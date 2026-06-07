@@ -7,7 +7,7 @@ cheap external models as nodes to **free Claude cupo**. Lives global at
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **14 módulos · 8 MCP tools · 49 tests.**
+_Auto-generado por `mmorch.docgen`._ **15 módulos · 8 MCP tools · 55 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -22,6 +22,7 @@ _Auto-generado por `mmorch.docgen`._ **14 módulos · 8 MCP tools · 49 tests.**
 | `mmorch/feedback.py` | feedback — el lazo que faltaba (la 'loss' ausente). mmorch genera/verifica/ |
 | `mmorch/innovate.py` | innovate (I-5) — motor de innovacion productizado. mmorch se idea capacidades |
 | `mmorch/learn.py` | learn — meta-inteligencia: mmorch aprende de su propio metrics.jsonl (I-1). |
+| `mmorch/memory.py` | memory — memoria episodica + semantica para mmorch (DuckDB 2 capas). |
 | `mmorch/metrics.py` | Observability — append-only JSONL metric log (§11 backbone). |
 | `mmorch/patterns.py` | Code-flow patterns (§7), migrated as deterministic Python. |
 | `mmorch/providers.py` | Provider layer — thin OpenAI-compatible client per external model. |

@@ -20,6 +20,8 @@ from .cache import Memo, memoized_verify, key_of         # I-4
 from .innovate import ideate, screen, ideate_and_screen  # I-5
 from .feedback import (record_outcome, ThompsonBandit,   # feedback loop (keystone)
                        calibration, read_outcomes)
+from .memory import (write_episode, write_note, recall,   # memoria episodica+semantica
+                     tombstone_note, embed, Note)
 
 __all__ = [
     "REGISTRY", "family_of", "ModelSpec", "call",
@@ -30,4 +32,5 @@ __all__ = [
     "Memo", "memoized_verify", "key_of",
     "ideate", "screen", "ideate_and_screen",
     "record_outcome", "ThompsonBandit", "calibration", "read_outcomes",
+    "write_episode", "write_note", "recall", "tombstone_note", "embed", "Note",
 ]

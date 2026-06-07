@@ -1,15 +1,18 @@
 [project]
 name = "mmorch"
-version = "0.1.0"
+version = "0.7.0"
 description = "Multi-model orchestration harness (migrated patterns) for Claude Code projects"
 requires-python = ">=3.10"
 dependencies = [
     "openai>=1.40.0",
     "python-dotenv>=1.0.0",
+    "duckdb>=1.0.0",
+    "numpy>=1.26.0",
 ]
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.2.0"]
+memory = ["fastembed>=0.3.0"]   # embeddings locales (bge-small). Sin esto: recall coarse-only.
 
 [build-system]
 requires = ["setuptools>=68"]
