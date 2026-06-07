@@ -22,7 +22,8 @@ except Exception as e:  # pragma: no cover
     )
 
 from mmorch import (fan_out, adversarial_verify, route, cascade, ensemble_verify,
-                    ideate_and_screen, recall as _recall)
+                    ideate_and_screen, recall as _recall, tournament as _tournament,
+                    bucket_rank as _bucket_rank)
 from mmorch.config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
 from mmorch.metrics import summary
 from mmorch.learn import analyze as _learn_analyze, recommend as _learn_recommend
@@ -216,6 +217,42 @@ def mmorch_recall(
         {"id": n.id, "ts": n.ts, "scope": n.scope, "text": n.text,
          "score": round(n.score, 4), "layer": n.layer} for n in notes],
         ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_tournament(
+    candidates: list[str],
+    criterion: str,
+    gen_model: str = DEFAULT_GENERATOR,
+    judge_model: str = DEFAULT_VERIFIER,
+) -> str:
+    """Pick the BEST of a few candidates by taste/quality (naming, design, copy) via
+    PAIRWISE single-elimination with a CROSS-FAMILY judge (OneFlow enforced). A tie
+    escalates to the orchestrator (Opus) instead of forcing a winner. Spends external
+    $, not cupo. Returns JSON {winner, escalate, rounds, comparisons, cost_usd}.
+    """
+    r = _tournament(candidates, criterion=criterion, gen_model=gen_model,
+                    judge_model=judge_model, phase="mcp")
+    return json.dumps({
+        "winner": r.winner, "escalate": r.escalate, "rounds": r.rounds,
+        "comparisons": r.comparisons, "cost_usd": r.cost_usd}, ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_bucket_rank(
+    items: list[str],
+    rubric: str,
+    tiers: list[str] | None = None,
+) -> str:
+    """Grade a LARGE set into quality tiers (triage, rank N>>10). Each item classified
+    independently by a cheap model in parallel (O(n), not pairwise O(n^2)). Items never
+    lost: a failed/unparseable grade falls to the lowest tier. Spends external $, not
+    cupo. Returns JSON {by_tier, graded, cost_usd, n_failed}.
+    """
+    r = _bucket_rank(items, rubric=rubric, tiers=tiers, phase="mcp")
+    return json.dumps({
+        "by_tier": r.by_tier, "graded": r.graded, "cost_usd": r.cost_usd,
+        "n_failed": r.n_failed}, ensure_ascii=False)
 
 
 @mcp.tool()

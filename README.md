@@ -7,12 +7,13 @@ cheap external models as nodes to **free Claude cupo**. Lives global at
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **15 módulos · 11 MCP tools · 58 tests.**
+_Auto-generado por `mmorch.docgen`._ **18 módulos · 13 MCP tools · 73 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
 | Módulo | Qué hace |
 |---|---|
+| `mmorch/bucketrank.py` | bucket_rank — graduar/ordenar un set GRANDE en tiers (triage por calidad, rankear |
 | `mmorch/cache.py` | memo (I-4) — cache content-hash de resultados/verdicts. Salta re-gen/re-verify |
 | `mmorch/cascade.py` | cascade — FrugalGPT-style multi-step confidence cascade (research: vault/research/ |
 | `mmorch/config.py` | Model registry — single source of truth for models, families, endpoints, prices. |
@@ -22,11 +23,13 @@ _Auto-generado por `mmorch.docgen`._ **15 módulos · 11 MCP tools · 58 tests.*
 | `mmorch/feedback.py` | feedback — el lazo que faltaba (la 'loss' ausente). mmorch genera/verifica/ |
 | `mmorch/innovate.py` | innovate (I-5) — motor de innovacion productizado. mmorch se idea capacidades |
 | `mmorch/learn.py` | learn — meta-inteligencia: mmorch aprende de su propio metrics.jsonl (I-1). |
+| `mmorch/loop.py` | loop_until_done — scope DESCONOCIDO, 'segui hasta que este limpio'. Control-flow |
 | `mmorch/memory.py` | memory — memoria episodica + semantica para mmorch (DuckDB 2 capas). |
 | `mmorch/metrics.py` | Observability — append-only JSONL metric log (§11 backbone). |
 | `mmorch/patterns.py` | Code-flow patterns (§7), migrated as deterministic Python. |
 | `mmorch/providers.py` | Provider layer — thin OpenAI-compatible client per external model. |
 | `mmorch/route.py` | route (I-2) — confidence-gated escalation. Ahorra cupo: el modelo barato |
+| `mmorch/tournament.py` | tournament — elegir EL mejor de pocos candidatos por gusto/calidad (naming, |
 | `mmorch/vault.py` | vault — memoria de largo plazo mmorch-legible sobre el vault Obsidian. |
 <!-- /mmorch:auto:modules -->
 
@@ -76,7 +79,7 @@ Registered globally in `~/.claude.json` as server `mmorch`. Calling these spends
 external API $, not cupo — that's the point.
 
 <!-- mmorch:auto:tools -->
-MCP tools (server `mmorch`): `mmorch_adversarial_verify`, `mmorch_cascade`, `mmorch_ensemble_verify`, `mmorch_fan_out`, `mmorch_innovate`, `mmorch_learn`, `mmorch_memory_stats`, `mmorch_metrics_summary`, `mmorch_recall`, `mmorch_remember`, `mmorch_route`.
+MCP tools (server `mmorch`): `mmorch_adversarial_verify`, `mmorch_bucket_rank`, `mmorch_cascade`, `mmorch_ensemble_verify`, `mmorch_fan_out`, `mmorch_innovate`, `mmorch_learn`, `mmorch_memory_stats`, `mmorch_metrics_summary`, `mmorch_recall`, `mmorch_remember`, `mmorch_route`, `mmorch_tournament`.
 
 **Restart Claude Code** to load new tools.
 <!-- /mmorch:auto:tools -->

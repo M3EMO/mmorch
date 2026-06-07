@@ -22,6 +22,9 @@ from .feedback import (record_outcome, ThompsonBandit,   # feedback loop (keysto
                        calibration, read_outcomes)
 from .memory import (write_episode, write_note, recall,   # memoria episodica+semantica
                      tombstone_note, embed, Note)
+from .tournament import tournament, TournamentResult        # backlog: best-of-N pairwise
+from .bucketrank import bucket_rank, BucketRankResult        # backlog: graduar set en tiers
+from .loop import loop_until_done, LoopResult                # backlog: loop-until-dry
 
 __all__ = [
     "REGISTRY", "family_of", "ModelSpec", "call",
@@ -33,4 +36,6 @@ __all__ = [
     "ideate", "screen", "ideate_and_screen",
     "record_outcome", "ThompsonBandit", "calibration", "read_outcomes",
     "write_episode", "write_note", "recall", "tombstone_note", "embed", "Note",
+    "tournament", "TournamentResult", "bucket_rank", "BucketRankResult",
+    "loop_until_done", "LoopResult",
 ]
