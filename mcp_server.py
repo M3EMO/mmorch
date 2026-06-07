@@ -1,0 +1,184 @@
+"""MCP wrapper — exposes mmorch patterns as tools to Claude Code.
+
+This is the "ambos" path: the same library is callable both as plain Python
+(harness migrado, §5) AND as MCP tools the orchestrator can invoke mid-session.
+
+IMPORTANT (cupo discipline, §5): invoking these tools spends EXTERNAL API dollars,
+NOT Claude cupo. That is the point — bulk/verify is offloaded off the plan.
+
+Run (stdio):  python mcp_server.py
+Register:     see README.md "Register the MCP server".
+"""
+from __future__ import annotations
+
+import json
+
+try:
+    from mcp.server.fastmcp import FastMCP
+except Exception as e:  # pragma: no cover
+    raise SystemExit(
+        "MCP SDK not installed. Run: pip install \"mcp>=1.2.0\"  "
+        f"(original error: {e})"
+    )
+
+from mmorch import (fan_out, adversarial_verify, route, cascade, ensemble_verify,
+                    ideate_and_screen)
+from mmorch.config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
+from mmorch.metrics import summary
+from mmorch.learn import analyze as _learn_analyze, recommend as _learn_recommend
+
+mcp = FastMCP("mmorch")
+
+
+@mcp.tool()
+def mmorch_fan_out(
+    prompts: list[str],
+    gen_model: str = DEFAULT_GENERATOR,
+    system: str | None = None,
+) -> str:
+    """Run independent generation tasks in parallel on a cheap external model.
+
+    Use for bulk work with many independent sub-steps. Spends external API $,
+    not Claude cupo. Returns a JSON list of {text, in_tokens, out_tokens, cost_usd}.
+    """
+    results = fan_out(prompts, gen_model=gen_model, system=system, phase="mcp")
+    return json.dumps(
+        [
+            {
+                "text": r.text,
+                "in_tokens": r.in_tokens,
+                "out_tokens": r.out_tokens,
+                "cost_usd": r.cost_usd,
+            }
+            for r in results
+        ],
+        ensure_ascii=False,
+    )
+
+
+@mcp.tool()
+def mmorch_adversarial_verify(
+    artifact: str,
+    rubric: str,
+    gen_model: str = DEFAULT_GENERATOR,
+    verifier_model: str = DEFAULT_VERIFIER,
+) -> str:
+    """Verify an artifact with a CROSS-FAMILY adversarial skeptic.
+
+    Enforces OneFlow (generator and verifier must differ in family). The verifier
+    is prompted to refute by default. Returns a JSON verdict
+    {passed, confidence, refutations, cost_usd}.
+    """
+    v = adversarial_verify(
+        artifact,
+        rubric=rubric,
+        gen_model=gen_model,
+        verifier_model=verifier_model,
+        phase="mcp",
+    )
+    return json.dumps(
+        {
+            "passed": v.passed,
+            "confidence": v.confidence,
+            "refutations": v.refutations,
+            "verifier_model": v.verifier_model,
+            "cost_usd": v.cost_usd,
+        },
+        ensure_ascii=False,
+    )
+
+
+@mcp.tool()
+def mmorch_metrics_summary() -> str:
+    """Return aggregate metrics (calls, total cost USD, cost by family)."""
+    return json.dumps(summary(), ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_route(
+    prompt: str,
+    gen_model: str = DEFAULT_GENERATOR,
+    threshold: float = 0.7,
+) -> str:
+    """Confidence-gated routing (I-2). A cheap external model answers and
+    self-scores; returns escalate=True if confidence < threshold so the
+    orchestrator (Opus) only intervenes when needed. Spends external $, not cupo.
+    Returns JSON {answer, confidence, escalate, model, cost_usd}.
+    """
+    r = route(prompt, gen_model=gen_model, threshold=threshold, phase="mcp")
+    return json.dumps({
+        "answer": r.answer, "confidence": r.confidence, "escalate": r.escalate,
+        "model": r.model, "cost_usd": r.cost_usd}, ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_cascade(
+    prompt: str,
+    steps: list[list] | None = None,
+) -> str:
+    """FrugalGPT-style cascade: cheapest model first + self-score; escalate to the
+    next only if confidence < per-step threshold; flag Opus if all steps exhausted.
+    Saves cupo (resolves cheap when possible). steps = [[model, threshold], ...].
+    Returns JSON {answer, confidence, resolved_step, escalate, models_used, cost_usd}.
+    """
+    st = [(s[0], float(s[1])) for s in steps] if steps else None
+    r = cascade(prompt, steps=st, phase="mcp")
+    return json.dumps({
+        "answer": r.answer, "confidence": r.confidence,
+        "resolved_step": r.resolved_step, "escalate": r.escalate,
+        "models_used": r.models_used, "cost_usd": r.cost_usd}, ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_ensemble_verify(
+    artifact: str,
+    rubric: str,
+    gen_model: str = DEFAULT_GENERATOR,
+    verifier_models: list[str] | None = None,
+) -> str:
+    """Ensemble adversarial verify (I-3): K cross-family skeptics + majority vote
+    (tie -> fail). More robust than a single verifier. Each verifier must be
+    cross-family vs the generator (OneFlow). Returns JSON
+    {passed, confidence, n_passed, n_total, refutations, cost_usd}.
+    """
+    ev = ensemble_verify(artifact, rubric=rubric, gen_model=gen_model,
+                         verifier_models=verifier_models, phase="mcp")
+    return json.dumps({
+        "passed": ev.passed, "confidence": ev.confidence,
+        "n_passed": ev.n_passed, "n_total": ev.n_total,
+        "refutations": ev.refutations, "cost_usd": ev.cost_usd}, ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_learn() -> str:
+    """Meta-intelligence (I-1): mmorch reads its own metrics.jsonl and returns
+    cost/latency/usage per model x pattern + gated recommendations (cheaper
+    defaults, latency flags, observability gaps). Read-only, no API spend.
+    Returns JSON {analysis, recommendations}.
+    """
+    return json.dumps({
+        "analysis": _learn_analyze(),
+        "recommendations": _learn_recommend(),
+    }, ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_innovate(
+    context: str,
+    lenses: list[str],
+    ask: str,
+    rubric: str,
+) -> str:
+    """Innovation engine (I-5): mmorch ideates NEW capabilities for itself
+    (fan_out over lenses) and screens each adversarially cross-family. Returns
+    surviving (non-refuted) ideas. Spends external $, not cupo. Returns JSON list
+    of {idea, survives, confidence, objection}.
+    """
+    res = ideate_and_screen(context, lenses, ask, rubric)
+    return json.dumps([
+        {"idea": s.idea, "survives": s.survives, "confidence": s.confidence,
+         "objection": s.objection} for s in res], ensure_ascii=False)
+
+
+if __name__ == "__main__":
+    mcp.run()
