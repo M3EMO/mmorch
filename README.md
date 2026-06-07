@@ -7,7 +7,7 @@ cheap external models as nodes to **free Claude cupo**. Lives global at
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **14 módulos · 8 MCP tools · 44 tests.**
+_Auto-generado por `mmorch.docgen`._ **14 módulos · 8 MCP tools · 49 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->

@@ -12,6 +12,7 @@ from collections import defaultdict
 
 from .metrics import read_events
 from .config import family_of, spec
+from .feedback import calibration, ThompsonBandit
 
 
 def analyze() -> dict:
@@ -40,7 +41,9 @@ def analyze() -> dict:
             "avg_out_tok": int(statistics.mean(a["out"])) if a["out"] else 0,
         })
     return {"rows": rows, "total_calls": len(ev),
-            "total_cost_usd": round(sum(r["cost_usd"] for r in rows), 5)}
+            "total_cost_usd": round(sum(r["cost_usd"] for r in rows), 5),
+            "calibration": calibration(),          # ECE conf-predicha vs realidad (feedback loop)
+            "bandit": ThompsonBandit().stats()}     # brazos aprendidos (cascade thresholds, etc.)
 
 
 def recommend() -> list[str]:
@@ -70,6 +73,28 @@ def recommend() -> list[str]:
             "GAP: adversarial_verify loggea costo pero NO el verdict (passed/confidence). "
             "Sin eso no hay proxy de calidad por verificador -> no se puede auto-tunear con "
             "fundamento. Proximo paso: loggear verdict en metrics (habilita I-1 completo).")
+    # 4. Calibracion (feedback loop): ECE alto = conf auto-reportada NO es de fiar.
+    cal = rep.get("calibration") or {}
+    ece = cal.get("ece")
+    if ece is not None and cal.get("n", 0) >= 10:
+        if ece > 0.15:
+            recs.append(
+                f"CALIBRACION: ECE={ece} sobre {cal['n']} outcomes (>0.15 = mal calibrado). "
+                f"La CONFIDENCE auto-reportada miente -> SUBIR umbrales de cascade (escalar mas) "
+                f"o no fiarse del self-score como senal de calidad. Anti-sicofancia: la conf "
+                f"no es reward.")
+        else:
+            recs.append(
+                f"CALIBRACION OK: ECE={ece} sobre {cal['n']} outcomes (<=0.15). "
+                f"La conf auto-reportada es razonablemente fiable; umbrales de cascade validos.")
+    # 5. Bandit (cascade thresholds aprendidos): reportar brazo dominante con n suficiente.
+    bandit = rep.get("bandit") or {}
+    ready = {a: s for a, s in bandit.items() if s.get("n", 0) >= 10}
+    if ready:
+        best = max(ready.items(), key=lambda kv: kv[1]["mean"])
+        recs.append(
+            f"BANDIT: brazo lider '{best[0]}' mean={best[1]['mean']} (n={best[1]['n']}). "
+            f"Si domina con margen, fijar ese umbral/modelo como default de cascade.")
     if not recs:
         recs.append("Sin recomendaciones: datos insuficientes o ya optimo.")
     return recs

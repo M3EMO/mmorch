@@ -10,11 +10,13 @@ hoy solo recomienda. Aca van umbrales fijos/explicitos.
 """
 from __future__ import annotations
 
+import random as _random
 from dataclasses import dataclass, field
 
 from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
 from .providers import call
 from .route import _extract_conf, _CONF_RE
+from .feedback import ThompsonBandit, record_outcome
 
 _SELF_SCORE = (
     "Al final, en una linea aparte, escribi exactamente: CONFIDENCE: <n> "
@@ -30,6 +32,8 @@ class CascadeResult:
     escalate: bool
     models_used: list[str] = field(default_factory=list)
     cost_usd: float = 0.0
+    arm: str = ""              # brazo (model@thr) que resolvio — clave para cerrar el lazo
+    arms: list[str] = field(default_factory=list)  # brazo elegido por paso
 
 
 def cascade(
@@ -38,15 +42,36 @@ def cascade(
     steps: list[tuple[str, float]] | None = None,
     system: str | None = None,
     phase: str = "",
+    bandit: ThompsonBandit | None = None,
+    thr_candidates: dict[int, list[float]] | None = None,
+    rng: _random.Random | None = None,
 ) -> CascadeResult:
-    """Cascade barato->caro con umbral por paso. steps = [(model, threshold), ...]."""
+    """Cascade barato->caro con umbral por paso. steps = [(model, threshold), ...].
+
+    Si se pasa `bandit` + `thr_candidates`, el umbral de cada paso NO es fijo: el
+    bandit Thompson elige entre los candidatos (arm = f"{model}@{thr}"). Asi mmorch
+    APRENDE el umbral de escalada (FrugalGPT threshold-optimizer, gradient-free) en
+    vez de hardcodearlo. El lazo se CIERRA afuera: cuando hay label, el caller hace
+    `bandit.update(result.arm, reward)` + `record_outcome(result.arm, reward,
+    pattern='cascade', predicted_conf=result.confidence)`. NO se auto-premia: en el
+    momento de la llamada no hay verdad de campo (anti-sicofancia: la conf
+    auto-reportada NO es el reward)."""
     steps = steps or [(DEFAULT_GENERATOR, 0.7), (DEFAULT_VERIFIER, 0.85)]
     used: list[str] = []
+    arms: list[str] = []
     total = 0.0
     answer = ""
     conf = 0.0
     prior = ""
-    for i, (model, thr) in enumerate(steps):
+    resolving_arm = ""
+    for i, (model, default_thr) in enumerate(steps):
+        thr = default_thr
+        arm = f"{model}@{thr}"
+        if bandit is not None and thr_candidates and thr_candidates.get(i):
+            cands = [f"{model}@{t}" for t in thr_candidates[i]]
+            arm = bandit.select(cands, rng=rng)
+            thr = float(arm.rsplit("@", 1)[1])
+        arms.append(arm)
         sys_msg = (system + "\n" if system else "") + _SELF_SCORE
         user = prompt if not prior else (
             f"{prompt}\n\n[Un modelo mas barato respondio con baja confianza:\n{prior}\n"
@@ -59,7 +84,9 @@ def cascade(
         conf = _extract_conf(res.text)
         answer = _CONF_RE.sub("", res.text).strip()
         if conf >= thr:
-            return CascadeResult(answer, conf, i, False, used, round(total, 6))
+            return CascadeResult(answer, conf, i, False, used, round(total, 6), arm, arms)
         prior = answer
+        resolving_arm = arm
     # Pasos agotados sin alcanzar umbral -> escalar al orquestador (Opus).
-    return CascadeResult(answer, conf, len(steps) - 1, True, used, round(total, 6))
+    return CascadeResult(answer, conf, len(steps) - 1, True, used, round(total, 6),
+                         resolving_arm, arms)

@@ -30,3 +30,25 @@ def test_recommend_flags_expensive_bulk(monkeypatch):
     # debe detectar el 35x y recomendar deepseek para bulk + flag latencia.
     assert any("deepseek-chat" in r and "bulk" in r.lower() for r in recs)
     assert any("p95" in r or "latencia" in r.lower() for r in recs)
+
+
+def test_recommend_flags_overconfidence(monkeypatch):
+    monkeypatch.setattr(L, "read_events", lambda: [
+        _ev("deepseek-chat", "cascade", 0.001, 5)])
+    # ECE alto + n suficiente -> flag de mala calibracion.
+    monkeypatch.setattr(L, "calibration", lambda: {"ece": 0.42, "n": 25, "by_arm": {}})
+    monkeypatch.setattr(L, "ThompsonBandit", lambda: type("B", (), {"stats": lambda self: {}})())
+    recs = L.recommend()
+    assert any("CALIBRACION" in r and "0.42" in r for r in recs)
+
+
+def test_recommend_surfaces_bandit_leader(monkeypatch):
+    monkeypatch.setattr(L, "read_events", lambda: [
+        _ev("deepseek-chat", "cascade", 0.001, 5)])
+    monkeypatch.setattr(L, "calibration", lambda: {"ece": None, "n": 0, "by_arm": {}})
+    monkeypatch.setattr(L, "ThompsonBandit",
+                        lambda: type("B", (), {"stats": lambda self: {
+                            "m@0.5": {"mean": 0.92, "n": 30},
+                            "m@0.9": {"mean": 0.40, "n": 15}}})())
+    recs = L.recommend()
+    assert any("BANDIT" in r and "m@0.5" in r for r in recs)
