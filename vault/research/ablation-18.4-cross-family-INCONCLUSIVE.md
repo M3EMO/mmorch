@@ -87,3 +87,54 @@ Escopar el invariante "cross-family obligatorio":
   (aritmetica, codigo, hechos verificables) — 0 perdida de deteccion, 6.75x mas barato.
 Requiere antes: test con artifacts ADVERSARIOS family-specific + ensemble-vs-ensemble.
 Hasta entonces, el invariante se mantiene como esta.
+
+---
+
+# RUN ADVERSARIO (n=30 HARD, errores sutiles) — 2026-06-07
+
+Benchmark HARD hand-authored: 16 errores SUTILES (escalado vol √t, base-rate,
+conjuncion, mutable-default, float ==, affirming-consequent, Chimborazo/Everest, CAGR,
+real-return exacto) + 14 correctos. 3 verificadores x 30 casos. Script:
+`ablation_adversarial.py`. Costo $0.0107.
+
+|  | acc | false_pass |
+|---|---|---|
+| deepseek-A (SAME) | 0.97 | 0/16 |
+| deepseek-B (SAME', temp .4, prompt variante) | 0.93 | 0/16 |
+| gemini (CROSS) | 0.97 | 0/16 |
+
+## Hipotesis -> veredicto
+- **H1** (deepseek tiene blind-spots, false_pass>0): **REFUTADA**. Cazo los 16. Cero
+  punto ciego a esta dificultad.
+- **H2** (gemini caza los blind-spots de deepseek): **N/A** — no hay blind-spots.
+  Jaccard=1.00 son sets vacios (artefacto), sin significado.
+- **H3** (ensemble cross-2 < same-2 en false_pass): **sin diferencia** (ambos 0).
+
+Las unicas misses fueron false_REFUTE (rechazar correctos), no fallo de deteccion.
+
+## Conclusion (definitiva para benchmarks checkeables)
+La tesis cross-family NO quedo soportada por NINGUN benchmark (objetivo n=54 + hard
+n=30). Para verificacion de claims CHECKEABLES — incluso sutiles, multi-dominio — un
+solo verificador same-family BARATO (deepseek) caza 100% de errores a ~6x menos costo
+que cross-family. Esfuerzo razonable de trampas adversarias no logro surfacear ni un
+blind-spot. Resultado NEGATIVO fuerte.
+
+## Limite de validez (donde cross-family AUN podria valer — NO testeado)
+1. **Artifacts SUBJETIVOS sin ground-truth** (diseno, juicio, sintesis, gusto): ahi
+   "blind spot" = sesgo compartido no-detectable como error. Mis benchmarks tienen
+   verdad objetiva -> no pueden testearlo.
+2. **AUTO-verificacion**: use artifacts hand-authored, NO generados por deepseek. La
+   version fuerte de la tesis (un modelo no ve SU PROPIO error) queda sin testear. Ese
+   es el experimento decisivo restante: deepseek GENERA -> deepseek-verify vs gemini-verify.
+3. Solo 2 familias disponibles -> sin test de 3-familia.
+
+## [PROPOSAL: STRATEGY CHANGE] (candidato, NO aplicado)
+Escopar el invariante "cross-family obligatorio" del diseño §4:
+- **Mandatorio** SOLO para artifacts subjetivos / sin ground-truth / alto-riesgo
+  (diseno, juicio estrategico, sintesis abierta, claims no-checkeables) Y para
+  AUTO-verificacion (modelo revisando su propio output).
+- **Opcional** (same-family barato basta, 0 perdida de deteccion, ~6x mas barato) para
+  verificacion de claims OBJETIVAMENTE CHECKEABLES (mates, codigo, hechos, logica formal).
+Gate para aplicar: correr el test de AUTO-verificacion (limite #2). Si ahi tampoco
+aparece decorrelacion -> escopar. Si aparece -> el invariante se sostiene para
+self-verify. Disciplina: NO cambiar el invariante sin ese run.
