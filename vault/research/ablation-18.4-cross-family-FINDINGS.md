@@ -138,3 +138,63 @@ Escopar el invariante "cross-family obligatorio" del diseño §4:
 Gate para aplicar: correr el test de AUTO-verificacion (limite #2). Si ahi tampoco
 aparece decorrelacion -> escopar. Si aparece -> el invariante se sostiene para
 self-verify. Disciplina: NO cambiar el invariante sin ese run.
+
+---
+
+# RUN AUTO-VERIFICACION (self vs cross) — 2026-06-07
+
+Closer de la tesis. deepseek RESUELVE problemas con ground-truth COMPUTADA en Python
+(label infalible), luego deepseek-self-verify vs gemini-cross-verify sobre SU PROPIA
+respuesta. Script: `ablation_selfverify.py`. Dos tandas (facil n=24, hard n=22).
+
+| tanda | deepseek acerto | false_refute SELF | false_refute CROSS |
+|---|---|---|---|
+| facil (n=24) | 24/24 | 9/24 (38%) | 3/24 (12%) |
+| hard (n=22, trailing-zeros, modexp, MISSISSIPPI, determinante, std) | 22/22 | 12/22 (54%) | 6/22 (27%) |
+
+## Problema metodologico: deepseek-chat (V4 Flash, temp 0) NO yerra en computo.
+Acerto 46/46 problemas duros. El blind-spot de auto-MISS (modelo endosa su propia
+respuesta INCORRECTA) quedo SIN TESTEAR: no hay respuestas incorrectas que endosar.
+Escalar dificultad mas = diminishing returns (V4 es muy fuerte en aritmetica/combinatoria).
+
+## Lo que SI emergio (consistente y fuerte)
+AUTO-verificacion es la PEOR en precision: deepseek rechazo 54% de sus propias
+respuestas CORRECTAS (fabrica refutaciones al verse a si mismo, empujado por el framing
+adversarial). cross-family la mitad. La patologia no es el blind-spot hipotetizado
+(endosar lo malo) sino su hermana: un modelo es mal juez de su PROPIO trabajo correcto.
+
+---
+
+# SINTESIS FINAL (4 runs) — cierre de §18.4
+
+| run | n | false_pass (miss bug) |
+|---|---|---|
+| objetivo | 54 | cross 0, same 0 |
+| hard sutil | 30 | cross 0, same 0 |
+| self facil | 24 | n/a (0 errores deepseek) |
+| self hard | 22 | n/a (0 errores deepseek) |
+
+**Tesis "cross-family mejora la DETECCION de bugs": REFUTADA.** En ningun run same-family
+barato perdio un bug que cross cazara. Para claims CHECKEABLES la deteccion es ~perfecta
+en ambas familias; cross-family no compra deteccion, y cuesta ~6x.
+
+**Lo que el dato SI soporta:**
+1. cross-family tiene mejor PRECISION (menos false-refute) que same-family.
+2. AUTO-verificacion es lo peor (38-54% false-refute). Un modelo no debe verificar su
+   propio output.
+3. El blind-spot de auto-MISS no se pudo testear (deepseek no yerra en computo) -> sigue
+   abierto SOLO para tareas no-checkeables/subjetivas, por teoria.
+
+## [PROPOSAL: STRATEGY CHANGE] v2 (refinado, NO aplicado)
+El invariante defendible por evidencia NO es "cross-family obligatorio" sino:
+- **REGLA DURA nueva: NUNCA auto-verificar** (un modelo no juzga su propio output). Es lo
+  unico con respaldo empirico fuerte (54% false-refute). Verificar SIEMPRE con otra
+  instancia/modelo.
+- **cross-family**: justificado por PRECISION + tareas subjetivas/sin-ground-truth (teoria
+  solida de decorrelacion). Recomendado, no obligatorio, para verificacion checkeable.
+- **same-family otra-instancia**: SUFICIENTE y ~6x mas barato para verificar artifacts
+  AJENOS objetivamente checkeables (0 perdida de deteccion en 84 casos).
+Gate restante: el blind-spot de auto-miss solo testeable en tareas subjetivas (sin
+ground-truth programatica) -> requiere panel de jueces humanos o un oraculo. Fuera de
+alcance del harness actual. Conclusion practica: aplicar "no self-verify" ya; escopar
+"cross-family" de obligatorio a recomendado-para-checkeable queda gated a ese panel.
