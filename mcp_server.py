@@ -22,10 +22,11 @@ except Exception as e:  # pragma: no cover
     )
 
 from mmorch import (fan_out, adversarial_verify, route, cascade, ensemble_verify,
-                    ideate_and_screen)
+                    ideate_and_screen, recall as _recall)
 from mmorch.config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
 from mmorch.metrics import summary
 from mmorch.learn import analyze as _learn_analyze, recommend as _learn_recommend
+from mmorch.memory import remember as _remember, stats as _mem_stats
 
 mcp = FastMCP("mmorch")
 
@@ -178,6 +179,50 @@ def mmorch_innovate(
     return json.dumps([
         {"idea": s.idea, "survives": s.survives, "confidence": s.confidence,
          "objection": s.objection} for s in res], ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_remember(
+    scope: str,
+    episode_text: str,
+    kind: str = "note",
+    verify: bool = False,
+) -> str:
+    """Persist a memory: append the raw episode (immutable) + distill a durable note
+    (Thought-Retriever, cheap model) + embed it. scope is hierarchical
+    (task_id<subsector<project_id<mmorch_self<global). If verify=True, a cross-family
+    skeptic checks the note is faithful to the episode before persisting (else only
+    the raw is kept). Spends a little external $, not cupo. Returns JSON
+    {episode_id, note_id, distilled, persisted, refutations}.
+    """
+    return json.dumps(_remember(scope, episode_text, kind=kind, verify=verify),
+                      ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_recall(
+    query: str,
+    scope: str = "global",
+    k: int = 5,
+    window_days: float | None = None,
+) -> str:
+    """Clinical two-stage recall: COARSE (scope-chain + recency, NO keyword gate) ->
+    FINE (local embedding rerank). Falls back to immutable episodic raw if distilled
+    notes fall short. Local embeddings = zero key/cost; degrades to recency-order if
+    fastembed absent. Returns JSON list of {id, ts, scope, text, score, layer}.
+    """
+    notes = _recall(query, scope=scope, k=k, window_days=window_days)
+    return json.dumps([
+        {"id": n.id, "ts": n.ts, "scope": n.scope, "text": n.text,
+         "score": round(n.score, 4), "layer": n.layer} for n in notes],
+        ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_memory_stats() -> str:
+    """Memory counts: episodic events, live semantic notes, embedded notes, and the
+    active embedding backend (or null if fastembed absent). Read-only, no spend."""
+    return json.dumps(_mem_stats(), ensure_ascii=False)
 
 
 if __name__ == "__main__":

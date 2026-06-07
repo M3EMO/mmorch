@@ -217,6 +217,68 @@ def recall(query: str, scope: str = "global", *, k: int = 5,
         con.close()
 
 
+# ---------------------------------------------------------------------------
+# Distillation (Thought-Retriever): condensar episodio -> nota durable
+# ---------------------------------------------------------------------------
+_DISTILL_SYS = (
+    "Sos un destilador de memoria. Te doy un episodio (hecho/decision/resultado). "
+    "Devolve UNA nota durable de 1-2 frases: SOLO lo que vale recordar a futuro "
+    "(la decision, el por que, el resultado, la leccion). Sin relleno, sin fecha, "
+    "sin meta-comentario. Si no hay nada digno de recordar, devolve exactamente: SKIP."
+)
+
+
+def distill(episode_text: str, *, gen_model=None, phase: str = "memory") -> str:
+    """Condensa un episodio en una nota durable via modelo barato. 'SKIP' si nada
+    vale la pena. (Thought-Retriever: se guarda el pensamiento destilado, no el raw.)"""
+    from .config import DEFAULT_GENERATOR
+    from .providers import call
+    gen_model = gen_model or DEFAULT_GENERATOR
+    res = call(gen_model,
+               [{"role": "system", "content": _DISTILL_SYS},
+                {"role": "user", "content": episode_text}],
+               pattern="distill", node="distiller", phase=phase, temperature=0.0)
+    return res.text.strip()
+
+
+def remember(scope: str, episode_text: str, *, kind: str = "note", actor: str = "mmorch",
+             verify: bool = False, gen_model=None, path: Path = _DB_PATH) -> dict:
+    """Pipeline completo (invariante 7 del diseno):
+      1. write_episode  -> log crudo INMUTABLE (siempre, nunca se pierde el hecho).
+      2. distill        -> nota durable via modelo barato.
+      3. (verify=True)  -> verificacion cross-family: la nota es FIEL al episodio?
+                           Si el esceptico la refuta (nota lossy/infiel) -> NO se
+                           persiste la nota; queda solo el raw. Anti-sicofancia.
+      4. write_note     -> persiste la nota destilada + embedding, linkeada al raw.
+    Devuelve {episode_id, note_id|None, distilled, persisted, refutations}."""
+    eid = write_episode(scope, kind, episode_text, actor=actor, path=path)
+    note = distill(episode_text, gen_model=gen_model)
+    out = {"episode_id": eid, "note_id": None, "distilled": note,
+           "persisted": False, "refutations": []}
+    if note.strip().upper() == "SKIP" or not note.strip():
+        return out
+    if verify:
+        from .patterns import adversarial_verify
+        v = adversarial_verify(
+            f"EPISODIO:\n{episode_text}\n\nNOTA DESTILADA:\n{note}",
+            rubric=("La NOTA es un resumen FIEL y no-lossy del EPISODIO? Refuta si "
+                    "omite un hecho critico, agrega algo que no estaba, o tergiversa "
+                    "la decision/resultado. passed=true solo si es fiel y util."),
+            gen_model=gen_model or _default_gen(), phase="memory")
+        out["refutations"] = v.refutations
+        if not v.passed:
+            return out  # nota infiel -> solo queda el raw (FIX B la cubre en recall)
+    nid = write_note(scope, note, source_ids=[eid], path=path)
+    out["note_id"] = nid
+    out["persisted"] = True
+    return out
+
+
+def _default_gen():
+    from .config import DEFAULT_GENERATOR
+    return DEFAULT_GENERATOR
+
+
 def stats(path: Path = _DB_PATH) -> dict:
     con = _connect(path)
     try:

@@ -7,7 +7,7 @@ cheap external models as nodes to **free Claude cupo**. Lives global at
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **15 módulos · 8 MCP tools · 55 tests.**
+_Auto-generado por `mmorch.docgen`._ **15 módulos · 11 MCP tools · 58 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -76,7 +76,7 @@ Registered globally in `~/.claude.json` as server `mmorch`. Calling these spends
 external API $, not cupo — that's the point.
 
 <!-- mmorch:auto:tools -->
-MCP tools (server `mmorch`): `mmorch_adversarial_verify`, `mmorch_cascade`, `mmorch_ensemble_verify`, `mmorch_fan_out`, `mmorch_innovate`, `mmorch_learn`, `mmorch_metrics_summary`, `mmorch_route`.
+MCP tools (server `mmorch`): `mmorch_adversarial_verify`, `mmorch_cascade`, `mmorch_ensemble_verify`, `mmorch_fan_out`, `mmorch_innovate`, `mmorch_learn`, `mmorch_memory_stats`, `mmorch_metrics_summary`, `mmorch_recall`, `mmorch_remember`, `mmorch_route`.
 
 **Restart Claude Code** to load new tools.
 <!-- /mmorch:auto:tools -->

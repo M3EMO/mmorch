@@ -1,8 +1,23 @@
 """memoria episodica+semantica: schema 2-capas, recall 2-stage, FIX A/B/C.
 Pasa con o sin fastembed (degrade graceful)."""
 import sys, pathlib
+from dataclasses import dataclass
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import mmorch.memory as M
+import mmorch.providers as P
+import mmorch.patterns as PAT
+
+
+@dataclass
+class _Res:
+    text: str
+    cost_usd: float = 0.0
+
+
+def _mock_call(text):
+    def _c(model, messages, **kw):
+        return _Res(text=text)
+    return _c
 
 
 def test_episodic_append_and_stats(tmp_path):
@@ -54,3 +69,34 @@ def test_scope_isolation(tmp_path):
     # project_id chain = [project_id, mmorch_self, global] -> NO incluye subsector.
     out = M.recall("nota", scope="project_id", k=5, path=db)
     assert all("subsector" not in n.scope for n in out)
+
+
+def test_remember_distills_and_persists(tmp_path, monkeypatch):
+    db = tmp_path / "m.duckdb"
+    monkeypatch.setattr(P, "call", _mock_call("bandit aprende umbral de cascade"))
+    out = M.remember("mmorch_self", "hoy wireamos el bandit Thompson en cascade", path=db)
+    assert out["persisted"] and out["note_id"] is not None
+    assert out["distilled"] == "bandit aprende umbral de cascade"
+    s = M.stats(path=db)
+    assert s["episodic"] == 1 and s["semantic"] == 1
+
+
+def test_remember_skip_keeps_only_raw(tmp_path, monkeypatch):
+    db = tmp_path / "m.duckdb"
+    monkeypatch.setattr(P, "call", _mock_call("SKIP"))
+    out = M.remember("global", "evento trivial sin valor", path=db)
+    assert out["persisted"] is False and out["note_id"] is None
+    s = M.stats(path=db)
+    assert s["episodic"] == 1 and s["semantic"] == 0  # raw queda, nota no
+
+
+def test_remember_verify_refuted_drops_note(tmp_path, monkeypatch):
+    db = tmp_path / "m.duckdb"
+    monkeypatch.setattr(P, "call", _mock_call("nota infiel que omite todo"))
+    monkeypatch.setattr(PAT, "adversarial_verify",
+                        lambda *a, **k: PAT.Verdict(False, 0.9, ["omite hecho critico"],
+                                                    "", "gemini-2.5-flash", 0.0))
+    out = M.remember("global", "episodio con hechos importantes", verify=True, path=db)
+    assert out["persisted"] is False and out["refutations"] == ["omite hecho critico"]
+    s = M.stats(path=db)
+    assert s["episodic"] == 1 and s["semantic"] == 0  # nota infiel descartada, raw queda
