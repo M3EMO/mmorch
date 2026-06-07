@@ -28,6 +28,8 @@ from mmorch.config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
 from mmorch.metrics import summary
 from mmorch.learn import analyze as _learn_analyze, recommend as _learn_recommend
 from mmorch.memory import remember as _remember, stats as _mem_stats
+from mmorch.classify import classify as _classify
+from mmorch.config import DEFAULT_ROUTER
 
 mcp = FastMCP("mmorch")
 
@@ -253,6 +255,23 @@ def mmorch_bucket_rank(
     return json.dumps({
         "by_tier": r.by_tier, "graded": r.graded, "cost_usd": r.cost_usd,
         "n_failed": r.n_failed}, ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_classify(
+    request: str,
+    classes: dict,
+    router_model: str = DEFAULT_ROUTER,
+) -> str:
+    """Triage front-door: a cheap model classifies the request into one of `classes`
+    ({name: description}) and self-scores confidence. Returns the label so the
+    orchestrator (Opus) can act on the right branch. Cheap external $, not cupo.
+    Returns JSON {cls, confidence, cost_usd}. (Acting via Python handlers is the
+    library API classify_and_act; over MCP this returns the label only.)
+    """
+    cls, conf, cost = _classify(request, dict(classes), router_model=router_model, phase="mcp")
+    return json.dumps({"cls": cls, "confidence": conf, "cost_usd": round(cost, 6)},
+                      ensure_ascii=False)
 
 
 @mcp.tool()
