@@ -25,6 +25,8 @@ from .memory import (write_episode, write_note, recall,   # memoria episodica+se
 from .tournament import tournament, TournamentResult        # backlog: best-of-N pairwise
 from .bucketrank import bucket_rank, BucketRankResult        # backlog: graduar set en tiers
 from .loop import loop_until_done, LoopResult                # backlog: loop-until-dry
+from .schema import (gated_json, validate, extract_json,     # §9 schema-gates
+                     SchemaGateError)
 
 __all__ = [
     "REGISTRY", "family_of", "ModelSpec", "call",
@@ -38,4 +40,5 @@ __all__ = [
     "write_episode", "write_note", "recall", "tombstone_note", "embed", "Note",
     "tournament", "TournamentResult", "bucket_rank", "BucketRankResult",
     "loop_until_done", "LoopResult",
+    "gated_json", "validate", "extract_json", "SchemaGateError",
 ]
