@@ -7,3 +7,4 @@ _install_python.ps1
 .pytest_cache/
 *.duckdb
 *.db
+vault/.obsidian/workspace.json
