@@ -44,9 +44,44 @@ from mmorch.patterns import _parse_verdict
 from mmorch.config import spec, family_of
 from ablation_paired import _mcnemar, _wilson   # reuso estadistica (stdlib)
 
+import threading
+
 FAM_A = "deepseek-chat"
 FAM_B = "gemini-2.5-flash"
 COST_CAP_USD = 4.0
+
+
+class RateGate:
+    """Limitador de tasa POR-MODELO (decopla concurrencia de RPM). Reserva slots de
+    tiempo espaciados 60/rpm por modelo: muchos workers, pero cada modelo NO supera su
+    RPM -> deepseek (rpm alto) vuela, gemini (rpm bajo) se espacia sin reventar en 429.
+    Reserva bajo lock (instantaneo), duerme AFUERA -> no serializa el computo."""
+
+    def __init__(self, rpm_by_model: dict[str, float]):
+        self._interval = {m: 60.0 / r for m, r in rpm_by_model.items()}
+        self._next = {m: 0.0 for m in rpm_by_model}
+        self._locks = {m: threading.Lock() for m in rpm_by_model}
+
+    def reserve(self, model: str) -> None:
+        iv = self._interval.get(model)
+        if iv is None:
+            return
+        with self._locks[model]:
+            now = time.monotonic()
+            slot = max(now, self._next[model])
+            self._next[model] = slot + iv
+        delay = slot - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+
+
+_GATE: RateGate | None = None  # se setea en main() con los RPM elegidos
+
+
+def _gated_call(model, msgs, **kw):
+    if _GATE is not None:
+        _GATE.reserve(model)
+    return call(model, msgs, **kw)
 
 
 # --------------------------------------------------------------------------- #
@@ -160,19 +195,19 @@ def _retry(fn, retries=4, base=2.0):
 
 
 def _solve(model, problem):
-    res = _retry(lambda: call(model, [{"role": "system", "content": _SOLVE_SYS},
-                                      {"role": "user", "content": problem}],
-                              pattern="ablsym_solve", node=f"s:{model}", phase="ablsym",
-                              temperature=0.0))
+    res = _retry(lambda: _gated_call(model, [{"role": "system", "content": _SOLVE_SYS},
+                                             {"role": "user", "content": problem}],
+                                     pattern="ablsym_solve", node=f"s:{model}", phase="ablsym",
+                                     temperature=0.0))
     return _parse_num(res.text), res.cost_usd
 
 
 def _verify(model, problem, answer):
     art = f"PROBLEMA:\n{problem}\n\nRESPUESTA PROPUESTA: {answer}"
-    res = _retry(lambda: call(model, [{"role": "system", "content": _VERIFY_SYS},
-                                      {"role": "user", "content": art}],
-                              pattern="ablsym_verify", node=f"v:{model}", phase="ablsym",
-                              temperature=0.0))
+    res = _retry(lambda: _gated_call(model, [{"role": "system", "content": _VERIFY_SYS},
+                                             {"role": "user", "content": art}],
+                                     pattern="ablsym_verify", node=f"v:{model}", phase="ablsym",
+                                     temperature=0.0))
     passed, conf, refs = _parse_verdict(res.text)
     return passed, res.cost_usd
 
@@ -215,13 +250,17 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=350)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--workers", type=int, default=4)  # gemini RPM-friendly (12 -> retry storm)
+    ap.add_argument("--workers", type=int, default=12)  # alto OK: el RateGate limita por RPM
+    ap.add_argument("--gemini-rpm", type=float, default=240)   # gemini se espacia a esta tasa
+    ap.add_argument("--deepseek-rpm", type=float, default=600)  # deepseek casi sin freno
     ap.add_argument("--yes", action="store_true")
     ap.add_argument("--dry", action="store_true")
     args = ap.parse_args()
 
     if family_of(FAM_A) == family_of(FAM_B):
         sys.exit("config rota: FAM_A y FAM_B comparten familia.")
+    global _GATE
+    _GATE = RateGate({FAM_A: args.deepseek_rpm, FAM_B: args.gemini_rpm})
     gold = build_gold(args.n, args.seed)
     est = estimate_cost(args.n)
     print(f"gold set DURO: {len(gold)} problemas | seed={args.seed}")
