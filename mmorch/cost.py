@@ -7,9 +7,8 @@ here — proxied via the fact that external nodes spend zero cupo).
 """
 from __future__ import annotations
 
-from .config import spec
-
-
 def cost_usd(model_key: str, in_tokens: int, out_tokens: int) -> float:
-    s = spec(model_key)
-    return (in_tokens * s.price_in + out_tokens * s.price_out) / 1_000_000.0
+    # Lee el override de prices.json si existe (datos volátiles), si no config.py.
+    from .prices import effective_prices
+    pin, pout = effective_prices(model_key)
+    return (in_tokens * pin + out_tokens * pout) / 1_000_000.0

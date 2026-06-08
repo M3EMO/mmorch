@@ -49,7 +49,10 @@ honestidad del MAPE + `goal_aligned` pass. Precisión <20% = objetivo de v0.2.
 
 ---
 
-## FASE 2 — Megafuente v1: pricing → auto-update config (zona amarilla)
+## FASE 2 — Megafuente v1: pricing → prices.json (zona amarilla) ✅ COMPLETA
+**HECHO:** prices.py (override de DATOS, cost lee primero, separado de config.py=rojo) + megasource.py (fetch_fn inyectable → diff → Change a prices.json amarilla reversible, NO aplica solo → gate evolve). goal_aligned pass. 5 tests. config.py intacto.
+
+## FASE 2-OLD
 **Goal:** mmorch mantiene sus propios precios; primer acto autodidacta reversible.
 **Entregables:**
 - `mmorch/megasource.py`: fetcher de fuente ESTRUCTURADA (YAML/repo público/webhook oficial — NO scraping con captcha) de precios provider.
@@ -63,7 +66,10 @@ honestidad del MAPE + `goal_aligned` pass. Precisión <20% = objetivo de v0.2.
 
 ---
 
-## FASE 3 — Reversibilidad: `rollback()` + `fitness()` (prerequisito del motor)
+## FASE 3 — Reversibilidad: rollback() + fitness() ✅ COMPLETA
+**HECHO:** Change/snapshot/apply/rollback + evaluate() = 6+budget checks. goal_aligned refutó 3x (gaps reales) → fixed. 8 tests.
+
+## FASE 3-OLD
 **Goal:** la maquinaria de deshacer y de aprobar, antes de cualquier auto-aplicación.
 **Entregables:**
 - `mmorch/evolve.py::rollback(change_id)`: git reset/revert a snapshot previo + tombstone notas + `write_episode(kind="rollback")` + re-correr fitness post-rollback. `change_id` = {diff, snapshot, notas creadas}.
@@ -76,7 +82,10 @@ honestidad del MAPE + `goal_aligned` pass. Precisión <20% = objetivo de v0.2.
 
 ---
 
-## FASE 4 — El motor: `self_evolve()` (loop-until-done legítimo ⟳)
+## FASE 4 — self_evolve() motor ✅ COMPLETA
+**HECHO:** ideate→evaluate(6)→tournament→ZONA(roja STOP, content-scan de acciones peligrosas)→apply verde/amarillo→audit auto_action→record_outcome. NUNCA aplica rojo. goal_aligned pass. tests inyectados.
+
+## FASE 4-OLD
 **Goal:** mmorch idea→prototipa→gatea→aplica/revierte→audita, 1 mejora segura por ciclo.
 **Entregables:**
 - `mmorch/evolve.py::self_evolve()` = SENSE(learn.recommend) → IDEATE(innovate N) → PROTOTYPE(sandbox/worktree) → FITNESS → ZONA(reversibilidad×blast) → APPLY(verde/amarillo)/STOP(rojo) → AUDIT(kind="auto_action") → MONITOR(reward/ECE post) → LEARN(record_outcome).
