@@ -242,7 +242,9 @@ def _solve(model, problem):
 def _verify(model, problem, answer):
     k, hit = _memo_get("ablsym_verify", model, problem, str(answer))
     if hit is not None:
-        return bool(hit[0]), float(hit[1]), 0.0   # cache guarda [passed, conf]
+        if isinstance(hit, list):                 # formato nuevo [passed, conf]
+            return bool(hit[0]), float(hit[1]), 0.0
+        return bool(hit), None, 0.0               # formato viejo (bool crudo): conf desconocida
     art = f"PROBLEMA:\n{problem}\n\nRESPUESTA PROPUESTA: {answer}"
     res = _retry(lambda: _gated_call(model, [{"role": "system", "content": _VERIFY_SYS},
                                              {"role": "user", "content": art}],
