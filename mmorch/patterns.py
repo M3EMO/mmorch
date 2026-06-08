@@ -111,8 +111,15 @@ def adversarial_verify(
     verifier_model: str = DEFAULT_VERIFIER,
     phase: str = "",
     task_kind: str = "subjective",
+    checker: str | None = None,
+    checker_ctx: dict | None = None,
 ) -> Verdict:
     """Verify an artifact with a skeptic. Cross-family enforcement is TASK-AWARE (#2).
+
+    DETERMINISTIC TOOL-VERIFY: if `checker` is given (with task_kind='checkable'), the
+    claim is verified by CODE (checkers.py), not an LLM — 100% reliable & free where an
+    LLM verifier is ~74% false-refute on hard math. Returns a Verdict (confidence=1.0,
+    no API). E.g. checker='arithmetic', checker_ctx={'expr':'comb(20,10)','expected':...}.
 
     task_kind="subjective" (default, SAFE): no computable ground-truth (design, copy,
       prose, judgement). Cross-family is REQUIRED — same-family is refused (raise).
@@ -125,6 +132,18 @@ def adversarial_verify(
       false-refute, ablation_prompt) regardless of family — prefer a TOOL/code check
       over any LLM verifier when you can compute the truth directly.
     """
+    # tool-verify determinista: cero API, 100% confiable en lo computable.
+    if checker is not None:
+        from .checkers import check
+        r = check(checker, **(checker_ctx or {}))
+        log_event(pattern="adversarial_verify_verdict", node=f"checker:{checker}",
+                  model=f"tool:{checker}", family="deterministic", in_tokens=0,
+                  out_tokens=0, cost_usd=0.0, latency_s=0.0, phase=phase,
+                  passed=r.passed, confidence=1.0, n_refutations=0 if r.passed else 1)
+        return Verdict(passed=r.passed, confidence=1.0,
+                       refutations=[] if r.passed else [r.detail],
+                       raw=r.detail, verifier_model=f"tool:{checker}", cost_usd=0.0)
+
     if task_kind != "checkable" and family_of(gen_model) == family_of(verifier_model):
         raise ValueError(
             f"OneFlow violation: generator ({gen_model}, {family_of(gen_model)}) and "

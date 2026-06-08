@@ -330,6 +330,19 @@ def mmorch_feedback_stats() -> str:
 
 
 @mcp.tool()
+def mmorch_check(checker: str, ctx: dict) -> str:
+    """DETERMINISTIC tool-verify (checkers.py) — zero API, 100% reliable where an LLM
+    verifier is ~74% false-refute on hard checkable math. checker in {arithmetic,
+    json_schema}; ctx is the checker's args. E.g. checker="arithmetic",
+    ctx={"expr": "comb(20,10)", "expected": 184756}. Use this INSTEAD of an LLM verifier
+    when the claim has computable ground-truth. Returns {passed, detail, checker, got}."""
+    from mmorch.checkers import check as _check
+    r = _check(checker, **dict(ctx))
+    return json.dumps({"passed": r.passed, "detail": r.detail, "checker": r.checker,
+                       "expected": r.expected, "got": r.got}, ensure_ascii=False, default=str)
+
+
+@mcp.tool()
 def mmorch_memory_stats() -> str:
     """Memory counts: episodic events, live semantic notes, embedded notes, and the
     active embedding backend (or null if fastembed absent). Read-only, no spend."""

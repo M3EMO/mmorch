@@ -30,6 +30,8 @@ from .loop import loop_until_done, LoopResult                # backlog: loop-unt
 from .schema import (gated_json, validate, extract_json,     # §9 schema-gates
                      SchemaGateError)
 from .classify import classify, classify_and_act, ClassifyResult  # classify-and-act (front-door)
+from .checkers import (check, register_checker, CheckResult,         # tool-verify determinista
+                       safe_arith, available as checkers_available)
 
 __all__ = [
     "REGISTRY", "family_of", "ModelSpec", "call",
@@ -46,4 +48,5 @@ __all__ = [
     "loop_until_done", "LoopResult",
     "gated_json", "validate", "extract_json", "SchemaGateError",
     "classify", "classify_and_act", "ClassifyResult",
+    "check", "register_checker", "CheckResult", "safe_arith", "checkers_available",
 ]
