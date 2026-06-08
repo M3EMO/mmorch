@@ -159,6 +159,7 @@ def mmorch_ensemble_verify(
     return json.dumps({
         "passed": ev.passed, "confidence": ev.confidence,
         "n_passed": ev.n_passed, "n_total": ev.n_total,
+        "unanimous": ev.unanimous, "escalate": ev.escalate,  # #5: split -> a Opus
         "refutations": ev.refutations, "cost_usd": ev.cost_usd}, ensure_ascii=False)
 
 

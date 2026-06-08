@@ -19,7 +19,9 @@ from .ensemble import ensemble_verify, EnsembleVerdict  # I-3
 from .cache import Memo, memoized_verify, key_of         # I-4
 from .innovate import ideate, screen, ideate_and_screen  # I-5
 from .feedback import (record_outcome, ThompsonBandit,   # feedback loop (keystone)
-                       calibration, read_outcomes)
+                       calibration, read_outcomes,
+                       calibrate_conf, reliability_bins,  # #3 calibrated gating
+                       contextual_arm)                    # #4 contextual bandit key
 from .memory import (write_episode, write_note, recall,   # memoria episodica+semantica
                      tombstone_note, embed, Note)
 from .tournament import tournament, TournamentResult        # backlog: best-of-N pairwise
@@ -38,6 +40,7 @@ __all__ = [
     "Memo", "memoized_verify", "key_of",
     "ideate", "screen", "ideate_and_screen",
     "record_outcome", "ThompsonBandit", "calibration", "read_outcomes",
+    "calibrate_conf", "reliability_bins", "contextual_arm",
     "write_episode", "write_note", "recall", "tombstone_note", "embed", "Note",
     "tournament", "TournamentResult", "bucket_rank", "BucketRankResult",
     "loop_until_done", "LoopResult",

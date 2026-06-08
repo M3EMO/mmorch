@@ -10,6 +10,7 @@ Hard rules enforced here:
 from __future__ import annotations
 
 import json
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
@@ -63,7 +64,20 @@ def fan_out(
         for fut in as_completed(futs):
             i, res = fut.result()
             results[i] = res
-    return [r for r in results if r is not None]
+    ok = [r for r in results if r is not None]
+    # #6: cobertura NO silenciosa. Dropear fallidos sin avisar viola "no silent caps":
+    # el caller no distingue 8/10 de 10/10 (una sintesis sobre 6 prompts es parcial).
+    n_failed = len(prompts) - len(ok)
+    if n_failed:
+        failed_idx = [i for i, r in enumerate(results) if r is None]
+        warnings.warn(f"fan_out: {n_failed}/{len(prompts)} prompts fallaron y se "
+                      f"dropearon (indices {failed_idx[:10]}). Resultado PARCIAL.",
+                      stacklevel=2)
+        log_event(pattern="fan_out_coverage", node="coverage", model=gen_model,
+                  family=family_of(gen_model), in_tokens=0, out_tokens=0, cost_usd=0.0,
+                  latency_s=0.0, phase=phase, n_prompts=len(prompts), n_ok=len(ok),
+                  n_failed=n_failed)
+    return ok
 
 
 # --------------------------------------------------------------------------- #

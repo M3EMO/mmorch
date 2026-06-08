@@ -46,6 +46,20 @@ def record_outcome(arm: str, reward: float, *, pattern: str = "",
     return o
 
 
+def contextual_arm(model: str, thr: float | None = None, ctx: str | None = None) -> str:
+    """#4: brazo CONTEXTUAL para ThompsonBandit. El umbral bueno para aritmetica != el
+    bueno para sintesis -> bucketear el brazo por clase de tarea (de classify.py) da un
+    posterior Beta POR clase. Cero ML nuevo: mismo Thompson, key compuesta
+    'model@thr#ctx'. El bandit ya soporta cualquier string como brazo; esto solo
+    normaliza el naming para que select()/update() aprendan por contexto."""
+    arm = model
+    if thr is not None:
+        arm += f"@{thr}"
+    if ctx:
+        arm += f"#{ctx}"
+    return arm
+
+
 def read_outcomes(path: Path = _FEEDBACK_LOG) -> list[dict]:
     if not path.exists():
         return []

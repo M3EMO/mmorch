@@ -22,6 +22,8 @@ class EnsembleVerdict:
     verdicts: list[Verdict] = field(default_factory=list)
     cost_usd: float = 0.0
     refutations: list[str] = field(default_factory=list)
+    unanimous: bool = True       # #5: todos coinciden (0/K o K/K)
+    escalate: bool = False       # #5: voto DIVIDIDO -> incertidumbre -> mandar a Opus
 
 
 def ensemble_verify(
@@ -63,8 +65,12 @@ def ensemble_verify(
         passed = n_pass > len(verdicts) / 2
     conf = sum(v.confidence for v in verdicts) / max(len(verdicts), 1)
     refs = [r for v in verdicts if not v.passed for r in v.refutations]
+    # #5: el margen (2-1 vs 3-0) es senal de incertidumbre que antes se tiraba. Voto
+    # dividido (ni 0 ni K) = los escepticos discrepan = justo donde rinde gastar Opus.
+    unanimous = (n_pass == 0 or n_pass == len(verdicts))
     return EnsembleVerdict(
         passed=passed, confidence=round(conf, 3), n_passed=n_pass,
         n_total=len(verdicts), verdicts=verdicts,
         cost_usd=round(sum(v.cost_usd for v in verdicts), 6), refutations=refs,
+        unanimous=unanimous, escalate=not unanimous,
     )
