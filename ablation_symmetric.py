@@ -291,11 +291,14 @@ def main():
     ap.add_argument("--workers", type=int, default=12)  # alto OK: el RateGate limita por RPM
     ap.add_argument("--gemini-rpm", type=float, default=240)   # gemini se espacia a esta tasa
     ap.add_argument("--deepseek-rpm", type=float, default=600)  # deepseek casi sin freno
+    ap.add_argument("--fam-b", default="gemini-2.5-flash", help="modelo lado google (flash | flash-lite)")
     ap.add_argument("--no-cache", action="store_true", help="desactiva el memo content-hash")
     ap.add_argument("--yes", action="store_true")
     ap.add_argument("--dry", action="store_true")
     args = ap.parse_args()
 
+    global FAM_B
+    FAM_B = args.fam_b
     if family_of(FAM_A) == family_of(FAM_B):
         sys.exit("config rota: FAM_A y FAM_B comparten familia.")
     global _GATE, _MEMO
