@@ -150,21 +150,32 @@ _VERIFY_SYS = (
 )
 
 
-def _verify(model: str, item: dict):
+def _verify(model: str, item: dict, retries: int = 2):
+    """Verifica con reintentos. H-1: un timeout transitorio NO debe matar el batch."""
     art = f"PROBLEMA:\n{item['problem']}\n\nRESPUESTA PROPUESTA: {item['proposed']}"
-    res = call(model, [{"role": "system", "content": _VERIFY_SYS},
-                       {"role": "user", "content": art}],
-               pattern="ablation_paired", node=f"v:{model}", phase="ablation_paired",
-               temperature=0.0)
-    passed, conf, refs = _parse_verdict(res.text)
-    return passed, res.cost_usd
+    last = None
+    for _ in range(retries + 1):
+        try:
+            res = call(model, [{"role": "system", "content": _VERIFY_SYS},
+                               {"role": "user", "content": art}],
+                       pattern="ablation_paired", node=f"v:{model}", phase="ablation_paired",
+                       temperature=0.0)
+            passed, conf, refs = _parse_verdict(res.text)
+            return passed, res.cost_usd
+        except Exception as e:  # APITimeoutError, rate-limit, red — reintentar
+            last = e
+    raise last
 
 
-def _judge_item(item: dict) -> dict:
-    """Corre AMBOS verificadores sobre el MISMO item (par)."""
-    self_passed, c1 = _verify(SELF_VERIFIER, item)
-    cross_passed, c2 = _verify(CROSS_VERIFIER, item)
-    # decision correcta = el verificador acerto (passed == is_correct)
+def _judge_item(item: dict):
+    """Corre AMBOS verificadores sobre el MISMO item (par). Devuelve None si UN
+    verificador falla tras reintentos -> el par se descarta (no se puede parear a
+    medias). main filtra los None y reporta cuantos cayeron (sin truncado silencioso)."""
+    try:
+        self_passed, c1 = _verify(SELF_VERIFIER, item)
+        cross_passed, c2 = _verify(CROSS_VERIFIER, item)
+    except Exception:
+        return None
     return {**item,
             "self_passed": self_passed, "cross_passed": cross_passed,
             "self_right": self_passed == item["is_correct"],
@@ -262,15 +273,24 @@ def main():
         sys.exit("corrida real gasta API. Repetir con --yes para confirmar.")
 
     rows: list[dict] = []
+    dropped = 0
     cost = 0.0
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = [ex.submit(_judge_item, g) for g in gold]
         for j, fut in enumerate(as_completed(futs), 1):
             r = fut.result()
-            rows.append(r)
-            cost += r["cost"]
+            if r is None:
+                dropped += 1
+            else:
+                rows.append(r)
+                cost += r["cost"]
             if j % 50 == 0:
-                print(f"  ... {j}/{len(gold)} (${cost:.3f})")
+                print(f"  ... {j}/{len(gold)} (${cost:.3f}, {dropped} caidos)")
+    if not rows:
+        sys.exit("todos los pares cayeron (API caida?). Sin resultado.")
+    if dropped:
+        print(f"\nAVISO: {dropped}/{len(gold)} pares descartados por fallo de API "
+              f"(no truncado silencioso). Analisis sobre {len(rows)} pares completos.")
 
     # McNemar sobre la decision-correcta (acierto del verificador vs ground-truth)
     b = sum(1 for r in rows if r["self_right"] and not r["cross_right"])
