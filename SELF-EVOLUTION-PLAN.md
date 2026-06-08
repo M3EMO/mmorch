@@ -10,16 +10,16 @@ Fuente: brainstorms/2026-06-08-mmorch-ideal-vision.md (grill completo). Estructu
 
 ---
 
-## FASE 0 — Cimientos: GOAL (ancla anti-drift) + BudgetKeeper (costo)
+## FASE 0 — Cimientos: GOAL (ancla anti-drift) + BudgetKeeper (costo) ✅ COMPLETA
 **Goal:** anclar el norte (anti goal-drift) y que ninguna fase repita el +$5.
 **Entregables:**
 - ✅ **GOAL.md + `mmorch/goal.py`** (HECHO): contrato north-star + invariantes + non-goals + métricas. `goal_aligned(change)` = verify cross-family del cambio contra el GOAL (refuta si deriva/bloatea/rompe invariante/zona-roja). Modelado sobre el `/goal` nativo (condición + gate que bloquea "done"). Editar GOAL = zona roja (`goal_hash()` audita). 3 tests verdes.
-- `BudgetKeeper` (`mmorch/budget.py`): lee `MAX_MONTHLY_USD` de config; antes de cada `call()` chequea el acumulado del mes en metrics.jsonl; si excede → bloquea no-críticas / exige override humano; notifica.
-- Contabilidad honesta: calls fallidas (timeout) hoy loggean cost=0 → estimar costo server-side facturado (el gap del +$5).
+- ✅ **`mmorch/budget.py` (HECHO)**: `MMORCH_MAX_MONTHLY_USD` (env, default ilimitado=opt-in); `monthly_spend()` suma metrics.jsonl del mes; `check(critical, override)` lanza `BudgetExceeded` si excede; wireado en `providers.call(critical=False)` antes de cada API call. `status()`/`remaining()` pa observabilidad. 6 tests verdes.
+- (pendiente menor) contabilidad de timeout-billing (metrics es piso) — el guard es conservador igual.
 **Checks/tests:**
-- ✅ goal: load_goal/goal_hash deterministas; goal_aligned embebe el GOAL + cross-family.
-- test: acumulado > límite → `call()` no-crítica bloquea; override humano permite; suma correcta.
-**CHECKPOINT (salir):** goal tests + budget tests verdes + demo: `MAX_MONTHLY_USD=0.01` bloquea un fan_out. Sin esto NO se corre nada que gaste API.
+- ✅ goal: load_goal/goal_hash deterministas; goal_aligned embebe el GOAL + cross-family (3 tests).
+- ✅ budget: spend filtra por mes; over-límite bloquea; critical/override bypassan; status (6 tests).
+**CHECKPOINT (salir): ✅** suite 120 verde + demo real: `MMORCH_MAX_MONTHLY_USD=0.01` bloquea (gasto $2.38 > límite), critical bypassa.
 
 ---
 

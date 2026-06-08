@@ -33,6 +33,8 @@ from .classify import classify, classify_and_act, ClassifyResult  # classify-and
 from .checkers import (check, register_checker, CheckResult,         # tool-verify determinista
                        safe_arith, available as checkers_available)
 from .goal import load_goal, goal_hash, goal_aligned                 # ancla anti-goal-drift
+from .budget import (BudgetExceeded, monthly_spend, remaining,       # BudgetKeeper (techo $)
+                     check as budget_check, status as budget_status)
 
 __all__ = [
     "REGISTRY", "family_of", "ModelSpec", "call",
@@ -51,4 +53,5 @@ __all__ = [
     "classify", "classify_and_act", "ClassifyResult",
     "check", "register_checker", "CheckResult", "safe_arith", "checkers_available",
     "load_goal", "goal_hash", "goal_aligned",
+    "BudgetExceeded", "monthly_spend", "remaining", "budget_check", "budget_status",
 ]

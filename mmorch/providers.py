@@ -76,6 +76,7 @@ def call(
     temperature: float = 0.3,
     max_tokens: int | None = 16384,
     timeout: float = 60.0,
+    critical: bool = False,
     **kw,
 ) -> CallResult:
     """Invoke one external model node. Normalizes I/O and logs a metric record.
@@ -89,6 +90,10 @@ def call(
     s = spec(model_key)
     if isinstance(messages, str):
         messages = [{"role": "user", "content": messages}]
+
+    # BudgetKeeper: bloquea si el gasto del mes supera el límite (no-op sin límite).
+    from .budget import check as _budget_check
+    _budget_check(critical=critical)
 
     client = _client(model_key)
     t0 = time.perf_counter()
