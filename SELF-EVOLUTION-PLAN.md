@@ -10,16 +10,16 @@ Fuente: brainstorms/2026-06-08-mmorch-ideal-vision.md (grill completo). Estructu
 
 ---
 
-## FASE 0 — Cimientos de seguridad de costo (antes que nada)
-**Goal:** que ninguna fase siguiente pueda repetir el incidente +$5.
+## FASE 0 — Cimientos: GOAL (ancla anti-drift) + BudgetKeeper (costo)
+**Goal:** anclar el norte (anti goal-drift) y que ninguna fase repita el +$5.
 **Entregables:**
+- ✅ **GOAL.md + `mmorch/goal.py`** (HECHO): contrato north-star + invariantes + non-goals + métricas. `goal_aligned(change)` = verify cross-family del cambio contra el GOAL (refuta si deriva/bloatea/rompe invariante/zona-roja). Modelado sobre el `/goal` nativo (condición + gate que bloquea "done"). Editar GOAL = zona roja (`goal_hash()` audita). 3 tests verdes.
 - `BudgetKeeper` (`mmorch/budget.py`): lee `MAX_MONTHLY_USD` de config; antes de cada `call()` chequea el acumulado del mes en metrics.jsonl; si excede → bloquea no-críticas / exige override humano; notifica.
-- Contabilidad honesta: las calls fallidas (timeout) hoy loggean cost=0 → estimar costo server-side facturado (el gap del +$5).
+- Contabilidad honesta: calls fallidas (timeout) hoy loggean cost=0 → estimar costo server-side facturado (el gap del +$5).
 **Checks/tests:**
-- test: simular acumulado > límite → `call()` no-crítica lanza/bloquea.
-- test: override humano explícito permite la call.
-- test: BudgetKeeper suma correcto desde un metrics.jsonl sintético.
-**CHECKPOINT (salir):** `pytest` verde + demo: con `MAX_MONTHLY_USD=0.01`, un fan_out se bloquea y notifica. Sin esto NO se corre nada que gaste API.
+- ✅ goal: load_goal/goal_hash deterministas; goal_aligned embebe el GOAL + cross-family.
+- test: acumulado > límite → `call()` no-crítica bloquea; override humano permite; suma correcta.
+**CHECKPOINT (salir):** goal tests + budget tests verdes + demo: `MAX_MONTHLY_USD=0.01` bloquea un fan_out. Sin esto NO se corre nada que gaste API.
 
 ---
 
@@ -54,7 +54,7 @@ Fuente: brainstorms/2026-06-08-mmorch-ideal-vision.md (grill completo). Estructu
 **Goal:** la maquinaria de deshacer y de aprobar, antes de cualquier auto-aplicación.
 **Entregables:**
 - `mmorch/evolve.py::rollback(change_id)`: git reset/revert a snapshot previo + tombstone notas + `write_episode(kind="rollback")` + re-correr fitness post-rollback. `change_id` = {diff, snapshot, notas creadas}.
-- `mmorch/evolve.py::fitness(change)`: las 5 obligatorias — pytest 100%, checkers (`python_ast_valid`+`unit_test`), ensemble-AZUL cross-family, rollback probado en sandbox, no-degradación de costo (≤10% verde/≤20% amarillo).
+- `mmorch/evolve.py::fitness(change)`: las **6 obligatorias** — pytest 100%, checkers (`python_ast_valid`+`unit_test`), ensemble-AZUL cross-family, rollback probado en sandbox, no-degradación de costo (≤10% verde/≤20% amarillo), **`goal_aligned(change)` passed** (6ta, no determinista — bloquea aunque los tests estén verdes si el cambio deriva del GOAL).
 **Checks/tests:**
 - test: aplicar un cambio trivial → rollback → estado idéntico (git + memoria).
 - test: fitness rechaza un cambio que rompe un test.

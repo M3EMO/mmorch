@@ -32,6 +32,7 @@ from .schema import (gated_json, validate, extract_json,     # §9 schema-gates
 from .classify import classify, classify_and_act, ClassifyResult  # classify-and-act (front-door)
 from .checkers import (check, register_checker, CheckResult,         # tool-verify determinista
                        safe_arith, available as checkers_available)
+from .goal import load_goal, goal_hash, goal_aligned                 # ancla anti-goal-drift
 
 __all__ = [
     "REGISTRY", "family_of", "ModelSpec", "call",
@@ -49,4 +50,5 @@ __all__ = [
     "gated_json", "validate", "extract_json", "SchemaGateError",
     "classify", "classify_and_act", "ClassifyResult",
     "check", "register_checker", "CheckResult", "safe_arith", "checkers_available",
+    "load_goal", "goal_hash", "goal_aligned",
 ]
