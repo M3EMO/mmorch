@@ -225,13 +225,19 @@ def _arm_stats(rows: list[dict], arm: str) -> dict:
             "sensitivity": sens, "specificity": spec, "balanced_acc": round(acc, 4)}
 
 
+# tokens/call calibrados de una corrida real n=350 (no inventados): el verificador
+# RAZONA antes del verdict -> out alto. gemini ~535 out, deepseek ~299. Usamos el alto
+# (560) para AMBOS: error conservador (sobre-estima) -> el budget guard no falla por lo bajo.
+_EST_IN_TOK = 120
+_EST_OUT_TOK = 560
+
+
 def estimate_cost(n: int) -> float:
-    """2 verificadores * n. Estima con precio de salida ~200 tok por verdict."""
+    """2 verificadores * n. Tokens calibrados de un run real (ver constantes)."""
     tot = 0.0
     for m in (SELF_VERIFIER, CROSS_VERIFIER):
         s = spec(m)
-        # ~300 tok in (problema+respuesta) + ~200 out, por call
-        tot += n * (300 / 1e6 * s.price_in + 200 / 1e6 * s.price_out)
+        tot += n * (_EST_IN_TOK / 1e6 * s.price_in + _EST_OUT_TOK / 1e6 * s.price_out)
     return tot
 
 
