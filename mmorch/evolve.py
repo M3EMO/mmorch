@@ -13,15 +13,132 @@ NUNCA auto-modifica vivo. Aplicar un patch = sandbox + fitness verde + gate huma
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 _ARCHIVE = ROOT / "logs" / "evolution_archive.jsonl"
+
+
+# --------------------------------------------------------------------------- #
+# FASE 3 — Change + rollback() + evaluate() (fitness compuesta, reversible)    #
+# --------------------------------------------------------------------------- #
+@dataclass
+class Change:
+    """Un cambio candidato. `before` = snapshot (la reversibilidad first-class: sin
+    snapshot no se puede rollback -> no se auto-aplica)."""
+    target: str            # path relativo a root
+    after: str             # contenido nuevo
+    before: str            # snapshot previo (para rollback)
+    description: str       # para goal_aligned
+    id: str = ""
+    notes: str = ""
+
+    def __post_init__(self):
+        if not self.id:
+            self.id = hashlib.sha256(
+                f"{self.target}\x00{self.after}".encode("utf-8")).hexdigest()[:12]
+
+
+def snapshot_change(target: str, after: str, description: str, *, root: Path = ROOT,
+                    notes: str = "") -> Change:
+    p = Path(root) / target
+    before = p.read_text(encoding="utf-8") if p.exists() else ""
+    return Change(target=target, after=after, before=before, description=description, notes=notes)
+
+
+def apply_change(change: Change, *, root: Path = ROOT) -> None:
+    p = Path(root) / change.target
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(change.after, encoding="utf-8")
+
+
+def rollback(change: Change, *, root: Path = ROOT) -> bool:
+    """Restaura el snapshot `before`. Devuelve True si el archivo quedó == before.
+    Reversibilidad first-class: si esto no puede restaurar, el cambio nunca debió
+    auto-aplicarse. (Tombstone de notas/episodios lo hace el caller vía memory.)"""
+    p = Path(root) / change.target
+    try:
+        if change.before == "" and not _existed_before(change):
+            if p.exists():
+                p.unlink()           # era archivo nuevo -> borrarlo
+            return not p.exists()
+        p.write_text(change.before, encoding="utf-8")
+        return p.read_text(encoding="utf-8") == change.before
+    except Exception:
+        return False
+
+
+def _existed_before(change: Change) -> bool:
+    return change.before != ""
+
+
+def evaluate(change: Change, *, root: Path = ROOT, run_tests: bool = True,
+             goal: bool = True, goal_fn=None, test_path: str = "tests") -> dict:
+    """fitness() compuesta de Fase 3. Checks (los que apliquen):
+      1. ast_valid del contenido nuevo (determinista).
+      2. goal_aligned(description) — alineación con GOAL (cross-family). Inyectable.
+      3. rollback PROBADO: apply -> rollback restaura `before` bit-a-bit (en sandbox).
+      4. pytest verde (si run_tests): aplica al repo, corre, SIEMPRE revierte (finally).
+    Devuelve {ok, checks:{...}}. ok = todas las que corrieron pasaron."""
+    from .checkers import check as _check
+    checks: dict[str, bool] = {}
+    checks["ast_valid"] = _check("python_ast_valid", code=change.after).passed
+
+    if goal:
+        gf = goal_fn
+        if gf is None:
+            from .goal import goal_aligned as gf
+        checks["goal_aligned"] = gf(change.description).passed
+
+    # rollback probado en un root temporal (no toca el repo vivo)
+    checks["rollback_works"] = _rollback_roundtrip(change)
+
+    if run_tests:
+        checks["tests_green"] = _tests_with_autorevert(change, root=root, test_path=test_path)
+
+    return {"ok": all(checks.values()), "checks": checks, "change_id": change.id}
+
+
+def _rollback_roundtrip(change: Change) -> bool:
+    """En un dir temporal: simula before, aplica after, rollback, verifica == before."""
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="mmorch_rb_") as td:
+        troot = Path(td)
+        tgt = troot / change.target
+        tgt.parent.mkdir(parents=True, exist_ok=True)
+        existed = _existed_before(change)
+        if existed:
+            tgt.write_text(change.before, encoding="utf-8")
+        apply_change(change, root=troot)
+        ok = rollback(change, root=troot)
+        if existed:
+            ok = ok and tgt.exists() and tgt.read_text(encoding="utf-8") == change.before
+        else:
+            ok = ok and not tgt.exists()
+        return ok
+
+
+def _tests_with_autorevert(change: Change, *, root: Path = ROOT, test_path: str = "tests") -> bool:
+    """Aplica el cambio al repo, corre pytest, SIEMPRE revierte (finally). Nunca deja
+    el repo mutado. (Solo se usa si el cambio toca el repo vivo.)"""
+    p = Path(root) / change.target
+    original = p.read_text(encoding="utf-8") if p.exists() else None
+    try:
+        apply_change(change, root=root)
+        return fitness(test_path=test_path)["ok"]
+    finally:
+        if original is None:
+            if p.exists():
+                p.unlink()
+        else:
+            p.write_text(original, encoding="utf-8")
 
 
 def fitness(test_path: str = "tests", timeout: int = 300) -> dict:
@@ -59,6 +176,87 @@ def read_archive() -> list[dict]:
     if not _ARCHIVE.exists():
         return []
     return [json.loads(ln) for ln in _ARCHIVE.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+# --------------------------------------------------------------------------- #
+# FASE 4 — self_evolve(): el motor (ideate -> fitness -> zona -> apply -> audit) #
+# --------------------------------------------------------------------------- #
+# Zona ROJA por path: nunca auto-aplicar (gate humano). Coincide con GOAL.md cat.4.
+_RED_PATHS = ("GOAL.md", "GOAL.hash", ".env", "mmorch/goal.py", "mmorch/budget.py",
+              "mmorch/config.py")
+
+
+def zone_of(change: Change, *, root: Path = ROOT) -> str:
+    """Clasifica por reversibilidad x blast-radius. roja = path prohibido o escapa del
+    repo; amarilla = modifica archivo existente (reversible, blast medio); verde =
+    archivo nuevo (aislado)."""
+    tgt = change.target.replace("\\", "/")
+    # escapa del repo / absoluto -> rojo
+    if tgt.startswith("/") or tgt.startswith("..") or ":" in tgt:
+        return "red"
+    if any(tgt == r or tgt.endswith("/" + r) for r in _RED_PATHS):
+        return "red"
+    return "yellow" if _existed_before(change) else "green"
+
+
+def self_evolve(*, candidates: list[Change] | None = None, generate_fn=None, n: int = 3,
+                root: Path = ROOT, evaluate_fn=None, do_apply: bool = False,
+                audit: bool = True) -> dict:
+    """Motor de auto-evolución (1 mejora segura por ciclo). Pasos:
+      IDEATE: usa `candidates` o `generate_fn() -> list[Change]`.
+      FITNESS: `evaluate()` cada uno (inyectable vía evaluate_fn para tests).
+      TOURNAMENT: entre los que pasan, gana el de más checks ok (desempate: id).
+      ZONA: roja -> STOP (nunca aplica, gate humano). verde/amarilla -> aplica si do_apply.
+      AUDIT: archive + episodio kind="auto_action". LEARN: record_outcome.
+    Devuelve {evaluated, winner, applied, zone, blocked_red}. NO aplica rojo jamás."""
+    ev = evaluate_fn or evaluate
+    cands = candidates if candidates is not None else (generate_fn() if generate_fn else [])
+    results = []
+    for c in cands:
+        z = zone_of(c, root=root)
+        r = ev(c)
+        results.append({"change": c, "zone": z, "eval": r, "ok": bool(r.get("ok"))})
+
+    passing = [x for x in results if x["ok"] and x["zone"] != "red"]
+    blocked_red = [x for x in results if x["zone"] == "red"]
+    # tournament: más checks ok gana (proxy de "mejor"); determinista por id
+    winner = max(passing, key=lambda x: (sum(x["eval"]["checks"].values()), x["change"].id),
+                 default=None)
+
+    applied = False
+    if winner and do_apply and winner["zone"] in ("green", "yellow"):
+        apply_change(winner["change"], root=root)
+        applied = True
+
+    if audit:
+        for x in results:
+            c = x["change"]
+            archive_variant(c.id, x["eval"], notes=f"zone={x['zone']} ok={x['ok']}",
+                            applied=(applied and winner is c))
+            if x is winner and applied:
+                _audit_episode(c, x["zone"], x["eval"])
+        try:
+            from .feedback import record_outcome
+            for x in results:
+                record_outcome(f"evolve:{x['zone']}", 1.0 if x["ok"] else 0.0,
+                               pattern="evolve", source="self_evolve", context=x["change"].target)
+        except Exception:
+            pass
+
+    return {"evaluated": len(results), "winner": winner["change"].id if winner else None,
+            "applied": applied, "zone": winner["zone"] if winner else None,
+            "blocked_red": [x["change"].id for x in blocked_red], "results": results}
+
+
+def _audit_episode(change: Change, zone: str, ev: dict) -> None:
+    """Auditoría inmutable de la auto-acción (mejora #5 del usuario)."""
+    try:
+        from .memory import write_episode
+        write_episode("mmorch_self", "auto_action", {
+            "change_id": change.id, "target": change.target, "zone": zone,
+            "checks": ev.get("checks"), "description": change.description})
+    except Exception:
+        pass
 
 
 def propose_patch(target_file: str, finding: str, *, gen_model: str | None = None) -> str:
