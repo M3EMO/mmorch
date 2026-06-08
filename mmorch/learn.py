@@ -42,8 +42,34 @@ def analyze() -> dict:
         })
     return {"rows": rows, "total_calls": len(ev),
             "total_cost_usd": round(sum(r["cost_usd"] for r in rows), 5),
+            "verdict_quality": _verdict_quality(ev),  # proxy de calidad por verificador (P3b)
             "calibration": calibration(),          # ECE conf-predicha vs realidad (feedback loop)
             "bandit": ThompsonBandit().stats()}     # brazos aprendidos (cascade thresholds, etc.)
+
+
+def _verdict_quality(ev: list[dict]) -> dict:
+    """Consume los eventos adversarial_verify_verdict (passed/confidence en `extra`)
+    como proxy de calidad por verificador. Esto es lo que cierra P3b: el verdict no
+    solo se loggea, se LEE. pass_rate alto + conf alta sin refutaciones puede ser
+    sicofancia -> se cruza con calibration (ECE) afuera."""
+    agg: dict[str, dict] = defaultdict(lambda: {"n": 0, "passed": 0, "conf": []})
+    for e in ev:
+        if e.get("pattern") != "adversarial_verify_verdict":
+            continue
+        x = e.get("extra") or {}
+        a = agg[e.get("model", "?")]
+        a["n"] += 1
+        a["passed"] += 1 if x.get("passed") else 0
+        if x.get("confidence") is not None:
+            a["conf"].append(float(x["confidence"]))
+    out = {}
+    for model, a in agg.items():
+        out[model] = {
+            "n": a["n"],
+            "pass_rate": round(a["passed"] / a["n"], 4) if a["n"] else None,
+            "avg_confidence": round(statistics.mean(a["conf"]), 4) if a["conf"] else None,
+        }
+    return out
 
 
 def recommend() -> list[str]:
@@ -67,12 +93,25 @@ def recommend() -> list[str]:
         recs.append(
             f"{r['model']}/{r['pattern']}: latencia p95 {r['lat_p95']}s (alta). "
             f"Revisar timeout o usar un modelo mas rapido si la calidad lo permite.")
-    # 3. Gap de observabilidad: el verdict de adversarial_verify no se loggea -> sin proxy de calidad.
-    if any(r["pattern"] == "adversarial_verify" for r in rows):
+    # 3. Proxy de calidad por verificador (P3b): consumir los verdict events si existen.
+    vq = rep.get("verdict_quality") or {}
+    has_verify = any(r["pattern"] == "adversarial_verify" for r in rows)
+    if has_verify and not vq:
+        # verify corrio pero no hay verdict events -> gap real de observabilidad.
         recs.append(
-            "GAP: adversarial_verify loggea costo pero NO el verdict (passed/confidence). "
-            "Sin eso no hay proxy de calidad por verificador -> no se puede auto-tunear con "
-            "fundamento. Proximo paso: loggear verdict en metrics (habilita I-1 completo).")
+            "GAP: adversarial_verify corrio pero no hay eventos de verdict en metrics "
+            "(passed/confidence). Sin eso no hay proxy de calidad por verificador.")
+    elif vq:
+        for model, q in vq.items():
+            if not q.get("n"):
+                continue
+            note = ""
+            if q.get("pass_rate") is not None and q["pass_rate"] >= 0.95 and q.get("avg_confidence", 0) >= 0.85:
+                note = (" [posible sicofancia: casi todo pasa con conf alta -> cruzar con ECE; "
+                        "el verificador puede no estar refutando de verdad]")
+            recs.append(
+                f"VERDICT/{model}: pass_rate={q['pass_rate']} avg_conf={q.get('avg_confidence')} "
+                f"(n={q['n']}). Proxy de calidad por verificador activo.{note}")
     # 4. Calibracion (feedback loop): ECE alto = conf auto-reportada NO es de fiar.
     cal = rep.get("calibration") or {}
     ece = cal.get("ece")
