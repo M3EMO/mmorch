@@ -7,7 +7,7 @@ cheap external models as nodes to **free Claude cupo**. Lives global at
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **21 módulos · 14 MCP tools · 89 tests.**
+_Auto-generado por `mmorch.docgen`._ **21 módulos · 16 MCP tools · 89 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -47,8 +47,9 @@ Active models: `deepseek-chat` (bulk), `gemini-2.5-flash` (cross-family verifier
 
 **Self-evolution (Rasputin gated):** mmorch self-audits and self-ideates new capabilities
 using itself (fan_out → cross-family verify → Opus tie-break). NEVER self-modifies live
-without green tests + human gate. Backlog: tournament, bucket-rank, loop-until-done,
-cascade (FrugalGPT-style), schema-gates.
+without green tests + human gate. The 7-pattern catalog is COMPLETE (classify-and-act,
+fan-out, adversarial-verify, generate-and-filter, tournament, bucket-rank, loop-until-done)
+plus cascade, ensemble, route, schema-gates, feedback loop and 2-layer memory.
 
 ## Setup
 
@@ -82,7 +83,7 @@ Registered globally in `~/.claude.json` as server `mmorch`. Calling these spends
 external API $, not cupo — that's the point.
 
 <!-- mmorch:auto:tools -->
-MCP tools (server `mmorch`): `mmorch_adversarial_verify`, `mmorch_bucket_rank`, `mmorch_cascade`, `mmorch_classify`, `mmorch_ensemble_verify`, `mmorch_fan_out`, `mmorch_innovate`, `mmorch_learn`, `mmorch_memory_stats`, `mmorch_metrics_summary`, `mmorch_recall`, `mmorch_remember`, `mmorch_route`, `mmorch_tournament`.
+MCP tools (server `mmorch`): `mmorch_adversarial_verify`, `mmorch_bucket_rank`, `mmorch_cascade`, `mmorch_classify`, `mmorch_ensemble_verify`, `mmorch_fan_out`, `mmorch_feedback_stats`, `mmorch_innovate`, `mmorch_learn`, `mmorch_memory_stats`, `mmorch_metrics_summary`, `mmorch_recall`, `mmorch_record_outcome`, `mmorch_remember`, `mmorch_route`, `mmorch_tournament`.
 
 **Restart Claude Code** to load new tools.
 <!-- /mmorch:auto:tools -->
@@ -100,11 +101,18 @@ the cost summary and metrics log path.
 Every node call appends to `logs/metrics.jsonl`. `mmorch.metrics.summary()` aggregates
 cost by family/model — the input to the break-even test (§14, §18.4).
 
-## Not yet built (by design §14 — add only if metrics justify)
+## Open / pending (not code gaps — validation & infra)
 
-tournament, bucket-rank, loop-until-done, FrugalGPT-style learned-threshold cascade
-(see `vault/research/`), the full A/B/C ablation (§18.4), schema-as-contract gates (§9),
-Kimi/Moonshot node. Run `python -m pytest tests/` before promoting any new capability.
+- **Break-even unproven.** The whole $-savings premise (§14) needs real volume in
+  `logs/metrics.jsonl`. Sample still thin; the feedback loop (`record_outcome`) is the
+  signal source and is only lightly used so far.
+- **§18.4 ablation — built, not yet powered.** Prior runs (n≤30/arm) were underpowered;
+  `ablation_paired.py` is the n=350 paired McNemar harness — run it to get a real verdict
+  on whether cross-family verification adds detection power. Until then the cross-family
+  keystone stays a `[PROPOSAL]`, not validated.
+- **Kimi/Moonshot node** — configured, inactive (no key). Blocks any 3-family test.
+
+Run `python -m pytest tests/` before promoting any new capability.
 
 ## Rollback
 
