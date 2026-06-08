@@ -32,7 +32,8 @@ from .schema import (gated_json, validate, extract_json,     # §9 schema-gates
 from .classify import classify, classify_and_act, ClassifyResult  # classify-and-act (front-door)
 from .checkers import (check, register_checker, CheckResult,         # tool-verify determinista
                        safe_arith, available as checkers_available)
-from .goal import load_goal, goal_hash, goal_aligned                 # ancla anti-goal-drift
+from .goal import (load_goal, goal_hash, goal_aligned,               # ancla anti-goal-drift
+                   authorize_goal, goal_guard, pursue_goal, GoalTampered)
 from .budget import (BudgetExceeded, monthly_spend, remaining,       # BudgetKeeper (techo $)
                      check as budget_check, status as budget_status)
 
@@ -53,5 +54,6 @@ __all__ = [
     "classify", "classify_and_act", "ClassifyResult",
     "check", "register_checker", "CheckResult", "safe_arith", "checkers_available",
     "load_goal", "goal_hash", "goal_aligned",
+    "authorize_goal", "goal_guard", "pursue_goal", "GoalTampered",
     "BudgetExceeded", "monthly_spend", "remaining", "budget_check", "budget_status",
 ]

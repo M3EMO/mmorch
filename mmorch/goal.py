@@ -18,6 +18,11 @@ from .patterns import adversarial_verify, Verdict
 
 ROOT = Path(__file__).resolve().parent.parent
 _GOAL_PATH = ROOT / "GOAL.md"
+_GOAL_HASH_PATH = ROOT / "GOAL.hash"   # hash AUTORIZADO (re-escribirlo = gate humano)
+
+
+class GoalTampered(RuntimeError):
+    """GOAL.md cambió sin re-autorización → HALT de toda auto-aplicación (zona roja cat.4)."""
 
 
 def load_goal(path: Path = _GOAL_PATH) -> str:
@@ -28,6 +33,51 @@ def load_goal(path: Path = _GOAL_PATH) -> str:
 def goal_hash(path: Path = _GOAL_PATH) -> str:
     """sha256 del GOAL — pa auditar si cambió (cambiarlo es zona roja)."""
     return hashlib.sha256(load_goal(path).encode("utf-8")).hexdigest()[:16]
+
+
+def authorize_goal(path: Path = _GOAL_PATH, hash_path: Path = _GOAL_HASH_PATH) -> str:
+    """Marca el GOAL actual como AUTORIZADO (acto humano = el gate de zona roja). Graba
+    el hash baseline. Llamar SOLO cuando un humano aprobó el contenido del GOAL."""
+    h = goal_hash(path)
+    Path(hash_path).write_text(h, encoding="utf-8")
+    return h
+
+
+def goal_guard(path: Path = _GOAL_PATH, hash_path: Path = _GOAL_HASH_PATH) -> None:
+    """Tamper-halt (análogo al hard-block del Stop-hook /goal). Si GOAL.md cambió vs el
+    hash autorizado → GoalTampered (frena TODA auto-aplicación). Primera vez sin baseline
+    → auto-autoriza (el GOAL inicial es el autorizado). Re-autorizar tras un cambio
+    legítimo = `authorize_goal()` (gate humano)."""
+    cur = goal_hash(path)
+    p = Path(hash_path)
+    if not p.exists():
+        p.write_text(cur, encoding="utf-8")   # init: el GOAL presente es el autorizado
+        return
+    authorized = p.read_text(encoding="utf-8").strip()
+    if cur != authorized:
+        raise GoalTampered(
+            f"GOAL.md cambió sin re-autorización (actual {cur} != autorizado {authorized}). "
+            f"HALT auto-aplicación. Si el cambio es legítimo, un HUMANO corre authorize_goal().")
+
+
+def pursue_goal(generate, *, max_rounds: int = 3, gen_model: str = DEFAULT_GENERATOR,
+                verifier_model: str = DEFAULT_VERIFIER, path: Path = _GOAL_PATH):
+    """Block-until-aligned con RETRY (el análogo productivo del /goal nativo: 'seguí hasta
+    cumplir'). `generate(feedback: str|None) -> str` produce un cambio; si `goal_aligned`
+    refuta, se realimenta la refutación y se regenera, hasta alinear o agotar max_rounds.
+    Mismo patrón que schema.gated_json pero contra el GOAL. Devuelve
+    {change, verdict, rounds, aligned}; aligned=False si se agotó sin pasar."""
+    feedback = None
+    last = None
+    for r in range(1, max_rounds + 1):
+        change = generate(feedback)
+        v = goal_aligned(change, gen_model=gen_model, verifier_model=verifier_model, path=path)
+        last = v
+        if v.passed:
+            return {"change": change, "verdict": v, "rounds": r, "aligned": True}
+        feedback = ("El cambio NO alineó con el GOAL. Refutaciones: "
+                    + "; ".join(v.refutations) + ". Corregí para alinear.")
+    return {"change": None, "verdict": last, "rounds": max_rounds, "aligned": False}
 
 
 def goal_aligned(change: str, *, gen_model: str = DEFAULT_GENERATOR,
