@@ -42,6 +42,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from mmorch.providers import call
 from mmorch.patterns import _parse_verdict
 from mmorch.config import spec, family_of
+from mmorch.feedback import record_outcome      # #1: bootstrap del feedback loop
 from ablation_paired import _mcnemar, _wilson   # reuso estadistica (stdlib)
 
 import threading
@@ -88,6 +89,8 @@ def _gated_call(model, msgs, **kw):
 _MEMO = None                       # Memo() en main si --cache
 _CACHE = {"hit": 0, "miss": 0}
 _CACHE_LOCK = threading.Lock()
+_RECORD = True                     # #1: emitir record_outcome por verdict (bootstrap feedback)
+_FB_LOCK = threading.Lock()        # serializa el append a feedback.jsonl (12 workers)
 
 
 def _memo_get(*parts):
@@ -239,15 +242,15 @@ def _solve(model, problem):
 def _verify(model, problem, answer):
     k, hit = _memo_get("ablsym_verify", model, problem, str(answer))
     if hit is not None:
-        return bool(hit), 0.0
+        return bool(hit[0]), float(hit[1]), 0.0   # cache guarda [passed, conf]
     art = f"PROBLEMA:\n{problem}\n\nRESPUESTA PROPUESTA: {answer}"
     res = _retry(lambda: _gated_call(model, [{"role": "system", "content": _VERIFY_SYS},
                                              {"role": "user", "content": art}],
                                      pattern="ablsym_verify", node=f"v:{model}", phase="ablsym",
                                      temperature=0.0, max_tokens=_MAX_TOK_VERIFY))
     passed, conf, refs = _parse_verdict(res.text)
-    _memo_put(k, passed)
-    return passed, res.cost_usd
+    _memo_put(k, [passed, conf])
+    return passed, conf, res.cost_usd
 
 
 def _run_item(item: dict):
@@ -257,16 +260,29 @@ def _run_item(item: dict):
         ans_d, c1 = _solve(FAM_A, item["problem"])
         ans_g, c2 = _solve(FAM_B, item["problem"])
         # autor=deepseek -> SELF=deepseek, CROSS=gemini
-        d_self, c3 = _verify(FAM_A, item["problem"], ans_d)
-        d_cross, c4 = _verify(FAM_B, item["problem"], ans_d)
+        d_self, ds_conf, c3 = _verify(FAM_A, item["problem"], ans_d)
+        d_cross, dc_conf, c4 = _verify(FAM_B, item["problem"], ans_d)
         # autor=gemini -> SELF=gemini, CROSS=deepseek
-        g_self, c5 = _verify(FAM_B, item["problem"], ans_g)
-        g_cross, c6 = _verify(FAM_A, item["problem"], ans_g)
+        g_self, gs_conf, c5 = _verify(FAM_B, item["problem"], ans_g)
+        g_cross, gc_conf, c6 = _verify(FAM_A, item["problem"], ans_g)
     except Exception:
         return None
+    correct_d = _close(ans_d, truth)
+    correct_g = _close(ans_g, truth)
+    # #1 BOOTSTRAP DEL FEEDBACK LOOP: cada verdict es un outcome ETIQUETADO contra la
+    # verdad computada (no self-reportada -> anti-sicofancia). reward = el verificador
+    # acerto (passed == era_correcta). predicted_conf alimenta calibration (ECE).
+    if _RECORD:
+        with _FB_LOCK:
+            for vmodel, passed, conf, truth_ok in (
+                (FAM_A, d_self, ds_conf, correct_d), (FAM_B, d_cross, dc_conf, correct_d),
+                (FAM_B, g_self, gs_conf, correct_g), (FAM_A, g_cross, gc_conf, correct_g)):
+                record_outcome(vmodel, 1.0 if passed == truth_ok else 0.0,
+                               pattern="ablsym_verify", predicted_conf=conf,
+                               source="ablation-truth", context="checkable-math")
     return {**item,
-            "ans_d": ans_d, "correct_d": _close(ans_d, truth),
-            "ans_g": ans_g, "correct_g": _close(ans_g, truth),
+            "ans_d": ans_d, "correct_d": correct_d,
+            "ans_g": ans_g, "correct_g": correct_g,
             "d_self": d_self, "d_cross": d_cross,      # verdicts sobre ans_d
             "g_self": g_self, "g_cross": g_cross,      # verdicts sobre ans_g
             "cost": c1 + c2 + c3 + c4 + c5 + c6}
@@ -293,12 +309,14 @@ def main():
     ap.add_argument("--deepseek-rpm", type=float, default=600)  # deepseek casi sin freno
     ap.add_argument("--fam-b", default="gemini-2.5-flash", help="modelo lado google (flash | flash-lite)")
     ap.add_argument("--no-cache", action="store_true", help="desactiva el memo content-hash")
+    ap.add_argument("--no-record", action="store_true", help="no emitir record_outcome (feedback)")
     ap.add_argument("--yes", action="store_true")
     ap.add_argument("--dry", action="store_true")
     args = ap.parse_args()
 
-    global FAM_B
+    global FAM_B, _RECORD
     FAM_B = args.fam_b
+    _RECORD = not args.no_record
     if family_of(FAM_A) == family_of(FAM_B):
         sys.exit("config rota: FAM_A y FAM_B comparten familia.")
     global _GATE, _MEMO
@@ -398,6 +416,15 @@ def main():
         print(f"CROSS rechazo correctas: {cross_fr}/{n_ok} = {cross_fr/n_ok:.3f}")
     print("\nNOTA: pooling balancea calidad-de-verificador (cada familia verifica en SELF "
           "y en CROSS) -> el contraste aisla la RELACION de familia, no que un modelo sea mejor.")
+
+    if _RECORD:
+        from mmorch.feedback import calibration
+        cal = calibration()
+        print(f"\n--- FEEDBACK LOOP (bootstrap #1) ---")
+        print(f"outcomes etiquetados emitidos este run: ~{len(rows) * 4} "
+              f"(4 verdicts/item vs verdad computada)")
+        print(f"calibration AHORA: ECE={cal['ece']} sobre n={cal['n']} "
+              f"(era n=1). by_arm: {cal['by_arm']}")
 
 
 if __name__ == "__main__":
