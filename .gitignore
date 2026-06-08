@@ -8,3 +8,5 @@ _install_python.ps1
 *.duckdb
 *.db
 vault/.obsidian/workspace.json
+vault/.obsidian/graph.json
+.planning/
