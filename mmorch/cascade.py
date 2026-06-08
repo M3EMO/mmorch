@@ -45,6 +45,7 @@ def cascade(
     bandit: ThompsonBandit | None = None,
     thr_candidates: dict[int, list[float]] | None = None,
     rng: _random.Random | None = None,
+    calibrated: bool = True,
 ) -> CascadeResult:
     """Cascade barato->caro con umbral por paso. steps = [(model, threshold), ...].
 
@@ -83,7 +84,13 @@ def cascade(
         total += res.cost_usd
         conf = _extract_conf(res.text)
         answer = _CONF_RE.sub("", res.text).strip()
-        if conf >= thr:
+        # #3: gatear sobre conf CALIBRADA (la cruda miente, ECE alto). gate_conf cae a
+        # la P(correcto) empirica del bucket -> escala cuando el self-score infla.
+        gate_conf = conf
+        if calibrated:
+            from .feedback import calibrate_conf
+            gate_conf = calibrate_conf(conf, pattern="cascade")  # solo data de cascade
+        if gate_conf >= thr:
             return CascadeResult(answer, conf, i, False, used, round(total, 6), arm, arms)
         prior = answer
         resolving_arm = arm

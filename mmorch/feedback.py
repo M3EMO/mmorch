@@ -95,6 +95,39 @@ class ThompsonBandit:
         return out
 
 
+def reliability_bins(path: Path = _FEEDBACK_LOG, bins: int = 10,
+                     pattern: str | None = None) -> dict[int, dict]:
+    """Curva de fiabilidad: por bucket de predicted_conf -> accuracy empirica real
+    (reward promedio) + n. Es el mapa raw_conf -> P(correcto) observado.
+
+    `pattern` filtra por tarea: la calibracion es ESPECIFICA de la tarea (la curva de
+    un verificador no aplica a un generador). Sin filtro mezcla todo (solo si sabes que
+    es comparable)."""
+    ev = [e for e in read_outcomes(path) if e.get("predicted_conf") is not None
+          and (pattern is None or e.get("pattern") == pattern)]
+    buckets: dict[int, list[float]] = {}
+    for e in ev:
+        c = max(0.0, min(1.0, float(e["predicted_conf"])))
+        b = min(bins - 1, int(c * bins))
+        buckets.setdefault(b, []).append(float(e["reward"]))
+    return {b: {"acc": sum(v) / len(v), "n": len(v)} for b, v in buckets.items()}
+
+
+def calibrate_conf(raw: float, *, pattern: str | None = None, path: Path = _FEEDBACK_LOG,
+                   bins: int = 10, min_n: int = 20) -> float:
+    """Mapea una conf auto-reportada (que MIENTE, ver ECE) a la P(correcto) empirica
+    de su bucket, usando SOLO outcomes de la misma `pattern` (tarea). Gateás sobre ESTO,
+    no sobre la conf cruda. Fallback a raw si el bucket no tiene >=min_n muestras de esa
+    tarea -> sin data comparable NO se inventa correccion (evita contaminacion cross-task)."""
+    raw = max(0.0, min(1.0, float(raw)))
+    m = reliability_bins(path, bins, pattern=pattern)
+    b = min(bins - 1, int(raw * bins))
+    cell = m.get(b)
+    if cell and cell["n"] >= min_n:
+        return cell["acc"]
+    return raw
+
+
 def calibration(path: Path = _FEEDBACK_LOG, bins: int = 10) -> dict:
     """ECE (Expected Calibration Error) + accuracy por modelo, sobre outcomes que
     tengan predicted_conf. ECE = sum_bin (n_bin/N) * |conf_prom - acc_bin|.
