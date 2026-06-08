@@ -34,6 +34,24 @@ def test_json_schema_checker():
     assert ok.passed and not bad.passed
 
 
+def test_determinant_checker():
+    # el caso exacto que gemini erro el signo (decia -1309): det real = 1309
+    m = [[1, 2, 4, 4], [9, 1, 9, 4], [9, 7, 4, 8], [5, 1, 3, 7]]
+    assert check("determinant", matrix=m, expected=1309).passed
+    assert not check("determinant", matrix=m, expected=-1309).passed
+
+
+def test_determinant_matches_numpy():
+    np = pytest.importorskip("numpy")
+    import random
+    from mmorch.checkers import _det_bareiss
+    rng = random.Random(123)
+    for _ in range(50):
+        n = rng.choice([2, 3, 4, 5])
+        m = [[rng.randint(-9, 9) for _ in range(n)] for _ in range(n)]
+        assert _det_bareiss(m) == round(float(np.linalg.det(np.array(m, dtype=float))))
+
+
 def test_predicate_checker():
     assert check("predicate", value=42, predicate=lambda x: x % 2 == 0).passed
 

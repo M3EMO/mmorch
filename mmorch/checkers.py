@@ -115,6 +115,39 @@ def _check_json_schema(*, data, schema: dict, **_) -> CheckResult:
     return CheckResult(not errs, "ok" if not errs else "; ".join(errs), "json_schema")
 
 
+def _det_bareiss(M: list[list[int]]) -> int:
+    """Determinante ENTERO EXACTO (algoritmo de Bareiss, fraction-free). Sin numpy,
+    sin floats -> sin error de redondeo. Para los casos que `arithmetic` no expresa
+    (matrices) — justo donde el LLM-verify erro el signo."""
+    n = len(M)
+    if any(len(r) != n for r in M):
+        raise ValueError("matriz no cuadrada")
+    M = [[int(x) for x in row] for row in M]
+    sign, prev = 1, 1
+    for i in range(n - 1):
+        if M[i][i] == 0:
+            swap = next((r for r in range(i + 1, n) if M[r][i] != 0), None)
+            if swap is None:
+                return 0
+            M[i], M[swap] = M[swap], M[i]
+            sign = -sign
+        for j in range(i + 1, n):
+            for k in range(i + 1, n):
+                M[j][k] = (M[j][k] * M[i][i] - M[j][i] * M[i][k]) // prev
+        prev = M[i][i]
+    return sign * M[n - 1][n - 1]
+
+
+def _check_determinant(*, matrix, expected, **_) -> CheckResult:
+    """Verifica el determinante de una matriz entera contra `expected` (exacto)."""
+    try:
+        got = _det_bareiss([list(r) for r in matrix])
+    except (ValueError, TypeError) as e:
+        return CheckResult(False, f"matriz invalida: {e}", "determinant", expected, None)
+    ok = (got == expected)
+    return CheckResult(ok, f"det = {got} (esperado {expected})", "determinant", expected, got)
+
+
 def _check_predicate(*, value, predicate: Callable[[Any], bool], **_) -> CheckResult:
     """Corre un predicado del caller (cualquier check determinista en codigo)."""
     ok = bool(predicate(value))
@@ -123,6 +156,7 @@ def _check_predicate(*, value, predicate: Callable[[Any], bool], **_) -> CheckRe
 
 _REGISTRY: dict[str, Callable[..., CheckResult]] = {
     "arithmetic": _check_arithmetic,
+    "determinant": _check_determinant,
     "json_schema": _check_json_schema,
     "predicate": _check_predicate,
 }
