@@ -69,12 +69,17 @@ def mmorch_adversarial_verify(
     rubric: str,
     gen_model: str = DEFAULT_GENERATOR,
     verifier_model: str = DEFAULT_VERIFIER,
+    task_kind: str = "subjective",
 ) -> str:
-    """Verify an artifact with a CROSS-FAMILY adversarial skeptic.
+    """Verify an artifact with an adversarial skeptic. Cross-family is TASK-AWARE (#2).
 
-    Enforces OneFlow (generator and verifier must differ in family). The verifier
-    is prompted to refute by default. Returns a JSON verdict
-    {passed, confidence, refutations, cost_usd}.
+    task_kind="subjective" (default): cross-family REQUIRED (same-family raises) — for
+    judgement/design/prose where a model can endorse its own blind spot.
+    task_kind="checkable": claim has computable ground-truth (math/code/fact). Same-family
+    ALLOWED (cost lever) — §18.4+ablation show cross-family adds no detection there.
+    CAVEAT: on hard checkable tasks any LLM verifier is unreliable (~74% false-refute);
+    prefer a tool/code check when you can compute the truth.
+    The verifier refutes by default. Returns {passed, confidence, refutations, cost_usd}.
     """
     v = adversarial_verify(
         artifact,
@@ -82,6 +87,7 @@ def mmorch_adversarial_verify(
         gen_model=gen_model,
         verifier_model=verifier_model,
         phase="mcp",
+        task_kind=task_kind,
     )
     return json.dumps(
         {

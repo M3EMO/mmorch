@@ -96,13 +96,27 @@ def adversarial_verify(
     gen_model: str = DEFAULT_GENERATOR,
     verifier_model: str = DEFAULT_VERIFIER,
     phase: str = "",
+    task_kind: str = "subjective",
 ) -> Verdict:
-    """Verify an artifact with a cross-family skeptic. Enforces OneFlow."""
-    if family_of(gen_model) == family_of(verifier_model):
+    """Verify an artifact with a skeptic. Cross-family enforcement is TASK-AWARE (#2).
+
+    task_kind="subjective" (default, SAFE): no computable ground-truth (design, copy,
+      prose, judgement). Cross-family is REQUIRED — same-family is refused (raise).
+      Rationale: for subjective output a model can endorse its own blind spot; an
+      independent family decorrelates.
+    task_kind="checkable": the claim has a deterministic ground-truth (math, code that
+      runs, a fact). Empirically (§18.4 + ablation_symmetric n=350) cross-family does
+      NOT improve detection here, so same-family is ALLOWED (cost lever, ~6x cheaper).
+      CAVEAT: on HARD checkable tasks LLM verification is itself unreliable (~74%
+      false-refute, ablation_prompt) regardless of family — prefer a TOOL/code check
+      over any LLM verifier when you can compute the truth directly.
+    """
+    if task_kind != "checkable" and family_of(gen_model) == family_of(verifier_model):
         raise ValueError(
             f"OneFlow violation: generator ({gen_model}, {family_of(gen_model)}) and "
-            f"verifier ({verifier_model}, {family_of(verifier_model)}) share a family. "
-            f"Pick a cross-family verifier (§4 master pairing rule)."
+            f"verifier ({verifier_model}, {family_of(verifier_model)}) share a family "
+            f"for a SUBJECTIVE task. Use a cross-family verifier (§4), or pass "
+            f"task_kind='checkable' if the claim has computable ground-truth."
         )
 
     user = (
