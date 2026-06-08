@@ -216,6 +216,12 @@ def _retry(fn, retries=4, base=2.0):
     raise last
 
 
+# techo DURO de tokens/call: sin esto el default es 16384 -> hasta $0.04/call gemini.
+# solve razona breve (~300), verify devuelve JSON corto (~150). 768 deja margen y capea.
+_MAX_TOK_SOLVE = 768
+_MAX_TOK_VERIFY = 512
+
+
 def _solve(model, problem):
     k, hit = _memo_get("ablsym_solve", model, problem)
     if hit is not None:
@@ -223,7 +229,7 @@ def _solve(model, problem):
     res = _retry(lambda: _gated_call(model, [{"role": "system", "content": _SOLVE_SYS},
                                              {"role": "user", "content": problem}],
                                      pattern="ablsym_solve", node=f"s:{model}", phase="ablsym",
-                                     temperature=0.0))
+                                     temperature=0.0, max_tokens=_MAX_TOK_SOLVE))
     ans = _parse_num(res.text)
     if ans is not None:                       # no cachear parse-fail (no congelar fallo transitorio)
         _memo_put(k, ans)
@@ -238,7 +244,7 @@ def _verify(model, problem, answer):
     res = _retry(lambda: _gated_call(model, [{"role": "system", "content": _VERIFY_SYS},
                                              {"role": "user", "content": art}],
                                      pattern="ablsym_verify", node=f"v:{model}", phase="ablsym",
-                                     temperature=0.0))
+                                     temperature=0.0, max_tokens=_MAX_TOK_VERIFY))
     passed, conf, refs = _parse_verdict(res.text)
     _memo_put(k, passed)
     return passed, res.cost_usd
