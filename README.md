@@ -76,7 +76,10 @@ v = adversarial_verify(code, rubric="must return a+b")
 print(v.passed, v.refutations)
 ```
 
-`adversarial_verify` raises if generator and verifier share a family (OneFlow).
+`adversarial_verify` is TASK-AWARE: for `task_kind="subjective"` (default) it raises on
+same-family (OneFlow); for `task_kind="checkable"` same-family is allowed, and passing a
+`checker=` (e.g. `"arithmetic"`) verifies by CODE (checkers.py) — zero API, 100% reliable
+where an LLM verifier is ~74% false-refute on hard math.
 
 ## Use as MCP tools (inside Claude Code)
 
@@ -107,11 +110,15 @@ cost by family/model — the input to the break-even test (§14, §18.4).
 - **Break-even unproven.** The whole $-savings premise (§14) needs real volume in
   `logs/metrics.jsonl`. Sample still thin; the feedback loop (`record_outcome`) is the
   signal source and is only lightly used so far.
-- **§18.4 ablation — built, not yet powered.** Prior runs (n≤30/arm) were underpowered;
-  `ablation_paired.py` is the n=350 paired McNemar harness — run it to get a real verdict
-  on whether cross-family verification adds detection power. Until then the cross-family
-  keystone stays a `[PROPOSAL]`, not validated.
+- **§18.4 ablation — POWERED (n=350, 2 runs).** `ablation_symmetric.py` (symmetric
+  4-cell, McNemar) found NO significant self-vs-cross blind-spot on checkable math
+  (p=0.06–0.25) → the cross-family raise is now scoped to subjective only (`task_kind`).
+  Separately, `ablation_prompt.py` showed LLM verification of hard checkable math is
+  ~74% false-refute regardless of family/prompt → use deterministic `checkers.py` there.
+  Still a 2-family limit (below) caps how far the cross-family thesis can be tested.
 - **Kimi/Moonshot node** — configured, inactive (no key). Blocks any 3-family test.
+- **break-even / feedback** — feedback loop bootstrapped (calibration n=1→1001 via
+  ablation `record_outcome`); break-even on real volume still pending.
 
 Run `python -m pytest tests/` before promoting any new capability.
 
