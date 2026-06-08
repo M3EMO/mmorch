@@ -67,6 +67,43 @@ def test_unknown_checker_raises():
         check("nope")
 
 
+def test_checksum():
+    assert check("checksum", value="4242424242424242", kind="luhn").passed
+    assert not check("checksum", value="4242424242424241", kind="luhn").passed
+    assert check("checksum", value="9780306406157", kind="isbn13").passed
+    assert check("checksum", value="0306406152", kind="isbn10").passed
+
+
+def test_python_ast_valid():
+    assert check("python_ast_valid", code="def f():\n    return 1").passed
+    assert not check("python_ast_valid", code="def f(:").passed
+
+
+def test_regex_format():
+    assert check("regex_format", value="a@b.com", fmt="email").passed
+    assert not check("regex_format", value="nope", fmt="email").passed
+    assert check("regex_format", value="2026-06-08", fmt="iso_date").passed
+    assert check("regex_format", value="abc", pattern=r"[a-c]+").passed
+
+
+def test_set_and_numeric():
+    assert check("set_equal", a=[1, 2, 3], b=[3, 2, 1]).passed
+    assert not check("set_equal", a=[1, 2], b=[1, 2, 3]).passed
+    assert check("numeric_close", a=0.1 + 0.2, b=0.3).passed
+
+
+def test_monotonic():
+    assert check("sorted_monotonic", seq=[1, 2, 3], strict=True).passed
+    assert not check("sorted_monotonic", seq=[1, 3, 2]).passed
+    assert check("sorted_monotonic", seq=[3, 2, 1], direction="desc").passed
+
+
+def test_number_theory():
+    assert check("number_theory", n=7919, claim="prime").passed
+    assert check("number_theory", n=7917, claim="prime", expected=False).passed
+    assert check("number_theory", n=561, claim="composite").passed  # Carmichael, no engana a MR
+
+
 def test_adversarial_verify_uses_checker_no_api():
     # task_kind=checkable + checker -> verdict determinista, sin llamar API
     v = adversarial_verify("comb(20,10)=184756", rubric="math", task_kind="checkable",

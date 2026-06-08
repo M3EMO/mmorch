@@ -154,11 +154,132 @@ def _check_predicate(*, value, predicate: Callable[[Any], bool], **_) -> CheckRe
     return CheckResult(ok, f"predicate({value!r})={ok}", "predicate", True, ok)
 
 
+# --- checksum: digito verificador (luhn|isbn10|isbn13|ean13) ---------------- #
+def _luhn(d: list[int]) -> bool:
+    s = 0
+    for i, x in enumerate(reversed(d)):
+        s += x if i % 2 == 0 else (x * 2 - 9 if x * 2 > 9 else x * 2)
+    return s % 10 == 0
+
+
+def _check_checksum(*, value: str, kind: str = "luhn", **_) -> CheckResult:
+    raw = str(value).strip().replace("-", "").replace(" ", "")
+    try:
+        if kind == "luhn":
+            ok = raw.isdigit() and _luhn([int(c) for c in raw])
+        elif kind == "isbn10":
+            ds = [10 if c in "Xx" else int(c) for c in raw]
+            ok = len(ds) == 10 and sum((10 - i) * d for i, d in enumerate(ds)) % 11 == 0
+        elif kind in ("isbn13", "ean13"):
+            ds = [int(c) for c in raw]
+            n = 13 if kind == "isbn13" else 13
+            ok = len(ds) == n and sum((1 if i % 2 == 0 else 3) * d
+                                      for i, d in enumerate(ds)) % 10 == 0
+        else:
+            return CheckResult(False, f"kind desconocido: {kind}", "checksum")
+    except ValueError:
+        return CheckResult(False, f"valor no valido para {kind}: {value!r}", "checksum")
+    return CheckResult(ok, f"{kind}({value}) {'valido' if ok else 'INVALIDO'}", "checksum")
+
+
+# --- python_ast_valid: sintaxis valida (NO ejecuta) ------------------------- #
+def _check_python_ast(*, code: str, **_) -> CheckResult:
+    try:
+        ast.parse(code)
+        return CheckResult(True, "sintaxis Python valida", "python_ast_valid")
+    except SyntaxError as e:
+        return CheckResult(False, f"SyntaxError: {e}", "python_ast_valid")
+
+
+# --- regex_format: matchea un patron (nombrado o custom) -------------------- #
+_NAMED_RE = {
+    "email": r"[^@\s]+@[^@\s]+\.[^@\s]+",
+    "uuid": r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+    "ipv4": r"(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)",
+    "iso_date": r"\d{4}-\d{2}-\d{2}",
+    "hex_color": r"#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})",
+}
+
+
+def _check_regex(*, value: str, fmt: str | None = None, pattern: str | None = None, **_) -> CheckResult:
+    import re as _re
+    pat = pattern if pattern is not None else _NAMED_RE.get(fmt or "")
+    if pat is None:
+        return CheckResult(False, f"formato desconocido: {fmt!r}", "regex_format")
+    ok = _re.fullmatch(pat, str(value)) is not None
+    return CheckResult(ok, f"{value!r} {'matchea' if ok else 'NO matchea'} {fmt or pat}",
+                       "regex_format")
+
+
+# --- set_equal / numeric_close ---------------------------------------------- #
+def _check_set_equal(*, a, b, **_) -> CheckResult:
+    ok = set(a) == set(b)
+    return CheckResult(ok, f"sets {'iguales' if ok else 'distintos'} "
+                       f"(|a|={len(set(a))}, |b|={len(set(b))})", "set_equal")
+
+
+def _check_numeric_close(*, a, b, tol: float = 1e-9, **_) -> CheckResult:
+    ok = abs(float(a) - float(b)) <= tol
+    return CheckResult(ok, f"|{a}-{b}|<= {tol}? {ok}", "numeric_close", b, a)
+
+
+# --- sorted_monotonic ------------------------------------------------------- #
+def _check_monotonic(*, seq, direction: str = "asc", strict: bool = False, **_) -> CheckResult:
+    s = list(seq)
+    if direction == "desc":
+        s = s[::-1]
+    op = (lambda x, y: x < y) if strict else (lambda x, y: x <= y)
+    ok = all(op(s[i], s[i + 1]) for i in range(len(s) - 1))
+    return CheckResult(ok, f"{'estrictamente ' if strict else ''}monotona {direction}? {ok}",
+                       "sorted_monotonic")
+
+
+# --- number_theory: primalidad (Miller-Rabin determinista, sin dep) --------- #
+def _is_prime(n: int) -> bool:
+    if n < 2:
+        return False
+    for p in (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37):
+        if n % p == 0:
+            return n == p
+    d, r = n - 1, 0
+    while d % 2 == 0:
+        d //= 2; r += 1
+    for a in (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37):  # determinista para n < 3.3e24
+        x = pow(a, d, n)
+        if x in (1, n - 1):
+            continue
+        for _ in range(r - 1):
+            x = x * x % n
+            if x == n - 1:
+                break
+        else:
+            return False
+    return True
+
+
+def _check_number_theory(*, n: int, claim: str = "prime", expected: bool = True, **_) -> CheckResult:
+    if claim == "prime":
+        got = _is_prime(int(n))
+    elif claim == "composite":
+        got = not _is_prime(int(n)) and int(n) > 1
+    else:
+        return CheckResult(False, f"claim desconocido: {claim}", "number_theory")
+    ok = (got == expected)
+    return CheckResult(ok, f"{n} {claim}? got={got} expected={expected}", "number_theory", expected, got)
+
+
 _REGISTRY: dict[str, Callable[..., CheckResult]] = {
     "arithmetic": _check_arithmetic,
     "determinant": _check_determinant,
     "json_schema": _check_json_schema,
     "predicate": _check_predicate,
+    "checksum": _check_checksum,
+    "python_ast_valid": _check_python_ast,
+    "regex_format": _check_regex,
+    "set_equal": _check_set_equal,
+    "numeric_close": _check_numeric_close,
+    "sorted_monotonic": _check_monotonic,
+    "number_theory": _check_number_theory,
 }
 
 
