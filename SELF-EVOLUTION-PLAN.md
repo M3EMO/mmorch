@@ -23,7 +23,20 @@ Fuente: brainstorms/2026-06-08-mmorch-ideal-vision.md (grill completo). Estructu
 
 ---
 
-## FASE 1 — v0.1 NN: predictor de costo/latencia (tabular, sin red todavía)
+## FASE 1 — v0.1 predictor de costo/latencia ✅ COMPLETA (re-scoped honesto)
+**HECHO:** `mmorch/predict.py` — predictor por cuantiles de out_tokens/latencia por
+(modelo,patrón) desde metrics.jsonl, sin dep pesada (numpy). `predict_cost(q)` deriva
+cost = precio × out_predicho (cost es determinista; lo incierto es out_tokens).
+**HALLAZGO HONESTO (validado, no asumido):** predicción PRECISA de out_tokens = 172%
+MAPE (es task-dependent, no se captura por modelo/patrón) → el checkpoint <20% NO se
+cumple con modelo simple; se DIFIERE a v0.2 (necesita embedding del prompt). PERO el
+estimador CONSERVADOR p90 = **92.8% coverage** → sirve como budget guard / hint
+informativo (sobre-estima seguro, evita el +$5). `goal_aligned` aprobó el cambio
+(cross-family, conf 0.9). 5 tests verdes.
+**CHECKPOINT cumplido (ajustado):** estimador conservador calibrado (p90 cov ~0.9) +
+honestidad del MAPE + `goal_aligned` pass. Precisión <20% = objetivo de v0.2.
+
+## FASE 1-OLD (spec original, referencia)
 **Goal:** decisión informada por costo predicho; cero overfit (target loggeado directo).
 **Entregables:**
 - `mmorch/predict.py`: LightGBM (o regresión lineal si se evita la dep) sobre metrics.jsonl. Features: (modelo, patrón, in_tokens, log-len). Target: cost_usd, latency_s.

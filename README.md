@@ -7,7 +7,7 @@ cheap external models as nodes to **free Claude cupo**. Lives global at
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **25 módulos · 17 MCP tools · 120 tests.**
+_Auto-generado por `mmorch.docgen`._ **26 módulos · 17 MCP tools · 128 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -32,6 +32,7 @@ _Auto-generado por `mmorch.docgen`._ **25 módulos · 17 MCP tools · 120 tests.
 | `mmorch/memory.py` | memory — memoria episodica + semantica para mmorch (DuckDB 2 capas). |
 | `mmorch/metrics.py` | Observability — append-only JSONL metric log (§11 backbone). |
 | `mmorch/patterns.py` | Code-flow patterns (§7), migrated as deterministic Python. |
+| `mmorch/predict.py` | predict (v0.1 NN, Fase 1) — predictor de out_tokens / latencia, SIN dep pesada. |
 | `mmorch/providers.py` | Provider layer — thin OpenAI-compatible client per external model. |
 | `mmorch/route.py` | route (I-2) — confidence-gated escalation. Ahorra cupo: el modelo barato |
 | `mmorch/sandbox.py` | sandbox — corre codigo NO confiable aislado (la compuerta del pipeline 'git-like' |

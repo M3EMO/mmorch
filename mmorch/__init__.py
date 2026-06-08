@@ -36,6 +36,7 @@ from .goal import (load_goal, goal_hash, goal_aligned,               # ancla ant
                    authorize_goal, goal_guard, pursue_goal, GoalTampered)
 from .budget import (BudgetExceeded, monthly_spend, remaining,       # BudgetKeeper (techo $)
                      check as budget_check, status as budget_status)
+from .predict import Predictor, train as train_predictor, cross_val_error  # v0.1 cost/lat predictor
 
 __all__ = [
     "REGISTRY", "family_of", "ModelSpec", "call",
@@ -56,4 +57,5 @@ __all__ = [
     "load_goal", "goal_hash", "goal_aligned",
     "authorize_goal", "goal_guard", "pursue_goal", "GoalTampered",
     "BudgetExceeded", "monthly_spend", "remaining", "budget_check", "budget_status",
+    "Predictor", "train_predictor", "cross_val_error",
 ]
