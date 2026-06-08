@@ -34,6 +34,7 @@ import math
 import random
 import re
 import sys
+import time
 import pathlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -137,13 +138,24 @@ def _close(a, b):
     return a is not None and b is not None and abs(a - b) <= max(0.02, abs(b) * 1e-4)
 
 
-def _retry(fn, retries=2):
+_FATAL = ("depleted", "billing", "prepayment", "insufficient", "exhausted credit")
+
+
+def _retry(fn, retries=4, base=2.0):
+    """Reintenta con BACKOFF exponencial + jitter (suaviza rate-limit RPM de gemini).
+    Aborta YA si el error es de billing (no transitorio) -> no malgasta reintentos."""
     last = None
-    for _ in range(retries + 1):
+    for k in range(retries + 1):
         try:
             return fn()
         except Exception as e:
+            msg = str(e).lower()
+            if any(f in msg for f in _FATAL):
+                raise                       # pared dura: credito agotado, no reintentar
             last = e
+            if k < retries:
+                # jitter determinista-suficiente sin random global: depende de k
+                time.sleep(base * (2 ** k) + (k % 3) * 0.3)
     raise last
 
 
@@ -203,7 +215,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=350)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--workers", type=int, default=10)
+    ap.add_argument("--workers", type=int, default=4)  # gemini RPM-friendly (12 -> retry storm)
     ap.add_argument("--yes", action="store_true")
     ap.add_argument("--dry", action="store_true")
     args = ap.parse_args()
@@ -236,7 +248,11 @@ def main():
             else:
                 rows.append(r); cost += r["cost"]
             if j % 25 == 0:
-                print(f"  ... {j}/{len(gold)} (${cost:.3f}, {dropped} caidos)")
+                print(f"  ... {j}/{len(gold)} (${cost:.3f}, {dropped} caidos)", flush=True)
+            if cost > COST_CAP_USD:   # guard runtime: corta si el costo se dispara
+                print(f"\nCORTE: costo ${cost:.2f} supero cap ${COST_CAP_USD}. "
+                      f"Analizo lo completado ({len(rows)}).", flush=True)
+                break
     if not rows:
         sys.exit("todos los items cayeron.")
     if dropped:
