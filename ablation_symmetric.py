@@ -84,6 +84,28 @@ def _gated_call(model, msgs, **kw):
     return call(model, msgs, **kw)
 
 
+# --- memo (I-4): cache content-hash. seed fijo + temp=0 -> re-runs identicos = $0 --- #
+_MEMO = None                       # Memo() en main si --cache
+_CACHE = {"hit": 0, "miss": 0}
+_CACHE_LOCK = threading.Lock()
+
+
+def _memo_get(*parts):
+    if _MEMO is None:
+        return None, None
+    from mmorch.cache import key_of
+    k = key_of(*parts)
+    hit = _MEMO.get(k)
+    with _CACHE_LOCK:
+        _CACHE["hit" if hit is not None else "miss"] += 1
+    return k, hit
+
+
+def _memo_put(k, value):
+    if _MEMO is not None and k is not None:
+        _MEMO.put(k, value)
+
+
 # --------------------------------------------------------------------------- #
 # gold set DURO: ground-truth computada, dificil para que el generador YERRE    #
 # --------------------------------------------------------------------------- #
@@ -195,20 +217,30 @@ def _retry(fn, retries=4, base=2.0):
 
 
 def _solve(model, problem):
+    k, hit = _memo_get("ablsym_solve", model, problem)
+    if hit is not None:
+        return hit, 0.0                       # cache hit -> sin API, costo 0
     res = _retry(lambda: _gated_call(model, [{"role": "system", "content": _SOLVE_SYS},
                                              {"role": "user", "content": problem}],
                                      pattern="ablsym_solve", node=f"s:{model}", phase="ablsym",
                                      temperature=0.0))
-    return _parse_num(res.text), res.cost_usd
+    ans = _parse_num(res.text)
+    if ans is not None:                       # no cachear parse-fail (no congelar fallo transitorio)
+        _memo_put(k, ans)
+    return ans, res.cost_usd
 
 
 def _verify(model, problem, answer):
+    k, hit = _memo_get("ablsym_verify", model, problem, str(answer))
+    if hit is not None:
+        return bool(hit), 0.0
     art = f"PROBLEMA:\n{problem}\n\nRESPUESTA PROPUESTA: {answer}"
     res = _retry(lambda: _gated_call(model, [{"role": "system", "content": _VERIFY_SYS},
                                              {"role": "user", "content": art}],
                                      pattern="ablsym_verify", node=f"v:{model}", phase="ablsym",
                                      temperature=0.0))
     passed, conf, refs = _parse_verdict(res.text)
+    _memo_put(k, passed)
     return passed, res.cost_usd
 
 
@@ -253,14 +285,19 @@ def main():
     ap.add_argument("--workers", type=int, default=12)  # alto OK: el RateGate limita por RPM
     ap.add_argument("--gemini-rpm", type=float, default=240)   # gemini se espacia a esta tasa
     ap.add_argument("--deepseek-rpm", type=float, default=600)  # deepseek casi sin freno
+    ap.add_argument("--no-cache", action="store_true", help="desactiva el memo content-hash")
     ap.add_argument("--yes", action="store_true")
     ap.add_argument("--dry", action="store_true")
     args = ap.parse_args()
 
     if family_of(FAM_A) == family_of(FAM_B):
         sys.exit("config rota: FAM_A y FAM_B comparten familia.")
-    global _GATE
+    global _GATE, _MEMO
     _GATE = RateGate({FAM_A: args.deepseek_rpm, FAM_B: args.gemini_rpm})
+    if not args.no_cache:
+        from mmorch.cache import Memo
+        _MEMO = Memo()
+        print(f"memo: ON ({len(_MEMO)} entradas previas) -> re-runs identicos = $0")
     gold = build_gold(args.n, args.seed)
     est = estimate_cost(args.n)
     print(f"gold set DURO: {len(gold)} problemas | seed={args.seed}")
@@ -306,6 +343,10 @@ def main():
     print("\n" + "=" * 64)
     print(f"RESULTADO (n={len(rows)} problemas, costo real ${cost:.4f})")
     print("=" * 64)
+    if _MEMO is not None:
+        tot = _CACHE["hit"] + _CACHE["miss"]
+        print(f"cache: {_CACHE['hit']}/{tot} hits ({100*_CACHE['hit']/max(tot,1):.0f}%) "
+              f"-> esas calls costaron $0")
     print(f"error natural del generador: deepseek erro {len(err_d)}/{len(rows)} | "
           f"gemini erro {len(err_g)}/{len(rows)}")
 
