@@ -30,6 +30,9 @@ from mmorch.learn import analyze as _learn_analyze, recommend as _learn_recommen
 from mmorch.memory import remember as _remember, stats as _mem_stats
 from mmorch.classify import classify as _classify
 from mmorch.config import DEFAULT_ROUTER
+from mmorch.feedback import (record_outcome as _record_outcome,
+                            ThompsonBandit as _ThompsonBandit,
+                            calibration as _calibration)
 
 mcp = FastMCP("mmorch")
 
@@ -272,6 +275,51 @@ def mmorch_classify(
     cls, conf, cost = _classify(request, dict(classes), router_model=router_model, phase="mcp")
     return json.dumps({"cls": cls, "confidence": conf, "cost_usd": round(cost, 6)},
                       ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_record_outcome(
+    arm: str,
+    reward: float,
+    pattern: str = "",
+    predicted_conf: float | None = None,
+    source: str = "opus",
+    context: str = "",
+) -> str:
+    """CLOSE THE FEEDBACK LOOP (keystone). After you (the orchestrator) use a cheap
+    mmorch result and learn whether it was actually right, call this with the real
+    label so the bandit + calibration learn. This is what was missing: 611 calls
+    logged but ~1 outcome -> the learning machinery was starved.
+
+    arm: the decision being scored, e.g. "deepseek-chat@0.6" or "gemini-2.5-flash".
+    reward: [0,1] real outcome — 1=correct, 0=wrong, fraction=partial. NOT the
+    model's self-reported confidence (anti-sycophancy: agreement != confirmation).
+    predicted_conf: what the system believed at decision time (enables calibration/ECE).
+    source: where the label came from (opus|downstream|test|human).
+
+    Records the labeled outcome AND updates the Thompson bandit posterior for `arm`.
+    Returns JSON {recorded, arm, reward, bandit: {mean, n}}.
+    """
+    o = _record_outcome(arm, reward, pattern=pattern, predicted_conf=predicted_conf,
+                        source=source, context=context)
+    b = _ThompsonBandit()
+    b.update(arm, reward)
+    return json.dumps({
+        "recorded": True, "arm": o.arm, "reward": o.reward,
+        "bandit": b.stats().get(arm, {})}, ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_feedback_stats() -> str:
+    """Inspect the feedback loop: Thompson bandit posteriors per arm (mean reward, n)
+    + calibration (ECE conf-predicted vs reality, accuracy per arm). Read-only, no
+    spend. Use to see whether the loop is actually learning (n>0 across arms) and
+    whether self-confidence is trustworthy (low ECE) or lying (high ECE -> raise
+    thresholds). Returns JSON {bandit, calibration}."""
+    return json.dumps({
+        "bandit": _ThompsonBandit().stats(),
+        "calibration": _calibration(),
+    }, ensure_ascii=False)
 
 
 @mcp.tool()
