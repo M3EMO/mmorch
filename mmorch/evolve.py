@@ -80,30 +80,91 @@ def _existed_before(change: Change) -> bool:
 
 
 def evaluate(change: Change, *, root: Path = ROOT, run_tests: bool = True,
-             goal: bool = True, goal_fn=None, test_path: str = "tests") -> dict:
-    """fitness() compuesta de Fase 3. Checks (los que apliquen):
-      1. ast_valid del contenido nuevo (determinista).
-      2. goal_aligned(description) — alineación con GOAL (cross-family). Inyectable.
-      3. rollback PROBADO: apply -> rollback restaura `before` bit-a-bit (en sandbox).
-      4. pytest verde (si run_tests): aplica al repo, corre, SIEMPRE revierte (finally).
-    Devuelve {ok, checks:{...}}. ok = todas las que corrieron pasaron."""
+             goal: bool = True, goal_fn=None, test_path: str = "tests",
+             check_cost: bool = True, cost_fn=None,
+             check_ensemble: bool = True, ensemble_fn=None) -> dict:
+    """fitness() compuesta de Fase 3 — las 6 OBLIGATORIAS del GOAL (invariante 'Gate antes
+    de aplicar'). Cualquiera que falle aborta:
+      1. ast_valid del contenido nuevo (checker determinista).
+      2. tests_green (si run_tests): aplica al repo, pytest, SIEMPRE revierte (finally).
+      3. ensemble cross-family (escéptico de seguridad/no-regresión). Inyectable.
+      4. rollback PROBADO: apply -> rollback restaura `before` bit-a-bit (sandbox).
+      5. cost_ok: no-degradación de costo (≤10% verde / ≤20% amarillo). Inyectable.
+      6. goal_aligned(description) — alineación con GOAL (cross-family). Inyectable.
+    Devuelve {ok, checks, ensemble_degraded}. ensemble_degraded=True si hoy solo hay 1
+    familia de verificador (Kimi inactivo) → el ensemble-AZUL de 2 cae al cross-family
+    simple (honesto, no se finge)."""
     from .checkers import check as _check
     checks: dict[str, bool] = {}
+    ensemble_degraded = False
+
     checks["ast_valid"] = _check("python_ast_valid", code=change.after).passed
+    checks["rollback_works"] = _rollback_roundtrip(change)   # reversibilidad first-class
 
     if goal:
-        gf = goal_fn
-        if gf is None:
-            from .goal import goal_aligned as gf
+        gf = goal_fn or _default_goal_fn()
         checks["goal_aligned"] = gf(change.description).passed
 
-    # rollback probado en un root temporal (no toca el repo vivo)
-    checks["rollback_works"] = _rollback_roundtrip(change)
+    if check_ensemble:
+        ok, ensemble_degraded = _ensemble_check(change, ensemble_fn)
+        checks["ensemble_xfamily"] = ok
+
+    if check_cost:
+        checks["cost_ok"] = _cost_check(change, cost_fn)        # no-degradación (relativo)
+        checks["budget_ok"] = _budget_ok()                       # BudgetKeeper (absoluto)
 
     if run_tests:
         checks["tests_green"] = _tests_with_autorevert(change, root=root, test_path=test_path)
 
-    return {"ok": all(checks.values()), "checks": checks, "change_id": change.id}
+    return {"ok": all(checks.values()), "checks": checks, "change_id": change.id,
+            "ensemble_degraded": ensemble_degraded}
+
+
+def _default_goal_fn():
+    from .goal import goal_aligned
+    return goal_aligned
+
+
+def _ensemble_check(change: Change, ensemble_fn):
+    """Escéptico cross-family de seguridad/no-regresión. Si hay ≥2 familias de verificador
+    -> ensemble-AZUL real. Hoy (Kimi inactivo) solo Google activa como verificador ->
+    degrada a UN cross-family verify (honesto: marca ensemble_degraded). Inyectable."""
+    if ensemble_fn is not None:
+        return bool(ensemble_fn(change)), False
+    from .config import REGISTRY
+    import os
+    verifier_families = {s.family for k, s in REGISTRY.items()
+                         if s.family != "deepseek" and os.getenv(s.api_key_env)}
+    rubric = ("¿Este cambio es SEGURO y NO introduce regresión ni viola invariantes "
+              "(reversibilidad, zona roja, OneFlow)? Refutá si hay riesgo.")
+    if len(verifier_families) >= 2:
+        from .ensemble import ensemble_verify
+        ev = ensemble_verify(change.after, rubric=rubric, phase="evolve")
+        return ev.passed, False
+    # degradado: un solo cross-family verify
+    from .patterns import adversarial_verify
+    v = adversarial_verify(change.after, rubric=rubric, phase="evolve", task_kind="subjective")
+    return v.passed, True
+
+
+def _cost_check(change: Change, cost_fn) -> bool:
+    """No-degradación de costo. cost_fn(change)->bool si se inyecta. Default conservador:
+    un cambio que SOLO agrega archivo nuevo (before=='') no toca el hot-path -> no degrada;
+    un cambio que MODIFICA hot-path requiere medición explícita (cost_fn) o falla cerrado."""
+    if cost_fn is not None:
+        return bool(cost_fn(change))
+    if not _existed_before(change):
+        return True                      # archivo nuevo aislado: no degrada el costo existente
+    # modifica algo existente sin medición -> fail-closed (exige cost_fn que mida)
+    return False
+
+
+def _budget_ok() -> bool:
+    """Invariante 'Costo acotado' ABSOLUTO: respeta el BudgetKeeper. No auto-aplicar si el
+    gasto del mes ya superó el límite (sin límite configurado = ilimitado = OK)."""
+    from .budget import max_monthly_usd, remaining
+    lim = max_monthly_usd()
+    return lim is None or (remaining() or 0) > 0
 
 
 def _rollback_roundtrip(change: Change) -> bool:
@@ -186,15 +247,32 @@ _RED_PATHS = ("GOAL.md", "GOAL.hash", ".env", "mmorch/goal.py", "mmorch/budget.p
               "mmorch/config.py")
 
 
+# Firmas de ACCIONES zona-roja en el CONTENIDO generado (no solo el path): un cambio de
+# código que INTRODUCE estas capacidades es rojo aunque el archivo sea nuevo/aislado.
+_RED_CONTENT = re.compile(
+    r"\b(os\.system|subprocess\.(?:run|Popen|call)|shutil\.rmtree|os\.remove|os\.unlink|"
+    r"\beval\s*\(|\bexec\s*\(|__import__|rm\s+-rf|DROP\s+TABLE|TRUNCATE|"
+    r"requests\.(?:post|put|delete|patch)|socket\.|"
+    r"transfer|withdraw|wallet|exchange|stripe|paypal|place_order|send_money|private_key|"
+    r"secret_key|seed_phrase)\b", re.I)
+
+
+def red_content_hits(text: str) -> list[str]:
+    """Firmas de acción zona-roja encontradas en el contenido (vacío = limpio)."""
+    return sorted(set(m.group(0) for m in _RED_CONTENT.finditer(text or "")))
+
+
 def zone_of(change: Change, *, root: Path = ROOT) -> str:
-    """Clasifica por reversibilidad x blast-radius. roja = path prohibido o escapa del
-    repo; amarilla = modifica archivo existente (reversible, blast medio); verde =
-    archivo nuevo (aislado)."""
+    """Clasifica por reversibilidad x blast-radius. ROJA = path prohibido, escapa del repo,
+    O el CONTENIDO introduce una acción zona-roja (dinero/borrado/SO/red/claves) — un
+    sistema que auto-genera código DEBE screenear capacidades peligrosas, no solo paths.
+    AMARILLA = modifica archivo existente (reversible); VERDE = archivo nuevo aislado."""
     tgt = change.target.replace("\\", "/")
-    # escapa del repo / absoluto -> rojo
     if tgt.startswith("/") or tgt.startswith("..") or ":" in tgt:
         return "red"
     if any(tgt == r or tgt.endswith("/" + r) for r in _RED_PATHS):
+        return "red"
+    if red_content_hits(change.after):              # acción peligrosa en el código generado
         return "red"
     return "yellow" if _existed_before(change) else "green"
 
