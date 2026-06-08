@@ -104,6 +104,38 @@ def test_number_theory():
     assert check("number_theory", n=561, claim="composite").passed  # Carmichael, no engana a MR
 
 
+def test_sql_valid():
+    pytest.importorskip("sqlglot")
+    assert check("sql_valid", sql="SELECT a FROM t WHERE a > 1").passed
+    assert not check("sql_valid", sql="SELEKT FROM").passed
+
+
+def test_units():
+    pytest.importorskip("pint")
+    assert check("units", quantity="1 mile", to="km", expected=1.609344, tol=1e-5).passed
+    assert not check("units", quantity="1 mile", to="km", expected=2.0, tol=1e-5).passed
+
+
+def test_sympy_identity():
+    pytest.importorskip("sympy")
+    assert check("sympy_identity", lhs="(x+1)**2", rhs="x**2+2*x+1").passed
+    assert not check("sympy_identity", lhs="x+1", rhs="x+2").passed
+
+
+def test_python_exec_sandbox():
+    assert check("python_exec", code="print(2+2)", expected_stdout="4").passed
+    assert not check("python_exec", code="1/0").passed
+    assert not check("python_exec", code="while True: pass", timeout=2).passed  # timeout-kill
+
+
+def test_unit_test_gate():
+    # el gate git-like: verde -> promovible, rojo -> no
+    assert check("unit_test", code="def add(a,b): return a+b",
+                 tests="def test_add():\n    assert add(2,3)==5").passed
+    assert not check("unit_test", code="def add(a,b): return a-b",
+                     tests="def test_add():\n    assert add(2,3)==5").passed
+
+
 def test_adversarial_verify_uses_checker_no_api():
     # task_kind=checkable + checker -> verdict determinista, sin llamar API
     v = adversarial_verify("comb(20,10)=184756", rubric="math", task_kind="checkable",

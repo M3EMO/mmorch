@@ -268,6 +268,77 @@ def _check_number_theory(*, n: int, claim: str = "prime", expected: bool = True,
     return CheckResult(ok, f"{n} {claim}? got={got} expected={expected}", "number_theory", expected, got)
 
 
+# --- con dependencia (import lazy; el checker falla limpio si falta la dep) -- #
+def _check_sql_valid(*, sql: str, dialect: str | None = None, **_) -> CheckResult:
+    """Sintaxis SQL valida (sqlglot, parse-only — NO ejecuta). Cero riesgo."""
+    try:
+        import sqlglot
+    except ImportError:
+        return CheckResult(False, "falta dep sqlglot (pip install sqlglot)", "sql_valid")
+    try:
+        sqlglot.parse_one(sql, dialect=dialect)
+        return CheckResult(True, "SQL valido", "sql_valid")
+    except Exception as e:
+        return CheckResult(False, f"SQL invalido: {str(e)[:120]}", "sql_valid")
+
+
+def _check_units(*, quantity: str, to: str, expected: float, tol: float = 1e-6, **_) -> CheckResult:
+    """Conversion / analisis dimensional (pint). quantity ej '1 mile', to 'km'."""
+    try:
+        import pint
+    except ImportError:
+        return CheckResult(False, "falta dep pint (pip install pint)", "units")
+    try:
+        ureg = pint.UnitRegistry()
+        got = ureg.Quantity(quantity).to(to).magnitude
+    except Exception as e:
+        return CheckResult(False, f"unidad invalida: {str(e)[:120]}", "units", expected, None)
+    ok = abs(float(got) - float(expected)) <= tol
+    return CheckResult(ok, f"{quantity} -> {to} = {got} (esperado {expected})", "units", expected, got)
+
+
+def _check_sympy_identity(*, lhs: str, rhs: str, **_) -> CheckResult:
+    """Identidad algebraica: simplify(lhs - rhs) == 0 (sympy, simbolico no-eval-python)."""
+    try:
+        import sympy
+    except ImportError:
+        return CheckResult(False, "falta dep sympy (pip install sympy)", "sympy_identity")
+    try:
+        diff = sympy.simplify(sympy.sympify(lhs) - sympy.sympify(rhs))
+        ok = (diff == 0)
+        return CheckResult(ok, f"simplify({lhs} - {rhs}) = {diff}", "sympy_identity")
+    except Exception as e:
+        return CheckResult(False, f"expr invalida: {str(e)[:120]}", "sympy_identity")
+
+
+# --- sandbox: corre codigo aislado (gate del pipeline sandbox->promote) ------ #
+def _check_python_exec(*, code: str, expected_stdout: str | None = None,
+                       expect_ok: bool = True, timeout: float = 5.0, **_) -> CheckResult:
+    """Corre `code` AISLADO (sandbox.py). passed si returncode==0 (y stdout matchea
+    `expected_stdout` si se da). UNSAFE-vs-hostil: ver sandbox.py. Opt-in."""
+    from .sandbox import run_sandboxed
+    r = run_sandboxed(code, timeout=timeout)
+    if expected_stdout is not None:
+        ok = r.ok and r.stdout.strip() == str(expected_stdout).strip()
+    else:
+        ok = r.ok if expect_ok else (not r.ok)
+    detail = f"rc={r.returncode} timeout={r.timed_out} stdout={r.stdout.strip()[:80]!r}"
+    if r.stderr.strip():
+        detail += f" stderr={r.stderr.strip()[:80]!r}"
+    return CheckResult(ok, detail, "python_exec", expected_stdout, r.stdout.strip())
+
+
+def _check_unit_test(*, code: str, tests: str, timeout: float = 10.0, **_) -> CheckResult:
+    """Corre pytest sobre `code` + `tests` AISLADO. passed si los tests pasan (verde).
+    Este es el gate 'git-like': si pasa, el caller puede PROMOVER el code a produccion."""
+    from .sandbox import run_sandboxed
+    r = run_sandboxed("", timeout=timeout, argv=["-m", "pytest", "-q", "test_candidate.py"],
+                      extra_files={"candidate.py": code, "test_candidate.py":
+                                   "from candidate import *\n" + tests})
+    return CheckResult(r.ok, f"pytest {'PASS' if r.ok else 'FAIL'} "
+                       f"({r.stdout.strip()[-120:] or r.stderr.strip()[-120:]})", "unit_test")
+
+
 _REGISTRY: dict[str, Callable[..., CheckResult]] = {
     "arithmetic": _check_arithmetic,
     "determinant": _check_determinant,
@@ -280,6 +351,11 @@ _REGISTRY: dict[str, Callable[..., CheckResult]] = {
     "numeric_close": _check_numeric_close,
     "sorted_monotonic": _check_monotonic,
     "number_theory": _check_number_theory,
+    "sql_valid": _check_sql_valid,
+    "units": _check_units,
+    "sympy_identity": _check_sympy_identity,
+    "python_exec": _check_python_exec,
+    "unit_test": _check_unit_test,
 }
 
 
