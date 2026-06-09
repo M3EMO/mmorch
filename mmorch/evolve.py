@@ -82,7 +82,8 @@ def _existed_before(change: Change) -> bool:
 def evaluate(change: Change, *, root: Path = ROOT, run_tests: bool = True,
              goal: bool = True, goal_fn=None, test_path: str = "tests",
              check_cost: bool = True, cost_fn=None,
-             check_ensemble: bool = True, ensemble_fn=None) -> dict:
+             check_ensemble: bool = True, ensemble_fn=None,
+             isolate: str = "branch") -> dict:
     """fitness() compuesta de Fase 3 — las 6 OBLIGATORIAS del GOAL (invariante 'Gate antes
     de aplicar'). Cualquiera que falle aborta:
       1. ast_valid del contenido nuevo (checker determinista).
@@ -114,10 +115,20 @@ def evaluate(change: Change, *, root: Path = ROOT, run_tests: bool = True,
         checks["budget_ok"] = _budget_ok()                       # BudgetKeeper (absoluto)
 
     if run_tests:
-        checks["tests_green"] = _tests_with_autorevert(change, root=root, test_path=test_path)
+        if isolate == "branch":
+            # aislamiento REAL: git worktree, no muta el repo vivo. Verde deja la branch
+            # (pa promote/PR). Es el reemplazo de la mutación in-place con finally-revert.
+            res = sandbox_branch(change, root=root, test_path=test_path)
+            checks["tests_green"] = res["ok"]
+            sandbox = {"branch": res.get("branch"), "fitness": res.get("fitness")}
+        else:
+            checks["tests_green"] = _tests_with_autorevert(change, root=root, test_path=test_path)
+            sandbox = {"mode": "inplace-autorevert"}
+    else:
+        sandbox = None
 
     return {"ok": all(checks.values()), "checks": checks, "change_id": change.id,
-            "ensemble_degraded": ensemble_degraded}
+            "ensemble_degraded": ensemble_degraded, "sandbox": sandbox}
 
 
 def _default_goal_fn():
@@ -324,6 +335,70 @@ def self_evolve(*, candidates: list[Change] | None = None, generate_fn=None, n: 
     return {"evaluated": len(results), "winner": winner["change"].id if winner else None,
             "applied": applied, "zone": winner["zone"] if winner else None,
             "blocked_red": [x["change"].id for x in blocked_red], "results": results}
+
+
+# --------------------------------------------------------------------------- #
+# Sandbox por BRANCH (git worktree) — aislamiento real, no muta el repo vivo    #
+# --------------------------------------------------------------------------- #
+def _git(*args, cwd) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True)
+
+
+def sandbox_branch(change: Change, *, root: Path = ROOT, base: str = "HEAD",
+                   run_tests: bool = True, test_path: str = "tests",
+                   test_cmd: list[str] | None = None, keep_on_pass: bool = True,
+                   timeout: int = 300) -> dict:
+    """Aísla en un git WORKTREE sobre una branch nueva `mmorch-sbx-<id>` (desde HEAD, NO
+    incluye cambios sin commitear del árbol principal → no interfiere). Aplica el cambio,
+    commitea, corre tests AHÍ. Verde → branch QUEDA (pa merge/PR). Rojo → branch borrada.
+    El repo vivo NUNCA se toca. Devuelve {ok, branch, fitness, change_id}."""
+    import tempfile
+    bname = f"mmorch-sbx-{change.id}"
+    wt = tempfile.mkdtemp(prefix="mmorch_wt_")
+    _git("worktree", "remove", "--force", wt, cwd=root)         # limpiar stale
+    _git("branch", "-D", bname, cwd=root)
+    add = _git("worktree", "add", "-b", bname, wt, base, cwd=root)
+    if add.returncode != 0:
+        return {"ok": False, "error": add.stderr[:200], "branch": None, "change_id": change.id}
+    fit, ok = {}, True
+    try:
+        tgt = Path(wt) / change.target
+        tgt.parent.mkdir(parents=True, exist_ok=True)
+        tgt.write_text(change.after, encoding="utf-8")
+        _git("add", "-A", cwd=wt)
+        _git("commit", "-m", f"sandbox {change.id}: {change.description[:60]}",
+             "--no-verify", cwd=wt)
+        if run_tests:
+            cmd = test_cmd or [sys.executable, "-m", "pytest", test_path, "-q", "--no-header"]
+            proc = subprocess.run(cmd, cwd=wt, capture_output=True, text=True, timeout=timeout)
+            out = (proc.stdout or "") + (proc.stderr or "")
+            fit = {"passed": _count(out, r"(\d+) passed"), "failed": _count(out, r"(\d+) failed"),
+                   "rc": proc.returncode}
+            ok = proc.returncode == 0 and fit["failed"] == 0
+    finally:
+        _git("worktree", "remove", "--force", wt, cwd=root)
+    if ok and keep_on_pass:
+        return {"ok": True, "branch": bname, "fitness": fit, "change_id": change.id}
+    _git("branch", "-D", bname, cwd=root)
+    return {"ok": ok, "branch": None, "fitness": fit, "change_id": change.id}
+
+
+def promote_branch(branch: str, *, root: Path = ROOT, ff_only: bool = True) -> dict:
+    """Mergea la branch sandbox a la actual. ff_only por default (no crea merge-commits
+    raros). Esto es la PROMOCIÓN del pipeline 'sandbox→merge' (zona amarilla)."""
+    args = ["merge", "--ff-only" if ff_only else "--no-ff", branch]
+    r = _git(*args, cwd=root)
+    return {"merged": r.returncode == 0, "detail": (r.stdout + r.stderr)[:300]}
+
+
+def open_pr_branch(branch: str, *, title: str, body: str = "", root: Path = ROOT) -> dict:
+    """Abre un PR de la branch sandbox vía `gh` (si está). Alternativa a merge directo
+    cuando querés revisión humana (zona amarilla con gate). gh ausente → devuelve push-only."""
+    push = _git("push", "-u", "origin", branch, cwd=root)
+    gh = subprocess.run(["gh", "pr", "create", "--head", branch, "--title", title,
+                         "--body", body or title], cwd=str(root), capture_output=True, text=True)
+    return {"pushed": push.returncode == 0, "pr_created": gh.returncode == 0,
+            "detail": (gh.stdout + gh.stderr)[:300]}
 
 
 def _audit_episode(change: Change, zone: str, ev: dict) -> None:

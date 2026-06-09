@@ -38,7 +38,8 @@ from .budget import (BudgetExceeded, monthly_spend, remaining,       # BudgetKee
                      check as budget_check, status as budget_status)
 from .predict import Predictor, train as train_predictor, cross_val_error  # v0.1 cost/lat predictor
 from .evolve import (Change, snapshot_change, apply_change, rollback,      # Fase 3+4 motor
-                     evaluate, zone_of, self_evolve, red_content_hits)
+                     evaluate, zone_of, self_evolve, red_content_hits,
+                     sandbox_branch, promote_branch, open_pr_branch)        # git-isolated promote
 from .prices import effective_prices, load_overrides                       # Fase 2 override precios
 from .megasource import fetch_prices, diff_prices, propose_price_update     # Fase 2 megafuente
 
@@ -63,6 +64,6 @@ __all__ = [
     "BudgetExceeded", "monthly_spend", "remaining", "budget_check", "budget_status",
     "Predictor", "train_predictor", "cross_val_error",
     "Change", "snapshot_change", "apply_change", "rollback", "evaluate", "zone_of",
-    "self_evolve", "red_content_hits",
+    "self_evolve", "red_content_hits", "sandbox_branch", "promote_branch", "open_pr_branch",
     "effective_prices", "load_overrides", "fetch_prices", "diff_prices", "propose_price_update",
 ]

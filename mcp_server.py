@@ -343,6 +343,36 @@ def mmorch_check(checker: str, ctx: dict) -> str:
 
 
 @mcp.tool()
+def mmorch_evolve_self(target_file: str, finding: str) -> str:
+    """Auto-evolución DRY (seguro por MCP: PROPONE + evalúa, NUNCA aplica). Un modelo
+    barato propone un cambio a `target_file` para resolver `finding`; se clasifica por
+    zona (reversibilidad×blast-radius, incluyendo scan de acciones peligrosas en el
+    código generado) y se corre la fitness compuesta SIN tests (ast + goal_aligned +
+    ensemble cross-family + cost/budget). NO toca el repo, NO mergea. Aplicar de verdad
+    = acción deliberada de librería/humano (sandbox_branch -> promote_branch/PR). Spends
+    external $ (swarm+verify), not cupo. Returns {zone, would_apply, checks, refused_red}."""
+    from mmorch.evolve import propose_patch, snapshot_change, zone_of, evaluate
+    after = propose_patch(target_file, finding)
+    # strip code-fence si vino envuelto
+    a = after.strip()
+    if a.startswith("```"):
+        a = a.split("```", 2)[1] if "```" in a[3:] else a
+        a = a.split("\n", 1)[1] if "\n" in a else a
+        a = a.rsplit("```", 1)[0]
+    change = snapshot_change(target_file, a, f"auto-evolve: {finding}")
+    zone = zone_of(change)
+    if zone == "red":
+        return json.dumps({"zone": "red", "would_apply": False, "refused_red": True,
+                           "reason": "zona roja -> gate humano, nunca auto-aplica",
+                           "change_id": change.id}, ensure_ascii=False)
+    ev = evaluate(change, run_tests=False)   # sin mutar repo; tests reales = sandbox_branch aparte
+    return json.dumps({"zone": zone, "would_apply": bool(ev["ok"]) and zone in ("green", "yellow"),
+                       "checks": ev["checks"], "ensemble_degraded": ev.get("ensemble_degraded"),
+                       "change_id": change.id, "note": "DRY: no aplicado. Promote = accion humana."},
+                      ensure_ascii=False)
+
+
+@mcp.tool()
 def mmorch_memory_stats() -> str:
     """Memory counts: episodic events, live semantic notes, embedded notes, and the
     active embedding backend (or null if fastembed absent). Read-only, no spend."""
