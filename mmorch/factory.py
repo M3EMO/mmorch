@@ -7,6 +7,13 @@ Distinción clave: mmorch no es un JEPA. Pero puede (a) ESCRIBIR el código de t
 MVP demostrable: entrena un clasificador de CALIDAD DE CÓDIGO (bueno/malo) con regresión
 logística en numpy (cero dep pesada), desde features baratos reusando checkers. Esto es
 la rebanada realizable del sueño "aprende a diferenciar buen código de mal código".
+
+REVERSIBILIDAD / scope: estas funciones son PURAS — devuelven artefactos INERTES (un dict
+modelo, un job spec). NO auto-aplican, NO escriben en el sistema, NO cambian el
+comportamiento de mmorch. Por eso no requieren `rollback()`: no hay nada que revertir.
+DESPLEGAR un modelo entrenado a producción (ej. usarlo como router/clasificador) es un
+paso APARTE que pasa por el gate de evolve (Change + fitness + rollback + zona). La
+fábrica produce; el gate decide y revierte.
 """
 from __future__ import annotations
 
