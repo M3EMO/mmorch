@@ -143,3 +143,45 @@ honestidad del MAPE + `goal_aligned` pass. Precisión <20% = objetivo de v0.2.
 - **Dentro de fases**: `loop_until_done` legítimo en Fase 4 (evolucionar hasta dry) y en cualquier "fix hasta tests verdes".
 - **Dogfooding**: desde Fase 4, mmorch puede manejar partes de Fases 5-7 con su propio loop — gateado, en sandbox, zona verde/amarilla.
 - **Orden duro**: 0 (budget) → 3 (rollback/fitness) → 4 (motor) son la columna vertebral de seguridad; 1/2/5/6/7 cuelgan de ahí.
+
+---
+
+## 🌱 BACKLOG / seeds futuros (no en el camino crítico)
+
+### SEED — Motor físico para mmorch
+**Idea (parkeada):** dar a mmorch la capacidad de razonar/verificar FÍSICA, mismo patrón
+que el coder: "entender = ejecutar/simular, no lenguaje".
+
+**Approach concreto (de la investigación):**
+- **Simulador determinista = el "unit test del mundo físico".** `check("physics_sim",
+  simulator="pymunk", init_state, action, expected)` → corre la sim en sandbox y compara.
+  Empezar 2D (pymunk/Box2D); cuando hay ecuaciones (F=ma) usar `check("arithmetic")`/sympy.
+- **Benchmark etiquetado:** problemas con respuesta simulada (caída libre, colisiones,
+  palancas) + sets de razonamiento físico (CLEVRER, PHYRE) como "tests unitarios".
+- **World model neuronal (V-JEPA-like) OPCIONAL** — solo como PRIOR rápido en cascade:
+  el simulador determinista corre solo cuando el prior duda (calibrate_conf bajo). NO es
+  necesario si la sim es barata. mmorch lo trataría como otro modelo (costo/latencia/calib).
+- **Routing aprendido:** el bandit aprende qué problema físico conviene resolver con
+  simulador (determinista) vs LLM (física cualitativa). Mismo esquema Capa A.
+
+**Por qué diferido:** otro DOMINIO, no la misión coder de mmorch. Construir DESPUÉS de que
+el stack coder (checkers + factory + dataset + code_quality) esté maduro.
+
+**Trigger pa retomar:** cuando la capa coder esté sólida y haya apetito por dominio nuevo.
+Encaja como `checkers_physics.py` (simulador determinista) + opcional world-model en WSL+torch.
+
+### SEED — mutation_score checker (idea #2, barato, cierra la batería determinista)
+`check("mutation_score", code, tests)`: muta el código (mutmut/AST: +↔-, invertir
+condiciones) → corre tests sobre mutantes → score = % mutantes que los tests MATAN. Mide
+robustez real de los tests (no solo pasar). Sandbox + generador de mutaciones. Encaja directo.
+
+### SEED — CodeBERT como prior probabilístico (idea #4)
+Fine-tune CodeBERT sobre labels de EJECUCIÓN (pasa-tests / mutation-score), no buggy-vs-fixed
+de texto (probado ill-posed). Usar como prior rápido que filtra antes del sandbox caro =
+Capa A aplicada a código. Corre en WSL+torch.
+
+### SEED — Retrieval de ejemplos de calidad (idea #1)
+FETCH (repos→episodios) → DISTILL (`remember` nota semántica) → LEARN (bandit con reward =
+outcome real de usar el código) → RECALL (traer ejemplos que demostraron calidad en tareas
+similares). Compone memory+recall+bandit que YA existen. Calidad guiada por experiencia, no
+por estrellas.
