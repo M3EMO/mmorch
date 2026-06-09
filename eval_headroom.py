@@ -32,14 +32,12 @@ def _read(rel: str, head: int = 4000) -> str:
 def build_samples() -> list[dict]:
     """(contexto real, pregunta, expected substring que una respuesta correcta DEBE tener)."""
     s = []
-    cost = _read("mmorch/cost.py")
-    if cost:
-        s.append({"ctx": cost, "q": "¿Qué unidad usa cost_usd para los precios? Responde corto.",
-                  "expected": "1_000_000"})  # /1M tokens
     budget = _read("mmorch/budget.py")
     if budget:
-        s.append({"ctx": budget, "q": "¿Qué env var configura el límite mensual? Responde solo el nombre.",
+        s.append({"ctx": budget, "q": "¿Qué env var configura el límite mensual? Solo el nombre.",
                   "expected": "MMORCH_MAX_MONTHLY_USD"})
+        s.append({"ctx": budget, "q": "¿Qué clase de excepción lanza check() al exceder el límite? Una palabra.",
+                  "expected": "BudgetExceeded"})
     goal = _read("GOAL.md")
     if goal:
         s.append({"ctx": goal, "q": "¿Editar el GOAL es de qué zona? Responde una palabra.",
@@ -48,10 +46,10 @@ def build_samples() -> list[dict]:
     if checkers:
         s.append({"ctx": checkers, "q": "¿Qué algoritmo usa el checker de determinante? Una palabra.",
                   "expected": "Bareiss"})
-    ev = _read("mmorch/evolve.py", 6000)
-    if ev:
-        s.append({"ctx": ev, "q": "¿Cómo se llama la función que clasifica un cambio por zona?",
-                  "expected": "zone_of"})
+    prices = _read("mmorch/prices.py")
+    if prices:
+        s.append({"ctx": prices, "q": "¿De qué archivo lee los precios el override? Solo el nombre.",
+                  "expected": "prices.json"})
     return s
 
 
