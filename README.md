@@ -7,7 +7,7 @@ cheap external models as nodes to **free Claude cupo**. Lives global at
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **29 módulos · 18 MCP tools · 147 tests.**
+_Auto-generado por `mmorch.docgen`._ **30 módulos · 18 MCP tools · 150 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -22,6 +22,7 @@ _Auto-generado por `mmorch.docgen`._ **29 módulos · 18 MCP tools · 147 tests.
 | `mmorch/classify.py` | classify_and_act — rutear por TIPO y manejar cada rama distinto (triage, model |
 | `mmorch/config.py` | Model registry — single source of truth for models, families, endpoints, prices. |
 | `mmorch/cost.py` | Cost model — USD from token counts, using REGISTRY prices. |
+| `mmorch/dataset.py` | dataset — construye un dataset de CALIDAD DE CÓDIGO desde git history, SIN labels |
 | `mmorch/ensemble.py` | ensemble_verify (I-3) — K escepticos cross-family + voto mayoria. |
 | `mmorch/evolve.py` | evolve — subset DGM-inspirado, GATED (research: vault/research/ |
 | `mmorch/factory.py` | factory — mmorch como FÁBRICA de modelos (no ES el modelo, lo CONSTRUYE/entrena). |
