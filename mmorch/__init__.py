@@ -42,6 +42,8 @@ from .evolve import (Change, snapshot_change, apply_change, rollback,      # Fas
                      sandbox_branch, promote_branch, open_pr_branch)        # git-isolated promote
 from .prices import effective_prices, load_overrides                       # Fase 2 override precios
 from .megasource import fetch_prices, diff_prices, propose_price_update     # Fase 2 megafuente
+from .factory import (featurize_code, train_logreg, train_code_quality,     # fábrica de modelos
+                      emit_training_job, predict_proba, accuracy)
 
 __all__ = [
     "REGISTRY", "family_of", "ModelSpec", "call",
@@ -66,4 +68,6 @@ __all__ = [
     "Change", "snapshot_change", "apply_change", "rollback", "evaluate", "zone_of",
     "self_evolve", "red_content_hits", "sandbox_branch", "promote_branch", "open_pr_branch",
     "effective_prices", "load_overrides", "fetch_prices", "diff_prices", "propose_price_update",
+    "featurize_code", "train_logreg", "train_code_quality", "emit_training_job",
+    "predict_proba", "accuracy",
 ]
