@@ -339,8 +339,67 @@ def _check_unit_test(*, code: str, tests: str, timeout: float = 10.0, **_) -> Ch
                        f"({r.stdout.strip()[-120:] or r.stderr.strip()[-120:]})", "unit_test")
 
 
+def _ast_smells(tree) -> dict:
+    """Code-smells deterministas via AST (sin dep): bare-except, sin docstring, default
+    mutable, anidamiento profundo, funcion larga."""
+    s = {"bare_except": 0, "no_docstring": 0, "mutable_default": 0, "deep_nesting": 0,
+         "long_func": 0}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ExceptHandler) and node.type is None:
+            s["bare_except"] += 1
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not ast.get_docstring(node):
+                s["no_docstring"] += 1
+            if any(isinstance(d, (ast.List, ast.Dict, ast.Set)) for d in node.args.defaults):
+                s["mutable_default"] += 1
+            span = getattr(node, "end_lineno", node.lineno) - node.lineno
+            if span > 60:
+                s["long_func"] += 1
+            depth = _max_depth(node)
+            if depth >= 5:
+                s["deep_nesting"] += 1
+    return s
+
+
+def _max_depth(node, d=0) -> int:
+    best = d
+    for ch in ast.iter_child_nodes(node):
+        nd = d + 1 if isinstance(ch, (ast.If, ast.For, ast.While, ast.With, ast.Try)) else d
+        best = max(best, _max_depth(ch, nd))
+    return best
+
+
+def _check_code_quality(*, code: str, min_score: float = 0.5, **_) -> CheckResult:
+    """Calidad de código NO-lingüística: métricas deterministas (radon: complejidad
+    ciclomática + maintainability index + Halstead; + smells por AST). Score 0..1, cero
+    API. Es la medida OBJETIVA que un LLM mirando texto no da (probado: bge-small=azar).
+    passed = score >= min_score."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        return CheckResult(False, f"no parsea: {e}", "code_quality", got=0.0)
+    try:
+        from radon.complexity import cc_visit
+        from radon.metrics import mi_visit
+        ccs = cc_visit(code)
+        avg_cc = sum(c.complexity for c in ccs) / len(ccs) if ccs else 1.0
+        mi = mi_visit(code, multi=True)            # 0..100, mayor = mas mantenible
+    except Exception as e:
+        return CheckResult(False, f"radon err: {str(e)[:60]}", "code_quality", got=0.0)
+    smells = _ast_smells(tree)
+    n_smells = sum(smells.values())
+    # composicion transparente, 0..1:
+    s_cc = max(0.0, min(1.0, 1 - (avg_cc - 1) / 20))     # cc 1->1.0, cc 21->0.0
+    s_mi = max(0.0, min(1.0, mi / 100))
+    s_smell = max(0.0, 1 - 0.1 * n_smells)               # -0.1 por smell
+    score = round(0.4 * s_cc + 0.35 * s_mi + 0.25 * s_smell, 3)
+    detail = f"score={score} (cc={round(avg_cc,1)} mi={round(mi,1)} smells={n_smells}:{ {k:v for k,v in smells.items() if v} })"
+    return CheckResult(score >= min_score, detail, "code_quality", expected=min_score, got=score)
+
+
 _REGISTRY: dict[str, Callable[..., CheckResult]] = {
     "arithmetic": _check_arithmetic,
+    "code_quality": _check_code_quality,
     "determinant": _check_determinant,
     "json_schema": _check_json_schema,
     "predicate": _check_predicate,

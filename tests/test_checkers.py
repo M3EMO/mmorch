@@ -145,3 +145,13 @@ def test_adversarial_verify_uses_checker_no_api():
     vb = adversarial_verify("x", rubric="math", task_kind="checkable",
                             checker="arithmetic", checker_ctx={"expr": "2+2", "expected": 5})
     assert not vb.passed and vb.refutations
+
+
+def test_code_quality():
+    radon = pytest.importorskip("radon")
+    good = check("code_quality", code='def add(a, b):\n    """suma."""\n    return a + b\n')
+    broken = check("code_quality", code="def f(:\n")
+    messy = check("code_quality", code="def f(a,b,c,d,e,f,g):\n" + "    if a:\n" * 6 + "        return 1\n")
+    assert good.got > 0.7 and good.passed          # codigo limpio = score alto
+    assert not broken.passed and broken.got == 0.0  # no parsea
+    assert good.got > messy.got                     # limpio > complejo
