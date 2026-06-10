@@ -185,3 +185,24 @@ FETCH (repos→episodios) → DISTILL (`remember` nota semántica) → LEARN (ba
 outcome real de usar el código) → RECALL (traer ejemplos que demostraron calidad en tareas
 similares). Compone memory+recall+bandit que YA existen. Calidad guiada por experiencia, no
 por estrellas.
+
+### SEED — Algoritmos ML útiles (PULL on-demand, NO integrar en batch = scope-creep)
+mmorch ya usa el subset correcto (Thompson=bandit, logreg=predict, k-NN=recall, MLP=v1.0,
+GP/Bayes=calibration, hash=memo, tournament/topo-sort). Los que mapean a needs PARKEADOS,
+traer SOLO cuando se llegue a esa fase:
+- **Isolation Forest** → backstop "anomalías en logs / regresión gradual" (detección outliers).
+- **Filtro de Kalman** → backstop "drift de reward" (mejor que media móvil).
+- **GBRT / Random Forest** → cost-predictor / code-quality tabular (mejor que logreg).
+- **UCB** → alternativa/complemento al Thompson bandit (exploración con garantías).
+- **Bloom filter** → dedup rápido en loop_until_done a escala.
+- **Hyperband / Bayesian-opt** → tuning de hiperparámetros de la NN (Fase 5/7).
+- **Regla:** un algoritmo entra cuando un problema MEDIDO lo pide, no porque exista.
+
+### SEED — Embedder de código contrastive (SimCLR) — el que le ganaría a bge-small
+Medimos que bge-small (texto) = azar en code-quality. Un **embedder ENTRENADO sobre código**
+(objetivo contrastive SimCLR: atraer fragmentos equivalentes, separar distintos) capturaría
+semántica de código, no texto. La FÁBRICA lo entrena en WSL+torch sobre labels de ejecución
+(pasa-tests). mmorch lo usa como NODO (verificador/prior), NO se convierte en él. Nota
+arquitectónica: **mmorch CONSTRUYE/conduce modelos grandes (VAE/Transformer/MoE/SimCLR) vía
+la fábrica como nodos gateados — su core sigue siendo orquestador determinista. Conductor,
+no la orquesta.**
