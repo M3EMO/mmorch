@@ -373,6 +373,15 @@ def mmorch_evolve_self(target_file: str, finding: str) -> str:
 
 
 @mcp.tool()
+def mmorch_orchestra() -> str:
+    """Roster de la ORQUESTA que mmorch dirige: conductor + secciones (generator/verifier/
+    router/soloist/memory) con cada nodo (handle, kind, builder algorithm, status). Vista
+    consultable del registry de nodos. Read-only, no spend."""
+    from mmorch.nodes import summary
+    return json.dumps(summary(), ensure_ascii=False)
+
+
+@mcp.tool()
 def mmorch_memory_stats() -> str:
     """Memory counts: episodic events, live semantic notes, embedded notes, and the
     active embedding backend (or null if fastembed absent). Read-only, no spend."""

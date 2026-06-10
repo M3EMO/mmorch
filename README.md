@@ -7,7 +7,7 @@ cheap external models as nodes to **free Claude cupo**. Lives global at
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **30 módulos · 18 MCP tools · 154 tests.**
+_Auto-generado por `mmorch.docgen`._ **31 módulos · 19 MCP tools · 159 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -34,6 +34,7 @@ _Auto-generado por `mmorch.docgen`._ **30 módulos · 18 MCP tools · 154 tests.
 | `mmorch/megasource.py` | megasource (Fase 2) — megafuente autodidacta: primer hit = provider PRICING. |
 | `mmorch/memory.py` | memory — memoria episodica + semantica para mmorch (DuckDB 2 capas). |
 | `mmorch/metrics.py` | Observability — append-only JSONL metric log (§11 backbone). |
+| `mmorch/nodes.py` | nodes — el registry de la ORQUESTA: nombra a cada miembro que mmorch (el DIRECTOR) |
 | `mmorch/patterns.py` | Code-flow patterns (§7), migrated as deterministic Python. |
 | `mmorch/predict.py` | predict (v0.1 NN, Fase 1) — predictor de out_tokens / latencia, SIN dep pesada. |
 | `mmorch/prices.py` | prices — capa de OVERRIDE de precios (datos volátiles, separados del código). |
@@ -95,7 +96,7 @@ Registered globally in `~/.claude.json` as server `mmorch`. Calling these spends
 external API $, not cupo — that's the point.
 
 <!-- mmorch:auto:tools -->
-MCP tools (server `mmorch`): `mmorch_adversarial_verify`, `mmorch_bucket_rank`, `mmorch_cascade`, `mmorch_check`, `mmorch_classify`, `mmorch_ensemble_verify`, `mmorch_evolve_self`, `mmorch_fan_out`, `mmorch_feedback_stats`, `mmorch_innovate`, `mmorch_learn`, `mmorch_memory_stats`, `mmorch_metrics_summary`, `mmorch_recall`, `mmorch_record_outcome`, `mmorch_remember`, `mmorch_route`, `mmorch_tournament`.
+MCP tools (server `mmorch`): `mmorch_adversarial_verify`, `mmorch_bucket_rank`, `mmorch_cascade`, `mmorch_check`, `mmorch_classify`, `mmorch_ensemble_verify`, `mmorch_evolve_self`, `mmorch_fan_out`, `mmorch_feedback_stats`, `mmorch_innovate`, `mmorch_learn`, `mmorch_memory_stats`, `mmorch_metrics_summary`, `mmorch_orchestra`, `mmorch_recall`, `mmorch_record_outcome`, `mmorch_remember`, `mmorch_route`, `mmorch_tournament`.
 
 **Restart Claude Code** to load new tools.
 <!-- /mmorch:auto:tools -->

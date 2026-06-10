@@ -42,6 +42,7 @@ from .evolve import (Change, snapshot_change, apply_change, rollback,      # Fas
                      sandbox_branch, promote_branch, open_pr_branch)        # git-isolated promote
 from .prices import effective_prices, load_overrides                       # Fase 2 override precios
 from .megasource import fetch_prices, diff_prices, propose_price_update     # Fase 2 megafuente
+from .nodes import orchestra, members, conductor as orchestra_conductor, Node  # registry orquesta
 from .factory import (featurize_code, train_logreg, train_code_quality,     # fábrica de modelos
                       emit_training_job, predict_proba, accuracy)
 
@@ -65,6 +66,7 @@ __all__ = [
     "authorize_goal", "goal_guard", "pursue_goal", "GoalTampered",
     "BudgetExceeded", "monthly_spend", "remaining", "budget_check", "budget_status",
     "Predictor", "train_predictor", "cross_val_error",
+    "orchestra", "members", "orchestra_conductor", "Node",
     "Change", "snapshot_change", "apply_change", "rollback", "evaluate", "zone_of",
     "self_evolve", "red_content_hits", "sandbox_branch", "promote_branch", "open_pr_branch",
     "effective_prices", "load_overrides", "fetch_prices", "diff_prices", "propose_price_update",
