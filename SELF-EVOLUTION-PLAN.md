@@ -206,3 +206,22 @@ semántica de código, no texto. La FÁBRICA lo entrena en WSL+torch sobre label
 arquitectónica: **mmorch CONSTRUYE/conduce modelos grandes (VAE/Transformer/MoE/SimCLR) vía
 la fábrica como nodos gateados — su core sigue siendo orquestador determinista. Conductor,
 no la orquesta.**
+
+### SEED — Timeout por CPU-time (no wall-clock) en el sandbox
+La última fuente de no-determinismo del sandbox: el timeout es por RELOJ DE PARED → una
+máquina ocupada timeoutea distinto (mismo código, distinto resultado). Fix: límite de
+CPU-TIME (`resource.setrlimit(RLIMIT_CPU, ...)`, Linux/WSL) en vez de wall-clock. Hace el
+veredicto de `unit_test`/`mutation_score`/`coverage` reproducible entre máquinas. Corre en
+WSL (resource es POSIX). Windows: aproximar con Job Objects o aceptar el wall-clock.
+
+### SEED — Generador SEMÁNTICO no-LLM (entiende ejecución, no sintaxis)
+Crítica válida: los LLM-generadores entienden distribución/sintaxis, NO ejecución/code-flow
+(probado: bge-small=azar). Hoy no hay generador no-LLM robusto pa código arbitrario, pero pa
+tareas ACOTADAS sí:
+- **Program synthesis** (enumerativo / SMT — sketch/Rosette / GP): genera código y lo valida
+  EJECUTANDO contra tests → correcto por construcción, semántica de verdad. Nodo `gen:synth`.
+- **GNN sobre AST/dataflow** (GraphCodeBERT-style): consume el GRAFO de control/datos, no
+  tokens → más cerca de "entender el flujo". La fábrica lo entrena.
+- **Arquitectura realista hoy**: LLM genera (pragmático) + EJECUCIÓN entiende (checkers = el
+  oráculo semántico). El entendimiento vive en la capa VERIFY, no en el generador. El
+  generador semántico es un nodo FUTURO pa subtareas acotadas, no reemplazo total.
