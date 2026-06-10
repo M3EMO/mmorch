@@ -101,8 +101,20 @@ honestidad del MAPE + `goal_aligned` pass. Precisión <20% = objetivo de v0.2.
 
 ---
 
-## FASE 5 — v0.2 NN: shadow prior (k-NN + logístico), scale 0→0.3
-**Goal:** la NN empieza a primear al bandit, sin riesgo (shadow + scale gated).
+## FASE 5 — v0.2 NN: shadow prior (k-NN), scale 0→0.3 ⚠️ CONSTRUIDO PERO DORMIDO (data-gated)
+**HECHO:** `shadow_prior.py` (ShadowPrior k-NN coseno sobre outcomes, embed bge-small local
+cero-API; prior_for→pseudo-conteos Beta; select bit-a-bit idéntico a bandit con scale=0;
+offline_improvement por Brier leave-one-out; auto_scale ±0.1 en [0.1,0.8], tope→needs_gate).
+6 tests verdes, suite 165 verde.
+**PERO NO ADOPTADO — el gate funcionó:** `goal_aligned` lo refutó por el non-goal anti
+scope-creep ("no crecer complejidad sin métricas que la justifiquen"). Verificado con DATOS:
+`offline_improvement` sobre 400 outcomes reales = **−0.061** (el prior contextual predice PEOR
+que la media global del brazo). → `auto_scale` mantiene scale=0; módulo queda dormido, CERO
+delta live, cero costo. Re-evaluar cuando existan outcomes con contexto que SÍ correlacione
+con reward (los actuales son de la ablación math/code, no clusterizan por reward). Decisión
+registrada: el sistema rechazó su propia fase planeada con su propia métrica = anti-scope-creep
+empírico funcionando.
+**Goal (original):** la NN empieza a primear al bandit, sin riesgo (shadow + scale gated).
 **Entregables:**
 - prior shadow: k-NN sobre memoria episódica (embedding del prompt) + logístico simple → `alpha/beta_prior` al bandit.
 - scale arranca 0; auto-ajuste dentro de [0.1, 0.8] (zona amarilla, ±0.1 si mejora >2% offline); subir el TOPE = sugerencia a humano.

@@ -45,6 +45,8 @@ from .megasource import fetch_prices, diff_prices, propose_price_update     # Fa
 from .nodes import orchestra, members, conductor as orchestra_conductor, Node  # registry orquesta
 from .factory import (featurize_code, train_logreg, train_code_quality,     # fábrica de modelos
                       emit_training_job, predict_proba, accuracy)
+from .shadow_prior import (ShadowPrior, offline_improvement,                # Fase 5 NN shadow prior
+                           auto_scale as shadow_auto_scale)
 
 __all__ = [
     "REGISTRY", "family_of", "ModelSpec", "call",
@@ -72,4 +74,5 @@ __all__ = [
     "effective_prices", "load_overrides", "fetch_prices", "diff_prices", "propose_price_update",
     "featurize_code", "train_logreg", "train_code_quality", "emit_training_job",
     "predict_proba", "accuracy",
+    "ShadowPrior", "offline_improvement", "shadow_auto_scale",
 ]
