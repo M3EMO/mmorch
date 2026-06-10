@@ -397,9 +397,84 @@ def _check_code_quality(*, code: str, min_score: float = 0.5, **_) -> CheckResul
     return CheckResult(score >= min_score, detail, "code_quality", expected=min_score, got=score)
 
 
+_MUT_BINOP = {ast.Add: [ast.Sub, ast.Mult], ast.Sub: [ast.Add, ast.Mult],
+              ast.Mult: [ast.Add, ast.Div], ast.Div: [ast.Mult, ast.Sub],
+              ast.FloorDiv: [ast.Mult], ast.Mod: [ast.Mult, ast.Add]}
+_MUT_CMP = {ast.Lt: ast.Gt, ast.Gt: ast.Lt, ast.LtE: ast.GtE, ast.GtE: ast.LtE,
+            ast.Eq: ast.NotEq, ast.NotEq: ast.Eq}
+_MUT_BOOL = {ast.And: ast.Or, ast.Or: ast.And}
+
+
+def _mutants(code: str, max_n: int = 12) -> list[str]:
+    """Genera mutantes (1 mutación c/u): swap de operador binario/comparación/booleano,
+    flip de bool, n->n+1. Usa ast+unparse. Cada mutante es código válido."""
+    import copy
+    try:
+        base = ast.parse(code)
+    except SyntaxError:
+        return []
+    # localizar nodos mutables (por índice de recorrido estable)
+    # (indice de recorrido, kind, alternativa) — una mutación por entrada
+    targets = []
+    for i, node in enumerate(ast.walk(base)):
+        if isinstance(node, ast.BinOp) and type(node.op) in _MUT_BINOP:
+            for alt in _MUT_BINOP[type(node.op)]:
+                targets.append((i, "binop", alt))
+        elif isinstance(node, ast.Compare) and len(node.ops) == 1 and type(node.ops[0]) in _MUT_CMP:
+            targets.append((i, "cmp", _MUT_CMP[type(node.ops[0])]))
+        elif isinstance(node, ast.BoolOp) and type(node.op) in _MUT_BOOL:
+            targets.append((i, "bool", _MUT_BOOL[type(node.op)]))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, bool):
+            targets.append((i, "boolconst", None))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(node.value, bool):
+            targets.append((i, "int", None))
+    out = []
+    for idx, kind, alt in targets[:max_n]:
+        tree = copy.deepcopy(base)
+        node = list(ast.walk(tree))[idx]
+        if kind == "binop":
+            node.op = alt()
+        elif kind == "cmp":
+            node.ops[0] = alt()
+        elif kind == "bool":
+            node.op = alt()
+        elif kind == "boolconst":
+            node.value = not node.value
+        elif kind == "int":
+            node.value = node.value + 1
+        try:
+            out.append(ast.unparse(tree))
+        except Exception:
+            pass
+    return out
+
+
+def _check_mutation_score(*, code: str, tests: str, min_score: float = 0.5,
+                          max_mutants: int = 12, timeout: float = 30.0, **_) -> CheckResult:
+    """Robustez de los TESTS (no del código): muta el código y corre los tests sobre cada
+    mutante. mutant KILLED = los tests fallaron (lo cazaron). score = killed/total. Alto =
+    tests fuertes. Bajo = tests débiles (pasan aunque el código esté mutado). Sandbox."""
+    from .sandbox import run_sandboxed
+    muts = _mutants(code, max_mutants)
+    if not muts:
+        return CheckResult(False, "sin mutantes (no parsea o sin operadores mutables)",
+                           "mutation_score", got=0.0)
+    killed = 0
+    for mut in muts:
+        r = run_sandboxed("", timeout=timeout, argv=["-m", "pytest", "-q", "test_candidate.py"],
+                          extra_files={"candidate.py": mut,
+                                       "test_candidate.py": "from candidate import *\n" + tests})
+        if not r.ok:           # tests fallaron sobre el mutante -> KILLED (bien)
+            killed += 1
+    score = round(killed / len(muts), 3)
+    return CheckResult(score >= min_score, f"mutation_score={score} ({killed}/{len(muts)} mutantes "
+                       f"matados)", "mutation_score", expected=min_score, got=score)
+
+
 _REGISTRY: dict[str, Callable[..., CheckResult]] = {
     "arithmetic": _check_arithmetic,
     "code_quality": _check_code_quality,
+    "mutation_score": _check_mutation_score,
     "determinant": _check_determinant,
     "json_schema": _check_json_schema,
     "predicate": _check_predicate,

@@ -155,3 +155,13 @@ def test_code_quality():
     assert good.got > 0.7 and good.passed          # codigo limpio = score alto
     assert not broken.passed and broken.got == 0.0  # no parsea
     assert good.got > messy.got                     # limpio > complejo
+
+
+def test_mutation_score():
+    code = "def add(a, b):\n    return a + b\n"
+    strong = "def test_add():\n    assert add(2,3)==5\n    assert add(0,5)==5\n"
+    weak = "def test_add():\n    assert add(2,2)==4\n"   # mutante * sobrevive
+    s = check("mutation_score", code=code, tests=strong)
+    w = check("mutation_score", code=code, tests=weak)
+    assert s.got == 1.0 and s.passed          # tests fuertes matan todo
+    assert w.got < 1.0                          # tests debiles dejan sobrevivientes
