@@ -34,21 +34,28 @@ def _cos(a: list[float], b: list[float]) -> float:
 
 @dataclass
 class ShadowPrior:
-    """Indexa (arm -> [(emb, reward)]) desde outcomes. prior_for da pseudo-conteos Beta."""
+    """Indexa (arm -> [(emb, reward)]) desde outcomes. prior_for da pseudo-conteos Beta.
+    embed_fn es PLUGGABLE: bge-small (default, texto) o code_embedder (codigo, mejor rep).
+    Cambiar la representacion es la palanca pa que el prior sea util (ver offline_improvement)."""
     scale: float = 0.0
     index: dict[str, list[tuple[list[float], float]]] = field(default_factory=dict)
+    embed_fn: callable = None
+
+    def _emb(self, text):
+        return (self.embed_fn or embed)(text)
 
     # ---- construccion ----
     @classmethod
-    def from_outcomes(cls, scale: float = 0.0, outcomes: list[dict] | None = None) -> "ShadowPrior":
-        sp = cls(scale=scale)
+    def from_outcomes(cls, scale: float = 0.0, outcomes: list[dict] | None = None,
+                      embed_fn=None) -> "ShadowPrior":
+        sp = cls(scale=scale, embed_fn=embed_fn)
         rows = outcomes if outcomes is not None else read_outcomes()
         for r in rows:
             ctx = r.get("context") or ""
             arm = r.get("arm")
             if not ctx or arm is None:
                 continue
-            e = embed(ctx)
+            e = sp._emb(ctx)
             if e is None:
                 continue
             sp.index.setdefault(arm, []).append((list(e), float(r.get("reward", 0.0))))
@@ -75,7 +82,7 @@ class ShadowPrior:
     def select(self, bandit: ThompsonBandit, arms: list[str], context: str | None = None,
                rng: _random.Random | None = None) -> str:
         rng = rng or _random.Random()
-        ctx_emb = embed(context) if (context and self.scale > 0.0) else None
+        ctx_emb = self._emb(context) if (context and self.scale > 0.0) else None
         best, best_theta = arms[0], -1.0
         for a in arms:
             alpha, beta = bandit._ab(a)                      # posterior actual del bandit
@@ -91,14 +98,17 @@ def _brier(preds: list[float], actual: list[float]) -> float:
     return sum((p - y) ** 2 for p, y in zip(preds, actual)) / max(1, len(preds))
 
 
-def offline_improvement(outcomes: list[dict] | None = None, scale: float = SCALE_MIN) -> float:
+def offline_improvement(outcomes: list[dict] | None = None, scale: float = SCALE_MIN,
+                        embed_fn=None) -> float:
     """Mejora relativa de Brier al predecir reward con el prior contextual vs media global
-    del brazo (leave-one-out por punto). >0 = el prior ayuda. Cero API (embeddings locales)."""
+    del brazo (leave-one-out por punto). >0 = el prior ayuda. Cero API (embeddings locales).
+    embed_fn pluggable: probar code_embedder vs bge es como se decide si Fase 5 puede seguir."""
+    ef = embed_fn or embed
     rows = [r for r in (outcomes if outcomes is not None else read_outcomes())
             if (r.get("context") and r.get("arm") is not None)]
     if len(rows) < 2 * _MIN_NEIGHBORS:
         return 0.0
-    embs = [embed(r["context"]) for r in rows]
+    embs = [ef(r["context"]) for r in rows]
     arms = [r["arm"] for r in rows]
     rew = [float(r.get("reward", 0.0)) for r in rows]
     base_pred, prior_pred = [], []
@@ -118,10 +128,10 @@ def offline_improvement(outcomes: list[dict] | None = None, scale: float = SCALE
 
 
 def auto_scale(current: float, outcomes: list[dict] | None = None,
-               threshold: float = 0.02) -> tuple[float, bool]:
+               threshold: float = 0.02, embed_fn=None) -> tuple[float, bool]:
     """Ajusta scale en pasos de ±0.1 segun mejora offline. Devuelve (nuevo_scale, needs_gate).
     Sube solo si mejora>threshold; baja si empeora. Clamp [0, SCALE_MAX]; querer >MAX => gate."""
-    imp = offline_improvement(outcomes, scale=max(current, SCALE_MIN))
+    imp = offline_improvement(outcomes, scale=max(current, SCALE_MIN), embed_fn=embed_fn)
     if imp > threshold:
         proposed = round(current + 0.1, 4)
         if proposed > SCALE_MAX:

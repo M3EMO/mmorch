@@ -24,6 +24,12 @@ def test_checkers_are_verifiers():
     assert len(chk) >= 15 and all(n.handle.startswith("check:") for n in chk)
 
 
-def test_planned_includes_synth_and_embedder():
+def test_planned_includes_synth():
     planned = {n.handle for n in orchestra() if n.status == "planned"}
-    assert "gen:synth" in planned and "model:code_embedder" in planned
+    assert "gen:synth" in planned
+
+
+def test_code_embedder_promoted_active():
+    # flywheel lo promovio: bate a bge en code-quality, inferencia numpy pura
+    active = {n.handle for n in orchestra() if n.status == "active"}
+    assert "model:code_embedder" in active

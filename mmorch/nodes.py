@@ -44,8 +44,9 @@ _SOLOISTS = [
          note="Capa A v1.0; entrena en WSL+torch"),
     Node("model:cost_predictor", "soloist", "model", "cuantil -> GBRT (#2)", "active",
          note="predict.py; out_tokens/latencia, mejora a GBRT"),
-    Node("model:code_embedder", "soloist", "model", "Contrastive/SimCLR (#26)", "planned",
-         note="el que GANA a bge-small en code-quality; fábrica en WSL"),
+    Node("model:code_embedder", "soloist", "model", "Contrastive/SimCLR (#26)", "active",
+         note="GANA a bge-small en code-quality (radon AUC 0.88 vs 0.80); inferencia numpy "
+              "pura (code_embedder.py), pesos en flywheel/code_embedder.npz"),
     Node("model:code_quality_clf", "soloist", "model", "RandomForest/GBRT (#3/#2)", "planned",
          note="clasificador entrenado con labels de EJECUCION (checkers)"),
     Node("memory:episodic", "memory", "store", "DuckDB append-only", "active"),

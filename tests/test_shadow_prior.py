@@ -73,6 +73,20 @@ def test_auto_scale_respects_bounds(monkeypatch):
     assert new2 == SP.SCALE_MAX and gate2 is True
 
 
+def test_embed_fn_pluggable_overrides_module_embed(monkeypatch):
+    # el module-level embed devuelve algo INUTIL; embed_fn custom es el que debe usarse
+    monkeypatch.setattr(SP, "embed", lambda t: [0.0, 0.0, 0.0])
+    custom = _fake_embed
+    sp = SP.ShadowPrior.from_outcomes(scale=0.5, embed_fn=custom, outcomes=[
+        {"arm": "g", "reward": 1.0, "context": "img:1"},
+        {"arm": "g", "reward": 1.0, "context": "img:2"},
+        {"arm": "g", "reward": 1.0, "context": "img:3"},
+    ])
+    # si uso custom, los 3 puntos 'img' estan juntos -> prior fuerte alpha>beta
+    ap, bp = sp.prior_for("g", custom("img:9"))
+    assert ap > bp and ap > 0
+
+
 def test_auto_scale_drops_when_no_signal(monkeypatch):
     monkeypatch.setattr(SP, "embed", _fake_embed)
     # contexto NO predice (reward aleatorio respecto a ctx) -> no sube

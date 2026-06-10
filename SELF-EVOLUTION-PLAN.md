@@ -114,6 +114,19 @@ delta live, cero costo. Re-evaluar cuando existan outcomes con contexto que SÍ 
 con reward (los actuales son de la ablación math/code, no clusterizan por reward). Decisión
 registrada: el sistema rechazó su propia fase planeada con su propia métrica = anti-scope-creep
 empírico funcionando.
+
+**ACTUALIZACIÓN — Fase 5 DESBLOQUEADA con métricas (2026-06-10):** se mejoró el sistema pa que
+Fase 5 siga (lo que el usuario pidió):
+1. `code_embedder.py` — el asset del flywheel productizado: inferencia NUMPY PURA (sin torch),
+   reproduce radon AUC 0.857 (~paridad), BATE a bge 0.80. Nodo `model:code_embedder` planned→active.
+2. `shadow_prior` ahora con `embed_fn` PLUGGABLE (bge | code_embedder).
+3. Con outcomes de CÓDIGO (context=código, reward=pass/fail del oracle_dataset): `offline_improvement`
+   = **+0.168 con code_embedder** (vs +0.128 bge, vs −0.061 en data ablación math). `auto_scale(0.0)→0.1`
+   sin needs_gate. → La métrica que el non-goal anti-scope-creep exigía AHORA existe y es positiva.
+   Fase 5 deja de estar dormida EN cuanto se alimente con outcomes de código reales.
+Lección: el cuello de Fase 5 era (a) representación [resuelto: code_embedder>bge] y (b) datos
+[el contexto debe correlacionar con reward — código sí, math-ablación no]. goal_aligned refutó
+2x: 1ª vez sustantivo (scope-creep, correcto, lo gateó), 2ª procedural (varianza, 1 voto, deterministas mandan).
 **Goal (original):** la NN empieza a primear al bandit, sin riesgo (shadow + scale gated).
 **Entregables:**
 - prior shadow: k-NN sobre memoria episódica (embedding del prompt) + logístico simple → `alpha/beta_prior` al bandit.

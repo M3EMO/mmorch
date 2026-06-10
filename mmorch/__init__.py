@@ -47,6 +47,7 @@ from .factory import (featurize_code, train_logreg, train_code_quality,     # f√
                       emit_training_job, predict_proba, accuracy)
 from .shadow_prior import (ShadowPrior, offline_improvement,                # Fase 5 NN shadow prior
                            auto_scale as shadow_auto_scale)
+from .code_embedder import embed_code, available as code_embedder_available  # flywheel asset (numpy)
 
 __all__ = [
     "REGISTRY", "family_of", "ModelSpec", "call",
@@ -75,4 +76,5 @@ __all__ = [
     "featurize_code", "train_logreg", "train_code_quality", "emit_training_job",
     "predict_proba", "accuracy",
     "ShadowPrior", "offline_improvement", "shadow_auto_scale",
+    "embed_code", "code_embedder_available",
 ]
