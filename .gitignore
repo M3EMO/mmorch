@@ -11,3 +11,7 @@ vault/.obsidian/workspace.json
 vault/.obsidian/graph.json
 .planning/
 .dataset_repos/
+flywheel/*.log
+flywheel/code_embedder.pt
+logs/radon_dataset.jsonl
+logs/oracle_dataset.jsonl
