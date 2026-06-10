@@ -165,3 +165,18 @@ def test_mutation_score():
     w = check("mutation_score", code=code, tests=weak)
     assert s.got == 1.0 and s.passed          # tests fuertes matan todo
     assert w.got < 1.0                          # tests debiles dejan sobrevivientes
+
+
+def test_coverage():
+    pytest.importorskip("coverage")
+    code = "def add(a,b):\n    return a+b\ndef sub(a,b):\n    return a-b\n"
+    full = check("coverage", code=code, tests="def test():\n    assert add(1,2)==3\n    assert sub(5,1)==4\n")
+    part = check("coverage", code=code, tests="def test():\n    assert add(1,2)==3\n")
+    assert full.got == 100.0 and full.passed
+    assert part.got < full.got            # menos tests = menos cobertura
+
+
+def test_deterministic():
+    assert check("deterministic", code="print(2+2)").passed                 # reproducible
+    assert not check("deterministic", code="import random; print(random.random())").passed
+    assert not check("deterministic", code="import time; print(time.time())").passed

@@ -13,7 +13,7 @@ dependencies = [
 [project.optional-dependencies]
 mcp = ["mcp>=1.2.0"]
 memory = ["fastembed>=0.3.0"]   # embeddings locales (bge-small). Sin esto: recall coarse-only.
-checkers = ["sqlglot>=20", "pint>=0.23", "sympy>=1.12", "radon>=6.0"]  # checkers con dep (sql/units/algebra)
+checkers = ["sqlglot>=20", "pint>=0.23", "sympy>=1.12", "radon>=6.0", "coverage>=7.0"]  # checkers con dep (sql/units/algebra)
 
 [build-system]
 requires = ["setuptools>=68"]

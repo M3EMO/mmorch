@@ -45,8 +45,10 @@ def run_sandboxed(code: str, *, timeout: float = 5.0, input_text: str = "",
         (tdp / "_run.py").write_text(code, encoding="utf-8")
         for name, content in (extra_files or {}).items():
             (tdp / name).write_text(content, encoding="utf-8")
-        # env minimo: PATH + SYSTEMROOT (Windows lo necesita pa arrancar python), nada mas.
-        env = {"PATH": os.environ.get("PATH", "")}
+        # env minimo + DETERMINISMO: PYTHONHASHSEED=0 fija el orden de hash/dict/set;
+        # PYTHONDONTWRITEBYTECODE evita .pyc; sin el resto del entorno (sin secrets).
+        env = {"PATH": os.environ.get("PATH", ""), "PYTHONHASHSEED": "0",
+               "PYTHONDONTWRITEBYTECODE": "1", "TZ": "UTC"}
         for k in ("SYSTEMROOT", "TEMP", "TMP"):
             if os.environ.get(k):
                 env[k] = os.environ[k]

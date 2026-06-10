@@ -23,6 +23,7 @@ from __future__ import annotations
 import ast
 import math
 import operator
+import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -471,10 +472,54 @@ def _check_mutation_score(*, code: str, tests: str, min_score: float = 0.5,
                        f"matados)", "mutation_score", expected=min_score, got=score)
 
 
+_COV_DRIVER = (
+    "import coverage, pytest, os\n"
+    "cov = coverage.Coverage(source=['candidate'], branch=True)\n"
+    "cov.start()\n"
+    "pytest.main(['-q', 'test_candidate.py'])\n"
+    "cov.stop()\n"
+    "pct = cov.report(file=open(os.devnull, 'w'))\n"
+    "print(f'COVERAGE:{pct:.1f}')\n"
+)
+
+
+def _check_coverage(*, code: str, tests: str, min_cov: float = 80.0, timeout: float = 40.0, **_) -> CheckResult:
+    """Cobertura de tests (coverage.py, branch). Corre los tests con instrumentación en
+    sandbox y reporta % de líneas/ramas cubiertas. Completa la batería determinista
+    (tests + radon + mutation + coverage). passed = cobertura >= min_cov."""
+    from .sandbox import run_sandboxed
+    r = run_sandboxed(_COV_DRIVER, timeout=timeout,
+                      extra_files={"candidate.py": code,
+                                   "test_candidate.py": "from candidate import *\n" + tests})
+    m = re.search(r"COVERAGE:([\d.]+)", r.stdout)
+    if not m:
+        return CheckResult(False, f"sin cobertura (err: {r.stderr.strip()[:80]})", "coverage", got=0.0)
+    cov = float(m.group(1))
+    return CheckResult(cov >= min_cov, f"coverage={cov}% (min {min_cov}%)", "coverage",
+                       expected=min_cov, got=cov)
+
+
+def _check_deterministic(*, code: str, runs: int = 3, timeout: float = 10.0, **_) -> CheckResult:
+    """¿El código es REPRODUCIBLE? Lo corre `runs` veces en sandbox (con PYTHONHASHSEED=0,
+    TZ=UTC) y compara stdout+returncode. passed si TODAS las corridas dan idéntico. Caza
+    no-determinismo real (time/random/network) — lo que haría no-fiable un verdict de los
+    otros checkers. Hardening de la propia determinación."""
+    from .sandbox import run_sandboxed
+    outs = set()
+    for _ in range(max(2, runs)):
+        r = run_sandboxed(code, timeout=timeout)
+        outs.add((r.ok, r.stdout.strip()))
+    ok = len(outs) == 1
+    return CheckResult(ok, f"{'reproducible' if ok else 'NO-DETERMINISTA'}: {len(outs)} salida(s) "
+                       f"distinta(s) en {max(2,runs)} corridas", "deterministic")
+
+
 _REGISTRY: dict[str, Callable[..., CheckResult]] = {
     "arithmetic": _check_arithmetic,
     "code_quality": _check_code_quality,
     "mutation_score": _check_mutation_score,
+    "coverage": _check_coverage,
+    "deterministic": _check_deterministic,
     "determinant": _check_determinant,
     "json_schema": _check_json_schema,
     "predicate": _check_predicate,
