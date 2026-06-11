@@ -27,7 +27,8 @@ from mmorch import (fan_out, adversarial_verify, route, cascade, ensemble_verify
 from mmorch.config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
 from mmorch.metrics import summary
 from mmorch.learn import analyze as _learn_analyze, recommend as _learn_recommend
-from mmorch.memory import remember as _remember, stats as _mem_stats
+from mmorch.memory import (remember as _remember, stats as _mem_stats,
+                           consolidate as _mem_consolidate)
 from mmorch.classify import classify as _classify
 from mmorch.config import DEFAULT_ROUTER
 from mmorch.feedback import (record_outcome as _record_outcome,
@@ -379,6 +380,24 @@ def mmorch_orchestra() -> str:
     consultable del registry de nodos. Read-only, no spend."""
     from mmorch.nodes import summary
     return json.dumps(summary(), ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_consolidate(scope: str = "", sim_threshold: float = 0.92,
+                       apply: bool = False) -> str:
+    """Periodic memory maintenance (run every ~10 sessions): merge near-duplicate
+    semantic notes per scope (identical text or embedding cosine >= sim_threshold),
+    tombstoning losers — keeper is the verified note first, then the most recent.
+    Episodic raw log is never touched; the run itself is logged as an episodic
+    'consolidation' event. Default is a DRY RUN (reports what would merge); pass
+    apply=true to actually tombstone. Also reports live-note bytes + over_budget
+    flag (>50KB suggests distilling harder, it never auto-deletes by size).
+    Deterministic, zero API spend. Returns JSON {merged, tombstoned, live_notes,
+    bytes, over_budget, dry_run}."""
+    return json.dumps(
+        _mem_consolidate(scope or None, sim_threshold=sim_threshold,
+                         dry_run=not apply),
+        ensure_ascii=False)
 
 
 @mcp.tool()

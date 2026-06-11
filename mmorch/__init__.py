@@ -23,7 +23,7 @@ from .feedback import (record_outcome, ThompsonBandit,   # feedback loop (keysto
                        calibrate_conf, reliability_bins,  # #3 calibrated gating
                        contextual_arm)                    # #4 contextual bandit key
 from .memory import (write_episode, write_note, recall,   # memoria episodica+semantica
-                     tombstone_note, embed, Note)
+                     tombstone_note, embed, Note, consolidate)
 from .tournament import tournament, TournamentResult        # backlog: best-of-N pairwise
 from .bucketrank import bucket_rank, BucketRankResult        # backlog: graduar set en tiers
 from .loop import loop_until_done, LoopResult                # backlog: loop-until-dry
@@ -62,6 +62,7 @@ __all__ = [
     "record_outcome", "ThompsonBandit", "calibration", "read_outcomes",
     "calibrate_conf", "reliability_bins", "contextual_arm",
     "write_episode", "write_note", "recall", "tombstone_note", "embed", "Note",
+    "consolidate",
     "tournament", "TournamentResult", "bucket_rank", "BucketRankResult",
     "loop_until_done", "LoopResult",
     "hillclimb", "ClimbResult", "ClimbCtx", "ClimbStep",

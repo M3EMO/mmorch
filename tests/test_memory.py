@@ -164,3 +164,74 @@ def test_tombstoned_verified_excluded_from_coverage(tmp_path):
     M.tombstone_note(nid, path=db)
     s = M.stats(path=db)
     assert s["verified"] == 0 and s["verification_coverage"] == 0.0
+
+
+# ---- consolidacion periodica (Martin 2026: merge dups, compress, sin perder raw) ----
+def test_consolidate_merges_exact_duplicates(tmp_path):
+    db = tmp_path / "m.duckdb"
+    a = M.write_note("global", "el bandit elige umbral de cascade", path=db)
+    b = M.write_note("global", "el bandit elige umbral de cascade", path=db)
+    out = M.consolidate(path=db)
+    assert out["tombstoned"] == 1
+    s = M.stats(path=db)
+    assert s["semantic"] == 1
+    # se queda la mas nueva (b)
+    assert out["merged"][0]["kept"] == b and out["merged"][0]["tombstoned"] == [a]
+
+
+def test_consolidate_prefers_verified_over_recent(tmp_path):
+    db = tmp_path / "m.duckdb"
+    old_verified = M.write_note("global", "hecho importante", verified=True, path=db)
+    M.write_note("global", "hecho importante", path=db)  # mas nueva, sin verificar
+    out = M.consolidate(path=db)
+    assert out["merged"][0]["kept"] == old_verified
+
+
+def test_consolidate_respects_scope_boundaries(tmp_path):
+    db = tmp_path / "m.duckdb"
+    M.write_note("task_id", "misma nota", path=db)
+    M.write_note("global", "misma nota", path=db)
+    out = M.consolidate(path=db)
+    assert out["tombstoned"] == 0  # scopes distintos: NO se mergea
+
+
+def test_consolidate_dry_run_reports_without_touching(tmp_path):
+    db = tmp_path / "m.duckdb"
+    M.write_note("global", "nota repetida", path=db)
+    M.write_note("global", "nota repetida", path=db)
+    out = M.consolidate(dry_run=True, path=db)
+    assert out["tombstoned"] == 1 and out["dry_run"] is True
+    assert M.stats(path=db)["semantic"] == 2  # nada tocado
+
+
+def test_consolidate_logs_episodic_event(tmp_path):
+    db = tmp_path / "m.duckdb"
+    M.write_note("global", "x", path=db)
+    M.write_note("global", "x", path=db)
+    M.consolidate(path=db)
+    import duckdb
+    con = duckdb.connect(str(db))
+    kinds = [r[0] for r in con.execute("SELECT kind FROM episodic").fetchall()]
+    con.close()
+    assert "consolidation" in kinds  # auditabilidad: el log inmutable registra la corrida
+
+
+def test_consolidate_over_budget_flag(tmp_path):
+    db = tmp_path / "m.duckdb"
+    M.write_note("global", "nota larga " * 50, path=db)
+    out = M.consolidate(max_bytes=10, path=db)
+    assert out["over_budget"] is True
+    assert M.stats(path=db)["semantic"] == 1  # over-budget NO borra solo: flag gated
+
+
+def test_consolidate_near_duplicates_by_embedding(tmp_path):
+    if M._get_embedder() is None:
+        import pytest
+        pytest.skip("fastembed no instalado")
+    db = tmp_path / "m.duckdb"
+    M.write_note("global", "DeepSeek hace la generacion bulk barata cross-family", path=db)
+    M.write_note("global", "la generacion bulk barata cross-family la hace DeepSeek", path=db)
+    M.write_note("global", "el gato duerme arriba del router", path=db)
+    out = M.consolidate(sim_threshold=0.9, path=db)
+    assert out["tombstoned"] == 1  # los dos primeros se mergean, el gato sobrevive
+    assert M.stats(path=db)["semantic"] == 2

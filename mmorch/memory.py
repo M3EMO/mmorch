@@ -292,6 +292,85 @@ def _default_gen():
     return DEFAULT_GENERATOR
 
 
+# ---------------------------------------------------------------------------
+# Consolidacion periodica (Martin 2026: merge dups + compress, cada ~10 sesiones)
+# ---------------------------------------------------------------------------
+def _is_dup(a, b, thr: float) -> bool:
+    """a/b = (id, ts, scope, text, embedding, verified). Dup si texto identico
+    (normalizado) o cosine >= thr cuando ambos tienen embedding. Determinista,
+    cero API."""
+    if a[3].strip().lower() == b[3].strip().lower():
+        return True
+    if a[4] and b[4]:
+        return _cosine(list(a[4]), list(b[4])) >= thr
+    return False
+
+
+def _pick_keeper(cluster: list) -> tuple:
+    """Verificada > reciente: una nota validada no se pisa con una sin validar."""
+    return sorted(cluster, key=lambda r: (bool(r[5]), r[1]), reverse=True)[0]
+
+
+def consolidate(scope: str | None = None, *, sim_threshold: float = 0.92,
+                max_bytes: int = 50_000, dry_run: bool = False,
+                path: Path = _DB_PATH) -> dict:
+    """Mantenimiento periodico de la capa semantica (correr cada ~10 sesiones):
+    mergea near-duplicados POR scope (texto identico o cosine >= sim_threshold),
+    tombstoneando los perdedores — keeper: verificada primero, despues la mas
+    reciente. El episodic raw NUNCA se toca (invariante: inmutable) y la corrida
+    queda auditada como evento episodico kind='consolidation'.
+
+    No borra por tamano: si las notas vivas superan max_bytes solo flaggea
+    over_budget=True (decidir que podar es juicio del caller — gated).
+    dry_run=True reporta sin tocar nada."""
+    con = _connect(path)
+    try:
+        q = ("SELECT id, ts, scope, text, embedding, verified FROM semantic "
+             "WHERE NOT tombstone")
+        params: list = []
+        if scope:
+            q += " AND scope = ?"
+            params.append(scope)
+        rows = con.execute(q + " ORDER BY ts", params).fetchall()
+    finally:
+        con.close()
+
+    by_scope: dict[str, list] = {}
+    for r in rows:
+        by_scope.setdefault(r[2], []).append(r)
+
+    merged: list[dict] = []
+    tomb_ids: list[int] = []
+    for sc, items in by_scope.items():
+        used: set[int] = set()
+        for i, anchor in enumerate(items):
+            if anchor[0] in used:
+                continue
+            cluster = [anchor]
+            for cand in items[i + 1:]:
+                if cand[0] not in used and _is_dup(anchor, cand, sim_threshold):
+                    cluster.append(cand)
+            if len(cluster) > 1:
+                used.update(c[0] for c in cluster)
+                keep = _pick_keeper(cluster)
+                drop = [c[0] for c in cluster if c[0] != keep[0]]
+                merged.append({"kept": int(keep[0]), "tombstoned": [int(d) for d in drop]})
+                tomb_ids.extend(drop)
+
+    if not dry_run:
+        for nid in tomb_ids:
+            tombstone_note(int(nid), path=path)
+        write_episode("mmorch_self", "consolidation",
+                      {"scope": scope or "*", "clusters": len(merged),
+                       "tombstoned": len(tomb_ids)}, path=path)
+
+    live = [r for r in rows if r[0] not in set(tomb_ids)]
+    nbytes = sum(len(r[3].encode("utf-8")) for r in live)
+    return {"merged": merged, "tombstoned": len(tomb_ids),
+            "live_notes": len(live), "bytes": nbytes,
+            "over_budget": nbytes > max_bytes, "dry_run": dry_run}
+
+
 def stats(path: Path = _DB_PATH) -> dict:
     con = _connect(path)
     try:
