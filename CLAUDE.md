@@ -6,11 +6,13 @@ al trabajar en este directorio. La regla de ruteo corta vive en el CLAUDE.md glo
 Recurso escaso = **cupo** del plan Claude (no dolares). Generacion masiva y
 verificacion se delegan a modelos externos baratos por API para **liberar cupo**.
 Libreria: `~/.claude/orchestration/` (paquete `mmorch`, Python). Tambien expuesta
-como MCP server `mmorch` (13 tools: `mmorch_fan_out`, `mmorch_adversarial_verify`,
+como MCP server `mmorch` (20 tools: `mmorch_fan_out`, `mmorch_adversarial_verify`,
 `mmorch_metrics_summary`, `mmorch_route`, `mmorch_cascade`, `mmorch_ensemble_verify`,
 `mmorch_learn`, `mmorch_innovate`, `mmorch_remember`, `mmorch_recall`,
-`mmorch_memory_stats`, `mmorch_tournament`, `mmorch_bucket_rank`, `mmorch_classify`).
-Versionado git: tag `v0.8`. Reload Claude Code para cargar
+`mmorch_memory_stats`, `mmorch_tournament`, `mmorch_bucket_rank`, `mmorch_classify`,
+`mmorch_record_outcome`, `mmorch_feedback_stats`, `mmorch_check`, `mmorch_evolve_self`,
+`mmorch_orchestra`, `mmorch_consolidate`).
+Versionado git: tag `v1.0`. Reload Claude Code para cargar
 los tools nuevos.
 
 ## Decision dura: cupo (Workflow nativo) vs API barata (mmorch)
@@ -92,7 +94,7 @@ usándose a sí mismo: fan_out (divergir) → adversarial_verify cross-family (r
 (tie-break). NUNCA auto-modifica vivo sin tests verdes + gate humano. Detectó su propio gap
 (verdict no loggeado) y lo cerró.
 
-## Patrones completos (los 7 del catalogo + extras)
+## Patrones completos (los 8 del catalogo + extras)
 fan_out, adversarial_verify, route, cascade, ensemble_verify, **tournament**
 (best-of-N pairwise, juez cross-family, empate→Opus), **bucket_rank** (graduar set
 grande en tiers, O(n), items nunca se pierden), **loop_until_done** (loop-until-dry,
