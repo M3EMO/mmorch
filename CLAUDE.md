@@ -12,7 +12,7 @@ como MCP server `mmorch` (20 tools: `mmorch_fan_out`, `mmorch_adversarial_verify
 `mmorch_memory_stats`, `mmorch_tournament`, `mmorch_bucket_rank`, `mmorch_classify`,
 `mmorch_record_outcome`, `mmorch_feedback_stats`, `mmorch_check`, `mmorch_evolve_self`,
 `mmorch_orchestra`, `mmorch_consolidate`).
-Versionado git: tag `v1.0`. Reload Claude Code para cargar
+Versionado git: tag `v1.1`. Reload Claude Code para cargar
 los tools nuevos.
 
 ## Decision dura: cupo (Workflow nativo) vs API barata (mmorch)
@@ -86,7 +86,7 @@ los tools nuevos.
   timeout 60s, max_tokens 16384, parse-verdict anti-sicofancia (`passed:"false"`→False),
   verdict logging (habilita proxy de calidad para learn).
 - **Red de seguridad:** `tests/` (197 tests, API/embeddings mockeados o locales) = gate
-  para promover código nuevo. Git versionado (`~/.claude/orchestration`, tag `v0.9`).
+  para promover código nuevo. Git versionado (`~/.claude/orchestration`, tag `v1.1`).
 
 ## Auto-evolución contenida (Rasputin gated)
 mmorch se auto-audita (`AUDIT_*.md`) y se auto-idea capacidades (`INNOVATION_ROADMAP_*.md`)
