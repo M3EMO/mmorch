@@ -27,6 +27,7 @@ from .memory import (write_episode, write_note, recall,   # memoria episodica+se
 from .tournament import tournament, TournamentResult        # backlog: best-of-N pairwise
 from .bucketrank import bucket_rank, BucketRankResult        # backlog: graduar set en tiers
 from .loop import loop_until_done, LoopResult                # backlog: loop-until-dry
+from .hillclimb import hillclimb, ClimbResult, ClimbCtx, ClimbStep  # goal+rubric loop (Martin 2026)
 from .schema import (gated_json, validate, extract_json,     # §9 schema-gates
                      SchemaGateError)
 from .classify import classify, classify_and_act, ClassifyResult  # classify-and-act (front-door)
@@ -63,6 +64,7 @@ __all__ = [
     "write_episode", "write_note", "recall", "tombstone_note", "embed", "Note",
     "tournament", "TournamentResult", "bucket_rank", "BucketRankResult",
     "loop_until_done", "LoopResult",
+    "hillclimb", "ClimbResult", "ClimbCtx", "ClimbStep",
     "gated_json", "validate", "extract_json", "SchemaGateError",
     "classify", "classify_and_act", "ClassifyResult",
     "check", "register_checker", "CheckResult", "safe_arith", "checkers_available",
