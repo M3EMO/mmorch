@@ -52,3 +52,23 @@ def test_recommend_surfaces_bandit_leader(monkeypatch):
                             "m@0.9": {"mean": 0.40, "n": 15}}})())
     recs = L.recommend()
     assert any("BANDIT" in r and "m@0.5" in r for r in recs)
+
+
+def test_recommend_flags_low_memory_coverage(monkeypatch):
+    monkeypatch.setattr(L, "read_events", lambda: [])
+    monkeypatch.setattr(L, "calibration", lambda: {"ece": None, "n": 0, "by_arm": {}})
+    monkeypatch.setattr(L, "ThompsonBandit", lambda: type("B", (), {"stats": lambda self: {}})())
+    monkeypatch.setattr(L, "memory_stats", lambda: {
+        "semantic": 10, "verified": 2, "verification_coverage": 0.2})
+    recs = L.recommend()
+    assert any("MEMORIA" in r and "20%" in r for r in recs)
+
+
+def test_recommend_silent_on_good_or_thin_coverage(monkeypatch):
+    monkeypatch.setattr(L, "read_events", lambda: [])
+    monkeypatch.setattr(L, "calibration", lambda: {"ece": None, "n": 0, "by_arm": {}})
+    monkeypatch.setattr(L, "ThompsonBandit", lambda: type("B", (), {"stats": lambda self: {}})())
+    # pocas notas -> sin senal suficiente, no flaggear.
+    monkeypatch.setattr(L, "memory_stats", lambda: {
+        "semantic": 3, "verified": 0, "verification_coverage": 0.0})
+    assert not any("MEMORIA" in r for r in L.recommend())

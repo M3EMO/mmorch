@@ -100,3 +100,67 @@ def test_remember_verify_refuted_drops_note(tmp_path, monkeypatch):
     assert out["persisted"] is False and out["refutations"] == ["omite hecho critico"]
     s = M.stats(path=db)
     assert s["episodic"] == 1 and s["semantic"] == 0  # nota infiel descartada, raw queda
+
+
+# ---- verification coverage (Martin 2026: % del aprendizaje validado) ----
+def test_write_note_verified_flag_in_stats(tmp_path):
+    db = tmp_path / "m.duckdb"
+    M.write_note("global", "nota verificada", verified=True, path=db)
+    M.write_note("global", "nota sin verificar", path=db)
+    s = M.stats(path=db)
+    assert s["verified"] == 1 and s["semantic"] == 2
+    assert s["verification_coverage"] == 0.5
+
+
+def test_coverage_empty_db_is_none(tmp_path):
+    s = M.stats(path=tmp_path / "m.duckdb")
+    assert s["verified"] == 0 and s["verification_coverage"] is None
+
+
+def test_remember_verify_passed_marks_note_verified(tmp_path, monkeypatch):
+    db = tmp_path / "m.duckdb"
+    monkeypatch.setattr(P, "call", _mock_call("nota fiel"))
+    monkeypatch.setattr(PAT, "adversarial_verify",
+                        lambda *a, **k: PAT.Verdict(True, 0.9, [], "", "gemini-2.5-flash", 0.0))
+    out = M.remember("global", "episodio importante", verify=True, path=db)
+    assert out["persisted"]
+    s = M.stats(path=db)
+    assert s["verified"] == 1 and s["verification_coverage"] == 1.0
+
+
+def test_remember_without_verify_counts_zero_coverage(tmp_path, monkeypatch):
+    db = tmp_path / "m.duckdb"
+    monkeypatch.setattr(P, "call", _mock_call("nota sin chequear"))
+    M.remember("global", "episodio cualquiera", path=db)
+    s = M.stats(path=db)
+    assert s["verified"] == 0 and s["verification_coverage"] == 0.0
+
+
+def test_old_schema_migrates_verified_column(tmp_path):
+    # DB creada antes de la columna `verified` -> _connect la agrega sin romper.
+    import duckdb
+    db = tmp_path / "m.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute("""
+        CREATE TABLE semantic (
+            id BIGINT, ts DOUBLE, scope VARCHAR, text VARCHAR,
+            embedding DOUBLE[], emb_model VARCHAR, dim INTEGER,
+            source_ids VARCHAR, tombstone BOOLEAN DEFAULT FALSE);
+        CREATE SEQUENCE seq_semantic START 1;
+        CREATE TABLE episodic (id BIGINT, ts DOUBLE, scope VARCHAR, kind VARCHAR,
+                               actor VARCHAR, payload VARCHAR);
+        CREATE SEQUENCE seq_episodic START 1;
+    """)
+    con.close()
+    M.write_note("global", "nota post-migracion", verified=True, path=db)
+    s = M.stats(path=db)
+    assert s["verified"] == 1 and s["verification_coverage"] == 1.0
+
+
+def test_tombstoned_verified_excluded_from_coverage(tmp_path):
+    db = tmp_path / "m.duckdb"
+    nid = M.write_note("global", "verificada pero borrada", verified=True, path=db)
+    M.write_note("global", "viva sin verificar", path=db)
+    M.tombstone_note(nid, path=db)
+    s = M.stats(path=db)
+    assert s["verified"] == 0 and s["verification_coverage"] == 0.0

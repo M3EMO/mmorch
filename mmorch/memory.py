@@ -97,6 +97,14 @@ def _connect(path: Path = _DB_PATH):
         );
         CREATE SEQUENCE IF NOT EXISTS seq_semantic START 1;
     """)
+    # migracion: columna `verified` (verification coverage, Martin 2026) en DBs previas.
+    # OJO: no usar ADD COLUMN IF NOT EXISTS — en DuckDB re-aplica el DEFAULT y PISA
+    # los valores existentes cuando la columna ya esta. Chequear el schema primero.
+    cols = {r[0] for r in con.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = 'semantic'").fetchall()}
+    if "verified" not in cols:
+        con.execute("ALTER TABLE semantic ADD COLUMN verified BOOLEAN DEFAULT FALSE")
     return con
 
 
@@ -128,18 +136,21 @@ def write_episode(scope: str, kind: str, payload: dict | str, *,
 
 
 def write_note(scope: str, text: str, *, source_ids: list[int] | None = None,
-               path: Path = _DB_PATH) -> int:
+               verified: bool = False, path: Path = _DB_PATH) -> int:
     """Persiste una nota destilada en la capa semantica + embedding (FIX C versionado).
-    Si fastembed no esta -> embedding NULL, recall cae a coarse-only para esa nota."""
+    Si fastembed no esta -> embedding NULL, recall cae a coarse-only para esa nota.
+    `verified=True` marca la nota como validada independientemente (cross-family o
+    checker) — alimenta verification_coverage en stats()."""
     con = _connect(path)
     try:
         sid = con.execute("SELECT nextval('seq_semantic')").fetchone()[0]
         vec = embed(text)
         con.execute(
-            "INSERT INTO semantic VALUES (?,?,?,?,?,?,?,?,FALSE)",
+            "INSERT INTO semantic (id, ts, scope, text, embedding, emb_model, dim, "
+            "source_ids, tombstone, verified) VALUES (?,?,?,?,?,?,?,?,FALSE,?)",
             [sid, time.time(), scope, text, vec,
              _EMB_MODEL if vec else None, _EMB_DIM if vec else None,
-             json.dumps(source_ids or [])])
+             json.dumps(source_ids or []), bool(verified)])
         return int(sid)
     finally:
         con.close()
@@ -268,7 +279,9 @@ def remember(scope: str, episode_text: str, *, kind: str = "note", actor: str = 
         out["refutations"] = v.refutations
         if not v.passed:
             return out  # nota infiel -> solo queda el raw (FIX B la cubre en recall)
-    nid = write_note(scope, note, source_ids=[eid], path=path)
+    # verified=True solo si la nota PASO la verificacion cross-family (verify=True
+    # y no refutada — si refutada ya retornamos arriba). Sin verify: queda UNVERIFIED.
+    nid = write_note(scope, note, source_ids=[eid], verified=verify, path=path)
     out["note_id"] = nid
     out["persisted"] = True
     return out
@@ -285,7 +298,12 @@ def stats(path: Path = _DB_PATH) -> dict:
         ep = con.execute("SELECT count(*) FROM episodic").fetchone()[0]
         se = con.execute("SELECT count(*) FROM semantic WHERE NOT tombstone").fetchone()[0]
         embd = con.execute("SELECT count(*) FROM semantic WHERE embedding IS NOT NULL").fetchone()[0]
+        ver = con.execute("SELECT count(*) FROM semantic WHERE verified AND NOT tombstone").fetchone()[0]
+        # verification coverage (Martin 2026): % del aprendizaje vivo validado
+        # independientemente. Predice utilidad de la memoria (73% Fable vs 17% Opus).
         return {"episodic": int(ep), "semantic": int(se), "embedded": int(embd),
+                "verified": int(ver),
+                "verification_coverage": (round(ver / se, 4) if se else None),
                 "emb_backend": (None if _get_embedder() is None else _EMB_MODEL)}
     finally:
         con.close()

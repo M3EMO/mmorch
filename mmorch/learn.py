@@ -13,6 +13,7 @@ from collections import defaultdict
 from .metrics import read_events
 from .config import family_of, spec
 from .feedback import calibration, ThompsonBandit
+from .memory import stats as memory_stats
 
 
 def analyze() -> dict:
@@ -134,6 +135,20 @@ def recommend() -> list[str]:
         recs.append(
             f"BANDIT: brazo lider '{best[0]}' mean={best[1]['mean']} (n={best[1]['n']}). "
             f"Si domina con margen, fijar ese umbral/modelo como default de cascade.")
+    # 6. Verification coverage de la memoria (Martin 2026: coverage predice utilidad —
+    #    notas sin verificar son aprendizaje no validado que recall sirve como si lo fuera).
+    try:
+        ms = memory_stats()
+    except Exception:
+        ms = None
+    if ms and ms.get("semantic", 0) >= 5:
+        cov = ms.get("verification_coverage")
+        if cov is not None and cov < 0.5:
+            recs.append(
+                f"MEMORIA: verification coverage {cov:.0%} "
+                f"({ms.get('verified', 0)}/{ms['semantic']} notas verificadas, <50%). "
+                f"Activar verify=True en remember() para hechos que se van a consultar — "
+                f"una nota infiel servida por recall propaga el error a costo cero aparente.")
     if not recs:
         recs.append("Sin recomendaciones: datos insuficientes o ya optimo.")
     return recs

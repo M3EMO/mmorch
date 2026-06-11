@@ -383,8 +383,10 @@ def mmorch_orchestra() -> str:
 
 @mcp.tool()
 def mmorch_memory_stats() -> str:
-    """Memory counts: episodic events, live semantic notes, embedded notes, and the
-    active embedding backend (or null if fastembed absent). Read-only, no spend."""
+    """Memory counts: episodic events, live semantic notes, embedded notes, verified
+    notes + verification_coverage (share of live notes independently validated — low
+    coverage means recall serves unvalidated learning), and the active embedding
+    backend (or null if fastembed absent). Read-only, no spend."""
     return json.dumps(_mem_stats(), ensure_ascii=False)
 
 
