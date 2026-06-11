@@ -87,6 +87,26 @@ def test_embed_fn_pluggable_overrides_module_embed(monkeypatch):
     assert ap > bp and ap > 0
 
 
+def test_auto_scale_requires_fresh_evidence(monkeypatch):
+    monkeypatch.setattr(SP, "embed", _fake_embed)
+    outs = []
+    for _ in range(6):
+        outs.append({"arm": "g", "reward": 1.0, "context": "img:x"})
+        outs.append({"arm": "g", "reward": 0.0, "context": "sql:x"})
+    # mismo dataset que el escalon anterior (n_seen igual) -> NO sube aunque mejore
+    new, gate = SP.auto_scale(0.1, outs, n_seen_last_step=len(outs))
+    assert new == 0.1 and not gate
+    # con >= _MIN_FRESH outcomes nuevos -> SI sube
+    fresh = outs + [{"arm": "g", "reward": 1.0, "context": "img:y"}] * SP._MIN_FRESH
+    new2, gate2 = SP.auto_scale(0.1, fresh, n_seen_last_step=len(outs))
+    assert new2 == 0.2 and not gate2
+    # bajar por empeoramiento NO exige frescura (seguridad): contexto anti-correlacionado
+    bad = [{"arm": "g", "reward": 0.0, "context": "img:x"},
+           {"arm": "g", "reward": 1.0, "context": "img:x"}] * 6
+    new3, _ = SP.auto_scale(0.3, bad, n_seen_last_step=len(bad))
+    assert new3 <= 0.3
+
+
 def test_auto_scale_drops_when_no_signal(monkeypatch):
     monkeypatch.setattr(SP, "embed", _fake_embed)
     # contexto NO predice (reward aleatorio respecto a ctx) -> no sube

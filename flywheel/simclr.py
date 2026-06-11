@@ -157,7 +157,8 @@ def main():
     vocab = build_vocab(toks)
     print(f"vocab={len(vocab)}", flush=True)
 
-    enc = Encoder(len(vocab)); proj = Projector(enc.out_dim)
+    HID = int(sys.argv[3]) if len(sys.argv) > 3 else 128
+    enc = Encoder(len(vocab), hid=HID); proj = Projector(enc.out_dim)
     opt = torch.optim.Adam(list(enc.parameters()) + list(proj.parameters()), lr=2e-3)
     rng = random.Random(SEED)
     idx = list(range(len(toks)))

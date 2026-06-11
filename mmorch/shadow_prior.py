@@ -127,12 +127,22 @@ def offline_improvement(outcomes: list[dict] | None = None, scale: float = SCALE
     return 0.0 if b0 == 0 else (b0 - b1) / b0
 
 
+_MIN_FRESH = 50   # outcomes nuevos exigidos entre escalones (anti re-evaluar el mismo set)
+
+
 def auto_scale(current: float, outcomes: list[dict] | None = None,
-               threshold: float = 0.02, embed_fn=None) -> tuple[float, bool]:
+               threshold: float = 0.02, embed_fn=None,
+               n_seen_last_step: int | None = None) -> tuple[float, bool]:
     """Ajusta scale en pasos de ±0.1 segun mejora offline. Devuelve (nuevo_scale, needs_gate).
-    Sube solo si mejora>threshold; baja si empeora. Clamp [0, SCALE_MAX]; querer >MAX => gate."""
-    imp = offline_improvement(outcomes, scale=max(current, SCALE_MIN), embed_fn=embed_fn)
+    Sube solo si mejora>threshold; baja si empeora. Clamp [0, SCALE_MAX]; querer >MAX => gate.
+    Anti-overfit: si se pasa n_seen_last_step (cuantos outcomes habia en el escalon anterior),
+    NO sube sin >= _MIN_FRESH outcomes nuevos — cada escalon exige evidencia fresca, no
+    re-leer el mismo dataset. (Bajar por empeoramiento NO requiere frescura: seguridad.)"""
+    rows = outcomes if outcomes is not None else read_outcomes()
+    imp = offline_improvement(rows, scale=max(current, SCALE_MIN), embed_fn=embed_fn)
     if imp > threshold:
+        if n_seen_last_step is not None and len(rows) - n_seen_last_step < _MIN_FRESH:
+            return current, False                  # sin evidencia nueva: no sube
         proposed = round(current + 0.1, 4)
         if proposed > SCALE_MAX:
             return SCALE_MAX, True                 # tope alcanzado: subir mas = humano
