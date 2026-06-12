@@ -47,14 +47,17 @@ def _extract_block(text: str) -> str:
 # Estado (dict JSON-serializable: viaja por MCP, resumible entre turnos)
 # --------------------------------------------------------------------------- #
 def start_rubric(task: str, criteria: list[dict], *, K: int = 5, arm: str = "",
-                 gen_model: str = "deepseek-chat",
-                 judge_model: str = "gemini-2.5-flash") -> dict:
+                 gen_model: str | None = None,
+                 judge_model: str | None = None) -> dict:
     """Crea el estado del loop. criteria = lista de:
       {"id": str, "desc": str, "kind": "checkable", "checker": str, "ctx": {...}}
         — ctx admite placeholders "{attempt}" (texto crudo) y "{attempt_code}"
           (bloque de codigo extraido del intento).
       {"id": str, "desc": str, "kind": "subjective"}
     Regla dura OneFlow: en modo API gen y judge deben ser cross-family."""
+    from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
+    gen_model = gen_model or DEFAULT_GENERATOR
+    judge_model = judge_model or DEFAULT_VERIFIER
     for c in criteria:
         if c.get("kind") not in ("checkable", "subjective"):
             raise ValueError(f"criterio {c.get('id')}: kind invalido")
@@ -249,12 +252,15 @@ def _close_loop(state: dict) -> None:
 # MODO API: loop completo automatico (DeepSeek genera, Gemini juzga, centavos)
 # --------------------------------------------------------------------------- #
 def run_rubric_loop(task: str, criteria: list[dict], *, K: int = 5,
-                    gen_model: str = "deepseek-chat",
-                    judge_model: str = "gemini-2.5-flash",
+                    gen_model: str | None = None,
+                    judge_model: str | None = None,
                     gen_fn=None, judge_fn=None, arm: str = "") -> dict:
     """Modo API (o cualquier transporte via gen_fn/judge_fn inyectados — asi un test
     o el modo plan reusan el MISMO gerente). Devuelve el estado final."""
     from .providers import call as _call
+    from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
+    gen_model = gen_model or DEFAULT_GENERATOR
+    judge_model = judge_model or DEFAULT_VERIFIER
 
     def _api(model):
         def fn(prompt):

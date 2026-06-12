@@ -97,6 +97,10 @@ def call(
 
     client = _client(model_key)
     t0 = time.perf_counter()
+    if s.extra_body:
+        # extras por-modelo (ej DeepSeek V4: thinking disabled pa bulk). El caller
+        # puede pisarlos pasando su propio extra_body en kw.
+        kw.setdefault("extra_body", dict(s.extra_body))
     try:
         resp = client.chat.completions.create(
             model=s.model_id,

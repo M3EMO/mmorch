@@ -20,32 +20,59 @@ class ModelSpec:
     price_in: float     # USD / 1M input tokens
     price_out: float    # USD / 1M output tokens
     role: str           # design role (§4)
+    extra_body: tuple = ()  # request-body extras como tuple de pares (hashable);
+                            # ej (("thinking", {"type": "disabled"}),) pa DeepSeek V4
 
 
 # OpenAI-compatible endpoints. Anthropic/Opus is NOT here on purpose: it is the
 # orchestrator (Claude Code itself / cupo), never invoked as an external node.
 REGISTRY: dict[str, ModelSpec] = {
+    # Keys internas estables (no romper brazos del bandit); model_id EXPLICITO v4 —
+    # los alias deepseek-chat/reasoner ya no figuran en /models (deprecacion probable).
     "deepseek-chat": ModelSpec(
         key="deepseek-chat",
         family="deepseek",
         provider="deepseek",
-        model_id="deepseek-chat",          # V4 Flash, no-thinking
+        model_id="deepseek-v4-flash",      # explicito; thinking APAGADO pa bulk
         base_url="https://api.deepseek.com/v1",
         api_key_env="DEEPSEEK_API_KEY",
         price_in=0.14,
         price_out=0.28,
         role="bulk generation (no-thinking)",
+        extra_body=(("thinking", {"type": "disabled"}),),
     ),
     "deepseek-reasoner": ModelSpec(
         key="deepseek-reasoner",
         family="deepseek",
         provider="deepseek",
-        model_id="deepseek-reasoner",      # V4 Flash, thinking
+        model_id="deepseek-v4-flash",      # explicito; thinking default (razonamiento)
         base_url="https://api.deepseek.com/v1",
         api_key_env="DEEPSEEK_API_KEY",
         price_in=0.14,
         price_out=0.28,
         role="independent reasoning/audit (thinking)",
+    ),
+    "deepseek-v4-pro": ModelSpec(
+        key="deepseek-v4-pro",
+        family="deepseek",
+        provider="deepseek",
+        model_id="deepseek-v4-pro",        # premium: ejecutor code-heavy (rubric_loop)
+        base_url="https://api.deepseek.com/v1",
+        api_key_env="DEEPSEEK_API_KEY",
+        price_in=1.74,
+        price_out=3.48,
+        role="code-heavy executor / hard tasks (thinking)",
+    ),
+    "gemini-3.1-flash-lite": ModelSpec(
+        key="gemini-3.1-flash-lite",
+        family="google",
+        provider="google",
+        model_id="gemini-3.1-flash-lite",
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        api_key_env="GEMINI_API_KEY",
+        price_in=0.25,
+        price_out=1.50,
+        role="cross-family verifier / judge (Tier 2)",
     ),
     "gemini-2.5-flash": ModelSpec(
         key="gemini-2.5-flash",
@@ -56,7 +83,7 @@ REGISTRY: dict[str, ModelSpec] = {
         api_key_env="GEMINI_API_KEY",
         price_in=0.30,
         price_out=2.50,
-        role="cross-family verifier (Tier 2)",
+        role="cross-family verifier (legacy fallback)",
     ),
     "gemini-2.5-flash-lite": ModelSpec(
         key="gemini-2.5-flash-lite",
@@ -84,9 +111,9 @@ REGISTRY: dict[str, ModelSpec] = {
 }
 
 # Default node assignments for the MVP slice.
-DEFAULT_GENERATOR = "deepseek-chat"
-DEFAULT_VERIFIER = "gemini-2.5-flash"   # cross-family vs deepseek (config B, §18.4)
-DEFAULT_ROUTER = "gemini-2.5-flash-lite"
+DEFAULT_GENERATOR = "deepseek-chat"        # -> deepseek-v4-flash no-thinking
+DEFAULT_VERIFIER = "gemini-3.1-flash-lite"  # cross-family vs deepseek; -40% out vs 2.5-flash
+DEFAULT_ROUTER = "gemini-2.5-flash-lite"    # sigue siendo el out/M mas barato servido
 
 
 def family_of(model_key: str) -> str:
