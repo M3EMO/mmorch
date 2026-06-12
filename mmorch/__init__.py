@@ -50,6 +50,8 @@ from .shadow_prior import (ShadowPrior, offline_improvement,                # Fa
                            auto_scale as shadow_auto_scale)
 from .code_embedder import embed_code, available as code_embedder_available  # flywheel asset (numpy)
 from .code_loop import run_code_task, CodeTaskResult                          # Fase 5 wire (lazo cerrado)
+from .rubric_loop import (start_rubric, next_action as rubric_next,           # loop autocorreccion
+                          submit as rubric_submit, run_rubric_loop)            # (plan o API)
 
 __all__ = [
     "REGISTRY", "family_of", "ModelSpec", "call",
@@ -82,4 +84,5 @@ __all__ = [
     "ShadowPrior", "offline_improvement", "shadow_auto_scale",
     "embed_code", "code_embedder_available",
     "run_code_task", "CodeTaskResult",
+    "start_rubric", "rubric_next", "rubric_submit", "run_rubric_loop",
 ]

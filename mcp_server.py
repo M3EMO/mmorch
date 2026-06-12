@@ -409,5 +409,42 @@ def mmorch_memory_stats() -> str:
     return json.dumps(_mem_stats(), ensure_ascii=False)
 
 
+@mcp.tool()
+def mmorch_rubric_start(task: str, criteria: list, K: int = 5) -> str:
+    """Start an autocorrection RUBRIC LOOP in PLAN mode (the session's own models do the
+    LLM work = plan quota, ZERO API spend; deterministic checkers run server-side for $0).
+    criteria: list of {"id","desc","kind":"checkable","checker","ctx"} or {"id","desc",
+    "kind":"subjective"}. ctx strings may use "{attempt_code}"/"{attempt}" placeholders.
+    Returns the loop STATE (JSON) — pass it to mmorch_rubric_next to get the next action.
+    Drive it: next -> (you execute the prompt with a SEPARATE subagent per role; executor
+    and judge must NEVER share context) -> submit -> repeat until role=done|escalate."""
+    from mmorch.rubric_loop import start_rubric
+    return json.dumps(start_rubric(task, list(criteria), K=K), ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_rubric_next(state: dict) -> str:
+    """Next action for a rubric loop state: {"role":"executor"|"judge","prompt":...} —
+    run the prompt in a FRESH subagent (separate context per role, judge never generates)
+    and feed the output to mmorch_rubric_submit. Or {"role":"done"|"escalate","summary"}:
+    done = 100% rubric verified; escalate = K exhausted, summary carries pending criteria
+    with executable evidence — hand it to the human. Deterministic, no spend."""
+    from mmorch.rubric_loop import next_action
+    return json.dumps(next_action(dict(state)), ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_rubric_submit(state: dict, output: str) -> str:
+    """Submit the current role's output to the rubric-loop MANAGER (deterministic).
+    Executor outputs trigger server-side CHECKER re-execution (evidence = local sandbox
+    runs, never the executor's claims). Judge outputs must be the JSON verdict array;
+    illegible JSON = refute-by-default. On done/escalate the loop self-closes: reward =
+    verified rubric fraction -> record_outcome(context=task) feeding bandit + ShadowPrior,
+    and a verified rule is distilled to memory if corrections happened. Returns the new
+    state — chain into mmorch_rubric_next."""
+    from mmorch.rubric_loop import submit
+    return json.dumps(submit(dict(state), output), ensure_ascii=False)
+
+
 if __name__ == "__main__":
     mcp.run()
