@@ -63,6 +63,7 @@ from .schedule import is_off_peak, advisory as offpeak_advisory, spend_by_period
 from .effort import model_for_effort, effort_steps, escalation_models         # effort-routing knob
 from .scout import (scout as run_scout, gather_environment,                    # Fable: entorno-primero
                     scout_delta)   # alias run_scout: NO shadowear el submodulo mmorch.scout
+from .events import emit as emit_event, bus as event_bus, Event                # nivel 3: bus live
 
 __all__ = [
     "REGISTRY", "family_of", "ModelSpec", "call",
@@ -104,4 +105,5 @@ __all__ = [
     "is_off_peak", "offpeak_advisory", "spend_by_period",
     "model_for_effort", "effort_steps", "escalation_models",
     "run_scout", "gather_environment", "scout_delta",
+    "emit_event", "event_bus", "Event",
 ]

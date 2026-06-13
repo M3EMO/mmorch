@@ -143,12 +143,21 @@ def next_action(state: dict) -> dict:
 
 def submit(state: dict, output: str) -> dict:
     """Entrega el output del rol actual al GERENTE. Muta y devuelve el estado."""
+    from .events import emit
+    jid = state.get("id", "")
     if state["phase"] == "executor":
         state["attempt"] = output
         state["iteration"] += 1
         state["history"].append({"iter": state["iteration"], "role": "executor",
                                  "chars": len(output)})
+        emit("step", "running", job_id=jid, node="checkers",
+             detail=f"iter {state['iteration']}: ejecutando checkers")
         _run_checkables(state)
+        for c in state["criteria"]:
+            if c.get("kind") == "checkable":
+                r = state["results"].get(c["id"], {})
+                emit("step", "done" if r.get("cumple") else "error", job_id=jid,
+                     node=f"check:{c.get('checker')}", detail=str(r.get("evidencia", ""))[:120])
         # traza pal flywheel (idea Hermes trajectory-compression): codigo del paso +
         # que criterios fallaban EN ese paso. Cada paso = ejemplo (code, label=ejecucion).
         failed = [c["id"] for c in state["criteria"]
@@ -162,6 +171,8 @@ def submit(state: dict, output: str) -> dict:
             _maybe_finish(state)
         return state
     if state["phase"] == "judge":
+        emit("step", "running", job_id=jid, node=f"judge:{state.get('judge_model')}",
+             detail="evaluando criterios subjetivos")
         _apply_judge(state, output)
         _maybe_finish(state)
         return state
@@ -220,14 +231,19 @@ def _apply_judge(state: dict, output: str) -> None:
 
 
 def _maybe_finish(state: dict) -> None:
+    from .events import emit
+    jid = state.get("id", "")
     if not _pending(state):
         state["phase"] = "done"
+        emit("job", "done", job_id=jid, detail=f"rubrica 100% en {state['iteration']} iter")
         _close_loop(state)
     elif state["iteration"] >= state["K"]:
         state["phase"] = "escalate"
+        emit("job", "gate", job_id=jid, detail=f"K={state['K']} agotado -> escala a humano")
         _close_loop(state)
     else:
         state["phase"] = "executor"
+        emit("step", "running", job_id=jid, node="executor", detail="corrigiendo pendientes")
 
 
 def _summary(state: dict) -> dict:

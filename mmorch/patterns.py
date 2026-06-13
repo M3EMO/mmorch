@@ -38,6 +38,8 @@ def fan_out(
     """
     def _one(idx_prompt):
         i, p = idx_prompt
+        from .events import emit
+        emit("call", "running", node=f"gen[{i}]:{gen_model}", detail="fan_out")
         msgs = []
         if system:
             msgs.append({"role": "system", "content": system})
@@ -56,6 +58,9 @@ def fan_out(
             )
         except Exception:
             res = None
+        from .events import emit
+        emit("call", "done" if res is not None else "error", node=f"gen[{i}]:{gen_model}",
+             detail="fan_out", cost_usd=(res.cost_usd if res else 0.0))
         return i, res
 
     results: list[CallResult | None] = [None] * len(prompts)

@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **42 módulos · 26 MCP tools · 259 tests.**
+_Auto-generado por `mmorch.docgen`._ **44 módulos · 26 MCP tools · 267 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -47,6 +47,7 @@ _Auto-generado por `mmorch.docgen`._ **42 módulos · 26 MCP tools · 259 tests.
 | `mmorch/dataset.py` | dataset — construye un dataset de CALIDAD DE CÓDIGO desde git history, SIN labels |
 | `mmorch/effort.py` | effort — knob explicito de esfuerzo -> tier de modelo (patron Fable 5: 'effort' controla |
 | `mmorch/ensemble.py` | ensemble_verify (I-3) — K escepticos cross-family + voto mayoria. |
+| `mmorch/events.py` | events — bus de progreso in-process pa la UI live (nivel 3). El orquestador emite |
 | `mmorch/evolve.py` | evolve — subset DGM-inspirado, GATED (research: vault/research/ |
 | `mmorch/factory.py` | factory — mmorch como FÁBRICA de modelos (no ES el modelo, lo CONSTRUYE/entrena). |
 | `mmorch/feedback.py` | feedback — el lazo que faltaba (la 'loss' ausente). mmorch genera/verifica/ |
@@ -71,6 +72,7 @@ _Auto-generado por `mmorch.docgen`._ **42 módulos · 26 MCP tools · 259 tests.
 | `mmorch/schedule.py` | schedule — ADVISORY de ventana off-peak (DeepSeek descuenta fuerte fuera de hora pico). |
 | `mmorch/schema.py` | schema (§9) — structured-output gates. Hoy los parsers de mmorch son best-effort |
 | `mmorch/scout.py` | scout — pre-pass ENTORNO-PRIMERO (el patron central de Fable 5: 'primero aprende el |
+| `mmorch/server.py` | server — mmorch VISUAL nivel 3: progreso live de cada subagente + control TOTAL remoto. |
 | `mmorch/shadow_prior.py` | shadow_prior — Fase 5: una capa que PRIMEA al ThompsonBandit con un prior contextual, |
 | `mmorch/tournament.py` | tournament — elegir EL mejor de pocos candidatos por gusto/calidad (naming, |
 | `mmorch/trajectory.py` | trajectory — robo de Hermes: 'trajectory compression para entrenar la proxima |
@@ -141,6 +143,26 @@ MCP tools (server `mmorch`): `mmorch_adversarial_verify`, `mmorch_bucket_rank`, 
 
 **Restart Claude Code** to load new tools.
 <!-- /mmorch:auto:tools -->
+
+## Live UI + remote control (level 3)
+
+A Starlette server (zero new deps — Starlette + uvicorn already present) gives a live view of
+every subagent and full remote control. It runs jobs **in-process** and streams progress over
+SSE from an in-memory event bus (`mmorch/events.py`) — no cross-process JSONL tailing. The
+JSONL stays the durable audit log.
+
+```
+MMORCH_SERVER_TOKEN=<secret> MMORCH_SERVER_HOST=<tailnet-ip> \
+  .venv/Scripts/python.exe -m mmorch.server      # default 127.0.0.1:8787
+```
+
+- `GET /` live dashboard · `GET /events` SSE feed · `GET /state` snapshot
+- `POST /run/rubric`, `/run/fanout` start jobs · `POST /kill/{id}`, `/approve/{id}` control
+- Auth: `X-Token` header (or `?token=` for `EventSource`) vs `MMORCH_SERVER_TOKEN`.
+- **Security:** run ONLY behind a private tunnel (Tailscale recommended) bound to the tailnet
+  IP — never `0.0.0.0` on the public internet. Remote control is the human gate exercised
+  remotely-but-authenticated; mmorch still never auto-applies red-zone on its own, and
+  `BudgetKeeper`/`goal_guard` stay active as override-able safety nets.
 
 ## Smoke test
 
