@@ -135,6 +135,13 @@ def submit(state: dict, output: str) -> dict:
         state["history"].append({"iter": state["iteration"], "role": "executor",
                                  "chars": len(output)})
         _run_checkables(state)
+        # traza pal flywheel (idea Hermes trajectory-compression): codigo del paso +
+        # que criterios fallaban EN ese paso. Cada paso = ejemplo (code, label=ejecucion).
+        failed = [c["id"] for c in state["criteria"]
+                  if not state["results"].get(c["id"], {}).get("cumple", False)]
+        state.setdefault("trace", []).append(
+            {"iter": state["iteration"], "code": _extract_block(output)[:4000],
+             "failed": failed})
         if _pending(state, "subjective"):
             state["phase"] = "judge"
         else:
@@ -246,6 +253,18 @@ def _close_loop(state: dict) -> None:
                 verified=True)
         except Exception:
             pass
+    # Captura/compresion de trayectoria (idea Hermes) -> dataset del flywheel + skill.
+    try:
+        from .trajectory import record_trajectory
+        record_trajectory(state)
+    except Exception:
+        pass
+    # nudge (idea Hermes): cada N cierres, mantenimiento de memoria automatico.
+    try:
+        from .nudge import tick
+        tick()
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- #

@@ -76,5 +76,15 @@ def run_code_task(
             bandit.update(res.arm, reward)
         record_outcome(res.arm, reward, pattern="code_loop", source="execution",
                        predicted_conf=res.confidence, context=prompt)
+    try:   # trayectoria pal flywheel (Hermes trajectory-compression)
+        from .trajectory import record_simple
+        record_simple(prompt, code, passed, arm=res.arm)
+    except Exception:
+        pass
+    try:   # nudge: mantenimiento periodico de memoria (Hermes)
+        from .nudge import tick
+        tick()
+    except Exception:
+        pass
     return CodeTaskResult(code, passed, reward, res.arm, res.escalate, res.confidence,
                           res.cost_usd, detail, res.models_used)

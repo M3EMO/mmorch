@@ -228,6 +228,80 @@ def recall(query: str, scope: str = "global", *, k: int = 5,
         con.close()
 
 
+_TOKEN_RE = __import__("re").compile(r"[a-z0-9_]+")
+
+
+def _tokens(text: str) -> list[str]:
+    return _TOKEN_RE.findall(text.lower())
+
+
+def recall_keyword(query: str, scope: str = "global", *, k: int = 5,
+                   window_days: float | None = None, path: Path = _DB_PATH) -> list[Note]:
+    """Recall por KEYWORD (idea Hermes FTS5): BM25-lite sobre las notas in-scope. Atrapa
+    el termino EXACTO que el embedding difumina (nombres, flags, ids) y anda sin fastembed.
+    Cero dep (tokenizador propio, no necesita la extension FTS de DuckDB)."""
+    import math
+    con = _connect(path)
+    try:
+        chain = _scope_chain(scope)
+        ph = ",".join("?" for _ in chain)
+        cutoff = time.time() - window_days * 86400 if window_days else 0.0
+        rows = con.execute(
+            f"""SELECT id, ts, scope, text FROM semantic
+                WHERE scope IN ({ph}) AND ts >= ? AND NOT tombstone""",
+            [*chain, cutoff]).fetchall()
+        if not rows:
+            return []
+        qtok = set(_tokens(query))
+        if not qtok:
+            return []
+        docs = [(rid, ts, sc, text, _tokens(text)) for rid, ts, sc, text in rows]
+        N = len(docs)
+        df = {t: 0 for t in qtok}
+        for *_, toks in docs:
+            s = set(toks)
+            for t in qtok:
+                if t in s:
+                    df[t] += 1
+        avgdl = sum(len(toks) for *_, toks in docs) / N
+        k1, b = 1.5, 0.75
+        scored = []
+        for rid, ts, sc, text, toks in docs:
+            dl = len(toks) or 1
+            score = 0.0
+            for t in qtok:
+                if df[t] == 0:
+                    continue
+                tf = toks.count(t)
+                if not tf:
+                    continue
+                idf = math.log(1 + (N - df[t] + 0.5) / (df[t] + 0.5))
+                score += idf * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl / avgdl))
+            if score > 0:
+                scored.append(Note(rid, ts, sc, text, round(score, 4), "semantic"))
+        scored.sort(key=lambda n: -n.score)
+        return scored[:k]
+    finally:
+        con.close()
+
+
+def recall_hybrid(query: str, scope: str = "global", *, k: int = 5,
+                  window_days: float | None = None, path: Path = _DB_PATH) -> list[Note]:
+    """Fusion de recall semantico (embedding) + keyword (BM25-lite) por Reciprocal Rank
+    Fusion (RRF). Lo mejor de los dos: sinonimos del embedding + termino exacto del keyword.
+    Si fastembed falta, degrada a keyword-only sin romper."""
+    sem = recall(query, scope, k=k * 2, window_days=window_days, path=path)
+    kw = recall_keyword(query, scope, k=k * 2, window_days=window_days, path=path)
+    C = 60.0
+    fused: dict[int, list] = {}
+    for rank, n in enumerate(sem):
+        fused.setdefault(n.id, [n, 0.0])[1] += 1.0 / (C + rank)
+    for rank, n in enumerate(kw):
+        fused.setdefault(n.id, [n, 0.0])[1] += 1.0 / (C + rank)
+    out = sorted(fused.values(), key=lambda nv: -nv[1])
+    return [Note(n.id, n.ts, n.scope, n.text, round(sc, 5), n.layer) for n, sc in out[:k]]
+
+
 # ---------------------------------------------------------------------------
 # Distillation (Thought-Retriever): condensar episodio -> nota durable
 # ---------------------------------------------------------------------------

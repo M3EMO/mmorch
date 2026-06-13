@@ -52,6 +52,12 @@ from .code_embedder import embed_code, available as code_embedder_available  # f
 from .code_loop import run_code_task, CodeTaskResult                          # Fase 5 wire (lazo cerrado)
 from .rubric_loop import (start_rubric, next_action as rubric_next,           # loop autocorreccion
                           submit as rubric_submit, run_rubric_loop)            # (plan o API)
+from .trajectory import (record_trajectory, trajectory_dataset,               # Hermes: trajectory
+                         distill_skill, load_trajectories,                     # compression + skills
+                         stats as trajectory_stats)
+from .memory import recall_keyword, recall_hybrid                             # Hermes: FTS keyword
+from .nudge import tick as nudge_tick, status as nudge_status                 # Hermes: memory nudge
+from .sandbox import policy_violations, docker_available                      # Hermes: exec policy
 
 __all__ = [
     "REGISTRY", "family_of", "ModelSpec", "call",
@@ -85,4 +91,8 @@ __all__ = [
     "embed_code", "code_embedder_available",
     "run_code_task", "CodeTaskResult",
     "start_rubric", "rubric_next", "rubric_submit", "run_rubric_loop",
+    "record_trajectory", "trajectory_dataset", "distill_skill", "load_trajectories",
+    "trajectory_stats",
+    "recall_keyword", "recall_hybrid", "nudge_tick", "nudge_status",
+    "policy_violations", "docker_available",
 ]

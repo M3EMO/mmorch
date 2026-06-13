@@ -15,3 +15,6 @@ flywheel/*.log
 flywheel/code_embedder.pt
 logs/radon_dataset.jsonl
 logs/oracle_dataset.jsonl
+logs/trajectories.jsonl
+logs/skills.jsonl
+logs/nudge.json
