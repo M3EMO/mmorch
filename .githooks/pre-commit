@@ -1,0 +1,7 @@
+#!/bin/sh
+# Auto-refresca las secciones <!-- mmorch:auto:* --> del README desde el codigo.
+# Best-effort: si falla, NO bloquea el commit.
+PY=".venv/Scripts/python.exe"
+[ -x "$PY" ] || PY="python"
+"$PY" -m mmorch.docgen >/dev/null 2>&1 && git add README.md 2>/dev/null
+exit 0
