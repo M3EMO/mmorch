@@ -32,6 +32,24 @@ except Exception:  # pragma: no cover
 _CLIENTS: dict[str, "OpenAI"] = {}
 
 
+def _classify_error(e: Exception) -> str:
+    """Clasifica un fallo de API en una clase MEDIBLE (observabilidad, sin tocar ruteo).
+    rate_limit = 429/throttle (openai.RateLimitError, status 429, 'rate limit'/'too many
+    requests' en el mensaje); timeout = APITimeoutError/timeout; other = el resto.
+    Duck-typing a proposito (no depende de importar tipos del SDK)."""
+    name = type(e).__name__.lower()
+    status = getattr(e, "status_code", None)
+    if status is None:
+        status = getattr(getattr(e, "response", None), "status_code", None)
+    msg = str(e).lower()
+    if (status == 429 or "ratelimit" in name
+            or "rate limit" in msg or "too many requests" in msg or "429" in msg):
+        return "rate_limit"
+    if "timeout" in name or "timeout" in msg or "timedout" in name:
+        return "timeout"
+    return "other"
+
+
 class MissingKeyError(RuntimeError):
     pass
 
@@ -92,8 +110,16 @@ def call(
         messages = [{"role": "user", "content": messages}]
 
     # BudgetKeeper: bloquea si el gasto del mes supera el límite (no-op sin límite).
-    from .budget import check as _budget_check
-    _budget_check(critical=critical)
+    from .budget import check as _budget_check, BudgetExceeded
+    try:
+        _budget_check(critical=critical)
+    except BudgetExceeded as e:
+        # Observabilidad: el cap-hit antes era INVISIBLE (salta antes de cualquier log).
+        # Lo registramos pa poder medir budget-cap-hit-rate. NO cambia comportamiento: re-lanza.
+        log_event(pattern=pattern, node=node or model_key, model=model_key, family=s.family,
+                  in_tokens=0, out_tokens=0, cost_usd=0.0, latency_s=0.0, phase=phase,
+                  error=type(e).__name__, error_msg=str(e)[:200], error_class="budget_cap")
+        raise
 
     client = _client(model_key)
     t0 = time.perf_counter()
@@ -113,6 +139,8 @@ def call(
     except Exception as e:
         # H-2: observabilidad de errores. Sin esto, un fallo de API es invisible
         # en metrics.jsonl y rompe el input del break-even (no se ve la fuga).
+        # error_class distingue rate-limit/429 del resto -> mide 429-rate por proveedor
+        # (señal previa a cualquier futuro load-balancing, exigida por anti-scope-creep).
         log_event(
             pattern=pattern,
             node=node or model_key,
@@ -125,6 +153,7 @@ def call(
             phase=phase,
             error=type(e).__name__,
             error_msg=str(e)[:200],
+            error_class=_classify_error(e),
         )
         raise
     latency = time.perf_counter() - t0

@@ -73,6 +73,55 @@ def read_events() -> list[dict]:
     return out
 
 
+def error_rates(*, window_n: int | None = 200, window_s: float | None = None) -> dict:
+    """429-rate y budget-cap-hit-rate por modelo/familia sobre una ventana reciente.
+
+    Señal de observabilidad PURA (no rutea nada): es el prerequisito MEDIDO que cualquier
+    futuro load-balancing tendría que citar pa justificarse bajo anti-scope-creep. El
+    error_class lo pone providers._classify_error / el gate de budget.
+
+    window_n: últimos N eventos (default 200). window_s: solo eventos de los últimos S
+    segundos (si se da, se aplica ADEMÁS de window_n). Denominador = todos los eventos del
+    modelo en la ventana (éxitos + errores + cap-hits) = tasa sobre intentos reales."""
+    events = read_events()
+    if window_s is not None:
+        cut = time.time() - window_s
+        events = [e for e in events if e.get("ts", 0) >= cut]
+    if window_n is not None:
+        events = events[-window_n:]
+
+    def _blank() -> dict:
+        return {"calls": 0, "rate_limit": 0, "budget_cap": 0, "timeout": 0, "other_error": 0}
+
+    by_model: dict[str, dict] = {}
+    by_family: dict[str, dict] = {}
+    for e in events:
+        m = e.get("model", "?"); fam = e.get("family", "?")
+        bm = by_model.setdefault(m, _blank()); bf = by_family.setdefault(fam, _blank())
+        bm["calls"] += 1; bf["calls"] += 1
+        ec = (e.get("extra") or {}).get("error_class")
+        if ec == "rate_limit":
+            bm["rate_limit"] += 1; bf["rate_limit"] += 1
+        elif ec == "budget_cap":
+            bm["budget_cap"] += 1; bf["budget_cap"] += 1
+        elif ec == "timeout":
+            bm["timeout"] += 1; bf["timeout"] += 1
+        elif (e.get("extra") or {}).get("error"):
+            bm["other_error"] += 1; bf["other_error"] += 1
+
+    def _rates(d: dict) -> dict:
+        for v in d.values():
+            n = v["calls"] or 1
+            v["rate_limit_rate"] = round(v["rate_limit"] / n, 4)
+            v["budget_cap_rate"] = round(v["budget_cap"] / n, 4)
+            v["error_rate"] = round(
+                (v["rate_limit"] + v["budget_cap"] + v["timeout"] + v["other_error"]) / n, 4)
+        return d
+
+    return {"window_events": len(events),
+            "by_model": _rates(by_model), "by_family": _rates(by_family)}
+
+
 def summary() -> dict:
     """Aggregate the log: total cost, tokens, calls per family/model."""
     events = read_events()

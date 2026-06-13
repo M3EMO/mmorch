@@ -25,7 +25,7 @@ from mmorch import (fan_out, adversarial_verify, route, cascade, ensemble_verify
                     ideate_and_screen, recall as _recall, tournament as _tournament,
                     bucket_rank as _bucket_rank)
 from mmorch.config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
-from mmorch.metrics import summary
+from mmorch.metrics import summary, error_rates
 from mmorch.learn import analyze as _learn_analyze, recommend as _learn_recommend
 from mmorch.memory import (remember as _remember, stats as _mem_stats,
                            consolidate as _mem_consolidate)
@@ -106,6 +106,17 @@ def mmorch_adversarial_verify(
 def mmorch_metrics_summary() -> str:
     """Return aggregate metrics (calls, total cost USD, cost by family)."""
     return json.dumps(summary(), ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_error_rates(window_n: int = 200) -> str:
+    """Per-model and per-family failure rates over the last `window_n` calls (read-only,
+    zero spend): 429/rate_limit count + rate, budget-cap-hit count + rate, timeouts, and
+    overall error_rate. Denominator = all logged attempts for that model in the window.
+    This is OBSERVABILITY ONLY — it does NOT bias routing. It is the measured signal any
+    future load-balancing would have to cite to justify itself under the anti-scope-creep
+    rule. error_class comes from providers._classify_error and the budget gate."""
+    return json.dumps(error_rates(window_n=window_n), ensure_ascii=False)
 
 
 @mcp.tool()
