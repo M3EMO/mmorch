@@ -1,45 +1,47 @@
-# Handoff — 2026-06-09
+# Handoff — 2026-06-13
 
 ## Goal
-Evolucionar mmorch (orquestador multi-modelo, ahorra cupo Claude) hacia el ideal
-auto-evolutivo/seguro/barato del brainstorm, construyendo fase por fase, todo goal-gated.
+Evolucionar mmorch (orquestador multi-modelo, ahorra cupo Claude) hacia auto-evolutivo/
+seguro/barato. Todo goal-gated, anti-scope-creep, cross-family (OneFlow), red-zone nunca autónomo.
 
-## State
-- **Done (esta sesión, ~50 commits, 157 tests, 32 módulos, 19 MCP tools):**
-  - Feedback loop revivido (calibration n=1→1001), gating calibrado (#3), policy task-aware (#2),
-    bandit contextual (#4), ensemble margin (#5), fan_out coverage honesta (#6).
-  - **Ancla GOAL** (`goal.py`): `goal_aligned` (cross-family) + `pursue_goal` (retry) + `goal_guard`
-    (tamper-halt) + `GOAL.md`/`GOAL.hash`. Modelado sobre `/goal` nativo. = check #6 de fitness.
-  - **BudgetKeeper** (`budget.py`, env `MMORCH_MAX_MONTHLY_USD`, wireado en providers.call).
-  - **Motor auto-evolución** (`evolve.py`): Change/rollback/evaluate(6 checks)/zone_of/self_evolve/
-    tournament + **sandbox_branch** (git worktree → promote_branch/PR). MCP `mmorch_evolve_self` (dry).
-  - **Checkers deterministas** (`checkers.py`, 20): arithmetic/determinant/sql/units/sympy/checksum/
-    regex/.../ **code_quality (radon)** + **mutation_score** + **coverage** + **deterministic**. Sandbox
-    endurecido (PYTHONHASHSEED=0, TZ=UTC).
-  - **Fábrica** (`factory.py`) + **dataset miner JIT-defect** (`dataset.py`) + `build_dataset_repos.py`
-    → 10,847 funciones etiquetadas (logs/codequality_dataset.jsonl, gitignored).
-  - **predict.py** (v0.1 cost/lat, p90), **megasource/prices** (Fase 2), **nodes.py** (registry orquesta).
-  - Docs: `SELF-EVOLUTION-PLAN.md` (Fases 0-4 ✅, 5-7 ⬜ + BACKLOG seeds), `ALGORITHMS-MAP.md`.
-- **Hallazgos clave (con datos):** LLM-verify de math/código dura ≈ azar/74%-false-refute → tool-verify
-  determinista. Code-quality desde texto (estructural + bge-small) = AZAR aun a 10k → cuello es
-  representación/framing, no escala. goal_aligned tiene varianza (false-refutes en checkers puros).
-- **Blocked:** PUSH (no remote, no gh). Kimi key (ensemble-AZUL cross-family real). headroom (descartado,
-  lossy + no instala bien; eval_headroom*.py quedan).
+## State — 259 tests verde, 26 MCP tools, ~48 módulos, ~70 commits
+**Esta sesión (todo committeado, working tree limpio):**
+- **Flywheel** (`flywheel/`): SimCLR `code_embedder` **bate bge** (radon AUC 0.88 vs 0.80; CONCAT+GBRT
+  0.95). Inferencia NUMPY pura (`mmorch/code_embedder.py`, sin torch, `code_embedder.npz`). Cuello
+  probado = la LABEL no la representación; correctitud NO se aprende estático (necesita ejecución).
+- **Fase 5** (`shadow_prior.py`): prior contextual k-NN sobre el bandit, scale gated 0→0.8 (tope=gate
+  humano), `auto_scale` con evidencia fresca (≥50 nuevos). Desbloqueada con métrica: offline_improvement
+  +0.168 con code_embedder en outcomes de código. Wireada en `code_loop.py` (cascade→ejecuta→reward).
+- **rubric_loop.py**: loop autocorrección PLANEADOR/GERENTE/EJECUTOR/JUEZ. Checkable→checker $0,
+  subjetivo→juez cross-family. Transporte pluggable: API o **modo PLAN** (MCP `mmorch_rubric_start/next/
+  submit`, cero API). Cierra lazo: reward→bandit+memoria, destila regla verificada.
+- **Hermes-steal** (`HERMES-IDEAS.md`): `trajectory.py` (captura→dataset flywheel + skill distill, solo
+  con verdad de ejecución), `memory.recall_keyword/hybrid` (BM25+RRF), `sandbox.py` (backend docker +
+  `enforce_policy`), `nudge.py`.
+- **Registry v4** (`config.py`): deepseek-v4-flash/pro explícitos + thinking toggle (`extra_body`),
+  gemini-3.1-flash-lite = DEFAULT_VERIFIER. Verificado contra APIs en vivo.
+- **Observabilidad/costo**: 429+budget-cap `error_class` + `metrics.error_rates`; **cache-hit billing**
+  (`cost_usd(cached_tokens)`, `prices.json` precios cache DeepSeek, `cache_stats`) — verificado VIVO 14x;
+  prefix-stable (`prompts.py`), off-peak advisory (`schedule.py`), effort-routing (`effort.py`),
+  scout entorno-primero (`scout.py`, medido por `scout_delta` no asumido).
+- **Build-list workflow**: B1 `goal_guard` wireado en evolve (era DEAD CODE — fix integridad), B2
+  `ensemble_degraded` flag, B3 `mmorch_budget_status`.
+- **AGENTS.md**: índice cross-agent (patrón agent0ai/dox) → GOAL.md/CLAUDE.md.
 
 ## Next
-1. Resolver push: usuario crea repo GitHub + da URL → `git remote add` + push. (o instala gh)
-2. Continuar plan: **Fase 5 (NN shadow prior)** O el **flywheel real**: entrenar `model:code_embedder`
-   (SimCLR) en WSL+torch sobre el dataset de 10k (signal = EJECUCIÓN/checkers, NO imitación LLM).
-3. Limpieza disco pendiente: `.dataset_repos/` (~cientos MB) + cache fastembed + WSL `~/hrvenv`.
+1. **PUSH** (bloqueado): sin remote ni `gh`. Usuario crea repo GitHub+da URL → `git remote add`+push, o instala `gh`.
+2. Promovible: cache-hit ya medible → prefix-stable real en hot paths; correr `scout_delta`/Fase 5 con
+   datos de código reales (modo plan) pa que `auto_scale` suba en producción.
+3. Free-tier hosted como nodo gratis (OpenRouter `:free`/Google quota) en vez del nodo local-CPU (descartado).
 
 ## Decisions
-- Orquestador determinista core; modelos grandes = NODOS que la FÁBRICA entrena en WSL (conductor ≠ orquesta).
-- Algoritmos: pull-on-demand cuando un problema MEDIDO lo pide (anti scope-creep), no batch.
-- goal_aligned = 1 voto junto a deterministas, NO árbitro único (su varianza lo exige).
-- Generador semántico no-LLM = seed futuro; hoy LLM genera + checkers entienden (oráculo en VERIFY).
+- config.py red-zone → precios cache en `prices.json` (datos/amarilla). Off-peak = ADVISORY no daemon.
+- Scout/Fase 5 = hipótesis MEDIDA no asumida (anti-scope-creep). goal_aligned = 1 voto, deterministas mandan.
+- Nodo local DeepSeek-CPU descartado (lento/débil) → free-tier hosted o factory task-específica.
+- `from .X import X` shadowea submódulo `X.py` → exportar función con alias (lección: `run_scout`).
+- Retrain encoder v2 (hid192/full) abandonado: WSL se reinició + ganancia marginal sobre 0.88/0.95.
 
 ## Read first
-- `SELF-EVOLUTION-PLAN.md` (fases + backlog seeds), `GOAL.md` (contrato), `ALGORITHMS-MAP.md`.
-- `brainstorms/2026-06-08-mmorch-ideal-vision.md` (visión completa grilleada).
-- `mmorch/nodes.py` (orquesta), `mmorch/evolve.py` (motor), `mmorch/checkers.py` (batería).
-- Memoria mmorch `kind="seed"` (recall): physics engine, ML algorithms, flywheel, semantic generator.
+`GOAL.md` (contrato), `AGENTS.md` (índice), `SELF-EVOLUTION-PLAN.md`, `HERMES-IDEAS.md`,
+`flywheel/RESULTS.md`. Memoria recall `flywheel-simclr-result`, `mmorch-harness`.
+Venv Windows `.venv/Scripts/python.exe`; WSL torch `~/flywheel/bin/python` (paths /mnt/c → `MSYS2_ARG_CONV_EXCL='*'`).
