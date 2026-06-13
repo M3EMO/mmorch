@@ -56,6 +56,7 @@ def compress(state: dict) -> dict:
         "passed": state.get("phase") == "done",
         "gen_model": state.get("gen_model", ""),
         "arm": state.get("arm", ""),
+        "scout": bool(state.get("scout_brief")),   # pa medir scout_delta (Fable scout)
     }
 
 

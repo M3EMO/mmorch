@@ -61,6 +61,7 @@ from .sandbox import policy_violations, docker_available                      # 
 from .prompts import cacheable_messages, prefix_signature, shares_prefix      # prefix-stable cache
 from .schedule import is_off_peak, advisory as offpeak_advisory, spend_by_period  # off-peak advisory
 from .effort import model_for_effort, effort_steps, escalation_models         # effort-routing knob
+from .scout import scout, gather_environment, scout_delta                      # Fable: entorno-primero
 
 __all__ = [
     "REGISTRY", "family_of", "ModelSpec", "call",
@@ -101,4 +102,5 @@ __all__ = [
     "cacheable_messages", "prefix_signature", "shares_prefix",
     "is_off_peak", "offpeak_advisory", "spend_by_period",
     "model_for_effort", "effort_steps", "escalation_models",
+    "scout", "gather_environment", "scout_delta",
 ]

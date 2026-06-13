@@ -48,7 +48,8 @@ def _extract_block(text: str) -> str:
 # --------------------------------------------------------------------------- #
 def start_rubric(task: str, criteria: list[dict], *, K: int = 5, arm: str = "",
                  gen_model: str | None = None,
-                 judge_model: str | None = None) -> dict:
+                 judge_model: str | None = None,
+                 scout: bool = False, scout_llm: bool = False) -> dict:
     """Crea el estado del loop. criteria = lista de:
       {"id": str, "desc": str, "kind": "checkable", "checker": str, "ctx": {...}}
         — ctx admite placeholders "{attempt}" (texto crudo) y "{attempt_code}"
@@ -66,11 +67,21 @@ def start_rubric(task: str, criteria: list[dict], *, K: int = 5, arm: str = "",
     if family_of(gen_model) == family_of(judge_model):
         raise ValueError("OneFlow: gen y judge deben ser de familias DISTINTAS "
                          f"({gen_model} vs {judge_model})")
+    # Scout entorno-primero (Fable 5): brief de grounding como prefijo estable del ejecutor.
+    # Determinista por default ($0); scout_llm=True suma una call barata de exploracion.
+    scout_brief = ""
+    if scout:
+        try:
+            from .scout import scout as _scout
+            scout_brief = _scout(task, criteria, use_llm=scout_llm, gen_model=gen_model).get("brief", "")
+        except Exception:
+            scout_brief = ""
     return {
         "id": uuid.uuid4().hex[:10], "task": task, "criteria": criteria,
         "K": int(K), "iteration": 0, "attempt": "", "phase": "executor",
         "results": {}, "history": [], "arm": arm,
         "gen_model": gen_model, "judge_model": judge_model,
+        "scout_brief": scout_brief,
     }
 
 
@@ -106,8 +117,11 @@ def next_action(state: dict) -> dict:
     if state["phase"] == "escalate":
         return {"role": "escalate", "summary": _summary(state)}
     if state["phase"] == "executor":
+        # brief de scout PRIMERO (prefijo estable cacheable + grounding entorno-primero)
+        ground = (state.get("scout_brief", "") + "\n\n") if state.get("scout_brief") else ""
         prompt = (
-            f"TAREA:\n{state['task']}\n\nRUBRICA (todos los criterios deben cumplirse):\n"
+            ground
+            + f"TAREA:\n{state['task']}\n\nRUBRICA (todos los criterios deben cumplirse):\n"
             f"{_rubric_text(state)}\n\n"
             + ("Tu intento anterior:\n```\n" + state["attempt"][:4000] + "\n```\n"
                "Corregi PRIORIZANDO los criterios PENDIENTES.\n" if state["attempt"] else "")
