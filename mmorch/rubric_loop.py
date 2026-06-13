@@ -49,7 +49,8 @@ def _extract_block(text: str) -> str:
 def start_rubric(task: str, criteria: list[dict], *, K: int = 5, arm: str = "",
                  gen_model: str | None = None,
                  judge_model: str | None = None,
-                 scout: bool = False, scout_llm: bool = False) -> dict:
+                 scout: bool = False, scout_llm: bool = False,
+                 enrich: bool = False) -> dict:
     """Crea el estado del loop. criteria = lista de:
       {"id": str, "desc": str, "kind": "checkable", "checker": str, "ctx": {...}}
         — ctx admite placeholders "{attempt}" (texto crudo) y "{attempt_code}"
@@ -59,6 +60,15 @@ def start_rubric(task: str, criteria: list[dict], *, K: int = 5, arm: str = "",
     from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
     gen_model = gen_model or DEFAULT_GENERATOR
     judge_model = judge_model or DEFAULT_VERIFIER
+    # Enrich (Fable 5): completar el prompt infiriendo intent, con guard cross-family.
+    enriched_flag = False
+    if enrich:
+        try:
+            from .enrich import enrich_prompt
+            task = enrich_prompt(task, gen_model=gen_model, judge_model=judge_model)["enriched"]
+            enriched_flag = True
+        except Exception:
+            pass
     for c in criteria:
         if c.get("kind") not in ("checkable", "subjective"):
             raise ValueError(f"criterio {c.get('id')}: kind invalido")
@@ -81,7 +91,7 @@ def start_rubric(task: str, criteria: list[dict], *, K: int = 5, arm: str = "",
         "K": int(K), "iteration": 0, "attempt": "", "phase": "executor",
         "results": {}, "history": [], "arm": arm,
         "gen_model": gen_model, "judge_model": judge_model,
-        "scout_brief": scout_brief,
+        "scout_brief": scout_brief, "enriched": enriched_flag,
     }
 
 

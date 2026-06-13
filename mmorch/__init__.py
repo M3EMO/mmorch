@@ -64,6 +64,7 @@ from .effort import model_for_effort, effort_steps, escalation_models         # 
 from .scout import (scout as run_scout, gather_environment,                    # Fable: entorno-primero
                     scout_delta)   # alias run_scout: NO shadowear el submodulo mmorch.scout
 from .events import emit as emit_event, bus as event_bus, Event                # nivel 3: bus live
+from .enrich import enrich_prompt, enrich_delta                                # Fable: intent enrich
 
 __all__ = [
     "REGISTRY", "family_of", "ModelSpec", "call",
@@ -106,4 +107,5 @@ __all__ = [
     "model_for_effort", "effort_steps", "escalation_models",
     "run_scout", "gather_environment", "scout_delta",
     "emit_event", "event_bus", "Event",
+    "enrich_prompt", "enrich_delta",
 ]

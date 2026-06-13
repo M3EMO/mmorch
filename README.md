@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **44 módulos · 26 MCP tools · 267 tests.**
+_Auto-generado por `mmorch.docgen`._ **45 módulos · 26 MCP tools · 273 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -46,6 +46,7 @@ _Auto-generado por `mmorch.docgen`._ **44 módulos · 26 MCP tools · 267 tests.
 | `mmorch/cost.py` | Cost model — USD from token counts, using REGISTRY prices. |
 | `mmorch/dataset.py` | dataset — construye un dataset de CALIDAD DE CÓDIGO desde git history, SIN labels |
 | `mmorch/effort.py` | effort — knob explicito de esfuerzo -> tier de modelo (patron Fable 5: 'effort' controla |
+| `mmorch/enrich.py` | enrich — completar/especificar el prompt infiriendo intent del usuario (patron Fable 5), |
 | `mmorch/ensemble.py` | ensemble_verify (I-3) — K escepticos cross-family + voto mayoria. |
 | `mmorch/events.py` | events — bus de progreso in-process pa la UI live (nivel 3). El orquestador emite |
 | `mmorch/evolve.py` | evolve — subset DGM-inspirado, GATED (research: vault/research/ |
