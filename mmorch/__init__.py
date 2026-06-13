@@ -58,6 +58,9 @@ from .trajectory import (record_trajectory, trajectory_dataset,               # 
 from .memory import recall_keyword, recall_hybrid                             # Hermes: FTS keyword
 from .nudge import tick as nudge_tick, status as nudge_status                 # Hermes: memory nudge
 from .sandbox import policy_violations, docker_available                      # Hermes: exec policy
+from .prompts import cacheable_messages, prefix_signature, shares_prefix      # prefix-stable cache
+from .schedule import is_off_peak, advisory as offpeak_advisory, spend_by_period  # off-peak advisory
+from .effort import model_for_effort, effort_steps, escalation_models         # effort-routing knob
 
 __all__ = [
     "REGISTRY", "family_of", "ModelSpec", "call",
@@ -95,4 +98,7 @@ __all__ = [
     "trajectory_stats",
     "recall_keyword", "recall_hybrid", "nudge_tick", "nudge_status",
     "policy_violations", "docker_available",
+    "cacheable_messages", "prefix_signature", "shares_prefix",
+    "is_off_peak", "offpeak_advisory", "spend_by_period",
+    "model_for_effort", "effort_steps", "escalation_models",
 ]
