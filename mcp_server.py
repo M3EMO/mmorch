@@ -25,7 +25,7 @@ from mmorch import (fan_out, adversarial_verify, route, cascade, ensemble_verify
                     ideate_and_screen, recall as _recall, tournament as _tournament,
                     bucket_rank as _bucket_rank)
 from mmorch.config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
-from mmorch.metrics import summary, error_rates
+from mmorch.metrics import summary, error_rates, cache_stats
 from mmorch.learn import analyze as _learn_analyze, recommend as _learn_recommend
 from mmorch.memory import (remember as _remember, stats as _mem_stats,
                            consolidate as _mem_consolidate)
@@ -117,6 +117,15 @@ def mmorch_error_rates(window_n: int = 200) -> str:
     future load-balancing would have to cite to justify itself under the anti-scope-creep
     rule. error_class comes from providers._classify_error and the budget gate."""
     return json.dumps(error_rates(window_n=window_n), ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_cache_stats(window_n: int = 500) -> str:
+    """Per-model prompt-cache-hit-rate (cached_tokens / in_tokens) over the last window_n
+    calls (read-only, zero spend). DeepSeek bills cached input ~50x cheaper; this is the
+    measured signal that makes prefix-stable-prompt and off-peak savings falsifiable.
+    Observability only — does not route."""
+    return json.dumps(cache_stats(window_n=window_n), ensure_ascii=False)
 
 
 @mcp.tool()

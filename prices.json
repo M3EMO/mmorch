@@ -1,0 +1,6 @@
+{
+  "_comment": "Override de DATOS (zona amarilla, reversible). Solo price_cache_in: precio del input CACHEADO (cache-hit) por 1M tok. price_in/price_out NO se overridean aca (siguen viniendo de config.py). DeepSeek V4 cobra el cache-hit ~50x mas barato. Re-verificar (volatil).",
+  "deepseek-chat": { "price_cache_in": 0.0028 },
+  "deepseek-reasoner": { "price_cache_in": 0.0028 },
+  "deepseek-v4-pro": { "price_cache_in": 0.0145 }
+}

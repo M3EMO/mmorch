@@ -35,3 +35,13 @@ def effective_prices(model_key: str, path: Path | None = None) -> tuple[float, f
     if ov and "price_in" in ov and "price_out" in ov:
         return float(ov["price_in"]), float(ov["price_out"])
     return s.price_in, s.price_out
+
+
+def effective_cache_price(model_key: str, path: Path | None = None) -> float:
+    """Precio por 1M de tokens de input CACHEADOS (cache-hit). DeepSeek cobra el input
+    cacheado ~50x mas barato que el miss. Vive en prices.json (datos, zona amarilla) pa no
+    tocar config.py (rojo). Fallback = price_in (sin descuento) -> backwards-compatible."""
+    ov = load_overrides(path).get(model_key)
+    if ov and "price_cache_in" in ov:
+        return float(ov["price_cache_in"])
+    return effective_prices(model_key, path)[0]

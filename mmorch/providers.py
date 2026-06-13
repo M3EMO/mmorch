@@ -50,6 +50,23 @@ def _classify_error(e: Exception) -> str:
     return "other"
 
 
+def _cached_tokens(usage) -> int:
+    """Tokens de input servidos del CACHE (cache-hit). DeepSeek: usage.prompt_cache_hit_tokens.
+    OpenAI/estandar: usage.prompt_tokens_details.cached_tokens. 0 si el proveedor no reporta.
+    Sin esto se cobraba todo el input a price_in -> sobre-conteo de costo (señal infalsificable)."""
+    v = getattr(usage, "prompt_cache_hit_tokens", None)
+    if v is not None:
+        return int(v) or 0
+    det = getattr(usage, "prompt_tokens_details", None)
+    if det is not None:
+        c = getattr(det, "cached_tokens", None)
+        if c is None and isinstance(det, dict):
+            c = det.get("cached_tokens")
+        if c is not None:
+            return int(c) or 0
+    return 0
+
+
 class MissingKeyError(RuntimeError):
     pass
 
@@ -162,7 +179,8 @@ def call(
     usage = resp.usage
     in_tok = getattr(usage, "prompt_tokens", 0) or 0
     out_tok = getattr(usage, "completion_tokens", 0) or 0
-    c = cost_usd(model_key, in_tok, out_tok)
+    cached_tok = _cached_tokens(usage)
+    c = cost_usd(model_key, in_tok, out_tok, cached_tok)
 
     log_event(
         pattern=pattern,
@@ -174,6 +192,7 @@ def call(
         cost_usd=c,
         latency_s=latency,
         phase=phase,
+        cached_tokens=cached_tok,
     )
     return CallResult(
         model_key=model_key,

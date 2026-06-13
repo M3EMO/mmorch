@@ -122,6 +122,27 @@ def error_rates(*, window_n: int | None = 200, window_s: float | None = None) ->
             "by_model": _rates(by_model), "by_family": _rates(by_family)}
 
 
+def cache_stats(*, window_n: int | None = 500) -> dict:
+    """Cache-hit-rate por modelo sobre la ventana: cached_tokens / in_tokens. Es el numero
+    que vuelve FALSIFICABLE el ahorro por prompt-caching y prefix-stable. Observabilidad
+    pura (no rutea). cached_tokens lo pone providers._cached_tokens en log_event."""
+    events = read_events()
+    if window_n is not None:
+        events = events[-window_n:]
+    by_model: dict[str, dict] = {}
+    for e in events:
+        if e.get("in_tokens", 0) <= 0:
+            continue   # errores/cap-hits no cuentan pa hit-rate
+        m = e.get("model", "?")
+        d = by_model.setdefault(m, {"in_tokens": 0, "cached_tokens": 0, "calls": 0})
+        d["in_tokens"] += e.get("in_tokens", 0)
+        d["cached_tokens"] += (e.get("extra") or {}).get("cached_tokens", 0) or 0
+        d["calls"] += 1
+    for d in by_model.values():
+        d["cache_hit_rate"] = round(d["cached_tokens"] / (d["in_tokens"] or 1), 4)
+    return {"window_events": len(events), "by_model": by_model}
+
+
 def summary() -> dict:
     """Aggregate the log: total cost, tokens, calls per family/model."""
     events = read_events()
