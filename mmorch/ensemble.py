@@ -24,6 +24,8 @@ class EnsembleVerdict:
     refutations: list[str] = field(default_factory=list)
     unanimous: bool = True       # #5: todos coinciden (0/K o K/K)
     escalate: bool = False       # #5: voto DIVIDIDO -> incertidumbre -> mandar a Opus
+    ensemble_degraded: bool = False  # B2: verificadores de UNA sola familia -> la premisa de
+                                     # decorrelacion (OneFlow) NO se cumple ENTRE verificadores
 
 
 def ensemble_verify(
@@ -68,9 +70,12 @@ def ensemble_verify(
     # #5: el margen (2-1 vs 3-0) es senal de incertidumbre que antes se tiraba. Voto
     # dividido (ni 0 ni K) = los escepticos discrepan = justo donde rinde gastar Opus.
     unanimous = (n_pass == 0 or n_pass == len(verdicts))
+    # B2: honestidad — si TODOS los verificadores son de la misma familia, el ensemble no
+    # decorrelaciona (la premisa OneFlow vale gen-vs-verifier, pero NO entre verificadores).
+    degraded = len({family_of(vm) for vm in verifier_models}) < 2
     return EnsembleVerdict(
         passed=passed, confidence=round(conf, 3), n_passed=n_pass,
         n_total=len(verdicts), verdicts=verdicts,
         cost_usd=round(sum(v.cost_usd for v in verdicts), 6), refutations=refs,
-        unanimous=unanimous, escalate=not unanimous,
+        unanimous=unanimous, escalate=not unanimous, ensemble_degraded=degraded,
     )

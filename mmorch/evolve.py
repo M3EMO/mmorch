@@ -103,6 +103,12 @@ def evaluate(change: Change, *, root: Path = ROOT, run_tests: bool = True,
     checks["rollback_works"] = _rollback_roundtrip(change)   # reversibilidad first-class
 
     if goal:
+        # TAMPER-HALT (B1): goal_guard estaba MUERTO (nunca se llamaba). evaluate() consume
+        # GOAL.md como rubrica via goal_aligned; si GOAL.md fue manipulado fuera de banda, esa
+        # rubrica esta envenenada. goal_guard frena ANTES de usarla. GoalTampered PROPAGA
+        # (no se swallowea): aborta el ciclo de auto-aplicacion entero.
+        from .goal import goal_guard as _goal_guard
+        _goal_guard()
         gf = goal_fn or _default_goal_fn()
         checks["goal_aligned"] = gf(change.description).passed
 
@@ -314,6 +320,10 @@ def self_evolve(*, candidates: list[Change] | None = None, generate_fn=None, n: 
 
     applied = False
     if winner and do_apply and winner["zone"] in ("green", "yellow"):
+        # defense-in-depth (B1): re-chequear tamper-halt JUSTO antes de mutar el repo, aunque
+        # evaluate ya lo corrio — el apply es el momento irreversible. GoalTampered propaga.
+        from .goal import goal_guard as _goal_guard
+        _goal_guard()
         apply_change(winner["change"], root=root)
         applied = True
 

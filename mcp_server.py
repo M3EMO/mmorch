@@ -120,6 +120,17 @@ def mmorch_error_rates(window_n: int = 200) -> str:
 
 
 @mcp.tool()
+def mmorch_budget_status() -> str:
+    """Budget status (B3, read-only, zero spend): {month, spent, limit, remaining, enforced}.
+    enforced=false means MMORCH_MAX_MONTHLY_USD is unset (unlimited spend). Use this BEFORE a
+    bulk fan_out: if enforced and remaining is low vs the estimated batch cost, shrink or defer
+    the batch instead of hitting BudgetExceeded mid-run. metrics_summary aggregates LIFETIME
+    cost and never compares against the monthly cap — this is the only mid-session cupo-$ signal."""
+    from mmorch.budget import status as budget_status
+    return json.dumps(budget_status(), ensure_ascii=False)
+
+
+@mcp.tool()
 def mmorch_cache_stats(window_n: int = 500) -> str:
     """Per-model prompt-cache-hit-rate (cached_tokens / in_tokens) over the last window_n
     calls (read-only, zero spend). DeepSeek bills cached input ~50x cheaper; this is the
@@ -181,6 +192,7 @@ def mmorch_ensemble_verify(
         "passed": ev.passed, "confidence": ev.confidence,
         "n_passed": ev.n_passed, "n_total": ev.n_total,
         "unanimous": ev.unanimous, "escalate": ev.escalate,  # #5: split -> a Opus
+        "ensemble_degraded": ev.ensemble_degraded,  # B2: verificadores 1-familia (no decorrelaciona)
         "refutations": ev.refutations, "cost_usd": ev.cost_usd}, ensure_ascii=False)
 
 
