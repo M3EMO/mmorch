@@ -68,6 +68,7 @@ from .enrich import enrich_prompt, enrich_delta                                #
 from .projects import (register as register_project, list_projects,           # project-aware
                        resolve as resolve_project)
 from .claude_exec import run_claude                                           # ejecutor en PLAN (cupo)
+from .sync import commit_push, pull as git_pull, pull_all as git_pull_all      # GitHub bus de sync
 
 __all__ = [
     "REGISTRY", "family_of", "ModelSpec", "call",
@@ -112,4 +113,5 @@ __all__ = [
     "emit_event", "event_bus", "Event",
     "enrich_prompt", "enrich_delta",
     "register_project", "list_projects", "resolve_project", "run_claude",
+    "commit_push", "git_pull", "git_pull_all",
 ]

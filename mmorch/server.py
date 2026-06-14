@@ -74,8 +74,9 @@ def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model):
             _JOBS[jid]["status"] = state.get("phase", "done")
 
 
-def _run_project_job(project: str, task: str, mode: str):
-    """Job project-aware: corre claude headless (PLAN) dentro del repo registrado."""
+def _run_project_job(project: str, task: str, mode: str, push: bool = False):
+    """Job project-aware: corre claude headless (PLAN) dentro del repo registrado.
+    Si mode=edit y push=True: tras editar, commit+push a la branch del agente (sync via git)."""
     from .projects import resolve
     from .claude_exec import run_claude
     import uuid as _u
@@ -91,6 +92,12 @@ def _run_project_job(project: str, task: str, mode: str):
         return
     emit("job", "running", job_id=jid, detail=f"{project} [{mode}]: {task[:80]}")
     r = run_claude(task, cwd, mode=mode, job_id=jid)
+    if r.get("ok") and mode == "edit" and push:
+        try:
+            from .sync import commit_push
+            commit_push(cwd, f"mmorch: {task[:80]}", job_id=jid)
+        except Exception as e:
+            emit("step", "error", job_id=jid, node="git:push", detail=str(e)[:160])
     with _JOBS_LOCK:
         _JOBS[jid]["status"] = "done" if r.get("ok") else "error"
 
@@ -200,12 +207,20 @@ async def run_project(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     body = await request.json()
     project = body.get("project", ""); task = body.get("task", "")
-    mode = body.get("mode", "plan")
+    mode = body.get("mode", "plan"); push = bool(body.get("push", False))
     if mode not in ("plan", "edit", "read"):
         return JSONResponse({"error": "mode invalido (plan|edit)"}, status_code=400)
-    t = threading.Thread(target=_run_project_job, args=(project, task, mode), daemon=True)
+    t = threading.Thread(target=_run_project_job, args=(project, task, mode, push), daemon=True)
     t.start()
-    return JSONResponse({"started": "project", "project": project, "mode": mode})
+    return JSONResponse({"started": "project", "project": project, "mode": mode, "push": push})
+
+
+async def sync_pull(request):
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from .sync import pull_all
+    return JSONResponse(pull_all())
 
 
 async def kill_job(request):
@@ -245,6 +260,7 @@ def build_app():
         Route("/run/fanout", run_fanout, methods=["POST"]),
         Route("/projects", projects_handler, methods=["GET", "POST"]),
         Route("/run/project", run_project, methods=["POST"]),
+        Route("/sync/pull", sync_pull, methods=["POST"]),
         Route("/kill/{job_id}", kill_job, methods=["POST"]),
         Route("/approve/{job_id}", approve_job, methods=["POST"]),
     ])
