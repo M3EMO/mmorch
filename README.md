@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **48 módulos · 26 MCP tools · 291 tests.**
+_Auto-generado por `mmorch.docgen`._ **49 módulos · 26 MCP tools · 295 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -66,6 +66,7 @@ _Auto-generado por `mmorch.docgen`._ **48 módulos · 26 MCP tools · 291 tests.
 | `mmorch/patterns.py` | Code-flow patterns (§7), migrated as deterministic Python. |
 | `mmorch/predict.py` | predict (v0.1 NN, Fase 1) — predictor de out_tokens / latencia, SIN dep pesada. |
 | `mmorch/prices.py` | prices — capa de OVERRIDE de precios (datos volátiles, separados del código). |
+| `mmorch/project_loop.py` | project_loop — ejecutor PROJECT-AWARE primario via mmorch (barato, cero cupo). Es la |
 | `mmorch/projects.py` | projects — registro de proyectos que mmorch puede CONTROLAR (project-aware). Hace que |
 | `mmorch/prompts.py` | prompts — construccion de mensajes PREFIX-STABLE pa maximizar el cache-hit de DeepSeek. |
 | `mmorch/providers.py` | Provider layer — thin OpenAI-compatible client per external model. |

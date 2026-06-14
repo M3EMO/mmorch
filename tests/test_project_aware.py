@@ -86,8 +86,8 @@ def test_run_project_auth_and_dispatch(monkeypatch):
     monkeypatch.setattr("mmorch.claude_exec.run_claude",
                         lambda task, cwd, **k: called.update(task=task, cwd=cwd, mode=k.get("mode")) or {"ok": True})
     r = c.post("/run/project", headers={"X-Token": "secret"},
-               json={"project": "portfolio", "task": "refactor X", "mode": "plan"})
-    assert r.status_code == 200 and r.json()["mode"] == "plan"
+               json={"project": "portfolio", "task": "refactor X", "mode": "plan", "engine": "claude"})
+    assert r.status_code == 200 and r.json()["engine"] == "claude"
     import time
     for _ in range(30):
         if called: break

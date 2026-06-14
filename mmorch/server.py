@@ -74,32 +74,41 @@ def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model):
             _JOBS[jid]["status"] = state.get("phase", "done")
 
 
-def _run_project_job(project: str, task: str, mode: str, push: bool = False):
-    """Job project-aware: corre claude headless (PLAN) dentro del repo registrado.
-    Si mode=edit y push=True: tras editar, commit+push a la branch del agente (sync via git)."""
-    from .projects import resolve
-    from .claude_exec import run_claude
+def _run_project_job(project: str, task: str, mode: str, push: bool = False,
+                     engine: str = "mmorch", target_file: str = "", test_cmd: str | None = None):
+    """Job project-aware. engine PRIMARIO = 'mmorch' (DeepSeek genera + tests verifican +
+    aplica determinista, cero cupo; escala a claude -p si no puede). engine='claude' =
+    claude -p directo (plan/cupo) — para tareas abiertas que mmorch no banca."""
     import uuid as _u
     jid = _u.uuid4().hex[:10]
     with _JOBS_LOCK:
-        _JOBS[jid] = {"status": "running", "kind": "project"}
+        _JOBS[jid] = {"status": "running", "kind": "project", "engine": engine}
     try:
-        cwd = resolve(project)
+        if engine == "mmorch":
+            if not target_file:
+                emit("job", "error", job_id=jid, detail="engine=mmorch requiere target_file")
+                with _JOBS_LOCK:
+                    _JOBS[jid]["status"] = "error"
+                return
+            from .project_loop import run_project_task
+            r = run_project_task(project, task, target_file=target_file, test_cmd=test_cmd,
+                                 push=push, job_id=jid)
+            ok = r.ok
+        else:   # engine == claude: claude -p directo (cupo)
+            from .projects import resolve
+            from .claude_exec import run_claude
+            cwd = resolve(project)
+            emit("job", "running", job_id=jid, detail=f"claude {project} [{mode}]: {task[:70]}")
+            res = run_claude(task, cwd, mode=mode, job_id=jid)
+            ok = bool(res.get("ok"))
+            if ok and mode == "edit" and push:
+                from .sync import commit_push
+                commit_push(cwd, f"mmorch(claude): {task[:64]}", job_id=jid)
     except Exception as e:
-        emit("job", "error", job_id=jid, detail=f"proyecto invalido: {str(e)[:120]}")
-        with _JOBS_LOCK:
-            _JOBS[jid]["status"] = "error"
-        return
-    emit("job", "running", job_id=jid, detail=f"{project} [{mode}]: {task[:80]}")
-    r = run_claude(task, cwd, mode=mode, job_id=jid)
-    if r.get("ok") and mode == "edit" and push:
-        try:
-            from .sync import commit_push
-            commit_push(cwd, f"mmorch: {task[:80]}", job_id=jid)
-        except Exception as e:
-            emit("step", "error", job_id=jid, node="git:push", detail=str(e)[:160])
+        emit("job", "error", job_id=jid, detail=str(e)[:160])
+        ok = False
     with _JOBS_LOCK:
-        _JOBS[jid]["status"] = "done" if r.get("ok") else "error"
+        _JOBS[jid]["status"] = "done" if ok else "error"
 
 
 def _run_fanout_job(prompts: list, gen_model: str):
@@ -208,11 +217,16 @@ async def run_project(request):
     body = await request.json()
     project = body.get("project", ""); task = body.get("task", "")
     mode = body.get("mode", "plan"); push = bool(body.get("push", False))
+    engine = body.get("engine", "mmorch")        # PRIMARIO = mmorch (barato); claude = escalada
+    target_file = body.get("target_file", ""); test_cmd = body.get("test_cmd")
     if mode not in ("plan", "edit", "read"):
         return JSONResponse({"error": "mode invalido (plan|edit)"}, status_code=400)
-    t = threading.Thread(target=_run_project_job, args=(project, task, mode, push), daemon=True)
+    if engine not in ("mmorch", "claude"):
+        return JSONResponse({"error": "engine invalido (mmorch|claude)"}, status_code=400)
+    t = threading.Thread(target=_run_project_job,
+                         args=(project, task, mode, push, engine, target_file, test_cmd), daemon=True)
     t.start()
-    return JSONResponse({"started": "project", "project": project, "mode": mode, "push": push})
+    return JSONResponse({"started": "project", "project": project, "engine": engine, "mode": mode})
 
 
 async def sync_pull(request):
@@ -293,10 +307,13 @@ main{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px}
 <div class=row style="margin-top:8px"><button onclick=runRubric()>▶ run rubric</button>
 <button onclick=runFan()>▶ run fan_out</button><button onclick=loadState()>↻ estado</button></div>
 <hr style="border:none;border-top:1px solid #26262b;margin:10px 0">
-<p class=muted>project-aware (corre en tu PLAN de Claude, dentro del repo)</p>
+<p class=muted>project-aware · PRIMARIO mmorch (barato, cero cupo) · claude = escalada (plan)</p>
 <div class=row><select id=proj style="flex:1"></select><button onclick=loadProjects()>↻</button></div>
-<div class=row style="margin-top:6px"><input id=ptask placeholder="instruccion para el proyecto" style="flex:1">
-<button onclick="runProject('plan')">analizar</button><button onclick="runProject('edit')">editar</button></div>
+<div class=row style="margin-top:6px"><input id=ptask placeholder="instruccion" style="flex:1"></div>
+<div class=row style="margin-top:6px"><input id=pfile placeholder="archivo (ej app.py)" style="flex:1">
+<input id=ptest placeholder="test_cmd (ej python -m pytest -q)" style="flex:1"></div>
+<div class=row style="margin-top:6px"><button onclick="runMmorch()">▶ mmorch (barato)</button>
+<button onclick="runClaude('plan')">claude analizar</button><button onclick="runClaude('edit')">claude editar</button></div>
 <pre id=state class=muted style="white-space:pre-wrap;max-height:30vh;overflow:auto"></pre></div>
 </main>
 <script>
@@ -321,9 +338,13 @@ function loadState(){fetch('/state?token='+encodeURIComponent(T)).then(r=>r.json
 function loadProjects(){fetch('/projects?token='+encodeURIComponent(T)).then(r=>r.json()).then(s=>{
  const sel=document.getElementById('proj');sel.innerHTML='';
  Object.keys(s.projects||{}).forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;sel.appendChild(o);});});}
-function runProject(mode){const project=document.getElementById('proj').value;const task=document.getElementById('ptask').value;
- if(!project||!task){alert('elegí proyecto + escribí instrucción');return;}
- fetch('/run/project',{method:'POST',headers:H(),body:JSON.stringify({project,task,mode})});}
+function runMmorch(){const project=document.getElementById('proj').value;const task=document.getElementById('ptask').value;
+ const target_file=document.getElementById('pfile').value;const test_cmd=document.getElementById('ptest').value||null;
+ if(!project||!task||!target_file){alert('mmorch necesita proyecto + instruccion + archivo');return;}
+ fetch('/run/project',{method:'POST',headers:H(),body:JSON.stringify({project,task,engine:'mmorch',target_file,test_cmd,push:true})});}
+function runClaude(mode){const project=document.getElementById('proj').value;const task=document.getElementById('ptask').value;
+ if(!project||!task){alert('elegí proyecto + instruccion');return;}
+ fetch('/run/project',{method:'POST',headers:H(),body:JSON.stringify({project,task,engine:'claude',mode,push:mode==='edit'})});}
 </script></body></html>"""
 
 

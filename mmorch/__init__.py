@@ -69,6 +69,7 @@ from .projects import (register as register_project, list_projects,           # 
                        resolve as resolve_project)
 from .claude_exec import run_claude                                           # ejecutor en PLAN (cupo)
 from .sync import commit_push, pull as git_pull, pull_all as git_pull_all      # GitHub bus de sync
+from .project_loop import run_project_task, ProjectResult                      # ejecutor mmorch-primario
 
 __all__ = [
     "REGISTRY", "family_of", "ModelSpec", "call",
@@ -114,4 +115,5 @@ __all__ = [
     "enrich_prompt", "enrich_delta",
     "register_project", "list_projects", "resolve_project", "run_claude",
     "commit_push", "git_pull", "git_pull_all",
+    "run_project_task", "ProjectResult",
 ]
