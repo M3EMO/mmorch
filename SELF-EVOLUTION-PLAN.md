@@ -250,3 +250,27 @@ tareas ACOTADAS sí:
 - **Arquitectura realista hoy**: LLM genera (pragmático) + EJECUCIÓN entiende (checkers = el
   oráculo semántico). El entendimiento vive en la capa VERIFY, no en el generador. El
   generador semántico es un nodo FUTURO pa subtareas acotadas, no reemplazo total.
+
+### SEED — DSPy prompt-optimization (módulo, NO core)
+Auto-tunear los prompts que mmorch manda a los modelos baratos (DSPy compila prompts contra
+una métrica). **Trigger**: una métrica MEDIDA muestra que el prompt es el cuello (no el modelo
+ni la representación). **Por qué parkeado**: dep pesada + paradigma distinto; adoptarlo como
+CORE diluiría el determinismo (la decisión de esta sesión: NO adoptar frameworks). Vive como
+módulo opt-in que optimiza prompts de `fan_out`/`rubric_loop`, gated por anti-scope-creep.
+
+### SEED — Cuantización de pesos (fp16/int8)
+`code_embedder.npz` hoy = float32, 3.77MB. **Trigger**: pesos crecen (>~50MB) o la latencia de
+inferencia molesta. Reduce tamaño/latencia (½ fp16, ¼ int8). **Por qué parkeado**: innecesario
+a 3.77MB. Va con el manifest (`weights/manifest.json` ya versiona + verifica sha).
+
+### SEED — Unificación de la familia de loops
+`loop`/`rubric_loop`/`code_loop`/`project_loop` comparten estructura (generar→verificar→iterar).
+Unificar en 1 engine con executor/verifier/policy PLUGGABLES. **Trigger**: hace falta un 5º loop
+o el mantenimiento duele. **Por qué parkeado**: cleanup sin ganancia funcional; los 4 andan +
+testeados. Refactor, no rewrite.
+
+### SEED — Fleet-control multi-host en el dashboard
+`fleet.py` (backend) ya lista hosts + agrega `/state` + forwardea jobs. **Falta**: la UI que
+elige host destino y rutea el job desde un solo dashboard (hoy se registra host pero el job va
+al server local). **Trigger**: ≥2 hosts always-on corriendo Y querés rutear desde un lugar.
+**Por qué parkeado**: el backend está; la UI/routing se cablea cuando haya uso multi-host real.
