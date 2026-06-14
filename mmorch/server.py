@@ -41,6 +41,12 @@ def _token_ok(request) -> bool:
 
 
 # --- jobs in-process -------------------------------------------------------- #
+def _jobmeta(kind: str, title: str, **extra) -> dict:
+    """Registro de job con title/ts/host -> alimenta el Kanban (columnas por status)."""
+    return {"status": "running", "kind": kind, "title": (title or kind)[:80],
+            "ts": time.time(), "host": os.getenv("MMORCH_SERVER_HOST", "local"), **extra}
+
+
 def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model):
     from .rubric_loop import start_rubric, next_action, submit
     from .providers import call
@@ -48,7 +54,7 @@ def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model):
     jid = state["id"]
     cancel = threading.Event()
     with _JOBS_LOCK:
-        _JOBS[jid] = {"cancel": cancel, "state": state, "status": "running", "kind": "rubric"}
+        _JOBS[jid] = _jobmeta("rubric", task, cancel=cancel, state=state)
     emit("job", "running", job_id=jid, detail=task[:120])
 
     def fn(model):
@@ -82,7 +88,7 @@ def _run_project_job(project: str, task: str, mode: str, push: bool = False,
     import uuid as _u
     jid = _u.uuid4().hex[:10]
     with _JOBS_LOCK:
-        _JOBS[jid] = {"status": "running", "kind": "project", "engine": engine}
+        _JOBS[jid] = _jobmeta("project", task, engine=engine)
     try:
         if engine == "mmorch":
             if not target_file:
@@ -115,7 +121,7 @@ def _run_fanout_job(prompts: list, gen_model: str):
     from .patterns import fan_out
     jid = uuid.uuid4().hex[:10]
     with _JOBS_LOCK:
-        _JOBS[jid] = {"status": "running", "kind": "fanout"}
+        _JOBS[jid] = _jobmeta("fanout", f"fan_out x{len(prompts)}")
     emit("job", "running", job_id=jid, detail=f"fan_out x{len(prompts)}")
     try:
         res = fan_out(prompts, gen_model=gen_model)
@@ -141,7 +147,9 @@ async def state_snapshot(request):
     from .budget import status as bstatus
     from .nodes import sections, conductor
     with _JOBS_LOCK:
-        jobs = {k: {"status": v["status"], "kind": v["kind"]} for k, v in _JOBS.items()}
+        jobs = {k: {"status": v["status"], "kind": v["kind"], "title": v.get("title", ""),
+                    "ts": v.get("ts", 0), "host": v.get("host", "local"),
+                    "engine": v.get("engine", "")} for k, v in _JOBS.items()}
     return JSONResponse({
         "conductor": conductor(), "sections": sections(), "summary": summary(),
         "error_rates": error_rates(window_n=200), "cache": cache_stats(window_n=200),
@@ -237,6 +245,33 @@ async def sync_pull(request):
     return JSONResponse(pull_all())
 
 
+async def fleet_handler(request):
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from .fleet import list_hosts, register_host, fleet_state
+    if request.method == "POST":
+        body = await request.json()
+        try:
+            r = register_host(body.get("name", ""), body.get("url", ""), body.get("token", ""))
+            return JSONResponse({"registered": r})
+        except Exception as e:
+            return JSONResponse({"error": str(e)[:200]}, status_code=400)
+    return JSONResponse({"hosts": list_hosts(), "state": fleet_state()})
+
+
+async def fleet_run(request):
+    """Forwardea un job a otro host del fleet (server->server). body: {host, path, payload}."""
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from .fleet import forward
+    body = await request.json()
+    host = body.get("host", ""); path = body.get("path", "/run/project")
+    payload = body.get("payload", {})
+    return JSONResponse(forward(host, path, payload))
+
+
 async def kill_job(request):
     from starlette.responses import JSONResponse
     if not _token_ok(request):
@@ -275,6 +310,8 @@ def build_app():
         Route("/projects", projects_handler, methods=["GET", "POST"]),
         Route("/run/project", run_project, methods=["POST"]),
         Route("/sync/pull", sync_pull, methods=["POST"]),
+        Route("/fleet", fleet_handler, methods=["GET", "POST"]),
+        Route("/fleet/run", fleet_run, methods=["POST"]),
         Route("/kill/{job_id}", kill_job, methods=["POST"]),
         Route("/approve/{job_id}", approve_job, methods=["POST"]),
     ])
@@ -314,7 +351,16 @@ main{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px}
 <input id=ptest placeholder="test_cmd (ej python -m pytest -q)" style="flex:1"></div>
 <div class=row style="margin-top:6px"><button onclick="runMmorch()">▶ mmorch (barato)</button>
 <button onclick="runClaude('plan')">claude analizar</button><button onclick="runClaude('edit')">claude editar</button></div>
-<pre id=state class=muted style="white-space:pre-wrap;max-height:30vh;overflow:auto"></pre></div>
+<pre id=state class=muted style="white-space:pre-wrap;max-height:20vh;overflow:auto"></pre></div>
+<div class=card style="grid-column:1/-1"><div class=row><strong>kanban</strong>
+<span class=muted>jobs por estado</span><button onclick=loadState() style="margin-left:auto">↻</button></div>
+<div id=kanban style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:8px"></div></div>
+<div class=card style="grid-column:1/-1"><div class=row><strong>fleet</strong>
+<span class=muted>hosts del tailnet</span><button onclick=loadFleet() style="margin-left:auto">↻</button></div>
+<div class=row style="margin-top:6px"><input id=hname placeholder="nombre" style="width:90px">
+<input id=hurl placeholder="http://100.x.x.x:8787" style="flex:1"><input id=htok placeholder="token" style="width:120px">
+<button onclick=addHost()>+ host</button></div>
+<div id=fleet style="margin-top:8px"></div></div>
 </main>
 <script>
 let T='';
@@ -322,7 +368,7 @@ function connect(){T=document.getElementById('token').value;
  const es=new EventSource('/events?token='+encodeURIComponent(T));
  es.onopen=()=>document.getElementById('conn').textContent='live';
  es.onerror=()=>document.getElementById('conn').textContent='desconectado';
- es.onmessage=e=>addEv(JSON.parse(e.data));loadState();loadProjects();}
+ es.onmessage=e=>addEv(JSON.parse(e.data));loadState();loadProjects();loadFleet();}
 function addEv(ev){const f=document.getElementById('feed');const d=document.createElement('div');
  d.className='ev '+(ev.status||'pending');
  d.innerHTML='<span class=dot></span><b>'+(ev.node||ev.type)+'</b><span class=muted>'+ev.status+'</span> '+(ev.detail||'');
@@ -334,7 +380,24 @@ function runRubric(){const task=document.getElementById('task').value||'implemen
   {id:'c1',desc:'inc pasa',kind:'checkable',checker:'python_exec',ctx:{code:'{attempt_code}\\nassert inc(1)==2'}}]})});}
 function runFan(){fetch('/run/fanout',{method:'POST',headers:H(),body:JSON.stringify({prompts:['di hola','di chau','di test']})});}
 function loadState(){fetch('/state?token='+encodeURIComponent(T)).then(r=>r.json()).then(s=>{
- document.getElementById('state').textContent=JSON.stringify({jobs:s.jobs,calls:s.summary&&s.summary.calls,cost:s.summary&&s.summary.total_cost_usd,sections:s.sections,budget:s.budget},null,2);});}
+ document.getElementById('state').textContent=JSON.stringify({calls:s.summary&&s.summary.calls,cost:s.summary&&s.summary.total_cost_usd,sections:s.sections,budget:s.budget},null,2);
+ renderKanban(s.jobs||{});});}
+const COLS=['queued','running','done','error','gate'];
+function renderKanban(jobs){const k=document.getElementById('kanban');k.innerHTML='';
+ const by={};COLS.forEach(c=>by[c]=[]);
+ Object.entries(jobs).forEach(([id,j])=>{const st=COLS.includes(j.status)?j.status:(j.status==='approved'?'done':'running');by[st].push([id,j]);});
+ COLS.forEach(c=>{const col=document.createElement('div');col.style='background:#141418;border:1px solid #26262b;border-radius:8px;padding:6px;min-height:60px';
+  col.innerHTML='<div class=muted style="font-size:11px;text-transform:uppercase;margin-bottom:4px">'+c+' ('+by[c].length+')</div>';
+  by[c].forEach(([id,j])=>{const card=document.createElement('div');card.className='ev '+c;card.style='font-size:11px;margin:3px 0;padding:4px 6px';
+   card.innerHTML='<b>'+(j.kind||'')+'</b> '+(j.title||id)+'<br><span class=muted>'+(j.host||'')+(j.engine?(' · '+j.engine):'')+'</span>';col.appendChild(card);});
+  k.appendChild(col);});}
+function loadFleet(){fetch('/fleet?token='+encodeURIComponent(T)).then(r=>r.json()).then(s=>{
+ const f=document.getElementById('fleet');f.innerHTML='';const st=(s.state&&s.state.hosts)||{};
+ Object.entries(s.hosts||{}).forEach(([n,h])=>{const hs=st[n]||{};const div=document.createElement('div');div.className='ev '+(hs.ok?'done':'error');
+  const calls=hs.summary?hs.summary.calls:'?';div.innerHTML='<b>'+n+'</b> '+h.url+' <span class=muted>'+(hs.ok?('ok · '+calls+' calls'):'caido')+'</span>';f.appendChild(div);});}); }
+function addHost(){const name=document.getElementById('hname').value,url=document.getElementById('hurl').value,token=document.getElementById('htok').value;
+ if(!name||!url){alert('nombre + url');return;}
+ fetch('/fleet',{method:'POST',headers:H(),body:JSON.stringify({name,url,token})}).then(()=>loadFleet());}
 function loadProjects(){fetch('/projects?token='+encodeURIComponent(T)).then(r=>r.json()).then(s=>{
  const sel=document.getElementById('proj');sel.innerHTML='';
  Object.keys(s.projects||{}).forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;sel.appendChild(o);});});}

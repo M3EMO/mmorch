@@ -19,3 +19,4 @@ logs/trajectories.jsonl
 logs/skills.jsonl
 logs/nudge.json
 projects.json
+hosts.json

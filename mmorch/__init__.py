@@ -70,6 +70,7 @@ from .projects import (register as register_project, list_projects,           # 
 from .claude_exec import run_claude                                           # ejecutor en PLAN (cupo)
 from .sync import commit_push, pull as git_pull, pull_all as git_pull_all      # GitHub bus de sync
 from .project_loop import run_project_task, ProjectResult                      # ejecutor mmorch-primario
+from .fleet import register_host, list_hosts, fleet_state, forward as fleet_forward  # fleet multi-host
 
 __all__ = [
     "REGISTRY", "family_of", "ModelSpec", "call",
@@ -116,4 +117,5 @@ __all__ = [
     "register_project", "list_projects", "resolve_project", "run_claude",
     "commit_push", "git_pull", "git_pull_all",
     "run_project_task", "ProjectResult",
+    "register_host", "list_hosts", "fleet_state", "fleet_forward",
 ]
