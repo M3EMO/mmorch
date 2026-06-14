@@ -65,6 +65,9 @@ from .scout import (scout as run_scout, gather_environment,                    #
                     scout_delta)   # alias run_scout: NO shadowear el submodulo mmorch.scout
 from .events import emit as emit_event, bus as event_bus, Event                # nivel 3: bus live
 from .enrich import enrich_prompt, enrich_delta                                # Fable: intent enrich
+from .projects import (register as register_project, list_projects,           # project-aware
+                       resolve as resolve_project)
+from .claude_exec import run_claude                                           # ejecutor en PLAN (cupo)
 
 __all__ = [
     "REGISTRY", "family_of", "ModelSpec", "call",
@@ -108,4 +111,5 @@ __all__ = [
     "run_scout", "gather_environment", "scout_delta",
     "emit_event", "event_bus", "Event",
     "enrich_prompt", "enrich_delta",
+    "register_project", "list_projects", "resolve_project", "run_claude",
 ]

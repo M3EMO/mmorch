@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **45 módulos · 26 MCP tools · 273 tests.**
+_Auto-generado por `mmorch.docgen`._ **47 módulos · 26 MCP tools · 283 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -40,6 +40,7 @@ _Auto-generado por `mmorch.docgen`._ **45 módulos · 26 MCP tools · 273 tests.
 | `mmorch/cascade.py` | cascade — FrugalGPT-style multi-step confidence cascade (research: vault/research/ |
 | `mmorch/checkers.py` | checkers — libreria propia de VERIFICADORES DETERMINISTAS (tool-verify). |
 | `mmorch/classify.py` | classify_and_act — rutear por TIPO y manejar cada rama distinto (triage, model |
+| `mmorch/claude_exec.py` | claude_exec — ejecutor que corre en el PLAN de Claude (cupo), no por API. Invoca el |
 | `mmorch/code_embedder.py` | code_embedder — inferencia NUMPY PURA del encoder SimCLR del flywheel (sin torch). |
 | `mmorch/code_loop.py` | code_loop — el WIRE de Fase 5 a produccion: tareas de CODIGO con lazo cerrado. |
 | `mmorch/config.py` | Model registry — single source of truth for models, families, endpoints, prices. |
@@ -65,6 +66,7 @@ _Auto-generado por `mmorch.docgen`._ **45 módulos · 26 MCP tools · 273 tests.
 | `mmorch/patterns.py` | Code-flow patterns (§7), migrated as deterministic Python. |
 | `mmorch/predict.py` | predict (v0.1 NN, Fase 1) — predictor de out_tokens / latencia, SIN dep pesada. |
 | `mmorch/prices.py` | prices — capa de OVERRIDE de precios (datos volátiles, separados del código). |
+| `mmorch/projects.py` | projects — registro de proyectos que mmorch puede CONTROLAR (project-aware). Hace que |
 | `mmorch/prompts.py` | prompts — construccion de mensajes PREFIX-STABLE pa maximizar el cache-hit de DeepSeek. |
 | `mmorch/providers.py` | Provider layer — thin OpenAI-compatible client per external model. |
 | `mmorch/route.py` | route (I-2) — confidence-gated escalation. Ahorra cupo: el modelo barato |

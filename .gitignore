@@ -18,3 +18,4 @@ logs/oracle_dataset.jsonl
 logs/trajectories.jsonl
 logs/skills.jsonl
 logs/nudge.json
+projects.json

@@ -74,6 +74,27 @@ def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model):
             _JOBS[jid]["status"] = state.get("phase", "done")
 
 
+def _run_project_job(project: str, task: str, mode: str):
+    """Job project-aware: corre claude headless (PLAN) dentro del repo registrado."""
+    from .projects import resolve
+    from .claude_exec import run_claude
+    import uuid as _u
+    jid = _u.uuid4().hex[:10]
+    with _JOBS_LOCK:
+        _JOBS[jid] = {"status": "running", "kind": "project"}
+    try:
+        cwd = resolve(project)
+    except Exception as e:
+        emit("job", "error", job_id=jid, detail=f"proyecto invalido: {str(e)[:120]}")
+        with _JOBS_LOCK:
+            _JOBS[jid]["status"] = "error"
+        return
+    emit("job", "running", job_id=jid, detail=f"{project} [{mode}]: {task[:80]}")
+    r = run_claude(task, cwd, mode=mode, job_id=jid)
+    with _JOBS_LOCK:
+        _JOBS[jid]["status"] = "done" if r.get("ok") else "error"
+
+
 def _run_fanout_job(prompts: list, gen_model: str):
     from .patterns import fan_out
     jid = uuid.uuid4().hex[:10]
@@ -158,6 +179,35 @@ async def run_fanout(request):
     return JSONResponse({"started": "fanout", "n": len(prompts)})
 
 
+async def projects_handler(request):
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from .projects import list_projects, register
+    if request.method == "POST":
+        body = await request.json()
+        try:
+            r = register(body.get("name", ""), body.get("path", ""))
+            return JSONResponse({"registered": r})
+        except Exception as e:
+            return JSONResponse({"error": str(e)[:200]}, status_code=400)
+    return JSONResponse({"projects": list_projects()})
+
+
+async def run_project(request):
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    body = await request.json()
+    project = body.get("project", ""); task = body.get("task", "")
+    mode = body.get("mode", "plan")
+    if mode not in ("plan", "edit", "read"):
+        return JSONResponse({"error": "mode invalido (plan|edit)"}, status_code=400)
+    t = threading.Thread(target=_run_project_job, args=(project, task, mode), daemon=True)
+    t.start()
+    return JSONResponse({"started": "project", "project": project, "mode": mode})
+
+
 async def kill_job(request):
     from starlette.responses import JSONResponse
     if not _token_ok(request):
@@ -193,6 +243,8 @@ def build_app():
         Route("/events", sse_events),
         Route("/run/rubric", run_rubric, methods=["POST"]),
         Route("/run/fanout", run_fanout, methods=["POST"]),
+        Route("/projects", projects_handler, methods=["GET", "POST"]),
+        Route("/run/project", run_project, methods=["POST"]),
         Route("/kill/{job_id}", kill_job, methods=["POST"]),
         Route("/approve/{job_id}", approve_job, methods=["POST"]),
     ])
@@ -224,6 +276,11 @@ main{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px}
 <textarea id=task placeholder="implementa inc(x)=x+1"></textarea>
 <div class=row style="margin-top:8px"><button onclick=runRubric()>▶ run rubric</button>
 <button onclick=runFan()>▶ run fan_out</button><button onclick=loadState()>↻ estado</button></div>
+<hr style="border:none;border-top:1px solid #26262b;margin:10px 0">
+<p class=muted>project-aware (corre en tu PLAN de Claude, dentro del repo)</p>
+<div class=row><select id=proj style="flex:1"></select><button onclick=loadProjects()>↻</button></div>
+<div class=row style="margin-top:6px"><input id=ptask placeholder="instruccion para el proyecto" style="flex:1">
+<button onclick="runProject('plan')">analizar</button><button onclick="runProject('edit')">editar</button></div>
 <pre id=state class=muted style="white-space:pre-wrap;max-height:30vh;overflow:auto"></pre></div>
 </main>
 <script>
@@ -232,7 +289,7 @@ function connect(){T=document.getElementById('token').value;
  const es=new EventSource('/events?token='+encodeURIComponent(T));
  es.onopen=()=>document.getElementById('conn').textContent='live';
  es.onerror=()=>document.getElementById('conn').textContent='desconectado';
- es.onmessage=e=>addEv(JSON.parse(e.data));loadState();}
+ es.onmessage=e=>addEv(JSON.parse(e.data));loadState();loadProjects();}
 function addEv(ev){const f=document.getElementById('feed');const d=document.createElement('div');
  d.className='ev '+(ev.status||'pending');
  d.innerHTML='<span class=dot></span><b>'+(ev.node||ev.type)+'</b><span class=muted>'+ev.status+'</span> '+(ev.detail||'');
@@ -245,6 +302,12 @@ function runRubric(){const task=document.getElementById('task').value||'implemen
 function runFan(){fetch('/run/fanout',{method:'POST',headers:H(),body:JSON.stringify({prompts:['di hola','di chau','di test']})});}
 function loadState(){fetch('/state?token='+encodeURIComponent(T)).then(r=>r.json()).then(s=>{
  document.getElementById('state').textContent=JSON.stringify({jobs:s.jobs,calls:s.summary&&s.summary.calls,cost:s.summary&&s.summary.total_cost_usd,sections:s.sections,budget:s.budget},null,2);});}
+function loadProjects(){fetch('/projects?token='+encodeURIComponent(T)).then(r=>r.json()).then(s=>{
+ const sel=document.getElementById('proj');sel.innerHTML='';
+ Object.keys(s.projects||{}).forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;sel.appendChild(o);});});}
+function runProject(mode){const project=document.getElementById('proj').value;const task=document.getElementById('ptask').value;
+ if(!project||!task){alert('elegí proyecto + escribí instrucción');return;}
+ fetch('/run/project',{method:'POST',headers:H(),body:JSON.stringify({project,task,mode})});}
 </script></body></html>"""
 
 
