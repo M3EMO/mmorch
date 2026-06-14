@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **50 módulos · 26 MCP tools · 302 tests.**
+_Auto-generado por `mmorch.docgen`._ **51 módulos · 26 MCP tools · 309 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -83,6 +83,7 @@ _Auto-generado por `mmorch.docgen`._ **50 módulos · 26 MCP tools · 302 tests.
 | `mmorch/tournament.py` | tournament — elegir EL mejor de pocos candidatos por gusto/calidad (naming, |
 | `mmorch/trajectory.py` | trajectory — robo de Hermes: 'trajectory compression para entrenar la proxima |
 | `mmorch/vault.py` | vault — memoria de largo plazo mmorch-legible sobre el vault Obsidian. |
+| `mmorch/weights.py` | weights — gestion de pesos de nodos neuronales (model-cards + verificacion). Source of |
 <!-- /mmorch:auto:modules -->
 
 Otros: `mcp_server.py` (MCP wrapper), `tests/` (regression gate), `vault/` (memoria +

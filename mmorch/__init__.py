@@ -71,6 +71,7 @@ from .claude_exec import run_claude                                           # 
 from .sync import commit_push, pull as git_pull, pull_all as git_pull_all      # GitHub bus de sync
 from .project_loop import run_project_task, ProjectResult                      # ejecutor mmorch-primario
 from .fleet import register_host, list_hosts, fleet_state, forward as fleet_forward  # fleet multi-host
+from .weights import card as weight_card, verify as weight_verify, list_weights      # model-cards + sha256
 
 __all__ = [
     "REGISTRY", "family_of", "ModelSpec", "call",
@@ -118,4 +119,5 @@ __all__ = [
     "commit_push", "git_pull", "git_pull_all",
     "run_project_task", "ProjectResult",
     "register_host", "list_hosts", "fleet_state", "fleet_forward",
+    "weight_card", "weight_verify", "list_weights",
 ]

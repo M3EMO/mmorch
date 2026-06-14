@@ -1,0 +1,19 @@
+{
+  "_comment": "Model-cards de los pesos de nodos neuronales de mmorch. Cada peso: arch, dims, sha256 (verificado al cargar), dataset+metrica, fecha, regen_cmd. Promover una version nueva = debe BATIR la metrica del incumbente (gate flywheel).",
+  "code_embedder": {
+    "kind": "SimCLR code encoder (token-embed -> bi-GRU -> mean-pool)",
+    "path": "flywheel/code_embedder.npz",
+    "vocab_path": "flywheel/code_embedder_vocab.json",
+    "vocab_size": 8000,
+    "emb_dim": 96,
+    "hidden": 128,
+    "out_dim": 256,
+    "dtype": "float32",
+    "sha256": "353c8e960a7a36a8c039738d80703d5bb525072ef177e860634f9b45fa637f6e",
+    "trained_on": "logs/codequality_dataset.jsonl (10847 funcs, 9 repos) -> radon MI tier",
+    "metric": "radon-tier AUC 0.88 (vs bge-small 0.80) — BATE al incumbente",
+    "trained_at": "2026-06-13",
+    "regen_cmd": "MSYS2_ARG_CONV_EXCL='*' wsl -d Ubuntu -- bash -lc 'export MMORCH_DS=/mnt/c/Users/map12/.claude/orchestration/logs/radon_dataset.jsonl; ~/flywheel/bin/python /mnt/c/.../flywheel/simclr.py 0 16 192' && python flywheel/export_numpy.py",
+    "status": "active"
+  }
+}
