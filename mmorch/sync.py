@@ -78,10 +78,15 @@ def pull_all(*, job_id: str = "") -> dict:
     return {"pulled": results}
 
 
-if __name__ == "__main__":   # CLI pa la Scheduled Task: python -m mmorch.sync pull-all
+def _cli() -> None:
+    """Entry-point CLI (mmorch-sync) pa la Scheduled Task: mmorch-sync pull-all."""
     import sys, json
     cmd = sys.argv[1] if len(sys.argv) > 1 else "pull-all"
     if cmd in ("pull-all", "pull_all"):
         print(json.dumps(pull_all(), ensure_ascii=False, default=str))
     else:
-        print("uso: python -m mmorch.sync pull-all")
+        print("uso: mmorch-sync pull-all")
+
+
+if __name__ == "__main__":   # python -m mmorch.sync pull-all
+    _cli()

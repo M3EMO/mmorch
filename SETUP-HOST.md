@@ -7,13 +7,14 @@ Arquitectura: una PC always-on (ej **pc-mateo**) HOSTEA el server y hace el trab
 ## A. En el HOST (pc-mateo) — una vez
 
 1. **Deps**: Git, Python 3.12, Claude Code (`npm i -g @anthropic-ai/claude-code`), Tailscale (ya).
-2. **Clonar mmorch**:
+2. **Clonar + instalar** (packaging: una línea trae todas las deps del host):
    ```
    git clone https://github.com/M3EMO/mmorch.git %USERPROFILE%\.claude\orchestration
    cd %USERPROFILE%\.claude\orchestration
    python -m venv .venv
-   .venv\Scripts\pip install openai python-dotenv "mcp>=1.2.0" starlette uvicorn duckdb fastembed radon sqlglot pint sympy scikit-learn numpy
+   .venv\Scripts\pip install -e .[host]
    ```
+   (`[host]` = mcp+memory+checkers+server+factory. Da los scripts `mmorch-server` y `mmorch-sync`.)
 3. **.env** (copialo a mano, NO va por git):
    ```
    DEEPSEEK_API_KEY=...
@@ -32,7 +33,7 @@ Arquitectura: una PC always-on (ej **pc-mateo**) HOSTEA el server y hace el trab
 7. **Server always-on** (Scheduled Task al iniciar sesión):
    ```
    schtasks /create /tn "mmorch-server" /sc onlogon /rl highest /f ^
-     /tr "cmd /c cd /d %USERPROFILE%\.claude\orchestration && .venv\Scripts\python.exe -m mmorch.server"
+     /tr "cmd /c cd /d %USERPROFILE%\.claude\orchestration && .venv\Scripts\mmorch-server.exe"
    schtasks /run /tn "mmorch-server"
    ```
    (server.main lee MMORCH_SERVER_* del .env vía dotenv.)
@@ -42,7 +43,7 @@ Arquitectura: una PC always-on (ej **pc-mateo**) HOSTEA el server y hace el trab
 Scheduled Task cada 5 min que trae los cambios del agente:
 ```
 schtasks /create /tn "mmorch-pull" /sc minute /mo 5 /f ^
-  /tr "cmd /c cd /d %USERPROFILE%\.claude\orchestration && .venv\Scripts\python.exe -m mmorch.sync pull-all"
+  /tr "cmd /c cd /d %USERPROFILE%\.claude\orchestration && .venv\Scripts\mmorch-sync.exe pull-all"
 ```
 Seguro: solo pullea repos con árbol limpio, ff-only (no pisa tu WIP).
 

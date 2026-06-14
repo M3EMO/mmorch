@@ -20,3 +20,6 @@ logs/skills.jsonl
 logs/nudge.json
 projects.json
 hosts.json
+*.egg-info/
+build/
+dist/
