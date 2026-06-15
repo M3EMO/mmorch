@@ -269,6 +269,18 @@ Unificar en 1 engine con executor/verifier/policy PLUGGABLES. **Trigger**: hace 
 o el mantenimiento duele. **Por qué parkeado**: cleanup sin ganancia funcional; los 4 andan +
 testeados. Refactor, no rewrite.
 
+### SEED — Embedding por EJECUCIÓN (huella de comportamiento) — el fix funcional real
+Probado (2026-06-14): el code_embedder es ESTRUCTURAL, no funcional (colapsa 0.99→0.45 en
+implementaciones diversas). #1 (positivos funcionales) lo mejora algo (+0.024, no significativo)
+pero un bi-GRU de tokens tiene TECHO: adivina forma, no ejecuta. **El fix real NO es red más
+grande**: embeber el COMPORTAMIENTO. Correr la función en N inputs-sonda → vector (inputs→outputs)
+= huella funcional. Funcional-equivalentes → mismos outputs → mismo embedding, sin importar
+sintaxis. Equivalencia EXACTA (módulo cobertura), CERO entrenamiento, alineado con la tesis
+(ejecución=oráculo). **Trigger**: querer separar correctitud/función (donde el estático da azar).
+**Cómo**: generar inputs por firma (como oracle_dataset) + sandbox + fingerprint de outputs
+(hash/vector). Limitación: necesita código ejecutable con firma (nivel-función, no snippets).
+Combina con el token-encoder: estructura (GRU) + comportamiento (ejecución) = embedding híbrido.
+
 ### SEED — Fleet-control multi-host en el dashboard
 `fleet.py` (backend) ya lista hosts + agrega `/state` + forwardea jobs. **Falta**: la UI que
 elige host destino y rutea el job desde un solo dashboard (hoy se registra host pero el job va
