@@ -7,7 +7,7 @@ import mmorch.weights as W
 
 def test_card_has_arch_and_sha():
     c = W.card("code_embedder")
-    assert c and c["out_dim"] == 256 and len(c["sha256"]) == 64
+    assert c and c["out_dim"] in (256, 384) and len(c["sha256"]) == 64
     assert "regen_cmd" in c and "metric" in c   # model-card completo
 
 

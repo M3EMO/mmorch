@@ -6,14 +6,14 @@
     "vocab_path": "flywheel/code_embedder_vocab.json",
     "vocab_size": 8000,
     "emb_dim": 96,
-    "hidden": 128,
-    "out_dim": 256,
+    "hidden": 192,
+    "out_dim": 384,
     "dtype": "float32",
-    "sha256": "353c8e960a7a36a8c039738d80703d5bb525072ef177e860634f9b45fa637f6e",
-    "trained_on": "logs/codequality_dataset.jsonl (10847 funcs, 9 repos) -> radon MI tier",
-    "metric": "radon-tier AUC 0.88 (vs bge-small 0.80) — BATE al incumbente",
-    "trained_at": "2026-06-13",
-    "regen_cmd": "MSYS2_ARG_CONV_EXCL='*' wsl -d Ubuntu -- bash -lc 'export MMORCH_DS=/mnt/c/Users/map12/.claude/orchestration/logs/radon_dataset.jsonl; ~/flywheel/bin/python /mnt/c/.../flywheel/simclr.py 0 16 192' && python flywheel/export_numpy.py",
+    "sha256": "50d96bae8e608dd6377441b6b762ee7cd774429c24205aa0cf410bfe22f0cfef",
+    "trained_on": "logs/radon_dataset.jsonl (10832 funcs, 9 repos) -> radon MI tier",
+    "metric": "radon-tier AUC 0.899 torch / 0.889 numpy (vs old 0.88, vs bge 0.80) — full-config retrain BATE al incumbente. MoCo (#2) probado y RECHAZADO (0.884 < 0.899).",
+    "trained_at": "2026-06-14",
+    "regen_cmd": "WSL: export MMORCH_DS=.../logs/radon_dataset.jsonl; ~/flywheel/bin/python flywheel/simclr.py 0 16 192  (luego export_numpy.py). MoCo variant: simclr_moco.py (rechazado).",
     "status": "active"
   }
 }
