@@ -31,7 +31,8 @@ def _load():
         return _STATE
     d = np.load(_NPZ)
     vocab = json.loads(_VOCAB.read_text(encoding="utf-8"))
-    _STATE = {"w": {k: d[k] for k in d.files}, "vocab": vocab}
+    # upcast a float32 (los pesos pueden venir cuantizados fp16; el compute numpy es fp32)
+    _STATE = {"w": {k: d[k].astype(np.float32) for k in d.files}, "vocab": vocab}
     return _STATE
 
 
