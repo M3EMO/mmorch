@@ -23,3 +23,5 @@ hosts.json
 *.egg-info/
 build/
 dist/
+logs/oracle_diverse.jsonl
+flywheel/diverse_gen.log
