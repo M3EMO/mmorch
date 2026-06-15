@@ -29,20 +29,22 @@ def main():
     from mmorch.checkers import check
     from flywheel.oracle_dataset import SPECS, extract_code
     K = int(sys.argv[1]) if len(sys.argv) > 1 else len(APPROACHES)
+    REPS = int(sys.argv[2]) if len(sys.argv) > 2 else 1   # repetir (temp alta -> variedad)
     tests = {n: t for n, _, t in SPECS}
 
     prompts, meta = [], []
     sysmsg = ("Sos programador Python. Implementa EXACTO lo pedido con el enfoque indicado. "
               "Solo el codigo de la funcion en un bloque python, sin explicacion.")
-    for name, spec, _ in SPECS:
-        for ap in APPROACHES[:K]:
-            prompts.append(f"Implementa {ap}: {spec}\nLa funcion DEBE llamarse `{name}`.")
-            meta.append((name, ap))
+    for _ in range(REPS):
+        for name, spec, _t in SPECS:
+            for ap in APPROACHES[:K]:
+                prompts.append(f"Implementa {ap}: {spec}\nLa funcion DEBE llamarse `{name}`.")
+                meta.append((name, ap))
 
-    print(f"generando {len(prompts)} ({len(SPECS)} specs x {min(K,len(APPROACHES))} enfoques)...", flush=True)
+    print(f"generando {len(prompts)} ({len(SPECS)} specs x {min(K,len(APPROACHES))} enfoques x {REPS} reps)...", flush=True)
     res = fan_out(prompts, gen_model="deepseek-chat", system=sysmsg, max_workers=8, temperature=1.0)
 
-    rows, npass = [], 0
+    rows, npass, seen = [], 0, set()
     for (name, ap), r in zip(meta, res):
         txt = getattr(r, "text", "") or ""
         if not txt:
@@ -50,6 +52,10 @@ def main():
         code = extract_code(txt)
         if name not in code:
             continue
+        h = hash((name, code))
+        if h in seen:           # dedup: misma solucion exacta no suma
+            continue
+        seen.add(h)
         try:
             ok = check("python_exec", code=code + "\n" + tests[name]).passed
         except Exception:
