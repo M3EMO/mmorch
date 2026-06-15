@@ -70,6 +70,16 @@ rápido que from-scratch. Opción: inicializar el embedding-table desde bge y fi
 - temperature schedule (subir gradual) reduce penalización de falsos-negativos.
 - **fp16/int8** pa deploy (seed) — hoy 3.77MB float32, innecesario.
 
+## 3b. Resultados de la ablación (2026-06-14)
+- **Encoder es ESTRUCTURAL, no funcional**: en data diversa (oracle_diverse, 367 passers/20 specs)
+  el code_embedder se desploma (P@1 0.99→0.45) — agrupa por superficie, no por función.
+- **#2 MoCo: RECHAZADO** (radon 0.884 < 0.899 NT-Xent; dataset chico → in-batch alcanza).
+- **retrain full-config: ADOPTADO** (0.88→0.899, dim 256→384) + **fp16 (#5): ADOPTADO** (½ tamaño, lossless).
+- **#1 positivos funcionales**: A/B vs rename-aug, P@1 held-out, name-normalized, n=5 seeds →
+  lift medio **+0.024 (std 0.031, 4/5 positivos, 1 negativo)**. DIRECCIONAL pero NO significativo
+  a 20 specs/4 held-out. Mecanismo y pipeline construidos (`simclr_functional.py`, `oracle_diverse.py`).
+  **NO promovido** (varianza > efecto). Cuello = spec-count: confirmar con 40-100 specs.
+
 ## 4. Recomendación priorizada
 1. **(b) Positivos funcionales del oracle** — señal real, cero costo extra, el mayor salto de calidad.
 2. **(a) Cola MoCo** — el lever de EFICIENCIA pa CPU (más negativos, batch chico).

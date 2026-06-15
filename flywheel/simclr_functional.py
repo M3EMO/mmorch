@@ -80,7 +80,10 @@ def train(by_train, vocab, *, mode, epochs=20, hid=192):
 
 
 def main():
+    global SEED
     epochs = int(sys.argv[1]) if len(sys.argv) > 1 else 40
+    SEED = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+    random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
     by = load_by_spec()
     specs = sorted(by); random.Random(SEED).shuffle(specs)
     n_test = max(2, len(specs) // 5)
