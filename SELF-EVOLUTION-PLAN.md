@@ -269,7 +269,15 @@ Unificar en 1 engine con executor/verifier/policy PLUGGABLES. **Trigger**: hace 
 o el mantenimiento duele. **Por qué parkeado**: cleanup sin ganancia funcional; los 4 andan +
 testeados. Refactor, no rewrite.
 
-### SEED — Embedding por EJECUCIÓN (huella de comportamiento) — el fix funcional real
+### SEED — Embedding por EJECUCIÓN (huella de comportamiento) — el fix funcional real ✅ VALIDADO 2026-06-15
+**IMPLEMENTADO y validado**: `mmorch/exec_embedder.py` (`embed_exec`/`embed_hybrid`). CERO train,
+sondas por arity + sandbox + canon + feature-hash. **A 40 specs (oracle_diverse): behavioral 0.919
+P@1 / 0.948 AUC vs structural 0.430 / 0.665 → gap +0.49 P@1.** El structural se DESPLOMA al escalar
+specs (0.847→0.430), behavioral aguanta → behavioral GENERALIZA, structural se degrada. behavioral-solo
+> hybrid a escala. Cobertura: drop 0/221 (float-canon + timeout por-sonda + mutación + callable).
+Detalle WEIGHTS.md §3c. **Gated NO hecho**: cablear a shadow_prior/recall — adapter `embed_hybrid`
+listo pero los outcomes actuales son etiquetas (no código ejecutable). Limitación: nivel-función, arity 1/2/3.
+
 Probado (2026-06-14): el code_embedder es ESTRUCTURAL, no funcional (colapsa 0.99→0.45 en
 implementaciones diversas). #1 (positivos funcionales) lo mejora algo (+0.024, no significativo)
 pero un bi-GRU de tokens tiene TECHO: adivina forma, no ejecuta. **El fix real NO es red más

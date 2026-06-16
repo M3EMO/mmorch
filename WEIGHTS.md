@@ -80,6 +80,35 @@ rápido que from-scratch. Opción: inicializar el embedding-table desde bge y fi
   a 20 specs/4 held-out. Mecanismo y pipeline construidos (`simclr_functional.py`, `oracle_diverse.py`).
   **NO promovido** (varianza > efecto). Cuello = spec-count: confirmar con 40-100 specs.
 
+## 3c. Embedding por EJECUCIÓN (exec-embedding) — VALIDADO (2026-06-15)
+El fix funcional REAL del seed, no una red más grande: `mmorch/exec_embedder.py`. **CERO entrenamiento.**
+Corre la función en sondas deterministas por arity (sandbox) → canonicaliza outputs (dict/set sin
+orden → mismo canon) → feature-hash de (sonda→output) a vector 256d. Funcional-equiv → mismo vector.
+
+Medición sobre **oracle_diverse**, apples-to-apples (`eval_functional.py code exec hybrid`):
+
+| arm | 20 specs (367 passers) | 40 specs (221 passers) |
+|-----|------------------------|------------------------|
+| structural (dim 384) | 0.847 P@1 / 0.710 AUC | **0.430** P@1 / 0.665 AUC |
+| **behavioral (exec)** | **0.973** / 0.948 | **0.919** / **0.948** |
+| hybrid (struct⊕behav) | 0.970 / 0.925 | 0.860 / 0.917 |
+
+- **El scale-up 20→40 specs (C) reveló lo clave**: el structural se DESPLOMA (0.847→0.430) cuando
+  hay más specs y menos densidad/spec — su "competencia" a 20 specs era artefacto de spec-count
+  bajo/saturado (justo el colapso ~0.45 que §3b vio con el encoder viejo). **behavioral AGUANTA**
+  (0.92, AUC 0.95). El gap se abre de **+0.13** (20 specs) a **+0.49 P@1** (40 specs).
+- **behavioral GENERALIZA, structural se DEGRADA con spec-count.** A escala, behavioral-SOLO es el
+  ganador claro; **hybrid empeora** (0.86) porque el structural débil (0.43) lo arrastra. Hybrid solo
+  convenía cuando el structural era decente (20 specs).
+- Cobertura de sondas (A, 2026-06-15): canon float-tolerante + timeout POR-SONDA + captura de
+  mutación in-place + detección por `callable` + sin sonda degenerada n=0 → **drop 0/221** (antes
+  8/367). Sigue acotado a código ejecutable nivel-función (arity 1/2/3).
+- exec-embedding NO reemplaza al code_embedder en su EJE (radon/estructura). Es el encoder FUNCIONAL:
+  para similitud de comportamiento, behavioral-solo > structural > hybrid a escala.
+- **Stop point**: validado + documentado. Adapter `embed_hybrid` pluggable construido (B) pero los
+  outcomes de shadow_prior son ETIQUETAS, no código → exec N/A ahí hoy; NO cableado a consumidores
+  live (cambio gated aparte). Detalle en docstring de `shadow_prior.py`.
+
 ## 4. Recomendación priorizada
 1. **(b) Positivos funcionales del oracle** — señal real, cero costo extra, el mayor salto de calidad.
 2. **(a) Cola MoCo** — el lever de EFICIENCIA pa CPU (más negativos, batch chico).
