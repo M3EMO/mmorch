@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **51 módulos · 26 MCP tools · 309 tests.**
+_Auto-generado por `mmorch.docgen`._ **52 módulos · 26 MCP tools · 309 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -51,6 +51,7 @@ _Auto-generado por `mmorch.docgen`._ **51 módulos · 26 MCP tools · 309 tests.
 | `mmorch/ensemble.py` | ensemble_verify (I-3) — K escepticos cross-family + voto mayoria. |
 | `mmorch/events.py` | events — bus de progreso in-process pa la UI live (nivel 3). El orquestador emite |
 | `mmorch/evolve.py` | evolve — subset DGM-inspirado, GATED (research: vault/research/ |
+| `mmorch/exec_embedder.py` | exec_embedder — embedding por EJECUCION (huella de comportamiento), CERO entrenamiento. |
 | `mmorch/factory.py` | factory — mmorch como FÁBRICA de modelos (no ES el modelo, lo CONSTRUYE/entrena). |
 | `mmorch/feedback.py` | feedback — el lazo que faltaba (la 'loss' ausente). mmorch genera/verifica/ |
 | `mmorch/fleet.py` | fleet — control unificado de varios hosts mmorch en el tailnet. Cada maquina corre su |
