@@ -339,6 +339,8 @@ main{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px}
 <div class=card><div class=row><strong>subagentes</strong><span class=pill id=cnt>0</span>
 <button onclick=clearfeed() style="margin-left:auto">limpiar</button></div><div id=feed></div></div>
 <div class=card><strong>control</strong>
+<div class=row style="margin-top:4px"><span class=muted>destino</span>
+<select id=target style="flex:1"><option value=local>local (este host)</option></select></div>
 <p class=muted>rubric_loop (tarea + 1 criterio checkable de ejemplo)</p>
 <textarea id=task placeholder="implementa inc(x)=x+1"></textarea>
 <div class=row style="margin-top:8px"><button onclick=runRubric()>▶ run rubric</button>
@@ -375,10 +377,14 @@ function addEv(ev){const f=document.getElementById('feed');const d=document.crea
  f.prepend(d);document.getElementById('cnt').textContent=f.children.length;}
 function clearfeed(){document.getElementById('feed').innerHTML='';document.getElementById('cnt').textContent=0;}
 function H(){return {'Content-Type':'application/json','X-Token':T};}
+// rutea el job al destino elegido: local -> /run/*, host del fleet -> /fleet/run (server->server)
+function submitJob(path,payload){const t=document.getElementById('target').value;
+ if(!t||t==='local'){return fetch(path,{method:'POST',headers:H(),body:JSON.stringify(payload)});}
+ return fetch('/fleet/run',{method:'POST',headers:H(),body:JSON.stringify({host:t,path:path,payload:payload})});}
 function runRubric(){const task=document.getElementById('task').value||'implementa inc(x)=x+1';
- fetch('/run/rubric',{method:'POST',headers:H(),body:JSON.stringify({task,K:5,criteria:[
-  {id:'c1',desc:'inc pasa',kind:'checkable',checker:'python_exec',ctx:{code:'{attempt_code}\\nassert inc(1)==2'}}]})});}
-function runFan(){fetch('/run/fanout',{method:'POST',headers:H(),body:JSON.stringify({prompts:['di hola','di chau','di test']})});}
+ submitJob('/run/rubric',{task,K:5,criteria:[
+  {id:'c1',desc:'inc pasa',kind:'checkable',checker:'python_exec',ctx:{code:'{attempt_code}\\nassert inc(1)==2'}}]});}
+function runFan(){submitJob('/run/fanout',{prompts:['di hola','di chau','di test']});}
 function loadState(){fetch('/state?token='+encodeURIComponent(T)).then(r=>r.json()).then(s=>{
  document.getElementById('state').textContent=JSON.stringify({calls:s.summary&&s.summary.calls,cost:s.summary&&s.summary.total_cost_usd,sections:s.sections,budget:s.budget},null,2);
  renderKanban(s.jobs||{});});}
@@ -393,8 +399,16 @@ function renderKanban(jobs){const k=document.getElementById('kanban');k.innerHTM
   k.appendChild(col);});}
 function loadFleet(){fetch('/fleet?token='+encodeURIComponent(T)).then(r=>r.json()).then(s=>{
  const f=document.getElementById('fleet');f.innerHTML='';const st=(s.state&&s.state.hosts)||{};
- Object.entries(s.hosts||{}).forEach(([n,h])=>{const hs=st[n]||{};const div=document.createElement('div');div.className='ev '+(hs.ok?'done':'error');
-  const calls=hs.summary?hs.summary.calls:'?';div.innerHTML='<b>'+n+'</b> '+h.url+' <span class=muted>'+(hs.ok?('ok · '+calls+' calls'):'caido')+'</span>';f.appendChild(div);});}); }
+ const tg=document.getElementById('target');const cur=tg.value;          // repuebla el dropdown destino
+ tg.innerHTML='<option value=local>local (este host)</option>';
+ Object.entries(s.hosts||{}).forEach(([n,h])=>{const hs=st[n]||{};
+  const o=document.createElement('option');o.value=n;o.textContent=n;tg.appendChild(o);
+  const div=document.createElement('div');div.className='ev '+(hs.ok?'done':'error');
+  const calls=hs.summary?hs.summary.calls:'?';
+  div.innerHTML='<b>'+n+'</b> '+h.url+' <span class=muted>'+(hs.ok?('ok · '+calls+' calls'):'caido')+'</span>';
+  const b=document.createElement('button');b.textContent='usar';b.style='margin-left:auto;font-size:11px;padding:2px 8px';
+  b.onclick=()=>{tg.value=n;};div.appendChild(b);f.appendChild(div);});
+ tg.value=[...tg.options].some(o=>o.value===cur)?cur:'local';}); }
 function addHost(){const name=document.getElementById('hname').value,url=document.getElementById('hurl').value,token=document.getElementById('htok').value;
  if(!name||!url){alert('nombre + url');return;}
  fetch('/fleet',{method:'POST',headers:H(),body:JSON.stringify({name,url,token})}).then(()=>loadFleet());}
@@ -404,10 +418,10 @@ function loadProjects(){fetch('/projects?token='+encodeURIComponent(T)).then(r=>
 function runMmorch(){const project=document.getElementById('proj').value;const task=document.getElementById('ptask').value;
  const target_file=document.getElementById('pfile').value;const test_cmd=document.getElementById('ptest').value||null;
  if(!project||!task||!target_file){alert('mmorch necesita proyecto + instruccion + archivo');return;}
- fetch('/run/project',{method:'POST',headers:H(),body:JSON.stringify({project,task,engine:'mmorch',target_file,test_cmd,push:true})});}
+ submitJob('/run/project',{project,task,engine:'mmorch',target_file,test_cmd,push:true});}
 function runClaude(mode){const project=document.getElementById('proj').value;const task=document.getElementById('ptask').value;
  if(!project||!task){alert('elegí proyecto + instruccion');return;}
- fetch('/run/project',{method:'POST',headers:H(),body:JSON.stringify({project,task,engine:'claude',mode,push:mode==='edit'})});}
+ submitJob('/run/project',{project,task,engine:'claude',mode,push:mode==='edit'});}
 </script></body></html>"""
 
 
