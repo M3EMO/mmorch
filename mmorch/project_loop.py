@@ -39,23 +39,43 @@ def _run_cmd(cwd: str, cmd: str, timeout: float = 120.0) -> tuple[bool, str]:
         return False, str(e)[:300]
 
 
+def _cg(bin_, repo, sub, *, arg="", timeout=60.0):
+    """Corre un subcomando de codegraph en `repo`, silencioso/best-effort."""
+    cmd = f'"{bin_}" {sub}' + (f' "{arg}"' if arg else "")
+    return subprocess.run(cmd, cwd=repo, shell=True, capture_output=True,
+                          text=True, encoding="utf-8", errors="replace", timeout=timeout)
+
+
 def _codegraph_context(repo: str, task: str, *, timeout: float = 15.0, cap: int = 4000) -> str:
     r"""Contexto relevante del repo via el CLI de codegraph (el MISMO motor que su MCP server,
-    sin el overhead de protocolo/spawn). Devuelve markdown (Entry Points / Related / Code) o ''
-    si no hay CLI / el repo no esta indexado (sin .codegraph/) / error. Acotado a `cap` chars.
-    El task se SANITIZA a [\w\s.-/] antes de pasarlo -> sin inyeccion de shell. Opt-in: lo gatea
-    MMORCH_CODEGRAPH. Override del binario via CODEGRAPH_BIN. Indexar un repo: `codegraph init`+`index`."""
+    sin el overhead de protocolo/spawn). Devuelve markdown (Entry Points / Related / Code) o ''.
+
+    AUTO-MANTIENE el indice (por eso NO hace falta un hook SessionStart, que ademas no dispararia
+    pa los jobs autonomos del server): si ya esta indexado -> `sync` (incremental, barato, lo deja
+    fresco); si falta -> `init`+`index` una vez (cero-manual). El init se puede apagar con
+    MMORCH_CODEGRAPH_AUTOINDEX=0 (queda solo-sync). Binario via CODEGRAPH_BIN o PATH.
+    El task se SANITIZA a [\w\s.-/] antes de pasarlo -> sin inyeccion de shell. Todo best-effort:
+    sin CLI / index fallido / error -> '' -> el loop sigue sin contexto (graceful)."""
     import shutil
     bin_ = os.environ.get("CODEGRAPH_BIN") or shutil.which("codegraph")
-    if not bin_ or not os.path.isdir(os.path.join(repo, ".codegraph")):
+    if not bin_:
+        return ""
+    cgdir = os.path.join(repo, ".codegraph")
+    try:
+        if os.path.isdir(cgdir):
+            _cg(bin_, repo, "sync", timeout=60)                         # fresco, incremental
+        elif os.environ.get("MMORCH_CODEGRAPH_AUTOINDEX", "1") != "0":
+            _cg(bin_, repo, "init", arg=repo, timeout=60)               # bootstrap una vez
+            _cg(bin_, repo, "index", timeout=180)
+    except Exception:
+        pass                                                            # index best-effort
+    if not os.path.isdir(cgdir):
         return ""
     safe = re.sub(r"[^\w\s.\-/]", " ", task)[:200].strip()
     if not safe:
         return ""
     try:
-        p = subprocess.run(f'"{bin_}" context "{safe}"', cwd=repo, shell=True,
-                           capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=timeout)
+        p = _cg(bin_, repo, "context", arg=safe, timeout=timeout)
         return p.stdout.strip()[:cap] if p.returncode == 0 else ""
     except Exception:
         return ""
