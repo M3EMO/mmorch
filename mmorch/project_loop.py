@@ -53,18 +53,25 @@ class ProjectResult:
 
 def run_project_task(project: str, task: str, *, target_file: str, test_cmd: str | None = None,
                      K: int = 4, escalate: bool = True, push: bool = True,
-                     gen_model: str | None = None, job_id: str = "") -> ProjectResult:
+                     gen_model: str | None = None, lazy: bool | None = None,
+                     job_id: str = "") -> ProjectResult:
     """mmorch-primario: loop DeepSeek genera el archivo -> escribe -> corre tests -> repite
     hasta verde o K. Verdad = ejecucion (test_cmd). Si K se agota y escalate: claude -p (cupo).
-    push: si verde, commit+push a mmorch/auto. test_cmd None -> sin verificacion (no recomendado)."""
+    push: si verde, commit+push a mmorch/auto. test_cmd None -> sin verificacion (no recomendado).
+    lazy: modo minimal-code (LAZY_SYSTEM, estilo ponytail). None -> env MMORCH_LAZY (default ON).
+    SEGURO empujar minimalismo aca: el gate de tests filtra lo minimal-pero-roto (medido: -51%
+    LOC, correctitud preservada por el gate). NO afecta al flywheel (usa fan_out, no este loop)."""
     from .config import DEFAULT_GENERATOR
     from .providers import call
     from .projects import resolve
     from .sync import commit_push, _git
+    from .prompts import LAZY_SYSTEM
     gen_model = gen_model or DEFAULT_GENERATOR
+    lazy_on = lazy if lazy is not None else os.environ.get("MMORCH_LAZY", "1") != "0"
     cwd = resolve(project)
     fpath = os.path.join(cwd, target_file)
-    emit("job", "running", job_id=job_id, detail=f"mmorch {project}/{target_file}: {task[:60]}")
+    emit("job", "running", job_id=job_id,
+         detail=f"mmorch{'·lazy' if lazy_on else ''} {project}/{target_file}: {task[:60]}")
 
     _git(cwd, "checkout", "-B", "mmorch/auto")   # branch del agente (reversible)
     cur = ""
@@ -81,8 +88,11 @@ def run_project_task(project: str, task: str, *, target_file: str, test_cmd: str
                   + (f"\nEl intento anterior fallo los tests:\n{feedback[:1000]}\n"
                      "Corregilo.\n" if feedback else "")
                   + "Devolve SOLO el contenido COMPLETO nuevo del archivo en un bloque ```.")
+        # lazy_on -> system LAZY como PREFIJO ESTABLE (cacheable entre iteraciones)
+        msgs = ([{"role": "system", "content": LAZY_SYSTEM}, {"role": "user", "content": prompt}]
+                if lazy_on else [{"role": "user", "content": prompt}])
         try:
-            new = _extract(call(gen_model, [{"role": "user", "content": prompt}],
+            new = _extract(call(gen_model, msgs,
                                 pattern="project_loop", node=f"gen[{i}]").text)
         except Exception as e:
             history.append({"iter": i, "error": str(e)[:120]}); continue
