@@ -1,4 +1,4 @@
-# Handoff — 2026-06-14 · upd 2026-06-15 (+caveman)
+# Handoff — 2026-06-14 · upd 2026-06-16 (+ponytail/lazy, codegraph, sparring→mmorch)
 
 ## Goal
 mmorch = orquestador determinista multi-modelo (ahorra cupo Claude). Esta etapa: plataforma de
@@ -43,7 +43,30 @@ github.com/M3EMO/mmorch (push activo, ~v1.2). Todo goal-gated, cross-family, red
   (backups `.bak` en logs/). Reveló el colapso structural a escala.
 - **D** fleet-UI (arriba). **E** PR caveman: branch en fork, gh no instalado → URL compare prefilled
   entregada (no puedo auth desatendido). PR sigue SIN abrir.
-- **Sin commitear**: ~8 archivos mmorch modificados/nuevos. 2 backups `.bak` + log autopull untracked.
+
+### Sesión 2026-06-16 — todo COMMITEADO+PUSHEADO a master (M3EMO/mmorch)
+Commits: `ff0da61` exec-embedding (exec_embedder+eval+40 specs) · `65de1fd` fleet-UI · `cd41078`
+autopull task · `900f970` docs · `ca618f3` lazy knob · `9ab71a4`+`78653c2` codegraph knob. 309 tests verde.
+- **Ponytail evaluado** (repo `DietrichGebert/ponytail`, gemelo de caveman pa CÓDIGO no prosa). Medido:
+  corta código −51% LOC SIN romper correctitud (gate filtra). Tokens NO baja en tasks chicos (+2% tax).
+  Instalado global como plugin Claude (composa con caveman; único choque statusline=singular).
+- **Knob lazy** en `project_loop` (`LAZY_SYSTEM` en `prompts.py`, reglas ponytail vendoreadas, MIT).
+  Default ON (`MMORCH_LAZY=0` apaga). System = prefijo estable (cacheable). **Flywheel NO afectado**
+  (usa fan_out, no run_project_task) → diversidad de training intacta.
+- **Knob codegraph** en `project_loop`: `_codegraph_context()` shell-out al CLI codegraph (mismo motor
+  que su MCP, sin protocolo) → contexto del repo como prefijo. **Auto-mantiene índice** (sync si está,
+  init+index si no). Gate `MMORCH_CODEGRAPH` (=1 puesto en `.env`). E2E testeado verde (repo temp,
+  1 iter, código minimal correcto, .codegraph auto-creado). NO es hook SessionStart a propósito: el
+  server corre jobs fuera de sesiones Claude → el knob cubre todos los paths.
+- **Statusline merged** `~/.claude/statusline-merged.ps1` (caveman[172]+ponytail[108]+savings suffix),
+  wireado en `~/.claude/settings.json`.
+- **ACTOR** (framework de estudio del user, proyecto `Desktop/Estudio`): comparte núcleo epistémico con
+  mmorch (no-LLM-self-eval, ground-truth, refute-default). Aplicado: `wiki-sparring` ahora rutea el
+  refuter a `mmorch_adversarial_verify` (cross-family, cero cupo, $0.0004/run) — commit `555d2a9` en
+  M3EMO/Estudio. Own/juicio queda en user+Opus. mmorch YA es ACTOR; único additivo no-hecho = Compress
+  discipline en nodos subjetivos (descartado por marginal).
+- **Pendiente**: PR caveman sin abrir (igual). chip `test_exec_embedder.py` (exec_embedder sin test). 
+  tus otros repos se auto-indexan codegraph al 1er job. server mmorch: reiniciar pa tomar MMORCH_CODEGRAPH.
 
 ## Decisions (no re-litigar)
 - NO adoptar framework externo (LangGraph/CrewAI) — diluye el determinismo = diferenciador.
