@@ -39,6 +39,28 @@ def _run_cmd(cwd: str, cmd: str, timeout: float = 120.0) -> tuple[bool, str]:
         return False, str(e)[:300]
 
 
+def _codegraph_context(repo: str, task: str, *, timeout: float = 15.0, cap: int = 4000) -> str:
+    r"""Contexto relevante del repo via el CLI de codegraph (el MISMO motor que su MCP server,
+    sin el overhead de protocolo/spawn). Devuelve markdown (Entry Points / Related / Code) o ''
+    si no hay CLI / el repo no esta indexado (sin .codegraph/) / error. Acotado a `cap` chars.
+    El task se SANITIZA a [\w\s.-/] antes de pasarlo -> sin inyeccion de shell. Opt-in: lo gatea
+    MMORCH_CODEGRAPH. Override del binario via CODEGRAPH_BIN. Indexar un repo: `codegraph init`+`index`."""
+    import shutil
+    bin_ = os.environ.get("CODEGRAPH_BIN") or shutil.which("codegraph")
+    if not bin_ or not os.path.isdir(os.path.join(repo, ".codegraph")):
+        return ""
+    safe = re.sub(r"[^\w\s.\-/]", " ", task)[:200].strip()
+    if not safe:
+        return ""
+    try:
+        p = subprocess.run(f'"{bin_}" context "{safe}"', cwd=repo, shell=True,
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=timeout)
+        return p.stdout.strip()[:cap] if p.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
 @dataclass
 class ProjectResult:
     ok: bool
@@ -54,13 +76,15 @@ class ProjectResult:
 def run_project_task(project: str, task: str, *, target_file: str, test_cmd: str | None = None,
                      K: int = 4, escalate: bool = True, push: bool = True,
                      gen_model: str | None = None, lazy: bool | None = None,
-                     job_id: str = "") -> ProjectResult:
+                     use_codegraph: bool | None = None, job_id: str = "") -> ProjectResult:
     """mmorch-primario: loop DeepSeek genera el archivo -> escribe -> corre tests -> repite
     hasta verde o K. Verdad = ejecucion (test_cmd). Si K se agota y escalate: claude -p (cupo).
     push: si verde, commit+push a mmorch/auto. test_cmd None -> sin verificacion (no recomendado).
     lazy: modo minimal-code (LAZY_SYSTEM, estilo ponytail). None -> env MMORCH_LAZY (default ON).
     SEGURO empujar minimalismo aca: el gate de tests filtra lo minimal-pero-roto (medido: -51%
-    LOC, correctitud preservada por el gate). NO afecta al flywheel (usa fan_out, no este loop)."""
+    LOC, correctitud preservada por el gate). NO afecta al flywheel (usa fan_out, no este loop).
+    use_codegraph: inyecta contexto del repo (codegraph CLI) como prefijo estable. None -> env
+    MMORCH_CODEGRAPH (default OFF; requiere el repo indexado con `codegraph init`+`index`)."""
     from .config import DEFAULT_GENERATOR
     from .providers import call
     from .projects import resolve
@@ -68,10 +92,13 @@ def run_project_task(project: str, task: str, *, target_file: str, test_cmd: str
     from .prompts import LAZY_SYSTEM
     gen_model = gen_model or DEFAULT_GENERATOR
     lazy_on = lazy if lazy is not None else os.environ.get("MMORCH_LAZY", "1") != "0"
+    cg_on = use_codegraph if use_codegraph is not None else os.environ.get("MMORCH_CODEGRAPH", "0") != "0"
     cwd = resolve(project)
+    cg_ctx = _codegraph_context(cwd, task) if cg_on else ""
     fpath = os.path.join(cwd, target_file)
     emit("job", "running", job_id=job_id,
-         detail=f"mmorch{'·lazy' if lazy_on else ''} {project}/{target_file}: {task[:60]}")
+         detail=f"mmorch{'·lazy' if lazy_on else ''}{'·cg' if cg_ctx else ''} "
+                f"{project}/{target_file}: {task[:60]}")
 
     _git(cwd, "checkout", "-B", "mmorch/auto")   # branch del agente (reversible)
     cur = ""
@@ -88,9 +115,15 @@ def run_project_task(project: str, task: str, *, target_file: str, test_cmd: str
                   + (f"\nEl intento anterior fallo los tests:\n{feedback[:1000]}\n"
                      "Corregilo.\n" if feedback else "")
                   + "Devolve SOLO el contenido COMPLETO nuevo del archivo en un bloque ```.")
-        # lazy_on -> system LAZY como PREFIJO ESTABLE (cacheable entre iteraciones)
-        msgs = ([{"role": "system", "content": LAZY_SYSTEM}, {"role": "user", "content": prompt}]
-                if lazy_on else [{"role": "user", "content": prompt}])
+        # system = PREFIJO ESTABLE (cacheable entre iteraciones): reglas LAZY + contexto del repo.
+        # El feedback volatil va en el user (ultimo) -> no rompe el cache del prefijo.
+        sysb = []
+        if lazy_on:
+            sysb.append(LAZY_SYSTEM)
+        if cg_ctx:
+            sysb.append("CONTEXTO DEL REPO (codegraph, relevante a la tarea):\n" + cg_ctx)
+        msgs = ([{"role": "system", "content": "\n\n".join(sysb)}] if sysb else []) \
+            + [{"role": "user", "content": prompt}]
         try:
             new = _extract(call(gen_model, msgs,
                                 pattern="project_loop", node=f"gen[{i}]").text)
