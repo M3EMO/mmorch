@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **52 módulos · 26 MCP tools · 314 tests.**
+_Auto-generado por `mmorch.docgen`._ **53 módulos · 29 MCP tools · 327 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -80,6 +80,7 @@ _Auto-generado por `mmorch.docgen`._ **52 módulos · 26 MCP tools · 314 tests.
 | `mmorch/scout.py` | scout — pre-pass ENTORNO-PRIMERO (el patron central de Fable 5: 'primero aprende el |
 | `mmorch/server.py` | server — mmorch VISUAL nivel 3: progreso live de cada subagente + control TOTAL remoto. |
 | `mmorch/shadow_prior.py` | shadow_prior — Fase 5: una capa que PRIMEA al ThompsonBandit con un prior contextual, |
+| `mmorch/spec.py` | spec — spec-builder barato que INFIERE mas alla de lo dicho, pero aplica |
 | `mmorch/sync.py` | sync — GitHub como bus de sincronizacion entre maquinas. El host always-on (ej pc-mateo) |
 | `mmorch/tournament.py` | tournament — elegir EL mejor de pocos candidatos por gusto/calidad (naming, |
 | `mmorch/trajectory.py` | trajectory — robo de Hermes: 'trajectory compression para entrenar la proxima |
@@ -147,7 +148,7 @@ Registered globally in `~/.claude.json` as server `mmorch`. Calling these spends
 external API $, not cupo — that's the point.
 
 <!-- mmorch:auto:tools -->
-MCP tools (server `mmorch`): `mmorch_adversarial_verify`, `mmorch_bucket_rank`, `mmorch_budget_status`, `mmorch_cache_stats`, `mmorch_cascade`, `mmorch_check`, `mmorch_classify`, `mmorch_consolidate`, `mmorch_ensemble_verify`, `mmorch_error_rates`, `mmorch_evolve_self`, `mmorch_fan_out`, `mmorch_feedback_stats`, `mmorch_innovate`, `mmorch_learn`, `mmorch_memory_stats`, `mmorch_metrics_summary`, `mmorch_orchestra`, `mmorch_recall`, `mmorch_record_outcome`, `mmorch_remember`, `mmorch_route`, `mmorch_rubric_next`, `mmorch_rubric_start`, `mmorch_rubric_submit`, `mmorch_tournament`.
+MCP tools (server `mmorch`): `mmorch_adversarial_verify`, `mmorch_bucket_rank`, `mmorch_budget_status`, `mmorch_build_spec`, `mmorch_cache_stats`, `mmorch_cascade`, `mmorch_check`, `mmorch_classify`, `mmorch_consolidate`, `mmorch_cynefin`, `mmorch_ensemble_verify`, `mmorch_error_rates`, `mmorch_evolve_self`, `mmorch_fan_out`, `mmorch_feedback_stats`, `mmorch_innovate`, `mmorch_learn`, `mmorch_memory_stats`, `mmorch_metrics_summary`, `mmorch_orchestra`, `mmorch_recall`, `mmorch_record_outcome`, `mmorch_remember`, `mmorch_route`, `mmorch_rubric_next`, `mmorch_rubric_start`, `mmorch_rubric_submit`, `mmorch_spec_interview`, `mmorch_tournament`.
 
 **Restart Claude Code** to load new tools.
 <!-- /mmorch:auto:tools -->

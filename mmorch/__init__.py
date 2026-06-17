@@ -30,7 +30,10 @@ from .loop import loop_until_done, LoopResult                # backlog: loop-unt
 from .hillclimb import hillclimb, ClimbResult, ClimbCtx, ClimbStep  # goal+rubric loop (Martin 2026)
 from .schema import (gated_json, validate, extract_json,     # §9 schema-gates
                      SchemaGateError)
-from .classify import classify, classify_and_act, ClassifyResult  # classify-and-act (front-door)
+from .classify import (classify, classify_and_act, ClassifyResult,  # classify-and-act (front-door)
+                       cynefin_classify, CynefinResult,             # P1: taxonomia Cynefin
+                       CYNEFIN_CLASSES, CYNEFIN_STRATEGY)
+from .spec import build_spec, interview as spec_interview, SpecResult  # spec-builder gated
 from .checkers import (check, register_checker, CheckResult,         # tool-verify determinista
                        safe_arith, available as checkers_available)
 from .goal import (load_goal, goal_hash, goal_aligned,               # ancla anti-goal-drift
@@ -90,6 +93,8 @@ __all__ = [
     "hillclimb", "ClimbResult", "ClimbCtx", "ClimbStep",
     "gated_json", "validate", "extract_json", "SchemaGateError",
     "classify", "classify_and_act", "ClassifyResult",
+    "cynefin_classify", "CynefinResult", "CYNEFIN_CLASSES", "CYNEFIN_STRATEGY",
+    "build_spec", "spec_interview", "SpecResult",
     "check", "register_checker", "CheckResult", "safe_arith", "checkers_available",
     "load_goal", "goal_hash", "goal_aligned",
     "authorize_goal", "goal_guard", "pursue_goal", "GoalTampered",

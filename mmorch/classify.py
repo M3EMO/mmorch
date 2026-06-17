@@ -80,3 +80,47 @@ def classify_and_act(
                                   round(cost, 6))
     # clase valida y confiable pero sin handler -> el orquestador actua.
     return ClassifyResult(cls, conf, False, True, None, round(cost, 6))
+
+
+# --- P1: taxonomia Cynefin como preset de ruteo -----------------------------
+# DART/Video-1: la pregunta de "Analyze" reduce el diagnostico a una sola cosa,
+# la relacion causa->efecto. Cada dominio mapea a una estrategia mmorch distinta.
+# NO es un modulo aparte: es classify() con un set de clases curado + un mapa de
+# estrategia. El caller decide los handlers; este helper solo etiqueta y recomienda.
+CYNEFIN_CLASSES: dict[str, str] = {
+    "clear":       "Causa->efecto OBVIA. Proceso estable y conocido; seguir los pasos basta.",
+    "complicated": "Causa->efecto DESCUBRIBLE con analisis o un experto. La respuesta existe pero no es inmediata.",
+    "complex":     "Causa->efecto EMERGENTE, solo visible en hindsight. Hay que probar chico y adaptar.",
+    "chaotic":     "Causa->efecto ROTO. Info incompleta y cambiante. Actuar/estabilizar YA, sin analizar.",
+}
+
+# Patron mmorch recomendado por dominio (heuristica del diseño; el caller decide
+# si lo respeta). chaotic -> Opus interviene ya, sin iteracion barata.
+CYNEFIN_STRATEGY: dict[str, str] = {
+    "clear":       "direct_cheap",             # modelo barato directo, sin escalada
+    "complicated": "route",                    # confidence-gated a especialista
+    "complex":     "fan_out+ensemble_verify",  # diversidad de familias, directionally-right
+    "chaotic":     "escalate_opus",            # actuar ya, sin test (Video-1: en caos no hay tiempo)
+}
+
+
+@dataclass
+class CynefinResult:
+    domain: str | None       # clear|complicated|complex|chaotic (None si invalida/baja-conf)
+    confidence: float
+    strategy: str            # patron mmorch recomendado (CYNEFIN_STRATEGY o "escalate_opus")
+    escalate: bool           # True -> el orquestador (Opus) toma el control
+    cost_usd: float = 0.0
+
+
+def cynefin_classify(request: str, *, router_model: str = DEFAULT_ROUTER,
+                     threshold: float = 0.6, phase: str = "cynefin") -> CynefinResult:
+    """Clasifica el request en un dominio Cynefin y recomienda un patron mmorch.
+    Escala a Opus si: clase invalida, conf < threshold, o dominio 'chaotic' (en caos
+    la jugada es actuar ya, no rutear barato). Etiqueta, no actua — el caller wirea
+    los handlers via classify_and_act(classes=CYNEFIN_CLASSES, ...) si quiere dispatch."""
+    cls, conf, cost = classify(request, CYNEFIN_CLASSES, router_model=router_model, phase=phase)
+    cost = round(cost, 6)
+    if cls is None or conf < threshold:
+        return CynefinResult(cls, conf, "escalate_opus", True, cost)
+    return CynefinResult(cls, conf, CYNEFIN_STRATEGY[cls], cls == "chaotic", cost)

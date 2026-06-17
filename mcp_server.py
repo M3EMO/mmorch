@@ -29,7 +29,8 @@ from mmorch.metrics import summary, error_rates, cache_stats
 from mmorch.learn import analyze as _learn_analyze, recommend as _learn_recommend
 from mmorch.memory import (remember as _remember, stats as _mem_stats,
                            consolidate as _mem_consolidate)
-from mmorch.classify import classify as _classify
+from mmorch.classify import classify as _classify, cynefin_classify as _cynefin
+from mmorch.spec import build_spec as _build_spec, interview as _spec_interview
 from mmorch.config import DEFAULT_ROUTER
 from mmorch.feedback import (record_outcome as _record_outcome,
                             ThompsonBandit as _ThompsonBandit,
@@ -315,6 +316,53 @@ def mmorch_classify(
     cls, conf, cost = _classify(request, dict(classes), router_model=router_model, phase="mcp")
     return json.dumps({"cls": cls, "confidence": conf, "cost_usd": round(cost, 6)},
                       ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_cynefin(
+    request: str,
+    router_model: str = DEFAULT_ROUTER,
+    threshold: float = 0.6,
+) -> str:
+    """Cynefin triage (P1): a cheap model maps the request to a complexity domain
+    (clear|complicated|complex|chaotic) via the DART cause->effect question, and
+    recommends an mmorch strategy. 'chaotic' or low-confidence -> escalate to the
+    orchestrator (Opus). Cheap external $, not cupo. Returns JSON
+    {domain, confidence, strategy, escalate, cost_usd}."""
+    r = _cynefin(request, router_model=router_model, threshold=threshold, phase="mcp")
+    return json.dumps({"domain": r.domain, "confidence": r.confidence,
+                       "strategy": r.strategy, "escalate": r.escalate,
+                       "cost_usd": r.cost_usd}, ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_spec_interview(request: str, n: int = 5) -> str:
+    """Spec layer-1 interview: a cheap model generates up to `n` short questions that
+    uncover the GOAL behind the task (the decision it drives), not the surface task.
+    The orchestrator asks the user, then feeds answers to mmorch_build_spec. Cheap
+    external $, not cupo. Returns JSON {questions, cost_usd}."""
+    qs, cost = _spec_interview(request, n=n, phase="mcp")
+    return json.dumps({"questions": qs, "cost_usd": round(cost, 6)}, ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_build_spec(request: str, answers: str = "") -> str:
+    """Spec-builder (draft -> refute cross-family -> gate). A cheap drafter writes the
+    spec with its over-inferences in a SEPARATE channel; a cross-family critic labels
+    each inference SAFE/BEYOND_INTENT/WRONG (refutes by default). Only SAFE inferences
+    fold into the spec; BEYOND_INTENT become open_questions for the user (never applied
+    silently); WRONG are dropped. Gross overreach -> escalate=true (Opus). If the drafter
+    smuggled unstated scope INTO the spec body, the result is quarantined=true: `spec` is
+    blanked and the dirty draft is preserved in `raw_draft` for Opus to review — never
+    hand `raw_draft` to a user as a clean spec. Cheap external $, not cupo. Returns JSON
+    {spec, accepted_inferences, open_questions, dropped, escalate, quarantined, raw_draft,
+    verifier_model, cost_usd}."""
+    r = _build_spec(request, answers=answers, phase="mcp")
+    return json.dumps({"spec": r.spec, "accepted_inferences": r.accepted_inferences,
+                       "open_questions": r.open_questions, "dropped": r.dropped,
+                       "escalate": r.escalate, "quarantined": r.quarantined,
+                       "raw_draft": r.raw_draft, "verifier_model": r.verifier_model,
+                       "cost_usd": r.cost_usd}, ensure_ascii=False)
 
 
 @mcp.tool()
