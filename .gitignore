@@ -27,3 +27,7 @@ logs/oracle_diverse.jsonl
 flywheel/diverse_gen.log
 flywheel/func.log
 .codegraph/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+.beads-credential-key
