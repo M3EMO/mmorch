@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -163,14 +164,23 @@ class IngestReport:
     recorded: int
     skipped_no_signal: int
     already_ingested: bool = False
+    recorder_failed: int = 0       # segmentos cuyo recorder() tiro excepcion (no aborta)
 
 
-def _resolve_latest() -> Path:
+# una sesion modificada hace < cooldown probablemente esta ACTIVA (Claude escribiendo);
+# ingerirla daria parse parcial + hash que cambia al crecer -> rompe idempotencia.
+_ACTIVE_COOLDOWN_S = 120
+
+
+def _resolve_latest(cooldown_s: float = _ACTIVE_COOLDOWN_S) -> Path:
     proj = Path.home() / ".claude" / "projects"
+    now = time.time()
     files = sorted(proj.rglob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not files:
-        raise FileNotFoundError("no session JSONL found under ~/.claude/projects")
-    return files[0]
+    for p in files:
+        if now - p.stat().st_mtime >= cooldown_s:    # saltea sesiones probablemente activas
+            return p
+    raise FileNotFoundError(
+        "no settled session JSONL under ~/.claude/projects (all modified within cooldown)")
 
 
 def ingest_session(path, *, router_model: str = DEFAULT_ROUTER,
@@ -189,7 +199,7 @@ def ingest_session(path, *, router_model: str = DEFAULT_ROUTER,
                             skipped_no_signal=0, already_ingested=True)
 
     segs = parse_session(p)
-    recorded = skipped = 0
+    recorded = skipped = failed = 0
     for i, seg in enumerate(segs):
         next_req = segs[i + 1].request if i + 1 < len(segs) else ""
         out = outcome_of(seg, next_request=next_req)
@@ -198,12 +208,18 @@ def ingest_session(path, *, router_model: str = DEFAULT_ROUTER,
             continue
         predicted = classifier(seg.request, router_model=router_model).domain or "unknown"
         obs = observed_domain(seg)
-        recorder(arm=f"cynefin:{predicted}", reward=1.0 if predicted == obs else 0.0,
-                 source="claude_session", context=f"{out.source}:{obs}")
-        recorded += 1
+        # graceful (como fan_out): un recorder que falla NO aborta el loop. Asi el ledger
+        # SIEMPRE se escribe al final -> un re-ingest no reprocesa (sin doble-conteo). El
+        # segmento perdido es un dato menos, no un sesgo (mejor que doble-contar).
+        try:
+            recorder(arm=f"cynefin:{predicted}", reward=1.0 if predicted == obs else 0.0,
+                     source="claude_session", context=f"{out.source}:{obs}")
+            recorded += 1
+        except Exception:
+            failed += 1
 
     ledger.parent.mkdir(parents=True, exist_ok=True)
     with open(ledger, "a", encoding="utf-8") as fh:
         fh.write(h + "\n")
     return IngestReport(session=p.name, segments=len(segs), recorded=recorded,
-                        skipped_no_signal=skipped)
+                        skipped_no_signal=skipped, recorder_failed=failed)

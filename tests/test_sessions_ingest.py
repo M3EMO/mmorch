@@ -63,3 +63,33 @@ def test_idempotent_second_ingest_skips(tmp_path):
     S.ingest_session(p, **args)
     rep2 = S.ingest_session(p, **args)
     assert rep2.already_ingested and rep2.recorded == 0 and len(rec) == 1
+
+
+def test_recorder_failure_does_not_abort_or_double_count(tmp_path):
+    # mmorch verify T5: si recorder() tira, el loop sigue y el ledger se escribe igual,
+    # asi un re-ingest NO reprocesa (sin doble-conteo).
+    def _boom(**k):
+        raise RuntimeError("sink down")
+    led = tmp_path / "l.txt"
+    args = dict(recorder=_boom,
+                classifier=lambda req, **k: type("R", (), {"domain": "clear"})(), ledger=led)
+    p = _calib_session(tmp_path)
+    rep = S.ingest_session(p, **args)
+    assert rep.recorder_failed == 1 and rep.recorded == 0
+    assert led.exists()                               # ledger escrito pese al fallo
+    rep2 = S.ingest_session(p, **args)
+    assert rep2.already_ingested                      # no reprocesa
+
+
+def test_resolve_latest_skips_active_session(tmp_path, monkeypatch):
+    # mmorch verify T5: la sesion activa (modificada recien) no se ingiere.
+    import os
+    proj = tmp_path / ".claude" / "projects" / "p"
+    proj.mkdir(parents=True)
+    active = proj / "active.jsonl"; active.write_text("{}", encoding="utf-8")
+    settled = proj / "settled.jsonl"; settled.write_text("{}", encoding="utf-8")
+    now = __import__("time").time()
+    os.utime(active, (now, now))                      # recien modificada (activa)
+    os.utime(settled, (now - 600, now - 600))         # vieja (settled)
+    monkeypatch.setattr(S.Path, "home", staticmethod(lambda: tmp_path))
+    assert S._resolve_latest(cooldown_s=120).name == "settled.jsonl"
