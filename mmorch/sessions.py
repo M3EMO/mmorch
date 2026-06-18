@@ -5,6 +5,7 @@ v0: 100% local, sin API externa, sin fuga. Library-only."""
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -71,12 +72,16 @@ class Outcome:
     confidence: float = 1.0
 
 
+# un fallo real lleva conteo NO-CERO ("1 failed", "2 errors"); "error" suelto en un log
+# exitoso no cuenta (precision fix del mmorch verify de Task 2).
+_TEST_FAIL = re.compile(r"[1-9]\d*\s+(failed|error)")
+
+
 def _tests_signal(seg: "Segment") -> float | None:
     for r in seg.tool_results:
         c = r["content"].lower()
-        if "passed" in c or "failed" in c:
-            failed = ("failed" in c or "error" in c) and "0 failed" not in c
-            return 0.0 if failed else 1.0
+        if "passed" in c or "failed" in c:        # resumen tipo pytest presente
+            return 0.0 if _TEST_FAIL.search(c) else 1.0
     return None
 
 

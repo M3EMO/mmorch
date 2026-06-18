@@ -36,3 +36,14 @@ def test_no_signal_abstains():
 def test_claude_self_report_is_not_a_label():
     seg = Seg(request="hace X", reasoning="listo, funciona perfecto, done")
     assert S.outcome_of(seg) is None
+
+
+def test_incidental_error_word_is_not_a_failure():
+    # precision fix (mmorch verify T2): "error" suelto en un log exitoso no marca fallo.
+    seg = Seg(request="x", tool_results=[{"content": "5 passed; tested error handling path", "is_error": False}])
+    assert S.outcome_of(seg).reward >= 0.8
+
+
+def test_zero_failed_is_a_pass():
+    seg = Seg(request="x", tool_results=[{"content": "5 passed, 0 failed", "is_error": False}])
+    assert S.outcome_of(seg).reward >= 0.8
