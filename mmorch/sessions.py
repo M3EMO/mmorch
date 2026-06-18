@@ -130,3 +130,19 @@ def redact(text: str) -> tuple[str, float]:
         out = pat.sub(_RED, out)
     confidence = 0.0 if _RESIDUAL.search(out.replace(_RED, "")) else 1.0
     return out, confidence
+
+
+def observed_domain(seg: "Segment") -> str:
+    """Dificultad REAL observada -> dominio Cynefin (ground-truth para calibrar)."""
+    has_error = any(r.get("is_error") for r in seg.tool_results)
+    has_revert = any(
+        any(k in str(tc.get("input", {}).get("command", "")).lower() for k in _REVERT_TOOLS)
+        for tc in seg.tool_calls)
+    if has_error or has_revert:
+        return "chaotic"
+    n = len(seg.tool_calls)
+    if n <= 1:
+        return "clear"
+    if n <= 5:
+        return "complicated"
+    return "complex"
