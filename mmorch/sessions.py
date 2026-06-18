@@ -57,3 +57,43 @@ def parse_session(path: str | Path) -> list[Segment]:
                 elif b.get("type") == "tool_use":
                     cur.tool_calls.append({"name": b.get("name", ""), "input": b.get("input", {})})
     return segments
+
+
+_ACCEPT = ("funciona", "perfecto", "gracias", "dale", "joya", "excelente", "buenisimo", "anda")
+_REJECT = ("no,", "mal", "rehace", "rehacer", "no funciona", "error", "esta roto", "revert")
+_REVERT_TOOLS = ("revert", "undo", "checkout --")
+
+
+@dataclass
+class Outcome:
+    reward: float
+    source: str        # "tool" | "user"
+    confidence: float = 1.0
+
+
+def _tests_signal(seg: "Segment") -> float | None:
+    for r in seg.tool_results:
+        c = r["content"].lower()
+        if "passed" in c or "failed" in c:
+            failed = ("failed" in c or "error" in c) and "0 failed" not in c
+            return 0.0 if failed else 1.0
+    return None
+
+
+def outcome_of(seg: "Segment", next_request: str = "") -> "Outcome | None":
+    """Label determinista de SEÑAL EXTERNA (tool o user). None si no hay señal.
+    Nunca usa el texto del propio assistant (anti-sicofancia)."""
+    t = _tests_signal(seg)
+    if t is not None:
+        return Outcome(reward=t, source="tool")
+    for tc in seg.tool_calls:                       # revert explicito = negativo
+        cmd = str(tc.get("input", {}).get("command", "")).lower()
+        if any(k in cmd for k in _REVERT_TOOLS):
+            return Outcome(reward=0.0, source="tool")
+    nx = next_request.lower().strip()
+    if nx:
+        if any(w in nx for w in _REJECT):
+            return Outcome(reward=0.0, source="user")
+        if any(w in nx for w in _ACCEPT):
+            return Outcome(reward=1.0, source="user")
+    return None
