@@ -1,7 +1,14 @@
 """sessions — aprende de transcripts de Claude Code. Parsea el JSONL de sesion en
 segmentos de tarea, deriva un outcome determinista (label externo), estima la
 dificultad observada y calibra cynefin_classify via feedback.record_outcome.
-v0: 100% local, sin API externa, sin fuga. Library-only."""
+
+PRIVACIDAD (honesto): el parse, el outcome y la dificultad son 100% LOCALES. La
+calibracion default llama a cynefin_classify, que manda SOLO el texto del request
+(el prompt que tipeo el user) al router barato externo — es inherente a calibrar un
+clasificador externo. NUNCA sale el transcript completo, el razonamiento del
+assistant, el output de tools ni secrets. redact() existe para el slice de
+enrichment DIFERIDO (que si mandaria contenido mas rico). Para cero-salida, inyectar
+un classifier local. Library-only."""
 from __future__ import annotations
 
 import hashlib
@@ -187,7 +194,10 @@ def ingest_session(path, *, router_model: str = DEFAULT_ROUTER,
                    recorder=record_outcome, classifier=cynefin_classify,
                    ledger: Path = _LEDGER) -> IngestReport:
     """Calibra cynefin_classify contra la dificultad observada en una sesion real.
-    Idempotente por hash. recorder/classifier/ledger son inyectables (tests)."""
+    Idempotente por hash. recorder/classifier/ledger son inyectables (tests).
+    OJO: el classifier default (cynefin_classify) manda el TEXTO DEL REQUEST al router
+    externo; nunca el transcript/razonamiento/tools. Para cero-salida, inyectar un
+    classifier local."""
     p = _resolve_latest() if path == "latest" else Path(path)
     raw = p.read_text(encoding="utf-8")
     h = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]

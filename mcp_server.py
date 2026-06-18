@@ -382,8 +382,10 @@ def mmorch_ingest_session(path: str = "latest") -> str:
     """Learn from a Claude Code session transcript: parse it, derive deterministic
     outcomes (external signal only), and calibrate the Cynefin router against the
     observed difficulty. path="latest" picks the most recent settled session under
-    ~/.claude/projects. 100% local, no external API, zero leak. Returns JSON
-    {session, segments, recorded, skipped_no_signal, already_ingested, recorder_failed}."""
+    ~/.claude/projects. Parse/outcome/difficulty are local; calibration sends ONLY the
+    request prompt text to the cheap router (never the transcript, reasoning, tool
+    output, or secrets). Returns JSON {session, segments, recorded, skipped_no_signal,
+    already_ingested, recorder_failed}."""
     r = _ingest_session(path)
     return json.dumps({"session": r.session, "segments": r.segments,
                        "recorded": r.recorded, "skipped_no_signal": r.skipped_no_signal,
