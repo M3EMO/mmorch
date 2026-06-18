@@ -28,9 +28,15 @@ from mmorch.config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
 from mmorch.metrics import summary, error_rates, cache_stats
 from mmorch.learn import analyze as _learn_analyze, recommend as _learn_recommend
 from mmorch.memory import (remember as _remember, stats as _mem_stats,
-                           consolidate as _mem_consolidate)
+                           consolidate as _mem_consolidate, reinforce as _reinforce,
+                           flag_contradiction as _flag_contradiction,
+                           pending_review as _pending_review,
+                           resolve_review as _resolve_review, close_loop as _close_loop,
+                           open_loops as _open_loops, forget_preview as _forget_preview)
+from mmorch.curiosity import find_tension as _find_tension
 from mmorch.classify import classify as _classify, cynefin_classify as _cynefin
 from mmorch.spec import build_spec as _build_spec, interview as _spec_interview
+from mmorch.sessions import ingest_session as _ingest_session
 from mmorch.config import DEFAULT_ROUTER
 from mmorch.feedback import (record_outcome as _record_outcome,
                             ThompsonBandit as _ThompsonBandit,
@@ -234,15 +240,21 @@ def mmorch_remember(
     episode_text: str,
     kind: str = "note",
     verify: bool = False,
+    open_loop: bool = False,
+    permanent: bool = False,
 ) -> str:
     """Persist a memory: append the raw episode (immutable) + distill a durable note
     (Thought-Retriever, cheap model) + embed it. scope is hierarchical
     (task_id<subsector<project_id<mmorch_self<global). If verify=True, a cross-family
     skeptic checks the note is faithful to the episode before persisting (else only
-    the raw is kept). Spends a little external $, not cupo. Returns JSON
+    the raw is kept). open_loop=true marks an unfinished task/question (Zeigarnik:
+    resists forgetting until mmorch_close_loop). permanent=true pins the note
+    (lifespan='permanent': decay never forgets it); default 'decay' = forgettable.
+    Spends a little external $, not cupo. Returns JSON
     {episode_id, note_id, distilled, persisted, refutations}.
     """
-    return json.dumps(_remember(scope, episode_text, kind=kind, verify=verify),
+    return json.dumps(_remember(scope, episode_text, kind=kind, verify=verify,
+                                open_loop=open_loop, permanent=permanent),
                       ensure_ascii=False)
 
 
@@ -366,6 +378,20 @@ def mmorch_build_spec(request: str, answers: str = "") -> str:
 
 
 @mcp.tool()
+def mmorch_ingest_session(path: str = "latest") -> str:
+    """Learn from a Claude Code session transcript: parse it, derive deterministic
+    outcomes (external signal only), and calibrate the Cynefin router against the
+    observed difficulty. path="latest" picks the most recent settled session under
+    ~/.claude/projects. 100% local, no external API, zero leak. Returns JSON
+    {session, segments, recorded, skipped_no_signal, already_ingested, recorder_failed}."""
+    r = _ingest_session(path)
+    return json.dumps({"session": r.session, "segments": r.segments,
+                       "recorded": r.recorded, "skipped_no_signal": r.skipped_no_signal,
+                       "already_ingested": r.already_ingested,
+                       "recorder_failed": r.recorder_failed}, ensure_ascii=False)
+
+
+@mcp.tool()
 def mmorch_record_outcome(
     arm: str,
     reward: float,
@@ -464,19 +490,22 @@ def mmorch_orchestra() -> str:
 
 @mcp.tool()
 def mmorch_consolidate(scope: str = "", sim_threshold: float = 0.92,
-                       apply: bool = False) -> str:
+                       forget: bool = False, apply: bool = False) -> str:
     """Periodic memory maintenance (run every ~10 sessions): merge near-duplicate
     semantic notes per scope (identical text or embedding cosine >= sim_threshold),
     tombstoning losers — keeper is the verified note first, then the most recent.
     Episodic raw log is never touched; the run itself is logged as an episodic
-    'consolidation' event. Default is a DRY RUN (reports what would merge); pass
-    apply=true to actually tombstone. Also reports live-note bytes + over_budget
-    flag (>50KB suggests distilling harder, it never auto-deletes by size).
-    Deterministic, zero API spend. Returns JSON {merged, tombstoned, live_notes,
-    bytes, over_budget, dry_run}."""
+    'consolidation' event. forget=true (default OFF) adds an Ebbinghaus-decay forget
+    pass: tombstones notes whose retention score fell below threshold, EXCEPT
+    verified / open_loop / permanent ones. Forgetting never loses a fact — only the
+    distilled note is tombstoned; the raw episode survives and recall falls back to
+    it. Default is a DRY RUN (reports what would change); pass apply=true to actually
+    tombstone. Also reports live-note bytes + over_budget flag. Deterministic, zero
+    API spend. Returns JSON {merged, tombstoned, forgotten, live_notes, bytes,
+    over_budget, dry_run}."""
     return json.dumps(
         _mem_consolidate(scope or None, sim_threshold=sim_threshold,
-                         dry_run=not apply),
+                         forget=forget, dry_run=not apply),
         ensure_ascii=False)
 
 
@@ -487,6 +516,95 @@ def mmorch_memory_stats() -> str:
     coverage means recall serves unvalidated learning), and the active embedding
     backend (or null if fastembed absent). Read-only, no spend."""
     return json.dumps(_mem_stats(), ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_reinforce(note_id: int, boost: int = 3) -> str:
+    """Reconsolidation — CONFIRM a recalled note (you used/validated it). Bumps its
+    access_count by `boost` (a confirm ~ several accesses) and refreshes last-access,
+    raising its retention score so decay won't forget it. Deterministic, no spend.
+    Returns JSON {note_id, boost, ok}."""
+    _reinforce(note_id, boost=boost)
+    return json.dumps({"note_id": note_id, "boost": boost, "ok": True}, ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_flag_contradiction(note_id: int) -> str:
+    """Reconsolidation — CONTRADICT a note (the user/evidence says it's wrong). Marks
+    it needs_review: recall stops surfacing it (no repeating suspected-false info) and
+    falls back to the immutable raw episode. The note is NOT deleted — resolve later
+    with mmorch_resolve_review. Self-correcting memory. Deterministic, no spend.
+    Returns JSON {note_id, ok}."""
+    _flag_contradiction(note_id)
+    return json.dumps({"note_id": note_id, "ok": True}, ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_pending_review(scope: str = "") -> str:
+    """List semantic notes flagged as contradicted (needs_review) and not yet resolved,
+    so you can review/supersede them. Read-only, no spend. Returns JSON list of
+    {id, ts, scope, text}."""
+    notes = _pending_review(scope or None)
+    return json.dumps([
+        {"id": n.id, "ts": n.ts, "scope": n.scope, "text": n.text} for n in notes],
+        ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_resolve_review(note_id: int, drop: bool = False) -> str:
+    """Resolve a contradiction. drop=true tombstones the note (it was false);
+    drop=false clears needs_review so it surfaces again (the contradiction was wrong).
+    The raw episode is never touched either way. Deterministic, no spend. Returns JSON
+    {note_id, dropped, ok}."""
+    _resolve_review(note_id, drop=drop)
+    return json.dumps({"note_id": note_id, "dropped": drop, "ok": True}, ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_close_loop(note_id: int) -> str:
+    """Close an open-loop note (the task/question is resolved): clears the Zeigarnik
+    flag so the note becomes eligible for normal decay/forgetting again. Deterministic,
+    no spend. Returns JSON {note_id, ok}."""
+    _close_loop(note_id)
+    return json.dumps({"note_id": note_id, "ok": True}, ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_open_loops(scope: str = "") -> str:
+    """Surface unfinished tasks/questions (notes flagged open_loop, Zeigarnik). Inject
+    these proactively when resuming work — they resist forgetting until closed. Read-only,
+    no spend. Returns JSON list of {id, ts, scope, text}."""
+    notes = _open_loops(scope or None)
+    return json.dumps([
+        {"id": n.id, "ts": n.ts, "scope": n.scope, "text": n.text} for n in notes],
+        ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_find_tension(scope: str = "", lo: float = 0.82, hi: float = 0.92,
+                        max_per_scope: int = 500) -> str:
+    """Curiosity — surface pairs of notes that are suspiciously close (lo <= cosine < hi)
+    but were NOT auto-merged: same topic, different wording = where redundancy or
+    CONTRADICTION hides. Deterministic candidates for YOU to judge (merge via
+    consolidate, conflict via flag_contradiction, or leave both). Embeddings give topical
+    similarity, not logical contradiction — so this proposes, you decide; no LLM-judge.
+    O(n^2) per scope; a scope with > max_per_scope notes is skipped (reported in
+    `skipped`, never silently dropped). Needs fastembed (returns no pairs without it).
+    Zero spend. Returns JSON {pairs:[{a,b,scope,cosine,question}], skipped:[{scope,n}]}."""
+    return json.dumps(_find_tension(scope or None, lo=lo, hi=hi,
+                                    max_per_scope=max_per_scope), ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_forget_preview(scope: str = "") -> str:
+    """METRICS GATE before turning on consolidate(forget=true): read-only, shows how
+    many live forgettable notes would be dropped at a grid of decay knobs (lambda,
+    threshold), WITHOUT tombstoning anything. verified/open_loop/permanent notes are
+    never eligible. Use this to pick knobs from evidence instead of guessing — it does
+    NOT auto-tune (no ground-truth label for 'worth forgetting' = tuning would be reward
+    hacking). Deterministic, zero spend. Returns JSON {total_live, eligible,
+    grid:[{lam, forget, would_forget, pct_eligible}]}."""
+    return json.dumps(_forget_preview(scope or None), ensure_ascii=False)
 
 
 @mcp.tool()
