@@ -30,7 +30,10 @@ def parse_session(path: str | Path) -> list[Segment]:
         line = line.strip()
         if not line:
             continue
-        ev = json.loads(line)
+        try:                                  # una linea corrupta no mata el parse
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
         t, msg = ev.get("type"), ev.get("message", {})
         if t == "user":
             content = _content_blocks(msg)
@@ -50,7 +53,7 @@ def parse_session(path: str | Path) -> list[Segment]:
                 if not isinstance(b, dict):
                     continue
                 if b.get("type") == "text":
-                    cur.reasoning = (cur.reasoning + " " + b.get("text", "")).strip()
+                    cur.reasoning = (cur.reasoning + " " + (b.get("text") or "")).strip()
                 elif b.get("type") == "tool_use":
                     cur.tool_calls.append({"name": b.get("name", ""), "input": b.get("input", {})})
     return segments
