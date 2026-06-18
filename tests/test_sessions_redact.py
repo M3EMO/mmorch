@@ -26,3 +26,22 @@ def test_residual_entropy_lowers_confidence():
 def test_clean_text_high_confidence():
     red, conf = S.redact("arregla el bug en el parser")
     assert conf == 1.0 and red == "arregla el bug en el parser"
+
+
+def test_redacts_jwt():
+    # mmorch verify T3: JWT eyJ... es un secret de alto valor.
+    jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N"
+    red, _ = S.redact("token " + jwt)
+    assert jwt not in red and "[REDACTED]" in red
+
+
+def test_redacts_pem_private_key():
+    pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----"
+    red, _ = S.redact("clave: " + pem)
+    assert "MIIEowIBAAKCAQEA" not in red
+
+
+def test_hyphenated_high_entropy_lowers_confidence():
+    # mmorch verify T3: token con guiones (UUID-ish) tambien debe bajar confidence.
+    _, conf = S.redact("ref abc12-def34-ghi56-jkl78-mno90-pqr12-stu34")
+    assert conf == 0.0

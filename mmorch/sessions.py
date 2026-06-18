@@ -106,14 +106,20 @@ def outcome_of(seg: "Segment", next_request: str = "") -> "Outcome | None":
 
 _RED = "[REDACTED]"
 _PATTERNS = [
+    re.compile(r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"),  # PEM
+    re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b"),            # JWT
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),                                  # AWS access key id
     re.compile(r"\b(sk|pk|gh[pousr]|xox[baprs])-[A-Za-z0-9_\-]{8,}\b"),   # api keys
     re.compile(r"(?i)\b(api[_-]?key|token|secret|password|authorization|bearer)\b\s*[:=]\s*\S+"),
     re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b"),                          # emails
     re.compile(r"(?i)C:\\Users\\[^\\\s\"']+"),                            # win home
     re.compile(r"/(?:home|Users)/[^/\s\"']+"),                           # unix home
 ]
-# residual: token largo base64/hex no clasificado tras redactar.
-_RESIDUAL = re.compile(r"\b[A-Za-z0-9+/=]{32,}\b")
+# residual: token largo de alta entropia no clasificado tras redactar. Incluye - y _
+# (UUIDs, session tokens). ponytail: secret CORTO sin marcador (ej 'hunter2' en prosa)
+# es indetectable por regex sin entropia Shannon — techo conocido; el gate degrada a
+# solo-determinista (no manda a API) ante duda, que es el fail-safe.
+_RESIDUAL = re.compile(r"[A-Za-z0-9+/=_-]{32,}")
 
 
 def redact(text: str) -> tuple[str, float]:
