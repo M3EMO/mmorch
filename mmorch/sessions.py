@@ -4,6 +4,7 @@ dificultad observada y calibra cynefin_classify via feedback.record_outcome.
 v0: 100% local, sin API externa, sin fuga. Library-only."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -146,3 +147,63 @@ def observed_domain(seg: "Segment") -> str:
     if n <= 5:
         return "complicated"
     return "complex"
+
+
+from .classify import cynefin_classify
+from .config import DEFAULT_ROUTER
+from .feedback import record_outcome
+
+_LEDGER = Path(__file__).resolve().parent.parent / "logs" / "ingested_sessions.txt"
+
+
+@dataclass
+class IngestReport:
+    session: str
+    segments: int
+    recorded: int
+    skipped_no_signal: int
+    already_ingested: bool = False
+
+
+def _resolve_latest() -> Path:
+    proj = Path.home() / ".claude" / "projects"
+    files = sorted(proj.rglob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not files:
+        raise FileNotFoundError("no session JSONL found under ~/.claude/projects")
+    return files[0]
+
+
+def ingest_session(path, *, router_model: str = DEFAULT_ROUTER,
+                   recorder=record_outcome, classifier=cynefin_classify,
+                   ledger: Path = _LEDGER) -> IngestReport:
+    """Calibra cynefin_classify contra la dificultad observada en una sesion real.
+    Idempotente por hash. recorder/classifier/ledger son inyectables (tests)."""
+    p = _resolve_latest() if path == "latest" else Path(path)
+    raw = p.read_text(encoding="utf-8")
+    h = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    seen = set()
+    if ledger.exists():
+        seen = {ln.strip() for ln in ledger.read_text(encoding="utf-8").splitlines() if ln.strip()}
+    if h in seen:
+        return IngestReport(session=p.name, segments=0, recorded=0,
+                            skipped_no_signal=0, already_ingested=True)
+
+    segs = parse_session(p)
+    recorded = skipped = 0
+    for i, seg in enumerate(segs):
+        next_req = segs[i + 1].request if i + 1 < len(segs) else ""
+        out = outcome_of(seg, next_request=next_req)
+        if out is None:
+            skipped += 1
+            continue
+        predicted = classifier(seg.request, router_model=router_model).domain or "unknown"
+        obs = observed_domain(seg)
+        recorder(arm=f"cynefin:{predicted}", reward=1.0 if predicted == obs else 0.0,
+                 source="claude_session", context=f"{out.source}:{obs}")
+        recorded += 1
+
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    with open(ledger, "a", encoding="utf-8") as fh:
+        fh.write(h + "\n")
+    return IngestReport(session=p.name, segments=len(segs), recorded=recorded,
+                        skipped_no_signal=skipped)
