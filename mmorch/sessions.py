@@ -102,3 +102,25 @@ def outcome_of(seg: "Segment", next_request: str = "") -> "Outcome | None":
         if any(w in nx for w in _ACCEPT):
             return Outcome(reward=1.0, source="user")
     return None
+
+
+_RED = "[REDACTED]"
+_PATTERNS = [
+    re.compile(r"\b(sk|pk|gh[pousr]|xox[baprs])-[A-Za-z0-9_\-]{8,}\b"),   # api keys
+    re.compile(r"(?i)\b(api[_-]?key|token|secret|password|authorization|bearer)\b\s*[:=]\s*\S+"),
+    re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b"),                          # emails
+    re.compile(r"(?i)C:\\Users\\[^\\\s\"']+"),                            # win home
+    re.compile(r"/(?:home|Users)/[^/\s\"']+"),                           # unix home
+]
+# residual: token largo base64/hex no clasificado tras redactar.
+_RESIDUAL = re.compile(r"\b[A-Za-z0-9+/=]{32,}\b")
+
+
+def redact(text: str) -> tuple[str, float]:
+    """Saca secrets antes de cualquier salida externa. confidence=0 si queda un token
+    de alta entropia sin clasificar (no mandar a API). Redacta-ante-duda."""
+    out = text
+    for pat in _PATTERNS:
+        out = pat.sub(_RED, out)
+    confidence = 0.0 if _RESIDUAL.search(out.replace(_RED, "")) else 1.0
+    return out, confidence
