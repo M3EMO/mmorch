@@ -37,6 +37,8 @@ from mmorch.curiosity import find_tension as _find_tension
 from mmorch.classify import classify as _classify, cynefin_classify as _cynefin
 from mmorch.spec import build_spec as _build_spec, interview as _spec_interview
 from mmorch.sessions import ingest_session as _ingest_session
+from mmorch.session_skills import (ingest_workflows as _ingest_workflows,
+                                   top_playbooks as _top_playbooks)
 from mmorch.config import DEFAULT_ROUTER
 from mmorch.feedback import (record_outcome as _record_outcome,
                             ThompsonBandit as _ThompsonBandit,
@@ -391,6 +393,21 @@ def mmorch_ingest_session(path: str = "latest") -> str:
                        "recorded": r.recorded, "skipped_no_signal": r.skipped_no_signal,
                        "already_ingested": r.already_ingested,
                        "recorder_failed": r.recorder_failed}, ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_session_playbooks(path: str = "latest", domain: str = "") -> str:
+    """Mine reusable workflow playbooks from Claude sessions: ingest the session's
+    successful tool-call sequences (labeled by EXTERNAL outcome) and return the
+    recurring ones ranked by real success rate, optionally filtered by Cynefin domain
+    (clear|complicated|complex|chaotic). 100% LOCAL — sends nothing to any API. Returns
+    JSON {ingested, playbooks:[{domain, tool_sequence, n_observed, n_success, success_rate}]}."""
+    n = _ingest_workflows(path)
+    books = _top_playbooks(domain=domain or None)
+    return json.dumps({"ingested": n, "playbooks": [
+        {"domain": b.domain, "tool_sequence": list(b.tool_sequence),
+         "n_observed": b.n_observed, "n_success": b.n_success,
+         "success_rate": b.success_rate} for b in books]}, ensure_ascii=False)
 
 
 @mcp.tool()

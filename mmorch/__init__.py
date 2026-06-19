@@ -36,6 +36,8 @@ from .classify import (classify, classify_and_act, ClassifyResult,  # classify-a
 from .spec import build_spec, interview as spec_interview, SpecResult  # spec-builder gated
 from .sessions import (ingest_session, parse_session,        # aprende de sesiones Claude
                        IngestReport, Segment)
+from .session_skills import (ingest_workflows, top_playbooks,  # playbooks de tool-calls
+                             extract_workflows, mine_playbooks, WorkflowObs, Playbook)
 from .checkers import (check, register_checker, CheckResult,         # tool-verify determinista
                        safe_arith, available as checkers_available)
 from .goal import (load_goal, goal_hash, goal_aligned,               # ancla anti-goal-drift
@@ -98,6 +100,8 @@ __all__ = [
     "cynefin_classify", "CynefinResult", "CYNEFIN_CLASSES", "CYNEFIN_STRATEGY",
     "build_spec", "spec_interview", "SpecResult",
     "ingest_session", "parse_session", "IngestReport", "Segment",
+    "ingest_workflows", "top_playbooks", "extract_workflows", "mine_playbooks",
+    "WorkflowObs", "Playbook",
     "check", "register_checker", "CheckResult", "safe_arith", "checkers_available",
     "load_goal", "goal_hash", "goal_aligned",
     "authorize_goal", "goal_guard", "pursue_goal", "GoalTampered",
