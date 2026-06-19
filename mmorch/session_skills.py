@@ -15,7 +15,8 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .sessions import _resolve_latest, observed_domain, outcome_of, parse_session
+from .sessions import (_ledger_seen, _resolve_latest, _session_id,
+                       observed_domain, outcome_of, parse_session)
 
 _STORE = Path(__file__).resolve().parent.parent / "logs" / "workflow_obs.jsonl"
 _LEDGER = Path(__file__).resolve().parent.parent / "logs" / "workflow_sessions.txt"
@@ -76,38 +77,6 @@ def mine_playbooks(obs, *, min_observed: int = 2) -> list[Playbook]:
              for (d, t), (n, s) in agg.items() if n >= min_observed]
     books.sort(key=lambda b: (b.success_rate, b.n_observed), reverse=True)
     return books
-
-
-def _session_id(path: Path) -> str:
-    """ID ESTABLE de la sesion (no cambia cuando el archivo crece -> evita re-ingerir y
-    duplicar segmentos previos). Usa el campo sessionId del JSONL; fallback a hash."""
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            ev = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        sid = ev.get("sessionId")
-        if sid:
-            return str(sid)[:40]
-    return "h:" + hashlib.sha256(path.read_bytes()).hexdigest()[:16]
-
-
-def _ledger_seen(ledger: Path) -> dict[str, int]:
-    """sessionId -> nº maximo de segmentos ya ingeridos. MAX (no last-wins): no depende
-    de orden ni de que len(segs) sea monotono."""
-    m: dict[str, int] = {}
-    if ledger.exists():
-        for ln in ledger.read_text(encoding="utf-8").splitlines():
-            if "\t" in ln:
-                sid, n = ln.rsplit("\t", 1)
-                try:
-                    m[sid] = max(m.get(sid, 0), int(n))
-                except ValueError:
-                    pass
-    return m
 
 
 def ingest_workflows(path, *, store: Path = _STORE, ledger: Path = _LEDGER) -> int:

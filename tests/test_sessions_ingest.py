@@ -65,6 +65,37 @@ def test_idempotent_second_ingest_skips(tmp_path):
     assert rep2.already_ingested and rep2.recorded == 0 and len(rec) == 1
 
 
+def test_grown_session_does_not_double_count(tmp_path):
+    # backport del modelo incremental: una sesion que CRECE solo registra los segmentos
+    # nuevos; no re-registra (no doble-cuenta) los outcomes de calibracion previos.
+    rec = []
+    led = tmp_path / "l.txt"
+    args = dict(recorder=lambda **k: rec.append(k),
+                classifier=lambda req, **k: type("R", (), {"domain": "clear"})(), ledger=led)
+    base = [{"type": "user", "message": {"role": "user", "content": "x"}, "sessionId": "SID-9"}]
+    seg1 = [
+        {"type": "user", "message": {"role": "user", "content": "lee"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Read", "input": {}}]}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "content": "3 passed", "is_error": False}]}}]
+    p = tmp_path / "g.jsonl"
+    p.write_text("\n".join(json.dumps(e) for e in base + seg1), encoding="utf-8")
+    r1 = S.ingest_session(p, **args)
+    seg2 = [
+        {"type": "user", "message": {"role": "user", "content": "otra"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Bash", "input": {}}]}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "content": "5 passed", "is_error": False}]}}]
+    p.write_text("\n".join(json.dumps(e) for e in base + seg1 + seg2), encoding="utf-8")
+    r2 = S.ingest_session(p, **args)
+    assert r1.recorded == 1 and r2.recorded == 1   # cada uno solo su segmento nuevo
+    assert len(rec) == 2                            # 'lee' NO se re-registro
+    r3 = S.ingest_session(p, **args)               # sin crecimiento -> nada
+    assert r3.already_ingested and len(rec) == 2
+
+
 def test_recorder_failure_does_not_abort_or_double_count(tmp_path):
     # mmorch verify T5: si recorder() tira, el loop sigue y el ledger se escribe igual,
     # asi un re-ingest NO reprocesa (sin doble-conteo).

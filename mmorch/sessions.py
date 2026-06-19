@@ -190,27 +190,62 @@ def _resolve_latest(cooldown_s: float = _ACTIVE_COOLDOWN_S) -> Path:
         "no settled session JSONL under ~/.claude/projects (all modified within cooldown)")
 
 
+def _session_id(path: Path) -> str:
+    """ID ESTABLE de la sesion (no cambia cuando el archivo crece -> base de la
+    idempotencia incremental). Usa el campo sessionId del JSONL; fallback a hash."""
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        sid = ev.get("sessionId")
+        if sid:
+            return str(sid)[:40]
+    return "h:" + hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+
+
+def _ledger_seen(ledger: Path) -> dict[str, int]:
+    """sessionId -> nº MAXIMO de segmentos ya procesados (formato 'sid<TAB>n').
+    ponytail: append-only, ~1 linea por sesion (las re-ingestas sin crecimiento salen
+    antes de escribir). O(N) sobre N sesiones = KB a esta escala; compactar (ultima
+    linea por sid) si N llega a 10k+."""
+    m: dict[str, int] = {}
+    if ledger.exists():
+        for ln in ledger.read_text(encoding="utf-8").splitlines():
+            if "\t" in ln:
+                sid, n = ln.rsplit("\t", 1)
+                try:
+                    m[sid] = max(m.get(sid, 0), int(n))
+                except ValueError:
+                    pass
+    return m
+
+
 def ingest_session(path, *, router_model: str = DEFAULT_ROUTER,
                    recorder=record_outcome, classifier=cynefin_classify,
                    ledger: Path = _LEDGER) -> IngestReport:
     """Calibra cynefin_classify contra la dificultad observada en una sesion real.
-    Idempotente por hash. recorder/classifier/ledger son inyectables (tests).
+    Idempotencia INCREMENTAL por sessionId (ledger 'sid<TAB>n'): solo procesa los
+    segmentos NUEVOS (segs[start:]), asi una sesion que crece o se reanuda no
+    doble-cuenta los outcomes previos ni pierde los nuevos. recorder/classifier/ledger
+    inyectables (tests).
     OJO: el classifier default (cynefin_classify) manda el TEXTO DEL REQUEST al router
     externo; nunca el transcript/razonamiento/tools. Para cero-salida, inyectar un
     classifier local."""
     p = _resolve_latest() if path == "latest" else Path(path)
-    raw = p.read_text(encoding="utf-8")
-    h = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
-    seen = set()
-    if ledger.exists():
-        seen = {ln.strip() for ln in ledger.read_text(encoding="utf-8").splitlines() if ln.strip()}
-    if h in seen:
-        return IngestReport(session=p.name, segments=0, recorded=0,
+    sid = _session_id(p)
+    segs = parse_session(p)
+    start = _ledger_seen(ledger).get(sid, 0)
+    if start >= len(segs):
+        return IngestReport(session=p.name, segments=len(segs), recorded=0,
                             skipped_no_signal=0, already_ingested=True)
 
-    segs = parse_session(p)
     recorded = skipped = failed = 0
-    for i, seg in enumerate(segs):
+    for i in range(start, len(segs)):
+        seg = segs[i]
         next_req = segs[i + 1].request if i + 1 < len(segs) else ""
         out = outcome_of(seg, next_request=next_req)
         if out is None:
@@ -230,6 +265,6 @@ def ingest_session(path, *, router_model: str = DEFAULT_ROUTER,
 
     ledger.parent.mkdir(parents=True, exist_ok=True)
     with open(ledger, "a", encoding="utf-8") as fh:
-        fh.write(h + "\n")
+        fh.write(f"{sid}\t{len(segs)}\n")    # marca cuantos segmentos vimos
     return IngestReport(session=p.name, segments=len(segs), recorded=recorded,
                         skipped_no_signal=skipped, recorder_failed=failed)
