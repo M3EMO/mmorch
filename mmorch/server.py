@@ -453,7 +453,13 @@ async def pty_close(request):
 def build_app():
     from starlette.applications import Starlette
     from starlette.routing import Route
-    return Starlette(routes=[
+    from starlette.middleware import Middleware
+    from starlette.middleware.cors import CORSMiddleware
+    # CORS: the real gate is the token + private tunnel, not the Origin. The Lotus
+    # client (Tauri / dev server) is cross-origin, so allow any origin here.
+    middleware = [Middleware(CORSMiddleware, allow_origins=["*"],
+                             allow_methods=["*"], allow_headers=["*"])]
+    return Starlette(middleware=middleware, routes=[
         Route("/", home),
         Route("/state", state_snapshot),
         Route("/events", sse_events),
