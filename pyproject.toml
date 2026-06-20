@@ -16,7 +16,8 @@ dependencies = [
 mcp = ["mcp>=1.2.0"]
 memory = ["fastembed>=0.3.0"]   # embeddings locales (bge-small). Sin esto: recall coarse-only.
 checkers = ["sqlglot>=20", "pint>=0.23", "sympy>=1.12", "radon>=6.0", "coverage>=7.0"]
-server = ["starlette>=0.37", "uvicorn>=0.27", "httpx>=0.27"]   # nivel 3: live server + fleet
+server = ["starlette>=0.37", "uvicorn>=0.27", "httpx>=0.27",
+          "pywinpty>=2.0; platform_system=='Windows'"]          # nivel 3: live server + fleet + PTY (ConPTY)
 factory = ["scikit-learn>=1.4"]                                 # fabrica de modelos (logreg/GBRT)
 # todo lo necesario pa un host always-on (deploy multi-host): pip install mmorch[host]
 host = ["mmorch[mcp,memory,checkers,server,factory]"]
