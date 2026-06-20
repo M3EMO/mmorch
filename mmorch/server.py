@@ -298,6 +298,50 @@ async def approve_job(request):
     return JSONResponse({"approved": jid})
 
 
+def _chat_reply(text: str) -> dict:
+    """Store the user msg, generate a terse reply via a cheap model (cero cupo), store + return it."""
+    from . import chat_store
+    chat_store.add("user", text)
+    reply, engine = "", ""
+    try:
+        from .providers import call
+        from .config import DEFAULT_GENERATOR
+        sysmsg = ("You are Lotus, a terse coding assistant backed by mmorch. If the user describes a "
+                  "coding task, say briefly how you'd route it (project edit / rubric / fan_out) and "
+                  "what you need (project, target file). Otherwise answer directly. Keep it short.")
+        r = call(DEFAULT_GENERATOR, [{"role": "system", "content": sysmsg},
+                                     {"role": "user", "content": text}],
+                 pattern="chat", node="chat", max_tokens=512)
+        reply = (r.text or "").strip()
+        engine = DEFAULT_GENERATOR
+    except Exception as e:
+        reply = f"(mmorch offline: {str(e)[:120]})"
+    return chat_store.add("assistant", reply or "(no reply)", engine=engine)
+
+
+async def chat_handler(request):
+    from starlette.responses import JSONResponse
+    from starlette.concurrency import run_in_threadpool
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    body = await request.json()
+    text = (body.get("message") or "").strip()
+    if not text:
+        return JSONResponse({"error": "mensaje vacio"}, status_code=400)
+    msg = await run_in_threadpool(_chat_reply, text)   # model call off the event loop
+    return JSONResponse({"message": msg})
+
+
+async def chat_history(request):
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from . import chat_store
+    before = request.query_params.get("before")
+    limit = int(request.query_params.get("limit", 30))
+    return JSONResponse(chat_store.history(before, limit))
+
+
 def build_app():
     from starlette.applications import Starlette
     from starlette.routing import Route
@@ -309,6 +353,8 @@ def build_app():
         Route("/run/fanout", run_fanout, methods=["POST"]),
         Route("/projects", projects_handler, methods=["GET", "POST"]),
         Route("/run/project", run_project, methods=["POST"]),
+        Route("/chat", chat_handler, methods=["POST"]),
+        Route("/chat/history", chat_history, methods=["GET"]),
         Route("/sync/pull", sync_pull, methods=["POST"]),
         Route("/fleet", fleet_handler, methods=["GET", "POST"]),
         Route("/fleet/run", fleet_run, methods=["POST"]),
