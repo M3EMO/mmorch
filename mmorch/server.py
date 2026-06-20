@@ -72,6 +72,9 @@ def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model):
             if act["role"] in ("done", "escalate"):
                 break
             out = gen_fn(act["prompt"]) if act["role"] == "executor" else judge_fn(act["prompt"])
+            from . import transcript_store
+            model = state["gen_model"] if act["role"] == "executor" else state["judge_model"]
+            transcript_store.append(jid, model, act["role"], out)
             submit(state, out)
     except Exception as e:
         emit("job", "error", job_id=jid, detail=str(e)[:200])
@@ -342,6 +345,25 @@ async def chat_history(request):
     return JSONResponse(chat_store.history(before, limit))
 
 
+async def minds_handler(request):
+    """Global codegraph federation across registered projects (read-only)."""
+    from starlette.responses import JSONResponse
+    from starlette.concurrency import run_in_threadpool
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from .minds import federation
+    return JSONResponse(await run_in_threadpool(federation))
+
+
+async def transcript_handler(request):
+    """Inter-agent transcript for a job (Lotus reads this; SSE mirrors live items)."""
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from .transcript_store import get
+    return JSONResponse(get(request.path_params["job_id"]))
+
+
 def build_app():
     from starlette.applications import Starlette
     from starlette.routing import Route
@@ -355,6 +377,8 @@ def build_app():
         Route("/run/project", run_project, methods=["POST"]),
         Route("/chat", chat_handler, methods=["POST"]),
         Route("/chat/history", chat_history, methods=["GET"]),
+        Route("/minds", minds_handler),
+        Route("/transcript/{job_id}", transcript_handler),
         Route("/sync/pull", sync_pull, methods=["POST"]),
         Route("/fleet", fleet_handler, methods=["GET", "POST"]),
         Route("/fleet/run", fleet_run, methods=["POST"]),

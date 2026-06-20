@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **58 módulos · 39 MCP tools · 399 tests.**
+_Auto-generado por `mmorch.docgen`._ **60 módulos · 39 MCP tools · 399 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -65,6 +65,7 @@ _Auto-generado por `mmorch.docgen`._ **58 módulos · 39 MCP tools · 399 tests.
 | `mmorch/megasource.py` | megasource (Fase 2) — megafuente autodidacta: primer hit = provider PRICING. |
 | `mmorch/memory.py` | memory — memoria episodica + semantica para mmorch (DuckDB 2 capas). |
 | `mmorch/metrics.py` | Observability — append-only JSONL metric log (§11 backbone). |
+| `mmorch/minds.py` | minds — global federation graph across registered projects (read-only). |
 | `mmorch/nodes.py` | nodes — el registry de la ORQUESTA: nombra a cada miembro que mmorch (el DIRECTOR) |
 | `mmorch/nudge.py` | nudge — robo de Hermes 'periodic memory nudging': cada N loops cerrados, dispara |
 | `mmorch/patterns.py` | Code-flow patterns (§7), migrated as deterministic Python. |
@@ -89,6 +90,7 @@ _Auto-generado por `mmorch.docgen`._ **58 módulos · 39 MCP tools · 399 tests.
 | `mmorch/sync.py` | sync — GitHub como bus de sincronizacion entre maquinas. El host always-on (ej pc-mateo) |
 | `mmorch/tournament.py` | tournament — elegir EL mejor de pocos candidatos por gusto/calidad (naming, |
 | `mmorch/trajectory.py` | trajectory — robo de Hermes: 'trajectory compression para entrenar la proxima |
+| `mmorch/transcript_store.py` | transcript_store — per-job inter-agent transcript (in-memory). |
 | `mmorch/vault.py` | vault — memoria de largo plazo mmorch-legible sobre el vault Obsidian. |
 | `mmorch/weights.py` | weights — gestion de pesos de nodos neuronales (model-cards + verificacion). Source of |
 <!-- /mmorch:auto:modules -->
