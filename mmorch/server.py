@@ -47,14 +47,14 @@ def _jobmeta(kind: str, title: str, **extra) -> dict:
             "ts": time.time(), "host": os.getenv("MMORCH_SERVER_HOST", "local"), **extra}
 
 
-def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model):
+def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model, parent=None):
     from .rubric_loop import start_rubric, next_action, submit
     from .providers import call
     state = start_rubric(task, criteria, K=K, gen_model=gen_model, judge_model=judge_model)
     jid = state["id"]
     cancel = threading.Event()
     with _JOBS_LOCK:
-        _JOBS[jid] = _jobmeta("rubric", task, cancel=cancel, state=state)
+        _JOBS[jid] = _jobmeta("rubric", task, cancel=cancel, state=state, parent=parent)
     emit("job", "running", job_id=jid, detail=task[:120])
 
     def fn(model):
@@ -84,14 +84,15 @@ def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model):
 
 
 def _run_project_job(project: str, task: str, mode: str, push: bool = False,
-                     engine: str = "mmorch", target_file: str = "", test_cmd: str | None = None):
+                     engine: str = "mmorch", target_file: str = "", test_cmd: str | None = None,
+                     parent=None):
     """Job project-aware. engine PRIMARIO = 'mmorch' (DeepSeek genera + tests verifican +
     aplica determinista, cero cupo; escala a claude -p si no puede). engine='claude' =
     claude -p directo (plan/cupo) — para tareas abiertas que mmorch no banca."""
     import uuid as _u
     jid = _u.uuid4().hex[:10]
     with _JOBS_LOCK:
-        _JOBS[jid] = _jobmeta("project", task, engine=engine)
+        _JOBS[jid] = _jobmeta("project", task, engine=engine, parent=parent)
     try:
         if engine == "mmorch":
             if not target_file:
@@ -120,11 +121,11 @@ def _run_project_job(project: str, task: str, mode: str, push: bool = False,
         _JOBS[jid]["status"] = "done" if ok else "error"
 
 
-def _run_fanout_job(prompts: list, gen_model: str):
+def _run_fanout_job(prompts: list, gen_model: str, parent=None):
     from .patterns import fan_out
     jid = uuid.uuid4().hex[:10]
     with _JOBS_LOCK:
-        _JOBS[jid] = _jobmeta("fanout", f"fan_out x{len(prompts)}")
+        _JOBS[jid] = _jobmeta("fanout", f"fan_out x{len(prompts)}", parent=parent)
     emit("job", "running", job_id=jid, detail=f"fan_out x{len(prompts)}")
     try:
         res = fan_out(prompts, gen_model=gen_model)
@@ -152,7 +153,7 @@ async def state_snapshot(request):
     with _JOBS_LOCK:
         jobs = {k: {"status": v["status"], "kind": v["kind"], "title": v.get("title", ""),
                     "ts": v.get("ts", 0), "host": v.get("host", "local"),
-                    "engine": v.get("engine", "")} for k, v in _JOBS.items()}
+                    "engine": v.get("engine", ""), "parent": v.get("parent")} for k, v in _JOBS.items()}
     return JSONResponse({
         "conductor": conductor(), "sections": sections(), "summary": summary(),
         "error_rates": error_rates(window_n=200), "cache": cache_stats(window_n=200),
@@ -190,7 +191,8 @@ async def run_rubric(request):
     body = await request.json()
     task = body.get("task", ""); criteria = body.get("criteria", []); K = int(body.get("K", 5))
     gm = body.get("gen_model"); jm = body.get("judge_model")
-    t = threading.Thread(target=_run_rubric_job, args=(task, criteria, K, gm, jm), daemon=True)
+    t = threading.Thread(target=_run_rubric_job, args=(task, criteria, K, gm, jm),
+                         kwargs={"parent": body.get("parent_id")}, daemon=True)
     t.start()
     return JSONResponse({"started": "rubric", "task": task[:80]})
 
@@ -201,7 +203,8 @@ async def run_fanout(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     body = await request.json()
     prompts = body.get("prompts", []); gm = body.get("gen_model", "deepseek-chat")
-    t = threading.Thread(target=_run_fanout_job, args=(prompts, gm), daemon=True)
+    t = threading.Thread(target=_run_fanout_job, args=(prompts, gm),
+                         kwargs={"parent": body.get("parent_id")}, daemon=True)
     t.start()
     return JSONResponse({"started": "fanout", "n": len(prompts)})
 
@@ -235,7 +238,8 @@ async def run_project(request):
     if engine not in ("mmorch", "claude"):
         return JSONResponse({"error": "engine invalido (mmorch|claude)"}, status_code=400)
     t = threading.Thread(target=_run_project_job,
-                         args=(project, task, mode, push, engine, target_file, test_cmd), daemon=True)
+                         args=(project, task, mode, push, engine, target_file, test_cmd),
+                         kwargs={"parent": body.get("parent_id")}, daemon=True)
     t.start()
     return JSONResponse({"started": "project", "project": project, "engine": engine, "mode": mode})
 
@@ -364,6 +368,17 @@ async def transcript_handler(request):
     return JSONResponse(get(request.path_params["job_id"]))
 
 
+async def job_ancestry(request):
+    """Lineage of a job (graft G1): ancestors up + descendants down (adjacency-list)."""
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from . import job_graph
+    with _JOBS_LOCK:
+        jobs = {k: {"parent": v.get("parent")} for k, v in _JOBS.items()}
+    return JSONResponse(job_graph.tree(jobs, request.path_params["job_id"]))
+
+
 # --- interactive PTY (writable terminal) ------------------------------------ #
 async def pty_open(request):
     """Spawn an interactive shell bound to a project's cwd. Token-gated; see pty_session."""
@@ -471,6 +486,7 @@ def build_app():
         Route("/chat/history", chat_history, methods=["GET"]),
         Route("/minds", minds_handler),
         Route("/transcript/{job_id}", transcript_handler),
+        Route("/jobs/{job_id}/ancestry", job_ancestry),
         Route("/pty/open", pty_open, methods=["POST"]),
         Route("/pty/{sid}/stream", pty_stream),
         Route("/pty/{sid}/input", pty_input, methods=["POST"]),

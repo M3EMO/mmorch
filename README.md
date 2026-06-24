@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **61 módulos · 39 MCP tools · 399 tests.**
+_Auto-generado por `mmorch.docgen`._ **62 módulos · 39 MCP tools · 399 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -60,6 +60,7 @@ _Auto-generado por `mmorch.docgen`._ **61 módulos · 39 MCP tools · 399 tests.
 | `mmorch/goal.py` | goal — ancla anti-goal-drift, modelada sobre el `/goal` nativo de Claude Code. |
 | `mmorch/hillclimb.py` | hillclimb — optimizacion sobre METRICA ESCALAR con feedback del entorno |
 | `mmorch/innovate.py` | innovate (I-5) — motor de innovacion productizado. mmorch se idea capacidades |
+| `mmorch/job_graph.py` | job_graph — adjacency-list ancestry over the in-memory job map (graft G1). |
 | `mmorch/learn.py` | learn — meta-inteligencia: mmorch aprende de su propio metrics.jsonl (I-1). |
 | `mmorch/loop.py` | loop_until_done — scope DESCONOCIDO, 'segui hasta que este limpio'. Control-flow |
 | `mmorch/megasource.py` | megasource (Fase 2) — megafuente autodidacta: primer hit = provider PRICING. |
