@@ -15,9 +15,8 @@ security-first, foundations-before-features. Effort: S/M/L. Source files cited p
 ## Phase 0 — Foundation (substrate for the rest)
 - **G1. Job ancestry** `[S]` ✅ DONE (`cf9f42e`) — `mmorch/job_graph.py` + jobs carry `parent`,
   run/* accept `parent_id`, `GET /jobs/{id}/ancestry`. Unlocks G6/G7. *Src: `goals.ts`, `issues.ts`.*
-- **G2. portable/system_dependent tagging** `[S]` — tag mmorch config/secrets/paths as `portable`
-  or `system_dependent` (abs paths, local cmds, machine meta = system). Substrate for sync (G4).
-  *Src: `company-portability.ts`.*
+- **G2. portable/system_dependent tagging** `[S]` ✅ DONE — `portability.tag(value, kind)`
+  (portable|system_dependent|secret). Used by G4. *Src: `company-portability.ts`.*
 
 ## Phase 1 — Security (close the PTY/exec hole)
 - **G3. Exec-policy driver-allowlist** `[M]` ✅ DONE (this commit) — `mmorch/exec_policy.py`
@@ -26,10 +25,11 @@ security-first, foundations-before-features. Effort: S/M/L. Source files cited p
   FOLLOW-UP: a real `worktree` driver so `sandbox` isolates instead of only denying. *Src: `execution-allowlist.ts`.*
 
 ## Phase 2 — Continuity (the Lotus cross-device payoff)
-- **G4. Portability export/import** `[L]` — versioned manifest (schemaVersion), bundle = projects+config+
-  jobs(+ancestry)+skills+env(portable/placeholder); import reconciliation (slug collision-suffix,
-  workspace dedup, orphan-repair); modes `full` / `safe` (safe rejects setup-cmds/triggers = anti-supply-chain).
-  Builds on G2. Enables sync across your 2 PCs + phone via Lotus. *Src: `company-portability.ts`.*
+- **G4. Portability export/import** `[L]` ✅ DONE — `portability.export_bundle/reconcile/import_bundle`;
+  `GET /export` (projects path=system_dependent, name portable, fleet token=secret, exec_policy) +
+  `POST /import` (reconcile: skip name-collisions, system_dependent paths need local re-provision via
+  `overrides`, never apply a stale abs path). Verified: round-trip = no mutation; bad path → needs_path.
+  FOLLOW-UP: bundle chat history + skills; Lotus UI for export/import + path-remap. *Src: `company-portability.ts`.*
 
 ## Phase 3 — Governance (configurable, data-driven)
 - **G5. Multi-scope budgets** `[M]` — scope `global|project|engine` × `soft(warn%)|hard` × window

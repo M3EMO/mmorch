@@ -384,6 +384,29 @@ async def job_ancestry(request):
     return JSONResponse(job_graph.tree(jobs, request.path_params["job_id"]))
 
 
+async def export_handler(request):
+    """Portable state bundle (graft G4): values tagged portable|system_dependent|secret."""
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    import time as _t
+    from .projects import list_projects
+    from .fleet import list_hosts
+    from .exec_policy import current_policy
+    from .portability import export_bundle
+    return JSONResponse(export_bundle(list_projects(), list_hosts(), current_policy(), _t.time()))
+
+
+async def import_handler(request):
+    """Reconcile + apply a portable bundle on THIS machine (skip collisions, need local paths)."""
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    body = await request.json()
+    from .portability import import_bundle
+    return JSONResponse(import_bundle(body.get("manifest") or {}, body.get("overrides") or {}))
+
+
 # --- interactive PTY (writable terminal) ------------------------------------ #
 async def pty_open(request):
     """Spawn an interactive shell bound to a project's cwd. Token-gated; see pty_session."""
@@ -496,6 +519,8 @@ def build_app():
         Route("/minds", minds_handler),
         Route("/transcript/{job_id}", transcript_handler),
         Route("/jobs/{job_id}/ancestry", job_ancestry),
+        Route("/export", export_handler),
+        Route("/import", import_handler, methods=["POST"]),
         Route("/pty/open", pty_open, methods=["POST"]),
         Route("/pty/{sid}/stream", pty_stream),
         Route("/pty/{sid}/input", pty_input, methods=["POST"]),
