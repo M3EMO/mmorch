@@ -32,9 +32,11 @@ security-first, foundations-before-features. Effort: S/M/L. Source files cited p
   FOLLOW-UP: bundle chat history + skills; Lotus UI for export/import + path-remap. *Src: `company-portability.ts`.*
 
 ## Phase 3 — Governance (configurable, data-driven)
-- **G5. Multi-scope budgets** `[M]` — scope `global|project|engine` × `soft(warn%)|hard` × window
-  `month|lifetime`; soft→notify, hard→pause scope + cancel work via hook. Upgrades BudgetKeeper.
-  *Src: `budgets.ts`.*
+- **G5. Multi-scope budgets** `[M]` ✅ DONE — `budget_policy.py` (policies json, `evaluate`,
+  `blocking_incident`); scopes `global`(month) + `family:*`(lifetime, the data we track);
+  soft@warn% / hard@limit. Hard blocks new work (402) in run/{rubric,fanout,project};
+  `GET|POST /budget/policies`; `/state.budget_incidents`. Verified: self-check + HTTP (hard→402→clear→ok).
+  FOLLOW-UP: per-project scope (needs per-project cost attribution); soft→notification in Lotus. *Src: `budgets.ts`.*
 - **G6. Staged gates per job** `[M]` — gate policy = `stages:[{type:review|approval, participants}]`,
   comment-required, auto-advance when remaining participants = assignee, `monitor`(timeout/retry).
   Turns binary gates into configurable; direct Lotus gate-modal UX. Uses G1. *Src: `issue-execution-policy.ts`.*

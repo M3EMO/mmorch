@@ -40,6 +40,18 @@ def _token_ok(request) -> bool:
     return got == want
 
 
+def _budget_block():
+    """Return a 402 JSONResponse if a hard budget policy is exceeded, else None (graft G5)."""
+    from starlette.responses import JSONResponse
+    from .budget_policy import blocking_incident
+    inc = blocking_incident()
+    if inc:
+        return JSONResponse(
+            {"error": f"budget hard-stop on '{inc['scope']}' (${inc['spent']} / ${inc['limit']})",
+             "incident": inc}, status_code=402)
+    return None
+
+
 # --- jobs in-process -------------------------------------------------------- #
 def _jobmeta(kind: str, title: str, **extra) -> dict:
     """Registro de job con title/ts/host -> alimenta el Kanban (columnas por status)."""
@@ -151,6 +163,7 @@ async def state_snapshot(request):
     from .budget import status as bstatus
     from .nodes import sections, conductor
     from .exec_policy import current_policy
+    from .budget_policy import load as _bp_load, evaluate as _bp_eval, snapshot as _bp_snap
     with _JOBS_LOCK:
         jobs = {k: {"status": v["status"], "kind": v["kind"], "title": v.get("title", ""),
                     "ts": v.get("ts", 0), "host": v.get("host", "local"),
@@ -159,6 +172,7 @@ async def state_snapshot(request):
         "conductor": conductor(), "sections": sections(), "summary": summary(),
         "error_rates": error_rates(window_n=200), "cache": cache_stats(window_n=200),
         "budget": bstatus(), "jobs": jobs, "exec_policy": current_policy(),
+        "budget_incidents": _bp_eval(_bp_load(), _bp_snap()),
         "recent": [e.to_dict() for e in bus().recent(50)],
     })
 
@@ -189,6 +203,9 @@ async def run_rubric(request):
     from starlette.responses import JSONResponse
     if not _token_ok(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+    blocked = _budget_block()
+    if blocked:
+        return blocked
     body = await request.json()
     task = body.get("task", ""); criteria = body.get("criteria", []); K = int(body.get("K", 5))
     gm = body.get("gen_model"); jm = body.get("judge_model")
@@ -202,6 +219,9 @@ async def run_fanout(request):
     from starlette.responses import JSONResponse
     if not _token_ok(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+    blocked = _budget_block()
+    if blocked:
+        return blocked
     body = await request.json()
     prompts = body.get("prompts", []); gm = body.get("gen_model", "deepseek-chat")
     t = threading.Thread(target=_run_fanout_job, args=(prompts, gm),
@@ -238,6 +258,9 @@ async def run_project(request):
         return JSONResponse({"error": "mode invalido (plan|edit)"}, status_code=400)
     if engine not in ("mmorch", "claude"):
         return JSONResponse({"error": "engine invalido (mmorch|claude)"}, status_code=400)
+    blocked = _budget_block()
+    if blocked:
+        return blocked
     from .exec_policy import current_policy, evaluate
     dec = evaluate(current_policy(), "local")          # project jobs execute locally
     if not dec["allowed"]:
@@ -382,6 +405,23 @@ async def job_ancestry(request):
     with _JOBS_LOCK:
         jobs = {k: {"parent": v.get("parent")} for k, v in _JOBS.items()}
     return JSONResponse(job_graph.tree(jobs, request.path_params["job_id"]))
+
+
+async def budget_policies(request):
+    """Scoped budget policies (graft G5): GET = policies+incidents+snapshot, POST = save."""
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from . import budget_policy
+    if request.method == "POST":
+        body = await request.json()
+        pols = body.get("policies", [])
+        budget_policy.save(pols)
+        return JSONResponse({"saved": len(pols)})
+    snap = budget_policy.snapshot()
+    pols = budget_policy.load()
+    return JSONResponse({"policies": pols, "snapshot": snap,
+                         "incidents": budget_policy.evaluate(pols, snap)})
 
 
 async def cancel_tree(request):
@@ -550,6 +590,7 @@ def build_app():
         Route("/transcript/{job_id}", transcript_handler),
         Route("/jobs/{job_id}/ancestry", job_ancestry),
         Route("/jobs/{job_id}/cancel-tree", cancel_tree, methods=["POST"]),
+        Route("/budget/policies", budget_policies, methods=["GET", "POST"]),
         Route("/export", export_handler),
         Route("/import", import_handler, methods=["POST"]),
         Route("/pty/open", pty_open, methods=["POST"]),

@@ -20,6 +20,8 @@ logs/skills.jsonl
 logs/nudge.json
 projects.json
 hosts.json
+chat.db
+budget_policies.json
 *.egg-info/
 build/
 dist/
