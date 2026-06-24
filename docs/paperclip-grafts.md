@@ -37,9 +37,11 @@ security-first, foundations-before-features. Effort: S/M/L. Source files cited p
   soft@warn% / hard@limit. Hard blocks new work (402) in run/{rubric,fanout,project};
   `GET|POST /budget/policies`; `/state.budget_incidents`. Verified: self-check + HTTP (hard→402→clear→ok).
   FOLLOW-UP: per-project scope (needs per-project cost attribution); soft→notification in Lotus. *Src: `budgets.ts`.*
-- **G6. Staged gates per job** `[M]` — gate policy = `stages:[{type:review|approval, participants}]`,
-  comment-required, auto-advance when remaining participants = assignee, `monitor`(timeout/retry).
-  Turns binary gates into configurable; direct Lotus gate-modal UX. Uses G1. *Src: `issue-execution-policy.ts`.*
+- **G6. Staged gates per job** `[M]` ✅ DONE — `gate_policy.py` pure state machine (stages
+  review|approval, comment-required, approve/request_changes/reject); `_GATES` registry +
+  `GET|POST /jobs/{id}/gate` + `POST /jobs/{id}/gate/advance`. Verified: self-check + HTTP
+  (2-stage flow, comment-required 400, approve×2→approved, terminal 400). FOLLOW-UP: participants/
+  auto-advance + Lotus multi-stage gate modal + attach gate on job execution. *Src: `issue-execution-policy.ts`.*
 - **G7. Hold + snapshot tree control** `[M]` ✅ DONE — `job_graph.plan_subtree_cancel` (members w/
   prev_status snapshot, skip terminals) + `POST /jobs/{id}/cancel-tree` (cascade cancel via G1 ancestry).
   Verified: self-check + HTTP (running root+child cancelled, snapshot, root→error). FOLLOW-UP: pause/restore

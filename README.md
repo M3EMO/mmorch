@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **65 módulos · 39 MCP tools · 399 tests.**
+_Auto-generado por `mmorch.docgen`._ **66 módulos · 39 MCP tools · 399 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -59,6 +59,7 @@ _Auto-generado por `mmorch.docgen`._ **65 módulos · 39 MCP tools · 399 tests.
 | `mmorch/factory.py` | factory — mmorch como FÁBRICA de modelos (no ES el modelo, lo CONSTRUYE/entrena). |
 | `mmorch/feedback.py` | feedback — el lazo que faltaba (la 'loss' ausente). mmorch genera/verifica/ |
 | `mmorch/fleet.py` | fleet — control unificado de varios hosts mmorch en el tailnet. Cada maquina corre su |
+| `mmorch/gate_policy.py` | gate_policy — staged review/approval gates per job (graft G6 from paperclip). |
 | `mmorch/goal.py` | goal — ancla anti-goal-drift, modelada sobre el `/goal` nativo de Claude Code. |
 | `mmorch/hillclimb.py` | hillclimb — optimizacion sobre METRICA ESCALAR con feedback del entorno |
 | `mmorch/innovate.py` | innovate (I-5) — motor de innovacion productizado. mmorch se idea capacidades |

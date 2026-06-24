@@ -30,6 +30,7 @@ from .events import bus, emit, Event
 
 _JOBS: dict[str, dict] = {}
 _JOBS_LOCK = threading.Lock()
+_GATES: dict[str, dict] = {}   # graft G6: per-job staged gate state
 
 
 def _token_ok(request) -> bool:
@@ -407,6 +408,55 @@ async def job_ancestry(request):
     return JSONResponse(job_graph.tree(jobs, request.path_params["job_id"]))
 
 
+async def gate_handler(request):
+    """Staged gate for a job (graft G6). GET = current state; POST {policy} = start a gate."""
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    jid = request.path_params["job_id"]
+    if request.method == "POST":
+        body = await request.json()
+        from .gate_policy import start
+        state = start(body.get("policy") or {})
+        with _JOBS_LOCK:
+            _GATES[jid] = state
+            if jid in _JOBS:
+                _JOBS[jid]["status"] = "gate"
+        emit("job", "gate", job_id=jid, detail=f"staged gate ({len(state['policy']['stages'])} stages)")
+        return JSONResponse(state)
+    with _JOBS_LOCK:
+        st = _GATES.get(jid)
+    return JSONResponse(st) if st else JSONResponse({"error": "no gate"}, status_code=404)
+
+
+async def gate_advance(request):
+    """Advance a staged gate (graft G6): action approve|request_changes|reject."""
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    jid = request.path_params["job_id"]
+    body = await request.json()
+    from .gate_policy import advance
+    with _JOBS_LOCK:
+        st = _GATES.get(jid)
+    if not st:
+        return JSONResponse({"error": "no gate"}, status_code=404)
+    nxt = advance(st, body.get("action", "approve"), body.get("actor", ""), body.get("comment", ""))
+    if nxt.get("error"):
+        return JSONResponse({"error": nxt["error"]}, status_code=400)
+    with _JOBS_LOCK:
+        _GATES[jid] = nxt
+        if jid in _JOBS:
+            if nxt["status"] == "approved":
+                _JOBS[jid]["status"] = "done"
+            elif nxt["status"] == "rejected":
+                _JOBS[jid]["status"] = "error"
+    if nxt["status"] in ("approved", "rejected"):
+        emit("job", "done" if nxt["status"] == "approved" else "error",
+             job_id=jid, detail=f"staged gate {nxt['status']}")
+    return JSONResponse(nxt)
+
+
 async def budget_policies(request):
     """Scoped budget policies (graft G5): GET = policies+incidents+snapshot, POST = save."""
     from starlette.responses import JSONResponse
@@ -590,6 +640,8 @@ def build_app():
         Route("/transcript/{job_id}", transcript_handler),
         Route("/jobs/{job_id}/ancestry", job_ancestry),
         Route("/jobs/{job_id}/cancel-tree", cancel_tree, methods=["POST"]),
+        Route("/jobs/{job_id}/gate", gate_handler, methods=["GET", "POST"]),
+        Route("/jobs/{job_id}/gate/advance", gate_advance, methods=["POST"]),
         Route("/budget/policies", budget_policies, methods=["GET", "POST"]),
         Route("/export", export_handler),
         Route("/import", import_handler, methods=["POST"]),
