@@ -38,9 +38,10 @@ security-first, foundations-before-features. Effort: S/M/L. Source files cited p
 - **G6. Staged gates per job** `[M]` — gate policy = `stages:[{type:review|approval, participants}]`,
   comment-required, auto-advance when remaining participants = assignee, `monitor`(timeout/retry).
   Turns binary gates into configurable; direct Lotus gate-modal UX. Uses G1. *Src: `issue-execution-policy.ts`.*
-- **G7. Hold + snapshot tree control** `[M]` — cascade pause/cancel/restore over a job subtree via a
-  *hold* with *members*=snapshots; `preview()` → affected + skip_reason before applying. Uses G1.
-  *Src: `issue-tree-control.ts`.*
+- **G7. Hold + snapshot tree control** `[M]` ✅ DONE — `job_graph.plan_subtree_cancel` (members w/
+  prev_status snapshot, skip terminals) + `POST /jobs/{id}/cancel-tree` (cascade cancel via G1 ancestry).
+  Verified: self-check + HTTP (running root+child cancelled, snapshot, root→error). FOLLOW-UP: pause/restore
+  modes + Lotus button. *Src: `issue-tree-control.ts`.*
 
 ## Phase 4 — Learning loop
 - **G8. Feedback trace-bundles** `[M]` — up/down vote on a job/output → bundle {content + context +

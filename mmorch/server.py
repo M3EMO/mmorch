@@ -384,6 +384,36 @@ async def job_ancestry(request):
     return JSONResponse(job_graph.tree(jobs, request.path_params["job_id"]))
 
 
+async def cancel_tree(request):
+    """Cascade-cancel a job subtree (graft G7): hold + per-member snapshot, skip terminals."""
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    jid = request.path_params["job_id"]
+    from . import job_graph
+    with _JOBS_LOCK:
+        snap = {k: {"parent": v.get("parent"), "status": v.get("status")} for k, v in _JOBS.items()}
+    plan = job_graph.plan_subtree_cancel(snap, jid)
+    applied = []
+    with _JOBS_LOCK:
+        for m in plan["members"]:
+            j = _JOBS.get(m["id"])
+            if not j:
+                continue
+            c = j.get("cancel")
+            if c:
+                try:
+                    c.set()
+                except Exception:
+                    pass
+            j["status"] = "error"
+            applied.append(m["id"])
+    for mid in applied:
+        emit("job", "error", job_id=mid, detail="cancelled via subtree hold")
+    plan["applied"] = applied
+    return JSONResponse(plan)
+
+
 async def export_handler(request):
     """Portable state bundle (graft G4): values tagged portable|system_dependent|secret."""
     from starlette.responses import JSONResponse
@@ -519,6 +549,7 @@ def build_app():
         Route("/minds", minds_handler),
         Route("/transcript/{job_id}", transcript_handler),
         Route("/jobs/{job_id}/ancestry", job_ancestry),
+        Route("/jobs/{job_id}/cancel-tree", cancel_tree, methods=["POST"]),
         Route("/export", export_handler),
         Route("/import", import_handler, methods=["POST"]),
         Route("/pty/open", pty_open, methods=["POST"]),

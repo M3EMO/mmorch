@@ -50,6 +50,29 @@ def tree(jobs: dict, jid: str) -> dict:
     return {"node": jid, "ancestors": ancestors(jobs, jid), "descendants": descendants(jobs, jid)}
 
 
+_TERMINAL = {"done", "error", "approved", "escalate"}
+
+
+def plan_subtree_cancel(jobs: dict, jid: str) -> dict:
+    """Graft G7 (hold + snapshot): plan a cascade cancel over jid + descendants.
+
+    Members = non-terminal jobs (root first), each with a prev_status snapshot taken
+    at plan time. Skipped = terminal/missing jobs with a reason. Pure — apply elsewhere.
+    """
+    ids = [jid] + descendants(jobs, jid)
+    members, skipped = [], []
+    for i in ids:
+        if i not in jobs:
+            skipped.append({"id": i, "reason": "not_found"})
+            continue
+        st = (jobs.get(i) or {}).get("status")
+        if st in _TERMINAL:
+            skipped.append({"id": i, "reason": "terminal"})
+        else:
+            members.append({"id": i, "prev_status": st})   # snapshot
+    return {"root": jid, "members": members, "skipped": skipped}
+
+
 if __name__ == "__main__":
     J = {
         "root": {"parent": None},
@@ -66,4 +89,15 @@ if __name__ == "__main__":
     assert ancestors(J, "loop1") == ["loop2"], "cycle must terminate"   # stops at seen
     t = tree(J, "a")
     assert t["ancestors"] == ["root"] and sorted(t["descendants"]) == ["a1", "a1x", "a2"]
+    # G7: cascade cancel plan over a status-annotated tree
+    S = {
+        "r": {"parent": None, "status": "running"},
+        "c1": {"parent": "r", "status": "running"},
+        "c2": {"parent": "r", "status": "done"},       # terminal -> skipped
+        "g": {"parent": "c1", "status": "pending"},
+    }
+    pc = plan_subtree_cancel(S, "r")
+    assert [m["id"] for m in pc["members"]] == ["r", "c1", "g"], pc
+    assert pc["members"][0]["prev_status"] == "running"
+    assert [s["id"] for s in pc["skipped"]] == ["c2"] and pc["skipped"][0]["reason"] == "terminal"
     print("job_graph OK")
