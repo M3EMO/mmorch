@@ -408,6 +408,31 @@ async def job_ancestry(request):
     return JSONResponse(job_graph.tree(jobs, request.path_params["job_id"]))
 
 
+async def feedback_handler(request):
+    """Human up/down vote on a job output (graft G8): trace bundle + feed the bandit."""
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    body = await request.json()
+    job_id = body.get("job_id", "")
+    vote = body.get("vote", "")
+    if vote not in ("up", "down"):
+        return JSONResponse({"error": "vote must be up|down"}, status_code=400)
+    from . import feedback_trace
+    from .transcript_store import get as _tget
+    arm, ctx = "", ""
+    with _JOBS_LOCK:
+        j = _JOBS.get(job_id)
+    if j:
+        arm = j.get("engine") or ""
+        ctx = j.get("title") or ""
+    bundle = feedback_trace.record_vote(
+        job_id, vote, arm=arm, comment=body.get("comment", ""), context=ctx,
+        transcript=_tget(job_id), consent=body.get("consent", "local_only"))
+    emit("feedback", "info", job_id=job_id, detail=f"{vote} ({arm or 'no-arm'})")
+    return JSONResponse({"recorded": True, "vote": vote, "arm": arm, "consent": bundle["consent"]})
+
+
 async def gate_handler(request):
     """Staged gate for a job (graft G6). GET = current state; POST {policy} = start a gate."""
     from starlette.responses import JSONResponse
@@ -643,6 +668,7 @@ def build_app():
         Route("/jobs/{job_id}/gate", gate_handler, methods=["GET", "POST"]),
         Route("/jobs/{job_id}/gate/advance", gate_advance, methods=["POST"]),
         Route("/budget/policies", budget_policies, methods=["GET", "POST"]),
+        Route("/feedback", feedback_handler, methods=["POST"]),
         Route("/export", export_handler),
         Route("/import", import_handler, methods=["POST"]),
         Route("/pty/open", pty_open, methods=["POST"]),

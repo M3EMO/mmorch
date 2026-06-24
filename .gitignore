@@ -18,6 +18,8 @@ logs/oracle_dataset.jsonl
 logs/trajectories.jsonl
 logs/skills.jsonl
 logs/nudge.json
+logs/feedback.jsonl
+logs/feedback_traces.jsonl
 projects.json
 hosts.json
 chat.db

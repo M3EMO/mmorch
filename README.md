@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **66 módulos · 39 MCP tools · 399 tests.**
+_Auto-generado por `mmorch.docgen`._ **67 módulos · 39 MCP tools · 399 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -58,6 +58,7 @@ _Auto-generado por `mmorch.docgen`._ **66 módulos · 39 MCP tools · 399 tests.
 | `mmorch/exec_policy.py` | exec_policy — where execution is allowed to run (graft G3 from paperclip). |
 | `mmorch/factory.py` | factory — mmorch como FÁBRICA de modelos (no ES el modelo, lo CONSTRUYE/entrena). |
 | `mmorch/feedback.py` | feedback — el lazo que faltaba (la 'loss' ausente). mmorch genera/verifica/ |
+| `mmorch/feedback_trace.py` | feedback_trace — human vote -> trace bundle + bandit signal (graft G8 from paperclip). |
 | `mmorch/fleet.py` | fleet — control unificado de varios hosts mmorch en el tailnet. Cada maquina corre su |
 | `mmorch/gate_policy.py` | gate_policy — staged review/approval gates per job (graft G6 from paperclip). |
 | `mmorch/goal.py` | goal — ancla anti-goal-drift, modelada sobre el `/goal` nativo de Claude Code. |

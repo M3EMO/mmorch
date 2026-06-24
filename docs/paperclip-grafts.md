@@ -48,9 +48,10 @@ security-first, foundations-before-features. Effort: S/M/L. Source files cited p
   modes + Lotus button. *Src: `issue-tree-control.ts`.*
 
 ## Phase 4 — Learning loop
-- **G8. Feedback trace-bundles** `[M]` — up/down vote on a job/output → bundle {content + context +
-  run logs + redaction + integrity hash}, consent `pending|local_only`; feed mmorch flywheel/learn.
-  *Src: `feedback.ts`.*
+- **G8. Feedback trace-bundles** `[M]` ✅ DONE — `feedback_trace.record_vote` (up/down → bundle
+  {vote, job context, transcript, consent, ts} appended jsonl + feeds the existing bandit via
+  `feedback.record_outcome`); `POST /feedback`. Verified: self-check + HTTP (vote up recorded,
+  bad vote 400, trace written). FOLLOW-UP: redaction + integrity hash + share-export pipeline. *Src: `feedback.ts`.*
 
 ## Phase 5 — Durability & scale (heavy / strategic, later)
 - **G9. Durable wake/heartbeat runs** `[L]` — resumable jobs (vs thread one-shot): zombie-detection,
