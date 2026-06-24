@@ -13,16 +13,17 @@ security-first, foundations-before-features. Effort: S/M/L. Source files cited p
 ---
 
 ## Phase 0 — Foundation (substrate for the rest)
-- **G1. Job ancestry** `[S]` — add `parent_id` (nullable) to mmorch jobs; BFS traversal w/ depth cap.
-  Unlocks traceability + tree-control (G7) + staged gates (G6). *Src: `goals.ts`, `issues.ts`.*
+- **G1. Job ancestry** `[S]` ✅ DONE (`cf9f42e`) — `mmorch/job_graph.py` + jobs carry `parent`,
+  run/* accept `parent_id`, `GET /jobs/{id}/ancestry`. Unlocks G6/G7. *Src: `goals.ts`, `issues.ts`.*
 - **G2. portable/system_dependent tagging** `[S]` — tag mmorch config/secrets/paths as `portable`
   or `system_dependent` (abs paths, local cmds, machine meta = system). Substrate for sync (G4).
   *Src: `company-portability.ts`.*
 
 ## Phase 1 — Security (close the PTY/exec hole)
-- **G3. Exec-policy + sandbox allowlist** `[M]` — policy per job: untrusted/remote → worktree/sandbox,
-  trusted → local; deny local under strict policy. Scopes the writable PTY I shipped.
-  `evaluateExecPolicy(policy, candidate) → {allowed, reason}`. *Src: `execution-allowlist.ts`.*
+- **G3. Exec-policy driver-allowlist** `[M]` ✅ DONE (this commit) — `mmorch/exec_policy.py`
+  `evaluate(policy, driver)`; `MMORCH_EXEC_POLICY=any|sandbox` (default any). `sandbox` denies
+  LOCAL drivers → gates `/pty/open` + `/run/project` (403); `/state.exec_policy` exposes it.
+  FOLLOW-UP: a real `worktree` driver so `sandbox` isolates instead of only denying. *Src: `execution-allowlist.ts`.*
 
 ## Phase 2 — Continuity (the Lotus cross-device payoff)
 - **G4. Portability export/import** `[L]` — versioned manifest (schemaVersion), bundle = projects+config+

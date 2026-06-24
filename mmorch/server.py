@@ -150,6 +150,7 @@ async def state_snapshot(request):
     from .metrics import summary, error_rates, cache_stats
     from .budget import status as bstatus
     from .nodes import sections, conductor
+    from .exec_policy import current_policy
     with _JOBS_LOCK:
         jobs = {k: {"status": v["status"], "kind": v["kind"], "title": v.get("title", ""),
                     "ts": v.get("ts", 0), "host": v.get("host", "local"),
@@ -157,7 +158,7 @@ async def state_snapshot(request):
     return JSONResponse({
         "conductor": conductor(), "sections": sections(), "summary": summary(),
         "error_rates": error_rates(window_n=200), "cache": cache_stats(window_n=200),
-        "budget": bstatus(), "jobs": jobs,
+        "budget": bstatus(), "jobs": jobs, "exec_policy": current_policy(),
         "recent": [e.to_dict() for e in bus().recent(50)],
     })
 
@@ -237,6 +238,10 @@ async def run_project(request):
         return JSONResponse({"error": "mode invalido (plan|edit)"}, status_code=400)
     if engine not in ("mmorch", "claude"):
         return JSONResponse({"error": "engine invalido (mmorch|claude)"}, status_code=400)
+    from .exec_policy import current_policy, evaluate
+    dec = evaluate(current_policy(), "local")          # project jobs execute locally
+    if not dec["allowed"]:
+        return JSONResponse({"error": dec["reason"]}, status_code=403)
     t = threading.Thread(target=_run_project_job,
                          args=(project, task, mode, push, engine, target_file, test_cmd),
                          kwargs={"parent": body.get("parent_id")}, daemon=True)
@@ -395,6 +400,10 @@ async def pty_open(request):
         except Exception:
             cwd = None
     rows = int(body.get("rows", 30)); cols = int(body.get("cols", 100))
+    from .exec_policy import current_policy, evaluate
+    dec = evaluate(current_policy(), "local")          # PTY is a local shell
+    if not dec["allowed"]:
+        return JSONResponse({"error": dec["reason"]}, status_code=403)
     from . import pty_session
     try:
         s = pty_session.open_session(cwd, rows, cols)
