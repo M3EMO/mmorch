@@ -313,9 +313,17 @@ def _close_loop(state: dict) -> None:
 def run_rubric_loop(task: str, criteria: list[dict], *, K: int = 5,
                     gen_model: str | None = None,
                     judge_model: str | None = None,
-                    gen_fn=None, judge_fn=None, arm: str = "") -> dict:
+                    gen_fn=None, judge_fn=None, arm: str = "",
+                    gen_for_round=None) -> dict:
     """Modo API (o cualquier transporte via gen_fn/judge_fn inyectados — asi un test
-    o el modo plan reusan el MISMO gerente). Devuelve el estado final."""
+    o el modo plan reusan el MISMO gerente). Devuelve el estado final.
+
+    lcw (loop-conditioned specialization): `gen_for_round(round:int) -> gen_fn` permite
+    ESCALAR el nodo ejecutor por ronda (round 1-based) en vez de un solo modelo fijo —
+    ej. ronda 1 modelo barato/amplio, ronda 3 modelo fuerte/correctivo. Si se pasa, pisa
+    a gen_fn/gen_model; si no, comportamiento single-node de siempre (fallback). Cada
+    modelo que devuelva DEBE ser cross-family vs el judge (responsabilidad del caller —
+    el gate OneFlow de start_rubric solo valida el par base)."""
     from .providers import call as _call
     from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
     gen_model = gen_model or DEFAULT_GENERATOR
@@ -336,5 +344,10 @@ def run_rubric_loop(task: str, criteria: list[dict], *, K: int = 5,
         act = next_action(state)
         if act["role"] in ("done", "escalate"):
             return state
-        out = gen_fn(act["prompt"]) if act["role"] == "executor" else judge_fn(act["prompt"])
+        if act["role"] == "executor":
+            # round = iteration+1 (submit incrementa DESPUES de generar)
+            g = gen_for_round(state["iteration"] + 1) if gen_for_round else gen_fn
+            out = g(act["prompt"])
+        else:
+            out = judge_fn(act["prompt"])
         submit(state, out)

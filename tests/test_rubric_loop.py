@@ -94,6 +94,26 @@ def test_close_loop_records_outcome_with_context(monkeypatch):
     assert rec["context"].startswith("implementa inc")        # comida pal ShadowPrior
 
 
+def test_lcw_per_round_node_escalation(monkeypatch):
+    """lcw: gen_for_round escala el ejecutor por ronda. round 1 barato (falla) ->
+    round 2 fuerte (verde). Prueba que el plateau dispara la escalada de nodo."""
+    _noop_close(monkeypatch)
+    used = []
+    def cheap(p): used.append("cheap"); return BAD
+    def strong(p): used.append("strong"); return GOOD
+    sched = lambda r: cheap if r == 1 else strong
+    st = RL.run_rubric_loop("implementa inc", CHECKABLE, gen_for_round=sched)
+    assert st["phase"] == "done" and st["iteration"] == 2
+    assert used == ["cheap", "strong"]   # escalo de nodo en la ronda 2
+
+
+def test_lcw_fallback_single_node(monkeypatch):
+    """Sin gen_for_round -> comportamiento single-node de siempre (fallback)."""
+    _noop_close(monkeypatch)
+    st = RL.run_rubric_loop("implementa inc", CHECKABLE, gen_fn=lambda p: GOOD)
+    assert st["phase"] == "done" and st["iteration"] == 1
+
+
 def test_plan_mode_state_machine_roundtrip(monkeypatch):
     """MODO PLAN: el estado viaja como JSON (MCP), el 'plan' ejecuta cada accion."""
     _noop_close(monkeypatch)
