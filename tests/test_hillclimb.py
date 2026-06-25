@@ -131,3 +131,23 @@ def test_no_arm_no_recording(tmp_path):
     hillclimb(seq_proposer(["a"]), scores.__getitem__,
               max_rounds=2, patience=5, outcome_path=fpath)
     assert not fpath.exists()
+
+
+def test_journal_appends_jsonl_per_round(tmp_path):
+    """qrf: journal_path appendea un JSONL por ronda (ledger autoresearch)."""
+    jp = tmp_path / "exp.jsonl"
+    scores = {"a": 0.1, "b": 0.5, "c": 0.9}
+    r = hillclimb(seq_proposer(["a", "b", "c"]), scores.__getitem__,
+                  max_rounds=3, patience=5, journal_path=jp)
+    lines = [json.loads(l) for l in jp.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(lines) == 3                                   # una entrada por ronda
+    assert [x["round"] for x in lines] == [1, 2, 3]
+    assert lines[0]["candidate"] == "'a'" and lines[2]["improved"] is True
+    assert lines[2]["score"] == 0.9
+
+
+def test_journal_off_by_default(tmp_path):
+    """Sin journal_path -> no escribe nada (comportamiento de siempre)."""
+    jp = tmp_path / "none.jsonl"
+    hillclimb(seq_proposer(["a"]), {"a": 1.0}.__getitem__, max_rounds=1)
+    assert not jp.exists()

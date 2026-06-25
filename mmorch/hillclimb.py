@@ -78,6 +78,7 @@ def hillclimb(
     rng: _random.Random | None = None,
     pattern: str = "hillclimb",
     context: str = "",
+    journal_path: Path | None = None,
 ) -> ClimbResult:
     """propose(ctx) -> candidato (None = no hay mas que proponer).
     score(candidato) -> float; si tira excepcion, la ronda cuenta como fallida
@@ -88,6 +89,11 @@ def hillclimb(
 
     Feedback: con `arm` (fijo) o `arms` (eleccion Thompson por ronda) cada ronda
     se registra en outcome_path y, si hay `bandit`, actualiza su posterior.
+
+    journal_path (qrf, extraido de autoresearch — el 'results.tsv', despertás a un
+    log de experimentos): si se setea, cada ronda se APPENDEA como JSONL
+    {round,score,best_score,improved,arm,detail,candidate(repr truncado)}. Append-only,
+    sobrevive a una corrida overnight y es auditable. None = comportamiento de siempre.
     """
     if arm and arms:
         raise ValueError("pasar `arm` (fijo) O `arms` (eleccion por ronda), no ambos")
@@ -132,6 +138,15 @@ def hillclimb(
             and (best_score is None or sign * s > sign * best_score + min_delta)
         )
         history.append(ClimbStep(r, cand, s, improved, round_arm, detail))
+
+        if journal_path is not None:                  # qrf: ledger append-only (autoresearch)
+            import json as _json
+            rec = {"round": r, "score": s, "best_score": best_score,
+                   "improved": improved, "arm": round_arm, "detail": detail,
+                   "candidate": repr(cand)[:300]}
+            Path(journal_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(journal_path, "a", encoding="utf-8") as _f:
+                _f.write(_json.dumps(rec, ensure_ascii=False) + "\n")
 
         if round_arm is not None:
             reward = 1.0 if improved else 0.0
