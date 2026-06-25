@@ -60,15 +60,12 @@ def _jobmeta(kind: str, title: str, **extra) -> dict:
             "ts": time.time(), "host": os.getenv("MMORCH_SERVER_HOST", "local"), **extra}
 
 
-def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model, parent=None):
-    from .rubric_loop import start_rubric, next_action, submit
+def _rubric_drive(jid: str, state: dict, cancel: threading.Event):
+    """The rubric loop body — shared by a fresh run and a resume (the state is the only input).
+    Persists the JSON-serializable state to the job spec each step so a resume continues from it."""
+    from .rubric_loop import next_action, submit
     from .providers import call
-    state = start_rubric(task, criteria, K=K, gen_model=gen_model, judge_model=judge_model)
-    jid = state["id"]
-    cancel = threading.Event()
-    with _JOBS_LOCK:
-        _JOBS[jid] = _jobmeta("rubric", task, cancel=cancel, state=state, parent=parent)
-    emit("job", "running", job_id=jid, detail=task[:120])
+    from . import workflow_store, transcript_store
 
     def fn(model):
         def _c(prompt):
@@ -76,8 +73,7 @@ def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model, p
                         pattern="rubric_loop", node=model).text
         return _c
     gen_fn, judge_fn = fn(state["gen_model"]), fn(state["judge_model"])
-    from . import workflow_store
-    step = 0
+    step = len(workflow_store.checkpoint_history(jid))      # continue numbering on resume
     try:
         while True:
             if cancel.is_set():
@@ -87,11 +83,10 @@ def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model, p
             if act["role"] in ("done", "escalate"):
                 break
             out = gen_fn(act["prompt"]) if act["role"] == "executor" else judge_fn(act["prompt"])
-            from . import transcript_store
             model = state["gen_model"] if act["role"] == "executor" else state["judge_model"]
             transcript_store.append(jid, model, act["role"], out)
             step += 1
-            try:                                   # Phase A: durable block-context checkpoint per step
+            try:                                   # Phase A checkpoint + Phase B durable state
                 bid = workflow_store.put_block(out, kind=act["role"], mime="text/markdown")
                 workflow_store.record_checkpoint(jid, step, act["role"], outputs=[bid],
                                                  state={"model": model})
@@ -101,11 +96,31 @@ def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model, p
                 if jid in _JOBS:
                     _JOBS[jid]["heartbeat"] = time.time()
             submit(state, out)
+            try:                                   # Phase B: persist resumable state after each step
+                workflow_store.record_job_spec(jid, "rubric", {"state": state})
+            except Exception:
+                pass
     except Exception as e:
         emit("job", "error", job_id=jid, detail=str(e)[:200])
     with _JOBS_LOCK:
         if jid in _JOBS:
             _JOBS[jid]["status"] = state.get("phase", "done")
+
+
+def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model, parent=None):
+    from .rubric_loop import start_rubric
+    from . import workflow_store
+    state = start_rubric(task, criteria, K=K, gen_model=gen_model, judge_model=judge_model)
+    jid = state["id"]
+    cancel = threading.Event()
+    with _JOBS_LOCK:
+        _JOBS[jid] = _jobmeta("rubric", task, cancel=cancel, state=state, parent=parent)
+    try:
+        workflow_store.record_job_spec(jid, "rubric", {"state": state})   # resumable from the start
+    except Exception:
+        pass
+    emit("job", "running", job_id=jid, detail=task[:120])
+    _rubric_drive(jid, state, cancel)
 
 
 def _run_project_job(project: str, task: str, mode: str, push: bool = False,
@@ -119,6 +134,14 @@ def _run_project_job(project: str, task: str, mode: str, push: bool = False,
     jid = _u.uuid4().hex[:10]
     with _JOBS_LOCK:
         _JOBS[jid] = _jobmeta("project", task, engine=engine, parent=parent, driver=driver)
+    if engine == "mmorch" and target_file and driver == "local":
+        try:                                   # Phase B: resumable spec (worktree runs are one-shot, no resume)
+            from . import workflow_store
+            workflow_store.record_job_spec(jid, "project", {
+                "project": project, "task": task, "target_file": target_file,
+                "test_cmd": test_cmd, "K": 4, "push": push})
+        except Exception:
+            pass
     try:
         if engine == "mmorch":
             if not target_file:
@@ -614,6 +637,83 @@ async def reap_zombies(request):
                          "gc": gc, "resumable": resumable})
 
 
+def _resume_project(jid: str, data: dict, remaining: int):
+    """Re-dispatch an interrupted project job from its last checkpoint (Phase B)."""
+    from . import workflow_store
+    from .projects import resolve
+    from .project_loop import run_project_task
+    done = len(workflow_store.checkpoint_history(jid))
+    # seed the file from the last checkpoint's output block so the loop continues from that attempt
+    latest = workflow_store.checkpoint_latest(jid)
+    try:
+        if latest and latest.get("outputs"):
+            blk = workflow_store.get_block(latest["outputs"][-1])
+            if blk and blk.get("body"):
+                import os as _os
+                fp = _os.path.join(resolve(data["project"]), data["target_file"])
+                with open(fp, "w", encoding="utf-8") as f:
+                    f.write(blk["body"] + ("\n" if not blk["body"].endswith("\n") else ""))
+    except Exception:
+        pass
+    with _JOBS_LOCK:
+        _JOBS[jid] = _jobmeta("project", data["task"], engine="mmorch", resumed=True)
+    ok = False
+    try:
+        r = run_project_task(data["project"], data["task"], target_file=data["target_file"],
+                             test_cmd=data.get("test_cmd"), K=remaining, push=data.get("push", False),
+                             escalate=False, step_offset=done, job_id=jid)
+        ok = r.ok
+    except Exception as e:
+        emit("job", "error", job_id=jid, detail=str(e)[:160])
+    with _JOBS_LOCK:
+        if jid in _JOBS:
+            _JOBS[jid]["status"] = "done" if ok else "error"
+
+
+async def resume_job(request):
+    """Resume an interrupted job from its last checkpoint (Phase B). Explicit only — no auto-resume."""
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    blocked = _budget_block()
+    if blocked:
+        return blocked
+    jid = request.path_params["job_id"]
+    from . import workflow_store
+    spec = workflow_store.get_job_spec(jid)
+    if not spec:
+        return JSONResponse({"error": "no resumable spec for this job"}, status_code=404)
+    if not workflow_store.checkpoint_latest(jid):
+        return JSONResponse({"error": "no checkpoints to resume from"}, status_code=409)
+    with _JOBS_LOCK:
+        cur = _JOBS.get(jid, {}).get("status")
+    if cur == "running":
+        return JSONResponse({"error": "job is already running"}, status_code=409)
+    kind = spec["kind"]
+    data = spec["spec"]
+    if kind == "rubric":
+        state = data["state"]
+        if state.get("phase") == "done":
+            return JSONResponse({"error": "rubric already complete"}, status_code=409)
+        cancel = threading.Event()
+        with _JOBS_LOCK:
+            _JOBS[jid] = _jobmeta("rubric", state.get("task", ""), cancel=cancel, state=state, resumed=True)
+        emit("job", "running", job_id=jid, detail="resumed from checkpoint")
+        threading.Thread(target=_rubric_drive, args=(jid, state, cancel), daemon=True).start()
+        return JSONResponse({"resumed": jid, "kind": "rubric", "phase": state.get("phase"),
+                             "from_step": len(workflow_store.checkpoint_history(jid))})
+    if kind == "project":
+        done = len(workflow_store.checkpoint_history(jid))
+        remaining = max(1, int(data.get("K", 4)) - done)
+        with _JOBS_LOCK:                        # set running synchronously -> no stale-status window
+            _JOBS[jid] = _jobmeta("project", data.get("task", ""), engine="mmorch", resumed=True)
+        emit("job", "running", job_id=jid, detail=f"resumed from checkpoint (K left={remaining})")
+        threading.Thread(target=_resume_project, args=(jid, data, remaining), daemon=True).start()
+        return JSONResponse({"resumed": jid, "kind": "project", "remaining_K": remaining,
+                             "from_step": done})
+    return JSONResponse({"error": f"unknown job kind '{kind}'"}, status_code=400)
+
+
 async def job_checkpoints(request):
     """Durable per-step trail of a job (Phase A): the block-referencing checkpoint chain."""
     from starlette.responses import JSONResponse
@@ -820,6 +920,7 @@ def build_app():
         Route("/jobs/{job_id}/cancel-tree", cancel_tree, methods=["POST"]),
         Route("/jobs/reap", reap_zombies, methods=["POST"]),
         Route("/jobs/{job_id}/checkpoints", job_checkpoints),
+        Route("/jobs/{job_id}/resume", resume_job, methods=["POST"]),
         Route("/blocks/{block_id}", block_get),
         Route("/plugins", plugins_list),
         Route("/plugins/{name}/invoke", plugin_invoke, methods=["POST"]),

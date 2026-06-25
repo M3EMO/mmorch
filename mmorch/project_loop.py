@@ -109,7 +109,7 @@ def run_project_task(project: str, task: str, *, target_file: str, test_cmd: str
                      K: int = 4, escalate: bool = True, push: bool = True,
                      gen_model: str | None = None, lazy: bool | None = None,
                      use_codegraph: bool | None = None, work_dir: str | None = None,
-                     job_id: str = "") -> ProjectResult:
+                     step_offset: int = 0, job_id: str = "") -> ProjectResult:
     """mmorch-primario: loop DeepSeek genera el archivo -> escribe -> corre tests -> repite
     hasta verde o K. Verdad = ejecucion (test_cmd). Si K se agota y escalate: claude -p (cupo).
     push: si verde, commit+push a mmorch/auto. test_cmd None -> sin verificacion (no recomendado).
@@ -176,12 +176,12 @@ def run_project_task(project: str, task: str, *, target_file: str, test_cmd: str
         if test_cmd is None:
             emit("step", "gate", job_id=job_id, node="tests", detail="sin test_cmd: NO verificado")
             history.append({"iter": i, "verified": False})
-            _checkpoint(job_id, i, new, None)
+            _checkpoint(job_id, step_offset + i, new, None)
             break
         ok, out = _run_cmd(cwd, test_cmd)
         feedback = "" if ok else out
         history.append({"iter": i, "tests_pass": ok})
-        _checkpoint(job_id, i, new, {"name": "tests", "passed": ok})
+        _checkpoint(job_id, step_offset + i, new, {"name": "tests", "passed": ok})
         emit("step", "done" if ok else "error", job_id=job_id, node="tests",
              detail="verde" if ok else out[-120:])
         if ok:
