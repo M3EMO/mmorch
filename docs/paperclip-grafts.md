@@ -54,8 +54,13 @@ security-first, foundations-before-features. Effort: S/M/L. Source files cited p
   bad vote 400, trace written). FOLLOW-UP: redaction + integrity hash + share-export pipeline. *Src: `feedback.ts`.*
 
 ## Phase 5 — Durability & scale (heavy / strategic, later)
-- **G9. Durable wake/heartbeat runs** `[L]` — resumable jobs (vs thread one-shot): zombie-detection,
-  session-reset-on-wake, follow-up queue. Pairs with scheduled-tasks. *Src: `heartbeat.ts`.*
+- **G9. Durable wake/heartbeat runs** `[L]` ✅ DONE (lazy core) — `durable_runs.py`: `touch(job, now)`
+  heartbeat + pure `detect_zombies(jobs, now, ttl)` (non-terminal & stale, excludes `gate`); rubric
+  loop bumps heartbeat per step; `POST /jobs/reap` (body `{ttl?, dry?}`) marks zombies error + sets
+  cancel event, idempotent. Trigger = scheduled-tasks hitting the endpoint (no daemon). `MMORCH_ZOMBIE_TTL`
+  (default 1800s). Verified: self-check + HTTP (auth 401, dry no-mutate, only stale reaped, gated/fresh safe).
+  FOLLOW-UP (heavy half, deferred): persist `_JOBS` so jobs survive a process restart + follow-up queue
+  + session-reset-on-wake. *Src: `heartbeat.ts`.*
 - **G10. Authorization PDP** `[M]` — `decide(actor, action, resource, scope) → {allowed, reason, grant}`;
   principals board/agent/none; only when mmorch goes multi-user/multi-agent. *Src: `authorization.ts`.*
 - **G11. Plugin manifest + capability-gated workers** `[L]` — manifest V1 (tools/jobs/events/webhooks/

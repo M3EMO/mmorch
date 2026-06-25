@@ -88,6 +88,9 @@ def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model, p
             from . import transcript_store
             model = state["gen_model"] if act["role"] == "executor" else state["judge_model"]
             transcript_store.append(jid, model, act["role"], out)
+            with _JOBS_LOCK:                       # G9: progress -> heartbeat, don't reap active jobs
+                if jid in _JOBS:
+                    _JOBS[jid]["heartbeat"] = time.time()
             submit(state, out)
     except Exception as e:
         emit("job", "error", job_id=jid, detail=str(e)[:200])
@@ -529,6 +532,47 @@ async def cancel_tree(request):
     return JSONResponse(plan)
 
 
+async def reap_zombies(request):
+    """Detect + fail stuck jobs (graft G9): non-terminal rows whose heartbeat went stale.
+    Trigger this from scheduled-tasks. Body: {ttl?: seconds, dry?: bool}."""
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    from . import durable_runs
+    ttl = body.get("ttl")
+    dry = bool(body.get("dry"))
+    now = time.time()
+    with _JOBS_LOCK:
+        snap = {k: {"status": v.get("status"), "ts": v.get("ts"),
+                    "heartbeat": v.get("heartbeat")} for k, v in _JOBS.items()}
+    zombies = durable_runs.detect_zombies(snap, now=now, ttl=ttl)
+    reaped = []
+    if not dry:
+        with _JOBS_LOCK:
+            for z in zombies:
+                j = _JOBS.get(z["id"])
+                if not j or j.get("status") in durable_runs._NOT_ZOMBIE:
+                    continue   # finished or vanished between snapshot and now
+                c = j.get("cancel")
+                if c:
+                    try:
+                        c.set()
+                    except Exception:
+                        pass
+                j["status"] = "error"
+                j["zombie"] = True
+                reaped.append(z)
+        for z in reaped:
+            emit("job", "error", job_id=z["id"],
+                 detail=f"zombie reaped: no heartbeat for {z['age']}s")
+    return JSONResponse({"now": now, "ttl": durable_runs.default_ttl() if ttl is None else ttl,
+                         "dry": dry, "zombies": zombies, "reaped": [r["id"] for r in reaped]})
+
+
 async def export_handler(request):
     """Portable state bundle (graft G4): values tagged portable|system_dependent|secret."""
     from starlette.responses import JSONResponse
@@ -665,6 +709,7 @@ def build_app():
         Route("/transcript/{job_id}", transcript_handler),
         Route("/jobs/{job_id}/ancestry", job_ancestry),
         Route("/jobs/{job_id}/cancel-tree", cancel_tree, methods=["POST"]),
+        Route("/jobs/reap", reap_zombies, methods=["POST"]),
         Route("/jobs/{job_id}/gate", gate_handler, methods=["GET", "POST"]),
         Route("/jobs/{job_id}/gate/advance", gate_advance, methods=["POST"]),
         Route("/budget/policies", budget_policies, methods=["GET", "POST"]),
