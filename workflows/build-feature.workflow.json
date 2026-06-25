@@ -1,0 +1,9 @@
+{
+  "name": "build-feature",
+  "description": "architect plans -> coder implements (test-gated) -> reviewer approves (cross-family verdict, loops back to coder on REQUEST_CHANGES)",
+  "steps": [
+    {"role": "architect", "model": "deepseek-chat", "produces": "plan"},
+    {"role": "coder", "model": "deepseek-chat", "consumes": ["plan"], "produces": "code", "gate": "tests", "test_cmd": "pytest -q"},
+    {"role": "reviewer", "model": "gemini-3.1-flash-lite", "consumes": ["code"], "produces": "review", "gate": "verdict", "loop_back": "coder", "max": 3}
+  ]
+}
