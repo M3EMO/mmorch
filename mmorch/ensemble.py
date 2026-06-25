@@ -79,3 +79,76 @@ def ensemble_verify(
         cost_usd=round(sum(v.cost_usd for v in verdicts), 6), refutations=refs,
         unanimous=unanimous, escalate=not unanimous, ensemble_degraded=degraded,
     )
+
+
+# --------------------------------------------------------------------------- #
+# 16u: ensemble multi-vista (Thousand Brains) — decorrelacion por LENTE         #
+# --------------------------------------------------------------------------- #
+@dataclass
+class MultiViewVerdict:
+    passed: bool | None          # True/False; None si las vistas discrepan (split->escalate)
+    n_pass: int
+    n_total: int
+    escalate: bool               # vistas en desacuerdo = ambiguedad genuina -> Opus
+    low_decorrelation: bool      # <2 familias o <2 lentes -> consenso DEBIL (acuerdo != confirmacion)
+    per_lens: list[dict] = field(default_factory=list)  # [{lens, verifier, family, passed, confidence}]
+    cost_usd: float = 0.0
+    refutations: list[str] = field(default_factory=list)
+
+
+def multiview_verify(
+    artifact: str,
+    *,
+    lenses: list[dict],
+    gen_model: str = DEFAULT_GENERATOR,
+    verifier_models: list[str] | None = None,
+    phase: str = "",
+) -> MultiViewVerdict:
+    """16u (Thousand Brains): decorrelacion por LENTE ademas de familia + consenso por
+    consistencia mutua. `lenses` = [{"name": str, "rubric": str}, ...]: cada lente es un
+    encuadre distinto del mismo artefacto (el 'sensor' de TBT — rol/angulo/sub-aspecto).
+    Los verificadores ROTAN de familia entre lentes -> DOBLE eje de decorrelacion
+    (familia x vista) desde pocos modelos. Cada verificador debe ser cross-family vs gen.
+
+    Consenso = consistencia mutua (NO mayoria sobre un solo artefacto): todas las lentes
+    pasan -> passed=True; todas fallan -> passed=False; split -> passed=None, escalate=True
+    (las vistas discrepan = ambiguedad genuina, mandar a Opus). N CHICO, fleet barato.
+
+    GUARDRAIL anti-consenso-correlacionado: low_decorrelation=True si se usaron <2 familias
+    de verificador O <2 lentes. Ahi el acuerdo NO confirma (invariante anti-sicofancia:
+    'acuerdo no es confirmacion') — el consenso entre vistas correlacionadas amplifica el
+    error confiado (el 'rico-se-hace-mas-rico' de TBT sobre un sesgo compartido)."""
+    if not lenses:
+        raise ValueError("multiview_verify: se requiere al menos una lente")
+    verifier_models = verifier_models or ["gemini-3.1-flash-lite", "glm-4.5-air"]
+    gf = family_of(gen_model)
+    for vm in verifier_models:
+        if family_of(vm) == gf:
+            raise ValueError(
+                f"OneFlow: verifier {vm} comparte familia ({gf}) con gen {gen_model}.")
+    per_lens, fams_used = [], set()
+    verdicts = []
+    for i, lens in enumerate(lenses):
+        vm = verifier_models[i % len(verifier_models)]   # rota familia entre lentes
+        v = adversarial_verify(artifact, rubric=lens["rubric"], gen_model=gen_model,
+                               verifier_model=vm, phase=phase)
+        verdicts.append(v)
+        fams_used.add(family_of(vm))
+        per_lens.append({"lens": lens.get("name", f"lens{i}"), "verifier": vm,
+                         "family": family_of(vm), "passed": v.passed,
+                         "confidence": v.confidence})
+    n_pass = sum(1 for v in verdicts if v.passed)
+    n_total = len(verdicts)
+    if n_pass == n_total:
+        passed, escalate = True, False
+    elif n_pass == 0:
+        passed, escalate = False, False
+    else:                                   # vistas discrepan -> ambiguedad -> Opus
+        passed, escalate = None, True
+    low_decorr = len(fams_used) < 2 or len(lenses) < 2
+    refs = [r for v in verdicts if not v.passed for r in v.refutations]
+    return MultiViewVerdict(
+        passed=passed, n_pass=n_pass, n_total=n_total, escalate=escalate,
+        low_decorrelation=low_decorr, per_lens=per_lens,
+        cost_usd=round(sum(v.cost_usd for v in verdicts), 6), refutations=refs,
+    )
