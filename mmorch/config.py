@@ -108,6 +108,23 @@ REGISTRY: dict[str, ModelSpec] = {
         price_out=3.00,
         role="UI / bulk / synthesis / cheap nodes",
     ),
+    # j76: GLM (Zhipu/THUDM) = 3ra familia ACTIVA -> rompe el techo de decorrelacion
+    # cross-family de 2 (deepseek+google) a 3. OpenAI-compatible, cero cupo. family
+    # 'zhipu' es distinta de deepseek/google/moonshot -> family_of() la trata como
+    # cross-family valida automaticamente (adversarial_verify/ensemble la aceptan, y
+    # rechazan zhipu<->zhipu). Inactivo hasta que exista ZHIPU_API_KEY (espejo de kimi).
+    # Precios jun-2026 ref, VOLATILES — reverificar antes de fijar budgets.
+    "glm-4.5-air": ModelSpec(
+        key="glm-4.5-air",
+        family="zhipu",
+        provider="zhipu",
+        model_id="glm-4.5-air",
+        base_url="https://api.z.ai/api/paas/v4",
+        api_key_env="ZHIPU_API_KEY",
+        price_in=0.20,
+        price_out=1.10,
+        role="3ra familia: verificador/juez cross-family + nodo barato",
+    ),
 }
 
 # Default node assignments for the MVP slice.
