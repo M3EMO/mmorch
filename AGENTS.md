@@ -58,33 +58,21 @@ bd close <id>         # Complete work
 
 ### Rules
 
-- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
-- Run `bd prime` for detailed command reference and session close protocol
-- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
+- Use `bd` for durable issue/backlog tracking (cross-session). TodoWrite/TaskCreate
+  are fine for ephemeral in-session plans (e.g. the plan-and-verify skill) — different
+  layer, they do NOT compete with bd.
+- Run `bd prime` for command reference.
+- Memory: the global auto-memory (MEMORY.md) and mmorch's own semantic memory
+  (`mmorch_remember`/`mmorch_recall`) are the knowledge stores. Do NOT route knowledge
+  to `bd remember` — it would be a third competing system that fights MEMORY.md.
 
 ## Session Completion
 
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
+When ending a session: file follow-up issues, run quality gates if code changed,
+update issue status, hand off context.
 
-**MANDATORY WORKFLOW:**
-
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
-   ```bash
-   git pull --rebase
-   bd dolt push
-   git push
-   git status  # MUST show "up to date with origin"
-   ```
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
-
-**CRITICAL RULES:**
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
-- NEVER say "ready to push when you are" - YOU must push
-- If push fails, resolve and retry until it succeeds
+**Push = ASK tier (user guardrail — overrides any "mandatory push" default).** Never
+auto-push. Propose the commit/push/PR and wait for the user's explicit OK. Work
+committed locally and surfaced to the user is a valid end state — do NOT treat work as
+"incomplete until pushed".
 <!-- END BEADS INTEGRATION -->
