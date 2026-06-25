@@ -101,15 +101,17 @@ Checkpoint = {
 ```
 - `record(job_id, step, role, *, inputs, outputs, state, gate) -> checkpoint`
 - `history(job_id) -> [Checkpoint...]` ordered; `latest(job_id) -> Checkpoint` (resume point).
-- Durable (SQLite), env-overridable path (`MMORCH_CHECKPOINT_DB`), gitignored runtime state.
+- Durable (SQLite `workflow.db`, env `MMORCH_WORKFLOW_DB`), gitignored runtime state. Tables: `blocks`,
+  `checkpoints`, `block_scope` (see Decisions #1).
 - **Wire**: `rubric_loop` + `project_loop` call `checkpoint_store.record(...)` per iteration (transcript_store
   still gets the human-readable text; checkpoint adds the resumable + deduped block state).
 - **Standalone value even without B/C**: durable tracking; the G9 reaper can show a zombie's **last checkpoint**
   (where it died); foundation for everything else. Effort: **S/M**.
 
 ## Phase B — resume-from-checkpoint (the G9 heavy-half, now tractable)
-- On start / on reap: a job with checkpoints but no terminal status → **re-dispatch from `latest`**: reload its
-  output blocks as the new seed state, continue the loop. No LLM replay — resume from last completed step.
+- Explicit `POST /jobs/{id}/resume` (Decisions #4): a job with checkpoints but no terminal status →
+  **re-dispatch from `latest`**: reload its output blocks as the new seed state, continue the loop. No LLM
+  replay — resume from last completed step. No auto-resume on boot; the reaper just flags resumable jobs.
 - This is what makes "durable wake-runs" real without token-level checkpointing. Effort: **M**.
 
 ## Phase C — role-chain cooperative workflow (the ChatDev-like dynamics)
@@ -136,15 +138,26 @@ workflow = [
 - **Durable block-context checkpoints + resume** — ChatDev has none.
 - Routing fit (user CLAUDE.md): a recurrent/understood multi-step flow → mmorch, not the native `Workflow` tool (cupo).
 
-## Open decisions
-- **RESOLVED — block scoping**: storage global (content-addressed dedup) / visibility per-task (checkpoint
-  chain) / worker = view (consumes subset) / opt-in promotion to project|global. See §Scoping.
-
-1. Block store backend: extend `chat.db` with `blocks`/`checkpoints` tables, or a separate `workflow.db`? (lean: separate.)
-2. Workflow spec authoring: inline JSON via API, or saved `*.workflow.json` files (policy-as-data, like budget_policy)?
-3. Role personas: a `RoleConfig` data file (ChatDev-style) vs inline per workflow step? (lean: a small role registry, reusable.)
-4. Resume trigger: on server boot, on reap, or explicit `POST /jobs/{id}/resume`? (lean: explicit + reap-suggested.)
-5. Block GC: when are blocks reclaimable (no checkpoint references them)? (defer; cheap to keep.)
+## Decisions (all RESOLVED)
+- **Block scoping** — storage global (content-addressed dedup) / visibility per-task (checkpoint chain) /
+  worker = view (consumes subset) / opt-in promotion to project|global. See §Scoping.
+- **#1 Store backend** — a SEPARATE `workflow.db` (env `MMORCH_WORKFLOW_DB`, gitignored, `chat_store` pattern),
+  tables `blocks` · `checkpoints` · `block_scope`. chat.db is user-facing conversation; workflow internals have a
+  different lifecycle/GC → don't couple.
+- **#2 Spec authoring** — BOTH, files canonical. Named workflows = `workflows/<name>.workflow.json` (a dir, like
+  `plugins/`) + a `workflow_spec.py` loader mirroring `plugins.discover` (load + validate `_REQUIRED`). Run API
+  accepts `{workflow_name}` (saved) OR `{workflow:{...}}` (ad-hoc, for Lotus). Policy-as-data; no new pattern.
+- **#3 Role personas** — a small registry: `roles/<name>.md` (plain text, hand-editable like `never-edit.txt`),
+  referenced by `role:"coder"` in a step; a step may override with inline `role_prompt`. The role file = persona
+  ONLY; the **step** picks `family`/`model` (same role can run on different families per workflow).
+- **#4 Resume trigger** — explicit `POST /jobs/{id}/resume` ONLY. No auto-resume on boot (mass re-dispatch +
+  cost storm + resurrects jobs that should die; cero-cupo = no spend without intent). The reaper FLAGS resumable
+  jobs (has checkpoints + non-terminal) so Lotus shows a "resume" button next to reaped ones.
+- **#5 Block GC** — automatic but CONSERVATIVE, on the reaper sweep (no new daemon). Reclaim a block iff
+  `refcount==0` (not in any `checkpoints.inputs/outputs`) AND not in `block_scope` (not promoted) AND
+  `age > MMORCH_BLOCK_GC_TTL` (default 24h — the TTL avoids the put→checkpoint race; steps finish in seconds).
+  `gc(dry_run=True)` for inspection; kill switch `MMORCH_BLOCK_GC=off`. Self-heals: a wrongly-collected block is
+  recreated by the next content-identical `put()` (resume-in-flight is protected by the TTL).
 
 ## Non-goals (don't build)
 - Arbitrary node/edge graph + Tarjan cycle detection (ChatDev's generic VM). Role-chain + loop-back covers the real cases.
