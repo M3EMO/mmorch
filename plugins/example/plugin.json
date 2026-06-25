@@ -1,0 +1,11 @@
+{
+  "name": "example",
+  "version": "1",
+  "entry": "main.py",
+  "description": "Authoring template (graft G11). One no-cap contribution + one host-RPC one.",
+  "capabilities": ["llm", "log"],
+  "contributes": [
+    {"kind": "pattern", "name": "echo", "desc": "no caps; pure transform of args"},
+    {"kind": "pattern", "name": "summarize", "desc": "needs caps llm+log; host calls a model"}
+  ]
+}
