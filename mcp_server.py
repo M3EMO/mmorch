@@ -34,6 +34,7 @@ from mmorch.memory import (remember as _remember, stats as _mem_stats,
                            resolve_review as _resolve_review, close_loop as _close_loop,
                            open_loops as _open_loops, forget_preview as _forget_preview)
 from mmorch.curiosity import find_tension as _find_tension
+from mmorch.autoresearch import run_autoresearch as _autoresearch
 from mmorch.classify import classify as _classify, cynefin_classify as _cynefin
 from mmorch.spec import build_spec as _build_spec, interview as _spec_interview
 from mmorch.sessions import ingest_session as _ingest_session
@@ -181,6 +182,37 @@ def mmorch_cascade(
         "answer": r.answer, "confidence": r.confidence,
         "resolved_step": r.resolved_step, "escalate": r.escalate,
         "models_used": r.models_used, "cost_usd": r.cost_usd}, ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_autoresearch(
+    task: str,
+    target_file: str,
+    scorer_cmd: str,
+    cwd: str = ".",
+    models: list[str] | None = None,
+    maximize: bool = False,
+    max_rounds: int = 20,
+    patience: int = 5,
+    metric_regex: str = r"score[:=]\s*([-\d.]+)",
+    journal_path: str | None = None,
+    resume: bool = False,
+) -> str:
+    """autoresearch (r4a): hillclimb como JOB — optimiza una metrica escalar editando
+    `target_file` con un modelo, contra un scorer DETERMINISTA frozen (`scorer_cmd`, que
+    debe imprimir la metrica matcheable por `metric_regex`). keep/discard por best, journal
+    append-only (resume=True continua desde journal_path). anti-reward-hacking: la metrica
+    sale de la ejecucion, NUNCA de un LLM. Gasta API (genera) — cero cupo. NUNCA pushea.
+    Returns JSON {best_score, baseline, rounds, stopped, improved}.
+    """
+    r = _autoresearch(task, target_file, scorer_cmd, cwd=cwd, models=models,
+                      maximize=maximize, max_rounds=max_rounds, patience=patience,
+                      metric_regex=metric_regex, journal_path=journal_path, resume=resume)
+    return json.dumps({
+        "best_score": r.best_score, "baseline": r.baseline, "rounds": r.rounds,
+        "stopped": r.stopped,
+        "improved": (r.baseline is not None and r.best_score is not None
+                     and r.best_score != r.baseline)}, ensure_ascii=False)
 
 
 @mcp.tool()
