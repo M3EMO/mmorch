@@ -60,16 +60,22 @@ class Worktree:
         _git(self.repo, "worktree", "prune")
 
 
-def open_worktree(repo: str, *, prefix: str = "mmorch/wt", base: str = "HEAD") -> Worktree:
-    """Add a fresh worktree of `repo` at a temp path on a new unique branch off `base`."""
+def open_worktree(repo: str, *, prefix: str = "mmorch/wt", base: str = "HEAD",
+                  branch: str | None = None) -> Worktree:
+    """Add a worktree of `repo` at a fresh temp path. `branch=None` -> a new unique branch off `base`;
+    `branch=<name>` -> check out that EXISTING branch (resume continuity — a branch lives in at most one
+    worktree, so the prior one must be closed first)."""
     if not is_git_repo(repo):
         raise RuntimeError(f"not a git repo: {repo}")
     if not _has_head(repo):
         raise RuntimeError(f"repo has no commits (no HEAD): {repo}")
     tag = uuid.uuid4().hex[:8]
-    branch = f"{prefix}-{tag}"
     path = os.path.join(tempfile.gettempdir(), f"mmorch-wt-{tag}")
-    rc, out = _git(repo, "worktree", "add", "-b", branch, path, base)
+    if branch:
+        rc, out = _git(repo, "worktree", "add", path, branch)        # reuse existing branch
+    else:
+        branch = f"{prefix}-{tag}"
+        rc, out = _git(repo, "worktree", "add", "-b", branch, path, base)
     if rc != 0:
         raise RuntimeError(f"worktree add failed: {out}")
     return Worktree(repo, path, branch)
@@ -102,4 +108,15 @@ if __name__ == "__main__":
     assert _git(d, "status", "--porcelain")[1] == "", "main tree clean"
     # the kept branch actually contains the change
     assert "b.txt" in _git(d, "show", "--stat", branch)[1], "branch holds the work"
+
+    # branch REUSE (resume continuity): reopen the kept branch, add more, it accumulates
+    wt2 = open_worktree(d, branch=branch)
+    assert wt2.branch == branch and os.path.exists(os.path.join(wt2.path, "b.txt")), "reopened branch has prior work"
+    with open(os.path.join(wt2.path, "c.txt"), "w") as f:
+        f.write("more\n")
+    cap2 = wt2.capture("more")
+    assert cap2["changed"]
+    wt2.close()
+    assert "c.txt" in _git(d, "show", "--stat", branch)[1], "reused branch accumulated new work"
+    assert not os.path.exists(os.path.join(d, "c.txt")), "main tree still untouched"
     print("worktree_driver OK")

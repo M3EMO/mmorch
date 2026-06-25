@@ -123,24 +123,37 @@ def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model, p
     _rubric_drive(jid, state, cancel)
 
 
-def _workflow_drive(jid: str, state: dict, task: str, work_dir: str, cancel: threading.Event):
-    """Drive the cooperative role-chain (Phase C). Shared by a fresh run and a resume — `state` is
-    the only input (JSON-serializable -> Phase B resume continues from it). Each step: run the role's
-    model -> put_block (derives_from the consumed blocks) -> checkpoint; then the gate (tests = run
-    test_cmd; verdict = parse the reviewer's APPROVE/REQUEST_CHANGES). Loops back / escalates per spec."""
+def _workflow_drive(jid: str, state: dict, meta: dict, cancel: threading.Event,
+                    pause: threading.Event | None = None) -> str:
+    """Drive the cooperative role-chain (Phase C). `meta` = {task, work_dir, apply_project?, branch?, name?}
+    persisted (with state) each step so a resume continues from it. Each step: run the role's model ->
+    put_block (derives_from the consumed blocks) -> checkpoint; then the gate (tests = run test_cmd;
+    verdict = parse the reviewer's APPROVE/REQUEST_CHANGES). Loops back / escalates per spec. A pause
+    stops cleanly at the next step boundary (state already persisted) -> resumable. Returns the terminal
+    job status: done | escalate | error | paused."""
     import os as _os
     from . import workflow_store, transcript_store
     from .workflow_engine import next_workflow_action, submit_workflow, build_prompt
     from .project_loop import _extract, _run_cmd
     from .providers import call
     from .config import DEFAULT_GENERATOR
+    task, work_dir = meta["task"], meta["work_dir"]
     _os.makedirs(work_dir, exist_ok=True)
     step = len(workflow_store.checkpoint_history(jid))
     try:
         while True:
             if cancel.is_set():
                 emit("job", "error", job_id=jid, detail="cancelado por el usuario")
-                return
+                with _JOBS_LOCK:
+                    if jid in _JOBS:
+                        _JOBS[jid]["status"] = "error"
+                return "error"
+            if pause is not None and pause.is_set():       # stop at this step boundary, stay resumable
+                emit("job", "gate", job_id=jid, detail="paused at checkpoint (resume to continue)")
+                with _JOBS_LOCK:
+                    if jid in _JOBS:
+                        _JOBS[jid]["status"] = "paused"
+                return "paused"
             act = next_workflow_action(state)
             if act["kind"] in ("done", "escalate"):
                 break
@@ -184,8 +197,7 @@ def _workflow_drive(jid: str, state: dict, task: str, work_dir: str, cancel: thr
                 if jid in _JOBS:
                     _JOBS[jid]["heartbeat"] = time.time()
             try:                                    # Phase B: persist resumable state each step
-                workflow_store.record_job_spec(jid, "workflow",
-                                               {"state": state, "task": task, "work_dir": work_dir})
+                workflow_store.record_job_spec(jid, "workflow", {**meta, "state": state})
             except Exception:
                 pass
     except Exception as e:
@@ -193,30 +205,73 @@ def _workflow_drive(jid: str, state: dict, task: str, work_dir: str, cancel: thr
         with _JOBS_LOCK:
             if jid in _JOBS:
                 _JOBS[jid]["status"] = "error"
-        return
+        return "error"
     final = state.get("status", "done")
-    emit("job", "done" if final == "done" else "gate", job_id=jid,
-         detail=f"workflow {final}")
+    emit("job", "done" if final == "done" else "gate", job_id=jid, detail=f"workflow {final}")
     with _JOBS_LOCK:
         if jid in _JOBS:
             _JOBS[jid]["status"] = "done" if final == "done" else "escalate"
+    return final
 
 
-def _run_workflow_job(jid: str, spec: dict, task: str, parent=None):
+def _workflow_run(jid: str, state: dict, meta: dict, *, resumed: bool = False, parent=None):
+    """Single entry for a workflow run AND a resume: manage the work dir (a git worktree of the repo
+    when meta.apply_project is set, else a temp sandbox), register the job, drive, and finalize the
+    worktree (commit progress -> review branch, keep it) on any exit (done/escalate/paused/error).
+    Resume reopens the SAME review branch (continuity)."""
     import tempfile as _tf
     from . import workflow_store
-    work_dir = os.path.join(_tf.gettempdir(), f"mmorch-wf-{jid}")
-    from .workflow_engine import start_workflow
-    state = start_workflow(spec["steps"], task)
-    cancel = threading.Event()
+    wt = None
+    if meta.get("apply_project"):
+        from .worktree_driver import open_worktree
+        from .projects import resolve
+        try:
+            wt = open_worktree(resolve(meta["apply_project"]), branch=meta.get("branch"))
+            meta["work_dir"], meta["branch"] = wt.path, wt.branch
+        except Exception as e:
+            emit("job", "error", job_id=jid, detail=f"worktree open failed: {str(e)[:140]}")
+            with _JOBS_LOCK:
+                _JOBS[jid] = _jobmeta("workflow", meta.get("task", ""), parent=parent)
+                _JOBS[jid]["status"] = "error"
+            return
+    else:
+        meta.setdefault("work_dir", os.path.join(_tf.gettempdir(), f"mmorch-wf-{jid}"))
+    cancel, pause = threading.Event(), threading.Event()
     with _JOBS_LOCK:
-        _JOBS[jid] = _jobmeta("workflow", spec.get("name", task), cancel=cancel, parent=parent)
+        _JOBS[jid] = _jobmeta("workflow", meta.get("name") or meta.get("task", ""),
+                              cancel=cancel, pause=pause, parent=parent, resumed=resumed)
+        if meta.get("branch"):
+            _JOBS[jid]["review_branch"] = meta["branch"]
     try:
-        workflow_store.record_job_spec(jid, "workflow", {"state": state, "task": task, "work_dir": work_dir})
+        workflow_store.record_job_spec(jid, "workflow", {**meta, "state": state})
     except Exception:
         pass
-    emit("job", "running", job_id=jid, detail=f"workflow {spec.get('name','')}: {task[:80]}")
-    _workflow_drive(jid, state, task, work_dir, cancel)
+    emit("job", "running", job_id=jid, detail=f"workflow {meta.get('name','')}: {meta.get('task','')[:80]}")
+    _workflow_drive(jid, state, meta, cancel, pause)
+    if wt:                                         # finalize: commit progress to the review branch, free it
+        try:
+            cap = wt.capture(f"mmorch workflow {meta.get('name','')}: {meta.get('task','')[:60]}")
+            with _JOBS_LOCK:
+                if jid in _JOBS:
+                    _JOBS[jid]["review_branch"] = cap["branch"]
+                    _JOBS[jid]["diffstat"] = cap.get("diffstat", "")
+            sp = workflow_store.get_job_spec(jid)   # persist branch so a resume reopens it
+            if sp:
+                m = sp["spec"]; m["branch"] = cap["branch"]
+                workflow_store.record_job_spec(jid, "workflow", m)
+        except Exception:
+            pass
+        finally:
+            wt.close(keep_branch=True)
+
+
+def _run_workflow_job(jid: str, spec: dict, task: str, project=None, apply=False, parent=None):
+    from .workflow_engine import start_workflow
+    state = start_workflow(spec["steps"], task)
+    meta = {"task": task, "name": spec.get("name", "")}
+    if apply and project:
+        meta["apply_project"] = project
+    _workflow_run(jid, state, meta, parent=parent)
 
 
 def _run_project_job(project: str, task: str, mode: str, push: bool = False,
@@ -448,11 +503,14 @@ async def run_workflow(request):
         return JSONResponse({"error": f"invalid workflow: {str(e)[:200]}"}, status_code=400)
     import uuid as _u
     jid = _u.uuid4().hex[:10]
+    project = body.get("project")
+    apply = bool(body.get("apply"))               # apply=true + project -> run in a git worktree of the repo
     t = threading.Thread(target=_run_workflow_job, args=(jid, spec, task),
-                         kwargs={"parent": body.get("parent_id")}, daemon=True)
+                         kwargs={"project": project, "apply": apply, "parent": body.get("parent_id")},
+                         daemon=True)
     t.start()
     return JSONResponse({"started": "workflow", "job_id": jid, "name": spec["name"],
-                         "steps": len(spec["steps"])})
+                         "steps": len(spec["steps"]), "apply": apply and bool(project)})
 
 
 async def sync_pull(request):
@@ -833,13 +891,10 @@ async def resume_job(request):
         state = data["state"]
         if state.get("status") == "done":
             return JSONResponse({"error": "workflow already complete"}, status_code=409)
-        cancel = threading.Event()
-        with _JOBS_LOCK:
-            _JOBS[jid] = _jobmeta("workflow", data.get("task", ""), cancel=cancel, resumed=True)
-        emit("job", "running", job_id=jid, detail="resumed from checkpoint")
-        threading.Thread(target=_workflow_drive,
-                         args=(jid, state, data.get("task", ""), data.get("work_dir", ""), cancel),
-                         daemon=True).start()
+        meta = {k: data[k] for k in ("task", "name", "work_dir", "apply_project", "branch") if k in data}
+        meta.setdefault("task", "")
+        threading.Thread(target=_workflow_run, args=(jid, state, meta),
+                         kwargs={"resumed": True}, daemon=True).start()
         return JSONResponse({"resumed": jid, "kind": "workflow", "status": state.get("status"),
                              "from_step": len(workflow_store.checkpoint_history(jid))})
     if kind == "project":
@@ -852,6 +907,27 @@ async def resume_job(request):
         return JSONResponse({"resumed": jid, "kind": "project", "remaining_K": remaining,
                              "from_step": done})
     return JSONResponse({"error": f"unknown job kind '{kind}'"}, status_code=400)
+
+
+async def pause_job(request):
+    """Pause a running job at its next checkpoint boundary (Phase B). It stops cleanly and stays
+    resumable via POST /jobs/{id}/resume. (Workflows; for a hard stop use cancel-tree.)"""
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    jid = request.path_params["job_id"]
+    with _JOBS_LOCK:
+        j = _JOBS.get(jid)
+        ev = j.get("pause") if j else None
+        st = j.get("status") if j else None
+    if not j:
+        return JSONResponse({"error": "no such job"}, status_code=404)
+    if ev is None:
+        return JSONResponse({"error": "job is not pausable (only running workflows)"}, status_code=409)
+    if st != "running":
+        return JSONResponse({"error": f"job is '{st}', not running"}, status_code=409)
+    ev.set()
+    return JSONResponse({"pausing": jid, "note": "stops at the next step boundary; resume to continue"})
 
 
 async def job_checkpoints(request):
@@ -1062,6 +1138,7 @@ def build_app():
         Route("/jobs/reap", reap_zombies, methods=["POST"]),
         Route("/jobs/{job_id}/checkpoints", job_checkpoints),
         Route("/jobs/{job_id}/resume", resume_job, methods=["POST"]),
+        Route("/jobs/{job_id}/pause", pause_job, methods=["POST"]),
         Route("/blocks/{block_id}", block_get),
         Route("/plugins", plugins_list),
         Route("/plugins/{name}/invoke", plugin_invoke, methods=["POST"]),
