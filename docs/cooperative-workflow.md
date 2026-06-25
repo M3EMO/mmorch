@@ -91,7 +91,11 @@ of a step's consumable blocks** = (blocks from my task's checkpoint chain) ∪ (
 
 ---
 
-## Phase A — `block_store` + `checkpoint_store` (the foundation; build first)
+## Phase A — `block_store` + `checkpoint_store` (the foundation) ✅ DONE (`f292216`)
+Shipped as `mmorch/workflow_store.py` (blocks + checkpoints + block_scope + refcount GC, one `workflow.db`).
+rubric_loop + project_loop checkpoint each step; reaper sweep GCs orphans + flags resumable jobs;
+`GET /jobs/{id}/checkpoints` + `GET /blocks/{id}`. Verified: store self-check + HTTP probe + loop-wiring probe.
+
 ### `checkpoint_store` (new) — references blocks, stays light
 ```
 Checkpoint = {
