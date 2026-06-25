@@ -125,6 +125,20 @@ REGISTRY: dict[str, ModelSpec] = {
         price_out=1.10,
         role="3ra familia: verificador/juez cross-family + nodo barato",
     ),
+    # bof: GLM-4.6 full = coder agentico top open-weight. Rival a MEDIR vs
+    # deepseek-v4-pro en code_loop (head-to-head por ejecucion, el bandit decide).
+    # Precios jun-2026 ref, VOLATILES — reverificar.
+    "glm-4.6": ModelSpec(
+        key="glm-4.6",
+        family="zhipu",
+        provider="zhipu",
+        model_id="glm-4.6",
+        base_url="https://api.z.ai/api/paas/v4",
+        api_key_env="ZHIPU_API_KEY",
+        price_in=0.60,
+        price_out=2.20,
+        role="coder agentico / code-heavy executor (head-to-head vs deepseek-v4-pro, bof)",
+    ),
 }
 
 # Default node assignments for the MVP slice.
