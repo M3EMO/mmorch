@@ -76,6 +76,8 @@ def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model, p
                         pattern="rubric_loop", node=model).text
         return _c
     gen_fn, judge_fn = fn(state["gen_model"]), fn(state["judge_model"])
+    from . import workflow_store
+    step = 0
     try:
         while True:
             if cancel.is_set():
@@ -88,6 +90,13 @@ def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model, p
             from . import transcript_store
             model = state["gen_model"] if act["role"] == "executor" else state["judge_model"]
             transcript_store.append(jid, model, act["role"], out)
+            step += 1
+            try:                                   # Phase A: durable block-context checkpoint per step
+                bid = workflow_store.put_block(out, kind=act["role"], mime="text/markdown")
+                workflow_store.record_checkpoint(jid, step, act["role"], outputs=[bid],
+                                                 state={"model": model})
+            except Exception:
+                pass                               # best-effort; never break the job on a store hiccup
             with _JOBS_LOCK:                       # G9: progress -> heartbeat, don't reap active jobs
                 if jid in _JOBS:
                     _JOBS[jid]["heartbeat"] = time.time()
@@ -589,8 +598,42 @@ async def reap_zombies(request):
         for z in reaped:
             emit("job", "error", job_id=z["id"],
                  detail=f"zombie reaped: no heartbeat for {z['age']}s")
+    # Phase A: the sweep also GCs orphan blocks + flags which reaped jobs are resumable.
+    gc, resumable = {}, []
+    try:
+        from . import workflow_store
+        gc = workflow_store.gc_blocks(dry_run=dry)
+        cp_jobs = workflow_store.jobs_with_checkpoints()
+        # a zombie with a checkpoint trail can be resumed from its last step instead of staying dead
+        ids = [z["id"] for z in (reaped if not dry else zombies)]
+        resumable = [jid for jid in ids if jid in cp_jobs]
+    except Exception as e:
+        gc = {"error": str(e)[:120]}
     return JSONResponse({"now": now, "ttl": durable_runs.default_ttl() if ttl is None else ttl,
-                         "dry": dry, "zombies": zombies, "reaped": [r["id"] for r in reaped]})
+                         "dry": dry, "zombies": zombies, "reaped": [r["id"] for r in reaped],
+                         "gc": gc, "resumable": resumable})
+
+
+async def job_checkpoints(request):
+    """Durable per-step trail of a job (Phase A): the block-referencing checkpoint chain."""
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from . import workflow_store
+    jid = request.path_params["job_id"]
+    return JSONResponse({"job_id": jid, "checkpoints": workflow_store.checkpoint_history(jid)})
+
+
+async def block_get(request):
+    """Fetch one context block by content-addressed id (Phase A)."""
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from . import workflow_store
+    b = workflow_store.get_block(request.path_params["block_id"])
+    if not b:
+        return JSONResponse({"error": "no such block"}, status_code=404)
+    return JSONResponse(b)
 
 
 async def plugins_list(request):
@@ -776,6 +819,8 @@ def build_app():
         Route("/jobs/{job_id}/ancestry", job_ancestry),
         Route("/jobs/{job_id}/cancel-tree", cancel_tree, methods=["POST"]),
         Route("/jobs/reap", reap_zombies, methods=["POST"]),
+        Route("/jobs/{job_id}/checkpoints", job_checkpoints),
+        Route("/blocks/{block_id}", block_get),
         Route("/plugins", plugins_list),
         Route("/plugins/{name}/invoke", plugin_invoke, methods=["POST"]),
         Route("/jobs/{job_id}/gate", gate_handler, methods=["GET", "POST"]),

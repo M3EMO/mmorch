@@ -27,6 +27,18 @@ def _extract(text: str) -> str:
     return (m.group(1) if m else text).strip()
 
 
+def _checkpoint(job_id: str, step: int, content: str, gate, role: str = "coder"):
+    """Phase A: durable block-context checkpoint per iteration (best-effort, never breaks the loop)."""
+    if not job_id:
+        return
+    try:
+        from . import workflow_store
+        bid = workflow_store.put_block(content, kind="code", mime="text/x-python")
+        workflow_store.record_checkpoint(job_id, step, role, outputs=[bid], gate=gate)
+    except Exception:
+        pass
+
+
 def _run_cmd(cwd: str, cmd: str, timeout: float = 120.0) -> tuple[bool, str]:
     try:
         p = subprocess.run(cmd, cwd=cwd, shell=True, capture_output=True, text=True,
@@ -164,10 +176,12 @@ def run_project_task(project: str, task: str, *, target_file: str, test_cmd: str
         if test_cmd is None:
             emit("step", "gate", job_id=job_id, node="tests", detail="sin test_cmd: NO verificado")
             history.append({"iter": i, "verified": False})
+            _checkpoint(job_id, i, new, None)
             break
         ok, out = _run_cmd(cwd, test_cmd)
         feedback = "" if ok else out
         history.append({"iter": i, "tests_pass": ok})
+        _checkpoint(job_id, i, new, {"name": "tests", "passed": ok})
         emit("step", "done" if ok else "error", job_id=job_id, node="tests",
              detail="verde" if ok else out[-120:])
         if ok:
