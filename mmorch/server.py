@@ -123,6 +123,102 @@ def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model, p
     _rubric_drive(jid, state, cancel)
 
 
+def _workflow_drive(jid: str, state: dict, task: str, work_dir: str, cancel: threading.Event):
+    """Drive the cooperative role-chain (Phase C). Shared by a fresh run and a resume — `state` is
+    the only input (JSON-serializable -> Phase B resume continues from it). Each step: run the role's
+    model -> put_block (derives_from the consumed blocks) -> checkpoint; then the gate (tests = run
+    test_cmd; verdict = parse the reviewer's APPROVE/REQUEST_CHANGES). Loops back / escalates per spec."""
+    import os as _os
+    from . import workflow_store, transcript_store
+    from .workflow_engine import next_workflow_action, submit_workflow, build_prompt
+    from .project_loop import _extract, _run_cmd
+    from .providers import call
+    from .config import DEFAULT_GENERATOR
+    _os.makedirs(work_dir, exist_ok=True)
+    step = len(workflow_store.checkpoint_history(jid))
+    try:
+        while True:
+            if cancel.is_set():
+                emit("job", "error", job_id=jid, detail="cancelado por el usuario")
+                return
+            act = next_workflow_action(state)
+            if act["kind"] in ("done", "escalate"):
+                break
+            if act["kind"] == "produce":
+                cfg = state["steps"][act["step"]]
+                names = cfg.get("consumes", [])
+                inputs = []
+                for nm, bid in zip(names, act["consumes"]):
+                    blk = workflow_store.get_block(bid)
+                    inputs.append((nm, blk["body"] if blk else ""))
+                prompt = build_prompt(act["role"], act["persona"], task, inputs)
+                model = act.get("model") or DEFAULT_GENERATOR
+                out = call(model, [{"role": "user", "content": prompt}],
+                           pattern="workflow", node=act["role"]).text
+                transcript_store.append(jid, model, act["role"], out)
+                step += 1
+                bid = workflow_store.put_block(out, kind=act.get("produces") or act["role"],
+                                               mime="text/markdown", derives_from=act["consumes"])
+                workflow_store.record_checkpoint(jid, step, act["role"], inputs=act["consumes"],
+                                                 outputs=[bid], state={"model": model,
+                                                                       "produces": act.get("produces")})
+                submit_workflow(state, block_id=bid)
+            else:                                   # gate
+                passed = False
+                blk = workflow_store.get_block(act.get("block") or "")
+                body = blk["body"] if blk else ""
+                if act["gate"] == "tests":
+                    tf = state["steps"][act["step"]].get("target_file") or "solution.py"
+                    with open(_os.path.join(work_dir, tf), "w", encoding="utf-8") as f:
+                        f.write(_extract(body))
+                    ok, detail = _run_cmd(work_dir, act["test_cmd"])
+                    passed = ok
+                    emit("step", "done" if ok else "error", job_id=jid,
+                         node=f"gate:tests:{act['role']}", detail=detail[-120:])
+                else:                               # verdict: cross-family reviewer's own output
+                    passed = "VERDICT: APPROVE" in body.upper()
+                    emit("step", "done" if passed else "gate", job_id=jid,
+                         node=f"gate:verdict:{act['role']}", detail="APPROVE" if passed else "REQUEST_CHANGES")
+                submit_workflow(state, gate_passed=passed)
+            with _JOBS_LOCK:                        # G9 heartbeat
+                if jid in _JOBS:
+                    _JOBS[jid]["heartbeat"] = time.time()
+            try:                                    # Phase B: persist resumable state each step
+                workflow_store.record_job_spec(jid, "workflow",
+                                               {"state": state, "task": task, "work_dir": work_dir})
+            except Exception:
+                pass
+    except Exception as e:
+        emit("job", "error", job_id=jid, detail=str(e)[:200])
+        with _JOBS_LOCK:
+            if jid in _JOBS:
+                _JOBS[jid]["status"] = "error"
+        return
+    final = state.get("status", "done")
+    emit("job", "done" if final == "done" else "gate", job_id=jid,
+         detail=f"workflow {final}")
+    with _JOBS_LOCK:
+        if jid in _JOBS:
+            _JOBS[jid]["status"] = "done" if final == "done" else "escalate"
+
+
+def _run_workflow_job(jid: str, spec: dict, task: str, parent=None):
+    import tempfile as _tf
+    from . import workflow_store
+    work_dir = os.path.join(_tf.gettempdir(), f"mmorch-wf-{jid}")
+    from .workflow_engine import start_workflow
+    state = start_workflow(spec["steps"], task)
+    cancel = threading.Event()
+    with _JOBS_LOCK:
+        _JOBS[jid] = _jobmeta("workflow", spec.get("name", task), cancel=cancel, parent=parent)
+    try:
+        workflow_store.record_job_spec(jid, "workflow", {"state": state, "task": task, "work_dir": work_dir})
+    except Exception:
+        pass
+    emit("job", "running", job_id=jid, detail=f"workflow {spec.get('name','')}: {task[:80]}")
+    _workflow_drive(jid, state, task, work_dir, cancel)
+
+
 def _run_project_job(project: str, task: str, mode: str, push: bool = False,
                      engine: str = "mmorch", target_file: str = "", test_cmd: str | None = None,
                      driver: str = "local", parent=None):
@@ -326,6 +422,37 @@ async def run_project(request):
     t.start()
     return JSONResponse({"started": "project", "project": project, "engine": engine,
                          "mode": mode, "driver": driver})
+
+
+async def run_workflow(request):
+    """Start a cooperative role-chain workflow (Phase C). Body: {task, workflow_name | workflow:{...}}."""
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    blocked = _budget_block()
+    if blocked:
+        return blocked
+    body = await request.json()
+    task = body.get("task", "")
+    if not task:
+        return JSONResponse({"error": "task required"}, status_code=400)
+    from . import workflow_spec
+    try:
+        if body.get("workflow"):
+            spec = workflow_spec.validate(body["workflow"])           # inline, ad-hoc
+        elif body.get("workflow_name"):
+            spec = workflow_spec.load_workflow(body["workflow_name"])  # saved
+        else:
+            return JSONResponse({"error": "workflow or workflow_name required"}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": f"invalid workflow: {str(e)[:200]}"}, status_code=400)
+    import uuid as _u
+    jid = _u.uuid4().hex[:10]
+    t = threading.Thread(target=_run_workflow_job, args=(jid, spec, task),
+                         kwargs={"parent": body.get("parent_id")}, daemon=True)
+    t.start()
+    return JSONResponse({"started": "workflow", "job_id": jid, "name": spec["name"],
+                         "steps": len(spec["steps"])})
 
 
 async def sync_pull(request):
@@ -702,6 +829,19 @@ async def resume_job(request):
         threading.Thread(target=_rubric_drive, args=(jid, state, cancel), daemon=True).start()
         return JSONResponse({"resumed": jid, "kind": "rubric", "phase": state.get("phase"),
                              "from_step": len(workflow_store.checkpoint_history(jid))})
+    if kind == "workflow":
+        state = data["state"]
+        if state.get("status") == "done":
+            return JSONResponse({"error": "workflow already complete"}, status_code=409)
+        cancel = threading.Event()
+        with _JOBS_LOCK:
+            _JOBS[jid] = _jobmeta("workflow", data.get("task", ""), cancel=cancel, resumed=True)
+        emit("job", "running", job_id=jid, detail="resumed from checkpoint")
+        threading.Thread(target=_workflow_drive,
+                         args=(jid, state, data.get("task", ""), data.get("work_dir", ""), cancel),
+                         daemon=True).start()
+        return JSONResponse({"resumed": jid, "kind": "workflow", "status": state.get("status"),
+                             "from_step": len(workflow_store.checkpoint_history(jid))})
     if kind == "project":
         done = len(workflow_store.checkpoint_history(jid))
         remaining = max(1, int(data.get("K", 4)) - done)
@@ -912,6 +1052,7 @@ def build_app():
         Route("/run/fanout", run_fanout, methods=["POST"]),
         Route("/projects", projects_handler, methods=["GET", "POST"]),
         Route("/run/project", run_project, methods=["POST"]),
+        Route("/run/workflow", run_workflow, methods=["POST"]),
         Route("/chat", chat_handler, methods=["POST"]),
         Route("/chat/history", chat_history, methods=["GET"]),
         Route("/minds", minds_handler),
