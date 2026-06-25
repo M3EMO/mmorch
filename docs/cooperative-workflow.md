@@ -131,6 +131,16 @@ Checkpoint = {
 - `workflow_spec.py`: `roles/<name>.md` + `workflows/<name>.workflow.json` loaders + validate (gate enum,
   consumes-produced-upstream, loop_back resolvable, OneFlow cross-family on verdict). Examples committed.
 - `_workflow_drive` + `POST /run/workflow` {task, workflow_name|workflow} + resume 'workflow' kind.
+
+### Phase C+ — pause + repo-apply ✅ DONE (`178c9bc`)
+- **Pause**: `POST /jobs/{id}/pause` → stops at next step boundary (state persisted) → status `paused`,
+  resumable via `/jobs/{id}/resume`. Distinct from cancel-tree (hard kill).
+- **Repo-apply**: `POST /run/workflow {project, apply:true}` → runs in a git WORKTREE of the repo
+  (worktree_driver), commits progress to a kept review branch on every exit, main tree untouched.
+  `open_worktree(branch=)` reuses the branch so a resumed apply-run continues on it (branch carries
+  progress across pause/resume). `_workflow_run` = single entry (worktree lifecycle) for fresh + resume.
+- Verified: 15-check probe 3× (pause→resume→done, pause endpoint guards, apply→review branch has the
+  code + main tree clean) + worktree branch-reuse. This closes the "build my actual repo" gap.
 - Verified: engine + spec self-checks; 13-check HTTP probe 3× (full run w/ forced review loop-back, real
   test gate, verdict parse, block lineage, saved+inline, resume).
 
