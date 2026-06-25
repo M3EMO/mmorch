@@ -86,3 +86,21 @@ security-first, foundations-before-features. Effort: S/M/L. Source files cited p
 ## Suggested execution order
 G1 → G2 → **G3 (security)** → G4 → G5 → G6 → G7 → G8 → (G9, G10, G11 strategic, later).
 Each graft: implement in mmorch + verify (HTTP/self-check) + commit, like the chat/minds/transcript/PTY work.
+
+## Follow-ups — status
+DONE:
+- G8 redaction + integrity hash on trace bundles (`ebd55d6`).
+- G11 example plugin / authoring template at `plugins/example/` (`c383bf5`).
+- Lotus UI (repo Lotus `6edb0a9`): exec-policy chip (G3) + budget-incident chip (G5) +
+  reap-zombies button (G9) on the dashboard ops strip; cancel-tree action on running cards (G7);
+  staged-gate modal w/ simple fallback (G6). `api.js` reap/cancelTree/get+advanceGate.
+
+DEFERRED (reason):
+- G3 real `worktree` driver (sandbox isolates vs only denies) — L, exec-path rework.
+- G9 heavy half: persist `_JOBS` cross-restart + follow-up queue + session-reset-on-wake — L.
+- G7 pause/restore (thread suspension) — blocked on G9-durable (no pause primitive; won't ship fake pause).
+- G5 per-project budget scope — needs per-project cost attribution (not tracked).
+- G4 bundle chat history + skills; Lotus export/import + path-remap UI — medium, low marginal value now.
+- G11 worker pool (vs per-invoke), event/webhook/ui-slot contributions — YAGNI until invoke rate / a real 3rd-party need.
+- G6 attach-gate-on-execution + participants/auto-advance — product-shaped.
+- **G10 authz PDP** — deferred: mmorch is single-user (decision 2026-06-24).
