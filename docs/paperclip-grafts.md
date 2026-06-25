@@ -63,9 +63,19 @@ security-first, foundations-before-features. Effort: S/M/L. Source files cited p
   + session-reset-on-wake. *Src: `heartbeat.ts`.*
 - **G10. Authorization PDP** `[M]` — `decide(actor, action, resource, scope) → {allowed, reason, grant}`;
   principals board/agent/none; only when mmorch goes multi-user/multi-agent. *Src: `authorization.ts`.*
-- **G11. Plugin manifest + capability-gated workers** `[L]` — manifest V1 (tools/jobs/events/webhooks/
-  ui-slots/db-migrations/env-drivers); isolated worker processes; capability-gated host RPC. Long-term
-  extensibility for 3rd-party patterns/checkers. *Src: `plugin-loader.ts`.*
+- **G11. Plugin manifest + capability-gated workers** `[L]` ✅ DONE — `plugins.py` (manifest load +
+  `discover` + `invoke`) + `plugin_worker.py` (subprocess harness, imported by file path only).
+  Plugin = dir w/ `plugin.json` {name,version,entry,capabilities,contributes} + entry module whose
+  contributions are `fn(args, host)`. Runs in an ISOLATED subprocess; NDJSON RPC; host intercepts
+  `host_call`s and grants only caps that are **declared ∩ policy-allowed** (two-layer, default-deny).
+  cap = method namespace (`llm.call`→`llm`). `GET /plugins`, `POST /plugins/{name}/invoke`. Host
+  services: `log.emit`, `llm.call` (budget-blocked). Env: `MMORCH_PLUGINS_DIR`, `MMORCH_PLUGINS_ALLOW`
+  (csv, default ""=deny all), `MMORCH_PLUGIN_TIMEOUT` (30s wall-clock kill). Verified: self-check +
+  HTTP (gate: granted log host-side, declared-but-policy-denied fs blocked, undeclared net blocked,
+  auth 401, 404/400). **SECURITY LIMIT:** gate controls access to mmorch internals + host RPC, NOT raw
+  OS (subprocess runs as same user; a plugin can still touch the fs via plain python). Run semi-trusted
+  code only, or pair with OS-level sandbox. FOLLOW-UP: pool workers (vs per-invoke), event/webhook
+  contributions, Lotus ui-slots, committed example plugin as authoring template. *Src: `plugin-loader.ts`.*
 
 ## Adopt-as-is / skip (don't reinvent)
 - **Evals**: paperclip uses **promptfoo** (off-the-shelf). Keep mmorch flywheel/exec-embedding (more rigorous);

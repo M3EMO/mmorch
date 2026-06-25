@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **68 módulos · 39 MCP tools · 399 tests.**
+_Auto-generado por `mmorch.docgen`._ **70 módulos · 39 MCP tools · 409 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -75,6 +75,8 @@ _Auto-generado por `mmorch.docgen`._ **68 módulos · 39 MCP tools · 399 tests.
 | `mmorch/nodes.py` | nodes — el registry de la ORQUESTA: nombra a cada miembro que mmorch (el DIRECTOR) |
 | `mmorch/nudge.py` | nudge — robo de Hermes 'periodic memory nudging': cada N loops cerrados, dispara |
 | `mmorch/patterns.py` | Code-flow patterns (§7), migrated as deterministic Python. |
+| `mmorch/plugin_worker.py` | plugin_worker — isolated subprocess host for ONE plugin invoke (graft G11). |
+| `mmorch/plugins.py` | plugins — capability-gated plugin platform (graft G11 from paperclip plugin-loader.ts). |
 | `mmorch/portability.py` | portability — export/import mmorch state across devices (grafts G2 + G4). |
 | `mmorch/predict.py` | predict (v0.1 NN, Fase 1) — predictor de out_tokens / latencia, SIN dep pesada. |
 | `mmorch/prices.py` | prices — capa de OVERRIDE de precios (datos volátiles, separados del código). |

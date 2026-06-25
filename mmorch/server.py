@@ -573,6 +573,52 @@ async def reap_zombies(request):
                          "dry": dry, "zombies": zombies, "reaped": [r["id"] for r in reaped]})
 
 
+async def plugins_list(request):
+    """List installed plugins + their granted caps under the current policy (graft G11)."""
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from . import plugins as _pl
+    return JSONResponse({"plugins": _pl.discover(),
+                         "policy_allow": sorted(_pl.policy_allow())})
+
+
+def _plugin_host_services():
+    """Host services a plugin MAY call (only if its cap is granted). Capability = namespace."""
+    from .providers import call
+    return {
+        "log.emit": lambda p: (emit("plugin", "info", detail=str(p.get("msg", ""))[:160]), "ok")[1],
+        "llm.call": lambda p: call(p["model"], p.get("messages") or p.get("prompt", ""),
+                                   pattern="plugin", node=p.get("model", "")).text,
+    }
+
+
+async def plugin_invoke(request):
+    """Run one plugin contribution in an isolated, capability-gated worker (graft G11)."""
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    blocked = _budget_block()          # a plugin may spend via llm.call
+    if blocked:
+        return blocked
+    name = request.path_params["name"]
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    fn, args = body.get("fn", ""), body.get("args", {})
+    if not fn:
+        return JSONResponse({"error": "fn required"}, status_code=400)
+    from . import plugins as _pl
+    match = next((p for p in _pl.discover() if p.get("name") == name), None)
+    if not match:
+        return JSONResponse({"error": f"no plugin '{name}'"}, status_code=404)
+    if match.get("error"):
+        return JSONResponse({"error": f"plugin '{name}' invalid: {match['error']}"}, status_code=400)
+    res = _pl.invoke(match, fn, args, host_services=_plugin_host_services())
+    return JSONResponse(res, status_code=200 if res.get("ok") else 400)
+
+
 async def export_handler(request):
     """Portable state bundle (graft G4): values tagged portable|system_dependent|secret."""
     from starlette.responses import JSONResponse
@@ -710,6 +756,8 @@ def build_app():
         Route("/jobs/{job_id}/ancestry", job_ancestry),
         Route("/jobs/{job_id}/cancel-tree", cancel_tree, methods=["POST"]),
         Route("/jobs/reap", reap_zombies, methods=["POST"]),
+        Route("/plugins", plugins_list),
+        Route("/plugins/{name}/invoke", plugin_invoke, methods=["POST"]),
         Route("/jobs/{job_id}/gate", gate_handler, methods=["GET", "POST"]),
         Route("/jobs/{job_id}/gate/advance", gate_advance, methods=["POST"]),
         Route("/budget/policies", budget_policies, methods=["GET", "POST"]),
