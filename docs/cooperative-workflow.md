@@ -124,7 +124,16 @@ Checkpoint = {
 - Verified: 11-check probe 3× (rubric mid-loop→done, project continued numbering + file seed, auth/404/409);
   caught+fixed a stale-status race. No LLM replay — resume from last completed step.
 
-## Phase C — role-chain cooperative workflow (the ChatDev-like dynamics)
+## Phase C — role-chain cooperative workflow ✅ DONE (C1 `33e63e4`, C2 `ddd20e0`)
+- `workflow_engine.py`: PURE start/next/submit state machine (resumable via Phase B for free). Per step:
+  produce (run role model) → gate (tests=execution / verdict=cross-family reviewer parse) → advance |
+  loop_back(≤max) | escalate. consumes→`derives_from` lineage.
+- `workflow_spec.py`: `roles/<name>.md` + `workflows/<name>.workflow.json` loaders + validate (gate enum,
+  consumes-produced-upstream, loop_back resolvable, OneFlow cross-family on verdict). Examples committed.
+- `_workflow_drive` + `POST /run/workflow` {task, workflow_name|workflow} + resume 'workflow' kind.
+- Verified: engine + spec self-checks; 13-check HTTP probe 3× (full run w/ forced review loop-back, real
+  test gate, verdict parse, block lineage, saved+inline, resume).
+
 A workflow = an ordered list of role-steps **as data** (NOT an arbitrary graph):
 ```
 workflow = [
