@@ -116,11 +116,13 @@ Checkpoint = {
 - **Standalone value even without B/C**: durable tracking; the G9 reaper can show a zombie's **last checkpoint**
   (where it died); foundation for everything else. Effort: **S/M**.
 
-## Phase B — resume-from-checkpoint (the G9 heavy-half, now tractable)
-- Explicit `POST /jobs/{id}/resume` (Decisions #4): a job with checkpoints but no terminal status →
-  **re-dispatch from `latest`**: reload its output blocks as the new seed state, continue the loop. No LLM
-  replay — resume from last completed step. No auto-resume on boot; the reaper just flags resumable jobs.
-- This is what makes "durable wake-runs" real without token-level checkpointing. Effort: **M**.
+## Phase B — resume-from-checkpoint (the G9 heavy-half) ✅ DONE (`a3ba0b1`)
+- `POST /jobs/{id}/resume` (explicit, budget-gated; no auto-resume). rubric: full JSON loop state persisted
+  to the job spec each step → resume reloads + continues (`_rubric_drive` shared fresh/resume). project:
+  `run_project_task(step_offset=)` continues checkpoint numbering (no collision) + seeds the target file from
+  the last block, runs remaining K. Job specs recorded at start; reaper flags resumable jobs.
+- Verified: 11-check probe 3× (rubric mid-loop→done, project continued numbering + file seed, auth/404/409);
+  caught+fixed a stale-status race. No LLM replay — resume from last completed step.
 
 ## Phase C — role-chain cooperative workflow (the ChatDev-like dynamics)
 A workflow = an ordered list of role-steps **as data** (NOT an arbitrary graph):
