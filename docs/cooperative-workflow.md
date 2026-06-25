@@ -69,6 +69,22 @@ Block = {
 4. **Cooperative hand-off** — coder emits a `code` block; reviewer consumes that `block_id`; the verdict is a
    `verdict` block. **The chain of blocks IS the shared durable blackboard** ChatDev keeps only in memory.
 
+### Scoping — global? per-task? per-worker? (RESOLVED: all three, different layers)
+Not a pick-one. Each level answers a different layer:
+
+| Layer | Scope | Why |
+|---|---|---|
+| **Storage** (the physical block pool) | **global** | Content-addressed (`id=sha256`): identical content = one block regardless of author, so **dedup only works if the pool is global**. No identity leak — you can only fetch a block whose id you already hold, and ids reach you via *your* chain. |
+| **Visibility** (what a worker sees = the checkpoint chain) | **per-task** (per workflow run) | The real isolation boundary. One run (architect→coder→reviewer of one feature) shares; different runs don't auto-mix. Default-isolated, like ChatDev's per-run GraphContext. |
+| **Worker context** (what a step consumes) | **a view** (subset, not a separate store) | The role-chain `consumes:[block_id]` selects only the blocks that step needs (plan + latest code). = ChatDev `carry_data`/`clear_context`. Per-worker-*only* would break cooperation (workers couldn't see each other). |
+| **Cross-task reuse** (optional bridge) | **opt-in promotion** to `project:X` / `global` | A reusable plan/pattern. = ChatDev's per-workflow FAISS memory, but explicit, not default. Maps to mmorch's existing scoping (budget global/family, projects per-project). |
+
+**Schema consequence:** scope lives on the **checkpoint**, not the block. `checkpoint.job_id` ties a chain to its
+task. A promoted block = one row in `block_scope{block_id, scope:"project:X"|"global"}` that makes it visible
+outside its task. The block itself never changes — promotion is just a visibility index. **Default resolution
+of a step's consumable blocks** = (blocks from my task's checkpoint chain) ∪ (blocks promoted to my project) ∪
+(globally promoted blocks).
+
 ---
 
 ## Phase A — `block_store` + `checkpoint_store` (the foundation; build first)
@@ -121,6 +137,9 @@ workflow = [
 - Routing fit (user CLAUDE.md): a recurrent/understood multi-step flow → mmorch, not the native `Workflow` tool (cupo).
 
 ## Open decisions
+- **RESOLVED — block scoping**: storage global (content-addressed dedup) / visibility per-task (checkpoint
+  chain) / worker = view (consumes subset) / opt-in promotion to project|global. See §Scoping.
+
 1. Block store backend: extend `chat.db` with `blocks`/`checkpoints` tables, or a separate `workflow.db`? (lean: separate.)
 2. Workflow spec authoring: inline JSON via API, or saved `*.workflow.json` files (policy-as-data, like budget_policy)?
 3. Role personas: a `RoleConfig` data file (ChatDev-style) vs inline per workflow step? (lean: a small role registry, reusable.)
