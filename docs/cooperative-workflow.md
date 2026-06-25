@@ -47,16 +47,20 @@ flat text — they **reference typed, content-addressed blocks**.
 A block = a typed, content-addressed unit of context.
 ```
 Block = {
-  id:    sha256(content)[:16],     # content-addressed -> automatic dedup
-  kind:  "text"|"code"|"file"|"diff"|"plan"|"verdict"|"test_report"|"image_ref",
-  mime:  "text/markdown" | "text/x-python" | ...,
-  size:  int,
-  body:  str            # inline for small text
-  path:  str            # OR a path, for large/binary artifacts (like AttachmentStore)
-  ts:    float,
+  id:           sha256(content)[:16],   # content-addressed -> automatic dedup
+  kind:         "text"|"code"|"file"|"diff"|"plan"|"verdict"|"test_report"|"image_ref",
+  mime:         "text/markdown" | "text/x-python" | ...,
+  size:         int,
+  body:         str,            # inline for small text
+  path:         str,            # OR a path, for large/binary artifacts (like AttachmentStore)
+  derives_from: [block_id,...], # OPTIONAL lineage: this block was derived from these (ancestry-everywhere, cf G1/G7)
+  ts:           float,          # first-seen
+  last_put_ts:  float,          # bumped on every (deduped) re-put -> the GC race-guard clock
 }
 ```
-- `put(content, kind, mime) -> block_id` — dedup: identical content reuses the same id (ChatDev's manifest idea).
+- `put(content, kind, mime, derives_from=[]) -> block_id` — dedup: identical content reuses the same id
+  (ChatDev's manifest idea); each put bumps `last_put_ts`. `derives_from` records lineage (and keeps an ancestor
+  alive via refcount — see GC, Decisions #5).
 - `get(block_id) -> Block`; `manifest()` — SQLite table or jsonl, same env-overridable pattern as chat_store.
 - Large artifacts (generated files, diffs) stored by `path` and referenced; small text inline. Mirrors
   `AttachmentStore.register_file(copy_file=False, persist=True)`.
@@ -153,11 +157,19 @@ workflow = [
 - **#4 Resume trigger** — explicit `POST /jobs/{id}/resume` ONLY. No auto-resume on boot (mass re-dispatch +
   cost storm + resurrects jobs that should die; cero-cupo = no spend without intent). The reaper FLAGS resumable
   jobs (has checkpoints + non-terminal) so Lotus shows a "resume" button next to reaped ones.
-- **#5 Block GC** — automatic but CONSERVATIVE, on the reaper sweep (no new daemon). Reclaim a block iff
-  `refcount==0` (not in any `checkpoints.inputs/outputs`) AND not in `block_scope` (not promoted) AND
-  `age > MMORCH_BLOCK_GC_TTL` (default 24h — the TTL avoids the put→checkpoint race; steps finish in seconds).
-  `gc(dry_run=True)` for inspection; kill switch `MMORCH_BLOCK_GC=off`. Self-heals: a wrongly-collected block is
-  recreated by the next content-identical `put()` (resume-in-flight is protected by the TTL).
+- **#5 Block GC** — automatic but CONSERVATIVE, on the reaper sweep (no new daemon). The value metric is
+  **reference count, NOT wall-clock** (calendar age ≠ decay; an old block you haven't touched is not less valid).
+  Reclaim a block iff:
+  - `refcount == 0`, where **refcount = (checkpoints referencing it in inputs/outputs) + (blocks referencing it
+    via `derives_from` lineage)** — a load-bearing block (referenced by a checkpoint OR a descendant block) survives;
+  - AND not in `block_scope` (not promoted);
+  - AND `now - last_put_ts > MMORCH_BLOCK_GC_MIN_IDLE` (default **15 min**) — a *pure race guard* (a block just
+    `put()` before its step writes the checkpoint), NOT a value TTL. Steps finish in seconds; `last_put_ts` is
+    bumped on every (deduped) re-put.
+  Time is never the reason a block lives or dies: GC only runs on the reaper sweep, which is **activity-gated**
+  (scheduled-task / manual) — no activity → no sweep → nothing collected (this is why "created 30h ago but I
+  didn't work" never gets wrongly reclaimed). `gc(dry_run=True)` for inspection; kill switch `MMORCH_BLOCK_GC=off`.
+  Self-heals: a wrongly-collected block is recreated by the next content-identical `put()`.
 
 ## Non-goals (don't build)
 - Arbitrary node/edge graph + Tarjan cycle detection (ChatDev's generic VM). Role-chain + loop-back covers the real cases.
