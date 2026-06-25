@@ -124,3 +124,50 @@ def cynefin_classify(request: str, *, router_model: str = DEFAULT_ROUTER,
     if cls is None or conf < threshold:
         return CynefinResult(cls, conf, "escalate_opus", True, cost)
     return CynefinResult(cls, conf, CYNEFIN_STRATEGY[cls], cls == "chaotic", cost)
+
+
+# --- 2il: storage-vs-manipulation como preset de ruteo -----------------------
+# Physics-of-LLMs (Allen-Zhu) + RL-ceiling: loopear/re-invocar agrega COMPUTO
+# interno (manipulacion/razonamiento) pero NO agrega CONOCIMIENTO. Corolario de
+# ruteo: en tareas de RECALL, loopear no ayuda -> hay que rutear a un modelo que
+# TENGA el conocimiento (subir tier). En tareas de MANIPULACION, gastar presupuesto
+# de loop/cascade SI ayuda. Hoy cascade escala por baja-conf sin distinguir el POR
+# QUE; este preset separa los dos ejes. Opt-in, library-first (estilo Cynefin): el
+# caller decide los handlers; este helper solo etiqueta y recomienda. NO auto-default
+# — entra como ruteo por defecto solo cuando un problema medido lo pida (invariante).
+STORAGE_MANIP_CLASSES: dict[str, str] = {
+    "storage":      "RECALL/extraccion de hechos almacenados (quien/cuando/donde, lookup, "
+                    "definicion, dato puntual). La respuesta o esta en los pesos o no; pensar "
+                    "mas no la inventa.",
+    "manipulation": "MANIPULACION/razonamiento sobre hechos (componer, comparar, calcular, "
+                    "transformar, inferir multi-paso). Mas computo interno mejora el resultado.",
+}
+
+# Estrategia mmorch por tipo (heuristica; el caller decide si la respeta).
+STORAGE_MANIP_STRATEGY: dict[str, str] = {
+    "storage":      "route_up",    # subir tier de modelo (mas conocimiento); loops NO ayudan
+    "manipulation": "loop_budget", # cascade/rubric_loop: el computo interno extra paga
+}
+
+
+@dataclass
+class TaskTypeResult:
+    task_type: str | None    # storage|manipulation (None si invalida/baja-conf)
+    confidence: float
+    strategy: str            # route_up | loop_budget | escalate_opus
+    escalate: bool           # True -> el orquestador (Opus) decide (invalida/baja-conf)
+    cost_usd: float = 0.0
+
+
+def task_type_classify(request: str, *, router_model: str = DEFAULT_ROUTER,
+                       threshold: float = 0.6, phase: str = "task_type") -> TaskTypeResult:
+    """Clasifica el request en storage vs manipulation y recomienda eje de gasto.
+    storage -> route_up (subir tier, loops no ayudan); manipulation -> loop_budget
+    (gastar computo interno). Escala a Opus si clase invalida o conf < threshold.
+    Etiqueta, no actua — el caller wirea handlers via classify_and_act(
+    classes=STORAGE_MANIP_CLASSES, ...) si quiere dispatch."""
+    cls, conf, cost = classify(request, STORAGE_MANIP_CLASSES, router_model=router_model, phase=phase)
+    cost = round(cost, 6)
+    if cls is None or conf < threshold:
+        return TaskTypeResult(cls, conf, "escalate_opus", True, cost)
+    return TaskTypeResult(cls, conf, STORAGE_MANIP_STRATEGY[cls], False, cost)
