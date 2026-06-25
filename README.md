@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **70 módulos · 39 MCP tools · 416 tests.**
+_Auto-generado por `mmorch.docgen`._ **71 módulos · 39 MCP tools · 416 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -103,6 +103,7 @@ _Auto-generado por `mmorch.docgen`._ **70 módulos · 39 MCP tools · 416 tests.
 | `mmorch/transcript_store.py` | transcript_store — per-job inter-agent transcript (in-memory). |
 | `mmorch/vault.py` | vault — memoria de largo plazo mmorch-legible sobre el vault Obsidian. |
 | `mmorch/weights.py` | weights — gestion de pesos de nodos neuronales (model-cards + verificacion). Source of |
+| `mmorch/worktree_driver.py` | worktree_driver — isolated execution in a throwaway git worktree (graft G3 follow-up). |
 <!-- /mmorch:auto:modules -->
 
 Otros: `mcp_server.py` (MCP wrapper), `tests/` (regression gate), `vault/` (memoria +

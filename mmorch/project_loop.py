@@ -96,7 +96,8 @@ class ProjectResult:
 def run_project_task(project: str, task: str, *, target_file: str, test_cmd: str | None = None,
                      K: int = 4, escalate: bool = True, push: bool = True,
                      gen_model: str | None = None, lazy: bool | None = None,
-                     use_codegraph: bool | None = None, job_id: str = "") -> ProjectResult:
+                     use_codegraph: bool | None = None, work_dir: str | None = None,
+                     job_id: str = "") -> ProjectResult:
     """mmorch-primario: loop DeepSeek genera el archivo -> escribe -> corre tests -> repite
     hasta verde o K. Verdad = ejecucion (test_cmd). Si K se agota y escalate: claude -p (cupo).
     push: si verde, commit+push a mmorch/auto. test_cmd None -> sin verificacion (no recomendado).
@@ -113,14 +114,20 @@ def run_project_task(project: str, task: str, *, target_file: str, test_cmd: str
     gen_model = gen_model or DEFAULT_GENERATOR
     lazy_on = lazy if lazy is not None else os.environ.get("MMORCH_LAZY", "1") != "0"
     cg_on = use_codegraph if use_codegraph is not None else os.environ.get("MMORCH_CODEGRAPH", "0") != "0"
-    cwd = resolve(project)
+    # work_dir = run against this dir instead of the project's real tree (G3 worktree isolation).
+    # The caller (run_project_task_isolated) owns persistence -> no push, no branch switch here.
+    cwd = work_dir or resolve(project)
+    if work_dir:
+        push = False
     cg_ctx = _codegraph_context(cwd, task) if cg_on else ""
     fpath = os.path.join(cwd, target_file)
     emit("job", "running", job_id=job_id,
          detail=f"mmorch{'·lazy' if lazy_on else ''}{'·cg' if cg_ctx else ''} "
                 f"{project}/{target_file}: {task[:60]}")
 
-    _git(cwd, "checkout", "-B", "mmorch/auto")   # branch del agente (reversible)
+    if not work_dir:
+        _git(cwd, "checkout", "-B", "mmorch/auto")   # branch del agente (reversible)
+    # work_dir (worktree) ya está en su propia branch aislada -> no tocar branches del repo real
     cur = ""
     if os.path.isfile(fpath):
         try:
@@ -184,3 +191,24 @@ def run_project_task(project: str, task: str, *, target_file: str, test_cmd: str
 
     emit("job", "error", job_id=job_id, detail=f"mmorch no pudo en {K} iter (sin escalada)")
     return ProjectResult(False, "mmorch", K, target_file, history=history)
+
+
+def run_project_task_isolated(project: str, task: str, **kw):
+    """G3 isolation: run the project task inside a throwaway git worktree of the project repo.
+    The real working tree is never touched; the result lands on a review branch. Returns
+    (ProjectResult, {branch, diffstat, changed, worktree}). escalate defaults OFF here — a
+    `claude -p` escalation would run in the worktree too, but that's a heavier path; opt in
+    explicitly via kw if wanted."""
+    from .projects import resolve
+    from . import worktree_driver as wd
+    repo = resolve(project)
+    wt = wd.open_worktree(repo)
+    kw["push"] = False                       # never push from a throwaway tree
+    kw.setdefault("escalate", False)
+    try:
+        r = run_project_task(project, task, work_dir=wt.path, **kw)
+        cap = wt.capture(f"mmorch(worktree): {task[:64]}")
+        cap["worktree"] = wt.path
+        return r, cap
+    finally:
+        wt.close(keep_branch=True)           # branch (with the work) survives for review

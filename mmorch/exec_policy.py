@@ -4,8 +4,10 @@ Ported from paperclip's execution-allowlist: a policy restricts the execution
 DRIVER (location), not the commands. Default `any` (dev / trusted tunnel) = no
 change. Set MMORCH_EXEC_POLICY=sandbox to forbid LOCAL execution (PTY shells,
 local project exec) — for when the server is exposed beyond a fully-trusted
-operator. The sandbox/worktree driver itself is a follow-up; until it exists,
-`sandbox` policy simply denies local (a lockdown switch).
+operator. Under `sandbox` the server now ISOLATES instead of only denying:
+a project edit (engine=mmorch) runs in a throwaway git worktree (worktree_driver)
+and lands on a review branch — the real tree is untouched. PTY and engine=claude
+have no isolated driver yet, so they stay denied under sandbox.
 
 ponytail: pure function + env read. The enforcement points (server.py) call evaluate().
 """

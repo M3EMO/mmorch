@@ -101,14 +101,15 @@ def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model, p
 
 def _run_project_job(project: str, task: str, mode: str, push: bool = False,
                      engine: str = "mmorch", target_file: str = "", test_cmd: str | None = None,
-                     parent=None):
+                     driver: str = "local", parent=None):
     """Job project-aware. engine PRIMARIO = 'mmorch' (DeepSeek genera + tests verifican +
     aplica determinista, cero cupo; escala a claude -p si no puede). engine='claude' =
-    claude -p directo (plan/cupo) — para tareas abiertas que mmorch no banca."""
+    claude -p directo (plan/cupo) — para tareas abiertas que mmorch no banca.
+    driver='worktree' (G3 sandbox) = corre en un git worktree desechable -> review branch."""
     import uuid as _u
     jid = _u.uuid4().hex[:10]
     with _JOBS_LOCK:
-        _JOBS[jid] = _jobmeta("project", task, engine=engine, parent=parent)
+        _JOBS[jid] = _jobmeta("project", task, engine=engine, parent=parent, driver=driver)
     try:
         if engine == "mmorch":
             if not target_file:
@@ -116,9 +117,20 @@ def _run_project_job(project: str, task: str, mode: str, push: bool = False,
                 with _JOBS_LOCK:
                     _JOBS[jid]["status"] = "error"
                 return
-            from .project_loop import run_project_task
-            r = run_project_task(project, task, target_file=target_file, test_cmd=test_cmd,
-                                 push=push, job_id=jid)
+            if driver == "worktree":
+                from .project_loop import run_project_task_isolated
+                r, cap = run_project_task_isolated(project, task, target_file=target_file,
+                                                   test_cmd=test_cmd, job_id=jid)
+                with _JOBS_LOCK:
+                    if jid in _JOBS:
+                        _JOBS[jid]["review_branch"] = cap.get("branch")
+                        _JOBS[jid]["diffstat"] = cap.get("diffstat", "")
+                emit("job", "running", job_id=jid,
+                     detail=f"worktree -> {cap.get('branch')} ({'changes' if cap.get('changed') else 'no changes'})")
+            else:
+                from .project_loop import run_project_task
+                r = run_project_task(project, task, target_file=target_file, test_cmd=test_cmd,
+                                     push=push, job_id=jid)
             ok = r.ok
         else:   # engine == claude: claude -p directo (cupo)
             from .projects import resolve
@@ -266,14 +278,22 @@ async def run_project(request):
     if blocked:
         return blocked
     from .exec_policy import current_policy, evaluate
-    dec = evaluate(current_policy(), "local")          # project jobs execute locally
-    if not dec["allowed"]:
-        return JSONResponse({"error": dec["reason"]}, status_code=403)
+    driver = "local"
+    if not evaluate(current_policy(), "local")["allowed"]:
+        # G3 sandbox: instead of denying, ISOLATE the mmorch engine in a git worktree.
+        # claude engine has no worktree path yet -> still denied under sandbox.
+        if engine == "mmorch":
+            driver = "worktree"
+        else:
+            return JSONResponse(
+                {"error": "exec policy 'sandbox': engine 'claude' has no isolated driver "
+                          "(use engine=mmorch for worktree isolation)"}, status_code=403)
     t = threading.Thread(target=_run_project_job,
-                         args=(project, task, mode, push, engine, target_file, test_cmd),
+                         args=(project, task, mode, push, engine, target_file, test_cmd, driver),
                          kwargs={"parent": body.get("parent_id")}, daemon=True)
     t.start()
-    return JSONResponse({"started": "project", "project": project, "engine": engine, "mode": mode})
+    return JSONResponse({"started": "project", "project": project, "engine": engine,
+                         "mode": mode, "driver": driver})
 
 
 async def sync_pull(request):
