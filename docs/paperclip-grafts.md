@@ -91,12 +91,14 @@ Each graft: implement in mmorch + verify (HTTP/self-check) + commit, like the ch
 DONE:
 - G8 redaction + integrity hash on trace bundles (`ebd55d6`).
 - G11 example plugin / authoring template at `plugins/example/` (`c383bf5`).
+- **G3 worktree driver** (`9fd7605`): `sandbox` now ISOLATES — engine=mmorch runs in a throwaway
+  git worktree → review branch, real tree untouched. `worktree_driver.py` + `run_project_task(work_dir=)`
+  + `run_project_task_isolated`. PTY/engine=claude still denied (no isolated driver). Verified self-check + probe.
 - Lotus UI (repo Lotus `6edb0a9`): exec-policy chip (G3) + budget-incident chip (G5) +
   reap-zombies button (G9) on the dashboard ops strip; cancel-tree action on running cards (G7);
   staged-gate modal w/ simple fallback (G6). `api.js` reap/cancelTree/get+advanceGate.
 
 DEFERRED (reason):
-- G3 real `worktree` driver (sandbox isolates vs only denies) — L, exec-path rework.
 - G9 heavy half: persist `_JOBS` cross-restart + follow-up queue + session-reset-on-wake — L.
 - G7 pause/restore (thread suspension) — blocked on G9-durable (no pause primitive; won't ship fake pause).
 - G5 per-project budget scope — needs per-project cost attribution (not tracked).
