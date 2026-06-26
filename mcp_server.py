@@ -36,7 +36,9 @@ from mmorch.memory import (remember as _remember, stats as _mem_stats,
 from mmorch.curiosity import find_tension as _find_tension
 from mmorch.autoresearch import run_autoresearch as _autoresearch
 from mmorch.classify import classify as _classify, cynefin_classify as _cynefin
-from mmorch.spec import build_spec as _build_spec, interview as _spec_interview
+from mmorch.spec import (build_spec as _build_spec, interview as _spec_interview,
+                         perfect as _perfect)
+from mmorch.speedup import speedup as _speedup
 from mmorch.sessions import ingest_session as _ingest_session
 from mmorch.session_skills import (ingest_workflows as _ingest_workflows,
                                    top_playbooks as _top_playbooks)
@@ -693,6 +695,33 @@ def mmorch_rubric_submit(state: dict, output: str) -> str:
     state — chain into mmorch_rubric_next."""
     from mmorch.rubric_loop import submit
     return json.dumps(submit(dict(state), output), ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_perfect(request: str, n: int = 4) -> str:
+    """Built-in prompt perfectioner (cero cupo, HEADLESS — no human turn): in ONE call it uncovers
+    the GOAL questions (interview) AND builds a cross-family-refuted spec (build_spec). Returns the
+    spec plus merged `open_questions` (interview goal-Qs + the spec's BEYOND_INTENT inferences) that a
+    caller should still DECIDE — never auto-resolved. Honors quarantine/escalate. This is the
+    mmorch-native twin of the interactive /perfect skill (which asks the human the questions); use it
+    for automated callers (Lotus, a workflow pre-sharpening a task, an agent self-sharpening). Returns
+    JSON {spec, open_questions, goal_questions, accepted_inferences, dropped, escalate, quarantined,
+    raw_draft, verifier_model, cost_usd}."""
+    return json.dumps(_perfect(request, n=n), ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_speedup(source: str, setup: str, call: str, runs: int = 5, rounds: int = 8) -> str:
+    """Make a Python function faster, cero cupo, kept ONLY on a MEASURED + CORRECT improvement. A
+    cheap generator proposes a faster variant; the score is a RUNNABLE rubric (never an LLM judge) =
+    correctness-gated runtime: the candidate runs in a fresh subprocess on a fixed benchmark — `setup`
+    builds the inputs, `call` invokes the function (e.g. setup='data=list(range(100000))',
+    call='f(data)'). A result diverging from the original scores inf (rejected — fast-but-wrong is a
+    regression); else its median seconds. hillclimb keeps the fastest correct candidate; falls back to
+    the original if no real margin. Vectorize/Numba/algorithmic = whatever the generator proposes;
+    execution decides. Returns JSON {best, baseline_sec, best_sec, speedup, rounds, stopped, kept}."""
+    return json.dumps(_speedup(source, setup=setup, call=call, runs=runs, rounds=rounds),
+                      ensure_ascii=False)
 
 
 if __name__ == "__main__":

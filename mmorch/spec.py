@@ -190,3 +190,49 @@ def build_spec(raw_request: str, *, answers: str = "",
     return SpecResult(spec=spec_text, accepted_inferences=accepted,
                       open_questions=open_qs, dropped=dropped, escalate=escalate,
                       verifier_model=verifier_model, cost_usd=round(cost, 6))
+
+
+def _merge_questions(goal_qs: list[str], open_qs: list[str]) -> list[str]:
+    """Goal-uncovering questions (interview) ∪ spec BEYOND_INTENT opens, deduped case-insensitively,
+    order preserved (goal questions first)."""
+    seen, merged = set(), []
+    for q in list(goal_qs) + list(open_qs):
+        k = (q or "").strip().lower()
+        if k and k not in seen:
+            seen.add(k)
+            merged.append(q.strip())
+    return merged
+
+
+def perfect(raw_request: str, *, n: int = 4, gen_model: str = DEFAULT_GENERATOR,
+            verifier_model: str = DEFAULT_VERIFIER, phase: str = "") -> dict:
+    """Built-in one-call perfectioner (cero cupo, NO human turn): uncover the GOAL questions
+    (interview) AND build a cross-family-refuted spec (build_spec) in a single pass. The interview
+    questions + the spec's BEYOND_INTENT opens are returned together as what a user/orchestrator
+    should still decide — never auto-resolved. Honors build_spec's quarantine/escalate guards.
+
+    This is the mmorch-native twin of the interactive /perfect skill: the skill asks the HUMAN the
+    interview questions; perfect() runs it headless for automated callers (Lotus, the cooperative
+    workflow pre-sharpening a task, an agent self-sharpening). Returns a dict (see keys below)."""
+    goal_qs, c1 = interview(raw_request, model=gen_model, n=n, phase=phase)
+    r = build_spec(raw_request, gen_model=gen_model, verifier_model=verifier_model, phase=phase)
+    return {
+        "spec": r.spec,
+        "open_questions": _merge_questions(goal_qs, r.open_questions),
+        "goal_questions": goal_qs,
+        "accepted_inferences": r.accepted_inferences,
+        "dropped": r.dropped,
+        "escalate": r.escalate,
+        "quarantined": r.quarantined,
+        "raw_draft": r.raw_draft,
+        "verifier_model": r.verifier_model,
+        "cost_usd": round(c1 + r.cost_usd, 6),
+    }
+
+
+if __name__ == "__main__":   # cero-cost check of the only non-API logic (the merge)
+    m = _merge_questions(["¿Cuál es el objetivo?", "¿Quién lo usa?"],
+                         ["¿quién lo usa?", "¿Qué formato de salida?", ""])
+    assert m == ["¿Cuál es el objetivo?", "¿Quién lo usa?", "¿Qué formato de salida?"], m
+    assert _merge_questions([], []) == []
+    print("spec.perfect merge OK")
