@@ -60,10 +60,17 @@ def _harness(source: str, setup: str, call: str, runs: int) -> str:
 
 
 def _measure(source: str, setup: str, call: str, runs: int, timeout: float):
-    """Run the candidate in a fresh process; return (result, median_seconds). Raises on any failure."""
+    """Run the candidate in a fresh process; return (result, median_seconds). Raises on any failure.
+    stdin=DEVNULL + no inherited handles: spawning a child from a stdio MCP server otherwise lets the
+    child inherit the server's stdin pipe (the MCP transport) and hang. CREATE_NO_WINDOW: no console
+    pop/stall on Windows."""
     code = _harness(source, setup, call, runs)
-    p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", timeout=timeout)
+    kw = {}
+    if sys.platform == "win32":
+        kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+    p = subprocess.run([sys.executable, "-c", code], stdin=subprocess.DEVNULL,
+                       capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       timeout=timeout, **kw)
     if p.returncode != 0:
         raise RuntimeError((p.stderr or "nonzero")[-200:])
     line = p.stdout.strip().splitlines()[-1]
