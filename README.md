@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **75 módulos · 40 MCP tools · 422 tests.**
+_Auto-generado por `mmorch.docgen`._ **76 módulos · 40 MCP tools · 422 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -98,6 +98,7 @@ _Auto-generado por `mmorch.docgen`._ **75 módulos · 40 MCP tools · 422 tests.
 | `mmorch/sessions.py` | sessions — aprende de transcripts de Claude Code. Parsea el JSONL de sesion en |
 | `mmorch/shadow_prior.py` | shadow_prior — Fase 5: una capa que PRIMEA al ThompsonBandit con un prior contextual, |
 | `mmorch/spec.py` | spec — spec-builder barato que INFIERE mas alla de lo dicho, pero aplica |
+| `mmorch/speedup.py` | speedup — make a function faster, cero-cupo, kept only on MEASURED+CORRECT improvement. |
 | `mmorch/sync.py` | sync — GitHub como bus de sincronizacion entre maquinas. El host always-on (ej pc-mateo) |
 | `mmorch/tournament.py` | tournament — elegir EL mejor de pocos candidatos por gusto/calidad (naming, |
 | `mmorch/trajectory.py` | trajectory — robo de Hermes: 'trajectory compression para entrenar la proxima |
