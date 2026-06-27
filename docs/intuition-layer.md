@@ -1,7 +1,8 @@
 # mmorch cognitive architecture — synthesis (intuition + insight)
 
-Status: **DESIGN** (no code yet). Consolidates a ~16-source problem-solving harvest into one
-buildable spec. Supersedes the scattered A–U notes in the `intuition-layer` memory.
+Status: **Phase 0+1+2 BUILT** (`signature.py` baa4013, `intuition.py` 2e7d0ef — backfilled 1893
+logged outcomes cero-cupo into 84 arms/74 sigs). Phase 3 gate / forward-wiring / Phase 4 INSIGHT
+deferred. Consolidates a ~16-source harvest; supersedes the A–U notes in the `intuition-layer` memory.
 
 mmorch is already ~60% a cognitive architecture (FRAME, REASON, VERIFY, MEMORY, most of
 EXEC-discipline exist). The real gap = the **INTUIT** component + the **INSIGHT** path. This doc
