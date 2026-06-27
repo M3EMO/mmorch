@@ -19,12 +19,7 @@ from .cascade import cascade, CascadeResult
 from .checkers import check
 from .feedback import ThompsonBandit, record_outcome
 
-_FENCE = re.compile(r"```(?:python)?\s*(.*?)```", re.DOTALL)
-
-
-def extract_code(text: str) -> str:
-    m = _FENCE.search(text)
-    return (m.group(1) if m else text).strip()
+from .textutil import extract_fence as extract_code  # noqa: E402 (dedup of the local fence helper)
 
 
 @dataclass

@@ -35,12 +35,7 @@ import uuid
 from .checkers import check
 from .config import family_of
 
-_FENCE = re.compile(r"```(?:python|json)?\s*(.*?)```", re.DOTALL)
-
-
-def _extract_block(text: str) -> str:
-    m = _FENCE.search(text)
-    return (m.group(1) if m else text).strip()
+from .textutil import extract_fence as _extract_block  # dedup of the local fence helper
 
 
 # --------------------------------------------------------------------------- #

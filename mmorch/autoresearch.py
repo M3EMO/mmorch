@@ -23,12 +23,7 @@ from pathlib import Path
 from .hillclimb import hillclimb, ClimbCtx, ClimbResult
 from .config import DEFAULT_GENERATOR
 
-_FENCE = re.compile(r"```(?:[a-zA-Z]*)?\s*(.*?)```", re.DOTALL)
-
-
-def _extract(text: str) -> str:
-    m = _FENCE.search(text or "")
-    return (m.group(1) if m else (text or "")).strip()
+from .textutil import extract_fence as _extract  # dedup of the local fence helper
 
 
 def parse_metric(text: str, regex: str) -> float:

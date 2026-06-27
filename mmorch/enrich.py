@@ -19,12 +19,11 @@ import re
 
 from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER, family_of
 
-_FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
+from .textutil import extract_fence  # dedup of the local fence helper
 
 
 def _extract_json(text: str):
-    m = _FENCE.search(text)
-    blob = (m.group(1) if m else text).strip()
+    blob = extract_fence(text)
     try:
         return json.loads(blob)
     except Exception:

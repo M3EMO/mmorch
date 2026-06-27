@@ -19,12 +19,7 @@ from dataclasses import dataclass, field
 
 from .events import emit
 
-_FENCE = re.compile(r"```(?:python)?\s*(.*?)```", re.DOTALL)
-
-
-def _extract(text: str) -> str:
-    m = _FENCE.search(text)
-    return (m.group(1) if m else text).strip()
+from .textutil import extract_fence as _extract  # dedup of the local fence helper
 
 
 def _checkpoint(job_id: str, step: int, content: str, gate, role: str = "coder"):
