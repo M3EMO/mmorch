@@ -23,7 +23,7 @@ import json
 from pathlib import Path
 
 from .feedback import ThompsonBandit
-from .signature import key as sig_key
+from .signature import Signature, key as sig_key, signature
 
 ROOT = Path(__file__).resolve().parent.parent
 _SIG_BANDIT = ROOT / "logs" / "bandit_sig.json"
@@ -72,6 +72,60 @@ def coherence(task: str, *, complexity: str = "", bandit: ThompsonBandit | None 
     b = bandit or ThompsonBandit(_SIG_BANDIT)
     sk = sig_key(task, complexity=complexity)
     return sum(s["n"] for a, s in b.stats().items() if a.endswith("#" + sk))
+
+
+def decide(models: list[str], task: str, *, complexity: str = "", threshold: float = 0.62,
+           min_n: int = 5, bandit: ThompsonBandit | None = None) -> tuple[str, str | None, str]:
+    """Phase 3 GATE (one-line policy, hysteresis deferred): if this signature is FAMILIAR
+    (coherence >= min_n) AND its best candidate is good enough (mean >= threshold, n >= min_n),
+    COMMIT to that model cheaply — no escalation. Else ESCALATE (let route/Opus decide).
+    Returns (action, model|None, reason)."""
+    b = bandit or ThompsonBandit(_SIG_BANDIT)
+    coh = coherence(task, complexity=complexity, bandit=b)
+    best_model, best_mean, best_n = candidates(models, task, complexity=complexity, k=1, bandit=b)[0]
+    if coh >= min_n and best_mean >= threshold and best_n >= min_n:
+        return ("commit", best_model, f"familiar coh={coh} best={best_model}@{best_mean:.2f}(n={best_n})")
+    return ("escalate", None, f"unfamiliar/weak coh={coh} best={best_mean:.2f}(n={best_n})")
+
+
+def reframe(task: str, *, complexity: str = "") -> list[str]:
+    """Phase 4 INSIGHT: on impasse, RE-REPRESENT by relaxing the signature one step at a time
+    -> broader NEIGHBOR signature keys (most-specific relaxation first). Dropping a constraint
+    bit recalls the more general bucket; dropping grounding/complexity is the coarse fallback.
+    (This is also the cold-start neighbor-pooling — predictive-coding's 'predict from above'.)"""
+    s = signature(task, complexity=complexity)
+    out: list[str] = []
+    for drop in s.bits:  # relax each constraint bit -> a more general signature
+        out.append(Signature(s.op_type, s.grounding, tuple(x for x in s.bits if x != drop), s.complexity).to_key())
+    if s.complexity:     # drop the Cynefin level
+        out.append(Signature(s.op_type, s.grounding, s.bits, "").to_key())
+    out.append(Signature(s.op_type, "self_contained", (), "").to_key())  # op_type-only coarse fallback
+    seen, uniq = set(), []
+    for k in out:
+        if k not in seen:
+            seen.add(k); uniq.append(k)
+    return uniq
+
+
+def candidates_pooled(models: list[str], task: str, *, complexity: str = "", k: int = 3,
+                      bandit: ThompsonBandit | None = None) -> list[tuple[str, float, int]]:
+    """INSIGHT-backed recall: if the exact signature is COLD (all n==0), fall back to the
+    nearest NEIGHBOR signature (reframe) that has evidence, and return ITS candidate set.
+    Cold tasks inherit what worked on structurally-adjacent tasks instead of pure exploration."""
+    b = bandit or ThompsonBandit(_SIG_BANDIT)
+    direct = candidates(models, task, complexity=complexity, k=k, bandit=b)
+    if any(n > 0 for _, _, n in direct):
+        return direct
+    stats = b.stats()
+    for sk in reframe(task, complexity=complexity):
+        pooled = []
+        for m in models:
+            s = stats.get(f"{m}#{sk}", {"mean": 0.5, "n": 0})
+            pooled.append((m, s["mean"], s["n"]))
+        if any(n > 0 for _, _, n in pooled):
+            pooled.sort(key=lambda t: (-t[1], -t[2]))
+            return pooled[:k]
+    return direct  # genuinely novel — nothing adjacent; caller explores/escalates
 
 
 def _load(p: Path) -> list[dict]:
@@ -144,5 +198,19 @@ if __name__ == "__main__":
     # coherence: code sig is familiar (16 samples), the other sig is cold (0)
     assert coherence(code_task, bandit=bb) == 16, coherence(code_task, bandit=bb)
     assert coherence(other_task, bandit=bb) == 0, coherence(other_task, bandit=bb)
+    # Phase 3 GATE: familiar+good -> commit; cold -> escalate.
+    act, mdl, _ = decide(["deepseek-chat", "gemini-2.5-flash"], code_task, bandit=bb)
+    assert act == "commit" and mdl == "deepseek-chat", (act, mdl)
+    act2, mdl2, _ = decide(["deepseek-chat", "gemini-2.5-flash"], other_task, bandit=bb)
+    assert act2 == "escalate" and mdl2 is None, (act2, mdl2)
+    # Phase 4 INSIGHT: a cold task that's structurally adjacent inherits the neighbor's evidence.
+    warm = "Generá en Python def f(a): devolvé la suma"
+    for _ in range(6):
+        record("glm-4.6", 1.0, warm, bandit=bb)
+    cold_variant = "Generá en Python def f(a): devolvé la suma EXACTA con negativos estrictamente"
+    assert all(n == 0 for _, _, n in candidates(["glm-4.6", "x"], cold_variant, bandit=bb)), "exact sig should be cold"
+    pooled = candidates_pooled(["glm-4.6", "x"], cold_variant, bandit=bb)
+    assert pooled[0][0] == "glm-4.6" and pooled[0][2] > 0, ("insight pooling should find the neighbor", pooled)
+    assert reframe(cold_variant), "reframe should yield neighbor signatures"
     tmp.unlink()
-    print("intuition OK — sig-keyed select, candidate set, coherence (familiar vs cold)")
+    print("intuition OK — sig-keyed select, candidate set, coherence, gate(commit/escalate), insight pooling")

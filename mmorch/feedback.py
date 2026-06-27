@@ -43,6 +43,17 @@ def record_outcome(arm: str, reward: float, *, pattern: str = "",
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(asdict(o), ensure_ascii=False) + "\n")
+    # Phase 5 forward-wire: also LEARN into the signature-keyed bandit when a task
+    # context is present (previously outcomes were logged but never trained the bandit).
+    # Lazy import: feedback must not hard-depend on intuition (cycle). try/except: a
+    # learning failure must NEVER break the append — logging is the contract.
+    # ponytail: extra ~regex+small-json-write per outcome; fine at orchestration volume.
+    if context:
+        try:
+            from .intuition import record as _sig_record
+            _sig_record(arm, o.reward, context)
+        except Exception:
+            pass
     return o
 
 
