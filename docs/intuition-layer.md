@@ -1,8 +1,11 @@
 # mmorch cognitive architecture — synthesis (intuition + insight)
 
-Status: **Phase 0+1+2 BUILT** (`signature.py` baa4013, `intuition.py` 2e7d0ef — backfilled 1893
-logged outcomes cero-cupo into 84 arms/74 sigs). Phase 3 gate / forward-wiring / Phase 4 INSIGHT
-deferred. Consolidates a ~16-source harvest; supersedes the A–U notes in the `intuition-layer` memory.
+Status: **Phases 0–5 BUILT** (`signature.py` baa4013; `intuition.py` 2e7d0ef + 045a6f7;
+`record_outcome` forward-wire 045a6f7). Backfilled 1893 logged outcomes cero-cupo → 84 arms/74 sigs.
+`decide` (gate), `reframe`/`candidates_pooled` (insight), and the learning forward-wire all ship.
+**Last integration remaining:** the live routers (`route.py`, cascade, server) don't yet *call*
+`intuition.decide`/`select` — learning accrues now, but routing won't consult the sig-bandit until a
+caller invokes it. That's the only open piece. Consolidates a ~16-source harvest; supersedes the A–U notes.
 
 mmorch is already ~60% a cognitive architecture (FRAME, REASON, VERIFY, MEMORY, most of
 EXEC-discipline exist). The real gap = the **INTUIT** component + the **INSIGHT** path. This doc
