@@ -43,6 +43,7 @@ def route(
     system: str | None = None,
     phase: str = "",
     calibrated: bool = True,
+    models: list[str] | None = None,
 ) -> RouteResult:
     """Genera en modelo barato + self-score. escalate=True si conf < threshold.
 
@@ -51,6 +52,18 @@ def route(
     outcomes). Asi el umbral opera sobre una senal real, no sobre el self-score crudo.
     calibrated=False vuelve al gating crudo (A/B o si no hay data de calibracion).
     """
+    # intuition layer (opt-in): if a model menu is given, let the signature-keyed bandit
+    # pick gen_model when this task's structure is FAMILIAR; cold/weak -> keep the default
+    # and let the outcome train it. Default (models=None) -> behavior unchanged. ponytail:
+    # A/B this on real traffic before trusting it over the existing default.
+    if models:
+        try:
+            from .intuition import decide
+            act, picked, _ = decide(models, prompt)
+            if act == "commit" and picked:
+                gen_model = picked
+        except Exception:
+            pass  # never let routing-by-signature break the actual route
     sys_msg = (system + "\n" if system else "") + (
         "Al final, en una linea aparte, escribi exactamente: CONFIDENCE: <n> "
         "donde <n> es tu certeza de 0 a 1 sobre la respuesta."

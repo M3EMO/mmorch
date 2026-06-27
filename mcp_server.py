@@ -43,6 +43,8 @@ from mmorch.sessions import ingest_session as _ingest_session
 from mmorch.session_skills import (ingest_workflows as _ingest_workflows,
                                    top_playbooks as _top_playbooks)
 from mmorch.config import DEFAULT_ROUTER
+from mmorch.intuition import (decide as _intuition_decide, candidates as _intuition_candidates,
+                              coherence as _intuition_coherence, reframe as _intuition_reframe)
 from mmorch.feedback import (record_outcome as _record_outcome,
                             ThompsonBandit as _ThompsonBandit,
                             calibration as _calibration)
@@ -156,16 +158,37 @@ def mmorch_route(
     prompt: str,
     gen_model: str = DEFAULT_GENERATOR,
     threshold: float = 0.7,
+    models: list[str] | None = None,
 ) -> str:
     """Confidence-gated routing (I-2). A cheap external model answers and
     self-scores; returns escalate=True if confidence < threshold so the
     orchestrator (Opus) only intervenes when needed. Spends external $, not cupo.
+    If `models` is given, the signature-keyed intuition bandit picks gen_model when
+    this task's structure is FAMILIAR (else falls back to the default gen_model).
     Returns JSON {answer, confidence, escalate, model, cost_usd}.
     """
-    r = route(prompt, gen_model=gen_model, threshold=threshold, phase="mcp")
+    r = route(prompt, gen_model=gen_model, threshold=threshold, phase="mcp", models=models)
     return json.dumps({
         "answer": r.answer, "confidence": r.confidence, "escalate": r.escalate,
         "model": r.model, "cost_usd": r.cost_usd}, ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_intuition(task: str, models: list[str], complexity: str = "") -> str:
+    """Intuition layer READ (cero cupo, no generation): what the signature-keyed bandit
+    recommends for `task` among `models`, and how familiar the task's structure is. Use to
+    A/B the intuition router vs the default before trusting it, or to inspect what was learned.
+    Returns JSON {decision, model, reason, coherence, candidates:[[model,mean,n]],
+    reframe_neighbors:[...]}. decision=commit means the structure is familiar+good; escalate
+    means cold/weak (let route/Opus decide). coherence = samples seen at this signature.
+    """
+    act, mdl, reason = _intuition_decide(models, task, complexity=complexity)
+    return json.dumps({
+        "decision": act, "model": mdl, "reason": reason,
+        "coherence": _intuition_coherence(task, complexity=complexity),
+        "candidates": _intuition_candidates(models, task, complexity=complexity),
+        "reframe_neighbors": _intuition_reframe(task, complexity=complexity)[:4],
+    }, ensure_ascii=False)
 
 
 @mcp.tool()
