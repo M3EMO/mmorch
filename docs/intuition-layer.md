@@ -5,8 +5,11 @@ Status: **Phases 0–5 BUILT** (`signature.py` baa4013; `intuition.py` 2e7d0ef +
 `decide` (gate), `reframe`/`candidates_pooled` (insight), the learning forward-wire, AND the
 router wiring all ship (`5fe4ba0`): `route(models=[...])` + `run_code_task(intuition_models=[...])`
 consult the sig-bandit (opt-in, default-off = zero regression); `mmorch_intuition` MCP tool exposes
-the decision for A/B. **Only open piece = a DECISION, not a build:** flip intuition ON by default in
-the routers, gated on an A/B vs the current default on real traffic. **Upgrade path (deferred):** swap
+the decision for A/B. **ON BY DEFAULT** (`7cdfe93`): `route`/`run_code_task` use
+`config.DEFAULT_INTUITION_POOL` when no models passed; `decide()` guards keep cold/thin sigs on the
+default, so only FAMILIAR sigs change. Kill switch `MMORCH_INTUITION=off` reverts; `models=[]` opts a
+call out. Sig-bandit keyed by MODEL only (`@thr` stripped → valid REGISTRY keys, samples pool across
+thresholds). **Upgrade path (deferred):** swap
 the tabular bandit for LinTS (linear contextual) — only when the tabular+`candidates_pooled` path
 measurably underperforms; it's a drop-in swap of the same record/select/candidates interface.
 Consolidates a ~16-source harvest; supersedes the A–U notes.
