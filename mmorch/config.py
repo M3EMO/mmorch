@@ -146,6 +146,10 @@ DEFAULT_GENERATOR = "deepseek-chat"        # -> deepseek-v4-flash no-thinking
 DEFAULT_VERIFIER = "gemini-3.1-flash-lite"  # cross-family vs deepseek; -40% out vs 2.5-flash
 DEFAULT_ROUTER = "gemini-2.5-flash-lite"    # sigue siendo el out/M mas barato servido
 
+# Candidate generator pool the intuition layer (signature-keyed bandit) picks among when
+# routing is left to it. Bare valid REGISTRY keys only, spanning families (decorrelate).
+DEFAULT_INTUITION_POOL = ["deepseek-chat", "deepseek-v4-pro", "gemini-2.5-flash", "glm-4.6"]
+
 
 def family_of(model_key: str) -> str:
     return REGISTRY[model_key].family

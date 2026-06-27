@@ -6,6 +6,7 @@ caller (Opus) decida. Respeta observabilidad (call loggea).
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 
@@ -52,16 +53,19 @@ def route(
     outcomes). Asi el umbral opera sobre una senal real, no sobre el self-score crudo.
     calibrated=False vuelve al gating crudo (A/B o si no hay data de calibracion).
     """
-    # intuition layer (opt-in): if a model menu is given, let the signature-keyed bandit
-    # pick gen_model when this task's structure is FAMILIAR; cold/weak -> keep the default
-    # and let the outcome train it. Default (models=None) -> behavior unchanged. ponytail:
-    # A/B this on real traffic before trusting it over the existing default.
+    # intuition layer (ON by default): the signature-keyed bandit picks gen_model when this
+    # task's structure is FAMILIAR (decide() guards: enough samples + good mean); cold/weak ->
+    # keep the passed default and let the outcome train it. Kill switch MMORCH_INTUITION=off
+    # restores the old fixed-default behavior instantly. Pass models=[] to opt a call out.
+    if models is None and os.getenv("MMORCH_INTUITION", "on").lower() != "off":
+        from .config import DEFAULT_INTUITION_POOL
+        models = DEFAULT_INTUITION_POOL
     if models:
         try:
             from .intuition import decide
             act, picked, _ = decide(models, prompt)
             if act == "commit" and picked:
-                gen_model = picked
+                gen_model = picked.split("@")[0]  # defensive: ensure a valid REGISTRY key
         except Exception:
             pass  # never let routing-by-signature break the actual route
     sys_msg = (system + "\n" if system else "") + (

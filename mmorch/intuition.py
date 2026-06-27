@@ -30,7 +30,9 @@ _SIG_BANDIT = ROOT / "logs" / "bandit_sig.json"
 
 
 def _arm(model: str, task: str, complexity: str = "") -> str:
-    return f"{model}#{sig_key(task, complexity=complexity)}"
+    # key by MODEL only: strip any "@thr" suffix (threshold is cascade's decision, not this
+    # bandit's) so a model's samples pool across thresholds and the arm is a valid model key.
+    return f"{model.split('@')[0]}#{sig_key(task, complexity=complexity)}"
 
 
 def record(model: str, reward: float, task: str, *, complexity: str = "",
@@ -57,11 +59,10 @@ def candidates(models: list[str], task: str, *, complexity: str = "", k: int = 3
     High-recall on purpose — precision comes from VERIFY, never the key."""
     b = bandit or ThompsonBandit(_SIG_BANDIT)
     stats = b.stats()
-    sk = sig_key(task, complexity=complexity)
     out = []
     for m in models:
-        s = stats.get(f"{m}#{sk}", {"mean": 0.5, "n": 0})
-        out.append((m, s["mean"], s["n"]))
+        s = stats.get(_arm(m, task, complexity=complexity), {"mean": 0.5, "n": 0})
+        out.append((m.split("@")[0], s["mean"], s["n"]))
     out.sort(key=lambda t: (-t[1], -t[2]))
     return out[:k]
 
@@ -120,8 +121,8 @@ def candidates_pooled(models: list[str], task: str, *, complexity: str = "", k: 
     for sk in reframe(task, complexity=complexity):
         pooled = []
         for m in models:
-            s = stats.get(f"{m}#{sk}", {"mean": 0.5, "n": 0})
-            pooled.append((m, s["mean"], s["n"]))
+            s = stats.get(f"{m.split('@')[0]}#{sk}", {"mean": 0.5, "n": 0})
+            pooled.append((m.split("@")[0], s["mean"], s["n"]))
         if any(n > 0 for _, _, n in pooled):
             pooled.sort(key=lambda t: (-t[1], -t[2]))
             return pooled[:k]
@@ -212,5 +213,9 @@ if __name__ == "__main__":
     pooled = candidates_pooled(["glm-4.6", "x"], cold_variant, bandit=bb)
     assert pooled[0][0] == "glm-4.6" and pooled[0][2] > 0, ("insight pooling should find the neighbor", pooled)
     assert reframe(cold_variant), "reframe should yield neighbor signatures"
+    # @thr is stripped: an outcome recorded with "model@0.0" is found by the bare "model".
+    record("deepseek-v4-pro@0.0", 1.0, code_task, bandit=bb)
+    assert any(m == "deepseek-v4-pro" and n > 0
+               for m, _, n in candidates(["deepseek-v4-pro"], code_task, bandit=bb)), "thr-strip keying"
     tmp.unlink()
     print("intuition OK — sig-keyed select, candidate set, coherence, gate(commit/escalate), insight pooling")

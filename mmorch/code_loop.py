@@ -11,6 +11,7 @@ select y update deben ver el MISMO contexto pa que el k-NN encuentre vecinos.
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -62,17 +63,20 @@ def run_code_task(
     """
     sysmsg = (system or "You are a Python programmer. Output ONLY the function source "
               "code in a python code block, no explanation.")
-    # intuition layer (opt-in): if this task's signature is FAMILIAR, try its proven-best
+    # intuition layer (ON by default): if this task's signature is FAMILIAR, try its proven-best
     # model FIRST (prepend as cascade step 0). The loop already TRAINS the sig-bandit via
-    # record_outcome below; this closes the loop by also CONSULTING it. Default off.
-    # ponytail: A/B intuition_models on/off before making it the default path.
+    # record_outcome below; this closes the loop by also CONSULTING it. Kill switch
+    # MMORCH_INTUITION=off; pass intuition_models=[] to opt a call out.
+    if intuition_models is None and os.getenv("MMORCH_INTUITION", "on").lower() != "off":
+        from .config import DEFAULT_INTUITION_POOL
+        intuition_models = DEFAULT_INTUITION_POOL
     if intuition_models:
         try:
             from .intuition import decide
             act, picked, _ = decide(intuition_models, prompt)
             if act == "commit" and picked:
                 thr0 = steps[0][1] if steps else 0.7
-                steps = [(picked, thr0)] + list(steps or [])
+                steps = [(picked.split("@")[0], thr0)] + list(steps or [])
         except Exception:
             pass
     res: CascadeResult = cascade(prompt, steps=steps, system=sysmsg, phase=phase,
