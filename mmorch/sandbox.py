@@ -99,9 +99,13 @@ def run_sandboxed(code: str, *, timeout: float = 5.0, input_text: str = "",
             if os.environ.get(k):
                 env[k] = os.environ[k]
         cmd = [sys.executable] + (argv if argv is not None else ["_run.py"])
+        # CREATE_NO_WINDOW on Windows: no console pop/stall, and the child does NOT inherit a
+        # stdio MCP server's pipes (input= gives it its own closed stdin). Lets callers spawned
+        # from the MCP server (speedup) use this runner without the inherited-stdin hang.
+        kw = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
         try:
             p = subprocess.run(cmd, cwd=td, input=input_text, capture_output=True,
-                               text=True, timeout=timeout, env=env)
+                               text=True, timeout=timeout, env=env, **kw)
             return SandboxResult(p.returncode == 0, p.stdout, p.stderr, p.returncode, False)
         except subprocess.TimeoutExpired as e:
             return SandboxResult(False, (e.stdout or "") if isinstance(e.stdout, str) else "",

@@ -12,12 +12,6 @@ Library-only (propose/score are callables). `gen` is injectable so a test can dr
 from __future__ import annotations
 
 import json
-import os
-import re
-import subprocess
-import sys
-import tempfile
-from pathlib import Path
 
 from .hillclimb import hillclimb
 from .textutil import extract_fence as _extract  # dedup of the local fence helper
@@ -55,28 +49,16 @@ def _harness(source: str, setup: str, call: str, runs: int) -> str:
 
 
 def _measure(source: str, setup: str, call: str, runs: int, timeout: float):
-    """Run the candidate in a fresh process; return (result, median_seconds). Raises on any failure.
-    stdin=DEVNULL + no inherited handles: spawning a child from a stdio MCP server otherwise lets the
-    child inherit the server's stdin pipe (the MCP transport) and hang. CREATE_NO_WINDOW: no console
-    pop/stall on Windows."""
-    code = _harness(source, setup, call, runs)
-    kw = {}
-    if sys.platform == "win32":
-        kw["creationflags"] = subprocess.CREATE_NO_WINDOW
-    # SCRUBBED env: the candidate is LLM-generated code — don't hand it the parent's secrets
-    # (API keys, MMORCH_SERVER_TOKEN) where it could read os.environ and exfil via stdout.
-    # Minimal env like sandbox.py; PYTHONHASHSEED=0 for determinism. (Was inheriting full env.)
-    env = {"PATH": os.environ.get("PATH", ""), "PYTHONHASHSEED": "0",
-           "PYTHONDONTWRITEBYTECODE": "1"}
-    for k in ("SYSTEMROOT", "TEMP", "TMP"):
-        if os.environ.get(k):
-            env[k] = os.environ[k]
-    p = subprocess.run([sys.executable, "-c", code], stdin=subprocess.DEVNULL,
-                       capture_output=True, text=True, encoding="utf-8", errors="replace",
-                       timeout=timeout, env=env, **kw)
-    if p.returncode != 0:
-        raise RuntimeError((p.stderr or "nonzero")[-200:])
-    line = p.stdout.strip().splitlines()[-1]
+    """Run the candidate in the SHARED sandbox (env-scrubbed ephemeral process — see sandbox.py)
+    and return (result, median_seconds). One execution path for all LLM-generated code: the env
+    scrub (no API keys / MMORCH_SERVER_TOKEN reachable), temp cwd, timeout+kill, and Windows
+    no-console handling all live in run_sandboxed. Raises on nonzero exit OR timeout, so a bad
+    candidate counts as a failed hillclimb round."""
+    from .sandbox import run_sandboxed
+    r = run_sandboxed(_harness(source, setup, call, runs), timeout=timeout)
+    if r.returncode != 0 or r.timed_out:
+        raise RuntimeError((r.stderr or "nonzero")[-200:])
+    line = r.stdout.strip().splitlines()[-1]
     d = json.loads(line)
     return d["r"], float(d["sec"])
 
