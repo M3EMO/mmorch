@@ -200,39 +200,7 @@ async def run_workflow(request):
                          "steps": len(spec["steps"]), "apply": apply and bool(project)})
 
 
-async def sync_pull(request):
-    from starlette.responses import JSONResponse
-    if not _token_ok(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    from .sync import pull_all
-    return JSONResponse(pull_all())
-
-
-async def fleet_handler(request):
-    from starlette.responses import JSONResponse
-    if not _token_ok(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    from .fleet import list_hosts, register_host, fleet_state
-    if request.method == "POST":
-        body = await request.json()
-        try:
-            r = register_host(body.get("name", ""), body.get("url", ""), body.get("token", ""))
-            return JSONResponse({"registered": r})
-        except Exception as e:
-            return JSONResponse({"error": str(e)[:200]}, status_code=400)
-    return JSONResponse({"hosts": list_hosts(), "state": fleet_state()})
-
-
-async def fleet_run(request):
-    """Forwardea un job a otro host del fleet (server->server). body: {host, path, payload}."""
-    from starlette.responses import JSONResponse
-    if not _token_ok(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    from .fleet import forward
-    body = await request.json()
-    host = body.get("host", ""); path = body.get("path", "/run/project")
-    payload = body.get("payload", {})
-    return JSONResponse(forward(host, path, payload))
+from .server_fleet import sync_pull, fleet_handler, fleet_run
 
 
 async def kill_job(request):
