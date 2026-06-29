@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **84 módulos · 43 MCP tools · 425 tests.**
+_Auto-generado por `mmorch.docgen`._ **85 módulos · 44 MCP tools · 425 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -46,6 +46,7 @@ _Auto-generado por `mmorch.docgen`._ **84 módulos · 43 MCP tools · 425 tests.
 | `mmorch/claude_exec.py` | claude_exec — ejecutor que corre en el PLAN de Claude (cupo), no por API. Invoca el |
 | `mmorch/code_embedder.py` | code_embedder — inferencia NUMPY PURA del encoder SimCLR del flywheel (sin torch). |
 | `mmorch/code_loop.py` | code_loop — el WIRE de Fase 5 a produccion: tareas de CODIGO con lazo cerrado. |
+| `mmorch/code_review.py` | code_review — cero-cupo senior reviewer: read code, flag where it breaks the mmorch coding |
 | `mmorch/config.py` | Model registry — single source of truth for models, families, endpoints, prices. |
 | `mmorch/cost.py` | Cost model — USD from token counts, using REGISTRY prices. |
 | `mmorch/curiosity.py` | curiosity — deteccion de TENSION en la memoria (modulo cognitivo #3). |
@@ -179,7 +180,7 @@ Registered globally in `~/.claude.json` as server `mmorch`. Calling these spends
 external API $, not cupo — that's the point.
 
 <!-- mmorch:auto:tools -->
-MCP tools (server `mmorch`): `mmorch_adversarial_verify`, `mmorch_autoresearch`, `mmorch_bucket_rank`, `mmorch_budget_status`, `mmorch_build_spec`, `mmorch_cache_stats`, `mmorch_cascade`, `mmorch_check`, `mmorch_classify`, `mmorch_close_loop`, `mmorch_consolidate`, `mmorch_cynefin`, `mmorch_ensemble_verify`, `mmorch_error_rates`, `mmorch_evolve_self`, `mmorch_fan_out`, `mmorch_feedback_stats`, `mmorch_find_tension`, `mmorch_flag_contradiction`, `mmorch_forget_preview`, `mmorch_ingest_session`, `mmorch_innovate`, `mmorch_intuition`, `mmorch_learn`, `mmorch_memory_stats`, `mmorch_metrics_summary`, `mmorch_open_loops`, `mmorch_orchestra`, `mmorch_pending_review`, `mmorch_perfect`, `mmorch_recall`, `mmorch_record_outcome`, `mmorch_reinforce`, `mmorch_remember`, `mmorch_resolve_review`, `mmorch_route`, `mmorch_rubric_next`, `mmorch_rubric_start`, `mmorch_rubric_submit`, `mmorch_session_playbooks`, `mmorch_spec_interview`, `mmorch_speedup`, `mmorch_tournament`.
+MCP tools (server `mmorch`): `mmorch_adversarial_verify`, `mmorch_autoresearch`, `mmorch_bucket_rank`, `mmorch_budget_status`, `mmorch_build_spec`, `mmorch_cache_stats`, `mmorch_cascade`, `mmorch_check`, `mmorch_classify`, `mmorch_close_loop`, `mmorch_consolidate`, `mmorch_cynefin`, `mmorch_ensemble_verify`, `mmorch_error_rates`, `mmorch_evolve_self`, `mmorch_fan_out`, `mmorch_feedback_stats`, `mmorch_find_tension`, `mmorch_flag_contradiction`, `mmorch_forget_preview`, `mmorch_ingest_session`, `mmorch_innovate`, `mmorch_intuition`, `mmorch_learn`, `mmorch_memory_stats`, `mmorch_metrics_summary`, `mmorch_open_loops`, `mmorch_orchestra`, `mmorch_pending_review`, `mmorch_perfect`, `mmorch_recall`, `mmorch_record_outcome`, `mmorch_reinforce`, `mmorch_remember`, `mmorch_resolve_review`, `mmorch_review_code`, `mmorch_route`, `mmorch_rubric_next`, `mmorch_rubric_start`, `mmorch_rubric_submit`, `mmorch_session_playbooks`, `mmorch_spec_interview`, `mmorch_speedup`, `mmorch_tournament`.
 
 **Restart Claude Code** to load new tools.
 <!-- /mmorch:auto:tools -->

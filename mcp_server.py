@@ -45,6 +45,7 @@ from mmorch.session_skills import (ingest_workflows as _ingest_workflows,
 from mmorch.config import DEFAULT_ROUTER
 from mmorch.intuition import (decide as _intuition_decide, candidates as _intuition_candidates,
                               coherence as _intuition_coherence, reframe as _intuition_reframe)
+from mmorch.code_review import review as _review_code
 from mmorch.feedback import (record_outcome as _record_outcome,
                             ThompsonBandit as _ThompsonBandit,
                             calibration as _calibration)
@@ -171,6 +172,26 @@ def mmorch_route(
     return json.dumps({
         "answer": r.answer, "confidence": r.confidence, "escalate": r.escalate,
         "model": r.model, "cost_usd": r.cost_usd}, ensure_ascii=False)
+
+
+@mcp.tool()
+def mmorch_review_code(code: str = "", path: str = "") -> str:
+    """Senior code reviewer (cero cupo): flag where code breaks the mmorch coding principles
+    (docs/coding-principles.md) — module depth/cohesion/coupling, DRY, nesting, naming, scope,
+    why-comments, KISS, security. Cross-family refuted (DeepSeek↔Gemini) so style-opinion nitpicks
+    get pruned; subjective review, so truth is judgement not execution. Pass `code` inline OR a
+    `path` to read from disk. Returns JSON {path, findings:[{principle, severity, line, problem,
+    fix}], n_raw, n_confirmed, dropped}.
+    """
+    if path and not code:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                code = fh.read()
+        except Exception as e:
+            return json.dumps({"error": f"cannot read {path}: {str(e)[:160]}"})
+    if not code.strip():
+        return json.dumps({"error": "no code provided (pass code= or path=)"})
+    return json.dumps(_review_code(code, path=path), ensure_ascii=False)
 
 
 @mcp.tool()
