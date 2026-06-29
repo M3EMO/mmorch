@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **81 módulos · 43 MCP tools · 425 tests.**
+_Auto-generado por `mmorch.docgen`._ **82 módulos · 43 MCP tools · 425 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -96,6 +96,7 @@ _Auto-generado por `mmorch.docgen`._ **81 módulos · 43 MCP tools · 425 tests.
 | `mmorch/scout.py` | scout — pre-pass ENTORNO-PRIMERO (el patron central de Fable 5: 'primero aprende el |
 | `mmorch/server.py` | server — mmorch VISUAL nivel 3: progreso live de cada subagente + control TOTAL remoto. |
 | `mmorch/server_core.py` | server_core — shared in-process state + tiny request helpers for the server route modules. |
+| `mmorch/server_engine.py` | server_engine — the in-process job execution engine: the threads that drive rubric, |
 | `mmorch/server_frontend.py` | server_frontend — the live dashboard HTML, lifted verbatim out of server.py (it is a static string, not logic; keeping it here shrinks the god-module). |
 | `mmorch/session_skills.py` | session_skills — mina playbooks reusables de sesiones de Claude. De segmentos con |
 | `mmorch/sessions.py` | sessions — aprende de transcripts de Claude Code. Parsea el JSONL de sesion en |
