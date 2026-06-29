@@ -140,6 +140,16 @@ def store(session_id: str, body: str, est_tokens: int = 0) -> None:
         c.commit()
     finally:
         c.close()
+    # Mirror into mmorch's RAW episodic memory (cero-cost, no distill) so the captured context is
+    # recallable across sessions via mmorch_recall — not only re-injected after compaction. Raw
+    # episodic, NOT the curated markdown notes nor distilled semantic notes (no pollution of the
+    # curated layer). Fail-open: memory must never break the block store. Off via MMORCH_CTX_MIRROR=0.
+    if os.getenv("MMORCH_CTX_MIRROR", "1") != "0":
+        try:
+            from .memory import write_episode
+            write_episode("global", "context_block", body)
+        except Exception:
+            pass
 
 
 def latest(session_id: str, *, k: int = 1) -> list[str]:
@@ -184,6 +194,7 @@ if __name__ == "__main__":
     else:
         # self-check (temp transcript + temp db), cero-cupo
         import tempfile
+        os.environ["MMORCH_CTX_MIRROR"] = "0"   # don't touch real mmorch memory during the self-check
         d = Path(tempfile.mkdtemp())
         os.environ["MMORCH_CONTEXT_DB"] = str(d / "ctx.db")
         _DB = d / "ctx.db"
