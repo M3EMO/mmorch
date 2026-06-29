@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **85 módulos · 44 MCP tools · 425 tests.**
+_Auto-generado por `mmorch.docgen`._ **86 módulos · 44 MCP tools · 425 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -48,6 +48,7 @@ _Auto-generado por `mmorch.docgen`._ **85 módulos · 44 MCP tools · 425 tests.
 | `mmorch/code_loop.py` | code_loop — el WIRE de Fase 5 a produccion: tareas de CODIGO con lazo cerrado. |
 | `mmorch/code_review.py` | code_review — cero-cupo senior reviewer: read code, flag where it breaks the mmorch coding |
 | `mmorch/config.py` | Model registry — single source of truth for models, families, endpoints, prices. |
+| `mmorch/context_blocks.py` | context_blocks — the durable half of an "auto-compact to info-blocks" scheme for Claude Code. |
 | `mmorch/cost.py` | Cost model — USD from token counts, using REGISTRY prices. |
 | `mmorch/curiosity.py` | curiosity — deteccion de TENSION en la memoria (modulo cognitivo #3). |
 | `mmorch/dataset.py` | dataset — construye un dataset de CALIDAD DE CÓDIGO desde git history, SIN labels |
