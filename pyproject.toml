@@ -41,6 +41,13 @@ select = ["F", "E9", "B", "PLE"]
 "mmorch/*.py" = ["B011"]
 "tests/*.py" = ["B011"]
 
+[tool.mypy]
+# ADVISORY, not a hard gate (yet). The core is 85% type-annotated but was never checked;
+# a cold run = 71 errors. ruff is the enforced gate; mypy is the ratchet target — fix the 71
+# down incrementally, then promote to a gate. Run: mypy mmorch --ignore-missing-imports
+python_version = "3.12"
+ignore_missing_imports = true       # 3rd-party libs without stubs (litellm, fastembed, ...) = noise, not bugs
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
