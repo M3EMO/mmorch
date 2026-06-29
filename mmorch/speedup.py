@@ -12,6 +12,7 @@ Library-only (propose/score are callables). `gen` is injectable so a test can dr
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -62,9 +63,17 @@ def _measure(source: str, setup: str, call: str, runs: int, timeout: float):
     kw = {}
     if sys.platform == "win32":
         kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+    # SCRUBBED env: the candidate is LLM-generated code — don't hand it the parent's secrets
+    # (API keys, MMORCH_SERVER_TOKEN) where it could read os.environ and exfil via stdout.
+    # Minimal env like sandbox.py; PYTHONHASHSEED=0 for determinism. (Was inheriting full env.)
+    env = {"PATH": os.environ.get("PATH", ""), "PYTHONHASHSEED": "0",
+           "PYTHONDONTWRITEBYTECODE": "1"}
+    for k in ("SYSTEMROOT", "TEMP", "TMP"):
+        if os.environ.get(k):
+            env[k] = os.environ[k]
     p = subprocess.run([sys.executable, "-c", code], stdin=subprocess.DEVNULL,
                        capture_output=True, text=True, encoding="utf-8", errors="replace",
-                       timeout=timeout, **kw)
+                       timeout=timeout, env=env, **kw)
     if p.returncode != 0:
         raise RuntimeError((p.stderr or "nonzero")[-200:])
     line = p.stdout.strip().splitlines()[-1]

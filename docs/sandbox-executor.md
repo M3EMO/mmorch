@@ -1,72 +1,62 @@
-# Sandbox executor — the one mmorch module that earns Rust
+# Sandbox executor — refined: NO hand-rolled Rust; harden + adopt the existing sandbox
 
-Status: **DESIGN** (no code). The single mmorch component whose interface is naturally **data-only**
-(so it crosses an FFI cleanly) AND is genuinely **systems/security-level** (so Rust pays off) AND is
-called **coarsely** (one spawn per code-run; FFI per-call overhead is negligible). Every other module
-has callable/object seams (inject-a-fake idiom) → Python-coupled, no Rust benefit. See
-docs/coding-principles.md §"Seleccion de lenguaje" and the language analysis it came from.
+Status: **DESIGN REVISED after a cross-family refine + reading the actual code.** The earlier draft
+(a hand-rolled cross-platform Rust supervisor) is **REJECTED**. Two findings flipped it:
 
-## Why this one (the three criteria, met)
-1. **Data-only interface**: `run(code, lang, limits) -> Verdict` — string + numbers in, JSON out. No
-   Python closures or live objects cross the boundary. (Contrast `hillclimb(propose, score)` etc.,
-   which pass callables and can't FFI cheaply.)
-2. **Systems/security task**: isolating UNTRUSTED / LLM-generated code = process isolation, resource
-   limits, syscall/fs/net restriction, no GC pauses in the supervisor. Rust's home turf.
-3. **Coarse calls**: one invocation per code-run; wall-clock is dominated by the run itself, so the
-   FFI/spawn overhead doesn't matter (unlike a hot inner loop).
+1. **mmorch already has `mmorch/sandbox.py`** doing exactly the recommended approach: separate process,
+   **scrubbed env (no secrets/API keys)**, temp cwd, timeout+kill, a **static policy denylist**
+   (blocks socket/subprocess/os.system/requests/file-writes pre-exec), and a **Docker backend**
+   (`--network none --read-only --memory --pids-limit --cap-drop ALL`) = real isolation via an
+   existing, battle-tested tool. The Rust design was redundant with this.
+2. **Cross-family ensemble refuted the Rust design 0.9** (mmorch_ensemble_verify, cero cupo) on every axis.
 
-## The problem it fixes
-Today mmorch runs generated code with `subprocess` + `timeout` + `stdin=DEVNULL` + (Windows)
-`CREATE_NO_WINDOW` — see `speedup.py._measure`, `checkers.py`. That catches infinite loops and
-crashes, but is **NOT a sandbox**: the child can still write the filesystem, open the network
-(exfil), and exhaust resources (fork bomb, memory). For LLM-generated code that's a real, if
-moderate, surface.
+## Why Rust was rejected (the refutations, all valid)
+- **Reinvention / false security**: hand-rolling a cross-platform sandbox is hard and a *leaky* sandbox
+  is worse than none. Use platform-native, vetted tools (Docker/nsjail/bubblewrap on Linux; Windows
+  Sandbox/containers/Job-Objects on Windows). `sandbox.py` already shells Docker for the strong path.
+- **"Portable Rust" is self-contradicting**: the OS primitives differ (seccomp/landlock vs Job-Objects/
+  AppContainer) → it's two implementations anyway, not one portable binary. The portability claim collapses.
+- **Windows-primary host vs Linux-first plan**: backwards; and robust untrusted isolation on Windows via
+  a hand-rolled Rust binary is the hardest, least-vetted path.
+- **Premature**: a hardened Python subprocess + an existing container gets ~80% now. The Rust binary's
+  own "Phase-0 Python fallback" was a tacit admission a simpler path suffices.
 
-## The interface (data-only contract — the FFI seam)
-```
-run(code: str, *, lang: "python"|"node"|..., stdin: str = "", timeout_s: float,
-    mem_mb: int, no_net: bool = True, writable_tmp: bool = True) -> Verdict
-Verdict = { ok: bool, exit_code: int, timed_out: bool, stdout: str, stderr: str,
-            violations: [str], wall_s: float }
-```
-Pure JSON in / JSON out. This is what makes it the legit polyglot module: the Python side never
-needs to pass anything richer than data.
+→ Consistent with the language analysis: mmorch has **no module that justifies hand-rolled Rust.** The
+sandbox was the last candidate, and it falls — the right tool is an *existing* sandbox, not new Rust.
 
-## Isolation approach (two options; recommend OS-level supervisor)
-- **OS-level Rust supervisor (recommended for running real interpreters):** a small Rust binary that
-  spawns the target under tight limits and reports the Verdict. Linux: `seccomp` (syscall filter) +
-  `landlock`/namespaces (fs) + `rlimit` (cpu/mem/procs) + no-net netns. Windows (this user's host):
-  Job Objects (kill-on-close, memory/cpu caps, active-process limit) + a restricted token / AppContainer
-  + a scratch temp cwd. Fits mmorch's case (it runs generated **Python**, so we sandbox the real python).
-- **wasmtime (capability-based WASM host):** strongest isolation, cross-platform, no fs/net by default
-  — but the code must be WASM. Great for wasm-targetable languages; awkward for Python (needs a
-  Python-in-WASM runtime). Reserve for a future "run wasm-compiled code" path, not Python execution.
+## The real hole the refine surfaced (FIXED)
+The threat model was complacent: LLM-generated code does non-malicious damage NOW — and concretely,
+**`speedup.py` bypassed `sandbox.py`** and ran candidates with the **full inherited env**, so generated
+code could read API keys / `MMORCH_SERVER_TOKEN` from `os.environ` and exfil them via stdout (captured +
+logged). `checkers.py` correctly used `run_sandboxed`; speedup was the leak. **Fixed**: `speedup._measure`
+now passes a scrubbed minimal env (verified: a generated `os.environ.get('MMORCH_SERVER_TOKEN')` → `<absent>`).
 
-## The bridge: subprocess, NOT PyO3
-Call the Rust binary as a **subprocess** (`mmorch-sandbox`, JSON over stdio), not a PyO3 extension.
-Why: simpler (no Python↔Rust build coupling, no ABI/wheel matrix), language-agnostic, and the
-data-only contract is natural over stdio. Coarse calls make spawn overhead irrelevant. PyO3 only if
-profiling later shows the spawn cost matters (it won't — the run dominates).
+## Recommended posture (no new module, no Rust)
+1. **One execution path.** All code-exec routes through `sandbox.py` (scrubbed env + temp cwd + timeout).
+   speedup is now env-scrubbed; the DRY end-state is to route speedup's `_measure` *through*
+   `run_sandboxed` — deferred only because `run_sandboxed` must first absorb speedup's Windows specifics
+   (`CREATE_NO_WINDOW` + `stdin=DEVNULL`, which fixed a real MCP-stdio hang). Until then, two paths but
+   both env-safe.
+2. **Strong isolation = the Docker backend** (`backend="docker"`), already implemented: `--network none`,
+   read-only fs + tmpfs, memory/pids limits, cap-drop ALL. Use it for genuinely untrusted code.
+3. **Defense-in-depth = `enforce_policy=True`** (static denylist) on by default for untrusted runs, so
+   dangerous code is rejected *before* execution, not relying on isolation alone.
+4. **Windows strong-isolation gap** (when it matters): use **Windows Sandbox** or a container, invoked
+   from Python — NOT a hand-rolled Rust Job-Objects supervisor.
 
-## Threat model (honest — sets the urgency, not the design)
-Private Tailscale, token-auth, code generated by **cheap models (DeepSeek/Gemini), not an adversary**.
-So the risk today = buggy generated code (loops/crashes — already handled) more than malicious code.
-Urgency = **moderate, not now**. The Rust sandbox becomes worth funding when: mmorch is exposed more
-broadly, runs less-trusted code, or you want defense-in-depth on the fs/net/resource axes the current
-subprocess leaves open. Design it now; build when the threat model rises.
-
-## Build order (when funded)
-- **Phase 0 — Python contract + fallback**: `mmorch/sandbox.py` `run(...) -> Verdict` that shells the
-  Rust binary if present, else falls back to today's `subprocess`+timeout (so nothing regresses while
-  the binary doesn't exist). Self-check on the fallback path.
-- **Phase 1 — Rust `mmorch-sandbox` (Linux first)**: spawn under rlimit+timeout+scratch-tmp+no-net,
-  capture stdout/stderr/exit, emit Verdict JSON. Then the **Windows** path (Job Objects).
-- **Phase 2 — wire**: point `checkers.py` / `speedup.py` / `code_loop.py` at `sandbox.run` instead of
-  raw subprocess. Their interface is already "code + tests -> pass/fail" = data-only, so the swap is local.
-- **Phase 3 (optional)**: wasmtime path for wasm-targetable code.
+## Build order (small, all Python, no Rust)
+- **Done**: env-scrub `speedup._measure` (closes the exfil hole).
+- **Next (cheap, real)**: port `CREATE_NO_WINDOW`/`stdin=DEVNULL` into `run_sandboxed`, then route
+  `speedup._measure` through it → one safe execution path (DRY). Default `enforce_policy=True` for
+  untrusted-code callers.
+- **When threat rises**: make the Docker backend the default for untrusted runs; document Windows-Sandbox
+  invocation for the Windows host.
 
 ## Non-goals
-- Not a general container runtime; not adversarial multi-tenant isolation.
-- Don't reinvent on Linux if `bubblewrap`/`nsjail` already fit — but they're not cross-platform
-  (no Windows), so a thin portable Rust supervisor is the reason this is a Rust module, not a wrapper.
-- Don't PyO3 it (subprocess is simpler and the calls are coarse).
+- No hand-rolled Rust sandbox (refuted: reinvention, false security, non-portable, premature).
+- No new sandbox module — `sandbox.py` exists and is the right shape; harden/adopt it.
+
+## Provenance
+Cross-family refine: `mmorch_ensemble_verify` (DeepSeek gen, Gemini skeptics), unanimous refute 0.9,
+$0.002 — killed the Rust design and exposed the threat-model complacency that led to finding the
+speedup env-exfil hole.
