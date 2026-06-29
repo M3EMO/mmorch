@@ -148,7 +148,7 @@ def test_adversarial_verify_uses_checker_no_api():
 
 
 def test_code_quality():
-    radon = pytest.importorskip("radon")
+    pytest.importorskip("radon")
     good = check("code_quality", code='def add(a, b):\n    """suma."""\n    return a + b\n')
     broken = check("code_quality", code="def f(:\n")
     messy = check("code_quality", code="def f(a,b,c,d,e,f,g):\n" + "    if a:\n" * 6 + "        return 1\n")

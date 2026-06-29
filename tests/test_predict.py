@@ -1,5 +1,5 @@
 """tests predict.py — v0.1 predictor (out_tokens/latencia/cost). Sin API, todo local."""
-from mmorch.predict import Predictor, _quantile, train, cross_val_error
+from mmorch.predict import Predictor, _quantile, cross_val_error
 
 
 def test_quantile():

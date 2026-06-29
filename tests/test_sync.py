@@ -1,6 +1,6 @@
 """sync: GitHub como bus entre maquinas. Un escritor (push a branch agente), auto-pull
 seguro (solo arbol limpio, ff-only). git mockeado (no toca repos reales)."""
-import sys, pathlib, importlib
+import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import mmorch.sync as SY
 

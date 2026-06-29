@@ -93,18 +93,37 @@ def _connect(path: Path = _DB_PATH):
         CREATE TABLE IF NOT EXISTS semantic (
             id BIGINT, ts DOUBLE, scope VARCHAR, text VARCHAR,
             embedding DOUBLE[], emb_model VARCHAR, dim INTEGER,
-            source_ids VARCHAR, tombstone BOOLEAN DEFAULT FALSE
+            source_ids VARCHAR, tombstone BOOLEAN DEFAULT FALSE,
+            verified BOOLEAN DEFAULT FALSE,
+            access_count INTEGER DEFAULT 0, last_accessed_at DOUBLE,
+            open_loop BOOLEAN DEFAULT FALSE, lifespan VARCHAR DEFAULT 'decay',
+            needs_review BOOLEAN DEFAULT FALSE
         );
         CREATE SEQUENCE IF NOT EXISTS seq_semantic START 1;
     """)
-    # migracion: columna `verified` (verification coverage, Martin 2026) en DBs previas.
-    # OJO: no usar ADD COLUMN IF NOT EXISTS — en DuckDB re-aplica el DEFAULT y PISA
-    # los valores existentes cuando la columna ya esta. Chequear el schema primero.
+    # migracion para DBs previas. OJO: no usar ADD COLUMN IF NOT EXISTS — en DuckDB
+    # re-aplica el DEFAULT y PISA los valores existentes cuando la columna ya esta.
+    # Chequear el schema primero y agregar solo lo que falta.
+    #   verified              verification coverage (Martin 2026)
+    #   access_count/         retention modulo #1 (decay Ebbinghaus): inputs de
+    #   last_accessed_at/       importance(), que es derivada (no se persiste).
+    #   open_loop               Zeigarnik (tarea abierta resiste olvido).
+    #   lifespan              'decay' | 'permanent' (modo dual de guardado por nota).
+    #   needs_review          modulo #2 (reconsolidacion): nota contradicha deja de
+    #                           surfacear (recall cae al raw) hasta resolve_review.
     cols = {r[0] for r in con.execute(
         "SELECT column_name FROM information_schema.columns "
         "WHERE table_name = 'semantic'").fetchall()}
-    if "verified" not in cols:
-        con.execute("ALTER TABLE semantic ADD COLUMN verified BOOLEAN DEFAULT FALSE")
+    for name, ddl in (
+        ("verified", "verified BOOLEAN DEFAULT FALSE"),
+        ("access_count", "access_count INTEGER DEFAULT 0"),
+        ("last_accessed_at", "last_accessed_at DOUBLE"),
+        ("open_loop", "open_loop BOOLEAN DEFAULT FALSE"),
+        ("lifespan", "lifespan VARCHAR DEFAULT 'decay'"),
+        ("needs_review", "needs_review BOOLEAN DEFAULT FALSE"),
+    ):
+        if name not in cols:
+            con.execute(f"ALTER TABLE semantic ADD COLUMN {ddl}")
     return con
 
 
@@ -136,22 +155,137 @@ def write_episode(scope: str, kind: str, payload: dict | str, *,
 
 
 def write_note(scope: str, text: str, *, source_ids: list[int] | None = None,
-               verified: bool = False, path: Path = _DB_PATH) -> int:
+               verified: bool = False, open_loop: bool = False,
+               permanent: bool = False, path: Path = _DB_PATH) -> int:
     """Persiste una nota destilada en la capa semantica + embedding (FIX C versionado).
     Si fastembed no esta -> embedding NULL, recall cae a coarse-only para esa nota.
     `verified=True` marca la nota como validada independientemente (cross-family o
-    checker) — alimenta verification_coverage en stats()."""
+    checker) — alimenta verification_coverage en stats().
+    `open_loop=True` la marca como tarea/pregunta abierta (Zeigarnik: resiste olvido
+    hasta close_loop()).
+    `permanent=True` la fija (lifespan='permanent'): nunca la olvida el decay. Default
+    'decay' = olvidable. Modo dual por nota."""
     con = _connect(path)
     try:
         sid = con.execute("SELECT nextval('seq_semantic')").fetchone()[0]
         vec = embed(text)
+        now = time.time()
         con.execute(
             "INSERT INTO semantic (id, ts, scope, text, embedding, emb_model, dim, "
-            "source_ids, tombstone, verified) VALUES (?,?,?,?,?,?,?,?,FALSE,?)",
-            [sid, time.time(), scope, text, vec,
+            "source_ids, tombstone, verified, access_count, last_accessed_at, "
+            "open_loop, lifespan) VALUES (?,?,?,?,?,?,?,?,FALSE,?,0,?,?,?)",
+            [sid, now, scope, text, vec,
              _EMB_MODEL if vec else None, _EMB_DIM if vec else None,
-             json.dumps(source_ids or []), bool(verified)])
+             json.dumps(source_ids or []), bool(verified), now,
+             bool(open_loop), "permanent" if permanent else "decay"])
         return int(sid)
+    finally:
+        con.close()
+
+
+def touch_notes(ids: list[int], *, con=None, path: Path = _DB_PATH) -> None:
+    """Registra acceso a notas semanticas (spacing effect): access_count += 1,
+    last_accessed_at = now. Inputs del decay. Si `con` se pasa, reusa esa conexion
+    (recall lo hace para no abrir dos veces); si no, abre una propia."""
+    if not ids:
+        return
+    own = con is None
+    if own:
+        con = _connect(path)
+    try:
+        ph = ",".join("?" for _ in ids)
+        con.execute(f"UPDATE semantic SET access_count = access_count + 1, "
+                    f"last_accessed_at = ? WHERE id IN ({ph})", [time.time(), *ids])
+    finally:
+        if own:
+            con.close()
+
+
+def close_loop(note_id: int, *, path: Path = _DB_PATH) -> None:
+    """Cierra un open-loop (tarea/pregunta resuelta): vuelve la nota elegible a
+    olvido normal. Quien marca/cierra es el caller, explicito — sin auto-deteccion."""
+    con = _connect(path)
+    try:
+        con.execute("UPDATE semantic SET open_loop = FALSE WHERE id = ?", [note_id])
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------------------
+# Reconsolidacion (modulo cognitivo #2): la memoria se auto-corrige con el uso.
+# La "ventana labile" vive en el CALLER (tiene los ids que devolvio recall); el
+# store no trackea timestamps de recall. recall ya hace el restabilize-por-acceso
+# (touch sube access_count -> mas durable). Aca van los dos signos restantes:
+#   confirm    -> reinforce()  (boost mas fuerte que un acceso normal)
+#   contradict -> flag_contradiction()  (deja de surfacear; recall cae al raw)
+# ---------------------------------------------------------------------------
+def reinforce(note_id: int, *, boost: int = 3, path: Path = _DB_PATH) -> None:
+    """Confirma una nota (el caller la uso/valido): sube access_count en `boost`
+    (un confirm ~ varios accesos) y refresca last_accessed_at. Sube importance ->
+    mas resistente al olvido. ponytail: boost es knob, default 3."""
+    con = _connect(path)
+    try:
+        con.execute("UPDATE semantic SET access_count = access_count + ?, "
+                    "last_accessed_at = ? WHERE id = ?", [boost, time.time(), note_id])
+    finally:
+        con.close()
+
+
+def flag_contradiction(note_id: int, *, path: Path = _DB_PATH) -> None:
+    """Marca una nota como contradicha: needs_review=TRUE. recall/recall_keyword
+    dejan de devolverla (no repetir info sospechada-falsa); cae al episodic raw, que
+    es el hecho sin editar (FIX B). NO la tombstonea — resolvable. Auto-correccion."""
+    con = _connect(path)
+    try:
+        con.execute("UPDATE semantic SET needs_review = TRUE WHERE id = ?", [note_id])
+    finally:
+        con.close()
+
+
+def pending_review(scope: str | None = None, *, path: Path = _DB_PATH) -> list[Note]:
+    """Notas marcadas needs_review (contradichas, sin resolver). Para que el caller
+    (o un modulo futuro) las revise/superseda."""
+    con = _connect(path)
+    try:
+        q = ("SELECT id, ts, scope, text FROM semantic "
+             "WHERE needs_review AND NOT tombstone")
+        params: list = []
+        if scope:
+            q += " AND scope = ?"
+            params.append(scope)
+        rows = con.execute(q + " ORDER BY ts DESC", params).fetchall()
+        return [Note(rid, ts, sc, text, 0.0, "semantic") for rid, ts, sc, text in rows]
+    finally:
+        con.close()
+
+
+def resolve_review(note_id: int, *, drop: bool = False, path: Path = _DB_PATH) -> None:
+    """Resuelve una contradiccion. drop=True -> tombstone (la nota era falsa).
+    drop=False -> limpia needs_review (la contradiccion era erronea, vuelve a surfacear).
+    El episodic raw nunca se toca en ningun caso."""
+    if drop:
+        tombstone_note(note_id, path=path)
+        return
+    con = _connect(path)
+    try:
+        con.execute("UPDATE semantic SET needs_review = FALSE WHERE id = ?", [note_id])
+    finally:
+        con.close()
+
+
+def open_loops(scope: str | None = None, *, path: Path = _DB_PATH) -> list[Note]:
+    """Modulo #3 (Zeigarnik surfacing): notas marcadas open_loop (tareas/preguntas sin
+    cerrar). Para inyectarlas proactivamente al arrancar/retomar. Mas reciente primero."""
+    con = _connect(path)
+    try:
+        q = ("SELECT id, ts, scope, text FROM semantic "
+             "WHERE open_loop AND NOT tombstone AND NOT needs_review")
+        params: list = []
+        if scope:
+            q += " AND scope = ?"
+            params.append(scope)
+        rows = con.execute(q + " ORDER BY ts DESC", params).fetchall()
+        return [Note(rid, ts, sc, text, 0.0, "semantic") for rid, ts, sc, text in rows]
     finally:
         con.close()
 
@@ -178,13 +312,17 @@ def _scope_chain(scope: str) -> list[str]:
 
 
 def recall(query: str, scope: str = "global", *, k: int = 5,
-           window_days: float | None = None, path: Path = _DB_PATH) -> list[Note]:
+           window_days: float | None = None, track: bool = True,
+           path: Path = _DB_PATH) -> list[Note]:
     """Recall clinico 2-stage:
       COARSE  scope-chain + (opcional) ventana de recencia. SIN keyword-gate (FIX A).
       FINE    rerank por cosine del embedding sobre el candidate set del coarse.
               Si no hay embeddings (fastembed ausente / notas viejas) -> orden por
               recencia (coarse-only).
       FALLBACK si la capa semantica devuelve < k, completa desde episodic RAW (FIX B).
+    `track=True` registra el acceso (spacing del decay) SOLO sobre las notas
+    semanticas devueltas. recall_hybrid llama con track=False y toca su propio set
+    fusionado para no doble-contar.
     """
     con = _connect(path)
     try:
@@ -194,7 +332,8 @@ def recall(query: str, scope: str = "global", *, k: int = 5,
         # COARSE: solo scope + recencia. Nada de keyword.
         rows = con.execute(
             f"""SELECT id, ts, scope, text, embedding FROM semantic
-                WHERE scope IN ({placeholders}) AND ts >= ? AND NOT tombstone
+                WHERE scope IN ({placeholders}) AND ts >= ?
+                  AND NOT tombstone AND NOT needs_review
                 ORDER BY ts DESC""",
             [*chain, cutoff]).fetchall()
 
@@ -223,6 +362,9 @@ def recall(query: str, scope: str = "global", *, k: int = 5,
                 [*chain, cutoff, need]).fetchall()
             for rid, ts, sc, kind, payload in erows:
                 notes.append(Note(rid, ts, sc, f"[{kind}] {payload}", 0.0, "episodic"))
+
+        if track:
+            touch_notes([n.id for n in notes if n.layer == "semantic"], con=con)
         return notes
     finally:
         con.close()
@@ -248,7 +390,8 @@ def recall_keyword(query: str, scope: str = "global", *, k: int = 5,
         cutoff = time.time() - window_days * 86400 if window_days else 0.0
         rows = con.execute(
             f"""SELECT id, ts, scope, text FROM semantic
-                WHERE scope IN ({ph}) AND ts >= ? AND NOT tombstone""",
+                WHERE scope IN ({ph}) AND ts >= ?
+                  AND NOT tombstone AND NOT needs_review""",
             [*chain, cutoff]).fetchall()
         if not rows:
             return []
@@ -290,7 +433,7 @@ def recall_hybrid(query: str, scope: str = "global", *, k: int = 5,
     """Fusion de recall semantico (embedding) + keyword (BM25-lite) por Reciprocal Rank
     Fusion (RRF). Lo mejor de los dos: sinonimos del embedding + termino exacto del keyword.
     Si fastembed falta, degrada a keyword-only sin romper."""
-    sem = recall(query, scope, k=k * 2, window_days=window_days, path=path)
+    sem = recall(query, scope, k=k * 2, window_days=window_days, track=False, path=path)
     kw = recall_keyword(query, scope, k=k * 2, window_days=window_days, path=path)
     C = 60.0
     fused: dict[int, list] = {}
@@ -299,7 +442,10 @@ def recall_hybrid(query: str, scope: str = "global", *, k: int = 5,
     for rank, n in enumerate(kw):
         fused.setdefault(n.id, [n, 0.0])[1] += 1.0 / (C + rank)
     out = sorted(fused.values(), key=lambda nv: -nv[1])
-    return [Note(n.id, n.ts, n.scope, n.text, round(sc, 5), n.layer) for n, sc in out[:k]]
+    top = [Note(n.id, n.ts, n.scope, n.text, round(sc, 5), n.layer) for n, sc in out[:k]]
+    # track sobre el set final fusionado (no sobre los candidatos k*2): evita doble-conteo.
+    touch_notes([n.id for n in top if n.layer == "semantic"], path=path)
+    return top
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +473,8 @@ def distill(episode_text: str, *, gen_model=None, phase: str = "memory") -> str:
 
 
 def remember(scope: str, episode_text: str, *, kind: str = "note", actor: str = "mmorch",
-             verify: bool = False, gen_model=None, path: Path = _DB_PATH) -> dict:
+             verify: bool = False, open_loop: bool = False, permanent: bool = False,
+             gen_model=None, path: Path = _DB_PATH) -> dict:
     """Pipeline completo (invariante 7 del diseno):
       1. write_episode  -> log crudo INMUTABLE (siempre, nunca se pierde el hecho).
       2. distill        -> nota durable via modelo barato.
@@ -355,7 +502,8 @@ def remember(scope: str, episode_text: str, *, kind: str = "note", actor: str = 
             return out  # nota infiel -> solo queda el raw (FIX B la cubre en recall)
     # verified=True solo si la nota PASO la verificacion cross-family (verify=True
     # y no refutada — si refutada ya retornamos arriba). Sin verify: queda UNVERIFIED.
-    nid = write_note(scope, note, source_ids=[eid], verified=verify, path=path)
+    nid = write_note(scope, note, source_ids=[eid], verified=verify,
+                     open_loop=open_loop, permanent=permanent, path=path)
     out["note_id"] = nid
     out["persisted"] = True
     return out
@@ -386,7 +534,7 @@ def _pick_keeper(cluster: list) -> tuple:
 
 
 def consolidate(scope: str | None = None, *, sim_threshold: float = 0.92,
-                max_bytes: int = 50_000, dry_run: bool = False,
+                max_bytes: int = 50_000, forget: bool = False, dry_run: bool = False,
                 path: Path = _DB_PATH) -> dict:
     """Mantenimiento periodico de la capa semantica (correr cada ~10 sesiones):
     mergea near-duplicados POR scope (texto identico o cosine >= sim_threshold),
@@ -394,13 +542,21 @@ def consolidate(scope: str | None = None, *, sim_threshold: float = 0.92,
     reciente. El episodic raw NUNCA se toca (invariante: inmutable) y la corrida
     queda auditada como evento episodico kind='consolidation'.
 
+    forget=True (default OFF, gated): pasada de olvido por decay Ebbinghaus tras el
+    merge. Tombstonea notas cuyo importance() cae bajo el umbral, EXCEPTO verified,
+    open_loop (Zeigarnik) y lifespan='permanent'. Olvidar no pierde el hecho: el
+    episodic raw queda y recall() lo recupera (FIX B). Es decision semi-irreversible
+    (soft), por eso esta gated y default OFF.
+
     No borra por tamano: si las notas vivas superan max_bytes solo flaggea
     over_budget=True (decidir que podar es juicio del caller — gated).
     dry_run=True reporta sin tocar nada."""
+    from .retention import importance, should_forget
     con = _connect(path)
     try:
-        q = ("SELECT id, ts, scope, text, embedding, verified FROM semantic "
-             "WHERE NOT tombstone")
+        q = ("SELECT id, ts, scope, text, embedding, verified, access_count, "
+             "last_accessed_at, open_loop, lifespan FROM semantic "
+             "WHERE NOT tombstone AND NOT needs_review")
         params: list = []
         if scope:
             q += " AND scope = ?"
@@ -415,7 +571,7 @@ def consolidate(scope: str | None = None, *, sim_threshold: float = 0.92,
 
     merged: list[dict] = []
     tomb_ids: list[int] = []
-    for sc, items in by_scope.items():
+    for _sc, items in by_scope.items():
         used: set[int] = set()
         for i, anchor in enumerate(items):
             if anchor[0] in used:
@@ -431,18 +587,72 @@ def consolidate(scope: str | None = None, *, sim_threshold: float = 0.92,
                 merged.append({"kept": int(keep[0]), "tombstoned": [int(d) for d in drop]})
                 tomb_ids.extend(drop)
 
+    # Pasada de olvido por decay (gated). Solo notas 'decay' no protegidas.
+    forgotten_ids: list[int] = []
+    if forget:
+        now = time.time()
+        dropped = set(tomb_ids)
+        for r in rows:
+            if r[0] in dropped:           # ya tombstoneada como dup
+                continue
+            if r[5] or r[8]:              # verified | open_loop -> nunca olvida
+                continue
+            if r[9] != "decay":          # permanent -> nunca olvida
+                continue
+            if should_forget(importance(now, r[7], int(r[6] or 0), bool(r[8]))):
+                forgotten_ids.append(int(r[0]))
+
+    all_tomb = tomb_ids + forgotten_ids
     if not dry_run:
-        for nid in tomb_ids:
+        for nid in all_tomb:
             tombstone_note(int(nid), path=path)
         write_episode("mmorch_self", "consolidation",
                       {"scope": scope or "*", "clusters": len(merged),
-                       "tombstoned": len(tomb_ids)}, path=path)
+                       "tombstoned": len(tomb_ids), "forgotten": len(forgotten_ids)},
+                      path=path)
 
-    live = [r for r in rows if r[0] not in set(tomb_ids)]
+    live = [r for r in rows if r[0] not in set(all_tomb)]
     nbytes = sum(len(r[3].encode("utf-8")) for r in live)
     return {"merged": merged, "tombstoned": len(tomb_ids),
-            "live_notes": len(live), "bytes": nbytes,
+            "forgotten": len(forgotten_ids), "live_notes": len(live), "bytes": nbytes,
             "over_budget": nbytes > max_bytes, "dry_run": dry_run}
+
+
+def forget_preview(scope: str | None = None, *, grid: list | None = None,
+                   path: Path = _DB_PATH) -> dict:
+    """Read-only: cuantas notas vivas 'decay' olvidaria el forget pass a distintos
+    knobs (lam, forget_thr), SIN tombstonear nada. Es la metrica-gate para decidir
+    antes de activar consolidate(forget=True) en serio (mmorch: no escalar sin
+    metricas). NO auto-tunea (sin label de 'que merece olvidarse' tunear seria reward
+    hacking) — surfacea el efecto, el humano elige el knob.
+    Devuelve {total_live, eligible, grid:[{lam, forget, would_forget, pct_eligible}]}."""
+    from .retention import importance, should_forget, LAMBDA, FORGET
+    grid = grid or [(LAMBDA, FORGET), (LAMBDA / 2, FORGET), (LAMBDA * 2, FORGET),
+                    (LAMBDA, FORGET / 2), (LAMBDA, FORGET * 2)]
+    con = _connect(path)
+    try:
+        q = ("SELECT access_count, last_accessed_at FROM semantic "
+             "WHERE NOT tombstone AND NOT needs_review AND NOT verified "
+             "AND NOT open_loop AND lifespan = 'decay'")
+        params: list = []
+        if scope:
+            q += " AND scope = ?"
+            params.append(scope)
+        eligible = con.execute(q, params).fetchall()
+        total_live = con.execute(
+            "SELECT count(*) FROM semantic WHERE NOT tombstone").fetchone()[0]
+    finally:
+        con.close()
+
+    now = time.time()
+    out = []
+    for lam, fthr in grid:
+        n = sum(1 for ac, la in eligible
+                if should_forget(importance(now, la, int(ac or 0), False,
+                                            lam=lam, forget=fthr), forget=fthr))
+        out.append({"lam": lam, "forget": fthr, "would_forget": n,
+                    "pct_eligible": round(n / len(eligible), 3) if eligible else 0.0})
+    return {"total_live": int(total_live), "eligible": len(eligible), "grid": out}
 
 
 def stats(path: Path = _DB_PATH) -> dict:

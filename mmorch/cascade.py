@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
 from .providers import call
 from .route import _extract_conf, _CONF_RE
-from .feedback import ThompsonBandit, record_outcome
+from .feedback import ThompsonBandit
 
 _SELF_SCORE = (
     "Al final, en una linea aparte, escribi exactamente: CONFIDENCE: <n> "

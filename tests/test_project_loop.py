@@ -1,6 +1,6 @@
 """project_loop: ejecutor mmorch-primario (DeepSeek genera + tests verifican + aplica), con
 escalada a claude. providers.call + tests + git mockeados; repo = tmp dir real."""
-import sys, pathlib, importlib
+import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import mmorch.project_loop as PL
 
@@ -51,6 +51,6 @@ def test_no_escalation_returns_failure(monkeypatch, tmp_path):
 def test_no_test_cmd_breaks_unverified(monkeypatch, tmp_path):
     repo = _setup(monkeypatch, tmp_path, gen_seq=["```python\ndef inc(x):\n    return x+1\n```"],
                   test_results=[])
-    r = PL.run_project_task("p", "t", target_file="app.py", test_cmd=None, K=3)
+    PL.run_project_task("p", "t", target_file="app.py", test_cmd=None, K=3)
     # sin test_cmd no verifica -> escribe y corta (no confirma ok)
     assert "return x+1" in (repo / "app.py").read_text(encoding="utf-8")

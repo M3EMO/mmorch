@@ -18,7 +18,7 @@ the upgrade path is an LLM-projected signature (one classify call) — NOT here,
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # op_type: first match in PRIORITY order wins (specific ops before the GENERATE default).
 # bilingual ES+EN — the feedback corpus is mostly Spanish task prompts.

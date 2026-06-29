@@ -29,7 +29,6 @@ Cierre del lazo (al terminar, done o escalate):
 from __future__ import annotations
 
 import json
-import re
 import uuid
 
 from .checkers import check

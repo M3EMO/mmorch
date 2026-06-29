@@ -82,7 +82,7 @@ def update_readme(path: Path = README) -> list[str]:
         if not pat.search(txt):
             continue
         block = f"{start}\n{render_block(name)}\n{end}"
-        txt = pat.sub(lambda _m: block, txt)
+        txt = pat.sub(lambda _m, block=block: block, txt)   # bind loop var (used immediately; explicit)
         updated.append(name)
     path.write_text(txt, encoding="utf-8")
     return updated

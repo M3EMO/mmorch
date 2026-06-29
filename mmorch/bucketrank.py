@@ -79,7 +79,7 @@ def bucket_rank(
             i, r = f.result()
             results[i] = r
 
-    for it, r in zip(items, results):
+    for it, r in zip(items, results, strict=False):
         if r is None:
             out.n_failed += 1
             tier = tiers[-1]  # fallo -> tier mas bajo, item NO se pierde

@@ -1,6 +1,6 @@
 """project-aware: registro de proyectos + ejecutor en PLAN (claude headless) + endpoints.
 No invoca claude real (subprocess mockeado); cero cupo en tests."""
-import sys, pathlib, json, importlib, types
+import sys, pathlib, json, importlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import mmorch.projects as PJ
 import mmorch.claude_exec as CE

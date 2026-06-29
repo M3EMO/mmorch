@@ -1,6 +1,6 @@
 """nivel 3: bus de eventos + instrumentacion + server Starlette (SSE/control/auth).
 Sin API real (providers.call mockeado); sandbox python_exec real."""
-import sys, pathlib, time, json
+import sys, pathlib, time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import mmorch.events as EVT
 import mmorch.patterns as PAT

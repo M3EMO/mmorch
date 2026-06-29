@@ -24,7 +24,7 @@ def _close(a, b, tol: float = 1e-6) -> bool:
     if isinstance(a, (int, float)) and isinstance(b, (int, float)):
         return abs(a - b) <= tol * (1 + abs(b))
     if isinstance(a, list) and isinstance(b, list):
-        return len(a) == len(b) and all(_close(x, y, tol) for x, y in zip(a, b))
+        return len(a) == len(b) and all(_close(x, y, tol) for x, y in zip(a, b, strict=False))
     if isinstance(a, dict) and isinstance(b, dict):
         return a.keys() == b.keys() and all(_close(a[k], b[k], tol) for k in a)
     return a == b

@@ -12,7 +12,6 @@ leak keys/emails) + a sha256 integrity hash so a shared bundle is tamper-evident
 """
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import os

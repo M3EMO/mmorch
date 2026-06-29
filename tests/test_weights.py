@@ -27,7 +27,7 @@ def test_resolve_returns_path_when_valid():
 
 def test_verify_detects_tamper(tmp_path):
     # manifest con sha WRONG apuntando al npz real -> verify falla (detecta tamper/corrupcion)
-    real = W.card("code_embedder")["path"]
+    W.card("code_embedder")["path"]
     bad = tmp_path / "manifest.json"
     bad.write_text(json.dumps({"code_embedder": {**W.card("code_embedder"),
                    "sha256": "0" * 64}}), encoding="utf-8")

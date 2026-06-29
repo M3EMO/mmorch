@@ -21,10 +21,25 @@ server = ["starlette>=0.37", "uvicorn>=0.27", "httpx>=0.27",
 factory = ["scikit-learn>=1.4"]                                 # fabrica de modelos (logreg/GBRT)
 # todo lo necesario pa un host always-on (deploy multi-host): pip install mmorch[host]
 host = ["mmorch[mcp,memory,checkers,server,factory]"]
+dev = ["ruff>=0.15", "mypy>=1.10"]                              # lint gate (ruff) + type checker (mypy, advisory)
 
 [project.scripts]
 mmorch-server = "mmorch.server:main"
 mmorch-sync = "mmorch.sync:_cli"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 110
+
+[tool.ruff.lint]
+# Bug-catching gate, NOT a style flood (keep signal high): pyflakes (F = undefined names / unused —
+# the exact class that bit the server refactor), syntax errors (E9), bugbear (B = real bug patterns:
+# mutable default args, etc.), pylint errors (PLE). Deliberately NOT line-length or style nits.
+select = ["F", "E9", "B", "PLE"]
+[tool.ruff.lint.per-file-ignores]
+# __main__ self-checks intentionally use `assert False` to prove a guard fires.
+"mmorch/*.py" = ["B011"]
+"tests/*.py" = ["B011"]
 
 [build-system]
 requires = ["setuptools>=68"]

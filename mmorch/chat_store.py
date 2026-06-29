@@ -62,7 +62,7 @@ def history(before=None, limit=30):
             page_oldest = _CONN.execute(
                 "SELECT seq FROM messages WHERE id=?", (rows[-1][0],)).fetchone()[0]
         has_more = bool(page_oldest and oldest is not None and page_oldest > oldest)
-    msgs = [dict(zip(_COLS, r)) for r in rows][::-1]
+    msgs = [dict(zip(_COLS, r, strict=False)) for r in rows][::-1]
     return {"messages": msgs, "hasMore": has_more}
 
 

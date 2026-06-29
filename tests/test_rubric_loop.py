@@ -89,7 +89,7 @@ def test_close_loop_records_outcome_with_context(monkeypatch):
     rec = {}
     monkeypatch.setattr("mmorch.feedback.record_outcome",
                         lambda arm, rew, **kw: rec.update(arm=arm, reward=rew, **kw))
-    st = RL.run_rubric_loop("implementa inc bien", CHECKABLE, gen_fn=lambda p: GOOD)
+    RL.run_rubric_loop("implementa inc bien", CHECKABLE, gen_fn=lambda p: GOOD)
     assert rec["reward"] == 1.0 and rec["pattern"] == "rubric_loop"
     assert rec["context"].startswith("implementa inc")        # comida pal ShadowPrior
 

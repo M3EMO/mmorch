@@ -15,7 +15,6 @@ Medible como scout (enrich_delta): ¿baja iteraciones / sube pass-rate? Hipotesi
 from __future__ import annotations
 
 import json
-import re
 
 from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER, family_of
 

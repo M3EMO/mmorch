@@ -11,7 +11,7 @@ import statistics
 from collections import defaultdict
 
 from .metrics import read_events
-from .config import family_of, spec
+from .config import family_of
 from .feedback import calibration, ThompsonBandit
 from .memory import stats as memory_stats
 

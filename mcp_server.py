@@ -19,7 +19,7 @@ except Exception as e:  # pragma: no cover
     raise SystemExit(
         "MCP SDK not installed. Run: pip install \"mcp>=1.2.0\"  "
         f"(original error: {e})"
-    )
+    ) from e
 
 from mmorch import (fan_out, adversarial_verify, route, cascade, ensemble_verify,
                     ideate_and_screen, recall as _recall, tournament as _tournament,

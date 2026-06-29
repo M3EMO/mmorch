@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import json
 import pathlib
-import time
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 _TRAJ = _ROOT / "logs" / "trajectories.jsonl"

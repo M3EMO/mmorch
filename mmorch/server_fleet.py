@@ -4,7 +4,6 @@ server_core auth only (host registry + HTTP proxying are lazy-imported).
 """
 from __future__ import annotations
 
-import json
 
 from .server_core import _token_ok
 

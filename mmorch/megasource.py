@@ -15,7 +15,7 @@ import json
 
 from .config import REGISTRY
 from .prices import load_overrides, PRICES_PATH
-from .evolve import snapshot_change, Change
+from .evolve import snapshot_change
 
 
 def fetch_prices(fetch_fn=None) -> dict:

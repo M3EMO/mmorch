@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 
-from .events import emit, Event
+from .events import emit
 from .server_core import _JOBS, _JOBS_LOCK, _jobmeta
 
 
@@ -115,7 +115,7 @@ def _workflow_drive(jid: str, state: dict, meta: dict, cancel: threading.Event,
                 cfg = state["steps"][act["step"]]
                 names = cfg.get("consumes", [])
                 inputs = []
-                for nm, bid in zip(names, act["consumes"]):
+                for nm, bid in zip(names, act["consumes"], strict=False):
                     blk = workflow_store.get_block(bid)
                     inputs.append((nm, blk["body"] if blk else ""))
                 prompt = build_prompt(act["role"], act["persona"], task, inputs)

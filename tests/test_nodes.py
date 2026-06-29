@@ -1,5 +1,5 @@
 """tests nodes.py — el registry de la orquesta."""
-from mmorch.nodes import orchestra, members, sections, conductor, Node
+from mmorch.nodes import orchestra, members, sections, conductor
 
 
 def test_conductor_not_musician():

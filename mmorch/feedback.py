@@ -167,7 +167,7 @@ def calibration(path: Path = _FEEDBACK_LOG, bins: int = 10) -> dict:
         buckets.setdefault(b, []).append((c, float(e["reward"])))
     n = len(ev)
     ece = 0.0
-    for b, pairs in buckets.items():
+    for _, pairs in buckets.items():
         conf_avg = sum(c for c, _ in pairs) / len(pairs)
         acc = sum(r for _, r in pairs) / len(pairs)
         ece += (len(pairs) / n) * abs(conf_avg - acc)
@@ -177,6 +177,6 @@ def calibration(path: Path = _FEEDBACK_LOG, bins: int = 10) -> dict:
         d = by_arm.setdefault(a, {"n": 0, "rew": 0.0})
         d["n"] += 1
         d["rew"] += float(e["reward"])
-    for a, d in by_arm.items():
+    for d in by_arm.values():
         d["accuracy"] = round(d.pop("rew") / d["n"], 4)
     return {"ece": round(ece, 4), "n": n, "by_arm": by_arm}

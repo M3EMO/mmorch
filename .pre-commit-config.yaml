@@ -1,0 +1,12 @@
+# The lint gate: ruff catches the bug classes Python leaks to runtime (undefined names, unused,
+# bad bug-patterns) — the cheap, in-language ~80% of what a compiler would give. Enforce with:
+#   pip install pre-commit && pre-commit install
+# or run the gate ad hoc:  ruff check mmorch mcp_server tests
+# (Config/ruleset live in pyproject.toml [tool.ruff].)
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.20
+    hooks:
+      - id: ruff
+        name: ruff (lint gate)
+        args: [--config, pyproject.toml]

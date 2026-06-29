@@ -26,7 +26,7 @@ _MIN_NEIGHBORS = 3                  # bajo esto, el prior se abstiene (cae a ban
 
 
 def _cos(a: list[float], b: list[float]) -> float:
-    s = sum(x * y for x, y in zip(a, b))
+    s = sum(x * y for x, y in zip(a, b, strict=False))
     na = math.sqrt(sum(x * x for x in a)) or 1.0
     nb = math.sqrt(sum(y * y for y in b)) or 1.0
     return s / (na * nb)
@@ -99,7 +99,7 @@ class ShadowPrior:
 
 # ---- evaluacion offline + auto-scale (gated) -------------------------------- #
 def _brier(preds: list[float], actual: list[float]) -> float:
-    return sum((p - y) ** 2 for p, y in zip(preds, actual)) / max(1, len(preds))
+    return sum((p - y) ** 2 for p, y in zip(preds, actual, strict=False)) / max(1, len(preds))
 
 
 def offline_improvement(outcomes: list[dict] | None = None, scale: float = SCALE_MIN,

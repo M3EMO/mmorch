@@ -6,7 +6,6 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import json
 import random
 
-import pytest
 
 from mmorch.hillclimb import hillclimb
 from mmorch.feedback import ThompsonBandit
@@ -137,7 +136,7 @@ def test_journal_appends_jsonl_per_round(tmp_path):
     """qrf: journal_path appendea un JSONL por ronda (ledger autoresearch)."""
     jp = tmp_path / "exp.jsonl"
     scores = {"a": 0.1, "b": 0.5, "c": 0.9}
-    r = hillclimb(seq_proposer(["a", "b", "c"]), scores.__getitem__,
+    hillclimb(seq_proposer(["a", "b", "c"]), scores.__getitem__,
                   max_rounds=3, patience=5, journal_path=jp)
     lines = [json.loads(l) for l in jp.read_text(encoding="utf-8").splitlines() if l.strip()]
     assert len(lines) == 3                                   # una entrada por ronda

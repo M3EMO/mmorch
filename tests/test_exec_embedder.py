@@ -9,7 +9,7 @@ from mmorch.code_embedder import available as cb_available
 
 
 def _cos(a, b):
-    s = sum(x * y for x, y in zip(a, b))
+    s = sum(x * y for x, y in zip(a, b, strict=False))
     na = math.sqrt(sum(x * x for x in a)) or 1.0
     nb = math.sqrt(sum(y * y for y in b)) or 1.0
     return s / (na * nb)

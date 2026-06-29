@@ -35,7 +35,7 @@ def test_records_calibration_with_predicted_domain(tmp_path):
 
 def test_matching_domain_rewards_one(tmp_path):
     rec = []
-    rep = S.ingest_session(_calib_session(tmp_path),
+    S.ingest_session(_calib_session(tmp_path),
                            recorder=lambda **k: rec.append(k),
                            classifier=lambda req, **k: type("R", (), {"domain": "clear"})(),
                            ledger=tmp_path / "l.txt")

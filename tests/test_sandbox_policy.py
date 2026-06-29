@@ -2,8 +2,7 @@
 Backend docker no se ejercita en CI (puede no estar); se testea el fallback graceful."""
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-from mmorch.sandbox import (run_sandboxed, policy_violations, docker_available,
-                            SandboxResult)
+from mmorch.sandbox import (run_sandboxed, policy_violations)
 
 
 def test_clean_code_no_violations():

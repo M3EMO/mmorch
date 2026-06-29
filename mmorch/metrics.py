@@ -10,7 +10,6 @@ in/out tokens, cost_usd, latency_s, plus any extra fields.
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 from pathlib import Path
