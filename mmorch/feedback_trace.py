@@ -73,7 +73,7 @@ def record_vote(job_id: str, vote: str, *, arm: str = "", comment: str = "", con
         f.write(json.dumps(bundle, ensure_ascii=False) + "\n")
     if arm:                                   # feed the existing bandit only if we know the producer
         from .feedback import record_outcome
-        kw = {"source": "human_vote", "context": (context or "")[:200]}
+        kw: dict = {"source": "human_vote", "context": (context or "")[:200]}
         if outcome_path:
             kw["path"] = Path(outcome_path)
         record_outcome(arm, 1.0 if up else 0.0, **kw)

@@ -90,7 +90,7 @@ def speedup(source: str, *, setup: str, call: str, gen=None, runs: int = 5,
             return float("inf")                                # fast-but-wrong = rejected
         return sec
 
-    def propose(ctx) -> str:
+    def propose(ctx) -> str | None:
         cand = gen(ctx.best)
         return cand if (cand and cand.strip() and cand.strip() != ctx.best.strip()) else None
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 import math
 import random as _random
 from dataclasses import dataclass, field
+from typing import Callable
 
 from .feedback import read_outcomes, ThompsonBandit
 from .memory import embed
@@ -43,7 +44,7 @@ class ShadowPrior:
     embed_hybrid solo aporta cuando el context sea una funcion runnable (code_loop/rubric_loop)."""
     scale: float = 0.0
     index: dict[str, list[tuple[list[float], float]]] = field(default_factory=dict)
-    embed_fn: callable = None
+    embed_fn: Callable | None = None
 
     def _emb(self, text):
         return (self.embed_fn or embed)(text)
@@ -120,9 +121,10 @@ def offline_improvement(outcomes: list[dict] | None = None, scale: float = SCALE
         same = [(embs[j], rew[j]) for j in range(len(rows)) if j != i and arms[j] == arms[i]]
         gmean = (sum(r for _, r in same) / len(same)) if same else 0.5
         base_pred.append(gmean)
-        if embs[i] is None or len(same) < _MIN_NEIGHBORS:
+        ei = embs[i]
+        if ei is None or len(same) < _MIN_NEIGHBORS:
             prior_pred.append(gmean); continue
-        sims = sorted(((_cos(embs[i], e), r) for e, r in same if e is not None),
+        sims = sorted(((_cos(ei, e), r) for e, r in same if e is not None),
                       key=lambda t: t[0], reverse=True)[:_K]
         wsum = sum(max(0.0, s) for s, _ in sims) or 1.0
         prior_pred.append(sum(max(0.0, s) * r for s, r in sims) / wsum)

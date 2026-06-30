@@ -38,7 +38,7 @@ def load_role(name: str) -> str:
 
 def discover_workflows() -> list:
     base = workflows_dir()
-    out = []
+    out: list = []
     if not base.is_dir():
         return out
     for f in sorted(base.glob("*.workflow.json")):
@@ -66,7 +66,7 @@ def validate(spec: dict) -> dict:
     if not isinstance(steps, list) or not steps:
         raise ValueError("workflow needs a non-empty 'steps' list")
     produced_by = {}                                  # produce-name -> step index
-    role_to_index = {}
+    role_to_index: dict = {}
     norm = []
     for i, raw in enumerate(steps):
         role = raw.get("role")

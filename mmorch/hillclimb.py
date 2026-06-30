@@ -119,7 +119,7 @@ def hillclimb(
 
     for r in range(1, max_rounds + 1):
         round_arm = arm
-        if arms:
+        if arms and bandit is not None:
             round_arm = bandit.select(arms, rng=rng)
         ctx = ClimbCtx(round=r, best=best, best_score=best_score,
                        history=history, arm=round_arm)
@@ -157,7 +157,7 @@ def hillclimb(
 
         if improved:
             best, best_score, dry = cand, s, 0
-            if _reached(best_score):
+            if best_score is not None and _reached(best_score):
                 return ClimbResult(best, best_score, r, "target", history, baseline)
         else:
             dry += 1

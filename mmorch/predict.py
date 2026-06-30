@@ -48,12 +48,13 @@ class Predictor:
     q=0.5 = best-estimate; q=0.9 = conservador (pa budget — sobre-estima, evita el +$5)."""
 
     def __init__(self):
-        self.by_mp: dict[tuple, list] = {}   # (model,pattern) -> {out:[...], lat:[...]}
+        self.by_mp: dict[tuple, dict] = {}   # (model,pattern) -> {out:[...], lat:[...]}
         self.by_m: dict[str, dict] = {}
         self.glob = {"out": [1.0], "lat": [0.0]}
 
     def fit(self, rows: list[dict]) -> "Predictor":
-        g_mp, g_m = defaultdict(lambda: {"out": [], "lat": []}), defaultdict(lambda: {"out": [], "lat": []})
+        g_mp: dict = defaultdict(lambda: {"out": [], "lat": []})
+        g_m: dict = defaultdict(lambda: {"out": [], "lat": []})
         for r in rows:
             for g in (g_mp[(r["model"], r["pattern"])], g_m[r["model"]]):
                 g["out"].append(r["out"]); g["lat"].append(r["lat"])

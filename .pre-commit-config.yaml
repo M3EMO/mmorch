@@ -10,3 +10,12 @@ repos:
       - id: ruff
         name: ruff (lint gate)
         args: [--config, pyproject.toml]
+  # mypy is at 0 — keep it there. Local hook (uses the venv's mypy + [tool.mypy] config).
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (type gate)
+        entry: python -m mypy mmorch --ignore-missing-imports
+        language: system
+        pass_filenames: false
+        always_run: true

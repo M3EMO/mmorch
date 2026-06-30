@@ -42,9 +42,9 @@ select = ["F", "E9", "B", "PLE"]
 "tests/*.py" = ["B011"]
 
 [tool.mypy]
-# ADVISORY, not a hard gate (yet). The core is 85% type-annotated but was never checked;
-# a cold run = 71 errors. ruff is the enforced gate; mypy is the ratchet target — fix the 71
-# down incrementally, then promote to a gate. Run: mypy mmorch --ignore-missing-imports
+# ENFORCED gate: the ratchet is done — 71 cold errors driven to 0 (a real bug found + fixed:
+# Predictor.by_mp was annotated dict[tuple, list] but holds dicts). Keep it at 0.
+# Run: mypy mmorch --ignore-missing-imports
 python_version = "3.12"
 ignore_missing_imports = true       # 3rd-party libs without stubs (litellm, fastembed, ...) = noise, not bugs
 

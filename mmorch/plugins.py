@@ -55,7 +55,7 @@ def load_manifest(d, *, allow: set[str] | None = None) -> dict:
 
 def discover(*, allow: set[str] | None = None) -> list[dict]:
     base = plugins_dir()
-    out = []
+    out: list = []
     if not base.is_dir():
         return out
     for d in sorted(base.iterdir()):
@@ -86,6 +86,7 @@ def invoke(plugin: dict, fn: str, args: dict, *, host_services: dict,
 
     try:
         _send({"type": "invoke", "fn": fn, "args": args})
+        assert proc.stdout is not None   # PIPE -> not None
         while True:
             line = proc.stdout.readline()
             if not line:
@@ -114,7 +115,8 @@ def invoke(plugin: dict, fn: str, args: dict, *, host_services: dict,
     finally:
         killer.cancel()
         try:
-            proc.stdin.close()
+            if proc.stdin is not None:
+                proc.stdin.close()
         except Exception:
             pass
         try:
@@ -149,7 +151,7 @@ if __name__ == "__main__":
     assert man["grants"] == ["log"], man["grants"]           # fs declared but policy-denied
     log = []
     res = invoke(man, "shout", {"text": "hey"},
-                 host_services={"log.emit": lambda p: (log.append(p["msg"]), "ok")[1]})
+                 host_services={"log.emit": lambda p: (log.append(p["msg"]), "ok")[1]})  # type: ignore[func-returns-value]
     assert res["ok"], res
     assert res["value"]["text"] == "HEY"
     assert res["value"]["denied"] == {"fs.write": True, "net.get": True}, res["value"]

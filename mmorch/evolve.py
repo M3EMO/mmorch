@@ -21,6 +21,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 _ARCHIVE = ROOT / "logs" / "evolution_archive.jsonl"
@@ -306,7 +307,7 @@ def self_evolve(*, candidates: list[Change] | None = None, generate_fn=None, n: 
     Devuelve {evaluated, winner, applied, zone, blocked_red}. NO aplica rojo jamás."""
     ev = evaluate_fn or evaluate
     cands = candidates if candidates is not None else (generate_fn() if generate_fn else [])
-    results = []
+    results: list[dict[str, Any]] = []
     for c in cands:
         z = zone_of(c, root=root)
         r = ev(c)

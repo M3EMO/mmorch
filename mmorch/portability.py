@@ -35,7 +35,7 @@ def export_bundle(projects: dict, hosts: dict, exec_policy: str, ts: float) -> d
 
 def reconcile(manifest: dict, existing: dict, overrides: dict) -> dict:
     """Plan an import without applying it. overrides: {project_name: local_path}."""
-    plan = {"register": [], "skipped": [], "needs_path": [], "warnings": []}
+    plan: dict = {"register": [], "skipped": [], "needs_path": [], "warnings": []}
     if manifest.get("schemaVersion") != SCHEMA:
         plan["warnings"].append(f"schemaVersion {manifest.get('schemaVersion')} != {SCHEMA}")
     for proj in manifest.get("projects", []):

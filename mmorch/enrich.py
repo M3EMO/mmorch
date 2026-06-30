@@ -102,7 +102,8 @@ def enrich_delta(path=None) -> dict:
     """MIDE la hipotesis: ¿enrich reduce iteraciones? Compara n_iters medio de trayectorias
     con prompt enriquecido vs sin, sobre trajectory.load_trajectories. Si delta ~0, no se justifica."""
     from .trajectory import load_trajectories
-    with_e, without_e = [], []
+    with_e: list = []
+    without_e: list = []
     for t in load_trajectories(path):
         (with_e if t.get("enriched") else without_e).append(t.get("n_iters", 0))
     def _avg(xs):

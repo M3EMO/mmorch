@@ -79,7 +79,7 @@ if __name__ == "__main__":
     assert soft and soft[0]["level"] == "soft", soft
     hard = evaluate(P, {"global": 10, "family:deepseek": 4})
     assert any(i["level"] == "hard" and i["scope"] == "global" for i in hard), hard
-    assert blocking_incident({"global": 12}, P)["scope"] == "global"
+    assert blocking_incident({"global": 12}, P)["scope"] == "global"  # type: ignore[index]
     assert blocking_incident({"global": 1}, P) is None
     assert evaluate([{"scope": "global", "limit_usd": 0}], {"global": 99}) == [], "limit<=0 ignored"
     print("budget_policy OK")

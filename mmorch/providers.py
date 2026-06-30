@@ -147,7 +147,7 @@ def call(
     try:
         resp = client.chat.completions.create(
             model=s.model_id,
-            messages=messages,
+            messages=messages,  # type: ignore[arg-type]  # OpenAI SDK typed-params; list[dict] valid at runtime
             temperature=temperature,
             max_tokens=max_tokens,
             timeout=timeout,

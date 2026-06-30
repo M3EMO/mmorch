@@ -104,8 +104,8 @@ def run_sandboxed(code: str, *, timeout: float = 5.0, input_text: str = "",
         # from the MCP server (speedup) use this runner without the inherited-stdin hang.
         kw = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
         try:
-            p = subprocess.run(cmd, cwd=td, input=input_text, capture_output=True,
-                               text=True, timeout=timeout, env=env, **kw)
+            p = subprocess.run(cmd, cwd=td, input=input_text, capture_output=True,  # type: ignore[call-overload]
+                               text=True, timeout=timeout, env=env, **kw)  # **kw=creationflags confuses overload; valid at runtime
             return SandboxResult(p.returncode == 0, p.stdout, p.stderr, p.returncode, False)
         except subprocess.TimeoutExpired as e:
             return SandboxResult(False, (e.stdout or "") if isinstance(e.stdout, str) else "",

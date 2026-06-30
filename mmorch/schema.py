@@ -15,7 +15,7 @@ from typing import Any
 
 from .providers import call
 
-_TYPE_MAP = {
+_TYPE_MAP: dict = {
     "object": dict, "array": list, "string": str,
     "number": (int, float), "integer": int, "boolean": bool, "null": type(None),
 }

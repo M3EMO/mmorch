@@ -51,6 +51,7 @@ def run_claude(prompt: str, cwd: str, *, mode: str = "plan", timeout: float = 60
     try:
         p = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+        assert p.stdin is not None and p.stdout is not None   # PIPE -> not None
         p.stdin.write(prompt); p.stdin.close()
         for line in p.stdout:
             line = line.strip()

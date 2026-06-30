@@ -84,7 +84,8 @@ def scout_delta(path=None) -> dict:
     con scout (task que arranca con 'GROUNDING') vs sin, sobre trajectory.load_trajectories.
     Honesto: si n es chico o el delta ~0, scout NO se justifica (anti-scope-creep)."""
     from .trajectory import load_trajectories
-    with_s, without_s = [], []
+    with_s: list = []
+    without_s: list = []
     for t in load_trajectories(path):
         (with_s if t.get("scout") else without_s).append(t.get("n_iters", 0))
     def _avg(xs):

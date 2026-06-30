@@ -40,10 +40,10 @@ class CheckResult:
 # --------------------------------------------------------------------------- #
 # sandbox aritmetico (ast walk; NUNCA eval/exec sobre texto del modelo)        #
 # --------------------------------------------------------------------------- #
-_BIN = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+_BIN: dict[type, Callable] = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
         ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv,
         ast.Mod: operator.mod, ast.Pow: operator.pow}
-_UNARY = {ast.UAdd: operator.pos, ast.USub: operator.neg}
+_UNARY: dict[type, Callable] = {ast.UAdd: operator.pos, ast.USub: operator.neg}
 _FUNCS: dict[str, Callable] = {
     "sqrt": math.isqrt, "isqrt": math.isqrt, "factorial": math.factorial,
     "comb": math.comb, "perm": math.perm, "gcd": math.gcd, "lcm": math.lcm,
@@ -290,8 +290,8 @@ def _check_units(*, quantity: str, to: str, expected: float, tol: float = 1e-6, 
     except ImportError:
         return CheckResult(False, "falta dep pint (pip install pint)", "units")
     try:
-        ureg = pint.UnitRegistry()
-        got = ureg.Quantity(quantity).to(to).magnitude
+        ureg: Any = pint.UnitRegistry()
+        got: Any = ureg.Quantity(quantity).to(to).magnitude
     except Exception as e:
         return CheckResult(False, f"unidad invalida: {str(e)[:120]}", "units", expected, None)
     ok = abs(float(got) - float(expected)) <= tol
@@ -398,7 +398,7 @@ def _check_code_quality(*, code: str, min_score: float = 0.5, **_) -> CheckResul
     return CheckResult(score >= min_score, detail, "code_quality", expected=min_score, got=score)
 
 
-_MUT_BINOP = {ast.Add: [ast.Sub, ast.Mult], ast.Sub: [ast.Add, ast.Mult],
+_MUT_BINOP: dict[type, list[type]] = {ast.Add: [ast.Sub, ast.Mult], ast.Sub: [ast.Add, ast.Mult],
               ast.Mult: [ast.Add, ast.Div], ast.Div: [ast.Mult, ast.Sub],
               ast.FloorDiv: [ast.Mult], ast.Mod: [ast.Mult, ast.Add]}
 _MUT_CMP = {ast.Lt: ast.Gt, ast.Gt: ast.Lt, ast.LtE: ast.GtE, ast.GtE: ast.LtE,
@@ -416,7 +416,7 @@ def _mutants(code: str, max_n: int = 12) -> list[str]:
         return []
     # localizar nodos mutables (por índice de recorrido estable)
     # (indice de recorrido, kind, alternativa) — una mutación por entrada
-    targets = []
+    targets: list[tuple[int, str, Any]] = []
     for i, node in enumerate(ast.walk(base)):
         if isinstance(node, ast.BinOp) and type(node.op) in _MUT_BINOP:
             for alt in _MUT_BINOP[type(node.op)]:
@@ -432,17 +432,17 @@ def _mutants(code: str, max_n: int = 12) -> list[str]:
     out = []
     for idx, kind, alt in targets[:max_n]:
         tree = copy.deepcopy(base)
-        node = list(ast.walk(tree))[idx]
-        if kind == "binop":
-            node.op = alt()
+        mn: Any = list(ast.walk(tree))[idx]   # node fetched by dynamic index -> ast.AST; Any so the
+        if kind == "binop":                   # type-specific mutations below typecheck (correct at runtime)
+            mn.op = alt()
         elif kind == "cmp":
-            node.ops[0] = alt()
+            mn.ops[0] = alt()
         elif kind == "bool":
-            node.op = alt()
+            mn.op = alt()
         elif kind == "boolconst":
-            node.value = not node.value
+            mn.value = not mn.value
         elif kind == "int":
-            node.value = node.value + 1
+            mn.value = mn.value + 1
         try:
             out.append(ast.unparse(tree))
         except Exception:
@@ -506,7 +506,7 @@ def _check_deterministic(*, code: str, runs: int = 3, timeout: float = 10.0, **_
     otros checkers. Hardening de la propia determinación."""
     from .sandbox import run_sandboxed
     outs = set()
-    for _ in range(max(2, runs)):
+    for _i in range(max(2, runs)):
         r = run_sandboxed(code, timeout=timeout)
         outs.add((r.ok, r.stdout.strip()))
     ok = len(outs) == 1

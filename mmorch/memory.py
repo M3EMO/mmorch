@@ -485,7 +485,7 @@ def remember(scope: str, episode_text: str, *, kind: str = "note", actor: str = 
     Devuelve {episode_id, note_id|None, distilled, persisted, refutations}."""
     eid = write_episode(scope, kind, episode_text, actor=actor, path=path)
     note = distill(episode_text, gen_model=gen_model)
-    out = {"episode_id": eid, "note_id": None, "distilled": note,
+    out: dict = {"episode_id": eid, "note_id": None, "distilled": note,
            "persisted": False, "refutations": []}
     if note.strip().upper() == "SKIP" or not note.strip():
         return out

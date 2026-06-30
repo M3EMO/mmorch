@@ -200,9 +200,9 @@ if __name__ == "__main__":
     assert coherence(code_task, bandit=bb) == 16, coherence(code_task, bandit=bb)
     assert coherence(other_task, bandit=bb) == 0, coherence(other_task, bandit=bb)
     # Phase 3 GATE: familiar+good -> commit; cold -> escalate.
-    act, mdl, _ = decide(["deepseek-chat", "gemini-2.5-flash"], code_task, bandit=bb)
+    act, mdl, _r = decide(["deepseek-chat", "gemini-2.5-flash"], code_task, bandit=bb)
     assert act == "commit" and mdl == "deepseek-chat", (act, mdl)
-    act2, mdl2, _ = decide(["deepseek-chat", "gemini-2.5-flash"], other_task, bandit=bb)
+    act2, mdl2, _r = decide(["deepseek-chat", "gemini-2.5-flash"], other_task, bandit=bb)
     assert act2 == "escalate" and mdl2 is None, (act2, mdl2)
     # Phase 4 INSIGHT: a cold task that's structurally adjacent inherits the neighbor's evidence.
     warm = "Generá en Python def f(a): devolvé la suma"

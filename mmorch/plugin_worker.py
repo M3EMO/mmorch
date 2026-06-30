@@ -22,6 +22,7 @@ def _load_entry(plugin_dir: Path):
     manifest = json.loads((plugin_dir / "plugin.json").read_text(encoding="utf-8"))
     entry = plugin_dir / manifest.get("entry", "main.py")
     spec = importlib.util.spec_from_file_location("mmorch_plugin_" + manifest["name"], entry)
+    assert spec is not None and spec.loader is not None   # valid entry file -> spec+loader present
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

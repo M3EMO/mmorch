@@ -35,7 +35,7 @@ def write_note(folder: str, title: str, body: str, *, frontmatter: dict | None =
 
 def read_notes(folder: str) -> list[dict]:
     """Lee notas de una carpeta. Devuelve [{path, title, frontmatter, body}]."""
-    out = []
+    out: list = []
     d = VAULT / folder
     if not d.exists():
         return out
