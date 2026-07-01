@@ -15,7 +15,7 @@ import json
 from mmorch.providers import call
 from mmorch.textutil import extract_fence
 from mmorch.checkers import check
-from mmorch.intuition import decide
+from mmorch.intuition import decide, record
 from mmorch.config import DEFAULT_GENERATOR, DEFAULT_INTUITION_POOL
 
 # (prompt, tests) — self-contained; tests are asserts run against the generated function.
@@ -55,7 +55,10 @@ def _gen_and_check(model: str, prompt: str, tests: str) -> bool:
         return False
 
 
-def run() -> dict:
+def run(train: bool = True) -> dict:
+    """A/B the intuition-picked model vs the default. train=True ALSO records both arms' real
+    (execution-truth) outcomes into the sig-bandit — the counterfactual data it normally never sees
+    (production only records the model it picked). So each run measures AND sharpens the router."""
     default = DEFAULT_GENERATOR
     pool = DEFAULT_INTUITION_POOL
     rows, diverged = [], []
@@ -64,6 +67,10 @@ def run() -> dict:
         arm_model = picked if (act == "commit" and picked) else default
         pass_intuition = _gen_and_check(arm_model, prompt, tests)
         pass_default = _gen_and_check(default, prompt, tests)
+        if train:                                    # counterfactual seed: feed BOTH arms' truth
+            record(arm_model, 1.0 if pass_intuition else 0.0, prompt)
+            if default != arm_model:
+                record(default, 1.0 if pass_default else 0.0, prompt)
         row = {"picked": arm_model, "same_as_default": arm_model == default,
                "intuition_pass": pass_intuition, "default_pass": pass_default}
         rows.append(row)

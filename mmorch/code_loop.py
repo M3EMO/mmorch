@@ -57,10 +57,10 @@ def run_code_task(
     """
     sysmsg = (system or "You are a Python programmer. Output ONLY the function source "
               "code in a python code block, no explanation.")
-    # intuition layer (OPT-IN — default OFF; see route.py + scripts/ab_intuition_router.py). The A/B
-    # did not validate default-ON, so the loop keeps TRAINING the sig-bandit (via record_outcome below)
-    # but only CONSULTS it when explicitly enabled (MMORCH_INTUITION=on or intuition_models=[...]).
-    if intuition_models is None and os.getenv("MMORCH_INTUITION", "off").lower() == "on":
+    # intuition layer (ON by default — user's call; improves with data, see route.py). The loop keeps
+    # TRAINING the sig-bandit (record_outcome below) AND consults it; Thompson self-corrects as
+    # outcomes accrue. Off via MMORCH_INTUITION=off; intuition_models=[] opts a call out.
+    if intuition_models is None and os.getenv("MMORCH_INTUITION", "on").lower() != "off":
         from .config import DEFAULT_INTUITION_POOL
         intuition_models = DEFAULT_INTUITION_POOL
     if intuition_models:
