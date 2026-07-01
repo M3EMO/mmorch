@@ -177,7 +177,13 @@ if __name__ == "__main__":
     assert stub_check("class C:\n    X = 1")[0] is False                   # config class ok
     # execution-arbitrated critiques from the mmorch review (a valid critique = a failing test):
     assert stub_check("def f():\n    raise mod.NotImplementedError")[0] is True   # qualified NotImplementedError
+    assert stub_check("def f():\n    raise a.b.NotImplementedError()")[0] is True  # nested-qualified too (round-2 dismissal locked)
     assert validate_worklist(_parse_worklist('[{"name":null,"spec":"x"}]'))[0] is False  # null name rejected, not "None"
+    _u = [{"name": "a", "spec": "a", "deps": []}, {"name": "b", "spec": "b", "deps": ["a"]}]
+    import copy as _copy
+    _b = _copy.deepcopy(_u)
+    build_order(_u)
+    assert _u == _b, "build_order must not mutate its input (round-2 dismissal locked)"
     # 3. decompose with an injected fake plan (cero-cost, no API).
     fake = '[{"name":"core","spec":"the core","deps":[],"test_cmd":"pytest -q"}]'
     wl = decompose("build a thing", plan=lambda: fake)
