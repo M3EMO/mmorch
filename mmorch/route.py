@@ -53,11 +53,12 @@ def route(
     outcomes). Asi el umbral opera sobre una senal real, no sobre el self-score crudo.
     calibrated=False vuelve al gating crudo (A/B o si no hay data de calibracion).
     """
-    # intuition layer (ON by default): the signature-keyed bandit picks gen_model when this
-    # task's structure is FAMILIAR (decide() guards: enough samples + good mean); cold/weak ->
-    # keep the passed default and let the outcome train it. Kill switch MMORCH_INTUITION=off
-    # restores the old fixed-default behavior instantly. Pass models=[] to opt a call out.
-    if models is None and os.getenv("MMORCH_INTUITION", "on").lower() != "off":
+    # intuition layer (OPT-IN — default OFF). An A/B (scripts/ab_intuition_router.py, execution-truth)
+    # did NOT validate default-ON: routing to the historically-best model (v4-pro) scored 0.9 vs the
+    # default's 1.0 on a neutral code set (ceiling effect, N=10) — no evidence it helps, weak evidence
+    # against. So default to the proven fixed gen_model; enable explicitly with MMORCH_INTUITION=on
+    # (or pass models=[...]) if/when a harder A/B justifies it. decide()'s guards still gate it when on.
+    if models is None and os.getenv("MMORCH_INTUITION", "off").lower() == "on":
         from .config import DEFAULT_INTUITION_POOL
         models = DEFAULT_INTUITION_POOL
     if models:
