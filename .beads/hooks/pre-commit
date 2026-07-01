@@ -1,4 +1,7 @@
 #!/bin/sh
+# --- ruff lint gate (enforced, fast): blocks the commit on a lint error. ---
+_GPY=".venv/Scripts/python.exe"; [ -x "$_GPY" ] || _GPY="python"
+"$_GPY" -m ruff check mmorch mcp_server.py tests || { echo >&2 "ruff gate failed (fix it, or 'git commit --no-verify' to bypass)"; exit 1; }
 # Auto-refresca las secciones <!-- mmorch:auto:* --> del README desde el codigo.
 # Best-effort: si falla, NO bloquea el commit.
 PY=".venv/Scripts/python.exe"

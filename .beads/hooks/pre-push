@@ -1,4 +1,8 @@
 #!/usr/bin/env sh
+# --- full gate before push (enforced): ruff + mypy must be at 0. ---
+_GPY=".venv/Scripts/python.exe"; [ -x "$_GPY" ] || _GPY="python"
+"$_GPY" -m ruff check mmorch mcp_server.py tests || { echo >&2 "ruff gate failed — push blocked"; exit 1; }
+"$_GPY" -m mypy mmorch --ignore-missing-imports || { echo >&2 "mypy gate failed — push blocked"; exit 1; }
 # --- BEGIN BEADS INTEGRATION v1.0.3 ---
 # This section is managed by beads. Do not remove these markers.
 if command -v bd >/dev/null 2>&1; then
