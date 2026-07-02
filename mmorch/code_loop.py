@@ -60,7 +60,10 @@ def run_code_task(
     # intuition layer (ON by default — user's call; improves with data, see route.py). The loop keeps
     # TRAINING the sig-bandit (record_outcome below) AND consults it; Thompson self-corrects as
     # outcomes accrue. Off via MMORCH_INTUITION=off; intuition_models=[] opts a call out.
-    if intuition_models is None and os.getenv("MMORCH_INTUITION", "on").lower() != "off":
+    # Only when the caller did NOT pass explicit `steps`: an explicit cascade is the caller's choice —
+    # intuition must never stomp it (same contract as route.py's `models is None` gate).
+    if steps is None and intuition_models is None \
+            and os.getenv("MMORCH_INTUITION", "on").lower() != "off":
         from .config import DEFAULT_INTUITION_POOL
         intuition_models = DEFAULT_INTUITION_POOL
     if intuition_models:
