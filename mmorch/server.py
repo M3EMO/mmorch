@@ -187,11 +187,12 @@ async def run_workflow(request):
                                           "(the acceptance command, e.g. 'pytest -q')"}, status_code=400)
         jid = _u.uuid4().hex[:10]
         md = int(body.get("max_depth", 2))
+        seeds = list(body.get("seed_globs") or [])   # gitignored artifacts the acceptance needs
         t = threading.Thread(target=_run_project_build_job, args=(jid, task, project, external_test, md),
-                             kwargs={"parent": body.get("parent_id")}, daemon=True)
+                             kwargs={"seed_globs": seeds, "parent": body.get("parent_id")}, daemon=True)
         t.start()
         return JSONResponse({"started": "project-build", "job_id": jid, "project": project,
-                             "external_test": external_test})
+                             "external_test": external_test, "seed_globs": seeds})
     from . import workflow_spec
     try:
         if body.get("workflow"):

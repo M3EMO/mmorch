@@ -287,7 +287,7 @@ def _run_project_job(project: str, task: str, mode: str, push: bool = False,
 
 
 def _run_project_build_job(jid: str, task: str, project: str, external_test: str,
-                           max_depth: int = 2, parent=None):
+                           max_depth: int = 2, seed_globs: list | None = None, parent=None):
     """The recursive /project engine (F1/F2/F3) as a server job. Runs in an ISOLATED git worktree
     of `project` (main tree untouched, result on a review branch). `external_test` is the real
     acceptance suite (the integration gate at depth 0). Terminal job status:
@@ -305,8 +305,13 @@ def _run_project_build_job(jid: str, task: str, project: str, external_test: str
         wt = open_worktree(resolve(project))
         with _JOBS_LOCK:
             _JOBS[jid]["review_branch"] = wt.branch
+        # F4 lesson: a fresh checkout lacks gitignored artifacts the acceptance reads (caches, local
+        # DBs) -> the gate would measure a broken env. seed_globs mirrors them (dirs linked, files
+        # copied); the links are removed by wt.close() before the tree is deleted.
+        n_seed = wt.seed(seed_globs)
         emit("job", "running", job_id=jid,
-             detail=f"project-build {project} -> {wt.branch}: {task[:70]}")
+             detail=f"project-build {project} -> {wt.branch}"
+                    f"{f' (+{n_seed} seeded)' if n_seed else ''}: {task[:70]}")
         res = build_project(task, wt.path, external_test=external_test, max_depth=max_depth)
         status = res.get("status", "escalate")
         job_status = {"built": "done", "integration_failed": "gate"}.get(status, "escalate")

@@ -41,6 +41,36 @@ class Worktree:
         self.repo, self.path, self.branch = repo, path, branch
         self.diff = ""
         self.diffstat = ""
+        self._links: list[str] = []   # seeded dir-links; close() removes them BEFORE git deletes the tree
+
+    def seed(self, patterns: list[str] | None) -> int:
+        """Mirror GITIGNORED artifacts into the worktree (F4 lesson: a fresh checkout lacks the
+        untracked data an acceptance suite reads — caches, local DBs — so the gate measures a broken
+        env). Dirs matching a pattern are LINKED (junction/symlink, no copy — caches can be GBs);
+        files are copied (isolates writes, e.g. a sqlite db). Links are recorded and removed by
+        close() first — a recursive worktree delete must never traverse into the main tree's data."""
+        import glob as _glob
+        import shutil
+        n = 0
+        for pat in patterns or []:
+            for src in _glob.glob(os.path.join(self.repo, pat)):
+                src = os.path.normpath(src)   # glob yields mixed seps; cmd's mklink rejects fwd-slashes
+                dst = os.path.join(self.path, os.path.relpath(src, self.repo))
+                if os.path.exists(dst):
+                    continue
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                if os.path.isdir(src):
+                    try:
+                        os.symlink(src, dst, target_is_directory=True)
+                    except OSError:               # Windows without symlink privilege -> junction
+                        subprocess.run(["cmd", "/c", "mklink", "/J", dst, src], capture_output=True)
+                    if os.path.isdir(dst):
+                        self._links.append(dst)
+                        n += 1
+                else:
+                    shutil.copy2(src, dst)
+                    n += 1
+        return n
 
     def capture(self, message: str = "mmorch(worktree): isolated run") -> dict:
         """Stage everything, record the diff vs the base, commit it to this worktree's branch."""
@@ -54,6 +84,12 @@ class Worktree:
 
     def close(self, *, keep_branch: bool = True) -> None:
         """Remove the worktree dir; the branch ref persists unless keep_branch=False."""
+        for link in self._links:      # unlink seeded dirs FIRST: never recursive-delete into main-tree data
+            try:
+                os.rmdir(link)        # on a junction/dir-symlink this removes only the link
+            except OSError:
+                pass
+        self._links = []
         _git(self.repo, "worktree", "remove", "--force", self.path)
         if not keep_branch:
             _git(self.repo, "branch", "-D", self.branch)
@@ -108,6 +144,26 @@ if __name__ == "__main__":
     assert _git(d, "status", "--porcelain")[1] == "", "main tree clean"
     # the kept branch actually contains the change
     assert "b.txt" in _git(d, "show", "--stat", branch)[1], "branch holds the work"
+
+    # SEED (F4): gitignored dir linked + file copied into the worktree; the SOURCE must survive close().
+    os.makedirs(os.path.join(d, "data", ".cache"))
+    with open(os.path.join(d, "data", ".cache", "big.bin"), "w") as f:
+        f.write("cache-artifact\n")
+    with open(os.path.join(d, "local.db"), "w") as f:
+        f.write("db\n")
+    with open(os.path.join(d, ".gitignore"), "w") as f:
+        f.write("data/.cache/\nlocal.db\n")
+    _git(d, "add", "-A"); _git(d, "commit", "-q", "-m", "gitignore")
+    wt3 = open_worktree(d)
+    assert not os.path.exists(os.path.join(wt3.path, "data", ".cache")), "fresh worktree lacks the cache"
+    ns = wt3.seed(["data/.cache", "local.db"])
+    assert ns == 2, ns
+    assert open(os.path.join(wt3.path, "data", ".cache", "big.bin")).read() == "cache-artifact\n", "linked"
+    assert os.path.isfile(os.path.join(wt3.path, "local.db")), "file copied"
+    wt3.close(keep_branch=False)
+    assert os.path.isfile(os.path.join(d, "data", ".cache", "big.bin")), \
+        "CRITICAL: source cache must SURVIVE close (link removed, never recursed into)"
+    assert os.path.isfile(os.path.join(d, "local.db")), "source db survives"
 
     # branch REUSE (resume continuity): reopen the kept branch, add more, it accumulates
     wt2 = open_worktree(d, branch=branch)
