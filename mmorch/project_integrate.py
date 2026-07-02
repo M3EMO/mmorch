@@ -61,10 +61,19 @@ def _ast_ok(code: str) -> tuple[bool, str]:
 
 
 # --- production boundaries (injectable; these are the only things that touch API / disk) --------- #
+# NOT prompts.LAZY_SYSTEM: "minimal code" reads as "output only the changed part", which fights the
+# full-file regeneration contract (F4: a 200-line module came back as a 20-line fragment). Minimality
+# must apply to the CHANGE; the OUTPUT is always the whole file.
+_CODER_SYS = (
+    "You are a senior engineer editing ONE file of an existing repo. Make the SMALLEST change that "
+    "satisfies the spec — but your output is ALWAYS the COMPLETE new content of the file (every line "
+    "that must exist in it after your change, including everything you did not touch). Never output "
+    "only the changed fragment. Return it in a single ``` block, no explanation.")
+
+
 def _default_gen(gen_model: str, repo: str):
     from .providers import call
     from .textutil import extract_fence
-    from .prompts import LAZY_SYSTEM
 
     def gen(unit: dict, feedback: str) -> str:
         fpath = _safe_target(repo, unit)
@@ -81,7 +90,7 @@ def _default_gen(gen_model: str, repo: str):
                 f"FILE `{_file_of(unit)}` (current):\n```\n{cur}\n```\n"
                 + (f"\nThe previous attempt FAILED:\n{feedback[:1200]}\nFix it.\n" if feedback else "")
                 + "Return ONLY the COMPLETE new file content in a ``` block.")
-        out = call(gen_model, [{"role": "system", "content": LAZY_SYSTEM},
+        out = call(gen_model, [{"role": "system", "content": _CODER_SYS},
                                {"role": "user", "content": user}],
                    pattern="project_integrate", node="coder", temperature=0.0).text
         return extract_fence(out)
