@@ -58,11 +58,22 @@ def run_project_build(task: str, *, external_test: str | None,
                       build_fn: Callable[[dict], str],
                       gate_fn: Callable[[dict, str], tuple[bool, str]],
                       commit_fn: Callable[[str, dict], None] | None = None,
-                      depth: int = 0, max_depth: int = 3) -> dict:
+                      integrate_fn: Callable[[str, list[dict]], tuple[bool, str]] | None = None,
+                      depth: int = 0, max_depth: int = 2) -> dict:
     """Recursive orchestrator. plan_fn(task, external_test)->units. Builds units in dependency order;
     a 'recurse' unit is decomposed and built depth-first, its own test_cmd (if any) becoming the
-    sub-level's backstop. commit_fn(name, result) checkpoints/commits a built LEAF. Returns a result
-    tree {status: 'built'|'escalate', results:[...]}."""
+    sub-level's backstop. commit_fn(name, result) checkpoints/commits a built LEAF.
+
+    INTEGRATION GATE (the whole > the parts): green units do NOT prove a green whole (shared state,
+    interface mismatch). So after every unit at a level builds, if that level has an `external_test`
+    AND `integrate_fn`, the assembled result is run against it. Red -> status 'integration_failed'
+    (NOT a silent 'built') carrying the failing output, which the orchestrator surfaces. There is NO
+    auto interface-re-plan (that risks an unbounded decompose<->integrate loop) — a failing
+    integration escalates to a human/Opus decision. depth cap default is SHALLOW (2): a stub still
+    present at the cap ESCALATES; a stub is never accepted as built.
+
+    Terminals: 'built' (all units built + integration green if checked), 'integration_failed',
+    'escalate' (bad plan / depth cap / a unit's gate never passed). All structured for the caller."""
     if depth > max_depth:
         return {"status": "escalate", "reason": f"max recursion depth {max_depth}", "task": task[:80]}
     units = plan_fn(task, external_test)
@@ -70,22 +81,30 @@ def run_project_build(task: str, *, external_test: str | None,
     if not ok:
         return {"status": "escalate", "reason": f"invalid plan: {errs}", "task": task[:80]}
     by_name = {u["name"]: u for u in units}
-    results = []
+    results: list = []
     for name in build_order(units):
         unit = by_name[name]
         r = build_unit(unit, build_fn=build_fn, gate_fn=gate_fn)
         if r["status"] == "recurse":
             sub = run_project_build(unit["spec"], external_test=unit.get("test_cmd") or external_test,
                                     plan_fn=plan_fn, build_fn=build_fn, gate_fn=gate_fn,
-                                    commit_fn=commit_fn, depth=depth + 1, max_depth=max_depth)
+                                    commit_fn=commit_fn, integrate_fn=integrate_fn,
+                                    depth=depth + 1, max_depth=max_depth)
             r = {"name": name, "status": sub["status"], "recursed": True, "sub": sub}
         # commit only LEAF units (built with their own code); a recursed container has no code of
         # its own — its sub-units were already committed inside the recursive call.
         if commit_fn and r["status"] == "built" and not r.get("recursed"):
             commit_fn(name, r)
         results.append(r)
-        if r["status"] == "escalate":
-            return {"status": "escalate", "at": name, "depth": depth, "results": results}
+        if r["status"] in ("escalate", "integration_failed"):
+            return {"status": r["status"], "at": name, "depth": depth, "results": results}
+    # integration gate: the assembled whole must pass this level's acceptance test (execution truth).
+    if external_test and integrate_fn:
+        iok, idetail = integrate_fn(external_test, results)
+        if not iok:
+            return {"status": "integration_failed", "depth": depth, "external_test": external_test,
+                    "detail": idetail, "results": results}
+        return {"status": "built", "depth": depth, "integrated": True, "results": results}
     return {"status": "built", "depth": depth, "results": results}
 
 
@@ -144,4 +163,31 @@ if __name__ == "__main__":
     r_throw = build_unit({"name": "u", "spec": "u"}, build_fn=lambda u: "def f():\n    return 1", gate_fn=_boom)
     assert r_throw["status"] == "escalate" and "RuntimeError" in r_throw["detail"], r_throw
 
-    print("project_driver F2 OK — recursion-on-stub, dep order, cumulative-commit, escalate propagation, depth cap")
+    # INTEGRATION GATE (cross-family round-1 valid critique 'e'): all units build green, but the
+    # assembled whole fails the level's acceptance test -> integration_failed, NOT a silent 'built'.
+    seen_integration: list = []
+
+    def _fail_integration(ext, rs):
+        seen_integration.append(ext)
+        return False, "3 failed"
+
+    res5 = run_project_build("top", external_test="pytest -q", plan_fn=lambda t, e: PLANS["top"],
+                             build_fn=lambda u: f"def {u['name']}():\n    return 1",
+                             gate_fn=lambda u, c: (True, "unit green"), integrate_fn=_fail_integration)
+    assert res5["status"] == "integration_failed", res5
+    assert res5["detail"] == "3 failed" and seen_integration == ["pytest -q"], res5
+    # integration GREEN -> built + integrated flag
+    res6 = run_project_build("top", external_test="pytest -q", plan_fn=lambda t, e: PLANS["top"],
+                             build_fn=lambda u: f"def {u['name']}():\n    return 1",
+                             gate_fn=lambda u, c: (True, "unit green"),
+                             integrate_fn=lambda ext, rs: (True, "all green"))
+    assert res6["status"] == "built" and res6.get("integrated"), res6
+    # no external_test -> no integration gate (nothing to assert against) -> plain built
+    res7 = run_project_build("top", external_test=None, plan_fn=lambda t, e: PLANS["top"],
+                             build_fn=lambda u: f"def {u['name']}():\n    return 1",
+                             gate_fn=lambda u, c: (True, ""),
+                             integrate_fn=lambda ext, rs: (False, "must not run"))
+    assert res7["status"] == "built" and not res7.get("integrated"), res7
+
+    print("project_driver F2 OK — recursion-on-stub, dep order, cumulative-commit, escalate propagation, "
+          "depth cap, integration gate (whole>parts)")
