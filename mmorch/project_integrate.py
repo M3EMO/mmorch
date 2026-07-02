@@ -151,6 +151,15 @@ def _default_integrate(repo: str):
     return integrate
 
 
+def _default_write_file(repo: str):
+    def write_file(unit: dict, code: str) -> None:
+        fpath = _safe_target(repo, unit)
+        os.makedirs(os.path.dirname(fpath) or repo, exist_ok=True)
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(code + ("\n" if not code.endswith("\n") else ""))
+    return write_file
+
+
 def _default_commit(repo: str):
     # Assumes `repo` is ALREADY the isolated working tree (the server opens a git worktree on a review
     # branch and passes its path). Commits in place on that branch -> per-unit history for git-bisect.
@@ -174,7 +183,8 @@ def build_project(task: str, repo: str, *, external_test: str | None,
                   run_snippet: Callable[[str, str], tuple[bool, str]] | None = None,
                   propose_test: Callable[[str, str], str] | None = None,
                   integrate: Callable[[str, list], tuple[bool, str]] | None = None,
-                  commit: Callable[[str, dict], None] | None = None) -> dict:
+                  commit: Callable[[str, dict], None] | None = None,
+                  write_file: Callable[[dict, str], None] | None = None) -> dict:
     """Build `task` in `repo` via the recursive engine, cero cupo. `external_test` = the real
     acceptance command (the integration gate at depth 0). All boundary fns default to production
     (providers.call / subprocess / checkers / worktree) and are injectable for the self-check.
@@ -188,6 +198,7 @@ def build_project(task: str, repo: str, *, external_test: str | None,
     propose_test = propose_test or _default_propose_test(verifier_model)
     integrate = integrate or _default_integrate(repo)
     commit = commit if commit is not None else _default_commit(repo)
+    write_file = write_file or _default_write_file(repo)
 
     cold_feedback: dict[str, str] = {}   # the cold verifier's counterexample -> next hot coder attempt
     unverified: list[str] = []           # units passed as 'unverified' (deferred to integration)
@@ -232,6 +243,10 @@ def build_project(task: str, repo: str, *, external_test: str | None,
         valid, why = _ast_ok(code)
         if not valid:
             return False, f"not valid python: {why}"
+        # LAND the code (F4 round-1 bug: only run_test wrote to disk, so an untested unit's code never
+        # reached the tree and the integration gate ran against NOTHING). Gate-time = post-stub-check,
+        # so a stub never lands. Tested units are written by run_test itself.
+        write_file(unit, code)
         probe = propose_test(code, unit["spec"])
         if probe.strip():
             passed, detail = run_snippet(code, probe)
@@ -288,17 +303,22 @@ if __name__ == "__main__":
 
     # 3. UNTESTED unit: no test_cmd -> gate passes it as 'unverified' (never called correct), a failing
     #    cold probe is ADVISORY only (does not fail the gate); correctness is deferred to integration.
+    #    AND its code must LAND on disk (F4 round-1 bug: only run_test wrote -> integration saw nothing).
     committed: list = []
+    written: dict = {}
     r3 = build_project("top", REPO, external_test="ACCEPT",
-                       plan=lambda t, e: [{"name": "u", "spec": "s", "deps": []}],  # no test_cmd
+                       plan=lambda t, e: [{"name": "u", "spec": "s", "deps": [], "file": "pkg/u.py"}],
                        gen=lambda u, fb: "def u():\n    return 1",
                        run_test=lambda u, c, tc: (True, ""),          # not consulted (no test_cmd)
                        run_snippet=lambda c, a: (False, "probe failed"),   # probe FAILS -> advisory
                        propose_test=lambda c, s: "assert u() == 2",
                        integrate=lambda e, rs: (True, "accept green"),
-                       commit=lambda n, rr: committed.append(n))
+                       commit=lambda n, rr: committed.append(n),
+                       write_file=lambda u, c: written.__setitem__(u.get("file"), c))
     assert r3["status"] == "built" and r3["unverified"] == ["u"], r3   # passed, but honestly unverified
     assert committed == ["u"], committed                              # a leaf still commits
+    assert "pkg/u.py" in written and "def u()" in written["pkg/u.py"], written  # the code LANDED
+    assert r3["results"][0].get("file") == "pkg/u.py", r3["results"]  # observability: file in the result
 
     # 4. UNTESTED unit that isn't valid python -> the deterministic floor FAILS the gate -> escalate.
     r4 = build_project("top", REPO, external_test=None,

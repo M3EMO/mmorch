@@ -49,8 +49,12 @@ def build_unit(unit: dict, *, build_fn: Callable[[dict], str],
             detail = f"gate_fn {type(e).__name__}: {str(e)[:100]}"
             continue
         if ok:
-            return {"name": unit["name"], "status": "built", "code": code}
-    return {"name": unit["name"], "status": "escalate", "detail": detail}
+            # file/test_cmd travel with the result: without them a failed run is undiagnosable
+            # (F4 round-1: couldn't tell WHERE the planner pointed the unit).
+            return {"name": unit["name"], "status": "built", "code": code,
+                    "file": unit.get("file"), "test_cmd": unit.get("test_cmd"), "gate": detail}
+    return {"name": unit["name"], "status": "escalate", "detail": detail,
+            "file": unit.get("file"), "test_cmd": unit.get("test_cmd")}
 
 
 def run_project_build(task: str, *, external_test: str | None,
