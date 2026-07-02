@@ -287,6 +287,46 @@ async def chat_history(request):
     return JSONResponse(chat_store.history(before, limit))
 
 
+async def benchmarks_handler(request):
+    """Real benchmark strip for Lotus (replaces MOCK_BENCH): live system metrics in the
+    front's shape {key,label,value,fmt,delta,good,spark}. delta/spark need history -> v1 empty."""
+    from starlette.responses import JSONResponse
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    out = []
+
+    def _row(key, label, value, fmt, good):
+        out.append({"key": key, "label": label, "value": round(float(value), 4),
+                    "fmt": fmt, "delta": 0, "good": good, "spark": []})
+    try:
+        from .metrics import summary, error_rates
+        s = summary()
+        if s.get("calls"):
+            _row("cost_call", "cost / call", s["total_cost_usd"] / s["calls"], "usd", "low")
+        ew = error_rates(window_n=200)
+        tot = sum(m["calls"] for m in ew["by_model"].values()) or 1
+        errs = sum(round(m["error_rate"] * m["calls"]) for m in ew["by_model"].values())
+        _row("err_rate", "error rate (w200)", errs / tot, "pct", "low")
+    except Exception:
+        pass
+    try:
+        from .feedback import calibration
+        c = calibration()
+        if c.get("n"):
+            _row("ece", "calibration ECE", c["ece"], "pct", "low")
+    except Exception:
+        pass
+    try:
+        from .memory import stats as _mstats
+        ms = _mstats()
+        if ms.get("semantic"):
+            _row("mem_verified", "memory verified", (ms.get("verified") or 0) / ms["semantic"],
+                 "pct", "high")
+    except Exception:
+        pass
+    return JSONResponse({"benchmarks": out})
+
+
 async def minds_handler(request):
     """Global codegraph federation across registered projects (read-only)."""
     from starlette.responses import JSONResponse
@@ -715,6 +755,7 @@ def build_app():
         Route("/chat", chat_handler, methods=["POST"]),
         Route("/chat/history", chat_history, methods=["GET"]),
         Route("/minds", minds_handler),
+        Route("/benchmarks", benchmarks_handler),
         Route("/transcript/{job_id}", transcript_handler),
         Route("/jobs/{job_id}/ancestry", job_ancestry),
         Route("/jobs/{job_id}/cancel-tree", cancel_tree, methods=["POST"]),
