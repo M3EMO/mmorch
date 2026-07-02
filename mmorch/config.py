@@ -139,6 +139,21 @@ REGISTRY: dict[str, ModelSpec] = {
         price_out=2.20,
         role="coder agentico / code-heavy executor (head-to-head vs deepseek-v4-pro, bof)",
     ),
+    # glm-5.2: sucesor de 4.6 a PROBAR en el pool de intuition (pedido usuario 2026-07-02).
+    # 4.6 midió 34% error ventaneado (timeouts) — el health-floor lo demota solo; 5.2 entra
+    # a competir por ejecución (el sig-bandit decide). Precios PROVISORIOS copiados de 4.6,
+    # VOLATILES — reverificar contra z.ai antes de fijar budgets.
+    "glm-5.2": ModelSpec(
+        key="glm-5.2",
+        family="zhipu",
+        provider="zhipu",
+        model_id="glm-5.2",
+        base_url="https://api.z.ai/api/paas/v4",
+        api_key_env="ZHIPU_API_KEY",
+        price_in=0.60,
+        price_out=2.20,
+        role="candidato intuition-pool (3ra familia, reemplaza a 4.6 health-floored)",
+    ),
 }
 
 # Default node assignments for the MVP slice.
@@ -148,7 +163,7 @@ DEFAULT_ROUTER = "gemini-2.5-flash-lite"    # sigue siendo el out/M mas barato s
 
 # Candidate generator pool the intuition layer (signature-keyed bandit) picks among when
 # routing is left to it. Bare valid REGISTRY keys only, spanning families (decorrelate).
-DEFAULT_INTUITION_POOL = ["deepseek-chat", "deepseek-v4-pro", "gemini-2.5-flash", "glm-4.6"]
+DEFAULT_INTUITION_POOL = ["deepseek-chat", "deepseek-v4-pro", "gemini-2.5-flash", "glm-5.2"]
 
 
 def family_of(model_key: str) -> str:
