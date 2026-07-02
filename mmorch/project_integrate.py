@@ -22,7 +22,6 @@ probe -> a model endorses its own blind spots).
 """
 from __future__ import annotations
 
-import ast
 import os
 import subprocess
 from typing import Callable
@@ -51,13 +50,11 @@ def _safe_target(repo: str, unit: dict) -> str:
     return fpath
 
 
-def _ast_ok(code: str) -> tuple[bool, str]:
-    """Deterministic floor for an untested unit: it must at least be valid Python."""
-    try:
-        ast.parse(code)
-        return True, ""
-    except SyntaxError as e:
-        return False, str(e)[:120]
+def _syntax_ok(code: str, file: str | None) -> tuple[bool, str]:
+    """Deterministic floor for an untested unit: it must at least PARSE in its own language
+    (lang registry: py=AST, js=node --check, unknown=fail-open — execution judges the rest)."""
+    from .lang import for_file
+    return for_file(file).syntax_ok(code)
 
 
 # --- production boundaries (injectable; these are the only things that touch API / disk) --------- #
@@ -267,15 +264,16 @@ def build_project(task: str, repo: str, *, external_test: str | None,
             if not ok:
                 cold_feedback[unit["name"]] = f"the clean re-run failed:\n{out[:300]}"
             return ok, (f"verified: {out[-160:]}" if ok else out[:250])
-        # no test_cmd: NOT independently provable. Floor = valid python; then an ADVISORY cold probe.
-        valid, why = _ast_ok(code)
+        # no test_cmd: NOT independently provable. Floor = parses in ITS language; then (py only —
+        # run_snippet is a python sandbox) an ADVISORY cold probe.
+        valid, why = _syntax_ok(code, unit.get("file"))
         if not valid:
-            return False, f"not valid python: {why}"
+            return False, f"does not parse: {why}"
         # LAND the code (F4 round-1 bug: only run_test wrote to disk, so an untested unit's code never
         # reached the tree and the integration gate ran against NOTHING). Gate-time = post-stub-check,
         # so a stub never lands. Tested units are written by run_test itself.
         write_file(unit, code)
-        probe = propose_test(code, unit["spec"])
+        probe = propose_test(code, unit["spec"]) if _file_of(unit).endswith(".py") else ""
         if probe.strip():
             passed, detail = run_snippet(code, probe)
             if not passed:                        # advisory: stash for the coder, but do NOT hard-fail

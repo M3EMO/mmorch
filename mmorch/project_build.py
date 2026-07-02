@@ -13,7 +13,6 @@ the exact failure that escaped the old flat workflow (a coder returning a 130-ch
 """
 from __future__ import annotations
 
-import ast
 import json
 from typing import Callable
 
@@ -73,46 +72,14 @@ def _has_cycle(units: list[dict]) -> bool:
         return True
 
 
-# --- deterministic stub detection (AST, no LLM) ---------------------------- #
-def _is_trivial_stmt(s: ast.stmt) -> bool:
-    """pass / ... / raise NotImplementedError = a stub body statement."""
-    if isinstance(s, ast.Pass):
-        return True
-    if isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant) and s.value.value is Ellipsis:
-        return True
-    if isinstance(s, ast.Raise):
-        exc = s.exc
-        # bare `raise NotImplementedError`, `raise NotImplementedError()`, qualified `raise m.NotImplementedError`
-        name = (getattr(exc, "id", None) or getattr(getattr(exc, "func", None), "id", None)
-                or getattr(exc, "attr", None) or getattr(getattr(exc, "func", None), "attr", None))
-        return name in ("NotImplementedError", "NotImplemented")
-    return False
-
-
-def stub_check(code: str) -> tuple[bool, str]:
-    """True if `code` is a stub: won't parse, has no def/class, or every function body is trivial
-    (pass/.../NotImplementedError, docstrings ignored). Deterministic — catches the import-only stub
-    that escaped the old flat workflow."""
-    try:
-        tree = ast.parse(code)
-    except SyntaxError as e:
-        return True, f"syntax error: {str(e)[:80]}"
-    funcs = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
-    classes = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
-    if not funcs and not classes:
-        return True, "no function/class definitions (import-only / __all__ stub)"
-    if not funcs:
-        return False, ""   # classes with attributes/config are legitimate non-stubs
-    trivial = 0
-    for f in funcs:
-        body = [s for s in f.body
-                if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant)
-                        and isinstance(s.value.value, str))]   # drop docstrings
-        if not body or all(_is_trivial_stmt(s) for s in body):
-            trivial += 1
-    if trivial == len(funcs):
-        return True, f"all {len(funcs)} function(s) are stubs (pass/.../NotImplementedError)"
-    return False, ""
+# --- deterministic stub detection (delegated to lang.py registry) ---------- #
+def stub_check(code: str, file: str | None = None) -> tuple[bool, str]:
+    """True if `code` is a stub. MULTI-LANGUAGE: delegates to the per-extension registry
+    (lang.py) — Python via AST (finest), JS via node --check + textual, unknown via a generic
+    substance floor. `file=None` -> Python (back-compat). Deterministic — catches the
+    import-only stub class that escaped the old flat workflow, in any registered language."""
+    from .lang import for_file
+    return for_file(file).stub_check(code)
 
 
 # --- decomposition (LLM planner is injectable; never gates) ---------------- #

@@ -40,7 +40,7 @@ def build_unit(unit: dict, *, build_fn: Callable[[dict], str],
         except Exception as e:
             detail = f"build_fn {type(e).__name__}: {str(e)[:100]}"
             continue
-        is_stub, reason = stub_check(code)
+        is_stub, reason = stub_check(code, unit.get("file"))   # multi-language via the lang registry
         if is_stub:
             return {"name": unit["name"], "status": "recurse", "reason": reason}
         try:
