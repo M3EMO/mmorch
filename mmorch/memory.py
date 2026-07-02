@@ -533,6 +533,47 @@ def _pick_keeper(cluster: list) -> tuple:
     return sorted(cluster, key=lambda r: (bool(r[5]), r[1]), reverse=True)[0]
 
 
+def distill_backlog(*, after_id: int = 0, limit: int = 5, verify: bool = True,
+                    gen_model=None, path: Path = _DB_PATH) -> dict:
+    """Cierra el gap episodico->semantico (medido 2026-07: 176 episodios, 0 notas — nada
+    ruteaba el raw por la destilacion; consolidate() solo mergea notas YA existentes).
+    Destila en batch los eventos crudos POSTERIORES a `after_id`, con verificacion
+    cross-family GATED (nota infiel/lossy -> refutada -> no persiste; el raw episodico es
+    inmutable, nunca se pierde). BOUNDED (limit) — pensado como paso del nudge periodico
+    (cada nudge avanza el watermark de a poco), no para backfills gigantes de una.
+    Devuelve {last_id (nuevo watermark), seen, persisted, refuted, skipped}."""
+    con = _connect(path)
+    try:
+        rows = con.execute(
+            "SELECT id, scope, payload FROM episodic WHERE id > ? "
+            "AND kind NOT IN ('consolidation') ORDER BY id LIMIT ?",
+            [after_id, limit]).fetchall()
+    finally:
+        con.close()
+    out = {"last_id": after_id, "seen": 0, "persisted": 0, "refuted": 0, "skipped": 0}
+    for eid, scope, payload in rows:
+        out["seen"] += 1
+        out["last_id"] = eid
+        note = distill(payload, gen_model=gen_model)
+        if not note.strip() or note.strip().upper() == "SKIP":
+            out["skipped"] += 1
+            continue
+        if verify:
+            from .patterns import adversarial_verify
+            v = adversarial_verify(
+                f"EPISODIO:\n{payload}\n\nNOTA DESTILADA:\n{note}",
+                rubric=("La NOTA es un resumen FIEL y no-lossy del EPISODIO? Refuta si "
+                        "omite un hecho critico, agrega algo que no estaba, o tergiversa "
+                        "la decision/resultado. passed=true solo si es fiel y util."),
+                gen_model=gen_model or _default_gen(), phase="memory")
+            if not v.passed:
+                out["refuted"] += 1
+                continue
+        write_note(scope, note, source_ids=[eid], verified=verify, path=path)
+        out["persisted"] += 1
+    return out
+
+
 def consolidate(scope: str | None = None, *, sim_threshold: float = 0.92,
                 max_bytes: int = 50_000, forget: bool = False, dry_run: bool = False,
                 path: Path = _DB_PATH) -> dict:

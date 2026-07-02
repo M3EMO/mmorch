@@ -201,6 +201,9 @@ def build_project(task: str, repo: str, *, external_test: str | None,
     if family_of(gen_model) == family_of(verifier_model):
         raise ValueError(f"coder and cold verifier must be cross-family: {gen_model}/{verifier_model} "
                          f"are both {family_of(gen_model)}")
+    # learn only from REAL runs: injected gen/run_test = synthetic (self-checks, tests) — feeding
+    # fake outcomes into the persistent bandit would poison exactly the signal we're trying to grow.
+    _real_run = gen is None and run_test is None
     gen = gen or _default_gen(gen_model, repo)
     run_test = run_test or _default_run_test(repo)
     run_snippet = run_snippet or _default_run_snippet()
@@ -240,11 +243,27 @@ def build_project(task: str, repo: str, *, external_test: str | None,
             feedback = out                        # execution failure -> feed the next attempt
         return code                               # best effort; stub_check / the gate decide the fate
 
+    def _learn(reward: float, context: str) -> None:
+        # side-channel: every gate result is FREE execution-truth for the starving learning loops
+        # (bandit n<=3/arm after 10k calls because almost no flow recorded outcomes). Never breaks
+        # the build on a store hiccup.
+        if not _real_run:
+            return
+        try:
+            from .feedback import record_outcome
+            from .intuition import record as intuition_record
+            record_outcome(gen_model, reward, pattern="project_build", source="execution",
+                           context=context)
+            intuition_record(gen_model, reward, context)
+        except Exception:
+            pass
+
     def gate_fn(unit: dict, code: str) -> tuple[bool, str]:
         # COLD verifier: independent of the coder's loop.
         tc = unit.get("test_cmd")
         if tc:
             ok, out = run_test(unit, code, tc)    # clean re-run = execution truth
+            _learn(1.0 if ok else 0.0, unit["spec"])
             if not ok:
                 cold_feedback[unit["name"]] = f"the clean re-run failed:\n{out[:300]}"
             return ok, (f"verified: {out[-160:]}" if ok else out[:250])
@@ -266,7 +285,9 @@ def build_project(task: str, repo: str, *, external_test: str | None,
         return True, "unverified (no test_cmd; correctness deferred to the integration gate)"
 
     def integrate_fn(ext: str, results: list) -> tuple[bool, str]:
-        return integrate(ext, results)
+        iok, idetail = integrate(ext, results)
+        _learn(1.0 if iok else 0.0, task)          # the whole-assembly verdict is a signal too
+        return iok, idetail
 
     res = run_project_build(task, external_test=external_test, plan_fn=plan_fn, build_fn=build_fn,
                             gate_fn=gate_fn, commit_fn=commit, integrate_fn=integrate_fn,

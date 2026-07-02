@@ -43,6 +43,17 @@ def tick(*, every: int = _EVERY, path: pathlib.Path | None = None,
                 report = _consolidate(None, dry_run=False)
             except Exception as e:
                 report = {"error": str(e)[:200]}
+            # destilado episodico->semantico (bounded, con watermark persistido): sin este paso
+            # consolidate mergea un set VACIO — medido 2026-07: 176 episodios, 0 notas, 16 nudges no-op.
+            try:
+                from .memory import distill_backlog as _distill
+                d = _distill(after_id=int(st.get("distill_upto", 0)), limit=5)
+                st["distill_upto"] = d["last_id"]
+                if isinstance(report, dict):
+                    report["distill"] = d
+            except Exception as e:
+                if isinstance(report, dict):
+                    report["distill"] = {"error": str(e)[:200]}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
     return {"closes": st["closes"], "nudged": nudged, "report": report}

@@ -75,13 +75,36 @@ def coherence(task: str, *, complexity: str = "", bandit: ThompsonBandit | None 
     return sum(s["n"] for a, s in b.stats().items() if a.endswith("#" + sk))
 
 
+def healthy(models: list[str], *, max_error_rate: float = 0.15, min_calls: int = 10,
+            rates: dict | None = None) -> list[str]:
+    """Deterministic HEALTH FLOOR over the candidate pool: drop models whose measured windowed
+    error_rate exceeds the cap (with enough calls for it to mean something). Justified by data,
+    not vibes — measured 2026-07: glm-4.6 at 34% error (timeouts) sat in the default pool, so
+    intuition could commit to a model that fails 1 in 3. The Thompson bandit would learn this
+    too, but it is STARVED (n<=3/arm after 10k calls) — the floor guards the cold start.
+    Fail-OPEN on any observability error (a broken metrics read must never break routing).
+    `rates` injectable (test seam; shape = error_rates()['by_model'])."""
+    try:
+        if rates is None:
+            from .metrics import error_rates
+            rates = error_rates(window_n=200)["by_model"]
+        keep = [m for m in models
+                if not (rates.get(m.split("@")[0], {}).get("calls", 0) >= min_calls
+                        and rates[m.split("@")[0]]["error_rate"] > max_error_rate)]
+        return keep or models        # never empty: all-sick -> caller's list wins (fail-open)
+    except Exception:
+        return models
+
+
 def decide(models: list[str], task: str, *, complexity: str = "", threshold: float = 0.62,
            min_n: int = 5, bandit: ThompsonBandit | None = None) -> tuple[str, str | None, str]:
     """Phase 3 GATE (one-line policy, hysteresis deferred): if this signature is FAMILIAR
     (coherence >= min_n) AND its best candidate is good enough (mean >= threshold, n >= min_n),
     COMMIT to that model cheaply — no escalation. Else ESCALATE (let route/Opus decide).
+    Candidates first pass the deterministic health floor (healthy()).
     Returns (action, model|None, reason)."""
     b = bandit or ThompsonBandit(_SIG_BANDIT)
+    models = healthy(models)
     coh = coherence(task, complexity=complexity, bandit=b)
     best_model, best_mean, best_n = candidates(models, task, complexity=complexity, k=1, bandit=b)[0]
     if coh >= min_n and best_mean >= threshold and best_n >= min_n:
