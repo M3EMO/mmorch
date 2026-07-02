@@ -743,7 +743,15 @@ def build_app():
     # client (Tauri / dev server) is cross-origin, so allow any origin here.
     middleware = [Middleware(CORSMiddleware, allow_origins=["*"],
                              allow_methods=["*"], allow_headers=["*"])]
-    return Starlette(middleware=middleware, routes=[
+    routes_extra = []
+    # Lotus app servida por el MISMO server (same-origin, cero config): /lotus -> ventana
+    # app-mode local (msedge --app) sin necesitar el build Tauri. Solo si el repo existe.
+    _lotus = os.getenv("LOTUS_DIR", os.path.expanduser(r"~\Desktop\Claude\Lotus\src"))
+    if os.path.isdir(_lotus):
+        from starlette.staticfiles import StaticFiles
+        from starlette.routing import Mount
+        routes_extra.append(Mount("/lotus", StaticFiles(directory=_lotus, html=True), name="lotus"))
+    return Starlette(middleware=middleware, routes=routes_extra + [
         Route("/", home),
         Route("/state", state_snapshot),
         Route("/events", sse_events),
