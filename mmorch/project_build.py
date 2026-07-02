@@ -30,6 +30,9 @@ def validate_worklist(units: list[dict]) -> tuple[bool, list[str]]:
     if len(set(names)) != len(names):
         errs.append("duplicate unit names")
     known = set(names)
+    files = [str(u.get("file")).replace("\\", "/").lower() for u in units if u.get("file")]
+    if len(set(files)) != len(files):    # two units writing the SAME file at one level = a silent overwrite
+        errs.append("duplicate target file across units")
     for u in units:
         if not u.get("name"):
             errs.append("a unit is missing 'name'")
@@ -115,10 +118,11 @@ def stub_check(code: str) -> tuple[bool, str]:
 # --- decomposition (LLM planner is injectable; never gates) ---------------- #
 _WORKLIST_SYS = (
     "You decompose a build task into a JSON worklist. Output ONLY a JSON array of units: "
-    '[{"name": "...", "spec": "what to build, concrete", "deps": ["other-unit-names"], '
-    '"test_cmd": "an EXISTING command that verifies this unit, or null"}]. Order by dependency; '
-    "no cycles; each unit small enough to implement in one file. Do NOT invent tests — test_cmd "
-    "must be an existing/user-provided command or null.")
+    '[{"name": "...", "spec": "what to build, concrete", "file": "relative/path/of/the_one_file.py", '
+    '"deps": ["other-unit-names"], "test_cmd": "an EXISTING command that verifies this unit, or null"}]. '
+    "Order by dependency; no cycles; each unit small enough to implement in ONE file — `file` is that "
+    "file's path relative to the repo root (the file the unit creates or edits; REQUIRED). Do NOT "
+    "invent tests — test_cmd must be an existing/user-provided command or null.")
 
 
 def _default_plan(task: str, external_test: str | None, gen_model: str) -> str:
@@ -137,6 +141,7 @@ def _parse_worklist(raw: str) -> list[dict]:
     if not isinstance(data, list):
         raise ValueError("worklist is not a JSON array")
     return [{"name": str(u.get("name") or ""), "spec": str(u.get("spec") or ""),   # null -> "" (not "None")
+             "file": str(u["file"]) if u.get("file") else None,   # target path (F3 derives name.py if absent)
              "deps": list(u.get("deps", []) or []), "test_cmd": u.get("test_cmd")}
             for u in data if isinstance(u, dict)]
 
@@ -185,9 +190,14 @@ if __name__ == "__main__":
     build_order(_u)
     assert _u == _b, "build_order must not mutate its input (round-2 dismissal locked)"
     # 3. decompose with an injected fake plan (cero-cost, no API).
-    fake = '[{"name":"core","spec":"the core","deps":[],"test_cmd":"pytest -q"}]'
+    fake = '[{"name":"core","spec":"the core","file":"pkg/core.py","deps":[],"test_cmd":"pytest -q"}]'
     wl = decompose("build a thing", plan=lambda: fake)
     assert wl[0]["name"] == "core" and wl[0]["test_cmd"] == "pytest -q", wl
+    assert wl[0]["file"] == "pkg/core.py", wl          # target path flows through (F3 writes THERE, not root)
+    assert decompose("x", plan=lambda: '[{"name":"a","spec":"a"}]')[0]["file"] is None  # absent -> None (F3 derives)
+    dupf = [{"name": "a", "spec": "a", "file": "x.py"}, {"name": "b", "spec": "b", "file": "X.py"}]
+    ok, errs = validate_worklist(dupf)                 # same target file (case-insens) = silent overwrite
+    assert not ok and any("duplicate target file" in e for e in errs), errs
     try:
         decompose("x", plan=lambda: '[{"name":"a","deps":["ghost"]}]')
         assert False, "bad plan must raise"

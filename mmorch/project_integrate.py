@@ -71,7 +71,10 @@ def _default_gen(gen_model: str, repo: str):
         cur = ""
         if os.path.isfile(fpath):
             try:
-                cur = open(fpath, encoding="utf-8").read()[:6000]
+                # 60k chars ~ 15k tokens: the coder REGENERATES the whole file, so a truncated view of a
+                # big file (e.g. a 25KB module it must minimally edit) would silently DROP the tail. 60k
+                # covers any sane single file; beyond that the unit is mis-scoped and should decompose.
+                cur = open(fpath, encoding="utf-8").read()[:60000]
             except (OSError, UnicodeDecodeError):
                 cur = ""   # side-channel: current-content is optional context; a bad read must not stop the coder
         user = (f"UNIT: {unit['name']}\nSPEC:\n{unit['spec']}\n\n"
