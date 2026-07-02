@@ -312,7 +312,28 @@ def _run_project_build_job(jid: str, task: str, project: str, external_test: str
         emit("job", "running", job_id=jid,
              detail=f"project-build {project} -> {wt.branch}"
                     f"{f' (+{n_seed} seeded)' if n_seed else ''}: {task[:70]}")
-        res = build_project(task, wt.path, external_test=external_test, max_depth=max_depth)
+
+        # per-unit checkpoints (observability parity with the role-chain): every built unit's code
+        # lands as a durable block + checkpoint, so Lotus/the skill can watch the build unit by unit.
+        step = {"n": 0}
+
+        def _commit(name: str, result: dict) -> None:
+            from .worktree_driver import Worktree
+            Worktree(wt.path, wt.path, wt.branch).capture(f"mmorch(project-build): unit {name}")
+            try:
+                from . import workflow_store
+                step["n"] += 1
+                bid = workflow_store.put_block(result.get("code", ""), kind="code",
+                                               mime="text/x-python")
+                workflow_store.record_checkpoint(jid, step["n"], f"unit:{name}", outputs=[bid],
+                                                 gate={"name": "unit", "passed": True,
+                                                       "detail": str(result.get("gate", ""))[:200]})
+            except Exception:
+                pass                                # best-effort: never break the build on the store
+            emit("step", "done", job_id=jid, node=f"unit:{name}", detail=result.get("file") or "")
+
+        res = build_project(task, wt.path, external_test=external_test, max_depth=max_depth,
+                            commit=_commit)
         status = res.get("status", "escalate")
         job_status = {"built": "done", "integration_failed": "gate"}.get(status, "escalate")
         with _JOBS_LOCK:
