@@ -286,6 +286,56 @@ def _run_project_job(project: str, task: str, mode: str, push: bool = False,
         _JOBS[jid]["status"] = "done" if ok else "error"
 
 
+def _run_project_build_job(jid: str, task: str, project: str, external_test: str,
+                           max_depth: int = 2, parent=None):
+    """The recursive /project engine (F1/F2/F3) as a server job. Runs in an ISOLATED git worktree
+    of `project` (main tree untouched, result on a review branch). `external_test` is the real
+    acceptance suite (the integration gate at depth 0). Terminal job status:
+      done             -> status 'built' (acceptance green)
+      gate             -> 'integration_failed' (assembled whole failed acceptance) — review + resume
+      escalate         -> bad plan / depth cap / a unit's gate never passed
+    Cero cupo: cheap external models are the coder + cold verifier."""
+    from .worktree_driver import open_worktree
+    from .projects import resolve
+    from .project_integrate import build_project
+    with _JOBS_LOCK:
+        _JOBS[jid] = _jobmeta("project-build", task, engine="mmorch", parent=parent)
+    wt = None
+    try:
+        wt = open_worktree(resolve(project))
+        with _JOBS_LOCK:
+            _JOBS[jid]["review_branch"] = wt.branch
+        emit("job", "running", job_id=jid,
+             detail=f"project-build {project} -> {wt.branch}: {task[:70]}")
+        res = build_project(task, wt.path, external_test=external_test, max_depth=max_depth)
+        status = res.get("status", "escalate")
+        job_status = {"built": "done", "integration_failed": "gate"}.get(status, "escalate")
+        with _JOBS_LOCK:
+            if jid in _JOBS:
+                _JOBS[jid]["status"] = job_status
+                _JOBS[jid]["result"] = {k: res.get(k) for k in
+                                        ("status", "unverified", "detail", "reason", "plan_error")
+                                        if res.get(k) is not None}
+        emit("job", "done" if job_status == "done" else "gate", job_id=jid,
+             detail=f"{status} (unverified={len(res.get('unverified', []))})")
+    except Exception as e:
+        emit("job", "error", job_id=jid, detail=str(e)[:200])
+        with _JOBS_LOCK:
+            if jid in _JOBS:
+                _JOBS[jid]["status"] = "error"
+    finally:
+        if wt:
+            try:                                   # commit any remainder; per-unit commits already landed
+                cap = wt.capture(f"mmorch project-build: {task[:60]}")
+                with _JOBS_LOCK:
+                    if jid in _JOBS:
+                        _JOBS[jid]["diffstat"] = cap.get("diffstat", "")
+            except Exception:
+                pass
+            finally:
+                wt.close(keep_branch=True)          # review branch survives for merge
+
+
 def _run_fanout_job(prompts: list, gen_model: str, parent=None):
     from .patterns import fan_out
     jid = uuid.uuid4().hex[:10]

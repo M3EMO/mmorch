@@ -31,7 +31,7 @@ from .server_core import _JOBS, _JOBS_LOCK, _GATES, _token_ok, _budget_block, _j
 
 
 from .server_engine import (_rubric_drive, _run_rubric_job, _workflow_run, _run_workflow_job, _run_project_job,
-                            _run_fanout_job)
+                            _run_project_build_job, _run_fanout_job)
 
 
 async def home(request):
@@ -176,6 +176,22 @@ async def run_workflow(request):
     task = body.get("task", "")
     if not task:
         return JSONResponse({"error": "task required"}, status_code=400)
+    import uuid as _u
+    # project-build = the recursive engine (F1/F2/F3), NOT a role-chain spec. Needs a registered
+    # project + the real acceptance command (the integration gate). Runs isolated -> review branch.
+    if body.get("workflow_name") == "project-build":
+        project = body.get("project", "")
+        external_test = body.get("external_test") or body.get("test_cmd")
+        if not project or not external_test:
+            return JSONResponse({"error": "project-build requires 'project' and 'external_test' "
+                                          "(the acceptance command, e.g. 'pytest -q')"}, status_code=400)
+        jid = _u.uuid4().hex[:10]
+        md = int(body.get("max_depth", 2))
+        t = threading.Thread(target=_run_project_build_job, args=(jid, task, project, external_test, md),
+                             kwargs={"parent": body.get("parent_id")}, daemon=True)
+        t.start()
+        return JSONResponse({"started": "project-build", "job_id": jid, "project": project,
+                             "external_test": external_test})
     from . import workflow_spec
     try:
         if body.get("workflow"):
@@ -186,7 +202,6 @@ async def run_workflow(request):
             return JSONResponse({"error": "workflow or workflow_name required"}, status_code=400)
     except Exception as e:
         return JSONResponse({"error": f"invalid workflow: {str(e)[:200]}"}, status_code=400)
-    import uuid as _u
     jid = _u.uuid4().hex[:10]
     project = body.get("project")
     apply = bool(body.get("apply"))               # apply=true + project -> run in a git worktree of the repo
