@@ -92,12 +92,32 @@ _WORKLIST_SYS = (
     "invent tests — test_cmd must be an existing/user-provided command or null.")
 
 
+def _plan_user_msg(task: str, external_test: str | None) -> str:
+    return f"TASK:\n{task}\n\nExternal acceptance (the real backstop): {external_test or '(none given)'}"
+
+
 def _default_plan(task: str, external_test: str | None, gen_model: str) -> str:
     from .providers import call
     from .textutil import extract_fence
-    u = f"TASK:\n{task}\n\nExternal acceptance (the real backstop): {external_test or '(none given)'}"
-    out = call(gen_model, [{"role": "system", "content": _WORKLIST_SYS}, {"role": "user", "content": u}],
+    out = call(gen_model, [{"role": "system", "content": _WORKLIST_SYS},
+                           {"role": "user", "content": _plan_user_msg(task, external_test)}],
                pattern="project_build", node="planner", temperature=0.0).text
+    return extract_fence(out)
+
+
+def _default_reask(task: str, external_test: str | None, gen_model: str,
+                   prev_raw: str, errors: list[str]) -> str:
+    """Re-ask del planner con SUS errores (patron Instructor, leido del codigo: el modelo ve su
+    output anterior + los errores concretos con contexto -> se corrige solo la gran mayoria de
+    las veces). Los errores de validate_worklist ya traen el 'field path' (que unit, que campo)."""
+    from .providers import call
+    from .textutil import extract_fence
+    msgs = [{"role": "system", "content": _WORKLIST_SYS},
+            {"role": "user", "content": _plan_user_msg(task, external_test)},
+            {"role": "assistant", "content": prev_raw},
+            {"role": "user", "content": "Correct your JSON ONLY RESPONSE, based on the following "
+                                        "errors:\n" + "\n".join(errors)}]
+    out = call(gen_model, msgs, pattern="project_build", node="planner-reask", temperature=0.0).text
     return extract_fence(out)
 
 
@@ -114,15 +134,28 @@ def _parse_worklist(raw: str) -> list[dict]:
 
 
 def decompose(task: str, *, external_test: str | None = None,
-              plan: Callable[[], str] | None = None, gen_model: str = DEFAULT_GENERATOR) -> list[dict]:
+              plan: Callable[[], str] | None = None, gen_model: str = DEFAULT_GENERATOR,
+              max_reask: int = 2,
+              reask: Callable[[str, list[str]], str] | None = None) -> list[dict]:
     """Decompose `task` into a VALIDATED worklist. `plan` (injectable) returns the raw worklist JSON;
-    default asks a model. Raises ValueError if the decomposition is structurally invalid."""
+    default asks a model. A structurally INVALID plan (bad JSON / duplicate names / unknown deps /
+    cycles) is RE-ASKED up to `max_reask` times showing the model its own output + the concrete
+    errors (Instructor pattern) — before, the first invalid plan was terminal. `reask(prev_raw,
+    errors)` is injectable (test seam). Raises ValueError only after the retries are exhausted."""
     plan = plan or (lambda: _default_plan(task, external_test, gen_model))
-    units = _parse_worklist(plan())
-    ok, errs = validate_worklist(units)
-    if not ok:
-        raise ValueError(f"invalid decomposition: {errs}")
-    return units
+    reask = reask or (lambda prev, errs: _default_reask(task, external_test, gen_model, prev, errs))
+    raw = plan()
+    for attempt in range(max_reask + 1):
+        try:
+            units = _parse_worklist(raw)
+            ok, errs = validate_worklist(units)
+        except (json.JSONDecodeError, ValueError) as e:
+            ok, errs = False, [f"output is not a valid JSON worklist: {str(e)[:120]}"]
+        if ok:
+            return units
+        if attempt < max_reask:            # no wasted re-ask on the final failed attempt
+            raw = reask(raw, errs)
+    raise ValueError(f"invalid decomposition after {max_reask} re-asks: {errs}")
 
 
 if __name__ == "__main__":
@@ -165,9 +198,30 @@ if __name__ == "__main__":
     dupf = [{"name": "a", "spec": "a", "file": "x.py"}, {"name": "b", "spec": "b", "file": "X.py"}]
     ok, errs = validate_worklist(dupf)                 # same target file (case-insens) = silent overwrite
     assert not ok and any("duplicate target file" in e for e in errs), errs
+    # 4. RE-ASK (patron Instructor): plan invalido -> el modelo ve sus errores y se corrige.
+    reasks: list = []
+
+    def _fix_on_reask(prev, errs):
+        reasks.append(errs)
+        assert any("ghost" in e for e in errs), errs        # el error concreto viaja al modelo
+        return '[{"name":"a","spec":"a","deps":[]}]'        # corregido
+
+    wl2 = decompose("x", plan=lambda: '[{"name":"a","spec":"a","deps":["ghost"]}]', reask=_fix_on_reask)
+    assert wl2[0]["name"] == "a" and len(reasks) == 1, (wl2, reasks)
+    # JSON roto tambien es re-askeable (no solo invalido estructural)
+    wl3 = decompose("x", plan=lambda: "not json at all",
+                    reask=lambda p, e: '[{"name":"b","spec":"b","deps":[]}]')
+    assert wl3[0]["name"] == "b", wl3
+    # incorregible -> raise DESPUES de agotar, sin re-ask extra en el ultimo intento
+    tries: list = []
+
+    def _never_fixes(p, e):
+        tries.append(1)
+        return '[{"nope":1}]'
     try:
-        decompose("x", plan=lambda: '[{"name":"a","deps":["ghost"]}]')
-        assert False, "bad plan must raise"
+        decompose("x", plan=lambda: '[{"name":"a","deps":["ghost"]}]', reask=_never_fixes, max_reask=2)
+        assert False, "bad plan must raise after retries"
     except ValueError:
         pass
+    assert len(tries) == 2, tries                            # exactamente max_reask re-asks
     print("project_build F1 OK — validate(DAG), build_order, stub_check(incl the escaped stub), decompose seam")
