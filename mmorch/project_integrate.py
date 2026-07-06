@@ -182,7 +182,7 @@ def _default_commit(repo: str):
 # --- the wiring: bind seams over shared state, then drive F2 ------------------------------------- #
 def build_project(task: str, repo: str, *, external_test: str | None,
                   gen_model: str = DEFAULT_GENERATOR, verifier_model: str = DEFAULT_VERIFIER,
-                  max_fix: int = 3, max_depth: int = 2,
+                  max_fix: int = 3, max_depth: int = 2, max_gen_calls: int = 150,
                   plan: Callable[[str, str | None], list[dict]] | None = None,
                   gen: Callable[[dict, str], str] | None = None,
                   run_test: Callable[[dict, str, str], tuple[bool, str]] | None = None,
@@ -203,6 +203,17 @@ def build_project(task: str, repo: str, *, external_test: str | None,
     _real_run = gen is None and run_test is None
     gen = gen or _default_gen(gen_model, repo)
     run_test = run_test or _default_run_test(repo)
+
+    # call-breaker (blind-spot #6): units x max_fix x re-asks compone sin tope de $. Cota dura de
+    # invocaciones al coder por run; excedida -> el build ESCALA (nunca sigue quemando en silencio).
+    _gen_calls = {"n": 0}
+    _inner_gen = gen
+
+    def gen(unit: dict, feedback: str) -> str:   # type: ignore[no-redef]
+        _gen_calls["n"] += 1
+        if _gen_calls["n"] > max_gen_calls:
+            raise RuntimeError(f"call-breaker: >{max_gen_calls} coder calls in one build")
+        return _inner_gen(unit, feedback)
     run_snippet = run_snippet or _default_run_snippet()
     propose_test = propose_test or _default_propose_test(verifier_model)
     integrate = integrate or _default_integrate(repo)
@@ -293,6 +304,13 @@ def build_project(task: str, repo: str, *, external_test: str | None,
     res["unverified"] = unverified
     if res.get("status") == "escalate" and plan_err.get("last"):
         res["plan_error"] = plan_err["last"]   # surface the swallowed planner failure, not just 'empty worklist'
+    # provenance (blind-spot #9): sin esto, cuando el prompt-bootstrap aterrice no se puede
+    # ATRIBUIR una mejora a un prompt/modelo concreto. Hash corto del system-prompt del coder =
+    # la "versión" del prompt; few_shots reservado para el graft DSPy-A.
+    import hashlib
+    res["provenance"] = {"gen_model": gen_model, "verifier_model": verifier_model,
+                         "coder_sys": hashlib.sha256(_CODER_SYS.encode()).hexdigest()[:12],
+                         "gen_calls": _gen_calls["n"], "few_shots": None}
     return res
 
 
@@ -389,5 +407,18 @@ if __name__ == "__main__":
         globals()["decompose"] = _orig
     assert r7["status"] == "escalate" and "deepseek 503" in r7.get("plan_error", ""), r7
 
+    # 8. call-breaker: un coder que nunca verdea no puede quemar llamadas sin tope -> escalate.
+    r8 = build_project("top", REPO, external_test=None, max_gen_calls=4,
+                       plan=lambda t, e: [{"name": "u", "spec": "s", "deps": [], "test_cmd": "pt"}],
+                       gen=lambda u, fb: "def u():\n    return 1",
+                       run_test=lambda u, c, tc: (False, "always red"),
+                       run_snippet=lambda c, a: (True, ""), propose_test=lambda c, s: "",
+                       integrate=lambda e, rs: (True, ""), commit=lambda n, rr: None)
+    assert r8["status"] == "escalate", r8
+    assert r8["provenance"]["gen_calls"] >= 4, r8["provenance"]     # el conteo viaja en provenance
+    # 9. provenance siempre presente (atribución del futuro prompt-bootstrap)
+    assert r3["provenance"]["gen_model"] and len(r3["provenance"]["coder_sys"]) == 12, r3["provenance"]
+
     print("project_integrate F3 OK — hot coder loop, integration gate, unverified ceiling, "
-          "deterministic floor, cross-family guard, escalate, planner-error surfaced")
+          "deterministic floor, cross-family guard, escalate, planner-error surfaced, "
+          "call-breaker, provenance")

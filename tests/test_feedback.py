@@ -32,7 +32,7 @@ def test_bandit_learns_best_arm(tmp_path):
     assert picks.count("A") >= 45  # explota el mejor casi siempre
     st = b.stats()
     assert st["A"]["mean"] > 0.9 and st["B"]["mean"] < 0.1
-    assert st["A"]["n"] == 20
+    assert 18 <= st["A"]["n"] <= 20  # n = muestra EFECTIVA: el discounted Thompson (decay 0.995) la achica levemente
 
 
 def test_bandit_persists(tmp_path):

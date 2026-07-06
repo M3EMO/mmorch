@@ -104,9 +104,16 @@ class ThompsonBandit:
                 best, best_theta = a, theta
         return best
 
-    def update(self, arm: str, reward: float) -> None:
+    def update(self, arm: str, reward: float, *, decay: float = 0.995) -> None:
+        """decay < 1 = Thompson DESCONTADO (blind-spot audit 2026-07: sin olvido, un cambio de
+        paradigma — migración de librería, modelo nuevo — deja priors obsoletos ruteando mal justo
+        en la transición). Cada update multiplica la EVIDENCIA (α,β menos el prior) antes de sumar:
+        lo viejo pesa geométricamente menos (half-life ≈ 139 updates con 0.995); mean estable bajo
+        régimen constante, re-aprendizaje rápido tras un shift. decay=1.0 = comportamiento previo."""
         reward = max(0.0, min(1.0, float(reward)))
         ab = self._ab(arm)
+        ab[0] = 1.0 + (ab[0] - 1.0) * decay   # el prior Beta(1,1) no se descuenta
+        ab[1] = 1.0 + (ab[1] - 1.0) * decay
         ab[0] += reward
         ab[1] += 1.0 - reward
         self.path.parent.mkdir(parents=True, exist_ok=True)
