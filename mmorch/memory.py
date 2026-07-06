@@ -458,6 +458,22 @@ _DISTILL_SYS = (
     "sin meta-comentario. Si no hay nada digno de recordar, devolve exactamente: SKIP."
 )
 
+# Bug real medido 2026-07 (100% refute sobre 3/3 episodios no-triviales, cero-cupo, reproducido):
+# el rubric anterior pedia "no-lossy" -> el verificador refutaba TODA nota por omitir algun
+# detalle secundario del episodio, que es la definicion misma de destilar (comprimir=perder
+# detalle, a proposito). Contradiccion interna del propio rubric (regla 9 del fable-workflow:
+# los prompts se revisan como codigo). Fix: la nota debe ser FIEL a lo que SI incluye (no
+# inventa, no contradice, no tergiversa la decision central) — comprimir detalle secundario
+# es el comportamiento CORRECTO, no una falla.
+_DISTILL_VERIFY_RUBRIC = (
+    "La NOTA es una destilacion FIEL del EPISODIO (comprimir detalle secundario es CORRECTO y "
+    "esperado — destilar es resumir, no copiar). Refuta SOLO si: (a) inventa un hecho que no "
+    "estaba en el episodio, (b) contradice o tergiversa la decision/resultado central, o (c) "
+    "omite LA decision/resultado central (no un detalle secundario). NO refutes por perder "
+    "detalles tecnicos secundarios (nombres de algoritmos, arquitectura completa, listas) si el "
+    "nucleo (que se decidio, por que, que paso) esta intacto. passed=true si el nucleo es fiel."
+)
+
 
 def distill(episode_text: str, *, gen_model=None, phase: str = "memory") -> str:
     """Condensa un episodio en una nota durable via modelo barato. 'SKIP' si nada
@@ -493,9 +509,7 @@ def remember(scope: str, episode_text: str, *, kind: str = "note", actor: str = 
         from .patterns import adversarial_verify
         v = adversarial_verify(
             f"EPISODIO:\n{episode_text}\n\nNOTA DESTILADA:\n{note}",
-            rubric=("La NOTA es un resumen FIEL y no-lossy del EPISODIO? Refuta si "
-                    "omite un hecho critico, agrega algo que no estaba, o tergiversa "
-                    "la decision/resultado. passed=true solo si es fiel y util."),
+            rubric=_DISTILL_VERIFY_RUBRIC,
             gen_model=gen_model or _default_gen(), phase="memory")
         out["refutations"] = v.refutations
         if not v.passed:
@@ -562,9 +576,7 @@ def distill_backlog(*, after_id: int = 0, limit: int = 5, verify: bool = True,
             from .patterns import adversarial_verify
             v = adversarial_verify(
                 f"EPISODIO:\n{payload}\n\nNOTA DESTILADA:\n{note}",
-                rubric=("La NOTA es un resumen FIEL y no-lossy del EPISODIO? Refuta si "
-                        "omite un hecho critico, agrega algo que no estaba, o tergiversa "
-                        "la decision/resultado. passed=true solo si es fiel y util."),
+                rubric=_DISTILL_VERIFY_RUBRIC,
                 gen_model=gen_model or _default_gen(), phase="memory")
             if not v.passed:
                 out["refuted"] += 1
