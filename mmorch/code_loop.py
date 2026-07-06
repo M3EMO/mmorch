@@ -46,6 +46,7 @@ def run_code_task(
     phase: str = "code_loop",
     timeout: float = 10.0,
     intuition_models: list[str] | None = None,
+    few_shots: bool | None = None,
 ) -> CodeTaskResult:
     """Genera codigo via cascade, lo EJECUTA contra `tests` (asserts), cierra el lazo.
 
@@ -54,9 +55,24 @@ def run_code_task(
       + record_outcome(pattern='code_loop', context=prompt, predicted_conf=self_conf).
     - Si cascade escalo (escalate=True), igual se ejecuta y registra: el orquestador
       decide que hacer con el codigo, pero el dato ya quedo pal prior.
+
+    few_shots (graft DSPy-A, ON por default): antes de generar, busca ejemplos verificados
+    por EJECUCION de tareas con la misma firma (few_shot_bootstrap.py sobre trajectory.py) y
+    los agrega al system prompt. min_n=3 evita ofrecer few-shots con evidencia insuficiente
+    (mismo criterio que intuition.decide). Off via MMORCH_FEWSHOT=off o few_shots=False.
     """
     sysmsg = (system or "You are a Python programmer. Output ONLY the function source "
               "code in a python code block, no explanation.")
+    if few_shots is None and os.getenv("MMORCH_FEWSHOT", "on").lower() != "off":
+        try:
+            from .few_shot_bootstrap import bootstrap_few_shots, render_few_shots
+            from .signature import signature
+            shots = bootstrap_few_shots(signature(prompt).to_key())
+            block = render_few_shots(shots)
+            if block:
+                sysmsg = sysmsg + "\n\n" + block
+        except Exception:
+            pass   # el bootstrap es un plus; nunca debe romper el loop
     # intuition layer (ON by default — user's call; improves with data, see route.py). The loop keeps
     # TRAINING the sig-bandit (record_outcome below) AND consults it; Thompson self-corrects as
     # outcomes accrue. Off via MMORCH_INTUITION=off; intuition_models=[] opts a call out.
