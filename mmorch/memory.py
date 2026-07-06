@@ -717,9 +717,16 @@ def stats(path: Path = _DB_PATH) -> dict:
         ver = con.execute("SELECT count(*) FROM semantic WHERE verified AND NOT tombstone").fetchone()[0]
         # verification coverage (Martin 2026): % del aprendizaje vivo validado
         # independientemente. Predice utilidad de la memoria (73% Fable vs 17% Opus).
+        # hnsw_recommended (libs-research 2026-07): recall() hoy es coseno brute-force sobre
+        # TODAS las notas embebidas — a miles el scan lineal empieza a doler. Señal DETERMINISTA
+        # y barata (sin medir latencia real): pasado el umbral, construir el índice vss/HNSW de
+        # DuckDB deja de ser prematuro. No se auto-construye — solo se recomienda (el graft en
+        # sí es una decisión de infraestructura, no algo para disparar solo).
+        _HNSW_THRESHOLD = 2000
         return {"episodic": int(ep), "semantic": int(se), "embedded": int(embd),
                 "verified": int(ver),
                 "verification_coverage": (round(ver / se, 4) if se else None),
-                "emb_backend": (None if _get_embedder() is None else _EMB_MODEL)}
+                "emb_backend": (None if _get_embedder() is None else _EMB_MODEL),
+                "hnsw_recommended": embd >= _HNSW_THRESHOLD}
     finally:
         con.close()
