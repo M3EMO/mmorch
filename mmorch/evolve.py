@@ -423,6 +423,112 @@ def _audit_episode(change: Change, zone: str, ev: dict) -> None:
         pass
 
 
+# --------------------------------------------------------------------------- #
+# Coordinacion nocturna (usuario 2026-07): auto-correr el loop overnight es seguro
+# (siempre worktree-aislado), auto-MERGEAR no (un test verde es proxy, no prueba —
+# mutation_score/F4 lo midieron esta misma sesion) -> auto-run + auto-PR, merge manual.
+#
+# El riesgo nuevo que introduce correr VARIAS rondas overnight: dos rondas tocando el
+# MISMO target_file terminarian con 2 branches que van a competir/conflictuar cuando
+# alguna se mergee. Fix: LOCK por archivo. Mientras el archivo tenga un PR trackeado
+# ABIERTO, ninguna ronda nueva genera un branch competidor para ese archivo -> se
+# saltea y reintenta en la proxima ronda. Cuando el humano mergea/cierra ese PR, el
+# archivo queda libre automaticamente (reap_merged_prs corre al principio de cada ronda).
+# Alternativa descartada: forzar mas commits sobre el MISMO PR abierto (mas trabajo, y
+# un force-push puede pisar contexto de una revision humana en curso).
+# --------------------------------------------------------------------------- #
+_PR_STATE = ROOT / "logs" / "evolve_open_prs.json"
+
+
+def _load_pr_state(path: Path = _PR_STATE) -> dict:
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_pr_state(state: dict, path: Path = _PR_STATE) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def _pr_still_open(entry: dict, *, root: Path, gh_check_fn=None) -> bool:
+    """Un PR trackeado sigue 'abierto' (bloqueando un branch nuevo) si su branch existe Y
+    (no hay pr_number registrado, O gh dice que sigue abierto). gh ausente/falla -> el
+    default es 'sigue abierto' (falla SEGURO: nunca pisa un merge que no pudo confirmar)."""
+    branch = entry.get("branch")
+    if not branch:
+        return False
+    if _git("rev-parse", "--verify", branch, cwd=root).returncode != 0:
+        return False
+    pr_num = entry.get("pr_number")
+    if pr_num and gh_check_fn:
+        try:
+            return gh_check_fn(pr_num) == "OPEN"
+        except Exception:
+            pass
+    return True
+
+
+def reap_merged_prs(*, root: Path = ROOT, gh_check_fn=None, path: Path = _PR_STATE) -> dict:
+    """Corre al empezar cada ronda: libera archivos cuyo PR trackeado ya se mergeo/cerro
+    (la branch ya no existe, o gh dice closed/merged). Solo toca el tracking LOCAL —
+    nunca borra nada de git. Devuelve {freed:[...], still_open:[...]}."""
+    state = _load_pr_state(path)
+    freed = []
+    for target, entry in list(state.items()):
+        if not _pr_still_open(entry, root=root, gh_check_fn=gh_check_fn):
+            freed.append(target)
+            del state[target]
+    _save_pr_state(state, path)
+    return {"freed": freed, "still_open": list(state.keys())}
+
+
+def coordinated_evolve_round(candidates: list[Change], *, root: Path = ROOT,
+                             sandbox_fn=None, pr_fn=None, gh_check_fn=None,
+                             pr_title_fn=None, open_pr: bool = True,
+                             path: Path = _PR_STATE) -> dict:
+    """1 ronda del loop nocturno, coordinada por archivo. `sandbox_fn`/`pr_fn` inyectables
+    (default = sandbox_branch/open_pr_branch reales; seam de test sin git/gh real).
+
+    1. reap_merged_prs(): libera archivos cuyo PR anterior ya se cerro.
+    2. Por candidate: target_file YA con PR abierto -> SKIP esta ronda (no crea un branch
+       competidor; se reintenta la proxima ronda, para entonces puede estar libre). Sin PR
+       abierto -> zona roja bloquea siempre; verde/amarilla -> sandbox+test; verde -> abre
+       PR + trackea; rojo/fitness-fail -> no trackea nada (proximo intento arranca limpio).
+
+    Devuelve {skipped_active_pr, opened, red, blocked_zone_red}."""
+    sandbox_fn = sandbox_fn or (lambda c: sandbox_branch(c, root=root))
+    pr_fn = pr_fn or (lambda branch, title: open_pr_branch(branch, title=title, root=root))
+    reap_merged_prs(root=root, gh_check_fn=gh_check_fn, path=path)
+    state = _load_pr_state(path)
+    skipped, opened, red, blocked_zone_red = [], [], [], []
+    for c in candidates:
+        if c.target in state:
+            skipped.append(c.target)
+            continue
+        if zone_of(c, root=root) == "red":
+            blocked_zone_red.append(c.target)
+            continue
+        r = sandbox_fn(c)
+        if not r.get("ok"):
+            red.append(c.target)
+            continue
+        entry = {"branch": r["branch"], "target": c.target, "change_id": c.id}
+        if open_pr:
+            title = pr_title_fn(c) if pr_title_fn else f"auto-evolve: {c.description[:60]}"
+            pr = pr_fn(r["branch"], title)
+            entry["pr_pushed"] = pr.get("pushed")
+            entry["pr_number"] = pr.get("pr_number")
+        state[c.target] = entry
+        opened.append(c.target)
+    _save_pr_state(state, path)
+    return {"skipped_active_pr": skipped, "opened": opened, "red": red,
+            "blocked_zone_red": blocked_zone_red}
+
+
 def propose_patch(target_file: str, finding: str, *, gen_model: str | None = None) -> str:
     """Un modelo barato PROPONE el contenido nuevo de target_file para resolver
     `finding`. READ-ONLY: devuelve el texto, NO escribe nada. Aplicar = gate aparte.
@@ -436,3 +542,69 @@ def propose_patch(target_file: str, finding: str, *, gen_model: str | None = Non
         f"HALLAZGO: {finding}\n\nARCHIVO {target_file}:\n{src}\n\n"
         f"Devolve el CONTENIDO COMPLETO nuevo del archivo, sin explicacion, en un bloque de codigo.")
     return fan_out([prompt], gen_model=gen_model or DEFAULT_GENERATOR, phase="evolve")[0].text
+
+
+if __name__ == "__main__":
+    import tempfile
+
+    # cero-git/gh: sandbox_fn/pr_fn/gh_check_fn inyectados (prueba la COORDINACION, no git real)
+    tmp_state = Path(tempfile.mkdtemp()) / "pr_state.json"
+    calls: list = []
+
+    def _fake_sandbox_ok(c):
+        calls.append(("sandbox", c.target))
+        return {"ok": True, "branch": f"mmorch-sbx-{c.id}", "fitness": {}, "change_id": c.id}
+
+    def _fake_sandbox_fail(c):
+        calls.append(("sandbox", c.target))
+        return {"ok": False, "branch": None, "fitness": {}, "change_id": c.id}
+
+    def _fake_pr(branch, title):
+        calls.append(("pr", branch))
+        return {"pushed": True, "pr_created": True, "pr_number": 42}
+
+    def _fake_git_exists_true(*a, cwd):
+        class _R:
+            returncode = 0
+        return _R()
+
+    def _fake_git_exists_false(*a, cwd):
+        class _R:
+            returncode = 1
+        return _R()
+
+    c1 = snapshot_change("a.py", "def a(): return 1", "fix a")
+    c2 = snapshot_change("a.py", "def a(): return 2", "fix a, take 2")  # MISMO target que c1
+    c3 = snapshot_change("b.py", "def b(): return 1", "fix b")
+
+    # 1. ronda 1: 2 candidatos, uno para 'a.py' otro para 'b.py' -> ambos abren PR
+    _git = globals()["_git"]
+    globals()["_git"] = _fake_git_exists_true   # branch existe (recien creada)
+    r1 = coordinated_evolve_round([c1, c3], sandbox_fn=_fake_sandbox_ok, pr_fn=_fake_pr,
+                                  path=tmp_state)
+    assert set(r1["opened"]) == {"a.py", "b.py"}, r1
+    assert r1["skipped_active_pr"] == [], r1
+
+    # 2. ronda 2: un candidato NUEVO para 'a.py' (mismo target que c1) -> SKIP, no compite
+    calls.clear()
+    r2 = coordinated_evolve_round([c2], sandbox_fn=_fake_sandbox_ok, pr_fn=_fake_pr,
+                                  path=tmp_state)
+    assert r2["skipped_active_pr"] == ["a.py"], r2
+    assert calls == [], "no debio llamar sandbox_fn para un archivo con PR abierto"
+
+    # 3. el PR de 'a.py' se mergea (la branch ya no existe) -> reap la libera -> ronda 3 la toma
+    globals()["_git"] = _fake_git_exists_false
+    r3 = coordinated_evolve_round([c2], sandbox_fn=_fake_sandbox_ok, pr_fn=_fake_pr,
+                                  path=tmp_state)
+    assert r3["opened"] == ["a.py"], r3          # liberada y re-tomada en la MISMA ronda
+
+    # 4. sandbox que falla (rojo) -> nunca se trackea, no bloquea futuras rondas
+    globals()["_git"] = _fake_git_exists_true
+    _save_pr_state({}, tmp_state)
+    r4 = coordinated_evolve_round([c1], sandbox_fn=_fake_sandbox_fail, pr_fn=_fake_pr,
+                                  path=tmp_state)
+    assert r4["red"] == ["a.py"] and r4["opened"] == [], r4
+    assert _load_pr_state(tmp_state) == {}, "un intento fallido no debe quedar trackeado"
+
+    globals()["_git"] = _git   # restaurar
+    print("evolve coordination OK — lock por archivo, reap libera al mergear, rojo no trackea")
