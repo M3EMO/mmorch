@@ -12,6 +12,7 @@ Register:     see README.md "Register the MCP server".
 from __future__ import annotations
 
 import json
+import re
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -177,20 +178,30 @@ def mmorch_route(
         "model": r.model, "cost_usd": r.cost_usd}, ensure_ascii=False)
 
 
+# audit 2026-07: patrones de archivo que NUNCA deben salir a una API externa, aunque el
+# caller (esta sesion) ya podia leerlos igual con Read -- el limite real que importa aca
+# es "sale de la maquina", no "se puede leer" (mismo patron que .gitignore de new-project skill).
+_SECRET_NAME_RX = re.compile(
+    r"(^|[/\\])(\.env(\..+)?|credentials\.json|token\.json|.*\.key|.*secret.*|.*password.*)$", re.I)
+
+
 @mcp.tool()
 def mmorch_review_code(code: str = "", path: str = "") -> str:
     """Senior code reviewer (cero cupo): flag where code breaks the mmorch coding principles
     (docs/coding-principles.md) — module depth/cohesion/coupling, DRY, nesting, naming, scope,
     why-comments, KISS, security. Cross-family refuted (DeepSeek↔Gemini) so style-opinion nitpicks
     get pruned; subjective review, so truth is judgement not execution. Pass `code` inline OR a
-    `path` to read from disk. Returns JSON {path, findings:[{principle, severity, line, problem,
-    fix}], n_raw, n_confirmed, dropped}.
+    `path` to read from disk (path only used when `code` is empty). Returns JSON {path,
+    findings:[{principle, severity, line, problem, fix}], n_raw, n_confirmed, dropped}.
     """
+    if path and _SECRET_NAME_RX.search(path):
+        return json.dumps({"error": f"refused: '{path}' looks like a secrets file — "
+                                    "review_code sends content to an EXTERNAL API"})
     if path and not code:
         try:
             with open(path, encoding="utf-8") as fh:
                 code = fh.read()
-        except Exception as e:
+        except (OSError, UnicodeDecodeError) as e:
             return json.dumps({"error": f"cannot read {path}: {str(e)[:160]}"})
     if not code.strip():
         return json.dumps({"error": "no code provided (pass code= or path=)"})
