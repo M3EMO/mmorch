@@ -544,6 +544,42 @@ def propose_patch(target_file: str, finding: str, *, gen_model: str | None = Non
     return fan_out([prompt], gen_model=gen_model or DEFAULT_GENERATOR, phase="evolve")[0].text
 
 
+# --------------------------------------------------------------------------- #
+# Loop nocturno end-to-end (pedido usuario 2026-07): cosecha -> propone -> sandbox+PR,
+# coordinado. Entry point unico para el scheduled-task.
+# --------------------------------------------------------------------------- #
+def nightly_evolve(*, days: int = 3, max_files: int = 5, max_findings: int = 8,
+                   root: Path = ROOT, harvest_fn=None, propose_fn=None,
+                   **round_kwargs) -> dict:
+    """1 corrida nocturna completa: harvest_findings() (code_review real sobre archivos
+    recientemente cambiados) -> por cada hallazgo, propose_patch() genera el cambio ->
+    coordinated_evolve_round() lo sandboxea + testea + abre PR (o saltea si el archivo ya
+    tiene un PR pendiente). `harvest_fn`/`propose_fn` inyectables (self-check cero-API).
+    Sin hallazgos -> no-op limpio (nunca genera ruido de PRs vacíos)."""
+    if harvest_fn is None:
+        from .evolve_findings import harvest_findings
+
+        def harvest_fn():
+            return harvest_findings(days=days, max_files=max_files,
+                                    max_findings=max_findings, root=root)
+    propose_fn = propose_fn or propose_patch
+
+    findings = harvest_fn()
+    if not findings:
+        return {"findings": 0, "skipped_active_pr": [], "opened": [], "red": [],
+                "blocked_zone_red": []}
+    candidates = []
+    for f in findings:
+        try:
+            after = propose_fn(f["target"], f["finding"])
+        except Exception:
+            continue   # un hallazgo que no se pudo proponer no debe frenar el resto
+        candidates.append(snapshot_change(f["target"], after, f["finding"][:80], root=root))
+    result = coordinated_evolve_round(candidates, root=root, **round_kwargs)
+    result["findings"] = len(findings)
+    return result
+
+
 if __name__ == "__main__":
     import tempfile
 
@@ -608,3 +644,42 @@ if __name__ == "__main__":
 
     globals()["_git"] = _git   # restaurar
     print("evolve coordination OK — lock por archivo, reap libera al mergear, rojo no trackea")
+
+    # --- nightly_evolve: harvest/propose/round todos inyectados, cero-API/cero-git ---
+    tmp_state2 = Path(tempfile.mkdtemp()) / "pr_state.json"
+    globals()["_git"] = _fake_git_exists_true
+
+    def _fake_harvest_some():
+        return [{"target": "x.py", "severity": "high", "finding": "algo mal en x"},
+                {"target": "y.py", "severity": "low", "finding": "algo mal en y"}]
+
+    def _fake_propose(target, finding):
+        return f"# fix aplicado a {target}\ndef f(): return 1"
+
+    r_night = nightly_evolve(harvest_fn=_fake_harvest_some, propose_fn=_fake_propose,
+                             root=Path(tempfile.mkdtemp()), sandbox_fn=_fake_sandbox_ok,
+                             pr_fn=_fake_pr, path=tmp_state2)
+    assert r_night["findings"] == 2, r_night
+    assert set(r_night["opened"]) == {"x.py", "y.py"}, r_night
+
+    # sin hallazgos -> no-op limpio, nunca llama propose/round
+    def _fake_harvest_empty():
+        return []
+    r_empty = nightly_evolve(harvest_fn=_fake_harvest_empty,
+                             propose_fn=lambda t, f: (_ for _ in ()).throw(
+                                 AssertionError("no debio proponerse nada")))
+    assert r_empty == {"findings": 0, "skipped_active_pr": [], "opened": [], "red": [],
+                       "blocked_zone_red": []}, r_empty
+
+    # un propose_fn que explota para UN finding no frena el resto
+    def _propose_one_boom(target, finding):
+        if target == "x.py":
+            raise RuntimeError("modelo caido")
+        return "def g(): return 2"
+    r_partial = nightly_evolve(harvest_fn=_fake_harvest_some, propose_fn=_propose_one_boom,
+                               root=Path(tempfile.mkdtemp()), sandbox_fn=_fake_sandbox_ok,
+                               pr_fn=_fake_pr, path=Path(tempfile.mkdtemp()) / "s.json")
+    assert r_partial["opened"] == ["y.py"], r_partial   # x.py se perdio, y.py sigue
+
+    globals()["_git"] = _git
+    print("nightly_evolve OK — harvest->propose->round encadenado, no-op limpio, resiliente")

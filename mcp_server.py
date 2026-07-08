@@ -591,6 +591,21 @@ def mmorch_evolve_self(target_file: str, finding: str) -> str:
 
 
 @mcp.tool()
+def mmorch_evolve_nightly(days: int = 3, max_files: int = 5, max_findings: int = 8) -> str:
+    """Loop nocturno end-to-end (pensado para un scheduled-task, cero cupo): cosecha
+    hallazgos REALES con code_review sobre archivos cambiados en los últimos `days` días
+    (hasta `max_files`), propone un fix por hallazgo (hasta `max_findings`), y para cada
+    uno corre sandbox_branch (worktree aislado, tests reales) + abre un PR si queda verde.
+    Coordinado por archivo: si un archivo YA tiene un PR pendiente, se saltea esta ronda
+    (nunca 2 PRs compitiendo por el mismo archivo — ver evolve.coordinated_evolve_round).
+    NUNCA mergea — el humano revisa y mergea cada PR. Zona roja sigue bloqueada siempre.
+    Returns {findings, opened:[archivos con PR nuevo], skipped_active_pr, red, blocked_zone_red}."""
+    from mmorch.evolve import nightly_evolve
+    return json.dumps(nightly_evolve(days=days, max_files=max_files, max_findings=max_findings),
+                      ensure_ascii=False)
+
+
+@mcp.tool()
 def mmorch_orchestra() -> str:
     """Roster de la ORQUESTA que mmorch dirige: conductor + secciones (generator/verifier/
     router/soloist/memory) con cada nodo (handle, kind, builder algorithm, status). Vista
