@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **92 módulos · 44 MCP tools · 437 tests.**
+_Auto-generado por `mmorch.docgen`._ **93 módulos · 44 MCP tools · 437 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -75,6 +75,7 @@ _Auto-generado por `mmorch.docgen`._ **92 módulos · 44 MCP tools · 437 tests.
 | `mmorch/lang.py` | lang — capacidades deterministas POR LENGUAJE para el project-build engine. |
 | `mmorch/learn.py` | learn — meta-inteligencia: mmorch aprende de su propio metrics.jsonl (I-1). |
 | `mmorch/loop.py` | loop_until_done — scope DESCONOCIDO, 'segui hasta que este limpio'. Control-flow |
+| `mmorch/mcp_telemetry.py` | mcp_telemetry — logger CENTRALIZADO de invocaciones MCP (audit 2026-07: 44 tools, ~20 |
 | `mmorch/megasource.py` | megasource (Fase 2) — megafuente autodidacta: primer hit = provider PRICING. |
 | `mmorch/memory.py` | memory — memoria episodica + semantica para mmorch (DuckDB 2 capas). |
 | `mmorch/metrics.py` | Observability — append-only JSONL metric log (§11 backbone). |

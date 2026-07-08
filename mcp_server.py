@@ -51,6 +51,9 @@ from mmorch.feedback import (record_outcome as _record_outcome,
                             calibration as _calibration)
 
 mcp = FastMCP("mmorch")
+from mmorch.mcp_telemetry import instrument  # noqa: E402 (needs `mcp` defined first)
+instrument(mcp)   # audit 2026-07: logs EVERY tool call (incl. las ~20 deterministas que
+                  # metrics.jsonl nunca ve) a logs/mcp_calls.jsonl — cero cambios en las 44 tools
 
 
 @mcp.tool()
