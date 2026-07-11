@@ -79,6 +79,12 @@ def stub_check(code: str, file: str | None = None) -> tuple[bool, str]:
     substance floor. `file=None` -> Python (back-compat). Deterministic — catches the
     import-only stub class that escaped the old flat workflow, in any registered language."""
     from .lang import for_file
+    # __init__.py: import-only/re-export ES su trabajo legitimo (bench rate-limiter 2026-07-11:
+    # el detector lo marcaba stub -> recursion -> cap -> escalate, falso positivo). Basta que
+    # parsee — el integration gate juzga si los re-exports son los correctos.
+    if file and file.replace("\\", "/").endswith("__init__.py"):
+        ok, why = for_file(file).syntax_ok(code)
+        return (not ok), (why if not ok else "")
     return for_file(file).stub_check(code)
 
 
