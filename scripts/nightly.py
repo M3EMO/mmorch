@@ -13,7 +13,7 @@ Resultado a logs/nightly.jsonl — la capa de notificación (el task de Claude, 
 ese log y resume; no ejecuta nada.
 
 Registrar:  schtasks /Create /TN mmorch-nightly /SC DAILY /ST 02:10 /F
-            /TR "<venv>\python.exe <repo>\scripts\nightly.py"
+            /TR "<venv>/python.exe <repo>/scripts/nightly.py"
 """
 import json
 import pathlib

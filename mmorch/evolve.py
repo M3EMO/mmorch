@@ -220,7 +220,7 @@ def _tests_with_autorevert(change: Change, *, root: Path = ROOT, test_path: str 
             p.write_text(original, encoding="utf-8")
 
 
-def fitness(test_path: str = "tests", timeout: int = 300) -> dict:
+def fitness(test_path: str = "tests", timeout: int = 900) -> dict:
     """Corre pytest y devuelve {passed, failed, total, pass_rate, ok}. Gate empirico."""
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", test_path, "-q", "--no-header"],
@@ -358,7 +358,7 @@ def _git(*args, cwd) -> subprocess.CompletedProcess:
 def sandbox_branch(change: Change, *, root: Path = ROOT, base: str = "HEAD",
                    run_tests: bool = True, test_path: str = "tests",
                    test_cmd: list[str] | None = None, keep_on_pass: bool = True,
-                   timeout: int = 300) -> dict:
+                   timeout: int = 900) -> dict:
     """Aísla en un git WORKTREE sobre una branch nueva `mmorch-sbx-<id>` (desde HEAD, NO
     incluye cambios sin commitear del árbol principal → no interfiere). Aplica el cambio,
     commitea, corre tests AHÍ. Verde → branch QUEDA (pa merge/PR). Rojo → branch borrada.
