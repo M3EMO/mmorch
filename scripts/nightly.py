@@ -70,6 +70,16 @@ def main() -> None:
     except Exception as e:
         rec["autoresearch_error"] = f"{type(e).__name__}: {str(e)[:200]}"
 
+    # cola de re-check de arbitrajes (blind-spot #2: descartes del árbitro nunca auditados).
+    # nightly solo SURFACEA la cola — el re-juicio es del orquestador (Opus), no de un cron.
+    try:
+        from mmorch.arbitration import pending_recheck, stats as arb_stats
+        rec["arbitration"] = {"pending_recheck": len(pending_recheck()),
+                              **{k: v for k, v in arb_stats().items()
+                                 if k in ("dismissed_without_evidence_rate", "total")}}
+    except Exception as e:
+        rec["arbitration_error"] = f"{type(e).__name__}: {str(e)[:120]}"
+
     _log(rec)
     print(json.dumps(rec, ensure_ascii=False, default=str))
 

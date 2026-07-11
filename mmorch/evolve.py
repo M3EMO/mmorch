@@ -477,13 +477,32 @@ def reap_merged_prs(*, root: Path = ROOT, gh_check_fn=None, path: Path = _PR_STA
     (la branch ya no existe, o gh dice closed/merged). Solo toca el tracking LOCAL —
     nunca borra nada de git. Devuelve {freed:[...], still_open:[...]}."""
     state = _load_pr_state(path)
-    freed = []
+    freed: list[str] = []
+    merged: list[str] = []
+    rejected: list[str] = []
     for target, entry in list(state.items()):
         if not _pr_still_open(entry, root=root, gh_check_fn=gh_check_fn):
             freed.append(target)
+            # POST-MERGE OUTCOME (blind-spot #1 del audit: el loop aprendía del gate, nunca
+            # del veredicto humano final). branch cerrada: si su commit es alcanzable desde
+            # HEAD -> MERGEADO (reward 1.0); si no -> rechazado/descartado (0.0). Señal más
+            # valiosa que el gate: es el juicio del humano sobre el trabajo completo.
+            was_merged = False
+            sha = entry.get("head_sha")
+            if sha:
+                was_merged = _git("merge-base", "--is-ancestor", sha, "HEAD",
+                                  cwd=root).returncode == 0
+            (merged if was_merged else rejected).append(target)
+            try:
+                from .feedback import record_outcome
+                record_outcome("evolve:nightly", 1.0 if was_merged else 0.0,
+                               pattern="evolve_pr", source="human_merge", context=target)
+            except Exception:
+                pass
             del state[target]
     _save_pr_state(state, path)
-    return {"freed": freed, "still_open": list(state.keys())}
+    return {"freed": freed, "merged": merged, "rejected": rejected,
+            "still_open": list(state.keys())}
 
 
 def coordinated_evolve_round(candidates: list[Change], *, root: Path = ROOT,
@@ -517,6 +536,9 @@ def coordinated_evolve_round(candidates: list[Change], *, root: Path = ROOT,
             red.append(c.target)
             continue
         entry = {"branch": r["branch"], "target": c.target, "change_id": c.id}
+        head = _git("rev-parse", r["branch"], cwd=root)
+        if head.returncode == 0:                      # pa distinguir merge de rechazo al reapear
+            entry["head_sha"] = head.stdout.strip()
         if open_pr:
             title = pr_title_fn(c) if pr_title_fn else f"auto-evolve: {c.description[:60]}"
             pr = pr_fn(r["branch"], title)
@@ -602,11 +624,13 @@ if __name__ == "__main__":
     def _fake_git_exists_true(*a, cwd):
         class _R:
             returncode = 0
+            stdout = "deadbeef123\n"
         return _R()
 
     def _fake_git_exists_false(*a, cwd):
         class _R:
             returncode = 1
+            stdout = ""
         return _R()
 
     c1 = snapshot_change("a.py", "def a(): return 1", "fix a")
