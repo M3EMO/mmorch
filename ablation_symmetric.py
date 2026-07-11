@@ -162,7 +162,7 @@ def _gen_hard(rng: random.Random):
 
 def build_gold(n: int, seed: int) -> list[dict]:
     rng = random.Random(seed)
-    return [{"i": i, **dict(zip(("problem", "truth"), _gen_hard(rng)))} for i in range(n)]
+    return [{"i": i, **dict(zip(("problem", "truth"), _gen_hard(rng), strict=False))} for i in range(n)]
 
 
 # --------------------------------------------------------------------------- #
@@ -422,7 +422,7 @@ def main():
     if _RECORD:
         from mmorch.feedback import calibration
         cal = calibration()
-        print(f"\n--- FEEDBACK LOOP (bootstrap #1) ---")
+        print("\n--- FEEDBACK LOOP (bootstrap #1) ---")
         print(f"outcomes etiquetados emitidos este run: ~{len(rows) * 4} "
               f"(4 verdicts/item vs verdad computada)")
         print(f"calibration AHORA: ECE={cal['ece']} sobre n={cal['n']} "

@@ -74,7 +74,7 @@ def _perturb(truth: int, rng: random.Random) -> int:
 def build_cases(n: int, seed: int):
     rng = random.Random(seed)
     cases = []
-    for i in range(n):
+    for _i in range(n):
         text, truth = _gen_hard(rng)
         cases.append({"problem": text, "proposed": truth, "is_correct": True})
         cases.append({"problem": text, "proposed": _perturb(truth, rng), "is_correct": False})
@@ -84,7 +84,6 @@ def build_cases(n: int, seed: int):
 def _verify(prompt_name, case, retries=3):
     sys_text, max_tok = PROMPTS[prompt_name]
     art = f"PROBLEMA:\n{case['problem']}\n\nRESPUESTA PROPUESTA: {case['proposed']}"
-    last = None
     for _ in range(retries + 1):
         try:
             _GATE.reserve(VERIFIER)
@@ -96,7 +95,7 @@ def _verify(prompt_name, case, retries=3):
             return {"prompt": prompt_name, "passed": passed,
                     "is_correct": case["is_correct"], "cost": res.cost_usd}
         except Exception as e:
-            last = e
+            _ = e
     return None
 
 

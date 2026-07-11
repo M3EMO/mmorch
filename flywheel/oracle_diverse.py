@@ -45,7 +45,7 @@ def main():
     res = fan_out(prompts, gen_model="deepseek-chat", system=sysmsg, max_workers=8, temperature=1.0)
 
     rows, npass, seen = [], 0, set()
-    for (name, ap), r in zip(meta, res):
+    for (name, ap), r in zip(meta, res, strict=False):
         txt = getattr(r, "text", "") or ""
         if not txt:
             continue

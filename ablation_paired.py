@@ -27,7 +27,6 @@ from __future__ import annotations
 import argparse
 import math
 import random
-import re
 import sys
 import pathlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -317,7 +316,7 @@ def main():
               f"IC95[{s['specificity'][1]}, {s['specificity'][2]}]  (n_correctos={s['n_correct']})")
         print(f"  accuracy balanceada: {s['balanced_acc']}")
     print(f"\nACCURACY GLOBAL de decision: self={self_acc:.4f}  cross={cross_acc:.4f}")
-    print(f"\nMcNEMAR (pareado, decision correcta):")
+    print("\nMcNEMAR (pareado, decision correcta):")
     print(f"  b (solo SELF acierta)={mc['b']}  c (solo CROSS acierta)={mc['c']}")
     if mc.get("chi2") is not None:
         print(f"  chi2(cc)={mc['chi2']}  p_exact={mc['p_exact']}")

@@ -11,7 +11,7 @@ Corre bajo WSL: ~/flywheel/bin/python flywheel/simclr.py [N] [EPOCHS]
 Lee dataset por /mnt/c. CPU-only. Determinista (seed fijo).
 """
 from __future__ import annotations
-import json, sys, re, io, tokenize, keyword, builtins, math, random
+import json, sys, re, io, tokenize, keyword, builtins, random
 import numpy as np
 import torch
 import torch.nn as nn

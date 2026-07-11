@@ -22,7 +22,7 @@ torch.manual_seed(SEED)
 
 @torch.no_grad()
 def _ema(target: nn.Module, online: nn.Module, m: float = 0.999):
-    for pt, po in zip(target.parameters(), online.parameters()):
+    for pt, po in zip(target.parameters(), online.parameters(), strict=False):
         pt.data = pt.data * m + po.data * (1.0 - m)
 
 

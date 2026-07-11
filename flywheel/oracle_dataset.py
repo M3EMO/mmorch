@@ -136,7 +136,7 @@ def main():
                       max_workers=8, temperature=0.9)
 
     rows, npass = [], 0
-    for (name, tests), r in zip(meta, results):
+    for (name, tests), r in zip(meta, results, strict=False):
         txt = getattr(r, "text", None) or getattr(r, "output", None) or ""
         if not txt:
             continue

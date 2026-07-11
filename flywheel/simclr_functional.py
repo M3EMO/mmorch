@@ -16,7 +16,6 @@ from __future__ import annotations
 import sys, re, json, random
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 import simclr as S
 

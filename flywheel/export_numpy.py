@@ -5,7 +5,7 @@ cero dep pesada = respeta anti-complejidad del GOAL). Corre en WSL (donde esta t
 Exporta: embedding, GRU bidireccional l0 (fwd+reverse) weight_ih/hh + bias_ih/hh.
 """
 from __future__ import annotations
-import json, sys
+import json
 import numpy as np
 import torch
 

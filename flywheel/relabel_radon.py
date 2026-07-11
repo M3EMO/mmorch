@@ -4,7 +4,7 @@ bate azar aca, el encoder/probe esta roto (no es la label). Semi-circular a prop
 solo valida que el pipeline aprende algo medible.
 """
 from __future__ import annotations
-import json, pathlib, sys
+import json, pathlib
 import textwrap
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]

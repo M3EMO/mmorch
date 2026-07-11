@@ -67,7 +67,7 @@ def embed_exec_list(codes, specs):
     """Huella de comportamiento por code (spec = nombre de la fn = hint). Algunas devuelven
     None (fn no corre / sin sonda valida) -> mask pa comparacion apples-to-apples en subset."""
     from mmorch.exec_embedder import embed_exec
-    out = [embed_exec(c, s) for c, s in zip(codes, specs)]
+    out = [embed_exec(c, s) for c, s in zip(codes, specs, strict=False)]
     mask = np.array([v is not None for v in out])
     X = np.array([v for v in out if v is not None], dtype=float)
     return X, mask

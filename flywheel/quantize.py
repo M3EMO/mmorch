@@ -5,7 +5,7 @@ el win es TAMAÑO. A 3.77MB es premature, pero deja el mecanismo + gate pa cuand
 Gateado: produce un fp16 aparte, mide el delta de AUC; SOLO se adopta si el delta < tol.
 """
 from __future__ import annotations
-import sys, json, hashlib, pathlib
+import json, hashlib, pathlib
 import numpy as np
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
