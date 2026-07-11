@@ -102,7 +102,7 @@ def test_fixed_arm_records_outcomes_and_updates_bandit(tmp_path):
     assert all(e["source"] == "rubric" for e in lines)
     assert all(e["pattern"] == "hillclimb" for e in lines)
     st = bandit.stats()["deepseek-chat#climb"]
-    assert st["n"] == 3 and st["mean"] == round(3 / 5, 4)  # Beta(1+2, 1+1)
+    assert 2 <= st["n"] <= 3 and 0.55 <= st["mean"] <= 0.65  # n EFECTIVO: discounted Thompson (decay 0.995) lo achica levemente
 
 
 def test_arms_selected_via_thompson(tmp_path):
@@ -121,7 +121,7 @@ def test_arms_selected_via_thompson(tmp_path):
     assert r.rounds == 4
     assert all(a in ("m1", "m2") for a in seen_arms)
     total_n = sum(s["n"] for s in bandit.stats().values())
-    assert total_n == 4  # cada ronda actualizo el brazo elegido
+    assert 3 <= total_n <= 4  # n efectivo bajo discounted Thompson; 4 updates reales
 
 
 def test_no_arm_no_recording(tmp_path):

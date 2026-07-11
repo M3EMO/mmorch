@@ -171,7 +171,10 @@ def materialize(task: BenchTask, dst: str) -> str:
                  ["config", "user.name", "bench"], ["config", "commit.gpgsign", "false"],
                  ["add", "-A"], ["commit", "-q", "-m", f"bench:{task.name} frozen"]):
         subprocess.run(["git", *args], cwd=str(root), capture_output=True)
-    return task.accept_cmd
+    # 'python' pelado + shell=True resuelve el python del SISTEMA (sin pytest) — la carrera
+    # viva 2026-07-08 murió entera por esto. El cmd corre con EL intérprete de mmorch.
+    import sys
+    return task.accept_cmd.replace("python ", f'"{sys.executable}" ', 1)
 
 
 if __name__ == "__main__":
