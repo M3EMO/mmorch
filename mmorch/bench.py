@@ -38,8 +38,10 @@ TASKS: list[BenchTask] = [
         name="etl-pipeline",
         task=(
             "Construí un mini-ETL en Python, 3 módulos que se importan entre sí:\n"
-            "1. etl/extract.py: parse_lines(lines) -> list[dict] — cada línea CSV 'id,nombre,monto' "
-            "(monto float, AR: coma decimal '1234,56'). Línea malformada se SALTEA (no rompe).\n"
+            "1. etl/extract.py: parse_lines(lines) -> list[dict] — cada línea es 'id,nombre,monto'. "
+            "Parsear con split(',', 2) — maxsplit=2: los 2 primeros commas separan id y nombre; TODO "
+            "lo que queda es el monto, con coma decimal AR ('1234,56' -> 1234.56). Línea con menos "
+            "de 3 partes o monto no-numérico se SALTEA (no rompe).\n"
             "2. etl/transform.py: normalize(rows) -> list[dict] — nombre a Title Case, monto "
             "redondeado a 2 decimales, descarta montos negativos, dedup por id (queda el primero).\n"
             "3. etl/load.py: to_summary(rows) -> dict — {'count': n, 'total': suma de montos "
@@ -54,7 +56,7 @@ from etl.transform import normalize
 
 def test_extract_salta_malformadas():
     rows = parse_lines(["1,Ana,100,50", "basura", "2,Luis,200,00"])
-    assert len(rows) == 2 or len(rows) == 0  # coma decimal AR: '100,50' es UN campo monto
+    assert len(rows) == 2                    # spec v2 sin ambiguedad: maxsplit=2
     rows2 = parse_lines(["1,ana,1234,56"])
     assert rows2 and abs(rows2[0]["monto"] - 1234.56) < 0.01
 
