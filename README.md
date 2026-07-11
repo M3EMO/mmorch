@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **94 módulos · 45 MCP tools · 437 tests.**
+_Auto-generado por `mmorch.docgen`._ **96 módulos · 45 MCP tools · 437 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -36,6 +36,7 @@ _Auto-generado por `mmorch.docgen`._ **94 módulos · 45 MCP tools · 437 tests.
 | `mmorch/ablation.py` | ablation (§18.4) — validar EMPIRICAMENTE la regla de pairing cross-family. El |
 | `mmorch/arbitration.py` | arbitration — registro auditable de los arbitrajes del orquestador (blind-spot #2, 2026-07). |
 | `mmorch/autoresearch.py` | autoresearch (r4a) — hillclimb como JOB declarativo + resumable. |
+| `mmorch/bench.py` | bench — benchmark CONGELADO de tasks difíciles para evolución de workflows. |
 | `mmorch/bucketrank.py` | bucket_rank — graduar/ordenar un set GRANDE en tiers (triage por calidad, rankear |
 | `mmorch/budget.py` | budget — BudgetKeeper: techo de gasto mensual (ataca el incidente +$5). |
 | `mmorch/budget_policy.py` | budget_policy — scoped budget policies (graft G5 from paperclip). |
@@ -124,6 +125,7 @@ _Auto-generado por `mmorch.docgen`._ **94 módulos · 45 MCP tools · 437 tests.
 | `mmorch/vault.py` | vault — memoria de largo plazo mmorch-legible sobre el vault Obsidian. |
 | `mmorch/weights.py` | weights — gestion de pesos de nodos neuronales (model-cards + verificacion). Source of |
 | `mmorch/workflow_engine.py` | workflow_engine — cooperative multi-role workflow as a pure state machine (Phase C). |
+| `mmorch/workflow_race.py` | workflow_race — corre N VARIANTES de workflow sobre una task congelada del bench y |
 | `mmorch/workflow_spec.py` | workflow_spec — load + validate cooperative workflows and role personas (Phase C, Decisions #2/#3). |
 | `mmorch/workflow_store.py` | workflow_store — durable block-context + checkpoints for cooperative workflows (Phase A). |
 | `mmorch/worktree_driver.py` | worktree_driver — isolated execution in a throwaway git worktree (graft G3 follow-up). |

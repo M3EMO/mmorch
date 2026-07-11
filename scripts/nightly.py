@@ -70,6 +70,34 @@ def main() -> None:
     except Exception as e:
         rec["autoresearch_error"] = f"{type(e).__name__}: {str(e)[:200]}"
 
+    # DESTILADO en volumen (audit 2026-07-08: 408 episodios vs 9 notas — el nudge destila de a 5
+    # cada 10 closes, el backlog crece más rápido; ritmo de entrada >> ritmo de destilación).
+    # La noche es el momento barato para ponerse al día: 50/noche, MISMO watermark que el nudge
+    # (nudge.json distill_upto) — un solo estado, dos ritmos (goteo diurno + lote nocturno).
+    try:
+        from mmorch.memory import distill_backlog
+        from mmorch.nudge import _load as _nudge_load, _STATE as _NUDGE_STATE
+        st = _nudge_load(_NUDGE_STATE)
+        d = distill_backlog(after_id=int(st.get("distill_upto", 0)), limit=50)
+        st["distill_upto"] = d["last_id"]
+        _NUDGE_STATE.parent.mkdir(parents=True, exist_ok=True)
+        _NUDGE_STATE.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+        rec["distill"] = d
+    except Exception as e:
+        rec["distill_error"] = f"{type(e).__name__}: {str(e)[:200]}"
+
+    # WORKFLOW RACE (evolución de estrategia, no solo de código): 1 task del bench por noche
+    # (rotando por día — cota de costo), 3 variantes del engine compiten, el ganador por firma
+    # alimenta el workflow-bandit. held-out NUNCA entra acá (anti-contaminación).
+    try:
+        from mmorch.bench import selection_tasks
+        from mmorch.workflow_race import race
+        sel = selection_tasks()
+        t = sel[int(time.time() // 86400) % len(sel)]      # rotación determinista por día
+        rec["workflow_race"] = race(t)
+    except Exception as e:
+        rec["workflow_race_error"] = f"{type(e).__name__}: {str(e)[:200]}"
+
     # cola de re-check de arbitrajes (blind-spot #2: descartes del árbitro nunca auditados).
     # nightly solo SURFACEA la cola — el re-juicio es del orquestador (Opus), no de un cron.
     try:
