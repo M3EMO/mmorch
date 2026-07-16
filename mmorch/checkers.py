@@ -414,10 +414,20 @@ def _mutants(code: str, max_n: int = 12) -> list[str]:
         base = ast.parse(code)
     except SyntaxError:
         return []
+    # nodos DENTRO de función (excluye módulo-nivel: imports/constantes de header cuya
+    # mutación rompe el import entero -> se contaban "killed" gratis sin tocar lógica real.
+    # bug medido 2026-07: _mutants tomaba los primeros max_n por orden de ast.walk, que en
+    # módulos chicos caen en ese header -> mutation_score saturaba en 1.0 sin medir nada).
+    in_func: set[int] = set()
+    for fn in ast.walk(base):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            in_func.update(id(n) for n in ast.walk(fn))
     # localizar nodos mutables (por índice de recorrido estable)
     # (indice de recorrido, kind, alternativa) — una mutación por entrada
     targets: list[tuple[int, str, Any]] = []
     for i, node in enumerate(ast.walk(base)):
+        if id(node) not in in_func:
+            continue
         if isinstance(node, ast.BinOp) and type(node.op) in _MUT_BINOP:
             for alt in _MUT_BINOP[type(node.op)]:
                 targets.append((i, "binop", alt))
@@ -461,11 +471,18 @@ def _check_mutation_score(*, code: str, tests: str, min_score: float = 0.5,
         return CheckResult(False, "sin mutantes (no parsea o sin operadores mutables)",
                            "mutation_score", got=0.0)
     killed = 0
+    # `tests` son asserts a nivel-módulo (convención mut_*.py, no test_-funciones) -> correr
+    # como script, NO pytest (pytest devuelve exit 5 "no tests ran" para CUALQUIER módulo sin
+    # funciones test_*, mutado o no -> se contaba killed=siempre, sin mirar el contenido del
+    # assert. bug medido 2026-07: 'assert True' solo daba mutation_score=1.0 igual).
+    # cubre las 2 convenciones: asserts a nivel-módulo (mut_*.py) corren al import; funciones
+    # test_* (convención pytest normal) se llaman explícito porque el import solo no las corre.
+    runner = ("from candidate import *\n" + tests +
+             "\nfor _n, _f in list(globals().items()):\n"
+             "    if _n.startswith('test_') and callable(_f):\n        _f()\n")
     for mut in muts:
-        r = run_sandboxed("", timeout=timeout, argv=["-m", "pytest", "-q", "test_candidate.py"],
-                          extra_files={"candidate.py": mut,
-                                       "test_candidate.py": "from candidate import *\n" + tests})
-        if not r.ok:           # tests fallaron sobre el mutante -> KILLED (bien)
+        r = run_sandboxed(runner, timeout=timeout, extra_files={"candidate.py": mut})
+        if not r.ok:           # AssertionError (o cualquier excepción) sobre el mutante -> KILLED
             killed += 1
     score = round(killed / len(muts), 3)
     return CheckResult(score >= min_score, f"mutation_score={score} ({killed}/{len(muts)} mutantes "
