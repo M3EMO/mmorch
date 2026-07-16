@@ -16,6 +16,7 @@ Registrar:  schtasks /Create /TN mmorch-nightly /SC DAILY /ST 02:10 /F
             /TR "<venv>/python.exe <repo>/scripts/nightly.py"
 """
 import json
+import os
 import pathlib
 import sys
 import time
@@ -45,24 +46,36 @@ def main() -> None:
     except Exception as e:
         rec["evolve_error"] = f"{type(e).__name__}: {str(e)[:200]}"
 
+    # autoresearch CONFIGURABLE por env (audit 2026-07: el target fijo evolve.py-maintainability
+    # no tenía headroom -> baseline==best toda noche. Ahora vos apuntás donde HAYA headroom sin
+    # tocar código). Default = fortalecer tests/mut_signature.py contra mutantes (mutation_score).
+    #   MMORCH_AR_TASK    enunciado para el coder
+    #   MMORCH_AR_TARGET  archivo que edita el loop (relativo al repo)
+    #   MMORCH_AR_SCORER  script scorer (recibe el target como argv, imprime 'score: N')
+    #   MMORCH_AR_ROUNDS  rounds (default 12) / MMORCH_AR_PATIENCE (default 5)
+    ar_target = os.getenv("MMORCH_AR_TARGET", "tests/mut_signature.py")
+    ar_scorer = os.getenv("MMORCH_AR_SCORER", "scripts/score_mutation.py")
+    ar_task = os.getenv("MMORCH_AR_TASK",
+                        f"Fortalecé los asserts de {ar_target} para MATAR más mutantes del módulo "
+                        "bajo prueba (más casos, más propiedades verificadas). Los asserts DEBEN "
+                        "seguir pasando sobre el código real — el scorer lo gatea.")
     try:
         from mmorch.autoresearch import run_autoresearch
         from mmorch.worktree_driver import open_worktree
-        wt = open_worktree(str(ROOT), prefix="mmorch/ar-quality")
+        wt = open_worktree(str(ROOT), prefix="mmorch/ar")
         improved = False
         try:
             r = run_autoresearch(
-                "Mejorá la mantenibilidad de mmorch/evolve.py (menos complejidad ciclomática, "
-                "menos anidamiento, funciones más cortas) SIN cambiar comportamiento — los tests "
-                "de evolve son el gate y el scorer los corre.",
-                "mmorch/evolve.py",
-                scorer_cmd=f'"{sys.executable}" scripts/score_quality.py mmorch/evolve.py',
-                cwd=wt.path, maximize=True, max_rounds=6, patience=3, scorer_timeout=700)
+                ar_task, ar_target,
+                scorer_cmd=f'"{sys.executable}" {ar_scorer} {ar_target}',
+                cwd=wt.path, maximize=True,
+                max_rounds=int(os.getenv("MMORCH_AR_ROUNDS", "12")),
+                patience=int(os.getenv("MMORCH_AR_PATIENCE", "5")), scorer_timeout=700)
             improved = (r.baseline is not None and r.best_score is not None
                         and r.best_score > r.baseline)
             if improved:
-                wt.capture(f"autoresearch quality evolve.py: {r.baseline} -> {r.best_score}")
-            rec["autoresearch"] = {"baseline": r.baseline, "best": r.best_score,
+                wt.capture(f"autoresearch {ar_target}: {r.baseline} -> {r.best_score}")
+            rec["autoresearch"] = {"target": ar_target, "baseline": r.baseline, "best": r.best_score,
                                    "rounds": r.rounds, "improved": improved,
                                    "branch": wt.branch if improved else None}
         finally:
