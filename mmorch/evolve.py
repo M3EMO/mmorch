@@ -275,9 +275,17 @@ _RED_CONTENT = re.compile(
     r"secret_key|seed_phrase)\b", re.I)
 
 
-def red_content_hits(text: str) -> list[str]:
-    """Firmas de acción zona-roja encontradas en el contenido (vacío = limpio)."""
-    return sorted(set(m.group(0) for m in _RED_CONTENT.finditer(text or "")))
+def red_content_hits(text: str, *, baseline: str | None = None) -> list[str]:
+    """Firmas de acción zona-roja en el contenido (vacío = limpio). Con `baseline`, devuelve
+    solo las firmas NUEVAS (delta): las que ya estaban en baseline no cuentan. Esto arregla el
+    auto-lock medido (2026-07: evolve.py CONTIENE la regex de firmas como strings -> se marcaba
+    rojo a sí mismo). El escudo real queda: un self-edit que INTRODUCE una capacidad peligrosa
+    nueva (que no estaba en baseline) sigue siendo rojo. No es caso-especial de 'self' —
+    principiado, aplica a cualquier archivo que ya mencione firmas legítimamente (regex, docs)."""
+    hits = set(m.group(0) for m in _RED_CONTENT.finditer(text or ""))
+    if baseline is not None:
+        hits -= set(m.group(0) for m in _RED_CONTENT.finditer(baseline))
+    return sorted(hits)
 
 
 def zone_of(change: Change, *, root: Path = ROOT) -> str:
@@ -290,7 +298,9 @@ def zone_of(change: Change, *, root: Path = ROOT) -> str:
         return "red"
     if any(tgt == r or tgt.endswith("/" + r) for r in _RED_PATHS):
         return "red"
-    if red_content_hits(change.after):              # acción peligrosa en el código generado
+    # delta: solo firmas NUEVAS vs el archivo previo -> un refactor que preserva firmas
+    # pre-existentes (regex, docs) no se auto-bloquea; capacidad peligrosa NUEVA sí.
+    if red_content_hits(change.after, baseline=change.before):
         return "red"
     return "yellow" if _existed_before(change) else "green"
 
@@ -707,3 +717,13 @@ if __name__ == "__main__":
 
     globals()["_git"] = _git
     print("nightly_evolve OK — harvest->propose->round encadenado, no-op limpio, resiliente")
+
+    # --- delta red-scan: pre-existente NO bloquea, capacidad NUEVA SÍ (fix auto-lock 2026-07) ---
+    _selfish = 'import os\nRX = "subprocess.run|os.remove"   # firmas como STRING, igual que evolve.py\n'
+    c_refactor = Change("evolve.py", _selfish + "\ndef mejor(): return 1", _selfish, "refactor")
+    assert zone_of(c_refactor) != "red", "un refactor que preserva firmas pre-existentes NO debe ser rojo"
+    c_newdanger = Change("x.py", _selfish + "\nos.system(payload)\n", _selfish, "agrega os.system real")
+    assert zone_of(c_newdanger) == "red", "capacidad peligrosa NUEVA (os.system no estaba antes) SÍ es roja"
+    c_fresh = Change("nuevo.py", "eval(user_input)\n", "", "archivo nuevo con eval")
+    assert zone_of(c_fresh) == "red", "archivo nuevo (before vacío) con eval = todo es nuevo = rojo"
+    print("delta red-scan OK — self-lock roto sin apagar el escudo (firma nueva sigue bloqueando)")
