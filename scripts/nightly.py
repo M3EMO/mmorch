@@ -53,12 +53,17 @@ def main() -> None:
     #   MMORCH_AR_TARGET  archivo que edita el loop (relativo al repo)
     #   MMORCH_AR_SCORER  script scorer (recibe el target como argv, imprime 'score: N')
     #   MMORCH_AR_ROUNDS  rounds (default 12) / MMORCH_AR_PATIENCE (default 5)
-    ar_target = os.getenv("MMORCH_AR_TARGET", "tests/mut_signature.py")
-    ar_scorer = os.getenv("MMORCH_AR_SCORER", "scripts/score_mutation.py")
+    # default = optimizar el system-prompt del coder contra pass-rate de una batería edge-heavy
+    # (el ÚNICO target con headroom real medido: baseline ~0.5-0.9 y prompt-sensible; code_quality
+    # y mutation_score sobre módulos daban 1.0 fijo — audit 2026-07).
+    ar_target = os.getenv("MMORCH_AR_TARGET", "prompts/coder_prompt.txt")
+    ar_scorer = os.getenv("MMORCH_AR_SCORER", "scripts/score_coder_prompt.py")
     ar_task = os.getenv("MMORCH_AR_TASK",
-                        f"Fortalecé los asserts de {ar_target} para MATAR más mutantes del módulo "
-                        "bajo prueba (más casos, más propiedades verificadas). Los asserts DEBEN "
-                        "seguir pasando sobre el código real — el scorer lo gatea.")
+                        f"Reescribí el system-prompt de {ar_target} para que un coder Python resuelva "
+                        "MÁS de la batería de tasks algorítmicas edge-heavy (casos borde: intervalos "
+                        "que tocan, división entera hacia cero, puntuación, matrices no-cuadradas). "
+                        "El prompt debe seguir pidiendo SOLO la función en un bloque de código. El "
+                        "scorer mide pass-rate por ejecución — no expliques, mejorá el prompt.")
     try:
         from mmorch.autoresearch import run_autoresearch
         from mmorch.worktree_driver import open_worktree
