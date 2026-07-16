@@ -13,6 +13,7 @@ presupuesto sin límite.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -70,6 +71,68 @@ def harvest_findings(files: list[str] | None = None, *, days: int = 3, max_files
     order = {"high": 0, "med": 1, "medium": 1, "low": 2}
     out.sort(key=lambda x: order.get(x["severity"], 3))
     return out[:max_findings]
+
+
+def _sample_py_files(root: Path, cap: int) -> list[str]:
+    """Muestra de .py de un repo (para repos EXTERNOS: no hay 'recién cambiado' útil, se toma
+    una tajada estable). Salta vendored/tests/build. Orden determinista (por path)."""
+    skip = ("/test", "/tests", "/.venv", "/venv", "/site-packages", "/node_modules",
+            "/build", "/dist", "/__pycache__", "/migrations")
+    out = []
+    for p in sorted(root.rglob("*.py")):
+        rel = "/" + str(p.relative_to(root)).replace("\\", "/").lower()
+        if any(s in rel for s in skip):
+            continue
+        out.append(str(p.relative_to(root)))
+        if len(out) >= cap:
+            break
+    return out
+
+
+_EXT_LOG = Path(__file__).resolve().parents[1] / "logs" / "external_findings.jsonl"
+
+
+def learn_from_repos(repo_urls: list[str], *, cap_files: int = 8, max_findings: int = 12,
+                     workdir: Path | None = None, clone_fn=None, harvest_fn=None,
+                     log_path: Path | None = None) -> dict:
+    """READ-ONLY: clona repos PÚBLICOS, cosecha findings de cada uno (code_review), y los
+    guarda a un corpus de aprendizaje (logs/external_findings.jsonl). NUNCA abre PR, NUNCA
+    escribe en el repo ajeno, NUNCA importa apply/nightly_evolve — separación DURA
+    aprender-vs-contribuir (repos ajenos = solo material; PRs solo en los tuyos).
+
+    Licencia/etiqueta: leer código público + aprender patrones es análisis, no redistribución;
+    esto no genera derivados publicados. `clone_fn`/`harvest_fn` inyectables (self-check sin red)."""
+    import subprocess
+    import tempfile
+    import time
+
+    log_path = log_path or _EXT_LOG
+    workdir = workdir or Path(tempfile.mkdtemp(prefix="mmorch-learn-"))
+    clone_fn = clone_fn or (lambda url, dst: subprocess.run(
+        ["git", "clone", "--depth", "1", url, str(dst)], capture_output=True, timeout=180).returncode == 0)
+    harvest_fn = harvest_fn or (lambda root, files: harvest_findings(
+        files, root=root, max_files=cap_files, max_findings=max_findings))
+
+    summary: dict = {"repos": 0, "findings": 0, "failed": []}
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    for url in repo_urls:
+        name = url.rstrip("/").split("/")[-1].removesuffix(".git")
+        dst = workdir / name
+        if not clone_fn(url, dst):
+            summary["failed"].append(url)
+            continue
+        files = _sample_py_files(dst, cap_files)
+        try:
+            findings = harvest_fn(dst, files)
+        except Exception:
+            summary["failed"].append(url)
+            continue
+        summary["repos"] += 1
+        summary["findings"] += len(findings)
+        with open(log_path, "a", encoding="utf-8") as f:
+            for fd in findings:
+                f.write(json.dumps({"ts": time.time(), "repo": name, **fd}, ensure_ascii=False) + "\n")
+    return summary
 
 
 if __name__ == "__main__":
@@ -132,3 +195,41 @@ if __name__ == "__main__":
     assert len(calls) == 1, calls   # solo el 1er archivo del recorte, pese a pasar 3
 
     print("evolve_findings OK — harvest ordena por severidad, respeta caps, resiliente a fallas por-archivo")
+
+    # --- learn_from_repos: READ-ONLY, corpus de aprendizaje, cero PR/apply (cero-red) ---
+    import tempfile as _tf
+    wd = Path(_tf.mkdtemp())
+    logp = wd / "ext.jsonl"
+
+    def _fake_clone(url, dst):
+        if "broken" in url:
+            return False
+        (dst / "pkg").mkdir(parents=True, exist_ok=True)
+        (dst / "pkg" / "core.py").write_text("def f(): return 1", encoding="utf-8")
+        (dst / "tests").mkdir(exist_ok=True)
+        (dst / "tests" / "test_x.py").write_text("def test(): pass", encoding="utf-8")  # se saltea
+        return True
+
+    def _fake_harvest(root, files):
+        assert "tests/test_x.py" not in files, "tests/ debe saltarse en el sampling"
+        return [{"target": files[0], "severity": "high", "finding": "algo real"}]
+
+    s = learn_from_repos(["https://github.com/u/repoA", "https://github.com/u/broken",
+                          "https://github.com/u/repoB.git"],
+                         workdir=wd, clone_fn=_fake_clone, harvest_fn=_fake_harvest, log_path=logp)
+    assert s["repos"] == 2 and s["findings"] == 2 and s["failed"] == ["https://github.com/u/broken"], s
+    corpus = [json.loads(ln) for ln in logp.read_text(encoding="utf-8").splitlines()]
+    assert len(corpus) == 2 and {c["repo"] for c in corpus} == {"repoA", "repoB"}, corpus
+    assert all("finding" in c and "ts" in c for c in corpus)
+
+    # SEPARACIÓN DURA (verificada por AST, no por texto): ninguna función de este módulo LLAMA a
+    # apply/PR — es read-only por construcción. Chequeo real: no hay Call a esos nombres.
+    import ast as _ast
+    tree = _ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    called = {n.func.id for n in _ast.walk(tree)
+              if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Name)}
+    for forbidden in ("open_pr_branch", "coordinated_evolve_round", "nightly_evolve", "apply_change"):
+        assert forbidden not in called, f"read-only: harvest no debe LLAMAR a {forbidden}"
+
+    print("learn_from_repos OK — read-only multi-repo, salta tests/vendored, corpus jsonl, "
+          "clone-fail resiliente, cero LLAMADA a apply/PR (separación dura por AST)")

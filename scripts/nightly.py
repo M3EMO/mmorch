@@ -111,6 +111,17 @@ def main() -> None:
     except Exception as e:
         rec["workflow_race_error"] = f"{type(e).__name__}: {str(e)[:200]}"
 
+    # LEARN-FROM-REPOS (read-only): si MMORCH_LEARN_REPOS lista repos PÚBLICOS (coma-separados),
+    # cosecha findings de cada uno a logs/external_findings.jsonl. NUNCA abre PR ni toca esos
+    # repos — solo material de aprendizaje (repos ajenos = read-only; PRs solo en el tuyo).
+    repos = [u.strip() for u in os.getenv("MMORCH_LEARN_REPOS", "").split(",") if u.strip()]
+    if repos:
+        try:
+            from mmorch.evolve_findings import learn_from_repos
+            rec["learn"] = learn_from_repos(repos)
+        except Exception as e:
+            rec["learn_error"] = f"{type(e).__name__}: {str(e)[:200]}"
+
     # cola de re-check de arbitrajes (blind-spot #2: descartes del árbitro nunca auditados).
     # nightly solo SURFACEA la cola — el re-juicio es del orquestador (Opus), no de un cron.
     try:
