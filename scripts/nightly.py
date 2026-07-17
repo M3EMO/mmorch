@@ -52,7 +52,8 @@ def main() -> None:
     #   MMORCH_AR_TASK    enunciado para el coder
     #   MMORCH_AR_TARGET  archivo que edita el loop (relativo al repo)
     #   MMORCH_AR_SCORER  script scorer (recibe el target como argv, imprime 'score: N')
-    #   MMORCH_AR_ROUNDS  rounds (default 6) / MMORCH_AR_PATIENCE (default 5)
+    #   MMORCH_AR_ROUNDS  rounds (default 12) / MMORCH_AR_PATIENCE (default 5)
+    #   MMORCH_AR_TARGET_SCORE  corta apenas el best la alcanza (default 1.0), no gasta todos los rounds
     # default = optimizar el system-prompt del coder contra pass-rate de una batería edge-heavy
     # (el ÚNICO target con headroom real medido: baseline ~0.5-0.9 y prompt-sensible; code_quality
     # y mutation_score sobre módulos daban 1.0 fijo — audit 2026-07).
@@ -76,8 +77,8 @@ def main() -> None:
             r = run_autoresearch(
                 ar_task, ar_target,
                 scorer_cmd=f'"{sys.executable}" {ar_scorer} {ar_target}',
-                cwd=wt.path, maximize=True,
-                max_rounds=int(os.getenv("MMORCH_AR_ROUNDS", "6")),
+                cwd=wt.path, maximize=True, target=float(os.getenv("MMORCH_AR_TARGET_SCORE", "1.0")),
+                max_rounds=int(os.getenv("MMORCH_AR_ROUNDS", "12")),
                 patience=int(os.getenv("MMORCH_AR_PATIENCE", "5")), scorer_timeout=700)
             improved = (r.baseline is not None and r.best_score is not None
                         and r.best_score > r.baseline)

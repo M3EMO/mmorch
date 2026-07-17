@@ -73,6 +73,7 @@ def run_autoresearch(
     cwd: str = ".",
     models: list[str] | None = None,
     maximize: bool = False,
+    target: float | None = None,
     max_rounds: int = 20,
     patience: int = 5,
     min_delta: float = 0.0,
@@ -92,6 +93,8 @@ def run_autoresearch(
     keep/discard: hillclimb se queda con el best; al final el best vuelve a escribirse al archivo.
     journal + resume: ledger por ronda; con resume=True arranca del best del journal previo.
     models: arms del bandit (rota generador por ronda); default = DEFAULT_GENERATOR.
+    target: si se setea, corta apenas el best alcanza esa metrica (ej 1.0) en vez de gastar
+      todos los max_rounds -- hillclimb ya soportaba esto, faltaba exponerlo acá.
     """
     fpath = Path(cwd) / target_file
     models = models or [DEFAULT_GENERATOR]
@@ -138,7 +141,7 @@ def run_autoresearch(
         rounds_done, _ = resume_from_journal(jp)
 
     res: ClimbResult = hillclimb(
-        propose, score, initial=initial, maximize=maximize,
+        propose, score, initial=initial, maximize=maximize, target=target,
         max_rounds=max(1, max_rounds - rounds_done), patience=patience,
         min_delta=min_delta, arms=models if len(models) > 1 else None,
         arm=models[0] if len(models) == 1 else None,
