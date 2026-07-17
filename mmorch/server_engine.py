@@ -181,6 +181,9 @@ def _workflow_run(jid: str, state: dict, meta: dict, *, resumed: bool = False, p
         from .projects import resolve
         try:
             wt = open_worktree(resolve(meta["apply_project"]), branch=meta.get("branch"))
+            wt.seed([".venv", "venv"])   # best-effort: pre-commit hooks del repo (ej ruff gate)
+                                          # suelen usar el venv relativo -> sin linkearlo, el
+                                          # commit puede fallar silencioso en el worktree.
             meta["work_dir"], meta["branch"] = wt.path, wt.branch
         except Exception as e:
             emit("job", "error", job_id=jid, detail=f"worktree open failed: {str(e)[:140]}")
@@ -205,6 +208,9 @@ def _workflow_run(jid: str, state: dict, meta: dict, *, resumed: bool = False, p
     if wt:                                         # finalize: commit progress to the review branch, free it
         try:
             cap = wt.capture(f"mmorch workflow {meta.get('name','')}: {meta.get('task','')[:60]}")
+            if cap["changed"] and not cap["committed"]:
+                emit("job", "error", job_id=jid,
+                     detail=f"worktree commit falló, trabajo NO guardado: {cap['error'][:160]}")
             with _JOBS_LOCK:
                 if jid in _JOBS:
                     _JOBS[jid]["review_branch"] = cap["branch"]
@@ -307,8 +313,10 @@ def _run_project_build_job(jid: str, task: str, project: str, external_test: str
             _JOBS[jid]["review_branch"] = wt.branch
         # F4 lesson: a fresh checkout lacks gitignored artifacts the acceptance reads (caches, local
         # DBs) -> the gate would measure a broken env. seed_globs mirrors them (dirs linked, files
-        # copied); the links are removed by wt.close() before the tree is deleted.
-        n_seed = wt.seed(seed_globs)
+        # copied); the links are removed by wt.close() before the tree is deleted. .venv/venv always
+        # included: a repo's pre-commit hook (ej ruff gate) commonly resolves the venv relatively ->
+        # without it linked, the hook falls back to system python and the commit can fail silently.
+        n_seed = wt.seed(list(dict.fromkeys((seed_globs or []) + [".venv", "venv"])))
         emit("job", "running", job_id=jid,
              detail=f"project-build {project} -> {wt.branch}"
                     f"{f' (+{n_seed} seeded)' if n_seed else ''}: {task[:70]}")
@@ -319,7 +327,11 @@ def _run_project_build_job(jid: str, task: str, project: str, external_test: str
 
         def _commit(name: str, result: dict) -> None:
             from .worktree_driver import Worktree
-            Worktree(wt.path, wt.path, wt.branch).capture(f"mmorch(project-build): unit {name}")
+            cap = Worktree(wt.path, wt.path, wt.branch).capture(f"mmorch(project-build): unit {name}")
+            if cap["changed"] and not cap["committed"]:
+                emit("job", "error", job_id=jid,
+                     detail=f"unit {name}: commit falló, código NO guardado en la branch: "
+                            f"{cap['error'][:160]}")
             try:
                 from . import workflow_store
                 step["n"] += 1
@@ -353,6 +365,9 @@ def _run_project_build_job(jid: str, task: str, project: str, external_test: str
         if wt:
             try:                                   # commit any remainder; per-unit commits already landed
                 cap = wt.capture(f"mmorch project-build: {task[:60]}")
+                if cap["changed"] and not cap["committed"]:
+                    emit("job", "error", job_id=jid,
+                         detail=f"remainder commit falló, trabajo NO guardado: {cap['error'][:160]}")
                 with _JOBS_LOCK:
                     if jid in _JOBS:
                         _JOBS[jid]["diffstat"] = cap.get("diffstat", "")

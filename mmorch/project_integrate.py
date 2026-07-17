@@ -175,7 +175,11 @@ def _default_commit(repo: str):
 
     def commit(name: str, result: dict) -> None:
         wt = wd.Worktree(repo, repo, "")   # commit in place on the current (caller-owned) branch
-        wt.capture(f"mmorch(project-build): unit {name}")
+        cap = wt.capture(f"mmorch(project-build): unit {name}")
+        if cap["changed"] and not cap["committed"]:
+            # no hay job/emit acá (seam de bajo nivel) -> lo mas seguro sin romper la firma
+            # commit(name,result)->None es levantar: silencioso == la unidad se pierde sin aviso.
+            raise RuntimeError(f"unit {name}: commit falló en {repo}: {cap['error'][:200]}")
     return commit
 
 

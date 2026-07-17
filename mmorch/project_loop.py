@@ -212,12 +212,20 @@ def run_project_task_isolated(project: str, task: str, **kw):
     from . import worktree_driver as wd
     repo = resolve(project)
     wt = wd.open_worktree(repo)
+    wt.seed([".venv", "venv"])   # best-effort: si el repo tiene un pre-commit hook que usa el
+                                  # venv relativo (ej ruff gate), sin esto cae a python de sistema
+                                  # sin el paquete -> el commit falla (bug medido 2026-07 en nightly).
     kw["push"] = False                       # never push from a throwaway tree
     kw.setdefault("escalate", False)
     try:
         r = run_project_task(project, task, work_dir=wt.path, **kw)
         cap = wt.capture(f"mmorch(worktree): {task[:64]}")
         cap["worktree"] = wt.path
+        if cap["changed"] and not cap["committed"]:
+            # el trabajo quedó en el working tree del worktree pero NUNCA entró a un commit ->
+            # sin esto, el caller ve r.ok=True y cree que el resultado está en la review branch.
+            r.ok = False
+            r.detail = (r.detail + " | " if r.detail else "") + f"commit falló: {cap['error'][:200]}"
         return r, cap
     finally:
         wt.close(keep_branch=True)           # branch (with the work) survives for review
