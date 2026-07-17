@@ -31,7 +31,18 @@ def validate_worklist(units: list[dict]) -> tuple[bool, list[str]]:
     known = set(names)
     files = [str(u.get("file")).replace("\\", "/").lower() for u in units if u.get("file")]
     if len(set(files)) != len(files):    # two units writing the SAME file at one level = a silent overwrite
-        errs.append("duplicate target file across units")
+        # nombra los archivos y las units en conflicto (medido 2026-07, bench rate-limiter: el
+        # mensaje generico no le decia al modelo QUE archivo repitio -> el reask no se corregia
+        # siempre). Con el archivo+units explicitos, el modelo tiene lo que necesita para fusionar
+        # o renombrar en el reask.
+        seen: dict[str, list[str]] = {}
+        for u in units:
+            f = str(u.get("file")).replace("\\", "/").lower() if u.get("file") else None
+            if f:
+                seen.setdefault(f, []).append(str(u.get("name")))
+        dupes = {f: ns for f, ns in seen.items() if len(ns) > 1}
+        errs.append("duplicate target file across units: " +
+                    "; ".join(f"{f} used by {ns}" for f, ns in dupes.items()))
     for u in units:
         if not u.get("name"):
             errs.append("a unit is missing 'name'")
@@ -141,7 +152,7 @@ def _parse_worklist(raw: str) -> list[dict]:
 
 def decompose(task: str, *, external_test: str | None = None,
               plan: Callable[[], str] | None = None, gen_model: str = DEFAULT_GENERATOR,
-              max_reask: int = 2,
+              max_reask: int = 3,
               reask: Callable[[str, list[str]], str] | None = None) -> list[dict]:
     """Decompose `task` into a VALIDATED worklist. `plan` (injectable) returns the raw worklist JSON;
     default asks a model. A structurally INVALID plan (bad JSON / duplicate names / unknown deps /
