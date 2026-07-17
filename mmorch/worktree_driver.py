@@ -73,14 +73,21 @@ class Worktree:
         return n
 
     def capture(self, message: str = "mmorch(worktree): isolated run") -> dict:
-        """Stage everything, record the diff vs the base, commit it to this worktree's branch."""
+        """Stage everything, record the diff vs the base, commit it to this worktree's branch.
+        Returns committed=False (with the git error in `error`) si el commit falla -- bug medido
+        2026-07: un pre-commit hook (ruff gate) fallaba en el worktree (.venv relativo no existe
+        ahí -> cae a python de sistema sin ruff) y esto devolvía 'changed: True' igual, mintiendo
+        que el trabajo quedó guardado cuando en realidad el HEAD del worktree no se movió."""
         _git(self.path, "add", "-A")
         self.diffstat = _git(self.path, "diff", "--cached", "--stat")[1]
         self.diff = _git(self.path, "diff", "--cached")[1]
         changed = bool(self.diff.strip())
+        committed, error = False, ""
         if changed:
-            _git(self.path, "commit", "-m", message)
-        return {"branch": self.branch, "diffstat": self.diffstat, "changed": changed}
+            rc, out = _git(self.path, "commit", "-m", message)
+            committed, error = rc == 0, ("" if rc == 0 else out)
+        return {"branch": self.branch, "diffstat": self.diffstat, "changed": changed,
+                "committed": committed, "error": error}
 
     def close(self, *, keep_branch: bool = True) -> None:
         """Remove the worktree dir; the branch ref persists unless keep_branch=False."""
@@ -134,7 +141,7 @@ if __name__ == "__main__":
     with open(os.path.join(wt.path, "a.txt"), "w") as f:    # modify existing, worktree only
         f.write("base\nedit\n")
     cap = wt.capture("test run")
-    assert cap["changed"] and "b.txt" in cap["diffstat"], cap
+    assert cap["changed"] and cap["committed"] and "b.txt" in cap["diffstat"], cap
     assert not os.path.exists(os.path.join(d, "b.txt")), "ISOLATION: main tree must not see b.txt"
     assert open(os.path.join(d, "a.txt")).read() == "base\n", "ISOLATION: main a.txt unchanged"
     branch = wt.branch
@@ -171,8 +178,21 @@ if __name__ == "__main__":
     with open(os.path.join(wt2.path, "c.txt"), "w") as f:
         f.write("more\n")
     cap2 = wt2.capture("more")
-    assert cap2["changed"]
+    assert cap2["changed"] and cap2["committed"]
     wt2.close()
     assert "c.txt" in _git(d, "show", "--stat", branch)[1], "reused branch accumulated new work"
     assert not os.path.exists(os.path.join(d, "c.txt")), "main tree still untouched"
+
+    # FAILED COMMIT surfaces, no lo traga (bug medido 2026-07: un hook que aborta el commit
+    # -> capture() decía changed=True igual, mintiendo que el trabajo quedó guardado).
+    os.makedirs(os.path.join(d, ".git", "hooks"), exist_ok=True)
+    with open(os.path.join(d, ".git", "hooks", "pre-commit"), "w") as f:
+        f.write("#!/bin/sh\necho 'blocked by hook' >&2\nexit 1\n")
+    os.chmod(os.path.join(d, ".git", "hooks", "pre-commit"), 0o755)
+    wt4 = open_worktree(d)
+    with open(os.path.join(wt4.path, "z.txt"), "w") as f:
+        f.write("blocked\n")
+    cap4 = wt4.capture("should fail")
+    assert cap4["changed"] and not cap4["committed"] and cap4["error"], cap4
+    wt4.close(keep_branch=False)
     print("worktree_driver OK")

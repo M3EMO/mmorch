@@ -68,6 +68,9 @@ def main() -> None:
         from mmorch.autoresearch import run_autoresearch
         from mmorch.worktree_driver import open_worktree
         wt = open_worktree(str(ROOT), prefix="mmorch/ar")
+        wt.seed([".venv"])   # el pre-commit hook (ruff gate) usa .venv/Scripts/python.exe relativo
+                              # -> sin esto cae a python de sistema sin ruff, la gate falla, el commit
+                              # se pierde silencioso (bug medido 2026-07, ver worktree_driver.capture)
         improved = False
         try:
             r = run_autoresearch(
