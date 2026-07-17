@@ -13,10 +13,43 @@ the exact failure that escaped the old flat workflow (a coder returning a 130-ch
 """
 from __future__ import annotations
 
+import hashlib
 import json
+from pathlib import Path
 from typing import Callable
 
 from .config import DEFAULT_GENERATOR
+
+# --- worklist cache (goal-regression pattern, research 2026-07: ChatHTN caches LLM-validated
+# decompositions as reusable HTN methods so a repeat task skips the LLM entirely -- zero variance
+# instead of re-rolling the dice. mmorch's planner is nondeterministic even at temp=0 (measured:
+# same rate-limiter task, same config -> sometimes 'duplicate target file', sometimes clean); a
+# task run twice (nightly workflow_race, bench re-runs) shouldn't pay that risk twice.) ---
+_WORKLIST_CACHE = Path(__file__).resolve().parents[1] / "logs" / "worklist_cache.json"
+
+
+def _cache_key(task: str, external_test: str | None) -> str:
+    # SOLO `task`: `external_test` es un comando (ej pytest) que suele traer un tmpdir ÚNICO por
+    # corrida (materialize() crea un mkdtemp nuevo cada vez) -> incluirlo en el hash rompía CADA
+    # cache hit real (bug medido 2026-07: workflow_race nunca pegaba, cacheaba bajo una key que
+    # nunca se repetía). La decomposición depende del TASK, no de dónde vive el test de aceptación.
+    return hashlib.sha256(task.encode()).hexdigest()[:16]
+
+
+def _load_cache() -> dict:
+    if not _WORKLIST_CACHE.exists():
+        return {}
+    try:
+        return json.loads(_WORKLIST_CACHE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_cache(key: str, units: list[dict]) -> None:
+    data = _load_cache()
+    data[key] = units
+    _WORKLIST_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    _WORKLIST_CACHE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # --- deterministic plan validation ----------------------------------------- #
@@ -152,13 +185,24 @@ def _parse_worklist(raw: str) -> list[dict]:
 
 def decompose(task: str, *, external_test: str | None = None,
               plan: Callable[[], str] | None = None, gen_model: str = DEFAULT_GENERATOR,
-              max_reask: int = 3,
+              max_reask: int = 3, use_cache: bool = True,
               reask: Callable[[str, list[str]], str] | None = None) -> list[dict]:
     """Decompose `task` into a VALIDATED worklist. `plan` (injectable) returns the raw worklist JSON;
     default asks a model. A structurally INVALID plan (bad JSON / duplicate names / unknown deps /
     cycles) is RE-ASKED up to `max_reask` times showing the model its own output + the concrete
     errors (Instructor pattern) — before, the first invalid plan was terminal. `reask(prev_raw,
-    errors)` is injectable (test seam). Raises ValueError only after the retries are exhausted."""
+    errors)` is injectable (test seam). Raises ValueError only after the retries are exhausted.
+
+    use_cache: si (task, external_test) ya produjo un worklist VALIDADO antes, lo devuelve directo
+    -- CERO llamadas al LLM, cero varianza (goal-regression: research 2026-07, ChatHTN). Solo
+    cachea planes que pasaron validate_worklist; nunca cachea un plan roto."""
+    key = _cache_key(task, external_test) if use_cache else None
+    if key:
+        cached = _load_cache().get(key)
+        if cached is not None:
+            ok, _ = validate_worklist(cached)   # re-valida (el cache es un archivo editable a mano)
+            if ok:
+                return cached
     plan = plan or (lambda: _default_plan(task, external_test, gen_model))
     reask = reask or (lambda prev, errs: _default_reask(task, external_test, gen_model, prev, errs))
     raw = plan()
@@ -169,6 +213,8 @@ def decompose(task: str, *, external_test: str | None = None,
         except (json.JSONDecodeError, ValueError) as e:
             ok, errs = False, [f"output is not a valid JSON worklist: {str(e)[:120]}"]
         if ok:
+            if key:
+                _save_cache(key, units)
             return units
         if attempt < max_reask:            # no wasted re-ask on the final failed attempt
             raw = reask(raw, errs)
@@ -208,10 +254,10 @@ if __name__ == "__main__":
     assert _u == _b, "build_order must not mutate its input (round-2 dismissal locked)"
     # 3. decompose with an injected fake plan (cero-cost, no API).
     fake = '[{"name":"core","spec":"the core","file":"pkg/core.py","deps":[],"test_cmd":"pytest -q"}]'
-    wl = decompose("build a thing", plan=lambda: fake)
+    wl = decompose("build a thing", plan=lambda: fake, use_cache=False)
     assert wl[0]["name"] == "core" and wl[0]["test_cmd"] == "pytest -q", wl
     assert wl[0]["file"] == "pkg/core.py", wl          # target path flows through (F3 writes THERE, not root)
-    assert decompose("x", plan=lambda: '[{"name":"a","spec":"a"}]')[0]["file"] is None  # absent -> None (F3 derives)
+    assert decompose("x", plan=lambda: '[{"name":"a","spec":"a"}]', use_cache=False)[0]["file"] is None  # absent -> None (F3 derives)
     dupf = [{"name": "a", "spec": "a", "file": "x.py"}, {"name": "b", "spec": "b", "file": "X.py"}]
     ok, errs = validate_worklist(dupf)                 # same target file (case-insens) = silent overwrite
     assert not ok and any("duplicate target file" in e for e in errs), errs
@@ -223,11 +269,11 @@ if __name__ == "__main__":
         assert any("ghost" in e for e in errs), errs        # el error concreto viaja al modelo
         return '[{"name":"a","spec":"a","deps":[]}]'        # corregido
 
-    wl2 = decompose("x", plan=lambda: '[{"name":"a","spec":"a","deps":["ghost"]}]', reask=_fix_on_reask)
+    wl2 = decompose("x", plan=lambda: '[{"name":"a","spec":"a","deps":["ghost"]}]', reask=_fix_on_reask, use_cache=False)
     assert wl2[0]["name"] == "a" and len(reasks) == 1, (wl2, reasks)
     # JSON roto tambien es re-askeable (no solo invalido estructural)
     wl3 = decompose("x", plan=lambda: "not json at all",
-                    reask=lambda p, e: '[{"name":"b","spec":"b","deps":[]}]')
+                    reask=lambda p, e: '[{"name":"b","spec":"b","deps":[]}]', use_cache=False)
     assert wl3[0]["name"] == "b", wl3
     # incorregible -> raise DESPUES de agotar, sin re-ask extra en el ultimo intento
     tries: list = []
@@ -236,9 +282,38 @@ if __name__ == "__main__":
         tries.append(1)
         return '[{"nope":1}]'
     try:
-        decompose("x", plan=lambda: '[{"name":"a","deps":["ghost"]}]', reask=_never_fixes, max_reask=2)
+        decompose("x", plan=lambda: '[{"name":"a","deps":["ghost"]}]', reask=_never_fixes, max_reask=2, use_cache=False)
         assert False, "bad plan must raise after retries"
     except ValueError:
         pass
     assert len(tries) == 2, tries                            # exactamente max_reask re-asks
-    print("project_build F1 OK — validate(DAG), build_order, stub_check(incl the escaped stub), decompose seam")
+
+    # 5. CACHE (goal-regression): un plan que validó se cachea; el 2do decompose del MISMO task
+    # NO llama al plan() inyectado (cero LLM real) -- prueba con un _cache_path aislado (no toca
+    # logs/worklist_cache.json real).
+    import tempfile as _tf
+    _orig_cache = _WORKLIST_CACHE
+    globals()["_WORKLIST_CACHE"] = Path(_tf.mkdtemp()) / "wl_cache_test.json"
+    try:
+        calls = {"n": 0}
+
+        def _counting_plan():
+            calls["n"] += 1
+            return fake
+        wl4 = decompose("cacheme", plan=_counting_plan)             # use_cache=True (default) -> stores
+        assert calls["n"] == 1 and wl4[0]["name"] == "core"
+        wl5 = decompose("cacheme", plan=_counting_plan)             # SAME task -> hits cache, no call
+        assert calls["n"] == 1 and wl5 == wl4, "cache hit must skip plan() entirely"
+        wl6 = decompose("cacheme but different", plan=_counting_plan)   # different task -> miss
+        assert calls["n"] == 2
+        # una entrada de cache CORRUPTA (editada a mano, ya no valida) no se sirve ciega
+        globals()["_WORKLIST_CACHE"].write_text(
+            json.dumps({_cache_key("corrupt", None): [{"name": "a", "spec": "a", "file": "x.py"},
+                                                       {"name": "b", "spec": "b", "file": "x.py"}]}),
+            encoding="utf-8")
+        wl7 = decompose("corrupt", plan=_counting_plan)              # dup-file cached entry -> re-plan
+        assert calls["n"] == 3 and wl7[0]["name"] == "core", wl7
+    finally:
+        globals()["_WORKLIST_CACHE"] = _orig_cache
+
+    print("project_build F1 OK — validate(DAG), build_order, stub_check(incl the escaped stub), decompose seam, worklist cache")
