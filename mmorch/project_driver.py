@@ -19,17 +19,39 @@ from __future__ import annotations
 
 from typing import Callable
 
-from .project_build import build_order, stub_check, validate_worklist
+from .project_build import (build_order, load_cached_unit_code, save_cached_unit_code,
+                            stub_check, validate_worklist)
 
 
 def build_unit(unit: dict, *, build_fn: Callable[[dict], str],
-               gate_fn: Callable[[dict, str], tuple[bool, str]], max_fix: int = 3) -> dict:
+               gate_fn: Callable[[dict, str], tuple[bool, str]], max_fix: int = 3,
+               use_cache: bool = True) -> dict:
     """Build ONE unit. build_fn(unit)->code; stub_check gates structure; gate_fn(unit,code)->(ok,detail)
     is the execution-truth gate. Returns {name, status, ...}:
       'built'    -> code passes the gate.
       'recurse'  -> the coder can't produce non-stub code (unit too big) -> caller decomposes it.
       'escalate' -> non-stub but the gate never passes within max_fix.
-    """
+
+    use_cache: si esta MISMA unit (name+file+spec byte-identicos) ya construyo codigo que paso el
+    gate antes, lo reusa -- CERO llamada al coder. Solo sirve de un hit el gate SIGUE corriendo
+    (deterministico, execution-truth, no LLM) para confirmar que el codigo cacheado pasa EN ESTE
+    entorno; si no pasa (env distinto), cae al loop normal como si no hubiera cache. El gate de
+    integracion final (la task completa) no se salta nunca -- esto solo evita re-generar codigo
+    por-unidad ya probado, misma logica que el worklist cache pero un nivel abajo (goal-regression,
+    research 2026-07: el planner ya no era la fuente de varianza, el coder seguia siendolo)."""
+    if use_cache:
+        cached_code = load_cached_unit_code(unit)
+        if cached_code is not None:
+            is_stub, _ = stub_check(cached_code, unit.get("file"))
+            if not is_stub:
+                try:
+                    ok, detail = gate_fn(unit, cached_code)
+                except Exception:
+                    ok, detail = False, ""
+                if ok:
+                    return {"name": unit["name"], "status": "built", "code": cached_code,
+                            "file": unit.get("file"), "test_cmd": unit.get("test_cmd"),
+                            "gate": detail, "cached": True}
     detail = ""
     for _ in range(max_fix):
         # wrap ONLY the untrusted boundary (build_fn=LLM, gate_fn=checker/sandbox): a throw there is a
@@ -49,6 +71,8 @@ def build_unit(unit: dict, *, build_fn: Callable[[dict], str],
             detail = f"gate_fn {type(e).__name__}: {str(e)[:100]}"
             continue
         if ok:
+            if use_cache:
+                save_cached_unit_code(unit, code)
             # file/test_cmd travel with the result: without them a failed run is undiagnosable
             # (F4 round-1: couldn't tell WHERE the planner pointed the unit).
             return {"name": unit["name"], "status": "built", "code": code,
@@ -113,6 +137,15 @@ def run_project_build(task: str, *, external_test: str | None,
 
 
 if __name__ == "__main__":
+    # aisla el cache de unit-code real (logs/unit_code_cache.json) -- sin esto, estos fixtures de
+    # test ("u", "a", "b1"...) contaminarian el cache que usa el bench de verdad.
+    import tempfile as _tf
+    from pathlib import Path
+
+    from . import project_build as _pb
+    _orig_unit_cache = _pb._UNIT_CODE_CACHE
+    _pb._UNIT_CODE_CACHE = Path(_tf.mkdtemp()) / "unit_cache_test.json"
+
     # Cero-cost self-check of the ORCHESTRATION: fake plan/build/gate simulate the interesting paths.
     # A worklist where 'big' is a stub on the first plan, then decomposes into buildable sub-units.
     PLANS = {
@@ -193,5 +226,27 @@ if __name__ == "__main__":
                              integrate_fn=lambda ext, rs: (False, "must not run"))
     assert res7["status"] == "built" and not res7.get("integrated"), res7
 
+    # UNIT CODE CACHE (goal-regression, un nivel abajo del worklist cache): la MISMA unit (name+
+    # file+spec) no re-llama a build_fn en un 2do build_unit -- y una entrada cacheada que YA NO
+    # pasa el gate en este entorno (env cambió) no se sirve ciega, re-genera como si no hubiera hit.
+    calls = {"n": 0}
+
+    def _counting_build(u):
+        calls["n"] += 1
+        return f"def {u['name']}():\n    return 1"
+    unit_x = {"name": "x", "spec": "x", "file": "x.py"}
+    r1 = build_unit(unit_x, build_fn=_counting_build, gate_fn=lambda u, c: (True, "ok"))
+    assert r1["status"] == "built" and calls["n"] == 1
+    r2 = build_unit(unit_x, build_fn=_counting_build, gate_fn=lambda u, c: (True, "ok"))
+    assert r2["status"] == "built" and r2.get("cached") and calls["n"] == 1, r2   # hit -> no build_fn call
+    gate_calls = {"n": 0}
+
+    def _gate_fails_once(u, c):     # simula: el cache ya no pasa (env cambió), pero un fresh build sí
+        gate_calls["n"] += 1
+        return (gate_calls["n"] > 1, "ok" if gate_calls["n"] > 1 else "env changed")
+    r3 = build_unit(unit_x, build_fn=_counting_build, gate_fn=_gate_fails_once)
+    assert r3["status"] == "built" and not r3.get("cached") and calls["n"] == 2, r3  # stale cache -> re-gen
+
+    _pb._UNIT_CODE_CACHE = _orig_unit_cache
     print("project_driver F2 OK — recursion-on-stub, dep order, cumulative-commit, escalate propagation, "
-          "depth cap, integration gate (whole>parts)")
+          "depth cap, integration gate (whole>parts), unit code cache")

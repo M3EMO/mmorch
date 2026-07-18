@@ -36,20 +36,48 @@ def _cache_key(task: str, external_test: str | None) -> str:
     return hashlib.sha256(task.encode()).hexdigest()[:16]
 
 
-def _load_cache() -> dict:
-    if not _WORKLIST_CACHE.exists():
+def _load_json_cache(path: Path) -> dict:
+    if not path.exists():
         return {}
     try:
-        return json.loads(_WORKLIST_CACHE.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return {}
 
 
+def _save_json_cache(path: Path, key: str, value) -> None:
+    data = _load_json_cache(path)
+    data[key] = value
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# --- per-unit code cache (mismo patron, un nivel mas abajo: goal-regression research 2026-07.
+# El worklist cache saco la varianza del PLANNER; queda la del CODER -- misma unit (name+file+spec
+# byte-identicos porque el worklist YA es el mismo entre variantes/corridas gracias al cache de
+# arriba) puede generar codigo distinto cada vez que build_unit la re-pide. Cachear el codigo que
+# ya paso el gate una vez evita re-tirar los dados del coder tambien. medido: rate-limiter, 3
+# variantes corridas en secuencia con worklist cache tibio -> 2/3 build, pero CUAL falla varia
+# corrida a corrida (pb-quick una vez, pb-deep otra) -- confirma que la varianza restante es del
+# coder, no del planner.) ---
+_UNIT_CODE_CACHE = Path(__file__).resolve().parents[1] / "logs" / "unit_code_cache.json"
+
+
+def unit_cache_key(unit: dict) -> str:
+    blob = f"{unit.get('name', '')}\x00{unit.get('file', '')}\x00{unit.get('spec', '')}"
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+def load_cached_unit_code(unit: dict) -> str | None:
+    return _load_json_cache(_UNIT_CODE_CACHE).get(unit_cache_key(unit))
+
+
+def save_cached_unit_code(unit: dict, code: str) -> None:
+    _save_json_cache(_UNIT_CODE_CACHE, unit_cache_key(unit), code)
+
+
 def _save_cache(key: str, units: list[dict]) -> None:
-    data = _load_cache()
-    data[key] = units
-    _WORKLIST_CACHE.parent.mkdir(parents=True, exist_ok=True)
-    _WORKLIST_CACHE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    _save_json_cache(_WORKLIST_CACHE, key, units)
 
 
 # --- deterministic plan validation ----------------------------------------- #
@@ -198,7 +226,7 @@ def decompose(task: str, *, external_test: str | None = None,
     cachea planes que pasaron validate_worklist; nunca cachea un plan roto."""
     key = _cache_key(task, external_test) if use_cache else None
     if key:
-        cached = _load_cache().get(key)
+        cached = _load_json_cache(_WORKLIST_CACHE).get(key)
         if cached is not None:
             ok, _ = validate_worklist(cached)   # re-valida (el cache es un archivo editable a mano)
             if ok:
