@@ -249,6 +249,32 @@ def decompose(task: str, *, external_test: str | None = None,
     raise ValueError(f"invalid decomposition after {max_reask} re-asks: {errs}")
 
 
+# --- pipeline shape por op_type (ADW pattern, 2026-07: "no corras tu pipeline pesado
+# para un chore"). El ruteo es DETERMINISTA (signature.op_type = regex, cero LLM, mismo
+# input -> mismo pipeline siempre) — mejora sobre el patron original que usa un "router
+# agent" LLM que puede alucinar el ruteo. El caller puede pisar cualquier campo. ---
+PIPELINES: dict[str, dict] = {
+    # hotfix quirurgico: minimo, rapido, sin optimizar nada; la review humana es el gate final
+    "REPAIR":    {"max_fix": 1, "max_depth": 1, "max_gen_calls": 40},
+    # verificar/chequear algo existente: chico, sin recursion
+    "VERIFY":    {"max_fix": 1, "max_depth": 1, "max_gen_calls": 40},
+    # refactor/traduccion: mas intentos de fix pero sin decomponer hondo
+    "TRANSFORM": {"max_fix": 3, "max_depth": 1, "max_gen_calls": 80},
+    # construccion desde cero: el engine completo (default F4)
+    "GENERATE":  {"max_fix": 3, "max_depth": 2, "max_gen_calls": 150},
+}
+
+
+def pipeline_for(task: str) -> dict:
+    """Forma de pipeline para la FORMA del task. Devuelve una copia (el caller puede mutar).
+    op_type desconocido -> GENERATE (el mas conservador: engine completo)."""
+    from .signature import signature
+    op = signature(task).op_type
+    shape = dict(PIPELINES.get(op, PIPELINES["GENERATE"]))
+    shape["op_type"] = op
+    return shape
+
+
 if __name__ == "__main__":
     # 1. validate_worklist: good DAG passes; cycle / bad-dep / empty-spec fail.
     good = [{"name": "a", "spec": "build a", "deps": []},
@@ -344,4 +370,14 @@ if __name__ == "__main__":
     finally:
         globals()["_WORKLIST_CACHE"] = _orig_cache
 
-    print("project_build F1 OK — validate(DAG), build_order, stub_check(incl the escaped stub), decompose seam, worklist cache")
+    # 6. pipeline_for: ruteo determinista por op_type; desconocido cae a GENERATE
+    assert pipeline_for("Fix the crash in auth")["op_type"] == "REPAIR"
+    assert pipeline_for("Fix the crash in auth")["max_fix"] == 1
+    assert pipeline_for("Construí un parser de logs")["op_type"] == "GENERATE"
+    assert pipeline_for("Construí un parser de logs")["max_depth"] == 2
+    assert pipeline_for("Refactor this for speed")["max_depth"] == 1
+    p1, p2 = pipeline_for("Fix x"), pipeline_for("Fix x")
+    p1["max_fix"] = 99
+    assert p2["max_fix"] == 1, "pipeline_for debe devolver copia, no el dict compartido"
+
+    print("project_build F1 OK — validate(DAG), build_order, stub_check(incl the escaped stub), decompose seam, worklist cache, pipeline_for")

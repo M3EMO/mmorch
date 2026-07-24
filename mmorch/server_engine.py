@@ -344,7 +344,17 @@ def _run_project_build_job(jid: str, task: str, project: str, external_test: str
                 pass                                # best-effort: never break the build on the store
             emit("step", "done", job_id=jid, node=f"unit:{name}", detail=result.get("file") or "")
 
-        res = build_project(task, wt.path, external_test=external_test, max_depth=max_depth,
+        # forma de pipeline por op_type (ADW 2026-07): REPAIR/VERIFY = hotfix minimo,
+        # TRANSFORM = sin recursion honda, GENERATE = engine completo. Ruteo determinista
+        # (regex de signature, cero LLM). max_depth explicito del caller (!=2) pisa la forma.
+        from .project_build import pipeline_for
+        shape = pipeline_for(task)
+        emit("job", "running", job_id=jid,
+             detail=f"pipeline {shape['op_type']}: fix={shape['max_fix']} "
+                    f"depth={shape['max_depth']} calls={shape['max_gen_calls']}")
+        res = build_project(task, wt.path, external_test=external_test,
+                            max_depth=max_depth if max_depth != 2 else shape["max_depth"],
+                            max_fix=shape["max_fix"], max_gen_calls=shape["max_gen_calls"],
                             commit=_commit)
         status = res.get("status", "escalate")
         job_status = {"built": "done", "integration_failed": "gate"}.get(status, "escalate")
