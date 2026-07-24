@@ -739,3 +739,63 @@ def stats(path: Path = _DB_PATH) -> dict:
                 "hnsw_recommended": embd >= _HNSW_THRESHOLD}
     finally:
         con.close()
+
+
+# ---------------------------------------------------------------------------
+# Tier 3 — digest global (patron HCA de DeepSeek V4, 2026-07: atencion hibrida =
+# reciente-exacto + retrieval-selectivo + compresion-pesada-de-TODO. mmorch tenia los
+# dos primeros (episodic raw / recall semantico); este es el tercero: UNA vista
+# ultra-comprimida por scope de TODAS las notas vivas, refrescada de noche, para
+# inyectar como contexto barato siempre-presente. Es una VISTA DERIVADA (se regenera
+# de las notas, que ya pasaron verify en el destilado) — nunca fuente de verdad.
+# ---------------------------------------------------------------------------
+_DIGEST_PATH = ROOT / "logs" / "memory_digests.json"
+
+
+def refresh_digest(scope: str = "global", *, max_words: int = 180,
+                   gen_model: str | None = None, call_fn=None,
+                   path: Path = _DB_PATH, out_path: Path | None = None) -> dict:
+    """Regenera el digest del scope desde sus notas vivas (1 llamada LLM). Devuelve
+    {scope, words, n_notes} o {skipped}. `call_fn(model, messages)->text` inyectable."""
+    con = _connect(path)
+    try:
+        rows = con.execute(
+            "SELECT text FROM semantic WHERE scope = ? AND NOT tombstone "
+            "AND NOT needs_review ORDER BY ts", [scope]).fetchall()
+    finally:
+        con.close()
+    if not rows:
+        return {"scope": scope, "skipped": "sin notas vivas"}
+    if call_fn is None:
+        from .config import DEFAULT_GENERATOR
+        from .providers import call as _call
+
+        def call_fn(m, msgs):
+            return _call(m or DEFAULT_GENERATOR, msgs, pattern="memory_digest",
+                         node="digest", temperature=0.0).text
+    corpus = "\n".join(f"- {t}" for (t,) in rows)
+    digest = call_fn(gen_model, [
+        {"role": "system", "content":
+         f"Comprimí estas notas de memoria en UN resumen global de <= {max_words} palabras. "
+         "Priorizá: estado actual del proyecto, decisiones vigentes, gotchas. Descartá "
+         "detalle episódico. Solo el resumen, sin preámbulo."},
+        {"role": "user", "content": corpus[:24000]}])
+    op = out_path or _DIGEST_PATH
+    try:
+        data = json.loads(op.read_text(encoding="utf-8")) if op.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        data = {}
+    data[scope] = {"text": digest.strip(), "ts": time.time(), "n_notes": len(rows)}
+    op.parent.mkdir(parents=True, exist_ok=True)
+    op.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"scope": scope, "words": len(digest.split()), "n_notes": len(rows)}
+
+
+def get_digest(scope: str = "global", *, out_path: Path | None = None) -> str | None:
+    """La vista global comprimida del scope (o None si nunca se generó). Barata (archivo);
+    pensada para inyectarse como contexto siempre-presente en planners/coders."""
+    op = out_path or _DIGEST_PATH
+    try:
+        return json.loads(op.read_text(encoding="utf-8"))[scope]["text"]
+    except (KeyError, json.JSONDecodeError, OSError):
+        return None

@@ -119,6 +119,11 @@ def main() -> None:
             _NUDGE_STATE.parent.mkdir(parents=True, exist_ok=True)
             _NUDGE_STATE.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
             rec["distill"] = d
+            # tier 3 (HCA): con material nuevo destilado, refrescar la vista global
+            # comprimida (1 llamada) — solo si el destilado persistio algo.
+            if d.get("persisted", 0) > 0:
+                from mmorch.memory import refresh_digest
+                rec["digest"] = refresh_digest("global")
     except Exception as e:
         rec["distill_error"] = f"{type(e).__name__}: {str(e)[:200]}"
 
