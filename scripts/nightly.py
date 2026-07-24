@@ -129,8 +129,31 @@ def main() -> None:
         from mmorch.bench import selection_tasks
         from mmorch.workflow_race import race
         sel = selection_tasks()
-        t = sel[int(time.time() // 86400) % len(sel)]      # rotación determinista por día
+        # CURRICULUM por frecuencia (2026-07, patron "foco en topics de alta frecuencia"):
+        # el compute nocturno se concentra en las FORMAS de task que mas aparecen en el uso
+        # real (n del sig-bandit por firma), en vez de rotacion plana. Deterministico: dia %
+        # suma-de-pesos camina la distribucion (task frecuente = mas noches). Sin datos del
+        # bandit (frio / error) degrada a pesos iguales = la rotacion plana de antes.
+        try:
+            from mmorch.feedback import ThompsonBandit
+            from mmorch.intuition import _SIG_BANDIT
+            from mmorch.signature import key as sig_key
+            stats = ThompsonBandit(_SIG_BANDIT).stats()
+
+            def _freq(bt):
+                sk = sig_key(bt.task)
+                return int(sum(s["n"] for a, s in stats.items() if a.endswith("#" + sk)))
+            weights = [1 + _freq(bt) for bt in sel]
+        except Exception:
+            weights = [1] * len(sel)
+        r = int(time.time() // 86400) % sum(weights)
+        t = sel[0]
+        for t, w in zip(sel, weights, strict=True):   # noqa: B007 — t queda con la elegida
+            r -= w
+            if r < 0:
+                break
         rec["workflow_race"] = race(t)
+        rec["workflow_race"]["curriculum_weights"] = dict(zip([b.name for b in sel], weights, strict=True))
     except Exception as e:
         rec["workflow_race_error"] = f"{type(e).__name__}: {str(e)[:200]}"
 
