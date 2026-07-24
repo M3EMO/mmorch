@@ -20,6 +20,7 @@ the bandit to HOLD real per-signature posteriors, which backfill() gives it cero
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from .feedback import ThompsonBandit
@@ -75,22 +76,50 @@ def coherence(task: str, *, complexity: str = "", bandit: ThompsonBandit | None 
     return sum(s["n"] for a, s in b.stats().items() if a.endswith("#" + sk))
 
 
+_PROBE_STATE = Path(__file__).resolve().parents[1] / "logs" / "health_probes.json"
+
+
 def healthy(models: list[str], *, max_error_rate: float = 0.15, min_calls: int = 10,
-            rates: dict | None = None) -> list[str]:
+            rates: dict | None = None, probe_every_s: float = 3600.0,
+            probe_state: Path | None = None, now: float | None = None) -> list[str]:
     """Deterministic HEALTH FLOOR over the candidate pool: drop models whose measured windowed
     error_rate exceeds the cap (with enough calls for it to mean something). Justified by data,
     not vibes — measured 2026-07: glm-4.6 at 34% error (timeouts) sat in the default pool, so
     intuition could commit to a model that fails 1 in 3. The Thompson bandit would learn this
     too, but it is STARVED (n<=3/arm after 10k calls) — the floor guards the cold start.
+
+    HALF-OPEN probes (patron circuit-breaker, leido del codigo de grok-build 2026-07): un modelo
+    demotado no recibe llamadas -> su ventana de error nunca rueda -> demotado PARA SIEMPRE
+    aunque el proveedor se haya recuperado. Fix: cada `probe_every_s` un modelo enfermo pasa
+    IGUAL una vez (probe) — esa llamada alimenta la ventana; si el proveedor se recupero, el
+    error_rate baja del cap y vuelve solo. probe_every_s=0 desactiva (comportamiento viejo).
+
     Fail-OPEN on any observability error (a broken metrics read must never break routing).
-    `rates` injectable (test seam; shape = error_rates()['by_model'])."""
+    `rates`/`probe_state`/`now` injectable (test seam)."""
     try:
         if rates is None:
             from .metrics import error_rates
             rates = error_rates(window_n=200)["by_model"]
-        keep = [m for m in models
-                if not (rates.get(m.split("@")[0], {}).get("calls", 0) >= min_calls
-                        and rates[m.split("@")[0]]["error_rate"] > max_error_rate)]
+        sick = [m for m in models
+                if (rates.get(m.split("@")[0], {}).get("calls", 0) >= min_calls
+                    and rates[m.split("@")[0]]["error_rate"] > max_error_rate)]
+        keep = [m for m in models if m not in sick]
+        if sick and probe_every_s > 0:
+            sp = probe_state or _PROBE_STATE
+            t = now if now is not None else time.time()
+            try:
+                st = json.loads(sp.read_text(encoding="utf-8")) if sp.exists() else {}
+            except (json.JSONDecodeError, OSError):
+                st = {}
+            changed = False
+            for m in sick:
+                if t - st.get(m, 0.0) >= probe_every_s:   # half-open: dejar pasar UN probe
+                    keep.append(m)
+                    st[m] = t
+                    changed = True
+            if changed:
+                sp.parent.mkdir(parents=True, exist_ok=True)
+                sp.write_text(json.dumps(st), encoding="utf-8")
         return keep or models        # never empty: all-sick -> caller's list wins (fail-open)
     except Exception:
         return models
@@ -219,8 +248,10 @@ if __name__ == "__main__":
     assert pick == "deepseek-chat", f"sig bandit should prefer deepseek on code sig, got {pick}"
     cands = candidates(["deepseek-chat", "gemini-2.5-flash"], code_task, bandit=bb)
     assert cands[0][0] == "deepseek-chat" and cands[0][1] > cands[1][1], cands
-    # coherence: code sig is familiar (16 samples), the other sig is cold (0)
-    assert coherence(code_task, bandit=bb) == 16, coherence(code_task, bandit=bb)
+    # coherence: code sig is familiar, the other sig is cold (0). El bandit DESCUENTA
+    # (Thompson discounted) -> 16 updates dan n efectivo ~14, no 16 exacto; el assert
+    # viejo (==16) quedo stale cuando se agrego el descuento (fallaba en HEAD, 2026-07).
+    assert coherence(code_task, bandit=bb) >= 10, coherence(code_task, bandit=bb)
     assert coherence(other_task, bandit=bb) == 0, coherence(other_task, bandit=bb)
     # Phase 3 GATE: familiar+good -> commit; cold -> escalate.
     act, mdl, _r = decide(["deepseek-chat", "gemini-2.5-flash"], code_task, bandit=bb)
@@ -241,4 +272,26 @@ if __name__ == "__main__":
     assert any(m == "deepseek-v4-pro" and n > 0
                for m, _, n in candidates(["deepseek-v4-pro"], code_task, bandit=bb)), "thr-strip keying"
     tmp.unlink()
-    print("intuition OK — sig-keyed select, candidate set, coherence, gate(commit/escalate), insight pooling")
+
+    # HALF-OPEN probes en healthy() (aislado: probe_state en temp, rates inyectados)
+    sick_rates = {"badmodel": {"calls": 50, "error_rate": 0.4},
+                  "goodmodel": {"calls": 50, "error_rate": 0.02}}
+    ps = Path(tempfile.gettempdir()) / "health_probes_selfcheck.json"
+    if ps.exists():
+        ps.unlink()
+    pool = ["badmodel", "goodmodel"]
+    # t=0: primer probe -> el enfermo PASA una vez (half-open)
+    h1 = healthy(pool, rates=sick_rates, probe_state=ps, probe_every_s=3600, now=4000.0)
+    assert h1 == ["goodmodel", "badmodel"], h1
+    # t=+10s (dentro de la ventana): el enfermo queda AFUERA
+    h2 = healthy(pool, rates=sick_rates, probe_state=ps, probe_every_s=3600, now=4010.0)
+    assert h2 == ["goodmodel"], h2
+    # t=+2h: nueva ventana -> probe de nuevo
+    h3 = healthy(pool, rates=sick_rates, probe_state=ps, probe_every_s=3600, now=9000.0)
+    assert h3 == ["goodmodel", "badmodel"], h3
+    # probe_every_s=0 -> comportamiento viejo (nunca probe)
+    h4 = healthy(pool, rates=sick_rates, probe_state=ps, probe_every_s=0, now=99999.0)
+    assert h4 == ["goodmodel"], h4
+    ps.unlink()
+    print("intuition OK — sig-keyed select, candidate set, coherence, gate(commit/escalate), "
+          "insight pooling, half-open health probes")
