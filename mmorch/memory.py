@@ -331,7 +331,8 @@ def recall(query: str, scope: str = "global", *, k: int = 5,
         cutoff = time.time() - window_days * 86400 if window_days else 0.0
         # COARSE: solo scope + recencia. Nada de keyword.
         rows = con.execute(
-            f"""SELECT id, ts, scope, text, embedding FROM semantic
+            f"""SELECT id, ts, scope, text, embedding, access_count, last_accessed_at,
+                       open_loop FROM semantic
                 WHERE scope IN ({placeholders}) AND ts >= ?
                   AND NOT tombstone AND NOT needs_review
                 ORDER BY ts DESC""",
@@ -340,17 +341,25 @@ def recall(query: str, scope: str = "global", *, k: int = 5,
         qvec = embed(query)
         notes: list[Note] = []
         if qvec is not None:
-            # FINE: rerank por cosine sobre candidatos con embedding.
+            # FINE (patron grok-build 2026-07, antes cosine puro): cosine modulado por
+            # retencion (decay desde ultimo acceso + boost de frecuencia + piso Zeigarnik)
+            # -> pool 3k, y MMR (Jaccard) elige k balanceando relevancia con diversidad
+            # (sin MMR, notas casi-duplicadas de un tema copan el top-k).
+            from .retention import mmr_rerank, rank_score
+            now = time.time()
             scored = []
-            for rid, ts, sc, text, emb in rows:
+            for rid, ts, sc, text, emb, acc, la, ol in rows:
                 if emb:
-                    scored.append(Note(rid, ts, sc, text, _cosine(qvec, list(emb)), "semantic"))
+                    s = rank_score(_cosine(qvec, list(emb)), now, la,
+                                   int(acc or 0), bool(ol))
+                    scored.append(Note(rid, ts, sc, text, s, "semantic"))
             scored.sort(key=lambda n: -n.score)
-            notes = scored[:k]
+            pool = scored[:3 * k]
+            notes = mmr_rerank(pool, [n.score for n in pool], k)
         else:
             # coarse-only: mas recientes primero.
             notes = [Note(rid, ts, sc, text, 0.0, "semantic")
-                     for (rid, ts, sc, text, _emb) in rows[:k]]
+                     for (rid, ts, sc, text, *_rest) in rows[:k]]
 
         # FIX B: completar desde episodic raw si falta.
         if len(notes) < k:

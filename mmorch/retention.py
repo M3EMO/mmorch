@@ -40,6 +40,63 @@ def should_forget(score: float, *, forget: float = FORGET) -> bool:
     return score < forget
 
 
+# ---------------------------------------------------------------------------
+# Ranking de recall (patron leido del codigo de grok-build/xai-grok-memory,
+# 2026-07: score = relevancia x decay_temporal x boost_de_frecuencia + rerank
+# MMR por diversidad). Antes recall() rankeaba por cosine PURO — importance()
+# existia pero solo para OLVIDAR, nunca para rankear: una nota tocada 20 veces
+# ayer y una intacta de hace 6 meses empataban si el cosine empataba.
+# ---------------------------------------------------------------------------
+def rank_score(relevance: float, now: float, last_accessed: float | None,
+               access_count: int, open_loop: bool, *, lam: float = LAMBDA) -> float:
+    """Score final de recall: relevancia (cosine) modulada por retencion.
+    decay = exp(-lam*dt) desde el ultimo acceso; open_loop (Zeigarnik) le pone piso
+    0.5 al decay (analogo a la exencion 'evergreen' de grok — vivo, no decae a 0).
+    boost = 1 + ln(1+access)*0.05 (grok: 0 accesos -> 1.0, 10 -> ~1.12; modesto a
+    proposito, la relevancia manda, la frecuencia desempata)."""
+    from math import log1p
+    la = last_accessed if last_accessed is not None else now
+    decay = exp(-lam * max(0.0, (now - la) * 1000.0))
+    if open_loop:
+        decay = max(decay, 0.5)
+    return relevance * decay * (1.0 + log1p(access_count) * 0.05)
+
+
+def mmr_rerank(items: list, scores: list[float], k: int, *, lam: float = 0.7) -> list:
+    """Maximal Marginal Relevance (grok-build mmr.rs): seleccion greedy que
+    balancea relevancia con diversidad — sin esto, 5 notas casi-duplicadas del
+    mismo tema copan el top-k. MMR(d) = lam*rel(d) - (1-lam)*max_sim(d, elegidos).
+    Similitud = Jaccard sobre tokens (SIN embeddings, O(n*k) con n chico).
+    `items` = objetos con .text; `scores` alineado por indice. Devuelve <= k items."""
+    if len(items) <= 1 or k <= 0:
+        return items[:k]
+
+    def toks(t: str) -> set:
+        return {w for w in "".join(c if c.isalnum() or c == "_" else " "
+                                   for c in t.lower()).split() if w}
+
+    tok = [toks(it.text) for it in items]
+
+    def jac(a: set, b: set) -> float:
+        if not a or not b:
+            return 1.0 if (not a and not b) else 0.0
+        inter = len(a & b)
+        return inter / (len(a) + len(b) - inter)
+
+    chosen: list[int] = []
+    rest = list(range(len(items)))
+    while rest and len(chosen) < k:
+        best_i, best_v = rest[0], float("-inf")
+        for i in rest:
+            penalty = max((jac(tok[i], tok[j]) for j in chosen), default=0.0)
+            v = lam * scores[i] - (1.0 - lam) * penalty
+            if v > best_v:
+                best_i, best_v = i, v
+        chosen.append(best_i)
+        rest.remove(best_i)
+    return [items[i] for i in chosen]
+
+
 if __name__ == "__main__":
     # demo/self-check (ponytail: una verificacion corrible deja el modulo terminado)
     import time
@@ -55,4 +112,26 @@ if __name__ == "__main__":
     assert not should_forget(importance(now, old, 0, True))
     # graceful: last_accessed None no decae
     assert importance(now, None, 0, False) == importance(now, now, 0, False)
+
+    # rank_score: mismo cosine, nota fresca+tocada gana a nota vieja intacta
+    assert rank_score(0.8, now, now, 10, False) > rank_score(0.8, now, now - 60 * day, 0, False)
+    # relevancia manda: cosine mucho mayor gana aunque este mas vieja (dentro de lo razonable)
+    assert rank_score(0.9, now, now - 5 * day, 0, False) > rank_score(0.5, now, now, 3, False)
+    # open_loop pone piso al decay (nota vieja con loop abierto no muere en el ranking)
+    assert rank_score(0.8, now, now - 90 * day, 0, True) >= 0.8 * 0.5
+    # boost modesto: nunca infla mas de ~30% con 100 accesos
+    assert rank_score(0.5, now, now, 100, False) < 0.5 * 1.3
+
+    # mmr_rerank: con 3 notas casi-identicas y 1 distinta, el top-2 NO son 2 duplicadas
+    class _N:
+        def __init__(self, t):
+            self.text = t
+    dups = [_N("el gato come pescado fresco"), _N("el gato come pescado muy fresco"),
+            _N("el gato come pescado fresco hoy"), _N("configurar timeout del servidor http")]
+    got = mmr_rerank(dups, [0.9, 0.89, 0.88, 0.6], 2)
+    assert got[0].text.startswith("el gato") and got[1].text.startswith("configurar"), \
+        [n.text for n in got]
+    # k >= n devuelve todo; k=0 devuelve nada
+    assert len(mmr_rerank(dups, [1, 1, 1, 1], 10)) == 4
+    assert mmr_rerank(dups, [1, 1, 1, 1], 0) == []
     print("retention self-check OK")
