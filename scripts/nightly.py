@@ -157,8 +157,16 @@ def main() -> None:
             r -= w
             if r < 0:
                 break
-        rec["workflow_race"] = race(t)
+        # EVOLUTION-SIM (backlog #1 repo-mining 2026-07): la race corre sobre la POBLACION
+        # viva (no las 3 hardcodeadas) y el resultado la evoluciona — el ganador se reproduce
+        # (hijo mutado/cruzado), el perdedor cronico muere (con evidencia del bandit).
+        # Fitness emergente de la distribucion de bench tasks, nunca un escalar frozen.
+        from mmorch.workflow_evolve import evolve_population, load_population
+        rec["workflow_race"] = race(t, variants=load_population())
         rec["workflow_race"]["curriculum_weights"] = dict(zip([b.name for b in sel], weights, strict=True))
+        ev = evolve_population(rec["workflow_race"].get("winner"))
+        rec["workflow_race"]["evolution"] = {"born": ev["born"], "died": ev["died"],
+                                             "population": sorted(ev["population"])}
     except Exception as e:
         rec["workflow_race_error"] = f"{type(e).__name__}: {str(e)[:200]}"
 
