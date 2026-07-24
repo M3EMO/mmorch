@@ -97,14 +97,28 @@ def main() -> None:
     # La noche es el momento barato para ponerse al día: 50/noche, MISMO watermark que el nudge
     # (nudge.json distill_upto) — un solo estado, dos ritmos (goteo diurno + lote nocturno).
     try:
-        from mmorch.memory import distill_backlog
+        from mmorch.memory import _connect, _DB_PATH, distill_backlog
         from mmorch.nudge import _load as _nudge_load, _STATE as _NUDGE_STATE
         st = _nudge_load(_NUDGE_STATE)
-        d = distill_backlog(after_id=int(st.get("distill_upto", 0)), limit=50)
-        st["distill_upto"] = d["last_id"]
-        _NUDGE_STATE.parent.mkdir(parents=True, exist_ok=True)
-        _NUDGE_STATE.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
-        rec["distill"] = d
+        upto = int(st.get("distill_upto", 0))
+        # GATE barato-primero (patron dream.rs de grok-build, 2026-07): contar ANTES de
+        # destilar — si hay < min_new episodios nuevos, saltear la pasada entera (cada
+        # destilado son llamadas gen+verify; una noche sin actividad no debe gastarlas).
+        min_new = int(os.getenv("MMORCH_DISTILL_MIN_NEW", "10"))
+        _c = _connect(_DB_PATH)
+        try:
+            n_new = _c.execute("SELECT COUNT(*) FROM episodic WHERE id > ? "
+                               "AND kind NOT IN ('consolidation')", [upto]).fetchone()[0]
+        finally:
+            _c.close()
+        if n_new < min_new:
+            rec["distill"] = {"skipped": f"solo {n_new} episodios nuevos (< {min_new})"}
+        else:
+            d = distill_backlog(after_id=upto, limit=50)
+            st["distill_upto"] = d["last_id"]
+            _NUDGE_STATE.parent.mkdir(parents=True, exist_ok=True)
+            _NUDGE_STATE.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+            rec["distill"] = d
     except Exception as e:
         rec["distill_error"] = f"{type(e).__name__}: {str(e)[:200]}"
 
