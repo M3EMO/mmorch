@@ -152,3 +152,87 @@ def multiview_verify(
         low_decorrelation=low_decorr, per_lens=per_lens,
         cost_usd=round(sum(v.cost_usd for v in verdicts), 6), refutations=refs,
     )
+
+
+# ---------------------------------------------------------------------------
+# memory_consistency (patron PULSE, npj Digit Med 2026, leido 2026-07): el MISMO
+# modelo responde SIN memoria (solo parametrico) y CON las notas recuperadas como
+# contexto. El diff entre ambas es senal DETERMINISTA (Jaccard, cero LLM-judge):
+#   divergencia alta -> la memoria fue load-bearing (cambio la respuesta de verdad)
+#     -> confiar en la version con-memoria pero flaggear para verify si es critico.
+#   divergencia ~0  -> retrieval decorativo (el modelo ya lo sabia) -> las notas
+#     no aportaron; senal para curar/mergear esas notas.
+# Distinto de ensemble_verify (2 familias juzgan UN artefacto): aca es UNA familia,
+# DOS condiciones de contexto -> mide el efecto causal de la memoria, no la calidad.
+# ---------------------------------------------------------------------------
+@dataclass
+class ConsistencyResult:
+    with_memory: str
+    without_memory: str
+    divergence: float          # 1 - jaccard(tokens) en [0,1]; alto = memoria load-bearing
+    notes_used: int
+    cost_usd: float = 0.0
+
+
+def memory_consistency(question: str, *, scope: str = "global", k: int = 5,
+                       model: str = DEFAULT_GENERATOR,
+                       call_fn=None, recall_fn=None) -> ConsistencyResult:
+    """Genera la respuesta a `question` con y sin las notas de recall() como contexto
+    y mide la divergencia. `call_fn(model, messages)->text` y `recall_fn(q, scope, k)
+    ->notes` inyectables (self-check cero-costo)."""
+    if recall_fn is None:
+        from .memory import recall as _recall
+        recall_fn = lambda q, s, kk: _recall(q, s, k=kk, track=False)  # noqa: E731
+    if call_fn is None:
+        from .providers import call as _call
+
+        def call_fn(m, msgs):
+            return _call(m, msgs, pattern="consistency", node="memcheck",
+                         temperature=0.0).text
+
+    notes = recall_fn(question, scope, k)
+    ctx = "\n".join(f"- {n.text}" for n in notes)
+    bare = call_fn(model, [{"role": "user", "content": question}])
+    grounded = call_fn(model, [
+        {"role": "system", "content": "Usá estas notas de memoria si son relevantes:\n" + ctx},
+        {"role": "user", "content": question}]) if notes else bare
+
+    def toks(t: str) -> set:
+        return {w for w in "".join(c if c.isalnum() or c == "_" else " "
+                                   for c in t.lower()).split() if w}
+    a, b = toks(bare), toks(grounded)
+    inter = len(a & b)
+    union = len(a | b) or 1
+    return ConsistencyResult(with_memory=grounded, without_memory=bare,
+                             divergence=round(1.0 - inter / union, 4),
+                             notes_used=len(notes))
+
+
+if __name__ == "__main__":
+    # self-check cero-costo de memory_consistency (call/recall inyectados)
+    class _FakeNote:
+        def __init__(self, t):
+            self.text = t
+
+    # 1. memoria load-bearing: la respuesta cambia con las notas -> divergencia alta
+    def _call_divergent(m, msgs):
+        return ("el timeout es 1800 segundos (medido)" if len(msgs) > 1
+                else "no tengo ese dato en mi entrenamiento")
+    r = memory_consistency("cual es el timeout?", call_fn=_call_divergent,
+                           recall_fn=lambda q, s, k: [_FakeNote("timeout=1800s")])
+    assert r.divergence > 0.5 and r.notes_used == 1, r
+
+    # 2. retrieval decorativo: misma respuesta con y sin -> divergencia 0
+    r2 = memory_consistency("2+2?", call_fn=lambda m, msgs: "4",
+                            recall_fn=lambda q, s, k: [_FakeNote("aritmetica basica")])
+    assert r2.divergence == 0.0, r2
+
+    # 3. sin notas: no gasta la 2da llamada (grounded == bare por construccion)
+    calls = {"n": 0}
+
+    def _counting(m, msgs):
+        calls["n"] += 1
+        return "x"
+    r3 = memory_consistency("q", call_fn=_counting, recall_fn=lambda q, s, k: [])
+    assert r3.notes_used == 0 and calls["n"] == 1 and r3.divergence == 0.0
+    print("ensemble self-check OK (memory_consistency)")
