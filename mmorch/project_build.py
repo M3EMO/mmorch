@@ -275,6 +275,42 @@ def pipeline_for(task: str) -> dict:
     return shape
 
 
+def decompose_best_of(task: str, *, n: int = 3, external_test: str | None = None,
+                      gen_model: str = DEFAULT_GENERATOR,
+                      plan: Callable[[], str] | None = None,
+                      reask: Callable[[str, list[str]], str] | None = None) -> list[dict]:
+    """Best-of-N sobre el planner (idea session-trees de Pi + diversidad, 2026-07,
+    ADAPTADA al invariante del repo: el patron original juzga los N candidatos con un
+    torneo LLM, pero el juicio LLM midio ~74% falso -- aca la seleccion es DETERMINISTA).
+
+    N muestras independientes del planner (su no-determinismo medido juega A FAVOR:
+    diversidad gratis) -> validate_worklist filtra -> entre las validas gana la MAS SIMPLE
+    (menos units; empate -> serializacion mas corta = menos especulacion, KISS). Ninguna
+    valida -> cae a decompose() normal (path de re-ask). Cache-aware en ambas puntas:
+    hit previo se devuelve directo, la ganadora se cachea."""
+    key = _cache_key(task, external_test)
+    cached = _load_json_cache(_WORKLIST_CACHE).get(key)
+    if cached is not None and validate_worklist(cached)[0]:
+        return cached
+    plan = plan or (lambda: _default_plan(task, external_test, gen_model))
+    valid: list[list[dict]] = []
+    for _ in range(n):
+        try:
+            units = _parse_worklist(plan())
+            if validate_worklist(units)[0]:
+                valid.append(units)
+        except (json.JSONDecodeError, ValueError):
+            continue                      # muestra rota = descartada, no rompe el best-of
+    if not valid:
+        # fallback al path de re-ask; plan/reask inyectados VIAJAN (sin esto el fallback
+        # ignoraba el seam y llamaba al LLM real -- cazado por el self-check, 2026-07)
+        return decompose(task, external_test=external_test, gen_model=gen_model,
+                         plan=plan, reask=reask)
+    best = min(valid, key=lambda u: (len(u), len(json.dumps(u, sort_keys=True))))
+    _save_cache(key, best)
+    return best
+
+
 if __name__ == "__main__":
     # 1. validate_worklist: good DAG passes; cycle / bad-dep / empty-spec fail.
     good = [{"name": "a", "spec": "build a", "deps": []},
@@ -380,4 +416,23 @@ if __name__ == "__main__":
     p1["max_fix"] = 99
     assert p2["max_fix"] == 1, "pipeline_for debe devolver copia, no el dict compartido"
 
-    print("project_build F1 OK — validate(DAG), build_order, stub_check(incl the escaped stub), decompose seam, worklist cache, pipeline_for")
+    # 7. decompose_best_of: elige la valida MAS SIMPLE entre N muestras; rotas no rompen;
+    # ninguna valida -> path decompose() normal. Cache aislado (mismo patron del bloque 5).
+    _orig2 = _WORKLIST_CACHE
+    globals()["_WORKLIST_CACHE"] = Path(_tf.mkdtemp()) / "wl_bo_test.json"
+    try:
+        samples = iter(['not json',
+                        '[{"name":"a","spec":"a","file":"a.py"},{"name":"b","spec":"b","file":"b.py"}]',
+                        '[{"name":"solo","spec":"todo en uno","file":"solo.py"}]'])
+        wl_bo = decompose_best_of("bo-task", n=3, plan=lambda: next(samples))
+        assert len(wl_bo) == 1 and wl_bo[0]["name"] == "solo", wl_bo   # gana la mas simple
+        wl_bo2 = decompose_best_of("bo-task", n=3, plan=lambda: 1 / 0)  # cache hit: plan no corre
+        assert wl_bo2 == wl_bo
+        bad = iter(['nope', 'nope', 'nope'])   # best-of agota 2, decompose usa la 3ra + reask
+        wl_bo3 = decompose_best_of("bo-fallback", n=2, plan=lambda: next(bad),
+                                   reask=lambda prev, errs: '[{"name":"x","spec":"x"}]')
+        assert wl_bo3[0]["name"] == "x", wl_bo3
+    finally:
+        globals()["_WORKLIST_CACHE"] = _orig2
+
+    print("project_build F1 OK — validate(DAG), build_order, stub_check(incl the escaped stub), decompose seam, worklist cache, pipeline_for, decompose_best_of")
