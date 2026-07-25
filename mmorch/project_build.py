@@ -174,12 +174,13 @@ def _plan_user_msg(task: str, external_test: str | None) -> str:
     return f"TASK:\n{task}\n\nExternal acceptance (the real backstop): {external_test or '(none given)'}"
 
 
-def _default_plan(task: str, external_test: str | None, gen_model: str) -> str:
+def _default_plan(task: str, external_test: str | None, gen_model: str,
+                  temperature: float = 0.0) -> str:
     from .providers import call
     from .textutil import extract_fence
     out = call(gen_model, [{"role": "system", "content": _WORKLIST_SYS},
                            {"role": "user", "content": _plan_user_msg(task, external_test)}],
-               pattern="project_build", node="planner", temperature=0.0).text
+               pattern="project_build", node="planner", temperature=temperature).text
     return extract_fence(out)
 
 
@@ -292,7 +293,10 @@ def decompose_best_of(task: str, *, n: int = 3, external_test: str | None = None
     cached = _load_json_cache(_WORKLIST_CACHE).get(key)
     if cached is not None and validate_worklist(cached)[0]:
         return cached
-    plan = plan or (lambda: _default_plan(task, external_test, gen_model))
+    # temp>0 A PROPOSITO (finding del harvest 2026-07, juzgado valido): a temp=0 la
+    # diversidad entre muestras es solo el no-determinismo accidental de la API; el
+    # best-of necesita diversidad DELIBERADA. decompose() normal sigue a temp=0.
+    plan = plan or (lambda: _default_plan(task, external_test, gen_model, temperature=0.7))
     valid: list[list[dict]] = []
     for _ in range(n):
         try:
