@@ -426,7 +426,9 @@ if __name__ == "__main__":
                         '[{"name":"solo","spec":"todo en uno","file":"solo.py"}]'])
         wl_bo = decompose_best_of("bo-task", n=3, plan=lambda: next(samples))
         assert len(wl_bo) == 1 and wl_bo[0]["name"] == "solo", wl_bo   # gana la mas simple
-        wl_bo2 = decompose_best_of("bo-task", n=3, plan=lambda: 1 / 0)  # cache hit: plan no corre
+        def _never_called() -> str:
+            raise AssertionError("cache hit: plan no debe correr")
+        wl_bo2 = decompose_best_of("bo-task", n=3, plan=_never_called)
         assert wl_bo2 == wl_bo
         bad = iter(['nope', 'nope', 'nope'])   # best-of agota 2, decompose usa la 3ra + reask
         wl_bo3 = decompose_best_of("bo-fallback", n=2, plan=lambda: next(bad),
