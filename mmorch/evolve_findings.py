@@ -41,6 +41,9 @@ def _git_changed_py_files(*, days: int, root: Path) -> list[str]:
         return []
 
 
+_FINDINGS_LOG = Path(__file__).resolve().parents[1] / "logs" / "evolve_findings.jsonl"
+
+
 def harvest_findings(files: list[str] | None = None, *, days: int = 3, max_files: int = 5,
                      max_findings: int = 8, root: Path = ROOT,
                      changed_files_fn=None, review_fn=None) -> list[dict]:
@@ -70,7 +73,20 @@ def harvest_findings(files: list[str] | None = None, *, days: int = 3, max_files
                                   f"— fix sugerido: {f.get('fix', '')}"})
     order = {"high": 0, "med": 1, "medium": 1, "low": 2}
     out.sort(key=lambda x: order.get(x["severity"], 3))
-    return out[:max_findings]
+    kept = out[:max_findings]
+    # PERSISTIR (2026-07, pedido explicito: el nightly solo guardaba los NOMBRES de archivo
+    # en el log -- el contenido del hallazgo se perdia y habia que re-cosechar para verlo).
+    # Append-only jsonl; quien cosecha, loguea. Best-effort: un fallo de log no rompe la cosecha.
+    try:
+        import time as _time
+        _FINDINGS_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(_FINDINGS_LOG, "a", encoding="utf-8") as fh:
+            ts = _time.time()
+            for k in kept:
+                fh.write(json.dumps({"ts": ts, **k}, ensure_ascii=False) + "\n")
+    except OSError:
+        pass   # side-channel: el log nunca frena la cosecha
+    return kept
 
 
 def _sample_py_files(root: Path, cap: int) -> list[str]:
