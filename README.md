@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **96 módulos · 45 MCP tools · 437 tests.**
+_Auto-generado por `mmorch.docgen`._ **98 módulos · 45 MCP tools · 437 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -36,6 +36,7 @@ _Auto-generado por `mmorch.docgen`._ **96 módulos · 45 MCP tools · 437 tests.
 | `mmorch/ablation.py` | ablation (§18.4) — validar EMPIRICAMENTE la regla de pairing cross-family. El |
 | `mmorch/arbitration.py` | arbitration — registro auditable de los arbitrajes del orquestador (blind-spot #2, 2026-07). |
 | `mmorch/autoresearch.py` | autoresearch (r4a) — hillclimb como JOB declarativo + resumable. |
+| `mmorch/babel.py` | babel — capa comprimida model-native del vault (paper 2606.19857). |
 | `mmorch/bench.py` | bench — benchmark CONGELADO de tasks difíciles para evolución de workflows. |
 | `mmorch/bucketrank.py` | bucket_rank — graduar/ordenar un set GRANDE en tiers (triage por calidad, rankear |
 | `mmorch/budget.py` | budget — BudgetKeeper: techo de gasto mensual (ataca el incidente +$5). |
@@ -125,6 +126,7 @@ _Auto-generado por `mmorch.docgen`._ **96 módulos · 45 MCP tools · 437 tests.
 | `mmorch/vault.py` | vault — memoria de largo plazo mmorch-legible sobre el vault Obsidian. |
 | `mmorch/weights.py` | weights — gestion de pesos de nodos neuronales (model-cards + verificacion). Source of |
 | `mmorch/workflow_engine.py` | workflow_engine — cooperative multi-role workflow as a pure state machine (Phase C). |
+| `mmorch/workflow_evolve.py` | workflow_evolve — la poblacion de variantes del engine EVOLUCIONA (backlog #1 |
 | `mmorch/workflow_race.py` | workflow_race — corre N VARIANTES de workflow sobre una task congelada del bench y |
 | `mmorch/workflow_spec.py` | workflow_spec — load + validate cooperative workflows and role personas (Phase C, Decisions #2/#3). |
 | `mmorch/workflow_store.py` | workflow_store — durable block-context + checkpoints for cooperative workflows (Phase A). |
@@ -155,6 +157,16 @@ plan-mode via MCP for zero API spend); a code-execution loop (`code_loop`); a Si
 encoder trained from loop trajectories (`flywheel/`, numpy inference); an environment-first
 scout pre-pass; and full cost observability (per-provider 429/budget-cap rates, cache-hit
 rate, off-peak split, effort-routing, prefix-stable prompts).
+
+**Knowledge vault global (`vault/` + `babel.py`):** research de TODOS los proyectos vive en
+el vault Obsidian (deja de estar local por-proyecto). `babel.ingest()` copia el original
+(siempre fuente de verdad) y deriva un `.babel.md` comprimido model-native (paper 2606.19857)
+solo si pasan DOS gates de ejecución: ratio ≤ 0.7 y fidelidad QA ≥ 0.8 (lector cross-family
+que solo ve el babel; grading determinista por containment — jamás LLM-judge). Medido
+2026-08: encoder = Gemini (DeepSeek ignora el char-budget en docs >10k), lector = DeepSeek;
+símbolos del lexicon en el prompt del encoder ROMPEN la compresión (el lexicon
+`vault/lexicon.md` es decoder key del lector). Charts del vault vía `flint-chart-mcp`
+(registrado en `.mcp.json`).
 
 ## Setup
 
