@@ -1,0 +1,1 @@
+upstream: https://github.com/mattpocock/skills @ 2ab9580 (2026-08-02)

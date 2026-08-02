@@ -29,11 +29,19 @@ from .config import DEFAULT_GENERATOR, family_of
 from .vault import VAULT
 
 LEXICON = VAULT / "lexicon.md"
-LEXICON_VERSION = "v1"
 RATIO_MAX = 0.7        # comprime <30% -> no paga (dense notes medidas en 0.906)
 FIDELITY_MIN = 0.8
 DEFAULT_ENCODER = "gemini-2.5-flash-lite"   # medido: cumple el char budget
 DEFAULT_READER = DEFAULT_GENERATOR          # deepseek: cross-family vs encoder
+CHUNK_CHARS = 6000     # docs mas grandes se comprimen por chunks (compliance
+                       # del char-budget cae con inputs grandes, medido 08-02)
+
+
+def lexicon_version() -> str:
+    """Version viva, leida del propio doc (`version: N`). El lexicon es un
+    diccionario que se actualiza; la version NO se hardcodea aca."""
+    m = re.search(r"`version:\s*(\d+)`", _lexicon_text())
+    return f"v{m.group(1)}" if m else "v?"
 
 
 def _call_default(model: str, messages: list[dict]) -> str:
@@ -72,13 +80,39 @@ def encode(text: str, *, model: str = DEFAULT_ENCODER,
             {"role": "system", "content": sys_p},
             {"role": "user", "content":
              payload + f"\n\n[HARD LIMIT: tu output <= {budget} caracteres. "
-             "Si no entra, comprimí más agresivo con el lexicon.]"}]).strip()
+             "Si no entra, comprimí más agresivo.]"}]).strip()
+
+    # docs grandes: comprimir POR CHUNKS (compliance del budget cae con inputs
+    # grandes — README 19k dio 0.95 entero; chunks de ~4-6k si cumplen)
+    if len(text) > CHUNK_CHARS:
+        cs = _chunks(text)
+        if len(cs) > 1:                    # 1 solo chunk indivisible -> directo
+            return "\n\n".join(
+                encode(c, model=model, target_ratio=target_ratio, call_fn=call_fn)
+                for c in cs)
 
     out = _ask(text)
     for _ in range(2):                     # recomprime su propio output si se pasa
         if len(out) <= budget * 1.15:
             break
         out = _ask(out)
+    return out
+
+
+def _chunks(text: str, limit: int = CHUNK_CHARS) -> list[str]:
+    """Corta por headers markdown primero, parrafos despues; junta hasta ~limit."""
+    parts, sep = re.split(r"(?m)(?=^#{1,3} )", text), ""
+    if len(parts) == 1:
+        parts, sep = text.split("\n\n"), "\n\n"
+    out, cur = [], ""
+    for p in parts:
+        if cur and len(cur) + len(p) > limit:
+            out.append(cur)
+            cur = p
+        else:
+            cur = cur + sep + p if cur else p
+    if cur:
+        out.append(cur)
     return out
 
 
@@ -175,7 +209,7 @@ def ingest(path: str | Path, *, folder: str = "research",
     bp.write_text(
         "---\n"
         f"source: {dst.name}\n"
-        f"lexicon: {LEXICON_VERSION}\n"
+        f"lexicon: {lexicon_version()}\n"
         f"ratio: {ratio}\n"
         f"fidelity: {fid.score}\n"
         "derived: true\n"
@@ -184,7 +218,41 @@ def ingest(path: str | Path, *, folder: str = "research",
     return out
 
 
+def mine_lexicon(*, min_count: int = 3, write: bool = False) -> list[tuple[str, int]]:
+    """Diccionario VIVO: escanea los `.babel.md` del vault y devuelve shorthand
+    usado pero NO documentado en el lexicon (simbolos no-ASCII + siglas 2-6
+    mayusculas, >= min_count usos). Con write=True los apendea a la seccion
+    'Candidatos' del lexicon para promocion humana/Opus (nunca auto-promueve:
+    el diccionario lo cura alguien, la mineria solo propone)."""
+    lex = _lexicon_text()
+    counts: dict[str, int] = {}
+    for bp in VAULT.rglob("*.babel.md"):
+        t = bp.read_text(encoding="utf-8")
+        for sym in re.findall(r"[^\x00-\x7F]", t):
+            counts[sym] = counts.get(sym, 0) + 1
+        for ab in re.findall(r"\b[A-Z][A-Z0-9]{1,5}\b", t):
+            counts[ab] = counts.get(ab, 0) + 1
+    cand = sorted(((k, v) for k, v in counts.items()
+                   if v >= min_count and k not in lex),
+                  key=lambda kv: -kv[1])
+    if write and cand and LEXICON.exists():
+        lines = "\n".join(f"- `{k}` — {v} usos, significado ? (promover a tabla y subir version)"
+                          for k, v in cand)
+        new = lex.replace(
+            "_Vacío. `--mine` apendea acá",
+            lines + "\n\n_`--mine` apendea acá") if "_Vacío. `--mine`" in lex \
+            else lex + "\n" + lines + "\n"
+        LEXICON.write_text(new, encoding="utf-8")
+    return cand
+
+
 if __name__ == "__main__":
+    import sys
+    if "--mine" in sys.argv:
+        for k, v in mine_lexicon(write="--write" in sys.argv):
+            print(f"{k}\t{v}")
+        raise SystemExit(0)
+
     # self-check cero-costo: call_fn inyectado, vault real no se toca (tmp).
     import tempfile
 
@@ -248,7 +316,21 @@ if __name__ == "__main__":
             r2 = ingest(src, folder="research", call_fn=_good)
             assert r2["babel_path"] and r2["skipped"] is None, r2
             bt = Path(r2["babel_path"]).read_text(encoding="utf-8")
-            assert "lexicon: v1" in bt and "derived: true" in bt
+            assert "lexicon: v" in bt and "derived: true" in bt
+            # 6. chunking: doc grande CON headers se parte y cada chunk <= limite
+            big = "\n\n".join(f"# s{i}\n" + ("prosa " * 500) for i in range(4))  # ~12k
+            cs = _chunks(big)
+            assert len(cs) >= 2 and all(len(c) <= CHUNK_CHARS * 1.2 for c in cs), \
+                [len(c) for c in cs]
+
+            # 7. mine_lexicon: detecta shorthand no documentado en babels del vault
+            (Path(td) / "research" / "x.babel.md").write_text(
+                "⊗ raro ⊗ raro ⊗ QQQ QQQ QQQ", encoding="utf-8")
+            mined = dict(mine_lexicon(min_count=3))
+            assert mined.get("⊗") == 3 and mined.get("QQQ") == 3, mined
         finally:
             globals()["VAULT"] = _orig_vault
-    print("babel self-check OK (6 propiedades)")
+
+    # 8. version viva parseada del doc real
+    assert lexicon_version().startswith("v") and lexicon_version() != "v?"
+    print("babel self-check OK (8 propiedades)")

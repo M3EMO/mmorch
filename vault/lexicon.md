@@ -1,10 +1,18 @@
-# Lexicon babel v1
+# Lexicon babel — DICCIONARIO VIVO
 
 Clave de decodificación para archivos `*.babel.md` del vault. Los `.babel.md`
 son derivados comprimidos model-native (paper 2606.19857) del archivo original
 homónimo — el original es SIEMPRE la fuente de verdad; el babel es para que los
 modelos lean con menos tokens. Un modelo que lee un babel debe recibir este
 lexicon como decoder key.
+
+**Este doc se actualiza siempre**: `python -m mmorch.babel --mine` escanea los
+babels existentes y lista shorthand usado pero no documentado → se agrega acá
+(sección Candidatos → promovido a tabla), sube la versión, y cada `.babel.md`
+registra en frontmatter con qué versión se escribió. Editable también a mano
+desde Obsidian (este archivo vive en el vault).
+
+`version: 2`
 
 ## Símbolos
 
@@ -23,6 +31,23 @@ lexicon como decoder key.
 | `✗` | refutado / falló |
 | `!` | invariante / importante |
 | `?` | incierto / pendiente |
+| `vs` | comparado con |
+| `+` | y / además |
+
+## Términos del dominio (abreviatura → expansión)
+
+| Abrev | Expansión |
+|-------|-----------|
+| `xfam` | cross-family (generador y verificador de familias distintas) |
+| `WT` | worktree aislado |
+| `fid` | fidelidad (score QA del gate babel) |
+| `AR` | autoresearch (hillclimb nocturno) |
+| `HITL` | human-in-the-loop |
+
+## Candidatos (minados, sin promover)
+
+_Vacío. `--mine` apendea acá; un humano (u Opus) promueve a las tablas de arriba
+y sube la versión._
 
 ## Convenciones
 
@@ -32,8 +57,14 @@ lexicon como decoder key.
 - Bloques de código intactos (no se comprimen).
 - Estructura de headers del original se preserva (navegabilidad).
 
+## Regla crítica (medida 2026-08-02)
+
+Este lexicon NUNCA va en el prompt del ENCODER: una sola línea de símbolos en
+ese prompt rompe la compresión (ratio 0.52 → 1.02 medido). Es exclusivamente
+decoder key del LECTOR.
+
 ## Versionado
 
-Cambios al lexicon suben la versión (v1 → v2) y se documentan acá. Cada
-`.babel.md` registra `lexicon: v1` en su frontmatter — un babel viejo se
-decodifica con la versión del lexicon con la que fue escrito.
+- v1 (2026-08-02): seed inicial, símbolos + convenciones.
+- v2 (2026-08-02): diccionario vivo — términos del dominio, sección candidatos,
+  proceso `--mine`, regla encoder-nunca.
