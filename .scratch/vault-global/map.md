@@ -25,6 +25,9 @@ tema+tag con MOC por proyecto, capa babel donde pague. La spec se entrega a
 
 <!-- una línea por ticket cerrado: gist + link -->
 
+- [Inventario de research local](issues/01-inventario-research-local.md) — ~38 docs/253 KB; mmorch domina (158 KB fuera del vault); 3 duplicados sin pointer que van a driftar; lo de mayor señal (ideal-vision, verdicts, benchmark) sigue fuera; realmente son 2 repos + mmorch.
+- [Contrato de escritura](issues/03-contrato-de-escritura.md) — puerta única `mmorch_vault_write` (MCP); validación mínima dura (title+tag proyecto, created auto); babel async al escribir + nightly como red; colisiones = update semantics.
+
 ## Not yet specified
 
 - Formato exacto del "pointer" que queda en el repo de origen tras migrar un doc
