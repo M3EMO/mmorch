@@ -32,14 +32,13 @@ tema+tag con MOC por proyecto, capa babel donde pague. La spec se entrega a
 - [Alcance babel](issues/05-alcance-babel.md) — automático con pre-filtro determinista gratis: ≥3k chars, fuera de archive/ e infra; sin marcado manual; los gates deciden el resto (rechazo por ratio = centavos).
 - [Sync multi-máquina](issues/06-sync-multimaquina.md) — sync.py tal cual (nightly commit_push del vault a mmorch/auto, auto-pull ff-only, humano mergea en lote); conflictos = ff-only avisa, sin auto-merge por nota. Spec: sumar el vault al push nocturno.
 - [Charts flint](issues/08-charts-flint.md) — 3 charts nightly como SVG en vault/charts/ (adopción por proyecto, babel ratio/fidelidad, costo API por proveedor) + convención: flint ad-hoc desde cualquier sesión para graficar resultados on demand.
+- [Índice del vault](issues/09-indice-del-vault.md) — bridge a duckdb: write_validated hace remember(gist+path) scope global; recall existente encuentra, path lee; backfill de las notas ya migradas.
+- [Vault vs memoria auto Claude](issues/10-vault-vs-memoria-claude.md) — regla por contenido: cross-proyecto/curado → vault, sesión/preferencias → memoria auto; links por path, sin duplicar.
 - [Wiring /new-project + CLAUDE.md global](issues/07-wiring-new-project.md) — HECHO: skill /new-project con sección "research → vault, NO local"; CLAUDE.md global con la convención completa. mmorch_vault_write queda como ítem de spec (fallback path directo funciona hoy).
-- [Contrato de escritura](issues/03-contrato-de-escritura.md) — puerta única `mmorch_vault_write` (MCP); validación mínima dura (title+tag proyecto, created auto); babel async al escribir + nightly como red; colisiones = update semantics.
 
 ## Not yet specified
 
-- Si el vault necesita índice embebido propio o alcanza con memory.duckdb global.
-- Cómo interactúa el vault con la memoria auto de Claude Code (dos memorias).
-<!-- graduados: pointer -> resuelto en 02; refresh de babels -> resuelto en 03 (nightly por hash) -->
+_Vacío — toda la niebla graduada y resuelta. El mapa está completo._
 
 ## Out of scope
 
