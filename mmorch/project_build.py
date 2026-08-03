@@ -419,6 +419,11 @@ if __name__ == "__main__":
     p1, p2 = pipeline_for("Fix x"), pipeline_for("Fix x")
     p1["max_fix"] = 99
     assert p2["max_fix"] == 1, "pipeline_for debe devolver copia, no el dict compartido"
+    # caso medido 2026-08-03: task de creacion con "validada" suelta en el cuerpo NO debe
+    # caer al pipeline VERIFY minimo (fix=1/depth=1) — 2 jobs project-build escalaron por esto.
+    pm = pipeline_for("Crear dos funciones nuevas en vault.py\n"
+                      "- Referencia de formato validada: _gen_moc_PROTOTYPE.py")
+    assert pm["op_type"] == "GENERATE" and pm["max_depth"] == 2, pm
 
     # 7. decompose_best_of: elige la valida MAS SIMPLE entre N muestras; rotas no rompen;
     # ninguna valida -> path decompose() normal. Cache aislado (mismo patron del bloque 5).

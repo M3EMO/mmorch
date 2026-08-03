@@ -20,7 +20,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-# op_type: first match in PRIORITY order wins (specific ops before the GENERATE default).
+# op_type: gana el match MAS TEMPRANO en el texto; empate de posicion -> orden de tabla
+# (especificos antes que GENERATE). Medido 2026-08-03: con prioridad por tabla, UNA palabra
+# suelta ("validada" en una linea de referencia) clasificaba VERIFY una task que abria con
+# "Crear dos funciones NUEVAS..." -> pipeline minimo (fix=1/depth=1) -> 2 jobs escalados.
+# El verbo imperativo inicial es la señal estructural; menciones sueltas del cuerpo no la pisan.
 # bilingual ES+EN — the feedback corpus is mostly Spanish task prompts.
 _OPS = [
     ("REPAIR",    r"\b(fix|debug|repair|patch|arregl|corrig|repar|soluciona el (bug|error))\w*"),
@@ -70,12 +74,23 @@ def _first_match(text: str, table) -> str | None:
     return None
 
 
+def _earliest_match(text: str, table) -> str | None:
+    """Gana la op cuyo match aparece PRIMERO en el texto (empate -> orden de tabla)."""
+    best: tuple[int, int] | None = None
+    best_name = None
+    for i, (name, pat) in enumerate(table):
+        m = re.search(pat, text, re.I)
+        if m and (best is None or (m.start(), i) < best):
+            best, best_name = (m.start(), i), name
+    return best_name
+
+
 def signature(task: str, *, complexity: str = "") -> Signature:
     """Project a task prompt onto its structural Signature. Pure, deterministic, cero-cupo.
     `complexity` = optional Cynefin domain (clear|complicated|complex|chaotic) if the caller
     already knows it (e.g. workflow_obs rows carry it); left "" otherwise — the key stays stable."""
     t = task or ""
-    op = _first_match(t, _OPS) or "GENERATE"
+    op = _earliest_match(t, _OPS) or "GENERATE"
     ground = _first_match(t, _GROUND) or "self_contained"
     bits = tuple(sorted(name for name, pat in _BITS if re.search(pat, t, re.I)))
     return Signature(op_type=op, grounding=ground, bits=bits, complexity=complexity)
@@ -104,6 +119,15 @@ if __name__ == "__main__":
     assert signature("Resolvé en Python: def f(a): ...").op_type == "GENERATE"
     assert signature("Refactor this function for readability").op_type == "TRANSFORM"
     assert signature("Verificá el resultado").op_type == "VERIFY"
+    # 2b. CASO MEDIDO 2026-08-03 (2 jobs escalados): verbo GENERATE inicial NO debe ser
+    # pisado por una mencion suelta verify-ish en el cuerpo de la task.
+    caso = ("Crear dos funciones NUEVAS en mmorch/vault.py\n"
+            "- Referencia de formato validada: vault/moc/_gen_moc_PROTOTYPE.py.\n"
+            "Contrato exacto en tests/test_vault_write.py (ya en el repo).")
+    assert signature(caso).op_type == "GENERATE", signature(caso).op_type
+    # ...pero una task que ABRE con el verbo verify sigue siendo VERIFY (posicion manda).
+    assert signature("Verificá lo que creamos ayer").op_type == "VERIFY"
+
     # 3. EXPECTED COLLISION (documented, NOT a bug): translate vs refactor both -> TRANSFORM.
     #    The key is coarse on purpose; recall returns BOTH strategies, execution-verify disposes.
     assert signature("Translate this Python to Java").op_type == "TRANSFORM"
