@@ -93,7 +93,7 @@ def write_validated(title: str, body: str, *, project: str, folder: str = 'resea
         try:
             enqueue_babel_fn(p)
         except Exception:
-            pass
+            pass  # side-channel (cola babel): su fallo nunca rompe el write
     return p
 
 
@@ -113,7 +113,9 @@ def regenerate_moc(project: str) -> Path:
                 continue
             txt = p.read_text(encoding="utf-8")
             fm, _ = _split_frontmatter(txt)
-            tags = fm.get("tags", "")
+            # tags viene como string "[a, b, c]" del frontmatter: parsear a lista
+            # (membresia exacta — substring haria que 'ai' matchee 'ai-notes')
+            tags = fm.get("tags", "").strip("[]").replace(",", " ").split()
             if project not in tags:
                 continue
             status = fm.get("status", "")
