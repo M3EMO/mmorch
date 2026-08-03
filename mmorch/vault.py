@@ -84,7 +84,9 @@ def write_validated(title: str, body: str, *, project: str, folder: str = 'resea
 
     if remember_fn is not None:
         try:
-            remember_fn({"path": str(p), "title": title, "project": project})
+            # gist TEXTUAL: es lo que remember() indexa — el recall encuentra el
+            # gist y la sesion lee la nota completa por el path (decision 09).
+            remember_fn(f"[{project}] {title} — nota del vault en {p}")
         except Exception:
             pass
     if enqueue_babel_fn is not None:
@@ -131,9 +133,9 @@ def regenerate_moc(project: str) -> Path:
     moc_path = moc_dir / f"{_slug(project)}.md"
 
     lines = [f"# {project}", ""]
-    for folder in sorted(sections):
-        lines.append(f"## {folder}")
-        lines.extend(sections[folder])
+    for sec in sorted(sections):
+        lines.append(f"## {sec}")
+        lines.extend(sections[sec])
         lines.append("")
     moc_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     return moc_path
