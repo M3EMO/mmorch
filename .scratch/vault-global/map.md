@@ -29,6 +29,7 @@ tema+tag con MOC por proyecto, capa babel donde pague. La spec se entrega a
 - [Criterio de curación + pointers](issues/02-criterio-curacion-y-pointers.md) — criterio por TIPO (veredictos/benchmarks/rationale/brainstorms-ancestro = vivo); pointer = stub 3 líneas en el path original (incluye los 3 duplicados); históricos → vault/archive/ con stub, fuera de MOC/recall.
 - [Contrato de escritura](issues/03-contrato-de-escritura.md) — puerta única MCP `mmorch_vault_write` (valida title + tag proyecto, created auto); babel async al escribir (cola del server) + nightly como red de seguridad y refresh por hash.
 - [Prototipo MOC Obsidian](issues/04-prototipo-moc-obsidian.md) — formato validado (carpeta → wikilink · status · conf · babel ✓); se regenera AL ESCRIBIR desde mmorch_vault_write; infra y archive excluidos. Hallazgo: 6/10 notas sin tag de proyecto → backfill a la spec.
+- [Alcance babel](issues/05-alcance-babel.md) — automático con pre-filtro determinista gratis: ≥3k chars, fuera de archive/ e infra; sin marcado manual; los gates deciden el resto (rechazo por ratio = centavos).
 - [Contrato de escritura](issues/03-contrato-de-escritura.md) — puerta única `mmorch_vault_write` (MCP); validación mínima dura (title+tag proyecto, created auto); babel async al escribir + nightly como red; colisiones = update semantics.
 
 ## Not yet specified
