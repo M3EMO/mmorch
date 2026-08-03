@@ -31,6 +31,7 @@ tema+tag con MOC por proyecto, capa babel donde pague. La spec se entrega a
 - [Prototipo MOC Obsidian](issues/04-prototipo-moc-obsidian.md) — formato validado (carpeta → wikilink · status · conf · babel ✓); se regenera AL ESCRIBIR desde mmorch_vault_write; infra y archive excluidos. Hallazgo: 6/10 notas sin tag de proyecto → backfill a la spec.
 - [Alcance babel](issues/05-alcance-babel.md) — automático con pre-filtro determinista gratis: ≥3k chars, fuera de archive/ e infra; sin marcado manual; los gates deciden el resto (rechazo por ratio = centavos).
 - [Sync multi-máquina](issues/06-sync-multimaquina.md) — sync.py tal cual (nightly commit_push del vault a mmorch/auto, auto-pull ff-only, humano mergea en lote); conflictos = ff-only avisa, sin auto-merge por nota. Spec: sumar el vault al push nocturno.
+- [Charts flint](issues/08-charts-flint.md) — 3 charts nightly como SVG en vault/charts/ (adopción por proyecto, babel ratio/fidelidad, costo API por proveedor) + convención: flint ad-hoc desde cualquier sesión para graficar resultados on demand.
 - [Contrato de escritura](issues/03-contrato-de-escritura.md) — puerta única `mmorch_vault_write` (MCP); validación mínima dura (title+tag proyecto, created auto); babel async al escribir + nightly como red; colisiones = update semantics.
 
 ## Not yet specified
