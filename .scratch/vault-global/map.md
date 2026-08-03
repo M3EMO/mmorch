@@ -26,15 +26,15 @@ tema+tag con MOC por proyecto, capa babel donde pague. La spec se entrega a
 <!-- una línea por ticket cerrado: gist + link -->
 
 - [Inventario de research local](issues/01-inventario-research-local.md) — ~38 docs/253 KB; mmorch domina (158 KB fuera del vault); 3 duplicados sin pointer que van a driftar; lo de mayor señal (ideal-vision, verdicts, benchmark) sigue fuera; realmente son 2 repos + mmorch.
+- [Criterio de curación + pointers](issues/02-criterio-curacion-y-pointers.md) — criterio por TIPO (veredictos/benchmarks/rationale/brainstorms-ancestro = vivo); pointer = stub 3 líneas en el path original (incluye los 3 duplicados); históricos → vault/archive/ con stub, fuera de MOC/recall.
+- [Contrato de escritura](issues/03-contrato-de-escritura.md) — puerta única MCP `mmorch_vault_write` (valida title + tag proyecto, created auto); babel async al escribir (cola del server) + nightly como red de seguridad y refresh por hash.
 - [Contrato de escritura](issues/03-contrato-de-escritura.md) — puerta única `mmorch_vault_write` (MCP); validación mínima dura (title+tag proyecto, created auto); babel async al escribir + nightly como red; colisiones = update semantics.
 
 ## Not yet specified
 
-- Formato exacto del "pointer" que queda en el repo de origen tras migrar un doc
-  (depende del inventario y del criterio de curación).
-- Política de refresh de babels cuando el original cambia (¿nightly? ¿on-read?).
 - Si el vault necesita índice embebido propio o alcanza con memory.duckdb global.
 - Cómo interactúa el vault con la memoria auto de Claude Code (dos memorias).
+<!-- graduados: pointer -> resuelto en 02; refresh de babels -> resuelto en 03 (nightly por hash) -->
 
 ## Out of scope
 

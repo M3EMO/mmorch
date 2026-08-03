@@ -33,3 +33,20 @@ Contrato decidido (grilling 2026-08-02, 4 decisiones):
 
 Implementación NO es de este mapa salvo el wiring (ticket 07, ahora desbloqueado);
 el detalle de dónde corre el thread async va a la spec final.
+
+## Answer
+
+Grilling 2026-08-02 (sesión anterior, asentado hoy), tres decisiones:
+
+1. **Puerta única = MCP tool nuevo `mmorch_vault_write`**: envuelve `vault.write_note`,
+   disponible en cualquier sesión con el MCP mmorch conectado. Path directo queda solo
+   para humanos/Obsidian; la validación vive en el tool.
+
+2. **Validación = mínimo duro**: obligatorio title + tag de proyecto; `created` lo
+   autocompleta el tool. status/confidence/sources opcionales con defaults del template
+   research-note.md — barrera baja para escribir, curado después.
+
+3. **Babel = async al escribir**: el write encola un job de `babel.ingest()` en el server
+   mmorch (infra de jobs ya existe: server_engine) y responde al toque. El nightly queda
+   como red de seguridad: barre notas sin .babel.md o con hash de original cambiado
+   (refresh) — esto cubre también la política de refresh que estaba en la niebla.
