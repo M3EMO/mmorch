@@ -7,6 +7,7 @@ aca viven hechos/decisiones/research curados, navegables por humano (Obsidian).
 from __future__ import annotations
 
 import re
+from datetime import date
 from pathlib import Path
 
 VAULT = Path(__file__).resolve().parent.parent / "vault"
@@ -59,3 +60,80 @@ def _split_frontmatter(txt: str) -> tuple[dict, str]:
             k, _, v = ln.partition(":")
             fm[k.strip()] = v.strip()
     return fm, parts[2].strip()
+
+
+def write_validated(title: str, body: str, *, project: str, folder: str = 'research',
+                    frontmatter: dict | None = None, remember_fn=None,
+                    enqueue_babel_fn=None) -> Path:
+    """Escribe una nota validada, regenera el MOC y dispara callbacks opcionales."""
+    if not title or not title.strip():
+        raise ValueError("title must be non-empty")
+    if not project or not project.strip():
+        raise ValueError("project must be non-empty")
+
+    fm = {
+        "created": date.today().isoformat(),
+        "tags": [project],
+        **(frontmatter or {}),
+    }
+    if "tags" in fm and isinstance(fm["tags"], list) and project not in fm["tags"]:
+        fm["tags"].append(project)
+
+    p = write_note(folder, title, body, frontmatter=fm)
+    regenerate_moc(project)
+
+    if remember_fn is not None:
+        try:
+            remember_fn({"path": str(p), "title": title, "project": project})
+        except Exception:
+            pass
+    if enqueue_babel_fn is not None:
+        try:
+            enqueue_babel_fn(p)
+        except Exception:
+            pass
+    return p
+
+
+def regenerate_moc(project: str) -> Path:
+    """Genera/actualiza el MOC del proyecto escaneando el vault."""
+    if not project or not project.strip():
+        raise ValueError("project must be non-empty")
+
+    sections: dict[str, list[str]] = {}
+    excluded_dirs = {"moc", "templates", "archive", ".obsidian"}
+
+    for folder in sorted(VAULT.iterdir()):
+        if not folder.is_dir() or folder.name in excluded_dirs:
+            continue
+        for p in sorted(folder.glob("*.md")):
+            if p.name.endswith(".babel.md"):
+                continue
+            txt = p.read_text(encoding="utf-8")
+            fm, _ = _split_frontmatter(txt)
+            tags = fm.get("tags", "")
+            if project not in tags:
+                continue
+            status = fm.get("status", "")
+            confidence = fm.get("confidence", "")
+            babel_ok = "babel OK" if (p.with_suffix(".babel.md")).exists() else ""
+            parts = [f"- [[{p.stem}]]"]
+            if status:
+                parts.append(f"— {status}")
+            if confidence:
+                parts.append(f"· conf {confidence}")
+            if babel_ok:
+                parts.append(f"· {babel_ok}")
+            sections.setdefault(folder.name, []).append(" ".join(parts))
+
+    moc_dir = VAULT / "moc"
+    moc_dir.mkdir(parents=True, exist_ok=True)
+    moc_path = moc_dir / f"{_slug(project)}.md"
+
+    lines = [f"# {project}", ""]
+    for folder in sorted(sections):
+        lines.append(f"## {folder}")
+        lines.extend(sections[folder])
+        lines.append("")
+    moc_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return moc_path
