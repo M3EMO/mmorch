@@ -353,6 +353,61 @@ def mmorch_remember(
 
 
 @mcp.tool()
+def mmorch_vault_write(
+    title: str,
+    body: str,
+    project: str,
+    folder: str = "research",
+    status: str = "seed",
+    confidence: str = "",
+    sources: str = "",
+    tags: str = "",
+) -> str:
+    """Write a research note to the GLOBAL knowledge vault (single validated door,
+    spec vault-global ticket 03). Validates title + project tag (hard minimum),
+    autocompletes `created`, regenerates the project's MOC, bridges a gist to
+    memory (scope global -> recall finds it, sessions read the note by path) and
+    fires babel ingest async (gates decide if the .babel.md pays; the nightly
+    sweep is the safety net). `sources`/`tags` = comma-separated. The original
+    note is ALWAYS the source of truth. Returns JSON {path, moc}.
+    """
+    import threading
+
+    from mmorch.vault import write_validated, VAULT as _VAULT
+
+    fm: dict = {"status": status or "seed"}
+    if confidence:
+        fm["confidence"] = confidence
+    if sources:
+        fm["sources"] = [s.strip() for s in sources.split(",") if s.strip()]
+    extra = [t.strip() for t in (tags or "").split(",") if t.strip()]
+    fm["tags"] = ["research", project] + [t for t in extra if t != project]
+
+    def _bridge(gist: str) -> None:
+        # decision 09: gist textual a duckdb scope global; el recall existente
+        # lo encuentra y la sesion lee la nota completa por path.
+        _remember("global", gist, kind="vault_note")
+
+    def _babel_async(path) -> None:
+        # decision 03 pedia cola del server; thread daemon = mismo efecto async
+        # sin endpoint nuevo (upgrade path: job real en server_engine). El
+        # nightly barre notas sin babel, asi que perder este thread no pierde nada.
+        def _run():
+            try:
+                from mmorch.babel import ingest
+                ingest(path, folder=folder)
+            except Exception:
+                pass  # side-channel: el gate/nightly deciden, jamas romper el write
+        threading.Thread(target=_run, daemon=True).start()
+
+    p = write_validated(title, body, project=project, folder=folder,
+                        frontmatter=fm, remember_fn=_bridge,
+                        enqueue_babel_fn=_babel_async)
+    return json.dumps({"path": str(p), "moc": str(_VAULT / "moc" / f"{project}.md")},
+                      ensure_ascii=False)
+
+
+@mcp.tool()
 def mmorch_recall(
     query: str,
     scope: str = "global",

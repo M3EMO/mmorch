@@ -118,8 +118,10 @@ def regenerate_moc(project: str) -> Path:
             tags = fm.get("tags", "").strip("[]").replace(",", " ").split()
             if project not in tags:
                 continue
-            status = fm.get("status", "")
-            confidence = fm.get("confidence", "")
+            # los frontmatter viejos traen comentarios inline ("applied   # ..."):
+            # el MOC muestra solo el valor
+            status = fm.get("status", "").split("#")[0].strip()
+            confidence = fm.get("confidence", "").split("#")[0].strip()
             babel_ok = "babel OK" if (p.with_suffix(".babel.md")).exists() else ""
             parts = [f"- [[{p.stem}]]"]
             if status:
