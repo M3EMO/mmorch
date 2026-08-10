@@ -26,3 +26,26 @@ Exploración 2026-08-07 de Desktop\Estudio (wiki-vault Obsidian mantenido por LL
 
 ## Veredicto cross-family
 Items 1-4 son convenciones de un commit. 5-7 son grafts con ticket. El resto contenido local.
+
+## Delta 2026-08-10 (segunda pasada)
+
+Commits nuevos ae29b41/4a23dcb relevados; los 3 grafts medianos de arriba quedaron
+SHIPPED en mmorch (pair_verify 643e1ff · derive_tier 348fc27 · commit/reveal 8fd1899).
+
+Adiciones nuevas de Estudio:
+1. **Playbook de proveedores alternativos** (backend/ACTIVAR-PROVEEDORES-ALTERNATIVOS.md):
+   registry de jueces `(prompt)->str` + `judge_order` como parametro — el seam de swap ya
+   quedo cubierto por `verifier_models` de pair_verify. Norma portable: "playbook en vez de
+   codigo que no podes testear" (no instalar clients sin credenciales).
+2. **Guia de validacion piloto** (docs/validacion-piloto-1-guia.md): patron "guia para
+   cuando llegue el input real" como artefacto que gatea trabajo no-verificable. Convencion,
+   anotada.
+3. **Gate de calidad del grafo DAG** (docs/03-ruta-educativa.md, el mas fuerte): ciclos =
+   error de extraccion -> arista DEMOTED a "sugerida, sin confirmar" y excluida del topo
+   (degrade-don't-block, con flag), prereqs colgantes -> stub flaggeado, baja confianza ->
+   fallback a orden literal flaggeado. SEED para decompose de project_build: hoy re-askea
+   ante ciclo; la alternativa degradar-la-arista-con-flag es mas resiliente. No graftear
+   a ciegas: cambia semantica del plan — medir primero.
+4. HANDOFF.json auto-checkpoint por hook (generador fuera del repo) — esquema interesante,
+   ubicar el hook si se quiere adoptar.
+
