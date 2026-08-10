@@ -226,6 +226,8 @@ def ingest(path: str | Path, *, folder: str = "research",
         "derived: true\n"
         "---\n" + b + "\n", encoding="utf-8")
     out["babel_path"] = str(bp)
+    from .vault import log_op
+    log_op("ingest", f"{dst.name} (ratio {ratio}, fid {fid.score})")
     return out
 
 
@@ -254,6 +256,8 @@ def mine_lexicon(*, min_count: int = 3, write: bool = False) -> list[tuple[str, 
             lines + "\n\n_`--mine` apendea acá") if "_Vacío. `--mine`" in lex \
             else lex + "\n" + lines + "\n"
         LEXICON.write_text(new, encoding="utf-8")
+        from .vault import log_op
+        log_op("mine", f"{len(cand)} candidatos al lexicon")
     return cand
 
 

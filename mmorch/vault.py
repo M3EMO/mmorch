@@ -62,6 +62,22 @@ def _split_frontmatter(txt: str) -> tuple[dict, str]:
     return fm, parts[2].strip()
 
 
+def log_op(op: str, title: str) -> None:
+    """Log de operaciones parseable (patron Estudio): append-only en VAULT/log.md,
+    una linea `## [YYYY-MM-DD] <op> | <titulo>` — `grep "^## \\["` es la interfaz
+    de query. Ops: write | ingest | migrate | mine | note. Best-effort."""
+    try:
+        lp = VAULT / "log.md"
+        header = "" if lp.exists() else (
+            "# Log de operaciones del vault\n\n"
+            "Append-only, parseable: `grep \"^## \\[\" log.md`. "
+            "Ops: write | ingest | migrate | mine | note.\n\n")
+        with lp.open("a", encoding="utf-8") as f:
+            f.write(f"{header}## [{date.today().isoformat()}] {op} | {title}\n")
+    except OSError:
+        pass  # side-channel (auditoria): su fallo nunca rompe la operacion
+
+
 def write_validated(title: str, body: str, *, project: str, folder: str = 'research',
                     frontmatter: dict | None = None, remember_fn=None,
                     enqueue_babel_fn=None) -> Path:
@@ -81,6 +97,7 @@ def write_validated(title: str, body: str, *, project: str, folder: str = 'resea
 
     p = write_note(folder, title, body, frontmatter=fm)
     regenerate_moc(project)
+    log_op("write", f"{title} [{project}]")
 
     if remember_fn is not None:
         try:

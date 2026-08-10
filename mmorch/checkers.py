@@ -531,6 +531,38 @@ def _check_deterministic(*, code: str, runs: int = 3, timeout: float = 10.0, **_
                        f"distinta(s) en {max(2,runs)} corridas", "deterministic")
 
 
+# --- no_tell: anti-delacion en sets generados (patron Estudio curate.cjs) --- #
+def _check_no_tell(*, preferred: str, alternatives: list[str], **_) -> CheckResult:
+    """En un set generado (MCQ, candidatos best-of, opciones), la alternativa
+    'correcta'/preferida NO debe delatarse. Heuristicas robadas de Estudio
+    app/scripts/curate.cjs (medidas contra quizzes reales):
+      1. alternativa demasiado corta (<8 chars) = relleno.
+      2. restate casi-verbatim de la preferida (prefijo comun >= 70% del mas corto).
+      3. length tell: preferida larga (>150) y alternativa <65% de su largo.
+    Devuelve ok=False si ALGUNA alternativa viola (el set delata la respuesta)."""
+    def _norm(s: str) -> str:
+        return " ".join((s or "").lower().split())
+
+    pref = _norm(preferred)
+    bad: list[str] = []
+    for alt in alternatives:
+        a = _norm(alt)
+        if len(a) < 8:
+            bad.append(f"corta({len(a)})")
+            continue
+        cp = 0
+        while cp < len(a) and cp < len(pref) and a[cp] == pref[cp]:
+            cp += 1
+        if min(len(a), len(pref)) and cp / min(len(a), len(pref)) >= 0.7:
+            bad.append("restate-verbatim")
+            continue
+        if len(pref) > 150 and len(a) < 0.65 * len(pref):
+            bad.append(f"length-tell({len(a)}/{len(pref)})")
+    ok = not bad
+    return CheckResult(ok, f"no_tell: {len(alternatives)} alts, violaciones={bad or 'ninguna'}",
+                       "no_tell", True, ok)
+
+
 _REGISTRY: dict[str, Callable[..., CheckResult]] = {
     "arithmetic": _check_arithmetic,
     "code_quality": _check_code_quality,
@@ -552,6 +584,7 @@ _REGISTRY: dict[str, Callable[..., CheckResult]] = {
     "sympy_identity": _check_sympy_identity,
     "python_exec": _check_python_exec,
     "unit_test": _check_unit_test,
+    "no_tell": _check_no_tell,
 }
 
 

@@ -180,3 +180,23 @@ def test_deterministic():
     assert check("deterministic", code="print(2+2)").passed                 # reproducible
     assert not check("deterministic", code="import random; print(random.random())").passed
     assert not check("deterministic", code="import time; print(time.time())").passed
+
+
+def test_no_tell_detecta_delaciones():
+    from mmorch.checkers import check
+    # set limpio: alternativas comparables -> ok
+    r = check("no_tell", preferred="El decorador envuelve la función y preserva su firma",
+              alternatives=["El decorador reemplaza la función por una clase nueva",
+                            "El decorador ejecuta la función dos veces por defecto"])
+    assert r.passed, r.detail
+    # restate casi-verbatim de la correcta -> falla
+    r2 = check("no_tell", preferred="El decorador envuelve la función y preserva su firma",
+               alternatives=["El decorador envuelve la función y preserva su nombre"])
+    assert not r2.passed and "restate" in r2.detail
+    # length tell: correcta larga, distractor enano -> falla
+    r3 = check("no_tell", preferred="x" * 200, alternatives=["una opción corta"])
+    assert not r3.passed and "length-tell" in r3.detail
+    # relleno de <8 chars -> falla
+    r4 = check("no_tell", preferred="respuesta normal de largo razonable",
+               alternatives=["nada"])
+    assert not r4.passed and "corta" in r4.detail

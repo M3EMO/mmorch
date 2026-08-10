@@ -78,6 +78,15 @@ def test_bridge_remember_y_cola_babel(tmp_vault):
     assert calls["babel"] == [p], "job babel no encolado con el path"
 
 
+def test_log_de_operaciones_parseable(tmp_vault):
+    _, rem, enq = _fakes()
+    write_validated("Nota logueada", "cuerpo", project="mmorch",
+                    remember_fn=rem, enqueue_babel_fn=enq)
+    log = (tmp_vault / "log.md").read_text(encoding="utf-8")
+    assert re.search(r"^## \[\d{4}-\d{2}-\d{2}\] write \| Nota logueada",
+                     log, re.M), "entrada de log parseable ausente"
+
+
 def test_fallo_de_side_channels_no_rompe_el_write(tmp_vault):
     def boom(*a, **kw):
         raise RuntimeError("side channel roto")
