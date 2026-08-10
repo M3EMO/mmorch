@@ -227,7 +227,7 @@ def ingest(path: str | Path, *, folder: str = "research",
         "---\n" + b + "\n", encoding="utf-8")
     out["babel_path"] = str(bp)
     from .vault import log_op
-    log_op("ingest", f"{dst.name} (ratio {ratio}, fid {fid.score})")
+    log_op("ingest", f"{dst.name} (ratio {ratio}, fid {fid.score})", base=VAULT)
     return out
 
 

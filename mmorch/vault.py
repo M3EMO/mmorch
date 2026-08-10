@@ -62,12 +62,12 @@ def _split_frontmatter(txt: str) -> tuple[dict, str]:
     return fm, parts[2].strip()
 
 
-def log_op(op: str, title: str) -> None:
+def log_op(op: str, title: str, *, base: Path | None = None) -> None:
     """Log de operaciones parseable (patron Estudio): append-only en VAULT/log.md,
     una linea `## [YYYY-MM-DD] <op> | <titulo>` — `grep "^## \\["` es la interfaz
     de query. Ops: write | ingest | migrate | mine | note. Best-effort."""
     try:
-        lp = VAULT / "log.md"
+        lp = (base or VAULT) / "log.md"
         header = "" if lp.exists() else (
             "# Log de operaciones del vault\n\n"
             "Append-only, parseable: `grep \"^## \\[\" log.md`. "
