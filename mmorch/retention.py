@@ -97,6 +97,41 @@ def mmr_rerank(items: list, scores: list[float], k: int, *, lam: float = 0.7) ->
     return [items[i] for i in chosen]
 
 
+# --------------------------------------------------------------------------- #
+# derive_tier (graft Estudio app/src/engine/progress/derive-tier.ts, 2026-08-07):
+# maquina de estados de mastery para RESURFACING — decide que item re-mostrar.
+# Reglas EN ORDEN, la primera que aplica gana. Ventanas en multiplos de 7 dias.
+# La guardia de solido evita "score reciente bueno pero fallas viejas sin
+# resolver". Uso en mmorch: items del vault / notas / conceptos con historial
+# de outcomes (ok, first_try, last_seen_ts).
+# --------------------------------------------------------------------------- #
+_DAY = 86400.0
+FAIL_WINDOW = 7 * _DAY      # fallo en la ultima semana -> repasar
+STALE_WINDOW = 56 * _DAY    # sin verse en 8 semanas -> repasar
+FRESH_WINDOW = 21 * _DAY    # solido requiere visto en las ultimas 3 semanas
+SOLIDO_FIRST_TRY_RATIO = 0.8
+
+
+def derive_tier(records: list[dict], now: float) -> str:
+    """'nuevo' | 'repasar' | 'solido' | 'en-progreso'.
+
+    records: [{"ok": bool, "first_try": bool, "last_seen": ts}] — un registro por
+    item/pregunta que cubre el concepto, con al menos un intento."""
+    rel = [r for r in records if r.get("last_seen") is not None]
+    if not rel:
+        return "nuevo"
+    if any(not r.get("ok") and now - r["last_seen"] <= FAIL_WINDOW for r in rel):
+        return "repasar"
+    if all(now - r["last_seen"] > STALE_WINDOW for r in rel):
+        return "repasar"
+    fresh_first = [r for r in rel
+                   if r.get("first_try") and now - r["last_seen"] <= FRESH_WINDOW]
+    ratio = sum(1 for r in rel if r.get("first_try")) / len(rel)
+    if len(fresh_first) >= 2 and ratio >= SOLIDO_FIRST_TRY_RATIO:
+        return "solido"
+    return "en-progreso"
+
+
 if __name__ == "__main__":
     # demo/self-check (ponytail: una verificacion corrible deja el modulo terminado)
     import time
@@ -134,4 +169,20 @@ if __name__ == "__main__":
     # k >= n devuelve todo; k=0 devuelve nada
     assert len(mmr_rerank(dups, [1, 1, 1, 1], 10)) == 4
     assert mmr_rerank(dups, [1, 1, 1, 1], 0) == []
-    print("retention self-check OK")
+
+    # derive_tier: las 4 reglas en orden + la guardia de solido
+    t = now
+    assert derive_tier([], t) == "nuevo"
+    assert derive_tier([{"ok": False, "first_try": False, "last_seen": t - 2 * _DAY}],
+                       t) == "repasar", "fallo reciente"
+    assert derive_tier([{"ok": True, "first_try": True, "last_seen": t - 60 * _DAY}],
+                       t) == "repasar", "todo stale"
+    solido = [{"ok": True, "first_try": True, "last_seen": t - 5 * _DAY},
+              {"ok": True, "first_try": True, "last_seen": t - 10 * _DAY},
+              {"ok": True, "first_try": True, "last_seen": t - 30 * _DAY}]
+    assert derive_tier(solido, t) == "solido"
+    # GUARDIA: 2 first-try frescos pero ratio global 0.5 < 0.8 -> en-progreso
+    mixed = solido[:2] + [{"ok": True, "first_try": False, "last_seen": t - 30 * _DAY},
+                          {"ok": True, "first_try": False, "last_seen": t - 40 * _DAY}]
+    assert derive_tier(mixed, t) == "en-progreso", "guardia de fallas viejas"
+    print("retention self-check OK (rank+mmr+derive_tier)")
