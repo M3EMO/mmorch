@@ -155,6 +155,87 @@ def multiview_verify(
 
 
 # ---------------------------------------------------------------------------
+# pair_verify (graft Estudio backend/grade, leido 2026-08-07): el grading service
+# de Estudio productizo 3 mecanicas que ensemble_verify no tenia:
+#   1. FAST-PATH de costo: si el 1er juez da veredicto EXTREMO (conf <=0.2 o >=0.8)
+#      y el artefacto es corto (<50 palabras), el 2do juez no aporta — 1 llamada.
+#   2. SNAP a niveles discretos anclados (0/.2/.4/.6/.8/1) FLAGGEANDO el ajuste
+#      (nunca aceptar silencioso un valor fuera de escala).
+#   3. DESACUERDO -> tag explicito + notas POR JUEZ preservadas; el promedio se
+#      muestra como estimacion, JAMAS como veredicto final silencioso (escala).
+# ---------------------------------------------------------------------------
+DISCRETE_LEVELS = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+_EXTREME_LOW, _EXTREME_HIGH = 0.2, 0.8
+_SHORT_WORDS = 50
+
+
+def snap_discrete(score: float) -> tuple[float, bool]:
+    """(nivel_anclado_mas_cercano, hubo_ajuste). El flag viaja al veredicto."""
+    lvl = min(DISCRETE_LEVELS, key=lambda x: abs(x - score))
+    return lvl, lvl != score
+
+
+@dataclass
+class PairVerdict:
+    passed: bool | None          # None = desacuerdo -> escalar (nunca promediar en silencio)
+    confidence: float            # snapeada; en desacuerdo = promedio MOSTRADO como estimacion
+    fast_path: bool              # True = 1 solo juez (extremo + corto)
+    disagreement: bool
+    flags: list[str] = field(default_factory=list)
+    judge_notes: list[dict] = field(default_factory=list)  # [{judge, passed, confidence, refutations}]
+    cost_usd: float = 0.0
+
+
+def pair_verify(artifact: str, *, rubric: str, gen_model: str = DEFAULT_GENERATOR,
+                verifier_models: list[str] | None = None,
+                fast_path: bool = True, verify_fn=None) -> PairVerdict:
+    """2 jueces cross-family con fast-path de costo y desacuerdo explicito.
+    `verify_fn(artifact, rubric, gen_model, verifier_model)->Verdict` inyectable
+    (self-check cero-costo); default = adversarial_verify."""
+    verifier_models = verifier_models or ["gemini-3.1-flash-lite", "gemini-2.5-flash"]
+    gf = family_of(gen_model)
+    for vm in verifier_models:
+        if family_of(vm) == gf:
+            raise ValueError(f"OneFlow: verifier {vm} comparte familia ({gf}) con gen.")
+    if verify_fn is None:
+        def verify_fn(a, r, g, v):
+            return adversarial_verify(a, rubric=r, gen_model=g, verifier_model=v)
+
+    flags: list[str] = []
+
+    def _note(v) -> dict:
+        return {"judge": v.verifier_model, "passed": v.passed,
+                "confidence": v.confidence, "refutations": list(v.refutations)}
+
+    v1 = verify_fn(artifact, rubric, gen_model, verifier_models[0])
+    c1, adj = snap_discrete(v1.confidence)
+    if adj:
+        flags.append(f"score_ajustado_de_{v1.confidence}_a_nivel_discreto")
+    extreme = c1 <= _EXTREME_LOW or c1 >= _EXTREME_HIGH
+    if fast_path and extreme and len(artifact.split()) < _SHORT_WORDS:
+        return PairVerdict(passed=v1.passed, confidence=c1, fast_path=True,
+                           disagreement=False, flags=flags, judge_notes=[_note(v1)],
+                           cost_usd=v1.cost_usd)
+
+    v2 = verify_fn(artifact, rubric, gen_model, verifier_models[1])
+    c2, adj2 = snap_discrete(v2.confidence)
+    if adj2:
+        flags.append(f"score_ajustado_de_{v2.confidence}_a_nivel_discreto")
+    notes = [_note(v1), _note(v2)]
+    cost = v1.cost_usd + v2.cost_usd
+    if v1.passed == v2.passed:
+        return PairVerdict(passed=v1.passed, confidence=round((c1 + c2) / 2, 2),
+                           fast_path=False, disagreement=False, flags=flags,
+                           judge_notes=notes, cost_usd=cost)
+    # desacuerdo: con 2 jueces no hay mayoria — se escala (passed=None); el
+    # promedio queda como estimacion visible, con las notas de cada juez.
+    flags.append("desacuerdo_cross_family")
+    return PairVerdict(passed=None, confidence=round((c1 + c2) / 2, 2),
+                       fast_path=False, disagreement=True, flags=flags,
+                       judge_notes=notes, cost_usd=cost)
+
+
+# ---------------------------------------------------------------------------
 # memory_consistency (patron PULSE, npj Digit Med 2026, leido 2026-07): el MISMO
 # modelo responde SIN memoria (solo parametrico) y CON las notas recuperadas como
 # contexto. El diff entre ambas es senal DETERMINISTA (Jaccard, cero LLM-judge):
@@ -235,4 +316,31 @@ if __name__ == "__main__":
         return "x"
     r3 = memory_consistency("q", call_fn=_counting, recall_fn=lambda q, s, k: [])
     assert r3.notes_used == 0 and calls["n"] == 1 and r3.divergence == 0.0
-    print("ensemble self-check OK (memory_consistency)")
+
+    # 4. pair_verify: fast-path, snap flaggeado, desacuerdo -> escalate
+    from .patterns import Verdict as _V
+
+    def _mk(passed, conf, model):
+        return _V(passed=passed, confidence=conf, refutations=[], raw="",
+                  verifier_model=model, cost_usd=0.01)
+    n_calls = {"n": 0}
+
+    def _vf(conf2=0.6, pass2=True):
+        def f(a, r, g, v):
+            n_calls["n"] += 1
+            return _mk(True, 0.95, v) if n_calls["n"] == 1 else _mk(pass2, conf2, v)
+        return f
+    # extremo (0.95 snapea a 1.0 con flag) + corto -> 1 solo juez
+    pv = pair_verify("corto", rubric="r", verify_fn=_vf())
+    assert pv.fast_path and n_calls["n"] == 1 and pv.confidence == 1.0
+    assert any("ajustado" in fl for fl in pv.flags), pv.flags
+    # largo -> 2 jueces; acuerdo -> passed definido
+    n_calls["n"] = 0
+    pv2 = pair_verify("palabra " * 60, rubric="r", verify_fn=_vf(conf2=0.8))
+    assert not pv2.fast_path and n_calls["n"] == 2 and pv2.passed is True
+    # desacuerdo -> passed=None (escalar), tag, notas por juez preservadas
+    n_calls["n"] = 0
+    pv3 = pair_verify("palabra " * 60, rubric="r", verify_fn=_vf(pass2=False, conf2=0.2))
+    assert pv3.passed is None and pv3.disagreement
+    assert "desacuerdo_cross_family" in pv3.flags and len(pv3.judge_notes) == 2
+    print("ensemble self-check OK (memory_consistency + pair_verify)")
