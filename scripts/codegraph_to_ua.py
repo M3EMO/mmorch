@@ -48,17 +48,23 @@ def convert(repo: Path) -> dict:
     con.row_factory = sqlite3.Row
 
     nodes, keep = [], {}
-    for r in con.execute("SELECT id, kind, name, qualified_name, file_path, start_line, end_line FROM nodes"):
+    for r in con.execute("SELECT id, kind, name, qualified_name, file_path, start_line, end_line,"
+                         " docstring, signature FROM nodes"):
         ua_type = KIND_MAP.get(r["kind"])
         if ua_type is None:  # import/variable = ruido para el dashboard
             continue
         ua_type = _file_type(r["file_path"]) if ua_type == "file" else ua_type
         keep[r["id"]] = r["id"]
+        # docstring del indice > heuristica: primera linea, es la mejor sintesis gratis
+        doc = (r["docstring"] or "").strip().splitlines()
+        summary = doc[0].strip() if doc else (
+            f"{r['kind']} {r['qualified_name'] or r['name']}"
+            + (f"{r['signature']}" if r["signature"] else "")
+            + (f" (lineas {r['start_line']}-{r['end_line']})" if r["start_line"] else ""))
         nodes.append({
             "id": r["id"], "type": ua_type, "name": r["name"],
             "filePath": r["file_path"],
-            "summary": f"{r['kind']} {r['qualified_name'] or r['name']}"
-                       + (f" (lineas {r['start_line']}-{r['end_line']})" if r["start_line"] else ""),
+            "summary": summary,
             "tags": [r["kind"]],
             "complexity": _complexity(r["start_line"], r["end_line"]),
         })
@@ -115,12 +121,83 @@ def convert(repo: Path) -> dict:
     }
 
 
+_TOUR_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "project_description": {"type": "string"},
+        "layers": {"type": "object"},
+        "tour": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"order": {"type": "number"}, "title": {"type": "string"},
+                           "description": {"type": "string"},
+                           "nodeIds": {"type": "array", "items": {"type": "string"}}},
+            "required": ["order", "title", "description", "nodeIds"]}},
+    },
+    "required": ["project_description", "layers", "tour"],
+}
+
+
+def narrate(graph: dict) -> dict:
+    """Pase LLM barato (DeepSeek via mmorch, centavos): descripcion de proyecto/capas
+    + tour guiado, generado SOLO sobre el grafo exacto (docstrings incluidos).
+    nodeIds inventados se descartan (validacion contra el grafo, no confianza).
+    Falla -> el grafo queda sin narrar (la narrativa es side-channel, no gate)."""
+    from mmorch.schema import SchemaGateError, gated_json
+
+    valid_ids = {n["id"] for n in graph["nodes"]}
+    hub_fanin: dict[str, int] = {}
+    for e in graph["edges"]:
+        hub_fanin[e["target"]] = hub_fanin.get(e["target"], 0) + 1
+    hubs = sorted((n for n in graph["nodes"] if n["type"] != "function"),
+                  key=lambda n: -hub_fanin.get(n["id"], 0))[:40]
+    ctx = {
+        "project": graph["project"]["name"],
+        "layers": [{"id": ly["id"], "name": ly["name"], "n_files": len(ly["nodeIds"]),
+                    "files": ly["nodeIds"][:25]} for ly in graph["layers"]],
+        "hubs": [{"id": n["id"], "fan_in": hub_fanin.get(n["id"], 0),
+                  "summary": n["summary"][:150]} for n in hubs],
+    }
+    prompt = (
+        "Sos un guia de codebases. Con este grafo (capas, archivos, hubs por fan-in y "
+        "sus docstrings) genera:\n"
+        "1. project_description: 2 frases de que es el proyecto.\n"
+        "2. layers: dict id_de_capa -> descripcion de 1-2 frases del ROL de esa capa.\n"
+        "3. tour: 6-10 pasos ordenados por dependencia (entry points primero) para "
+        "aprender el repo; cada paso con title, description (3-4 frases, concreto, "
+        "menciona archivos por nombre) y nodeIds (SOLO ids que aparecen en el contexto).\n"
+        "Responde JSON.\n\n" + json.dumps(ctx, ensure_ascii=False)
+    )
+    try:
+        out = gated_json("deepseek-chat", [{"role": "user", "content": prompt}],
+                         schema=_TOUR_SCHEMA, phase="ua_narrate")
+    except SchemaGateError as e:
+        print(f"[narrate] fallo el schema gate, grafo queda sin tour: {e}")
+        return graph
+    graph["project"]["description"] = out["project_description"]
+    for ly in graph["layers"]:
+        if ly["id"] in out["layers"]:
+            ly["description"] = str(out["layers"][ly["id"]])
+    tour = []
+    for i, step in enumerate(out["tour"], 1):
+        ids = [x for x in step["nodeIds"] if x in valid_ids]  # anti-alucinacion
+        if ids:
+            tour.append({"order": i, "title": step["title"],
+                         "description": step["description"], "nodeIds": ids})
+    graph["tour"] = tour
+    print(f"[narrate] tour de {len(tour)} pasos + {len(out['layers'])} capas narradas")
+    return graph
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("repo", type=Path)
     p.add_argument("--out", type=Path, default=None)
+    p.add_argument("--narrate", action="store_true",
+                   help="pase DeepSeek (centavos) para descripcion de capas + tour")
     a = p.parse_args()
     graph = convert(a.repo.resolve())
+    if a.narrate:
+        graph = narrate(graph)
     out_dir = a.out or (a.repo.resolve() / ".ua")
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / "knowledge-graph.json"
