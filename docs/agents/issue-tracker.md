@@ -2,6 +2,8 @@
 
 Issues and specs (you may know a spec as a PRD) for this repo live as markdown files in `.scratch/`.
 
+**Partition rule (single source):** `.scratch/<effort>/` holds wayfinder maps + tickets scoped to that effort (lifetime = the effort). Durable cross-session backlog lives in bd (beads) — see CLAUDE.md "Beads Issue Tracker". An item that outlives its effort gets PROMOTED to bd (one issue pointing at the file); nothing lives in both systems at once.
+
 ## Conventions
 
 - One feature per directory: `.scratch/<feature-slug>/`

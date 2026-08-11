@@ -6,19 +6,12 @@ al trabajar en este directorio. La regla de ruteo corta vive en el CLAUDE.md glo
 Recurso escaso = **cupo** del plan Claude (no dolares). Generacion masiva y
 verificacion se delegan a modelos externos baratos por API para **liberar cupo**.
 Libreria: `~/.claude/orchestration/` (paquete `mmorch`, Python). Tambien expuesta
-como MCP server `mmorch` (20 tools: `mmorch_fan_out`, `mmorch_adversarial_verify`,
-`mmorch_metrics_summary`, `mmorch_route`, `mmorch_cascade`, `mmorch_ensemble_verify`,
-`mmorch_learn`, `mmorch_innovate`, `mmorch_remember`, `mmorch_recall`,
-`mmorch_memory_stats`, `mmorch_tournament`, `mmorch_bucket_rank`, `mmorch_classify`,
-`mmorch_record_outcome`, `mmorch_feedback_stats`, `mmorch_check`, `mmorch_evolve_self`,
-`mmorch_orchestra`, `mmorch_consolidate`).
-Modulos cognitivos (de bitterbot, reimplementados, 2026-06): retencion (decay
-Ebbinghaus + Zeigarnik) y reconsolidacion. Tools nuevos: `mmorch_reinforce`,
-`mmorch_flag_contradiction`, `mmorch_pending_review`, `mmorch_resolve_review`,
-`mmorch_close_loop` (+ params open_loop/permanent en remember, forget en consolidate).
-Ver memoria [[mmorch-cognitive-modules]].
-Versionado git: tag `v1.1`. Reload Claude Code para cargar
-los tools nuevos.
+como MCP server `mmorch`. **Lista de tools: NO se duplica aca — la fuente unica es
+`mcp_server.py`** (46 tools a 2026-08; grep `mmorch_` ahi o mira el listado MCP de la
+sesion). Modulos cognitivos (de bitterbot, reimplementados, 2026-06): retencion (decay
+Ebbinghaus + Zeigarnik) y reconsolidacion; ver memoria [[mmorch-cognitive-modules]].
+Version: la de `pyproject.toml` (fuente unica; no citar tags aca). Reload Claude Code
+para cargar tools nuevos.
 
 ## Decision dura: cupo (Workflow nativo) vs API barata (mmorch)
 - **Flujo recurrente/entendido** (bulk gen, verificar, rutear repetido) → `mmorch`
@@ -40,10 +33,11 @@ los tools nuevos.
 - **Observabilidad.** Todo nodo loggea a `~/.claude/orchestration/logs/metrics.jsonl`
   (tokens, costo, latencia, familia). Sin metricas no se valida el break-even.
 
-## Modelos activos (MVP)
-- `deepseek-chat` (DeepSeek, bulk) · `gemini-2.5-flash` (Google, verificador cross-family)
-- `gemini-2.5-flash-lite` (routing) · Kimi configurado pero inactivo (sin key).
-- Precios y roles: `mmorch/config.py` (fuente unica). Reverificar precios (volatiles).
+## Modelos activos
+- Roles, modelos por rol (DEFAULT_VERIFIER etc.) y precios: `mmorch/config.py` es la
+  **fuente unica** — no duplicar nombres de modelo aca (drift garantizado; el audit
+  2026-08 encontro este doc citando un verifier legacy +67% mas caro que el real).
+- Invariante que si vive aca: bulk=DeepSeek, verificador=Google (cross-family).
 
 ## Capacidades (2026-06-07)
 - **Patrones:** `fan_out` (bulk paralela), `adversarial_verify` (escéptico cross-family),
@@ -146,6 +140,11 @@ bd close <id>         # Complete work
 - Use `bd` for durable issue/backlog tracking (cross-session). TodoWrite/TaskCreate
   are fine for ephemeral in-session plans (e.g. the plan-and-verify skill) — different
   layer, they do NOT compete with bd.
+- **Particion bd vs `.scratch/` (regla unica):** bd = backlog durable cross-session;
+  `.scratch/<effort>/` = mapas wayfinder + tickets DE ese esfuerzo (vida = el esfuerzo).
+  Un item de `.scratch/` que sobrevive a su esfuerzo se PROMUEVE a bd (un issue con
+  puntero al file) — nunca vive en los dos lados a la vez. Detalle operativo:
+  `docs/agents/issue-tracker.md`.
 - Run `bd prime` for command reference.
 - Memory: the global auto-memory (MEMORY.md) and mmorch's own semantic memory
   (`mmorch_remember`/`mmorch_recall`) are the knowledge stores. Do NOT route knowledge
