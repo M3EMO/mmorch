@@ -14,7 +14,7 @@ import threading
 import time
 from pathlib import Path
 
-from .iohelpers import read_jsonl_tolerant
+from .iohelpers import read_jsonl_cached, read_jsonl_tail
 
 _LOCK = threading.Lock()
 
@@ -63,7 +63,9 @@ def log_event(
 
 
 def read_events() -> list[dict]:
-    return read_jsonl_tolerant(_LOG_PATH)
+    # Ticket 13 (audit-2026-08): cacheado por (mtime_ns, size) — metrics.jsonl es
+    # append-only sin rotación, así que "no cambió de tamaño/mtime" == "misma historia".
+    return read_jsonl_cached(_LOG_PATH)
 
 
 def error_rates(*, window_n: int | None = 200, window_s: float | None = None) -> dict:
@@ -75,13 +77,22 @@ def error_rates(*, window_n: int | None = 200, window_s: float | None = None) ->
 
     window_n: últimos N eventos (default 200). window_s: solo eventos de los últimos S
     segundos (si se da, se aplica ADEMÁS de window_n). Denominador = todos los eventos del
-    modelo en la ventana (éxitos + errores + cap-hits) = tasa sobre intentos reales."""
-    events = read_events()
-    if window_s is not None:
-        cut = time.time() - window_s
-        events = [e for e in events if e.get("ts", 0) >= cut]
-    if window_n is not None:
-        events = events[-window_n:]
+    modelo en la ventana (éxitos + errores + cap-hits) = tasa sobre intentos reales.
+
+    Ticket 13: cuando solo se pide window_n (el caso caliente — intuition.healthy() en
+    cada route()), lee el TAIL del archivo directo en vez de parsear la historia completa
+    vía read_events(). window_s exige mirar más atrás que N líneas (no sabemos cuántas
+    entran en S segundos) así que ahí cae al read_events() cacheado (igual de rápido en
+    calls repetidas, sólo el primer parse post-mtime-change paga el costo completo)."""
+    if window_s is None and window_n is not None:
+        events = read_jsonl_tail(log_path(), window_n)
+    else:
+        events = read_events()
+        if window_s is not None:
+            cut = time.time() - window_s
+            events = [e for e in events if e.get("ts", 0) >= cut]
+        if window_n is not None:
+            events = events[-window_n:]
 
     def _blank() -> dict:
         return {"calls": 0, "rate_limit": 0, "budget_cap": 0, "timeout": 0, "other_error": 0}

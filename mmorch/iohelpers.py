@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +54,65 @@ def read_jsonl_tolerant(path: Path) -> list[dict]:
             out.append(json.loads(ln))
         except Exception:
             continue   # una linea corrupta no rompe el resto de la lectura
+    return out
+
+
+_JSONL_CACHE_LOCK = threading.Lock()
+# path (str) -> ((mtime_ns, size), parsed rows). Ticket 13 (audit-2026-08): metrics.jsonl/
+# feedback.jsonl son append-only SIN rotación, así que (mtime_ns, size) alcanza como llave
+# de invalidación — un archivo que no cambió de tamaño/mtime no puede tener nuevas líneas.
+_JSONL_CACHE: dict[str, tuple[tuple[int, int], list[dict]]] = {}
+
+
+def _stat_key(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+        return st.st_mtime_ns, st.st_size
+    except OSError:
+        return None
+
+
+def read_jsonl_cached(path: Path) -> list[dict]:
+    """`read_jsonl_tolerant(path)` con cache módulo-level por (mtime_ns, size): si el
+    archivo no cambió desde la última lectura, devuelve la MISMA lista ya parseada en vez
+    de reparsear miles de líneas por call (route/budget lo llaman antes de cada API call,
+    ×8 concurrente en fan_out). Thread-safe: el lock rodea el check-and-fill completo,
+    así 2 threads que ven el mismo mtime no pisan la entrada del otro a medias."""
+    key = str(path)
+    sk = _stat_key(path)
+    with _JSONL_CACHE_LOCK:
+        cached = _JSONL_CACHE.get(key)
+        if cached is not None and sk is not None and cached[0] == sk:
+            return cached[1]
+        parsed = read_jsonl_tolerant(path)
+        if sk is not None:
+            _JSONL_CACHE[key] = (sk, parsed)
+        return parsed
+
+
+def read_jsonl_tail(path: Path, max_lines: int, *, chunk_size: int = 65536) -> list[dict]:
+    """Lee solo las últimas `max_lines` líneas de un .jsonl append-only, sin parsear la
+    historia completa: seekea desde el final leyendo de a `chunk_size` bytes hasta juntar
+    suficientes newlines (o llegar al principio del archivo). Para consumidores VENTANEADOS
+    (ej error_rates(window_n=200) sobre un log de 13.5k líneas) — evita el O(historia)."""
+    if max_lines <= 0 or not path.exists():
+        return []
+    with open(path, "rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        pos = fh.tell()
+        block = b""
+        while pos > 0 and block.count(b"\n") <= max_lines:
+            step = min(chunk_size, pos)
+            pos -= step
+            fh.seek(pos)
+            block = fh.read(step) + block
+    lines = [ln.strip() for ln in block.decode("utf-8", errors="ignore").splitlines() if ln.strip()]
+    out: list[dict] = []
+    for ln in lines[-max_lines:]:
+        try:
+            out.append(json.loads(ln))
+        except Exception:
+            continue   # una linea corrupta no rompe el resto de la lectura (mismo idioma que tolerant)
     return out
 
 

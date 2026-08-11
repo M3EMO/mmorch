@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-from .iohelpers import atomic_write_json, load_json_tolerant, read_jsonl_tolerant
+from .iohelpers import atomic_write_json, load_json_tolerant, read_jsonl_cached
 
 _log = logging.getLogger(__name__)
 
@@ -77,7 +77,9 @@ def contextual_arm(model: str, thr: float | None = None, ctx: str | None = None)
 
 
 def read_outcomes(path: Path = _FEEDBACK_LOG) -> list[dict]:
-    return read_jsonl_tolerant(path)
+    # Ticket 13 (audit-2026-08): cacheado por (mtime_ns, size) — feedback.jsonl es
+    # append-only sin rotación, así que "no cambió de tamaño/mtime" == "misma historia".
+    return read_jsonl_cached(path)
 
 
 class ThompsonBandit:

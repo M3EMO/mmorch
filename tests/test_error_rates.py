@@ -67,6 +67,28 @@ def test_error_rates_window_n_limits(tmp_path, monkeypatch):
     assert r["window_events"] == 1 and "deepseek-chat" not in r["by_model"]
 
 
+# ---- ticket 13 (audit-2026-08): tail-read path for window_n-only consumers -------------
+def test_error_rates_window_n_matches_full_read_equivalent(tmp_path, monkeypatch):
+    """window_n sin window_s ahora usa read_jsonl_tail() en vez de read_events() completo
+    -> el resultado tiene que ser IDENTICO al camino viejo (full read + slice)."""
+    _seed_log(tmp_path, monkeypatch)
+    tail_path = MET.log_path()
+    fast = MET.error_rates(window_n=3)
+    # camino viejo, a mano: leer todo + slice
+    from mmorch.iohelpers import read_jsonl_tolerant
+    all_events = read_jsonl_tolerant(tail_path)
+    old_events = all_events[-3:]
+    assert fast["window_events"] == len(old_events) == 3
+
+
+def test_error_rates_window_s_still_uses_full_read(tmp_path, monkeypatch):
+    # window_s se aplica ADEMAS de window_n -> sigue necesitando la historia completa
+    # (no sabemos cuántas líneas entran en S segundos) — no debe romperse.
+    _seed_log(tmp_path, monkeypatch)
+    r = MET.error_rates(window_n=200, window_s=3600 * 24 * 365)
+    assert r["window_events"] == 5
+
+
 # ---- providers wiring: el except y el budget-cap loggean error_class ---------
 def test_call_logs_rate_limit_class(monkeypatch):
     cap = {}

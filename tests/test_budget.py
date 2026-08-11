@@ -57,3 +57,35 @@ def test_status(monkeypatch):
     monkeypatch.setattr(budget, "monthly_spend", lambda *a, **k: 5.5)
     s = budget.status()
     assert s["enforced"] and s["limit"] == 10.0 and s["remaining"] == 4.5
+
+
+# ---- monthly_spend accumulator cache (ticket 13, audit-2026-08) ------------------------
+class _CountingEvents(list):
+    """Misma lista (mismo id) pero cuenta cuántas veces se recorre — pa probar que un
+    cache-hit del acumulador NO vuelve a sumar los 13.5k eventos."""
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.iterations = 0
+
+    def __iter__(self):
+        self.iterations += 1
+        return super().__iter__()
+
+
+def test_monthly_spend_does_not_resum_on_cache_hit(monkeypatch):
+    events = _CountingEvents(_FAKE)
+    monkeypatch.setattr(budget, "read_events", lambda: events)
+    monkeypatch.delenv("MMORCH_MAX_MONTHLY_USD", raising=False)
+    first = budget.monthly_spend("2026-06")
+    second = budget.monthly_spend("2026-06")
+    assert first == second == 5.5
+    assert events.iterations == 1   # el segundo call fue cache-hit, no re-sumó
+
+
+def test_monthly_spend_cached_matches_manual_sum(monkeypatch):
+    # Equivalencia de resultado: el path cacheado suma lo mismo que sumar a mano.
+    events = _CountingEvents(_FAKE)
+    monkeypatch.setattr(budget, "read_events", lambda: events)
+    monkeypatch.delenv("MMORCH_MAX_MONTHLY_USD", raising=False)
+    expected = round(sum(e["cost_usd"] for e in _FAKE if e["iso"].startswith("2026-06")), 6)
+    assert budget.monthly_spend("2026-06") == expected == 5.5

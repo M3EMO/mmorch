@@ -12,6 +12,7 @@ el server factura). El BudgetKeeper es conservador igual — mejor frenar de má
 from __future__ import annotations
 
 import os
+import threading
 from datetime import datetime
 
 from .metrics import read_events
@@ -19,6 +20,15 @@ from .metrics import read_events
 
 class BudgetExceeded(RuntimeError):
     """El gasto del mes superó MMORCH_MAX_MONTHLY_USD y la call no es crítica/override."""
+
+
+_SPEND_LOCK = threading.Lock()
+# (id(events), len(events), month) -> total. `events` viene de read_events(), que ya
+# cachea por (mtime_ns, size) — misma lista (mismo id) == mismo archivo sin cambios.
+# Así el acumulador se apoya en la MISMA invalidación sin duplicar el stat del path acá,
+# y no re-suma 13.5k eventos por call (budget.check() corre antes de CADA API call,
+# ×8 concurrente en fan_out). len() de más evita colisiones si algún día se reusa un id.
+_SPEND_CACHE: dict[tuple[int, int, str], float] = {}
 
 
 def max_monthly_usd() -> float | None:
@@ -36,12 +46,21 @@ def monthly_spend(month: str | None = None) -> float:
     """Suma cost_usd de metrics.jsonl del mes (YYYY-MM). month=None → mes actual."""
     if month is None:
         month = datetime.now().strftime("%Y-%m")
+    events = read_events()
+    cache_key = (id(events), len(events), month)
+    with _SPEND_LOCK:
+        cached = _SPEND_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
     total = 0.0
-    for e in read_events():
+    for e in events:
         iso = e.get("iso", "")
         if isinstance(iso, str) and iso.startswith(month):
             total += e.get("cost_usd", 0.0) or 0.0
-    return round(total, 6)
+    total = round(total, 6)
+    with _SPEND_LOCK:
+        _SPEND_CACHE[cache_key] = total
+    return total
 
 
 def remaining() -> float | None:
