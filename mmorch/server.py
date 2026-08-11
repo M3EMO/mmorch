@@ -39,10 +39,10 @@ async def home(request):
     return HTMLResponse(_FRONTEND)
 
 
-async def state_snapshot(request):
-    from starlette.responses import JSONResponse
-    if not _token_ok(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+def _state_snapshot_sync() -> dict:
+    """Sync body of state_snapshot: several metrics.jsonl parses + file reads. Run off the
+    event loop via run_in_threadpool so concurrent SSE/requests don't wait on it (GIL still
+    serializes CPU, but the loop stays free to service other I/O meanwhile)."""
     from .metrics import summary, error_rates, cache_stats
     from .budget import status as bstatus
     from .nodes import sections, conductor
@@ -52,13 +52,21 @@ async def state_snapshot(request):
         jobs = {k: {"status": v["status"], "kind": v["kind"], "title": v.get("title", ""),
                     "ts": v.get("ts", 0), "host": v.get("host", "local"),
                     "engine": v.get("engine", ""), "parent": v.get("parent")} for k, v in _JOBS.items()}
-    return JSONResponse({
+    return {
         "conductor": conductor(), "sections": sections(), "summary": summary(),
         "error_rates": error_rates(window_n=200), "cache": cache_stats(window_n=200),
         "budget": bstatus(), "jobs": jobs, "exec_policy": current_policy(),
         "budget_incidents": _bp_eval(_bp_load(), _bp_snap()),
         "recent": [e.to_dict() for e in bus().recent(50)],
-    })
+    }
+
+
+async def state_snapshot(request):
+    from starlette.responses import JSONResponse
+    from starlette.concurrency import run_in_threadpool
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return JSONResponse(await run_in_threadpool(_state_snapshot_sync))
 
 
 async def sse_events(request):
@@ -287,12 +295,9 @@ async def chat_history(request):
     return JSONResponse(chat_store.history(before, limit))
 
 
-async def benchmarks_handler(request):
-    """Real benchmark strip for Lotus (replaces MOCK_BENCH): live system metrics in the
-    front's shape {key,label,value,fmt,delta,good,spark}. delta/spark need history -> v1 empty."""
-    from starlette.responses import JSONResponse
-    if not _token_ok(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+def _benchmarks_sync() -> list:
+    """Sync body of benchmarks_handler: metrics.jsonl parses + memory DB read. Run off the
+    event loop via run_in_threadpool (same pattern as chat_handler/minds_handler)."""
     out = []
 
     def _row(key, label, value, fmt, good):
@@ -324,7 +329,17 @@ async def benchmarks_handler(request):
                  "pct", "high")
     except Exception:
         pass
-    return JSONResponse({"benchmarks": out})
+    return out
+
+
+async def benchmarks_handler(request):
+    """Real benchmark strip for Lotus (replaces MOCK_BENCH): live system metrics in the
+    front's shape {key,label,value,fmt,delta,good,spark}. delta/spark need history -> v1 empty."""
+    from starlette.responses import JSONResponse
+    from starlette.concurrency import run_in_threadpool
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return JSONResponse({"benchmarks": await run_in_threadpool(_benchmarks_sync)})
 
 
 async def minds_handler(request):

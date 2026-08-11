@@ -7,9 +7,10 @@ Cada verificador DEBE ser cross-family vs el generador (OneFlow). Empate -> fall
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
-from .config import DEFAULT_GENERATOR, family_of
+from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER, family_of
 from .patterns import adversarial_verify, Verdict
 
 
@@ -48,15 +49,18 @@ def ensemble_verify(
     Activar mas familias (Kimi, etc.) decorrelaciona mejor (research: error
     correlacionado por confounders compartidos).
     """
-    verifier_models = verifier_models or ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+    verifier_models = verifier_models or [DEFAULT_VERIFIER, "gemini-2.5-flash-lite"]
     gf = family_of(gen_model)
     for vm in verifier_models:
         if family_of(vm) == gf:
             raise ValueError(
                 f"OneFlow: verifier {vm} comparte familia ({gf}) con gen {gen_model}.")
-    verdicts = [adversarial_verify(artifact, rubric=rubric, gen_model=gen_model,
-                                   verifier_model=vm, phase=phase)
-                for vm in verifier_models]
+    # Calls independientes -> paralelas; map preserva el orden de verdicts por indice.
+    with ThreadPoolExecutor(max_workers=len(verifier_models)) as ex:
+        verdicts = list(ex.map(
+            lambda vm: adversarial_verify(artifact, rubric=rubric, gen_model=gen_model,
+                                          verifier_model=vm, phase=phase),
+            verifier_models))
     n_pass = sum(1 for v in verdicts if v.passed)
     n_fail = len(verdicts) - n_pass
     if min_veto is not None:

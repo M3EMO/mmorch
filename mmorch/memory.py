@@ -77,13 +77,38 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return float(va.dot(vb) / (na * nb))
 
 
+def _cosine_batch(qvec: list[float], embs: list[list[float]]) -> list[float]:
+    """Cosine de qvec contra N embeddings en UN matmul (reemplaza N llamadas a `_cosine`
+    por fila en el loop de rerank: N*2 conversiones np.asarray chicas + N dots chicos ->
+    1 matriz (N x dim) float32 + 1 matmul). Mismo resultado que `_cosine` fila a fila,
+    incluyendo el caso vector-cero -> 0.0 (numerador ya da 0 ahi)."""
+    import numpy as np
+    if not embs:
+        return []
+    q = np.asarray(qvec, dtype="float32")
+    qn = np.linalg.norm(q)
+    if qn == 0:
+        return [0.0] * len(embs)
+    mat = np.asarray(embs, dtype="float32")            # (N, dim)
+    norms = np.linalg.norm(mat, axis=1)
+    safe_norms = np.where(norms == 0, 1.0, norms)       # avoid div-by-zero; numerator is 0 there too
+    sims = (mat @ q) / (safe_norms * qn)
+    return sims.tolist()
+
+
 # ---------------------------------------------------------------------------
 # DB
 # ---------------------------------------------------------------------------
+_MIGRATED_PATHS: set = set()  # DDL + migracion una sola vez por proceso (por DB path)
+
+
 def _connect(path: Path = _DB_PATH):
     import duckdb
     path.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(str(path))
+    # La conexion NO se comparte entre threads: solo se saltea el DDL ya aplicado.
+    if str(path) in _MIGRATED_PATHS:
+        return con
     con.execute("""
         CREATE TABLE IF NOT EXISTS episodic (
             id BIGINT, ts DOUBLE, scope VARCHAR, kind VARCHAR,
@@ -124,6 +149,7 @@ def _connect(path: Path = _DB_PATH):
     ):
         if name not in cols:
             con.execute(f"ALTER TABLE semantic ADD COLUMN {ddl}")
+    _MIGRATED_PATHS.add(str(path))
     return con
 
 
@@ -347,12 +373,13 @@ def recall(query: str, scope: str = "global", *, k: int = 5,
             # (sin MMR, notas casi-duplicadas de un tema copan el top-k).
             from .retention import mmr_rerank, rank_score
             now = time.time()
-            scored = []
-            for rid, ts, sc, text, emb, acc, la, ol in rows:
-                if emb:
-                    s = rank_score(_cosine(qvec, list(emb)), now, la,
-                                   int(acc or 0), bool(ol))
-                    scored.append(Note(rid, ts, sc, text, s, "semantic"))
+            valid = [(rid, ts, sc, text, list(emb), acc, la, ol)
+                     for rid, ts, sc, text, emb, acc, la, ol in rows if emb]
+            sims = _cosine_batch(qvec, [v[4] for v in valid])
+            scored = [
+                Note(rid, ts, sc, text, rank_score(sim, now, la, int(acc or 0), bool(ol)),
+                     "semantic")
+                for (rid, ts, sc, text, _emb, acc, la, ol), sim in zip(valid, sims, strict=True)]
             scored.sort(key=lambda n: -n.score)
             pool = scored[:3 * k]
             notes = mmr_rerank(pool, [n.score for n in pool], k)

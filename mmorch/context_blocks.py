@@ -34,26 +34,37 @@ def _conn():
     c = sqlite3.connect(_DB)
     c.execute("CREATE TABLE IF NOT EXISTS context_blocks "
               "(session_id TEXT, ts REAL, est_tokens INTEGER, body TEXT)")
+    # (session_id, ts) is the shape of every query here (latest-by-session, ORDER BY ts DESC).
+    c.execute("CREATE INDEX IF NOT EXISTS idx_context_blocks_session_ts "
+              "ON context_blocks (session_id, ts)")
     return c
+
+
+def _parse_lines(transcript_path: str) -> list[tuple[str, dict | None]]:
+    """Single read+parse pass: (raw_line, parsed_obj_or_None) per non-blank line.
+    Shared by estimate_tokens/_entries so a tick() doesn't parse the transcript twice."""
+    p = Path(transcript_path)
+    if not p.exists():
+        return []
+    out = []
+    for ln in p.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not ln.strip():
+            continue
+        try:
+            out.append((ln, json.loads(ln)))
+        except Exception:
+            out.append((ln, None))
+    return out
+
+
+def _chars_of_lines(lines: list[tuple[str, dict | None]]) -> int:
+    return sum(_str_chars(obj) if obj is not None else len(ln) for ln, obj in lines)
 
 
 def estimate_tokens(transcript_path: str) -> int:
     """Rough token estimate: ~4 chars/token over every string value in the transcript JSONL.
     Best-effort and schema-agnostic — sums all string content it can find."""
-    p = Path(transcript_path)
-    if not p.exists():
-        return 0
-    chars = 0
-    for ln in p.read_text(encoding="utf-8", errors="replace").splitlines():
-        if not ln.strip():
-            continue
-        try:
-            obj = json.loads(ln)
-        except Exception:
-            chars += len(ln)
-            continue
-        chars += _str_chars(obj)
-    return chars // 4
+    return _chars_of_lines(_parse_lines(transcript_path)) // 4
 
 
 def _str_chars(obj) -> int:
@@ -67,17 +78,7 @@ def _str_chars(obj) -> int:
 
 
 def _entries(transcript_path: str) -> list[dict]:
-    p = Path(transcript_path)
-    if not p.exists():
-        return []
-    out = []
-    for ln in p.read_text(encoding="utf-8", errors="replace").splitlines():
-        if ln.strip():
-            try:
-                out.append(json.loads(ln))
-            except Exception:
-                pass
-    return out
+    return [obj for _, obj in _parse_lines(transcript_path) if obj is not None]
 
 
 def _text_of(content) -> str:
@@ -93,7 +94,14 @@ def _text_of(content) -> str:
 def compose(transcript_path: str, *, recent_users: int = 6, tail_chars: int = 1500) -> str:
     """Compose a compact info-block from the transcript: recent user intents + files touched +
     commits, plus a raw tail fallback. Deterministic, cero-cupo, schema-tolerant."""
-    entries = _entries(transcript_path)
+    return _compose_from_entries(_entries(transcript_path),
+                                 recent_users=recent_users, tail_chars=tail_chars)
+
+
+def _compose_from_entries(entries: list[dict], *, recent_users: int = 6,
+                          tail_chars: int = 1500) -> str:
+    """Same as compose(), but over an already-parsed entry list (tick() reuses the pass it
+    used for estimate_tokens instead of re-reading+re-parsing the transcript)."""
     users, files, commits = [], [], []
     for e in entries:
         msg = e.get("message", e)                       # tolerate {message:{...}} or flat
@@ -165,9 +173,20 @@ def latest(session_id: str, *, k: int = 1) -> list[str]:
 def tick(transcript_path: str, session_id: str, *, threshold: int | None = None) -> str:
     """Stop-hook entrypoint: if the estimated tokens exceed the threshold, compose+store a block
     and return a one-line nudge for stderr; else return "" (no-op). Idempotent-ish: only stores
-    when over threshold AND the estimate grew since the last stored block (avoids spamming)."""
+    when over threshold AND the estimate grew since the last stored block (avoids spamming).
+
+    Prefiltered by raw file size: JSON syntax (braces/quotes/keys) only ADDS bytes on top of the
+    string content estimate_tokens sums, so bytes/4 is a safe upper bound on the real estimate.
+    Below threshold on that upper bound -> skip reading/parsing the transcript at all (the common
+    case, most turns are nowhere near the compaction threshold)."""
     thr = threshold if threshold is not None else _THRESHOLD
-    est = estimate_tokens(transcript_path)
+    try:
+        if os.stat(transcript_path).st_size // 4 < thr:
+            return ""
+    except OSError:
+        return ""
+    lines = _parse_lines(transcript_path)
+    est = _chars_of_lines(lines) // 4
     if est < thr:
         return ""
     c = _conn()
@@ -178,7 +197,8 @@ def tick(transcript_path: str, session_id: str, *, threshold: int | None = None)
         c.close()
     if last and est <= last[0]:                          # already captured at/above this size
         return ""
-    store(session_id, compose(transcript_path), est_tokens=est)
+    entries = [obj for _, obj in lines if obj is not None]
+    store(session_id, _compose_from_entries(entries), est_tokens=est)
     return f"[mmorch] context ~{est} tok >= {thr}; info-block saved for re-inject (run /compact when ready)"
 
 
