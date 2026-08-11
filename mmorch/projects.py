@@ -63,3 +63,17 @@ def resolve(name: str, *, store: Path | None = None) -> str:
     if not os.path.isdir(ap):
         raise ValueError(f"proyecto '{name}' apunta a un path inexistente: {ap}")
     return ap
+
+
+def prune(*, store: Path | None = None, dry_run: bool = True) -> dict[str, str]:
+    """GC de projects.json (audit-2026-08 #19): resolve() ya detecta un path muerto call-by-call,
+    pero nadie los SACA -> quedan acumulando (ej un tmpdir de pytest que ya no existe). Devuelve
+    {name: path} de las entradas MUERTAS (no-dir). dry_run=True (default) SOLO reporta, no
+    escribe -- higiene es una accion explicita, no un side-effect de leer el registro."""
+    data = _load(store)
+    dead = {name: path for name, path in data.items() if not os.path.isdir(path)}
+    if dead and not dry_run:
+        for name in dead:
+            del data[name]
+        _save(data, store)
+    return dead

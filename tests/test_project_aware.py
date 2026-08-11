@@ -37,6 +37,53 @@ def test_resolve_missing_raises(tmp_path):
         pass
 
 
+# ---- prune (audit-2026-08 #19: GC de paths muertos, dry-run default) ---------
+def test_prune_dry_run_default_does_not_write(tmp_path):
+    store = tmp_path / "projects.json"
+    alive = tmp_path / "alive"; alive.mkdir()
+    store.write_text(json.dumps({"alive": str(alive), "dead": str(tmp_path / "ghost")}),
+                     encoding="utf-8")
+    dead = PJ.prune(store=store)
+    assert dead == {"dead": str(tmp_path / "ghost")}
+    # dry-run: nada se escribio, "dead" sigue en el registro
+    assert PJ.list_projects(store=store) == {"alive": str(alive), "dead": str(tmp_path / "ghost")}
+
+
+def test_prune_apply_removes_dead_entries(tmp_path):
+    store = tmp_path / "projects.json"
+    alive = tmp_path / "alive"; alive.mkdir()
+    store.write_text(json.dumps({"alive": str(alive), "dead": str(tmp_path / "ghost")}),
+                     encoding="utf-8")
+    dead = PJ.prune(store=store, dry_run=False)
+    assert dead == {"dead": str(tmp_path / "ghost")}
+    assert PJ.list_projects(store=store) == {"alive": str(alive)}   # dead is GONE, alive kept
+
+
+def test_prune_nothing_dead_is_noop(tmp_path):
+    store = tmp_path / "projects.json"
+    alive = tmp_path / "alive"; alive.mkdir()
+    store.write_text(json.dumps({"alive": str(alive)}), encoding="utf-8")
+    assert PJ.prune(store=store, dry_run=False) == {}
+    assert PJ.list_projects(store=store) == {"alive": str(alive)}
+
+
+# ---- autoregister_project: temp/home/Desktop-root filter ---------------------
+def test_autoregister_skips_temp_home_desktop(tmp_path, monkeypatch):
+    import os
+    import scripts.autoregister_project as AR
+    # patch the module's resolved TEMP directly (tempfile.gettempdir() caches its result process-
+    # wide, so re-setting TEMP/TMP env vars post-import would not be observed reliably)
+    systmp = tmp_path / "systmp"; systmp.mkdir()
+    monkeypatch.setattr(AR, "TEMP", os.path.realpath(str(systmp)))
+    assert AR._is_skippable(AR.HOME) is True                          # home dir itself
+    assert AR._is_skippable(AR.DESKTOP) is True                       # Desktop root itself
+    nested_tmp = systmp / "pytest-xyz" / "test_x" / "repo"
+    nested_tmp.mkdir(parents=True)
+    assert AR._is_skippable(str(nested_tmp)) is True                  # anything under TEMP
+    real_project = tmp_path / "real_project"; real_project.mkdir()
+    assert AR._is_skippable(str(real_project)) is False               # a normal project: kept
+
+
 # ---- claude_exec (sin invocar claude real) -----------------------------------
 def test_claude_bin_returns_argv():
     assert isinstance(CE.claude_bin(), list) and CE.claude_bin()

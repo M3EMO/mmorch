@@ -23,11 +23,12 @@ probe -> a model endorses its own blind spots).
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 from typing import Callable
 
 from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER, family_of
-from .project_build import decompose
+from .project_build import decompose, validate_test_cmd
 from .project_driver import run_project_build
 
 
@@ -101,12 +102,19 @@ def _default_run_test(repo: str):
         os.makedirs(os.path.dirname(fpath) or repo, exist_ok=True)
         with open(fpath, "w", encoding="utf-8") as f:
             f.write(code + ("\n" if not code.endswith("\n") else ""))
-        # shell=True is deliberate: test_cmd is a real acceptance command, often COMPOUND (`pytest &&
-        # shadow_diff`) — shlex-splitting would break that. Trust boundary: decompose() constrains
-        # test_cmd to an EXISTING/user command, and the server runs build_project in an ISOLATED git
-        # worktree (exec_policy), the same containment project_loop relies on. Not a free-form eval.
+        # test_cmd is PLANNER/LLM output (prompt-injection surface: audit-2026-08 #12), unlike
+        # external_test which is the USER's own trusted command (see integrate() below) — NOT the
+        # same trust level, so it does NOT get the same treatment. validate_worklist() already
+        # gates this at plan time, but plan_fn is injectable (tests, alt callers) -> re-check here
+        # so this boundary can never be bypassed by skipping validate_worklist. A worktree isolates
+        # the FILE TREE, not process execution (it still runs with the user's env/network/home) —
+        # it is not a substitute for this check.
+        ok, why = validate_test_cmd(test_cmd)
+        if not ok:
+            return False, f"test_cmd REJECTED by policy (not executed): {why}"
         try:
-            p = subprocess.run(test_cmd, cwd=repo, shell=True, capture_output=True, text=True,  # noqa: S602
+            argv = shlex.split(test_cmd)
+            p = subprocess.run(argv, cwd=repo, shell=False, capture_output=True, text=True,
                                encoding="utf-8", errors="replace", timeout=timeout)
             return p.returncode == 0, (p.stdout + p.stderr)[-1500:]
         except subprocess.TimeoutExpired:
@@ -144,8 +152,11 @@ def _default_run_snippet():
 
 def _default_integrate(repo: str):
     def integrate(external_test: str, results: list, timeout: float = 600.0) -> tuple[bool, str]:
-        # external_test is the USER's acceptance suite (the real backstop), typically COMPOUND ->
-        # shell=True is required; containment is the isolated worktree (server exec_policy). See run_test.
+        # external_test is the USER's OWN acceptance suite (trusted input, not model output — unlike
+        # test_cmd, see run_test above), typically COMPOUND -> shell=True is required and acceptable
+        # here. The git worktree (server exec_policy) isolates the FILE TREE the build writes to; it
+        # is NOT process-execution containment (this still runs with the user's env/network/home) —
+        # do not read it as a sandbox for what external_test itself does.
         try:
             p = subprocess.run(external_test, cwd=repo, shell=True, capture_output=True, text=True,  # noqa: S602
                                encoding="utf-8", errors="replace", timeout=timeout)
@@ -333,7 +344,7 @@ if __name__ == "__main__":
         return (len(seen_fb) >= 3, "still red" if len(seen_fb) < 3 else "green")
 
     r1 = build_project("build one thing", REPO, external_test="ACCEPT",
-                       plan=lambda t, e: [{"name": "u", "spec": "the unit", "deps": [], "test_cmd": "pt"}],
+                       plan=lambda t, e: [{"name": "u", "spec": "the unit", "deps": [], "test_cmd": "pytest -q"}],
                        gen=gen_hot, run_test=run_reds_then_green, run_snippet=lambda c, a: (True, ""),
                        propose_test=lambda c, s: "", integrate=lambda e, rs: (True, "accept green"),
                        commit=lambda n, rr: None)
@@ -342,8 +353,8 @@ if __name__ == "__main__":
 
     # 2. INTEGRATION GATE: all units pass their own tests, but the assembled whole fails -> integration_failed.
     r2 = build_project("top", REPO, external_test="ACCEPT",
-                       plan=lambda t, e: [{"name": "a", "spec": "a", "deps": [], "test_cmd": "pt"},
-                                          {"name": "b", "spec": "b", "deps": ["a"], "test_cmd": "pt"}],
+                       plan=lambda t, e: [{"name": "a", "spec": "a", "deps": [], "test_cmd": "pytest -q"},
+                                          {"name": "b", "spec": "b", "deps": ["a"], "test_cmd": "pytest -q"}],
                        gen=lambda u, fb: f"def {u['name']}():\n    return 1",
                        run_test=lambda u, c, tc: (True, "unit green"),
                        run_snippet=lambda c, a: (True, ""), propose_test=lambda c, s: "",
@@ -413,7 +424,7 @@ if __name__ == "__main__":
 
     # 8. call-breaker: un coder que nunca verdea no puede quemar llamadas sin tope -> escalate.
     r8 = build_project("top", REPO, external_test=None, max_gen_calls=4,
-                       plan=lambda t, e: [{"name": "u", "spec": "s", "deps": [], "test_cmd": "pt"}],
+                       plan=lambda t, e: [{"name": "u", "spec": "s", "deps": [], "test_cmd": "pytest -q"}],
                        gen=lambda u, fb: "def u():\n    return 1",
                        run_test=lambda u, c, tc: (False, "always red"),
                        run_snippet=lambda c, a: (True, ""), propose_test=lambda c, s: "",

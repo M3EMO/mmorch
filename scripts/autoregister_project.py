@@ -5,12 +5,18 @@ SIN importar mmorch (stdlib pura -> corre con cualquier python). Idempotente.
 Solo da VISIBILIDAD (el proyecto aparece en el dashboard). Editar sigue siendo accion
 explicita per-call (mode='edit') — auto-registrar no auto-habilita escritura remota.
 """
-import json, os, sys
+import json, os, sys, tempfile
 
 ORCH = os.path.join(os.path.expanduser("~"), ".claude", "orchestration")
 PROJECTS = os.path.join(ORCH, "projects.json")
-# no registrar la propia orchestration ni dirs de sistema
-_SKIP = {ORCH.lower()}
+HOME = os.path.expanduser("~")
+DESKTOP = os.path.join(HOME, "Desktop")
+TEMP = os.path.realpath(tempfile.gettempdir())
+# no registrar la propia orchestration ni dirs de sistema (audit-2026-08 #19: projects.json
+# terminaba con el home dir ENTERO y un tmpdir de pytest ya borrado registrados como proyectos
+# "job-controlables" -> un job podia apuntar a ~ o a un tmp muerto). EXACT matches, no prefijo:
+# home/Desktop son contenedores genericos (no un proyecto en si), no cada carpeta debajo.
+_SKIP = {ORCH.lower(), HOME.lower(), DESKTOP.lower()}
 
 
 def _cwd_from_stdin():
@@ -21,10 +27,24 @@ def _cwd_from_stdin():
         return ""
 
 
+def _is_skippable(cwd: str) -> bool:
+    """cwd ya es abspath. Excluye orchestration/home/Desktop (exact) y cualquier cosa bajo el
+    directorio TEMP del sistema (prefijo: los tmpdirs de pytest/tempfile SIEMPRE viven ahi, y
+    quedan huerfanos apenas el test termina -> registrarlos deja un path muerto de entrada)."""
+    low = cwd.lower()
+    if low in _SKIP:
+        return True
+    real = os.path.realpath(cwd).lower()
+    try:
+        return os.path.commonpath([real, TEMP.lower()]) == TEMP.lower()
+    except ValueError:      # distintas unidades (Windows) -> no puede estar bajo TEMP
+        return False
+
+
 def main():
     cwd = _cwd_from_stdin() or os.getcwd()
     cwd = os.path.abspath(cwd)
-    if not os.path.isdir(cwd) or cwd.lower() in _SKIP:
+    if not os.path.isdir(cwd) or _is_skippable(cwd):
         return
     name = os.path.basename(cwd) or cwd
     try:

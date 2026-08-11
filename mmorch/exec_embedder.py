@@ -16,7 +16,7 @@ from __future__ import annotations
 import ast, hashlib, json
 import numpy as np
 
-from .sandbox import run_sandboxed
+from .sandbox import run_sandboxed, policy_violations, docker_available
 
 D = 256          # dim del vector (matchea convencion del code_embedder)
 _TIMEOUT = 20.0  # backstop global del code; el timeout fino es POR-SONDA dentro del runner
@@ -150,13 +150,24 @@ def _feat(results: list[str]) -> np.ndarray:
 
 
 def embed_exec(code: str, fn_name: str | None = None) -> list[float] | None:
-    """Huella de comportamiento del code. None si no se halla la fn o ninguna sonda corrio.
-    El arity se detecta DENTRO del runner (inspect); aca elegimos el banco por la firma AST."""
+    """Huella de comportamiento del code. None si no se halla la fn, el candidato viola la
+    policy estatica (red/proceso/fs-write), o ninguna sonda corrio. Prefiere backend='docker'
+    (aislamiento real) cuando esta disponible; si no, cae a 'local' (subproceso efimero) donde
+    -en Windows sin seccomp/namespaces- la contencion es BEST-EFFORT, no un jail hostil (ver
+    sandbox.py docstring). El arity se detecta DENTRO del runner (inspect); aca elegimos el
+    banco por la firma AST."""
     fn = _target_fn(code, fn_name)
     if fn is None:
         return None                      # ni def top-level ni hint -> nada que ejecutar (no gasta sandbox)
+    # El codigo NO-CONFIABLE (candidato del modelo) viaja como argv (json.dumps(code)), no
+    # como el `code` escrito a _run.py (eso es _RUNNER, el harness fijo) -> enforce_policy
+    # en run_sandboxed escanearia el harness, no el candidato. Se escanea ACA, contra el
+    # candidato real, antes de tocar el sandbox (mismo denylist: red/proceso/fs-write).
+    if policy_violations(code):
+        return None                      # candidato bloqueado por policy -> sin embedding
     # arity por AST del def elegido (cuenta de positionals; fallback prueba 1 y 2)
     arities = _arities(code, fn)
+    backend = "docker" if docker_available() else "local"
     for n in arities:
         probes = _PROBES.get(n)
         if not probes:
@@ -164,6 +175,7 @@ def embed_exec(code: str, fn_name: str | None = None) -> list[float] | None:
         res = run_sandboxed(
             _RUNNER, timeout=_TIMEOUT, argv=["_run.py", json.dumps(code),
                                              json.dumps(fn), json.dumps(probes)],
+            backend=backend, enforce_policy=True,
         )
         if not res.ok or not res.stdout.strip():
             continue
