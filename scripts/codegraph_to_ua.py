@@ -177,15 +177,19 @@ def narrate(graph: dict) -> dict:
     for ly in graph["layers"]:
         if ly["id"] in out["layers"]:
             ly["description"] = str(out["layers"][ly["id"]])
-    # el dashboard arranca en modo "Files": si un paso solo referencia clases/
-    # funciones, el zoom no tiene target visible — incluir siempre el file padre
+    # el fit de camara del tour exige que TODOS los nodeIds esten renderizados;
+    # en modo "Files" (default) los nodos clase/funcion NO existen en el canvas,
+    # asi que un solo id de simbolo bloquea el zoom del paso entero (fallback a
+    # grafo completo). Tour = SOLO nodos file (cada simbolo -> su file padre).
     file_of = {n["id"]: f"file:{n['filePath']}" for n in graph["nodes"]
                if n["type"] not in ("file", "document", "config")}
+    file_ids = {n["id"] for n in graph["nodes"] if n["type"] in ("file", "document", "config")}
     tour = []
     for i, step in enumerate(out["tour"], 1):
         ids = [x for x in step["nodeIds"] if x in valid_ids]  # anti-alucinacion
-        parents = [file_of[x] for x in ids if x in file_of and file_of[x] in valid_ids]
-        ids = list(dict.fromkeys(parents + ids))  # files primero, sin dups
+        ids = list(dict.fromkeys(
+            x if x in file_ids else file_of.get(x, "") for x in ids))
+        ids = [x for x in ids if x in file_ids]
         if ids:
             tour.append({"order": i, "title": step["title"],
                          "description": step["description"], "nodeIds": ids})
