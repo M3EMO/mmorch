@@ -177,14 +177,65 @@ def narrate(graph: dict) -> dict:
     for ly in graph["layers"]:
         if ly["id"] in out["layers"]:
             ly["description"] = str(out["layers"][ly["id"]])
+    # el dashboard arranca en modo "Files": si un paso solo referencia clases/
+    # funciones, el zoom no tiene target visible — incluir siempre el file padre
+    file_of = {n["id"]: f"file:{n['filePath']}" for n in graph["nodes"]
+               if n["type"] not in ("file", "document", "config")}
     tour = []
     for i, step in enumerate(out["tour"], 1):
         ids = [x for x in step["nodeIds"] if x in valid_ids]  # anti-alucinacion
+        parents = [file_of[x] for x in ids if x in file_of and file_of[x] in valid_ids]
+        ids = list(dict.fromkeys(parents + ids))  # files primero, sin dups
         if ids:
             tour.append({"order": i, "title": step["title"],
                          "description": step["description"], "nodeIds": ids})
     graph["tour"] = tour
     print(f"[narrate] tour de {len(tour)} pasos + {len(out['layers'])} capas narradas")
+    return graph
+
+
+_FILES_SCHEMA = {
+    "type": "object",
+    "properties": {"summaries": {"type": "object"}},
+    "required": ["summaries"],
+}
+
+
+def narrate_files(graph: dict, batch_size: int = 25) -> dict:
+    """Summaries DeepSeek POR ARCHIVO (batches, centavos). Contexto por archivo:
+    docstring del modulo + simbolos contenidos con sus firmas. Un batch que falla
+    se saltea (los demas quedan); ids desconocidos se descartan."""
+    from mmorch.schema import SchemaGateError, gated_json
+
+    by_id = {n["id"]: n for n in graph["nodes"]}
+    contained: dict[str, list[str]] = defaultdict(list)
+    for e in graph["edges"]:
+        if e["type"] == "contains" and e["source"] in by_id and e["target"] in by_id:
+            t = by_id[e["target"]]
+            contained[e["source"]].append(f"{t['name']}: {t['summary'][:90]}")
+    targets = [n for n in graph["nodes"] if n["type"] in ("file", "document", "config")]
+    done = 0
+    for i in range(0, len(targets), batch_size):
+        batch = targets[i:i + batch_size]
+        ctx = [{"id": n["id"], "path": n["filePath"], "doc": n["summary"][:150],
+                "symbols": contained.get(n["id"], [])[:12]} for n in batch]
+        prompt = (
+            "Para cada archivo, escribi un summary de 1-2 frases: QUE hace y su rol "
+            "en el sistema (no listes los simbolos — sintetiza). Responde JSON "
+            '{"summaries": {"<id>": "<summary>", ...}} cubriendo TODOS los ids.\n\n'
+            + json.dumps(ctx, ensure_ascii=False)
+        )
+        try:
+            out = gated_json("deepseek-chat", [{"role": "user", "content": prompt}],
+                             schema=_FILES_SCHEMA, phase="ua_narrate_files")
+        except SchemaGateError as e:
+            print(f"[narrate-files] batch {i // batch_size + 1} fallo, sigo: {e}")
+            continue
+        for nid, s in out["summaries"].items():
+            if nid in by_id and isinstance(s, str) and s.strip():
+                by_id[nid]["summary"] = s.strip()
+                done += 1
+    print(f"[narrate-files] {done}/{len(targets)} archivos narrados")
     return graph
 
 
@@ -194,8 +245,12 @@ def main() -> int:
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--narrate", action="store_true",
                    help="pase DeepSeek (centavos) para descripcion de capas + tour")
+    p.add_argument("--narrate-files", action="store_true",
+                   help="summaries DeepSeek por archivo (batches, centavos)")
     a = p.parse_args()
     graph = convert(a.repo.resolve())
+    if a.narrate_files:
+        graph = narrate_files(graph)  # antes del tour: el tour lee summaries mejores
     if a.narrate:
         graph = narrate(graph)
     out_dir = a.out or (a.repo.resolve() / ".ua")
