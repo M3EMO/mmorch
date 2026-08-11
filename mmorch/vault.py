@@ -19,7 +19,13 @@ def _slug(s: str) -> str:
 
 
 def write_note(folder: str, title: str, body: str, *, frontmatter: dict | None = None) -> Path:
-    """Escribe una nota markdown con frontmatter YAML simple. Devuelve el path."""
+    """Escribe una nota markdown con frontmatter YAML simple. Devuelve el path.
+
+    _slug trunca a 60 chars (colisiones deterministas) y dos titulos distintos pueden
+    mapear al mismo path. Si el path ya existe con OTRO contenido, no lo pisamos en
+    silencio (la nota vieja seria irrecuperable sin backup/commit): buscamos el proximo
+    sufijo libre `-2`, `-3`, ... Mismo titulo + mismo contenido (idempotencia real) SI
+    reusa el path — no es una colision, es un re-write."""
     fm = {"title": title, **(frontmatter or {})}
     lines = ["---"]
     for k, v in fm.items():
@@ -28,9 +34,18 @@ def write_note(folder: str, title: str, body: str, *, frontmatter: dict | None =
         else:
             lines.append(f"{k}: {v}")
     lines.append("---\n")
-    p = VAULT / folder / f"{_slug(title)}.md"
+    text = "\n".join(lines) + body.strip() + "\n"
+
+    slug = _slug(title)
+    p = VAULT / folder / f"{slug}.md"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("\n".join(lines) + body.strip() + "\n", encoding="utf-8")
+    if p.exists() and p.read_text(encoding="utf-8") != text:
+        n = 2
+        while (cand := VAULT / folder / f"{slug}-{n}.md").exists() and cand.read_text(encoding="utf-8") != text:
+            n += 1
+        p = cand
+        log_op("overwrite_avoided", f"{title} -> {p.name} (colision de slug)")
+    p.write_text(text, encoding="utf-8")
     return p
 
 
@@ -60,6 +75,27 @@ def _split_frontmatter(txt: str) -> tuple[dict, str]:
             k, _, v = ln.partition(":")
             fm[k.strip()] = v.strip()
     return fm, parts[2].strip()
+
+
+def _read_frontmatter_only(p: Path) -> dict:
+    """Lee SOLO el bloque frontmatter (hasta el 2do '---'), sin cargar el body entero.
+    regenerate_moc solo necesita tags/status/confidence del frontmatter -> evita
+    read_text() de todo el .md (O(vault) por write cuando el vault crece)."""
+    lines: list[str] = []
+    with p.open(encoding="utf-8") as fh:
+        first = fh.readline()
+        if first.strip() != "---":
+            return {}
+        for ln in fh:
+            if ln.strip() == "---":
+                break
+            lines.append(ln)
+    fm = {}
+    for ln in lines:
+        if ":" in ln:
+            k, _, v = ln.partition(":")
+            fm[k.strip()] = v.strip()
+    return fm
 
 
 def log_op(op: str, title: str, *, base: Path | None = None) -> None:
@@ -128,8 +164,7 @@ def regenerate_moc(project: str) -> Path:
         for p in sorted(folder.glob("*.md")):
             if p.name.endswith(".babel.md"):
                 continue
-            txt = p.read_text(encoding="utf-8")
-            fm, _ = _split_frontmatter(txt)
+            fm = _read_frontmatter_only(p)
             # tags viene como string "[a, b, c]" del frontmatter: parsear a lista
             # (membresia exacta — substring haria que 'ai' matchee 'ai-notes')
             tags = fm.get("tags", "").strip("[]").replace(",", " ").split()

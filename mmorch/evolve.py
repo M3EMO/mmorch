@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -22,6 +23,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from .iohelpers import atomic_write_json, load_json_tolerant, read_jsonl_tolerant
+
+_log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
 _ARCHIVE = ROOT / "logs" / "evolution_archive.jsonl"
@@ -252,9 +257,7 @@ def archive_variant(name: str, fit: dict, notes: str = "", applied: bool = False
 
 
 def read_archive() -> list[dict]:
-    if not _ARCHIVE.exists():
-        return []
-    return [json.loads(ln) for ln in _ARCHIVE.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    return read_jsonl_tolerant(_ARCHIVE)
 
 
 # --------------------------------------------------------------------------- #
@@ -451,17 +454,14 @@ _PR_STATE = ROOT / "logs" / "evolve_open_prs.json"
 
 
 def _load_pr_state(path: Path = _PR_STATE) -> dict:
-    if path.exists():
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
+    # NO tragar la corrupcion en silencio: un JSON truncado (crash nocturno mid-write,
+    # ahora mitigado por el write atomico de _save_pr_state) hacia desaparecer los locks
+    # por archivo -> coordinated_evolve_round podia abrir un branch competidor.
+    return load_json_tolerant(path, {}, what="evolve_open_prs.json (PR locks)")
 
 
 def _save_pr_state(state: dict, path: Path = _PR_STATE) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
+    atomic_write_json(path, state, indent=1)
 
 
 def _pr_still_open(entry: dict, *, root: Path, gh_check_fn=None) -> bool:

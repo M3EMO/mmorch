@@ -24,6 +24,8 @@ from __future__ import annotations
 import json
 import pathlib
 
+from .iohelpers import read_jsonl_tolerant
+
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 _TRAJ = _ROOT / "logs" / "trajectories.jsonl"
 _SKILLS = _ROOT / "logs" / "skills.jsonl"
@@ -122,10 +124,7 @@ def distill_skill(traj: dict, *, path: pathlib.Path | None = None) -> dict:
 # Consumo: trayectorias -> dataset (code, label) pal flywheel (mismo shape que oracle)
 # --------------------------------------------------------------------------- #
 def load_trajectories(path: pathlib.Path | None = None) -> list[dict]:
-    path = path or _TRAJ
-    if not path.exists():
-        return []
-    return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    return read_jsonl_tolerant(path or _TRAJ)
 
 
 def trajectory_dataset(path: pathlib.Path | None = None, *, min_chars: int = 20) -> list[dict]:

@@ -13,10 +13,15 @@ calibracion evita aprender shortcuts sobre un proxy debil.
 from __future__ import annotations
 
 import json
+import logging
 import random as _random
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
+
+from .iohelpers import atomic_write_json, load_json_tolerant, read_jsonl_tolerant
+
+_log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
 _FEEDBACK_LOG = ROOT / "logs" / "feedback.jsonl"
@@ -72,9 +77,7 @@ def contextual_arm(model: str, thr: float | None = None, ctx: str | None = None)
 
 
 def read_outcomes(path: Path = _FEEDBACK_LOG) -> list[dict]:
-    if not path.exists():
-        return []
-    return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    return read_jsonl_tolerant(path)
 
 
 class ThompsonBandit:
@@ -86,10 +89,11 @@ class ThompsonBandit:
         self.path = path
         self._arms: dict[str, list[float]] = {}
         if path.exists():
-            try:
-                self._arms = {k: list(v) for k, v in json.loads(path.read_text(encoding="utf-8")).items()}
-            except Exception:
-                self._arms = {}
+            # NO resetear en silencio: un archivo corrupto (crash mid-write, ahora mitigado
+            # por el write atomico de update()) borraria todo lo aprendido sin dejar rastro.
+            raw = load_json_tolerant(path, None, what="bandit state")
+            if raw is not None:
+                self._arms = {k: list(v) for k, v in raw.items()}
 
     def _ab(self, arm: str) -> list[float]:
         return self._arms.setdefault(arm, [1.0, 1.0])  # prior uniforme Beta(1,1)
@@ -116,8 +120,9 @@ class ThompsonBandit:
         ab[1] = 1.0 + (ab[1] - 1.0) * decay
         ab[0] += reward
         ab[1] += 1.0 - reward
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self._arms, ensure_ascii=False), encoding="utf-8")
+        # write atomico: MCP server + nightly.py escriben el mismo archivo sin lock
+        # inter-proceso; un crash/interleave mid-write no debe truncar el estado aprendido.
+        atomic_write_json(self.path, self._arms)
 
     def stats(self) -> dict[str, dict]:
         out = {}

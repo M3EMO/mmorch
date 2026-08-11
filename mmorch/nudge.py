@@ -9,21 +9,21 @@ reporte. Graceful: si algo falla, no rompe el loop que lo llamo.
 """
 from __future__ import annotations
 
-import json
+import logging
 import pathlib
+
+from .iohelpers import atomic_write_json, load_json_tolerant
+
+_log = logging.getLogger(__name__)
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 _STATE = _ROOT / "logs" / "nudge.json"
 _EVERY = 10
+_DEFAULT_STATE = {"closes": 0, "last_nudge_at": 0}
 
 
 def _load(path: pathlib.Path) -> dict:
-    if path.exists():
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {"closes": 0, "last_nudge_at": 0}
+    return dict(load_json_tolerant(path, _DEFAULT_STATE, what="nudge state"))
 
 
 def tick(*, every: int = _EVERY, path: pathlib.Path | None = None,
@@ -54,8 +54,14 @@ def tick(*, every: int = _EVERY, path: pathlib.Path | None = None,
             except Exception as e:
                 if isinstance(report, dict):
                     report["distill"] = {"error": str(e)[:200]}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+    # guard monotonico: nudge.tick (diurno, MCP server) y nightly.py (02:10) hacen
+    # load->modify->write sin lock inter-proceso. Sin esto, last-writer-wins puede
+    # retroceder distill_upto y hacer que distill_backlog re-procese episodios ya
+    # destilados. Re-leer justo antes de escribir y nunca bajar el watermark en disco.
+    on_disk = _load(path)
+    if on_disk.get("distill_upto", 0) > st.get("distill_upto", 0):
+        st["distill_upto"] = on_disk["distill_upto"]
+    atomic_write_json(path, st)
     return {"closes": st["closes"], "nudged": nudged, "report": report}
 
 

@@ -12,22 +12,40 @@ Per-project scopes are a follow-up (needs per-project cost attribution, not trac
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
+
+from .iohelpers import atomic_write_json
+
+_log = logging.getLogger(__name__)
 
 _PATH = Path(os.getenv("MMORCH_BUDGET_POLICIES")
              or (Path(__file__).resolve().parent.parent / "budget_policies.json"))
 
 
-def load() -> list:
+class PolicyLoadError(Exception):
+    """budget_policies.json existe pero no parsea (distinto de 'no hay politicas')."""
+
+
+def load(*, strict: bool = False) -> list:
+    """[] es un default legitimo solo si el archivo NO existe. Si existe pero esta
+    corrupto, loggeamos fuerte; con strict=True ademas propagamos, para que
+    blocking_incident() pueda fallar CERRADO (bloquear gasto) en vez de fallar abierto
+    en silencio — un JSON truncado no debe poder desactivar los hard-stops de gasto."""
+    if not _PATH.exists():
+        return []
     try:
-        return json.loads(_PATH.read_text(encoding="utf-8")) if _PATH.exists() else []
+        return json.loads(_PATH.read_text(encoding="utf-8"))
     except Exception:
+        _log.error("budget_policies.json corrupto en %s", _PATH)
+        if strict:
+            raise PolicyLoadError(str(_PATH)) from None
         return []
 
 
 def save(policies: list) -> None:
-    _PATH.write_text(json.dumps(list(policies), indent=1), encoding="utf-8")
+    atomic_write_json(_PATH, list(policies), indent=1)
 
 
 def snapshot() -> dict:
@@ -64,7 +82,15 @@ def evaluate(policies: list, snap: dict) -> list:
 
 def blocking_incident(snap: dict | None = None, policies: list | None = None) -> dict | None:
     snap = snapshot() if snap is None else snap
-    policies = load() if policies is None else policies
+    if policies is None:
+        try:
+            policies = load(strict=True)
+        except PolicyLoadError:
+            # conservador: politicas ilegibles = no se puede confirmar que el gasto este
+            # dentro de limite -> bloquear trabajo nuevo hasta que se repare el archivo,
+            # en vez de dejar pasar todo sin señal (el bug que este fix cierra).
+            return {"scope": "*", "level": "hard", "spent": 0.0, "limit": 0.0, "pct": 100.0,
+                    "reason": f"budget_policies.json corrupto en {_PATH}"}
     for inc in evaluate(policies, snap):
         if inc["level"] == "hard":
             return inc

@@ -44,16 +44,18 @@ def _rubric_drive(jid: str, state: dict, cancel: threading.Event):
                 bid = workflow_store.put_block(out, kind=act["role"], mime="text/markdown")
                 workflow_store.record_checkpoint(jid, step, act["role"], outputs=[bid],
                                                  state={"model": model})
-            except Exception:
-                pass                               # best-effort; never break the job on a store hiccup
+            except Exception as e:
+                # best-effort; never break the job on a store hiccup — but a silent skip
+                # here means a later resume re-pays this step from scratch with no one told.
+                emit("job", "warn", job_id=jid, detail=f"checkpoint no persistido: {str(e)[:150]}")
             with _JOBS_LOCK:                       # G9: progress -> heartbeat, don't reap active jobs
                 if jid in _JOBS:
                     _JOBS[jid]["heartbeat"] = time.time()
             submit(state, out)
             try:                                   # Phase B: persist resumable state after each step
                 workflow_store.record_job_spec(jid, "rubric", {"state": state})
-            except Exception:
-                pass
+            except Exception as e:
+                emit("job", "warn", job_id=jid, detail=f"spec no persistido: {str(e)[:150]}")
     except Exception as e:
         emit("job", "error", job_id=jid, detail=str(e)[:200])
     with _JOBS_LOCK:
@@ -152,8 +154,8 @@ def _workflow_drive(jid: str, state: dict, meta: dict, cancel: threading.Event,
                     _JOBS[jid]["heartbeat"] = time.time()
             try:                                    # Phase B: persist resumable state each step
                 workflow_store.record_job_spec(jid, "workflow", {**meta, "state": state})
-            except Exception:
-                pass
+            except Exception as e:
+                emit("job", "warn", job_id=jid, detail=f"spec no persistido: {str(e)[:150]}")
     except Exception as e:
         emit("job", "error", job_id=jid, detail=str(e)[:200])
         with _JOBS_LOCK:
@@ -340,8 +342,11 @@ def _run_project_build_job(jid: str, task: str, project: str, external_test: str
                 workflow_store.record_checkpoint(jid, step["n"], f"unit:{name}", outputs=[bid],
                                                  gate={"name": "unit", "passed": True,
                                                        "detail": str(result.get("gate", ""))[:200]})
-            except Exception:
-                pass                                # best-effort: never break the build on the store
+            except Exception as e:
+                # best-effort: never break the build on the store, but a resume that
+                # doesn't know this unit was already checkpointed re-pays it from step 0.
+                emit("step", "warn", job_id=jid, node=f"unit:{name}",
+                     detail=f"checkpoint no persistido: {str(e)[:150]}")
             emit("step", "done", job_id=jid, node=f"unit:{name}", detail=result.get("file") or "")
 
         # forma de pipeline por op_type (ADW 2026-07): REPAIR/VERIFY = hotfix minimo,
@@ -381,8 +386,8 @@ def _run_project_build_job(jid: str, task: str, project: str, external_test: str
                 with _JOBS_LOCK:
                     if jid in _JOBS:
                         _JOBS[jid]["diffstat"] = cap.get("diffstat", "")
-            except Exception:
-                pass
+            except Exception as e:
+                emit("job", "warn", job_id=jid, detail=f"remainder commit no confirmado: {str(e)[:150]}")
             finally:
                 wt.close(keep_branch=True)          # review branch survives for merge
 

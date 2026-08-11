@@ -14,6 +14,8 @@ import threading
 import time
 from pathlib import Path
 
+from .iohelpers import read_jsonl_tolerant
+
 _LOCK = threading.Lock()
 
 # logs/ sits next to this package, under ~/.claude/orchestration/
@@ -61,15 +63,7 @@ def log_event(
 
 
 def read_events() -> list[dict]:
-    if not _LOG_PATH.exists():
-        return []
-    out = []
-    with open(_LOG_PATH, encoding="utf-8") as fh:
-        for ln in fh:
-            ln = ln.strip()
-            if ln:
-                out.append(json.loads(ln))
-    return out
+    return read_jsonl_tolerant(_LOG_PATH)
 
 
 def error_rates(*, window_n: int | None = 200, window_s: float | None = None) -> dict:

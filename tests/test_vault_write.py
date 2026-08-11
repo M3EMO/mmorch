@@ -93,3 +93,21 @@ def test_fallo_de_side_channels_no_rompe_el_write(tmp_vault):
     p = write_validated("Nota cuatro", "cuerpo", project="mmorch",
                         remember_fn=boom, enqueue_babel_fn=boom)
     assert p.exists(), "la nota debe escribirse aunque bridge/cola fallen"
+
+
+def test_colision_de_slug_no_pisa_la_nota_vieja(tmp_vault):
+    """audit 2026-08 #11: dos titulos que colisionan en el slug (o un titulo re-usado con
+    otro cuerpo) no deben perder la nota anterior en silencio."""
+    p1 = vault_mod.write_note("research", "Mismo Titulo", "contenido original")
+    p2 = vault_mod.write_note("research", "Mismo Titulo", "contenido DISTINTO")
+    assert p1 != p2, "la segunda escritura debe ir a un path distinto, no pisar la primera"
+    assert p1.read_text(encoding="utf-8").endswith("contenido original\n")
+    assert "contenido DISTINTO" in p2.read_text(encoding="utf-8")
+
+
+def test_mismo_titulo_mismo_contenido_reusa_el_path(tmp_vault):
+    """Idempotencia real (no es colision): re-escribir con el MISMO contenido reusa el
+    mismo path en vez de crear -2, -3, ... indefinidamente."""
+    p1 = vault_mod.write_note("research", "Titulo Estable", "cuerpo\n")
+    p2 = vault_mod.write_note("research", "Titulo Estable", "cuerpo\n")
+    assert p1 == p2
