@@ -27,13 +27,14 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **99 módulos · 46 MCP tools · 480 tests.**
+_Auto-generado por `mmorch.docgen`._ **100 módulos · 46 MCP tools · 480 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
 | Módulo | Qué hace |
 |---|---|
 | `mmorch/ablation.py` | ablation (§18.4) — validar EMPIRICAMENTE la regla de pairing cross-family. El |
+| `mmorch/adjudicate.py` | Adjudication module for matching notes to projects. |
 | `mmorch/arbitration.py` | arbitration — registro auditable de los arbitrajes del orquestador (blind-spot #2, 2026-07). |
 | `mmorch/autoresearch.py` | autoresearch (r4a) — hillclimb como JOB declarativo + resumable. |
 | `mmorch/babel.py` | babel — capa comprimida model-native del vault (paper 2606.19857). |
