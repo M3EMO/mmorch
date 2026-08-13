@@ -51,7 +51,11 @@ def _state_snapshot_sync() -> dict:
     with _JOBS_LOCK:
         jobs = {k: {"status": v["status"], "kind": v["kind"], "title": v.get("title", ""),
                     "ts": v.get("ts", 0), "host": v.get("host", "local"),
-                    "engine": v.get("engine", ""), "parent": v.get("parent")} for k, v in _JOBS.items()}
+                    "engine": v.get("engine", ""), "parent": v.get("parent"),
+                    # sin esto, un escalate de project-build llega al cliente sin su porqué
+                    # (result/reason/review_branch se guardaban en _JOBS pero no se exponían)
+                    "result": v.get("result"), "review_branch": v.get("review_branch"),
+                    "diffstat": v.get("diffstat")} for k, v in _JOBS.items()}
     return {
         "conductor": conductor(), "sections": sections(), "summary": summary(),
         "error_rates": error_rates(window_n=200), "cache": cache_stats(window_n=200),
