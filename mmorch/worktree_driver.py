@@ -12,6 +12,7 @@ branch ref (cheap) outlives the worktree dir so the result stays reviewable.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -86,11 +87,14 @@ class Worktree:
         committed, error = False, ""
         if changed:
             rc, out = _git(self.path, "commit", "-m", message)
-            if rc != 0 and "[*]" in out:
+            if rc != 0 and re.search(r"\b[EWF]\d{3}\b", out):
                 # bug medido 2026-08: el pre-commit ruff gate del repo frena código generado por
                 # lint AUTO-FIXABLE (ej F401 import sobrante) -> unidad jamás llega a la branch ->
                 # escalate. "[*]" en el output de ruff marca fixable: fix + re-stage + UN retry.
-                subprocess.run([sys.executable, "-m", "ruff", "check", "--fix", "."],
+                # --unsafe-fixes: F841 y similares solo se auto-fixean asi; aceptable en un
+                # worktree aislado cuyo codigo igual pasa por el gate de integracion despues
+                subprocess.run([sys.executable, "-m", "ruff", "check", "--fix",
+                                "--unsafe-fixes", "."],
                                cwd=self.path, capture_output=True, timeout=120)
                 _git(self.path, "add", "-A")
                 rc, out = _git(self.path, "commit", "-m", message)
