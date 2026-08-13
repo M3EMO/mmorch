@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 import uuid
 
@@ -85,6 +86,14 @@ class Worktree:
         committed, error = False, ""
         if changed:
             rc, out = _git(self.path, "commit", "-m", message)
+            if rc != 0 and "[*]" in out:
+                # bug medido 2026-08: el pre-commit ruff gate del repo frena código generado por
+                # lint AUTO-FIXABLE (ej F401 import sobrante) -> unidad jamás llega a la branch ->
+                # escalate. "[*]" en el output de ruff marca fixable: fix + re-stage + UN retry.
+                subprocess.run([sys.executable, "-m", "ruff", "check", "--fix", "."],
+                               cwd=self.path, capture_output=True, timeout=120)
+                _git(self.path, "add", "-A")
+                rc, out = _git(self.path, "commit", "-m", message)
             committed, error = rc == 0, ("" if rc == 0 else out)
         return {"branch": self.branch, "diffstat": self.diffstat, "changed": changed,
                 "committed": committed, "error": error}
