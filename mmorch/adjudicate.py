@@ -11,9 +11,12 @@ def adjudicate(note, project_name, project_path, generator, verifier, *, logs_di
     if (logs_path / 'loop_paused').exists():
         return {'skipped': True}
 
+    # contrato: si el proyecto esta indexado (.codegraph/), el juez y el refutador
+    # ven la lista de archivos .py DEL PROYECTO (no del indice) para citar modulo
     codegraph_dir = Path(project_path) / '.codegraph'
     codegraph = (
-        [str(p) for p in sorted(codegraph_dir.rglob('*.py'))]
+        [str(p) for p in sorted(Path(project_path).rglob('*.py'))
+         if '.codegraph' not in p.parts]
         if codegraph_dir.exists()
         else None
     )
@@ -55,18 +58,15 @@ def run_incremental(notes_dir, projects, generator, verifier, *, logs_dir='logs'
     logs_path = Path(logs_dir)
     logs_path.mkdir(parents=True, exist_ok=True)
 
-    # Read notes from non-hidden subdirs
+    # Notas: *.md directos en notes_dir (contrato F1; sin recorrer subdirs)
     notes = []
-    notes_base = Path(notes_dir)
-    for subdir in sorted(notes_base.iterdir()):
-        if subdir.is_dir() and not subdir.name.startswith('.'):
-            for md_file in sorted(subdir.glob('*.md')):
-                content = md_file.read_text(encoding='utf-8')
-                notes.append({
-                    'path': str(md_file),
-                    'content': content,
-                    'hash': hashlib.sha256(content.encode('utf-8')).hexdigest(),
-                })
+    for md_file in sorted(Path(notes_dir).glob('*.md')):
+        content = md_file.read_text(encoding='utf-8')
+        notes.append({
+            'path': str(md_file),
+            'content': content,
+            'hash': hashlib.sha256(content.encode('utf-8')).hexdigest(),
+        })
 
     # Load previous state
     state_path = logs_path / 'adjudications.json'
@@ -103,7 +103,6 @@ def run_incremental(notes_dir, projects, generator, verifier, *, logs_dir='logs'
 
             if result.get('strong'):
                 strong_results.append(result)
-                state['by_project'].setdefault(project_name, []).append(result)
 
     # Update frontmatter for notes with strong matches
     for note in notes:
@@ -118,6 +117,22 @@ def run_incremental(notes_dir, projects, generator, verifier, *, logs_dir='logs'
         ]
         if strong_projects:
             _update_frontmatter(note_path, strong_projects)
+            # el espejo reescribe la nota -> el hash en disco cambia; sin este
+            # refresh, la proxima corrida re-juzgaria todos los pares de la nota
+            new_content = Path(note_path).read_text(encoding='utf-8')
+            new_hash = hashlib.sha256(new_content.encode('utf-8')).hexdigest()
+            for key, entry in state['pairs'].items():
+                if key.startswith(f'{note_path}|'):
+                    entry['hash'] = new_hash
+
+    # by_project se RECONSTRUYE desde pairs (append incremental duplicaba
+    # los strong cacheados en cada corrida)
+    by_project = {}
+    for entry in state['pairs'].values():
+        r = entry['result']
+        if r.get('strong'):
+            by_project.setdefault(r['project'], []).append(r)
+    state['by_project'] = by_project
 
     # Write state back
     atomic_write_json(state_path, state)
