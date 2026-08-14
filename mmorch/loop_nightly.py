@@ -37,7 +37,8 @@ _REFUTE_SCHEMA = {
 }
 
 
-def _llm_json(prompt: str, *, schema: dict, model: str | None = None) -> dict:
+def _llm_json(prompt: str, *, schema: dict, model: str | None = None,
+              temperature: float = 0.0) -> dict:
     """Unico seam de LLM del modulo (los tests lo monkeypatchean)."""
     from mmorch.config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
     from mmorch.schema import gated_json
@@ -47,7 +48,41 @@ def _llm_json(prompt: str, *, schema: dict, model: str | None = None) -> dict:
     if schema is _REFUTE_SCHEMA and model is None:
         mdl = DEFAULT_VERIFIER
     return gated_json(mdl, [{"role": "user", "content": prompt}],
-                      schema=schema, pattern="loop_propuestas", phase="idea_loop")
+                      schema=schema, pattern="loop_propuestas", phase="idea_loop",
+                      temperature=temperature)
+
+
+_PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts"
+# temperatura de ideacion: 0.0 colapsa en el atractor mas saliente (medido
+# 2026-08-14: la misma expansion pegada a las 7 candidatas). Adjudicacion y
+# refutacion quedan en 0.0 — ahi el determinismo es virtud.
+_IDEATE_TEMP = 0.8
+_IDEATE_SAMPLES = 2
+
+
+def _prompt_file(name: str, default: str) -> str:
+    """Prompts de ideacion externalizados -> hillclimbeables por autoresearch."""
+    try:
+        return (_PROMPTS_DIR / name).read_text(encoding="utf-8")
+    except OSError:
+        return default
+
+
+def _tokens(text: str) -> set:
+    return {t for t in text.lower().split() if len(t) > 3}
+
+
+def _novelty(text: str, seen: list[str]) -> float:
+    """1 - max Jaccard contra lo ya visto (mas alto = mas nuevo)."""
+    tt = _tokens(text)
+    if not tt or not seen:
+        return 1.0
+    worst = 0.0
+    for s in seen:
+        st = _tokens(s)
+        if st:
+            worst = max(worst, len(tt & st) / len(tt | st))
+    return 1.0 - worst
 
 
 class _Judge:
@@ -55,20 +90,29 @@ class _Judge:
 
     def propose(self, payload: dict) -> dict:
         if "madurar" in payload:
-            prompt = (
-                "Sos el madurador de candidatas de mmorch. Candidata: {gist}\n"
-                "Otras candidatas vigentes (buscá cruces/sinergias): {otras}\n"
-                "Expansiones YA usadas hoy en otras candidatas (PROHIBIDO repetir "
-                "el mismo cruce o plantilla): {usadas}\n"
-                "Proponé UNA expansión corta, concreta y ESPECÍFICA de esta "
-                "candidata (máx 30 palabras), o null si no agrega valor real. "
-                "JSON: {{\"gist\": str|null, \"justification\": str}}"
-            ).format(gist=payload["madurar"][:1500],
-                     otras=str(payload.get("otras"))[:3000],
-                     usadas=str(payload.get("usadas_hoy"))[:1500])
-            out = _llm_json(prompt, schema=_JUDGE_SCHEMA)
-            return {"gist": out.get("gist"),
-                    "justification": out.get("justification", "")}
+            tpl = _prompt_file("idea_madurar.txt",
+                               "Candidata: {gist}\nOtras: {otras}\nUsadas: {usadas}\n"
+                               "JSON: {{\"gist\": str|null, \"justification\": str}}")
+            prompt = tpl.format(gist=payload["madurar"][:1500],
+                                otras=str(payload.get("otras"))[:3000],
+                                usadas=str(payload.get("usadas_hoy"))[:1500])
+            # sampling con temperatura + seleccion por NOVEDAD (anti-colapso
+            # estructural, no solo la prohibicion en el prompt)
+            seen = [payload["madurar"]] + list(payload.get("usadas_hoy") or [])
+            best, best_nov = None, -1.0
+            for _ in range(_IDEATE_SAMPLES):
+                out = _llm_json(prompt, schema=_JUDGE_SCHEMA,
+                                temperature=_IDEATE_TEMP)
+                gist = (out.get("gist") or "").strip()
+                if not gist:
+                    continue
+                nov = _novelty(gist, seen)
+                if nov > best_nov:
+                    best, best_nov = out, nov
+            if best is None:
+                return {"gist": None, "justification": ""}
+            return {"gist": best.get("gist"),
+                    "justification": best.get("justification", "")}
         if "lente" in payload:
             prompt = (
                 "Sos el ideador nocturno de mmorch. Lente: {lente}. Contexto de lo que "
@@ -78,7 +122,7 @@ class _Judge:
                 "\"justification\": str}}"
             ).format(lente=payload["lente"], context=str(payload.get("context"))[:2000],
                      visto=str(payload.get("ya_visto"))[:4000])
-            out = _llm_json(prompt, schema=_JUDGE_SCHEMA)
+            out = _llm_json(prompt, schema=_JUDGE_SCHEMA, temperature=_IDEATE_TEMP)
             return {"gist": out.get("gist"), "justification": out.get("justification", "")}
         readme = ""
         try:
@@ -113,12 +157,10 @@ class _Refuter:
             # modo IDEA: screening, no verificacion de hechos — que la idea sea
             # imperfecta o tenga limites NO es razon (medido 2026-08-14: el modo
             # estricto mataba toda maduracion con objeciones perfeccionistas)
-            prompt = (
-                "Sos el screener de ideas de mmorch. Refutá SOLO si la idea es "
-                "redundante con lo existente, incoherente, o dañina. Que sea "
-                "imperfecta, parcial o tenga casos límite NO es razón para "
-                "refutar.\nIdea: {item}\nJSON: {{\"refuted\": bool, \"reason\": str}}"
-            ).format(item=str(payload)[:3000])
+            tpl = _prompt_file("idea_screener.txt",
+                               "Refutá solo redundante/incoherente/dañina.\n"
+                               "Idea: {item}\nJSON: {{\"refuted\": bool, \"reason\": str}}")
+            prompt = tpl.format(item=str(payload)[:3000])
             out = _llm_json(prompt, schema=_REFUTE_SCHEMA)
             return {"refuted": bool(out.get("refuted", True)),
                     "reason": out.get("reason", "")}
