@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **104 módulos · 46 MCP tools · 533 tests.**
+_Auto-generado por `mmorch.docgen`._ **105 módulos · 46 MCP tools · 533 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -73,6 +73,7 @@ _Auto-generado por `mmorch.docgen`._ **104 módulos · 46 MCP tools · 533 tests
 | `mmorch/fuel.py` | Fuel module: candidate proposal lifecycle for roadmap loops. |
 | `mmorch/gate_policy.py` | gate_policy — staged review/approval gates per job (graft G6 from paperclip). |
 | `mmorch/goal.py` | goal — ancla anti-goal-drift, modelada sobre el `/goal` nativo de Claude Code. |
+| `mmorch/health.py` | Health module for mmorch: dead-man's switch detection. |
 | `mmorch/hillclimb.py` | hillclimb — optimizacion sobre METRICA ESCALAR con feedback del entorno |
 | `mmorch/innovate.py` | innovate (I-5) — motor de innovacion productizado. mmorch se idea capacidades |
 | `mmorch/intuition.py` | intuition — the bandit, re-keyed by structural signature (intuition layer Phase 1). |
