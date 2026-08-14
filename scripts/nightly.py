@@ -201,6 +201,11 @@ def main() -> None:
         rec["idea_loop"] = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
 
     _log(rec)
+    try:
+        from mmorch.health import beat
+        beat("nightly", logs_dir=str(ROOT / "logs"), detail="ok")
+    except Exception:
+        pass
     print(json.dumps(rec, ensure_ascii=False, default=str))
 
 

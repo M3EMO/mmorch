@@ -59,13 +59,15 @@ def check(
         if comp not in last_ts:
             never.append(comp)
         else:
-            overdue_s = now - last_ts[comp]
-            if overdue_s > limit:
+            elapsed = now - last_ts[comp]
+            if elapsed > limit:
                 dead.append(
                     {
                         "component": comp,
                         "last_ts": last_ts[comp],
-                        "overdue_s": overdue_s,
+                        # exceso sobre el limite ("lleva X seg de mas"), no el
+                        # tiempo total desde el ultimo latido
+                        "overdue_s": elapsed - limit,
                     }
                 )
             else:

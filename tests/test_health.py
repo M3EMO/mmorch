@@ -117,9 +117,10 @@ def test_report_healthy_true(tmp_path):
 def test_report_healthy_false_dead(tmp_path):
     now_ts = 1000.0
 
-    health.beat("server", logs_dir=str(tmp_path), now_ts=now_ts - 200)
+    # limite de server = 900 -> latido hace 1000s esta vencido (overdue 100)
+    health.beat("server", logs_dir=str(tmp_path), now_ts=now_ts - 1000)
 
-    result = health.report(logs_dir=str(tmp_path), now_ts=now_ts)
+    result = health.report(logs_dir=str(tmp_path), now_ts=now_ts + 1000)
 
     assert result["healthy"] is False
     assert len(result["check"]["dead"]) == 1
