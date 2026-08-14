@@ -156,9 +156,13 @@ class _Judge:
                  path=payload.get("project_path"), readme=readme or "(sin README)",
                  cg=str(payload.get("codegraph"))[:1500])
         out = _llm_json(prompt, schema=_JUDGE_SCHEMA)
+        # guard determinista: sin codegraph NO hay lista de archivos -> el juez
+        # no puede citar (medido 2026-08-14: invento RefinementManager.java en
+        # un proyecto sin indice)
+        cited = out.get("cited_file") if payload.get("codegraph") else None
         return {"score": float(out.get("score") or 0.0),
                 "justification": out.get("justification", ""),
-                "cited_file": out.get("cited_file")}
+                "cited_file": cited}
 
 
 class _Refuter:
@@ -183,9 +187,12 @@ class _Refuter:
             # todos sensatos; 2 corridas de 144 pares -> 0 strong)
             prompt = (
                 "Sos el auditor de adjudicaciones de mmorch. El juez propuso que esta "
-                "nota aplica a este proyecto. Refutá SOLO si la nota NO tiene relación "
-                "real con el proyecto, o la justificación inventa hechos. Que el "
-                "beneficio sea parcial o requiera trabajo NO es razón para refutar.\n"
+                "nota aplica a este proyecto. Refutá si: (1) la nota NO tiene relación "
+                "real con el proyecto; (2) la justificación inventa hechos o cita "
+                "archivos que no están en la lista; (3) la justificación habla de OTRO "
+                "proyecto distinto al adjudicado (ej: dice 'aplica a mmorch' cuando el "
+                "proyecto es Minecraft). Que el beneficio sea parcial o requiera "
+                "trabajo NO es razón para refutar.\n"
                 "Item: {item}\nJSON: {{\"refuted\": bool, \"reason\": str}}"
             ).format(item=str(payload)[:3000])
             out = _llm_json(prompt, schema=_REFUTE_SCHEMA)
