@@ -137,3 +137,39 @@ def report(*, logs_dir: str = "logs", now_ts: float | None = None) -> dict:
         and not errors["idea_loop_errors"]
     )
     return {"healthy": healthy, "check": check_result, "errors": errors}
+
+
+def check_projects(projects: dict, *, run_fn=None, timeout: float = 600.0) -> dict:
+    """Suite de cada proyecto del registry que tenga tests/ — suite roja = señal
+    de bug que nadie vio (la otra mitad del dead-man's switch: no solo procesos
+    muertos, tambien verdad de ejecucion por proyecto).
+
+    run_fn(path) -> bool (True = suite verde). Default: pytest -q -x con el
+    python del PROPIO proyecto si tiene .venv (correr mmorch's venv sobre otro
+    repo daria falsas alarmas de imports), fail-soft por proyecto."""
+    import subprocess
+    import sys as _sys
+    from pathlib import Path as _P
+
+    def _default_run(path: str) -> bool:
+        py = _P(path) / ".venv" / "Scripts" / "python.exe"
+        exe = str(py) if py.exists() else _sys.executable
+        r = subprocess.run([exe, "-m", "pytest", "-q", "-x"], cwd=path,
+                           capture_output=True, timeout=timeout)
+        return r.returncode == 0
+
+    run = run_fn or _default_run
+    ok: list[str] = []
+    failing: list[str] = []
+    skipped: list[str] = []
+    errors: list[str] = []
+    for name in sorted(projects):
+        path = projects[name]
+        try:
+            if not (_P(path) / "tests").is_dir():
+                skipped.append(name)
+                continue
+            (ok if run(path) else failing).append(name)
+        except Exception as e:  # timeout/venv roto: señal, no crash del health
+            errors.append(f"{name}: {type(e).__name__}: {str(e)[:120]}")
+    return {"ok": ok, "failing": failing, "sin_tests": skipped, "errors": errors}
