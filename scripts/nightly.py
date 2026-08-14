@@ -191,6 +191,15 @@ def main() -> None:
     except Exception as e:
         rec["arbitration_error"] = f"{type(e).__name__}: {str(e)[:120]}"
 
+    # loop de ideas (spec loop-cerrado F5): adjudicacion + candidatas + cards.
+    # fail-soft interno; este try es la segunda red.
+    try:
+        from mmorch.loop_nightly import run_idea_loop
+        rec["idea_loop"] = run_idea_loop(repo_dir=str(ROOT),
+                                         today=time.strftime("%Y-%m-%d"))
+    except Exception as e:
+        rec["idea_loop"] = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+
     _log(rec)
     print(json.dumps(rec, ensure_ascii=False, default=str))
 
