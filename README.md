@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **100 módulos · 46 MCP tools · 490 tests.**
+_Auto-generado por `mmorch.docgen`._ **101 módulos · 46 MCP tools · 491 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -99,6 +99,7 @@ _Auto-generado por `mmorch.docgen`._ **100 módulos · 46 MCP tools · 490 tests
 | `mmorch/project_loop.py` | project_loop — ejecutor PROJECT-AWARE primario via mmorch (barato, cero cupo). Es la |
 | `mmorch/projects.py` | projects — registro de proyectos que mmorch puede CONTROLAR (project-aware). Hace que |
 | `mmorch/prompts.py` | prompts — construccion de mensajes PREFIX-STABLE pa maximizar el cache-hit de DeepSeek. |
+| `mmorch/proposals.py` | Proposals module: compose and pick proposal cards. |
 | `mmorch/providers.py` | Provider layer — thin OpenAI-compatible client per external model. |
 | `mmorch/pty_session.py` | pty_session — interactive PTY sessions for the Lotus terminal. |
 | `mmorch/retention.py` | retention — decay Ebbinghaus + Zeigarnik para la capa semantica de memory. |
