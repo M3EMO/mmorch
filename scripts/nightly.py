@@ -200,6 +200,36 @@ def main() -> None:
     except Exception as e:
         rec["idea_loop"] = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
 
+    # bug-hunt semanal (lunes): mutation-survivors = mapa de donde un bug logico
+    # viviria sin ser detectado. SIEMPRE en worktree aislado (muta archivos).
+    if time.localtime().tm_wday == 0:
+        try:
+            from mmorch.bughunt import hunt, make_reviewer
+            from mmorch.worktree_driver import open_worktree
+            bh_wt = open_worktree(str(ROOT), prefix="mmorch/bh")
+            try:
+                bh = hunt(bh_wt.path, review_fn=make_reviewer())
+                worst = sorted((m for m in bh["map"] if m.get("survived")),
+                               key=lambda m: -m["survived"] / max(m["mutants"], 1))[:10]
+                rec["bughunt"] = {"scanned": bh["scanned"],
+                                  "worst": [{"module": m["module"],
+                                             "survived": m["survived"],
+                                             "mutants": m["mutants"]} for m in worst],
+                                  "findings": bh["findings"],
+                                  "errors": bh["errors"][:5]}
+            finally:
+                bh_wt.close(keep_branch=False)
+        except Exception as e:
+            rec["bughunt_error"] = f"{type(e).__name__}: {str(e)[:150]}"
+
+    # salud por proyecto: suite roja en un repo del registry = bug que nadie vio
+    try:
+        from mmorch.health import check_projects
+        from mmorch.projects import _load as _load_projects
+        rec["project_health"] = check_projects(_load_projects())
+    except Exception as e:
+        rec["project_health"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
+
     _log(rec)
     try:
         from mmorch.health import beat

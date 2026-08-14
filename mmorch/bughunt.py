@@ -62,6 +62,14 @@ def survivors_for(
         return {"module": module_rel, "skipped": "suite roja de base"}
 
     mutants = checkers._mutants(original_code, max_mutants)
+    # base normalizada para el diff: ast.unparse reformatea todo (borra blanks/
+    # comentarios) -> diffear contra el crudo mostraba el reformateo entero y
+    # la mutacion quedaba fuera de las 40 lineas (medido en la 1ra caceria)
+    import ast as _ast
+    try:
+        normalized_base = _ast.unparse(_ast.parse(original_code))
+    except SyntaxError:
+        normalized_base = original_code
     survived = 0
     survivor_diffs: list[str] = []
 
@@ -80,7 +88,7 @@ def survivors_for(
             survived += 1
             diff_lines = list(
                 difflib.unified_diff(
-                    original_code.splitlines(keepends=True),
+                    normalized_base.splitlines(keepends=True),
                     mutant.splitlines(keepends=True),
                     fromfile=f"original/{module_rel}",
                     tofile=f"mutant/{module_rel}",
@@ -143,7 +151,11 @@ def make_reviewer() -> Callable[[str, list[str]], list[str]]:
         prompt = (
             f"Modulo: {module_rel}\n"
             "Estos mutantes sobreviven a la suite de tests — para cada diff decide "
-            "si esconde un posible bug logico real o es benigno; responde SOLO los riesgosos.\n\n"
+            "si esconde un posible bug logico real o es benigno; incluye SOLO los "
+            "riesgosos.\n"
+            'Responde EXACTAMENTE un objeto JSON con esta forma (aunque no haya '
+            'riesgosos): {"findings": ["<descripcion corta del riesgo>", ...]} — '
+            'jamas una lista suelta ni otro shape.\n\n'
             + "\n---\n".join(survivor_diffs)
         )
         schema = {
