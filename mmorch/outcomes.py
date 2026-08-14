@@ -18,7 +18,7 @@ _CARD_RE = re.compile(r"la nota (\S+) aplica a (\S+) —")
 def _load_adjudications(logs_dir):
     """Load adjudications.json tolerantly."""
     path = Path(logs_dir) / "adjudications.json"
-    return load_json_tolerant(path)
+    return load_json_tolerant(path, {})
 
 
 def _save_adjudications(data, logs_dir):
@@ -131,23 +131,21 @@ def sweep_transcript(transcript_path, *, logs_dir="logs", record_fn=None):
                         pending_card = (note_filename, _project)
                         cards_seen += 1
                 else:
-                    note_filename, _project = pending_card
-                    stripped = text.strip()
-                    if stripped == "dale" or stripped == "no":
+                    note_filename, project = pending_card
+                    stripped = text.strip().lower()
+                    role = msg.get("message", {}).get("role")
+                    # solo cuenta el veredicto del USUARIO: "dale..." o exactamente "no"
+                    if role == "user" and (stripped.startswith("dale") or stripped == "no"):
+                        verdict = "dale" if stripped.startswith("dale") else "no"
                         data = _load_adjudications(logs_dir)
                         match = None
-                        by_project = data.get("by_project", {})
-                        for _proj, matches in by_project.items():
-                            for m in matches:
-                                note_path = m.get("note_path", "")
-                                if note_path.endswith(note_filename):
-                                    match = m
-                                    break
-                            if match:
+                        for m in data.get("by_project", {}).get(project, []):
+                            if m.get("note_path", "").endswith(note_filename):
+                                match = m
                                 break
                         if match:
                             result = record_verdict(
-                                match["id"], stripped, logs_dir=logs_dir, record_fn=record_fn
+                                match["id"], verdict, logs_dir=logs_dir, record_fn=record_fn
                             )
                             if result["recorded"]:
                                 verdicts += 1
