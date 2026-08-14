@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **105 módulos · 46 MCP tools · 542 tests.**
+_Auto-generado por `mmorch.docgen`._ **106 módulos · 46 MCP tools · 542 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -42,6 +42,7 @@ _Auto-generado por `mmorch.docgen`._ **105 módulos · 46 MCP tools · 542 tests
 | `mmorch/bucketrank.py` | bucket_rank — graduar/ordenar un set GRANDE en tiers (triage por calidad, rankear |
 | `mmorch/budget.py` | budget — BudgetKeeper: techo de gasto mensual (ataca el incidente +$5). |
 | `mmorch/budget_policy.py` | budget_policy — scoped budget policies (graft G5 from paperclip). |
+| `mmorch/bughunt.py` | BUG-HUNTER logico de mmorch: mutation-survivors como mapa de donde un bug silencioso viviria. |
 | `mmorch/cache.py` | memo (I-4) — cache content-hash de resultados/verdicts. Salta re-gen/re-verify |
 | `mmorch/cascade.py` | cascade — FrugalGPT-style multi-step confidence cascade (research: vault/research/ |
 | `mmorch/chat_store.py` | chat_store — durable chat history for Lotus (SQLite, stdlib). |
