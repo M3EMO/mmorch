@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **102 módulos · 46 MCP tools · 501 tests.**
+_Auto-generado por `mmorch.docgen`._ **103 módulos · 46 MCP tools · 512 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -70,6 +70,7 @@ _Auto-generado por `mmorch.docgen`._ **102 módulos · 46 MCP tools · 501 tests
 | `mmorch/feedback_trace.py` | feedback_trace — human vote -> trace bundle + bandit signal (graft G8 from paperclip). |
 | `mmorch/few_shot_bootstrap.py` | few_shot_bootstrap — DSPy-A leído del código (bootstrap.py de stanfordnlp/dspy), robado como |
 | `mmorch/fleet.py` | fleet — control unificado de varios hosts mmorch en el tailnet. Cada maquina corre su |
+| `mmorch/fuel.py` | Fuel module: candidate proposal lifecycle for roadmap loops. |
 | `mmorch/gate_policy.py` | gate_policy — staged review/approval gates per job (graft G6 from paperclip). |
 | `mmorch/goal.py` | goal — ancla anti-goal-drift, modelada sobre el `/goal` nativo de Claude Code. |
 | `mmorch/hillclimb.py` | hillclimb — optimizacion sobre METRICA ESCALAR con feedback del entorno |
