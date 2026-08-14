@@ -14,7 +14,9 @@ from pathlib import Path
 from mmorch.iohelpers import atomic_write_json, load_json_tolerant
 
 CAP_CALLS_PER_MONTH = 2000
+CAP_USD_PER_MONTH = 3.0
 _EST_CALLS_PER_RUN = 40
+_BUDGET_PATH: Path | None = None  # seteado por run_idea_loop; _llm_json acumula USD reales
 FUEL_PATHS = ("logs/workflow_obs.jsonl", "logs/feedback.jsonl", "vault/research")
 CANDIDATOS = "vault/roadmaps/candidatos.md"
 ROADMAP = "vault/roadmaps/roadmap.md"
@@ -47,9 +49,19 @@ def _llm_json(prompt: str, *, schema: dict, model: str | None = None,
     # el refutador va cross-family por contrato: schema de refutacion -> verifier
     if schema is _REFUTE_SCHEMA and model is None:
         mdl = DEFAULT_VERIFIER
-    return gated_json(mdl, [{"role": "user", "content": prompt}],
-                      schema=schema, pattern="loop_propuestas", phase="idea_loop",
-                      temperature=temperature)
+    out = gated_json(mdl, [{"role": "user", "content": prompt}],
+                     schema=schema, pattern="loop_propuestas", phase="idea_loop",
+                     temperature=temperature)
+    # budget en USD REALES (gated_json reporta _cost_usd), no solo conteo de calls
+    if _BUDGET_PATH is not None and isinstance(out, dict):
+        try:
+            state = load_json_tolerant(_BUDGET_PATH, {})
+            state["usd"] = round(state.get("usd", 0.0)
+                                 + float(out.get("_cost_usd") or 0.0), 6)
+            atomic_write_json(_BUDGET_PATH, state)
+        except Exception:
+            pass  # side-channel de contabilidad: jamas rompe la llamada
+    return out
 
 
 _PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts"
@@ -164,6 +176,21 @@ class _Refuter:
             out = _llm_json(prompt, schema=_REFUTE_SCHEMA)
             return {"refuted": bool(out.get("refuted", True)),
                     "reason": out.get("reason", "")}
+        if "note" in payload:
+            # modo ADJUDICACION: un match nota->proyecto no es un teorema — refutar
+            # solo si NO hay relacion real o la justificacion es inventada (medido
+            # 2026-08-14: el modo estricto mato los 16 matches >=0.85 del juez,
+            # todos sensatos; 2 corridas de 144 pares -> 0 strong)
+            prompt = (
+                "Sos el auditor de adjudicaciones de mmorch. El juez propuso que esta "
+                "nota aplica a este proyecto. Refutá SOLO si la nota NO tiene relación "
+                "real con el proyecto, o la justificación inventa hechos. Que el "
+                "beneficio sea parcial o requiera trabajo NO es razón para refutar.\n"
+                "Item: {item}\nJSON: {{\"refuted\": bool, \"reason\": str}}"
+            ).format(item=str(payload)[:3000])
+            out = _llm_json(prompt, schema=_REFUTE_SCHEMA)
+            return {"refuted": bool(out.get("refuted", True)),
+                    "reason": out.get("reason", "")}
         prompt = (
             "Sos el refutador de mmorch. REFUTA por default: solo si el match/idea es "
             "solido e inatacable respondé refuted=false. Ante la duda, refuted=true.\n"
@@ -182,8 +209,10 @@ def _check_and_count_budget(n_calls: int, *, logs_dir: str, month: str) -> bool:
     path = Path(logs_dir) / "loop_budget.json"
     state = load_json_tolerant(path, {})
     if state.get("month") != month:
-        state = {"month": month, "calls": 0}
+        state = {"month": month, "calls": 0, "usd": 0.0}
     if state["calls"] + n_calls > CAP_CALLS_PER_MONTH:
+        return False
+    if state.get("usd", 0.0) >= CAP_USD_PER_MONTH:   # tope en plata REAL
         return False
     state["calls"] += n_calls
     atomic_write_json(path, state)
@@ -210,6 +239,9 @@ def run_idea_loop(*, repo_dir: str, today: str, generator=None, verifier=None,
                   record_fn=None, now_ts: float | None = None) -> dict:
     repo = Path(repo_dir)
     logs_dir = str(repo / "logs")
+
+    global _BUDGET_PATH
+    _BUDGET_PATH = repo / "logs" / "loop_budget.json"
 
     if (repo / "logs" / "loop_paused").exists():
         return {"skipped": "paused"}

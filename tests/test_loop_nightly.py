@@ -54,7 +54,15 @@ def test_budget_old_month_resets(tmp_path):
     result = run(repo)
     assert "skipped" not in result
     budget = json.loads((repo / "logs" / "loop_budget.json").read_text())
-    assert budget == {"month": "2026-08", "calls": 40}
+    assert budget["month"] == "2026-08" and budget["calls"] == 40
+    assert budget.get("usd", 0.0) == 0.0  # reset mensual arranca la plata en 0
+
+
+def test_budget_usd_cap_skips(tmp_path):
+    repo = make_repo(tmp_path)
+    atomic_write_json(repo / "logs" / "loop_budget.json",
+                      {"month": "2026-08", "calls": 0, "usd": 3.5})
+    assert run(repo) == {"skipped": "budget"}
 
 
 def test_steps_run_and_state_updated(tmp_path, monkeypatch):

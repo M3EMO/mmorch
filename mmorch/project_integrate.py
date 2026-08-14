@@ -69,9 +69,16 @@ _CODER_SYS = (
     "only the changed fragment. Return it in a single ``` block, no explanation.")
 
 
-def _default_gen(gen_model: str, repo: str):
+def _default_gen(gen_model: str, repo: str, task: str = ""):
     from .providers import call
     from .textutil import extract_fence
+
+    # contract-verbatim (medido 2026-08: 4/4 builds con "CONTRATO EXACTO" en el
+    # task fallaron porque las unidades solo veian el spec PARAFRASEADO por el
+    # planner — el test-writer inventaba firmas). El task original viaja entero
+    # a cada unidad; ante conflicto, el contrato literal manda sobre el spec.
+    contract = (f"\nGLOBAL TASK / CONTRACT (verbatim — on any conflict this "
+                f"OVERRIDES the SPEC paraphrase):\n{task[:8000]}\n") if task else ""
 
     def gen(unit: dict, feedback: str) -> str:
         fpath = _safe_target(repo, unit)
@@ -84,7 +91,7 @@ def _default_gen(gen_model: str, repo: str):
                 cur = open(fpath, encoding="utf-8").read()[:60000]
             except (OSError, UnicodeDecodeError):
                 cur = ""   # side-channel: current-content is optional context; a bad read must not stop the coder
-        user = (f"UNIT: {unit['name']}\nSPEC:\n{unit['spec']}\n\n"
+        user = (f"UNIT: {unit['name']}\nSPEC:\n{unit['spec']}\n{contract}\n"
                 f"FILE `{_file_of(unit)}` (current):\n```\n{cur}\n```\n"
                 + (f"\nThe previous attempt FAILED:\n{feedback[:1200]}\nFix it.\n" if feedback else "")
                 + "Return ONLY the COMPLETE new file content in a ``` block.")
@@ -216,7 +223,7 @@ def build_project(task: str, repo: str, *, external_test: str | None,
     # learn only from REAL runs: injected gen/run_test = synthetic (self-checks, tests) — feeding
     # fake outcomes into the persistent bandit would poison exactly the signal we're trying to grow.
     _real_run = gen is None and run_test is None
-    gen = gen or _default_gen(gen_model, repo)
+    gen = gen or _default_gen(gen_model, repo, task)
     run_test = run_test or _default_run_test(repo)
 
     # call-breaker (blind-spot #6): units x max_fix x re-asks compone sin tope de $. Cota dura de
