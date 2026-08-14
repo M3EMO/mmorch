@@ -1,234 +1,167 @@
-"""Tests for fuel module."""
+"""Tests F4 fuel (contrato .scratch/loop-cerrado/spec.md)."""
 
-from pathlib import Path
+import time
 
-import pytest
-
-from fuel import (
+from mmorch.fuel import (
+    ARM_PREFIX,
+    LENTES,
     detect_promotions,
-    expire,
-    generate,
+    expire_candidates,
+    generate_candidates,
     has_new_fuel,
-    parse,
-    render,
+    parse_candidatos,
+    render_candidatos,
 )
 
 
-class FakePropose:
-    """Fake propose API."""
-
-    def __init__(self, today):
-        self.today = today
-        self.added = []
-
-    def add(self, text, lente, ya_visto, gist=None):
-        self.added.append((text, lente, ya_visto, gist))
-        return len(self.added)
+def entry(id_="2026-08-14-01", lente="deuda", gist="consolidar bandits",
+          estado="pendiente", vence="2026-08-28"):
+    return {"id": id_, "fecha": "2026-08-14", "vence": vence, "lente": lente,
+            "gist": gist, "estado": estado}
 
 
-class FakeRefute:
-    """Fake refute API."""
+class FakeGen:
+    def __init__(self, gists):
+        self.gists = dict(gists)  # lente -> gist | None
+        self.payloads = []
 
+    def propose(self, payload):
+        self.payloads.append(payload)
+        return {"gist": self.gists.get(payload["lente"]), "justification": "j"}
+
+
+class FakeVer:
+    def __init__(self, refute_gists=()):
+        self.refute_gists = set(refute_gists)
+
+    def refute(self, payload):
+        return {"refuted": payload["gist"] in self.refute_gists}
+
+
+class Recorder:
     def __init__(self):
-        self.refuted = set()
+        self.calls = []
 
-    def is_refuted(self, text):
-        return text in self.refuted
-
-
-@pytest.fixture
-def tmp_path():
-    """Temporary directory fixture."""
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as tmp:
-        yield Path(tmp)
+    def __call__(self, arm, reward, *, pattern="", source=""):
+        self.calls.append((arm, reward, source))
 
 
-@pytest.fixture
-def propose():
-    """Fake propose fixture."""
-    return FakePropose("2024-01-15")
+def test_roundtrip_preserves_fields():
+    vig = [entry(), entry(id_="2026-08-14-02", lente="integracion",
+                          gist="recall federado")]
+    arch = [entry(id_="2026-08-01-01", estado="expirada", vence="2026-08-10")]
+    md = render_candidatos(vig, arch)
+    parsed = parse_candidatos(md)
+    assert [e["id"] for e in parsed] == ["2026-08-14-01", "2026-08-14-02"]
+    assert parsed[0]["vence"] == "2026-08-28"
+    assert parsed[1]["lente"] == "integracion"
+    assert parsed[0]["estado"] == "pendiente"
+    # archivadas no aparecen en vigentes pero conservan estado en el texto
+    assert "estado: expirada" in md
 
 
-@pytest.fixture
-def refute():
-    """Fake refute fixture."""
-    return FakeRefute()
+def test_parse_ignores_garbage():
+    md = "# x\n\n## Vigentes\n\n- **cand-roto sin formato\n- texto suelto\n"
+    assert parse_candidatos(md) == []
 
 
-SEEDED_ENTRY = """- [ ] #fuel 2024-01-15
-  - lente: "lente-a"
-  - texto: "Candidato de prueba con formato real"
-  - gist: "abc123"
-"""
+def test_has_new_fuel(tmp_path):
+    f = tmp_path / "a.txt"
+    f.write_text("x")
+    old = time.time() - 1000
+    assert has_new_fuel(old, [str(f)]) is True
+    assert has_new_fuel(time.time() + 1000, [str(f)]) is False
+    assert has_new_fuel(old, [str(tmp_path / "no-existe")]) is False
 
 
-def test_parse_real_seeded_format(tmp_path):
-    """Parse a real seeded format entry."""
-    file_path = tmp_path / "candidatos.md"
-    file_path.write_text(SEEDED_ENTRY)
-    fuels = parse(file_path)
-    assert len(fuels) == 1
-    fuel = fuels[0]
-    assert fuel.lente == "lente-a"
-    assert fuel.texto == "Candidato de prueba con formato real"
-    assert fuel.gist == "abc123"
-    assert fuel.fecha == "2024-01-15"
+def test_generate_lentes_and_dedup(tmp_path):
+    cand = tmp_path / "candidatos.md"
+    road = tmp_path / "roadmap.md"
+    road.write_text("direccion: unificar recall federado en mmorch",
+                    encoding="utf-8")
+    gen = FakeGen({"deuda": "consolidar bandits",
+                   "capacidad": None,
+                   "integracion": "unificar recall federado en mmorch",  # ya en roadmap
+                   "notas-huerfanas": "adjudicar notas viejas"})
+    result = generate_candidates("ctx", gen, FakeVer(),
+                                 candidatos_path=str(cand),
+                                 roadmap_path=str(road), today="2026-08-14")
+    assert result == {"nuevas": 2}  # None no produce; la del roadmap dedupea
+    parsed = parse_candidatos(cand.read_text(encoding="utf-8"))
+    assert {e["lente"] for e in parsed} == {"deuda", "notas-huerfanas"}
+    assert all(e["vence"] == "2026-08-28" for e in parsed)
+    # el generator recibio ya_visto
+    assert all("ya_visto" in p for p in gen.payloads)
 
 
-def test_roundtrip_parse_render(tmp_path):
-    """Roundtrip parse(render(x)) preserves data."""
-    file_path = tmp_path / "candidatos.md"
-    file_path.write_text(SEEDED_ENTRY)
-    fuels = parse(file_path)
-    rendered = render(fuels)
-    reparsed = parse(rendered)
-    assert len(reparsed) == 1
-    assert reparsed[0].lente == fuels[0].lente
-    assert reparsed[0].texto == fuels[0].texto
-    assert reparsed[0].gist == fuels[0].gist
-    assert reparsed[0].fecha == fuels[0].fecha
+def test_refuted_does_not_enter(tmp_path):
+    cand = tmp_path / "candidatos.md"
+    gen = FakeGen({"deuda": "idea refutable", "capacidad": None,
+                   "integracion": None, "notas-huerfanas": None})
+    result = generate_candidates("ctx", gen, FakeVer(refute_gists={"idea refutable"}),
+                                 candidatos_path=str(cand),
+                                 roadmap_path=str(tmp_path / "no.md"),
+                                 today="2026-08-14")
+    assert result == {"nuevas": 0}
 
 
-def test_has_new_fuel_true(tmp_path):
-    """has_new_fuel returns True when file has new fuel."""
-    file_path = tmp_path / "candidatos.md"
-    file_path.write_text(SEEDED_ENTRY)
-    assert has_new_fuel(file_path) is True
+def test_sequential_ids_same_day(tmp_path):
+    cand = tmp_path / "candidatos.md"
+    gen1 = FakeGen({"deuda": "idea uno", "capacidad": None,
+                    "integracion": None, "notas-huerfanas": None})
+    generate_candidates("ctx", gen1, FakeVer(), candidatos_path=str(cand),
+                        roadmap_path=str(tmp_path / "no.md"), today="2026-08-14")
+    gen2 = FakeGen({"deuda": "idea dos", "capacidad": None,
+                    "integracion": None, "notas-huerfanas": None})
+    generate_candidates("ctx", gen2, FakeVer(), candidatos_path=str(cand),
+                        roadmap_path=str(tmp_path / "no.md"), today="2026-08-14")
+    ids = [e["id"] for e in parse_candidatos(cand.read_text(encoding="utf-8"))]
+    assert ids == ["2026-08-14-01", "2026-08-14-02"]
 
 
-def test_has_new_fuel_false(tmp_path):
-    """has_new_fuel returns False when file has no new fuel."""
-    file_path = tmp_path / "candidatos.md"
-    file_path.write_text("- [x] #fuel 2024-01-15\n")
-    assert has_new_fuel(file_path) is False
+def test_expire_moves_and_records(tmp_path):
+    cand = tmp_path / "candidatos.md"
+    cand.write_text(render_candidatos(
+        [entry(vence="2026-08-10", lente="deuda"),
+         entry(id_="2026-08-14-02", vence="2026-08-28", lente="capacidad",
+               gist="otra")], []), encoding="utf-8")
+    rec = Recorder()
+    result = expire_candidates(candidatos_path=str(cand), today="2026-08-14",
+                               record_fn=rec)
+    assert result == {"expired": 1}
+    md = cand.read_text(encoding="utf-8")
+    assert len(parse_candidatos(md)) == 1
+    assert "estado: expirada" in md
+    assert rec.calls == [(f"{ARM_PREFIX}deuda", 0.2, "soft_reject")]
 
 
-def test_has_new_fuel_nonexistent(tmp_path):
-    """has_new_fuel returns False for nonexistent path."""
-    file_path = tmp_path / "no_existe.md"
-    assert has_new_fuel(file_path) is False
+def test_detect_promotions(tmp_path):
+    cand = tmp_path / "candidatos.md"
+    road = tmp_path / "roadmap.md"
+    cand.write_text(render_candidatos(
+        [entry(gist="consolidar los tres bandits en uno", lente="deuda"),
+         entry(id_="2026-08-14-02", gist="otra idea distinta",
+               lente="capacidad")], []), encoding="utf-8")
+    road.write_text("## Direcciones\n- Consolidar los tres bandits en uno\n",
+                    encoding="utf-8")
+    rec = Recorder()
+    result = detect_promotions(candidatos_path=str(cand),
+                               roadmap_path=str(road), record_fn=rec)
+    assert result == {"promoted": 1}
+    md = cand.read_text(encoding="utf-8")
+    assert "estado: promovida" in md
+    assert len(parse_candidatos(md)) == 1
+    assert rec.calls == [(f"{ARM_PREFIX}deuda", 1.0, "roadmap_promotion")]
 
 
-def test_generate_adds_with_different_lentes(tmp_path, propose, refute):
-    """generate adds entries with different lentes."""
-    file_path = tmp_path / "candidatos.md"
-    file_path.write_text(
-        "- [ ] #fuel 2024-01-15\n"
-        '  - lente: "lente-a"\n'
-        '  - texto: "Candidato uno"\n'
-        '  - gist: "gist1"\n'
-        "- [ ] #fuel 2024-01-15\n"
-        '  - lente: "lente-b"\n'
-        '  - texto: "Candidato dos"\n'
-        '  - gist: "gist2"\n'
-    )
-    generate(file_path, propose, refute, today="2024-01-15")
-    assert len(propose.added) == 2
-    assert propose.added[0][1] == "lente-a"
-    assert propose.added[1][1] == "lente-b"
+def test_promotions_without_roadmap(tmp_path):
+    cand = tmp_path / "candidatos.md"
+    cand.write_text(render_candidatos([entry()], []), encoding="utf-8")
+    result = detect_promotions(candidatos_path=str(cand),
+                               roadmap_path=str(tmp_path / "no.md"),
+                               record_fn=Recorder())
+    assert result == {"promoted": 0}
 
 
-def test_generate_dedup_against_ya_visto(tmp_path, propose, refute):
-    """generate deduplicates against ya_visto."""
-    file_path = tmp_path / "candidatos.md"
-    file_path.write_text(
-        "- [ ] #fuel 2024-01-15\n"
-        '  - lente: "lente-a"\n'
-        '  - texto: "Candidato repetido"\n'
-        '  - gist: "gist1"\n'
-    )
-    ya_visto = {"Candidato repetido"}
-    generate(file_path, propose, refute, today="2024-01-15", ya_visto=ya_visto)
-    assert len(propose.added) == 0
-
-
-def test_generate_refuted_does_not_enter(tmp_path, propose, refute):
-    """generate skips refuted entries."""
-    file_path = tmp_path / "candidatos.md"
-    file_path.write_text(
-        "- [ ] #fuel 2024-01-15\n"
-        '  - lente: "lente-a"\n'
-        '  - texto: "Candidato refutado"\n'
-        '  - gist: "gist1"\n'
-    )
-    refute.refuted.add("Candidato refutado")
-    generate(file_path, propose, refute, today="2024-01-15")
-    assert len(propose.added) == 0
-
-
-def test_generate_gist_none_produces_nothing(tmp_path, propose, refute):
-    """generate skips entries with gist None."""
-    file_path = tmp_path / "candidatos.md"
-    file_path.write_text(
-        "- [ ] #fuel 2024-01-15\n"
-        '  - lente: "lente-a"\n'
-        '  - texto: "Candidato sin gist"\n'
-        "  - gist: None\n"
-    )
-    generate(file_path, propose, refute, today="2024-01-15")
-    assert len(propose.added) == 0
-
-
-def test_generate_sequential_ids_same_day(tmp_path, propose, refute):
-    """generate produces sequential ids for same day."""
-    file_path = tmp_path / "candidatos.md"
-    file_path.write_text(
-        "- [ ] #fuel 2024-01-15\n"
-        '  - lente: "lente-a"\n'
-        '  - texto: "Candidato uno"\n'
-        '  - gist: "gist1"\n'
-        "- [ ] #fuel 2024-01-15\n"
-        '  - lente: "lente-b"\n'
-        '  - texto: "Candidato dos"\n'
-        '  - gist: "gist2"\n'
-    )
-    generate(file_path, propose, refute, today="2024-01-15")
-    assert propose.added[0][0] == "2024-01-15-1"
-    assert propose.added[1][0] == "2024-01-15-2"
-
-
-def test_expire_moves_to_archivadas(tmp_path):
-    """expire moves old fuels to Archivadas with reward 0.2."""
-    candidatos = tmp_path / "candidatos.md"
-    archivadas = tmp_path / "archivadas.md"
-    candidatos.write_text(
-        "- [ ] #fuel 2024-01-01\n"
-        '  - lente: "lente-a"\n'
-        '  - texto: "Candidato viejo"\n'
-        '  - gist: "gist1"\n'
-    )
-    archivadas.write_text("")
-    expire(candidatos, archivadas, today="2024-01-15")
-    archivadas_content = archivadas.read_text()
-    assert "Candidato viejo" in archivadas_content
-    assert "reward: 0.2" in archivadas_content
-    assert "lente-a" in archivadas_content
-    assert candidatos.read_text() == ""
-
-
-def test_detect_promotions_moves_with_1_0(tmp_path):
-    """detect_promotions moves entries with 1.0 reward."""
-    candidatos = tmp_path / "candidatos.md"
-    archivadas = tmp_path / "archivadas.md"
-    candidatos.write_text(
-        "- [ ] #fuel 2024-01-15\n"
-        '  - lente: "lente-a"\n'
-        '  - texto: "Candidato promovido"\n'
-        '  - gist: "gist1"\n'
-        "  - reward: 1.0\n"
-    )
-    archivadas.write_text("")
-    detect_promotions(candidatos, archivadas)
-    archivadas_content = archivadas.read_text()
-    assert "Candidato promovido" in archivadas_content
-    assert "reward: 1.0" in archivadas_content
-    assert candidatos.read_text() == ""
-
-
-def test_nonexistent_roadmap_does_not_break(tmp_path, propose, refute):
-    """generate handles nonexistent roadmap gracefully."""
-    file_path = tmp_path / "no_existe.md"
-    generate(file_path, propose, refute, today="2024-01-15")
-    assert len(propose.added) == 0
+def test_lentes_constant():
+    assert LENTES == ("deuda", "capacidad", "integracion", "notas-huerfanas")

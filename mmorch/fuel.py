@@ -15,30 +15,29 @@ EXPIRY_DAYS = 14
 ARM_PREFIX = "propuesta:roadmap-"
 
 _CAND_RE = re.compile(
-    r"^-\s+\*\*cand-(?P<id>[^*]+)\*\*.*?"
-    r"fecha:\s*(?P<fecha>\S+).*?"
-    r"vence:\s*(?P<vence>\S+).*?"
-    r"lente:\s*(?P<lente>\S+).*?"
-    r"gist:\s*(?P<gist>.+?)\s*$",
-    re.MULTILINE | re.DOTALL,
+    r"^-\s+\*\*cand-(?P<id>[^*]+)\*\*\s*\|\s*"
+    r"fecha:\s*(?P<fecha>\S+)\s*\|\s*"
+    r"vence:\s*(?P<vence>\S+)\s*\|\s*"
+    r"lente:\s*(?P<lente>[^|]+?)\s*\|\s*"
+    r"gist:\s*(?P<gist>.+?)"
+    r"(?:\s*\|\s*estado:\s*(?P<estado>\S+))?\s*$"
 )
 
 
-def parse_candidatos(md_text: str) -> list[dict]:
-    """Parse '## Vigentes' section bullets starting with '- **cand-'."""
+def _parse_section(md_text: str, header: str) -> list[dict]:
+    """Parse the bullets of one '## <header>' section."""
     entries = []
-    in_vigentes = False
+    in_section = False
     for line in md_text.splitlines():
-        if line.strip().startswith("## Vigentes"):
-            in_vigentes = True
+        stripped = line.strip()
+        if stripped.startswith(f"## {header}"):
+            in_section = True
             continue
-        if line.strip().startswith("## ") and in_vigentes:
+        if stripped.startswith("## ") and in_section:
             break
-        if not in_vigentes:
+        if not in_section or not stripped.startswith("- **cand-"):
             continue
-        if not line.strip().startswith("- **cand-"):
-            continue
-        m = _CAND_RE.match(line)
+        m = _CAND_RE.match(stripped)
         if m:
             entries.append(
                 {
@@ -47,10 +46,20 @@ def parse_candidatos(md_text: str) -> list[dict]:
                     "vence": m.group("vence").strip(),
                     "lente": m.group("lente").strip(),
                     "gist": m.group("gist").strip(),
-                    "estado": "pendiente",
+                    "estado": (m.group("estado") or "pendiente").strip(),
                 }
             )
     return entries
+
+
+def parse_candidatos(md_text: str) -> list[dict]:
+    """Parse '## Vigentes' section bullets starting with '- **cand-'."""
+    return _parse_section(md_text, "Vigentes")
+
+
+def parse_archivadas(md_text: str) -> list[dict]:
+    """Parse '## Archivadas' section bullets."""
+    return _parse_section(md_text, "Archivadas")
 
 
 def render_candidatos(entries: list[dict], archived: list[dict]) -> str:
@@ -104,66 +113,43 @@ def generate_candidates(
         md_text = ""
     try:
         with open(roadmap_path, "r", encoding="utf-8") as f:
-            f.read()
+            roadmap_text = f.read()
     except FileNotFoundError:
-        pass
+        roadmap_text = ""
 
     existing = parse_candidatos(md_text)
-    ya_visto = [e["gist"].lower().strip() for e in existing]
-
-    # Also consider archived? Spec says ya_visto from existing (vigentes) only.
-    # But to avoid duplicates with archived, we could include them too.
-    # The spec says "ya_visto":[...] — we'll use all existing entries (vigentes + archived)
-    # but parse_candidatos only gets vigentes. Let's also parse archived for dedup.
-    archived_entries = []
-    in_arch = False
-    for line in md_text.splitlines():
-        if line.strip().startswith("## Archivadas"):
-            in_arch = True
-            continue
-        if line.strip().startswith("## ") and in_arch:
-            break
-        if in_arch and line.strip().startswith("- **cand-"):
-            m = _CAND_RE.match(line)
-            if m:
-                archived_entries.append(
-                    {
-                        "id": m.group("id").strip(),
-                        "fecha": m.group("fecha").strip(),
-                        "vence": m.group("vence").strip(),
-                        "lente": m.group("lente").strip(),
-                        "gist": m.group("gist").strip(),
-                        "estado": "archivada",
-                    }
-                )
-    ya_visto.extend([e["gist"].lower().strip() for e in archived_entries])
+    archived_entries = parse_archivadas(md_text)
+    ya_visto = [e["gist"].lower().strip() for e in existing + archived_entries]
+    if roadmap_text.strip():
+        ya_visto.append(roadmap_text.lower())
+    roadmap_lower = roadmap_text.lower()
 
     survivors = []
     for lente in LENTES:
         proposal = generator.propose(
             {"lente": lente, "context": fuel_context, "ya_visto": ya_visto}
         )
-        gist = proposal.get("gist", "").strip()
+        gist = (proposal.get("gist") or "").strip()
         if not gist:
             continue
-        # Verify
         refutation = verifier.refute({"lente": lente, "gist": gist})
         if refutation and refutation.get("refuted"):
             continue
-        # Dedup
         key = gist.lower().strip()
-        if key in ya_visto:
+        # dedup contra candidatas (vigentes+archivadas) Y contra el roadmap curado
+        if key in ya_visto or (roadmap_lower and key in roadmap_lower):
             continue
         ya_visto.append(key)
         survivors.append({"lente": lente, "gist": gist})
         if len(survivors) >= MAX_CANDIDATAS:
             break
 
-    # Build new entries
+    # Build new entries; NN sigue contando las ya creadas HOY (sin colision al re-correr)
+    same_day = sum(1 for e in existing + archived_entries if e["id"].startswith(today))
     new_entries = []
     vence_date = date.fromisoformat(today) + timedelta(days=EXPIRY_DAYS)
     vence_str = vence_date.isoformat()
-    for i, s in enumerate(survivors, start=1):
+    for i, s in enumerate(survivors, start=same_day + 1):
         new_entries.append(
             {
                 "id": f"{today}-{i:02d}",
@@ -202,27 +188,7 @@ def expire_candidates(
         return {"expired": 0}
 
     entries = parse_candidatos(md_text)
-    archived_entries = []
-    in_arch = False
-    for line in md_text.splitlines():
-        if line.strip().startswith("## Archivadas"):
-            in_arch = True
-            continue
-        if line.strip().startswith("## ") and in_arch:
-            break
-        if in_arch and line.strip().startswith("- **cand-"):
-            m = _CAND_RE.match(line)
-            if m:
-                archived_entries.append(
-                    {
-                        "id": m.group("id").strip(),
-                        "fecha": m.group("fecha").strip(),
-                        "vence": m.group("vence").strip(),
-                        "lente": m.group("lente").strip(),
-                        "gist": m.group("gist").strip(),
-                        "estado": "archivada",
-                    }
-                )
+    archived_entries = parse_archivadas(md_text)
 
     today_date = date.fromisoformat(today)
     expired = []
@@ -276,27 +242,7 @@ def detect_promotions(
         roadmap_text = ""
 
     entries = parse_candidatos(md_text)
-    archived_entries = []
-    in_arch = False
-    for line in md_text.splitlines():
-        if line.strip().startswith("## Archivadas"):
-            in_arch = True
-            continue
-        if line.strip().startswith("## ") and in_arch:
-            break
-        if in_arch and line.strip().startswith("- **cand-"):
-            m = _CAND_RE.match(line)
-            if m:
-                archived_entries.append(
-                    {
-                        "id": m.group("id").strip(),
-                        "fecha": m.group("fecha").strip(),
-                        "vence": m.group("vence").strip(),
-                        "lente": m.group("lente").strip(),
-                        "gist": m.group("gist").strip(),
-                        "estado": "archivada",
-                    }
-                )
+    archived_entries = parse_archivadas(md_text)
 
     roadmap_lower = roadmap_text.lower()
     promoted = []
