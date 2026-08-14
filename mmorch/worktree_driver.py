@@ -87,7 +87,7 @@ class Worktree:
         committed, error = False, ""
         if changed:
             rc, out = _git(self.path, "commit", "-m", message)
-            if rc != 0 and re.search(r"\b[EWF]\d{3}\b", out):
+            if rc != 0 and re.search(r"\b[A-Z]{1,3}\d{3}\b", out):
                 # bug medido 2026-08: el pre-commit ruff gate del repo frena código generado por
                 # lint AUTO-FIXABLE (ej F401 import sobrante) -> unidad jamás llega a la branch ->
                 # escalate. "[*]" en el output de ruff marca fixable: fix + re-stage + UN retry.
