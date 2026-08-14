@@ -267,3 +267,55 @@ def detect_promotions(
         f.write(output)
 
     return {"promoted": len(promoted)}
+
+
+def mature_candidates(
+    generator,
+    verifier,
+    *,
+    candidatos_path: str,
+    today: str,
+) -> dict:
+    """Madura candidatas vigentes: ideate propone una expansion/complemento por
+    candidata (viendo a las demas, para cruces), el refutador filtra, y el gist
+    se enriquece con un sufijo versionado " >> {today}: {extra}". Una maduracion
+    por candidata por dia (el marcador del dia evita re-madurar)."""
+    try:
+        with open(candidatos_path, "r", encoding="utf-8") as f:
+            md_text = f.read()
+    except FileNotFoundError:
+        return {"matured": 0}
+
+    entries = parse_candidatos(md_text)
+    archived = parse_archivadas(md_text)
+    marker = f">> {today}:"
+    matured = 0
+    usadas: list[str] = []  # anti mode-collapse: una expansion no coloniza todas
+    for e in entries:
+        if marker in e["gist"]:
+            continue
+        otras = [x["gist"] for x in entries if x is not e]
+        proposal = generator.propose(
+            {"madurar": e["gist"], "lente": e["lente"], "otras": otras,
+             "usadas_hoy": usadas}
+        )
+        extra = (proposal.get("gist") or "").strip()
+        if not extra:
+            continue
+        # guard determinista: expansion casi identica a una ya aplicada hoy
+        key = extra.lower()[:40]
+        if any(key == u.lower()[:40] for u in usadas):
+            continue
+        refutation = verifier.refute(
+            {"lente": e["lente"], "gist": f"{e['gist']} + {extra}"}
+        )
+        if refutation and refutation.get("refuted"):
+            continue
+        e["gist"] = f"{e['gist']} {marker} {extra}"
+        usadas.append(extra)
+        matured += 1
+
+    if matured:
+        with open(candidatos_path, "w", encoding="utf-8") as f:
+            f.write(render_candidatos(entries, archived))
+    return {"matured": matured}

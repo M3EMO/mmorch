@@ -3,6 +3,7 @@
 import time
 
 from mmorch.fuel import (
+    mature_candidates,
     ARM_PREFIX,
     LENTES,
     detect_promotions,
@@ -165,3 +166,51 @@ def test_promotions_without_roadmap(tmp_path):
 
 def test_lentes_constant():
     assert LENTES == ("deuda", "capacidad", "integracion", "notas-huerfanas")
+
+
+class MaturingGen:
+    def __init__(self, extra="cruzarla con el review-gate"):
+        self.extra = extra
+        self.payloads = []
+
+    def propose(self, payload):
+        self.payloads.append(payload)
+        if not self.extra:
+            return {"gist": None, "justification": "j"}
+        # expansion distinta por llamada (el guard anti-colapso dedupea identicas)
+        return {"gist": f"{self.extra} #{len(self.payloads)}", "justification": "j"}
+
+
+def test_mature_enriches_gist_once_per_day(tmp_path):
+    cand = tmp_path / "candidatos.md"
+    cand.write_text(render_candidatos(
+        [entry(gist="rollback estructural"),
+         entry(id_="2026-08-14-02", lente="capacidad", gist="playbooks")],
+        []), encoding="utf-8")
+    gen = MaturingGen()
+    r1 = mature_candidates(gen, FakeVer(), candidatos_path=str(cand),
+                           today="2026-08-14")
+    assert r1 == {"matured": 2}
+    md = cand.read_text(encoding="utf-8")
+    assert md.count(">> 2026-08-14:") == 2
+    # el propose ve a las otras candidatas (cruces)
+    assert gen.payloads[0]["otras"] == ["playbooks"]
+    # segunda corrida el mismo dia: no re-madura
+    r2 = mature_candidates(MaturingGen(), FakeVer(), candidatos_path=str(cand),
+                           today="2026-08-14")
+    assert r2 == {"matured": 0}
+    # el enriquecido sigue parseable
+    assert len(parse_candidatos(md)) == 2
+
+
+def test_mature_refuted_or_null_skips(tmp_path):
+    cand = tmp_path / "candidatos.md"
+    cand.write_text(render_candidatos([entry(gist="idea base")], []),
+                    encoding="utf-8")
+    r = mature_candidates(MaturingGen(extra=""), FakeVer(),
+                          candidatos_path=str(cand), today="2026-08-14")
+    assert r == {"matured": 0}
+    gen = MaturingGen(extra="expansion mala")
+    r2 = mature_candidates(gen, FakeVer(refute_gists={"idea base + expansion mala #1"}),
+                           candidatos_path=str(cand), today="2026-08-14")
+    assert r2 == {"matured": 0}

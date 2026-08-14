@@ -24,8 +24,9 @@ _JUDGE_SCHEMA = {
     "properties": {
         "score": {"type": "number"},
         "justification": {"type": "string"},
-        "cited_file": {"type": ["string", "null"]},
-        "gist": {"type": ["string", "null"]},
+        # sin "type": el validate() de mmorch no soporta union ["string","null"]
+        "cited_file": {},
+        "gist": {},
     },
     "required": ["justification"],
 }
@@ -53,6 +54,21 @@ class _Judge:
     """generator.propose para adjudicacion (payload con note/project) y candidatas (lente)."""
 
     def propose(self, payload: dict) -> dict:
+        if "madurar" in payload:
+            prompt = (
+                "Sos el madurador de candidatas de mmorch. Candidata: {gist}\n"
+                "Otras candidatas vigentes (buscá cruces/sinergias): {otras}\n"
+                "Expansiones YA usadas hoy en otras candidatas (PROHIBIDO repetir "
+                "el mismo cruce o plantilla): {usadas}\n"
+                "Proponé UNA expansión corta, concreta y ESPECÍFICA de esta "
+                "candidata (máx 30 palabras), o null si no agrega valor real. "
+                "JSON: {{\"gist\": str|null, \"justification\": str}}"
+            ).format(gist=payload["madurar"][:1500],
+                     otras=str(payload.get("otras"))[:3000],
+                     usadas=str(payload.get("usadas_hoy"))[:1500])
+            out = _llm_json(prompt, schema=_JUDGE_SCHEMA)
+            return {"gist": out.get("gist"),
+                    "justification": out.get("justification", "")}
         if "lente" in payload:
             prompt = (
                 "Sos el ideador nocturno de mmorch. Lente: {lente}. Contexto de lo que "
@@ -64,14 +80,25 @@ class _Judge:
                      visto=str(payload.get("ya_visto"))[:4000])
             out = _llm_json(prompt, schema=_JUDGE_SCHEMA)
             return {"gist": out.get("gist"), "justification": out.get("justification", "")}
+        readme = ""
+        try:
+            for name in ("README.md", "CLAUDE.md"):
+                p = Path(str(payload.get("project_path") or "")) / name
+                if p.exists():
+                    readme = p.read_text(encoding="utf-8", errors="ignore")[:1500]
+                    break
+        except OSError:
+            pass
         prompt = (
             "Sos el juez de adjudicacion de mmorch. ¿Esta nota de research aplica a este "
             "proyecto? Nota: {note}\nProyecto: {project} ({path})\n"
+            "Descripcion del proyecto: {readme}\n"
             "Archivos del proyecto (si hay): {cg}\n"
             "JSON: {{\"score\": 0..1, \"justification\": str breve en espanol, "
             "\"cited_file\": str|null (archivo concreto donde aplica, solo si hay lista)}}"
         ).format(note=str(payload.get("note"))[:3000], project=payload.get("project"),
-                 path=payload.get("project_path"), cg=str(payload.get("codegraph"))[:1500])
+                 path=payload.get("project_path"), readme=readme or "(sin README)",
+                 cg=str(payload.get("codegraph"))[:1500])
         out = _llm_json(prompt, schema=_JUDGE_SCHEMA)
         return {"score": float(out.get("score") or 0.0),
                 "justification": out.get("justification", ""),
@@ -82,6 +109,19 @@ class _Refuter:
     """verifier.refute — cross-family, refuta por default (duda = refuted)."""
 
     def refute(self, payload: dict) -> dict:
+        if "lente" in payload:
+            # modo IDEA: screening, no verificacion de hechos — que la idea sea
+            # imperfecta o tenga limites NO es razon (medido 2026-08-14: el modo
+            # estricto mataba toda maduracion con objeciones perfeccionistas)
+            prompt = (
+                "Sos el screener de ideas de mmorch. Refutá SOLO si la idea es "
+                "redundante con lo existente, incoherente, o dañina. Que sea "
+                "imperfecta, parcial o tenga casos límite NO es razón para "
+                "refutar.\nIdea: {item}\nJSON: {{\"refuted\": bool, \"reason\": str}}"
+            ).format(item=str(payload)[:3000])
+            out = _llm_json(prompt, schema=_REFUTE_SCHEMA)
+            return {"refuted": bool(out.get("refuted", True)),
+                    "reason": out.get("reason", "")}
         prompt = (
             "Sos el refutador de mmorch. REFUTA por default: solo si el match/idea es "
             "solido e inatacable respondé refuted=false. Ante la duda, refuted=true.\n"
@@ -181,6 +221,10 @@ def run_idea_loop(*, repo_dir: str, today: str, generator=None, verifier=None,
                                         roadmap_path=roadmap_path, today=today)
 
     _step("candidatas", _candidatas)
+    _step("madurar",
+          lambda: fuel.mature_candidates(generator, verifier,
+                                         candidatos_path=candidatos_path,
+                                         today=today))
     atomic_write_json(state_path,
                       {"last_run_ts": now_ts if now_ts is not None else time.time()})
 
