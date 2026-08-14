@@ -25,7 +25,7 @@ def module_pairs(repo_dir: str) -> list[tuple[str, str]]:
             continue
         test_file = tests_dir / f"test_{name}.py"
         if test_file.is_file():
-            pairs.append((str(module_file.relative_to(repo)), str(test_file.relative_to(repo))))
+            pairs.append((module_file.relative_to(repo).as_posix(), test_file.relative_to(repo).as_posix()))
     return pairs
 
 
@@ -151,7 +151,7 @@ def make_reviewer() -> Callable[[str, list[str]], list[str]]:
             "properties": {"findings": {"type": "array", "items": {"type": "string"}}},
             "required": ["findings"],
         }
-        response = _llm_json(prompt, schema)
+        response = _llm_json(prompt, schema=schema)
         return response.get("findings", [])
 
     return review_fn

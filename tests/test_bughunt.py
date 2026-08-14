@@ -71,8 +71,12 @@ def test_survivors_for_restores_even_if_run_fn_raises(repo_dir):
 
 
 def test_dead_mutant_not_in_survivor_diffs(repo_dir):
+    calls = {"n": 0}
+
     def run_fn(test_rel):
-        return False
+        # 1ra llamada = precondicion con codigo original (verde); resto = mutantes (rojos)
+        calls["n"] += 1
+        return calls["n"] == 1
 
     result = bughunt.survivors_for(
         "mmorch/sample.py",
