@@ -1,242 +1,124 @@
+"""Tests F2 propuesta (contrato .scratch/loop-cerrado/spec.md)."""
+
 import json
 from pathlib import Path
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from proposals import compose_cards, pick_card
+from mmorch.iohelpers import atomic_write_json
+from mmorch.proposals import compose_cards, pick_card
 
 
-def make_proposals_file(tmp_path, data):
-    path = tmp_path / "proposals.json"
-    path.write_text(json.dumps(data))
-    return path
+def match(project="proj1", score=0.9, status="pendiente", card=None,
+          shown=0, cited=None, note="note1.md"):
+    m = {"note_path": f"/vault/{note}", "project": project, "score": score,
+         "justification": "aplica al ingest", "cited_file": cited,
+         "strong": True, "status": status, "shown_count": shown,
+         "id": f"/vault/{note}|{project}"}
+    if card is not None:
+        m["card"] = card
+    return m
 
 
-def make_state_file(tmp_path, data):
-    path = tmp_path / "state.json"
-    path.write_text(json.dumps(data))
-    return path
+def write_state(logs_dir: Path, matches):
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    by_project = {}
+    for m in matches:
+        by_project.setdefault(m["project"], []).append(m)
+    atomic_write_json(logs_dir / "adjudications.json",
+                      {"pairs": {}, "by_project": by_project})
 
 
-def test_compose_cards_writes_to_best_pending_without_card(tmp_path):
-    proposals_file = make_proposals_file(tmp_path, {
-        "pending": [
-            {"id": "p1", "template": "hello {{name}}", "score": 5},
-            {"id": "p2", "template": "world", "score": 3},
-        ],
-        "cited": []
-    })
-    state_file = make_state_file(tmp_path, {"shown_count": 0})
-
-    result = compose_cards(
-        proposals_file=proposals_file,
-        state_file=state_file,
-        cwd=tmp_path,
-        name="dale"
-    )
-
-    assert result == 1
-    data = json.loads(proposals_file.read_text())
-    assert data["pending"][0]["id"] == "p2"
-    assert data["pending"][0]["template"] == "world"
-    assert data["pending"][0]["score"] == 3
-    assert data["pending"][0]["card"] == "world"
+def read_state(logs_dir: Path):
+    return json.loads((logs_dir / "adjudications.json").read_text(encoding="utf-8"))
 
 
-def test_compose_cards_template_contains_dale_and_score(tmp_path):
-    proposals_file = make_proposals_file(tmp_path, {
-        "pending": [
-            {"id": "p1", "template": "Hi {{name}}!", "score": 7},
-        ],
-        "cited": []
-    })
-    state_file = make_state_file(tmp_path, {"shown_count": 0})
-
-    compose_cards(
-        proposals_file=proposals_file,
-        state_file=state_file,
-        cwd=tmp_path,
-        name="dale"
-    )
-
-    data = json.loads(proposals_file.read_text())
-    card = data["pending"][0]["card"]
-    assert "dale" in card
-    assert "7" in card
+def test_compose_writes_card_to_best_pending(tmp_path):
+    logs = tmp_path / "logs"
+    write_state(logs, [match(score=0.75), match(score=0.9, note="note2.md")])
+    result = compose_cards(logs_dir=str(logs))
+    assert result == {"cards": 1}
+    entries = read_state(logs)["by_project"]["proj1"]
+    carded = [m for m in entries if "card" in m]
+    assert len(carded) == 1
+    assert carded[0]["note_path"].endswith("note2.md")  # el de mayor score
 
 
-def test_compose_cards_cited_file_appears_only_if_exists(tmp_path):
-    proposals_file = make_proposals_file(tmp_path, {
-        "pending": [
-            {"id": "p1", "template": "x", "score": 1, "cited_file": "notes.txt"},
-        ],
-        "cited": []
-    })
-    state_file = make_state_file(tmp_path, {"shown_count": 0})
-
-    # Without the file existing
-    compose_cards(
-        proposals_file=proposals_file,
-        state_file=state_file,
-        cwd=tmp_path,
-        name="dale"
-    )
-    data = json.loads(proposals_file.read_text())
-    assert "cited_file" not in data["pending"][0]["card"]
-
-    # With the file existing
-    (tmp_path / "notes.txt").write_text("important")
-    proposals_file2 = make_proposals_file(tmp_path, {
-        "pending": [
-            {"id": "p1", "template": "x", "score": 1, "cited_file": "notes.txt"},
-        ],
-        "cited": []
-    })
-    state_file2 = make_state_file(tmp_path, {"shown_count": 0})
-    compose_cards(
-        proposals_file=proposals_file2,
-        state_file=state_file2,
-        cwd=tmp_path,
-        name="dale"
-    )
-    data2 = json.loads(proposals_file2.read_text())
-    assert "important" in data2["pending"][0]["card"]
+def test_card_template_contains_dale_and_score(tmp_path):
+    logs = tmp_path / "logs"
+    write_state(logs, [match(score=0.83)])
+    compose_cards(logs_dir=str(logs))
+    card = read_state(logs)["by_project"]["proj1"][0]["card"]
+    assert '"dale"' in card and "0.83" in card and "proj1" in card
 
 
-def test_compose_cards_loop_paused_skips(tmp_path):
-    proposals_file = make_proposals_file(tmp_path, {
-        "pending": [
-            {"id": "p1", "template": "a", "score": 5, "loop_paused": True},
-            {"id": "p2", "template": "b", "score": 3},
-        ],
-        "cited": []
-    })
-    state_file = make_state_file(tmp_path, {"shown_count": 0})
+def test_cited_file_only_when_present(tmp_path):
+    logs = tmp_path / "logs"
+    write_state(logs, [match(cited="scripts/x.py")])
+    compose_cards(logs_dir=str(logs))
+    card = read_state(logs)["by_project"]["proj1"][0]["card"]
+    assert "Cita: scripts/x.py" in card
 
-    result = compose_cards(
-        proposals_file=proposals_file,
-        state_file=state_file,
-        cwd=tmp_path,
-        name="dale"
-    )
-
-    assert result == 1
-    data = json.loads(proposals_file.read_text())
-    assert data["pending"][0]["id"] == "p2"
-    assert data["pending"][0]["card"] == "b"
+    logs2 = tmp_path / "logs2"
+    write_state(logs2, [match()])
+    compose_cards(logs_dir=str(logs2))
+    assert "Cita:" not in read_state(logs2)["by_project"]["proj1"][0]["card"]
 
 
-def test_pick_card_resolves_project_by_cwd_prefix_longest_wins(tmp_path):
-    # Create two project dirs: one nested inside another
-    outer = tmp_path / "project"
-    inner = outer / "sub"
+def test_compose_skips_when_loop_paused(tmp_path):
+    logs = tmp_path / "logs"
+    write_state(logs, [match()])
+    (logs / "loop_paused").touch()
+    assert compose_cards(logs_dir=str(logs)) == {"skipped": True}
+    assert "card" not in read_state(logs)["by_project"]["proj1"][0]
+
+
+def make_projects(tmp_path):
+    outer = tmp_path / "repos"
+    inner = outer / "proj1"
     inner.mkdir(parents=True)
-
-    proposals_file = make_proposals_file(tmp_path, {
-        "pending": [
-            {"id": "p1", "template": "outer", "score": 1, "project": str(outer)},
-            {"id": "p2", "template": "inner", "score": 2, "project": str(inner)},
-        ],
-        "cited": []
-    })
-    state_file = make_state_file(tmp_path, {"shown_count": 0})
-
-    # cwd is the inner dir, longest prefix should win
-    result = pick_card(
-        proposals_file=proposals_file,
-        state_file=state_file,
-        cwd=inner
-    )
-
-    assert result is not None
-    assert result["id"] == "p2"
+    return {"outer": str(outer), "proj1": str(inner)}
 
 
-def test_pick_card_respects_shown_count_less_than_5(tmp_path):
-    proposals_file = make_proposals_file(tmp_path, {
-        "pending": [
-            {"id": "p1", "template": "a", "score": 1},
-        ],
-        "cited": []
-    })
-    state_file = make_state_file(tmp_path, {"shown_count": 4})
-
-    result = pick_card(
-        proposals_file=proposals_file,
-        state_file=state_file,
-        cwd=tmp_path
-    )
-
-    assert result is not None
-    assert result["id"] == "p1"
+def test_pick_resolves_project_by_longest_prefix(tmp_path):
+    projects = make_projects(tmp_path)
+    logs = tmp_path / "logs"
+    write_state(logs, [match(project="proj1", card="tarjeta proj1"),
+                       match(project="outer", card="tarjeta outer")])
+    card = pick_card(projects["proj1"], projects, logs_dir=str(logs))
+    assert card == "tarjeta proj1"  # gana el prefijo mas largo
 
 
-def test_pick_card_with_5_shown_count_returns_none(tmp_path):
-    proposals_file = make_proposals_file(tmp_path, {
-        "pending": [
-            {"id": "p1", "template": "a", "score": 1},
-        ],
-        "cited": []
-    })
-    state_file = make_state_file(tmp_path, {"shown_count": 5})
-
-    result = pick_card(
-        proposals_file=proposals_file,
-        state_file=state_file,
-        cwd=tmp_path
-    )
-
-    assert result is None
+def test_pick_none_when_no_project_matches(tmp_path):
+    projects = make_projects(tmp_path)
+    logs = tmp_path / "logs"
+    write_state(logs, [match(card="t")])
+    assert pick_card(str(tmp_path / "otro"), projects, logs_dir=str(logs)) is None
 
 
-def test_pick_card_increments_shown_count_persisted(tmp_path):
-    proposals_file = make_proposals_file(tmp_path, {
-        "pending": [
-            {"id": "p1", "template": "a", "score": 1},
-        ],
-        "cited": []
-    })
-    state_file = make_state_file(tmp_path, {"shown_count": 2})
-
-    result = pick_card(
-        proposals_file=proposals_file,
-        state_file=state_file,
-        cwd=tmp_path
-    )
-
-    assert result is not None
-    state_data = json.loads(state_file.read_text())
-    assert state_data["shown_count"] == 3
+def test_pick_respects_shown_count_limit(tmp_path):
+    projects = make_projects(tmp_path)
+    logs = tmp_path / "logs"
+    write_state(logs, [match(card="t", shown=5)])
+    assert pick_card(projects["proj1"], projects, logs_dir=str(logs)) is None
 
 
-def test_pick_card_no_match_returns_none(tmp_path):
-    proposals_file = make_proposals_file(tmp_path, {
-        "pending": [
-            {"id": "p1", "template": "a", "score": 1, "project": "/nonexistent"},
-        ],
-        "cited": []
-    })
-    state_file = make_state_file(tmp_path, {"shown_count": 0})
-
-    result = pick_card(
-        proposals_file=proposals_file,
-        state_file=state_file,
-        cwd=tmp_path
-    )
-
-    assert result is None
+def test_pick_increments_shown_count_persisted(tmp_path):
+    projects = make_projects(tmp_path)
+    logs = tmp_path / "logs"
+    write_state(logs, [match(card="t", shown=1)])
+    assert pick_card(projects["proj1"], projects, logs_dir=str(logs)) == "t"
+    assert read_state(logs)["by_project"]["proj1"][0]["shown_count"] == 2
 
 
-def test_pick_card_internal_exception_corrupt_json_returns_none(tmp_path):
-    proposals_file = tmp_path / "proposals.json"
-    proposals_file.write_text("{invalid json")
-    state_file = make_state_file(tmp_path, {"shown_count": 0})
+def test_pick_none_without_carded_pending(tmp_path):
+    projects = make_projects(tmp_path)
+    logs = tmp_path / "logs"
+    write_state(logs, [match()])  # sin card
+    assert pick_card(projects["proj1"], projects, logs_dir=str(logs)) is None
 
-    result = pick_card(
-        proposals_file=proposals_file,
-        state_file=state_file,
-        cwd=tmp_path
-    )
 
-    assert result is None
+def test_pick_fail_open_on_corrupt_json(tmp_path):
+    projects = make_projects(tmp_path)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "adjudications.json").write_text("{corrupto", encoding="utf-8")
+    assert pick_card(projects["proj1"], projects, logs_dir=str(logs)) is None
