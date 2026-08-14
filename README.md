@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **101 módulos · 46 MCP tools · 501 tests.**
+_Auto-generado por `mmorch.docgen`._ **102 módulos · 46 MCP tools · 501 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -87,6 +87,7 @@ _Auto-generado por `mmorch.docgen`._ **101 módulos · 46 MCP tools · 501 tests
 | `mmorch/minds.py` | minds — global federation graph across registered projects (read-only). |
 | `mmorch/nodes.py` | nodes — el registry de la ORQUESTA: nombra a cada miembro que mmorch (el DIRECTOR) |
 | `mmorch/nudge.py` | nudge — robo de Hermes 'periodic memory nudging': cada N loops cerrados, dispara |
+| `mmorch/outcomes.py` | Outcome recording and expiry for proposals. |
 | `mmorch/patterns.py` | Code-flow patterns (§7), migrated as deterministic Python. |
 | `mmorch/plugin_worker.py` | plugin_worker — isolated subprocess host for ONE plugin invoke (graft G11). |
 | `mmorch/plugins.py` | plugins — capability-gated plugin platform (graft G11 from paperclip plugin-loader.ts). |
