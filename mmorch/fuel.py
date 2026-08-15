@@ -300,7 +300,9 @@ def mature_candidates(
              "usadas_hoy": usadas}
         )
         extra = (proposal.get("gist") or "").strip()
-        if not extra:
+        # el LLM a veces devuelve el STRING "null" (medido 2026-08-15 en el
+        # archivo real: ">> 2026-08-15: null")
+        if not extra or extra.lower() in ("null", "none"):
             continue
         # guard determinista: expansion casi identica a una ya aplicada hoy
         key = extra.lower()[:40]
