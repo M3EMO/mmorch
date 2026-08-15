@@ -10,5 +10,7 @@
 - **cand-2026-08-14-05** | fecha: 2026-08-14 | vence: 2026-08-28 | lente: capacidad | gist: entrenamiento con volumen mayor — datos sinteticos gateados por refutador cross-family + mineria de historia git con reward ejecutable (replay de commits via project-build engine) + eval congelada previa + LoRA en GPU rentada; destino foggy -> wayfinder si se acepta >> 2026-08-14: Reusar snapshots de rollback estructural para replay de commits, validando convergencia con eval congelada previa y refutador cross-family. | estado: pendiente
 - **cand-2026-08-14-06** | fecha: 2026-08-14 | vence: 2026-08-28 | lente: integracion | gist: Jarvis v0 — mmorch como orquestador + Home Assistant + sensores ESP32 (temperatura/presencia/consumo/camara) via MCP: medir el mundo fisico y actuar con tool-use, cero entrenamiento; percepcion con modulos preentrenados (Whisper, VLM chico); wayfinder si se acepta >> 2026-08-14: Integrar wayfinder como router físico: clasifica eventos ESP32 (presencia/consumo) para decidir tool-use en Home Assistant, reutilizando feedback.jsonl del loop. | estado: pendiente
 
+- **cand-2026-08-15-01** | fecha: 2026-08-15 | vence: 2026-08-29 | lente: deuda | gist: unificar los 3 ThompsonBandit (default / _SIG_BANDIT de intuition / _WF_BANDIT de workflow_race) en una instancia con namespacing de brazos — hoy no comparten evidencia y triplican estado/decay | estado: pendiente
+
 ## Archivadas
 

@@ -247,6 +247,12 @@ def main() -> None:
         beat("nightly", logs_dir=str(ROOT / "logs"), detail="ok")
     except Exception:
         pass
+    # digest local (no depende de la app de Claude): logs/digest_last.md
+    try:
+        from mmorch.loop_nightly import write_local_digest
+        write_local_digest(rec, logs_dir=str(ROOT / "logs"))
+    except Exception:
+        pass
     print(json.dumps(rec, ensure_ascii=False, default=str))
 
 

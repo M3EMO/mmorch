@@ -97,6 +97,75 @@ def _novelty(text: str, seen: list[str]) -> float:
     return 1.0 - worst
 
 
+_DESC_SCHEMA = {"type": "object", "properties": {"desc": {"type": "string"}},
+                "required": ["desc"]}
+_DIGEST_SCHEMA = {"type": "object", "properties": {"digest": {"type": "string"}},
+                  "required": ["digest"]}
+
+
+def write_local_digest(rec: dict, *, logs_dir: str) -> dict:
+    """Digest LOCAL sin depender de la app de Claude: DeepSeek redacta el
+    resumen de la corrida nocturna y queda en logs/digest_last.md. La app a
+    las 09:10 sigue siendo la capa interactiva (dale/no/ampliá)."""
+    import json as _json
+    out = _llm_json(
+        "Sos el redactor del digest matutino de mmorch. Resumí esta corrida "
+        "nocturna en español, corto y accionable (max 20 líneas de markdown): "
+        "qué corrió, tarjetas/candidatas nuevas o maduradas, salud (componentes "
+        "muertos, suites rojas de proyectos), branches esperando merge, errores. "
+        "Sin relleno; si algo requiere acción humana, marcalo con ⚠️ o 🛡️.\n"
+        f"Record JSON:\n{_json.dumps(rec, ensure_ascii=False, default=str)[:6000]}\n"
+        'JSON: {"digest": str markdown}', schema=_DIGEST_SCHEMA)
+    text = out.get("digest", "")
+    path = Path(logs_dir) / "digest_last.md"
+    path.write_text(text + "\n", encoding="utf-8")
+    return {"path": str(path), "chars": len(text)}
+
+
+def describe_projects(projects: dict, *, logs_dir: str, today: str) -> dict:
+    """Registry enriquecido: descripcion 2-3 frases por proyecto (1 call c/u,
+    solo los que faltan — incremental). El juez de adjudicacion la usa en vez
+    del README-hack. Store: logs/projects_meta.json {name: {desc, updated}}."""
+    meta_path = Path(logs_dir) / "projects_meta.json"
+    meta = load_json_tolerant(meta_path, {})
+    new = 0
+    for name, path in sorted(projects.items()):
+        if meta.get(name, {}).get("desc"):
+            continue
+        excerpt = ""
+        for fn in ("README.md", "CLAUDE.md"):
+            p = Path(path) / fn
+            if p.exists():
+                try:
+                    excerpt = p.read_text(encoding="utf-8", errors="ignore")[:2500]
+                except OSError:
+                    pass
+                break
+        try:
+            listing = ", ".join(x.name for x in sorted(Path(path).iterdir())[:25])
+        except OSError:
+            listing = ""
+        out = _llm_json(
+            f"Proyecto: {name} ({path})\nArchivos: {listing}\n"
+            f"README/CLAUDE.md: {excerpt or '(no tiene)'}\n"
+            "Describí en 2-3 frases QUÉ es este proyecto y qué tecnologías/temas "
+            'toca (para que un juez decida si una nota de research le aplica). '
+            'JSON: {"desc": str}', schema=_DESC_SCHEMA)
+        meta[name] = {"desc": out.get("desc", ""), "updated": today}
+        new += 1
+    if new:
+        atomic_write_json(meta_path, meta)
+    return {"described": new, "total": len(meta)}
+
+
+def _project_desc(project: str) -> str:
+    """Desc del registry enriquecido (via _BUDGET_PATH -> logs dir); '' si no hay."""
+    if _BUDGET_PATH is None:
+        return ""
+    meta = load_json_tolerant(_BUDGET_PATH.parent / "projects_meta.json", {})
+    return meta.get(project, {}).get("desc", "")
+
+
 class _Judge:
     """generator.propose para adjudicacion (payload con note/project) y candidatas (lente)."""
 
@@ -136,15 +205,17 @@ class _Judge:
                      visto=str(payload.get("ya_visto"))[:4000])
             out = _llm_json(prompt, schema=_JUDGE_SCHEMA, temperature=_IDEATE_TEMP)
             return {"gist": out.get("gist"), "justification": out.get("justification", "")}
-        readme = ""
-        try:
-            for name in ("README.md", "CLAUDE.md"):
-                p = Path(str(payload.get("project_path") or "")) / name
-                if p.exists():
-                    readme = p.read_text(encoding="utf-8", errors="ignore")[:1500]
-                    break
-        except OSError:
-            pass
+        # registry enriquecido primero; README crudo como fallback
+        readme = _project_desc(str(payload.get("project") or ""))
+        if not readme:
+            try:
+                for name in ("README.md", "CLAUDE.md"):
+                    p = Path(str(payload.get("project_path") or "")) / name
+                    if p.exists():
+                        readme = p.read_text(encoding="utf-8", errors="ignore")[:1500]
+                        break
+            except OSError:
+                pass
         prompt = (
             "Sos el juez de adjudicacion de mmorch. ¿Esta nota de research aplica a este "
             "proyecto? Nota: {note}\nProyecto: {project} ({path})\n"
@@ -256,7 +327,11 @@ def run_idea_loop(*, repo_dir: str, today: str, generator=None, verifier=None,
                                    month=today[:7]):
         return {"skipped": "budget"}
 
-    if generator is None or verifier is None:
+    # jueces inyectados = modo test/mock: NADA del loop debe tocar la API real
+    # (medido: un test corrio describe_projects contra el registry real y gasto
+    # USD 0.000358 de verdad)
+    real_mode = generator is None or verifier is None
+    if real_mode:
         generator, verifier = build_judges()
 
     steps: dict = {}
@@ -275,6 +350,10 @@ def run_idea_loop(*, repo_dir: str, today: str, generator=None, verifier=None,
     from mmorch import adjudicate, fuel, outcomes, proposals
     from mmorch.projects import _load as _load_projects
 
+    if real_mode:
+        _step("describe_projects",
+              lambda: describe_projects(_load_projects(), logs_dir=logs_dir,
+                                        today=today))
     _step("expire_ignored",
           lambda: outcomes.expire_ignored(logs_dir=logs_dir, record_fn=record_fn))
     _step("expire_candidates",
