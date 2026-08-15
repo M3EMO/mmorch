@@ -419,10 +419,17 @@ def open_pr_branch(branch: str, *, title: str, body: str = "", root: Path = ROOT
     """Abre un PR de la branch sandbox vía `gh` (si está). Alternativa a merge directo
     cuando querés revisión humana (zona amarilla con gate). gh ausente → devuelve push-only."""
     push = _git("push", "-u", "origin", branch, cwd=root)
-    gh = subprocess.run(["gh", "pr", "create", "--head", branch, "--title", title,
-                         "--body", body or title], cwd=str(root), capture_output=True, text=True)
-    return {"pushed": push.returncode == 0, "pr_created": gh.returncode == 0,
-            "detail": (gh.stdout + gh.stderr)[:300]}
+    try:
+        gh = subprocess.run(["gh", "pr", "create", "--head", branch, "--title", title,
+                             "--body", body or title], cwd=str(root),
+                            capture_output=True, text=True)
+        pr_created, detail = gh.returncode == 0, (gh.stdout + gh.stderr)[:300]
+    except FileNotFoundError:
+        # el docstring siempre prometio push-only sin gh; el crash rompia el
+        # nightly entero (FileNotFoundError medido, corrida 2026-08-15)
+        pr_created, detail = False, "gh no instalado -> push-only"
+    return {"pushed": push.returncode == 0, "pr_created": pr_created,
+            "detail": detail}
 
 
 def _audit_episode(change: Change, zone: str, ev: dict) -> None:

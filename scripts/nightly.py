@@ -237,7 +237,11 @@ def main() -> None:
     try:
         from mmorch.health import check_projects
         from mmorch.projects import _load as _load_projects
-        rec["project_health"] = check_projects(_load_projects())
+        # orchestration se excluye: su suite (15 min) corre en cada build/gate
+        # igual, y acá solo daba TimeoutExpired (medido 1ra corrida)
+        _projs = {n: p for n, p in _load_projects().items()
+                  if pathlib.Path(p).resolve() != ROOT}
+        rec["project_health"] = check_projects(_projs)
     except Exception as e:
         rec["project_health"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
 
