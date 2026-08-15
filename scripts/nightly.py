@@ -222,6 +222,17 @@ def main() -> None:
         except Exception as e:
             rec["bughunt_error"] = f"{type(e).__name__}: {str(e)[:150]}"
 
+    # hardening loop (toda noche menos lunes): el peor modulo del ultimo mapa
+    # de caza recibe tests anti-mutante del engine, gate = re-caza con menos
+    # sobrevivientes + suite verde. Review branch, merge humano.
+    if time.localtime().tm_wday != 0:
+        try:
+            from mmorch.hardening import harden
+            rec["hardening"] = harden(str(ROOT),
+                                      today=time.strftime("%Y-%m-%d"))
+        except Exception as e:
+            rec["hardening"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
+
     # salud por proyecto: suite roja en un repo del registry = bug que nadie vio
     try:
         from mmorch.health import check_projects
