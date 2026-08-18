@@ -1,114 +1,84 @@
-"""Tests for mmorch.decision_mining."""
+"""Tests de decision_mining (transcripts sinteticos en formato real de Claude Code)."""
 
 import json
 
-
-from mmorch import decision_mining
-
-
-def _write_transcript(tmp_path, lines):
-    """Write a synthetic transcript JSONL file."""
-    path = tmp_path / "transcript.jsonl"
-    with open(path, "w", encoding="utf-8") as f:
-        for line in lines:
-            f.write(json.dumps(line) + "\n")
-    return str(path)
+from mmorch.decision_mining import ingest_decisions, mine_decisions
 
 
-def _msg(role, text):
-    """Build a message dict in the sessions.py format."""
-    return {
-        "message": {
-            "role": role,
-            "content": [{"type": "text", "text": text}],
-        }
-    }
+def _user(text):
+    return json.dumps({"type": "user", "message": {"content": text}})
 
 
-def test_question_short_decision_mined(tmp_path):
-    """A question followed by a short user decision is mined."""
-    path = _write_transcript(
-        tmp_path,
-        [
-            _msg("assistant", "Which option do you prefer? 1. A 2. B"),
-            _msg("user", "Option 1"),
-        ],
-    )
-    result = decision_mining.mine_decisions(path)
-    assert len(result) == 1
-    assert "Which option" in result[0]["question"]
-    assert result[0]["decision"] == "Option 1"
-    assert result[0]["ts"] is None
+def _assistant(text):
+    return json.dumps({"type": "assistant",
+                       "message": {"content": [{"type": "text", "text": text}]}})
 
 
-def test_long_response_not_mined(tmp_path):
-    """A user response longer than 240 chars is not mined."""
-    long_text = "x" * 241
-    path = _write_transcript(
-        tmp_path,
-        [
-            _msg("assistant", "What should we do?"),
-            _msg("user", long_text),
-        ],
-    )
-    result = decision_mining.mine_decisions(path)
-    assert result == []
+def write_transcript(tmp_path, lines, name="t.jsonl"):
+    p = tmp_path / name
+    p.write_text("\n".join(lines) + "\nlinea corrupta\n", encoding="utf-8")
+    return str(p)
+
+
+def test_question_plus_short_decision_is_mined(tmp_path):
+    t = write_transcript(tmp_path, [
+        _user("arranca"),
+        _assistant("¿Cual de las dos opciones? 1. spec 2. codigo"),
+        _user("1"),
+    ])
+    pairs = mine_decisions(t)
+    assert len(pairs) == 1
+    assert "opciones" in pairs[0]["question"]
+    assert pairs[0]["decision"] == "1"
+
+
+def test_long_answer_not_mined(tmp_path):
+    t = write_transcript(tmp_path, [
+        _user("arranca"),
+        _assistant("¿Como lo encaramos?"),
+        _user("x" * 300),
+    ])
+    assert mine_decisions(t) == []
 
 
 def test_no_question_no_pair(tmp_path):
-    """Text without a question produces no pair."""
-    path = _write_transcript(
-        tmp_path,
-        [
-            _msg("assistant", "Here is some info."),
-            _msg("user", "OK"),
-        ],
-    )
-    result = decision_mining.mine_decisions(path)
-    assert result == []
+    t = write_transcript(tmp_path, [
+        _user("arranca"),
+        _assistant("Listo, commiteado sin novedades"),
+        _user("dale"),
+    ])
+    assert mine_decisions(t) == []
 
 
-def test_dedup_between_ingests(tmp_path):
-    """Second ingest of the same transcript yields new=0."""
-    path = _write_transcript(
-        tmp_path,
-        [
-            _msg("assistant", "Which one? 1. A 2. B"),
-            _msg("user", "A"),
-        ],
-    )
-    logs_dir = tmp_path / "logs"
-    first = decision_mining.ingest_decisions(path, logs_dir=str(logs_dir))
-    assert first["mined"] == 1
-    assert first["new"] == 1
-
-    second = decision_mining.ingest_decisions(path, logs_dir=str(logs_dir))
-    assert second["mined"] == 1
-    assert second["new"] == 0
+def test_ingest_dedups_across_runs(tmp_path):
+    t = write_transcript(tmp_path, [
+        _user("arranca"),
+        _assistant("¿Va la opcion A?"),
+        _user("dale"),
+    ])
+    logs = tmp_path / "logs"
+    r1 = ingest_decisions(t, logs_dir=str(logs))
+    assert r1 == {"mined": 1, "new": 1}
+    r2 = ingest_decisions(t, logs_dir=str(logs))
+    assert r2 == {"mined": 1, "new": 0}
+    lines = (logs / "decision_samples.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1 and "hash" in json.loads(lines[0])
 
 
-def test_nonexistent_transcript_returns_zeros(tmp_path):
-    """Nonexistent transcript returns zeros."""
-    result = decision_mining.ingest_decisions(
-        str(tmp_path / "missing.jsonl"), logs_dir=str(tmp_path / "logs")
-    )
-    assert result == {"mined": 0, "new": 0}
+def test_missing_transcript_returns_zeros(tmp_path):
+    assert mine_decisions(str(tmp_path / "no.jsonl")) == []
+    assert ingest_decisions(str(tmp_path / "no.jsonl"),
+                            logs_dir=str(tmp_path / "logs")) == {"mined": 0, "new": 0}
 
 
 def test_secret_redacted_in_file(tmp_path):
-    """An obvious secret in the decision is redacted in the file."""
-    path = _write_transcript(
-        tmp_path,
-        [
-            _msg("assistant", "What is the key? 1. A 2. B"),
-            _msg("user", "sk-abc123456789"),
-        ],
-    )
-    logs_dir = tmp_path / "logs"
-    decision_mining.ingest_decisions(path, logs_dir=str(logs_dir))
-
-    log_file = logs_dir / "decision_samples.jsonl"
-    with open(log_file, encoding="utf-8") as f:
-        line = json.loads(f.readline())
-    assert "sk-abc123456789" not in line["decision"]
-    assert "sk-" in line["decision"]  # redacted but still present
+    secret = "sk-" + "a1b2c3d4e5" * 4
+    t = write_transcript(tmp_path, [
+        _user("arranca"),
+        _assistant("¿Uso esta key?"),
+        _user(f"dale, usa {secret}"),
+    ])
+    logs = tmp_path / "logs"
+    ingest_decisions(t, logs_dir=str(logs))
+    content = (logs / "decision_samples.jsonl").read_text(encoding="utf-8")
+    assert secret not in content

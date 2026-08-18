@@ -1,98 +1,70 @@
-"""Mine human decisions from Claude Code transcripts."""
+"""Mineria de DECISIONES humanas desde transcripts de Claude Code.
+
+El criterio del usuario ("dale", "no", "opcion 2", "va asi") es la señal GOLD
+del flywheel de entrenamiento y hoy se tira. Un par = (pregunta del assistant,
+respuesta corta del usuario) — o sea: fin del reasoning de un Segment +
+request del Segment siguiente (parse_session de sessions.py ya segmenta asi).
+Ambos lados pasan por redact() antes de persistir.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
 
-from mmorch.sessions import parse_transcript, redact_secrets
+from mmorch.sessions import parse_session, redact
+
+_MAX_DECISION_CHARS = 240
+_Q_MARKERS = ("?", "1.", "opcion", "opción")
 
 
 def mine_decisions(transcript_path: str) -> list[dict]:
-    """Mine assistant question + short user decision pairs from a transcript."""
-    decisions: list[dict] = []
+    """Pares (question, decision) del transcript; tolerante y fail-open."""
     try:
-        messages = parse_transcript(transcript_path)
-    except Exception:
+        segments = parse_session(transcript_path)
+    except OSError:
         return []
-
-    for i, msg in enumerate(messages):
-        if msg.get("role") != "assistant":
+    out = []
+    for prev, nxt in zip(segments, segments[1:], strict=False):
+        question = (prev.reasoning or "").strip()
+        decision = (nxt.request or "").strip()
+        if not question or not decision:
             continue
-        text = _get_text(msg)
-        if not text or not _is_question(text):
+        if len(decision) >= _MAX_DECISION_CHARS:
             continue
-        if i + 1 >= len(messages):
-            break
-        next_msg = messages[i + 1]
-        if next_msg.get("role") != "user":
+        low = question.lower()
+        if not any(m in low for m in _Q_MARKERS):
             continue
-        decision = _get_text(next_msg)
-        if not decision or len(decision) >= 240:
-            continue
-        decisions.append(
-            {
-                "question": redact_secrets(text[-1200:]),
-                "decision": redact_secrets(decision),
-                "ts": msg.get("ts"),
-            }
-        )
-    return decisions
+        out.append({"question": redact(question[-1200:])[0],
+                    "decision": redact(decision)[0],
+                    "ts": None})
+    return out
 
 
-def ingest_decisions(
-    transcript_path: str, *, logs_dir: str = "logs"
-) -> dict:
-    """Mine decisions, dedup, and append to decision_samples.jsonl."""
+def ingest_decisions(transcript_path: str, *, logs_dir: str = "logs") -> dict:
+    """mine + dedup por hash + append a decision_samples.jsonl. Fail-open."""
     try:
         mined = mine_decisions(transcript_path)
-        log_path = Path(logs_dir) / "decision_samples.jsonl"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-
-        existing_hashes: set[str] = set()
-        if log_path.exists():
-            for line in log_path.read_text().splitlines():
+        path = Path(logs_dir) / "decision_samples.jsonl"
+        seen = set()
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
                 try:
-                    existing_hashes.add(json.loads(line).get("hash", ""))
+                    seen.add(json.loads(line).get("hash"))
                 except json.JSONDecodeError:
                     continue
-
-        new_count = 0
-        with log_path.open("a") as f:
-            for sample in mined:
-                hash_key = hashlib.sha256(
-                    f"{sample['question']}{sample['decision']}".encode()
-                ).hexdigest()
-                if hash_key in existing_hashes:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        new = 0
+        with open(path, "a", encoding="utf-8") as f:
+            for m in mined:
+                h = hashlib.sha256(
+                    (m["question"] + "\x00" + m["decision"]).encode()).hexdigest()
+                if h in seen:
                     continue
-                existing_hashes.add(hash_key)
-                new_count += 1
-                f.write(
-                    json.dumps({**sample, "hash": hash_key}) + "\n"
-                )
-        return {"mined": len(mined), "new": new_count}
+                seen.add(h)
+                f.write(json.dumps({**m, "hash": h}, ensure_ascii=False) + "\n")
+                new += 1
+        return {"mined": len(mined), "new": new}
     except Exception:
         return {"mined": 0, "new": 0}
-
-
-def _get_text(msg: dict[str, Any]) -> str:
-    """Extract text content from a message dict."""
-    content = msg.get("content", [])
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                parts.append(item.get("text", ""))
-        return "".join(parts)
-    return ""
-
-
-def _is_question(text: str) -> bool:
-    """Check if assistant text looks like a question."""
-    return "?" in text or any(
-        f"{n}." in text for n in range(1, 10)
-    ) or "opcion" in text.lower()
