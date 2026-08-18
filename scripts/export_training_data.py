@@ -24,6 +24,18 @@ sys.path.insert(0, str(ROOT))
 OUT = ROOT / "training"
 
 
+def _finish(row: dict, tier: str) -> dict:
+    """tier: gold = veredicto humano / silver = sobrevivio cross-family /
+    bronze = crudo. split: 90/10 determinista por hash del input (un ejemplo
+    cae SIEMPRE del mismo lado -> el eval jamas se contamina con el train)."""
+    import hashlib
+    h = hashlib.md5(json.dumps(row["input"], sort_keys=True,
+                               ensure_ascii=False, default=str).encode()).hexdigest()
+    row["tier"] = tier
+    row["split"] = "eval" if int(h[:8], 16) % 10 == 0 else "train"
+    return row
+
+
 def _write(name: str, rows: list) -> int:
     OUT.mkdir(exist_ok=True)
     with open(OUT / name, "w", encoding="utf-8") as f:
@@ -46,10 +58,10 @@ def _jsonl(path: pathlib.Path) -> list:
 
 
 def export_judge_sft() -> int:
-    rows = [{"kind": "sft_judge", "input": t.get("prompt", ""),
+    rows = [_finish({"kind": "sft_judge", "input": t.get("prompt", ""),
              "output": t.get("output", {}),
              "meta": {"model": t.get("model"), "ts": t.get("ts"),
-                      "temperature": t.get("temperature")}}
+                      "temperature": t.get("temperature")}}, "bronze")
             for t in _jsonl(ROOT / "logs" / "idea_loop_traces.jsonl")
             if t.get("prompt") and t.get("output")]
     return _write("sft_judge.jsonl", rows)
@@ -63,6 +75,8 @@ def export_router_prefs() -> int:
              "meta": {"source": e.get("source"), "ts": e.get("ts")}}
             for e in _jsonl(ROOT / "logs" / "feedback.jsonl")
             if e.get("arm") is not None and e.get("reward") is not None]
+    rows = [_finish(r, "gold" if r["meta"].get("source") in ("human_merge", "verdict")
+                    else "silver") for r in rows]
     return _write("router_prefs.jsonl", rows)
 
 
@@ -84,6 +98,9 @@ def export_match_labels() -> int:
                                "status": r.get("status"),
                                "justification": r.get("justification")},
                      "meta": {"hash": entry.get("hash")}})
+    rows = [_finish(r, "gold" if r["label"]["status"] in ("aceptada", "rechazada")
+                    else ("silver" if r["label"].get("strong") else "bronze"))
+            for r in rows]
     return _write("match_labels.jsonl", rows)
 
 
@@ -97,6 +114,8 @@ def export_idea_labels() -> int:
              "label": e["estado"],
              "meta": {"id": e["id"], "lente": e["lente"], "fecha": e["fecha"]}}
             for e in parse_candidatos(md) + parse_archivadas(md)]
+    rows = [_finish(r, "gold" if r["label"] in ("promovida", "expirada")
+                    else "bronze") for r in rows]
     return _write("idea_labels.jsonl", rows)
 
 
@@ -108,6 +127,7 @@ def export_dpo_pairs() -> int:
              "meta": {"gen": t.get("gen_model"), "verifier": t.get("verifier_model"),
                       "phase": t.get("phase"), "ts": t.get("ts")}}
             for t in _jsonl(ROOT / "logs" / "dpo_pairs.jsonl")]
+    rows = [_finish(r, "silver") for r in rows]
     return _write("dpo_pairs.jsonl", rows)
 
 

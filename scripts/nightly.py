@@ -260,6 +260,15 @@ def main() -> None:
     except Exception as e:
         rec["reflexion"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
 
+    # flywheel: refrescar training/ cada noche (capturas corren todo el dia;
+    # esto solo re-exporta el acumulado a formato entrenable)
+    try:
+        import subprocess as _sp
+        _sp.run([sys.executable, str(ROOT / "scripts" / "export_training_data.py")],
+                capture_output=True, timeout=300)
+    except Exception:
+        pass
+
     # digest local (no depende de la app de Claude): logs/digest_last.md
     try:
         from mmorch.loop_nightly import write_local_digest
