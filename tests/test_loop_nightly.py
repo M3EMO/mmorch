@@ -128,3 +128,17 @@ def test_no_fuel_no_candidates(tmp_path, monkeypatch):
                       {"last_run_ts": 9999999999.0})
     result = run(repo)
     assert result["steps"]["candidatas"] == {"nuevas": 0, "sin_fuel": True}
+
+
+def test_apply_focus_whitelist_and_determinism(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (tmp_path / "mmorch").mkdir()
+    (tmp_path / "mmorch" / "feedback.py").write_text("x", encoding="utf-8")
+    # nombra un modulo real -> focus; nombra uno inexistente -> focus vacio
+    f1 = ln.apply_focus({"foco_sugerido": "endurecer feedback.py ya",
+                         "fecha": "2026-08-15"}, logs_dir=str(logs))
+    assert f1["hardening_module"] == "mmorch/feedback.py"
+    f2 = ln.apply_focus({"foco_sugerido": "arreglar inexistente.py"},
+                        logs_dir=str(logs))
+    assert f2 == {}

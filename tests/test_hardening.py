@@ -45,3 +45,15 @@ def test_pick_target_skips_recent_attempts():
 def test_pick_target_none_when_all_clean_or_recent():
     worst = [{"module": "c.py", "survived": 0, "mutants": 8}]
     assert pick_target(worst, {}, today="2026-08-15") is None
+
+
+def test_pick_target_prefers_reflection_focus():
+    worst = [{"module": "b.py", "survived": 7, "mutants": 8},
+             {"module": "a.py", "survived": 2, "mutants": 8}]
+    # sin foco gana el peor ratio; con foco elegible, gana el foco
+    assert pick_target(worst, {}, today="2026-08-15")["module"] == "b.py"
+    t = pick_target(worst, {}, today="2026-08-15", preferred="a.py")
+    assert t["module"] == "a.py"
+    # foco inexistente en el mapa -> orden normal
+    t2 = pick_target(worst, {}, today="2026-08-15", preferred="zzz.py")
+    assert t2["module"] == "b.py"

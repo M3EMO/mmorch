@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **107 módulos · 46 MCP tools · 562 tests.**
+_Auto-generado por `mmorch.docgen`._ **107 módulos · 46 MCP tools · 564 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->

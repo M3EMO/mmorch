@@ -148,7 +148,27 @@ def reflect(*, logs_dir: str, today: str, n_nights: int = 7) -> dict:
            "riesgo_principal": out.get("riesgo_principal", "")}
     with open(prev_path, "a", encoding="utf-8") as f:
         f.write(_json.dumps(rec, ensure_ascii=False) + "\n")
+    apply_focus(rec, logs_dir=logs_dir)
     return rec
+
+
+def apply_focus(reflexion: dict, *, logs_dir: str) -> dict:
+    """Pienso->actuo con volante LIMITADO: si el foco de la reflexion nombra un
+    modulo mmorch/*.py, el hardening lo prioriza esa noche. Determinista (regex
+    sobre texto que la propia reflexion ya escribio), whitelist implicita (solo
+    modulos existentes del repo), y solo REORDENA prioridades — jamas toca
+    codigo, config ni presupuestos."""
+    import re as _re
+    text = f"{reflexion.get('foco_sugerido', '')} {reflexion.get('diagnostico', '')}"
+    focus = {}
+    for name in _re.findall(r"\b([a-z_]+)\.py\b", text.lower()):
+        cand = Path(logs_dir).parent / "mmorch" / f"{name}.py"
+        if cand.exists():
+            focus = {"hardening_module": f"mmorch/{name}.py",
+                     "fecha": reflexion.get("fecha", "")}
+            break
+    atomic_write_json(Path(logs_dir) / "focus.json", focus)
+    return focus
 
 
 def write_local_digest(rec: dict, *, logs_dir: str) -> dict:

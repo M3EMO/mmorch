@@ -35,9 +35,15 @@ def load_last_map(logs_dir: str) -> list[dict]:
     return []
 
 
-def pick_target(worst: list[dict], state: dict, *, today: str) -> dict | None:
-    """Peor modulo con sobrevivientes no intentado en los ultimos _RETRY_DAYS."""
-    for m in sorted(worst, key=lambda x: -x.get("survived", 0) / max(x.get("mutants", 1), 1)):
+def pick_target(worst: list[dict], state: dict, *, today: str,
+                preferred: str | None = None) -> dict | None:
+    """Peor modulo con sobrevivientes no intentado en los ultimos _RETRY_DAYS.
+    `preferred` (el foco de la reflexion nocturna) va primero si es elegible."""
+    ordered = sorted(worst, key=lambda x: -x.get("survived", 0) / max(x.get("mutants", 1), 1))
+    if preferred:
+        ordered = ([m for m in ordered if m["module"] == preferred]
+                   + [m for m in ordered if m["module"] != preferred])
+    for m in ordered:
         if not m.get("survived"):
             continue
         prev = state.get(m["module"])
@@ -69,7 +75,10 @@ def harden(repo_dir: str, *, today: str, build_fn=None, survivors_fn=None,
 
     state_path = Path(logs) / "hardening_state.json"
     state = load_json_tolerant(state_path, {})
-    target = pick_target(worst, state, today=today)
+    # foco de la reflexion nocturna (pienso->actuo, volante limitado)
+    focus = load_json_tolerant(Path(logs) / "focus.json", {})
+    target = pick_target(worst, state, today=today,
+                         preferred=focus.get("hardening_module"))
     if target is None:
         return {"skipped": "sin objetivo (todo intentado o limpio)"}
     module = target["module"]
