@@ -89,8 +89,11 @@ def scrape_errors(*, logs_dir: str = "logs", max_lines: int = 50) -> dict:
     server_err_path = Path(logs_dir) / "server_forever.err"
     if server_err_path.exists():
         try:
-            with server_err_path.open("r", encoding="utf-8") as f:
-                lines = [l.rstrip("\n") for l in f if l.strip()]
+            raw = server_err_path.read_bytes()
+            # PowerShell redirige stderr en UTF-16 con BOM (medido: 0xff 0xfe)
+            enc = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8"
+            lines = [ln.rstrip("\n") for ln in
+                     raw.decode(enc, errors="replace").splitlines() if ln.strip()]
             server_err_tail = lines[-max_lines:]
         except OSError:
             pass

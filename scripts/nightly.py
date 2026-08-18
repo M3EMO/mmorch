@@ -270,6 +270,18 @@ def main() -> None:
     except Exception as e:
         rec["auto_repair"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
 
+    # smoke de subsistemas: uso correcto de cada pieza, barato y read-only;
+    # historia en logs/smoke.jsonl (el digest reporta los rojos)
+    try:
+        import subprocess as _sp2
+        _sp2.run([sys.executable, str(ROOT / "scripts" / "smoke.py")],
+                 capture_output=True, timeout=300)
+        _last = (ROOT / "logs" / "smoke.jsonl").read_text(
+            encoding="utf-8").strip().splitlines()[-1]
+        rec["smoke"] = json.loads(_last)
+    except Exception as e:
+        rec["smoke"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
+
     # merge train: las amarillas del dia se conglomeran en UNA branch con gate
     # de integracion sobre la union -> un solo click humano por dia
     try:

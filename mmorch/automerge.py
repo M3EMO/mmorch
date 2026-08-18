@@ -21,8 +21,11 @@ from pathlib import Path
 
 
 def _git(repo: str, *args: str) -> subprocess.CompletedProcess:
+    # encoding explicito: text=True usa el locale (cp1252 en Windows) y explota
+    # con archivos utf-8 en los reader threads (medido en el smoke)
     return subprocess.run(["git", *args], cwd=repo, capture_output=True,
-                          text=True, timeout=120)
+                          text=True, encoding="utf-8", errors="replace",
+                          timeout=120)
 
 
 def classify_branch(repo: str, branch: str, *, base: str) -> dict:
