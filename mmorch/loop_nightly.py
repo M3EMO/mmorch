@@ -61,6 +61,22 @@ def _llm_json(prompt: str, *, schema: dict, model: str | None = None,
             atomic_write_json(_BUDGET_PATH, state)
         except Exception:
             pass  # side-channel de contabilidad: jamas rompe la llamada
+        # flywheel de entrenamiento (goal 2026-08-15): persistir el I/O completo
+        # de cada juicio — hoy se tiraba; es el dato crudo de un futuro
+        # fine-tune (juez/refutador destilado, router). Local-only, fail-open.
+        try:
+            import json as _json
+            import time as _time
+            with open(_BUDGET_PATH.parent / "idea_loop_traces.jsonl", "a",
+                      encoding="utf-8") as f:
+                f.write(_json.dumps(
+                    {"ts": _time.time(), "model": mdl, "temperature": temperature,
+                     "prompt": prompt[:6000],
+                     "output": {k: v for k, v in out.items()
+                                if not k.startswith("_")}},
+                    ensure_ascii=False) + "\n")
+        except Exception:
+            pass
     return out
 
 
