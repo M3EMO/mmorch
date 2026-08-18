@@ -111,9 +111,22 @@ def repair(repo_dir: str, *, today: str, build_fn=None,
                       "result": res.get("status", "fail"),
                       "branch": wt.branch if built else None}
         atomic_write_json(state_path, state)
-        return {"source": target["source"], "detail": target["detail"][:150],
-                "status": res.get("status"),
-                "branch": wt.branch if built else None}
+        out = {"source": target["source"], "detail": target["detail"][:150],
+               "status": res.get("status"),
+               "branch": wt.branch if built else None}
+        if built:
+            # carril verde del semaforo: solo-tests/archivos nuevos -> automerge
+            try:
+                import subprocess as _sp
+                from mmorch.automerge import try_automerge
+                base = _sp.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                               cwd=repo_dir, capture_output=True,
+                               text=True).stdout.strip()
+                out["automerge"] = try_automerge(repo_dir, wt.branch, base=base,
+                                                source="auto_repair")
+            except Exception as e:
+                out["automerge"] = {"merged": False, "reason": str(e)[:100]}
+        return out
     finally:
         keep = state.get(sig, {}).get("result") == "built"
         wt.close(keep_branch=keep)

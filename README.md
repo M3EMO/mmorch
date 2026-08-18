@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **110 módulos · 46 MCP tools · 576 tests.**
+_Auto-generado por `mmorch.docgen`._ **111 módulos · 46 MCP tools · 584 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -37,6 +37,7 @@ _Auto-generado por `mmorch.docgen`._ **110 módulos · 46 MCP tools · 576 tests
 | `mmorch/adjudicate.py` | Adjudication module for matching notes to projects. |
 | `mmorch/arbitration.py` | arbitration — registro auditable de los arbitrajes del orquestador (blind-spot #2, 2026-07). |
 | `mmorch/auto_repair.py` | Auto-reparación nocturna: los errores que el sistema DETECTA se convierten |
+| `mmorch/automerge.py` | Automerge con semáforo — merges sin accionar humano SOLO en el carril verde. |
 | `mmorch/autoresearch.py` | autoresearch (r4a) — hillclimb como JOB declarativo + resumable. |
 | `mmorch/babel.py` | babel — capa comprimida model-native del vault (paper 2606.19857). |
 | `mmorch/bench.py` | bench — benchmark CONGELADO de tasks difíciles para evolución de workflows. |

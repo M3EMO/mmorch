@@ -123,8 +123,20 @@ def harden(repo_dir: str, *, today: str, build_fn=None, survivors_fn=None,
                         "survived_before": survived,
                         "branch": wt.branch if built else None}
         atomic_write_json(state_path, state)
-        return {"module": module, "survived_before": survived,
-                "status": res.get("status"), "branch": wt.branch if built else None}
+        out = {"module": module, "survived_before": survived,
+               "status": res.get("status"), "branch": wt.branch if built else None}
+        if built:
+            # carril verde: branch solo-tests con suite verde -> automerge
+            try:
+                from mmorch.automerge import try_automerge
+                base = __import__("subprocess").run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir,
+                    capture_output=True, text=True).stdout.strip()
+                out["automerge"] = try_automerge(repo_dir, wt.branch, base=base,
+                                                source="hardening")
+            except Exception as e:
+                out["automerge"] = {"merged": False, "reason": str(e)[:100]}
+        return out
     finally:
         # branch sobrevive solo si el build paso el gate (revision humana)
         keep = state.get(module, {}).get("result") == "built"
