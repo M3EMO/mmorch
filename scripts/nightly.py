@@ -251,6 +251,15 @@ def main() -> None:
         beat("nightly", logs_dir=str(ROOT / "logs"), detail="ok")
     except Exception:
         pass
+    # auto-reparacion: los errores de la corrida ANTERIOR se convierten en un
+    # intento de fix en worktree (review branch, merge humano) — el digest ya
+    # no solo reporta problemas: amanece con la solucion propuesta
+    try:
+        from mmorch.auto_repair import repair
+        rec["auto_repair"] = repair(str(ROOT), today=time.strftime("%Y-%m-%d"))
+    except Exception as e:
+        rec["auto_repair"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
+
     # reflexion: mmorch mira su propia trayectoria (ultimas 7 noches) y elige
     # foco — capa "pensar sobre si mismo" (goal Jarvis 2026-08-15)
     try:
