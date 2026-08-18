@@ -280,6 +280,23 @@ def main() -> None:
     except Exception as e:
         rec["auto_repair"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
 
+    # slim: 1 modulo por noche se adelgaza (verbosidad/dup, API intacta,
+    # suite como juez); la branch amarilla la levanta el tren solo
+    try:
+        from mmorch.slim import slim_one
+        rec["slim"] = slim_one(str(ROOT), today=time.strftime("%Y-%m-%d"))
+    except Exception as e:
+        rec["slim"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
+
+    # descubrimiento semanal (domingos): GitHub search con queries derivadas
+    # del roadmap + foco de la reflexion -> encola para las noches siguientes
+    if time.localtime().tm_wday == 6:
+        try:
+            from mmorch.repo_mining import discover_repos
+            rec["repo_discovery"] = discover_repos(orch_root=str(ROOT))
+        except Exception as e:
+            rec["repo_discovery"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
+
     # mineria de repos ajenos: 1 por noche desde logs/repos_queue.txt —
     # clona efimero, destila grafts al vault + candidatas, borra el clon
     try:

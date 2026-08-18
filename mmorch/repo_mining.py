@@ -15,6 +15,7 @@ detecta licencia permisiva (MIT/Apache/BSD) — sino la candidata se marca
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import tempfile
@@ -171,3 +172,71 @@ def consume_queue(orch_root: str, *, today: str, llm_fn=None,
         q.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return r
     return {"skipped": "cola vacia"}
+
+
+def discover_repos(*, orch_root: str, max_new: int = 3, http_fn=None) -> dict:
+    """Auto-descubrimiento: busca en GitHub repos relevantes a las DIRECCIONES
+    del roadmap + el foco de la reflexion, y encola los mejores no-minados.
+    API publica de search (sin auth, 60 req/h — usamos 2-3). Queries salen de
+    lo que el sistema YA decidio que le importa, no de moda."""
+    import re
+    import urllib.parse
+    import urllib.request
+    root = Path(orch_root)
+
+    # queries deterministas desde el roadmap (titulos en negrita) + foco
+    queries = []
+    try:
+        road = (root / "vault" / "roadmaps" / "roadmap.md").read_text(encoding="utf-8")
+        queries += re.findall(r"\*\*([^*]{6,60})\*\*", road)[:4]
+    except OSError:
+        pass
+    try:
+        refl = (root / "logs" / "reflexiones.jsonl").read_text(
+            encoding="utf-8").strip().splitlines()[-1]
+        foco = json.loads(refl).get("foco_sugerido", "")[:80]
+        if foco:
+            queries.append(foco)
+    except (OSError, IndexError, json.JSONDecodeError):
+        pass
+    if not queries:
+        return {"skipped": "sin queries (roadmap vacio)"}
+
+    if http_fn is None:
+        def http_fn(url):
+            req = urllib.request.Request(url, headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "mmorch-miner"})
+            return json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
+
+    # dedup contra lo ya minado/encolado
+    seen = set()
+    q_path = root / "logs" / "repos_queue.txt"
+    if q_path.exists():
+        for line in q_path.read_text(encoding="utf-8").splitlines():
+            seen.add(line.strip().lstrip("# ").split(" minado: ")[-1])
+    for f in (root / "vault" / "research").glob("minado-*.md"):
+        seen.add(f.stem)
+
+    found = []
+    for q in queries[:3]:
+        try:
+            data = http_fn("https://api.github.com/search/repositories?"
+                           + urllib.parse.urlencode(
+                               {"q": f"{q} language:python stars:>200 pushed:>2025-06-01",
+                                "sort": "stars", "per_page": 5}))
+        except Exception:
+            continue
+        for item in data.get("items", []):
+            url = item.get("html_url", "")
+            lic = (item.get("license") or {}).get("spdx_id", "")
+            if url and url not in seen and lic in ("MIT", "Apache-2.0",
+                                                   "BSD-3-Clause", "BSD-2-Clause"):
+                found.append(url)
+                seen.add(url)
+    nuevos = found[:max_new]
+    if nuevos:
+        with open(q_path, "a", encoding="utf-8") as fh:
+            for u in nuevos:
+                fh.write(u + "\n")
+    return {"queries": len(queries[:3]), "encolados": nuevos}
