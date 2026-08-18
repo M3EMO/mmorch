@@ -34,11 +34,13 @@ def findings_from_record(rec: dict) -> list[dict]:
             for e in (v.get("errors") or []):
                 if isinstance(e, str):
                     out.append({"source": k, "detail": e})
-    # errores que referencian artefactos EFIMEROS (worktrees/tmp ya borrados)
-    # no son reparables post-hoc — el contexto murio con la limpieza (medido
-    # 2026-08-18: auto-repair gasto un ciclo en un F821 de un worktree muerto)
+    # filtros medidos en los 2 primeros runs vivos (2026-08-18):
+    # 1) artefactos EFIMEROS (worktrees/tmp borrados): irreparables post-hoc
+    # 2) project_health: errores de OTROS repos — tocar codigo de mmorch no
+    #    los arregla (el gate rechazo el intento); cross-repo repair es futuro
     return [f for f in out
-            if "mmorch-wt-" not in f["detail"] and "mmorch_wt_" not in f["detail"]]
+            if "mmorch-wt-" not in f["detail"] and "mmorch_wt_" not in f["detail"]
+            and f["source"] != "project_health"]
 
 
 def _sig(f: dict) -> str:

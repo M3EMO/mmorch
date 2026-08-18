@@ -19,8 +19,9 @@ def test_findings_extraction_all_shapes():
     assert "FileNotFoundError: gh" in detalles
     assert "F821 hashlib" in detalles
     assert "adjudicate: boom" in detalles
-    assert "Portfolio: timeout" in detalles
-    assert len(f) == 4
+    # project_health = errores de OTROS repos: excluidos (irreparables aca)
+    assert "Portfolio: timeout" not in detalles
+    assert len(f) == 3
 
 
 def test_pick_respects_retry_window():
