@@ -280,6 +280,15 @@ def main() -> None:
     except Exception as e:
         rec["auto_repair"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
 
+    # mineria de repos ajenos: 1 por noche desde logs/repos_queue.txt —
+    # clona efimero, destila grafts al vault + candidatas, borra el clon
+    try:
+        from mmorch.repo_mining import consume_queue
+        rec["repo_mining"] = consume_queue(str(ROOT),
+                                           today=time.strftime("%Y-%m-%d"))
+    except Exception as e:
+        rec["repo_mining"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
+
     # smoke de subsistemas: uso correcto de cada pieza, barato y read-only;
     # historia en logs/smoke.jsonl (el digest reporta los rojos)
     try:
