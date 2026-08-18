@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **107 módulos · 46 MCP tools · 564 tests.**
+_Auto-generado por `mmorch.docgen`._ **108 módulos · 46 MCP tools · 562 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -57,6 +57,7 @@ _Auto-generado por `mmorch.docgen`._ **107 módulos · 46 MCP tools · 564 tests
 | `mmorch/cost.py` | Cost model — USD from token counts, using REGISTRY prices. |
 | `mmorch/curiosity.py` | curiosity — deteccion de TENSION en la memoria (modulo cognitivo #3). |
 | `mmorch/dataset.py` | dataset — construye un dataset de CALIDAD DE CÓDIGO desde git history, SIN labels |
+| `mmorch/decision_mining.py` | Mine human decisions from Claude Code transcripts. |
 | `mmorch/durable_runs.py` | durable_runs — heartbeat + zombie reaper for in-process jobs (graft G9 from paperclip). |
 | `mmorch/effort.py` | effort — knob explicito de esfuerzo -> tier de modelo (patron Fable 5: 'effort' controla |
 | `mmorch/enrich.py` | enrich — completar/especificar el prompt infiriendo intent del usuario (patron Fable 5), |
