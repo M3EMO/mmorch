@@ -131,9 +131,19 @@ def export_dpo_pairs() -> int:
     return _write("dpo_pairs.jsonl", rows)
 
 
+def export_decisions() -> int:
+    rows = [_finish({"kind": "decision", "input": d.get("question", ""),
+                     "label": d.get("decision", ""),
+                     "meta": {"hash": d.get("hash"), "ts": d.get("ts")}}, "gold")
+            for d in _jsonl(ROOT / "logs" / "decision_samples.jsonl")
+            if d.get("question") and d.get("decision")]
+    return _write("decisions.jsonl", rows)
+
+
 def main() -> None:
     counts = {"sft_judge": export_judge_sft(),
               "dpo_pairs": export_dpo_pairs(),
+              "decisions": export_decisions(),
               "router_prefs": export_router_prefs(),
               "match_labels": export_match_labels(),
               "idea_labels": export_idea_labels()}
