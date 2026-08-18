@@ -34,7 +34,11 @@ def findings_from_record(rec: dict) -> list[dict]:
             for e in (v.get("errors") or []):
                 if isinstance(e, str):
                     out.append({"source": k, "detail": e})
-    return out
+    # errores que referencian artefactos EFIMEROS (worktrees/tmp ya borrados)
+    # no son reparables post-hoc — el contexto murio con la limpieza (medido
+    # 2026-08-18: auto-repair gasto un ciclo en un F821 de un worktree muerto)
+    return [f for f in out
+            if "mmorch-wt-" not in f["detail"] and "mmorch_wt_" not in f["detail"]]
 
 
 def _sig(f: dict) -> str:
