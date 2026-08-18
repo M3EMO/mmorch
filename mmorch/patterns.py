@@ -189,6 +189,24 @@ def adversarial_verify(
         confidence=confidence,
         n_refutations=len(refutations),
     )
+    # flywheel DPO (research escalado 2026-08, §6): cada refutacion cross-family
+    # ES un par de preferencia (artifact chosen/rejected segun el verdict) —
+    # trivial de capturar hoy, imposible de reconstruir despues. Local-only,
+    # fail-open, gitignoreado via logs/.
+    try:
+        import json as _json
+        import time as _time
+        from pathlib import Path as _P
+        with open(_P(__file__).resolve().parents[1] / "logs" / "dpo_pairs.jsonl",
+                  "a", encoding="utf-8") as _f:
+            _f.write(_json.dumps(
+                {"ts": _time.time(), "rubric": rubric[:2000],
+                 "artifact": artifact[:4000], "passed": passed,
+                 "confidence": confidence, "refutations": refutations[:3],
+                 "gen_model": gen_model, "verifier_model": verifier_model,
+                 "phase": phase}, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
     return Verdict(
         passed=passed,
         confidence=confidence,

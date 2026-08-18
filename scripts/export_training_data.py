@@ -100,8 +100,20 @@ def export_idea_labels() -> int:
     return _write("idea_labels.jsonl", rows)
 
 
+def export_dpo_pairs() -> int:
+    rows = [{"kind": "dpo_pair",
+             "input": {"rubric": t.get("rubric"), "artifact": t.get("artifact")},
+             "label": {"passed": t.get("passed"), "confidence": t.get("confidence"),
+                       "refutations": t.get("refutations", [])},
+             "meta": {"gen": t.get("gen_model"), "verifier": t.get("verifier_model"),
+                      "phase": t.get("phase"), "ts": t.get("ts")}}
+            for t in _jsonl(ROOT / "logs" / "dpo_pairs.jsonl")]
+    return _write("dpo_pairs.jsonl", rows)
+
+
 def main() -> None:
     counts = {"sft_judge": export_judge_sft(),
+              "dpo_pairs": export_dpo_pairs(),
               "router_prefs": export_router_prefs(),
               "match_labels": export_match_labels(),
               "idea_labels": export_idea_labels()}
