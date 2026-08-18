@@ -393,7 +393,12 @@ def sandbox_branch(change: Change, *, root: Path = ROOT, base: str = "HEAD",
         _git("commit", "-m", f"sandbox {change.id}: {change.description[:60]}",
              "--no-verify", cwd=wt)
         if run_tests:
-            cmd = test_cmd or [sys.executable, "-m", "pytest", test_path, "-q", "--no-header"]
+            # --basetemp propio: el pytest-current global del user esta roto de
+            # permisos (medido 2026-08: TODOS los sandboxes daban rojo por el
+            # cleanup, no por los tests -> 0 PRs abiertos durante semanas)
+            bt = tempfile.mkdtemp(prefix="mmorch_bt_")
+            cmd = test_cmd or [sys.executable, "-m", "pytest", test_path, "-q",
+                               "--no-header", f"--basetemp={bt}"]
             proc = subprocess.run(cmd, cwd=wt, capture_output=True, text=True, timeout=timeout)
             out = (proc.stdout or "") + (proc.stderr or "")
             fit = {"passed": _count(out, r"(\d+) passed"), "failed": _count(out, r"(\d+) failed"),

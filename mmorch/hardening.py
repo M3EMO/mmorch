@@ -107,7 +107,9 @@ def harden(repo_dir: str, *, today: str, build_fn=None, survivors_fn=None,
             f"Endurecer {test_rel} contra mutantes sobrevivientes de {module}.\n"
             f"CONTRATO: agregar tests dirigidos AL FINAL de {test_rel} (no borrar los "
             f"existentes) que MATEN estos mutantes — cada test debe fallar si la "
-            f"mutacion estuviera aplicada. NO tocar {module} ni ningun otro archivo.\n"
+            f"mutacion estuviera aplicada. NO tocar {module} ni ningun otro archivo. "
+            f"IMPORTANTE: el archivo de tests debe importar TODO lo que use "
+            f"(hashlib, json, etc.) — un import faltante rompe el commit.\n"
             f"Mutantes sobrevivientes (diffs contra base normalizada):\n{diffs}\n"
             f"Estilo: ruff-clean, asserts de COMPORTAMIENTO (no de implementacion)."
         )

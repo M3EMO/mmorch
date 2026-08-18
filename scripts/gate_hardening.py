@@ -26,7 +26,10 @@ def main() -> int:
     if survived >= baseline:
         print(f"gate: FAIL (survived {survived} >= baseline {baseline})")
         return 1
-    suite = subprocess.run([sys.executable, "-m", "pytest", "-q"], cwd=ROOT,
+    import tempfile
+    bt = tempfile.mkdtemp(prefix="mmorch_bt_")
+    suite = subprocess.run([sys.executable, "-m", "pytest", "-q",
+                            f"--basetemp={bt}"], cwd=ROOT,
                            capture_output=True, timeout=1800)
     if suite.returncode != 0:
         print("gate: FAIL (suite completa roja)")

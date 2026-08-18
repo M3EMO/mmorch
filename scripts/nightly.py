@@ -57,8 +57,16 @@ def main() -> None:
     # default = optimizar el system-prompt del coder contra pass-rate de una batería edge-heavy
     # (el ÚNICO target con headroom real medido: baseline ~0.5-0.9 y prompt-sensible; code_quality
     # y mutation_score sobre módulos daban 1.0 fijo — audit 2026-07).
-    ar_target = os.getenv("MMORCH_AR_TARGET", "prompts/coder_prompt.txt")
-    ar_scorer = os.getenv("MMORCH_AR_SCORER", "scripts/score_coder_prompt.py")
+    # rotacion de target (fix estancamiento medido: coder_prompt 6 corridas en
+    # 0.8889 plano — evaluador saturado). Dias pares: coder_prompt; impares: el
+    # prompt del madurador de ideas contra su scorer congelado (baseline 0.854,
+    # headroom real). La reflexion nocturna pidio exactamente esto.
+    if time.localtime().tm_yday % 2 == 0:
+        _ar_t, _ar_s = "prompts/coder_prompt.txt", "scripts/score_coder_prompt.py"
+    else:
+        _ar_t, _ar_s = "prompts/idea_madurar.txt", "scripts/score_idea_maturation.py"
+    ar_target = os.getenv("MMORCH_AR_TARGET", _ar_t)
+    ar_scorer = os.getenv("MMORCH_AR_SCORER", _ar_s)
     ar_task = os.getenv("MMORCH_AR_TASK",
                         f"Reescribí el system-prompt de {ar_target} para que un coder Python resuelva "
                         "MÁS de la batería de tasks algorítmicas edge-heavy (casos borde: intervalos "
@@ -241,7 +249,9 @@ def main() -> None:
         # igual, y acá solo daba TimeoutExpired (medido 1ra corrida)
         _projs = {n: p for n, p in _load_projects().items()
                   if pathlib.Path(p).resolve() != ROOT}
-        rec["project_health"] = check_projects(_projs)
+        # timeout 900s: la suite de Portfolio tarda ~8 min sana; colgada >15 min
+        # es señal (y auto_repair la levanta a la noche siguiente)
+        rec["project_health"] = check_projects(_projs, timeout=900.0)
     except Exception as e:
         rec["project_health"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
 
