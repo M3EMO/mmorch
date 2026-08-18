@@ -73,6 +73,36 @@ async def state_snapshot(request):
     return JSONResponse(await run_in_threadpool(_state_snapshot_sync))
 
 
+async def curation_pending(request):
+    """GET /pending — tarjetas + candidatas esperando veredicto humano (Lotus)."""
+    from starlette.responses import JSONResponse
+    from starlette.concurrency import run_in_threadpool
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from mmorch.curation import pending
+    return JSONResponse(await run_in_threadpool(pending))
+
+
+async def curation_verdict(request):
+    """POST /verdict {kind: 'cand'|'card', id, verdict: 'dale'|'no'} — un click
+    de Lotus = un ejemplo GOLD del flywheel (reward al bandit + estados)."""
+    from starlette.responses import JSONResponse
+    from starlette.concurrency import run_in_threadpool
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+        kind, vid, verdict = body.get("kind"), body.get("id"), body.get("verdict")
+        if kind not in ("cand", "card") or verdict not in ("dale", "no") or not vid:
+            return JSONResponse({"ok": False, "error": "payload invalido"},
+                                status_code=400)
+        from mmorch.curation import verdict_candidata, verdict_card
+        fn = verdict_candidata if kind == "cand" else verdict_card
+        return JSONResponse(await run_in_threadpool(lambda: fn(vid, verdict)))
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)[:200]}, status_code=500)
+
+
 async def sse_events(request):
     from starlette.responses import StreamingResponse
     if not _token_ok(request):
@@ -773,6 +803,8 @@ def build_app():
     return Starlette(middleware=middleware, routes=routes_extra + [
         Route("/", home),
         Route("/state", state_snapshot),
+        Route("/pending", curation_pending),
+        Route("/verdict", curation_verdict, methods=["POST"]),
         Route("/events", sse_events),
         Route("/run/rubric", run_rubric, methods=["POST"]),
         Route("/run/fanout", run_fanout, methods=["POST"]),
