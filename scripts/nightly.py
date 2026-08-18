@@ -255,6 +255,16 @@ def main() -> None:
     except Exception as e:
         rec["project_health"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
 
+    # reparacion cross-repo: suite roja de un proyecto del registry -> REPAIR
+    # en un worktree de ESE repo con SU venv como gate; review branch alla,
+    # siempre amarillo (jamas automerge en territorio ajeno)
+    try:
+        from mmorch.project_repair import repair_projects
+        rec["project_repair"] = repair_projects(str(ROOT),
+                                                today=time.strftime("%Y-%m-%d"))
+    except Exception as e:
+        rec["project_repair"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
+
     _log(rec)
     try:
         from mmorch.health import beat

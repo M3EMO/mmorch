@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **112 módulos · 46 MCP tools · 589 tests.**
+_Auto-generado por `mmorch.docgen`._ **113 módulos · 46 MCP tools · 593 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -108,6 +108,7 @@ _Auto-generado por `mmorch.docgen`._ **112 módulos · 46 MCP tools · 589 tests
 | `mmorch/project_driver.py` | project_driver — F2 of the /project rebuild: the RECURSIVE build orchestrator. |
 | `mmorch/project_integrate.py` | project_integrate — F3 of the /project rebuild: wire the recursive driver (F2) to REAL seams. |
 | `mmorch/project_loop.py` | project_loop — ejecutor PROJECT-AWARE primario via mmorch (barato, cero cupo). Es la |
+| `mmorch/project_repair.py` | Reparación cross-repo: mmorch arregla los proyectos del REGISTRY, no solo |
 | `mmorch/projects.py` | projects — registro de proyectos que mmorch puede CONTROLAR (project-aware). Hace que |
 | `mmorch/prompts.py` | prompts — construccion de mensajes PREFIX-STABLE pa maximizar el cache-hit de DeepSeek. |
 | `mmorch/proposals.py` | F2 propuesta (spec .scratch/loop-cerrado/spec.md): tarjetas pre-cocinadas + pick del hook. |
