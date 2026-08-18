@@ -101,6 +101,54 @@ _DESC_SCHEMA = {"type": "object", "properties": {"desc": {"type": "string"}},
                 "required": ["desc"]}
 _DIGEST_SCHEMA = {"type": "object", "properties": {"digest": {"type": "string"}},
                   "required": ["digest"]}
+_REFLECT_SCHEMA = {
+    "type": "object",
+    "properties": {"diagnostico": {"type": "string"},
+                   "foco_sugerido": {"type": "string"},
+                   "riesgo_principal": {"type": "string"}},
+    "required": ["diagnostico", "foco_sugerido", "riesgo_principal"],
+}
+
+
+def reflect(*, logs_dir: str, today: str, n_nights: int = 7) -> dict:
+    """Reflexion nocturna: mmorch lee sus PROPIAS ultimas corridas y se
+    auto-evalua — diagnostico de tendencia, foco sugerido para las proximas
+    noches y riesgo principal. Es la capa 'pensar sobre si mismo' del goal
+    Jarvis: no reacciona a un paso, mira su propia trayectoria.
+
+    Persistencia: logs/reflexiones.jsonl (append) — historia de que penso el
+    sistema de si mismo cada noche; el digest y el humano la leen; el propio
+    reflect ve su reflexion anterior (continuidad de pensamiento)."""
+    import json as _json
+    path = Path(logs_dir) / "nightly.jsonl"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()[-n_nights:]
+    except OSError:
+        return {"skipped": "sin historia"}
+    prev_path = Path(logs_dir) / "reflexiones.jsonl"
+    prev = ""
+    try:
+        prev = prev_path.read_text(encoding="utf-8").splitlines()[-1]
+    except (OSError, IndexError):
+        pass
+    out = _llm_json(
+        "Sos la capa de auto-reflexion de mmorch (sistema de orquestacion que "
+        "se auto-mejora). Estas son tus ultimas corridas nocturnas (records "
+        "JSON) y tu reflexion anterior. Mira tu TRAYECTORIA, no una noche: "
+        "¿que tendencia hay (errores repetidos, pasos que nunca rinden, "
+        "aprendizaje estancado)? ¿donde deberia ir el foco de las proximas "
+        "noches? ¿cual es el riesgo principal de seguir igual? Se especifico "
+        "y critico — esto lo lee el humano y tu proxima reflexion.\n"
+        f"Reflexion anterior: {prev[:1500] or '(primera reflexion)'}\n"
+        f"Corridas:\n{chr(10).join(x[:1200] for x in lines)}\n"
+        'JSON: {"diagnostico": str, "foco_sugerido": str, "riesgo_principal": str}',
+        schema=_REFLECT_SCHEMA)
+    rec = {"fecha": today, "diagnostico": out.get("diagnostico", ""),
+           "foco_sugerido": out.get("foco_sugerido", ""),
+           "riesgo_principal": out.get("riesgo_principal", "")}
+    with open(prev_path, "a", encoding="utf-8") as f:
+        f.write(_json.dumps(rec, ensure_ascii=False) + "\n")
+    return rec
 
 
 def write_local_digest(rec: dict, *, logs_dir: str) -> dict:

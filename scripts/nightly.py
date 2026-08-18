@@ -251,6 +251,15 @@ def main() -> None:
         beat("nightly", logs_dir=str(ROOT / "logs"), detail="ok")
     except Exception:
         pass
+    # reflexion: mmorch mira su propia trayectoria (ultimas 7 noches) y elige
+    # foco — capa "pensar sobre si mismo" (goal Jarvis 2026-08-15)
+    try:
+        from mmorch.loop_nightly import reflect
+        rec["reflexion"] = reflect(logs_dir=str(ROOT / "logs"),
+                                   today=time.strftime("%Y-%m-%d"))
+    except Exception as e:
+        rec["reflexion"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
+
     # digest local (no depende de la app de Claude): logs/digest_last.md
     try:
         from mmorch.loop_nightly import write_local_digest
