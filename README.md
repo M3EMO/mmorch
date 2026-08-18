@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **111 módulos · 46 MCP tools · 584 tests.**
+_Auto-generado por `mmorch.docgen`._ **112 módulos · 46 MCP tools · 589 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -92,6 +92,7 @@ _Auto-generado por `mmorch.docgen`._ **111 módulos · 46 MCP tools · 584 tests
 | `mmorch/mcp_telemetry.py` | mcp_telemetry — logger CENTRALIZADO de invocaciones MCP (audit 2026-07: 44 tools, ~20 |
 | `mmorch/megasource.py` | megasource (Fase 2) — megafuente autodidacta: primer hit = provider PRICING. |
 | `mmorch/memory.py` | memory — memoria episodica + semantica para mmorch (DuckDB 2 capas). |
+| `mmorch/merge_train.py` | Merge train — las branches amarillas del dia se conglomeran en UN merge. |
 | `mmorch/metrics.py` | Observability — append-only JSONL metric log (§11 backbone). |
 | `mmorch/minds.py` | minds — global federation graph across registered projects (read-only). |
 | `mmorch/nodes.py` | nodes — el registry de la ORQUESTA: nombra a cada miembro que mmorch (el DIRECTOR) |

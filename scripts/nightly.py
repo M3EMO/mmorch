@@ -270,6 +270,19 @@ def main() -> None:
     except Exception as e:
         rec["auto_repair"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
 
+    # merge train: las amarillas del dia se conglomeran en UNA branch con gate
+    # de integracion sobre la union -> un solo click humano por dia
+    try:
+        import subprocess as _sp
+        from mmorch.merge_train import run_train
+        _base = _sp.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                        cwd=str(ROOT), capture_output=True,
+                        text=True).stdout.strip()
+        rec["merge_train"] = run_train(str(ROOT), base=_base,
+                                       today=time.strftime("%Y-%m-%d"))
+    except Exception as e:
+        rec["merge_train"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
+
     # reflexion: mmorch mira su propia trayectoria (ultimas 7 noches) y elige
     # foco — capa "pensar sobre si mismo" (goal Jarvis 2026-08-15)
     try:
