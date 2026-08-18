@@ -4,32 +4,51 @@ El ARCHIVO es la fuente de verdad. Cualquier vía que lo mueva vale (edición a
 mano o "dale la N" en sesión); el nightly registra outcomes comparando diffs y
 detecta promociones de candidatas (`mmorch.fuel.detect_promotions`).
 
+Consolidado 2026-08-18 desde la primera curación masiva (22 candidatas
+promovidas — dedup de redundantes, agrupado por tema; trazabilidad en los
+comentarios de cada línea).
+
 ## Direcciones
 
-- Cerrar el loop autónomo de mmorch (spec `.scratch/loop-cerrado/spec.md`) —
-  F1-F4 construidas, F5 pendiente.
+- **Entrenamiento de IA propia** — flywheel de datos (ya capturando: DPO,
+  decisiones, traces) → router aprendido en shadow mode contra eval congelado
+  (jamás toma control hasta ganarle al bandit) → reward model destilado del
+  refutador → volumen mayor (sintéticos gateados + minería git con reward
+  ejecutable + LoRA en GPU rentada; wayfinder antes de escalar).
+  <!-- cand-2026-08-14-04, 14-05, 15-07b, 18-01, 18-02 -->
+
+- **Calidad y anti-pseudo-progreso del loop** — SPC (CUSUM+EWMA) sobre
+  outcomes; active learning en adjudicación (solo la franja incierta a juicio,
+  disenso = prioridad); MAP-Elites por celda proyecto×tipo contra el
+  mode-collapse; detector de divergencias engine/logs; refutaciones → tests de
+  regresión semántica automáticos.
+  <!-- cand-2026-08-15-05b, 15-06b, 15-08, 15-03, 15-04 -->
+
+- **Grafts prime-agent** — rollback estructural (snapshot por edit + inversión
+  mecánica) en evolve/close-loop; playbooks ejecutables (reference validado en
+  session_skills); review-gate barato pre-persistencia del ingest.
+  <!-- cand-2026-08-14-01, 14-02, 14-03 -->
+
+- **Deuda estructural** — unificar los 3 ThompsonBandit (namespacing de brazos,
+  evidencia compartida); feedback.jsonl → SQLite con índices cuando el volumen
+  lo pida.
+  <!-- cand-2026-08-15-01, 15-02 (misma idea, dedup) -->
+
+- **Engine /project** — graft /speckit.analyze: verificación cross-family de
+  consistencia spec↔decompose antes de construir.
+  <!-- cand-2026-08-12-01 -->
+
+- **Jarvis físico** — Home Assistant + sensores ESP32 vía MCP (medir el mundo,
+  actuar con tool-use, percepción preentrenada); wayfinder HITL antes de
+  comprar/construir.
+  <!-- cand-2026-08-14-06 -->
+
+<!-- Dedup de la curación 2026-08-18: cand-18-03 y 18-04 (variaciones
+     router/refutador) absorbidas en "Entrenamiento"; 15-05 y 15-06 (variantes
+     nightly de clasificadores sobre snapshots) absorbidas en "Calidad" y
+     "Entrenamiento"; 15-07 (routing con feedback implícito) absorbida en
+     "Entrenamiento". Nada se perdió: candidatos.md#Archivadas conserva todas
+     con estado promovida. -->
 
 <!-- Histórico pre-loop: INNOVATION_ROADMAP_2026-06-07.md (raíz del repo,
      archivado — todo LANDED, no migra nada). -->
-- graftear /speckit.analyze al engine /project — pase mmorch_adversarial_verify cross-family sobre spec+decompose antes de F1, caza contradicciones entre artefactos por centavos (origen: veredicto spec-kit 2026-06-17, re-eval 2026-08-12)  <!-- cand-2026-08-12-01, dale 2026-08-18 -->
-- rollback estructural de refinements en evolve/close-loop — before/after snapshot por edit + inversion mecanica sin LLM (patron prime-agent refinement.ts:762-836); hoy revertir un finding malo es manual (~100 lineas)  <!-- cand-2026-08-14-01, dale 2026-08-18 -->
-- playbooks ejecutables — campo reference {module, callable, args_schema} validado en session_skills, cierra el gap minar->ejecutar (contrato copiable de prime-agent validateEdit 680-703)  <!-- cand-2026-08-14-02, dale 2026-08-18 -->
-- review-gate barato pre-persistencia del ingest de sesiones — 1 call DeepSeek shouldRefine antes de escribir memoria, filtra ruido (patron reviewAutoRefine prime-agent)  <!-- cand-2026-08-14-03, dale 2026-08-18 -->
-- router aprendido — clasificador chico entrenado sobre feedback.jsonl (task signature -> modelo/umbral optimo) que reemplace/complemente el ThompsonBandit; primer entrenamiento con datos propios del loop (precedente: flywheel SimCLR le gano a bge-small)  <!-- cand-2026-08-14-04, dale 2026-08-18 -->
-- Jarvis v0 — mmorch como orquestador + Home Assistant + sensores ESP32 (temperatura/presencia/consumo/camara) via MCP: medir el mundo fisico y actuar con tool-use, cero entrenamiento; percepcion con modulos preentrenados (Whisper, VLM chico); wayfinder si se acepta  <!-- cand-2026-08-14-06, dale 2026-08-18 -->
-- unificar los 3 ThompsonBandit (default / _SIG_BANDIT de intuition / _WF_BANDIT de workflow_race) en una instancia con namespacing de brazos — hoy no comparten evidencia y triplican estado/decay  <!-- cand-2026-08-15-01, dale 2026-08-18 -->
-- Fusionar los 3 thompsonbandit en una sola instancia con namespacing de brazos y evidencia compartida, usando feedback.jsonl como fuente unificada de recompensas y decay global por brazo.  <!-- cand-2026-08-15-02, dale 2026-08-18 -->
-- Añadir verificación de consistencia entre artefactos generados por el engine y los logs de feedback/workflow_obs, detectando divergencias entre lo que el sistema decide y lo que realmente ejecuta/observa, para ajustar automáticamente el router aprendido o el umbral de shouldrefine sin esperar feedback humano.  <!-- cand-2026-08-15-03, dale 2026-08-18 -->
-- feedback loop de auto-depuración: cuando el refutador cross-family detecta contradicciones entre artefactos y logs, en vez de solo revertir, inyectar el hallazgo como caso de test en una suite de regresión semántica que se ejecuta en el siguiente ciclo, forzando al engine a no repetir el patrón erróneo sin esperar intervención humana.  <!-- cand-2026-08-15-04, dale 2026-08-18 -->
-- Entrenar un clasificador de contradicciones cross-family sobre los snapshots de rollback estructural, usando los pares (artefacto_pre_edit, artefacto_post_edit) marcados como revertidos como datos de entrenamiento negativo, y los pares que sobrevivieron como positivo; luego usar ese clasificador como gate de persistencia para nuevos hallazgos, reemplazando al refutador genérico con uno especializado en el historial real de reversiones del sistema.  <!-- cand-2026-08-15-05, dale 2026-08-18 -->
-- Integrar el router aprendido (feedback.jsonl) como gate de persistencia y selección de modelos en el pipeline de ingestion de sesiones, reemplazando el filtro shouldrefine estático por una decisión dinámica basada en la signature de la tarea, y usar los snapshots de rollback estructural como dataset de entrenamiento offline para el router (precedente: wayfinder sobre esp32), cerrando el ciclo de mejora continua sin intervención manual.  <!-- cand-2026-08-15-06, dale 2026-08-18 -->
-- Entrenar un modelo de routing con feedback implícito de sesiones (no solo feedback.jsonl): usar la diferencia entre el resultado esperado y el real de cada tool-call como pseudo-label, y validar con rollback estructural (si el edit se revirtió, la predicción del router falló).  <!-- cand-2026-08-15-07, dale 2026-08-18 -->
-- SPC sobre el loop — CUSUM+EWMA (~50 lineas numpy) sobre reward medio, error-rate por modelo y maduracion de candidatas: convierte la reflexion de narrativa en ALARMAS estadisticas de drift/pseudo-progreso; chartear outcomes, jamas actividad (research escalado 2026-08 §4, mejor ratio valor/esfuerzo)  <!-- cand-2026-08-15-05b, dale 2026-08-18 -->
-- active learning en adjudicacion — embeddings pre-filtran los 144 pares y solo la franja INCIERTA va a juicio LLM; el disenso DeepSeek-Gemini es query-by-committee gratis que ademas prioriza que guardar como dato de entrenamiento (research §1)  <!-- cand-2026-08-15-06b, dale 2026-08-18 -->
-- shadow mode para el router aprendido — predice en paralelo al bandit SIN control hasta ganarle en el eval congelado versionado (patron data-engine Tesla a escala JSONL, research §5); learning-progress bandit (reward = delta de mejora, Graves) contra el starving  <!-- cand-2026-08-15-07b, dale 2026-08-18 -->
-- MAP-Elites como dict — grilla proyecto x tipo-de-idea para candidatas: evita que un atractor monopolice (el mode-collapse del madurador ya lo mostro) manteniendo diversidad por celda, sin framework (research §3); bonus inmunologia: mutacion inversa a la afinidad en maduracion (§7)  <!-- cand-2026-08-15-08, dale 2026-08-18 -->
-- Entrenar un clasificador de ruido vs señal sobre feedback.jsonl, usando el refutador cross-family como pseudo-label, para que el review-gate barato (shouldrefine) aprenda a filtrar sin depender de un call LLM por sesión.  <!-- cand-2026-08-18-01, dale 2026-08-18 -->
-- Entrenar un modelo de recompensa de preferencias (reward model) sobre feedback.jsonl, usando el refutador cross-family como anotador automático de pares (antes/después de rollback estructural), para optimizar el umbral de shouldrefine y el router aprendido de forma end-to-end con gradientes, en lugar de heurísticas separadas.  <!-- cand-2026-08-18-02, dale 2026-08-18 -->
-- Integrar el refutador cross-family como filtro de calidad del router aprendido: que el router, antes de decidir el modelo/umbral óptimo para una tarea, consulte al refutador para descartar pseudo-labels ruidosos o contradictorios, y que el refutador retroalimente al router con señales de consistencia semántica para ajustar sus pesos en tiempo real.  <!-- cand-2026-08-18-03, dale 2026-08-18 -->
-- Integrar la verificación cross-family de contradicciones como fuente de pseudo-labels para el router aprendido, usando los snapshots de rollback estructural como evidencia de divergencia semántica entre artefactos generados por spec y decompose, y alimentando feedback.jsonl con estos casos para entrenar al router sin depender de feedback humano.  <!-- cand-2026-08-18-04, dale 2026-08-18 -->
-- entrenamiento con volumen mayor — datos sinteticos gateados por refutador cross-family + mineria de historia git con reward ejecutable (replay de commits via project-build engine) + eval congelada previa + LoRA en GPU rentada; destino foggy -> wayfinder si se acepta  <!-- cand-2026-08-14-05, dale 2026-08-18 -->
