@@ -1,0 +1,1 @@
+{"task": "x", "criteria": [{"id": "s1", "desc": "lindo", "kind": "subjective"}], "steps": [{"iter": 1, "code": "def f(): pass", "failed": [], "checkable_pass": false}], "n_iters": 1, "reward": 1.0, "passed": true}

@@ -15,11 +15,24 @@ ese log y resume; no ejecuta nada.
 Registrar:  schtasks /Create /TN mmorch-nightly /SC DAILY /ST 02:10 /F
             /TR "<venv>/python.exe <repo>/scripts/nightly.py"
 """
+import io
 import json
 import os
 import pathlib
 import sys
 import time
+
+# corre via Task Scheduler sin terminal utf-8 (consola por default cp1252 en
+# Windows) — cualquier "→"/emoji/acento en texto de LLM (reflexion, digest,
+# findings) tiraba UnicodeEncodeError en el print final y el script salia con
+# exit 1 pese a haber corrido bien; nadie lo notaba porque nightly.jsonl ya
+# habia quedado escrito ANTES de ese print. Mismo fix que ya se aplico en
+# otros puntos del repo, faltaba en el entrypoint mismo.
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8",
+                                  errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8",
+                                  errors="replace")
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))

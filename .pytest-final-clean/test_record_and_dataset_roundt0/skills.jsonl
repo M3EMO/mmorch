@@ -1,0 +1,1 @@
+{"task_pattern": "inc", "winning_code": "def inc(x):\n    return x + 1", "fixed_criteria": ["c1"], "n_iters": 2, "criteria": [{"id": "c1", "desc": "inc pasa", "kind": "checkable"}]}

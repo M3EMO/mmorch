@@ -1,0 +1,1 @@
+{"criteria": [{"desc": "define el concepto", "id": "c1", "kind": "subjective", "weight": 0.9}, {"desc": "da un ejemplo", "id": "c2", "kind": "subjective", "weight": 0.4}], "task": "explicar equilibrio de Nash"}

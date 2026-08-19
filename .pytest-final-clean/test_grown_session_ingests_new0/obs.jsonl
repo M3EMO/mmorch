@@ -1,0 +1,2 @@
+{"task": "arregla", "tools": ["Read", "Edit"], "domain": "complicated", "reward": 1.0}
+{"task": "otra", "tools": ["Bash"], "domain": "clear", "reward": 1.0}
