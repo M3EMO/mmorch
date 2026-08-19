@@ -19,11 +19,14 @@ import json
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from itertools import zip_longest
 from pathlib import Path
 
 from mmorch.iohelpers import atomic_write_json, load_json_tolerant
+
+_PERSIST = threading.Lock()
 
 _MAX_Q = 4  # cupo de busquedas por noche de discovery
 
@@ -133,42 +136,44 @@ def mine_repo(url: str, *, orch_root: str, today: str,
                 ).get("refuted", True)
         survivors = [g for g in grafts if verify_fn(g)]
 
-        # persistir el JUGO: nota vault con citas URL+SHA (jamas codigo entero)
-        import re
-        name = url.replace("\\", "/").rstrip("/").split("/")[-1].removesuffix(".git")
-        name = re.sub(r"[^A-Za-z0-9._-]", "-", name)[:60] or "repo"
-        nota = root / "vault" / "research" / f"minado-{name}-{today}.md"
-        cites = "\n".join(
-            f"- **{g['titulo']}** ({g.get('esfuerzo', '?')}): {g['que']} — "
-            f"aplica a {g['aplica_a']}. Archivos: "
-            + ", ".join(f"[{a}]({url}/blob/{sha}/{a})"
-                        for a in (g.get("archivos_clave") or [])[:4])
-            for g in survivors)
-        nota.write_text(
-            f"---\ntitle: minado {name} {today}\nstatus: seed\n"
-            f"tags: [mmorch, repo-mining]\nsources: [{url}]\ncreated: {today}\n"
-            f"---\n\n{out.get('resumen', '')}\n\nLicencia: "
-            f"{out.get('licencia', 'desconocida')}\n\n## Grafts "
-            f"(sobrevivieron refutacion {len(survivors)}/{len(grafts)})\n\n"
-            f"{cites}\n", encoding="utf-8")
+        # candidatos.md y la numeracion de candidatas son estado
+        # compartido: con minado en paralelo dos hilos se pisan
+        with _PERSIST:
+            # persistir el JUGO: nota vault con citas URL+SHA (jamas codigo entero)
+            import re
+            name = url.replace("\\", "/").rstrip("/").split("/")[-1].removesuffix(".git")
+            name = re.sub(r"[^A-Za-z0-9._-]", "-", name)[:60] or "repo"
+            nota = root / "vault" / "research" / f"minado-{name}-{today}.md"
+            cites = "\n".join(
+                f"- **{g['titulo']}** ({g.get('esfuerzo', '?')}): {g['que']} — "
+                f"aplica a {g['aplica_a']}. Archivos: "
+                + ", ".join(f"[{a}]({url}/blob/{sha}/{a})"
+                            for a in (g.get("archivos_clave") or [])[:4])
+                for g in survivors)
+            nota.write_text(
+                f"---\ntitle: minado {name} {today}\nstatus: seed\n"
+                f"tags: [mmorch, repo-mining]\nsources: [{url}]\ncreated: {today}\n"
+                f"---\n\n{out.get('resumen', '')}\n\nLicencia: "
+                f"{out.get('licencia', 'desconocida')}\n\n## Grafts "
+                f"(sobrevivieron refutacion {len(survivors)}/{len(grafts)})\n\n"
+                f"{cites}\n", encoding="utf-8")
 
-        # candidatas al loop (la aprobacion humana es el dale de siempre)
-        from mmorch.fuel import parse_archivadas, parse_candidatos, render_candidatos
-        cand_path = root / "vault" / "roadmaps" / "candidatos.md"
-        md = cand_path.read_text(encoding="utf-8")
-        vig, arch = parse_candidatos(md), parse_archivadas(md)
-        from datetime import date, timedelta
-        vence = (date.fromisoformat(today) + timedelta(days=14)).isoformat()
-        existing_today = sum(1 for e in vig + arch if e["id"].startswith(today))
-        for i, g in enumerate(survivors[:3], start=existing_today + 1):
-            vig.append({"id": f"{today}-{i:02d}", "fecha": today,
-                        "vence": vence, "lente": "integracion",
-                        "gist": f"graft de {name}: {g['titulo']} — {g['que']} "
-                                f"(aplica a {g['aplica_a']}; ver nota "
-                                f"minado-{name}-{today})",
-                        "estado": "pendiente"})
-        cand_path.write_text(render_candidatos(vig, arch), encoding="utf-8")
-
+            # candidatas al loop (la aprobacion humana es el dale de siempre)
+            from mmorch.fuel import parse_archivadas, parse_candidatos, render_candidatos
+            cand_path = root / "vault" / "roadmaps" / "candidatos.md"
+            md = cand_path.read_text(encoding="utf-8")
+            vig, arch = parse_candidatos(md), parse_archivadas(md)
+            from datetime import date, timedelta
+            vence = (date.fromisoformat(today) + timedelta(days=14)).isoformat()
+            existing_today = sum(1 for e in vig + arch if e["id"].startswith(today))
+            for i, g in enumerate(survivors[:3], start=existing_today + 1):
+                vig.append({"id": f"{today}-{i:02d}", "fecha": today,
+                            "vence": vence, "lente": "integracion",
+                            "gist": f"graft de {name}: {g['titulo']} — {g['que']} "
+                                    f"(aplica a {g['aplica_a']}; ver nota "
+                                    f"minado-{name}-{today})",
+                            "estado": "pendiente"})
+            cand_path.write_text(render_candidatos(vig, arch), encoding="utf-8")
         return {"ok": True, "repo": name, "sha": sha,
                 "grafts": len(grafts), "sobrevivieron": len(survivors),
                 "nota": str(nota.name), "candidatas": len(survivors[:3])}
@@ -177,24 +182,49 @@ def mine_repo(url: str, *, orch_root: str, today: str,
 
 
 def consume_queue(orch_root: str, *, today: str, llm_fn=None,
-                  verify_fn=None) -> dict:
-    """1 repo por noche desde logs/repos_queue.txt (linea consumida se comenta)."""
+                  verify_fn=None, n: int = 3) -> dict:
+    """`n` repos por noche desde logs/repos_queue.txt, minados EN PARALELO.
+
+    El trabajo es I/O puro (git clone + llamadas a modelos), asi que los hilos
+    ganan casi lineal: 3 repos tardan lo que el mas lento, no la suma. La
+    escritura de candidatas va bajo _PERSIST. Cada linea consumida se comenta
+    con su resultado; una que falla vuelve a quedar libre para otra noche."""
     q = Path(orch_root) / "logs" / "repos_queue.txt"
     if (Path(orch_root) / "logs" / "loop_paused").exists():
         return {"skipped": "paused"}
     if not q.exists():
         return {"skipped": "sin cola"}
     lines = q.read_text(encoding="utf-8").splitlines()
-    for i, line in enumerate(lines):
-        url = line.strip()
-        if not url or url.startswith("#"):
-            continue
-        r = mine_repo(url, orch_root=orch_root, today=today,
-                      llm_fn=llm_fn, verify_fn=verify_fn)
-        lines[i] = f"# {time.strftime('%Y-%m-%d')} minado: {url}"
-        q.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        return r
-    return {"skipped": "cola vacia"}
+    pend = [(i, ln.strip()) for i, ln in enumerate(lines)
+            if ln.strip() and not ln.strip().startswith("#")][:n]
+    if not pend:
+        return {"skipped": "cola vacia"}
+
+    # minar en paralelo multiplica el gasto: el tope mensual manda
+    if llm_fn is None:
+        from mmorch.loop_nightly import _check_and_count_budget
+        pend = [x for x in pend
+                if _check_and_count_budget(2, logs_dir=str(q.parent),
+                                           month=today[:7])]
+        if not pend:
+            return {"skipped": "presupuesto agotado"}
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=len(pend)) as pool:
+        futs = {i: pool.submit(mine_repo, url, orch_root=orch_root, today=today,
+                               llm_fn=llm_fn, verify_fn=verify_fn)
+                for i, url in pend}
+    res = []
+    for i, url in pend:
+        try:
+            r = futs[i].result()
+        except Exception as e:
+            r = {"ok": False, "error": str(e)[:150]}
+        res.append(r)
+        if r.get("ok"):   # el que falla NO se marca: se reintenta otra noche
+            lines[i] = f"# {time.strftime('%Y-%m-%d')} minado: {url}"
+    q.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"minados": sum(1 for r in res if r.get("ok")), "resultados": res}
 
 
 def discover_repos(*, orch_root: str, max_new: int = 3, http_fn=None) -> dict:
@@ -247,9 +277,15 @@ def discover_repos(*, orch_root: str, max_new: int = 3, http_fn=None) -> dict:
     conocidas = {q.lower() for q in q_road + q_temas + q_foco}
     nuevos_temas = frontier(logs_dir=logs_dir, k=2, exclude=conocidas)
 
-    # round-robin: cada fuente entra al cupo, la frontera primero
+    # BURSTS: el punto ciego del grafo son los temas tan nuevos que todavia no
+    # tienen tag. arXiv los delata por ritmo de aparicion, no por etiqueta.
+    from mmorch.bursts import bursting
+    q_burst = [t for t in bursting(logs_dir=logs_dir, k=2)
+               if t.lower() not in conocidas and t not in nuevos_temas]
+
+    # round-robin: cada fuente entra al cupo, lo exogeno primero
     queries = []
-    for fila in zip_longest(nuevos_temas, q_road, q_temas, q_foco):
+    for fila in zip_longest(nuevos_temas, q_burst, q_road, q_temas, q_foco):
         queries += [q for q in fila if q]
 
     # cooldown: una query que dio 0 nuevos dos veces seguidas descansa 30 dias
@@ -313,7 +349,7 @@ def discover_repos(*, orch_root: str, max_new: int = 3, http_fn=None) -> dict:
                        "last": ahora}
         # un tema de la FRONTERA que rinde deja de ser tanteo y pasa a interes
         # permanente (marcado "# auto" — Mateo lo edita o borra a mano)
-        if pasaron and q in nuevos_temas:
+        if pasaron and (q in nuevos_temas or q in q_burst):
             adoptados.append(q)
     atomic_write_json(cd_path, cooldown)
     if adoptados:
@@ -331,4 +367,5 @@ def discover_repos(*, orch_root: str, max_new: int = 3, http_fn=None) -> dict:
             for u in nuevos:
                 fh.write(u + "\n")
     return {"queries": len(queries[:_MAX_Q]), "encolados": nuevos,
-            "frontera": nuevos_temas, "adoptados": adoptados}
+            "frontera": nuevos_temas, "bursts": q_burst,
+            "adoptados": adoptados}

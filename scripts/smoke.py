@@ -103,6 +103,21 @@ def c_training():
     return f"{sum(counts.values())} ejemplos en {len(counts)} datasets"
 
 
+@check("descubrimiento (exogeno)")
+def c_discovery():
+    """Las dos fuentes que pueden nombrar un tema que el sistema no conoce."""
+    from mmorch.bursts import bursting
+    from mmorch.frontier import frontier
+    logs = str(ROOT / "logs")
+    from mmorch.iohelpers import load_json_tolerant
+    g = load_json_tolerant(ROOT / "logs" / "topic_graph.json", {})
+    ar = load_json_tolerant(ROOT / "logs" / "arxiv_terms.json", {})
+    return (f"grafo {len(g.get('nodes', {}))} topics/{g.get('docs', 0)} repos "
+            f"-> frontera {frontier(logs_dir=logs, k=3)}; arxiv "
+            f"{len(ar.get('weeks', {}))} semanas -> bursts "
+            f"{bursting(logs_dir=logs, k=3)}")
+
+
 @check("reflexion (historia)")
 def c_reflect():
     p = ROOT / "logs" / "reflexiones.jsonl"
@@ -140,6 +155,7 @@ def main() -> None:
               ("health", c_health), ("outcomes", c_outcomes),
               ("automerge", c_automerge), ("merge_train", c_train),
               ("decision_mining", c_decisions), ("flywheel", c_training),
+              ("descubrimiento", c_discovery),
               ("reflexion", c_reflect), ("budget", c_budget),
               ("server", c_server)]
     print(f"\n{B}SMOKE mmorch — {len(checks)} subsistemas{X}\n")

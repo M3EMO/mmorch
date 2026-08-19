@@ -65,17 +65,29 @@ def test_mine_repo_distills_and_deletes(tmp_path):
     assert leftovers == []
 
 
-def test_consume_queue_one_per_night_and_comments(tmp_path):
+def test_consume_queue_paralelo_marca_solo_los_que_salieron(tmp_path):
+    """Mina en paralelo; el que falla queda SIN comentar (reintenta otra noche)."""
     remote = make_fake_remote(tmp_path)
     orch = make_orch(tmp_path)
     q = Path(orch) / "logs" / "repos_queue.txt"
-    q.write_text(f"# ya minado\n{remote}\notro-que-espera\n", encoding="utf-8")
+    q.write_text(f"# ya minado\n{remote}\nurl-rota\n", encoding="utf-8")
     r = consume_queue(orch, today="2026-08-19", llm_fn=fake_llm,
-                      verify_fn=lambda g: True)
-    assert r["ok"]
+                      verify_fn=lambda g: True, n=3)
+    assert r["minados"] == 1 and len(r["resultados"]) == 2
     lines = q.read_text(encoding="utf-8").splitlines()
-    assert lines[1].startswith("#")              # consumida -> comentada
-    assert lines[2] == "otro-que-espera"         # la siguiente espera su noche
+    assert lines[1].startswith("#")        # el bueno: consumido
+    assert lines[2] == "url-rota"          # el roto: sigue en cola
+
+
+def test_consume_queue_respeta_el_cupo(tmp_path):
+    remote = make_fake_remote(tmp_path)
+    orch = make_orch(tmp_path)
+    q = Path(orch) / "logs" / "repos_queue.txt"
+    q.write_text(f"{remote}\n{remote}\n{remote}\n", encoding="utf-8")
+    r = consume_queue(orch, today="2026-08-19", llm_fn=fake_llm,
+                      verify_fn=lambda g: True, n=2)
+    assert len(r["resultados"]) == 2
+    assert q.read_text(encoding="utf-8").splitlines()[2] == str(remote)
 
 
 def test_consume_queue_empty_and_paused(tmp_path):

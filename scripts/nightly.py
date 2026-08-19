@@ -288,8 +288,17 @@ def main() -> None:
     except Exception as e:
         rec["slim"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
 
-    # descubrimiento semanal (domingos): GitHub search con queries derivadas
-    # del roadmap + foco de la reflexion -> encola para las noches siguientes
+    # cosecha de arXiv TODAS las noches (cubetas semanales de bigramas): el
+    # burst es un ratio contra las semanas propias, asi que necesita un ritmo
+    # de muestreo parejo. Barato: 5 requests con sleep de 3s.
+    try:
+        from mmorch.bursts import harvest
+        rec["arxiv"] = harvest(logs_dir=str(ROOT / "logs"))
+    except Exception as e:
+        rec["arxiv"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
+
+    # descubrimiento semanal (domingos): GitHub search con queries de la
+    # frontera de topics + bursts de arXiv + roadmap + intereses + foco
     if time.localtime().tm_wday == 6:
         try:
             from mmorch.repo_mining import discover_repos
@@ -297,11 +306,11 @@ def main() -> None:
         except Exception as e:
             rec["repo_discovery"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
 
-    # mineria de repos ajenos: 1 por noche desde logs/repos_queue.txt —
+    # mineria de repos ajenos: 3 EN PARALELO desde logs/repos_queue.txt —
     # clona efimero, destila grafts al vault + candidatas, borra el clon
     try:
         from mmorch.repo_mining import consume_queue
-        rec["repo_mining"] = consume_queue(str(ROOT),
+        rec["repo_mining"] = consume_queue(str(ROOT), n=3,
                                            today=time.strftime("%Y-%m-%d"))
     except Exception as e:
         rec["repo_mining"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
