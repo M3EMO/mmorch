@@ -68,6 +68,16 @@ def _collect_context(repo_dir: Path, *, max_chars: int = 24000) -> str:
     for f in code:
         parts.append(f"== {f.relative_to(repo_dir)} (cabeza) ==\n"
                      + f.read_text(encoding="utf-8", errors="ignore")[:2500])
+    # PDFs sueltos (whitepaper, docs/architecture.pdf) — antes invisibles
+    # del todo. Texto plano via pypdfium2 (sin torch, ver docs_extract.py);
+    # candidata "Docling completo" queda pendiente de mas RAM.
+    try:
+        from mmorch.docs_extract import collect_pdfs
+        pdfs = collect_pdfs(repo_dir)
+        if pdfs:
+            parts.append(pdfs)
+    except ImportError:
+        pass
     return "\n\n".join(parts)[:max_chars]
 
 

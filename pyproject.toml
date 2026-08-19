@@ -16,6 +16,9 @@ dependencies = [
 mcp = ["mcp>=1.2.0"]
 memory = ["fastembed>=0.3.0"]   # embeddings locales (bge-small). Sin esto: recall coarse-only.
 checkers = ["sqlglot>=20", "pint>=0.23", "sympy>=1.12", "radon>=6.0", "coverage>=7.0"]
+docs = ["pypdfium2>=5.0"]   # extraccion de texto de PDF (docs_extract.py) —
+                            # SIN torch: candidata "docling completo" (layout/
+                            # tablas via ML) espera mas RAM, ver el modulo
 server = ["starlette>=0.37", "uvicorn>=0.27", "httpx>=0.27",
           "pywinpty>=2.0; platform_system=='Windows'"]          # nivel 3: live server + fleet + PTY (ConPTY)
 factory = ["scikit-learn>=1.4"]                                 # fabrica de modelos (logreg/GBRT)

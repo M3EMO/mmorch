@@ -144,3 +144,25 @@ def test_discovery_cooldown_retira_query_seca(tmp_path):
     assert discover_repos(**kw)["queries"] == 1
     assert discover_repos(**kw)["queries"] == 1
     assert discover_repos(**kw).get("skipped")   # tercera: en cooldown
+
+
+def test_collect_context_incluye_pdfs_del_repo(tmp_path):
+    """Antes de docs_extract, ningun PDF entraba al contexto del juez —
+    ahora un PDF suelto (whitepaper, docs/architecture.pdf) se lee via
+    pypdfium2 (sin torch) y aparece en _collect_context."""
+    from mmorch.repo_mining import _collect_context
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    stream = "BT /F1 14 Tf 20 100 Td (contenido del whitepaper mmorch) Tj ET"
+    pdf_body = (
+        "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+        "2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+        "3 0 obj<</Type/Page/Parent 2 0 R/Resources<</Font<</F1 4 0 R>>>>"
+        "/MediaBox[0 0 300 150]/Contents 5 0 R>>endobj\n"
+        "4 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\n"
+        f"5 0 obj<</Length {len(stream)}>>stream\n{stream}\nendstream\nendobj\n"
+        "xref\n0 6\ntrailer<</Size 6/Root 1 0 R>>\nstartxref\n0\n%%EOF")
+    (repo / "whitepaper.pdf").write_bytes(pdf_body.encode("latin-1"))
+    ctx = _collect_context(repo)
+    assert "contenido del whitepaper mmorch" in ctx
+    assert "whitepaper.pdf" in ctx
