@@ -82,3 +82,15 @@ def test_secret_redacted_in_file(tmp_path):
     ingest_decisions(t, logs_dir=str(logs))
     content = (logs / "decision_samples.jsonl").read_text(encoding="utf-8")
     assert secret not in content
+
+
+def test_tail_corta_en_borde_legible_y_respeta_tope():
+    from mmorch.decision_mining import _tail
+    assert _tail("corto", 1200) == "corto"
+    assert _tail("xx mitad. Frase limpia que sigue aca", 30).startswith("Frase limpia")
+    assert len(_tail("x" * 3000, 100)) <= 100          # el tope nunca crece
+    # tabla sin cabecera: las filas no significan nada, se tiran
+    t = "basura cortada\n\n| a | b |\n| 1 | 2 |\nprosa que sigue"
+    assert _tail(t, 34) == "prosa que sigue"
+    # ...salvo que la muestra sea toda tabla (mejor eso que vacio)
+    assert _tail("xx\n\n| a | b |\n| 1 | 2 |", 20).startswith("| a |")

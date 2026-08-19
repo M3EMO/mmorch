@@ -26,12 +26,25 @@ def _tail(text: str, n: int) -> str:
     if len(text) <= n:
         return text
     tail = text[-n:]
-    for sep in ("\n\n", "\n", ". "):
+    # borde de parrafo primero (el mas legible), aceptando gastar hasta 2/3 del
+    # recorte con tal de arrancar limpio; despues linea, despues fin de oracion
+    keep = n // 3
+    for sep, limite in (("\n\n", n - keep), ("\n", n // 3), (". ", n // 3)):
         i = tail.find(sep)
-        if 0 <= i < n // 3:            # solo si el borde esta cerca del inicio
-            return tail[i + len(sep):].lstrip()
-    i = tail.find(" ")
-    return tail[i + 1:] if 0 <= i < 40 else tail
+        if 0 <= i < limite:
+            tail = tail[i + len(sep):].lstrip()
+            break
+    else:
+        i = tail.find(" ")
+        tail = tail[i + 1:] if 0 <= i < 40 else tail
+
+    # tabla huerfana: si arranca a mitad de tabla markdown, la cabecera quedo
+    # afuera y las filas no significan nada — se tiran, salvo que sea todo tabla
+    lineas = tail.split("\n")
+    resto = [j for j, ln in enumerate(lineas) if not ln.lstrip().startswith("|")]
+    if lineas[0].lstrip().startswith("|") and resto:
+        tail = "\n".join(lineas[resto[0]:]).lstrip()
+    return tail
 
 
 def mine_decisions(transcript_path: str) -> list[dict]:
