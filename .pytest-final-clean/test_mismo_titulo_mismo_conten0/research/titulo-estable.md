@@ -1,4 +1,0 @@
----
-title: Titulo Estable
----
-cuerpo

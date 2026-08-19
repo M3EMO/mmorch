@@ -1,4 +1,0 @@
-# mmorch
-
-## research
-- [[nota-dos]]

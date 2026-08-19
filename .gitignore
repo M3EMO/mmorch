@@ -41,3 +41,4 @@ training/
 
 .pytest-tmp/
 .pytest-tmp*/
+.pytest-*/
