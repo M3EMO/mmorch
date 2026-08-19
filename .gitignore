@@ -38,3 +38,5 @@ flywheel/func.log
 
 .ua/
 training/
+
+.pytest-tmp/

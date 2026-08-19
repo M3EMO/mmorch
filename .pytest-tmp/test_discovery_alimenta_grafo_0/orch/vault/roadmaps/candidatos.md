@@ -1,5 +1,0 @@
-# Candidatas
-
-## Vigentes
-
-## Archivadas
