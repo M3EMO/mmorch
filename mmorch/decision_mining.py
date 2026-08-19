@@ -19,6 +19,21 @@ _MAX_DECISION_CHARS = 240
 _Q_MARKERS = ("?", "1.", "opcion", "opción")
 
 
+def _tail(text: str, n: int) -> str:
+    """Ultimos n chars pero arrancando en un borde legible: cortar a lo bruto
+    dejaba el 58% de las muestras empezando a mitad de palabra ("n progreso"),
+    y un ejemplo de entrenamiento que arranca cortado enseña ruido."""
+    if len(text) <= n:
+        return text
+    tail = text[-n:]
+    for sep in ("\n\n", "\n", ". "):
+        i = tail.find(sep)
+        if 0 <= i < n // 3:            # solo si el borde esta cerca del inicio
+            return tail[i + len(sep):].lstrip()
+    i = tail.find(" ")
+    return tail[i + 1:] if 0 <= i < 40 else tail
+
+
 def mine_decisions(transcript_path: str) -> list[dict]:
     """Pares (question, decision) del transcript; tolerante y fail-open."""
     try:
@@ -36,7 +51,7 @@ def mine_decisions(transcript_path: str) -> list[dict]:
         low = question.lower()
         if not any(m in low for m in _Q_MARKERS):
             continue
-        out.append({"question": redact(question[-1200:])[0],
+        out.append({"question": redact(_tail(question, 1200))[0],
                     "decision": redact(decision)[0],
                     "ts": None})
     return out
