@@ -265,7 +265,8 @@ def main() -> None:
     except Exception as e:
         rec["project_repair"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
 
-    _log(rec)
+    # el latido va aca (dead-man's switch temprano); el RECORD se escribe al
+    # final: escribirlo antes dejaba fuera del digest todo lo que sigue
     try:
         from mmorch.health import beat
         beat("nightly", logs_dir=str(ROOT / "logs"), detail="ok")
@@ -357,6 +358,8 @@ def main() -> None:
                 capture_output=True, timeout=300)
     except Exception:
         pass
+
+    _log(rec)
 
     # digest local (no depende de la app de Claude): logs/digest_last.md
     try:
