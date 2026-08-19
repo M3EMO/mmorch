@@ -81,6 +81,16 @@ def mine_repo(url: str, *, orch_root: str, today: str,
                              capture_output=True, text=True).stdout.strip()[:12]
         ctx = _collect_context(repo_dir)
 
+        # la vara de calidad es TUYA, no la fama del repo: los principios de
+        # codigo del dueño son la rubrica explicita del juez y el refutador
+        # (popularidad = prior de descubrimiento, jamas veredicto de calidad)
+        principios = ""
+        try:
+            principios = (root / "docs" / "coding-principles.md").read_text(
+                encoding="utf-8")[:2200]
+        except OSError:
+            pass
+
         if llm_fn is None:
             from mmorch.loop_nightly import _llm_json
 
@@ -94,7 +104,11 @@ def mine_repo(url: str, *, orch_root: str, today: str,
             "GRAFTS concretos (modulos/funciones/patrones/comportamientos que "
             "valga la pena robar e integrar). Se critico: pocos grafts buenos "
             "> muchos vagos. Identifica la licencia (si no es permisiva "
-            "MIT/Apache/BSD, los grafts son solo-patron, sin codigo literal).\n"
+            "MIT/Apache/BSD, los grafts son solo-patron, sin codigo literal). "
+            "OJO: estrellas/popularidad NO son calidad — juzga cada graft "
+            "contra ESTOS principios del dueño (un patron que los viola NO es "
+            "graft aunque el repo sea famoso):\n"
+            f"{principios}\n"
             f"REPO {url} @ {sha}:\n{ctx}\n"
             'JSON: {"resumen": str, "licencia": str, "grafts": [{"titulo", '
             '"que", "aplica_a", "archivos_clave": [paths], "esfuerzo"}]}',
@@ -105,9 +119,13 @@ def mine_repo(url: str, *, orch_root: str, today: str,
             def verify_fn(g):
                 from mmorch.loop_nightly import build_judges
                 _, ver = build_judges()
-                return not ver.refute({"lente": "integracion",
-                                       "gist": f"{g['titulo']}: {g['que']}"}
-                                      ).get("refuted", True)
+                # el refutador refuta grafts que violan los principios del
+                # dueño (complejidad especulativa, acoplamiento, verbosidad)
+                return not ver.refute(
+                    {"lente": "integracion",
+                     "gist": f"{g['titulo']}: {g['que']} — ¿respeta estos "
+                             f"principios? {principios[:800]}"}
+                ).get("refuted", True)
         survivors = [g for g in grafts if verify_fn(g)]
 
         # persistir el JUGO: nota vault con citas URL+SHA (jamas codigo entero)
@@ -184,11 +202,23 @@ def discover_repos(*, orch_root: str, max_new: int = 3, http_fn=None) -> dict:
     import urllib.request
     root = Path(orch_root)
 
-    # queries deterministas desde el roadmap (titulos en negrita) + foco
+    # queries deterministas desde el roadmap (titulos en negrita) + INTERESES
+    # semilla (vault/roadmaps/intereses.txt, editable a mano) + foco
     queries = []
     try:
         road = (root / "vault" / "roadmaps" / "roadmap.md").read_text(encoding="utf-8")
-        queries += re.findall(r"\*\*([^*]{6,60})\*\*", road)[:4]
+        queries += re.findall(r"\*\*([^*]{6,60})\*\*", road)[:3]
+    except OSError:
+        pass
+    try:
+        temas = [t.strip() for t in
+                 (root / "vault" / "roadmaps" / "intereses.txt")
+                 .read_text(encoding="utf-8").splitlines()
+                 if t.strip() and not t.startswith("#")]
+        if temas:
+            # rotacion semanal determinista: cada domingo 2 temas distintos
+            week = int(time.time() // (7 * 86400))
+            queries += [temas[(week + i) % len(temas)] for i in range(2)]
     except OSError:
         pass
     try:
