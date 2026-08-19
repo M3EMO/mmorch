@@ -1,9 +1,15 @@
 ---
-title: minado loushang 2026-08-19
-status: seed
-tags: [mmorch, repo-mining]
-sources: [https://github.com/zhnt/loushang]
+applies_to:
+- Lotus
+- orchestration
 created: 2026-08-19
+sources:
+- https://github.com/zhnt/loushang
+status: seed
+tags:
+- mmorch
+- repo-mining
+title: minado loushang 2026-08-19
 ---
 
 Loushang es un sistema de trabajo AI nativo de método para ejecutar trabajo complejo desde la intención hasta la entrega verificada. Su enfoque actual es 'loushang code', un CLI y banco de trabajo terminal para desarrollo de software con enrutamiento de modelos, sesiones persistentes, herramientas, extensiones y entrega guiada por método. El sistema trata métodos, etapas, roles, herramientas, sesiones y productos de trabajo como objetos de runtime. La arquitectura incluye capas para método (contrato de trabajo), trabajo (hecho de runtime), agente (kernel de ejecución), AI (capa de acceso a modelos), harness (sustrato cross-producto), coding (superficie de producto V1), tui (presentación terminal) y channel (protocolo de límite).

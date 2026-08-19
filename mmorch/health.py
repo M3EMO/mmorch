@@ -157,7 +157,13 @@ def check_projects(projects: dict, *, run_fn=None, timeout: float = 600.0) -> di
     def _default_run(path: str) -> bool:
         py = _P(path) / ".venv" / "Scripts" / "python.exe"
         exe = str(py) if py.exists() else _sys.executable
-        r = subprocess.run([exe, "-m", "pytest", "-q", "-x"], cwd=path,
+        import tempfile
+        bt = tempfile.mkdtemp(prefix="mmorch_health_")
+        # --basetemp: el pytest-current global de Windows queda con permisos
+        # rotos (root cause documentada), y sin esto la limpieza final tira
+        # PermissionError en CADA proyecto ajeno que se chequea aca
+        r = subprocess.run([exe, "-m", "pytest", "-q", "-x",
+                            f"--basetemp={bt}"], cwd=path,
                            capture_output=True, timeout=timeout)
         return r.returncode == 0
 

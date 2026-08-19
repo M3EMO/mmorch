@@ -77,3 +77,15 @@ def test_train_paused(tmp_path):
     from pathlib import Path
     (Path(repo) / "logs" / "loop_paused").touch()
     assert run_train(repo, base="main")["skipped"] == "paused"
+
+
+def test_train_timeout_no_pierde_el_registro(tmp_path):
+    """Un test_fn que excede el timeout NO debe tirar la excepcion afuera de
+    run_train: antes se perdia el registro entero de la noche."""
+    def _cuelga():
+        raise subprocess.TimeoutExpired(cmd="pytest", timeout=1800)
+    repo = make_repo(tmp_path)
+    _mk_branch(repo, "mmorch/hard-1", "mmorch/a.py", "a = 2\n")
+    r = run_train(repo, base="main", today="2026-08-19", test_fn=_cuelga)
+    assert r["gate"] == "rojo" and r["train_branch"] is None
+    assert r["gate_reason"] == "timeout"

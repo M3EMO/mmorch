@@ -251,7 +251,11 @@ def main() -> None:
                   if pathlib.Path(p).resolve() != ROOT}
         # timeout 900s: la suite de Portfolio tarda ~8 min sana; colgada >15 min
         # es señal (y auto_repair la levanta a la noche siguiente)
-        rec["project_health"] = check_projects(_projs, timeout=900.0)
+        # Portfolio financiero: 1634 tests, 12 archivos numericos pesados sin
+        # vectorizar (test_baseline_hmm.py solo = 2m40s) — medido en vivo,
+        # 900s no alcanzaba SIN que nada estuviera colgado. 1800s = mismo
+        # presupuesto que el tren le da a la suite propia de mmorch.
+        rec["project_health"] = check_projects(_projs, timeout=1800.0)
     except Exception as e:
         rec["project_health"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
 

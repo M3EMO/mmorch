@@ -64,6 +64,7 @@ def run_train(repo: str, *, base: str, today: str | None = None,
                 skipped.append(b)                            # vuelve a la cola
             else:
                 merged.append(b)
+        gate_reason = None
         if merged:
             if test_fn is None:
                 bt = tempfile.mkdtemp(prefix="mmorch_bt_")
@@ -72,7 +73,13 @@ def run_train(repo: str, *, base: str, today: str | None = None,
                                         f"--basetemp={bt}"], cwd=wt.path,
                                        capture_output=True, timeout=1800)
                     return p.returncode == 0
-            gate_ok = bool(test_fn())
+            try:
+                gate_ok = bool(test_fn())
+            except subprocess.TimeoutExpired:
+                # sin esto la excepcion se comia el registro ENTERO de la
+                # noche: gate rojo con motivo es señal; nada es agujero negro
+                gate_ok = False
+                gate_reason = "timeout"
             if gate_ok:
                 # renombrar la branch del worktree al nombre del tren
                 _git(repo, "branch", "-f", train, wt.branch)
@@ -81,7 +88,8 @@ def run_train(repo: str, *, base: str, today: str | None = None,
 
     result = {"train_branch": train if (merged and gate_ok) else None,
               "merged": merged, "skipped_conflict": skipped,
-              "gate": "verde" if gate_ok else ("rojo" if merged else "vacio")}
+              "gate": "verde" if gate_ok else ("rojo" if merged else "vacio"),
+              "gate_reason": gate_reason}
     try:
         logs.mkdir(exist_ok=True)
         with open(logs / "merge_train.jsonl", "a", encoding="utf-8") as f:
