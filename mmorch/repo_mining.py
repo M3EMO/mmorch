@@ -20,7 +20,12 @@ import shutil
 import subprocess
 import tempfile
 import time
+from itertools import zip_longest
 from pathlib import Path
+
+from mmorch.iohelpers import atomic_write_json, load_json_tolerant
+
+_MAX_Q = 4  # cupo de busquedas por noche de discovery
 
 _MINE_SCHEMA = {
     "type": "object",
@@ -204,21 +209,25 @@ def discover_repos(*, orch_root: str, max_new: int = 3, http_fn=None) -> dict:
 
     # queries deterministas desde el roadmap (titulos en negrita) + INTERESES
     # semilla (vault/roadmaps/intereses.txt, editable a mano) + foco
-    queries = []
+    # una lista POR FUENTE: el corte final es round-robin, no "las 3 primeras"
+    # (antes el roadmap copaba el cupo y intereses/foco no se consultaban nunca)
+    q_road: list[str] = []
+    q_temas: list[str] = []
+    q_foco: list[str] = []
     try:
         road = (root / "vault" / "roadmaps" / "roadmap.md").read_text(encoding="utf-8")
-        queries += re.findall(r"\*\*([^*]{6,60})\*\*", road)[:3]
+        q_road += re.findall(r"\*\*([^*]{6,60})\*\*", road)[:3]
     except OSError:
         pass
     try:
-        temas = [t.strip() for t in
+        temas = [t.split("#")[0].strip() for t in
                  (root / "vault" / "roadmaps" / "intereses.txt")
                  .read_text(encoding="utf-8").splitlines()
-                 if t.strip() and not t.startswith("#")]
+                 if t.split("#")[0].strip()]
         if temas:
             # rotacion semanal determinista: cada domingo 2 temas distintos
             week = int(time.time() // (7 * 86400))
-            queries += [temas[(week + i) % len(temas)] for i in range(2)]
+            q_temas += [temas[(week + i) % len(temas)] for i in range(2)]
     except OSError:
         pass
     try:
@@ -226,9 +235,33 @@ def discover_repos(*, orch_root: str, max_new: int = 3, http_fn=None) -> dict:
             encoding="utf-8").strip().splitlines()[-1]
         foco = json.loads(refl).get("foco_sugerido", "")[:80]
         if foco:
-            queries.append(foco)
+            q_foco.append(foco)
     except (OSError, IndexError, json.JSONDecodeError):
         pass
+
+    # FRONTERA: temas ajenos adyacentes a los nuestros, sacados del grafo de
+    # co-ocurrencia de topics de GitHub. Es la unica fuente que puede nombrar
+    # un tema que nadie de este lado (ni el LLM) conoce — va primero.
+    from mmorch.frontier import absorb, frontier
+    logs_dir = str(root / "logs")
+    conocidas = {q.lower() for q in q_road + q_temas + q_foco}
+    nuevos_temas = frontier(logs_dir=logs_dir, k=2, exclude=conocidas)
+
+    # round-robin: cada fuente entra al cupo, la frontera primero
+    queries = []
+    for fila in zip_longest(nuevos_temas, q_road, q_temas, q_foco):
+        queries += [q for q in fila if q]
+
+    # cooldown: una query que dio 0 nuevos dos veces seguidas descansa 30 dias
+    # (bandit "rotting": el tema se agota con los pulls y se recupera con el
+    # tiempo). El presupuesto liberado es lo que financia la exploracion.
+    cd_path = root / "logs" / "query_cooldown.json"
+    cooldown = load_json_tolerant(cd_path, {})
+    ahora = time.time()
+    queries = [q for q in queries
+               if not (cooldown.get(q, {}).get("zeros", 0) >= 2
+                       and ahora - cooldown.get(q, {}).get("last", 0) < 30 * 86400)]
+
     if not queries:
         return {"skipped": "sin queries (roadmap vacio)"}
 
@@ -249,7 +282,8 @@ def discover_repos(*, orch_root: str, max_new: int = 3, http_fn=None) -> dict:
         seen.add(f.stem)
 
     found = []
-    for q in queries[:3]:
+    adoptados: list[str] = []
+    for q in queries[:_MAX_Q]:
         try:
             data = http_fn("https://api.github.com/search/repositories?"
                            + urllib.parse.urlencode(
@@ -257,16 +291,44 @@ def discover_repos(*, orch_root: str, max_new: int = 3, http_fn=None) -> dict:
                                 "sort": "stars", "per_page": 5}))
         except Exception:
             continue
-        for item in data.get("items", []):
+        items = data.get("items", [])
+        pasaron = []
+        for item in items:
             url = item.get("html_url", "")
             lic = (item.get("license") or {}).get("spdx_id", "")
             if url and url not in seen and lic in ("MIT", "Apache-2.0",
                                                    "BSD-3-Clause", "BSD-2-Clause"):
                 found.append(url)
+                pasaron.append(item)
                 seen.add(url)
+        # el grafo se alimenta de TODO lo visto; "propio" solo lo que pasa filtros
+        try:
+            absorb(items, logs_dir=logs_dir)
+            if pasaron:
+                absorb(pasaron, logs_dir=logs_dir, own=True)
+        except OSError:
+            pass
+        prev = cooldown.get(q, {})
+        cooldown[q] = {"zeros": 0 if pasaron else prev.get("zeros", 0) + 1,
+                       "last": ahora}
+        # un tema de la FRONTERA que rinde deja de ser tanteo y pasa a interes
+        # permanente (marcado "# auto" — Mateo lo edita o borra a mano)
+        if pasaron and q in nuevos_temas:
+            adoptados.append(q)
+    atomic_write_json(cd_path, cooldown)
+    if adoptados:
+        try:
+            with open(root / "vault" / "roadmaps" / "intereses.txt", "a",
+                      encoding="utf-8") as fh:
+                for t in adoptados:
+                    fh.write(f"{t}  # auto {time.strftime('%Y-%m-%d')} (frontera)\n")
+        except OSError:
+            pass
+
     nuevos = found[:max_new]
     if nuevos:
         with open(q_path, "a", encoding="utf-8") as fh:
             for u in nuevos:
                 fh.write(u + "\n")
-    return {"queries": len(queries[:3]), "encolados": nuevos}
+    return {"queries": len(queries[:_MAX_Q]), "encolados": nuevos,
+            "frontera": nuevos_temas, "adoptados": adoptados}

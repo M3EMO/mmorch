@@ -1,10 +1,23 @@
 ---
-title: Markdoc (Stripe) — veredicto code-level y demo corrida
-created: 2026-08-12
-tags: [research, mmorch, markdoc, markdown, validacion, templates, reports, steal-pattern]
-status: evergreen
+applies_to:
+- Portfolio financiero
+- orchestration
 confidence: alta — clonado, API leída, demo ejecutada con casos válido e inválido
-sources: [https://github.com/markdoc/markdoc, npm @markdoc/markdoc 0.5.9]
+created: 2026-08-12
+sources:
+- https://github.com/markdoc/markdoc
+- npm @markdoc/markdoc 0.5.9
+status: evergreen
+tags:
+- research
+- mmorch
+- markdoc
+- markdown
+- validacion
+- templates
+- reports
+- steal-pattern
+title: Markdoc (Stripe) — veredicto code-level y demo corrida
 ---
 # Qué es
 

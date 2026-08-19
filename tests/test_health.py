@@ -139,3 +139,22 @@ def test_report_healthy_false_errors(tmp_path):
 
     assert result["healthy"] is False
     assert result["errors"]["nightly_errors"] == {"digest_error": "failed"}
+
+
+def test_check_projects_classifies(tmp_path):
+    a = tmp_path / "a"; (a / "tests").mkdir(parents=True)
+    b = tmp_path / "b"; (b / "tests").mkdir(parents=True)
+    c = tmp_path / "c"; c.mkdir()  # sin tests/
+    projects = {"a": str(a), "b": str(b), "c": str(c)}
+    result = health.check_projects(projects, run_fn=lambda p: p == str(a))
+    assert result == {"ok": ["a"], "failing": ["b"], "sin_tests": ["c"],
+                      "errors": []}
+
+
+def test_check_projects_fail_soft(tmp_path):
+    a = tmp_path / "a"; (a / "tests").mkdir(parents=True)
+    def boom(p):
+        raise RuntimeError("venv roto")
+    result = health.check_projects({"a": str(a)}, run_fn=boom)
+    assert result["failing"] == [] and result["ok"] == []
+    assert "venv roto" in result["errors"][0]

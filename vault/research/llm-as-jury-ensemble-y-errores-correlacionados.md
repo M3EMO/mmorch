@@ -1,11 +1,21 @@
 ---
-title: LLM-as-jury ensemble y errores correlacionados
-status: applied   # ensemble_verify min_veto (minority-veto) landed; mas-familias pendiente
+applies_to:
+- Claude
+- Proyecto_Adepor
+- orchestration
 confidence: 0.9
-verifier: gemini-2.5-flash
-tags: [research, mmorch, verification, ensemble]
-sources: [https://arxiv.org/html/2604.22891v2, https://arxiv.org/pdf/2603.00039]
 created: 2026-06-07
+sources:
+- https://arxiv.org/html/2604.22891v2
+- https://arxiv.org/pdf/2603.00039
+status: applied
+tags:
+- research
+- mmorch
+- verification
+- ensemble
+title: LLM-as-jury ensemble y errores correlacionados
+verifier: gemini-2.5-flash
 ---
 ## Qué es
 LLM-as-jury: panel de múltiples jueces, decisión por **voto mayoría**. Baja el self-preference

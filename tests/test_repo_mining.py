@@ -90,3 +90,45 @@ def test_mine_repo_bad_url(tmp_path):
     r = mine_repo(str(tmp_path / "no-existe"), orch_root=orch,
                   today="2026-08-19", llm_fn=fake_llm)
     assert r["ok"] is False and "clone" in r["error"]
+
+
+def _fake_search(items):
+    """http_fn falso: siempre devuelve los mismos items."""
+    return lambda url: {"items": items}
+
+
+def test_discovery_alimenta_grafo_y_adopta_frontera(tmp_path):
+    """La frontera (tema ajeno adyacente) entra como query y, si rinde, queda
+    como interes permanente marcado '# auto'."""
+    from mmorch.frontier import absorb
+    from mmorch.repo_mining import discover_repos
+    orch = Path(make_orch(tmp_path))
+    (orch / "vault" / "roadmaps" / "roadmap.md").write_text(
+        "**bandits contextuales**\n", encoding="utf-8")
+    logs = str(orch / "logs")
+    # grafo precargado: 'rlhf' es propio, 'reward-modeling' es su vecino ajeno
+    absorb([{"topics": ["rlhf", "dpo"]}] * 4, logs_dir=logs, own=True)
+    absorb([{"topics": ["dpo", "reward-modeling"]}] * 4, logs_dir=logs)
+
+    item = {"html_url": "https://github.com/x/y", "topics": ["reward-modeling"],
+            "license": {"spdx_id": "MIT"}}
+    r = discover_repos(orch_root=str(orch), max_new=2,
+                       http_fn=_fake_search([item]))
+
+    assert "reward-modeling" in r["frontera"], r
+    assert "reward-modeling" in r["adoptados"], r
+    intereses = (orch / "vault" / "roadmaps" / "intereses.txt").read_text(
+        encoding="utf-8")
+    assert "reward-modeling" in intereses and "# auto" in intereses
+
+
+def test_discovery_cooldown_retira_query_seca(tmp_path):
+    """Query con 0 resultados dos veces seguidas descansa (presupuesto libre)."""
+    from mmorch.repo_mining import discover_repos
+    orch = Path(make_orch(tmp_path))
+    (orch / "vault" / "roadmaps" / "roadmap.md").write_text(
+        "**tema seco**\n", encoding="utf-8")
+    kw = dict(orch_root=str(orch), max_new=2, http_fn=_fake_search([]))
+    assert discover_repos(**kw)["queries"] == 1
+    assert discover_repos(**kw)["queries"] == 1
+    assert discover_repos(**kw).get("skipped")   # tercera: en cooldown

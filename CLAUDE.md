@@ -114,6 +114,13 @@ tira `SchemaGateError` si se agota. bool NO cuela como number. Library-only, OPT
 (no forzado en adversarial_verify: ahí el skeptic-default unparse→failed es más seguro
 que excepción).
 
+## Prose-gate (`tools/ste-lint.py`)
+Linter STE de prosa (vendored de woosal1337/blog ep01, extendido con `--lang es`).
+Gate determinístico para docs generados — mismo rol que ruff/mypy pero para markdown.
+Regex + wordlists, stdlib puro. Uso: `python tools/ste-lint.py docs/*.md --fail-over 5`
+(exit 1 si per100w supera umbral); `--lang es` para prosa en español; `--json`; stdin OK.
+Correr sobre README/specs/notas antes de commitearlos.
+
 ## Pendiente / backlog
 ablacion §18.4 (validar empíricamente config B DeepSeek↔Google vs alternativas —
 requiere API real + métricas, es research no código). No escalar sin métricas verdes

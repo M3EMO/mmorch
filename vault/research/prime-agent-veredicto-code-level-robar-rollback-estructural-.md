@@ -1,10 +1,7 @@
 ---
-title: prime-agent veredicto code-level: robar rollback estructural, playbooks ejecutables y review-gate
-created: 2026-08-14
-tags: [research, mmorch, repo-mining, evolve, session-skills, grafts]
-status: verified
-confidence: 0.85
-sources: [https://github.com/PrimeIntellect-ai/prime-agent, packages/coding-agent/src/core/refinement/refinement.ts, docs/rlm.md]
+applies_to:
+- OS propio
+- orchestration
 ---
 Code-read 2026-08-14 (agente dedicado sobre clon shallow). prime-agent = "self-improving RLM agent" de PrimeIntellect: kernel IPython persistente como único tool + harness state durable (prompt/memory/skill/subagent) refinado por LLM.
 

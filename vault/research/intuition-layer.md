@@ -1,3 +1,7 @@
+---
+applies_to:
+- orchestration
+---
 # mmorch cognitive architecture — synthesis (intuition + insight)
 
 Status: **Phases 0–5 BUILT** (`signature.py` baa4013; `intuition.py` 2e7d0ef + 045a6f7;
