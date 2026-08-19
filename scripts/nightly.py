@@ -305,6 +305,26 @@ def main() -> None:
         except Exception as e:
             rec["self_audit_global"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
 
+        # arquitectura (domingos, sin LLM): ciclos de imports, candidatos a
+        # god-module, co-cambio en git sin import (violacion CCP retroactiva
+        # — asi se hubiera visto el bug de hoy antes de que pasara), y
+        # señales estaticas de contaminacion entre tests. Solo lectura, va
+        # al log/vault — self_audit sigue siendo el unico que propone cambios
+        try:
+            from mmorch.architecture import scan as _arch_scan
+            arch = _arch_scan(str(ROOT))
+            rec["architecture"] = {
+                "ciclos": len(arch["ciclos"]),
+                "god_modules": len(arch["god_module_candidates"]),
+                "co_change_sin_import": len(arch["co_change_sin_import"]),
+                "test_pollution": len(arch["test_pollution_candidates"]),
+            }
+            with open(ROOT / "logs" / "architecture.jsonl", "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"fecha": time.strftime("%Y-%m-%d"), **arch},
+                                    ensure_ascii=False) + "\n")
+        except Exception as e:
+            rec["architecture"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
+
     # cosecha de arXiv TODAS las noches (cubetas semanales de bigramas): el
     # burst es un ratio contra las semanas propias, asi que necesita un ritmo
     # de muestreo parejo. Barato: 5 requests con sleep de 3s.

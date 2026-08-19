@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **118 módulos · 46 MCP tools · 617 tests.**
+_Auto-generado por `mmorch.docgen`._ **119 módulos · 46 MCP tools · 626 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -36,6 +36,7 @@ _Auto-generado por `mmorch.docgen`._ **118 módulos · 46 MCP tools · 617 tests
 | `mmorch/ablation.py` | ablation (§18.4) — validar EMPIRICAMENTE la regla de pairing cross-family. El |
 | `mmorch/adjudicate.py` | Adjudication module for matching notes to projects. |
 | `mmorch/arbitration.py` | arbitration — registro auditable de los arbitrajes del orquestador (blind-spot #2, 2026-07). |
+| `mmorch/architecture.py` | Organizador de arquitectura — chequeos MECANICOS, sin juicio de LLM. |
 | `mmorch/auto_repair.py` | Auto-reparación nocturna: los errores que el sistema DETECTA se convierten |
 | `mmorch/automerge.py` | Automerge con semáforo — merges sin accionar humano SOLO en el carril verde. |
 | `mmorch/autoresearch.py` | autoresearch (r4a) — hillclimb como JOB declarativo + resumable. |
