@@ -130,16 +130,45 @@ def scrape_errors(*, logs_dir: str = "logs", max_lines: int = 50) -> dict:
     }
 
 
+def _recent_silent_errors(logs_dir: str, *, hours: float = 48.0) -> list[dict]:
+    """Cola de logs/silent_errors.jsonl (canal generico que llena nightly.py
+    con findings_from_record de CADA subsistema) recortada a lo reciente.
+    No reemplaza el log propio de cada modulo — es el INDICE de lectura, no
+    la fuente: cada subsistema sigue siendo dueño de su propio detalle."""
+    import json as _json
+    path = Path(logs_dir) / "silent_errors.jsonl"
+    try:
+        lines = path.read_text(encoding="utf-8").strip().splitlines()
+    except OSError:
+        return []
+    from datetime import date, timedelta
+    corte = (date.today() - timedelta(hours=hours / 24)).isoformat()
+    out = []
+    for ln in lines[-200:]:
+        try:
+            e = _json.loads(ln)
+        except _json.JSONDecodeError:
+            continue
+        if e.get("fecha", "") >= corte:
+            out.append(e)
+    return out
+
+
 def report(*, logs_dir: str = "logs", now_ts: float | None = None) -> dict:
-    """Combine check() and scrape_errors() with a healthy flag."""
+    """Combine check() y scrape_errors() con un flag healthy, mas un vistazo
+    a silent_errors.jsonl: una sola llamada responde '¿vivo?' Y '¿algo roto
+    reciente en cualquier subsistema?' sin fusionar quien es dueño de que."""
     check_result = check(logs_dir=logs_dir, now_ts=now_ts)
     errors = scrape_errors(logs_dir=logs_dir)
+    recientes = _recent_silent_errors(logs_dir)
     healthy = (
         not check_result["dead"]
         and not errors["nightly_errors"]
         and not errors["idea_loop_errors"]
     )
-    return {"healthy": healthy, "check": check_result, "errors": errors}
+    return {"healthy": healthy, "check": check_result, "errors": errors,
+            "silent_errors_48h": len(recientes),
+            "silent_errors_sample": recientes[:5]}
 
 
 def check_projects(projects: dict, *, run_fn=None, timeout: float = 600.0) -> dict:

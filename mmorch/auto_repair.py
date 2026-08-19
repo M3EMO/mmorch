@@ -66,17 +66,22 @@ def _default_build(task: str, wt_path: str, gate_cmd: str) -> dict:
 
 
 def repair(repo_dir: str, *, today: str, build_fn=None,
-           logs_dir: str | None = None) -> dict:
-    """Una vuelta: peor hallazgo no reintentado -> REPAIR gateado en worktree."""
+           logs_dir: str | None = None, rec: dict | None = None) -> dict:
+    """Una vuelta: peor hallazgo no reintentado -> REPAIR gateado en worktree.
+
+    `rec`: si se pasa el record EN MEMORIA de esta misma corrida (nightly.py
+    lo hace desde que auto_repair paso a correr al final), se repara lo que
+    fallo ESTA noche en vez de leer nightly.jsonl y reparar lo de anoche."""
     logs = Path(logs_dir or (Path(repo_dir) / "logs"))
     if (logs / "loop_paused").exists():
         return {"skipped": "paused"}
 
-    try:
-        lines = (logs / "nightly.jsonl").read_text(encoding="utf-8").splitlines()
-        rec = json.loads(lines[-1])
-    except (OSError, IndexError, json.JSONDecodeError):
-        return {"skipped": "sin record nocturno"}
+    if rec is None:
+        try:
+            lines = (logs / "nightly.jsonl").read_text(encoding="utf-8").splitlines()
+            rec = json.loads(lines[-1])
+        except (OSError, IndexError, json.JSONDecodeError):
+            return {"skipped": "sin record nocturno"}
 
     findings = findings_from_record(rec)
     if not findings:

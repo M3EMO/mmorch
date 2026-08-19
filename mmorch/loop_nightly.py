@@ -126,6 +126,35 @@ _REFLECT_SCHEMA = {
 }
 
 
+def _summarize_record(rec: dict, *, per_key: int = 140) -> str:
+    """Una linea por subsistema (status + detalle corto), no el JSON crudo.
+
+    Medido: el record completo ronda 6-7k chars; cortarlo a 1200 chars crudos
+    SIEMPRE perdia los mismos campos (los que el script arma al final —
+    project_health, auto_repair, slim, arxiv, repo_mining, smoke, merge_train)
+    porque el orden de insercion en el dict es fijo. reflect() nunca los veia,
+    noche tras noche. Con una linea pareja por subsistema, todos entran."""
+    import json
+    out = []
+    for k, v in rec.items():
+        if k == "ts":
+            continue
+        if isinstance(v, dict):
+            if v.get("error"):
+                tag, detail = "ERROR", str(v["error"])
+            elif v.get("errors"):
+                tag, detail = f"ERRORES({len(v['errors'])})", "; ".join(
+                    str(e) for e in v["errors"][:2])
+            elif v.get("skipped"):
+                tag, detail = "skip", str(v["skipped"])
+            else:
+                tag, detail = "ok", json.dumps(v, ensure_ascii=False)
+        else:
+            tag, detail = "?", json.dumps(v, ensure_ascii=False)
+        out.append(f"- {k} [{tag}]: {detail[:per_key]}")
+    return "\n".join(out)
+
+
 def reflect(*, logs_dir: str, today: str, n_nights: int = 7) -> dict:
     """Reflexion nocturna: mmorch lee sus PROPIAS ultimas corridas y se
     auto-evalua — diagnostico de tendencia, foco sugerido para las proximas
@@ -147,16 +176,25 @@ def reflect(*, logs_dir: str, today: str, n_nights: int = 7) -> dict:
         prev = prev_path.read_text(encoding="utf-8").splitlines()[-1]
     except (OSError, IndexError):
         pass
+    # resumen parejo por subsistema en vez de JSON crudo cortado a 1200 chars:
+    # el corte crudo perdia SIEMPRE los mismos campos (los ultimos del dict)
+    resumenes = []
+    for raw in lines:
+        try:
+            resumenes.append(_summarize_record(_json.loads(raw)))
+        except (_json.JSONDecodeError, TypeError, AttributeError):
+            resumenes.append(raw[:400])
     out = _llm_json(
         "Sos la capa de auto-reflexion de mmorch (sistema de orquestacion que "
-        "se auto-mejora). Estas son tus ultimas corridas nocturnas (records "
-        "JSON) y tu reflexion anterior. Mira tu TRAYECTORIA, no una noche: "
-        "¿que tendencia hay (errores repetidos, pasos que nunca rinden, "
-        "aprendizaje estancado)? ¿donde deberia ir el foco de las proximas "
-        "noches? ¿cual es el riesgo principal de seguir igual? Se especifico "
-        "y critico — esto lo lee el humano y tu proxima reflexion.\n"
+        "se auto-mejora). Estas son tus ultimas corridas nocturnas (resumen "
+        "por subsistema: [ok]/[skip]/[ERROR]/[ERRORES]) y tu reflexion "
+        "anterior. Mira tu TRAYECTORIA, no una noche: ¿que tendencia hay "
+        "(errores repetidos, pasos que nunca rinden, aprendizaje estancado)? "
+        "¿donde deberia ir el foco de las proximas noches? ¿cual es el riesgo "
+        "principal de seguir igual? Se especifico y critico — esto lo lee el "
+        "humano y tu proxima reflexion.\n"
         f"Reflexion anterior: {prev[:1500] or '(primera reflexion)'}\n"
-        f"Corridas:\n{chr(10).join(x[:1200] for x in lines)}\n"
+        f"Corridas:\n{(chr(10) + '== noche ==' + chr(10)).join(resumenes)}\n"
         'JSON: {"diagnostico": str, "foco_sugerido": str, "riesgo_principal": str}',
         schema=_REFLECT_SCHEMA)
     rec = {"fecha": today, "diagnostico": out.get("diagnostico", ""),

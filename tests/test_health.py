@@ -158,3 +158,17 @@ def test_check_projects_fail_soft(tmp_path):
     result = health.check_projects({"a": str(a)}, run_fn=boom)
     assert result["failing"] == [] and result["ok"] == []
     assert "venv roto" in result["errors"][0]
+
+
+def test_report_incluye_silent_errors_recientes(tmp_path):
+    """report() debe sumar un resumen de silent_errors.jsonl sin fusionar
+    su detalle — el subsistema que lo escribio sigue siendo el dueño."""
+    from mmorch.health import report
+    logs = tmp_path
+    (logs / "silent_errors.jsonl").write_text(
+        '{"fecha": "2026-08-19", "source": "merge_train", "detail": "timeout"}\n'
+        '{"fecha": "2020-01-01", "source": "viejo", "detail": "hace anios"}\n',
+        encoding="utf-8")
+    r = report(logs_dir=str(logs), now_ts=1787110000)
+    assert r["silent_errors_48h"] == 1
+    assert r["silent_errors_sample"][0]["source"] == "merge_train"

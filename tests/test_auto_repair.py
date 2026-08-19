@@ -61,3 +61,18 @@ def test_repair_skips_paused(tmp_path):
     (logs / "nightly.jsonl").write_text(json.dumps({"x_error": "boom"}) + "\n",
                                         encoding="utf-8")
     assert repair(str(tmp_path), today="2026-08-19") == {"skipped": "paused"}
+
+
+def test_repair_usa_rec_en_memoria_sin_leer_nightly_jsonl(tmp_path):
+    """Pasar rec= evita el lag de 1 noche: repara lo de ESTA corrida, no lo
+    de ayer (nightly.py llama repair(rec=rec) despues de mover el llamado
+    al final del script)."""
+    from mmorch.auto_repair import repair
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    # sin record en disco -> con rec= no deberia importar
+    rec_hoy = {"ts": 1, "algo": {"error": "boom de HOY"}}
+    r = repair(str(tmp_path), today="2026-08-19", rec=rec_hoy,
+              build_fn=lambda t, w, g: {"status": "built"})
+    assert r.get("status") != "sin record nocturno"
+    assert "no deberia" not in str(r)  # sanity: no exploto por falta de archivo

@@ -142,3 +142,27 @@ def test_apply_focus_whitelist_and_determinism(tmp_path):
     f2 = ln.apply_focus({"foco_sugerido": "arreglar inexistente.py"},
                         logs_dir=str(logs))
     assert f2 == {}
+
+
+def test_summarize_record_cubre_todos_los_subsistemas():
+    """El corte crudo a 1200 chars perdia SIEMPRE los mismos campos (los
+    ultimos del dict). El resumen debe traer una linea por cada uno."""
+    rec = {"ts": 1,
+           "evolve": {"opened": [], "findings": 8},
+           "project_health": {"errors": ["Portfolio: TimeoutExpired algo"]},
+           "merge_train": {"error": "TimeoutExpired: pytest tardo demasiado"},
+           "smoke": {"ok": 13, "total": 13, "fails": []},
+           "auto_repair": {"skipped": "sin errores detectados"}}
+    resumen = ln._summarize_record(rec)
+    assert "ts" not in resumen
+    for k in ("evolve", "project_health", "merge_train", "smoke", "auto_repair"):
+        assert f"- {k} [" in resumen, f"{k} no aparece en el resumen"
+    assert "[ERROR]" in resumen and "TimeoutExpired" in resumen
+    assert "[skip]" in resumen
+
+
+def test_summarize_record_respeta_presupuesto_por_clave():
+    rec = {"ts": 1, "algo": {"detalle": "x" * 500}}
+    resumen = ln._summarize_record(rec, per_key=50)
+    linea = [ln_ for ln_ in resumen.splitlines() if "algo" in ln_][0]
+    assert len(linea) < 80

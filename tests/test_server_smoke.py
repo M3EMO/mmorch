@@ -45,6 +45,8 @@ EXPECTED_ROUTES = {
     "/jobs/{job_id}/gate/advance": "POST",
     "/budget/policies": "GET,HEAD,POST",
     "/feedback": "POST",
+    "/pending": "GET,HEAD",
+    "/verdict": "POST",
     "/export": "GET,HEAD",
     "/import": "POST",
     "/pty/open": "POST",

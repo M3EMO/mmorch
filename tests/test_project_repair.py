@@ -73,3 +73,30 @@ def test_repair_paused(tmp_path, monkeypatch):
     logs.mkdir()
     (logs / "loop_paused").touch()
     assert repair_projects(str(tmp_path), today="2026-08-19") == {"skipped": "paused"}
+
+
+def test_repair_logea_el_motivo_cuando_falla(tmp_path, monkeypatch):
+    """Antes se guardaba SOLO el status: el 'detail' real de build_project()
+    (p.ej. interface mismatch en la integracion) se perdia sin loguearse."""
+    proj = tmp_path / "p"
+    proj.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=proj, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=proj, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=proj, capture_output=True)
+    (proj / "a.py").write_text("a = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=proj, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "base", "--no-verify"], cwd=proj,
+                   capture_output=True)
+    logs = _setup(tmp_path, monkeypatch, "p", proj)
+
+    def fake_build(task, wt_path, gate):
+        return {"status": "integration_failed", "detail": "3 failed: interface mismatch"}
+
+    r = repair_projects(str(tmp_path), today="2026-08-19", build_fn=fake_build)
+    assert r["status"] == "integration_failed"
+    assert r["detail"] == "3 failed: interface mismatch"
+
+    linea = json.loads((logs / "project_repair.jsonl").read_text(
+        encoding="utf-8").strip().splitlines()[-1])
+    assert linea["detail"] == "3 failed: interface mismatch"
+    assert linea["project"] == "p"

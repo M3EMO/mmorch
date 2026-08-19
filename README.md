@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **117 módulos · 46 MCP tools · 606 tests.**
+_Auto-generado por `mmorch.docgen`._ **118 módulos · 46 MCP tools · 617 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -124,6 +124,7 @@ _Auto-generado por `mmorch.docgen`._ **117 módulos · 46 MCP tools · 606 tests
 | `mmorch/schedule.py` | schedule — ADVISORY de ventana off-peak (DeepSeek descuenta fuerte fuera de hora pico). |
 | `mmorch/schema.py` | schema (§9) — structured-output gates. Hoy los parsers de mmorch son best-effort |
 | `mmorch/scout.py` | scout — pre-pass ENTORNO-PRIMERO (el patron central de Fable 5: 'primero aprende el |
+| `mmorch/self_audit.py` | Auto-auditoria — el juez de mmorch se mira a si mismo, modulo por modulo. |
 | `mmorch/server.py` | server — mmorch VISUAL nivel 3: progreso live de cada subagente + control TOTAL remoto. |
 | `mmorch/server_core.py` | server_core — shared in-process state + tiny request helpers for the server route modules. |
 | `mmorch/server_engine.py` | server_engine — the in-process job execution engine: the threads that drive rubric, |

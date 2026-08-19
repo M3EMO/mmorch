@@ -30,16 +30,21 @@ def failing_projects(rec: dict) -> list[str]:
 
 
 def repair_projects(orch_root: str, *, today: str, build_fn=None,
-                    logs_dir: str | None = None) -> dict:
+                    logs_dir: str | None = None, rec: dict | None = None) -> dict:
+    """`rec`: record EN MEMORIA de esta misma corrida. Sin esto, releia
+    nightly.jsonl y actuaba sobre el project_health de la corrida ANTERIOR —
+    medido en vivo: targeteo "Portfolio financiero" con datos de hace una
+    corrida, cuando la de HOY ya lo habia reclasificado de failing a errors."""
     from mmorch.projects import _load as load_projects
     logs = Path(logs_dir or (Path(orch_root) / "logs"))
     if (logs / "loop_paused").exists():
         return {"skipped": "paused"}
-    try:
-        rec = json.loads((logs / "nightly.jsonl").read_text(
-            encoding="utf-8").strip().splitlines()[-1])
-    except (OSError, IndexError, json.JSONDecodeError):
-        return {"skipped": "sin record nocturno"}
+    if rec is None:
+        try:
+            rec = json.loads((logs / "nightly.jsonl").read_text(
+                encoding="utf-8").strip().splitlines()[-1])
+        except (OSError, IndexError, json.JSONDecodeError):
+            return {"skipped": "sin record nocturno"}
 
     failing = failing_projects(rec)
     if not failing:
@@ -92,15 +97,27 @@ def repair_projects(orch_root: str, *, today: str, build_fn=None,
                                      max_fix=3, max_gen_calls=40)
         res = build_fn(task, wt.path, gate_cmd)
         built = res.get("status") == "built"
+        # antes se guardaba SOLO el status: build_project() trae el motivo real
+        # en "detail" (p.ej. "3 failed: interface mismatch") y se perdia sin
+        # loguearse — el worktree se cierra sin rama si no built, irrecuperable
+        detail = res.get("detail") or res.get("error") or ""
         if built:
             wt.capture(f"mmorch sana {name}: suite roja reparada")
         state[name] = {"retry_after": retry_after,
                        "result": res.get("status", "fail"),
-                       "branch": wt.branch if built else None}
+                       "branch": wt.branch if built else None,
+                       "detail": detail[:300]}
         atomic_write_json(state_path, state)
-        return {"project": name, "status": res.get("status"),
-                "branch": wt.branch if built else None,
-                "repo": path}
+        out = {"project": name, "status": res.get("status"),
+              "branch": wt.branch if built else None,
+              "detail": detail[:300], "repo": path}
+        try:
+            with open(logs / "project_repair.jsonl", "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"fecha": today, **out},
+                                    ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+        return out
     finally:
         keep = state.get(name, {}).get("result") == "built"
         wt.close(keep_branch=keep)

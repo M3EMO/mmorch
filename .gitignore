@@ -40,3 +40,4 @@ flywheel/func.log
 training/
 
 .pytest-tmp/
+.pytest-tmp*/

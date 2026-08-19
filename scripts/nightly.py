@@ -264,7 +264,7 @@ def main() -> None:
     # siempre amarillo (jamas automerge en territorio ajeno)
     try:
         from mmorch.project_repair import repair_projects
-        rec["project_repair"] = repair_projects(str(ROOT),
+        rec["project_repair"] = repair_projects(str(ROOT), rec=rec,
                                                 today=time.strftime("%Y-%m-%d"))
     except Exception as e:
         rec["project_repair"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
@@ -276,15 +276,6 @@ def main() -> None:
         beat("nightly", logs_dir=str(ROOT / "logs"), detail="ok")
     except Exception:
         pass
-    # auto-reparacion: los errores de la corrida ANTERIOR se convierten en un
-    # intento de fix en worktree (review branch, merge humano) — el digest ya
-    # no solo reporta problemas: amanece con la solucion propuesta
-    try:
-        from mmorch.auto_repair import repair
-        rec["auto_repair"] = repair(str(ROOT), today=time.strftime("%Y-%m-%d"))
-    except Exception as e:
-        rec["auto_repair"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
-
     # slim: 1 modulo por noche se adelgaza (verbosidad/dup, API intacta,
     # suite como juez); la branch amarilla la levanta el tren solo
     try:
@@ -292,6 +283,27 @@ def main() -> None:
         rec["slim"] = slim_one(str(ROOT), today=time.strftime("%Y-%m-%d"))
     except Exception as e:
         rec["slim"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
+
+    # self-audit: el juez de mmorch se mira a si mismo, 1 modulo/noche
+    # (rubrica = coding-principles.md, refutador cross-family, findings ->
+    # candidatas del circuito de siempre). Motivo: el mismo bug (releer disco
+    # en vez de usar el rec en memoria) aparecio 3 veces esta semana y ninguno
+    # se detecto solo.
+    try:
+        from mmorch.self_audit import run_one as _audit_one
+        rec["self_audit"] = _audit_one(str(ROOT), today=time.strftime("%Y-%m-%d"))
+    except Exception as e:
+        rec["self_audit"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
+
+    # sintesis semanal (domingos): compara los ultimos ~10 audits de modulo
+    # buscando el patron repetido que un audit de un solo archivo no puede ver
+    if time.localtime().tm_wday == 6:
+        try:
+            from mmorch.self_audit import audit_global
+            rec["self_audit_global"] = audit_global(str(ROOT),
+                                                     today=time.strftime("%Y-%m-%d"))
+        except Exception as e:
+            rec["self_audit_global"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
 
     # cosecha de arXiv TODAS las noches (cubetas semanales de bigramas): el
     # burst es un ratio contra las semanas propias, asi que necesita un ritmo
@@ -362,6 +374,28 @@ def main() -> None:
                 capture_output=True, timeout=300)
     except Exception:
         pass
+
+    # rastro durable de errores silenciosos: independiente del formato de
+    # nightly.jsonl (uno por noche), este es append-only por HALLAZGO, asi
+    # que un error queda visible aunque nadie corra reflect() sobre esa noche
+    try:
+        from mmorch.auto_repair import findings_from_record
+        with open(ROOT / "logs" / "silent_errors.jsonl", "a", encoding="utf-8") as fh:
+            for f in findings_from_record(rec):
+                fh.write(json.dumps({"fecha": time.strftime("%Y-%m-%d"), **f},
+                                    ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+    # auto-reparacion: ahora corre AL FINAL sobre el rec EN MEMORIA de esta
+    # misma corrida (antes leia nightly.jsonl y reparaba lo de ANOCHE, porque
+    # el registro de hoy todavia no se habia escrito) — mismo dia: un error
+    # que aparece temprano en la corrida se repara esa misma madrugada
+    try:
+        from mmorch.auto_repair import repair
+        rec["auto_repair"] = repair(str(ROOT), today=time.strftime("%Y-%m-%d"), rec=rec)
+    except Exception as e:
+        rec["auto_repair"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
 
     _log(rec)
 
