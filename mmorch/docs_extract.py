@@ -1,21 +1,23 @@
-"""Extracción de texto de documentos (PDF hoy) para enriquecer el contexto
-que ve el juez — candidata "Docling" resuelta a lo que el hardware permite.
+"""Extracción de texto de documentos (PDF hoy) — dos niveles, medidos en
+vivo, no supuestos.
 
-Docling completo (layout/tablas/reading-order via modelos ML) NECESITA torch
-en tiempo de ejecución (el layout model hace `import torch` al inicializarse,
-no hay pipeline liviano para PDF — probado en vivo: import ok sin torch,
-conversión real revienta con ModuleNotFoundError). torch solo pesa ~527MB en
-disco + baja pesos de modelos aparte — no corresponde en esta maquina (RAM
-limitada, ver memoria de hardware). Via pypdfium2 (4MB, sin ML) se consigue
-texto plano — sin estructura de tablas ni reading-order multi-columna, pero
-suficiente para que el juez vea CONTENIDO que hoy no ve (ningun PDF entra a
-_collect_context).
+LIVIANO (extract_text, default, automatico): pypdfium2 (4MB, sin ML). Texto
+plano, sin tablas ni reading-order. Es lo que usa repo_mining._collect_context
+en el pipeline NOCTURNO desatendido.
 
-Interfaz estable a propósito (inyeccion de deps, OCP-por-adicion): quien
-llame a `extract_text` no sabe ni le importa si por dentro es pypdfium2 o
-docling completo. Cuando el hardware lo permita (ExpertBook 64GB, memoria
-'hardware-plan'), el upgrade es cambiar EL CUERPO de esta funcion, no los
-call-sites."""
+RICO (extract_rich, manual/opt-in): docling completo (layout+tablas+OCR via
+torch). Probado en vivo (2026-08-19, PDF real de 55 paginas): funciona, pero
+327s (~5.4 min) y el pico de RAM libre en la maquina bajo a 297MB de 7.8GB
+totales — corriendo SOLO, atendido. Metido en el loop nocturno junto con
+evolve/autoresearch/self_audit/etc ese margen es real riesgo de OOM/swap.
+Por eso NO esta wireado a repo_mining ni a nada automatico — es una funcion
+que Mateo (o un script manual) llama a demanda, cuando quiere una conversion
+rica de un documento puntual y puede esperar los minutos. Requiere
+`pip install -e ".[docs-rico]"` (torch+torchvision+accelerate+docling-slim,
+~1.1GB) — no se instala por default ni con el extra `docs` liviano.
+
+Interfaz estable a propósito (inyeccion de deps, OCP-por-adicion): el
+llamador no sabe ni le importa cual de las dos corre por dentro."""
 
 from __future__ import annotations
 
@@ -50,6 +52,74 @@ def extract_text(path: Path, *, max_pages: int = _MAX_PAGES,
     finally:
         pdf.close()
     return "\n".join(partes)[:max_chars]
+
+
+def extract_rich(path: Path, *, converter_fn=None) -> str:
+    """Markdown ESTRUCTURADO (headers/tablas/listas reales) via docling
+    completo — MANUAL, nunca la llama el pipeline nocturno. Minutos de
+    espera y GBs de RAM en el pico; uso a demanda, atendido.
+
+    `converter_fn`: seam de test / inyeccion — por default construye un
+    docling.document_converter.DocumentConverter real. RuntimeError con
+    mensaje claro si torch/docling no estan instalados (no falla silencioso:
+    a diferencia de extract_text, esta funcion la llama un humano esperando
+    resultado, no un job desatendido — el silencio ahi confundiria mas de lo
+    que ayuda)."""
+    if converter_fn is None:
+        try:
+            from docling.document_converter import DocumentConverter
+        except ImportError as e:
+            raise RuntimeError(
+                "extract_rich necesita docling completo (torch incluido) — "
+                'instalar con: pip install -e ".[docs-rico]" '
+                "(~1.1GB, minutos de conversion, pico de RAM alto — ver "
+                "docs_extract.py y vault/research/docling-vs-pypdfium2-*.md)"
+            ) from e
+        converter_fn = DocumentConverter().convert
+    res = converter_fn(str(path))
+    return res.document.export_to_markdown()
+
+
+def extract_rich_images(pdf: Path, out_md: Path) -> tuple[str, list[Path]]:
+    """Como extract_rich, pero además extrae las FIGURAS/DIAGRAMAS reales del
+    PDF como PNG (docling picture extraction, images_scale=2.0) en vez de
+    dejarlas como placeholder `<!-- image -->` sin contenido. Mismo costo que
+    extract_rich (docling ya corre layout detection igual; guardar el recorte
+    no agrega minutos) — probado en vivo 2026-08-20, ~2 min para un capitulo
+    de 12 paginas / 2 figuras, sin GPU. MANUAL/atendido igual que extract_rich.
+
+    A diferencia de extract_rich (que devuelve el markdown como string),
+    ESTA funcion escribe directo a `out_md` porque docling necesita saber la
+    ruta de salida para nombrar la carpeta de artifacts (`<out_md.stem>_artifacts/`)
+    donde caen los PNG — no hay forma limpia de devolver "markdown + imagenes"
+    sin fijar esa ruta primero.
+
+    Devuelve (markdown, lista de paths a los PNG extraidos) — las imagenes
+    hay que leerlas (via el tool Read u otro lector visual) para escribir su
+    descripcion; esta funcion solo las saca del PDF, no las interpreta."""
+    try:
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.datamodel.base_models import InputFormat
+        from docling_core.types.doc import ImageRefMode
+    except ImportError as e:
+        raise RuntimeError(
+            "extract_rich_images necesita docling completo (torch incluido) — "
+            'instalar con: pip install -e ".[docs-rico]"'
+        ) from e
+
+    opts = PdfPipelineOptions()
+    opts.generate_picture_images = True
+    opts.images_scale = 2.0
+    conv = DocumentConverter(
+        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)}
+    )
+    doc = conv.convert(str(pdf)).document
+    doc.save_as_markdown(out_md, image_mode=ImageRefMode.REFERENCED)
+
+    artifacts_dir = out_md.parent / f"{out_md.stem}_artifacts"
+    images = sorted(artifacts_dir.glob("*.png")) if artifacts_dir.exists() else []
+    return out_md.read_text(encoding="utf-8"), images
 
 
 def collect_pdfs(repo_dir: Path, *, max_files: int = 3,

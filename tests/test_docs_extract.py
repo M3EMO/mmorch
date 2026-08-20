@@ -80,3 +80,43 @@ def test_collect_pdfs_respeta_max_files(tmp_path):
         _make_pdf(repo / f"doc{i}.pdf", f"contenido {i}")
     out = collect_pdfs(repo, max_files=2)
     assert out.count("== doc") == 2
+
+
+def test_extract_rich_usa_converter_inyectado(tmp_path):
+    """El seam converter_fn permite testear sin docling/torch instalados."""
+    from mmorch.docs_extract import extract_rich
+
+    class FakeDoc:
+        def export_to_markdown(self):
+            return "# Titulo\n\n- item real de docling"
+
+    class FakeResult:
+        document = FakeDoc()
+
+    p = tmp_path / "algo.pdf"
+    p.write_bytes(b"%PDF-1.4 fake")
+    md = extract_rich(p, converter_fn=lambda path: FakeResult())
+    assert "item real de docling" in md
+
+
+def test_extract_rich_sin_docling_da_mensaje_claro(tmp_path, monkeypatch):
+    """Sin converter_fn Y sin docling instalado: RuntimeError con el comando
+    de instalacion, no un ImportError crudo (esto lo llama un humano)."""
+    import builtins
+    from mmorch.docs_extract import extract_rich
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *a, **kw):
+        if name == "docling.document_converter" or name.startswith("docling"):
+            raise ImportError("no module named docling")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    p = tmp_path / "algo.pdf"
+    p.write_bytes(b"%PDF-1.4 fake")
+    try:
+        extract_rich(p)
+        raise AssertionError("debia levantar RuntimeError")
+    except RuntimeError as e:
+        assert "docs-rico" in str(e)
