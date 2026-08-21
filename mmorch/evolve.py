@@ -561,6 +561,21 @@ def coordinated_evolve_round(candidates: list[Change], *, root: Path = ROOT,
         r = sandbox_fn(c)
         if not r.get("ok"):
             red.append(c.target)
+            # persistir el POR QUE: fitness.detail se calculaba y se tiraba —
+            # medido 2026-08-21: el stuck-finding le pedia al reparador "lee
+            # fitness.detail" y ese dato no existia en ningun log. Sin esto,
+            # diagnosticar el bucle muerto de evolve es adivinar.
+            try:
+                with open(root / "logs" / "evolve_red.jsonl", "a",
+                          encoding="utf-8") as fh:
+                    fh.write(json.dumps(
+                        {"ts": time.time(), "target": c.target,
+                         "description": c.description[:120],
+                         "fitness": r.get("fitness", {}),
+                         "error": r.get("error", "")},
+                        ensure_ascii=False) + "\n")
+            except OSError:
+                pass
             continue
         entry = {"branch": r["branch"], "target": c.target, "change_id": c.id}
         head = _git("rev-parse", r["branch"], cwd=root)

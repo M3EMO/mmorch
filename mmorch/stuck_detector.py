@@ -68,9 +68,10 @@ def stuck_findings(history: list[dict], *, min_nights: int = _MIN_NIGHTS) -> lis
             "atacar el mecanismo, no los modulos marcados. Racha actual: "
             f"{n} noches. Modulos mas repetidos en rojo: {', '.join(top)}. "
             "Diagnostica POR QUE los sandboxes nunca verdean (leer "
-            "logs/evolve_findings.jsonl y el retorno de sandbox_branch, campo "
-            "fitness.detail) antes de proponer un fix — el fix va al mecanismo, "
-            "no a los modulos marcados.")
+            "logs/evolve_red.jsonl — cada sandbox rojo persiste ahi su "
+            "fitness.detail con el output real de pytest — y "
+            "logs/evolve_findings.jsonl) antes de proponer un fix — el fix va "
+            "al mecanismo, no a los modulos marcados.")
 
     # 2. autoresearch plano: mismo target, sin mejora, N corridas seguidas
     def _flat(r: dict) -> bool:
