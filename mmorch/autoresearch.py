@@ -114,14 +114,22 @@ def run_autoresearch(
     run = run_fn or _default_run                      # inyectable: (cmd) -> output text
 
     base_content = fpath.read_text(encoding="utf-8") if fpath.exists() else ""
+    # side-channel de detalle: hillclimb solo pasa `detail` a la SIGUIENTE ronda
+    # cuando score() TIRA (rubric rota) — un score valido pero imperfecto (ej
+    # 0.8889) nunca llegaba con contexto. Medido: 15+ noches optimizando a
+    # ciegas, sin saber CUAL tarea del scorer fallaba, solo el numero agregado.
+    # No se toca el contrato de hillclimb.py (lo usan otros callers) — este es
+    # un canal local a esta funcion.
+    _last_detail = ""
 
     def propose(ctx: ClimbCtx) -> str:
         cur = ctx.best if ctx.best is not None else base_content
         fpath.write_text(cur, encoding="utf-8")
-        last = ctx.history[-1].detail if ctx.history else ""
+        last = _last_detail or (ctx.history[-1].detail if ctx.history else "")
         prompt = (f"TAREA (optimizar una metrica, {'mayor' if maximize else 'menor'} es mejor):\n{task}\n\n"
                   f"ARCHIVO `{target_file}` actual:\n```\n{cur[:6000]}\n```\n"
-                  + (f"\nFeedback de la ronda previa: {last[:500]}\n" if last else "")
+                  + (f"\nFeedback de la ronda previa (que fallo, especificamente): {last[:1200]}\n"
+                     if last else "")
                   + "Devolve SOLO el contenido COMPLETO nuevo del archivo en un bloque ```.")
         model = ctx.arm or models[0]
         new = _extract(_call_model(model, prompt))
@@ -131,7 +139,11 @@ def run_autoresearch(
         return new
 
     def score(content: str) -> float:
+        nonlocal _last_detail
         out = run(scorer_cmd)
+        # solo el detalle de fallos (lineas FAIL), no el output entero — la
+        # metrica parseada abajo ya resume el score; esto es el POR QUE
+        _last_detail = "\n".join(ln for ln in out.splitlines() if "FAIL" in ln)[:1500]
         return parse_metric(out, metric_regex)
 
     jp = Path(journal_path) if journal_path else None

@@ -47,3 +47,34 @@ def test_resume_from_journal(tmp_path):
 def test_resume_no_journal(tmp_path):
     rounds, best = resume_from_journal(tmp_path / "nope.jsonl")
     assert rounds == 0 and best is None
+
+
+def test_feedback_de_fallos_especificos_llega_a_la_proxima_ronda(tmp_path):
+    """Antes: 'detail' solo se poblaba si score() TIRABA excepcion — un score
+    valido pero imperfecto (el caso normal, 0.8889 por ej) nunca le daba
+    contexto a la siguiente ronda. Medido: autoresearch optimizaba a ciegas
+    15+ noches. Ahora score() captura las lineas FAIL del output crudo del
+    scorer y se las pasa a la siguiente propuesta."""
+    f = tmp_path / "prompt.txt"
+    f.write_text("prompt v1", encoding="utf-8")
+    prompts_vistos = []
+
+    def gen(model, prompt):
+        prompts_vistos.append(prompt)
+        return "```\nprompt v2\n```"
+
+    salidas = iter([
+        "FAIL tarea 5 (compress): solo comprime si acorta\nscore: 0.8889",
+        "score: 1.0",
+    ])
+
+    def run(cmd):
+        return next(salidas)
+
+    run_autoresearch("mejora el prompt", "prompt.txt", "scorer", cwd=str(tmp_path),
+                     maximize=True, max_rounds=2, patience=9,
+                     gen_fn=gen, run_fn=run)
+    # la 2da ronda (unico prompt propuesto tras la 1ra, ya que max_rounds=2)
+    # debe ver el detalle especifico de la tarea que fallo en la 1ra
+    assert any("compress" in p and "solo comprime si acorta" in p
+              for p in prompts_vistos), prompts_vistos

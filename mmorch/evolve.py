@@ -395,14 +395,19 @@ def sandbox_branch(change: Change, *, root: Path = ROOT, base: str = "HEAD",
         if run_tests:
             # --basetemp propio: el pytest-current global del user esta roto de
             # permisos (medido 2026-08: TODOS los sandboxes daban rojo por el
-            # cleanup, no por los tests -> 0 PRs abiertos durante semanas)
+            # cleanup, no por los tests -> 0 PRs abiertos durante semanas). Se
+            # agrega SIEMPRE, tambien si test_cmd viene inyectado (bug real
+            # encontrado escribiendo propose_with_fast_retry: un test_cmd
+            # custom se saltaba el basetemp por completo)
             bt = tempfile.mkdtemp(prefix="mmorch_bt_")
-            cmd = test_cmd or [sys.executable, "-m", "pytest", test_path, "-q",
-                               "--no-header", f"--basetemp={bt}"]
+            cmd = list(test_cmd) if test_cmd else [
+                sys.executable, "-m", "pytest", test_path, "-q", "--no-header"]
+            if not any("--basetemp" in c for c in cmd):
+                cmd.append(f"--basetemp={bt}")
             proc = subprocess.run(cmd, cwd=wt, capture_output=True, text=True, timeout=timeout)
             out = (proc.stdout or "") + (proc.stderr or "")
             fit = {"passed": _count(out, r"(\d+) passed"), "failed": _count(out, r"(\d+) failed"),
-                   "rc": proc.returncode}
+                   "rc": proc.returncode, "detail": out[-1200:]}
             ok = proc.returncode == 0 and fit["failed"] == 0
     finally:
         _git("worktree", "remove", "--force", wt, cwd=root)
@@ -573,19 +578,71 @@ def coordinated_evolve_round(candidates: list[Change], *, root: Path = ROOT,
             "blocked_zone_red": blocked_zone_red}
 
 
-def propose_patch(target_file: str, finding: str, *, gen_model: str | None = None) -> str:
+def propose_patch(target_file: str, finding: str, *, gen_model: str | None = None,
+                  feedback: str = "") -> str:
     """Un modelo barato PROPONE el contenido nuevo de target_file para resolver
     `finding`. READ-ONLY: devuelve el texto, NO escribe nada. Aplicar = gate aparte.
+
+    `feedback`: salida de pytest del intento ANTERIOR (ver propose_with_fast_retry) —
+    mismo patron que project_integrate.py's hot-coder loop. Sin esto, cada intento
+    era ciego a por que el anterior fallo (medido: causa raiz de por que evolve
+    llevaba 12+ noches con 0 PRs — un solo tiro contra la suite completa, sin
+    iterar, es un piso demasiado alto para un cambio de archivo entero).
     """
     from .patterns import fan_out
     from .config import DEFAULT_GENERATOR
     src = (ROOT / target_file).read_text(encoding="utf-8") if (ROOT / target_file).exists() else ""
+    fb = (f"\nEl intento anterior FALLO estos tests:\n{feedback[:1200]}\n"
+         f"Arreglalo sin reintroducir el problema original.\n") if feedback else ""
     prompt = (
         f"Sos un mejorador de codigo Python. Resolve este hallazgo SIN romper la API publica "
         f"ni los invariantes (cross-family, OneFlow, anti-sicofancia, observabilidad).\n\n"
-        f"HALLAZGO: {finding}\n\nARCHIVO {target_file}:\n{src}\n\n"
+        f"HALLAZGO: {finding}\n\nARCHIVO {target_file}:\n{src}\n{fb}\n"
         f"Devolve el CONTENIDO COMPLETO nuevo del archivo, sin explicacion, en un bloque de codigo.")
     return fan_out([prompt], gen_model=gen_model or DEFAULT_GENERATOR, phase="evolve")[0].text
+
+
+def _target_test_file(target_file: str, *, root: Path = ROOT) -> str | None:
+    """mmorch/repo_mining.py -> tests/test_repo_mining.py si existe. El gate RAPIDO
+    de iteracion usa esto (segundos, no minutos) en vez de la suite completa (10+
+    min, 600+ tests) — coordinated_evolve_round sigue corriendo la suite entera
+    como gate FINAL antes de abrir PR, esto solo acelera llegar ahi."""
+    p = Path(target_file)
+    if p.parts[:1] != ("mmorch",):
+        return None
+    cand = root / "tests" / f"test_{p.stem}.py"
+    return str(cand.relative_to(root)).replace("\\", "/") if cand.exists() else None
+
+
+def propose_with_fast_retry(target_file: str, finding: str, *, root: Path = ROOT,
+                            max_attempts: int = 3, propose_fn=None,
+                            quick_sandbox_fn=None) -> tuple[str, dict]:
+    """Genera el patch iterando contra el test RAPIDO del modulo (si existe) antes
+    de que coordinated_evolve_round gaste 10+ min corriendo la suite entera. Cada
+    intento fallido le pasa el output real de pytest al siguiente — antes cada
+    intento era ciego (un solo tiro, causa raiz medida del bucle muerto de evolve).
+
+    Sin test rapido disponible (target fuera de mmorch/, o sin tests/test_X.py):
+    un solo intento sin feedback — no hay gate barato contra el cual iterar.
+    Devuelve (ultimo patch propuesto, resultado del ultimo intento rapido)."""
+    propose_fn = propose_fn or propose_patch
+    quick_sandbox_fn = quick_sandbox_fn or (
+        lambda c, cmd: sandbox_branch(c, root=root, test_cmd=cmd, keep_on_pass=False))
+    quick_test = _target_test_file(target_file, root=root)
+    if quick_test is None:
+        return propose_fn(target_file, finding), {"skipped": "sin test rapido"}
+
+    feedback = ""
+    last: dict = {}
+    for _ in range(max_attempts):
+        after = propose_fn(target_file, finding, feedback=feedback)
+        change = snapshot_change(target_file, after, finding[:80], root=root)
+        cmd = [sys.executable, "-m", "pytest", quick_test, "-q", "--no-header"]
+        last = quick_sandbox_fn(change, cmd)
+        if last.get("ok"):
+            return after, last
+        feedback = last.get("fitness", {}).get("detail", "")
+    return after, last
 
 
 # --------------------------------------------------------------------------- #
@@ -615,7 +672,12 @@ def nightly_evolve(*, days: int = 3, max_files: int = 5, max_findings: int = 8,
     candidates = []
     for f in findings:
         try:
-            after = propose_fn(f["target"], f["finding"])
+            # antes: un solo tiro contra la suite completa (10+ min), ciego a
+            # por que fallo el intento anterior — causa raiz medida de 12+
+            # noches sin abrir un PR. Ahora itera rapido (segundos) contra el
+            # test propio del modulo antes de llegar al gate caro de abajo.
+            after, _ = propose_with_fast_retry(f["target"], f["finding"], root=root,
+                                               propose_fn=propose_fn)
         except Exception:
             continue   # un hallazgo que no se pudo proponer no debe frenar el resto
         candidates.append(snapshot_change(f["target"], after, f["finding"][:80], root=root))

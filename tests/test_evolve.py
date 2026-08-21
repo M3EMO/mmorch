@@ -40,3 +40,103 @@ def test_propose_patch_is_readonly(monkeypatch, tmp_path):
     out = EV.propose_patch("mod.py", "mejorar X")
     assert out == "# NUEVO"
     assert (tmp_path / "mod.py").read_text(encoding="utf-8") == "# old"  # NO se modifico
+
+
+def test_target_test_file_encuentra_el_match(tmp_path):
+    (tmp_path / "mmorch").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_repo_mining.py").write_text("", encoding="utf-8")
+    assert EV._target_test_file("mmorch/repo_mining.py", root=tmp_path) == "tests/test_repo_mining.py"
+
+
+def test_target_test_file_sin_match_devuelve_none(tmp_path):
+    (tmp_path / "mmorch").mkdir()
+    (tmp_path / "tests").mkdir()
+    assert EV._target_test_file("mmorch/nada.py", root=tmp_path) is None
+
+
+def test_target_test_file_fuera_de_mmorch_devuelve_none(tmp_path):
+    assert EV._target_test_file("scripts/nightly.py", root=tmp_path) is None
+
+
+def test_propose_with_fast_retry_sin_test_rapido_un_solo_tiro(tmp_path):
+    """Sin tests/test_X.py para el target: un intento, sin feedback (mismo
+    contrato viejo de propose_fn, backward-compat con self-checks/tests que
+    inyectan un fake de 2 args)."""
+    (tmp_path / "mmorch").mkdir()
+    (tmp_path / "tests").mkdir()
+    calls = []
+
+    def fake_propose(target, finding):
+        calls.append((target, finding))
+        return "nuevo contenido"
+
+    after, r = EV.propose_with_fast_retry("mmorch/nada.py", "algo", root=tmp_path,
+                                          propose_fn=fake_propose)
+    assert after == "nuevo contenido" and calls == [("mmorch/nada.py", "algo")]
+    assert r == {"skipped": "sin test rapido"}
+
+
+def test_propose_with_fast_retry_itera_con_feedback_hasta_pasar(tmp_path):
+    """Con test rapido disponible: reintenta pasandole el detalle del fallo
+    anterior, hasta que el sandbox rapido de ok."""
+    (tmp_path / "mmorch").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text("", encoding="utf-8")
+
+    intentos = []
+
+    def fake_propose(target, finding, feedback=""):
+        intentos.append(feedback)
+        return f"intento {len(intentos)}"
+
+    resultados = iter([
+        {"ok": False, "fitness": {"detail": "1 failed: assert False"}},
+        {"ok": True, "fitness": {"detail": ""}},
+    ])
+
+    def fake_quick_sandbox(change, cmd):
+        return next(resultados)
+
+    after, r = EV.propose_with_fast_retry("mmorch/x.py", "algo", root=tmp_path,
+                                          propose_fn=fake_propose,
+                                          quick_sandbox_fn=fake_quick_sandbox)
+    assert after == "intento 2" and r["ok"] is True
+    assert intentos == ["", "1 failed: assert False"]  # el 2do intento vio el fallo del 1ro
+
+
+def test_propose_with_fast_retry_agota_intentos_y_devuelve_el_ultimo(tmp_path):
+    (tmp_path / "mmorch").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text("", encoding="utf-8")
+
+    def fake_propose(target, finding, feedback=""):
+        return "siempre falla"
+
+    def fake_quick_sandbox(change, cmd):
+        return {"ok": False, "fitness": {"detail": "still red"}}
+
+    after, r = EV.propose_with_fast_retry("mmorch/x.py", "algo", root=tmp_path,
+                                          max_attempts=2, propose_fn=fake_propose,
+                                          quick_sandbox_fn=fake_quick_sandbox)
+    assert after == "siempre falla" and r["ok"] is False
+
+
+def test_sandbox_branch_test_cmd_custom_tambien_lleva_basetemp(monkeypatch, tmp_path):
+    """Bug real encontrado escribiendo propose_with_fast_retry: un test_cmd
+    inyectado se saltaba el --basetemp por completo (mismo bug de raiz que
+    ya se habia arreglado para el cmd default)."""
+    monkeypatch.setattr(EV, "_git", lambda *a, **k: types.SimpleNamespace(
+        returncode=0, stdout="", stderr=""))
+    seen_cmd = {}
+
+    def fake_run(cmd, **kw):
+        seen_cmd["cmd"] = cmd
+        return _proc("1 passed", 0)
+
+    monkeypatch.setattr(EV.subprocess, "run", fake_run)
+    change = EV.Change(id="x1", target="mmorch/x.py", before="a", after="b",
+                       description="d")
+    EV.sandbox_branch(change, root=tmp_path,
+                      test_cmd=[sys.executable, "-m", "pytest", "tests/test_x.py", "-q"])
+    assert any("--basetemp" in c for c in seen_cmd["cmd"])
