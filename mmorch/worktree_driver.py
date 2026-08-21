@@ -54,9 +54,19 @@ class Worktree:
         import glob as _glob
         import shutil
         n = 0
+        repo_real = os.path.realpath(self.repo)
         for pat in patterns or []:
             for src in _glob.glob(os.path.join(self.repo, pat)):
                 src = os.path.normpath(src)   # glob yields mixed seps; cmd's mklink rejects fwd-slashes
+                src_real = os.path.realpath(src)
+                # un symlink DENTRO del repo puede resolver AFUERA — sin este
+                # chequeo, seed() copiaria/linkearia algo fuera del repo al
+                # worktree aislado (rescatado de mmorch-sbx-89cc9fba829b,
+                # reaplicado limpio — el commit original traia un fence de
+                # markdown filtrado adentro del .py, rompia el import)
+                if not (src_real == repo_real
+                       or src_real.startswith(repo_real + os.sep)):
+                    continue
                 dst = os.path.join(self.path, os.path.relpath(src, self.repo))
                 if os.path.exists(dst):
                     continue

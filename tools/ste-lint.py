@@ -80,7 +80,7 @@ def count_ci(text, phrases):
     n = 0; hits = []
     low = text.lower()
     for ph in phrases:
-        for m in re.finditer(r"(?<![a-záéíóúñ])" + re.escape(ph) + r"(?![a-záéíóúñ])", low):
+        for _m in re.finditer(r"(?<![a-záéíóúñ])" + re.escape(ph) + r"(?![a-záéíóúñ])", low):
             n += 1; hits.append(ph)
     return n, hits
 

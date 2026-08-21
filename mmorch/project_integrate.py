@@ -1,4 +1,3 @@
-```python
 """project_integrate — F3 of the /project rebuild: wire the recursive driver (F2) to REAL seams.
 
 F1 = deterministic primitives (decompose/validate/stub_check). F2 = the recursive orchestrator
@@ -188,31 +187,17 @@ def _default_write_file(repo: str):
 def _default_commit(repo: str):
     # Assumes `repo` is ALREADY the isolated working tree (the server opens a git worktree on a review
     # branch and passes its path). Commits in place on that branch -> per-unit history for git-bisect.
-    # Uses a simple subprocess-based git commit — avoids dependency on an untested internal API
-    # (worktree_driver.Worktree.capture) and gives us full control over error handling.
-    if not os.path.isdir(os.path.join(repo, ".git")):
+    from . import worktree_driver as wd
+    if not wd.is_git_repo(repo):
         return None  # not a repo -> no per-unit commits; the build still runs (F2 guards commit_fn=None)
 
     def commit(name: str, result: dict) -> None:
-        # Stage all changes in the repo (the unit's file was just written) and commit with a clear message.
-        try:
-            subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=30)
-            p = subprocess.run(["git", "commit", "-m", f"mmorch(project-build): unit {name}"],
-                               cwd=repo, check=False, capture_output=True, text=True,
-                               encoding="utf-8", errors="replace", timeout=30)
-            if p.returncode != 0:
-                # git commit returns non-zero when there's nothing to commit (no changes) — that's fine
-                # (the unit may have been already committed by a previous pass). Only raise if it's a
-                # REAL error (e.g. not a clean worktree, missing user config, etc.).
-                if "nothing to commit" not in p.stderr and "nothing added to commit" not in p.stderr:
-                    raise RuntimeError(f"unit {name}: git commit failed in {repo}: {p.stderr[:200]}")
-        except subprocess.TimeoutExpired:
-            raise RuntimeError(f"unit {name}: git commit timed out in {repo}")
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"unit {name}: git add failed in {repo}: {e.stderr[:200]}")
-        except FileNotFoundError:
-            raise RuntimeError(f"unit {name}: git not found on PATH")
+        wt = wd.Worktree(repo, repo, "")   # commit in place on the current (caller-owned) branch
+        cap = wt.capture(f"mmorch(project-build): unit {name}")
+        if cap["changed"] and not cap["committed"]:
+            # no hay job/emit acá (seam de bajo nivel) -> lo mas seguro sin romper la firma
+            # commit(name,result)->None es levantar: silencioso == la unidad se pierde sin aviso.
+            raise RuntimeError(f"unit {name}: commit falló en {repo}: {cap['error'][:200]}")
     return commit
 
 
@@ -459,4 +444,3 @@ if __name__ == "__main__":
     print("project_integrate F3 OK — hot coder loop, integration gate, unverified ceiling, "
           "deterministic floor, cross-family guard, escalate, planner-error surfaced, "
           "call-breaker, provenance")
-```
