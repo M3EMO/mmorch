@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **120 módulos · 46 MCP tools · 654 tests.**
+_Auto-generado por `mmorch.docgen`._ **121 módulos · 46 MCP tools · 661 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -140,6 +140,7 @@ _Auto-generado por `mmorch.docgen`._ **120 módulos · 46 MCP tools · 654 tests
 | `mmorch/slim.py` | Slim — auto-eficientización de código: menos verbose, misma conducta. |
 | `mmorch/spec.py` | spec — spec-builder barato que INFIERE mas alla de lo dicho, pero aplica |
 | `mmorch/speedup.py` | speedup — make a function faster, cero-cupo, kept only on MEASURED+CORRECT improvement. |
+| `mmorch/stuck_detector.py` | Detector de estancamiento — tendencias sobre la historia nocturna, cero LLM. |
 | `mmorch/sync.py` | sync — GitHub como bus de sincronizacion entre maquinas. El host always-on (ej pc-mateo) |
 | `mmorch/textutil.py` | textutil — shared text helpers. Dedups the code-fence extractor that was copy-pasted |
 | `mmorch/tournament.py` | tournament — elegir EL mejor de pocos candidatos por gusto/calidad (naming, |

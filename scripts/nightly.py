@@ -408,6 +408,27 @@ def main() -> None:
     except Exception:
         pass
 
+    # detector de estancamiento (tendencias sobre N noches, cero LLM): un
+    # bucle muerto no es un error de UNA corrida — cada noche "salio bien" y
+    # el problema solo se ve en la historia. rec["stuck"] usa el shape
+    # {"errors": [...]} a proposito: findings_from_record lo levanta SIN
+    # cambios y auto_repair lo convierte en REPAIR gateado — sensor nuevo,
+    # cero mecanismo nuevo. (Version mecanica del cierre manual 2026-08-21.)
+    try:
+        from mmorch.stuck_detector import stuck_findings
+        _hist = []
+        try:
+            for _ln in (ROOT / "logs" / "nightly.jsonl").read_text(
+                    encoding="utf-8").strip().splitlines()[-9:]:
+                _hist.append(json.loads(_ln))
+        except (OSError, json.JSONDecodeError):
+            pass
+        _stuck = stuck_findings(_hist + [rec])
+        if _stuck:
+            rec["stuck"] = {"errors": _stuck}
+    except Exception as e:
+        rec["stuck"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
+
     # rastro durable de errores silenciosos: independiente del formato de
     # nightly.jsonl (uno por noche), este es append-only por HALLAZGO, asi
     # que un error queda visible aunque nadie corra reflect() sobre esa noche
