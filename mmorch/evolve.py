@@ -614,7 +614,15 @@ def propose_patch(target_file: str, finding: str, *, gen_model: str | None = Non
         f"ni los invariantes (cross-family, OneFlow, anti-sicofancia, observabilidad).\n\n"
         f"HALLAZGO: {finding}\n\nARCHIVO {target_file}:\n{src}\n{fb}\n"
         f"Devolve el CONTENIDO COMPLETO nuevo del archivo, sin explicacion, en un bloque de codigo.")
-    return fan_out([prompt], gen_model=gen_model or DEFAULT_GENERATOR, phase="evolve")[0].text
+    out = fan_out([prompt], gen_model=gen_model or DEFAULT_GENERATOR, phase="evolve")[0].text
+    # extract_fence: SIN esto, el ```python del modelo viajaba ADENTRO del .py
+    # -> SyntaxError -> suite entera roja en la coleccion -> 12+ noches con 0
+    # PRs. Confirmado por aritmetica: slim reportaba 'no_adelgazo' con +13
+    # chars exactos = el overhead del fence. project_integrate siempre lo
+    # extrajo; evolve (y todo lo que reusa propose_patch: slim, hardening,
+    # auto-findings) nunca. El bug mas caro del sistema costaba 13 chars.
+    from .textutil import extract_fence
+    return extract_fence(out)
 
 
 def _target_test_file(target_file: str, *, root: Path = ROOT) -> str | None:

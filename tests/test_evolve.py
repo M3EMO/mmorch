@@ -140,3 +140,27 @@ def test_sandbox_branch_test_cmd_custom_tambien_lleva_basetemp(monkeypatch, tmp_
     EV.sandbox_branch(change, root=tmp_path,
                       test_cmd=[sys.executable, "-m", "pytest", "tests/test_x.py", "-q"])
     assert any("--basetemp" in c for c in seen_cmd["cmd"])
+
+
+def test_propose_patch_extrae_el_fence(monkeypatch, tmp_path):
+    """El bug mas caro del sistema: el ```python del modelo viajaba ADENTRO
+    del .py -> SyntaxError -> suite roja -> 12+ noches con 0 PRs. Confirmado
+    por aritmetica (+13 chars exactos en slim dos noches = overhead del
+    fence) y por los commits corruptos de las sandbox-branches."""
+    monkeypatch.setattr(EV, "ROOT", tmp_path)
+    (tmp_path / "mod.py").write_text("# old", encoding="utf-8")
+    monkeypatch.setattr(PAT, "fan_out",
+        lambda prompts, **k: [CallResult("deepseek-chat", "deepseek",
+                                         "```python\nx = 1\n```", 1, 1, 0.0, 0.0)])
+    out = EV.propose_patch("mod.py", "mejorar X")
+    assert out == "x = 1"                    # fence FUERA
+    assert "```" not in out
+
+
+def test_propose_patch_sin_fence_devuelve_texto_limpio(monkeypatch, tmp_path):
+    monkeypatch.setattr(EV, "ROOT", tmp_path)
+    (tmp_path / "mod.py").write_text("# old", encoding="utf-8")
+    monkeypatch.setattr(PAT, "fan_out",
+        lambda prompts, **k: [CallResult("deepseek-chat", "deepseek",
+                                         "y = 2\n", 1, 1, 0.0, 0.0)])
+    assert EV.propose_patch("mod.py", "z") == "y = 2"
