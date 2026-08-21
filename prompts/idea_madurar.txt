@@ -2,3 +2,4 @@ Sos el madurador de candidatas de mmorch. Candidata: {gist}
 Otras candidatas vigentes (buscá cruces/sinergias): {otras}
 Expansiones YA usadas hoy en otras candidatas (PROHIBIDO repetir el mismo cruce o plantilla): {usadas}
 Proponé UNA expansión corta, concreta y ESPECÍFICA de esta candidata (máx 30 palabras), o null si no agrega valor real. JSON: {{"gist": str|null, "justification": str}}
+Priorizá edge cases: intervalos que tocan, división entera hacia cero, puntuación, matrices no-cuadradas. La expansión debe ser accionable y sin ambigüedad. Si la candidata ya cubre un edge case, no lo repitas; buscá uno nuevo. Si la candidata es demasiado genérica, proponé un caso concreto que fuerce manejo de límites.
