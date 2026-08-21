@@ -371,7 +371,7 @@ def _git(*args, cwd) -> subprocess.CompletedProcess:
 def sandbox_branch(change: Change, *, root: Path = ROOT, base: str = "HEAD",
                    run_tests: bool = True, test_path: str = "tests",
                    test_cmd: list[str] | None = None, keep_on_pass: bool = True,
-                   timeout: int = 1800) -> dict:
+                   timeout: int = 1800, origin: str = "evolve") -> dict:
     """Aísla en un git WORKTREE sobre una branch nueva `mmorch-sbx-<id>` (desde HEAD, NO
     incluye cambios sin commitear del árbol principal → no interfiere). Aplica el cambio,
     commitea, corre tests AHÍ. Verde → branch QUEDA (pa merge/PR). Rojo → branch borrada.
@@ -412,6 +412,17 @@ def sandbox_branch(change: Change, *, root: Path = ROOT, base: str = "HEAD",
     finally:
         _git("worktree", "remove", "--force", wt, cwd=root)
     if ok and keep_on_pass:
+        # provenance: la branch nace atribuida a su brazo — al mergearse (o
+        # expirar) el bandit recibe el outcome retroactivo sin ningun clic
+        # extra del humano. Fail-soft: un ledger roto no frena el sandbox.
+        try:
+            from .config import DEFAULT_GENERATOR
+            from .provenance import record_branch
+            record_branch(bname, arm=f"{DEFAULT_GENERATOR}#{origin}",
+                          origin=origin, target=change.target,
+                          logs_dir=str(root / "logs"))
+        except Exception:
+            pass
         return {"ok": True, "branch": bname, "fitness": fit, "change_id": change.id}
     _git("branch", "-D", bname, cwd=root)
     return {"ok": ok, "branch": None, "fitness": fit, "change_id": change.id}

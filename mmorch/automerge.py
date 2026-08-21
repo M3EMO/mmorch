@@ -82,6 +82,13 @@ def try_automerge(repo: str, branch: str, *, base: str,
             else:
                 result = {"merged": True, "zone": "green", "branch": branch,
                           "files": [f["path"] for f in c.get("files", [])]}
+                # outcome retroactivo al brazo que produjo la branch: el
+                # merge verde automatico tambien es veredicto de ejecucion
+                try:
+                    from .provenance import on_merge
+                    on_merge(branch, logs_dir=str(logs))
+                except Exception:
+                    pass
     try:
         logs.mkdir(exist_ok=True)
         with open(logs / "automerge_ledger.jsonl", "a", encoding="utf-8") as f:

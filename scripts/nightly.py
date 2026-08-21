@@ -408,6 +408,16 @@ def main() -> None:
     except Exception:
         pass
 
+    # provenance sweep: branches gateadas que llevan >14d sin merge = rechazo
+    # blando (0.2) al brazo que las produjo — señal implicita, cero clic
+    try:
+        from mmorch.provenance import sweep_expired
+        _sw = sweep_expired(logs_dir=str(ROOT / "logs"))
+        if _sw:
+            rec["provenance_sweep"] = {"expiradas": _sw}
+    except Exception as e:
+        rec["provenance_sweep"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
+
     # detector de estancamiento (tendencias sobre N noches, cero LLM): un
     # bucle muerto no es un error de UNA corrida — cada noche "salio bien" y
     # el problema solo se ve en la historia. rec["stuck"] usa el shape

@@ -89,7 +89,10 @@ def mine_repo(url: str, *, orch_root: str, today: str,
     tmp = Path(tempfile.mkdtemp(prefix="mmorch_mine_"))
     try:
         clone = subprocess.run(
-            ["git", "clone", "--depth", "1", url, str(tmp / "r")],
+            # --depth 50 (era 1): la historia acotada habilita mineria
+            # JIT-defect (fix-commit -> funcion antes=mala/despues=buena) —
+            # pares de entrenamiento gratis del mismo clon que ya bajamos
+            ["git", "clone", "--depth", "50", url, str(tmp / "r")],
             capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=300)
         if clone.returncode != 0:
@@ -184,9 +187,41 @@ def mine_repo(url: str, *, orch_root: str, today: str,
                                     f"minado-{name}-{today})",
                             "estado": "pendiente"})
             cand_path.write_text(render_candidatos(vig, arch), encoding="utf-8")
+        # JUGO extra antes de borrar la fruta: pares JIT-defect del
+        # historial ajeno (dataset.build_dataset ya existia, corria solo a
+        # mano). El acto de arreglar de OTRO programador etiqueta gratis.
+        jit_pairs = 0
+        try:
+            from mmorch.dataset import build_dataset
+            import hashlib as _hl
+            rows = build_dataset(repo_dir, max_commits=40, max_samples=200)
+            if rows:
+                fw = root / "flywheel" / "jit_ajenos.jsonl"
+                fw.parent.mkdir(parents=True, exist_ok=True)
+                vistos = set()
+                try:
+                    for ln in fw.read_text(encoding="utf-8").splitlines():
+                        vistos.add(json.loads(ln).get("hash"))
+                except OSError:
+                    pass
+                with open(fw, "a", encoding="utf-8") as fh:
+                    for code, label in rows:
+                        h = _hl.sha256(code.encode()).hexdigest()[:16]
+                        if h in vistos:
+                            continue
+                        vistos.add(h)
+                        fh.write(json.dumps(
+                            {"hash": h, "code": code, "label": label,
+                             "repo": url, "fecha": today},
+                            ensure_ascii=False) + "\n")
+                        jit_pairs += 1
+        except Exception:
+            pass   # side-channel: la mineria de pares jamas rompe el minado
+
         return {"ok": True, "repo": name, "sha": sha,
                 "grafts": len(grafts), "sobrevivieron": len(survivors),
-                "nota": str(nota.name), "candidatas": len(survivors[:3])}
+                "nota": str(nota.name), "candidatas": len(survivors[:3]),
+                "jit_pairs": jit_pairs}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)   # la fruta SIEMPRE se borra
 

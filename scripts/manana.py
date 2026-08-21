@@ -117,6 +117,13 @@ def seccion_merges():
             if m.returncode == 0:
                 print(f"    {G}✓ mergeada{X}")
                 merged += 1
+                # outcome retroactivo: el merge humano ES el veredicto — el
+                # brazo que produjo la branch recibe 1.0 sin clic extra
+                try:
+                    from mmorch.provenance import on_merge
+                    on_merge(b, logs_dir=str(ROOT / "logs"))
+                except Exception:
+                    pass
             else:
                 _git("merge", "--abort")
                 print(f"    {R}✗ conflicto — apartada: {m.stderr[:100]}{X}")

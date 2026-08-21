@@ -41,6 +41,22 @@ def _items():
     return p["candidatas"], sorted(p["cards"], key=lambda x: -x["score"])
 
 
+
+def _prev(e) -> str:
+    """Pre-veredicto del juez (cacheado, 1 llamada por candidata en su vida).
+    Triaje para el humano — jamas reward del bandit. Fail-soft: sin API, nada."""
+    try:
+        from mmorch.curation import pre_veredicto
+        v = pre_veredicto(e, logs_dir=str(ROOT / "logs"))
+        if not v:
+            return ""
+        s = v["puntaje"]
+        col = C["green"] if s >= 0.7 else (C["yellow"] if s >= 0.4 else C["red"])
+        return (f"\n  {col}⚖ juez previo {s:.2f}{C['reset']} "
+                f"{C['dim']}{v['razon']}{C['reset']}")
+    except Exception:
+        return ""
+
 def listar() -> None:
     os.system("")  # habilita ANSI en la consola de Windows
     cands, cards = _items()
@@ -52,7 +68,7 @@ def listar() -> None:
                if e.get("maduraciones") else "")
         print(f"\n{C['bold']}{e['id']}{C['reset']}  {lc}● {e['lente']}{C['reset']}"
               f"  {C['dim']}vence {e['vence']}{C['reset']}{mad}")
-        print(_wrap(e["gist"]))
+        print(_wrap(e["gist"]) + _prev(e))
     print(f"\n{C['bold']}{C['blue']}══ TARJETAS nota→proyecto ({len(cards)}) "
           f"{'═' * 42}{C['reset']}")
     for n, m in enumerate(cards, 1):
@@ -90,7 +106,7 @@ def interactivo() -> None:
     def _cand_header(e):
         lc = C[LENTE_COLOR.get(e["lente"], "dim")]
         return (f"\n{C['bold']}CANDIDATA {e['id']}{C['reset']}  "
-                f"{lc}● {e['lente']}{C['reset']}\n" + _wrap(e["gist"]))
+                f"{lc}● {e['lente']}{C['reset']}\n" + _wrap(e["gist"]) + _prev(e))
 
     def _card_header(m):
         return (f"\n{C['bold']}TARJETA{C['reset']}  {_bar(m['score'])} "

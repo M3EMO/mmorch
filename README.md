@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **122 módulos · 46 MCP tools · 668 tests.**
+_Auto-generado por `mmorch.docgen`._ **123 módulos · 46 MCP tools · 675 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -116,6 +116,7 @@ _Auto-generado por `mmorch.docgen`._ **122 módulos · 46 MCP tools · 668 tests
 | `mmorch/projects.py` | projects — registro de proyectos que mmorch puede CONTROLAR (project-aware). Hace que |
 | `mmorch/prompts.py` | prompts — construccion de mensajes PREFIX-STABLE pa maximizar el cache-hit de DeepSeek. |
 | `mmorch/proposals.py` | F2 propuesta (spec .scratch/loop-cerrado/spec.md): tarjetas pre-cocinadas + pick del hook. |
+| `mmorch/provenance.py` | Provenance de branches — outcomes retroactivos por verdad de ejecución. |
 | `mmorch/providers.py` | Provider layer — thin OpenAI-compatible client per external model. |
 | `mmorch/pty_session.py` | pty_session — interactive PTY sessions for the Lotus terminal. |
 | `mmorch/repo_mining.py` | Minería de repos ajenos — aprender de cualquier repo SIN acumularlo. |
