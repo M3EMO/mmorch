@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **121 módulos · 46 MCP tools · 661 tests.**
+_Auto-generado por `mmorch.docgen`._ **122 módulos · 46 MCP tools · 666 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -147,6 +147,7 @@ _Auto-generado por `mmorch.docgen`._ **121 módulos · 46 MCP tools · 661 tests
 | `mmorch/trajectory.py` | trajectory — robo de Hermes: 'trajectory compression para entrenar la proxima |
 | `mmorch/transcript_store.py` | transcript_store — per-job inter-agent transcript (in-memory). |
 | `mmorch/vault.py` | vault — memoria de largo plazo mmorch-legible sobre el vault Obsidian. |
+| `mmorch/wayfinder_prep.py` | wayfinder-prep — investigación autónoma de tickets, decisión humana. |
 | `mmorch/weights.py` | weights — gestion de pesos de nodos neuronales (model-cards + verificacion). Source of |
 | `mmorch/workflow_engine.py` | workflow_engine — cooperative multi-role workflow as a pure state machine (Phase C). |
 | `mmorch/workflow_evolve.py` | workflow_evolve — la poblacion de variantes del engine EVOLUCIONA (backlog #1 |
