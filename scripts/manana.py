@@ -16,7 +16,6 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 G, R, Y, D, B, C, X = ("\x1b[92m", "\x1b[91m", "\x1b[93m", "\x1b[2m",
                        "\x1b[1m", "\x1b[96m", "\x1b[0m")
@@ -61,6 +60,23 @@ def seccion_salud():
         pass
 
 
+def _tren_rojo_de_anoche() -> set[str]:
+    """Ramas que anoche estuvieron en un intento de tren cuya UNION rompio
+    tests (merge_train gate='rojo') — NO es el rojo de seguridad de
+    classify_branch, es señal de conflicto entre partes. Las ramas
+    individuales sobreviven al fallo (merge nunca borra la fuente), asi que
+    sin este contexto se preguntan una por una sin avisar que ya fallaron
+    juntas anoche."""
+    p = ROOT / "logs" / "merge_train.jsonl"
+    try:
+        rec = json.loads(p.read_text(encoding="utf-8").strip().splitlines()[-1])
+    except (OSError, IndexError, json.JSONDecodeError):
+        return set()
+    if rec.get("gate") != "rojo" or not rec.get("merged"):
+        return set()
+    return set(rec["merged"])
+
+
 def seccion_merges():
     _hdr("MERGES PENDIENTES")
     from mmorch.automerge import classify_branch
@@ -73,14 +89,20 @@ def seccion_merges():
         return 0
     # tren primero (un click resuelve N)
     branches.sort(key=lambda b: (0 if "tren" in b else 1, b))
+    tren_rojo = _tren_rojo_de_anoche()
     merged = 0
     for b in branches:
         z = classify_branch(str(ROOT), b, base=base)
         zone = z.get("zone", "?")
-        stat = _git("diff", "--shortstat", f"{base}..{b}").stdout.strip()
+        asuntos = _git("log", "--format=%s", f"{base}..{b}").stdout.strip().splitlines()
         print(f"\n  {ZC.get(zone, zone)}{X} {B}{b}{X}")
-        print(f"    {D}{stat or '(sin diff)'}"
-              f"{' · ' + z.get('reason', '') if zone == 'red' else ''}{X}")
+        for asunto in asuntos[:3] or ["(sin commits nuevos)"]:
+            print(f"    {D}· {asunto}{X}")
+        if b in tren_rojo:
+            otras = sorted(tren_rojo - {b})
+            print(f"    {Y}⚠ anoche el tren intento unir esta rama con "
+                  f"{', '.join(otras) or 'otra'} y la UNION rompio tests — "
+                  f"sola puede estar bien igual, mergear con cuidado{X}")
         if zone == "red":
             print(f"    {R}rojo: solo merge manual tuyo fuera de este tool{X}")
             continue
@@ -117,6 +139,11 @@ def seccion_veredictos():
 
 def main() -> None:
     os.system("")
+    # utf-8 SOLO al ejecutar como script, no como efecto secundario de un
+    # import (importar esto en un test le rompia la captura de stdout a
+    # pytest — mismo bug de raiz que ya vimos hoy en otro lado, mutar
+    # global-state al importar, no al ejecutar)
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     print(f"{B}☀ BUENOS DÍAS — cockpit mmorch{X}")
     seccion_digest()
     seccion_salud()
