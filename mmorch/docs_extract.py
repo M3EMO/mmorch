@@ -80,7 +80,7 @@ def extract_rich(path: Path, *, converter_fn=None) -> str:
     return res.document.export_to_markdown()
 
 
-def extract_rich_images(pdf: Path, out_md: Path) -> tuple[str, list[Path]]:
+def extract_rich_images(pdf: Path, out_md: Path, *, converter_fn=None) -> tuple[str, list[Path]]:
     """Como extract_rich, pero además extrae las FIGURAS/DIAGRAMAS reales del
     PDF como PNG (docling picture extraction, images_scale=2.0) en vez de
     dejarlas como placeholder `<!-- image -->` sin contenido. Mismo costo que
@@ -96,25 +96,30 @@ def extract_rich_images(pdf: Path, out_md: Path) -> tuple[str, list[Path]]:
 
     Devuelve (markdown, lista de paths a los PNG extraidos) — las imagenes
     hay que leerlas (via el tool Read u otro lector visual) para escribir su
-    descripcion; esta funcion solo las saca del PDF, no las interpreta."""
-    try:
-        from docling.document_converter import DocumentConverter, PdfFormatOption
-        from docling.datamodel.pipeline_options import PdfPipelineOptions
-        from docling.datamodel.base_models import InputFormat
-        from docling_core.types.doc import ImageRefMode
-    except ImportError as e:
-        raise RuntimeError(
-            "extract_rich_images necesita docling completo (torch incluido) — "
-            'instalar con: pip install -e ".[docs-rico]"'
-        ) from e
+    descripcion; esta funcion solo las saca del PDF, no las interpreta.
 
-    opts = PdfPipelineOptions()
-    opts.generate_picture_images = True
-    opts.images_scale = 2.0
-    conv = DocumentConverter(
-        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)}
-    )
-    doc = conv.convert(str(pdf)).document
+    `converter_fn`: mismo seam de test/inyeccion que extract_rich — por
+    default construye el DocumentConverter real con picture-extraction
+    prendida; un test puede inyectar un doc fake con `.save_as_markdown`."""
+    if converter_fn is None:
+        try:
+            from docling.document_converter import DocumentConverter, PdfFormatOption
+            from docling.datamodel.pipeline_options import PdfPipelineOptions
+            from docling.datamodel.base_models import InputFormat
+        except ImportError as e:
+            raise RuntimeError(
+                "extract_rich_images necesita docling completo (torch incluido) — "
+                'instalar con: pip install -e ".[docs-rico]"'
+            ) from e
+        opts = PdfPipelineOptions()
+        opts.generate_picture_images = True
+        opts.images_scale = 2.0
+        conv = DocumentConverter(
+            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)})
+        converter_fn = conv.convert
+
+    from docling_core.types.doc import ImageRefMode
+    doc = converter_fn(str(pdf)).document
     doc.save_as_markdown(out_md, image_mode=ImageRefMode.REFERENCED)
 
     artifacts_dir = out_md.parent / f"{out_md.stem}_artifacts"

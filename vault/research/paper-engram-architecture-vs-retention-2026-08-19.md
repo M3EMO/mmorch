@@ -1,9 +1,17 @@
 ---
-title: Synaptic engram architecture (Science 2026) — candidata para retention.py
-status: seed
-tags: [research, mmorch, memory, retention, neurociencia]
+applies_to:
+- orchestration
 created: 2026-08-19
-sources: [10.1126/science.aee7004]
+sources:
+- 10.1126/science.aee7004
+status: seed
+tags:
+- research
+- mmorch
+- memory
+- retention
+- neurociencia
+title: Synaptic engram architecture (Science 2026) — candidata para retention.py
 ---
 
 Paper: "Artificial hibernation reveals synaptic engram architecture

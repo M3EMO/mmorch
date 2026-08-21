@@ -120,3 +120,70 @@ def test_extract_rich_sin_docling_da_mensaje_claro(tmp_path, monkeypatch):
         raise AssertionError("debia levantar RuntimeError")
     except RuntimeError as e:
         assert "docs-rico" in str(e)
+
+
+def test_extract_rich_images_usa_converter_inyectado(tmp_path):
+    """Camino feliz sin torch: converter_fn fake que escribe markdown+PNG
+    como haria el DocumentConverter real con generate_picture_images=True."""
+    from mmorch.docs_extract import extract_rich_images
+
+    class FakeDoc:
+        def save_as_markdown(self, out_md, *, image_mode=None):
+            artifacts = out_md.parent / f"{out_md.stem}_artifacts"
+            artifacts.mkdir()
+            (artifacts / "img_1.png").write_bytes(b"\x89PNG fake")
+            out_md.write_text("# Capitulo\n\n![figura](img_1.png)", encoding="utf-8")
+
+    class FakeResult:
+        document = FakeDoc()
+
+    pdf = tmp_path / "cap.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+    out_md = tmp_path / "cap_rico.md"
+    md, images = extract_rich_images(pdf, out_md, converter_fn=lambda p: FakeResult())
+    assert "Capitulo" in md
+    assert len(images) == 1 and images[0].name == "img_1.png"
+
+
+def test_extract_rich_images_sin_pngs_devuelve_lista_vacia(tmp_path):
+    """Si docling no genero artifacts (PDF sin imagenes), no debe romper —
+    lista vacia, no excepcion."""
+    from mmorch.docs_extract import extract_rich_images
+
+    class FakeDoc:
+        def save_as_markdown(self, out_md, *, image_mode=None):
+            out_md.write_text("# Solo texto, sin figuras", encoding="utf-8")
+
+    class FakeResult:
+        document = FakeDoc()
+
+    pdf = tmp_path / "cap.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+    out_md = tmp_path / "cap_rico.md"
+    md, images = extract_rich_images(pdf, out_md, converter_fn=lambda p: FakeResult())
+    assert "Solo texto" in md
+    assert images == []
+
+
+def test_extract_rich_images_sin_docling_da_mensaje_claro(tmp_path, monkeypatch):
+    """Mismo contrato que extract_rich: sin docling instalado y sin
+    converter_fn, RuntimeError con el comando de instalacion — no un
+    ImportError crudo que confunda a quien lo esta corriendo a mano."""
+    import builtins
+    from mmorch.docs_extract import extract_rich_images
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *a, **kw):
+        if name.startswith("docling"):
+            raise ImportError("no module named docling")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    pdf = tmp_path / "cap.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+    try:
+        extract_rich_images(pdf, tmp_path / "out.md")
+        raise AssertionError("debia levantar RuntimeError")
+    except RuntimeError as e:
+        assert "docs-rico" in str(e)

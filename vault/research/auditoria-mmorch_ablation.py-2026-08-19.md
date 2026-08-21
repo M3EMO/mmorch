@@ -1,8 +1,12 @@
 ---
-title: auditoria mmorch/ablation.py 2026-08-19
-status: seed
-tags: [mmorch, self-audit]
+applies_to:
+- orchestration
 created: 2026-08-19
+status: seed
+tags:
+- mmorch
+- self-audit
+title: auditoria mmorch/ablation.py 2026-08-19
 ---
 
 El módulo de ablación es funcionalmente correcto pero tiene acoplamiento oculto con _SKEPTIC_SYSTEM, viola el principio de inyección de dependencias al hardcodear el parser, y tiene un edge case de división por cero no manejado.
