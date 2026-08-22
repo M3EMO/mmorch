@@ -1,8 +1,11 @@
 """Health module for mmorch: dead-man's switch detection."""
 
 import json
+import logging
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 EXPECTATIONS = {"nightly": 26 * 3600, "server": 900, "digest": 26 * 3600}
 
@@ -21,6 +24,8 @@ def beat(
         path = Path(logs_dir) / "health.jsonl"
         with path.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
+    except OSError as e:
+        logger.warning("beat(): cannot write health.jsonl: %s", e)
     except Exception:
         pass
 
@@ -49,8 +54,8 @@ def check(
                             last_ts[comp] = float(ts)
                     except (json.JSONDecodeError, AttributeError):
                         continue
-        except OSError:
-            pass
+        except OSError as e:
+            logger.warning("check(): cannot read health.jsonl: %s", e)
 
     dead = []
     alive = []
@@ -95,8 +100,8 @@ def scrape_errors(*, logs_dir: str = "logs", max_lines: int = 50) -> dict:
             lines = [ln.rstrip("\n") for ln in
                      raw.decode(enc, errors="replace").splitlines() if ln.strip()]
             server_err_tail = lines[-max_lines:]
-        except OSError:
-            pass
+        except OSError as e:
+            logger.warning("scrape_errors(): cannot read server_forever.err: %s", e)
 
     # Nightly errors from last valid record
     nightly_path = Path(logs_dir) / "nightly.jsonl"
@@ -120,8 +125,8 @@ def scrape_errors(*, logs_dir: str = "logs", max_lines: int = 50) -> dict:
                     errs = idea_loop.get("errors")
                     if isinstance(errs, list):
                         idea_loop_errors = [str(e) for e in errs]
-        except OSError:
-            pass
+        except OSError as e:
+            logger.warning("scrape_errors(): cannot read nightly.jsonl: %s", e)
 
     return {
         "server_err_tail": server_err_tail,
@@ -139,7 +144,8 @@ def _recent_silent_errors(logs_dir: str, *, hours: float = 48.0) -> list[dict]:
     path = Path(logs_dir) / "silent_errors.jsonl"
     try:
         lines = path.read_text(encoding="utf-8").strip().splitlines()
-    except OSError:
+    except OSError as e:
+        logger.warning("_recent_silent_errors(): cannot read silent_errors.jsonl: %s", e)
         return []
     from datetime import date, timedelta
     # timedelta(hours=hours), NO hours/24: aquel daba 2 HORAS que la
