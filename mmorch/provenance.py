@@ -23,6 +23,7 @@ ledger de automerge). El último registro de una branch manda.
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -30,11 +31,52 @@ _LEDGER = "branch_provenance.jsonl"
 _EXPIRE_DAYS = 14
 
 
+def _lock_file(p: Path):
+    """Adquiere un lock exclusivo sobre el archivo de ledger."""
+    try:
+        import fcntl
+        return fcntl.flock
+    except ImportError:
+        try:
+            import msvcrt
+            return msvcrt.locking
+        except ImportError:
+            return None
+
+
 def _append(logs_dir: str, rec: dict) -> None:
+    """Append atómico con lock para evitar race conditions."""
     p = Path(logs_dir) / _LEDGER
     p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    
+    lock_fn = _lock_file(p)
+    
+    with open(p, "a+", encoding="utf-8") as fh:
+        if lock_fn is not None:
+            try:
+                if lock_fn.__name__ == "flock":
+                    lock_fn(fh.fileno(), 2)  # LOCK_EX
+                else:
+                    fh.seek(0, 2)
+                    lock_fn(fh.fileno(), 1, 1)  # LK_LOCK
+            except (OSError, PermissionError):
+                # Si no podemos lockear, procedemos sin lock (best-effort)
+                pass
+        
+        try:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        finally:
+            if lock_fn is not None:
+                try:
+                    if lock_fn.__name__ == "flock":
+                        lock_fn(fh.fileno(), 8)  # LOCK_UN
+                    else:
+                        fh.seek(0, 0)
+                        lock_fn(fh.fileno(), 0, 1)  # LK_UNLCK
+                except (OSError, PermissionError):
+                    pass
 
 
 def _latest(logs_dir: str) -> dict[str, dict]:
@@ -42,12 +84,36 @@ def _latest(logs_dir: str) -> dict[str, dict]:
     p = Path(logs_dir) / _LEDGER
     out: dict[str, dict] = {}
     try:
-        for ln in p.read_text(encoding="utf-8").splitlines():
+        # Leer con lock compartido para consistencia
+        lock_fn = _lock_file(p)
+        with open(p, "r", encoding="utf-8") as fh:
+            if lock_fn is not None:
+                try:
+                    if lock_fn.__name__ == "flock":
+                        lock_fn(fh.fileno(), 1)  # LOCK_SH
+                    else:
+                        fh.seek(0, 0)
+                        lock_fn(fh.fileno(), 0, 1)  # LK_LOCK
+                except (OSError, PermissionError):
+                    pass
+            
             try:
-                r = json.loads(ln)
-                out[r["branch"]] = r
-            except (json.JSONDecodeError, KeyError):
-                continue
+                for ln in fh:
+                    try:
+                        r = json.loads(ln)
+                        out[r["branch"]] = r
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+            finally:
+                if lock_fn is not None:
+                    try:
+                        if lock_fn.__name__ == "flock":
+                            lock_fn(fh.fileno(), 8)  # LOCK_UN
+                        else:
+                            fh.seek(0, 0)
+                            lock_fn(fh.fileno(), 0, 1)  # LK_UNLCK
+                    except (OSError, PermissionError):
+                        pass
     except OSError:
         pass
     return out
