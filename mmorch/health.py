@@ -142,7 +142,11 @@ def _recent_silent_errors(logs_dir: str, *, hours: float = 48.0) -> list[dict]:
     except OSError:
         return []
     from datetime import date, timedelta
-    corte = (date.today() - timedelta(hours=hours / 24)).isoformat()
+    # timedelta(hours=hours), NO hours/24: aquel daba 2 HORAS que la
+    # aritmetica de date trunca a 0 dias -> corte siempre HOY -> toda entrada
+    # de ayer quedaba afuera (bug cazado por evolve_red.jsonl en su estreno:
+    # los 6 sandboxes de la noche murieron por este test, no por sus parches)
+    corte = (date.today() - timedelta(hours=hours)).isoformat()
     out = []
     for ln in lines[-200:]:
         try:

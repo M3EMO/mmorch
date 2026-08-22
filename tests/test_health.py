@@ -162,13 +162,21 @@ def test_check_projects_fail_soft(tmp_path):
 
 def test_report_incluye_silent_errors_recientes(tmp_path):
     """report() debe sumar un resumen de silent_errors.jsonl sin fusionar
-    su detalle — el subsistema que lo escribio sigue siendo el dueño."""
+    su detalle — el subsistema que lo escribio sigue siendo el dueño.
+
+    Fecha RELATIVA a hoy, no hardcodeada: la version con '2026-08-19' fija
+    paso el dia que se escribio y se pudrio sola 48h despues — mato los 6
+    sandboxes del estreno de evolve (todos rojos por ESTE test, no por sus
+    parches). Un test con fecha absoluta es una bomba de tiempo literal."""
+    import datetime
     from mmorch.health import report
     logs = tmp_path
+    hoy = datetime.date.today().isoformat()
     (logs / "silent_errors.jsonl").write_text(
-        '{"fecha": "2026-08-19", "source": "merge_train", "detail": "timeout"}\n'
-        '{"fecha": "2020-01-01", "source": "viejo", "detail": "hace anios"}\n',
+        '{"fecha": "%s", "source": "merge_train", "detail": "timeout"}\n'
+        '{"fecha": "2020-01-01", "source": "viejo", "detail": "hace anios"}\n'
+        % hoy,
         encoding="utf-8")
-    r = report(logs_dir=str(logs), now_ts=1787110000)
+    r = report(logs_dir=str(logs))
     assert r["silent_errors_48h"] == 1
     assert r["silent_errors_sample"][0]["source"] == "merge_train"

@@ -1,8 +1,12 @@
 ---
-title: auditoria mmorch/auto_repair.py 2026-08-21
-status: seed
-tags: [mmorch, self-audit]
+applies_to:
+- orchestration
 created: 2026-08-21
+status: seed
+tags:
+- mmorch
+- self-audit
+title: auditoria mmorch/auto_repair.py 2026-08-21
 ---
 
 Se identificaron 8 hallazgos: 2 bugs de comportamiento, 1 violación estructural del ADR 0001, 2 violaciones de principios, y 3 hallazgos menores. Los más críticos son la releída innecesaria de disco y el path hardcodeado de Windows que rompe portabilidad.

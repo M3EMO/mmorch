@@ -66,10 +66,25 @@ def test_repair_skips_paused(tmp_path):
 def test_repair_usa_rec_en_memoria_sin_leer_nightly_jsonl(tmp_path):
     """Pasar rec= evita el lag de 1 noche: repara lo de ESTA corrida, no lo
     de ayer (nightly.py llama repair(rec=rec) despues de mover el llamado
-    al final del script)."""
+    al final del script).
+
+    git init EXPLICITO: la version sin init pasaba solo de casualidad — el
+    tmp de pytest caia DENTRO del repo de orchestration y `git -C` encontraba
+    al padre; en un sandbox de evolve (basetemp fuera de todo repo) reventaba
+    con 'not a git repo' y mato los 6 sandboxes del estreno. Un test que
+    depende de DONDE corre no es un test."""
+    import subprocess as _sp
     from mmorch.auto_repair import repair
     logs = tmp_path / "logs"
     logs.mkdir()
+    for cmd in (["git", "init", "-b", "main"],
+                ["git", "config", "user.email", "t@t"],
+                ["git", "config", "user.name", "t"]):
+        _sp.run(cmd, cwd=tmp_path, capture_output=True)
+    (tmp_path / "x.py").write_text("x = 1\n", encoding="utf-8")
+    _sp.run(["git", "add", "-A"], cwd=tmp_path, capture_output=True)
+    _sp.run(["git", "commit", "-m", "base", "--no-verify"], cwd=tmp_path,
+            capture_output=True)
     # sin record en disco -> con rec= no deberia importar
     rec_hoy = {"ts": 1, "algo": {"error": "boom de HOY"}}
     r = repair(str(tmp_path), today="2026-08-19", rec=rec_hoy,
