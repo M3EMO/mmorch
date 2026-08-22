@@ -9,10 +9,12 @@ card           -> outcomes.record_verdict (dedup por status, reward al bandit)
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+logger = logging.getLogger(__name__)
 
 
 def pending(*, root: Path = ROOT) -> dict:
@@ -25,8 +27,11 @@ def pending(*, root: Path = ROOT) -> dict:
             cands.append({"id": e["id"], "lente": e["lente"], "vence": e["vence"],
                           "gist": e["gist"].split(">>")[0].strip(),
                           "maduraciones": e["gist"].count(">>")})
-    except OSError:
-        pass
+    except FileNotFoundError:
+        logger.warning("candidatos.md no encontrado en %s", root / "vault" / "roadmaps")
+    except OSError as e:
+        logger.error("Error leyendo candidatos.md: %s", e)
+        raise
     cards = []
     try:
         adj = json.loads((root / "logs" / "adjudications.json")
@@ -39,8 +44,11 @@ def pending(*, root: Path = ROOT) -> dict:
                                   "score": m["score"],
                                   "justification": m.get("justification", ""),
                                   "card": m.get("card", "")})
-    except (OSError, json.JSONDecodeError):
-        pass
+    except FileNotFoundError:
+        logger.warning("adjudications.json no encontrado en %s", root / "logs")
+    except (OSError, json.JSONDecodeError) as e:
+        logger.error("Error leyendo adjudications.json: %s", e)
+        raise
     return {"candidatas": cands, "cards": cards}
 
 
@@ -121,7 +129,8 @@ def pre_veredicto(entry: dict, *, logs_dir: str = "logs", llm_fn=None) -> dict:
             _PREV_SCHEMA)
         v = {"puntaje": max(0.0, min(1.0, float(out.get("puntaje", 0.5)))),
              "razon": str(out.get("razon", ""))[:160]}
-    except Exception:
+    except Exception as e:
+        logger.warning("pre_veredicto fallo para %s: %s", cid, e)
         return {}
     cache[cid] = v
     atomic_write_json(cache_path, cache)
