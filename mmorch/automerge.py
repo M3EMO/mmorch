@@ -15,9 +15,13 @@ Ledger append-only en logs/automerge_ledger.jsonl. Kill-switch: loop_paused.
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
+import sys
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def _git(repo: str, *args: str) -> subprocess.CompletedProcess:
@@ -87,13 +91,26 @@ def try_automerge(repo: str, branch: str, *, base: str,
                 try:
                     from .provenance import on_merge
                     on_merge(branch, logs_dir=str(logs))
-                except Exception:
-                    pass
+                except Exception as e:
+                    # No romper el main path, pero registrar el fallo
+                    # explícitamente: la provenance inconsistente es un
+                    # problema de observabilidad, no de merge.
+                    logger.error(
+                        "on_merge falló para branch %s (merge ya aplicado): %s",
+                        branch, e, exc_info=True
+                    )
+                    # También al stderr para que sea visible en logs del
+                    # proceso, no solo en el logger configurado.
+                    print(
+                        f"WARNING: on_merge falló para {branch}: {e}",
+                        file=sys.stderr
+                    )
     try:
         logs.mkdir(exist_ok=True)
         with open(logs / "automerge_ledger.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps({"ts": time.time(), "source": source, **result},
                                ensure_ascii=False) + "\n")
-    except OSError:
-        pass
+    except OSError as e:
+        # El ledger es best-effort; si falla, al menos loguear.
+        logger.error("No se pudo escribir ledger: %s", e)
     return result
