@@ -7,7 +7,6 @@ con semáforo, diffstat e interacción m/enter/q) -> veredictos pendientes
 (d/n/enter/q) -> resumen. Cinco minutos y el sistema queda servido.
 """
 
-import io
 import json
 import os
 import pathlib
@@ -150,7 +149,11 @@ def main() -> None:
     # import (importar esto en un test le rompia la captura de stdout a
     # pytest — mismo bug de raiz que ya vimos hoy en otro lado, mutar
     # global-state al importar, no al ejecutar)
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    # reconfigure, no wrapper nuevo: veredicto.py (importado mas abajo)
+    # tambien ajusta stdout — dos wrappers encadenados = el viejo se GC-cierra
+    # y mata el buffer compartido (crash real 2026-08-22)
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     print(f"{B}☀ BUENOS DÍAS — cockpit mmorch{X}")
     seccion_digest()
     seccion_salud()

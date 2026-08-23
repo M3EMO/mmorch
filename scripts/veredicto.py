@@ -7,7 +7,6 @@ Uso (desde el repo, con el venv):
   python scripts/veredicto.py card <#|id> dale|no   (# = numero de la lista)
 """
 
-import io
 import os
 import pathlib
 import sys
@@ -15,7 +14,12 @@ import textwrap
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+# reconfigure, NO TextIOWrapper nuevo: manana.py ya pudo haber envuelto
+# stdout — un segundo wrapper deja al primero huerfano, el GC lo cierra y
+# cierra el buffer COMPARTIDO -> "I/O operation on closed file" (crash real
+# medido 2026-08-22 en la seccion de veredictos de manana.py)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 C = {"reset": "\x1b[0m", "bold": "\x1b[1m", "dim": "\x1b[2m",
      "cyan": "\x1b[96m", "green": "\x1b[92m", "yellow": "\x1b[93m",
