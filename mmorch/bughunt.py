@@ -122,6 +122,10 @@ def hunt(
     nightly) dejaba un modulo de mmorch escrito con un mutante. Ademas el
     round-trip por ast.unparse cambia los line endings del archivo real.
     Mismo aislamiento que ya usan evolve y merge_train.
+
+    Consecuencia a tener presente: el worktree sale de HEAD, asi que se mide
+    el codigo COMMITEADO. Un test nuevo sin commitear no cuenta todavia (se
+    ve como "el mutante sigue vivo"), igual que en el nightly.
     """
     pairs = module_pairs(repo_dir)
     if modules is not None:
