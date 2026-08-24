@@ -69,9 +69,15 @@ def run_train(repo: str, *, base: str, today: str | None = None,
             if test_fn is None:
                 bt = tempfile.mkdtemp(prefix="mmorch_bt_")
                 def test_fn():
+                    nonlocal gate_reason
                     p = subprocess.run([sys.executable, "-m", "pytest", "-q",
                                         f"--basetemp={bt}"], cwd=wt.path,
                                        capture_output=True, timeout=1800)
+                    if p.returncode != 0:
+                        # el POR QUE del rojo: sin esto el tren repite el mismo
+                        # fallo noche tras noche sin que nadie pueda leerlo
+                        gate_reason = (p.stdout or b"").decode(
+                            "utf-8", "replace")[-1500:]
                     return p.returncode == 0
             try:
                 gate_ok = bool(test_fn())
