@@ -112,8 +112,17 @@ def hunt(
     max_mutants: int = 8,
     review_fn: Callable[[str, list[str]], list[str]] | None = None,
     run_fn: Callable[[str], bool] | None = None,
+    isolate: bool = True,
 ) -> dict:
-    """Run bug-hunt across modules, optionally with LLM review."""
+    """Run bug-hunt across modules, optionally with LLM review.
+
+    `isolate` (default): muta en un worktree efimero, no en el arbol de trabajo
+    real. survivors_for escribe cada mutante SOBRE el archivo y lo restaura en
+    un finally — una corrida cortada a mitad (Ctrl-C, reboot, timeout del
+    nightly) dejaba un modulo de mmorch escrito con un mutante. Ademas el
+    round-trip por ast.unparse cambia los line endings del archivo real.
+    Mismo aislamiento que ya usan evolve y merge_train.
+    """
     pairs = module_pairs(repo_dir)
     if modules is not None:
         module_names = {Path(m).stem for m in modules}
@@ -122,22 +131,41 @@ def hunt(
     results: list[dict] = []
     findings: list[dict] = []
     errors: list[str] = []
-
-    for module_rel, test_rel in pairs:
+    wt = None
+    work_dir = repo_dir
+    from mmorch.worktree_driver import is_git_repo, open_worktree
+    # sin git no hay arbol versionado que proteger (ni worktree posible): eso es
+    # un dir descartable del caller, se muta ahi mismo
+    if isolate and pairs and is_git_repo(repo_dir):
         try:
-            result = survivors_for(
-                module_rel,
-                test_rel,
-                repo_dir=repo_dir,
-                max_mutants=max_mutants,
-                run_fn=run_fn,
-            )
-            results.append(result)
-            if result.get("survived", 0) > 0 and review_fn is not None:
-                module_findings = review_fn(module_rel, result["survivor_diffs"])
-                findings.append({"module": module_rel, "findings": module_findings})
+            wt = open_worktree(repo_dir, prefix="mmorch/wt-bughunt")
+            wt.seed([".venv"])          # los tests corren con las deps del repo
+            work_dir = wt.path
         except Exception as exc:
-            errors.append(f"{module_rel}: {exc}")
+            # sin worktree preferimos NO mutar el arbol real: el mapa de
+            # sobrevivientes es informativo, corromper mmorch no es aceptable
+            return {"scanned": 0, "map": [], "findings": [],
+                    "errors": [f"worktree: {type(exc).__name__}: {exc}"]}
+
+    try:
+        for module_rel, test_rel in pairs:
+            try:
+                result = survivors_for(
+                    module_rel,
+                    test_rel,
+                    repo_dir=work_dir,
+                    max_mutants=max_mutants,
+                    run_fn=run_fn,
+                )
+                results.append(result)
+                if result.get("survived", 0) > 0 and review_fn is not None:
+                    module_findings = review_fn(module_rel, result["survivor_diffs"])
+                    findings.append({"module": module_rel, "findings": module_findings})
+            except Exception as exc:
+                errors.append(f"{module_rel}: {exc}")
+    finally:
+        if wt is not None:
+            wt.close(keep_branch=False)
 
     return {"scanned": len(pairs), "map": results, "findings": findings, "errors": errors}
 
