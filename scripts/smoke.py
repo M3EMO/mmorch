@@ -15,6 +15,9 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 G, R, D, B, X = "\x1b[92m", "\x1b[91m", "\x1b[2m", "\x1b[1m", "\x1b[0m"
 
 
+WHY: dict[str, str] = {}  # chequeo -> motivo del rojo; sin esto el fail es un agujero negro
+
+
 def check(name):
     def deco(fn):
         def run():
@@ -23,6 +26,7 @@ def check(name):
                 print(f"  {G}✓{X} {name:<22} {D}{detail}{X}")
                 return True
             except Exception as e:
+                WHY[name] = f"{type(e).__name__}: {str(e)[:200]}"
                 print(f"  {R}✗{X} {B}{name:<22}{X} {R}{type(e).__name__}: {str(e)[:90]}{X}")
                 return False
         return run
@@ -143,7 +147,8 @@ def c_server():
             tok = m.group(1)
             break
     d = json.loads(urllib.request.urlopen(
-        f"http://127.0.0.1:8787/pending?token={tok}", timeout=5).read().decode())
+        # 20s, no 5: el primer request tras revivir el server tarda ~5.3s (cold import)
+        f"http://127.0.0.1:8787/pending?token={tok}", timeout=20).read().decode())
     return f"/pending vivo ({len(d['candidatas'])}+{len(d['cards'])})"
 
 
@@ -166,8 +171,10 @@ def main() -> None:
     # log system: historia append-only para tendencia + consumo de nightly/digest
     try:
         with open(ROOT / "logs" / "smoke.jsonl", "a", encoding="utf-8") as f:
+            why = {n: v for n in fails for k, v in WHY.items() if k.startswith(n)}
             f.write(json.dumps({"ts": time.time(), "ok": ok,
-                                "total": len(checks), "fails": fails},
+                                "total": len(checks), "fails": fails,
+                                "why": why},
                                ensure_ascii=False) + "\n")
     except OSError:
         pass

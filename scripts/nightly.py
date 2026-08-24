@@ -365,6 +365,24 @@ def main() -> None:
     except Exception as e:
         rec["repo_mining"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
 
+    # el server corre bajo la tarea mmorch-server con trigger SOLO-AtLogOn: si
+    # el proceso muere (paso 2026-08-18, ERROR_PROCESS_ABORTED) nadie lo
+    # relanza hasta el proximo login -> smoke rojo 6 noches seguidas.
+    # ponytail: revivirlo aca es lo mas barato; si molesta, agregar trigger diario.
+    try:
+        import socket as _sk
+        import subprocess as _sp3
+        with _sk.socket() as _s:
+            _s.settimeout(2)
+            _down = _s.connect_ex(("127.0.0.1", 8787)) != 0
+        if _down:
+            _sp3.run(["schtasks", "/Run", "/TN", "mmorch-server"],
+                     capture_output=True, timeout=60)
+            time.sleep(15)
+            rec["server_revived"] = True
+    except Exception as e:
+        rec["server_revived"] = f"{type(e).__name__}: {str(e)[:120]}"
+
     # smoke de subsistemas: uso correcto de cada pieza, barato y read-only;
     # historia en logs/smoke.jsonl (el digest reporta los rojos)
     try:
