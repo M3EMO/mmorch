@@ -109,6 +109,38 @@ def stuck_findings(history: list[dict], *, min_nights: int = _MIN_NIGHTS) -> lis
                 "sintoma de una noche.")
             break   # 1 módulo por noche: auto_repair igual toma 1 finding/noche
 
+    # 4. chequeo del smoke rojo N noches seguidas. auto_repair solo levanta
+    # claves error/errors del record, y el smoke reporta {"fails": [...]} —
+    # forma de dato, no de excepción. Medido 2026-08-24: el check "server"
+    # llevaba 6 noches rojo (el proceso murió el 18 y su tarea solo arranca
+    # AtLogOn) sin que ningún sensor lo nombrara.
+    fallando = set((history[-1].get("smoke") or {}).get("fails") or [])
+    for chk in sorted(fallando):
+        n = _consecutive_recent(
+            history, lambda r, c=chk: c in ((r.get("smoke") or {}).get("fails") or []))
+        if n >= min_nights:
+            why = ((history[-1].get("smoke") or {}).get("why") or {}).get(chk, "")
+            out.append(
+                f"stuck smoke {chk}: rojo {n} noches seguidas. "
+                f"Motivo de anoche: {why[:200] or '(el smoke no registro el porque)'}. "
+                "Verificar primero que el subsistema este VIVO (proceso, tarea "
+                "programada, puerto) antes de tocar codigo — el chequeo es "
+                "read-only, su rojo suele ser de entorno, no de logica.")
+            break   # 1 por noche
+
+    # 5. tren con gate rojo N noches seguidas: dos amarillas verdes por
+    # separado que se rompen ENTRE SI y nadie lo mira. gate_reason trae el
+    # tail real de pytest desde 2026-08-24.
+    n = _consecutive_recent(
+        history, lambda r: (r.get("merge_train") or {}).get("gate") == "rojo")
+    if n >= min_nights:
+        mt = history[-1].get("merge_train") or {}
+        out.append(
+            f"stuck merge_train gate rojo: {n} noches seguidas sin tren verde "
+            f"(ramas: {', '.join(mt.get('merged') or []) or 'sin datos'}). "
+            f"Salida del gate: {(mt.get('gate_reason') or '')[-400:] or '(sin registro)'}. "
+            "El fix va a la INTERACCION entre las ramas, no a una sola.")
+
     return out
 
 

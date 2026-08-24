@@ -51,3 +51,31 @@ def test_prefijo_estable_para_la_firma_de_retry():
     f6 = next(f for f in stuck_findings([MUERTO] * 6) if "bucle muerto" in f)
     f7 = next(f for f in stuck_findings([MUERTO] * 7) if "bucle muerto" in f)
     assert f6[:80] == f7[:80]
+
+
+# --- señales que NO son excepciones (auto_repair solo lee error/errors) ------ #
+SMOKE_ROJO = {"smoke": {"ok": 12, "total": 13, "fails": ["server"],
+                        "why": {"server": "URLError: connection refused"}}}
+SMOKE_VERDE = {"smoke": {"ok": 13, "total": 13, "fails": []}}
+TREN_ROJO = {"merge_train": {"gate": "rojo", "merged": ["mmorch-sbx-a"],
+                             "gate_reason": "1 failed, 600 passed"}}
+TREN_VERDE = {"merge_train": {"gate": "verde", "merged": ["mmorch-sbx-a"]}}
+
+
+def test_smoke_rojo_repetido_se_vuelve_finding_con_su_motivo():
+    f = [x for x in stuck_findings([SMOKE_ROJO] * 6) if x.startswith("stuck smoke")]
+    assert len(f) == 1
+    assert "server" in f[0] and "6 noches" in f[0]
+    assert "connection refused" in f[0]   # el POR QUE viaja con el finding
+
+
+def test_smoke_verde_una_noche_corta_la_racha():
+    assert not [x for x in stuck_findings([SMOKE_ROJO] * 6 + [SMOKE_VERDE])
+                if x.startswith("stuck smoke")]
+
+
+def test_tren_rojo_repetido_apunta_a_la_interaccion_entre_ramas():
+    f = [x for x in stuck_findings([TREN_ROJO] * 5) if "merge_train" in x]
+    assert len(f) == 1 and "1 failed, 600 passed" in f[0]
+    assert not [x for x in stuck_findings([TREN_ROJO] * 5 + [TREN_VERDE])
+                if "merge_train" in x]
