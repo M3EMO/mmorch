@@ -116,3 +116,20 @@ def test_gate_get_sin_gate_es_404_y_post_lo_crea(monkeypatch):
                json={"policy": {"stages": [{"name": "s1"}]}})
     assert r.status_code == 200
     assert c.get("/jobs/j1/gate?token=secret").status_code == 200
+
+
+def test_budget_policies_get_lee_y_post_guarda(monkeypatch):
+    S, c = _client(monkeypatch)
+    import mmorch.budget_policy as BP
+    guardado = []
+    monkeypatch.setattr(BP, "save", lambda pols: guardado.append(pols))
+    monkeypatch.setattr(BP, "load", lambda: [{"name": "cap"}])
+    monkeypatch.setattr(BP, "snapshot", lambda: {"usd": 0.0})
+    monkeypatch.setattr(BP, "evaluate", lambda pols, snap: [])
+
+    j = c.get("/budget/policies?token=secret").json()
+    assert j["policies"] == [{"name": "cap"}] and "snapshot" in j
+    assert not guardado                       # un GET jamas debe escribir
+
+    r = c.post("/budget/policies?token=secret", json={"policies": [{"name": "x"}]})
+    assert r.json() == {"saved": 1} and guardado == [[{"name": "x"}]]
