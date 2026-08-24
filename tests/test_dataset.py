@@ -17,3 +17,45 @@ def test_fix_regex():
     assert _FIX_RE.search("Fix crash in parser")
     assert _FIX_RE.search("bugfix: wrong header")
     assert not _FIX_RE.search("add new feature")
+
+
+# --- parsing de git: 8/8 mutantes sobrevivian a este archivo ----------------- #
+from pathlib import Path
+
+import mmorch.dataset as ds
+
+
+def test_changed_lines_ignora_el_encabezado_del_diff(monkeypatch):
+    """'+++ b/x.py' arranca con '+' pero NO es una linea agregada. Sin este
+    test, cambiar el `and not` por un `or` pasaba desapercibido y metia el
+    numero de linea del encabezado en el set."""
+    diff = "\n".join(["diff --git a/x.py b/x.py",
+                      "--- a/x.py",
+                      "+++ b/x.py",
+                      "@@ -1,0 +3,2 @@",
+                      "+nueva a",
+                      "+nueva b"])
+    monkeypatch.setattr(ds, "_git", lambda *a, **k: diff)
+    assert ds._changed_lines(Path("."), "sha", "x.py") == {3, 4}
+
+
+def test_changed_lines_cuenta_contexto_y_saltea_borradas(monkeypatch):
+    diff = "\n".join(["@@ -1,3 +1,3 @@",
+                      " contexto",      # linea 1
+                      "-vieja",         # no avanza la numeracion nueva
+                      "+nueva",         # linea 2
+                      " final"])        # linea 3
+    monkeypatch.setattr(ds, "_git", lambda *a, **k: diff)
+    assert ds._changed_lines(Path("."), "sha", "x.py") == {2}
+
+
+def test_fix_commits_corta_exactamente_en_el_tope(monkeypatch):
+    log = "\n".join(f"sha{i}|fix: algo {i}" for i in range(5))
+    monkeypatch.setattr(ds, "_git", lambda *a, **k: log)
+    assert ds.fix_commits(Path("."), max_n=3) == ["sha0", "sha1", "sha2"]
+
+
+def test_fix_commits_filtra_los_que_no_son_fix(monkeypatch):
+    log = "aaa|feat: cosa nueva\nbbb|fix: rompia al abrir\nccc|docs: notas"
+    monkeypatch.setattr(ds, "_git", lambda *a, **k: log)
+    assert ds.fix_commits(Path("."), max_n=10) == ["bbb"]
