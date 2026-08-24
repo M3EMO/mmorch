@@ -314,9 +314,13 @@ def _check_sympy_identity(*, lhs: str, rhs: str, **_) -> CheckResult:
 
 # --- sandbox: corre codigo aislado (gate del pipeline sandbox->promote) ------ #
 def _check_python_exec(*, code: str, expected_stdout: str | None = None,
-                       expect_ok: bool = True, timeout: float = 5.0, **_) -> CheckResult:
+                       expect_ok: bool = True, timeout: float = 15.0, **_) -> CheckResult:
     """Corre `code` AISLADO (sandbox.py). passed si returncode==0 (y stdout matchea
-    `expected_stdout` si se da). UNSAFE-vs-hostil: ver sandbox.py. Opt-in."""
+    `expected_stdout` si se da). UNSAFE-vs-hostil: ver sandbox.py. Opt-in.
+
+    timeout 15s y no 5: arrancar un python nuevo con la maquina cargada (nightly
+    corriendo la suite entera en un worktree) pasaba de 5s y daba rojo FALSO —
+    origen medido de la flakiness de test_trajectory que ensuciaba sandboxes."""
     from .sandbox import run_sandboxed
     r = run_sandboxed(code, timeout=timeout)
     if expected_stdout is not None:
