@@ -242,8 +242,11 @@ def fitness(test_path: str = "tests", timeout: int = 1800) -> dict:
 
 
 def _count(text: str, pat: str) -> int:
-    m = re.search(pat, text)
-    return int(m.group(1)) if m else 0
+    # la ULTIMA aparicion, no la primera: la linea de resumen de pytest va al
+    # final, y cualquier "1 failed" impreso ANTES por la salida capturada de un
+    # test mentia el conteo (medido: sandbox con 9 failed registrado como 1).
+    ms = re.findall(pat, text)
+    return int(ms[-1]) if ms else 0
 
 
 def archive_variant(name: str, fit: dict, notes: str = "", applied: bool = False) -> None:
@@ -498,6 +501,14 @@ def _pr_still_open(entry: dict, *, root: Path, gh_check_fn=None) -> bool:
     default es 'sigue abierto' (falla SEGURO: nunca pisa un merge que no pudo confirmar)."""
     branch = entry.get("branch")
     if not branch:
+        return False
+    # el trabajo YA esta en HEAD (lo mergeo el tren o el humano) -> el lock esta
+    # muerto aunque la branch siga existiendo. Sin esto, con gh ausente (pr_number
+    # None) y nadie borrando branches sandbox, el lock era PERMANENTE: medido
+    # 2026-08-24, 4 archivos bloqueados y 6 de 8 hallazgos salteados por noche.
+    sha = entry.get("head_sha")
+    if sha and _git("merge-base", "--is-ancestor", sha, "HEAD",
+                    cwd=root).returncode == 0:
         return False
     if _git("rev-parse", "--verify", branch, cwd=root).returncode != 0:
         return False

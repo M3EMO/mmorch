@@ -164,3 +164,31 @@ def test_propose_patch_sin_fence_devuelve_texto_limpio(monkeypatch, tmp_path):
         lambda prompts, **k: [CallResult("deepseek-chat", "deepseek",
                                          "y = 2\n", 1, 1, 0.0, 0.0)])
     assert EV.propose_patch("mod.py", "z") == "y = 2"
+
+
+def test_pr_lock_muere_cuando_el_trabajo_ya_esta_en_head(monkeypatch, tmp_path):
+    """Branch sandbox que sigue existiendo pero cuyo commit YA es ancestro de HEAD:
+    el lock por archivo tiene que soltarse igual (sin gh, pr_number es None y el
+    lock era permanente -> evolve salteaba el archivo TODAS las noches)."""
+    seen = []
+
+    def fake_git(*args, cwd):
+        seen.append(args)
+        if args[0] == "merge-base":          # es ancestro de HEAD -> mergeado
+            return _proc("", rc=0)
+        return _proc("", rc=0)               # la branch existe
+
+    monkeypatch.setattr(EV, "_git", fake_git)
+    entry = {"branch": "mmorch-sbx-abc", "head_sha": "deadbeef", "pr_number": None}
+    assert EV._pr_still_open(entry, root=tmp_path) is False
+
+
+def test_pr_lock_sigue_vivo_si_el_trabajo_no_llego_a_head(monkeypatch, tmp_path):
+    def fake_git(*args, cwd):
+        if args[0] == "merge-base":
+            return _proc("", rc=1)           # NO es ancestro
+        return _proc("", rc=0)               # la branch existe
+
+    monkeypatch.setattr(EV, "_git", fake_git)
+    entry = {"branch": "mmorch-sbx-abc", "head_sha": "deadbeef", "pr_number": None}
+    assert EV._pr_still_open(entry, root=tmp_path) is True
