@@ -306,11 +306,16 @@ def discover_repos(*, orch_root: str, max_new: int = 3, http_fn=None) -> dict:
     except OSError:
         pass
     try:
-        refl = (root / "logs" / "reflexiones.jsonl").read_text(
-            encoding="utf-8").strip().splitlines()[-1]
-        foco = json.loads(refl).get("foco_sugerido", "")[:80]
-        if foco:
-            q_foco.append(foco)
+        refl = json.loads((root / "logs" / "reflexiones.jsonl").read_text(
+            encoding="utf-8").strip().splitlines()[-1])
+        # temas_busqueda (keywords en ingles), NO foco_sugerido: recortar la
+        # prosa a 80 chars mandaba a GitHub queries como "El foco de las
+        # proximas noches debe ser: (1) ROMPER el bucle muerto de evolve: i"
+        # -> 0 resultados garantizados, gastando 1 de las 3 queries semanales.
+        for t in (refl.get("temas_busqueda") or [])[:2]:
+            t = str(t).strip()
+            if t and len(t) <= 60:
+                q_foco.append(t)
     except (OSError, IndexError, json.JSONDecodeError):
         pass
 

@@ -121,7 +121,13 @@ _REFLECT_SCHEMA = {
     "type": "object",
     "properties": {"diagnostico": {"type": "string"},
                    "foco_sugerido": {"type": "string"},
-                   "riesgo_principal": {"type": "string"}},
+                   "riesgo_principal": {"type": "string"},
+                   # keywords, no prosa: repo_mining manda esto a GitHub search.
+                   # Antes usaba foco_sugerido[:80] y buscaba parrafos en
+                   # castellano -> 0 resultados, quemando 1 de las 3 queries
+                   # semanales de descubrimiento.
+                   "temas_busqueda": {"type": "array",
+                                      "items": {"type": "string"}}},
     "required": ["diagnostico", "foco_sugerido", "riesgo_principal"],
 }
 
@@ -238,11 +244,16 @@ def reflect(*, logs_dir: str, today: str, n_nights: int = 7) -> dict:
         f"{prev[:1500] or '(primera reflexion)'}\n"
         f"Corridas (solo las ultimas {n_nights}):\n"
         f"{(chr(10) + '== noche ==' + chr(10)).join(resumenes)}\n"
-        'JSON: {"diagnostico": str, "foco_sugerido": str, "riesgo_principal": str}',
+        "temas_busqueda: 2 keywords en INGLES (2-4 palabras cada una, <=60 "
+        "chars) para buscar repos en GitHub sobre lo que te falta — tecnicas, "
+        "no frases. Ej: 'mutation testing python', 'llm agent memory'.\n"
+        'JSON: {"diagnostico": str, "foco_sugerido": str, '
+        '"riesgo_principal": str, "temas_busqueda": [str]}',
         schema=_REFLECT_SCHEMA)
     rec = {"fecha": today, "diagnostico": out.get("diagnostico", ""),
            "foco_sugerido": out.get("foco_sugerido", ""),
-           "riesgo_principal": out.get("riesgo_principal", "")}
+           "riesgo_principal": out.get("riesgo_principal", ""),
+           "temas_busqueda": out.get("temas_busqueda") or []}
     with open(prev_path, "a", encoding="utf-8") as f:
         f.write(_json.dumps(rec, ensure_ascii=False) + "\n")
     apply_focus(rec, logs_dir=logs_dir)
