@@ -331,7 +331,12 @@ def describe_projects(projects: dict, *, logs_dir: str, today: str) -> dict:
         new += 1
     if new:
         atomic_write_json(meta_path, meta)
-    return {"described": new, "total": len(meta)}
+    # `pendientes` explicito: `described` es un contador INCREMENTAL (los que
+    # faltaban esa noche) y se leia como "solo describio 1 de 12, esta
+    # estancado" — la reflexion del 2026-08-24 lo diagnostico asi estando
+    # 12/12 cubierto. Un 0 en pendientes cierra la lectura.
+    return {"described": new, "total": len(meta),
+            "pendientes": sum(1 for n in projects if not meta.get(n, {}).get("desc"))}
 
 
 def _project_desc(project: str) -> str:

@@ -231,3 +231,17 @@ def test_novelty_parcial_queda_entre_los_extremos():
     n = ln._novelty("grafo de topics ajenos",
                     ["grafo de repos propios", "cosa completamente distinta"])
     assert 0.0 < n < 1.0
+
+
+def test_describe_projects_reporta_pendientes(tmp_path, monkeypatch):
+    """`described` es incremental; sin `pendientes` se leia como estancamiento."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    atomic_write_json(logs / "projects_meta.json",
+                      {"ya": {"desc": "cubierto", "updated": "2026-01-01"}})
+    monkeypatch.setattr(ln, "_llm_json", lambda *a, **k: {"desc": "nuevo"})
+    proj = tmp_path / "nuevo"
+    proj.mkdir()
+    r = ln.describe_projects({"ya": str(tmp_path), "nuevo": str(proj)},
+                             logs_dir=str(logs), today="2026-08-24")
+    assert r == {"described": 1, "total": 2, "pendientes": 0}
