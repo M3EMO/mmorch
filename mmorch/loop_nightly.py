@@ -126,6 +126,46 @@ _REFLECT_SCHEMA = {
 }
 
 
+def _tag(v) -> tuple[str, str]:
+    """[ok]/[skip]/[ERROR] + detalle, para un valor de subsistema del record."""
+    import json
+    if not isinstance(v, dict):
+        return "?", json.dumps(v, ensure_ascii=False)
+    if v.get("error"):
+        return "ERROR", str(v["error"])
+    if v.get("errors"):
+        return f"ERRORES({len(v['errors'])})", "; ".join(
+            str(e) for e in v["errors"][:2])
+    if v.get("skipped"):
+        return "skip", str(v["skipped"])
+    return "ok", json.dumps(v, ensure_ascii=False)
+
+
+def _facts(records: list[dict]) -> str:
+    """Cifras CALCULADAS sobre la historia entera, para anclar a la reflexion.
+
+    Sin esto el LLM no puede contar (solo ve n_nights records) y arrastraba el
+    numero de su propia reflexion anterior, sumandole 5 cada noche: medido
+    6 -> 8 -> 10 -> 12 -> 15 -> 20 -> 25 -> 30 -> '35+ noches' en 7 dias
+    reales. Una cifra inventada que se auto-alimenta es peor que ninguna:
+    el humano deja de creerle al diagnostico entero."""
+    import time as _t
+    from .stuck_detector import _consecutive_recent
+    if not records:
+        return "(sin historia)"
+    dias = [_t.strftime("%Y-%m-%d", _t.localtime(r.get("ts", 0))) for r in records]
+    out = [f"- corridas registradas: {len(records)}, del {dias[0]} al {dias[-1]} "
+           f"({len(set(dias))} dias distintos)"]
+    for k in [k for k in records[-1] if k != "ts"]:
+        # subsistema AUSENTE corta la racha: no existia todavia, no fallo
+        n = _consecutive_recent(
+            records, lambda r, k=k: k in r and _tag(r[k])[0] != "ok")
+        if n:
+            out.append(f"- {k}: {n} corridas consecutivas sin [ok] "
+                       f"(sobre {len(records)} registradas)")
+    return "\n".join(out)
+
+
 def _summarize_record(rec: dict, *, per_key: int = 140) -> str:
     """Una linea por subsistema (status + detalle corto), no el JSON crudo.
 
@@ -134,23 +174,11 @@ def _summarize_record(rec: dict, *, per_key: int = 140) -> str:
     project_health, auto_repair, slim, arxiv, repo_mining, smoke, merge_train)
     porque el orden de insercion en el dict es fijo. reflect() nunca los veia,
     noche tras noche. Con una linea pareja por subsistema, todos entran."""
-    import json
     out = []
     for k, v in rec.items():
         if k == "ts":
             continue
-        if isinstance(v, dict):
-            if v.get("error"):
-                tag, detail = "ERROR", str(v["error"])
-            elif v.get("errors"):
-                tag, detail = f"ERRORES({len(v['errors'])})", "; ".join(
-                    str(e) for e in v["errors"][:2])
-            elif v.get("skipped"):
-                tag, detail = "skip", str(v["skipped"])
-            else:
-                tag, detail = "ok", json.dumps(v, ensure_ascii=False)
-        else:
-            tag, detail = "?", json.dumps(v, ensure_ascii=False)
+        tag, detail = _tag(v)
         out.append(f"- {k} [{tag}]: {detail[:per_key]}")
     return "\n".join(out)
 
@@ -184,6 +212,12 @@ def reflect(*, logs_dir: str, today: str, n_nights: int = 7) -> dict:
             resumenes.append(_summarize_record(_json.loads(raw)))
         except (_json.JSONDecodeError, TypeError, AttributeError):
             resumenes.append(raw[:400])
+    todos = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        try:
+            todos.append(_json.loads(raw))
+        except _json.JSONDecodeError:
+            pass
     out = _llm_json(
         "Sos la capa de auto-reflexion de mmorch (sistema de orquestacion que "
         "se auto-mejora). Estas son tus ultimas corridas nocturnas (resumen "
@@ -193,8 +227,17 @@ def reflect(*, logs_dir: str, today: str, n_nights: int = 7) -> dict:
         "¿donde deberia ir el foco de las proximas noches? ¿cual es el riesgo "
         "principal de seguir igual? Se especifico y critico — esto lo lee el "
         "humano y tu proxima reflexion.\n"
-        f"Reflexion anterior: {prev[:1500] or '(primera reflexion)'}\n"
-        f"Corridas:\n{(chr(10) + '== noche ==' + chr(10)).join(resumenes)}\n"
+        "REGLA DURA sobre cifras: toda cantidad de noches/corridas que escribas "
+        "tiene que salir TAL CUAL de HECHOS. No estimes, no redondees hacia "
+        "arriba, no reuses las cifras de tu reflexion anterior (son texto, no "
+        "evidencia) y no escribas 'N+'. Si una cifra no esta en HECHOS, decilo "
+        "sin numero. Una cifra inflada invalida el diagnostico entero.\n"
+        f"HECHOS (calculados sobre la historia completa, no estimados):\n"
+        f"{_facts(todos)}\n"
+        f"Reflexion anterior (prosa, NO fuente de cifras): "
+        f"{prev[:1500] or '(primera reflexion)'}\n"
+        f"Corridas (solo las ultimas {n_nights}):\n"
+        f"{(chr(10) + '== noche ==' + chr(10)).join(resumenes)}\n"
         'JSON: {"diagnostico": str, "foco_sugerido": str, "riesgo_principal": str}',
         schema=_REFLECT_SCHEMA)
     rec = {"fecha": today, "diagnostico": out.get("diagnostico", ""),

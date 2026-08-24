@@ -166,3 +166,21 @@ def test_summarize_record_respeta_presupuesto_por_clave():
     resumen = ln._summarize_record(rec, per_key=50)
     linea = [ln_ for ln_ in resumen.splitlines() if "algo" in ln_][0]
     assert len(linea) < 80
+
+
+def test_facts_cuenta_corridas_reales_y_rachas():
+    """Las cifras de la reflexion tienen que salir de aca, no de su propia
+    prosa anterior (medido: 6 -> 35+ 'noches' en 7 dias reales)."""
+    from mmorch.loop_nightly import _facts
+    recs = [{"ts": 0, "evolve": {"opened": []}},
+            {"ts": 0, "evolve": {"skipped": "nada"}},
+            {"ts": 0, "evolve": {"skipped": "nada"}}]
+    out = _facts(recs)
+    assert "corridas registradas: 3" in out
+    assert "evolve: 2 corridas consecutivas sin [ok]" in out
+
+
+def test_facts_subsistema_ausente_corta_la_racha():
+    from mmorch.loop_nightly import _facts
+    recs = [{"ts": 0}, {"ts": 0, "slim": {"skipped": "x"}}]   # noche 1 sin slim
+    assert "slim: 1 corridas consecutivas" in _facts(recs)
