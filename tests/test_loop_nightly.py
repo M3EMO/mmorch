@@ -184,3 +184,50 @@ def test_facts_subsistema_ausente_corta_la_racha():
     from mmorch.loop_nightly import _facts
     recs = [{"ts": 0}, {"ts": 0, "slim": {"skipped": "x"}}]   # noche 1 sin slim
     assert "slim: 1 corridas consecutivas" in _facts(recs)
+
+
+# --- ruteo de modelo y novedad: 8/8 mutantes sobrevivian a este archivo ------ #
+def _capturar_modelo(monkeypatch):
+    """Devuelve una lista donde queda el modelo con el que se llamo a gated_json."""
+    import mmorch.schema as sch
+    visto = []
+
+    def fake(mdl, msgs, **kw):
+        visto.append(mdl)
+        return {}
+
+    monkeypatch.setattr(sch, "gated_json", fake)
+    return visto
+
+
+def test_llm_json_default_es_el_generador(monkeypatch):
+    from mmorch.config import DEFAULT_GENERATOR
+    visto = _capturar_modelo(monkeypatch)
+    ln._llm_json("x", schema=ln._DESC_SCHEMA)
+    assert visto == [DEFAULT_GENERATOR]
+
+
+def test_llm_json_refutacion_va_cross_family(monkeypatch):
+    """El refutador tiene que ser de OTRA familia — invariante del sistema."""
+    from mmorch.config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
+    visto = _capturar_modelo(monkeypatch)
+    ln._llm_json("x", schema=ln._REFUTE_SCHEMA)
+    assert visto == [DEFAULT_VERIFIER] and DEFAULT_VERIFIER != DEFAULT_GENERATOR
+
+
+def test_llm_json_modelo_explicito_manda(monkeypatch):
+    visto = _capturar_modelo(monkeypatch)
+    ln._llm_json("x", schema=ln._DESC_SCHEMA, model="modelo-pedido")
+    assert visto == ["modelo-pedido"]
+
+
+def test_novelty_repetido_es_cero_y_nuevo_es_uno():
+    texto = "grafo de topics con bursts de arxiv"
+    assert ln._novelty(texto, []) == 1.0            # nada visto -> todo nuevo
+    assert ln._novelty(texto, [texto]) == 0.0       # identico -> nada nuevo
+
+
+def test_novelty_parcial_queda_entre_los_extremos():
+    n = ln._novelty("grafo de topics ajenos",
+                    ["grafo de repos propios", "cosa completamente distinta"])
+    assert 0.0 < n < 1.0
