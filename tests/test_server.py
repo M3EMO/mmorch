@@ -89,3 +89,30 @@ def test_approve_emits_gate(monkeypatch):
     r = c.post("/approve/abc123", headers={"X-Token": "secret"})
     assert r.status_code == 200 and r.json()["approved"] == "abc123"
     assert any(e.detail.startswith("APROBADO") for e in S.bus().recent(20))
+
+
+# ---- guardas de metodo: los mutantes que invertian GET/POST sobrevivian ------
+def test_projects_get_lista_y_post_registra(monkeypatch, tmp_path):
+    """El mismo path sirve dos cosas segun el metodo. Sin cubrir LAS DOS ramas,
+    invertir la condicion (== POST -> != POST) pasaba desapercibido."""
+    S, c = _client(monkeypatch)
+    r = c.get("/projects?token=secret")
+    assert r.status_code == 200 and "projects" in r.json()
+
+    registrado = {}
+    import mmorch.projects as P
+    monkeypatch.setattr(P, "register",
+                        lambda name, path: registrado.setdefault(name, path) or True)
+    r = c.post("/projects?token=secret",
+               json={"name": "demo", "path": str(tmp_path)})
+    assert r.status_code == 200 and "registered" in r.json()
+    assert registrado == {"demo": str(tmp_path)}
+
+
+def test_gate_get_sin_gate_es_404_y_post_lo_crea(monkeypatch):
+    S, c = _client(monkeypatch)
+    assert c.get("/jobs/nada/gate?token=secret").status_code == 404
+    r = c.post("/jobs/j1/gate?token=secret",
+               json={"policy": {"stages": [{"name": "s1"}]}})
+    assert r.status_code == 200
+    assert c.get("/jobs/j1/gate?token=secret").status_code == 200
