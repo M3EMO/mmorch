@@ -26,8 +26,11 @@ def beat(
             f.write(line + "\n")
     except OSError as e:
         logger.warning("beat(): cannot write health.jsonl: %s", e)
-    except Exception:
-        pass
+    except Exception as e:
+        # Fail-open: heartbeat must never break the main path even if
+        # detail contains non-serializable types or ts is invalid.
+        # These are caller bugs, not health infrastructure failures.
+        logger.debug("beat(): non-OSError ignored (fail-open): %s", e)
 
 
 def check(
