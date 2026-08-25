@@ -40,8 +40,13 @@ _REFUTE_SCHEMA = {
 
 
 def _llm_json(prompt: str, *, schema: dict, model: str | None = None,
-              temperature: float = 0.0) -> dict:
-    """Unico seam de LLM del modulo (los tests lo monkeypatchean)."""
+              temperature: float = 0.0, logs_dir: str | None = None) -> dict:
+    """Unico seam de LLM del modulo (los tests lo monkeypatchean).
+
+    logs_dir: directorio de logs donde persistir budget y traces. Si es None,
+    se usa el path global _BUDGET_PATH (seteado por run_idea_loop) para
+    compatibilidad con llamadas externas que no pasan logs_dir.
+    """
     from mmorch.config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
     from mmorch.schema import gated_json
 
@@ -53,12 +58,14 @@ def _llm_json(prompt: str, *, schema: dict, model: str | None = None,
                      schema=schema, pattern="loop_propuestas", phase="idea_loop",
                      temperature=temperature)
     # budget en USD REALES (gated_json reporta _cost_usd), no solo conteo de calls
-    if _BUDGET_PATH is not None and isinstance(out, dict):
+    budget_dir = logs_dir or (_BUDGET_PATH.parent if _BUDGET_PATH is not None else None)
+    if budget_dir is not None and isinstance(out, dict):
+        budget_path = Path(budget_dir) / "loop_budget.json"
         try:
-            state = load_json_tolerant(_BUDGET_PATH, {})
+            state = load_json_tolerant(budget_path, {})
             state["usd"] = round(state.get("usd", 0.0)
                                  + float(out.get("_cost_usd") or 0.0), 6)
-            atomic_write_json(_BUDGET_PATH, state)
+            atomic_write_json(budget_path, state)
         except Exception:
             pass  # side-channel de contabilidad: jamas rompe la llamada
         # flywheel de entrenamiento (goal 2026-08-15): persistir el I/O completo
@@ -67,7 +74,7 @@ def _llm_json(prompt: str, *, schema: dict, model: str | None = None,
         try:
             import json as _json
             import time as _time
-            with open(_BUDGET_PATH.parent / "idea_loop_traces.jsonl", "a",
+            with open(Path(budget_dir) / "idea_loop_traces.jsonl", "a",
                       encoding="utf-8") as f:
                 f.write(_json.dumps(
                     {"ts": _time.time(), "model": mdl, "temperature": temperature,
@@ -249,7 +256,7 @@ def reflect(*, logs_dir: str, today: str, n_nights: int = 7) -> dict:
         "no frases. Ej: 'mutation testing python', 'llm agent memory'.\n"
         'JSON: {"diagnostico": str, "foco_sugerido": str, '
         '"riesgo_principal": str, "temas_busqueda": [str]}',
-        schema=_REFLECT_SCHEMA)
+        schema=_REFLECT_SCHEMA, logs_dir=logs_dir)
     rec = {"fecha": today, "diagnostico": out.get("diagnostico", ""),
            "foco_sugerido": out.get("foco_sugerido", ""),
            "riesgo_principal": out.get("riesgo_principal", ""),
@@ -291,7 +298,7 @@ def write_local_digest(rec: dict, *, logs_dir: str) -> dict:
         "muertos, suites rojas de proyectos), branches esperando merge, errores. "
         "Sin relleno; si algo requiere acción humana, marcalo con ⚠️ o 🛡️.\n"
         f"Record JSON:\n{_json.dumps(rec, ensure_ascii=False, default=str)[:6000]}\n"
-        'JSON: {"digest": str markdown}', schema=_DIGEST_SCHEMA)
+        'JSON: {"digest": str markdown}', schema=_DIGEST_SCHEMA, logs_dir=logs_dir)
     text = out.get("digest", "")
     path = Path(logs_dir) / "digest_last.md"
     path.write_text(text + "\n", encoding="utf-8")
@@ -326,7 +333,7 @@ def describe_projects(projects: dict, *, logs_dir: str, today: str) -> dict:
             f"README/CLAUDE.md: {excerpt or '(no tiene)'}\n"
             "Describí en 2-3 frases QUÉ es este proyecto y qué tecnologías/temas "
             'toca (para que un juez decida si una nota de research le aplica). '
-            'JSON: {"desc": str}', schema=_DESC_SCHEMA)
+            'JSON: {"desc": str}', schema=_DESC_SCHEMA, logs_dir=logs_dir)
         meta[name] = {"desc": out.get("desc", ""), "updated": today}
         new += 1
     if new:
@@ -364,7 +371,8 @@ class _Judge:
             best, best_nov = None, -1.0
             for _ in range(_IDEATE_SAMPLES):
                 out = _llm_json(prompt, schema=_JUDGE_SCHEMA,
-                                temperature=_IDEATE_TEMP)
+                                temperature=_IDEATE_TEMP,
+                                logs_dir=str(_BUDGET_PATH.parent) if _BUDGET_PATH else None)
                 gist = (out.get("gist") or "").strip()
                 if not gist:
                     continue
@@ -384,7 +392,8 @@ class _Judge:
                 "\"justification\": str}}"
             ).format(lente=payload["lente"], context=str(payload.get("context"))[:2000],
                      visto=str(payload.get("ya_visto"))[:4000])
-            out = _llm_json(prompt, schema=_JUDGE_SCHEMA, temperature=_IDEATE_TEMP)
+            out = _llm_json(prompt, schema=_JUDGE_SCHEMA, temperature=_IDEATE_TEMP,
+                            logs_dir=str(_BUDGET_PATH.parent) if _BUDGET_PATH else None)
             return {"gist": out.get("gist"), "justification": out.get("justification", "")}
         # registry enriquecido primero; README crudo como fallback
         readme = _project_desc(str(payload.get("project") or ""))
@@ -407,7 +416,8 @@ class _Judge:
         ).format(note=str(payload.get("note"))[:3000], project=payload.get("project"),
                  path=payload.get("project_path"), readme=readme or "(sin README)",
                  cg=str(payload.get("codegraph"))[:1500])
-        out = _llm_json(prompt, schema=_JUDGE_SCHEMA)
+        out = _llm_json(prompt, schema=_JUDGE_SCHEMA,
+                        logs_dir=str(_BUDGET_PATH.parent) if _BUDGET_PATH else None)
         # guard determinista: sin codegraph NO hay lista de archivos -> el juez
         # no puede citar (medido 2026-08-14: invento RefinementManager.java en
         # un proyecto sin indice)
@@ -429,7 +439,8 @@ class _Refuter:
                                "Refutá solo redundante/incoherente/dañina.\n"
                                "Idea: {item}\nJSON: {{\"refuted\": bool, \"reason\": str}}")
             prompt = tpl.format(item=str(payload)[:3000])
-            out = _llm_json(prompt, schema=_REFUTE_SCHEMA)
+            out = _llm_json(prompt, schema=_REFUTE_SCHEMA,
+                            logs_dir=str(_BUDGET_PATH.parent) if _BUDGET_PATH else None)
             return {"refuted": bool(out.get("refuted", True)),
                     "reason": out.get("reason", "")}
         if "note" in payload:
@@ -447,7 +458,8 @@ class _Refuter:
                 "trabajo NO es razón para refutar.\n"
                 "Item: {item}\nJSON: {{\"refuted\": bool, \"reason\": str}}"
             ).format(item=str(payload)[:3000])
-            out = _llm_json(prompt, schema=_REFUTE_SCHEMA)
+            out = _llm_json(prompt, schema=_REFUTE_SCHEMA,
+                            logs_dir=str(_BUDGET_PATH.parent) if _BUDGET_PATH else None)
             return {"refuted": bool(out.get("refuted", True)),
                     "reason": out.get("reason", "")}
         prompt = (
@@ -455,7 +467,8 @@ class _Refuter:
             "solido e inatacable respondé refuted=false. Ante la duda, refuted=true.\n"
             "Item: {item}\nJSON: {{\"refuted\": bool, \"reason\": str}}"
         ).format(item=str(payload)[:3000])
-        out = _llm_json(prompt, schema=_REFUTE_SCHEMA)
+        out = _llm_json(prompt, schema=_REFUTE_SCHEMA,
+                        logs_dir=str(_BUDGET_PATH.parent) if _BUDGET_PATH else None)
         return {"refuted": bool(out.get("refuted", True)),
                 "reason": out.get("reason", "")}
 
