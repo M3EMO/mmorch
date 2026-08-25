@@ -76,7 +76,7 @@ def stuck_findings(history: list[dict], *, min_nights: int = _MIN_NIGHTS) -> lis
     # 2. autoresearch plano: mismo target, sin mejora, N corridas seguidas
     def _flat(r: dict) -> bool:
         a = r.get("autoresearch") or {}
-        return bool(a.get("target")) and not a.get("improved")
+        return bool(a.get("target")) and a.get("improved") is False
 
     n = _consecutive_recent(history, _flat)
     if n >= min_nights:
@@ -153,6 +153,9 @@ def _demo() -> None:
     assert not stuck_findings([muerto] * 6 + [vivo])  # PR abierto corta la racha
     plano = {"autoresearch": {"target": "p.txt", "improved": False}}
     assert any("autoresearch" in f for f in stuck_findings([plano] * 5))
+    # Caso borde: target sin clave 'improved' (schema change) NO debe contar como plano
+    sin_improved = {"autoresearch": {"target": "p.txt"}}
+    assert not any("autoresearch" in f for f in stuck_findings([sin_improved] * 5))
     assert stuck_findings([]) == []
     print("stuck_detector ok")
 
