@@ -196,14 +196,22 @@ def check_projects(projects: dict, *, run_fn=None, timeout: float = 600.0) -> di
     def _default_run(path: str) -> bool:
         py = _P(path) / ".venv" / "Scripts" / "python.exe"
         exe = str(py) if py.exists() else _sys.executable
+        import os
         import tempfile
         bt = tempfile.mkdtemp(prefix="mmorch_health_")
+        # SUITE_BUDGET_S: cuanto tiempo de TESTS le presta este chequeo al
+        # proyecto (el resto del timeout se lo come la coleccion). El proyecto
+        # decide que recortar — si su conftest no lo implementa, lo ignora y
+        # nada cambia. Medido 2026-08-24: "Portfolio financiero" tarda 20 min,
+        # el chequeo daba 10, y el timeout tapaba 2 tests rojos reales durante
+        # 9 noches. Un veredicto parcial y explicito vale mas que ninguno.
+        env = {**os.environ, "SUITE_BUDGET_S": str(round(timeout * 0.75))}
         # --basetemp: el pytest-current global de Windows queda con permisos
         # rotos (root cause documentada), y sin esto la limpieza final tira
         # PermissionError en CADA proyecto ajeno que se chequea aca
         r = subprocess.run([exe, "-m", "pytest", "-q", "-x",
                             f"--basetemp={bt}"], cwd=path,
-                           capture_output=True, timeout=timeout)
+                           capture_output=True, timeout=timeout, env=env)
         return r.returncode == 0
 
     run = run_fn or _default_run
