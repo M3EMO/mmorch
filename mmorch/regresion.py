@@ -50,6 +50,11 @@ from pathlib import Path
 _MAX_DIFF = 12000
 _TIMEOUT = 300
 _LLM_TIMEOUT = 180      # 60s no alcanza con un diff grande: medido, 3/5 timeouts
+# el DEFAULT_VERIFIER (flash-lite) no da la talla para esta tarea: escribio un
+# test que no pasaba ni en base. Medido sobre los mismos 5 casos —
+# flash-lite 3/5, deepseek-reasoner sin corridas validas (timeouts),
+# gemini-2.5-flash 5/5.
+MODELO = "gemini-2.5-flash"
 
 
 def declara_intencion(diff: str) -> bool:
@@ -148,11 +153,10 @@ def refutar_ejecutable(repo: str, branch: str, *, base: str, modelo: str | None 
     if correr_fn is None:
         correr_fn = _correr_test
     if llm_fn is None:
-        from mmorch.config import DEFAULT_VERIFIER
         from mmorch.schema import gated_json
 
         def llm_fn(prompt, *, schema):
-            return gated_json(modelo or DEFAULT_VERIFIER,
+            return gated_json(modelo or MODELO,
                               [{"role": "user", "content": prompt}], schema=schema,
                               pattern="refutar_ejecutable", phase="triage_branch",
                               temperature=0.0, timeout=_LLM_TIMEOUT)

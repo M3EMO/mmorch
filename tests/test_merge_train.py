@@ -89,3 +89,43 @@ def test_train_timeout_no_pierde_el_registro(tmp_path):
     r = run_train(repo, base="main", today="2026-08-19", test_fn=_cuelga)
     assert r["gate"] == "rojo" and r["train_branch"] is None
     assert r["gate_reason"] == "timeout"
+
+
+def _regresion_falsa(material, motivo="regresion probada: x"):
+    def fn(repo, branch, *, base):
+        return {"material": material, "motivo": motivo}
+    return fn
+
+
+def test_regresion_en_modo_observar_anota_pero_no_bloquea(tmp_path):
+    """Arranca observando a proposito: la medicion que lo respalda es n=5 con
+    casos elegidos por Claude. Ve como se porta antes de tener poder de veto."""
+    repo = make_repo(tmp_path)
+    _mk_branch(repo, "mmorch/hard-1", "mmorch/a.py", "a = 2\n")
+    r = run_train(repo, base="main", today="2026-08-26", test_fn=lambda: True,
+                  regresion_fn=_regresion_falsa(True))
+    assert r["merged"] == ["mmorch/hard-1"]          # NO la aparto
+    assert "mmorch/hard-1" in r["regresiones"]       # pero la anoto
+    assert r["gate"] == "verde"
+
+
+def test_regresion_en_modo_bloquear_si_aparta(tmp_path):
+    repo = make_repo(tmp_path)
+    _mk_branch(repo, "mmorch/hard-1", "mmorch/a.py", "a = 2\n")
+    r = run_train(repo, base="main", today="2026-08-26", test_fn=lambda: True,
+                  regresion_fn=_regresion_falsa(True), modo_regresion="bloquear")
+    assert r["skipped"] == "todas apartadas"
+    assert "regresion probada" in r["apartadas_triage"]["mmorch/hard-1"]
+
+
+def test_regresion_que_explota_no_frena_el_tren(tmp_path):
+    repo = make_repo(tmp_path)
+    _mk_branch(repo, "mmorch/hard-1", "mmorch/a.py", "a = 2\n")
+
+    def _explota(repo_, branch, *, base):
+        raise RuntimeError("sin API")
+
+    r = run_train(repo, base="main", today="2026-08-26", test_fn=lambda: True,
+                  regresion_fn=_explota, modo_regresion="bloquear")
+    assert r["merged"] == ["mmorch/hard-1"]          # fail-open: sigue el tren
+    assert "sin API" in str(r["regresiones"]) or "RuntimeError" in str(r["regresiones"])

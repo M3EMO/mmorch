@@ -403,8 +403,14 @@ def main() -> None:
         _base = _sp.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
                         cwd=str(ROOT), capture_output=True,
                         text=True).stdout.strip()
+        # refutacion ejecutable en modo OBSERVAR: anota que habria bloqueado
+        # sin bloquear. Cuando haya suficientes noches para comparar contra el
+        # juicio humano real, pasa a modo_regresion="bloquear".
+        from mmorch.regresion import refutar_ejecutable
         rec["merge_train"] = run_train(str(ROOT), base=_base,
-                                       today=time.strftime("%Y-%m-%d"))
+                                       today=time.strftime("%Y-%m-%d"),
+                                       regresion_fn=refutar_ejecutable,
+                                       modo_regresion="observar")
     except Exception as e:
         rec["merge_train"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
 

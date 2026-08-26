@@ -38,7 +38,8 @@ def yellow_branches(repo: str, *, base: str) -> list[str]:
 
 
 def run_train(repo: str, *, base: str, today: str | None = None,
-              test_fn=None, triage_fn=None) -> dict:
+              test_fn=None, triage_fn=None, regresion_fn=None,
+              modo_regresion: str = "observar") -> dict:
     """Arma el tren en un worktree aislado: merge secuencial + suite sobre la
     union. Retorna {train_branch, merged, skipped_conflict, gate}."""
     logs = Path(repo) / "logs"
@@ -72,6 +73,28 @@ def run_train(repo: str, *, base: str, today: str | None = None,
     branches = aptas
     if not branches:
         return {"skipped": "todas apartadas por triage", "apartadas_triage": apartadas}
+
+    # refutacion EJECUTABLE sobre lo que el triage dejo pasar. Arranca en modo
+    # "observar": ANOTA que habria bloqueado y no bloquea nada. La medicion que
+    # lo respalda es n=5 con casos que elegi yo — antes de darle poder de veto
+    # conviene ver como se porta contra el juicio humano real por unas noches.
+    # Para activarlo: modo_regresion="bloquear".
+    regresiones: dict[str, str] = {}
+    if regresion_fn is not None:
+        for b in list(branches):
+            try:
+                r = regresion_fn(repo, b, base=base)
+            except Exception as e:       # jamas frena al tren
+                regresiones[b] = f"regresion fallo: {type(e).__name__}"
+                continue
+            if r.get("material"):
+                regresiones[b] = r.get("motivo", "")[:200]
+                if modo_regresion == "bloquear":
+                    branches.remove(b)
+                    apartadas[b] = f"regresion probada: {r.get('motivo', '')[:120]}"
+        if not branches:
+            return {"skipped": "todas apartadas", "apartadas_triage": apartadas,
+                    "regresiones": regresiones, "modo_regresion": modo_regresion}
 
     train = f"mmorch/tren-{today}"
     _git(repo, "branch", "-D", train)                       # tren previo del dia
@@ -120,7 +143,8 @@ def run_train(repo: str, *, base: str, today: str | None = None,
               "merged": merged, "skipped_conflict": skipped,
               "gate": "verde" if gate_ok else ("rojo" if merged else "vacio"),
               "gate_reason": gate_reason,
-              "apartadas_triage": apartadas}
+              "apartadas_triage": apartadas,
+              "regresiones": regresiones, "modo_regresion": modo_regresion}
     try:
         logs.mkdir(exist_ok=True)
         with open(logs / "merge_train.jsonl", "a", encoding="utf-8") as f:
