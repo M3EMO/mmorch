@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **125 módulos · 46 MCP tools · 707 tests.**
+_Auto-generado por `mmorch.docgen`._ **127 módulos · 46 MCP tools · 715 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -62,6 +62,7 @@ _Auto-generado por `mmorch.docgen`._ **125 módulos · 46 MCP tools · 707 tests
 | `mmorch/curation.py` | Curacion humana de propuestas — logica compartida entre scripts/veredicto.py, |
 | `mmorch/curiosity.py` | curiosity — deteccion de TENSION en la memoria (modulo cognitivo #3). |
 | `mmorch/dataset.py` | dataset — construye un dataset de CALIDAD DE CÓDIGO desde git history, SIN labels |
+| `mmorch/debate.py` | Debate cross-family sobre una branch: refutador -> habilitador -> juez. |
 | `mmorch/decision_mining.py` | Mineria de DECISIONES humanas desde transcripts de Claude Code. |
 | `mmorch/docs_extract.py` | Extracción de texto de documentos (PDF hoy) — dos niveles, medidos en |
 | `mmorch/durable_runs.py` | durable_runs — heartbeat + zombie reaper for in-process jobs (graft G9 from paperclip). |
@@ -120,6 +121,7 @@ _Auto-generado por `mmorch.docgen`._ **125 módulos · 46 MCP tools · 707 tests
 | `mmorch/providers.py` | Provider layer — thin OpenAI-compatible client per external model. |
 | `mmorch/pty_session.py` | pty_session — interactive PTY sessions for the Lotus terminal. |
 | `mmorch/refutar.py` | Refutacion cross-family de una branch propuesta — el escalon entre el triage |
+| `mmorch/regresion.py` | Refutacion EJECUTABLE de una branch: la objecion se prueba o no existe. |
 | `mmorch/repo_mining.py` | Minería de repos ajenos — aprender de cualquier repo SIN acumularlo. |
 | `mmorch/retention.py` | retention — decay Ebbinghaus + Zeigarnik para la capa semantica de memory. |
 | `mmorch/route.py` | route (I-2) — confidence-gated escalation. Ahorra cupo: el modelo barato |
