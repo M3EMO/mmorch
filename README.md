@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **123 módulos · 46 MCP tools · 695 tests.**
+_Auto-generado por `mmorch.docgen`._ **124 módulos · 46 MCP tools · 702 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -147,6 +147,7 @@ _Auto-generado por `mmorch.docgen`._ **123 módulos · 46 MCP tools · 695 tests
 | `mmorch/tournament.py` | tournament — elegir EL mejor de pocos candidatos por gusto/calidad (naming, |
 | `mmorch/trajectory.py` | trajectory — robo de Hermes: 'trajectory compression para entrenar la proxima |
 | `mmorch/transcript_store.py` | transcript_store — per-job inter-agent transcript (in-memory). |
+| `mmorch/triage.py` | Triage mecanico de branches propuestas — cero LLM, cero cupo, determinista. |
 | `mmorch/vault.py` | vault — memoria de largo plazo mmorch-legible sobre el vault Obsidian. |
 | `mmorch/wayfinder_prep.py` | wayfinder-prep — investigación autónoma de tickets, decisión humana. |
 | `mmorch/weights.py` | weights — gestion de pesos de nodos neuronales (model-cards + verificacion). Source of |

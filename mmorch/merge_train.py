@@ -38,7 +38,7 @@ def yellow_branches(repo: str, *, base: str) -> list[str]:
 
 
 def run_train(repo: str, *, base: str, today: str | None = None,
-              test_fn=None) -> dict:
+              test_fn=None, triage_fn=None) -> dict:
     """Arma el tren en un worktree aislado: merge secuencial + suite sobre la
     union. Retorna {train_branch, merged, skipped_conflict, gate}."""
     logs = Path(repo) / "logs"
@@ -48,6 +48,30 @@ def run_train(repo: str, *, base: str, today: str | None = None,
     branches = yellow_branches(repo, base=base)
     if not branches:
         return {"skipped": "sin amarillas pendientes"}
+
+    # triage mecanico ANTES de armar el tren: el gate de ejecucion acepta todo
+    # lo que no rompe tests, y eso deja pasar ruido. Medido 2026-08-25: de las
+    # 5 branches de la noche, 3 eran para descartar y el tren las llevaba a
+    # todas — revisarlas una por una y despues mergear el tren REINTRODUCIA las
+    # rechazadas. El tren empaqueta lo que sobrevivio, no lo que compila.
+    if triage_fn is None:
+        from mmorch.triage import triage_branch as triage_fn
+    apartadas: dict[str, str] = {}
+    aptas = []
+    for b in branches:
+        try:
+            t = triage_fn(repo, b, base=base)
+        except Exception as e:            # el triage jamas frena al tren
+            aptas.append(b)
+            apartadas[b] = f"triage fallo, pasa igual: {type(e).__name__}"
+            continue
+        if t.get("veredicto") == "ok":
+            aptas.append(b)
+        else:
+            apartadas[b] = f"{t.get('veredicto')}: {t.get('motivo', '')[:120]}"
+    branches = aptas
+    if not branches:
+        return {"skipped": "todas apartadas por triage", "apartadas_triage": apartadas}
 
     train = f"mmorch/tren-{today}"
     _git(repo, "branch", "-D", train)                       # tren previo del dia
@@ -95,7 +119,8 @@ def run_train(repo: str, *, base: str, today: str | None = None,
     result = {"train_branch": train if (merged and gate_ok) else None,
               "merged": merged, "skipped_conflict": skipped,
               "gate": "verde" if gate_ok else ("rojo" if merged else "vacio"),
-              "gate_reason": gate_reason}
+              "gate_reason": gate_reason,
+              "apartadas_triage": apartadas}
     try:
         logs.mkdir(exist_ok=True)
         with open(logs / "merge_train.jsonl", "a", encoding="utf-8") as f:
