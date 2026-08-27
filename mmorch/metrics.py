@@ -28,6 +28,33 @@ def log_path() -> Path:
     return _LOG_PATH
 
 
+# --- rotacion (W3.4): metrics.jsonl crece sin tope (append-only). >50MB se renombra
+# con timestamp; los segmentos rotados son INMUTABLES y el budget re-deriva el gasto
+# del mes desde TODOS los segmentos (rotated_paths) — rotar nunca "borra" gasto.
+_ROTATE_MAX_BYTES = 50 * 1024 * 1024
+
+
+def rotated_paths() -> list[Path]:
+    """Segmentos rotados metrics-*.jsonl, orden por nombre (= cronologico)."""
+    return sorted(_LOG_DIR.glob("metrics-*.jsonl"))
+
+
+def _rotate_if_needed() -> None:
+    # llamado bajo _LOCK (antes del append). Fallo de rotacion = side-channel: nunca
+    # debe frenar el logging del evento (mejor un archivo gordo que un evento perdido).
+    try:
+        if _LOG_PATH.exists() and _LOG_PATH.stat().st_size > _ROTATE_MAX_BYTES:
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            target = _LOG_DIR / f"metrics-{stamp}.jsonl"
+            n = 0
+            while target.exists():          # dos rotaciones en el mismo segundo
+                n += 1
+                target = _LOG_DIR / f"metrics-{stamp}-{n}.jsonl"
+            _LOG_PATH.rename(target)
+    except OSError:
+        pass
+
+
 def log_event(
     *,
     pattern: str,
@@ -59,6 +86,7 @@ def log_event(
     line = json.dumps(record, ensure_ascii=False)
     with _LOCK:
         _LOG_DIR.mkdir(parents=True, exist_ok=True)
+        _rotate_if_needed()
         with open(_LOG_PATH, "a", encoding="utf-8") as fh:
             fh.write(line + "\n")
 
@@ -151,12 +179,16 @@ def cache_stats(*, window_n: int | None = 500) -> dict:
 def summary() -> dict:
     """Aggregate the log: total cost, tokens, calls per family/model."""
     events = read_events()
-    total_cost = sum(e["cost_usd"] for e in events)
+    total_cost = 0.0
     by_family: dict[str, float] = {}
     by_model: dict[str, int] = {}
     for e in events:
-        by_family[e["family"]] = by_family.get(e["family"], 0.0) + e["cost_usd"]
-        by_model[e["model"]] = by_model.get(e["model"], 0) + 1
+        # .get() defensivo (W3.4): una linea incompleta (torn write, editada a mano)
+        # no debe reventar el summary entero — se cuenta con lo que tenga.
+        c = e.get("cost_usd", 0.0) or 0.0
+        total_cost += c
+        by_family[e.get("family", "?")] = by_family.get(e.get("family", "?"), 0.0) + c
+        by_model[e.get("model", "?")] = by_model.get(e.get("model", "?"), 0) + 1
     return {
         "calls": len(events),
         "total_cost_usd": round(total_cost, 6),

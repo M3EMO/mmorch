@@ -205,6 +205,8 @@ def _default_commit(repo: str):
 def build_project(task: str, repo: str, *, external_test: str | None,
                   gen_model: str = DEFAULT_GENERATOR, verifier_model: str = DEFAULT_VERIFIER,
                   max_fix: int = 3, max_depth: int = 2, max_gen_calls: int = 150,
+                  max_usd_per_run: float | None = None,
+                  run_cost: Callable[[], float] | None = None,
                   plan: Callable[[str, str | None], list[dict]] | None = None,
                   gen: Callable[[dict, str], str] | None = None,
                   run_test: Callable[[dict, str, str], tuple[bool, str]] | None = None,
@@ -226,6 +228,18 @@ def build_project(task: str, repo: str, *, external_test: str | None,
     gen = gen or _default_gen(gen_model, repo, task)
     run_test = run_test or _default_run_test(repo)
 
+    # breaker USD por-run (W3.4): el call-breaker de abajo acota LLAMADAS, no dolares —
+    # una call cara (contexto grande, modelo premium, timeouts facturados) compone
+    # distinto. providers.call() suma el costo (real o estimado) de cada API call al
+    # tracker registrado; run_cost es el seam de test (costo fake sin API).
+    if max_usd_per_run is None:
+        try:
+            max_usd_per_run = float(os.getenv("MMORCH_MAX_USD_PER_RUN", "5.0"))
+        except ValueError:
+            max_usd_per_run = 5.0
+    _usd_tracker: dict = {"usd": 0.0}
+    _run_cost = run_cost or (lambda: _usd_tracker["usd"])
+
     # call-breaker (blind-spot #6): units x max_fix x re-asks compone sin tope de $. Cota dura de
     # invocaciones al coder por run; excedida -> el build ESCALA (nunca sigue quemando en silencio).
     _gen_calls = {"n": 0}
@@ -235,6 +249,10 @@ def build_project(task: str, repo: str, *, external_test: str | None,
         _gen_calls["n"] += 1
         if _gen_calls["n"] > max_gen_calls:
             raise RuntimeError(f"call-breaker: >{max_gen_calls} coder calls in one build")
+        if max_usd_per_run > 0 and _run_cost() > max_usd_per_run:
+            raise RuntimeError(
+                f"usd-breaker: costo acumulado del run ${_run_cost():.4f} supera "
+                f"max_usd_per_run ${max_usd_per_run:.2f}")
         return _inner_gen(unit, feedback)
     run_snippet = run_snippet or _default_run_snippet()
     propose_test = propose_test or _default_propose_test(verifier_model)
@@ -320,9 +338,14 @@ def build_project(task: str, repo: str, *, external_test: str | None,
         _learn(1.0 if iok else 0.0, task)          # the whole-assembly verdict is a signal too
         return iok, idetail
 
-    res = run_project_build(task, external_test=external_test, plan_fn=plan_fn, build_fn=build_fn,
-                            gate_fn=gate_fn, commit_fn=commit, integrate_fn=integrate_fn,
-                            max_depth=max_depth)
+    from .providers import register_run_tracker, unregister_run_tracker
+    register_run_tracker(_usd_tracker)
+    try:
+        res = run_project_build(task, external_test=external_test, plan_fn=plan_fn, build_fn=build_fn,
+                                gate_fn=gate_fn, commit_fn=commit, integrate_fn=integrate_fn,
+                                max_depth=max_depth)
+    finally:
+        unregister_run_tracker(_usd_tracker)
     res["unverified"] = unverified
     if res.get("status") == "escalate" and plan_err.get("last"):
         res["plan_error"] = plan_err["last"]   # surface the swallowed planner failure, not just 'empty worklist'
@@ -332,7 +355,8 @@ def build_project(task: str, repo: str, *, external_test: str | None,
     import hashlib
     res["provenance"] = {"gen_model": gen_model, "verifier_model": verifier_model,
                          "coder_sys": hashlib.sha256(_CODER_SYS.encode()).hexdigest()[:12],
-                         "gen_calls": _gen_calls["n"], "few_shots": None}
+                         "gen_calls": _gen_calls["n"], "few_shots": None,
+                         "run_usd": round(_usd_tracker["usd"], 6)}
     return res
 
 
