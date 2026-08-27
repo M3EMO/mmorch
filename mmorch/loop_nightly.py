@@ -87,7 +87,9 @@ def _llm_json(prompt: str, *, schema: dict, model: str | None = None,
     return out
 
 
-_PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts"
+# prompts/ viaja DENTRO del paquete (codigo, no estado — W2.1): resuelve
+# igual instalado como wheel que en el checkout editable.
+_PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 # temperatura de ideacion: 0.0 colapsa en el atractor mas saliente (medido
 # 2026-08-14: la misma expansion pegada a las 7 candidatas). Adjudicacion y
 # refutacion quedan en 0.0 — ahi el determinismo es virtud.

@@ -10,7 +10,7 @@ propiedades ESTRUCTURALES deterministas de los outputs:
   - trampa:        1.0 si la candidata sin-valor-posible quedo SIN madurar (null correcto)
 
 score = promedio de las 4. Uso como target de autoresearch:
-  MMORCH_AR_TARGET=prompts/idea_madurar.txt
+  MMORCH_AR_TARGET=mmorch/prompts/idea_madurar.txt
   MMORCH_AR_SCORER=scripts/score_idea_maturation.py
 """
 

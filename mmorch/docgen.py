@@ -39,7 +39,7 @@ def module_table() -> str:
 
 
 def mcp_tools() -> list[str]:
-    src = (ROOT / "mcp_server.py")
+    src = (PKG / "mcp_server.py")
     if not src.exists():
         return []
     txt = src.read_text(encoding="utf-8")

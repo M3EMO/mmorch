@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **128 módulos · 46 MCP tools · 721 tests.**
+_Auto-generado por `mmorch.docgen`._ **131 módulos · 46 MCP tools · 730 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -53,6 +53,7 @@ _Auto-generado por `mmorch.docgen`._ **128 módulos · 46 MCP tools · 721 tests
 | `mmorch/checkers.py` | checkers — libreria propia de VERIFICADORES DETERMINISTAS (tool-verify). |
 | `mmorch/classify.py` | classify_and_act — rutear por TIPO y manejar cada rama distinto (triage, model |
 | `mmorch/claude_exec.py` | claude_exec — ejecutor que corre en el PLAN de Claude (cupo), no por API. Invoca el |
+| `mmorch/cli.py` | CLI minimo instalable (`mmorch`): status y health desde la terminal. |
 | `mmorch/code_embedder.py` | code_embedder — inferencia NUMPY PURA del encoder SimCLR del flywheel (sin torch). |
 | `mmorch/code_loop.py` | code_loop — el WIRE de Fase 5 a produccion: tareas de CODIGO con lazo cerrado. |
 | `mmorch/code_review.py` | code_review — cero-cupo senior reviewer: read code, flag where it breaks the mmorch coding |
@@ -94,12 +95,14 @@ _Auto-generado por `mmorch.docgen`._ **128 módulos · 46 MCP tools · 721 tests
 | `mmorch/learn.py` | learn — meta-inteligencia: mmorch aprende de su propio metrics.jsonl (I-1). |
 | `mmorch/loop.py` | loop_until_done — scope DESCONOCIDO, 'segui hasta que este limpio'. Control-flow |
 | `mmorch/loop_nightly.py` | F5 loop-cerrado: orquestador nightly del loop de ideas (spec .scratch/loop-cerrado/spec.md). |
+| `mmorch/mcp_server.py` | MCP wrapper — exposes mmorch patterns as tools to Claude Code. |
 | `mmorch/mcp_telemetry.py` | mcp_telemetry — logger CENTRALIZADO de invocaciones MCP (audit 2026-07: 44 tools, ~20 |
 | `mmorch/megasource.py` | megasource (Fase 2) — megafuente autodidacta: primer hit = provider PRICING. |
 | `mmorch/memory.py` | memory — memoria episodica + semantica para mmorch (DuckDB 2 capas). |
 | `mmorch/merge_train.py` | Merge train — las branches amarillas del dia se conglomeran en UN merge. |
 | `mmorch/metrics.py` | Observability — append-only JSONL metric log (§11 backbone). |
 | `mmorch/minds.py` | minds — global federation graph across registered projects (read-only). |
+| `mmorch/nightly.py` | nightly — driver ALWAYS-ON del loop nocturno (Windows Task Scheduler, no Claude). |
 | `mmorch/nodes.py` | nodes — el registry de la ORQUESTA: nombra a cada miembro que mmorch (el DIRECTOR) |
 | `mmorch/nudge.py` | nudge — robo de Hermes 'periodic memory nudging': cada N loops cerrados, dispara |
 | `mmorch/outcomes.py` | Outcome recording and expiry for proposals. |
@@ -163,7 +166,7 @@ _Auto-generado por `mmorch.docgen`._ **128 módulos · 46 MCP tools · 721 tests
 | `mmorch/worktree_driver.py` | worktree_driver — isolated execution in a throwaway git worktree (graft G3 follow-up). |
 <!-- /mmorch:auto:modules -->
 
-Otros: `mcp_server.py` (MCP wrapper), `tests/` (regression gate), `vault/` (memoria +
+Otros: `mmorch/mcp_server.py` (MCP wrapper; shim compat en la raiz), `tests/` (regression gate), `vault/` (memoria +
 research), `smoke_test.py`, `AUDIT_*.md` / `INNOVATION_ROADMAP_*.md`.
 
 > Las secciones entre `<!-- mmorch:auto:* -->` las regenera `python -m mmorch.docgen`

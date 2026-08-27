@@ -17,11 +17,14 @@ import os
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
+_PKG = Path(__file__).resolve().parent
 _GATES = ("none", "tests", "verdict")
 
 
 def roles_dir() -> Path:
-    return Path(os.getenv("MMORCH_ROLES_DIR") or (_ROOT / "roles"))
+    # roles/ viaja DENTRO del paquete (codigo — W2.1); workflows/ sigue en la
+    # raiz del checkout (policy-as-data editable por el humano).
+    return Path(os.getenv("MMORCH_ROLES_DIR") or (_PKG / "roles"))
 
 
 def workflows_dir() -> Path:

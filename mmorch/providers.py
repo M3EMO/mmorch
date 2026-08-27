@@ -16,10 +16,13 @@ from .config import spec
 from .cost import cost_usd
 from .metrics import log_event
 
-load_dotenv()  # picks up ~/.claude/orchestration/.env if cwd or parents contain it
-# Also explicitly load the package-local .env regardless of cwd.
+# El .env canonico vive en el home de mmorch (W2.1): resuelve igual desde
+# cualquier cwd (entry points instalados, Cursor, Task Scheduler). Se carga
+# PRIMERO porque dotenv no pisa claves ya cargadas — el home gana; el load()
+# por cwd queda como fallback para checkouts/tests con .env propio.
 from .paths import home as _mmorch_home
 load_dotenv(_mmorch_home() / ".env")
+load_dotenv()
 
 # Lazy import so the package imports even if `openai` isn't installed yet.
 try:

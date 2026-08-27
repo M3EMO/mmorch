@@ -35,7 +35,7 @@ def test_default_ensemble_is_degraded(monkeypatch):
 
 
 def test_budget_status_tool_matches_module(monkeypatch):
-    import mcp_server
+    from mmorch import mcp_server
     from mmorch.budget import status as budget_status
     # sin limite -> enforced False
     monkeypatch.delenv("MMORCH_MAX_MONTHLY_USD", raising=False)
@@ -45,7 +45,7 @@ def test_budget_status_tool_matches_module(monkeypatch):
 
 
 def test_budget_status_enforced_toggles(monkeypatch):
-    import mcp_server
+    from mmorch import mcp_server
     monkeypatch.setenv("MMORCH_MAX_MONTHLY_USD", "100")
     out = json.loads(mcp_server.mmorch_budget_status())
     assert out["enforced"] is True and out["limit"] == 100.0

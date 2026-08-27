@@ -4,11 +4,11 @@ SYSTEM PROMPT del coder contra el pass-rate de una batería congelada de tasks a
 satura: un wording/instrucción mejor mueve el pass-rate de verdad, a diferencia de
 code_quality/mutation_score sobre módulos (que daban 1.0 fijo — medido 2026-07).
 
-autoresearch edita prompts/coder_prompt.txt (o MMORCH_CODER_PROMPT); este scorer lo lee, genera
+autoresearch edita mmorch/prompts/coder_prompt.txt (o MMORCH_CODER_PROMPT); este scorer lo lee, genera
 cada solución con ESE system prompt (temperature=0 -> casi determinista, minimiza ruido), la
 EJECUTA contra sus asserts, e imprime 'score: <pass_rate>'. Batería reusada de ab_intuition_router.
 
-Uso:  python scripts/score_coder_prompt.py prompts/coder_prompt.txt
+Uso:  python scripts/score_coder_prompt.py mmorch/prompts/coder_prompt.txt
 """
 import os
 import pathlib

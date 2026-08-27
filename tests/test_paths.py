@@ -25,8 +25,7 @@ _ALLOWLIST = {
     "evolve.py",         # self-evolution: edita el codigo del checkout
     "evolve_findings.py",  # default root para escanear el repo (codigo)
     "goal.py",           # GOAL.md/GOAL.hash viven versionados en el repo
-    "loop_nightly.py",   # prompts/ del paquete (codigo)
-    "workflow_spec.py",  # roles/ y workflows/ del paquete (codigo)
+    "workflow_spec.py",  # workflows/ del checkout (policy-as-data)
 }
 
 # laxo a proposito: cualquier variante de anclar la raiz al archivo cuenta

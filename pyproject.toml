@@ -39,6 +39,9 @@ dev = ["ruff==0.15.20", "mypy==2.1.0"]                          # gates estatico
 [project.scripts]
 mmorch-server = "mmorch.server:main"
 mmorch-sync = "mmorch.sync:_cli"
+mmorch-mcp = "mmorch.mcp_server:main"
+mmorch-nightly = "mmorch.nightly:main"
+mmorch = "mmorch.cli:main"
 
 [tool.ruff]
 target-version = "py312"
@@ -69,8 +72,9 @@ build-backend = "setuptools.build_meta"
 packages = ["mmorch"]
 
 [tool.setuptools.package-data]
-# pesos del nodo neuronal + vocab + datos viajan con el paquete (deploy sin re-entrenar)
-mmorch = ["py.typed"]
+# pesos del nodo neuronal + vocab + datos viajan con el paquete (deploy sin
+# re-entrenar); prompts/ y roles/ son CODIGO del paquete (W2.1), no estado
+mmorch = ["py.typed", "prompts/*.txt", "roles/*.md"]
 
 [tool.setuptools.exclude-package-data]
 mmorch = []
