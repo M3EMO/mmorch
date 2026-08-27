@@ -16,10 +16,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import re
 import subprocess
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -285,8 +287,39 @@ _RED_CONTENT = re.compile(
     r"\b(os\.system|subprocess\.(?:run|Popen|call)|shutil\.rmtree|os\.remove|os\.unlink|"
     r"\beval\s*\(|\bexec\s*\(|__import__|rm\s+-rf|DROP\s+TABLE|TRUNCATE|"
     r"requests\.(?:post|put|delete|patch)|socket\.|"
-    r"transfer|withdraw|wallet|exchange|stripe|paypal|place_order|send_money|private_key|"
-    r"secret_key|seed_phrase)\b", re.I)
+    r"transfer|withdraw|wallet|exchange|stripe|paypal|place_order|send_money)\b", re.I)
+
+
+# Palabras de CREDENCIAL separadas de las ACCIONES: su mera presencia en identificadores,
+# tests o docs no es peligrosa (falso rojo medido: fixtures con "password"/"secret_key"
+# bloqueaban merges verdes legitimos — defecto 05 #7). Lo rojo es un VALOR real asignado:
+# `password = "<literal con entropia>"`. Conservador a proposito: umbrales bajos, ante
+# duda rojo; solo la palabra suelta o un placeholder corto dejan de bloquear.
+_SECRET_ASSIGN = re.compile(
+    r"\b(?:password|passwd|secret|secret_key|private_key|api_key|access_token|"
+    r"auth_token|seed_phrase)\b\s*[:=]\s*[\"']([^\"']{8,})[\"']", re.I)
+
+
+def _char_entropy(s: str) -> float:
+    """Entropia de Shannon por caracter (bits) — proxy barato de 'parece clave real'."""
+    if not s:
+        return 0.0
+    counts = Counter(s)
+    n = len(s)
+    return -sum(c / n * math.log2(c / n) for c in counts.values())
+
+
+def _secret_hits(text: str) -> set[str]:
+    """Asignaciones de credencial cuyo VALOR parece secreto real: literal largo con
+    entropia alta, o >=20 chars con forma hex/base64 (aunque la entropia sea baja).
+    El hit incluye el valor -> el delta vs baseline funciona igual que con acciones."""
+    hits = set()
+    for m in _SECRET_ASSIGN.finditer(text or ""):
+        val = m.group(1)
+        if (len(val) >= 12 and _char_entropy(val) >= 3.0) or (
+                len(val) >= 20 and re.fullmatch(r"[A-Za-z0-9+/=_\-]+", val)):
+            hits.add(m.group(0))
+    return hits
 
 
 def red_content_hits(text: str, *, baseline: str | None = None) -> list[str]:
@@ -296,9 +329,9 @@ def red_content_hits(text: str, *, baseline: str | None = None) -> list[str]:
     rojo a sí mismo). El escudo real queda: un self-edit que INTRODUCE una capacidad peligrosa
     nueva (que no estaba en baseline) sigue siendo rojo. No es caso-especial de 'self' —
     principiado, aplica a cualquier archivo que ya mencione firmas legítimamente (regex, docs)."""
-    hits = set(m.group(0) for m in _RED_CONTENT.finditer(text or ""))
+    hits = set(m.group(0) for m in _RED_CONTENT.finditer(text or "")) | _secret_hits(text or "")
     if baseline is not None:
-        hits -= set(m.group(0) for m in _RED_CONTENT.finditer(baseline))
+        hits -= set(m.group(0) for m in _RED_CONTENT.finditer(baseline)) | _secret_hits(baseline)
     return sorted(hits)
 
 

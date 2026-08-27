@@ -91,6 +91,71 @@ def test_automerge_yellow_refuses(tmp_path):
     assert r["merged"] is False and r["zone"] == "yellow"
 
 
+def test_nuevo_archivo_con_palabra_password_no_es_rojo(tmp_path):
+    """05 #7: la MERA palabra password/secret en un test/doc nuevo no es rojo."""
+    repo = make_repo(tmp_path)
+    _branch(repo, "b-fixture", "tests/test_login.py",
+            'def test_password_reset():\n'
+            '    password = "test"\n'
+            '    assert "secret" in "secret field"\n')
+    assert classify_branch(repo, "b-fixture", base="main")["zone"] == "green"
+
+
+def test_nuevo_archivo_con_secreto_real_es_rojo(tmp_path):
+    """Valor asignado con entropia (parece clave real) => rojo, aun en archivo nuevo."""
+    repo = make_repo(tmp_path)
+    _branch(repo, "b-leak", "tests/test_cfg.py",
+            'api_key = "sk-9fK2mQ8xL0pW7zR4tY6uB1nV"\n\ndef test_x():\n    assert api_key\n')
+    assert classify_branch(repo, "b-leak", base="main")["zone"] == "red"
+
+
+def test_placeholder_de_baja_entropia_no_es_rojo():
+    """Umbral conservador pero util: placeholder repetitivo pasa, clave real no."""
+    from mmorch.evolve import red_content_hits
+    assert red_content_hits('password = "hunter2hunter2"') == []
+    assert red_content_hits('secret_key = "9fK2mQ8xL0pW7zR4tY6u"') != []
+    # delta: el mismo secreto ya presente en baseline no cuenta como NUEVO
+    leak = 'private_key = "9fK2mQ8xL0pW7zR4tY6u"'
+    assert red_content_hits(leak, baseline=leak) == []
+
+
+def test_e2e_carril_verde_ledger_y_rollback(tmp_path):
+    """End-to-end: merge verde real en repo fake + ledger con schema obligatorio
+    + rollback ensayado via git revert del merge commit."""
+    import json
+    from pathlib import Path
+    repo = make_repo(tmp_path)
+    _branch(repo, "b-verde", "tests/test_extra.py",
+            "def test_ok():\n    assert True\n")
+    r = try_automerge(repo, "b-verde", base="main", source="e2e")
+    assert r["merged"] is True and r["veredicto"] == "merged"
+    assert r["diff_hash"] and r["merge_sha"]
+    assert {"kill_switch_ok", "paths_ok", "contenido_ok",
+            "solo_tests_o_nuevos"} <= set(r["checks"])
+    lines = (Path(repo) / "logs" / "automerge_ledger.jsonl").read_text(
+        encoding="utf-8").splitlines()
+    rec = json.loads(lines[-1])
+    for k in ("ts", "branch", "diff_hash", "checks", "veredicto", "merge_sha"):
+        assert k in rec, f"ledger sin campo obligatorio: {k}"
+    assert rec["merge_sha"] == r["merge_sha"] and rec["branch"] == "b-verde"
+    # rollback: revert del merge deja el arbol sin el archivo mergeado
+    rv = _git(repo, "revert", "-m", "1", "--no-edit", r["merge_sha"])
+    assert rv.returncode == 0, rv.stderr
+    assert not (Path(repo) / "tests" / "test_extra.py").exists()
+
+
+def test_ledger_registra_rechazo_amarillo(tmp_path):
+    import json
+    from pathlib import Path
+    repo = make_repo(tmp_path)
+    _branch(repo, "b-mod", "mmorch/mod.py", "x = 9\n")
+    r = try_automerge(repo, "b-mod", base="main", source="test")
+    assert r["veredicto"] == "rechazado_yellow" and r["merge_sha"] is None
+    rec = json.loads((Path(repo) / "logs" / "automerge_ledger.jsonl")
+                     .read_text(encoding="utf-8").splitlines()[-1])
+    assert rec["veredicto"] == "rechazado_yellow" and rec["diff_hash"]
+
+
 def test_automerge_paused(tmp_path):
     repo = make_repo(tmp_path)
     _branch(repo, "b-tests", "tests/test_mod.py", "def test_x():\n    assert True\n # y\n")

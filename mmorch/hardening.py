@@ -120,11 +120,6 @@ def harden(repo_dir: str, *, today: str, build_fn=None, survivors_fn=None,
         built = res.get("status") == "built"
         if built:
             wt.capture(f"hardening {module}: {survived} sobrevivientes atacados")
-        state[module] = {"retry_after": retry_after,
-                        "result": "built" if built else res.get("status", "fail"),
-                        "survived_before": survived,
-                        "branch": wt.branch if built else None}
-        atomic_write_json(state_path, state)
         out = {"module": module, "survived_before": survived,
                "status": res.get("status"), "branch": wt.branch if built else None}
         if built:
@@ -138,6 +133,14 @@ def harden(repo_dir: str, *, today: str, build_fn=None, survivors_fn=None,
                                                 source="hardening")
             except Exception as e:
                 out["automerge"] = {"merged": False, "reason": str(e)[:100]}
+        # persistir DESPUES del automerge (mismo 05 #6 de auto_repair): el estado
+        # escrito refleja tambien el resultado del merge, no solo el build.
+        state[module] = {"retry_after": retry_after,
+                        "result": "built" if built else res.get("status", "fail"),
+                        "survived_before": survived,
+                        "branch": wt.branch if built else None,
+                        "automerge": out.get("automerge")}
+        atomic_write_json(state_path, state)
         return out
     finally:
         # branch sobrevive solo si el build paso el gate (revision humana)

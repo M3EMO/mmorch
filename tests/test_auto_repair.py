@@ -91,3 +91,39 @@ def test_repair_usa_rec_en_memoria_sin_leer_nightly_jsonl(tmp_path):
               build_fn=lambda t, w, g: {"status": "built"})
     assert r.get("status") != "sin record nocturno"
     assert "no deberia" not in str(r)  # sanity: no exploto por falta de archivo
+
+
+def test_repair_persiste_estado_despues_del_automerge(tmp_path, monkeypatch):
+    """05 #6: el estado se escribe DESPUES del automerge y lo incluye — un crash
+    entre medio ya no deja repair_state sin el resultado real del merge."""
+    import subprocess as _sp
+    from mmorch.auto_repair import repair
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    for cmd in (["git", "init", "-b", "main"],
+                ["git", "config", "user.email", "t@t"],
+                ["git", "config", "user.name", "t"]):
+        _sp.run(cmd, cwd=tmp_path, capture_output=True)
+    (tmp_path / "x.py").write_text("x = 1\n", encoding="utf-8")
+    _sp.run(["git", "add", "-A"], cwd=tmp_path, capture_output=True)
+    _sp.run(["git", "commit", "-m", "base", "--no-verify"], cwd=tmp_path,
+            capture_output=True)
+
+    import mmorch.automerge as am
+    state_path = logs / "repair_state.json"
+    visto = {}
+
+    def fake_automerge(repo, branch, *, base, source=""):
+        # el orden es el contrato: al momento del automerge NADA persistido aun
+        visto["estado_ya_persistido"] = state_path.exists()
+        return {"merged": True, "zone": "green", "veredicto": "merged"}
+
+    monkeypatch.setattr(am, "try_automerge", fake_automerge)
+    r = repair(str(tmp_path), today="2026-08-19",
+               rec={"ts": 1, "algo": {"error": "boom"}},
+               build_fn=lambda t, w, g: {"status": "built"})
+    assert r["automerge"]["merged"] is True
+    assert visto["estado_ya_persistido"] is False
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    entry = next(iter(state.values()))
+    assert entry["automerge"]["veredicto"] == "merged"

@@ -118,10 +118,6 @@ def repair(repo_dir: str, *, today: str, build_fn=None,
         built = res.get("status") == "built"
         if built:
             wt.capture(f"auto-repair {target['source']}: {target['detail'][:60]}")
-        state[sig] = {"retry_after": retry_after, "source": target["source"],
-                      "result": res.get("status", "fail"),
-                      "branch": wt.branch if built else None}
-        atomic_write_json(state_path, state)
         out = {"source": target["source"], "detail": target["detail"][:150],
                "status": res.get("status"),
                "branch": wt.branch if built else None}
@@ -137,6 +133,14 @@ def repair(repo_dir: str, *, today: str, build_fn=None,
                                                 source="auto_repair")
             except Exception as e:
                 out["automerge"] = {"merged": False, "reason": str(e)[:100]}
+        # persistir DESPUES del automerge (05 #6): un crash entre persist y merge
+        # dejaba repair_state sin el resultado real; ahora el estado escrito ya
+        # incluye que paso con el merge, y un crash previo solo reintenta.
+        state[sig] = {"retry_after": retry_after, "source": target["source"],
+                      "result": res.get("status", "fail"),
+                      "branch": wt.branch if built else None,
+                      "automerge": out.get("automerge")}
+        atomic_write_json(state_path, state)
         return out
     finally:
         keep = state.get(sig, {}).get("result") == "built"
