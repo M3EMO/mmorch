@@ -69,26 +69,6 @@ def goal_guard(path: Path = _GOAL_PATH, hash_path: Path = _GOAL_HASH_PATH,
             f"HALT auto-aplicación. Si el cambio es legítimo, un HUMANO corre authorize_goal().")
 
 
-def pursue_goal(generate, *, max_rounds: int = 3, gen_model: str = DEFAULT_GENERATOR,
-                verifier_model: str = DEFAULT_VERIFIER, path: Path = _GOAL_PATH):
-    """Block-until-aligned con RETRY (el análogo productivo del /goal nativo: 'seguí hasta
-    cumplir'). `generate(feedback: str|None) -> str` produce un cambio; si `goal_aligned`
-    refuta, se realimenta la refutación y se regenera, hasta alinear o agotar max_rounds.
-    Mismo patrón que schema.gated_json pero contra el GOAL. Devuelve
-    {change, verdict, rounds, aligned}; aligned=False si se agotó sin pasar."""
-    feedback = None
-    last = None
-    for r in range(1, max_rounds + 1):
-        change = generate(feedback)
-        v = goal_aligned(change, gen_model=gen_model, verifier_model=verifier_model, path=path)
-        last = v
-        if v.passed:
-            return {"change": change, "verdict": v, "rounds": r, "aligned": True}
-        feedback = ("El cambio NO alineó con el GOAL. Refutaciones: "
-                    + "; ".join(v.refutations) + ". Corregí para alinear.")
-    return {"change": None, "verdict": last, "rounds": max_rounds, "aligned": False}
-
-
 def goal_aligned(change: str, *, gen_model: str = DEFAULT_GENERATOR,
                  verifier_model: str = DEFAULT_VERIFIER, path: Path = _GOAL_PATH,
                  phase: str = "goal") -> Verdict:

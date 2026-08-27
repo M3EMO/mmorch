@@ -3,7 +3,7 @@ import json
 
 from mmorch import megasource, prices
 from mmorch.cost import cost_usd
-from mmorch.evolve import zone_of, apply_change, rollback
+from mmorch.evolve import zone_of, apply_change
 
 
 def test_effective_prices_falls_back_to_config(tmp_path):
@@ -36,11 +36,14 @@ def test_propose_builds_yellow_reversible_change(tmp_path, monkeypatch):
     assert ch.target == "prices.json"
     # zona: prices.json NO está en red-list, contenido sin acciones peligrosas -> verde/amarillo
     assert zone_of(ch, root=tmp_path) in ("green", "yellow")
-    # reversible: aplicar y revertir
+    # aplicar escribe el override; reversible via el snapshot `before` del Change
+    # (el rollback estructural se borro en W4.3 — en produccion revierte git)
     apply_change(ch, root=tmp_path)
     loaded = json.loads((tmp_path / "prices.json").read_text())
     assert loaded["deepseek-chat"]["price_in"] == 0.99
-    assert rollback(ch, root=tmp_path)
+    (tmp_path / "prices.json").write_text(ch.before, encoding="utf-8")
+    reverted = json.loads((tmp_path / "prices.json").read_text())
+    assert reverted.get("deepseek-chat", {}).get("price_in") != 0.99
 
 
 def test_cost_uses_override(tmp_path, monkeypatch):

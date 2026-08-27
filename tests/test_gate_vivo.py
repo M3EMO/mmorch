@@ -73,7 +73,11 @@ def test_nightly_main_halts_with_auditable_episode(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 # 2. goal_aligned sobre el diff pre-PR                                         #
 # --------------------------------------------------------------------------- #
-def _round(tmp_path, monkeypatch, aligned_fn):
+def _fit_ok(c):
+    return {"ok": True, "checks": {}}
+
+
+def _round(tmp_path, monkeypatch, aligned_fn, fitness_fn=_fit_ok):
     """1 candidato verde que pasa sandbox; devuelve (resultado, pr_calls, state_path)."""
     monkeypatch.setattr(E, "_git", lambda *a, cwd: SimpleNamespace(returncode=1, stdout=""))
     (tmp_path / "logs").mkdir()
@@ -87,6 +91,7 @@ def _round(tmp_path, monkeypatch, aligned_fn):
     c = snapshot_change("x.py", "def f(): return 1", "mejora x", root=tmp_path)
     r = coordinated_evolve_round(
         [c], root=tmp_path, path=state, pr_fn=pr_fn, aligned_fn=aligned_fn,
+        fitness_fn=fitness_fn,
         sandbox_fn=lambda c: {"ok": True, "branch": "b1", "fitness": {}})
     return r, pr_calls, state
 
@@ -152,3 +157,60 @@ def test_eval_harness_is_red_zone(target):
 def test_normal_module_still_yellow():
     c = E.Change("mmorch/memory.py", "x = 2", "x = 1", "cambio normal")
     assert zone_of(c) == "yellow"
+
+
+# --------------------------------------------------------------------------- #
+# 4. W4.3 — evaluate() (fitness compuesta) como gate pre-PR                    #
+# --------------------------------------------------------------------------- #
+def test_fitness_fail_blocks_pr_and_logs(tmp_path, monkeypatch):
+    seen = []
+
+    def fit_bad(c):
+        seen.append(c.target)
+        return {"ok": False, "checks": {"ast_valid": True, "ensemble_xfamily": False}}
+
+    r, pr_calls, state = _round(tmp_path, monkeypatch,
+                                lambda c: SimpleNamespace(passed=True, refutations=[]),
+                                fitness_fn=fit_bad)
+    assert r["blocked_fitness"] == ["x.py"] and r["opened"] == []
+    assert pr_calls == [], "fitness roja => NO se abre PR"
+    assert seen == ["x.py"]
+    assert json.loads(state.read_text(encoding="utf-8")) == {}, "no se trackea"
+    red = json.loads((tmp_path / "logs" / "evolve_red.jsonl")
+                     .read_text(encoding="utf-8").splitlines()[0])
+    assert red["kind"] == "fitness_fail" and red["checks"]["ensemble_xfamily"] is False
+
+
+def test_fitness_ok_opens_pr(tmp_path, monkeypatch):
+    r, pr_calls, _ = _round(tmp_path, monkeypatch,
+                            lambda c: SimpleNamespace(passed=True, refutations=[]))
+    assert r["opened"] == ["x.py"] and r["blocked_fitness"] == []
+    assert pr_calls == ["b1"]
+
+
+def test_fitness_infra_error_fails_open(tmp_path, monkeypatch):
+    def boom(c):
+        raise RuntimeError("proveedor caído")
+
+    r, pr_calls, _ = _round(tmp_path, monkeypatch,
+                            lambda c: SimpleNamespace(passed=True, refutations=[]),
+                            fitness_fn=boom)
+    # fail-OPEN: mismo contrato que aligned_fn — el humano del PR sigue gateando
+    assert r["opened"] == ["x.py"] and pr_calls == ["b1"]
+
+
+def test_default_pr_fitness_skips_goal_and_relative_cost(monkeypatch):
+    """El default NO duplica lo ya pagado en la ronda: goal=False (lo cubre aligned_fn
+    de W4.1) y el costo relativo no gatea (solo budget absoluto)."""
+    captured = {}
+
+    def fake_evaluate(c, **kw):
+        captured.update(kw)
+        return {"ok": True, "checks": {}}
+
+    monkeypatch.setattr(E, "evaluate", fake_evaluate)
+    c = E.Change("x.py", "def f(): return 2\n", "def f(): return 1\n", "cambia f")
+    r = E._pr_fitness(c)
+    assert r["ok"]
+    assert captured["goal"] is False, "goal_aligned ya lo corre aligned_fn (W4.1)"
+    assert captured["cost_fn"](c) is True, "costo relativo sin medicion no gatea"

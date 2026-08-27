@@ -7,7 +7,7 @@ what worked, instead of every task being a fresh cold arm.
 
 arm key = f"{model_arm}#{signature_key}"  (e.g. "deepseek-chat@0.6#GENERATE|g=self...|b=exec_truth")
 
-Separate state file (bandit_sig.json) so it never collides with the flat bandit_state.json.
+State file: bandit_sig.json — desde W4.3 es EL bandit (el estado plano zombie se borro).
 - record(model, reward, task): learn from one outcome.
 - select(models, task): Thompson-pick the best model for this signature (cold sigs explore).
 - candidates(models, task): the top-K SET (recall is high-recall; VERIFY disposes — never the key).
@@ -23,12 +23,10 @@ import json
 import time
 from pathlib import Path
 
-from .feedback import ThompsonBandit
+from .feedback import ThompsonBandit, _SIG_BANDIT   # una sola definicion del path (W4.3)
 from .signature import Signature, key as sig_key, signature
 
 from .paths import logs_dir
-
-_SIG_BANDIT = logs_dir() / "bandit_sig.json"
 
 
 def _arm(model: str, task: str, complexity: str = "") -> str:

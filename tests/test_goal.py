@@ -1,9 +1,8 @@
 """tests goal.py — ancla anti-goal-drift. Partes deterministas (sin API)."""
 import pytest
 from mmorch.goal import (load_goal, goal_hash, goal_aligned,
-                         authorize_goal, goal_guard, pursue_goal, GoalTampered)
+                         authorize_goal, goal_guard, GoalTampered)
 from mmorch import patterns
-import mmorch.goal as G
 
 
 def test_load_goal_has_contract():
@@ -50,30 +49,3 @@ def test_goal_guard_tamper_halt(tmp_path):
         goal_guard(g, h)                   # cambió sin re-autorizar -> HALT
     authorize_goal(g, h)                   # humano re-autoriza
     goal_guard(g, h)                       # ahora OK
-
-
-def test_pursue_goal_retries_until_aligned(monkeypatch):
-    calls = {"n": 0}
-
-    def fake_verify(artifact, *, rubric, gen_model, verifier_model, phase, task_kind):
-        calls["n"] += 1
-        ok = calls["n"] >= 2               # falla la 1ra, alinea la 2da
-        return patterns.Verdict(ok, 0.9, [] if ok else ["deriva del norte"], "x", verifier_model, 0.0)
-
-    monkeypatch.setattr(G, "adversarial_verify", fake_verify)
-    seen = []
-
-    def generate(feedback):
-        seen.append(feedback)
-        return f"cambio intento {len(seen)}"
-
-    r = pursue_goal(generate, max_rounds=3)
-    assert r["aligned"] and r["rounds"] == 2
-    assert seen[0] is None and "Refutaciones" in seen[1]   # realimenta la refutación
-
-
-def test_pursue_goal_gives_up(monkeypatch):
-    monkeypatch.setattr(G, "adversarial_verify",
-                        lambda *a, **k: patterns.Verdict(False, 0.5, ["no"], "x", "m", 0.0))
-    r = pursue_goal(lambda fb: "x", max_rounds=2)
-    assert not r["aligned"] and r["change"] is None

@@ -26,7 +26,11 @@ _log = logging.getLogger(__name__)
 from .paths import logs_dir
 
 _FEEDBACK_LOG = logs_dir() / "feedback.jsonl"
-_BANDIT_STATE = logs_dir() / "bandit_state.json"
+# W4.3: UN solo estado de bandit. El estado plano previo era zombie — la via MCP lo
+# escribia pero nadie lo leia para decidir, y feedback_stats lo reportaba como "el
+# bandit". El default ahora es el sig-bandit real (el que consumen intuition/route/
+# nightly); intuition importa este path (una sola definicion).
+_SIG_BANDIT = logs_dir() / "bandit_sig.json"
 
 
 @dataclass
@@ -88,7 +92,7 @@ class ThompsonBandit:
     posterior Beta(alpha, beta); select muestrea cada brazo y elige el max; update
     suma reward a alpha y (1-reward) a beta. Anda desde la PRIMERA muestra."""
 
-    def __init__(self, path: Path = _BANDIT_STATE):
+    def __init__(self, path: Path = _SIG_BANDIT):
         self.path = path
         self._arms: dict[str, list[float]] = {}
         if path.exists():

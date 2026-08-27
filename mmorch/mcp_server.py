@@ -608,25 +608,31 @@ def mmorch_record_outcome(
     predicted_conf: what the system believed at decision time (enables calibration/ECE).
     source: where the label came from (opus|downstream|test|human).
 
-    Records the labeled outcome AND updates the Thompson bandit posterior for `arm`.
-    Returns JSON {recorded, arm, reward, bandit: {mean, n}}.
+    Records the labeled outcome; with a non-empty `context` the library also trains the
+    signature-keyed bandit (the ONLY bandit since W4.3 — the old flat state file was a
+    zombie: written here but never read for any decision). Same semantics as calling
+    mmorch.record_outcome directly (W5.1: wrapper without its own logic).
+    Returns JSON {recorded, arm, reward, bandit: {mean, n}} for the sig-keyed arm.
     """
     o = _record_outcome(arm, reward, pattern=pattern, predicted_conf=predicted_conf,
                         source=source, context=context)
-    b = _ThompsonBandit()
-    b.update(arm, reward)
+    bandit_stats: dict = {}
+    if context:
+        from mmorch.intuition import _arm as _sig_arm
+        bandit_stats = _ThompsonBandit().stats().get(_sig_arm(arm, context), {})
     return json.dumps({
         "recorded": True, "arm": o.arm, "reward": o.reward,
-        "bandit": b.stats().get(arm, {})}, ensure_ascii=False)
+        "bandit": bandit_stats}, ensure_ascii=False)
 
 
 @_tool
 def mmorch_feedback_stats() -> str:
-    """Inspect the feedback loop: Thompson bandit posteriors per arm (mean reward, n)
-    + calibration (ECE conf-predicted vs reality, accuracy per arm). Read-only, no
-    spend. Use to see whether the loop is actually learning (n>0 across arms) and
-    whether self-confidence is trustworthy (low ECE) or lying (high ECE -> raise
-    thresholds). Returns JSON {bandit, calibration}."""
+    """Inspect the feedback loop: the REAL signature-keyed Thompson bandit posteriors
+    (arm = "model#signature"; the flat zombie state this used to report was removed
+    in W4.3) + calibration (ECE conf-predicted vs reality, accuracy
+    per arm). Read-only, no spend. Use to see whether the loop is actually learning
+    (n>0 across arms) and whether self-confidence is trustworthy (low ECE) or lying
+    (high ECE -> raise thresholds). Returns JSON {bandit, calibration}."""
     return json.dumps({
         "bandit": _ThompsonBandit().stats(),
         "calibration": _calibration(),
@@ -653,7 +659,7 @@ def mmorch_evolve_self(target_file: str, finding: str) -> str:
     zona (reversibilidad×blast-radius, incluyendo scan de acciones peligrosas en el
     código generado) y se corre la fitness compuesta SIN tests (ast + goal_aligned +
     ensemble cross-family + cost/budget). NO toca el repo, NO mergea. Aplicar de verdad
-    = acción deliberada de librería/humano (sandbox_branch -> promote_branch/PR). Spends
+    = acción deliberada de librería/humano (sandbox_branch -> PR -> merge humano). Spends
     external $ (swarm+verify), not cupo. Returns {zone, would_apply, checks, refused_red}."""
     from mmorch.evolve import propose_patch, snapshot_change, zone_of, evaluate
     after = propose_patch(target_file, finding)
@@ -669,7 +675,7 @@ def mmorch_evolve_self(target_file: str, finding: str) -> str:
         return json.dumps({"zone": "red", "would_apply": False, "refused_red": True,
                            "reason": "zona roja -> gate humano, nunca auto-aplica",
                            "change_id": change.id}, ensure_ascii=False)
-    ev = evaluate(change, run_tests=False)   # sin mutar repo; tests reales = sandbox_branch aparte
+    ev = evaluate(change)   # sin mutar repo; tests reales = sandbox_branch aparte
     return json.dumps({"zone": zone, "would_apply": bool(ev["ok"]) and zone in ("green", "yellow"),
                        "checks": ev["checks"], "ensemble_degraded": ev.get("ensemble_degraded"),
                        "change_id": change.id, "note": "DRY: no aplicado. Promote = accion humana."},

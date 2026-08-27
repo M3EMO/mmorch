@@ -3,7 +3,7 @@ import subprocess
 import sys
 import pytest
 
-from mmorch.evolve import Change, sandbox_branch, promote_branch
+from mmorch.evolve import Change, sandbox_branch
 
 
 def _git(tmp, *args):
@@ -33,9 +33,9 @@ def test_sandbox_branch_pass_keeps_branch(tmp_path):
     assert res["ok"] and res["branch"] == f"mmorch-sbx-{ch.id}"
     # el repo vivo NO cambió (cap.py no existe en main)
     assert not (tmp_path / "cap.py").exists()
-    # promover: merge a main -> ahora sí existe
-    pr = promote_branch(res["branch"], root=tmp_path)
-    assert pr["merged"] and (tmp_path / "cap.py").exists()
+    # promover = merge (humano/tren; promote_branch se borro en W4.3) -> ahora sí existe
+    m = _git(tmp_path, "merge", "--ff-only", res["branch"])
+    assert m.returncode == 0 and (tmp_path / "cap.py").exists()
 
 
 def test_sandbox_branch_fail_deletes_branch(tmp_path):

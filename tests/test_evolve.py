@@ -1,4 +1,4 @@
-"""Tests evolve (subset DGM gated): fitness, archive, propose. Subprocess/API mockeados."""
+"""Tests evolve (subset DGM gated): propose + coordinacion. Subprocess/API mockeados."""
 import sys, pathlib, types
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import mmorch.evolve as EV
@@ -8,27 +8,6 @@ from mmorch.providers import CallResult
 
 def _proc(out, rc=0):
     return types.SimpleNamespace(stdout=out, stderr="", returncode=rc)
-
-
-def test_fitness_all_pass(monkeypatch):
-    monkeypatch.setattr(EV.subprocess, "run", lambda *a, **k: _proc("30 passed in 1s", 0))
-    f = EV.fitness()
-    assert f["passed"] == 30 and f["failed"] == 0 and f["pass_rate"] == 1.0 and f["ok"] is True
-
-
-def test_fitness_with_failures(monkeypatch):
-    monkeypatch.setattr(EV.subprocess, "run", lambda *a, **k: _proc("28 passed, 2 failed in 1s", 1))
-    f = EV.fitness()
-    assert f["passed"] == 28 and f["failed"] == 2 and f["ok"] is False
-    assert 0.9 < f["pass_rate"] < 0.94
-
-
-def test_archive_roundtrip(tmp_path, monkeypatch):
-    monkeypatch.setattr(EV, "_ARCHIVE", tmp_path / "arch.jsonl")
-    EV.archive_variant("v1", {"pass_rate": 1.0, "ok": True}, notes="fix X")
-    EV.archive_variant("v2", {"pass_rate": 0.5, "ok": False})
-    arch = EV.read_archive()
-    assert len(arch) == 2 and arch[0]["name"] == "v1" and arch[1]["fitness"]["ok"] is False
 
 
 def test_propose_patch_is_readonly(monkeypatch, tmp_path):
