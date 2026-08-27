@@ -228,12 +228,15 @@ def touch_notes(ids: list[int], *, con=None, path: Path = _DB_PATH) -> None:
             con.close()
 
 
-def close_loop(note_id: int, *, path: Path = _DB_PATH) -> None:
+def close_loop(note_id: int, *, path: Path = _DB_PATH) -> bool:
     """Cierra un open-loop (tarea/pregunta resuelta): vuelve la nota elegible a
-    olvido normal. Quien marca/cierra es el caller, explicito — sin auto-deteccion."""
+    olvido normal. Quien marca/cierra es el caller, explicito — sin auto-deteccion.
+    Devuelve si la nota existia (W5.1: ok=True sobre 0 filas era exito silencioso)."""
     con = _connect(path)
     try:
-        con.execute("UPDATE semantic SET open_loop = FALSE WHERE id = ?", [note_id])
+        rows = con.execute("UPDATE semantic SET open_loop = FALSE WHERE id = ? "
+                           "RETURNING id", [note_id]).fetchall()
+        return bool(rows)
     finally:
         con.close()
 
@@ -246,25 +249,31 @@ def close_loop(note_id: int, *, path: Path = _DB_PATH) -> None:
 #   confirm    -> reinforce()  (boost mas fuerte que un acceso normal)
 #   contradict -> flag_contradiction()  (deja de surfacear; recall cae al raw)
 # ---------------------------------------------------------------------------
-def reinforce(note_id: int, *, boost: int = 3, path: Path = _DB_PATH) -> None:
+def reinforce(note_id: int, *, boost: int = 3, path: Path = _DB_PATH) -> bool:
     """Confirma una nota (el caller la uso/valido): sube access_count en `boost`
     (un confirm ~ varios accesos) y refresca last_accessed_at. Sube importance ->
-    mas resistente al olvido. ponytail: boost es knob, default 3."""
+    mas resistente al olvido. ponytail: boost es knob, default 3.
+    Devuelve si la nota existia (W5.1: ok honesto, no exito sobre 0 filas)."""
     con = _connect(path)
     try:
-        con.execute("UPDATE semantic SET access_count = access_count + ?, "
-                    "last_accessed_at = ? WHERE id = ?", [boost, time.time(), note_id])
+        rows = con.execute("UPDATE semantic SET access_count = access_count + ?, "
+                           "last_accessed_at = ? WHERE id = ? RETURNING id",
+                           [boost, time.time(), note_id]).fetchall()
+        return bool(rows)
     finally:
         con.close()
 
 
-def flag_contradiction(note_id: int, *, path: Path = _DB_PATH) -> None:
+def flag_contradiction(note_id: int, *, path: Path = _DB_PATH) -> bool:
     """Marca una nota como contradicha: needs_review=TRUE. recall/recall_keyword
     dejan de devolverla (no repetir info sospechada-falsa); cae al episodic raw, que
-    es el hecho sin editar (FIX B). NO la tombstonea — resolvable. Auto-correccion."""
+    es el hecho sin editar (FIX B). NO la tombstonea — resolvable. Auto-correccion.
+    Devuelve si la nota existia (W5.1)."""
     con = _connect(path)
     try:
-        con.execute("UPDATE semantic SET needs_review = TRUE WHERE id = ?", [note_id])
+        rows = con.execute("UPDATE semantic SET needs_review = TRUE WHERE id = ? "
+                           "RETURNING id", [note_id]).fetchall()
+        return bool(rows)
     finally:
         con.close()
 
@@ -286,16 +295,17 @@ def pending_review(scope: str | None = None, *, path: Path = _DB_PATH) -> list[N
         con.close()
 
 
-def resolve_review(note_id: int, *, drop: bool = False, path: Path = _DB_PATH) -> None:
+def resolve_review(note_id: int, *, drop: bool = False, path: Path = _DB_PATH) -> bool:
     """Resuelve una contradiccion. drop=True -> tombstone (la nota era falsa).
     drop=False -> limpia needs_review (la contradiccion era erronea, vuelve a surfacear).
-    El episodic raw nunca se toca en ningun caso."""
+    El episodic raw nunca se toca en ningun caso. Devuelve si la nota existia (W5.1)."""
     if drop:
-        tombstone_note(note_id, path=path)
-        return
+        return tombstone_note(note_id, path=path)
     con = _connect(path)
     try:
-        con.execute("UPDATE semantic SET needs_review = FALSE WHERE id = ?", [note_id])
+        rows = con.execute("UPDATE semantic SET needs_review = FALSE WHERE id = ? "
+                           "RETURNING id", [note_id]).fetchall()
+        return bool(rows)
     finally:
         con.close()
 
@@ -317,11 +327,14 @@ def open_loops(scope: str | None = None, *, path: Path = _DB_PATH) -> list[Note]
         con.close()
 
 
-def tombstone_note(note_id: int, *, path: Path = _DB_PATH) -> None:
-    """Soft-delete (FIX/HARDEN): la nota deja de recuperarse. El episodic raw queda."""
+def tombstone_note(note_id: int, *, path: Path = _DB_PATH) -> bool:
+    """Soft-delete (FIX/HARDEN): la nota deja de recuperarse. El episodic raw queda.
+    Devuelve si la nota existia (W5.1)."""
     con = _connect(path)
     try:
-        con.execute("UPDATE semantic SET tombstone=TRUE WHERE id=?", [note_id])
+        rows = con.execute("UPDATE semantic SET tombstone=TRUE WHERE id=? "
+                           "RETURNING id", [note_id]).fetchall()
+        return bool(rows)
     finally:
         con.close()
 
@@ -351,6 +364,12 @@ def recall(query: str, scope: str = "global", *, k: int = 5,
     semanticas devueltas. recall_hybrid llama con track=False y toca su propio set
     fusionado para no doble-contar.
     """
+    # bordes (W5.1, hueco #3): k sin techo disparaba el fallback episodico masivo;
+    # window_days negativo daba cutoff futuro -> 0 resultados en silencio.
+    if not 1 <= int(k) <= 200:
+        raise ValueError(f"k debe estar en [1, 200], vino {k}")
+    if window_days is not None and window_days <= 0:
+        raise ValueError(f"window_days debe ser > 0, vino {window_days}")
     con = _connect(path)
     try:
         chain = _scope_chain(scope)

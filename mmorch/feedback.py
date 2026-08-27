@@ -47,7 +47,11 @@ class Outcome:
 def record_outcome(arm: str, reward: float, *, pattern: str = "",
                    predicted_conf: float | None = None, source: str = "",
                    context: str = "", path: Path = _FEEDBACK_LOG) -> Outcome:
-    """Registra un outcome etiquetado (append-only). reward se clampa a [0,1]."""
+    """Registra un outcome etiquetado (append-only). reward y predicted_conf se
+    clampan a [0,1] al ESCRIBIR — antes solo se clampaban al leer (reliability_bins/
+    calibration) y el log podia acumular valores fuera de rango (W5.1, hueco #6)."""
+    if predicted_conf is not None:
+        predicted_conf = max(0.0, min(1.0, float(predicted_conf)))
     o = Outcome(ts=time.time(), arm=arm, reward=max(0.0, min(1.0, float(reward))),
                 pattern=pattern, predicted_conf=predicted_conf, source=source, context=context)
     path.parent.mkdir(parents=True, exist_ok=True)

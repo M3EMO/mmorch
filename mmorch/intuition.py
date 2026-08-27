@@ -44,6 +44,15 @@ def record(model: str, reward: float, task: str, *, complexity: str = "",
     return arm
 
 
+def arm_stats(model: str, task: str, *, complexity: str = "",
+              bandit: ThompsonBandit | None = None) -> dict:
+    """Posterior {mean, n} del brazo sig-keyed de este (modelo, tarea) — lo que
+    record()/feedback entrenaron. {} si el brazo es frio. Read-only (W5.1: el
+    readback que hacia el wrapper MCP de record_outcome vive aca)."""
+    b = bandit or ThompsonBandit(_SIG_BANDIT)
+    return b.stats().get(_arm(model, task, complexity), {})
+
+
 def select(models: list[str], task: str, *, complexity: str = "",
            bandit: ThompsonBandit | None = None) -> str:
     """Thompson-pick the best MODEL for this signature. Cold signatures explore (Beta(1,1))."""

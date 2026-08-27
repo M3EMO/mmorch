@@ -119,6 +119,9 @@ def cynefin_classify(request: str, *, router_model: str = DEFAULT_ROUTER,
     Escala a Opus si: clase invalida, conf < threshold, o dominio 'chaotic' (en caos
     la jugada es actuar ya, no rutear barato). Etiqueta, no actua — el caller wirea
     los handlers via classify_and_act(classes=CYNEFIN_CLASSES, ...) si quiere dispatch."""
+    # mismo clamp que route(): threshold es probabilidad, fuera de [0,1] el gate
+    # degenera en silencio (W5.1, hueco #5)
+    threshold = max(0.0, min(1.0, float(threshold)))
     cls, conf, cost = classify(request, CYNEFIN_CLASSES, router_model=router_model, phase=phase)
     cost = round(cost, 6)
     if cls is None or conf < threshold:

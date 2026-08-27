@@ -64,8 +64,15 @@ def start_rubric(task: str, criteria: list[dict], *, K: int = 5, arm: str = "",
         except Exception:
             pass
     for c in criteria:
+        # validar TODO el shape en el borde (W5.1, hueco #7): un criterio sin id
+        # reventaba recien dentro del loop, con un KeyError lejos del caller
+        if not isinstance(c, dict):
+            raise ValueError(f"criterio invalido (se esperaba dict): {c!r}")
+        if not c.get("id"):
+            raise ValueError(f"criterio sin 'id': {c!r}")
         if c.get("kind") not in ("checkable", "subjective"):
-            raise ValueError(f"criterio {c.get('id')}: kind invalido")
+            raise ValueError(f"criterio {c.get('id')}: kind invalido "
+                             "(debe ser 'checkable' o 'subjective')")
         if c["kind"] == "checkable" and not c.get("checker"):
             raise ValueError(f"criterio {c.get('id')}: checkable sin checker")
     if family_of(gen_model) == family_of(judge_model):

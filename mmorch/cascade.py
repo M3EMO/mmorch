@@ -63,6 +63,19 @@ def cascade(
     usa prior.select(bandit, cands, context=prompt) — el k-NN contextual prima los
     pseudo-conteos Beta. Con scale=0 es bit-a-bit identico al bandit puro."""
     steps = steps or [(DEFAULT_GENERATOR, 0.7), (DEFAULT_VERIFIER, 0.85)]
+    # validar shape en el borde (W5.1, hueco #1): un step mal formado reventaba con
+    # IndexError/ValueError crudos recien al iterar, lejos del caller
+    norm: list[tuple[str, float]] = []
+    for s in steps:
+        try:
+            model, thr = s[0], float(s[1])
+        except (IndexError, TypeError, ValueError):
+            raise ValueError(
+                f"step invalido {s!r}: se espera [model: str, threshold: float]") from None
+        if not isinstance(model, str) or not model:
+            raise ValueError(f"step invalido {s!r}: model debe ser str no vacio")
+        norm.append((model, max(0.0, min(1.0, thr))))
+    steps = norm
     used: list[str] = []
     arms: list[str] = []
     total = 0.0

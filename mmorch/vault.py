@@ -152,6 +152,47 @@ def write_validated(title: str, body: str, *, project: str, folder: str = 'resea
     return p
 
 
+def write_research_note(title: str, body: str, *, project: str, folder: str = "research",
+                        status: str = "seed", confidence: str = "", sources: str = "",
+                        tags: str = "") -> tuple[Path, Path]:
+    """Puerta de ALTO nivel para callers de borde (MCP/CLI): arma el frontmatter desde
+    strings CSV, escribe la nota validada, puentea un gist a memoria (scope global) y
+    dispara babel ingest async. Antes esta orquestacion vivia en el wrapper MCP (W5.1:
+    la logica va en la libreria, el wrapper solo adapta tipos). Devuelve (nota, moc)."""
+    import threading
+
+    fm: dict = {"status": status or "seed"}
+    if confidence:
+        fm["confidence"] = confidence
+    if sources:
+        fm["sources"] = [s.strip() for s in sources.split(",") if s.strip()]
+    extra = [t.strip() for t in (tags or "").split(",") if t.strip()]
+    fm["tags"] = ["research", project] + [t for t in extra if t != project]
+
+    def _bridge(gist: str) -> None:
+        # decision 09: gist textual a duckdb scope global; el recall existente lo
+        # encuentra y la sesion lee la nota completa por path. Import lazy: vault no
+        # debe depender duro de memory (y remember gasta una call barata de destilado).
+        from .memory import remember
+        remember("global", gist, kind="vault_note")
+
+    def _babel_async(path: Path) -> None:
+        # decision 03 pedia cola del server; thread daemon = mismo efecto async sin
+        # endpoint nuevo. El nightly barre notas sin babel: perder el thread no pierde nada.
+        def _run() -> None:
+            try:
+                from .babel import ingest
+                ingest(path, folder=folder)
+            except Exception:
+                pass  # side-channel: el gate/nightly deciden, jamas romper el write
+        threading.Thread(target=_run, daemon=True).start()
+
+    p = write_validated(title, body, project=project, folder=folder,
+                        frontmatter=fm, remember_fn=_bridge,
+                        enqueue_babel_fn=_babel_async)
+    return p, VAULT / "moc" / f"{project}.md"
+
+
 def regenerate_moc(project: str) -> Path:
     """Genera/actualiza el MOC del proyecto escaneando el vault."""
     if not project or not project.strip():

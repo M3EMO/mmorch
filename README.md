@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **131 módulos · 46 MCP tools · 798 tests.**
+_Auto-generado por `mmorch.docgen`._ **131 módulos · 46 MCP tools · 813 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -96,7 +96,7 @@ _Auto-generado por `mmorch.docgen`._ **131 módulos · 46 MCP tools · 798 tests
 | `mmorch/loop.py` | loop_until_done — scope DESCONOCIDO, 'segui hasta que este limpio'. Control-flow |
 | `mmorch/loop_nightly.py` | F5 loop-cerrado: orquestador nightly del loop de ideas (spec .scratch/loop-cerrado/spec.md). |
 | `mmorch/mcp_server.py` | MCP wrapper — exposes mmorch patterns as tools to Claude Code. |
-| `mmorch/mcp_telemetry.py` | mcp_telemetry — logger CENTRALIZADO de invocaciones MCP (audit 2026-07: 44 tools, ~20 |
+| `mmorch/mcp_telemetry.py` | mcp_telemetry — logger CENTRALIZADO de invocaciones MCP (audit 2026-07; hoy 46 tools, ~20 |
 | `mmorch/megasource.py` | megasource (Fase 2) — megafuente autodidacta: primer hit = provider PRICING. |
 | `mmorch/memory.py` | memory — memoria episodica + semantica para mmorch (DuckDB 2 capas). |
 | `mmorch/merge_train.py` | Merge train — las branches amarillas del dia se conglomeran en UN merge. |

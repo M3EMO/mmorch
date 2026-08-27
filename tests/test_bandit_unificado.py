@@ -60,6 +60,11 @@ def test_mcp_record_outcome_sin_doble_train(monkeypatch):
 
     monkeypatch.setattr(srv, "_record_outcome", fake_record)
     monkeypatch.setattr(srv, "_ThompsonBandit", _FakeBandit)
+    # W5.1: el readback del posterior vive en la libreria (intuition.arm_stats);
+    # el wrapper solo adapta — el fake confirma que reporta ese valor tal cual
+    import mmorch.intuition as IT
+    monkeypatch.setattr(IT, "arm_stats",
+                        lambda arm, task, **k: _FakeBandit().stats()[sig_arm(arm, task)])
     out = json.loads(srv.mmorch_record_outcome(
         "deepseek-chat", 1.0, context="sumar dos enteros"))
     assert out["recorded"] and recorded["context"] == "sumar dos enteros"

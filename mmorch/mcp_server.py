@@ -11,9 +11,9 @@ Register:     see README.md "Register the MCP server".
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
-import re
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -47,7 +47,7 @@ from mmorch.session_skills import (ingest_workflows as _ingest_workflows,
 from mmorch.config import DEFAULT_ROUTER
 from mmorch.intuition import (decide as _intuition_decide, candidates as _intuition_candidates,
                               coherence as _intuition_coherence, reframe as _intuition_reframe)
-from mmorch.code_review import review as _review_code
+from mmorch.code_review import review_source as _review_source
 from mmorch.feedback import (record_outcome as _record_outcome,
                             ThompsonBandit as _ThompsonBandit,
                             calibration as _calibration)
@@ -80,9 +80,45 @@ _NOT_IN_CORE = frozenset({
 })
 
 
+# --- Contrato de error uniforme (W5.1) ---------------------------------------
+# Antes convivian dos contratos: algunas tools devolvian {"error": "..."} y otras
+# dejaban propagar la excepcion Python cruda al framework MCP — un caller no podia
+# tratar errores uniformemente. UN solo punto de catch: toda tool devuelve
+# {"error": str, "kind": str} en fallo. `kind` agrupa por accion del caller:
+# arreglar el input vs reintentar vs reportar bug.
+def _kind_of(e: BaseException) -> str:
+    from mmorch.budget import BudgetExceeded
+    if isinstance(e, BudgetExceeded):
+        return "budget"
+    if isinstance(e, FileNotFoundError):
+        return "not_found"
+    if isinstance(e, (OSError, UnicodeDecodeError)):
+        return "io"
+    if isinstance(e, (KeyError, IndexError, ValueError, TypeError)):
+        return "invalid_input"
+    return "internal"
+
+
+def _guarded(fn):
+    """Envuelve una tool con el contrato de error. Llama via wrapper.__wrapped__
+    (atributo, no closure) para que el test de contrato pueda inyectar un fallo
+    controlado por tool sin tocar red ni APIs."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return wrapper.__wrapped__(*args, **kwargs)
+        except Exception as e:
+            msg = str(e).strip() or type(e).__name__
+            return json.dumps({"error": msg[:500], "kind": _kind_of(e)},
+                              ensure_ascii=False)
+    wrapper.__mmorch_guarded__ = True  # marker que verifica el test de contrato
+    return wrapper
+
+
 def _tool(fn):
-    """Registro condicional por perfil: en core, las tools excluidas quedan como
-    funciones Python normales (cero duplicacion de codigo, el body no cambia)."""
+    """Registro condicional por perfil (en core, las tools excluidas quedan como
+    funciones Python normales) + contrato de error uniforme para TODAS."""
+    fn = _guarded(fn)
     if _PROFILE == "core" and fn.__name__ in _NOT_IN_CORE:
         return fn
     return mcp.tool()(fn)
@@ -154,7 +190,9 @@ def mmorch_adversarial_verify(
 
 @_tool
 def mmorch_metrics_summary() -> str:
-    """Return aggregate metrics (calls, total cost USD, cost by family)."""
+    """Return aggregate metrics (calls, total cost USD, cost by family). Cost is a
+    FLOOR, not ground truth: timed-out calls log cost=0 but the provider still bills
+    (budget.py) — treat totals as an underestimate."""
     return json.dumps(summary(), ensure_ascii=False)
 
 
@@ -175,7 +213,8 @@ def mmorch_budget_status() -> str:
     enforced=false means MMORCH_MAX_MONTHLY_USD is unset (unlimited spend). Use this BEFORE a
     bulk fan_out: if enforced and remaining is low vs the estimated batch cost, shrink or defer
     the batch instead of hitting BudgetExceeded mid-run. metrics_summary aggregates LIFETIME
-    cost and never compares against the monthly cap — this is the only mid-session cupo-$ signal."""
+    cost and never compares against the monthly cap — this is the only mid-session cupo-$ signal.
+    `spent` is a FLOOR: timed-out calls log cost=0 but the provider still bills (budget.py)."""
     from mmorch.budget import status as budget_status
     return json.dumps(budget_status(), ensure_ascii=False)
 
@@ -209,34 +248,19 @@ def mmorch_route(
         "model": r.model, "cost_usd": r.cost_usd}, ensure_ascii=False)
 
 
-# audit 2026-07: patrones de archivo que NUNCA deben salir a una API externa, aunque el
-# caller (esta sesion) ya podia leerlos igual con Read -- el limite real que importa aca
-# es "sale de la maquina", no "se puede leer" (mismo patron que .gitignore de new-project skill).
-_SECRET_NAME_RX = re.compile(
-    r"(^|[/\\])(\.env(\..+)?|credentials\.json|token\.json|.*\.key|.*secret.*|.*password.*)$", re.I)
-
-
 @_tool
 def mmorch_review_code(code: str = "", path: str = "") -> str:
     """Senior code reviewer (cero cupo): flag where code breaks the mmorch coding principles
     (docs/coding-principles.md) — module depth/cohesion/coupling, DRY, nesting, naming, scope,
     why-comments, KISS, security. Cross-family refuted (DeepSeek↔Gemini) so style-opinion nitpicks
     get pruned; subjective review, so truth is judgement not execution. Pass `code` inline OR a
-    `path` to read from disk (path only used when `code` is empty). Returns JSON {path,
-    findings:[{principle, severity, line, problem, fix}], n_raw, n_confirmed, dropped}.
+    `path` to read from disk (path only used when `code` is empty). Secret gate (library-side,
+    W5.1): refuses secret-looking paths (.env/*.key/*.pem/id_rsa/...) AND inline code containing
+    credential signatures (private-key blocks, known token prefixes) — content goes to an
+    EXTERNAL API. Returns JSON {path, findings:[{principle, severity, line, problem, fix}],
+    n_raw, n_confirmed, dropped} or {error, kind} on refusal/failure.
     """
-    if path and _SECRET_NAME_RX.search(path):
-        return json.dumps({"error": f"refused: '{path}' looks like a secrets file — "
-                                    "review_code sends content to an EXTERNAL API"})
-    if path and not code:
-        try:
-            with open(path, encoding="utf-8") as fh:
-                code = fh.read()
-        except (OSError, UnicodeDecodeError) as e:
-            return json.dumps({"error": f"cannot read {path}: {str(e)[:160]}"})
-    if not code.strip():
-        return json.dumps({"error": "no code provided (pass code= or path=)"})
-    return json.dumps(_review_code(code, path=path), ensure_ascii=False)
+    return json.dumps(_review_source(code, path), ensure_ascii=False)
 
 
 @_tool
@@ -264,10 +288,13 @@ def mmorch_cascade(
 ) -> str:
     """FrugalGPT-style cascade: cheapest model first + self-score; escalate to the
     next only if confidence < per-step threshold; flag Opus if all steps exhausted.
-    Saves cupo (resolves cheap when possible). steps = [[model, threshold], ...].
+    Saves cupo (resolves cheap when possible). steps = [[model, threshold], ...] — a
+    malformed step (missing threshold, non-numeric) returns {error, kind:"invalid_input"}.
     Returns JSON {answer, confidence, resolved_step, escalate, models_used, cost_usd}.
     """
-    st = [(s[0], float(s[1])) for s in steps] if steps else None
+    # adaptar tipo (list->tuple) y nada mas: el shape lo valida la libreria (W5.1)
+    from typing import cast
+    st = cast("list[tuple[str, float]]", [tuple(s) for s in steps]) if steps else None
     r = cascade(prompt, steps=st, phase="mcp")
     return json.dumps({
         "answer": r.answer, "confidence": r.confidence,
@@ -402,40 +429,13 @@ def mmorch_vault_write(
     sweep is the safety net). `sources`/`tags` = comma-separated. The original
     note is ALWAYS the source of truth. Returns JSON {path, moc}.
     """
-    import threading
-
-    from mmorch.vault import write_validated, VAULT as _VAULT
-
-    fm: dict = {"status": status or "seed"}
-    if confidence:
-        fm["confidence"] = confidence
-    if sources:
-        fm["sources"] = [s.strip() for s in sources.split(",") if s.strip()]
-    extra = [t.strip() for t in (tags or "").split(",") if t.strip()]
-    fm["tags"] = ["research", project] + [t for t in extra if t != project]
-
-    def _bridge(gist: str) -> None:
-        # decision 09: gist textual a duckdb scope global; el recall existente
-        # lo encuentra y la sesion lee la nota completa por path.
-        _remember("global", gist, kind="vault_note")
-
-    def _babel_async(path) -> None:
-        # decision 03 pedia cola del server; thread daemon = mismo efecto async
-        # sin endpoint nuevo (upgrade path: job real en server_engine). El
-        # nightly barre notas sin babel, asi que perder este thread no pierde nada.
-        def _run():
-            try:
-                from mmorch.babel import ingest
-                ingest(path, folder=folder)
-            except Exception:
-                pass  # side-channel: el gate/nightly deciden, jamas romper el write
-        threading.Thread(target=_run, daemon=True).start()
-
-    p = write_validated(title, body, project=project, folder=folder,
-                        frontmatter=fm, remember_fn=_bridge,
-                        enqueue_babel_fn=_babel_async)
-    return json.dumps({"path": str(p), "moc": str(_VAULT / "moc" / f"{project}.md")},
-                      ensure_ascii=False)
+    # W5.1: toda la orquestacion (frontmatter CSV, bridge a memoria, babel async)
+    # vive en la libreria; este wrapper solo adapta tipos
+    from mmorch.vault import write_research_note
+    p, moc = write_research_note(title, body, project=project, folder=folder,
+                                 status=status, confidence=confidence,
+                                 sources=sources, tags=tags)
+    return json.dumps({"path": str(p), "moc": str(moc)}, ensure_ascii=False)
 
 
 @_tool
@@ -448,7 +448,12 @@ def mmorch_recall(
     """Clinical two-stage recall: COARSE (scope-chain + recency, NO keyword gate) ->
     FINE (local embedding rerank). Falls back to immutable episodic raw if distilled
     notes fall short. Local embeddings = zero key/cost; degrades to recency-order if
-    fastembed absent. Returns JSON list of {id, ts, scope, text, score, layer}.
+    fastembed absent. scope levels are LITERAL names (task_id|subsector|project_id|
+    mmorch_self|global — "task_id" IS a scope, not a placeholder); any other string
+    chains [scope, global]. Bounds: 1 <= k <= 200, window_days > 0 (else {error,
+    kind:"invalid_input"}). NOT strictly read-only: each recall bumps the returned
+    notes' access_count/last_accessed_at (spacing effect — affects what decay forgets
+    later). Returns JSON list of {id, ts, scope, text, score, layer}.
     """
     notes = _recall(query, scope=scope, k=k, window_days=window_days)
     return json.dumps([
@@ -594,7 +599,7 @@ def mmorch_record_outcome(
     reward: float,
     pattern: str = "",
     predicted_conf: float | None = None,
-    source: str = "opus",
+    source: str = "",
     context: str = "",
 ) -> str:
     """CLOSE THE FEEDBACK LOOP (keystone). After you (the orchestrator) use a cheap
@@ -605,8 +610,11 @@ def mmorch_record_outcome(
     arm: the decision being scored, e.g. "deepseek-chat@0.6" or "gemini-2.5-flash".
     reward: [0,1] real outcome — 1=correct, 0=wrong, fraction=partial. NOT the
     model's self-reported confidence (anti-sycophancy: agreement != confirmation).
-    predicted_conf: what the system believed at decision time (enables calibration/ECE).
-    source: where the label came from (opus|downstream|test|human).
+    predicted_conf: what the system believed at decision time (enables calibration/ECE);
+    clamped to [0,1] at write time, same as reward.
+    source: where the label came from (opus|downstream|test|human). Default "" — same
+    as the library (W5.1: the old MCP-only default "opus" mislabeled outcomes whose
+    label came from elsewhere).
 
     Records the labeled outcome; with a non-empty `context` the library also trains the
     signature-keyed bandit (the ONLY bandit since W4.3 — the old flat state file was a
@@ -618,8 +626,8 @@ def mmorch_record_outcome(
                         source=source, context=context)
     bandit_stats: dict = {}
     if context:
-        from mmorch.intuition import _arm as _sig_arm
-        bandit_stats = _ThompsonBandit().stats().get(_sig_arm(arm, context), {})
+        from mmorch.intuition import arm_stats
+        bandit_stats = arm_stats(arm, context)
     return json.dumps({
         "recorded": True, "arm": o.arm, "reward": o.reward,
         "bandit": bandit_stats}, ensure_ascii=False)
@@ -642,10 +650,15 @@ def mmorch_feedback_stats() -> str:
 @_tool
 def mmorch_check(checker: str, ctx: dict) -> str:
     """DETERMINISTIC tool-verify (checkers.py) — zero API, 100% reliable where an LLM
-    verifier is ~74% false-refute on hard checkable math. checker in {arithmetic,
-    json_schema}; ctx is the checker's args. E.g. checker="arithmetic",
-    ctx={"expr": "comb(20,10)", "expected": 184756}. Use this INSTEAD of an LLM verifier
-    when the claim has computable ground-truth. Returns {passed, detail, checker, got}."""
+    verifier is ~74% false-refute on hard checkable math. 21 registered checkers:
+    arithmetic, code_quality, mutation_score, coverage, deterministic, determinant,
+    json_schema, predicate, checksum, python_ast_valid, regex_format, set_equal,
+    numeric_close, sorted_monotonic, number_theory, sql_valid, units, sympy_identity,
+    python_exec, unit_test, no_tell. ctx is the checker's kwargs. E.g.
+    checker="arithmetic", ctx={"expr": "comb(20,10)", "expected": 184756}. Unknown
+    checker / bad ctx returns {error, kind:"invalid_input"} listing the valid names.
+    Use this INSTEAD of an LLM verifier when the claim has computable ground-truth.
+    Returns {passed, detail, checker, expected, got}."""
     from mmorch.checkers import check as _check
     r = _check(checker, **dict(ctx))
     return json.dumps({"passed": r.passed, "detail": r.detail, "checker": r.checker,
@@ -662,14 +675,10 @@ def mmorch_evolve_self(target_file: str, finding: str) -> str:
     = acción deliberada de librería/humano (sandbox_branch -> PR -> merge humano). Spends
     external $ (swarm+verify), not cupo. Returns {zone, would_apply, checks, refused_red}."""
     from mmorch.evolve import propose_patch, snapshot_change, zone_of, evaluate
+    # propose_patch ya extrae el fence (textutil.extract_fence); el segundo strip
+    # heuristico que vivia aca podia truncar outputs con fences internos (W5.1, hueco #9)
     after = propose_patch(target_file, finding)
-    # strip code-fence si vino envuelto
-    a = after.strip()
-    if a.startswith("```"):
-        a = a.split("```", 2)[1] if "```" in a[3:] else a
-        a = a.split("\n", 1)[1] if "\n" in a else a
-        a = a.rsplit("```", 1)[0]
-    change = snapshot_change(target_file, a, f"auto-evolve: {finding}")
+    change = snapshot_change(target_file, after, f"auto-evolve: {finding}")
     zone = zone_of(change)
     if zone == "red":
         return json.dumps({"zone": "red", "would_apply": False, "refused_red": True,
@@ -718,7 +727,9 @@ def mmorch_consolidate(scope: str = "", sim_threshold: float = 0.92,
     verified / open_loop / permanent ones. Forgetting never loses a fact — only the
     distilled note is tombstoned; the raw episode survives and recall falls back to
     it. Default is a DRY RUN (reports what would change); pass apply=true to actually
-    tombstone. Also reports live-note bytes + over_budget flag. Deterministic, zero
+    tombstone. NOTE inverted polarity vs the library: mmorch.memory.consolidate takes
+    dry_run (default False = applies); this tool takes apply (default False = dry run)
+    — don't carry kwargs verbatim from one to the other. Also reports live-note bytes + over_budget flag. Deterministic, zero
     API spend. Returns JSON {merged, tombstoned, forgotten, live_notes, bytes,
     over_budget, dry_run}."""
     return json.dumps(
@@ -741,9 +752,10 @@ def mmorch_reinforce(note_id: int, boost: int = 3) -> str:
     """Reconsolidation — CONFIRM a recalled note (you used/validated it). Bumps its
     access_count by `boost` (a confirm ~ several accesses) and refreshes last-access,
     raising its retention score so decay won't forget it. Deterministic, no spend.
-    Returns JSON {note_id, boost, ok}."""
-    _reinforce(note_id, boost=boost)
-    return json.dumps({"note_id": note_id, "boost": boost, "ok": True}, ensure_ascii=False)
+    Returns JSON {note_id, boost, ok} — ok=false means the note does not exist (W5.1:
+    no more silent success over 0 rows)."""
+    ok = _reinforce(note_id, boost=boost)
+    return json.dumps({"note_id": note_id, "boost": boost, "ok": ok}, ensure_ascii=False)
 
 
 @_tool
@@ -752,9 +764,9 @@ def mmorch_flag_contradiction(note_id: int) -> str:
     it needs_review: recall stops surfacing it (no repeating suspected-false info) and
     falls back to the immutable raw episode. The note is NOT deleted — resolve later
     with mmorch_resolve_review. Self-correcting memory. Deterministic, no spend.
-    Returns JSON {note_id, ok}."""
-    _flag_contradiction(note_id)
-    return json.dumps({"note_id": note_id, "ok": True}, ensure_ascii=False)
+    Returns JSON {note_id, ok} — ok=false means the note does not exist."""
+    ok = _flag_contradiction(note_id)
+    return json.dumps({"note_id": note_id, "ok": ok}, ensure_ascii=False)
 
 
 @_tool
@@ -773,18 +785,18 @@ def mmorch_resolve_review(note_id: int, drop: bool = False) -> str:
     """Resolve a contradiction. drop=true tombstones the note (it was false);
     drop=false clears needs_review so it surfaces again (the contradiction was wrong).
     The raw episode is never touched either way. Deterministic, no spend. Returns JSON
-    {note_id, dropped, ok}."""
-    _resolve_review(note_id, drop=drop)
-    return json.dumps({"note_id": note_id, "dropped": drop, "ok": True}, ensure_ascii=False)
+    {note_id, dropped, ok} — ok=false means the note does not exist."""
+    ok = _resolve_review(note_id, drop=drop)
+    return json.dumps({"note_id": note_id, "dropped": drop, "ok": ok}, ensure_ascii=False)
 
 
 @_tool
 def mmorch_close_loop(note_id: int) -> str:
     """Close an open-loop note (the task/question is resolved): clears the Zeigarnik
     flag so the note becomes eligible for normal decay/forgetting again. Deterministic,
-    no spend. Returns JSON {note_id, ok}."""
-    _close_loop(note_id)
-    return json.dumps({"note_id": note_id, "ok": True}, ensure_ascii=False)
+    no spend. Returns JSON {note_id, ok} — ok=false means the note does not exist."""
+    ok = _close_loop(note_id)
+    return json.dumps({"note_id": note_id, "ok": ok}, ensure_ascii=False)
 
 
 @_tool
