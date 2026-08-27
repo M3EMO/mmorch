@@ -226,16 +226,21 @@ def _demo() -> None:
         diff = "- a\n+    assert nuevo == 1\n"
         return types.SimpleNamespace(returncode=0, stdout=diff, stderr="")
 
-    kw = dict(repo="r", branch="b", base="main", git_fn=_git, llm_fn=_llm_con_test)
+    # closure en vez de **dict: un dict heterogeneo de kwargs pierde los tipos
+    # (mypy lo ve como dict[str, object] y rechaza el unpack)
+    def _refutar(correr_fn):
+        return refutar_ejecutable(repo="r", branch="b", base="main",
+                                  git_fn=_git, llm_fn=_llm_con_test, correr_fn=correr_fn)
+
     # pasa en base + falla en branch -> UNICO caso material
-    assert refutar_ejecutable(**kw, correr_fn=_corredor(True, False))["material"] is True
+    assert _refutar(_corredor(True, False))["material"] is True
     # pasa en los dos -> la regresion no ocurre
-    assert refutar_ejecutable(**kw, correr_fn=_corredor(True, True))["material"] is False
+    assert _refutar(_corredor(True, True))["material"] is False
     # falla en los dos -> no describe una regresion
-    r = refutar_ejecutable(**kw, correr_fn=_corredor(False, False))
+    r = _refutar(_corredor(False, False))
     assert r["material"] is False and "tampoco pasa en base" in r["motivo"]
     # falla en base y pasa en branch -> el cambio ARREGLA algo
-    assert refutar_ejecutable(**kw, correr_fn=_corredor(False, True))["material"] is False
+    assert _refutar(_corredor(False, True))["material"] is False
 
     # sin regresion declarada -> ni se ejecuta nada
     def _llm_limpio(prompt, *, schema):

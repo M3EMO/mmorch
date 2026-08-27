@@ -287,6 +287,7 @@ cost by family/model — the input to the break-even test (§14, §18.4).
   ablation `record_outcome`); break-even on real volume still pending.
 
 Run `python -m pytest tests/` before promoting any new capability.
+Static gates in one shot: `python scripts/gates.py` (ruff + mypy + paths grep-gate; same criteria as the pre-commit hook).
 
 ## Rollback
 

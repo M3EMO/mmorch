@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -33,15 +34,20 @@ _EXPIRE_DAYS = 14
 
 def _lock_file(p: Path):
     """Adquiere un lock exclusivo sobre el archivo de ledger."""
-    try:
-        import fcntl
-        return fcntl.flock
-    except ImportError:
+    # Rama por sys.platform (no try/ImportError): mypy solo analiza la rama
+    # de la plataforma donde corre, asi el import inexistente en la otra
+    # (fcntl en Windows, msvcrt en POSIX) no es un falso error de tipos.
+    if sys.platform == "win32":
         try:
             import msvcrt
             return msvcrt.locking
         except ImportError:
             return None
+    try:
+        import fcntl
+        return fcntl.flock
+    except ImportError:
+        return None
 
 
 def _append(logs_dir: str, rec: dict) -> None:

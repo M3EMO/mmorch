@@ -157,13 +157,15 @@ def _recent_silent_errors(logs_dir: str, *, hours: float = 48.0) -> list[dict]:
     # los 6 sandboxes de la noche murieron por este test, no por sus parches)
     corte = (date.today() - timedelta(hours=hours)).isoformat()
     out = []
+    # "rec", no "e": el except de arriba ya uso "e" y reciclar el nombre
+    # fuera del except es error de mypy (CPython lo borra al salir del bloque)
     for ln in lines[-200:]:
         try:
-            e = _json.loads(ln)
+            rec = _json.loads(ln)
         except _json.JSONDecodeError:
             continue
-        if e.get("fecha", "") >= corte:
-            out.append(e)
+        if rec.get("fecha", "") >= corte:
+            out.append(rec)
     return out
 
 
