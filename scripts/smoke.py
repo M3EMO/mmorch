@@ -10,7 +10,6 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 G, R, D, B, X = "\x1b[92m", "\x1b[91m", "\x1b[2m", "\x1b[1m", "\x1b[0m"
 
@@ -59,7 +58,15 @@ def c_adj():
 def c_health():
     from mmorch.health import report
     r = report(logs_dir=str(ROOT / "logs"))
-    return f"healthy={r['healthy']}, dead={len(r['check']['dead'])}, never={len(r['check']['never'])}"
+    # healthy=False = ROJO del smoke (exit 1), no un detalle decorativo: un
+    # smoke verde con el sistema unhealthy entrena a ignorar la alarma
+    if not r["healthy"]:
+        dead = [d["component"] for d in r["check"]["dead"]]
+        raise RuntimeError(
+            f"healthy=False: dead={dead}, never={r['check']['never']}, "
+            f"nightly_errors={sorted(r['errors']['nightly_errors'])}, "
+            f"idea_loop_errors={len(r['errors']['idea_loop_errors'])}")
+    return f"healthy=True, alive={len(r['check']['alive'])}"
 
 
 @check("outcomes (feedback)")
@@ -155,6 +162,9 @@ def c_server():
 def main() -> None:
     import os
     os.system("")
+    # utf-8 solo al correr como script: a import-time rompia pytest (stdout
+    # capturado sin .buffer) y el modulo debe ser importable por los tests
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     import time
     checks = [("fuel", c_fuel), ("curation", c_curation), ("adjudicate", c_adj),
               ("health", c_health), ("outcomes", c_outcomes),

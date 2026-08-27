@@ -304,6 +304,11 @@ def write_local_digest(rec: dict, *, logs_dir: str) -> dict:
     text = out.get("digest", "")
     path = Path(logs_dir) / "digest_last.md"
     path.write_text(text + "\n", encoding="utf-8")
+    # latido "digest" (health.EXPECTATIONS) DESPUES de escribir el md: si el
+    # LLM o el write fallan no hay latido, y health lo declara muerto a las
+    # 26h — el beat certifica digest ESCRITO, no intento de digest.
+    from mmorch.health import beat
+    beat("digest", logs_dir=logs_dir, detail="ok")
     return {"path": str(path), "chars": len(text)}
 
 

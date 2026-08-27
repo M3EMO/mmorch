@@ -7,6 +7,11 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Cada componente declarado DEBE tener un emisor real de beat(); declarar sin
+# emisor entrena a ignorar la alarma (healthy=False cronico). Emisores hoy:
+#   nightly -> mmorch/nightly.py (latido temprano de la corrida nocturna)
+#   server  -> mmorch/server.py start_health_beats() (arranque + periodico)
+#   digest  -> mmorch/loop_nightly.py write_local_digest() (tras escribir el md)
 EXPECTATIONS = {"nightly": 26 * 3600, "server": 900, "digest": 26 * 3600}
 
 
@@ -178,6 +183,11 @@ def report(*, logs_dir: str = "logs", now_ts: float | None = None) -> dict:
     recientes = _recent_silent_errors(logs_dir)
     healthy = (
         not check_result["dead"]
+        # "never" tambien es rojo: todo componente declarado tiene emisor real
+        # (ver EXPECTATIONS), asi que "jamas latio" = tan muerto como "dead".
+        # En operacion normal (server corriendo + nightly de anoche) los 3
+        # laten y healthy=True es alcanzable; False vuelve a significar algo.
+        and not check_result["never"]
         and not errors["nightly_errors"]
         and not errors["idea_loop_errors"]
     )

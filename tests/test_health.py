@@ -101,17 +101,35 @@ def test_scrape_errors_collects_all_sources(tmp_path):
 
 
 def test_report_healthy_true(tmp_path):
+    # operacion normal = los 3 componentes declarados laten (todos tienen
+    # emisor real); recien ahi healthy=True es alcanzable
+    now_ts = 1000.0
+
+    health.beat("server", logs_dir=str(tmp_path), now_ts=now_ts - 50)
+    health.beat("nightly", logs_dir=str(tmp_path), now_ts=now_ts - 50)
+    health.beat("digest", logs_dir=str(tmp_path), now_ts=now_ts - 50)
+
+    result = health.report(logs_dir=str(tmp_path), now_ts=now_ts)
+
+    assert result["healthy"] is True
+    assert result["check"]["alive"] == ["digest", "nightly", "server"]
+    assert result["check"]["never"] == []
+    assert result["errors"]["server_err_tail"] == []
+    assert result["errors"]["nightly_errors"] == {}
+    assert result["errors"]["idea_loop_errors"] == []
+
+
+def test_report_healthy_false_never(tmp_path):
+    # componente declarado que jamas latio = rojo (antes "never" no pesaba en
+    # healthy y la alarma cronica se entrenaba a ignorarse)
     now_ts = 1000.0
 
     health.beat("server", logs_dir=str(tmp_path), now_ts=now_ts - 50)
 
     result = health.report(logs_dir=str(tmp_path), now_ts=now_ts)
 
-    assert result["healthy"] is True
-    assert result["check"]["alive"] == ["server"]
-    assert result["errors"]["server_err_tail"] == []
-    assert result["errors"]["nightly_errors"] == {}
-    assert result["errors"]["idea_loop_errors"] == []
+    assert result["healthy"] is False
+    assert result["check"]["never"] == ["digest", "nightly"]
 
 
 def test_report_healthy_false_dead(tmp_path):
@@ -127,9 +145,12 @@ def test_report_healthy_false_dead(tmp_path):
 
 
 def test_report_healthy_false_errors(tmp_path):
+    # los 3 laten para aislar la causa: el rojo viene SOLO del *_error
     now_ts = 1000.0
 
     health.beat("server", logs_dir=str(tmp_path), now_ts=now_ts - 50)
+    health.beat("nightly", logs_dir=str(tmp_path), now_ts=now_ts - 50)
+    health.beat("digest", logs_dir=str(tmp_path), now_ts=now_ts - 50)
 
     (tmp_path / "nightly.jsonl").write_text(
         json.dumps({"ts": 900.0, "digest_error": "failed"}) + "\n"

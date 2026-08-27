@@ -844,10 +844,33 @@ def build_app():
     ])
 
 
+def start_health_beats(*, logs_dir: str | None = None,
+                       interval_s: float | None = None) -> threading.Event:
+    """Latido "server" del dead-man's switch (health.EXPECTATIONS): uno
+    inmediato al arrancar + un thread daemon que repite. Default de intervalo
+    = 1/3 del limite declarado, para tolerar 2 latidos perdidos antes de que
+    check() lo declare muerto. Devuelve el Event que frena el loop (seam de
+    los tests; en produccion nadie lo setea y el daemon muere con el proceso)."""
+    from .health import beat, EXPECTATIONS
+    from .paths import logs_dir as _logs_dir
+    ldir = logs_dir if logs_dir is not None else str(_logs_dir())
+    every = interval_s if interval_s is not None else EXPECTATIONS["server"] / 3
+    beat("server", logs_dir=ldir, detail="startup")
+    stop = threading.Event()
+
+    def _loop() -> None:
+        while not stop.wait(every):
+            beat("server", logs_dir=ldir, detail="alive")
+
+    threading.Thread(target=_loop, daemon=True, name="mmorch-health-beat").start()
+    return stop
+
+
 def main():
     import uvicorn
     host = os.getenv("MMORCH_SERVER_HOST", "127.0.0.1")
     port = int(os.getenv("MMORCH_SERVER_PORT", "8787"))
+    start_health_beats()
     if not os.getenv("MMORCH_SERVER_TOKEN"):
         print("WARN: MMORCH_SERVER_TOKEN no seteado -> sin auth. Bindeá a localhost/tailnet.")
     print(f"mmorch live -> http://{host}:{port}  (token {'ON' if os.getenv('MMORCH_SERVER_TOKEN') else 'OFF'})")
