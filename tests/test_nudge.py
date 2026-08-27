@@ -1,7 +1,20 @@
 """nudge: cada N loops cerrados dispara mantenimiento de memoria (Hermes nudging)."""
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import pytest
+
 import mmorch.nudge as N
+
+
+@pytest.fixture(autouse=True)
+def _distill_hermetico(monkeypatch):
+    # POR QUE: tick() nudgeado tambien llama memory.distill_backlog, que dispara
+    # providers.call REAL. Sin este mock, cada nudge del test golpeaba la API (o
+    # fallaba 3 veces y ABRIA el breaker de deepseek-chat), y test_providers caia
+    # con BreakerOpen si corria dentro del cooldown de 60s — flaky orden/timing
+    # medido 2026-08-27 en la suite completa. Cero API en tests: siempre mockeado.
+    monkeypatch.setattr("mmorch.memory.distill_backlog",
+                        lambda after_id=0, limit=5: {"last_id": after_id, "distilled": 0})
 
 
 def test_tick_counts_and_fires_every_n(tmp_path, monkeypatch):
