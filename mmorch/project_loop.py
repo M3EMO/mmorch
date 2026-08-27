@@ -189,13 +189,13 @@ def run_project_task(project: str, task: str, *, target_file: str, test_cmd: str
     # mmorch no pudo -> escalada a claude -p (plan/cupo) si esta habilitada
     if escalate:
         emit("step", "gate", job_id=job_id, node="escalate", detail="mmorch agoto K -> claude -p (cupo)")
-        from .claude_exec import run_claude
-        r = run_claude(task, cwd, mode="edit", job_id=job_id)
+        from .claude_exec import get_executor
+        r = get_executor().run(task, cwd, mode="edit", job_id=job_id)
         pushed = False
-        if r.get("ok") and push:
+        if r.ok and push:
             pushed = commit_push(cwd, f"mmorch(claude): {task[:64]}", job_id=job_id).get("pushed", False)
-        emit("job", "done" if r.get("ok") else "error", job_id=job_id, detail="via escalada claude")
-        return ProjectResult(bool(r.get("ok")), "claude", K, target_file, pushed=pushed,
+        emit("job", "done" if r.ok else "error", job_id=job_id, detail="via escalada claude")
+        return ProjectResult(r.ok, "claude", K, target_file, pushed=pushed,
                              escalated=True, history=history)
 
     emit("job", "error", job_id=job_id, detail=f"mmorch no pudo en {K} iter (sin escalada)")

@@ -279,11 +279,10 @@ def _run_project_job(project: str, task: str, mode: str, push: bool = False,
             ok = r.ok
         else:   # engine == claude: claude -p directo (cupo)
             from .projects import resolve
-            from .claude_exec import run_claude
+            from .claude_exec import get_executor
             cwd = resolve(project)
             emit("job", "running", job_id=jid, detail=f"claude {project} [{mode}]: {task[:70]}")
-            res = run_claude(task, cwd, mode=mode, job_id=jid)
-            ok = bool(res.get("ok"))
+            ok = get_executor().run(task, cwd, mode=mode, job_id=jid).ok
             if ok and mode == "edit" and push:
                 from .sync import commit_push
                 commit_push(cwd, f"mmorch(claude): {task[:64]}", job_id=jid)

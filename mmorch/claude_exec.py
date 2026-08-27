@@ -16,7 +16,9 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from .events import emit
 
@@ -101,3 +103,51 @@ def _maybe_result(line: str) -> str:
     if ev.get("type") == "result":
         return str(ev.get("result", ""))[:4000]
     return ""
+
+
+# ---- seam Executor (W2.3) ----------------------------------------------------
+# POR QUE: el coder loop no debe conocer QUE backend ejecuta el prompt (claude CLI hoy;
+# cursor-agent/API manana). La seam es el punto donde un test inyecta un FakeExecutor y
+# prueba el loop sin CLI real. Cero framework: un protocolo, una impl, una factory por env.
+
+@dataclass(frozen=True)
+class ExecResult:
+    """Resultado normalizado de un executor (mismo shape que el dict de run_claude)."""
+    ok: bool
+    result: str
+    returncode: int | None
+    steps: int
+
+
+class Executor(Protocol):
+    def run(self, prompt: str, cwd: str, *, mode: str = "plan", timeout: float = 600.0,
+            job_id: str = "", model: str | None = None) -> ExecResult: ...
+
+
+class ClaudeCliExecutor:
+    """Backend actual: delega en run_claude (claude -p headless). Delegar — y no mover el
+    codigo — mantiene monkeypatcheable run_claude en los tests existentes."""
+
+    def run(self, prompt: str, cwd: str, *, mode: str = "plan", timeout: float = 600.0,
+            job_id: str = "", model: str | None = None) -> ExecResult:
+        r = run_claude(prompt, cwd, mode=mode, timeout=timeout, job_id=job_id, model=model)
+        # .get con defaults: los fakes de tests devuelven dicts parciales ({"ok": True})
+        return ExecResult(ok=bool(r.get("ok")), result=str(r.get("result", "")),
+                          returncode=r.get("returncode"), steps=int(r.get("steps", 0)))
+
+
+# valores reservados en el build-plan; fallar CLARO > fallar raro al invocar el CLI equivocado
+_FUTURE_EXECUTORS = ("cursor-agent", "api")
+
+
+def get_executor() -> Executor:
+    """Factory de la seam: env MMORCH_EXECUTOR elige el backend (default claude-cli)."""
+    name = os.getenv("MMORCH_EXECUTOR", "claude-cli")
+    if name == "claude-cli":
+        return ClaudeCliExecutor()
+    if name in _FUTURE_EXECUTORS:
+        raise NotImplementedError(
+            f"MMORCH_EXECUTOR={name!r}: backend reservado pero aun no implementado; "
+            "usa 'claude-cli' (default) o desarma la variable.")
+    raise ValueError(f"MMORCH_EXECUTOR={name!r} desconocido; validos: 'claude-cli' "
+                     f"(implementado) o {_FUTURE_EXECUTORS} (reservados).")
