@@ -13,7 +13,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-mcp = ["mcp>=1.2.0"]
+# Techo <2: la spec MCP 2026-07-28 rompe compat (python-sdk v2 renombra FastMCP
+# y mueve el transporte a run()); la linea 1.x queda en maintenance (docs/
+# production-readiness/10-research-standards-contracts.md §1). Piso = version
+# real del venv (1.27.2, aun pre-1.28) para que el pin refleje lo verificado.
+mcp = ["mcp>=1.27.2,<2"]
 memory = ["fastembed>=0.3.0"]   # embeddings locales (bge-small). Sin esto: recall coarse-only.
 checkers = ["sqlglot>=20", "pint>=0.23", "sympy>=1.12", "radon>=6.0", "coverage>=7.0"]
 docs = ["pypdfium2>=5.0"]   # extraccion de texto de PDF (docs_extract.py) —
