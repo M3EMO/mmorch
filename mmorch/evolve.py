@@ -713,8 +713,11 @@ if __name__ == "__main__":
         return {"pushed": True, "pr_created": True, "pr_number": 42}
 
     def _fake_git_exists_true(*a, cwd):
+        # rev-parse rc=0 (la branch existe) pero merge-base --is-ancestor rc=1
+        # (NO mergeada aun): sin distinguirlos, el lock-release por commit-en-HEAD
+        # (fix 2026-08-24) liberaba el target y el skip de ronda 2 jamas ocurria.
         class _R:
-            returncode = 0
+            returncode = 1 if a and a[0] == "merge-base" else 0
             stdout = "deadbeef123\n"
         return _R()
 
