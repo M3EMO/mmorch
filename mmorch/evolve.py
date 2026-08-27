@@ -269,8 +269,14 @@ def read_archive() -> list[dict]:
 # FASE 4 — self_evolve(): el motor (ideate -> fitness -> zona -> apply -> audit) #
 # --------------------------------------------------------------------------- #
 # Zona ROJA por path: nunca auto-aplicar (gate humano). Coincide con GOAL.md cat.4.
+# W4.1 (research 07 #1): el harness de EVALUACIÓN también es zona roja — un pipeline que
+# puede editar sus propios gates (gates/smoke, los tests del fitness, esta misma allowlist)
+# puede aflojarlos para pasar. Por eso mmorch/evolve.py (contiene _RED_PATHS y zone_of)
+# está acá adentro: la lista se protege a sí misma.
 _RED_PATHS = ("GOAL.md", "GOAL.hash", ".env", "mmorch/goal.py", "mmorch/budget.py",
-              "mmorch/config.py")
+              "mmorch/config.py", "mmorch/evolve.py", "scripts/gates.py",
+              "scripts/smoke.py", "tests/test_evolve_motor.py", "tests/test_goal.py",
+              "tests/test_evolve_goal_guard.py")
 
 
 # Firmas de ACCIONES zona-roja en el CONTENIDO generado (no solo el path): un cambio de
@@ -556,10 +562,22 @@ def reap_merged_prs(*, root: Path = ROOT, gh_check_fn=None, path: Path = _PR_STA
             "still_open": list(state.keys())}
 
 
+def _diff_goal_aligned(c: Change):
+    """goal_aligned() sobre el DIFF del candidato (no el archivo entero: el verificador
+    juzga QUÉ cambió, con menos ruido y menos tokens). W4.1: el ancla anti-drift pasa
+    de museo (solo evaluate(), que nadie llama) al camino vivo pre-PR."""
+    import difflib
+    from .goal import goal_aligned
+    diff = "".join(difflib.unified_diff(
+        c.before.splitlines(keepends=True), c.after.splitlines(keepends=True),
+        fromfile=f"a/{c.target}", tofile=f"b/{c.target}"))
+    return goal_aligned(f"{c.description}\n\n{diff[:8000]}", phase="evolve_pr_gate")
+
+
 def coordinated_evolve_round(candidates: list[Change], *, root: Path = ROOT,
                              sandbox_fn=None, pr_fn=None, gh_check_fn=None,
                              pr_title_fn=None, open_pr: bool = True,
-                             path: Path = _PR_STATE) -> dict:
+                             aligned_fn=None, path: Path = _PR_STATE) -> dict:
     """1 ronda del loop nocturno, coordinada por archivo. `sandbox_fn`/`pr_fn` inyectables
     (default = sandbox_branch/open_pr_branch reales; seam de test sin git/gh real).
 
@@ -569,12 +587,18 @@ def coordinated_evolve_round(candidates: list[Change], *, root: Path = ROOT,
        abierto -> zona roja bloquea siempre; verde/amarilla -> sandbox+test; verde -> abre
        PR + trackea; rojo/fitness-fail -> no trackea nada (proximo intento arranca limpio).
 
-    Devuelve {skipped_active_pr, opened, red, blocked_zone_red}."""
+    W4.1: antes de abrir PR, `aligned_fn` (default goal_aligned sobre el diff) tiene que
+    pasar — desalineado con GOAL.md => sin PR + motivo a evolve_red.jsonl. Error de infra
+    del check => fail-OPEN (se abre el PR igual: el gate humano del PR sigue; CLOSED solo
+    ante refutación explícita — mismo principio que el never-edit guard).
+
+    Devuelve {skipped_active_pr, opened, red, blocked_zone_red, blocked_goal}."""
     sandbox_fn = sandbox_fn or (lambda c: sandbox_branch(c, root=root))
     pr_fn = pr_fn or (lambda branch, title: open_pr_branch(branch, title=title, root=root))
+    aligned_fn = aligned_fn or _diff_goal_aligned
     reap_merged_prs(root=root, gh_check_fn=gh_check_fn, path=path)
     state = _load_pr_state(path)
-    skipped, opened, red, blocked_zone_red = [], [], [], []
+    skipped, opened, red, blocked_zone_red, blocked_goal = [], [], [], [], []
     for c in candidates:
         if c.target in state:
             skipped.append(c.target)
@@ -601,6 +625,28 @@ def coordinated_evolve_round(candidates: list[Change], *, root: Path = ROOT,
             except OSError:
                 pass
             continue
+        if open_pr:
+            # gate de alineación pre-PR (W4.1): tests verdes NO alcanza — el cambio
+            # además tiene que alinear con GOAL.md. Solo acá (candidatos que ya pasaron
+            # sandbox: pocos) para no pagar cross-family por basura que igual moría.
+            try:
+                v = aligned_fn(c)
+                aligned = bool(getattr(v, "passed", True))
+                refutations = list(getattr(v, "refutations", []))
+            except Exception as e:   # infra caída => fail-open (el PR sigue gateado por humano)
+                aligned, refutations = True, [f"aligned_fn error (fail-open): {type(e).__name__}"]
+            if not aligned:
+                blocked_goal.append(c.target)
+                try:
+                    with open(root / "logs" / "evolve_red.jsonl", "a",
+                              encoding="utf-8") as fh:
+                        fh.write(json.dumps(
+                            {"ts": time.time(), "target": c.target, "kind": "goal_misaligned",
+                             "description": c.description[:120], "branch": r["branch"],
+                             "refutations": refutations[:5]}, ensure_ascii=False) + "\n")
+                except OSError:
+                    pass
+                continue   # sin PR; la branch queda para autopsia humana, nada se trackea
         entry = {"branch": r["branch"], "target": c.target, "change_id": c.id}
         head = _git("rev-parse", r["branch"], cwd=root)
         if head.returncode == 0:                      # pa distinguir merge de rechazo al reapear
@@ -614,7 +660,7 @@ def coordinated_evolve_round(candidates: list[Change], *, root: Path = ROOT,
         opened.append(c.target)
     _save_pr_state(state, path)
     return {"skipped_active_pr": skipped, "opened": opened, "red": red,
-            "blocked_zone_red": blocked_zone_red}
+            "blocked_zone_red": blocked_zone_red, "blocked_goal": blocked_goal}
 
 
 def propose_patch(target_file: str, finding: str, *, gen_model: str | None = None,
@@ -715,7 +761,7 @@ def nightly_evolve(*, days: int = 3, max_files: int = 5, max_findings: int = 8,
     findings = harvest_fn()
     if not findings:
         return {"findings": 0, "skipped_active_pr": [], "opened": [], "red": [],
-                "blocked_zone_red": []}
+                "blocked_zone_red": [], "blocked_goal": []}
     candidates = []
     for f in findings:
         try:
@@ -739,6 +785,11 @@ if __name__ == "__main__":
     # cero-git/gh: sandbox_fn/pr_fn/gh_check_fn inyectados (prueba la COORDINACION, no git real)
     tmp_state = Path(tempfile.mkdtemp()) / "pr_state.json"
     calls: list = []
+
+    from types import SimpleNamespace
+
+    def _fake_aligned_ok(c):
+        return SimpleNamespace(passed=True, refutations=[])
 
     def _fake_sandbox_ok(c):
         calls.append(("sandbox", c.target))
@@ -771,28 +822,28 @@ if __name__ == "__main__":
     # 1. ronda 1: 2 candidatos, uno para 'a.py' otro para 'b.py' -> ambos abren PR
     _git = globals()["_git"]
     globals()["_git"] = _fake_git_exists_true   # branch existe (recien creada)
-    r1 = coordinated_evolve_round([c1, c3], sandbox_fn=_fake_sandbox_ok, pr_fn=_fake_pr,
+    r1 = coordinated_evolve_round([c1, c3], sandbox_fn=_fake_sandbox_ok, pr_fn=_fake_pr, aligned_fn=_fake_aligned_ok,
                                   path=tmp_state)
     assert set(r1["opened"]) == {"a.py", "b.py"}, r1
     assert r1["skipped_active_pr"] == [], r1
 
     # 2. ronda 2: un candidato NUEVO para 'a.py' (mismo target que c1) -> SKIP, no compite
     calls.clear()
-    r2 = coordinated_evolve_round([c2], sandbox_fn=_fake_sandbox_ok, pr_fn=_fake_pr,
+    r2 = coordinated_evolve_round([c2], sandbox_fn=_fake_sandbox_ok, pr_fn=_fake_pr, aligned_fn=_fake_aligned_ok,
                                   path=tmp_state)
     assert r2["skipped_active_pr"] == ["a.py"], r2
     assert calls == [], "no debio llamar sandbox_fn para un archivo con PR abierto"
 
     # 3. el PR de 'a.py' se mergea (la branch ya no existe) -> reap la libera -> ronda 3 la toma
     globals()["_git"] = _fake_git_exists_false
-    r3 = coordinated_evolve_round([c2], sandbox_fn=_fake_sandbox_ok, pr_fn=_fake_pr,
+    r3 = coordinated_evolve_round([c2], sandbox_fn=_fake_sandbox_ok, pr_fn=_fake_pr, aligned_fn=_fake_aligned_ok,
                                   path=tmp_state)
     assert r3["opened"] == ["a.py"], r3          # liberada y re-tomada en la MISMA ronda
 
     # 4. sandbox que falla (rojo) -> nunca se trackea, no bloquea futuras rondas
     globals()["_git"] = _fake_git_exists_true
     _save_pr_state({}, tmp_state)
-    r4 = coordinated_evolve_round([c1], sandbox_fn=_fake_sandbox_fail, pr_fn=_fake_pr,
+    r4 = coordinated_evolve_round([c1], sandbox_fn=_fake_sandbox_fail, pr_fn=_fake_pr, aligned_fn=_fake_aligned_ok,
                                   path=tmp_state)
     assert r4["red"] == ["a.py"] and r4["opened"] == [], r4
     assert _load_pr_state(tmp_state) == {}, "un intento fallido no debe quedar trackeado"
@@ -813,7 +864,7 @@ if __name__ == "__main__":
 
     r_night = nightly_evolve(harvest_fn=_fake_harvest_some, propose_fn=_fake_propose,
                              root=Path(tempfile.mkdtemp()), sandbox_fn=_fake_sandbox_ok,
-                             pr_fn=_fake_pr, path=tmp_state2)
+                             pr_fn=_fake_pr, aligned_fn=_fake_aligned_ok, path=tmp_state2)
     assert r_night["findings"] == 2, r_night
     assert set(r_night["opened"]) == {"x.py", "y.py"}, r_night
 
@@ -824,7 +875,7 @@ if __name__ == "__main__":
                              propose_fn=lambda t, f: (_ for _ in ()).throw(
                                  AssertionError("no debio proponerse nada")))
     assert r_empty == {"findings": 0, "skipped_active_pr": [], "opened": [], "red": [],
-                       "blocked_zone_red": []}, r_empty
+                       "blocked_zone_red": [], "blocked_goal": []}, r_empty
 
     # un propose_fn que explota para UN finding no frena el resto
     def _propose_one_boom(target, finding):
@@ -833,7 +884,7 @@ if __name__ == "__main__":
         return "def g(): return 2"
     r_partial = nightly_evolve(harvest_fn=_fake_harvest_some, propose_fn=_propose_one_boom,
                                root=Path(tempfile.mkdtemp()), sandbox_fn=_fake_sandbox_ok,
-                               pr_fn=_fake_pr, path=Path(tempfile.mkdtemp()) / "s.json")
+                               pr_fn=_fake_pr, aligned_fn=_fake_aligned_ok, path=Path(tempfile.mkdtemp()) / "s.json")
     assert r_partial["opened"] == ["y.py"], r_partial   # x.py se perdio, y.py sigue
 
     globals()["_git"] = _git

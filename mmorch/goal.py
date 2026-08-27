@@ -43,14 +43,23 @@ def authorize_goal(path: Path = _GOAL_PATH, hash_path: Path = _GOAL_HASH_PATH) -
     return h
 
 
-def goal_guard(path: Path = _GOAL_PATH, hash_path: Path = _GOAL_HASH_PATH) -> None:
+def goal_guard(path: Path = _GOAL_PATH, hash_path: Path = _GOAL_HASH_PATH,
+               *, allow_init: bool = True) -> None:
     """Tamper-halt (análogo al hard-block del Stop-hook /goal). Si GOAL.md cambió vs el
     hash autorizado → GoalTampered (frena TODA auto-aplicación). Primera vez sin baseline
     → auto-autoriza (el GOAL inicial es el autorizado). Re-autorizar tras un cambio
-    legítimo = `authorize_goal()` (gate humano)."""
+    legítimo = `authorize_goal()` (gate humano).
+
+    `allow_init=False` (camino VIVO nocturno, W4.1): GOAL.hash faltante = HALT, no
+    re-autorización silenciosa — sin esto, BORRAR GOAL.hash re-autorizaba solo cualquier
+    GOAL.md adulterado. Regenerar el hash es acción humana explícita (`authorize_goal()`)."""
     cur = goal_hash(path)
     p = Path(hash_path)
     if not p.exists():
+        if not allow_init:
+            raise GoalTampered(
+                f"GOAL.hash faltante en {p} — hash faltante = HALT (borrar el hash NO "
+                f"re-autoriza). Si el GOAL actual es legítimo, un HUMANO corre authorize_goal().")
         p.write_text(cur, encoding="utf-8")   # init: el GOAL presente es el autorizado
         return
     authorized = p.read_text(encoding="utf-8").strip()

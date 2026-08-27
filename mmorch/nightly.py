@@ -54,8 +54,37 @@ def _log(rec: dict) -> None:
         f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
 
 
+def _goal_gate(path=None, hash_path=None) -> str | None:
+    """Tamper-halt del GOAL en el ARRANQUE del camino VIVO (W4.1). Antes goal_guard solo
+    gateaba evaluate()/self_evolve() — caminos que el nightly nunca ejecuta — así que
+    adulterar GOAL.md era invisible para el loop real. Devuelve el motivo del HALT
+    (GOAL.md adulterado, GOAL.hash faltante, GOAL.md faltante) o None si está sano.
+    Regenerar GOAL.hash es acción humana explícita: mmorch.goal.authorize_goal()."""
+    from mmorch.goal import GoalTampered, goal_guard
+    kw = {}
+    if path is not None:
+        kw = {"path": path, "hash_path": hash_path}
+    try:
+        goal_guard(allow_init=False, **kw)   # hash faltante = HALT, no re-autorización
+    except GoalTampered as e:
+        return str(e)
+    except FileNotFoundError as e:
+        return f"GOAL.md faltante (el ancla es obligatoria): {e}"
+    return None
+
+
 def main() -> None:
     rec: dict = {"ts": time.time()}
+
+    # gate de integridad ANTES de cualquier trabajo: si el contrato GOAL está adulterado
+    # o des-autorizado, NADA del loop corre — episodio auditable a nightly.jsonl + exit 1.
+    halt = _goal_gate()
+    if halt is not None:
+        rec["halt"] = "goal_tampered"
+        rec["halt_reason"] = halt
+        _log(rec)
+        print(f"HALT nightly: {halt}")
+        raise SystemExit(1)
 
     try:
         from mmorch.evolve import nightly_evolve
