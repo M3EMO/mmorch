@@ -39,8 +39,15 @@ def test_fanout_emits_events(monkeypatch):
 
 
 # ---- server ------------------------------------------------------------------
+H = {"X-Token": "secret"}
+
+
 def _client(monkeypatch, token="secret"):
     monkeypatch.setenv("MMORCH_SERVER_TOKEN", token)
+    # MMORCH_HOME aislado: los jobs se espejan en logs/jobs.jsonl (W3.2) y los
+    # tests no deben ensuciar el registro durable real del repo
+    import tempfile
+    monkeypatch.setenv("MMORCH_HOME", tempfile.mkdtemp())
     import importlib, mmorch.server as S
     importlib.reload(S)
     return S, TestClient(S.build_app())
@@ -49,7 +56,9 @@ def _client(monkeypatch, token="secret"):
 def test_state_requires_token(monkeypatch):
     S, c = _client(monkeypatch)
     assert c.get("/state").status_code == 401
-    assert c.get("/state?token=secret").status_code == 200
+    # W3.2: el token por query string ya NO autentica (solo header)
+    assert c.get("/state?token=secret").status_code == 401
+    assert c.get("/state", headers=H).status_code == 200
 
 
 def test_state_payload_shape(monkeypatch):
@@ -96,14 +105,14 @@ def test_projects_get_lista_y_post_registra(monkeypatch, tmp_path):
     """El mismo path sirve dos cosas segun el metodo. Sin cubrir LAS DOS ramas,
     invertir la condicion (== POST -> != POST) pasaba desapercibido."""
     S, c = _client(monkeypatch)
-    r = c.get("/projects?token=secret")
+    r = c.get("/projects", headers=H)
     assert r.status_code == 200 and "projects" in r.json()
 
     registrado = {}
     import mmorch.projects as P
     monkeypatch.setattr(P, "register",
                         lambda name, path: registrado.setdefault(name, path) or True)
-    r = c.post("/projects?token=secret",
+    r = c.post("/projects", headers=H,
                json={"name": "demo", "path": str(tmp_path)})
     assert r.status_code == 200 and "registered" in r.json()
     assert registrado == {"demo": str(tmp_path)}
@@ -111,11 +120,11 @@ def test_projects_get_lista_y_post_registra(monkeypatch, tmp_path):
 
 def test_gate_get_sin_gate_es_404_y_post_lo_crea(monkeypatch):
     S, c = _client(monkeypatch)
-    assert c.get("/jobs/nada/gate?token=secret").status_code == 404
-    r = c.post("/jobs/j1/gate?token=secret",
+    assert c.get("/jobs/nada/gate", headers=H).status_code == 404
+    r = c.post("/jobs/j1/gate", headers=H,
                json={"policy": {"stages": [{"name": "s1"}]}})
     assert r.status_code == 200
-    assert c.get("/jobs/j1/gate?token=secret").status_code == 200
+    assert c.get("/jobs/j1/gate", headers=H).status_code == 200
 
 
 def test_budget_policies_get_lee_y_post_guarda(monkeypatch):
@@ -127,9 +136,9 @@ def test_budget_policies_get_lee_y_post_guarda(monkeypatch):
     monkeypatch.setattr(BP, "snapshot", lambda: {"usd": 0.0})
     monkeypatch.setattr(BP, "evaluate", lambda pols, snap: [])
 
-    j = c.get("/budget/policies?token=secret").json()
+    j = c.get("/budget/policies", headers=H).json()
     assert j["policies"] == [{"name": "cap"}] and "snapshot" in j
     assert not guardado                       # un GET jamas debe escribir
 
-    r = c.post("/budget/policies?token=secret", json={"policies": [{"name": "x"}]})
+    r = c.post("/budget/policies", headers=H, json={"policies": [{"name": "x"}]})
     assert r.json() == {"saved": 1} and guardado == [[{"name": "x"}]]

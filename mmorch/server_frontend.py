@@ -49,11 +49,22 @@ main{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px}
 </main>
 <script>
 let T='';
-function connect(){T=document.getElementById('token').value;
- const es=new EventSource('/events?token='+encodeURIComponent(T));
- es.onopen=()=>document.getElementById('conn').textContent='live';
- es.onerror=()=>document.getElementById('conn').textContent='desconectado';
- es.onmessage=e=>addEv(JSON.parse(e.data));loadState();loadProjects();loadFleet();}
+// SSE via fetch streaming (no EventSource): el token viaja SOLO por header y
+// EventSource no puede mandar headers.
+async function connect(){T=document.getElementById('token').value;
+ loadState();loadProjects();loadFleet();
+ try{
+  const r=await fetch('/events',{headers:H()});
+  if(!r.ok){document.getElementById('conn').textContent='desconectado';return;}
+  document.getElementById('conn').textContent='live';
+  const rd=r.body.getReader();const dec=new TextDecoder();let buf='';
+  while(true){const {done,value}=await rd.read();if(done)break;
+   buf+=dec.decode(value,{stream:true});
+   let i;while((i=buf.indexOf('\\n\\n'))>=0){const chunk=buf.slice(0,i);buf=buf.slice(i+2);
+    const line=chunk.split('\\n').find(l=>l.startsWith('data: '));
+    if(line){try{addEv(JSON.parse(line.slice(6)));}catch(e){}}}}
+ }catch(e){}
+ document.getElementById('conn').textContent='desconectado';}
 function addEv(ev){const f=document.getElementById('feed');const d=document.createElement('div');
  d.className='ev '+(ev.status||'pending');
  d.innerHTML='<span class=dot></span><b>'+(ev.node||ev.type)+'</b><span class=muted>'+ev.status+'</span> '+(ev.detail||'');
@@ -68,7 +79,7 @@ function runRubric(){const task=document.getElementById('task').value||'implemen
  submitJob('/run/rubric',{task,K:5,criteria:[
   {id:'c1',desc:'inc pasa',kind:'checkable',checker:'python_exec',ctx:{code:'{attempt_code}\\nassert inc(1)==2'}}]});}
 function runFan(){submitJob('/run/fanout',{prompts:['di hola','di chau','di test']});}
-function loadState(){fetch('/state?token='+encodeURIComponent(T)).then(r=>r.json()).then(s=>{
+function loadState(){fetch('/state',{headers:H()}).then(r=>r.json()).then(s=>{
  document.getElementById('state').textContent=JSON.stringify({calls:s.summary&&s.summary.calls,cost:s.summary&&s.summary.total_cost_usd,sections:s.sections,budget:s.budget},null,2);
  renderKanban(s.jobs||{});});}
 const COLS=['queued','running','done','error','gate'];
@@ -80,7 +91,7 @@ function renderKanban(jobs){const k=document.getElementById('kanban');k.innerHTM
   by[c].forEach(([id,j])=>{const card=document.createElement('div');card.className='ev '+c;card.style='font-size:11px;margin:3px 0;padding:4px 6px';
    card.innerHTML='<b>'+(j.kind||'')+'</b> '+(j.title||id)+'<br><span class=muted>'+(j.host||'')+(j.engine?(' · '+j.engine):'')+'</span>';col.appendChild(card);});
   k.appendChild(col);});}
-function loadFleet(){fetch('/fleet?token='+encodeURIComponent(T)).then(r=>r.json()).then(s=>{
+function loadFleet(){fetch('/fleet',{headers:H()}).then(r=>r.json()).then(s=>{
  const f=document.getElementById('fleet');f.innerHTML='';const st=(s.state&&s.state.hosts)||{};
  const tg=document.getElementById('target');const cur=tg.value;          // repuebla el dropdown destino
  tg.innerHTML='<option value=local>local (este host)</option>';
@@ -95,7 +106,7 @@ function loadFleet(){fetch('/fleet?token='+encodeURIComponent(T)).then(r=>r.json
 function addHost(){const name=document.getElementById('hname').value,url=document.getElementById('hurl').value,token=document.getElementById('htok').value;
  if(!name||!url){alert('nombre + url');return;}
  fetch('/fleet',{method:'POST',headers:H(),body:JSON.stringify({name,url,token})}).then(()=>loadFleet());}
-function loadProjects(){fetch('/projects?token='+encodeURIComponent(T)).then(r=>r.json()).then(s=>{
+function loadProjects(){fetch('/projects',{headers:H()}).then(r=>r.json()).then(s=>{
  const sel=document.getElementById('proj');sel.innerHTML='';
  Object.keys(s.projects||{}).forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;sel.appendChild(o);});});}
 function runMmorch(){const project=document.getElementById('proj').value;const task=document.getElementById('ptask').value;

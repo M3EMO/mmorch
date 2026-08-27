@@ -6,9 +6,10 @@ Arquitectura (sintetizada de un ideate cross-family, las 3 alternativas naive re
 - El SERVER corre los jobs IN-PROCESS (importa mmorch, llama fan_out/rubric_loop) -> tiene los
   eventos en memoria via events.bus() y los streamea por SSE. Cero race con el JSONL (que sigue
   siendo el audit durable).
-- Control total: lanzar/matar jobs, aprobar gates. Auth por token (env MMORCH_SERVER_TOKEN).
-  Bind a la IP del tailnet (env MMORCH_SERVER_HOST, default 127.0.0.1). EventSource no manda
-  headers -> el token tambien se acepta por ?token=.
+- Control total: lanzar/matar jobs, aprobar gates. Auth por token OBLIGATORIO (env
+  MMORCH_SERVER_TOKEN; sin el, main() rehusa arrancar) y SOLO por header (Authorization:
+  Bearer o X-Token) — nunca query string. El SSE del front va por fetch streaming (que si
+  manda headers), no por EventSource.
 
 SEGURIDAD (decision informada del usuario): control total remoto. El gate humano se ejerce
 remoto-pero-autenticado por tunel PRIVADO (Tailscale). mmorch NO auto-aplica red-zone solo;
@@ -37,6 +38,18 @@ from .server_engine import (_rubric_drive, _run_rubric_job, _workflow_run, _run_
 async def home(request):
     from starlette.responses import HTMLResponse
     return HTMLResponse(_FRONTEND)
+
+
+async def health_handler(request):
+    """GET /health SIN auth: el dead-man's switch de W3.1 (health.report) para
+    monitoreo externo/watchdogs que no tienen el token. 200 = healthy, 503 = algo
+    muerto o con errores recientes. Solo estado operacional, sin secretos."""
+    from starlette.responses import JSONResponse
+    from starlette.concurrency import run_in_threadpool
+    from .health import report
+    from .paths import logs_dir
+    rep = await run_in_threadpool(lambda: report(logs_dir=str(logs_dir())))
+    return JSONResponse(rep, status_code=200 if rep.get("healthy") else 503)
 
 
 def _state_snapshot_sync() -> dict:
@@ -802,6 +815,7 @@ def build_app():
         routes_extra.append(Mount("/lotus", StaticFiles(directory=_lotus, html=True), name="lotus"))
     return Starlette(middleware=middleware, routes=routes_extra + [
         Route("/", home),
+        Route("/health", health_handler),
         Route("/state", state_snapshot),
         Route("/pending", curation_pending),
         Route("/verdict", curation_verdict, methods=["POST"]),
@@ -868,12 +882,22 @@ def start_health_beats(*, logs_dir: str | None = None,
 
 def main():
     import uvicorn
+    # Token OBLIGATORIO: sin auth el server no arranca (no existe "modo dev";
+    # un server de control total sin token es una puerta abierta al tailnet).
+    if not os.getenv("MMORCH_SERVER_TOKEN"):
+        raise SystemExit(
+            "MMORCH_SERVER_TOKEN es obligatorio y no esta seteado.\n"
+            "El server rehusa arrancar sin auth. Setealo en el entorno, ej:\n"
+            '  $env:MMORCH_SERVER_TOKEN = "un-secreto-largo"; python -m mmorch.server\n'
+            "El token viaja SOLO por header (Authorization: Bearer <tok> o X-Token).")
     host = os.getenv("MMORCH_SERVER_HOST", "127.0.0.1")
     port = int(os.getenv("MMORCH_SERVER_PORT", "8787"))
+    from .server_core import load_interrupted_jobs
+    interrupted = load_interrupted_jobs()
+    if interrupted:
+        print(f"jobs del proceso anterior recuperados como interrupted: {', '.join(interrupted)}")
     start_health_beats()
-    if not os.getenv("MMORCH_SERVER_TOKEN"):
-        print("WARN: MMORCH_SERVER_TOKEN no seteado -> sin auth. Bindeá a localhost/tailnet.")
-    print(f"mmorch live -> http://{host}:{port}  (token {'ON' if os.getenv('MMORCH_SERVER_TOKEN') else 'OFF'})")
+    print(f"mmorch live -> http://{host}:{port}  (token ON, solo header)")
     uvicorn.run(build_app(), host=host, port=port, log_level="warning")
 
 

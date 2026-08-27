@@ -153,9 +153,11 @@ def c_server():
         if m:
             tok = m.group(1)
             break
-    d = json.loads(urllib.request.urlopen(
-        # 20s, no 5: el primer request tras revivir el server tarda ~5.3s (cold import)
-        f"http://127.0.0.1:8787/pending?token={tok}", timeout=20).read().decode())
+    # token por header, nunca query (W3.2): el server rechaza ?token=
+    req = urllib.request.Request("http://127.0.0.1:8787/pending",
+                                 headers={"X-Token": tok})
+    # 20s, no 5: el primer request tras revivir el server tarda ~5.3s (cold import)
+    d = json.loads(urllib.request.urlopen(req, timeout=20).read().decode())
     return f"/pending vivo ({len(d['candidatas'])}+{len(d['cards'])})"
 
 
