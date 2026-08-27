@@ -891,6 +891,9 @@ def mmorch_speedup(source: str, setup: str, call: str, runs: int = 5, rounds: in
 
 def main() -> None:
     """Entry point instalable (`mmorch-mcp`) — arranca el server stdio."""
+    # dead-man visible (W4.4): grita por stderr (stdout es protocolo MCP)
+    from mmorch.health import nightly_watchdog
+    nightly_watchdog()
     mcp.run()
 
 

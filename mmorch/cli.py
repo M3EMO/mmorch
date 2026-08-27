@@ -20,6 +20,12 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("health", help="latidos + errores recientes; exit 1 si unhealthy")
     args = parser.parse_args(argv)
 
+    # dead-man visible (W4.4): nightly vencido grita en stderr aca mismo,
+    # ademas del JSON de `health` — status solo muestra metrics y sin esto
+    # un nightly muerto pasaba inadvertido en el comando mas usado
+    from mmorch.health import nightly_watchdog
+    nightly_watchdog()
+
     if args.cmd == "status":
         from mmorch.metrics import summary
         print(json.dumps(summary(), ensure_ascii=False, indent=2, default=str))

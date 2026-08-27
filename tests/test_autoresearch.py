@@ -35,13 +35,42 @@ def test_optimizes_file_keeps_best_and_journals(tmp_path):
 
 
 def test_resume_from_journal(tmp_path):
+    # formato REAL de hillclimb: best_score = best ANTES de la ronda, score =
+    # el candidato de la ronda, improved = si score paso a ser el nuevo best
     jp = tmp_path / "j.jsonl"
     jp.write_text(
-        json.dumps({"round": 1, "best_score": 100, "improved": True}) + "\n" +
-        json.dumps({"round": 2, "best_score": 60, "improved": True}) + "\n",
+        json.dumps({"round": 1, "score": 100, "best_score": None, "improved": True}) + "\n" +
+        json.dumps({"round": 2, "score": 60, "best_score": 100, "improved": True}) + "\n",
         encoding="utf-8")
     rounds, best = resume_from_journal(jp)
     assert rounds == 2 and best == 60
+
+
+def test_resume_ultima_ronda_sin_mejora_conserva_el_best(tmp_path):
+    """05 #16: el loop viejo de best era codigo muerto y el bloque final pisaba
+    con el best_score del ultimo registro — que es el best PRE-ronda. Si la
+    ULTIMA ronda mejoraba, la mejora se perdia al resumir; si no mejoraba, el
+    best correcto es su best_score. Ambos casos cubiertos."""
+    jp = tmp_path / "j.jsonl"
+    jp.write_text(
+        json.dumps({"round": 1, "score": 100, "best_score": None, "improved": True}) + "\n" +
+        json.dumps({"round": 2, "score": 60, "best_score": 100, "improved": True}) + "\n" +
+        json.dumps({"round": 3, "score": 80, "best_score": 60, "improved": False}) + "\n",
+        encoding="utf-8")
+    rounds, best = resume_from_journal(jp)
+    assert rounds == 3 and best == 60
+
+
+def test_resume_salta_linea_corrupta_sin_contarla(tmp_path):
+    """Crash a mitad del write deja una linea JSON truncada: no debe reventar
+    el resume ni inflar rounds_done (comeria rondas del presupuesto restante)."""
+    jp = tmp_path / "j.jsonl"
+    jp.write_text(
+        json.dumps({"round": 1, "score": 100, "best_score": None, "improved": True}) + "\n"
+        '{"round": 2, "sco',
+        encoding="utf-8")
+    rounds, best = resume_from_journal(jp)
+    assert rounds == 1 and best == 100
 
 
 def test_resume_no_journal(tmp_path):

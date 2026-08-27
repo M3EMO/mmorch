@@ -196,6 +196,68 @@ def report(*, logs_dir: str = "logs", now_ts: float | None = None) -> dict:
             "silent_errors_sample": recientes[:5]}
 
 
+def nightly_watchdog(*, logs_dir: str | None = None, now_ts: float | None = None,
+                     write_episode_fn=None) -> dict | None:
+    """Dead-man VISIBLE del nightly: se llama al arrancar cada entry point
+    principal (mmorch-mcp, mmorch-server, CLI `mmorch status`/`health`).
+
+    health.report() ya marca el rojo, pero nadie lo mira si nada lo grita:
+    si el nightly lleva mas del limite sin latir (o jamas latio), esto grita
+    en stderr + logger.warning en el arranque que el humano SI ve, y persiste
+    un episodio en memoria episodica (maximo uno por dia) para que la señal
+    sobreviva al scroll de la consola. Devuelve el hallazgo (None = sano)."""
+    import sys
+    if logs_dir is None:
+        from .paths import logs_dir as _ld
+        logs_dir = str(_ld())
+    limit = EXPECTATIONS["nightly"]
+    res = check(logs_dir=logs_dir, now_ts=now_ts, expectations={"nightly": limit})
+    if res["dead"]:
+        d = res["dead"][0]
+        horas = (d["overdue_s"] + limit) / 3600
+        msg = (f"WATCHDOG: nightly MUERTO — ultimo latido hace {horas:.1f}h "
+               f"(limite {limit // 3600}h). Revisar la Scheduled Task "
+               "'mmorch-nightly' y logs/nightly.jsonl.")
+        finding: dict = {"component": "nightly", "status": "dead",
+                         "overdue_s": d["overdue_s"]}
+    elif res["never"]:
+        msg = ("WATCHDOG: nightly NUNCA latio en este home — la Scheduled Task "
+               "'mmorch-nightly' no corrio jamas aca. Revisar el Task Scheduler.")
+        finding = {"component": "nightly", "status": "never", "overdue_s": None}
+    else:
+        return None
+    # stderr, no stdout: mmorch-mcp habla protocolo por stdout y el CLI emite
+    # JSON parseable — el grito no puede corromper ninguno de los dos canales
+    print(msg, file=sys.stderr)
+    logger.warning(msg)
+    finding["episode_written"] = _episodio_diario(logs_dir, msg, write_episode_fn)
+    return finding
+
+
+def _episodio_diario(logs_dir: str, msg: str, write_episode_fn) -> bool:
+    """Cada arranque grita, pero la memoria episodica recibe el hecho UNA vez
+    por dia (dedupe por fecha en watchdog_state.json): N reinicios del mismo
+    dia no son N hechos nuevos. Fail-open: jamas frena un arranque."""
+    from datetime import date
+    stamp = Path(logs_dir) / "watchdog_state.json"
+    hoy = date.today().isoformat()
+    try:
+        if json.loads(stamp.read_text(encoding="utf-8")).get("last_episode") == hoy:
+            return False
+    except (OSError, json.JSONDecodeError):
+        pass
+    try:
+        if write_episode_fn is None:
+            from .memory import write_episode
+            write_episode_fn = write_episode
+        write_episode_fn("global", "watchdog", msg)
+        stamp.write_text(json.dumps({"last_episode": hoy}), encoding="utf-8")
+        return True
+    except Exception as e:
+        logger.warning("nightly_watchdog: no pude escribir el episodio: %s", e)
+        return False
+
+
 def check_projects(projects: dict, *, run_fn=None, timeout: float = 600.0) -> dict:
     """Suite de cada proyecto del registry que tenga tests/ — suite roja = señal
     de bug que nadie vio (la otra mitad del dead-man's switch: no solo procesos

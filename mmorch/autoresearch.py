@@ -36,7 +36,14 @@ def parse_metric(text: str, regex: str) -> float:
 
 def resume_from_journal(journal_path: Path) -> tuple[int, float | None]:
     """Lee un journal de hillclimb (qrf) y devuelve (rondas_hechas, mejor_score visto).
-    Permite continuar una corrida overnight cortada. (0, None) si no hay journal."""
+    Permite continuar una corrida overnight cortada. (0, None) si no hay journal.
+
+    El `best_score` de cada registro es el best ANTES de esa ronda (hillclimb
+    lo escribe pre-update), asi que el best real al cortar = `score` del ultimo
+    registro si mejoro, sino su `best_score` (05 #16: el loop viejo nunca
+    acumulaba y el ultimo registro pisaba perdiendo la mejora final). Lineas
+    corruptas (crash a mitad de write) se saltan SIN contarlas como ronda,
+    para no inflar rounds_done y comerse rondas del presupuesto al resumir."""
     p = Path(journal_path)
     if not p.exists():
         return 0, None
@@ -44,15 +51,15 @@ def resume_from_journal(journal_path: Path) -> tuple[int, float | None]:
     for ln in p.read_text(encoding="utf-8").splitlines():
         if not ln.strip():
             continue
-        rec = json.loads(ln)
+        try:
+            rec = json.loads(ln)
+        except json.JSONDecodeError:
+            continue
         rounds += 1
-        bs = rec.get("best_score")
-        if bs is not None:
-            best = bs if best is None else best
-    # best_score del ULTIMO registro es el mejor acumulado al cortar
-    last = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
-    if last and last[-1].get("best_score") is not None:
-        best = last[-1]["best_score"]
+        if rec.get("improved") and rec.get("score") is not None:
+            best = rec["score"]
+        elif rec.get("best_score") is not None:
+            best = rec["best_score"]
     return rounds, best
 
 

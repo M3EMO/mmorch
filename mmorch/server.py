@@ -897,6 +897,10 @@ def main():
     if interrupted:
         print(f"jobs del proceso anterior recuperados como interrupted: {', '.join(interrupted)}")
     start_health_beats()
+    # dead-man visible (W4.4): el server suele ser el proceso que SI arranca
+    # cada dia — si el nightly esta vencido, que lo grite este arranque
+    from .health import nightly_watchdog
+    nightly_watchdog()
     print(f"mmorch live -> http://{host}:{port}  (token ON, solo header)")
     uvicorn.run(build_app(), host=host, port=port, log_level="warning")
 

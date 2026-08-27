@@ -201,3 +201,58 @@ def test_report_incluye_silent_errors_recientes(tmp_path):
     r = report(logs_dir=str(logs))
     assert r["silent_errors_48h"] == 1
     assert r["silent_errors_sample"][0]["source"] == "merge_train"
+
+
+# --- nightly_watchdog (W4.4): dead-man VISIBLE mas alla de health.report ---
+
+def test_watchdog_nightly_vencido_grita_y_persiste_episodio(tmp_path, capsys):
+    now = 1_000_000.0
+    health.beat("nightly", logs_dir=str(tmp_path), now_ts=now - 27 * 3600)
+    episodios = []
+    f = health.nightly_watchdog(
+        logs_dir=str(tmp_path), now_ts=now,
+        write_episode_fn=lambda scope, kind, msg: episodios.append((scope, kind, msg)))
+    assert f is not None and f["status"] == "dead" and f["episode_written"]
+    # el grito va por stderr (stdout es protocolo MCP / JSON del CLI)
+    err = capsys.readouterr().err
+    assert "WATCHDOG" in err and "mmorch-nightly" in err
+    assert episodios and episodios[0][1] == "watchdog"
+
+
+def test_watchdog_episodio_una_vez_por_dia_pero_grita_siempre(tmp_path, capsys):
+    now = 1_000_000.0
+    health.beat("nightly", logs_dir=str(tmp_path), now_ts=now - 27 * 3600)
+    episodios = []
+    fn = lambda *a: episodios.append(a)  # noqa: E731
+    f1 = health.nightly_watchdog(logs_dir=str(tmp_path), now_ts=now, write_episode_fn=fn)
+    f2 = health.nightly_watchdog(logs_dir=str(tmp_path), now_ts=now, write_episode_fn=fn)
+    assert f1["episode_written"] and not f2["episode_written"]
+    assert len(episodios) == 1
+    # el segundo arranque igual grita: la señal visible no se deduplica
+    assert capsys.readouterr().err.count("WATCHDOG") == 2
+
+
+def test_watchdog_nightly_vivo_devuelve_none_y_no_grita(tmp_path, capsys):
+    now = 1_000_000.0
+    health.beat("nightly", logs_dir=str(tmp_path), now_ts=now - 3600)
+    assert health.nightly_watchdog(logs_dir=str(tmp_path), now_ts=now) is None
+    assert capsys.readouterr().err == ""
+
+
+def test_watchdog_nightly_jamas_latio_tambien_es_rojo(tmp_path, capsys):
+    f = health.nightly_watchdog(logs_dir=str(tmp_path), now_ts=1_000_000.0,
+                                write_episode_fn=lambda *a: None)
+    assert f is not None and f["status"] == "never"
+    assert "NUNCA" in capsys.readouterr().err
+
+
+def test_watchdog_fail_open_si_el_episodio_revienta(tmp_path, capsys):
+    """El watchdog jamas frena el arranque de un entry point: si la memoria
+    episodica (DuckDB) esta rota, el grito visible igual sale."""
+    def boom(*a):
+        raise RuntimeError("duckdb lockeada")
+    health.beat("nightly", logs_dir=str(tmp_path), now_ts=1_000_000.0 - 30 * 3600)
+    f = health.nightly_watchdog(logs_dir=str(tmp_path), now_ts=1_000_000.0,
+                                write_episode_fn=boom)
+    assert f is not None and not f["episode_written"]
+    assert "WATCHDOG" in capsys.readouterr().err

@@ -111,8 +111,13 @@ def repair(repo_dir: str, *, today: str, build_fn=None,
             "budgets ni configs. Estilo ruff-clean."
         )
         import sys as _sys
-        gate_cmd = (f'"{_sys.executable}" -m pytest -q '
-                    f"--basetemp={Path(repo_dir).drive}/Users/map12/AppData/Local/Temp/claude/pt-repair")
+        import tempfile as _tf
+        # basetemp propio y PORTABLE (05 #19): el path absoluto hardcodeado a
+        # esta maquina rompia el gate en cualquier otra -> bloqueaba TODA
+        # reparacion; ademas el pytest-current global de Windows queda con
+        # permisos rotos (misma razon que health.check_projects)
+        bt = _tf.mkdtemp(prefix="mmorch_repair_bt_")
+        gate_cmd = f'"{_sys.executable}" -m pytest -q "--basetemp={bt}"'
         bf = build_fn or _default_build
         res = bf(task, wt.path, gate_cmd)
         built = res.get("status") == "built"
