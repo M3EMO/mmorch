@@ -22,6 +22,8 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from . import paths
 from typing import Any
 
 from .iohelpers import atomic_write_json, load_json_tolerant, read_jsonl_tolerant
@@ -29,7 +31,7 @@ from .iohelpers import atomic_write_json, load_json_tolerant, read_jsonl_toleran
 _log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
-_ARCHIVE = ROOT / "logs" / "evolution_archive.jsonl"
+_ARCHIVE = paths.logs_dir() / "evolution_archive.jsonl"
 
 
 # --------------------------------------------------------------------------- #
@@ -481,7 +483,7 @@ def _audit_episode(change: Change, zone: str, ev: dict) -> None:
 # Alternativa descartada: forzar mas commits sobre el MISMO PR abierto (mas trabajo, y
 # un force-push puede pisar contexto de una revision humana en curso).
 # --------------------------------------------------------------------------- #
-_PR_STATE = ROOT / "logs" / "evolve_open_prs.json"
+_PR_STATE = paths.logs_dir() / "evolve_open_prs.json"
 
 
 def _load_pr_state(path: Path = _PR_STATE) -> dict:

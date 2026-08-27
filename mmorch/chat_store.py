@@ -13,7 +13,9 @@ import time
 import uuid
 from pathlib import Path
 
-_DB = Path(os.getenv("MMORCH_CHAT_DB") or (Path(__file__).resolve().parent.parent / "chat.db"))
+from .paths import db_path
+
+_DB = Path(os.getenv("MMORCH_CHAT_DB") or db_path("chat.db"))
 _LOCK = threading.Lock()
 _CONN = sqlite3.connect(_DB, check_same_thread=False)
 _CONN.execute(

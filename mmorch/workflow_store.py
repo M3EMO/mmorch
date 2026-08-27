@@ -22,7 +22,9 @@ import threading
 import time
 from pathlib import Path
 
-_DB = Path(os.getenv("MMORCH_WORKFLOW_DB") or (Path(__file__).resolve().parent.parent / "workflow.db"))
+from .paths import db_path
+
+_DB = Path(os.getenv("MMORCH_WORKFLOW_DB") or db_path("workflow.db"))
 _LOCK = threading.Lock()
 _CONN = sqlite3.connect(_DB, check_same_thread=False)
 _CONN.executescript(

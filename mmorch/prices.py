@@ -12,8 +12,9 @@ from pathlib import Path
 
 from .config import spec
 
-ROOT = Path(__file__).resolve().parent.parent
-PRICES_PATH = ROOT / "prices.json"
+from .paths import data_dir
+
+PRICES_PATH = data_dir() / "prices.json"
 
 
 def load_overrides(path: Path | None = None) -> dict:

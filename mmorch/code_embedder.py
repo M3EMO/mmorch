@@ -9,12 +9,13 @@ como memory.embed). Cero dep nueva: solo numpy (ya esta).
 Uso: from mmorch.code_embedder import embed_code; v = embed_code("def f(x): return x+1")
 """
 from __future__ import annotations
-import io, json, re, tokenize, keyword, builtins, textwrap, pathlib
+import io, json, re, tokenize, keyword, builtins, textwrap
 import numpy as np
 
-_ROOT = pathlib.Path(__file__).resolve().parents[1]
-_NPZ = _ROOT / "flywheel" / "code_embedder.npz"
-_VOCAB = _ROOT / "flywheel" / "code_embedder_vocab.json"
+from .paths import home
+
+_NPZ = home() / "flywheel" / "code_embedder.npz"
+_VOCAB = home() / "flywheel" / "code_embedder_vocab.json"
 _BUILTINS = set(dir(builtins)) | set(keyword.kwlist)
 _WORD = re.compile(r"[A-Za-z_]\w*|\d+|[^\sA-Za-z0-9_]")
 _MAXLEN = 200

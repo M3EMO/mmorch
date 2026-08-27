@@ -161,7 +161,9 @@ from .classify import cynefin_classify
 from .config import DEFAULT_ROUTER
 from .feedback import record_outcome
 
-_LEDGER = Path(__file__).resolve().parent.parent / "logs" / "ingested_sessions.txt"
+from .paths import logs_dir
+
+_LEDGER = logs_dir() / "ingested_sessions.txt"
 
 
 @dataclass

@@ -29,8 +29,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-_DB_PATH = ROOT / "logs" / "memory.duckdb"
+from .paths import logs_dir
+
+_DB_PATH = logs_dir() / "memory.duckdb"
 _EMB_MODEL = "BAAI/bge-small-en-v1.5"
 _EMB_DIM = 384
 
@@ -776,7 +777,7 @@ def stats(path: Path = _DB_PATH) -> dict:
 # inyectar como contexto barato siempre-presente. Es una VISTA DERIVADA (se regenera
 # de las notas, que ya pasaron verify en el destilado) — nunca fuente de verdad.
 # ---------------------------------------------------------------------------
-_DIGEST_PATH = ROOT / "logs" / "memory_digests.json"
+_DIGEST_PATH = logs_dir() / "memory_digests.json"
 
 
 def refresh_digest(scope: str = "global", *, max_words: int = 180,

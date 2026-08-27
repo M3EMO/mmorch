@@ -10,7 +10,9 @@ import re
 from datetime import date
 from pathlib import Path
 
-VAULT = Path(__file__).resolve().parent.parent / "vault"
+from .paths import home
+
+VAULT = home() / "vault"
 
 
 def _slug(s: str) -> str:

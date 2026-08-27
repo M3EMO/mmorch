@@ -11,7 +11,9 @@ import hashlib
 import json
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+from .paths import home
+
+ROOT = home()
 MANIFEST = ROOT / "weights" / "manifest.json"
 
 

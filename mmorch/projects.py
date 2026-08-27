@@ -11,8 +11,9 @@ import json
 import os
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-PROJECTS_PATH = ROOT / "projects.json"
+from .paths import data_dir
+
+PROJECTS_PATH = data_dir() / "projects.json"
 
 
 def _load(path: Path | None = None) -> dict:

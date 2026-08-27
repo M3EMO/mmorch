@@ -13,7 +13,9 @@ from pathlib import Path
 
 from .config import DEFAULT_VERIFIER
 
-_PATH = Path(__file__).resolve().parent.parent / "logs" / "memo.json"
+from .paths import logs_dir
+
+_PATH = logs_dir() / "memo.json"
 _LOCK = threading.Lock()
 _log = logging.getLogger(__name__)
 

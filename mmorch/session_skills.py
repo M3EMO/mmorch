@@ -17,8 +17,10 @@ from pathlib import Path
 from .sessions import (_ledger_seen, _resolve_latest, _session_id,
                        observed_domain, outcome_of, parse_session)
 
-_STORE = Path(__file__).resolve().parent.parent / "logs" / "workflow_obs.jsonl"
-_LEDGER = Path(__file__).resolve().parent.parent / "logs" / "workflow_sessions.txt"
+from .paths import logs_dir
+
+_STORE = logs_dir() / "workflow_obs.jsonl"
+_LEDGER = logs_dir() / "workflow_sessions.txt"
 
 
 @dataclass

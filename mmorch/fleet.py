@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-HOSTS_PATH = ROOT / "hosts.json"
+from .paths import data_dir
+
+HOSTS_PATH = data_dir() / "hosts.json"
 
 
 def _load(path: Path | None = None) -> dict:

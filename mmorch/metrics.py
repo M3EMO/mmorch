@@ -18,8 +18,9 @@ from .iohelpers import read_jsonl_cached, read_jsonl_tail
 
 _LOCK = threading.Lock()
 
-# logs/ sits next to this package, under ~/.claude/orchestration/
-_LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+from .paths import logs_dir
+
+_LOG_DIR = logs_dir()
 _LOG_PATH = _LOG_DIR / "metrics.jsonl"
 
 

@@ -26,8 +26,9 @@ from pathlib import Path
 from .feedback import ThompsonBandit
 from .signature import Signature, key as sig_key, signature
 
-ROOT = Path(__file__).resolve().parent.parent
-_SIG_BANDIT = ROOT / "logs" / "bandit_sig.json"
+from .paths import logs_dir
+
+_SIG_BANDIT = logs_dir() / "bandit_sig.json"
 
 
 def _arm(model: str, task: str, complexity: str = "") -> str:
@@ -76,7 +77,7 @@ def coherence(task: str, *, complexity: str = "", bandit: ThompsonBandit | None 
     return sum(s["n"] for a, s in b.stats().items() if a.endswith("#" + sk))
 
 
-_PROBE_STATE = Path(__file__).resolve().parents[1] / "logs" / "health_probes.json"
+_PROBE_STATE = logs_dir() / "health_probes.json"
 
 
 def healthy(models: list[str], *, max_error_rate: float = 0.15, min_calls: int = 10,
@@ -192,9 +193,9 @@ def backfill(*, reset: bool = True, bandit_path: Path = _SIG_BANDIT) -> dict:
         bandit_path.unlink()
     b = ThompsonBandit(bandit_path)
     sources = {
-        "feedback": (ROOT / "logs" / "feedback.jsonl", "arm", "context", None),
-        "trajectories": (ROOT / "logs" / "trajectories.jsonl", "gen_model", "task", None),
-        "workflow_obs": (ROOT / "logs" / "workflow_obs.jsonl", None, "task", "domain"),
+        "feedback": (logs_dir() / "feedback.jsonl", "arm", "context", None),
+        "trajectories": (logs_dir() / "trajectories.jsonl", "gen_model", "task", None),
+        "workflow_obs": (logs_dir() / "workflow_obs.jsonl", None, "task", "domain"),
     }
     rep: dict = {"by_source": {}, "total_updates": 0}
     for name, (path, armf, taskf, cplxf) in sources.items():

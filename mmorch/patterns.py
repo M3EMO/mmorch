@@ -196,8 +196,8 @@ def adversarial_verify(
     try:
         import json as _json
         import time as _time
-        from pathlib import Path as _P
-        with open(_P(__file__).resolve().parents[1] / "logs" / "dpo_pairs.jsonl",
+        from .paths import logs_dir as _logs_dir
+        with open(_logs_dir() / "dpo_pairs.jsonl",
                   "a", encoding="utf-8") as _f:
             _f.write(_json.dumps(
                 {"ts": _time.time(), "rubric": rubric[:2000],

@@ -22,13 +22,14 @@ import sys
 import threading
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parent.parent
+from .paths import home
+
 _WORKER = Path(__file__).resolve().parent / "plugin_worker.py"
 _REQUIRED = ("name", "version", "entry", "contributes")
 
 
 def plugins_dir() -> Path:
-    return Path(os.getenv("MMORCH_PLUGINS_DIR") or (_ROOT / "plugins"))
+    return Path(os.getenv("MMORCH_PLUGINS_DIR") or (home() / "plugins"))
 
 
 def policy_allow() -> set[str]:

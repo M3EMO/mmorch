@@ -361,7 +361,8 @@ def commit_rubric(task: str, criteria: list[dict], *, store_dir: str | None = No
     import json as _json
     from pathlib import Path
 
-    d = Path(store_dir) if store_dir else Path(__file__).resolve().parent.parent / "logs" / "rubric_pending"
+    from .paths import logs_dir
+    d = Path(store_dir) if store_dir else logs_dir() / "rubric_pending"
     d.mkdir(parents=True, exist_ok=True)
     payload = _json.dumps({"task": task, "criteria": criteria}, sort_keys=True,
                           ensure_ascii=False)
@@ -381,7 +382,8 @@ def reveal_rubric(rid: str, *, store_dir: str | None = None,
     import json as _json
     from pathlib import Path
 
-    d = Path(store_dir) if store_dir else Path(__file__).resolve().parent.parent / "logs" / "rubric_pending"
+    from .paths import logs_dir
+    d = Path(store_dir) if store_dir else logs_dir() / "rubric_pending"
     p = d / f"{rid}.json"
     payload = p.read_text(encoding="utf-8")
     ok = hashlib.sha256(payload.encode()).hexdigest().startswith(rid)

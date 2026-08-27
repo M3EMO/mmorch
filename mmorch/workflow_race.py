@@ -19,8 +19,9 @@ from pathlib import Path
 
 from .feedback import ThompsonBandit
 
-_ROOT = Path(__file__).resolve().parents[1]
-_WF_BANDIT = _ROOT / "logs" / "workflow_bandit.json"
+from .paths import logs_dir
+
+_WF_BANDIT = logs_dir() / "workflow_bandit.json"
 
 # Variantes v1 del project-build engine. Frozen-ish: renombrar una variante resetea su
 # historial en el bandit (el arm es el nombre) — versionar como los bench tasks.

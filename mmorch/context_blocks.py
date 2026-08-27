@@ -22,8 +22,9 @@ import sqlite3
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-_DB = Path(os.getenv("MMORCH_CONTEXT_DB", ROOT / "logs" / "context_blocks.db"))
+from .paths import logs_dir
+
+_DB = Path(os.getenv("MMORCH_CONTEXT_DB", logs_dir() / "context_blocks.db"))
 # absolute-token threshold (a hook can't see the window %, so the user sets this near their model's
 # ~85%); env-overridable. ~4 chars/token heuristic.
 _THRESHOLD = int(os.getenv("MMORCH_CTX_BLOCK_TOKENS", "150000"))

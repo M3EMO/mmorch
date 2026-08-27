@@ -23,9 +23,10 @@ from .iohelpers import atomic_write_json, load_json_tolerant, read_jsonl_cached
 
 _log = logging.getLogger(__name__)
 
-ROOT = Path(__file__).resolve().parent.parent
-_FEEDBACK_LOG = ROOT / "logs" / "feedback.jsonl"
-_BANDIT_STATE = ROOT / "logs" / "bandit_state.json"
+from .paths import logs_dir
+
+_FEEDBACK_LOG = logs_dir() / "feedback.jsonl"
+_BANDIT_STATE = logs_dir() / "bandit_state.json"
 
 
 @dataclass

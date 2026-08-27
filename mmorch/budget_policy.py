@@ -20,8 +20,10 @@ from .iohelpers import atomic_write_json
 
 _log = logging.getLogger(__name__)
 
+from .paths import data_dir
+
 _PATH = Path(os.getenv("MMORCH_BUDGET_POLICIES")
-             or (Path(__file__).resolve().parent.parent / "budget_policies.json"))
+             or (data_dir() / "budget_policies.json"))
 
 
 class PolicyLoadError(Exception):

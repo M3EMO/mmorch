@@ -26,9 +26,10 @@ import pathlib
 
 from .iohelpers import read_jsonl_tolerant
 
-_ROOT = pathlib.Path(__file__).resolve().parents[1]
-_TRAJ = _ROOT / "logs" / "trajectories.jsonl"
-_SKILLS = _ROOT / "logs" / "skills.jsonl"
+from .paths import logs_dir
+
+_TRAJ = logs_dir() / "trajectories.jsonl"
+_SKILLS = logs_dir() / "skills.jsonl"
 
 
 def _checkable_ids(state: dict) -> set[str]:

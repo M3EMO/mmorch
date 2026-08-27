@@ -18,6 +18,8 @@ import json
 import re
 import shlex
 from pathlib import Path
+
+from . import paths
 from typing import Callable
 
 from .config import DEFAULT_GENERATOR
@@ -67,7 +69,7 @@ def validate_test_cmd(cmd: str | None) -> tuple[bool, str]:
 # instead of re-rolling the dice. mmorch's planner is nondeterministic even at temp=0 (measured:
 # same rate-limiter task, same config -> sometimes 'duplicate target file', sometimes clean); a
 # task run twice (nightly workflow_race, bench re-runs) shouldn't pay that risk twice.) ---
-_WORKLIST_CACHE = Path(__file__).resolve().parents[1] / "logs" / "worklist_cache.json"
+_WORKLIST_CACHE = paths.logs_dir() / "worklist_cache.json"
 
 
 def _cache_key(task: str, external_test: str | None) -> str:
@@ -102,7 +104,7 @@ def _save_json_cache(path: Path, key: str, value) -> None:
 # variantes corridas en secuencia con worklist cache tibio -> 2/3 build, pero CUAL falla varia
 # corrida a corrida (pb-quick una vez, pb-deep otra) -- confirma que la varianza restante es del
 # coder, no del planner.) ---
-_UNIT_CODE_CACHE = Path(__file__).resolve().parents[1] / "logs" / "unit_code_cache.json"
+_UNIT_CODE_CACHE = paths.logs_dir() / "unit_code_cache.json"
 
 
 def unit_cache_key(unit: dict) -> str:

@@ -17,8 +17,9 @@ import json
 import pathlib
 import time
 
-_ROOT = pathlib.Path(__file__).resolve().parents[1]
-_LOG = _ROOT / "logs" / "mcp_calls.jsonl"
+from .paths import logs_dir
+
+_LOG = logs_dir() / "mcp_calls.jsonl"
 
 
 def _log_call(tool: str, ok: bool, dur_s: float, err: str = "") -> None:

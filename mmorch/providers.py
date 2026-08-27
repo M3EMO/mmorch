@@ -18,8 +18,8 @@ from .metrics import log_event
 
 load_dotenv()  # picks up ~/.claude/orchestration/.env if cwd or parents contain it
 # Also explicitly load the package-local .env regardless of cwd.
-from pathlib import Path as _Path  # noqa: E402
-load_dotenv(_Path(__file__).resolve().parent.parent / ".env")
+from .paths import home as _mmorch_home
+load_dotenv(_mmorch_home() / ".env")
 
 # Lazy import so the package imports even if `openai` isn't installed yet.
 try:
