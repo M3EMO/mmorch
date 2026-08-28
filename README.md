@@ -27,7 +27,7 @@ server `mmorch`.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **131 módulos · 46 MCP tools · 832 tests.**
+_Auto-generado por `mmorch.docgen`._ **132 módulos · 46 MCP tools · 849 tests.**
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
@@ -48,6 +48,7 @@ _Auto-generado por `mmorch.docgen`._ **131 módulos · 46 MCP tools · 832 tests
 | `mmorch/bughunt.py` | BUG-HUNTER logico de mmorch: mutation-survivors como mapa de donde un bug silencioso viviria. |
 | `mmorch/bursts.py` | Bursts de arXiv — temas recién acuñados, que ningún tag todavía nombra. |
 | `mmorch/cache.py` | memo (I-4) — cache content-hash de resultados/verdicts. Salta re-gen/re-verify |
+| `mmorch/canary.py` | canary — set FIJO de tareas con respuesta verificable deterministicamente (W5.3). |
 | `mmorch/cascade.py` | cascade — FrugalGPT-style multi-step confidence cascade (research: vault/research/ |
 | `mmorch/chat_store.py` | chat_store — durable chat history for Lotus (SQLite, stdlib). |
 | `mmorch/checkers.py` | checkers — libreria propia de VERIFICADORES DETERMINISTAS (tool-verify). |

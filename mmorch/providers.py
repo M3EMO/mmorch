@@ -193,6 +193,10 @@ class CallResult:
     out_tokens: int
     cost_usd: float
     latency_s: float
+    # W5.3: nombre/version EXACTA que el provider dice haber servido (resp.model).
+    # Los providers rotan versiones sin aviso; capturarla permite invalidar priors
+    # del bandit y correlacionar drift del canary con la rotacion.
+    model_version: str = ""
 
     def __str__(self) -> str:
         return self.text
@@ -349,4 +353,5 @@ def call(
         out_tokens=out_tok,
         cost_usd=c,
         latency_s=latency,
+        model_version=str(getattr(resp, "model", "") or ""),
     )

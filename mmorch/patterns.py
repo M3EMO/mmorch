@@ -98,13 +98,21 @@ class Verdict:
     cost_usd: float
 
 
+# W5.3 (research 08, ataca ECE 0.456 medido): labels categoricos ANCLADOS en vez de
+# score numerico crudo. Un judge con escala 0..1 libre inventa su propia escala y
+# driftea entre modelos/versiones; una definicion por label es estable, y el numero
+# se asigna DESPUES aca (mapeo fijo, ver _LABEL_MAP en _parse_verdict).
 _SKEPTIC_SYSTEM = (
     "You are an adversarial verifier from a DIFFERENT model family than the author. "
     "Your job is to REFUTE the artifact, not to praise it. Assume it is flawed until "
     "proven otherwise. Agreement is NOT confirmation. Check against the rubric. "
     "If you concede a point, state: 'CEDO porque [refuted premise] + [rule/evidence]'. "
     "Respond ONLY with minified JSON: "
-    '{"passed": bool, "confidence": 0..1, "refutations": [string, ...]}'
+    '{"verdict": "correcto"|"incorrecto_menor"|"incorrecto_grave", '
+    '"refutations": [string, ...]}. '
+    "verdict anchors: correcto = meets the rubric with no substantive error; "
+    "incorrecto_menor = real but bounded flaws that do not invalidate the core; "
+    "incorrecto_grave = violates the rubric or contains a substantive error."
 )
 
 
@@ -233,6 +241,17 @@ def _coerce_conf(v) -> float:
         return 0.0
 
 
+# label anclado -> (passed, confidence). Los numeros son POST-mapeo, fijos y nuestros
+# (no auto-reporte del modelo): incorrecto_grave mapea MAS confianza de refutacion
+# (0.95) que incorrecto_menor (0.6) — la severidad definida es la señal, el numero
+# solo la transporta a los consumidores existentes (ensemble avg, pair_verify snap).
+_LABEL_MAP: dict[str, tuple[bool, float]] = {
+    "correcto": (True, 0.9),
+    "incorrecto_menor": (False, 0.6),
+    "incorrecto_grave": (False, 0.95),
+}
+
+
 def _parse_verdict(text: str) -> tuple[bool, float, list[str]]:
     """Best-effort JSON extraction from the verifier reply."""
     s = text.strip()
@@ -246,11 +265,24 @@ def _parse_verdict(text: str) -> tuple[bool, float, list[str]]:
         s = s[start : end + 1]
     try:
         data = json.loads(s)
-        return (
-            _coerce_passed(data.get("passed", False)),
-            _coerce_conf(data.get("confidence", 0.0)),
-            list(data.get("refutations", [])),
-        )
     except Exception:
         # Could not parse → treat as failed (skeptic default).
         return False, 0.0, [f"unparseable verifier output: {text[:200]}"]
+    refs = list(data.get("refutations", []))
+    v = data.get("verdict")
+    if isinstance(v, str):
+        # tolerar variantes triviales ("incorrecto-menor", mayusculas); todo lo demas
+        # es label fuera de vocabulario -> refuta por default (anti-sicofancia: un
+        # verificador ilegible jamas aprueba)
+        key = v.strip().lower().replace("-", "_").replace(" ", "_")
+        if key in _LABEL_MAP:
+            passed, conf = _LABEL_MAP[key]
+            return passed, conf, refs
+        return False, 0.0, refs + [f"label desconocido del verificador: {v[:80]}"]
+    # legacy {"passed", "confidence"}: modelos que ignoran el contrato nuevo siguen
+    # parseando (mejor un veredicto numerico que un unparseable-refute falso)
+    return (
+        _coerce_passed(data.get("passed", False)),
+        _coerce_conf(data.get("confidence", 0.0)),
+        refs,
+    )

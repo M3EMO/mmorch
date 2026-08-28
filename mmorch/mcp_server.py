@@ -14,6 +14,7 @@ from __future__ import annotations
 import functools
 import json
 import os
+import time
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -115,11 +116,129 @@ def _guarded(fn):
     return wrapper
 
 
+# --- Matriz de riesgo por tool (W5.3, research 08: risk-rating de OpenAI) ------
+# Cada tool declara su clase de riesgo; el registro _tool la EXIGE (tool nueva sin
+# declarar = RuntimeError a import-time, no drift silencioso):
+#   read   — consulta/computo; no cambia estado persistente del sistema.
+#   mutate — cambia estado local (memoria, vault, outcomes, archivos, o ejecuta
+#            codigo generado en sandbox).
+#   outward — efectos FUERA de la maquina/estado local (PRs, push, mensajes).
+# NO hay gate HITL bloqueante (decision W5.3): mutate sensibles + outward dejan
+# rastro en un audit trail (logs/audit.jsonl) para forensica y review humano.
+_TOOL_RISK: dict[str, str] = {
+    "mmorch_fan_out": "read",
+    "mmorch_adversarial_verify": "read",
+    "mmorch_metrics_summary": "read",
+    "mmorch_error_rates": "read",
+    "mmorch_budget_status": "read",
+    "mmorch_cache_stats": "read",
+    "mmorch_route": "read",
+    "mmorch_review_code": "read",
+    "mmorch_intuition": "read",
+    "mmorch_cascade": "read",
+    "mmorch_autoresearch": "mutate",      # edita target_file en el repo del caller
+    "mmorch_ensemble_verify": "read",
+    "mmorch_learn": "read",
+    "mmorch_innovate": "read",
+    "mmorch_remember": "mutate",
+    "mmorch_vault_write": "mutate",       # escribe en el vault global
+    "mmorch_recall": "mutate",            # bumpea access_count (afecta decay futuro)
+    "mmorch_tournament": "read",
+    "mmorch_bucket_rank": "read",
+    "mmorch_classify": "read",
+    "mmorch_cynefin": "read",
+    "mmorch_spec_interview": "read",
+    "mmorch_build_spec": "read",
+    "mmorch_ingest_session": "mutate",
+    "mmorch_session_playbooks": "mutate",
+    "mmorch_record_outcome": "mutate",
+    "mmorch_feedback_stats": "read",
+    "mmorch_check": "read",
+    "mmorch_evolve_self": "mutate",       # propone+snapshotea cambios de codigo
+    "mmorch_evolve_nightly": "outward",   # abre PRs — sale del estado local
+    "mmorch_orchestra": "read",
+    "mmorch_consolidate": "mutate",       # tombstonea memoria (con apply)
+    "mmorch_memory_stats": "read",
+    "mmorch_reinforce": "mutate",
+    "mmorch_flag_contradiction": "mutate",
+    "mmorch_pending_review": "read",
+    "mmorch_resolve_review": "mutate",    # drop=true tombstonea
+    "mmorch_close_loop": "mutate",
+    "mmorch_open_loops": "read",
+    "mmorch_find_tension": "read",
+    "mmorch_forget_preview": "read",
+    "mmorch_rubric_start": "read",
+    "mmorch_rubric_next": "read",
+    "mmorch_rubric_submit": "mutate",     # re-ejecuta checkers + registra outcomes
+    "mmorch_perfect": "read",
+    "mmorch_speedup": "mutate",           # ejecuta codigo generado (subprocess)
+}
+
+# mutate SENSIBLES (tocan codigo/vault/memoria de forma dificil de deshacer o
+# ejecutan codigo generado) + todo outward: van al audit trail.
+_AUDITED = frozenset({
+    "mmorch_autoresearch", "mmorch_evolve_self", "mmorch_evolve_nightly",
+    "mmorch_vault_write", "mmorch_consolidate", "mmorch_resolve_review",
+    "mmorch_speedup",
+})
+
+
+def _audit_log(tool: str, risk: str, ok: bool, kwargs: dict) -> None:
+    """Append-only a logs/audit.jsonl. logs_dir() se resuelve EN cada call (no a
+    import-time) para que MMORCH_HOME de una instancia aislada aplique. El audit
+    jamas rompe la tool (fail-open: perder una linea de log < perder la operacion)."""
+    try:
+        from mmorch.paths import logs_dir
+        rec = {"ts": time.time(), "tool": tool, "risk": risk, "ok": ok,
+               "args": json.dumps({k: str(v)[:80] for k, v in kwargs.items()},
+                                  ensure_ascii=False)[:400]}
+        with open(logs_dir() / "audit.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _audited(fn, risk: str):
+    """Wrapper de audit trail para tools sensibles/outward. Va POR DENTRO de
+    _guarded: ve la excepcion real (ok=False) y la re-lanza para que el contrato
+    de error la formatee."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        ok = True
+        try:
+            return fn(*args, **kwargs)
+        except BaseException:
+            ok = False
+            raise
+        finally:
+            _audit_log(fn.__name__, risk, ok, kwargs)
+    return wrapper
+
+
+def _registers_in_profile(name: str, risk: str, profile: str) -> bool:
+    """Decide si una tool se registra en el server segun el perfil. core (Cursor)
+    excluye la lista curada Y todo outward por default: un cliente generico no
+    debe descubrir tools con efectos fuera de la maquina sin opt-in (full)."""
+    if profile != "core":
+        return True
+    return name not in _NOT_IN_CORE and risk != "outward"
+
+
 def _tool(fn):
     """Registro condicional por perfil (en core, las tools excluidas quedan como
-    funciones Python normales) + contrato de error uniforme para TODAS."""
+    funciones Python normales) + contrato de error uniforme para TODAS + matriz
+    de riesgo obligatoria (audit trail en sensibles/outward)."""
+    name = fn.__name__
+    risk = _TOOL_RISK.get(name)
+    if risk is None:
+        raise RuntimeError(
+            f"{name} sin riesgo declarado en _TOOL_RISK (read|mutate|outward) — "
+            "toda tool MCP debe clasificarse (W5.3)")
+    if name in _AUDITED:
+        fn = _audited(fn, risk)
     fn = _guarded(fn)
-    if _PROFILE == "core" and fn.__name__ in _NOT_IN_CORE:
+    fn.__mmorch_risk__ = risk  # metadata inspeccionable (tests / clientes)
+    if not _registers_in_profile(name, risk, _PROFILE):
         return fn
     return mcp.tool()(fn)
 
@@ -601,6 +720,7 @@ def mmorch_record_outcome(
     predicted_conf: float | None = None,
     source: str = "",
     context: str = "",
+    model_version: str = "",
 ) -> str:
     """CLOSE THE FEEDBACK LOOP (keystone). After you (the orchestrator) use a cheap
     mmorch result and learn whether it was actually right, call this with the real
@@ -615,6 +735,9 @@ def mmorch_record_outcome(
     source: where the label came from (opus|downstream|test|human). Default "" — same
     as the library (W5.1: the old MCP-only default "opus" mislabeled outcomes whose
     label came from elsewhere).
+    model_version: EXACT model name/version the provider reported serving (from
+    CallResult.model_version). Providers rotate versions behind stable arm keys;
+    logging it lets you invalidate/segment bandit priors when the version rotates (W5.3).
 
     Records the labeled outcome; with a non-empty `context` the library also trains the
     signature-keyed bandit (the ONLY bandit since W4.3 — the old flat state file was a
@@ -623,7 +746,7 @@ def mmorch_record_outcome(
     Returns JSON {recorded, arm, reward, bandit: {mean, n}} for the sig-keyed arm.
     """
     o = _record_outcome(arm, reward, pattern=pattern, predicted_conf=predicted_conf,
-                        source=source, context=context)
+                        source=source, context=context, model_version=model_version)
     bandit_stats: dict = {}
     if context:
         from mmorch.intuition import arm_stats

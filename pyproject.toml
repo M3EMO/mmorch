@@ -74,7 +74,7 @@ packages = ["mmorch"]
 [tool.setuptools.package-data]
 # pesos del nodo neuronal + vocab + datos viajan con el paquete (deploy sin
 # re-entrenar); prompts/ y roles/ son CODIGO del paquete (W2.1), no estado
-mmorch = ["py.typed", "prompts/*.txt", "roles/*.md"]
+mmorch = ["py.typed", "prompts/*.txt", "roles/*.md", "canary_tasks.jsonl"]
 
 [tool.setuptools.exclude-package-data]
 mmorch = []
