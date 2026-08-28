@@ -8,6 +8,13 @@ $py = Join-Path $repo ".venv\Scripts\python.exe"
 $errlog = Join-Path $repo "logs\server_forever.err"
 $port = if ($env:MMORCH_SERVER_PORT) { [int]$env:MMORCH_SERVER_PORT } else { 8787 }
 
+# Rotacion al arrancar (defecto #4 r3): sin esto el err crece para siempre y el
+# server_err_tail de health.report muestra errores historicos ya resueltos
+# (10048 viejos), enmascarando los nuevos. Una generacion .1 alcanza de forense.
+if ((Test-Path $errlog) -and ((Get-Item $errlog).Length -gt 262144)) {
+  Move-Item -Force $errlog "$errlog.1"
+}
+
 while ($true) {
   # Fix W3.2 (bind 10048): si el puerto ya esta escuchando, NO relanzar en loop
   # infinito de bind. Un python viejo (huerfano de un watchdog anterior) se mata

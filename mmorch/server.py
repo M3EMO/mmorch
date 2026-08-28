@@ -132,8 +132,10 @@ async def curation_verdict(request):
     from starlette.concurrency import run_in_threadpool
     if not _token_ok(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+    # fuera del try: body no-JSON debe llegar al handler global (400 invalid_input,
+    # D-adv3-1), no al except generico de aca que lo volvia 500
+    body = await request.json()
     try:
-        body = await request.json()
         kind, vid, verdict = body.get("kind"), body.get("id"), body.get("verdict")
         if kind not in ("cand", "card") or verdict not in ("dale", "no") or not vid:
             return JSONResponse({"ok": False, "error": "payload invalido"},
@@ -848,6 +850,17 @@ async def import_handler(request):
 from .server_pty import pty_open, pty_stream, pty_input, pty_resize, pty_close
 
 
+async def _bad_json_body(request, exc):
+    """D-adv3-1: body no-JSON al borde HTTP era un 500 con JSONDecodeError cruda.
+    El contrato del server es 4xx {"error","kind"} para input invalido — un solo
+    handler cubre los 14 `await request.json()` sin tocar cada endpoint.
+    UnicodeDecodeError: json.loads(bytes) la levanta con bytes no decodificables
+    (b"\\x00\\xff..."), mismo defecto, mismo veredicto."""
+    from starlette.responses import JSONResponse
+    return JSONResponse({"error": "body no es JSON valido", "kind": "invalid_input"},
+                        status_code=400)
+
+
 def build_app():
     from starlette.applications import Starlette
     from starlette.routing import Route
@@ -865,7 +878,10 @@ def build_app():
         from starlette.staticfiles import StaticFiles
         from starlette.routing import Mount
         routes_extra.append(Mount("/lotus", StaticFiles(directory=_lotus, html=True), name="lotus"))
-    return Starlette(middleware=middleware, routes=routes_extra + [
+    return Starlette(middleware=middleware,
+                     exception_handlers={json.JSONDecodeError: _bad_json_body,
+                                         UnicodeDecodeError: _bad_json_body},
+                     routes=routes_extra + [
         Route("/", home),
         Route("/health", health_handler),
         Route("/state", state_snapshot),

@@ -76,6 +76,9 @@ def _is_transient(e: Exception) -> bool:
 # Solo clases transitorias; max 3 intentos totales. _sleep es seam de test (sin dormir real).
 _RETRY_MAX_ATTEMPTS = 3
 _RETRY_BASE_S = 0.5
+# Floor de tokens para el reintento anti "exito vacio" de modelos reasoning
+# (AT-10 r3): 300 no alcanza, 2000 alcanza en glm-5.2 — 4096 deja margen.
+_REASONING_FLOOR_TOKENS = 4096
 _sleep = time.sleep
 
 
@@ -245,6 +248,7 @@ def call(
     max_tokens: int | None = 16384,
     timeout: float = 60.0,
     critical: bool = False,
+    _empty_retry: bool = False,
     **kw,
 ) -> CallResult:
     """Invoke one external model node. Normalizes I/O and logs a metric record.
@@ -378,6 +382,15 @@ def call(
     # modelo que legitimamente respondio vacio.
     finish = str(getattr(resp.choices[0], "finish_reason", "") or "")
     if not text.strip() and finish == "length":
+        # AT-10 r3 (glm-5.2): con max_tokens conservador el reasoning se come el
+        # budget entero y el error de abajo rompe el caso comun aun con key viva.
+        # UN reintento elevando al floor (medido: 300 falla, 2000 alcanza) lo
+        # absorbe sin loop; si el floor tampoco alcanza, el error explicito sigue.
+        if (not _empty_retry and max_tokens is not None
+                and max_tokens < _REASONING_FLOOR_TOKENS):
+            return call(model_key, messages, pattern=pattern, node=node, phase=phase,
+                        temperature=temperature, max_tokens=_REASONING_FLOOR_TOKENS,
+                        timeout=timeout, critical=critical, _empty_retry=True, **kw)
         raise RuntimeError(
             f"{model_key}: respuesta vacia — el budget de tokens se agoto en reasoning "
             f"(finish_reason=length, max_tokens={max_tokens}); subir max_tokens")
