@@ -138,6 +138,22 @@ def _breaker_record(model: str, ok: bool) -> None:
             b["probing"] = False
 
 
+def breaker_snapshot() -> dict:
+    """Estado por modelo {open, fails, cooldown_left_s} SIN secretos — alimenta el
+    'estado por proveedor' de GET /health (AT-20): un watchdog externo distingue
+    'server vivo pero DeepSeek en cooldown' de 'todo sano' sin token ni logs."""
+    with _BREAKER_LOCK:
+        out = {}
+        for m, b in _BREAKERS.items():
+            opened = b["opened_at"]
+            left = 0.0
+            if opened is not None:
+                left = max(0.0, _BREAKER_COOLDOWN_S - (_now() - opened))
+            out[m] = {"open": opened is not None, "fails": b["fails"],
+                      "cooldown_left_s": round(left, 1)}
+        return out
+
+
 # --- trackers de costo por-run (W3.4: breaker USD de project_build) -------------------
 # Un caller (build_project) registra un acumulador dict {"usd": float} mientras dura su
 # run; call() le suma el costo (real o estimado en timeout) de CADA api-call. Lista, no

@@ -28,10 +28,16 @@ def _rubric_drive(jid: str, state: dict, cancel: threading.Event):
         return _c
     gen_fn, judge_fn = fn(state["gen_model"]), fn(state["judge_model"])
     step = len(workflow_store.checkpoint_history(jid))      # continue numbering on resume
+    # final explicito: antes una excepcion (p.ej. BudgetExceeded) dejaba el status
+    # en la FASE del momento ("executor") — el job muerto era indistinguible de uno
+    # vivo para el cliente, y el guard de resume ("running") lo dejaba re-lanzar
+    # doble (medido por el verificador adversarial W6 r1).
+    final: str | None = None
     try:
         while True:
             if cancel.is_set():
                 emit("job", "error", job_id=jid, detail="cancelado por el usuario")
+                final = "error"
                 break
             act = next_action(state)
             if act["role"] in ("done", "escalate"):
@@ -58,9 +64,10 @@ def _rubric_drive(jid: str, state: dict, cancel: threading.Event):
                 emit("job", "warn", job_id=jid, detail=f"spec no persistido: {str(e)[:150]}")
     except Exception as e:
         emit("job", "error", job_id=jid, detail=str(e)[:200])
+        final = "error"
     with _JOBS_LOCK:
         if jid in _JOBS:
-            _JOBS[jid]["status"] = state.get("phase", "done")
+            _JOBS[jid]["status"] = final or state.get("phase", "done")
 
 
 def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model, parent=None,

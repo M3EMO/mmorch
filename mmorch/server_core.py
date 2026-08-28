@@ -28,6 +28,12 @@ _GATES: dict[str, dict] = {}   # graft G6: per-job staged gate state
 # Estados que ya no cambian: en el replay post-crash no se recargan (el registro
 # vivo es el Kanban del proceso actual; el historial completo queda en el jsonl).
 _TERMINAL = {"done", "error", "approved", "escalate"}
+# Estados desde los que un resume es seguro: NINGUN thread los esta corriendo.
+# El guard viejo comparaba contra el literal "running", pero los estados de FASE
+# ("executor", "gate", ...) tambien son un thread vivo — un resume ahi era doble
+# ejecucion del mismo checkpoint (verificador adversarial W6 r1). Allowlist, no
+# denylist: un status de fase nuevo cae del lado seguro (409) por default.
+_RESUME_SAFE = {"interrupted", "paused", "error", "escalate"}
 # Subconjunto serializable del job (cancel/pause/state son objetos vivos del proceso).
 _PERSIST_KEYS = ("status", "kind", "title", "ts", "host", "engine", "parent")
 

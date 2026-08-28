@@ -48,7 +48,22 @@ async def health_handler(request):
     from starlette.concurrency import run_in_threadpool
     from .health import report
     from .paths import logs_dir
-    rep = await run_in_threadpool(lambda: report(logs_dir=str(logs_dir())))
+
+    def _rep() -> dict:
+        r = report(logs_dir=str(logs_dir()))
+        # estado por PROVEEDOR (AT-20): breakers in-process + errores recientes por
+        # modelo (metrics tail). Sin esto el 503 decia "algo esta mal" sin decir
+        # QUE proveedor — el watchdog no podia distinguir caido de sin-saldo.
+        try:
+            from .metrics import error_rates
+            from .providers import breaker_snapshot
+            r["providers"] = {"breakers": breaker_snapshot(),
+                              "error_rates": error_rates(window_n=200)["by_model"]}
+        except Exception as e:   # observabilidad extra jamas tira el health basico
+            r["providers"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
+        return r
+
+    rep = await run_in_threadpool(_rep)
     return JSONResponse(rep, status_code=200 if rep.get("healthy") else 503)
 
 
@@ -64,6 +79,7 @@ def _state_snapshot_sync() -> dict:
     # D3 (Lotus): sin este flag, el cliente no distinguia un interrupted resumible
     # de uno muerto y comia el 409 de /resume a ciegas. Mismo par de condiciones
     # que resume_job chequea (spec + checkpoint), leido barato como dos DISTINCT.
+    from .server_core import _RESUME_SAFE
     try:
         from . import workflow_store
         _cp = workflow_store.jobs_with_checkpoints()
@@ -78,7 +94,9 @@ def _state_snapshot_sync() -> dict:
                     # (result/reason/review_branch se guardaban en _JOBS pero no se exponían)
                     "result": v.get("result"), "review_branch": v.get("review_branch"),
                     "diffstat": v.get("diffstat"),
-                    "resumable": k in _cp and k in _sp and v["status"] != "running"}
+                    # _RESUME_SAFE, no "!= running": un job VIVO en fase ("executor")
+                    # reportaba resumable:true (verificador adversarial W6 r1)
+                    "resumable": k in _cp and k in _sp and v["status"] in _RESUME_SAFE}
                 for k, v in _JOBS.items()}
     return {
         "conductor": conductor(), "sections": sections(), "summary": summary(),
@@ -672,7 +690,12 @@ async def resume_job(request):
         return JSONResponse({"error": "no checkpoints to resume from"}, status_code=409)
     with _JOBS_LOCK:
         cur = _JOBS.get(jid, {}).get("status")
-    if cur == "running":
+    # allowlist de estados sin thread vivo: "running" Y los estados de fase
+    # ("executor", "gate", ...) son un job corriendo — resumirlos era doble
+    # ejecucion del mismo checkpoint. Job ausente del registro (cur None) =
+    # proceso anterior muerto -> resumible (los gates de spec/checkpoint ya pasaron).
+    from .server_core import _RESUME_SAFE, _TERMINAL
+    if cur is not None and cur not in _RESUME_SAFE and cur not in _TERMINAL:
         return JSONResponse({"error": "job is already running"}, status_code=409)
     kind = spec["kind"]
     data = spec["spec"]

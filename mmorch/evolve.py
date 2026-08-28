@@ -502,13 +502,25 @@ def coordinated_evolve_round(candidates: list[Change], *, root: Path = ROOT,
             # fitness.detail" y ese dato no existia en ningun log. Sin esto,
             # diagnosticar el bucle muerto de evolve es adivinar.
             try:
+                # zone + reason SIEMPRE (AT-29): habia lineas con fitness:{} y
+                # error:"" — una linea roja sin porque no audita nada. reason se
+                # deriva de lo mejor que haya; su ausencia total tambien se nombra.
+                fit = r.get("fitness") or {}
+                reason = (r.get("error")
+                          or (f"suite roja: {fit['failed']} failed (rc {fit.get('rc')})"
+                              if fit.get("failed") else "")
+                          or fit.get("detail", "")[-300:]
+                          or "sandbox_fail_sin_detalle")
+                # mkdir: un root sin logs/ (instancia fresca) tiraba OSError y el
+                # except lo tragaba — el rechazo desaparecia sin dejar rastro
+                (root / "logs").mkdir(parents=True, exist_ok=True)
                 with open(root / "logs" / "evolve_red.jsonl", "a",
                           encoding="utf-8") as fh:
                     fh.write(json.dumps(
                         {"ts": time.time(), "target": c.target,
                          "description": c.description[:120],
-                         "fitness": r.get("fitness", {}),
-                         "error": r.get("error", "")},
+                         "zone": zone_of(c, root=root), "reason": reason,
+                         "fitness": fit, "error": r.get("error", "")},
                         ensure_ascii=False) + "\n")
             except OSError:
                 pass

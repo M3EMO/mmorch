@@ -1,24 +1,58 @@
-"""system_check — chequeo operacional one-shot (AT-21): ¿el sistema está sano AHORA?
+"""system_check — chequeo one-shot con veredicto UNICO (AT-21): ¿el sistema entero
+está verde AHORA? Encadena TODO lo que ya existe por separado (no re-implementa):
 
-Agrega en un solo comando lo que ya existe por separado (no re-implementa nada):
-health.report (dead-man beats + errores recientes), goal_guard (tamper del contrato)
-y budget.status. Pensado para humano/watchdog sin server: exit 0 = sano, 1 = algo
-muerto/adulterado. El detalle sale como JSON por stdout (parseable).
+  1. gates estáticos (scripts/gates.py = ruff + mypy + paths-grep)
+  2. suite completa (pytest -q, basetemp fresco — el pytest-current global de
+     Windows queda con permisos rotos y contaminaba el veredicto)
+  3. smoke vivo (scripts/smoke.py)
+  4. health.report (dead-man beats + errores recientes)
+  5. goal_guard (tamper del contrato)  6. budget.status (informativo)
 
-Run:  .venv/Scripts/python.exe scripts/system_check.py
+Sale ≠0 si CUALQUIERA falla — incluido healthy=False (cierra la trampa del smoke
+que daba ✓ con el sistema no-sano). `--fast` salta 1-3 (el camino barato del
+watchdog periódico: solo health+goal+budget, el uso pre-W6). Detalle JSON por
+stdout (parseable).
+
+Run:  .venv/Scripts/python.exe scripts/system_check.py [--fast]
 """
 from __future__ import annotations
 
 import json
 import pathlib
+import subprocess
 import sys
+import tempfile
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+
+def _run(name: str, cmd: list[str], out: dict, timeout: int = 2400) -> bool:
+    """Corre un paso como subprocess; registra rc + cola de output (el porqué del
+    rojo tiene que quedar en el JSON, no solo en la consola que ya scrolleó)."""
+    try:
+        p = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True,
+                           timeout=timeout)
+        tail = ((p.stdout or "") + (p.stderr or ""))[-1500:]
+        out[name] = {"rc": p.returncode, "tail": tail if p.returncode != 0 else ""}
+        return p.returncode == 0
+    except Exception as e:   # timeout/exe ausente = rojo con motivo, no crash
+        out[name] = {"rc": -1, "tail": f"{type(e).__name__}: {str(e)[:300]}"}
+        return False
 
 
 def main() -> int:
+    fast = "--fast" in sys.argv[1:]
     out: dict = {}
     ok = True
+
+    if not fast:
+        py = sys.executable
+        ok = _run("gates", [py, "scripts/gates.py"], out) and ok
+        bt = tempfile.mkdtemp(prefix="mmorch_sc_bt_")
+        ok = _run("pytest", [py, "-m", "pytest", "tests", "-q", "--no-header",
+                             f"--basetemp={bt}"], out) and ok
+        ok = _run("smoke", [py, "scripts/smoke.py"], out) and ok
 
     from mmorch.health import report
     from mmorch.paths import logs_dir

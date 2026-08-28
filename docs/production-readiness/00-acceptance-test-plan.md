@@ -85,7 +85,7 @@ FAIL: cualquier excepción, o el verificador NO detecta el bug plantado. [HOY: P
 
 **AT-10 · Todas las keys del pool vivas**
 ```
-PY -c "from mmorch import call, DEFAULT_INTUITION_POOL; [print(m, call(m, [{'role':'user','content':'di ok'}], max_tokens=5).text[:20]) for m in DEFAULT_INTUITION_POOL]"
+PY -c "from mmorch import call; from mmorch.config import DEFAULT_INTUITION_POOL; [print(m, call(m, [{'role':'user','content':'di ok'}], max_tokens=5).text[:20]) for m in DEFAULT_INTUITION_POOL]"
 ```
 PASS: cada modelo del pool responde sin excepción (costo ~$0.001).
 FAIL: MissingKeyError o 401 en cualquiera. [HOY: SOSPECHA DE FAIL — ZHIPU_API_KEY reportada muerta (401) hace 47 días, sin re-verificar (05 #8).]
@@ -137,10 +137,10 @@ PASS: 0 failed, 0 error (718+ tests; ~7 min). FAIL: cualquier rojo. [HOY: colecc
 
 **AT-17 · Runner de self-checks (los 30 módulos huérfanos)**
 ```
-PY scripts/run_selfchecks.py
+PY -m pytest tests/test_selfchecks.py -q
 ```
-Script (a escribir, ~15 líneas): itera `PY -m mmorch.<mod>` sobre la lista de 30 módulos del informe 03 §2.1, subprocess con timeout 60s cada uno.
-PASS: 30/30 exit 0. FAIL: cualquier assert/timeout. [HOY: FAIL — el runner no existe; los self-checks son cobertura latente.]
+El runner vive como test parametrizado (tests/test_selfchecks.py): itera `PY -m mmorch.<mod>` sobre los módulos con self-check, subprocess con timeout por módulo.
+PASS: todos verdes. FAIL: cualquier assert/timeout. [W6 r1: el plan referenciaba un scripts/run_selfchecks.py que nunca existió con ese nombre.]
 
 **AT-18 · CI remoto en verde**
 ```
@@ -195,9 +195,9 @@ FAIL: 200 sin credencial. [HOY: FAIL — token vacío = "modo dev" sin auth (ser
 **AT-24 · Zona roja bloqueada en el camino vivo**
 ```
 PY -c "from mmorch.evolve import zone_of; assert zone_of('GOAL.md','')=='red'; assert zone_of('goal.py','')=='red'; assert zone_of('mmorch/config.py','')=='red'; assert zone_of('mmorch/textutil.py','x=1')!='red'; print('ok')"
-PY -c "import json; from mmorch import self_evolve; r=self_evolve('GOAL.md','cualquier finding',do_apply=False); assert r.get('zone')=='red' or r.get('refused_red'), r; print('ok')"
 ```
-PASS: ambos `ok` — paths rojos rechazados, path normal no. FAIL: cualquier assert. [HOY: PASS esperado — zone_of sí está en el camino vivo (evolve.py:580).]
+más el camino vivo: `self_evolve` fue removido (W4.3) — hoy los gates reales son `coordinated_evolve_round` (evolve.py, cuenta `blocked_zone_red` por candidato) y `classify_branch` (automerge.py, diff que toca zona roja → veredicto red). Verificar con un repo scratch: branch cuyo diff toca GOAL.md ⇒ classify_branch = red.
+PASS: `ok` en zone_of Y classify_branch red sobre diff rojo. FAIL: cualquier assert. [HOY: PASS esperado — zone_of sí está en el camino vivo.]
 
 **AT-25 · Tamper-halt de GOAL frena el loop real**
 Procedimiento (reversible): `copy GOAL.md GOAL.md.bak` → agregar una línea a GOAL.md → correr:
@@ -224,7 +224,7 @@ PASS: el hook PreToolUse `never-edit-guard.js` bloquea la tool. FAIL: la edició
 
 **AT-28 · Nightly vivo (dead-man's switch)**
 ```
-PY -c "from mmorch.health import check; import sys; s=check(logs_dir='logs'); sys.exit(0 if s['nightly']['status']=='alive' else 1)"
+PY -c "from mmorch.health import check; import sys; s=check(logs_dir='logs'); sys.exit(0 if 'nightly' in s['alive'] else 1)"
 ```
 PASS: exit 0 (beat de nightly < 26h). FAIL: dead/never. [HOY: FAIL — overdue ~15.7h sobre el límite.]
 
@@ -258,12 +258,12 @@ FAIL: cualquier acción con el switch puesto. [HOY: PASS esperado — chequeado 
 
 **AT-32 · Rollback estructural round-trip**
 ```
-PY -c "from mmorch.evolve import snapshot_change, apply_change, rollback; from pathlib import Path
-p=Path('%TEMP%/at32.py'); p.write_text('x = 1\n')
-ch=snapshot_change(str(p), 'x = 2\n'); apply_change(ch); assert p.read_text()=='x = 2\n'
-rollback(ch); assert p.read_text()=='x = 1\n'; print('ok')"
+PY -c "from mmorch.evolve import snapshot_change, apply_change; from pathlib import Path; import tempfile
+root=Path(tempfile.mkdtemp()); (root/'at32.py').write_text('x = 1\n')
+ch=snapshot_change('at32.py', 'x = 2\n', 'at32', root=root); apply_change(ch, root=root); assert (root/'at32.py').read_text()=='x = 2\n'
+(root/'at32.py').write_text(ch.before); assert (root/'at32.py').read_text()=='x = 1\n'; print('ok')"
 ```
-PASS: `ok` — byte-idéntico tras rollback. FAIL: assert. [HOY: PASS esperado (implementado y testeado) — pero notar que en producción la reversibilidad real es git (04 §3.3).]
+PASS: `ok` — byte-idéntico restaurando `ch.before`. FAIL: assert. [W6 r1: `rollback()` fue removido en W4.2 — git es el camino de reversión en producción (04 §3.3); el round-trip estructural es snapshot+apply+write(before).]
 
 **AT-33 · Rollback por git del carril de producción (revert de un PR del loop)**
 Procedimiento sobre una branch del nightly ya mergeada (o mergear una de las `mmorch/tren-*` verdes pendientes):

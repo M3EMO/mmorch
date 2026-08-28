@@ -14,7 +14,7 @@ import hashlib
 from pathlib import Path
 
 from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
-from .paths import home
+from .paths import home, repo_root
 from .patterns import adversarial_verify, Verdict
 
 # El ancla GOAL vive con el ESTADO (paths.home), no con el codigo: instalado como
@@ -23,6 +23,13 @@ from .patterns import adversarial_verify, Verdict
 # En el checkout el default de home() es el repo -> comportamiento identico.
 ROOT = home()
 _GOAL_PATH = ROOT / "GOAL.md"
+# Fallback al GOAL del checkout: un MMORCH_HOME FRESCO (tests aislados, segunda
+# instancia recien creada) no trae GOAL.md y todo evaluate() moria con
+# FileNotFoundError (AT-16, medido). GOAL.md es POLICY que viaja con el codigo;
+# un home puede sobreescribirla poniendo la suya, pero su ausencia no debe
+# significar "sin contrato" mientras el checkout tenga el suyo.
+if not _GOAL_PATH.exists():
+    _GOAL_PATH = repo_root() / "GOAL.md"
 _GOAL_HASH_PATH = ROOT / "GOAL.hash"   # hash AUTORIZADO (re-escribirlo = gate humano)
 
 

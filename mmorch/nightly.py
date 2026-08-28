@@ -187,6 +187,13 @@ def main() -> None:
             if d.get("persisted", 0) > 0:
                 from mmorch.memory import refresh_digest
                 rec["digest"] = refresh_digest("global")
+        # beat SIEMPRE que el paso digest se atendio (skip/persisted=0 = digest ya
+        # al dia): el unico emisor declarado en health.EXPECTATIONS vivia en
+        # loop_nightly.py (camino inactivo) -> "digest: never" cronico y
+        # healthy=False permanente entrenaba a ignorar la alarma (AT-19, medido).
+        from mmorch.health import beat as _beat
+        _beat("digest", logs_dir=str(ROOT / "logs"),
+              detail="refreshed" if "digest" in rec else "sin material nuevo")
     except Exception as e:
         rec["distill_error"] = f"{type(e).__name__}: {str(e)[:200]}"
 

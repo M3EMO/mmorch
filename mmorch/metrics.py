@@ -155,6 +155,16 @@ def error_rates(*, window_n: int | None = 200, window_s: float | None = None) ->
             "by_model": _rates(by_model), "by_family": _rates(by_family)}
 
 
+def _num(v) -> float:
+    """Coercion defensiva por evento: metrics.jsonl es editable/appendeable por
+    fuera del proceso — un valor no-numerico en una linea no debe tirar el
+    agregado entero (mismo contrato que el .get() defensivo de W3.4)."""
+    try:
+        return float(v or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def cache_stats(*, window_n: int | None = 500) -> dict:
     """Cache-hit-rate por modelo sobre la ventana: cached_tokens / in_tokens. Es el numero
     que vuelve FALSIFICABLE el ahorro por prompt-caching y prefix-stable. Observabilidad
@@ -164,12 +174,14 @@ def cache_stats(*, window_n: int | None = 500) -> dict:
         events = events[-window_n:]
     by_model: dict[str, dict] = {}
     for e in events:
-        if e.get("in_tokens", 0) <= 0:
+        # _num: misma clase de veneno que D-ADV1 — un in_tokens string en una
+        # linea valida tiraba el comparador y con el toda la snapshot de /state
+        if _num(e.get("in_tokens")) <= 0:
             continue   # errores/cap-hits no cuentan pa hit-rate
         m = e.get("model", "?")
         d = by_model.setdefault(m, {"in_tokens": 0, "cached_tokens": 0, "calls": 0})
-        d["in_tokens"] += e.get("in_tokens", 0)
-        d["cached_tokens"] += (e.get("extra") or {}).get("cached_tokens", 0) or 0
+        d["in_tokens"] += _num(e.get("in_tokens"))
+        d["cached_tokens"] += _num((e.get("extra") or {}).get("cached_tokens"))
         d["calls"] += 1
     for d in by_model.values():
         d["cache_hit_rate"] = round(d["cached_tokens"] / (d["in_tokens"] or 1), 4)
@@ -185,7 +197,10 @@ def summary() -> dict:
     for e in events:
         # .get() defensivo (W3.4): una linea incompleta (torn write, editada a mano)
         # no debe reventar el summary entero — se cuenta con lo que tenga.
-        c = e.get("cost_usd", 0.0) or 0.0
+        # _num (W6): una linea JSON VALIDA con cost_usd no-numerico ("not-a-number")
+        # pasaba el .get() y reventaba el float += str — una linea envenenada
+        # brickeaba /state y el dashboard entero (D-ADV1, medido).
+        c = _num(e.get("cost_usd"))
         total_cost += c
         by_family[e.get("family", "?")] = by_family.get(e.get("family", "?"), 0.0) + c
         by_model[e.get("model", "?")] = by_model.get(e.get("model", "?"), 0) + 1
