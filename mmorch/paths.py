@@ -19,10 +19,27 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def repo_root() -> Path:
+    """Raiz del CODIGO (checkout o site-packages) — para assets que viajan con el
+    codigo (weights committeados, prices.json del repo). NO es estado: no usar
+    para logs/DBs. Existe pa que ningun otro modulo ancle parents[1] a mano."""
+    return _REPO_ROOT
+
+
+def _default_home() -> Path:
+    # Instalado como wheel, parents[1] ES site-packages: usarlo de home hacia que
+    # `import mmorch` escribiera logs/ DENTRO de site-packages (AT-2 borde). En
+    # ese caso el estado va a ~/.mmorch; en un checkout git, al checkout (layout
+    # historico intacto).
+    if any(p in ("site-packages", "dist-packages") for p in _REPO_ROOT.parts):
+        return Path.home() / ".mmorch"
+    return _REPO_ROOT
+
+
 def home() -> Path:
-    """Raiz del estado: env MMORCH_HOME o el checkout actual."""
+    """Raiz del estado: env MMORCH_HOME, o el default segun como se corre el paquete."""
     env = os.getenv("MMORCH_HOME")
-    return Path(env).resolve() if env else _REPO_ROOT
+    return Path(env).resolve() if env else _default_home()
 
 
 def data_dir() -> Path:

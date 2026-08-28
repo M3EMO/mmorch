@@ -93,6 +93,56 @@ def test_run_rubric_auth_and_executes(monkeypatch):
     assert ok, "el job rubric deberia emitir job/done"
 
 
+# ---- W6 D2 (Lotus): shape invalida = 400 ANTES de crear el job + job_id -------
+def test_run_rubric_criteria_shape_invalida_400(monkeypatch):
+    """Antes: criteria string/dict/[1,2,3] devolvia 200 'started' y el crash
+    (start_rubric sobre un no-list) moria invisible en el worker thread."""
+    S, c = _client(monkeypatch)
+    for bad in ({"a": 1}, "no-una-lista", [1, 2, 3], [{"desc": "sin id"}]):
+        r = c.post("/run/rubric", headers=H, json={"task": "t", "criteria": bad})
+        assert r.status_code == 400, f"criteria={bad!r} deberia dar 400"
+        j = r.json()
+        assert j["kind"] == "invalid_input" and j["error"]
+
+
+def test_run_endpoints_devuelven_job_id(monkeypatch):
+    """D2 Lotus: todo /run/* que crea job devuelve su job_id (sin el, el cliente
+    no puede matar/pausar/seguir el job que acaba de lanzar)."""
+    S, c = _client(monkeypatch)
+    fake = lambda *a, **k: type("R", (), {"text": "ok", "cost_usd": 0.0,   # noqa: E731
+                                          "in_tokens": 1, "out_tokens": 1})()
+    monkeypatch.setattr(PROV, "call", fake)
+    monkeypatch.setattr(PAT, "call", fake)   # fan_out importa call por nombre
+    r = c.post("/run/rubric", headers=H, json={"task": "t", "criteria": [], "K": 1})
+    assert r.status_code == 200 and r.json()["job_id"]
+    r = c.post("/run/fanout", headers=H, json={"prompts": ["a"]})
+    assert r.status_code == 200 and r.json()["job_id"]
+    # fanout con prompts no-lista -> mismo contrato 400
+    r = c.post("/run/fanout", headers=H, json={"prompts": "hola"})
+    assert r.status_code == 400 and r.json()["kind"] == "invalid_input"
+
+
+# ---- W6 D3 (Lotus): /state expone si un job interrumpido es resumible ---------
+def test_state_expone_resumable(monkeypatch):
+    """Sin el flag, el cliente comia el 409 de /resume a ciegas: no podia saber
+    si un interrupted tenia checkpoint+spec (lo mismo que resume_job chequea)."""
+    S, c = _client(monkeypatch)
+    import mmorch.workflow_store as WS
+    monkeypatch.setattr(WS, "jobs_with_checkpoints", lambda: {"jr1"})
+    monkeypatch.setattr(WS, "jobs_with_specs", lambda: {"jr1"})
+    from mmorch.server_core import _JOBS, _JOBS_LOCK
+    with _JOBS_LOCK:
+        _JOBS["jr1"] = {"status": "interrupted", "kind": "rubric"}
+        _JOBS["jr2"] = {"status": "interrupted", "kind": "rubric"}   # sin checkpoint
+    try:
+        jobs = c.get("/state", headers=H).json()["jobs"]
+        assert jobs["jr1"]["resumable"] is True
+        assert jobs["jr2"]["resumable"] is False
+    finally:
+        with _JOBS_LOCK:
+            _JOBS.pop("jr1", None); _JOBS.pop("jr2", None)
+
+
 def test_approve_emits_gate(monkeypatch):
     S, c = _client(monkeypatch)
     r = c.post("/approve/abc123", headers={"X-Token": "secret"})

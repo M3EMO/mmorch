@@ -201,9 +201,13 @@ _RED_CONTENT = re.compile(
 # bloqueaban merges verdes legitimos — defecto 05 #7). Lo rojo es un VALOR real asignado:
 # `password = "<literal con entropia>"`. Conservador a proposito: umbrales bajos, ante
 # duda rojo; solo la palabra suelta o un placeholder corto dejan de bloquear.
+# \w* a ambos lados: los \b no cortan en underscore, asi que un identificador ENV-style
+# (AWS_SECRET_ACCESS_KEY = "...") NO matcheaba y la clave literal pasaba el gate de zona
+# (AT-26 defecto #1). El anti-falso-rojo sigue siendo el filtro de VALOR en _secret_hits
+# (entropia/forma), no la angostura del identificador.
 _SECRET_ASSIGN = re.compile(
-    r"\b(?:password|passwd|secret|secret_key|private_key|api_key|access_token|"
-    r"auth_token|seed_phrase)\b\s*[:=]\s*[\"']([^\"']{8,})[\"']", re.I)
+    r"\b\w*(?:password|passwd|secret|private_key|api_key|access_key|access_token|"
+    r"auth_token|seed_phrase)\w*\s*[:=]\s*[\"']([^\"']{8,})[\"']", re.I)
 
 
 def _char_entropy(s: str) -> float:

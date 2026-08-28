@@ -14,9 +14,14 @@ import hashlib
 from pathlib import Path
 
 from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
+from .paths import home
 from .patterns import adversarial_verify, Verdict
 
-ROOT = Path(__file__).resolve().parent.parent
+# El ancla GOAL vive con el ESTADO (paths.home), no con el codigo: instalado como
+# wheel, anclar a parents[1] apuntaba a site-packages (donde GOAL.md no existe ni
+# debe) y una instancia aislada via MMORCH_HOME no podia tener su propio contrato.
+# En el checkout el default de home() es el repo -> comportamiento identico.
+ROOT = home()
 _GOAL_PATH = ROOT / "GOAL.md"
 _GOAL_HASH_PATH = ROOT / "GOAL.hash"   # hash AUTORIZADO (re-escribirlo = gate humano)
 

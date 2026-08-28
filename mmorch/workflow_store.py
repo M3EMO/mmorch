@@ -160,6 +160,14 @@ def jobs_with_checkpoints() -> set:
     return {r[0] for r in rows}
 
 
+def jobs_with_specs() -> set:
+    """Jobs con spec re-dispatchable — la otra mitad de lo que /resume exige.
+    /state cruza esto con jobs_with_checkpoints() pa exponer `resumable` (D3)."""
+    with _LOCK:
+        rows = _CONN.execute("SELECT DISTINCT job_id FROM job_specs").fetchall()
+    return {r[0] for r in rows}
+
+
 # ── job specs (Phase B: durable re-dispatch params / resumable state) ───────── #
 def record_job_spec(job_id: str, kind: str, spec: dict) -> None:
     """Upsert what's needed to RESUME a job: kind ('rubric'|'project') + its params/state.

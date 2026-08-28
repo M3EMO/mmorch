@@ -40,6 +40,27 @@ from .textutil import extract_fence as _extract_block  # dedup of the local fenc
 # --------------------------------------------------------------------------- #
 # Estado (dict JSON-serializable: viaja por MCP, resumible entre turnos)
 # --------------------------------------------------------------------------- #
+def validate_criteria(criteria) -> None:
+    """Shape COMPLETO de criteria, reutilizable en el borde HTTP/MCP (W6 D2): el
+    server valida ANTES de crear el job y responde 400; sin esto un criteria
+    string/dict devolvia 200 y el crash quedaba enterrado en el worker thread."""
+    if not isinstance(criteria, list):
+        raise ValueError(
+            f"criteria debe ser una lista de dicts, no {type(criteria).__name__}")
+    for c in criteria:
+        # validar TODO el shape en el borde (W5.1, hueco #7): un criterio sin id
+        # reventaba recien dentro del loop, con un KeyError lejos del caller
+        if not isinstance(c, dict):
+            raise ValueError(f"criterio invalido (se esperaba dict): {c!r}")
+        if not c.get("id"):
+            raise ValueError(f"criterio sin 'id': {c!r}")
+        if c.get("kind") not in ("checkable", "subjective"):
+            raise ValueError(f"criterio {c.get('id')}: kind invalido "
+                             "(debe ser 'checkable' o 'subjective')")
+        if c["kind"] == "checkable" and not c.get("checker"):
+            raise ValueError(f"criterio {c.get('id')}: checkable sin checker")
+
+
 def start_rubric(task: str, criteria: list[dict], *, K: int = 5, arm: str = "",
                  gen_model: str | None = None,
                  judge_model: str | None = None,
@@ -63,18 +84,7 @@ def start_rubric(task: str, criteria: list[dict], *, K: int = 5, arm: str = "",
             enriched_flag = True
         except Exception:
             pass
-    for c in criteria:
-        # validar TODO el shape en el borde (W5.1, hueco #7): un criterio sin id
-        # reventaba recien dentro del loop, con un KeyError lejos del caller
-        if not isinstance(c, dict):
-            raise ValueError(f"criterio invalido (se esperaba dict): {c!r}")
-        if not c.get("id"):
-            raise ValueError(f"criterio sin 'id': {c!r}")
-        if c.get("kind") not in ("checkable", "subjective"):
-            raise ValueError(f"criterio {c.get('id')}: kind invalido "
-                             "(debe ser 'checkable' o 'subjective')")
-        if c["kind"] == "checkable" and not c.get("checker"):
-            raise ValueError(f"criterio {c.get('id')}: checkable sin checker")
+    validate_criteria(criteria)
     if family_of(gen_model) == family_of(judge_model):
         raise ValueError("OneFlow: gen y judge deben ser de familias DISTINTAS "
                          f"({gen_model} vs {judge_model})")

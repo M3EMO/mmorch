@@ -63,10 +63,14 @@ def _rubric_drive(jid: str, state: dict, cancel: threading.Event):
             _JOBS[jid]["status"] = state.get("phase", "done")
 
 
-def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model, parent=None):
+def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model, parent=None,
+                    job_id: str | None = None):
     from .rubric_loop import start_rubric
     from . import workflow_store
     state = start_rubric(task, criteria, K=K, gen_model=gen_model, judge_model=judge_model)
+    if job_id:
+        # D2 (Lotus): el handler ya devolvio este id al cliente — el estado lo adopta
+        state["id"] = job_id
     jid = state["id"]
     cancel = threading.Event()
     with _JOBS_LOCK:
@@ -238,13 +242,13 @@ def _run_workflow_job(jid: str, spec: dict, task: str, project=None, apply=False
 
 def _run_project_job(project: str, task: str, mode: str, push: bool = False,
                      engine: str = "mmorch", target_file: str = "", test_cmd: str | None = None,
-                     driver: str = "local", parent=None):
+                     driver: str = "local", parent=None, job_id: str | None = None):
     """Job project-aware. engine PRIMARIO = 'mmorch' (DeepSeek genera + tests verifican +
     aplica determinista, cero cupo; escala a claude -p si no puede). engine='claude' =
     claude -p directo (plan/cupo) — para tareas abiertas que mmorch no banca.
     driver='worktree' (G3 sandbox) = corre en un git worktree desechable -> review branch."""
     import uuid as _u
-    jid = _u.uuid4().hex[:10]
+    jid = job_id or _u.uuid4().hex[:10]   # D2 (Lotus): id acordado con el handler
     with _JOBS_LOCK:
         _JOBS[jid] = _jobmeta("project", task, engine=engine, parent=parent, driver=driver)
     if engine == "mmorch" and target_file and driver == "local":
@@ -391,9 +395,9 @@ def _run_project_build_job(jid: str, task: str, project: str, external_test: str
                 wt.close(keep_branch=True)          # review branch survives for merge
 
 
-def _run_fanout_job(prompts: list, gen_model: str, parent=None):
+def _run_fanout_job(prompts: list, gen_model: str, parent=None, job_id: str | None = None):
     from .patterns import fan_out
-    jid = uuid.uuid4().hex[:10]
+    jid = job_id or uuid.uuid4().hex[:10]   # D2 (Lotus): id acordado con el handler
     with _JOBS_LOCK:
         _JOBS[jid] = _jobmeta("fanout", f"fan_out x{len(prompts)}", parent=parent)
     emit("job", "running", job_id=jid, detail=f"fan_out x{len(prompts)}")

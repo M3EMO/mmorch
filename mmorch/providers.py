@@ -245,8 +245,17 @@ def call(
 
     # BudgetKeeper: bloquea si el gasto del mes supera el límite (no-op sin límite).
     from .budget import check as _budget_check, BudgetExceeded
+    # est_cost peor-caso ANTES de la red (AT-12/D4): sin estimado, con el ledger en 0
+    # la PRIMERA call del mes salía a la API aunque el límite fuera menor que su costo
+    # (spend 0 <= lim). Input por len/4; salida acotada por max_tokens (H-6 la hace finita).
     try:
-        _budget_check(critical=critical)
+        from .cost import cost_usd as _cost_est
+        est = _cost_est(model_key, sum(len(str(m.get("content", ""))) for m in messages) // 4,
+                        max_tokens or 16384, 0)
+    except Exception:
+        est = 0.0   # fail-open del ESTIMADO: el gate por gasto acumulado sigue activo
+    try:
+        _budget_check(critical=critical, est_cost=est)
     except BudgetExceeded as e:
         # Observabilidad: el cap-hit antes era INVISIBLE (salta antes de cualquier log).
         # Lo registramos pa poder medir budget-cap-hit-rate. NO cambia comportamiento: re-lanza.

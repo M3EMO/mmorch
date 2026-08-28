@@ -20,6 +20,17 @@ def _slug(s: str) -> str:
     return re.sub(r"[\s_]+", "-", s)[:60] or "nota"
 
 
+def _safe_folder(folder: str) -> Path:
+    """Clamp del param `folder` (expuesto por la tool MCP mmorch_vault_write): sin esto,
+    '../..' escribia FUERA del vault y hasta fuera de MMORCH_HOME (path traversal, W6).
+    Lee VAULT del modulo en runtime pa respetar el monkeypatch de los tests."""
+    base = Path(VAULT).resolve()
+    d = (base / str(folder)).resolve()
+    if d != base and base not in d.parents:
+        raise ValueError(f"folder invalido (escapa del vault): {folder!r}")
+    return d
+
+
 def write_note(folder: str, title: str, body: str, *, frontmatter: dict | None = None) -> Path:
     """Escribe una nota markdown con frontmatter YAML simple. Devuelve el path.
 
@@ -39,11 +50,12 @@ def write_note(folder: str, title: str, body: str, *, frontmatter: dict | None =
     text = "\n".join(lines) + body.strip() + "\n"
 
     slug = _slug(title)
-    p = VAULT / folder / f"{slug}.md"
+    d = _safe_folder(folder)
+    p = d / f"{slug}.md"
     p.parent.mkdir(parents=True, exist_ok=True)
     if p.exists() and p.read_text(encoding="utf-8") != text:
         n = 2
-        while (cand := VAULT / folder / f"{slug}-{n}.md").exists() and cand.read_text(encoding="utf-8") != text:
+        while (cand := d / f"{slug}-{n}.md").exists() and cand.read_text(encoding="utf-8") != text:
             n += 1
         p = cand
         log_op("overwrite_avoided", f"{title} -> {p.name} (colision de slug)")
@@ -54,7 +66,7 @@ def write_note(folder: str, title: str, body: str, *, frontmatter: dict | None =
 def read_notes(folder: str) -> list[dict]:
     """Lee notas de una carpeta. Devuelve [{path, title, frontmatter, body}]."""
     out: list = []
-    d = VAULT / folder
+    d = _safe_folder(folder)
     if not d.exists():
         return out
     for p in sorted(d.glob("*.md")):

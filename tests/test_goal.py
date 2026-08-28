@@ -1,19 +1,25 @@
 """tests goal.py — ancla anti-goal-drift. Partes deterministas (sin API)."""
+import pathlib
+
 import pytest
 from mmorch.goal import (load_goal, goal_hash, goal_aligned,
                          authorize_goal, goal_guard, GoalTampered)
 from mmorch import patterns
 
+# El GOAL testeado es el del REPO, explicito: goal.py ahora ancla a MMORCH_HOME
+# (W6) y bajo un home aislado el default apuntaria a un GOAL.md inexistente.
+_REPO_GOAL = pathlib.Path(__file__).resolve().parents[1] / "GOAL.md"
+
 
 def test_load_goal_has_contract():
-    g = load_goal()
+    g = load_goal(_REPO_GOAL)
     assert "north star" in g.lower()
     assert "Invariantes" in g and "Non-goals" in g
     assert "ZONA ROJA" in g or "zona roja" in g.lower()
 
 
 def test_goal_hash_stable():
-    h1, h2 = goal_hash(), goal_hash()
+    h1, h2 = goal_hash(_REPO_GOAL), goal_hash(_REPO_GOAL)
     assert h1 == h2 and len(h1) == 16
 
 
@@ -30,7 +36,7 @@ def test_goal_aligned_embeds_goal_and_is_cross_family(monkeypatch):
     import mmorch.goal as G
     monkeypatch.setattr(G, "adversarial_verify", fake_verify)
 
-    v = goal_aligned("agregar un checker nuevo determinista")
+    v = goal_aligned("agregar un checker nuevo determinista", path=_REPO_GOAL)
     assert v.passed
     assert "north star" in captured["rubric"].lower()      # el GOAL va en la rúbrica
     assert "Invariantes" in captured["rubric"]

@@ -61,6 +61,15 @@ def _state_snapshot_sync() -> dict:
     from .nodes import sections, conductor
     from .exec_policy import current_policy
     from .budget_policy import load as _bp_load, evaluate as _bp_eval, snapshot as _bp_snap
+    # D3 (Lotus): sin este flag, el cliente no distinguia un interrupted resumible
+    # de uno muerto y comia el 409 de /resume a ciegas. Mismo par de condiciones
+    # que resume_job chequea (spec + checkpoint), leido barato como dos DISTINCT.
+    try:
+        from . import workflow_store
+        _cp = workflow_store.jobs_with_checkpoints()
+        _sp = workflow_store.jobs_with_specs()
+    except Exception:
+        _cp, _sp = set(), set()
     with _JOBS_LOCK:
         jobs = {k: {"status": v["status"], "kind": v["kind"], "title": v.get("title", ""),
                     "ts": v.get("ts", 0), "host": v.get("host", "local"),
@@ -68,7 +77,9 @@ def _state_snapshot_sync() -> dict:
                     # sin esto, un escalate de project-build llega al cliente sin su porqué
                     # (result/reason/review_branch se guardaban en _JOBS pero no se exponían)
                     "result": v.get("result"), "review_branch": v.get("review_branch"),
-                    "diffstat": v.get("diffstat")} for k, v in _JOBS.items()}
+                    "diffstat": v.get("diffstat"),
+                    "resumable": k in _cp and k in _sp and v["status"] != "running"}
+                for k, v in _JOBS.items()}
     return {
         "conductor": conductor(), "sections": sections(), "summary": summary(),
         "error_rates": error_rates(window_n=200), "cache": cache_stats(window_n=200),
@@ -146,12 +157,22 @@ async def run_rubric(request):
     if blocked:
         return blocked
     body = await request.json()
-    task = body.get("task", ""); criteria = body.get("criteria", []); K = int(body.get("K", 5))
+    task = body.get("task", ""); criteria = body.get("criteria", [])
     gm = body.get("gen_model"); jm = body.get("judge_model")
+    # D2 (Lotus): validar el shape ANTES de crear el job. Sin esto, criteria
+    # string/dict devolvia 200 "started" y el crash moria invisible en el thread.
+    from .rubric_loop import validate_criteria
+    try:
+        K = int(body.get("K", 5))
+        validate_criteria(criteria)
+    except (ValueError, TypeError) as e:
+        return JSONResponse({"error": str(e)[:200], "kind": "invalid_input"}, status_code=400)
+    import uuid as _u
+    jid = _u.uuid4().hex[:10]   # generado ACA pa poder devolverlo al cliente (D2)
     t = threading.Thread(target=_run_rubric_job, args=(task, criteria, K, gm, jm),
-                         kwargs={"parent": body.get("parent_id")}, daemon=True)
+                         kwargs={"parent": body.get("parent_id"), "job_id": jid}, daemon=True)
     t.start()
-    return JSONResponse({"started": "rubric", "task": task[:80]})
+    return JSONResponse({"started": "rubric", "job_id": jid, "task": task[:80]})
 
 
 async def run_fanout(request):
@@ -163,10 +184,16 @@ async def run_fanout(request):
         return blocked
     body = await request.json()
     prompts = body.get("prompts", []); gm = body.get("gen_model", "deepseek-chat")
+    # mismo contrato que /run/rubric (D2): shape invalida = 400, no 200 + crash
+    if not isinstance(prompts, list):
+        return JSONResponse({"error": "prompts debe ser una lista de strings",
+                             "kind": "invalid_input"}, status_code=400)
+    import uuid as _u
+    jid = _u.uuid4().hex[:10]
     t = threading.Thread(target=_run_fanout_job, args=(prompts, gm),
-                         kwargs={"parent": body.get("parent_id")}, daemon=True)
+                         kwargs={"parent": body.get("parent_id"), "job_id": jid}, daemon=True)
     t.start()
-    return JSONResponse({"started": "fanout", "n": len(prompts)})
+    return JSONResponse({"started": "fanout", "job_id": jid, "n": len(prompts)})
 
 
 async def projects_handler(request):
@@ -211,12 +238,14 @@ async def run_project(request):
             return JSONResponse(
                 {"error": "exec policy 'sandbox': engine 'claude' has no isolated driver "
                           "(use engine=mmorch for worktree isolation)"}, status_code=403)
+    import uuid as _u
+    jid = _u.uuid4().hex[:10]   # D2 (Lotus): todo /run/* que crea job devuelve su job_id
     t = threading.Thread(target=_run_project_job,
                          args=(project, task, mode, push, engine, target_file, test_cmd, driver),
-                         kwargs={"parent": body.get("parent_id")}, daemon=True)
+                         kwargs={"parent": body.get("parent_id"), "job_id": jid}, daemon=True)
     t.start()
-    return JSONResponse({"started": "project", "project": project, "engine": engine,
-                         "mode": mode, "driver": driver})
+    return JSONResponse({"started": "project", "job_id": jid, "project": project,
+                         "engine": engine, "mode": mode, "driver": driver})
 
 
 async def run_workflow(request):

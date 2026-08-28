@@ -74,6 +74,15 @@ def _goal_gate(path=None, hash_path=None) -> str | None:
 
 
 def main() -> None:
+    # --help/-h ANTES del goal gate (AT-3/D2): en una install limpia el gate
+    # HALTaba (GOAL.md ausente) y hasta pedir ayuda salia con exit 1.
+    if {"-h", "--help"} & set(sys.argv[1:]):
+        print("mmorch-nightly: loop nocturno desatendido (evolve + autoresearch + digest).\n"
+              "Sin flags. Estado/logs bajo MMORCH_HOME (default: el checkout).\n"
+              "Registrar: schtasks /Create /TN mmorch-nightly /SC DAILY /ST 02:10 /F "
+              "/TR \"<venv>/Scripts/mmorch-nightly.exe\"")
+        return
+
     rec: dict = {"ts": time.time()}
 
     # gate de integridad ANTES de cualquier trabajo: si el contrato GOAL está adulterado
