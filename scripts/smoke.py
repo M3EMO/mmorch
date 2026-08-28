@@ -156,8 +156,10 @@ def c_server():
     # token por header, nunca query (W3.2): el server rechaza ?token=
     req = urllib.request.Request("http://127.0.0.1:8787/pending",
                                  headers={"X-Token": tok})
-    # 20s, no 5: el primer request tras revivir el server tarda ~5.3s (cold import)
-    d = json.loads(urllib.request.urlopen(req, timeout=20).read().decode())
+    # 60s, no 20: el primer request tras revivir el server tarda ~5.3s (cold import) y
+    # con la maquina bajo pytest full el server real tardaba >20s -> falso rojo de
+    # AT-21 bajo carga (D4 ronda 2); el server vivo se mide aparte por beats.
+    d = json.loads(urllib.request.urlopen(req, timeout=60).read().decode())
     return f"/pending vivo ({len(d['candidatas'])}+{len(d['cards'])})"
 
 

@@ -238,6 +238,14 @@ def ingest_session(path, *, router_model: str = DEFAULT_ROUTER,
     externo; nunca el transcript/razonamiento/tools. Para cero-salida, inyectar un
     classifier local."""
     p = _resolve_latest() if path == "latest" else Path(path)
+    # D-adv1 (ronda 2): sin gate de forma, un path arbitrario (../../Windows/system.ini)
+    # entraba al parse y — si sus lineas parsean como JSONL — su contenido salia al
+    # router EXTERNO via el classifier default. Solo transcripts .jsonl (mismo criterio
+    # que _resolve_latest); la validacion vive en la libreria, no en cada wrapper
+    # (mismo principio que review_source en code_review).
+    if p.suffix.lower() != ".jsonl":
+        raise ValueError(f"refused: '{p}' no es un transcript .jsonl de sesion — "
+                         "ingest manda texto de requests a un router EXTERNO")
     sid = _session_id(p)
     segs = parse_session(p)
     start = _ledger_seen(ledger).get(sid, 0)

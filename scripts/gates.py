@@ -15,7 +15,9 @@ REPO = Path(__file__).resolve().parents[1]
 # para no duplicar la allowlist en dos lugares.
 GATES = [
     ("ruff", [sys.executable, "-m", "ruff", "check", "."]),
-    ("mypy", [sys.executable, "-m", "mypy", "mmorch"]),
+    # mcp_server.py (shim raiz) incluido: los gates enforced lo salteaban y AT-14
+    # solo lo cubria a mano (hallazgo menor ronda 2) — mismo alcance que el AT.
+    ("mypy", [sys.executable, "-m", "mypy", "mmorch", "mcp_server.py"]),
     ("paths-grep", [sys.executable, "-m", "pytest", "-q",
                     "tests/test_paths.py::test_gate_sin_anclas_de_estado_fuera_de_paths"]),
 ]

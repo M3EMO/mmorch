@@ -279,10 +279,11 @@ def _parse_verdict(text: str) -> tuple[bool, float, list[str]]:
             passed, conf = _LABEL_MAP[key]
             return passed, conf, refs
         return False, 0.0, refs + [f"label desconocido del verificador: {v[:80]}"]
-    # legacy {"passed", "confidence"}: modelos que ignoran el contrato nuevo siguen
-    # parseando (mejor un veredicto numerico que un unparseable-refute falso)
-    return (
-        _coerce_passed(data.get("passed", False)),
-        _coerce_conf(data.get("confidence", 0.0)),
-        refs,
-    )
+    # legacy {"passed", "confidence"}: SOLO puede refutar. D-adv2 (ronda 2): un verifier
+    # hijackeado que emitia {"passed": true} bypaseaba el vocabulario anclado y APROBABA
+    # — "un verificador ilegible jamas aprueba" aplica tambien al formato viejo. El lado
+    # seguro (refutacion, con su confidence numerica) sigue parseando: mejor eso que un
+    # unparseable-refute falso; una aprobacion exige label del vocabulario.
+    if _coerce_passed(data.get("passed", False)):
+        return False, 0.0, refs + ["aprobacion legacy sin label anclado -> refutada"]
+    return False, _coerce_conf(data.get("confidence", 0.0)), refs

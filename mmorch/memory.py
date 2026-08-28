@@ -527,7 +527,8 @@ _DISTILL_VERIFY_RUBRIC = (
     "estaba en el episodio, (b) contradice o tergiversa la decision/resultado central, o (c) "
     "omite LA decision/resultado central (no un detalle secundario). NO refutes por perder "
     "detalles tecnicos secundarios (nombres de algoritmos, arquitectura completa, listas) si el "
-    "nucleo (que se decidio, por que, que paso) esta intacto. passed=true si el nucleo es fiel."
+    # 'correcto' (label anclado), no passed=true: el legacy {"passed":true} refuta (D-adv2)
+    "nucleo (que se decidio, por que, que paso) esta intacto. Veredicto 'correcto' si el nucleo es fiel."
 )
 
 

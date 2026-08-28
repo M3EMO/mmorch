@@ -127,6 +127,15 @@ def review_source(code: str = "", path: str = "", *, gen_model: str = DEFAULT_GE
     if _SECRET_CONTENT_RX.search(code):
         raise ValueError("refused: the code contains what looks like a credential "
                          "(private key / API token) — review sends content to an EXTERNAL API")
+    # hueco ronda 2 (D2): los prefijos de arriba no cazan una clave ASIGNADA sin firma
+    # conocida (AWS_SECRET_ACCESS_KEY = "wJal..." salia a la API). Reusar el detector de
+    # evolve (identificador de credencial + VALOR con entropia/forma de clave) — el MISMO
+    # semaforo del sistema, no un scanner nuevo; su filtro de valor ya evita el falso
+    # rojo de fixtures con "password" suelto.
+    from mmorch.evolve import _secret_hits
+    if _secret_hits(code):
+        raise ValueError("refused: the code contains what looks like an assigned "
+                         "credential value — review sends content to an EXTERNAL API")
     return review(code, path=path, gen_model=gen_model, verifier_model=verifier_model,
                   find=find, refute=refute)
 

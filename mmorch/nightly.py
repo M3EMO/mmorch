@@ -187,15 +187,22 @@ def main() -> None:
             if d.get("persisted", 0) > 0:
                 from mmorch.memory import refresh_digest
                 rec["digest"] = refresh_digest("global")
-        # beat SIEMPRE que el paso digest se atendio (skip/persisted=0 = digest ya
-        # al dia): el unico emisor declarado en health.EXPECTATIONS vivia en
-        # loop_nightly.py (camino inactivo) -> "digest: never" cronico y
-        # healthy=False permanente entrenaba a ignorar la alarma (AT-19, medido).
-        from mmorch.health import beat as _beat
-        _beat("digest", logs_dir=str(ROOT / "logs"),
-              detail="refreshed" if "digest" in rec else "sin material nuevo")
     except Exception as e:
         rec["distill_error"] = f"{type(e).__name__}: {str(e)[:200]}"
+    finally:
+        # beat SIEMPRE que el paso digest se ATENDIO, incluso si distill fallo: el beat
+        # mide "el paso corrio", no "salio bien" — el error ya viaja por distill_error y
+        # los silent-errors del breaker. El fix de ronda 1 dejo el beat DENTRO del try:
+        # un BreakerOpen cronico (DeepSeek 402) saltaba al except ANTES del beat ->
+        # "digest: never" permanente y healthy=False que entrena a ignorar la alarma
+        # (AT-19 medido en rondas 1 y 2).
+        try:
+            from mmorch.health import beat as _beat
+            _beat("digest", logs_dir=str(ROOT / "logs"),
+                  detail="refreshed" if "digest" in rec
+                  else rec.get("distill_error", "sin material nuevo"))
+        except Exception:
+            pass    # telemetria: el beat jamas voltea el nightly
 
     # WORKFLOW RACE (evolución de estrategia, no solo de código): 1 task del bench por noche
     # (rotando por día — cota de costo), 3 variantes del engine compiten, el ganador por firma

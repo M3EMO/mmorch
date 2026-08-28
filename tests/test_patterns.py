@@ -22,7 +22,7 @@ def test_adversarial_verify_rejects_same_family(monkeypatch):
 
 def test_adversarial_verify_crossfamily_ok(monkeypatch):
     monkeypatch.setattr(P, "call",
-        lambda *a, **k: _fake_result('{"passed":true,"confidence":0.9,"refutations":[]}',
+        lambda *a, **k: _fake_result('{"verdict":"correcto","refutations":[]}',
                                      "gemini-2.5-flash", "google"))
     v = adversarial_verify("x", rubric="r")  # deepseek gen vs gemini verifier
     assert v.passed is True and v.confidence == 0.9
@@ -71,6 +71,19 @@ def test_parse_label_desconocido_refuta():
     # label fuera de vocabulario = verificador ilegible -> jamas aprueba
     p, c, r = _parse_verdict('{"verdict":"maso","refutations":[]}')
     assert p is False and c == 0.0 and any("desconocido" in x for x in r)
+
+
+def test_parse_legacy_passed_true_refuta():
+    # D-adv2 (ronda 2): el fallback legacy {"passed":true} bypaseaba el vocabulario
+    # anclado y aprobaba — una aprobacion exige label; legacy solo puede refutar.
+    p, c, r = _parse_verdict('{"passed": true, "confidence": 1.5}')
+    assert p is False and c == 0.0 and any("legacy" in x for x in r)
+
+
+def test_parse_legacy_passed_false_sigue_refutando():
+    # el lado seguro del legacy (refutacion numerica) sigue parseando
+    p, c, r = _parse_verdict('{"passed": false, "confidence": 0.7, "refutations": ["z"]}')
+    assert p is False and c == 0.7 and r == ["z"]
 
 
 def test_skeptic_prompt_pide_labels_no_score_crudo():

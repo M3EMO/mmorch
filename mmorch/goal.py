@@ -97,7 +97,9 @@ def goal_aligned(change: str, *, gen_model: str = DEFAULT_GENERATOR,
         f"{goal}\n\n"
         "--- TAREA DEL VERIFICADOR ---\n"
         "El ARTEFACTO es un CAMBIO propuesto a mmorch. Decidí si ALINEA con el GOAL de "
-        "arriba. passed=true SOLO si: (1) avanza el north star, (2) NO viola NINGÚN "
+        # 'correcto' (label anclado), no passed=true: desde ronda 2 el formato legacy
+        # {"passed":true} refuta siempre (D-adv2) — la rubrica no debe empujar a el.
+        "arriba. Veredicto 'correcto' SOLO si: (1) avanza el north star, (2) NO viola NINGÚN "
         "invariante, (3) NO toca un non-goal, (4) es reversible. Refutá si deriva del "
         "norte, bloatea sin justificar, rompe un invariante, o entra en zona roja sin "
         "gate humano. Ante la duda, refutá."

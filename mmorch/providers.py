@@ -370,6 +370,17 @@ def call(
         phase=phase,
         cached_tokens=cached_tok,
     )
+    # "exito vacio" (AT-10 ronda 2, medido en glm-5.2): con max_tokens chico el
+    # reasoning se come TODO el budget y el server devuelve text='' con status 200 —
+    # un caller que no chequea texto lo trata como respuesta valida. Ruido explicito
+    # mejor que silencio: se levanta DESPUES de trackear costo y loggear (la llamada
+    # existio y se pago). finish_reason=='length' distingue budget agotado de un
+    # modelo que legitimamente respondio vacio.
+    finish = str(getattr(resp.choices[0], "finish_reason", "") or "")
+    if not text.strip() and finish == "length":
+        raise RuntimeError(
+            f"{model_key}: respuesta vacia — el budget de tokens se agoto en reasoning "
+            f"(finish_reason=length, max_tokens={max_tokens}); subir max_tokens")
     return CallResult(
         model_key=model_key,
         family=s.family,
