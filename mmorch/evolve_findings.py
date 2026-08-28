@@ -17,6 +17,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from . import paths
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -41,7 +43,7 @@ def _git_changed_py_files(*, days: int, root: Path) -> list[str]:
         return []
 
 
-_FINDINGS_LOG = Path(__file__).resolve().parents[1] / "logs" / "evolve_findings.jsonl"
+_FINDINGS_LOG = paths.logs_dir() / "evolve_findings.jsonl"
 
 
 def harvest_findings(files: list[str] | None = None, *, days: int = 3, max_files: int = 5,
@@ -105,7 +107,7 @@ def _sample_py_files(root: Path, cap: int) -> list[str]:
     return out
 
 
-_EXT_LOG = Path(__file__).resolve().parents[1] / "logs" / "external_findings.jsonl"
+_EXT_LOG = paths.logs_dir() / "external_findings.jsonl"
 
 
 def learn_from_repos(repo_urls: list[str], *, cap_files: int = 8, max_findings: int = 12,

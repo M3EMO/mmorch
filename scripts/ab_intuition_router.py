@@ -83,8 +83,8 @@ def run(train: bool = True) -> dict:
     intu_pass = sum(r["intuition_pass"] for r in rows)
     def_pass = sum(r["default_pass"] for r in rows)
     # McNemar-style on diverged tasks: where they disagree, who won
-    win_i = sum(1 for r in diverged if r["intuition_pass"] and not r["default_pass"])
-    win_d = sum(1 for r in diverged if r["default_pass"] and not r["intuition_pass"])
+    win_i = sum(1 for r in diverged if bool(r["intuition_pass"]) and not r["default_pass"])
+    win_d = sum(1 for r in diverged if bool(r["default_pass"]) and not r["intuition_pass"])
     return {"n": n, "n_diverged": len(diverged),
             "intuition_passrate": round(intu_pass / n, 3), "default_passrate": round(def_pass / n, 3),
             "on_diverged_intuition_wins": win_i, "on_diverged_default_wins": win_d,

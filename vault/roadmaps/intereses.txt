@@ -1,0 +1,11 @@
+# Temas semilla para el auto-descubrimiento de repos (editable a mano).
+# Una linea por tema; el discovery rota 2-3 por domingo junto a las queries
+# del roadmap. "#" comenta.
+machine learning pipeline self-improving
+reinforcement learning verifiable rewards
+LLM agent orchestration multi-model
+active learning data curation
+mutation testing property based
+DPO preference optimization dataset
+bandit contextual routing
+knowledge distillation small models

@@ -57,3 +57,46 @@ def test_calibration_well_vs_over_confident(tmp_path):
         FB.record_outcome("m", 1.0 if i < 3 else 0.0, predicted_conf=0.95, path=p2)
     c2 = FB.calibration(p2)
     assert c2["ece"] > 0.5  # mal calibrado
+
+
+# --- tests anti-mutantes (bug-hunt 2026-08-14: 6/12 sobrevivian) ------------
+
+def test_sample_uses_default_rng(tmp_path):
+    # mutante 'rng or Random()' -> 'rng and Random()': sample() sin rng explotaba
+    b = FB.ThompsonBandit(path=tmp_path / "b.json")
+    b.update("a", 1.0)
+    assert b.select(["a", "b"]) in ("a", "b")
+
+
+def test_calibrate_conf_gate_min_n(tmp_path):
+    # mutante 'cell and n>=min_n' -> 'or': calibraria con datos insuficientes
+    p = tmp_path / "f.jsonl"
+    for _ in range(5):  # solo 5 muestras (< min_n=20) en el bucket de 0.95
+        FB.record_outcome("m", 0.0, predicted_conf=0.95, path=p)
+    # con datos insuficientes DEBE devolver la conf cruda, jamas la del bucket
+    assert FB.calibrate_conf(0.95, path=p) == 0.95
+
+
+def test_calibrate_conf_applies_at_exactly_min_n(tmp_path):
+    # mata mutantes de frontera min_n 20->21 y bins 10->11
+    p = tmp_path / "f.jsonl"
+    for _ in range(20):  # exactamente min_n en el bucket 9 (conf 0.95, bins=10)
+        FB.record_outcome("m", 0.0, predicted_conf=0.95, path=p)
+    assert FB.calibrate_conf(0.95, path=p) == 0.0  # acc empirica del bucket
+
+
+def test_reliability_bins_default_bucketing(tmp_path):
+    # bins default = 10: conf 0.95 cae en el bucket 9; 11 bins lo moveria
+    p = tmp_path / "f.jsonl"
+    FB.record_outcome("m", 1.0, predicted_conf=0.95, path=p)
+    m = FB.reliability_bins(p)
+    assert list(m.keys()) == [9]
+
+
+def test_calibration_default_bins_ece_value(tmp_path):
+    # ECE con bins default: 10 outcomes conf 0.95 acc 0.0 -> ece == 0.95 exacto
+    p = tmp_path / "f.jsonl"
+    for _ in range(10):
+        FB.record_outcome("m", 0.0, predicted_conf=0.95, path=p)
+    c = FB.calibration(p)
+    assert abs(c["ece"] - 0.95) < 1e-9

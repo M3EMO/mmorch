@@ -59,6 +59,9 @@ def route(
     # unconditional) and Thompson self-corrects, so the pick sharpens as real outcomes accrue. The A/B
     # script records BOTH arms' outcomes (counterfactual seed). Off via MMORCH_INTUITION=off; models=[]
     # opts a call out; re-measure anytime with the A/B script.
+    # threshold es una probabilidad: fuera de [0,1] el gate degenera (7.0 escala
+    # siempre, -1 nunca) en silencio — clamp en el borde (W5.1, hueco #5)
+    threshold = max(0.0, min(1.0, float(threshold)))
     if models is None and os.getenv("MMORCH_INTUITION", "on").lower() != "off":
         from .config import DEFAULT_INTUITION_POOL
         models = DEFAULT_INTUITION_POOL

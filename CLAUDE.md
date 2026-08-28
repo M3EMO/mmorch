@@ -65,6 +65,13 @@ se compone con estos. Que hace cada uno y cuando elegirlo: `docs/capabilities.md
 `adversarial_verify` (ahi el skeptic-default unparse→failed es mas seguro que una
 excepcion). Detalle: `docs/capabilities.md`.
 
+## Prose-gate (`tools/ste-lint.py`)
+Linter STE de prosa (vendored de woosal1337/blog ep01, extendido con `--lang es`).
+Gate determinístico para docs generados — mismo rol que ruff/mypy pero para markdown.
+Regex + wordlists, stdlib puro. Uso: `python tools/ste-lint.py docs/*.md --fail-over 5`
+(exit 1 si per100w supera umbral); `--lang es` para prosa en español; `--json`; stdin OK.
+Correr sobre README/specs/notas antes de commitearlos.
+
 ## Pendiente / backlog
 ablacion §18.4 (validar empíricamente config B DeepSeek↔Google vs alternativas —
 requiere API real + métricas, es research no código). No escalar sin métricas verdes

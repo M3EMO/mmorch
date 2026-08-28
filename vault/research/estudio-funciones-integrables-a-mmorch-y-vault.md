@@ -1,9 +1,17 @@
 ---
-title: Estudio — funciones integrables a mmorch y vault
-created: 2026-08-10
-tags: [research, mmorch, estudio, repo-mining, vault, grafts]
-status: verified
+applies_to:
+- orchestration
 confidence: 0.85
+created: 2026-08-10
+status: verified
+tags:
+- research
+- mmorch
+- estudio
+- repo-mining
+- vault
+- grafts
+title: Estudio — funciones integrables a mmorch y vault
 ---
 ## Qué es
 Exploración 2026-08-07 de Desktop\Estudio (wiki-vault Obsidian mantenido por LLM + SaaS educativa). 14 capacidades relevadas; este es el arbitraje de qué integrar a mmorch/vault.

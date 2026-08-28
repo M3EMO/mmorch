@@ -15,7 +15,8 @@ import os
 import threading
 from datetime import datetime
 
-from .metrics import read_events
+from .iohelpers import read_jsonl_cached
+from .metrics import read_events, rotated_paths
 
 
 class BudgetExceeded(RuntimeError):
@@ -28,7 +29,7 @@ _SPEND_LOCK = threading.Lock()
 # Así el acumulador se apoya en la MISMA invalidación sin duplicar el stat del path acá,
 # y no re-suma 13.5k eventos por call (budget.check() corre antes de CADA API call,
 # ×8 concurrente en fan_out). len() de más evita colisiones si algún día se reusa un id.
-_SPEND_CACHE: dict[tuple[int, int, str], float] = {}
+_SPEND_CACHE: dict[tuple, float] = {}
 
 
 def max_monthly_usd() -> float | None:
@@ -42,21 +43,32 @@ def max_monthly_usd() -> float | None:
         return None
 
 
-def monthly_spend(month: str | None = None) -> float:
-    """Suma cost_usd de metrics.jsonl del mes (YYYY-MM). month=None → mes actual."""
-    if month is None:
-        month = datetime.now().strftime("%Y-%m")
-    events = read_events()
-    cache_key = (id(events), len(events), month)
-    with _SPEND_LOCK:
-        cached = _SPEND_CACHE.get(cache_key)
-        if cached is not None:
-            return cached
+def _month_cost(events: list[dict], month: str) -> float:
     total = 0.0
     for e in events:
         iso = e.get("iso", "")
         if isinstance(iso, str) and iso.startswith(month):
             total += e.get("cost_usd", 0.0) or 0.0
+    return total
+
+
+def monthly_spend(month: str | None = None) -> float:
+    """Suma cost_usd del mes (YYYY-MM) sobre metrics.jsonl + TODOS los segmentos rotados
+    (W3.4: la rotacion por tamaño no puede "borrar" gasto del mes en curso o el techo
+    mensual se resetea solo). month=None → mes actual."""
+    if month is None:
+        month = datetime.now().strftime("%Y-%m")
+    events = read_events()
+    rotated = rotated_paths()
+    # los segmentos rotados son inmutables -> su identidad (nombres) basta en la key
+    cache_key = (id(events), len(events), tuple(p.name for p in rotated), month)
+    with _SPEND_LOCK:
+        cached = _SPEND_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+    total = _month_cost(events, month)
+    for p in rotated:
+        total += _month_cost(read_jsonl_cached(p), month)   # parse cacheado por (mtime, size)
     total = round(total, 6)
     with _SPEND_LOCK:
         _SPEND_CACHE[cache_key] = total

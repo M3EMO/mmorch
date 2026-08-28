@@ -7,7 +7,7 @@ what worked, instead of every task being a fresh cold arm.
 
 arm key = f"{model_arm}#{signature_key}"  (e.g. "deepseek-chat@0.6#GENERATE|g=self...|b=exec_truth")
 
-Separate state file (bandit_sig.json) so it never collides with the flat bandit_state.json.
+State file: bandit_sig.json — desde W4.3 es EL bandit (el estado plano zombie se borro).
 - record(model, reward, task): learn from one outcome.
 - select(models, task): Thompson-pick the best model for this signature (cold sigs explore).
 - candidates(models, task): the top-K SET (recall is high-recall; VERIFY disposes — never the key).
@@ -23,11 +23,10 @@ import json
 import time
 from pathlib import Path
 
-from .feedback import ThompsonBandit
+from .feedback import ThompsonBandit, _SIG_BANDIT   # una sola definicion del path (W4.3)
 from .signature import Signature, key as sig_key, signature
 
-ROOT = Path(__file__).resolve().parent.parent
-_SIG_BANDIT = ROOT / "logs" / "bandit_sig.json"
+from .paths import logs_dir
 
 
 def _arm(model: str, task: str, complexity: str = "") -> str:
@@ -43,6 +42,15 @@ def record(model: str, reward: float, task: str, *, complexity: str = "",
     arm = _arm(model, task, complexity)
     b.update(arm, reward)
     return arm
+
+
+def arm_stats(model: str, task: str, *, complexity: str = "",
+              bandit: ThompsonBandit | None = None) -> dict:
+    """Posterior {mean, n} del brazo sig-keyed de este (modelo, tarea) — lo que
+    record()/feedback entrenaron. {} si el brazo es frio. Read-only (W5.1: el
+    readback que hacia el wrapper MCP de record_outcome vive aca)."""
+    b = bandit or ThompsonBandit(_SIG_BANDIT)
+    return b.stats().get(_arm(model, task, complexity), {})
 
 
 def select(models: list[str], task: str, *, complexity: str = "",
@@ -76,7 +84,7 @@ def coherence(task: str, *, complexity: str = "", bandit: ThompsonBandit | None 
     return sum(s["n"] for a, s in b.stats().items() if a.endswith("#" + sk))
 
 
-_PROBE_STATE = Path(__file__).resolve().parents[1] / "logs" / "health_probes.json"
+_PROBE_STATE = logs_dir() / "health_probes.json"
 
 
 def healthy(models: list[str], *, max_error_rate: float = 0.15, min_calls: int = 10,
@@ -192,9 +200,9 @@ def backfill(*, reset: bool = True, bandit_path: Path = _SIG_BANDIT) -> dict:
         bandit_path.unlink()
     b = ThompsonBandit(bandit_path)
     sources = {
-        "feedback": (ROOT / "logs" / "feedback.jsonl", "arm", "context", None),
-        "trajectories": (ROOT / "logs" / "trajectories.jsonl", "gen_model", "task", None),
-        "workflow_obs": (ROOT / "logs" / "workflow_obs.jsonl", None, "task", "domain"),
+        "feedback": (logs_dir() / "feedback.jsonl", "arm", "context", None),
+        "trajectories": (logs_dir() / "trajectories.jsonl", "gen_model", "task", None),
+        "workflow_obs": (logs_dir() / "workflow_obs.jsonl", None, "task", "domain"),
     }
     rep: dict = {"by_source": {}, "total_updates": 0}
     for name, (path, armf, taskf, cplxf) in sources.items():

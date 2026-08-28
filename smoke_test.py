@@ -34,6 +34,12 @@ def main() -> int:
         for i, r in enumerate(results):
             print(f"   gen[{i}] ({r.in_tokens}->{r.out_tokens} tok, ${r.cost_usd:.6f}): "
                   f"{r.text.strip()[:80]}")
+        # D6: fan_out degrada graceful (dropea fallidos con warning) — el smoke NO puede
+        # heredar esa tolerancia: con el generador caído imprimía OK y exit 0 (verde falso).
+        if len(results) < 2:
+            print(f"\nFAIL: generador caído — {2 - len(results)}/2 prompts sin resultado "
+                  "(ver warning de fan_out arriba).")
+            return 1
 
         print("\n[2/2] adversarial_verify: Gemini refutes a planted bug ...")
         artifact = "def add(a, b):\n    return a - b  # intended: a + b"

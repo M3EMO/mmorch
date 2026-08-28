@@ -9,9 +9,12 @@ Alineacion item<->tier preservada aunque una llamada falle (cae al tier mas bajo
 """
 from __future__ import annotations
 
+import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+
+_log = logging.getLogger(__name__)
 
 from .config import DEFAULT_ROUTER
 from .providers import call
@@ -68,15 +71,20 @@ def bucket_rank(
 
     def _job(idx_item):
         i, it = idx_item
-        try:
-            return i, _grade_one(it, rubric, tiers, grader_model, phase)
-        except Exception:
-            return i, None
+        return i, _grade_one(it, rubric, tiers, grader_model, phase)
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = [ex.submit(_job, (i, it)) for i, it in enumerate(items)]
+        futs = {ex.submit(_job, (i, it)): i for i, it in enumerate(items)}
         for f in as_completed(futs):
-            i, r = f.result()
+            # patron H-1 (fix de fan_out): una excepcion en UN item no aborta el pool
+            # entero — se captura, ese item cae al tier mas bajo (via r=None) y el
+            # resto del batch sigue. futs[f] recupera el indice aunque _job reviente.
+            try:
+                i, r = f.result()
+            except Exception as e:
+                i, r = futs[f], None
+                _log.warning("bucket_rank: item %d fallo (%s: %s) — cae al tier mas bajo",
+                             futs[f], type(e).__name__, str(e)[:120])
             results[i] = r
 
     for it, r in zip(items, results, strict=False):

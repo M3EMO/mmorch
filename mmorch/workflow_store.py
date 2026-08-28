@@ -22,7 +22,9 @@ import threading
 import time
 from pathlib import Path
 
-_DB = Path(os.getenv("MMORCH_WORKFLOW_DB") or (Path(__file__).resolve().parent.parent / "workflow.db"))
+from .paths import db_path
+
+_DB = Path(os.getenv("MMORCH_WORKFLOW_DB") or db_path("workflow.db"))
 _LOCK = threading.Lock()
 _CONN = sqlite3.connect(_DB, check_same_thread=False)
 _CONN.executescript(
@@ -155,6 +157,14 @@ def checkpoint_latest(job_id: str):
 def jobs_with_checkpoints() -> set:
     with _LOCK:
         rows = _CONN.execute("SELECT DISTINCT job_id FROM checkpoints").fetchall()
+    return {r[0] for r in rows}
+
+
+def jobs_with_specs() -> set:
+    """Jobs con spec re-dispatchable — la otra mitad de lo que /resume exige.
+    /state cruza esto con jobs_with_checkpoints() pa exponer `resumable` (D3)."""
+    with _LOCK:
+        rows = _CONN.execute("SELECT DISTINCT job_id FROM job_specs").fetchall()
     return {r[0] for r in rows}
 
 

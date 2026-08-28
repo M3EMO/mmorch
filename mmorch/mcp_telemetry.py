@@ -1,9 +1,9 @@
-"""mcp_telemetry — logger CENTRALIZADO de invocaciones MCP (audit 2026-07: 44 tools, ~20
+"""mcp_telemetry — logger CENTRALIZADO de invocaciones MCP (audit 2026-07; hoy 46 tools, ~20
 deterministas nunca aparecen en metrics.jsonl porque ese log solo trackea llamadas a modelo).
 
 Antes: instrumentar esto hubiera sido editar 20 funciones individuales (invasivo, mantenimiento
 distribuido). En vez de eso, se envuelve el DECORADOR `FastMCP.tool()` una sola vez — cada
-`@mcp.tool()` de mcp_server.py queda logueado automáticamente, sin tocar ninguna de las 44
+`@mcp.tool()` de mcp_server.py queda logueado automáticamente, sin tocar ninguna de las
 funciones, y cualquier tool nueva que se agregue queda cubierta gratis.
 
 Uso (una linea en mcp_server.py, después de `mcp = FastMCP("mmorch")`):
@@ -17,8 +17,9 @@ import json
 import pathlib
 import time
 
-_ROOT = pathlib.Path(__file__).resolve().parents[1]
-_LOG = _ROOT / "logs" / "mcp_calls.jsonl"
+from .paths import logs_dir
+
+_LOG = logs_dir() / "mcp_calls.jsonl"
 
 
 def _log_call(tool: str, ok: bool, dur_s: float, err: str = "") -> None:

@@ -18,13 +18,41 @@ from .iohelpers import read_jsonl_cached, read_jsonl_tail
 
 _LOCK = threading.Lock()
 
-# logs/ sits next to this package, under ~/.claude/orchestration/
-_LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+from .paths import logs_dir
+
+_LOG_DIR = logs_dir()
 _LOG_PATH = _LOG_DIR / "metrics.jsonl"
 
 
 def log_path() -> Path:
     return _LOG_PATH
+
+
+# --- rotacion (W3.4): metrics.jsonl crece sin tope (append-only). >50MB se renombra
+# con timestamp; los segmentos rotados son INMUTABLES y el budget re-deriva el gasto
+# del mes desde TODOS los segmentos (rotated_paths) — rotar nunca "borra" gasto.
+_ROTATE_MAX_BYTES = 50 * 1024 * 1024
+
+
+def rotated_paths() -> list[Path]:
+    """Segmentos rotados metrics-*.jsonl, orden por nombre (= cronologico)."""
+    return sorted(_LOG_DIR.glob("metrics-*.jsonl"))
+
+
+def _rotate_if_needed() -> None:
+    # llamado bajo _LOCK (antes del append). Fallo de rotacion = side-channel: nunca
+    # debe frenar el logging del evento (mejor un archivo gordo que un evento perdido).
+    try:
+        if _LOG_PATH.exists() and _LOG_PATH.stat().st_size > _ROTATE_MAX_BYTES:
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            target = _LOG_DIR / f"metrics-{stamp}.jsonl"
+            n = 0
+            while target.exists():          # dos rotaciones en el mismo segundo
+                n += 1
+                target = _LOG_DIR / f"metrics-{stamp}-{n}.jsonl"
+            _LOG_PATH.rename(target)
+    except OSError:
+        pass
 
 
 def log_event(
@@ -58,6 +86,7 @@ def log_event(
     line = json.dumps(record, ensure_ascii=False)
     with _LOCK:
         _LOG_DIR.mkdir(parents=True, exist_ok=True)
+        _rotate_if_needed()
         with open(_LOG_PATH, "a", encoding="utf-8") as fh:
             fh.write(line + "\n")
 
@@ -126,6 +155,16 @@ def error_rates(*, window_n: int | None = 200, window_s: float | None = None) ->
             "by_model": _rates(by_model), "by_family": _rates(by_family)}
 
 
+def _num(v) -> float:
+    """Coercion defensiva por evento: metrics.jsonl es editable/appendeable por
+    fuera del proceso — un valor no-numerico en una linea no debe tirar el
+    agregado entero (mismo contrato que el .get() defensivo de W3.4)."""
+    try:
+        return float(v or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def cache_stats(*, window_n: int | None = 500) -> dict:
     """Cache-hit-rate por modelo sobre la ventana: cached_tokens / in_tokens. Es el numero
     que vuelve FALSIFICABLE el ahorro por prompt-caching y prefix-stable. Observabilidad
@@ -135,12 +174,14 @@ def cache_stats(*, window_n: int | None = 500) -> dict:
         events = events[-window_n:]
     by_model: dict[str, dict] = {}
     for e in events:
-        if e.get("in_tokens", 0) <= 0:
+        # _num: misma clase de veneno que D-ADV1 — un in_tokens string en una
+        # linea valida tiraba el comparador y con el toda la snapshot de /state
+        if _num(e.get("in_tokens")) <= 0:
             continue   # errores/cap-hits no cuentan pa hit-rate
         m = e.get("model", "?")
         d = by_model.setdefault(m, {"in_tokens": 0, "cached_tokens": 0, "calls": 0})
-        d["in_tokens"] += e.get("in_tokens", 0)
-        d["cached_tokens"] += (e.get("extra") or {}).get("cached_tokens", 0) or 0
+        d["in_tokens"] += _num(e.get("in_tokens"))
+        d["cached_tokens"] += _num((e.get("extra") or {}).get("cached_tokens"))
         d["calls"] += 1
     for d in by_model.values():
         d["cache_hit_rate"] = round(d["cached_tokens"] / (d["in_tokens"] or 1), 4)
@@ -150,12 +191,19 @@ def cache_stats(*, window_n: int | None = 500) -> dict:
 def summary() -> dict:
     """Aggregate the log: total cost, tokens, calls per family/model."""
     events = read_events()
-    total_cost = sum(e["cost_usd"] for e in events)
+    total_cost = 0.0
     by_family: dict[str, float] = {}
     by_model: dict[str, int] = {}
     for e in events:
-        by_family[e["family"]] = by_family.get(e["family"], 0.0) + e["cost_usd"]
-        by_model[e["model"]] = by_model.get(e["model"], 0) + 1
+        # .get() defensivo (W3.4): una linea incompleta (torn write, editada a mano)
+        # no debe reventar el summary entero — se cuenta con lo que tenga.
+        # _num (W6): una linea JSON VALIDA con cost_usd no-numerico ("not-a-number")
+        # pasaba el .get() y reventaba el float += str — una linea envenenada
+        # brickeaba /state y el dashboard entero (D-ADV1, medido).
+        c = _num(e.get("cost_usd"))
+        total_cost += c
+        by_family[e.get("family", "?")] = by_family.get(e.get("family", "?"), 0.0) + c
+        by_model[e.get("model", "?")] = by_model.get(e.get("model", "?"), 0) + 1
     return {
         "calls": len(events),
         "total_cost_usd": round(total_cost, 6),

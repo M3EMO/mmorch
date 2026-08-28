@@ -9,5 +9,5 @@ def test_package_exports():
 
 
 def test_mcp_tool_exists():
-    srv = importlib.import_module("mcp_server")
+    srv = importlib.import_module("mmorch.mcp_server")
     assert hasattr(srv, "mmorch_ingest_session")

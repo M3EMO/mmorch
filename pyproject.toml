@@ -13,19 +13,35 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-mcp = ["mcp>=1.2.0"]
+# Techo <2: la spec MCP 2026-07-28 rompe compat (python-sdk v2 renombra FastMCP
+# y mueve el transporte a run()); la linea 1.x queda en maintenance (docs/
+# production-readiness/10-research-standards-contracts.md §1). Piso = version
+# real del venv (1.27.2, aun pre-1.28) para que el pin refleje lo verificado.
+mcp = ["mcp>=1.27.2,<2"]
 memory = ["fastembed>=0.3.0"]   # embeddings locales (bge-small). Sin esto: recall coarse-only.
 checkers = ["sqlglot>=20", "pint>=0.23", "sympy>=1.12", "radon>=6.0", "coverage>=7.0"]
+docs = ["pypdfium2>=5.0"]   # extraccion de texto de PDF (docs_extract.py) —
+                            # SIN torch, es lo que usa el pipeline nocturno
+docs-rico = ["docling-slim[format-pdf-pypdfium2]>=2.120"]
+                            # docling completo (layout/tablas via torch) —
+                            # ~1.1GB, medido: 5.4min y pico de RAM a 297MB
+                            # libres en un PDF de 55 paginas. Manual SOLO
+                            # (scripts/convertir_pdf.py), nunca automatico
 server = ["starlette>=0.37", "uvicorn>=0.27", "httpx>=0.27",
           "pywinpty>=2.0; platform_system=='Windows'"]          # nivel 3: live server + fleet + PTY (ConPTY)
 factory = ["scikit-learn>=1.4"]                                 # fabrica de modelos (logreg/GBRT)
 # todo lo necesario pa un host always-on (deploy multi-host): pip install mmorch[host]
 host = ["mmorch[mcp,memory,checkers,server,factory]"]
-dev = ["ruff>=0.15", "mypy>=1.10"]                              # lint gate (ruff) + type checker (mypy, advisory)
+# Pin exacto (== la version del venv): los gates corren en pre-commit y un
+# bump silencioso de ruff/mypy cambiaria que codigo pasa el gate.
+dev = ["ruff==0.15.20", "mypy==2.1.0"]                          # gates estaticos (ambos enforced en 0)
 
 [project.scripts]
 mmorch-server = "mmorch.server:main"
 mmorch-sync = "mmorch.sync:_cli"
+mmorch-mcp = "mmorch.mcp_server:main"
+mmorch-nightly = "mmorch.nightly:main"
+mmorch = "mmorch.cli:main"
 
 [tool.ruff]
 target-version = "py312"
@@ -56,8 +72,9 @@ build-backend = "setuptools.build_meta"
 packages = ["mmorch"]
 
 [tool.setuptools.package-data]
-# pesos del nodo neuronal + vocab + datos viajan con el paquete (deploy sin re-entrenar)
-mmorch = ["py.typed"]
+# pesos del nodo neuronal + vocab + datos viajan con el paquete (deploy sin
+# re-entrenar); prompts/ y roles/ son CODIGO del paquete (W2.1), no estado
+mmorch = ["py.typed", "prompts/*.txt", "roles/*.md", "canary_tasks.jsonl"]
 
 [tool.setuptools.exclude-package-data]
 mmorch = []

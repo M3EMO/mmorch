@@ -7,6 +7,8 @@ auto-logs a metric record (§11). Keys come from env (loaded from .env).
 from __future__ import annotations
 
 import os
+import random
+import threading
 import time
 from dataclasses import dataclass
 
@@ -16,10 +18,13 @@ from .config import spec
 from .cost import cost_usd
 from .metrics import log_event
 
-load_dotenv()  # picks up ~/.claude/orchestration/.env if cwd or parents contain it
-# Also explicitly load the package-local .env regardless of cwd.
-from pathlib import Path as _Path  # noqa: E402
-load_dotenv(_Path(__file__).resolve().parent.parent / ".env")
+# El .env canonico vive en el home de mmorch (W2.1): resuelve igual desde
+# cualquier cwd (entry points instalados, Cursor, Task Scheduler). Se carga
+# PRIMERO porque dotenv no pisa claves ya cargadas — el home gana; el load()
+# por cwd queda como fallback para checkouts/tests con .env propio.
+from .paths import home as _mmorch_home
+load_dotenv(_mmorch_home() / ".env")
+load_dotenv()
 
 # Lazy import so the package imports even if `openai` isn't installed yet.
 try:
@@ -48,6 +53,133 @@ def _classify_error(e: Exception) -> str:
     if "timeout" in name or "timeout" in msg or "timedout" in name:
         return "timeout"
     return "other"
+
+
+def _http_status(e: Exception) -> int | None:
+    status = getattr(e, "status_code", None)
+    if status is None:
+        status = getattr(getattr(e, "response", None), "status_code", None)
+    return status if isinstance(status, int) else None
+
+
+def _is_transient(e: Exception) -> bool:
+    """Clases que un retry puede arreglar: 429 (rate limit), timeout, 5xx del server.
+    Todo lo demas (auth, 4xx de request, parseo) es determinista — reintentar solo
+    duplica costo y latencia sin cambiar el resultado."""
+    if _classify_error(e) in ("rate_limit", "timeout"):
+        return True
+    status = _http_status(e)
+    return status is not None and 500 <= status <= 599
+
+
+# --- retry con backoff exponencial + jitter (W3.3) ------------------------------------
+# Solo clases transitorias; max 3 intentos totales. _sleep es seam de test (sin dormir real).
+_RETRY_MAX_ATTEMPTS = 3
+_RETRY_BASE_S = 0.5
+# Floor de tokens para el reintento anti "exito vacio" de modelos reasoning
+# (AT-10 r3): 300 no alcanza, 2000 alcanza en glm-5.2 — 4096 deja margen.
+_REASONING_FLOOR_TOKENS = 4096
+_sleep = time.sleep
+
+
+# --- half-open breaker por modelo (W3.3, defaults estilo LiteLLM) ---------------------
+# 3 fallos dentro de 60s => abierto (fail-fast BreakerOpen) por 60s de cooldown; pasado el
+# cooldown UN caller entra como probe (half-open): exito cierra, fallo re-abre. Evita que un
+# run masivo martille un proveedor caido (cada call colgada quema un slot del pool + $).
+_BREAKER_FAILS = 3
+_BREAKER_WINDOW_S = 60.0
+_BREAKER_COOLDOWN_S = 60.0
+_BREAKER_LOCK = threading.Lock()
+_BREAKERS: dict[str, dict] = {}
+_now = time.monotonic   # seam de test (avanzar el reloj sin esperar el cooldown)
+
+
+class BreakerOpen(RuntimeError):
+    """El modelo esta en cooldown por fallos consecutivos; la call ni se intenta."""
+
+
+def _breaker_state(model: str) -> dict:
+    return _BREAKERS.setdefault(
+        model, {"fails": 0, "first_fail": 0.0, "opened_at": None, "probing": False})
+
+
+def _breaker_allow(model: str) -> None:
+    """Gate de entrada: cerrado pasa; abierto en cooldown (o con probe en vuelo) lanza
+    BreakerOpen; cooldown vencido deja pasar UN caller como probe."""
+    with _BREAKER_LOCK:
+        b = _breaker_state(model)
+        if b["opened_at"] is None:
+            return
+        elapsed = _now() - b["opened_at"]
+        if elapsed < _BREAKER_COOLDOWN_S or b["probing"]:
+            raise BreakerOpen(
+                f"breaker abierto para {model}: {b['fails']} fallos seguidos, "
+                f"cooldown {_BREAKER_COOLDOWN_S:.0f}s (van {elapsed:.0f}s)")
+        b["probing"] = True   # half-open: este caller es EL probe
+
+
+def _breaker_record(model: str, ok: bool) -> None:
+    with _BREAKER_LOCK:
+        b = _breaker_state(model)
+        if ok:
+            _BREAKERS[model] = {"fails": 0, "first_fail": 0.0, "opened_at": None,
+                                "probing": False}
+            return
+        t = _now()
+        if b["opened_at"] is not None:      # el probe fallo -> re-abre el cooldown entero
+            b["opened_at"] = t
+            b["probing"] = False
+            return
+        # ventana deslizante simple: fallos que no son "seguidos" (fuera de la ventana)
+        # arrancan la cuenta de nuevo — un fallo aislado por hora no debe abrir nada.
+        if b["fails"] == 0 or t - b["first_fail"] > _BREAKER_WINDOW_S:
+            b["fails"], b["first_fail"] = 1, t
+        else:
+            b["fails"] += 1
+        if b["fails"] >= _BREAKER_FAILS:
+            b["opened_at"] = t
+            b["probing"] = False
+
+
+def breaker_snapshot() -> dict:
+    """Estado por modelo {open, fails, cooldown_left_s} SIN secretos — alimenta el
+    'estado por proveedor' de GET /health (AT-20): un watchdog externo distingue
+    'server vivo pero DeepSeek en cooldown' de 'todo sano' sin token ni logs."""
+    with _BREAKER_LOCK:
+        out = {}
+        for m, b in _BREAKERS.items():
+            opened = b["opened_at"]
+            left = 0.0
+            if opened is not None:
+                left = max(0.0, _BREAKER_COOLDOWN_S - (_now() - opened))
+            out[m] = {"open": opened is not None, "fails": b["fails"],
+                      "cooldown_left_s": round(left, 1)}
+        return out
+
+
+# --- trackers de costo por-run (W3.4: breaker USD de project_build) -------------------
+# Un caller (build_project) registra un acumulador dict {"usd": float} mientras dura su
+# run; call() le suma el costo (real o estimado en timeout) de CADA api-call. Lista, no
+# singleton: builds anidados/paralelos acumulan cada uno lo suyo.
+_RUN_TRACKER_LOCK = threading.Lock()
+_RUN_TRACKERS: list[dict] = []
+
+
+def register_run_tracker(t: dict) -> None:
+    with _RUN_TRACKER_LOCK:
+        _RUN_TRACKERS.append(t)
+
+
+def unregister_run_tracker(t: dict) -> None:
+    with _RUN_TRACKER_LOCK:
+        if t in _RUN_TRACKERS:
+            _RUN_TRACKERS.remove(t)
+
+
+def _track_cost(c: float) -> None:
+    with _RUN_TRACKER_LOCK:
+        for t in _RUN_TRACKERS:
+            t["usd"] = t.get("usd", 0.0) + c
 
 
 def _cached_tokens(usage) -> int:
@@ -80,6 +212,10 @@ class CallResult:
     out_tokens: int
     cost_usd: float
     latency_s: float
+    # W5.3: nombre/version EXACTA que el provider dice haber servido (resp.model).
+    # Los providers rotan versiones sin aviso; capturarla permite invalidar priors
+    # del bandit y correlacionar drift del canary con la rotacion.
+    model_version: str = ""
 
     def __str__(self) -> str:
         return self.text
@@ -112,6 +248,7 @@ def call(
     max_tokens: int | None = 16384,
     timeout: float = 60.0,
     critical: bool = False,
+    _empty_retry: bool = False,
     **kw,
 ) -> CallResult:
     """Invoke one external model node. Normalizes I/O and logs a metric record.
@@ -128,8 +265,17 @@ def call(
 
     # BudgetKeeper: bloquea si el gasto del mes supera el límite (no-op sin límite).
     from .budget import check as _budget_check, BudgetExceeded
+    # est_cost peor-caso ANTES de la red (AT-12/D4): sin estimado, con el ledger en 0
+    # la PRIMERA call del mes salía a la API aunque el límite fuera menor que su costo
+    # (spend 0 <= lim). Input por len/4; salida acotada por max_tokens (H-6 la hace finita).
     try:
-        _budget_check(critical=critical)
+        from .cost import cost_usd as _cost_est
+        est = _cost_est(model_key, sum(len(str(m.get("content", ""))) for m in messages) // 4,
+                        max_tokens or 16384, 0)
+    except Exception:
+        est = 0.0   # fail-open del ESTIMADO: el gate por gasto acumulado sigue activo
+    try:
+        _budget_check(critical=critical, est_cost=est)
     except BudgetExceeded as e:
         # Observabilidad: el cap-hit antes era INVISIBLE (salta antes de cualquier log).
         # Lo registramos pa poder medir budget-cap-hit-rate. NO cambia comportamiento: re-lanza.
@@ -138,41 +284,74 @@ def call(
                   error=type(e).__name__, error_msg=str(e)[:200], error_class="budget_cap")
         raise
 
+    # breaker por modelo ANTES de gastar nada: modelo en cooldown = fail-fast observable.
+    try:
+        _breaker_allow(model_key)
+    except BreakerOpen as e:
+        log_event(pattern=pattern, node=node or model_key, model=model_key, family=s.family,
+                  in_tokens=0, out_tokens=0, cost_usd=0.0, latency_s=0.0, phase=phase,
+                  error=type(e).__name__, error_msg=str(e)[:200], error_class="breaker_open")
+        raise
+
     client = _client(model_key)
-    t0 = time.perf_counter()
     if s.extra_body:
         # extras por-modelo (ej DeepSeek V4: thinking disabled pa bulk). El caller
         # puede pisarlos pasando su propio extra_body en kw.
         kw.setdefault("extra_body", dict(s.extra_body))
-    try:
-        resp = client.chat.completions.create(
-            model=s.model_id,
-            messages=messages,  # type: ignore[arg-type]  # OpenAI SDK typed-params; list[dict] valid at runtime
-            temperature=temperature,
-            max_tokens=max_tokens,
-            timeout=timeout,
-            **kw,
-        )
-    except Exception as e:
-        # H-2: observabilidad de errores. Sin esto, un fallo de API es invisible
-        # en metrics.jsonl y rompe el input del break-even (no se ve la fuga).
-        # error_class distingue rate-limit/429 del resto -> mide 429-rate por proveedor
-        # (señal previa a cualquier futuro load-balancing, exigida por anti-scope-creep).
-        log_event(
-            pattern=pattern,
-            node=node or model_key,
-            model=model_key,
-            family=s.family,
-            in_tokens=0,
-            out_tokens=0,
-            cost_usd=0.0,
-            latency_s=time.perf_counter() - t0,
-            phase=phase,
-            error=type(e).__name__,
-            error_msg=str(e)[:200],
-            error_class=_classify_error(e),
-        )
-        raise
+    for attempt in range(1, _RETRY_MAX_ATTEMPTS + 1):
+        t0 = time.perf_counter()
+        try:
+            resp = client.chat.completions.create(
+                model=s.model_id,
+                messages=messages,  # type: ignore[arg-type]  # OpenAI SDK typed-params; list[dict] valid at runtime
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=timeout,
+                **kw,
+            )
+            _breaker_record(model_key, ok=True)
+            break
+        except Exception as e:
+            _breaker_record(model_key, ok=False)
+            eclass = _classify_error(e)
+            transient = _is_transient(e)
+            # Timeout: el server YA proceso el input (y lo factura) aunque nunca vimos la
+            # respuesta. cost=0 subestimaba por diseño y rompia la defensa del budget:
+            # estimamos por chars enviados (~4 chars/token) y lo marcamos estimado.
+            err_in, err_cost, err_extra = 0, 0.0, {}
+            if eclass == "timeout":
+                err_in = sum(len(str(m.get("content", ""))) for m in messages) // 4
+                err_cost = cost_usd(model_key, err_in, 0)
+                err_extra = {"cost_estimated": True}
+                _track_cost(err_cost)
+            # H-2: observabilidad de errores. Sin esto, un fallo de API es invisible
+            # en metrics.jsonl y rompe el input del break-even (no se ve la fuga).
+            # error_class distingue rate-limit/429 del resto -> mide 429-rate por proveedor.
+            # attempt/retried registran CADA retry (W3.3): el retry silencioso esconde
+            # exactamente la degradacion que el breaker necesita hacer visible.
+            log_event(
+                pattern=pattern,
+                node=node or model_key,
+                model=model_key,
+                family=s.family,
+                in_tokens=err_in,
+                out_tokens=0,
+                cost_usd=err_cost,
+                latency_s=time.perf_counter() - t0,
+                phase=phase,
+                error=type(e).__name__,
+                error_msg=str(e)[:200],
+                error_class=eclass,
+                attempt=attempt,
+                retried=transient and attempt < _RETRY_MAX_ATTEMPTS,
+                **err_extra,
+            )
+            if not transient or attempt >= _RETRY_MAX_ATTEMPTS:
+                raise
+            # backoff exponencial + jitter (evita que N workers re-golpeen en sincronia)
+            _sleep(_RETRY_BASE_S * (2 ** (attempt - 1)) + random.uniform(0.0, 0.25))
+    else:  # pragma: no cover — el loop siempre sale por break (exito) o raise (fallo final)
+        raise AssertionError("unreachable")
     latency = time.perf_counter() - t0
 
     text = resp.choices[0].message.content or ""
@@ -181,6 +360,7 @@ def call(
     out_tok = getattr(usage, "completion_tokens", 0) or 0
     cached_tok = _cached_tokens(usage)
     c = cost_usd(model_key, in_tok, out_tok, cached_tok)
+    _track_cost(c)
 
     log_event(
         pattern=pattern,
@@ -194,6 +374,26 @@ def call(
         phase=phase,
         cached_tokens=cached_tok,
     )
+    # "exito vacio" (AT-10 ronda 2, medido en glm-5.2): con max_tokens chico el
+    # reasoning se come TODO el budget y el server devuelve text='' con status 200 —
+    # un caller que no chequea texto lo trata como respuesta valida. Ruido explicito
+    # mejor que silencio: se levanta DESPUES de trackear costo y loggear (la llamada
+    # existio y se pago). finish_reason=='length' distingue budget agotado de un
+    # modelo que legitimamente respondio vacio.
+    finish = str(getattr(resp.choices[0], "finish_reason", "") or "")
+    if not text.strip() and finish == "length":
+        # AT-10 r3 (glm-5.2): con max_tokens conservador el reasoning se come el
+        # budget entero y el error de abajo rompe el caso comun aun con key viva.
+        # UN reintento elevando al floor (medido: 300 falla, 2000 alcanza) lo
+        # absorbe sin loop; si el floor tampoco alcanza, el error explicito sigue.
+        if (not _empty_retry and max_tokens is not None
+                and max_tokens < _REASONING_FLOOR_TOKENS):
+            return call(model_key, messages, pattern=pattern, node=node, phase=phase,
+                        temperature=temperature, max_tokens=_REASONING_FLOOR_TOKENS,
+                        timeout=timeout, critical=critical, _empty_retry=True, **kw)
+        raise RuntimeError(
+            f"{model_key}: respuesta vacia — el budget de tokens se agoto en reasoning "
+            f"(finish_reason=length, max_tokens={max_tokens}); subir max_tokens")
     return CallResult(
         model_key=model_key,
         family=s.family,
@@ -202,4 +402,5 @@ def call(
         out_tokens=out_tok,
         cost_usd=c,
         latency_s=latency,
+        model_version=str(getattr(resp, "model", "") or ""),
     )

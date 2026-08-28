@@ -1,7 +1,12 @@
 ---
-title: MOC autolearning
-tags: [MOC, research, mmorch]
+applies_to:
+- orchestration
 created: 2026-06-07
+tags:
+- MOC
+- research
+- mmorch
+title: MOC autolearning
 ---
 ## Research — autolearning / self-improving (grounded, cross-family verified)
 

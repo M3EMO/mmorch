@@ -16,8 +16,9 @@ from .iohelpers import atomic_write_json, load_json_tolerant
 
 _log = logging.getLogger(__name__)
 
-_ROOT = pathlib.Path(__file__).resolve().parents[1]
-_STATE = _ROOT / "logs" / "nudge.json"
+from .paths import logs_dir
+
+_STATE = logs_dir() / "nudge.json"
 _EVERY = 10
 _DEFAULT_STATE = {"closes": 0, "last_nudge_at": 0}
 

@@ -1,0 +1,169 @@
+"""Cockpit matutino de mmorch — TODO lo que depende del humano, en un comando.
+
+Uso diario:  .venv/Scripts/python.exe scripts/manana.py
+
+Secuencia: digest de anoche -> salud -> merges pendientes (tren + amarillas,
+con semáforo, diffstat e interacción m/enter/q) -> veredictos pendientes
+(d/n/enter/q) -> resumen. Cinco minutos y el sistema queda servido.
+"""
+
+import json
+import os
+import pathlib
+import subprocess
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+G, R, Y, D, B, C, X = ("\x1b[92m", "\x1b[91m", "\x1b[93m", "\x1b[2m",
+                       "\x1b[1m", "\x1b[96m", "\x1b[0m")
+ZC = {"green": G + "🟢", "yellow": Y + "🟡", "red": R + "🔴", "paused": D + "⏸"}
+
+
+def _git(*args):
+    return subprocess.run(["git", *args], cwd=ROOT, capture_output=True,
+                          text=True, encoding="utf-8", errors="replace")
+
+
+def _hdr(title):
+    print(f"\n{B}{C}══ {title} {'═' * max(4, 60 - len(title))}{X}")
+
+
+def seccion_digest():
+    _hdr("DIGEST DE ANOCHE")
+    p = ROOT / "logs" / "digest_last.md"
+    print(p.read_text(encoding="utf-8") if p.exists()
+          else f"{D}(sin digest — ¿corrió el nightly?){X}")
+
+
+def seccion_salud():
+    _hdr("SALUD")
+    from mmorch.health import report
+    r = report(logs_dir=str(ROOT / "logs"))
+    if r["healthy"]:
+        print(f"  {G}✓ todo late{X}")
+    for d in r["check"]["dead"]:
+        print(f"  {R}✗ {d['component']}: vencido hace {d['overdue_s']/3600:.1f}h{X}")
+    for n in r["check"]["never"]:
+        print(f"  {D}· {n}: sin latidos aún{X}")
+    for k, v in r["errors"]["nightly_errors"].items():
+        print(f"  {Y}⚠ {k}: {str(v)[:90]}{X}")
+    try:
+        smoke = json.loads((ROOT / "logs" / "smoke.jsonl")
+                           .read_text(encoding="utf-8").strip().splitlines()[-1])
+        col = G if not smoke["fails"] else R
+        print(f"  {col}🧪 smoke {smoke['ok']}/{smoke['total']}"
+              f"{' — ' + ','.join(smoke['fails']) if smoke['fails'] else ''}{X}")
+    except (OSError, IndexError, json.JSONDecodeError):
+        pass
+
+
+def _tren_rojo_de_anoche() -> set[str]:
+    """Ramas que anoche estuvieron en un intento de tren cuya UNION rompio
+    tests (merge_train gate='rojo') — NO es el rojo de seguridad de
+    classify_branch, es señal de conflicto entre partes. Las ramas
+    individuales sobreviven al fallo (merge nunca borra la fuente), asi que
+    sin este contexto se preguntan una por una sin avisar que ya fallaron
+    juntas anoche."""
+    p = ROOT / "logs" / "merge_train.jsonl"
+    try:
+        rec = json.loads(p.read_text(encoding="utf-8").strip().splitlines()[-1])
+    except (OSError, IndexError, json.JSONDecodeError):
+        return set()
+    if rec.get("gate") != "rojo" or not rec.get("merged"):
+        return set()
+    return set(rec["merged"])
+
+
+def seccion_merges():
+    _hdr("MERGES PENDIENTES")
+    from mmorch.automerge import classify_branch
+    base = _git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    out = _git("branch", "--list", "--no-merged", base, "mmorch/*",
+               "mmorch-sbx-*", "--format=%(refname:short)")
+    branches = [b.strip() for b in out.stdout.splitlines() if b.strip()]
+    if not branches:
+        print(f"  {D}(nada pendiente de merge){X}")
+        return 0
+    # tren primero (un click resuelve N)
+    branches.sort(key=lambda b: (0 if "tren" in b else 1, b))
+    tren_rojo = _tren_rojo_de_anoche()
+    merged = 0
+    for b in branches:
+        z = classify_branch(str(ROOT), b, base=base)
+        zone = z.get("zone", "?")
+        asuntos = _git("log", "--format=%s", f"{base}..{b}").stdout.strip().splitlines()
+        print(f"\n  {ZC.get(zone, zone)}{X} {B}{b}{X}")
+        for asunto in asuntos[:3] or ["(sin commits nuevos)"]:
+            print(f"    {D}· {asunto}{X}")
+        if b in tren_rojo:
+            otras = sorted(tren_rojo - {b})
+            print(f"    {Y}⚠ anoche el tren intento unir esta rama con "
+                  f"{', '.join(otras) or 'otra'} y la UNION rompio tests — "
+                  f"sola puede estar bien igual, mergear con cuidado{X}")
+        if zone == "red":
+            print(f"    {R}rojo: solo merge manual tuyo fuera de este tool{X}")
+            continue
+        r = input(f"    {B}[m]erge / [d]iff / enter=saltar / q=salir >{X} ").strip().lower()
+        if r == "q":
+            break
+        if r == "d":
+            print(_git("diff", "--stat", f"{base}..{b}").stdout[:2000])
+            r = input(f"    {B}[m]erge / enter=saltar >{X} ").strip().lower()
+        if r == "m":
+            m = _git("merge", "--no-edit", b)
+            if m.returncode == 0:
+                print(f"    {G}✓ mergeada{X}")
+                merged += 1
+                # outcome retroactivo: el merge humano ES el veredicto — el
+                # brazo que produjo la branch recibe 1.0 sin clic extra
+                try:
+                    from mmorch.provenance import on_merge
+                    on_merge(b, logs_dir=str(ROOT / "logs"))
+                except Exception:
+                    pass
+            else:
+                _git("merge", "--abort")
+                print(f"    {R}✗ conflicto — apartada: {m.stderr[:100]}{X}")
+    return merged
+
+
+def seccion_veredictos():
+    _hdr("VEREDICTOS PENDIENTES")
+    from mmorch.curation import pending
+    p = pending()
+    n = len(p["candidatas"]) + len(p["cards"])
+    if not n:
+        print(f"  {D}(nada pendiente de veredicto){X}")
+        return
+    print(f"  {n} pendientes — entrando al modo interactivo (d/n/enter/q)")
+    import importlib
+    veredicto = importlib.import_module("veredicto")
+    veredicto.interactivo()
+
+
+def main() -> None:
+    os.system("")
+    # utf-8 SOLO al ejecutar como script, no como efecto secundario de un
+    # import (importar esto en un test le rompia la captura de stdout a
+    # pytest — mismo bug de raiz que ya vimos hoy en otro lado, mutar
+    # global-state al importar, no al ejecutar)
+    # reconfigure, no wrapper nuevo: veredicto.py (importado mas abajo)
+    # tambien ajusta stdout — dos wrappers encadenados = el viejo se GC-cierra
+    # y mata el buffer compartido (crash real 2026-08-22)
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    print(f"{B}☀ BUENOS DÍAS — cockpit mmorch{X}")
+    seccion_digest()
+    seccion_salud()
+    merged = seccion_merges()
+    seccion_veredictos()
+    _hdr("LISTO")
+    print(f"  merges hechos: {merged} · el sistema queda servido hasta mañana.\n")
+    if merged:
+        print(f"  {D}tip: git push cuando quieras subir lo mergeado{X}\n")
+
+
+if __name__ == "__main__":
+    main()

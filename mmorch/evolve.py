@@ -3,45 +3,49 @@ darwin-godel-machine-self-improving-agents). La critica cross-family marco que e
 DGM completo (evolucion poblacional open-ended + auto-modificacion) es overreach
 para mmorch. Aca solo el subset seguro:
 
-- fitness(): corre el test suite (gate empirico) y devuelve pass-rate. Es la
-  "performance empirica" del DGM, pero usando los tests propios como benchmark.
-- archive: registro append-only de intentos de evolucion + su fitness (la
-  "poblacion/archivo" del DGM, sin la evolucion automatica).
+- evaluate(): fitness compuesta (ast + ensemble + costo/budget + goal_aligned),
+  cableada como gate pre-PR del loop nocturno (W4.3).
 - propose_patch(): un modelo barato PROPONE un cambio (read-only, NO lo aplica).
+- sandbox_branch(): tests reales en git worktree aislado; la reversibilidad la
+  da git (branch + revert del carril automerge), no un snapshot estructural.
 
-NUNCA auto-modifica vivo. Aplicar un patch = sandbox + fitness verde + gate humano.
+NUNCA auto-modifica vivo. Aplicar un patch = sandbox + gates verdes + gate humano.
+(El motor self_evolve/promote/archive de F3-F4 se borro en W4.3: era museo —
+implementado y testeado con cero callers vivos; 00-canonical-matrix §4.)
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
+import math
 import re
 import subprocess
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
-from .iohelpers import atomic_write_json, load_json_tolerant, read_jsonl_tolerant
+from . import paths
+
+from .iohelpers import atomic_write_json, load_json_tolerant
 
 _log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
-_ARCHIVE = ROOT / "logs" / "evolution_archive.jsonl"
 
 
 # --------------------------------------------------------------------------- #
-# FASE 3 — Change + rollback() + evaluate() (fitness compuesta, reversible)    #
+# Change + evaluate() (fitness compuesta)                                      #
 # --------------------------------------------------------------------------- #
 @dataclass
 class Change:
-    """Un cambio candidato. `before` = snapshot (la reversibilidad first-class: sin
-    snapshot no se puede rollback -> no se auto-aplica)."""
+    """Un cambio candidato. `before` = snapshot previo: alimenta el delta del
+    red-scan (zone_of) y el diff que juzga el gate pre-PR."""
     target: str            # path relativo a root
     after: str             # contenido nuevo
-    before: str            # snapshot previo (para rollback)
+    before: str            # snapshot previo (baseline del delta red-scan y del diff)
     description: str       # para goal_aligned
     id: str = ""
     notes: str = ""
@@ -65,39 +69,24 @@ def apply_change(change: Change, *, root: Path = ROOT) -> None:
     p.write_text(change.after, encoding="utf-8")
 
 
-def rollback(change: Change, *, root: Path = ROOT) -> bool:
-    """Restaura el snapshot `before`. Devuelve True si el archivo quedó == before.
-    Reversibilidad first-class: si esto no puede restaurar, el cambio nunca debió
-    auto-aplicarse. (Tombstone de notas/episodios lo hace el caller vía memory.)"""
-    p = Path(root) / change.target
-    try:
-        if change.before == "" and not _existed_before(change):
-            if p.exists():
-                p.unlink()           # era archivo nuevo -> borrarlo
-            return not p.exists()
-        p.write_text(change.before, encoding="utf-8")
-        return p.read_text(encoding="utf-8") == change.before
-    except Exception:
-        return False
-
-
 def _existed_before(change: Change) -> bool:
     return change.before != ""
 
 
-def evaluate(change: Change, *, root: Path = ROOT, run_tests: bool = True,
-             goal: bool = True, goal_fn=None, test_path: str = "tests",
+def evaluate(change: Change, *,
+             goal: bool = True, goal_fn=None,
              check_cost: bool = True, cost_fn=None,
-             check_ensemble: bool = True, ensemble_fn=None,
-             isolate: str = "branch") -> dict:
-    """fitness() compuesta de Fase 3 — las 6 OBLIGATORIAS del GOAL (invariante 'Gate antes
-    de aplicar'). Cualquiera que falle aborta:
+             check_ensemble: bool = True, ensemble_fn=None) -> dict:
+    """fitness() compuesta — cableada al camino VIVO como gate pre-PR de
+    coordinated_evolve_round (W4.3; antes solo la corria mmorch_evolve_self en DRY).
+    Cualquier check que falle aborta:
       1. ast_valid del contenido nuevo (checker determinista).
-      2. tests_green (si run_tests): aplica al repo, pytest, SIEMPRE revierte (finally).
-      3. ensemble cross-family (escéptico de seguridad/no-regresión). Inyectable.
-      4. rollback PROBADO: apply -> rollback restaura `before` bit-a-bit (sandbox).
-      5. cost_ok: no-degradación de costo (≤10% verde / ≤20% amarillo). Inyectable.
-      6. goal_aligned(description) — alineación con GOAL (cross-family). Inyectable.
+      2. ensemble cross-family (escéptico de seguridad/no-regresión). Inyectable.
+      3. cost_ok: no-degradación de costo (inyectable) + budget_ok (BudgetKeeper absoluto).
+      4. goal_aligned(description) — alineación con GOAL (cross-family). Inyectable.
+    Tests reales y reversibilidad NO viven acá: los garantiza git (sandbox_branch en
+    worktree + revert del carril automerge, W4.2). El rollback estructural por snapshot
+    y el check tests_green in-place se borraron (museo, 00-canonical-matrix §4).
     Devuelve {ok, checks, ensemble_degraded}. ensemble_degraded=True si hoy solo hay 1
     familia de verificador (Kimi inactivo) → el ensemble-AZUL de 2 cae al cross-family
     simple (honesto, no se finge)."""
@@ -106,7 +95,6 @@ def evaluate(change: Change, *, root: Path = ROOT, run_tests: bool = True,
     ensemble_degraded = False
 
     checks["ast_valid"] = _check("python_ast_valid", code=change.after).passed
-    checks["rollback_works"] = _rollback_roundtrip(change)   # reversibilidad first-class
 
     if goal:
         # TAMPER-HALT (B1): goal_guard estaba MUERTO (nunca se llamaba). evaluate() consume
@@ -126,21 +114,8 @@ def evaluate(change: Change, *, root: Path = ROOT, run_tests: bool = True,
         checks["cost_ok"] = _cost_check(change, cost_fn)        # no-degradación (relativo)
         checks["budget_ok"] = _budget_ok()                       # BudgetKeeper (absoluto)
 
-    if run_tests:
-        if isolate == "branch":
-            # aislamiento REAL: git worktree, no muta el repo vivo. Verde deja la branch
-            # (pa promote/PR). Es el reemplazo de la mutación in-place con finally-revert.
-            res = sandbox_branch(change, root=root, test_path=test_path)
-            checks["tests_green"] = res["ok"]
-            sandbox = {"branch": res.get("branch"), "fitness": res.get("fitness")}
-        else:
-            checks["tests_green"] = _tests_with_autorevert(change, root=root, test_path=test_path)
-            sandbox = {"mode": "inplace-autorevert"}
-    else:
-        sandbox = None
-
     return {"ok": all(checks.values()), "checks": checks, "change_id": change.id,
-            "ensemble_degraded": ensemble_degraded, "sandbox": sandbox}
+            "ensemble_degraded": ensemble_degraded}
 
 
 def _default_goal_fn():
@@ -190,82 +165,26 @@ def _budget_ok() -> bool:
     return lim is None or (remaining() or 0) > 0
 
 
-def _rollback_roundtrip(change: Change) -> bool:
-    """En un dir temporal: simula before, aplica after, rollback, verifica == before."""
-    import tempfile
-    with tempfile.TemporaryDirectory(prefix="mmorch_rb_") as td:
-        troot = Path(td)
-        tgt = troot / change.target
-        tgt.parent.mkdir(parents=True, exist_ok=True)
-        existed = _existed_before(change)
-        if existed:
-            tgt.write_text(change.before, encoding="utf-8")
-        apply_change(change, root=troot)
-        ok = rollback(change, root=troot)
-        if existed:
-            ok = ok and tgt.exists() and tgt.read_text(encoding="utf-8") == change.before
-        else:
-            ok = ok and not tgt.exists()
-        return ok
-
-
-def _tests_with_autorevert(change: Change, *, root: Path = ROOT, test_path: str = "tests") -> bool:
-    """Aplica el cambio al repo, corre pytest, SIEMPRE revierte (finally). Nunca deja
-    el repo mutado. (Solo se usa si el cambio toca el repo vivo.)"""
-    p = Path(root) / change.target
-    original = p.read_text(encoding="utf-8") if p.exists() else None
-    try:
-        apply_change(change, root=root)
-        return fitness(test_path=test_path)["ok"]
-    finally:
-        if original is None:
-            if p.exists():
-                p.unlink()
-        else:
-            p.write_text(original, encoding="utf-8")
-
-
-def fitness(test_path: str = "tests", timeout: int = 1800) -> dict:
-    """Corre pytest y devuelve {passed, failed, total, pass_rate, ok}. Gate empirico."""
-    proc = subprocess.run(
-        [sys.executable, "-m", "pytest", test_path, "-q", "--no-header"],
-        cwd=str(ROOT), capture_output=True, text=True, timeout=timeout)
-    out = (proc.stdout or "") + (proc.stderr or "")
-    passed = _count(out, r"(\d+) passed")
-    failed = _count(out, r"(\d+) failed")
-    total = passed + failed
-    return {
-        "passed": passed, "failed": failed, "total": total,
-        "pass_rate": round(passed / total, 4) if total else 0.0,
-        "ok": proc.returncode == 0 and failed == 0 and passed > 0,
-    }
-
-
 def _count(text: str, pat: str) -> int:
-    m = re.search(pat, text)
-    return int(m.group(1)) if m else 0
-
-
-def archive_variant(name: str, fit: dict, notes: str = "", applied: bool = False) -> None:
-    """Registra un intento de evolucion + su fitness (append-only)."""
-    rec = {"ts": time.time(),
-           "iso": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
-           "name": name, "fitness": fit, "applied": applied, "notes": notes}
-    _ARCHIVE.parent.mkdir(parents=True, exist_ok=True)
-    with open(_ARCHIVE, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
-
-def read_archive() -> list[dict]:
-    return read_jsonl_tolerant(_ARCHIVE)
+    # la ULTIMA aparicion, no la primera: la linea de resumen de pytest va al
+    # final, y cualquier "1 failed" impreso ANTES por la salida capturada de un
+    # test mentia el conteo (medido: sandbox con 9 failed registrado como 1).
+    ms = re.findall(pat, text)
+    return int(ms[-1]) if ms else 0
 
 
 # --------------------------------------------------------------------------- #
-# FASE 4 — self_evolve(): el motor (ideate -> fitness -> zona -> apply -> audit) #
+# Zona roja (paths + contenido) — el semáforo que comparte todo el pipeline     #
 # --------------------------------------------------------------------------- #
 # Zona ROJA por path: nunca auto-aplicar (gate humano). Coincide con GOAL.md cat.4.
+# W4.1 (research 07 #1): el harness de EVALUACIÓN también es zona roja — un pipeline que
+# puede editar sus propios gates (gates/smoke, los tests del fitness, esta misma allowlist)
+# puede aflojarlos para pasar. Por eso mmorch/evolve.py (contiene _RED_PATHS y zone_of)
+# está acá adentro: la lista se protege a sí misma.
 _RED_PATHS = ("GOAL.md", "GOAL.hash", ".env", "mmorch/goal.py", "mmorch/budget.py",
-              "mmorch/config.py")
+              "mmorch/config.py", "mmorch/evolve.py", "scripts/gates.py",
+              "scripts/smoke.py", "tests/test_evolve_motor.py", "tests/test_goal.py",
+              "tests/test_evolve_goal_guard.py")
 
 
 # Firmas de ACCIONES zona-roja en el CONTENIDO generado (no solo el path): un cambio de
@@ -274,8 +193,43 @@ _RED_CONTENT = re.compile(
     r"\b(os\.system|subprocess\.(?:run|Popen|call)|shutil\.rmtree|os\.remove|os\.unlink|"
     r"\beval\s*\(|\bexec\s*\(|__import__|rm\s+-rf|DROP\s+TABLE|TRUNCATE|"
     r"requests\.(?:post|put|delete|patch)|socket\.|"
-    r"transfer|withdraw|wallet|exchange|stripe|paypal|place_order|send_money|private_key|"
-    r"secret_key|seed_phrase)\b", re.I)
+    r"transfer|withdraw|wallet|exchange|stripe|paypal|place_order|send_money)\b", re.I)
+
+
+# Palabras de CREDENCIAL separadas de las ACCIONES: su mera presencia en identificadores,
+# tests o docs no es peligrosa (falso rojo medido: fixtures con "password"/"secret_key"
+# bloqueaban merges verdes legitimos — defecto 05 #7). Lo rojo es un VALOR real asignado:
+# `password = "<literal con entropia>"`. Conservador a proposito: umbrales bajos, ante
+# duda rojo; solo la palabra suelta o un placeholder corto dejan de bloquear.
+# \w* a ambos lados: los \b no cortan en underscore, asi que un identificador ENV-style
+# (AWS_SECRET_ACCESS_KEY = "...") NO matcheaba y la clave literal pasaba el gate de zona
+# (AT-26 defecto #1). El anti-falso-rojo sigue siendo el filtro de VALOR en _secret_hits
+# (entropia/forma), no la angostura del identificador.
+_SECRET_ASSIGN = re.compile(
+    r"\b\w*(?:password|passwd|secret|private_key|api_key|access_key|access_token|"
+    r"auth_token|seed_phrase)\w*\s*[:=]\s*[\"']([^\"']{8,})[\"']", re.I)
+
+
+def _char_entropy(s: str) -> float:
+    """Entropia de Shannon por caracter (bits) — proxy barato de 'parece clave real'."""
+    if not s:
+        return 0.0
+    counts = Counter(s)
+    n = len(s)
+    return -sum(c / n * math.log2(c / n) for c in counts.values())
+
+
+def _secret_hits(text: str) -> set[str]:
+    """Asignaciones de credencial cuyo VALOR parece secreto real: literal largo con
+    entropia alta, o >=20 chars con forma hex/base64 (aunque la entropia sea baja).
+    El hit incluye el valor -> el delta vs baseline funciona igual que con acciones."""
+    hits = set()
+    for m in _SECRET_ASSIGN.finditer(text or ""):
+        val = m.group(1)
+        if (len(val) >= 12 and _char_entropy(val) >= 3.0) or (
+                len(val) >= 20 and re.fullmatch(r"[A-Za-z0-9+/=_\-]+", val)):
+            hits.add(m.group(0))
+    return hits
 
 
 def red_content_hits(text: str, *, baseline: str | None = None) -> list[str]:
@@ -285,9 +239,9 @@ def red_content_hits(text: str, *, baseline: str | None = None) -> list[str]:
     rojo a sí mismo). El escudo real queda: un self-edit que INTRODUCE una capacidad peligrosa
     nueva (que no estaba en baseline) sigue siendo rojo. No es caso-especial de 'self' —
     principiado, aplica a cualquier archivo que ya mencione firmas legítimamente (regex, docs)."""
-    hits = set(m.group(0) for m in _RED_CONTENT.finditer(text or ""))
+    hits = set(m.group(0) for m in _RED_CONTENT.finditer(text or "")) | _secret_hits(text or "")
     if baseline is not None:
-        hits -= set(m.group(0) for m in _RED_CONTENT.finditer(baseline))
+        hits -= set(m.group(0) for m in _RED_CONTENT.finditer(baseline)) | _secret_hits(baseline)
     return sorted(hits)
 
 
@@ -308,59 +262,6 @@ def zone_of(change: Change, *, root: Path = ROOT) -> str:
     return "yellow" if _existed_before(change) else "green"
 
 
-def self_evolve(*, candidates: list[Change] | None = None, generate_fn=None, n: int = 3,
-                root: Path = ROOT, evaluate_fn=None, do_apply: bool = False,
-                audit: bool = True) -> dict:
-    """Motor de auto-evolución (1 mejora segura por ciclo). Pasos:
-      IDEATE: usa `candidates` o `generate_fn() -> list[Change]`.
-      FITNESS: `evaluate()` cada uno (inyectable vía evaluate_fn para tests).
-      TOURNAMENT: entre los que pasan, gana el de más checks ok (desempate: id).
-      ZONA: roja -> STOP (nunca aplica, gate humano). verde/amarilla -> aplica si do_apply.
-      AUDIT: archive + episodio kind="auto_action". LEARN: record_outcome.
-    Devuelve {evaluated, winner, applied, zone, blocked_red}. NO aplica rojo jamás."""
-    ev = evaluate_fn or evaluate
-    cands = candidates if candidates is not None else (generate_fn() if generate_fn else [])
-    results: list[dict[str, Any]] = []
-    for c in cands:
-        z = zone_of(c, root=root)
-        r = ev(c)
-        results.append({"change": c, "zone": z, "eval": r, "ok": bool(r.get("ok"))})
-
-    passing = [x for x in results if x["ok"] and x["zone"] != "red"]
-    blocked_red = [x for x in results if x["zone"] == "red"]
-    # tournament: más checks ok gana (proxy de "mejor"); determinista por id
-    winner = max(passing, key=lambda x: (sum(x["eval"]["checks"].values()), x["change"].id),
-                 default=None)
-
-    applied = False
-    if winner and do_apply and winner["zone"] in ("green", "yellow"):
-        # defense-in-depth (B1): re-chequear tamper-halt JUSTO antes de mutar el repo, aunque
-        # evaluate ya lo corrio — el apply es el momento irreversible. GoalTampered propaga.
-        from .goal import goal_guard as _goal_guard
-        _goal_guard()
-        apply_change(winner["change"], root=root)
-        applied = True
-
-    if audit:
-        for x in results:
-            c = x["change"]
-            archive_variant(c.id, x["eval"], notes=f"zone={x['zone']} ok={x['ok']}",
-                            applied=(applied and winner is c))
-            if x is winner and applied:
-                _audit_episode(c, x["zone"], x["eval"])
-        try:
-            from .feedback import record_outcome
-            for x in results:
-                record_outcome(f"evolve:{x['zone']}", 1.0 if x["ok"] else 0.0,
-                               pattern="evolve", source="self_evolve", context=x["change"].target)
-        except Exception:
-            pass
-
-    return {"evaluated": len(results), "winner": winner["change"].id if winner else None,
-            "applied": applied, "zone": winner["zone"] if winner else None,
-            "blocked_red": [x["change"].id for x in blocked_red], "results": results}
-
-
 # --------------------------------------------------------------------------- #
 # Sandbox por BRANCH (git worktree) — aislamiento real, no muta el repo vivo    #
 # --------------------------------------------------------------------------- #
@@ -371,7 +272,7 @@ def _git(*args, cwd) -> subprocess.CompletedProcess:
 def sandbox_branch(change: Change, *, root: Path = ROOT, base: str = "HEAD",
                    run_tests: bool = True, test_path: str = "tests",
                    test_cmd: list[str] | None = None, keep_on_pass: bool = True,
-                   timeout: int = 1800) -> dict:
+                   timeout: int = 1800, origin: str = "evolve") -> dict:
     """Aísla en un git WORKTREE sobre una branch nueva `mmorch-sbx-<id>` (desde HEAD, NO
     incluye cambios sin commitear del árbol principal → no interfiere). Aplica el cambio,
     commitea, corre tests AHÍ. Verde → branch QUEDA (pa merge/PR). Rojo → branch borrada.
@@ -393,47 +294,56 @@ def sandbox_branch(change: Change, *, root: Path = ROOT, base: str = "HEAD",
         _git("commit", "-m", f"sandbox {change.id}: {change.description[:60]}",
              "--no-verify", cwd=wt)
         if run_tests:
-            cmd = test_cmd or [sys.executable, "-m", "pytest", test_path, "-q", "--no-header"]
+            # --basetemp propio: el pytest-current global del user esta roto de
+            # permisos (medido 2026-08: TODOS los sandboxes daban rojo por el
+            # cleanup, no por los tests -> 0 PRs abiertos durante semanas). Se
+            # agrega SIEMPRE, tambien si test_cmd viene inyectado (bug real
+            # encontrado escribiendo propose_with_fast_retry: un test_cmd
+            # custom se saltaba el basetemp por completo)
+            bt = tempfile.mkdtemp(prefix="mmorch_bt_")
+            cmd = list(test_cmd) if test_cmd else [
+                sys.executable, "-m", "pytest", test_path, "-q", "--no-header"]
+            if not any("--basetemp" in c for c in cmd):
+                cmd.append(f"--basetemp={bt}")
             proc = subprocess.run(cmd, cwd=wt, capture_output=True, text=True, timeout=timeout)
             out = (proc.stdout or "") + (proc.stderr or "")
             fit = {"passed": _count(out, r"(\d+) passed"), "failed": _count(out, r"(\d+) failed"),
-                   "rc": proc.returncode}
+                   "rc": proc.returncode, "detail": out[-1200:]}
             ok = proc.returncode == 0 and fit["failed"] == 0
     finally:
         _git("worktree", "remove", "--force", wt, cwd=root)
     if ok and keep_on_pass:
+        # provenance: la branch nace atribuida a su brazo — al mergearse (o
+        # expirar) el bandit recibe el outcome retroactivo sin ningun clic
+        # extra del humano. Fail-soft: un ledger roto no frena el sandbox.
+        try:
+            from .config import DEFAULT_GENERATOR
+            from .provenance import record_branch
+            record_branch(bname, arm=f"{DEFAULT_GENERATOR}#{origin}",
+                          origin=origin, target=change.target,
+                          logs_dir=str(root / "logs"))
+        except Exception:
+            pass
         return {"ok": True, "branch": bname, "fitness": fit, "change_id": change.id}
     _git("branch", "-D", bname, cwd=root)
     return {"ok": ok, "branch": None, "fitness": fit, "change_id": change.id}
-
-
-def promote_branch(branch: str, *, root: Path = ROOT, ff_only: bool = True) -> dict:
-    """Mergea la branch sandbox a la actual. ff_only por default (no crea merge-commits
-    raros). Esto es la PROMOCIÓN del pipeline 'sandbox→merge' (zona amarilla)."""
-    args = ["merge", "--ff-only" if ff_only else "--no-ff", branch]
-    r = _git(*args, cwd=root)
-    return {"merged": r.returncode == 0, "detail": (r.stdout + r.stderr)[:300]}
 
 
 def open_pr_branch(branch: str, *, title: str, body: str = "", root: Path = ROOT) -> dict:
     """Abre un PR de la branch sandbox vía `gh` (si está). Alternativa a merge directo
     cuando querés revisión humana (zona amarilla con gate). gh ausente → devuelve push-only."""
     push = _git("push", "-u", "origin", branch, cwd=root)
-    gh = subprocess.run(["gh", "pr", "create", "--head", branch, "--title", title,
-                         "--body", body or title], cwd=str(root), capture_output=True, text=True)
-    return {"pushed": push.returncode == 0, "pr_created": gh.returncode == 0,
-            "detail": (gh.stdout + gh.stderr)[:300]}
-
-
-def _audit_episode(change: Change, zone: str, ev: dict) -> None:
-    """Auditoría inmutable de la auto-acción (mejora #5 del usuario)."""
     try:
-        from .memory import write_episode
-        write_episode("mmorch_self", "auto_action", {
-            "change_id": change.id, "target": change.target, "zone": zone,
-            "checks": ev.get("checks"), "description": change.description})
-    except Exception:
-        pass
+        gh = subprocess.run(["gh", "pr", "create", "--head", branch, "--title", title,
+                             "--body", body or title], cwd=str(root),
+                            capture_output=True, text=True)
+        pr_created, detail = gh.returncode == 0, (gh.stdout + gh.stderr)[:300]
+    except FileNotFoundError:
+        # el docstring siempre prometio push-only sin gh; el crash rompia el
+        # nightly entero (FileNotFoundError medido, corrida 2026-08-15)
+        pr_created, detail = False, "gh no instalado -> push-only"
+    return {"pushed": push.returncode == 0, "pr_created": pr_created,
+            "detail": detail}
 
 
 # --------------------------------------------------------------------------- #
@@ -450,7 +360,7 @@ def _audit_episode(change: Change, zone: str, ev: dict) -> None:
 # Alternativa descartada: forzar mas commits sobre el MISMO PR abierto (mas trabajo, y
 # un force-push puede pisar contexto de una revision humana en curso).
 # --------------------------------------------------------------------------- #
-_PR_STATE = ROOT / "logs" / "evolve_open_prs.json"
+_PR_STATE = paths.logs_dir() / "evolve_open_prs.json"
 
 
 def _load_pr_state(path: Path = _PR_STATE) -> dict:
@@ -470,6 +380,14 @@ def _pr_still_open(entry: dict, *, root: Path, gh_check_fn=None) -> bool:
     default es 'sigue abierto' (falla SEGURO: nunca pisa un merge que no pudo confirmar)."""
     branch = entry.get("branch")
     if not branch:
+        return False
+    # el trabajo YA esta en HEAD (lo mergeo el tren o el humano) -> el lock esta
+    # muerto aunque la branch siga existiendo. Sin esto, con gh ausente (pr_number
+    # None) y nadie borrando branches sandbox, el lock era PERMANENTE: medido
+    # 2026-08-24, 4 archivos bloqueados y 6 de 8 hallazgos salteados por noche.
+    sha = entry.get("head_sha")
+    if sha and _git("merge-base", "--is-ancestor", sha, "HEAD",
+                    cwd=root).returncode == 0:
         return False
     if _git("rev-parse", "--verify", branch, cwd=root).returncode != 0:
         return False
@@ -515,9 +433,31 @@ def reap_merged_prs(*, root: Path = ROOT, gh_check_fn=None, path: Path = _PR_STA
             "still_open": list(state.keys())}
 
 
+def _diff_goal_aligned(c: Change):
+    """goal_aligned() sobre el DIFF del candidato (no el archivo entero: el verificador
+    juzga QUÉ cambió, con menos ruido y menos tokens). W4.1: el ancla anti-drift pasa
+    de museo (solo evaluate(), que nadie llama) al camino vivo pre-PR."""
+    import difflib
+    from .goal import goal_aligned
+    diff = "".join(difflib.unified_diff(
+        c.before.splitlines(keepends=True), c.after.splitlines(keepends=True),
+        fromfile=f"a/{c.target}", tofile=f"b/{c.target}"))
+    return goal_aligned(f"{c.description}\n\n{diff[:8000]}", phase="evolve_pr_gate")
+
+
+def _pr_fitness(c: Change) -> dict:
+    """W4.3: evaluate() (la fitness compuesta, museo desde F3) entra al camino vivo
+    como check pre-PR, SIN duplicar lo que la ronda ya paga: goal_aligned lo cubre
+    aligned_fn (W4.1, sobre el diff) => goal=False; los tests reales los corrió
+    sandbox_branch. El costo RELATIVO no se mide en el nightly (no hay cost_fn con
+    medición) => no gatea; budget_ok (absoluto, BudgetKeeper) sí."""
+    return evaluate(c, goal=False, cost_fn=lambda ch: True)
+
+
 def coordinated_evolve_round(candidates: list[Change], *, root: Path = ROOT,
                              sandbox_fn=None, pr_fn=None, gh_check_fn=None,
                              pr_title_fn=None, open_pr: bool = True,
+                             aligned_fn=None, fitness_fn=None,
                              path: Path = _PR_STATE) -> dict:
     """1 ronda del loop nocturno, coordinada por archivo. `sandbox_fn`/`pr_fn` inyectables
     (default = sandbox_branch/open_pr_branch reales; seam de test sin git/gh real).
@@ -528,12 +468,25 @@ def coordinated_evolve_round(candidates: list[Change], *, root: Path = ROOT,
        abierto -> zona roja bloquea siempre; verde/amarilla -> sandbox+test; verde -> abre
        PR + trackea; rojo/fitness-fail -> no trackea nada (proximo intento arranca limpio).
 
-    Devuelve {skipped_active_pr, opened, red, blocked_zone_red}."""
+    W4.1: antes de abrir PR, `aligned_fn` (default goal_aligned sobre el diff) tiene que
+    pasar — desalineado con GOAL.md => sin PR + motivo a evolve_red.jsonl. Error de infra
+    del check => fail-OPEN (se abre el PR igual: el gate humano del PR sigue; CLOSED solo
+    ante refutación explícita — mismo principio que el never-edit guard).
+
+    W4.3: `fitness_fn` (default _pr_fitness = evaluate() sin goal/tests) es el segundo
+    gate pre-PR: ast + ensemble cross-family + budget. Falla explícita => sin PR +
+    checks a evolve_red.jsonl; error de infra => fail-OPEN, igual que aligned_fn.
+
+    Devuelve {skipped_active_pr, opened, red, blocked_zone_red, blocked_fitness,
+    blocked_goal}."""
     sandbox_fn = sandbox_fn or (lambda c: sandbox_branch(c, root=root))
     pr_fn = pr_fn or (lambda branch, title: open_pr_branch(branch, title=title, root=root))
+    aligned_fn = aligned_fn or _diff_goal_aligned
+    fitness_fn = fitness_fn or _pr_fitness
     reap_merged_prs(root=root, gh_check_fn=gh_check_fn, path=path)
     state = _load_pr_state(path)
-    skipped, opened, red, blocked_zone_red = [], [], [], []
+    skipped, opened, red, blocked_zone_red, blocked_goal = [], [], [], [], []
+    blocked_fitness: list[str] = []
     for c in candidates:
         if c.target in state:
             skipped.append(c.target)
@@ -544,7 +497,77 @@ def coordinated_evolve_round(candidates: list[Change], *, root: Path = ROOT,
         r = sandbox_fn(c)
         if not r.get("ok"):
             red.append(c.target)
+            # persistir el POR QUE: fitness.detail se calculaba y se tiraba —
+            # medido 2026-08-21: el stuck-finding le pedia al reparador "lee
+            # fitness.detail" y ese dato no existia en ningun log. Sin esto,
+            # diagnosticar el bucle muerto de evolve es adivinar.
+            try:
+                # zone + reason SIEMPRE (AT-29): habia lineas con fitness:{} y
+                # error:"" — una linea roja sin porque no audita nada. reason se
+                # deriva de lo mejor que haya; su ausencia total tambien se nombra.
+                fit = r.get("fitness") or {}
+                reason = (r.get("error")
+                          or (f"suite roja: {fit['failed']} failed (rc {fit.get('rc')})"
+                              if fit.get("failed") else "")
+                          or fit.get("detail", "")[-300:]
+                          or "sandbox_fail_sin_detalle")
+                # mkdir: un root sin logs/ (instancia fresca) tiraba OSError y el
+                # except lo tragaba — el rechazo desaparecia sin dejar rastro
+                (root / "logs").mkdir(parents=True, exist_ok=True)
+                with open(root / "logs" / "evolve_red.jsonl", "a",
+                          encoding="utf-8") as fh:
+                    fh.write(json.dumps(
+                        {"ts": time.time(), "target": c.target,
+                         "description": c.description[:120],
+                         "zone": zone_of(c, root=root), "reason": reason,
+                         "fitness": fit, "error": r.get("error", "")},
+                        ensure_ascii=False) + "\n")
+            except OSError:
+                pass
             continue
+        if open_pr:
+            # gate de fitness pre-PR (W4.3): ast + ensemble + budget sobre el candidato
+            # que YA pasó zona y sandbox — pocos, así el ensemble cross-family no se paga
+            # por basura que igual moría. Mismo contrato fail-open que aligned_fn.
+            try:
+                fv = fitness_fn(c)
+                fit_ok = bool(fv.get("ok", True))
+                fit_checks = dict(fv.get("checks", {}))
+            except Exception as e:   # infra caída => fail-open (el humano del PR gatea)
+                fit_ok, fit_checks = True, {"error": f"fitness_fn (fail-open): {type(e).__name__}"}
+            if not fit_ok:
+                blocked_fitness.append(c.target)
+                try:
+                    with open(root / "logs" / "evolve_red.jsonl", "a",
+                              encoding="utf-8") as fh:
+                        fh.write(json.dumps(
+                            {"ts": time.time(), "target": c.target, "kind": "fitness_fail",
+                             "description": c.description[:120], "branch": r["branch"],
+                             "checks": fit_checks}, ensure_ascii=False) + "\n")
+                except OSError:
+                    pass
+                continue   # sin PR; la branch queda para autopsia humana
+            # gate de alineación pre-PR (W4.1): tests verdes NO alcanza — el cambio
+            # además tiene que alinear con GOAL.md. Solo acá (candidatos que ya pasaron
+            # sandbox: pocos) para no pagar cross-family por basura que igual moría.
+            try:
+                v = aligned_fn(c)
+                aligned = bool(getattr(v, "passed", True))
+                refutations = list(getattr(v, "refutations", []))
+            except Exception as e:   # infra caída => fail-open (el PR sigue gateado por humano)
+                aligned, refutations = True, [f"aligned_fn error (fail-open): {type(e).__name__}"]
+            if not aligned:
+                blocked_goal.append(c.target)
+                try:
+                    with open(root / "logs" / "evolve_red.jsonl", "a",
+                              encoding="utf-8") as fh:
+                        fh.write(json.dumps(
+                            {"ts": time.time(), "target": c.target, "kind": "goal_misaligned",
+                             "description": c.description[:120], "branch": r["branch"],
+                             "refutations": refutations[:5]}, ensure_ascii=False) + "\n")
+                except OSError:
+                    pass
+                continue   # sin PR; la branch queda para autopsia humana, nada se trackea
         entry = {"branch": r["branch"], "target": c.target, "change_id": c.id}
         head = _git("rev-parse", r["branch"], cwd=root)
         if head.returncode == 0:                      # pa distinguir merge de rechazo al reapear
@@ -558,22 +581,83 @@ def coordinated_evolve_round(candidates: list[Change], *, root: Path = ROOT,
         opened.append(c.target)
     _save_pr_state(state, path)
     return {"skipped_active_pr": skipped, "opened": opened, "red": red,
-            "blocked_zone_red": blocked_zone_red}
+            "blocked_zone_red": blocked_zone_red, "blocked_fitness": blocked_fitness,
+            "blocked_goal": blocked_goal}
 
 
-def propose_patch(target_file: str, finding: str, *, gen_model: str | None = None) -> str:
+def propose_patch(target_file: str, finding: str, *, gen_model: str | None = None,
+                  feedback: str = "") -> str:
     """Un modelo barato PROPONE el contenido nuevo de target_file para resolver
     `finding`. READ-ONLY: devuelve el texto, NO escribe nada. Aplicar = gate aparte.
+
+    `feedback`: salida de pytest del intento ANTERIOR (ver propose_with_fast_retry) —
+    mismo patron que project_integrate.py's hot-coder loop. Sin esto, cada intento
+    era ciego a por que el anterior fallo (medido: causa raiz de por que evolve
+    llevaba 12+ noches con 0 PRs — un solo tiro contra la suite completa, sin
+    iterar, es un piso demasiado alto para un cambio de archivo entero).
     """
     from .patterns import fan_out
     from .config import DEFAULT_GENERATOR
     src = (ROOT / target_file).read_text(encoding="utf-8") if (ROOT / target_file).exists() else ""
+    fb = (f"\nEl intento anterior FALLO estos tests:\n{feedback[:1200]}\n"
+         f"Arreglalo sin reintroducir el problema original.\n") if feedback else ""
     prompt = (
         f"Sos un mejorador de codigo Python. Resolve este hallazgo SIN romper la API publica "
         f"ni los invariantes (cross-family, OneFlow, anti-sicofancia, observabilidad).\n\n"
-        f"HALLAZGO: {finding}\n\nARCHIVO {target_file}:\n{src}\n\n"
+        f"HALLAZGO: {finding}\n\nARCHIVO {target_file}:\n{src}\n{fb}\n"
         f"Devolve el CONTENIDO COMPLETO nuevo del archivo, sin explicacion, en un bloque de codigo.")
-    return fan_out([prompt], gen_model=gen_model or DEFAULT_GENERATOR, phase="evolve")[0].text
+    out = fan_out([prompt], gen_model=gen_model or DEFAULT_GENERATOR, phase="evolve")[0].text
+    # extract_fence: SIN esto, el ```python del modelo viajaba ADENTRO del .py
+    # -> SyntaxError -> suite entera roja en la coleccion -> 12+ noches con 0
+    # PRs. Confirmado por aritmetica: slim reportaba 'no_adelgazo' con +13
+    # chars exactos = el overhead del fence. project_integrate siempre lo
+    # extrajo; evolve (y todo lo que reusa propose_patch: slim, hardening,
+    # auto-findings) nunca. El bug mas caro del sistema costaba 13 chars.
+    from .textutil import extract_fence
+    return extract_fence(out)
+
+
+def _target_test_file(target_file: str, *, root: Path = ROOT) -> str | None:
+    """mmorch/repo_mining.py -> tests/test_repo_mining.py si existe. El gate RAPIDO
+    de iteracion usa esto (segundos, no minutos) en vez de la suite completa (10+
+    min, 600+ tests) — coordinated_evolve_round sigue corriendo la suite entera
+    como gate FINAL antes de abrir PR, esto solo acelera llegar ahi."""
+    p = Path(target_file)
+    if p.parts[:1] != ("mmorch",):
+        return None
+    cand = root / "tests" / f"test_{p.stem}.py"
+    return str(cand.relative_to(root)).replace("\\", "/") if cand.exists() else None
+
+
+def propose_with_fast_retry(target_file: str, finding: str, *, root: Path = ROOT,
+                            max_attempts: int = 3, propose_fn=None,
+                            quick_sandbox_fn=None) -> tuple[str, dict]:
+    """Genera el patch iterando contra el test RAPIDO del modulo (si existe) antes
+    de que coordinated_evolve_round gaste 10+ min corriendo la suite entera. Cada
+    intento fallido le pasa el output real de pytest al siguiente — antes cada
+    intento era ciego (un solo tiro, causa raiz medida del bucle muerto de evolve).
+
+    Sin test rapido disponible (target fuera de mmorch/, o sin tests/test_X.py):
+    un solo intento sin feedback — no hay gate barato contra el cual iterar.
+    Devuelve (ultimo patch propuesto, resultado del ultimo intento rapido)."""
+    propose_fn = propose_fn or propose_patch
+    quick_sandbox_fn = quick_sandbox_fn or (
+        lambda c, cmd: sandbox_branch(c, root=root, test_cmd=cmd, keep_on_pass=False))
+    quick_test = _target_test_file(target_file, root=root)
+    if quick_test is None:
+        return propose_fn(target_file, finding), {"skipped": "sin test rapido"}
+
+    feedback = ""
+    last: dict = {}
+    for _ in range(max_attempts):
+        after = propose_fn(target_file, finding, feedback=feedback)
+        change = snapshot_change(target_file, after, finding[:80], root=root)
+        cmd = [sys.executable, "-m", "pytest", quick_test, "-q", "--no-header"]
+        last = quick_sandbox_fn(change, cmd)
+        if last.get("ok"):
+            return after, last
+        feedback = last.get("fitness", {}).get("detail", "")
+    return after, last
 
 
 # --------------------------------------------------------------------------- #
@@ -599,11 +683,16 @@ def nightly_evolve(*, days: int = 3, max_files: int = 5, max_findings: int = 8,
     findings = harvest_fn()
     if not findings:
         return {"findings": 0, "skipped_active_pr": [], "opened": [], "red": [],
-                "blocked_zone_red": []}
+                "blocked_zone_red": [], "blocked_fitness": [], "blocked_goal": []}
     candidates = []
     for f in findings:
         try:
-            after = propose_fn(f["target"], f["finding"])
+            # antes: un solo tiro contra la suite completa (10+ min), ciego a
+            # por que fallo el intento anterior — causa raiz medida de 12+
+            # noches sin abrir un PR. Ahora itera rapido (segundos) contra el
+            # test propio del modulo antes de llegar al gate caro de abajo.
+            after, _ = propose_with_fast_retry(f["target"], f["finding"], root=root,
+                                               propose_fn=propose_fn)
         except Exception:
             continue   # un hallazgo que no se pudo proponer no debe frenar el resto
         candidates.append(snapshot_change(f["target"], after, f["finding"][:80], root=root))
@@ -619,6 +708,14 @@ if __name__ == "__main__":
     tmp_state = Path(tempfile.mkdtemp()) / "pr_state.json"
     calls: list = []
 
+    from types import SimpleNamespace
+
+    def _fake_aligned_ok(c):
+        return SimpleNamespace(passed=True, refutations=[])
+
+    def _fake_fitness_ok(c):
+        return {"ok": True, "checks": {}}
+
     def _fake_sandbox_ok(c):
         calls.append(("sandbox", c.target))
         return {"ok": True, "branch": f"mmorch-sbx-{c.id}", "fitness": {}, "change_id": c.id}
@@ -632,8 +729,11 @@ if __name__ == "__main__":
         return {"pushed": True, "pr_created": True, "pr_number": 42}
 
     def _fake_git_exists_true(*a, cwd):
+        # rev-parse rc=0 (la branch existe) pero merge-base --is-ancestor rc=1
+        # (NO mergeada aun): sin distinguirlos, el lock-release por commit-en-HEAD
+        # (fix 2026-08-24) liberaba el target y el skip de ronda 2 jamas ocurria.
         class _R:
-            returncode = 0
+            returncode = 1 if a and a[0] == "merge-base" else 0
             stdout = "deadbeef123\n"
         return _R()
 
@@ -650,28 +750,28 @@ if __name__ == "__main__":
     # 1. ronda 1: 2 candidatos, uno para 'a.py' otro para 'b.py' -> ambos abren PR
     _git = globals()["_git"]
     globals()["_git"] = _fake_git_exists_true   # branch existe (recien creada)
-    r1 = coordinated_evolve_round([c1, c3], sandbox_fn=_fake_sandbox_ok, pr_fn=_fake_pr,
+    r1 = coordinated_evolve_round([c1, c3], sandbox_fn=_fake_sandbox_ok, pr_fn=_fake_pr, aligned_fn=_fake_aligned_ok, fitness_fn=_fake_fitness_ok,
                                   path=tmp_state)
     assert set(r1["opened"]) == {"a.py", "b.py"}, r1
     assert r1["skipped_active_pr"] == [], r1
 
     # 2. ronda 2: un candidato NUEVO para 'a.py' (mismo target que c1) -> SKIP, no compite
     calls.clear()
-    r2 = coordinated_evolve_round([c2], sandbox_fn=_fake_sandbox_ok, pr_fn=_fake_pr,
+    r2 = coordinated_evolve_round([c2], sandbox_fn=_fake_sandbox_ok, pr_fn=_fake_pr, aligned_fn=_fake_aligned_ok, fitness_fn=_fake_fitness_ok,
                                   path=tmp_state)
     assert r2["skipped_active_pr"] == ["a.py"], r2
     assert calls == [], "no debio llamar sandbox_fn para un archivo con PR abierto"
 
     # 3. el PR de 'a.py' se mergea (la branch ya no existe) -> reap la libera -> ronda 3 la toma
     globals()["_git"] = _fake_git_exists_false
-    r3 = coordinated_evolve_round([c2], sandbox_fn=_fake_sandbox_ok, pr_fn=_fake_pr,
+    r3 = coordinated_evolve_round([c2], sandbox_fn=_fake_sandbox_ok, pr_fn=_fake_pr, aligned_fn=_fake_aligned_ok, fitness_fn=_fake_fitness_ok,
                                   path=tmp_state)
     assert r3["opened"] == ["a.py"], r3          # liberada y re-tomada en la MISMA ronda
 
     # 4. sandbox que falla (rojo) -> nunca se trackea, no bloquea futuras rondas
     globals()["_git"] = _fake_git_exists_true
     _save_pr_state({}, tmp_state)
-    r4 = coordinated_evolve_round([c1], sandbox_fn=_fake_sandbox_fail, pr_fn=_fake_pr,
+    r4 = coordinated_evolve_round([c1], sandbox_fn=_fake_sandbox_fail, pr_fn=_fake_pr, aligned_fn=_fake_aligned_ok, fitness_fn=_fake_fitness_ok,
                                   path=tmp_state)
     assert r4["red"] == ["a.py"] and r4["opened"] == [], r4
     assert _load_pr_state(tmp_state) == {}, "un intento fallido no debe quedar trackeado"
@@ -692,7 +792,7 @@ if __name__ == "__main__":
 
     r_night = nightly_evolve(harvest_fn=_fake_harvest_some, propose_fn=_fake_propose,
                              root=Path(tempfile.mkdtemp()), sandbox_fn=_fake_sandbox_ok,
-                             pr_fn=_fake_pr, path=tmp_state2)
+                             pr_fn=_fake_pr, aligned_fn=_fake_aligned_ok, fitness_fn=_fake_fitness_ok, path=tmp_state2)
     assert r_night["findings"] == 2, r_night
     assert set(r_night["opened"]) == {"x.py", "y.py"}, r_night
 
@@ -703,7 +803,8 @@ if __name__ == "__main__":
                              propose_fn=lambda t, f: (_ for _ in ()).throw(
                                  AssertionError("no debio proponerse nada")))
     assert r_empty == {"findings": 0, "skipped_active_pr": [], "opened": [], "red": [],
-                       "blocked_zone_red": []}, r_empty
+                       "blocked_zone_red": [], "blocked_fitness": [],
+                       "blocked_goal": []}, r_empty
 
     # un propose_fn que explota para UN finding no frena el resto
     def _propose_one_boom(target, finding):
@@ -712,7 +813,7 @@ if __name__ == "__main__":
         return "def g(): return 2"
     r_partial = nightly_evolve(harvest_fn=_fake_harvest_some, propose_fn=_propose_one_boom,
                                root=Path(tempfile.mkdtemp()), sandbox_fn=_fake_sandbox_ok,
-                               pr_fn=_fake_pr, path=Path(tempfile.mkdtemp()) / "s.json")
+                               pr_fn=_fake_pr, aligned_fn=_fake_aligned_ok, fitness_fn=_fake_fitness_ok, path=Path(tempfile.mkdtemp()) / "s.json")
     assert r_partial["opened"] == ["y.py"], r_partial   # x.py se perdio, y.py sigue
 
     globals()["_git"] = _git

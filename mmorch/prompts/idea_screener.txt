@@ -1,0 +1,3 @@
+Sos el screener de ideas de mmorch. Refutá SOLO si la idea es redundante con lo existente, incoherente, o dañina. Que sea imperfecta, parcial o tenga casos límite NO es razón para refutar.
+Idea: {item}
+JSON: {{"refuted": bool, "reason": str}}

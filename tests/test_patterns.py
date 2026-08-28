@@ -22,7 +22,7 @@ def test_adversarial_verify_rejects_same_family(monkeypatch):
 
 def test_adversarial_verify_crossfamily_ok(monkeypatch):
     monkeypatch.setattr(P, "call",
-        lambda *a, **k: _fake_result('{"passed":true,"confidence":0.9,"refutations":[]}',
+        lambda *a, **k: _fake_result('{"verdict":"correcto","refutations":[]}',
                                      "gemini-2.5-flash", "google"))
     v = adversarial_verify("x", rubric="r")  # deepseek gen vs gemini verifier
     assert v.passed is True and v.confidence == 0.9
@@ -50,6 +50,47 @@ def test_parse_fenced_json_with_string_false():
 def test_parse_unparseable_fails_closed():
     p, c, r = _parse_verdict("no json here")
     assert p is False and c == 0.0 and r  # skeptic default = refute
+
+
+# ---- Labels categoricos anclados (W5.3, research 08 — ataca ECE 0.456) ----
+def test_parse_anchored_labels():
+    # el numero es el mapeo fijo POST-label (_LABEL_MAP), no auto-reporte del modelo
+    assert _parse_verdict('{"verdict":"correcto","refutations":[]}') == (True, 0.9, [])
+    p, c, r = _parse_verdict('{"verdict":"incorrecto_menor","refutations":["x"]}')
+    assert p is False and c == 0.6 and r == ["x"]
+    p, c, _ = _parse_verdict('{"verdict":"incorrecto_grave","refutations":["y"]}')
+    assert p is False and c == 0.95
+
+
+def test_parse_label_variants_toleradas():
+    # guion/mayusculas se normalizan; el vocabulario NO se amplia
+    assert _parse_verdict('{"verdict":"Incorrecto-Menor","refutations":[]}')[1] == 0.6
+
+
+def test_parse_label_desconocido_refuta():
+    # label fuera de vocabulario = verificador ilegible -> jamas aprueba
+    p, c, r = _parse_verdict('{"verdict":"maso","refutations":[]}')
+    assert p is False and c == 0.0 and any("desconocido" in x for x in r)
+
+
+def test_parse_legacy_passed_true_refuta():
+    # D-adv2 (ronda 2): el fallback legacy {"passed":true} bypaseaba el vocabulario
+    # anclado y aprobaba — una aprobacion exige label; legacy solo puede refutar.
+    p, c, r = _parse_verdict('{"passed": true, "confidence": 1.5}')
+    assert p is False and c == 0.0 and any("legacy" in x for x in r)
+
+
+def test_parse_legacy_passed_false_sigue_refutando():
+    # el lado seguro del legacy (refutacion numerica) sigue parseando
+    p, c, r = _parse_verdict('{"passed": false, "confidence": 0.7, "refutations": ["z"]}')
+    assert p is False and c == 0.7 and r == ["z"]
+
+
+def test_skeptic_prompt_pide_labels_no_score_crudo():
+    # el contrato del prompt es el label anclado; un score numerico crudo seria
+    # regresion directa del robo W5.3
+    assert "incorrecto_grave" in P._SKEPTIC_SYSTEM
+    assert '"confidence": 0..1' not in P._SKEPTIC_SYSTEM
 
 
 # ---- fan_out graceful (H-1) ----

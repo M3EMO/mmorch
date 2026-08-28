@@ -28,6 +28,16 @@ def main() -> int:
         sys.stderr.write(f"mmorch session-ingest: +{n} workflow obs from {pathlib.Path(tp).name}\n")
     except Exception as e:                       # nunca bloquear el cierre
         sys.stderr.write(f"mmorch session-ingest skipped: {type(e).__name__}: {e}\n")
+    try:
+        # decisiones humanas (flywheel gold): pares pregunta->veredicto corto,
+        # 100% local, redactado y dedupeado
+        from mmorch.decision_mining import ingest_decisions
+        root = pathlib.Path(__file__).resolve().parent.parent
+        r = ingest_decisions(tp, logs_dir=str(root / "logs"))
+        if r.get("new"):
+            sys.stderr.write(f"mmorch decisiones: +{r['new']} nuevas\n")
+    except Exception:
+        pass
     return 0
 
 

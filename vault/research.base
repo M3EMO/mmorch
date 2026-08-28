@@ -1,0 +1,62 @@
+filters:
+  and:
+    - file.folder == "research"
+
+views:
+  - type: table
+    name: Todas las notas
+    order:
+      - file.name
+      - title
+      - status
+      - tags
+      - created
+    sort:
+      - property: created
+        direction: DESC
+
+  - type: table
+    name: Por estado
+    order:
+      - title
+      - status
+      - tags
+      - created
+    sort:
+      - property: status
+        direction: ASC
+      - property: created
+        direction: DESC
+
+  - type: table
+    name: Seed — sin decidir todavia
+    filters:
+      and:
+        - status == "seed"
+    order:
+      - title
+      - tags
+      - created
+
+  - type: table
+    name: Verificadas o aplicadas
+    filters:
+      or:
+        - status == "verified"
+        - status == "applied"
+        - status == "evergreen"
+    order:
+      - title
+      - status
+      - created
+
+  - type: table
+    name: Refutadas o inconclusas
+    filters:
+      or:
+        - status == "refuted"
+        - status == "inconclusive"
+    order:
+      - title
+      - status
+      - created

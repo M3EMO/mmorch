@@ -48,8 +48,11 @@ def test_skill_distilled_only_after_corrections(tmp_path, monkeypatch):
     RL.run_rubric_loop("inc", CHECKABLE, gen_fn=lambda p: GOOD)
     assert not sp.exists()
     # verde tras 2 intentos -> SI skill
+    # next(attempts, GOOD): si el exec del checker da rojo falso por carga, el loop
+    # pide un 3er intento y el iterador pelado tiraba StopIteration -> el test
+    # moria con un error que no era el suyo (y mataba sandboxes de evolve enteros)
     attempts = iter([BAD, GOOD])
-    RL.run_rubric_loop("inc", CHECKABLE, gen_fn=lambda p: next(attempts))
+    RL.run_rubric_loop("inc", CHECKABLE, gen_fn=lambda p: next(attempts, GOOD))
     skills = [json.loads(l) for l in sp.read_text(encoding="utf-8").splitlines()]
     assert len(skills) == 1 and skills[0]["fixed_criteria"] == ["c1"]
     assert "def inc(x):" in skills[0]["winning_code"]

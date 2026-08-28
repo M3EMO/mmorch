@@ -2,8 +2,8 @@
 (Lance Martin, "Designing loops" 2026-06: medir -> proponer -> implementar ->
 probar -> repetir; el rubric hace mas trabajo que el modelo).
 
-Distinto de loop_until_done (discovery: "hasta que este limpio") y de
-goal.pursue_goal (binario: alinea/no-alinea). Aca el entorno devuelve un NUMERO
+Distinto de loop_until_done (discovery: "hasta que este limpio") y del gate
+binario goal.goal_aligned (alinea/no-alinea). Aca el entorno devuelve un NUMERO
 y el loop se queda con mejoras: best solo avanza si score supera best + min_delta.
 
 Regla anti-reward-hacking: `score` debe ser un rubric CORRIBLE y determinista

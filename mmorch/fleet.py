@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-HOSTS_PATH = ROOT / "hosts.json"
+from .paths import data_dir
+
+HOSTS_PATH = data_dir() / "hosts.json"
 
 
 def _load(path: Path | None = None) -> dict:
@@ -43,7 +44,8 @@ def list_hosts(*, store: Path | None = None) -> dict:
 
 def _get(url: str, token: str, timeout: float = 6.0):
     import httpx
-    r = httpx.get(url, params={"token": token} if token else None, timeout=timeout)
+    # token por header, nunca query: un peer W3.2 rechaza ?token= (y no queda en logs)
+    r = httpx.get(url, headers={"X-Token": token} if token else None, timeout=timeout)
     return r.status_code, (r.json() if r.headers.get("content-type", "").startswith("application/json") else {})
 
 

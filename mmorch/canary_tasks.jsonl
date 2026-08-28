@@ -1,0 +1,20 @@
+{"id": "comb-20-10", "prompt": "Calcula C(20,10) (combinaciones de 20 tomadas de a 10). Responde SOLO con el numero, sin separadores de miles ni explicacion.", "checker": "numeric_close", "ctx": {"a": "{answer}", "b": 184756}}
+{"id": "factorial-10", "prompt": "Calcula 10! (factorial de 10). Responde SOLO con el numero, sin separadores de miles ni explicacion.", "checker": "numeric_close", "ctx": {"a": "{answer}", "b": 3628800}}
+{"id": "gcd-1071-462", "prompt": "Calcula el maximo comun divisor de 1071 y 462. Responde SOLO con el numero.", "checker": "numeric_close", "ctx": {"a": "{answer}", "b": 21}}
+{"id": "mult-17-23", "prompt": "Calcula 17 * 23. Responde SOLO con el numero.", "checker": "numeric_close", "ctx": {"a": "{answer}", "b": 391}}
+{"id": "pow-2-10", "prompt": "Calcula 2 elevado a la 10. Responde SOLO con el numero.", "checker": "numeric_close", "ctx": {"a": "{answer}", "b": 1024}}
+{"id": "suma-1-100", "prompt": "Calcula la suma de los enteros del 1 al 100 inclusive. Responde SOLO con el numero, sin separadores de miles.", "checker": "numeric_close", "ctx": {"a": "{answer}", "b": 5050}}
+{"id": "sqrt-1024", "prompt": "Calcula la raiz cuadrada de 1024. Responde SOLO con el numero.", "checker": "numeric_close", "ctx": {"a": "{answer}", "b": 32}}
+{"id": "pct-15-240", "prompt": "Calcula el 15% de 240. Responde SOLO con el numero.", "checker": "numeric_close", "ctx": {"a": "{answer}", "b": 36}}
+{"id": "lcm-12-18", "prompt": "Calcula el minimo comun multiplo de 12 y 18. Responde SOLO con el numero.", "checker": "numeric_close", "ctx": {"a": "{answer}", "b": 36}}
+{"id": "primo-7mo", "prompt": "Cual es el septimo numero primo? (el primero es 2). Responde SOLO con el numero.", "checker": "numeric_close", "ctx": {"a": "{answer}", "b": 17}}
+{"id": "det-2x2", "prompt": "Calcula el determinante de la matriz [[3,1],[2,4]]. Responde SOLO con el numero.", "checker": "numeric_close", "ctx": {"a": "{answer}", "b": 10}}
+{"id": "seg-3h30", "prompt": "Cuantos segundos hay en 3 horas y media? Responde SOLO con el numero, sin separadores de miles.", "checker": "numeric_close", "ctx": {"a": "{answer}", "b": 12600}}
+{"id": "resta-mult", "prompt": "Calcula 1000 - 7*13. Responde SOLO con el numero.", "checker": "numeric_close", "ctx": {"a": "{answer}", "b": 909}}
+{"id": "mod-1234-9", "prompt": "Calcula el resto de dividir 1234 por 9. Responde SOLO con el numero.", "checker": "numeric_close", "ctx": {"a": "{answer}", "b": 1}}
+{"id": "iso-navidad-2024", "prompt": "Escribe la fecha de Navidad de 2024 en formato ISO (AAAA-MM-DD). Responde SOLO con la fecha.", "checker": "regex_format", "ctx": {"value": "{answer}", "pattern": "2024-12-25"}}
+{"id": "hex-rojo", "prompt": "Cual es el codigo hexadecimal del color rojo puro (RGB 255,0,0)? Responde SOLO con el codigo empezando con #.", "checker": "regex_format", "ctx": {"value": "{answer}", "pattern": "(?i)#f{2}0{4}"}}
+{"id": "bin-10", "prompt": "Escribe el numero 10 en binario. Responde SOLO con los digitos binarios, sin prefijo.", "checker": "regex_format", "ctx": {"value": "{answer}", "pattern": "1010"}}
+{"id": "romano-14", "prompt": "Escribe el numero 14 en numeros romanos. Responde SOLO con el numeral.", "checker": "regex_format", "ctx": {"value": "{answer}", "pattern": "(?i)xiv"}}
+{"id": "capital-francia", "prompt": "Cual es la capital de Francia? Responde SOLO con el nombre de la ciudad.", "checker": "regex_format", "ctx": {"value": "{answer}", "pattern": "(?i)par[ií]s|paris"}}
+{"id": "plural-mouse", "prompt": "What is the plural of the English word 'mouse' (the animal)? Answer with ONLY the word.", "checker": "regex_format", "ctx": {"value": "{answer}", "pattern": "(?i)mice"}}

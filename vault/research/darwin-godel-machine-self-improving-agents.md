@@ -1,11 +1,19 @@
 ---
-title: Darwin Godel Machine self-improving agents
-status: applied   # evolve.py subset (fitness+archivo+propose gated) landed; full open-ended sigue gated
+applies_to:
+- orchestration
 confidence: 0.9
-verifier: gemini-2.5-flash
-tags: [research, autolearning, mmorch, self-evolution]
-sources: [https://arxiv.org/abs/2505.22954, https://github.com/lemoz/darwin-godel-machine]
 created: 2026-06-07
+sources:
+- https://arxiv.org/abs/2505.22954
+- https://github.com/lemoz/darwin-godel-machine
+status: applied
+tags:
+- research
+- autolearning
+- mmorch
+- self-evolution
+title: Darwin Godel Machine self-improving agents
+verifier: gemini-2.5-flash
 ---
 ## Qué es
 Darwin Gödel Machine (Zhang et al. 2025, ICLR 2026): agente que **modifica su propio código**

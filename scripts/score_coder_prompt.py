@@ -4,11 +4,11 @@ SYSTEM PROMPT del coder contra el pass-rate de una batería congelada de tasks a
 satura: un wording/instrucción mejor mueve el pass-rate de verdad, a diferencia de
 code_quality/mutation_score sobre módulos (que daban 1.0 fijo — medido 2026-07).
 
-autoresearch edita prompts/coder_prompt.txt (o MMORCH_CODER_PROMPT); este scorer lo lee, genera
+autoresearch edita mmorch/prompts/coder_prompt.txt (o MMORCH_CODER_PROMPT); este scorer lo lee, genera
 cada solución con ESE system prompt (temperature=0 -> casi determinista, minimiza ruido), la
 EJECUTA contra sus asserts, e imprime 'score: <pass_rate>'. Batería reusada de ab_intuition_router.
 
-Uso:  python scripts/score_coder_prompt.py prompts/coder_prompt.txt
+Uso:  python scripts/score_coder_prompt.py mmorch/prompts/coder_prompt.txt
 """
 import os
 import pathlib
@@ -81,16 +81,23 @@ def main() -> None:
     model = os.getenv("MMORCH_CODER_MODEL", DEFAULT_GENERATOR)
 
     passed = 0
-    for task, tests in TASKS:
+    for i, (task, tests) in enumerate(TASKS):
         try:
             out = call(model, [{"role": "system", "content": prompt},
                                {"role": "user", "content": task}],
                        pattern="score_coder", node="coder", temperature=0.0).text
             code = extract_fence(out)
-            if check("python_exec", code=code + "\n" + tests, timeout=10).passed:
+            r = check("python_exec", code=code + "\n" + tests, timeout=10)
+            if r.passed:
                 passed += 1
-        except Exception:
-            pass   # una task que falla = 0 para esa task, no rompe la medición
+            else:
+                # detalle por tarea, no solo el score agregado (medido: sin esto
+                # autoresearch optimiza a ciegas — 15+ noches sin poder ver CUAL
+                # tarea fallaba, solo un numero. score() de autoresearch.py
+                # captura este stdout completo como feedback de la proxima ronda)
+                print(f"FAIL tarea {i} ({task[:50]}): {r.detail[:200]}")
+        except Exception as e:
+            print(f"FAIL tarea {i} ({task[:50]}): excepcion {type(e).__name__}: {e}")
     print(f"score: {round(passed / len(TASKS), 4)}")
 
 

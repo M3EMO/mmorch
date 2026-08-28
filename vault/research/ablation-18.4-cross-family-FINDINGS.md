@@ -1,8 +1,14 @@
 ---
-title: "Ablacion §18.4 — cross-family verifier (PRIMER RUN, inconcluso)"
-status: inconclusive
+applies_to:
+- orchestration
 date: 2026-06-07
-tags: [ablation, cross-family, verification, methodology]
+status: inconclusive
+tags:
+- ablation
+- cross-family
+- verification
+- methodology
+title: Ablacion §18.4 — cross-family verifier (PRIMER RUN, inconcluso)
 ---
 
 # Ablacion §18.4 — cross vs same family verifier

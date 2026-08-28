@@ -41,13 +41,13 @@ from .session_skills import (ingest_workflows, top_playbooks,  # playbooks de to
 from .checkers import (check, register_checker, CheckResult,         # tool-verify determinista
                        safe_arith, available as checkers_available)
 from .goal import (load_goal, goal_hash, goal_aligned,               # ancla anti-goal-drift
-                   authorize_goal, goal_guard, pursue_goal, GoalTampered)
+                   authorize_goal, goal_guard, GoalTampered)
 from .budget import (BudgetExceeded, monthly_spend, remaining,       # BudgetKeeper (techo $)
                      check as budget_check, status as budget_status)
 from .predict import Predictor, train as train_predictor, cross_val_error  # v0.1 cost/lat predictor
-from .evolve import (Change, snapshot_change, apply_change, rollback,      # Fase 3+4 motor
-                     evaluate, zone_of, self_evolve, red_content_hits,
-                     sandbox_branch, promote_branch, open_pr_branch)        # git-isolated promote
+from .evolve import (Change, snapshot_change, apply_change,                # fitness + zona
+                     evaluate, zone_of, red_content_hits,
+                     sandbox_branch, open_pr_branch)                        # git-isolated PR
 from .prices import effective_prices, load_overrides                       # Fase 2 override precios
 from .megasource import fetch_prices, diff_prices, propose_price_update     # Fase 2 megafuente
 from .nodes import orchestra, members, conductor as orchestra_conductor, Node  # registry orquesta
@@ -74,7 +74,7 @@ from .events import emit as emit_event, bus as event_bus, Event                #
 from .enrich import enrich_prompt, enrich_delta                                # Fable: intent enrich
 from .projects import (register as register_project, list_projects,           # project-aware
                        resolve as resolve_project)
-from .claude_exec import run_claude                                           # ejecutor en PLAN (cupo)
+from .claude_exec import run_claude, get_executor, ExecResult                  # ejecutor en PLAN (cupo) + seam
 from .sync import commit_push, pull as git_pull, pull_all as git_pull_all      # GitHub bus de sync
 from .project_loop import run_project_task, ProjectResult                      # ejecutor mmorch-primario
 from .fleet import register_host, list_hosts, fleet_state, forward as fleet_forward  # fleet multi-host
@@ -104,12 +104,12 @@ __all__ = [
     "WorkflowObs", "Playbook",
     "check", "register_checker", "CheckResult", "safe_arith", "checkers_available",
     "load_goal", "goal_hash", "goal_aligned",
-    "authorize_goal", "goal_guard", "pursue_goal", "GoalTampered",
+    "authorize_goal", "goal_guard", "GoalTampered",
     "BudgetExceeded", "monthly_spend", "remaining", "budget_check", "budget_status",
     "Predictor", "train_predictor", "cross_val_error",
     "orchestra", "members", "orchestra_conductor", "Node",
-    "Change", "snapshot_change", "apply_change", "rollback", "evaluate", "zone_of",
-    "self_evolve", "red_content_hits", "sandbox_branch", "promote_branch", "open_pr_branch",
+    "Change", "snapshot_change", "apply_change", "evaluate", "zone_of",
+    "red_content_hits", "sandbox_branch", "open_pr_branch",
     "effective_prices", "load_overrides", "fetch_prices", "diff_prices", "propose_price_update",
     "featurize_code", "train_logreg", "train_code_quality", "emit_training_job",
     "predict_proba", "accuracy",
@@ -128,6 +128,7 @@ __all__ = [
     "emit_event", "event_bus", "Event",
     "enrich_prompt", "enrich_delta",
     "register_project", "list_projects", "resolve_project", "run_claude",
+    "get_executor", "ExecResult",
     "commit_push", "git_pull", "git_pull_all",
     "run_project_task", "ProjectResult",
     "register_host", "list_hosts", "fleet_state", "fleet_forward",

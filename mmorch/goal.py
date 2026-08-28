@@ -14,10 +14,22 @@ import hashlib
 from pathlib import Path
 
 from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
+from .paths import home, repo_root
 from .patterns import adversarial_verify, Verdict
 
-ROOT = Path(__file__).resolve().parent.parent
+# El ancla GOAL vive con el ESTADO (paths.home), no con el codigo: instalado como
+# wheel, anclar a parents[1] apuntaba a site-packages (donde GOAL.md no existe ni
+# debe) y una instancia aislada via MMORCH_HOME no podia tener su propio contrato.
+# En el checkout el default de home() es el repo -> comportamiento identico.
+ROOT = home()
 _GOAL_PATH = ROOT / "GOAL.md"
+# Fallback al GOAL del checkout: un MMORCH_HOME FRESCO (tests aislados, segunda
+# instancia recien creada) no trae GOAL.md y todo evaluate() moria con
+# FileNotFoundError (AT-16, medido). GOAL.md es POLICY que viaja con el codigo;
+# un home puede sobreescribirla poniendo la suya, pero su ausencia no debe
+# significar "sin contrato" mientras el checkout tenga el suyo.
+if not _GOAL_PATH.exists():
+    _GOAL_PATH = repo_root() / "GOAL.md"
 _GOAL_HASH_PATH = ROOT / "GOAL.hash"   # hash AUTORIZADO (re-escribirlo = gate humano)
 
 
@@ -43,14 +55,23 @@ def authorize_goal(path: Path = _GOAL_PATH, hash_path: Path = _GOAL_HASH_PATH) -
     return h
 
 
-def goal_guard(path: Path = _GOAL_PATH, hash_path: Path = _GOAL_HASH_PATH) -> None:
+def goal_guard(path: Path = _GOAL_PATH, hash_path: Path = _GOAL_HASH_PATH,
+               *, allow_init: bool = True) -> None:
     """Tamper-halt (análogo al hard-block del Stop-hook /goal). Si GOAL.md cambió vs el
     hash autorizado → GoalTampered (frena TODA auto-aplicación). Primera vez sin baseline
     → auto-autoriza (el GOAL inicial es el autorizado). Re-autorizar tras un cambio
-    legítimo = `authorize_goal()` (gate humano)."""
+    legítimo = `authorize_goal()` (gate humano).
+
+    `allow_init=False` (camino VIVO nocturno, W4.1): GOAL.hash faltante = HALT, no
+    re-autorización silenciosa — sin esto, BORRAR GOAL.hash re-autorizaba solo cualquier
+    GOAL.md adulterado. Regenerar el hash es acción humana explícita (`authorize_goal()`)."""
     cur = goal_hash(path)
     p = Path(hash_path)
     if not p.exists():
+        if not allow_init:
+            raise GoalTampered(
+                f"GOAL.hash faltante en {p} — hash faltante = HALT (borrar el hash NO "
+                f"re-autoriza). Si el GOAL actual es legítimo, un HUMANO corre authorize_goal().")
         p.write_text(cur, encoding="utf-8")   # init: el GOAL presente es el autorizado
         return
     authorized = p.read_text(encoding="utf-8").strip()
@@ -58,26 +79,6 @@ def goal_guard(path: Path = _GOAL_PATH, hash_path: Path = _GOAL_HASH_PATH) -> No
         raise GoalTampered(
             f"GOAL.md cambió sin re-autorización (actual {cur} != autorizado {authorized}). "
             f"HALT auto-aplicación. Si el cambio es legítimo, un HUMANO corre authorize_goal().")
-
-
-def pursue_goal(generate, *, max_rounds: int = 3, gen_model: str = DEFAULT_GENERATOR,
-                verifier_model: str = DEFAULT_VERIFIER, path: Path = _GOAL_PATH):
-    """Block-until-aligned con RETRY (el análogo productivo del /goal nativo: 'seguí hasta
-    cumplir'). `generate(feedback: str|None) -> str` produce un cambio; si `goal_aligned`
-    refuta, se realimenta la refutación y se regenera, hasta alinear o agotar max_rounds.
-    Mismo patrón que schema.gated_json pero contra el GOAL. Devuelve
-    {change, verdict, rounds, aligned}; aligned=False si se agotó sin pasar."""
-    feedback = None
-    last = None
-    for r in range(1, max_rounds + 1):
-        change = generate(feedback)
-        v = goal_aligned(change, gen_model=gen_model, verifier_model=verifier_model, path=path)
-        last = v
-        if v.passed:
-            return {"change": change, "verdict": v, "rounds": r, "aligned": True}
-        feedback = ("El cambio NO alineó con el GOAL. Refutaciones: "
-                    + "; ".join(v.refutations) + ". Corregí para alinear.")
-    return {"change": None, "verdict": last, "rounds": max_rounds, "aligned": False}
 
 
 def goal_aligned(change: str, *, gen_model: str = DEFAULT_GENERATOR,
@@ -96,7 +97,9 @@ def goal_aligned(change: str, *, gen_model: str = DEFAULT_GENERATOR,
         f"{goal}\n\n"
         "--- TAREA DEL VERIFICADOR ---\n"
         "El ARTEFACTO es un CAMBIO propuesto a mmorch. Decidí si ALINEA con el GOAL de "
-        "arriba. passed=true SOLO si: (1) avanza el north star, (2) NO viola NINGÚN "
+        # 'correcto' (label anclado), no passed=true: desde ronda 2 el formato legacy
+        # {"passed":true} refuta siempre (D-adv2) — la rubrica no debe empujar a el.
+        "arriba. Veredicto 'correcto' SOLO si: (1) avanza el north star, (2) NO viola NINGÚN "
         "invariante, (3) NO toca un non-goal, (4) es reversible. Refutá si deriva del "
         "norte, bloatea sin justificar, rompe un invariante, o entra en zona roja sin "
         "gate humano. Ante la duda, refutá."

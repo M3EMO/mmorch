@@ -6,9 +6,10 @@ Arquitectura (sintetizada de un ideate cross-family, las 3 alternativas naive re
 - El SERVER corre los jobs IN-PROCESS (importa mmorch, llama fan_out/rubric_loop) -> tiene los
   eventos en memoria via events.bus() y los streamea por SSE. Cero race con el JSONL (que sigue
   siendo el audit durable).
-- Control total: lanzar/matar jobs, aprobar gates. Auth por token (env MMORCH_SERVER_TOKEN).
-  Bind a la IP del tailnet (env MMORCH_SERVER_HOST, default 127.0.0.1). EventSource no manda
-  headers -> el token tambien se acepta por ?token=.
+- Control total: lanzar/matar jobs, aprobar gates. Auth por token OBLIGATORIO (env
+  MMORCH_SERVER_TOKEN; sin el, main() rehusa arrancar) y SOLO por header (Authorization:
+  Bearer o X-Token) — nunca query string. El SSE del front va por fetch streaming (que si
+  manda headers), no por EventSource.
 
 SEGURIDAD (decision informada del usuario): control total remoto. El gate humano se ejerce
 remoto-pero-autenticado por tunel PRIVADO (Tailscale). mmorch NO auto-aplica red-zone solo;
@@ -39,6 +40,33 @@ async def home(request):
     return HTMLResponse(_FRONTEND)
 
 
+async def health_handler(request):
+    """GET /health SIN auth: el dead-man's switch de W3.1 (health.report) para
+    monitoreo externo/watchdogs que no tienen el token. 200 = healthy, 503 = algo
+    muerto o con errores recientes. Solo estado operacional, sin secretos."""
+    from starlette.responses import JSONResponse
+    from starlette.concurrency import run_in_threadpool
+    from .health import report
+    from .paths import logs_dir
+
+    def _rep() -> dict:
+        r = report(logs_dir=str(logs_dir()))
+        # estado por PROVEEDOR (AT-20): breakers in-process + errores recientes por
+        # modelo (metrics tail). Sin esto el 503 decia "algo esta mal" sin decir
+        # QUE proveedor — el watchdog no podia distinguir caido de sin-saldo.
+        try:
+            from .metrics import error_rates
+            from .providers import breaker_snapshot
+            r["providers"] = {"breakers": breaker_snapshot(),
+                              "error_rates": error_rates(window_n=200)["by_model"]}
+        except Exception as e:   # observabilidad extra jamas tira el health basico
+            r["providers"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
+        return r
+
+    rep = await run_in_threadpool(_rep)
+    return JSONResponse(rep, status_code=200 if rep.get("healthy") else 503)
+
+
 def _state_snapshot_sync() -> dict:
     """Sync body of state_snapshot: several metrics.jsonl parses + file reads. Run off the
     event loop via run_in_threadpool so concurrent SSE/requests don't wait on it (GIL still
@@ -48,10 +76,28 @@ def _state_snapshot_sync() -> dict:
     from .nodes import sections, conductor
     from .exec_policy import current_policy
     from .budget_policy import load as _bp_load, evaluate as _bp_eval, snapshot as _bp_snap
+    # D3 (Lotus): sin este flag, el cliente no distinguia un interrupted resumible
+    # de uno muerto y comia el 409 de /resume a ciegas. Mismo par de condiciones
+    # que resume_job chequea (spec + checkpoint), leido barato como dos DISTINCT.
+    from .server_core import _RESUME_SAFE
+    try:
+        from . import workflow_store
+        _cp = workflow_store.jobs_with_checkpoints()
+        _sp = workflow_store.jobs_with_specs()
+    except Exception:
+        _cp, _sp = set(), set()
     with _JOBS_LOCK:
         jobs = {k: {"status": v["status"], "kind": v["kind"], "title": v.get("title", ""),
                     "ts": v.get("ts", 0), "host": v.get("host", "local"),
-                    "engine": v.get("engine", ""), "parent": v.get("parent")} for k, v in _JOBS.items()}
+                    "engine": v.get("engine", ""), "parent": v.get("parent"),
+                    # sin esto, un escalate de project-build llega al cliente sin su porqué
+                    # (result/reason/review_branch se guardaban en _JOBS pero no se exponían)
+                    "result": v.get("result"), "review_branch": v.get("review_branch"),
+                    "diffstat": v.get("diffstat"),
+                    # _RESUME_SAFE, no "!= running": un job VIVO en fase ("executor")
+                    # reportaba resumable:true (verificador adversarial W6 r1)
+                    "resumable": k in _cp and k in _sp and v["status"] in _RESUME_SAFE}
+                for k, v in _JOBS.items()}
     return {
         "conductor": conductor(), "sections": sections(), "summary": summary(),
         "error_rates": error_rates(window_n=200), "cache": cache_stats(window_n=200),
@@ -67,6 +113,38 @@ async def state_snapshot(request):
     if not _token_ok(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     return JSONResponse(await run_in_threadpool(_state_snapshot_sync))
+
+
+async def curation_pending(request):
+    """GET /pending — tarjetas + candidatas esperando veredicto humano (Lotus)."""
+    from starlette.responses import JSONResponse
+    from starlette.concurrency import run_in_threadpool
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from mmorch.curation import pending
+    return JSONResponse(await run_in_threadpool(pending))
+
+
+async def curation_verdict(request):
+    """POST /verdict {kind: 'cand'|'card', id, verdict: 'dale'|'no'} — un click
+    de Lotus = un ejemplo GOLD del flywheel (reward al bandit + estados)."""
+    from starlette.responses import JSONResponse
+    from starlette.concurrency import run_in_threadpool
+    if not _token_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    # fuera del try: body no-JSON debe llegar al handler global (400 invalid_input,
+    # D-adv3-1), no al except generico de aca que lo volvia 500
+    body = await request.json()
+    try:
+        kind, vid, verdict = body.get("kind"), body.get("id"), body.get("verdict")
+        if kind not in ("cand", "card") or verdict not in ("dale", "no") or not vid:
+            return JSONResponse({"ok": False, "error": "payload invalido"},
+                                status_code=400)
+        from mmorch.curation import verdict_candidata, verdict_card
+        fn = verdict_candidata if kind == "cand" else verdict_card
+        return JSONResponse(await run_in_threadpool(lambda: fn(vid, verdict)))
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)[:200]}, status_code=500)
 
 
 async def sse_events(request):
@@ -99,12 +177,22 @@ async def run_rubric(request):
     if blocked:
         return blocked
     body = await request.json()
-    task = body.get("task", ""); criteria = body.get("criteria", []); K = int(body.get("K", 5))
+    task = body.get("task", ""); criteria = body.get("criteria", [])
     gm = body.get("gen_model"); jm = body.get("judge_model")
+    # D2 (Lotus): validar el shape ANTES de crear el job. Sin esto, criteria
+    # string/dict devolvia 200 "started" y el crash moria invisible en el thread.
+    from .rubric_loop import validate_criteria
+    try:
+        K = int(body.get("K", 5))
+        validate_criteria(criteria)
+    except (ValueError, TypeError) as e:
+        return JSONResponse({"error": str(e)[:200], "kind": "invalid_input"}, status_code=400)
+    import uuid as _u
+    jid = _u.uuid4().hex[:10]   # generado ACA pa poder devolverlo al cliente (D2)
     t = threading.Thread(target=_run_rubric_job, args=(task, criteria, K, gm, jm),
-                         kwargs={"parent": body.get("parent_id")}, daemon=True)
+                         kwargs={"parent": body.get("parent_id"), "job_id": jid}, daemon=True)
     t.start()
-    return JSONResponse({"started": "rubric", "task": task[:80]})
+    return JSONResponse({"started": "rubric", "job_id": jid, "task": task[:80]})
 
 
 async def run_fanout(request):
@@ -116,10 +204,16 @@ async def run_fanout(request):
         return blocked
     body = await request.json()
     prompts = body.get("prompts", []); gm = body.get("gen_model", "deepseek-chat")
+    # mismo contrato que /run/rubric (D2): shape invalida = 400, no 200 + crash
+    if not isinstance(prompts, list):
+        return JSONResponse({"error": "prompts debe ser una lista de strings",
+                             "kind": "invalid_input"}, status_code=400)
+    import uuid as _u
+    jid = _u.uuid4().hex[:10]
     t = threading.Thread(target=_run_fanout_job, args=(prompts, gm),
-                         kwargs={"parent": body.get("parent_id")}, daemon=True)
+                         kwargs={"parent": body.get("parent_id"), "job_id": jid}, daemon=True)
     t.start()
-    return JSONResponse({"started": "fanout", "n": len(prompts)})
+    return JSONResponse({"started": "fanout", "job_id": jid, "n": len(prompts)})
 
 
 async def projects_handler(request):
@@ -164,12 +258,14 @@ async def run_project(request):
             return JSONResponse(
                 {"error": "exec policy 'sandbox': engine 'claude' has no isolated driver "
                           "(use engine=mmorch for worktree isolation)"}, status_code=403)
+    import uuid as _u
+    jid = _u.uuid4().hex[:10]   # D2 (Lotus): todo /run/* que crea job devuelve su job_id
     t = threading.Thread(target=_run_project_job,
                          args=(project, task, mode, push, engine, target_file, test_cmd, driver),
-                         kwargs={"parent": body.get("parent_id")}, daemon=True)
+                         kwargs={"parent": body.get("parent_id"), "job_id": jid}, daemon=True)
     t.start()
-    return JSONResponse({"started": "project", "project": project, "engine": engine,
-                         "mode": mode, "driver": driver})
+    return JSONResponse({"started": "project", "job_id": jid, "project": project,
+                         "engine": engine, "mode": mode, "driver": driver})
 
 
 async def run_workflow(request):
@@ -596,7 +692,12 @@ async def resume_job(request):
         return JSONResponse({"error": "no checkpoints to resume from"}, status_code=409)
     with _JOBS_LOCK:
         cur = _JOBS.get(jid, {}).get("status")
-    if cur == "running":
+    # allowlist de estados sin thread vivo: "running" Y los estados de fase
+    # ("executor", "gate", ...) son un job corriendo — resumirlos era doble
+    # ejecucion del mismo checkpoint. Job ausente del registro (cur None) =
+    # proceso anterior muerto -> resumible (los gates de spec/checkpoint ya pasaron).
+    from .server_core import _RESUME_SAFE, _TERMINAL
+    if cur is not None and cur not in _RESUME_SAFE and cur not in _TERMINAL:
         return JSONResponse({"error": "job is already running"}, status_code=409)
     kind = spec["kind"]
     data = spec["spec"]
@@ -749,6 +850,17 @@ async def import_handler(request):
 from .server_pty import pty_open, pty_stream, pty_input, pty_resize, pty_close
 
 
+async def _bad_json_body(request, exc):
+    """D-adv3-1: body no-JSON al borde HTTP era un 500 con JSONDecodeError cruda.
+    El contrato del server es 4xx {"error","kind"} para input invalido — un solo
+    handler cubre los 14 `await request.json()` sin tocar cada endpoint.
+    UnicodeDecodeError: json.loads(bytes) la levanta con bytes no decodificables
+    (b"\\x00\\xff..."), mismo defecto, mismo veredicto."""
+    from starlette.responses import JSONResponse
+    return JSONResponse({"error": "body no es JSON valido", "kind": "invalid_input"},
+                        status_code=400)
+
+
 def build_app():
     from starlette.applications import Starlette
     from starlette.routing import Route
@@ -766,9 +878,15 @@ def build_app():
         from starlette.staticfiles import StaticFiles
         from starlette.routing import Mount
         routes_extra.append(Mount("/lotus", StaticFiles(directory=_lotus, html=True), name="lotus"))
-    return Starlette(middleware=middleware, routes=routes_extra + [
+    return Starlette(middleware=middleware,
+                     exception_handlers={json.JSONDecodeError: _bad_json_body,
+                                         UnicodeDecodeError: _bad_json_body},
+                     routes=routes_extra + [
         Route("/", home),
+        Route("/health", health_handler),
         Route("/state", state_snapshot),
+        Route("/pending", curation_pending),
+        Route("/verdict", curation_verdict, methods=["POST"]),
         Route("/events", sse_events),
         Route("/run/rubric", run_rubric, methods=["POST"]),
         Route("/run/fanout", run_fanout, methods=["POST"]),
@@ -808,13 +926,50 @@ def build_app():
     ])
 
 
+def start_health_beats(*, logs_dir: str | None = None,
+                       interval_s: float | None = None) -> threading.Event:
+    """Latido "server" del dead-man's switch (health.EXPECTATIONS): uno
+    inmediato al arrancar + un thread daemon que repite. Default de intervalo
+    = 1/3 del limite declarado, para tolerar 2 latidos perdidos antes de que
+    check() lo declare muerto. Devuelve el Event que frena el loop (seam de
+    los tests; en produccion nadie lo setea y el daemon muere con el proceso)."""
+    from .health import beat, EXPECTATIONS
+    from .paths import logs_dir as _logs_dir
+    ldir = logs_dir if logs_dir is not None else str(_logs_dir())
+    every = interval_s if interval_s is not None else EXPECTATIONS["server"] / 3
+    beat("server", logs_dir=ldir, detail="startup")
+    stop = threading.Event()
+
+    def _loop() -> None:
+        while not stop.wait(every):
+            beat("server", logs_dir=ldir, detail="alive")
+
+    threading.Thread(target=_loop, daemon=True, name="mmorch-health-beat").start()
+    return stop
+
+
 def main():
     import uvicorn
+    # Token OBLIGATORIO: sin auth el server no arranca (no existe "modo dev";
+    # un server de control total sin token es una puerta abierta al tailnet).
+    if not os.getenv("MMORCH_SERVER_TOKEN"):
+        raise SystemExit(
+            "MMORCH_SERVER_TOKEN es obligatorio y no esta seteado.\n"
+            "El server rehusa arrancar sin auth. Setealo en el entorno, ej:\n"
+            '  $env:MMORCH_SERVER_TOKEN = "un-secreto-largo"; python -m mmorch.server\n'
+            "El token viaja SOLO por header (Authorization: Bearer <tok> o X-Token).")
     host = os.getenv("MMORCH_SERVER_HOST", "127.0.0.1")
     port = int(os.getenv("MMORCH_SERVER_PORT", "8787"))
-    if not os.getenv("MMORCH_SERVER_TOKEN"):
-        print("WARN: MMORCH_SERVER_TOKEN no seteado -> sin auth. Bindeá a localhost/tailnet.")
-    print(f"mmorch live -> http://{host}:{port}  (token {'ON' if os.getenv('MMORCH_SERVER_TOKEN') else 'OFF'})")
+    from .server_core import load_interrupted_jobs
+    interrupted = load_interrupted_jobs()
+    if interrupted:
+        print(f"jobs del proceso anterior recuperados como interrupted: {', '.join(interrupted)}")
+    start_health_beats()
+    # dead-man visible (W4.4): el server suele ser el proceso que SI arranca
+    # cada dia — si el nightly esta vencido, que lo grite este arranque
+    from .health import nightly_watchdog
+    nightly_watchdog()
+    print(f"mmorch live -> http://{host}:{port}  (token ON, solo header)")
     uvicorn.run(build_app(), host=host, port=port, log_level="warning")
 
 

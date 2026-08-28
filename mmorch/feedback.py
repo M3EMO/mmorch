@@ -23,9 +23,14 @@ from .iohelpers import atomic_write_json, load_json_tolerant, read_jsonl_cached
 
 _log = logging.getLogger(__name__)
 
-ROOT = Path(__file__).resolve().parent.parent
-_FEEDBACK_LOG = ROOT / "logs" / "feedback.jsonl"
-_BANDIT_STATE = ROOT / "logs" / "bandit_state.json"
+from .paths import logs_dir
+
+_FEEDBACK_LOG = logs_dir() / "feedback.jsonl"
+# W4.3: UN solo estado de bandit. El estado plano previo era zombie — la via MCP lo
+# escribia pero nadie lo leia para decidir, y feedback_stats lo reportaba como "el
+# bandit". El default ahora es el sig-bandit real (el que consumen intuition/route/
+# nightly); intuition importa este path (una sola definicion).
+_SIG_BANDIT = logs_dir() / "bandit_sig.json"
 
 
 @dataclass
@@ -37,14 +42,25 @@ class Outcome:
     predicted_conf: float | None = None  # lo que el sistema creia (para calibracion)
     source: str = ""    # test|opus|human|downstream (de donde sale el label)
     context: str = ""   # scope/task opcional
+    # W5.3 (research 08): version EXACTA del modelo que produjo el outcome, tal como
+    # viaja en la respuesta del provider (CallResult.model_version). El arm es la key
+    # INTERNA estable ("deepseek-chat"); cuando el provider rota la version detras de
+    # esa key, este campo permite invalidar/segmentar los priors del bandit.
+    model_version: str = ""
 
 
 def record_outcome(arm: str, reward: float, *, pattern: str = "",
                    predicted_conf: float | None = None, source: str = "",
-                   context: str = "", path: Path = _FEEDBACK_LOG) -> Outcome:
-    """Registra un outcome etiquetado (append-only). reward se clampa a [0,1]."""
+                   context: str = "", model_version: str = "",
+                   path: Path = _FEEDBACK_LOG) -> Outcome:
+    """Registra un outcome etiquetado (append-only). reward y predicted_conf se
+    clampan a [0,1] al ESCRIBIR — antes solo se clampaban al leer (reliability_bins/
+    calibration) y el log podia acumular valores fuera de rango (W5.1, hueco #6)."""
+    if predicted_conf is not None:
+        predicted_conf = max(0.0, min(1.0, float(predicted_conf)))
     o = Outcome(ts=time.time(), arm=arm, reward=max(0.0, min(1.0, float(reward))),
-                pattern=pattern, predicted_conf=predicted_conf, source=source, context=context)
+                pattern=pattern, predicted_conf=predicted_conf, source=source,
+                context=context, model_version=model_version)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(asdict(o), ensure_ascii=False) + "\n")
@@ -87,7 +103,7 @@ class ThompsonBandit:
     posterior Beta(alpha, beta); select muestrea cada brazo y elige el max; update
     suma reward a alpha y (1-reward) a beta. Anda desde la PRIMERA muestra."""
 
-    def __init__(self, path: Path = _BANDIT_STATE):
+    def __init__(self, path: Path = _SIG_BANDIT):
         self.path = path
         self._arms: dict[str, list[float]] = {}
         if path.exists():

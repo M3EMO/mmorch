@@ -1,1 +1,0 @@
-You are a Python programmer. Output ONLY the function source code in a python code block, no explanation. Handle edge cases: overlapping intervals, integer division truncating toward zero, scoring ties, non-square matrices. Use defensive checks, avoid assumptions about input shape or value ranges.

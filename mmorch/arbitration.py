@@ -13,8 +13,9 @@ import json
 import pathlib
 import time
 
-_ROOT = pathlib.Path(__file__).resolve().parents[1]
-_LOG = _ROOT / "logs" / "arbitrations.jsonl"
+from .paths import logs_dir
+
+_LOG = logs_dir() / "arbitrations.jsonl"
 
 VERDICTS = ("valid", "partial", "dismissed")
 

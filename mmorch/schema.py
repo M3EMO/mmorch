@@ -93,6 +93,7 @@ def gated_json(
     node: str = "gen",
     phase: str = "",
     temperature: float = 0.0,
+    timeout: float = 60.0,
 ) -> dict:
     """Llama al modelo y EXIGE JSON valido contra `schema`. Reintenta con el error
     como feedback. Tira SchemaGateError si se agotan los reintentos. Devuelve el dict
@@ -101,8 +102,11 @@ def gated_json(
     last_err = "?"
     total_cost = 0.0
     for attempt in range(max_retries + 1):
+        # timeout explicito: 60s no alcanza para un modelo de razonamiento con un
+        # diff grande — medido 2026-08-26, 3 de 5 corridas de medicion murieron por
+        # APITimeoutError y el resultado quedaba inflado por el fail-open
         res = call(model, msgs, pattern=pattern, node=f"{node}#{attempt}",
-                   phase=phase, temperature=temperature)
+                   phase=phase, temperature=temperature, timeout=timeout)
         total_cost += getattr(res, "cost_usd", 0.0)
         data = extract_json(res.text)
         if data is None:

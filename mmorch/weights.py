@@ -11,7 +11,13 @@ import hashlib
 import json
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+from .paths import repo_root
+
+# Los pesos .npz + manifest estan COMMITTEADOS: viajan con el codigo, no con el
+# estado. Anclarlos a home() rompia bajo MMORCH_HOME aislado (manifest "ausente"
+# en un home fresco — hermeticidad AT-16/D5) sin ganar nada: nadie escribe pesos
+# en el home.
+ROOT = repo_root()
 MANIFEST = ROOT / "weights" / "manifest.json"
 
 

@@ -39,8 +39,15 @@ def test_fanout_emits_events(monkeypatch):
 
 
 # ---- server ------------------------------------------------------------------
+H = {"X-Token": "secret"}
+
+
 def _client(monkeypatch, token="secret"):
     monkeypatch.setenv("MMORCH_SERVER_TOKEN", token)
+    # MMORCH_HOME aislado: los jobs se espejan en logs/jobs.jsonl (W3.2) y los
+    # tests no deben ensuciar el registro durable real del repo
+    import tempfile
+    monkeypatch.setenv("MMORCH_HOME", tempfile.mkdtemp())
     import importlib, mmorch.server as S
     importlib.reload(S)
     return S, TestClient(S.build_app())
@@ -49,7 +56,9 @@ def _client(monkeypatch, token="secret"):
 def test_state_requires_token(monkeypatch):
     S, c = _client(monkeypatch)
     assert c.get("/state").status_code == 401
-    assert c.get("/state?token=secret").status_code == 200
+    # W3.2: el token por query string ya NO autentica (solo header)
+    assert c.get("/state?token=secret").status_code == 401
+    assert c.get("/state", headers=H).status_code == 200
 
 
 def test_state_payload_shape(monkeypatch):
@@ -84,8 +93,102 @@ def test_run_rubric_auth_and_executes(monkeypatch):
     assert ok, "el job rubric deberia emitir job/done"
 
 
+# ---- W6 D2 (Lotus): shape invalida = 400 ANTES de crear el job + job_id -------
+def test_run_rubric_criteria_shape_invalida_400(monkeypatch):
+    """Antes: criteria string/dict/[1,2,3] devolvia 200 'started' y el crash
+    (start_rubric sobre un no-list) moria invisible en el worker thread."""
+    S, c = _client(monkeypatch)
+    for bad in ({"a": 1}, "no-una-lista", [1, 2, 3], [{"desc": "sin id"}]):
+        r = c.post("/run/rubric", headers=H, json={"task": "t", "criteria": bad})
+        assert r.status_code == 400, f"criteria={bad!r} deberia dar 400"
+        j = r.json()
+        assert j["kind"] == "invalid_input" and j["error"]
+
+
+def test_run_endpoints_devuelven_job_id(monkeypatch):
+    """D2 Lotus: todo /run/* que crea job devuelve su job_id (sin el, el cliente
+    no puede matar/pausar/seguir el job que acaba de lanzar)."""
+    S, c = _client(monkeypatch)
+    fake = lambda *a, **k: type("R", (), {"text": "ok", "cost_usd": 0.0,   # noqa: E731
+                                          "in_tokens": 1, "out_tokens": 1})()
+    monkeypatch.setattr(PROV, "call", fake)
+    monkeypatch.setattr(PAT, "call", fake)   # fan_out importa call por nombre
+    r = c.post("/run/rubric", headers=H, json={"task": "t", "criteria": [], "K": 1})
+    assert r.status_code == 200 and r.json()["job_id"]
+    r = c.post("/run/fanout", headers=H, json={"prompts": ["a"]})
+    assert r.status_code == 200 and r.json()["job_id"]
+    # fanout con prompts no-lista -> mismo contrato 400
+    r = c.post("/run/fanout", headers=H, json={"prompts": "hola"})
+    assert r.status_code == 400 and r.json()["kind"] == "invalid_input"
+
+
+# ---- W6 D3 (Lotus): /state expone si un job interrumpido es resumible ---------
+def test_state_expone_resumable(monkeypatch):
+    """Sin el flag, el cliente comia el 409 de /resume a ciegas: no podia saber
+    si un interrupted tenia checkpoint+spec (lo mismo que resume_job chequea)."""
+    S, c = _client(monkeypatch)
+    import mmorch.workflow_store as WS
+    monkeypatch.setattr(WS, "jobs_with_checkpoints", lambda: {"jr1"})
+    monkeypatch.setattr(WS, "jobs_with_specs", lambda: {"jr1"})
+    from mmorch.server_core import _JOBS, _JOBS_LOCK
+    with _JOBS_LOCK:
+        _JOBS["jr1"] = {"status": "interrupted", "kind": "rubric"}
+        _JOBS["jr2"] = {"status": "interrupted", "kind": "rubric"}   # sin checkpoint
+    try:
+        jobs = c.get("/state", headers=H).json()["jobs"]
+        assert jobs["jr1"]["resumable"] is True
+        assert jobs["jr2"]["resumable"] is False
+    finally:
+        with _JOBS_LOCK:
+            _JOBS.pop("jr1", None); _JOBS.pop("jr2", None)
+
+
 def test_approve_emits_gate(monkeypatch):
     S, c = _client(monkeypatch)
     r = c.post("/approve/abc123", headers={"X-Token": "secret"})
     assert r.status_code == 200 and r.json()["approved"] == "abc123"
     assert any(e.detail.startswith("APROBADO") for e in S.bus().recent(20))
+
+
+# ---- guardas de metodo: los mutantes que invertian GET/POST sobrevivian ------
+def test_projects_get_lista_y_post_registra(monkeypatch, tmp_path):
+    """El mismo path sirve dos cosas segun el metodo. Sin cubrir LAS DOS ramas,
+    invertir la condicion (== POST -> != POST) pasaba desapercibido."""
+    S, c = _client(monkeypatch)
+    r = c.get("/projects", headers=H)
+    assert r.status_code == 200 and "projects" in r.json()
+
+    registrado = {}
+    import mmorch.projects as P
+    monkeypatch.setattr(P, "register",
+                        lambda name, path: registrado.setdefault(name, path) or True)
+    r = c.post("/projects", headers=H,
+               json={"name": "demo", "path": str(tmp_path)})
+    assert r.status_code == 200 and "registered" in r.json()
+    assert registrado == {"demo": str(tmp_path)}
+
+
+def test_gate_get_sin_gate_es_404_y_post_lo_crea(monkeypatch):
+    S, c = _client(monkeypatch)
+    assert c.get("/jobs/nada/gate", headers=H).status_code == 404
+    r = c.post("/jobs/j1/gate", headers=H,
+               json={"policy": {"stages": [{"name": "s1"}]}})
+    assert r.status_code == 200
+    assert c.get("/jobs/j1/gate", headers=H).status_code == 200
+
+
+def test_budget_policies_get_lee_y_post_guarda(monkeypatch):
+    S, c = _client(monkeypatch)
+    import mmorch.budget_policy as BP
+    guardado = []
+    monkeypatch.setattr(BP, "save", lambda pols: guardado.append(pols))
+    monkeypatch.setattr(BP, "load", lambda: [{"name": "cap"}])
+    monkeypatch.setattr(BP, "snapshot", lambda: {"usd": 0.0})
+    monkeypatch.setattr(BP, "evaluate", lambda pols, snap: [])
+
+    j = c.get("/budget/policies", headers=H).json()
+    assert j["policies"] == [{"name": "cap"}] and "snapshot" in j
+    assert not guardado                       # un GET jamas debe escribir
+
+    r = c.post("/budget/policies", headers=H, json={"policies": [{"name": "x"}]})
+    assert r.json() == {"saved": 1} and guardado == [[{"name": "x"}]]

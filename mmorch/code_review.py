@@ -11,6 +11,7 @@ Library fn (`review`) with injectable `find`/`refute` so the self-check runs wit
 from __future__ import annotations
 
 import json
+import re
 
 from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER, family_of
 from .providers import call
@@ -89,6 +90,54 @@ def review(code: str, *, path: str = "", gen_model: str = DEFAULT_GENERATOR,
     confirmed = refute(raw) if raw else []
     return {"path": path, "findings": confirmed, "n_raw": len(raw),
             "n_confirmed": len(confirmed), "dropped": len(raw) - len(confirmed)}
+
+
+# audit 2026-07 (movido del wrapper MCP en W5.1): patrones de archivo que NUNCA deben
+# salir a una API externa, aunque el caller ya podia leerlos con Read — el limite real
+# es "sale de la maquina", no "se puede leer". W5.1 suma id_rsa/.pem/.pfx/.p12 (hueco #8).
+_SECRET_NAME_RX = re.compile(
+    r"(^|[/\\])(\.env(\..+)?|credentials\.json|token\.json|id_rsa[^/\\]*"
+    r"|.*\.(key|pem|pfx|p12)|.*secret.*|.*password.*)$", re.I)
+
+# hueco #8 (contenido, no solo nombre): `code=` inline con secretos pegados salia a la
+# API sin scan. Firmas de alta precision (bloques PEM + prefijos de token conocidos);
+# no pretende ser un scanner completo, solo cerrar los casos obvios y baratos.
+_SECRET_CONTENT_RX = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|\bAKIA[0-9A-Z]{16}\b"           # AWS access key id
+    r"|\bghp_[A-Za-z0-9]{30,}\b"       # GitHub PAT
+    r"|\bsk-[A-Za-z0-9_-]{20,}\b")     # OpenAI/Anthropic-style API key
+
+
+def review_source(code: str = "", path: str = "", *, gen_model: str = DEFAULT_GENERATOR,
+                  verifier_model: str = DEFAULT_VERIFIER, find=None, refute=None) -> dict:
+    """Puerta unica de review para callers de borde (MCP/CLI): valida y ENTONCES revisa.
+    `code` inline O `path` en disco (path solo se usa si code viene vacio). Levanta
+    ValueError si el input parece contener secretos (nombre de archivo o contenido) o
+    si no hay codigo — el contenido va a una API EXTERNA, la validacion vive aca en la
+    libreria y no en cada wrapper (W5.1: una sola semantica)."""
+    if path and _SECRET_NAME_RX.search(path):
+        raise ValueError(f"refused: '{path}' looks like a secrets file — "
+                         "review sends content to an EXTERNAL API")
+    if path and not code:
+        with open(path, encoding="utf-8") as fh:
+            code = fh.read()
+    if not code.strip():
+        raise ValueError("no code provided (pass code= or path=)")
+    if _SECRET_CONTENT_RX.search(code):
+        raise ValueError("refused: the code contains what looks like a credential "
+                         "(private key / API token) — review sends content to an EXTERNAL API")
+    # hueco ronda 2 (D2): los prefijos de arriba no cazan una clave ASIGNADA sin firma
+    # conocida (AWS_SECRET_ACCESS_KEY = "wJal..." salia a la API). Reusar el detector de
+    # evolve (identificador de credencial + VALOR con entropia/forma de clave) — el MISMO
+    # semaforo del sistema, no un scanner nuevo; su filtro de valor ya evita el falso
+    # rojo de fixtures con "password" suelto.
+    from mmorch.evolve import _secret_hits
+    if _secret_hits(code):
+        raise ValueError("refused: the code contains what looks like an assigned "
+                         "credential value — review sends content to an EXTERNAL API")
+    return review(code, path=path, gen_model=gen_model, verifier_model=verifier_model,
+                  find=find, refute=refute)
 
 
 if __name__ == "__main__":

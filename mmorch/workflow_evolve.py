@@ -27,7 +27,9 @@ from pathlib import Path
 from .feedback import ThompsonBandit
 from .workflow_race import _WF_BANDIT, VARIANTS
 
-_POP_PATH = Path(__file__).resolve().parents[1] / "logs" / "workflow_population.json"
+from .paths import logs_dir
+
+_POP_PATH = logs_dir() / "workflow_population.json"
 
 MIN_POP, MAX_POP = 3, 6
 #          knob            (min, max, paso de mutacion)

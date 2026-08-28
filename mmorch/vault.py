@@ -10,12 +10,25 @@ import re
 from datetime import date
 from pathlib import Path
 
-VAULT = Path(__file__).resolve().parent.parent / "vault"
+from .paths import home
+
+VAULT = home() / "vault"
 
 
 def _slug(s: str) -> str:
     s = re.sub(r"[^\w\s-]", "", s.lower()).strip()
     return re.sub(r"[\s_]+", "-", s)[:60] or "nota"
+
+
+def _safe_folder(folder: str) -> Path:
+    """Clamp del param `folder` (expuesto por la tool MCP mmorch_vault_write): sin esto,
+    '../..' escribia FUERA del vault y hasta fuera de MMORCH_HOME (path traversal, W6).
+    Lee VAULT del modulo en runtime pa respetar el monkeypatch de los tests."""
+    base = Path(VAULT).resolve()
+    d = (base / str(folder)).resolve()
+    if d != base and base not in d.parents:
+        raise ValueError(f"folder invalido (escapa del vault): {folder!r}")
+    return d
 
 
 def write_note(folder: str, title: str, body: str, *, frontmatter: dict | None = None) -> Path:
@@ -37,11 +50,12 @@ def write_note(folder: str, title: str, body: str, *, frontmatter: dict | None =
     text = "\n".join(lines) + body.strip() + "\n"
 
     slug = _slug(title)
-    p = VAULT / folder / f"{slug}.md"
+    d = _safe_folder(folder)
+    p = d / f"{slug}.md"
     p.parent.mkdir(parents=True, exist_ok=True)
     if p.exists() and p.read_text(encoding="utf-8") != text:
         n = 2
-        while (cand := VAULT / folder / f"{slug}-{n}.md").exists() and cand.read_text(encoding="utf-8") != text:
+        while (cand := d / f"{slug}-{n}.md").exists() and cand.read_text(encoding="utf-8") != text:
             n += 1
         p = cand
         log_op("overwrite_avoided", f"{title} -> {p.name} (colision de slug)")
@@ -52,7 +66,7 @@ def write_note(folder: str, title: str, body: str, *, frontmatter: dict | None =
 def read_notes(folder: str) -> list[dict]:
     """Lee notas de una carpeta. Devuelve [{path, title, frontmatter, body}]."""
     out: list = []
-    d = VAULT / folder
+    d = _safe_folder(folder)
     if not d.exists():
         return out
     for p in sorted(d.glob("*.md")):
@@ -148,6 +162,47 @@ def write_validated(title: str, body: str, *, project: str, folder: str = 'resea
         except Exception:
             pass  # side-channel (cola babel): su fallo nunca rompe el write
     return p
+
+
+def write_research_note(title: str, body: str, *, project: str, folder: str = "research",
+                        status: str = "seed", confidence: str = "", sources: str = "",
+                        tags: str = "") -> tuple[Path, Path]:
+    """Puerta de ALTO nivel para callers de borde (MCP/CLI): arma el frontmatter desde
+    strings CSV, escribe la nota validada, puentea un gist a memoria (scope global) y
+    dispara babel ingest async. Antes esta orquestacion vivia en el wrapper MCP (W5.1:
+    la logica va en la libreria, el wrapper solo adapta tipos). Devuelve (nota, moc)."""
+    import threading
+
+    fm: dict = {"status": status or "seed"}
+    if confidence:
+        fm["confidence"] = confidence
+    if sources:
+        fm["sources"] = [s.strip() for s in sources.split(",") if s.strip()]
+    extra = [t.strip() for t in (tags or "").split(",") if t.strip()]
+    fm["tags"] = ["research", project] + [t for t in extra if t != project]
+
+    def _bridge(gist: str) -> None:
+        # decision 09: gist textual a duckdb scope global; el recall existente lo
+        # encuentra y la sesion lee la nota completa por path. Import lazy: vault no
+        # debe depender duro de memory (y remember gasta una call barata de destilado).
+        from .memory import remember
+        remember("global", gist, kind="vault_note")
+
+    def _babel_async(path: Path) -> None:
+        # decision 03 pedia cola del server; thread daemon = mismo efecto async sin
+        # endpoint nuevo. El nightly barre notas sin babel: perder el thread no pierde nada.
+        def _run() -> None:
+            try:
+                from .babel import ingest
+                ingest(path, folder=folder)
+            except Exception:
+                pass  # side-channel: el gate/nightly deciden, jamas romper el write
+        threading.Thread(target=_run, daemon=True).start()
+
+    p = write_validated(title, body, project=project, folder=folder,
+                        frontmatter=fm, remember_fn=_bridge,
+                        enqueue_babel_fn=_babel_async)
+    return p, VAULT / "moc" / f"{project}.md"
 
 
 def regenerate_moc(project: str) -> Path:

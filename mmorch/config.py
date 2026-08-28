@@ -167,7 +167,9 @@ DEFAULT_INTUITION_POOL = ["deepseek-chat", "deepseek-v4-pro", "gemini-2.5-flash"
 
 
 def family_of(model_key: str) -> str:
-    return REGISTRY[model_key].family
+    # via spec() y no REGISTRY[...] directo: un modelo desconocido debe fallar con la
+    # lista de modelos validos, no con un KeyError pelado (W5.1, huecos de borde #5)
+    return spec(model_key).family
 
 
 def spec(model_key: str) -> ModelSpec:

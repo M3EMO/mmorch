@@ -37,3 +37,8 @@ flywheel/func.log
 .beads-credential-key
 
 .ua/
+training/
+
+.pytest-tmp/
+.pytest-tmp*/
+.pytest-*/

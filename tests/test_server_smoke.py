@@ -20,6 +20,7 @@ from mmorch.server import build_app
 # in the same commit — that makes the contract change explicit and reviewable.
 EXPECTED_ROUTES = {
     "/": "GET,HEAD",
+    "/health": "GET,HEAD",
     "/state": "GET,HEAD",
     "/events": "GET,HEAD",
     "/run/rubric": "POST",
@@ -45,6 +46,8 @@ EXPECTED_ROUTES = {
     "/jobs/{job_id}/gate/advance": "POST",
     "/budget/policies": "GET,HEAD,POST",
     "/feedback": "POST",
+    "/pending": "GET,HEAD",
+    "/verdict": "POST",
     "/export": "GET,HEAD",
     "/import": "POST",
     "/pty/open": "POST",

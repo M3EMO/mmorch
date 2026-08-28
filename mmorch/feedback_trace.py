@@ -19,8 +19,9 @@ import re
 import time
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parent.parent
-_TRACES = Path(os.getenv("MMORCH_FEEDBACK_TRACES") or (_ROOT / "logs" / "feedback_traces.jsonl"))
+from .paths import logs_dir
+
+_TRACES = Path(os.getenv("MMORCH_FEEDBACK_TRACES") or (logs_dir() / "feedback_traces.jsonl"))
 
 # Conservative: only well-shaped secrets/PII, to avoid mangling legit content (e.g. real hashes).
 _REDACTORS = [

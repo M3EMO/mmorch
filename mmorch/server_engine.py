@@ -28,10 +28,16 @@ def _rubric_drive(jid: str, state: dict, cancel: threading.Event):
         return _c
     gen_fn, judge_fn = fn(state["gen_model"]), fn(state["judge_model"])
     step = len(workflow_store.checkpoint_history(jid))      # continue numbering on resume
+    # final explicito: antes una excepcion (p.ej. BudgetExceeded) dejaba el status
+    # en la FASE del momento ("executor") — el job muerto era indistinguible de uno
+    # vivo para el cliente, y el guard de resume ("running") lo dejaba re-lanzar
+    # doble (medido por el verificador adversarial W6 r1).
+    final: str | None = None
     try:
         while True:
             if cancel.is_set():
                 emit("job", "error", job_id=jid, detail="cancelado por el usuario")
+                final = "error"
                 break
             act = next_action(state)
             if act["role"] in ("done", "escalate"):
@@ -58,15 +64,20 @@ def _rubric_drive(jid: str, state: dict, cancel: threading.Event):
                 emit("job", "warn", job_id=jid, detail=f"spec no persistido: {str(e)[:150]}")
     except Exception as e:
         emit("job", "error", job_id=jid, detail=str(e)[:200])
+        final = "error"
     with _JOBS_LOCK:
         if jid in _JOBS:
-            _JOBS[jid]["status"] = state.get("phase", "done")
+            _JOBS[jid]["status"] = final or state.get("phase", "done")
 
 
-def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model, parent=None):
+def _run_rubric_job(task: str, criteria: list, K: int, gen_model, judge_model, parent=None,
+                    job_id: str | None = None):
     from .rubric_loop import start_rubric
     from . import workflow_store
     state = start_rubric(task, criteria, K=K, gen_model=gen_model, judge_model=judge_model)
+    if job_id:
+        # D2 (Lotus): el handler ya devolvio este id al cliente — el estado lo adopta
+        state["id"] = job_id
     jid = state["id"]
     cancel = threading.Event()
     with _JOBS_LOCK:
@@ -238,13 +249,13 @@ def _run_workflow_job(jid: str, spec: dict, task: str, project=None, apply=False
 
 def _run_project_job(project: str, task: str, mode: str, push: bool = False,
                      engine: str = "mmorch", target_file: str = "", test_cmd: str | None = None,
-                     driver: str = "local", parent=None):
+                     driver: str = "local", parent=None, job_id: str | None = None):
     """Job project-aware. engine PRIMARIO = 'mmorch' (DeepSeek genera + tests verifican +
     aplica determinista, cero cupo; escala a claude -p si no puede). engine='claude' =
     claude -p directo (plan/cupo) — para tareas abiertas que mmorch no banca.
     driver='worktree' (G3 sandbox) = corre en un git worktree desechable -> review branch."""
     import uuid as _u
-    jid = _u.uuid4().hex[:10]
+    jid = job_id or _u.uuid4().hex[:10]   # D2 (Lotus): id acordado con el handler
     with _JOBS_LOCK:
         _JOBS[jid] = _jobmeta("project", task, engine=engine, parent=parent, driver=driver)
     if engine == "mmorch" and target_file and driver == "local":
@@ -279,11 +290,10 @@ def _run_project_job(project: str, task: str, mode: str, push: bool = False,
             ok = r.ok
         else:   # engine == claude: claude -p directo (cupo)
             from .projects import resolve
-            from .claude_exec import run_claude
+            from .claude_exec import get_executor
             cwd = resolve(project)
             emit("job", "running", job_id=jid, detail=f"claude {project} [{mode}]: {task[:70]}")
-            res = run_claude(task, cwd, mode=mode, job_id=jid)
-            ok = bool(res.get("ok"))
+            ok = get_executor().run(task, cwd, mode=mode, job_id=jid).ok
             if ok and mode == "edit" and push:
                 from .sync import commit_push
                 commit_push(cwd, f"mmorch(claude): {task[:64]}", job_id=jid)
@@ -392,9 +402,9 @@ def _run_project_build_job(jid: str, task: str, project: str, external_test: str
                 wt.close(keep_branch=True)          # review branch survives for merge
 
 
-def _run_fanout_job(prompts: list, gen_model: str, parent=None):
+def _run_fanout_job(prompts: list, gen_model: str, parent=None, job_id: str | None = None):
     from .patterns import fan_out
-    jid = uuid.uuid4().hex[:10]
+    jid = job_id or uuid.uuid4().hex[:10]   # D2 (Lotus): id acordado con el handler
     with _JOBS_LOCK:
         _JOBS[jid] = _jobmeta("fanout", f"fan_out x{len(prompts)}", parent=parent)
     emit("job", "running", job_id=jid, detail=f"fan_out x{len(prompts)}")
