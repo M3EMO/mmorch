@@ -627,16 +627,21 @@ async def reap_zombies(request):
             emit("job", "error", job_id=z["id"],
                  detail=f"zombie reaped: no heartbeat for {z['age']}s")
     # Phase A: the sweep also GCs orphan blocks + flags which reaped jobs are resumable.
-    gc, resumable = {}, []
+    gc = {}
+    resumable = []
     try:
         from . import workflow_store
         gc = workflow_store.gc_blocks(dry_run=dry)
+    except Exception as e:
+        gc = {"error": str(e)[:120]}
+    try:
+        from . import workflow_store
         cp_jobs = workflow_store.jobs_with_checkpoints()
         # a zombie with a checkpoint trail can be resumed from its last step instead of staying dead
         ids = [z["id"] for z in (reaped if not dry else zombies)]
         resumable = [jid for jid in ids if jid in cp_jobs]
     except Exception as e:
-        gc = {"error": str(e)[:120]}
+        resumable = []
     return JSONResponse({"now": now, "ttl": durable_runs.default_ttl() if ttl is None else ttl,
                          "dry": dry, "zombies": zombies, "reaped": [r["id"] for r in reaped],
                          "gc": gc, "resumable": resumable})
