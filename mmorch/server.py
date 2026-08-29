@@ -478,6 +478,16 @@ async def feedback_handler(request):
     vote = body.get("vote", "")
     if vote not in ("up", "down"):
         return JSONResponse({"error": "vote must be up|down"}, status_code=400)
+    # Validate consent against an allowlist (security: don't store invalid data)
+    consent = body.get("consent", "local_only")
+    if consent not in ("local_only", "share"):
+        return JSONResponse({"error": "consent must be local_only|share"}, status_code=400)
+    # Validate comment length (security: prevent unbounded storage)
+    comment = body.get("comment", "")
+    if not isinstance(comment, str):
+        return JSONResponse({"error": "comment must be a string"}, status_code=400)
+    if len(comment) > 2000:
+        return JSONResponse({"error": "comment too long (max 2000 chars)"}, status_code=400)
     from . import feedback_trace
     from .transcript_store import get as _tget
     arm, ctx = "", ""
@@ -487,8 +497,8 @@ async def feedback_handler(request):
         arm = j.get("engine") or ""
         ctx = j.get("title") or ""
     bundle = feedback_trace.record_vote(
-        job_id, vote, arm=arm, comment=body.get("comment", ""), context=ctx,
-        transcript=_tget(job_id), consent=body.get("consent", "local_only"))
+        job_id, vote, arm=arm, comment=comment, context=ctx,
+        transcript=_tget(job_id), consent=consent)
     emit("feedback", "info", job_id=job_id, detail=f"{vote} ({arm or 'no-arm'})")
     return JSONResponse({"recorded": True, "vote": vote, "arm": arm, "consent": bundle["consent"]})
 
