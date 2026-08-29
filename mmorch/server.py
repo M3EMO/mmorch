@@ -387,7 +387,11 @@ async def chat_history(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     from . import chat_store
     before = request.query_params.get("before")
-    limit = int(request.query_params.get("limit", 30))
+    try:
+        limit = int(request.query_params.get("limit", 30))
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "limit debe ser un entero", "kind": "invalid_input"},
+                            status_code=400)
     return JSONResponse(chat_store.history(before, limit))
 
 
