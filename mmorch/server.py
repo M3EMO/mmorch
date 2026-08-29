@@ -660,6 +660,22 @@ async def reap_zombies(request):
                          "gc": gc, "resumable": resumable})
 
 
+def _safe_project_target(project: str, target_file: str) -> str | None:
+    """Validate that target_file resolves to a path inside the project root.
+    Returns the absolute path if safe, None otherwise."""
+    import os as _os
+    from .projects import resolve
+    try:
+        project_root = _os.path.realpath(resolve(project))
+        target_abs = _os.path.realpath(_os.path.join(project_root, target_file))
+        # commonpath raises ValueError if paths are on different drives (Windows)
+        if _os.path.commonpath([project_root, target_abs]) != project_root:
+            return None
+        return target_abs
+    except Exception:
+        return None
+
+
 def _resume_project(jid: str, data: dict, remaining: int):
     """Re-dispatch an interrupted project job from its last checkpoint (Phase B)."""
     from . import workflow_store
@@ -673,8 +689,16 @@ def _resume_project(jid: str, data: dict, remaining: int):
             blk = workflow_store.get_block(latest["outputs"][-1])
             if blk and blk.get("body"):
                 import os as _os
-                fp = _os.path.join(resolve(data["project"]), data["target_file"])
-                with open(fp, "w", encoding="utf-8") as f:
+                # SECURITY: validate target_file is inside the project root before writing
+                target_abs = _safe_project_target(data["project"], data["target_file"])
+                if target_abs is None:
+                    emit("job", "error", job_id=jid,
+                         detail=f"target_file fuera del proyecto: {data['target_file']}")
+                    with _JOBS_LOCK:
+                        if jid in _JOBS:
+                            _JOBS[jid]["status"] = "error"
+                    return
+                with open(target_abs, "w", encoding="utf-8") as f:
                     f.write(blk["body"] + ("\n" if not blk["body"].endswith("\n") else ""))
     except Exception:
         pass
