@@ -540,7 +540,11 @@ async def gate_advance(request):
         st = _GATES.get(jid)
     if not st:
         return JSONResponse({"error": "no gate"}, status_code=404)
-    nxt = advance(st, body.get("action", "approve"), body.get("actor", ""), body.get("comment", ""))
+    actor = body.get("actor", "")
+    if not actor or not actor.strip():
+        return JSONResponse({"error": "actor es obligatorio (quien aprueba/cambia/rechaza)"},
+                            status_code=400)
+    nxt = advance(st, body.get("action", "approve"), actor.strip(), body.get("comment", ""))
     if nxt.get("error"):
         return JSONResponse({"error": nxt["error"]}, status_code=400)
     with _JOBS_LOCK:
