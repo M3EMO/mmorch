@@ -1,5 +1,8 @@
 # 00 — Matriz canónica de producto (consolidado Research)
 
+**Snapshot, not SSOT** (2026-08-27). Do not sync this file forward; see
+`docs/production-readiness/README.md` and `docs/SOURCES.md`.
+
 Fecha: 2026-08-27 · Consolidado de 01-architecture-map, 02-interface-contracts,
 03-quality-gates-tests, 04-self-evolution-state, 05-known-defects-backlog,
 06-cursor-standalone-research. HEAD `90f18e9`. Evidencia en `file:line`.

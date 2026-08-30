@@ -1,7 +1,7 @@
-"""Gates estaticos en un solo comando: ruff + mypy + grep-gate de paths.
+"""Gates estaticos en un solo comando: ruff + mypy + grep-gate de paths + docs SSOT.
 
 Uso: .venv/Scripts/python.exe scripts/gates.py
-Sale 0 solo si los TRES pasan — el mismo criterio que el hook pre-commit,
+Sale 0 solo si todos pasan — el mismo criterio que el hook pre-commit,
 corrible a mano antes de commitear o desde CI.
 """
 
@@ -20,6 +20,7 @@ GATES = [
     ("mypy", [sys.executable, "-m", "mypy", "mmorch", "mcp_server.py"]),
     ("paths-grep", [sys.executable, "-m", "pytest", "-q",
                     "tests/test_paths.py::test_gate_sin_anclas_de_estado_fuera_de_paths"]),
+    ("docs-ssot", [sys.executable, "-m", "mmorch.docgen", "--check"]),
 ]
 
 

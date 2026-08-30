@@ -4,11 +4,12 @@ _GPY=".venv/Scripts/python.exe"; [ -x "$_GPY" ] || _GPY="python"
 "$_GPY" -m ruff check mmorch mcp_server.py tests || { echo >&2 "ruff gate failed (fix it, or 'git commit --no-verify' to bypass)"; exit 1; }
 # --- mypy type gate (enforced): mismo trato que ruff, 0 errores o no hay commit. ---
 "$_GPY" -m mypy mmorch mcp_server.py || { echo >&2 "mypy gate failed (fix it, or 'git commit --no-verify' to bypass)"; exit 1; }
-# Auto-refresca las secciones <!-- mmorch:auto:* --> del README desde el codigo.
-# Best-effort: si falla, NO bloquea el commit.
+# Catalogo generado + README auto-blocks. Falla el commit si docgen falla.
+# --check (copias en contratos / stale) corre en pytest y en scripts/gates.py.
 PY=".venv/Scripts/python.exe"
 [ -x "$PY" ] || PY="python"
-"$PY" -m mmorch.docgen >/dev/null 2>&1 && git add README.md 2>/dev/null
+"$PY" -m mmorch.docgen || { echo >&2 "docgen failed"; exit 1; }
+git add README.md docs/generated/catalog.md 2>/dev/null
 exit 0
 
 # --- BEGIN BEADS INTEGRATION v1.0.3 ---

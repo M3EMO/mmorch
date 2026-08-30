@@ -71,3 +71,32 @@ the head of whoever reads or changes this tomorrow?*
 6. KISS: is there a materially simpler version? Is any abstraction paying for itself?
 Refute by default: if correctness/quality evidence isn't clear, REQUEST_CHANGES with the single
 highest-priority fix.
+
+## Seleccion de lenguaje
+
+(Movido desde el CLAUDE.md global en la poda 2026-08-27.)
+
+La regla NO es "todo en Python por reflejo" ni "lenguaje por funcion" (eso = impuesto
+poliglota: seams FFI + 2 toolchains). El lenguaje se elige por **proyecto/componente**,
+al arrancarlo, por **target + bottleneck + ecosistema**:
+
+- browser/UI → TS · systems/perf-critico/exec-no-confiable → Rust/C++ · glue/orquestacion/ML → Python · JVM-shop → Java.
+- Dentro de un proyecto: manten su lenguaje (consistencia).
+- **Cruzar a otro lenguaje SOLO en un modulo con interfaz DATA-only** (bytes/JSON/primitivos,
+  sin callables ni objetos vivos cruzando) **+ beneficio real** (CPU/systems) **+ llamadas
+  gruesas**, via FFI. Seam de callable/objeto NO cruza el FFI (rompe el "inyecta un fake"
+  y serializa caro).
+- **Perf**: medir antes de salir de lenguaje (`/speedup`: vectorizar→numba→cython).
+  Nunca Rust por adivinanza.
+- "Menos sloppy" lo da el **gate por lenguaje**, no mas lenguajes: ruff+pyright (Py) /
+  clippy+rustc (Rust) / eslint+tsc (TS).
+
+## Documentation (anti-noise, anti-copy)
+
+Map of owners: `docs/SOURCES.md`. Ratchet: `python -m mmorch.docgen --check`.
+
+- **Module docstring = one line.** That line feeds the generated catalog. Design
+  narrative does not live at the top of the `.py`. A why-comment sits next to the
+  decision it explains.
+- No per-module markdown beside the code. Generated tables live in
+  `docs/generated/`. Contracts (GOAL / CLAUDE / AGENTS) point; they do not catalog.
