@@ -171,3 +171,40 @@ def test_pr_lock_sigue_vivo_si_el_trabajo_no_llego_a_head(monkeypatch, tmp_path)
     monkeypatch.setattr(EV, "_git", fake_git)
     entry = {"branch": "mmorch-sbx-abc", "head_sha": "deadbeef", "pr_number": None}
     assert EV._pr_still_open(entry, root=tmp_path) is True
+
+
+# --- fast-path deterministico: saltea el verificador LLM solo si NADA se pierde ---
+
+def test_guard_fastpath_acepta_wrap_en_try_reindentado():
+    # el patron real: envolver una linea existente en try/except. La unified-diff
+    # la cuenta como remove+add del MISMO texto, solo re-indentado.
+    before = "def f(x):\n    return int(x)\n"
+    after = ("def f(x):\n    try:\n        return int(x)\n"
+             "    except ValueError:\n        raise HTTPException(status_code=400)\n")
+    assert EV._diff_only_adds_guards(before, after) is True
+
+
+def test_guard_fastpath_rechaza_si_se_pierde_codigo():
+    # afloja algo (borra una linea real) aunque agregue un raise -> al verificador LLM
+    before = "def f(x):\n    check_auth(x)\n    return x\n"
+    after = "def f(x):\n    if not x:\n        raise ValueError\n    return x\n"
+    assert EV._diff_only_adds_guards(before, after) is False
+
+
+def test_guard_fastpath_rechaza_sin_guard_nueva():
+    before = "def f(x):\n    return x\n"
+    after = "def f(x):\n    y = x + 1\n    return y\n"
+    assert EV._diff_only_adds_guards(before, after) is False
+
+
+def test_guard_fastpath_ignora_newline_final_del_eof():
+    before = "def f(x):\n    return x"          # sin \n final
+    after = "def f(x):\n    if not x:\n        raise ValueError\n    return x\n"
+    assert EV._diff_only_adds_guards(before, after) is True
+
+
+def test_guard_fastpath_una_linea_removida_no_se_cubre_dos_veces():
+    # dos removidas identicas, un solo add identico -> no alcanza para cubrir ambas
+    before = "a = 1\nlog(x)\nlog(x)\nb = 2\n"
+    after = "a = 1\nlog(x)\nif not x:\n    raise ValueError\nb = 2\n"
+    assert EV._diff_only_adds_guards(before, after) is False

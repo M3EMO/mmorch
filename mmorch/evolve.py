@@ -139,10 +139,68 @@ def _ensemble_check(change: Change, ensemble_fn):
         from .ensemble import ensemble_verify
         ev = ensemble_verify(change.after, rubric=rubric, phase="evolve")
         return ev.passed, False
-    # degradado: un solo cross-family verify
+    # HIBRIDO (research 2026-08-29, vault: llm-as-jury-ensemble-y-errores-correlacionados.md
+    # + externo: arXiv 2605.29800 "Nine Judges, Two Effective Votes", arXiv 2404.18796 PoLL).
+    # Intento anterior: repetir el MISMO verificador 3 veces y pedir mayoria. Descartado:
+    # la literatura mide que errores correlacionados vienen de compartir arquitectura/prior
+    # de entrenamiento, no de ruido de muestreo — 9 jueces (7 familias DISTINTAS) dieron
+    # n_eff~2.2 "votos efectivos" (formula de Kish); repetir el MISMO modelo tiene phi~1 =>
+    # n_eff~1. Self-consistency (Wang 2022) funciona en razonamiento con ground-truth
+    # computable via MULTIPLES caminos; aca el sesgo es de POLITICA/cautela entrenada
+    # (ve "security" en el diff -> refuta), y eso se repite identico en cada muestra: votar
+    # 3 veces sobre eso da falsa confianza (el paper: "the operator now trusts it"), no
+    # señal nueva. Fix real: gate DETERMINISTICO primero (barato, 0 sesgo) para el patron
+    # mas comun medido (parche que SOLO agrega validacion, no remueve ni afloja nada) —
+    # mismo principio que checkable/checker en patterns.py ("preferir tool-verify cuando
+    # se puede calcular"). Lo que no matchea sigue cayendo al UNICO llamado LLM degradado
+    # (honesto: sigue siendo 1 voto, no se infla con copias del mismo verificador).
+    if _diff_only_adds_guards(change.before, change.after):
+        return True, True
     from .patterns import adversarial_verify
     v = adversarial_verify(change.after, rubric=rubric, phase="evolve", task_kind="subjective")
     return v.passed, True
+
+
+_GUARD_ADD_PAT = re.compile(
+    r"(status_code\s*=\s*40\d|\braise\b|\breturn\b[^\n]{0,80}\berror\b)", re.I)
+
+
+def _diff_only_adds_guards(before: str, after: str) -> bool:
+    """Chequeo DETERMINISTICO (checkable, 0 sesgo, 0 costo API): TRUE si nada del
+    contenido existente se PIERDE (una linea removida vale si su texto reaparece,
+    solo re-indentada — el patron mas comun es envolver una linea existente en un
+    `try/except` o un `if`, que la unified-diff cuenta como remove+add del MISMO
+    texto) Y se agrega al menos una guard clause de rechazo (validar y devolver
+    40x/raise). Cubre el patron medido de 'security fix' mas comun (validar un query
+    param, exigir un campo, envolver un int() en try/except) sin pagar el verificador
+    LLM (ni su sesgo) para el caso mecanicamente verificable. No reevalua capacidad
+    peligrosa: eso YA lo filtro zone_of()/red_content_hits() rio arriba (este check
+    solo corre sobre candidatos que ya pasaron zona no-roja) — esto solo mide
+    'nada se pierde, algo nuevo rechaza input'. Cualquier linea removida cuyo texto NO
+    reaparece hace caer al chequeo LLM de siempre — esto solo ADELANTA el pase facil,
+    nunca reemplaza el chequeo para lo ambiguo. Heuristica de regex, no AST real —
+    upgrade path si empieza a dar falsos positivos (medir contra evolve_red.jsonl)."""
+    import difflib
+    from collections import Counter
+    # normalizar trailing newline: un archivo que gana/pierde el \n final del EOF
+    # generaba un remove "fantasma" en la ultima linea (medido en los 5 diffs reales
+    # de anoche: texto identico, solo cambiaba el newline final)
+    norm = lambda s: s if s.endswith("\n") or not s else s + "\n"
+    diff = list(difflib.unified_diff(norm(before).splitlines(), norm(after).splitlines(),
+                                     lineterm=""))
+    removed = [ln[1:] for ln in diff if ln.startswith("-") and not ln.startswith("---")]
+    added = [ln[1:] for ln in diff if ln.startswith("+") and not ln.startswith("+++")]
+    if not added:
+        return False
+    added_content = Counter(ln.strip() for ln in added if ln.strip())
+    for ln in removed:
+        content = ln.strip()
+        if not content:
+            continue
+        if added_content[content] <= 0:
+            return False               # se perdio texto real, no solo se re-indento
+        added_content[content] -= 1    # consumido: no sirve para "cubrir" otra linea removida
+    return any(_GUARD_ADD_PAT.search(ln) for ln in added)
 
 
 def _cost_check(change: Change, cost_fn) -> bool:
