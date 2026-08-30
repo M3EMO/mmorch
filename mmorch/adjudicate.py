@@ -59,9 +59,26 @@ def run_incremental(notes_dir, projects, generator, verifier, *, logs_dir='logs'
     logs_path.mkdir(parents=True, exist_ok=True)
 
     # Notas: *.md directos en notes_dir (contrato F1; sin recorrer subdirs)
+    # bug medido 2026-08-29: una nota YA aplicada/construida (status: applied, ej.
+    # intuition-layer.md con las 5 fases shippeadas) se seguia rejudgeando contra
+    # cada proyecto y generaba tarjetas "pendiente" para trabajo que ya estaba
+    # hecho hace semanas. Fix: saltear notas en estado TERMINAL antes de juzgar
+    # (ni siquiera se paga el generator/verifier) — "refuted" tampoco es accionable
+    # (la investigacion se invalido). "seed"/"verified"/"inconclusive"/"evergreen"
+    # siguen siendo candidatas legitimas a proponerse.
+    _TERMINAL_STATUS = {'applied', 'refuted'}
     notes = []
     for md_file in sorted(Path(notes_dir).glob('*.md')):
         content = md_file.read_text(encoding='utf-8')
+        if content.startswith('---'):
+            parts = content.split('---', 2)
+            if len(parts) >= 3:
+                try:
+                    fm = yaml.safe_load(parts[1]) or {}
+                except yaml.YAMLError:
+                    fm = {}
+                if fm.get('status') in _TERMINAL_STATUS:
+                    continue
         notes.append({
             'path': str(md_file),
             'content': content,
@@ -124,6 +141,18 @@ def run_incremental(notes_dir, projects, generator, verifier, *, logs_dir='logs'
             for key, entry in state['pairs'].items():
                 if key.startswith(f'{note_path}|'):
                     entry['hash'] = new_hash
+
+    # purga: una nota que paso a estado TERMINAL (applied/refuted) desaparece de
+    # `notes` este run (ver skip arriba) pero su match viejo seguia cacheado en
+    # pairs para siempre -> by_project la resucitaba cada noche. Sin esto, marcar
+    # una nota como aplicada NO limpiaba la tarjeta pendiente que ya genero.
+    # ponytail: sin notas no se purga nada. Un notes_dir vacio o mal apuntado
+    # borraria la cache entera de adjudicaciones ya pagadas. Costo: si TODAS las
+    # notas quedan terminales el mismo run, sus pairs sobreviven una corrida mas.
+    live_note_paths = {n['path'] for n in notes}
+    if live_note_paths:
+        for key in [k for k in state['pairs'] if k.split('|', 1)[0] not in live_note_paths]:
+            del state['pairs'][key]
 
     # by_project se RECONSTRUYE desde pairs (append incremental duplicaba
     # los strong cacheados en cada corrida)
