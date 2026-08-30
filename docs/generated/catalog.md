@@ -4,7 +4,7 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**132 módulos · 46 MCP tools · 891 tests.**
+**132 módulos · 46 MCP tools · 896 tests.**
 
 ## Módulos
 

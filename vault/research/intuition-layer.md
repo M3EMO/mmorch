@@ -1,6 +1,7 @@
 ---
 applies_to:
 - orchestration
+status: applied
 ---
 # mmorch cognitive architecture — synthesis (intuition + insight)
 
