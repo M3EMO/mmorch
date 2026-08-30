@@ -658,7 +658,7 @@ async def reap_zombies(request):
         # a zombie with a checkpoint trail can be resumed from its last step instead of staying dead
         ids = [z["id"] for z in (reaped if not dry else zombies)]
         resumable = [jid for jid in ids if jid in cp_jobs]
-    except Exception as e:
+    except Exception:
         resumable = []
     return JSONResponse({"now": now, "ttl": durable_runs.default_ttl() if ttl is None else ttl,
                          "dry": dry, "zombies": zombies, "reaped": [r["id"] for r in reaped],
@@ -684,7 +684,6 @@ def _safe_project_target(project: str, target_file: str) -> str | None:
 def _resume_project(jid: str, data: dict, remaining: int):
     """Re-dispatch an interrupted project job from its last checkpoint (Phase B)."""
     from . import workflow_store
-    from .projects import resolve
     from .project_loop import run_project_task
     done = len(workflow_store.checkpoint_history(jid))
     # seed the file from the last checkpoint's output block so the loop continues from that attempt
@@ -693,7 +692,6 @@ def _resume_project(jid: str, data: dict, remaining: int):
         if latest and latest.get("outputs"):
             blk = workflow_store.get_block(latest["outputs"][-1])
             if blk and blk.get("body"):
-                import os as _os
                 # SECURITY: validate target_file is inside the project root before writing
                 target_abs = _safe_project_target(data["project"], data["target_file"])
                 if target_abs is None:
