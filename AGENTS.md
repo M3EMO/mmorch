@@ -34,6 +34,19 @@ reversibility × blast-radius + fitness + budget.
 - After a meaningful edit, update the **owner** named in `docs/SOURCES.md`. Never
   copy a catalog into a contract file. Module docstring stays one line.
 
+## Handoff entre agentes (Cursor <-> Claude Code)
+Los dos clientes montan el MISMO MCP server con el mismo `MMORCH_HOME`, asi que
+`logs/memory.duckdb` es un bus compartido. Es un BUZON asincronico: nadie despierta
+al otro, cada lado lee cuando corre.
+
+- **Al arrancar**: recall sobre el scope `canal` antes de tocar codigo que otro agente
+  pudo haber dejado a medias.
+- **Al cortar** (sobre todo si quedas a mitad de una verificacion): remember en scope
+  `canal` con que quedo sin probar y por que. Un working tree sucio sin nota es la
+  falla que esto arregla.
+- Nombres de las tools de memoria: `docs/generated/catalog.md` (este archivo es indice,
+  no catalogo).
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 ## Beads Issue Tracker
 
