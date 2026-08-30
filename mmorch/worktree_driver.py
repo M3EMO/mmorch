@@ -96,7 +96,11 @@ class Worktree:
         changed = bool(self.diff.strip())
         committed, error = False, ""
         if changed:
-            rc, out = _git(self.path, "commit", "-m", message)
+            # ponytail: timeout mas largo que el default (120s) — medido 2026-08-29,
+            # un commit legitimo (no colgado) tardo mas bajo carga (8GB RAM, hooks
+            # de pre-commit) y el default lo mato a mitad de camino, tragado como
+            # "commit fallo" sin causa clara. Subir a 300s si vuelve a pasar con esto.
+            rc, out = _git(self.path, "commit", "-m", message, timeout=300)
             if rc != 0 and re.search(r"\b[A-Z]{1,3}\d{3}\b", out):
                 # bug medido 2026-08: el pre-commit ruff gate del repo frena código generado por
                 # lint AUTO-FIXABLE (ej F401 import sobrante) -> unidad jamás llega a la branch ->
@@ -107,7 +111,7 @@ class Worktree:
                                 "--unsafe-fixes", "."],
                                cwd=self.path, capture_output=True, timeout=120)
                 _git(self.path, "add", "-A")
-                rc, out = _git(self.path, "commit", "-m", message)
+                rc, out = _git(self.path, "commit", "-m", message, timeout=300)
             committed, error = rc == 0, ("" if rc == 0 else out)
         return {"branch": self.branch, "diffstat": self.diffstat, "changed": changed,
                 "committed": committed, "error": error}
