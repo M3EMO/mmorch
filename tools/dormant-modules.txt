@@ -1,0 +1,6 @@
+# Modulos sin caller Python que NO son museo. Uno por linea: nombre # por que.
+# Si un modulo de aca vuelve a tener callers, dead-modules.py lo avisa y se saca.
+# Esto NO es donde se esconde codigo muerto: si el por que no convence, borralo.
+
+context_blocks   # lo invoca ~/.claude/hooks/context-block-watch.js con `python -m mmorch.context_blocks tick` — el caller vive fuera del repo
+plugin_worker    # subprocess host aislado: plugins.py lo lanza por path (_WORKER, plugins.py:27), nunca lo importa — el aislamiento es el punto

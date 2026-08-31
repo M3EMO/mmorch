@@ -24,7 +24,6 @@ PKG = REPO / "mmorch"
 # Museo pre-existente (sin caller vivo al momento de crear el gate, W4.3). Deuda:
 # cablear o borrar; PROHIBIDO agregar entradas para código nuevo.
 _DEUDA_MUSEO = {
-    "run_ablation",         # ablation.py
     "task_type_classify",   # classify.py
     "multiview_verify",     # ensemble.py
     "embed_hybrid",         # exec_embedder.py

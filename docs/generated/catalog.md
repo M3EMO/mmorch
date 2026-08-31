@@ -4,13 +4,12 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**132 módulos · 46 MCP tools · 896 tests.**
+**130 módulos · 47 MCP tools · 895 tests.**
 
 ## Módulos
 
 | Módulo | Qué hace |
 |---|---|
-| `mmorch/ablation.py` | ablation (§18.4) — validar EMPIRICAMENTE la regla de pairing cross-family. El |
 | `mmorch/adjudicate.py` | Adjudication module for matching notes to projects. |
 | `mmorch/arbitration.py` | arbitration — registro auditable de los arbitrajes del orquestador (blind-spot #2, 2026-07). |
 | `mmorch/architecture.py` | Organizador de arquitectura — chequeos MECANICOS, sin juicio de LLM. |
@@ -25,6 +24,7 @@ Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp
 | `mmorch/bughunt.py` | BUG-HUNTER logico de mmorch: mutation-survivors como mapa de donde un bug silencioso viviria. |
 | `mmorch/bursts.py` | Bursts de arXiv — temas recién acuñados, que ningún tag todavía nombra. |
 | `mmorch/cache.py` | memo (I-4) — cache content-hash de resultados/verdicts. Salta re-gen/re-verify |
+| `mmorch/canal.py` | canal — hilo ordenado entre Cursor, Claude Code y mmorch. |
 | `mmorch/canary.py` | canary — set FIJO de tareas con respuesta verificable deterministicamente (W5.3). |
 | `mmorch/cascade.py` | cascade — FrugalGPT-style multi-step confidence cascade (research: vault/research/ |
 | `mmorch/chat_store.py` | chat_store — durable chat history for Lotus (SQLite, stdlib). |
@@ -41,7 +41,6 @@ Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp
 | `mmorch/curation.py` | Curacion humana de propuestas — logica compartida entre scripts/veredicto.py, |
 | `mmorch/curiosity.py` | curiosity — deteccion de TENSION en la memoria (modulo cognitivo #3). |
 | `mmorch/dataset.py` | dataset — construye un dataset de CALIDAD DE CÓDIGO desde git history, SIN labels |
-| `mmorch/debate.py` | Debate cross-family sobre una branch: refutador -> habilitador -> juez. |
 | `mmorch/decision_mining.py` | Mineria de DECISIONES humanas desde transcripts de Claude Code. |
 | `mmorch/docs_extract.py` | Extracción de texto de documentos (PDF hoy) — dos niveles, medidos en |
 | `mmorch/durable_runs.py` | durable_runs — heartbeat + zombie reaper for in-process jobs (graft G9 from paperclip). |
@@ -102,7 +101,6 @@ Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp
 | `mmorch/provenance.py` | Provenance de branches — outcomes retroactivos por verdad de ejecución. |
 | `mmorch/providers.py` | Provider layer — thin OpenAI-compatible client per external model. |
 | `mmorch/pty_session.py` | pty_session — interactive PTY sessions for the Lotus terminal. |
-| `mmorch/refutar.py` | Refutacion cross-family de una branch propuesta — el escalon entre el triage |
 | `mmorch/regresion.py` | Refutacion EJECUTABLE de una branch: la objecion se prueba o no existe. |
 | `mmorch/repo_mining.py` | Minería de repos ajenos — aprender de cualquier repo SIN acumularlo. |
 | `mmorch/retention.py` | retention — decay Ebbinghaus + Zeigarnik para la capa semantica de memory. |
@@ -145,4 +143,4 @@ Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp
 
 ## MCP tools
 
-`mmorch_adversarial_verify`, `mmorch_autoresearch`, `mmorch_bucket_rank`, `mmorch_budget_status`, `mmorch_build_spec`, `mmorch_cache_stats`, `mmorch_cascade`, `mmorch_check`, `mmorch_classify`, `mmorch_close_loop`, `mmorch_consolidate`, `mmorch_cynefin`, `mmorch_ensemble_verify`, `mmorch_error_rates`, `mmorch_evolve_nightly`, `mmorch_evolve_self`, `mmorch_fan_out`, `mmorch_feedback_stats`, `mmorch_find_tension`, `mmorch_flag_contradiction`, `mmorch_forget_preview`, `mmorch_ingest_session`, `mmorch_innovate`, `mmorch_intuition`, `mmorch_learn`, `mmorch_memory_stats`, `mmorch_metrics_summary`, `mmorch_open_loops`, `mmorch_orchestra`, `mmorch_pending_review`, `mmorch_perfect`, `mmorch_recall`, `mmorch_record_outcome`, `mmorch_reinforce`, `mmorch_remember`, `mmorch_resolve_review`, `mmorch_review_code`, `mmorch_route`, `mmorch_rubric_next`, `mmorch_rubric_start`, `mmorch_rubric_submit`, `mmorch_session_playbooks`, `mmorch_spec_interview`, `mmorch_speedup`, `mmorch_tournament`, `mmorch_vault_write`.
+`mmorch_adversarial_verify`, `mmorch_autoresearch`, `mmorch_bucket_rank`, `mmorch_budget_status`, `mmorch_build_spec`, `mmorch_cache_stats`, `mmorch_canal`, `mmorch_cascade`, `mmorch_check`, `mmorch_classify`, `mmorch_close_loop`, `mmorch_consolidate`, `mmorch_cynefin`, `mmorch_ensemble_verify`, `mmorch_error_rates`, `mmorch_evolve_nightly`, `mmorch_evolve_self`, `mmorch_fan_out`, `mmorch_feedback_stats`, `mmorch_find_tension`, `mmorch_flag_contradiction`, `mmorch_forget_preview`, `mmorch_ingest_session`, `mmorch_innovate`, `mmorch_intuition`, `mmorch_learn`, `mmorch_memory_stats`, `mmorch_metrics_summary`, `mmorch_open_loops`, `mmorch_orchestra`, `mmorch_pending_review`, `mmorch_perfect`, `mmorch_recall`, `mmorch_record_outcome`, `mmorch_reinforce`, `mmorch_remember`, `mmorch_resolve_review`, `mmorch_review_code`, `mmorch_route`, `mmorch_rubric_next`, `mmorch_rubric_start`, `mmorch_rubric_submit`, `mmorch_session_playbooks`, `mmorch_spec_interview`, `mmorch_speedup`, `mmorch_tournament`, `mmorch_vault_write`.
