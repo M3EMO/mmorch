@@ -1,8 +1,9 @@
 # mmorch en Cursor (perfil `core`)
 
-El MCP server expone 46 tools en perfil `full`; el techo practico de Cursor es
-~40 tools por server. El perfil `core` (env `MMORCH_MCP_PROFILE=core`) registra
-37 tools curadas y deja fuera 9 nicho/experimentales/Claude-Code-only. El perfil
+El MCP server expone el perfil `core` (15 tools) **por default** desde la poda
+2026-08-30; `MMORCH_MCP_PROFILE=full` expone el catalogo completo (conteo vivo:
+`docs/generated/catalog.md`, que inventaria el codigo, no lo que se registra).
+El techo practico de Cursor es ~40 tools por server. El perfil
 se lee a import-time: cambiarlo requiere reiniciar el server (Cursor lo relanza
 al tocar `mcp.json`).
 
@@ -40,37 +41,44 @@ Notas:
   copiar ahi el `.env`.
 - El `.env` se carga desde `MMORCH_HOME/.env` (no depende del cwd del
   workspace de Cursor — providers.py lo resuelve via paths.home()).
-- `MMORCH_MCP_PROFILE=full` (o ausente) expone las 46; en Cursor eso supera el
-  techo y Cursor puede truncar/ignorar tools arbitrariamente — usar `core`.
+- `MMORCH_MCP_PROFILE=full` expone las 47; en Cursor eso supera el techo y Cursor
+  puede truncar/ignorar tools. Ausente o vacio = `core`, que es lo que se quiere:
+  el bloque `"MMORCH_MCP_PROFILE": "core"` de arriba quedo redundante pero
+  explicito, y no molesta.
 
-## Que incluye `core` (37) y que queda fuera (9)
+## Que incluye `core` (15 tools) y que queda fuera
 
-Dentro: los patrones core (`mmorch_fan_out`, `mmorch_cascade`, `mmorch_route`,
-`mmorch_classify`, `mmorch_check`, `mmorch_tournament`, `mmorch_bucket_rank`,
-`mmorch_perfect`, `mmorch_speedup`, `mmorch_review_code`), verificacion
-(`mmorch_adversarial_verify`, `mmorch_ensemble_verify`), memoria/recall
-(`mmorch_recall`, `mmorch_remember`, `mmorch_learn`, `mmorch_reinforce`,
-`mmorch_consolidate`, `mmorch_memory_stats`, `mmorch_intuition`,
-`mmorch_flag_contradiction`, `mmorch_vault_write`), spec/planning
-(`mmorch_build_spec`, `mmorch_spec_interview`, `mmorch_cynefin`,
-`mmorch_rubric_*`), loops/feedback (`mmorch_open_loops`, `mmorch_close_loop`,
-`mmorch_record_outcome`, `mmorch_feedback_stats`, `mmorch_pending_review`,
-`mmorch_resolve_review`) y budget/health (`mmorch_budget_status`,
-`mmorch_error_rates`, `mmorch_metrics_summary`, `mmorch_cache_stats`).
+**`core` es ahora el default** (poda 2026-08-30) y sale de la telemetria, no de
+criterio a ojo. `logs/mcp_calls.jsonl`, 53 dias (2026-07-08 → 08-30, 269
+llamadas): **11 de 47 tools se invocaron alguna vez**, y 5 concentran el 97% —
+`budget_status` (136), `record_outcome` (52), `review_code` (39),
+`adversarial_verify` (27), `vault_write` (7).
 
-Fuera de `core` (lista exacta: `_NOT_IN_CORE` en `mmorch/mcp_server.py`):
+Dentro (11 con uso medido): `budget_status`, `record_outcome`, `review_code`,
+`adversarial_verify`, `ensemble_verify`, `vault_write`, `recall`, `remember`,
+`check`, `cynefin`, `innovate`.
 
-| Tool | Por que fuera |
-|---|---|
-| `mmorch_ingest_session` | Claude-Code-only (ver limitaciones) |
-| `mmorch_session_playbooks` | Claude-Code-only (idem ingest) |
-| `mmorch_autoresearch` | job overnight, no interactivo |
-| `mmorch_evolve_nightly` | scheduled-task, no interactivo |
-| `mmorch_evolve_self` | experimental: auto-evolucion DRY |
-| `mmorch_innovate` | experimental: auto-ideacion |
-| `mmorch_find_tension` | curiosity, mantenimiento ocasional |
-| `mmorch_forget_preview` | gate de mantenimiento, no flujo diario |
-| `mmorch_orchestra` | introspeccion del registry, nicho |
+Dentro sin llamadas, por excepcion escrita: `canal` (nacio 2026-08-30, no tuvo
+ventana) y `build_spec` / `route` / `spec_interview` (los nombra
+`~/.claude/skills/perfect/SKILL.md`).
+
+Fuera: las **32 que no se llamaron nunca** en la ventana. No son nuevas —
+`fan_out`, `tournament`, `cascade` y `classify` son del 2026-06-07, el dia
+fundacional. Siguen implementadas y testeadas; `MMORCH_MCP_PROFILE=full` las
+registra todas. Esto recorta **superficie de decision**, no capacidad: cada tool
+que el orquestador no usa igual la lee antes de elegir, en cada turno.
+
+Volver a exponer una = sacarla de `_NOT_IN_CORE` y reiniciar el server. Si el
+flujo con Cursor empieza a usar `fan_out`/`cascade` de verdad, la telemetria lo
+va a mostrar y se revierte con evidencia.
+
+La lista exacta de las 32 vive en `_NOT_IN_CORE` (`mmorch/mcp_server.py`) — no se
+duplica aca a proposito: una tabla de 32 filas en un doc driftaria contra el
+codigo, y `tests/test_mcp_profile.py` ya congela el set contra la telemetria.
+
+Dos de las 32 estan fuera por una razon que NO es la telemetria y sobrevive a
+cualquier medicion: `mmorch_ingest_session` y `mmorch_session_playbooks` son
+Claude-Code-only (ver limitaciones abajo) — en Cursor no funcionarian igual.
 
 ## Limitaciones conocidas en Cursor
 
@@ -88,16 +96,15 @@ Fuera de `core` (lista exacta: `_NOT_IN_CORE` en `mmorch/mcp_server.py`):
 ## Smoke de verificacion
 
 ```powershell
-# core registra <=40 (esperado: 37)
+# core <=40; full = catalogo generado
 $env:MMORCH_MCP_PROFILE = "core"
 C:/Users/map12/.claude/orchestration/.venv/Scripts/python.exe -c "from mmorch.mcp_server import mcp; print(len(mcp._tool_manager.list_tools()))"
 
-# full registra todas (esperado: 46)
 $env:MMORCH_MCP_PROFILE = "full"
 C:/Users/map12/.claude/orchestration/.venv/Scripts/python.exe -c "from mmorch.mcp_server import mcp; print(len(mcp._tool_manager.list_tools()))"
 ```
 
-En Cursor: Settings → MCP debe listar el server `mmorch` en verde con 37 tools;
+En Cursor: Settings → MCP debe listar el server `mmorch` en verde (perfil `core`);
 probar `mmorch_budget_status` (determinista, no gasta API) como smoke end-to-end.
 
 Test automatizado del contrato: `tests/test_mcp_profile.py`.

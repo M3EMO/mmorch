@@ -37,9 +37,38 @@ Nota: la poda de los duplicados ya estaba decidida en
 
 ---
 
-## T2 — La superficie que se paga cada turno. Mayor ROI del plan.
+## T2 — HECHO (2026-08-31). La superficie que se paga cada turno.
 
-**Sacar `@mcp.tool()` de 32 tools nunca invocadas. NO borrar la función de librería.**
+**Ejecutado distinto de como estaba planeado.** El plan decía "sacar `@mcp.tool()`
+de 32 tools". Al abrir `mcp_server.py` apareció que **el mecanismo ya existía**:
+`MMORCH_MCP_PROFILE` (W2.2, 08-27), con un set `core` de 38 tools curado a ojo
+para el techo de ~40 de Cursor, y `full` de default.
+
+Lo que se hizo en vez de eso:
+
+1. `_NOT_IN_CORE` pasó de 9 entradas curadas a ojo → **32 derivadas de la
+   telemetría**. `core` queda en **15 tools**.
+2. **Default flipeado de `full` a `core`.** Ahí está el 47 → 15 real: sin esto
+   nada cambiaba para la sesión, que corría con el default.
+3. Fix de borde: `MMORCH_MCP_PROFILE=""` caía en `full`. Antes daba lo mismo
+   porque el default *era* full; ahora cae en `core` como corresponde.
+4. `docs/cursor-setup.md` reescrito, y la tabla de 9 exclusiones reemplazada por
+   un puntero a `_NOT_IN_CORE` — 32 filas duplicadas en un doc driftan seguro.
+5. `test_default_es_full` → `test_default_es_core`; `test_core_curado_...` →
+   `test_core_es_el_set_con_uso_medido`, que congela `core` contra la telemetría.
+6. `test_mcp_contract.py` y `test_mcp_schema.py` pineados a `full`: prueban el
+   contrato del **catálogo**, no del perfil. Sin eso, las 32 fuera de `core`
+   dejaban de estar cubiertas por el contrato de error y por el freeze de schema.
+
+**Riesgo asumido, explícito:** la ventana de telemetría (07-08 → 08-30) es casi
+toda anterior a la integración con Cursor, que es del 08-27. `fan_out`, `cascade`
+y `error_rates` se cortaron sin que su flujo haya tenido chance de correr. La
+telemetría sigue loggeando: si ese flujo los usa, aparece y se revierte sacándolos
+de `_NOT_IN_CORE`. Decisión del usuario tras plantearle el conflicto.
+
+### Evidencia original
+
+**32 tools nunca invocadas. NO se borra la función de librería.**
 
 Telemetría `logs/mcp_calls.jsonl`, 53 días (07-08 → 08-30), 269 llamadas, 47 tools:
 

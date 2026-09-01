@@ -67,25 +67,40 @@ instrument(mcp)   # audit 2026-07: logs EVERY tool call (incl. las ~20 determini
                   # metrics.jsonl nunca ve) a logs/mcp_calls.jsonl — cero cambios en las tools
 
 # --- Perfil de tools (W2.2) ---------------------------------------------------
-# Cursor tiene un techo practico de ~40 tools por server; el set completo (46)
-# lo excede. MMORCH_MCP_PROFILE=core registra solo el set curado de uso real;
-# "full" (default) registra todo. Se lee a import-time porque FastMCP registra
+# Cursor tiene un techo practico de ~40 tools por server; el set full lo excede.
+# "core" (DEFAULT desde la poda 2026-08-30) registra solo las tools con uso
+# medido; MMORCH_MCP_PROFILE=full registra las 47. Se lee a import-time porque FastMCP registra
 # via decorator a import-time — cambiar de perfil = reiniciar el server (igual
 # que MMORCH_HOME o las API keys).
-_PROFILE = os.getenv("MMORCH_MCP_PROFILE", "full").strip().lower()
+# `or "core"`: MMORCH_MCP_PROFILE="" (var seteada vacia) tiene que caer en el
+# default, no en full — antes daba lo mismo porque el default ERA full.
+_PROFILE = os.getenv("MMORCH_MCP_PROFILE", "").strip().lower() or "core"
 
-# Fuera de "core": nicho/experimental o Claude-Code-only (matriz canonica:
-# ingest de sesiones depende del JSONL de ~/.claude/projects — ciego en Cursor).
+# Fuera de "core": TELEMETRIA, no criterio a ojo (poda 2026-08-30).
+# logs/mcp_calls.jsonl, 53 dias (2026-07-08 -> 08-30, 269 llamadas): 11 de 47
+# tools se invocaron alguna vez y 5 concentran el 97% (budget_status 136,
+# record_outcome 52, review_code 39, adversarial_verify 27, vault_write 7).
+# Las 32 de abajo no se llamaron NUNCA, y no son nuevas: fan_out, tournament,
+# cascade y classify son del 2026-06-07, el dia fundacional.
+#
+# Esto es superficie de DECISION, no borrado: la funcion de libreria queda
+# intacta y "full" las sigue registrando. Volver a exponer una = sacarla de aca.
+#
+# Se quedan en core sin llamadas, a proposito:
+#   canal                              nacio 2026-08-30, no tuvo ventana
+#   build_spec/route/spec_interview    los nombra ~/.claude/skills/perfect
 _NOT_IN_CORE = frozenset({
-    "mmorch_innovate",            # experimental: auto-ideacion de capacidades
-    "mmorch_autoresearch",        # job overnight, no interactivo
-    "mmorch_evolve_self",         # experimental: auto-evolucion DRY
-    "mmorch_evolve_nightly",      # scheduled-task, no interactivo
-    "mmorch_ingest_session",      # Claude-Code-only (formato ~/.claude/projects)
-    "mmorch_session_playbooks",   # Claude-Code-only (idem ingest)
-    "mmorch_find_tension",        # curiosity, mantenimiento ocasional
-    "mmorch_forget_preview",      # gate de mantenimiento, no flujo diario
-    "mmorch_orchestra",           # introspeccion del registry, nicho
+    "mmorch_autoresearch", "mmorch_bucket_rank", "mmorch_cache_stats",
+    "mmorch_cascade", "mmorch_classify", "mmorch_close_loop",
+    "mmorch_consolidate", "mmorch_error_rates", "mmorch_evolve_nightly",
+    "mmorch_evolve_self", "mmorch_fan_out", "mmorch_feedback_stats",
+    "mmorch_find_tension", "mmorch_flag_contradiction", "mmorch_forget_preview",
+    "mmorch_ingest_session", "mmorch_intuition", "mmorch_learn",
+    "mmorch_memory_stats", "mmorch_metrics_summary", "mmorch_open_loops",
+    "mmorch_orchestra", "mmorch_pending_review", "mmorch_perfect",
+    "mmorch_reinforce", "mmorch_resolve_review", "mmorch_rubric_next",
+    "mmorch_rubric_start", "mmorch_rubric_submit", "mmorch_session_playbooks",
+    "mmorch_speedup", "mmorch_tournament",
 })
 
 
@@ -149,6 +164,7 @@ _TOOL_RISK: dict[str, str] = {
     "mmorch_learn": "read",
     "mmorch_innovate": "read",
     "mmorch_remember": "mutate",
+    "mmorch_canal": "mutate",              # append logs/canal.jsonl (hilo agentes)
     "mmorch_vault_write": "mutate",       # escribe en el vault global
     "mmorch_recall": "mutate",            # bumpea access_count (afecta decay futuro)
     "mmorch_tournament": "read",
@@ -535,6 +551,37 @@ def mmorch_remember(
     return json.dumps(_remember(scope, episode_text, kind=kind, verify=verify,
                                 open_loop=open_loop, permanent=permanent),
                       ensure_ascii=False)
+
+
+@_tool
+def mmorch_canal(
+    action: str,
+    src: str = "",
+    kind: str = "status",
+    body: str = "",
+    artifacts: list[str] | None = None,
+    verify_cmd: str = "",
+    verify_expect: str = "",
+    to: str = "",
+    n: int = 20,
+) -> str:
+    """Ordered thread between Cursor, Claude Code, and mmorch (logs/canal.jsonl).
+    Nobody wakes the other process. action=read returns last n turns (oldest first).
+    action=post appends a turn: src in cursor|claude|mmorch|user, kind in
+    status|ask|refute|handoff. handoff should set verify_cmd + verify_expect.
+    Deterministic, no API spend. Returns JSON (turn or list of turns).
+    """
+    from mmorch.canal import post as _canal_post, read as _canal_read
+    if action == "read":
+        return json.dumps(_canal_read(n), ensure_ascii=False)
+    if action == "post":
+        rec = _canal_post(
+            src, kind, body,
+            artifacts=artifacts, verify_cmd=verify_cmd,
+            verify_expect=verify_expect, to=to,
+        )
+        return json.dumps(rec, ensure_ascii=False)
+    raise ValueError("action must be 'post' or 'read'")
 
 
 @_tool

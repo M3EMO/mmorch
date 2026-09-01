@@ -2,7 +2,7 @@
 
 Toda tool MCP registrada devuelve {"error": str, "kind": str} ante un fallo,
 jamas una excepcion cruda ni formatos mixtos. El fallo controlado se inyecta via
-wrapper.__wrapped__ (la seam del guard) — parametrizado sobre las 46 tools reales,
+wrapper.__wrapped__ (la seam del guard) — parametrizado sobre las tools reales,
 cero red y cero API. Los tests de hueco pegan en la LIBRERIA (donde vive la
 validacion desde W5.1) y a traves del wrapper donde es barato.
 """
@@ -10,8 +10,14 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 
 import pytest
+
+# El contrato de error aplica a TODA tool del catalogo, no solo a las que expone
+# el perfil por default ("core" desde la poda 2026-08-30). Sin esto, las 32 fuera
+# de core dejarian de estar cubiertas por el contrato.
+os.environ["MMORCH_MCP_PROFILE"] = "full"
 
 from mmorch.mcp_server import mcp, _guarded, _kind_of
 

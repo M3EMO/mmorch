@@ -9,8 +9,14 @@ en fallo ya lo cubre test_mcp_contract (W5.1) — no se repite.
 from __future__ import annotations
 
 import inspect
+import os
 
 import pytest
+
+# El contrato de schema es del CATALOGO completo, no del perfil que se exponga:
+# desde la poda 2026-08-30 el default es "core" (15 tools) y sin esto el test
+# congelaria 15 en vez de 47, dejando de ver un drift en las 32 restantes.
+os.environ["MMORCH_MCP_PROFILE"] = "full"
 
 from mmorch.mcp_server import mcp
 
@@ -19,7 +25,7 @@ assert TOOLS, "el server no registro ninguna tool"
 
 # La tabla congelada de nombres: una tool dropeada/renombrada en un refactor
 # rompe ESTE assert con el diff exacto (actualizarla aca = cambio explicito).
-EXPECTED_TOOL_COUNT = 46
+EXPECTED_TOOL_COUNT = 47
 
 
 def test_cantidad_de_tools_congelada():
