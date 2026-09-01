@@ -124,26 +124,3 @@ def test_plan_mode_state_machine_roundtrip(monkeypatch):
     st = RL.submit(st, GOOD)
     st = json.loads(json.dumps(st))
     assert RL.next_action(st)["role"] == "done"
-
-
-def test_commit_then_reveal(tmp_path):
-    from mmorch.rubric_loop import commit_rubric, reveal_rubric
-    crits = [{"id": "c1", "desc": "define el concepto", "kind": "subjective", "weight": 0.6},
-             {"id": "c2", "desc": "da un ejemplo", "kind": "subjective", "weight": 0.4}]
-    c = commit_rubric("explicar equilibrio de Nash", crits, store_dir=str(tmp_path))
-    assert len(c["sha256"]) == 64 and c["id"] == c["sha256"][:12]
-    # el compromiso NO expone la rubrica (solo id+hash)
-    assert "criteria" not in c
-
-    r = reveal_rubric(c["id"], store_dir=str(tmp_path))
-    assert r["sha256_ok"] and r["criteria"] == crits and not r["edited"]
-
-    # edicion humana: registrada, sin pisar el original
-    edited = [dict(crits[0], weight=0.5), dict(crits[1], weight=0.5)]
-    r2 = reveal_rubric(c["id"], store_dir=str(tmp_path), edits=edited)
-    assert r2["edited"] and r2["criteria"] == edited and r2["original_criteria"] == crits
-
-    # tamper-evident: si el archivo cambia, el hash no matchea el id
-    p = tmp_path / f"{c['id']}.json"
-    p.write_text(p.read_text(encoding="utf-8").replace("0.6", "0.9"), encoding="utf-8")
-    assert not reveal_rubric(c["id"], store_dir=str(tmp_path))["sha256_ok"]

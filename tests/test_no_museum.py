@@ -21,23 +21,19 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 PKG = REPO / "mmorch"
 
-# Museo pre-existente (sin caller vivo al momento de crear el gate, W4.3). Deuda:
-# cablear o borrar; PROHIBIDO agregar entradas para código nuevo.
-_DEUDA_MUSEO = {
-    "task_type_classify",   # classify.py
-    "multiview_verify",     # ensemble.py
-    "embed_hybrid",         # exec_embedder.py
-    "backfill",             # intuition.py
-    "get_digest",           # memory.py
-    "sweep_transcript",     # outcomes.py
-    "unregister",           # projects.py
-    "prune",                # projects.py
-    "commit_rubric",        # rubric_loop.py
-    "reveal_rubric",        # rubric_loop.py
-    "read_notes",           # vault.py
-    "block_manifest",       # workflow_store.py
-    "block_scopes",         # workflow_store.py
-}
+# Museo pre-existente (W4.3, audit 2026-08). **SALDADA el 2026-09-01** (poda):
+# 13 entradas -> 0. Cuatro se borraron sin ceremonia (backfill, get_digest,
+# block_manifest, block_scopes: ni siquiera tenían test); siete se borraron con
+# sus tests (task_type_classify, multiview_verify, embed_hybrid, sweep_transcript,
+# commit_rubric, reveal_rubric, read_notes); dos se CABLEARON en vez de borrarse
+# (projects.prune -> paso de higiene en nightly.py, y projects.unregister -> unico
+# camino de baja, lo usa prune) porque eran el fix del hallazgo #19 al que solo le
+# faltaba un trigger.
+#
+# Vacía es el estado correcto: el gate vuelve a ser un ratchet duro. Una función
+# nueva sin caller ROMPE el test — es la señal, no una entrada más acá.
+# PROHIBIDO agregar entradas para código nuevo.
+_DEUDA_MUSEO: set[str] = set()
 
 
 def _init_public_api() -> set[str]:

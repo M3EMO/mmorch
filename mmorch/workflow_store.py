@@ -89,28 +89,12 @@ def get_block(bid: str):
             "derives_from": json.loads(r[6] or "[]"), "ts": r[7], "last_put_ts": r[8]}
 
 
-def block_manifest(limit: int = 200) -> list:
-    """Block metadata (no body) — for listing/inspection."""
-    with _LOCK:
-        rows = _CONN.execute(
-            "SELECT id,kind,mime,size,derives_from,ts,last_put_ts FROM blocks "
-            "ORDER BY last_put_ts DESC LIMIT ?", (max(1, min(int(limit), 1000)),)).fetchall()
-    return [{"id": r[0], "kind": r[1], "mime": r[2], "size": r[3],
-             "derives_from": json.loads(r[4] or "[]"), "ts": r[5], "last_put_ts": r[6]} for r in rows]
-
-
 def promote_block(bid: str, scope: str) -> bool:
     """Make a block visible beyond its task: scope = 'project:X' | 'global'. Idempotent."""
     with _LOCK:
         _CONN.execute("INSERT OR IGNORE INTO block_scope (block_id,scope) VALUES (?,?)", (bid, scope))
         _CONN.commit()
     return True
-
-
-def block_scopes(bid: str) -> list:
-    with _LOCK:
-        rows = _CONN.execute("SELECT scope FROM block_scope WHERE block_id=?", (bid,)).fetchall()
-    return [r[0] for r in rows]
 
 
 # ── checkpoints ───────────────────────────────────────────────────────────── #

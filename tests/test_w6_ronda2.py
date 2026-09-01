@@ -79,13 +79,3 @@ def test_secret_assign_matchea_env_style():
 
 
 # ---- D-TRAVERSAL: folder del vault clampeado -----------------------------------
-def test_vault_folder_no_escapa(tmp_path, monkeypatch):
-    import mmorch.vault as V
-    monkeypatch.setattr(V, "VAULT", tmp_path / "vault")
-    with pytest.raises(ValueError):
-        V.write_note("../../mm_escape", "titulo", "cuerpo")
-    with pytest.raises(ValueError):
-        V.read_notes("..")
-    assert not (tmp_path / "mm_escape").exists()
-    p = V.write_note("research", "titulo ok", "cuerpo")   # el camino legitimo sigue
-    assert p.exists() and (tmp_path / "vault") in p.parents

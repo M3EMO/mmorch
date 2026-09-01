@@ -5,15 +5,7 @@ import json
 import pytest
 
 from mmorch.iohelpers import atomic_write_json
-from mmorch.outcomes import (
-    ARM,
-    REWARD_BLANDO,
-    REWARD_DALE,
-    REWARD_NO,
-    expire_ignored,
-    record_verdict,
-    sweep_transcript,
-)
+from mmorch.outcomes import ARM, REWARD_BLANDO, REWARD_DALE, REWARD_NO, expire_ignored, record_verdict
 
 
 def match(project="proj1", status="pendiente", shown=0, note="note1.md", pid=None):
@@ -123,51 +115,3 @@ def write_transcript(tmp_path, lines):
 
 
 CARD = "💡 mmorch: la nota note1.md aplica a proj1 — aplica al ingest."
-
-
-def test_sweep_detects_card_and_dale(tmp_path):
-    logs = tmp_path / "logs"
-    write_state(logs, [match()])
-    t = write_transcript(tmp_path, [_tline("assistant", CARD),
-                                    _tline("user", "dale, arrancala")])
-    rec = RecorderFake()
-    result = sweep_transcript(t, logs_dir=str(logs), record_fn=rec)
-    assert result == {"cards_seen": 1, "verdicts": 1}
-    assert read_state(logs)["by_project"]["proj1"][0]["status"] == "aceptada"
-
-
-def test_sweep_without_card_records_nothing(tmp_path):
-    logs = tmp_path / "logs"
-    write_state(logs, [match()])
-    t = write_transcript(tmp_path, [_tline("user", "dale")])
-    rec = RecorderFake()
-    result = sweep_transcript(t, logs_dir=str(logs), record_fn=rec)
-    assert result == {"cards_seen": 0, "verdicts": 0}
-    assert rec.calls == []
-
-
-def test_sweep_does_not_duplicate_already_accepted(tmp_path):
-    logs = tmp_path / "logs"
-    write_state(logs, [match(status="aceptada")])
-    t = write_transcript(tmp_path, [_tline("assistant", CARD),
-                                    _tline("user", "dale")])
-    rec = RecorderFake()
-    result = sweep_transcript(t, logs_dir=str(logs), record_fn=rec)
-    assert result["verdicts"] == 0
-    assert rec.calls == []
-
-
-def test_sweep_ignores_non_user_verdict(tmp_path):
-    logs = tmp_path / "logs"
-    write_state(logs, [match()])
-    t = write_transcript(tmp_path, [_tline("assistant", CARD),
-                                    _tline("assistant", "dale")])
-    rec = RecorderFake()
-    result = sweep_transcript(t, logs_dir=str(logs), record_fn=rec)
-    assert result["verdicts"] == 0
-
-
-def test_sweep_missing_transcript(tmp_path):
-    result = sweep_transcript(str(tmp_path / "nope.jsonl"),
-                              logs_dir=str(tmp_path / "logs"))
-    assert result == {"cards_seen": 0, "verdicts": 0}

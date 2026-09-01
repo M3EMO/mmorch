@@ -451,6 +451,16 @@ def main() -> None:
     except Exception as e:
         rec["smoke"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
 
+    # higiene del registro de proyectos (audit-2026-08 #19): resolve() detecta un
+    # path muerto call-by-call pero nadie los saca, asi que projects.json acumula
+    # (tmpdirs de pytest, repos movidos). prune() existia desde el audit sin
+    # trigger — la noche ES el trigger. dry_run=False: es la accion, no el reporte.
+    try:
+        from mmorch.projects import prune as _prune_projects
+        rec["projects_prune"] = _prune_projects(dry_run=False)
+    except Exception as e:
+        rec["projects_prune"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
+
     # merge train: las amarillas del dia se conglomeran en UNA branch con gate
     # de integracion sobre la union -> un solo click humano por dia
     try:

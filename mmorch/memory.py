@@ -837,13 +837,3 @@ def refresh_digest(scope: str = "global", *, max_words: int = 180,
     op.parent.mkdir(parents=True, exist_ok=True)
     op.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"scope": scope, "words": len(digest.split()), "n_notes": len(rows)}
-
-
-def get_digest(scope: str = "global", *, out_path: Path | None = None) -> str | None:
-    """La vista global comprimida del scope (o None si nunca se generó). Barata (archivo);
-    pensada para inyectarse como contexto siempre-presente en planners/coders."""
-    op = out_path or _DIGEST_PATH
-    try:
-        return json.loads(op.read_text(encoding="utf-8"))[scope]["text"]
-    except (KeyError, json.JSONDecodeError, OSError):
-        return None

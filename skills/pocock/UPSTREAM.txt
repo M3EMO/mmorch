@@ -1,1 +1,7 @@
 upstream: https://github.com/mattpocock/skills @ 2ab9580 (2026-08-02)
+
+fork local (2026-08-31): `grill-me/` es una reescritura propia de `grilling/` de
+upstream (12 -> 60 lineas, checkpointing a un brainstorm file). Vivia SOLO en
+~/.claude/skills/ y sin git; `grilling/` upstream quedaba en el repo sin instalar,
+asi que sync_skills.py --check reportaba MISSING para siempre. Se borro el
+upstream y se versiono el vivo. Al re-vendorizar upstream, NO pisar grill-me/.

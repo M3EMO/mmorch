@@ -192,3 +192,36 @@ def test_budget_policies_get_lee_y_post_guarda(monkeypatch):
 
     r = c.post("/budget/policies", headers=H, json={"policies": [{"name": "x"}]})
     assert r.json() == {"saved": 1} and guardado == [[{"name": "x"}]]
+
+
+def test_chat_reply_incluye_historial_previo(monkeypatch):
+    """Bug medido 2026-08-31 (dogfood real via Lotus): _chat_reply guardaba cada
+    turno pero nunca lo releia -> el modelo respondia "no tengo memoria" porque
+    cada llamada era un solo turno aislado. chat_store mockeado (no toca chat.db
+    real) para aislar la logica de _chat_reply de su storage."""
+    S, c = _client(monkeypatch)
+    import mmorch.chat_store as CS
+    prior = [{"id": "m1", "role": "user", "text": "hola", "ts": 1.0},
+             {"id": "m2", "role": "assistant", "text": "hola, en que ayudo", "ts": 2.0}]
+    monkeypatch.setattr(CS, "history", lambda limit=30: {"messages": prior, "hasMore": False})
+    added = []
+    monkeypatch.setattr(CS, "add", lambda role, text, **k: added.append((role, text, k)) or
+                        {"id": "mN", "role": role, "text": text, **k})
+
+    seen_messages = []
+    def fake_call(model, messages, **kw):
+        seen_messages.append(messages)
+        return type("R", (), {"text": "segun lo que dijiste antes...", "cost_usd": 0.0})()
+    monkeypatch.setattr(PROV, "call", fake_call)
+
+    S._chat_reply("segundo mensaje")
+
+    assert len(seen_messages) == 1
+    msgs = seen_messages[0]
+    # system + los 2 turnos previos + el mensaje actual, EN ORDEN
+    assert [m["role"] for m in msgs] == ["system", "user", "assistant", "user"]
+    assert msgs[1]["content"] == "hola" and msgs[2]["content"] == "hola, en que ayudo"
+    assert msgs[3]["content"] == "segundo mensaje"
+    # se persiste el turno actual (user) y la respuesta (assistant), en ese orden
+    assert [a[0] for a in added] == ["user", "assistant"]
+    assert added[0][1] == "segundo mensaje"

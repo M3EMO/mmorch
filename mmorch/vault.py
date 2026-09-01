@@ -63,20 +63,6 @@ def write_note(folder: str, title: str, body: str, *, frontmatter: dict | None =
     return p
 
 
-def read_notes(folder: str) -> list[dict]:
-    """Lee notas de una carpeta. Devuelve [{path, title, frontmatter, body}]."""
-    out: list = []
-    d = _safe_folder(folder)
-    if not d.exists():
-        return out
-    for p in sorted(d.glob("*.md")):
-        txt = p.read_text(encoding="utf-8")
-        fm, body = _split_frontmatter(txt)
-        out.append({"path": str(p), "title": fm.get("title", p.stem),
-                    "frontmatter": fm, "body": body})
-    return out
-
-
 def _split_frontmatter(txt: str) -> tuple[dict, str]:
     if not txt.startswith("---"):
         return {}, txt

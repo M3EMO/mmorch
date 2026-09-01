@@ -4,7 +4,9 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**130 módulos · 47 MCP tools · 896 tests.**
+**129 módulos · 47 MCP tools · 874 tests.**
+
+El server expone **15** de esas 47 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
 
 ## Módulos
 
@@ -50,7 +52,6 @@ Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp
 | `mmorch/events.py` | events — bus de progreso in-process pa la UI live (nivel 3). El orquestador emite |
 | `mmorch/evolve.py` | evolve — subset DGM-inspirado, GATED (research: vault/research/ |
 | `mmorch/evolve_findings.py` | evolve_findings — fuente automática de hallazgos para el loop nocturno de auto-evolve |
-| `mmorch/exec_embedder.py` | exec_embedder — embedding por EJECUCION (huella de comportamiento), CERO entrenamiento. |
 | `mmorch/exec_policy.py` | exec_policy — where execution is allowed to run (graft G3 from paperclip). |
 | `mmorch/factory.py` | factory — mmorch como FÁBRICA de modelos (no ES el modelo, lo CONSTRUYE/entrena). |
 | `mmorch/feedback.py` | feedback — el lazo que faltaba (la 'loss' ausente). mmorch genera/verifica/ |

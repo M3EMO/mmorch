@@ -36,12 +36,13 @@ def _cos(a: list[float], b: list[float]) -> float:
 @dataclass
 class ShadowPrior:
     """Indexa (arm -> [(emb, reward)]) desde outcomes. prior_for da pseudo-conteos Beta.
-    embed_fn es PLUGGABLE: bge-small (default, texto), code_embedder (codigo, structural), o
-    exec_embedder.embed_hybrid (codigo EJECUTABLE: structural⊕behavioral, similitud FUNCIONAL).
+    embed_fn es PLUGGABLE: bge-small (default, texto) o code_embedder (codigo, structural).
     Cambiar la representacion es la palanca pa que el prior sea util (ver offline_improvement).
     NOTA (2026-06-15): los outcomes actuales tienen context = ETIQUETA corta (no codigo), asi que
-    los 3 embed_fn dan lo mismo (offline_improvement -0.067, el prior no ayuda en etiquetas).
-    embed_hybrid solo aporta cuando el context sea una funcion runnable (code_loop/rubric_loop)."""
+    los embed_fn dan lo mismo (offline_improvement -0.067, el prior no ayuda en etiquetas).
+    HUBO una tercera opcion, exec_embedder.embed_hybrid (structural⊕behavioral por EJECUCION),
+    que solo aportaba con context = funcion runnable. Nunca se enchufo a nada y se borro en la
+    poda 2026-09-01 (215 lineas); si el context llega a ser codigo corrible, esta en git."""
     scale: float = 0.0
     index: dict[str, list[tuple[list[float], float]]] = field(default_factory=dict)
     embed_fn: Callable | None = None

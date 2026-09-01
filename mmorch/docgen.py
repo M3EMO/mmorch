@@ -70,6 +70,20 @@ def mcp_tools() -> list[str]:
     return sorted(set(re.findall(r"def (mmorch_\w+)\s*\(", txt)))
 
 
+def tools_expuestas() -> int:
+    """Cuantas tools registra el server con el perfil por default ("core" desde
+    la poda 2026-08-30). El catalogo inventaria el CODIGO (47) — sin esto, un
+    lector cuenta 47 y el server le ofrece 15. Regex sobre el fuente, igual que
+    mcp_tools(): importar mcp_server aca levantaria el server entero."""
+    src = PKG / "mcp_server.py"
+    if not src.exists():
+        return 0
+    txt = src.read_text(encoding="utf-8")
+    m = re.search(r"_NOT_IN_CORE\s*=\s*frozenset\(\{(.*?)\}\)", txt, re.S)
+    fuera = set(re.findall(r'"(mmorch_\w+)"', m.group(1))) if m else set()
+    return len(set(mcp_tools()) - fuera)
+
+
 def stats() -> dict:
     n_mod = len([p for p in PKG.glob("*.py") if p.name not in _SKIP])
     tdir = ROOT / "tests"
@@ -77,7 +91,8 @@ def stats() -> dict:
     if tdir.exists():
         for tf in tdir.glob("test_*.py"):
             n_tests += len(re.findall(r"^\s*def test_\w+", tf.read_text(encoding="utf-8"), re.M))
-    return {"modules": n_mod, "tools": len(mcp_tools()), "tests": n_tests}
+    return {"modules": n_mod, "tools": len(mcp_tools()), "tests": n_tests,
+            "tools_expuestas": tools_expuestas()}
 
 
 def catalog_markdown() -> str:
@@ -90,6 +105,9 @@ def catalog_markdown() -> str:
         "Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y "
         "`mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.\n\n"
         f"**{s['modules']} módulos · {s['tools']} MCP tools · {s['tests']} tests.**\n\n"
+        f"El server expone **{s['tools_expuestas']}** de esas {s['tools']} con el perfil por "
+        "default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y "
+        "telemetría: `docs/cursor-setup.md`.\n\n"
         "## Módulos\n\n"
         f"{module_table()}\n\n"
         "## MCP tools\n\n"
@@ -101,7 +119,8 @@ def render_block(name: str) -> str:
     if name == "stats":
         s = stats()
         return (f"_Auto-generado por `mmorch.docgen`._ "
-                f"**{s['modules']} módulos · {s['tools']} MCP tools · {s['tests']} tests.** "
+                f"**{s['modules']} módulos · {s['tools']} MCP tools "
+                f"({s['tools_expuestas']} expuestas por default) · {s['tests']} tests.** "
                 "Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).")
     if name == "modules":
         return ("Tabla de módulos: [`docs/generated/catalog.md`](docs/generated/catalog.md). "

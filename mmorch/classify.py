@@ -160,17 +160,3 @@ class TaskTypeResult:
     strategy: str            # route_up | loop_budget | escalate_opus
     escalate: bool           # True -> el orquestador (Opus) decide (invalida/baja-conf)
     cost_usd: float = 0.0
-
-
-def task_type_classify(request: str, *, router_model: str = DEFAULT_ROUTER,
-                       threshold: float = 0.6, phase: str = "task_type") -> TaskTypeResult:
-    """Clasifica el request en storage vs manipulation y recomienda eje de gasto.
-    storage -> route_up (subir tier, loops no ayudan); manipulation -> loop_budget
-    (gastar computo interno). Escala a Opus si clase invalida o conf < threshold.
-    Etiqueta, no actua — el caller wirea handlers via classify_and_act(
-    classes=STORAGE_MANIP_CLASSES, ...) si quiere dispatch."""
-    cls, conf, cost = classify(request, STORAGE_MANIP_CLASSES, router_model=router_model, phase=phase)
-    cost = round(cost, 6)
-    if cls is None or conf < threshold:
-        return TaskTypeResult(cls, conf, "escalate_opus", True, cost)
-    return TaskTypeResult(cls, conf, STORAGE_MANIP_STRATEGY[cls], False, cost)

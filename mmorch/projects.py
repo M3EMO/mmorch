@@ -74,7 +74,8 @@ def prune(*, store: Path | None = None, dry_run: bool = True) -> dict[str, str]:
     data = _load(store)
     dead = {name: path for name, path in data.items() if not os.path.isdir(path)}
     if dead and not dry_run:
+        # via unregister() y no borrando el dict a mano: UN solo camino de baja
+        # del registro. Recarga por entrada, pero projects.json son unidades.
         for name in dead:
-            del data[name]
-        _save(data, store)
+            unregister(name, store=store)
     return dead

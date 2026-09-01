@@ -193,45 +193,6 @@ def _load(p: Path) -> list[dict]:
     return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()] if p.exists() else []
 
 
-def backfill(*, reset: bool = True, bandit_path: Path = _SIG_BANDIT) -> dict:
-    """One-time replay of the existing logs into the sig-bandit. reset=True rebuilds from
-    scratch (idempotent — safe to re-run). Returns a stats report."""
-    if reset and bandit_path.exists():
-        bandit_path.unlink()
-    b = ThompsonBandit(bandit_path)
-    sources = {
-        "feedback": (logs_dir() / "feedback.jsonl", "arm", "context", None),
-        "trajectories": (logs_dir() / "trajectories.jsonl", "gen_model", "task", None),
-        "workflow_obs": (logs_dir() / "workflow_obs.jsonl", None, "task", "domain"),
-    }
-    rep: dict = {"by_source": {}, "total_updates": 0}
-    for name, (path, armf, taskf, cplxf) in sources.items():
-        rows = _load(path)
-        n = 0
-        rewards = []
-        for r in rows:
-            task = (r.get(taskf) or "").strip()
-            rew = r.get("reward")
-            if not task or not isinstance(rew, (int, float)):
-                continue
-            model = (r.get(armf) if armf else None) or r.get("gen_model") or r.get("arm") or "unknown"
-            cplx = (r.get(cplxf) or "") if cplxf else ""
-            record(model, float(rew), task, complexity=cplx, bandit=b)
-            n += 1
-            rewards.append(float(rew))
-        rep["by_source"][name] = {
-            "rows": len(rows), "used": n,
-            "reward_mean": round(sum(rewards) / len(rewards), 3) if rewards else None,
-            "reward_variance": round(_var(rewards), 3) if len(rewards) > 1 else 0.0,
-        }
-        rep["total_updates"] += n
-    stats = b.stats()
-    rep["distinct_arms"] = len(stats)
-    sigs = {a.split("#", 1)[1] for a in stats if "#" in a}
-    rep["distinct_signatures"] = len(sigs)
-    return rep
-
-
 def _var(xs: list[float]) -> float:
     if len(xs) < 2:
         return 0.0

@@ -1,6 +1,5 @@
 """Outcome recording and expiry for proposals."""
 
-import json
 import re
 from pathlib import Path
 
@@ -93,64 +92,3 @@ def expire_ignored(*, logs_dir="logs", record_fn=None):
         _save_adjudications(data, logs_dir)
 
     return {"expired": expired}
-
-
-def sweep_transcript(transcript_path, *, logs_dir="logs", record_fn=None):
-    """Sweep a transcript for card patterns and verdicts."""
-    cards_seen = 0
-    verdicts = 0
-    pending_card = None
-
-    try:
-        with open(transcript_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    msg = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-                content = msg.get("message", {}).get("content")
-                if isinstance(content, list):
-                    text = ""
-                    for block in content:
-                        if block.get("type") == "text":
-                            text += block.get("text", "")
-                elif isinstance(content, str):
-                    text = content
-                else:
-                    continue
-
-                if pending_card is None:
-                    card_match = _CARD_RE.search(text)
-                    if card_match:
-                        note_filename = card_match.group(1)
-                        _project = card_match.group(2)
-                        pending_card = (note_filename, _project)
-                        cards_seen += 1
-                else:
-                    note_filename, project = pending_card
-                    stripped = text.strip().lower()
-                    role = msg.get("message", {}).get("role")
-                    # solo cuenta el veredicto del USUARIO: "dale..." o exactamente "no"
-                    if role == "user" and (stripped.startswith("dale") or stripped == "no"):
-                        verdict = "dale" if stripped.startswith("dale") else "no"
-                        data = _load_adjudications(logs_dir)
-                        match = None
-                        for m in data.get("by_project", {}).get(project, []):
-                            if m.get("note_path", "").endswith(note_filename):
-                                match = m
-                                break
-                        if match:
-                            result = record_verdict(
-                                match["id"], verdict, logs_dir=logs_dir, record_fn=record_fn
-                            )
-                            if result["recorded"]:
-                                verdicts += 1
-                        pending_card = None
-    except (OSError, IOError):
-        pass
-
-    return {"cards_seen": cards_seen, "verdicts": verdicts}
