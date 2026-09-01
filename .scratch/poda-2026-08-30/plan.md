@@ -98,7 +98,50 @@ lado. Son superficie huérfana.
 
 ---
 
-## T3 — Revisar antes de borrar. Evidencia parcial.
+## T3 — HECHO (2026-08-31). Y la mitad resultó load-bearing.
+
+Cursor estimó "4.000–6.000 líneas razonables" para T3. Verificado ítem por ítem,
+**lo borrable eran ~2.600**, y varias de sus sugerencias habrían roto cosas vivas.
+
+### Borrado (2.609 líneas)
+
+- **`.scratch/`**: 36 de 39 issues estaban `Status: resolved`. Los 3 abiertos se
+  **promovieron a bd** (`orchestration-hcv` P2 ensemble_verify en serie, `-p4s`
+  P3 memo cache, `-m7h` P3 migración DuckDB por operación) y los 3 esfuerzos se
+  borraron — regla propia: `.scratch/` vive lo que vive el esfuerzo.
+- **`docs/intuition-layer.md`** (167): verificado que el contenido es idéntico
+  al del vault ignorando frontmatter (`diff` de los cuerpos, vacío).
+
+**Excepción a la regla, encontrada al borrar:** `mmorch/loop_nightly.py` y
+`mmorch/proposals.py` citan `.scratch/loop-cerrado/spec.md` en sus docstrings, y
+`.claude/handoff.md` cita `.scratch/vault-global/spec.md`. Un item de `.scratch/`
+que algo de afuera referencia **sobrevivió a su esfuerzo**. Los dos `spec.md`
+(177 líneas) se restauraron; el resto de esos esfuerzos se fue.
+
+### NO borrado — Cursor se equivocó, cada uno verificado
+
+| Qué | Por qué se queda |
+|---|---|
+| `skills/pocock/` (876) | **Fuente de verdad** de las skills vendorizadas: `scripts/sync_skills.py` las copia a `~/.claude/skills/`. Incluye `wayfinder`, que el CLAUDE.md global manda usar, más `domain-modeling`/`prototype`/`research`/`grilling`, todas instaladas. Borrarlo huerfaniza las copias. |
+| `ablation_paired/prompt/symmetric.py` (1.002) | `README.md:146,149` los cita **por nombre** como la evidencia de §18.4 POWERED (n=350). Son el registro del experimento que ganó. |
+| `ALGORITHMS-MAP.md`, `SELF-EVOLUTION-PLAN.md` | `docs/production-readiness/05-known-defects-backlog.md:16,102` los declara explícitamente "seeds ⏳ gateados por problema medido — **NO son deuda**". Borrarlos contradice una decisión escrita. `SELF-EVOLUTION-PLAN.md` además lo cita `mmorch/nodes.py:4`. |
+| `AUDIT_2026-06-07.md`, `HANDOFF.md` | Filas vivas de la tabla de `05-known-defects-backlog.md`. Borrarlos deja la tabla con punteros muertos. |
+
+**La lección del tier:** una lista de poda hecha sin seguir referencias borra
+cosas vivas. Los cuatro casos de arriba se ven muertos desde afuera y no lo están.
+
+### Pendiente de decisión (no lo toqué)
+
+- `docs/superpowers/` (838). Es un esfuerzo SDD **completo** del 2026-06-18 (las
+  6 tareas cerradas) sobre `sessions.py`/`mmorch_ingest_session`, y nada externo
+  lo referencia. Pero incluye el **design spec** de ese módulo, que puede ser el
+  único que existe. Borrar el progress-log y conservar el spec sería lo coherente
+  con la excepción de arriba.
+- Las 14 funciones de `_DEUDA_MUSEO` (ahora 13, `run_ablation` se fue con T1).
+- Drift: `sync_skills.py --check` reporta `MISSING grilling` — la skill instalada
+  se llama `grill-me` y en el repo `grilling`.
+
+### Evidencia original
 
 | Qué | Líneas | Qué falta decidir |
 |---|---|---|
