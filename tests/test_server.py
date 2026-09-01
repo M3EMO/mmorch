@@ -305,3 +305,24 @@ def test_chat_lanza_job_solo_con_proyecto_real_y_target(monkeypatch):
     m = S._chat_reply("hola")
     # el add real siempre devuelve la clave; lo que importa es que venga vacia
     assert len(lanzados) == 1 and not m.get("job_id") and not m.get("status")
+
+
+def test_chat_no_persiste_la_caida_del_proveedor(monkeypatch):
+    """Una excepcion del proveedor NO es un turno del asistente: si se persistia, entraba
+    al historial (limit=30) y en la llamada siguiente el modelo leia '(mmorch offline: ...)'
+    como algo que el mismo habia dicho -- envenenaba la conversacion."""
+    S, _ = _client(monkeypatch)
+    import mmorch.chat_store as CS
+    monkeypatch.setattr(CS, "history", lambda **k: {"messages": []})
+    added = []
+    monkeypatch.setattr(CS, "add", lambda role, txt, **k: added.append((role, txt)) or
+                        {"role": role, "text": txt, **k})
+
+    def boom(*a, **k):
+        raise RuntimeError("provider 502")
+    monkeypatch.setattr("mmorch.schema.gated_json", boom)
+
+    m = S._chat_reply("hola")
+    assert "offline" in m["text"] and m.get("transient") is True
+    # el turno del usuario si se guarda; la falla NO
+    assert [r for r, _ in added] == ["user"]

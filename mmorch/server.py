@@ -434,7 +434,14 @@ def _chat_reply(text: str) -> dict:
                     kwargs={"job_id": job_id}, daemon=True).start()
                 reply = reply or f"Lanzando: {task[:80]}"
     except Exception as e:
-        reply = f"(mmorch offline: {str(e)[:120]})"
+        # Una caida del proveedor NO es un turno del asistente: persistirla la metia en
+        # el historial (limit=30) y en la proxima llamada el modelo leia "(mmorch
+        # offline: ...)" como algo que el mismo habia dicho. Se le avisa al usuario en
+        # el momento, pero no se contamina la conversacion.
+        import time as _t
+        return {"id": "msg-transient", "role": "assistant", "ts": _t.time() * 1000.0,
+                "text": f"(mmorch offline: {str(e)[:120]})", "engine": "",
+                "job_id": None, "status": None, "progress": None, "transient": True}
     # job_id/status van DENTRO del add (chat_store los persiste en la tabla): pegarlos
     # despues sobre el dict devuelto los perdia al recargar, y el job desaparecia del
     # hilo. El cliente pinta un job block real con esto (chat.js _renderMessage: isJob
@@ -997,7 +1004,21 @@ def build_app():
     if os.path.isdir(_lotus):
         from starlette.staticfiles import StaticFiles
         from starlette.routing import Mount
-        routes_extra.append(Mount("/lotus", StaticFiles(directory=_lotus, html=True), name="lotus"))
+
+        class _NoStaleStatic(StaticFiles):
+            """StaticFiles manda ETag+Last-Modified pero NO Cache-Control, asi que el
+            browser aplica heuristic caching y puede servir un modulo ES viejo sin
+            revalidar. Medido 2026-09-01: tras agregar la vista Inbox, el sidebar
+            cacheado seguia mostrando 6 solapas mientras el archivo servido ya traia 7
+            -- una feature nueva invisible, en silencio, sin forma de que el usuario se
+            entere. 'no-cache' no desactiva el cache: obliga a revalidar, y el ETag
+            sigue devolviendo 304 cuando no cambio nada."""
+            def file_response(self, *a, **k):
+                resp = super().file_response(*a, **k)
+                resp.headers.setdefault("Cache-Control", "no-cache")
+                return resp
+
+        routes_extra.append(Mount("/lotus", _NoStaleStatic(directory=_lotus, html=True), name="lotus"))
     return Starlette(middleware=middleware,
                      exception_handlers={json.JSONDecodeError: _bad_json_body,
                                          UnicodeDecodeError: _bad_json_body},
