@@ -72,6 +72,39 @@ def test_sse_requires_token(monkeypatch):
     assert c.get("/events").status_code == 401
 
 
+def test_event_ids_assigned_monotonic():
+    # events.py: EventBus.publish() ahora asigna Event.id (monotonico, thread-safe
+    # bajo el mismo lock que el ring buffer) -- base de AT-L7.
+    b = EVT.EventBus()
+    e1 = EVT.Event(type="job", status="running", job_id="j1")
+    e2 = EVT.Event(type="job", status="done", job_id="j1")
+    b.publish(e1); b.publish(e2)
+    assert e1.id > 0 and e2.id > e1.id
+
+
+def test_parse_last_event_id(monkeypatch):
+    S, _ = _client(monkeypatch)
+    assert S._parse_last_event_id(None) == 0
+    assert S._parse_last_event_id("") == 0
+    assert S._parse_last_event_id("42") == 42
+    assert S._parse_last_event_id("no-es-un-numero") == 0   # header corrupto -> no crashea, no filtra
+
+
+def test_sse_replay_filters_events_client_already_has(monkeypatch):
+    # AT-L7 (Lotus): el replay inicial de recent(30) ya no reenvia a ciegas -- filtra
+    # contra Last-Event-ID, misma logica que corre dentro de sse_events.gen().
+    S, _ = _client(monkeypatch)
+    S.bus().publish(EVT.Event(type="job", status="running", job_id="j1"))
+    ev_seen = EVT.Event(type="job", status="done", job_id="j1")
+    S.bus().publish(ev_seen)
+    ev_new = EVT.Event(type="job", status="done", job_id="j2")
+    S.bus().publish(ev_new)
+
+    last_id = S._parse_last_event_id(str(ev_seen.id))
+    replay = [e for e in S.bus().recent(30) if e.id > last_id]
+    assert ev_new in replay and ev_seen not in replay
+
+
 def test_run_rubric_auth_and_executes(monkeypatch):
     S, c = _client(monkeypatch)
     # sin token -> 401
@@ -209,10 +242,10 @@ def test_chat_reply_incluye_historial_previo(monkeypatch):
                         {"id": "mN", "role": role, "text": text, **k})
 
     seen_messages = []
-    def fake_call(model, messages, **kw):
+    def fake_gated(model, messages, **kw):
         seen_messages.append(messages)
-        return type("R", (), {"text": "segun lo que dijiste antes...", "cost_usd": 0.0})()
-    monkeypatch.setattr(PROV, "call", fake_call)
+        return {"reply": "segun lo que dijiste antes...", "action": "none"}
+    monkeypatch.setattr("mmorch.schema.gated_json", fake_gated)
 
     S._chat_reply("segundo mensaje")
 
@@ -225,3 +258,48 @@ def test_chat_reply_incluye_historial_previo(monkeypatch):
     # se persiste el turno actual (user) y la respuesta (assistant), en ese orden
     assert [a[0] for a in added] == ["user", "assistant"]
     assert added[0][1] == "segundo mensaje"
+
+
+def test_chat_lanza_job_solo_con_proyecto_real_y_target(monkeypatch):
+    """El chat puede EJECUTAR (decision de producto 2026-09-01: modelo JARVIS), pero
+    nunca confiando en el modelo: el proyecto tiene que estar en el registro real y el
+    target_file no puede faltar (server_engine.py:271 mata el job si falta)."""
+    S, _ = _client(monkeypatch)
+    import mmorch.chat_store as CS
+    monkeypatch.setattr(CS, "history", lambda **k: {"messages": []})
+    monkeypatch.setattr(CS, "add", lambda role, txt, **k: {"role": role, "text": txt})
+    monkeypatch.setattr(S, "list_projects", lambda: {"real": "/tmp/real"}, raising=False)
+    import mmorch.projects as P
+    monkeypatch.setattr(P, "list_projects", lambda **k: {"real": "/tmp/real"})
+
+    lanzados = []
+    monkeypatch.setattr(S, "_run_project_job", lambda *a, **k: lanzados.append((a, k)))
+
+    def fake_gated(model, msgs, **kw):
+        return dict(fake_gated.out)
+    monkeypatch.setattr("mmorch.schema.gated_json", fake_gated)
+
+    # 1) proyecto inventado -> NO lanza, y lo dice
+    fake_gated.out = {"reply": "dale", "action": "run_project",
+                      "project": "inventado", "target_file": "a.py", "task": "x"}
+    m = S._chat_reply("implementa x")
+    assert not lanzados and "no es un proyecto registrado" in m["text"]
+
+    # 2) sin target_file -> NO lanza (el server haria fail-fast)
+    fake_gated.out = {"reply": "dale", "action": "run_project",
+                      "project": "real", "target_file": "", "task": "x"}
+    m = S._chat_reply("implementa x")
+    assert not lanzados and "archivo objetivo" in m["text"]
+
+    # 3) todo completo -> lanza de verdad y devuelve job_id para el job block
+    fake_gated.out = {"reply": "lanzando", "action": "run_project",
+                      "project": "real", "target_file": "a.py", "task": "implementa x"}
+    m = S._chat_reply("implementa x")
+    assert len(lanzados) == 1
+    assert lanzados[0][0][0] == "real" and lanzados[0][0][5] == "a.py"
+    assert m["job_id"] and m["status"] == "running"
+
+    # 4) charla normal -> ni job ni job_id
+    fake_gated.out = {"reply": "hola", "action": "none"}
+    m = S._chat_reply("hola")
+    assert len(lanzados) == 1 and "job_id" not in m

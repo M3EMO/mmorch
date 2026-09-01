@@ -25,6 +25,7 @@ class Event:
     ts: float = 0.0
     detail: str = ""
     extra: dict = field(default_factory=dict)
+    id: int = 0                # asignado por EventBus.publish() (monotonico, para SSE id:/Last-Event-ID)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -36,6 +37,7 @@ class EventBus:
         self._subs: list[queue.Queue] = []
         self._lock = threading.Lock()
         self._ring: deque = deque(maxlen=ring)
+        self._next_id: int = 1
 
     def subscribe(self) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=1000)
@@ -52,6 +54,8 @@ class EventBus:
         if not ev.ts:
             ev.ts = time.time()
         with self._lock:
+            ev.id = self._next_id
+            self._next_id += 1
             self._ring.append(ev)
             subs = list(self._subs)
         for q in subs:

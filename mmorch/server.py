@@ -147,6 +147,16 @@ async def curation_verdict(request):
         return JSONResponse({"ok": False, "error": str(e)[:200]}, status_code=500)
 
 
+def _parse_last_event_id(header_value: str | None) -> int:
+    """AT-L7 (Lotus): parseo puro del header Last-Event-ID -> testeable sin abrir
+    un stream HTTP real (el generador de sse_events bloquea en q.get, no apto para
+    un test sincrono corto)."""
+    try:
+        return int(header_value) if header_value else 0
+    except ValueError:
+        return 0
+
+
 async def sse_events(request):
     from starlette.responses import StreamingResponse
     if not _token_ok(request):
@@ -154,14 +164,20 @@ async def sse_events(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     q = bus().subscribe()
 
+    # honrar Last-Event-ID de verdad, no solo re-mandar recent(30) a ciegas en
+    # cada conexion. Header case-insensitive via Starlette headers dict.
+    last_id = _parse_last_event_id(request.headers.get("last-event-id"))
+
     def gen():
         for e in bus().recent(30):
-            yield f"data: {json.dumps(e.to_dict(), default=str)}\n\n"
+            if e.id <= last_id:
+                continue  # el cliente ya lo tiene -- evita el resend ciego que forzaba el dedup del lado cliente
+            yield f"id: {e.id}\ndata: {json.dumps(e.to_dict(), default=str)}\n\n"
         try:
             while True:
                 try:
                     ev = q.get(timeout=15)
-                    yield f"data: {json.dumps(ev.to_dict(), default=str)}\n\n"
+                    yield f"id: {ev.id}\ndata: {json.dumps(ev.to_dict(), default=str)}\n\n"
                 except Exception:
                     yield ": keepalive\n\n"
         finally:
@@ -348,24 +364,84 @@ async def approve_job(request):
 
 
 def _chat_reply(text: str) -> dict:
-    """Store the user msg, generate a terse reply via a cheap model (cero cupo), store + return it."""
+    """Store the user msg, generate a terse reply via a cheap model (cero cupo), store + return it.
+
+    Bug medido 2026-08-31 (dogfood real via Lotus): guardaba cada turno en chat_store
+    pero NUNCA releia el historial para la llamada al modelo -- cada mensaje era una
+    conversacion aislada de un solo turno, "no tengo memoria" era literal, no
+    alucinacion. Fix: chat_store.history(limit=30) ya existe con fidelidad completa
+    (mismo default que usa /chat/history para la UI) -- ventana simple, sin
+    infraestructura nueva (se evaluo babel/blocks explicitamente: babel es
+    compresion con perdida para notas de research que se leen rara vez, mal fit para
+    los ultimos turnos que necesitan fidelidad alta; blocks son para linaje de
+    artefactos de build, no aplica a una conversacion lineal)."""
     from . import chat_store
+    from .projects import list_projects
+    # leer ANTES de persistir el turno actual, para no duplicarlo en el prompt
+    prior = chat_store.history(limit=30)["messages"]
     chat_store.add("user", text)
-    reply, engine = "", ""
+    reply, engine, job_id = "", "", None
+    known = sorted(list_projects())
     try:
-        from .providers import call
         from .config import DEFAULT_GENERATOR
-        sysmsg = ("You are Lotus, a terse coding assistant backed by mmorch. If the user describes a "
-                  "coding task, say briefly how you'd route it (project edit / rubric / fan_out) and "
-                  "what you need (project, target file). Otherwise answer directly. Keep it short.")
-        r = call(DEFAULT_GENERATOR, [{"role": "system", "content": sysmsg},
-                                     {"role": "user", "content": text}],
-                 pattern="chat", node="chat", max_tokens=512)
-        reply = (r.text or "").strip()
+        from .schema import gated_json
+        sysmsg = (
+            "Sos Lotus, un asistente de codigo conciso respaldado por mmorch. Podes EJECUTAR "
+            "tareas de codigo de verdad, no solo hablar de ellas.\n"
+            f"Proyectos registrados (los unicos que podes tocar): {known or 'ninguno'}.\n\n"
+            "Devolve SIEMPRE JSON con este shape:\n"
+            '{"reply": "<lo que le decis al usuario>", "action": "none"|"run_project", '
+            '"project": "", "target_file": "", "task": ""}\n\n'
+            "Regla: usa action='run_project' SOLO si ya tenes las tres cosas: un `project` de la "
+            "lista de arriba, un `target_file` (ruta relativa dentro de ese proyecto) y una `task` "
+            "clara y autocontenida. Si falta cualquiera, usa action='none' y PEDI lo que falta en "
+            "`reply`, en una sola pregunta corta. Nunca inventes un proyecto que no este en la "
+            "lista. Para charla que no es una tarea de codigo, action='none' y responde normal.\n\n"
+            "IMPORTANTE sobre el tono de `reply`: con action='run_project' el job ARRANCA en el "
+            "acto. No pidas confirmacion ('¿lo hago ahora?' es incorrecto, ya lo estas haciendo): "
+            "deci en presente que lo estas ejecutando y sobre que archivo.")
+        history_msgs = [{"role": m["role"], "content": m["text"]} for m in prior]
+        out = gated_json(
+            DEFAULT_GENERATOR,
+            [{"role": "system", "content": sysmsg}, *history_msgs,
+             {"role": "user", "content": text}],
+            schema={"type": "object", "required": ["reply", "action"], "properties": {
+                "reply": {"type": "string"},
+                "action": {"type": "string", "enum": ["none", "run_project"]},
+                "project": {"type": "string"}, "target_file": {"type": "string"},
+                "task": {"type": "string"}}},
+            pattern="chat", node="chat")
+        reply = (out.get("reply") or "").strip()
         engine = DEFAULT_GENERATOR
+        if out.get("action") == "run_project":
+            # NUNCA confiar en el modelo para esto: el proyecto tiene que estar en el
+            # registro real y el target_file no puede estar vacio (server_engine.py:271
+            # hace fail-fast con engine=mmorch y el job moriria en milisegundos).
+            proj = (out.get("project") or "").strip()
+            tf = (out.get("target_file") or "").strip()
+            task = (out.get("task") or "").strip() or text
+            if proj not in known:
+                reply = (f"No puedo: '{proj}' no es un proyecto registrado. "
+                         f"Registrados: {known or 'ninguno'}.")
+            elif not tf:
+                reply = "Necesito el archivo objetivo (ruta relativa dentro del proyecto)."
+            else:
+                import uuid as _u
+                job_id = _u.uuid4().hex[:10]
+                threading.Thread(
+                    target=_run_project_job,
+                    args=(proj, task, "plan", False, "mmorch", tf, None, "local"),
+                    kwargs={"job_id": job_id}, daemon=True).start()
+                reply = reply or f"Lanzando: {task[:80]}"
     except Exception as e:
         reply = f"(mmorch offline: {str(e)[:120]})"
-    return chat_store.add("assistant", reply or "(no reply)", engine=engine)
+    msg = chat_store.add("assistant", reply or "(no reply)", engine=engine)
+    if job_id:
+        # el cliente pinta un job block real con esto (chat.js _renderMessage: isJob
+        # exige job_id + status), asi que la tarea se sigue desde el mismo hilo.
+        msg["job_id"] = job_id
+        msg["status"] = "running"
+    return msg
 
 
 async def chat_handler(request):
