@@ -435,13 +435,12 @@ def _chat_reply(text: str) -> dict:
                 reply = reply or f"Lanzando: {task[:80]}"
     except Exception as e:
         reply = f"(mmorch offline: {str(e)[:120]})"
-    msg = chat_store.add("assistant", reply or "(no reply)", engine=engine)
-    if job_id:
-        # el cliente pinta un job block real con esto (chat.js _renderMessage: isJob
-        # exige job_id + status), asi que la tarea se sigue desde el mismo hilo.
-        msg["job_id"] = job_id
-        msg["status"] = "running"
-    return msg
+    # job_id/status van DENTRO del add (chat_store los persiste en la tabla): pegarlos
+    # despues sobre el dict devuelto los perdia al recargar, y el job desaparecia del
+    # hilo. El cliente pinta un job block real con esto (chat.js _renderMessage: isJob
+    # exige job_id + status), asi que la tarea se sigue desde la conversacion misma.
+    return chat_store.add("assistant", reply or "(no reply)", engine=engine,
+                          job_id=job_id, status="running" if job_id else None)
 
 
 async def chat_handler(request):

@@ -267,7 +267,8 @@ def test_chat_lanza_job_solo_con_proyecto_real_y_target(monkeypatch):
     S, _ = _client(monkeypatch)
     import mmorch.chat_store as CS
     monkeypatch.setattr(CS, "history", lambda **k: {"messages": []})
-    monkeypatch.setattr(CS, "add", lambda role, txt, **k: {"role": role, "text": txt})
+    # fiel al add real (chat_store.py:33): persiste job_id/status y los devuelve
+    monkeypatch.setattr(CS, "add", lambda role, txt, **k: {"role": role, "text": txt, **k})
     monkeypatch.setattr(S, "list_projects", lambda: {"real": "/tmp/real"}, raising=False)
     import mmorch.projects as P
     monkeypatch.setattr(P, "list_projects", lambda **k: {"real": "/tmp/real"})
@@ -302,4 +303,5 @@ def test_chat_lanza_job_solo_con_proyecto_real_y_target(monkeypatch):
     # 4) charla normal -> ni job ni job_id
     fake_gated.out = {"reply": "hola", "action": "none"}
     m = S._chat_reply("hola")
-    assert len(lanzados) == 1 and "job_id" not in m
+    # el add real siempre devuelve la clave; lo que importa es que venga vacia
+    assert len(lanzados) == 1 and not m.get("job_id") and not m.get("status")
