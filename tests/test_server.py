@@ -326,3 +326,49 @@ def test_chat_no_persiste_la_caida_del_proveedor(monkeypatch):
     assert "offline" in m["text"] and m.get("transient") is True
     # el turno del usuario si se guarda; la falla NO
     assert [r for r, _ in added] == ["user"]
+
+
+def test_projects_delete_saca_del_registro(monkeypatch, tmp_path):
+    """Se podia registrar un proyecto y nunca sacarlo desde la app (projects.unregister
+    existia pero el server no lo exponia): la unica salida era editar projects.json."""
+    S, c = _client(monkeypatch)
+    import mmorch.projects as P
+    store = tmp_path / "projects.json"
+    monkeypatch.setattr(P, "PROJECTS_PATH", store, raising=False)
+    monkeypatch.setattr(P, "_load", lambda s=None: __import__("json").loads(store.read_text()) if store.exists() else {})
+    monkeypatch.setattr(P, "_save", lambda d, s=None: store.write_text(__import__("json").dumps(d)))
+
+    d = tmp_path / "proy"
+    d.mkdir()
+    assert c.post("/projects", headers=H, json={"name": "p1", "path": str(d)}).status_code == 200
+    assert "p1" in c.get("/projects", headers=H).json()["projects"]
+
+    r = c.request("DELETE", "/projects?name=p1", headers=H)
+    assert r.status_code == 200 and r.json()["existia"] is True
+    assert "p1" not in c.get("/projects", headers=H).json()["projects"]
+
+    # idempotente: borrar dos veces no revienta, solo dice que no estaba
+    assert c.request("DELETE", "/projects?name=p1", headers=H).json()["existia"] is False
+    # sin nombre -> 400, no un borrado silencioso de nada
+    assert c.request("DELETE", "/projects", headers=H).status_code == 400
+    # sigue exigiendo token
+    assert c.request("DELETE", "/projects?name=p1").status_code == 401
+
+
+def test_fleet_delete_saca_el_host(monkeypatch, tmp_path):
+    """Simetrico a POST /fleet: sin esto habia que borrar hosts.json a mano."""
+    S, c = _client(monkeypatch)
+    import mmorch.fleet as F
+    store = tmp_path / "hosts.json"
+    monkeypatch.setattr(F, "_load", lambda s=None: __import__("json").loads(store.read_text()) if store.exists() else {})
+    monkeypatch.setattr(F, "_save", lambda d, s=None: store.write_text(__import__("json").dumps(d)))
+
+    assert c.post("/fleet", headers=H, json={"name": "h1", "url": "http://127.0.0.1:9", "token": "t"}).status_code == 200
+    assert "h1" in c.get("/fleet", headers=H).json()["hosts"]
+
+    r = c.request("DELETE", "/fleet?name=h1", headers=H)
+    assert r.status_code == 200 and r.json()["existia"] is True
+    assert "h1" not in c.get("/fleet", headers=H).json()["hosts"]
+    assert c.request("DELETE", "/fleet?name=h1", headers=H).json()["existia"] is False
+    assert c.request("DELETE", "/fleet", headers=H).status_code == 400
+    assert c.request("DELETE", "/fleet?name=h1").status_code == 401

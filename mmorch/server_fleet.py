@@ -20,7 +20,7 @@ async def fleet_handler(request):
     from starlette.responses import JSONResponse
     if not _token_ok(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    from .fleet import list_hosts, register_host, fleet_state
+    from .fleet import list_hosts, register_host, unregister_host, fleet_state
     if request.method == "POST":
         body = await request.json()
         try:
@@ -28,6 +28,13 @@ async def fleet_handler(request):
             return JSONResponse({"registered": r})
         except Exception as e:
             return JSONResponse({"error": str(e)[:200]}, status_code=400)
+    if request.method == "DELETE":
+        # Simetrico a POST: se podia agregar un host y nunca sacarlo (habia que borrar
+        # hosts.json a mano). Solo saca la entrada del registro local; no toca ese server.
+        name = request.query_params.get("name", "")
+        if not name:
+            return JSONResponse({"error": "falta ?name="}, status_code=400)
+        return JSONResponse({"unregistered": name, "existia": unregister_host(name)})
     return JSONResponse({"hosts": list_hosts(), "state": fleet_state()})
 
 

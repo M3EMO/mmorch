@@ -38,6 +38,19 @@ def register_host(name: str, url: str, token: str = "", *, store: Path | None = 
     return {"name": name, "url": data[name]["url"]}
 
 
+def unregister_host(name: str, *, store: Path | None = None) -> bool:
+    """Saca un host del registro. Devuelve False si no estaba (idempotente para el caller).
+
+    Faltaba: se podia registrar un host y nunca sacarlo desde la app — para limpiar habia
+    que editar hosts.json a mano. Espeja projects.unregister(), que si existia."""
+    data = _load(store)
+    if name in data:
+        del data[name]
+        _save(data, store)
+        return True
+    return False
+
+
 def list_hosts(*, store: Path | None = None) -> dict:
     return _load(store)
 

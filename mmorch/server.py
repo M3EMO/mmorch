@@ -236,7 +236,7 @@ async def projects_handler(request):
     from starlette.responses import JSONResponse
     if not _token_ok(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    from .projects import list_projects, register
+    from .projects import list_projects, register, unregister
     if request.method == "POST":
         body = await request.json()
         try:
@@ -244,6 +244,14 @@ async def projects_handler(request):
             return JSONResponse({"registered": r})
         except Exception as e:
             return JSONResponse({"error": str(e)[:200]}, status_code=400)
+    if request.method == "DELETE":
+        # Se podia registrar un proyecto y nunca sacarlo desde la app: la unica salida
+        # era editar projects.json a mano. Solo saca la ENTRADA del registro; no toca
+        # una sola linea del disco del proyecto.
+        name = request.query_params.get("name", "")
+        if not name:
+            return JSONResponse({"error": "falta ?name="}, status_code=400)
+        return JSONResponse({"unregistered": name, "existia": unregister(name)})
     return JSONResponse({"projects": list_projects()})
 
 
@@ -1031,7 +1039,7 @@ def build_app():
         Route("/events", sse_events),
         Route("/run/rubric", run_rubric, methods=["POST"]),
         Route("/run/fanout", run_fanout, methods=["POST"]),
-        Route("/projects", projects_handler, methods=["GET", "POST"]),
+        Route("/projects", projects_handler, methods=["GET", "POST", "DELETE"]),
         Route("/run/project", run_project, methods=["POST"]),
         Route("/run/workflow", run_workflow, methods=["POST"]),
         Route("/chat", chat_handler, methods=["POST"]),
@@ -1060,7 +1068,7 @@ def build_app():
         Route("/pty/{sid}/resize", pty_resize, methods=["POST"]),
         Route("/pty/{sid}/close", pty_close, methods=["POST"]),
         Route("/sync/pull", sync_pull, methods=["POST"]),
-        Route("/fleet", fleet_handler, methods=["GET", "POST"]),
+        Route("/fleet", fleet_handler, methods=["GET", "POST", "DELETE"]),
         Route("/fleet/run", fleet_run, methods=["POST"]),
         Route("/kill/{job_id}", kill_job, methods=["POST"]),
         Route("/approve/{job_id}", approve_job, methods=["POST"]),
