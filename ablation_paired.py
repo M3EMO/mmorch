@@ -142,10 +142,20 @@ def build_gold(n: int, seed: int) -> list[dict]:
 # --------------------------------------------------------------------------- #
 # verificacion                                                                 #
 # --------------------------------------------------------------------------- #
+# El vocabulario ANCLADO es obligatorio: _parse_verdict (patterns.py) fue endurecido el
+# 2026-08-28 (commit 3897345) para que el formato legacy {"passed": bool} SOLO pueda
+# refutar -- un verificador hijackeado no puede aprobar emitiendo passed:true. Una
+# aprobacion exige {"verdict": "correcto"}. Esta ablacion pedia el formato viejo y por
+# eso la corrida del 2026-09-04 dio especificidad 0.0 en AMBOS brazos con cero pares
+# discordantes: el parser refutaba todo, se medía el arnes y no a los modelos.
 _VERIFY_SYS = (
     "Verificador adversarial. Resolve el problema vos mismo y compara con la respuesta "
-    "propuesta. Refuta por default. passed=true SOLO si la respuesta propuesta es "
-    'numericamente correcta. JSON: {"passed": bool, "confidence": 0..1, "refutations": [string]}'
+    "propuesta. Refuta por default: asumi que esta mal hasta probar lo contrario. "
+    'Respondé SOLO con JSON minificado: {"verdict": "correcto"|"incorrecto_menor"|'
+    '"incorrecto_grave", "refutations": [string, ...]}. '
+    "Anclas: correcto = la respuesta propuesta es numericamente correcta; "
+    "incorrecto_menor = correcta en el metodo pero con un desvio acotado; "
+    "incorrecto_grave = numericamente incorrecta."
 )
 
 
@@ -243,6 +253,25 @@ def estimate_cost(n: int) -> float:
 # --------------------------------------------------------------------------- #
 # main                                                                         #
 # --------------------------------------------------------------------------- #
+def _save_result(payload: dict) -> None:
+    """Append-only de resultados de ablacion a logs/ablation_results.jsonl.
+
+    Un experimento que no persiste su output no ocurrio: las corridas del 2026-06-08
+    (6.190 llamadas, US$2,15) se perdieron exactamente por no tener esto. Los scripts
+    son deterministas (seed fija), asi que el registro es reproducible.
+    """
+    import json as _json
+    import pathlib as _pl
+    import time as _t
+    payload.setdefault("ts", _t.time())
+    payload.setdefault("fecha", _t.strftime("%Y-%m-%d %H:%M"))
+    out = _pl.Path(__file__).resolve().parent / "logs" / "ablation_results.jsonl"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "a", encoding="utf-8") as fh:
+        fh.write(_json.dumps(payload, ensure_ascii=False, default=str) + chr(10))
+    print(chr(10) + "[guardado] " + str(out))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=350)
@@ -328,6 +357,18 @@ def main():
         print(f"  {mc.get('note')}")
     print("\nNOTA: esto mide PODER DE DETECCION por familia de verificador (pareado), "
           "NO el blind-spot generativo (error propio). Ver docstring.")
+
+
+    _save_result({
+        "experimento": "ablation_paired",
+        "pregunta": "poder de deteccion por FAMILIA de verificador (diseno pareado, McNemar)",
+        "n": len(rows), "seed": args.seed, "costo_usd": round(cost, 4),
+        "verificadores": {"self": SELF_VERIFIER, "cross": CROSS_VERIFIER},
+        "accuracy": {"self": round(self_acc, 4), "cross": round(cross_acc, 4)},
+        "por_brazo": {arm: _arm_stats(rows, arm) for arm in ("self", "cross")},
+        "mcnemar": mc,
+        "descartados_por_api": dropped,
+    })
 
 
 if __name__ == "__main__":
