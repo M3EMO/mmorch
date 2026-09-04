@@ -1,6 +1,21 @@
 {
-  "_comment": "Override de DATOS (zona amarilla, reversible). Solo price_cache_in: precio del input CACHEADO (cache-hit) por 1M tok. price_in/price_out NO se overridean aca (siguen viniendo de config.py). DeepSeek V4 cobra el cache-hit ~50x mas barato. price_asof = fecha de verificacion del precio; >90 dias dispara warning (W3.4). Re-verificar (volatil).",
-  "deepseek-chat": { "price_cache_in": 0.0028, "price_asof": "2026-06-01" },
-  "deepseek-reasoner": { "price_cache_in": 0.0028, "price_asof": "2026-06-01" },
-  "deepseek-v4-pro": { "price_cache_in": 0.0145, "price_asof": "2026-06-01" }
+  "_comment": "Override de DATOS (zona amarilla, reversible). Solo price_cache_in: precio del input CACHEADO (cache-hit) por 1M tok. price_in/price_out NO se overridean aca (siguen viniendo de config.py). price_asof = fecha de verificacion; >90 dias dispara warning (W3.4). Re-verificar (volatil).",
+  "_verificado_2026-09-04": "Fuente: api-docs.deepseek.com/quick_start/pricing. DeepSeek introdujo precios PEAK/OFF-PEAK el 2026-08-16: off-peak = la mitad de peak (peak 01:00-04:00 y 06:00-10:00 UTC, lun-vie). Se registra el precio PEAK a proposito: para un guard de presupuesto, subestimar es la direccion peligrosa. Off-peak sale la mitad, asi que el gasto real siempre queda por DEBAJO de lo estimado, nunca por encima.",
+  "_correccion": "Los valores anteriores (asof 2026-06-01) subestimaban el cache-hit entre 3x y 5x: deepseek-chat estaba en 0.0028 contra 0.014 real de peak, y v4-pro en 0.0145 contra 0.044. El lineup tambien cambio: la tabla oficial ya solo lista v4-flash / v4-pro / v4-flash-vision-exp.",
+
+  "deepseek-chat": {
+    "price_cache_in": 0.014,
+    "price_asof": "2026-09-04",
+    "_nota": "12.093 llamadas, el modelo mas usado del sistema. 'deepseek-chat' ya no figura en la tabla oficial pero el alias sigue vivo (probado 2026-09-04): apunta al workhorse, hoy deepseek-v4-flash. Precio = cache-hit PEAK de v4-flash ($0.014/1M; off-peak $0.007)."
+  },
+  "deepseek-v4-pro": {
+    "price_cache_in": 0.044,
+    "price_asof": "2026-09-04",
+    "_nota": "cache-hit PEAK de la tabla oficial ($0.044/1M; off-peak $0.022)."
+  },
+  "deepseek-reasoner": {
+    "price_cache_in": 0.044,
+    "price_asof": "2026-09-04",
+    "_nota": "NO VERIFICADO: 'deepseek-reasoner' ya no aparece en la tabla oficial de precios. Se le asigna el precio del tier caro (v4-pro) por conservador -- si el real es menor, se sobrestima, que es la direccion segura. Solo 14 llamadas historicas, asi que el impacto en el presupuesto es despreciable. Reemplazar por el valor real cuando se confirme."
+  }
 }
