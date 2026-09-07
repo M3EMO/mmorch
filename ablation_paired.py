@@ -273,16 +273,31 @@ def _save_result(payload: dict) -> None:
 
 
 def main():
+    global SELF_VERIFIER, CROSS_VERIFIER
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=350)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--yes", action="store_true")
     ap.add_argument("--dry", action="store_true")
+    # Los brazos son parametricos para poder desconfundir FAMILIA de CAPACIDAD: el
+    # resultado del 2026-09-04 (self 0.75 vs cross 0.99 acc. balanceada) se corrio con UN
+    # modelo por familia, asi que "otra familia" y "mejor en aritmetica" son la misma
+    # variable. Mismo --seed => los mismos N items => todas las corridas comparan directo.
+    ap.add_argument("--self", dest="self_v", default=SELF_VERIFIER)
+    ap.add_argument("--cross", dest="cross_v", default=CROSS_VERIFIER)
+    ap.add_argument("--allow-same-family", action="store_true",
+                    help="permite un par intra-familia (control: aisla capacidad de familia)")
     args = ap.parse_args()
 
+    SELF_VERIFIER, CROSS_VERIFIER = args.self_v, args.cross_v
+
     if family_of(SELF_VERIFIER) == family_of(CROSS_VERIFIER):
-        sys.exit("config rota: SELF y CROSS comparten familia (no es cross-family).")
+        if not args.allow_same_family:
+            sys.exit("config rota: SELF y CROSS comparten familia (no es cross-family). "
+                     "Usa --allow-same-family si es a proposito (brazo de control).")
+        print(f"[control] par INTRA-familia ({family_of(SELF_VERIFIER)}): mide capacidad, "
+              "no decorrelacion.")
 
     gold = build_gold(args.n, args.seed)
     n_c = sum(1 for g in gold if g["is_correct"])

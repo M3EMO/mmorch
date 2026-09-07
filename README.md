@@ -1,17 +1,27 @@
 # mmorch — Multi-Model Orchestration Harness
 
-**mmorch** is a deterministic Python orchestration library (plus an MCP server) that treats
-the scarce resource as *Claude plan quota* ("cupo"), not dollars. Bulk generation and
-verification are delegated to cheap external model APIs (DeepSeek, Gemini); the high-judgment
-orchestrator (Opus/Fable) only conducts and breaks ties — it is never an external node. The
-orchestration is plain, testable Python; the models are interchangeable nodes.
+**mmorch** is a measurement bench for multi-model verification. It runs generator->verifier
+pairs over tasks with **computable ground truth** (deterministic oracles, not LLM judges) and
+measures which configuration is actually right, what it costs, and with what confidence
+interval. The primary output is measurements -- paired ablations, McNemar, calibration -- not
+delegated work.
+
+The orchestration machinery (routing, bandit, memory, MCP server) exists because it is the
+apparatus needed *to run those measurements*, and it doubles as a working delegation harness:
+bulk generation and verification go to cheap external APIs to free Claude plan quota ("cupo"),
+with the high-judgment orchestrator (Opus/Fable) conducting and breaking ties, never a node.
+That second use is the apparatus, not the thesis.
 
 **Core ideas**
 - **Conductor + orchestra.** A deterministic Python core routes work to model nodes; Opus/Fable
   conducts, never plays.
-- **Cross-family verification (OneFlow).** Every generator→verifier pair spans different model
-  families to decorrelate errors; checkable claims go to deterministic checkers instead of an
-  LLM (measured: LLM judges ≈74% false-refute on hard checkable tasks).
+- **Deterministic oracles over LLM judges.** Checkable claims go to `checkers.py`, never to a
+  model (measured: LLM judges ≈74% false-refute on hard checkable tasks). This is the load-
+  bearing claim, and the one the measurements keep confirming.
+- **Cross-family pairing (OneFlow) — mechanism NOT established.** Generator→verifier pairs are
+  routed across families on the *hypothesis* that this decorrelates errors. The 2026-09-07
+  ablation refuted family as the explanation for the measured gain: see "Measured" below.
+  Kept as the default because it is cheap and harmless, not because it is proven.
 - **Anti-sycophancy.** Verifiers refute by default; the reward label is a real execution
   outcome, never self-reported confidence.
 - **Self-evolution, safely gated.** Changes pass a fitness battery (AST · tests · ensemble ·
@@ -23,6 +33,35 @@ orchestration is plain, testable Python; the models are interchangeable nodes.
 
 Lives at `~/.claude/orchestration/`, usable from any project; registered globally as the MCP
 server `mmorch`.
+
+## Measured
+
+Paired ablations over a seeded gold set of 350 arithmetic items with **computed** labels
+(no human, no LLM in the ground truth). Same `--seed` = same items, so arms compare directly.
+Every run appends to `logs/ablation_results.jsonl`; re-run with
+`python ablation_paired.py --n 350 --self X --cross Y --yes`.
+
+| verifier | catches bugs | doesn't false-reject | balanced acc | cost |
+|---|---|---|---|---|
+| `deepseek-chat` (thinking OFF) | 0.94 | **0.61** | 0.77 | — |
+| `deepseek-reasoner` (same weights, thinking ON) | 1.00 | **0.99** | **0.997** | $0.074 |
+| `gemini-2.5-flash` (different family) | 1.00 | 0.98 | 0.991 | $0.135 |
+
+**What this establishes.** The failure mode of a cheap verifier is not letting errors through
+(sensitivity is ~0.94 everywhere) — it is **refuting correct work**: thinking-off DeepSeek
+falsely rejects ~40% of right answers. Verifier choice moves balanced accuracy 0.77 -> 0.99.
+
+**What this refutes.** The 2026-09-04 cross-family run (self 0.75 vs cross 0.99, McNemar
+b=0 c=79, p≈0) was read as evidence for cross-family decorrelation. The intra-family control
+run on 2026-09-07 reproduces it almost exactly (0.77 vs 0.997, b=0 c=78, p≈0) using **the same
+model, the same weights** — `deepseek-chat` and `deepseek-reasoner` are both `deepseek-v4-flash`
+and differ only in `thinking: disabled`. So the effect was **reasoning, not family**. Gemini did
+not win by being Google; it won by thinking — and it cost ~2x more than the DeepSeek model that
+does it better.
+
+**What remains untested.** Whether cross-family pairing decorrelates errors *at all*; one task
+domain (arithmetic) only; injected errors, so this measures detection, not a verifier's blind
+spot for its own mistakes.
 
 ## What's here
 
