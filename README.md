@@ -18,10 +18,11 @@ That second use is the apparatus, not the thesis.
 - **Deterministic oracles over LLM judges.** Checkable claims go to `checkers.py`, never to a
   model (measured: LLM judges ≈74% false-refute on hard checkable tasks). This is the load-
   bearing claim, and the one the measurements keep confirming.
-- **Cross-family pairing (OneFlow) — mechanism NOT established.** Generator→verifier pairs are
-  routed across families on the *hypothesis* that this decorrelates errors. The 2026-09-07
-  ablation refuted family as the explanation for the measured gain: see "Measured" below.
-  Kept as the default because it is cheap and harmless, not because it is proven.
+- **Cross-family pairing (OneFlow) — required on subjective tasks, unproven as a mechanism.**
+  `GOAL.md` requires cross-family pairs for *subjective* work and allows same-family on
+  *checkable* work. The decorrelation rationale has never been measured on the subjective
+  branch. On the checkable branch it has: family turned out not to be the driver at all
+  (see "Measured"). Invariant stands; the *reason* given for it is still untested.
 - **Anti-sycophancy.** Verifiers refute by default; the reward label is a real execution
   outcome, never self-reported confidence.
 - **Self-evolution, safely gated.** Changes pass a fitness battery (AST · tests · ensemble ·
@@ -41,27 +42,46 @@ Paired ablations over a seeded gold set of 350 arithmetic items with **computed*
 Every run appends to `logs/ablation_results.jsonl`; re-run with
 `python ablation_paired.py --n 350 --self X --cross Y --yes`.
 
-| verifier | catches bugs | doesn't false-reject | balanced acc | cost |
-|---|---|---|---|---|
-| `deepseek-chat` (thinking OFF) | 0.94 | **0.61** | 0.77 | — |
-| `deepseek-reasoner` (same weights, thinking ON) | 1.00 | **0.99** | **0.997** | $0.074 |
-| `gemini-2.5-flash` (different family) | 1.00 | 0.98 | 0.991 | $0.135 |
+| verifier | family | catches bugs | doesn't false-reject | balanced acc | cost |
+|---|---|---|---|---|---|
+| `deepseek-chat` (thinking OFF) | deepseek | 0.94 | **0.56-0.61** | 0.77 | — |
+| **`deepseek-reasoner`** (same weights, thinking ON) | deepseek | 1.00 | 0.994 | **0.997** | **$0.074** |
+| `gemini-2.5-flash` | google | 1.00 | 0.982 | 0.991 | $0.135 |
+| `glm-4.5-air` | zhipu | 0.99 | 0.977 | 0.986 | $0.332 |
+
+Three models from **three different families** all land at ~0.99. The only one that collapses
+to 0.77 is the one with reasoning switched off — same family and same weights as the best of
+the four. Cost runs exactly inverse to quality: the best verifier is also the cheapest
+(1.8x cheaper than Gemini, 4.5x cheaper than GLM).
+
+The SELF arm replicated independently three times (specificity 0.558 / 0.606 / 0.594 against
+three different counterparts), so the ~40% false-reject rate of thinking-off `deepseek-chat`
+is stable, not one-run noise.
 
 **What this establishes.** The failure mode of a cheap verifier is not letting errors through
 (sensitivity is ~0.94 everywhere) — it is **refuting correct work**: thinking-off DeepSeek
 falsely rejects ~40% of right answers. Verifier choice moves balanced accuracy 0.77 -> 0.99.
 
-**What this refutes.** The 2026-09-04 cross-family run (self 0.75 vs cross 0.99, McNemar
+**What this refutes (about capability, not about GOAL).** The 2026-09-04 cross-family run (self 0.75 vs cross 0.99, McNemar
 b=0 c=79, p≈0) was read as evidence for cross-family decorrelation. The intra-family control
 run on 2026-09-07 reproduces it almost exactly (0.77 vs 0.997, b=0 c=78, p≈0) using **the same
 model, the same weights** — `deepseek-chat` and `deepseek-reasoner` are both `deepseek-v4-flash`
 and differ only in `thinking: disabled`. So the effect was **reasoning, not family**. Gemini did
 not win by being Google; it won by thinking — and it cost ~2x more than the DeepSeek model that
-does it better.
+does it better. A third family (zhipu) reproduces the same pattern at 4.5x the cost.
 
-**What remains untested.** Whether cross-family pairing decorrelates errors *at all*; one task
-domain (arithmetic) only; injected errors, so this measures detection, not a verifier's blind
-spot for its own mistakes.
+**Scope — this does NOT refute the `GOAL.md` OneFlow invariant.** That invariant is scoped:
+cross-family for *subjective* tasks, same-family allowed on *checkable* ones. Every item here is
+checkable (computed truth), i.e. the branch where same-family is already permitted — and the
+best verifier measured (`deepseek-reasoner`) is indeed same-family. The result lands inside the
+carve-out GOAL already has; the subjective branch, where the invariant actually binds, was not
+touched by a single item.
+
+**What remains untested.** Whether cross-family pairing decorrelates errors on *subjective*
+tasks (the claim GOAL makes); one task domain (arithmetic) only; injected errors, so this
+measures detection, not a verifier's blind spot for its own mistakes. Strictly, a checkable
+arithmetic item should go to `checkers.py` and not to any LLM — these arms measure LLM
+verifiers on a domain where mmorch's own rule says not to use one.
 
 ## What's here
 
