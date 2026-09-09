@@ -152,17 +152,25 @@ def _verify_synth(model: str, item: dict, timeout: float):
     cost = 0.0
     with _synth_lock:
         if key not in _synth_cache:
-            res = call(model, [{"role": "system", "content": _SYNTH_SYS},
-                               {"role": "user", "content": f"PROBLEMA:\n{item['problem']}"}],
-                       pattern="ablation_stages_hard", node=f"synth:{model}",
-                       phase="ablation_stages_hard", temperature=0.0, timeout=timeout)
-            cost = res.cost_usd
-            src = _strip_fence(res.text)
             probe = _GOLD_BY_KIND.get(key[1], [item])[:_PROMOTE_K]
-            ok = all(_run_solve(src, g["problem"]) == g["truth"] for g in probe)
+            # Hasta 2 intentos por tipo: synth:deepseek-v4-pro devolvio texto VACIO
+            # para "suma de digitos" (n=50, 2026-09-09) y el tipo entero quedo
+            # refutado por una respuesta en blanco. Un reintento cuesta una llamada
+            # por tipo, no por item. Sigue cerrado si los dos fallan.
+            src, ok = "", False
+            for _attempt in range(2):
+                res = call(model, [{"role": "system", "content": _SYNTH_SYS},
+                                   {"role": "user", "content": f"PROBLEMA:\n{item['problem']}"}],
+                           pattern="ablation_stages_hard", node=f"synth:{model}",
+                           phase="ablation_stages_hard", temperature=0.0, timeout=timeout)
+                cost += res.cost_usd
+                src = _strip_fence(res.text)
+                ok = bool(src) and all(_run_solve(src, g["problem"]) == g["truth"] for g in probe)
+                if ok:
+                    break
             _synth_cache[key] = src if ok else None
             if not ok:
-                _synth_rejected[key] = src
+                _synth_rejected[key] = src or "<vacio>"
     src = _synth_cache[key]
     if src is None:
         # guardar la fuente rechazada: sin esto la diagnosis del 2026-09-09 tuvo que
