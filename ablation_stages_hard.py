@@ -69,7 +69,7 @@ _CODE_SYS = (
 
 
 def _family(g: str) -> str:
-    return family_of(g.split(":", 1)[1] if g.startswith("code:") else g)
+    return family_of(g.split(":", 1)[1] if ":" in g else g)
 
 
 def _strip_fence(t: str) -> str:
@@ -84,15 +84,82 @@ def _verify_code(model: str, item: dict, timeout: float):
                        {"role": "user", "content": f"PROBLEMA:\n{item['problem']}"}],
                pattern="ablation_stages_hard", node=f"code:{model}",
                phase="ablation_stages_hard", temperature=0.0, timeout=timeout)
-    code = _strip_fence(res.text) + "\n\nprint(solve())\n"
+    body = _strip_fence(res.text)
+    # Medido 2026-09-09 (n=50): los 4 falsos rechazos de code:deepseek-chat fueron
+    # FORMATO, no aritmetica -- 2 veces emitio la expresion pelada ("6**37"), 1 vez
+    # prosa con el numero correcto, 1 vez repitio el system prompt. Una expresion de
+    # una linea se envuelve en solve(); prosa y eco siguen refutados (fail-closed).
+    # El texto crudo queda en el row para poder re-analizar sin volver a llamar.
+    if "def solve" not in body and "\n" not in body.strip() and body.strip():
+        body = f"def solve():\n    return ({body.strip()})"
+    code = body + "\n\nprint(solve())\n"
     r = run_sandboxed(code, timeout=20.0)
+    raw = res.text[:300]
     if r.timed_out or r.returncode != 0:
-        return False, res.cost_usd
+        return False, res.cost_usd, raw
     try:
         got = int(r.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
-        return False, res.cost_usd
-    return got == item["proposed"], res.cost_usd
+        return False, res.cost_usd, raw
+    return got == item["proposed"], res.cost_usd, raw
+
+
+# "synth:<modelo>" (idea del usuario, 2026-09-09): la funcion se sintetiza UNA vez por
+# TIPO de problema y despues se aplica en local, sin llamadas. El modelo escribe
+# `def solve(problem: str) -> int` que parsea el enunciado y calcula. Antes de confiar
+# en ella se PROMUEVE: tiene que acertar la verdad computada en hasta 3 items del mismo
+# tipo. Si no, el tipo queda refutado entero (cerrado). Una funcion promovida mal
+# envenenaria todos los items de su tipo -- por eso la promocion es contra verdad
+# computada y no contra la respuesta propuesta. Es checkers.py escrito por el modelo.
+_SYNTH_SYS = (
+    "Sos un programador. Escribi SOLO codigo Python 3 que defina "
+    "`def solve(problem: str) -> int`. La funcion recibe el ENUNCIADO como texto, extrae "
+    "los numeros con re, y devuelve la respuesta exacta. Tiene que funcionar para "
+    "cualquier enunciado con la misma forma y otros numeros. Sin explicacion, sin "
+    "markdown, solo stdlib."
+)
+_PROMOTE_K = 3
+_synth_cache: dict = {}      # (model, kind) -> codigo fuente promovido, o None si fallo
+_synth_lock = __import__("threading").Lock()
+_GOLD_BY_KIND: dict = {}     # kind -> [items con truth], lo llena main()
+
+
+def _kind(problem: str) -> str:
+    return re.sub(r"\d+", "N", problem)
+
+
+def _run_solve(src: str, problem: str, timeout: float = 20.0):
+    """Corre solve(problem) en el sandbox. None si falla o no parsea."""
+    code = src + "\n\nimport sys\nprint(solve(sys.stdin.read()))\n"
+    r = run_sandboxed(code, timeout=timeout, input_text=problem)
+    if r.timed_out or r.returncode != 0:
+        return None
+    try:
+        return int(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return None
+
+
+def _verify_synth(model: str, item: dict, timeout: float):
+    from mmorch.providers import call
+    key = (model, _kind(item["problem"]))
+    cost = 0.0
+    with _synth_lock:
+        if key not in _synth_cache:
+            res = call(model, [{"role": "system", "content": _SYNTH_SYS},
+                               {"role": "user", "content": f"PROBLEMA:\n{item['problem']}"}],
+                       pattern="ablation_stages_hard", node=f"synth:{model}",
+                       phase="ablation_stages_hard", temperature=0.0, timeout=timeout)
+            cost = res.cost_usd
+            src = _strip_fence(res.text)
+            probe = _GOLD_BY_KIND.get(key[1], [item])[:_PROMOTE_K]
+            ok = all(_run_solve(src, g["problem"]) == g["truth"] for g in probe)
+            _synth_cache[key] = src if ok else None
+    src = _synth_cache[key]
+    if src is None:
+        return False, cost, "NO PROMOVIDA"
+    got = _run_solve(src, item["problem"])
+    return got == item["proposed"], cost, "cache"
 
 
 def _judge_all_hard(item: dict) -> dict | None:
@@ -102,7 +169,11 @@ def _judge_all_hard(item: dict) -> dict | None:
     for g in HARD_GATES:
         try:
             if g.startswith("code:"):
-                passed, c = _verify_code(g.split(":", 1)[1], item, VERIFY_TIMEOUT)
+                passed, c, raw = _verify_code(g.split(":", 1)[1], item, VERIFY_TIMEOUT)
+                out[g + ":raw"] = raw
+            elif g.startswith("synth:"):
+                passed, c, raw = _verify_synth(g.split(":", 1)[1], item, VERIFY_TIMEOUT)
+                out[g + ":raw"] = raw
             else:
                 passed, c = _verify(g, item, timeout=VERIFY_TIMEOUT)
         except Exception:
@@ -180,6 +251,7 @@ def build_gold_hard(n: int, seed: int) -> list[dict]:
 
 
 def main():
+    global HARD_GATES
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=1000)
     ap.add_argument("--seed", type=int, default=DEFAULT_SEED)
@@ -187,12 +259,19 @@ def main():
     ap.add_argument("--dry", action="store_true")
     ap.add_argument("--from-items", action="store_true",
                     help="no llama a la API: analiza los items ya guardados de este seed")
+    ap.add_argument("--redo", action="store_true",
+                    help="ignora los items guardados de este seed+gates y los vuelve a juzgar")
+    ap.add_argument("--gates", default=",".join(HARD_GATES),
+                    help="lista separada por coma; prefijo code: = el modelo escribe solve()")
     args = ap.parse_args()
+    HARD_GATES = [g.strip() for g in args.gates.split(",") if g.strip()]
 
     items_path = pathlib.Path(__file__).resolve().parent / "logs" / "ablation_stages_hard_items.jsonl"
     items_path.parent.mkdir(parents=True, exist_ok=True)
 
     gold = build_gold_hard(args.n, args.seed)
+    for g in gold:
+        _GOLD_BY_KIND.setdefault(_kind(g["problem"]), []).append(g)
     n_c = sum(1 for g in gold if g["is_correct"])
     print(f"gold DIFICIL: {len(gold)} items ({n_c} correctos, {len(gold)-n_c} fallados) | "
           f"seed={args.seed}")
@@ -211,7 +290,7 @@ def main():
     # lanzo y perdio US$0.41 porque los items se escribian al final. Ahora se escriben
     # uno por uno, apenas terminan.
     done = {}
-    if items_path.exists():
+    if items_path.exists() and not args.redo:
         for line in items_path.read_text(encoding="utf-8").splitlines():
             try:
                 r = json.loads(line)
