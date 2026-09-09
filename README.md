@@ -83,6 +83,38 @@ measures detection, not a verifier's blind spot for its own mistakes. Strictly, 
 arithmetic item should go to `checkers.py` and not to any LLM — these arms measure LLM
 verifiers on a domain where mmorch's own rule says not to use one.
 
+### Stacking gates (2026-09-08)
+
+A 4-gate ablation (`ablation_stages.py`, n=299, $1.44, 2 models per family so "different
+family" and "different model" are separable) tested a specific claim from an SDLC review: that
+chaining N review gates compounds false-rejection, so `(1 - false_reject_rate)^N` predicts
+survival of good work through the pipeline. **That formula assumes every gate is equally bad —
+false.**
+
+| gate | false-rejects (of 150 correct) | specificity |
+|---|---|---|
+| `deepseek-chat` (thinking OFF) | 61 | 0.593 |
+| `deepseek-v4-pro` | 0 | **1.000** |
+| `glm-4.5-air` | 2 | 0.987 |
+| `glm-5.2` | 1 | 0.993 |
+
+Chained specificity barely moves with gate count: K=2 -> 0.593, K=3 -> 0.587, K=4 -> 0.587.
+**A chain's specificity is set by its worst gate, not by how many gates it has.** Adding good
+gates next to a bad one is nearly free — and does nothing to undo the bad one's damage.
+Sensitivity was 1.000 in all 11 chains: one good gate already catches everything a chain of
+four catches, so in this domain stacking gates buys zero extra detection and pays the
+false-rejection cost of its weakest link.
+
+Independence held (observed vs. product-of-marginals gap <=0.005 everywhere), but the test was
+underpowered to say anything about decorrelation: 3 of 4 gates had 0-2 errors out of 150, so
+there was almost nothing to correlate (phi undefined in half the pairs). `deepseek-v4-pro`
+measured a **perfect verifier** on this gold set (0 false-rejects, 0 missed bugs, n=299) —
+unplanned, and worth a second look. A follow-up on harder items (comparable non-trivial error
+rates across gates, larger n) is needed before decorrelation can be confirmed either way; see
+`logs/ablation_results.jsonl` (experiment `ablation_stages`) for the full per-pair phi table
+and `logs/ablation_stages_items.jsonl` for raw per-item verdicts (re-analyzable without new
+API calls).
+
 ## What's here
 
 <!-- mmorch:auto:stats -->
