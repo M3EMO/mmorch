@@ -120,6 +120,7 @@ _SYNTH_SYS = (
 )
 _PROMOTE_K = 3
 _synth_cache: dict = {}      # (model, kind) -> codigo fuente promovido, o None si fallo
+_synth_rejected: dict = {}   # (model, kind) -> fuente que NO paso la promocion (diagnosis)
 _synth_lock = __import__("threading").Lock()
 _GOLD_BY_KIND: dict = {}     # kind -> [items con truth], lo llena main()
 
@@ -130,8 +131,13 @@ def _kind(problem: str) -> str:
 
 def _run_solve(src: str, problem: str, timeout: float = 20.0):
     """Corre solve(problem) en el sandbox. None si falla o no parsea."""
-    code = src + "\n\nimport sys\nprint(solve(sys.stdin.read()))\n"
-    r = run_sandboxed(code, timeout=timeout, input_text=problem)
+    # El enunciado va EMBEBIDO como literal JSON (ASCII puro: json.dumps escapa
+    # el "≡" como \\u2261). Por stdin, el python del sandbox en Windows lee cp1252 y
+    # revienta con ese caracter: las 2 funciones del tipo "inverso modular" fallaron
+    # la promocion en AMBOS modelos con phi=+1.0 (run n=50, 2026-09-09). Era el arnes.
+    code = (src + "\n\nimport json\n"
+            f"print(solve(json.loads({json.dumps(json.dumps(problem))})))\n")
+    r = run_sandboxed(code, timeout=timeout)
     if r.timed_out or r.returncode != 0:
         return None
     try:
@@ -155,9 +161,13 @@ def _verify_synth(model: str, item: dict, timeout: float):
             probe = _GOLD_BY_KIND.get(key[1], [item])[:_PROMOTE_K]
             ok = all(_run_solve(src, g["problem"]) == g["truth"] for g in probe)
             _synth_cache[key] = src if ok else None
+            if not ok:
+                _synth_rejected[key] = src
     src = _synth_cache[key]
     if src is None:
-        return False, cost, "NO PROMOVIDA"
+        # guardar la fuente rechazada: sin esto la diagnosis del 2026-09-09 tuvo que
+        # adivinar la causa en vez de leerla del row.
+        return False, cost, "NO PROMOVIDA: " + _synth_rejected.get(key, "")[:250]
     got = _run_solve(src, item["problem"])
     return got == item["proposed"], cost, "cache"
 
