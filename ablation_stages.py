@@ -49,6 +49,8 @@ from mmorch.config import family_of  # noqa: E402
 # que es el mismo confound que arruino la lectura del 2026-09-04. google y moonshot
 # estan sin saldo (429 credits depleted), asi que las familias vivas son deepseek+zhipu.
 GATES = ["deepseek-chat", "deepseek-v4-pro", "glm-4.5-air", "glm-5.2"]
+# Timeout por llamada. ablation_stages_hard lo sube: sus items tardan 65-75s por gate.
+VERIFY_TIMEOUT = 60.0
 
 
 def _judge_all(item: dict) -> dict | None:
@@ -58,7 +60,7 @@ def _judge_all(item: dict) -> dict | None:
     cost = 0.0
     for g in GATES:
         try:
-            passed, c = _verify(g, item)
+            passed, c = _verify(g, item, timeout=VERIFY_TIMEOUT)
         except Exception:
             return None
         out[g] = bool(passed)

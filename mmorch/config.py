@@ -63,6 +63,24 @@ REGISTRY: dict[str, ModelSpec] = {
         price_out=3.48,
         role="code-heavy executor / hard tasks (thinking)",
     ),
+    # Variante SIN razonamiento de v4-pro. Existe para la ablacion de decorrelacion
+    # (ablation_stages_hard, 2026-09-09): con thinking prendido v4-pro y glm-5.2 no
+    # cometen NINGUN error en 19 items dificiles, asi que no hay nada que correlacionar.
+    # Para medir si dos verificadores fallan en los MISMOS items hacen falta gates que
+    # fallen, dos por familia. No entra en pools de produccion: para verificar se usa
+    # razonamiento prendido (CLAUDE.md global, medido 2026-09-07).
+    "deepseek-v4-pro-nothink": ModelSpec(
+        key="deepseek-v4-pro-nothink",
+        family="deepseek",
+        provider="deepseek",
+        model_id="deepseek-v4-pro",
+        base_url="https://api.deepseek.com/v1",
+        api_key_env="DEEPSEEK_API_KEY",
+        price_in=1.74,
+        price_out=3.48,
+        role="SOLO ablacion: v4-pro sin thinking (gate que falla, misma familia que chat)",
+        extra_body=(("thinking", {"type": "disabled"}),),
+    ),
     "gemini-3.1-flash-lite": ModelSpec(
         key="gemini-3.1-flash-lite",
         family="google",
@@ -153,6 +171,20 @@ REGISTRY: dict[str, ModelSpec] = {
         price_in=0.60,
         price_out=2.20,
         role="candidato intuition-pool (3ra familia, reemplaza a 4.6 health-floored)",
+    ),
+    # Espejo de deepseek-v4-pro-nothink para la familia zhipu (misma razon, misma fecha).
+    # z.ai acepta `thinking: {"type": "disabled"}` en el body (OpenAI-compatible).
+    "glm-5.2-nothink": ModelSpec(
+        key="glm-5.2-nothink",
+        family="zhipu",
+        provider="zhipu",
+        model_id="glm-5.2",
+        base_url="https://api.z.ai/api/paas/v4",
+        api_key_env="ZHIPU_API_KEY",
+        price_in=0.60,
+        price_out=2.20,
+        role="SOLO ablacion: glm-5.2 sin thinking (gate que falla, misma familia que 4.5-air)",
+        extra_body=(("thinking", {"type": "disabled"}),),
     ),
 }
 

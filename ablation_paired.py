@@ -159,8 +159,13 @@ _VERIFY_SYS = (
 )
 
 
-def _verify(model: str, item: dict, retries: int = 2):
-    """Verifica con reintentos. H-1: un timeout transitorio NO debe matar el batch."""
+def _verify(model: str, item: dict, retries: int = 2, timeout: float = 60.0):
+    """Verifica con reintentos. H-1: un timeout transitorio NO debe matar el batch.
+
+    timeout: por llamada. El default de 60s alcanza para el gold set facil; los items
+    dificiles (ablation_stages_hard) tardan 65-75s por gate y con 60s TODAS las llamadas
+    caian por timeout, reintentaban 3 veces y el piloto corrio 42 min sin producir un
+    solo item. Un timeout corto no es un guard: es un experimento que no termina."""
     art = f"PROBLEMA:\n{item['problem']}\n\nRESPUESTA PROPUESTA: {item['proposed']}"
     last = None
     for _ in range(retries + 1):
@@ -168,7 +173,7 @@ def _verify(model: str, item: dict, retries: int = 2):
             res = call(model, [{"role": "system", "content": _VERIFY_SYS},
                                {"role": "user", "content": art}],
                        pattern="ablation_paired", node=f"v:{model}", phase="ablation_paired",
-                       temperature=0.0)
+                       temperature=0.0, timeout=timeout)
             passed, conf, refs = _parse_verdict(res.text)
             return passed, res.cost_usd
         except Exception as e:  # APITimeoutError, rate-limit, red — reintentar
