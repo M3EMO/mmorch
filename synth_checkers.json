@@ -1,0 +1,686 @@
+{
+ "bell": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "617c12ac48226b27",
+  "src": "def solve(params: dict) -> int:\n    n = params.get(\"n\", 17)\n    if n < 0:\n        return 0\n    row = [1]\n    for _ in range(n):\n        new_row = [row[-1]]\n        for value in row:\n            new_row.append(new_row[-1] + value)\n        row = new_row\n    return row[0]"
+ },
+ "binarias_sin_11": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "d6a7bb493699e51d",
+  "src": "def solve(params: dict) -> int:\n    n = params[\"n\"]\n    a, b = 1, 1  # F_1, F_2? Actually count for n=0 is 1, n=1 is 2\n    # Let's use a_n recurrence directly.\n    if n == 0:\n        return 1\n    prev, curr = 1, 2\n    for _ in range(1, n):\n        prev, curr = curr, prev + curr\n    return curr"
+ },
+ "binarios_palindromos": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "46f42d1dda8bb47c",
+  "src": "def solve(params: dict) -> int:\n    n = int(params[\"n\"])\n    if n <= 0:\n        return 0\n\n    L = n.bit_length()\n    total = 0\n\n    for length in range(1, L):\n        total += 1 << ((length - 1) // 2)\n\n    h = (L + 1) // 2\n    base = 1 << (h - 1)\n    suffix_len = L - h\n    prefix = n >> suffix_len\n\n    if suffix_len == 0:\n        rev = 0\n    else:\n        s = bin(prefix)[2:]\n        if L % 2 == 0:\n            rev_s = s[::-1]\n        else:\n            rev_s = s[:-1][::-1]\n        rev = int(rev_s, 2) if rev_s else 0\n\n    n_suffix = n & ((1 << suffix_len) - 1)\n\n    if rev <= n_suffix:\n        max_p = prefix\n    else:\n        max_p = prefix - 1\n\n    if max_p >= base:\n        total += max_p - base + 1\n\n    return total"
+ },
+ "cadenas_sin_ab": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "32d1d78568b4afec",
+  "src": "def solve(params: dict) -> int:\n    n = params[\"n\"]\n    if n == 0:\n        return 1\n    a = b = c = 1\n    total = 3\n    for _ in range(2, n + 1):\n        na = total\n        nb = b + c\n        nc = total\n        a, b, c = na, nb, nc\n        total = a + b + c\n    return total"
+ },
+ "cambio_formas": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "1d91918348aa4d89",
+  "src": "def solve(params: dict) -> int:\n    coins = params[\"coins\"]\n    amt = params[\"amt\"]\n    dp = [0] * (amt + 1)\n    dp[0] = 1\n    for coin in coins:\n        for i in range(coin, amt + 1):\n            dp[i] += dp[i - coin]\n    return dp[amt]"
+ },
+ "cambio_min": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "bd8c4aef016f0230",
+  "src": "def solve(params: dict) -> int:\n    coins = params[\"coins\"]\n    amt = params[\"amt\"]\n    INF = 10**9\n    dp = [INF] * (amt + 1)\n    dp[0] = 0\n    for i in range(1, amt + 1):\n        for c in coins:\n            if i >= c and dp[i - c] + 1 < dp[i]:\n                dp[i] = dp[i - c] + 1\n    return dp[amt] if dp[amt] != INF else -1"
+ },
+ "cant_divisores": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "5a40dc2126e05f39",
+  "src": "import math\n\ndef solve(params: dict) -> int:\n    n = int(params[\"n\"])\n    count = 1\n    d = 2\n    while d * d <= n:\n        if n % d == 0:\n            exp = 0\n            while n % d == 0:\n                n //= d\n                exp += 1\n            count *= exp + 1\n        d += 1 if d == 2 else 2\n    if n > 1:\n        count *= 2\n    return count"
+ },
+ "catalan": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "0342577532386de1",
+  "src": "import math\n\ndef solve(params: dict) -> int:\n    n = params[\"n\"]\n    return math.comb(2 * n, n) // (n + 1)"
+ },
+ "ceros_base": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "d7d95408c2f6e115",
+  "src": "def solve(params: dict) -> int:\n    n = params[\"n\"]\n    b = params[\"b\"]\n\n    factors = {}\n    d = 2\n    while d * d <= b:\n        while b % d == 0:\n            factors[d] = factors.get(d, 0) + 1\n            b //= d\n        d += 1\n    if b > 1:\n        factors[b] = factors.get(b, 0) + 1\n\n    ans = None\n    for p, e in factors.items():\n        count = 0\n        q = n\n        while q:\n            q //= p\n            count += q\n        val = count // e\n        if ans is None or val < ans:\n            ans = val\n\n    return ans"
+ },
+ "collatz_max": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "b6cef3ceb944aee0",
+  "src": "def solve(params: dict) -> int:\n    n = int(params[\"n\"])\n    max_value = n\n    while n != 1:\n        if n % 2 == 0:\n            n //= 2\n        else:\n            n = 3 * n + 1\n        if n > max_value:\n            max_value = n\n    return max_value"
+ },
+ "collatz_pasos": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "8537bf229668cadf",
+  "src": "def solve(params: dict) -> int:\n    n = params[\"n\"]\n    steps = 0\n    while n != 1:\n        if n % 2 == 0:\n            n //= 2\n        else:\n            n = 3 * n + 1\n        steps += 1\n    return steps"
+ },
+ "desarreglos": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "66cdc0e014621e71",
+  "src": "def solve(params: dict) -> int:\n    n = params[\"n\"]\n    if n == 0:\n        return 1\n    if n == 1:\n        return 0\n    d0, d1 = 1, 0\n    for i in range(2, n + 1):\n        d0, d1 = d1, (i - 1) * (d0 + d1)\n    return d1"
+ },
+ "digitos_2n": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "9291584f9dc45678",
+  "src": "def solve(params: dict) -> int:\n    n = params[\"n\"]\n    return sum(int(d) for d in str(2 ** n))"
+ },
+ "digitos_crecientes": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "3c24a78f3ba37c06",
+  "src": "def solve(params: dict) -> int:\n    n = int(params[\"n\"])\n    count = 0\n    for mask in range(1, 1 << 9):\n        num = 0\n        for d in range(1, 10):\n            if mask & (1 << (d - 1)):\n                num = num * 10 + d\n        if num <= n:\n            count += 1\n    return count"
+ },
+ "digitos_factorial": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "1f360f4ef5c44649",
+  "src": "import math\ndef solve(params: dict) -> int:\n    n = params[\"n\"]\n    return sum(int(d) for d in str(math.factorial(n)))"
+ },
+ "digitos_factorial_cant": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "ce5b1075a254e3a3",
+  "src": "import math\n\ndef solve(params: dict) -> int:\n    n = params[\"n\"]\n    return len(str(math.factorial(n)))"
+ },
+ "divisibles_p_o_q": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "1a1d7085ce674118",
+  "src": "import math\n\ndef solve(params: dict) -> int:\n    a = params[\"a\"]\n    b = params[\"b\"]\n    p = params[\"p\"]\n    q = params[\"q\"]\n\n    def count_divisible(d: int) -> int:\n        return b // d - (a - 1) // d\n\n    lcm = p * q // math.gcd(p, q)\n\n    return count_divisible(p) + count_divisible(q) - count_divisible(lcm)"
+ },
+ "edit_distance": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "00bb235e9dca8adb",
+  "src": "def solve(params: dict) -> int:\n    a = params[\"a\"]\n    b = params[\"b\"]\n    n, m = len(a), len(b)\n    dp = list(range(m + 1))\n    for i in range(1, n + 1):\n        prev = dp[0]\n        dp[0] = i\n        for j in range(1, m + 1):\n            temp = dp[j]\n            cost = 0 if a[i - 1] == b[j - 1] else 1\n            dp[j] = min(\n                dp[j] + 1,\n                dp[j - 1] + 1,\n                prev + cost\n            )\n            prev = temp\n    return dp[m]"
+ },
+ "escalones_123": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "329eeba57cc84f76",
+  "src": "def solve(params: dict) -> int:\n    n = params[\"n\"]\n    dp = [0] * (n + 1)\n    dp[0] = 1\n    for i in range(1, n + 1):\n        dp[i] = sum(dp[i - k] for k in (1, 2, 3) if i - k >= 0)\n    return dp[n]"
+ },
+ "euler_phi": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "a79fa39166a0e58c",
+  "src": "def solve(params: dict) -> int:\n    n = int(params[\"n\"])\n    result = n\n    x = n\n    p = 2\n    while p * p <= x:\n        if x % p == 0:\n            while x % p == 0:\n                x //= p\n            result -= result // p\n        p += 1 if p == 2 else 2\n    if x > 1:\n        result -= result // x\n    return result"
+ },
+ "felices": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "560eee3e811c7b48",
+  "src": "def solve(params: dict) -> int:\n    n = params[\"n\"]\n\n    def happy(x: int) -> bool:\n        seen = set()\n        while x != 1 and x not in seen:\n            seen.add(x)\n            s = 0\n            while x > 0:\n                d = x % 10\n                s += d * d\n                x //= 10\n            x = s\n        return x == 1\n\n    return sum(1 for i in range(1, n + 1) if happy(i))"
+ },
+ "fibonacci_mod": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "e5798a68e87d22df",
+  "src": "def solve(params: dict) -> int:\n    n = int(params[\"n\"])\n    m = int(params[\"m\"])\n\n    def fib_pair(k):\n        if k == 0:\n            return 0, 1\n        a, b = fib_pair(k >> 1)\n        c = (a * ((2 * b - a) % m)) % m\n        d = (a * a + b * b) % m\n        if k & 1:\n            return d, (c + d) % m\n        return c, d\n\n    return fib_pair(n)[0]"
+ },
+ "grilla_obstaculo": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "2ee996dd38a24f44",
+  "src": "from math import comb\n\ndef solve(params: dict) -> int:\n    R = params[\"R\"]\n    C = params[\"C\"]\n    bx = params[\"bx\"]\n    by = params[\"by\"]\n\n    def paths(dx: int, dy: int) -> int:\n        return comb(dx + dy, dx)\n\n    total = paths(R, C)\n\n    if 0 <= bx <= R and 0 <= by <= C:\n        if (bx, by) == (0, 0) or (bx, by) == (R, C):\n            return 0\n        through = paths(bx, by) * paths(R - bx, C - by)\n        return total - through\n\n    return total"
+ },
+ "inversiones": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "4ac4e49d54baf76b",
+  "src": "def solve(params: dict) -> int:\n    a = params[\"a\"]\n    def merge_count(arr):\n        n = len(arr)\n        if n <= 1:\n            return arr, 0\n        mid = n // 2\n        left, inv_l = merge_count(arr[:mid])\n        right, inv_r = merge_count(arr[mid:])\n        merged = []\n        i = j = 0\n        inv = inv_l + inv_r\n        while i < len(left) and j < len(right):\n            if left[i] <= right[j]:\n                merged.append(left[i])\n                i += 1\n            else:\n                merged.append(right[j])\n                inv += len(left) - i\n                j += 1\n        merged.extend(left[i:])\n        merged.extend(right[j:])\n        return merged, inv\n    _, inversions = merge_count(a)\n    return inversions"
+ },
+ "islas": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "e4cc45e2ec843ede",
+  "src": "def solve(params: dict) -> int:\n    g = params[\"g\"]\n    if not g:\n        return 0\n\n    n = len(g)\n    m = len(g[0])\n    seen = set()\n    islands = 0\n\n    for i in range(n):\n        for j in range(m):\n            if g[i][j] == '1' and (i, j) not in seen:\n                islands += 1\n                stack = [(i, j)]\n                seen.add((i, j))\n\n                while stack:\n                    x, y = stack.pop()\n                    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):\n                        nx, ny = x + dx, y + dy\n                        if 0 <= nx < n and 0 <= ny < m:\n                            if g[nx][ny] == '1' and (nx, ny) not in seen:\n                                seen.add((nx, ny))\n                                stack.append((nx, ny))\n\n    return islands"
+ },
+ "josephus": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "d0166707ce52740b",
+  "src": "def solve(params: dict) -> int:\n    n = params[\"n\"]\n    k = params[\"k\"]\n    r = 0\n    for i in range(2, n + 1):\n        r = (r + k) % i\n    return r + 1"
+ },
+ "kadane": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "4a0e6b97410a3607",
+  "src": "def solve(params: dict) -> int:\n    a = params[\"a\"]\n    best = current = a[0]\n    for x in a[1:]:\n        current = max(x, current + x)\n        best = max(best, current)\n    return best"
+ },
+ "kaprekar": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "dba15ebdca7fe83e",
+  "src": "def solve(params: dict) -> int:\n    n = int(params[\"n\"])\n    objetivo = 6174\n    iteraciones = 0\n    while n != objetivo:\n        s = f\"{n:04d}\"\n        desc = int(\"\".join(sorted(s, reverse=True)))\n        asc = int(\"\".join(sorted(s)))\n        n = desc - asc\n        iteraciones += 1\n    return iteraciones"
+ },
+ "kesima_permutacion": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "0f951fbb3820c0f7",
+  "src": "import math\n\ndef solve(params: dict) -> int:\n    n = params[\"n\"]\n    k = params[\"k\"]\n    digits = list(range(n))\n    k -= 1\n    result = []\n    for remaining in range(n, 0, -1):\n        fact = math.factorial(remaining - 1)\n        index = k // fact\n        k %= fact\n        result.append(str(digits.pop(index)))\n    return int(\"\".join(result))"
+ },
+ "lcm_1n": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "8afbe62a1761020b",
+  "src": "def solve(params: dict) -> int:\n    from math import gcd\n    n = params[\"n\"]\n    r = 1\n    for i in range(1, n + 1):\n        r = r * i // gcd(r, i)\n    return r"
+ },
+ "lcs": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "abf77a7bbc28c6f4",
+  "src": "def solve(params: dict) -> int:\n    a = params[\"a\"]\n    b = params[\"b\"]\n    n, m = len(a), len(b)\n    dp = [[0] * (m + 1) for _ in range(n + 1)]\n    for i in range(1, n + 1):\n        for j in range(1, m + 1):\n            if a[i - 1] == b[j - 1]:\n                dp[i][j] = dp[i - 1][j - 1] + 1\n            else:\n                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])\n    return dp[n][m]"
+ },
+ "libres_cuadrados": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "86e4123af640addf",
+  "src": "import math\n\ndef solve(params: dict) -> int:\n    n = int(params[\"n\"])\n    if n <= 0:\n        return 0\n\n    limit = math.isqrt(n)\n    mu = [0] * (limit + 1)\n    mu[1] = 1\n\n    primes = []\n    is_composite = [False] * (limit + 1)\n\n    for i in range(2, limit + 1):\n        if not is_composite[i]:\n            primes.append(i)\n            mu[i] = -1\n        for p in primes:\n            v = i * p\n            if v > limit:\n                break\n            is_composite[v] = True\n            if i % p == 0:\n                mu[v] = 0\n                break\n            else:\n                mu[v] = -mu[i]\n\n    total = 0\n    for d in range(1, limit + 1):\n        if mu[d] != 0:\n            total += mu[d] * (n // (d * d))\n\n    return total"
+ },
+ "libres_cuadrados_grande": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "74c6ac58a13eda25",
+  "src": "import math\n\ndef solve(params: dict) -> int:\n    n = int(params[\"n\"])\n    if n < 1:\n        return 0\n    L = math.isqrt(n)\n    mu = [0] * (L + 1)\n    if L >= 1:\n        mu[1] = 1\n    primes = []\n    comp = bytearray(L + 1)\n    for i in range(2, L + 1):\n        if comp[i] == 0:\n            primes.append(i)\n            mu[i] = -1\n        for p in primes:\n            v = i * p\n            if v > L:\n                break\n            comp[v] = 1\n            if i % p == 0:\n                mu[v] = 0\n                break\n            mu[v] = -mu[i]\n    ans = 0\n    for d in range(1, L + 1):\n        m = mu[d]\n        if m:\n            ans += m * (n // (d * d))\n    return ans"
+ },
+ "lis": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "17d3b4146178021c",
+  "src": "from bisect import bisect_left\n\ndef solve(params: dict) -> int:\n    a = params[\"a\"]\n    tails = []\n    for x in a:\n        i = bisect_left(tails, x)\n        if i == len(tails):\n            tails.append(x)\n        else:\n            tails[i] = x\n    return len(tails)"
+ },
+ "look_say": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "d6315ff4fd7d2d6a",
+  "src": "def solve(params: dict) -> int:\n    n = int(params[\"n\"])\n    s = \"1\"\n    for _ in range(n - 1):\n        parts = []\n        i = 0\n        while i < len(s):\n            j = i + 1\n            while j < len(s) and s[j] == s[i]:\n                j += 1\n            parts.append(str(j - i))\n            parts.append(s[i])\n            i = j\n        s = \"\".join(parts)\n    return len(s)"
+ },
+ "max_producto": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "710ce5e07b2f555a",
+  "src": "def solve(params: dict) -> int:\n    a = params[\"a\"]\n    if not a:\n        return 0\n    max_prod = a[0]\n    min_prod = a[0]\n    ans = a[0]\n    for x in a[1:]:\n        candidates = (x, max_prod * x, min_prod * x)\n        max_prod = max(candidates)\n        min_prod = min(candidates)\n        if max_prod > ans:\n            ans = max_prod\n    return ans"
+ },
+ "mayor_primo": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "66c706a8110ea6a7",
+  "src": "def solve(params: dict) -> int:\n    n = params[\"n\"]\n    largest = 1\n\n    while n % 2 == 0:\n        largest = 2\n        n //= 2\n\n    p = 3\n    while p * p <= n:\n        if n % p == 0:\n            largest = p\n            while n % p == 0:\n                n //= p\n        p += 2\n\n    if n > 1:\n        largest = n\n\n    return largest"
+ },
+ "mochila": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "72c319f7c5909358",
+  "src": "def solve(params: dict) -> int:\n    items = params[\"items\"]\n    cap = params[\"cap\"]\n    dp = [0] * (cap + 1)\n    for w, v in items:\n        if w > cap:\n            continue\n        for c in range(cap, w - 1, -1):\n            cand = dp[c - w] + v\n            if cand > dp[c]:\n                dp[c] = cand\n    return dp[cap]"
+ },
+ "ndigitos_suma": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "1931665b8fa12f24",
+  "src": "import math\n\ndef solve(params: dict) -> int:\n    n = int(params[\"n\"])\n    s = int(params[\"s\"])\n    if n <= 0 or s < 1 or s > 9 * n:\n        return 0\n\n    S = s - 1\n    N = n - 1\n    total = 0\n\n    max_b = min(N, S // 10)\n    for b in range(max_b + 1):\n        rem = S - 10 * b\n        term = math.comb(N, b) * math.comb(rem + N, N)\n        if b % 2 == 0:\n            total += term\n        else:\n            total -= term\n\n    if S >= 9:\n        S2 = S - 9\n        max_b = min(N, S2 // 10)\n        for b in range(max_b + 1):\n            rem = S2 - 10 * b\n            term = math.comb(N, b) * math.comb(rem + N, N)\n            if b % 2 == 0:\n                total -= term\n            else:\n                total += term\n\n    return total"
+ },
+ "nesimo_primo": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "cf0a67cd982eb7df",
+  "src": "def solve(params: dict) -> int:\n    import math\n    n = params[\"n\"]\n    if n == 1:\n        return 2\n    if n < 6:\n        limit = 15\n    else:\n        limit = int(n * (math.log(n) + math.log(math.log(n)))) + 10\n    primes = []\n    while len(primes) < n:\n        sieve = bytearray(b'\\x01') * (limit + 1)\n        sieve[0:2] = b'\\x00\\x00'\n        for i in range(2, int(limit ** 0.5) + 1):\n            if sieve[i]:\n                start = i * i\n                sieve[start:limit + 1:i] = b'\\x00' * (((limit - start) // i) + 1)\n        primes = [i for i in range(2, limit + 1) if sieve[i]]\n        limit *= 2\n    return primes[n - 1]"
+ },
+ "palindromos": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "835f4c49c25ff61e",
+  "src": "def solve(params: dict) -> int:\n    s = params[\"s\"]\n    t = [\"^\"]\n    for ch in s:\n        t.append(\"#\")\n        t.append(ch)\n    t.append(\"#\")\n    t.append(\"$\")\n\n    p = [0] * len(t)\n    c = 0\n    r = 0\n\n    for i in range(1, len(t) - 1):\n        if i < r:\n            p[i] = min(r - i, p[2 * c - i])\n        while t[i - p[i] - 1] == t[i + p[i] + 1]:\n            p[i] += 1\n        if i + p[i] > r:\n            c = i\n            r = i + p[i]\n\n    ans = 0\n    for i in range(1, len(t) - 1):\n        ans += (p[i] + 1) // 2\n    return ans"
+ },
+ "pares_div_k": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "31cae2ed49b9cc7e",
+  "src": "def solve(params: dict) -> int:\n    a = params[\"a\"]\n    k = params[\"k\"]\n    counts = {}\n    ans = 0\n    for x in a:\n        r = x % k\n        need = (-r) % k\n        ans += counts.get(need, 0)\n        counts[r] = counts.get(r, 0) + 1\n    return ans"
+ },
+ "particiones": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "f1dcd9ac0ff00050",
+  "src": "def solve(params: dict) -> int:\n    n = int(params[\"n\"])\n    dp = [0] * (n + 1)\n    dp[0] = 1\n    for i in range(1, n + 1):\n        for j in range(i, n + 1):\n            dp[j] += dp[j - i]\n    return dp[n]"
+ },
+ "pasos_euclides": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "b6b54642c8c62634",
+  "src": "def solve(params: dict) -> int:\n    a = params[\"a\"]\n    b = params[\"b\"]\n    count = 0\n    while b != 0:\n        a, b = b, a % b\n        count += 1\n    return count"
+ },
+ "pitagoricas_prim": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "4308307324a34ca4",
+  "src": "import math\n\ndef solve(params: dict) -> int:\n    N = params[\"n\"]\n    cnt = 0\n    m = 2\n    while m * m + 1 <= N:\n        limit = math.isqrt(N - m * m)\n        if limit > m - 1:\n            limit = m - 1\n        for n in range(1, limit + 1):\n            if (m - n) % 2 == 1 and math.gcd(m, n) == 1:\n                cnt += 1\n        m += 1\n    return cnt"
+ },
+ "popcount_total": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "4cae572b5206ea30",
+  "src": "def solve(params: dict) -> int:\n    n = params[\"n\"]\n    if n <= 0:\n        return 0\n    total = 0\n    bit = 0\n    N = n + 1\n    while (1 << bit) <= n:\n        half = 1 << bit\n        cycle = half << 1\n        full, rem = divmod(N, cycle)\n        total += full * half + max(0, rem - half)\n        bit += 1\n    return total"
+ },
+ "primos_rango": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "579d306ffd3695e9",
+  "src": "import math\n\ndef solve(params: dict) -> int:\n    a = int(params[\"a\"])\n    b = int(params[\"b\"])\n    if b < 2 or a > b:\n        return 0\n\n    low = max(a, 2)\n    high = b\n    limit = math.isqrt(high)\n\n    if limit < 2:\n        base_primes = []\n    else:\n        sieve = bytearray(b'\\x01') * (limit + 1)\n        sieve[0:2] = b'\\x00\\x00'\n        for i in range(2, math.isqrt(limit) + 1):\n            if sieve[i]:\n                start = i * i\n                sieve[start:limit + 1:i] = b'\\x00' * (((limit - start) // i) + 1)\n        base_primes = [i for i in range(2, limit + 1) if sieve[i]]\n\n    count = 0\n    seg_size = 1 << 20\n    cur = low\n\n    while cur <= high:\n        end = min(high, cur + seg_size - 1)\n        size = end - cur + 1\n        segment = bytearray(b'\\x01') * size\n\n        for p in base_primes:\n            start = ((cur + p - 1) // p) * p\n            if start < p * p:\n                start = p * p\n            if start > end:\n                continue\n            idx = start - cur\n            segment[idx:size:p] = b'\\x00' * (((size - 1 - idx) // p) + 1)\n\n        count += sum(segment)\n        cur = end + 1\n\n    return count"
+ },
+ "puntos_circulo": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "329b99059eb5fdf0",
+  "src": "def solve(params: dict) -> int:\n    n = params[\"n\"]\n    if n < 0:\n        return 0\n    if n == 0:\n        return 1\n\n    m = n\n    while m % 2 == 0:\n        m //= 2\n\n    ways = 1\n    p = 3\n    while p * p <= m:\n        if m % p == 0:\n            e = 0\n            while m % p == 0:\n                m //= p\n                e += 1\n            if p % 4 == 3:\n                if e % 2 == 1:\n                    return 0\n            else:\n                ways *= e + 1\n        p += 2\n\n    if m > 1:\n        if m % 4 == 3:\n            return 0\n        if m % 4 == 1:\n            ways *= 2\n\n    return 4 * ways"
+ },
+ "stirling2": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "139640275244886a",
+  "src": "def solve(params: dict) -> int:\n    n = params[\"n\"]\n    k = params[\"k\"]\n    if n < 0 or k < 0:\n        return 0\n    if k == 0:\n        return 1 if n == 0 else 0\n    if k > n:\n        return 0\n\n    dp = [0] * (k + 1)\n    dp[0] = 1\n\n    for i in range(1, n + 1):\n        new = [0] * (k + 1)\n        for j in range(1, min(i, k) + 1):\n            new[j] = dp[j - 1] + j * dp[j]\n        dp = new\n\n    return dp[k]"
+ },
+ "subcadenas_distintas": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "ced1ad23fc669ef1",
+  "src": "def solve(params: dict) -> int:\n    s = params[\"s\"]\n    if not s:\n        return 0\n\n    n = len(s)\n    max_states = 2 * n + 5\n    length = [0] * max_states\n    link = [-1] * max_states\n    nxt = [{} for _ in range(max_states)]\n\n    size = 1\n    last = 0\n\n    for ch in s:\n        cur = size\n        size += 1\n        length[cur] = length[last] + 1\n\n        p = last\n        while p != -1 and ch not in nxt[p]:\n            nxt[p][ch] = cur\n            p = link[p]\n\n        if p == -1:\n            link[cur] = 0\n        else:\n            q = nxt[p][ch]\n            if length[p] + 1 == length[q]:\n                link[cur] = q\n            else:\n                clone = size\n                size += 1\n                length[clone] = length[p] + 1\n                nxt[clone] = nxt[q].copy()\n                link[clone] = link[q]\n\n                while p != -1 and nxt[p].get(ch) == q:\n                    nxt[p][ch] = clone\n                    p = link[p]\n\n                link[q] = clone\n                link[cur] = clone\n\n        last = cur\n\n    ans = 0\n    for i in range(1, size):\n        ans += length[i] - length[link[i]]\n\n    return ans"
+ },
+ "subconjuntos_div": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "1a222ca005ac7301",
+  "src": "def solve(params: dict) -> int:\n    a = params[\"a\"]\n    k = params[\"k\"]\n    d = params[\"d\"]\n    dp = [[0] * d for _ in range(k + 1)]\n    dp[0][0] = 1\n    for x in a:\n        r = x % d\n        for j in range(k - 1, -1, -1):\n            for rem in range(d):\n                val = dp[j][rem]\n                if val:\n                    dp[j + 1][(rem + r) % d] += val\n    return dp[k][0]"
+ },
+ "subsecuencia_palindroma": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "68c99bb844c869f5",
+  "src": "def solve(params: dict) -> int:\n    s = params[\"s\"]\n    n = len(s)\n    dp = [[0] * n for _ in range(n)]\n    for i in range(n - 1, -1, -1):\n        dp[i][i] = 1\n        for j in range(i + 1, n):\n            if s[i] == s[j]:\n                dp[i][j] = dp[i + 1][j - 1] + 2\n            else:\n                dp[i][j] = max(dp[i + 1][j], dp[i][j - 1])\n    return dp[0][n - 1] if n else 0"
+ },
+ "suma_digitos_rango": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "586413a951f3acfe",
+  "src": "def solve(params: dict) -> int:\n    n = params[\"n\"]\n    total = 0\n    p = 1\n    while p <= n:\n        higher = n // (p * 10)\n        current = (n // p) % 10\n        lower = n % p\n        total += higher * 45 * p\n        total += (current * (current - 1) // 2) * p\n        total += current * (lower + 1)\n        p *= 10\n    return total"
+ },
+ "suma_div_propios": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "ed0cc0b7733f334d",
+  "src": "def solve(params: dict) -> int:\n    n = params[\"n\"]\n    if n <= 1:\n        return 0\n    total = 0\n    i = 1\n    while i * i <= n:\n        if n % i == 0:\n            if i != n:\n                total += i\n            other = n // i\n            if other != i and other != n:\n                total += other\n        i += 1\n    return total"
+ },
+ "suma_primos": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "cfd1ee621761843c",
+  "src": "import math\n\ndef solve(params: dict) -> int:\n    n = int(params[\"n\"])\n    if n <= 0:\n        return 0\n    \n    limit = 15 if n < 6 else int(n * (math.log(n) + math.log(math.log(n)))) + 10\n    \n    while True:\n        sieve = bytearray(b'\\x01') * (limit + 1)\n        if limit >= 0:\n            sieve[0] = 0\n        if limit >= 1:\n            sieve[1] = 0\n        \n        for i in range(2, int(limit ** 0.5) + 1):\n            if sieve[i]:\n                start = i * i\n                step = i\n                count = ((limit - start) // step) + 1\n                sieve[start:limit + 1:step] = b'\\x00' * count\n        \n        primes = [i for i in range(limit + 1) if sieve[i]]\n        if len(primes) >= n:\n            return sum(primes[:n])\n        \n        limit *= 2"
+ },
+ "ternas_crecientes": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "4ae1ddc3cd5ddeca",
+  "src": "def solve(params: dict) -> int:\n    a = params[\"a\"]\n    ans = 0\n    for j in range(1, len(a) - 1):\n        left = 0\n        right = 0\n        for i in range(j):\n            if a[i] < a[j]:\n                left += 1\n        for k in range(j + 1, len(a)):\n            if a[j] < a[k]:\n                right += 1\n        ans += left * right\n    return ans"
+ },
+ "tiling_2xn": {
+  "evidence": {
+   "edge": true,
+   "n_promote": 4,
+   "n_test": 7,
+   "n_test_ok": 7
+  },
+  "model": "deepseek-reasoner",
+  "promoted_at": "2026-09-10 13:36",
+  "sha256": "dfbaa1fd7b432960",
+  "src": "def solve(params: dict) -> int:\n    n = int(params[\"n\"])\n    a, b = 1, 1\n    if n == 0:\n        return a\n    for _ in range(2, n + 1):\n        a, b = b, b + 2 * a\n    return b"
+ }
+}

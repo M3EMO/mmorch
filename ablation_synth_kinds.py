@@ -36,6 +36,7 @@ from functools import lru_cache
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from ablation_paired import _wilson, _save_result  # noqa: E402
 from ablation_stages_hard import _strip_fence  # noqa: E402
+from mmorch import synth_store  # noqa: E402
 from mmorch.config import family_of  # noqa: E402
 from mmorch.sandbox import run_sandboxed  # noqa: E402
 
@@ -60,15 +61,21 @@ _SYNTH_SYS = (
 
 def _run_solve(src: str, params: dict, timeout: float = 20.0):
     """Corre solve(params) en el sandbox con los params embebidos como literal JSON."""
+    # Devuelve (valor o None, segundos de pared). Los segundos incluyen el arranque de
+    # python (~0.1-0.3s en Windows): sirven para COMPARAR modelos, no como tiempo
+    # absoluto. Timeout = None: codigo correcto pero lento no sirve (LiveCodeBench).
+    import time as _t
     code = (src + "\n\nimport json\n"
             f"print(solve(json.loads({json.dumps(json.dumps(params))})))\n")
+    t0 = _t.perf_counter()
     r = run_sandboxed(code, timeout=timeout)
+    dt = _t.perf_counter() - t0
     if r.timed_out or r.returncode != 0:
-        return None
+        return None, dt
     try:
-        return int(r.stdout.strip().splitlines()[-1])
+        return int(r.stdout.strip().splitlines()[-1]), dt
     except (ValueError, IndexError):
-        return None
+        return None, dt
 N_PROMOTE, N_TEST = 3, 7
 TIMEOUT = 180.0
 # 3 por familia: 3 pares misma-familia por lado, 9 cross. Google/Moonshot sin saldo.
@@ -416,14 +423,14 @@ class _MinRng:
     def random(self): return 0.0
 
 
-def build_kind_items(seed):
+def build_kind_items(seed, n_test=N_TEST):
     """kind -> {"promote": [items con truth], "test": [items con proposed/is_correct]}.
     promote = N_PROMOTE aleatorios + 1 de BORDE (instancia minima del tipo)."""
     rng = random.Random(seed)
     out = {}
     for name, gen in KINDS:
         items = []
-        for i in range(N_PROMOTE + N_TEST):
+        for i in range(N_PROMOTE + n_test):
             problem, truth, params = gen(rng)
             items.append({"i": i, "problem": problem, "truth": truth, "params": params})
         for it in items[N_PROMOTE:]:
@@ -450,20 +457,29 @@ def _synth_kind(model, name, bundle):
                    phase="ablation_synth_kinds", temperature=0.0, timeout=TIMEOUT)
         cost += res.cost_usd
         src = _strip_fence(res.text)
-        ok = bool(src) and all(_run_solve(src, g["params"]) == g["truth"] for g in bundle["promote"])
+        ok = bool(src) and all(_run_solve(src, g["params"])[0] == g["truth"] for g in bundle["promote"])
         if ok:
             break
     row = {"model": model, "kind": name, "promoted": ok, "attempts": attempts,
            "cost": cost, "src": src[:1500], "test": []}
     for it in bundle["test"]:
-        got = _run_solve(src, it["params"]) if ok else None
+        got, dt = _run_solve(src, it["params"]) if ok else (None, 0.0)
         passed = (got == it["proposed"]) if ok else False
         row["test"].append({"i": it["i"], "is_correct": it["is_correct"], "passed": passed,
-                            "got": got, "truth": it["truth"], "proposed": it["proposed"]})
+                            "got": got, "truth": it["truth"], "proposed": it["proposed"],
+                            "t": round(dt, 3)})
     fr = sum(1 for t in row["test"] if t["is_correct"] and not t["passed"])
     mb = sum(1 for t in row["test"] if not t["is_correct"] and t["passed"])
     row["false_rejects"], row["missed_bugs"] = fr, mb
     row["kind_failed"] = (not ok) or fr > 0 or mb > 0
+    # El experimento SOLO ESCRIBE en el store (nunca lee: cada modelo tiene que
+    # sintetizar por su cuenta o la medicion no es por modelo). Un gate de produccion
+    # lee primero y paga solo si el tipo es nuevo -- synth_store.get/run.
+    if ok and not row["kind_failed"]:
+        row["stored"] = synth_store.put(name, src, model, {
+            "n_promote": len(bundle["promote"]), "edge": True,
+            "n_test": len(row["test"]), "n_test_ok": len(row["test"]),
+        })
     return row
 
 
@@ -482,10 +498,12 @@ def main():
     ap.add_argument("--dry", action="store_true")
     ap.add_argument("--analyze-only", action="store_true",
                     help="no llama a la API: analiza las filas guardadas de este seed")
+    ap.add_argument("--n-test", type=int, default=N_TEST,
+                    help="items de test por tipo (default 7); 17 -> ~1000 items en 57 tipos")
     args = ap.parse_args()
     models = [m.strip() for m in args.models.split(",") if m.strip()]
-    kinds = build_kind_items(args.seed)
-    print(f"tipos: {len(kinds)} | items por tipo: {N_PROMOTE} promocion + {N_TEST} test | seed={args.seed}")
+    kinds = build_kind_items(args.seed, args.n_test)
+    print(f"tipos: {len(kinds)} | items por tipo: {N_PROMOTE}+1 borde promocion + {args.n_test} test | seed={args.seed}")
     print(f"modelos: {len(models)} -> {len(kinds) * len(models)} sintesis (x2 si reintenta)")
     for m in models:
         print(f"  {m:20s} familia={family_of(m)}")
@@ -549,8 +567,13 @@ def main():
         spec = sum(1 for t in tests if t["is_correct"] and t["passed"]) / max(nc, 1)
         sens = sum(1 for t in tests if not t["is_correct"] and not t["passed"]) / max(nf, 1)
         kind_fail[m] = {r["kind"]: r["kind_failed"] for r in rs}
+        ts = sorted(t["t"] for r in rs if r["promoted"] for t in r["test"] if "t" in t)
+        med = ts[len(ts) // 2] if ts else float("nan")
+        p95 = ts[int(len(ts) * 0.95)] if ts else float("nan")
+        tout = sum(1 for r in rs if r["promoted"] for t in r["test"] if t["got"] is None)
         print(f"  {m:20s} promovidos={prom:2d}/{len(rs)}  tipos_fallados={kf:2d}  "
-              f"espec={spec:.3f} {_wilson(round(spec * nc), nc)}  sens={sens:.3f}  ${sum(r['cost'] for r in rs):.3f}")
+              f"espec={spec:.3f} {_wilson(round(spec * nc), nc)}  sens={sens:.3f}  "
+              f"t_med={med:.2f}s t_p95={p95:.2f}s timeouts={tout}  ${sum(r['cost'] for r in rs):.3f}")
 
     print("\nPHI por par sobre 'fallo el tipo' (alto = se equivocan en los MISMOS tipos):")
     phis, same, cross = [], [], []

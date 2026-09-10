@@ -4,7 +4,7 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**134 módulos · 47 MCP tools · 926 tests.**
+**135 módulos · 47 MCP tools · 928 tests.**
 
 El server expone **15** de esas 47 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
 
@@ -132,6 +132,7 @@ El server expone **15** de esas 47 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/speedup.py` | speedup — make a function faster, cero-cupo, kept only on MEASURED+CORRECT improvement. |
 | `mmorch/stuck_detector.py` | Detector de estancamiento — tendencias sobre la historia nocturna, cero LLM. |
 | `mmorch/sync.py` | sync — GitHub como bus de sincronizacion entre maquinas. El host always-on (ej pc-mateo) |
+| `mmorch/synth_store.py` | synth_store — registro persistente de checkers SINTETIZADOS y promovidos, por tipo. |
 | `mmorch/textutil.py` | textutil — shared text helpers. Dedups the code-fence extractor that was copy-pasted |
 | `mmorch/tournament.py` | tournament — elegir EL mejor de pocos candidatos por gusto/calidad (naming, |
 | `mmorch/trajectory.py` | trajectory — robo de Hermes: 'trajectory compression para entrenar la proxima |
