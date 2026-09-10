@@ -118,9 +118,13 @@ def _default_gen(gen_model: str, repo: str, task: str = "", units_by_name: dict 
                 f"FILE `{_file_of(unit)}` (current):\n```\n{cur}\n```\n"
                 + (f"\nThe previous attempt FAILED:\n{feedback[:1200]}\nFix it.\n" if feedback else "")
                 + "Return ONLY the COMPLETE new file content in a ``` block.")
+        # A/B 2026-09-10, intento 4: la unidad Bot (300 lineas de Java) con v4-pro y thinking
+        # devolvio 3 veces out_tokens=0 -- el budget default de 16384 se agoto en reasoning
+        # (providers.call: "respuesta vacia"). 32768 y timeout 400s, lo mismo que el brazo B.
         out = call(gen_model, [{"role": "system", "content": _CODER_SYS},
                                {"role": "user", "content": user}],
-                   pattern="project_integrate", node="coder", temperature=0.0).text
+                   pattern="project_integrate", node="coder", temperature=0.0,
+                   max_tokens=32768, timeout=400.0).text
         return extract_fence(out)
     return gen
 
