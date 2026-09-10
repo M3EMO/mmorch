@@ -115,6 +115,60 @@ rates across gates, larger n) is needed before decorrelation can be confirmed ei
 and `logs/ablation_stages_items.jsonl` for raw per-item verdicts (re-analyzable without new
 API calls).
 
+### Synthesized checkers (2026-09-09/10)
+
+The user's idea: instead of asking a model to *compute* an answer, ask it to *write the
+function* and let a sandbox run it. Three gates were measured on the same hard gold set
+(`ablation_stages_hard.py`, n=50-80, computed truth):
+
+| gate | what the model does | specificity | cost / item |
+|---|---|---|---|
+| `deepseek-chat` (manual) | computes the answer in its head | 0.35-0.50 | $0.0046 |
+| `code:deepseek-chat` | writes `solve()` for THIS item; sandbox runs it | 0.98 | $0.00003 |
+| `code:deepseek-v4-pro` | same, thinking on | **1.00** (130/130) | $0.0017 |
+| `synth:deepseek-chat` | writes `solve(params)` ONCE per problem *kind*, promoted against computed truth, then cached | 1.00 | ~$0 (10 calls total) |
+
+Same model, same weights: 0.35 -> 0.98 by changing the *method*, at 150x lower cost. The
+two remaining `code:` failures were format (a bare expression, the system prompt echoed
+back), not arithmetic. phi between the manual and the code gate of the same model was
+-0.07 / +0.06 / +0.11 across three runs: **errors decorrelate by method, not by family.**
+
+`synth:` is `checkers.py` written by the model. A synthesized function is *promoted* only
+if it reproduces computed truth on 3 random items **plus one edge instance** (minimum
+legal parameters; the EvalPlus finding that edge tests cut pass@1 by 10-29 points). A
+function that fails promotion refutes its whole kind (fail-closed). Cost is per kind, not
+per item, so n stops mattering.
+
+**Kind-level decorrelation (`ablation_synth_kinds.py`, 57 algorithmic kinds, 6 models,
+$0.77).** Each kind has its own reference solver (brute-force verified); the function
+receives typed `params`, not prose — an earlier text-parsing design produced 12 false
+"failures" from decoy digits in the statement (`n/2`, `1..92`, `responder -1`) and
+correlated the models through *my* text. Result:
+
+| model | kinds promoted | kinds failed | missed bugs | cost |
+|---|---|---|---|---|
+| `deepseek-chat` (thinking off) | 53/57 | **4** | 0 | $0.003 |
+| `deepseek-v4-pro` | 57/57 | 0 | 0 | $0.37 |
+| **`deepseek-reasoner`** | **57/57** | 0 | 0 | **$0.03** |
+| `glm-4.5-air` | 54/54 | 0 | 0 | $0.21 |
+| `glm-5.2` | 49/49 | 0 | 0 | $0.16 |
+
+Zero missed bugs in 274 synthesized functions. The four `deepseek-chat` failures are all
+real spec bugs — `p*q` instead of `lcm(p,q)` in inclusion-exclusion, swapped terms in the
+tiling recurrence, "largest prime factor" returning 1 when the number factors completely
+(caught only by the edge item), a wrong transfer matrix for "strings without ab". Every
+other model wrote a correct function for every kind, edge cases and a 20-second time
+limit included. **phi is undefined for every pair: there are no errors to correlate.**
+The decorrelation question (same-family vs cross-family) is unanswerable at this
+difficulty — four of five models simply do not fail. What *is* established: for
+well-specified, typed, single-function tasks, a thinking model synthesizes a correct
+checker essentially always, and `deepseek-reasoner` does it at 12x less than `v4-pro`.
+
+Harness lessons, paid for four times this week: a phi of +1.0 between two different
+models was the harness every time (a 60s timeout, a `≡` character through cp1252 stdin,
+decoy digits in the prompt, and API-dropped rows counted as failures). Raw model output
+and rejected sources are now persisted per row so the next diagnosis is read, not guessed.
+
 ## What's here
 
 <!-- mmorch:auto:stats -->
