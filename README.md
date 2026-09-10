@@ -169,6 +169,26 @@ models was the harness every time (a 60s timeout, a `≡` character through cp12
 decoy digits in the prompt, and API-dropped rows counted as failures). Raw model output
 and rejected sources are now persisted per row so the next diagnosis is read, not guessed.
 
+### Pipeline vs engine on a real feature (2026-09-10)
+
+One feature (port of a 290-line Python intent matcher to Java 17, 35-assert acceptance test,
+Python as oracle), three ways of building it from the same baseline commit:
+
+| arm | who decides at the gates | acceptance | calls | USD | min | interventions |
+|---|---|---|---|---|---|---|
+| A: `/project` engine | nobody | **red**, 5 attempts | 11-21 | 0.81 | ~120 | 4 engine fixes |
+| B: 6-stage pipeline, scripted | the script | **green** (v2) | 31 | 1.13 | 22 | 0 human, 2 harness |
+| C: 6-stage pipeline, hybrid | Claude at the gates | **green** | 9 | 0.16 | 9 | 2 by Claude, 4 min |
+
+B and C shared the spec and plan (deepseek-reasoner) and the coder (deepseek-v4-pro); only
+what happened after the first red test differed. B's blind fix loop (rewrite all 9 files)
+broke its own build; a targeted loop (the model names the files, compile gate with revert)
+went green in 2 rounds. C needed one 4-line fix that a `mvn test-compile` gate would have
+caught for free. A exposed four engine defects (fixed: 58ce334, ea8b775) and ended one method
+short of green with no gate to tell it so. Full write-up: `docs/ab-sdlc-2026-09-10/README.md`.
+Next: the wayfinder map `.scratch/sdlc-6-gates/` (13 tickets) — the pipeline replaces the
+engine and becomes a per-repo convention.
+
 ## What's here
 
 <!-- mmorch:auto:stats -->

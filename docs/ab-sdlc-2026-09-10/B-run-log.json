@@ -1,0 +1,72 @@
+{
+ "stages": [
+  {
+   "stage": "4-build",
+   "ok": true,
+   "minutes": 20.56,
+   "calls": 27,
+   "note": "G3 ok: compila"
+  },
+  {
+   "stage": "5-test",
+   "ok": true,
+   "minutes": 1.64,
+   "calls": 4,
+   "note": "G4 ok: aceptacion verde (2 vueltas de fix)"
+  },
+  {
+   "stage": "6-pr",
+   "ok": true,
+   "minutes": 0.01,
+   "calls": 0,
+   "note": " 13 files changed, 1128 insertions(+)"
+  }
+ ],
+ "calls": 31,
+ "human_interventions": 0,
+ "gate_rejects": [],
+ "harness_fixes": [
+  "max_tokens 16384->32768, timeout 240->400 (v1: reasoner agoto el budget en la spec)",
+  "fix loop v2: archivos dirigidos + compile gate con revert + conteo por vuelta (v1 se rompio a si mismo)"
+ ],
+ "t0": "2026-09-10 14:53:35",
+ "t0_epoch": 1789062815.0845103,
+ "plan_files": [
+  "SeqMatch",
+  "Norm",
+  "Ars",
+  "Variant",
+  "Product",
+  "Msg",
+  "Reply",
+  "Catalog",
+  "Bot"
+ ],
+ "resumed_from_stage": 4,
+ "test_rounds": [
+  {
+   "round": 0,
+   "compiles": false,
+   "tests": null
+  },
+  {
+   "round": 1,
+   "files": [
+    "Reply"
+   ],
+   "compiles": true,
+   "tests": null
+  },
+  {
+   "round": 2,
+   "files": [
+    "Catalog"
+   ],
+   "compiles": true,
+   "tests": null
+  }
+ ],
+ "test_fix_rounds": 2,
+ "diffstat": " 13 files changed, 1128 insertions(+)",
+ "minutes_total": 22.21
+}

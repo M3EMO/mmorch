@@ -1,0 +1,167 @@
+{
+ "feature": "Port del matcher demo.py a Java 17 (com.qtp.bot), aceptacion = BotAcceptanceTest (35 asserts, oraculo demo.py)",
+ "baseline_commit": "d6853c9",
+ "A_project_engine": {
+  "attempt": 1,
+  "job_id": "20b2c6dd30",
+  "t0": "2026-09-10 13:52:36",
+  "duration_s": 57,
+  "status_engine": "escalate",
+  "acceptance_mvn_test": "FAIL: no compila (Bot.java usa Msg.text(x)/image(x) como setters; Msg los define como getters; 19 errores)",
+  "units": [
+   "msg",
+   "pom",
+   "product",
+   "catalog",
+   "reply",
+   "bot"
+  ],
+  "unit_gates": "6/6 'unverified (no test_cmd)': ningun gate por unidad, todo diferido al gate de integracion",
+  "integration_gate_reported": "no: el job escalo sin detail; el fallo se descubrio corriendo mvn test a mano en la rama",
+  "llm_calls": 11,
+  "models": {
+   "planner": "deepseek-chat",
+   "planner-reask": "deepseek-chat",
+   "coder": "deepseek-chat x9"
+  },
+  "usd": 0.0053,
+  "human_interventions": 0,
+  "diffstat": "6 files, +388 -7 (pom modificado, test intacto)",
+  "branch": "mmorch/wt-881319f8",
+  "root_cause": "El planner (deepseek-chat) creo 7 unidades: 6 de codigo sin test_cmd + una unidad 'acceptance-test' con test_cmd='mvn -q -B test'. Las 6 pasaron el gate como 'unverified'. La 7ma no puede pasar sola (necesita el todo) -> gate nunca verde -> escalate en project_driver:80 -> el gate de integracion NUNCA corrio. Ademas el coder de 'bot' nunca vio el codigo de Msg (unidades aisladas por spec) e invento Msg.text(x) como setter. El intento 2 uso el worklist CACHEADO (worklist_cache.json, key por task) -> byte a byte igual."
+ },
+ "B_sdlc_6_stages": {
+  "worktree": "ChatBot-abB",
+  "branch": "ab/b-sdlc",
+  "commit": "f9798ad",
+  "acceptance_mvn_test": "PASS: Tests run 5, Failures 0, Errors 0 (verificado a mano 15:17)",
+  "v1": {
+   "resultado": "rojo: G4 tras 3 vueltas; el fix loop reescribia 9 archivos por vuelta y rompio la compilacion en la vuelta 3",
+   "llamadas": 48,
+   "usd": 1.548,
+   "min": 30
+  },
+  "v2": {
+   "resultado": "verde",
+   "build": "27 llamadas, 20.6 min (9 archivos + 2 vueltas de compile-fix)",
+   "test": "2 vueltas de fix dirigido (Reply, Catalog), 4 llamadas, 1.6 min",
+   "llamadas": 31,
+   "usd": 1.133,
+   "min": 22.2,
+   "human_interventions": 0
+  },
+  "total": {
+   "llamadas": 79,
+   "usd": 2.681,
+   "min": 52
+  },
+  "harness_fixes": [
+   "max_tokens 16384->32768 (reasoner agoto el budget en la spec)",
+   "fix loop v2: archivos dirigidos + compile gate con revert"
+  ],
+  "diffstat": "13 files, +1128"
+ },
+ "A_project_engine_attempt2": {
+  "attempt": 2,
+  "job_id": "92d8df8415",
+  "t0": "2026-09-10 14:12:10",
+  "max_depth": 2,
+  "status_engine": "escalate",
+  "branch": "mmorch/wt-6f1dcb3a",
+  "acceptance_mvn_test": "FAIL: identico al intento 1 -- mismo diffstat (388/7), mismos 19 errores de compilacion",
+  "human_interventions_acumuladas": 1,
+  "nota": "temperature 0 + mismo plan => salida byte a byte igual; max_depth no cambia nada porque ningun gate por unidad fallo (no hay test por unidad) y el fallo de integracion no se realimenta al coder"
+ },
+ "C_hybrid_claude": {
+  "worktree": "ChatBot-abC",
+  "branch": "ab/c-hybrid",
+  "commit": "dcdef5c",
+  "base": "d6853c9 + spec.md y plan.md de B (reasoner)",
+  "acceptance_mvn_test": "PASS: Tests run 5, Failures 0, Errors 0 (15:05)",
+  "build": "9 llamadas deepseek-v4-pro, 4.5 min, compila a la primera",
+  "claude_interventions": [
+   {
+    "id": "I1",
+    "gate": "plan",
+    "min": 3,
+    "accion": "revision; aprobado; nota: no regenerar pom"
+   },
+   {
+    "id": "I2",
+    "gate": "test vuelta 0",
+    "min": 1,
+    "accion": "Catalog.load declaraba IOException y el test no la maneja; 1 metodo corregido a mano, sin llamada"
+   }
+  ],
+  "llm_calls_total_phase": 16,
+  "usd": 0.1639,
+  "nota_costo": "16 llamadas incluyen 7 de un primer build que murio con la sesion; el build que conto fue 9",
+  "fix_calls": 0,
+  "gate_rejects": [
+   "G4 vuelta 0: test no compilaba (excepcion chequeada) -> I2"
+  ],
+  "diffstat": "14 files, +1186"
+ },
+ "A_project_engine_attempt3_4": {
+  "attempt3": {
+   "job": "05317585a8",
+   "gen_model": "deepseek-v4-pro",
+   "max_fix": 3,
+   "estado": "murio con la sesion en la unidad Bot (7 unidades commiteadas en mmorch/wt-b491cf70)",
+   "usd": 0.231
+  },
+  "attempt4": {
+   "job": "b252270573",
+   "project": "chatbot-ab (worktree fijo en d6853c9)",
+   "estado": "en curso, unidad Bot",
+   "nota": "plan y 7 unidades desde cache -> 3 llamadas hasta ahora ($0.13)"
+  },
+  "engine_fixes_before_attempt3": [
+   "planner no puede crear unidad de aceptacion",
+   "coder ve el codigo de sus deps",
+   "gen_model y max_fix por payload"
+  ]
+ },
+ "A_project_engine_attempt5": {
+  "job": "0df98b5c07",
+  "t0": "15:17:55",
+  "t_end": "15:36:58",
+  "min": 19,
+  "gen_model": "deepseek-v4-pro",
+  "max_fix": 3,
+  "max_tokens_coder": 32768,
+  "status_engine": "escalate (unverified=7); Bot.java de 571 lineas SI aterrizo en la rama mmorch/wt-9151a412",
+  "coder_calls": 21,
+  "usd": 0.4424,
+  "detalle_llamadas": "9 llamadas v4-pro para 'bot' (10k-16k tokens, 100-170s cada una) + 12 llamadas deepseek-chat a las 15:20 (sub-unidades de una recursion: el gen_model no se propaga al decompose recursivo) ",
+  "acceptance_mvn_test": "FAIL en test-compile: Catalog.load declara IOException y el test no la maneja -- EXACTAMENTE el mismo defecto que C corrigio con 4 lineas (I2) y que B arreglo en su vuelta 2",
+  "lectura": "A estaba a un metodo de verde. El engine no tiene gate de test-compile ni loop de fix sobre la integracion: escala y para. La forma VERIFY (max_depth=1) siguio aplicando porque solo se sobreescribio max_fix.",
+  "engine_defects_new": [
+   "gen_model no se propaga a la recursion (sub-unidades con deepseek-chat)",
+   "max_depth de la forma VERIFY (1) no se sobreescribe si el caller manda 2",
+   "sin gate test-compile antes del external_test",
+   "el fallo de integracion no realimenta al coder"
+  ]
+ },
+ "tabla_final": {
+  "A_engine": {
+   "aceptacion": "rojo (5 intentos, 4 fixes de engine, a 1 metodo de verde)",
+   "usd_total": 0.811,
+   "min_total": "~120",
+   "intervenciones": "4 fixes de engine + 5 relanzamientos"
+  },
+  "B_script": {
+   "aceptacion": "verde (v2)",
+   "usd_v2": 1.133,
+   "min_v2": 22,
+   "intervenciones": "0 humanas, 2 de arnes",
+   "usd_total_con_v1": 2.681
+  },
+  "C_hibrido": {
+   "aceptacion": "verde",
+   "usd": 0.164,
+   "min": 9,
+   "intervenciones": "2 de Claude (4 min)"
+  }
+ }
+}
