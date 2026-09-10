@@ -313,6 +313,88 @@ KINDS = [
 
 assert len(KINDS) == 43 and len({k for k, _ in KINDS}) == 43
 
+# --------------------------------------------------------------------------- #
+# Tipos DIFICILES (2026-09-10). Fuente: EvalPlus/HumanEval+ -- los tests de borde     #
+# tumban 10-29 puntos de pass@1; LiveCodeBench -- limites de tiempo. Aca cada tipo   #
+# tiene una trampa de spec conocida: indexado 0/1, bordes inclusivos, negativos,   #
+# strings vacios o iguales, y rangos donde una solucion O(n^2) se pasa de los 20s.  #
+# --------------------------------------------------------------------------- #
+def _incl_excl(a, b, p, q):
+    f = lambda x, d: x // d
+    lcm = p * q // math.gcd(p, q)
+    return (f(b, p) - f(a - 1, p)) + (f(b, q) - f(a - 1, q)) - (f(b, lcm) - f(a - 1, lcm))
+def _kth_perm(n, k):
+    """k-esima permutacion de 0..n-1 en orden lexicografico, k 1-INDEXADO, como entero
+    de concatenar los digitos (n<=9)."""
+    digs = list(range(n)); k -= 1; out = []
+    for i in range(n, 0, -1):
+        f = math.factorial(i - 1); out.append(digs.pop(k // f)); k %= f
+    return int("".join(map(str, out)))
+def _max_prod(a):
+    best = hi = lo = a[0]
+    for x in a[1:]:
+        hi, lo = max(x, hi * x, lo * x), min(x, hi * x, lo * x); best = max(best, hi)
+    return best
+def _islands(rows):
+    seen = set(); c = 0
+    for i, r in enumerate(rows):
+        for j, ch in enumerate(r):
+            if ch == "1" and (i, j) not in seen:
+                c += 1; st = [(i, j)]
+                while st:
+                    x, y = st.pop()
+                    if (x, y) in seen or x < 0 or y < 0 or x >= len(rows) or y >= len(r) or rows[x][y] != "1": continue
+                    seen.add((x, y)); st += [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]
+    return c
+def _distinct_substr(s): return len({s[i:j] for i in range(len(s)) for j in range(i + 1, len(s) + 1)})
+def _stairs123(n):
+    a, b, c = 1, 1, 2  # f(0)=1 f(1)=1 f(2)=2
+    for _ in range(n - 2): a, b, c = b, c, a + b + c
+    return c if n >= 2 else (1 if n <= 1 else c)
+def _triples_inc(a): return sum(1 for i in range(len(a)) for j in range(i + 1, len(a)) for k in range(j + 1, len(a)) if a[i] < a[j] < a[k])
+def _pairs_divk(a, k): return sum(1 for i in range(len(a)) for j in range(i + 1, len(a)) if (a[i] + a[j]) % k == 0)
+def _bin_pal(n): return sum(1 for x in range(1, n + 1) if bin(x)[2:] == bin(x)[2:][::-1])
+def _no_ab(n):
+    # cadenas sobre {a,b,c} de longitud n sin "ab": estados = ultimo char es 'a' o no
+    ea, no = 1, 2  # n=1: 'a' | 'b','c'
+    for _ in range(n - 1): ea, no = ea + no, 2 * ea + 2 * no - ea  # 'a' desde todo; 'b' no desde 'a'; 'c' desde todo
+    return ea + no if n >= 1 else 1
+def _digits_sum_range(n): return sum(sum(map(int, str(x))) for x in range(1, n + 1))
+def _strict_inc_digits(n): return sum(1 for x in range(1, n + 1) if all(a < b for a, b in zip(str(x), str(x)[1:], strict=False)))
+def _lps(s):
+    n = len(s); dp = [[0] * n for _ in range(n)]
+    for i in range(n - 1, -1, -1):
+        dp[i][i] = 1
+        for j in range(i + 1, n):
+            dp[i][j] = dp[i + 1][j - 1] + 2 if s[i] == s[j] else max(dp[i + 1][j], dp[i][j - 1])
+    return dp[0][n - 1]
+def _sqfree_fast(n):
+    ok = bytearray([1]) * (n + 1)
+    for p in range(2, int(n ** 0.5) + 1):
+        for m in range(p * p, n + 1, p * p): ok[m] = 0
+    return sum(ok[1:])
+
+
+KINDS += [
+    ("divisibles_p_o_q", lambda r: (lambda a, b, p, q: (f"Cuantos enteros en el intervalo CERRADO [{a}, {b}] son divisibles por {p} o por {q}?", _incl_excl(a, b, p, q), {"a": a, "b": b, "p": p, "q": q}))(r.randint(1, 500), r.randint(10_000, 10_000_000), r.randint(2, 30), r.randint(2, 30))),
+    ("kesima_permutacion", lambda r: (lambda n, k: (f"Permutaciones de los digitos 0..{n-1} en orden lexicografico. La k-esima con k=1 es 01..{n-1}. Cual es la {k}-esima, como entero (concatenar digitos)?", _kth_perm(n, k), {"n": n, "k": k}))(r.randint(5, 9), r.randint(1, 120))),
+    ("max_producto", lambda r: (lambda a: (f"Producto maximo de un subarreglo contiguo no vacio de {a}?", _max_prod(a), {"a": a}))([r.choice([-3, -2, -1, 0, 1, 2, 3]) for _ in range(r.randint(6, 12))])),
+    ("islas", lambda r: (lambda g: (f"Cuantas islas (componentes conexas de '1' en 4 direcciones) hay en la grilla {g}?", _islands(g), {"g": g}))(["".join(r.choice("0011") for _ in range(8)) for _ in range(6)])),
+    ("subcadenas_distintas", lambda r: (lambda s: (f"Cuantas subcadenas DISTINTAS no vacias tiene '{s}'?", _distinct_substr(s), {"s": s}))("".join(r.choice("ab") for _ in range(r.randint(8, 16))))),
+    ("escalones_123", lambda r: (lambda n: (f"De cuantas formas se suben {n} escalones con pasos de 1, 2 o 3 (el orden importa)?", _stairs123(n), {"n": n}))(r.randint(5, 40))),
+    ("ternas_crecientes", lambda r: (lambda a: (f"Cuantas ternas de indices i<j<k cumplen a[i]<a[j]<a[k] en {a}?", _triples_inc(a), {"a": a}))(_lst(r, r.randint(8, 14), 1, 20))),
+    ("pares_div_k", lambda r: (lambda a, k: (f"Cuantos pares de indices i<j tienen a[i]+a[j] divisible por {k} en {a}?", _pairs_divk(a, k), {"a": a, "k": k}))(_lst(r, r.randint(10, 16), 0, 50), r.randint(2, 7))),
+    ("binarios_palindromos", lambda r: (lambda n: (f"Cuantos enteros en 1..{n} tienen representacion binaria palindroma (sin ceros a la izquierda)?", _bin_pal(n), {"n": n}))(r.randint(1000, 200000))),
+    ("cadenas_sin_ab", lambda r: (lambda n: (f"Cuantas cadenas de longitud {n} sobre el alfabeto {{a,b,c}} NO contienen 'ab' como subcadena contigua?", _no_ab(n), {"n": n}))(r.randint(3, 30))),
+    ("suma_digitos_rango", lambda r: (lambda n: (f"Cual es la suma de los digitos de TODOS los enteros de 1 a {n}?", _digits_sum_range(n), {"n": n}))(r.randint(1000, 300000))),
+    ("digitos_crecientes", lambda r: (lambda n: (f"Cuantos enteros en 1..{n} tienen digitos ESTRICTAMENTE crecientes de izquierda a derecha (los de un digito cuentan)?", _strict_inc_digits(n), {"n": n}))(r.randint(1000, 500000))),
+    ("subsecuencia_palindroma", lambda r: (lambda s: (f"Longitud de la subsecuencia palindroma mas larga (no necesariamente contigua) de '{s}'?", _lps(s), {"s": s}))("".join(r.choice("abc") for _ in range(r.randint(8, 16))))),
+    ("libres_cuadrados_grande", lambda r: (lambda n: (f"Cuantos enteros en 1..{n} son libres de cuadrados? (n grande: una solucion lenta no termina)", _sqfree_fast(n), {"n": n}))(r.randint(200_000, 2_000_000))),
+]
+
+assert len(KINDS) == 57 and len({k for k, _ in KINDS}) == 57
+
+
 
 def _perturb(truth, rng):
     mag = max(1, len(str(abs(truth))) - 1)
@@ -320,8 +402,23 @@ def _perturb(truth, rng):
     return truth + rng.choice([-1, 1]) * d
 
 
+class _MinRng:
+    """RNG que devuelve siempre el valor MINIMO legal: genera la instancia de borde de
+    cada tipo con el mismo generador, sin escribir 43 casos a mano. Los bugs de codigo
+    viven en los bordes (n=0/1, lista de un valor repetido, k minimo): el bug de
+    'desarreglos' del piloto (D(0)/D(1) invertidos) pasaba la promocion con n en 8..18
+    y se atrapa con n=8 solo si la recurrencia arranca mal -- con n minimo se atrapa
+    siempre. Es la idea de EvalPlus: los tests de borde tumban codigo que los tests
+    aleatorios de rango medio dejan pasar."""
+    def randint(self, a, b): return a
+    def choice(self, seq): return seq[0]
+    def sample(self, pop, k): return list(pop)[:k]
+    def random(self): return 0.0
+
+
 def build_kind_items(seed):
-    """kind -> {"promote": [items con truth], "test": [items con proposed/is_correct]}."""
+    """kind -> {"promote": [items con truth], "test": [items con proposed/is_correct]}.
+    promote = N_PROMOTE aleatorios + 1 de BORDE (instancia minima del tipo)."""
     rng = random.Random(seed)
     out = {}
     for name, gen in KINDS:
@@ -332,7 +429,9 @@ def build_kind_items(seed):
         for it in items[N_PROMOTE:]:
             it["is_correct"] = rng.random() < 0.5
             it["proposed"] = it["truth"] if it["is_correct"] else _perturb(it["truth"], rng)
-        out[name] = {"promote": items[:N_PROMOTE], "test": items[N_PROMOTE:]}
+        problem, truth, params = gen(_MinRng())
+        edge = {"i": -1, "problem": problem, "truth": truth, "params": params, "edge": True}
+        out[name] = {"promote": items[:N_PROMOTE] + [edge], "test": items[N_PROMOTE:]}
     return out
 
 
