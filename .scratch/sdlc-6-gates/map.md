@@ -19,6 +19,7 @@ Todos los proyectos del usuario construyen sus features con el mismo pipeline de
 
 <!-- una línea por ticket resuelto: gist + link -->
 
+- [Features de validación](issues/06-features-de-validacion.md) — 3 reales desde `main` 77bc70c del ChatBot (menú configurable → bot; reserva persistida; conector Woo Store API con fixtures) + 2 del bench congelado (rate-limiter como control histórico 0/3, lru-ttl-cache como piso). Dashboard afuera: sin e2e. Tests de aceptación los escribe Claude; el pipeline no los toca.
 - [Prototipo driver v3](issues/04-prototipo-driver-v3.md) — verde con 0 Claude: 9 llamadas, US$0.31, 7.3 min, 0 vueltas (corrida limpia, sin pista ni gate sobreajustado); 4x más barato y 3x más rápido que B; los gates nuevos no rechazaron nada → sin ejercitar hasta las features del 06. Mutación/tests por unidad no incluidos.
 - [Cierre del A/B y tabla final](issues/10-cierre-del-ab-y-tabla-final.md) — A rojo a un método de verde (US$0.81, 4 fixes de engine); B verde US$1.13/22 min/0 intervenciones; C verde US$0.16/9 min/2 intervenciones reemplazables por gates. Evidencia en `docs/ab-sdlc-2026-09-10/`.
 - [Inventario de gates existentes](issues/01-inventario-gates-existentes.md) — 20 gates en código, todos sin número medido propio; intent, spec y PR tienen cero gates; tres contratos de salida distintos (CheckResult / tuple / int|None) que el ticket 02 debe unificar; el engine no consume synth_store ni coverage/mutation. Detalle: [research/01-inventario-gates.md](research/01-inventario-gates.md).
@@ -34,7 +35,6 @@ Todos los proyectos del usuario construyen sus features con el mismo pipeline de
 - Cómo un candidato de `supervision.md` se etiqueta 3+1 cuando no hay oráculo: ticket 08.
 - Cuándo y cómo se retira el engine viejo (`project_driver` / `project_integrate`). Depende de 05.
 - Topes USD y minutos por feature. Depende de 07. Escalación de vueltas ya está en 03 (3 + reasoner×2).
-- Validación en ChatBot: punto de partida git. Depende de 06.
 - Observabilidad opcional en Lotus. Depende de 05. Baja prioridad.
 
 ## Out of scope
