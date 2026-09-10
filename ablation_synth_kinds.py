@@ -480,6 +480,8 @@ def main():
     ap.add_argument("--models", default=",".join(DEFAULT_MODELS))
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--dry", action="store_true")
+    ap.add_argument("--analyze-only", action="store_true",
+                    help="no llama a la API: analiza las filas guardadas de este seed")
     args = ap.parse_args()
     models = [m.strip() for m in args.models.split(",") if m.strip()]
     kinds = build_kind_items(args.seed)
@@ -509,6 +511,8 @@ def main():
     rows = [done[(m, k)] for m in models for k in kinds if (m, k) in done]
     if rows:
         print(f"retomando: {len(rows)} (modelo,tipo) guardados, {len(todo)} pendientes")
+    if args.analyze_only:
+        todo = []
 
     fails = 0
     with ThreadPoolExecutor(max_workers=args.workers) as ex, \
@@ -552,8 +556,12 @@ def main():
     phis, same, cross = [], [], []
     knames = [k for k, _ in KINDS]
     for m1, m2 in itertools.combinations([m for m in models if m in kind_fail], 2):
-        xs = [kind_fail[m1].get(k, True) for k in knames]
-        ys = [kind_fail[m2].get(k, True) for k in knames]
+        # SOLO tipos presentes en ambos. El run del 2026-09-10 (68 caidos por API)
+        # contaba un tipo ausente como fallado y fabrico phi=+0.357 entre los dos glm
+        # con "co-fallos" que eran llamadas caidas, no funciones mal escritas.
+        common = [k for k in knames if k in kind_fail[m1] and k in kind_fail[m2]]
+        xs = [kind_fail[m1][k] for k in common]
+        ys = [kind_fail[m2][k] for k in common]
         ph, both = _phi_bin(xs, ys)
         is_cross = family_of(m1) != family_of(m2)
         (cross if is_cross else same).append(ph)
