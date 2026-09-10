@@ -35,10 +35,40 @@ from functools import lru_cache
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from ablation_paired import _wilson, _save_result  # noqa: E402
-from ablation_stages_hard import _SYNTH_SYS, _strip_fence, _run_solve  # noqa: E402
+from ablation_stages_hard import _strip_fence  # noqa: E402
 from mmorch.config import family_of  # noqa: E402
+from mmorch.sandbox import run_sandboxed  # noqa: E402
 
-DEFAULT_SEED = 44
+# 45 y no 44: el seed 44 tiene filas guardadas del diseño viejo (extraccion por regex
+# del enunciado). Mezclarlas con el diseño por params seria comparar dos experimentos
+# distintos como si fueran uno.
+DEFAULT_SEED = 45
+
+# La funcion recibe los PARAMETROS como dict, no el enunciado como texto. El piloto del
+# 2026-09-09 con extraccion por regex fallo Collatz y Josephus con codigo CORRECTO: el
+# enunciado traia "n/2", "3n+1", "1..92", "responder -1", y la regex tomaba esos digitos
+# como parametros. Eso es un defecto del enunciado, y correlaciona a los modelos entre
+# si por culpa del texto, no del codigo. Con params estructurados se mide SOLO el
+# algoritmo -- que es lo que un SDLC real recibe: entradas tipadas, no prosa.
+_SYNTH_SYS = (
+    "Sos un programador. Escribi SOLO codigo Python 3 que defina "
+    "`def solve(params: dict) -> int`. `params` trae los parametros del problema con los "
+    "nombres indicados. Devolve la respuesta exacta como int. Tiene que funcionar para "
+    "otros valores de los mismos parametros. Sin explicacion, sin markdown, solo stdlib."
+)
+
+
+def _run_solve(src: str, params: dict, timeout: float = 20.0):
+    """Corre solve(params) en el sandbox con los params embebidos como literal JSON."""
+    code = (src + "\n\nimport json\n"
+            f"print(solve(json.loads({json.dumps(json.dumps(params))})))\n")
+    r = run_sandboxed(code, timeout=timeout)
+    if r.timed_out or r.returncode != 0:
+        return None
+    try:
+        return int(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return None
 N_PROMOTE, N_TEST = 3, 7
 TIMEOUT = 180.0
 # 3 por familia: 3 pares misma-familia por lado, 9 cross. Google/Moonshot sin saldo.
@@ -235,49 +265,49 @@ def _lst(rng, k, lo, hi): return [rng.randint(lo, hi) for _ in range(k)]
 
 
 KINDS = [
-    ("particiones", lambda r: (lambda n: (f"Cuantas particiones enteras tiene {n}? (formas de escribir {n} como suma de enteros positivos sin importar el orden)", _partitions(n)))(r.randint(30, 80))),
-    ("josephus", lambda r: (lambda n, k: (f"Problema de Josefo: {n} personas en circulo numeradas 1..{n}; se elimina cada {k}-esima persona empezando a contar desde la 1. Que numero tiene la sobreviviente?", _josephus(n, k)))(r.randint(20, 200), r.randint(2, 9))),
-    ("collatz_pasos", lambda r: (lambda n: (f"Cuantos pasos de Collatz (n par -> n/2, n impar -> 3n+1) necesita {n} para llegar a 1?", _collatz(n)))(r.randint(1000, 99999))),
-    ("collatz_max", lambda r: (lambda n: (f"Cual es el valor MAXIMO alcanzado en la secuencia de Collatz que empieza en {n} (incluido {n})?", _collatz_max(n)))(r.randint(1000, 99999))),
-    ("primos_rango", lambda r: (lambda a, b: (f"Cuantos numeros primos hay en el intervalo cerrado [{a}, {b}]?", sum(1 for p in _sieve(b) if p >= a)))(r.randint(1000, 5000), r.randint(6000, 20000))),
-    ("nesimo_primo", lambda r: (lambda n: (f"Cual es el {n}-esimo numero primo? (el 1-esimo es 2)", _sieve(200000)[n - 1]))(r.randint(500, 5000))),
-    ("suma_div_propios", lambda r: (lambda n: (f"Suma de los divisores PROPIOS de {n} (todos los divisores menos {n} mismo)?", sum(_divs(n)) - n))(r.randint(10000, 99999))),
-    ("cant_divisores", lambda r: (lambda n: (f"Cuantos divisores positivos tiene {n}?", len(_divs(n))))(r.randint(10000, 99999))),
-    ("euler_phi", lambda r: (lambda n: (f"Cuanto vale la funcion phi de Euler de {n} (cantidad de enteros en 1..{n} coprimos con {n})?", _phi(n)))(r.randint(10000, 99999))),
-    ("fibonacci_mod", lambda r: (lambda n, m: (f"Cual es el {n}-esimo numero de Fibonacci modulo {m}? (F(1)=1, F(2)=1)", _fib_mod(n, m)))(r.randint(1000, 100000), r.choice([1000, 9973, 1000003]))),
-    ("catalan", lambda r: (lambda n: (f"Cual es el {n}-esimo numero de Catalan? (C(0)=1, C(1)=1, C(2)=2)", math.comb(2 * n, n) // (n + 1)))(r.randint(15, 40))),
-    ("desarreglos", lambda r: (lambda n: (f"Cuantos desarreglos (permutaciones sin puntos fijos) tiene un conjunto de {n} elementos?", _derange(n)))(r.randint(8, 18))),
-    ("stirling2", lambda r: (lambda n, k: (f"Numero de Stirling de segunda especie S({n},{k}): formas de partir {n} elementos en {k} bloques no vacios?", _stirling2(n, k)))(r.randint(10, 20), r.randint(3, 8))),
-    ("bell", lambda r: (lambda n: (f"Cual es el {n}-esimo numero de Bell (cantidad de particiones de un conjunto de {n} elementos)?", _bell(n)))(r.randint(8, 18))),
-    ("digitos_factorial", lambda r: (lambda n: (f"Cual es la suma de los digitos decimales de {n}! (factorial de {n})?", sum(map(int, str(math.factorial(n))))))(r.randint(100, 400))),
-    ("ceros_base", lambda r: (lambda n, b: (f"Cuantos ceros al final tiene {n}! escrito en base {b}?", _zeros_base(n, b)))(r.randint(50, 500), r.choice([6, 12, 15]))),
-    ("popcount_total", lambda r: (lambda n: (f"Cuantos bits en 1 hay en total en las representaciones binarias de todos los enteros de 1 a {n}?", sum(bin(i).count('1') for i in range(1, n + 1))))(r.randint(1000, 50000))),
-    ("lis", lambda r: (lambda a: (f"Longitud de la subsecuencia estrictamente creciente mas larga de la lista {a}?", _lis(a)))(_lst(r, 14, 1, 60))),
-    ("kadane", lambda r: (lambda a: (f"Suma maxima de un subarreglo contiguo no vacio de {a}?", _kadane(a)))(_lst(r, 12, -30, 30))),
-    ("inversiones", lambda r: (lambda a: (f"Cuantas inversiones (pares i<j con a[i]>a[j]) tiene la lista {a}?", _inversions(a)))(_lst(r, 14, 1, 99))),
-    ("palindromos", lambda r: (lambda s: (f"Cuantas subcadenas (contiguas, contando posiciones distintas) palindromas tiene la cadena de digitos '{s}'?", _pal_substrings(s)))(''.join(str(r.randint(0, 3)) for _ in range(14)))),
-    ("lcs", lambda r: (lambda a, b: (f"Longitud de la subsecuencia comun mas larga (no necesariamente contigua) entre '{a}' y '{b}'?", _lcs(a, b)))(''.join(r.choice('abcd') for _ in range(12)), ''.join(r.choice('abcd') for _ in range(12)))),
-    ("edit_distance", lambda r: (lambda a, b: (f"Distancia de edicion de Levenshtein (insertar, borrar, sustituir, costo 1 cada una) entre '{a}' y '{b}'?", _edit(a, b)))(''.join(r.choice('abcde') for _ in range(10)), ''.join(r.choice('abcde') for _ in range(10)))),
-    ("mochila", lambda r: (lambda items, cap: (f"Mochila 0/1: items (peso, valor) = {items}, capacidad {cap}. Valor maximo alcanzable?", _knap(items, cap)))([(r.randint(1, 15), r.randint(1, 40)) for _ in range(7)], r.randint(20, 40))),
-    ("cambio_formas", lambda r: (lambda coins, amt: (f"De cuantas formas se puede formar {amt} con monedas de valores {coins} (cantidad ilimitada, el orden no importa)?", _coin_ways(coins, amt)))(sorted(r.sample([1, 2, 3, 5, 7, 10, 20, 25], 4)), r.randint(50, 200))),
-    ("cambio_min", lambda r: (lambda coins, amt: (f"Cantidad MINIMA de monedas para formar {amt} con valores {coins} (ilimitadas)? Responder -1 si es imposible.", _min_coins(coins, amt)))(sorted(r.sample([3, 4, 7, 9, 11, 13, 17], 3)), r.randint(30, 150))),
-    ("tiling_2xn", lambda r: (lambda n: (f"De cuantas formas se puede cubrir un tablero de 2x{n} con fichas de 1x2 (en cualquier orientacion) y de 2x2?", _tile2n(n)))(r.randint(10, 40))),
-    ("binarias_sin_11", lambda r: (lambda n: (f"Cuantas cadenas binarias de longitud {n} NO tienen dos 1 consecutivos?", _no11(n)))(r.randint(10, 60))),
-    ("digitos_2n", lambda r: (lambda n: (f"Cual es la suma de los digitos decimales de 2 elevado a {n}?", sum(map(int, str(2 ** n)))))(r.randint(200, 2000))),
-    ("ndigitos_suma", lambda r: (lambda n, s: (f"Cuantos numeros de exactamente {n} digitos (sin ceros a la izquierda) tienen suma de digitos igual a {s}?", _digit_sum_count(n, s)))(r.randint(3, 5), r.randint(8, 30))),
-    ("lcm_1n", lambda r: (lambda n: (f"Cual es el minimo comun multiplo de todos los enteros de 1 a {n}?", math.lcm(*range(1, n + 1))))(r.randint(15, 40))),
-    ("puntos_circulo", lambda r: (lambda n: (f"Cuantos puntos enteros (x, y) cumplen x^2 + y^2 = {n}?", _r2(n)))(r.choice([25, 50, 65, 125, 325, 1105, 5525, 8125, 4225, 2450]))),
-    ("pitagoricas_prim", lambda r: (lambda n: (f"Cuantas ternas pitagoricas PRIMITIVAS (a<b<c, gcd(a,b,c)=1) tienen hipotenusa c <= {n}?", _prim_pyth(n)))(r.randint(100, 2000))),
-    ("suma_primos", lambda r: (lambda n: (f"Cual es la suma de los primeros {n} numeros primos?", sum(_sieve(200000)[:n])))(r.randint(100, 3000))),
-    ("digitos_factorial_cant", lambda r: (lambda n: (f"Cuantos digitos decimales tiene {n}! (factorial de {n})?", len(str(math.factorial(n)))))(r.randint(100, 1500))),
-    ("mayor_primo", lambda r: (lambda n: (f"Cual es el mayor factor primo de {n}?", _lpf(n)))(r.randint(100000, 9999999))),
-    ("libres_cuadrados", lambda r: (lambda n: (f"Cuantos enteros en 1..{n} son libres de cuadrados (no divisibles por ningun cuadrado perfecto > 1)?", _squarefree(n)))(r.randint(500, 5000))),
-    ("pasos_euclides", lambda r: (lambda a, b: (f"Cuantas divisiones (pasos) hace el algoritmo de Euclides para gcd({a}, {b})? Contar una por cada operacion modulo hasta que el resto sea 0.", _euclid_steps(a, b)))(r.randint(10000, 999999), r.randint(1000, 99999))),
-    ("subconjuntos_div", lambda r: (lambda a, k, d: (f"Cuantos subconjuntos de exactamente {k} elementos de {a} tienen suma divisible por {d}?", _subsets_div(a, k, d)))(_lst(r, 12, 1, 50), r.randint(3, 5), r.randint(3, 7))),
-    ("grilla_obstaculo", lambda r: (lambda R, C, bx, by: (f"Caminos de (0,0) a ({R},{C}) moviendo solo +1 en x o +1 en y, sin pasar por la celda ({bx},{by})?", _grid_avoid(R, C, bx, by)))(r.randint(6, 14), r.randint(6, 14), r.randint(1, 5), r.randint(1, 5))),
-    ("felices", lambda r: (lambda n: (f"Cuantos numeros felices hay en 1..{n}? (un numero es feliz si iterar 'suma de cuadrados de sus digitos' llega a 1)", _happy_count(n)))(r.randint(500, 5000))),
-    ("look_say", lambda r: (lambda n: (f"Longitud del {n}-esimo termino de la secuencia look-and-say que empieza en '1' (termino 1 = '1', termino 2 = '11', termino 3 = '21')?", _look_say_len(n)))(r.randint(15, 35))),
-    ("kaprekar", lambda r: (lambda n: (f"Cuantas iteraciones de la rutina de Kaprekar (ordenar digitos desc menos asc, con 4 digitos y ceros a la izquierda) necesita {n} para llegar a 6174?", _kaprekar_steps(n)))(r.choice([x for x in range(1000, 9999) if len(set(f"{x:04d}")) > 1]))),
+    ('particiones', lambda r: (lambda n: (f'Cuantas particiones enteras tiene {n}? (formas de escribir {n} como suma de enteros positivos sin importar el orden)', _partitions(n), {'n': n}))(r.randint(30, 80))),
+    ('josephus', lambda r: (lambda n, k: (f'Problema de Josefo: {n} personas en circulo numeradas 1..{n}; se elimina cada {k}-esima persona empezando a contar desde la 1. Que numero tiene la sobreviviente?', _josephus(n, k), {'n': n, 'k': k}))(r.randint(20, 200), r.randint(2, 9))),
+    ('collatz_pasos', lambda r: (lambda n: (f'Cuantos pasos de Collatz (n par -> n/2, n impar -> 3n+1) necesita {n} para llegar a 1?', _collatz(n), {'n': n}))(r.randint(1000, 99999))),
+    ('collatz_max', lambda r: (lambda n: (f'Cual es el valor MAXIMO alcanzado en la secuencia de Collatz que empieza en {n} (incluido {n})?', _collatz_max(n), {'n': n}))(r.randint(1000, 99999))),
+    ('primos_rango', lambda r: (lambda a, b: (f'Cuantos numeros primos hay en el intervalo cerrado [{a}, {b}]?', sum((1 for p in _sieve(b) if p >= a)), {'a': a, 'b': b}))(r.randint(1000, 5000), r.randint(6000, 20000))),
+    ('nesimo_primo', lambda r: (lambda n: (f'Cual es el {n}-esimo numero primo? (el 1-esimo es 2)', _sieve(200000)[n - 1], {'n': n}))(r.randint(500, 5000))),
+    ('suma_div_propios', lambda r: (lambda n: (f'Suma de los divisores PROPIOS de {n} (todos los divisores menos {n} mismo)?', sum(_divs(n)) - n, {'n': n}))(r.randint(10000, 99999))),
+    ('cant_divisores', lambda r: (lambda n: (f'Cuantos divisores positivos tiene {n}?', len(_divs(n)), {'n': n}))(r.randint(10000, 99999))),
+    ('euler_phi', lambda r: (lambda n: (f'Cuanto vale la funcion phi de Euler de {n} (cantidad de enteros en 1..{n} coprimos con {n})?', _phi(n), {'n': n}))(r.randint(10000, 99999))),
+    ('fibonacci_mod', lambda r: (lambda n, m: (f'Cual es el {n}-esimo numero de Fibonacci modulo {m}? (F(1)=1, F(2)=1)', _fib_mod(n, m), {'n': n, 'm': m}))(r.randint(1000, 100000), r.choice([1000, 9973, 1000003]))),
+    ('catalan', lambda r: (lambda n: (f'Cual es el {n}-esimo numero de Catalan? (C(0)=1, C(1)=1, C(2)=2)', math.comb(2 * n, n) // (n + 1), {'n': n}))(r.randint(15, 40))),
+    ('desarreglos', lambda r: (lambda n: (f'Cuantos desarreglos (permutaciones sin puntos fijos) tiene un conjunto de {n} elementos?', _derange(n), {'n': n}))(r.randint(8, 18))),
+    ('stirling2', lambda r: (lambda n, k: (f'Numero de Stirling de segunda especie S({n},{k}): formas de partir {n} elementos en {k} bloques no vacios?', _stirling2(n, k), {'n': n, 'k': k}))(r.randint(10, 20), r.randint(3, 8))),
+    ('bell', lambda r: (lambda n: (f'Cual es el {n}-esimo numero de Bell (cantidad de particiones de un conjunto de {n} elementos)?', _bell(n), {'n': n}))(r.randint(8, 18))),
+    ('digitos_factorial', lambda r: (lambda n: (f'Cual es la suma de los digitos decimales de {n}! (factorial de {n})?', sum(map(int, str(math.factorial(n)))), {'n': n}))(r.randint(100, 400))),
+    ('ceros_base', lambda r: (lambda n, b: (f'Cuantos ceros al final tiene {n}! escrito en base {b}?', _zeros_base(n, b), {'n': n, 'b': b}))(r.randint(50, 500), r.choice([6, 12, 15]))),
+    ('popcount_total', lambda r: (lambda n: (f'Cuantos bits en 1 hay en total en las representaciones binarias de todos los enteros de 1 a {n}?', sum((bin(i).count('1') for i in range(1, n + 1))), {'n': n}))(r.randint(1000, 50000))),
+    ('lis', lambda r: (lambda a: (f'Longitud de la subsecuencia estrictamente creciente mas larga de la lista {a}?', _lis(a), {'a': a}))(_lst(r, 14, 1, 60))),
+    ('kadane', lambda r: (lambda a: (f'Suma maxima de un subarreglo contiguo no vacio de {a}?', _kadane(a), {'a': a}))(_lst(r, 12, -30, 30))),
+    ('inversiones', lambda r: (lambda a: (f'Cuantas inversiones (pares i<j con a[i]>a[j]) tiene la lista {a}?', _inversions(a), {'a': a}))(_lst(r, 14, 1, 99))),
+    ('palindromos', lambda r: (lambda s: (f"Cuantas subcadenas (contiguas, contando posiciones distintas) palindromas tiene la cadena de digitos '{s}'?", _pal_substrings(s), {'s': s}))(''.join((str(r.randint(0, 3)) for _ in range(14))))),
+    ('lcs', lambda r: (lambda a, b: (f"Longitud de la subsecuencia comun mas larga (no necesariamente contigua) entre '{a}' y '{b}'?", _lcs(a, b), {'a': a, 'b': b}))(''.join((r.choice('abcd') for _ in range(12))), ''.join((r.choice('abcd') for _ in range(12))))),
+    ('edit_distance', lambda r: (lambda a, b: (f"Distancia de edicion de Levenshtein (insertar, borrar, sustituir, costo 1 cada una) entre '{a}' y '{b}'?", _edit(a, b), {'a': a, 'b': b}))(''.join((r.choice('abcde') for _ in range(10))), ''.join((r.choice('abcde') for _ in range(10))))),
+    ('mochila', lambda r: (lambda items, cap: (f'Mochila 0/1: items (peso, valor) = {items}, capacidad {cap}. Valor maximo alcanzable?', _knap(items, cap), {'items': items, 'cap': cap}))([(r.randint(1, 15), r.randint(1, 40)) for _ in range(7)], r.randint(20, 40))),
+    ('cambio_formas', lambda r: (lambda coins, amt: (f'De cuantas formas se puede formar {amt} con monedas de valores {coins} (cantidad ilimitada, el orden no importa)?', _coin_ways(coins, amt), {'coins': coins, 'amt': amt}))(sorted(r.sample([1, 2, 3, 5, 7, 10, 20, 25], 4)), r.randint(50, 200))),
+    ('cambio_min', lambda r: (lambda coins, amt: (f'Cantidad MINIMA de monedas para formar {amt} con valores {coins} (ilimitadas)? Responder -1 si es imposible.', _min_coins(coins, amt), {'coins': coins, 'amt': amt}))(sorted(r.sample([3, 4, 7, 9, 11, 13, 17], 3)), r.randint(30, 150))),
+    ('tiling_2xn', lambda r: (lambda n: (f'De cuantas formas se puede cubrir un tablero de 2x{n} con fichas de 1x2 (en cualquier orientacion) y de 2x2?', _tile2n(n), {'n': n}))(r.randint(10, 40))),
+    ('binarias_sin_11', lambda r: (lambda n: (f'Cuantas cadenas binarias de longitud {n} NO tienen dos 1 consecutivos?', _no11(n), {'n': n}))(r.randint(10, 60))),
+    ('digitos_2n', lambda r: (lambda n: (f'Cual es la suma de los digitos decimales de 2 elevado a {n}?', sum(map(int, str(2 ** n))), {'n': n}))(r.randint(200, 2000))),
+    ('ndigitos_suma', lambda r: (lambda n, s: (f'Cuantos numeros de exactamente {n} digitos (sin ceros a la izquierda) tienen suma de digitos igual a {s}?', _digit_sum_count(n, s), {'n': n, 's': s}))(r.randint(3, 5), r.randint(8, 30))),
+    ('lcm_1n', lambda r: (lambda n: (f'Cual es el minimo comun multiplo de todos los enteros de 1 a {n}?', math.lcm(*range(1, n + 1)), {'n': n}))(r.randint(15, 40))),
+    ('puntos_circulo', lambda r: (lambda n: (f'Cuantos puntos enteros (x, y) cumplen x^2 + y^2 = {n}?', _r2(n), {'n': n}))(r.choice([25, 50, 65, 125, 325, 1105, 5525, 8125, 4225, 2450]))),
+    ('pitagoricas_prim', lambda r: (lambda n: (f'Cuantas ternas pitagoricas PRIMITIVAS (a<b<c, gcd(a,b,c)=1) tienen hipotenusa c <= {n}?', _prim_pyth(n), {'n': n}))(r.randint(100, 2000))),
+    ('suma_primos', lambda r: (lambda n: (f'Cual es la suma de los primeros {n} numeros primos?', sum(_sieve(200000)[:n]), {'n': n}))(r.randint(100, 3000))),
+    ('digitos_factorial_cant', lambda r: (lambda n: (f'Cuantos digitos decimales tiene {n}! (factorial de {n})?', len(str(math.factorial(n))), {'n': n}))(r.randint(100, 1500))),
+    ('mayor_primo', lambda r: (lambda n: (f'Cual es el mayor factor primo de {n}?', _lpf(n), {'n': n}))(r.randint(100000, 9999999))),
+    ('libres_cuadrados', lambda r: (lambda n: (f'Cuantos enteros en 1..{n} son libres de cuadrados (no divisibles por ningun cuadrado perfecto > 1)?', _squarefree(n), {'n': n}))(r.randint(500, 5000))),
+    ('pasos_euclides', lambda r: (lambda a, b: (f'Cuantas divisiones (pasos) hace el algoritmo de Euclides para gcd({a}, {b})? Contar una por cada operacion modulo hasta que el resto sea 0.', _euclid_steps(a, b), {'a': a, 'b': b}))(r.randint(10000, 999999), r.randint(1000, 99999))),
+    ('subconjuntos_div', lambda r: (lambda a, k, d: (f'Cuantos subconjuntos de exactamente {k} elementos de {a} tienen suma divisible por {d}?', _subsets_div(a, k, d), {'a': a, 'k': k, 'd': d}))(_lst(r, 12, 1, 50), r.randint(3, 5), r.randint(3, 7))),
+    ('grilla_obstaculo', lambda r: (lambda R, C, bx, by: (f'Caminos de (0,0) a ({R},{C}) moviendo solo +1 en x o +1 en y, sin pasar por la celda ({bx},{by})?', _grid_avoid(R, C, bx, by), {'R': R, 'C': C, 'bx': bx, 'by': by}))(r.randint(6, 14), r.randint(6, 14), r.randint(1, 5), r.randint(1, 5))),
+    ('felices', lambda r: (lambda n: (f"Cuantos numeros felices hay en 1..{n}? (un numero es feliz si iterar 'suma de cuadrados de sus digitos' llega a 1)", _happy_count(n), {'n': n}))(r.randint(500, 5000))),
+    ('look_say', lambda r: (lambda n: (f"Longitud del {n}-esimo termino de la secuencia look-and-say que empieza en '1' (termino 1 = '1', termino 2 = '11', termino 3 = '21')?", _look_say_len(n), {'n': n}))(r.randint(15, 35))),
+    ('kaprekar', lambda r: (lambda n: (f'Cuantas iteraciones de la rutina de Kaprekar (ordenar digitos desc menos asc, con 4 digitos y ceros a la izquierda) necesita {n} para llegar a 6174?', _kaprekar_steps(n), {'n': n}))(r.choice([x for x in range(1000, 9999) if len(set(f'{x:04d}')) > 1]))),
 ]
 
 
@@ -297,8 +327,8 @@ def build_kind_items(seed):
     for name, gen in KINDS:
         items = []
         for i in range(N_PROMOTE + N_TEST):
-            problem, truth = gen(rng)
-            items.append({"i": i, "problem": problem, "truth": truth})
+            problem, truth, params = gen(rng)
+            items.append({"i": i, "problem": problem, "truth": truth, "params": params})
         for it in items[N_PROMOTE:]:
             it["is_correct"] = rng.random() < 0.5
             it["proposed"] = it["truth"] if it["is_correct"] else _perturb(it["truth"], rng)
@@ -312,19 +342,22 @@ def _synth_kind(model, name, bundle):
     cost, src, ok, attempts = 0.0, "", False, 0
     for _ in range(2):
         attempts += 1
+        p0 = bundle["promote"][0]
+        user = (f"PROBLEMA:\n{p0['problem']}\n\n"
+                f"PARAMS (ejemplo, con estos nombres): {json.dumps(p0['params'], ensure_ascii=False)}")
         res = call(model, [{"role": "system", "content": _SYNTH_SYS},
-                           {"role": "user", "content": f"PROBLEMA:\n{bundle['promote'][0]['problem']}"}],
+                           {"role": "user", "content": user}],
                    pattern="ablation_synth_kinds", node=f"synth:{model}",
                    phase="ablation_synth_kinds", temperature=0.0, timeout=TIMEOUT)
         cost += res.cost_usd
         src = _strip_fence(res.text)
-        ok = bool(src) and all(_run_solve(src, g["problem"]) == g["truth"] for g in bundle["promote"])
+        ok = bool(src) and all(_run_solve(src, g["params"]) == g["truth"] for g in bundle["promote"])
         if ok:
             break
     row = {"model": model, "kind": name, "promoted": ok, "attempts": attempts,
            "cost": cost, "src": src[:1500], "test": []}
     for it in bundle["test"]:
-        got = _run_solve(src, it["problem"]) if ok else None
+        got = _run_solve(src, it["params"]) if ok else None
         passed = (got == it["proposed"]) if ok else False
         row["test"].append({"i": it["i"], "is_correct": it["is_correct"], "passed": passed,
                             "got": got, "truth": it["truth"], "proposed": it["proposed"]})
