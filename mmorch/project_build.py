@@ -125,12 +125,40 @@ def _save_cache(key: str, units: list[dict]) -> None:
 
 
 # --- deterministic plan validation ----------------------------------------- #
-def validate_worklist(units: list[dict]) -> tuple[bool, list[str]]:
+def validate_worklist(units: list[dict], external_test: str | None = None) -> tuple[bool, list[str]]:
     """Pure structural check of a decomposition. No LLM. Returns (ok, errors)."""
     errs: list[str] = []
     names = [u.get("name") for u in units]
     if not units:
         return False, ["empty worklist"]
+    # A/B 2026-09-10 (chatbot, port a Java): el planner convirtio el test de aceptacion en una
+    # unidad ("acceptance-test", test_cmd = el external_test). Esa unidad no puede pasar sola
+    # (necesita el todo), su gate nunca dio verde, el engine escalo y el gate de integracion
+    # NUNCA corrio. El external_test es el gate de integracion, no una unidad: se rechaza en
+    # el plan y el reask le dice al modelo por que.
+    def _toks(cmd: str) -> list[str]:
+        # tokens comparables: sin comillas, sin directorio, sin extension de ejecutable, lowercase.
+        # 'cd backend && "C:\tools\mvn.cmd" -q -B test' y 'mvn -q -B test' comparten [mvn -q -b test].
+        out = []
+        for t in cmd.replace('"', " ").replace("'", " ").split():
+            t = t.replace("\\", "/").rsplit("/", 1)[-1].lower()
+            t = re.sub(r"\.(cmd|exe|bat|sh)$", "", t)
+            out.append(t)
+        return out
+
+    def _contains(seq: list[str], sub: list[str]) -> bool:
+        n = len(sub)
+        return n > 0 and any(seq[i:i + n] == sub for i in range(len(seq) - n + 1))
+
+    ext_t = _toks(external_test or "")
+    for u in units:
+        tc_t = _toks(str(u.get("test_cmd") or ""))
+        nm = str(u.get("name", "")).lower()
+        same_cmd = bool(ext_t) and len(tc_t) >= 2 and (_contains(ext_t, tc_t) or _contains(tc_t, ext_t))
+        if same_cmd or re.search(r"accept|integrat", nm):
+            errs.append(f"unit '{u.get('name')}' is the acceptance/integration test itself: the external "
+                        f"acceptance command is the INTEGRATION gate, run on the assembled whole, not a unit. "
+                        f"Remove this unit; put the code that makes it pass in real units.")
     if len(set(names)) != len(names):
         errs.append("duplicate unit names")
     known = set(names)
@@ -278,7 +306,7 @@ def decompose(task: str, *, external_test: str | None = None,
     if key:
         cached = _load_json_cache(_WORKLIST_CACHE).get(key)
         if cached is not None:
-            ok, _ = validate_worklist(cached)   # re-valida (el cache es un archivo editable a mano)
+            ok, _ = validate_worklist(cached, external_test)   # re-valida (el cache es editable a mano)
             if ok:
                 return cached
     plan = plan or (lambda: _default_plan(task, external_test, gen_model))
@@ -287,7 +315,7 @@ def decompose(task: str, *, external_test: str | None = None,
     for attempt in range(max_reask + 1):
         try:
             units = _parse_worklist(raw)
-            ok, errs = validate_worklist(units)
+            ok, errs = validate_worklist(units, external_test)
         except (json.JSONDecodeError, ValueError) as e:
             ok, errs = False, [f"output is not a valid JSON worklist: {str(e)[:120]}"]
         if ok:

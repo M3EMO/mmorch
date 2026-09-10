@@ -305,7 +305,8 @@ def _run_project_job(project: str, task: str, mode: str, push: bool = False,
 
 
 def _run_project_build_job(jid: str, task: str, project: str, external_test: str,
-                           max_depth: int = 2, seed_globs: list | None = None, parent=None):
+                           max_depth: int = 2, seed_globs: list | None = None, parent=None,
+                           gen_model: str | None = None, max_fix: int | None = None):
     """The recursive /project engine (F1/F2/F3) as a server job. Runs in an ISOLATED git worktree
     of `project` (main tree untouched, result on a review branch). `external_test` is the real
     acceptance suite (the integration gate at depth 0). Terminal job status:
@@ -367,9 +368,12 @@ def _run_project_build_job(jid: str, task: str, project: str, external_test: str
         emit("job", "running", job_id=jid,
              detail=f"pipeline {shape['op_type']}: fix={shape['max_fix']} "
                     f"depth={shape['max_depth']} calls={shape['max_gen_calls']}")
+        from .config import DEFAULT_GENERATOR
         res = build_project(task, wt.path, external_test=external_test,
+                            gen_model=gen_model or DEFAULT_GENERATOR,
                             max_depth=max_depth if max_depth != 2 else shape["max_depth"],
-                            max_fix=shape["max_fix"], max_gen_calls=shape["max_gen_calls"],
+                            max_fix=int(max_fix) if max_fix else shape["max_fix"],
+                            max_gen_calls=shape["max_gen_calls"],
                             commit=_commit)
         status = res.get("status", "escalate")
         job_status = {"built": "done", "integration_failed": "gate"}.get(status, "escalate")

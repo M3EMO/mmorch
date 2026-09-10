@@ -316,8 +316,13 @@ async def run_workflow(request):
         jid = _u.uuid4().hex[:10]
         md = int(body.get("max_depth", 2))
         seeds = list(body.get("seed_globs") or [])   # gitignored artifacts the acceptance needs
+        # gen_model / max_fix opcionales (A/B 2026-09-10): el engine corria SIEMPRE con
+        # DEFAULT_GENERATOR (deepseek-chat, el peor medido) y la forma VERIFY (max_fix=1) por
+        # un regex sobre "test" en el task. El caller puede fijar el coder y las vueltas de fix.
         t = threading.Thread(target=_run_project_build_job, args=(jid, task, project, external_test, md),
-                             kwargs={"seed_globs": seeds, "parent": body.get("parent_id")}, daemon=True)
+                             kwargs={"seed_globs": seeds, "parent": body.get("parent_id"),
+                                     "gen_model": body.get("gen_model"),
+                                     "max_fix": body.get("max_fix")}, daemon=True)
         t.start()
         return JSONResponse({"started": "project-build", "job_id": jid, "project": project,
                              "external_test": external_test, "seed_globs": seeds})
