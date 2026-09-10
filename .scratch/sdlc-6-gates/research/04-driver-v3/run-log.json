@@ -1,0 +1,143 @@
+{
+ "proto": "driver_v3",
+ "stages": [
+  {
+   "stage": "2-spec",
+   "ok": true,
+   "minutes": 1.74,
+   "calls": 1,
+   "note": "G1 ok"
+  },
+  {
+   "stage": "3-plan",
+   "ok": true,
+   "minutes": 0.19,
+   "calls": 1,
+   "note": "['Variant', 'Product', 'Msg', 'Text', 'Reply', 'Catalog', 'Bot']"
+  },
+  {
+   "stage": "4-build",
+   "ok": true,
+   "minutes": 5.31,
+   "calls": 7,
+   "note": "G3 + test-compile ok"
+  },
+  {
+   "stage": "5-test",
+   "ok": true,
+   "minutes": 0.1,
+   "calls": 0,
+   "note": "G4 ok (0 vueltas)"
+  },
+  {
+   "stage": "6-pr",
+   "ok": true,
+   "minutes": 0.01,
+   "calls": 0,
+   "note": " 11 files changed, 1286 insertions(+)"
+  }
+ ],
+ "gates": [
+  {
+   "id": "G1-spec-contrato",
+   "ok": true,
+   "detail": "contrato cubierto, sin TBD",
+   "calls": 1
+  },
+  {
+   "id": "plan-allowlist",
+   "ok": true,
+   "detail": "['Variant', 'Product', 'Msg', 'Text', 'Reply', 'Catalog', 'Bot']",
+   "calls": 2
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 4
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 5
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 6
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 7
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 8
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 9
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 9
+  },
+  {
+   "id": "test-compile",
+   "ok": true,
+   "detail": "ok",
+   "calls": 9
+  },
+  {
+   "id": "G4-aceptacion",
+   "ok": true,
+   "detail": "verde en 0 vueltas",
+   "calls": 9
+  }
+ ],
+ "calls": 9,
+ "human_interventions": 0,
+ "claude_calls": 0,
+ "gate_rejects": [],
+ "escalated_to_claude": false,
+ "t0": "2026-09-10 19:37:38",
+ "t0_epoch": 1789079858.101951,
+ "plan_files": [
+  "Variant",
+  "Product",
+  "Msg",
+  "Text",
+  "Reply",
+  "Catalog",
+  "Bot"
+ ],
+ "test_rounds": [
+  {
+   "round": 0,
+   "tests": {
+    "run": 10,
+    "failed": 0
+   }
+  }
+ ],
+ "test_fix_rounds": 0,
+ "diffstat": " 11 files changed, 1286 insertions(+)",
+ "minutes_total": 7.34,
+ "usd": 0.3114
+}

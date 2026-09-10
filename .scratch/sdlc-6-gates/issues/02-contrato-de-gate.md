@@ -1,9 +1,22 @@
 # Contrato de gate
 Type: grilling
-Status: open
+Status: resolved
 Blocked by: 01
 Map: ../map.md
+Capture: `brainstorms/2026-09-10-sdlc-6-gates.md` (Q1–Q7)
 
 ## Question
 
-Definir el contrato de gate como código y el formato `GATE-N.md` por etapa. Preguntas: ¿qué campos son obligatorios (clase, comando, entrada, salida, qué pasa si falla, número medido)? ¿Un gate es una función Python registrada, un comando, o ambos? ¿Cómo se registra la evidencia (n_promote, borde, n_test_ok) para gates sintetizados y qué mínimo exige entrar? ¿Un gate de juicio se declara distinto? ¿Dónde viven los GATE-N.md? Los 4 gates nuevos del A/B (test-compile, archivos permitidos del plan, baseline intacto, firmas coinciden con el test) son el caso de prueba del formato.
+Definir el contrato de gate como código y el formato `GATE-N.md` por etapa.
+
+## Decisions
+
+- Un gate es función Python registrada en mmorch. Puede correr un comando del repo. Salida única: `CheckResult`.
+- Campos de `GATE-N.md`: id, etapa, clase (determinista | sintetizado | juicio), entrada, checker o comando, on_fail, measured_ref, alcance (unidad | integracion | aceptacion).
+- Viven en `docs/sdlc/gates/` de cada repo. El archivo nombra; no copia el checker.
+- Juez LLM no decide pass/fail en build/test/PR. Reasoner propone parche solo si el oráculo falló.
+- Cada fallo: job + log. Aviso a persona solo al agotar vueltas/USD, o zona roja.
+- Promoción: automática si hay oráculo y evidencia 3+1. Humana si no hay oráculo. Nunca por opinión de un modelo.
+- `clase: juicio` solo en spec (`measured_ref: juicio-fijo`). Fallo: stop, sin parche automático.
+- 4 del A/B: determinista. test-compile, archivos del plan, firmas vs test = unidad. Baseline intacto = integracion.
+- Tres contratos: pipeline = GATE-N.md; módulo = tests; producto = spec + aceptación.

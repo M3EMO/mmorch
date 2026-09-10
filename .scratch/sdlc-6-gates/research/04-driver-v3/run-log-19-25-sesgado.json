@@ -1,0 +1,137 @@
+{
+ "proto": "driver_v3",
+ "stages": [
+  {
+   "stage": "3-plan",
+   "ok": true,
+   "minutes": 0.34,
+   "calls": 1,
+   "note": "['Product', 'Variant', 'Msg', 'Reply', 'Norm', 'Ars', 'Fuzzy', 'Catalog', 'Bot']"
+  },
+  {
+   "stage": "4-build",
+   "ok": true,
+   "minutes": 5.96,
+   "calls": 9,
+   "note": "G3 + firmas + test-compile ok"
+  },
+  {
+   "stage": "5-test",
+   "ok": true,
+   "minutes": 0.09,
+   "calls": 0,
+   "note": "G4 ok (0 vueltas)"
+  }
+ ],
+ "gates": [
+  {
+   "id": "plan-allowlist",
+   "ok": true,
+   "detail": "['Product', 'Variant', 'Msg', 'Reply', 'Norm', 'Ars', 'Fuzzy', 'Catalog', 'Bot']",
+   "calls": 1
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 2
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 4
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 5
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 6
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 7
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 8
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 9
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 10
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 10
+  },
+  {
+   "id": "firmas-vs-test",
+   "ok": true,
+   "detail": "ok",
+   "calls": 10
+  },
+  {
+   "id": "test-compile",
+   "ok": true,
+   "detail": "ok",
+   "calls": 10
+  },
+  {
+   "id": "G4-aceptacion",
+   "ok": true,
+   "detail": "verde en 0 vueltas",
+   "calls": 10
+  }
+ ],
+ "calls": 10,
+ "human_interventions": 0,
+ "claude_calls": 0,
+ "gate_rejects": [],
+ "escalated_to_claude": false,
+ "t0": "2026-09-10 19:19:14",
+ "t0_epoch": 1789078754.1846855,
+ "plan_files": [
+  "Product",
+  "Variant",
+  "Msg",
+  "Reply",
+  "Norm",
+  "Ars",
+  "Fuzzy",
+  "Catalog",
+  "Bot"
+ ],
+ "test_rounds": [
+  {
+   "round": 0,
+   "tests": null
+  }
+ ],
+ "test_fix_rounds": 0
+}

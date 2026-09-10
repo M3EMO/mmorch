@@ -1,9 +1,21 @@
 # Escalacion por niveles
 Type: grilling
-Status: open
-Blocked by: 
+Status: resolved
+Blocked by:
 Map: ../map.md
+Capture: `brainstorms/2026-09-10-sdlc-6-gates.md` (Q11–Q13)
+Industria: vault loops-de-parche + `research/industria-por-ticket.md`
 
 ## Question
 
-El usuario eligió escalación automática hasta agotar y después avisar, y preguntó si se puede hacer mejor. Diseñar los niveles: (1) fix loop dirigido con presupuesto de vueltas y USD; (2) diagnosticador con razonamiento (reasoner) que lee log + oráculo + diff y produce UNA instrucción precisa por archivo — es lo que Claude hizo en C (I2) y un modelo puede hacerlo; (3) Claude en sesión, con el diagnóstico adjunto; (4) humano. Decidir: qué dispara cada nivel (N fallos, USD, tipo de fallo), qué recibe, qué deja (corrección + chequeo nuevo), y cómo se registra (supervision.md, job en estado gate). ¿El nivel 2 elimina la mayoría de las escalaciones a Claude? Se mide en el ticket 04.
+Diseñar niveles de escalación cuando un gate falla.
+
+## Decisions
+
+- Niveles: (1) fix loop 3 vueltas; (2) reasoner 2 veces, una instrucción por archivo; (3) Claude en sesión; (4) humano.
+- Disparo: 3 fallos de (1) → (2). 2 fallos de (2) o USD agotado → (3). Zona roja → (4) directo.
+- Aviso a persona: al pasar a Claude, o zona roja. No en cada rojo del nivel 1.
+- Deja: (1) diff acotado + log; (2) instrucción + parche + candidato en `supervision.md`; (3) corrección + candidato; (4) decisión humana.
+- Claude puede promover solo `sintetizado` o `determinista` con evidencia ya corrida. No promueve `juicio`.
+- Job anota el nivel (`gate_failed` / `escalated`).
+- ¿El nivel 2 elimina la mayoría de las escaladas a Claude? Se mide en el ticket 04.

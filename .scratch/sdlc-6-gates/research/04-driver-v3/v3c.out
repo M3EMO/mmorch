@@ -1,0 +1,6 @@
+[2-spec] ok=True G1 ok (1 llamadas, 1.7 min)
+[3-plan] ok=True ['Variant', 'Product', 'Msg', 'Text', 'Reply', 'Catalog', 'Bot'] (1 llamadas, 0.2 min)
+[4-build] ok=True G3 + test-compile ok (7 llamadas, 5.3 min)
+[5-test] ok=True G4 ok (0 vueltas) (0 llamadas, 0.1 min)
+[6-pr] ok=True  11 files changed, 1286 insertions(+) (0 llamadas, 0.0 min)
+V3 TERMINO {"calls": 9, "minutes_total": 7.34, "usd": 0.3114, "human_interventions": 0, "claude_calls": 0, "escalated_to_claude": false, "gate_rejects": [], "diffstat": " 11 files changed, 1286 insertions(+)"}

@@ -19,19 +19,23 @@ Todos los proyectos del usuario construyen sus features con el mismo pipeline de
 
 <!-- una línea por ticket resuelto: gist + link -->
 
+- [Prototipo driver v3](issues/04-prototipo-driver-v3.md) — verde con 0 Claude: 9 llamadas, US$0.31, 7.3 min, 0 vueltas (corrida limpia, sin pista ni gate sobreajustado); 4x más barato y 3x más rápido que B; los gates nuevos no rechazaron nada → sin ejercitar hasta las features del 06. Mutación/tests por unidad no incluidos.
 - [Cierre del A/B y tabla final](issues/10-cierre-del-ab-y-tabla-final.md) — A rojo a un método de verde (US$0.81, 4 fixes de engine); B verde US$1.13/22 min/0 intervenciones; C verde US$0.16/9 min/2 intervenciones reemplazables por gates. Evidencia en `docs/ab-sdlc-2026-09-10/`.
 - [Inventario de gates existentes](issues/01-inventario-gates-existentes.md) — 20 gates en código, todos sin número medido propio; intent, spec y PR tienen cero gates; tres contratos de salida distintos (CheckResult / tuple / int|None) que el ticket 02 debe unificar; el engine no consume synth_store ni coverage/mutation. Detalle: [research/01-inventario-gates.md](research/01-inventario-gates.md).
 - [Fix loops en otros agentes](issues/09-fix-loops-en-otros-agentes.md) — nadie reescribe archivos enteros; gate por vuelta solo lint (SWE-agent, Aider), sin revert automático; tope 3 en tres sistemas; stuck-detector y 'gate antes de aplicar' son las ideas para el ticket 03. Detalle: [research/09-fix-loops.md](research/09-fix-loops.md).
+- [Contrato de gate](issues/02-contrato-de-gate.md) — función Python + comando; `CheckResult`; `docs/sdlc/gates/`; promoción auto con oráculo 3+1, humana sin oráculo; juicio solo en spec. Capture: `brainstorms/2026-09-10-sdlc-6-gates.md`.
+- [Testeo modular + regresión](issues/13-testeo-modular-y-regresion.md) — unidad (mutantes) + suite total por unidad + aceptación al final; test-compile fail-closed; umbral de mutación en la ficha, no copiar 80.
+- [Escalación por niveles](issues/03-escalacion-por-niveles.md) — 3 vueltas → reasoner×2 → Claude → humano; aviso al pasar a Claude; Claude promueve solo con oráculo+evidencia.
+- [Convención por repo](issues/11-convencion-por-repo.md) — `sdlc.toml` + `accept_cmd` o no entra; scaffold con 4 fichas A/B; intent/PR sin gate; `contract_version` fail-closed.
 
 ## Not yet specified
 
-- Contenido de `GATE-N.md` para las etapas sin gate medido todavía: intent (¿qué chequeo tiene una intención?), spec (más allá del contrato cubierto), PR (diffstat, archivos permitidos, ¿review LLM advisory?). Depende del ticket 02.
-- Cómo `supervision.md` alimenta el `synth_store`: formato del "chequeo nuevo" que Claude deja al escalar, y quién lo promueve. Depende de 03 y 08.
-- Cuándo y cómo se retira el engine viejo (project_driver / project_integrate): flag, rama, o borrado. Depende de 05.
-- Topes de costo por feature y por nivel de escalación (USD y minutos). Depende de 03 y 07.
-- Validación en ChatBot: `main` ya tiene Spring y el webhook; el baseline del A/B es anterior. Cómo se elige el punto de partida de cada feature de validación. Depende de 06.
-- Observabilidad opcional en Lotus: checkpoint por gate. Baja de prioridad por el re-scope; depende de 05.
-- Cómo se versiona el contrato por repo cuando el engine cambia (compatibilidad GATE-N.md ↔ engine). Depende de 11.
+- Intent y PR: sin `GATE-N.md` a propósito (Q16b). No se inventa oráculo.
+- Cómo un candidato de `supervision.md` se etiqueta 3+1 cuando no hay oráculo: ticket 08.
+- Cuándo y cómo se retira el engine viejo (`project_driver` / `project_integrate`). Depende de 05.
+- Topes USD y minutos por feature. Depende de 07. Escalación de vueltas ya está en 03 (3 + reasoner×2).
+- Validación en ChatBot: punto de partida git. Depende de 06.
+- Observabilidad opcional en Lotus. Depende de 05. Baja prioridad.
 
 ## Out of scope
 
