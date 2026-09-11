@@ -1,0 +1,17 @@
+materializado C:\Users\map12\Desktop\Claude\sdlc-runs\rate-limiter-r1
+[2-spec] ok=True G1 ok (1 llamadas, 0.2 min)
+[3-plan] ok=True ['limiter/core.py', 'limiter/multi.py', 'limiter/__init__.py'] (1 llamadas, 0.1 min)
+[4-build] ok=False otstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests_accept\test_limiter.py:2: in <module>
+    from limiter import TokenBucket, MultiLimiter
+limiter\__init__.py:1: in <module>
+    from limiter.core import TokenBucket
+limiter\core.py:2: in <module>
+    from limiter.core import TokenBucket
+E   ImportError: cannot import name 'TokenBucket' from partially initialized module 'limiter.core' (most likely due to a circular import) (C:\Users\map12\Desktop\Claude\sdlc-runs\rate-limiter-r1\limiter\core.py)
+=========================== short test summary info ===========================
+ERROR tests_accept/test_limiter.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+no tests collected, 1 error in 0.50s
+ (3 llamadas, 1.4 min)
