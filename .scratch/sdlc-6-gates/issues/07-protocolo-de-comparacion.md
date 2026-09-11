@@ -1,6 +1,6 @@
 # Protocolo de comparacion
 Type: grilling
-Status: open
+Status: claimed (Claude, 2026-09-11)
 Blocked by: 06
 Map: ../map.md
 

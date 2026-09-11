@@ -24,10 +24,10 @@ Todos los proyectos del usuario construyen sus features con el mismo pipeline de
 - [Cierre del A/B y tabla final](issues/10-cierre-del-ab-y-tabla-final.md) — A rojo a un método de verde (US$0.81, 4 fixes de engine); B verde US$1.13/22 min/0 intervenciones; C verde US$0.16/9 min/2 intervenciones reemplazables por gates. Evidencia en `docs/ab-sdlc-2026-09-10/`.
 - [Inventario de gates existentes](issues/01-inventario-gates-existentes.md) — 20 gates en código, todos sin número medido propio; intent, spec y PR tienen cero gates; tres contratos de salida distintos (CheckResult / tuple / int|None) que el ticket 02 debe unificar; el engine no consume synth_store ni coverage/mutation. Detalle: [research/01-inventario-gates.md](research/01-inventario-gates.md).
 - [Fix loops en otros agentes](issues/09-fix-loops-en-otros-agentes.md) — nadie reescribe archivos enteros; gate por vuelta solo lint (SWE-agent, Aider), sin revert automático; tope 3 en tres sistemas; stuck-detector y 'gate antes de aplicar' son las ideas para el ticket 03. Detalle: [research/09-fix-loops.md](research/09-fix-loops.md).
-- [Contrato de gate](issues/02-contrato-de-gate.md) — función Python + comando; `CheckResult`; `docs/sdlc/gates/`; promoción auto con oráculo 3+1, humana sin oráculo; juicio solo en spec. Capture: `brainstorms/2026-09-10-sdlc-6-gates.md`.
+- [Contrato de gate](issues/02-contrato-de-gate.md) — función Python + comando; `CheckResult`; `docs/sdlc/gates/`; promoción auto con oráculo 3+1, humana sin oráculo; juicio solo en spec; gate `trazabilidad` por IDs R<n> (2026-09-11). Capture: `brainstorms/2026-09-10-sdlc-6-gates.md`.
 - [Testeo modular + regresión](issues/13-testeo-modular-y-regresion.md) — unidad (mutantes) + suite total por unidad + aceptación al final; test-compile fail-closed; umbral de mutación en la ficha, no copiar 80.
 - [Escalación por niveles](issues/03-escalacion-por-niveles.md) — 3 vueltas → reasoner×2 → Claude → humano; aviso al pasar a Claude; Claude promueve solo con oráculo+evidencia.
-- [Convención por repo](issues/11-convencion-por-repo.md) — `sdlc.toml` + `accept_cmd` o no entra; scaffold con 4 fichas A/B; intent/PR sin gate; `contract_version` fail-closed.
+- [Convención por repo](issues/11-convencion-por-repo.md) — `sdlc.toml` + `accept_cmd` o no entra; scaffold con 4 fichas A/B; intent/PR sin gate; `contract_version` fail-closed. Plantillas desde spec-kit: spec-template, `spec-review.md` desde `clarify`, marca `[P]` (2026-09-11).
 
 ## Not yet specified
 

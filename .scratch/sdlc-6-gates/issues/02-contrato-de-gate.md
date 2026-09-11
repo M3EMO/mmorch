@@ -20,3 +20,4 @@ Definir el contrato de gate como código y el formato `GATE-N.md` por etapa.
 - `clase: juicio` solo en spec (`measured_ref: juicio-fijo`). Fallo: stop, sin parche automático.
 - 4 del A/B: determinista. test-compile, archivos del plan, firmas vs test = unidad. Baseline intacto = integracion.
 - Tres contratos: pipeline = GATE-N.md; módulo = tests; producto = spec + aceptación.
+- Gate `trazabilidad` (agregado 2026-09-11, idea de spec-kit `analyze` sin LLM): cada requisito de `spec.md` lleva ID `R<n>`; cada unidad de `plan.md` cita los IDs que cubre; cada test de aceptacion cita un ID en su nombre. Falla si un ID queda huerfano en cualquier direccion. Clase determinista, alcance integracion, USD 0. Generaliza `plan-allowlist`.
