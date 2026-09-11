@@ -114,6 +114,16 @@ def strip_fence(t):
     return (m.group(1) if m else t).strip()
 
 
+def one_file(code: str, rel: str) -> str:
+    """Gate un-archivo (r1 2026-09-11): el coder imito las cabeceras "# path" del prompt y pego 3 archivos en uno."""
+    parts = re.split(r"(?m)^# ((?:\w+/)*\w+\.py)\s*$", code)
+    if len(parts) < 3:
+        return code
+    secs = {parts[i]: parts[i + 1].strip() for i in range(1, len(parts), 2)}
+    rec_gate("un-archivo", rel in secs, f"{rel}: recorte de {list(secs)}")
+    return secs.get(rel, code)
+
+
 def sh(cmd: list[str]):
     p = subprocess.run(cmd, cwd=WT, capture_output=True, text=True, encoding="utf-8", errors="replace",
                        timeout=CFG["cmd_timeout_s"])
@@ -250,7 +260,7 @@ def reasoner_rounds(log) -> tuple[bool, str]:
                       f"Aplica ESTA instruccion a {f}. No toques tests_accept.\n"
                       f"INSTRUCCION: {instr.get(f, 'corregi el fallo del test')}\n\n"
                       f"SALIDA:\n{log}\n\nARCHIVOS:\n{_joined(written)}")
-            code = strip_fence(out)
+            code = one_file(strip_fence(out), f)
             if code:
                 _write(f, code)
         if not gate_baseline()[0] or not gate_compile(files)[0] or not gate_test_compile()[0]:
@@ -297,6 +307,9 @@ def self_check() -> int:
         fails.append("novelty")
     if test_counts("2 failed, 1 passed in 0.1s") != {"run": 3, "failed": 2} or test_counts("3 passed in 0.1s") != {"run": 3, "failed": 0}:
         fails.append("counts")
+    if one_file("# limiter/__init__.py\nfrom x import y\n\n# limiter/core.py\nclass TokenBucket: pass\n", "limiter/core.py") != "class TokenBucket: pass" \
+            or one_file("class A: pass", "a.py") != "class A: pass":
+        fails.append("un-archivo")
     print("self-check", "FAIL" if fails else "PASS", fails)
     return 1 if fails else 0
 
@@ -347,30 +360,31 @@ def build():
                   f"Escribi {f}. Tiene que importar con los archivos ya escritos y pasar los tests de aceptacion.\n\n"
                   f"PLAN:\n{plan_md}\n\nSPEC:\n{spec_md}\n\nTAREA:\n{TASK.task}\n\nTESTS:\n{_tests_text()}\n\n"
                   f"ARCHIVOS YA ESCRITOS:\n{_joined(written) or '(ninguno)'}")
-        code = strip_fence(out)
+        code = one_file(strip_fence(out), f)
         _write(f, code)
         written[f] = code
         bok, bnote = gate_baseline()
         if not bok:
             return False, bnote
-    ok, log = gate_compile(state["plan_files"])
-    for _ in range(3):
+    def _compiles():
+        ok, log = gate_compile(state["plan_files"])
+        return (ok, log) if not ok else gate_test_compile()
+
+    ok, log = _compiles()
+    for _ in range(3):  # r1 2026-09-11: test-compile tambien entra al fix loop, antes cortaba sin vuelta
         if ok:
             break
         for f in state["plan_files"]:
-            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el codigo corregido del archivo.",
-                      f"py_compile fallo. Corregi {f}.\n\nERROR:\n{log}\n\nARCHIVOS:\n{_joined(written)}")
-            code = strip_fence(out)
+            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el codigo corregido del archivo pedido, un solo archivo.",
+                      f"py_compile o la importacion de los tests fallo. Corregi {f}.\n\nERROR:\n{log}\n\nARCHIVOS:\n{_joined(written)}")
+            code = one_file(strip_fence(out), f)
             if code and code != written[f]:
                 _write(f, code); written[f] = code
-        ok, log = gate_compile(state["plan_files"])
+        ok, log = _compiles()
         if not gate_baseline()[0]:
             return False, "baseline roto en compile-fix"
     if not ok:
-        return False, "G3 rechaza: no compila"
-    tok, tnote = gate_test_compile()
-    if not tok:
-        return False, tnote
+        return False, f"G3 rechaza tras 3 vueltas: {log[-300:]}"
     return True, "G3 + test-compile ok"
 
 
@@ -397,7 +411,7 @@ def test():
             out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero. No toques tests_accept.",
                       f"Arregla {f}. Los tests NO se modifican.\n\nSALIDA:\n{log}\n\nTAREA:\n{TASK.task}\n\n"
                       f"TESTS:\n{_tests_text()}\n\nARCHIVOS:\n{_joined(written)}")
-            code = strip_fence(out)
+            code = one_file(strip_fence(out), f)
             if code and code != written[f]:
                 _write(f, code)
         if not gate_baseline()[0] or not gate_compile(files)[0] or not gate_test_compile()[0]:
