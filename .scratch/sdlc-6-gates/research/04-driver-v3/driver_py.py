@@ -380,7 +380,7 @@ def spec():
     ask = (f"Escribi spec.md siguiendo EXACTAMENTE esta plantilla (mismas secciones, IDs R<n> unicos, tabla de trazabilidad "
            f"que cita tests por su nombre exacto de entre {sorted(tests)}). Python 3.12, sin dependencias.\n\n"
            f"PLANTILLA:\n{tpl}\n\nTAREA:\n{TASK.task}\n\nTESTS DE ACEPTACION (no se modifican):\n{_tests_text()}\n\n"
-           "Sin 'TBD'. Solo markdown.")
+           "Omiti las lineas de instruccion de la plantilla. Sin marcadores pendientes. Solo markdown.")
     out = llm(WRITER, "Sos un ingeniero de software. Escribis specs precisas en markdown, sin relleno.", ask)
     _write("docs/sdlc/spec.md", out)
 

@@ -9,7 +9,7 @@ Cada archivo, clase y metodo con firma y tipos exactos. Paths exactos.
 
 ## Requisitos
 
-Uno por linea. Comportamiento observable, no implementacion. Sin "TBD".
+Uno por linea. Comportamiento observable, no implementacion. Sin marcadores pendientes.
 
 - R1: <regla de comportamiento con su orden de evaluacion>
 - R2: <...>
