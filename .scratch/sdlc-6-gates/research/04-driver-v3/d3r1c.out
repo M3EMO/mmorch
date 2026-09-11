@@ -1,0 +1,1 @@
+[5-test] ok=False suite total: fallos nuevos: ['tests/test_w6_ronda3.py::test_mcp_server_reporta_version_de_mmorch'] (0 llamadas, 5.6 min)

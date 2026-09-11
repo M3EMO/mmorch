@@ -1,0 +1,6 @@
+materializado C:\Users\map12\Desktop\Claude\sdlc-runs\D3-r1b
+[2-spec] ok=True G1 + trazabilidad-spec ok (1 llamadas, 0.4 min)
+[2b-spec-review] ok=True 5 IDs cubiertos (0 llamadas, 3.0 min)
+[3-plan] ok=True ok (1 llamadas, 0.0 min)
+[4-build] ok=True G3 + test-compile ok (1 llamadas, 1.7 min)
+[5-test] ok=False suite total roja: escala a humano (0 llamadas, 1.8 min)

@@ -156,8 +156,20 @@ def sh(cmd: list[str], timeout: float | None = None):
 def gate_suite_total() -> tuple[bool, str]:
     """Regresion total (ticket 13): la suite entera del repo no gana fallos nuevos respecto del baseline.
     mmorch tarda ~20 min y trae 4 rojos previos (medido 2026-09-11): se compara por NOMBRE, no por verde."""
-    base_file = HERE / "suite-baseline.txt"
-    base = set(re.findall(r"(?m)^FAILED (\S+)", base_file.read_text(encoding="utf-8"))) if base_file.exists() else set()
+    # D3 r1b: el baseline medido en el arbol principal no vale (tests sin commitear, metadata del paquete).
+    # Se mide EN el worktree, sobre el commit base, una vez por sha; se cachea en suite-baseline-<sha>.txt.
+    sha = subprocess.run(["git", "rev-parse", "--short", "HEAD~1"], cwd=WT, capture_output=True, text=True).stdout.strip()
+    base_file = HERE / f"suite-baseline-{sha}.txt"
+    if not base_file.exists():
+        keep = {f: (WT / f).read_text(encoding="utf-8") for f in state["plan_files"] if (WT / f).exists()}
+        subprocess.run(["git", "checkout", "HEAD", "--", *keep], cwd=WT, check=True)  # sin stash: la pila es compartida
+        try:
+            _, blog = sh([PY, "-m", "pytest", *FEAT["suite"]], timeout=CFG["suite_timeout_s"])
+        finally:
+            for f, c in keep.items():
+                _write(f, c)
+        base_file.write_text("\n".join(re.findall(r"(?m)^FAILED \S+", blog)) + "\n", encoding="utf-8")
+    base = set(re.findall(r"(?m)^FAILED (\S+)", base_file.read_text(encoding="utf-8")))
     ok, log = sh([PY, "-m", "pytest", *FEAT["suite"]], timeout=CFG["suite_timeout_s"])
     now = set(re.findall(r"(?m)^FAILED (\S+)", log))
     new = sorted(now - base)

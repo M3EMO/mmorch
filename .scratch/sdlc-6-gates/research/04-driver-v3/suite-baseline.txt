@@ -1,0 +1,9 @@
+                     tests="def test_add():\n    assert add(2,3)==5").passed
+E        +  where False = CheckResult(passed=False, detail='pytest FAIL (TIMEOUT)', checker='unit_test', expected=None, got=None).passed
+E        +    where CheckResult(passed=False, detail='pytest FAIL (TIMEOUT)', checker='unit_test', expected=None, got=None) = check('unit_test', code='def add(a,b): return a+b', tests='def test_add():\n    assert add(2,3)==5')
+FAILED tests/test_cache_cost.py::test_repo_prices_json_has_deepseek_cache
+FAILED tests/test_checkers.py::test_unit_test_gate
+FAILED tests/test_no_museum.py::test_cero_funciones_publicas_sin_caller_vivo
+FAILED tests/test_paths.py::test_gate_sin_anclas_de_estado_fuera_de_paths
+FAILED tests/test_server_smoke.py::test_route_table_matches_contract
+5 failed, 1196 passed, 2 warnings in 1034.82s (0:17:14)
