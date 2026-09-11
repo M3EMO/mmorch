@@ -486,8 +486,7 @@ def review():
 def pr():
     gi = WT / ".gitignore"
     if not gi.exists():
-        gi.write_text("__pycache__/
-", encoding="utf-8")  # r1: se colaron .pyc en el PR
+        gi.write_text("__pycache__/\n", encoding="utf-8")  # r1: se colaron .pyc en el PR
     subprocess.run(["git", "add", "-A"], cwd=WT, check=True)
     subprocess.run(["git", "-c", "user.name=map12", "-c", "user.email=map12082004@gmail.com", "commit", "-q", "-m",
                     f"sdlc: {TASK_NAME} — driver_py, gates + escalera + revision Claude"], cwd=WT, check=True)
