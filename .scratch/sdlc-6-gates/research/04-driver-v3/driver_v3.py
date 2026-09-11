@@ -170,6 +170,7 @@ def ledger_usd():
         return None
     t0 = state.get("t0_epoch") or 0
     usd = 0.0
+    state["usd_by_family"] = {}
     for line in METRICS.read_text(encoding="utf-8").splitlines()[-8000:]:
         try:
             r = json.loads(line)
@@ -177,6 +178,8 @@ def ledger_usd():
             continue
         if r.get("phase") == PHASE and float(r.get("ts") or 0) >= t0:
             usd += float(r.get("cost_usd") or 0)
+            fam = r.get("family") or "?"
+            state.setdefault("usd_by_family", {})[fam] = round(state.get("usd_by_family", {}).get(fam, 0) + float(r.get("cost_usd") or 0), 4)
     return round(usd, 4)
 
 
@@ -488,4 +491,4 @@ if __name__ == "__main__":
     here.write_text(LOG.read_text(encoding="utf-8"), encoding="utf-8")
     print("V3 TERMINO", json.dumps({k: state.get(k) for k in
           ("calls", "minutes_total", "usd", "human_interventions", "claude_calls", "review_block",
-           "escalated_to_claude", "gate_rejects", "diffstat", "lines", "suite_total")}, ensure_ascii=False))
+           "escalated_to_claude", "gate_rejects", "diffstat", "lines", "suite_total", "usd_by_family")}, ensure_ascii=False))
