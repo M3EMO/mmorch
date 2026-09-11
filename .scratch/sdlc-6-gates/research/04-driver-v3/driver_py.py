@@ -191,6 +191,10 @@ def accept():
 
 
 def test_counts(log):
+    # D3: con -rf el log repite "N failed" dentro de los asserts; se cuenta SOLO la linea de resumen final
+    summary = [l for l in log.splitlines() if re.search(r"\d+ (?:passed|failed|error).* in [\d.]+s", l)]
+    if summary:
+        log = summary[-1]
     f = sum(int(x) for x in re.findall(r"(\d+) (?:failed|error)", log))
     p = sum(int(x) for x in re.findall(r"(\d+) passed", log))
     if not (f or p):

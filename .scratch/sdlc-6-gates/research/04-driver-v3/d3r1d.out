@@ -1,0 +1,4 @@
+[5-test] ok=True G4 + suite ok (0 vueltas) (0 llamadas, 13.2 min)
+[5b-review] ok=True sin test nuevo: NOTE: El branch de excepcion de `gate_fn` (linea 73) guarda `previous_code` aunque el gate no rechazo, solo crasheo. Est (0 llamadas, 7.6 min)
+[6-pr] ok=True  7 files changed, 275 insertions(+), 1 deletion(-) (0 llamadas, 0.8 min)
+DRIVER_PY TERMINO {"task": "D3", "calls": 0, "minutes_total": 21.6, "usd": 0.0, "usd_by_family": {}, "human_interventions": 0, "claude_calls": 1, "review_block": null, "escalated_to_claude": false, "gate_rejects": [], "diffstat": " 7 files changed, 275 insertions(+), 1 deletion(-)", "lines": {"added": 9, "deleted": 1}, "suite_total": {"run": 1126, "failed": 118, "new_failures": [], "baseline_failures": 5}, "lint_new": {"ruff": 0, "mypy": 0}}

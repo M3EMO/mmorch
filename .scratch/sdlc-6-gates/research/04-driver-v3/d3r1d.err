@@ -1,0 +1,5 @@
+All checks passed!
+mmorch\predict.py:51: note: By default the bodies of untyped functions are not checked, consider using --check-untyped-defs  [annotation-unchecked]
+mmorch\predict.py:52: note: By default the bodies of untyped functions are not checked, consider using --check-untyped-defs  [annotation-unchecked]
+Success: no issues found in 132 source files
+catalogo+README actualizados: bloques ['modules', 'tools', 'stats'] | {'modules': 129, 'tools': 47, 'tests': 890, 'tools_expuestas': 15}

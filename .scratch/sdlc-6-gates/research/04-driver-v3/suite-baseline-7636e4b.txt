@@ -1,0 +1,5 @@
+FAILED tests/test_cache_cost.py::test_repo_prices_json_has_deepseek_cache
+FAILED tests/test_paths.py::test_gate_sin_anclas_de_estado_fuera_de_paths
+FAILED tests/test_sdlc_d3_atasco.py::test_mismo_codigo_dos_veces_escala_en_la_segunda
+FAILED tests/test_server_smoke.py::test_route_table_matches_contract
+FAILED tests/test_w6_ronda3.py::test_mcp_server_reporta_version_de_mmorch

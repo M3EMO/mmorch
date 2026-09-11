@@ -1,0 +1,99 @@
+{
+ "proto": "driver_py",
+ "task": "D3",
+ "stages": [
+  {
+   "stage": "5-test",
+   "ok": true,
+   "minutes": 13.2,
+   "calls": 0,
+   "note": "G4 + suite ok (0 vueltas)"
+  },
+  {
+   "stage": "5b-review",
+   "ok": true,
+   "minutes": 7.56,
+   "calls": 0,
+   "note": "sin test nuevo: NOTE: El branch de excepcion de `gate_fn` (linea 73) guarda `previous_code` aunque el gate no rechazo, solo crasheo. Est"
+  },
+  {
+   "stage": "6-pr",
+   "ok": true,
+   "minutes": 0.84,
+   "calls": 0,
+   "note": " 7 files changed, 275 insertions(+), 1 deletion(-)"
+  }
+ ],
+ "gates": [
+  {
+   "id": "suite-total",
+   "ok": true,
+   "detail": "sin fallos nuevos",
+   "calls": 0
+  },
+  {
+   "id": "G4-aceptacion",
+   "ok": true,
+   "detail": "verde en 0 vueltas + suite total",
+   "calls": 0
+  },
+  {
+   "id": "diff-review-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 0
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 0
+  },
+  {
+   "id": "claude-diff-review",
+   "ok": true,
+   "detail": "sin test nuevo: NOTE: El branch de excepcion de `gate_fn` (linea 73) guarda `previous_code` aunque el gate no rechazo, solo crasheo. Est",
+   "calls": 0
+  }
+ ],
+ "calls": 0,
+ "human_interventions": 0,
+ "claude_calls": 1,
+ "gate_rejects": [],
+ "escalated_to_claude": false,
+ "t0": "2026-09-11 18:29:11",
+ "t0_epoch": 1789162151.2025738,
+ "plan_files": [
+  "mmorch/project_driver.py"
+ ],
+ "test_rounds": [
+  {
+   "round": 0,
+   "tests": {
+    "run": 2,
+    "failed": 0
+   }
+  }
+ ],
+ "stall": 0,
+ "test_fix_rounds": 0,
+ "suite_total": {
+  "run": 1126,
+  "failed": 118,
+  "new_failures": [],
+  "baseline_failures": 5
+ },
+ "diffstat": " 7 files changed, 275 insertions(+), 1 deletion(-)",
+ "lines": {
+  "added": 9,
+  "deleted": 1
+ },
+ "lint_new": {
+  "ruff": 0,
+  "mypy": 0
+ },
+ "mutation_score": null,
+ "minutes_total": 21.6,
+ "usd_by_family": {},
+ "usd": 0.0
+}
