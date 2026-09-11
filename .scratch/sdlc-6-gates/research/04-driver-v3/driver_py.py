@@ -484,9 +484,6 @@ def review():
 
 @stage("6-pr")
 def pr():
-    gi = WT / ".gitignore"
-    if not gi.exists():
-        gi.write_text("__pycache__/\n", encoding="utf-8")  # r1: se colaron .pyc en el PR
     subprocess.run(["git", "add", "-A"], cwd=WT, check=True)
     subprocess.run(["git", "-c", "user.name=map12", "-c", "user.email=map12082004@gmail.com", "commit", "-q", "-m",
                     f"sdlc: {TASK_NAME} — driver_py, gates + escalera + revision Claude"], cwd=WT, check=True)
@@ -513,6 +510,9 @@ if __name__ == "__main__":
         WT.parent.mkdir(parents=True, exist_ok=True)
         bench.materialize(TASK, str(WT))
         print("materializado", WT, flush=True)
+    gi = WT / ".gitignore"
+    if not gi.exists():
+        gi.write_text("__pycache__/\n", encoding="utf-8")  # r1-r3: la review hace git add -A antes del pr
     snapshot_baseline()
     state["t0"] = time.strftime("%Y-%m-%d %H:%M:%S")
     state["t0_epoch"] = time.time()
