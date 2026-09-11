@@ -10,13 +10,9 @@ Elegir el set de validación: 3 features reales del mapa de QueTePario (tickets 
 
 ## Answer
 
-Set elegido (detalle, aceptación y por qué en [research/06-features.md](../research/06-features.md)):
-- Punto de partida real: `ChatBot` `main` @ `77bc70c` (Spring + matcher + webhook, 13/13 verde). El baseline del A/B ya no sirve.
-- F1 chica: Menú configurable (`Opcion`) → `Bot`, deuda del ticket 13. Test: `MenuConfigurableTest` (H2).
-- F2 mediana: Reserva persistida, ticket 16 sin Mercado Pago. Test: `ReservaAcceptanceTest` por `ConversacionService` + API.
-- F3 grande: Conector WooCommerce Store API con fixtures reales, ticket 15. Test: `WooSyncAcceptanceTest` sin red.
-- S1 `rate-limiter` y S2 `lru-ttl-cache` del bench congelado (`mmorch/bench.py`, `materialize`). S1 es control: el engine viejo midió 0/3.
-- Dashboard (14) queda afuera: su aceptación es un flujo en navegador y no hay e2e en el repo.
-- Los 3 tests de aceptación los escribe Claude antes de lanzar; el pipeline no los toca (gate baseline-intacto sobre `src/test`).
-- Orden: F1 → S2 → F2 → S1 → F3. Costo total estimado < US$5.
-Pendiente del usuario: confirmar la lista.
+Revisado 2026-09-11 tras corrección del usuario: el mapa es SOLO del SDLC en mmorch; el ChatBot es un proyecto aparte y sus features no entran acá. Detalle en [research/06-features.md](../research/06-features.md).
+- 3 del bench congelado (`mmorch/bench.py`): S1 `lru-ttl-cache` (chica, held-out, se corre una vez al final), S2 `rate-limiter` (mediana, control: el engine viejo midió 0/3), S3 `etl-pipeline` (grande, interfaces entre módulos).
+- 2 de dogfood, features de mmorch con pytest: D1 `gen_model` se propaga a la recursión; D2 gate `test-compile` en `project_integrate` como primer gate del contrato del ticket 02.
+- Punto de partida: el repo que `materialize` crea (bench) o `main` de orchestration (dogfood). Los tests de aceptación los escribe Claude; el pipeline no toca `tests/`.
+- Orden: S2 → D1 → S3 → D2 → S1. Costo total estimado < US$3.
+- Fuera: el ChatBot. Si el pipeline sirve, el ChatBot lo usa desde su mapa, con su `sdlc.toml`.

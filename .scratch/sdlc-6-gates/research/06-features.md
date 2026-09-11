@@ -1,70 +1,56 @@
-# Ticket 06 — Set de validación del pipeline (3 features reales + 2 sintéticas)
+# Ticket 06 — Set de validación del pipeline (revisado 2026-09-11)
 
-Fecha: 2026-09-10. Criterio de selección: test de aceptación ejecutable sin red ni credenciales,
-tamaño distinto, y que cada una toque una parte del pipeline que el A/B no ejercitó.
+Corrección del usuario: este mapa es SOLO del SDLC de 6 etapas en mmorch. El ChatBot es un
+proyecto aparte, con su propio mapa. Sus features no son tickets de acá. La versión anterior
+de este archivo (3 features del ChatBot) queda descartada.
 
-## Punto de partida en git (las 3 reales)
+Criterio: tests de aceptación ejecutables sin red ni credenciales, tamaño distinto, todo
+dentro de mmorch o de su bench congelado. El pipeline se valida sobre lo que mmorch controla.
 
-`QueTePario/ChatBot`, rama `main` en `77bc70c` ("Ticket 13 resuelto: H1 backend en main, suite 13/13").
-Ya tiene Spring Boot 3.3, JPA con H2 en perfil test, el matcher del brazo B mergeado, el webhook
-de Meta y la API del dashboard. Comando de aceptación común: `cd backend && mvn -q -B test`.
-La suite completa (13 tests) es el gate de regresión; el test nuevo de cada feature es la aceptación.
-El baseline del A/B (`d6853c9`) queda atrás: no sirve, no tiene Spring.
+## Los 3 del bench congelado (`mmorch/bench.py`, `materialize(task, dst)`)
 
-Regla para el pipeline: el test de aceptación de cada feature lo escribo YO antes de lanzar,
-como en el A/B. El pipeline no puede tocarlo (gate `baseline-intacto` sobre `src/test`).
+`materialize` arma un repo git nuevo con semillas + tests congelados y devuelve el `accept_cmd`.
+Los tests exigen comportamiento, no ausencia de error (anti-Goodhart, lección F4).
 
-## F1 — chica: Menú configurable → Bot (deuda declarada del ticket 13)
+| id | task | tamaño | rol |
+|---|---|---|---|
+| S1 | `lru-ttl-cache` | chica | held-out: NUNCA se usa para elegir variantes; solo para validar que el pipeline generaliza. Se corre UNA vez, al final. |
+| S2 | `rate-limiter` | mediana | control histórico: el engine viejo midió 0/3 con el mismo planner. Si el pipeline la pasa, es mejora contra un número existente. |
+| S3 | `etl-pipeline` | grande | 3 módulos que se importan entre sí: lo que rompía al flat build-feature. Mide interfaces entre unidades, donde el engine viejo falló. |
 
-- Qué: `BotFactory` construye el `Bot` con el menú del `Negocio` (`Opcion` con `titulo`, `orden`, `accion`, `hijos`) en vez del menú fijo del prototipo. Sin opciones cargadas, cae al menú fijo.
-- Tamaño: 2-4 archivos (`Bot` acepta un menú; `BotFactory` lo arma; `ApiController` invalida caché al editar).
-- Aceptación: `MenuConfigurableTest` (H2): Negocio con 3 opciones ordenadas → `Bot.MENU` del bot de ese negocio lista esas 3 en orden; Negocio sin opciones → menú fijo; editar una opción por la API invalida la caché.
-- Por qué: es el primer cambio sobre código que el pipeline no escribió. Mide si el coder respeta un contrato existente (`Bot` con 571 líneas ya en main).
+Comando de aceptación: el `accept_cmd` de cada task (`python -m pytest tests_accept -q`).
+Punto de partida: el repo que `materialize` crea, commit inicial. Sin baseline compartido con nada.
 
-## F2 — mediana: Reserva persistida (ticket 16, sin Mercado Pago)
+## Los 2 de dogfood: features de mmorch construidas por el pipeline
 
-- Qué: entidad `Reserva` (negocio, cliente, producto, variante, entrega, localidad, estado, link), repositorio, `ConversacionService` persiste cuando el bot cierra una reserva (`Reply.order()` no nulo), endpoint `GET /api/reservas` y `PUT /api/reservas/{id}/estado`. El link de pago es un stub `https://mpago.la/demo-{n}`, como en el prototipo.
-- Tamaño: 5-7 archivos, toca dominio, servicio, web y test.
-- Aceptación: `ReservaAcceptanceTest` (H2): flujo por `ConversacionService.recibir` "zuecos rayadas 40" → "si" → "retiro" crea una Reserva PENDIENTE con los datos; `GET /api/reservas` la lista con Basic auth; `PUT` la pasa a CONFIRMADA; 13 tests previos siguen verdes.
-- Por qué: cruza 3 capas y un contrato existente (`Reply.order()` como string). Es donde el engine viejo falló (12 unidades, `integration_failed` por interfaces).
+El pipeline construye mmorch. Son las deudas del engine que el A/B dejó anotadas (ticket 10),
+con test de aceptación en pytest, sin red.
 
-## F3 — grande: Conector de catálogo WooCommerce Store API (ticket 15, con fixture)
+- D1 chica: `gen_model` se propaga a la recursión de `project_driver` (hoy las sub-unidades caen a `DEFAULT_GENERATOR`). Aceptación: test con `plan` inyectado que fuerza una recursión y afirma el modelo recibido por el `gen` fake en el nivel 2. Toca `project_integrate.py` y `project_driver.py`.
+- D2 mediana: gate `test-compile` antes del `external_test` en `project_integrate` (fail-closed, un comando declarado por el repo, `CheckResult`). Aceptación: test con `integrate` inyectado que afirma que el gate corre antes y corta con detalle cuando falla. Es el primer gate del contrato del ticket 02 escrito como código en el engine.
 
-- Qué: `WooStoreConnector` que lee `wp-json/wc/store/v1/products` y `?type=variation` (el mismo esquema que `prototypes/demo-pitch/demo.py` ya parsea), mapea a `Producto`/`Variante` del Negocio, upsert idempotente por id externo, `POST /api/negocio/{id}/sync` que lo dispara, y `BotFactory.invalidate` al terminar.
-- Tamaño: 6-9 archivos, cliente HTTP, mapeo, persistencia, endpoint, test con fixture.
-- Aceptación: `WooSyncAcceptanceTest` (H2, sin red): un `HttpClient` fake sirve `fixtures/woo-products.json` + `fixtures/woo-variations.json` (recortes reales de quetepario.com, guardados en el repo) → 12 productos y sus variantes en DB con precio, fotos y stock; segunda sync no duplica; el bot del negocio ve el stock ("tenes borcegos en 38?" responde con el producto real). 13 previos verdes.
-- Por qué: es el "servicio de adecuación" del modelo de negocio, con oráculo real (el prototipo ya lo hace en Python). Y es la feature más grande sin credenciales.
+Comando de aceptación: `python -m pytest tests/test_project_driver.py tests/test_sdlc_gates.py -q`
+(el segundo lo escribe Claude antes de lanzar). Regla: el pipeline no toca `tests/`.
 
-## S1 y S2 — sintéticas del bench congelado de mmorch
-
-`mmorch/bench.py` ya tiene tasks multi-módulo con tests de aceptación congelados (anti-Goodhart:
-exigen comportamiento). Se materializan con `materialize(task, dst)` en un repo git nuevo.
-
-- S1 `rate-limiter`: la task donde el engine viejo midió 0/3 con el mismo planner. Sirve como control: si el pipeline la pasa, es mejora contra un número histórico.
-- S2 `lru-ttl-cache`: tamaño chico, para medir el piso de costo/tiempo del pipeline en algo trivial.
-- `etl-pipeline` queda como held-out si hace falta validar que lo aprendido generaliza.
-
-## Qué se mide por feature (ticket 07 lo fija; esto es la propuesta)
+## Qué se mide (propuesta para el ticket 07)
 
 | métrica | fuente |
 |---|---|
-| aceptación verde / rojo | `mvn test` o `pytest` a mano, no el run-log |
-| USD | `logs/metrics.jsonl` por fase (`ab-sdlc-<feature>`) |
+| aceptación verde / rojo | `accept_cmd` a mano, no el run-log |
+| USD | `logs/metrics.jsonl` por fase (`sdlc-<id>`) |
 | minutos de pared | run-log |
-| rechazos por gate y vueltas | run-log `gates` y `test_rounds` |
-| nivel máximo de escalación alcanzado | run-log (`reasoner_rounds`, `escalated_to_claude`) |
-| intervenciones de Claude | `supervision.md` |
+| rechazos por gate y vueltas | run-log `gates` / `test_rounds` |
+| nivel máximo de escalación | run-log (`reasoner_rounds`, `escalated_to_claude`) |
 
-Brazos: pipeline v3 (0 Claude) vs híbrido (Claude en escalación). El engine viejo ya no se corre:
-el ticket 05 lo reemplaza, y el A/B ya lo midió.
+Brazos: pipeline v3 (0 Claude) vs híbrido (Claude en escalación). El engine viejo tiene su
+número histórico en S2; no se vuelve a correr.
 
-## Orden propuesto
+## Orden y costo
 
-F1 → S2 → F2 → S1 → F3. Chico primero para ver el piso, grande al final. Costo estimado total:
-menos de US$5. Tiempo: ~1 h de pipeline, más lo que yo tarde en escribir los 3 tests.
+S2 → D1 → S3 → D2 → S1 (held-out al final). Costo estimado total: menos de US$3.
+Chico primero para ver el piso, held-out último para no contaminar.
 
-## Lo que el usuario decide
+## Fuera de este ticket
 
-- Confirmar las 3 features o cambiar alguna por la del dashboard (ticket 14). Esa no entra hoy:
-  su aceptación es un flujo en el navegador y no hay Playwright ni e2e en el repo.
-- Confirmar que escribo yo los tests de aceptación (como en el A/B) y que el pipeline no los toca.
+Las features del ChatBot. Si el pipeline resulta bueno, el ChatBot lo USA desde su propio mapa
+como herramienta, con su `sdlc.toml` (ticket 11). No al revés.
