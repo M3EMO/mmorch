@@ -32,6 +32,8 @@ con test de aceptación en pytest, sin red.
 Comando de aceptación: `python -m pytest tests/test_project_driver.py tests/test_sdlc_gates.py -q`
 (el segundo lo escribe Claude antes de lanzar). Regla: el pipeline no toca `tests/`.
 
+- D3 chica: detector de atasco (ticket 03, idea del research 09): si el hash del output del coder se repite dos veces en el mismo nivel, salta al nivel siguiente aunque queden vueltas. Aceptación: test con `gen` fake que devuelve el mismo código dos veces y afirma que el driver escala en la 2da, no en la 3ra; y que outputs distintos no escalan. Toca el loop de fix (driver v3 / `project_integrate`).
+
 ## Qué se mide (propuesta para el ticket 07)
 
 | métrica | fuente |
@@ -47,7 +49,7 @@ número histórico en S2; no se vuelve a correr.
 
 ## Orden y costo
 
-S2 → D1 → S3 → D2 → S1 (held-out al final). Costo estimado total: menos de US$3.
+S2 → D1 → D3 → S3 → D2 → S1 (held-out al final). Costo estimado total: menos de US$3.
 Chico primero para ver el piso, held-out último para no contaminar.
 
 ## Fuera de este ticket
