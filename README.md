@@ -192,7 +192,7 @@ engine and becomes a per-repo convention.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **135 módulos · 47 MCP tools (15 expuestas por default) · 932 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
+_Auto-generado por `mmorch.docgen`._ **135 módulos · 47 MCP tools (15 expuestas por default) · 933 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
