@@ -40,6 +40,7 @@ LOG = WT / "docs" / "sdlc" / "run-log.json"
 METRICS = pathlib.Path(r"C:\Users\map12\.claude\orchestration\logs\metrics.jsonl")
 REVIEW_REL = "tests_accept/test_review.py"
 PY_RE = r"`?((?:\w+/)*\w+\.py)`?"
+TPL = pathlib.Path(__file__).resolve().parent / "templates"  # spec-kit recortado (tickets 02 y 11)
 
 # Tokens que la spec tiene que nombrar verbatim (G1). Uno por task; se agrega al llegar cada feature.
 CONTRACTS = {
@@ -170,6 +171,49 @@ def gate_plan_allowlist(plan_md: str, files: list[str]) -> tuple[bool, str]:
     if need:
         return rec_gate("plan-allowlist", False, f"plan omite {need}")
     return rec_gate("plan-allowlist", True, f"{files}")
+
+
+def _test_names() -> set[str]:
+    return {n for rel in TASK.accept_files for n in re.findall(r"(?m)^def (test_\w+)", (WT / rel).read_text(encoding="utf-8"))}
+
+
+def gate_traza_spec(spec_md: str, tests: set[str]) -> tuple[bool, str]:
+    """Trazabilidad lado spec (ticket 02): IDs R<n> y tabla que cita tests existentes por nombre."""
+    ids = set(re.findall(r"\bR\d+\b", spec_md))
+    if not ids:
+        return rec_gate("trazabilidad-spec", False, "sin IDs R<n>")
+    m = re.search(r"## Trazabilidad\b(.*?)(?:\n## |\Z)", spec_md, re.S)
+    rows = re.findall(r"(?m)^\|\s*(R\d+)\s*\|([^|]*)\|", m.group(1) if m else "")
+    cov = {rid: set(re.findall(r"test_\w+", cell)) for rid, cell in rows}
+    sin_test = sorted(i for i in ids if not cov.get(i))
+    inexist = sorted(t for ts in cov.values() for t in ts if t not in tests)
+    if sin_test or inexist:
+        return rec_gate("trazabilidad-spec", False, f"sin test: {sin_test}; tests inexistentes: {inexist}")
+    return rec_gate("trazabilidad-spec", True, f"{len(ids)} IDs cubiertos")
+
+
+def gate_traza_plan(spec_md: str, plan_block: str, files: list[str]) -> tuple[bool, str]:
+    """Trazabilidad lado plan: cada R<n> de la spec aparece en el plan; cada archivo cita >= 1 R<n>."""
+    ids = set(re.findall(r"\bR\d+\b", spec_md))
+    huerfanos = sorted(i for i in ids if not re.search(rf"\b{i}\b", plan_block))
+    items = re.findall(r"(?m)^\s*[-*]\s*(.*)$", plan_block)
+    sin_id = [f for f in files if not any(f in it and re.search(r"\bR\d+\b", it) for it in items)]
+    if huerfanos or sin_id:
+        return rec_gate("trazabilidad-plan", False, f"IDs sin unidad: {huerfanos}; archivos sin ID: {sin_id}")
+    return rec_gate("trazabilidad-plan", True, "ok")
+
+
+def gate_clarificaciones(spec_md: str) -> tuple[bool, str]:
+    """Salida de la revision de spec (ticket 11, de clarify.md): seccion con 0..5 preguntas respondidas."""
+    m = re.search(r"## Clarificaciones\b(.*?)(?:\n## |\Z)", spec_md, re.S)
+    if not m:
+        return rec_gate("spec-review", False, "falta ## Clarificaciones")
+    if "sin preguntas" in m.group(1):
+        return rec_gate("spec-review", True, "0 preguntas")
+    qs = re.findall(r"(?m)^- P\d+: .+\| R: \S.*\| afecta: R\d+", m.group(1))
+    if not 1 <= len(qs) <= 5:
+        return rec_gate("spec-review", False, f"{len(qs)} preguntas validas (esperado 1..5)")
+    return rec_gate("spec-review", True, f"{len(qs)} preguntas respondidas")
 
 
 def gate_baseline() -> tuple[bool, str]:
@@ -310,44 +354,92 @@ def self_check() -> int:
     if one_file("# limiter/__init__.py\nfrom x import y\n\n# limiter/core.py\nclass TokenBucket: pass\n", "limiter/core.py") != "class TokenBucket: pass" \
             or one_file("class A: pass", "a.py") != "class A: pass":
         fails.append("un-archivo")
+    tests = {"test_a", "test_b"}
+    sp = "## Requisitos\n- R1: x\n- R2: y\n\n## Trazabilidad\n| ID | tests |\n|---|---|\n| R1 | test_a |\n| R2 | test_a, test_b |\n"
+    if not gate_traza_spec(sp, tests)[0]:
+        fails.append("traza-spec-good")
+    if gate_traza_spec(sp.replace("| R2 | test_a, test_b |\n", ""), tests)[0] or gate_traza_spec(sp.replace("test_b", "test_zz"), tests)[0]:
+        fails.append("traza-spec-bad")
+    pb = "\n- `limiter/core.py` [R1] [P]\n- `limiter/multi.py` [R2]\n"
+    if not gate_traza_plan(sp, pb, ["limiter/core.py", "limiter/multi.py"])[0]:
+        fails.append("traza-plan-good")
+    if gate_traza_plan(sp, pb.replace("[R2]", ""), ["limiter/core.py", "limiter/multi.py"])[0]:
+        fails.append("traza-plan-bad")
+    cl = "## Clarificaciones\n\n- P1: cap? | R: SUPUESTO: float | afecta: R1\n"
+    if not gate_clarificaciones(cl)[0] or not gate_clarificaciones("## Clarificaciones\n- sin preguntas: la spec cubre el barrido.\n")[0] \
+            or gate_clarificaciones("## Casos\n")[0] or gate_clarificaciones("## Clarificaciones\n- P1: cap? | R:  | afecta: R1\n")[0]:
+        fails.append("clarificaciones")
     print("self-check", "FAIL" if fails else "PASS", fails)
     return 1 if fails else 0
 
 
 @stage("2-spec")
 def spec():
-    out = llm(WRITER, "Sos un ingeniero de software. Escribis specs precisas en markdown, sin relleno.",
-              f"Escribi spec.md: requisitos y diseño para implementar esta tarea en Python 3.12, sin dependencias.\n\n"
-              f"TAREA:\n{TASK.task}\n\nTESTS DE ACEPTACION (no se modifican):\n{_tests_text()}\n\n"
-              "La spec tiene que: (1) listar cada archivo, clase y metodo con firmas y tipos exactos; "
-              "(2) describir cada regla de comportamiento con el orden de evaluacion y los casos borde (recarga fraccionaria, cap, keys nuevas); "
-              "(3) nombrar los archivos con su path exacto. Sin 'TBD'. Solo markdown.")
+    tpl = (TPL / "spec-template.md").read_text(encoding="utf-8")
+    tests = _test_names()
+    ask = (f"Escribi spec.md siguiendo EXACTAMENTE esta plantilla (mismas secciones, IDs R<n> unicos, tabla de trazabilidad "
+           f"que cita tests por su nombre exacto de entre {sorted(tests)}). Python 3.12, sin dependencias.\n\n"
+           f"PLANTILLA:\n{tpl}\n\nTAREA:\n{TASK.task}\n\nTESTS DE ACEPTACION (no se modifican):\n{_tests_text()}\n\n"
+           "Sin 'TBD'. Solo markdown.")
+    out = llm(WRITER, "Sos un ingeniero de software. Escribis specs precisas en markdown, sin relleno.", ask)
     _write("docs/sdlc/spec.md", out)
-    missing = [s for s in CONTRACT if s not in out]
-    if missing or "TBD" in out:
-        out = llm(WRITER, "Sos un ingeniero. Reescribís la spec. Los tokens pedidos deben aparecer VERBATIM.",
-                  f"Esta spec fallo el gate. Inserta estos tokens verbatim: {missing}. No borres el resto. Sin TBD.\n\nSPEC ACTUAL:\n{out}")
-        _write("docs/sdlc/spec.md", out)
+
+    def _falla():
         missing = [s for s in CONTRACT if s not in out]
-    if missing or "TBD" in out:
-        rec_gate("G1-spec-contrato", False, f"faltan {missing}")
-        return False, f"G1 rechaza: faltan {missing}"
-    rec_gate("G1-spec-contrato", True, "contrato cubierto, sin TBD")
-    return True, "G1 ok"
+        tok, tnote = gate_traza_spec(out, tests)
+        return (f"faltan tokens {missing}; " if missing else "") + ("TBD; " if "TBD" in out else "") + ("" if tok else tnote)
+
+    why = _falla()
+    if why:
+        out = llm(WRITER, "Sos un ingeniero. Reescribís la spec completa. Los tokens y la tabla pedidos deben aparecer VERBATIM.",
+                  f"Esta spec fallo el gate: {why}. Corregilo sin borrar el resto. Plantilla:\n{tpl}\n\nSPEC ACTUAL:\n{out}")
+        _write("docs/sdlc/spec.md", out)
+        why = _falla()
+    if why:
+        rec_gate("G1-spec-contrato", False, why)
+        return False, f"G1 rechaza: {why}"
+    rec_gate("G1-spec-contrato", True, "contrato cubierto, sin TBD, IDs trazados")
+    return True, "G1 + trazabilidad-spec ok"
+
+
+@stage("2b-spec-review")
+def spec_review():
+    """Claude revisa la spec con spec-review.md (de clarify.md): <= 5 preguntas, respondidas en la spec."""
+    from mmorch.claude_exec import run_claude
+    os.environ.pop("CLAUDECODE", None)
+    guide = (TPL / "spec-review.md").read_text(encoding="utf-8")
+    state["claude_calls"] += 1
+    r = run_claude(f"{guide}\n\nTAREA:\n{TASK.task}\n\nEdita docs/sdlc/spec.md segun estas reglas y responde en una linea cuantas preguntas hiciste.",
+                   cwd=str(WT), mode="edit", timeout=CFG["cmd_timeout_s"])
+    write_supervision(f"revision de spec (Claude, rc={r.get('returncode')}): {(r.get('result') or '')[:1500]}")
+    if not gate_baseline()[0]:
+        subprocess.run(["git", "checkout", "--", *SNAP], cwd=WT)
+    spec_md = (WT / "docs/sdlc/spec.md").read_text(encoding="utf-8")
+    ok, note = gate_clarificaciones(spec_md)
+    if ok:
+        ok, note = gate_traza_spec(spec_md, _test_names())  # la revision no puede romper la trazabilidad
+    return ok, note
 
 
 @stage("3-plan")
 def plan():
     spec_md = (WT / "docs/sdlc/spec.md").read_text(encoding="utf-8")
-    out = llm(WRITER, "Sos un tech lead. Escribis planes ejecutables. NO regeneres tests_accept.",
-              f"Escribi plan.md. Formato OBLIGATORIO: seccion '## Archivos' con un item `path.py` por archivo a escribir, "
-              f"en orden de dependencia (primero los que no importan a otros). '## Prueba' = `python -m pytest tests_accept -q`.\n\nSPEC:\n{spec_md}")
+    ask = (f"Escribi plan.md. Formato OBLIGATORIO: seccion '## Archivos' con un item por archivo a escribir, asi:\n"
+           f"- `path.py` [R1, R3] [P]\n"
+           f"Cada item cita los IDs R<n> de la spec que cubre. Todo R<n> de la spec aparece en algun item. "
+           f"[P] marca archivos que NO importan a otros del plan (paralelizables); los demas van en orden de dependencia. "
+           f"'## Prueba' = `python -m pytest tests_accept -q`.\n\nSPEC:\n{spec_md}")
+    out = llm(WRITER, "Sos un tech lead. Escribis planes ejecutables. NO regeneres tests_accept.", ask)
     _write("docs/sdlc/plan.md", out)
     m = re.search(r"## Archivos\b(.*?)(?:\n## |\Z)", out, re.S | re.I)
-    files = list(dict.fromkeys(re.findall(PY_RE, m.group(1) if m else out)))
-    files = [f for f in files if not f.startswith("tests_accept/")]
+    block = m.group(1) if m else out
+    files = [f for f in dict.fromkeys(re.findall(PY_RE, block)) if not f.startswith("tests_accept/")]
     state["plan_files"] = files
-    return gate_plan_allowlist(out, files)
+    state["plan_parallel"] = [f for f in files if re.search(rf"{re.escape(f)}`?[^\n]*\[P\]", block)]  # ticket 05 lo ejecuta en paralelo
+    ok, note = gate_plan_allowlist(out, files)
+    if ok:
+        ok, note = gate_traza_plan(spec_md, block, files)
+    return ok, note
 
 
 @stage("4-build")
@@ -520,7 +612,9 @@ if __name__ == "__main__":
     if from_stage > 3:
         plan_md = (WT / "docs/sdlc/plan.md").read_text(encoding="utf-8")
         state["plan_files"] = [f for f in dict.fromkeys(re.findall(PY_RE, plan_md)) if not f.startswith("tests_accept/")]
-    stages = {2: spec, 3: plan, 4: build, 5: test, 5.5: review, 6: pr}
+    for t in TPL.glob("*.md"):  # convencion por repo (ticket 11): las plantillas viajan con el repo
+        _write(f"docs/sdlc/{t.name}", t.read_text(encoding="utf-8"))
+    stages = {2: spec, 2.5: spec_review, 3: plan, 4: build, 5: test, 5.5: review, 6: pr}
     for k in sorted(stages):
         if k >= from_stage:
             stages[k]()
