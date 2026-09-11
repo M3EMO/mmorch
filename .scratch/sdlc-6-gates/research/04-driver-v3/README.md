@@ -24,3 +24,9 @@ C:\Users\map12\.claude\orchestration\.venv\Scripts\python.exe driver_v3.py
 `--from-stage N` retoma como el brazo B.
 
 Fase ledger: `ab-sdlc-v3`. Run-log: `ChatBot-abV3/docs/sdlc/run-log.json` y copia aquí al terminar.
+
+## 2026-09-11 (ticket 07)
+- Etapa `5b-review`: Claude revisa el diff con `claude_exec.run_claude` (modo edit). Bloquea SOLO si deja `ReviewTest.java` y ese test falla; entonces corre una vuelta mas de `test()`.
+- Topes por avance en el fix loop: `stall_rounds` (fallos no bajan) y `diff_novelty_min` (lineas nuevas / lineas cambiadas). Tope USD en `llm()`. Defaults en `docs/sdlc/sdlc.toml` del worktree.
+- Metricas nuevas: `lines` (numstat), `suite_total`; `lint_new` y `mutation_score` quedan `null` en Java (ticket 13).
+- Sin correr en vivo todavia: `--self-check` PASS. Primera corrida real = rate-limiter (S2).

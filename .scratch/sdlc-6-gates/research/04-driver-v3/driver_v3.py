@@ -1,7 +1,8 @@
 """PROTOTIPO throwaway — driver v3 (ticket 04). No es el engine vivo.
 
 B v2 + 3 gates A/B (plan-allowlist, baseline, test-compile; firmas-vs-test se saco: mvn test-compile lo cubre)
-+ regresion por unidad en el fix loop + escalera 3 vueltas / reasoner×2 / stop (no llama Claude).
++ regresion por unidad en el fix loop + escalera 3 vueltas / reasoner×2 / stop
++ topes por avance (ticket 07) + revision del diff por Claude antes del PR (bloquea solo con test que falla).
 Sin pistas del bug de ayer en los prompts: los gates tienen que atraparlo solos.
 """
 from __future__ import annotations
@@ -34,6 +35,20 @@ WRITER, CODER = "deepseek-reasoner", "deepseek-v4-pro"
 LOG = WT / "docs" / "sdlc" / "run-log.json"
 JAVA_RE = r"src/main/java/com/qtp/bot/(\w+)\.java"
 METRICS = pathlib.Path(r"C:\Users\map12\.claude\orchestration\logs\metrics.jsonl")
+REVIEW_REL = "src/test/java/com/qtp/bot/ReviewTest.java"
+
+
+def _cfg():
+    """Topes del ticket 07. docs/sdlc/sdlc.toml pisa los defaults."""
+    d = {"usd_max": 3.0, "stall_rounds": 2, "diff_novelty_min": 0.10, "cmd_timeout_s": 600}
+    p = WT / "docs" / "sdlc" / "sdlc.toml"
+    if p.exists():
+        import tomllib
+        d.update(tomllib.loads(p.read_text(encoding="utf-8")))
+    return d
+
+
+CFG = _cfg()
 
 CONTRACT = ["Catalog", "load", "Product", "Variant", "Bot", "reply", "Reply", "replies",
             "paused", "order", "Msg", "text", "image", "MENU", "HANDOFF", "MAYORISTA"]
@@ -51,6 +66,12 @@ def llm(model, system, user, timeout=400):
     state["calls"] += 1
     r = call(model, [{"role": "system", "content": system}, {"role": "user", "content": user}],
              pattern=PHASE, node=model, phase=PHASE, temperature=0.0, timeout=timeout, max_tokens=32768)
+    usd = ledger_usd() or 0
+    if usd > CFG["usd_max"]:
+        rec_gate("usd-tope", False, f"US${usd} > {CFG['usd_max']}")
+        write_supervision(f"ESCALATE_HUMAN: tope USD {usd} superado")
+        _flush()
+        sys.exit(f"tope USD {usd}: escala a humano")
     return r.text
 
 
@@ -89,7 +110,7 @@ def strip_fence(t):
 def mvn(goal):
     # sin -q para "test": el gate de regresion cuenta "Tests run: X, Failures: Y" por clase
     args = [MVN, "-B", goal] if goal == "test" else [MVN, "-q", "-B", goal]
-    p = subprocess.run(args, cwd=BACK, capture_output=True, text=True, timeout=600)
+    p = subprocess.run(args, cwd=BACK, capture_output=True, text=True, timeout=CFG["cmd_timeout_s"])
     return p.returncode == 0, (p.stdout + p.stderr)[-6000:]
 
 
@@ -98,6 +119,19 @@ def test_counts(log):
     if not m:
         return None
     return {"run": sum(int(x[0]) for x in m), "failed": sum(int(x[1]) + int(x[2]) for x in m)}
+
+
+SEEN: set[str] = set()
+
+
+def _novelty(old: dict, new: dict) -> float:
+    """Fraccion de lineas agregadas en esta vuelta que nunca aparecieron en vueltas previas (ticket 07)."""
+    before = {l.strip() for c in old.values() for l in c.splitlines()}
+    added = {l.strip() for c in new.values() for l in c.splitlines()} - before
+    SEEN.update(before)
+    nov = len(added - SEEN) / max(1, len(added))
+    SEEN.update(added)
+    return round(nov, 2)
 
 
 def sha_file(rel):
@@ -199,6 +233,7 @@ def reasoner_rounds(log, demo, test) -> tuple[bool, str]:
         ok, log = mvn("test")
         state["reasoner_rounds"] = state.get("reasoner_rounds", []) + [{"i": i + 1, "files": files, "ok": ok}]
         if ok:
+            state["suite_total"] = test_counts(log)
             return True, f"reasoner {i+1} verde"
     return False, f"reasoner x{REASONER_TRIES} rojo"
 
@@ -213,6 +248,9 @@ def self_check() -> int:
     ok, _ = gate_plan_allowlist("- pom.xml\n- src/main/java/com/qtp/bot/Bot.java", ["Bot"])
     if ok:
         fails.append("allowlist-pom")
+    SEEN.clear()
+    if _novelty({"A": "x\ny"}, {"A": "x\nz"}) != 1.0 or _novelty({"A": "x\nz"}, {"A": "x\ny"}) != 0.0:
+        fails.append("novelty")
     print("self-check", "FAIL" if fails else "PASS", fails)
     return 1 if fails else 0
 
@@ -307,6 +345,9 @@ def build():
 def test():
     demo = (BACK / "reference/demo.py").read_text(encoding="utf-8")
     test = (BACK / TEST_REL).read_text(encoding="utf-8")
+    if (BACK / REVIEW_REL).exists():
+        test += "\n\n// ReviewTest.java (revision de Claude, no se toca)\n" + (BACK / REVIEW_REL).read_text(encoding="utf-8")
+    state["stall"] = 0
     ok, log = mvn("test")
     state["test_rounds"] = [{"round": 0, "tests": test_counts(log)}]
     vueltas = 0
@@ -343,19 +384,26 @@ def test():
         prev = state["test_rounds"][-1].get("tests") or {"failed": 10 ** 6}
         ok, log2 = mvn("test")
         now = test_counts(log2) or {"failed": 10 ** 6, "run": 0}
+        nov = _novelty(backup, {f: (SRC / f"{f}.java").read_text(encoding="utf-8") for f in files})
+        state["stall"] = state["stall"] + 1 if now["failed"] >= prev["failed"] else 0
         # Gate de REGRESION por unidad (ticket 13, la parte barata): si la vuelta hace fallar
         # mas tests que antes, se revierte y se atribuye a los archivos tocados.
         if now["failed"] > prev["failed"]:
             for f, old in backup.items():
                 (SRC / f"{f}.java").write_text(old, encoding="utf-8")
             rec_gate("regresion-unidad", False, f"{files} rompio {now['failed'] - prev['failed']} test(s) que pasaban")
-            state["test_rounds"].append({"round": vueltas, "files": files, "reverted": "regresion", "tests": now})
-            continue
-        rec_gate("regresion-unidad", True, f"{files}: {prev['failed']} -> {now['failed']} fallos")
-        ok, log = ok, log2
-        state["test_rounds"].append({"round": vueltas, "files": files, "tests": now})
+            state["test_rounds"].append({"round": vueltas, "files": files, "reverted": "regresion", "tests": now, "novelty": nov})
+        else:
+            rec_gate("regresion-unidad", True, f"{files}: {prev['failed']} -> {now['failed']} fallos")
+            ok, log = ok, log2
+            state["test_rounds"].append({"round": vueltas, "files": files, "tests": now, "novelty": nov})
+        # Topes por AVANCE (ticket 07): sin bajar fallos N vueltas, o diff sin novedad -> escala un nivel.
+        if not ok and (state["stall"] >= CFG["stall_rounds"] or nov < CFG["diff_novelty_min"]):
+            rec_gate("avance", False, f"stall={state['stall']} novedad={nov}: escala a reasoner")
+            break
     state["test_fix_rounds"] = vueltas
     if ok:
+        state["suite_total"] = test_counts(log)
         rec_gate("G4-aceptacion", True, f"verde en {vueltas} vueltas")
         return True, f"G4 ok ({vueltas} vueltas)"
     rok, rnote = reasoner_rounds(log, demo, test)
@@ -368,13 +416,49 @@ def test():
     return False, "escala a Claude (no llamado)"
 
 
+@stage("5b-review")
+def review():
+    """Claude revisa el diff. Bloquea SOLO si deja un ReviewTest.java que falla (ticket 07)."""
+    import os
+    from mmorch.claude_exec import run_claude
+    os.environ.pop("CLAUDECODE", None)  # ponytail: el CLI no anida dentro de una sesion Claude Code
+    subprocess.run(["git", "add", "-A"], cwd=WT, check=True)
+    diff = subprocess.run(["git", "diff", "--cached", "--", "backend/src"], cwd=WT, capture_output=True, text=True, encoding="utf-8").stdout
+    state["claude_calls"] += 1
+    r = run_claude(
+        "Revisa este diff contra docs/sdlc/spec.md y backend/reference/demo.py (oraculo). "
+        f"Si encontras un defecto REAL, escribi UN test JUnit 5 que falle en backend/{REVIEW_REL} "
+        "(paquete com.qtp.bot, un metodo @Test) y responde 'BLOCK: <defecto>'. No toques ningun otro archivo. "
+        "Si no hay defecto demostrable con test, no escribas nada y responde 'OK' o 'NOTE: <observacion>'.\n\n"
+        f"DIFF:\n{diff[:60000]}", cwd=str(WT), mode="edit", timeout=CFG["cmd_timeout_s"])
+    verdict = (r.get("result") or "").strip()
+    write_supervision(f"revision del diff (Claude, rc={r.get('returncode')}): {verdict[:2000]}")
+    bok, _ = gate_baseline()
+    if not bok:
+        subprocess.run(["git", "checkout", "--", POM_REL, TEST_REL], cwd=BACK)
+    if not (BACK / REVIEW_REL).exists():
+        return rec_gate("claude-diff-review", True, f"sin test nuevo: {verdict[:120]}")
+    SNAP[REVIEW_REL] = sha_file(REVIEW_REL)
+    ok, _ = mvn("test")
+    if ok:
+        return rec_gate("claude-diff-review", True, "ReviewTest pasa: sin evidencia, PR sigue")
+    state["review_block"] = True
+    rec_gate("claude-diff-review", False, f"ReviewTest falla: vuelve a build. {verdict[:120]}")
+    return True, "bloqueo con evidencia"
+
+
 @stage("6-pr")
 def pr():
     subprocess.run(["git", "add", "-A"], cwd=WT, check=True)
-    msg = "v3: port demo.py — 4 gates + escalera 3+2, sin Claude"
+    msg = "v3: port demo.py — 4 gates + escalera 3+2 + revision Claude"
     subprocess.run(["git", "-c", "user.name=map12", "-c", "user.email=map12082004@gmail.com", "commit", "-q", "-m", msg], cwd=WT, check=True)
     ds = subprocess.run(["git", "diff", "--stat", "HEAD~1"], cwd=WT, capture_output=True, text=True).stdout
     state["diffstat"] = ds.strip().splitlines()[-1] if ds.strip() else ""
+    ns = subprocess.run(["git", "diff", "--numstat", "HEAD~1"], cwd=WT, capture_output=True, text=True).stdout
+    rows = [l.split("\t") for l in ns.splitlines() if l.count("\t") == 2 and l.split("\t")[0].isdigit()]
+    state["lines"] = {"added": sum(int(a) for a, _, _ in rows), "deleted": sum(int(d) for _, d, _ in rows)}
+    state["lint_new"] = None       # ponytail: repo Java, ruff+mypy no aplican; ticket 13
+    state["mutation_score"] = None  # ponytail: mutmut es Python; PIT no esta en el pom; ticket 13
     return True, state["diffstat"]
 
 
@@ -391,15 +475,17 @@ if __name__ == "__main__":
         plan_md = (WT / "docs/sdlc/plan.md").read_text(encoding="utf-8")
         state["plan_files"] = list(dict.fromkeys(re.findall(JAVA_RE, plan_md)))
         state["resumed_from_stage"] = from_stage
-    stages = {2: spec, 3: plan, 4: build, 5: test, 6: pr}
+    stages = {2: spec, 3: plan, 4: build, 5: test, 5.5: review, 6: pr}
     for k in sorted(stages):
         if k >= from_stage:
             stages[k]()
+            if k == 5.5 and state.get("review_block"):
+                test()  # una sola vuelta mas con el ReviewTest; si sigue rojo, escala
     state["minutes_total"] = round((time.time() - state["t0_epoch"]) / 60, 2)
     state["usd"] = ledger_usd()
     _flush()
     here = pathlib.Path(__file__).resolve().parent / "run-log.json"
     here.write_text(LOG.read_text(encoding="utf-8"), encoding="utf-8")
     print("V3 TERMINO", json.dumps({k: state.get(k) for k in
-          ("calls", "minutes_total", "usd", "human_interventions", "claude_calls",
-           "escalated_to_claude", "gate_rejects", "diffstat")}, ensure_ascii=False))
+          ("calls", "minutes_total", "usd", "human_interventions", "claude_calls", "review_block",
+           "escalated_to_claude", "gate_rejects", "diffstat", "lines", "suite_total")}, ensure_ascii=False))
