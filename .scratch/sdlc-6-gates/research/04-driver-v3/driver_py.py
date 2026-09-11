@@ -667,6 +667,8 @@ if __name__ == "__main__":
         CONTRACT = CONTRACTS.get(TASK_NAME, [])
     if "--self-check" in sys.argv:
         sys.exit(self_check())
+    # D3 r1: el pre-commit de mmorch corre `python -m ruff` y resolvia al Python del sistema (sin ruff).
+    os.environ["PATH"] = os.path.dirname(PY) + os.pathsep + os.environ.get("PATH", "")
     if not (WT / ".git").exists():
         WT.parent.mkdir(parents=True, exist_ok=True)
         if FEAT:
