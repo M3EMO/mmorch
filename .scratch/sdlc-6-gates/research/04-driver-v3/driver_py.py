@@ -216,6 +216,24 @@ def gate_clarificaciones(spec_md: str) -> tuple[bool, str]:
     return rec_gate("spec-review", True, f"{len(qs)} preguntas respondidas")
 
 
+def _tree() -> dict[str, str]:
+    """path -> sha de todo archivo del worktree (tracked + nuevos), para medir que toco una pasada de Claude."""
+    out = subprocess.run(["git", "ls-files", "-co", "--exclude-standard"], cwd=WT, capture_output=True, text=True).stdout
+    return {p: sha_file(p) for p in out.splitlines() if p and (WT / p).is_file()}
+
+
+def gate_alcance(gid: str, before: dict[str, str], allowed: tuple[str, ...]) -> tuple[bool, str]:
+    """Una pasada de Claude solo puede tocar `allowed` (r4b: la revision de spec implemento core.py y multi.py).
+    Lo demas vuelve al estado previo: tracked/staged con checkout, nuevo con clean. Determinista, USD 0."""
+    after = _tree()
+    changed = [p for p in set(before) | set(after) if before.get(p) != after.get(p)]
+    fuera = sorted(p for p in changed if not p.startswith(allowed) and not p.startswith("docs/sdlc/supervision"))
+    if fuera:
+        subprocess.run(["git", "checkout", "--", *[p for p in fuera if p in before]], cwd=WT, capture_output=True)
+        subprocess.run(["git", "clean", "-fq", "--", *[p for p in fuera if p not in before]], cwd=WT, capture_output=True)
+    return rec_gate(gid, not fuera, "ok" if not fuera else f"toco fuera de alcance, revertido: {fuera}")
+
+
 def gate_baseline() -> tuple[bool, str]:
     bad = [rel for rel, h in SNAP.items() if not (WT / rel).exists() or sha_file(rel) != h]
     return rec_gate("baseline-intacto", not bad, "ok" if not bad else f"toco {bad}")
@@ -324,10 +342,12 @@ def claude_fix(log) -> tuple[bool, str]:
     os.environ.pop("CLAUDECODE", None)  # ponytail: el CLI no anida dentro de una sesion Claude Code
     state["escalated_to_claude"] = True
     state["claude_calls"] += 1
+    before = _tree()
     r = run_claude(f"Los tests de aceptacion fallan. Arregla el codigo en {state['plan_files']} hasta que "
                    f"`pytest tests_accept -q` pase. NO toques tests_accept ni docs. Al final responde en una linea que cambiaste.\n\n"
                    f"TAREA:\n{TASK.task}\n\nSALIDA:\n{log}", cwd=str(WT), mode="edit", timeout=CFG["cmd_timeout_s"])
     write_supervision(f"nivel 3 Claude (rc={r.get('returncode')}): {(r.get('result') or '')[:2000]}")
+    gate_alcance("claude-fix-alcance", before, tuple(state["plan_files"]))
     if not gate_baseline()[0]:
         subprocess.run(["git", "checkout", "--", *SNAP], cwd=WT)
     ok, log = accept()
@@ -409,9 +429,12 @@ def spec_review():
     os.environ.pop("CLAUDECODE", None)
     guide = (TPL / "spec-review.md").read_text(encoding="utf-8")
     state["claude_calls"] += 1
-    r = run_claude(f"{guide}\n\nTAREA:\n{TASK.task}\n\nEdita docs/sdlc/spec.md segun estas reglas y responde en una linea cuantas preguntas hiciste.",
+    before = _tree()
+    r = run_claude(f"{guide}\n\nTAREA:\n{TASK.task}\n\nEdita SOLO docs/sdlc/spec.md segun estas reglas. NO escribas codigo ni crees "
+                   "ni toques ningun otro archivo: la implementacion la hace otra etapa. Responde en una linea cuantas preguntas hiciste.",
                    cwd=str(WT), mode="edit", timeout=CFG["cmd_timeout_s"])
     write_supervision(f"revision de spec (Claude, rc={r.get('returncode')}): {(r.get('result') or '')[:1500]}")
+    gate_alcance("spec-review-alcance", before, ("docs/sdlc/spec.md",))
     if not gate_baseline()[0]:
         subprocess.run(["git", "checkout", "--", *SNAP], cwd=WT)
     spec_md = (WT / "docs/sdlc/spec.md").read_text(encoding="utf-8")
@@ -553,6 +576,7 @@ def review():
     diff = subprocess.run(["git", "diff", "--cached", "--", *state["plan_files"]], cwd=WT,
                           capture_output=True, text=True, encoding="utf-8").stdout
     state["claude_calls"] += 1
+    before = _tree()
     r = run_claude(
         "Revisa este diff contra docs/sdlc/spec.md y la TAREA. "
         f"Si encontras un defecto REAL, escribi UN test pytest que falle en {REVIEW_REL} "
@@ -561,6 +585,7 @@ def review():
         f"TAREA:\n{TASK.task}\n\nDIFF:\n{diff[:60000]}", cwd=str(WT), mode="edit", timeout=CFG["cmd_timeout_s"])
     verdict = (r.get("result") or "").strip()
     write_supervision(f"revision del diff (Claude, rc={r.get('returncode')}): {verdict[:2000]}")
+    gate_alcance("diff-review-alcance", before, (REVIEW_REL,))
     if not gate_baseline()[0]:
         subprocess.run(["git", "checkout", "--", *SNAP], cwd=WT)
     if not (WT / REVIEW_REL).exists():
