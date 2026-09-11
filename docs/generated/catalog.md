@@ -4,7 +4,7 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**135 módulos · 47 MCP tools · 933 tests.**
+**129 módulos · 47 MCP tools · 890 tests.**
 
 El server expone **15** de esas 47 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
 
@@ -15,8 +15,6 @@ El server expone **15** de esas 47 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/adjudicate.py` | Adjudication module for matching notes to projects. |
 | `mmorch/arbitration.py` | arbitration — registro auditable de los arbitrajes del orquestador (blind-spot #2, 2026-07). |
 | `mmorch/architecture.py` | Organizador de arquitectura — chequeos MECANICOS, sin juicio de LLM. |
-| `mmorch/auto_apply.py` | Fail-closed policy and evidence gate for autonomous code promotion. |
-| `mmorch/auto_apply_nightly.py` | Nightly adapter for the isolated autonomous promotion circuit. |
 | `mmorch/auto_repair.py` | Auto-reparación nocturna: los errores que el sistema DETECTA se convierten |
 | `mmorch/automerge.py` | Automerge con semáforo — merges sin accionar humano SOLO en el carril verde. |
 | `mmorch/autoresearch.py` | autoresearch (r4a) — hillclimb como JOB declarativo + resumable. |
@@ -28,7 +26,6 @@ El server expone **15** de esas 47 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/bughunt.py` | BUG-HUNTER logico de mmorch: mutation-survivors como mapa de donde un bug silencioso viviria. |
 | `mmorch/bursts.py` | Bursts de arXiv — temas recién acuñados, que ningún tag todavía nombra. |
 | `mmorch/cache.py` | memo (I-4) — cache content-hash de resultados/verdicts. Salta re-gen/re-verify |
-| `mmorch/canal.py` | canal — hilo ordenado entre Cursor, Claude Code y mmorch. |
 | `mmorch/canary.py` | canary — set FIJO de tareas con respuesta verificable deterministicamente (W5.3). |
 | `mmorch/cascade.py` | cascade — FrugalGPT-style multi-step confidence cascade (research: vault/research/ |
 | `mmorch/chat_store.py` | chat_store — durable chat history for Lotus (SQLite, stdlib). |
@@ -85,7 +82,6 @@ El server expone **15** de esas 47 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/nightly.py` | nightly — driver ALWAYS-ON del loop nocturno (Windows Task Scheduler, no Claude). |
 | `mmorch/nodes.py` | nodes — el registry de la ORQUESTA: nombra a cada miembro que mmorch (el DIRECTOR) |
 | `mmorch/nudge.py` | nudge — robo de Hermes 'periodic memory nudging': cada N loops cerrados, dispara |
-| `mmorch/observation.py` | Deterministic post-merge observation policy for autonomous promotions. |
 | `mmorch/outcomes.py` | Outcome recording and expiry for proposals. |
 | `mmorch/paths.py` | Rutas de ESTADO del sistema (logs, DBs, bandits, memoria, cache). |
 | `mmorch/patterns.py` | Code-flow patterns (§7), migrated as deterministic Python. |
@@ -100,7 +96,6 @@ El server expone **15** de esas 47 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/project_loop.py` | project_loop — ejecutor PROJECT-AWARE primario via mmorch (barato, cero cupo). Es la |
 | `mmorch/project_repair.py` | Reparación cross-repo: mmorch arregla los proyectos del REGISTRY, no solo |
 | `mmorch/projects.py` | projects — registro de proyectos que mmorch puede CONTROLAR (project-aware). Hace que |
-| `mmorch/promotion.py` | Durable fail-closed state machine for autonomous code promotions. |
 | `mmorch/prompts.py` | prompts — construccion de mensajes PREFIX-STABLE pa maximizar el cache-hit de DeepSeek. |
 | `mmorch/proposals.py` | F2 propuesta (spec .scratch/loop-cerrado/spec.md): tarjetas pre-cocinadas + pick del hook. |
 | `mmorch/provenance.py` | Provenance de branches — outcomes retroactivos por verdad de ejecución. |
@@ -111,7 +106,6 @@ El server expone **15** de esas 47 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/retention.py` | retention — decay Ebbinghaus + Zeigarnik para la capa semantica de memory. |
 | `mmorch/route.py` | route (I-2) — confidence-gated escalation. Ahorra cupo: el modelo barato |
 | `mmorch/rubric_loop.py` | rubric_loop — LOOP DE AUTOCORRECCION CON VERIFICADOR INDEPENDIENTE (spec del usuario). |
-| `mmorch/runtime_checkout.py` | Persistent Git worktree used as the isolated autonomous runtime. |
 | `mmorch/sandbox.py` | sandbox — corre codigo NO confiable aislado (la compuerta del pipeline 'git-like' |
 | `mmorch/schedule.py` | schedule — ADVISORY de ventana off-peak (DeepSeek descuenta fuerte fuera de hora pico). |
 | `mmorch/schema.py` | schema (§9) — structured-output gates. Hoy los parsers de mmorch son best-effort |
