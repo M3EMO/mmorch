@@ -484,12 +484,16 @@ def review():
 
 @stage("6-pr")
 def pr():
+    gi = WT / ".gitignore"
+    if not gi.exists():
+        gi.write_text("__pycache__/
+", encoding="utf-8")  # r1: se colaron .pyc en el PR
     subprocess.run(["git", "add", "-A"], cwd=WT, check=True)
     subprocess.run(["git", "-c", "user.name=map12", "-c", "user.email=map12082004@gmail.com", "commit", "-q", "-m",
                     f"sdlc: {TASK_NAME} — driver_py, gates + escalera + revision Claude"], cwd=WT, check=True)
     ds = subprocess.run(["git", "diff", "--stat", "HEAD~1"], cwd=WT, capture_output=True, text=True).stdout
     state["diffstat"] = ds.strip().splitlines()[-1] if ds.strip() else ""
-    ns = subprocess.run(["git", "diff", "--numstat", "HEAD~1"], cwd=WT, capture_output=True, text=True).stdout
+    ns = subprocess.run(["git", "diff", "--numstat", "HEAD~1", "--", *state["plan_files"]], cwd=WT, capture_output=True, text=True).stdout
     rows = [l.split("\t") for l in ns.splitlines() if l.count("\t") == 2 and l.split("\t")[0].isdigit()]
     state["lines"] = {"added": sum(int(a) for a, _, _ in rows), "deleted": sum(int(d) for _, d, _ in rows)}
     pkg = sorted({f.split("/")[0] for f in state["plan_files"] if "/" in f}) or state["plan_files"]

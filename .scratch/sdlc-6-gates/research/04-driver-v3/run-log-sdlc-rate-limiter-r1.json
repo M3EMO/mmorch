@@ -1,0 +1,126 @@
+{
+ "proto": "driver_py",
+ "task": "rate-limiter",
+ "stages": [
+  {
+   "stage": "4-build",
+   "ok": true,
+   "minutes": 0.61,
+   "calls": 3,
+   "note": "G3 + test-compile ok"
+  },
+  {
+   "stage": "5-test",
+   "ok": true,
+   "minutes": 0.03,
+   "calls": 0,
+   "note": "G4 ok (0 vueltas)"
+  },
+  {
+   "stage": "5b-review",
+   "ok": true,
+   "minutes": 0.54,
+   "calls": 0,
+   "note": "sin test nuevo: OK"
+  },
+  {
+   "stage": "6-pr",
+   "ok": true,
+   "minutes": 0.05,
+   "calls": 0,
+   "note": " 11 files changed, 297 insertions(+)"
+  }
+ ],
+ "gates": [
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 1
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 2
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 3
+  },
+  {
+   "id": "test-compile",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "G4-aceptacion",
+   "ok": true,
+   "detail": "verde en 0 vueltas",
+   "calls": 3
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "claude-diff-review",
+   "ok": true,
+   "detail": "sin test nuevo: OK",
+   "calls": 3
+  }
+ ],
+ "calls": 3,
+ "human_interventions": 0,
+ "claude_calls": 1,
+ "gate_rejects": [],
+ "escalated_to_claude": false,
+ "t0": "2026-09-11 16:10:57",
+ "t0_epoch": 1789153857.9128604,
+ "plan_files": [
+  "limiter/core.py",
+  "limiter/multi.py",
+  "limiter/__init__.py"
+ ],
+ "usd_by_family": {
+  "deepseek": 0.0188
+ },
+ "test_rounds": [
+  {
+   "round": 0,
+   "tests": {
+    "run": 3,
+    "failed": 0
+   }
+  }
+ ],
+ "stall": 0,
+ "test_fix_rounds": 0,
+ "suite_total": {
+  "run": 3,
+  "failed": 0
+ },
+ "diffstat": " 11 files changed, 297 insertions(+)",
+ "lines": {
+  "added": 297,
+  "deleted": 0
+ },
+ "lint_new": {
+  "ruff": 0,
+  "mypy": 0
+ },
+ "mutation_score": null,
+ "minutes_total": 1.23,
+ "usd": 0.0187
+}
