@@ -27,6 +27,7 @@ Todos los proyectos del usuario construyen sus features con el mismo pipeline de
 - [Contrato de gate](issues/02-contrato-de-gate.md) — función Python + comando; `CheckResult`; `docs/sdlc/gates/`; promoción auto con oráculo 3+1, humana sin oráculo; juicio solo en spec; gate `trazabilidad` por IDs R<n> (2026-09-11). Capture: `brainstorms/2026-09-10-sdlc-6-gates.md`.
 - [Testeo modular + regresión](issues/13-testeo-modular-y-regresion.md) — unidad (mutantes) + suite total por unidad + aceptación al final; test-compile fail-closed; umbral de mutación en la ficha, no copiar 80.
 - [Escalación por niveles](issues/03-escalacion-por-niveles.md) — 3 vueltas → reasoner×2 → Claude → humano; aviso al pasar a Claude; Claude promueve solo con oráculo+evidencia.
+- [Protocolo de comparación](issues/07-protocolo-de-comparacion.md) — 2 brazos (v3 control, v3+Claude fijo producto); repeticiones 1 grande / 3 chicas / held-out x1, cache de worklist apagada; 9 métricas computables; Claude bloquea solo con test que falla; gana = 5/6 + mediana < US$1 + 0 humanos antes del nivel 4; topes por avance (fallos no bajan 2 vueltas, novedad del diff < 10%) + US$3 de fondo, reloj solo por comando.
 - [Convención por repo](issues/11-convencion-por-repo.md) — `sdlc.toml` + `accept_cmd` o no entra; scaffold con 4 fichas A/B; intent/PR sin gate; `contract_version` fail-closed. Plantillas desde spec-kit: spec-template, `spec-review.md` desde `clarify`, marca `[P]` (2026-09-11).
 
 ## Not yet specified
@@ -34,8 +35,8 @@ Todos los proyectos del usuario construyen sus features con el mismo pipeline de
 - Intent y PR: sin `GATE-N.md` a propósito (Q16b). No se inventa oráculo.
 - Cómo un candidato de `supervision.md` se etiqueta 3+1 cuando no hay oráculo: ticket 08.
 - Cuándo y cómo se retira el engine viejo (`project_driver` / `project_integrate`). Depende de 05.
-- Topes USD y minutos por feature. Depende de 07. Escalación de vueltas ya está en 03 (3 + reasoner×2).
 - Observabilidad opcional en Lotus. Depende de 05. Baja prioridad.
+- Hermes como canal del nivel humano (gateway Telegram/WhatsApp) y como emisor de skills por gate. Sin ticket hasta que haga falta.
 
 ## Out of scope
 
