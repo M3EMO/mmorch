@@ -46,7 +46,7 @@ FEATURES = {
               "mmorch/project_driver.py; no se tocan tests ni otros archivos."),
         accept={"tests/test_sdlc_d3_atasco.py": HERE / "accept/D3/tests/test_sdlc_d3_atasco.py"},
         contract=["build_unit", "escalate", "atascado", "mmorch/project_driver.py"],
-        suite=["tests", "-q", "-x", "-p", "no:cacheprovider"],
+        suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
     ),
 }
 FEAT = FEATURES.get(TASK_NAME)
@@ -70,7 +70,7 @@ CONTRACTS = {
 
 def _cfg():
     """Topes del ticket 07. docs/sdlc/sdlc.toml pisa los defaults."""
-    d = {"usd_max": 3.0, "stall_rounds": 2, "diff_novelty_min": 0.10, "cmd_timeout_s": 600}
+    d = {"usd_max": 3.0, "stall_rounds": 2, "diff_novelty_min": 0.10, "cmd_timeout_s": 600, "suite_timeout_s": 1800}
     p = WT / "docs" / "sdlc" / "sdlc.toml"
     if p.exists():
         import tomllib
@@ -144,10 +144,27 @@ def one_file(code: str, rel: str) -> str:
     return secs.get(rel, code)
 
 
-def sh(cmd: list[str]):
-    p = subprocess.run(cmd, cwd=WT, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                       timeout=CFG["cmd_timeout_s"])
+def sh(cmd: list[str], timeout: float | None = None):
+    try:
+        p = subprocess.run(cmd, cwd=WT, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=timeout or CFG["cmd_timeout_s"])
+    except subprocess.TimeoutExpired:
+        return False, f"TIMEOUT {timeout or CFG['cmd_timeout_s']}s: {' '.join(cmd)[:200]}"
     return p.returncode == 0, (p.stdout + p.stderr)[-6000:]
+
+
+def gate_suite_total() -> tuple[bool, str]:
+    """Regresion total (ticket 13): la suite entera del repo no gana fallos nuevos respecto del baseline.
+    mmorch tarda ~20 min y trae 4 rojos previos (medido 2026-09-11): se compara por NOMBRE, no por verde."""
+    base_file = HERE / "suite-baseline.txt"
+    base = set(re.findall(r"(?m)^FAILED (\S+)", base_file.read_text(encoding="utf-8"))) if base_file.exists() else set()
+    ok, log = sh([PY, "-m", "pytest", *FEAT["suite"]], timeout=CFG["suite_timeout_s"])
+    now = set(re.findall(r"(?m)^FAILED (\S+)", log))
+    new = sorted(now - base)
+    state["suite_total"] = test_counts(log) | {"new_failures": new, "baseline_failures": len(base)} if test_counts(log) else {"log": log[-300:]}
+    if "TIMEOUT" in log:
+        return rec_gate("suite-total", False, log[:200])
+    return rec_gate("suite-total", not new, "sin fallos nuevos" if not new else f"fallos nuevos: {new}")
 
 
 def _accept_paths():
@@ -582,12 +599,10 @@ def test():
             break
     state["test_fix_rounds"] = state.get("test_fix_rounds", 0) + vueltas
     if ok and FEAT:
-        sok, slog = sh([PY, "-m", "pytest", *FEAT["suite"]])
-        rec_gate("suite-total", sok, "verde" if sok else slog[-600:])
+        sok, snote = gate_suite_total()
         if not sok:
-            write_supervision(f"ESCALATE_HUMAN: aceptacion verde pero suite total roja\n{slog[-1500:]}")
-            return False, "suite total roja: escala a humano"
-        state["suite_total"] = test_counts(slog)
+            write_supervision(f"ESCALATE_HUMAN: aceptacion verde pero suite total con regresion\n{snote}")
+            return False, f"suite total: {snote[:200]}"
         rec_gate("G4-aceptacion", True, f"verde en {vueltas} vueltas + suite total")
         return True, f"G4 + suite ok ({vueltas} vueltas)"
     if ok:
