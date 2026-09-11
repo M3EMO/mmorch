@@ -32,13 +32,32 @@ def _arg(flag, default):
 TASK_NAME = _arg("--task", "rate-limiter")
 WT = pathlib.Path(_arg("--wt", rf"C:\Users\map12\Desktop\Claude\sdlc-runs\{TASK_NAME}-r1"))
 PHASE = _arg("--phase", f"sdlc-{TASK_NAME}-r1")
+HERE = pathlib.Path(__file__).resolve().parent
+
+# Features de dogfood sobre un repo existente (ticket 06, D*). El test de aceptacion lo escribe Claude
+# (accept/<id>/tests/...) y el pipeline no toca tests/. `suite` = gate de regresion total (ticket 13).
+FEATURES = {
+    "D3": dict(
+        repo=r"C:\Users\map12\.claude\orchestration",
+        task=("Agrega un detector de atasco a `build_unit` en mmorch/project_driver.py: si `build_fn` devuelve un "
+              "codigo byte-identico al de la vuelta anterior y el gate lo rechaza, `build_unit` devuelve status "
+              "'escalate' en ESA vuelta con un `detail` que contenga la palabra 'atascado', sin gastar las vueltas "
+              "restantes de max_fix. Codigos distintos siguen agotando max_fix como hoy. Solo se modifica "
+              "mmorch/project_driver.py; no se tocan tests ni otros archivos."),
+        accept={"tests/test_sdlc_d3_atasco.py": HERE / "accept/D3/tests/test_sdlc_d3_atasco.py"},
+        contract=["build_unit", "escalate", "atascado", "mmorch/project_driver.py"],
+        suite=["tests", "-q", "-x", "-p", "no:cacheprovider"],
+    ),
+}
+FEAT = FEATURES.get(TASK_NAME)
+TESTS_PREFIX = "tests/" if FEAT else "tests_accept/"
 MAX_FIX = int(_arg("--max-fix", "3"))
 REASONER_TRIES = 2
 WRITER, CODER = "deepseek-reasoner", "deepseek-v4-pro"
 PY = sys.executable
 LOG = WT / "docs" / "sdlc" / "run-log.json"
 METRICS = pathlib.Path(r"C:\Users\map12\.claude\orchestration\logs\metrics.jsonl")
-REVIEW_REL = "tests_accept/test_review.py"
+REVIEW_REL = f"{TESTS_PREFIX}test_review_sdlc.py"
 PY_RE = r"`?((?:\w+/)*\w+\.py)`?"
 TPL = pathlib.Path(__file__).resolve().parent / "templates"  # spec-kit recortado (tickets 02 y 11)
 
@@ -131,8 +150,15 @@ def sh(cmd: list[str]):
     return p.returncode == 0, (p.stdout + p.stderr)[-6000:]
 
 
+def _accept_paths():
+    paths = list(TASK.accept_files)
+    if (WT / REVIEW_REL).exists():
+        paths.append(REVIEW_REL)
+    return paths
+
+
 def accept():
-    return sh([PY, "-m", "pytest", "tests_accept", "-q", "-p", "no:cacheprovider"])
+    return sh([PY, "-m", "pytest", *_accept_paths(), "-q", "-p", "no:cacheprovider"])
 
 
 def test_counts(log):
@@ -165,9 +191,9 @@ def snapshot_baseline():
 def gate_plan_allowlist(plan_md: str, files: list[str]) -> tuple[bool, str]:
     m = re.search(r"## Archivos\b(.*?)(?:\n## |\Z)", plan_md, re.S | re.I)
     block = m.group(1) if m else plan_md
-    if re.search(r"(?im)^\s*[-*]+\s*`?tests_accept/", block):
-        return rec_gate("plan-allowlist", False, "plan lista tests_accept como archivo a escribir")
-    need = [f for f in re.findall(r"[\w/]+\.py", TASK.task) if f not in files]
+    if re.search(r"(?im)^\s*[-*]+\s*`?" + re.escape(TESTS_PREFIX), block):
+        return rec_gate("plan-allowlist", False, f"plan lista {TESTS_PREFIX} como archivo a escribir")
+    need = [f for f in dict.fromkeys(re.findall(r"[\w/]+\.py", TASK.task)) if f not in files]
     if need:
         return rec_gate("plan-allowlist", False, f"plan omite {need}")
     return rec_gate("plan-allowlist", True, f"{files}")
@@ -246,7 +272,7 @@ def gate_compile(files) -> tuple[bool, str]:
 
 def gate_test_compile() -> tuple[bool, str]:
     """Equivalente a mvn test-compile: los tests importan y se recolectan."""
-    ok, log = sh([PY, "-m", "pytest", "tests_accept", "--collect-only", "-q", "-p", "no:cacheprovider"])
+    ok, log = sh([PY, "-m", "pytest", *_accept_paths(), "--collect-only", "-q", "-p", "no:cacheprovider"])
     return rec_gate("test-compile", ok, "ok" if ok else log[-800:])
 
 
@@ -286,7 +312,7 @@ def _write(rel, code):
 def _tests_text():
     t = "\n\n".join(f"# {k}\n{(WT / k).read_text(encoding='utf-8')}" for k in TASK.accept_files)
     if (WT / REVIEW_REL).exists():
-        t += "\n\n# tests_accept/test_review.py (revision de Claude, no se toca)\n" + (WT / REVIEW_REL).read_text(encoding="utf-8")
+        t += "\n\n# test_review_sdlc.py (revision de Claude, no se toca)\n" + (WT / REVIEW_REL).read_text(encoding="utf-8")
     return t
 
 
@@ -319,7 +345,7 @@ def reasoner_rounds(log) -> tuple[bool, str]:
         backup = {f: written[f] for f in files}
         for f in files:
             out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero.",
-                      f"Aplica ESTA instruccion a {f}. No toques tests_accept.\n"
+                      f"Aplica ESTA instruccion a {f}. No toques los tests.\n"
                       f"INSTRUCCION: {instr.get(f, 'corregi el fallo del test')}\n\n"
                       f"SALIDA:\n{log}\n\nARCHIVOS:\n{_joined(written)}")
             code = one_file(strip_fence(out), f)
@@ -344,7 +370,7 @@ def claude_fix(log) -> tuple[bool, str]:
     state["claude_calls"] += 1
     before = _tree()
     r = run_claude(f"Los tests de aceptacion fallan. Arregla el codigo en {state['plan_files']} hasta que "
-                   f"`pytest tests_accept -q` pase. NO toques tests_accept ni docs. Al final responde en una linea que cambiaste.\n\n"
+                   f"`pytest {' '.join(_accept_paths())} -q` pase. NO toques tests ni docs. Al final responde en una linea que cambiaste.\n\n"
                    f"TAREA:\n{TASK.task}\n\nSALIDA:\n{log}", cwd=str(WT), mode="edit", timeout=CFG["cmd_timeout_s"])
     write_supervision(f"nivel 3 Claude (rc={r.get('returncode')}): {(r.get('result') or '')[:2000]}")
     gate_alcance("claude-fix-alcance", before, tuple(state["plan_files"]))
@@ -359,12 +385,13 @@ def claude_fix(log) -> tuple[bool, str]:
 def self_check() -> int:
     """Cero API: allowlist, novedad, conteo pytest."""
     fails = []
-    good = "## Archivos\n- `limiter/core.py`\n- `limiter/multi.py`\n- `limiter/__init__.py`\n\n## Prueba\npytest\n"
-    if not gate_plan_allowlist(good, ["limiter/core.py", "limiter/multi.py", "limiter/__init__.py"])[0]:
+    need = list(dict.fromkeys(re.findall(r"[\w/]+\.py", TASK.task)))   # archivos que la tarea nombra
+    good = "## Archivos\n" + "".join(f"- `{f}`\n" for f in need) + "\n## Prueba\npytest\n"
+    if not gate_plan_allowlist(good, need)[0]:
         fails.append("allowlist-good")
-    if gate_plan_allowlist("## Archivos\n- tests_accept/test_limiter.py\n- limiter/core.py", ["limiter/core.py"])[0]:
+    if gate_plan_allowlist(f"## Archivos\n- {TESTS_PREFIX}test_x.py\n- {need[0]}", need)[0]:
         fails.append("allowlist-tests")
-    if gate_plan_allowlist(good, ["limiter/core.py"])[0]:
+    if gate_plan_allowlist(good, need[:-1])[0]:
         fails.append("allowlist-omite")
     SEEN.clear()
     if _novelty({"A": "x\ny"}, {"A": "x\nz"}) != 1.0 or _novelty({"A": "x\nz"}, {"A": "x\ny"}) != 0.0:
@@ -451,12 +478,12 @@ def plan():
            f"- `path.py` [R1, R3] [P]\n"
            f"Cada item cita los IDs R<n> de la spec que cubre. Todo R<n> de la spec aparece en algun item. "
            f"[P] marca archivos que NO importan a otros del plan (paralelizables); los demas van en orden de dependencia. "
-           f"'## Prueba' = `python -m pytest tests_accept -q`.\n\nSPEC:\n{spec_md}")
-    out = llm(WRITER, "Sos un tech lead. Escribis planes ejecutables. NO regeneres tests_accept.", ask)
+           f"'## Prueba' = `python -m pytest {' '.join(_accept_paths())} -q`.\n\nSPEC:\n{spec_md}")
+    out = llm(WRITER, "Sos un tech lead. Escribis planes ejecutables. NO regeneres los tests.", ask)
     _write("docs/sdlc/plan.md", out)
     m = re.search(r"## Archivos\b(.*?)(?:\n## |\Z)", out, re.S | re.I)
     block = m.group(1) if m else out
-    files = [f for f in dict.fromkeys(re.findall(PY_RE, block)) if not f.startswith("tests_accept/")]
+    files = [f for f in dict.fromkeys(re.findall(PY_RE, block)) if not f.startswith(TESTS_PREFIX)]
     state["plan_files"] = files
     state["plan_parallel"] = [f for f in files if re.search(rf"{re.escape(f)}`?[^\n]*\[P\]", block)]  # ticket 05 lo ejecuta en paralelo
     ok, note = gate_plan_allowlist(out, files)
@@ -471,8 +498,10 @@ def build():
     plan_md = (WT / "docs/sdlc/plan.md").read_text(encoding="utf-8")
     written = {}
     for f in state["plan_files"]:
+        cur = (WT / f).read_text(encoding="utf-8") if (WT / f).exists() else ""
+        cur_ctx = f"ARCHIVO ACTUAL {f} (devolvelo COMPLETO con el cambio minimo):\n{cur}\n\n" if cur.strip() else ""
         out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el codigo del archivo pedido, sin explicacion ni markdown.",
-                  f"Escribi {f}. Tiene que importar con los archivos ya escritos y pasar los tests de aceptacion.\n\n"
+                  f"Escribi {f}. Tiene que importar con los archivos ya escritos y pasar los tests de aceptacion.\n\n{cur_ctx}"
                   f"PLAN:\n{plan_md}\n\nSPEC:\n{spec_md}\n\nTAREA:\n{TASK.task}\n\nTESTS:\n{_tests_text()}\n\n"
                   f"ARCHIVOS YA ESCRITOS:\n{_joined(written) or '(ninguno)'}")
         code = one_file(strip_fence(out), f)
@@ -523,7 +552,7 @@ def test():
             files = state["plan_files"][:1]
         backup = {f: written[f] for f in files}
         for f in files:
-            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero. No toques tests_accept.",
+            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero. No toques los tests.",
                       f"Arregla {f}. Los tests NO se modifican.\n\nSALIDA:\n{log}\n\nTAREA:\n{TASK.task}\n\n"
                       f"TESTS:\n{_tests_text()}\n\nARCHIVOS:\n{_joined(written)}")
             code = one_file(strip_fence(out), f)
@@ -552,6 +581,15 @@ def test():
             rec_gate("avance", False, f"stall={state['stall']} novedad={nov}: escala a reasoner")
             break
     state["test_fix_rounds"] = state.get("test_fix_rounds", 0) + vueltas
+    if ok and FEAT:
+        sok, slog = sh([PY, "-m", "pytest", *FEAT["suite"]])
+        rec_gate("suite-total", sok, "verde" if sok else slog[-600:])
+        if not sok:
+            write_supervision(f"ESCALATE_HUMAN: aceptacion verde pero suite total roja\n{slog[-1500:]}")
+            return False, "suite total roja: escala a humano"
+        state["suite_total"] = test_counts(slog)
+        rec_gate("G4-aceptacion", True, f"verde en {vueltas} vueltas + suite total")
+        return True, f"G4 + suite ok ({vueltas} vueltas)"
     if ok:
         state["suite_total"] = test_counts(log)
         rec_gate("G4-aceptacion", True, f"verde en {vueltas} vueltas")
@@ -619,13 +657,27 @@ def pr():
 
 
 if __name__ == "__main__":
-    TASK = bench.get_task(TASK_NAME)
-    CONTRACT = CONTRACTS.get(TASK_NAME, [])
+    if FEAT:
+        import types
+        TASK = types.SimpleNamespace(name=TASK_NAME, task=FEAT["task"],
+                                    accept_files={rel: pathlib.Path(src).read_text(encoding="utf-8") for rel, src in FEAT["accept"].items()})
+        CONTRACT = FEAT["contract"]
+    else:
+        TASK = bench.get_task(TASK_NAME)
+        CONTRACT = CONTRACTS.get(TASK_NAME, [])
     if "--self-check" in sys.argv:
         sys.exit(self_check())
     if not (WT / ".git").exists():
         WT.parent.mkdir(parents=True, exist_ok=True)
-        bench.materialize(TASK, str(WT))
+        if FEAT:
+            subprocess.run(["git", "-C", FEAT["repo"], "worktree", "add", "-q", "-b", f"sdlc/{PHASE}", str(WT), "HEAD"], check=True)
+            for rel, content in TASK.accept_files.items():
+                _write(rel, content)
+            subprocess.run(["git", "add", "-A"], cwd=WT, check=True)
+            subprocess.run(["git", "-c", "user.name=map12", "-c", "user.email=map12082004@gmail.com", "commit", "-q", "-m",
+                            f"sdlc: test de aceptacion {TASK_NAME} (rojo por diseño)"], cwd=WT, check=True)
+        else:
+            bench.materialize(TASK, str(WT))
         print("materializado", WT, flush=True)
     gi = WT / ".gitignore"
     if not gi.exists():
@@ -636,7 +688,7 @@ if __name__ == "__main__":
     from_stage = float(_arg("--from-stage", "2"))
     if from_stage > 3:
         plan_md = (WT / "docs/sdlc/plan.md").read_text(encoding="utf-8")
-        state["plan_files"] = [f for f in dict.fromkeys(re.findall(PY_RE, plan_md)) if not f.startswith("tests_accept/")]
+        state["plan_files"] = [f for f in dict.fromkeys(re.findall(PY_RE, plan_md)) if not f.startswith(TESTS_PREFIX)]
     for t in TPL.glob("*.md"):  # convencion por repo (ticket 11): las plantillas viajan con el repo
         _write(f"docs/sdlc/{t.name}", t.read_text(encoding="utf-8"))
     stages = {2: spec, 2.5: spec_review, 3: plan, 4: build, 5: test, 5.5: review, 6: pr}
