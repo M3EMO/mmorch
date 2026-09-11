@@ -1,0 +1,8 @@
+materializado C:\Users\map12\Desktop\Claude\sdlc-runs\rate-limiter-r2
+[2-spec] ok=True G1 ok (1 llamadas, 0.4 min)
+[3-plan] ok=True ['limiter/core.py', 'limiter/multi.py', 'limiter/__init__.py'] (1 llamadas, 0.1 min)
+[4-build] ok=True G3 + test-compile ok (3 llamadas, 0.6 min)
+[5-test] ok=True G4 ok (0 vueltas) (0 llamadas, 0.0 min)
+[5b-review] ok=True sin test nuevo: Revisé el diff contra `spec.md`, línea por línea. Verifiqué orden de recarga, cap con `min`, casos `elapsed<=0`, `capaci (0 llamadas, 0.8 min)
+[6-pr] ok=True  12 files changed, 380 insertions(+) (0 llamadas, 0.0 min)
+DRIVER_PY TERMINO {"task": "rate-limiter", "calls": 5, "minutes_total": 1.97, "usd": 0.0268, "usd_by_family": {"deepseek": 0.0268}, "human_interventions": 0, "claude_calls": 1, "review_block": null, "escalated_to_claude": false, "gate_rejects": [], "diffstat": " 12 files changed, 380 insertions(+)", "lines": {"added": 47, "deleted": 0}, "suite_total": {"run": 3, "failed": 0}, "lint_new": {"ruff": 0, "mypy": 0}}

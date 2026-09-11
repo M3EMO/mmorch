@@ -1,0 +1,158 @@
+{
+ "proto": "driver_py",
+ "task": "rate-limiter",
+ "stages": [
+  {
+   "stage": "2-spec",
+   "ok": true,
+   "minutes": 0.42,
+   "calls": 1,
+   "note": "G1 ok"
+  },
+  {
+   "stage": "3-plan",
+   "ok": true,
+   "minutes": 0.06,
+   "calls": 1,
+   "note": "['limiter/core.py', 'limiter/multi.py', 'limiter/__init__.py']"
+  },
+  {
+   "stage": "4-build",
+   "ok": true,
+   "minutes": 0.59,
+   "calls": 3,
+   "note": "G3 + test-compile ok"
+  },
+  {
+   "stage": "5-test",
+   "ok": true,
+   "minutes": 0.03,
+   "calls": 0,
+   "note": "G4 ok (0 vueltas)"
+  },
+  {
+   "stage": "5b-review",
+   "ok": true,
+   "minutes": 0.84,
+   "calls": 0,
+   "note": "sin test nuevo: Revisé el diff contra `spec.md`, línea por línea. Verifiqué orden de recarga, cap con `min`, casos `elapsed<=0`, `capaci"
+  },
+  {
+   "stage": "6-pr",
+   "ok": true,
+   "minutes": 0.04,
+   "calls": 0,
+   "note": " 12 files changed, 380 insertions(+)"
+  }
+ ],
+ "gates": [
+  {
+   "id": "G1-spec-contrato",
+   "ok": true,
+   "detail": "contrato cubierto, sin TBD",
+   "calls": 1
+  },
+  {
+   "id": "plan-allowlist",
+   "ok": true,
+   "detail": "['limiter/core.py', 'limiter/multi.py', 'limiter/__init__.py']",
+   "calls": 2
+  },
+  {
+   "id": "un-archivo",
+   "ok": true,
+   "detail": "limiter/core.py: recorte de ['limiter/core.py', 'limiter/multi.py', 'limiter/__init__.py']",
+   "calls": 3
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 4
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 5
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 5
+  },
+  {
+   "id": "test-compile",
+   "ok": true,
+   "detail": "ok",
+   "calls": 5
+  },
+  {
+   "id": "G4-aceptacion",
+   "ok": true,
+   "detail": "verde en 0 vueltas",
+   "calls": 5
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 5
+  },
+  {
+   "id": "claude-diff-review",
+   "ok": true,
+   "detail": "sin test nuevo: Revisé el diff contra `spec.md`, línea por línea. Verifiqué orden de recarga, cap con `min`, casos `elapsed<=0`, `capaci",
+   "calls": 5
+  }
+ ],
+ "calls": 5,
+ "human_interventions": 0,
+ "claude_calls": 1,
+ "gate_rejects": [],
+ "escalated_to_claude": false,
+ "t0": "2026-09-11 16:15:07",
+ "t0_epoch": 1789154107.6894808,
+ "usd_by_family": {
+  "deepseek": 0.0268
+ },
+ "plan_files": [
+  "limiter/core.py",
+  "limiter/multi.py",
+  "limiter/__init__.py"
+ ],
+ "test_rounds": [
+  {
+   "round": 0,
+   "tests": {
+    "run": 3,
+    "failed": 0
+   }
+  }
+ ],
+ "stall": 0,
+ "test_fix_rounds": 0,
+ "suite_total": {
+  "run": 3,
+  "failed": 0
+ },
+ "diffstat": " 12 files changed, 380 insertions(+)",
+ "lines": {
+  "added": 47,
+  "deleted": 0
+ },
+ "lint_new": {
+  "ruff": 0,
+  "mypy": 0
+ },
+ "mutation_score": null,
+ "minutes_total": 1.97,
+ "usd": 0.0268
+}
