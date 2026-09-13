@@ -14,6 +14,9 @@ production behaviour, cero Claude cupo (cheap external models do the roles):
               feedback (you cannot manufacture ground truth for an untested unit — honest ceiling).
   integrate_fn = run the level's external acceptance test on the ASSEMBLED whole (green units do not
               prove a green whole). Red -> F2 returns 'integration_failed' (surfaced, never silent).
+              A `compile_cmd` gate (test-compile, D2) runs INSIDE integrate_fn, before the external
+              test — a compile/syntax break fails fast, fail-closed, without spending the acceptance
+              run.
   commit_fn = commit each built+verified LEAF to a git worktree branch (per-unit -> git-bisect).
 
 The single entry is build_project(). Every model/exec/commit boundary is injectable so the wiring
@@ -27,9 +30,12 @@ import shlex
 import subprocess
 from typing import Callable
 
+from .checkers import CheckResult
 from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER, family_of
 from .project_build import decompose, validate_test_cmd
 from .project_driver import run_project_build
+
+_COMPILE_TIMEOUT_S: float = 120.0
 
 
 def _file_of(unit: dict) -> str:
@@ -228,6 +234,15 @@ def _default_commit(repo: str):
     return commit
 
 
+def _default_compile(repo: str, compile_cmd: str) -> CheckResult:
+    """Default `run_compile`: run `compile_cmd` in `repo`; passed = returncode 0 (test-compile gate).
+    A timeout is NOT caught (spec R5/P1) — it propagates as subprocess.TimeoutExpired."""
+    p = subprocess.run(compile_cmd, cwd=repo, shell=True, capture_output=True, text=True,  # noqa: S602
+                       encoding="utf-8", errors="replace", timeout=_COMPILE_TIMEOUT_S)
+    raw = (p.stdout + p.stderr).strip() or f"returncode={p.returncode}"
+    return CheckResult(p.returncode == 0, raw[-2000:], "test_compile")
+
+
 # --- the wiring: bind seams over shared state, then drive F2 ------------------------------------- #
 def build_project(task: str, repo: str, *, external_test: str | None,
                   gen_model: str = DEFAULT_GENERATOR, verifier_model: str = DEFAULT_VERIFIER,
@@ -241,10 +256,18 @@ def build_project(task: str, repo: str, *, external_test: str | None,
                   propose_test: Callable[[str, str], str] | None = None,
                   integrate: Callable[[str, list], tuple[bool, str]] | None = None,
                   commit: Callable[[str, dict], None] | None = None,
-                  write_file: Callable[[dict, str], None] | None = None) -> dict:
+                  write_file: Callable[[dict, str], None] | None = None,
+                  compile_cmd: str | None = None,
+                  run_compile: Callable[[str], CheckResult] | None = None) -> dict:
     """Build `task` in `repo` via the recursive engine, cero cupo. `external_test` = the real
     acceptance command (the integration gate at depth 0). All boundary fns default to production
     (providers.call / subprocess / checkers / worktree) and are injectable for the self-check.
+
+    `compile_cmd` (D2): a test-compile gate that runs INSIDE the integration gate, BEFORE
+    `integrate`/`external_test`. `run_compile(compile_cmd) -> CheckResult` (default: subprocess in
+    `repo`, passed = returncode 0). A red gate fails closed — 'integration_failed' with detail
+    'test-compile: <detail>', and `integrate` is never called. No `compile_cmd` -> unchanged behaviour.
+
     Returns F2's result tree plus {'unverified': [names deferred to the integration gate]}."""
     if family_of(gen_model) == family_of(verifier_model):
         raise ValueError(f"coder and cold verifier must be cross-family: {gen_model}/{verifier_model} "
@@ -287,6 +310,7 @@ def build_project(task: str, repo: str, *, external_test: str | None,
     integrate = integrate or _default_integrate(repo)
     commit = commit if commit is not None else _default_commit(repo)
     write_file = write_file or _default_write_file(repo)
+    _run_compile = run_compile or (lambda cmd: _default_compile(repo, cmd))
 
     cold_feedback: dict[str, str] = {}   # the cold verifier's counterexample -> next hot coder attempt
     unverified: list[str] = []           # units passed as 'unverified' (deferred to integration)
@@ -369,6 +393,13 @@ def build_project(task: str, repo: str, *, external_test: str | None,
         return True, "unverified (no test_cmd; correctness deferred to the integration gate)"
 
     def integrate_fn(ext: str, results: list) -> tuple[bool, str]:
+        # test-compile gate (D2): runs BEFORE the acceptance test, fail-closed — `integrate` is not
+        # called at all if it's red, so a build that doesn't even compile never spends the (usually
+        # slower/pricier) acceptance run.
+        if compile_cmd:
+            cres = _run_compile(compile_cmd)
+            if not cres.passed:
+                return False, f"test-compile: {cres.detail}"
         iok, idetail = integrate(ext, results)
         _learn(1.0 if iok else 0.0, task)          # the whole-assembly verdict is a signal too
         return iok, idetail
@@ -433,6 +464,13 @@ if __name__ == "__main__":
     #    AND its code must LAND on disk (F4 round-1 bug: only run_test wrote -> integration saw nothing).
     committed: list = []
     written: dict = {}
+
+    def _collect_commit(name: str, result: dict) -> None:
+        committed.append(name)
+
+    def _collect_write(unit: dict, code: str) -> None:
+        written[unit.get("file")] = code
+
     r3 = build_project("top", REPO, external_test="ACCEPT",
                        plan=lambda t, e: [{"name": "u", "spec": "s", "deps": [], "file": "pkg/u.py"}],
                        gen=lambda u, fb: "def u():\n    return 1",
@@ -440,8 +478,8 @@ if __name__ == "__main__":
                        run_snippet=lambda c, a: (False, "probe failed"),   # probe FAILS -> advisory
                        propose_test=lambda c, s: "assert u() == 2",
                        integrate=lambda e, rs: (True, "accept green"),
-                       commit=lambda n, rr: committed.append(n),
-                       write_file=lambda u, c: written.__setitem__(u.get("file"), c))
+                       commit=_collect_commit,
+                       write_file=_collect_write)
     assert r3["status"] == "built" and r3["unverified"] == ["u"], r3   # passed, but honestly unverified
     assert committed == ["u"], committed                              # a leaf still commits
     assert "pkg/u.py" in written and "def u()" in written["pkg/u.py"], written  # the code LANDED
@@ -500,6 +538,33 @@ if __name__ == "__main__":
     # 9. provenance siempre presente (atribución del futuro prompt-bootstrap)
     assert r3["provenance"]["gen_model"] and len(r3["provenance"]["coder_sys"]) == 12, r3["provenance"]
 
+    # 10. test-compile gate (D2): red -> integration_failed, fail-closed, `integrate` never called.
+    compile_calls: list = []
+    def _integrate_spy(e, rs):
+        compile_calls.append(e)
+        return True, "verde"
+
+    r10 = build_project("top", REPO, external_test="ACCEPT",
+                        plan=lambda t, e: [{"name": "u", "spec": "s", "deps": []}],
+                        gen=lambda u, fb: "def u():\n    return 1",
+                        run_test=lambda u, c, tc: (True, ""), run_snippet=lambda c, a: (True, ""),
+                        propose_test=lambda c, s: "",
+                        integrate=_integrate_spy,
+                        commit=lambda n, rr: None, compile_cmd="python -m compileall .",
+                        run_compile=lambda cmd: CheckResult(False, "boom", "test_compile"))
+    assert r10["status"] == "integration_failed", r10
+    assert r10["detail"] == "test-compile: boom" and compile_calls == [], r10
+    # green compile -> integrate DOES run, behaviour otherwise unchanged.
+    r11 = build_project("top", REPO, external_test="ACCEPT",
+                        plan=lambda t, e: [{"name": "u", "spec": "s", "deps": []}],
+                        gen=lambda u, fb: "def u():\n    return 1",
+                        run_test=lambda u, c, tc: (True, ""), run_snippet=lambda c, a: (True, ""),
+                        propose_test=lambda c, s: "",
+                        integrate=_integrate_spy,
+                        commit=lambda n, rr: None, compile_cmd="python -m compileall .",
+                        run_compile=lambda cmd: CheckResult(True, "ok", "test_compile"))
+    assert r11["status"] == "built" and compile_calls == ["ACCEPT"], r11
+
     print("project_integrate F3 OK — hot coder loop, integration gate, unverified ceiling, "
           "deterministic floor, cross-family guard, escalate, planner-error surfaced, "
-          "call-breaker, provenance")
+          "call-breaker, provenance, test-compile gate (D2)")
