@@ -1,0 +1,232 @@
+{
+ "proto": "driver_py",
+ "task": "D2",
+ "stages": [
+  {
+   "stage": "5-test",
+   "ok": true,
+   "minutes": 4.39,
+   "calls": 0,
+   "note": "G4 + suite ok (0 vueltas)"
+  },
+  {
+   "stage": "5b-review",
+   "ok": true,
+   "minutes": 2.03,
+   "calls": 0,
+   "note": "bloqueo con evidencia"
+  },
+  {
+   "stage": "5-test",
+   "ok": true,
+   "minutes": 7.84,
+   "calls": 6,
+   "note": "G4 + suite ok (3 vueltas)"
+  },
+  {
+   "stage": "6-pr",
+   "ok": true,
+   "minutes": 0.2,
+   "calls": 0,
+   "note": " 10 files changed, 576 insertions(+), 6 deletions(-)"
+  }
+ ],
+ "gates": [
+  {
+   "id": "lint",
+   "ok": true,
+   "detail": "0/0",
+   "calls": 0
+  },
+  {
+   "id": "suite-total",
+   "ok": true,
+   "detail": "sin fallos nuevos",
+   "calls": 0
+  },
+  {
+   "id": "G4-aceptacion",
+   "ok": true,
+   "detail": "verde en 0 vueltas + lint + suite total",
+   "calls": 0
+  },
+  {
+   "id": "diff-review-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 0
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 0
+  },
+  {
+   "id": "claude-diff-review",
+   "ok": false,
+   "detail": "test_review falla: vuelve a build. El test nuevo falla contra el diff. Confirma el defecto. El test existente pasa. El error de pathlib al final es cleanup",
+   "calls": 0
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 2
+  },
+  {
+   "id": "G3-compile",
+   "ok": false,
+   "detail": "  File \"mmorch/project_integrate.py\", line 1\n    block, no explanation.\")\n                          ^\nSyntaxError: unterminated string literal (detected at line 1)\n",
+   "calls": 2
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 4
+  },
+  {
+   "id": "G3-compile",
+   "ok": false,
+   "detail": "  File \"mmorch/project_integrate.py\", line 1\n    block, no explanation.\")\n                          ^\nSyntaxError: unterminated string literal (detected at line 1)\n",
+   "calls": 4
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 6
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 6
+  },
+  {
+   "id": "test-compile",
+   "ok": true,
+   "detail": "ok",
+   "calls": 6
+  },
+  {
+   "id": "regresion-unidad",
+   "ok": true,
+   "detail": "['mmorch/project_integrate.py']: 1000000 -> 0 fallos",
+   "calls": 6
+  },
+  {
+   "id": "lint",
+   "ok": true,
+   "detail": "0/0",
+   "calls": 6
+  },
+  {
+   "id": "suite-total",
+   "ok": true,
+   "detail": "sin fallos nuevos",
+   "calls": 6
+  },
+  {
+   "id": "G4-aceptacion",
+   "ok": true,
+   "detail": "verde en 3 vueltas + lint + suite total",
+   "calls": 6
+  },
+  {
+   "id": "lint",
+   "ok": true,
+   "detail": "0/0",
+   "calls": 6
+  }
+ ],
+ "calls": 6,
+ "human_interventions": 0,
+ "claude_calls": 1,
+ "gate_rejects": [
+  {
+   "gate": "claude-diff-review",
+   "detail": "test_review falla: vuelve a build. El test nuevo falla contra el diff. Confirma el defecto. El test existente pasa. El error de pathlib al final es cleanup"
+  },
+  {
+   "gate": "G3-compile",
+   "detail": "  File \"mmorch/project_integrate.py\", line 1\n    block, no explanation.\")\n                          ^\nSyntaxError: unterminated string literal (detected at line 1)\n"
+  },
+  {
+   "gate": "G3-compile",
+   "detail": "  File \"mmorch/project_integrate.py\", line 1\n    block, no explanation.\")\n                          ^\nSyntaxError: unterminated string literal (detected at line 1)\n"
+  }
+ ],
+ "escalated_to_claude": false,
+ "t0": "2026-09-13 19:07:00",
+ "t0_epoch": 1789337220.3687656,
+ "plan_files": [
+  "mmorch/project_integrate.py"
+ ],
+ "test_rounds": [
+  {
+   "round": 0,
+   "tests": {
+    "run": 4,
+    "failed": 0
+   }
+  },
+  {
+   "round": 0,
+   "tests": {
+    "run": 5,
+    "failed": 1
+   }
+  },
+  {
+   "round": 1,
+   "files": [
+    "mmorch/project_integrate.py"
+   ],
+   "reverted": "gate"
+  },
+  {
+   "round": 2,
+   "files": [
+    "mmorch/project_integrate.py"
+   ],
+   "reverted": "gate"
+  },
+  {
+   "round": 3,
+   "files": [
+    "mmorch/project_integrate.py"
+   ],
+   "tests": {
+    "run": 5,
+    "failed": 0
+   },
+   "novelty": 1.0
+  }
+ ],
+ "stall": 0,
+ "test_fix_rounds": 3,
+ "lint_new": {
+  "ruff": 0,
+  "mypy": 0
+ },
+ "suite_total": {
+  "run": 1129,
+  "failed": 4,
+  "new_failures": [],
+  "baseline_failures": 7
+ },
+ "review_block": true,
+ "usd_by_family": {
+  "deepseek": 0.1639
+ },
+ "diffstat": " 10 files changed, 576 insertions(+), 6 deletions(-)",
+ "lines": {
+  "added": 69,
+  "deleted": 4
+ },
+ "mutation_score": null,
+ "minutes_total": 14.46,
+ "usd": 0.164
+}

@@ -81,6 +81,7 @@ CONTRACTS = {
                      "limiter/core.py", "limiter/multi.py", "limiter/__init__.py"],
     "etl-pipeline": ["parse_lines", "normalize", "to_summary", "run", "maxsplit", "count", "total", "by_name",
                      "etl/extract.py", "etl/transform.py", "etl/load.py", "etl/__init__.py"],
+    "lru-ttl-cache": ["LRUCache", "maxsize", "ttl_s", "get", "put", "now", "None", "cache/core.py", "cache/__init__.py"],
 }
 
 
