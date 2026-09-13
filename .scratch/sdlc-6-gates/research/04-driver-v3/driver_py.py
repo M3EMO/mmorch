@@ -529,16 +529,27 @@ def plan():
            f"[P] marca archivos que NO importan a otros del plan (paralelizables); los demas van en orden de dependencia. "
            f"'## Prueba' = `python -m pytest {' '.join(_accept_paths())} -q`.\n\nSPEC:\n{spec_md}")
     out = llm(WRITER, "Sos un tech lead. Escribis planes ejecutables. NO regeneres los tests.", ask)
-    _write("docs/sdlc/plan.md", out)
-    m = re.search(r"## Archivos\b(.*?)(?:\n## |\Z)", out, re.S | re.I)
-    block = m.group(1) if m else out
-    files = [f for f in dict.fromkeys(re.findall(PY_RE, block)) if not f.startswith(TESTS_PREFIX)]
-    state["plan_files"] = files
-    state["plan_parallel"] = [f for f in files if re.search(rf"{re.escape(f)}`?[^\n]*\[P\]", block)]  # ticket 05 lo ejecuta en paralelo
-    ok, note = gate_plan_allowlist(out, files)
-    if ok:
-        ok, note = gate_traza_plan(spec_md, block, files)
+    for intento in range(2):  # D2 r1: una reescritura con el motivo del gate, como en spec
+        _write("docs/sdlc/plan.md", out)
+        m = re.search(r"## Archivos\b(.*?)(?:\n## |\Z)", out, re.S | re.I)
+        block = m.group(1) if m else out
+        files = _plan_files(block)
+        state["plan_files"] = files
+        state["plan_parallel"] = [f for f in files if re.search(rf"{re.escape(f)}`?[^\n]*\[P\]", block)]  # ticket 05 lo ejecuta en paralelo
+        ok, note = gate_plan_allowlist(out, files)
+        if ok:
+            ok, note = gate_traza_plan(spec_md, block, files)
+        if ok or intento:
+            return ok, note
+        out = llm(WRITER, "Sos un tech lead. Reescribis el plan completo con el formato obligatorio.",
+                  f"Este plan fallo el gate: {note}. Corregilo.\n\nPLAN ACTUAL:\n{out}\n\nSPEC:\n{spec_md}")
     return ok, note
+
+
+def _plan_files(block: str) -> list[str]:
+    """Archivos del plan = SOLO los items de la lista (D2 r1: una mencion en prosa 'sin tocar X.py' se colaba)."""
+    items = re.findall(r"(?m)^\s*[-*]\s*`?((?:\w+/)*\w+\.py)`?", block)
+    return [f for f in dict.fromkeys(items) if not f.startswith(TESTS_PREFIX)]
 
 
 @stage("4-build")
@@ -737,7 +748,8 @@ if __name__ == "__main__":
     from_stage = float(_arg("--from-stage", "2"))
     if from_stage > 3:
         plan_md = (WT / "docs/sdlc/plan.md").read_text(encoding="utf-8")
-        state["plan_files"] = [f for f in dict.fromkeys(re.findall(PY_RE, plan_md)) if not f.startswith(TESTS_PREFIX)]
+        m = re.search(r"## Archivos\b(.*?)(?:\n## |\Z)", plan_md, re.S | re.I)
+        state["plan_files"] = _plan_files(m.group(1) if m else plan_md)
     for t in TPL.glob("*.md"):  # convencion por repo (ticket 11): las plantillas viajan con el repo
         _write(f"docs/sdlc/{t.name}", t.read_text(encoding="utf-8"))
     stages = {2: spec, 2.5: spec_review, 3: plan, 4: build, 5: test, 5.5: review, 6: pr}
