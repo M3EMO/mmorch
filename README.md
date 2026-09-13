@@ -189,6 +189,35 @@ short of green with no gate to tell it so. Full write-up: `docs/ab-sdlc-2026-09-
 Next: the wayfinder map `.scratch/sdlc-6-gates/` (13 tickets) — the pipeline replaces the
 engine and becomes a per-repo convention.
 
+### 6-stage pipeline on the validation set (2026-09-11/13)
+
+Driver v3 (`.scratch/sdlc-6-gates/research/04-driver-v3/driver_py.py`): spec → Claude spec review
+(≤5 questions, from spec-kit `clarify`) → plan → build → test → Claude diff review → PR. Every
+gate is deterministic (contract tokens, R<n> traceability, plan allowlist, py_compile,
+collect-only, per-unit regression, progress caps, scope of each Claude pass, lint, full-suite
+regression by test name) except the two fixed Claude reviews, which may block ONLY by leaving a
+failing test. Escalation: 3 fix rounds → deepseek-reasoner ×2 → Claude → human. Coder
+deepseek-v4-pro, writer deepseek-reasoner. Protocol and win criterion: ticket 07.
+
+| feature | runs | green | USD (median) | wall min | max level | Claude blocked with a test | human |
+|---|---|---|---|---|---|---|---|
+| S2 `rate-limiter` (old engine: 0/3) | 5 | 5/5 | 0.03 | 2-3 | 0 | 0 | 0 |
+| D3 stuck detector in `build_unit` (mmorch itself) | 1 | 1/1 | 0.04 | 34 (25 = full suite ×2) | 0 | 0 (one NOTE, no test) | 0 |
+| S3 `etl-pipeline` (3 cross-importing modules) | 1 | 1/1 | 0.04 | 6 | 0 | 0 | 0 |
+| D2 `test-compile` gate in `build_project` (mmorch itself) | 1 | 1/1 | 0.84 | ~60 | 3 | **2, both real** | 0 |
+| S1 `lru-ttl-cache` (held-out, run once, last) | 1 | 1/1 | 0.02 | 4 | 0 | 0 | 0 |
+
+D1 (`gen_model` reaches the recursion) was already green at baseline — its acceptance test
+stays as a regression test, no run. Verdict against ticket 07: 6/6 green including the
+held-out, median US$0.037 per feature, 0 human interventions before level 4 — the pipeline
+**wins**. D2 is the only expensive one, and the cost was a driver defect: the target file
+contains "```" inside a string and the fence stripper cut it, which pushed the ladder to Claude
+twice. The runs surfaced 9 driver defects, all caught by deterministic gates at US$0. The fixed
+Claude diff review caught 0 defects in 8 small runs and 2 real ones (a swallowed timeout, an
+empty detail) in the one hard run. Per-run logs and findings:
+`.scratch/sdlc-6-gates/research/07-resultados.md`. D2/D3 PRs sit on branches
+`sdlc/sdlc-D2-r1`, `sdlc/sdlc-D3-r1b` (not merged).
+
 ## What's here
 
 <!-- mmorch:auto:stats -->

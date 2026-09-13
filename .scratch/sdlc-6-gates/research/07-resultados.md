@@ -14,6 +14,16 @@ Run-logs: `04-driver-v3/run-log-sdlc-<task>-r<n>.json`. Worktrees: `Desktop/Clau
 | D3 atasco (mmorch) | r1 | si | 0.0374 | 34 (25 de suite total) | 0 | suite-total x2 (baseline mal medido, driver) | 0 (NOTE sin test: zona gris fuera de R1-R5) | +9 / -1 | 1126 sin fallos nuevos | 0/0 | 0 |
 | etl-pipeline (S3) | r1 | si | 0.0374 | 6.4 | 0 | ninguno | 0 (OK) | +42 / -0 | 3/3 | 0/1 | 0 |
 | D2 test-compile (mmorch) | r1 | si | 0.8369 | ~60 (4 intentos, 3 pasadas de suite) | 3 (Claude x2 + lint) | G3-compile x7, avance x1, lint x2, claude-diff-review x2, suite-total x1 (flaky) | 2 BLOCK con test (timeout capturado; detail vacio) | +69 / -4 | 1129 sin fallos nuevos | 0/0 | 0 |
+| lru-ttl-cache (S1, held-out) | r1 | si | 0.0187 | 4.3 | 0 | ninguno | 0 (OK, probo bordes a mano) | +32 / -0 | 3/3 | 0/0 | 0 |
+
+## Veredicto (criterio del ticket 07)
+
+- Verde en >= 5 de 6 incluida la held-out: **6/6** (S2 3/3, D3, S3, D2, S1; D1 ya verde en baseline, sin corrida).
+- Mediana de USD por feature < US$1: **US$0.037** (0.019 / 0.03 / 0.037 / 0.037 / 0.84).
+- Cero intervenciones humanas antes del nivel 4: **0** en todas las corridas.
+- Nivel maximo de escalacion: 3 (solo D2). Claude bloqueo con test 2 veces, ambas correctas (D2).
+- Defectos del driver encontrados por las corridas: 9, todos atrapados por gates deterministas a US$0 y corregidos.
+- El pipeline GANA contra el engine viejo (0/3 historico en S2). Cupo de Claude: 2 pasadas por corrida (spec + diff), mas 3 en D2.
 
 S2 cerrada: 3/3 verde, mediana US$0.03, 0 escalaciones, 0 humanos. Claude atrapo 0 defectos en 3 revisiones.
 D1 no se corrio: su test de aceptacion (`tests/test_project_driver.py`) ya pasa en el baseline; queda como regresion.
