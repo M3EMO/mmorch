@@ -1,0 +1,9 @@
+materializado C:\Users\map12\Desktop\Claude\sdlc-runs\etl-pipeline-r1
+[2-spec] ok=True G1 + trazabilidad-spec ok (2 llamadas, 0.9 min)
+[2b-spec-review] ok=True 12 IDs cubiertos (0 llamadas, 1.0 min)
+[3-plan] ok=True ok (1 llamadas, 0.1 min)
+[4-build] ok=True G3 + test-compile ok (4 llamadas, 0.4 min)
+[5-test] ok=True G4 ok (0 vueltas) (0 llamadas, 0.0 min)
+[5b-review] ok=True sin test nuevo: OK (0 llamadas, 3.9 min)
+[6-pr] ok=True  11 files changed, 417 insertions(+) (0 llamadas, 0.1 min)
+DRIVER_PY TERMINO {"task": "etl-pipeline", "calls": 7, "minutes_total": 6.43, "usd": 0.0374, "usd_by_family": {"deepseek": 0.0375}, "human_interventions": 0, "claude_calls": 2, "review_block": null, "escalated_to_claude": false, "gate_rejects": [], "diffstat": " 11 files changed, 417 insertions(+)", "lines": {"added": 42, "deleted": 0}, "suite_total": {"run": 3, "failed": 0}, "lint_new": {"ruff": 0, "mypy": 1}}

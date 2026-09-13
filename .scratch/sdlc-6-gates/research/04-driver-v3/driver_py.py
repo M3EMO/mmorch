@@ -48,6 +48,20 @@ FEATURES = {
         contract=["build_unit", "escalate", "atascado", "mmorch/project_driver.py"],
         suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
     ),
+    "D2": dict(
+        repo=r"C:\Users\map12\.claude\orchestration",
+        task=("Agrega un gate `test-compile` a `build_project` en mmorch/project_integrate.py, antes del `external_test` "
+              "de integracion. Nuevos parametros keyword: `compile_cmd: str | None = None` y `run_compile=None`. "
+              "`run_compile(compile_cmd)` devuelve un `CheckResult` de mmorch.checkers con checker='test_compile'; "
+              "el default corre `compile_cmd` con subprocess (shell=True, cwd=repo, timeout) y passed = returncode 0. "
+              "En `integrate_fn`: si `compile_cmd` esta declarado y el CheckResult no pasa, devolver "
+              "(False, 'test-compile: ' + detail) SIN llamar a `integrate` (fail-closed). Si pasa, sigue como hoy. "
+              "Sin `compile_cmd` nada cambia. Solo se modifica mmorch/project_integrate.py; no se tocan tests ni otros archivos."),
+        accept={"tests/test_sdlc_d2_test_compile.py": HERE / "accept/D2/tests/test_sdlc_d2_test_compile.py"},
+        contract=["build_project", "compile_cmd", "run_compile", "CheckResult", "test_compile", "integration_failed",
+                  "mmorch/project_integrate.py"],
+        suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
+    ),
 }
 FEAT = FEATURES.get(TASK_NAME)
 TESTS_PREFIX = "tests/" if FEAT else "tests_accept/"
