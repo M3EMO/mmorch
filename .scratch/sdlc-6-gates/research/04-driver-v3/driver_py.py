@@ -65,6 +65,8 @@ TPL = pathlib.Path(__file__).resolve().parent / "templates"  # spec-kit recortad
 CONTRACTS = {
     "rate-limiter": ["TokenBucket", "MultiLimiter", "allow", "capacity", "refill_per_s", "now", "key",
                      "limiter/core.py", "limiter/multi.py", "limiter/__init__.py"],
+    "etl-pipeline": ["parse_lines", "normalize", "to_summary", "run", "maxsplit", "count", "total", "by_name",
+                     "etl/extract.py", "etl/transform.py", "etl/load.py", "etl/__init__.py"],
 }
 
 
