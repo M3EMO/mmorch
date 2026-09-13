@@ -1,0 +1,1 @@
+etapa 5-test fallo: suite total: fallos nuevos: ['tests/test_providers.py::test_call_api_failure_logs_error_and_reraises', 'tests/test_providers.py::test_call_passes_timeout_and_maxtokens', 'tests/test_providers.py::test_call_success

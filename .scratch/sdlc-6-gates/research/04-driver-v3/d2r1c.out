@@ -1,0 +1,1 @@
+[5-test] ok=False suite total: fallos nuevos: ['tests/test_providers.py::test_call_api_failure_logs_error_and_reraises', 'tests/test_providers.py::test_call_passes_timeout_and_maxtokens', 'tests/test_providers.py::test_call_success (1 llamadas, 8.8 min)

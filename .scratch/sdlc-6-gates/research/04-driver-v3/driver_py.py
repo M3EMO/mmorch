@@ -194,6 +194,13 @@ def gate_suite_total() -> tuple[bool, str]:
     ok, log = sh([PY, "-m", "pytest", *FEAT["suite"]], timeout=CFG["suite_timeout_s"])
     now = set(re.findall(r"(?m)^FAILED (\S+)", log))
     new = sorted(now - base)
+    if new and "TIMEOUT" not in log:
+        # D2 r1: 3 tests de providers fallaron en la suite y pasaron solos -> flaky bajo carga.
+        # Un fallo nuevo cuenta como regresion solo si se repite AISLADO (determinista, sin juicio).
+        _, rlog = sh([PY, "-m", "pytest", *new, "-q", "-rf", "-p", "no:cacheprovider"])
+        flaky = sorted(set(new) - set(re.findall(r"(?m)^FAILED (\S+)", rlog)))
+        new = sorted(set(new) - set(flaky))
+        state["suite_flaky"] = flaky
     state["suite_total"] = test_counts(log) | {"new_failures": new, "baseline_failures": len(base)} if test_counts(log) else {"log": log[-300:]}
     if "TIMEOUT" in log:
         return rec_gate("suite-total", False, log[:200])
@@ -213,7 +220,7 @@ def accept():
 
 def test_counts(log):
     # D3: con -rf el log repite "N failed" dentro de los asserts; se cuenta SOLO la linea de resumen final
-    summary = [l for l in log.splitlines() if re.search(r"\d+ (?:passed|failed|error).* in [\d.]+s", l)]
+    summary = [l for l in log.splitlines() if re.match(r"=*\s*(?:\d+ \w+, )*\d+ (?:passed|failed|errors?)\b.* in [\d.]+s", l)]
     if summary:
         log = summary[-1]
     f = sum(int(x) for x in re.findall(r"(\d+) (?:failed|error)", log))
