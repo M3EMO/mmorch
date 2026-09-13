@@ -1,0 +1,5 @@
+[3-plan] ok=True ok (1 llamadas, 0.1 min)
+[4-build] ok=True G3 + test-compile ok (3 llamadas, 3.9 min)
+[5-test] ok=True Claude verde (8 llamadas, 9.0 min)
+[5b-review] ok=True bloqueo con evidencia (0 llamadas, 2.5 min)
+[5-test] ok=True Claude verde (10 llamadas, 5.8 min)

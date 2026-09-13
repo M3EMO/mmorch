@@ -146,6 +146,11 @@ def _flush():
 
 
 def strip_fence(t):
+    # D2 r1: project_integrate.py contiene "```" dentro de un string; el recorte perezoso cortaba el archivo.
+    # Se toma la valla EXTERIOR (primera apertura, ultimo cierre); sin valla, el texto entero.
+    m = re.match(r"\s*```(?:\w+)?\s*\n(.*)\n\s*```\s*$", t, re.S)
+    if m:
+        return m.group(1).strip()
     m = re.search(r"```(?:\w+)?\s*(.*?)```", t, re.S)
     return (m.group(1) if m else t).strip()
 
@@ -642,11 +647,27 @@ def test():
             break
     state["test_fix_rounds"] = state.get("test_fix_rounds", 0) + vueltas
     if ok and FEAT:
+        lok, lnote = gate_lint()
+        if not lok:  # D2 r1: el pre-commit del repo rechazo 2 errores de mypy; ahora es gate con escalera
+            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero.",
+                      f"ruff/mypy reportan errores nuevos. Corregi {state['plan_files'][0]} sin cambiar comportamiento.\n\n"
+                      f"ERRORES:\n{lnote}\n\nARCHIVOS:\n{_joined(_all_code())}")
+            code = one_file(strip_fence(out), state["plan_files"][0])
+            if code:
+                _write(state["plan_files"][0], code)
+            lok, lnote = gate_lint()
+            aok, _ = accept()
+            if not (lok and aok):
+                cok, cnote = claude_fix(f"ruff/mypy nuevos deben ser 0 y la aceptacion verde:\n{lnote}")
+                lok, lnote = gate_lint()
+                if not (cok and lok):
+                    write_supervision(f"ESCALATE_HUMAN: lint nuevo tras coder y Claude\n{lnote}")
+                    return False, f"lint: {lnote[:200]}"
         sok, snote = gate_suite_total()
         if not sok:
             write_supervision(f"ESCALATE_HUMAN: aceptacion verde pero suite total con regresion\n{snote}")
             return False, f"suite total: {snote[:200]}"
-        rec_gate("G4-aceptacion", True, f"verde en {vueltas} vueltas + suite total")
+        rec_gate("G4-aceptacion", True, f"verde en {vueltas} vueltas + lint + suite total")
         return True, f"G4 + suite ok ({vueltas} vueltas)"
     if ok:
         state["suite_total"] = test_counts(log)
@@ -699,19 +720,27 @@ def review():
 def pr():
     subprocess.run(["git", "add", "-A"], cwd=WT, check=True)
     subprocess.run(["git", "-c", "user.name=map12", "-c", "user.email=map12082004@gmail.com", "commit", "-q", "-m",
-                    f"sdlc: {TASK_NAME} — driver_py, gates + escalera + revision Claude"], cwd=WT, check=True)
+                    f"sdlc: {TASK_NAME} - driver_py, gates + escalera + revision Claude"], cwd=WT, check=True)
     ds = subprocess.run(["git", "diff", "--stat", "HEAD~1"], cwd=WT, capture_output=True, text=True).stdout
     state["diffstat"] = ds.strip().splitlines()[-1] if ds.strip() else ""
     ns = subprocess.run(["git", "diff", "--numstat", "HEAD~1", "--", *state["plan_files"]], cwd=WT, capture_output=True, text=True).stdout
     rows = [l.split("\t") for l in ns.splitlines() if l.count("\t") == 2 and l.split("\t")[0].isdigit()]
     state["lines"] = {"added": sum(int(a) for a, _, _ in rows), "deleted": sum(int(d) for _, d, _ in rows)}
-    pkg = sorted({f.split("/")[0] for f in state["plan_files"] if "/" in f}) or state["plan_files"]
-    _, rl = sh([PY, "-m", "ruff", "check", "--output-format", "concise", *pkg])
-    _, ml = sh([PY, "-m", "mypy", "--ignore-missing-imports", *pkg])
-    state["lint_new"] = {"ruff": len(re.findall(r"^\S+:\d+:\d+: ", rl, re.M)),
-                         "mypy": int((re.search(r"Found (\d+) error", ml) or [0, 0])[1])}
+    gate_lint()
     state["mutation_score"] = None  # ponytail: mutmut queda para el ticket 13
     return True, state["diffstat"]
+
+
+def gate_lint() -> tuple[bool, str]:
+    """ruff + mypy sobre los archivos del plan. Bench: paquete nuevo, baseline 0. Repo: el hook exige 0."""
+    files = state["plan_files"]
+    _, rl = sh([PY, "-m", "ruff", "check", "--output-format", "concise", *files])
+    _, ml = sh([PY, "-m", "mypy", "--ignore-missing-imports", *files])
+    ruff = len(re.findall(r"^\S+:\d+:\d+: ", rl, re.M))
+    mypy = int((re.search(r"Found (\d+) error", ml) or [0, 0])[1])
+    state["lint_new"] = {"ruff": ruff, "mypy": mypy}
+    detail = "0/0" if not (ruff or mypy) else (rl + "\n" + ml)[-1500:]
+    return rec_gate("lint", not (ruff or mypy), detail)
 
 
 if __name__ == "__main__":
