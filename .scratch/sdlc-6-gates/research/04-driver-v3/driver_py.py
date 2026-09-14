@@ -92,6 +92,23 @@ FEATURES = {
         contract=["mmorch_version", "PackageNotFoundError", "pyproject.toml", "tomllib", "repo_root", "mmorch/mcp_server.py"],
         suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
     ),
+    # Robustez por modulos (2026-09-14). Modulo 1: plugins (host + worker). Tests de modos de falla escritos por Claude.
+    "D6": dict(
+        repo=r"C:\Users\map12\.claude\orchestration",
+        task=("Robustez del modulo de plugins: `invoke()` en mmorch/plugins.py y el worker mmorch/plugin_worker.py nunca hacen "
+              "crashear al host por lo que haga el plugin. Tres requisitos: (R1) un plugin que imprime en stdout al IMPORTAR "
+              "(antes del redirect del worker) no corrompe el protocolo NDJSON: el worker redirige sys.stdout a stderr ANTES de "
+              "importar el entry, y el host ignora lineas que no parsean como JSON en vez de levantar JSONDecodeError. "
+              "(R2) si el timer de timeout mato al worker, el host devuelve {ok: False, error: 'plugin timeout after <t>s'} "
+              "(la palabra 'exited' NO aparece en ese caso). (R3) si el entry no importa (SyntaxError, ImportError, entry ausente), "
+              "el worker envia {type: 'error', error: 'load failed: <causa>'} por el protocolo y el host lo devuelve como "
+              "{ok: False, error: ...} sin decir 'timeout'. `_send` del host tolera BrokenPipeError devolviendo ok False. "
+              "Solo se modifican mmorch/plugins.py y mmorch/plugin_worker.py; no se tocan tests ni otros archivos."),
+        files=["mmorch/plugins.py", "mmorch/plugin_worker.py"],
+        accept={"tests/test_sdlc_d6_plugins_robustez.py": HERE / "accept/D6/tests/test_sdlc_d6_plugins_robustez.py"},
+        contract=["invoke", "timeout", "load failed", "JSONDecodeError", "BrokenPipeError", "mmorch/plugins.py", "mmorch/plugin_worker.py"],
+        suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
+    ),
 }
 FEAT = FEATURES.get(TASK_NAME)
 TESTS_PREFIX = "tests/" if FEAT else "tests_accept/"
