@@ -30,7 +30,8 @@ def _arg(flag, default):
 
 
 TASK_NAME = _arg("--task", "rate-limiter")
-WT = pathlib.Path(_arg("--wt", rf"C:\Users\map12\Desktop\Claude\sdlc-runs\{TASK_NAME}-r1"))
+# Worktrees FUERA de Desktop/Claude: codegraph indexa ese workspace (207 MB, 19 worktrees = 1.5 GB) y su MCP dejo de conectar.
+WT = pathlib.Path(_arg("--wt", rf"C:\Users\map12\AppData\Local\Temp\sdlc-runs\{TASK_NAME}-r1"))
 PHASE = _arg("--phase", f"sdlc-{TASK_NAME}-r1")
 HERE = pathlib.Path(__file__).resolve().parent
 
@@ -173,6 +174,20 @@ FEATURES = {
         files=["mmorch/workflow_engine.py"],
         accept={"tests/test_sdlc_d10_workflow_engine_validacion.py": HERE / "accept/D10/tests/test_sdlc_d10_workflow_engine_validacion.py"},
         contract=["validate_steps", "start_workflow", "ValueError", "loop_back", "block_id", "_GATES", "mmorch/workflow_engine.py"],
+        suite=["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
+    ),
+    # Hermeticidad: project_loop disparaba `codegraph init/index` reales en repos temporales (594 ERROR de suite).
+    "D11": dict(
+        repo=r"C:\Users\map12\.claude\orchestration",
+        task=("Hermeticidad de `_codegraph_context` en mmorch/project_loop.py. (R1) Si el repo NO tiene `.codegraph`, no se corre "
+              "`init` ni `index` salvo opt-in explicito: la variable MMORCH_CODEGRAPH_AUTOINDEX pasa a default '0' (hoy '1'); "
+              "sin opt-in la funcion devuelve '' sin tocar el repo. (R2) Aun con opt-in, si el repo esta bajo "
+              "`tempfile.gettempdir()` (comparar paths resueltos) no se indexa: devuelve ''. (R3) Si `.codegraph` ya existe, "
+              "`sync` y el resto siguen igual que hoy. Actualizar el docstring de la funcion para reflejar el default nuevo. "
+              "Solo se modifica mmorch/project_loop.py; no se tocan tests ni otros archivos; el docstring del modulo se conserva."),
+        files=["mmorch/project_loop.py"],
+        accept={"tests/test_sdlc_d11_codegraph_hermetico.py": HERE / "accept/D11/tests/test_sdlc_d11_codegraph_hermetico.py"},
+        contract=["_codegraph_context", "MMORCH_CODEGRAPH_AUTOINDEX", "gettempdir", "sync", "mmorch/project_loop.py"],
         suite=["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
     ),
 }

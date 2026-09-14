@@ -1,0 +1,14 @@
+All checks passed!
+mmorch\predict.py:51: note: By default the bodies of untyped functions are not checked, consider using --check-untyped-defs  [annotation-unchecked]
+mmorch\predict.py:52: note: By default the bodies of untyped functions are not checked, consider using --check-untyped-defs  [annotation-unchecked]
+Success: no issues found in 132 source files
+catalogo+README actualizados: bloques ['modules', 'tools', 'stats'] | {'modules': 129, 'tools': 47, 'tests': 901, 'tools_expuestas': 15}
+Traceback (most recent call last):
+  File "C:\Users\map12\.claude\orchestration\.scratch\sdlc-6-gates\research\04-driver-v3\driver_py.py", line 984, in <module>
+    stages[k]()
+  File "C:\Users\map12\.claude\orchestration\.scratch\sdlc-6-gates\research\04-driver-v3\driver_py.py", line 250, in run
+    print(f"[{name}] ok={ok} {note} ({state['calls'] - c0} llamadas, {(time.time() - t0) / 60:.1f} min)", flush=True)
+  File "C:\Users\map12\AppData\Local\Programs\Python\Python312\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2192' in position 96: character maps to <undefined>
