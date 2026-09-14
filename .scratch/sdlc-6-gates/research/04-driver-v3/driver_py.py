@@ -159,6 +159,22 @@ FEATURES = {
         contract=["request.json", "400", "404", "502", "rows", "cols", "forward", "mmorch/server_fleet.py", "mmorch/server_pty.py"],
         suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
     ),
+    # Modulo 4: workflow_engine. Validacion al cargar, como promete su docstring.
+    "D10": dict(
+        repo=r"C:\Users\map12\.claude\orchestration",
+        task=("Validacion al cargar en mmorch/workflow_engine.py: `start_workflow(steps, task)` valida los pasos y levanta "
+              "ValueError con mensaje claro antes de devolver estado. (R1) `steps` vacio o no lista -> ValueError con la palabra "
+              "'steps'. (R2) `gate` fuera de _GATES -> ValueError con 'gate' y el valor. (R3) `loop_back` presente pero negativo o "
+              ">= indice del propio step -> ValueError con 'loop_back'. (R4) step sin `role` (str no vacio) -> ValueError con 'role'. "
+              "(R5) `submit_workflow` en fase 'produce' con `block_id` None -> ValueError con 'block_id'. (R6) un workflow valido "
+              "se comporta exactamente como hoy; el self-check del `__main__` sigue pasando. Implementar la validacion en una "
+              "funcion `validate_steps(steps) -> None` llamada por `start_workflow`. Solo se modifica mmorch/workflow_engine.py; "
+              "no se tocan tests ni otros archivos; el docstring del modulo se conserva."),
+        files=["mmorch/workflow_engine.py"],
+        accept={"tests/test_sdlc_d10_workflow_engine_validacion.py": HERE / "accept/D10/tests/test_sdlc_d10_workflow_engine_validacion.py"},
+        contract=["validate_steps", "start_workflow", "ValueError", "loop_back", "block_id", "_GATES", "mmorch/workflow_engine.py"],
+        suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
+    ),
 }
 FEAT = FEATURES.get(TASK_NAME)
 TESTS_PREFIX = "tests/" if FEAT else "tests_accept/"
