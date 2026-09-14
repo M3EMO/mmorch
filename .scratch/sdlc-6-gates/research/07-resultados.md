@@ -24,6 +24,8 @@ Run-logs: `04-driver-v3/run-log-sdlc-<task>-r<n>.json`. Worktrees: `Desktop/Clau
 | D9 fleet/pty bordes (2 archivos) | r1 | si | 0.0932 | 17.9 | 0 | claude-diff-review x1 | 1 BLOCK con test (404 vs 502 por match de texto en cualquier error) | +49 / -12 | 1136, 0 nuevos, 0 errores | 0/0 | 0 |
 | D10 workflow_engine validacion | r1 | si | ~0.05 (2 intentos) | 26 (crash cp1252 en review + resume) | 0 | claude-diff-review x1 | 1 BLOCK con test (TypeError en vez de ValueError con loop_back None) | +33 / -10 | 1138, 0 nuevos | 0/0 | 0 |
 | D11 codegraph hermetico en project_loop | r1 (2 intentos) | si, suite final validada a mano | 0.29 | ~50 | 3 (suite rota -> coder -> Claude) | suite-total x2, claude-fix-alcance x1, claude-diff-review x1, G3-compile x5 | 1 BLOCK con test (which() antes del opt-in) | +25 / -9 | ver hallazgo | 0/0 | 0 |
+| D12 megasource al nightly (cableo) | r1 | si | 0.1273 | 25.7 | 0 | ninguno | 0 (OK) | ver run-log | sin fallos nuevos | 0/0 | 0 |
+| D13 / D14 (cableos) | r1 | NO: crash en spec | ~0 | 1 | - | - | - | - | - | - | 0 |
 
 ## Veredicto (criterio del ticket 07)
 

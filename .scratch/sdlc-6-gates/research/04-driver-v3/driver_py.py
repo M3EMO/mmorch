@@ -243,6 +243,20 @@ FEATURES = {
         contract=["effort", "model_for_effort", "schedule.is_off_peak", "off_peak", "log_event", "mmorch/providers.py"],
         suite=["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
     ),
+    # Robustez hallada en vivo (2026-09-14): la API devolvio un objeto sin `choices` y call() murio con TypeError.
+    "D15": dict(
+        repo=r"C:\Users\map12\.claude\orchestration",
+        task=("Robustez de `call` en mmorch/providers.py ante respuestas malformadas de la API. (R1) Si `resp.choices` es None "
+              "o vacio, levantar `RuntimeError` con mensaje que contenga 'respuesta sin choices' y el modelo; nunca dejar escapar "
+              "un TypeError. (R2) Antes de levantar, registrar el fallo con `log_event(...)` igual que los errores de API, con "
+              "error='EmptyResponse', error_msg con el modelo y error_class='empty_response'. (R3) Si `resp.usage` es None con "
+              "choices validos, in_tokens y out_tokens valen 0 y la llamada sigue normal. Conservar el resto byte a byte. "
+              "Solo se modifica mmorch/providers.py; no se tocan tests ni otros archivos; el docstring del modulo se conserva."),
+        files=["mmorch/providers.py"],
+        accept={"tests/test_sdlc_d15_providers_respuesta_vacia.py": HERE / "accept/D15/tests/test_sdlc_d15_providers_respuesta_vacia.py"},
+        contract=["choices", "respuesta sin choices", "EmptyResponse", "empty_response", "usage", "mmorch/providers.py"],
+        suite=["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
+    ),
 }
 FEAT = FEATURES.get(TASK_NAME)
 TESTS_PREFIX = "tests/" if FEAT else "tests_accept/"
