@@ -288,10 +288,11 @@ def sh(cmd: list[str], timeout: float | None = None, keep: int = 6000):
     return p.returncode == 0, (p.stdout + p.stderr)[-keep:]
 
 
-def _suite_args() -> list[str]:
-    """D8: el --basetemp compartido entre corridas dejo 594 ERROR de setup (dir de pytest corrupto/bloqueado en
-    Windows). Un basetemp por fase: la misma suite paso 1132/1134 con uno limpio."""
-    return [f"{a}-{PHASE}" if a.startswith(r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc") else a for a in FEAT["suite"]]
+def _suite_args(tag: str) -> list[str]:
+    """D8/D10: 594 ERROR de setup = pytest no puede borrar el --basetemp de la corrida ANTERIOR porque un proceso
+    hijo de algun test (codegraph.db abierto) sigue vivo y lo bloquea en Windows. Basetemp unico por corrida."""
+    stamp = f"{PHASE}-{tag}-{int(time.time())}"
+    return [f"{a}-{stamp}" if a.startswith(r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc") else a for a in FEAT["suite"]]
 
 
 def gate_suite_total() -> tuple[bool, str]:
@@ -305,7 +306,7 @@ def gate_suite_total() -> tuple[bool, str]:
         keep = {f: (WT / f).read_text(encoding="utf-8") for f in state["plan_files"] if (WT / f).exists()}
         subprocess.run(["git", "checkout", "HEAD", "--", *keep], cwd=WT, check=True)  # sin stash: la pila es compartida
         try:
-            _, blog = sh([PY, "-m", "pytest", *_suite_args()], timeout=CFG["suite_timeout_s"], keep=400000)
+            _, blog = sh([PY, "-m", "pytest", *_suite_args("base")], timeout=CFG["suite_timeout_s"], keep=400000)
         finally:
             for f, c in keep.items():
                 _write(f, c)
@@ -313,7 +314,7 @@ def gate_suite_total() -> tuple[bool, str]:
         base_file.write_text("\n".join(re.findall(r"(?m)^(?:FAILED|ERROR) \S+", blog)) + "\n", encoding="utf-8")
     # D8: la suite del worktree traia 594 ERROR (setup) que el gate no miraba porque solo leia FAILED.
     base = set(re.findall(r"(?m)^(?:FAILED|ERROR) (\S+)", base_file.read_text(encoding="utf-8")))
-    ok, log = sh([PY, "-m", "pytest", *_suite_args()], timeout=CFG["suite_timeout_s"], keep=400000)
+    ok, log = sh([PY, "-m", "pytest", *_suite_args("final")], timeout=CFG["suite_timeout_s"], keep=400000)
     _write("docs/sdlc/suite.log", log)
     now = set(re.findall(r"(?m)^(?:FAILED|ERROR) (\S+)", log))
     new = sorted(now - base)
@@ -937,6 +938,8 @@ def gate_lint() -> tuple[bool, str]:
 
 
 if __name__ == "__main__":
+    for _s in (sys.stdout, sys.stderr):  # D10: la consola cp1252 tiro UnicodeEncodeError por un "->" de Claude
+        _s.reconfigure(encoding="utf-8", errors="replace")
     if FEAT:
         import types
         TASK = types.SimpleNamespace(name=TASK_NAME, task=FEAT["task"],
