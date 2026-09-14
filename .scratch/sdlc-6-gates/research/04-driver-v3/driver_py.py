@@ -262,7 +262,10 @@ FEAT = FEATURES.get(TASK_NAME)
 TESTS_PREFIX = "tests/" if FEAT else "tests_accept/"
 MAX_FIX = int(_arg("--max-fix", "3"))
 REASONER_TRIES = 2
-WRITER, CODER = "deepseek-reasoner", "deepseek-v4-pro"
+# 2026-09-14 15:18: el tier flash de DeepSeek (chat/reasoner) dejo de responder y v4-pro siguio en 1.4 s.
+# Override por env para no cambiar el protocolo (ticket 07) en el codigo: SDLC_WRITER=deepseek-v4-pro.
+WRITER = os.environ.get("SDLC_WRITER", "deepseek-reasoner")
+CODER = os.environ.get("SDLC_CODER", "deepseek-v4-pro")
 PY = sys.executable
 LOG = WT / "docs" / "sdlc" / "run-log.json"
 METRICS = pathlib.Path(r"C:\Users\map12\.claude\orchestration\logs\metrics.jsonl")
