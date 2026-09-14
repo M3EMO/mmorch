@@ -1,2 +1,6 @@
 materializado C:\Users\map12\Desktop\Claude\sdlc-runs\D4-r2
 [2-spec] ok=True G1 + trazabilidad-spec ok (1 llamadas, 0.9 min)
+[2b-spec-review] ok=True 4 IDs cubiertos (0 llamadas, 0.9 min)
+[3-plan] ok=True ok (1 llamadas, 0.0 min)
+[4-build] ok=True G3 + test-compile + docstring ok (2 llamadas, 0.9 min)
+[5-test] ok=True G4 + suite ok (0 vueltas) (0 llamadas, 7.2 min)

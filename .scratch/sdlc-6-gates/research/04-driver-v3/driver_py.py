@@ -109,6 +109,23 @@ FEATURES = {
         contract=["invoke", "timeout", "load failed", "JSONDecodeError", "BrokenPipeError", "mmorch/plugins.py", "mmorch/plugin_worker.py"],
         suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
     ),
+    "D7": dict(
+        repo=r"C:\Users\map12\.claude\orchestration",
+        task=("Cablear `try_automerge` (mmorch/automerge.py, hoy sin caller vivo: lo marca tests/test_no_museum.py) en "
+              "mmorch/auto_apply.py. En `_finish_merge`, cuando `merge_sha` es None: importar a nivel de modulo "
+              "`from .automerge import try_automerge` y llamar `try_automerge(str(runtime.path), state['branch'], "
+              "base=state['base_sha'], source='auto_apply')`. Si el resultado trae `merged` True, usar su `merge_sha` y seguir "
+              "como hoy (advance a 'merged' y 'observing'). Si `merged` es False y tanto `state.get('zone')` como el `zone` del "
+              "resultado son 'yellow', conservar el merge directo actual con `_git(... 'merge' ...)` (carril amarillo acotado). "
+              "En cualquier otro rechazo, `_halt(store, reason=f\"automerge {r.get('veredicto')}: {r.get('reason', '')}\", "
+              "expected='candidate')`. Con `merge_sha` dado no se llama al semaforo. Solo se modifica mmorch/auto_apply.py; "
+              "no se tocan tests ni otros archivos."),
+        files=["mmorch/auto_apply.py"],
+        accept={"tests/test_sdlc_d7_automerge_cableado.py": HERE / "accept/D7/tests/test_sdlc_d7_automerge_cableado.py",
+                "tests/test_no_museum.py": r"C:\Users\map12\.claude\orchestration\tests\test_no_museum.py"},
+        contract=["try_automerge", "_finish_merge", "merge_sha", "yellow", "_halt", "mmorch/auto_apply.py"],
+        suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
+    ),
 }
 FEAT = FEATURES.get(TASK_NAME)
 TESTS_PREFIX = "tests/" if FEAT else "tests_accept/"
