@@ -15,7 +15,9 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .events import emit
 
@@ -57,21 +59,35 @@ def _codegraph_context(repo: str, task: str, *, timeout: float = 15.0, cap: int 
     r"""Contexto relevante del repo via el CLI de codegraph (el MISMO motor que su MCP server,
     sin el overhead de protocolo/spawn). Devuelve markdown (Entry Points / Related / Code) o ''.
 
-    AUTO-MANTIENE el indice (por eso NO hace falta un hook SessionStart, que ademas no dispararia
-    pa los jobs autonomos del server): si ya esta indexado -> `sync` (incremental, barato, lo deja
-    fresco); si falta -> `init`+`index` una vez (cero-manual). El init se puede apagar con
-    MMORCH_CODEGRAPH_AUTOINDEX=0 (queda solo-sync). Binario via CODEGRAPH_BIN o PATH.
-    El task se SANITIZA a [\w\s.-/] antes de pasarlo -> sin inyeccion de shell. Todo best-effort:
-    sin CLI / index fallido / error -> '' -> el loop sigue sin contexto (graceful)."""
+    Hermeticidad (D11): si `.codegraph` ya existe, corre `sync` (incremental, barato) como
+    siempre. Si NO existe, NO se auto-indexa (`init`+`index`) salvo opt-in explicito via
+    MMORCH_CODEGRAPH_AUTOINDEX=1 (default nuevo: '0' — antes indexaba por default, disparando
+    el CLI real contra repos de test). Aun con opt-in, un repo que resuelve bajo el directorio
+    temporal del sistema (tempfile.gettempdir()) NUNCA se indexa (repos de test/tmp). Binario
+    via CODEGRAPH_BIN o PATH. El task se SANITIZA a [\w\s.-/] antes de pasarlo -> sin inyeccion
+    de shell. Todo best-effort: sin CLI / index fallido / error -> '' -> el loop sigue sin
+    contexto (graceful)."""
+    cgdir = os.path.join(repo, ".codegraph")
+    has_index = os.path.isdir(cgdir)
+    if not has_index:
+        if os.environ.get("MMORCH_CODEGRAPH_AUTOINDEX", "0") != "1":
+            return ""
+        try:
+            temp_dir = Path(tempfile.gettempdir()).resolve()
+            repo_resolved = Path(repo).resolve()
+            under_temp = repo_resolved == temp_dir or temp_dir in repo_resolved.parents
+        except Exception:
+            under_temp = False
+        if under_temp:
+            return ""
     import shutil
     bin_ = os.environ.get("CODEGRAPH_BIN") or shutil.which("codegraph")
     if not bin_:
         return ""
-    cgdir = os.path.join(repo, ".codegraph")
     try:
-        if os.path.isdir(cgdir):
+        if has_index:
             _cg(bin_, repo, "sync", timeout=60)                         # fresco, incremental
-        elif os.environ.get("MMORCH_CODEGRAPH_AUTOINDEX", "1") != "0":
+        else:
             _cg(bin_, repo, "init", arg=repo, timeout=60)               # bootstrap una vez
             _cg(bin_, repo, "index", timeout=180)
     except Exception:
