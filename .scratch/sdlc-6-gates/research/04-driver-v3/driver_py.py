@@ -288,6 +288,12 @@ def sh(cmd: list[str], timeout: float | None = None, keep: int = 6000):
     return p.returncode == 0, (p.stdout + p.stderr)[-keep:]
 
 
+def _suite_args() -> list[str]:
+    """D8: el --basetemp compartido entre corridas dejo 594 ERROR de setup (dir de pytest corrupto/bloqueado en
+    Windows). Un basetemp por fase: la misma suite paso 1132/1134 con uno limpio."""
+    return [f"{a}-{PHASE}" if a.startswith(r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc") else a for a in FEAT["suite"]]
+
+
 def gate_suite_total() -> tuple[bool, str]:
     """Regresion total (ticket 13): la suite entera del repo no gana fallos nuevos respecto del baseline.
     mmorch tarda ~20 min y trae 4 rojos previos (medido 2026-09-11): se compara por NOMBRE, no por verde."""
@@ -299,7 +305,7 @@ def gate_suite_total() -> tuple[bool, str]:
         keep = {f: (WT / f).read_text(encoding="utf-8") for f in state["plan_files"] if (WT / f).exists()}
         subprocess.run(["git", "checkout", "HEAD", "--", *keep], cwd=WT, check=True)  # sin stash: la pila es compartida
         try:
-            _, blog = sh([PY, "-m", "pytest", *FEAT["suite"]], timeout=CFG["suite_timeout_s"], keep=400000)
+            _, blog = sh([PY, "-m", "pytest", *_suite_args()], timeout=CFG["suite_timeout_s"], keep=400000)
         finally:
             for f, c in keep.items():
                 _write(f, c)
@@ -307,7 +313,7 @@ def gate_suite_total() -> tuple[bool, str]:
         base_file.write_text("\n".join(re.findall(r"(?m)^(?:FAILED|ERROR) \S+", blog)) + "\n", encoding="utf-8")
     # D8: la suite del worktree traia 594 ERROR (setup) que el gate no miraba porque solo leia FAILED.
     base = set(re.findall(r"(?m)^(?:FAILED|ERROR) (\S+)", base_file.read_text(encoding="utf-8")))
-    ok, log = sh([PY, "-m", "pytest", *FEAT["suite"]], timeout=CFG["suite_timeout_s"], keep=400000)
+    ok, log = sh([PY, "-m", "pytest", *_suite_args()], timeout=CFG["suite_timeout_s"], keep=400000)
     _write("docs/sdlc/suite.log", log)
     now = set(re.findall(r"(?m)^(?:FAILED|ERROR) (\S+)", log))
     new = sorted(now - base)

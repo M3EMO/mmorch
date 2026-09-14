@@ -1,0 +1,4 @@
+materializado C:\Users\map12\Desktop\Claude\sdlc-runs\D9-r1
+[2-spec] ok=True G1 + trazabilidad-spec ok (1 llamadas, 0.6 min)
+[2b-spec-review] ok=True 4 IDs cubiertos (0 llamadas, 1.7 min)
+[3-plan] ok=True ok (1 llamadas, 0.1 min)
