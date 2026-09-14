@@ -142,6 +142,23 @@ FEATURES = {
         contract=["run_project_build", "planner failed", "commit_error", "integrate_fn", "integration_failed", "mmorch/project_driver.py"],
         suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
     ),
+    # Modulo 3: superficie de red (server_fleet + server_pty). Entrada malformada nunca es 500.
+    "D9": dict(
+        repo=r"C:\Users\map12\.claude\orchestration",
+        task=("Robustez de las rutas en mmorch/server_fleet.py y mmorch/server_pty.py: una entrada malformada devuelve un JSON "
+              "{'error': ...} con 4xx, nunca un 500. (R1) en todos los handlers que hacen `await request.json()`, un body que no "
+              "parsea (JSONDecodeError/ValueError) o que no es un objeto devuelve 400 {'error': 'body JSON invalido'}. "
+              "(R2) en `pty_open` y `pty_resize`, `rows`/`cols` no enteros devuelven 400 {'error': 'rows/cols deben ser enteros'} "
+              "(usar int() dentro de try/except ValueError/TypeError). (R3) en `fleet_run`, si `forward` devuelve un dict con "
+              "`ok` False y el error dice que el host no esta registrado, responder 404 con ese error; cualquier otro `ok` False "
+              "responde 502 con el error. (R4) en `pty_resize` y `pty_input`, la sesion inexistente se verifica ANTES de leer el body "
+              "(404 aunque el body este roto). Conserva el orden actual: primero `_token_ok` -> 401. "
+              "Solo se modifican mmorch/server_fleet.py y mmorch/server_pty.py; no se tocan tests ni otros archivos; los docstrings se conservan."),
+        files=["mmorch/server_fleet.py", "mmorch/server_pty.py"],
+        accept={"tests/test_sdlc_d9_server_bordes.py": HERE / "accept/D9/tests/test_sdlc_d9_server_bordes.py"},
+        contract=["request.json", "400", "404", "502", "rows", "cols", "forward", "mmorch/server_fleet.py", "mmorch/server_pty.py"],
+        suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
+    ),
 }
 FEAT = FEATURES.get(TASK_NAME)
 TESTS_PREFIX = "tests/" if FEAT else "tests_accept/"
