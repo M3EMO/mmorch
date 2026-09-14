@@ -4,7 +4,7 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**135 módulos · 47 MCP tools · 944 tests.**
+**134 módulos · 47 MCP tools · 944 tests.**
 
 El server expone **15** de esas 47 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
 
@@ -40,7 +40,6 @@ El server expone **15** de esas 47 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/code_loop.py` | code_loop — el WIRE de Fase 5 a produccion: tareas de CODIGO con lazo cerrado. |
 | `mmorch/code_review.py` | code_review — cero-cupo senior reviewer: read code, flag where it breaks the mmorch coding |
 | `mmorch/config.py` | Model registry — single source of truth for models, families, endpoints, prices. |
-| `mmorch/context_blocks.py` | context_blocks — the durable half of an "auto-compact to info-blocks" scheme for Claude Code. |
 | `mmorch/cost.py` | Cost model — USD from token counts, using REGISTRY prices. |
 | `mmorch/curation.py` | Curacion humana de propuestas — logica compartida entre scripts/veredicto.py, |
 | `mmorch/curiosity.py` | curiosity — deteccion de TENSION en la memoria (modulo cognitivo #3). |
