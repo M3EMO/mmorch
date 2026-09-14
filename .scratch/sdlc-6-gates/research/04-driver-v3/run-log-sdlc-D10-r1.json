@@ -1,0 +1,155 @@
+{
+ "proto": "driver_py",
+ "task": "D10",
+ "stages": [
+  {
+   "stage": "5b-review",
+   "ok": true,
+   "minutes": 3.17,
+   "calls": 0,
+   "note": "bloqueo con evidencia"
+  },
+  {
+   "stage": "5-test",
+   "ok": true,
+   "minutes": 11.95,
+   "calls": 2,
+   "note": "G4 + suite ok (1 vueltas)"
+  },
+  {
+   "stage": "6-pr",
+   "ok": true,
+   "minutes": 0.3,
+   "calls": 0,
+   "note": " 13 files changed, 1442 insertions(+), 12 deletions(-)"
+  }
+ ],
+ "gates": [
+  {
+   "id": "diff-review-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 0
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 0
+  },
+  {
+   "id": "claude-diff-review",
+   "ok": false,
+   "detail": "test_review falla: vuelve a build. BLOCK: `validate_steps` levanta `TypeError`, no `ValueError`. Pasa cuando un step trae `\"loop_back\": None`. La clave exi",
+   "calls": 0
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 2
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 2
+  },
+  {
+   "id": "test-compile",
+   "ok": true,
+   "detail": "ok",
+   "calls": 2
+  },
+  {
+   "id": "regresion-unidad",
+   "ok": true,
+   "detail": "['mmorch/workflow_engine.py']: 1 -> 0 fallos",
+   "calls": 2
+  },
+  {
+   "id": "lint",
+   "ok": true,
+   "detail": "0/0",
+   "calls": 2
+  },
+  {
+   "id": "suite-total",
+   "ok": true,
+   "detail": "sin fallos nuevos",
+   "calls": 2
+  },
+  {
+   "id": "G4-aceptacion",
+   "ok": true,
+   "detail": "verde en 1 vueltas + lint + suite total",
+   "calls": 2
+  },
+  {
+   "id": "lint",
+   "ok": true,
+   "detail": "0/0",
+   "calls": 2
+  }
+ ],
+ "calls": 2,
+ "human_interventions": 0,
+ "claude_calls": 1,
+ "gate_rejects": [
+  {
+   "gate": "claude-diff-review",
+   "detail": "test_review falla: vuelve a build. BLOCK: `validate_steps` levanta `TypeError`, no `ValueError`. Pasa cuando un step trae `\"loop_back\": None`. La clave exi"
+  }
+ ],
+ "escalated_to_claude": false,
+ "base_sha": "HEAD~1",
+ "t0": "2026-09-14 13:45:34",
+ "t0_epoch": 1789404334.9135246,
+ "plan_files": [
+  "mmorch/workflow_engine.py"
+ ],
+ "review_block": true,
+ "test_rounds": [
+  {
+   "round": 0,
+   "tests": {
+    "run": 7,
+    "failed": 1
+   }
+  },
+  {
+   "round": 1,
+   "files": [
+    "mmorch/workflow_engine.py"
+   ],
+   "tests": {
+    "run": 7,
+    "failed": 0
+   },
+   "novelty": 1.0
+  }
+ ],
+ "stall": 0,
+ "usd_by_family": {
+  "deepseek": 0.0336
+ },
+ "test_fix_rounds": 1,
+ "lint_new": {
+  "ruff": 0,
+  "mypy": 0
+ },
+ "suite_total": {
+  "run": 1138,
+  "failed": 2,
+  "new_failures": [],
+  "baseline_failures": 8
+ },
+ "diffstat": " 13 files changed, 1442 insertions(+), 12 deletions(-)",
+ "lines": {
+  "added": 33,
+  "deleted": 10
+ },
+ "mutation_score": null,
+ "minutes_total": 15.41,
+ "usd": 0.0337
+}
