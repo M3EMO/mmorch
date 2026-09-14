@@ -4,9 +4,9 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**134 módulos · 47 MCP tools · 944 tests.**
+**128 módulos · 45 MCP tools · 915 tests.**
 
-El server expone **15** de esas 47 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
+El server expone **15** de esas 45 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
 
 ## Módulos
 
@@ -22,7 +22,6 @@ El server expone **15** de esas 47 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/autoresearch.py` | autoresearch (r4a) — hillclimb como JOB declarativo + resumable. |
 | `mmorch/babel.py` | babel — capa comprimida model-native del vault (paper 2606.19857). |
 | `mmorch/bench.py` | bench — benchmark CONGELADO de tasks difíciles para evolución de workflows. |
-| `mmorch/bucketrank.py` | bucket_rank — graduar/ordenar un set GRANDE en tiers (triage por calidad, rankear |
 | `mmorch/budget.py` | budget — BudgetKeeper: techo de gasto mensual (ataca el incidente +$5). |
 | `mmorch/budget_policy.py` | budget_policy — scoped budget policies (graft G5 from paperclip). |
 | `mmorch/bughunt.py` | BUG-HUNTER logico de mmorch: mutation-survivors como mapa de donde un bug silencioso viviria. |
@@ -37,7 +36,6 @@ El server expone **15** de esas 47 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/claude_exec.py` | claude_exec — ejecutor que corre en el PLAN de Claude (cupo), no por API. Invoca el |
 | `mmorch/cli.py` | CLI minimo instalable (`mmorch`): status y health desde la terminal. |
 | `mmorch/code_embedder.py` | code_embedder — inferencia NUMPY PURA del encoder SimCLR del flywheel (sin torch). |
-| `mmorch/code_loop.py` | code_loop — el WIRE de Fase 5 a produccion: tareas de CODIGO con lazo cerrado. |
 | `mmorch/code_review.py` | code_review — cero-cupo senior reviewer: read code, flag where it breaks the mmorch coding |
 | `mmorch/config.py` | Model registry — single source of truth for models, families, endpoints, prices. |
 | `mmorch/cost.py` | Cost model — USD from token counts, using REGISTRY prices. |
@@ -57,7 +55,6 @@ El server expone **15** de esas 47 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/factory.py` | factory — mmorch como FÁBRICA de modelos (no ES el modelo, lo CONSTRUYE/entrena). |
 | `mmorch/feedback.py` | feedback — el lazo que faltaba (la 'loss' ausente). mmorch genera/verifica/ |
 | `mmorch/feedback_trace.py` | feedback_trace — human vote -> trace bundle + bandit signal (graft G8 from paperclip). |
-| `mmorch/few_shot_bootstrap.py` | few_shot_bootstrap — DSPy-A leído del código (bootstrap.py de stanfordnlp/dspy), robado como |
 | `mmorch/fleet.py` | fleet — control unificado de varios hosts mmorch en el tailnet. Cada maquina corre su |
 | `mmorch/frontier.py` | Frontera de temas — rompe el círculo cerrado del auto-descubrimiento. |
 | `mmorch/fuel.py` | Fuel module: candidate proposal lifecycle for roadmap loops. |
@@ -124,7 +121,6 @@ El server expone **15** de esas 47 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/server_pty.py` | server_pty — interactive PTY (terminal) routes: open/stream/input/resize/close a shell |
 | `mmorch/session_skills.py` | session_skills — mina playbooks reusables de sesiones de Claude. De segmentos con |
 | `mmorch/sessions.py` | sessions — aprende de transcripts de Claude Code. Parsea el JSONL de sesion en |
-| `mmorch/shadow_prior.py` | shadow_prior — Fase 5: una capa que PRIMEA al ThompsonBandit con un prior contextual, |
 | `mmorch/signature.py` | signature — project a task's TEXT onto a STRUCTURAL key (cero-cupo, deterministic). |
 | `mmorch/slim.py` | Slim — auto-eficientización de código: menos verbose, misma conducta. |
 | `mmorch/spec.py` | spec — spec-builder barato que INFIERE mas alla de lo dicho, pero aplica |
@@ -133,12 +129,10 @@ El server expone **15** de esas 47 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/sync.py` | sync — GitHub como bus de sincronizacion entre maquinas. El host always-on (ej pc-mateo) |
 | `mmorch/synth_store.py` | synth_store — registro persistente de checkers SINTETIZADOS y promovidos, por tipo. |
 | `mmorch/textutil.py` | textutil — shared text helpers. Dedups the code-fence extractor that was copy-pasted |
-| `mmorch/tournament.py` | tournament — elegir EL mejor de pocos candidatos por gusto/calidad (naming, |
 | `mmorch/trajectory.py` | trajectory — robo de Hermes: 'trajectory compression para entrenar la proxima |
 | `mmorch/transcript_store.py` | transcript_store — per-job inter-agent transcript (in-memory). |
 | `mmorch/triage.py` | Triage mecanico de branches propuestas — cero LLM, cero cupo, determinista. |
 | `mmorch/vault.py` | vault — memoria de largo plazo mmorch-legible sobre el vault Obsidian. |
-| `mmorch/wayfinder_prep.py` | wayfinder-prep — investigación autónoma de tickets, decisión humana. |
 | `mmorch/weights.py` | weights — gestion de pesos de nodos neuronales (model-cards + verificacion). Source of |
 | `mmorch/workflow_engine.py` | workflow_engine — cooperative multi-role workflow as a pure state machine (Phase C). |
 | `mmorch/workflow_evolve.py` | workflow_evolve — la poblacion de variantes del engine EVOLUCIONA (backlog #1 |
@@ -149,4 +143,4 @@ El server expone **15** de esas 47 con el perfil por default (`core`); `MMORCH_M
 
 ## MCP tools
 
-`mmorch_adversarial_verify`, `mmorch_autoresearch`, `mmorch_bucket_rank`, `mmorch_budget_status`, `mmorch_build_spec`, `mmorch_cache_stats`, `mmorch_canal`, `mmorch_cascade`, `mmorch_check`, `mmorch_classify`, `mmorch_close_loop`, `mmorch_consolidate`, `mmorch_cynefin`, `mmorch_ensemble_verify`, `mmorch_error_rates`, `mmorch_evolve_nightly`, `mmorch_evolve_self`, `mmorch_fan_out`, `mmorch_feedback_stats`, `mmorch_find_tension`, `mmorch_flag_contradiction`, `mmorch_forget_preview`, `mmorch_ingest_session`, `mmorch_innovate`, `mmorch_intuition`, `mmorch_learn`, `mmorch_memory_stats`, `mmorch_metrics_summary`, `mmorch_open_loops`, `mmorch_orchestra`, `mmorch_pending_review`, `mmorch_perfect`, `mmorch_recall`, `mmorch_record_outcome`, `mmorch_reinforce`, `mmorch_remember`, `mmorch_resolve_review`, `mmorch_review_code`, `mmorch_route`, `mmorch_rubric_next`, `mmorch_rubric_start`, `mmorch_rubric_submit`, `mmorch_session_playbooks`, `mmorch_spec_interview`, `mmorch_speedup`, `mmorch_tournament`, `mmorch_vault_write`.
+`mmorch_adversarial_verify`, `mmorch_autoresearch`, `mmorch_budget_status`, `mmorch_build_spec`, `mmorch_cache_stats`, `mmorch_canal`, `mmorch_cascade`, `mmorch_check`, `mmorch_classify`, `mmorch_close_loop`, `mmorch_consolidate`, `mmorch_cynefin`, `mmorch_ensemble_verify`, `mmorch_error_rates`, `mmorch_evolve_nightly`, `mmorch_evolve_self`, `mmorch_fan_out`, `mmorch_feedback_stats`, `mmorch_find_tension`, `mmorch_flag_contradiction`, `mmorch_forget_preview`, `mmorch_ingest_session`, `mmorch_innovate`, `mmorch_intuition`, `mmorch_learn`, `mmorch_memory_stats`, `mmorch_metrics_summary`, `mmorch_open_loops`, `mmorch_orchestra`, `mmorch_pending_review`, `mmorch_perfect`, `mmorch_recall`, `mmorch_record_outcome`, `mmorch_reinforce`, `mmorch_remember`, `mmorch_resolve_review`, `mmorch_review_code`, `mmorch_route`, `mmorch_rubric_next`, `mmorch_rubric_start`, `mmorch_rubric_submit`, `mmorch_session_playbooks`, `mmorch_spec_interview`, `mmorch_speedup`, `mmorch_vault_write`.

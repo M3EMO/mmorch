@@ -10,7 +10,6 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-import mmorch.bucketrank as BR
 import mmorch.budget as B
 import mmorch.metrics as MET
 import mmorch.prices as PR
@@ -173,20 +172,6 @@ def test_timeout_loggea_costo_estimado(monkeypatch, eventos):
     assert all(e["cost_usd"] > 0 for e in errs), "cost=0 en timeout subestima el gasto"
     assert all(e["cost_estimated"] and e["in_tokens"] > 0 for e in errs)
 
-
-# ---------- W3.3: pool de bucket_rank no aborta por un item -------------------------
-def test_bucketrank_pool_sobrevive_excepcion(monkeypatch):
-    def _fake_call(model, msgs, **kw):
-        if "boom" in msgs[-1]["content"]:
-            raise RuntimeError("api reventada")
-        return types.SimpleNamespace(text="razonado...\nTIER: A", cost_usd=0.001)
-
-    monkeypatch.setattr(BR, "call", _fake_call)
-    r = BR.bucket_rank(["uno", "boom aca", "tres"], rubric="calidad")
-    assert r.n_failed == 1
-    assert sorted(r.by_tier["A"]) == ["tres", "uno"]
-    assert r.by_tier["D"] == ["boom aca"]           # dropeado al tier mas bajo, no perdido
-    assert len(r.graded) == 3
 
 
 # ---------- W3.4: rotacion de metrics.jsonl + budget multi-segmento -----------------

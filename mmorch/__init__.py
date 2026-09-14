@@ -24,8 +24,6 @@ from .feedback import (record_outcome, ThompsonBandit,   # feedback loop (keysto
                        contextual_arm)                    # #4 contextual bandit key
 from .memory import (write_episode, write_note, recall,   # memoria episodica+semantica
                      tombstone_note, embed, Note, consolidate)
-from .tournament import tournament, TournamentResult        # backlog: best-of-N pairwise
-from .bucketrank import bucket_rank, BucketRankResult        # backlog: graduar set en tiers
 from .loop import loop_until_done, LoopResult                # backlog: loop-until-dry
 from .hillclimb import hillclimb, ClimbResult, ClimbCtx, ClimbStep  # goal+rubric loop (Martin 2026)
 from .schema import (gated_json, validate, extract_json,     # §9 schema-gates
@@ -53,10 +51,7 @@ from .megasource import fetch_prices, diff_prices, propose_price_update     # Fa
 from .nodes import orchestra, members, conductor as orchestra_conductor, Node  # registry orquesta
 from .factory import (featurize_code, train_logreg, train_code_quality,     # fábrica de modelos
                       emit_training_job, predict_proba, accuracy)
-from .shadow_prior import (ShadowPrior, offline_improvement,                # Fase 5 NN shadow prior
-                           auto_scale as shadow_auto_scale)
 from .code_embedder import embed_code, available as code_embedder_available  # flywheel asset (numpy)
-from .code_loop import run_code_task, CodeTaskResult                          # Fase 5 wire (lazo cerrado)
 from .rubric_loop import (start_rubric, next_action as rubric_next,           # loop autocorreccion
                           submit as rubric_submit, run_rubric_loop)            # (plan o API)
 from .trajectory import (record_trajectory, trajectory_dataset,               # Hermes: trajectory
@@ -92,7 +87,6 @@ __all__ = [
     "calibrate_conf", "reliability_bins", "contextual_arm",
     "write_episode", "write_note", "recall", "tombstone_note", "embed", "Note",
     "consolidate",
-    "tournament", "TournamentResult", "bucket_rank", "BucketRankResult",
     "loop_until_done", "LoopResult",
     "hillclimb", "ClimbResult", "ClimbCtx", "ClimbStep",
     "gated_json", "validate", "extract_json", "SchemaGateError",
@@ -113,9 +107,7 @@ __all__ = [
     "effective_prices", "load_overrides", "fetch_prices", "diff_prices", "propose_price_update",
     "featurize_code", "train_logreg", "train_code_quality", "emit_training_job",
     "predict_proba", "accuracy",
-    "ShadowPrior", "offline_improvement", "shadow_auto_scale",
     "embed_code", "code_embedder_available",
-    "run_code_task", "CodeTaskResult",
     "start_rubric", "rubric_next", "rubric_submit", "run_rubric_loop",
     "record_trajectory", "trajectory_dataset", "distill_skill", "load_trajectories",
     "trajectory_stats",

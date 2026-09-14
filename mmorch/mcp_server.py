@@ -25,8 +25,7 @@ except Exception as e:  # pragma: no cover
     ) from e
 
 from mmorch import (fan_out, adversarial_verify, route, cascade, ensemble_verify,
-                    ideate_and_screen, recall as _recall, tournament as _tournament,
-                    bucket_rank as _bucket_rank)
+                    ideate_and_screen, recall as _recall)
 from mmorch.config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
 from mmorch.metrics import summary, error_rates, cache_stats
 from mmorch.learn import analyze as _learn_analyze, recommend as _learn_recommend
@@ -90,7 +89,7 @@ _PROFILE = os.getenv("MMORCH_MCP_PROFILE", "").strip().lower() or "core"
 #   canal                              nacio 2026-08-30, no tuvo ventana
 #   build_spec/route/spec_interview    los nombra ~/.claude/skills/perfect
 _NOT_IN_CORE = frozenset({
-    "mmorch_autoresearch", "mmorch_bucket_rank", "mmorch_cache_stats",
+    "mmorch_autoresearch", "mmorch_cache_stats",
     "mmorch_cascade", "mmorch_classify", "mmorch_close_loop",
     "mmorch_consolidate", "mmorch_error_rates", "mmorch_evolve_nightly",
     "mmorch_evolve_self", "mmorch_fan_out", "mmorch_feedback_stats",
@@ -100,7 +99,7 @@ _NOT_IN_CORE = frozenset({
     "mmorch_orchestra", "mmorch_pending_review", "mmorch_perfect",
     "mmorch_reinforce", "mmorch_resolve_review", "mmorch_rubric_next",
     "mmorch_rubric_start", "mmorch_rubric_submit", "mmorch_session_playbooks",
-    "mmorch_speedup", "mmorch_tournament",
+    "mmorch_speedup",
 })
 
 
@@ -167,8 +166,6 @@ _TOOL_RISK: dict[str, str] = {
     "mmorch_canal": "mutate",              # append logs/canal.jsonl (hilo agentes)
     "mmorch_vault_write": "mutate",       # escribe en el vault global
     "mmorch_recall": "mutate",            # bumpea access_count (afecta decay futuro)
-    "mmorch_tournament": "read",
-    "mmorch_bucket_rank": "read",
     "mmorch_classify": "read",
     "mmorch_cynefin": "read",
     "mmorch_spec_interview": "read",
@@ -636,40 +633,6 @@ def mmorch_recall(
         ensure_ascii=False)
 
 
-@_tool
-def mmorch_tournament(
-    candidates: list[str],
-    criterion: str,
-    gen_model: str = DEFAULT_GENERATOR,
-    judge_model: str = DEFAULT_VERIFIER,
-) -> str:
-    """Pick the BEST of a few candidates by taste/quality (naming, design, copy) via
-    PAIRWISE single-elimination with a CROSS-FAMILY judge (OneFlow enforced). A tie
-    escalates to the orchestrator (Opus) instead of forcing a winner. Spends external
-    $, not cupo. Returns JSON {winner, escalate, rounds, comparisons, cost_usd}.
-    """
-    r = _tournament(candidates, criterion=criterion, gen_model=gen_model,
-                    judge_model=judge_model, phase="mcp")
-    return json.dumps({
-        "winner": r.winner, "escalate": r.escalate, "rounds": r.rounds,
-        "comparisons": r.comparisons, "cost_usd": r.cost_usd}, ensure_ascii=False)
-
-
-@_tool
-def mmorch_bucket_rank(
-    items: list[str],
-    rubric: str,
-    tiers: list[str] | None = None,
-) -> str:
-    """Grade a LARGE set into quality tiers (triage, rank N>>10). Each item classified
-    independently by a cheap model in parallel (O(n), not pairwise O(n^2)). Items never
-    lost: a failed/unparseable grade falls to the lowest tier. Spends external $, not
-    cupo. Returns JSON {by_tier, graded, cost_usd, n_failed}.
-    """
-    r = _bucket_rank(items, rubric=rubric, tiers=tiers, phase="mcp")
-    return json.dumps({
-        "by_tier": r.by_tier, "graded": r.graded, "cost_usd": r.cost_usd,
-        "n_failed": r.n_failed}, ensure_ascii=False)
 
 
 @_tool

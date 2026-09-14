@@ -68,5 +68,5 @@ def test_core_es_el_set_con_uso_medido(tmp_path):
         "core dejo de ser el set medido — si agregas una tool a core, que sea "
         "porque la telemetria la muestra usada o porque tiene exencion escrita")
     # cero llamadas en 53 dias y ninguna es del ultimo mes: fuera
-    assert not ({"mmorch_fan_out", "mmorch_cascade", "mmorch_tournament",
+    assert not ({"mmorch_fan_out", "mmorch_cascade",
                  "mmorch_classify", "mmorch_error_rates"} & core)

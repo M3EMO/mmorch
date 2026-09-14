@@ -26,8 +26,7 @@ _DINAMICOS = {"loop"}   # cargado por nombre desde loop_nightly; 4173 usos en 90
 # Medido 2026-09-14 con este mismo analisis (15). Cada uno: se cablea (y sale de aca) o se borra (y sale
 # de aca). Nunca crece. plugin_worker es el subproceso de plugins: se ejecuta por path, no por import.
 _NO_ALCANZADOS = {
-    "adjudicate", "bucketrank", "code_embedder", "context_blocks", "effort", "factory", "innovate",
-    "megasource", "plugin_worker", "predict", "schedule", "shadow_prior", "synth_store", "tournament", "weights",
+    "code_embedder", "effort", "factory", "megasource", "plugin_worker", "predict", "schedule", "synth_store", "weights",
 }
 
 
@@ -35,18 +34,35 @@ def _modulos() -> dict[str, Path]:
     return {p.stem: p for p in PKG.glob("*.py") if not p.stem.startswith("__")}
 
 
+def _reexports() -> dict[str, str]:
+    """nombre exportado por mmorch/__init__.py -> modulo que lo define (`from .mod import nombre`)."""
+    out: dict[str, str] = {}
+    try:
+        tree = ast.parse((PKG / "__init__.py").read_text(encoding="utf-8", errors="replace"))
+    except (SyntaxError, OSError):
+        return out
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom) and n.level == 1 and n.module:
+            for a in n.names:
+                out[a.asname or a.name] = n.module.split(".")[0]
+    return out
+
+
 def _imports(path: Path, mods: set[str]) -> set[str]:
     try:
         tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
     except SyntaxError:
         return set()
+    rex = _reexports()
     out: set[str] = set()
     for n in ast.walk(tree):
         if isinstance(n, ast.ImportFrom):
             if n.level == 1 and n.module:
                 out.add(n.module.split(".")[0])
-            elif n.level == 1 and not n.module:
-                out.update(a.name for a in n.names)
+            elif (n.level == 1 and not n.module) or (n.level == 0 and n.module == "mmorch"):
+                # `from . import x` / `from mmorch import x`: x es un modulo o un nombre re-exportado por __init__
+                for a in n.names:
+                    out.add(a.name if a.name in mods else rex.get(a.name, ""))
             elif n.module and n.module.startswith("mmorch."):
                 out.add(n.module.split(".")[1])
         elif isinstance(n, ast.Import):
@@ -96,4 +112,4 @@ def test_R3_la_lista_solo_achica():
 
 def test_R4_museo_por_modulo_no_crece():
     # el numero baja con cada poda; subirlo a mano es agregar museo
-    assert len(_NO_ALCANZADOS) <= 15
+    assert len(_NO_ALCANZADOS) <= 9
