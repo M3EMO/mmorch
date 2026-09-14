@@ -4,3 +4,7 @@ materializado C:\Users\map12\Desktop\Claude\sdlc-runs\D4-r2
 [3-plan] ok=True ok (1 llamadas, 0.0 min)
 [4-build] ok=True G3 + test-compile + docstring ok (2 llamadas, 0.9 min)
 [5-test] ok=True G4 + suite ok (0 vueltas) (0 llamadas, 7.2 min)
+[5b-review] ok=True bloqueo con evidencia (0 llamadas, 2.4 min)
+[5-test] ok=True G4 + suite ok (1 vueltas) (2 llamadas, 5.1 min)
+[6-pr] ok=True  10 files changed, 449 insertions(+), 10 deletions(-) (0 llamadas, 1.1 min)
+DRIVER_PY TERMINO {"task": "D4", "calls": 6, "minutes_total": 18.59, "usd": 0.0489, "usd_by_family": {"deepseek": 0.049}, "human_interventions": 0, "claude_calls": 2, "review_block": true, "escalated_to_claude": false, "gate_rejects": [{"gate": "docstring-intacto", "detail": "docstring de modulo borrado en ['mmorch/synth_store.py']"}, {"gate": "claude-diff-review", "detail": "test_review falla: vuelve a build. BLOCK: el diff quita el salto de línea final del docstring de módulo en `mmorch/synth_store.py`.\n\nLa TAREA solo autoriza"}], "diffstat": " 10 files changed, 449 insertions(+), 10 deletions(-)", "lines": {"added": 2, "deleted": 2}, "suite_total": {"run": 1125, "failed": 1, "new_failures": [], "baseline_failures": 2}, "lint_new": {"ruff": 0, "mypy": 0}}
