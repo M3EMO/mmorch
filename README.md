@@ -221,7 +221,7 @@ empty detail) in the one hard run. Per-run logs and findings:
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **129 módulos · 47 MCP tools (15 expuestas por default) · 891 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
+_Auto-generado por `mmorch.docgen`._ **129 módulos · 48 MCP tools (16 expuestas por default) · 891 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
