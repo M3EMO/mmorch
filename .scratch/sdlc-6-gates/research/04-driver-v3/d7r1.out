@@ -1,0 +1,10 @@
+materializado C:\Users\map12\Desktop\Claude\sdlc-runs\D7-r1
+[2-spec] ok=True G1 + trazabilidad-spec ok (1 llamadas, 0.7 min)
+[2b-spec-review] ok=True 6 IDs cubiertos (0 llamadas, 0.6 min)
+[3-plan] ok=True ok (1 llamadas, 0.1 min)
+[4-build] ok=False G3 rechaza tras 3 vueltas:  ModuleNotFoundError: No module named 'mmorch.promotion'
+=========================== short test summary info ===========================
+ERROR tests/test_sdlc_d7_automerge_cableado.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+2 tests collected, 1 error in 1.98s
+ (4 llamadas, 5.2 min)

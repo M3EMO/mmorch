@@ -1,0 +1,200 @@
+{
+ "proto": "driver_py",
+ "task": "D7",
+ "stages": [
+  {
+   "stage": "2-spec",
+   "ok": true,
+   "minutes": 0.73,
+   "calls": 1,
+   "note": "G1 + trazabilidad-spec ok"
+  },
+  {
+   "stage": "2b-spec-review",
+   "ok": true,
+   "minutes": 0.55,
+   "calls": 0,
+   "note": "6 IDs cubiertos"
+  },
+  {
+   "stage": "3-plan",
+   "ok": true,
+   "minutes": 0.12,
+   "calls": 1,
+   "note": "ok"
+  },
+  {
+   "stage": "4-build",
+   "ok": false,
+   "minutes": 5.2,
+   "calls": 4,
+   "note": "G3 rechaza tras 3 vueltas:  ModuleNotFoundError: No module named 'mmorch.promotion'\n=========================== short test summary info ===========================\nERROR tests/test_sdlc_d7_automerge_cableado.py\n!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n2 tests collected, 1 error in 1.98s\n"
+  }
+ ],
+ "gates": [
+  {
+   "id": "trazabilidad-spec",
+   "ok": true,
+   "detail": "6 IDs cubiertos",
+   "calls": 1
+  },
+  {
+   "id": "G1-spec-contrato",
+   "ok": true,
+   "detail": "contrato cubierto, sin TBD, IDs trazados",
+   "calls": 1
+  },
+  {
+   "id": "spec-review-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 1
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 1
+  },
+  {
+   "id": "spec-review",
+   "ok": true,
+   "detail": "0 preguntas",
+   "calls": 1
+  },
+  {
+   "id": "trazabilidad-spec",
+   "ok": true,
+   "detail": "6 IDs cubiertos",
+   "calls": 1
+  },
+  {
+   "id": "plan-allowlist",
+   "ok": true,
+   "detail": "['mmorch/auto_apply.py']",
+   "calls": 2
+  },
+  {
+   "id": "trazabilidad-plan",
+   "ok": true,
+   "detail": "ok",
+   "calls": 2
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 3
+  },
+  {
+   "id": "test-compile",
+   "ok": false,
+   "detail": "tomerge_cableado.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n..\\..\\..\\..\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\importlib\\__init__.py:90: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests\\test_sdlc_d7_automerge_cableado.py:8: in <module>\n    import mmorch.auto_apply as AA\nmmorch\\auto_apply.py:2: in <module>\n    from .promotion import PromotionStore\nE   ModuleNotFoundError: No module named 'mmorch.promotion'\n=========================== short test summary info ===========================\nERROR tests/test_sdlc_d7_automerge_cableado.py\n!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n2 tests collected, 1 error in 2.62s\n",
+   "calls": 3
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 4
+  },
+  {
+   "id": "test-compile",
+   "ok": false,
+   "detail": "\\Users\\map12\\Desktop\\Claude\\sdlc-runs\\D7-r1\\tests\\test_sdlc_d7_automerge_cableado.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n..\\..\\..\\..\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\importlib\\__init__.py:90: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests\\test_sdlc_d7_automerge_cableado.py:9: in <module>\n    from mmorch.promotion import PromotionStore\nE   ModuleNotFoundError: No module named 'mmorch.promotion'\n=========================== short test summary info ===========================\nERROR tests/test_sdlc_d7_automerge_cableado.py\n!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n2 tests collected, 1 error in 2.50s\n",
+   "calls": 4
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 4
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 5
+  },
+  {
+   "id": "test-compile",
+   "ok": false,
+   "detail": "\\Users\\map12\\Desktop\\Claude\\sdlc-runs\\D7-r1\\tests\\test_sdlc_d7_automerge_cableado.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n..\\..\\..\\..\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\importlib\\__init__.py:90: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests\\test_sdlc_d7_automerge_cableado.py:9: in <module>\n    from mmorch.promotion import PromotionStore\nE   ModuleNotFoundError: No module named 'mmorch.promotion'\n=========================== short test summary info ===========================\nERROR tests/test_sdlc_d7_automerge_cableado.py\n!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n2 tests collected, 1 error in 2.46s\n",
+   "calls": 5
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 5
+  },
+  {
+   "id": "un-archivo",
+   "ok": false,
+   "detail": "mmorch/auto_apply.py: recorte de ['mmorch/promotion.py']",
+   "calls": 6
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 6
+  },
+  {
+   "id": "test-compile",
+   "ok": false,
+   "detail": "\\Users\\map12\\Desktop\\Claude\\sdlc-runs\\D7-r1\\tests\\test_sdlc_d7_automerge_cableado.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n..\\..\\..\\..\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\importlib\\__init__.py:90: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests\\test_sdlc_d7_automerge_cableado.py:9: in <module>\n    from mmorch.promotion import PromotionStore\nE   ModuleNotFoundError: No module named 'mmorch.promotion'\n=========================== short test summary info ===========================\nERROR tests/test_sdlc_d7_automerge_cableado.py\n!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n2 tests collected, 1 error in 1.98s\n",
+   "calls": 6
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 6
+  }
+ ],
+ "calls": 6,
+ "human_interventions": 0,
+ "claude_calls": 1,
+ "gate_rejects": [
+  {
+   "gate": "test-compile",
+   "detail": "tomerge_cableado.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n..\\..\\..\\..\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\importlib\\__init__.py:90: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests\\test_sdlc_d7_automerge_cableado.py:8: in <module>\n    import mmorch.auto_apply as AA\nmmorch\\auto_apply.py:2: in <module>\n    from .promotion import PromotionStore\nE   ModuleNotFoundError: No module named 'mmorch.promotion'\n=========================== short test summary info ===========================\nERROR tests/test_sdlc_d7_automerge_cableado.py\n!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n2 tests collected, 1 error in 2.62s\n"
+  },
+  {
+   "gate": "test-compile",
+   "detail": "\\Users\\map12\\Desktop\\Claude\\sdlc-runs\\D7-r1\\tests\\test_sdlc_d7_automerge_cableado.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n..\\..\\..\\..\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\importlib\\__init__.py:90: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests\\test_sdlc_d7_automerge_cableado.py:9: in <module>\n    from mmorch.promotion import PromotionStore\nE   ModuleNotFoundError: No module named 'mmorch.promotion'\n=========================== short test summary info ===========================\nERROR tests/test_sdlc_d7_automerge_cableado.py\n!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n2 tests collected, 1 error in 2.50s\n"
+  },
+  {
+   "gate": "test-compile",
+   "detail": "\\Users\\map12\\Desktop\\Claude\\sdlc-runs\\D7-r1\\tests\\test_sdlc_d7_automerge_cableado.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n..\\..\\..\\..\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\importlib\\__init__.py:90: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests\\test_sdlc_d7_automerge_cableado.py:9: in <module>\n    from mmorch.promotion import PromotionStore\nE   ModuleNotFoundError: No module named 'mmorch.promotion'\n=========================== short test summary info ===========================\nERROR tests/test_sdlc_d7_automerge_cableado.py\n!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n2 tests collected, 1 error in 2.46s\n"
+  },
+  {
+   "gate": "un-archivo",
+   "detail": "mmorch/auto_apply.py: recorte de ['mmorch/promotion.py']"
+  },
+  {
+   "gate": "test-compile",
+   "detail": "\\Users\\map12\\Desktop\\Claude\\sdlc-runs\\D7-r1\\tests\\test_sdlc_d7_automerge_cableado.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n..\\..\\..\\..\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\importlib\\__init__.py:90: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests\\test_sdlc_d7_automerge_cableado.py:9: in <module>\n    from mmorch.promotion import PromotionStore\nE   ModuleNotFoundError: No module named 'mmorch.promotion'\n=========================== short test summary info ===========================\nERROR tests/test_sdlc_d7_automerge_cableado.py\n!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n2 tests collected, 1 error in 1.98s\n"
+  }
+ ],
+ "escalated_to_claude": false,
+ "base_sha": "d7d475e",
+ "t0": "2026-09-14 12:44:45",
+ "t0_epoch": 1789400685.524142,
+ "usd_by_family": {
+  "deepseek": 0.1077
+ },
+ "plan_files": [
+  "mmorch/auto_apply.py"
+ ],
+ "plan_parallel": [
+  "mmorch/auto_apply.py"
+ ]
+}
