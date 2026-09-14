@@ -1,0 +1,220 @@
+{
+ "proto": "driver_py",
+ "task": "D12",
+ "stages": [
+  {
+   "stage": "2-spec",
+   "ok": true,
+   "minutes": 0.46,
+   "calls": 1,
+   "note": "G1 + trazabilidad-spec ok"
+  },
+  {
+   "stage": "2b-spec-review",
+   "ok": true,
+   "minutes": 0.95,
+   "calls": 0,
+   "note": "4 IDs cubiertos"
+  },
+  {
+   "stage": "3-plan",
+   "ok": true,
+   "minutes": 0.09,
+   "calls": 1,
+   "note": "ok"
+  },
+  {
+   "stage": "4-build",
+   "ok": true,
+   "minutes": 1.38,
+   "calls": 1,
+   "note": "G3 + test-compile + docstring ok"
+  },
+  {
+   "stage": "5-test",
+   "ok": true,
+   "minutes": 14.45,
+   "calls": 1,
+   "note": "G4 + suite ok (0 vueltas)"
+  },
+  {
+   "stage": "5b-review",
+   "ok": true,
+   "minutes": 7.74,
+   "calls": 0,
+   "note": "sin test nuevo: Corrección de esa oración (23 palabras → dos oraciones):\n\nProbé las 4 ramas R1-R4. También probé el límite de 30 días ex"
+  }
+ ],
+ "gates": [
+  {
+   "id": "trazabilidad-spec",
+   "ok": true,
+   "detail": "4 IDs cubiertos",
+   "calls": 1
+  },
+  {
+   "id": "G1-spec-contrato",
+   "ok": true,
+   "detail": "contrato cubierto, sin TBD, IDs trazados",
+   "calls": 1
+  },
+  {
+   "id": "spec-review-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 1
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 1
+  },
+  {
+   "id": "spec-review",
+   "ok": true,
+   "detail": "0 preguntas",
+   "calls": 1
+  },
+  {
+   "id": "trazabilidad-spec",
+   "ok": true,
+   "detail": "4 IDs cubiertos",
+   "calls": 1
+  },
+  {
+   "id": "plan-allowlist",
+   "ok": true,
+   "detail": "['mmorch/nightly.py']",
+   "calls": 2
+  },
+  {
+   "id": "trazabilidad-plan",
+   "ok": true,
+   "detail": "ok",
+   "calls": 2
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 3
+  },
+  {
+   "id": "test-compile",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "sin-clones",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "cambio-minimo",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "docstring-intacto",
+   "ok": true,
+   "detail": "la tarea lo cubre",
+   "calls": 3
+  },
+  {
+   "id": "lint",
+   "ok": true,
+   "detail": "0/0",
+   "calls": 3
+  },
+  {
+   "id": "suite-total",
+   "ok": false,
+   "detail": "fallos nuevos: ['tests/test_capas.py::test_R1_el_engine_no_importa_modulos_no_alcanzados', 'tests/test_capas.py::test_R3_la_lista_solo_achica']",
+   "calls": 3
+  },
+  {
+   "id": "suite-total",
+   "ok": true,
+   "detail": "sin fallos nuevos",
+   "calls": 4
+  },
+  {
+   "id": "G4-aceptacion",
+   "ok": true,
+   "detail": "verde en 0 vueltas + lint + suite total",
+   "calls": 4
+  },
+  {
+   "id": "diff-review-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 4
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 4
+  },
+  {
+   "id": "claude-diff-review",
+   "ok": true,
+   "detail": "sin test nuevo: Corrección de esa oración (23 palabras → dos oraciones):\n\nProbé las 4 ramas R1-R4. También probé el límite de 30 días ex",
+   "calls": 4
+  }
+ ],
+ "calls": 4,
+ "human_interventions": 0,
+ "claude_calls": 2,
+ "gate_rejects": [
+  {
+   "gate": "suite-total",
+   "detail": "fallos nuevos: ['tests/test_capas.py::test_R1_el_engine_no_importa_modulos_no_alcanzados', 'tests/test_capas.py::test_R3_la_lista_solo_achica']"
+  }
+ ],
+ "escalated_to_claude": false,
+ "base_sha": "5f60f7c",
+ "t0": "2026-09-14 15:04:38",
+ "t0_epoch": 1789409078.740934,
+ "usd_by_family": {
+  "deepseek": 0.1273
+ },
+ "plan_files": [
+  "mmorch/nightly.py"
+ ],
+ "plan_parallel": [
+  "mmorch/nightly.py"
+ ],
+ "test_rounds": [
+  {
+   "round": 0,
+   "tests": {
+    "run": 4,
+    "failed": 0
+   }
+  }
+ ],
+ "stall": 0,
+ "test_fix_rounds": 0,
+ "lint_new": {
+  "ruff": 0,
+  "mypy": 0
+ },
+ "suite_flaky": [],
+ "suite_total": {
+  "run": 1091,
+  "failed": 2,
+  "new_failures": [],
+  "baseline_failures": 6
+ }
+}
