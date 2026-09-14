@@ -1,0 +1,5 @@
+FAILED tests/test_paths.py::test_gate_sin_anclas_de_estado_fuera_de_paths
+FAILED tests/test_sdlc_d6_plugins_robustez.py::test_R1_print_al_importar_no_corrompe_el_protocolo
+FAILED tests/test_sdlc_d6_plugins_robustez.py::test_R2_timeout_se_reporta_como_timeout
+FAILED tests/test_sdlc_d6_plugins_robustez.py::test_R3_entry_roto_devuelve_error_con_causa
+FAILED tests/test_w6_ronda3.py::test_mcp_server_reporta_version_de_mmorch

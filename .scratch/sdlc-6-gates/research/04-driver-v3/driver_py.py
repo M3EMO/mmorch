@@ -306,6 +306,7 @@ def gate_suite_total() -> tuple[bool, str]:
         base_file.write_text("\n".join(re.findall(r"(?m)^FAILED \S+", blog)) + "\n", encoding="utf-8")
     base = set(re.findall(r"(?m)^FAILED (\S+)", base_file.read_text(encoding="utf-8")))
     ok, log = sh([PY, "-m", "pytest", *FEAT["suite"]], timeout=CFG["suite_timeout_s"])
+    _write("docs/sdlc/suite.log", log)  # D6: el conteo de fallos salia inflado (597); el log crudo permite depurarlo
     now = set(re.findall(r"(?m)^FAILED (\S+)", log))
     new = sorted(now - base)
     if new and "TIMEOUT" not in log:
@@ -505,6 +506,19 @@ def _docstrings(files) -> dict:
         except SyntaxError:
             out[f] = None
     return out
+
+
+def gate_clones(written: dict) -> tuple[bool, str]:
+    """D6: el coder escribio el contenido de plugins.py dentro de plugin_worker.py. Dos archivos del plan
+    con > 80% de lineas identicas es un clon, no una feature. Determinista, USD 0."""
+    files = list(written)
+    for i, a in enumerate(files):
+        la = {l.strip() for l in written[a].splitlines() if l.strip()}
+        for b in files[i + 1:]:
+            lb = {l.strip() for l in written[b].splitlines() if l.strip()}
+            if la and lb and len(la & lb) / min(len(la), len(lb)) > 0.8:
+                return rec_gate("sin-clones", False, f"{a} y {b} comparten > 80% de lineas")
+    return rec_gate("sin-clones", True, "ok")
 
 
 def gate_docstring(before: dict) -> tuple[bool, str]:
@@ -749,6 +763,9 @@ def build():
             return False, "baseline roto en compile-fix"
     if not ok:
         return False, f"G3 rechaza tras 3 vueltas: {log[-300:]}"
+    cok, cnote = gate_clones(written)
+    if not cok:
+        return False, cnote
     dok, dnote = gate_docstring(docs_before)
     if not dok:  # una vuelta del coder para restaurarlo; si insiste, la etapa falla
         for f in [f for f, d in docs_before.items() if d and not _docstrings([f]).get(f)]:
