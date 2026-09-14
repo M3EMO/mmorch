@@ -1089,7 +1089,11 @@ if __name__ == "__main__":
     if not (WT / ".git").exists():
         WT.parent.mkdir(parents=True, exist_ok=True)
         if FEAT:
-            subprocess.run(["git", "-C", FEAT["repo"], "worktree", "add", "-q", "-b", f"sdlc/{PHASE}", str(WT), "HEAD"], check=True)
+            br = f"sdlc/{PHASE}"
+            exists = subprocess.run(["git", "-C", FEAT["repo"], "rev-parse", "--verify", "-q", br], capture_output=True).returncode == 0
+            # D13/D14: un intento anterior dejo la branch creada -> `-b` falla (255). Se reusa la branch existente.
+            args = ["worktree", "add", "-q", str(WT), br] if exists else ["worktree", "add", "-q", "-b", br, str(WT), "HEAD"]
+            subprocess.run(["git", "-C", FEAT["repo"], *args], check=True)
             for rel, content in TASK.accept_files.items():
                 _write(rel, content)
             subprocess.run(["git", "add", "-A"], cwd=WT, check=True)
