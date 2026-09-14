@@ -227,6 +227,22 @@ FEATURES = {
                   "mmorch/code_embedder.py", "mmorch/memory.py"],
         suite=["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
     ),
+    # Cableo aprobado: schedule y effort a providers.call (automatico: off_peak en cada registro; knob effort).
+    "D14": dict(
+        repo=r"C:\Users\map12\.claude\orchestration",
+        task=("Cablear `schedule` y `effort` en mmorch/providers.py. (R1) `call(...)` acepta keyword `effort: str | None = None`; "
+              "si viene, el modelo efectivo es `effort.model_for_effort(effort)` (import `from .effort import model_for_effort`) "
+              "y reemplaza a `model_key` desde el principio de la funcion (spec, cliente, costo y registro usan el modelo efectivo). "
+              "(R2) Sin `effort`, nada cambia. (R3) Cada `log_event(...)` de `call` (exito, error de API, budget_cap, breaker_open) "
+              "incluye en su dict `extra` la clave `off_peak` con el bool de `schedule.is_off_peak()` (import `from . import schedule` "
+              "a nivel de modulo y llamar `schedule.is_off_peak()` en cada evento, para que los tests lo parcheen); si `extra` no "
+              "existia en ese registro, crearlo como {'off_peak': ...}. Solo se modifica mmorch/providers.py; no se tocan tests ni "
+              "otros archivos; el docstring del modulo se conserva."),
+        files=["mmorch/providers.py"],
+        accept={"tests/test_sdlc_d14_schedule_effort_providers.py": HERE / "accept/D14/tests/test_sdlc_d14_schedule_effort_providers.py"},
+        contract=["effort", "model_for_effort", "schedule.is_off_peak", "off_peak", "log_event", "mmorch/providers.py"],
+        suite=["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
+    ),
 }
 FEAT = FEATURES.get(TASK_NAME)
 TESTS_PREFIX = "tests/" if FEAT else "tests_accept/"
