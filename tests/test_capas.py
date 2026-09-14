@@ -26,7 +26,7 @@ _DINAMICOS = {"loop"}   # cargado por nombre desde loop_nightly; 4173 usos en 90
 # Medido 2026-09-14 con este mismo analisis (15). Cada uno: se cablea (y sale de aca) o se borra (y sale
 # de aca). Nunca crece. plugin_worker es el subproceso de plugins: se ejecuta por path, no por import.
 _NO_ALCANZADOS = {
-    "code_embedder", "effort", "factory", "megasource", "plugin_worker", "predict", "schedule", "synth_store", "weights",
+    "code_embedder", "effort", "megasource", "plugin_worker", "schedule", "synth_store", "weights",
 }
 
 
@@ -112,4 +112,4 @@ def test_R3_la_lista_solo_achica():
 
 def test_R4_museo_por_modulo_no_crece():
     # el numero baja con cada poda; subirlo a mano es agregar museo
-    assert len(_NO_ALCANZADOS) <= 9
+    assert len(_NO_ALCANZADOS) <= 7

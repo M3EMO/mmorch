@@ -42,15 +42,12 @@ from .goal import (load_goal, goal_hash, goal_aligned,               # ancla ant
                    authorize_goal, goal_guard, GoalTampered)
 from .budget import (BudgetExceeded, monthly_spend, remaining,       # BudgetKeeper (techo $)
                      check as budget_check, status as budget_status)
-from .predict import Predictor, train as train_predictor, cross_val_error  # v0.1 cost/lat predictor
 from .evolve import (Change, snapshot_change, apply_change,                # fitness + zona
                      evaluate, zone_of, red_content_hits,
                      sandbox_branch, open_pr_branch)                        # git-isolated PR
 from .prices import effective_prices, load_overrides                       # Fase 2 override precios
 from .megasource import fetch_prices, diff_prices, propose_price_update     # Fase 2 megafuente
 from .nodes import orchestra, members, conductor as orchestra_conductor, Node  # registry orquesta
-from .factory import (featurize_code, train_logreg, train_code_quality,     # fábrica de modelos
-                      emit_training_job, predict_proba, accuracy)
 from .code_embedder import embed_code, available as code_embedder_available  # flywheel asset (numpy)
 from .rubric_loop import (start_rubric, next_action as rubric_next,           # loop autocorreccion
                           submit as rubric_submit, run_rubric_loop)            # (plan o API)
@@ -100,13 +97,10 @@ __all__ = [
     "load_goal", "goal_hash", "goal_aligned",
     "authorize_goal", "goal_guard", "GoalTampered",
     "BudgetExceeded", "monthly_spend", "remaining", "budget_check", "budget_status",
-    "Predictor", "train_predictor", "cross_val_error",
     "orchestra", "members", "orchestra_conductor", "Node",
     "Change", "snapshot_change", "apply_change", "evaluate", "zone_of",
     "red_content_hits", "sandbox_branch", "open_pr_branch",
     "effective_prices", "load_overrides", "fetch_prices", "diff_prices", "propose_price_update",
-    "featurize_code", "train_logreg", "train_code_quality", "emit_training_job",
-    "predict_proba", "accuracy",
     "embed_code", "code_embedder_available",
     "start_rubric", "rubric_next", "rubric_submit", "run_rubric_loop",
     "record_trajectory", "trajectory_dataset", "distill_skill", "load_trajectories",

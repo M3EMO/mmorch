@@ -150,22 +150,6 @@ def trajectory_dataset(path: pathlib.Path | None = None, *, min_chars: int = 20)
     return out
 
 
-def record_simple(task: str, code: str, passed: bool, *, arm: str = "",
-                  path: pathlib.Path | None = None) -> dict:
-    """Trayectoria de 1 paso (code_loop): codigo + label ejecucion. Mismo formato."""
-    traj = {
-        "task": task[:2000],
-        "criteria": [{"id": "exec", "desc": "pasa sus tests", "kind": "checkable"}],
-        "steps": [{"iter": 1, "code": code[:4000], "failed": [] if passed else ["exec"],
-                   "checkable_pass": bool(passed)}],
-        "n_iters": 1, "reward": 1.0 if passed else 0.0, "passed": bool(passed),
-        "gen_model": "", "arm": arm,
-    }
-    path = path or _TRAJ
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(traj, ensure_ascii=False) + "\n")
-    return traj
 
 
 def stats(path: pathlib.Path | None = None) -> dict:
