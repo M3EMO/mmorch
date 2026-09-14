@@ -942,6 +942,15 @@ def test():
             rec_gate("avance", False, f"stall={state['stall']} novedad={nov}: escala a reasoner")
             break
     state["test_fix_rounds"] = state.get("test_fix_rounds", 0) + vueltas
+    ladder_note = ""
+    if not ok:  # escalera: reasoner x2 -> Claude. D11: antes estos caminos saltaban lint y suite total.
+        ok, ladder_note = reasoner_rounds(log)
+        if not ok:
+            ok, ladder_note = claude_fix(log)
+        if not ok:
+            rec_gate("G4-aceptacion", False, ladder_note)
+            write_supervision("ESCALATE_HUMAN: fix 3 + reasoner 2 + Claude agotados.")
+            return False, ladder_note
     if ok and FEAT:
         lok, lnote = gate_lint()
         if not lok:  # D2 r1: el pre-commit del repo rechazo 2 errores de mypy; ahora es gate con escalera
@@ -978,21 +987,11 @@ def test():
         if not sok:
             write_supervision(f"ESCALATE_HUMAN: aceptacion verde pero suite total con regresion\n{snote}")
             return False, f"suite total: {snote[:200]}"
-        rec_gate("G4-aceptacion", True, f"verde en {vueltas} vueltas + lint + suite total")
-        return True, f"G4 + suite ok ({vueltas} vueltas)"
-    if ok:
-        state["suite_total"] = test_counts(log)
-        rec_gate("G4-aceptacion", True, f"verde en {vueltas} vueltas")
-        return True, f"G4 ok ({vueltas} vueltas)"
-    rok, rnote = reasoner_rounds(log)
-    if rok:
-        rec_gate("G4-aceptacion", True, rnote)
-        return True, rnote
-    cok, cnote = claude_fix(log)
-    rec_gate("G4-aceptacion", cok, cnote)
-    if not cok:
-        write_supervision("ESCALATE_HUMAN: fix 3 + reasoner 2 + Claude agotados.")
-    return cok, cnote
+        rec_gate("G4-aceptacion", True, f"verde en {vueltas} vueltas {ladder_note} + lint + suite total")
+        return True, f"G4 + suite ok ({vueltas} vueltas {ladder_note})".strip()
+    state["suite_total"] = test_counts(log)
+    rec_gate("G4-aceptacion", True, f"verde en {vueltas} vueltas {ladder_note}".strip())
+    return True, f"G4 ok ({vueltas} vueltas {ladder_note})".strip()
 
 
 @stage("5b-review")

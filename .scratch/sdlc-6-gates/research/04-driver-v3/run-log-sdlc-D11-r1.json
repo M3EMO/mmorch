@@ -3,229 +3,287 @@
  "task": "D11",
  "stages": [
   {
-   "stage": "2-spec",
-   "ok": true,
-   "minutes": 0.27,
-   "calls": 1,
-   "note": "G1 + trazabilidad-spec ok"
-  },
-  {
-   "stage": "2b-spec-review",
-   "ok": true,
-   "minutes": 0.81,
-   "calls": 0,
-   "note": "3 IDs cubiertos"
-  },
-  {
-   "stage": "3-plan",
-   "ok": true,
-   "minutes": 0.09,
-   "calls": 1,
-   "note": "ok"
-  },
-  {
    "stage": "4-build",
    "ok": true,
-   "minutes": 2.46,
-   "calls": 3,
+   "minutes": 1.3,
+   "calls": 1,
    "note": "G3 + test-compile + docstring ok"
   },
   {
    "stage": "5-test",
-   "ok": false,
-   "minutes": 11.73,
-   "calls": 2,
-   "note": "suite total: fallos nuevos: ['tests/test_executor_seam.py::test_coder_loop_escalates_through_fake_executor', 'tests/test_executor_seam.py::test_coder_loop_fake_executor_failure_propagates', 'tests/test_project_loo"
+   "ok": true,
+   "minutes": 28.24,
+   "calls": 1,
+   "note": "G4 + suite ok (0 vueltas)"
+  },
+  {
+   "stage": "5b-review",
+   "ok": true,
+   "minutes": 1.49,
+   "calls": 0,
+   "note": "bloqueo con evidencia"
+  },
+  {
+   "stage": "5-test",
+   "ok": true,
+   "minutes": 5.69,
+   "calls": 10,
+   "note": "Claude verde"
+  },
+  {
+   "stage": "6-pr",
+   "ok": true,
+   "minutes": 0.59,
+   "calls": 0,
+   "note": " 12 files changed, 989 insertions(+), 11 deletions(-)"
   }
  ],
  "gates": [
   {
-   "id": "trazabilidad-spec",
-   "ok": true,
-   "detail": "3 IDs cubiertos",
-   "calls": 1
-  },
-  {
-   "id": "G1-spec-contrato",
-   "ok": true,
-   "detail": "contrato cubierto, sin TBD, IDs trazados",
-   "calls": 1
-  },
-  {
-   "id": "spec-review-alcance",
-   "ok": true,
-   "detail": "ok",
-   "calls": 1
-  },
-  {
    "id": "baseline-intacto",
    "ok": true,
    "detail": "ok",
    "calls": 1
-  },
-  {
-   "id": "spec-review",
-   "ok": true,
-   "detail": "0 preguntas",
-   "calls": 1
-  },
-  {
-   "id": "trazabilidad-spec",
-   "ok": true,
-   "detail": "3 IDs cubiertos",
-   "calls": 1
-  },
-  {
-   "id": "plan-allowlist",
-   "ok": true,
-   "detail": "['mmorch/project_loop.py']",
-   "calls": 2
-  },
-  {
-   "id": "trazabilidad-plan",
-   "ok": true,
-   "detail": "ok",
-   "calls": 2
-  },
-  {
-   "id": "baseline-intacto",
-   "ok": true,
-   "detail": "ok",
-   "calls": 3
-  },
-  {
-   "id": "G3-compile",
-   "ok": false,
-   "detail": "  File \"mmorch/project_loop.py\", line 1\n    \\n{cur[:6000]}\\n\n     ^\nSyntaxError: unexpected character after line continuation character\n",
-   "calls": 3
   },
   {
    "id": "G3-compile",
    "ok": true,
    "detail": "compila",
-   "calls": 4
-  },
-  {
-   "id": "test-compile",
-   "ok": false,
-   "detail": "ame[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests\\test_sdlc_d11_codegraph_hermetico.py:16: in <module>\n    import mmorch.project_loop as PL\nmmorch\\__init__.py:79: in <module>\n    from .project_loop import run_project_task, ProjectResult                      # ejecutor mmorch-primario\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   ImportError: cannot import name 'run_project_task' from 'mmorch.project_loop' (C:\\Users\\map12\\AppData\\Local\\Temp\\sdlc-runs\\D11-r1\\mmorch\\project_loop.py)\n=========================== short test summary info ===========================\nERROR tests/test_sdlc_d11_codegraph_hermetico.py\n!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\nno tests collected, 1 error in 2.10s\n",
-   "calls": 4
-  },
-  {
-   "id": "baseline-intacto",
-   "ok": true,
-   "detail": "ok",
-   "calls": 4
-  },
-  {
-   "id": "G3-compile",
-   "ok": true,
-   "detail": "compila",
-   "calls": 5
+   "calls": 1
   },
   {
    "id": "test-compile",
    "ok": true,
    "detail": "ok",
-   "calls": 5
-  },
-  {
-   "id": "baseline-intacto",
-   "ok": true,
-   "detail": "ok",
-   "calls": 5
+   "calls": 1
   },
   {
    "id": "sin-clones",
    "ok": true,
    "detail": "ok",
-   "calls": 5
+   "calls": 1
+  },
+  {
+   "id": "cambio-minimo",
+   "ok": true,
+   "detail": "ok",
+   "calls": 1
   },
   {
    "id": "docstring-intacto",
    "ok": true,
    "detail": "la tarea lo cubre",
-   "calls": 5
-  },
-  {
-   "id": "un-archivo",
-   "ok": true,
-   "detail": "mmorch/project_loop.py: recorte de ['mmorch/project_loop.py']",
-   "calls": 7
-  },
-  {
-   "id": "baseline-intacto",
-   "ok": true,
-   "detail": "ok",
-   "calls": 7
-  },
-  {
-   "id": "G3-compile",
-   "ok": true,
-   "detail": "compila",
-   "calls": 7
-  },
-  {
-   "id": "test-compile",
-   "ok": true,
-   "detail": "ok",
-   "calls": 7
-  },
-  {
-   "id": "regresion-unidad",
-   "ok": true,
-   "detail": "['mmorch/project_loop.py']: 3 -> 0 fallos",
-   "calls": 7
+   "calls": 1
   },
   {
    "id": "lint",
    "ok": true,
    "detail": "0/0",
-   "calls": 7
+   "calls": 1
   },
   {
    "id": "suite-total",
    "ok": false,
    "detail": "fallos nuevos: ['tests/test_executor_seam.py::test_coder_loop_escalates_through_fake_executor', 'tests/test_executor_seam.py::test_coder_loop_fake_executor_failure_propagates', 'tests/test_project_loop.py::test_escalates_to_claude_after_K', 'tests/test_project_loop.py::test_mmorch_solves_after_correction', 'tests/test_project_loop.py::test_no_escalation_returns_failure', 'tests/test_project_loop.py::test_no_test_cmd_breaks_unverified']",
-   "calls": 7
+   "calls": 1
+  },
+  {
+   "id": "suite-total",
+   "ok": false,
+   "detail": "fallos nuevos: ['tests/test_executor_seam.py::test_coder_loop_escalates_through_fake_executor', 'tests/test_executor_seam.py::test_coder_loop_fake_executor_failure_propagates', 'tests/test_no_museum.py::test_cero_funciones_publicas_sin_caller_vivo', 'tests/test_project_loop.py::test_escalates_to_claude_after_K', 'tests/test_project_loop.py::test_mmorch_solves_after_correction', 'tests/test_project_loop.py::test_no_escalation_returns_failure', 'tests/test_project_loop.py::test_no_test_cmd_breaks_unverified']",
+   "calls": 2
+  },
+  {
+   "id": "claude-fix-alcance",
+   "ok": false,
+   "detail": "toco fuera de alcance, revertido: ['docs/generated/catalog.md']",
+   "calls": 2
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 2
+  },
+  {
+   "id": "suite-total",
+   "ok": true,
+   "detail": "sin fallos nuevos",
+   "calls": 2
+  },
+  {
+   "id": "G4-aceptacion",
+   "ok": true,
+   "detail": "verde en 0 vueltas + lint + suite total",
+   "calls": 2
+  },
+  {
+   "id": "diff-review-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 2
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 2
+  },
+  {
+   "id": "claude-diff-review",
+   "ok": false,
+   "detail": "test_review falla: vuelve a build. BLOCK: R1 llama `shutil.which(\"codegraph\")` antes de chequear el opt-in. Esto viola `spec.md`. El test falla en rojo y c",
+   "calls": 2
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 4
+  },
+  {
+   "id": "G3-compile",
+   "ok": false,
+   "detail": "  File \"mmorch/project_loop.py\", line 1\n    \\n{cur[:6000]}\\n\n     ^\nSyntaxError: unexpected character after line continuation character\n",
+   "calls": 4
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 6
+  },
+  {
+   "id": "G3-compile",
+   "ok": false,
+   "detail": "  File \"mmorch/project_loop.py\", line 1\n    \\n{cur[:6000]}\\n\n     ^\nSyntaxError: unexpected character after line continuation character\n",
+   "calls": 6
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 8
+  },
+  {
+   "id": "G3-compile",
+   "ok": false,
+   "detail": "  File \"mmorch/project_loop.py\", line 1\n    \\n{cur[:6000]}\\n\n     ^\nSyntaxError: unexpected character after line continuation character\n",
+   "calls": 8
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 10
+  },
+  {
+   "id": "G3-compile",
+   "ok": false,
+   "detail": "  File \"mmorch/project_loop.py\", line 1\n    \\n{cur[:6000]}\\n\n     ^\nSyntaxError: unexpected character after line continuation character\n",
+   "calls": 10
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 12
+  },
+  {
+   "id": "G3-compile",
+   "ok": false,
+   "detail": "  File \"mmorch/project_loop.py\", line 1\n    \\n{cur[:6000]}\\n\n     ^\nSyntaxError: unexpected character after line continuation character\n",
+   "calls": 12
+  },
+  {
+   "id": "claude-fix-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 12
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 12
+  },
+  {
+   "id": "G4-aceptacion",
+   "ok": true,
+   "detail": "Claude verde",
+   "calls": 12
+  },
+  {
+   "id": "lint",
+   "ok": true,
+   "detail": "0/0",
+   "calls": 12
   }
  ],
- "calls": 7,
+ "calls": 12,
  "human_interventions": 0,
- "claude_calls": 1,
+ "claude_calls": 3,
  "gate_rejects": [
+  {
+   "gate": "suite-total",
+   "detail": "fallos nuevos: ['tests/test_executor_seam.py::test_coder_loop_escalates_through_fake_executor', 'tests/test_executor_seam.py::test_coder_loop_fake_executor_failure_propagates', 'tests/test_project_loop.py::test_escalates_to_claude_after_K', 'tests/test_project_loop.py::test_mmorch_solves_after_correction', 'tests/test_project_loop.py::test_no_escalation_returns_failure', 'tests/test_project_loop.py::test_no_test_cmd_breaks_unverified']"
+  },
+  {
+   "gate": "suite-total",
+   "detail": "fallos nuevos: ['tests/test_executor_seam.py::test_coder_loop_escalates_through_fake_executor', 'tests/test_executor_seam.py::test_coder_loop_fake_executor_failure_propagates', 'tests/test_no_museum.py::test_cero_funciones_publicas_sin_caller_vivo', 'tests/test_project_loop.py::test_escalates_to_claude_after_K', 'tests/test_project_loop.py::test_mmorch_solves_after_correction', 'tests/test_project_loop.py::test_no_escalation_returns_failure', 'tests/test_project_loop.py::test_no_test_cmd_breaks_unverified']"
+  },
+  {
+   "gate": "claude-fix-alcance",
+   "detail": "toco fuera de alcance, revertido: ['docs/generated/catalog.md']"
+  },
+  {
+   "gate": "claude-diff-review",
+   "detail": "test_review falla: vuelve a build. BLOCK: R1 llama `shutil.which(\"codegraph\")` antes de chequear el opt-in. Esto viola `spec.md`. El test falla en rojo y c"
+  },
   {
    "gate": "G3-compile",
    "detail": "  File \"mmorch/project_loop.py\", line 1\n    \\n{cur[:6000]}\\n\n     ^\nSyntaxError: unexpected character after line continuation character\n"
   },
   {
-   "gate": "test-compile",
-   "detail": "ame[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests\\test_sdlc_d11_codegraph_hermetico.py:16: in <module>\n    import mmorch.project_loop as PL\nmmorch\\__init__.py:79: in <module>\n    from .project_loop import run_project_task, ProjectResult                      # ejecutor mmorch-primario\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   ImportError: cannot import name 'run_project_task' from 'mmorch.project_loop' (C:\\Users\\map12\\AppData\\Local\\Temp\\sdlc-runs\\D11-r1\\mmorch\\project_loop.py)\n=========================== short test summary info ===========================\nERROR tests/test_sdlc_d11_codegraph_hermetico.py\n!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\nno tests collected, 1 error in 2.10s\n"
+   "gate": "G3-compile",
+   "detail": "  File \"mmorch/project_loop.py\", line 1\n    \\n{cur[:6000]}\\n\n     ^\nSyntaxError: unexpected character after line continuation character\n"
   },
   {
-   "gate": "suite-total",
-   "detail": "fallos nuevos: ['tests/test_executor_seam.py::test_coder_loop_escalates_through_fake_executor', 'tests/test_executor_seam.py::test_coder_loop_fake_executor_failure_propagates', 'tests/test_project_loop.py::test_escalates_to_claude_after_K', 'tests/test_project_loop.py::test_mmorch_solves_after_correction', 'tests/test_project_loop.py::test_no_escalation_returns_failure', 'tests/test_project_loop.py::test_no_test_cmd_breaks_unverified']"
+   "gate": "G3-compile",
+   "detail": "  File \"mmorch/project_loop.py\", line 1\n    \\n{cur[:6000]}\\n\n     ^\nSyntaxError: unexpected character after line continuation character\n"
+  },
+  {
+   "gate": "G3-compile",
+   "detail": "  File \"mmorch/project_loop.py\", line 1\n    \\n{cur[:6000]}\\n\n     ^\nSyntaxError: unexpected character after line continuation character\n"
+  },
+  {
+   "gate": "G3-compile",
+   "detail": "  File \"mmorch/project_loop.py\", line 1\n    \\n{cur[:6000]}\\n\n     ^\nSyntaxError: unexpected character after line continuation character\n"
   }
  ],
- "escalated_to_claude": false,
- "base_sha": "f06ca4b",
- "t0": "2026-09-14 14:05:59",
- "t0_epoch": 1789405559.8338308,
- "usd_by_family": {
-  "deepseek": 0.093
- },
+ "escalated_to_claude": true,
+ "base_sha": "HEAD~1",
+ "t0": "2026-09-14 14:23:07",
+ "t0_epoch": 1789406587.7804296,
  "plan_files": [
   "mmorch/project_loop.py"
  ],
- "plan_parallel": [
-  "mmorch/project_loop.py"
- ],
+ "usd_by_family": {
+  "deepseek": 0.2852
+ },
  "test_rounds": [
   {
    "round": 0,
    "tests": {
     "run": 3,
-    "failed": 3
+    "failed": 0
+   }
+  },
+  {
+   "round": 0,
+   "tests": {
+    "run": 4,
+    "failed": 1
    }
   },
   {
@@ -233,15 +291,25 @@
    "files": [
     "mmorch/project_loop.py"
    ],
-   "tests": {
-    "run": 3,
-    "failed": 0
-   },
-   "novelty": 1.0
+   "reverted": "gate"
+  },
+  {
+   "round": 2,
+   "files": [
+    "mmorch/project_loop.py"
+   ],
+   "reverted": "gate"
+  },
+  {
+   "round": 3,
+   "files": [
+    "mmorch/project_loop.py"
+   ],
+   "reverted": "gate"
   }
  ],
  "stall": 0,
- "test_fix_rounds": 1,
+ "test_fix_rounds": 3,
  "lint_new": {
   "ruff": 0,
   "mypy": 0
@@ -252,16 +320,16 @@
   "tests/test_providers.py::test_call_success_logs_metric"
  ],
  "suite_total": {
-  "run": 1137,
-  "failed": 12,
-  "new_failures": [
-   "tests/test_executor_seam.py::test_coder_loop_escalates_through_fake_executor",
-   "tests/test_executor_seam.py::test_coder_loop_fake_executor_failure_propagates",
-   "tests/test_project_loop.py::test_escalates_to_claude_after_K",
-   "tests/test_project_loop.py::test_mmorch_solves_after_correction",
-   "tests/test_project_loop.py::test_no_escalation_returns_failure",
-   "tests/test_project_loop.py::test_no_test_cmd_breaks_unverified"
-  ],
-  "baseline_failures": 5
- }
+  "run": 4,
+  "failed": 0
+ },
+ "review_block": true,
+ "diffstat": " 12 files changed, 989 insertions(+), 11 deletions(-)",
+ "lines": {
+  "added": 25,
+  "deleted": 9
+ },
+ "mutation_score": null,
+ "minutes_total": 37.32,
+ "usd": 0.2852
 }
