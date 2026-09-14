@@ -47,7 +47,7 @@ FEATURES = {
         files=["mmorch/project_driver.py"],
         accept={"tests/test_sdlc_d3_atasco.py": HERE / "accept/D3/tests/test_sdlc_d3_atasco.py"},
         contract=["build_unit", "escalate", "atascado", "mmorch/project_driver.py"],
-        suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
+        suite=["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
     ),
     "D2": dict(
         repo=r"C:\Users\map12\.claude\orchestration",
@@ -62,7 +62,7 @@ FEATURES = {
         accept={"tests/test_sdlc_d2_test_compile.py": HERE / "accept/D2/tests/test_sdlc_d2_test_compile.py"},
         contract=["build_project", "compile_cmd", "run_compile", "CheckResult", "test_compile", "integration_failed",
                   "mmorch/project_integrate.py"],
-        suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
+        suite=["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
     ),
     # Reparacion de mmorch por modulos (2026-09-14): cada rojo previo de la suite es una aceptacion ya escrita.
     "D4": dict(
@@ -75,7 +75,7 @@ FEATURES = {
         files=["mmorch/synth_store.py"],
         accept={"tests/test_paths.py": r"C:\Users\map12\.claude\orchestration\tests\test_paths.py"},
         contract=["STORE_PATH", "repo_root", "synth_checkers.json", "mmorch/synth_store.py"],
-        suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
+        suite=["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
     ),
     "D5": dict(
         repo=r"C:\Users\map12\.claude\orchestration",
@@ -90,7 +90,7 @@ FEATURES = {
         files=["mmorch/mcp_server.py"],
         accept={"tests/test_sdlc_d5_version.py": HERE / "accept/D5/tests/test_sdlc_d5_version.py"},
         contract=["mmorch_version", "PackageNotFoundError", "pyproject.toml", "tomllib", "repo_root", "mmorch/mcp_server.py"],
-        suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
+        suite=["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
     ),
     # Robustez por modulos (2026-09-14). Modulo 1: plugins (host + worker). Tests de modos de falla escritos por Claude.
     "D6": dict(
@@ -107,7 +107,7 @@ FEATURES = {
         files=["mmorch/plugins.py", "mmorch/plugin_worker.py"],
         accept={"tests/test_sdlc_d6_plugins_robustez.py": HERE / "accept/D6/tests/test_sdlc_d6_plugins_robustez.py"},
         contract=["invoke", "timeout", "load failed", "JSONDecodeError", "BrokenPipeError", "mmorch/plugins.py", "mmorch/plugin_worker.py"],
-        suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
+        suite=["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
     ),
     "D7": dict(
         repo=r"C:\Users\map12\.claude\orchestration",
@@ -124,7 +124,7 @@ FEATURES = {
         accept={"tests/test_sdlc_d7_automerge_cableado.py": HERE / "accept/D7/tests/test_sdlc_d7_automerge_cableado.py",
                 "tests/test_no_museum.py": r"C:\Users\map12\.claude\orchestration\tests\test_no_museum.py"},
         contract=["try_automerge", "_finish_merge", "merge_sha", "yellow", "_halt", "mmorch/auto_apply.py"],
-        suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
+        suite=["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
     ),
     # Modulo 2: project_driver. Los seams inyectados (plan_fn, commit_fn, integrate_fn) sin proteccion.
     "D8": dict(
@@ -140,7 +140,7 @@ FEATURES = {
         files=["mmorch/project_driver.py"],
         accept={"tests/test_sdlc_d8_project_driver_robustez.py": HERE / "accept/D8/tests/test_sdlc_d8_project_driver_robustez.py"},
         contract=["run_project_build", "planner failed", "commit_error", "integrate_fn", "integration_failed", "mmorch/project_driver.py"],
-        suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
+        suite=["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
     ),
     # Modulo 3: superficie de red (server_fleet + server_pty). Entrada malformada nunca es 500.
     "D9": dict(
@@ -157,7 +157,7 @@ FEATURES = {
         files=["mmorch/server_fleet.py", "mmorch/server_pty.py"],
         accept={"tests/test_sdlc_d9_server_bordes.py": HERE / "accept/D9/tests/test_sdlc_d9_server_bordes.py"},
         contract=["request.json", "400", "404", "502", "rows", "cols", "forward", "mmorch/server_fleet.py", "mmorch/server_pty.py"],
-        suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
+        suite=["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
     ),
     # Modulo 4: workflow_engine. Validacion al cargar, como promete su docstring.
     "D10": dict(
@@ -173,7 +173,7 @@ FEATURES = {
         files=["mmorch/workflow_engine.py"],
         accept={"tests/test_sdlc_d10_workflow_engine_validacion.py": HERE / "accept/D10/tests/test_sdlc_d10_workflow_engine_validacion.py"},
         contract=["validate_steps", "start_workflow", "ValueError", "loop_back", "block_id", "_GATES", "mmorch/workflow_engine.py"],
-        suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
+        suite=["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
     ),
 }
 FEAT = FEATURES.get(TASK_NAME)
@@ -279,13 +279,13 @@ def one_file(code: str, rel: str) -> str:
     return secs.get(rel, code)
 
 
-def sh(cmd: list[str], timeout: float | None = None):
+def sh(cmd: list[str], timeout: float | None = None, keep: int = 6000):
     try:
         p = subprocess.run(cmd, cwd=WT, capture_output=True, text=True, encoding="utf-8", errors="replace",
                            timeout=timeout or CFG["cmd_timeout_s"])
     except subprocess.TimeoutExpired:
         return False, f"TIMEOUT {timeout or CFG['cmd_timeout_s']}s: {' '.join(cmd)[:200]}"
-    return p.returncode == 0, (p.stdout + p.stderr)[-6000:]
+    return p.returncode == 0, (p.stdout + p.stderr)[-keep:]
 
 
 def gate_suite_total() -> tuple[bool, str]:
@@ -299,21 +299,23 @@ def gate_suite_total() -> tuple[bool, str]:
         keep = {f: (WT / f).read_text(encoding="utf-8") for f in state["plan_files"] if (WT / f).exists()}
         subprocess.run(["git", "checkout", "HEAD", "--", *keep], cwd=WT, check=True)  # sin stash: la pila es compartida
         try:
-            _, blog = sh([PY, "-m", "pytest", *FEAT["suite"]], timeout=CFG["suite_timeout_s"])
+            _, blog = sh([PY, "-m", "pytest", *FEAT["suite"]], timeout=CFG["suite_timeout_s"], keep=400000)
         finally:
             for f, c in keep.items():
                 _write(f, c)
-        base_file.write_text("\n".join(re.findall(r"(?m)^FAILED \S+", blog)) + "\n", encoding="utf-8")
-    base = set(re.findall(r"(?m)^FAILED (\S+)", base_file.read_text(encoding="utf-8")))
-    ok, log = sh([PY, "-m", "pytest", *FEAT["suite"]], timeout=CFG["suite_timeout_s"])
-    _write("docs/sdlc/suite.log", log)  # D6: el conteo de fallos salia inflado (597); el log crudo permite depurarlo
-    now = set(re.findall(r"(?m)^FAILED (\S+)", log))
+        _write("docs/sdlc/suite-baseline.log", blog)
+        base_file.write_text("\n".join(re.findall(r"(?m)^(?:FAILED|ERROR) \S+", blog)) + "\n", encoding="utf-8")
+    # D8: la suite del worktree traia 594 ERROR (setup) que el gate no miraba porque solo leia FAILED.
+    base = set(re.findall(r"(?m)^(?:FAILED|ERROR) (\S+)", base_file.read_text(encoding="utf-8")))
+    ok, log = sh([PY, "-m", "pytest", *FEAT["suite"]], timeout=CFG["suite_timeout_s"], keep=400000)
+    _write("docs/sdlc/suite.log", log)
+    now = set(re.findall(r"(?m)^(?:FAILED|ERROR) (\S+)", log))
     new = sorted(now - base)
     if new and "TIMEOUT" not in log:
         # D2 r1: 3 tests de providers fallaron en la suite y pasaron solos -> flaky bajo carga.
         # Un fallo nuevo cuenta como regresion solo si se repite AISLADO (determinista, sin juicio).
-        _, rlog = sh([PY, "-m", "pytest", *new, "-q", "-rf", "-p", "no:cacheprovider"])
-        flaky = sorted(set(new) - set(re.findall(r"(?m)^FAILED (\S+)", rlog)))
+        _, rlog = sh([PY, "-m", "pytest", *new[:50], "-q", "-rfE", "-p", "no:cacheprovider"], keep=400000)
+        flaky = sorted(set(new) - set(re.findall(r"(?m)^(?:FAILED|ERROR) (\S+)", rlog)))
         new = sorted(set(new) - set(flaky))
         state["suite_flaky"] = flaky
     state["suite_total"] = test_counts(log) | {"new_failures": new, "baseline_failures": len(base)} if test_counts(log) else {"log": log[-300:]}

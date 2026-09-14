@@ -1,0 +1,9 @@
+materializado C:\Users\map12\Desktop\Claude\sdlc-runs\D8-r1
+[2-spec] ok=True G1 + trazabilidad-spec ok (1 llamadas, 0.3 min)
+[2b-spec-review] ok=True 3 IDs cubiertos (0 llamadas, 1.0 min)
+[3-plan] ok=True ok (1 llamadas, 0.1 min)
+[4-build] ok=True G3 + test-compile + docstring ok (1 llamadas, 1.0 min)
+[5-test] ok=True G4 + suite ok (0 vueltas) (0 llamadas, 5.9 min)
+[5b-review] ok=True sin test nuevo: El diff implementa R1, R2 y R3 como pide la TAREA. Los tests de aceptación D8 ahora pasan en verde. No toca otros archiv (0 llamadas, 1.7 min)
+[6-pr] ok=True  8 files changed, 509 insertions(+), 5 deletions(-) (0 llamadas, 0.2 min)
+DRIVER_PY TERMINO {"task": "D8", "calls": 3, "minutes_total": 10.28, "usd": 0.0397, "usd_by_family": {"deepseek": 0.0397}, "human_interventions": 0, "claude_calls": 2, "review_block": null, "escalated_to_claude": false, "gate_rejects": [], "diffstat": " 8 files changed, 509 insertions(+), 5 deletions(-)", "lines": {"added": 16, "deleted": 5}, "suite_total": {"run": 1134, "failed": 599, "new_failures": [], "baseline_failures": 5}, "lint_new": {"ruff": 0, "mypy": 0}}

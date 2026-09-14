@@ -20,6 +20,7 @@ Run-logs: `04-driver-v3/run-log-sdlc-<task>-r<n>.json`. Worktrees: `Desktop/Clau
 | D4 synth_store usa paths | r2 (con gate docstring) | si, diff limpio | 0.0489 | 18.6 | 0 | docstring-intacto x1 (restaurado por el coder), claude-diff-review x1 | 1 BLOCK con test (salto de linea final del docstring) | +2 / -2 | 1125 sin fallos nuevos | 0/0 | 0 |
 | D6 plugins robustez (2 archivos) | r1 | si | 0.1077 | 21.5 | 3 (lint -> Claude) | lint x2 | 0 (NOTE, probo bordes extra) | +182 / -108 (reescritura) | 1126 sin fallos nuevos | 0/0 | 0 |
 | D7 cablear try_automerge | r1 | NO: bloqueada | ~0.05 | 6.6 | build | test-compile x4, un-archivo x1 | - | - | - | - | 0 |
+| D8 project_driver seams | r1 | si | 0.0397 | 10.3 | 0 | ninguno | 0 (OK) | +16 / -5 | 1134 sin FAILED nuevos; 594 ERROR de setup no mirados (ver hallazgo) | 0/0 | 0 |
 
 ## Veredicto (criterio del ticket 07)
 

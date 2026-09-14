@@ -1,0 +1,228 @@
+{
+ "proto": "driver_py",
+ "task": "D8",
+ "stages": [
+  {
+   "stage": "2-spec",
+   "ok": true,
+   "minutes": 0.3,
+   "calls": 1,
+   "note": "G1 + trazabilidad-spec ok"
+  },
+  {
+   "stage": "2b-spec-review",
+   "ok": true,
+   "minutes": 1.01,
+   "calls": 0,
+   "note": "3 IDs cubiertos"
+  },
+  {
+   "stage": "3-plan",
+   "ok": true,
+   "minutes": 0.07,
+   "calls": 1,
+   "note": "ok"
+  },
+  {
+   "stage": "4-build",
+   "ok": true,
+   "minutes": 1.03,
+   "calls": 1,
+   "note": "G3 + test-compile + docstring ok"
+  },
+  {
+   "stage": "5-test",
+   "ok": true,
+   "minutes": 5.91,
+   "calls": 0,
+   "note": "G4 + suite ok (0 vueltas)"
+  },
+  {
+   "stage": "5b-review",
+   "ok": true,
+   "minutes": 1.72,
+   "calls": 0,
+   "note": "sin test nuevo: El diff implementa R1, R2 y R3 como pide la TAREA. Los tests de aceptación D8 ahora pasan en verde. No toca otros archiv"
+  },
+  {
+   "stage": "6-pr",
+   "ok": true,
+   "minutes": 0.24,
+   "calls": 0,
+   "note": " 8 files changed, 509 insertions(+), 5 deletions(-)"
+  }
+ ],
+ "gates": [
+  {
+   "id": "trazabilidad-spec",
+   "ok": true,
+   "detail": "3 IDs cubiertos",
+   "calls": 1
+  },
+  {
+   "id": "G1-spec-contrato",
+   "ok": true,
+   "detail": "contrato cubierto, sin TBD, IDs trazados",
+   "calls": 1
+  },
+  {
+   "id": "spec-review-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 1
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 1
+  },
+  {
+   "id": "spec-review",
+   "ok": true,
+   "detail": "0 preguntas",
+   "calls": 1
+  },
+  {
+   "id": "trazabilidad-spec",
+   "ok": true,
+   "detail": "3 IDs cubiertos",
+   "calls": 1
+  },
+  {
+   "id": "plan-allowlist",
+   "ok": true,
+   "detail": "['mmorch/project_driver.py']",
+   "calls": 2
+  },
+  {
+   "id": "trazabilidad-plan",
+   "ok": true,
+   "detail": "ok",
+   "calls": 2
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 3
+  },
+  {
+   "id": "test-compile",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "sin-clones",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "docstring-intacto",
+   "ok": true,
+   "detail": "la tarea lo cubre",
+   "calls": 3
+  },
+  {
+   "id": "lint",
+   "ok": true,
+   "detail": "0/0",
+   "calls": 3
+  },
+  {
+   "id": "suite-total",
+   "ok": true,
+   "detail": "sin fallos nuevos",
+   "calls": 3
+  },
+  {
+   "id": "G4-aceptacion",
+   "ok": true,
+   "detail": "verde en 0 vueltas + lint + suite total",
+   "calls": 3
+  },
+  {
+   "id": "diff-review-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "claude-diff-review",
+   "ok": true,
+   "detail": "sin test nuevo: El diff implementa R1, R2 y R3 como pide la TAREA. Los tests de aceptación D8 ahora pasan en verde. No toca otros archiv",
+   "calls": 3
+  },
+  {
+   "id": "lint",
+   "ok": true,
+   "detail": "0/0",
+   "calls": 3
+  }
+ ],
+ "calls": 3,
+ "human_interventions": 0,
+ "claude_calls": 2,
+ "gate_rejects": [],
+ "escalated_to_claude": false,
+ "base_sha": "c9a1172",
+ "t0": "2026-09-14 12:53:56",
+ "t0_epoch": 1789401236.3749187,
+ "usd_by_family": {
+  "deepseek": 0.0397
+ },
+ "plan_files": [
+  "mmorch/project_driver.py"
+ ],
+ "plan_parallel": [
+  "mmorch/project_driver.py"
+ ],
+ "test_rounds": [
+  {
+   "round": 0,
+   "tests": {
+    "run": 3,
+    "failed": 0
+   }
+  }
+ ],
+ "stall": 0,
+ "test_fix_rounds": 0,
+ "lint_new": {
+  "ruff": 0,
+  "mypy": 0
+ },
+ "suite_flaky": [
+  "tests/test_providers.py::test_call_api_failure_logs_error_and_reraises",
+  "tests/test_providers.py::test_call_passes_timeout_and_maxtokens",
+  "tests/test_providers.py::test_call_success_logs_metric"
+ ],
+ "suite_total": {
+  "run": 1134,
+  "failed": 599,
+  "new_failures": [],
+  "baseline_failures": 5
+ },
+ "diffstat": " 8 files changed, 509 insertions(+), 5 deletions(-)",
+ "lines": {
+  "added": 16,
+  "deleted": 5
+ },
+ "mutation_score": null,
+ "minutes_total": 10.28,
+ "usd": 0.0397
+}
