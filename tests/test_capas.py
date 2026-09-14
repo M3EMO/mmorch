@@ -13,6 +13,7 @@ Reglas:
 from __future__ import annotations
 
 import ast
+import functools
 import glob
 import re
 from pathlib import Path
@@ -34,8 +35,10 @@ def _modulos() -> dict[str, Path]:
     return {p.stem: p for p in PKG.glob("*.py") if not p.stem.startswith("__")}
 
 
+@functools.lru_cache(maxsize=None)
 def _reexports() -> dict[str, str]:
-    """nombre exportado por mmorch/__init__.py -> modulo que lo define (`from .mod import nombre`)."""
+    """nombre exportado por mmorch/__init__.py -> modulo que lo define (`from .mod import nombre`).
+    Cacheado: sin cache, cada _imports() re-parseaba __init__ y R3 tardaba > 15 min en un worktree cargado."""
     out: dict[str, str] = {}
     try:
         tree = ast.parse((PKG / "__init__.py").read_text(encoding="utf-8", errors="replace"))
@@ -70,7 +73,12 @@ def _imports(path: Path, mods: set[str]) -> set[str]:
     return {m for m in out if m in mods and m != path.stem}
 
 
-def _alcanzados() -> set[str]:
+@functools.lru_cache(maxsize=None)
+def _alcanzados() -> frozenset[str]:
+    return frozenset(_alcanzados_raw())
+
+
+def _alcanzados_raw() -> set[str]:
     mods = _modulos()
     entradas = [e for e in _ENTRADAS if e in mods]
     for f in glob.glob(str(REPO / "scripts" / "*.py")) + glob.glob(str(REPO / "*.py")):
