@@ -190,6 +190,23 @@ FEATURES = {
         contract=["_codegraph_context", "MMORCH_CODEGRAPH_AUTOINDEX", "gettempdir", "sync", "mmorch/project_loop.py"],
         suite=["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
     ),
+    # Cableo aprobado: megasource al nightly (mensual, propone, no escribe prices.json).
+    "D12": dict(
+        repo=r"C:\Users\map12\.claude\orchestration",
+        task=("Cablear `megasource` al nightly en mmorch/nightly.py. Agregar `run_price_check(now=None, propose=None, "
+              "state_path=None) -> dict`: estado JSON en `mmorch.paths.home() / 'nightly_prices.json'` con `last_check_ts`; "
+              "si la ultima corrida tiene menos de 30 dias devuelve {'ran': False, 'reason': 'reciente'} sin llamar a propose; "
+              "si no, llama `propose()` (default: `from mmorch.megasource import propose_price_update`), guarda `last_check_ts = now` "
+              "y devuelve {'ran': True, 'n_changed': r.get('n_changed', 0), 'diff': r.get('diff', {})}. Si propose levanta, "
+              "devuelve {'ran': True, 'error': f'{type(e).__name__}: {str(e)[:200]}'} y NO escribe el estado. Nunca modifica prices.json. "
+              "En `main()`, invocarla dentro de su propio try/except despues del bloque del digest, registrando el resultado con `_log` "
+              "(rec {'step': 'price_check', **resultado}). Solo se modifica mmorch/nightly.py; no se tocan tests ni otros archivos; "
+              "el docstring del modulo se conserva."),
+        files=["mmorch/nightly.py"],
+        accept={"tests/test_sdlc_d12_megasource_nightly.py": HERE / "accept/D12/tests/test_sdlc_d12_megasource_nightly.py"},
+        contract=["run_price_check", "nightly_prices.json", "last_check_ts", "propose_price_update", "price_check", "mmorch/nightly.py"],
+        suite=["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
+    ),
 }
 FEAT = FEATURES.get(TASK_NAME)
 TESTS_PREFIX = "tests/" if FEAT else "tests_accept/"
