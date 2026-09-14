@@ -126,6 +126,22 @@ FEATURES = {
         contract=["try_automerge", "_finish_merge", "merge_sha", "yellow", "_halt", "mmorch/auto_apply.py"],
         suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
     ),
+    # Modulo 2: project_driver. Los seams inyectados (plan_fn, commit_fn, integrate_fn) sin proteccion.
+    "D8": dict(
+        repo=r"C:\Users\map12\.claude\orchestration",
+        task=("Robustez de `run_project_build` en mmorch/project_driver.py: los seams inyectados no pueden tirar abajo el build. "
+              "(R1) si `plan_fn` levanta una excepcion, devolver {'status': 'escalate', 'reason': f'planner failed: {type(e).__name__}: {str(e)[:200]}', 'task': task[:80]}. "
+              "(R2) si `commit_fn` levanta, la unidad sigue 'built', se agrega al dict de resultado de esa unidad la clave "
+              "'commit_error' con f'{type(e).__name__}: {str(e)[:200]}' y el build continua con la siguiente unidad. "
+              "(R3) si `integrate_fn` levanta, devolver {'status': 'integration_failed', 'depth': depth, 'external_test': external_test, "
+              "'detail': f'integrate_fn {type(e).__name__}: {str(e)[:200]}', 'results': results}. "
+              "La recursion (sub-builds) hereda el mismo comportamiento porque pasa por la misma funcion. "
+              "Solo se modifica mmorch/project_driver.py; no se tocan tests ni otros archivos; el docstring del modulo se conserva."),
+        files=["mmorch/project_driver.py"],
+        accept={"tests/test_sdlc_d8_project_driver_robustez.py": HERE / "accept/D8/tests/test_sdlc_d8_project_driver_robustez.py"},
+        contract=["run_project_build", "planner failed", "commit_error", "integrate_fn", "integration_failed", "mmorch/project_driver.py"],
+        suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
+    ),
 }
 FEAT = FEATURES.get(TASK_NAME)
 TESTS_PREFIX = "tests/" if FEAT else "tests_accept/"
