@@ -25,13 +25,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import pathlib
 import threading
 import time
 
+from .paths import repo_root
 from .sandbox import run_sandboxed
 
-STORE_PATH = pathlib.Path(__file__).resolve().parent.parent / "synth_checkers.json"
+STORE_PATH = repo_root() / "synth_checkers.json"
 _lock = threading.Lock()
 
 
