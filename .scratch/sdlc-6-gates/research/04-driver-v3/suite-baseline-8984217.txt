@@ -1,0 +1,5 @@
+FAILED tests/test_paths.py::test_gate_sin_anclas_de_estado_fuera_de_paths
+FAILED tests/test_sdlc_d5_version.py::test_mmorch_version_cae_a_pyproject_sin_metadata
+FAILED tests/test_sdlc_d5_version.py::test_mmorch_version_usa_metadata_cuando_existe
+FAILED tests/test_sdlc_d5_version.py::test_server_expone_version_no_vacia
+FAILED tests/test_w6_ronda3.py::test_mcp_server_reporta_version_de_mmorch

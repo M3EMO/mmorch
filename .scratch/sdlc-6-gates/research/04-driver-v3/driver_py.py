@@ -251,9 +251,11 @@ def accept():
 
 def test_counts(log):
     # D3: con -rf el log repite "N failed" dentro de los asserts; se cuenta SOLO la linea de resumen final
-    summary = [l for l in log.splitlines() if re.match(r"=*\s*(?:\d+ \w+, )*\d+ (?:passed|failed|errors?)\b.* in [\d.]+s", l)]
-    if summary:
-        log = summary[-1]
+    # D4/D5: los "N failed" dentro de los asserts de -rf inflaban el conteo (594): solo la ULTIMA linea de pytest
+    lines = [l for l in log.strip().splitlines() if l.strip()]
+    tail = [l for l in lines[-3:] if re.search(r"\d+ (?:passed|failed|errors?)\b", l)]
+    if tail:
+        log = tail[-1]
     f = sum(int(x) for x in re.findall(r"(\d+) (?:failed|error)", log))
     p = sum(int(x) for x in re.findall(r"(\d+) passed", log))
     if not (f or p):
@@ -406,7 +408,30 @@ def _all_code():
 def _write(rel, code):
     p = WT / rel
     p.parent.mkdir(parents=True, exist_ok=True)
+    if rel.endswith(".py") and code and not code.endswith("\n"):
+        code += "\n"  # D4: strip_fence borraba la linea final y el diff mostraba "No newline at end of file"
     p.write_text(code, encoding="utf-8")
+
+
+def _docstrings(files) -> dict:
+    import ast
+    out = {}
+    for f in files:
+        try:
+            out[f] = ast.get_docstring(ast.parse((WT / f).read_text(encoding="utf-8"))) if (WT / f).exists() else None
+        except SyntaxError:
+            out[f] = None
+    return out
+
+
+def gate_docstring(before: dict) -> tuple[bool, str]:
+    """D4: el coder borro el docstring del modulo (22 lineas) y ningun test lo ve. Determinista, USD 0:
+    un docstring de modulo que existia antes tiene que seguir existiendo, salvo que la tarea hable de docstrings."""
+    if "docstring" in TASK.task.lower():
+        return rec_gate("docstring-intacto", True, "la tarea lo cubre")
+    after = _docstrings(before)
+    perdidos = [f for f, d in before.items() if d and not after.get(f)]
+    return rec_gate("docstring-intacto", not perdidos, "ok" if not perdidos else f"docstring de modulo borrado en {perdidos}")
 
 
 def _tests_text():
@@ -608,6 +633,7 @@ def build():
     spec_md = (WT / "docs/sdlc/spec.md").read_text(encoding="utf-8")
     plan_md = (WT / "docs/sdlc/plan.md").read_text(encoding="utf-8")
     written = {}
+    docs_before = _docstrings(state["plan_files"])  # gate docstring-intacto (D4)
     for f in state["plan_files"]:
         cur = (WT / f).read_text(encoding="utf-8") if (WT / f).exists() else ""
         cur_ctx = f"ARCHIVO ACTUAL {f} (devolvelo COMPLETO con el cambio minimo):\n{cur}\n\n" if cur.strip() else ""
@@ -640,7 +666,19 @@ def build():
             return False, "baseline roto en compile-fix"
     if not ok:
         return False, f"G3 rechaza tras 3 vueltas: {log[-300:]}"
-    return True, "G3 + test-compile ok"
+    dok, dnote = gate_docstring(docs_before)
+    if not dok:  # una vuelta del coder para restaurarlo; si insiste, la etapa falla
+        for f in [f for f, d in docs_before.items() if d and not _docstrings([f]).get(f)]:
+            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero.",
+                      f"Restaura el docstring de modulo original de {f} al inicio del archivo, sin cambiar nada mas.\n\n"
+                      f"DOCSTRING ORIGINAL:\n\"\"\"{docs_before[f]}\"\"\"\n\nARCHIVO ACTUAL:\n{(WT / f).read_text(encoding='utf-8')}")
+            code = one_file(strip_fence(out), f)
+            if code:
+                _write(f, code); written[f] = code
+        dok, dnote = gate_docstring(docs_before)
+        if not dok or not _compiles()[0]:
+            return False, f"docstring: {dnote}"
+    return True, "G3 + test-compile + docstring ok"
 
 
 @stage("5-test")
