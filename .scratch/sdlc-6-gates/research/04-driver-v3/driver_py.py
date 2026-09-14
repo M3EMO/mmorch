@@ -44,6 +44,7 @@ FEATURES = {
               "'escalate' en ESA vuelta con un `detail` que contenga la palabra 'atascado', sin gastar las vueltas "
               "restantes de max_fix. Codigos distintos siguen agotando max_fix como hoy. Solo se modifica "
               "mmorch/project_driver.py; no se tocan tests ni otros archivos."),
+        files=["mmorch/project_driver.py"],
         accept={"tests/test_sdlc_d3_atasco.py": HERE / "accept/D3/tests/test_sdlc_d3_atasco.py"},
         contract=["build_unit", "escalate", "atascado", "mmorch/project_driver.py"],
         suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
@@ -57,9 +58,38 @@ FEATURES = {
               "En `integrate_fn`: si `compile_cmd` esta declarado y el CheckResult no pasa, devolver "
               "(False, 'test-compile: ' + detail) SIN llamar a `integrate` (fail-closed). Si pasa, sigue como hoy. "
               "Sin `compile_cmd` nada cambia. Solo se modifica mmorch/project_integrate.py; no se tocan tests ni otros archivos."),
+        files=["mmorch/project_integrate.py"],
         accept={"tests/test_sdlc_d2_test_compile.py": HERE / "accept/D2/tests/test_sdlc_d2_test_compile.py"},
         contract=["build_project", "compile_cmd", "run_compile", "CheckResult", "test_compile", "integration_failed",
                   "mmorch/project_integrate.py"],
+        suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
+    ),
+    # Reparacion de mmorch por modulos (2026-09-14): cada rojo previo de la suite es una aceptacion ya escrita.
+    "D4": dict(
+        repo=r"C:\Users\map12\.claude\orchestration",
+        task=("mmorch/synth_store.py ancla `STORE_PATH` a la raiz del repo con `pathlib.Path(__file__).resolve().parent.parent`. "
+              "El gate `tests/test_paths.py::test_gate_sin_anclas_de_estado_fuera_de_paths` prohibe ese patron fuera de mmorch/paths.py. "
+              "Reemplazalo por `from .paths import repo_root` y `STORE_PATH = repo_root() / \"synth_checkers.json\"` "
+              "(el archivo sigue versionado en la raiz del repo; el comportamiento no cambia). "
+              "Solo se modifica mmorch/synth_store.py; no se tocan tests ni otros archivos."),
+        files=["mmorch/synth_store.py"],
+        accept={"tests/test_paths.py": r"C:\Users\map12\.claude\orchestration\tests\test_paths.py"},
+        contract=["STORE_PATH", "repo_root", "synth_checkers.json", "mmorch/synth_store.py"],
+        suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
+    ),
+    "D5": dict(
+        repo=r"C:\Users\map12\.claude\orchestration",
+        task=("mmorch/mcp_server.py fija `mcp._mcp_server.version` con `importlib.metadata.version(\"mmorch\")`. En un git worktree "
+              "no hay metadata del paquete (PackageNotFoundError) y el test `tests/test_w6_ronda3.py::test_mcp_server_reporta_version_de_mmorch` "
+              "falla. Agrega un fallback determinista: si `importlib.metadata.version` falla, leer `version = \"...\"` de la seccion "
+              "[project] del pyproject.toml en `mmorch.paths.repo_root()` con `tomllib`; si tampoco existe, devolver \"0.0.0\". "
+              "Expone en mmorch/mcp_server.py una funcion `mmorch_version() -> str` con ese fallback y usala en la asignacion de "
+              "`mcp._mcp_server.version`. Dentro de `mmorch_version` llama `importlib.metadata.version(\"mmorch\")` accediendo por el "
+              "modulo (`import importlib.metadata`), NO con `from importlib.metadata import version`: los tests lo parchean. "
+              "Solo se modifica mmorch/mcp_server.py; no se tocan tests ni otros archivos."),
+        files=["mmorch/mcp_server.py"],
+        accept={"tests/test_sdlc_d5_version.py": HERE / "accept/D5/tests/test_sdlc_d5_version.py"},
+        contract=["mmorch_version", "PackageNotFoundError", "pyproject.toml", "tomllib", "repo_root", "mmorch/mcp_server.py"],
         suite=["tests", "-q", "-rf", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
     ),
 }
@@ -180,7 +210,7 @@ def gate_suite_total() -> tuple[bool, str]:
     mmorch tarda ~20 min y trae 4 rojos previos (medido 2026-09-11): se compara por NOMBRE, no por verde."""
     # D3 r1b: el baseline medido en el arbol principal no vale (tests sin commitear, metadata del paquete).
     # Se mide EN el worktree, sobre el commit base, una vez por sha; se cachea en suite-baseline-<sha>.txt.
-    sha = subprocess.run(["git", "rev-parse", "--short", "HEAD~1"], cwd=WT, capture_output=True, text=True).stdout.strip()
+    sha = subprocess.run(["git", "rev-parse", "--short", state.get("base_sha", "HEAD~1")], cwd=WT, capture_output=True, text=True).stdout.strip()
     base_file = HERE / f"suite-baseline-{sha}.txt"
     if not base_file.exists():
         keep = {f: (WT / f).read_text(encoding="utf-8") for f in state["plan_files"] if (WT / f).exists()}
@@ -250,12 +280,20 @@ def snapshot_baseline():
         SNAP[rel] = sha_file(rel)
 
 
+def _need_files() -> list[str]:
+    """Archivos que el plan DEBE incluir. Feature de repo: lista explicita (D4: la tarea nombra archivos que NO se
+    tocan, el regex los tomaba como obligatorios). Bench: los paths que nombra el enunciado."""
+    if FEAT:
+        return list(FEAT["files"])
+    return list(dict.fromkeys(re.findall(r"[\w/]+\.py", TASK.task)))
+
+
 def gate_plan_allowlist(plan_md: str, files: list[str]) -> tuple[bool, str]:
     m = re.search(r"## Archivos\b(.*?)(?:\n## |\Z)", plan_md, re.S | re.I)
     block = m.group(1) if m else plan_md
     if re.search(r"(?im)^\s*[-*]+\s*`?" + re.escape(TESTS_PREFIX), block):
         return rec_gate("plan-allowlist", False, f"plan lista {TESTS_PREFIX} como archivo a escribir")
-    need = [f for f in dict.fromkeys(re.findall(r"[\w/]+\.py", TASK.task)) if f not in files]
+    need = [f for f in _need_files() if f not in files]
     if need:
         return rec_gate("plan-allowlist", False, f"plan omite {need}")
     return rec_gate("plan-allowlist", True, f"{files}")
@@ -447,7 +485,7 @@ def claude_fix(log) -> tuple[bool, str]:
 def self_check() -> int:
     """Cero API: allowlist, novedad, conteo pytest."""
     fails = []
-    need = list(dict.fromkeys(re.findall(r"[\w/]+\.py", TASK.task)))   # archivos que la tarea nombra
+    need = _need_files()
     good = "## Archivos\n" + "".join(f"- `{f}`\n" for f in need) + "\n## Prueba\npytest\n"
     if not gate_plan_allowlist(good, need)[0]:
         fails.append("allowlist-good")
@@ -729,9 +767,10 @@ def pr():
     subprocess.run(["git", "add", "-A"], cwd=WT, check=True)
     subprocess.run(["git", "-c", "user.name=map12", "-c", "user.email=map12082004@gmail.com", "commit", "-q", "-m",
                     f"sdlc: {TASK_NAME} - driver_py, gates + escalera + revision Claude"], cwd=WT, check=True)
-    ds = subprocess.run(["git", "diff", "--stat", "HEAD~1"], cwd=WT, capture_output=True, text=True).stdout
+    base = state.get("base_sha", "HEAD~1")
+    ds = subprocess.run(["git", "diff", "--stat", base], cwd=WT, capture_output=True, text=True).stdout
     state["diffstat"] = ds.strip().splitlines()[-1] if ds.strip() else ""
-    ns = subprocess.run(["git", "diff", "--numstat", "HEAD~1", "--", *state["plan_files"]], cwd=WT, capture_output=True, text=True).stdout
+    ns = subprocess.run(["git", "diff", "--numstat", base, "--", *state["plan_files"]], cwd=WT, capture_output=True, text=True).stdout
     rows = [l.split("\t") for l in ns.splitlines() if l.count("\t") == 2 and l.split("\t")[0].isdigit()]
     state["lines"] = {"added": sum(int(a) for a, _, _ in rows), "deleted": sum(int(d) for _, d, _ in rows)}
     gate_lint()
@@ -771,11 +810,15 @@ if __name__ == "__main__":
             for rel, content in TASK.accept_files.items():
                 _write(rel, content)
             subprocess.run(["git", "add", "-A"], cwd=WT, check=True)
-            subprocess.run(["git", "-c", "user.name=map12", "-c", "user.email=map12082004@gmail.com", "commit", "-q", "-m",
-                            f"sdlc: test de aceptacion {TASK_NAME} (rojo por diseño)"], cwd=WT, check=True)
+            staged = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=WT).returncode != 0
+            if staged:  # D4: el test de aceptacion puede ser uno que ya vive en el repo -> nada que commitear
+                subprocess.run(["git", "-c", "user.name=map12", "-c", "user.email=map12082004@gmail.com", "commit", "-q", "-m",
+                                f"sdlc: test de aceptacion {TASK_NAME} (rojo por diseño)"], cwd=WT, check=True)
         else:
             bench.materialize(TASK, str(WT))
         print("materializado", WT, flush=True)
+    state["base_sha"] = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=WT, capture_output=True, text=True).stdout.strip() \
+        if float(_arg("--from-stage", "2")) <= 3 else "HEAD~1"  # en resume no se conoce: HEAD~1 como antes
     gi = WT / ".gitignore"
     if not gi.exists():
         gi.write_text("__pycache__/\n", encoding="utf-8")  # r1-r3: la review hace git add -A antes del pr

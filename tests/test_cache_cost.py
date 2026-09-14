@@ -22,7 +22,8 @@ def test_repo_prices_json_has_deepseek_cache():
     # Path explicito (D5): bajo MMORCH_HOME aislado el default apunta al home
     # fresco (sin prices.json) y este test dejaba de ser hermetico.
     repo_prices = pathlib.Path(__file__).resolve().parents[1] / "prices.json"
-    assert PR.effective_cache_price("deepseek-chat", path=repo_prices) == 0.0028
+    # 2026-09-04: prices.json corrigio el cache-hit de deepseek-chat a 0.014 (peak real de v4-flash).
+    assert PR.effective_cache_price("deepseek-chat", path=repo_prices) == 0.014
 
 
 def test_cost_with_cache_is_cheaper(monkeypatch, tmp_path):
