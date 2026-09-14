@@ -207,6 +207,26 @@ FEATURES = {
         contract=["run_price_check", "nightly_prices.json", "last_check_ts", "propose_price_update", "price_check", "mmorch/nightly.py"],
         suite=["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
     ),
+    # Cableo aprobado: code_embedder a memory (notas de codigo) con pesos verificados por weights.
+    "D13": dict(
+        repo=r"C:\Users\map12\.claude\orchestration",
+        task=("Cablear `code_embedder` a `memory` con verificacion de pesos. (R1) En mmorch/code_embedder.py, `_load()` resuelve "
+              "el .npz y el vocab via `from .weights import resolve, verify, card`: primero `verify('code_embedder')`; si no pasa, "
+              "cachea 'no disponible' y `available()` devuelve False y `embed_code()` None; si pasa, usa `resolve('code_embedder')` "
+              "para el .npz y `card('code_embedder')['vocab_path']` (relativo a `weights.ROOT`) para el vocab. Mantener el cache de "
+              "carga en una variable de modulo `_CACHE` (None = sin cargar). (R2) En mmorch/memory.py, `write_note(..., kind: str = 'text')`: "
+              "con kind='code' el embedding sale de `code_embedder.embed_code(text)` y se guarda emb_model='code_embedder', dim=384; "
+              "si no esta disponible, embedding NULL como hoy. (R3) `recall(query, scope, ..., kind: str = 'text')`: con kind='code' "
+              "embebe la query con code_embedder y en el rerank fino compara SOLO notas con emb_model='code_embedder'; con kind='text' "
+              "compara SOLO notas con emb_model distinto de 'code_embedder' (los espacios no se mezclan). (R4) Todo lo demas igual: "
+              "kind default 'text' conserva el comportamiento actual byte a byte. Solo se modifican mmorch/code_embedder.py y "
+              "mmorch/memory.py; no se tocan tests ni otros archivos; los docstrings de modulo se conservan."),
+        files=["mmorch/code_embedder.py", "mmorch/memory.py"],
+        accept={"tests/test_sdlc_d13_code_embedder_recall.py": HERE / "accept/D13/tests/test_sdlc_d13_code_embedder_recall.py"},
+        contract=["code_embedder", "verify", "resolve", "_CACHE", "kind", "emb_model", "write_note", "recall",
+                  "mmorch/code_embedder.py", "mmorch/memory.py"],
+        suite=["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
+    ),
 }
 FEAT = FEATURES.get(TASK_NAME)
 TESTS_PREFIX = "tests/" if FEAT else "tests_accept/"
@@ -562,6 +582,26 @@ def gate_clones(written: dict) -> tuple[bool, str]:
     return rec_gate("sin-clones", True, "ok")
 
 
+_orig_files: dict[str, str] = {}
+
+
+def gate_cambio_minimo(before: dict, written: dict) -> tuple[bool, str]:
+    """D11: el coder reescribio project_loop.py (-216 lineas) para agregar una guarda. Sobre un archivo que ya existia,
+    borrar mas del 30% de sus lineas (minimo 40) sin que la tarea diga 'reescrib' es un cambio no pedido. USD 0."""
+    if "reescrib" in TASK.task.lower():
+        return rec_gate("cambio-minimo", True, "la tarea pide reescribir")
+    malos = []
+    for f, orig in _orig_files.items():
+        if f not in written or not orig.strip():
+            continue
+        old_lines = [l for l in orig.splitlines() if l.strip()]
+        new_set = {l.strip() for l in written[f].splitlines()}
+        borradas = sum(1 for l in old_lines if l.strip() not in new_set)
+        if borradas > max(40, int(0.3 * len(old_lines))):
+            malos.append(f"{f}: {borradas} de {len(old_lines)} lineas originales desaparecieron")
+    return rec_gate("cambio-minimo", not malos, "ok" if not malos else "; ".join(malos))
+
+
 def gate_docstring(before: dict) -> tuple[bool, str]:
     """D4: el coder borro el docstring del modulo (22 lineas) y ningun test lo ve. Determinista, USD 0:
     un docstring de modulo que existia antes tiene que seguir existiendo, salvo que la tarea hable de docstrings."""
@@ -772,6 +812,8 @@ def build():
     plan_md = (WT / "docs/sdlc/plan.md").read_text(encoding="utf-8")
     written = {}
     docs_before = _docstrings(state["plan_files"])  # gate docstring-intacto (D4)
+    _orig_files.clear()
+    _orig_files.update({f: (WT / f).read_text(encoding="utf-8") for f in state["plan_files"] if (WT / f).exists()})
     for f in state["plan_files"]:
         cur = (WT / f).read_text(encoding="utf-8") if (WT / f).exists() else ""
         cur_ctx = f"ARCHIVO ACTUAL {f} (devolvelo COMPLETO con el cambio minimo):\n{cur}\n\n" if cur.strip() else ""
@@ -807,6 +849,19 @@ def build():
     cok, cnote = gate_clones(written)
     if not cok:
         return False, cnote
+    mok, mnote = gate_cambio_minimo(docs_before, written)
+    if not mok:  # D11: el coder borro 216 lineas de project_loop.py para agregar 10; una vuelta de re-pedido
+        for f in [f for f in written if f in mnote]:
+            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero.",
+                      f"Tu version de {f} borro codigo existente que la tarea NO pide tocar ({mnote}). "
+                      f"Parti del ARCHIVO ORIGINAL y aplica SOLO el cambio pedido, conservando todo lo demas.\n\n"
+                      f"TAREA:\n{TASK.task}\n\nARCHIVO ORIGINAL:\n{_orig_files.get(f, '')}\n\nTU VERSION:\n{written[f]}")
+            code = one_file(strip_fence(out), f)
+            if code:
+                _write(f, code); written[f] = code
+        mok, mnote = gate_cambio_minimo(docs_before, written)
+        if not mok or not _compiles()[0]:
+            return False, f"cambio-minimo: {mnote}"
     dok, dnote = gate_docstring(docs_before)
     if not dok:  # una vuelta del coder para restaurarlo; si insiste, la etapa falla
         for f in [f for f, d in docs_before.items() if d and not _docstrings([f]).get(f)]:
@@ -889,6 +944,21 @@ def test():
                     write_supervision(f"ESCALATE_HUMAN: lint nuevo tras coder y Claude\n{lnote}")
                     return False, f"lint: {lnote[:200]}"
         sok, snote = gate_suite_total()
+        if not sok and state.get("suite_total", {}).get("new_failures"):
+            # D11: la regresion de suite iba directo a humano; ahora sigue la escalera (coder -> Claude -> humano)
+            new = state["suite_total"]["new_failures"][:20]
+            _, flog = sh([PY, "-m", "pytest", *new, "-q", "-x", "-p", "no:cacheprovider"])
+            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero.",
+                      f"Tu cambio en {state['plan_files'][0]} rompio tests existentes que antes pasaban. Corregilo conservando "
+                      f"la feature nueva y el comportamiento previo.\n\nTESTS ROTOS:\n{flog[-4000:]}\n\nARCHIVOS:\n{_joined(_all_code())}")
+            code = one_file(strip_fence(out), state["plan_files"][0])
+            if code:
+                _write(state["plan_files"][0], code)
+            aok, _ = accept()
+            sok, snote = gate_suite_total() if aok else (False, "aceptacion rota tras el fix de regresion")
+            if not sok:
+                cok, _ = claude_fix(f"Tests existentes rotos por el cambio (deben volver a pasar sin perder la feature):\n{flog[-4000:]}")
+                sok, snote = gate_suite_total() if cok else (False, "Claude no dejo verde la aceptacion")
         if not sok:
             write_supervision(f"ESCALATE_HUMAN: aceptacion verde pero suite total con regresion\n{snote}")
             return False, f"suite total: {snote[:200]}"

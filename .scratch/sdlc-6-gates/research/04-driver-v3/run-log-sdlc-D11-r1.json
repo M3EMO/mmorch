@@ -1,0 +1,267 @@
+{
+ "proto": "driver_py",
+ "task": "D11",
+ "stages": [
+  {
+   "stage": "2-spec",
+   "ok": true,
+   "minutes": 0.27,
+   "calls": 1,
+   "note": "G1 + trazabilidad-spec ok"
+  },
+  {
+   "stage": "2b-spec-review",
+   "ok": true,
+   "minutes": 0.81,
+   "calls": 0,
+   "note": "3 IDs cubiertos"
+  },
+  {
+   "stage": "3-plan",
+   "ok": true,
+   "minutes": 0.09,
+   "calls": 1,
+   "note": "ok"
+  },
+  {
+   "stage": "4-build",
+   "ok": true,
+   "minutes": 2.46,
+   "calls": 3,
+   "note": "G3 + test-compile + docstring ok"
+  },
+  {
+   "stage": "5-test",
+   "ok": false,
+   "minutes": 11.73,
+   "calls": 2,
+   "note": "suite total: fallos nuevos: ['tests/test_executor_seam.py::test_coder_loop_escalates_through_fake_executor', 'tests/test_executor_seam.py::test_coder_loop_fake_executor_failure_propagates', 'tests/test_project_loo"
+  }
+ ],
+ "gates": [
+  {
+   "id": "trazabilidad-spec",
+   "ok": true,
+   "detail": "3 IDs cubiertos",
+   "calls": 1
+  },
+  {
+   "id": "G1-spec-contrato",
+   "ok": true,
+   "detail": "contrato cubierto, sin TBD, IDs trazados",
+   "calls": 1
+  },
+  {
+   "id": "spec-review-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 1
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 1
+  },
+  {
+   "id": "spec-review",
+   "ok": true,
+   "detail": "0 preguntas",
+   "calls": 1
+  },
+  {
+   "id": "trazabilidad-spec",
+   "ok": true,
+   "detail": "3 IDs cubiertos",
+   "calls": 1
+  },
+  {
+   "id": "plan-allowlist",
+   "ok": true,
+   "detail": "['mmorch/project_loop.py']",
+   "calls": 2
+  },
+  {
+   "id": "trazabilidad-plan",
+   "ok": true,
+   "detail": "ok",
+   "calls": 2
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "G3-compile",
+   "ok": false,
+   "detail": "  File \"mmorch/project_loop.py\", line 1\n    \\n{cur[:6000]}\\n\n     ^\nSyntaxError: unexpected character after line continuation character\n",
+   "calls": 3
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 4
+  },
+  {
+   "id": "test-compile",
+   "ok": false,
+   "detail": "ame[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests\\test_sdlc_d11_codegraph_hermetico.py:16: in <module>\n    import mmorch.project_loop as PL\nmmorch\\__init__.py:79: in <module>\n    from .project_loop import run_project_task, ProjectResult                      # ejecutor mmorch-primario\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   ImportError: cannot import name 'run_project_task' from 'mmorch.project_loop' (C:\\Users\\map12\\AppData\\Local\\Temp\\sdlc-runs\\D11-r1\\mmorch\\project_loop.py)\n=========================== short test summary info ===========================\nERROR tests/test_sdlc_d11_codegraph_hermetico.py\n!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\nno tests collected, 1 error in 2.10s\n",
+   "calls": 4
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 4
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 5
+  },
+  {
+   "id": "test-compile",
+   "ok": true,
+   "detail": "ok",
+   "calls": 5
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 5
+  },
+  {
+   "id": "sin-clones",
+   "ok": true,
+   "detail": "ok",
+   "calls": 5
+  },
+  {
+   "id": "docstring-intacto",
+   "ok": true,
+   "detail": "la tarea lo cubre",
+   "calls": 5
+  },
+  {
+   "id": "un-archivo",
+   "ok": true,
+   "detail": "mmorch/project_loop.py: recorte de ['mmorch/project_loop.py']",
+   "calls": 7
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 7
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 7
+  },
+  {
+   "id": "test-compile",
+   "ok": true,
+   "detail": "ok",
+   "calls": 7
+  },
+  {
+   "id": "regresion-unidad",
+   "ok": true,
+   "detail": "['mmorch/project_loop.py']: 3 -> 0 fallos",
+   "calls": 7
+  },
+  {
+   "id": "lint",
+   "ok": true,
+   "detail": "0/0",
+   "calls": 7
+  },
+  {
+   "id": "suite-total",
+   "ok": false,
+   "detail": "fallos nuevos: ['tests/test_executor_seam.py::test_coder_loop_escalates_through_fake_executor', 'tests/test_executor_seam.py::test_coder_loop_fake_executor_failure_propagates', 'tests/test_project_loop.py::test_escalates_to_claude_after_K', 'tests/test_project_loop.py::test_mmorch_solves_after_correction', 'tests/test_project_loop.py::test_no_escalation_returns_failure', 'tests/test_project_loop.py::test_no_test_cmd_breaks_unverified']",
+   "calls": 7
+  }
+ ],
+ "calls": 7,
+ "human_interventions": 0,
+ "claude_calls": 1,
+ "gate_rejects": [
+  {
+   "gate": "G3-compile",
+   "detail": "  File \"mmorch/project_loop.py\", line 1\n    \\n{cur[:6000]}\\n\n     ^\nSyntaxError: unexpected character after line continuation character\n"
+  },
+  {
+   "gate": "test-compile",
+   "detail": "ame[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests\\test_sdlc_d11_codegraph_hermetico.py:16: in <module>\n    import mmorch.project_loop as PL\nmmorch\\__init__.py:79: in <module>\n    from .project_loop import run_project_task, ProjectResult                      # ejecutor mmorch-primario\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   ImportError: cannot import name 'run_project_task' from 'mmorch.project_loop' (C:\\Users\\map12\\AppData\\Local\\Temp\\sdlc-runs\\D11-r1\\mmorch\\project_loop.py)\n=========================== short test summary info ===========================\nERROR tests/test_sdlc_d11_codegraph_hermetico.py\n!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\nno tests collected, 1 error in 2.10s\n"
+  },
+  {
+   "gate": "suite-total",
+   "detail": "fallos nuevos: ['tests/test_executor_seam.py::test_coder_loop_escalates_through_fake_executor', 'tests/test_executor_seam.py::test_coder_loop_fake_executor_failure_propagates', 'tests/test_project_loop.py::test_escalates_to_claude_after_K', 'tests/test_project_loop.py::test_mmorch_solves_after_correction', 'tests/test_project_loop.py::test_no_escalation_returns_failure', 'tests/test_project_loop.py::test_no_test_cmd_breaks_unverified']"
+  }
+ ],
+ "escalated_to_claude": false,
+ "base_sha": "f06ca4b",
+ "t0": "2026-09-14 14:05:59",
+ "t0_epoch": 1789405559.8338308,
+ "usd_by_family": {
+  "deepseek": 0.093
+ },
+ "plan_files": [
+  "mmorch/project_loop.py"
+ ],
+ "plan_parallel": [
+  "mmorch/project_loop.py"
+ ],
+ "test_rounds": [
+  {
+   "round": 0,
+   "tests": {
+    "run": 3,
+    "failed": 3
+   }
+  },
+  {
+   "round": 1,
+   "files": [
+    "mmorch/project_loop.py"
+   ],
+   "tests": {
+    "run": 3,
+    "failed": 0
+   },
+   "novelty": 1.0
+  }
+ ],
+ "stall": 0,
+ "test_fix_rounds": 1,
+ "lint_new": {
+  "ruff": 0,
+  "mypy": 0
+ },
+ "suite_flaky": [
+  "tests/test_providers.py::test_call_api_failure_logs_error_and_reraises",
+  "tests/test_providers.py::test_call_passes_timeout_and_maxtokens",
+  "tests/test_providers.py::test_call_success_logs_metric"
+ ],
+ "suite_total": {
+  "run": 1137,
+  "failed": 12,
+  "new_failures": [
+   "tests/test_executor_seam.py::test_coder_loop_escalates_through_fake_executor",
+   "tests/test_executor_seam.py::test_coder_loop_fake_executor_failure_propagates",
+   "tests/test_project_loop.py::test_escalates_to_claude_after_K",
+   "tests/test_project_loop.py::test_mmorch_solves_after_correction",
+   "tests/test_project_loop.py::test_no_escalation_returns_failure",
+   "tests/test_project_loop.py::test_no_test_cmd_breaks_unverified"
+  ],
+  "baseline_failures": 5
+ }
+}

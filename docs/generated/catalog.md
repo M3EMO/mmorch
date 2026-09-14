@@ -4,7 +4,7 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**128 módulos · 45 MCP tools · 915 tests.**
+**126 módulos · 45 MCP tools · 906 tests.**
 
 El server expone **15** de esas 45 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
 
@@ -52,7 +52,6 @@ El server expone **15** de esas 45 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/evolve.py` | evolve — subset DGM-inspirado, GATED (research: vault/research/ |
 | `mmorch/evolve_findings.py` | evolve_findings — fuente automática de hallazgos para el loop nocturno de auto-evolve |
 | `mmorch/exec_policy.py` | exec_policy — where execution is allowed to run (graft G3 from paperclip). |
-| `mmorch/factory.py` | factory — mmorch como FÁBRICA de modelos (no ES el modelo, lo CONSTRUYE/entrena). |
 | `mmorch/feedback.py` | feedback — el lazo que faltaba (la 'loss' ausente). mmorch genera/verifica/ |
 | `mmorch/feedback_trace.py` | feedback_trace — human vote -> trace bundle + bandit signal (graft G8 from paperclip). |
 | `mmorch/fleet.py` | fleet — control unificado de varios hosts mmorch en el tailnet. Cada maquina corre su |
@@ -88,7 +87,6 @@ El server expone **15** de esas 45 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/plugin_worker.py` | plugin_worker — isolated subprocess host for ONE plugin invoke (graft G11). |
 | `mmorch/plugins.py` | plugins — capability-gated plugin platform (graft G11 from paperclip plugin-loader.ts). |
 | `mmorch/portability.py` | portability — export/import mmorch state across devices (grafts G2 + G4). |
-| `mmorch/predict.py` | predict (v0.1 NN, Fase 1) — predictor de out_tokens / latencia, SIN dep pesada. |
 | `mmorch/prices.py` | prices — capa de OVERRIDE de precios (datos volátiles, separados del código). |
 | `mmorch/project_build.py` | project_build — F1 of the /project rebuild: decompose a big task into a VALIDATED worklist |
 | `mmorch/project_driver.py` | project_driver — F2 of the /project rebuild: the RECURSIVE build orchestrator. |
