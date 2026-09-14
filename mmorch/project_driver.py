@@ -53,6 +53,7 @@ def build_unit(unit: dict, *, build_fn: Callable[[dict], str],
                             "file": unit.get("file"), "test_cmd": unit.get("test_cmd"),
                             "gate": detail, "cached": True}
     detail = ""
+    previous_code = None
     for _ in range(max_fix):
         # wrap ONLY the untrusted boundary (build_fn=LLM, gate_fn=checker/sandbox): a throw there is a
         # failed attempt, not a crash. stub_check is OUR deterministic code -> left un-wrapped so a bug
@@ -69,6 +70,7 @@ def build_unit(unit: dict, *, build_fn: Callable[[dict], str],
             ok, detail = gate_fn(unit, code)
         except Exception as e:
             detail = f"gate_fn {type(e).__name__}: {str(e)[:100]}"
+            previous_code = code
             continue
         if ok:
             if use_cache:
@@ -77,6 +79,12 @@ def build_unit(unit: dict, *, build_fn: Callable[[dict], str],
             # (F4 round-1: couldn't tell WHERE the planner pointed the unit).
             return {"name": unit["name"], "status": "built", "code": code,
                     "file": unit.get("file"), "test_cmd": unit.get("test_cmd"), "gate": detail}
+        # gate rejected: detect byte-identical repetition (atasco) and stop early
+        if previous_code is not None and code == previous_code:
+            return {"name": unit["name"], "status": "escalate",
+                    "detail": f"atascado: {detail}",
+                    "file": unit.get("file"), "test_cmd": unit.get("test_cmd")}
+        previous_code = code
     return {"name": unit["name"], "status": "escalate", "detail": detail,
             "file": unit.get("file"), "test_cmd": unit.get("test_cmd")}
 
