@@ -1,0 +1,288 @@
+{
+ "proto": "driver_py",
+ "task": "D9",
+ "stages": [
+  {
+   "stage": "2-spec",
+   "ok": true,
+   "minutes": 0.6,
+   "calls": 1,
+   "note": "G1 + trazabilidad-spec ok"
+  },
+  {
+   "stage": "2b-spec-review",
+   "ok": true,
+   "minutes": 1.68,
+   "calls": 0,
+   "note": "4 IDs cubiertos"
+  },
+  {
+   "stage": "3-plan",
+   "ok": true,
+   "minutes": 0.07,
+   "calls": 1,
+   "note": "ok"
+  },
+  {
+   "stage": "4-build",
+   "ok": true,
+   "minutes": 1.54,
+   "calls": 2,
+   "note": "G3 + test-compile + docstring ok"
+  },
+  {
+   "stage": "5-test",
+   "ok": true,
+   "minutes": 5.48,
+   "calls": 0,
+   "note": "G4 + suite ok (0 vueltas)"
+  },
+  {
+   "stage": "5b-review",
+   "ok": true,
+   "minutes": 2.28,
+   "calls": 0,
+   "note": "bloqueo con evidencia"
+  },
+  {
+   "stage": "5-test",
+   "ok": true,
+   "minutes": 6.04,
+   "calls": 2,
+   "note": "G4 + suite ok (1 vueltas)"
+  }
+ ],
+ "gates": [
+  {
+   "id": "trazabilidad-spec",
+   "ok": true,
+   "detail": "4 IDs cubiertos",
+   "calls": 1
+  },
+  {
+   "id": "G1-spec-contrato",
+   "ok": true,
+   "detail": "contrato cubierto, sin TBD, IDs trazados",
+   "calls": 1
+  },
+  {
+   "id": "spec-review-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 1
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 1
+  },
+  {
+   "id": "spec-review",
+   "ok": true,
+   "detail": "1 preguntas respondidas",
+   "calls": 1
+  },
+  {
+   "id": "trazabilidad-spec",
+   "ok": true,
+   "detail": "4 IDs cubiertos",
+   "calls": 1
+  },
+  {
+   "id": "plan-allowlist",
+   "ok": true,
+   "detail": "['mmorch/server_fleet.py', 'mmorch/server_pty.py']",
+   "calls": 2
+  },
+  {
+   "id": "trazabilidad-plan",
+   "ok": true,
+   "detail": "ok",
+   "calls": 2
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 4
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 4
+  },
+  {
+   "id": "test-compile",
+   "ok": true,
+   "detail": "ok",
+   "calls": 4
+  },
+  {
+   "id": "sin-clones",
+   "ok": true,
+   "detail": "ok",
+   "calls": 4
+  },
+  {
+   "id": "docstring-intacto",
+   "ok": true,
+   "detail": "la tarea lo cubre",
+   "calls": 4
+  },
+  {
+   "id": "lint",
+   "ok": true,
+   "detail": "0/0",
+   "calls": 4
+  },
+  {
+   "id": "suite-total",
+   "ok": true,
+   "detail": "sin fallos nuevos",
+   "calls": 4
+  },
+  {
+   "id": "G4-aceptacion",
+   "ok": true,
+   "detail": "verde en 0 vueltas + lint + suite total",
+   "calls": 4
+  },
+  {
+   "id": "diff-review-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 4
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 4
+  },
+  {
+   "id": "claude-diff-review",
+   "ok": false,
+   "detail": "test_review falla: vuelve a build. BLOCK: `fleet_run` clasifica mal 404 vs 502.\n\nEl código matchea \"no existe\" o \"not found\" en CUALQUIER error de `forward",
+   "calls": 4
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 6
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 6
+  },
+  {
+   "id": "test-compile",
+   "ok": true,
+   "detail": "ok",
+   "calls": 6
+  },
+  {
+   "id": "regresion-unidad",
+   "ok": true,
+   "detail": "['mmorch/server_fleet.py']: 1 -> 0 fallos",
+   "calls": 6
+  },
+  {
+   "id": "lint",
+   "ok": true,
+   "detail": "0/0",
+   "calls": 6
+  },
+  {
+   "id": "suite-total",
+   "ok": true,
+   "detail": "sin fallos nuevos",
+   "calls": 6
+  },
+  {
+   "id": "G4-aceptacion",
+   "ok": true,
+   "detail": "verde en 1 vueltas + lint + suite total",
+   "calls": 6
+  }
+ ],
+ "calls": 6,
+ "human_interventions": 0,
+ "claude_calls": 2,
+ "gate_rejects": [
+  {
+   "gate": "claude-diff-review",
+   "detail": "test_review falla: vuelve a build. BLOCK: `fleet_run` clasifica mal 404 vs 502.\n\nEl código matchea \"no existe\" o \"not found\" en CUALQUIER error de `forward"
+  }
+ ],
+ "escalated_to_claude": false,
+ "base_sha": "f616a3c",
+ "t0": "2026-09-14 13:08:13",
+ "t0_epoch": 1789402093.6059132,
+ "usd_by_family": {
+  "deepseek": 0.0933
+ },
+ "plan_files": [
+  "mmorch/server_fleet.py",
+  "mmorch/server_pty.py"
+ ],
+ "plan_parallel": [
+  "mmorch/server_fleet.py",
+  "mmorch/server_pty.py"
+ ],
+ "test_rounds": [
+  {
+   "round": 0,
+   "tests": {
+    "run": 4,
+    "failed": 0
+   }
+  },
+  {
+   "round": 0,
+   "tests": {
+    "run": 5,
+    "failed": 1
+   }
+  },
+  {
+   "round": 1,
+   "files": [
+    "mmorch/server_fleet.py"
+   ],
+   "tests": {
+    "run": 5,
+    "failed": 0
+   },
+   "novelty": 1.0
+  }
+ ],
+ "stall": 0,
+ "test_fix_rounds": 1,
+ "lint_new": {
+  "ruff": 0,
+  "mypy": 0
+ },
+ "suite_flaky": [
+  "tests/test_providers.py::test_call_api_failure_logs_error_and_reraises",
+  "tests/test_providers.py::test_call_passes_timeout_and_maxtokens",
+  "tests/test_providers.py::test_call_success_logs_metric"
+ ],
+ "suite_total": {
+  "run": 1136,
+  "failed": 2,
+  "new_failures": [],
+  "baseline_failures": 4
+ },
+ "review_block": true
+}

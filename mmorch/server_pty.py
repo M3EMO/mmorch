@@ -15,7 +15,12 @@ async def pty_open(request):
     from starlette.responses import JSONResponse
     if not _token_ok(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    body = await request.json()
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "body JSON invalido"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body JSON invalido"}, status_code=400)
     cwd = body.get("cwd") or None
     proj = body.get("project")
     if proj and not cwd:
@@ -24,7 +29,10 @@ async def pty_open(request):
             cwd = resolve(proj)
         except Exception:
             cwd = None
-    rows = int(body.get("rows", 30)); cols = int(body.get("cols", 100))
+    try:
+        rows = int(body.get("rows", 30)); cols = int(body.get("cols", 100))
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "rows/cols deben ser enteros"}, status_code=400)
     from .exec_policy import current_policy, evaluate
     dec = evaluate(current_policy(), "local")          # PTY is a local shell
     if not dec["allowed"]:
@@ -72,7 +80,12 @@ async def pty_input(request):
     s = pty_session.get(request.path_params["sid"])
     if not s or not s.alive:
         return JSONResponse({"error": "no session"}, status_code=404)
-    body = await request.json()
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "body JSON invalido"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body JSON invalido"}, status_code=400)
     s.write(body.get("data", ""))
     return JSONResponse({"ok": True})
 
@@ -85,8 +98,17 @@ async def pty_resize(request):
     s = pty_session.get(request.path_params["sid"])
     if not s:
         return JSONResponse({"error": "no session"}, status_code=404)
-    body = await request.json()
-    s.resize(int(body.get("rows", 30)), int(body.get("cols", 100)))
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "body JSON invalido"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body JSON invalido"}, status_code=400)
+    try:
+        rows = int(body.get("rows", 30)); cols = int(body.get("cols", 100))
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "rows/cols deben ser enteros"}, status_code=400)
+    s.resize(rows, cols)
     return JSONResponse({"ok": True})
 
 
@@ -97,5 +119,3 @@ async def pty_close(request):
     from . import pty_session
     ok = pty_session.close_session(request.path_params["sid"])
     return JSONResponse({"closed": ok})
-
-
