@@ -56,3 +56,21 @@ Los `sdlc.toml` quedaron SIN commitear en cada repo (commit = decision del usuar
 - Candidatas de feature de prueba (evidencia en docs del repo): Estudio = exportar mastery a la wiki
   (spec 2026-05-13 :171 y :248); Portfolio = shortfall por ticker en `scripts/cost_audit.py`
   (`docs/automatizacion/roadmap_proposals_futuros.md:36`). Pendiente: grilling de requisitos con el usuario.
+
+## Sesion 3 (2026-09-15): features de prueba, oraculo de Adepor, seguridad
+
+- Seguridad Adepor (`9bcf506`): `credentials.json` (cliente OAuth Google) y `token.json` (refresh token, scopes Drive +
+  Sheets) fuera del indice. SIGUEN en `origin/main` de GitHub y en el historial: el usuario debe revocar/rotar y decidir
+  si purga el historial y pushea.
+- Oraculo Adepor (opcion A, `b197ffe` en main): `tests/test_oraculo_motor.py`, unittest hermetico sin red, 15 tests,
+  7/7 mutantes manuales muertos; `accept_cmd`/`suite_cmd` = unittest + self-test de split_forward. `min_ev_escalado`
+  queda FUERA: el codigo usa escalones y `Reglas_IA.txt:196` una formula; decide el usuario. Limite: la etapa 1 y el
+  test-compile corren pytest para tests .py y la `.venv` de Adepor no tiene pytest.
+- Features de prueba aceptadas por el usuario, tests escritos desde el borrador R1..R4 y verificados (rojo en HEAD,
+  verde con una implementacion de referencia descartada):
+  - Portfolio `sdlc/shortfall-por-ticker` (`3cb0bc4`): `tests/test_sdlc_shortfall_por_ticker.py`.
+  - Estudio `sdlc/export-mastery` (`fa7b2fb`): `app/src/sdlc/export_mastery.test.ts`, tsc limpio.
+  Pendiente: veredicto humano sobre cada test (no se registra en nombre del usuario) y despues la corrida por el server
+  con `resume_branch` + `from_stage=2` + `verdict`.
+- Huecos de mmorch hallados: `21d888a` PYTHONDONTWRITEBYTECODE (mutantes del mismo tamaño en el mismo segundo reusaban el
+  .pyc: 2 falsos vivos de 7); `c3e9bed` el server reconoce tests nombrados de cualquier lenguaje.
