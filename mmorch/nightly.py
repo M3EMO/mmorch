@@ -98,13 +98,8 @@ def run_price_check(
     if state_path is None:
         state_path = _mmorch_home() / PRICE_CHECK_STATE_FILENAME
     if propose is None:
-        # Import dinámico para no violar la regla de capas (R1: el engine no
-        # importa modulos no alcanzados). La importación estática de
-        # `mmorch.megasource` hacía que nightly apareciera como culpable en
-        # test_capas.py; con importlib la funcionalidad es idéntica sin el
-        # import estático que detecta el chequeo de imports.
-        import importlib
-        propose = importlib.import_module("mmorch.megasource").propose_price_update
+        from .megasource import propose_price_update  # cableo honesto: megasource sale del ratchet de capas
+        propose = propose_price_update
 
     last_check_ts = None
     if state_path.exists():

@@ -55,8 +55,9 @@ def harvest_findings(files: list[str] | None = None, *, days: int = 3, max_files
     evolve: [{target, finding, severity}], severidad-alta primero. `changed_files_fn`/
     `review_fn` inyectables (default = git log real / code_review.review real)."""
     changed_files_fn = changed_files_fn or (lambda: _git_changed_py_files(days=days, root=root))
-    review_fn = review_fn or (lambda code, path: __import__("mmorch.code_review",
-                              fromlist=["review"]).review(code, path=path))
+    if review_fn is None:
+        from .code_review import review as _review  # local: evita el ciclo en import; estatico para el ratchet de capas
+        review_fn = lambda code, path: _review(code, path=path)  # noqa: E731
     targets = (files if files is not None else changed_files_fn())[:max_files]
     out: list[dict] = []
     for rel in targets:

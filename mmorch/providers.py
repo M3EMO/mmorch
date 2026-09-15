@@ -366,11 +366,33 @@ def call(
         raise AssertionError("unreachable")
     latency = time.perf_counter() - t0
 
+    # NEW: validar resp.choices antes de indexar (R1/R2)
+    if not resp.choices:
+        msg = f"respuesta sin choices: {model_key}"
+        log_event(
+            pattern=pattern,
+            node=node or model_key,
+            model=model_key,
+            family=s.family,
+            in_tokens=0,
+            out_tokens=0,
+            cost_usd=0.0,
+            latency_s=latency,
+            phase=phase,
+            error="EmptyResponse",
+            error_msg=msg,
+            error_class="empty_response",
+        )
+        raise RuntimeError(msg)
+
     text = resp.choices[0].message.content or ""
     usage = resp.usage
-    in_tok = getattr(usage, "prompt_tokens", 0) or 0
-    out_tok = getattr(usage, "completion_tokens", 0) or 0
-    cached_tok = _cached_tokens(usage)
+    if usage is None:  # D15: respuesta sin usage no rompe
+        in_tok = out_tok = cached_tok = 0
+    else:
+        in_tok = getattr(usage, "prompt_tokens", 0) or 0
+        out_tok = getattr(usage, "completion_tokens", 0) or 0
+        cached_tok = _cached_tokens(usage)
     c = cost_usd(effective_model, in_tok, out_tok, cached_tok)
     _track_cost(c)
 

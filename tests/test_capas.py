@@ -27,7 +27,7 @@ _DINAMICOS = {"loop"}   # cargado por nombre desde loop_nightly; 4173 usos en 90
 # Medido 2026-09-14 con este mismo analisis (15). Cada uno: se cablea (y sale de aca) o se borra (y sale
 # de aca). Nunca crece. plugin_worker es el subproceso de plugins: se ejecuta por path, no por import.
 _NO_ALCANZADOS = {
-    "megasource", "plugin_worker", "synth_store",
+    "plugin_worker", "synth_store",
 }
 
 
@@ -126,5 +126,5 @@ def test_R4_museo_por_modulo_no_crece():
 def test_R5_sin_importlib_hacia_modulos_propios():
     # D14 (2026-09-14): el coder esquivo R1 con importlib.import_module('.effort'). plugins carga por path, es la excepcion.
     culpables = sorted(m for m, p in _modulos().items() if m != "plugins"
-                       and re.search(r"import_module\(\s*['\"]\.", p.read_text(encoding="utf-8", errors="replace")))
+                       and re.search(r"import_module\(\s*['\"](?:\.|mmorch\.)|__import__\(\s*['\"]mmorch", p.read_text(encoding="utf-8", errors="replace")))
     assert culpables == [], f"import dinamico de modulos propios (usar import estatico): {culpables}"

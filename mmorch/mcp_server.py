@@ -59,7 +59,7 @@ mcp = FastMCP("mmorch")
 # serverInfo.version (defecto #3 r3): sin esto FastMCP deja version=None y el
 # handshake reporta la version de la LIB mcp (1.27.x), no la de mmorch — el
 # cliente no puede saber que build del server tiene enfrente.
-def mmorch_version() -> str:
+def server_version() -> str:
     try:
         return importlib.metadata.version("mmorch")
     except importlib.metadata.PackageNotFoundError:
@@ -74,7 +74,7 @@ def mmorch_version() -> str:
             pass
         return "0.0.0"
 
-mcp._mcp_server.version = mmorch_version()
+mcp._mcp_server.version = server_version()
 from mmorch.mcp_telemetry import instrument  # noqa: E402 (needs `mcp` defined first)
 instrument(mcp)   # audit 2026-07: logs EVERY tool call (incl. las ~20 deterministas que
                   # metrics.jsonl nunca ve) a logs/mcp_calls.jsonl — cero cambios en las tools
