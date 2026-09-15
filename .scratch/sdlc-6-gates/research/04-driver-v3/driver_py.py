@@ -357,7 +357,7 @@ def strip_fence(t):
     m = re.match(r"\s*```(?:\w+)?\s*\n(.*)\n\s*```\s*$", t, re.S)
     if m:
         return m.group(1).strip()
-    m = re.search(r"```(?:\w+)?\s*(.*?)```", t, re.S)
+    m = re.search(r"```(?:\w+)?\s*(.*)```", t, re.S)  # D11-diag2: greedy = hasta el ULTIMO cierre; el lazy cortaba en una valla interna
     return (m.group(1) if m else t).strip()
 
 
@@ -815,6 +815,17 @@ def spec_review():
     ok, note = gate_clarificaciones(spec_md)
     if ok:
         ok, note = gate_traza_spec(spec_md, _test_names())  # la revision no puede romper la trazabilidad
+    if not ok:  # D13-diag: Claude agrego un R5 sin test; una vuelta para que lo quite o lo funda en un R con test
+        state["claude_calls"] += 1
+        before = _tree()
+        run_claude(f"Tu revision de docs/sdlc/spec.md fallo este gate: {note}. Cada R<n> de la spec debe tener un test "
+                   f"con su ID en el nombre; NO agregues R nuevos: quitalos o fundilos en un R existente. Edita SOLO docs/sdlc/spec.md.",
+                   cwd=str(WT), mode="edit", timeout=CFG["cmd_timeout_s"])
+        gate_alcance("spec-review-alcance", before, ("docs/sdlc/spec.md",))
+        spec_md = (WT / "docs/sdlc/spec.md").read_text(encoding="utf-8")
+        ok, note = gate_clarificaciones(spec_md)
+        if ok:
+            ok, note = gate_traza_spec(spec_md, _test_names())
     return ok, note
 
 
@@ -825,7 +836,8 @@ def plan():
            f"- `path.py` [R1, R3] [P]\n"
            f"Cada item cita los IDs R<n> de la spec que cubre. Todo R<n> de la spec aparece en algun item. "
            f"[P] marca archivos que NO importan a otros del plan (paralelizables); los demas van en orden de dependencia. "
-           f"'## Prueba' = `python -m pytest {' '.join(_accept_paths())} -q`.\n\nSPEC:\n{spec_md}")
+           f"'## Prueba' = `python -m pytest {' '.join(_accept_paths())} -q`.\n"
+           f"Archivos OBLIGATORIOS en '## Archivos': {_need_files()}.\n\nSPEC:\n{spec_md}")  # D14-diag: el plan omitia test_capas
     out = llm(WRITER, "Sos un tech lead. Escribis planes ejecutables. NO regeneres los tests.", ask)
     for intento in range(2):  # D2 r1: una reescritura con el motivo del gate, como en spec
         _write("docs/sdlc/plan.md", out)
@@ -847,7 +859,7 @@ def plan():
 def _plan_files(block: str) -> list[str]:
     """Archivos del plan = SOLO los items de la lista (D2 r1: una mencion en prosa 'sin tocar X.py' se colaba)."""
     items = re.findall(r"(?m)^\s*[-*]\s*`?((?:\w+/)*\w+\.py)`?", block)
-    return [f for f in dict.fromkeys(items) if not f.startswith(TESTS_PREFIX)]
+    return [f for f in dict.fromkeys(items) if not f.startswith(TESTS_PREFIX) or f in _need_files()]  # D14-diag: test_capas es obligatorio en cableos
 
 
 @stage("4-build")
