@@ -23,7 +23,6 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 _JOBS_LOCK = threading.Lock()
-_GATES: dict[str, dict] = {}   # graft G6: per-job staged gate state
 
 # Estados que ya no cambian: en el replay post-crash no se recargan (el registro
 # vivo es el Kanban del proceso actual; el historial completo queda en el jsonl).

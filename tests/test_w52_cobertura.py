@@ -1,14 +1,13 @@
 """W5.2 — cobertura real para los 7 modulos con cobertura CERO (03 §2.2):
 
-pty_session, server_core, server_engine, server_fleet, server_frontend,
-server_pty, transcript_store. Smoke de la superficie publica con I/O mockeado —
+server_core, server_engine, server_fleet, server_frontend,
+transcript_store. Smoke de la superficie publica con I/O mockeado —
 NO duplica test_server_smoke (tabla de rutas + auth global): aca se prueba la
 LOGICA de cada modulo, con el server solo como transporte donde hace falta.
 """
 from __future__ import annotations
 
 import json
-import os
 from types import SimpleNamespace
 
 import pytest
@@ -62,13 +61,6 @@ def test_transcript_cap_y_copia(ts):
     assert len(got[0]["text"]) == 100            # cap corta el texto, no revienta
     got.append("intruso")                        # get devuelve COPIA: mutarla no toca el store
     assert len(ts.get("j")) == 1
-
-
-def test_transcript_endpoint_sirve_el_store(ts, client):
-    ts.append("job-w52", "gemini", "verifier", "veredicto")
-    r = client.get("/transcript/job-w52", headers=AUTH)
-    assert r.status_code == 200
-    assert r.json() == [{"model": "gemini", "role": "verifier", "text": "veredicto"}]
 
 
 # --------------------------------------------------------------------------- #
@@ -169,57 +161,6 @@ def test_sync_pull_devuelve_pull_all(client, monkeypatch):
     r = client.post("/sync/pull", headers=AUTH)
     assert r.status_code == 200 and r.json() == {"notes": 0}
     assert client.post("/sync/pull").status_code == 401
-
-
-# --------------------------------------------------------------------------- #
-# server_pty — rutas de terminal (sesion mockeada: sin shell real en el suite HTTP)
-# --------------------------------------------------------------------------- #
-def test_pty_rutas_sesion_inexistente(client):
-    assert client.post("/pty/nope/input", json={"data": "x"}, headers=AUTH).status_code == 404
-    assert client.post("/pty/nope/resize", json={}, headers=AUTH).status_code == 404
-    r = client.post("/pty/nope/close", headers=AUTH)
-    assert r.status_code == 200 and r.json() == {"closed": False}
-    assert client.post("/pty/open", json={}).status_code == 401
-
-
-def test_pty_open_responde_sesion(client, monkeypatch):
-    import mmorch.pty_session as ps
-    stub = SimpleNamespace(id="pty-w52", cwd="", _backend="stub", alive=True)
-    monkeypatch.setattr(ps, "open_session", lambda cwd, rows, cols: stub)
-    r = client.post("/pty/open", json={"rows": 20, "cols": 80}, headers=AUTH)
-    assert r.status_code == 200
-    assert r.json() == {"session": "pty-w52", "cwd": "", "backend": "stub"}
-
-
-def test_pty_open_respeta_exec_policy(client, monkeypatch):
-    import mmorch.exec_policy as ep
-    monkeypatch.setattr(ep, "evaluate",
-                        lambda pol, kind: {"allowed": False, "reason": "policy w52"})
-    r = client.post("/pty/open", json={}, headers=AUTH)
-    assert r.status_code == 403 and r.json()["error"] == "policy w52"
-
-
-# --------------------------------------------------------------------------- #
-# pty_session — import + creacion basica de una sesion REAL (shell del OS)
-# --------------------------------------------------------------------------- #
-def test_pty_session_creacion_basica(tmp_path):
-    if os.name == "nt":
-        pytest.importorskip("winpty")            # ConPTY: sin pywinpty no hay backend
-    from mmorch import pty_session
-    try:
-        s = pty_session.open_session(cwd=str(tmp_path))
-    except OSError as e:                         # entorno sin PTY (CI headless raro)
-        pytest.skip(f"PTY no disponible: {e}")
-    try:
-        assert s.alive and s.id.startswith("pty-")
-        assert pty_session.get(s.id) is s
-        q = s.subscribe()
-        s.write("\r\n")                          # input no revienta con la sesion viva
-        assert q in s.subscribers
-        s.unsubscribe(q)
-    finally:
-        assert pty_session.close_session(s.id) is True
-    assert pty_session.get(s.id) is None and not s.alive
 
 
 # --------------------------------------------------------------------------- #

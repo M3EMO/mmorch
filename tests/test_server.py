@@ -201,15 +201,6 @@ def test_projects_get_lista_y_post_registra(monkeypatch, tmp_path):
     assert registrado == {"demo": str(tmp_path)}
 
 
-def test_gate_get_sin_gate_es_404_y_post_lo_crea(monkeypatch):
-    S, c = _client(monkeypatch)
-    assert c.get("/jobs/nada/gate", headers=H).status_code == 404
-    r = c.post("/jobs/j1/gate", headers=H,
-               json={"policy": {"stages": [{"name": "s1"}]}})
-    assert r.status_code == 200
-    assert c.get("/jobs/j1/gate", headers=H).status_code == 200
-
-
 def test_budget_policies_get_lee_y_post_guarda(monkeypatch):
     S, c = _client(monkeypatch)
     import mmorch.budget_policy as BP
@@ -225,107 +216,6 @@ def test_budget_policies_get_lee_y_post_guarda(monkeypatch):
 
     r = c.post("/budget/policies", headers=H, json={"policies": [{"name": "x"}]})
     assert r.json() == {"saved": 1} and guardado == [[{"name": "x"}]]
-
-
-def test_chat_reply_incluye_historial_previo(monkeypatch):
-    """Bug medido 2026-08-31 (dogfood real via Lotus): _chat_reply guardaba cada
-    turno pero nunca lo releia -> el modelo respondia "no tengo memoria" porque
-    cada llamada era un solo turno aislado. chat_store mockeado (no toca chat.db
-    real) para aislar la logica de _chat_reply de su storage."""
-    S, c = _client(monkeypatch)
-    import mmorch.chat_store as CS
-    prior = [{"id": "m1", "role": "user", "text": "hola", "ts": 1.0},
-             {"id": "m2", "role": "assistant", "text": "hola, en que ayudo", "ts": 2.0}]
-    monkeypatch.setattr(CS, "history", lambda limit=30: {"messages": prior, "hasMore": False})
-    added = []
-    monkeypatch.setattr(CS, "add", lambda role, text, **k: added.append((role, text, k)) or
-                        {"id": "mN", "role": role, "text": text, **k})
-
-    seen_messages = []
-    def fake_gated(model, messages, **kw):
-        seen_messages.append(messages)
-        return {"reply": "segun lo que dijiste antes...", "action": "none"}
-    monkeypatch.setattr("mmorch.schema.gated_json", fake_gated)
-
-    S._chat_reply("segundo mensaje")
-
-    assert len(seen_messages) == 1
-    msgs = seen_messages[0]
-    # system + los 2 turnos previos + el mensaje actual, EN ORDEN
-    assert [m["role"] for m in msgs] == ["system", "user", "assistant", "user"]
-    assert msgs[1]["content"] == "hola" and msgs[2]["content"] == "hola, en que ayudo"
-    assert msgs[3]["content"] == "segundo mensaje"
-    # se persiste el turno actual (user) y la respuesta (assistant), en ese orden
-    assert [a[0] for a in added] == ["user", "assistant"]
-    assert added[0][1] == "segundo mensaje"
-
-
-def test_chat_lanza_job_solo_con_proyecto_real_y_target(monkeypatch):
-    """El chat puede EJECUTAR (decision de producto 2026-09-01: modelo JARVIS), pero
-    nunca confiando en el modelo: el proyecto tiene que estar en el registro real y el
-    target_file no puede faltar (server_engine.py:271 mata el job si falta)."""
-    S, _ = _client(monkeypatch)
-    import mmorch.chat_store as CS
-    monkeypatch.setattr(CS, "history", lambda **k: {"messages": []})
-    # fiel al add real (chat_store.py:33): persiste job_id/status y los devuelve
-    monkeypatch.setattr(CS, "add", lambda role, txt, **k: {"role": role, "text": txt, **k})
-    monkeypatch.setattr(S, "list_projects", lambda: {"real": "/tmp/real"}, raising=False)
-    import mmorch.projects as P
-    monkeypatch.setattr(P, "list_projects", lambda **k: {"real": "/tmp/real"})
-
-    lanzados = []
-    monkeypatch.setattr(S, "_run_project_job", lambda *a, **k: lanzados.append((a, k)))
-
-    def fake_gated(model, msgs, **kw):
-        return dict(fake_gated.out)
-    monkeypatch.setattr("mmorch.schema.gated_json", fake_gated)
-
-    # 1) proyecto inventado -> NO lanza, y lo dice
-    fake_gated.out = {"reply": "dale", "action": "run_project",
-                      "project": "inventado", "target_file": "a.py", "task": "x"}
-    m = S._chat_reply("implementa x")
-    assert not lanzados and "no es un proyecto registrado" in m["text"]
-
-    # 2) sin target_file -> NO lanza (el server haria fail-fast)
-    fake_gated.out = {"reply": "dale", "action": "run_project",
-                      "project": "real", "target_file": "", "task": "x"}
-    m = S._chat_reply("implementa x")
-    assert not lanzados and "archivo objetivo" in m["text"]
-
-    # 3) todo completo -> lanza de verdad y devuelve job_id para el job block
-    fake_gated.out = {"reply": "lanzando", "action": "run_project",
-                      "project": "real", "target_file": "a.py", "task": "implementa x"}
-    m = S._chat_reply("implementa x")
-    assert len(lanzados) == 1
-    assert lanzados[0][0][0] == "real" and lanzados[0][0][5] == "a.py"
-    assert m["job_id"] and m["status"] == "running"
-
-    # 4) charla normal -> ni job ni job_id
-    fake_gated.out = {"reply": "hola", "action": "none"}
-    m = S._chat_reply("hola")
-    # el add real siempre devuelve la clave; lo que importa es que venga vacia
-    assert len(lanzados) == 1 and not m.get("job_id") and not m.get("status")
-
-
-def test_chat_no_persiste_la_caida_del_proveedor(monkeypatch):
-    """Una excepcion del proveedor NO es un turno del asistente: si se persistia, entraba
-    al historial (limit=30) y en la llamada siguiente el modelo leia '(mmorch offline: ...)'
-    como algo que el mismo habia dicho -- envenenaba la conversacion."""
-    S, _ = _client(monkeypatch)
-    import mmorch.chat_store as CS
-    monkeypatch.setattr(CS, "history", lambda **k: {"messages": []})
-    added = []
-    monkeypatch.setattr(CS, "add", lambda role, txt, **k: added.append((role, txt)) or
-                        {"role": role, "text": txt, **k})
-
-    def boom(*a, **k):
-        raise RuntimeError("provider 502")
-    monkeypatch.setattr("mmorch.schema.gated_json", boom)
-
-    m = S._chat_reply("hola")
-    assert "offline" in m["text"] and m.get("transient") is True
-    # el turno del usuario si se guarda; la falla NO
-    assert [r for r, _ in added] == ["user"]
 
 
 def test_projects_delete_saca_del_registro(monkeypatch, tmp_path):

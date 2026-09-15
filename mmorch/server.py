@@ -28,7 +28,7 @@ import time
 
 from .events import bus, emit
 from .server_frontend import FRONTEND as _FRONTEND
-from .server_core import _JOBS, _JOBS_LOCK, _GATES, _token_ok, _budget_block, _jobmeta
+from .server_core import _JOBS, _JOBS_LOCK, _token_ok, _budget_block, _jobmeta
 
 
 from .server_engine import (_rubric_drive, _run_rubric_job, _workflow_run, _run_workflow_job, _run_project_job,
@@ -376,186 +376,6 @@ async def approve_job(request):
     return JSONResponse({"approved": jid})
 
 
-def _chat_reply(text: str) -> dict:
-    """Store the user msg, generate a terse reply via a cheap model (cero cupo), store + return it.
-
-    Bug medido 2026-08-31 (dogfood real via Lotus): guardaba cada turno en chat_store
-    pero NUNCA releia el historial para la llamada al modelo -- cada mensaje era una
-    conversacion aislada de un solo turno, "no tengo memoria" era literal, no
-    alucinacion. Fix: chat_store.history(limit=30) ya existe con fidelidad completa
-    (mismo default que usa /chat/history para la UI) -- ventana simple, sin
-    infraestructura nueva (se evaluo babel/blocks explicitamente: babel es
-    compresion con perdida para notas de research que se leen rara vez, mal fit para
-    los ultimos turnos que necesitan fidelidad alta; blocks son para linaje de
-    artefactos de build, no aplica a una conversacion lineal)."""
-    from . import chat_store
-    from .projects import list_projects
-    # leer ANTES de persistir el turno actual, para no duplicarlo en el prompt
-    prior = chat_store.history(limit=30)["messages"]
-    chat_store.add("user", text)
-    reply, engine, job_id = "", "", None
-    known = sorted(list_projects())
-    try:
-        from .config import DEFAULT_GENERATOR
-        from .schema import gated_json
-        sysmsg = (
-            "Sos Lotus, un asistente de codigo conciso respaldado por mmorch. Podes EJECUTAR "
-            "tareas de codigo de verdad, no solo hablar de ellas.\n"
-            f"Proyectos registrados (los unicos que podes tocar): {known or 'ninguno'}.\n\n"
-            "Devolve SIEMPRE JSON con este shape:\n"
-            '{"reply": "<lo que le decis al usuario>", "action": "none"|"run_project", '
-            '"project": "", "target_file": "", "task": ""}\n\n'
-            "Regla: usa action='run_project' SOLO si ya tenes las tres cosas: un `project` de la "
-            "lista de arriba, un `target_file` (ruta relativa dentro de ese proyecto) y una `task` "
-            "clara y autocontenida. Si falta cualquiera, usa action='none' y PEDI lo que falta en "
-            "`reply`, en una sola pregunta corta. Nunca inventes un proyecto que no este en la "
-            "lista. Para charla que no es una tarea de codigo, action='none' y responde normal.\n\n"
-            "IMPORTANTE sobre el tono de `reply`: con action='run_project' el job ARRANCA en el "
-            "acto. No pidas confirmacion ('¿lo hago ahora?' es incorrecto, ya lo estas haciendo): "
-            "deci en presente que lo estas ejecutando y sobre que archivo.")
-        history_msgs = [{"role": m["role"], "content": m["text"]} for m in prior]
-        out = gated_json(
-            DEFAULT_GENERATOR,
-            [{"role": "system", "content": sysmsg}, *history_msgs,
-             {"role": "user", "content": text}],
-            schema={"type": "object", "required": ["reply", "action"], "properties": {
-                "reply": {"type": "string"},
-                "action": {"type": "string", "enum": ["none", "run_project"]},
-                "project": {"type": "string"}, "target_file": {"type": "string"},
-                "task": {"type": "string"}}},
-            pattern="chat", node="chat")
-        reply = (out.get("reply") or "").strip()
-        engine = DEFAULT_GENERATOR
-        if out.get("action") == "run_project":
-            # NUNCA confiar en el modelo para esto: el proyecto tiene que estar en el
-            # registro real y el target_file no puede estar vacio (server_engine.py:271
-            # hace fail-fast con engine=mmorch y el job moriria en milisegundos).
-            proj = (out.get("project") or "").strip()
-            tf = (out.get("target_file") or "").strip()
-            task = (out.get("task") or "").strip() or text
-            if proj not in known:
-                reply = (f"No puedo: '{proj}' no es un proyecto registrado. "
-                         f"Registrados: {known or 'ninguno'}.")
-            elif not tf:
-                reply = "Necesito el archivo objetivo (ruta relativa dentro del proyecto)."
-            else:
-                import uuid as _u
-                job_id = _u.uuid4().hex[:10]
-                threading.Thread(
-                    target=_run_project_job,
-                    args=(proj, task, "plan", False, "mmorch", tf, None, "local"),
-                    kwargs={"job_id": job_id}, daemon=True).start()
-                reply = reply or f"Lanzando: {task[:80]}"
-    except Exception as e:
-        # Una caida del proveedor NO es un turno del asistente: persistirla la metia en
-        # el historial (limit=30) y en la proxima llamada el modelo leia "(mmorch
-        # offline: ...)" como algo que el mismo habia dicho. Se le avisa al usuario en
-        # el momento, pero no se contamina la conversacion.
-        import time as _t
-        return {"id": "msg-transient", "role": "assistant", "ts": _t.time() * 1000.0,
-                "text": f"(mmorch offline: {str(e)[:120]})", "engine": "",
-                "job_id": None, "status": None, "progress": None, "transient": True}
-    # job_id/status van DENTRO del add (chat_store los persiste en la tabla): pegarlos
-    # despues sobre el dict devuelto los perdia al recargar, y el job desaparecia del
-    # hilo. El cliente pinta un job block real con esto (chat.js _renderMessage: isJob
-    # exige job_id + status), asi que la tarea se sigue desde la conversacion misma.
-    return chat_store.add("assistant", reply or "(no reply)", engine=engine,
-                          job_id=job_id, status="running" if job_id else None)
-
-
-async def chat_handler(request):
-    from starlette.responses import JSONResponse
-    from starlette.concurrency import run_in_threadpool
-    if not _token_ok(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    body = await request.json()
-    text = (body.get("message") or "").strip()
-    if not text:
-        return JSONResponse({"error": "mensaje vacio"}, status_code=400)
-    msg = await run_in_threadpool(_chat_reply, text)   # model call off the event loop
-    return JSONResponse({"message": msg})
-
-
-async def chat_history(request):
-    from starlette.responses import JSONResponse
-    if not _token_ok(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    from . import chat_store
-    before = request.query_params.get("before")
-    try:
-        limit = int(request.query_params.get("limit", 30))
-    except (ValueError, TypeError):
-        return JSONResponse({"error": "limit debe ser un entero", "kind": "invalid_input"},
-                            status_code=400)
-    return JSONResponse(chat_store.history(before, limit))
-
-
-def _benchmarks_sync() -> list:
-    """Sync body of benchmarks_handler: metrics.jsonl parses + memory DB read. Run off the
-    event loop via run_in_threadpool (same pattern as chat_handler/minds_handler)."""
-    out = []
-
-    def _row(key, label, value, fmt, good):
-        out.append({"key": key, "label": label, "value": round(float(value), 4),
-                    "fmt": fmt, "delta": 0, "good": good, "spark": []})
-    try:
-        from .metrics import summary, error_rates
-        s = summary()
-        if s.get("calls"):
-            _row("cost_call", "cost / call", s["total_cost_usd"] / s["calls"], "usd", "low")
-        ew = error_rates(window_n=200)
-        tot = sum(m["calls"] for m in ew["by_model"].values()) or 1
-        errs = sum(round(m["error_rate"] * m["calls"]) for m in ew["by_model"].values())
-        _row("err_rate", "error rate (w200)", errs / tot, "pct", "low")
-    except Exception:
-        pass
-    try:
-        from .feedback import calibration
-        c = calibration()
-        if c.get("n"):
-            _row("ece", "calibration ECE", c["ece"], "pct", "low")
-    except Exception:
-        pass
-    try:
-        from .memory import stats as _mstats
-        ms = _mstats()
-        if ms.get("semantic"):
-            _row("mem_verified", "memory verified", (ms.get("verified") or 0) / ms["semantic"],
-                 "pct", "high")
-    except Exception:
-        pass
-    return out
-
-
-async def benchmarks_handler(request):
-    """Real benchmark strip for Lotus (replaces MOCK_BENCH): live system metrics in the
-    front's shape {key,label,value,fmt,delta,good,spark}. delta/spark need history -> v1 empty."""
-    from starlette.responses import JSONResponse
-    from starlette.concurrency import run_in_threadpool
-    if not _token_ok(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    return JSONResponse({"benchmarks": await run_in_threadpool(_benchmarks_sync)})
-
-
-async def minds_handler(request):
-    """Global codegraph federation across registered projects (read-only)."""
-    from starlette.responses import JSONResponse
-    from starlette.concurrency import run_in_threadpool
-    if not _token_ok(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    from .minds import federation
-    return JSONResponse(await run_in_threadpool(federation))
-
-
-async def transcript_handler(request):
-    """Inter-agent transcript for a job (Lotus reads this; SSE mirrors live items)."""
-    from starlette.responses import JSONResponse
-    if not _token_ok(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    from .transcript_store import get
-    return JSONResponse(get(request.path_params["job_id"]))
-
-
 async def job_ancestry(request):
     """Lineage of a job (graft G1): ancestors up + descendants down (adjacency-list)."""
     from starlette.responses import JSONResponse
@@ -600,59 +420,6 @@ async def feedback_handler(request):
         transcript=_tget(job_id), consent=consent)
     emit("feedback", "info", job_id=job_id, detail=f"{vote} ({arm or 'no-arm'})")
     return JSONResponse({"recorded": True, "vote": vote, "arm": arm, "consent": bundle["consent"]})
-
-
-async def gate_handler(request):
-    """Staged gate for a job (graft G6). GET = current state; POST {policy} = start a gate."""
-    from starlette.responses import JSONResponse
-    if not _token_ok(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    jid = request.path_params["job_id"]
-    if request.method == "POST":
-        body = await request.json()
-        from .gate_policy import start
-        state = start(body.get("policy") or {})
-        with _JOBS_LOCK:
-            _GATES[jid] = state
-            if jid in _JOBS:
-                _JOBS[jid]["status"] = "gate"
-        emit("job", "gate", job_id=jid, detail=f"staged gate ({len(state['policy']['stages'])} stages)")
-        return JSONResponse(state)
-    with _JOBS_LOCK:
-        st = _GATES.get(jid)
-    return JSONResponse(st) if st else JSONResponse({"error": "no gate"}, status_code=404)
-
-
-async def gate_advance(request):
-    """Advance a staged gate (graft G6): action approve|request_changes|reject."""
-    from starlette.responses import JSONResponse
-    if not _token_ok(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    jid = request.path_params["job_id"]
-    body = await request.json()
-    from .gate_policy import advance
-    with _JOBS_LOCK:
-        st = _GATES.get(jid)
-    if not st:
-        return JSONResponse({"error": "no gate"}, status_code=404)
-    actor = body.get("actor", "")
-    if not actor or not actor.strip():
-        return JSONResponse({"error": "actor es obligatorio (quien aprueba/cambia/rechaza)"},
-                            status_code=400)
-    nxt = advance(st, body.get("action", "approve"), actor.strip(), body.get("comment", ""))
-    if nxt.get("error"):
-        return JSONResponse({"error": nxt["error"]}, status_code=400)
-    with _JOBS_LOCK:
-        _GATES[jid] = nxt
-        if jid in _JOBS:
-            if nxt["status"] == "approved":
-                _JOBS[jid]["status"] = "done"
-            elif nxt["status"] == "rejected":
-                _JOBS[jid]["status"] = "error"
-    if nxt["status"] in ("approved", "rejected"):
-        emit("job", "done" if nxt["status"] == "approved" else "error",
-             job_id=jid, detail=f"staged gate {nxt['status']}")
-    return JSONResponse(nxt)
 
 
 async def budget_policies(request):
@@ -987,7 +754,6 @@ async def import_handler(request):
 
 
 # --- interactive PTY (writable terminal) ------------------------------------ #
-from .server_pty import pty_open, pty_stream, pty_input, pty_resize, pty_close
 
 
 async def _bad_json_body(request, exc):
@@ -1006,36 +772,13 @@ def build_app():
     from starlette.routing import Route
     from starlette.middleware import Middleware
     from starlette.middleware.cors import CORSMiddleware
-    # CORS: the real gate is the token + private tunnel, not the Origin. The Lotus
-    # client (Tauri / dev server) is cross-origin, so allow any origin here.
+    # CORS: el gate real es el token + tunel privado, no el Origin.
     middleware = [Middleware(CORSMiddleware, allow_origins=["*"],
                              allow_methods=["*"], allow_headers=["*"])]
-    routes_extra = []
-    # Lotus app servida por el MISMO server (same-origin, cero config): /lotus -> ventana
-    # app-mode local (msedge --app) sin necesitar el build Tauri. Solo si el repo existe.
-    _lotus = os.getenv("LOTUS_DIR", os.path.expanduser(r"~\Desktop\Claude\Lotus\src"))
-    if os.path.isdir(_lotus):
-        from starlette.staticfiles import StaticFiles
-        from starlette.routing import Mount
-
-        class _NoStaleStatic(StaticFiles):
-            """StaticFiles manda ETag+Last-Modified pero NO Cache-Control, asi que el
-            browser aplica heuristic caching y puede servir un modulo ES viejo sin
-            revalidar. Medido 2026-09-01: tras agregar la vista Inbox, el sidebar
-            cacheado seguia mostrando 6 solapas mientras el archivo servido ya traia 7
-            -- una feature nueva invisible, en silencio, sin forma de que el usuario se
-            entere. 'no-cache' no desactiva el cache: obliga a revalidar, y el ETag
-            sigue devolviendo 304 cuando no cambio nada."""
-            def file_response(self, *a, **k):
-                resp = super().file_response(*a, **k)
-                resp.headers.setdefault("Cache-Control", "no-cache")
-                return resp
-
-        routes_extra.append(Mount("/lotus", _NoStaleStatic(directory=_lotus, html=True), name="lotus"))
     return Starlette(middleware=middleware,
                      exception_handlers={json.JSONDecodeError: _bad_json_body,
                                          UnicodeDecodeError: _bad_json_body},
-                     routes=routes_extra + [
+                     routes=[
         Route("/", home),
         Route("/health", health_handler),
         Route("/state", state_snapshot),
@@ -1047,11 +790,6 @@ def build_app():
         Route("/projects", projects_handler, methods=["GET", "POST", "DELETE"]),
         Route("/run/project", run_project, methods=["POST"]),
         Route("/run/workflow", run_workflow, methods=["POST"]),
-        Route("/chat", chat_handler, methods=["POST"]),
-        Route("/chat/history", chat_history, methods=["GET"]),
-        Route("/minds", minds_handler),
-        Route("/benchmarks", benchmarks_handler),
-        Route("/transcript/{job_id}", transcript_handler),
         Route("/jobs/{job_id}/ancestry", job_ancestry),
         Route("/jobs/{job_id}/cancel-tree", cancel_tree, methods=["POST"]),
         Route("/jobs/reap", reap_zombies, methods=["POST"]),
@@ -1061,17 +799,10 @@ def build_app():
         Route("/blocks/{block_id}", block_get),
         Route("/plugins", plugins_list),
         Route("/plugins/{name}/invoke", plugin_invoke, methods=["POST"]),
-        Route("/jobs/{job_id}/gate", gate_handler, methods=["GET", "POST"]),
-        Route("/jobs/{job_id}/gate/advance", gate_advance, methods=["POST"]),
         Route("/budget/policies", budget_policies, methods=["GET", "POST"]),
         Route("/feedback", feedback_handler, methods=["POST"]),
         Route("/export", export_handler),
         Route("/import", import_handler, methods=["POST"]),
-        Route("/pty/open", pty_open, methods=["POST"]),
-        Route("/pty/{sid}/stream", pty_stream),
-        Route("/pty/{sid}/input", pty_input, methods=["POST"]),
-        Route("/pty/{sid}/resize", pty_resize, methods=["POST"]),
-        Route("/pty/{sid}/close", pty_close, methods=["POST"]),
         Route("/sync/pull", sync_pull, methods=["POST"]),
         Route("/fleet", fleet_handler, methods=["GET", "POST", "DELETE"]),
         Route("/fleet/run", fleet_run, methods=["POST"]),

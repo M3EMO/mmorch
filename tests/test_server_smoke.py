@@ -28,11 +28,6 @@ EXPECTED_ROUTES = {
     "/projects": "DELETE,GET,HEAD,POST",
     "/run/project": "POST",
     "/run/workflow": "POST",
-    "/chat": "POST",
-    "/chat/history": "GET,HEAD",
-    "/minds": "GET,HEAD",
-    "/benchmarks": "GET,HEAD",
-    "/transcript/{job_id}": "GET,HEAD",
     "/jobs/{job_id}/ancestry": "GET,HEAD",
     "/jobs/{job_id}/cancel-tree": "POST",
     "/jobs/reap": "POST",
@@ -42,19 +37,12 @@ EXPECTED_ROUTES = {
     "/blocks/{block_id}": "GET,HEAD",
     "/plugins": "GET,HEAD",
     "/plugins/{name}/invoke": "POST",
-    "/jobs/{job_id}/gate": "GET,HEAD,POST",
-    "/jobs/{job_id}/gate/advance": "POST",
     "/budget/policies": "GET,HEAD,POST",
     "/feedback": "POST",
     "/pending": "GET,HEAD",
     "/verdict": "POST",
     "/export": "GET,HEAD",
     "/import": "POST",
-    "/pty/open": "POST",
-    "/pty/{sid}/stream": "GET,HEAD",
-    "/pty/{sid}/input": "POST",
-    "/pty/{sid}/resize": "POST",
-    "/pty/{sid}/close": "POST",
     "/sync/pull": "POST",
     "/fleet": "DELETE,GET,HEAD,POST",
     "/fleet/run": "POST",
@@ -64,10 +52,8 @@ EXPECTED_ROUTES = {
 
 
 def _route_table(app) -> dict:
-    # /lotus es un Mount CONDICIONAL (solo si el dir de Lotus existe en la maquina) ->
-    # fuera del contrato fijo; el contrato cubre las Routes, no mounts opcionales.
     return {getattr(r, "path", ""): ",".join(sorted(getattr(r, "methods", []) or []))
-            for r in app.routes if getattr(r, "path", "") and getattr(r, "path", "") != "/lotus"}
+            for r in app.routes if getattr(r, "path", "")}
 
 
 def test_route_table_matches_contract():

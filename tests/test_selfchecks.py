@@ -25,7 +25,6 @@ EXCLUIR = {
     "nightly": "pipeline nocturno completo: LLM/API real y estado del home real",
     "plugin_worker": "worker CLI: main() exige argv de job (IndexError sin args)",
     "babel": "asserta lexicon_version() del vault REAL — vacio en el home aislado",
-    "minds": "federation() lee projects.json real — cero nodos en el home aislado",
 }
 
 

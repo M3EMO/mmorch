@@ -4,7 +4,7 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**126 módulos · 45 MCP tools · 907 tests.**
+**121 módulos · 45 MCP tools · 898 tests.**
 
 El server expone **15** de esas 45 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
 
@@ -30,7 +30,6 @@ El server expone **15** de esas 45 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/canal.py` | canal — hilo ordenado entre Cursor, Claude Code y mmorch. |
 | `mmorch/canary.py` | canary — set FIJO de tareas con respuesta verificable deterministicamente (W5.3). |
 | `mmorch/cascade.py` | cascade — FrugalGPT-style multi-step confidence cascade (research: vault/research/ |
-| `mmorch/chat_store.py` | chat_store — durable chat history for Lotus (SQLite, stdlib). |
 | `mmorch/checkers.py` | checkers — libreria propia de VERIFICADORES DETERMINISTAS (tool-verify). |
 | `mmorch/classify.py` | classify_and_act — rutear por TIPO y manejar cada rama distinto (triage, model |
 | `mmorch/claude_exec.py` | claude_exec — ejecutor que corre en el PLAN de Claude (cupo), no por API. Invoca el |
@@ -57,7 +56,6 @@ El server expone **15** de esas 45 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/fleet.py` | fleet — control unificado de varios hosts mmorch en el tailnet. Cada maquina corre su |
 | `mmorch/frontier.py` | Frontera de temas — rompe el círculo cerrado del auto-descubrimiento. |
 | `mmorch/fuel.py` | Fuel module: candidate proposal lifecycle for roadmap loops. |
-| `mmorch/gate_policy.py` | gate_policy — staged review/approval gates per job (graft G6 from paperclip). |
 | `mmorch/goal.py` | goal — ancla anti-goal-drift, modelada sobre el `/goal` nativo de Claude Code. |
 | `mmorch/hardening.py` | Hardening loop: mmorch se blinda solo contra sus puntos ciegos. |
 | `mmorch/health.py` | Health module for mmorch: dead-man's switch detection. |
@@ -76,7 +74,6 @@ El server expone **15** de esas 45 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/memory.py` | memory — memoria episodica + semantica para mmorch (DuckDB 2 capas). |
 | `mmorch/merge_train.py` | Merge train — las branches amarillas del dia se conglomeran en UN merge. |
 | `mmorch/metrics.py` | Observability — append-only JSONL metric log (§11 backbone). |
-| `mmorch/minds.py` | minds — global federation graph across registered projects (read-only). |
 | `mmorch/nightly.py` | nightly — driver ALWAYS-ON del loop nocturno (Windows Task Scheduler, no Claude). |
 | `mmorch/nodes.py` | nodes — el registry de la ORQUESTA: nombra a cada miembro que mmorch (el DIRECTOR) |
 | `mmorch/nudge.py` | nudge — robo de Hermes 'periodic memory nudging': cada N loops cerrados, dispara |
@@ -99,7 +96,6 @@ El server expone **15** de esas 45 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/proposals.py` | F2 propuesta (spec .scratch/loop-cerrado/spec.md): tarjetas pre-cocinadas + pick del hook. |
 | `mmorch/provenance.py` | Provenance de branches — outcomes retroactivos por verdad de ejecución. |
 | `mmorch/providers.py` | Provider layer — thin OpenAI-compatible client per external model. |
-| `mmorch/pty_session.py` | pty_session — interactive PTY sessions for the Lotus terminal. |
 | `mmorch/regresion.py` | Refutacion EJECUTABLE de una branch: la objecion se prueba o no existe. |
 | `mmorch/repo_mining.py` | Minería de repos ajenos — aprender de cualquier repo SIN acumularlo. |
 | `mmorch/retention.py` | retention — decay Ebbinghaus + Zeigarnik para la capa semantica de memory. |
@@ -116,7 +112,6 @@ El server expone **15** de esas 45 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/server_engine.py` | server_engine — the in-process job execution engine: the threads that drive rubric, |
 | `mmorch/server_fleet.py` | server_fleet — multi-host (tailnet) routes: register/list fleet hosts, proxy a job to a |
 | `mmorch/server_frontend.py` | server_frontend — the live dashboard HTML, lifted verbatim out of server.py (it is a static string, not logic; keeping it here shrinks the god-module). |
-| `mmorch/server_pty.py` | server_pty — interactive PTY (terminal) routes: open/stream/input/resize/close a shell |
 | `mmorch/session_skills.py` | session_skills — mina playbooks reusables de sesiones de Claude. De segmentos con |
 | `mmorch/sessions.py` | sessions — aprende de transcripts de Claude Code. Parsea el JSONL de sesion en |
 | `mmorch/signature.py` | signature — project a task's TEXT onto a STRUCTURAL key (cero-cupo, deterministic). |
