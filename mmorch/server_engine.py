@@ -339,7 +339,7 @@ def _run_project_build_job(jid: str, task: str, project: str, external_test: str
                             files=files, wt=wt.path, phase=f"sdlc-{jid}", from_stage=from_stage,
                             max_fix=int(max_fix) if max_fix else 3, coder=gen_model)
         status = res.get("status", "escalate")
-        job_status = {"built": "done", "integration_failed": "gate"}.get(status, "escalate")
+        job_status = {"built": "done", "integration_failed": "gate", "awaiting_approval": "gate"}.get(status, "escalate")
         with _JOBS_LOCK:
             if jid in _JOBS:
                 _JOBS[jid]["status"] = job_status
