@@ -4,7 +4,7 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**118 módulos · 45 MCP tools · 934 tests.**
+**118 módulos · 45 MCP tools · 939 tests.**
 
 El server expone **15** de esas 45 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
 

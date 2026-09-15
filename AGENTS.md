@@ -79,3 +79,7 @@ auto-push. Propose the commit/push/PR and wait for the user's explicit OK. Work
 committed locally and surfaced to the user is a valid end state — do NOT treat work as
 "incomplete until pushed".
 <!-- END BEADS INTEGRATION -->
+
+## SDLC (pipeline de 6 etapas)
+
+Este repo construye features con `mmorch.sdlc` (skill `/project`). Contrato del repo en `sdlc.toml`; artefactos de cada corrida en `docs/sdlc/` de la review branch.

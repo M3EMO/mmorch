@@ -15,6 +15,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -49,13 +50,22 @@ PY_RE = r"`?((?:\w+/)*\w+\.py)`?"
 TPL = pathlib.Path(__file__).resolve().parent / "sdlc_templates"  # spec-kit recortado (tickets 02 y 11)
 
 
+def _toml(root) -> dict:
+    """`sdlc.toml` en la raiz del repo (ticket 11): accept_cmd, suite, files (techo), approve_accept, topes."""
+    import tomllib
+    p = pathlib.Path(root) / "sdlc.toml"
+    return tomllib.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+
+
 def _cfg():
-    """Topes del ticket 07. docs/sdlc/sdlc.toml del worktree pisa los defaults."""
-    d = {"usd_max": 3.0, "stall_rounds": 2, "diff_novelty_min": 0.10, "cmd_timeout_s": 600, "suite_timeout_s": 1800}
-    p = WT / "docs" / "sdlc" / "sdlc.toml"
-    if p.exists():
+    """Topes del ticket 07 + `approve_accept` (ticket 12 D5). sdlc.toml de la raiz del worktree pisa los defaults."""
+    d = {"usd_max": 3.0, "stall_rounds": 2, "diff_novelty_min": 0.10, "cmd_timeout_s": 600, "suite_timeout_s": 1800,
+         "approve_accept": True}
+    d.update(_toml(WT))
+    legacy = WT / "docs" / "sdlc" / "sdlc.toml"
+    if legacy.exists():
         import tomllib
-        d.update(tomllib.loads(p.read_text(encoding="utf-8")))
+        d.update(tomllib.loads(legacy.read_text(encoding="utf-8")))
     return d
 
 
@@ -578,6 +588,47 @@ def self_check() -> int:
     return 1 if fails else 0
 
 
+@stage("1-aceptacion")
+def aceptacion():
+    """Etapa 1 (ticket 12 D5): Claude escribe el test de aceptacion desde la tarea. Gates deterministas: nombra
+    test_R<n>_..., compila (collect-only) y FALLA en HEAD (rojo por diseño). Con `approve_accept` (default) la corrida
+    se detiene en `awaiting_approval`: un humano (o el agente del ticket 14) aprueba y reanuda desde la etapa 2."""
+    if TASK.accept_files:
+        return True, "tests de aceptacion provistos por el llamador"
+    from .claude_exec import run_claude
+    os.environ.pop("CLAUDECODE", None)
+    rel = f"{TESTS_PREFIX}test_sdlc_{re.sub(r'[^a-z0-9]+', '_', TASK_NAME.lower()).strip('_')[:40]}.py"
+    state["claude_calls"] += 1
+    before = _tree()
+    r = run_claude(f"Escribi SOLO el archivo {rel}: el test de aceptacion (pytest, sin red) de esta TAREA. Un test por "
+                   f"requisito, nombrados test_R1_..., test_R2_... con el ID en el nombre; docstring de modulo con el contrato "
+                   f"R<n>. El test DEBE fallar hoy (el codigo aun no existe o no cumple) y pasar cuando la tarea este hecha. "
+                   f"No toques ningun otro archivo.\n\nTAREA:\n{TASK.task}",
+                   cwd=str(WT), mode="edit", timeout=CFG["cmd_timeout_s"])
+    write_supervision(f"aceptacion (Claude, rc={r.get('returncode')}): {(r.get('result') or '')[:1000]}")
+    if not gate_alcance("aceptacion-alcance", before, (rel,))[0] or not (WT / rel).exists():
+        return False, f"Claude no dejo {rel} (o toco otros archivos)"
+    text = (WT / rel).read_text(encoding="utf-8")
+    ids = sorted(set(re.findall(r"(?m)^def test_(R\d+)", text)))
+    if not ids:
+        return rec_gate("aceptacion-ids", False, "sin tests test_R<n>_...")
+    ok_c, log = sh([PY, "-m", "pytest", rel, "--collect-only", "-q", "-p", "no:cacheprovider"])
+    if not ok_c:
+        return rec_gate("aceptacion-compila", False, log[-600:])
+    ok_r, _ = sh([PY, "-m", "pytest", rel, "-q", "-p", "no:cacheprovider"])
+    if ok_r:
+        return rec_gate("aceptacion-roja", False, f"{rel} ya pasa en HEAD: no mide la tarea")
+    rec_gate("aceptacion-roja", True, f"{rel} roja en HEAD, R: {ids}")
+    TASK.accept_files[rel] = text
+    _seed_accept()
+    snapshot_baseline()
+    if CFG.get("approve_accept", True):
+        state["awaiting_approval"] = rel
+        write_supervision(f"ESPERA_HUMANO: aprobar {rel} y reanudar desde la etapa 2 (from_stage=2)")
+        return False, f"esperando aprobacion humana de {rel} (reanudar desde la etapa 2)"
+    return True, f"{rel}: R {ids}, roja en HEAD, sin aprobacion (approve_accept=false)"
+
+
 @stage("2-spec")
 def spec():
     tpl = (TPL / "spec-template.md").read_text(encoding="utf-8")
@@ -907,12 +958,13 @@ def gate_lint() -> tuple[bool, str]:
 
 def _seed_accept() -> None:
     """Escribe y commitea los tests de aceptacion del llamador (rojos por diseño) si no estan en el arbol."""
-    faltan = {rel: c for rel, c in getattr(TASK, "accept_files", {}).items() if not (WT / rel).exists()}
-    if not faltan:
+    accept = getattr(TASK, "accept_files", {})
+    if not accept:
         return
-    for rel, content in faltan.items():
-        _write(rel, content)
-    subprocess.run(["git", "add", "-A"], cwd=WT, check=True)
+    for rel, content in accept.items():
+        if not (WT / rel).exists():
+            _write(rel, content)
+    subprocess.run(["git", "add", "--", *accept], cwd=WT, check=True)  # solo los tests: el resto del arbol no es nuestro
     if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=WT).returncode != 0:
         subprocess.run(["git", "-c", "user.name=mmorch", "-c", "user.email=mmorch@local", "commit", "-q", "-m",
                         f"sdlc: test de aceptacion {TASK_NAME} (rojo por diseño)"], cwd=WT, check=True)
@@ -963,7 +1015,7 @@ def _run_stages(from_stage: float) -> dict:
         state["plan_files"] = _plan_files(m.group(1) if m else plan_md)
     for t in TPL.glob("*.md"):  # convencion por repo (ticket 11): las plantillas viajan con el repo
         _write(f"docs/sdlc/{t.name}", t.read_text(encoding="utf-8"))
-    stages = {2: spec, 2.5: spec_review, 3: plan, 4: build, 5: test, 5.5: review, 6: pr}
+    stages = {1: aceptacion, 2: spec, 2.5: spec_review, 3: plan, 4: build, 5: test, 5.5: review, 6: pr}
     try:
         for k in sorted(stages):
             if k >= from_stage:
@@ -978,7 +1030,8 @@ def _run_stages(from_stage: float) -> dict:
     _flush()
     here = RUNS / f"run-log-{PHASE}.json"
     here.write_text(LOG.read_text(encoding="utf-8"), encoding="utf-8")
-    state["status"] = "built" if not state.get("failed_stage") else ("integration_failed" if str(state["failed_stage"]).startswith("5") else "escalate")
+    state["status"] = ("built" if not state.get("failed_stage") else "awaiting_approval" if state.get("awaiting_approval")
+                       else "integration_failed" if str(state["failed_stage"]).startswith("5") else "escalate")
     print("SDLC TERMINO", json.dumps({k: state.get(k) for k in
           ("task", "calls", "minutes_total", "usd", "usd_by_family", "human_interventions", "claude_calls", "review_block",
            "escalated_to_claude", "gate_rejects", "diffstat", "lines", "suite_total", "lint_new")}, ensure_ascii=False))
@@ -987,19 +1040,23 @@ def _run_stages(from_stage: float) -> dict:
 
 def build_feature(name: str, task: str, repo: str, *, accept: dict[str, str] | None = None, accept_cmd: str | None = None,
                   files: list[str] | None = None, contract: list[str] | None = None, suite: list[str] | None = None,
-                  wt=None, phase=None, from_stage: float = 2, max_fix: int = 3, writer=None, coder=None) -> dict:
+                  wt=None, phase=None, from_stage: float | None = None, max_fix: int = 3, writer=None, coder=None) -> dict:
     """Construye UNA feature en un repo existente por el pipeline. Devuelve el estado final (run-log) con
     `status` in {built, integration_failed, escalate} y, si fallo, `failed_stage` (el checkpoint para reanudar).
 
     `accept` = {ruta relativa del test de aceptacion: contenido} (lo escribe el llamador, nunca el pipeline);
     sin `accept`, `accept_cmd` (el comando del repo) es el oraculo. `files` = lo que el plan puede escribir:
     `sdlc.toml` de la raiz del repo es el techo y un `files` del llamador solo lo acota (ticket 05 D2)."""
+    toml = _toml(repo)
+    accept_cmd = accept_cmd or toml.get("accept_cmd")
     if not accept and not accept_cmd:
-        raise ValueError("build_feature necesita `accept` (tests) o `accept_cmd` (comando del repo)")
+        raise ValueError("build_feature necesita `accept` (tests) o `accept_cmd` (comando del repo / sdlc.toml)")
     files = _resolve_files(repo, files)
+    if from_stage is None:
+        from_stage = 2 if accept else 1  # sin tests del llamador: la etapa 1 los escribe (ticket 12 D5)
     feat = {"repo": repo, "task": task, "files": files, "accept": dict(accept or {}), "contract": list(contract or []),
-            "suite": suite or ["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp",
-                               str(pathlib.Path(tempfile.gettempdir()) / "pyt-sdlc-wt")]}
+            "suite": suite or toml.get("suite") or ["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp",
+                                                       str(pathlib.Path(tempfile.gettempdir()) / "pyt-sdlc-wt")]}
     t = types.SimpleNamespace(name=name, task=task, accept_files=dict(accept or {}))
     configure(t, contract=feat["contract"], feat=feat, wt=wt, phase=phase, max_fix=max_fix, writer=writer, coder=coder,
               accept_cmd=accept_cmd)
@@ -1032,9 +1089,47 @@ def _files_from_toml(repo: str) -> list[str]:
     return list(files)
 
 
+def init(repo: str) -> dict:
+    """Ticket 12: un repo entra al pipeline. Escribe `sdlc.toml` (techo = fuentes .py fuera de tests; accept_cmd; suite;
+    approve_accept), `docs/sdlc/` con las plantillas y un puntero en AGENTS.md. Nunca pisa lo que ya existe."""
+    root = pathlib.Path(repo).resolve()
+    hecho: list[str] = []
+    toml = root / "sdlc.toml"
+    if not toml.exists():
+        skip = {"tests", "tests_accept", ".venv", "venv", "node_modules", "build", "dist", "docs"}
+        src = sorted(str(q.relative_to(root)).replace("\\", "/") for q in root.rglob("*.py")
+                     if not any(part in skip or part.startswith(".") for part in q.relative_to(root).parts))
+        toml.write_text(
+            "# sdlc.toml — convencion por repo (ticket 11). `files` es el TECHO de lo que el pipeline puede escribir;\n"
+            "# un payload solo lo acota. Sin accept_cmd el repo no entra. approve_accept: un humano aprueba el test\n"
+            "# de aceptacion que escribe la etapa 1 antes de gastar (ticket 12 D5).\n"
+            'accept_cmd = "python -m pytest -q"\n'
+            'suite = ["tests", "-q", "-rfE", "-p", "no:cacheprovider"]\n'
+            "approve_accept = true\nusd_max = 3.0\n"
+            "files = [\n" + "".join(f'    "{f}",\n' for f in src[:200]) + "]\n", encoding="utf-8")
+        hecho.append("sdlc.toml")
+    d = root / "docs" / "sdlc"
+    d.mkdir(parents=True, exist_ok=True)
+    for t in TPL.glob("*.md"):
+        if not (d / t.name).exists():
+            shutil.copy(t, d / t.name)
+            hecho.append(f"docs/sdlc/{t.name}")
+    ag = root / "AGENTS.md"
+    marca = "## SDLC (pipeline de 6 etapas)"
+    if ag.exists() and marca not in ag.read_text(encoding="utf-8"):
+        ag.write_text(ag.read_text(encoding="utf-8").rstrip("\n") + f"\n\n{marca}\n\nEste repo construye features con "
+                      "`mmorch.sdlc` (skill `/project`). Contrato del repo en `sdlc.toml`; artefactos de cada corrida en "
+                      "`docs/sdlc/` de la review branch.\n", encoding="utf-8")
+        hecho.append("AGENTS.md")
+    return {"repo": str(root), "hecho": hecho}
+
+
 def main(argv: list[str] | None = None) -> int:
-    """CLI para tasks del bench: python -m mmorch.sdlc --task rate-limiter [--wt DIR] [--phase P] [--from-stage N]."""
+    """CLI: `python -m mmorch.sdlc init <repo>` | `--task <bench> [--wt DIR] [--phase P] [--from-stage N]`."""
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["init"]:
+        print(json.dumps(init(argv[1] if len(argv) > 1 else "."), ensure_ascii=False))
+        return 0
 
     def arg(flag, default):
         return argv[argv.index(flag) + 1] if flag in argv else default

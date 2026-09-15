@@ -38,7 +38,7 @@ Todos los proyectos del usuario construyen sus features con el mismo pipeline de
 - Intent y PR: sin `GATE-N.md` a propósito (Q16b). No se inventa oráculo.
 - Cómo un candidato de `supervision.md` se etiqueta 3+1 cuando no hay oráculo: ticket 08.
 - Retiro del store de bloques cuando ningun lector quede (05 dejo de escribirlo).
-- Hermes como canal del nivel humano (gateway Telegram/WhatsApp) y como emisor de skills por gate. Sin ticket hasta que haga falta.
+- Hermes como emisor de skills por gate. (El rol de Hermes en la aceptación ya es ticket: 14.)
 
 ## Out of scope
 
