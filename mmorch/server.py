@@ -31,7 +31,7 @@ from .server_frontend import FRONTEND as _FRONTEND
 from .server_core import _JOBS, _JOBS_LOCK, _token_ok, _budget_block, _jobmeta
 
 
-from .server_engine import (_rubric_drive, _run_rubric_job, _workflow_run, _run_workflow_job, _run_project_job,
+from .server_engine import (_rubric_drive, _run_rubric_job, _run_project_job,
                             _run_project_build_job, _run_fanout_job)
 
 
@@ -293,7 +293,8 @@ async def run_project(request):
 
 
 async def run_workflow(request):
-    """Start a cooperative role-chain workflow (Phase C). Body: {task, workflow_name | workflow:{...}}."""
+    """POST /run/workflow {workflow_name: "project-build", project, external_test, task, ...}: el pipeline de 6 etapas
+    (mmorch.sdlc) como job del server. (Los role-chains cooperativos se retiraron el 2026-09-15.)"""
     from starlette.responses import JSONResponse
     if not _token_ok(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -344,25 +345,9 @@ async def run_workflow(request):
         t.start()
         return JSONResponse({"started": "project-build", "job_id": jid, "project": project,
                              "external_test": external_test, "seed_globs": seeds})
-    from . import workflow_spec
-    try:
-        if body.get("workflow"):
-            spec = workflow_spec.validate(body["workflow"])           # inline, ad-hoc
-        elif body.get("workflow_name"):
-            spec = workflow_spec.load_workflow(body["workflow_name"])  # saved
-        else:
-            return JSONResponse({"error": "workflow or workflow_name required"}, status_code=400)
-    except Exception as e:
-        return JSONResponse({"error": f"invalid workflow: {str(e)[:200]}"}, status_code=400)
-    jid = _u.uuid4().hex[:10]
-    project = body.get("project")
-    apply = bool(body.get("apply"))               # apply=true + project -> run in a git worktree of the repo
-    t = threading.Thread(target=_run_workflow_job, args=(jid, spec, task),
-                         kwargs={"project": project, "apply": apply, "parent": body.get("parent_id")},
-                         daemon=True)
-    t.start()
-    return JSONResponse({"started": "workflow", "job_id": jid, "name": spec["name"],
-                         "steps": len(spec["steps"]), "apply": apply and bool(project)})
+    # 2026-09-15: los role-chains (build-feature) se retiraron (2 usos en 90 dias). Solo queda el pipeline.
+    return JSONResponse({"error": "solo workflow_name='project-build' (el pipeline de 6 etapas); los role-chains se retiraron"},
+                        status_code=400)
 
 
 from .server_fleet import sync_pull, fleet_handler, fleet_run
@@ -636,16 +621,6 @@ async def resume_job(request):
         emit("job", "running", job_id=jid, detail="resumed from checkpoint")
         threading.Thread(target=_rubric_drive, args=(jid, state, cancel), daemon=True).start()
         return JSONResponse({"resumed": jid, "kind": "rubric", "phase": state.get("phase"),
-                             "from_step": len(workflow_store.checkpoint_history(jid))})
-    if kind == "workflow":
-        state = data["state"]
-        if state.get("status") == "done":
-            return JSONResponse({"error": "workflow already complete"}, status_code=409)
-        meta = {k: data[k] for k in ("task", "name", "work_dir", "apply_project", "branch") if k in data}
-        meta.setdefault("task", "")
-        threading.Thread(target=_workflow_run, args=(jid, state, meta),
-                         kwargs={"resumed": True}, daemon=True).start()
-        return JSONResponse({"resumed": jid, "kind": "workflow", "status": state.get("status"),
                              "from_step": len(workflow_store.checkpoint_history(jid))})
     if kind == "project":
         done = len(workflow_store.checkpoint_history(jid))

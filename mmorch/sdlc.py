@@ -46,8 +46,11 @@ CODER = os.environ.get("SDLC_CODER", "deepseek-v4-pro")
 DIAG = os.environ.get("SDLC_DIAG", WRITER)  # medicion 2026-09-15: diagnostico con/sin razonamiento
 PY = sys.executable
 METRICS = logs_dir() / "metrics.jsonl"
-_LANG_HINT = {"py": "python -m compileall -q .", "java": "mvn -q test-compile", "ts": "npx tsc --noEmit", "js": "node --check <archivo>",
-              "go": "go build ./... && go vet ./...", "rs": "cargo check"}
+# El pipeline es agnostico: compila/lintea/acepta por COMANDO (sdlc.toml). Esta tabla solo sugiere el compile_cmd en `init`.
+_LANG_HINT = {"py": "python -m compileall -q .", "java": "mvn -q test-compile", "kt": "gradle -q compileTestKotlin",
+              "ts": "npx tsc --noEmit", "js": "node --check <archivo>", "go": "go build ./... && go vet ./...",
+              "rs": "cargo check --tests", "cpp": "cmake --build build", "cc": "cmake --build build", "c": "cmake --build build",
+              "cs": "dotnet build --no-restore", "swift": "swift build", "rb": "ruby -c <archivo>", "php": "php -l <archivo>"}
 
 
 def _exts() -> list[str]:

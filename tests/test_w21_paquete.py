@@ -21,9 +21,6 @@ def test_prompts_y_roles_viajan_con_el_paquete():
     from mmorch.loop_nightly import _PROMPTS_DIR
     assert _PROMPTS_DIR == pkg / "prompts"
     assert (_PROMPTS_DIR / "coder_prompt.txt").is_file()
-    from mmorch.workflow_spec import roles_dir
-    assert roles_dir() == pkg / "roles"
-    assert (roles_dir() / "coder.md").is_file()
 
 
 def test_shims_compat_apuntan_al_paquete():
