@@ -480,8 +480,10 @@ def _need_files() -> list[str]:
 def gate_plan_allowlist(plan_md: str, files: list[str]) -> tuple[bool, str]:
     m = re.search(r"## Archivos\b(.*?)(?:\n## |\Z)", plan_md, re.S | re.I)
     block = m.group(1) if m else plan_md
-    if re.search(r"(?im)^\s*[-*]+\s*`?" + re.escape(TESTS_PREFIX), block):
-        return rec_gate("plan-allowlist", False, f"plan lista {TESTS_PREFIX} como archivo a escribir")
+    # un cableo puede listar tests/test_capas.py (esta en FEAT["files"]); cualquier otro tests/ sigue prohibido
+    ajenos = [t for t in re.findall(r"(?im)^\s*[-*]+\s*`?(" + re.escape(TESTS_PREFIX) + r"[\w/.-]*)", block) if t not in _need_files()]
+    if ajenos:
+        return rec_gate("plan-allowlist", False, f"plan lista {ajenos} como archivo a escribir")
     need = [f for f in _need_files() if f not in files]
     if need:
         return rec_gate("plan-allowlist", False, f"plan omite {need}")
@@ -523,9 +525,9 @@ def gate_clarificaciones(spec_md: str) -> tuple[bool, str]:
     m = re.search(r"## Clarificaciones\b(.*?)(?:\n## |\Z)", spec_md, re.S)
     if not m:
         return rec_gate("spec-review", False, "falta ## Clarificaciones")
-    if "sin preguntas" in m.group(1):
-        return rec_gate("spec-review", True, "0 preguntas")
-    qs = re.findall(r"(?m)^- P\d+: .+\| R: \S.*\| afecta: R\d+", m.group(1))
+    qs = re.findall(r"(?m)^- P\d+: .+\| R: \S.*\| afecta: \S+", m.group(1))  # D11-diag: "afecta: Contrato" tambien vale
+    if not qs and re.search(r"sin preguntas|0 preguntas|ninguna pregunta|no hay preguntas", m.group(1), re.I):
+        return rec_gate("spec-review", True, "0 preguntas")  # D11-diag: Claude escribio "0 preguntas" en vez del literal
     if not 1 <= len(qs) <= 5:
         return rec_gate("spec-review", False, f"{len(qs)} preguntas validas (esperado 1..5)")
     return rec_gate("spec-review", True, f"{len(qs)} preguntas respondidas")
