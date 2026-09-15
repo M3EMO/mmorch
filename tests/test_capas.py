@@ -26,7 +26,7 @@ _DINAMICOS = {"loop"}   # cargado por nombre desde loop_nightly; 4173 usos en 90
 # Medido 2026-09-14 con este mismo analisis (15). Cada uno: se cablea (y sale de aca) o se borra (y sale
 # de aca). Nunca crece. plugin_worker es el subproceso de plugins: se ejecuta por path, no por import.
 _NO_ALCANZADOS = {
-    "code_embedder", "effort", "megasource", "plugin_worker", "schedule", "synth_store", "weights",
+    "code_embedder", "megasource", "plugin_worker", "synth_store", "weights",
 }
 
 

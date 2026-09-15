@@ -6,7 +6,6 @@ auto-logs a metric record (§11). Keys come from env (loaded from .env).
 """
 from __future__ import annotations
 
-import importlib
 import os
 import random
 import threading
@@ -263,10 +262,12 @@ def call(
     """
     # R1: si effort viene, el modelo efectivo se resuelve al inicio y reemplaza a model_key.
     if effort is not None:
-        effort_mod = importlib.import_module('.effort', __package__)
-        effective_model = effort_mod.model_for_effort(effort)
+        from .effort import model_for_effort
+        effective_model = model_for_effort(effort)
     else:
         effective_model = model_key
+    from .schedule import is_off_peak
+    off_peak = is_off_peak()  # D14: una vez por llamada; va al ledger como extra['off_peak']
     s = spec(effective_model)
     if isinstance(messages, str):
         messages = [{"role": "user", "content": messages}]
@@ -287,12 +288,9 @@ def call(
     except BudgetExceeded as e:
         # Observabilidad: el cap-hit antes era INVISIBLE (salta antes de cualquier log).
         # Lo registramos pa poder medir budget-cap-hit-rate. NO cambia comportamiento: re-lanza.
-        schedule = importlib.import_module('.schedule', __package__)
-        off_peak = schedule.is_off_peak()
         log_event(pattern=pattern, node=node or effective_model, model=effective_model, family=s.family,
                   in_tokens=0, out_tokens=0, cost_usd=0.0, latency_s=0.0, phase=phase,
                   error=type(e).__name__, error_msg=str(e)[:200], error_class="budget_cap",
-                  extra={'off_peak': off_peak},
                   off_peak=off_peak)
         raise
 
@@ -300,12 +298,9 @@ def call(
     try:
         _breaker_allow(effective_model)
     except BreakerOpen as e:
-        schedule = importlib.import_module('.schedule', __package__)
-        off_peak = schedule.is_off_peak()
         log_event(pattern=pattern, node=node or effective_model, model=effective_model, family=s.family,
                   in_tokens=0, out_tokens=0, cost_usd=0.0, latency_s=0.0, phase=phase,
                   error=type(e).__name__, error_msg=str(e)[:200], error_class="breaker_open",
-                  extra={'off_peak': off_peak},
                   off_peak=off_peak)
         raise
 
@@ -345,8 +340,6 @@ def call(
             # error_class distingue rate-limit/429 del resto -> mide 429-rate por proveedor.
             # attempt/retried registran CADA retry (W3.3): el retry silencioso esconde
             # exactamente la degradacion que el breaker necesita hacer visible.
-            schedule = importlib.import_module('.schedule', __package__)
-            off_peak = schedule.is_off_peak()
             log_event(
                 pattern=pattern,
                 node=node or effective_model,
@@ -362,7 +355,6 @@ def call(
                 error_class=eclass,
                 attempt=attempt,
                 retried=transient and attempt < _RETRY_MAX_ATTEMPTS,
-                extra={'off_peak': off_peak},
                 off_peak=off_peak,
                 **err_extra,
             )
@@ -382,8 +374,6 @@ def call(
     c = cost_usd(effective_model, in_tok, out_tok, cached_tok)
     _track_cost(c)
 
-    schedule = importlib.import_module('.schedule', __package__)
-    off_peak = schedule.is_off_peak()
     log_event(
         pattern=pattern,
         node=node or effective_model,
@@ -395,7 +385,6 @@ def call(
         latency_s=latency,
         phase=phase,
         cached_tokens=cached_tok,
-        extra={'off_peak': off_peak},
         off_peak=off_peak,
     )
     # "exito vacio" (AT-10 ronda 2, medido en glm-5.2): con max_tokens chico el
