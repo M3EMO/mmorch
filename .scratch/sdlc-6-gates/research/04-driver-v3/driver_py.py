@@ -266,6 +266,7 @@ REASONER_TRIES = 2
 # Override por env para no cambiar el protocolo (ticket 07) en el codigo: SDLC_WRITER=deepseek-v4-pro.
 WRITER = os.environ.get("SDLC_WRITER", "deepseek-reasoner")
 CODER = os.environ.get("SDLC_CODER", "deepseek-v4-pro")
+DIAG = os.environ.get("SDLC_DIAG", WRITER)  # medicion 2026-09-15: diagnostico con/sin razonamiento
 PY = sys.executable
 LOG = WT / "docs" / "sdlc" / "run-log.json"
 METRICS = pathlib.Path(r"C:\Users\map12\.claude\orchestration\logs\metrics.jsonl")
@@ -676,7 +677,7 @@ def reasoner_rounds(log) -> tuple[bool, str]:
     """Nivel 2: dos intentos con deepseek-reasoner. Una instruccion por archivo."""
     for i in range(REASONER_TRIES):
         written = _all_code()
-        pick = llm(WRITER, 'Sos un diagnosticador. Respondes SOLO JSON: {"files": [paths], "instructions": {path: "una instruccion"}}. Una instruccion por archivo.',
+        pick = llm(DIAG, 'Sos un diagnosticador. Respondes SOLO JSON: {"files": [paths], "instructions": {path: "una instruccion"}}. Una instruccion por archivo.',
                    f"Los tests de aceptacion fallan. Diagnostica y indica QUE cambiar.\n\nSALIDA:\n{log}\n\n"
                    f"TAREA:\n{TASK.task}\n\nTESTS:\n{_tests_text()}\n\nARCHIVOS:\n{_joined(written)}")
         write_supervision(f"reasoner {i+1}: {pick[:2000]}")
