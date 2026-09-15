@@ -87,3 +87,15 @@ def test_run_recupera_el_test_al_reanudar(tmp_path):
     S.configure(t, contract=[], feat={"repo": str(repo), "files": ["pkg/a.py"], "suite": ["tests"]}, wt=repo, accept_cmd="pytest")
     S.run(from_stage=99)  # ninguna etapa corre: solo la preparacion (sin API)
     assert "tests/test_sdlc_m.py" in t.accept_files
+
+
+def test_tests_nombrados_en_cualquier_lenguaje(tmp_path):
+    """El server reconoce el test de aceptacion que nombra el payload aunque no sea .py (Estudio, ChatBot)."""
+    from mmorch.server_engine import _tests_nombrados
+    for rel in ["tests/test_sdlc_a.py", "app/src/sdlc/export_mastery.test.ts", "backend/pom.xml"]:
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("x", encoding="utf-8")
+    assert _tests_nombrados("python -m pytest -q tests/test_sdlc_a.py", tmp_path) == ["tests/test_sdlc_a.py"]
+    assert _tests_nombrados("app/src/sdlc/export_mastery.test.ts", tmp_path) == ["app/src/sdlc/export_mastery.test.ts"]
+    assert _tests_nombrados("mvn -q -f backend/pom.xml test", tmp_path) == []
+    assert _tests_nombrados("pytest -q tests/test_no_existe.py", tmp_path) == []

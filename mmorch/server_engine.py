@@ -148,6 +148,13 @@ def _run_project_job(project: str, task: str, mode: str, push: bool = False,
         _JOBS[jid]["status"] = "done" if ok else "error"
 
 
+def _tests_nombrados(external_test: str | None, root) -> list[str]:
+    """Rutas de tests que nombra `external_test` y existen en el worktree: `tests/test_x.py`, pero tambien
+    `app/src/sdlc/x.test.ts` o `.../Sdlc_x_Test.java` (antes solo .py bajo tests/). `backend/pom.xml` no es un test."""
+    import re as _re
+    return [p for p in _re.findall(r"[\w./-]*test[\w./-]*\.\w+", external_test or "", _re.I) if (Path(root) / p).is_file()]
+
+
 def _run_project_build_job(jid: str, task: str, project: str, external_test: str,
                            max_depth: int = 2, seed_globs: list | None = None, parent=None,
                            gen_model: str | None = None, max_fix: int | None = None,
@@ -174,9 +181,7 @@ def _run_project_build_job(jid: str, task: str, project: str, external_test: str
         n_seed = wt.seed(list(dict.fromkeys((seed_globs or []) + list(_toml(repo).get("seed_globs", [])) + [".venv", "venv"])))
         emit("job", "running", job_id=jid,
              detail=f"sdlc {project} -> {wt.branch}{f' (+{n_seed} seeded)' if n_seed else ''}: {task[:70]}")
-        import re as _re
-        named = [p for p in _re.findall(r"(?:tests?|tests_accept)[\w/.-]*\.py", external_test or "")
-                 if (Path(wt.path) / p).exists()]
+        named = _tests_nombrados(external_test, wt.path)
         accept = {p: (Path(wt.path) / p).read_text(encoding="utf-8") for p in named}
         res = build_feature(jid, task, repo, accept=accept or None, accept_cmd=None if accept else external_test,
                             files=files, wt=wt.path, phase=f"sdlc-{jid}", from_stage=from_stage,
