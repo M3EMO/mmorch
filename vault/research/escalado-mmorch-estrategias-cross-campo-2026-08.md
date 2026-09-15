@@ -1,3 +1,7 @@
+---
+applies_to:
+- .claude
+---
 # Research: estrategias de otros campos para escalar el flywheel de auto-mejora de mmorch
 
 Fecha: 2026-08-18. Contexto: mmorch ya tiene bandits Thompson+decay, verificación cross-family, mutation-testing+hardening, loop nocturno de ideas (144 pares nota×proyecto brute-force), auto-reflexión, feedback.jsonl con rewards. Meta futura: LoRA de modelos chicos, reward models, router aprendido.

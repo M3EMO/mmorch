@@ -1,7 +1,7 @@
 ---
 applies_to:
-- OS propio
 - orchestration
+- .claude
 ---
 Code-read 2026-08-14 (agente dedicado sobre clon shallow). prime-agent = "self-improving RLM agent" de PrimeIntellect: kernel IPython persistente como único tool + harness state durable (prompt/memory/skill/subagent) refinado por LLM.
 

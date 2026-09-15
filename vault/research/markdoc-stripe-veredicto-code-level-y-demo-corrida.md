@@ -2,6 +2,7 @@
 applies_to:
 - Portfolio financiero
 - orchestration
+- .claude
 confidence: alta — clonado, API leída, demo ejecutada con casos válido e inválido
 created: 2026-08-12
 sources:

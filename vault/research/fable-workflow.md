@@ -1,3 +1,7 @@
+---
+applies_to:
+- .claude
+---
 # Cómo trabaja Fable — reglas destiladas para mmorch
 
 > Skill-distillation (metodo del articulo de Vuyyuru): el modelo caro documenta UNA VEZ su

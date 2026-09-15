@@ -1,10 +1,7 @@
 ---
-title: Decision systems: majority voting requiere independencia — panel same-model no decorrelaciona
-created: 2026-08-29
-tags: [research, orchestration, research, decision-theory, ensemble, verification, evolve, llm-as-judge]
-status: applied
-confidence: 0.9
-sources: [https://en.wikipedia.org/wiki/Condorcet%27s_jury_theorem, https://arxiv.org/html/2605.29800, https://arxiv.org/abs/2404.18796, https://arxiv.org/html/2607.08065]
+applies_to:
+- orchestration
+- .claude
 ---
 ## Pregunta
 

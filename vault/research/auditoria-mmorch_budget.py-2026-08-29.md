@@ -1,8 +1,12 @@
 ---
-title: auditoria mmorch/budget.py 2026-08-29
-status: seed
-tags: [mmorch, self-audit]
+applies_to:
+- orchestration
 created: 2026-08-29
+status: seed
+tags:
+- mmorch
+- self-audit
+title: auditoria mmorch/budget.py 2026-08-29
 ---
 
 3 findings: 1 bug de consistencia en caché, 1 acoplamiento estructural con read_events(), 1 violación de principio de inyección de dependencias

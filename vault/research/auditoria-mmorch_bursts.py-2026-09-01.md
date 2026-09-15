@@ -1,0 +1,16 @@
+---
+title: auditoria mmorch/bursts.py 2026-09-01
+status: seed
+tags: [mmorch, self-audit]
+created: 2026-09-01
+---
+
+El módulo de bursts tiene un bug de persistencia que filtra términos legítimos, una violación estructural del principio de estado en memoria, y un problema de acoplamiento oculto con el formato de datos.
+
+## Findings (sobrevivieron refutacion 5/5 — 2 estructurales, 1 bugs, 1 de principios)
+
+- **Estructural: Relee el store del disco cuando el llamador ya lo tiene en memoria** [media/estructural]: `harvest()` (línea 47) lee `load_json_tolerant(path, ...)` y luego `bursting()` (línea 82) vuelve a leer el mismo archivo. Si un llamador ejecuta harvest y luego bursting en el mismo ciclo, el segundo relee del disco un dato que el primero ya tiene en memoria. Viola el ADR 0001 (estado en memoria, no releer disco). La solución es que `harvest()` devuelva el store actualizado o que `bursting()` acepte un store opcional.
+- **Estructural: Acoplamiento oculto con el formato de datos de iohelpers** [media/estructural]: El módulo asume que `load_json_tolerant` devuelve un dict con la estructura `{"weeks": {...}}` y que `atomic_write_json` serializa exactamente ese formato. Si iohelpers cambia el formato (por ejemplo, agrega metadata o cambia la estructura), este módulo revienta silenciosamente. No hay validación del schema al leer, y el default `{}` en `bursting()` (línea 82) enmascara un archivo corrupto como 'sin datos' en vez de fallar explícitamente.
+- **Bug: La condición de persistencia usa media+1 en vez de la cuenta real de la semana previa** [alta/bug]: Línea 99: `if previa.get(term, 0) < media + 1` — esto exige que el término tenga AL MENOS media+1 en la semana previa, pero la media se calcula sobre las semanas base (excluyendo la actual y la previa). Si un término explota de 1→10 en la semana previa y luego a 12 en la actual, con media base de 1.5, la condición `10 < 2.5` es falsa y el término se descarta. El requisito de persistencia debería ser `previa.get(term, 0) >= min_count` o comparar contra la cuenta de la semana previa directamente, no contra la media de semanas aún más antiguas.
+- **Principio: El self-check no cubre el caso de persistencia con media baja** [baja/principio]: El `_demo()` (línea 108) prueba el caso feliz (explota y persiste) y el caso de pico sin persistencia, pero no prueba el caso del bug reportado: un término que explota en la semana previa (cuenta alta) pero tiene media base baja. El self-check debería incluir un caso donde `previa[term]` es alto pero `media` es bajo, para atrapar el bug de la línea 99.
+- **Otro: El límite de 150 resultados por categoría puede perder términos emergentes** [baja/otro]: Línea 62: `max_results=150` — arXiv devuelve los más recientes por fecha de envío, pero si una categoría tiene más de 150 papers en la ventana de una semana (cs.LG fácilmente supera esto), los términos de los papers más antiguos de esa semana se pierden. Esto introduce un sesgo: los términos que aparecen en papers que llegan temprano en la semana tienen más chance de ser contados que los que aparecen en papers del final de la semana. El harvest no es determinista respecto a cuándo se corre dentro de la semana.

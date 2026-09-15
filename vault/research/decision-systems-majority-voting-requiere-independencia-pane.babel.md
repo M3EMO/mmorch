@@ -1,9 +1,11 @@
 ---
-source: decision-systems-majority-voting-requiere-independencia-pane.md
+applies_to:
+- orchestration
+derived: true
+fidelity: 0.833
 lexicon: v2
 ratio: 0.468
-fidelity: 0.833
-derived: true
+source: decision-systems-majority-voting-requiere-independencia-pane.md
 ---
 Decision systems: majority voting requires independence—panel same-model no decorrelates.
 2026-08-29. [research, orchestration, decision-theory, ensemble, verification, evolve, llm-as-judge]. applied. 0.9.
