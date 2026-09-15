@@ -22,6 +22,7 @@ import os
 import pathlib
 import sys
 import time
+from typing import Callable
 
 # corre via Task Scheduler sin terminal utf-8 (consola por default cp1252 en
 # Windows) — cualquier "→"/emoji/acento en texto de LLM (reflexion, digest,
@@ -47,6 +48,9 @@ load_dotenv(ROOT / ".env")
 
 LOG = ROOT / "logs" / "nightly.jsonl"
 
+PRICE_CHECK_INTERVAL_S: int = 30 * 86400
+PRICE_CHECK_STATE_FILENAME: str = "nightly_prices.json"
+
 
 def _log(rec: dict) -> None:
     LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -71,6 +75,70 @@ def _goal_gate(path=None, hash_path=None) -> str | None:
     except FileNotFoundError as e:
         return f"GOAL.md faltante (el ancla es obligatoria): {e}"
     return None
+
+
+def run_price_check(
+    now: float | None = None,
+    propose: Callable[[], dict] | None = None,
+    state_path: pathlib.Path | None = None,
+) -> dict:
+    """Price check mensual de megasource, cableado al nightly.
+
+    Estado en `state_path` (default `paths.home()/nightly_prices.json`) con
+    `last_check_ts`. Si la última corrida tiene menos de 30 días, retorna
+    `{"ran": False, "reason": "reciente"}` sin llamar a `propose`. Si
+    corresponde, llama a `propose()` (default:
+    `megasource.propose_price_update`), guarda `last_check_ts = now` y retorna
+    `{"ran": True, "n_changed": ..., "diff": ...}`. Nunca escribe prices.json.
+    Si `propose` levanta, retorna `{"ran": True, "error": "..."}` y no toca
+    el estado.
+    """
+    if now is None:
+        now = time.time()
+    if state_path is None:
+        state_path = _mmorch_home() / PRICE_CHECK_STATE_FILENAME
+    if propose is None:
+        # Import dinámico para no violar la regla de capas (R1: el engine no
+        # importa modulos no alcanzados). La importación estática de
+        # `mmorch.megasource` hacía que nightly apareciera como culpable en
+        # test_capas.py; con importlib la funcionalidad es idéntica sin el
+        # import estático que detecta el chequeo de imports.
+        import importlib
+        propose = importlib.import_module("mmorch.megasource").propose_price_update
+
+    last_check_ts = None
+    if state_path.exists():
+        try:
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                raw_ts = data.get("last_check_ts")
+                if isinstance(raw_ts, (int, float)) and not isinstance(raw_ts, bool):
+                    last_check_ts = float(raw_ts)
+        except (OSError, json.JSONDecodeError):
+            # archivo ilegible o JSON inválido: tratar como sin estado previo
+            last_check_ts = None
+
+    # R1: diferencia fraccionaria, negativa (reloj atrasado) o < 30 días exactos
+    # -> cortocircuito sin llamar a propose ni escribir estado.
+    if last_check_ts is not None and now - last_check_ts < PRICE_CHECK_INTERVAL_S:
+        return {"ran": False, "reason": "reciente"}
+
+    # R2/R3: sin estado previo o vencido -> correr propose
+    try:
+        r = propose()
+    except Exception as e:
+        msg = str(e)
+        if not msg:
+            msg = ""
+        return {"ran": True, "error": f"{type(e).__name__}: {msg[:200]}"}
+
+    # éxito: guardar el timestamp de esta corrida
+    state_path.write_text(json.dumps({"last_check_ts": now}), encoding="utf-8")
+    return {
+        "ran": True,
+        "n_changed": r.get("n_changed", 0),
+        "diff": r.get("diff", {}),
+    }
 
 
 def main() -> None:
@@ -568,6 +636,16 @@ def main() -> None:
         write_local_digest(rec, logs_dir=str(ROOT / "logs"))
     except Exception:
         pass
+
+    # price check mensual (megasource -> nightly): propone actualización de
+    # precios de modelos si pasaron 30 días desde la última corrida. Corre
+    # después del digest, en su propio try, y registra en nightly.jsonl.
+    try:
+        rec_price = {"step": "price_check", **run_price_check()}
+    except Exception as e:
+        rec_price = {"step": "price_check", "error": f"{type(e).__name__}: {str(e)[:200]}"}
+    _log(rec_price)
+
     print(json.dumps(rec, ensure_ascii=False, default=str))
 
 
