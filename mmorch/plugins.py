@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 from typing import cast
 
-from .paths import home
+from .paths import home, repo_root
 
 _REQUIRED = ("name", "version", "entry", "contributes")
 
@@ -143,7 +143,7 @@ def invoke(manifest: dict, method: str, args: dict, *, host_services: dict,
     deadline = time.monotonic() + timeout
     grants = set(manifest.get("grants", []))
 
-    REPO_ROOT = str(Path(__file__).resolve().parents[1])
+    REPO_ROOT = str(repo_root())  # gate test_paths: sin anclas __file__ fuera de paths.py
     env = os.environ.copy()
     existing_pythonpath = os.environ.get("PYTHONPATH", "")
     env["PYTHONPATH"] = REPO_ROOT + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
