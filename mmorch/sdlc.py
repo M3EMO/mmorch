@@ -1342,9 +1342,10 @@ def init(repo: str) -> dict:
             "# el test de aceptacion que escribe la etapa 1 antes de gastar (ticket 12 D5).\n"
             "# Otros lenguajes: `ext`, `compile_cmd` (G3 y test-compile), `lint_cmd` ({files} = archivos del plan),\n"
             "# `suite_cmd` (suite total si no es pytest), `seed_globs` (ignorados que el worktree necesita), `accept_test` ({slug}).\n"
-            'accept_cmd = "python -m pytest -q"\n'
-            'suite = ["tests", "-q", "-rfE", "-p", "no:cacheprovider"]\n'
-            f"ext = {json.dumps(exts)}\n" + (hints + "\n" if hints else "")
+            + ('accept_cmd = "python -m pytest -q"\nsuite = ["tests", "-q", "-rfE", "-p", "no:cacheprovider"]\n'
+               if (root / "tests").is_dir() else  # sin tests/, pytest en la raiz recolecta cualquier test_*.py (scrapers)
+               '# accept_cmd = "<comando determinista, sin red>"   # sin tests/: definilo o el repo no entra\n')
+            + f"ext = {json.dumps(exts)}\n" + (hints + "\n" if hints else "")
             + "approve_accept = true\nusd_max = 3.0\n"
             "files = [\n" + "".join(f'    "{g}",\n' for g in globs) + "]\n", encoding="utf-8")
         hecho.append("sdlc.toml")

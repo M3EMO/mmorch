@@ -36,6 +36,14 @@ def test_init_escribe_toml_docs_y_agents_sin_pisar(tmp_path):
     assert S.init(str(repo))["hecho"] == []  # idempotente
 
 
+def test_init_sin_tests_no_escribe_accept_cmd(tmp_path):
+    """Adepor: sin tests/, `pytest` en la raiz recolectaria scrapers con red. El repo no entra hasta fijar un oraculo."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "m.py").write_text("x = 1\n", encoding="utf-8")
+    S.init(str(tmp_path))
+    assert "accept_cmd" not in S._toml(tmp_path)
+
+
 def _configura(repo, monkeypatch, escribe, approve=True):
     (repo / "sdlc.toml").write_text(f'accept_cmd = "python -m pytest -q"\napprove_accept = {str(approve).lower()}\nfiles = ["pkg/a.py"]\n', encoding="utf-8")
     t = types.SimpleNamespace(name="feat x", task="pkg/a.py: suma(a, b) devuelve a + b", accept_files={})
