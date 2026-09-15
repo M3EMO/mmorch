@@ -220,7 +220,7 @@ FEATURES = {
               "embebe la query con code_embedder y en el rerank fino compara SOLO notas con emb_model='code_embedder'; con kind='text' "
               "compara SOLO notas con emb_model distinto de 'code_embedder' (los espacios no se mezclan). (R4) Todo lo demas igual: "
               "kind default 'text' conserva el comportamiento actual byte a byte. Solo se modifican mmorch/code_embedder.py y "
-              "mmorch/memory.py; no se tocan tests ni otros archivos; los docstrings de modulo se conservan."),
+              "mmorch/memory.py y tests/test_capas.py (sacar 'code_embedder' y 'weights' de _NO_ALCANZADOS: el ratchet se achica en el mismo commit); no se tocan otros tests ni archivos; los docstrings de modulo se conservan."),
         files=["mmorch/code_embedder.py", "mmorch/memory.py", "tests/test_capas.py"],  # cableo: el ratchet se achica en el mismo commit
         accept={"tests/test_sdlc_d13_code_embedder_recall.py": HERE / "accept/D13/tests/test_sdlc_d13_code_embedder_recall.py"},
         contract=["code_embedder", "verify", "resolve", "_CACHE", "kind", "emb_model", "write_note", "recall",
@@ -236,7 +236,7 @@ FEATURES = {
               "(R2) Sin `effort`, nada cambia. (R3) Cada `log_event(...)` de `call` (exito, error de API, budget_cap, breaker_open) "
               "incluye en su dict `extra` la clave `off_peak` con el bool de `schedule.is_off_peak()` (import `from . import schedule` "
               "a nivel de modulo y llamar `schedule.is_off_peak()` en cada evento, para que los tests lo parcheen); si `extra` no "
-              "existia en ese registro, crearlo como {'off_peak': ...}. Solo se modifica mmorch/providers.py; no se tocan tests ni "
+              "existia en ese registro, crearlo como {'off_peak': ...}. Se modifican mmorch/providers.py y tests/test_capas.py (sacar 'effort' y 'schedule' de _NO_ALCANZADOS); no se tocan otros tests ni "
               "otros archivos; el docstring del modulo se conserva."),
         files=["mmorch/providers.py", "tests/test_capas.py"],  # D14: sin esto el coder esquivo el ratchet con importlib
         accept={"tests/test_sdlc_d14_schedule_effort_providers.py": HERE / "accept/D14/tests/test_sdlc_d14_schedule_effort_providers.py"},
@@ -675,8 +675,18 @@ def _revert(backup):
         _write(f, old)
 
 
+def _dump_diag_case(log: str) -> None:
+    d = HERE / "diag-cases"; d.mkdir(exist_ok=True)
+    case = {"task": TASK_NAME, "phase": PHASE, "base_sha": state.get("base_sha"), "log": log[-20000:],
+            "files": _all_code(), "orig": dict(_orig_files), "tests": _tests_text(), "task_text": TASK.task}
+    (d / f"{PHASE}-{int(time.time())}.json").write_text(json.dumps(case, ensure_ascii=False), encoding="utf-8")
+
+
 def reasoner_rounds(log) -> tuple[bool, str]:
     """Nivel 2: dos intentos con deepseek-reasoner. Una instruccion por archivo."""
+    # bench de diagnostico (2026-09-15): cada entrada a la escalera queda como caso replayable (log + archivos + tests),
+    # para medir diagnosticadores con/sin razonamiento SIN depender de que una corrida nueva falle justo ahi.
+    _dump_diag_case(log)
     for i in range(REASONER_TRIES):
         written = _all_code()
         pick = llm(DIAG, 'Sos un diagnosticador. Respondes SOLO JSON: {"files": [paths], "instructions": {path: "una instruccion"}}. Una instruccion por archivo.',
