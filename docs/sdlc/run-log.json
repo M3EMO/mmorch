@@ -1,0 +1,199 @@
+{
+ "proto": "driver_py",
+ "task": "D7",
+ "stages": [
+  {
+   "stage": "5-test",
+   "ok": true,
+   "minutes": 13.72,
+   "calls": 0,
+   "note": "G4 + suite ok (0 vueltas )"
+  },
+  {
+   "stage": "5b-review",
+   "ok": true,
+   "minutes": 6.63,
+   "calls": 0,
+   "note": "bloqueo con evidencia"
+  },
+  {
+   "stage": "5-test",
+   "ok": true,
+   "minutes": 29.1,
+   "calls": 3,
+   "note": "G4 + suite ok (1 vueltas )"
+  }
+ ],
+ "gates": [
+  {
+   "id": "lint",
+   "ok": true,
+   "detail": "0/0",
+   "calls": 0
+  },
+  {
+   "id": "suite-total",
+   "ok": true,
+   "detail": "sin fallos nuevos",
+   "calls": 0
+  },
+  {
+   "id": "G4-aceptacion",
+   "ok": true,
+   "detail": "verde en 0 vueltas  + lint + suite total",
+   "calls": 0
+  },
+  {
+   "id": "diff-review-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 0
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 0
+  },
+  {
+   "id": "claude-diff-review",
+   "ok": false,
+   "detail": "test_review falla: vuelve a build. BLOCK: `_hide_ledger` (mmorch/auto_apply.py) escribe \"logs/\" en `.git/info/exclude` del runtime. Ese archivo es comparti",
+   "calls": 0
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 2
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 2
+  },
+  {
+   "id": "test-compile",
+   "ok": true,
+   "detail": "ok",
+   "calls": 2
+  },
+  {
+   "id": "regresion-unidad",
+   "ok": true,
+   "detail": "['mmorch/auto_apply.py']: 1 -> 0 fallos",
+   "calls": 2
+  },
+  {
+   "id": "lint",
+   "ok": true,
+   "detail": "0/0",
+   "calls": 2
+  },
+  {
+   "id": "suite-total",
+   "ok": false,
+   "detail": "fallos nuevos: ['tests/test_auto_apply.py::test_e2e_merge_regression_revert_and_halt_across_restarts', 'tests/test_auto_apply.py::test_reconcile_crash_after_git_revert_before_state_write']",
+   "calls": 2
+  },
+  {
+   "id": "suite-total",
+   "ok": false,
+   "detail": "fallos nuevos: ['tests/test_auto_apply.py::test_e2e_merge_regression_revert_and_halt_across_restarts', 'tests/test_auto_apply.py::test_reconcile_crash_after_git_revert_before_state_write']",
+   "calls": 3
+  },
+  {
+   "id": "claude-fix-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "suite-total",
+   "ok": true,
+   "detail": "sin fallos nuevos",
+   "calls": 3
+  },
+  {
+   "id": "G4-aceptacion",
+   "ok": true,
+   "detail": "verde en 1 vueltas  + lint + suite total",
+   "calls": 3
+  }
+ ],
+ "calls": 3,
+ "human_interventions": 0,
+ "claude_calls": 2,
+ "gate_rejects": [
+  {
+   "gate": "claude-diff-review",
+   "detail": "test_review falla: vuelve a build. BLOCK: `_hide_ledger` (mmorch/auto_apply.py) escribe \"logs/\" en `.git/info/exclude` del runtime. Ese archivo es comparti"
+  },
+  {
+   "gate": "suite-total",
+   "detail": "fallos nuevos: ['tests/test_auto_apply.py::test_e2e_merge_regression_revert_and_halt_across_restarts', 'tests/test_auto_apply.py::test_reconcile_crash_after_git_revert_before_state_write']"
+  },
+  {
+   "gate": "suite-total",
+   "detail": "fallos nuevos: ['tests/test_auto_apply.py::test_e2e_merge_regression_revert_and_halt_across_restarts', 'tests/test_auto_apply.py::test_reconcile_crash_after_git_revert_before_state_write']"
+  }
+ ],
+ "escalated_to_claude": true,
+ "base_sha": "HEAD~1",
+ "t0": "2026-09-15 00:21:39",
+ "t0_epoch": 1789442499.4558353,
+ "plan_files": [
+  "mmorch/auto_apply.py"
+ ],
+ "test_rounds": [
+  {
+   "round": 0,
+   "tests": {
+    "run": 5,
+    "failed": 0
+   }
+  },
+  {
+   "round": 0,
+   "tests": {
+    "run": 6,
+    "failed": 1
+   }
+  },
+  {
+   "round": 1,
+   "files": [
+    "mmorch/auto_apply.py"
+   ],
+   "tests": {
+    "run": 6,
+    "failed": 0
+   },
+   "novelty": 1.0
+  }
+ ],
+ "stall": 0,
+ "test_fix_rounds": 1,
+ "lint_new": {
+  "ruff": 0,
+  "mypy": 0
+ },
+ "suite_total": {
+  "run": 1169,
+  "failed": 2,
+  "new_failures": [],
+  "baseline_failures": 6
+ },
+ "review_block": true,
+ "usd_by_family": {
+  "deepseek": 0.1524
+ },
+ "suite_flaky": []
+}

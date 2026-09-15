@@ -1,0 +1,178 @@
+........................................................................ [  6%]
+........................................................................ [ 12%]
+........................................................................ [ 18%]
+........................................................................ [ 24%]
+........................................................................ [ 30%]
+........................................................................ [ 36%]
+........................................................................ [ 43%]
+........................................................................ [ 49%]
+........................................................................ [ 55%]
+................................................................F....... [ 61%]
+.............................F.......................................... [ 67%]
+........................................................................ [ 73%]
+........................................FFF............................. [ 80%]
+........................................................................ [ 86%]
+........................................................................ [ 92%]
+........................................................................ [ 98%]
+.F..............                                                         [100%]
+================================== FAILURES ===================================
+________________ test_cero_funciones_publicas_sin_caller_vivo _________________
+
+    def test_cero_funciones_publicas_sin_caller_vivo():
+        api = _init_public_api()
+        defs = _public_defs()
+        refs = _live_references()
+        museo = {n: m for n, m in defs.items()
+                 if n not in api and n not in refs and n not in _DEUDA_MUSEO}
+>       assert museo == {}, (
+            "Funciones p�blicas SIN caller vivo (cablear o borrar � no agregar a "
+            f"_DEUDA_MUSEO): {sorted((m, n) for n, m in museo.items())}")
+E       AssertionError: Funciones p�blicas SIN caller vivo (cablear o borrar � no agregar a _DEUDA_MUSEO): [('mmorch/automerge.py', 'try_automerge')]
+E       assert {'try_automer...automerge.py'} == {}
+E         
+E         Left contains 1 more item:
+E         {'try_automerge': 'mmorch/automerge.py'}
+E         Use -v to get more diff
+
+tests\test_no_museum.py:88: AssertionError
+________________ test_gate_sin_anclas_de_estado_fuera_de_paths ________________
+
+    def test_gate_sin_anclas_de_estado_fuera_de_paths():
+        """Grep-gate: prohibido `Path(__file__).parents[1]` fuera de paths.py.
+    
+        Si un modulo NUEVO necesita la raiz del repo por ser genuinamente de
+        CODIGO, se agrega a la allowlist explicita de arriba � nunca en silencio.
+        """
+        ofensores = []
+        for py in sorted((REPO / "mmorch").glob("*.py")):
+            if py.name in _ALLOWLIST:
+                continue
+            if _ANCHOR.search(py.read_text(encoding="utf-8")):
+                ofensores.append(py.name)
+>       assert not ofensores, (
+            f"anclas de estado fuera de paths.py: {ofensores} � usar mmorch.paths "
+            "(home/data_dir/logs_dir/db_path) o justificar en la allowlist del test")
+E       AssertionError: anclas de estado fuera de paths.py: ['synth_store.py'] � usar mmorch.paths (home/data_dir/logs_dir/db_path) o justificar en la allowlist del test
+E       assert not ['synth_store.py']
+
+tests\test_paths.py:81: AssertionError
+_______________ test_R1_finish_merge_usa_try_automerge_en_verde _______________
+
+tmp_path = WindowsPath('C:/Users/map12/AppData/Local/Temp/pyt-sdlc-wt-sdlc-D7-r2-base-1789442547/test_R1_finish_merge_usa_try_a0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x00000260471CB680>
+
+    def test_R1_finish_merge_usa_try_automerge_en_verde(tmp_path, monkeypatch):
+        calls = []
+    
+        def fake(repo, branch, *, base, source=""):
+            calls.append((branch, base, source))
+            return {"merged": True, "zone": "green", "veredicto": "merged", "merge_sha": "abc123", "checks": []}
+    
+>       monkeypatch.setattr(AA, "try_automerge", fake)
+E       AttributeError: <module 'mmorch.auto_apply' from 'C:\\Users\\map12\\AppData\\Local\\Temp\\sdlc-runs\\D7-r2\\mmorch\\auto_apply.py'> has no attribute 'try_automerge'
+
+tests\test_sdlc_d7_automerge_cableado.py:37: AttributeError
+______________ test_R2_rechazo_del_semaforo_detiene_la_promocion ______________
+
+tmp_path = WindowsPath('C:/Users/map12/AppData/Local/Temp/pyt-sdlc-wt-sdlc-D7-r2-base-1789442547/test_R2_rechazo_del_semaforo_d0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x00000260471CAD20>
+
+    def test_R2_rechazo_del_semaforo_detiene_la_promocion(tmp_path, monkeypatch):
+>       monkeypatch.setattr(AA, "try_automerge", lambda repo, branch, *, base, source="": {
+            "merged": False, "zone": "red", "veredicto": "rechazado_red", "reason": "path rojo: GOAL.md",
+            "merge_sha": None, "checks": []})
+E       AttributeError: <module 'mmorch.auto_apply' from 'C:\\Users\\map12\\AppData\\Local\\Temp\\sdlc-runs\\D7-r2\\mmorch\\auto_apply.py'> has no attribute 'try_automerge'
+
+tests\test_sdlc_d7_automerge_cableado.py:46: AttributeError
+_______________ test_R3_merge_sha_conocido_no_llama_al_semaforo _______________
+
+tmp_path = WindowsPath('C:/Users/map12/AppData/Local/Temp/pyt-sdlc-wt-sdlc-D7-r2-base-1789442547/test_R3_merge_sha_conocido_no_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x00000260471CB9E0>
+
+    def test_R3_merge_sha_conocido_no_llama_al_semaforo(tmp_path, monkeypatch):
+>       monkeypatch.setattr(AA, "try_automerge", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no debe llamarse")))
+E       AttributeError: <module 'mmorch.auto_apply' from 'C:\\Users\\map12\\AppData\\Local\\Temp\\sdlc-runs\\D7-r2\\mmorch\\auto_apply.py'> has no attribute 'try_automerge'
+
+tests\test_sdlc_d7_automerge_cableado.py:56: AttributeError
+__________________ test_mcp_server_reporta_version_de_mmorch __________________
+
+cls = <class 'importlib.metadata.Distribution'>, name = 'mmorch'
+
+    @classmethod
+    def from_name(cls, name: str):
+        """Return the Distribution for the given package name.
+    
+        :param name: The name of the distribution package to search for.
+        :return: The Distribution instance (or subclass thereof) for the named
+            package, if found.
+        :raises PackageNotFoundError: When the named package's distribution
+            metadata cannot be found.
+        :raises ValueError: When an invalid value is supplied for name.
+        """
+        if not name:
+            raise ValueError("A distribution name is required.")
+        try:
+>           return next(cls.discover(name=name))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           StopIteration
+
+..\..\..\Programs\Python\Python312\Lib\importlib\metadata\__init__.py:397: StopIteration
+
+During handling of the above exception, another exception occurred:
+
+    def test_mcp_server_reporta_version_de_mmorch():
+        from importlib.metadata import version
+        import mmorch.mcp_server as M
+>       assert M.mcp._mcp_server.version == version("mmorch")
+                                            ^^^^^^^^^^^^^^^^^
+
+tests\test_w6_ronda3.py:121: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+..\..\..\Programs\Python\Python312\Lib\importlib\metadata\__init__.py:889: in version
+    return distribution(distribution_name).version
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\Programs\Python\Python312\Lib\importlib\metadata\__init__.py:862: in distribution
+    return Distribution.from_name(distribution_name)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+cls = <class 'importlib.metadata.Distribution'>, name = 'mmorch'
+
+    @classmethod
+    def from_name(cls, name: str):
+        """Return the Distribution for the given package name.
+    
+        :param name: The name of the distribution package to search for.
+        :return: The Distribution instance (or subclass thereof) for the named
+            package, if found.
+        :raises PackageNotFoundError: When the named package's distribution
+            metadata cannot be found.
+        :raises ValueError: When an invalid value is supplied for name.
+        """
+        if not name:
+            raise ValueError("A distribution name is required.")
+        try:
+            return next(cls.discover(name=name))
+        except StopIteration:
+>           raise PackageNotFoundError(name)
+E           importlib.metadata.PackageNotFoundError: No package metadata was found for mmorch
+
+..\..\..\Programs\Python\Python312\Lib\importlib\metadata\__init__.py:399: PackageNotFoundError
+============================== warnings summary ===============================
+tests\test_fleet.py:6
+  C:\Users\map12\AppData\Local\Temp\sdlc-runs\D7-r2\tests\test_fleet.py:6: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient
+
+tests/test_patterns.py::test_fan_out_one_failure_keeps_others
+  C:\Users\map12\AppData\Local\Temp\sdlc-runs\D7-r2\tests\test_patterns.py:106: UserWarning: fan_out: 1/3 prompts fallaron y se dropearon (indices [1]). Resultado PARCIAL.
+    res = fan_out(["ok1", "BOOM", "ok3"])
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_no_museum.py::test_cero_funciones_publicas_sin_caller_vivo
+FAILED tests/test_paths.py::test_gate_sin_anclas_de_estado_fuera_de_paths - A...
+FAILED tests/test_sdlc_d7_automerge_cableado.py::test_R1_finish_merge_usa_try_automerge_en_verde
+FAILED tests/test_sdlc_d7_automerge_cableado.py::test_R2_rechazo_del_semaforo_detiene_la_promocion
+FAILED tests/test_sdlc_d7_automerge_cableado.py::test_R3_merge_sha_conocido_no_llama_al_semaforo
+FAILED tests/test_w6_ronda3.py::test_mcp_server_reporta_version_de_mmorch - i...
+6 failed, 1162 passed, 2 warnings in 434.70s (0:07:14)
