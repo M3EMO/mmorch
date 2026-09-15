@@ -1,1 +1,4 @@
 [5b-review] ok=True bloqueo con evidencia (0 llamadas, 3.2 min)
+[5-test] ok=True G4 + suite ok (1 vueltas) (2 llamadas, 11.9 min)
+[6-pr] ok=True  13 files changed, 1442 insertions(+), 12 deletions(-) (0 llamadas, 0.3 min)
+DRIVER_PY TERMINO {"task": "D10", "calls": 2, "minutes_total": 15.41, "usd": 0.0337, "usd_by_family": {"deepseek": 0.0336}, "human_interventions": 0, "claude_calls": 1, "review_block": true, "escalated_to_claude": false, "gate_rejects": [{"gate": "claude-diff-review", "detail": "test_review falla: vuelve a build. BLOCK: `validate_steps` levanta `TypeError`, no `ValueError`. Pasa cuando un step trae `\"loop_back\": None`. La clave exi"}], "diffstat": " 13 files changed, 1442 insertions(+), 12 deletions(-)", "lines": {"added": 33, "deleted": 10}, "suite_total": {"run": 1138, "failed": 2, "new_failures": [], "baseline_failures": 8}, "lint_new": {"ruff": 0, "mypy": 0}}

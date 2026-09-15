@@ -221,7 +221,7 @@ FEATURES = {
               "compara SOLO notas con emb_model distinto de 'code_embedder' (los espacios no se mezclan). (R4) Todo lo demas igual: "
               "kind default 'text' conserva el comportamiento actual byte a byte. Solo se modifican mmorch/code_embedder.py y "
               "mmorch/memory.py; no se tocan tests ni otros archivos; los docstrings de modulo se conservan."),
-        files=["mmorch/code_embedder.py", "mmorch/memory.py"],
+        files=["mmorch/code_embedder.py", "mmorch/memory.py", "tests/test_capas.py"],  # cableo: el ratchet se achica en el mismo commit
         accept={"tests/test_sdlc_d13_code_embedder_recall.py": HERE / "accept/D13/tests/test_sdlc_d13_code_embedder_recall.py"},
         contract=["code_embedder", "verify", "resolve", "_CACHE", "kind", "emb_model", "write_note", "recall",
                   "mmorch/code_embedder.py", "mmorch/memory.py"],
@@ -238,7 +238,7 @@ FEATURES = {
               "a nivel de modulo y llamar `schedule.is_off_peak()` en cada evento, para que los tests lo parcheen); si `extra` no "
               "existia en ese registro, crearlo como {'off_peak': ...}. Solo se modifica mmorch/providers.py; no se tocan tests ni "
               "otros archivos; el docstring del modulo se conserva."),
-        files=["mmorch/providers.py"],
+        files=["mmorch/providers.py", "tests/test_capas.py"],  # D14: sin esto el coder esquivo el ratchet con importlib
         accept={"tests/test_sdlc_d14_schedule_effort_providers.py": HERE / "accept/D14/tests/test_sdlc_d14_schedule_effort_providers.py"},
         contract=["effort", "model_for_effort", "schedule.is_off_peak", "off_peak", "log_event", "mmorch/providers.py"],
         suite=["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp", r"C:\Users\map12\AppData\Local\Temp\pyt-sdlc-wt"],
@@ -306,8 +306,14 @@ SEEN: set[str] = set()
 
 def llm(model, system, user, timeout=400):
     state["calls"] += 1
-    r = call(model, [{"role": "system", "content": system}, {"role": "user", "content": user}],
-             pattern=PHASE, node=model, phase=PHASE, temperature=0.0, timeout=timeout, max_tokens=32768)
+    try:
+        r = call(model, [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                 pattern=PHASE, node=model, phase=PHASE, temperature=0.0, timeout=timeout, max_tokens=32768)
+    except RuntimeError as e:  # D13: el reasoner agoto 32k tokens razonando -> un intento con el coder
+        if "respuesta vacia" not in str(e) or model == CODER:
+            raise
+        rec_gate("presupuesto-razonamiento", False, f"{model}: {str(e)[:120]}; reintento con {CODER}")
+        return llm(CODER, system, user, timeout)
     usd = ledger_usd() or 0
     if usd > CFG["usd_max"]:
         rec_gate("usd-tope", False, f"US${usd} > {CFG['usd_max']}")
@@ -396,6 +402,8 @@ def gate_suite_total() -> tuple[bool, str]:
             for f, c in keep.items():
                 _write(f, c)
         _write("docs/sdlc/suite-baseline.log", blog)
+        if "TIMEOUT" in blog:  # D15: un baseline vacio por timeout se cacheaba y volvia "nuevos" a los rojos previos
+            return rec_gate("suite-total", False, f"baseline: {blog[:200]}")
         base_file.write_text("\n".join(re.findall(r"(?m)^(?:FAILED|ERROR) \S+", blog)) + "\n", encoding="utf-8")
     # D8: la suite del worktree traia 594 ERROR (setup) que el gate no miraba porque solo leia FAILED.
     base = set(re.findall(r"(?m)^(?:FAILED|ERROR) (\S+)", base_file.read_text(encoding="utf-8")))

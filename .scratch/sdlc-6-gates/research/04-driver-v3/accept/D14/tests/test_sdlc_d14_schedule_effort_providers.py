@@ -57,10 +57,10 @@ def test_R2_sin_effort_no_cambia(events):
 def test_R3_off_peak_en_el_ledger(events, monkeypatch):
     monkeypatch.setattr(S, "is_off_peak", lambda now=None: True)
     PV.call("deepseek-chat", "hola", pattern="t")
-    assert events[-1].get("extra", {}).get("off_peak") is True, events[-1]
+    assert events[-1].get("off_peak") is True, events[-1]
     monkeypatch.setattr(S, "is_off_peak", lambda now=None: False)
     PV.call("deepseek-chat", "hola", pattern="t")
-    assert events[-1].get("extra", {}).get("off_peak") is False, events[-1]
+    assert events[-1].get("off_peak") is False, events[-1]
 
 
 def test_R3b_off_peak_tambien_en_error(monkeypatch):
@@ -70,4 +70,4 @@ def test_R3b_off_peak_tambien_en_error(monkeypatch):
     monkeypatch.setattr(S, "is_off_peak", lambda now=None: True)
     with pytest.raises(RuntimeError):
         PV.call("deepseek-chat", "hola", pattern="t")
-    assert out and out[-1].get("extra", {}).get("off_peak") is True, out
+    assert out and out[-1].get("off_peak") is True, out

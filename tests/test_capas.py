@@ -121,3 +121,10 @@ def test_R3_la_lista_solo_achica():
 def test_R4_museo_por_modulo_no_crece():
     # el numero baja con cada poda; subirlo a mano es agregar museo
     assert len(_NO_ALCANZADOS) <= 7
+
+
+def test_R5_sin_importlib_hacia_modulos_propios():
+    # D14 (2026-09-14): el coder esquivo R1 con importlib.import_module('.effort'). plugins carga por path, es la excepcion.
+    culpables = sorted(m for m, p in _modulos().items() if m != "plugins"
+                       and re.search(r"import_module\(\s*['\"]\.", p.read_text(encoding="utf-8", errors="replace")))
+    assert culpables == [], f"import dinamico de modulos propios (usar import estatico): {culpables}"
