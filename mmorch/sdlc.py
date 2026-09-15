@@ -87,6 +87,16 @@ def _cfg():
     return d
 
 
+def _repo_python() -> str:
+    """Interprete del repo (ticket 12): `python` de sdlc.toml, o el venv sembrado en el worktree (el server siembra
+    .venv/venv), o el de mmorch. Sin esto la suite de un repo con dependencias propias corre con el Python equivocado."""
+    for c in ([CFG["python"]] if CFG.get("python") else []) + [
+            ".venv/Scripts/python.exe", ".venv/bin/python", "venv/Scripts/python.exe", "venv/bin/python"]:
+        if (WT / c).exists():
+            return str(WT / c)
+    return sys.executable
+
+
 CFG: dict = {}
 state: dict = {}
 SNAP: dict[str, str] = {}
@@ -106,7 +116,7 @@ def configure(task, *, contract, feat=None, wt=None, phase=None, max_fix=3, writ
               accept_cmd=None):
     """Fija la corrida. `task` tiene .name, .task y .accept_files ({rel: contenido}); bench.get_task sirve tal cual.
     `feat` (dict repo/files/suite) = feature sobre un repo existente; None = task del bench (paquete nuevo)."""
-    global TASK_NAME, WT, PHASE, FEAT, TASK, CONTRACT, TESTS_PREFIX, MAX_FIX, LOG, REVIEW_REL, CFG, WRITER, CODER, DIAG, ACCEPT_CMD
+    global TASK_NAME, WT, PHASE, FEAT, TASK, CONTRACT, TESTS_PREFIX, MAX_FIX, LOG, REVIEW_REL, CFG, WRITER, CODER, DIAG, ACCEPT_CMD, PY
     ACCEPT_CMD = accept_cmd
     TASK_NAME, TASK, FEAT, CONTRACT = task.name, task, feat, list(contract)
     PHASE = phase or f"sdlc-{TASK_NAME}-r1"
@@ -120,6 +130,7 @@ def configure(task, *, contract, feat=None, wt=None, phase=None, max_fix=3, writ
     CODER = coder or os.environ.get("SDLC_CODER", "deepseek-v4-pro")
     DIAG = diag or os.environ.get("SDLC_DIAG", WRITER)
     CFG = _cfg()
+    PY = _repo_python()
     state.clear()
     state.update({"proto": "mmorch.sdlc", "task": TASK_NAME, "stages": [], "gates": [], "calls": 0,
                   "human_interventions": 0, "claude_calls": 0, "gate_rejects": [], "escalated_to_claude": False})
@@ -194,10 +205,11 @@ def one_file(code: str, rel: str) -> str:
 
 
 def sh(cmd, timeout: float | None = None, keep: int = 6000):
-    """Lista = exec directo; str = comando shell (accept_cmd del repo)."""
+    """Lista = exec directo; str = comando shell (accept_cmd del repo). `python` en un comando = el interprete del repo."""
+    env = {**os.environ, "PATH": os.path.dirname(PY) + os.pathsep + os.environ.get("PATH", "")}
     try:
         p = subprocess.run(cmd, cwd=WT, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           timeout=timeout or CFG["cmd_timeout_s"], shell=isinstance(cmd, str))
+                           timeout=timeout or CFG["cmd_timeout_s"], shell=isinstance(cmd, str), env=env)
     except subprocess.TimeoutExpired:
         return False, f"TIMEOUT {timeout or CFG['cmd_timeout_s']}s: {(cmd if isinstance(cmd, str) else ' '.join(cmd))[:200]}"
     return p.returncode == 0, (p.stdout + p.stderr)[-keep:]
@@ -1086,8 +1098,8 @@ def gate_lint() -> tuple[bool, str]:
     if not files:
         state["lint_new"] = {"ruff": 0, "mypy": 0}
         return rec_gate("lint", True, "sin archivos Python ni lint_cmd")
-    _, rl = sh([PY, "-m", "ruff", "check", "--output-format", "concise", *files])
-    _, ml = sh([PY, "-m", "mypy", "--ignore-missing-imports", *files])
+    _, rl = sh([sys.executable, "-m", "ruff", "check", "--output-format", "concise", *files])
+    _, ml = sh([sys.executable, "-m", "mypy", "--ignore-missing-imports", *files])
     ruff = len(re.findall(r"^\S+:\d+:\d+: ", rl, re.M))
     mypy = int((re.search(r"Found (\d+) error", ml) or [0, 0])[1])
     state["lint_new"] = {"ruff": ruff, "mypy": mypy}

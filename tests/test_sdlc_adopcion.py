@@ -81,3 +81,17 @@ def test_etapa1_rechaza_test_sin_ids(tmp_path, monkeypatch):
     _configura(repo, monkeypatch, "def test_suma():\n    assert False\n", approve=False)
     with pytest.raises(S.StageFailed, match="R<n>"):
         S.aceptacion()
+
+
+def test_interprete_del_repo_es_el_venv_sembrado(tmp_path):
+    """Un repo con venv propio (Portfolio, Adepor) corre suite y accept_cmd con SU Python, no con el de mmorch."""
+    import sys
+    import venv
+    t = types.SimpleNamespace(name="i", task="t", accept_files={})
+    S.configure(t, contract=[], feat={"repo": str(tmp_path), "files": [], "suite": []}, wt=tmp_path)
+    assert S.PY == sys.executable  # sin venv en el worktree: el de mmorch
+    venv.create(tmp_path / ".venv", with_pip=False)
+    S.configure(t, contract=[], feat={"repo": str(tmp_path), "files": [], "suite": []}, wt=tmp_path)
+    assert S.PY != sys.executable and ".venv" in S.PY
+    ok, out = S.sh('python -c "import sys; print(sys.prefix)"')  # `python` dentro de un comando del repo
+    assert ok and ".venv" in out
