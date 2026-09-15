@@ -19,11 +19,33 @@ On gate fail: loop back to the configured step up to `max`, else escalate.
 """
 from __future__ import annotations
 
+from typing import Any
+
 _TERMINAL = ("done", "escalate")
-_GATES = ("none", "tests", "verdict")
+_GATES: tuple[str, ...] = ("none", "tests", "verdict")
 
 
-def start_workflow(steps: list, task: str) -> dict:
+def validate_steps(steps: list[dict[Any, Any]]) -> None:
+    """Validate the structure of all workflow steps. Raises ValueError on first failure."""
+    if not isinstance(steps, list) or len(steps) == 0:
+        raise ValueError("steps must be a non-empty list")
+    for i, step in enumerate(steps):
+        role = step.get("role")
+        if not isinstance(role, str) or not role.strip():
+            raise ValueError(f"step {i}: 'role' must be a non-empty string")
+        g = step.get("gate", "none")
+        if g not in _GATES:
+            raise ValueError(f"step {i}: invalid gate {g!r}")
+        if "loop_back" in step:
+            lb = step.get("loop_back")
+            if not isinstance(lb, int) or isinstance(lb, bool):
+                raise ValueError(f"step {i}: 'loop_back' must be an integer")
+            if lb < 0 or lb >= i:
+                raise ValueError(f"step {i}: 'loop_back' must be >= 0 and < step index")
+
+
+def start_workflow(steps: list[dict[Any, Any]], task: str) -> dict:
+    validate_steps(steps)
     return {"task": task, "steps": steps, "cursor": 0, "produced": {}, "history": [],
             "loops": {}, "status": "running", "phase": "produce", "pending": None}
 
@@ -47,12 +69,14 @@ def next_workflow_action(state: dict) -> dict:
             "block": state["pending"], "test_cmd": st.get("test_cmd"), "role": st["role"]}
 
 
-def submit_workflow(state: dict, *, block_id: str | None = None, gate_passed: bool | None = None) -> dict:
-    """Feed a result back. produce -> pass block_id; gate -> pass gate_passed. Mutates + returns."""
+def submit_workflow(state: dict, block_id: str | None = None, gate_passed: bool | None = None) -> None:
+    """Feed a result back. produce -> pass block_id; gate -> pass gate_passed. Mutates in place."""
     if state["status"] != "running":
-        return state
+        return
     st = _step(state)
     if state["phase"] == "produce":
+        if block_id is None:
+            raise ValueError("block_id is required in produce phase")
         state["produced"][st.get("produces")] = block_id
         state["pending"] = block_id
         state["history"].append({"step": state["cursor"], "role": st["role"],
@@ -61,7 +85,7 @@ def submit_workflow(state: dict, *, block_id: str | None = None, gate_passed: bo
             state["phase"] = "gate"
         else:
             _advance(state)
-        return state
+        return
     # phase == gate
     state["history"].append({"step": state["cursor"], "event": "gate",
                              "gate": st.get("gate"), "passed": bool(gate_passed)})
@@ -69,7 +93,6 @@ def submit_workflow(state: dict, *, block_id: str | None = None, gate_passed: bo
         _advance(state)
     else:
         _on_fail(state)
-    return state
 
 
 def _advance(state: dict) -> None:
@@ -107,7 +130,7 @@ def build_prompt(role: str, persona: str, task: str, inputs: list) -> str:
 
 
 if __name__ == "__main__":
-    steps = [
+    steps: list[dict[Any, Any]] = [
         {"role": "architect", "produces": "plan", "gate": "none"},
         {"role": "coder", "consumes": ["plan"], "produces": "code", "gate": "tests", "test_cmd": "pytest"},
         {"role": "reviewer", "consumes": ["code"], "produces": "review", "gate": "verdict",
