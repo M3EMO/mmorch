@@ -170,7 +170,8 @@ def _run_project_build_job(jid: str, task: str, project: str, external_test: str
         with _JOBS_LOCK:
             _JOBS[jid]["review_branch"] = wt.branch
         # F4: un checkout fresco no tiene los artefactos gitignorados que la aceptacion lee (.venv, caches).
-        n_seed = wt.seed(list(dict.fromkeys((seed_globs or []) + [".venv", "venv"])))
+        from .sdlc import _toml
+        n_seed = wt.seed(list(dict.fromkeys((seed_globs or []) + list(_toml(repo).get("seed_globs", [])) + [".venv", "venv"])))
         emit("job", "running", job_id=jid,
              detail=f"sdlc {project} -> {wt.branch}{f' (+{n_seed} seeded)' if n_seed else ''}: {task[:70]}")
         import re as _re

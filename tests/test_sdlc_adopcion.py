@@ -95,3 +95,16 @@ def test_interprete_del_repo_es_el_venv_sembrado(tmp_path):
     assert S.PY != sys.executable and ".venv" in S.PY
     ok, out = S.sh('python -c "import sys; print(sys.prefix)"')  # `python` dentro de un comando del repo
     assert ok and ".venv" in out
+
+
+def test_cfg_lee_el_sdlc_toml_del_repo_aunque_el_worktree_no_lo_tenga(tmp_path):
+    """Adopcion sin commitear: el worktree sale de HEAD sin sdlc.toml; la config del repo igual aplica y el worktree la pisa."""
+    repo, wt = tmp_path / "repo", tmp_path / "wt"
+    repo.mkdir(); wt.mkdir()
+    (repo / "sdlc.toml").write_text('lint_cmd = "npx eslint {files}"\nseed_globs = ["app/node_modules"]\n', encoding="utf-8")
+    t = types.SimpleNamespace(name="c", task="t", accept_files={})
+    S.configure(t, contract=[], feat={"repo": str(repo), "files": [], "suite": []}, wt=wt)
+    assert S.CFG["lint_cmd"] == "npx eslint {files}" and S._toml(repo)["seed_globs"] == ["app/node_modules"]
+    (wt / "sdlc.toml").write_text('lint_cmd = "otro"\n', encoding="utf-8")
+    S.configure(t, contract=[], feat={"repo": str(repo), "files": [], "suite": []}, wt=wt)
+    assert S.CFG["lint_cmd"] == "otro"

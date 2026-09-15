@@ -48,9 +48,9 @@ PY = sys.executable
 METRICS = logs_dir() / "metrics.jsonl"
 # El pipeline es agnostico: compila/lintea/acepta por COMANDO (sdlc.toml). Esta tabla solo sugiere el compile_cmd en `init`.
 _LANG_HINT = {"py": "python -m compileall -q .", "java": "mvn -q test-compile", "kt": "gradle -q compileTestKotlin",
-              "ts": "npx tsc --noEmit", "js": "node --check <archivo>", "go": "go build ./... && go vet ./...",
+              "ts": "npx tsc --noEmit", "js": "node --check {files}", "go": "go build ./... && go vet ./...",
               "rs": "cargo check --tests", "cpp": "cmake --build build", "cc": "cmake --build build", "c": "cmake --build build",
-              "cs": "dotnet build --no-restore", "swift": "swift build", "rb": "ruby -c <archivo>", "php": "php -l <archivo>"}
+              "cs": "dotnet build --no-restore", "swift": "swift build", "rb": "ruby -c {files}", "php": "php -l {files}"}
 
 
 def _exts() -> list[str]:
@@ -79,6 +79,8 @@ def _cfg():
     """Topes del ticket 07 + `approve_accept` (ticket 12 D5). sdlc.toml de la raiz del worktree pisa los defaults."""
     d = {"usd_max": 3.0, "stall_rounds": 2, "diff_novelty_min": 0.10, "cmd_timeout_s": 600, "suite_timeout_s": 1800,
          "approve_accept": True}
+    if FEAT and FEAT.get("repo"):
+        d.update(_toml(FEAT["repo"]))  # sdlc.toml recien adoptado y sin commitear: el worktree (HEAD) aun no lo tiene
     d.update(_toml(WT))
     legacy = WT / "docs" / "sdlc" / "sdlc.toml"
     if legacy.exists():
@@ -215,6 +217,12 @@ def sh(cmd, timeout: float | None = None, keep: int = 6000):
     return p.returncode == 0, (p.stdout + p.stderr)[-keep:]
 
 
+def _cmd(key: str, files) -> str:
+    """Comando de sdlc.toml; `{files}` = archivos entre comillas (compilar/lintear solo lo que toca el plan: un lint
+    global sobre un repo con errores previos bloquearia toda corrida)."""
+    return str(CFG[key]).replace("{files}", " ".join(f'"{f}"' for f in files))
+
+
 def _suite_args(tag: str) -> list[str]:
     """D8/D10: 594 ERROR de setup = pytest no puede borrar el --basetemp de la corrida ANTERIOR porque un proceso
     hijo de algun test (codegraph.db abierto) sigue vivo y lo bloquea en Windows. Basetemp unico por corrida."""
@@ -270,7 +278,7 @@ def gate_mutacion() -> tuple[bool, str]:
         for m in (_mutants(orig, max_n=8) if _es_py(f) else _mutantes_texto(orig, max_n=8)):
             p.write_text(m, encoding="utf-8")
             try:
-                if not _es_py(f) and compile_cmd and not sh(str(compile_cmd))[0]:
+                if not _es_py(f) and compile_cmd and not sh(_cmd("compile_cmd", [f]))[0]:
                     continue  # mortinato: no compila, no cuenta
                 total += 1
                 if _accept_mata():
@@ -487,7 +495,7 @@ def gate_compile(files) -> tuple[bool, str]:
         cmd = CFG.get("compile_cmd")
         if not cmd:
             return rec_gate("G3-compile", True, f"sin compile_cmd para {otros}: no se compila")
-        ok, log = sh(str(cmd))
+        ok, log = sh(_cmd("compile_cmd", otros))
         return rec_gate("G3-compile", ok, "compila" if ok else log[-800:])
     return rec_gate("G3-compile", True, "compila")
 
@@ -500,7 +508,7 @@ def gate_test_compile() -> tuple[bool, str]:
         cmd = CFG.get("compile_cmd")
         if not cmd:
             return rec_gate("test-compile", True, "tests no-Python sin compile_cmd: no se compila")
-        ok, log = sh(str(cmd))
+        ok, log = sh(_cmd("compile_cmd", _accept_paths()))
         return rec_gate("test-compile", ok, "ok" if ok else log[-800:])
     ok, log = sh([PY, "-m", "pytest", *_accept_paths(), "--collect-only", "-q", "-p", "no:cacheprovider"])
     return rec_gate("test-compile", ok, "ok" if ok else log[-800:])
@@ -1091,7 +1099,7 @@ def gate_lint() -> tuple[bool, str]:
     """ruff + mypy sobre los archivos del plan. Bench: paquete nuevo, baseline 0. Repo: el hook exige 0."""
     cmd = CFG.get("lint_cmd")
     if cmd:  # otro lenguaje o linter propio del repo: exit 0 = limpio
-        ok, log = sh(str(cmd))
+        ok, log = sh(_cmd("lint_cmd", state["plan_files"]))
         state["lint_new"] = {"lint_cmd": 0 if ok else 1}
         return rec_gate("lint", ok, "0" if ok else log[-1500:])
     files = [f for f in state["plan_files"] if _es_py(f)]
@@ -1297,7 +1305,7 @@ def init(repo: str) -> dict:
             "# sdlc.toml — convencion por repo (ticket 11). `files` es el TECHO (patrones) de lo que el pipeline puede\n"
             "# escribir; un payload solo lo acota. Sin accept_cmd el repo no entra. approve_accept: un humano aprueba\n"
             "# el test de aceptacion que escribe la etapa 1 antes de gastar (ticket 12 D5).\n"
-            "# Otros lenguajes: `ext`, `compile_cmd` (G3 y test-compile), `lint_cmd`, `accept_test` (ruta con {slug}).\n"
+            "# Otros lenguajes: `ext`, `compile_cmd` (G3 y test-compile), `lint_cmd` ({files} = archivos del plan), `accept_test` (ruta con {slug}).\n"
             'accept_cmd = "python -m pytest -q"\n'
             'suite = ["tests", "-q", "-rfE", "-p", "no:cacheprovider"]\n'
             f"ext = {json.dumps(exts)}\n" + (hints + "\n" if hints else "")

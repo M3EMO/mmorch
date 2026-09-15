@@ -113,6 +113,10 @@ def test_compile_y_lint_por_comando_para_otros_lenguajes(run, tmp_path):
     S.state["plan_files"] = ["src/A.java"]
     S.CFG["lint_cmd"] = "python -c \"import sys; sys.exit(0)\""
     assert S.gate_lint()[0] and S.state["lint_new"] == {"lint_cmd": 0}
+    # {files}: el comando recibe solo los archivos del plan (lint de repo con errores previos, node --check por archivo)
+    (S.WT / "chk.py").write_text("import sys; sys.exit(0 if sys.argv[1:] == ['src/A.java'] else 1)", encoding="utf-8")
+    S.CFG["lint_cmd"] = S.CFG["compile_cmd"] = "python chk.py {files}"
+    assert S.gate_lint()[0] and S.gate_compile(["src/A.java"])[0] and not S.gate_compile(["src/B.java"])[0]
 
 
 def test_stage_fallida_es_excepcion_con_etapa(run):
