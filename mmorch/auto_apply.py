@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from .automerge import try_automerge
 from .observation import evaluate as evaluate_observation
 from .promotion import PromotionStore
 from .runtime_checkout import RuntimeCheckout
@@ -199,14 +200,66 @@ def _pause(store: PromotionStore) -> None:
     (store.root / "loop_paused").touch()
 
 
-def _halt(store: PromotionStore, *, reason: str, expected: str | None = None) -> dict:
+def _halt(
+    store: PromotionStore,
+    *,
+    reason: str,
+    expected: str | None = None,
+    fields: dict | None = None,
+) -> dict:
     _pause(store)
-    return store.advance(
+    merged_fields = {"halt_reason": reason}
+    if fields:
+        merged_fields.update(fields)
+    final = store.advance(
         "halted",
         expected=expected,
         evidence={"reason": reason},
-        fields={"halt_reason": reason},
+        fields=merged_fields,
     )
+    # Guarantee that caller-supplied fields are present in the returned state.
+    # Some store implementations may not merge custom fields into the halted
+    # state, so we add them back explicitly without overwriting existing keys.
+    if fields:
+        for key, value in fields.items():
+            final.setdefault(key, value)
+    return final
+
+
+def _hide_ledger(runtime: RuntimeCheckout) -> None:
+    """Keep the runtime worktree clean without leaking ignore rules into the
+    source checkout.
+
+    try_automerge always writes logs/automerge_ledger.jsonl inside the runtime
+    (mergee or rejected); without excluding it from git status the worktree
+    stays dirty for the rest of the cycle. Comitting it breaks the tree
+    comparison against base_sha in reconcile, so it must be ignored.
+
+    The per-repo ignore file info/exclude is shared between the source checkout
+    and all of its linked worktrees, so adding logs/ there also hides a real
+    logs/ directory in the source checkout. Use a per-worktree core.excludesFile
+    pointing to an untracked ignore file inside the runtime worktree instead.
+    """
+    if not Path(runtime.path).is_absolute():
+        return
+    ledger = runtime.path / "logs" / "automerge_ledger.jsonl"
+    if not ledger.exists():
+        return
+    exclude_file = runtime.path / ".automerge_exclude"
+    try:
+        exclude_file.write_text("logs/\n.automerge_exclude\n", encoding="utf-8")
+    except OSError:
+        return
+    # `--worktree` config needs this extension enabled once per repo; it only
+    # turns on per-worktree config files, it does not itself set or share any
+    # value with other worktrees or the source checkout.
+    _git(runtime.path, "config", "extensions.worktreeConfig", "true")
+    result = _git(runtime.path, "config", "--worktree", "core.excludesFile", str(exclude_file))
+    if result.returncode != 0:
+        # Do not fall back to shared info/exclude; that would leak into the
+        # source checkout. A dirty runtime is safer than affecting source repo
+        # `git status`.
+        return
 
 
 def _finish_merge(
@@ -220,15 +273,31 @@ def _finish_merge(
     if state is None or state["status"] != "candidate":
         raise RuntimeError("merge completion requires candidate state")
     if merge_sha is None:
-        merged = _git(runtime.path, "merge", "--no-edit", "--no-ff", state["branch"])
-        if merged.returncode != 0:
-            _git(runtime.path, "merge", "--abort")
-            return _halt(
-                store,
-                reason=f"merge failed: {(merged.stdout + merged.stderr)[:180]}",
-                expected="candidate",
-            )
-        merge_sha = runtime.head()
+        result = try_automerge(
+            str(runtime.path), state["branch"], base=state["base_sha"], source="auto_apply"
+        )
+        _hide_ledger(runtime)
+        if result.get("merged"):
+            merge_sha = result["merge_sha"]
+        else:
+            if state.get("zone") == "yellow" and result.get("zone") == "yellow":
+                merged = _git(runtime.path, "merge", "--no-edit", "--no-ff", state["branch"])
+                if merged.returncode != 0:
+                    _git(runtime.path, "merge", "--abort")
+                    return _halt(
+                        store,
+                        reason=f"merge failed: {(merged.stdout + merged.stderr)[:180]}",
+                        expected="candidate",
+                    )
+                merge_sha = runtime.head()
+            else:
+                veredicto = result.get("veredicto", "")
+                reason = result.get("reason", "")
+                return _halt(
+                    store,
+                    reason=f"automerge {veredicto}: {reason}",
+                    expected="candidate",
+                )
     store.advance(
         "merged",
         expected="candidate",
@@ -319,7 +388,12 @@ def _finish_recovery(
         evidence={"revert_sha": revert_sha, "recovery_verified": True},
         fields={"revert_sha": revert_sha, "recovery_verified": True},
     )
-    return _halt(store, reason=f"reverted after: {reason}", expected="reverted")
+    return _halt(
+        store,
+        reason=f"reverted after: {reason}",
+        expected="reverted",
+        fields={"recovery_verified": True, "revert_sha": revert_sha},
+    )
 
 
 def rollback(
