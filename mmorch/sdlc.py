@@ -48,7 +48,7 @@ PY = sys.executable
 METRICS = logs_dir() / "metrics.jsonl"
 # El pipeline es agnostico: compila/lintea/acepta por COMANDO (sdlc.toml). Esta tabla solo sugiere el compile_cmd en `init`.
 _LANG_HINT = {"py": "python -m compileall -q .", "java": "mvn -q test-compile", "kt": "gradle -q compileTestKotlin",
-              "ts": "npx tsc --noEmit", "js": "node --check {files}", "go": "go build ./... && go vet ./...",
+              "ts": "npx tsc --noEmit", "tsx": "npx tsc --noEmit", "jsx": "npx tsc --noEmit", "js": "node --check {files}", "go": "go build ./... && go vet ./...",
               "rs": "cargo check --tests", "cpp": "cmake --build build", "cc": "cmake --build build", "c": "cmake --build build",
               "cs": "dotnet build --no-restore", "swift": "swift build", "rb": "ruby -c {files}", "php": "php -l {files}"}
 
@@ -368,8 +368,9 @@ def _accept_paths():
 
 
 def accept():
-    if ACCEPT_CMD and (not TASK.accept_files or not all(_es_py(f) for f in TASK.accept_files)):
-        return sh(ACCEPT_CMD)  # sin tests nombrados, o tests en otro lenguaje: el comando del repo es el oraculo
+    cmd = ACCEPT_CMD or CFG.get("accept_cmd")  # payload o sdlc.toml
+    if cmd and (not TASK.accept_files or not all(_es_py(f) for f in TASK.accept_files)):
+        return sh(str(cmd))  # sin tests nombrados, o tests en otro lenguaje: el comando del repo es el oraculo
     return sh([PY, "-m", "pytest", *_accept_paths(), "-q", "-p", "no:cacheprovider"])
 
 
@@ -442,7 +443,9 @@ def gate_plan_allowlist(plan_md: str, files: list[str]) -> tuple[bool, str]:
 
 
 def _test_names() -> set[str]:
-    return {n for rel in TASK.accept_files for n in re.findall(r"(?m)^def (test_\w+)", (WT / rel).read_text(encoding="utf-8"))}
+    """Nombres test_... de la aceptacion: `def test_` en Python; en otro lenguaje, funcion o titulo (`it('test_R1_...')`)."""
+    return {n for rel in TASK.accept_files
+            for n in re.findall(r"(?m)^def (test_\w+)" if _es_py(rel) else r"\b(test_\w+)", (WT / rel).read_text(encoding="utf-8"))}
 
 
 def gate_traza_spec(spec_md: str, tests: set[str]) -> tuple[bool, str]:
@@ -772,8 +775,10 @@ def aceptacion():
     rel = str(CFG.get("accept_test", f"{TESTS_PREFIX}test_sdlc_{{slug}}.{ext}")).replace("{slug}", slug)
     state["claude_calls"] += 1
     before = _tree()
-    r = run_claude(f"Escribi SOLO el archivo {rel}: el test de aceptacion (pytest, sin red) de esta TAREA. Un test por "
-                   f"requisito, nombrados test_R1_..., test_R2_... con el ID en el nombre; docstring de modulo con el contrato "
+    marco = "pytest" if _es_py(rel) else f"framework de tests del repo; lo corre `{ACCEPT_CMD or CFG.get('accept_cmd')}`"
+    r = run_claude(f"Escribi SOLO el archivo {rel}: el test de aceptacion ({marco}, sin red) de esta TAREA. Un test por "
+                   f"requisito, nombrados test_R1_..., test_R2_... con el ID en el nombre (funcion o titulo del test); "
+                   f"comentario o docstring de modulo con el contrato "
                    f"R<n>. El test DEBE fallar hoy (el codigo aun no existe o no cumple) y pasar cuando la tarea este hecha. "
                    f"No toques ningun otro archivo.\n\nTAREA:\n{TASK.task}",
                    cwd=str(WT), mode="edit", timeout=CFG["cmd_timeout_s"])
@@ -781,7 +786,7 @@ def aceptacion():
     if not gate_alcance("aceptacion-alcance", before, (rel,))[0] or not (WT / rel).exists():
         return False, f"Claude no dejo {rel} (o toco otros archivos)"
     text = (WT / rel).read_text(encoding="utf-8")
-    ids = sorted(set(re.findall(r"(?m)^def test_(R\d+)", text)))
+    ids = sorted(set(re.findall(r"(?m)^def test_(R\d+)" if _es_py(rel) else r"\btest_(R\d+)", text)))
     if not ids:
         return rec_gate("aceptacion-ids", False, "sin tests test_R<n>_...")
     if _es_py(rel):

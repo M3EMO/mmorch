@@ -108,3 +108,24 @@ def test_cfg_lee_el_sdlc_toml_del_repo_aunque_el_worktree_no_lo_tenga(tmp_path):
     (wt / "sdlc.toml").write_text('lint_cmd = "otro"\n', encoding="utf-8")
     S.configure(t, contract=[], feat={"repo": str(repo), "files": [], "suite": []}, wt=wt)
     assert S.CFG["lint_cmd"] == "otro"
+
+
+def test_etapa1_en_typescript_nombra_por_titulo_y_usa_el_comando_del_repo(tmp_path, monkeypatch):
+    """Estudio (vitest): el test sale en `accept_test`, nombra test_R<n> en el titulo y el rojo lo decide accept_cmd."""
+    repo = _repo(tmp_path)
+    (repo / "app").mkdir()
+    t = types.SimpleNamespace(name="feat ts", task="app/suma.ts: suma(a, b)", accept_files={})
+    S.configure(t, contract=[], feat={"repo": str(repo), "files": [], "suite": []}, wt=repo,
+                accept_cmd='python -c "import sys; sys.exit(1)"')
+    S.CFG.update(ext=["ts"], accept_test="app/{slug}.test.ts", approve_accept=False)
+    visto = {}
+
+    def fake_claude(prompt, cwd, **kw):
+        visto["prompt"] = prompt
+        (repo / "app" / "feat_ts.test.ts").write_text("it('test_R1_suma', () => expect(suma(1, 2)).toBe(3))\n", encoding="utf-8")
+        return {"returncode": 0, "result": "ok"}
+    import mmorch.claude_exec as CE
+    monkeypatch.setattr(CE, "run_claude", fake_claude)
+    S.aceptacion()
+    assert "app/feat_ts.test.ts" in t.accept_files and "pytest" not in visto["prompt"]
+    assert S._test_names() == {"test_R1_suma"}
