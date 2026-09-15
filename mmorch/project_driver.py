@@ -112,7 +112,11 @@ def run_project_build(task: str, *, external_test: str | None,
     'escalate' (bad plan / depth cap / a unit's gate never passed). All structured for the caller."""
     if depth > max_depth:
         return {"status": "escalate", "reason": f"max recursion depth {max_depth}", "task": task[:80]}
-    units = plan_fn(task, external_test)
+    try:
+        units = plan_fn(task, external_test)
+    except Exception as e:
+        return {"status": "escalate", "reason": f"planner failed: {type(e).__name__}: {str(e)[:200]}",
+                "task": task[:80]}
     ok, errs = validate_worklist(units)   # the DRIVER enforces a valid plan — not just the default planner
     if not ok:
         return {"status": "escalate", "reason": f"invalid plan: {errs}", "task": task[:80]}
@@ -129,14 +133,21 @@ def run_project_build(task: str, *, external_test: str | None,
             r = {"name": name, "status": sub["status"], "recursed": True, "sub": sub}
         # commit only LEAF units (built with their own code); a recursed container has no code of
         # its own — its sub-units were already committed inside the recursive call.
-        if commit_fn and r["status"] == "built" and not r.get("recursed"):
-            commit_fn(name, r)
         results.append(r)
+        if commit_fn and r["status"] == "built" and not r.get("recursed"):
+            try:
+                commit_fn(name, r)
+            except Exception as e:
+                r["commit_error"] = f"{type(e).__name__}: {str(e)[:200]}"
         if r["status"] in ("escalate", "integration_failed"):
             return {"status": r["status"], "at": name, "depth": depth, "results": results}
     # integration gate: the assembled whole must pass this level's acceptance test (execution truth).
     if external_test and integrate_fn:
-        iok, idetail = integrate_fn(external_test, results)
+        try:
+            iok, idetail = integrate_fn(external_test, results)
+        except Exception as e:
+            return {"status": "integration_failed", "depth": depth, "external_test": external_test,
+                    "detail": f"integrate_fn {type(e).__name__}: {str(e)[:200]}", "results": results}
         if not iok:
             return {"status": "integration_failed", "depth": depth, "external_test": external_test,
                     "detail": idetail, "results": results}
