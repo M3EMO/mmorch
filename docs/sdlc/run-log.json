@@ -1,41 +1,215 @@
 {
  "proto": "mmorch.sdlc",
- "task": "12249f76b2",
+ "task": "67c44713dd",
  "stages": [
   {
-   "stage": "1-aceptacion",
-   "ok": false,
-   "minutes": 5.87,
+   "stage": "2-spec",
+   "ok": true,
+   "minutes": 0.33,
+   "calls": 1,
+   "note": "G1 + trazabilidad-spec ok"
+  },
+  {
+   "stage": "2b-spec-review",
+   "ok": true,
+   "minutes": 2.2,
    "calls": 0,
-   "note": "esperando aprobacion humana de tests/test_sdlc_12249f76b2.py (reanudar desde la etapa 2)"
+   "note": "4 IDs cubiertos"
+  },
+  {
+   "stage": "3-plan",
+   "ok": true,
+   "minutes": 0.07,
+   "calls": 1,
+   "note": "ok"
+  },
+  {
+   "stage": "4-build",
+   "ok": true,
+   "minutes": 0.52,
+   "calls": 1,
+   "note": "G3 + test-compile + docstring ok"
+  },
+  {
+   "stage": "5-test",
+   "ok": true,
+   "minutes": 26.07,
+   "calls": 0,
+   "note": "G4 + suite ok (0 vueltas )"
+  },
+  {
+   "stage": "5b-review",
+   "ok": true,
+   "minutes": 1.26,
+   "calls": 0,
+   "note": "sin test nuevo: OK"
   }
  ],
  "gates": [
   {
-   "id": "aceptacion-alcance",
+   "id": "trazabilidad-spec",
    "ok": true,
-   "detail": "ok",
-   "calls": 0
+   "detail": "4 IDs cubiertos",
+   "calls": 1
   },
   {
-   "id": "aceptacion-roja",
+   "id": "G1-spec-contrato",
    "ok": true,
-   "detail": "tests/test_sdlc_12249f76b2.py roja en HEAD, R: ['R1', 'R2', 'R3', 'R4']",
-   "calls": 0
+   "detail": "contrato cubierto, sin TBD, IDs trazados",
+   "calls": 1
+  },
+  {
+   "id": "spec-review-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 1
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 1
+  },
+  {
+   "id": "spec-review",
+   "ok": true,
+   "detail": "2 preguntas respondidas",
+   "calls": 1
+  },
+  {
+   "id": "trazabilidad-spec",
+   "ok": true,
+   "detail": "4 IDs cubiertos",
+   "calls": 1
+  },
+  {
+   "id": "plan-allowlist",
+   "ok": true,
+   "detail": "['mmorch/canal.py']",
+   "calls": 2
+  },
+  {
+   "id": "trazabilidad-plan",
+   "ok": true,
+   "detail": "ok",
+   "calls": 2
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 3
+  },
+  {
+   "id": "test-compile",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "sin-clones",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "cambio-minimo",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "docstring-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "lint",
+   "ok": true,
+   "detail": "0/0",
+   "calls": 3
+  },
+  {
+   "id": "mutacion",
+   "ok": true,
+   "detail": "mutation score 0.25 (2/8) (observa: sin mutation_min)",
+   "calls": 3
+  },
+  {
+   "id": "suite-total",
+   "ok": true,
+   "detail": "sin fallos nuevos",
+   "calls": 3
+  },
+  {
+   "id": "G4-aceptacion",
+   "ok": true,
+   "detail": "verde en 0 vueltas  + lint + suite total",
+   "calls": 3
+  },
+  {
+   "id": "diff-review-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "claude-diff-review",
+   "ok": true,
+   "detail": "sin test nuevo: OK",
+   "calls": 3
   }
  ],
- "calls": 0,
+ "calls": 3,
  "human_interventions": 0,
- "claude_calls": 1,
+ "claude_calls": 2,
  "gate_rejects": [],
  "escalated_to_claude": false,
- "base_sha": "ed5279e",
- "t0": "2026-09-15 12:24:47",
- "t0_epoch": 1789485887.1720483,
- "awaiting_approval": "tests/test_sdlc_12249f76b2.py",
- "failed_stage": "1-aceptacion",
- "failed_note": "esperando aprobacion humana de tests/test_sdlc_12249f76b2.py (reanudar desde la etapa 2)",
- "minutes_total": 5.87,
- "usd_by_family": {},
- "usd": 0.0
+ "base_sha": "e6889d8",
+ "t0": "2026-09-15 12:55:52",
+ "t0_epoch": 1789487752.8384895,
+ "usd_by_family": {
+  "deepseek": 0.0156
+ },
+ "plan_files": [
+  "mmorch/canal.py"
+ ],
+ "plan_parallel": [
+  "mmorch/canal.py"
+ ],
+ "test_rounds": [
+  {
+   "round": 0,
+   "tests": {
+    "run": 4,
+    "failed": 0
+   }
+  }
+ ],
+ "stall": 0,
+ "test_fix_rounds": 0,
+ "lint_new": {
+  "ruff": 0,
+  "mypy": 0
+ },
+ "mutation_score": 0.25,
+ "suite_total": {
+  "run": 1195,
+  "failed": 1,
+  "new_failures": [],
+  "baseline_failures": 3
+ }
 }

@@ -46,15 +46,15 @@ def post(
     path: Path | None = None,
 ) -> dict:
     """Append a turn. `to` empty = both agents. `handoff` should carry verify_cmd."""
+    body = (body or "").strip()
+    if not body:
+        raise ValueError('body vacio')
     if src not in SIDES:
         raise ValueError(f"src must be one of {SIDES}")
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {KINDS}")
     if to and to not in SIDES:
         raise ValueError(f"to must be empty or one of {SIDES}")
-    body = (body or "").strip()
-    if not body:
-        raise ValueError("body is required")
     p = path or canal_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     with _LOCK:
