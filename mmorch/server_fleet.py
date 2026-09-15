@@ -22,7 +22,12 @@ async def fleet_handler(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     from .fleet import list_hosts, register_host, unregister_host, fleet_state
     if request.method == "POST":
-        body = await request.json()
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "body JSON invalido"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "body JSON invalido"}, status_code=400)
         try:
             r = register_host(body.get("name", ""), body.get("url", ""), body.get("token", ""))
             return JSONResponse({"registered": r})
@@ -44,9 +49,21 @@ async def fleet_run(request):
     if not _token_ok(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     from .fleet import forward
-    body = await request.json()
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "body JSON invalido"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body JSON invalido"}, status_code=400)
     host = body.get("host", ""); path = body.get("path", "/run/project")
     payload = body.get("payload", {})
-    return JSONResponse(forward(host, path, payload))
-
-
+    res = forward(host, path, payload)
+    if isinstance(res, dict):
+        if res.get("ok") is False:
+            error = res.get("error", "")
+            err_l = error.lower()
+            if "registrado" in err_l or "not registered" in err_l:
+                return JSONResponse({"error": error}, status_code=404)
+            return JSONResponse({"error": error}, status_code=502)
+        return JSONResponse(res)
+    return JSONResponse(res)
