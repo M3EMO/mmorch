@@ -1,0 +1,41 @@
+{
+ "proto": "mmorch.sdlc",
+ "task": "12249f76b2",
+ "stages": [
+  {
+   "stage": "1-aceptacion",
+   "ok": false,
+   "minutes": 5.87,
+   "calls": 0,
+   "note": "esperando aprobacion humana de tests/test_sdlc_12249f76b2.py (reanudar desde la etapa 2)"
+  }
+ ],
+ "gates": [
+  {
+   "id": "aceptacion-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 0
+  },
+  {
+   "id": "aceptacion-roja",
+   "ok": true,
+   "detail": "tests/test_sdlc_12249f76b2.py roja en HEAD, R: ['R1', 'R2', 'R3', 'R4']",
+   "calls": 0
+  }
+ ],
+ "calls": 0,
+ "human_interventions": 0,
+ "claude_calls": 1,
+ "gate_rejects": [],
+ "escalated_to_claude": false,
+ "base_sha": "ed5279e",
+ "t0": "2026-09-15 12:24:47",
+ "t0_epoch": 1789485887.1720483,
+ "awaiting_approval": "tests/test_sdlc_12249f76b2.py",
+ "failed_stage": "1-aceptacion",
+ "failed_note": "esperando aprobacion humana de tests/test_sdlc_12249f76b2.py (reanudar desde la etapa 2)",
+ "minutes_total": 5.87,
+ "usd_by_family": {},
+ "usd": 0.0
+}
