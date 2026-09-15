@@ -24,6 +24,10 @@ _Avoid_: LLM-judge, verifier (cuando hay ground truth)
 Escéptico LLM, familia distinta al autor, refuta por default. El acuerdo no confirma.
 _Avoid_: reviewer amable, self-score como label
 
+**Canal**:
+Hilo JSONL ordenado entre Cursor, Claude Code y mmorch. Turnos, no conocimiento destilado.
+_Avoid_: remember/recall para handoff, chat que despierta al otro proceso
+
 **Zona**:
 Radio de explosión × reversibilidad (verde / azul / amarillo / rojo). Rojo nunca es autónomo.
 _Avoid_: severity, P0

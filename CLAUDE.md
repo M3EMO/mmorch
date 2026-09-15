@@ -32,6 +32,7 @@ Reload Claude Code para cargar tools nuevos.
   familias: bulk y verificador no comparten familia.
 
 ## Donde leer el resto
+- Hilo con Cursor: `logs/canal.jsonl` (`mmorch.canal`). Nadie despierta al otro.
 - Capacidades (cuando elegir un patron): `docs/capabilities.md`
 - Feedback y memoria (como estan hechos): `mmorch/feedback.py`, `mmorch/memory.py`
 - Tests: `tests/` es el gate para promover codigo nuevo

@@ -15,6 +15,7 @@ Ratchet: `python -m mmorch.docgen --check`.
 | Por qué (irreversible) | `docs/adr/` | catálogos |
 | Cómo se escribe código | `docs/coding-principles.md` | el modelo del sistema |
 | Research, ablaciones, auditorías | `vault/` | `docs/` como si estuvieran al día |
+| Hilo Cursor↔Claude↔mmorch | `logs/canal.jsonl` via `mmorch.canal` | memoria semantica, bd |
 | Snapshots de producto (sólido/frágil a una fecha) | `docs/production-readiness/` | contratos; no re-sincronizar a mano |
 
 ## Capas
