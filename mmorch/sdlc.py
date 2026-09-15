@@ -24,7 +24,7 @@ from typing import Any
 
 from . import bench
 from .paths import logs_dir
-from .providers import call
+from .providers import call, register_run_tracker, unregister_run_tracker
 
 # Globals de corrida: los fija configure() (antes venian de argv). Ninguna funcion los lee antes de configure().
 TASK_NAME = ""
@@ -63,6 +63,7 @@ CFG: dict = {}
 state: dict = {}
 SNAP: dict[str, str] = {}
 SEEN: set[str] = set()
+_RUN_USD: dict = {"usd": 0.0}  # acumulador por-run de providers (W3.4): cada api-call le suma su costo
 
 
 class StageFailed(Exception):
@@ -108,7 +109,7 @@ def llm(model, system, user, timeout=400):
             raise
         rec_gate("presupuesto-razonamiento", False, f"{model}: {str(e)[:120]}; reintento con {CODER}")
         return llm(CODER, system, user, timeout)
-    usd = ledger_usd() or 0
+    usd = max(ledger_usd() or 0, round(_RUN_USD.get("usd", 0.0), 4))  # ledger (todo el proceso) o tracker (este run)
     if usd > CFG["usd_max"]:
         rec_gate("usd-tope", False, f"US${usd} > {CFG['usd_max']}")
         write_supervision(f"ESCALATE_HUMAN: tope USD {usd} superado")
@@ -920,6 +921,16 @@ def _seed_accept() -> None:
 def run(from_stage: float = 2) -> dict:
     """Corre las etapas desde `from_stage` (2 spec, 2.5 spec-review, 3 plan, 4 build, 5 test, 5.5 review, 6 pr).
     La etapa es el checkpoint (ticket 05 D4): reanudar = mismo worktree + from_stage."""
+    _RUN_USD["usd"] = 0.0
+    register_run_tracker(_RUN_USD)  # W3.4: tope USD por-run medido en proceso, no solo por el ledger
+    try:
+        return _run_stages(from_stage)
+    finally:
+        unregister_run_tracker(_RUN_USD)
+        state["usd_run"] = round(_RUN_USD["usd"], 4)
+
+
+def _run_stages(from_stage: float) -> dict:
     # D3 r1: el pre-commit de mmorch corre `python -m ruff` y resolvia al Python del sistema (sin ruff).
     os.environ["PATH"] = os.path.dirname(PY) + os.pathsep + os.environ.get("PATH", "")
     if not (WT / ".git").exists():

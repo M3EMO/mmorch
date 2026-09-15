@@ -36,3 +36,12 @@ Siguiente: los 4 pasos son ejecucion, no decision. Se construyen con el propio p
   puros, cada uno de un defecto real), `sdlc` registrado como entrada CLI en test_capas, excluido del selfcheck
   (corre API real). `driver_py.py` queda como CLI fino con la tabla FEATURES. Sin `files`, build_feature lee
   `sdlc.toml` de la raiz del repo (D2). Baseline de suite y casos de diagnostico van a `logs/sdlc/`.
+- Paso 2 HECHO (b553ebd): `server_engine._run_project_build_job`, `workflow_race._default_build_fn`,
+  `project_repair`, `auto_repair` y `hardening` llaman a `sdlc.build_feature`; fallos como `StageFailed`
+  (el server los mapea: built -> done, etapa 5 -> gate, otro -> escalate); `accept_cmd` como oraculo cuando
+  el comando no nombra tests; `files` = techo de `sdlc.toml` acotado por el payload (`_resolve_files`);
+  resume por `resume_branch` + `from_stage` en el mismo payload de /run/workflow.
+- Paso 3 HECHO (bd014a1): borrados project_driver, project_integrate, project_build y lang (quedaron sin
+  consumidor) con 6 tests; piso de selfchecks 40 -> 37. mmorch: 122 -> 118 modulos.
+- Paso 4 HECHO: `~/.claude/skills/project/SKILL.md` describe el pipeline, el payload nuevo (files, max_fix,
+  resume_branch/from_stage), los estados terminales y la regla "el pipeline nunca escribe tests". Nombre `/project` intacto.
