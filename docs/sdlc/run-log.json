@@ -43,6 +43,13 @@
    "minutes": 1.26,
    "calls": 0,
    "note": "sin test nuevo: OK"
+  },
+  {
+   "stage": "6-pr",
+   "ok": true,
+   "minutes": 4.9,
+   "calls": 0,
+   "note": " 7 files changed, 591 insertions(+), 24 deletions(-)"
   }
  ],
  "gates": [
@@ -171,6 +178,12 @@
    "ok": true,
    "detail": "sin test nuevo: OK",
    "calls": 3
+  },
+  {
+   "id": "lint",
+   "ok": true,
+   "detail": "0/0",
+   "calls": 3
   }
  ],
  "calls": 3,
@@ -211,5 +224,12 @@
   "failed": 1,
   "new_failures": [],
   "baseline_failures": 3
- }
+ },
+ "diffstat": " 7 files changed, 591 insertions(+), 24 deletions(-)",
+ "lines": {
+  "added": 3,
+  "deleted": 3
+ },
+ "minutes_total": 35.35,
+ "usd": 0.0156
 }
