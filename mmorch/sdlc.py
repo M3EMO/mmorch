@@ -210,28 +210,61 @@ def _suite_args(tag: str) -> list[str]:
     return [f"{a}-{stamp}" if "pyt-sdlc" in a else a for a in (FEAT or {}).get("suite", [])]
 
 
+_MUT_TEXTO = [("==", "!="), ("!=", "=="), ("<=", ">="), (">=", "<="), (" < ", " >= "), (" > ", " <= "),
+              ("&&", "||"), ("||", "&&"), ("true", "false"), ("false", "true"), (" + ", " - "), (" - ", " + ")]
+
+
+def _mutantes_texto(code: str, max_n: int = 8) -> list[str]:
+    """Mutantes para lenguajes sin AST en stdlib (Rust, JS, Go, C...): un swap de operador/booleano por mutante,
+    solo en lineas de codigo (no comentarios ni imports). Un mutante que no compila se descarta (mortinato)."""
+    lines = code.split("\n")
+    out: list[str] = []
+    for i, line in enumerate(lines):
+        st = line.strip()
+        if not st or st.startswith(("//", "#", "*", "/*", "use ", "import ", "require(", "mod ", "package ")):
+            continue
+        for a, b in _MUT_TEXTO:
+            if a in line:
+                m = lines[:i] + [line.replace(a, b, 1)] + lines[i + 1:]
+                out.append("\n".join(m))
+                if len(out) >= max_n:
+                    return out
+    return out
+
+
+def _accept_mata() -> bool:
+    """True si la aceptacion FALLA con el mutante puesto (mutante muerto)."""
+    if TASK.accept_files and all(_es_py(f) for f in TASK.accept_files):
+        ok, _ = sh([PY, "-m", "pytest", *_accept_paths(), "-q", "-x", "-p", "no:cacheprovider"])
+    else:
+        ok, _ = sh(str(ACCEPT_CMD or CFG.get("accept_cmd") or "false"))
+    return not ok
+
+
 def gate_mutacion() -> tuple[bool, str]:
     """Ticket 08 D2 (opcion D): el test de aceptacion mata mutantes del codigo final. Score = muertos / total sobre los
     archivos del plan (mutantes de checkers._mutants: operadores, comparaciones, booleanos, enteros). Bloquea SOLO con
     `mutation_min` en sdlc.toml; sin numero medido, observa y deja state["mutation_score"]."""
     from .checkers import _mutants
-    if not TASK.accept_files:
-        return rec_gate("mutacion", True, "sin tests nombrados: sin mutacion")
+    if not TASK.accept_files and not (ACCEPT_CMD or CFG.get("accept_cmd")):
+        return rec_gate("mutacion", True, "sin oraculo de aceptacion: sin mutacion")
     killed = total = 0
+    compile_cmd = CFG.get("compile_cmd")
     for f in state.get("plan_files", []):
         p = WT / f
-        if not f.endswith(".py") or not p.exists():
+        if not p.exists():
             continue
         orig = p.read_text(encoding="utf-8")
-        for m in _mutants(orig, max_n=8):
-            total += 1
+        for m in (_mutants(orig, max_n=8) if _es_py(f) else _mutantes_texto(orig, max_n=8)):
             p.write_text(m, encoding="utf-8")
             try:
-                ok, _ = sh([PY, "-m", "pytest", *_accept_paths(), "-q", "-x", "-p", "no:cacheprovider"])
+                if not _es_py(f) and compile_cmd and not sh(str(compile_cmd))[0]:
+                    continue  # mortinato: no compila, no cuenta
+                total += 1
+                if _accept_mata():
+                    killed += 1
             finally:
                 p.write_text(orig, encoding="utf-8")
-            if not ok:
-                killed += 1
     if not total:
         state["mutation_score"] = None
         return rec_gate("mutacion", True, "sin mutantes posibles")
@@ -498,12 +531,20 @@ def _write(rel, code):
 
 def _docstrings(files) -> dict:
     import ast
-    out = {}
+    out: dict[str, str | None] = {}
     for f in files:
-        try:
-            out[f] = ast.get_docstring(ast.parse((WT / f).read_text(encoding="utf-8"))) if _es_py(f) and (WT / f).exists() else None
-        except SyntaxError:
+        if not (WT / f).exists():
             out[f] = None
+            continue
+        text = (WT / f).read_text(encoding="utf-8")
+        if _es_py(f):
+            try:
+                out[f] = ast.get_docstring(ast.parse(text))
+            except SyntaxError:
+                out[f] = None
+        else:  # otros lenguajes: la cabecera de comentario del archivo (//! //, #, /* */) es el "docstring de modulo"
+            m = re.match(r"(?:\s*(?://[^\n]*|#[^\n]*|/\*[\s\S]*?\*/)\n)+", text)
+            out[f] = m.group(0).strip() if m else None
     return out
 
 
