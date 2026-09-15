@@ -420,10 +420,15 @@ def _techo() -> list[str]:
     return list((FEAT or {}).get("techo") or [])
 
 
-def _en_techo(f: str) -> bool:
+def _calza(f: str, pat: str) -> bool:
+    """fnmatch con `**/` opcional: `pkg/**/*.py` incluye `pkg/a.py` (fnmatch solo exigia un directorio intermedio)."""
     import fnmatch
+    return fnmatch.fnmatch(f, pat) or fnmatch.fnmatch(f, pat.replace("**/", ""))
+
+
+def _en_techo(f: str) -> bool:
     t = _techo()
-    return f in _need_files() or not t or any(fnmatch.fnmatch(f, pat) for pat in t)  # sin techo (bench, FEATURES viejas): todo vale
+    return f in _need_files() or not t or any(_calza(f, pat) for pat in t)  # sin techo (bench, FEATURES viejas): todo vale
 
 
 def gate_plan_allowlist(plan_md: str, files: list[str]) -> tuple[bool, str]:
@@ -1264,7 +1269,6 @@ def build_feature(name: str, task: str, repo: str, *, accept: dict[str, str] | N
 def _resolve_files(repo: str, files: list[str] | None) -> list[str]:
     """Devuelve el TECHO (patrones fnmatch de `files` en sdlc.toml). Un `files` del llamador solo acota: cada archivo
     tiene que caer dentro del techo; sin toml, el techo es exactamente lo que dice el llamador."""
-    import fnmatch
     p = pathlib.Path(repo) / "sdlc.toml"
     techo = _files_from_toml(repo) if p.exists() else None
     if files is None:
@@ -1272,7 +1276,7 @@ def _resolve_files(repo: str, files: list[str] | None) -> list[str]:
             raise ValueError(f"sin `files` y sin {p}: el pipeline no sabe que archivos puede tocar (ticket 05 D2)")
         return techo
     if techo is not None:
-        fuera = [f for f in files if not any(fnmatch.fnmatch(f, pat) for pat in techo)]
+        fuera = [f for f in files if not any(_calza(f, pat) for pat in techo)]
         if fuera:
             raise ValueError(f"files fuera del techo de {p}: {fuera} (el payload solo acota, no amplia)")
         return techo

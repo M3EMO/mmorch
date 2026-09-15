@@ -96,6 +96,7 @@ def test_techo_con_globs_y_varios_lenguajes(run):
     S.FEAT["techo"] = ["src/**/*.java", "pkg/*.py"]
     S.CFG["ext"] = ["py", "java"]
     assert S._en_techo("src/main/App.java") and S._en_techo("pkg/a.py") and not S._en_techo("otro/x.py")
+    assert S._calza("src/App.java", "src/**/*.java")  # init escribe d/**/*.ext: incluye los archivos del nivel d
     assert S._plan_files("- `src/main/App.java` [R1]\n- `pkg/a.py` [R2]\n- `otro/x.rb`\n") == ["src/main/App.java", "pkg/a.py"]
     plan = "## Archivos\n- `pkg/a.py` [R1]\n- `tests/test_capas.py` [R1]\n- `otro/x.py` [R1]\n"
     ok, nota = S.gate_plan_allowlist(plan, ["pkg/a.py", "tests/test_capas.py", "otro/x.py"])
