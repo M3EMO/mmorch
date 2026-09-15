@@ -1323,7 +1323,9 @@ def init(repo: str) -> dict:
         skip = {"tests", "tests_accept", ".venv", "venv", "node_modules", "build", "dist", "docs", "target", "__pycache__"}
         conteo: dict[str, int] = {}
         dirs: dict[str, set[str]] = {}
-        for q in root.rglob("*"):
+        ls = subprocess.run(["git", "ls-files"], cwd=root, capture_output=True, text=True, encoding="utf-8")
+        # repo git: solo lo trackeado (Portfolio tenia _kimi_exp/ y _tmp_*.py sin trackear); si no, el arbol entero
+        for q in ([root / x for x in ls.stdout.splitlines()] if ls.returncode == 0 and ls.stdout else root.rglob("*")):
             if not q.is_file():
                 continue
             rel = q.relative_to(root)
