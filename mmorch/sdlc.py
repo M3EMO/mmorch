@@ -208,7 +208,9 @@ def one_file(code: str, rel: str) -> str:
 
 def sh(cmd, timeout: float | None = None, keep: int = 6000):
     """Lista = exec directo; str = comando shell (accept_cmd del repo). `python` en un comando = el interprete del repo."""
-    env = {**os.environ, "PATH": os.path.dirname(PY) + os.pathsep + os.environ.get("PATH", "")}
+    # PYTHONDONTWRITEBYTECODE: dos mutantes del mismo tamaño escritos en el mismo segundo reusaban el .pyc del anterior
+    # y el mutante "sobrevivia" (medido en Adepor 2026-09-15: 2 falsos vivos de 7).
+    env = {**os.environ, "PATH": os.path.dirname(PY) + os.pathsep + os.environ.get("PATH", ""), "PYTHONDONTWRITEBYTECODE": "1"}
     try:
         p = subprocess.run(cmd, cwd=WT, capture_output=True, text=True, encoding="utf-8", errors="replace",
                            timeout=timeout or CFG["cmd_timeout_s"], shell=isinstance(cmd, str), env=env)

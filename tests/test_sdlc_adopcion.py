@@ -101,8 +101,8 @@ def test_interprete_del_repo_es_el_venv_sembrado(tmp_path):
     venv.create(tmp_path / ".venv", with_pip=False)
     S.configure(t, contract=[], feat={"repo": str(tmp_path), "files": [], "suite": []}, wt=tmp_path)
     assert S.PY != sys.executable and ".venv" in S.PY
-    ok, out = S.sh('python -c "import sys; print(sys.prefix)"')  # `python` dentro de un comando del repo
-    assert ok and ".venv" in out
+    ok, out = S.sh('python -c "import sys; print(sys.prefix, sys.dont_write_bytecode)"')  # `python` dentro de un comando del repo
+    assert ok and ".venv" in out and "True" in out  # sin .pyc: un mutante no reusa el bytecode del anterior
 
 
 def test_cfg_lee_el_sdlc_toml_del_repo_aunque_el_worktree_no_lo_tenga(tmp_path):
