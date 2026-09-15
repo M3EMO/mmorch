@@ -29,6 +29,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import code_embedder
 from .paths import logs_dir
 
 _DB_PATH = logs_dir() / "memory.duckdb"
@@ -181,11 +182,14 @@ def write_episode(scope: str, kind: str, payload: dict | str, *,
         con.close()
 
 
-def write_note(scope: str, text: str, *, source_ids: list[int] | None = None,
+def write_note(scope: str, text: str, *, kind: str = 'text',
+               source_ids: list[int] | None = None,
                verified: bool = False, open_loop: bool = False,
                permanent: bool = False, path: Path = _DB_PATH) -> int:
     """Persiste una nota destilada en la capa semantica + embedding (FIX C versionado).
     Si fastembed no esta -> embedding NULL, recall cae a coarse-only para esa nota.
+    `kind='code'` usa el encoder de codigo (code_embedder) y guarda emb_model='code_embedder';
+    si ese encoder no esta disponible, embedding NULL (misma degradacion que texto).
     `verified=True` marca la nota como validada independientemente (cross-family o
     checker) — alimenta verification_coverage en stats().
     `open_loop=True` la marca como tarea/pregunta abierta (Zeigarnik: resiste olvido
@@ -195,14 +199,20 @@ def write_note(scope: str, text: str, *, source_ids: list[int] | None = None,
     con = _connect(path)
     try:
         sid = con.execute("SELECT nextval('seq_semantic')").fetchone()[0]
-        vec = embed(text)
+        if kind == 'code':
+            vec = code_embedder.embed_code(text)
+            emb_model = 'code_embedder' if vec is not None else None
+            dim = 384 if vec is not None else None
+        else:
+            vec = embed(text)
+            emb_model = _EMB_MODEL if vec is not None else None
+            dim = _EMB_DIM if vec is not None else None
         now = time.time()
         con.execute(
             "INSERT INTO semantic (id, ts, scope, text, embedding, emb_model, dim, "
             "source_ids, tombstone, verified, access_count, last_accessed_at, "
             "open_loop, lifespan) VALUES (?,?,?,?,?,?,?,?,FALSE,?,0,?,?,?)",
-            [sid, now, scope, text, vec,
-             _EMB_MODEL if vec else None, _EMB_DIM if vec else None,
+            [sid, now, scope, text, vec, emb_model, dim,
              json.dumps(source_ids or []), bool(verified), now,
              bool(open_loop), "permanent" if permanent else "decay"])
         return int(sid)
@@ -351,8 +361,8 @@ def _scope_chain(scope: str) -> list[str]:
     return [scope, "global"]
 
 
-def recall(query: str, scope: str = "global", *, k: int = 5,
-           window_days: float | None = None, track: bool = True,
+def recall(query: str, scope: str = "global", *, kind: str = 'text',
+           k: int = 5, window_days: float | None = None, track: bool = True,
            path: Path = _DB_PATH) -> list[Note]:
     """Recall clinico 2-stage:
       COARSE  scope-chain + (opcional) ventana de recencia. SIN keyword-gate (FIX A).
@@ -360,6 +370,10 @@ def recall(query: str, scope: str = "global", *, k: int = 5,
               Si no hay embeddings (fastembed ausente / notas viejas) -> orden por
               recencia (coarse-only).
       FALLBACK si la capa semantica devuelve < k, completa desde episodic RAW (FIX B).
+    `kind='code'` usa el encoder de codigo y compara SOLO contra notas con
+    emb_model='code_embedder'; `kind='text'` (default) compara SOLO contra notas con
+    emb_model != 'code_embedder'. Los espacios no se mezclan. Para kind='code', si el
+    encoder no esta disponible retorna [] y no cae al fallback episodico.
     `track=True` registra el acceso (spacing del decay) SOLO sobre las notas
     semanticas devueltas. recall_hybrid llama con track=False y toca su propio set
     fusionado para no doble-contar.
@@ -370,6 +384,14 @@ def recall(query: str, scope: str = "global", *, k: int = 5,
         raise ValueError(f"k debe estar en [1, 200], vino {k}")
     if window_days is not None and window_days <= 0:
         raise ValueError(f"window_days debe ser > 0, vino {window_days}")
+
+    if kind == 'code':
+        qvec = code_embedder.embed_code(query)
+        if qvec is None:
+            return []
+    else:
+        qvec = embed(query)
+
     con = _connect(path)
     try:
         chain = _scope_chain(scope)
@@ -377,39 +399,49 @@ def recall(query: str, scope: str = "global", *, k: int = 5,
         cutoff = time.time() - window_days * 86400 if window_days else 0.0
         # COARSE: solo scope + recencia. Nada de keyword.
         rows = con.execute(
-            f"""SELECT id, ts, scope, text, embedding, access_count, last_accessed_at,
+            f"""SELECT id, ts, scope, text, embedding, emb_model, access_count, last_accessed_at,
                        open_loop FROM semantic
                 WHERE scope IN ({placeholders}) AND ts >= ?
                   AND NOT tombstone AND NOT needs_review
                 ORDER BY ts DESC""",
             [*chain, cutoff]).fetchall()
 
-        qvec = embed(query)
         notes: list[Note] = []
         if qvec is not None:
-            # FINE (patron grok-build 2026-07, antes cosine puro): cosine modulado por
-            # retencion (decay desde ultimo acceso + boost de frecuencia + piso Zeigarnik)
-            # -> pool 3k, y MMR (Jaccard) elige k balanceando relevancia con diversidad
-            # (sin MMR, notas casi-duplicadas de un tema copan el top-k).
-            from .retention import mmr_rerank, rank_score
             now = time.time()
-            valid = [(rid, ts, sc, text, list(emb), acc, la, ol)
-                     for rid, ts, sc, text, emb, acc, la, ol in rows if emb]
-            sims = _cosine_batch(qvec, [v[4] for v in valid])
-            scored = [
-                Note(rid, ts, sc, text, rank_score(sim, now, la, int(acc or 0), bool(ol)),
-                     "semantic")
-                for (rid, ts, sc, text, _emb, acc, la, ol), sim in zip(valid, sims, strict=True)]
-            scored.sort(key=lambda n: -n.score)
-            pool = scored[:3 * k]
-            notes = mmr_rerank(pool, [n.score for n in pool], k)
+            if kind == 'code':
+                valid = [(rid, ts, sc, text, list(emb), acc, la, ol)
+                         for rid, ts, sc, text, emb, emb_m, acc, la, ol in rows
+                         if emb and emb_m == 'code_embedder']
+                sims = _cosine_batch(qvec, [v[4] for v in valid])
+                scored = [
+                    Note(rid, ts, sc, text, sim, "semantic")
+                    for (rid, ts, sc, text, _emb, acc, la, ol), sim in zip(valid, sims, strict=True)]
+                scored.sort(key=lambda n: -n.score)
+                notes = scored[:k]
+            else:  # kind == 'text'
+                from .retention import mmr_rerank, rank_score
+                valid = [(rid, ts, sc, text, list(emb), acc, la, ol)
+                         for rid, ts, sc, text, emb, emb_m, acc, la, ol in rows
+                         if emb and emb_m != 'code_embedder']
+                sims = _cosine_batch(qvec, [v[4] for v in valid])
+                scored = [
+                    Note(rid, ts, sc, text, rank_score(sim, now, la, int(acc or 0), bool(ol)),
+                         "semantic")
+                    for (rid, ts, sc, text, _emb, acc, la, ol), sim in zip(valid, sims, strict=True)]
+                scored.sort(key=lambda n: -n.score)
+                pool = scored[:3 * k]
+                notes = mmr_rerank(pool, [n.score for n in pool], k)
         else:
             # coarse-only: mas recientes primero.
+            if kind == 'text':
+                # excluir notas de codigo (espacios no se mezclan)
+                rows = [r for r in rows if r[5] != 'code_embedder']
             notes = [Note(rid, ts, sc, text, 0.0, "semantic")
                      for (rid, ts, sc, text, *_rest) in rows[:k]]
 
-        # FIX B: completar desde episodic raw si falta.
-        if len(notes) < k:
+        # FIX B: completar desde episodic raw si falta (solo para kind='text').
+        if len(notes) < k and kind == 'text':
             need = k - len(notes)
             erows = con.execute(
                 f"""SELECT id, ts, scope, kind, payload FROM episodic

@@ -48,10 +48,11 @@ def test_R2_nota_de_codigo_usa_code_embedder(tmp_path):
 def test_R3_recall_de_codigo_solo_compara_con_codigo(tmp_path):
     db = tmp_path / "mem.duckdb"
     a = M.write_note("proj", CODE_A, kind="code", path=db)
-    M.write_note("proj", CODE_B, kind="code", path=db)
+    b = M.write_note("proj", CODE_B, kind="code", path=db)
     M.write_note("proj", TEXT, path=db)
-    got = M.recall("def parse_lines(lines)", "proj", kind="code", k=2, track=False, path=db)
-    assert got and got[0].id == a, got
+    got = M.recall("def parse_lines(lines)", "proj", kind="code", k=3, track=False, path=db)
+    # el ORDEN es del encoder, no del cableo (medido 2026-09-14: el encoder puso CODE_B 0.33 > CODE_A 0.27)
+    assert {n.id for n in got} == {a, b}, got
     assert all(n.text != TEXT for n in got)
 
 
