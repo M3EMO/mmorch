@@ -37,7 +37,7 @@ def _tool_names(tmp_path, profile: str | None) -> list[str]:
 def test_full_expone_todas_las_tools(tmp_path):
     full = _tool_names(tmp_path, "full")
     # 46 al escribir W2.2; >= evita romper el test al agregar una tool nueva
-    assert len(full) >= 45   # 2026-09-14: -2 tools (tournament, bucket_rank) por poda medida
+    assert len(full) >= 44   # 2026-09-14: -2 tools (tournament, bucket_rank) por poda medida
     assert "mmorch_ingest_session" in full  # las excluidas de core siguen en full
 
 

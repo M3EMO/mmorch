@@ -46,7 +46,22 @@ CODER = os.environ.get("SDLC_CODER", "deepseek-v4-pro")
 DIAG = os.environ.get("SDLC_DIAG", WRITER)  # medicion 2026-09-15: diagnostico con/sin razonamiento
 PY = sys.executable
 METRICS = logs_dir() / "metrics.jsonl"
-PY_RE = r"`?((?:\w+/)*\w+\.py)`?"
+_LANG_HINT = {"py": "python -m compileall -q .", "java": "mvn -q test-compile", "ts": "npx tsc --noEmit", "js": "node --check <archivo>",
+              "go": "go build ./... && go vet ./...", "rs": "cargo check"}
+
+
+def _exts() -> list[str]:
+    """Extensiones que el pipeline puede escribir (sdlc.toml `ext`, default py)."""
+    e = CFG.get("ext") or ["py"]
+    return [str(x).lstrip(".") for x in e]
+
+
+def _file_re() -> str:
+    return r"((?:[\w.-]+/)*[\w.-]+\.(?:" + "|".join(re.escape(x) for x in _exts()) + r"))"
+
+
+def _es_py(f: str) -> bool:
+    return f.endswith(".py")
 TPL = pathlib.Path(__file__).resolve().parent / "sdlc_templates"  # spec-kit recortado (tickets 02 y 11)
 
 
@@ -167,7 +182,7 @@ def strip_fence(t):
 
 def one_file(code: str, rel: str) -> str:
     """Gate un-archivo (r1 2026-09-11): el coder imito las cabeceras "# path" del prompt y pego 3 archivos en uno."""
-    parts = re.split(r"(?m)^# ((?:\w+/)*\w+\.py)\s*$", code)
+    parts = re.split(r"(?m)^(?:#|//)\s*" + _file_re() + r"\s*$", code)
     if len(parts) < 3:
         return code
     secs = {parts[i]: parts[i + 1].strip() for i in range(1, len(parts), 2)}
@@ -271,8 +286,8 @@ def _accept_paths():
 
 
 def accept():
-    if not TASK.accept_files and ACCEPT_CMD:
-        return sh(ACCEPT_CMD)  # repair / payload sin tests nombrados: el comando del repo es el oraculo
+    if ACCEPT_CMD and (not TASK.accept_files or not all(_es_py(f) for f in TASK.accept_files)):
+        return sh(ACCEPT_CMD)  # sin tests nombrados, o tests en otro lenguaje: el comando del repo es el oraculo
     return sh([PY, "-m", "pytest", *_accept_paths(), "-q", "-p", "no:cacheprovider"])
 
 
@@ -314,7 +329,18 @@ def _need_files() -> list[str]:
     tocan, el regex los tomaba como obligatorios). Bench: los paths que nombra el enunciado."""
     if FEAT:
         return list(FEAT["files"])
-    return list(dict.fromkeys(re.findall(r"[\w/]+\.py", TASK.task)))
+    return list(dict.fromkeys(re.findall(r"[\w/.-]+\.(?:" + "|".join(_exts()) + ")", TASK.task)))
+
+
+def _techo() -> list[str]:
+    """Patrones (fnmatch) de lo que el plan PUEDE escribir; vacio = solo los obligatorios (bench)."""
+    return list((FEAT or {}).get("techo") or [])
+
+
+def _en_techo(f: str) -> bool:
+    import fnmatch
+    t = _techo()
+    return f in _need_files() or not t or any(fnmatch.fnmatch(f, pat) for pat in t)  # sin techo (bench, FEATURES viejas): todo vale
 
 
 def gate_plan_allowlist(plan_md: str, files: list[str]) -> tuple[bool, str]:
@@ -327,6 +353,9 @@ def gate_plan_allowlist(plan_md: str, files: list[str]) -> tuple[bool, str]:
     need = [f for f in _need_files() if f not in files]
     if need:
         return rec_gate("plan-allowlist", False, f"plan omite {need}")
+    fuera = [f for f in files if not _en_techo(f)]
+    if fuera:
+        return rec_gate("plan-allowlist", False, f"plan lista archivos fuera del techo de sdlc.toml: {fuera}")
     return rec_gate("plan-allowlist", True, f"{files}")
 
 
@@ -399,14 +428,32 @@ def gate_baseline() -> tuple[bool, str]:
 
 
 def gate_compile(files) -> tuple[bool, str]:
-    ok, log = sh([PY, "-m", "py_compile", *files])
-    return rec_gate("G3-compile", ok, "compila" if ok else log[-800:])
+    """G3: .py -> py_compile; otros lenguajes -> `compile_cmd` de sdlc.toml (sin el, se anota y no bloquea)."""
+    pys = [f for f in files if _es_py(f)]
+    if pys:
+        ok, log = sh([PY, "-m", "py_compile", *pys])
+        if not ok:
+            return rec_gate("G3-compile", False, log[-800:])
+    otros = [f for f in files if not _es_py(f)]
+    if otros:
+        cmd = CFG.get("compile_cmd")
+        if not cmd:
+            return rec_gate("G3-compile", True, f"sin compile_cmd para {otros}: no se compila")
+        ok, log = sh(str(cmd))
+        return rec_gate("G3-compile", ok, "compila" if ok else log[-800:])
+    return rec_gate("G3-compile", True, "compila")
 
 
 def gate_test_compile() -> tuple[bool, str]:
     """Equivalente a mvn test-compile: los tests importan y se recolectan."""
     if not _accept_paths():
         return rec_gate("test-compile", True, "sin tests nombrados (accept_cmd)")
+    if not all(_es_py(f) for f in _accept_paths()):
+        cmd = CFG.get("compile_cmd")
+        if not cmd:
+            return rec_gate("test-compile", True, "tests no-Python sin compile_cmd: no se compila")
+        ok, log = sh(str(cmd))
+        return rec_gate("test-compile", ok, "ok" if ok else log[-800:])
     ok, log = sh([PY, "-m", "pytest", *_accept_paths(), "--collect-only", "-q", "-p", "no:cacheprovider"])
     return rec_gate("test-compile", ok, "ok" if ok else log[-800:])
 
@@ -441,7 +488,7 @@ def _all_code():
 def _write(rel, code):
     p = WT / rel
     p.parent.mkdir(parents=True, exist_ok=True)
-    if rel.endswith(".py") and code and not code.endswith("\n"):
+    if code and not code.endswith("\n"):
         code += "\n"  # D4: strip_fence borraba la linea final y el diff mostraba "No newline at end of file"
     p.write_text(code, encoding="utf-8")
 
@@ -451,7 +498,7 @@ def _docstrings(files) -> dict:
     out = {}
     for f in files:
         try:
-            out[f] = ast.get_docstring(ast.parse((WT / f).read_text(encoding="utf-8"))) if (WT / f).exists() else None
+            out[f] = ast.get_docstring(ast.parse((WT / f).read_text(encoding="utf-8"))) if _es_py(f) and (WT / f).exists() else None
         except SyntaxError:
             out[f] = None
     return out
@@ -630,7 +677,9 @@ def aceptacion():
         return True, "tests de aceptacion provistos por el llamador"
     from .claude_exec import run_claude
     os.environ.pop("CLAUDECODE", None)
-    rel = f"{TESTS_PREFIX}test_sdlc_{re.sub(r'[^a-z0-9]+', '_', TASK_NAME.lower()).strip('_')[:40]}.py"
+    slug = re.sub(r'[^a-z0-9]+', '_', TASK_NAME.lower()).strip('_')[:40]
+    ext = _exts()[0]
+    rel = str(CFG.get("accept_test", f"{TESTS_PREFIX}test_sdlc_{{slug}}.{ext}")).replace("{slug}", slug)
     state["claude_calls"] += 1
     before = _tree()
     r = run_claude(f"Escribi SOLO el archivo {rel}: el test de aceptacion (pytest, sin red) de esta TAREA. Un test por "
@@ -645,10 +694,13 @@ def aceptacion():
     ids = sorted(set(re.findall(r"(?m)^def test_(R\d+)", text)))
     if not ids:
         return rec_gate("aceptacion-ids", False, "sin tests test_R<n>_...")
-    ok_c, log = sh([PY, "-m", "pytest", rel, "--collect-only", "-q", "-p", "no:cacheprovider"])
-    if not ok_c:
-        return rec_gate("aceptacion-compila", False, log[-600:])
-    ok_r, _ = sh([PY, "-m", "pytest", rel, "-q", "-p", "no:cacheprovider"])
+    if _es_py(rel):
+        ok_c, log = sh([PY, "-m", "pytest", rel, "--collect-only", "-q", "-p", "no:cacheprovider"])
+        if not ok_c:
+            return rec_gate("aceptacion-compila", False, log[-600:])
+        ok_r, _ = sh([PY, "-m", "pytest", rel, "-q", "-p", "no:cacheprovider"])
+    else:  # otro lenguaje: el comando del repo compila y corre; debe estar ROJO
+        ok_r, _ = sh(str(ACCEPT_CMD or CFG.get("accept_cmd") or "false"))
     if ok_r:
         return rec_gate("aceptacion-roja", False, f"{rel} ya pasa en HEAD: no mide la tarea")
     rec_gate("aceptacion-roja", True, f"{rel} roja en HEAD, R: {ids}")
@@ -753,7 +805,7 @@ def plan():
 
 def _plan_files(block: str) -> list[str]:
     """Archivos del plan = SOLO los items de la lista (D2 r1: una mencion en prosa 'sin tocar X.py' se colaba)."""
-    items = re.findall(r"(?m)^\s*[-*]\s*`?((?:\w+/)*\w+\.py)`?", block)
+    items = re.findall(r"(?m)^\s*[-*]\s*`?" + _file_re() + r"`?", block)
     return [f for f in dict.fromkeys(items) if not f.startswith(TESTS_PREFIX) or f in _need_files()]  # D14-diag: test_capas es obligatorio en cableos
 
 
@@ -981,7 +1033,15 @@ def pr():
 
 def gate_lint() -> tuple[bool, str]:
     """ruff + mypy sobre los archivos del plan. Bench: paquete nuevo, baseline 0. Repo: el hook exige 0."""
-    files = state["plan_files"]
+    cmd = CFG.get("lint_cmd")
+    if cmd:  # otro lenguaje o linter propio del repo: exit 0 = limpio
+        ok, log = sh(str(cmd))
+        state["lint_new"] = {"lint_cmd": 0 if ok else 1}
+        return rec_gate("lint", ok, "0" if ok else log[-1500:])
+    files = [f for f in state["plan_files"] if _es_py(f)]
+    if not files:
+        state["lint_new"] = {"ruff": 0, "mypy": 0}
+        return rec_gate("lint", True, "sin archivos Python ni lint_cmd")
     _, rl = sh([PY, "-m", "ruff", "check", "--output-format", "concise", *files])
     _, ml = sh([PY, "-m", "mypy", "--ignore-missing-imports", *files])
     ruff = len(re.findall(r"^\S+:\d+:\d+: ", rl, re.M))
@@ -1093,10 +1153,11 @@ def build_feature(name: str, task: str, repo: str, *, accept: dict[str, str] | N
     accept_cmd = accept_cmd or toml.get("accept_cmd")
     if not accept and not accept_cmd:
         raise ValueError("build_feature necesita `accept` (tests) o `accept_cmd` (comando del repo / sdlc.toml)")
-    files = _resolve_files(repo, files)
+    techo = _resolve_files(repo, files)
     if from_stage is None:
         from_stage = 2 if accept else 1  # sin tests del llamador: la etapa 1 los escribe (ticket 12 D5)
-    feat = {"repo": repo, "task": task, "files": files, "accept": dict(accept or {}), "contract": list(contract or []),
+    # `files` del llamador = obligatorios (el plan los lista si o si); el techo del toml = lo permitido
+    feat = {"repo": repo, "task": task, "files": list(files or []), "techo": techo, "accept": dict(accept or {}), "contract": list(contract or []),
             "suite": suite or toml.get("suite") or ["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp",
                                                        str(pathlib.Path(tempfile.gettempdir()) / "pyt-sdlc-wt")]}
     t = types.SimpleNamespace(name=name, task=task, accept_files=dict(accept or {}))
@@ -1106,7 +1167,9 @@ def build_feature(name: str, task: str, repo: str, *, accept: dict[str, str] | N
 
 
 def _resolve_files(repo: str, files: list[str] | None) -> list[str]:
-    """Techo = `files` de sdlc.toml en la raiz del repo. El llamador solo acota: un archivo fuera del techo es error."""
+    """Devuelve el TECHO (patrones fnmatch de `files` en sdlc.toml). Un `files` del llamador solo acota: cada archivo
+    tiene que caer dentro del techo; sin toml, el techo es exactamente lo que dice el llamador."""
+    import fnmatch
     p = pathlib.Path(repo) / "sdlc.toml"
     techo = _files_from_toml(repo) if p.exists() else None
     if files is None:
@@ -1114,9 +1177,10 @@ def _resolve_files(repo: str, files: list[str] | None) -> list[str]:
             raise ValueError(f"sin `files` y sin {p}: el pipeline no sabe que archivos puede tocar (ticket 05 D2)")
         return techo
     if techo is not None:
-        fuera = [f for f in files if f not in techo]
+        fuera = [f for f in files if not any(fnmatch.fnmatch(f, pat) for pat in techo)]
         if fuera:
             raise ValueError(f"files fuera del techo de {p}: {fuera} (el payload solo acota, no amplia)")
+        return techo
     return list(files)
 
 
@@ -1157,17 +1221,32 @@ def init(repo: str) -> dict:
     hecho: list[str] = []
     toml = root / "sdlc.toml"
     if not toml.exists():
-        skip = {"tests", "tests_accept", ".venv", "venv", "node_modules", "build", "dist", "docs"}
-        src = sorted(str(q.relative_to(root)).replace("\\", "/") for q in root.rglob("*.py")
-                     if not any(part in skip or part.startswith(".") for part in q.relative_to(root).parts))
+        skip = {"tests", "tests_accept", ".venv", "venv", "node_modules", "build", "dist", "docs", "target", "__pycache__"}
+        conteo: dict[str, int] = {}
+        dirs: dict[str, set[str]] = {}
+        for q in root.rglob("*"):
+            if not q.is_file():
+                continue
+            rel = q.relative_to(root)
+            if any(part in skip or part.startswith(".") for part in rel.parts):
+                continue
+            ext = q.suffix.lstrip(".").lower()
+            if ext in _LANG_HINT:
+                conteo[ext] = conteo.get(ext, 0) + 1
+                dirs.setdefault(ext, set()).add(rel.parts[0] if len(rel.parts) > 1 else "")
+        exts = [e for e, _ in sorted(conteo.items(), key=lambda kv: -kv[1])][:3] or ["py"]
+        globs = sorted({(f"{d}/**/*.{e}" if d else f"*.{e}") for e in exts for d in dirs.get(e, {""})})
+        hints = "\n".join(f"# compile_cmd = \"{_LANG_HINT[e]}\"   # {e}" for e in exts if e != "py")
         toml.write_text(
-            "# sdlc.toml — convencion por repo (ticket 11). `files` es el TECHO de lo que el pipeline puede escribir;\n"
-            "# un payload solo lo acota. Sin accept_cmd el repo no entra. approve_accept: un humano aprueba el test\n"
-            "# de aceptacion que escribe la etapa 1 antes de gastar (ticket 12 D5).\n"
+            "# sdlc.toml — convencion por repo (ticket 11). `files` es el TECHO (patrones) de lo que el pipeline puede\n"
+            "# escribir; un payload solo lo acota. Sin accept_cmd el repo no entra. approve_accept: un humano aprueba\n"
+            "# el test de aceptacion que escribe la etapa 1 antes de gastar (ticket 12 D5).\n"
+            "# Otros lenguajes: `ext`, `compile_cmd` (G3 y test-compile), `lint_cmd`, `accept_test` (ruta con {slug}).\n"
             'accept_cmd = "python -m pytest -q"\n'
             'suite = ["tests", "-q", "-rfE", "-p", "no:cacheprovider"]\n'
-            "approve_accept = true\nusd_max = 3.0\n"
-            "files = [\n" + "".join(f'    "{f}",\n' for f in src[:200]) + "]\n", encoding="utf-8")
+            f"ext = {json.dumps(exts)}\n" + (hints + "\n" if hints else "")
+            + "approve_accept = true\nusd_max = 3.0\n"
+            "files = [\n" + "".join(f'    "{g}",\n' for g in globs) + "]\n", encoding="utf-8")
         hecho.append("sdlc.toml")
     d = root / "docs" / "sdlc"
     d.mkdir(parents=True, exist_ok=True)

@@ -85,9 +85,34 @@ def test_resolve_files_toml_es_techo_y_el_payload_solo_acota(tmp_path):
     assert S._resolve_files(str(tmp_path), ["pkg/a.py"]) == ["pkg/a.py"]  # sin toml: lo que dice el llamador
     (tmp_path / "sdlc.toml").write_text('files = ["pkg/a.py", "pkg/b.py"]\n', encoding="utf-8")
     assert S._resolve_files(str(tmp_path), None) == ["pkg/a.py", "pkg/b.py"]
-    assert S._resolve_files(str(tmp_path), ["pkg/b.py"]) == ["pkg/b.py"]
+    assert S._resolve_files(str(tmp_path), ["pkg/b.py"]) == ["pkg/a.py", "pkg/b.py"]  # devuelve el techo; b es obligatorio
     with pytest.raises(ValueError, match="fuera del techo"):
         S._resolve_files(str(tmp_path), ["pkg/c.py"])
+    (tmp_path / "sdlc.toml").write_text('files = ["pkg/**/*.py", "tests/test_capas.py"]\n', encoding="utf-8")
+    assert S._resolve_files(str(tmp_path), ["pkg/sub/nuevo.py"]) == ["pkg/**/*.py", "tests/test_capas.py"]  # glob
+
+
+def test_techo_con_globs_y_varios_lenguajes(run):
+    S.FEAT["techo"] = ["src/**/*.java", "pkg/*.py"]
+    S.CFG["ext"] = ["py", "java"]
+    assert S._en_techo("src/main/App.java") and S._en_techo("pkg/a.py") and not S._en_techo("otro/x.py")
+    assert S._plan_files("- `src/main/App.java` [R1]\n- `pkg/a.py` [R2]\n- `otro/x.rb`\n") == ["src/main/App.java", "pkg/a.py"]
+    plan = "## Archivos\n- `pkg/a.py` [R1]\n- `tests/test_capas.py` [R1]\n- `otro/x.py` [R1]\n"
+    ok, nota = S.gate_plan_allowlist(plan, ["pkg/a.py", "tests/test_capas.py", "otro/x.py"])
+    assert not ok and "fuera del techo" in nota
+    assert S.one_file("// src/A.java\nclass A {}\n// src/B.java\nclass B {}\n", "src/B.java").strip() == "class B {}"
+
+
+def test_compile_y_lint_por_comando_para_otros_lenguajes(run, tmp_path):
+    (S.WT / "src").mkdir(parents=True, exist_ok=True)
+    (S.WT / "src" / "A.java").write_text("class A {}\n", encoding="utf-8")
+    S.CFG["compile_cmd"] = "python -c \"import sys; sys.exit(0)\""
+    assert S.gate_compile(["src/A.java"])[0]
+    S.CFG["compile_cmd"] = "python -c \"import sys; sys.exit(1)\""
+    assert not S.gate_compile(["src/A.java"])[0]
+    S.state["plan_files"] = ["src/A.java"]
+    S.CFG["lint_cmd"] = "python -c \"import sys; sys.exit(0)\""
+    assert S.gate_lint()[0] and S.state["lint_new"] == {"lint_cmd": 0}
 
 
 def test_stage_fallida_es_excepcion_con_etapa(run):

@@ -40,8 +40,7 @@ from mmorch.memory import (remember as _remember, stats as _mem_stats,
 from mmorch.curiosity import find_tension as _find_tension
 from mmorch.autoresearch import run_autoresearch as _autoresearch
 from mmorch.classify import classify as _classify, cynefin_classify as _cynefin
-from mmorch.spec import (build_spec as _build_spec, interview as _spec_interview,
-                         perfect as _perfect)
+from mmorch.spec import (build_spec as _build_spec, interview as _spec_interview)
 from mmorch.speedup import speedup as _speedup
 from mmorch.sessions import ingest_session as _ingest_session
 from mmorch.session_skills import (ingest_workflows as _ingest_workflows,
@@ -101,7 +100,7 @@ _PROFILE = os.getenv("MMORCH_MCP_PROFILE", "").strip().lower() or "core"
 #
 # Se quedan en core sin llamadas, a proposito:
 #   canal                              nacio 2026-08-30, no tuvo ventana
-#   build_spec/route/spec_interview    los nombra ~/.claude/skills/perfect
+#   build_spec/route/spec_interview    (la skill /perfect se retiro 2026-09-15: 7 usos en 90 dias; /grill-me la reemplaza)
 _NOT_IN_CORE = frozenset({
     "mmorch_autoresearch", "mmorch_cache_stats",
     "mmorch_cascade", "mmorch_classify", "mmorch_close_loop",
@@ -110,8 +109,7 @@ _NOT_IN_CORE = frozenset({
     "mmorch_find_tension", "mmorch_flag_contradiction", "mmorch_forget_preview",
     "mmorch_ingest_session", "mmorch_intuition", "mmorch_learn",
     "mmorch_memory_stats", "mmorch_metrics_summary", "mmorch_open_loops",
-    "mmorch_orchestra", "mmorch_pending_review", "mmorch_perfect",
-    "mmorch_reinforce", "mmorch_resolve_review", "mmorch_rubric_next",
+    "mmorch_orchestra", "mmorch_pending_review", "mmorch_reinforce", "mmorch_resolve_review", "mmorch_rubric_next",
     "mmorch_rubric_start", "mmorch_rubric_submit", "mmorch_session_playbooks",
     "mmorch_speedup",
 })
@@ -205,7 +203,6 @@ _TOOL_RISK: dict[str, str] = {
     "mmorch_rubric_start": "read",
     "mmorch_rubric_next": "read",
     "mmorch_rubric_submit": "mutate",     # re-ejecuta checkers + registra outcomes
-    "mmorch_perfect": "read",
     "mmorch_speedup": "mutate",           # ejecuta codigo generado (subprocess)
 }
 
@@ -1027,19 +1024,6 @@ def mmorch_rubric_submit(state: dict, output: str) -> str:
     state — chain into mmorch_rubric_next."""
     from mmorch.rubric_loop import submit
     return json.dumps(submit(dict(state), output), ensure_ascii=False)
-
-
-@_tool
-def mmorch_perfect(request: str, n: int = 4) -> str:
-    """Built-in prompt perfectioner (cero cupo, HEADLESS — no human turn): in ONE call it uncovers
-    the GOAL questions (interview) AND builds a cross-family-refuted spec (build_spec). Returns the
-    spec plus merged `open_questions` (interview goal-Qs + the spec's BEYOND_INTENT inferences) that a
-    caller should still DECIDE — never auto-resolved. Honors quarantine/escalate. This is the
-    mmorch-native twin of the interactive /perfect skill (which asks the human the questions); use it
-    for automated callers (Lotus, a workflow pre-sharpening a task, an agent self-sharpening). Returns
-    JSON {spec, open_questions, goal_questions, accepted_inferences, dropped, escalate, quarantined,
-    raw_draft, verifier_model, cost_usd}."""
-    return json.dumps(_perfect(request, n=n), ensure_ascii=False)
 
 
 @_tool

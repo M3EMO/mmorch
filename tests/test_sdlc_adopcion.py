@@ -31,7 +31,7 @@ def test_init_escribe_toml_docs_y_agents_sin_pisar(tmp_path):
     r = S.init(str(repo))
     assert set(r["hecho"]) >= {"sdlc.toml", "AGENTS.md", "docs/sdlc/spec-template.md"}
     toml = S._toml(repo)
-    assert toml["files"] == ["pkg/a.py"] and toml["approve_accept"] is True and toml["accept_cmd"]
+    assert toml["files"] == ["pkg/**/*.py"] and toml["ext"] == ["py"] and toml["approve_accept"] is True and toml["accept_cmd"]
     assert "## SDLC" in (repo / "AGENTS.md").read_text(encoding="utf-8")
     assert S.init(str(repo))["hecho"] == []  # idempotente
 

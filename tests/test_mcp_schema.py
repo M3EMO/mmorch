@@ -25,7 +25,7 @@ assert TOOLS, "el server no registro ninguna tool"
 
 # La tabla congelada de nombres: una tool dropeada/renombrada en un refactor
 # rompe ESTE assert con el diff exacto (actualizarla aca = cambio explicito).
-EXPECTED_TOOL_COUNT = 45   # 2026-09-14: -2 (tournament, bucket_rank) por poda medida
+EXPECTED_TOOL_COUNT = 44   # 2026-09-14: -2 (tournament, bucket_rank) por poda medida
 
 
 def test_cantidad_de_tools_congelada():
