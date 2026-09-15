@@ -52,3 +52,25 @@ def test_clones_no_dependen_del_lenguaje(tmp_path, monkeypatch):
     _wt(tmp_path, monkeypatch, "a.js", JS, "python -c \"pass\"")
     ok, _ = S.gate_clones({"src/a.js": JS, "src/b.js": JS.replace("modulo a", "modulo b")})
     assert not ok
+
+
+def test_suite_cmd_compara_verde_rojo_contra_el_baseline(tmp_path, monkeypatch):
+    """Repo no pytest (Estudio con vitest, ChatBot con maven): la suite total corre `suite_cmd` y compara con HEAD."""
+    import subprocess
+    monkeypatch.setattr(S, "RUNS", tmp_path / "runs")
+    wt = tmp_path / "wt"
+    (wt / "src").mkdir(parents=True)
+    (wt / "src" / "a.js").write_text("const ok = true;\n", encoding="utf-8")
+    (wt / "suite.py").write_text("import sys; sys.exit(0 if 'true' in open('src/a.js').read() else 1)", encoding="utf-8")
+    for c in (["init", "-q"], ["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "b"]):
+        subprocess.run(["git", *c], cwd=wt, check=True)
+    t = types.SimpleNamespace(name="s", task="t", accept_files={})
+    S.configure(t, contract=[], feat={"repo": str(wt), "files": ["src/a.js"], "suite": []}, wt=wt)
+    S.CFG["suite_cmd"] = "python suite.py"
+    S.state.update(plan_files=["src/a.js"], base_sha="HEAD")
+    (wt / "src" / "a.js").write_text("const ok = false;\n", encoding="utf-8")  # el cambio del plan rompe la suite
+    ok, nota = S.gate_suite_total()
+    assert not ok and "ahora rojo" in nota
+    assert (wt / "src" / "a.js").read_text(encoding="utf-8") == "const ok = false;\n"  # el baseline restaura el cambio
+    (wt / "src" / "a.js").write_text("const ok = true;\n", encoding="utf-8")
+    assert S.gate_suite_total()[0]

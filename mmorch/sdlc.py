@@ -296,21 +296,47 @@ def gate_mutacion() -> tuple[bool, str]:
     return rec_gate("mutacion", True, f"mutation score {score} ({killed}/{total})" + ("" if minimo is not None else " (observa: sin mutation_min)"))
 
 
+def _en_base(fn):
+    """Corre fn() con los archivos del plan en su version de HEAD (baseline) y despues los restaura."""
+    keep = {f: (WT / f).read_text(encoding="utf-8") for f in state["plan_files"] if (WT / f).exists()}
+    subprocess.run(["git", "checkout", "HEAD", "--", *keep], cwd=WT, check=True)  # sin stash: la pila es compartida
+    try:
+        return fn()
+    finally:
+        for f, c in keep.items():
+            _write(f, c)
+
+
+def _suite_cmd_total(sha: str) -> tuple[bool, str]:
+    """Otros lenguajes (`suite_cmd` en sdlc.toml): sin nombres de tests, compara verde/rojo contra el baseline."""
+    # ponytail: exit code, no nombres; parsear la salida del runner (vitest, surefire) cuando un baseline rojo lo pida
+    base_file = RUNS / f"suite-baseline-{sha}-cmd.txt"
+    if not base_file.exists():
+        bok, blog = _en_base(lambda: sh(str(CFG["suite_cmd"]), timeout=CFG["suite_timeout_s"], keep=400000))
+        _write("docs/sdlc/suite-baseline.log", blog)
+        if "TIMEOUT" in blog:
+            return rec_gate("suite-total", False, f"baseline: {blog[:200]}")
+        base_file.write_text("verde" if bok else "rojo", encoding="utf-8")
+    ok, log = sh(str(CFG["suite_cmd"]), timeout=CFG["suite_timeout_s"], keep=400000)
+    _write("docs/sdlc/suite.log", log)
+    base_verde = base_file.read_text(encoding="utf-8") == "verde"
+    state["suite_total"] = {"suite_cmd": ok, "baseline_verde": base_verde}
+    if not base_verde:
+        return rec_gate("suite-total", True, "baseline rojo: regresion no medible por exit code (observa)")
+    return rec_gate("suite-total", ok, "sin fallos nuevos" if ok else f"baseline verde y ahora rojo: {log[-300:]}")
+
+
 def gate_suite_total() -> tuple[bool, str]:
     """Regresion total (ticket 13): la suite entera del repo no gana fallos nuevos respecto del baseline.
     mmorch tarda ~20 min y trae 4 rojos previos (medido 2026-09-11): se compara por NOMBRE, no por verde."""
     # D3 r1b: el baseline medido en el arbol principal no vale (tests sin commitear, metadata del paquete).
     # Se mide EN el worktree, sobre el commit base, una vez por sha; se cachea en suite-baseline-<sha>.txt.
     sha = subprocess.run(["git", "rev-parse", "--short", state.get("base_sha", "HEAD~1")], cwd=WT, capture_output=True, text=True).stdout.strip()
+    if CFG.get("suite_cmd"):
+        return _suite_cmd_total(sha)
     base_file = RUNS / f"suite-baseline-{sha}.txt"
     if not base_file.exists():
-        keep = {f: (WT / f).read_text(encoding="utf-8") for f in state["plan_files"] if (WT / f).exists()}
-        subprocess.run(["git", "checkout", "HEAD", "--", *keep], cwd=WT, check=True)  # sin stash: la pila es compartida
-        try:
-            _, blog = sh([PY, "-m", "pytest", *_suite_args("base")], timeout=CFG["suite_timeout_s"], keep=400000)
-        finally:
-            for f, c in keep.items():
-                _write(f, c)
+        _, blog = _en_base(lambda: sh([PY, "-m", "pytest", *_suite_args("base")], timeout=CFG["suite_timeout_s"], keep=400000))
         _write("docs/sdlc/suite-baseline.log", blog)
         if "TIMEOUT" in blog:  # D15: un baseline vacio por timeout se cacheaba y volvia "nuevos" a los rojos previos
             return rec_gate("suite-total", False, f"baseline: {blog[:200]}")
@@ -1305,7 +1331,8 @@ def init(repo: str) -> dict:
             "# sdlc.toml — convencion por repo (ticket 11). `files` es el TECHO (patrones) de lo que el pipeline puede\n"
             "# escribir; un payload solo lo acota. Sin accept_cmd el repo no entra. approve_accept: un humano aprueba\n"
             "# el test de aceptacion que escribe la etapa 1 antes de gastar (ticket 12 D5).\n"
-            "# Otros lenguajes: `ext`, `compile_cmd` (G3 y test-compile), `lint_cmd` ({files} = archivos del plan), `accept_test` (ruta con {slug}).\n"
+            "# Otros lenguajes: `ext`, `compile_cmd` (G3 y test-compile), `lint_cmd` ({files} = archivos del plan),\n"
+            "# `suite_cmd` (suite total si no es pytest), `seed_globs` (ignorados que el worktree necesita), `accept_test` ({slug}).\n"
             'accept_cmd = "python -m pytest -q"\n'
             'suite = ["tests", "-q", "-rfE", "-p", "no:cacheprovider"]\n'
             f"ext = {json.dumps(exts)}\n" + (hints + "\n" if hints else "")
