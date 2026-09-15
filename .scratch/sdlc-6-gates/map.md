@@ -44,6 +44,8 @@ Todos los proyectos del usuario construyen sus features con el mismo pipeline de
 - Retiro del store de bloques cuando ningun lector quede (05 dejo de escribirlo).
 - Hermes como emisor de skills por gate. (El rol de Hermes en la aceptación ya es ticket: 14.)
 
+- Recursos visuales (sprites): ticket 15, espera un juego real.
+
 ## Out of scope
 
 - Dashboard, WhatsApp Cloud API, multi-tenant: viven en el mapa de QueTePario.
