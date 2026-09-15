@@ -313,6 +313,20 @@ async def run_workflow(request):
         if not project or not external_test:
             return JSONResponse({"error": "project-build requires 'project' and 'external_test' "
                                           "(the acceptance command, e.g. 'pytest -q')"}, status_code=400)
+        resume_branch = body.get("resume_branch")
+        from_stage = float(body["from_stage"]) if body.get("from_stage") is not None else None
+        if resume_branch and (from_stage or 0) <= 2:
+            # ticket 08 D2: reanudar tras la etapa 1 EXIGE el veredicto humano del test (cerrado por default)
+            v = body.get("verdict") or {}
+            if v.get("label") not in ("aprobado", "rechazado") or not str(v.get("motivo", "")).strip():
+                return JSONResponse({"error": "resume desde la etapa 2 requiere verdict {label: aprobado|rechazado, motivo}"},
+                                    status_code=400)
+            from .projects import resolve as _resolve
+            from .sdlc import registrar_veredicto
+            registrar_veredicto(_resolve(project), resume_branch, v["label"], str(v["motivo"]).strip(), task)
+            if v["label"] == "rechazado":
+                return JSONResponse({"recorded": "rechazado", "branch": resume_branch,
+                                     "next": "edita el test en la branch y reanuda con label aprobado"})
         jid = _u.uuid4().hex[:10]
         md = int(body.get("max_depth", 2))
         seeds = list(body.get("seed_globs") or [])   # gitignored artifacts the acceptance needs
@@ -325,8 +339,8 @@ async def run_workflow(request):
                                      "max_fix": body.get("max_fix"),
                                      # ticket 05: files acota el techo de sdlc.toml; resume = branch + etapa
                                      "files": body.get("files"),
-                                     "from_stage": float(body["from_stage"]) if body.get("from_stage") is not None else None,  # None = etapa 1 si no hay tests
-                                     "resume_branch": body.get("resume_branch")}, daemon=True)
+                                     "from_stage": from_stage,  # None = etapa 1 si no hay tests
+                                     "resume_branch": resume_branch}, daemon=True)
         t.start()
         return JSONResponse({"started": "project-build", "job_id": jid, "project": project,
                              "external_test": external_test, "seed_globs": seeds})

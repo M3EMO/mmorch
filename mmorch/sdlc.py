@@ -192,6 +192,39 @@ def _suite_args(tag: str) -> list[str]:
     return [f"{a}-{stamp}" if "pyt-sdlc" in a else a for a in (FEAT or {}).get("suite", [])]
 
 
+def gate_mutacion() -> tuple[bool, str]:
+    """Ticket 08 D2 (opcion D): el test de aceptacion mata mutantes del codigo final. Score = muertos / total sobre los
+    archivos del plan (mutantes de checkers._mutants: operadores, comparaciones, booleanos, enteros). Bloquea SOLO con
+    `mutation_min` en sdlc.toml; sin numero medido, observa y deja state["mutation_score"]."""
+    from .checkers import _mutants
+    if not TASK.accept_files:
+        return rec_gate("mutacion", True, "sin tests nombrados: sin mutacion")
+    killed = total = 0
+    for f in state.get("plan_files", []):
+        p = WT / f
+        if not f.endswith(".py") or not p.exists():
+            continue
+        orig = p.read_text(encoding="utf-8")
+        for m in _mutants(orig, max_n=8):
+            total += 1
+            p.write_text(m, encoding="utf-8")
+            try:
+                ok, _ = sh([PY, "-m", "pytest", *_accept_paths(), "-q", "-x", "-p", "no:cacheprovider"])
+            finally:
+                p.write_text(orig, encoding="utf-8")
+            if not ok:
+                killed += 1
+    if not total:
+        state["mutation_score"] = None
+        return rec_gate("mutacion", True, "sin mutantes posibles")
+    score = round(killed / total, 3)
+    state["mutation_score"] = score
+    minimo = CFG.get("mutation_min")
+    if minimo is not None and score < float(minimo):
+        return rec_gate("mutacion", False, f"mutation score {score} < {minimo} ({killed}/{total})")
+    return rec_gate("mutacion", True, f"mutation score {score} ({killed}/{total})" + ("" if minimo is not None else " (observa: sin mutation_min)"))
+
+
 def gate_suite_total() -> tuple[bool, str]:
     """Regresion total (ticket 13): la suite entera del repo no gana fallos nuevos respecto del baseline.
     mmorch tarda ~20 min y trae 4 rojos previos (medido 2026-09-11): se compara por NOMBRE, no por verde."""
@@ -870,6 +903,9 @@ def test():
                 if not (cok and lok):
                     write_supervision(f"ESCALATE_HUMAN: lint nuevo tras coder y Claude\n{lnote}")
                     return False, f"lint: {lnote[:200]}"
+        mok, mnote = gate_mutacion()
+        if not mok:
+            return False, f"mutacion: {mnote}"
         sok, snote = gate_suite_total()
         if not sok and state.get("suite_total", {}).get("new_failures"):
             # D11: la regresion de suite iba directo a humano; ahora sigue la escalera (coder -> Claude -> humano)
@@ -940,7 +976,6 @@ def pr():
     rows = [l.split("\t") for l in ns.splitlines() if l.count("\t") == 2 and l.split("\t")[0].isdigit()]
     state["lines"] = {"added": sum(int(a) for a, _, _ in rows), "deleted": sum(int(d) for _, d, _ in rows)}
     gate_lint()
-    state["mutation_score"] = None  # ponytail: mutmut queda para el ticket 13
     return True, state["diffstat"]
 
 
@@ -1000,6 +1035,13 @@ def _run_stages(from_stage: float) -> dict:
             subprocess.run(["git", "add", "-A"], cwd=WT, check=True)
             subprocess.run(["git", "-c", "user.name=mmorch", "-c", "user.email=mmorch@local", "commit", "-q", "-m", "base"], cwd=WT)
         print("materializado", WT, flush=True)
+    if not TASK.accept_files and LOG.exists():  # resume tras awaiting_approval: el test ya vive en la branch
+        try:
+            rel = json.loads(LOG.read_text(encoding="utf-8")).get("awaiting_approval")
+            if rel and (WT / rel).exists():
+                TASK.accept_files[rel] = (WT / rel).read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            pass
     _seed_accept()  # tambien sobre un worktree abierto por el server: el test de aceptacion entra commiteado
     state["base_sha"] = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=WT, capture_output=True, text=True).stdout.strip() \
         if from_stage <= 3 else "HEAD~1"  # en resume no se conoce: HEAD~1 como antes
@@ -1087,6 +1129,25 @@ def _files_from_toml(repo: str) -> list[str]:
     if not files:
         raise ValueError(f"{p} no declara `files`")
     return list(files)
+
+
+def registrar_veredicto(repo: str, branch: str, label: str, motivo: str, task: str = "") -> dict:
+    """Ticket 08 D1/D2: cada aprobacion o rechazo del test de aceptacion deja un ejemplo etiquetado (test completo,
+    etiqueta, motivo) en logs/sdlc/veredictos.jsonl. El test se lee de la branch (docs/sdlc/run-log.json -> rel)."""
+    def _show(rel):
+        r = subprocess.run(["git", "-C", repo, "show", f"{branch}:{rel}"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        return r.stdout if r.returncode == 0 else ""
+    rel = ""
+    try:
+        rel = json.loads(_show("docs/sdlc/run-log.json") or "{}").get("awaiting_approval") or ""
+    except ValueError:
+        rel = ""
+    rec = {"ts": time.time(), "repo": repo, "branch": branch, "test_rel": rel, "test": _show(rel) if rel else "",
+           "label": label, "motivo": motivo, "task": task}
+    RUNS.mkdir(parents=True, exist_ok=True)
+    with (RUNS / "veredictos.jsonl").open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return rec
 
 
 def init(repo: str) -> dict:

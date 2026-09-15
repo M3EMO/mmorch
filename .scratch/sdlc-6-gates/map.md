@@ -33,10 +33,12 @@ Todos los proyectos del usuario construyen sus features con el mismo pipeline de
 
 - [Integracion al engine](issues/05-integracion-al-engine.md) — `mmorch/sdlc.py` + `build_feature` reemplaza a `project_integrate.build_project` (2 consumidores reales: server_engine, workflow_race); allowlist = techo en `sdlc.toml`, payload solo acota; retiro en 4 pasos con test; `/project` conserva el nombre; la etapa es el checkpoint.
 
+- [Lo subjetivo baja a sintetizado](issues/08-lo-subjetivo-baja-a-sintetizado.md) — veredicto = test + etiqueta + motivo, capturado en el resume (obligatorio); mutation score como gate ejecutable de la etapa 5; checker sintetizado en sombra hasta kappa 0.6; humano en los bordes (A+E+D de la research).
+
 ## Not yet specified
 
 - Intent y PR: sin `GATE-N.md` a propósito (Q16b). No se inventa oráculo.
-- Cómo un candidato de `supervision.md` se etiqueta 3+1 cuando no hay oráculo: ticket 08.
+- Sintetizar y medir (kappa) el checker de aceptacion cuando `logs/sdlc/veredictos.jsonl` tenga >= 6 veredictos (08 fijo el protocolo, no hay datos aun).
 - Retiro del store de bloques cuando ningun lector quede (05 dejo de escribirlo).
 - Hermes como emisor de skills por gate. (El rol de Hermes en la aceptación ya es ticket: 14.)
 
