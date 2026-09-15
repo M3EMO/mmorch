@@ -1,0 +1,3 @@
+materializado C:\Users\map12\AppData\Local\Temp\sdlc-runs\D11-diag
+[2-spec] ok=True G1 + trazabilidad-spec ok (1 llamadas, 0.4 min)
+[2b-spec-review] ok=False 0 preguntas validas (esperado 1..5) (0 llamadas, 1.4 min)

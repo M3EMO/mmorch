@@ -1,0 +1,5 @@
+FAILED tests/test_paths.py::test_gate_sin_anclas_de_estado_fuera_de_paths
+FAILED tests/test_sdlc_d14_schedule_effort_providers.py::test_R1_effort_elige_el_modelo
+FAILED tests/test_sdlc_d14_schedule_effort_providers.py::test_R3_off_peak_en_el_ledger
+FAILED tests/test_sdlc_d14_schedule_effort_providers.py::test_R3b_off_peak_tambien_en_error
+FAILED tests/test_w6_ronda3.py::test_mcp_server_reporta_version_de_mmorch

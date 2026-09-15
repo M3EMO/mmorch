@@ -1,0 +1,6 @@
+materializado C:\Users\map12\AppData\Local\Temp\sdlc-runs\D11-r1
+[2-spec] ok=True G1 + trazabilidad-spec ok (1 llamadas, 0.3 min)
+[2b-spec-review] ok=True 3 IDs cubiertos (0 llamadas, 0.8 min)
+[3-plan] ok=True ok (1 llamadas, 0.1 min)
+[4-build] ok=True G3 + test-compile + docstring ok (3 llamadas, 2.5 min)
+[5-test] ok=False suite total: fallos nuevos: ['tests/test_executor_seam.py::test_coder_loop_escalates_through_fake_executor', 'tests/test_executor_seam.py::test_coder_loop_fake_executor_failure_propagates', 'tests/test_project_loo (2 llamadas, 11.7 min)

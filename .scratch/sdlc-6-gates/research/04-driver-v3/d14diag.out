@@ -1,0 +1,4 @@
+materializado C:\Users\map12\AppData\Local\Temp\sdlc-runs\D14-diag
+[2-spec] ok=True G1 + trazabilidad-spec ok (1 llamadas, 0.6 min)
+[2b-spec-review] ok=True 3 IDs cubiertos (0 llamadas, 0.4 min)
+[3-plan] ok=False plan lista tests/ como archivo a escribir (2 llamadas, 0.2 min)

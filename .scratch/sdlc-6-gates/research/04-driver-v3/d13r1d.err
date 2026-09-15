@@ -1,0 +1,18 @@
+Traceback (most recent call last):
+  File "C:\Users\map12\.claude\orchestration\.scratch\sdlc-6-gates\research\04-driver-v3\driver_py.py", line 1125, in <module>
+    stages[k]()
+  File "C:\Users\map12\.claude\orchestration\.scratch\sdlc-6-gates\research\04-driver-v3\driver_py.py", line 331, in run
+    ok, note = fn()
+               ^^^^
+  File "C:\Users\map12\.claude\orchestration\.scratch\sdlc-6-gates\research\04-driver-v3\driver_py.py", line 964, in test
+    ok, ladder_note = reasoner_rounds(log)
+                      ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\map12\.claude\orchestration\.scratch\sdlc-6-gates\research\04-driver-v3\driver_py.py", line 671, in reasoner_rounds
+    pick = llm(WRITER, 'Sos un diagnosticador. Respondes SOLO JSON: {"files": [paths], "instructions": {path: "una instruccion"}}. Una instruccion por archivo.',
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\map12\.claude\orchestration\.scratch\sdlc-6-gates\research\04-driver-v3\driver_py.py", line 309, in llm
+    r = call(model, [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\map12\.claude\orchestration\mmorch\providers.py", line 394, in call
+    raise RuntimeError(
+RuntimeError: deepseek-reasoner: respuesta vacia — el budget de tokens se agoto en reasoning (finish_reason=length, max_tokens=32768); subir max_tokens

@@ -1,0 +1,5 @@
+FAILED tests/test_capas.py::test_R3_la_lista_solo_achica
+FAILED tests/test_paths.py::test_gate_sin_anclas_de_estado_fuera_de_paths
+FAILED tests/test_sdlc_d11_codegraph_hermetico.py::test_R1_sin_indice_previo_no_indexa_sin_opt_in
+FAILED tests/test_sdlc_d11_codegraph_hermetico.py::test_R2_con_opt_in_pero_repo_temporal_no_indexa
+FAILED tests/test_w6_ronda3.py::test_mcp_server_reporta_version_de_mmorch

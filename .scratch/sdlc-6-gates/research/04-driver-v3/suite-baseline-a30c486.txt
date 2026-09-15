@@ -1,0 +1,6 @@
+FAILED tests/test_capas.py::test_R2_no_hay_modulos_nuevos_sin_alcanzar
+FAILED tests/test_paths.py::test_gate_sin_anclas_de_estado_fuera_de_paths
+FAILED tests/test_sdlc_d13_code_embedder_recall.py::test_R1_pesos_no_verificados_apagan_el_encoder
+FAILED tests/test_sdlc_d13_code_embedder_recall.py::test_R2_nota_de_codigo_usa_code_embedder
+FAILED tests/test_sdlc_d13_code_embedder_recall.py::test_R3_recall_de_codigo_solo_compara_con_codigo
+FAILED tests/test_w6_ronda3.py::test_mcp_server_reporta_version_de_mmorch

@@ -1,0 +1,6 @@
+FAILED tests/test_paths.py::test_gate_sin_anclas_de_estado_fuera_de_paths
+FAILED tests/test_sdlc_d12_megasource_nightly.py::test_R1_reciente_no_corre
+FAILED tests/test_sdlc_d12_megasource_nightly.py::test_R2_vencido_propone_y_guarda_estado
+FAILED tests/test_sdlc_d12_megasource_nightly.py::test_R3_sin_estado_previo_corre
+FAILED tests/test_sdlc_d12_megasource_nightly.py::test_R4_propose_que_levanta_no_rompe_ni_avanza_estado
+FAILED tests/test_w6_ronda3.py::test_mcp_server_reporta_version_de_mmorch

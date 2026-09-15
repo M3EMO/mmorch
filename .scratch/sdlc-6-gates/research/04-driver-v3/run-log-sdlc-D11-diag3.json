@@ -1,0 +1,246 @@
+{
+ "proto": "driver_py",
+ "task": "D11",
+ "stages": [
+  {
+   "stage": "2-spec",
+   "ok": true,
+   "minutes": 0.4,
+   "calls": 1,
+   "note": "G1 + trazabilidad-spec ok"
+  },
+  {
+   "stage": "2b-spec-review",
+   "ok": true,
+   "minutes": 3.66,
+   "calls": 0,
+   "note": "3 IDs cubiertos"
+  },
+  {
+   "stage": "3-plan",
+   "ok": true,
+   "minutes": 0.08,
+   "calls": 1,
+   "note": "ok"
+  },
+  {
+   "stage": "4-build",
+   "ok": true,
+   "minutes": 0.97,
+   "calls": 1,
+   "note": "G3 + test-compile + docstring ok"
+  },
+  {
+   "stage": "5-test",
+   "ok": true,
+   "minutes": 8.85,
+   "calls": 0,
+   "note": "G4 + suite ok (0 vueltas )"
+  },
+  {
+   "stage": "5b-review",
+   "ok": true,
+   "minutes": 2.55,
+   "calls": 0,
+   "note": "sin test nuevo: Sin defecto real. Los 3 tests de aceptación pasan. El diff cumple R1, R2 y R3 de la spec.\n\nOK"
+  },
+  {
+   "stage": "6-pr",
+   "ok": true,
+   "minutes": 0.38,
+   "calls": 0,
+   "note": " 9 files changed, 692 insertions(+), 6 deletions(-)"
+  }
+ ],
+ "gates": [
+  {
+   "id": "trazabilidad-spec",
+   "ok": true,
+   "detail": "3 IDs cubiertos",
+   "calls": 1
+  },
+  {
+   "id": "G1-spec-contrato",
+   "ok": true,
+   "detail": "contrato cubierto, sin TBD, IDs trazados",
+   "calls": 1
+  },
+  {
+   "id": "spec-review-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 1
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 1
+  },
+  {
+   "id": "spec-review",
+   "ok": false,
+   "detail": "0 preguntas validas (esperado 1..5)",
+   "calls": 1
+  },
+  {
+   "id": "spec-review-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 1
+  },
+  {
+   "id": "spec-review",
+   "ok": true,
+   "detail": "1 preguntas respondidas",
+   "calls": 1
+  },
+  {
+   "id": "trazabilidad-spec",
+   "ok": true,
+   "detail": "3 IDs cubiertos",
+   "calls": 1
+  },
+  {
+   "id": "plan-allowlist",
+   "ok": true,
+   "detail": "['mmorch/project_loop.py']",
+   "calls": 2
+  },
+  {
+   "id": "trazabilidad-plan",
+   "ok": true,
+   "detail": "ok",
+   "calls": 2
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 3
+  },
+  {
+   "id": "test-compile",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "sin-clones",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "cambio-minimo",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "docstring-intacto",
+   "ok": true,
+   "detail": "la tarea lo cubre",
+   "calls": 3
+  },
+  {
+   "id": "lint",
+   "ok": true,
+   "detail": "0/0",
+   "calls": 3
+  },
+  {
+   "id": "suite-total",
+   "ok": true,
+   "detail": "sin fallos nuevos",
+   "calls": 3
+  },
+  {
+   "id": "G4-aceptacion",
+   "ok": true,
+   "detail": "verde en 0 vueltas  + lint + suite total",
+   "calls": 3
+  },
+  {
+   "id": "diff-review-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "claude-diff-review",
+   "ok": true,
+   "detail": "sin test nuevo: Sin defecto real. Los 3 tests de aceptación pasan. El diff cumple R1, R2 y R3 de la spec.\n\nOK",
+   "calls": 3
+  },
+  {
+   "id": "lint",
+   "ok": true,
+   "detail": "0/0",
+   "calls": 3
+  }
+ ],
+ "calls": 3,
+ "human_interventions": 0,
+ "claude_calls": 3,
+ "gate_rejects": [
+  {
+   "gate": "spec-review",
+   "detail": "0 preguntas validas (esperado 1..5)"
+  }
+ ],
+ "escalated_to_claude": false,
+ "base_sha": "b7585dd",
+ "t0": "2026-09-15 02:13:05",
+ "t0_epoch": 1789449185.449894,
+ "usd_by_family": {
+  "deepseek": 0.0306
+ },
+ "plan_files": [
+  "mmorch/project_loop.py"
+ ],
+ "plan_parallel": [
+  "mmorch/project_loop.py"
+ ],
+ "test_rounds": [
+  {
+   "round": 0,
+   "tests": {
+    "run": 3,
+    "failed": 0
+   }
+  }
+ ],
+ "stall": 0,
+ "test_fix_rounds": 0,
+ "lint_new": {
+  "ruff": 0,
+  "mypy": 0
+ },
+ "suite_total": {
+  "run": 1161,
+  "failed": 2,
+  "new_failures": [],
+  "baseline_failures": 4
+ },
+ "diffstat": " 9 files changed, 692 insertions(+), 6 deletions(-)",
+ "lines": {
+  "added": 28,
+  "deleted": 6
+ },
+ "mutation_score": null,
+ "minutes_total": 16.88,
+ "usd": 0.0306
+}

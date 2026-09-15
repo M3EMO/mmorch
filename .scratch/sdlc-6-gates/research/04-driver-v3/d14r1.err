@@ -1,0 +1,19 @@
+All checks passed!
+Success: no issues found in 123 source files
+catalogo+README actualizados: bloques ['modules', 'tools', 'stats'] | {'modules': 120, 'tools': 45, 'tests': 865, 'tools_expuestas': 15}
+Traceback (most recent call last):
+  File "C:\Users\map12\.claude\orchestration\.scratch\sdlc-6-gates\research\04-driver-v3\driver_py.py", line 1104, in <module>
+    stages[k]()
+  File "C:\Users\map12\.claude\orchestration\.scratch\sdlc-6-gates\research\04-driver-v3\driver_py.py", line 314, in run
+    ok, note = fn()
+               ^^^^
+  File "C:\Users\map12\.claude\orchestration\.scratch\sdlc-6-gates\research\04-driver-v3\driver_py.py", line 750, in spec
+    out = llm(WRITER, "Sos un ingeniero de software. Escribis specs precisas en markdown, sin relleno.", ask)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\map12\.claude\orchestration\.scratch\sdlc-6-gates\research\04-driver-v3\driver_py.py", line 292, in llm
+    r = call(model, [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\map12\.claude\orchestration\mmorch\providers.py", line 357, in call
+    text = resp.choices[0].message.content or ""
+           ~~~~~~~~~~~~^^^
+TypeError: 'NoneType' object is not subscriptable

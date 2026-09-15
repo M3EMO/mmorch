@@ -1,0 +1,7 @@
+fatal: a branch named 'sdlc/sdlc-D13-r1' already exists
+Traceback (most recent call last):
+  File "C:\Users\map12\.claude\orchestration\.scratch\sdlc-6-gates\research\04-driver-v3\driver_py.py", line 1092, in <module>
+    subprocess.run(["git", "-C", FEAT["repo"], "worktree", "add", "-q", "-b", f"sdlc/{PHASE}", str(WT), "HEAD"], check=True)
+  File "C:\Users\map12\AppData\Local\Programs\Python\Python312\Lib\subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', '-C', 'C:\\Users\\map12\\.claude\\orchestration', 'worktree', 'add', '-q', '-b', 'sdlc/sdlc-D13-r1', 'C:\\Users\\map12\\AppData\\Local\\Temp\\sdlc-runs\\D13-r1b', 'HEAD']' returned non-zero exit status 255.

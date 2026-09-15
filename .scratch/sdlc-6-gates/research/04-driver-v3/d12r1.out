@@ -1,0 +1,11 @@
+materializado C:\Users\map12\AppData\Local\Temp\sdlc-runs\D12-r1
+[2-spec] ok=True G1 + trazabilidad-spec ok (1 llamadas, 0.5 min)
+[2b-spec-review] ok=True 4 IDs cubiertos (0 llamadas, 1.0 min)
+[3-plan] ok=True ok (1 llamadas, 0.1 min)
+[4-build] ok=True G3 + test-compile + docstring ok (1 llamadas, 1.4 min)
+[5-test] ok=True G4 + suite ok (0 vueltas) (1 llamadas, 14.4 min)
+[5b-review] ok=True sin test nuevo: Corrección de esa oración (23 palabras → dos oraciones):
+
+Probé las 4 ramas R1-R4. También probé el límite de 30 días ex (0 llamadas, 7.7 min)
+[6-pr] ok=True  9 files changed, 789 insertions(+) (0 llamadas, 0.6 min)
+DRIVER_PY TERMINO {"task": "D12", "calls": 4, "minutes_total": 25.67, "usd": 0.1273, "usd_by_family": {"deepseek": 0.1273}, "human_interventions": 0, "claude_calls": 2, "review_block": null, "escalated_to_claude": false, "gate_rejects": [{"gate": "suite-total", "detail": "fallos nuevos: ['tests/test_capas.py::test_R1_el_engine_no_importa_modulos_no_alcanzados', 'tests/test_capas.py::test_R3_la_lista_solo_achica']"}], "diffstat": " 9 files changed, 789 insertions(+)", "lines": {"added": 78, "deleted": 0}, "suite_total": {"run": 1091, "failed": 2, "new_failures": [], "baseline_failures": 6}, "lint_new": {"ruff": 0, "mypy": 0}}

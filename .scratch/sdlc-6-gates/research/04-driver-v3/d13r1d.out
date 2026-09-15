@@ -1,0 +1,4 @@
+[2-spec] ok=True G1 + trazabilidad-spec ok (1 llamadas, 0.7 min)
+[2b-spec-review] ok=True 4 IDs cubiertos (0 llamadas, 5.0 min)
+[3-plan] ok=True ok (1 llamadas, 0.1 min)
+[4-build] ok=True G3 + test-compile + docstring ok (2 llamadas, 2.8 min)

@@ -1,0 +1,5 @@
+materializado C:\Users\map12\AppData\Local\Temp\sdlc-runs\D11-diag2
+[2-spec] ok=True G1 + trazabilidad-spec ok (1 llamadas, 0.2 min)
+[2b-spec-review] ok=True 3 IDs cubiertos (0 llamadas, 1.1 min)
+[3-plan] ok=True ok (1 llamadas, 0.0 min)
+[4-build] ok=False cambio-minimo: mmorch/project_loop.py: 207 de 207 lineas originales desaparecieron (5 llamadas, 4.1 min)

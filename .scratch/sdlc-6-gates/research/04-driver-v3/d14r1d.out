@@ -1,0 +1,9 @@
+[2-spec] ok=True G1 + trazabilidad-spec ok (1 llamadas, 0.7 min)
+[2b-spec-review] ok=True 3 IDs cubiertos (0 llamadas, 4.1 min)
+[3-plan] ok=True ok (1 llamadas, 0.1 min)
+[4-build] ok=True G3 + test-compile + docstring ok (1 llamadas, 1.6 min)
+[5-test] ok=True G4 + suite ok (0 vueltas ) (1 llamadas, 18.2 min)
+[5b-review] ok=True bloqueo con evidencia (0 llamadas, 2.2 min)
+[5-test] ok=True G4 + suite ok (2 vueltas reasoner 1 verde) (8 llamadas, 21.6 min)
+[6-pr] ok=True  12 files changed, 901 insertions(+), 22 deletions(-) (0 llamadas, 0.4 min)
+DRIVER_PY TERMINO {"task": "D14", "calls": 12, "minutes_total": 48.97, "usd": 0.3525, "usd_by_family": {"deepseek": 0.3525}, "human_interventions": 0, "claude_calls": 2, "review_block": true, "escalated_to_claude": false, "gate_rejects": [{"gate": "suite-total", "detail": "fallos nuevos: ['tests/test_capas.py::test_R1_el_engine_no_importa_modulos_no_alcanzados', 'tests/test_capas.py::test_R3_la_lista_solo_achica']"}, {"gate": "claude-diff-review", "detail": "test_review falla: vuelve a build. BLOCK: R3 rompe el ledger real. `call` pasa `extra={\"off_peak\": ...}` a `log_event`. `log_event` ya junta kwargs sueltos"}, {"gate": "regresion-unidad", "detail": "['mmorch/providers.py'] rompio 1 test(s) que pasaban"}, {"gate": "avance", "detail": "stall=2 novedad=0.0: escala a reasoner"}, {"gate": "lint", "detail": "mmorch\\providers.py:9:8: F401 [*] `importlib` imported but unused\nFound 1 error.\n[*] 1 fixable with the `--fix` option.\n\nSuccess: no issues found in 1 source file\n"}, {"gate": "suite-total", "detail": "fallos nuevos: ['tests/test_capas.py::test_R1_el_engine_no_importa_modulos_no_alcanzados', 'tests/test_capas.py::test_R3_la_lista_solo_achica']"}], "diffstat": " 12 files changed, 901 insertions(+), 22 deletions(-)", "lines": {"added": 45, "deleted": 20}, "suite_total": {"run": 1092, "failed": 2, "new_failures": [], "baseline_failures": 5}, "lint_new": {"ruff": 0, "mypy": 0}}

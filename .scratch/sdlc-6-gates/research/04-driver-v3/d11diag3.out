@@ -1,0 +1,11 @@
+materializado C:\Users\map12\AppData\Local\Temp\sdlc-runs\D11-diag3
+[2-spec] ok=True G1 + trazabilidad-spec ok (1 llamadas, 0.4 min)
+[2b-spec-review] ok=True 3 IDs cubiertos (0 llamadas, 3.7 min)
+[3-plan] ok=True ok (1 llamadas, 0.1 min)
+[4-build] ok=True G3 + test-compile + docstring ok (1 llamadas, 1.0 min)
+[5-test] ok=True G4 + suite ok (0 vueltas ) (0 llamadas, 8.8 min)
+[5b-review] ok=True sin test nuevo: Sin defecto real. Los 3 tests de aceptación pasan. El diff cumple R1, R2 y R3 de la spec.
+
+OK (0 llamadas, 2.5 min)
+[6-pr] ok=True  9 files changed, 692 insertions(+), 6 deletions(-) (0 llamadas, 0.4 min)
+DRIVER_PY TERMINO {"task": "D11", "calls": 3, "minutes_total": 16.88, "usd": 0.0306, "usd_by_family": {"deepseek": 0.0306}, "human_interventions": 0, "claude_calls": 3, "review_block": null, "escalated_to_claude": false, "gate_rejects": [{"gate": "spec-review", "detail": "0 preguntas validas (esperado 1..5)"}], "diffstat": " 9 files changed, 692 insertions(+), 6 deletions(-)", "lines": {"added": 28, "deleted": 6}, "suite_total": {"run": 1161, "failed": 2, "new_failures": [], "baseline_failures": 4}, "lint_new": {"ruff": 0, "mypy": 0}}

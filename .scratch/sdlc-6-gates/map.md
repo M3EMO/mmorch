@@ -31,12 +31,13 @@ Todos los proyectos del usuario construyen sus features con el mismo pipeline de
 - [Protocolo de comparación](issues/07-protocolo-de-comparacion.md) — 2 brazos (v3 control, v3+Claude fijo producto); repeticiones 1 grande / 3 chicas / held-out x1, cache de worklist apagada; 9 métricas computables; Claude bloquea solo con test que falla; gana = 5/6 + mediana < US$1 + 0 humanos antes del nivel 4; topes por avance (fallos no bajan 2 vueltas, novedad del diff < 10%) + US$3 de fondo, reloj solo por comando.
 - [Convención por repo](issues/11-convencion-por-repo.md) — `sdlc.toml` + `accept_cmd` o no entra; scaffold con 4 fichas A/B; intent/PR sin gate; `contract_version` fail-closed. Plantillas desde spec-kit: spec-template, `spec-review.md` desde `clarify`, marca `[P]` (2026-09-11).
 
+- [Integracion al engine](issues/05-integracion-al-engine.md) — `mmorch/sdlc.py` + `build_feature` reemplaza a `project_integrate.build_project` (2 consumidores reales: server_engine, workflow_race); allowlist = techo en `sdlc.toml`, payload solo acota; retiro en 4 pasos con test; `/project` conserva el nombre; la etapa es el checkpoint.
+
 ## Not yet specified
 
 - Intent y PR: sin `GATE-N.md` a propósito (Q16b). No se inventa oráculo.
 - Cómo un candidato de `supervision.md` se etiqueta 3+1 cuando no hay oráculo: ticket 08.
-- Cuándo y cómo se retira el engine viejo (`project_driver` / `project_integrate`). Depende de 05.
-- Observabilidad opcional en Lotus. Depende de 05. Baja prioridad.
+- Retiro del store de bloques cuando ningun lector quede (05 dejo de escribirlo).
 - Hermes como canal del nivel humano (gateway Telegram/WhatsApp) y como emisor de skills por gate. Sin ticket hasta que haga falta.
 
 ## Out of scope

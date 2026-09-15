@@ -1,0 +1,4 @@
+FAILED tests/test_paths.py::test_gate_sin_anclas_de_estado_fuera_de_paths
+FAILED tests/test_sdlc_d15_providers_respuesta_vacia.py::test_R1_R2_sin_choices_es_runtime_error_registrado[None]
+FAILED tests/test_sdlc_d15_providers_respuesta_vacia.py::test_R1_R2_sin_choices_es_runtime_error_registrado[choices1]
+FAILED tests/test_w6_ronda3.py::test_mcp_server_reporta_version_de_mmorch

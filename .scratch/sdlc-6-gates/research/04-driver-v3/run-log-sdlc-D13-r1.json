@@ -1,0 +1,126 @@
+{
+ "proto": "driver_py",
+ "task": "D13",
+ "stages": [
+  {
+   "stage": "5-test",
+   "ok": true,
+   "minutes": 10.31,
+   "calls": 1,
+   "note": "G4 + suite ok (0 vueltas )"
+  },
+  {
+   "stage": "5b-review",
+   "ok": true,
+   "minutes": 5.79,
+   "calls": 0,
+   "note": "sin test nuevo: No encontré un defecto real demostrable con un test que no rompa ya la suite existente. Los 4 tests de aceptación (R1-R4"
+  },
+  {
+   "stage": "6-pr",
+   "ok": true,
+   "minutes": 0.42,
+   "calls": 0,
+   "note": " 12 files changed, 685 insertions(+), 51 deletions(-)"
+  }
+ ],
+ "gates": [
+  {
+   "id": "lint",
+   "ok": false,
+   "detail": "mmorch\\code_embedder.py:19:20: F401 [*] `.paths.home` imported but unused\nFound 1 error.\n[*] 1 fixable with the `--fix` option.\n\nmmorch\\code_embedder.py:42: error: Value of type \"dict[Any, Any] | None\" is not indexable  [index]\nFound 1 error in 1 file (checked 2 source files)\n",
+   "calls": 0
+  },
+  {
+   "id": "lint",
+   "ok": true,
+   "detail": "0/0",
+   "calls": 1
+  },
+  {
+   "id": "suite-total",
+   "ok": true,
+   "detail": "sin fallos nuevos",
+   "calls": 1
+  },
+  {
+   "id": "G4-aceptacion",
+   "ok": true,
+   "detail": "verde en 0 vueltas  + lint + suite total",
+   "calls": 1
+  },
+  {
+   "id": "diff-review-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 1
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 1
+  },
+  {
+   "id": "claude-diff-review",
+   "ok": true,
+   "detail": "sin test nuevo: No encontré un defecto real demostrable con un test que no rompa ya la suite existente. Los 4 tests de aceptación (R1-R4",
+   "calls": 1
+  },
+  {
+   "id": "lint",
+   "ok": true,
+   "detail": "0/0",
+   "calls": 1
+  }
+ ],
+ "calls": 1,
+ "human_interventions": 0,
+ "claude_calls": 1,
+ "gate_rejects": [
+  {
+   "gate": "lint",
+   "detail": "mmorch\\code_embedder.py:19:20: F401 [*] `.paths.home` imported but unused\nFound 1 error.\n[*] 1 fixable with the `--fix` option.\n\nmmorch\\code_embedder.py:42: error: Value of type \"dict[Any, Any] | None\" is not indexable  [index]\nFound 1 error in 1 file (checked 2 source files)\n"
+  }
+ ],
+ "escalated_to_claude": false,
+ "base_sha": "HEAD~1",
+ "t0": "2026-09-14 23:16:52",
+ "t0_epoch": 1789438612.7606003,
+ "plan_files": [
+  "mmorch/code_embedder.py",
+  "mmorch/memory.py"
+ ],
+ "test_rounds": [
+  {
+   "round": 0,
+   "tests": {
+    "run": 4,
+    "failed": 0
+   }
+  }
+ ],
+ "stall": 0,
+ "test_fix_rounds": 0,
+ "lint_new": {
+  "ruff": 0,
+  "mypy": 0
+ },
+ "usd_by_family": {
+  "deepseek": 0.0316
+ },
+ "suite_total": {
+  "run": 1091,
+  "failed": 2,
+  "new_failures": [],
+  "baseline_failures": 6
+ },
+ "diffstat": " 12 files changed, 685 insertions(+), 51 deletions(-)",
+ "lines": {
+  "added": 95,
+  "deleted": 47
+ },
+ "mutation_score": null,
+ "minutes_total": 16.52,
+ "usd": 0.0316
+}

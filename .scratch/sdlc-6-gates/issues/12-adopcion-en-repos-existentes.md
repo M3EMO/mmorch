@@ -1,7 +1,7 @@
 # Adopción en los repos existentes
 Type: task
 Status: open
-Blocked by: 05, 11
+Blocked by: (05 y 11 cerrados) — desbloqueado 2026-09-15
 Map: ../map.md
 
 ## Question
