@@ -17,6 +17,8 @@ Todos los proyectos del usuario construyen sus features con el mismo pipeline de
 
 ## Decisions so far
 
+- Embudo wayfinder -> SDLC (usuario aprueba 2026-09-15): cada decision ejecutable de un mapa se vuelve una ficha `docs/sdlc/features/<id>.md` (tarea, archivos permitidos, ruta del test); el test de aceptacion se escribe con `/grill-me` junto al humano (modo grill de la etapa 1) y el veredicto humano tambien sale de un grilling, no de un click ciego; `/project` lee la ficha y lanza la corrida. Se aplica al cerrar el ticket 14.
+
 <!-- una línea por ticket resuelto: gist + link -->
 
 - [Features de validación](issues/06-features-de-validacion.md) — 3 del bench congelado (lru-ttl-cache held-out, rate-limiter control 0/3, etl-pipeline interfaces) + 2 de dogfood en mmorch (gen_model en la recursión; gate test-compile en el engine). El ChatBot queda fuera: es otro proyecto con su propio mapa.
