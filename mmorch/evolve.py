@@ -240,9 +240,14 @@ def _count(text: str, pat: str) -> int:
 # puede aflojarlos para pasar. Por eso mmorch/evolve.py (contiene _RED_PATHS y zone_of)
 # está acá adentro: la lista se protege a sí misma.
 _RED_PATHS = ("GOAL.md", "GOAL.hash", ".env", "mmorch/goal.py", "mmorch/budget.py",
-              "mmorch/config.py", "mmorch/evolve.py", "scripts/gates.py",
+              "mmorch/config.py", "mmorch/evolve.py", "mmorch/auto_apply.py",
+              "mmorch/auto_apply_nightly.py",
+              "mmorch/promotion.py", "mmorch/runtime_checkout.py", "mmorch/observation.py",
+              "scripts/gates.py",
               "scripts/smoke.py", "tests/test_evolve_motor.py", "tests/test_goal.py",
-              "tests/test_evolve_goal_guard.py")
+              "tests/test_evolve_goal_guard.py", "tests/test_auto_apply.py",
+              "tests/test_promotion.py", "tests/test_runtime_checkout.py",
+              "tests/test_observation.py", "tests/test_auto_apply_nightly.py")
 
 
 # Firmas de ACCIONES zona-roja en el CONTENIDO generado (no solo el path): un cambio de

@@ -551,6 +551,15 @@ def main() -> None:
     except Exception as e:
         rec["auto_repair"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
 
+    # Auto-aplicación aislada. Default OFF: el código puede desplegarse y correrse
+    # en shadow sin tocar Task Scheduler ni el checkout humano. La activación real
+    # requiere MMORCH_RUNTIME_DIR + rollout + comando de restart explícitos.
+    try:
+        from mmorch.auto_apply_nightly import run_nightly as _run_auto_apply
+        rec["auto_apply"] = _run_auto_apply(rec, root=ROOT)
+    except Exception as e:
+        rec["auto_apply"] = {"error": f"{type(e).__name__}: {str(e)[:150]}"}
+
     _log(rec)
 
     # digest local (no depende de la app de Claude): logs/digest_last.md

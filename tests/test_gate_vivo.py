@@ -146,7 +146,11 @@ def test_default_aligned_fn_judges_the_diff(monkeypatch):
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("target", [
     "scripts/gates.py", "scripts/smoke.py", "mmorch/evolve.py",
+    "mmorch/auto_apply.py", "mmorch/promotion.py", "mmorch/runtime_checkout.py",
+    "mmorch/observation.py", "mmorch/auto_apply_nightly.py",
     "tests/test_evolve_motor.py", "tests/test_goal.py", "tests/test_evolve_goal_guard.py",
+    "tests/test_auto_apply.py", "tests/test_promotion.py", "tests/test_runtime_checkout.py",
+    "tests/test_observation.py", "tests/test_auto_apply_nightly.py",
     "GOAL.md", "GOAL.hash",
 ])
 def test_eval_harness_is_red_zone(target):

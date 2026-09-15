@@ -127,17 +127,13 @@ def repair(repo_dir: str, *, today: str, build_fn=None,
                "status": res.get("status"),
                "branch": wt.branch if built else None}
         if built:
-            # carril verde del semaforo: solo-tests/archivos nuevos -> automerge
-            try:
-                import subprocess as _sp
-                from mmorch.automerge import try_automerge
-                base = _sp.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                               cwd=repo_dir, capture_output=True,
-                               text=True).stdout.strip()
-                out["automerge"] = try_automerge(repo_dir, wt.branch, base=base,
-                                                source="auto_repair")
-            except Exception as e:
-                out["automerge"] = {"merged": False, "reason": str(e)[:100]}
+            # El adapter auto_apply_nightly consume esta branch DESPUÉS de cerrar
+            # el worktree. Nunca mergear sobre el checkout humano.
+            out["automerge"] = {
+                "merged": False,
+                "veredicto": "deferred_runtime",
+                "branch": wt.branch,
+            }
         # persistir DESPUES del automerge (05 #6): un crash entre persist y merge
         # dejaba repair_state sin el resultado real; ahora el estado escrito ya
         # incluye que paso con el merge, y un crash previo solo reintenta.

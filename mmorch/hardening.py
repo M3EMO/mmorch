@@ -123,16 +123,13 @@ def harden(repo_dir: str, *, today: str, build_fn=None, survivors_fn=None,
         out = {"module": module, "survived_before": survived,
                "status": res.get("status"), "branch": wt.branch if built else None}
         if built:
-            # carril verde: branch solo-tests con suite verde -> automerge
-            try:
-                from mmorch.automerge import try_automerge
-                base = __import__("subprocess").run(
-                    ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir,
-                    capture_output=True, text=True).stdout.strip()
-                out["automerge"] = try_automerge(repo_dir, wt.branch, base=base,
-                                                source="hardening")
-            except Exception as e:
-                out["automerge"] = {"merged": False, "reason": str(e)[:100]}
+            # El adapter auto_apply_nightly consume esta branch DESPUÉS de cerrar
+            # el worktree. Nunca mergear sobre el checkout humano.
+            out["automerge"] = {
+                "merged": False,
+                "veredicto": "deferred_runtime",
+                "branch": wt.branch,
+            }
         # persistir DESPUES del automerge (mismo 05 #6 de auto_repair): el estado
         # escrito refleja tambien el resultado del merge, no solo el build.
         state[module] = {"retry_after": retry_after,
