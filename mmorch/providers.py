@@ -6,6 +6,7 @@ auto-logs a metric record (§11). Keys come from env (loaded from .env).
 """
 from __future__ import annotations
 
+import importlib
 import os
 import random
 import threading
@@ -248,6 +249,7 @@ def call(
     max_tokens: int | None = 16384,
     timeout: float = 60.0,
     critical: bool = False,
+    effort: str | None = None,
     _empty_retry: bool = False,
     **kw,
 ) -> CallResult:
@@ -259,7 +261,13 @@ def call(
     sintesis/audit/codigo tipicos (un audit genero ~5.5k out). Bajalo por-call en
     fan_out masivo si queres acotar costo. H-2: fallo de API loggea error y re-lanza.
     """
-    s = spec(model_key)
+    # R1: si effort viene, el modelo efectivo se resuelve al inicio y reemplaza a model_key.
+    if effort is not None:
+        effort_mod = importlib.import_module('.effort', __package__)
+        effective_model = effort_mod.model_for_effort(effort)
+    else:
+        effective_model = model_key
+    s = spec(effective_model)
     if isinstance(messages, str):
         messages = [{"role": "user", "content": messages}]
 
@@ -270,7 +278,7 @@ def call(
     # (spend 0 <= lim). Input por len/4; salida acotada por max_tokens (H-6 la hace finita).
     try:
         from .cost import cost_usd as _cost_est
-        est = _cost_est(model_key, sum(len(str(m.get("content", ""))) for m in messages) // 4,
+        est = _cost_est(effective_model, sum(len(str(m.get("content", ""))) for m in messages) // 4,
                         max_tokens or 16384, 0)
     except Exception:
         est = 0.0   # fail-open del ESTIMADO: el gate por gasto acumulado sigue activo
@@ -279,21 +287,29 @@ def call(
     except BudgetExceeded as e:
         # Observabilidad: el cap-hit antes era INVISIBLE (salta antes de cualquier log).
         # Lo registramos pa poder medir budget-cap-hit-rate. NO cambia comportamiento: re-lanza.
-        log_event(pattern=pattern, node=node or model_key, model=model_key, family=s.family,
+        schedule = importlib.import_module('.schedule', __package__)
+        off_peak = schedule.is_off_peak()
+        log_event(pattern=pattern, node=node or effective_model, model=effective_model, family=s.family,
                   in_tokens=0, out_tokens=0, cost_usd=0.0, latency_s=0.0, phase=phase,
-                  error=type(e).__name__, error_msg=str(e)[:200], error_class="budget_cap")
+                  error=type(e).__name__, error_msg=str(e)[:200], error_class="budget_cap",
+                  extra={'off_peak': off_peak},
+                  off_peak=off_peak)
         raise
 
     # breaker por modelo ANTES de gastar nada: modelo en cooldown = fail-fast observable.
     try:
-        _breaker_allow(model_key)
+        _breaker_allow(effective_model)
     except BreakerOpen as e:
-        log_event(pattern=pattern, node=node or model_key, model=model_key, family=s.family,
+        schedule = importlib.import_module('.schedule', __package__)
+        off_peak = schedule.is_off_peak()
+        log_event(pattern=pattern, node=node or effective_model, model=effective_model, family=s.family,
                   in_tokens=0, out_tokens=0, cost_usd=0.0, latency_s=0.0, phase=phase,
-                  error=type(e).__name__, error_msg=str(e)[:200], error_class="breaker_open")
+                  error=type(e).__name__, error_msg=str(e)[:200], error_class="breaker_open",
+                  extra={'off_peak': off_peak},
+                  off_peak=off_peak)
         raise
 
-    client = _client(model_key)
+    client = _client(effective_model)
     if s.extra_body:
         # extras por-modelo (ej DeepSeek V4: thinking disabled pa bulk). El caller
         # puede pisarlos pasando su propio extra_body en kw.
@@ -309,10 +325,10 @@ def call(
                 timeout=timeout,
                 **kw,
             )
-            _breaker_record(model_key, ok=True)
+            _breaker_record(effective_model, ok=True)
             break
         except Exception as e:
-            _breaker_record(model_key, ok=False)
+            _breaker_record(effective_model, ok=False)
             eclass = _classify_error(e)
             transient = _is_transient(e)
             # Timeout: el server YA proceso el input (y lo factura) aunque nunca vimos la
@@ -321,7 +337,7 @@ def call(
             err_in, err_cost, err_extra = 0, 0.0, {}
             if eclass == "timeout":
                 err_in = sum(len(str(m.get("content", ""))) for m in messages) // 4
-                err_cost = cost_usd(model_key, err_in, 0)
+                err_cost = cost_usd(effective_model, err_in, 0)
                 err_extra = {"cost_estimated": True}
                 _track_cost(err_cost)
             # H-2: observabilidad de errores. Sin esto, un fallo de API es invisible
@@ -329,10 +345,12 @@ def call(
             # error_class distingue rate-limit/429 del resto -> mide 429-rate por proveedor.
             # attempt/retried registran CADA retry (W3.3): el retry silencioso esconde
             # exactamente la degradacion que el breaker necesita hacer visible.
+            schedule = importlib.import_module('.schedule', __package__)
+            off_peak = schedule.is_off_peak()
             log_event(
                 pattern=pattern,
-                node=node or model_key,
-                model=model_key,
+                node=node or effective_model,
+                model=effective_model,
                 family=s.family,
                 in_tokens=err_in,
                 out_tokens=0,
@@ -344,6 +362,8 @@ def call(
                 error_class=eclass,
                 attempt=attempt,
                 retried=transient and attempt < _RETRY_MAX_ATTEMPTS,
+                extra={'off_peak': off_peak},
+                off_peak=off_peak,
                 **err_extra,
             )
             if not transient or attempt >= _RETRY_MAX_ATTEMPTS:
@@ -359,13 +379,15 @@ def call(
     in_tok = getattr(usage, "prompt_tokens", 0) or 0
     out_tok = getattr(usage, "completion_tokens", 0) or 0
     cached_tok = _cached_tokens(usage)
-    c = cost_usd(model_key, in_tok, out_tok, cached_tok)
+    c = cost_usd(effective_model, in_tok, out_tok, cached_tok)
     _track_cost(c)
 
+    schedule = importlib.import_module('.schedule', __package__)
+    off_peak = schedule.is_off_peak()
     log_event(
         pattern=pattern,
-        node=node or model_key,
-        model=model_key,
+        node=node or effective_model,
+        model=effective_model,
         family=s.family,
         in_tokens=in_tok,
         out_tokens=out_tok,
@@ -373,6 +395,8 @@ def call(
         latency_s=latency,
         phase=phase,
         cached_tokens=cached_tok,
+        extra={'off_peak': off_peak},
+        off_peak=off_peak,
     )
     # "exito vacio" (AT-10 ronda 2, medido en glm-5.2): con max_tokens chico el
     # reasoning se come TODO el budget y el server devuelve text='' con status 200 —
@@ -388,14 +412,15 @@ def call(
         # absorbe sin loop; si el floor tampoco alcanza, el error explicito sigue.
         if (not _empty_retry and max_tokens is not None
                 and max_tokens < _REASONING_FLOOR_TOKENS):
-            return call(model_key, messages, pattern=pattern, node=node, phase=phase,
+            return call(effective_model, messages, pattern=pattern, node=node, phase=phase,
                         temperature=temperature, max_tokens=_REASONING_FLOOR_TOKENS,
-                        timeout=timeout, critical=critical, _empty_retry=True, **kw)
+                        timeout=timeout, critical=critical, effort=effort,
+                        _empty_retry=True, **kw)
         raise RuntimeError(
-            f"{model_key}: respuesta vacia — el budget de tokens se agoto en reasoning "
+            f"{effective_model}: respuesta vacía — el budget de tokens se agoto en reasoning "
             f"(finish_reason=length, max_tokens={max_tokens}); subir max_tokens")
     return CallResult(
-        model_key=model_key,
+        model_key=effective_model,
         family=s.family,
         text=text,
         in_tokens=in_tok,

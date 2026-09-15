@@ -1,0 +1,171 @@
+........................................................................ [  6%]
+........................................................................ [ 13%]
+........................................................................ [ 19%]
+........................................................................ [ 26%]
+........................................................................ [ 32%]
+........................................................................ [ 39%]
+........................................................................ [ 46%]
+........................................................................ [ 52%]
+........................................................................ [ 59%]
+.........................................F.............................. [ 65%]
+........................................................................ [ 72%]
+..............................F.FF...................................... [ 79%]
+........................................................................ [ 85%]
+........................................................................ [ 92%]
+....................................................................F... [ 98%]
+...........                                                              [100%]
+================================== FAILURES ===================================
+________________ test_gate_sin_anclas_de_estado_fuera_de_paths ________________
+
+    def test_gate_sin_anclas_de_estado_fuera_de_paths():
+        """Grep-gate: prohibido `Path(__file__).parents[1]` fuera de paths.py.
+    
+        Si un modulo NUEVO necesita la raiz del repo por ser genuinamente de
+        CODIGO, se agrega a la allowlist explicita de arriba � nunca en silencio.
+        """
+        ofensores = []
+        for py in sorted((REPO / "mmorch").glob("*.py")):
+            if py.name in _ALLOWLIST:
+                continue
+            if _ANCHOR.search(py.read_text(encoding="utf-8")):
+                ofensores.append(py.name)
+>       assert not ofensores, (
+            f"anclas de estado fuera de paths.py: {ofensores} � usar mmorch.paths "
+            "(home/data_dir/logs_dir/db_path) o justificar en la allowlist del test")
+E       AssertionError: anclas de estado fuera de paths.py: ['synth_store.py'] � usar mmorch.paths (home/data_dir/logs_dir/db_path) o justificar en la allowlist del test
+E       assert not ['synth_store.py']
+
+tests\test_paths.py:81: AssertionError
+_______________________ test_R1_effort_elige_el_modelo ________________________
+
+events = [{'cached_tokens': 0, 'cost_usd': 7.000000000000001e-06, 'family': 'deepseek', 'in_tokens': 10, ...}]
+
+    def test_R1_effort_elige_el_modelo(events):
+        r = PV.call("deepseek-chat", "hola", pattern="t", effort="high")
+        assert r.text == "hi"
+>       assert events[-1]["model"] == "deepseek-v4-pro", events[-1]
+E       AssertionError: {'cached_tokens': 0, 'cost_usd': 7.000000000000001e-06, 'family': 'deepseek', 'in_tokens': 10, ...}
+E       assert 'deepseek-chat' == 'deepseek-v4-pro'
+E         
+E         - deepseek-v4-pro
+E         + deepseek-chat
+
+tests\test_sdlc_d14_schedule_effort_providers.py:49: AssertionError
+________________________ test_R3_off_peak_en_el_ledger ________________________
+
+events = [{'cached_tokens': 0, 'cost_usd': 7.000000000000001e-06, 'family': 'deepseek', 'in_tokens': 10, ...}]
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001E818976030>
+
+    def test_R3_off_peak_en_el_ledger(events, monkeypatch):
+        monkeypatch.setattr(S, "is_off_peak", lambda now=None: True)
+        PV.call("deepseek-chat", "hola", pattern="t")
+>       assert events[-1].get("extra", {}).get("off_peak") is True, events[-1]
+E       AssertionError: {'cached_tokens': 0, 'cost_usd': 7.000000000000001e-06, 'family': 'deepseek', 'in_tokens': 10, ...}
+E       assert None is True
+E        +  where None = <built-in method get of dict object at 0x000001E818955440>('off_peak')
+E        +    where <built-in method get of dict object at 0x000001E818955440> = {}.get
+E        +      where {} = <built-in method get of dict object at 0x000001E818956140>('extra', {})
+E        +        where <built-in method get of dict object at 0x000001E818956140> = {'cached_tokens': 0, 'cost_usd': 7.000000000000001e-06, 'family': 'deepseek', 'in_tokens': 10, ...}.get
+
+tests\test_sdlc_d14_schedule_effort_providers.py:60: AssertionError
+_____________________ test_R3b_off_peak_tambien_en_error ______________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001E818975550>
+
+    def test_R3b_off_peak_tambien_en_error(monkeypatch):
+        out = []
+        monkeypatch.setattr(PV, "log_event", lambda **rec: out.append(rec))
+        monkeypatch.setattr(PV, "_client", lambda mk: _Fake(boom=True))
+        monkeypatch.setattr(S, "is_off_peak", lambda now=None: True)
+        with pytest.raises(RuntimeError):
+            PV.call("deepseek-chat", "hola", pattern="t")
+>       assert out and out[-1].get("extra", {}).get("off_peak") is True, out
+E       AssertionError: [{'attempt': 1, 'cost_usd': 0.0, 'error': 'RuntimeError', 'error_class': 'other', ...}]
+E       assert ([{'attempt': 1, 'cost_usd': 0.0, 'error': 'RuntimeError', 'error_class': 'other', ...}] and None is True)
+E        +  where None = <built-in method get of dict object at 0x000001E8189A5980>('off_peak')
+E        +    where <built-in method get of dict object at 0x000001E8189A5980> = {}.get
+E        +      where {} = <built-in method get of dict object at 0x000001E8189A5440>('extra', {})
+E        +        where <built-in method get of dict object at 0x000001E8189A5440> = {'attempt': 1, 'cost_usd': 0.0, 'error': 'RuntimeError', 'error_class': 'other', ...}.get
+
+tests\test_sdlc_d14_schedule_effort_providers.py:73: AssertionError
+__________________ test_mcp_server_reporta_version_de_mmorch __________________
+
+cls = <class 'importlib.metadata.Distribution'>, name = 'mmorch'
+
+    @classmethod
+    def from_name(cls, name: str):
+        """Return the Distribution for the given package name.
+    
+        :param name: The name of the distribution package to search for.
+        :return: The Distribution instance (or subclass thereof) for the named
+            package, if found.
+        :raises PackageNotFoundError: When the named package's distribution
+            metadata cannot be found.
+        :raises ValueError: When an invalid value is supplied for name.
+        """
+        if not name:
+            raise ValueError("A distribution name is required.")
+        try:
+>           return next(cls.discover(name=name))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           StopIteration
+
+..\..\..\Programs\Python\Python312\Lib\importlib\metadata\__init__.py:397: StopIteration
+
+During handling of the above exception, another exception occurred:
+
+    def test_mcp_server_reporta_version_de_mmorch():
+        from importlib.metadata import version
+        import mmorch.mcp_server as M
+>       assert M.mcp._mcp_server.version == version("mmorch")
+                                            ^^^^^^^^^^^^^^^^^
+
+tests\test_w6_ronda3.py:121: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+..\..\..\Programs\Python\Python312\Lib\importlib\metadata\__init__.py:889: in version
+    return distribution(distribution_name).version
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\Programs\Python\Python312\Lib\importlib\metadata\__init__.py:862: in distribution
+    return Distribution.from_name(distribution_name)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+cls = <class 'importlib.metadata.Distribution'>, name = 'mmorch'
+
+    @classmethod
+    def from_name(cls, name: str):
+        """Return the Distribution for the given package name.
+    
+        :param name: The name of the distribution package to search for.
+        :return: The Distribution instance (or subclass thereof) for the named
+            package, if found.
+        :raises PackageNotFoundError: When the named package's distribution
+            metadata cannot be found.
+        :raises ValueError: When an invalid value is supplied for name.
+        """
+        if not name:
+            raise ValueError("A distribution name is required.")
+        try:
+            return next(cls.discover(name=name))
+        except StopIteration:
+>           raise PackageNotFoundError(name)
+E           importlib.metadata.PackageNotFoundError: No package metadata was found for mmorch
+
+..\..\..\Programs\Python\Python312\Lib\importlib\metadata\__init__.py:399: PackageNotFoundError
+============================== warnings summary ===============================
+tests\test_fleet.py:6
+  C:\Users\map12\AppData\Local\Temp\sdlc-runs\D14-r1\tests\test_fleet.py:6: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient
+
+tests/test_patterns.py::test_fan_out_one_failure_keeps_others
+  C:\Users\map12\AppData\Local\Temp\sdlc-runs\D14-r1\tests\test_patterns.py:106: UserWarning: fan_out: 1/3 prompts fallaron y se dropearon (indices [1]). Resultado PARCIAL.
+    res = fan_out(["ok1", "BOOM", "ok3"])
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_paths.py::test_gate_sin_anclas_de_estado_fuera_de_paths - A...
+FAILED tests/test_sdlc_d14_schedule_effort_providers.py::test_R1_effort_elige_el_modelo
+FAILED tests/test_sdlc_d14_schedule_effort_providers.py::test_R3_off_peak_en_el_ledger
+FAILED tests/test_sdlc_d14_schedule_effort_providers.py::test_R3b_off_peak_tambien_en_error
+FAILED tests/test_w6_ronda3.py::test_mcp_server_reporta_version_de_mmorch - i...
+5 failed, 1086 passed, 2 warnings in 289.95s (0:04:49)

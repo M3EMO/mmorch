@@ -1,0 +1,389 @@
+{
+ "proto": "driver_py",
+ "task": "D14",
+ "stages": [
+  {
+   "stage": "2-spec",
+   "ok": true,
+   "minutes": 0.68,
+   "calls": 1,
+   "note": "G1 + trazabilidad-spec ok"
+  },
+  {
+   "stage": "2b-spec-review",
+   "ok": true,
+   "minutes": 4.11,
+   "calls": 0,
+   "note": "3 IDs cubiertos"
+  },
+  {
+   "stage": "3-plan",
+   "ok": true,
+   "minutes": 0.09,
+   "calls": 1,
+   "note": "ok"
+  },
+  {
+   "stage": "4-build",
+   "ok": true,
+   "minutes": 1.61,
+   "calls": 1,
+   "note": "G3 + test-compile + docstring ok"
+  },
+  {
+   "stage": "5-test",
+   "ok": true,
+   "minutes": 18.22,
+   "calls": 1,
+   "note": "G4 + suite ok (0 vueltas )"
+  },
+  {
+   "stage": "5b-review",
+   "ok": true,
+   "minutes": 2.25,
+   "calls": 0,
+   "note": "bloqueo con evidencia"
+  },
+  {
+   "stage": "5-test",
+   "ok": true,
+   "minutes": 21.61,
+   "calls": 8,
+   "note": "G4 + suite ok (2 vueltas reasoner 1 verde)"
+  }
+ ],
+ "gates": [
+  {
+   "id": "trazabilidad-spec",
+   "ok": true,
+   "detail": "3 IDs cubiertos",
+   "calls": 1
+  },
+  {
+   "id": "G1-spec-contrato",
+   "ok": true,
+   "detail": "contrato cubierto, sin TBD, IDs trazados",
+   "calls": 1
+  },
+  {
+   "id": "spec-review-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 1
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 1
+  },
+  {
+   "id": "spec-review",
+   "ok": true,
+   "detail": "0 preguntas",
+   "calls": 1
+  },
+  {
+   "id": "trazabilidad-spec",
+   "ok": true,
+   "detail": "3 IDs cubiertos",
+   "calls": 1
+  },
+  {
+   "id": "plan-allowlist",
+   "ok": true,
+   "detail": "['mmorch/providers.py']",
+   "calls": 2
+  },
+  {
+   "id": "trazabilidad-plan",
+   "ok": true,
+   "detail": "ok",
+   "calls": 2
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 3
+  },
+  {
+   "id": "test-compile",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "sin-clones",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "cambio-minimo",
+   "ok": true,
+   "detail": "ok",
+   "calls": 3
+  },
+  {
+   "id": "docstring-intacto",
+   "ok": true,
+   "detail": "la tarea lo cubre",
+   "calls": 3
+  },
+  {
+   "id": "lint",
+   "ok": true,
+   "detail": "0/0",
+   "calls": 3
+  },
+  {
+   "id": "suite-total",
+   "ok": false,
+   "detail": "fallos nuevos: ['tests/test_capas.py::test_R1_el_engine_no_importa_modulos_no_alcanzados', 'tests/test_capas.py::test_R3_la_lista_solo_achica']",
+   "calls": 3
+  },
+  {
+   "id": "suite-total",
+   "ok": true,
+   "detail": "sin fallos nuevos",
+   "calls": 4
+  },
+  {
+   "id": "G4-aceptacion",
+   "ok": true,
+   "detail": "verde en 0 vueltas  + lint + suite total",
+   "calls": 4
+  },
+  {
+   "id": "diff-review-alcance",
+   "ok": true,
+   "detail": "ok",
+   "calls": 4
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 4
+  },
+  {
+   "id": "claude-diff-review",
+   "ok": false,
+   "detail": "test_review falla: vuelve a build. BLOCK: R3 rompe el ledger real. `call` pasa `extra={\"off_peak\": ...}` a `log_event`. `log_event` ya junta kwargs sueltos",
+   "calls": 4
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 6
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 6
+  },
+  {
+   "id": "test-compile",
+   "ok": true,
+   "detail": "ok",
+   "calls": 6
+  },
+  {
+   "id": "regresion-unidad",
+   "ok": false,
+   "detail": "['mmorch/providers.py'] rompio 1 test(s) que pasaban",
+   "calls": 6
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 8
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 8
+  },
+  {
+   "id": "test-compile",
+   "ok": true,
+   "detail": "ok",
+   "calls": 8
+  },
+  {
+   "id": "regresion-unidad",
+   "ok": true,
+   "detail": "['mmorch/providers.py']: 2 -> 2 fallos",
+   "calls": 8
+  },
+  {
+   "id": "avance",
+   "ok": false,
+   "detail": "stall=2 novedad=0.0: escala a reasoner",
+   "calls": 8
+  },
+  {
+   "id": "baseline-intacto",
+   "ok": true,
+   "detail": "ok",
+   "calls": 10
+  },
+  {
+   "id": "G3-compile",
+   "ok": true,
+   "detail": "compila",
+   "calls": 10
+  },
+  {
+   "id": "test-compile",
+   "ok": true,
+   "detail": "ok",
+   "calls": 10
+  },
+  {
+   "id": "lint",
+   "ok": false,
+   "detail": "mmorch\\providers.py:9:8: F401 [*] `importlib` imported but unused\nFound 1 error.\n[*] 1 fixable with the `--fix` option.\n\nSuccess: no issues found in 1 source file\n",
+   "calls": 10
+  },
+  {
+   "id": "lint",
+   "ok": true,
+   "detail": "0/0",
+   "calls": 11
+  },
+  {
+   "id": "suite-total",
+   "ok": false,
+   "detail": "fallos nuevos: ['tests/test_capas.py::test_R1_el_engine_no_importa_modulos_no_alcanzados', 'tests/test_capas.py::test_R3_la_lista_solo_achica']",
+   "calls": 11
+  },
+  {
+   "id": "suite-total",
+   "ok": true,
+   "detail": "sin fallos nuevos",
+   "calls": 12
+  },
+  {
+   "id": "G4-aceptacion",
+   "ok": true,
+   "detail": "verde en 2 vueltas reasoner 1 verde + lint + suite total",
+   "calls": 12
+  }
+ ],
+ "calls": 12,
+ "human_interventions": 0,
+ "claude_calls": 2,
+ "gate_rejects": [
+  {
+   "gate": "suite-total",
+   "detail": "fallos nuevos: ['tests/test_capas.py::test_R1_el_engine_no_importa_modulos_no_alcanzados', 'tests/test_capas.py::test_R3_la_lista_solo_achica']"
+  },
+  {
+   "gate": "claude-diff-review",
+   "detail": "test_review falla: vuelve a build. BLOCK: R3 rompe el ledger real. `call` pasa `extra={\"off_peak\": ...}` a `log_event`. `log_event` ya junta kwargs sueltos"
+  },
+  {
+   "gate": "regresion-unidad",
+   "detail": "['mmorch/providers.py'] rompio 1 test(s) que pasaban"
+  },
+  {
+   "gate": "avance",
+   "detail": "stall=2 novedad=0.0: escala a reasoner"
+  },
+  {
+   "gate": "lint",
+   "detail": "mmorch\\providers.py:9:8: F401 [*] `importlib` imported but unused\nFound 1 error.\n[*] 1 fixable with the `--fix` option.\n\nSuccess: no issues found in 1 source file\n"
+  },
+  {
+   "gate": "suite-total",
+   "detail": "fallos nuevos: ['tests/test_capas.py::test_R1_el_engine_no_importa_modulos_no_alcanzados', 'tests/test_capas.py::test_R3_la_lista_solo_achica']"
+  }
+ ],
+ "escalated_to_claude": false,
+ "base_sha": "b774ddc",
+ "t0": "2026-09-14 21:39:29",
+ "t0_epoch": 1789432769.6772656,
+ "usd_by_family": {
+  "deepseek": 0.3525
+ },
+ "plan_files": [
+  "mmorch/providers.py"
+ ],
+ "plan_parallel": [
+  "mmorch/providers.py"
+ ],
+ "test_rounds": [
+  {
+   "round": 0,
+   "tests": {
+    "run": 4,
+    "failed": 0
+   }
+  },
+  {
+   "round": 0,
+   "tests": {
+    "run": 5,
+    "failed": 1
+   }
+  },
+  {
+   "round": 1,
+   "files": [
+    "mmorch/providers.py"
+   ],
+   "reverted": "regresion",
+   "tests": {
+    "run": 5,
+    "failed": 2
+   },
+   "novelty": 1.0
+  },
+  {
+   "round": 2,
+   "files": [
+    "mmorch/providers.py"
+   ],
+   "tests": {
+    "run": 5,
+    "failed": 2
+   },
+   "novelty": 0.0
+  }
+ ],
+ "stall": 2,
+ "test_fix_rounds": 2,
+ "lint_new": {
+  "ruff": 0,
+  "mypy": 0
+ },
+ "suite_flaky": [],
+ "suite_total": {
+  "run": 1092,
+  "failed": 2,
+  "new_failures": [],
+  "baseline_failures": 5
+ },
+ "review_block": true,
+ "reasoner_rounds": [
+  {
+   "i": 1,
+   "files": [
+    "mmorch/providers.py"
+   ],
+   "ok": true
+  }
+ ]
+}
