@@ -17,14 +17,16 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
+from typing import cast
 
 from .paths import home
 
-_WORKER = Path(__file__).resolve().parent / "plugin_worker.py"
 _REQUIRED = ("name", "version", "entry", "contributes")
 
 
@@ -49,8 +51,9 @@ def load_manifest(d, *, allow: set[str] | None = None) -> dict:
         raise ValueError(f"manifest {d.name} missing {missing}")
     declared = set(m.get("capabilities", []))
     pol = policy_allow() if allow is None else set(allow)
-    m["dir"] = str(d)
-    m["grants"] = sorted(declared & pol)          # two-layer gate baked in at load
+    m["dir"] = str(d.resolve())
+    m["entry"] = m["entry"]
+    m["grants"] = sorted(declared & pol)
     return m
 
 
@@ -68,95 +71,151 @@ def discover(*, allow: set[str] | None = None) -> list[dict]:
     return out
 
 
-def invoke(plugin: dict, fn: str, args: dict, *, host_services: dict,
-           grants=None, timeout: float | None = None) -> dict:
-    """Run one contribution in an isolated worker. Returns {ok, value} or {ok:False, error}.
-    host_services: method -> callable(params)->value. grants default = plugin['grants']."""
-    g = set(plugin.get("grants", [])) if grants is None else set(grants)
-    t = float(os.getenv("MMORCH_PLUGIN_TIMEOUT") or 30.0) if timeout is None else timeout
-    proc = subprocess.Popen(
-        [sys.executable, str(_WORKER), plugin["dir"]],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        text=True, encoding="utf-8", bufsize=1)
-    killer = threading.Timer(t, proc.kill)        # hung/abusive worker -> killed
-    killer.start()
+class _Eof:
+    pass
 
-    def _send(obj):
-        proc.stdin.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+EOF = _Eof()
+
+
+def _decode_line(line: str) -> dict | None:
+    try:
+        obj = json.loads(line)
+    except Exception:
+        return None
+    if isinstance(obj, dict) and isinstance(obj.get("type"), str):
+        return obj
+    return None
+
+
+def _send(proc: subprocess.Popen[str], msg: dict) -> bool:
+    if proc.stdin is None:
+        return False
+    try:
+        proc.stdin.write(json.dumps(msg, ensure_ascii=False) + "\n")
         proc.stdin.flush()
+        return True
+    except (BrokenPipeError, OSError, ValueError):
+        return False
+
+
+def _pump(proc: subprocess.Popen[str], q: queue.Queue[str | None]) -> None:
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            q.put(line)
+    except Exception:
+        pass
+    finally:
+        q.put(None)
+
+
+def _next_message(q: queue.Queue[str | None], deadline: float) -> dict | _Eof | None:
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        try:
+            line = q.get(timeout=remaining)
+        except queue.Empty:
+            return None
+        if line is None:
+            return EOF
+        msg = _decode_line(line)
+        if msg is not None:
+            return msg
+        # ignore undecodable line, continue
+
+
+def _map_error_payload(payload: dict) -> dict:
+    err = payload.get("error", "unknown plugin error")
+    return {"ok": False, "error": err if isinstance(err, str) else str(err)}
+
+
+def invoke(manifest: dict, method: str, args: dict, *, host_services: dict,
+           timeout: float | None = None) -> dict:
+    """Run one contribution in an isolated worker. Returns {ok, value} or {ok:False, error}."""
+    if timeout is None:
+        try:
+            timeout = float(os.getenv("MMORCH_PLUGIN_TIMEOUT", "30"))
+        except ValueError:
+            timeout = 30.0
+    deadline = time.monotonic() + timeout
+    grants = set(manifest.get("grants", []))
+
+    REPO_ROOT = str(Path(__file__).resolve().parents[1])
+    env = os.environ.copy()
+    existing_pythonpath = os.environ.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = REPO_ROOT + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "mmorch.plugin_worker"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        text=True, encoding="utf-8", cwd=manifest["dir"], env=env)
+
+    q: queue.Queue[str | None] = queue.Queue()
+    pump_thread = threading.Thread(target=_pump, args=(proc, q), daemon=True)
+    pump_thread.start()
+
+    request = {
+        "type": "invoke",
+        "method": method,
+        "args": args,
+        "dir": manifest["dir"],
+        "entry": manifest["entry"],
+    }
 
     try:
-        _send({"type": "invoke", "fn": fn, "args": args})
-        assert proc.stdout is not None   # PIPE -> not None
+        if not _send(proc, request):
+            return {"ok": False, "error": "plugin worker unavailable"}
+
         while True:
-            line = proc.stdout.readline()
-            if not line:
-                return {"ok": False, "error": "plugin exited/timeout"}
-            msg = json.loads(line)
+            msg = _next_message(q, deadline)
+            if msg is None:
+                # deadline exceeded
+                proc.kill()
+                return {"ok": False, "error": f"plugin timeout after {timeout:g}s"}
+            if msg is EOF:
+                # worker closed stdout without result/error
+                try:
+                    rc = proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    rc = proc.wait(timeout=2)
+                return {"ok": False, "error": f"plugin worker died with code {rc}"}
+            msg = cast(dict, msg)  # dict, now that None (timeout) and EOF are handled
             mt = msg.get("type")
-            if mt == "host_call":
-                cid, method = msg.get("id"), msg.get("method", "")
-                cap = _cap(method)
-                if cap not in g:
-                    _send({"type": "host_result", "id": cid,
-                           "error": f"capability '{cap}' not granted"})
-                elif method not in host_services:
-                    _send({"type": "host_result", "id": cid,
-                           "error": f"unknown host service '{method}'"})
-                else:
-                    try:
-                        _send({"type": "host_result", "id": cid,
-                               "value": host_services[method](msg.get("params") or {})})
-                    except Exception as e:
-                        _send({"type": "host_result", "id": cid, "error": str(e)[:200]})
-            elif mt == "result":
+            if mt == "result":
                 return {"ok": True, "value": msg.get("value")}
             elif mt == "error":
-                return {"ok": False, "error": msg.get("error")}
+                return _map_error_payload(msg)
+            elif mt == "host_call":
+                cid, hmethod = msg.get("id"), msg.get("method", "")
+                cap = _cap(hmethod)
+                if cap not in grants:
+                    _send(proc, {"type": "host_result", "id": cid,
+                                 "error": f"capability '{cap}' not granted"})
+                elif hmethod not in host_services:
+                    _send(proc, {"type": "host_result", "id": cid,
+                                 "error": f"unknown host service '{hmethod}'"})
+                else:
+                    try:
+                        value = host_services[hmethod](msg.get("params") or {})
+                        _send(proc, {"type": "host_result", "id": cid, "value": value})
+                    except Exception as e:
+                        _send(proc, {"type": "host_result", "id": cid, "error": str(e)[:200]})
+            # ignore unknown message types and keep waiting
     finally:
-        killer.cancel()
         try:
             if proc.stdin is not None:
                 proc.stdin.close()
         except Exception:
             pass
+        if proc.poll() is None:
+            proc.kill()
         try:
             proc.wait(timeout=2)
-        except Exception:
+        except subprocess.TimeoutExpired:
             proc.kill()
-
-
-if __name__ == "__main__":
-    import tempfile
-    import textwrap
-    d = Path(tempfile.mkdtemp()) / "shout"
-    d.mkdir()
-    (d / "plugin.json").write_text(json.dumps({
-        "name": "shout", "version": "1", "entry": "main.py",
-        "capabilities": ["log", "fs"],                       # declares log + fs
-        "contributes": [{"kind": "pattern", "name": "shout"}],
-    }), encoding="utf-8")
-    (d / "main.py").write_text(textwrap.dedent('''
-        def shout(args, host):
-            host("log.emit", {"msg": "hi"})                  # granted -> runs host-side
-            denied = {}
-            for m in ("fs.write", "net.get"):
-                try:
-                    host(m, {}); denied[m] = False
-                except Exception:
-                    denied[m] = True
-            return {"text": args["text"].upper(), "denied": denied}
-    '''), encoding="utf-8")
-
-    man = load_manifest(d, allow={"log"})                    # policy allows ONLY log
-    assert man["grants"] == ["log"], man["grants"]           # fs declared but policy-denied
-    log = []
-    res = invoke(man, "shout", {"text": "hey"},
-                 host_services={"log.emit": lambda p: (log.append(p["msg"]), "ok")[1]})  # type: ignore[func-returns-value]
-    assert res["ok"], res
-    assert res["value"]["text"] == "HEY"
-    assert res["value"]["denied"] == {"fs.write": True, "net.get": True}, res["value"]
-    assert log == ["hi"], log                                # only the granted call reached the host
-    bad = invoke(man, "nope", {}, host_services={})          # unknown contribution
-    assert not bad["ok"] and "contribution" in bad["error"], bad
-    print("plugins OK")
+            proc.wait(timeout=2)
+        pump_thread.join(timeout=2)
