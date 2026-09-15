@@ -1,6 +1,6 @@
 """W3.3+W3.4 — retry/backoff transitorio, half-open breaker por modelo, pool de
 bucket_rank resiliente, rotacion de metrics.jsonl + budget multi-segmento, costo
-estimado en timeout, price_asof, breaker USD por-run, summary() defensivo. Sin API."""
+estimado en timeout, price_asof, summary() defensivo. Sin API. (W3.4 breaker USD por-run: sus tests iban por build_project, retirado en el ticket 05.)"""
 import json
 import pathlib
 import sys
@@ -13,8 +13,6 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import mmorch.budget as B
 import mmorch.metrics as MET
 import mmorch.prices as PR
-import mmorch.project_build as PB
-import mmorch.project_integrate as PI
 import mmorch.providers as PV
 
 
@@ -66,11 +64,6 @@ def _aislado(monkeypatch, tmp_path):
     monkeypatch.setattr(MET, "_LOG_DIR", tmp_path)
     monkeypatch.setattr(MET, "_LOG_PATH", tmp_path / "metrics.jsonl")
     monkeypatch.setattr(B, "_SPEND_CACHE", {})
-    # caches de plan/codigo a tmp: sin esto un run anterior deja unit-code cacheado en
-    # logs/ real y build_unit sirve el hit SIN llamar al coder -> el usd-breaker (que
-    # vive en el wrapper de gen) nunca corre y el test se vuelve orden-dependiente.
-    monkeypatch.setattr(PB, "_WORKLIST_CACHE", tmp_path / "wl_cache.json")
-    monkeypatch.setattr(PB, "_UNIT_CODE_CACHE", tmp_path / "unit_code_cache.json")
     monkeypatch.delenv("MMORCH_MAX_MONTHLY_USD", raising=False)
     monkeypatch.delenv("MMORCH_MAX_USD_PER_RUN", raising=False)
 
@@ -225,39 +218,3 @@ def test_price_asof_fresco_no_warnea(monkeypatch, tmp_path, caplog):
     with caplog.at_level("WARNING", logger="mmorch.prices"):
         PR.effective_prices("deepseek-chat", path=p)
     assert not [r for r in caplog.records if "price_asof" in r.getMessage()]
-
-
-# ---------- W3.4: breaker USD por-run en build_project ------------------------------
-def _fakes():
-    return dict(gen=lambda u, fb: "def u():\n    return 1",
-                run_test=lambda u, c, tc: (True, "green"),
-                run_snippet=lambda c, a: (True, ""), propose_test=lambda c, s: "",
-                integrate=lambda e, rs: (True, "ok"), commit=lambda n, rr: None)
-
-
-def test_usd_breaker_corta_el_run():
-    r = PI.build_project(
-        "t", "/nonexistent", external_test=None, max_usd_per_run=1.0,
-        run_cost=lambda: 99.0,   # costo fake ya excedido
-        plan=lambda t, e: [{"name": "u", "spec": "s", "deps": [], "test_cmd": "pytest -q"}],
-        **_fakes())
-    assert r["status"] == "escalate", r
-
-
-def test_usd_breaker_default_por_env(monkeypatch):
-    monkeypatch.setenv("MMORCH_MAX_USD_PER_RUN", "0.5")
-    r = PI.build_project(
-        "t", "/nonexistent", external_test=None, run_cost=lambda: 0.6,
-        plan=lambda t, e: [{"name": "u", "spec": "s", "deps": [], "test_cmd": "pytest -q"}],
-        **_fakes())
-    assert r["status"] == "escalate", r
-
-
-def test_usd_bajo_el_techo_no_corta():
-    r = PI.build_project(
-        "t", "/nonexistent", external_test=None, max_usd_per_run=1.0,
-        run_cost=lambda: 0.01,
-        plan=lambda t, e: [{"name": "u", "spec": "s", "deps": [], "test_cmd": "pytest -q"}],
-        **_fakes())
-    assert r["status"] == "built", r
-    assert "run_usd" in r["provenance"]

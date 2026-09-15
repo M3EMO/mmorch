@@ -60,9 +60,10 @@ def pick_finding(findings: list[dict], state: dict, *, today: str) -> dict | Non
 
 
 def _default_build(task: str, wt_path: str, gate_cmd: str) -> dict:
-    from mmorch.project_integrate import build_project
-    return build_project(task, wt_path, external_test=gate_cmd,
-                         max_fix=3, max_gen_calls=40)
+    # ticket 05: pipeline de 6 etapas; la suite/gate del repo es el oraculo (accept_cmd), files = techo de sdlc.toml
+    from mmorch.sdlc import build_feature
+    r = build_feature("auto-repair", task, wt_path, accept_cmd=gate_cmd, wt=wt_path, max_fix=3)
+    return {"status": r.get("status"), "detail": r.get("failed_note", "")}
 
 
 def repair(repo_dir: str, *, today: str, build_fn=None,

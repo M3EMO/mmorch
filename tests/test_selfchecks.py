@@ -38,7 +38,7 @@ def _modulos_con_selfcheck() -> list[str]:
 
 
 MODULOS = [m for m in _modulos_con_selfcheck() if m not in EXCLUIR]
-assert len(MODULOS) >= 40, f"el descubrimiento colapso: {len(MODULOS)} modulos"
+assert len(MODULOS) >= 37  # 40 -> 37 al retirar project_driver/integrate/build y lang (ticket 05), f"el descubrimiento colapso: {len(MODULOS)} modulos"
 
 
 @pytest.mark.parametrize("mod", MODULOS)

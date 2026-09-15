@@ -4,7 +4,7 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**122 módulos · 45 MCP tools · 952 tests.**
+**118 módulos · 45 MCP tools · 934 tests.**
 
 El server expone **15** de esas 45 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
 
@@ -64,7 +64,6 @@ El server expone **15** de esas 45 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/intuition.py` | intuition — the bandit, re-keyed by structural signature (intuition layer Phase 1). |
 | `mmorch/iohelpers.py` | iohelpers — shared robustness idioms for the JSON/JSONL state files under logs/*. |
 | `mmorch/job_graph.py` | job_graph — adjacency-list ancestry over the in-memory job map (graft G1). |
-| `mmorch/lang.py` | lang — capacidades deterministas POR LENGUAJE para el project-build engine. |
 | `mmorch/learn.py` | learn — meta-inteligencia: mmorch aprende de su propio metrics.jsonl (I-1). |
 | `mmorch/loop.py` | loop_until_done — scope DESCONOCIDO, 'segui hasta que este limpio'. Control-flow |
 | `mmorch/loop_nightly.py` | F5 loop-cerrado: orquestador nightly del loop de ideas (spec .scratch/loop-cerrado/spec.md). |
@@ -85,9 +84,6 @@ El server expone **15** de esas 45 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/plugins.py` | plugins — capability-gated plugin platform (graft G11 from paperclip plugin-loader.ts). |
 | `mmorch/portability.py` | portability — export/import mmorch state across devices (grafts G2 + G4). |
 | `mmorch/prices.py` | prices — capa de OVERRIDE de precios (datos volátiles, separados del código). |
-| `mmorch/project_build.py` | project_build — F1 of the /project rebuild: decompose a big task into a VALIDATED worklist |
-| `mmorch/project_driver.py` | project_driver — F2 of the /project rebuild: the RECURSIVE build orchestrator. |
-| `mmorch/project_integrate.py` | project_integrate — F3 of the /project rebuild: wire the recursive driver (F2) to REAL seams. |
 | `mmorch/project_loop.py` | project_loop — ejecutor PROJECT-AWARE primario via mmorch (barato, cero cupo). Es la |
 | `mmorch/project_repair.py` | Reparación cross-repo: mmorch arregla los proyectos del REGISTRY, no solo |
 | `mmorch/projects.py` | projects — registro de proyectos que mmorch puede CONTROLAR (project-aware). Hace que |
