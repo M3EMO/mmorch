@@ -309,7 +309,7 @@ def _run_project_job(project: str, task: str, mode: str, push: bool = False,
 def _run_project_build_job(jid: str, task: str, project: str, external_test: str,
                            max_depth: int = 2, seed_globs: list | None = None, parent=None,
                            gen_model: str | None = None, max_fix: int | None = None,
-                           files: list | None = None, from_stage: float = 2, resume_branch: str | None = None):
+                           files: list | None = None, from_stage: float | None = None, resume_branch: str | None = None):
     """El pipeline de 6 etapas (mmorch.sdlc, ticket 05) como job del server. Corre en un worktree AISLADO de
     `project` (arbol principal intacto, resultado en una review branch). `external_test` = comando de aceptacion;
     si nombra archivos tests/*.py que existen en el repo, esos son los tests de aceptacion del pipeline.

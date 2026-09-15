@@ -325,7 +325,7 @@ async def run_workflow(request):
                                      "max_fix": body.get("max_fix"),
                                      # ticket 05: files acota el techo de sdlc.toml; resume = branch + etapa
                                      "files": body.get("files"),
-                                     "from_stage": float(body.get("from_stage", 2)),
+                                     "from_stage": float(body["from_stage"]) if body.get("from_stage") is not None else None,  # None = etapa 1 si no hay tests
                                      "resume_branch": body.get("resume_branch")}, daemon=True)
         t.start()
         return JSONResponse({"started": "project-build", "job_id": jid, "project": project,
