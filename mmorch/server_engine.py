@@ -5,6 +5,8 @@ server_core (shared state) + events; the route handlers call these via import.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import os
 import threading
 import time
@@ -306,85 +308,46 @@ def _run_project_job(project: str, task: str, mode: str, push: bool = False,
 
 def _run_project_build_job(jid: str, task: str, project: str, external_test: str,
                            max_depth: int = 2, seed_globs: list | None = None, parent=None,
-                           gen_model: str | None = None, max_fix: int | None = None):
-    """The recursive /project engine (F1/F2/F3) as a server job. Runs in an ISOLATED git worktree
-    of `project` (main tree untouched, result on a review branch). `external_test` is the real
-    acceptance suite (the integration gate at depth 0). Terminal job status:
-      done             -> status 'built' (acceptance green)
-      gate             -> 'integration_failed' (assembled whole failed acceptance) — review + resume
-      escalate         -> bad plan / depth cap / a unit's gate never passed
-    Cero cupo: cheap external models are the coder + cold verifier."""
+                           gen_model: str | None = None, max_fix: int | None = None,
+                           files: list | None = None, from_stage: float = 2, resume_branch: str | None = None):
+    """El pipeline de 6 etapas (mmorch.sdlc, ticket 05) como job del server. Corre en un worktree AISLADO de
+    `project` (arbol principal intacto, resultado en una review branch). `external_test` = comando de aceptacion;
+    si nombra archivos tests/*.py que existen en el repo, esos son los tests de aceptacion del pipeline.
+    Estado terminal: built -> done; integration_failed (etapa 5) -> gate; otro fallo -> escalate.
+    La etapa es el checkpoint: `result.failed_stage` + `review_branch` permiten reanudar con
+    {resume_branch, from_stage} en el mismo payload. `max_depth` se acepta por compatibilidad y se ignora."""
     from .worktree_driver import open_worktree
     from .projects import resolve
-    from .project_integrate import build_project
+    from .sdlc import build_feature
     with _JOBS_LOCK:
         _JOBS[jid] = _jobmeta("project-build", task, engine="mmorch", parent=parent)
     wt = None
     try:
-        wt = open_worktree(resolve(project))
+        repo = resolve(project)
+        wt = open_worktree(repo, base=resume_branch or "HEAD")
         with _JOBS_LOCK:
             _JOBS[jid]["review_branch"] = wt.branch
-        # F4 lesson: a fresh checkout lacks gitignored artifacts the acceptance reads (caches, local
-        # DBs) -> the gate would measure a broken env. seed_globs mirrors them (dirs linked, files
-        # copied); the links are removed by wt.close() before the tree is deleted. .venv/venv always
-        # included: a repo's pre-commit hook (ej ruff gate) commonly resolves the venv relatively ->
-        # without it linked, the hook falls back to system python and the commit can fail silently.
+        # F4: un checkout fresco no tiene los artefactos gitignorados que la aceptacion lee (.venv, caches).
         n_seed = wt.seed(list(dict.fromkeys((seed_globs or []) + [".venv", "venv"])))
         emit("job", "running", job_id=jid,
-             detail=f"project-build {project} -> {wt.branch}"
-                    f"{f' (+{n_seed} seeded)' if n_seed else ''}: {task[:70]}")
-
-        # per-unit checkpoints (observability parity with the role-chain): every built unit's code
-        # lands as a durable block + checkpoint, so Lotus/the skill can watch the build unit by unit.
-        step = {"n": 0}
-
-        def _commit(name: str, result: dict) -> None:
-            from .worktree_driver import Worktree
-            cap = Worktree(wt.path, wt.path, wt.branch).capture(f"mmorch(project-build): unit {name}")
-            if cap["changed"] and not cap["committed"]:
-                emit("job", "error", job_id=jid,
-                     detail=f"unit {name}: commit falló, código NO guardado en la branch: "
-                            f"{cap['error'][:160]}")
-            try:
-                from . import workflow_store
-                step["n"] += 1
-                bid = workflow_store.put_block(result.get("code", ""), kind="code",
-                                               mime="text/x-python")
-                workflow_store.record_checkpoint(jid, step["n"], f"unit:{name}", outputs=[bid],
-                                                 gate={"name": "unit", "passed": True,
-                                                       "detail": str(result.get("gate", ""))[:200]})
-            except Exception as e:
-                # best-effort: never break the build on the store, but a resume that
-                # doesn't know this unit was already checkpointed re-pays it from step 0.
-                emit("step", "warn", job_id=jid, node=f"unit:{name}",
-                     detail=f"checkpoint no persistido: {str(e)[:150]}")
-            emit("step", "done", job_id=jid, node=f"unit:{name}", detail=result.get("file") or "")
-
-        # forma de pipeline por op_type (ADW 2026-07): REPAIR/VERIFY = hotfix minimo,
-        # TRANSFORM = sin recursion honda, GENERATE = engine completo. Ruteo determinista
-        # (regex de signature, cero LLM). max_depth explicito del caller (!=2) pisa la forma.
-        from .project_build import pipeline_for
-        shape = pipeline_for(task)
-        emit("job", "running", job_id=jid,
-             detail=f"pipeline {shape['op_type']}: fix={shape['max_fix']} "
-                    f"depth={shape['max_depth']} calls={shape['max_gen_calls']}")
-        from .config import DEFAULT_GENERATOR
-        res = build_project(task, wt.path, external_test=external_test,
-                            gen_model=gen_model or DEFAULT_GENERATOR,
-                            max_depth=max_depth if max_depth != 2 else shape["max_depth"],
-                            max_fix=int(max_fix) if max_fix else shape["max_fix"],
-                            max_gen_calls=shape["max_gen_calls"],
-                            commit=_commit)
+             detail=f"sdlc {project} -> {wt.branch}{f' (+{n_seed} seeded)' if n_seed else ''}: {task[:70]}")
+        import re as _re
+        named = [p for p in _re.findall(r"(?:tests?|tests_accept)[\w/.-]*\.py", external_test or "")
+                 if (Path(wt.path) / p).exists()]
+        accept = {p: (Path(wt.path) / p).read_text(encoding="utf-8") for p in named}
+        res = build_feature(jid, task, repo, accept=accept or None, accept_cmd=None if accept else external_test,
+                            files=files, wt=wt.path, phase=f"sdlc-{jid}", from_stage=from_stage,
+                            max_fix=int(max_fix) if max_fix else 3, coder=gen_model)
         status = res.get("status", "escalate")
         job_status = {"built": "done", "integration_failed": "gate"}.get(status, "escalate")
         with _JOBS_LOCK:
             if jid in _JOBS:
                 _JOBS[jid]["status"] = job_status
                 _JOBS[jid]["result"] = {k: res.get(k) for k in
-                                        ("status", "unverified", "detail", "reason", "plan_error")
+                                        ("status", "failed_stage", "failed_note", "usd", "minutes_total", "gate_rejects")
                                         if res.get(k) is not None}
         emit("job", "done" if job_status == "done" else "gate", job_id=jid,
-             detail=f"{status} (unverified={len(res.get('unverified', []))})")
+             detail=f"{status} ({res.get('failed_stage') or 'todas las etapas'})")
     except Exception as e:
         emit("job", "error", job_id=jid, detail=str(e)[:200])
         with _JOBS_LOCK:
@@ -392,18 +355,18 @@ def _run_project_build_job(jid: str, task: str, project: str, external_test: str
                 _JOBS[jid]["status"] = "error"
     finally:
         if wt:
-            try:                                   # commit any remainder; per-unit commits already landed
-                cap = wt.capture(f"mmorch project-build: {task[:60]}")
+            try:                                   # docs/sdlc + trabajo parcial quedan en la branch (reanudable)
+                cap = wt.capture(f"mmorch sdlc: {task[:60]}")
                 if cap["changed"] and not cap["committed"]:
                     emit("job", "error", job_id=jid,
-                         detail=f"remainder commit falló, trabajo NO guardado: {cap['error'][:160]}")
+                         detail=f"commit final falló, trabajo NO guardado: {cap['error'][:160]}")
                 with _JOBS_LOCK:
                     if jid in _JOBS:
                         _JOBS[jid]["diffstat"] = cap.get("diffstat", "")
             except Exception as e:
-                emit("job", "warn", job_id=jid, detail=f"remainder commit no confirmado: {str(e)[:150]}")
+                emit("job", "warn", job_id=jid, detail=f"commit final no confirmado: {str(e)[:150]}")
             finally:
-                wt.close(keep_branch=True)          # review branch survives for merge
+                wt.close(keep_branch=True)          # review branch survives for merge / resume
 
 
 def _run_fanout_job(prompts: list, gen_model: str, parent=None, job_id: str | None = None):

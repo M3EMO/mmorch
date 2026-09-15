@@ -90,11 +90,12 @@ def repair_projects(orch_root: str, *, today: str, build_fn=None,
             f"Estilo del repo."
         )
         if build_fn is None:
-            from mmorch.project_integrate import build_project
+            from mmorch.sdlc import build_feature
 
             def build_fn(t, w, g):
-                return build_project(t, w, external_test=g,
-                                     max_fix=3, max_gen_calls=40)
+                # ticket 05: la suite roja es el oraculo (accept_cmd); files = techo de sdlc.toml del repo
+                r = build_feature(f"repair-{name}", t, w, accept_cmd=g, wt=w, max_fix=3)
+                return {"status": r.get("status"), "detail": r.get("failed_note", "")}
         res = build_fn(task, wt.path, gate_cmd)
         built = res.get("status") == "built"
         # antes se guardaba SOLO el status: build_project() trae el motivo real

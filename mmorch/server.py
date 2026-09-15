@@ -305,8 +305,8 @@ async def run_workflow(request):
     if not task:
         return JSONResponse({"error": "task required"}, status_code=400)
     import uuid as _u
-    # project-build = the recursive engine (F1/F2/F3), NOT a role-chain spec. Needs a registered
-    # project + the real acceptance command (the integration gate). Runs isolated -> review branch.
+    # project-build = el pipeline de 6 etapas (mmorch.sdlc, ticket 05), NOT a role-chain spec. Needs a
+    # registered project + the acceptance command. Runs isolated -> review branch.
     if body.get("workflow_name") == "project-build":
         project = body.get("project", "")
         external_test = body.get("external_test") or body.get("test_cmd")
@@ -322,7 +322,11 @@ async def run_workflow(request):
         t = threading.Thread(target=_run_project_build_job, args=(jid, task, project, external_test, md),
                              kwargs={"seed_globs": seeds, "parent": body.get("parent_id"),
                                      "gen_model": body.get("gen_model"),
-                                     "max_fix": body.get("max_fix")}, daemon=True)
+                                     "max_fix": body.get("max_fix"),
+                                     # ticket 05: files acota el techo de sdlc.toml; resume = branch + etapa
+                                     "files": body.get("files"),
+                                     "from_stage": float(body.get("from_stage", 2)),
+                                     "resume_branch": body.get("resume_branch")}, daemon=True)
         t.start()
         return JSONResponse({"started": "project-build", "job_id": jid, "project": project,
                              "external_test": external_test, "seed_globs": seeds})

@@ -37,6 +37,7 @@ TESTS_PREFIX = "tests_accept/"
 MAX_FIX = 3
 LOG = pathlib.Path("run-log.json")
 REVIEW_REL = "tests_accept/test_review_sdlc.py"
+ACCEPT_CMD: str | None = None  # aceptacion por comando (repair / payload sin tests nombrados)
 RUNS = logs_dir() / "sdlc"          # baseline de suite por sha, casos de diagnostico, copia del run-log
 REASONER_TRIES = 2
 WRITER = os.environ.get("SDLC_WRITER", "deepseek-reasoner")
@@ -64,10 +65,20 @@ SNAP: dict[str, str] = {}
 SEEN: set[str] = set()
 
 
-def configure(task, *, contract, feat=None, wt=None, phase=None, max_fix=3, writer=None, coder=None, diag=None):
+class StageFailed(Exception):
+    """Una etapa o el tope de USD fallo: el llamador (CLI, server) decide; el run-log ya quedo escrito."""
+
+    def __init__(self, stage: str, note: str):
+        super().__init__(f"etapa {stage} fallo: {note}")
+        self.stage, self.note = stage, note
+
+
+def configure(task, *, contract, feat=None, wt=None, phase=None, max_fix=3, writer=None, coder=None, diag=None,
+              accept_cmd=None):
     """Fija la corrida. `task` tiene .name, .task y .accept_files ({rel: contenido}); bench.get_task sirve tal cual.
     `feat` (dict repo/files/suite) = feature sobre un repo existente; None = task del bench (paquete nuevo)."""
-    global TASK_NAME, WT, PHASE, FEAT, TASK, CONTRACT, TESTS_PREFIX, MAX_FIX, LOG, REVIEW_REL, CFG, WRITER, CODER, DIAG
+    global TASK_NAME, WT, PHASE, FEAT, TASK, CONTRACT, TESTS_PREFIX, MAX_FIX, LOG, REVIEW_REL, CFG, WRITER, CODER, DIAG, ACCEPT_CMD
+    ACCEPT_CMD = accept_cmd
     TASK_NAME, TASK, FEAT, CONTRACT = task.name, task, feat, list(contract)
     PHASE = phase or f"sdlc-{TASK_NAME}-r1"
     # Worktrees FUERA de Desktop/Claude: codegraph indexa ese workspace y su MCP dejaba de conectar.
@@ -102,7 +113,7 @@ def llm(model, system, user, timeout=400):
         rec_gate("usd-tope", False, f"US${usd} > {CFG['usd_max']}")
         write_supervision(f"ESCALATE_HUMAN: tope USD {usd} superado")
         _flush()
-        sys.exit(f"tope USD {usd}: escala a humano")
+        raise StageFailed("usd-tope", f"US${usd}: escala a humano")
     return r.text
 
 
@@ -123,7 +134,7 @@ def stage(name):
             _flush()
             print(f"[{name}] ok={ok} {note} ({state['calls'] - c0} llamadas, {(time.time() - t0) / 60:.1f} min)", flush=True)
             if not ok:
-                sys.exit(f"etapa {name} fallo: {note}")
+                raise StageFailed(name, note)
         return run
     return deco
 
@@ -153,12 +164,13 @@ def one_file(code: str, rel: str) -> str:
     return secs.get(rel, code)
 
 
-def sh(cmd: list[str], timeout: float | None = None, keep: int = 6000):
+def sh(cmd, timeout: float | None = None, keep: int = 6000):
+    """Lista = exec directo; str = comando shell (accept_cmd del repo)."""
     try:
         p = subprocess.run(cmd, cwd=WT, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           timeout=timeout or CFG["cmd_timeout_s"])
+                           timeout=timeout or CFG["cmd_timeout_s"], shell=isinstance(cmd, str))
     except subprocess.TimeoutExpired:
-        return False, f"TIMEOUT {timeout or CFG['cmd_timeout_s']}s: {' '.join(cmd)[:200]}"
+        return False, f"TIMEOUT {timeout or CFG['cmd_timeout_s']}s: {(cmd if isinstance(cmd, str) else ' '.join(cmd))[:200]}"
     return p.returncode == 0, (p.stdout + p.stderr)[-keep:]
 
 
@@ -215,6 +227,8 @@ def _accept_paths():
 
 
 def accept():
+    if not TASK.accept_files and ACCEPT_CMD:
+        return sh(ACCEPT_CMD)  # repair / payload sin tests nombrados: el comando del repo es el oraculo
     return sh([PY, "-m", "pytest", *_accept_paths(), "-q", "-p", "no:cacheprovider"])
 
 
@@ -281,6 +295,8 @@ def gate_traza_spec(spec_md: str, tests: set[str]) -> tuple[bool, str]:
     ids = set(re.findall(r"\bR\d+\b", spec_md))
     if not ids:
         return rec_gate("trazabilidad-spec", False, "sin IDs R<n>")
+    if not tests and not getattr(TASK, "accept_files", None):
+        return rec_gate("trazabilidad-spec", True, f"{len(ids)} IDs; sin tests nombrados (accept_cmd es el oraculo)")
     m = re.search(r"## Trazabilidad\b(.*?)(?:\n## |\Z)", spec_md, re.S)
     rows = re.findall(r"(?m)^\|\s*(R\d+)\s*\|([^|]*)\|", m.group(1) if m else "")
     cov = {rid: set(re.findall(r"test_\w+", cell)) for rid, cell in rows}
@@ -345,6 +361,8 @@ def gate_compile(files) -> tuple[bool, str]:
 
 def gate_test_compile() -> tuple[bool, str]:
     """Equivalente a mvn test-compile: los tests importan y se recolectan."""
+    if not _accept_paths():
+        return rec_gate("test-compile", True, "sin tests nombrados (accept_cmd)")
     ok, log = sh([PY, "-m", "pytest", *_accept_paths(), "--collect-only", "-q", "-p", "no:cacheprovider"])
     return rec_gate("test-compile", ok, "ok" if ok else log[-800:])
 
@@ -862,7 +880,7 @@ def review():
 def pr():
     subprocess.run(["git", "add", "-A"], cwd=WT, check=True)
     subprocess.run(["git", "-c", "user.name=map12", "-c", "user.email=map12082004@gmail.com", "commit", "-q", "-m",
-                    f"sdlc: {TASK_NAME} - driver_py, gates + escalera + revision Claude"], cwd=WT, check=True)
+                    f"sdlc: {TASK_NAME} - pipeline 6 etapas, gates + escalera + revision Claude"], cwd=WT, check=True)
     base = state.get("base_sha", "HEAD~1")
     ds = subprocess.run(["git", "diff", "--stat", base], cwd=WT, capture_output=True, text=True).stdout
     state["diffstat"] = ds.strip().splitlines()[-1] if ds.strip() else ""
@@ -886,6 +904,19 @@ def gate_lint() -> tuple[bool, str]:
     return rec_gate("lint", not (ruff or mypy), detail)
 
 
+def _seed_accept() -> None:
+    """Escribe y commitea los tests de aceptacion del llamador (rojos por diseño) si no estan en el arbol."""
+    faltan = {rel: c for rel, c in getattr(TASK, "accept_files", {}).items() if not (WT / rel).exists()}
+    if not faltan:
+        return
+    for rel, content in faltan.items():
+        _write(rel, content)
+    subprocess.run(["git", "add", "-A"], cwd=WT, check=True)
+    if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=WT).returncode != 0:
+        subprocess.run(["git", "-c", "user.name=mmorch", "-c", "user.email=mmorch@local", "commit", "-q", "-m",
+                        f"sdlc: test de aceptacion {TASK_NAME} (rojo por diseño)"], cwd=WT, check=True)
+
+
 def run(from_stage: float = 2) -> dict:
     """Corre las etapas desde `from_stage` (2 spec, 2.5 spec-review, 3 plan, 4 build, 5 test, 5.5 review, 6 pr).
     La etapa es el checkpoint (ticket 05 D4): reanudar = mismo worktree + from_stage."""
@@ -899,16 +930,14 @@ def run(from_stage: float = 2) -> dict:
             # D13/D14: un intento anterior dejo la branch creada -> `-b` falla (255). Se reusa la branch existente.
             args = ["worktree", "add", "-q", str(WT), br] if exists else ["worktree", "add", "-q", "-b", br, str(WT), "HEAD"]
             subprocess.run(["git", "-C", FEAT["repo"], *args], check=True)
-            for rel, content in TASK.accept_files.items():
-                _write(rel, content)
-            subprocess.run(["git", "add", "-A"], cwd=WT, check=True)
-            staged = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=WT).returncode != 0
-            if staged:  # D4: el test de aceptacion puede ser uno que ya vive en el repo -> nada que commitear
-                subprocess.run(["git", "-c", "user.name=map12", "-c", "user.email=map12082004@gmail.com", "commit", "-q", "-m",
-                                f"sdlc: test de aceptacion {TASK_NAME} (rojo por diseño)"], cwd=WT, check=True)
-        else:
+        elif hasattr(TASK, "held_out"):  # bench.BenchTask
             bench.materialize(TASK, str(WT))
+        else:  # directorio plano ya materializado por el llamador (workflow_race): el pipeline necesita git
+            subprocess.run(["git", "init", "-q"], cwd=WT, check=True)
+            subprocess.run(["git", "add", "-A"], cwd=WT, check=True)
+            subprocess.run(["git", "-c", "user.name=mmorch", "-c", "user.email=mmorch@local", "commit", "-q", "-m", "base"], cwd=WT)
         print("materializado", WT, flush=True)
+    _seed_accept()  # tambien sobre un worktree abierto por el server: el test de aceptacion entra commiteado
     state["base_sha"] = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=WT, capture_output=True, text=True).stdout.strip() \
         if from_stage <= 3 else "HEAD~1"  # en resume no se conoce: HEAD~1 como antes
     gi = WT / ".gitignore"
@@ -924,38 +953,61 @@ def run(from_stage: float = 2) -> dict:
     for t in TPL.glob("*.md"):  # convencion por repo (ticket 11): las plantillas viajan con el repo
         _write(f"docs/sdlc/{t.name}", t.read_text(encoding="utf-8"))
     stages = {2: spec, 2.5: spec_review, 3: plan, 4: build, 5: test, 5.5: review, 6: pr}
-    for k in sorted(stages):
-        if k >= from_stage:
-            stages[k]()
-            if k == 5.5 and state.get("review_block"):
-                test()  # una vuelta mas con el test de Claude; si sigue rojo, escala
+    try:
+        for k in sorted(stages):
+            if k >= from_stage:
+                stages[k]()
+                if k == 5.5 and state.get("review_block"):
+                    test()  # una vuelta mas con el test de Claude; si sigue rojo, escala
+    except StageFailed as e:  # la etapa es el checkpoint: el run-log dice donde reanudar
+        state["failed_stage"], state["failed_note"] = e.stage, e.note
+        print(str(e), flush=True)
     state["minutes_total"] = round((time.time() - state["t0_epoch"]) / 60, 2)
     state["usd"] = ledger_usd()
     _flush()
     here = RUNS / f"run-log-{PHASE}.json"
     here.write_text(LOG.read_text(encoding="utf-8"), encoding="utf-8")
+    state["status"] = "built" if not state.get("failed_stage") else ("integration_failed" if str(state["failed_stage"]).startswith("5") else "escalate")
     print("SDLC TERMINO", json.dumps({k: state.get(k) for k in
           ("task", "calls", "minutes_total", "usd", "usd_by_family", "human_interventions", "claude_calls", "review_block",
            "escalated_to_claude", "gate_rejects", "diffstat", "lines", "suite_total", "lint_new")}, ensure_ascii=False))
     return dict(state)
 
 
-def build_feature(name: str, task: str, repo: str, *, accept: dict[str, str], files: list[str] | None = None,
-                  contract: list[str] | None = None, suite: list[str] | None = None, wt=None, phase=None,
-                  from_stage: float = 2, max_fix: int = 3, writer=None, coder=None) -> dict:
-    """Construye UNA feature en un repo existente por el pipeline. Devuelve el estado final (run-log).
+def build_feature(name: str, task: str, repo: str, *, accept: dict[str, str] | None = None, accept_cmd: str | None = None,
+                  files: list[str] | None = None, contract: list[str] | None = None, suite: list[str] | None = None,
+                  wt=None, phase=None, from_stage: float = 2, max_fix: int = 3, writer=None, coder=None) -> dict:
+    """Construye UNA feature en un repo existente por el pipeline. Devuelve el estado final (run-log) con
+    `status` in {built, integration_failed, escalate} y, si fallo, `failed_stage` (el checkpoint para reanudar).
 
-    `accept` = {ruta relativa del test de aceptacion: contenido} (lo escribe el llamador, nunca el pipeline).
-    `files` = archivos que el plan puede escribir. Sin `files`, se lee `sdlc.toml` en la raiz del repo
-    (ticket 05 D2: el toml es el techo por modulo; un payload solo lo acota, nunca lo amplia)."""
-    if files is None:
-        files = _files_from_toml(repo)
-    feat = {"repo": repo, "task": task, "files": list(files), "accept": accept, "contract": list(contract or []),
+    `accept` = {ruta relativa del test de aceptacion: contenido} (lo escribe el llamador, nunca el pipeline);
+    sin `accept`, `accept_cmd` (el comando del repo) es el oraculo. `files` = lo que el plan puede escribir:
+    `sdlc.toml` de la raiz del repo es el techo y un `files` del llamador solo lo acota (ticket 05 D2)."""
+    if not accept and not accept_cmd:
+        raise ValueError("build_feature necesita `accept` (tests) o `accept_cmd` (comando del repo)")
+    files = _resolve_files(repo, files)
+    feat = {"repo": repo, "task": task, "files": files, "accept": dict(accept or {}), "contract": list(contract or []),
             "suite": suite or ["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp",
                                str(pathlib.Path(tempfile.gettempdir()) / "pyt-sdlc-wt")]}
-    t = types.SimpleNamespace(name=name, task=task, accept_files=dict(accept))
-    configure(t, contract=feat["contract"], feat=feat, wt=wt, phase=phase, max_fix=max_fix, writer=writer, coder=coder)
+    t = types.SimpleNamespace(name=name, task=task, accept_files=dict(accept or {}))
+    configure(t, contract=feat["contract"], feat=feat, wt=wt, phase=phase, max_fix=max_fix, writer=writer, coder=coder,
+              accept_cmd=accept_cmd)
     return run(from_stage)
+
+
+def _resolve_files(repo: str, files: list[str] | None) -> list[str]:
+    """Techo = `files` de sdlc.toml en la raiz del repo. El llamador solo acota: un archivo fuera del techo es error."""
+    p = pathlib.Path(repo) / "sdlc.toml"
+    techo = _files_from_toml(repo) if p.exists() else None
+    if files is None:
+        if techo is None:
+            raise ValueError(f"sin `files` y sin {p}: el pipeline no sabe que archivos puede tocar (ticket 05 D2)")
+        return techo
+    if techo is not None:
+        fuera = [f for f in files if f not in techo]
+        if fuera:
+            raise ValueError(f"files fuera del techo de {p}: {fuera} (el payload solo acota, no amplia)")
+    return list(files)
 
 
 def _files_from_toml(repo: str) -> list[str]:
@@ -984,8 +1036,7 @@ def main(argv: list[str] | None = None) -> int:
               max_fix=arg("--max-fix", 3))
     if "--self-check" in argv:
         return self_check()
-    run(float(arg("--from-stage", "2")))
-    return 0
+    return 0 if run(float(arg("--from-stage", "2"))).get("status") == "built" else 1
 
 
 # Tokens que la spec tiene que nombrar verbatim (G1) para las tasks del bench.

@@ -77,3 +77,29 @@ def test_files_from_toml_es_el_techo(tmp_path):
         S._files_from_toml(str(tmp_path))
     (tmp_path / "sdlc.toml").write_text('files = ["pkg/a.py"]\n', encoding="utf-8")
     assert S._files_from_toml(str(tmp_path)) == ["pkg/a.py"]
+
+
+def test_resolve_files_toml_es_techo_y_el_payload_solo_acota(tmp_path):
+    with pytest.raises(ValueError):
+        S._resolve_files(str(tmp_path), None)
+    assert S._resolve_files(str(tmp_path), ["pkg/a.py"]) == ["pkg/a.py"]  # sin toml: lo que dice el llamador
+    (tmp_path / "sdlc.toml").write_text('files = ["pkg/a.py", "pkg/b.py"]\n', encoding="utf-8")
+    assert S._resolve_files(str(tmp_path), None) == ["pkg/a.py", "pkg/b.py"]
+    assert S._resolve_files(str(tmp_path), ["pkg/b.py"]) == ["pkg/b.py"]
+    with pytest.raises(ValueError, match="fuera del techo"):
+        S._resolve_files(str(tmp_path), ["pkg/c.py"])
+
+
+def test_stage_fallida_es_excepcion_con_etapa(run):
+    @S.stage("9-falsa")
+    def falsa():
+        return False, "motivo"
+    with pytest.raises(S.StageFailed) as e:
+        falsa()
+    assert e.value.stage == "9-falsa" and e.value.note == "motivo"
+    assert S.state["stages"][-1]["ok"] is False
+
+
+def test_build_feature_exige_oraculo(tmp_path):
+    with pytest.raises(ValueError, match="accept"):
+        S.build_feature("x", "t", str(tmp_path))
