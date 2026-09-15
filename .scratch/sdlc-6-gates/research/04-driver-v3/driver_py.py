@@ -353,12 +353,12 @@ def _flush():
 
 def strip_fence(t):
     # D2 r1: project_integrate.py contiene "```" dentro de un string; el recorte perezoso cortaba el archivo.
-    # Se toma la valla EXTERIOR (primera apertura, ultimo cierre); sin valla, el texto entero.
-    m = re.match(r"\s*```(?:\w+)?\s*\n(.*)\n\s*```\s*$", t, re.S)
-    if m:
-        return m.group(1).strip()
-    m = re.search(r"```(?:\w+)?\s*(.*)```", t, re.S)  # D11-diag2: greedy = hasta el ULTIMO cierre; el lazy cortaba en una valla interna
-    return (m.group(1) if m else t).strip()
+    # D11-diag2: solo cuentan las vallas que ocupan una LINEA entera (```lang); una valla dentro de un string
+    # va en medio de una linea. Se toma de la primera valla-linea a la ultima; sin dos vallas, el texto entero.
+    fences = [m for m in re.finditer(r"(?m)^[ 	]*```\w*[ 	]*$", t)]
+    if len(fences) < 2:
+        return t.strip()
+    return t[fences[0].end():fences[-1].start()].strip()
 
 
 def one_file(code: str, rel: str) -> str:
