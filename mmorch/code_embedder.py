@@ -3,38 +3,53 @@ Mejor representacion de codigo que bge-small en estructura/calidad (flywheel/RES
 radon-tier AUC 0.88 vs bge 0.80). Pesos exportados de torch via flywheel/export_numpy.py.
 
 Es un NODO de la fabrica promovido: token-embed -> bi-GRU -> mean-pool (mask-aware).
-Carga perezosa (.npz + vocab). Si faltan artefactos, embed() devuelve None (degrada graceful,
-como memory.embed). Cero dep nueva: solo numpy (ya esta).
+Carga perezosa (persistida por mmorch.weights). Si falla la verificacion de pesos,
+embed() devuelve None (degrada graceful, como memory.embed). Cero dep nueva: solo numpy
+y el modulo de pesos del repo.
 
 Uso: from mmorch.code_embedder import embed_code; v = embed_code("def f(x): return x+1")
 """
 from __future__ import annotations
 import io, json, re, tokenize, keyword, builtins, textwrap
+from pathlib import Path
+from typing import Any, Literal
 import numpy as np
 
-from .paths import home
+from . import weights
 
-_NPZ = home() / "flywheel" / "code_embedder.npz"
-_VOCAB = home() / "flywheel" / "code_embedder_vocab.json"
 _BUILTINS = set(dir(builtins)) | set(keyword.kwlist)
 _WORD = re.compile(r"[A-Za-z_]\w*|\d+|[^\sA-Za-z0-9_]")
 _MAXLEN = 200
 
-_STATE: dict | None = None
+_CACHE: tuple[Any, Any] | Literal[False] | None = None
 
 
-def _load():
-    global _STATE
-    if _STATE is not None:
-        return _STATE
-    if not (_NPZ.exists() and _VOCAB.exists()):
-        _STATE = {}
-        return _STATE
-    d = np.load(_NPZ)
-    vocab = json.loads(_VOCAB.read_text(encoding="utf-8"))
-    # upcast a float32 (los pesos pueden venir cuantizados fp16; el compute numpy es fp32)
-    _STATE = {"w": {k: d[k].astype(np.float32) for k in d.files}, "vocab": vocab}
-    return _STATE
+def _load() -> tuple[Any, Any] | None:
+    """Carga y verifica pesos una sola vez. None si no estan disponibles."""
+    global _CACHE
+    if _CACHE is False:
+        return None
+    if isinstance(_CACHE, tuple):
+        return _CACHE
+
+    ok, _motivo = weights.verify("code_embedder")
+    if not ok:
+        _CACHE = False
+        return None
+
+    npz_path = weights.resolve("code_embedder")
+    card = weights.card("code_embedder")
+    if card is None or "vocab_path" not in card:
+        _CACHE = False
+        return None
+    vocab_rel = card["vocab_path"]
+    vocab_path = Path(weights.ROOT) / vocab_rel
+
+    d = np.load(npz_path)
+    vocab = json.loads(vocab_path.read_text(encoding="utf-8"))
+    modelo = {"w": {k: d[k].astype(np.float32) for k in d.files}}
+    _CACHE = (modelo, vocab)
+    return _CACHE
 
 
 # --- tokenizer: identico a flywheel/simclr.py (misma distribucion de entrenamiento) --- #
@@ -85,10 +100,11 @@ def _gru_dir(X, w, suf):
 
 def embed_code(code: str) -> list[float] | None:
     """Embedding del codigo (dim 2*hidden). None si faltan artefactos del encoder."""
-    st = _load()
-    if not st:
+    loaded = _load()
+    if loaded is None:
         return None
-    w, vocab = st["w"], st["vocab"]
+    modelo, vocab = loaded
+    w = modelo["w"]
     toks = _tokenize(code)[:_MAXLEN]
     ids = [vocab.get(t, 1) for t in toks] or [1]
     X = w["emb"][ids]                          # (T, emb)
@@ -99,4 +115,4 @@ def embed_code(code: str) -> list[float] | None:
 
 
 def available() -> bool:
-    return bool(_load())
+    return _load() is not None
