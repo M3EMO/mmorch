@@ -49,3 +49,10 @@ Cada hueco del pipeline que la sonda expuso quedo corregido con test en `mmorch/
 
 Los `sdlc.toml` quedaron SIN commitear en cada repo (commit = decision del usuario). El backend Python de
 "Proyecto SaaS" (Estudio) queda fuera: sin venv propio.
+
+- Commits de adopcion por pedido del usuario (2026-09-15): Estudio `b7e7ab0`, Portfolio `65cf5f1`, ChatBot `0725a12`,
+  Adepor `1d5c71e` (solo sdlc.toml + docs/sdlc; el `.beads/issues.jsonl` staged del usuario quedo fuera).
+- Maven: la descarga desde la terminal esta bloqueada por permisos; el usuario la corre (Apache 3.9.11 con sha512).
+- Candidatas de feature de prueba (evidencia en docs del repo): Estudio = exportar mastery a la wiki
+  (spec 2026-05-13 :171 y :248); Portfolio = shortfall por ticker en `scripts/cost_audit.py`
+  (`docs/automatizacion/roadmap_proposals_futuros.md:36`). Pendiente: grilling de requisitos con el usuario.
