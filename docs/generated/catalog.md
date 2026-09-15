@@ -4,7 +4,7 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**121 módulos · 45 MCP tools · 941 tests.**
+**122 módulos · 45 MCP tools · 949 tests.**
 
 El server expone **15** de esas 45 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
 
@@ -106,6 +106,7 @@ El server expone **15** de esas 45 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/schedule.py` | schedule — ADVISORY de ventana off-peak (DeepSeek descuenta fuerte fuera de hora pico). |
 | `mmorch/schema.py` | schema (§9) — structured-output gates. Hoy los parsers de mmorch son best-effort |
 | `mmorch/scout.py` | scout — pre-pass ENTORNO-PRIMERO (el patron central de Fable 5: 'primero aprende el |
+| `mmorch/sdlc.py` | sdlc — pipeline de 6 etapas con gates (spec -> plan -> build -> test -> review -> pr). Ticket 05, paso 1. |
 | `mmorch/self_audit.py` | Auto-auditoria — el juez de mmorch se mira a si mismo, modulo por modulo. |
 | `mmorch/server.py` | server — mmorch VISUAL nivel 3: progreso live de cada subagente + control TOTAL remoto. |
 | `mmorch/server_core.py` | server_core — shared in-process state + tiny request helpers for the server route modules. |

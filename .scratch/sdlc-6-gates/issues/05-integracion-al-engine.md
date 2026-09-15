@@ -28,3 +28,11 @@ El pipeline reemplaza a project-build (decisión del usuario). Decidir qué se r
   escrituras del engine; no se borra todavia (queda en la niebla: retiro de blocks cuando nadie lo lea).
 
 Siguiente: los 4 pasos son ejecucion, no decision. Se construyen con el propio pipeline (dogfood: D16 = paso 1).
+
+## Ejecucion
+
+- Paso 1 HECHO (2026-09-15): `mmorch/sdlc.py` (1001 lineas, port mecanico del driver: configure() + run() +
+  build_feature() + main()), plantillas en `mmorch/sdlc_templates/`, `tests/test_sdlc_gates.py` (8 tests de gates
+  puros, cada uno de un defecto real), `sdlc` registrado como entrada CLI en test_capas, excluido del selfcheck
+  (corre API real). `driver_py.py` queda como CLI fino con la tabla FEATURES. Sin `files`, build_feature lee
+  `sdlc.toml` de la raiz del repo (D2). Baseline de suite y casos de diagnostico van a `logs/sdlc/`.

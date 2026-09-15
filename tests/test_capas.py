@@ -21,7 +21,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 PKG = REPO / "mmorch"
 
-_ENTRADAS = ("mcp_server", "server", "nightly", "cli", "auto_apply_nightly", "hillclimb", "autoresearch")
+_ENTRADAS = ("mcp_server", "server", "nightly", "cli", "auto_apply_nightly", "hillclimb", "autoresearch",
+             "sdlc")  # sdlc: CLI `python -m mmorch.sdlc` (ticket 05 paso 1); el paso 2 lo cablea a server_engine
 _DINAMICOS = {"loop"}   # cargado por nombre desde loop_nightly; 4173 usos en 90 dias
 
 # Medido 2026-09-14 con este mismo analisis (15). Cada uno: se cablea (y sale de aca) o se borra (y sale
