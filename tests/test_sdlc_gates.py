@@ -135,6 +135,29 @@ def test_build_feature_exige_oraculo(tmp_path):
         S.build_feature("x", "t", str(tmp_path))
 
 
+def test_build_feature_serializa_corridas_paralelas(tmp_path, monkeypatch):
+    """Dos jobs del server en el mismo proceso compartian los globals: uno leia el worktree del otro."""
+    import threading
+    import time as _time
+    activos, pico = [0], [0]
+
+    def run(_stage):
+        activos[0] += 1
+        pico[0] = max(pico[0], activos[0])
+        _time.sleep(0.05)
+        activos[0] -= 1
+        return {}
+    monkeypatch.setattr(S, "configure", lambda *a, **k: None)
+    monkeypatch.setattr(S, "run", run)
+    hilos = [threading.Thread(target=S.build_feature, args=(f"f{i}", "t", str(tmp_path)),
+                              kwargs={"accept_cmd": "x", "files": ["a.py"]}) for i in range(3)]
+    for h in hilos:
+        h.start()
+    for h in hilos:
+        h.join()
+    assert pico[0] == 1
+
+
 def test_lint_cuenta_hallazgos_nuevos_por_archivo_contra_la_base(tmp_path, monkeypatch):
     """Ticket 1 del mapa portfolio-circuito: la deuda vieja no bloquea; un hallazgo NUEVO si. Archivo nuevo parte de 0."""
     import subprocess

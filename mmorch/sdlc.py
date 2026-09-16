@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 from typing import Any
@@ -101,6 +102,7 @@ def _repo_python() -> str:
 
 CFG: dict = {}
 state: dict = {}
+_RUN_LOCK = threading.Lock()
 SNAP: dict[str, str] = {}
 SEEN: set[str] = set()
 _RUN_USD: dict = {"usd": 0.0}  # acumulador por-run de providers (W3.4): cada api-call le suma su costo
@@ -1286,9 +1288,12 @@ def build_feature(name: str, task: str, repo: str, *, accept: dict[str, str] | N
             "suite": suite or toml.get("suite") or ["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp",
                                                        str(pathlib.Path(tempfile.gettempdir()) / "pyt-sdlc-wt")]}
     t = types.SimpleNamespace(name=name, task=task, accept_files=dict(accept or {}))
-    configure(t, contract=feat["contract"], feat=feat, wt=wt, phase=phase, max_fix=max_fix, writer=writer, coder=coder,
-              accept_cmd=accept_cmd)
-    return run(from_stage)
+    # ponytail: la corrida vive en globals del modulo; dos jobs a la vez se pisaban WT (Estudio leyo el worktree de
+    # Portfolio). Lock global = una feature por proceso; estado por instancia si hace falta paralelismo.
+    with _RUN_LOCK:
+        configure(t, contract=feat["contract"], feat=feat, wt=wt, phase=phase, max_fix=max_fix, writer=writer, coder=coder,
+                  accept_cmd=accept_cmd)
+        return run(from_stage)
 
 
 def _resolve_files(repo: str, files: list[str] | None) -> list[str]:
