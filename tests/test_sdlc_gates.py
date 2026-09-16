@@ -133,3 +133,28 @@ def test_stage_fallida_es_excepcion_con_etapa(run):
 def test_build_feature_exige_oraculo(tmp_path):
     with pytest.raises(ValueError, match="accept"):
         S.build_feature("x", "t", str(tmp_path))
+
+
+def test_lint_cuenta_hallazgos_nuevos_por_archivo_contra_la_base(tmp_path, monkeypatch):
+    """Ticket 1 del mapa portfolio-circuito: la deuda vieja no bloquea; un hallazgo NUEVO si. Archivo nuevo parte de 0."""
+    import subprocess
+    import types as _t
+    wt = tmp_path / "wt"
+    (wt / "pkg").mkdir(parents=True)
+    (wt / "pkg" / "viejo.py").write_text("l = 1\n", encoding="utf-8")  # E741 preexistente
+    for c in (["init", "-q"], ["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "b"]):
+        subprocess.run(["git", *c], cwd=wt, check=True)
+    t = _t.SimpleNamespace(name="l", task="t", accept_files={})
+    S.configure(t, contract=[], feat={"repo": str(wt), "files": ["pkg/viejo.py"], "suite": []}, wt=wt)
+    S.state["plan_files"] = ["pkg/viejo.py"]
+    (wt / "pkg" / "viejo.py").write_text("l = 1\nx = 2\n", encoding="utf-8")  # cambio sin hallazgos nuevos
+    ok, nota = S.gate_lint()
+    assert ok, nota
+    assert S.state["lint_new"] == {"pkg/viejo.py": [1, 1]}
+    (wt / "pkg" / "viejo.py").write_text("l = 1\nI = 2\n", encoding="utf-8")  # E741 NUEVO
+    assert not S.gate_lint()[0]
+    S.state["plan_files"] = ["pkg/nuevo.py"]
+    (wt / "pkg" / "nuevo.py").write_text("O = 3\n", encoding="utf-8")  # archivo nuevo con hallazgo: base 0
+    ok, nota = S.gate_lint()
+    assert not ok and "nuevo.py" in nota
+    assert (wt / "pkg" / "nuevo.py").exists()  # el baseline lo restaura

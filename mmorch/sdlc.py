@@ -1151,13 +1151,29 @@ def gate_lint() -> tuple[bool, str]:
     if not files:
         state["lint_new"] = {"ruff": 0, "mypy": 0}
         return rec_gate("lint", True, "sin archivos Python ni lint_cmd")
+    # Ticket 1 del mapa portfolio-circuito (2026-09-16): "sin hallazgos NUEVOS por archivo contra la base". Antes exigia
+    # cero absoluto en cada archivo tocado, y la deuda vieja de un repo (Portfolio: 730 ruff + 144 mypy) bloqueaba
+    # cualquier reparacion. En un repo limpio da lo mismo: la base es cero. Un archivo nuevo parte de cero.
+    ahora, log = _hallazgos_por_archivo(files)
+    base, _ = _en_base(lambda: _hallazgos_por_archivo([f for f in files if (WT / f).exists()]))
+    state["lint_new"] = {f: [base.get(f, 0), ahora.get(f, 0)] for f in files}
+    peor = {f: v for f, v in state["lint_new"].items() if v[1] > v[0]}
+    if not peor:
+        return rec_gate("lint", True, f"sin hallazgos nuevos (base, ahora): {state['lint_new']}")
+    return rec_gate("lint", False, f"hallazgos nuevos (base, ahora): {peor}\n{log[-1200:]}")
+
+
+def _hallazgos_por_archivo(files: list[str]) -> tuple[dict[str, int], str]:
+    """ruff + mypy de mmorch sobre `files`; devuelve {archivo: hallazgos} y el log crudo."""
+    if not files:
+        return {}, ""
     _, rl = sh([sys.executable, "-m", "ruff", "check", "--output-format", "concise", *files])
     _, ml = sh([sys.executable, "-m", "mypy", "--ignore-missing-imports", *files])
-    ruff = len(re.findall(r"^\S+:\d+:\d+: ", rl, re.M))
-    mypy = int((re.search(r"Found (\d+) error", ml) or [0, 0])[1])
-    state["lint_new"] = {"ruff": ruff, "mypy": mypy}
-    detail = "0/0" if not (ruff or mypy) else (rl + "\n" + ml)[-1500:]
-    return rec_gate("lint", not (ruff or mypy), detail)
+    cuenta: dict[str, int] = {}
+    for m in re.finditer(r"(?m)^(\S+?):\d+:(?:\d+: |\s*error:)", rl + "\n" + ml):
+        f = m.group(1).replace("\\", "/")
+        cuenta[f] = cuenta.get(f, 0) + 1
+    return cuenta, rl + "\n" + ml
 
 
 def _seed_accept() -> None:
