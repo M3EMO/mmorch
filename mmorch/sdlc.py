@@ -301,7 +301,14 @@ def gate_mutacion() -> tuple[bool, str]:
 def _en_base(fn):
     """Corre fn() con los archivos del plan en su version de HEAD (baseline) y despues los restaura."""
     keep = {f: (WT / f).read_text(encoding="utf-8") for f in state["plan_files"] if (WT / f).exists()}
-    subprocess.run(["git", "checkout", "HEAD", "--", *keep], cwd=WT, check=True)  # sin stash: la pila es compartida
+    # 2026-09-16: un archivo NUEVO del plan no existe en HEAD; `git checkout HEAD -- nuevo` explotaba y el job del server
+    # terminaba en error sin detalle (macro-leadlag, export-mastery). En la base, el archivo nuevo simplemente no esta.
+    en_head = [f for f in keep if subprocess.run(["git", "cat-file", "-e", f"HEAD:{f}"], cwd=WT, capture_output=True).returncode == 0]
+    if en_head:
+        subprocess.run(["git", "checkout", "HEAD", "--", *en_head], cwd=WT, check=True)  # sin stash: la pila es compartida
+    for f in keep:
+        if f not in en_head:
+            (WT / f).unlink()
     try:
         return fn()
     finally:

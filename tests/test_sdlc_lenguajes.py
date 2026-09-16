@@ -74,3 +74,24 @@ def test_suite_cmd_compara_verde_rojo_contra_el_baseline(tmp_path, monkeypatch):
     assert (wt / "src" / "a.js").read_text(encoding="utf-8") == "const ok = false;\n"  # el baseline restaura el cambio
     (wt / "src" / "a.js").write_text("const ok = true;\n", encoding="utf-8")
     assert S.gate_suite_total()[0]
+
+
+def test_baseline_con_archivo_nuevo_del_plan(tmp_path, monkeypatch):
+    """macro-leadlag y export-mastery CREAN un archivo: el baseline hacia `git checkout HEAD -- nuevo` y explotaba
+    (pathspec no conocido por git), el job terminaba en error sin detalle. En la base el archivo nuevo no existe."""
+    import subprocess
+    monkeypatch.setattr(S, "RUNS", tmp_path / "runs")
+    wt = tmp_path / "wt"
+    (wt / "src").mkdir(parents=True)
+    (wt / "suite.py").write_text("import os, sys; sys.exit(0 if not os.path.exists('src/nuevo.js') or 'ok' in open('src/nuevo.js').read() else 1)",
+                                 encoding="utf-8")
+    for c in (["init", "-q"], ["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "b"]):
+        subprocess.run(["git", *c], cwd=wt, check=True)
+    t = types.SimpleNamespace(name="n", task="t", accept_files={})
+    S.configure(t, contract=[], feat={"repo": str(wt), "files": ["src/nuevo.js"], "suite": []}, wt=wt)
+    S.CFG["suite_cmd"] = "python suite.py"
+    S.state.update(plan_files=["src/nuevo.js"], base_sha="HEAD")
+    (wt / "src" / "nuevo.js").write_text("const x = 'ok';\n", encoding="utf-8")  # archivo NUEVO, sin trackear
+    ok, nota = S.gate_suite_total()
+    assert ok, nota
+    assert (wt / "src" / "nuevo.js").read_text(encoding="utf-8") == "const x = 'ok';\n"  # el baseline lo restaura
