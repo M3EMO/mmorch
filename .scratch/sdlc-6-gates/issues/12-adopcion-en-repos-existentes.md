@@ -74,3 +74,9 @@ Los `sdlc.toml` quedaron SIN commitear en cada repo (commit = decision del usuar
   con `resume_branch` + `from_stage=2` + `verdict`.
 - Huecos de mmorch hallados: `21d888a` PYTHONDONTWRITEBYTECODE (mutantes del mismo tamaño en el mismo segundo reusaban el
   .pyc: 2 falsos vivos de 7); `c3e9bed` el server reconoce tests nombrados de cualquier lenguaje.
+
+- Veredictos del usuario 2026-09-15 (2 rechazos, registrados en `logs/sdlc/veredictos.jsonl`): shortfall-por-ticker
+  rechazado porque quiere medir relaciones y patrones entre datos macro; export-mastery rechazado porque quiere YAML.
+  Segunda vuelta: Estudio `1c259df` (YAML con subject/generated/concepts) y Portfolio rama `sdlc/macro-leadlag`
+  (`fb8b2b4`): `mapa_lead_lag` sobre variaciones, ranking por correlacion OOS, 4/4 mutantes muertos. Adepor: el
+  usuario decidio que manda el codigo en `min_ev_escalado` (`c276b73`, 16 tests).
