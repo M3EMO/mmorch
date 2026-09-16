@@ -60,3 +60,25 @@ def test_seed_sin_patterns_no_hace_nada(tmp_path):
     wt = Worktree(str(repo), str(dest), "b")
     assert wt.seed(None) == 0
     assert wt.seed([]) == 0
+
+
+def test_unlink_seeds_desengancha_anidados_sin_borrar_el_destino(tmp_path):
+    """2026-09-15: un junction anidado (app/node_modules) sobrevivio a close() y el borrado siguiente vacio el real."""
+    import os
+    import shutil
+    import subprocess
+
+    from mmorch.worktree_driver import unlink_seeds
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "dato.txt").write_text("no me borres", encoding="utf-8")
+    wt = tmp_path / "wt" / "app"
+    wt.mkdir(parents=True)
+    r = subprocess.run(["cmd", "/c", "mklink", "/J", str(wt / "node_modules"), str(real)], capture_output=True)
+    if r.returncode != 0:
+        import pytest
+        pytest.skip("sin junctions en este entorno")
+    assert unlink_seeds(str(tmp_path / "wt")) == [str(wt / "node_modules")]
+    shutil.rmtree(tmp_path / "wt")
+    assert (real / "dato.txt").read_text(encoding="utf-8") == "no me borres"
+    assert not os.path.exists(wt)

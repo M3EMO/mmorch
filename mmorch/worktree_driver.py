@@ -124,10 +124,31 @@ class Worktree:
             except OSError:
                 pass
         self._links = []
+        unlink_seeds(self.path)       # cinturon: un enlace que no quedo en _links (proceso muerto, reintento)
         _git(self.repo, "worktree", "remove", "--force", self.path)
         if not keep_branch:
             _git(self.repo, "branch", "-D", self.branch)
         _git(self.repo, "worktree", "prune")
+
+
+def unlink_seeds(path: str) -> list[str]:
+    """Desengancha (sin seguir) todo junction/symlink de directorio dentro de `path`, a cualquier profundidad.
+
+    Medido 2026-09-15 (caro): un worktree quedo huerfano al morir el proceso, y el borrado recursivo siguiente
+    siguio el junction `app/node_modules` y VACIO el node_modules del repo real. Cualquier borrado de un worktree
+    sembrado pasa por aca primero; `close()` ya lo hace, y un rescate de worktrees huerfanos debe hacerlo tambien."""
+    fuera: list[str] = []
+    for raiz, dirs, _ in os.walk(path, topdown=True):
+        for d in list(dirs):
+            p = os.path.join(raiz, d)
+            if os.path.islink(p) or (os.name == "nt" and os.lstat(p).st_file_attributes & 0x400):  # REPARSE_POINT
+                dirs.remove(d)  # nunca descender por el enlace
+                try:
+                    os.rmdir(p)
+                    fuera.append(p)
+                except OSError:
+                    pass
+    return fuera
 
 
 def open_worktree(repo: str, *, prefix: str = "mmorch/wt", base: str = "HEAD",
