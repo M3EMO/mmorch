@@ -1296,17 +1296,19 @@ def _files_from_toml(repo: str) -> list[str]:
     return list(files)
 
 
-def registrar_veredicto(repo: str, branch: str, label: str, motivo: str, task: str = "") -> dict:
+def registrar_veredicto(repo: str, branch: str, label: str, motivo: str, task: str = "", test_rel: str = "") -> dict:
     """Ticket 08 D1/D2: cada aprobacion o rechazo del test de aceptacion deja un ejemplo etiquetado (test completo,
-    etiqueta, motivo) en logs/sdlc/veredictos.jsonl. El test se lee de la branch (docs/sdlc/run-log.json -> rel)."""
+    etiqueta, motivo) en logs/sdlc/veredictos.jsonl. El test se lee de la branch: `test_rel` si el llamador lo sabe
+    (modo grill: el test lo escribe un humano y no hay run-log), si no `docs/sdlc/run-log.json -> awaiting_approval`."""
     def _show(rel):
         r = subprocess.run(["git", "-C", repo, "show", f"{branch}:{rel}"], capture_output=True, text=True, encoding="utf-8", errors="replace")
         return r.stdout if r.returncode == 0 else ""
-    rel = ""
-    try:
-        rel = json.loads(_show("docs/sdlc/run-log.json") or "{}").get("awaiting_approval") or ""
-    except ValueError:
-        rel = ""
+    rel = test_rel
+    if not rel:
+        try:
+            rel = json.loads(_show("docs/sdlc/run-log.json") or "{}").get("awaiting_approval") or ""
+        except ValueError:
+            rel = ""
     rec = {"ts": time.time(), "repo": repo, "branch": branch, "test_rel": rel, "test": _show(rel) if rel else "",
            "label": label, "motivo": motivo, "task": task}
     RUNS.mkdir(parents=True, exist_ok=True)

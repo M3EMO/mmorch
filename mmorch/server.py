@@ -324,7 +324,8 @@ async def run_workflow(request):
                                     status_code=400)
             from .projects import resolve as _resolve
             from .sdlc import registrar_veredicto
-            registrar_veredicto(_resolve(project), resume_branch, v["label"], str(v["motivo"]).strip(), task)
+            registrar_veredicto(_resolve(project), resume_branch, v["label"], str(v["motivo"]).strip(), task,
+                                test_rel=str(v.get("test_rel", "")))  # modo grill: el test lo nombra el llamador
             if v["label"] == "rechazado":
                 return JSONResponse({"recorded": "rechazado", "branch": resume_branch,
                                      "next": "edita el test en la branch y reanuda con label aprobado"})

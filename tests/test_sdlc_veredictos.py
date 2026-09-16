@@ -99,3 +99,14 @@ def test_tests_nombrados_en_cualquier_lenguaje(tmp_path):
     assert _tests_nombrados("app/src/sdlc/export_mastery.test.ts", tmp_path) == ["app/src/sdlc/export_mastery.test.ts"]
     assert _tests_nombrados("mvn -q -f backend/pom.xml test", tmp_path) == []
     assert _tests_nombrados("pytest -q tests/test_no_existe.py", tmp_path) == []
+
+
+def test_veredicto_con_test_rel_explicito(tmp_path, monkeypatch):
+    """Modo grill: el test lo escribe un humano y no hay run-log; el llamador nombra la ruta y el veredicto la guarda."""
+    repo = _repo(tmp_path)
+    (repo / "tests" / "test_sdlc_grill.py").write_text("def test_R1_x():\n    assert False\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "test"], cwd=repo, check=True)
+    monkeypatch.setattr(S, "RUNS", tmp_path / "logs")
+    rec = S.registrar_veredicto(str(repo), "HEAD", "rechazado", "quiero otro formato", "tarea", test_rel="tests/test_sdlc_grill.py")
+    assert rec["test_rel"] == "tests/test_sdlc_grill.py" and "test_R1_x" in rec["test"]
