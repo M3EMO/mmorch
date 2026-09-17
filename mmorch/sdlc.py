@@ -130,6 +130,10 @@ def configure(task, *, contract, feat=None, wt=None, phase=None, max_fix=3, writ
     MAX_FIX = int(max_fix)
     LOG = WT / "docs" / "sdlc" / "run-log.json"
     REVIEW_REL = f"{TESTS_PREFIX}test_review_sdlc.py"
+    if FEAT:  # 2026-09-17: un nombre fijo hacia chocar la revision de dos features al mergear; el slug sale del test
+        acc = next(iter(task.accept_files), TASK_NAME)  # de aceptacion, estable al reanudar la misma feature
+        slug = re.sub(r"^test_(sdlc_)?|_test$", "", re.sub(r"[^a-z0-9]+", "_", pathlib.Path(acc).name.split(".")[0].lower()))
+        REVIEW_REL = f"{TESTS_PREFIX}test_review_{slug.strip('_')[:40] or 'sdlc'}.py"
     WRITER = writer or os.environ.get("SDLC_WRITER", "deepseek-reasoner")
     CODER = coder or os.environ.get("SDLC_CODER", "deepseek-v4-pro")
     DIAG = diag or os.environ.get("SDLC_DIAG", WRITER)
@@ -238,14 +242,14 @@ _MUT_TEXTO = [("==", "!="), ("!=", "=="), ("<=", ">="), (">=", "<="), (" < ", " 
               ("&&", "||"), ("||", "&&"), ("true", "false"), ("false", "true"), (" + ", " - "), (" - ", " + ")]
 
 
-def _mutantes_texto(code: str, max_n: int = 8) -> list[str]:
+def _mutantes_texto(code: str, max_n: int = 8, lineas: set[int] | None = None) -> list[str]:
     """Mutantes para lenguajes sin AST en stdlib (Rust, JS, Go, C...): un swap de operador/booleano por mutante,
     solo en lineas de codigo (no comentarios ni imports). Un mutante que no compila se descarta (mortinato)."""
     lines = code.split("\n")
     out: list[str] = []
     for i, line in enumerate(lines):
         st = line.strip()
-        if not st or st.startswith(("//", "#", "*", "/*", "use ", "import ", "require(", "mod ", "package ")):
+        if (lineas is not None and i + 1 not in lineas) or not st or st.startswith(("//", "#", "*", "/*", "use ", "import ", "require(", "mod ", "package ")):
             continue
         for a, b in _MUT_TEXTO:
             if a in line:
@@ -265,6 +269,81 @@ def _accept_mata() -> bool:
     return not ok
 
 
+_COBERTURA = r'''
+import json, os, sys
+destino, archivos, args = sys.argv[1], {os.path.normcase(os.path.abspath(a)) for a in json.loads(sys.argv[2])}, sys.argv[3:]
+M = sys.monitoring
+corridas = set()
+def linea(code, n):
+    f = os.path.normcase(code.co_filename)
+    if f in archivos:
+        corridas.add((f, n))
+    return M.DISABLE  # cada linea avisa una sola vez: el costo no escala con la suite
+M.use_tool_id(M.COVERAGE_ID, "sdlc")
+M.register_callback(M.COVERAGE_ID, M.events.LINE, linea)
+M.set_events(M.COVERAGE_ID, M.events.LINE)
+import pytest
+rc = pytest.main(args)
+out = {}
+for f in archivos:
+    pend, ejec = [compile(open(f, encoding="utf-8").read(), f, "exec")], set()
+    while pend:
+        c = pend.pop()
+        ejec.update(n for _, _, n in c.co_lines() if n)
+        pend.extend(k for k in c.co_consts if hasattr(k, "co_lines"))
+    out[f] = {"ejecutables": sorted(ejec), "corridas": sorted(n for g, n in corridas if g == f)}
+json.dump(out, open(destino, "w", encoding="utf-8"))
+sys.exit(rc)
+'''
+
+
+def _cobertura(files: list[str]) -> dict[str, tuple[int, list[int]]] | None:
+    """{archivo: (lineas ejecutables, lineas que la aceptacion NO corre)} con el interprete del repo (sys.monitoring,
+    3.12+). None = no se pudo medir (interprete viejo o la aceptacion no corre)."""
+    destino = pathlib.Path(tempfile.mkdtemp()) / "cobertura.json"
+    ok, _ = sh([PY, "-c", _COBERTURA, str(destino), json.dumps([str(WT / f) for f in files]),
+                *_accept_paths(), "-q", "-p", "no:cacheprovider"])
+    if not ok or not destino.exists():
+        return None
+    datos = json.loads(destino.read_text(encoding="utf-8"))
+    out = {}
+    for f in files:
+        d = datos[os.path.normcase(os.path.abspath(WT / f))]
+        out[f] = (len(d["ejecutables"]), sorted(set(d["ejecutables"]) - set(d["corridas"])))
+    return out
+
+
+def _en_head(f: str) -> bool:
+    return subprocess.run(["git", "cat-file", "-e", f"HEAD:{f}"], cwd=WT, capture_output=True).returncode == 0
+
+
+def _lineas_cambiadas(f: str) -> set[int] | None:
+    """Lineas (1-based) de `f` que difieren de HEAD. None = archivo nuevo: todas cuentan."""
+    if not _en_head(f):
+        return None
+    diff = subprocess.run(["git", "diff", "-U0", "HEAD", "--", f], cwd=WT, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace").stdout
+    return {n for a, b in re.findall(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@", diff, re.M) for n in range(int(a), int(a) + int(b or 1))}
+
+
+def gate_codigo_muerto() -> tuple[bool, str]:
+    """2026-09-17: ningun gate medía codigo muerto en archivos NUEVOS (cambio-minimo solo mira los existentes) y
+    macro_leadlag llego con ~180 de 333 lineas para formatos que walk_forward_corr nunca devuelve. Mide que fraccion
+    de las lineas ejecutables de los .py nuevos del plan corre la aceptacion; bloquea bajo `cobertura_min`.
+    Default 0.8 medido: esa version corria 0.533 y la recortada 0.947 (las firmas multilinea no siempre avisan)."""
+    nuevos = [f for f in state.get("plan_files", []) if _es_py(f) and (WT / f).exists() and not _en_head(f)]
+    if not nuevos or not TASK.accept_files:
+        return rec_gate("codigo-muerto", True, "sin .py nuevos o sin tests de aceptacion pytest: no mide")
+    medida = _cobertura(nuevos)
+    if medida is None:
+        return rec_gate("codigo-muerto", True, f"no se pudo medir con {PY} (sys.monitoring pide Python 3.12+)")
+    minimo = float(CFG.get("cobertura_min", 0.8))
+    state["cobertura_nueva"] = {f: round(1 - len(falta) / max(total, 1), 3) for f, (total, falta) in medida.items()}
+    bajos = {f: medida[f][1] for f, c in state["cobertura_nueva"].items() if c < minimo}
+    detalle = "; ".join(f"{f}: {state['cobertura_nueva'][f]} corre, lineas sin ejecutar {falta}" for f, falta in bajos.items())
+    return rec_gate("codigo-muerto", not bajos, detalle or f"cobertura de archivos nuevos {state['cobertura_nueva']} >= {minimo}")
+
+
 def gate_mutacion() -> tuple[bool, str]:
     """Ticket 08 D2 (opcion D): el test de aceptacion mata mutantes del codigo final. Score = muertos / total sobre los
     archivos del plan (mutantes de checkers._mutants: operadores, comparaciones, booleanos, enteros). Bloquea SOLO con
@@ -279,7 +358,9 @@ def gate_mutacion() -> tuple[bool, str]:
         if not p.exists():
             continue
         orig = p.read_text(encoding="utf-8")
-        for m in (_mutants(orig, max_n=8) if _es_py(f) else _mutantes_texto(orig, max_n=8)):
+        # 2026-09-17: solo las lineas que cambio la feature; mutar el archivo entero medía los tests viejos (score 0.25)
+        cambiadas = _lineas_cambiadas(f)
+        for m in (_mutants(orig, max_n=8, lineas=cambiadas) if _es_py(f) else _mutantes_texto(orig, max_n=8, lineas=cambiadas)):
             p.write_text(m, encoding="utf-8")
             try:
                 if not _es_py(f) and compile_cmd and not sh(_cmd("compile_cmd", [f]))[0]:
@@ -305,7 +386,7 @@ def _en_base(fn):
     keep = {f: (WT / f).read_text(encoding="utf-8") for f in state["plan_files"] if (WT / f).exists()}
     # 2026-09-16: un archivo NUEVO del plan no existe en HEAD; `git checkout HEAD -- nuevo` explotaba y el job del server
     # terminaba en error sin detalle (macro-leadlag, export-mastery). En la base, el archivo nuevo simplemente no esta.
-    en_head = [f for f in keep if subprocess.run(["git", "cat-file", "-e", f"HEAD:{f}"], cwd=WT, capture_output=True).returncode == 0]
+    en_head = [f for f in keep if _en_head(f)]
     if en_head:
         subprocess.run(["git", "checkout", "HEAD", "--", *en_head], cwd=WT, check=True)  # sin stash: la pila es compartida
     for f in keep:
@@ -659,7 +740,7 @@ def gate_docstring(before: dict) -> tuple[bool, str]:
 def _tests_text():
     t = "\n\n".join(f"# {k}\n{(WT / k).read_text(encoding='utf-8')}" for k in TASK.accept_files)
     if (WT / REVIEW_REL).exists():
-        t += "\n\n# test_review_sdlc.py (revision de Claude, no se toca)\n" + (WT / REVIEW_REL).read_text(encoding="utf-8")
+        t += f"\n\n# {REVIEW_REL} (revision de Claude, no se toca)\n" + (WT / REVIEW_REL).read_text(encoding="utf-8")
     return t
 
 
@@ -1050,6 +1131,26 @@ def test():
             write_supervision("ESCALATE_HUMAN: fix 3 + reasoner 2 + Claude agotados.")
             return False, ladder_note
     if ok and FEAT:
+        dok, dnote = gate_codigo_muerto()  # antes del lint: borrar codigo deja imports sin uso y el lint los ve
+        if not dok:
+            backup = _all_code()
+            nuevo = next(f for f in state["plan_files"] if f in dnote)
+            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero.",
+                      f"Ningun test ejecuta estas lineas de {nuevo}. Borra el codigo que la tarea no pide (ramas y formatos "
+                      f"que nunca ocurren) sin cambiar el comportamiento que los tests fijan.\n\nMEDIDA:\n{dnote}\n\n"
+                      f"TAREA:\n{TASK.task}\n\nTESTS:\n{_tests_text()}\n\nARCHIVOS:\n{_joined(backup)}")
+            code = one_file(strip_fence(out), nuevo)
+            if code:
+                _write(nuevo, code)
+            aok, _ = accept()
+            dok, dnote = gate_codigo_muerto() if aok else (False, "la aceptacion se rompio al borrar codigo")
+            if not dok:
+                _revert(backup)
+                cok, _ = claude_fix(f"Codigo que ningun test de aceptacion ejecuta; borralo sin romper los tests:\n{dnote}")
+                dok, dnote = gate_codigo_muerto() if cok else (False, "Claude no dejo verde la aceptacion")
+            if not dok:
+                write_supervision(f"ESCALATE_HUMAN: codigo muerto tras coder y Claude\n{dnote}")
+                return False, f"codigo muerto: {dnote[:200]}"
         lok, lnote = gate_lint()
         if not lok:  # D2 r1: el pre-commit del repo rechazo 2 errores de mypy; ahora es gate con escalera
             out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero.",
@@ -1340,9 +1441,20 @@ def registrar_veredicto(repo: str, branch: str, label: str, motivo: str, task: s
     rec = {"ts": time.time(), "repo": repo, "branch": branch, "test_rel": rel, "test": _show(rel) if rel else "",
            "label": label, "motivo": motivo, "task": task}
     RUNS.mkdir(parents=True, exist_ok=True)
-    with (RUNS / "veredictos.jsonl").open("a", encoding="utf-8") as f:
+    log = RUNS / "veredictos.jsonl"
+    # 2026-09-17: cada relanzamiento con `verdict` re-registraba la misma decision (17 filas para 7): un veredicto es
+    # (repo, branch, test, etiqueta); repetido, no suma un ejemplo nuevo al umbral del checker en sombra.
+    clave = _clave_veredicto(rec)
+    for linea in (log.read_text(encoding="utf-8").splitlines() if log.exists() else []):
+        if linea.strip() and _clave_veredicto(json.loads(linea)) == clave:
+            return json.loads(linea)
+    with log.open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     return rec
+
+
+def _clave_veredicto(rec: dict) -> tuple:
+    return rec.get("repo"), rec.get("branch"), rec.get("test_rel"), rec.get("test"), rec.get("label")
 
 
 def init(repo: str) -> dict:
@@ -1376,6 +1488,7 @@ def init(repo: str) -> dict:
             "# el test de aceptacion que escribe la etapa 1 antes de gastar (ticket 12 D5).\n"
             "# Otros lenguajes: `ext`, `compile_cmd` (G3 y test-compile), `lint_cmd` ({files} = archivos del plan),\n"
             "# `suite_cmd` (suite total si no es pytest), `seed_globs` (ignorados que el worktree necesita), `accept_test` ({slug}).\n"
+            "# Umbrales: `cobertura_min` (0.8; fraccion de un .py NUEVO que corre la aceptacion), `mutation_min` (sin: observa).\n"
             + ('accept_cmd = "python -m pytest -q"\nsuite = ["tests", "-q", "-rfE", "-p", "no:cacheprovider"]\n'
                if (root / "tests").is_dir() else  # sin tests/, pytest en la raiz recolecta cualquier test_*.py (scrapers)
                '# accept_cmd = "<comando determinista, sin red>"   # sin tests/: definilo o el repo no entra\n')

@@ -14,11 +14,13 @@ WEAK = "def test_R1_suma():\n    from pkg.a import suma\n    assert suma(0, 0) =
 
 def _repo(tmp_path):
     (tmp_path / "pkg").mkdir()
-    (tmp_path / "pkg" / "a.py").write_text("def suma(a, b):\n    if a > 100:\n        return 100\n    return a + b\n", encoding="utf-8")
+    (tmp_path / "pkg" / "a.py").write_text("def suma(a, b):\n    return 0\n", encoding="utf-8")
     (tmp_path / "tests").mkdir()
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
     subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base"], cwd=tmp_path, check=True)
+    # la feature: la mutacion mide solo las lineas que cambian contra HEAD
+    (tmp_path / "pkg" / "a.py").write_text("def suma(a, b):\n    if a > 100:\n        return 100\n    return a + b\n", encoding="utf-8")
     return tmp_path
 
 
@@ -110,3 +112,49 @@ def test_veredicto_con_test_rel_explicito(tmp_path, monkeypatch):
     monkeypatch.setattr(S, "RUNS", tmp_path / "logs")
     rec = S.registrar_veredicto(str(repo), "HEAD", "rechazado", "quiero otro formato", "tarea", test_rel="tests/test_sdlc_grill.py")
     assert rec["test_rel"] == "tests/test_sdlc_grill.py" and "test_R1_x" in rec["test"]
+
+
+def test_veredicto_repetido_no_suma_un_ejemplo(tmp_path, monkeypatch):
+    """Cada relanzamiento con `verdict` re-registraba la misma decision: 17 filas para 7 veredictos reales."""
+    repo = _repo(tmp_path)
+    (repo / "tests" / "test_sdlc_m.py").write_text(WEAK, encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "acc"], cwd=repo, check=True)
+    monkeypatch.setattr(S, "RUNS", tmp_path / "logs")
+    for motivo in ("mide la tarea", "relanzo la corrida"):
+        S.registrar_veredicto(str(repo), "HEAD", "aprobado", motivo, test_rel="tests/test_sdlc_m.py")
+    S.registrar_veredicto(str(repo), "HEAD", "rechazado", "cambie de idea", test_rel="tests/test_sdlc_m.py")
+    (repo / "tests" / "test_sdlc_m.py").write_text(STRONG, encoding="utf-8")  # test nuevo = ejemplo nuevo
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "R2"], cwd=repo, check=True)
+    S.registrar_veredicto(str(repo), "HEAD", "aprobado", "con R2", test_rel="tests/test_sdlc_m.py")
+    filas = [json.loads(x) for x in (tmp_path / "logs" / "veredictos.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [(f["label"], f["motivo"]) for f in filas] == [("aprobado", "mide la tarea"), ("rechazado", "cambie de idea"),
+                                                          ("aprobado", "con R2")]
+
+
+def test_build_job_reporta_el_diff_de_toda_la_feature(tmp_path, monkeypatch):
+    """La etapa 6 commitea dentro del worktree: el diffstat del ultimo commit salia vacio o parcial."""
+    import mmorch.server_engine as SE
+    from mmorch.server_core import _JOBS
+    repo = _repo(tmp_path)
+    monkeypatch.setattr("mmorch.projects.resolve", lambda name, **k: str(repo))
+
+    def build_falso(kw):
+        wt = kw["wt"]
+        open(f"{wt}/pkg/b.py", "w", encoding="utf-8").write("B = 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "etapa 6"], cwd=wt, check=True)
+        return {"status": "built"}
+    monkeypatch.setattr(SE, "_build_en_proceso", build_falso)
+    SE._run_project_build_job("diff1", "t", "p", "pytest -q")
+    assert _JOBS["diff1"]["status"] == "done"
+    assert "pkg/b.py" in _JOBS["diff1"]["diffstat"]
+
+
+def test_build_en_proceso_propaga_el_error_del_hijo(tmp_path):
+    """Cada feature corre en su proceso (globals de sdlc por proceso): un error de build_feature llega al job."""
+    import pytest
+
+    from mmorch.server_engine import _build_en_proceso
+    with pytest.raises(RuntimeError, match="accept"):
+        _build_en_proceso({"name": "x", "task": "t", "repo": str(tmp_path)})

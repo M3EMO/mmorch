@@ -155,6 +155,32 @@ def _tests_nombrados(external_test: str | None, root) -> list[str]:
     return [p for p in _re.findall(r"[\w./-]*test[\w./-]*\.\w+", external_test or "", _re.I) if (Path(root) / p).is_file()]
 
 
+_BUILD_HIJO = """import json, pathlib, sys
+from mmorch.sdlc import build_feature
+kw = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+pathlib.Path(sys.argv[2]).write_text(json.dumps(build_feature(**kw), default=str), encoding="utf-8")
+"""
+
+
+def _build_en_proceso(kw: dict) -> dict:
+    """Cada feature corre en su propio proceso. Los globals de mmorch.sdlc son por proceso: dos jobs avanzan en paralelo
+    sin pisarse el worktree (2026-09-16 un lock los serializaba; el gasto igual queda en metrics.jsonl)."""
+    import json
+    import subprocess
+    import sys
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        entrada, salida = Path(d) / "entrada.json", Path(d) / "salida.json"
+        entrada.write_text(json.dumps(kw), encoding="utf-8")
+        from .paths import repo_root
+        p = subprocess.run([sys.executable, "-c", _BUILD_HIJO, str(entrada), str(salida)], cwd=repo_root(),
+                           stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+        sys.stderr.write(p.stderr)
+        if p.returncode or not salida.exists():
+            raise RuntimeError(f"build_feature salio con {p.returncode}: {p.stderr.strip()[-300:]}")
+        return json.loads(salida.read_text(encoding="utf-8"))
+
+
 def _run_project_build_job(jid: str, task: str, project: str, external_test: str,
                            max_depth: int = 2, seed_globs: list | None = None, parent=None,
                            gen_model: str | None = None, max_fix: int | None = None,
@@ -165,15 +191,17 @@ def _run_project_build_job(jid: str, task: str, project: str, external_test: str
     Estado terminal: built -> done; integration_failed (etapa 5) -> gate; otro fallo -> escalate.
     La etapa es el checkpoint: `result.failed_stage` + `review_branch` permiten reanudar con
     {resume_branch, from_stage} en el mismo payload. `max_depth` se acepta por compatibilidad y se ignora."""
-    from .worktree_driver import open_worktree
+    from .worktree_driver import _git, open_worktree
     from .projects import resolve
-    from .sdlc import build_feature
     with _JOBS_LOCK:
         _JOBS[jid] = _jobmeta("project-build", task, engine="mmorch", parent=parent)
     wt = None
+    base = ""
     try:
         repo = resolve(project)
         wt = open_worktree(repo, base=resume_branch or "HEAD")
+        rc, base = _git(wt.path, "rev-parse", "HEAD")
+        base = base if rc == 0 else ""
         with _JOBS_LOCK:
             _JOBS[jid]["review_branch"] = wt.branch
         # F4: un checkout fresco no tiene los artefactos gitignorados que la aceptacion lee (.venv, caches).
@@ -183,9 +211,10 @@ def _run_project_build_job(jid: str, task: str, project: str, external_test: str
              detail=f"sdlc {project} -> {wt.branch}{f' (+{n_seed} seeded)' if n_seed else ''}: {task[:70]}")
         named = _tests_nombrados(external_test, wt.path)
         accept = {p: (Path(wt.path) / p).read_text(encoding="utf-8") for p in named}
-        res = build_feature(jid, task, repo, accept=accept or None, accept_cmd=None if accept else external_test,
-                            files=files, wt=wt.path, phase=f"sdlc-{jid}", from_stage=from_stage,
-                            max_fix=int(max_fix) if max_fix else 3, coder=gen_model)
+        res = _build_en_proceso(dict(name=jid, task=task, repo=repo, accept=accept or None,
+                                     accept_cmd=None if accept else external_test, files=files, wt=wt.path,
+                                     phase=f"sdlc-{jid}", from_stage=from_stage, max_fix=int(max_fix) if max_fix else 3,
+                                     coder=gen_model))
         status = res.get("status", "escalate")
         job_status = {"built": "done", "integration_failed": "gate", "awaiting_approval": "gate"}.get(status, "escalate")
         with _JOBS_LOCK:
@@ -208,9 +237,11 @@ def _run_project_build_job(jid: str, task: str, project: str, external_test: str
                 if cap["changed"] and not cap["committed"]:
                     emit("job", "error", job_id=jid,
                          detail=f"commit final falló, trabajo NO guardado: {cap['error'][:160]}")
+                # la etapa 6 ya commitea: el diff del ultimo commit no mostraba la feature (2026-09-16)
+                rc, total = _git(wt.path, "diff", "--stat", base, "HEAD") if base else (1, "")
                 with _JOBS_LOCK:
                     if jid in _JOBS:
-                        _JOBS[jid]["diffstat"] = cap.get("diffstat", "")
+                        _JOBS[jid]["diffstat"] = (total if rc == 0 else "") or cap.get("diffstat", "")
             except Exception as e:
                 emit("job", "warn", job_id=jid, detail=f"commit final no confirmado: {str(e)[:150]}")
             finally:

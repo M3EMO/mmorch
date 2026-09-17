@@ -410,9 +410,10 @@ _MUT_CMP = {ast.Lt: ast.Gt, ast.Gt: ast.Lt, ast.LtE: ast.GtE, ast.GtE: ast.LtE,
 _MUT_BOOL = {ast.And: ast.Or, ast.Or: ast.And}
 
 
-def _mutants(code: str, max_n: int = 12) -> list[str]:
+def _mutants(code: str, max_n: int = 12, lineas: set[int] | None = None) -> list[str]:
     """Genera mutantes (1 mutación c/u): swap de operador binario/comparación/booleano,
-    flip de bool, n->n+1. Usa ast+unparse. Cada mutante es código válido."""
+    flip de bool, n->n+1. Usa ast+unparse. Cada mutante es código válido.
+    `lineas` = solo nodos que empiezan en esas lineas (el gate del SDLC muta lo que cambio la feature)."""
     import copy
     try:
         base = ast.parse(code)
@@ -430,7 +431,7 @@ def _mutants(code: str, max_n: int = 12) -> list[str]:
     # (indice de recorrido, kind, alternativa) — una mutación por entrada
     targets: list[tuple[int, str, Any]] = []
     for i, node in enumerate(ast.walk(base)):
-        if id(node) not in in_func:
+        if id(node) not in in_func or (lineas is not None and getattr(node, "lineno", None) not in lineas):
             continue
         if isinstance(node, ast.BinOp) and type(node.op) in _MUT_BINOP:
             for alt in _MUT_BINOP[type(node.op)]:

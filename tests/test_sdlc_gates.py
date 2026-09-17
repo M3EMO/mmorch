@@ -7,6 +7,8 @@ Cada caso viene de un defecto real del driver (research/07-resultados.md del map
 - cambio-minimo: el coder reescribio project_loop.py (-216 lineas) para agregar una guarda (D11).
 - clarificaciones: Claude escribe "0 preguntas" y "afecta: Contrato" con formato libre (D11-diag).
 """
+import subprocess
+import sys
 import types
 
 import pytest
@@ -156,6 +158,63 @@ def test_build_feature_serializa_corridas_paralelas(tmp_path, monkeypatch):
     for h in hilos:
         h.join()
     assert pico[0] == 1
+
+
+def _repo_git(wt):
+    (wt / "pkg").mkdir(parents=True)
+    (wt / "pkg" / "viejo.py").write_text("def f(x):\n    return x\n", encoding="utf-8")
+    for c in (["init", "-q"], ["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "b"]):
+        subprocess.run(["git", *c], cwd=wt, check=True)
+
+
+def test_codigo_muerto_en_archivo_nuevo_bloquea_bajo_el_umbral(tmp_path):
+    """macro_leadlag llego con ~180 lineas que ningun test ejecutaba; ningun gate miraba archivos nuevos."""
+    wt = tmp_path / "wt"
+    _repo_git(wt)
+    acc = "def test_R1():\n    from pkg.nuevo import doble\n    assert doble(2) == 4\n"
+    (wt / "test_acc.py").write_text(acc, encoding="utf-8")
+    muerto = "".join(f"    if formato == {i}:\n        return {i}\n" for i in range(12))
+    (wt / "pkg" / "nuevo.py").write_text(f"def doble(x):\n    return 2 * x\n\n\ndef formatos(formato):\n{muerto}", encoding="utf-8")
+    t = types.SimpleNamespace(name="m", task="t", accept_files={"test_acc.py": acc})
+    S.configure(t, contract=[], feat={"repo": str(wt), "files": ["pkg/nuevo.py"], "suite": []}, wt=wt)
+    S.PY = sys.executable
+    S.state["plan_files"] = ["pkg/nuevo.py", "pkg/viejo.py"]
+    ok, nota = S.gate_codigo_muerto()
+    assert not ok and "pkg/nuevo.py" in nota and "viejo" not in nota  # el archivo de HEAD no se mide
+    (wt / "pkg" / "nuevo.py").write_text("def doble(x):\n    return 2 * x\n", encoding="utf-8")
+    ok, nota = S.gate_codigo_muerto()
+    assert ok and S.state["cobertura_nueva"] == {"pkg/nuevo.py": 1.0}, nota
+
+
+def test_test_de_revision_se_llama_como_la_feature(tmp_path):
+    """Un nombre fijo (tests/test_review_sdlc.py) hacia chocar la revision de dos features al mergear."""
+    casos = {"tests/test_sdlc_macro_leadlag.py": "tests/test_review_macro_leadlag.py",
+             "app/src/sdlc/export_mastery.test.ts": "tests/test_review_export_mastery.py",
+             "backend/src/test/java/Sdlc_login_Test.java": "tests/test_review_sdlc_login.py"}
+    for acc, esperado in casos.items():
+        t = types.SimpleNamespace(name="298c10307f", task="t", accept_files={acc: ""})
+        S.configure(t, contract=[], feat={"repo": str(tmp_path), "files": ["a.py"], "suite": []}, wt=tmp_path)
+        assert S.REVIEW_REL == esperado
+    S.configure(types.SimpleNamespace(name="298c10307f", task="t", accept_files={}), contract=[],
+                feat={"repo": str(tmp_path), "files": ["a.py"], "suite": []}, wt=tmp_path)
+    assert S.REVIEW_REL == "tests/test_review_298c10307f.py"
+
+
+def test_mutacion_solo_en_las_lineas_que_cambio_la_feature(tmp_path):
+    """El score medía el archivo entero (0.25 en canal.py): los mutantes caian en codigo viejo que la feature no toca."""
+    from mmorch.checkers import _mutants
+    wt = tmp_path / "wt"
+    _repo_git(wt)
+    t = types.SimpleNamespace(name="m", task="t", accept_files={})
+    S.configure(t, contract=[], feat={"repo": str(wt), "files": ["pkg/viejo.py"], "suite": []}, wt=wt)
+    codigo = "def f(x):\n    return x\n\n\ndef g(x):\n    return x + 1 if x > 0 else 0\n"
+    (wt / "pkg" / "viejo.py").write_text(codigo, encoding="utf-8")
+    assert S._lineas_cambiadas("pkg/viejo.py") == {3, 4, 5, 6}
+    assert S._lineas_cambiadas("pkg/no_existe.py") is None  # archivo nuevo: todo cuenta
+    solo_g = _mutants(codigo, max_n=50, lineas={6})
+    assert solo_g and all(m.splitlines()[:2] == ["def f(x):", "    return x"] for m in solo_g)
+    assert _mutants(codigo, max_n=50, lineas={2}) == []  # f no tiene nada mutable
+    assert S._mutantes_texto("a = 1 == 2\nb = 3 == 4\n", lineas={2}) == ["a = 1 == 2\nb = 3 != 4\n"]
 
 
 def test_lint_cuenta_hallazgos_nuevos_por_archivo_contra_la_base(tmp_path, monkeypatch):

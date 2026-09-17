@@ -80,3 +80,22 @@ Los `sdlc.toml` quedaron SIN commitear en cada repo (commit = decision del usuar
   Segunda vuelta: Estudio `1c259df` (YAML con subject/generated/concepts) y Portfolio rama `sdlc/macro-leadlag`
   (`fb8b2b4`): `mapa_lead_lag` sobre variaciones, ranking por correlacion OOS, 4/4 mutantes muertos. Adepor: el
   usuario decidio que manda el codigo en `min_ev_escalado` (`c276b73`, 16 tests).
+
+## Sesion 4 (2026-09-16/17): corridas reales, Adepor fuera, huecos reforzados
+
+- Decision del usuario (2026-09-17): Proyecto_Adepor queda FUERA de este ticket (no corre feature de prueba).
+- Corridas por el server con veredicto:
+  - Estudio export-mastery (TS): BUILT en `mmorch/wt-92141994`, US$0.018, 6 min, 0 intervenciones, 21 tests verdes.
+    Primer repo no Python validado de punta a punta (compile_cmd tsc atrapo `topic.quiz` posiblemente undefined).
+  - Portfolio macro-leadlag: la primera corrida (`wt-e570693d`) paso R1..R4 pero borraba filas con NaN antes de
+    diferenciar (lag 2 en vez de 3 con 25% de huecos). El usuario aprobo R5 (`255f77d`); segunda corrida BUILT en
+    `mmorch/wt-11293607`, US$0.42, 67 min, 0 intervenciones; la revision de Claude bloqueo una vez con test. Salida
+    identica a una referencia en 12 series macro reales. Recorte manual de codigo muerto (`6a7e2d0`, 333 -> 80 lineas).
+- Huecos de mmorch hallados por estas corridas y corregidos con test:
+  - `018f4bf` baseline con archivo nuevo (`git checkout HEAD -- nuevo` explotaba).
+  - `4c190c0` lock: dos jobs del server se pisaban el worktree (globals de sdlc.py); ahora cada job corre en su proceso.
+  - gate `codigo-muerto` (etapa 5, antes del lint): fraccion de un .py NUEVO que corre la aceptacion, `cobertura_min`
+    0.8 medido (construido 0.533, recortado 0.947); coder -> Claude -> humano.
+  - mutacion solo sobre las lineas que cambio la feature; test de revision con nombre por feature; diffstat del job
+    contra la base del worktree; veredicto repetido no suma ejemplo (log deduplicado 17 -> 7, respaldo `.bak-2026-09-17`).
+- Estado: Estudio y Portfolio ENTRAN con numeros; ChatBot BLOQUEADO hasta instalar Maven; Adepor FUERA.
