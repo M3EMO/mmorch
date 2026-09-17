@@ -37,13 +37,17 @@ Todos los proyectos del usuario construyen sus features con el mismo pipeline de
 
 - [Lo subjetivo baja a sintetizado](issues/08-lo-subjetivo-baja-a-sintetizado.md) — veredicto = test + etiqueta + motivo, capturado en el resume (obligatorio); mutation score como gate ejecutable de la etapa 5; checker sintetizado en sombra hasta kappa 0.6; humano en los bordes (A+E+D de la research).
 - [Adopcion en repos existentes](issues/12-adopcion-en-repos-existentes.md) — Estudio (TS) y Portfolio (Python) entran con features mergeadas; ChatBot (Java) entra con verificacion en curso; Adepor fuera por decision del usuario; 8 huecos del pipeline corregidos con test (2026-09-17).
+- [Hermes como acompañante de la aceptación](issues/14-hermes-acompanante-de-la-aceptacion.md) — Hermes no vive en el pipeline: la skill comun "refutar tests" corre siempre antes del veredicto y propone tests filtrados por gates; plantar Hermes en un repo es opcional; runtime mmorch vs Hermes sale de un banco con oraculo por ejecucion (2026-09-17). Tickets 16-18.
 
 ## Not yet specified
 
 - Intent y PR: sin `GATE-N.md` a propósito (Q16b). No se inventa oráculo.
-- Sintetizar y medir (kappa) el checker de aceptacion cuando `logs/sdlc/veredictos.jsonl` tenga >= 6 veredictos (08 fijo el protocolo, no hay datos aun).
+- Sintetizar y medir (kappa) el checker de aceptacion: `logs/sdlc/veredictos.jsonl` ya tiene 8 veredictos reales (6 aprobados, 2 rechazados, 2026-09-17); con solo 2 negativos el kappa todavia no es medible.
 - Retiro del store de bloques cuando ningun lector quede (05 dejo de escribirlo).
-- Hermes como emisor de skills por gate. (El rol de Hermes en la aceptación ya es ticket: 14.)
+- Hermes como emisor de skills por gate. (El ticket 14 ya decidio su rol en la aceptacion: refutador opcional.)
+- Señal que justifica plantar un Hermes en un repo (ticket 14 lo dejo como herramienta opcional sin default): espera un caso real.
+- Canal movil para aprobar tests desde el telefono (Telegram): el ticket 14 no lo eligio; vuelve si esperar el veredicto frena corridas.
+- Exportar los perfiles locales de Hermes en `scripts/claude_config.py`: solo si se planta un Hermes.
 
 - Recursos visuales (sprites): ticket 15, espera un juego real.
 
