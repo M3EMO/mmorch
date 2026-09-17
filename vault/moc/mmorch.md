@@ -19,7 +19,11 @@
 - [[hallazgo-flakiness-suite-completa-2026-08-19]] — seed
 - [[hallazgo-project-integrate-selfcheck-roto-2026-08-20]] — seed
 - [[loops-de-parche-y-escalación-cuando-falla-un-check-agentes-v]] — seed · conf 0.8
+- [[lotus-cierre-y-migracion-a-mmorch-2026-09-15]] — applied · conf 0.9
+- [[mmorch-modulos-sin-uso-medicion-2026-09-14]] — verified · conf 0.7
 - [[mojo-candidata-2026-08-19]] — seed
+- [[sdlc-6-etapas-validacion-6-de-6-verde-2026-09]] — verified · conf 0.9
 - [[sdlc-6-gates-herramientas-y-prácticas-de-industria-por-ticke]] — draft · conf medium
 - [[suite-unidad-regresión-mutación-práctica-documentada-ticket-]] — verified · conf 0.85
+- [[ticket-08-sdlc-como-lo-subjetivo-baja-a-checker-5-opciones-m]] — seed · conf 0.7 (lectura de abstracts/resumenes; numeros citados, no replicados)
 - [[understand-anything-veredicto-para-mmorchvault]] — seed · conf 0.8
