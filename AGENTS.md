@@ -83,3 +83,10 @@ committed locally and surfaced to the user is a valid end state — do NOT treat
 ## SDLC (pipeline de 6 etapas)
 
 Este repo construye features con `mmorch.sdlc` (skill `/project`). Contrato del repo en `sdlc.toml`; artefactos de cada corrida en `docs/sdlc/` de la review branch.
+
+Gates que bloquean en la etapa 5: suite total sin fallos nuevos (el baseline se mide SIN los tests de aceptacion), lint
+y tipos sin hallazgos nuevos por archivo contra la base, codigo muerto en un `.py` nuevo (`cobertura_min`, default 0.8),
+mutacion solo sobre las lineas cambiadas (`mutation_min`; sin la clave, observa), y assets si el repo declara `[sprites]`.
+La revision de Claude bloquea dejando un test, que tambien se corre en repos que no son Python. `reviewer_cmd` cambia el
+agente que revisa y corrige (prompt por stdin, `{modo}` = plan|edit). El juez visual de sprites solo observa hasta tener
+50 assets etiquetados con kappa 0.6. El veredicto humano del test de aceptacion no se registra en nombre del usuario.

@@ -19,7 +19,7 @@ Arquitectura: una PC always-on (ej **pc-mateo**) HOSTEA el server y hace el trab
    ```
    DEEPSEEK_API_KEY=...
    GEMINI_API_KEY=...
-   MMORCH_SERVER_TOKEN=bfP0brI-if387ExSyUD6-uZm
+   MMORCH_SERVER_TOKEN=<el valor de MMORCH_SERVER_TOKEN en .env>
    MMORCH_SERVER_HOST=100.88.0.57      # IP tailnet de pc-mateo
    MMORCH_SERVER_PORT=8787
    ```

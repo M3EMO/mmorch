@@ -1,107 +1,54 @@
-# Handoff — 2026-06-14 · upd 2026-06-16 (+ponytail/lazy, codegraph, sparring→mmorch)
+# Handoff — 2026-09-17
 
 ## Goal
-mmorch = orquestador determinista multi-modelo (ahorra cupo Claude). Esta etapa: plataforma de
-agente (server live + fleet + project-aware + sync) + flywheel del code_embedder. Repo:
-github.com/M3EMO/mmorch (push activo, ~v1.2). Todo goal-gated, cross-family, red-zone nunca autónomo.
 
-## State — 309 tests verde, ~52 módulos, ~95 commits, pusheado
-**Plataforma (esta sesión):**
-- **Live server** `server.py` (Starlette+uvicorn, cero dep nueva): SSE progreso por subagente +
-  control remoto + token. Bus `events.py`. Dashboard: **Kanban** (jobs por status) + panel **fleet**.
-  CORRIENDO en tailnet `http://100.113.221.3:8787` (token `bfP0brI-if387ExSyUD6-uZm`) — background
-  de ESTA sesión (muere al cerrar; pa always-on ver SETUP-HOST.md).
-- **Fleet** `fleet.py` (hosts.json + estado agregado + forward). **project-aware**: `projects.py`,
-  `project_loop.py` (PRIMARIO mmorch: DeepSeek genera+tests verifican+aplica; claude -p escalada
-  via `claude_exec.py`). **sync.py** (GitHub bus: edit→push branch mmorch/auto, auto-pull seguro).
-- **auto-register** hook SessionStart (~/.claude/settings.json). **packaging** `pyproject` v1.2
-  → `pip install -e .[host]` + scripts mmorch-server/mmorch-sync. **weights** manifest+sha (`weights.py`).
-- **enrich.py** (intent completion, guard cross-family).
+mmorch = orquestador determinista multi-modelo que cuida el **cupo** del plan Claude. La etapa actual es el **SDLC de 6
+etapas con gates**: el engine de `/project` que construye features en repos reales, en un worktree aislado, y deja una
+review branch. Repo PUBLICO: `github.com/M3EMO/mmorch` (rama principal `mmorch/auto`; `origin/master` se avanza por
+fast-forward). Nunca subir ahi memoria, config personal ni datos del usuario.
 
-**Flywheel (ablación hoy, en WEIGHTS.md):**
-- retrain full-config: 0.88→**0.899** (dim 384) ✅ promovido. **fp16** ½ tamaño lossless ✅.
-- **#2 MoCo RECHAZADO** (0.884<0.899, dataset chico). **#1 functional positives**: +0.024 P@1
-  (5 seeds, 4/5 pos, 1 neg) — DIRECCIONAL, NO significativo → NO promovido. Cuello = spec-count.
-- **Hallazgo clave**: el encoder es ESTRUCTURAL, no funcional (colapsa 0.99→0.45 en data diversa).
+## Estado (2026-09-17)
 
-## Next
-1. ✅ **HECHO — Reparar lo funcional**: `mmorch/exec_embedder.py` (`embed_exec`/`embed_hybrid`, cero
-   train). **40 specs oracle_diverse: behavioral 0.919 P@1 / 0.948 AUC vs structural 0.430/0.665
-   (gap +0.49)**. El structural se desploma al escalar specs; behavioral aguanta. Eval `eval_functional.py`
-   (arms code/exec/hybrid, `MMORCH_EVAL_DATA=oracle_diverse.jsonl`). WEIGHTS.md §3c.
-2. ✅ **auto-pull task HECHO** (esta PC): Scheduled Task Windows `mmorch-autopull` (cada 15 min →
-   `scripts/autopull.cmd` → `mmorch.sync pull-all`, salta dirty). Re-crear: `scripts/register-autopull.ps1`.
-   **Pendiente**: always-on en pc-mateo (SETUP-HOST.md; no alcanzo esa PC).
-3. ✅ **Fleet-UI HECHO**: selector `destino` en el dashboard (`server.py` _FRONTEND) + `submitJob()`
-   rutea local↔`/fleet/run`; botón "usar" por host. Backend `/fleet/run` ya existía.
+- Suite: 1220 tests verdes; ruff y mypy en 0; el ratchet de capas y el gate anti-museo, verdes.
+- Mapa wayfinder `.scratch/sdlc-6-gates/`: **sin tickets abiertos**. Cerrados 01..17; el 18 se cerro sin construir
+  porque la medicion refuto su premisa.
+- Repos adoptados y con feature mergeada: Estudio (`init`, TS/vitest), Portfolio (`master`, pytest). ChatBot (`main`,
+  Maven) entra y tiene su feature verificada en `mmorch/wt-f8223a1e`, pendiente de merge; no tiene remoto.
+  Proyecto_Adepor quedo fuera por decision del usuario.
 
-### Sesión 2026-06-15 (A→E) — además de lo de arriba
-- **A** cobertura sondas: drop 8/367→0/221 (float-canon, timeout por-sonda, mutación, callable, sin n=0).
-- **B** `embed_hybrid` adapter pluggable construido; shadow_prior contexts = ETIQUETAS no código →
-  exec N/A hoy (offline_improvement −0.067 idéntico pa los 3 embed_fn). NO cableado (gated). Pointer en `shadow_prior.py`.
-- **C** specs 20→40 (`oracle_dataset.py` +20). Regenerado oracle_dataset.jsonl + oracle_diverse.jsonl
-  (backups `.bak` en logs/). Reveló el colapso structural a escala.
-- **D** fleet-UI (arriba). **E** PR caveman: branch en fork, gh no instalado → URL compare prefilled
-  entregada (no puedo auth desatendido). PR sigue SIN abrir.
+## Gates del pipeline hoy
 
-### Sesión 2026-06-16 — todo COMMITEADO+PUSHEADO a master (M3EMO/mmorch)
-Commits: `ff0da61` exec-embedding (exec_embedder+eval+40 specs) · `65de1fd` fleet-UI · `cd41078`
-autopull task · `900f970` docs · `ca618f3` lazy knob · `9ab71a4`+`78653c2` codegraph knob. 309 tests verde.
-- **Ponytail evaluado** (repo `DietrichGebert/ponytail`, gemelo de caveman pa CÓDIGO no prosa). Medido:
-  corta código −51% LOC SIN romper correctitud (gate filtra). Tokens NO baja en tasks chicos (+2% tax).
-  Instalado global como plugin Claude (composa con caveman; único choque statusline=singular).
-- **Knob lazy** en `project_loop` (`LAZY_SYSTEM` en `prompts.py`, reglas ponytail vendoreadas, MIT).
-  Default ON (`MMORCH_LAZY=0` apaga). System = prefijo estable (cacheable). **Flywheel NO afectado**
-  (usa fan_out, no run_project_task) → diversidad de training intacta.
-- **Knob codegraph** en `project_loop`: `_codegraph_context()` shell-out al CLI codegraph (mismo motor
-  que su MCP, sin protocolo) → contexto del repo como prefijo. **Auto-mantiene índice** (sync si está,
-  init+index si no). Gate `MMORCH_CODEGRAPH` (=1 puesto en `.env`). E2E testeado verde (repo temp,
-  1 iter, código minimal correcto, .codegraph auto-creado). NO es hook SessionStart a propósito: el
-  server corre jobs fuera de sesiones Claude → el knob cubre todos los paths.
-- **Statusline merged** `~/.claude/statusline-merged.ps1` (caveman[172]+ponytail[108]+savings suffix),
-  wireado en `~/.claude/settings.json`.
-- **ACTOR** (framework de estudio del user, proyecto `Desktop/Estudio`): comparte núcleo epistémico con
-  mmorch (no-LLM-self-eval, ground-truth, refute-default). Aplicado: `wiki-sparring` ahora rutea el
-  refuter a `mmorch_adversarial_verify` (cross-family, cero cupo, $0.0004/run) — commit `555d2a9` en
-  M3EMO/Estudio. Own/juicio queda en user+Opus. mmorch YA es ACTOR; único additivo no-hecho = Compress
-  discipline en nodos subjetivos (descartado por marginal).
-- **Pendiente**: PR caveman sin abrir (igual). chip `test_exec_embedder.py` (exec_embedder sin test). 
-  tus otros repos se auto-indexan codegraph al 1er job. server mmorch: reiniciar pa tomar MMORCH_CODEGRAPH.
+| Gate | Que hace |
+|---|---|
+| suite total | Sin fallos nuevos; el baseline se mide sin los tests de aceptacion (Java y TS no compilaban en la base) |
+| lint y tipos | Sin hallazgos nuevos POR ARCHIVO contra la base |
+| codigo muerto | Fraccion de un `.py` NUEVO que corre la aceptacion; `cobertura_min` 0.8 |
+| mutacion | Solo sobre las lineas que cambio la feature; `mutation_min` bloquea, sin clave observa |
+| revision | Claude bloquea con un test; en repos no Python ese test tambien se corre |
+| sprites | Capa determinista de assets que bloquea; el juez visual solo observa (`[sprites]` en sdlc.toml) |
 
-## Decisions (no re-litigar)
-- NO adoptar framework externo (LangGraph/CrewAI) — diluye el determinismo = diferenciador.
-- mmorch PRIMARIO en el server (barato), claude -p = escalada. Editar es local al host → GitHub-sync.
-- Tailscale (no WireGuard propio). Server idle ≈ 0 carga.
-- Weights: torch-train/numpy-infer, manifest+sha, peso=cache regenerable, gate=batir incumbente.
-- Ciencia: medir cada lever, no sobre-vender (MoCo rechazado, #1 no-significativo honesto).
+`reviewer_cmd` en `sdlc.toml` reemplaza a `claude -p` por cualquier comando (prompt por stdin, `{modo}`).
+Cada job del server corre `build_feature` en su propio proceso, asi dos features avanzan en paralelo.
 
-## Caveman — sesión 2026-06-15 (proyecto aparte, no mmorch)
-Repo `C:\Users\map12\Desktop\Claude\caveman-upstream` (fork `M3EMO/caveman`, upstream `JuliusBrussee/caveman`).
-Branch `fix/temp-file-leak` — 1 commit `9ba994f` (Co-author Fable 5), +215/-8, 3 archivos.
+## Medido esta semana
 
-**Bug:** `safeWriteFlag` (`src/hooks/caveman-config.js`) escribe flag via temp atómico + `renameSync`.
-Windows: `renameSync` sobre destino existente tira `EPERM`/`EBUSY` si otro proceso lo tiene abierto
-(statusline leyendo, hook concurrente). El `catch` silencioso se tragaba el error pero nunca borraba
-el temp → 1 huérfano por rename fallido. 28 en 2 semanas.
+- 4 corridas reales por el server: Estudio US$0.018 / 6 min; Portfolio shortfall US$0.067 / 41 min; Portfolio leadlag
+  US$0.42 / 67 min; ChatBot US$0.014 + US$0.027. Cero intervenciones humanas dentro de las corridas.
+- Refutador de tests ANTES de la aprobacion humana: 3 versiones, 25 corridas, **0 aciertos**. Los defectos reales se
+  atraparon con el codigo delante. Banco reusable en `mmorch/refutacion.py` (`mmorch cli refutacion`).
+- Juez visual VLM: ordena (Pearson 0.459) pero puntua mal (32.1% exacto) y pierde acierto con imagenes chicas. Por eso
+  compara de a pares, usa rubrica binaria y el sprite viaja agrandado x8.
+- Capa determinista de sprites: 10 defectos inyectados, 10 atrapados, 0 falsos positivos.
 
-**Fix (3 partes):**
-- `safeWriteFlag` → todo en `try/finally`, flag `renamed`; si rename no completó `unlinkSync(temp)`.
-- nueva `sweepOrphanTemps(flagDir)`: borra temp solo si >24h **o** PID-muerto + >60s gracia. Regex
-  estricta `^\.caveman-active\.(\d+)\.(\d+)$` (nunca matchea flag vivo), `lstatSync` salta symlinks/dirs,
-  `pidAlive` trata EPERM como vivo, todo silent-fail. Exportada en `module.exports`.
-- wiring: 1 línea en `caveman-activate.js` (SessionStart), corre 1x/sesión.
+## Lo que sigue (niebla del mapa)
 
-**Tests:** `tests/test_temp_leak.js` nuevo, 9 casos → **9/9 verde** (verificado).
+- Etiquetar 50 sprites reales para medir kappa del juez visual: espera el primer juego.
+- Ejecucion en contenedor declarada por repo en `sdlc.toml`, nunca por RAM libre.
+- Canal movil para aprobar tests desde el telefono; volveria si esperar el veredicto frena corridas.
+- Checker sintetizado de aceptacion: `logs/sdlc/veredictos.jsonl` tiene 8 veredictos reales, con solo 2 negativos.
 
-**Estado:** pusheado a fork `M3EMO/caveman` branch `fix/temp-file-leak`. `PR_BODY.md` listo (untracked).
-**PR NO abierto** — `gh` CLI no instalado, sin token/creds usables. Pregunté método (install gh vs URL
-prefilled), usuario dismisseó → en espera.
+## Pendiente del usuario
 
-**Next:** abrir PR upstream `JuliusBrussee/caveman:main` ← `M3EMO:fix/temp-file-leak` con `PR_BODY.md`.
-Opciones: `winget install GitHub.cli` + `gh auth login`, o URL compare prefilled pa click manual.
-
-## Read first
-`WEIGHTS.md` (resultados flywheel + cómo armar pesos), `SETUP-HOST.md` (deploy multi-host),
-`AGENTS.md`/`GOAL.md` (contrato), `SELF-EVOLUTION-PLAN.md` §BACKLOG (seeds: exec-embedding,
-GNN-AST, DSPy, fleet-UI). Memoria: [[mmorch-platform]], [[flywheel-simclr-result]], [[mmorch-harness]].
-WSL torch `~/flywheel/bin/python`; paths /mnt/c → `MSYS2_ARG_CONV_EXCL='*'` (y NO usar $var en for-loops wsl).
+- Rotar `MMORCH_SERVER_TOKEN`: estuvo escrito en `HANDOFF.md` y `SETUP-HOST.md` de este repo publico hasta hoy.
+- Mergear la rama `mmorch/wt-f8223a1e` de ChatBot, y decidir si ese repo tiene remoto.
+- Copiar a mano a la otra PC: `.env` y `logs/refutacion/banco.json` (no van al repo).
