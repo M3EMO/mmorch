@@ -1,6 +1,6 @@
 # Adopción en los repos existentes
 Type: task
-Status: open
+Status: resolved (2026-09-17)
 Blocked by: (05 y 11 cerrados) — desbloqueado 2026-09-15
 Map: ../map.md
 
@@ -107,3 +107,10 @@ Los `sdlc.toml` quedaron SIN commitear en cada repo (commit = decision del usuar
   descarto. Huecos corregidos: accept() en repos no Python tambien corre el test pytest de la revision; el baseline de
   `suite_cmd` se mide sin los tests de aceptacion (en Java/TS no compilaban en la base y el gate solo observaba).
   Pendiente: reanudar ChatBot desde la etapa 5 y verificar antes del merge. ChatBot no tiene remoto.
+
+## Resolucion (2026-09-17)
+
+El usuario cierra el ticket: 12 verificaba la funcion SDLC, no entrega funcionalidad, y el ticket 14 no depende de
+que termine la verificacion de ChatBot. Resultado: Estudio y Portfolio entran con features mergeadas y pusheadas;
+ChatBot entra (mvn verde) y su corrida de reposicion sigue como verificacion, sin bloquear; Adepor queda fuera.
+Los huecos que expusieron las corridas quedaron corregidos con test en mmorch (`db9d58c`, `7f3988e`).

@@ -1,7 +1,7 @@
 # Hermes como acompañante de la aceptación
 Type: grilling
 Status: open
-Blocked by: 08, 12
+Blocked by: 08, 12 (ambos cerrados; desbloqueado 2026-09-17)
 Map: ../map.md
 
 ## Question

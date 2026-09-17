@@ -36,6 +36,7 @@ Todos los proyectos del usuario construyen sus features con el mismo pipeline de
 - [Integracion al engine](issues/05-integracion-al-engine.md) — `mmorch/sdlc.py` + `build_feature` reemplaza a `project_integrate.build_project` (2 consumidores reales: server_engine, workflow_race); allowlist = techo en `sdlc.toml`, payload solo acota; retiro en 4 pasos con test; `/project` conserva el nombre; la etapa es el checkpoint.
 
 - [Lo subjetivo baja a sintetizado](issues/08-lo-subjetivo-baja-a-sintetizado.md) — veredicto = test + etiqueta + motivo, capturado en el resume (obligatorio); mutation score como gate ejecutable de la etapa 5; checker sintetizado en sombra hasta kappa 0.6; humano en los bordes (A+E+D de la research).
+- [Adopcion en repos existentes](issues/12-adopcion-en-repos-existentes.md) — Estudio (TS) y Portfolio (Python) entran con features mergeadas; ChatBot (Java) entra con verificacion en curso; Adepor fuera por decision del usuario; 8 huecos del pipeline corregidos con test (2026-09-17).
 
 ## Not yet specified
 
