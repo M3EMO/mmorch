@@ -820,16 +820,25 @@ def reasoner_rounds(log) -> tuple[bool, str]:
     return False, f"reasoner x{REASONER_TRIES} rojo"
 
 
+def _revisor(prompt: str, *, mode: str = "edit", timeout: float | None = None) -> dict:
+    """Ticket 11: el agente que revisa y corrige es configurable por repo (`reviewer_cmd` en sdlc.toml, prompt por
+    stdin); sin esa clave manda la seam de mmorch (`claude -p` por default, env MMORCH_EXECUTOR)."""
+    from .claude_exec import CmdExecutor, get_executor
+    os.environ.pop("CLAUDECODE", None)  # ponytail: el CLI no anida dentro de una sesion Claude Code
+    cmd = CFG.get("reviewer_cmd")
+    ex = CmdExecutor(str(cmd)) if cmd else get_executor()
+    r = ex.run(prompt, str(WT), mode=mode, timeout=float(timeout or CFG["cmd_timeout_s"]))
+    return {"ok": r.ok, "result": r.result, "returncode": r.returncode, "steps": r.steps}
+
+
 def claude_fix(log) -> tuple[bool, str]:
     """Nivel 3: Claude en el worktree (modo edit). Deja correccion; el test de aceptacion decide."""
-    from mmorch.claude_exec import run_claude
-    os.environ.pop("CLAUDECODE", None)  # ponytail: el CLI no anida dentro de una sesion Claude Code
     state["escalated_to_claude"] = True
     state["claude_calls"] += 1
     before = _tree()
-    r = run_claude(f"Los tests de aceptacion fallan. Arregla el codigo en {state['plan_files']} hasta que "
-                   f"`pytest {' '.join(_accept_paths())} -q` pase. NO toques tests ni docs. Al final responde en una linea que cambiaste.\n\n"
-                   f"TAREA:\n{TASK.task}\n\nSALIDA:\n{log}", cwd=str(WT), mode="edit", timeout=CFG["cmd_timeout_s"])
+    r = _revisor(f"Los tests de aceptacion fallan. Arregla el codigo en {state['plan_files']} hasta que "
+                 f"`pytest {' '.join(_accept_paths())} -q` pase. NO toques tests ni docs. Al final responde en una linea que cambiaste.\n\n"
+                 f"TAREA:\n{TASK.task}\n\nSALIDA:\n{log}")
     write_supervision(f"nivel 3 Claude (rc={r.get('returncode')}): {(r.get('result') or '')[:2000]}")
     gate_alcance("claude-fix-alcance", before, tuple(state["plan_files"]))
     if not gate_baseline()[0]:
@@ -885,20 +894,17 @@ def aceptacion():
     se detiene en `awaiting_approval`: un humano (o el agente del ticket 14) aprueba y reanuda desde la etapa 2."""
     if TASK.accept_files:
         return True, "tests de aceptacion provistos por el llamador"
-    from .claude_exec import run_claude
-    os.environ.pop("CLAUDECODE", None)
     slug = re.sub(r'[^a-z0-9]+', '_', TASK_NAME.lower()).strip('_')[:40]
     ext = _exts()[0]
     rel = str(CFG.get("accept_test", f"{TESTS_PREFIX}test_sdlc_{{slug}}.{ext}")).replace("{slug}", slug)
     state["claude_calls"] += 1
     before = _tree()
     marco = "pytest" if _es_py(rel) else f"framework de tests del repo; lo corre `{ACCEPT_CMD or CFG.get('accept_cmd')}`"
-    r = run_claude(f"Escribi SOLO el archivo {rel}: el test de aceptacion ({marco}, sin red) de esta TAREA. Un test por "
+    r = _revisor(f"Escribi SOLO el archivo {rel}: el test de aceptacion ({marco}, sin red) de esta TAREA. Un test por "
                    f"requisito, nombrados test_R1_..., test_R2_... con el ID en el nombre (funcion o titulo del test); "
                    f"comentario o docstring de modulo con el contrato "
                    f"R<n>. El test DEBE fallar hoy (el codigo aun no existe o no cumple) y pasar cuando la tarea este hecha. "
-                   f"No toques ningun otro archivo.\n\nTAREA:\n{TASK.task}",
-                   cwd=str(WT), mode="edit", timeout=CFG["cmd_timeout_s"])
+                 f"No toques ningun otro archivo.\n\nTAREA:\n{TASK.task}")
     write_supervision(f"aceptacion (Claude, rc={r.get('returncode')}): {(r.get('result') or '')[:1000]}")
     if not gate_alcance("aceptacion-alcance", before, (rel,))[0] or not (WT / rel).exists():
         return False, f"Claude no dejo {rel} (o toco otros archivos)"
@@ -958,14 +964,11 @@ def spec():
 @stage("2b-spec-review")
 def spec_review():
     """Claude revisa la spec con spec-review.md (de clarify.md): <= 5 preguntas, respondidas en la spec."""
-    from mmorch.claude_exec import run_claude
-    os.environ.pop("CLAUDECODE", None)
     guide = (TPL / "spec-review.md").read_text(encoding="utf-8")
     state["claude_calls"] += 1
     before = _tree()
-    r = run_claude(f"{guide}\n\nTAREA:\n{TASK.task}\n\nEdita SOLO docs/sdlc/spec.md segun estas reglas. NO escribas codigo ni crees "
-                   "ni toques ningun otro archivo: la implementacion la hace otra etapa. Responde en una linea cuantas preguntas hiciste.",
-                   cwd=str(WT), mode="edit", timeout=CFG["cmd_timeout_s"])
+    r = _revisor(f"{guide}\n\nTAREA:\n{TASK.task}\n\nEdita SOLO docs/sdlc/spec.md segun estas reglas. NO escribas codigo ni crees "
+                 "ni toques ningun otro archivo: la implementacion la hace otra etapa. Responde en una linea cuantas preguntas hiciste.")
     write_supervision(f"revision de spec (Claude, rc={r.get('returncode')}): {(r.get('result') or '')[:1500]}")
     gate_alcance("spec-review-alcance", before, ("docs/sdlc/spec.md",))
     if not gate_baseline()[0]:
@@ -977,9 +980,8 @@ def spec_review():
     if not ok:  # D13-diag: Claude agrego un R5 sin test; una vuelta para que lo quite o lo funda en un R con test
         state["claude_calls"] += 1
         before = _tree()
-        run_claude(f"Tu revision de docs/sdlc/spec.md fallo este gate: {note}. Cada R<n> de la spec debe tener un test "
-                   f"con su ID en el nombre; NO agregues R nuevos: quitalos o fundilos en un R existente. Edita SOLO docs/sdlc/spec.md.",
-                   cwd=str(WT), mode="edit", timeout=CFG["cmd_timeout_s"])
+        _revisor(f"Tu revision de docs/sdlc/spec.md fallo este gate: {note}. Cada R<n> de la spec debe tener un test "
+                 f"con su ID en el nombre; NO agregues R nuevos: quitalos o fundilos en un R existente. Edita SOLO docs/sdlc/spec.md.")
         gate_alcance("spec-review-alcance", before, ("docs/sdlc/spec.md",))
         spec_md = (WT / "docs/sdlc/spec.md").read_text(encoding="utf-8")
         ok, note = gate_clarificaciones(spec_md)
@@ -1219,19 +1221,17 @@ def test():
 @stage("5b-review")
 def review():
     """Claude revisa el diff. Bloquea SOLO si deja un test_review.py que falla (ticket 07)."""
-    from mmorch.claude_exec import run_claude
-    os.environ.pop("CLAUDECODE", None)
     subprocess.run(["git", "add", "-A"], cwd=WT, check=True)
     diff = subprocess.run(["git", "diff", "--cached", "--", *state["plan_files"]], cwd=WT,
                           capture_output=True, text=True, encoding="utf-8").stdout
     state["claude_calls"] += 1
     before = _tree()
-    r = run_claude(
+    r = _revisor(
         "Revisa este diff contra docs/sdlc/spec.md y la TAREA. "
         f"Si encontras un defecto REAL, escribi UN test pytest que falle en {REVIEW_REL} "
         "(una funcion test_*) y responde 'BLOCK: <defecto>'. No toques ningun otro archivo. "
         "Si no hay defecto demostrable con test, no escribas nada y responde 'OK' o 'NOTE: <observacion>'.\n\n"
-        f"TAREA:\n{TASK.task}\n\nDIFF:\n{diff[:60000]}", cwd=str(WT), mode="edit", timeout=CFG["cmd_timeout_s"])
+        f"TAREA:\n{TASK.task}\n\nDIFF:\n{diff[:60000]}")
     verdict = (r.get("result") or "").strip()
     write_supervision(f"revision del diff (Claude, rc={r.get('returncode')}): {verdict[:2000]}")
     gate_alcance("diff-review-alcance", before, (REVIEW_REL,))
@@ -1509,6 +1509,7 @@ def init(repo: str) -> dict:
             "# Otros lenguajes: `ext`, `compile_cmd` (G3 y test-compile), `lint_cmd` ({files} = archivos del plan),\n"
             "# `suite_cmd` (suite total si no es pytest), `seed_globs` (ignorados que el worktree necesita), `accept_test` ({slug}).\n"
             "# Umbrales: `cobertura_min` (0.8; fraccion de un .py NUEVO que corre la aceptacion), `mutation_min` (sin: observa).\n"
+            "# `reviewer_cmd`: agente que revisa y corrige (prompt por stdin, `{modo}` = plan|edit); sin esta clave, `claude -p`.\n"
             + ('accept_cmd = "python -m pytest -q"\nsuite = ["tests", "-q", "-rfE", "-p", "no:cacheprovider"]\n'
                if (root / "tests").is_dir() else  # sin tests/, pytest en la raiz recolecta cualquier test_*.py (scrapers)
                '# accept_cmd = "<comando determinista, sin red>"   # sin tests/: definilo o el repo no entra\n')

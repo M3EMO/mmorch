@@ -160,6 +160,23 @@ def test_build_feature_serializa_corridas_paralelas(tmp_path, monkeypatch):
     assert pico[0] == 1
 
 
+def test_reviewer_configurable_por_repo(tmp_path, monkeypatch):
+    """Ticket 11: el agente que revisa y corrige sale de `reviewer_cmd` del repo; sin esa clave manda la seam."""
+    import mmorch.claude_exec as CE
+    (tmp_path / "sdlc.toml").write_text(
+        'files = ["a.py"]\nreviewer_cmd = "python -c \\"import sys; print(\'modo\', __import__(\'os\').environ[\'MMORCH_MODE\'],'
+        ' sys.stdin.read()[:12])\\""\n', encoding="utf-8")
+    t = types.SimpleNamespace(name="rev", task="t", accept_files={})
+    S.configure(t, contract=[], feat={"repo": str(tmp_path), "files": ["a.py"], "suite": []}, wt=tmp_path)
+    r = S._revisor("REVISA ESTO y nada mas", mode="edit")
+    assert r["ok"] and "modo edit" in r["result"] and "REVISA ESTO" in r["result"]
+    llamado = []
+    monkeypatch.setattr(CE, "get_executor", lambda: types.SimpleNamespace(
+        run=lambda *a, **k: llamado.append(k) or CE.ExecResult(True, "seam", 0, 1)))
+    S.CFG.pop("reviewer_cmd")
+    assert S._revisor("x")["result"] == "seam" and llamado[0]["mode"] == "edit"
+
+
 def _repo_git(wt):
     (wt / "pkg").mkdir(parents=True)
     (wt / "pkg" / "viejo.py").write_text("def f(x):\n    return x\n", encoding="utf-8")

@@ -140,11 +140,34 @@ class ClaudeCliExecutor:
 _FUTURE_EXECUTORS = ("cursor-agent", "api")
 
 
+class CmdExecutor:
+    """Reviewer configurable (ticket 11): un comando cualquiera recibe el prompt por stdin, con `cwd` en el worktree.
+    `{modo}` en el comando y la env `MMORCH_MODE` llevan plan|edit (`cursor-agent -p`, otro agente, un script)."""
+
+    def __init__(self, cmd: str):
+        if not cmd.strip():
+            raise ValueError("comando de reviewer vacio: setea `reviewer_cmd` en sdlc.toml o MMORCH_REVIEWER_CMD")
+        self.cmd = cmd
+
+    def run(self, prompt: str, cwd: str, *, mode: str = "plan", timeout: float = 600.0,
+            job_id: str = "", model: str | None = None) -> ExecResult:
+        emit("job", "running", job_id=job_id, node=f"cmd:{mode}", detail=self.cmd[:80])
+        try:
+            p = subprocess.run(self.cmd.replace("{modo}", mode), shell=True, cwd=cwd, input=prompt, timeout=timeout,
+                               capture_output=True, text=True, encoding="utf-8", errors="replace",
+                               env={**os.environ, "MMORCH_MODE": mode})
+        except subprocess.TimeoutExpired:
+            return ExecResult(False, f"TIMEOUT {timeout}s: {self.cmd[:80]}", None, 0)
+        return ExecResult(p.returncode == 0, (p.stdout + p.stderr)[-6000:], p.returncode, 0)
+
+
 def get_executor() -> Executor:
     """Factory de la seam: env MMORCH_EXECUTOR elige el backend (default claude-cli)."""
     name = os.getenv("MMORCH_EXECUTOR", "claude-cli")
     if name == "claude-cli":
         return ClaudeCliExecutor()
+    if name == "cmd":
+        return CmdExecutor(os.getenv("MMORCH_REVIEWER_CMD", ""))
     if name in _FUTURE_EXECUTORS:
         raise NotImplementedError(
             f"MMORCH_EXECUTOR={name!r}: backend reservado pero aun no implementado; "
