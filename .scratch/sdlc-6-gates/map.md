@@ -38,6 +38,7 @@ Todos los proyectos del usuario construyen sus features con el mismo pipeline de
 - [Lo subjetivo baja a sintetizado](issues/08-lo-subjetivo-baja-a-sintetizado.md) — veredicto = test + etiqueta + motivo, capturado en el resume (obligatorio); mutation score como gate ejecutable de la etapa 5; checker sintetizado en sombra hasta kappa 0.6; humano en los bordes (A+E+D de la research).
 - [Adopcion en repos existentes](issues/12-adopcion-en-repos-existentes.md) — Estudio (TS) y Portfolio (Python) entran con features mergeadas; ChatBot (Java) entra con verificacion en curso; Adepor fuera por decision del usuario; 8 huecos del pipeline corregidos con test (2026-09-17).
 - [Hermes como acompañante de la aceptación](issues/14-hermes-acompanante-de-la-aceptacion.md) — Hermes no vive en el pipeline: la skill comun "refutar tests" corre siempre antes del veredicto y propone tests filtrados por gates; plantar Hermes en un repo es opcional; runtime mmorch vs Hermes sale de un banco con oraculo por ejecucion (2026-09-17). Tickets 16-18.
+- [Banco de refutación](issues/16-banco-de-refutacion.md) — `mmorch/refutacion.py` + `mmorch cli refutacion`: clasifica un test propuesto por ejecucion (acierto/falsa alarma/neutro/invalido) en worktrees detached; 3 casos en `logs/refutacion/banco.json` (local); verificado 5/5 con tests conocidos (2026-09-17).
 
 ## Not yet specified
 

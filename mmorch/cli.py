@@ -1,4 +1,4 @@
-"""CLI minimo instalable (`mmorch`): status y health desde la terminal.
+"""CLI minimo instalable (`mmorch`): status, health, canary y refutacion desde la terminal.
 
 Reusa lo que ya existe — metrics.summary() y health.report() — sin logica
 propia: el CLI es una vista, la semantica vive en la libreria (contrato W5:
@@ -24,7 +24,20 @@ def main(argv: list[str] | None = None) -> int:
                     help="model keys a testear (default: gen/verifier/router activos)")
     pc.add_argument("--update-baseline", action="store_true",
                     help="persiste los pass-rates medidos como nuevo baseline")
+    pr = sub.add_parser("refutacion", help="clasifica un test propuesto contra un caso del banco de refutacion "
+                        "(acierto / falsa_alarma / neutro / invalido); exit 0 solo si acierta")
+    pr.add_argument("caso", help="id del caso en logs/refutacion/banco.json")
+    pr.add_argument("test", help="archivo con el test propuesto, en el formato del caso")
     args = parser.parse_args(argv)
+
+    if args.cmd == "refutacion":  # sin watchdog: es una medicion puntual, no una vista del estado
+        from pathlib import Path
+
+        from mmorch.refutacion import Banco, cargar_banco
+        with Banco(cargar_banco()) as banco:
+            r = banco.evaluar(args.caso, Path(args.test).read_text(encoding="utf-8"))
+        print(json.dumps(r, ensure_ascii=False, indent=2))
+        return 0 if r["clase"] == "acierto" else 1
 
     # dead-man visible (W4.4): nightly vencido grita en stderr aca mismo,
     # ademas del JSON de `health` — status solo muestra metrics y sin esto

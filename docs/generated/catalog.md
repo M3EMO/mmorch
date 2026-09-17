@@ -4,7 +4,7 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**116 módulos · 44 MCP tools · 966 tests.**
+**117 módulos · 44 MCP tools · 968 tests.**
 
 El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
 
@@ -33,7 +33,7 @@ El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/checkers.py` | checkers — libreria propia de VERIFICADORES DETERMINISTAS (tool-verify). |
 | `mmorch/classify.py` | classify_and_act — rutear por TIPO y manejar cada rama distinto (triage, model |
 | `mmorch/claude_exec.py` | claude_exec — ejecutor que corre en el PLAN de Claude (cupo), no por API. Invoca el |
-| `mmorch/cli.py` | CLI minimo instalable (`mmorch`): status y health desde la terminal. |
+| `mmorch/cli.py` | CLI minimo instalable (`mmorch`): status, health, canary y refutacion desde la terminal. |
 | `mmorch/code_embedder.py` | code_embedder — inferencia NUMPY PURA del encoder SimCLR del flywheel (sin torch). |
 | `mmorch/code_review.py` | code_review — cero-cupo senior reviewer: read code, flag where it breaks the mmorch coding |
 | `mmorch/config.py` | Model registry — single source of truth for models, families, endpoints, prices. |
@@ -92,6 +92,7 @@ El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/proposals.py` | F2 propuesta (spec .scratch/loop-cerrado/spec.md): tarjetas pre-cocinadas + pick del hook. |
 | `mmorch/provenance.py` | Provenance de branches — outcomes retroactivos por verdad de ejecución. |
 | `mmorch/providers.py` | Provider layer — thin OpenAI-compatible client per external model. |
+| `mmorch/refutacion.py` | refutacion — banco congelado que mide la skill "refutar tests" (tickets 14 y 16 del mapa sdlc-6-gates). |
 | `mmorch/regresion.py` | Refutacion EJECUTABLE de una branch: la objecion se prueba o no existe. |
 | `mmorch/repo_mining.py` | Minería de repos ajenos — aprender de cualquier repo SIN acumularlo. |
 | `mmorch/retention.py` | retention — decay Ebbinghaus + Zeigarnik para la capa semantica de memory. |
