@@ -19,6 +19,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 import tempfile
 import uuid
 from pathlib import Path
@@ -28,12 +29,66 @@ from .projects import resolve
 from .worktree_driver import Worktree, _git
 
 
+SKILL = Path(__file__).with_name("sdlc_templates") / "refutar-tests.md"
+_BLOQUE = re.compile(r"```[\w.]*\n(.*?)```", re.S)
+
+
 def banco_path() -> Path:
     return logs_dir() / "refutacion" / "banco.json"
 
 
+def _git_show(repo: str, ref: str, rel: str) -> str:
+    r = subprocess.run(["git", "-C", repo, "show", f"{ref}:{rel}"], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    return r.stdout if r.returncode == 0 else ""
+
+
+def prompt_de(caso: dict) -> str:
+    """El pedido que reciben los dos runtimes: la skill comun + tarea, ficha, formato y el test aprobado del caso."""
+    repo = resolve(caso["proyecto"])
+    return "\n\n".join([
+        SKILL.read_text(encoding="utf-8"),
+        f"## Formato del caso\n\n{caso['formato']}\nEl comando que corre los tests es: `{caso['cmd']}`",
+        f"## Tarea\n\n{caso['tarea']}",
+        f"## Ficha\n\n{_git_show(repo, caso['test_ref'], caso['ficha_rel'])}",
+        f"## Test de aceptacion aprobado (el que tenes que refutar)\n\n"
+        f"{_git_show(repo, caso['test_ref'], caso['test_rel'])}",
+    ])
+
+
+def tests_propuestos(respuesta: str, max_n: int = 3) -> list[str]:
+    """Los bloques de codigo de la respuesta, en orden. Sin bloques no hay propuesta (la skill lo permite)."""
+    return [b.strip() + "\n" for b in _BLOQUE.findall(respuesta)][:max_n]
+
+
 def cargar_banco(path: Path | None = None) -> dict[str, dict]:
     return {c["id"]: c for c in json.loads(Path(path or banco_path()).read_text(encoding="utf-8"))}
+
+
+HERMES = Path.home() / "Documents" / "Hermes" / "hermes-agent" / ".venv" / "Scripts" / "hermes-agent.exe"
+
+
+def refutar(caso: dict, *, runtime: str = "mmorch", modelo: str = "deepseek-reasoner", temperature: float = 0.7,
+            timeout: float = 900.0, max_n: int = 3) -> dict:
+    """Corre la skill comun en un runtime y devuelve {tests, texto, segundos, usd}. `mmorch` llama al modelo directo;
+    `hermes` usa el one-shot de Hermes Agent (mismo modelo: lo que se compara es el agente, no el modelo)."""
+    prompt = prompt_de(caso)
+    t0 = time.time()
+    if runtime == "mmorch":
+        from .providers import call
+        r = call(modelo, prompt, pattern="sdlc-refutacion", node=modelo, phase="refutacion",
+                 temperature=temperature, max_tokens=64000, timeout=timeout)
+        texto, usd = r.text, r.cost_usd
+    elif runtime == "hermes":
+        if not HERMES.exists():
+            raise RuntimeError(f"Hermes Agent no esta instalado en {HERMES}")
+        p = subprocess.run([str(HERMES), "-z", "-", "--model", modelo, "--provider", "deepseek",
+                            "-p", "sdlc-refutador", "-Q"], input=prompt, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
+        texto, usd = p.stdout + p.stderr, 0.0  # el gasto de Hermes queda en su propio log
+    else:
+        raise ValueError(f"runtime desconocido: {runtime}")
+    return {"tests": tests_propuestos(texto, max_n), "texto": texto, "segundos": round(time.time() - t0, 1), "usd": usd}
 
 
 def _python_del_repo(repo: str) -> str:

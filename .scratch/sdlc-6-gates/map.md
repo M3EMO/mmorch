@@ -39,6 +39,7 @@ Todos los proyectos del usuario construyen sus features con el mismo pipeline de
 - [Adopcion en repos existentes](issues/12-adopcion-en-repos-existentes.md) — Estudio (TS) y Portfolio (Python) entran con features mergeadas; ChatBot (Java) entra con verificacion en curso; Adepor fuera por decision del usuario; 8 huecos del pipeline corregidos con test (2026-09-17).
 - [Hermes como acompañante de la aceptación](issues/14-hermes-acompanante-de-la-aceptacion.md) — Hermes no vive en el pipeline: la skill comun "refutar tests" corre siempre antes del veredicto y propone tests filtrados por gates; plantar Hermes en un repo es opcional; runtime mmorch vs Hermes sale de un banco con oraculo por ejecucion (2026-09-17). Tickets 16-18.
 - [Banco de refutación](issues/16-banco-de-refutacion.md) — `mmorch/refutacion.py` + `mmorch cli refutacion`: clasifica un test propuesto por ejecucion (acierto/falsa alarma/neutro/invalido) en worktrees detached; 3 casos en `logs/refutacion/banco.json` (local); verificado 5/5 con tests conocidos (2026-09-17).
+- [Skill refutar tests y medición](issues/17-skill-refutar-tests-y-medicion.md) — medido y NEGATIVO: 3 versiones de la skill, 25 corridas con deepseek-reasoner, 0 aciertos y casi todo neutro; los defectos reales se atraparon CON el codigo delante. El ticket 18 se cierra sin construir (2026-09-17).
 
 ## Not yet specified
 
@@ -49,6 +50,9 @@ Todos los proyectos del usuario construyen sus features con el mismo pipeline de
 - Señal que justifica plantar un Hermes en un repo (ticket 14 lo dejo como herramienta opcional sin default): espera un caso real.
 - Canal movil para aprobar tests desde el telefono (Telegram): el ticket 14 no lo eligio; vuelve si esperar el veredicto frena corridas.
 - Exportar los perfiles locales de Hermes en `scripts/claude_config.py`: solo si se planta un Hermes.
+
+- Refutador del test antes de la aprobacion humana: medido negativo en el ticket 17 (0 aciertos en 25 corridas). Vuelve con una hipotesis nueva, por ejemplo un refutador que vea una implementacion; el banco del ticket 16 lo mide en ~12 min.
+- Ejecucion en contenedor (Docker) declarada por el repo en `sdlc.toml` (no por RAM libre: cambiaria el entorno entre corridas y el baseline dejaria de ser comparable).
 
 - Recursos visuales (sprites): ticket 15, espera un juego real.
 

@@ -1,6 +1,6 @@
 # Refutación del test en la etapa 1 del pipeline
 Type: task
-Status: open
+Status: closed (2026-09-17, premisa refutada)
 Blocked by: 17
 Map: ../map.md
 
@@ -14,3 +14,10 @@ refutacion (propuesta + etiqueta + motivo). Una reescritura de la skill queda so
 
 Hecho cuando: una corrida real por el server muestra propuestas filtradas antes del veredicto, con tests que prueben el
 filtro (no compila, pasa en HEAD, sin R<n>) y el registro idempotente de las decisiones.
+
+## Cierre (2026-09-17)
+
+No se construye: el ticket 17 midio la skill y NINGUNA version llega al criterio D6 (25 corridas, 0 aciertos). Conectar
+a la etapa 1 un refutador que no atrapa defectos solo agregaria ruido y costo antes del veredicto humano. La idea vuelve
+a la niebla del mapa con su numero medido; el banco del ticket 16 permite reintentar cuando haya una hipotesis nueva
+(por ejemplo un refutador que vea una implementacion, no solo el test).
