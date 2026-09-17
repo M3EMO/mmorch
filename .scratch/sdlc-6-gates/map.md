@@ -40,6 +40,7 @@ Todos los proyectos del usuario construyen sus features con el mismo pipeline de
 - [Hermes como acompañante de la aceptación](issues/14-hermes-acompanante-de-la-aceptacion.md) — Hermes no vive en el pipeline: la skill comun "refutar tests" corre siempre antes del veredicto y propone tests filtrados por gates; plantar Hermes en un repo es opcional; runtime mmorch vs Hermes sale de un banco con oraculo por ejecucion (2026-09-17). Tickets 16-18.
 - [Banco de refutación](issues/16-banco-de-refutacion.md) — `mmorch/refutacion.py` + `mmorch cli refutacion`: clasifica un test propuesto por ejecucion (acierto/falsa alarma/neutro/invalido) en worktrees detached; 3 casos en `logs/refutacion/banco.json` (local); verificado 5/5 con tests conocidos (2026-09-17).
 - [Skill refutar tests y medición](issues/17-skill-refutar-tests-y-medicion.md) — medido y NEGATIVO: 3 versiones de la skill, 25 corridas con deepseek-reasoner, 0 aciertos y casi todo neutro; los defectos reales se atraparon CON el codigo delante. El ticket 18 se cierra sin construir (2026-09-17).
+- [Oráculo visual para sprites](issues/15-oraculo-visual-sprites.md) — `mmorch/sprites.py`: capa determinista que bloquea (10 chequeos medidos, 10 defectos atrapados) + juez visual de a pares y rubrica binaria EN SOMBRA hasta 50 sprites etiquetados con kappa 0.6; el sprite viaja x8 porque el juez pierde acierto en chico (2026-09-17).
 
 ## Not yet specified
 
@@ -54,7 +55,7 @@ Todos los proyectos del usuario construyen sus features con el mismo pipeline de
 - Refutador del test antes de la aprobacion humana: medido negativo en el ticket 17 (0 aciertos en 25 corridas). Vuelve con una hipotesis nueva, por ejemplo un refutador que vea una implementacion; el banco del ticket 16 lo mide en ~12 min.
 - Ejecucion en contenedor (Docker) declarada por el repo en `sdlc.toml` (no por RAM libre: cambiaria el entorno entre corridas y el baseline dejaria de ser comparable).
 
-- Recursos visuales (sprites): ticket 15, espera un juego real.
+- Etiquetar 50 sprites reales (kind sprite) para medir kappa del juez visual: espera el primer juego.
 
 ## Out of scope
 

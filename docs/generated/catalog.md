@@ -4,7 +4,7 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**117 módulos · 44 MCP tools · 969 tests.**
+**118 módulos · 44 MCP tools · 974 tests.**
 
 El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
 
@@ -116,6 +116,7 @@ El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/slim.py` | Slim — auto-eficientización de código: menos verbose, misma conducta. |
 | `mmorch/spec.py` | spec — spec-builder barato que INFIERE mas alla de lo dicho, pero aplica |
 | `mmorch/speedup.py` | speedup — make a function faster, cero-cupo, kept only on MEASURED+CORRECT improvement. |
+| `mmorch/sprites.py` | sprites — oraculo visual del pipeline (ticket 15 del mapa sdlc-6-gates). |
 | `mmorch/stuck_detector.py` | Detector de estancamiento — tendencias sobre la historia nocturna, cero LLM. |
 | `mmorch/sync.py` | sync — GitHub como bus de sincronizacion entre maquinas. El host always-on (ej pc-mateo) |
 | `mmorch/synth_store.py` | synth_store — registro persistente de checkers SINTETIZADOS y promovidos, por tipo. |

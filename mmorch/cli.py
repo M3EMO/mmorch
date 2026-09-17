@@ -27,17 +27,29 @@ def main(argv: list[str] | None = None) -> int:
     pr = sub.add_parser("refutacion", help="clasifica un test propuesto contra un caso del banco de refutacion "
                         "(acierto / falsa_alarma / neutro / invalido); exit 0 solo si acierta")
     pr.add_argument("caso", help="id del caso en logs/refutacion/banco.json")
-    pr.add_argument("test", help="archivo con el test propuesto, en el formato del caso")
+    pr.add_argument("test", nargs="?", help="archivo con el test propuesto, en el formato del caso")
+    pr.add_argument("--proponer", metavar="MODELO", nargs="?", const="deepseek-reasoner",
+                    help="en vez de un archivo, le pide los tests a un modelo y clasifica cada uno "
+                         "(ticket 17: medido 0 aciertos en 25 corridas; sirve para reintentar con otra hipotesis)")
     args = parser.parse_args(argv)
 
     if args.cmd == "refutacion":  # sin watchdog: es una medicion puntual, no una vista del estado
         from pathlib import Path
 
-        from mmorch.refutacion import Banco, cargar_banco
-        with Banco(cargar_banco()) as banco:
-            r = banco.evaluar(args.caso, Path(args.test).read_text(encoding="utf-8"))
-        print(json.dumps(r, ensure_ascii=False, indent=2))
-        return 0 if r["clase"] == "acierto" else 1
+        from mmorch.refutacion import Banco, cargar_banco, refutar
+        casos = cargar_banco()
+        with Banco(casos) as banco:
+            if args.proponer:
+                r = refutar(casos[args.caso], modelo=args.proponer, max_n=8)
+                clases = [banco.evaluar(args.caso, t)["clase"] for t in r["tests"]]
+                print(json.dumps({"propuestas": len(r["tests"]), "clases": clases, "usd": r["usd"],
+                                  "segundos": r["segundos"]}, ensure_ascii=False, indent=2))
+                return 0 if "acierto" in clases else 1
+            if not args.test:
+                parser.error("falta el archivo del test (o usa --proponer)")
+            res = banco.evaluar(args.caso, Path(args.test).read_text(encoding="utf-8"))
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0 if res["clase"] == "acierto" else 1
 
     # dead-man visible (W4.4): nightly vencido grita en stderr aca mismo,
     # ademas del JSON de `health` — status solo muestra metrics y sin esto

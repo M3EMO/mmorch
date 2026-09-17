@@ -27,3 +27,4 @@ Append-only, parseable: `grep "^## \[" log.md`. Ops: write | ingest | migrate | 
 ## [2026-09-10] write | Loops de parche y escalación cuando falla un check (agentes vs CI) [mmorch]
 ## [2026-09-10] write | Suite unidad + regresión + mutación: práctica documentada (ticket 13) [mmorch]
 ## [2026-09-15] write | Ticket 08 SDLC: como lo subjetivo baja a checker — 5 opciones medidas por otros (2026-09) [mmorch]
+## [2026-09-17] write | Juez visual VLM para sprites: ordena pero no puntua (2026-09) [mmorch]

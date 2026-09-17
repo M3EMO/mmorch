@@ -326,6 +326,32 @@ def _lineas_cambiadas(f: str) -> set[int] | None:
     return {n for a, b in re.findall(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@", diff, re.M) for n in range(int(a), int(a) + int(b or 1))}
 
 
+def gate_sprites() -> tuple[bool, str]:
+    """Ticket 15: los assets del repo pasan la capa DETERMINISTA (bloquea) y, si hay referencias, el juez visual deja
+    su opinion EN SOMBRA (nunca bloquea: un juez VLM ordena pero no puntua, medido 2026-09-17)."""
+    cfg = CFG.get("sprites")
+    if not cfg:
+        return rec_gate("sprites", True, "el repo no declara [sprites]")
+    from .sprites import juez_visual, revisar
+    res = revisar(cfg, WT)
+    malos = [f"{n}: {d}" for n, ok, d in res if not ok]
+    base = WT / cfg.get("dir", ".")
+    for rel, ref in (cfg.get("referencias") or {}).items():
+        try:
+            juez_visual(base / rel, base / ref)
+        except Exception as e:  # noqa: BLE001 — la sombra nunca puede tumbar una corrida
+            rec_gate("juez-visual-sombra", True, f"{rel}: no se pudo consultar ({str(e)[:100]})")
+    if cfg.get("referencias"):
+        from .sprites import confiable
+        try:
+            v = [json.loads(x) for x in (RUNS / "veredictos.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
+        except OSError:
+            v = []
+        rec_gate("juez-visual-sombra", True, confiable(v)[1])  # informativo: cuanto falta para confiar en el juez
+    state["sprites"] = {"chequeos": len(res), "malos": len(malos)}
+    return rec_gate("sprites", not malos, "; ".join(malos[:5]) or f"{len(res)} chequeos verdes")
+
+
 def gate_codigo_muerto() -> tuple[bool, str]:
     """2026-09-17: ningun gate medía codigo muerto en archivos NUEVOS (cambio-minimo solo mira los existentes) y
     macro_leadlag llego con ~180 de 333 lineas para formatos que walk_forward_corr nunca devuelve. Mide que fraccion
@@ -1153,6 +1179,10 @@ def test():
             write_supervision("ESCALATE_HUMAN: fix 3 + reasoner 2 + Claude agotados.")
             return False, ladder_note
     if ok and FEAT:
+        spok, spnote = gate_sprites()
+        if not spok:
+            write_supervision(f"ESCALATE_HUMAN: assets invalidos\n{spnote}")
+            return False, f"sprites: {spnote[:200]}"
         dok, dnote = gate_codigo_muerto()  # antes del lint: borrar codigo deja imports sin uso y el lint los ve
         if not dok:
             backup = _all_code()
@@ -1510,6 +1540,8 @@ def init(repo: str) -> dict:
             "# `suite_cmd` (suite total si no es pytest), `seed_globs` (ignorados que el worktree necesita), `accept_test` ({slug}).\n"
             "# Umbrales: `cobertura_min` (0.8; fraccion de un .py NUEVO que corre la aceptacion), `mutation_min` (sin: observa).\n"
             "# `reviewer_cmd`: agente que revisa y corrige (prompt por stdin, `{modo}` = plan|edit); sin esta clave, `claude -p`.\n"
+            "# [sprites]: dir, lado, paleta, tope_colores, hitboxes, animaciones, referencias. Lo determinista bloquea;\n"
+            "# el juez visual de `referencias` solo observa hasta kappa 0.6 sobre 50 sprites etiquetados (ticket 15).\n"
             + ('accept_cmd = "python -m pytest -q"\nsuite = ["tests", "-q", "-rfE", "-p", "no:cacheprovider"]\n'
                if (root / "tests").is_dir() else  # sin tests/, pytest en la raiz recolecta cualquier test_*.py (scrapers)
                '# accept_cmd = "<comando determinista, sin red>"   # sin tests/: definilo o el repo no entra\n')
