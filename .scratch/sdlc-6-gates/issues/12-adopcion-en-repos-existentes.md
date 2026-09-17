@@ -99,3 +99,6 @@ Los `sdlc.toml` quedaron SIN commitear en cada repo (commit = decision del usuar
   - mutacion solo sobre las lineas que cambio la feature; test de revision con nombre por feature; diffstat del job
     contra la base del worktree; veredicto repetido no suma ejemplo (log deduplicado 17 -> 7, respaldo `.bak-2026-09-17`).
 - Estado: Estudio y Portfolio ENTRAN con numeros; ChatBot BLOQUEADO hasta instalar Maven; Adepor FUERA.
+- ChatBot DESBLOQUEADO (2026-09-17): el usuario instalo Maven 3.9.11 (Java 17). Sonda en worktree de HEAD:
+  `mvn -q -B -f backend/pom.xml test` verde, 13 tests (Core 4, Bot 5, Webhook 4), 39 s, arbol limpio. Falta la feature
+  de prueba (grilling con el usuario). mmorch `db9d58c` = los 6 huecos de la sesion 4.
