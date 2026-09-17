@@ -102,3 +102,8 @@ Los `sdlc.toml` quedaron SIN commitear en cada repo (commit = decision del usuar
 - ChatBot DESBLOQUEADO (2026-09-17): el usuario instalo Maven 3.9.11 (Java 17). Sonda en worktree de HEAD:
   `mvn -q -B -f backend/pom.xml test` verde, 13 tests (Core 4, Bot 5, Webhook 4), 39 s, arbol limpio. Falta la feature
   de prueba (grilling con el usuario). mmorch `db9d58c` = los 6 huecos de la sesion 4.
+- ChatBot reposicion (2026-09-17): corrida BUILT en `mmorch/wt-8d07232f` (US$0.014, 12 min, mutacion 0.857) con un
+  defecto real que la revision de Claude probo con test (clave de deduplicacion con "|" sin escapar) y el pipeline
+  descarto. Huecos corregidos: accept() en repos no Python tambien corre el test pytest de la revision; el baseline de
+  `suite_cmd` se mide sin los tests de aceptacion (en Java/TS no compilaban en la base y el gate solo observaba).
+  Pendiente: reanudar ChatBot desde la etapa 5 y verificar antes del merge. ChatBot no tiene remoto.

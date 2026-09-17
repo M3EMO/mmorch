@@ -1,5 +1,6 @@
 """Gates del pipeline en lenguajes sin AST en stdlib (Rust, JS, ...): mutantes por texto, cabecera de comentario como
 docstring, clones por lineas. Cero API, cero compilador real: accept_cmd/compile_cmd son scripts Python."""
+import sys
 import types
 
 import mmorch.sdlc as S
@@ -95,3 +96,41 @@ def test_baseline_con_archivo_nuevo_del_plan(tmp_path, monkeypatch):
     ok, nota = S.gate_suite_total()
     assert ok, nota
     assert (wt / "src" / "nuevo.js").read_text(encoding="utf-8") == "const x = 'ok';\n"  # el baseline lo restaura
+
+
+def test_baseline_sin_la_aceptacion_ve_regresiones_en_lenguajes_compilados(tmp_path, monkeypatch):
+    """ChatBot (maven): el test de aceptacion no compila en la base y tumba la suite entera; el baseline salia rojo
+    siempre y el gate de regresion solo observaba. La base se mide sin los tests de aceptacion."""
+    import subprocess
+    monkeypatch.setattr(S, "RUNS", tmp_path / "runs")
+    wt = tmp_path / "wt"
+    (wt / "src").mkdir(parents=True)
+    (wt / "src" / "viejo.js").write_text("const ok = true;\n", encoding="utf-8")
+    # "compilador": la suite cae si hay un test de aceptacion sin su implementacion, o si viejo.js se rompe
+    (wt / "suite.py").write_text("import os, sys\nacc = os.path.exists('src/acc.test.js') and not os.path.exists('src/nuevo.js')\n"
+                                 "sys.exit(1 if acc or 'true' not in open('src/viejo.js').read() else 0)\n", encoding="utf-8")
+    (wt / "src" / "acc.test.js").write_bytes(b"test('R1')\r\n")
+    for c in (["init", "-q"], ["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "b"]):
+        subprocess.run(["git", *c], cwd=wt, check=True)
+    t = types.SimpleNamespace(name="c", task="t", accept_files={"src/acc.test.js": "test('R1')\n"})
+    S.configure(t, contract=[], feat={"repo": str(wt), "files": ["src/nuevo.js", "src/viejo.js"], "suite": []}, wt=wt)
+    S.CFG["suite_cmd"] = "python suite.py"
+    S.state.update(plan_files=["src/nuevo.js", "src/viejo.js"], base_sha="HEAD")
+    (wt / "src" / "nuevo.js").write_text("const x = 1;\n", encoding="utf-8")
+    (wt / "src" / "viejo.js").write_text("const ok = false;\n", encoding="utf-8")  # la feature rompe codigo viejo
+    ok, nota = S.gate_suite_total()
+    assert not ok and "ahora rojo" in nota and S.state["suite_total"]["baseline_verde"], nota
+    assert (wt / "src" / "acc.test.js").read_bytes() == b"test('R1')\r\n"  # la aceptacion vuelve intacta
+
+
+def test_aceptacion_en_otro_lenguaje_tambien_corre_el_test_de_revision(tmp_path, monkeypatch):
+    """ChatBot: Claude bloqueo con un test pytest que fallaba, pero `mvn test` no lo corria y el PR siguio."""
+    t = types.SimpleNamespace(name="r", task="t", accept_files={"src/Sdlc_x_Test.java": ""})
+    S.configure(t, contract=[], feat={"repo": str(tmp_path), "files": ["src/X.java"], "suite": []}, wt=tmp_path,
+                accept_cmd="python -c \"pass\"")
+    S.PY = sys.executable
+    assert S.accept()[0]  # sin test de revision: manda el comando del repo
+    (tmp_path / S.REVIEW_REL).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / S.REVIEW_REL).write_text("def test_R2_colision():\n    assert 1 == 2\n", encoding="utf-8")
+    ok, log = S.accept()
+    assert not ok and "1 failed" in log

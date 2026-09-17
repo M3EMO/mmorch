@@ -399,12 +399,26 @@ def _en_base(fn):
             _write(f, c)
 
 
+def _sin_aceptacion(fn):
+    """Corre fn() sin los tests de aceptacion en el arbol. Son rojos en la base por diseño, y en un lenguaje compilado
+    un test que no compila tumba la suite entera: el baseline salia rojo siempre y el gate de regresion solo observaba
+    (ChatBot y Estudio, 2026-09-17)."""
+    guardados = {f: (WT / f).read_bytes() for f in TASK.accept_files if (WT / f).exists()}
+    for f in guardados:
+        (WT / f).unlink()
+    try:
+        return fn()
+    finally:
+        for f, contenido in guardados.items():
+            (WT / f).write_bytes(contenido)
+
+
 def _suite_cmd_total(sha: str) -> tuple[bool, str]:
     """Otros lenguajes (`suite_cmd` en sdlc.toml): sin nombres de tests, compara verde/rojo contra el baseline."""
     # ponytail: exit code, no nombres; parsear la salida del runner (vitest, surefire) cuando un baseline rojo lo pida
-    base_file = RUNS / f"suite-baseline-{sha}-cmd.txt"
+    base_file = RUNS / f"suite-baseline-{sha}-cmd-sin-aceptacion.txt"
     if not base_file.exists():
-        bok, blog = _en_base(lambda: sh(str(CFG["suite_cmd"]), timeout=CFG["suite_timeout_s"], keep=400000))
+        bok, blog = _en_base(lambda: _sin_aceptacion(lambda: sh(str(CFG["suite_cmd"]), timeout=CFG["suite_timeout_s"], keep=400000)))
         _write("docs/sdlc/suite-baseline.log", blog)
         if "TIMEOUT" in blog:
             return rec_gate("suite-total", False, f"baseline: {blog[:200]}")
@@ -462,7 +476,13 @@ def _accept_paths():
 def accept():
     cmd = ACCEPT_CMD or CFG.get("accept_cmd")  # payload o sdlc.toml
     if cmd and (not TASK.accept_files or not all(_es_py(f) for f in TASK.accept_files)):
-        return sh(str(cmd))  # sin tests nombrados, o tests en otro lenguaje: el comando del repo es el oraculo
+        ok, log = sh(str(cmd))  # sin tests nombrados, o tests en otro lenguaje: el comando del repo es el oraculo
+        if (WT / REVIEW_REL).exists():
+            # 2026-09-17: la revision deja un test pytest; en ChatBot (Java) `mvn test` no lo corria y un BLOCK real
+            # (clave de deduplicacion con "|" sin escapar) paso como "sin evidencia". Corre despues: puede usar lo compilado.
+            rok, rlog = sh([PY, "-m", "pytest", REVIEW_REL, "-q", "-p", "no:cacheprovider"])
+            ok, log = ok and rok, f"{log}\n{rlog}"
+        return ok, log
     return sh([PY, "-m", "pytest", *_accept_paths(), "-q", "-p", "no:cacheprovider"])
 
 
