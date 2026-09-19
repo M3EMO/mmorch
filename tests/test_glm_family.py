@@ -11,10 +11,12 @@ def test_glm_registered_as_zhipu():
     assert cfg.family_of("glm-4.5-air") == "zhipu"
 
 
-def test_glm_is_cross_family_vs_defaults():
-    # gen deepseek y verifier google -> GLM cross-family con ambos
+def test_defaults_are_cross_family():
+    # 2026-09-19: verifier default = glm (zhipu), generador = deepseek. El invariante que importa
+    # es generador != verificador; GLM ya no es "tercera familia" respecto del verificador.
+    assert cfg.family_of(cfg.DEFAULT_GENERATOR) != cfg.family_of(cfg.DEFAULT_VERIFIER)
     assert cfg.family_of("glm-4.5-air") != cfg.family_of(cfg.DEFAULT_GENERATOR)
-    assert cfg.family_of("glm-4.5-air") != cfg.family_of(cfg.DEFAULT_VERIFIER)
+    assert cfg.family_of(cfg.DEFAULT_VERIFIER) == "zhipu"
 
 
 def test_glm_same_family_with_itself():

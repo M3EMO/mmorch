@@ -49,7 +49,7 @@ def ensemble_verify(
     Activar mas familias (Kimi, etc.) decorrelaciona mejor (research: error
     correlacionado por confounders compartidos).
     """
-    verifier_models = verifier_models or [DEFAULT_VERIFIER, "gemini-2.5-flash-lite"]
+    verifier_models = verifier_models or [DEFAULT_VERIFIER, "glm-4.5-air"]
     gf = family_of(gen_model)
     for vm in verifier_models:
         if family_of(vm) == gf:
@@ -138,7 +138,7 @@ def pair_verify(artifact: str, *, rubric: str, gen_model: str = DEFAULT_GENERATO
     """2 jueces cross-family con fast-path de costo y desacuerdo explicito.
     `verify_fn(artifact, rubric, gen_model, verifier_model)->Verdict` inyectable
     (self-check cero-costo); default = adversarial_verify."""
-    verifier_models = verifier_models or ["gemini-3.1-flash-lite", "gemini-2.5-flash"]
+    verifier_models = verifier_models or ["glm-5.2", "glm-4.5-air"]
     gf = family_of(gen_model)
     for vm in verifier_models:
         if family_of(vm) == gf:

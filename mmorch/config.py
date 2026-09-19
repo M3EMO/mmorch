@@ -190,12 +190,12 @@ REGISTRY: dict[str, ModelSpec] = {
 
 # Default node assignments for the MVP slice.
 DEFAULT_GENERATOR = "deepseek-chat"        # -> deepseek-v4-flash no-thinking
-DEFAULT_VERIFIER = "gemini-3.1-flash-lite"  # cross-family vs deepseek; -40% out vs 2.5-flash
-DEFAULT_ROUTER = "gemini-2.5-flash-lite"    # sigue siendo el out/M mas barato servido
+DEFAULT_VERIFIER = "glm-5.2"       # cross-family vs deepseek; medido README 2026-09-08: especificidad 0.993, thinking ON
+DEFAULT_ROUTER = "glm-4.5-air"     # zhipu mas barato del registro; sin gemini por decision del usuario 2026-09-19
 
 # Candidate generator pool the intuition layer (signature-keyed bandit) picks among when
 # routing is left to it. Bare valid REGISTRY keys only, spanning families (decorrelate).
-DEFAULT_INTUITION_POOL = ["deepseek-chat", "deepseek-v4-pro", "gemini-2.5-flash", "glm-5.2"]
+DEFAULT_INTUITION_POOL = ["deepseek-chat", "deepseek-v4-pro", "glm-4.6", "glm-5.2"]
 
 
 def family_of(model_key: str) -> str:
