@@ -1335,7 +1335,8 @@ def _seed_accept() -> None:
     if not accept:
         return
     for rel, content in accept.items():
-        if not (WT / rel).exists():
+        f = WT / rel  # tambien refresca uno existente: un accept actualizado (test viejo + feature nueva) no puede quedar stale
+        if not f.exists() or f.read_text(encoding="utf-8") != content:
             _write(rel, content)
     subprocess.run(["git", "add", "--", *accept], cwd=WT, check=True)  # solo los tests: el resto del arbol no es nuestro
     if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=WT).returncode != 0:
