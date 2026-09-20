@@ -257,3 +257,9 @@ def test_lint_cuenta_hallazgos_nuevos_por_archivo_contra_la_base(tmp_path, monke
     ok, nota = S.gate_lint()
     assert not ok and "nuevo.py" in nota
     assert (wt / "pkg" / "nuevo.py").exists()  # el baseline lo restaura
+
+
+def test_plan_files_acepta_filas_de_tabla(run):
+    # orchestration-r18: el planner escribe tablas aunque se le pidan vinetas
+    plan = "| Ruta | Accion |\n|---|---|\n| `pkg/a.py` | modificar |\n| `tests/test_otro.py` | crear |\n- `pkg/b.py`\n"
+    assert S._plan_files(plan) == ["pkg/a.py", "pkg/b.py"]

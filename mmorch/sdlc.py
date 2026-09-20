@@ -1044,8 +1044,12 @@ def plan():
 
 
 def _plan_files(block: str) -> list[str]:
-    """Archivos del plan = SOLO los items de la lista (D2 r1: una mencion en prosa 'sin tocar X.py' se colaba)."""
-    items = re.findall(r"(?m)^\s*[-*]\s*`?" + _file_re() + r"`?", block)
+    """Archivos del plan = SOLO los items de la lista (D2 r1: una mencion en prosa 'sin tocar X.py' se colaba).
+
+    Tambien la primera celda de una fila de tabla (`| `ruta` | accion |`): el planner escribe tablas
+    aunque se le pida vinetas (orchestration-r18) y el gate rechazaba planes correctos.
+    """
+    items = re.findall(r"(?m)^\s*(?:[-*]|\|)\s*`?" + _file_re() + r"`?", block)
     return [f for f in dict.fromkeys(items) if not f.startswith(TESTS_PREFIX) or f in _need_files()]  # D14-diag: test_capas es obligatorio en cableos
 
 
