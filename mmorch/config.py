@@ -190,7 +190,8 @@ REGISTRY: dict[str, ModelSpec] = {
 
 # Default node assignments for the MVP slice.
 DEFAULT_GENERATOR = "deepseek-chat"        # -> deepseek-v4-flash no-thinking
-DEFAULT_VERIFIER = "deepseek-reasoner"     # 2026-09-22: el mejor MEDIDO (n=350, acc. bal. 0.997); cross-family sin evidencia, ver issue orchestration-0a6
+DEFAULT_VERIFIER = "glm-5.2"               # subjetivo: GOAL exige cross-family vs el generador deepseek; thinking prendido
+CHECKABLE_VERIFIER = "deepseek-reasoner"   # checkeable sin oraculo: el mejor MEDIDO (n=350, acc. bal. 0.997); same-family permitido ahi
 DEFAULT_ROUTER = "glm-4.5-air"              # 2026-09-22: el zhipu mas barato; google fuera
 
 # Candidate generator pool the intuition layer (signature-keyed bandit) picks among when
