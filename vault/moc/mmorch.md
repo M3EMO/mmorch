@@ -13,6 +13,7 @@
 - [[auditoria-mmorch_bughunt.py-2026-08-31]] — seed
 - [[auditoria-mmorch_bursts.py-2026-09-01]] — seed
 - [[babel-para-prompts-refutado-por-medicion]] — refuted · conf 0.95
+- [[banco-de-acople-por-datos-typeddict-dueño-único-round-trip-e]] — measured · conf media
 - [[checkers-sintetizados-por-tipo-synth-promocion-con-borde-y-d]] — validated · conf alta en lo medido; la pregunta de familia queda sin respuesta por falta de errores
 - [[convenciones-de-arquitectura-de-repo-plantilla-gates-y-ci]] — seed · conf alta en fuentes oficiales; GATE-N.md no aparece en ellas
 - [[docling-vs-pypdfium2-2026-08-19]] — applied
