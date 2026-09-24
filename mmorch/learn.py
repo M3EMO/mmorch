@@ -10,7 +10,7 @@ from __future__ import annotations
 import statistics
 from collections import defaultdict
 
-from .metrics import read_events
+from .metrics import MetricEvent, read_events
 from .config import family_of
 from .feedback import calibration, ThompsonBandit
 from .memory import stats as memory_stats
@@ -48,7 +48,7 @@ def analyze() -> dict:
             "bandit": ThompsonBandit().stats()}     # brazos aprendidos (cascade thresholds, etc.)
 
 
-def _verdict_quality(ev: list[dict]) -> dict:
+def _verdict_quality(ev: list[MetricEvent]) -> dict:
     """Consume los eventos adversarial_verify_verdict (passed/confidence en `extra`)
     como proxy de calidad por verificador. Esto es lo que cierra P3b: el verdict no
     solo se loggea, se LEE. pass_rate alto + conf alta sin refutaciones puede ser

@@ -46,7 +46,6 @@ WRITER = os.environ.get("SDLC_WRITER", "deepseek-reasoner")
 CODER = os.environ.get("SDLC_CODER", "deepseek-v4-pro")
 DIAG = os.environ.get("SDLC_DIAG", WRITER)  # medicion 2026-09-15: diagnostico con/sin razonamiento
 PY = sys.executable
-METRICS = logs_dir() / "metrics.jsonl"
 # El pipeline es agnostico: compila/lintea/acepta por COMANDO (sdlc.toml). Esta tabla solo sugiere el compile_cmd en `init`.
 _LANG_HINT = {"py": "python -m compileall -q .", "java": "mvn -q test-compile", "kt": "gradle -q compileTestKotlin",
               "ts": "npx tsc --noEmit", "tsx": "npx tsc --noEmit", "jsx": "npx tsc --noEmit", "js": "node --check {files}", "go": "go build ./... && go vet ./...",
@@ -686,17 +685,14 @@ def gate_test_compile() -> tuple[bool, str]:
     return rec_gate("test-compile", ok, "ok" if ok else log[-800:])
 
 
-def ledger_usd():
-    if not METRICS.exists():
+def ledger_usd() -> float | None:
+    from .metrics import log_path, read_events
+    if not log_path().exists():
         return None
     t0 = state.get("t0_epoch") or 0
     usd = 0.0
     state["usd_by_family"] = {}
-    for line in METRICS.read_text(encoding="utf-8").splitlines()[-8000:]:
-        try:
-            r = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for r in read_events()[-8000:]:
         if r.get("phase") == PHASE and float(r.get("ts") or 0) >= t0:
             c = float(r.get("cost_usd") or 0)
             usd += c

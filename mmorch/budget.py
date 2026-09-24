@@ -16,7 +16,7 @@ import threading
 from datetime import datetime
 
 from .iohelpers import read_jsonl_cached
-from .metrics import read_events, rotated_paths
+from .metrics import MetricEvent, read_events, rotated_paths
 
 
 class BudgetExceeded(RuntimeError):
@@ -43,7 +43,7 @@ def max_monthly_usd() -> float | None:
         return None
 
 
-def _month_cost(events: list[dict], month: str) -> float:
+def _month_cost(events: list[MetricEvent], month: str) -> float:
     total = 0.0
     for e in events:
         iso = e.get("iso", "")

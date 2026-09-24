@@ -13,6 +13,7 @@ import json
 import threading
 import time
 from pathlib import Path
+from typing import Any, TypedDict
 
 from .iohelpers import read_jsonl_cached, read_jsonl_tail
 
@@ -22,6 +23,23 @@ from .paths import logs_dir
 
 _LOG_DIR = logs_dir()
 _LOG_PATH = _LOG_DIR / "metrics.jsonl"
+
+
+class MetricEvent(TypedDict, total=False):
+    """Contrato de una linea de metrics.jsonl: escritor y lectores lo comparten, asi mypy
+    ve el acople por datos que el grafo de llamadas no ve (banco de acople 2026-09-24)."""
+    ts: float
+    iso: str
+    phase: str
+    pattern: str
+    node: str
+    model: str
+    family: str
+    in_tokens: int
+    out_tokens: int
+    cost_usd: float
+    latency_s: float
+    extra: dict[str, Any]
 
 
 def log_path() -> Path:
@@ -68,7 +86,7 @@ def log_event(
     phase: str = "",
     **extra,
 ) -> None:
-    record = {
+    record: MetricEvent = {
         "ts": time.time(),
         "iso": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
         "phase": phase,
@@ -91,7 +109,7 @@ def log_event(
             fh.write(line + "\n")
 
 
-def read_events() -> list[dict]:
+def read_events() -> list[MetricEvent]:
     # Ticket 13 (audit-2026-08): cacheado por (mtime_ns, size) — metrics.jsonl es
     # append-only sin rotación, así que "no cambió de tamaño/mtime" == "misma historia".
     return read_jsonl_cached(_LOG_PATH)
@@ -113,6 +131,7 @@ def error_rates(*, window_n: int | None = 200, window_s: float | None = None) ->
     vía read_events(). window_s exige mirar más atrás que N líneas (no sabemos cuántas
     entran en S segundos) así que ahí cae al read_events() cacheado (igual de rápido en
     calls repetidas, sólo el primer parse post-mtime-change paga el costo completo)."""
+    events: list[MetricEvent]
     if window_s is None and window_n is not None:
         events = read_jsonl_tail(log_path(), window_n)
     else:
