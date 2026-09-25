@@ -3,6 +3,7 @@ import subprocess
 import pytest
 
 from mmorch.auto_apply import merge_candidate, observe, preflight, reconcile
+from mmorch.killswitch import pause
 from mmorch.promotion import PromotionStore
 from mmorch.runtime_checkout import ensure_runtime
 
@@ -43,6 +44,14 @@ def test_green_preflight_allows_apply_only_with_complete_evidence():
     assert verdict.eligible and verdict.apply_allowed
     assert verdict.zone == "green"
     assert all(verdict.checks.values())
+
+
+def test_kill_switch_rejects_even_with_green_evidence(tmp_path):
+    pause(tmp_path / "logs")
+    verdict = _ok(repo=tmp_path)
+    assert not verdict.eligible and not verdict.apply_allowed
+    assert verdict.checks["kill_switch"] is False
+    assert "kill_switch" in verdict.reason
 
 
 def test_shadow_evaluates_but_never_applies():
@@ -215,7 +224,7 @@ def test_e2e_merge_regression_revert_and_halt_across_restarts(tmp_path):
     assert restarts == ["restart"]
     assert (runtime.path / "value.py").read_text(encoding="utf-8") == "VALUE = 1\n"
     assert (repo / "value.py").read_text(encoding="utf-8") == "VALUE = 1\n"
-    assert (state_root / "loop_paused").exists()
+    assert (state_root.parent / "loop_paused").exists()
     reloaded = PromotionStore(state_root).load()
     statuses = [event["status"] for event in reloaded["history"]]
     assert statuses == [
@@ -259,7 +268,7 @@ def test_e2e_healthy_horizon_accepts_without_revert(tmp_path):
         horizon_s=10,
     )
     assert accepted["status"] == "accepted"
-    assert not (state_root / "loop_paused").exists()
+    assert not (state_root.parent / "loop_paused").exists()
     assert (runtime.path / "value.py").read_text(encoding="utf-8") == "VALUE = 2\n"
 
 

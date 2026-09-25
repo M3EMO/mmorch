@@ -4,7 +4,7 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**119 módulos · 44 MCP tools · 979 tests.**
+**120 módulos · 44 MCP tools · 981 tests.**
 
 El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
 
@@ -65,6 +65,7 @@ El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/intuition.py` | intuition — the bandit, re-keyed by structural signature (intuition layer Phase 1). |
 | `mmorch/iohelpers.py` | iohelpers — shared robustness idioms for the JSON/JSONL state files under logs/*. |
 | `mmorch/job_graph.py` | job_graph — adjacency-list ancestry over the in-memory job map (graft G1). |
+| `mmorch/killswitch.py` | Kill-switch global de los loops autonomos: un solo archivo, un solo dueño. |
 | `mmorch/learn.py` | learn — meta-inteligencia: mmorch aprende de su propio metrics.jsonl (I-1). |
 | `mmorch/loop.py` | loop_until_done — scope DESCONOCIDO, 'segui hasta que este limpio'. Control-flow |
 | `mmorch/loop_nightly.py` | F5 loop-cerrado: orquestador nightly del loop de ideas (spec .scratch/loop-cerrado/spec.md). |

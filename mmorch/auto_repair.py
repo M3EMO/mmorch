@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 
 from mmorch.iohelpers import atomic_write_json, load_json_tolerant
+from mmorch.killswitch import paused
 
 _RETRY_DAYS = 5
 
@@ -74,7 +75,7 @@ def repair(repo_dir: str, *, today: str, build_fn=None,
     lo hace desde que auto_repair paso a correr al final), se repara lo que
     fallo ESTA noche en vez de leer nightly.jsonl y reparar lo de anoche."""
     logs = Path(logs_dir or (Path(repo_dir) / "logs"))
-    if (logs / "loop_paused").exists():
+    if paused(logs):
         return {"skipped": "paused"}
 
     if rec is None:

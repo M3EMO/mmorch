@@ -16,6 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from mmorch.iohelpers import atomic_write_json, load_json_tolerant
+from mmorch.killswitch import paused
 
 _RETRY_DAYS = 7
 _SKIP = {"__init__.py"}
@@ -42,7 +43,7 @@ def slim_one(orch_root: str, *, today: str, evolve_round_fn=None,
     Branch verde queda para el tren; roja se descarta sola."""
     root = Path(orch_root)
     logs = root / "logs"
-    if (logs / "loop_paused").exists():
+    if paused(logs):
         return {"skipped": "paused"}
 
     state_path = logs / "slim_state.json"

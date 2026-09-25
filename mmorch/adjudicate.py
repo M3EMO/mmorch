@@ -3,12 +3,13 @@
 from pathlib import Path
 import hashlib
 import yaml
+from mmorch.killswitch import paused
 
 
 def adjudicate(note, project_name, project_path, generator, verifier, *, logs_dir='logs'):
     """Adjudicate a single note against a project."""
     logs_path = Path(logs_dir)
-    if (logs_path / 'loop_paused').exists():
+    if paused(logs_path):
         return {'skipped': True}
 
     # contrato: si el proyecto esta indexado (.codegraph/), el juez y el refutador

@@ -8,6 +8,7 @@ mejor propuesta pendiente para el proyecto del cwd, incrementando shown_count.
 from pathlib import Path
 
 from mmorch.iohelpers import atomic_write_json, load_json_tolerant
+from mmorch.killswitch import paused
 
 _MAX_SHOWN = 5
 
@@ -27,7 +28,7 @@ def _card_text(match: dict) -> str:
 def compose_cards(*, logs_dir: str = "logs") -> dict:
     """Agrega "card" al mejor strong pendiente sin card de cada proyecto."""
     logs_path = Path(logs_dir)
-    if (logs_path / "loop_paused").exists():
+    if paused(logs_path):
         return {"skipped": True}
     state_path = logs_path / "adjudications.json"
     state = load_json_tolerant(state_path, {})

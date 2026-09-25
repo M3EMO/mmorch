@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from mmorch.iohelpers import atomic_write_json, load_json_tolerant
+from mmorch.killswitch import paused
 
 CAP_CALLS_PER_MONTH = 2000
 CAP_USD_PER_MONTH = 3.0
@@ -522,7 +523,7 @@ def run_idea_loop(*, repo_dir: str, today: str, generator=None, verifier=None,
     global _BUDGET_PATH
     _BUDGET_PATH = repo / "logs" / "loop_budget.json"
 
-    if (repo / "logs" / "loop_paused").exists():
+    if paused(repo / "logs"):
         return {"skipped": "paused"}
     if not _check_and_count_budget(_EST_CALLS_PER_RUN, logs_dir=logs_dir,
                                    month=today[:7]):
