@@ -4,7 +4,7 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**120 módulos · 44 MCP tools · 981 tests.**
+**121 módulos · 44 MCP tools · 990 tests.**
 
 El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
 
@@ -61,6 +61,7 @@ El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/hardening.py` | Hardening loop: mmorch se blinda solo contra sus puntos ciegos. |
 | `mmorch/health.py` | Health module for mmorch: dead-man's switch detection. |
 | `mmorch/hillclimb.py` | hillclimb — optimizacion sobre METRICA ESCALAR con feedback del entorno |
+| `mmorch/impacto.py` | impacto — informe de impacto por literales compartidos (mapa `.scratch/mapa-de-impacto`). |
 | `mmorch/innovate.py` | innovate (I-5) — motor de innovacion productizado. mmorch se idea capacidades |
 | `mmorch/intuition.py` | intuition — the bandit, re-keyed by structural signature (intuition layer Phase 1). |
 | `mmorch/iohelpers.py` | iohelpers — shared robustness idioms for the JSON/JSONL state files under logs/*. |

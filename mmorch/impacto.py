@@ -1,0 +1,199 @@
+"""impacto — informe de impacto por literales compartidos (mapa `.scratch/mapa-de-impacto`).
+
+Antes de editar un archivo Python, lista los otros modulos que comparten con el literales
+de datos (tablas SQL, rutas, claves JSON, variables de entorno).
+Medido (ticket 09): con este informe, tareas de cambio con un lector acoplado pasan de 42% a
+96% de acierto (deepseek-v4-pro); sin el, el agente cambia el escritor y no toca al lector.
+
+Formato (grilling del ticket 03): orden por especificidad (menos modulos primero), un literal
+en mas de COMMON modulos se resume con su conteo, tope de MAX_LINES lineas. Sin linea de
+tests: en la aceptacion del ticket 05 no mejoro el acierto (20/24 con ella, 23/24 sin ella) y
+promete algo que no cumple, porque los tests visibles no cubren a los lectores acoplados.
+
+Uso como hook de Claude Code (PreToolUse sobre Edit|Write|MultiEdit):
+    python -m mmorch.impacto hook   < json del hook   -> json con additionalContext o nada
+Uso como hook de Cursor (postToolUse, despues de la primera edicion; ticket 10):
+    python -m mmorch.impacto cursor < json del hook   -> json con additional_context o nada
+Siempre sale con codigo 0: si algo falla, la edicion sigue sin informe (fail-open).
+"""
+from __future__ import annotations
+
+import ast
+import json
+import os
+import re
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+MAX_LINES = 10
+COMMON = 5
+MAX_FILES = 5000   # ponytail: tope duro para repos enormes; subir si un repo real lo necesita
+_TOK = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
+_STOP = {"utf", "encoding", "SELECT", "FROM", "WHERE", "INSERT", "INTO", "VALUES", "UPDATE", "SET",
+         "CREATE", "TABLE", "EXISTS", "INTEGER", "PRIMARY", "KEY", "REAL", "TEXT", "COALESCE", "SUM",
+         "COUNT", "GROUP", "ORDER", "LIMIT", "DESC", "NOT", "AND", "NULL"}
+_SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", "build", "dist", "site-packages",
+              ".codegraph", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox"}
+
+
+def _py_files(root: Path) -> list[Path]:
+    out: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")]
+        out += [Path(dirpath) / f for f in filenames if f.endswith(".py")]
+        if len(out) >= MAX_FILES:
+            break
+    return out
+
+
+def _is_test(rel: str) -> bool:
+    parts = rel.split("/")
+    return "tests" in parts[:-1] or "test" in parts[:-1] or parts[-1].startswith("test_")
+
+
+_SQL = re.compile(r"\s*(select|insert|update|delete|create|with|alter|drop)\b", re.I)
+
+
+def _looks_like_data(s: str) -> bool:
+    """Literal con forma de dato: sin espacios (clave, ruta, variable de entorno) o SQL.
+    Los textos en prosa (mensajes, prompts) comparten palabras por azar y solo agregan ruido."""
+    s = s.strip()
+    return bool(s) and (" " not in s or bool(_SQL.match(s)))
+
+
+def literal_tokens(src: str) -> dict[str, int]:
+    """token -> primera linea donde aparece dentro de un literal de texto (sin docstrings)."""
+    tree = ast.parse(src)
+    docs = set()
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.body \
+                and isinstance(n.body[0], ast.Expr) and isinstance(n.body[0].value, ast.Constant):
+            docs.add(id(n.body[0].value))
+    out: dict[str, int] = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docs \
+                and _looks_like_data(n.value):
+            for t in _TOK.findall(n.value):
+                if t not in _STOP:
+                    out.setdefault(t, n.lineno)
+    return out
+
+
+def report(root: Path, target: Path) -> str:
+    """Informe de impacto de `target` dentro de `root`. Vacio si no hay nada que avisar."""
+    root, target = root.resolve(), target.resolve()
+    rel_target = target.relative_to(root).as_posix()
+    toks: dict[str, dict[str, int]] = {}
+    for p in _py_files(root):
+        rel = p.relative_to(root).as_posix()
+        if _is_test(rel):
+            continue
+        try:
+            toks[rel] = literal_tokens(p.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError, ValueError, OSError):
+            continue
+    if rel_target not in toks and target.is_file():
+        try:
+            toks[rel_target] = literal_tokens(target.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError, ValueError, OSError):
+            toks[rel_target] = {}
+    mine = toks.get(rel_target, {})
+    entries = []
+    for t, line in mine.items():
+        others = sorted(rel for rel, tk in toks.items() if rel != rel_target and t in tk)
+        if others:
+            entries.append((len(others), t, line, others))
+    entries.sort()
+    body = []
+    for n, t, line, others in entries[:MAX_LINES]:
+        if n > COMMON:
+            body.append(f"- `{t}` (linea {line}) aparece en {n} modulos mas (literal comun, sin lista)")
+        else:
+            refs = ", ".join(f"{o}:{toks[o][t]}" for o in others)
+            body.append(f"- `{t}` (linea {line}) tambien en: {refs}")
+    if len(entries) > MAX_LINES:
+        body[-1] = f"- ... y {len(entries) - MAX_LINES + 1} literales compartidos mas"
+    if not body:
+        return ""
+    return (f"INFORME DE IMPACTO (automatico, mmorch.impacto): {rel_target} comparte estos literales "
+            "de datos con otros modulos. Si cambias su formato, nombre o significado, revisa esos "
+            "modulos:\n" + "\n".join(body))
+
+
+def _repo_root(path: Path) -> Path:
+    for d in [path.parent, *path.parent.parents]:
+        if (d / ".git").exists():
+            return d
+    return path.parent
+
+
+def _seen(session: str, file: str) -> bool:
+    """Una vez por archivo por sesion: marca y devuelve si ya se habia informado."""
+    d = Path(tempfile.gettempdir()) / "mmorch_impacto"
+    d.mkdir(exist_ok=True)
+    marks = d / f"{re.sub(r'[^A-Za-z0-9_-]', '_', session)[:80]}.txt"
+    done = set(marks.read_text(encoding="utf-8").splitlines()) if marks.exists() else set()
+    if file in done:
+        return True
+    with marks.open("a", encoding="utf-8") as fh:
+        fh.write(file + "\n")
+    return False
+
+
+def _log(row: dict) -> None:
+    """Dueno unico de logs/impacto.jsonl: un registro por informe calculado."""
+    from .paths import logs_dir
+    with (logs_dir() / "impacto.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def hook(raw: str, cursor: bool = False) -> str:
+    """Entrada: JSON del hook. Claude Code (PreToolUse): `tool_input.file_path` + `session_id`,
+    salida `hookSpecificOutput.additionalContext`, sin permissionDecision (los permisos del
+    usuario siguen su curso). Cursor (postToolUse, ticket 10): `tool_input.path` +
+    `conversation_id`, salida `additional_context`. Devuelve "" si no aplica."""
+    data = json.loads(raw)
+    ti = data.get("tool_input") or {}
+    fp = ti.get("file_path") or ti.get("path") or ""
+    if not fp.endswith(".py"):
+        return ""
+    path = Path(fp)
+    if not path.is_absolute():
+        path = Path(data.get("cwd") or ".") / path
+    session = str(data.get("session_id") or data.get("conversation_id") or "sin-sesion")
+    if _seen(session, str(path.resolve())):
+        return ""
+    t0 = time.perf_counter()
+    root = _repo_root(path.resolve())
+    text = report(root, path)
+    _log({"ts": time.time(), "session": session, "file": str(path), "root": str(root),
+          "lines": text.count("\n") + 1 if text else 0, "chars": len(text),
+          "ms": round((time.perf_counter() - t0) * 1000)})
+    if not text:
+        return ""
+    if cursor:
+        return json.dumps({"additional_context": text}, ensure_ascii=False)
+    return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": text}},
+                      ensure_ascii=False)
+
+
+def main(argv: list[str]) -> int:
+    if argv[:1] in (["hook"], ["cursor"]):
+        try:
+            out = hook(sys.stdin.read(), cursor=argv[0] == "cursor")
+            if out:
+                print(out)
+        except Exception:  # fail-open: un informe roto nunca bloquea la edicion
+            pass
+        return 0
+    if len(argv) == 2:
+        print(report(Path(argv[0]), Path(argv[1])) or "(sin informe)")
+        return 0
+    print("uso: python -m mmorch.impacto hook  |  python -m mmorch.impacto <raiz> <archivo.py>")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
