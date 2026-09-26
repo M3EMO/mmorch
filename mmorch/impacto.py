@@ -81,19 +81,48 @@ def literal_tokens(src: str) -> dict[str, int]:
     return out
 
 
-def report(root: Path, target: Path) -> str:
-    """Informe de impacto de `target` dentro de `root`. Vacio si no hay nada que avisar."""
-    root, target = root.resolve(), target.resolve()
-    rel_target = target.relative_to(root).as_posix()
+def _cache_path(root: Path) -> Path:
+    import hashlib
+    d = Path(tempfile.gettempdir()) / "mmorch_impacto"
+    d.mkdir(exist_ok=True)
+    return d / f"tokens_{hashlib.sha1(str(root).encode()).hexdigest()[:12]}.json"
+
+
+def _all_tokens(root: Path) -> dict[str, dict[str, int]]:
+    """rel -> tokens de cada modulo no-test, con cache por (mtime_ns, size): en Portfolio
+    (327 modulos) el parseo en frio cuesta 5-15 s; con cache, solo se reparsea lo cambiado."""
+    cp = _cache_path(root)
+    try:
+        cache = json.loads(cp.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = {}
     toks: dict[str, dict[str, int]] = {}
+    fresh: dict[str, list] = {}
     for p in _py_files(root):
         rel = p.relative_to(root).as_posix()
         if _is_test(rel):
             continue
         try:
-            toks[rel] = literal_tokens(p.read_text(encoding="utf-8"))
+            st = p.stat()
+            key = [st.st_mtime_ns, st.st_size]
+            hit = cache.get(rel)
+            t = hit[1] if hit and hit[0] == key else literal_tokens(p.read_text(encoding="utf-8"))
         except (SyntaxError, UnicodeDecodeError, ValueError, OSError):
             continue
+        toks[rel] = t
+        fresh[rel] = [key, t]
+    try:
+        cp.write_text(json.dumps(fresh), encoding="utf-8")
+    except OSError:
+        pass
+    return toks
+
+
+def report(root: Path, target: Path) -> str:
+    """Informe de impacto de `target` dentro de `root`. Vacio si no hay nada que avisar."""
+    root, target = root.resolve(), target.resolve()
+    rel_target = target.relative_to(root).as_posix()
+    toks = _all_tokens(root)
     if rel_target not in toks and target.is_file():
         try:
             toks[rel_target] = literal_tokens(target.read_text(encoding="utf-8"))
