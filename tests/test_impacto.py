@@ -1,6 +1,8 @@
 """mmorch.impacto: informe de literales compartidos (mapa .scratch/mapa-de-impacto, ticket 05)."""
 import json
 
+import pytest
+
 import mmorch.impacto as I
 
 
@@ -72,6 +74,23 @@ def test_hook_modo_cursor(tmp_path, monkeypatch):
     out = json.loads(I.hook(json.dumps(ev), cursor=True))
     assert "reports/nightly.py" in out["additional_context"]
     assert I.hook(json.dumps(ev), cursor=True) == ""
+
+
+def test_typescript_lista_al_lector_y_saltea_imports(tmp_path):
+    pytest.importorskip("tree_sitter_typescript")
+    root = _repo(tmp_path, {
+        "exporter.ts": 'import { writeFileSync } from "node:fs";\nexport const H = "date,amount_cents";\n',
+        "reconcile.ts": 'import { readFileSync } from "node:fs";\nconst c = h.indexOf("amount_cents");\n',
+        "fmt.ts": 'export const money = (x: number) => x.toFixed(2);\n',
+        "exporter.test.ts": 'const x = "amount_cents";\n'})
+    r = I.report(root, root / "exporter.ts")
+    assert "reconcile.ts" in r and "`amount_cents`" in r
+    assert "`node`" not in r and "exporter.test.ts" not in r
+
+
+def test_extension_sin_soporte_no_informa(tmp_path):
+    root = _repo(tmp_path, {"a.java": 'String k = "clave";\n', "b.java": 'String k = "clave";\n'})
+    assert I.report(root, root / "a.java") == ""
 
 
 def test_hook_falla_abierto(capsys, monkeypatch):

@@ -38,11 +38,11 @@ _SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", "build", "
               ".codegraph", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox"}
 
 
-def _py_files(root: Path) -> list[Path]:
+def _source_files(root: Path, exts: tuple[str, ...]) -> list[Path]:
     out: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")]
-        out += [Path(dirpath) / f for f in filenames if f.endswith(".py")]
+        out += [Path(dirpath) / f for f in filenames if f.endswith(exts) and not f.endswith(".d.ts")]
         if len(out) >= MAX_FILES:
             break
     return out
@@ -50,7 +50,9 @@ def _py_files(root: Path) -> list[Path]:
 
 def _is_test(rel: str) -> bool:
     parts = rel.split("/")
-    return "tests" in parts[:-1] or "test" in parts[:-1] or parts[-1].startswith("test_")
+    name = parts[-1]
+    return bool({"tests", "test", "__tests__"} & set(parts[:-1])) or name.startswith("test_") \
+        or ".test." in name or ".spec." in name
 
 
 _SQL = re.compile(r"\s*(select|insert|update|delete|create|with|alter|drop)\b", re.I)
@@ -81,24 +83,67 @@ def literal_tokens(src: str) -> dict[str, int]:
     return out
 
 
-def _cache_path(root: Path) -> Path:
+_TS_PARSERS: dict[str, object] = {}
+
+
+def ts_tokens(src: str, tsx: bool = False) -> dict[str, int]:
+    """Mismo criterio que `literal_tokens` para TypeScript (ticket 11, variante v1): literales de
+    texto con forma de dato, sin las fuentes de import/export. Medido en el banco TS: acopladas
+    38% -> 100% (deepseek-v4-pro). Requiere tree-sitter (dependencia opcional `impacto-ts`)."""
+    from tree_sitter import Language, Parser
+    import tree_sitter_typescript as tst
+    key = "tsx" if tsx else "ts"
+    if key not in _TS_PARSERS:
+        _TS_PARSERS[key] = Parser(Language(tst.language_tsx() if tsx else tst.language_typescript()))
+    data = src.encode("utf-8")
+    stack = [_TS_PARSERS[key].parse(data).root_node]  # type: ignore[attr-defined]
+    out: dict[str, int] = {}
+    while stack:
+        n = stack.pop()
+        stack.extend(n.children)
+        if n.type != "string_fragment":
+            continue
+        p = n.parent
+        while p is not None and p.type in ("string", "string_fragment"):
+            p = p.parent
+        if p is not None and p.type in ("import_statement", "export_statement"):
+            continue   # "node:fs", "./store.ts": codigo, no datos
+        text = data[n.start_byte:n.end_byte].decode("utf-8", "ignore")
+        if _looks_like_data(text):
+            for t in _TOK.findall(text):
+                if t not in _STOP:
+                    out.setdefault(t, n.start_point[0] + 1)
+    return out
+
+
+# extension -> (familia, extensiones de la familia, tokenizador). Cada lenguaje entra solo
+# despues de pasar el banco de tareas con lector acoplado (grilling del ticket 03, Q7).
+_LANGS = {
+    ".py": ("py", (".py",), literal_tokens),
+    ".ts": ("ts", (".ts", ".tsx"), ts_tokens),
+    ".tsx": ("ts", (".ts", ".tsx"), lambda s: ts_tokens(s, tsx=True)),
+}
+
+
+def _cache_path(root: Path, family: str = "py") -> Path:
     import hashlib
     d = Path(tempfile.gettempdir()) / "mmorch_impacto"
     d.mkdir(exist_ok=True)
-    return d / f"tokens_{hashlib.sha1(str(root).encode()).hexdigest()[:12]}.json"
+    return d / f"tokens_{family}_{hashlib.sha1(str(root).encode()).hexdigest()[:12]}.json"
 
 
-def _all_tokens(root: Path) -> dict[str, dict[str, int]]:
-    """rel -> tokens de cada modulo no-test, con cache por (mtime_ns, size): en Portfolio
-    (327 modulos) el parseo en frio cuesta 5-15 s; con cache, solo se reparsea lo cambiado."""
-    cp = _cache_path(root)
+def _all_tokens(root: Path, suffix: str = ".py") -> dict[str, dict[str, int]]:
+    """rel -> tokens de cada modulo no-test del mismo lenguaje, con cache por (mtime_ns, size):
+    en Portfolio (327 modulos) el parseo en frio cuesta 5-15 s; con cache, solo lo cambiado."""
+    family, exts, _ = _LANGS[suffix]
+    cp = _cache_path(root, family)
     try:
         cache = json.loads(cp.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         cache = {}
     toks: dict[str, dict[str, int]] = {}
     fresh: dict[str, list] = {}
-    for p in _py_files(root):
+    for p in _source_files(root, exts):
         rel = p.relative_to(root).as_posix()
         if _is_test(rel):
             continue
@@ -106,7 +151,7 @@ def _all_tokens(root: Path) -> dict[str, dict[str, int]]:
             st = p.stat()
             key = [st.st_mtime_ns, st.st_size]
             hit = cache.get(rel)
-            t = hit[1] if hit and hit[0] == key else literal_tokens(p.read_text(encoding="utf-8"))
+            t = hit[1] if hit and hit[0] == key else _LANGS[p.suffix][2](p.read_text(encoding="utf-8"))
         except (SyntaxError, UnicodeDecodeError, ValueError, OSError):
             continue
         toks[rel] = t
@@ -121,11 +166,16 @@ def _all_tokens(root: Path) -> dict[str, dict[str, int]]:
 def report(root: Path, target: Path) -> str:
     """Informe de impacto de `target` dentro de `root`. Vacio si no hay nada que avisar."""
     root, target = root.resolve(), target.resolve()
+    if target.suffix not in _LANGS:
+        return ""
     rel_target = target.relative_to(root).as_posix()
-    toks = _all_tokens(root)
+    try:
+        toks = _all_tokens(root, target.suffix)
+    except ImportError:   # TS sin tree-sitter instalado: sin informe (fail-open)
+        return ""
     if rel_target not in toks and target.is_file():
         try:
-            toks[rel_target] = literal_tokens(target.read_text(encoding="utf-8"))
+            toks[rel_target] = _LANGS[target.suffix][2](target.read_text(encoding="utf-8"))
         except (SyntaxError, UnicodeDecodeError, ValueError, OSError):
             toks[rel_target] = {}
     mine = toks.get(rel_target, {})
@@ -186,7 +236,7 @@ def hook(raw: str, cursor: bool = False) -> str:
     data = json.loads(raw)
     ti = data.get("tool_input") or {}
     fp = ti.get("file_path") or ti.get("path") or ""
-    if not fp.endswith(".py"):
+    if Path(fp).suffix not in _LANGS:
         return ""
     path = Path(fp)
     if not path.is_absolute():
