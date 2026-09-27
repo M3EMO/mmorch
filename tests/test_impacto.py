@@ -65,6 +65,18 @@ def test_hook_una_vez_por_archivo_y_solo_py(tmp_path, monkeypatch):
     assert (tmp_path / "home" / "logs" / "impacto.jsonl").exists()
 
 
+def test_hook_sin_repo_no_informa_ni_recorre(tmp_path, monkeypatch):
+    if any((d / ".git").exists() for d in tmp_path.parents):
+        pytest.skip("tmp_path cae dentro de un repo git")
+    monkeypatch.setenv("MMORCH_HOME", str(tmp_path / "home"))
+    for rel, body in {"orders.py": WRITER, "reports/nightly.py": READER}.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(body, encoding="utf-8")
+    monkeypatch.setattr(I, "_source_files", lambda *a: pytest.fail("recorrio sin repo"))
+    ev = {"session_id": "s-sin-repo", "tool_input": {"file_path": str(tmp_path / "orders.py")}}
+    assert I.hook(json.dumps(ev)) == ""
+
+
 def test_hook_modo_cursor(tmp_path, monkeypatch):
     monkeypatch.setenv("MMORCH_HOME", str(tmp_path / "home"))
     monkeypatch.setattr(I.tempfile, "gettempdir", lambda: str(tmp_path / "tmp"))

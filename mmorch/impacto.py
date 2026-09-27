@@ -226,11 +226,12 @@ def report(root: Path, target: Path) -> str:
             "modulos:\n" + "\n".join(body))
 
 
-def _repo_root(path: Path) -> Path:
+def _repo_root(path: Path) -> Path | None:
+    """Carpeta con `.git` mas cercana. Sin repo, None: una raiz como C:\\ haria recorrer el disco."""
     for d in [path.parent, *path.parent.parents]:
         if (d / ".git").exists():
             return d
-    return path.parent
+    return None
 
 
 def _seen(session: str, file: str) -> bool:
@@ -269,8 +270,10 @@ def hook(raw: str, cursor: bool = False) -> str:
     session = str(data.get("session_id") or data.get("conversation_id") or "sin-sesion")
     if _seen(session, str(path.resolve())):
         return ""
-    t0 = time.perf_counter()
     root = _repo_root(path.resolve())
+    if root is None:
+        return ""
+    t0 = time.perf_counter()
     text = report(root, path)
     _log({"ts": time.time(), "session": session, "file": str(path), "root": str(root),
           "lines": text.count("\n") + 1 if text else 0, "chars": len(text),
