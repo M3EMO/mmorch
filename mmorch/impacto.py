@@ -4,6 +4,7 @@ Antes de editar un archivo Python, TypeScript o Java, lista los otros modulos qu
 de datos (tablas SQL, rutas, claves JSON, variables de entorno).
 Medido (ticket 09): con este informe, tareas de cambio con un lector acoplado pasan de 42% a
 96% de acierto (deepseek-v4-pro); sin el, el agente cambia el escritor y no toca al lector.
+En Python agrega las aristas indirectas de `mmorch.impacto_indirecto` (ticket 04: 38% -> 92%).
 
 Formato (grilling del ticket 03): orden por especificidad (menos modulos primero), un literal
 en mas de COMMON modulos se resume con su conteo, tope de MAX_LINES lineas. Sin linea de
@@ -189,7 +190,21 @@ def _all_tokens(root: Path, suffix: str = ".py") -> dict[str, dict[str, int]]:
 
 
 def report(root: Path, target: Path) -> str:
-    """Informe de impacto de `target` dentro de `root`. Vacio si no hay nada que avisar."""
+    """Informe de impacto de `target` dentro de `root`. Vacio si no hay nada que avisar.
+    En Python suma las aristas indirectas (mmorch.impacto_indirecto, ticket 04)."""
+    lit = _literal_report(root, target)
+    if target.suffix != ".py":
+        return lit
+    from mmorch import impacto_indirecto   # import tardio: solo Python lo usa
+    root, target = root.resolve(), target.resolve()
+    files = [p for p in _source_files(root, (".py",)) if not _is_test(p.relative_to(root).as_posix())]
+    F = impacto_indirecto.all_facts(root, files, _cache_path(root, "pyind"))
+    ind = impacto_indirecto.report(F, target.relative_to(root).as_posix())
+    return "\n\n".join(x for x in (lit, ind) if x)
+
+
+def _literal_report(root: Path, target: Path) -> str:
+    """Literales de datos que `target` comparte con otros modulos del mismo lenguaje."""
     root, target = root.resolve(), target.resolve()
     if target.suffix not in _LANGS:
         return ""
