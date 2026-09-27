@@ -19,6 +19,7 @@
 - [[docling-vs-pypdfium2-2026-08-19]] — applied
 - [[hallazgo-flakiness-suite-completa-2026-08-19]] — seed
 - [[hallazgo-project-integrate-selfcheck-roto-2026-08-20]] — seed
+- [[informe-de-impacto-evita-el-error-del-lector-acoplado-42-a-9]] — measured · conf media
 - [[juez-visual-vlm-para-sprites-ordena-pero-no-puntua-2026-09]] — verified · conf 0.8
 - [[loops-de-parche-y-escalación-cuando-falla-un-check-agentes-v]] — seed · conf 0.8
 - [[lotus-cierre-y-migracion-a-mmorch-2026-09-15]] — applied · conf 0.9
