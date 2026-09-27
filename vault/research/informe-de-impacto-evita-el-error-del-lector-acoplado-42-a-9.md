@@ -4,7 +4,7 @@ created: 2026-09-25
 tags: [research, mmorch, impacto, acople-por-datos, agentes, codegraph, benchmark, wayfinder]
 status: measured
 confidence: media
-sources: [.scratch/mapa-de-impacto (tickets 01, 02, 09); worktree ../orch-spike rama spike/impacto, scripts/tareas y scripts/impacto; video youtube k2qls2LiBRc]
+sources: [.scratch/mapa-de-impacto (tickets 01, 02, 09); worktree ../orch-spike rama spike/impacto, scripts/tareas, tareas_ts, tareas_java, tareas_portfolio y scripts/impacto; video youtube k2qls2LiBRc]
 ---
 ## Pregunta
 El video "AI gives too much code" describe un error: un agente cambia un escritor y no actualiza a un lector acoplado por datos, sin referencia en el codigo. ¿Un informe de impacto automatico lo evita?
@@ -46,13 +46,15 @@ Todas con el mismo protocolo: tareas acopladas y de control, tests ocultos, orac
 |---|---|---|---|---|
 | Python sintetico (ticket 09) | 42% -> 96% | 100% -> 100% | 4e-5 | US$0.81 |
 | TypeScript sintetico (ticket 11), informe v1 | 38% -> 100% | 100% -> 100% | 1e-6 | US$1.21 |
+| Java sintetico (ticket 12) | 38% -> 96% | 100% -> 100% | 1.4e-5 | US$0.87 |
 | Cursor: informe despues de la primera edicion (ticket 10) | 42% -> 79% | 100% -> 100% | 9e-3 | US$0.36 |
 | **Portfolio, codigo real del usuario (ticket 07)** | **54% -> 96%** | 100% -> 92% | 9e-4 | US$5.18 |
 
 - Portfolio: en t01, t04 y t07, sin informe fallo 9/9 y con informe acerto 9/9; sin informe, el agente nunca toco al lector.
 - Alcanza con senalar al modulo que comparte datos: en TypeScript, v1 acerto aunque no viera el campo exacto (solo el nombre de archivo compartido).
+- Limite visto al portar a Java: si el escritor no tiene literales (el nombre del archivo vive en una clase de acceso a datos), el informe sale vacio. No medido.
 - Una linea extra "tests que importan el modulo" no mejoro (20/24 vs 23/24, p=0.17) y se quito: los tests visibles no cubren a los lectores.
-- Instalado: `mmorch/impacto.py` + hook `PreToolUse` en Claude Code y `postToolUse` en Cursor; Python y TypeScript (tree-sitter opcional).
+- Instalado: `mmorch/impacto.py` + hook `PreToolUse` en Claude Code y `postToolUse` en Cursor; Python, TypeScript y Java (tree-sitter opcional). Sin `.git` en ningun padre, el hook no informa.
 
 ## Negativos y lecciones de medicion
 - Co-cambio en git como verdad (Portfolio, orchestration, Proyecto_Adepor): recall 0.12-0.20 (con el informe que mira la edicion) y lift 12-104x sobre el azar. El informe tiene señal, pero un co-cambio no implica "el lector tenia que actualizarse": verdad debil.
