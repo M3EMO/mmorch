@@ -88,9 +88,21 @@ def test_typescript_lista_al_lector_y_saltea_imports(tmp_path):
     assert "`node`" not in r and "exporter.test.ts" not in r
 
 
+def test_java_lista_al_lector_y_saltea_tests(tmp_path):
+    pytest.importorskip("tree_sitter_java")
+    root = _repo(tmp_path, {
+        "Exporter.java": 'import java.nio.file.*;\nclass Exporter { String h = "date,amount_cents"; }\n',
+        "Reconcile.java": 'class Reconcile { int c = h.indexOf("amount_cents"); }\n',
+        "Fmt.java": 'class Fmt { String f = "$%.2f"; }\n',
+        "ExporterTest.java": 'class ExporterTest { String x = "amount_cents"; }\n'})
+    r = I.report(root, root / "Exporter.java")
+    assert "Reconcile.java" in r and "`amount_cents`" in r
+    assert "ExporterTest.java" not in r
+
+
 def test_extension_sin_soporte_no_informa(tmp_path):
-    root = _repo(tmp_path, {"a.java": 'String k = "clave";\n', "b.java": 'String k = "clave";\n'})
-    assert I.report(root, root / "a.java") == ""
+    root = _repo(tmp_path, {"a.rb": 'k = "clave"\n', "b.rb": 'k = "clave"\n'})
+    assert I.report(root, root / "a.rb") == ""
 
 
 def test_hook_falla_abierto(capsys, monkeypatch):

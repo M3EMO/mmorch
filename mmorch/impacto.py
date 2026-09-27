@@ -1,6 +1,6 @@
 """impacto — informe de impacto por literales compartidos (mapa `.scratch/mapa-de-impacto`).
 
-Antes de editar un archivo Python, lista los otros modulos que comparten con el literales
+Antes de editar un archivo Python, TypeScript o Java, lista los otros modulos que comparten con el literales
 de datos (tablas SQL, rutas, claves JSON, variables de entorno).
 Medido (ticket 09): con este informe, tareas de cambio con un lector acoplado pasan de 42% a
 96% de acierto (deepseek-v4-pro); sin el, el agente cambia el escritor y no toca al lector.
@@ -52,7 +52,7 @@ def _is_test(rel: str) -> bool:
     parts = rel.split("/")
     name = parts[-1]
     return bool({"tests", "test", "__tests__"} & set(parts[:-1])) or name.startswith("test_") \
-        or ".test." in name or ".spec." in name
+        or ".test." in name or ".spec." in name or name.endswith(("Test.java", "Tests.java"))
 
 
 _SQL = re.compile(r"\s*(select|insert|update|delete|create|with|alter|drop)\b", re.I)
@@ -86,28 +86,30 @@ def literal_tokens(src: str) -> dict[str, int]:
 _TS_PARSERS: dict[str, object] = {}
 
 
-def ts_tokens(src: str, tsx: bool = False) -> dict[str, int]:
-    """Mismo criterio que `literal_tokens` para TypeScript (ticket 11, variante v1): literales de
-    texto con forma de dato, sin las fuentes de import/export. Medido en el banco TS: acopladas
-    38% -> 100% (deepseek-v4-pro). Requiere tree-sitter (dependencia opcional `impacto-ts`)."""
-    from tree_sitter import Language, Parser
-    import tree_sitter_typescript as tst
-    key = "tsx" if tsx else "ts"
+def _parser(key: str):
+    """Parser de tree-sitter por lenguaje ("ts", "tsx", "java"), creado una sola vez."""
     if key not in _TS_PARSERS:
-        _TS_PARSERS[key] = Parser(Language(tst.language_tsx() if tsx else tst.language_typescript()))
+        from tree_sitter import Language, Parser
+        if key == "java":
+            import tree_sitter_java as tsj
+            lang = tsj.language()
+        else:
+            import tree_sitter_typescript as tst
+            lang = tst.language_tsx() if key == "tsx" else tst.language_typescript()
+        _TS_PARSERS[key] = Parser(Language(lang))
+    return _TS_PARSERS[key]
+
+
+def _fragment_tokens(key: str, src: str, skip=lambda node: False) -> dict[str, int]:
+    """Mismo criterio que `literal_tokens` sobre los nodos `string_fragment` de tree-sitter."""
     data = src.encode("utf-8")
-    stack = [_TS_PARSERS[key].parse(data).root_node]  # type: ignore[attr-defined]
+    stack = [_parser(key).parse(data).root_node]
     out: dict[str, int] = {}
     while stack:
         n = stack.pop()
         stack.extend(n.children)
-        if n.type != "string_fragment":
+        if n.type != "string_fragment" or skip(n):
             continue
-        p = n.parent
-        while p is not None and p.type in ("string", "string_fragment"):
-            p = p.parent
-        if p is not None and p.type in ("import_statement", "export_statement"):
-            continue   # "node:fs", "./store.ts": codigo, no datos
         text = data[n.start_byte:n.end_byte].decode("utf-8", "ignore")
         if _looks_like_data(text):
             for t in _TOK.findall(text):
@@ -116,12 +118,35 @@ def ts_tokens(src: str, tsx: bool = False) -> dict[str, int]:
     return out
 
 
+def _in_import(n) -> bool:
+    """La fuente de un import/export ("node:fs", "./store.ts") es codigo, no datos."""
+    p = n.parent
+    while p is not None and p.type in ("string", "string_fragment"):
+        p = p.parent
+    return p is not None and p.type in ("import_statement", "export_statement")
+
+
+def ts_tokens(src: str, tsx: bool = False) -> dict[str, int]:
+    """TypeScript (ticket 11, variante v1): literales de texto con forma de dato, sin las fuentes
+    de import/export. Medido en el banco TS: acopladas 38% -> 100% (deepseek-v4-pro).
+    Requiere tree-sitter (dependencia opcional `impacto-ts`)."""
+    return _fragment_tokens("tsx" if tsx else "ts", src, _in_import)
+
+
+def java_tokens(src: str) -> dict[str, int]:
+    """Java (ticket 12): literales de texto con forma de dato. Java no pone rutas de import en
+    strings. Medido en el banco Java: acopladas 38% -> 96% (deepseek-v4-pro).
+    Requiere tree-sitter (dependencia opcional `impacto-java`)."""
+    return _fragment_tokens("java", src)
+
+
 # extension -> (familia, extensiones de la familia, tokenizador). Cada lenguaje entra solo
 # despues de pasar el banco de tareas con lector acoplado (grilling del ticket 03, Q7).
 _LANGS = {
     ".py": ("py", (".py",), literal_tokens),
     ".ts": ("ts", (".ts", ".tsx"), ts_tokens),
     ".tsx": ("ts", (".ts", ".tsx"), lambda s: ts_tokens(s, tsx=True)),
+    ".java": ("java", (".java",), java_tokens),
 }
 
 
@@ -171,7 +196,7 @@ def report(root: Path, target: Path) -> str:
     rel_target = target.relative_to(root).as_posix()
     try:
         toks = _all_tokens(root, target.suffix)
-    except ImportError:   # TS sin tree-sitter instalado: sin informe (fail-open)
+    except ImportError:   # TS o Java sin tree-sitter instalado: sin informe (fail-open)
         return ""
     if rel_target not in toks and target.is_file():
         try:
