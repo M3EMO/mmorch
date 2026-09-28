@@ -117,6 +117,18 @@ def test_extension_sin_soporte_no_informa(tmp_path):
     assert I.report(root, root / "a.rb") == ""
 
 
+def test_script_del_hook_no_carga_el_init_del_paquete():
+    """mmorch/__init__ importa providers y openai (~8 s); el hook corta a los 15 s."""
+    import subprocess
+    import sys
+    from pathlib import Path
+    script = Path(__file__).resolve().parents[1] / "scripts" / "impacto_hook.py"
+    r = subprocess.run([sys.executable, "-X", "importtime", str(script), "hook"], input="{}",
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0 and "mmorch.impacto" in r.stderr
+    assert "openai" not in r.stderr and "mmorch.providers" not in r.stderr
+
+
 def test_hook_falla_abierto(capsys, monkeypatch):
     monkeypatch.setattr(I.sys, "stdin", type("S", (), {"read": lambda self: "{no es json"})())
     assert I.main(["hook"]) == 0

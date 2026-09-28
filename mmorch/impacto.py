@@ -4,7 +4,8 @@ Antes de editar un archivo Python, TypeScript o Java, lista los otros modulos qu
 de datos (tablas SQL, rutas, claves JSON, variables de entorno).
 Medido (ticket 09): con este informe, tareas de cambio con un lector acoplado pasan de 42% a
 96% de acierto (deepseek-v4-pro); sin el, el agente cambia el escritor y no toca al lector.
-En Python agrega las aristas indirectas de `mmorch.impacto_indirecto` (ticket 04: 38% -> 92%).
+En Python agrega las aristas indirectas de `mmorch.impacto_indirecto` (ticket 04: 38% -> 92%)
+y los lectores en prompts y configuracion de agentes de `mmorch.impacto_externo` (ticket 13: 0/12 -> 12/12).
 
 Formato (grilling del ticket 03): orden por especificidad (menos modulos primero), un literal
 en mas de COMMON modulos se resume con su conteo, tope de MAX_LINES lineas. Sin linea de
@@ -199,8 +200,21 @@ def report(root: Path, target: Path) -> str:
     root, target = root.resolve(), target.resolve()
     files = [p for p in _source_files(root, (".py",)) if not _is_test(p.relative_to(root).as_posix())]
     F = impacto_indirecto.all_facts(root, files, _cache_path(root, "pyind"))
-    ind = impacto_indirecto.report(F, target.relative_to(root).as_posix())
-    return "\n\n".join(x for x in (lit, ind) if x)
+    rel = target.relative_to(root).as_posix()
+    ind = impacto_indirecto.report(F, rel)
+    ext = _external_report(target, rel)
+    return "\n\n".join(x for x in (lit, ind, ext) if x)
+
+
+def _external_report(target: Path, rel: str) -> str:
+    """Lectores en prompts y configuracion de agentes (mmorch.impacto_externo, ticket 13)."""
+    from mmorch import impacto_externo
+    try:
+        src = target.read_text(encoding="utf-8")
+        idx = impacto_externo.index(impacto_externo.config_roots(), _cache_path(Path.home(), "cfg"))
+        return impacto_externo.report(src, rel, idx)
+    except (SyntaxError, UnicodeDecodeError, ValueError, OSError):
+        return ""
 
 
 def _literal_report(root: Path, target: Path) -> str:
