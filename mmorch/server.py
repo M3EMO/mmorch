@@ -24,7 +24,6 @@ from __future__ import annotations
 import json
 import os
 import threading
-import time
 
 from .events import bus, emit
 from .server_frontend import FRONTEND as _FRONTEND
@@ -380,50 +379,8 @@ async def approve_job(request):
     return JSONResponse({"approved": jid})
 
 
-async def job_ancestry(request):
-    """Lineage of a job (graft G1): ancestors up + descendants down (adjacency-list)."""
-    from starlette.responses import JSONResponse
-    if not _token_ok(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    from . import job_graph
-    with _JOBS_LOCK:
-        jobs = {k: {"parent": v.get("parent")} for k, v in _JOBS.items()}
-    return JSONResponse(job_graph.tree(jobs, request.path_params["job_id"]))
 
 
-async def feedback_handler(request):
-    """Human up/down vote on a job output (graft G8): trace bundle + feed the bandit."""
-    from starlette.responses import JSONResponse
-    if not _token_ok(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    body = await request.json()
-    job_id = body.get("job_id", "")
-    vote = body.get("vote", "")
-    if vote not in ("up", "down"):
-        return JSONResponse({"error": "vote must be up|down"}, status_code=400)
-    # Validate consent against an allowlist (security: don't store invalid data)
-    consent = body.get("consent", "local_only")
-    if consent not in ("local_only", "share"):
-        return JSONResponse({"error": "consent must be local_only|share"}, status_code=400)
-    # Validate comment length (security: prevent unbounded storage)
-    comment = body.get("comment", "")
-    if not isinstance(comment, str):
-        return JSONResponse({"error": "comment must be a string"}, status_code=400)
-    if len(comment) > 2000:
-        return JSONResponse({"error": "comment too long (max 2000 chars)"}, status_code=400)
-    from . import feedback_trace
-    from .transcript_store import get as _tget
-    arm, ctx = "", ""
-    with _JOBS_LOCK:
-        j = _JOBS.get(job_id)
-    if j:
-        arm = j.get("engine") or ""
-        ctx = j.get("title") or ""
-    bundle = feedback_trace.record_vote(
-        job_id, vote, arm=arm, comment=comment, context=ctx,
-        transcript=_tget(job_id), consent=consent)
-    emit("feedback", "info", job_id=job_id, detail=f"{vote} ({arm or 'no-arm'})")
-    return JSONResponse({"recorded": True, "vote": vote, "arm": arm, "consent": bundle["consent"]})
 
 
 async def budget_policies(request):
@@ -443,92 +400,8 @@ async def budget_policies(request):
                          "incidents": budget_policy.evaluate(pols, snap)})
 
 
-async def cancel_tree(request):
-    """Cascade-cancel a job subtree (graft G7): hold + per-member snapshot, skip terminals."""
-    from starlette.responses import JSONResponse
-    if not _token_ok(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    jid = request.path_params["job_id"]
-    from . import job_graph
-    with _JOBS_LOCK:
-        snap = {k: {"parent": v.get("parent"), "status": v.get("status")} for k, v in _JOBS.items()}
-    plan = job_graph.plan_subtree_cancel(snap, jid)
-    applied = []
-    with _JOBS_LOCK:
-        for m in plan["members"]:
-            j = _JOBS.get(m["id"])
-            if not j:
-                continue
-            c = j.get("cancel")
-            if c:
-                try:
-                    c.set()
-                except Exception:
-                    pass
-            j["status"] = "error"
-            applied.append(m["id"])
-    for mid in applied:
-        emit("job", "error", job_id=mid, detail="cancelled via subtree hold")
-    plan["applied"] = applied
-    return JSONResponse(plan)
 
 
-async def reap_zombies(request):
-    """Detect + fail stuck jobs (graft G9): non-terminal rows whose heartbeat went stale.
-    Trigger this from scheduled-tasks. Body: {ttl?: seconds, dry?: bool}."""
-    from starlette.responses import JSONResponse
-    if not _token_ok(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    from . import durable_runs
-    ttl = body.get("ttl")
-    dry = bool(body.get("dry"))
-    now = time.time()
-    with _JOBS_LOCK:
-        snap = {k: {"status": v.get("status"), "ts": v.get("ts"),
-                    "heartbeat": v.get("heartbeat")} for k, v in _JOBS.items()}
-    zombies = durable_runs.detect_zombies(snap, now=now, ttl=ttl)
-    reaped = []
-    if not dry:
-        with _JOBS_LOCK:
-            for z in zombies:
-                j = _JOBS.get(z["id"])
-                if not j or j.get("status") in durable_runs._NOT_ZOMBIE:
-                    continue   # finished or vanished between snapshot and now
-                c = j.get("cancel")
-                if c:
-                    try:
-                        c.set()
-                    except Exception:
-                        pass
-                j["status"] = "error"
-                j["zombie"] = True
-                reaped.append(z)
-        for z in reaped:
-            emit("job", "error", job_id=z["id"],
-                 detail=f"zombie reaped: no heartbeat for {z['age']}s")
-    # Phase A: the sweep also GCs orphan blocks + flags which reaped jobs are resumable.
-    gc = {}
-    resumable = []
-    try:
-        from . import workflow_store
-        gc = workflow_store.gc_blocks(dry_run=dry)
-    except Exception as e:
-        gc = {"error": str(e)[:120]}
-    try:
-        from . import workflow_store
-        cp_jobs = workflow_store.jobs_with_checkpoints()
-        # a zombie with a checkpoint trail can be resumed from its last step instead of staying dead
-        ids = [z["id"] for z in (reaped if not dry else zombies)]
-        resumable = [jid for jid in ids if jid in cp_jobs]
-    except Exception:
-        resumable = []
-    return JSONResponse({"now": now, "ttl": durable_runs.default_ttl() if ttl is None else ttl,
-                         "dry": dry, "zombies": zombies, "reaped": [r["id"] for r in reaped],
-                         "gc": gc, "resumable": resumable})
 
 
 def _safe_project_target(project: str, target_file: str) -> str | None:
@@ -678,76 +551,14 @@ async def block_get(request):
     return JSONResponse(b)
 
 
-async def plugins_list(request):
-    """List installed plugins + their granted caps under the current policy (graft G11)."""
-    from starlette.responses import JSONResponse
-    if not _token_ok(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    from . import plugins as _pl
-    return JSONResponse({"plugins": _pl.discover(),
-                         "policy_allow": sorted(_pl.policy_allow())})
 
 
-def _plugin_host_services():
-    """Host services a plugin MAY call (only if its cap is granted). Capability = namespace."""
-    from .providers import call
-    return {
-        "log.emit": lambda p: (emit("plugin", "info", detail=str(p.get("msg", ""))[:160]), "ok")[1],
-        "llm.call": lambda p: call(p["model"], p.get("messages") or p.get("prompt", ""),
-                                   pattern="plugin", node=p.get("model", "")).text,
-    }
 
 
-async def plugin_invoke(request):
-    """Run one plugin contribution in an isolated, capability-gated worker (graft G11)."""
-    from starlette.responses import JSONResponse
-    if not _token_ok(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    blocked = _budget_block()          # a plugin may spend via llm.call
-    if blocked:
-        return blocked
-    name = request.path_params["name"]
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    fn, args = body.get("fn", ""), body.get("args", {})
-    if not fn:
-        return JSONResponse({"error": "fn required"}, status_code=400)
-    from . import plugins as _pl
-    match = next((p for p in _pl.discover() if p.get("name") == name), None)
-    if not match:
-        return JSONResponse({"error": f"no plugin '{name}'"}, status_code=404)
-    if match.get("error"):
-        return JSONResponse({"error": f"plugin '{name}' invalid: {match['error']}"}, status_code=400)
-    res = _pl.invoke(match, fn, args, host_services=_plugin_host_services())
-    return JSONResponse(res, status_code=200 if res.get("ok") else 400)
 
 
-async def export_handler(request):
-    """Portable state bundle (graft G4): values tagged portable|system_dependent|secret."""
-    from starlette.responses import JSONResponse
-    if not _token_ok(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    import time as _t
-    from .projects import list_projects
-    from .fleet import list_hosts
-    from .exec_policy import current_policy
-    from .portability import export_bundle
-    return JSONResponse(export_bundle(list_projects(), list_hosts(), current_policy(), _t.time()))
 
 
-async def import_handler(request):
-    """Reconcile + apply a portable bundle on THIS machine (skip collisions, need local paths)."""
-    from starlette.responses import JSONResponse
-    if not _token_ok(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    body = await request.json()
-    from .portability import import_bundle
-    return JSONResponse(import_bundle(body.get("manifest") or {}, body.get("overrides") or {}))
-
-
-# --- interactive PTY (writable terminal) ------------------------------------ #
 
 
 async def _bad_json_body(request, exc):
@@ -784,19 +595,11 @@ def build_app():
         Route("/projects", projects_handler, methods=["GET", "POST", "DELETE"]),
         Route("/run/project", run_project, methods=["POST"]),
         Route("/run/workflow", run_workflow, methods=["POST"]),
-        Route("/jobs/{job_id}/ancestry", job_ancestry),
-        Route("/jobs/{job_id}/cancel-tree", cancel_tree, methods=["POST"]),
-        Route("/jobs/reap", reap_zombies, methods=["POST"]),
         Route("/jobs/{job_id}/checkpoints", job_checkpoints),
         Route("/jobs/{job_id}/resume", resume_job, methods=["POST"]),
         Route("/jobs/{job_id}/pause", pause_job, methods=["POST"]),
         Route("/blocks/{block_id}", block_get),
-        Route("/plugins", plugins_list),
-        Route("/plugins/{name}/invoke", plugin_invoke, methods=["POST"]),
         Route("/budget/policies", budget_policies, methods=["GET", "POST"]),
-        Route("/feedback", feedback_handler, methods=["POST"]),
-        Route("/export", export_handler),
-        Route("/import", import_handler, methods=["POST"]),
         Route("/sync/pull", sync_pull, methods=["POST"]),
         Route("/fleet", fleet_handler, methods=["GET", "POST", "DELETE"]),
         Route("/fleet/run", fleet_run, methods=["POST"]),

@@ -4,7 +4,7 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**124 módulos · 44 MCP tools · 1036 tests.**
+**118 módulos · 44 MCP tools · 1033 tests.**
 
 El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
 
@@ -44,7 +44,6 @@ El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/dataset.py` | dataset — construye un dataset de CALIDAD DE CÓDIGO desde git history, SIN labels |
 | `mmorch/decision_mining.py` | Mineria de DECISIONES humanas desde transcripts de Claude Code. |
 | `mmorch/docs_extract.py` | Extracción de texto de documentos (PDF hoy) — dos niveles, medidos en |
-| `mmorch/durable_runs.py` | durable_runs — heartbeat + zombie reaper for in-process jobs (graft G9 from paperclip). |
 | `mmorch/effort.py` | effort — knob explicito de esfuerzo -> tier de modelo (patron Fable 5: 'effort' controla |
 | `mmorch/enrich.py` | enrich — completar/especificar el prompt infiriendo intent del usuario (patron Fable 5), |
 | `mmorch/ensemble.py` | ensemble_verify (I-3) — K escepticos cross-family + voto mayoria. |
@@ -53,7 +52,6 @@ El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/evolve_findings.py` | evolve_findings — fuente automática de hallazgos para el loop nocturno de auto-evolve |
 | `mmorch/exec_policy.py` | exec_policy — where execution is allowed to run (graft G3 from paperclip). |
 | `mmorch/feedback.py` | feedback — el lazo que faltaba (la 'loss' ausente). mmorch genera/verifica/ |
-| `mmorch/feedback_trace.py` | feedback_trace — human vote -> trace bundle + bandit signal (graft G8 from paperclip). |
 | `mmorch/fleet.py` | fleet — control unificado de varios hosts mmorch en el tailnet. Cada maquina corre su |
 | `mmorch/frontier.py` | Frontera de temas — rompe el círculo cerrado del auto-descubrimiento. |
 | `mmorch/fuel.py` | Fuel module: candidate proposal lifecycle for roadmap loops. |
@@ -68,7 +66,6 @@ El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/innovate.py` | innovate (I-5) — motor de innovacion productizado. mmorch se idea capacidades |
 | `mmorch/intuition.py` | intuition — the bandit, re-keyed by structural signature (intuition layer Phase 1). |
 | `mmorch/iohelpers.py` | iohelpers — shared robustness idioms for the JSON/JSONL state files under logs/*. |
-| `mmorch/job_graph.py` | job_graph — adjacency-list ancestry over the in-memory job map (graft G1). |
 | `mmorch/killswitch.py` | Kill-switch global de los loops autonomos: un solo archivo, un solo dueño. |
 | `mmorch/learn.py` | learn — meta-inteligencia: mmorch aprende de su propio metrics.jsonl (I-1). |
 | `mmorch/loop.py` | loop_until_done — scope DESCONOCIDO, 'segui hasta que este limpio'. Control-flow |
@@ -86,9 +83,6 @@ El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/outcomes.py` | Outcome recording and expiry for proposals. |
 | `mmorch/paths.py` | Rutas de ESTADO del sistema (logs, DBs, bandits, memoria, cache). |
 | `mmorch/patterns.py` | Code-flow patterns (§7), migrated as deterministic Python. |
-| `mmorch/plugin_worker.py` | plugin_worker — isolated subprocess host for ONE plugin invoke (graft G11). |
-| `mmorch/plugins.py` | plugins — capability-gated plugin platform (graft G11 from paperclip plugin-loader.ts). |
-| `mmorch/portability.py` | portability — export/import mmorch state across devices (grafts G2 + G4). |
 | `mmorch/prices.py` | prices — capa de OVERRIDE de precios (datos volátiles, separados del código). |
 | `mmorch/project_loop.py` | project_loop — ejecutor PROJECT-AWARE primario via mmorch (barato, cero cupo). Es la |
 | `mmorch/project_repair.py` | Reparación cross-repo: mmorch arregla los proyectos del REGISTRY, no solo |
