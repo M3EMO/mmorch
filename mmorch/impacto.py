@@ -344,9 +344,11 @@ def _post_text(data: dict) -> str:
     except (OSError, ValueError):
         last = {}
     key = str(path.resolve())
-    if last.get(key) == text:
+    # sin numeros de linea: una edicion arriba corre las lineas y el mismo aviso volvia en cada edicion
+    same = re.sub(r"linea \d+|:\d+\)", "", text)
+    if last.get(key) == same:
         return ""
-    last[key] = text
+    last[key] = same
     state.write_text(json.dumps(last), encoding="utf-8")
     return text
 

@@ -92,6 +92,9 @@ def test_hook_post_avisa_solo_cuando_cambia(tmp_path, monkeypatch):
     out = json.loads(I.post(ev))["hookSpecificOutput"]
     assert out["hookEventName"] == "PostToolUse" and "get_customer" in out["additionalContext"]
     assert I.post(ev) == ""                                   # mismo aviso: silencio
+    (root / "report.py").write_text("# linea nueva\n\nfrom customers import get_customer\n\nX = [get_customer(i) for i in range(3)]\n",
+                                    encoding="utf-8")
+    assert I.post(ev) == ""                                   # solo se corrieron las lineas: silencio
     (root / "report.py").write_text("X = 1\n", encoding="utf-8")
     assert I.post(ev) == ""                                   # arreglado: nada que avisar
     (root / "report.py").write_text("from customers import get_customer\n\nY = [get_customer(i) for i in range(2)]\n",

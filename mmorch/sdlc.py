@@ -3,7 +3,8 @@
 Reemplaza a project_integrate.build_project como engine de /project. Validado 6/6 en el bench y D2..D15 sobre
 mmorch (research/07-resultados.md del mapa sdlc-6-gates). Gates deterministas (contrato, allowlist, trazabilidad,
 compile, test-compile, cambio-minimo, sin-clones, docstring, suite total por nombre, lint, alcance) y escalera
-fix loop 3 -> reasoner x2 -> Claude (edit) -> humano. La etapa es el checkpoint: run-log.json + from_stage.
+fix loop 3 -> reasoner x2 -> Claude (edit) -> humano, en la etapa 4 (exito = compila) y en la 5 (exito = aceptacion).
+Si falta el compilador, la etapa 4 va directo a Claude para el entorno. La etapa es el checkpoint: run-log.json + from_stage.
 
 Uso como biblioteca: `build_feature(name, task, repo, accept={rel: contenido}, files=[...], contract=[...])`.
 Uso como CLI (bench o feature ya configurada por el llamador): `python -m mmorch.sdlc --task <bench> --wt <dir>`.
@@ -223,6 +224,29 @@ def sh(cmd, timeout: float | None = None, keep: int = 6000):
     except subprocess.TimeoutExpired:
         return False, f"TIMEOUT {timeout or CFG['cmd_timeout_s']}s: {(cmd if isinstance(cmd, str) else ' '.join(cmd))[:200]}"
     return p.returncode == 0, (p.stdout + p.stderr)[-keep:]
+
+
+_LANG_NAMES = {".py": "Python", ".ts": "TypeScript", ".tsx": "TypeScript", ".js": "JavaScript", ".jsx": "JavaScript",
+               ".mjs": "JavaScript", ".java": "Java", ".kt": "Kotlin", ".go": "Go", ".rs": "Rust", ".cs": "C#",
+               ".cpp": "C++", ".c": "C", ".rb": "Ruby", ".php": "PHP", ".swift": "Swift"}
+# Salidas de un comando que no existe (shell de Windows en ingles y castellano, POSIX, y avisos de npx/tsc).
+_NO_TOOL = re.compile(r"is not recognized as an internal or external command|no se reconoce como un comando"
+                      r"|command not found|: not found\b|To get access to the TypeScript compiler"
+                      r"|could not determine executable to run|El sistema no puede encontrar el archivo especificado", re.I)
+
+
+def _rol() -> str:
+    """Rol del coder segun el lenguaje de los archivos del plan (orchestration-7ys: antes decia Python siempre,
+    tambien en repos TypeScript y Java, que son justo donde el build cortaba por compilacion)."""
+    from collections import Counter
+    c = Counter(_LANG_NAMES.get(pathlib.Path(f).suffix) for f in state.get("plan_files", []))
+    c.pop(None, None)
+    return f"Sos un programador {c.most_common(1)[0][0] if c else 'Python'} senior. "
+
+
+def _toolchain_missing(log: str) -> bool:
+    """El compilador del repo no esta instalado o no esta en PATH: las vueltas del coder no pueden arreglarlo."""
+    return bool(_NO_TOOL.search(log or ""))
 
 
 def _cmd(key: str, files) -> str:
@@ -799,11 +823,13 @@ def _revert(backup):
         _write(f, old)
 
 
-def _dump_diag_case(log: str) -> None:
+def _dump_diag_case(log: str, kind: str = "test") -> None:
     d = RUNS / "diag-cases"; d.mkdir(parents=True, exist_ok=True)
-    case = {"task": TASK_NAME, "phase": PHASE, "base_sha": state.get("base_sha"), "log": log[-20000:],
-            "files": _all_code(), "orig": dict(_orig_files), "tests": _tests_text(), "task_text": TASK.task}
-    (d / f"{PHASE}-{int(time.time())}.json").write_text(json.dumps(case, ensure_ascii=False), encoding="utf-8")
+    case = {"task": TASK_NAME, "phase": PHASE, "kind": kind, "base_sha": state.get("base_sha"), "log": log[-20000:],
+            "files": _all_code(), "orig": dict(_orig_files), "tests": _tests_text(), "task_text": TASK.task,
+            "compile_cmd": CFG.get("compile_cmd")}
+    stem = PHASE if kind == "test" else f"{PHASE}-{kind}"
+    (d / f"{stem}-{int(time.time())}.json").write_text(json.dumps(case, ensure_ascii=False), encoding="utf-8")
 
 
 def reasoner_rounds(log) -> tuple[bool, str]:
@@ -825,7 +851,7 @@ def reasoner_rounds(log) -> tuple[bool, str]:
             files, instr = list(written)[:1], {}
         backup = {f: written[f] for f in files}
         for f in files:
-            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero.",
+            out = llm(CODER, _rol() + "Devolves SOLO el archivo entero.",
                       f"Aplica ESTA instruccion a {f}. No toques los tests.\n"
                       f"INSTRUCCION: {instr.get(f, 'corregi el fallo del test')}\n\n"
                       f"SALIDA:\n{log}\n\nARCHIVOS:\n{_joined(written)}")
@@ -870,6 +896,81 @@ def claude_fix(log) -> tuple[bool, str]:
     if ok:
         state["suite_total"] = test_counts(log)
     return ok, "Claude verde" if ok else "Claude rojo: escala a humano"
+
+
+# Archivos de entorno que Claude puede tocar para dejar andar el compilador (sin tocar el codigo ni los tests).
+_ENV_FILES = ("sdlc.toml", "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "tsconfig",
+              "node_modules/", "pom.xml", "build.gradle", "settings.gradle", "gradle", "mvnw", ".mvn/",
+              "requirements", "pyproject.toml")
+
+
+def _claude_compile(log: str, compiles, *, env: bool) -> tuple[bool, str]:
+    """Claude en el worktree para la etapa build (orchestration-7ys). env=True: falta el compilador; resuelve el
+    entorno del proyecto sin tocar el sistema. env=False: errores de compilacion; arregla los archivos del plan.
+    Exito = compila (no los tests de aceptacion, que corren en la etapa 5)."""
+    state["escalated_to_claude"] = True
+    state["claude_calls"] += 1
+    before = _tree()
+    cmd = CFG.get("compile_cmd") or "py_compile"
+    if env:
+        prompt = (f"El comando de compilacion del proyecto no encuentra su herramienta: `{cmd}`.\n\nSALIDA:\n{log}\n\n"
+                  "Resolve el entorno SIN instalar nada global ni fuera de este directorio: usa la herramienta local del "
+                  "proyecto (npx, mvnw, gradlew, el venv del repo), agrega la dependencia de desarrollo al manifiesto e "
+                  "instalala en el proyecto, o corregi `compile_cmd` en sdlc.toml. No toques codigo fuente, tests ni docs. "
+                  "Si no se puede sin tocar el sistema, no cambies nada. Al final responde en una linea que hiciste o que falta.")
+        allowed = _ENV_FILES
+    else:
+        prompt = (f"El codigo no compila con `{cmd}`. Arregla {state['plan_files']} hasta que compile. "
+                  f"NO toques tests ni docs. Al final responde en una linea que cambiaste.\n\nTAREA:\n{TASK.task}\n\nSALIDA:\n{log}")
+        allowed = tuple(state["plan_files"])
+    r = _revisor(prompt)
+    write_supervision(f"nivel 3 Claude build ({'entorno' if env else 'compila'}, rc={r.get('returncode')}): "
+                      f"{(r.get('result') or '')[:2000]}")
+    gate_alcance("claude-build-alcance", before, allowed)
+    if env:
+        new = _toml(WT).get("compile_cmd")
+        if new:
+            CFG["compile_cmd"] = new
+    if not gate_baseline()[0]:
+        subprocess.run(["git", "checkout", "--", *SNAP], cwd=WT)
+    return compiles()
+
+
+def _compile_ladder(log: str, compiles) -> tuple[bool, str, str]:
+    """Escalera de la etapa build (orchestration-7ys): diagnostico x2 y despues Claude; exito = compila.
+    Antes la etapa cortaba tras 3 vueltas del coder sin escalar. Cada entrada queda como caso replayable."""
+    _dump_diag_case(log, kind="compile")
+    for i in range(REASONER_TRIES):
+        written = _all_code()
+        pick = llm(DIAG, 'Sos un diagnosticador. Respondes SOLO JSON: {"files": [paths], "instructions": {path: "una instruccion"}}. Una instruccion por archivo.',
+                   f"El codigo no compila. Diagnostica y indica QUE cambiar.\n\nERROR DEL COMPILADOR:\n{log}\n\n"
+                   f"TAREA:\n{TASK.task}\n\nARCHIVOS:\n{_joined(written)}")
+        write_supervision(f"reasoner build {i+1}: {pick[:2000]}")
+        try:
+            data = json.loads(strip_fence(pick))
+            files = [f for f in data.get("files", []) if f in written]
+            instr = data.get("instructions") or {}
+        except Exception:
+            files, instr = [], {}
+        files = files or list(written)[:1]
+        backup = {f: written[f] for f in files}
+        for f in files:
+            out = llm(CODER, _rol() + "Devolves SOLO el archivo entero.",
+                      f"Aplica ESTA instruccion a {f} para que compile. No toques los tests.\n"
+                      f"INSTRUCCION: {instr.get(f, 'corregi el error del compilador')}\n\n"
+                      f"ERROR DEL COMPILADOR:\n{log}\n\nARCHIVOS:\n{_joined(written)}")
+            code = one_file(strip_fence(out), f)
+            if code:
+                _write(f, code)
+        if not gate_baseline()[0]:
+            _revert(backup)
+            continue
+        ok, log = compiles()
+        state["compile_ladder"] = state.get("compile_ladder", []) + [{"i": i + 1, "files": files, "ok": ok}]
+        if ok:
+            return True, f"reasoner build {i+1} compila", log
+    ok, log = _claude_compile(log, compiles, env=False)
+    return ok, "Claude build compila" if ok else "Claude build rojo: escala a humano", log
 
 
 def self_check() -> int:
@@ -1057,7 +1158,7 @@ def build():
     for f in state["plan_files"]:
         cur = (WT / f).read_text(encoding="utf-8") if (WT / f).exists() else ""
         cur_ctx = f"ARCHIVO ACTUAL {f} (devolvelo COMPLETO con el cambio minimo):\n{cur}\n\n" if cur.strip() else ""
-        out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el codigo del archivo pedido, sin explicacion ni markdown.",
+        out = llm(CODER, _rol() + "Devolves SOLO el codigo del archivo pedido, sin explicacion ni markdown.",
                   f"Escribi {f}. Tiene que importar con los archivos ya escritos y pasar los tests de aceptacion.\n\n{cur_ctx}"
                   f"PLAN:\n{plan_md}\n\nSPEC:\n{spec_md}\n\nTAREA:\n{TASK.task}\n\nTESTS:\n{_tests_text()}\n\n"
                   f"ARCHIVOS YA ESCRITOS:\n{_joined(written) or '(ninguno)'}")
@@ -1072,11 +1173,17 @@ def build():
         return (ok, log) if not ok else gate_test_compile()
 
     ok, log = _compiles()
+    if not ok and _toolchain_missing(log):  # orchestration-7ys: sin compilador las vueltas del coder no sirven
+        rec_gate("toolchain", False, log[-300:])
+        ok, log = _claude_compile(log, _compiles, env=True)
+        if not ok and _toolchain_missing(log):
+            write_supervision(f"ESCALATE_HUMAN: falta el compilador y Claude no lo resolvio\n{log[-1500:]}")
+            return False, f"toolchain: {log[-300:]}"
     for _ in range(3):  # r1 2026-09-11: test-compile tambien entra al fix loop, antes cortaba sin vuelta
         if ok:
             break
         for f in state["plan_files"]:
-            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el codigo corregido del archivo pedido, un solo archivo.",
+            out = llm(CODER, _rol() + "Devolves SOLO el codigo corregido del archivo pedido, un solo archivo.",
                       f"py_compile o la importacion de los tests fallo. Corregi {f}.\n\nERROR:\n{log}\n\nARCHIVOS:\n{_joined(written)}")
             code = one_file(strip_fence(out), f)
             if code and code != written[f]:
@@ -1084,15 +1191,18 @@ def build():
         ok, log = _compiles()
         if not gate_baseline()[0]:
             return False, "baseline roto en compile-fix"
-    if not ok:
-        return False, f"G3 rechaza tras 3 vueltas: {log[-300:]}"
+    if not ok:  # orchestration-7ys: la misma escalera que la etapa 5, con exito = compila
+        ok, ladder_note, log = _compile_ladder(log, _compiles)
+        if not ok:
+            write_supervision(f"ESCALATE_HUMAN: compila: fix 3 + reasoner 2 + Claude agotados.\n{log[-1500:]}")
+            return False, f"G3 rechaza tras 3 vueltas y la escalera ({ladder_note}): {log[-300:]}"
     cok, cnote = gate_clones(written)
     if not cok:
         return False, cnote
     mok, mnote = gate_cambio_minimo(docs_before, written)
     if not mok:  # D11: el coder borro 216 lineas de project_loop.py para agregar 10; una vuelta de re-pedido
         for f in [f for f in written if f in mnote]:
-            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero.",
+            out = llm(CODER, _rol() + "Devolves SOLO el archivo entero.",
                       f"Tu version de {f} borro codigo existente que la tarea NO pide tocar ({mnote}). "
                       f"Parti del ARCHIVO ORIGINAL y aplica SOLO el cambio pedido, conservando todo lo demas.\n\n"
                       f"TAREA:\n{TASK.task}\n\nARCHIVO ORIGINAL:\n{_orig_files.get(f, '')}\n\nTU VERSION:\n{written[f]}")
@@ -1105,7 +1215,7 @@ def build():
     dok, dnote = gate_docstring(docs_before)
     if not dok:  # una vuelta del coder para restaurarlo; si insiste, la etapa falla
         for f in [f for f, d in docs_before.items() if d and not _docstrings([f]).get(f)]:
-            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero.",
+            out = llm(CODER, _rol() + "Devolves SOLO el archivo entero.",
                       f"Restaura el docstring de modulo original de {f} al inicio del archivo, sin cambiar nada mas.\n\n"
                       f"DOCSTRING ORIGINAL:\n\"\"\"{docs_before[f]}\"\"\"\n\nARCHIVO ACTUAL:\n{(WT / f).read_text(encoding='utf-8')}")
             code = one_file(strip_fence(out), f)
@@ -1126,7 +1236,7 @@ def test():
     while not ok and vueltas < MAX_FIX:
         vueltas += 1
         written = _all_code()
-        pick = llm(CODER, 'Sos un programador Python senior. Respondes SOLO un JSON: {"files": [paths], "why": str}.',
+        pick = llm(CODER, _rol() + 'Respondes SOLO un JSON: {"files": [paths], "why": str}.',
                    f"Los tests fallan. Que archivos cambiar (los MENOS posibles)?\n\nSALIDA:\n{log}\n\n"
                    f"TAREA:\n{TASK.task}\n\nTESTS:\n{_tests_text()}\n\nARCHIVOS:\n{_joined(written)}")
         try:
@@ -1137,7 +1247,7 @@ def test():
             files = state["plan_files"][:1]
         backup = {f: written[f] for f in files}
         for f in files:
-            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero. No toques los tests.",
+            out = llm(CODER, _rol() + "Devolves SOLO el archivo entero. No toques los tests.",
                       f"Arregla {f}. Los tests NO se modifican.\n\nSALIDA:\n{log}\n\nTAREA:\n{TASK.task}\n\n"
                       f"TESTS:\n{_tests_text()}\n\nARCHIVOS:\n{_joined(written)}")
             code = one_file(strip_fence(out), f)
@@ -1184,7 +1294,7 @@ def test():
         if not dok:
             backup = _all_code()
             nuevo = next(f for f in state["plan_files"] if f in dnote)
-            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero.",
+            out = llm(CODER, _rol() + "Devolves SOLO el archivo entero.",
                       f"Ningun test ejecuta estas lineas de {nuevo}. Borra el codigo que la tarea no pide (ramas y formatos "
                       f"que nunca ocurren) sin cambiar el comportamiento que los tests fijan.\n\nMEDIDA:\n{dnote}\n\n"
                       f"TAREA:\n{TASK.task}\n\nTESTS:\n{_tests_text()}\n\nARCHIVOS:\n{_joined(backup)}")
@@ -1202,7 +1312,7 @@ def test():
                 return False, f"codigo muerto: {dnote[:200]}"
         lok, lnote = gate_lint()
         if not lok:  # D2 r1: el pre-commit del repo rechazo 2 errores de mypy; ahora es gate con escalera
-            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero.",
+            out = llm(CODER, _rol() + "Devolves SOLO el archivo entero.",
                       f"ruff/mypy reportan errores nuevos. Corregi {state['plan_files'][0]} sin cambiar comportamiento.\n\n"
                       f"ERRORES:\n{lnote}\n\nARCHIVOS:\n{_joined(_all_code())}")
             code = one_file(strip_fence(out), state["plan_files"][0])
@@ -1224,7 +1334,7 @@ def test():
             # D11: la regresion de suite iba directo a humano; ahora sigue la escalera (coder -> Claude -> humano)
             new = state["suite_total"]["new_failures"][:20]
             _, flog = sh([PY, "-m", "pytest", *new, "-q", "-x", "-p", "no:cacheprovider"])
-            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero.",
+            out = llm(CODER, _rol() + "Devolves SOLO el archivo entero.",
                       f"Tu cambio en {state['plan_files'][0]} rompio tests existentes que antes pasaban. Corregilo conservando "
                       f"la feature nueva y el comportamiento previo.\n\nTESTS ROTOS:\n{flog[-4000:]}\n\nARCHIVOS:\n{_joined(_all_code())}")
             code = one_file(strip_fence(out), state["plan_files"][0])
