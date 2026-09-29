@@ -4,7 +4,7 @@ created: 2026-09-25
 tags: [research, mmorch, impacto, acople-por-datos, agentes, codegraph, benchmark, wayfinder]
 status: measured
 confidence: media
-sources: [.scratch/mapa-de-impacto (tickets 01, 02, 09); worktree ../orch-spike rama spike/impacto, scripts/tareas, tareas_ts, tareas_java, tareas_indirectas, tareas_externos, tareas_portfolio y scripts/impacto; video youtube k2qls2LiBRc]
+sources: [.scratch/mapa-de-impacto (tickets 01, 02, 09); worktree ../orch-spike rama spike/impacto, scripts/tareas, tareas_ts, tareas_java, tareas_indirectas, tareas_externos, tareas_costo, tareas_portfolio y scripts/impacto; video youtube k2qls2LiBRc]
 ---
 ## Pregunta
 El video "AI gives too much code" describe un error: un agente cambia un escritor y no actualiza a un lector acoplado por datos, sin referencia en el codigo. ¿Un informe de impacto automatico lo evita?
@@ -50,6 +50,7 @@ Todas con el mismo protocolo: tareas acopladas y de control, tests ocultos, orac
 | Aristas indirectas en Python (ticket 04), literales solo -> + indirectas | 38% -> 92% | 100% -> 100% | 9e-5 | US$1.11 |
 | Lector en prompt o hook de agente (ticket 13), + lectores en configuracion | 0% -> 100% | 100% -> 100% | 4e-7 | US$0.78 |
 | Repo sin tests ni run_tests (ticket 14), informe instalado | 92% -> 88% | 100% -> 100% | - | US$0.81 |
+| Cuadratico oculto (ticket 15), aviso de costo despues de escribir | 33% -> 100% | 100% -> 100% | 3e-7 | US$0.51 |
 | Cursor: informe despues de la primera edicion (ticket 10) | 42% -> 79% | 100% -> 100% | 9e-3 | US$0.36 |
 | **Portfolio, codigo real del usuario (ticket 07)** | **54% -> 96%** | 100% -> 92% | 9e-4 | US$5.18 |
 
@@ -58,10 +59,11 @@ Todas con el mismo protocolo: tareas acopladas y de control, tests ocultos, orac
 - Aristas indirectas (ticket 04): el informe de literales no ve funciones pasadas como valor. Sin ayuda fallan kwarg, `getattr` con prefijo y atributo asignado; lista de hooks, dict de funciones y `key=` las resuelve el grep del agente. Un salto alcanza salvo en registros por decorador (2/3).
 - Lectores fuera del repo (ticket 13): los lectores externos reales de orchestration son prompts (tarea programada nocturna, skills) y hooks, no codigo de otros repos. Sin avisar, el agente nunca los toca (0/12); con el nombre del archivo y la ruta del prompt, siempre (12/12). El indice de literales entre repos hermanos da puro ruido en repos reales.
 - Sin tests (ticket 14): quitar tests visibles y run_tests casi no cambia el acierto (22/24 -> 21/24); el agente llega al lector por el informe.
+- Costo propagado (ticket 15): anotar al inicio no sirve, porque la funcion trampa vive en un modulo que el archivo todavia no importa; el aviso util llega despues de escribir, cuando la llamada en bucle ya existe. Sin aviso, el agente cae en 6 de 8 trampas. Una lectura cuya ruta sale de un parametro no es trampa (archivo distinto por llamada): descartarla deja 7 de 8 avisos reales.
 - Leccion operativa: el hook importaba el `__init__` del paquete (openai, 8-30 s) y superaba su corte de 15 s; medir el hook como subproceso, no solo la funcion.
 - Limite visto al portar a Java: si el escritor no tiene literales (el nombre del archivo vive en una clase de acceso a datos), el informe sale vacio. No medido.
 - Una linea extra "tests que importan el modulo" no mejoro (20/24 vs 23/24, p=0.17) y se quito: los tests visibles no cubren a los lectores.
-- Instalado: `mmorch/impacto.py` + hook `PreToolUse` en Claude Code y `postToolUse` en Cursor; Python, TypeScript y Java (tree-sitter opcional); en Python suma aristas indirectas (`mmorch/impacto_indirecto.py`) y lectores en prompts y configuracion de agentes (`mmorch/impacto_externo.py`), ambos con cache. Sin `.git` en ningun padre, el hook no informa.
+- Instalado: `mmorch/impacto.py` + hook `PreToolUse` en Claude Code y `postToolUse` en Cursor; Python, TypeScript y Java (tree-sitter opcional); en Python suma aristas indirectas (`mmorch/impacto_indirecto.py`) y lectores en prompts y configuracion de agentes (`mmorch/impacto_externo.py`); despues de escribir, hook `PostToolUse` con el chequeo de costo (`mmorch/impacto_costo.py`). Todos con cache. Sin `.git` en ningun padre, el hook no informa.
 
 ## Negativos y lecciones de medicion
 - Co-cambio en git como verdad (Portfolio, orchestration, Proyecto_Adepor): recall 0.12-0.20 (con el informe que mira la edicion) y lift 12-104x sobre el azar. El informe tiene señal, pero un co-cambio no implica "el lector tenia que actualizarse": verdad debil.
