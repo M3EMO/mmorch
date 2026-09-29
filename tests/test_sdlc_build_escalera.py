@@ -96,3 +96,30 @@ def test_build_cableado_llega_a_claude(tmp_path, monkeypatch):
     etapa = S.state["stages"][-1]
     assert etapa["stage"] == "4-build" and etapa["ok"] and S.state["escalated_to_claude"]
     assert S.state.get("compile_ladder") and not any(x["ok"] for x in S.state["compile_ladder"])
+
+
+def test_rol_sale_del_plan_archivo_y_stack(tmp_path, monkeypatch):
+    _wt(tmp_path, monkeypatch, COMPILA)
+    plan = "## Archivos\n- `src/a.ts` [R1]\n- `tools/gen.py` [R1]\n\n## Stack\n- TypeScript, Three.js, Vitest\n\n## Prueba\nnpm test\n"
+    S.state["plan_stack"] = S._plan_stack(plan)
+    assert S.state["plan_stack"] == "TypeScript, Three.js, Vitest"
+    assert S._rol("tools/gen.py") == "Sos un programador Python senior (stack del plan: TypeScript, Three.js, Vitest). "
+    assert S._rol("src/a.ts").startswith("Sos un programador TypeScript senior (stack")
+    assert S._plan_stack("## Archivos\n- `a.py`\n") == ""
+
+
+def test_prompt_del_plan_sigue_al_repo(tmp_path, monkeypatch):
+    _wt(tmp_path, monkeypatch, COMPILA)
+    monkeypatch.setattr(S, "ACCEPT_CMD", None)   # sin comando fijado por el llamador, manda el de sdlc.toml
+    S.CFG["accept_cmd"] = "npm test"
+    (tmp_path / "docs" / "sdlc").mkdir(parents=True)
+    (tmp_path / "docs" / "sdlc" / "spec.md").write_text("R1: sumar uno", encoding="utf-8")
+    pedidos = []
+
+    def fake(model, system, user, timeout=400):
+        pedidos.append(user)
+        return "## Archivos\n- `src/a.ts` [R1]\n\n## Stack\nTypeScript, Vitest\n\n## Prueba\n`npm test`\n"
+    monkeypatch.setattr(S, "llm", fake)
+    S.plan()
+    assert "`path.ts`" in pedidos[0] and "`npm test`" in pedidos[0] and "## Stack" in pedidos[0]
+    assert S.state["plan_stack"] == "TypeScript, Vitest"

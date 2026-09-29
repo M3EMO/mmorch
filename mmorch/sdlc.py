@@ -235,13 +235,24 @@ _NO_TOOL = re.compile(r"is not recognized as an internal or external command|no 
                       r"|could not determine executable to run|El sistema no puede encontrar el archivo especificado", re.I)
 
 
-def _rol() -> str:
-    """Rol del coder segun el lenguaje de los archivos del plan (orchestration-7ys: antes decia Python siempre,
-    tambien en repos TypeScript y Java, que son justo donde el build cortaba por compilacion)."""
+def _rol(f: str | None = None) -> str:
+    """Rol del coder armado desde el plan (orchestration-7ys: antes decia Python siempre, tambien en repos TypeScript
+    y Java, que son justo donde el build cortaba por compilacion). Lenguaje del archivo `f` (o el mayoritario del
+    plan) y el stack que declara la seccion `## Stack` del plan."""
     from collections import Counter
-    c = Counter(_LANG_NAMES.get(pathlib.Path(f).suffix) for f in state.get("plan_files", []))
-    c.pop(None, None)
-    return f"Sos un programador {c.most_common(1)[0][0] if c else 'Python'} senior. "
+    lang = _LANG_NAMES.get(pathlib.Path(f).suffix) if f else None
+    if not lang:
+        c = Counter(_LANG_NAMES.get(pathlib.Path(x).suffix) for x in state.get("plan_files", []))
+        c.pop(None, None)
+        lang = c.most_common(1)[0][0] if c else "Python"
+    stack = state.get("plan_stack")
+    return f"Sos un programador {lang} senior" + (f" (stack del plan: {stack})" if stack else "") + ". "
+
+
+def _plan_stack(plan_md: str) -> str:
+    """Seccion `## Stack` del plan en una linea: lenguaje, frameworks y librerias que usa el cambio."""
+    m = re.search(r"## Stack\b(.*?)(?:\n## |\Z)", plan_md or "", re.S | re.I)
+    return " ".join(m.group(1).split()).strip(" -*:")[:200] if m else ""
 
 
 def _toolchain_missing(log: str) -> bool:
@@ -851,7 +862,7 @@ def reasoner_rounds(log) -> tuple[bool, str]:
             files, instr = list(written)[:1], {}
         backup = {f: written[f] for f in files}
         for f in files:
-            out = llm(CODER, _rol() + "Devolves SOLO el archivo entero.",
+            out = llm(CODER, _rol(f) + "Devolves SOLO el archivo entero.",
                       f"Aplica ESTA instruccion a {f}. No toques los tests.\n"
                       f"INSTRUCCION: {instr.get(f, 'corregi el fallo del test')}\n\n"
                       f"SALIDA:\n{log}\n\nARCHIVOS:\n{_joined(written)}")
@@ -955,7 +966,7 @@ def _compile_ladder(log: str, compiles) -> tuple[bool, str, str]:
         files = files or list(written)[:1]
         backup = {f: written[f] for f in files}
         for f in files:
-            out = llm(CODER, _rol() + "Devolves SOLO el archivo entero.",
+            out = llm(CODER, _rol(f) + "Devolves SOLO el archivo entero.",
                       f"Aplica ESTA instruccion a {f} para que compile. No toques los tests.\n"
                       f"INSTRUCCION: {instr.get(f, 'corregi el error del compilador')}\n\n"
                       f"ERROR DEL COMPILADOR:\n{log}\n\nARCHIVOS:\n{_joined(written)}")
@@ -1117,11 +1128,14 @@ def spec_review():
 @stage("3-plan")
 def plan():
     spec_md = (WT / "docs/sdlc/spec.md").read_text(encoding="utf-8")
+    ext = (CFG.get("ext") or ["py"])[0]   # orchestration-7ys: el ejemplo y la prueba siguen al lenguaje del repo
+    prueba = ACCEPT_CMD or CFG.get("accept_cmd") or f"python -m pytest {' '.join(_accept_paths())} -q"
     ask = (f"Escribi plan.md. Formato OBLIGATORIO: seccion '## Archivos' con un item por archivo a escribir, asi:\n"
-           f"- `path.py` [R1, R3] [P]\n"
+           f"- `path.{ext}` [R1, R3] [P]\n"
            f"Cada item cita los IDs R<n> de la spec que cubre. Todo R<n> de la spec aparece en algun item. "
            f"[P] marca archivos que NO importan a otros del plan (paralelizables); los demas van en orden de dependencia. "
-           f"'## Prueba' = `python -m pytest {' '.join(_accept_paths())} -q`.\n"
+           f"'## Stack' = UNA linea con el lenguaje, los frameworks y las librerias que usa el cambio (lo que ya usa el "
+           f"repo; nada nuevo sin que la spec lo pida). '## Prueba' = `{prueba}`.\n"
            f"Archivos OBLIGATORIOS en '## Archivos': {_need_files()}.\n\nSPEC:\n{spec_md}")  # D14-diag: el plan omitia test_capas
     out = llm(WRITER, "Sos un tech lead. Escribis planes ejecutables. NO regeneres los tests.", ask)
     for intento in range(2):  # D2 r1: una reescritura con el motivo del gate, como en spec
@@ -1130,6 +1144,7 @@ def plan():
         block = m.group(1) if m else out
         files = _plan_files(block)
         state["plan_files"] = files
+        state["plan_stack"] = _plan_stack(out)   # el rol del coder sale del plan (_rol)
         state["plan_parallel"] = [f for f in files if re.search(rf"{re.escape(f)}`?[^\n]*\[P\]", block)]  # ticket 05 lo ejecuta en paralelo
         ok, note = gate_plan_allowlist(out, files)
         if ok:
@@ -1151,6 +1166,7 @@ def _plan_files(block: str) -> list[str]:
 def build():
     spec_md = (WT / "docs/sdlc/spec.md").read_text(encoding="utf-8")
     plan_md = (WT / "docs/sdlc/plan.md").read_text(encoding="utf-8")
+    state["plan_stack"] = _plan_stack(plan_md)   # tambien al reanudar desde la etapa 4, sin pasar por plan()
     written = {}
     docs_before = _docstrings(state["plan_files"])  # gate docstring-intacto (D4)
     _orig_files.clear()
@@ -1158,7 +1174,7 @@ def build():
     for f in state["plan_files"]:
         cur = (WT / f).read_text(encoding="utf-8") if (WT / f).exists() else ""
         cur_ctx = f"ARCHIVO ACTUAL {f} (devolvelo COMPLETO con el cambio minimo):\n{cur}\n\n" if cur.strip() else ""
-        out = llm(CODER, _rol() + "Devolves SOLO el codigo del archivo pedido, sin explicacion ni markdown.",
+        out = llm(CODER, _rol(f) + "Devolves SOLO el codigo del archivo pedido, sin explicacion ni markdown.",
                   f"Escribi {f}. Tiene que importar con los archivos ya escritos y pasar los tests de aceptacion.\n\n{cur_ctx}"
                   f"PLAN:\n{plan_md}\n\nSPEC:\n{spec_md}\n\nTAREA:\n{TASK.task}\n\nTESTS:\n{_tests_text()}\n\n"
                   f"ARCHIVOS YA ESCRITOS:\n{_joined(written) or '(ninguno)'}")
@@ -1183,7 +1199,7 @@ def build():
         if ok:
             break
         for f in state["plan_files"]:
-            out = llm(CODER, _rol() + "Devolves SOLO el codigo corregido del archivo pedido, un solo archivo.",
+            out = llm(CODER, _rol(f) + "Devolves SOLO el codigo corregido del archivo pedido, un solo archivo.",
                       f"py_compile o la importacion de los tests fallo. Corregi {f}.\n\nERROR:\n{log}\n\nARCHIVOS:\n{_joined(written)}")
             code = one_file(strip_fence(out), f)
             if code and code != written[f]:
@@ -1202,7 +1218,7 @@ def build():
     mok, mnote = gate_cambio_minimo(docs_before, written)
     if not mok:  # D11: el coder borro 216 lineas de project_loop.py para agregar 10; una vuelta de re-pedido
         for f in [f for f in written if f in mnote]:
-            out = llm(CODER, _rol() + "Devolves SOLO el archivo entero.",
+            out = llm(CODER, _rol(f) + "Devolves SOLO el archivo entero.",
                       f"Tu version de {f} borro codigo existente que la tarea NO pide tocar ({mnote}). "
                       f"Parti del ARCHIVO ORIGINAL y aplica SOLO el cambio pedido, conservando todo lo demas.\n\n"
                       f"TAREA:\n{TASK.task}\n\nARCHIVO ORIGINAL:\n{_orig_files.get(f, '')}\n\nTU VERSION:\n{written[f]}")
@@ -1215,7 +1231,7 @@ def build():
     dok, dnote = gate_docstring(docs_before)
     if not dok:  # una vuelta del coder para restaurarlo; si insiste, la etapa falla
         for f in [f for f, d in docs_before.items() if d and not _docstrings([f]).get(f)]:
-            out = llm(CODER, _rol() + "Devolves SOLO el archivo entero.",
+            out = llm(CODER, _rol(f) + "Devolves SOLO el archivo entero.",
                       f"Restaura el docstring de modulo original de {f} al inicio del archivo, sin cambiar nada mas.\n\n"
                       f"DOCSTRING ORIGINAL:\n\"\"\"{docs_before[f]}\"\"\"\n\nARCHIVO ACTUAL:\n{(WT / f).read_text(encoding='utf-8')}")
             code = one_file(strip_fence(out), f)
@@ -1247,7 +1263,7 @@ def test():
             files = state["plan_files"][:1]
         backup = {f: written[f] for f in files}
         for f in files:
-            out = llm(CODER, _rol() + "Devolves SOLO el archivo entero. No toques los tests.",
+            out = llm(CODER, _rol(f) + "Devolves SOLO el archivo entero. No toques los tests.",
                       f"Arregla {f}. Los tests NO se modifican.\n\nSALIDA:\n{log}\n\nTAREA:\n{TASK.task}\n\n"
                       f"TESTS:\n{_tests_text()}\n\nARCHIVOS:\n{_joined(written)}")
             code = one_file(strip_fence(out), f)
@@ -1294,7 +1310,7 @@ def test():
         if not dok:
             backup = _all_code()
             nuevo = next(f for f in state["plan_files"] if f in dnote)
-            out = llm(CODER, _rol() + "Devolves SOLO el archivo entero.",
+            out = llm(CODER, _rol(nuevo) + "Devolves SOLO el archivo entero.",
                       f"Ningun test ejecuta estas lineas de {nuevo}. Borra el codigo que la tarea no pide (ramas y formatos "
                       f"que nunca ocurren) sin cambiar el comportamiento que los tests fijan.\n\nMEDIDA:\n{dnote}\n\n"
                       f"TAREA:\n{TASK.task}\n\nTESTS:\n{_tests_text()}\n\nARCHIVOS:\n{_joined(backup)}")
@@ -1312,7 +1328,7 @@ def test():
                 return False, f"codigo muerto: {dnote[:200]}"
         lok, lnote = gate_lint()
         if not lok:  # D2 r1: el pre-commit del repo rechazo 2 errores de mypy; ahora es gate con escalera
-            out = llm(CODER, _rol() + "Devolves SOLO el archivo entero.",
+            out = llm(CODER, _rol(state["plan_files"][0]) + "Devolves SOLO el archivo entero.",
                       f"ruff/mypy reportan errores nuevos. Corregi {state['plan_files'][0]} sin cambiar comportamiento.\n\n"
                       f"ERRORES:\n{lnote}\n\nARCHIVOS:\n{_joined(_all_code())}")
             code = one_file(strip_fence(out), state["plan_files"][0])
@@ -1334,7 +1350,7 @@ def test():
             # D11: la regresion de suite iba directo a humano; ahora sigue la escalera (coder -> Claude -> humano)
             new = state["suite_total"]["new_failures"][:20]
             _, flog = sh([PY, "-m", "pytest", *new, "-q", "-x", "-p", "no:cacheprovider"])
-            out = llm(CODER, _rol() + "Devolves SOLO el archivo entero.",
+            out = llm(CODER, _rol(state["plan_files"][0]) + "Devolves SOLO el archivo entero.",
                       f"Tu cambio en {state['plan_files'][0]} rompio tests existentes que antes pasaban. Corregilo conservando "
                       f"la feature nueva y el comportamiento previo.\n\nTESTS ROTOS:\n{flog[-4000:]}\n\nARCHIVOS:\n{_joined(_all_code())}")
             code = one_file(strip_fence(out), state["plan_files"][0])
