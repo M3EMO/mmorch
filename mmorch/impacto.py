@@ -16,6 +16,9 @@ Uso como hook de Claude Code (PreToolUse sobre Edit|Write|MultiEdit):
     python -m mmorch.impacto hook   < json del hook   -> json con additionalContext o nada
 Uso como hook de Cursor (postToolUse, despues de la primera edicion; ticket 10):
     python -m mmorch.impacto cursor < json del hook   -> json con additional_context o nada
+Chequeo de costo despues de escribir en Claude Code (PostToolUse; ticket 15, `mmorch.impacto_costo`):
+    python -m mmorch.impacto post   < json del hook   -> json con additionalContext o nada
+El modo cursor ya corre despues de editar y suma el mismo chequeo.
 Siempre sale con codigo 0: si algo falla, la edicion sigue sin informe (fail-open).
 """
 from __future__ import annotations
@@ -283,42 +286,102 @@ def _log(row: dict) -> None:
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def hook(raw: str, cursor: bool = False) -> str:
-    """Entrada: JSON del hook. Claude Code (PreToolUse): `tool_input.file_path` + `session_id`,
-    salida `hookSpecificOutput.additionalContext`, sin permissionDecision (los permisos del
-    usuario siguen su curso). Cursor (postToolUse, ticket 10): `tool_input.path` +
-    `conversation_id`, salida `additional_context`. Devuelve "" si no aplica."""
-    data = json.loads(raw)
+def _target(data: dict) -> tuple[Path, str, Path] | None:
+    """(archivo, sesion, raiz del repo) del evento de hook, o None si no aplica."""
     ti = data.get("tool_input") or {}
     fp = ti.get("file_path") or ti.get("path") or ""
     if Path(fp).suffix not in _LANGS:
-        return ""
+        return None
     path = Path(fp)
     if not path.is_absolute():
         path = Path(data.get("cwd") or ".") / path
-    session = str(data.get("session_id") or data.get("conversation_id") or "sin-sesion")
-    if _seen(session, str(path.resolve())):
-        return ""
     root = _repo_root(path.resolve())
     if root is None:
+        return None
+    return path, str(data.get("session_id") or data.get("conversation_id") or "sin-sesion"), root
+
+
+def _pre_text(data: dict) -> str:
+    """Informe de impacto, una vez por archivo por sesion."""
+    t = _target(data)
+    if t is None or _seen(t[1], str(t[0].resolve())):
         return ""
+    path, session, root = t
     t0 = time.perf_counter()
     text = report(root, path)
     _log({"ts": time.time(), "session": session, "file": str(path), "root": str(root),
           "lines": text.count("\n") + 1 if text else 0, "chars": len(text),
           "ms": round((time.perf_counter() - t0) * 1000)})
+    return text
+
+
+def cost_report(root: Path, target: Path) -> str:
+    """Chequeo de costo despues de escribir (mmorch.impacto_costo, ticket 15). Solo Python."""
+    if target.suffix != ".py":
+        return ""
+    from mmorch import impacto_costo, impacto_indirecto
+    root, target = root.resolve(), target.resolve()
+    files = [p for p in _source_files(root, (".py",)) if not _is_test(p.relative_to(root).as_posix())]
+    F = impacto_indirecto.all_facts(root, files, _cache_path(root, "pycost"), impacto_costo.facts)
+    return impacto_costo.report(F, target.relative_to(root).as_posix())
+
+
+def _post_text(data: dict) -> str:
+    """Chequeo de costo, cada vez que cambia el aviso para ese archivo en la sesion."""
+    t = _target(data)
+    if t is None:
+        return ""
+    path, session, root = t
+    try:
+        text = cost_report(root, path)
+    except (SyntaxError, UnicodeDecodeError, ValueError, OSError):
+        return ""
+    d = Path(tempfile.gettempdir()) / "mmorch_impacto"
+    d.mkdir(exist_ok=True)
+    state = d / f"post_{re.sub(r'[^A-Za-z0-9_-]', '_', session)[:80]}.json"
+    try:
+        last = json.loads(state.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        last = {}
+    key = str(path.resolve())
+    if last.get(key) == text:
+        return ""
+    last[key] = text
+    state.write_text(json.dumps(last), encoding="utf-8")
+    return text
+
+
+def _emit(text: str, event: str, cursor: bool) -> str:
     if not text:
         return ""
     if cursor:
         return json.dumps({"additional_context": text}, ensure_ascii=False)
-    return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": text}},
-                      ensure_ascii=False)
+    return json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}, ensure_ascii=False)
+
+
+def hook(raw: str, cursor: bool = False) -> str:
+    """Entrada: JSON del hook. Claude Code (PreToolUse): `tool_input.file_path` + `session_id`,
+    salida `hookSpecificOutput.additionalContext`, sin permissionDecision (los permisos del
+    usuario siguen su curso). Cursor (postToolUse, ticket 10): `tool_input.path` +
+    `conversation_id`, salida `additional_context`; como corre despues de editar, suma el
+    chequeo de costo (ticket 15). Devuelve "" si no aplica."""
+    data = json.loads(raw)
+    text = _pre_text(data)
+    if cursor:
+        text = "\n\n".join(x for x in (text, _post_text(data)) if x)
+    return _emit(text, "PreToolUse", cursor)
+
+
+def post(raw: str) -> str:
+    """Claude Code PostToolUse (ticket 15): chequeo de costo del archivo recien escrito."""
+    return _emit(_post_text(json.loads(raw)), "PostToolUse", False)
 
 
 def main(argv: list[str]) -> int:
-    if argv[:1] in (["hook"], ["cursor"]):
+    if argv[:1] in (["hook"], ["cursor"], ["post"]):
         try:
-            out = hook(sys.stdin.read(), cursor=argv[0] == "cursor")
+            raw = sys.stdin.read()
+            out = post(raw) if argv[0] == "post" else hook(raw, cursor=argv[0] == "cursor")
             if out:
                 print(out)
         except Exception:  # fail-open: un informe roto nunca bloquea la edicion
@@ -327,7 +390,7 @@ def main(argv: list[str]) -> int:
     if len(argv) == 2:
         print(report(Path(argv[0]), Path(argv[1])) or "(sin informe)")
         return 0
-    print("uso: python -m mmorch.impacto hook  |  python -m mmorch.impacto <raiz> <archivo.py>")
+    print("uso: python -m mmorch.impacto hook|cursor|post  |  python -m mmorch.impacto <raiz> <archivo.py>")
     return 0
 
 

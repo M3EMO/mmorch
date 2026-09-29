@@ -4,7 +4,7 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**123 módulos · 44 MCP tools · 1024 tests.**
+**124 módulos · 44 MCP tools · 1029 tests.**
 
 El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
 
@@ -62,6 +62,7 @@ El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/health.py` | Health module for mmorch: dead-man's switch detection. |
 | `mmorch/hillclimb.py` | hillclimb — optimizacion sobre METRICA ESCALAR con feedback del entorno |
 | `mmorch/impacto.py` | impacto — informe de impacto por literales compartidos (mapa `.scratch/mapa-de-impacto`). |
+| `mmorch/impacto_costo.py` | impacto_costo — chequeo de costo despues de escribir un archivo Python (ticket 15). |
 | `mmorch/impacto_externo.py` | impacto_externo — lectores fuera del repo en prompts y configuracion de agentes (ticket 13). |
 | `mmorch/impacto_indirecto.py` | impacto_indirecto — aristas indirectas de un archivo Python (ticket 04 del mapa de impacto). |
 | `mmorch/innovate.py` | innovate (I-5) — motor de innovacion productizado. mmorch se idea capacidades |

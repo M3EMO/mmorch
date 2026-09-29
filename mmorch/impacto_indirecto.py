@@ -148,8 +148,10 @@ def facts(src: str, rel: str) -> dict:
             "sites": sites, "loads": loads, "attr_calls": attr_calls, "dyn": dyn}
 
 
-def all_facts(root: Path, files: list[Path], cache_path: Path) -> dict[str, dict]:
-    """rel -> hechos, con cache por (mtime_ns, size): en frio se parsea todo; despues, lo cambiado."""
+def all_facts(root: Path, files: list[Path], cache_path: Path, extract=None) -> dict[str, dict]:
+    """rel -> hechos, con cache por (mtime_ns, size): en frio se parsea todo; despues, lo cambiado.
+    `extract(src, rel)` elige que hechos sacar (por defecto, las aristas indirectas)."""
+    extract = extract or facts
     try:
         cache = json.loads(cache_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -161,7 +163,7 @@ def all_facts(root: Path, files: list[Path], cache_path: Path) -> dict[str, dict
             st = p.stat()
             key = [st.st_mtime_ns, st.st_size]
             hit = cache.get(rel)
-            f = hit[1] if hit and hit[0] == key else facts(p.read_text(encoding="utf-8"), rel)
+            f = hit[1] if hit and hit[0] == key else extract(p.read_text(encoding="utf-8"), rel)
         except (SyntaxError, UnicodeDecodeError, ValueError, OSError, RecursionError):
             continue
         out[rel] = f
