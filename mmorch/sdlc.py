@@ -151,7 +151,8 @@ def llm(model, system, user, timeout=400):
         r = call(model, [{"role": "system", "content": system}, {"role": "user", "content": user}],
                  pattern=PHASE, node=model, phase=PHASE, temperature=0.0, timeout=timeout, max_tokens=32768)
     except RuntimeError as e:  # D13: el reasoner agoto 32k tokens razonando -> un intento con el coder
-        if "respuesta vacia" not in str(e) or model == CODER:
+        # "respuesta vac" sin la vocal final: providers escribe "vacía" con tilde y el match exacto nunca disparaba
+        if "respuesta vac" not in str(e) or model == CODER:
             raise
         rec_gate("presupuesto-razonamiento", False, f"{model}: {str(e)[:120]}; reintento con {CODER}")
         return llm(CODER, system, user, timeout)
