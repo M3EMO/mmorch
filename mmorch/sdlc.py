@@ -4,7 +4,8 @@ Reemplaza a project_integrate.build_project como engine de /project. Validado 6/
 mmorch (research/07-resultados.md del mapa sdlc-6-gates). Gates deterministas (contrato, allowlist, trazabilidad,
 compile, test-compile, cambio-minimo, sin-clones, docstring, suite total por nombre, lint, alcance) y escalera
 fix loop 3 -> reasoner x2 -> Claude (edit) -> humano, en la etapa 4 (exito = compila) y en la 5 (exito = aceptacion).
-Si falta el compilador, la etapa 4 va directo a Claude para el entorno. La etapa es el checkpoint: run-log.json + from_stage.
+Si falta el compilador, la etapa 4 va directo a Claude para el entorno. G3 y test-compile descuentan los errores que la
+base ya tenia sin la aceptacion propia (tests rojos por diseño de otras features). La etapa es el checkpoint: run-log.json + from_stage.
 
 Uso como biblioteca: `build_feature(name, task, repo, accept={rel: contenido}, files=[...], contract=[...])`.
 Uso como CLI (bench o feature ya configurada por el llamador): `python -m mmorch.sdlc --task <bench> --wt <dir>`.
@@ -142,7 +143,7 @@ def configure(task, *, contract, feat=None, wt=None, phase=None, max_fix=3, writ
     state.clear()
     state.update({"proto": "mmorch.sdlc", "task": TASK_NAME, "stages": [], "gates": [], "calls": 0,
                   "human_interventions": 0, "claude_calls": 0, "gate_rejects": [], "escalated_to_claude": False})
-    SNAP.clear(); SEEN.clear(); _orig_files.clear()
+    SNAP.clear(); SEEN.clear(); _orig_files.clear(); _COMPILE_BASE.clear()
     RUNS.mkdir(parents=True, exist_ok=True)
 
 
@@ -244,9 +245,14 @@ def _rol(f: str | None = None) -> str:
     if not lang:
         c = Counter(_LANG_NAMES.get(pathlib.Path(x).suffix) for x in state.get("plan_files", []))
         c.pop(None, None)
-        lang = c.most_common(1)[0][0] if c else "Python"
+        lang = c.most_common(1)[0][0] if c else _lenguaje()
     stack = state.get("plan_stack")
     return f"Sos un programador {lang} senior" + (f" (stack del plan: {stack})" if stack else "") + ". "
+
+
+def _lenguaje() -> str:
+    """Lenguaje principal del repo: la primera `ext` de sdlc.toml (py si no declara)."""
+    return _LANG_NAMES.get("." + _exts()[0], _exts()[0])
 
 
 def _plan_stack(plan_md: str) -> str:
@@ -424,7 +430,7 @@ def gate_mutacion() -> tuple[bool, str]:
         for m in (_mutants(orig, max_n=8, lineas=cambiadas) if _es_py(f) else _mutantes_texto(orig, max_n=8, lineas=cambiadas)):
             p.write_text(m, encoding="utf-8")
             try:
-                if not _es_py(f) and compile_cmd and not sh(_cmd("compile_cmd", [f]))[0]:
+                if not _es_py(f) and compile_cmd and not _compila(_cmd("compile_cmd", [f]))[0]:
                     continue  # mortinato: no compila, no cuenta
                 total += 1
                 if _accept_mata():
@@ -534,9 +540,20 @@ def _accept_paths():
     return paths
 
 
-def accept():
+def _accept_por_cmd() -> str | None:
+    """El comando del repo es el oraculo si no hay tests nombrados o si estan en otro lenguaje; None = pytest."""
     cmd = ACCEPT_CMD or CFG.get("accept_cmd")  # payload o sdlc.toml
-    if cmd and (not TASK.accept_files or not all(_es_py(f) for f in TASK.accept_files)):
+    return str(cmd) if cmd and (not TASK.accept_files or not all(_es_py(f) for f in TASK.accept_files)) else None
+
+
+def _accept_desc() -> str:
+    """La aceptacion como la corre accept(), para los prompts (decia pytest tambien en repos TypeScript)."""
+    return _accept_por_cmd() or f"pytest {' '.join(_accept_paths())} -q"
+
+
+def accept():
+    cmd = _accept_por_cmd()
+    if cmd:
         ok, log = sh(str(cmd))  # sin tests nombrados, o tests en otro lenguaje: el comando del repo es el oraculo
         if (WT / REVIEW_REL).exists():
             # 2026-09-17: la revision deja un test pytest; en ChatBot (Java) `mvn test` no lo corria y un BLOCK real
@@ -644,11 +661,17 @@ def gate_traza_spec(spec_md: str, tests: set[str]) -> tuple[bool, str]:
 
 
 def gate_traza_plan(spec_md: str, plan_block: str, files: list[str]) -> tuple[bool, str]:
-    """Trazabilidad lado plan: cada R<n> de la spec aparece en el plan; cada archivo cita >= 1 R<n>."""
+    """Trazabilidad lado plan: cada R<n> de la spec aparece en el plan; cada archivo cita >= 1 R<n>. Un item es una
+    linea de lista o una fila de tabla; un rango `R2–R10` cita R2..R10 (SSB F7a)."""
     ids = set(re.findall(r"\bR\d+\b", spec_md))
+    plan_block = re.sub(r"\bR(\d+)\s*[–-]\s*R(\d+)\b",
+                        lambda m: ", ".join(f"R{i}" for i in range(int(m[1]), int(m[2]) + 1)), plan_block)
     huerfanos = sorted(i for i in ids if not re.search(rf"\b{i}\b", plan_block))
-    items = re.findall(r"(?m)^\s*[-*]\s*(.*)$", plan_block)
-    sin_id = [f for f in files if not any(f in it and re.search(r"\bR\d+\b", it) for it in items)]
+    items = re.findall(r"(?m)^\s*[-*]\s*(.*)$", plan_block) + _filas_tabla(plan_block)
+
+    def nombra(it: str, f: str) -> bool:  # la ruta, o su nombre suelto si el plan lo escribio sin carpeta (F4b)
+        return f in it or bool(re.search(r"(?<![\w/.-])" + re.escape(f.rsplit("/", 1)[-1]) + r"(?![\w.-])", it))
+    sin_id = [f for f in files if not any(nombra(it, f) and re.search(r"\bR\d+\b", it) for it in items)]
     if huerfanos or sin_id:
         return rec_gate("trazabilidad-plan", False, f"IDs sin unidad: {huerfanos}; archivos sin ID: {sin_id}")
     return rec_gate("trazabilidad-plan", True, "ok")
@@ -702,9 +725,44 @@ def gate_compile(files) -> tuple[bool, str]:
         cmd = CFG.get("compile_cmd")
         if not cmd:
             return rec_gate("G3-compile", True, f"sin compile_cmd para {otros}: no se compila")
-        ok, log = sh(_cmd("compile_cmd", otros))
-        return rec_gate("G3-compile", ok, "compila" if ok else log[-800:])
+        ok, log, previos = _compila(_cmd("compile_cmd", otros))
+        return rec_gate("G3-compile", ok, _nota_compila(previos) if ok else log[-800:])
     return rec_gate("G3-compile", True, "compila")
+
+
+_COMPILE_BASE: dict[str, set[str]] = {}  # comando -> errores de la base sin la aceptacion; se vacia en configure()
+
+
+def _errores_compilador(log: str) -> set[str]:
+    """Errores sin linea ni columna: `ruta(l,c): error ...` (tsc) o `ruta:l:c: ...` (javac, go, gcc). Sin warnings."""
+    return {f"{m[1]}: {m[2].strip()}"
+            for m in re.finditer(r"(?m)^\s*(\S+?\.\w+)(?:\(\d+,\d+\)|:\d+(?::\d+)?):?\s+(.+)$", log)
+            if not m[2].lower().startswith("warning")}
+
+
+def _compila(cmd: str) -> tuple[bool, str, list[str]]:
+    """Corre `cmd` y descuenta los errores que la base ya tenia SIN la aceptacion de esta feature. Un compilador de
+    proyecto entero (tsc) ve los tests rojos por diseño de OTRAS features: en SSB F3a el TS2307 del test de F3b tumbaba
+    G3. Una regresion en otro archivo sigue bloqueando (su error no esta en la base), igual que un error del test de
+    aceptacion propio. Sin errores legibles en la salida no descuenta nada. Devuelve (ok, log, errores previos)."""
+    ok, log = sh(cmd)
+    ahora = set() if ok else _errores_compilador(log)
+    if not ahora or not state.get("plan_files"):
+        return ok, log, []
+    if cmd not in _COMPILE_BASE:
+        _, blog = _en_base(lambda: _sin_aceptacion(lambda: sh(cmd)))
+        _COMPILE_BASE[cmd] = _errores_compilador(blog)
+    previos = sorted(ahora & _COMPILE_BASE[cmd])
+    if len(previos) < len(ahora):
+        return False, log, previos
+    state["compile_previos"] = previos
+    return True, log, previos
+
+
+def _nota_compila(previos: list[str]) -> str:
+    if not previos:
+        return "compila"
+    return f"compila salvo {len(previos)} errores previos de la base, ajenos a esta feature: {'; '.join(previos)[:600]}"
 
 
 def gate_test_compile() -> tuple[bool, str]:
@@ -715,8 +773,8 @@ def gate_test_compile() -> tuple[bool, str]:
         cmd = CFG.get("compile_cmd")
         if not cmd:
             return rec_gate("test-compile", True, "tests no-Python sin compile_cmd: no se compila")
-        ok, log = sh(_cmd("compile_cmd", _accept_paths()))
-        return rec_gate("test-compile", ok, "ok" if ok else log[-800:])
+        ok, log, previos = _compila(_cmd("compile_cmd", _accept_paths()))
+        return rec_gate("test-compile", ok, ("ok" if not previos else _nota_compila(previos)) if ok else log[-800:])
     ok, log = sh([PY, "-m", "pytest", *_accept_paths(), "--collect-only", "-q", "-p", "no:cacheprovider"])
     return rec_gate("test-compile", ok, "ok" if ok else log[-800:])
 
@@ -897,7 +955,7 @@ def claude_fix(log) -> tuple[bool, str]:
     state["claude_calls"] += 1
     before = _tree()
     r = _revisor(f"Los tests de aceptacion fallan. Arregla el codigo en {state['plan_files']} hasta que "
-                 f"`pytest {' '.join(_accept_paths())} -q` pase. NO toques tests ni docs. Al final responde en una linea que cambiaste.\n\n"
+                 f"`{_accept_desc()}` pase. NO toques tests ni docs. Al final responde en una linea que cambiaste.\n\n"
                  f"TAREA:\n{TASK.task}\n\nSALIDA:\n{log}")
     write_supervision(f"nivel 3 Claude (rc={r.get('returncode')}): {(r.get('result') or '')[:2000]}")
     gate_alcance("claude-fix-alcance", before, tuple(state["plan_files"]))
@@ -1071,8 +1129,10 @@ def aceptacion():
 def spec():
     tpl = (TPL / "spec-template.md").read_text(encoding="utf-8")
     tests = _test_names()
+    lang = _lenguaje()   # SSB (TypeScript) recibia "Python 3.12" en la spec
+    stack = "Python 3.12, sin dependencias" if lang == "Python" else f"{lang}, sin dependencias que el repo no use ya"
     ask = (f"Escribi spec.md siguiendo EXACTAMENTE esta plantilla (mismas secciones, IDs R<n> unicos, tabla de trazabilidad "
-           f"que cita tests por su nombre exacto de entre {sorted(tests)}). Python 3.12, sin dependencias.\n\n"
+           f"que cita tests por su nombre exacto de entre {sorted(tests)}). {stack}.\n\n"
            f"PLANTILLA:\n{tpl}\n\nTAREA:\n{TASK.task}\n\nTESTS DE ACEPTACION (no se modifican):\n{_tests_text()}\n\n"
            "Omiti las lineas de instruccion de la plantilla. Sin marcadores pendientes. Solo markdown.")
     out = llm(WRITER, "Sos un ingeniero de software. Escribis specs precisas en markdown, sin relleno.", ask)
@@ -1157,9 +1217,31 @@ def plan():
 
 
 def _plan_files(block: str) -> list[str]:
-    """Archivos del plan = SOLO los items de la lista (D2 r1: una mencion en prosa 'sin tocar X.py' se colaba)."""
+    """Archivos del plan = SOLO los items de la lista (D2 r1: una mencion en prosa 'sin tocar X.py' se colaba) y, en
+    una tabla, las rutas entre backticks de la primera celda que nombra alguna (SSB F7a: el plan vino en tabla).
+    Un nombre sin carpeta (`resolver.ts`, SSB F4b) pasa a la unica ruta del plan o del repo con ese nombre."""
     items = re.findall(r"(?m)^\s*[-*]\s*`?" + _file_re() + r"`?", block)
+    for fila in _filas_tabla(block):
+        celda = next((c for c in fila.split("|") if re.search("`" + _file_re() + "`", c)), "")
+        items += re.findall("`" + _file_re() + "`", celda)
+    items = [_ruta_unica(f, items) for f in items]
     return [f for f in dict.fromkeys(items) if not f.startswith(TESTS_PREFIX) or f in _need_files()]  # D14-diag: test_capas es obligatorio en cableos
+
+
+def _filas_tabla(block: str) -> list[str]:
+    return re.findall(r"(?m)^\s*\|(.*)\|\s*$", block)
+
+
+def _ruta_unica(f: str, listados: list[str]) -> str:
+    """`resolver.ts` -> `src/encuadre/resolver.ts` si hay UNA candidata con ese nombre: entre las rutas del plan o, si
+    no, entre los archivos del repo dentro del techo. Con cero o varias queda igual y el gate la rechaza por nombre."""
+    if "/" in f or (_techo() and _en_techo(f)):
+        return f
+    cands = {x for x in listados if x.rsplit("/", 1)[-1] == f and "/" in x}
+    if not cands and _techo():
+        ls = subprocess.run(["git", "ls-files"], cwd=WT, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        cands = {x for x in ls.stdout.splitlines() if x.rsplit("/", 1)[-1] == f and "/" in x and _en_techo(x)}
+    return cands.pop() if len(cands) == 1 else f
 
 
 @stage("4-build")
@@ -1188,6 +1270,29 @@ def build():
         ok, log = gate_compile(state["plan_files"])
         return (ok, log) if not ok else gate_test_compile()
 
+    def _hasta_compilar(ok: bool, log: str) -> tuple[bool, str]:
+        """Fix loop del coder x3 y despues la escalera; exito = compila. Corre tras escribir y tras cada re-pedido:
+        en SSB F7a2 el re-pedido de cambio-minimo rompio la compilacion y la etapa cortaba sin escalar."""
+        for _ in range(3):  # r1 2026-09-11: test-compile tambien entra al fix loop, antes cortaba sin vuelta
+            if ok:
+                break
+            for f in state["plan_files"]:
+                out = llm(CODER, _rol(f) + "Devolves SOLO el codigo corregido del archivo pedido, un solo archivo.",
+                          f"py_compile o la importacion de los tests fallo. Corregi {f}.\n\nERROR:\n{log}\n\nARCHIVOS:\n{_joined(written)}")
+                code = one_file(strip_fence(out), f)
+                if code and code != written[f]:
+                    _write(f, code); written[f] = code
+            ok, log = _compiles()
+            if not gate_baseline()[0]:
+                return False, "baseline roto en compile-fix"
+        if not ok:  # orchestration-7ys: la misma escalera que la etapa 5, con exito = compila
+            ok, ladder_note, log = _compile_ladder(log, _compiles)
+            if not ok:
+                write_supervision(f"ESCALATE_HUMAN: compila: fix 3 + reasoner 2 + Claude agotados.\n{log[-1500:]}")
+                return False, f"G3 rechaza tras 3 vueltas y la escalera ({ladder_note}): {log[-300:]}"
+        written.update(_all_code())  # la escalera escribe en disco: los gates de abajo miran lo que compila (F7a2)
+        return True, "compila"
+
     ok, log = _compiles()
     if not ok and _toolchain_missing(log):  # orchestration-7ys: sin compilador las vueltas del coder no sirven
         rec_gate("toolchain", False, log[-300:])
@@ -1195,23 +1300,9 @@ def build():
         if not ok and _toolchain_missing(log):
             write_supervision(f"ESCALATE_HUMAN: falta el compilador y Claude no lo resolvio\n{log[-1500:]}")
             return False, f"toolchain: {log[-300:]}"
-    for _ in range(3):  # r1 2026-09-11: test-compile tambien entra al fix loop, antes cortaba sin vuelta
-        if ok:
-            break
-        for f in state["plan_files"]:
-            out = llm(CODER, _rol(f) + "Devolves SOLO el codigo corregido del archivo pedido, un solo archivo.",
-                      f"py_compile o la importacion de los tests fallo. Corregi {f}.\n\nERROR:\n{log}\n\nARCHIVOS:\n{_joined(written)}")
-            code = one_file(strip_fence(out), f)
-            if code and code != written[f]:
-                _write(f, code); written[f] = code
-        ok, log = _compiles()
-        if not gate_baseline()[0]:
-            return False, "baseline roto en compile-fix"
-    if not ok:  # orchestration-7ys: la misma escalera que la etapa 5, con exito = compila
-        ok, ladder_note, log = _compile_ladder(log, _compiles)
-        if not ok:
-            write_supervision(f"ESCALATE_HUMAN: compila: fix 3 + reasoner 2 + Claude agotados.\n{log[-1500:]}")
-            return False, f"G3 rechaza tras 3 vueltas y la escalera ({ladder_note}): {log[-300:]}"
+    ok, note = _hasta_compilar(ok, log)
+    if not ok:
+        return False, note
     cok, cnote = gate_clones(written)
     if not cok:
         return False, cnote
@@ -1226,8 +1317,14 @@ def build():
             if code:
                 _write(f, code); written[f] = code
         mok, mnote = gate_cambio_minimo(docs_before, written)
-        if not mok or not _compiles()[0]:
+        if not mok:
             return False, f"cambio-minimo: {mnote}"
+        ok, note = _hasta_compilar(*_compiles())
+        if not ok:
+            return False, f"cambio-minimo ok pero no compila: {note}"
+        mok, mnote = gate_cambio_minimo(docs_before, written)  # la escalera puede volver a borrar
+        if not mok:
+            return False, f"cambio-minimo tras la escalera: {mnote}"
     dok, dnote = gate_docstring(docs_before)
     if not dok:  # una vuelta del coder para restaurarlo; si insiste, la etapa falla
         for f in [f for f, d in docs_before.items() if d and not _docstrings([f]).get(f)]:
@@ -1238,8 +1335,14 @@ def build():
             if code:
                 _write(f, code); written[f] = code
         dok, dnote = gate_docstring(docs_before)
-        if not dok or not _compiles()[0]:
+        if not dok:
             return False, f"docstring: {dnote}"
+        ok, note = _hasta_compilar(*_compiles())
+        if not ok:
+            return False, f"docstring ok pero no compila: {note}"
+        dok, dnote = gate_docstring(docs_before)
+        if not dok:
+            return False, f"docstring tras la escalera: {dnote}"
     return True, "G3 + test-compile + docstring ok"
 
 
