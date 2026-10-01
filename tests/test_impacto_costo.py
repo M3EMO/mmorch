@@ -84,6 +84,15 @@ def test_falsas_alarmas_descartadas(tmp_path, monkeypatch):
     assert _check(tmp_path, monkeypatch, src) == ""
 
 
+def test_metodo_homonimo_no_hereda_la_marca(tmp_path, monkeypatch):
+    # `d.items()` es el metodo de un dict, no la funcion `items` del modulo que recorre q.json (falso positivo
+    # visto el 2026-10-01 en orch-spike/scripts/cursor_roles/roles.py)
+    src = ("import json\n\n\ndef items():\n    return json.loads(open('q.json').read())\n\n\n"
+           "def pares(d):\n    return list(d.items())\n\n\n"
+           "def todo(ds):\n    return [pares(d) for d in ds]\n")
+    assert _check(tmp_path, monkeypatch, src) == ""
+
+
 def test_hook_post_avisa_solo_cuando_cambia(tmp_path, monkeypatch):
     monkeypatch.setattr(I.tempfile, "gettempdir", lambda: str(tmp_path / "tmp"))
     (tmp_path / "tmp").mkdir()

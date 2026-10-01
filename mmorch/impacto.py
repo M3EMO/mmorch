@@ -322,7 +322,8 @@ def cost_report(root: Path, target: Path) -> str:
     from mmorch import impacto_costo, impacto_indirecto
     root, target = root.resolve(), target.resolve()
     files = [p for p in _source_files(root, (".py",)) if not _is_test(p.relative_to(root).as_posix())]
-    F = impacto_indirecto.all_facts(root, files, _cache_path(root, "pycost"), impacto_costo.facts)
+    # pycost2: `calls` guarda solo llamadas por nombre; la cache vieja traia nombres de metodos (falso positivo)
+    F = impacto_indirecto.all_facts(root, files, _cache_path(root, "pycost2"), impacto_costo.facts)
     return impacto_costo.report(F, target.relative_to(root).as_posix())
 
 

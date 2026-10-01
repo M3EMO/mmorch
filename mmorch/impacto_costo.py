@@ -153,8 +153,9 @@ def facts(src: str, rel: str) -> dict:
             store = _store_name(f, helpers)
             obj = f"`{store}`" if store and what == "un archivo" else what
             direct = f"lee {obj} {'completa' if what.startswith(('una ', 'la ')) else 'completo'} en cada llamada"
+        # solo `g()`: `x.items()` es un metodo del objeto, no la funcion `items` del modulo (falso positivo 2026-10-01)
         funcs[f.name] = {"line": f.lineno, "direct": direct,
-                         "calls": [_call_name(c) for c in ast.walk(f) if isinstance(c, ast.Call)]}
+                         "calls": [c.func.id for c in ast.walk(f) if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)]}
     return {"mod": _mod(rel), "funcs": funcs,
             "top_froms": [[n.module, a.name, a.asname] for n in tree.body if isinstance(n, ast.ImportFrom) for a in n.names],
             "froms": [[n.module, a.name, a.asname] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) for a in n.names],
