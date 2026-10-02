@@ -86,6 +86,22 @@ def test_moc_incluye_tags_inline_y_applies_to_en_bloque(tmp_vault):
     assert "parecido" not in moc, "membresia exacta: 'orchestration-old' no es el proyecto"
 
 
+def test_moc_de_proyectos_con_el_mismo_slug_no_se_pisan(tmp_vault):
+    """'.claude' y 'Claude' daban el mismo _slug ('claude'): el ultimo MOC regenerado
+    pisaba al otro."""
+    research = tmp_vault / "research"
+    research.mkdir()
+    (research / "a.md").write_text("---\napplies_to:\n- .claude\n---\nx", encoding="utf-8")
+    (research / "b.md").write_text("---\napplies_to:\n- Claude\n---\nx", encoding="utf-8")
+    dot, mayus = vault_mod.regenerate_moc(".claude"), vault_mod.regenerate_moc("Claude")
+    assert dot.name.lower() != mayus.name.lower()
+    assert "[[a]]" in dot.read_text(encoding="utf-8")
+    assert "[[a]]" not in mayus.read_text(encoding="utf-8")
+    assert "[[b]]" in mayus.read_text(encoding="utf-8")
+    assert vault_mod.regenerate_moc("orchestration").name == "orchestration.md"
+    assert vault_mod._moc_path("Claude") == mayus, "write_research_note devuelve este path"
+
+
 def test_frontmatter_de_write_note_es_yaml_valido(tmp_vault):
     """2026-10-02: write_note escribia 'title: a: b' y URLs con '?' en [..] sin comillas;
     el YAML invalido hacia que adjudicate borrara el frontmatter entero."""

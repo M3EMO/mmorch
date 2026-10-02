@@ -6,6 +6,7 @@ aca viven hechos/decisiones/research curados, navegables por humano (Obsidian).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import date
@@ -224,7 +225,18 @@ def write_research_note(title: str, body: str, *, project: str, folder: str = "r
     p = write_validated(title, body, project=project, folder=folder,
                         frontmatter=fm, remember_fn=_bridge,
                         enqueue_babel_fn=_babel_async)
-    return p, VAULT / "moc" / f"{project}.md"
+    return p, _moc_path(project)
+
+
+def _moc_path(project: str) -> Path:
+    """Path del MOC de un proyecto. _slug pierde informacion ('.claude' y 'Claude' dan
+    'claude', y Windows no distingue mayusculas): un nombre que no es su propio slug
+    lleva un sufijo con hash del nombre exacto, asi dos proyectos nunca comparten MOC.
+    Los nombres que ya son slug (orchestration, mmorch) conservan su archivo."""
+    slug = _slug(project)
+    if slug != project:
+        slug = f"{slug}-{hashlib.sha256(project.encode('utf-8')).hexdigest()[:8]}"
+    return VAULT / "moc" / f"{slug}.md"
 
 
 def regenerate_moc(project: str) -> Path:
@@ -261,9 +273,8 @@ def regenerate_moc(project: str) -> Path:
                 parts.append(f"· {babel_ok}")
             sections.setdefault(folder.name, []).append(" ".join(parts))
 
-    moc_dir = VAULT / "moc"
-    moc_dir.mkdir(parents=True, exist_ok=True)
-    moc_path = moc_dir / f"{_slug(project)}.md"
+    moc_path = _moc_path(project)
+    moc_path.parent.mkdir(parents=True, exist_ok=True)
 
     lines = [f"# {project}", ""]
     for sec in sorted(sections):
