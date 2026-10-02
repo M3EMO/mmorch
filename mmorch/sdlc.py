@@ -167,6 +167,88 @@ def llm(model, system, user, timeout=400):
     return r.text
 
 
+_SIN_SHELL = ("CLAUDECODE", "SHELL", "BASH", "BASH_ENV", "MSYSTEM")   # cursor-agent rompe los hooks con el bash de Git
+
+
+def _cursor_argv() -> list[str]:
+    """node + index.js de la version mas nueva de cursor-agent (el .cmd pasa por PowerShell y corta un prompt multilinea)."""
+    vs = pathlib.Path(os.environ.get("LOCALAPPDATA", "")) / "cursor-agent" / "versions"
+    v = max((p for p in vs.iterdir() if re.match(r"\d{4}\.\d+\.\d+-", p.name)),
+            key=lambda p: tuple(int(x) for x in p.name.split("-")[0].split(".")))
+    return [str(v / "node.exe"), str(v / "index.js")]
+
+
+def _agent_run(argv: list[str], prompt: str | None, env: dict, timeout: float) -> tuple[int, str]:
+    """Corre un agente en el worktree. Timeout = falla tecnica (RuntimeError, como una API caida), con el arbol
+    entero muerto: cursor-agent lanza hijos (node, rg) que un kill simple deja vivos en Windows."""
+    p = subprocess.Popen(argv, cwd=WT, stdin=subprocess.PIPE if prompt is not None else subprocess.DEVNULL,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+                         env=env)
+    try:
+        out, err = p.communicate(prompt, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True)
+        else:
+            p.kill()
+        p.communicate()
+        raise RuntimeError(f"planner: timeout de {timeout:.0f} s") from None
+    if p.returncode:
+        raise RuntimeError(f"planner: rc={p.returncode} {(err or out)[-300:]}")
+    return p.returncode, out
+
+
+def _planner(system: str, user: str) -> str:
+    """Planner de la etapa 3 (orchestration-34k). SDLC_PLANNER vacio = el WRITER, una llamada sin ver el repo.
+    `claude:<modelo>` y `cursor:<modelo>` corren un agente de SOLO LECTURA en el worktree, sin MCP ni hooks."""
+    p = os.environ.get("SDLC_PLANNER", "") or WRITER
+    if not p.startswith(("claude:", "cursor:")):
+        return llm(p, system, user)
+    kind, model = p.split(":", 1)
+    prompt = (f"{system}\n\nExplora el repo de este directorio con tus herramientas de lectura antes de planear. No edites "
+              f"ningun archivo. Tu respuesta final es SOLO el contenido de plan.md.\n\n{user}")
+    env = {k: v for k, v in os.environ.items() if k not in _SIN_SHELL}
+    timeout = float(CFG.get("planner_timeout_s", 1200))
+    state["calls"] += 1
+    state["planner"] = p
+    if kind == "claude":
+        from .claude_exec import claude_bin
+        argv = claude_bin() + ["-p", "--model", model, "--restricted", "--strict-mcp-config", "--tools", "Read,Grep,Glob",
+                               "--no-session-persistence", "--output-format", "json"]   # el prompt va por stdin: --tools es variadico
+        _, out = _agent_run(argv, prompt, env, timeout)
+        try:
+            d = json.loads((out.strip().splitlines() or ["{}"])[-1])
+        except ValueError:
+            raise RuntimeError(f"planner claude: salida sin JSON: {out[-300:]}") from None
+        state["planner_usd"] = round(state.get("planner_usd", 0.0) + (d.get("total_cost_usd") or 0.0), 4)
+        if d.get("is_error") or not d.get("result"):   # cupo agotado, auth: falla tecnica, no un plan malo
+            raise RuntimeError(f"planner claude: {str(d.get('result') or d)[:300]}")
+        return str(d["result"])
+    cfg = WT / ".cursor"
+    cfg.mkdir(exist_ok=True)   # sin interfaz Cursor ve Gmail/Calendar/Drive de sus plugins: deny Mcp(*:*) (medido 2026-10-01)
+    (cfg / "cli.json").write_text(json.dumps({"permissions": {"allow": [], "deny": ["Mcp(*:*)"]}}), encoding="utf-8")
+    try:
+        _, out = _agent_run(_cursor_argv() + ["-p", "--trust", "--mode", "plan", "--workspace", str(WT), "--model", model,
+                                              "--output-format", "stream-json", prompt], None, env, timeout)
+    finally:
+        shutil.rmtree(cfg, ignore_errors=True)
+    plan_txt, result = "", ""
+    for line in out.splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if ev.get("type") == "result":
+            result = str(ev.get("result") or "")
+            u = ev.get("usage") or {}
+            state["planner_tokens"] = state.get("planner_tokens", 0) + (u.get("inputTokens") or 0) + (u.get("outputTokens") or 0)
+        elif ev.get("type") == "tool_call" and "createPlanToolCall" in (ev.get("tool_call") or {}):
+            plan_txt = str((ev["tool_call"]["createPlanToolCall"].get("args") or {}).get("plan") or plan_txt)
+    if not (plan_txt or result):
+        raise RuntimeError(f"planner cursor: sin plan ni result: {out[-300:]}")
+    return plan_txt or result   # --mode plan deja el plan en createPlan, no en result
+
+
 def rec_gate(gid, ok, detail):
     state["gates"].append({"id": gid, "ok": ok, "detail": detail, "calls": state["calls"]})
     if not ok:
@@ -1197,7 +1279,7 @@ def plan():
            f"'## Stack' = UNA linea con el lenguaje, los frameworks y las librerias que usa el cambio (lo que ya usa el "
            f"repo; nada nuevo sin que la spec lo pida). '## Prueba' = `{prueba}`.\n"
            f"Archivos OBLIGATORIOS en '## Archivos': {_need_files()}.\n\nSPEC:\n{spec_md}")  # D14-diag: el plan omitia test_capas
-    out = llm(WRITER, "Sos un tech lead. Escribis planes ejecutables. NO regeneres los tests.", ask)
+    out = _planner("Sos un tech lead. Escribis planes ejecutables. NO regeneres los tests.", ask)
     for intento in range(2):  # D2 r1: una reescritura con el motivo del gate, como en spec
         _write("docs/sdlc/plan.md", out)
         m = re.search(r"## Archivos\b(.*?)(?:\n## |\Z)", out, re.S | re.I)
@@ -1211,7 +1293,7 @@ def plan():
             ok, note = gate_traza_plan(spec_md, block, files)
         if ok or intento:
             return ok, note
-        out = llm(WRITER, "Sos un tech lead. Reescribis el plan completo con el formato obligatorio.",
+        out = _planner("Sos un tech lead. Reescribis el plan completo con el formato obligatorio.",
                   f"Este plan fallo el gate: {note}. Corregilo.\n\nPLAN ACTUAL:\n{out}\n\nSPEC:\n{spec_md}")
     return ok, note
 
@@ -1569,19 +1651,20 @@ def _seed_accept() -> None:
                         f"sdlc: test de aceptacion {TASK_NAME} (rojo por diseño)"], cwd=WT, check=True)
 
 
-def run(from_stage: float = 2) -> dict:
-    """Corre las etapas desde `from_stage` (2 spec, 2.5 spec-review, 3 plan, 4 build, 5 test, 5.5 review, 6 pr).
-    La etapa es el checkpoint (ticket 05 D4): reanudar = mismo worktree + from_stage."""
+def run(from_stage: float = 2, to_stage: float = 6) -> dict:
+    """Corre las etapas desde `from_stage` hasta `to_stage` (2 spec, 2.5 spec-review, 3 plan, 4 build, 5 test, 5.5 review,
+    6 pr). La etapa es el checkpoint (ticket 05 D4): reanudar = mismo worktree + from_stage. `to_stage` < 6 corta antes
+    del PR (orchestration-34k: repetir una corrida real sin revision ni PR)."""
     _RUN_USD["usd"] = 0.0
     register_run_tracker(_RUN_USD)  # W3.4: tope USD por-run medido en proceso, no solo por el ledger
     try:
-        return _run_stages(from_stage)
+        return _run_stages(from_stage, to_stage)
     finally:
         unregister_run_tracker(_RUN_USD)
         state["usd_run"] = round(_RUN_USD["usd"], 4)
 
 
-def _run_stages(from_stage: float) -> dict:
+def _run_stages(from_stage: float, to_stage: float = 6) -> dict:
     # D3 r1: el pre-commit de mmorch corre `python -m ruff` y resolvia al Python del sistema (sin ruff).
     os.environ["PATH"] = os.path.dirname(PY) + os.pathsep + os.environ.get("PATH", "")
     if not (WT / ".git").exists():
@@ -1624,7 +1707,7 @@ def _run_stages(from_stage: float) -> dict:
     stages = {1: aceptacion, 2: spec, 2.5: spec_review, 3: plan, 4: build, 5: test, 5.5: review, 6: pr}
     try:
         for k in sorted(stages):
-            if k >= from_stage:
+            if from_stage <= k <= to_stage:
                 stages[k]()
                 if k == 5.5 and state.get("review_block"):
                     test()  # una vuelta mas con el test de Claude; si sigue rojo, escala
