@@ -68,6 +68,24 @@ def test_moc_excluye_infra_y_archive(tmp_vault):
     assert "viejo" not in moc and "lexicon" not in moc
 
 
+def test_moc_incluye_tags_inline_y_applies_to_en_bloque(tmp_vault):
+    """2026-10-01: regenerate_moc solo leia `tags` inline y borraba del MOC las notas que
+    declaran el proyecto en `applies_to` como lista YAML en bloque."""
+    research = tmp_vault / "research"
+    research.mkdir()
+    (research / "inline.md").write_text(
+        "---\ntitle: inline\ntags: [research, orchestration]\n---\nx", encoding="utf-8")
+    (research / "bloque.md").write_text(
+        "---\ntitle: bloque\napplies_to:\n- orchestration\n- .claude\n"
+        "status: applied\nconfidence: 0.9\n---\nx", encoding="utf-8")
+    (research / "parecido.md").write_text(
+        "---\ntitle: parecido\napplies_to:\n- orchestration-old\n---\nx", encoding="utf-8")
+    moc = vault_mod.regenerate_moc("orchestration").read_text(encoding="utf-8")
+    assert "[[inline]]" in moc
+    assert "- [[bloque]] — applied · conf 0.9" in moc
+    assert "parecido" not in moc, "membresia exacta: 'orchestration-old' no es el proyecto"
+
+
 def test_bridge_remember_y_cola_babel(tmp_vault):
     calls, rem, enq = _fakes()
     p = write_validated("Nota tres", "b" * 50, project="mmorch",

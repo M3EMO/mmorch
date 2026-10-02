@@ -79,7 +79,7 @@ def _split_frontmatter(txt: str) -> tuple[dict, str]:
 
 def _read_frontmatter_only(p: Path) -> dict:
     """Lee SOLO el bloque frontmatter (hasta el 2do '---'), sin cargar el body entero.
-    regenerate_moc solo necesita tags/status/confidence del frontmatter -> evita
+    regenerate_moc solo necesita tags/applies_to/status/confidence del frontmatter -> evita
     read_text() de todo el .md (O(vault) por write cuando el vault crece)."""
     lines: list[str] = []
     with p.open(encoding="utf-8") as fh:
@@ -90,12 +90,26 @@ def _read_frontmatter_only(p: Path) -> dict:
             if ln.strip() == "---":
                 break
             lines.append(ln)
-    fm = {}
+    fm: dict = {}
+    open_key = None  # clave con valor vacio: puede abrir una lista en bloque ("- item")
     for ln in lines:
+        item = re.match(r"\s*-\s+(.*)", ln)
+        if item and open_key is not None:
+            fm[open_key] = [*(fm[open_key] or []), item.group(1).strip()]
+            continue
         if ":" in ln:
             k, _, v = ln.partition(":")
             fm[k.strip()] = v.strip()
+            open_key = k.strip() if not v.strip() else None
     return fm
+
+
+def _as_list(v: str | list) -> list[str]:
+    """Lista del frontmatter en cualquiera de sus formas: en bloque ya llega como list,
+    inline llega como string "[a, b]". Items exactos (membresia por igualdad, nunca
+    substring: 'ai' no debe matchear 'ai-notes')."""
+    items = v if isinstance(v, list) else v.strip("[]").split(",")
+    return [x.strip().strip("'\"") for x in items if x.strip()]
 
 
 def log_op(op: str, title: str, *, base: Path | None = None) -> None:
@@ -206,10 +220,10 @@ def regenerate_moc(project: str) -> Path:
             if p.name.endswith(".babel.md"):
                 continue
             fm = _read_frontmatter_only(p)
-            # tags viene como string "[a, b, c]" del frontmatter: parsear a lista
-            # (membresia exacta — substring haria que 'ai' matchee 'ai-notes')
-            tags = fm.get("tags", "").strip("[]").replace(",", " ").split()
-            if project not in tags:
+            # una nota declara su proyecto en `tags` o en `applies_to` (notas viejas,
+            # 2026-10-01: sin esto desaparecian del MOC en cada regeneracion)
+            members = _as_list(fm.get("tags", "")) + _as_list(fm.get("applies_to", ""))
+            if project not in members:
                 continue
             # los frontmatter viejos traen comentarios inline ("applied   # ..."):
             # el MOC muestra solo el valor
