@@ -1,6 +1,13 @@
 ---
 applies_to:
 - orchestration
+title: FrugalGPT cascade y model routing
+status: applied   # cascade() landed; threshold-optimizer aun seed
+confidence: 0.8
+verifier: gemini-2.5-flash
+tags: [research, autolearning, mmorch, routing, cost]
+sources: ["https://arxiv.org/abs/2305.05176", "https://openreview.net/pdf?id=qYI4fw3g4v"]
+created: 2026-06-07
 ---
 ## Qué es
 FrugalGPT (Chen et al. 2023): cascade multi-modelo. Consulta el modelo más chico primero,
