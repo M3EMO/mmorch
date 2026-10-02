@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import hashlib
+import re
 import yaml
 from mmorch.killswitch import paused
 
@@ -73,13 +74,8 @@ def run_incremental(notes_dir, projects, generator, verifier, *, logs_dir='logs'
         content = md_file.read_text(encoding='utf-8')
         if content.startswith('---'):
             parts = content.split('---', 2)
-            if len(parts) >= 3:
-                try:
-                    fm = yaml.safe_load(parts[1]) or {}
-                except yaml.YAMLError:
-                    fm = {}
-                if fm.get('status') in _TERMINAL_STATUS:
-                    continue
+            if len(parts) >= 3 and _load_frontmatter(parts[1]).get('status') in _TERMINAL_STATUS:
+                continue
         notes.append({
             'path': str(md_file),
             'content': content,
@@ -174,25 +170,47 @@ def run_incremental(notes_dir, projects, generator, verifier, *, logs_dir='logs'
     }
 
 
+def _load_frontmatter(fm_text):
+    """YAML del frontmatter; si no parsea, cae a `clave: valor` de primer nivel por linea.
+    Bug medido 2026-10-02: vault.write_note escribia titulos con ': ' sin comillas, el
+    YAMLError dejaba fm={} y una nota `status: applied` se re-juzgaba igual."""
+    try:
+        fm = yaml.safe_load(fm_text)
+        if isinstance(fm, dict):
+            return fm
+    except yaml.YAMLError:
+        pass
+    fm = {}
+    for ln in fm_text.splitlines():
+        if ':' in ln and ln[:1] not in ('', ' ', '\t', '-', '#'):
+            k, _, v = ln.partition(':')
+            fm[k.strip()] = v.split('#')[0].strip()
+    return fm
+
+
 def _update_frontmatter(note_path, projects):
-    """Update the applies_to key in frontmatter, preserving other content."""
+    """Reemplaza (o agrega) el bloque applies_to y deja el resto del frontmatter TAL CUAL.
+
+    Edicion por lineas, no yaml.load + yaml.dump: ante un YAMLError el round-trip
+    descartaba TODO el frontmatter (2026-10-02: 3 notas del vault perdieron title,
+    status, confidence, tags y sources), y aun sin error borraba los comentarios."""
     path = Path(note_path)
     text = path.read_text(encoding='utf-8')
+    block = yaml.dump({'applies_to': projects}, default_flow_style=False,
+                      allow_unicode=True).splitlines()
+    parts = text.split('---', 2) if text.startswith('---') else []
+    if len(parts) < 3:
+        path.write_text('---\n' + '\n'.join(block) + '\n---\n' + text, encoding='utf-8')
+        return
 
-    if text.startswith('---'):
-        parts = text.split('---', 2)
-        if len(parts) >= 3:
-            frontmatter_text = parts[1]
-            body = parts[2]
-            try:
-                frontmatter = yaml.safe_load(frontmatter_text) or {}
-            except yaml.YAMLError:
-                frontmatter = {}
-            frontmatter['applies_to'] = projects
-            new_frontmatter = yaml.dump(frontmatter, default_flow_style=False, allow_unicode=True)
-            path.write_text(f'---\n{new_frontmatter}---{body}', encoding='utf-8')
-    else:
-        # No frontmatter, create one
-        frontmatter = {'applies_to': projects}
-        new_frontmatter = yaml.dump(frontmatter, default_flow_style=False, allow_unicode=True)
-        path.write_text(f'---\n{new_frontmatter}---\n{text}', encoding='utf-8')
+    kept, at, in_old = [], 0, False
+    for ln in parts[1].strip('\n').splitlines():
+        if re.match(r'applies_to\s*:', ln):
+            at, in_old = len(kept), True
+            continue
+        if in_old and ln[:1] in (' ', '\t', '-'):
+            continue  # items del applies_to viejo (lista en bloque)
+        in_old = False
+        kept.append(ln)
+    kept[at:at] = block
+    path.write_text('---\n' + '\n'.join(kept) + '\n---' + parts[2], encoding='utf-8')

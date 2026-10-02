@@ -6,6 +6,7 @@ aca viven hechos/decisiones/research curados, navegables por humano (Obsidian).
 """
 from __future__ import annotations
 
+import json
 import re
 from datetime import date
 from pathlib import Path
@@ -31,6 +32,17 @@ def _safe_folder(folder: str) -> Path:
     return d
 
 
+def _yaml_str(v, *, flow: bool = False) -> str:
+    """Escalar YAML: plano si yaml lo lee igual, entre comillas dobles si no (un string
+    JSON es YAML valido). Medido 2026-10-02: 'title: a: b' y una URL con '?' dentro de
+    [..] dejaban el frontmatter ilegible, y adjudicate lo borraba entero."""
+    s = str(v)
+    risky = (not s or s != s.strip() or s.startswith(tuple("-?:,[]{}#&*!|>'\"%@`"))
+             or ": " in s or " #" in s or s.endswith(":")
+             or (flow and any(c in s for c in ",[]{}:?#")))
+    return json.dumps(s, ensure_ascii=False) if risky else s
+
+
 def write_note(folder: str, title: str, body: str, *, frontmatter: dict | None = None) -> Path:
     """Escribe una nota markdown con frontmatter YAML simple. Devuelve el path.
 
@@ -43,9 +55,9 @@ def write_note(folder: str, title: str, body: str, *, frontmatter: dict | None =
     lines = ["---"]
     for k, v in fm.items():
         if isinstance(v, list):
-            lines.append(f"{k}: [{', '.join(str(x) for x in v)}]")
+            lines.append(f"{k}: [{', '.join(_yaml_str(x, flow=True) for x in v)}]")
         else:
-            lines.append(f"{k}: {v}")
+            lines.append(f"{k}: {_yaml_str(v)}")
     lines.append("---\n")
     text = "\n".join(lines) + body.strip() + "\n"
 
@@ -99,9 +111,19 @@ def _read_frontmatter_only(p: Path) -> dict:
             continue
         if ":" in ln:
             k, _, v = ln.partition(":")
-            fm[k.strip()] = v.strip()
+            fm[k.strip()] = _unquote(v.strip())
             open_key = k.strip() if not v.strip() else None
     return fm
+
+
+def _unquote(v: str) -> str:
+    """Inverso de _yaml_str para el lector por lineas: '"a: b"' -> 'a: b'."""
+    if len(v) >= 2 and v[0] == v[-1] == '"':
+        try:
+            return json.loads(v)
+        except ValueError:
+            return v[1:-1]
+    return v
 
 
 def _as_list(v: str | list) -> list[str]:
