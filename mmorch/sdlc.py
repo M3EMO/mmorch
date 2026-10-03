@@ -224,14 +224,21 @@ def _planner(system: str, user: str) -> str:
         if d.get("is_error") or not d.get("result"):   # cupo agotado, auth: falla tecnica, no un plan malo
             raise RuntimeError(f"planner claude: {str(d.get('result') or d)[:300]}")
         return str(d["result"])
-    cfg = WT / ".cursor"
+    cfg, cli = WT / ".cursor", WT / ".cursor" / "cli.json"
+    nuevo = not cfg.exists()   # el repo puede versionar su propio .cursor/ (reglas): la limpieza solo deshace lo nuestro
+    previo = cli.read_bytes() if cli.exists() else None
     cfg.mkdir(exist_ok=True)   # sin interfaz Cursor ve Gmail/Calendar/Drive de sus plugins: deny Mcp(*:*) (medido 2026-10-01)
-    (cfg / "cli.json").write_text(json.dumps({"permissions": {"allow": [], "deny": ["Mcp(*:*)"]}}), encoding="utf-8")
+    cli.write_text(json.dumps({"permissions": {"allow": [], "deny": ["Mcp(*:*)"]}}), encoding="utf-8")
     try:
         _, out = _agent_run(_cursor_argv() + ["-p", "--trust", "--mode", "plan", "--workspace", str(WT), "--model", model,
                                               "--output-format", "stream-json", prompt], None, env, timeout)
     finally:
-        shutil.rmtree(cfg, ignore_errors=True)
+        if nuevo:
+            shutil.rmtree(cfg, ignore_errors=True)
+        elif previo is None:
+            cli.unlink(missing_ok=True)
+        else:
+            cli.write_bytes(previo)
     plan_txt, result = "", ""
     for line in out.splitlines():
         try:

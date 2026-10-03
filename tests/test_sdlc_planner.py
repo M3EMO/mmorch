@@ -66,6 +66,23 @@ def test_planner_cursor_toma_create_plan_y_bloquea_mcp(tmp_path, monkeypatch):
     assert not (tmp_path / ".cursor").exists() and S.state["planner_tokens"] == 15
 
 
+def test_planner_cursor_no_borra_el_cursor_del_repo(tmp_path, monkeypatch):
+    """La limpieza borraba .cursor/ entero: un repo que versiona sus reglas de Cursor las perdia en el worktree."""
+    _wt(tmp_path, monkeypatch)
+    monkeypatch.setenv("SDLC_PLANNER", "cursor:grok-4.7-medium")
+    monkeypatch.setattr(S, "_cursor_argv", lambda: ["node", "index.js"])
+    reglas = tmp_path / ".cursor" / "rules" / "repo.mdc"
+    reglas.parent.mkdir(parents=True)
+    reglas.write_text("regla del repo", encoding="utf-8")
+    cli = tmp_path / ".cursor" / "cli.json"
+    monkeypatch.setattr(S, "_agent_run", lambda *a: (0, json.dumps({"type": "result", "result": "plan"})))
+    assert S._planner("sys", "SPEC") == "plan"
+    assert reglas.read_text(encoding="utf-8") == "regla del repo" and not cli.exists()
+    cli.write_text('{"propio": true}', encoding="utf-8")
+    S._planner("sys", "SPEC")
+    assert cli.read_text(encoding="utf-8") == '{"propio": true}'
+
+
 def test_falla_tecnica_del_planner_es_runtimeerror(tmp_path, monkeypatch):
     """Cupo agotado o salida vacia = falla tecnica (como una API caida), nunca un plan malo que cuenta en contra."""
     _wt(tmp_path, monkeypatch)
