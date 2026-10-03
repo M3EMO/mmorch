@@ -1,9 +1,9 @@
 ---
-title: Planner de SDLC sobre corridas reales: Sonnet y Cursor no superan al reasoner
+title: "Planner de SDLC sobre corridas reales: Sonnet y Cursor no superan al reasoner"
 created: 2026-10-02
 tags: [research, orchestration, sdlc, planner, cursor, sonnet, reasoner, banco, corridas-reales]
 status: measured
-confidence: media: 12 corridas reales x 2 repeticiones; potencia baja para diferencias chicas
+confidence: "media: 12 corridas reales x 2 repeticiones; potencia baja para diferencias chicas"
 sources: [bd orchestration-34k, orch-spike/scripts/sdlc_planner (7058afe congelado, fc933ae resultados), mmorch/sdlc.py (e6f358b)]
 ---
 ## Pregunta
