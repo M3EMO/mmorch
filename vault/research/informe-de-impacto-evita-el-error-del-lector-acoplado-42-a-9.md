@@ -1,10 +1,10 @@
 ---
-title: Informe de impacto evita el error del lector acoplado: 42% a 96% (2026-09-25)
+title: "Informe de impacto evita el error del lector acoplado: 42% a 96% (2026-09-25)"
 created: 2026-09-25
 tags: [research, mmorch, impacto, acople-por-datos, agentes, codegraph, benchmark, wayfinder]
 status: measured
 confidence: media
-sources: [.scratch/mapa-de-impacto (tickets 01, 02, 09); worktree ../orch-spike rama spike/impacto, scripts/tareas, tareas_ts, tareas_java, tareas_indirectas, tareas_externos, tareas_costo, tareas_scaffold, tareas_portfolio y scripts/impacto; video youtube k2qls2LiBRc]
+sources: [.scratch/mapa-de-impacto (tickets 01, "02", 09); worktree ../orch-spike rama spike/impacto, scripts/tareas, tareas_ts, tareas_java, tareas_indirectas, tareas_externos, tareas_costo, tareas_scaffold, tareas_portfolio y scripts/impacto; video youtube k2qls2LiBRc]
 ---
 ## Pregunta
 El video "AI gives too much code" describe un error: un agente cambia un escritor y no actualiza a un lector acoplado por datos, sin referencia en el codigo. ¿Un informe de impacto automatico lo evita?

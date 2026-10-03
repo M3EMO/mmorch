@@ -1,5 +1,5 @@
 ---
-title: Ticket 08 SDLC: como lo subjetivo baja a checker — 5 opciones medidas por otros (2026-09)
+title: "Ticket 08 SDLC: como lo subjetivo baja a checker — 5 opciones medidas por otros (2026-09)"
 created: 2026-09-15
 tags: [research, mmorch, sdlc, gates, llm-judge, rubric, tdd, ticket-08]
 status: seed

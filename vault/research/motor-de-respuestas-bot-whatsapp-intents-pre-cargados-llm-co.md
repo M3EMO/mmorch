@@ -1,5 +1,5 @@
 ---
-title: Motor de respuestas bot WhatsApp: intents pre-cargados + LLM con tools desde Java, modelo y costo
+title: "Motor de respuestas bot WhatsApp: intents pre-cargados + LLM con tools desde Java, modelo y costo"
 created: 2026-09-09
 tags: [research, quetepario-chatbot, research, llm-pricing, spring-ai, tool-calling, java]
 status: seed

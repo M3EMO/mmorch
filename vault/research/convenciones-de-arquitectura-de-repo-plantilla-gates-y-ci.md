@@ -1,5 +1,5 @@
 ---
-title: Convenciones de arquitectura de repo: plantilla, gates y CI
+title: "Convenciones de arquitectura de repo: plantilla, gates y CI"
 created: 2026-09-10
 tags: [research, mmorch, sdlc, architecture, gates, templates, cookiecutter, copier, scorecard, slsa, agents.md]
 status: seed

@@ -1,5 +1,5 @@
 ---
-title: QueTePario: opciones de mejora exploradas
+title: "QueTePario: opciones de mejora exploradas"
 created: 2026-09-09
 tags: [research, quetepario, ecommerce, pyme, brainstorm]
 status: seed

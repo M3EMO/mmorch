@@ -1,10 +1,10 @@
 ---
-title: Banco de acople por datos: TypedDict, dueño único, round-trip, escala y trinquete (2026-09-24)
+title: "Banco de acople por datos: TypedDict, dueño único, round-trip, escala y trinquete (2026-09-24)"
 created: 2026-09-24
 tags: [research, mmorch, mutation-testing, acople-por-datos, codegraph, metrics.jsonl, benchmark]
 status: measured
 confidence: media
-sources: [worktree orch-bench rama bench/data-coupling: scripts/bench_acople/ (PREREG.md, mutants.json sha256, run_matrix.py, analyze.py, results.jsonl, results_i4_rerun.jsonl); issue bd orchestration-be8; video youtube k2qls2LiBRc]
+sources: ["worktree orch-bench rama bench/data-coupling: scripts/bench_acople/ (PREREG.md", mutants.json sha256, run_matrix.py, analyze.py, results.jsonl, results_i4_rerun.jsonl); issue bd orchestration-be8; video youtube k2qls2LiBRc]
 ---
 ## Pregunta
 El video "AI gives too much code" plantea tres fallas de la IA en sistemas grandes. El pilar 3 es el acople por datos: un modulo escribe un archivo y otro lo lee sin referencia en el codigo. `codegraph_impact(log_event)` devuelve 54 simbolos, todos escritores y ningun lector de metrics.jsonl. La pregunta es que intervencion cierra ese hueco mejor por linea de codigo.

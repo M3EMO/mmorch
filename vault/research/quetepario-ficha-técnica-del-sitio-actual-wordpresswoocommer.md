@@ -1,5 +1,5 @@
 ---
-title: QueTePario: ficha técnica del sitio actual (WordPress/WooCommerce)
+title: "QueTePario: ficha técnica del sitio actual (WordPress/WooCommerce)"
 created: 2026-09-09
 tags: [research, quetepario, piloto, woocommerce, sitemap]
 status: seed

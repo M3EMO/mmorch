@@ -1,5 +1,5 @@
 ---
-title: Juez visual VLM para sprites: ordena pero no puntua (2026-09)
+title: "Juez visual VLM para sprites: ordena pero no puntua (2026-09)"
 created: 2026-09-17
 tags: [research, mmorch, vlm, juez, sprites, pixel-art, sdlc, oraculo]
 status: verified

@@ -3,7 +3,7 @@ title: Cursor como explorador o borrador para Opus no ahorra cupo; Sonnet es el 
 created: 2026-10-01
 tags: [research, orchestration, cursor, delegacion, cupo, planner, sdlc, anclaje, banco]
 status: measured
-confidence: media: 50 preguntas y 12 tareas sintéticas; el rol B es un piloto
+confidence: "media: 50 preguntas y 12 tareas sintéticas; el rol B es un piloto"
 sources: [.scratch/cursor-trabajador/issues/06-banco-roles-explorador-y-borrador.md, .scratch/cursor-trabajador/research/06-preregistro.md, orch-spike/scripts/cursor_roles (fcb7ea4)]
 ---
 ## Pregunta

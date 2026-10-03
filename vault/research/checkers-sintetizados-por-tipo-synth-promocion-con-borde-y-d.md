@@ -1,5 +1,5 @@
 ---
-title: Checkers sintetizados por tipo: synth, promocion con borde y decorrelacion por metodo — 2026-09-10
+title: "Checkers sintetizados por tipo: synth, promocion con borde y decorrelacion por metodo — 2026-09-10"
 created: 2026-09-10
 tags: [research, mmorch, ablation, synth, checkers, decorrelacion, oneflow, evalplus, sdlc]
 status: validated

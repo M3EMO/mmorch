@@ -1,5 +1,5 @@
 ---
-title: Chatbot SaaS: Brainstorm / Discovery Notes
+title: "Chatbot SaaS: Brainstorm / Discovery Notes"
 created: 2026-09-09
 tags: [research, chatbot-saas, wayfinder, chatbot, saas, grilling]
 status: active

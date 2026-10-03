@@ -1,5 +1,5 @@
 ---
-title: SDLC 6 gates: herramientas y prácticas de industria por ticket
+title: "SDLC 6 gates: herramientas y prácticas de industria por ticket"
 created: 2026-09-10
 tags: [research, mmorch, sdlc, gates, mutation, ci, ticket-02, ticket-13, ticket-03, ticket-11]
 status: draft
