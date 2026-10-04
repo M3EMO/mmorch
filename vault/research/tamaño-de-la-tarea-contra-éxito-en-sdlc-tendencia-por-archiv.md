@@ -4,7 +4,7 @@ created: 2026-10-04
 tags: [research, orchestration, sdlc, tamano, gate, plan, carga-cuantizada]
 status: measured
 confidence: "baja: 107 corridas, las 72 del banco vienen de 12 tareas"
-sources: [bd orchestration-e4d, orch-spike/scripts/sdlc_tamano (e16590b), mmorch/sdlc.py gate_tamano (85c3de8)]
+sources: [bd orchestration-e4d, orch-spike/scripts/sdlc_tamano (e16590b), mmorch/sdlc.py gate_tamano (85c3de8), informe de impacto (3114940), orch-spike/scripts/sdlc_planner/pares_e4d.py (8eb8218)]
 ---
 ## Pregunta
 
@@ -44,5 +44,36 @@ AUROC para predecir el fracaso en 98 corridas con las tres medidas (15 fallas, b
 
 - Solo los archivos predicen algo, y poco. El acoplamiento por literales no predice: no se rutea por esa medida.
 - Igual se agregó el informe de impacto al planner y al coder, por la evidencia del banco sintético del mapa de impacto.
-- Validación parcial en corridas reales (brazo reasoner, 13 pares antes de que se acabara el saldo de DeepSeek): éxito 13/13 contra 12/13 de la línea base, USD +15%, tiempo mediano 990 s contra 472 s (el tiempo puede venir de la latencia de la API).
-- Las 11 repeticiones que faltan quedan para cuando haya saldo: `results_replay_e4d_402.jsonl` en `orch-spike/scripts/sdlc_planner`.
+
+## Validación del informe de impacto en corridas reales (2026-10-04)
+
+Brazo reasoner con el informe (3114940) contra la línea base del banco 34k, 24 pares emparejados por tarea y repetición (12 tareas). Script: `orch-spike/scripts/sdlc_planner/pares_e4d.py` (8eb8218).
+
+| Medida | Línea base (2026-10-02) | Con informe (2026-10-04) |
+|---|---|---|
+| Éxito sin Claude | 21/24 | 24/24 |
+| Escaladas a Claude | 3 | 0 |
+| USD total | 5.26 | 4.15 |
+| Tiempo mediano por corrida | 496 s | 996 s |
+
+- Los 3 pares que cambian van de escalada a construido. Ningún par empeora.
+- La diferencia de éxito es +0.125, con IC 90% por tarea de +0.04 a +0.25.
+- McNemar exacto con 3 pares discordantes da p = 0.25 a dos colas: la señal es positiva, pero chica.
+- Los brazos corrieron en días distintos, sin intercalar: la deriva del proveedor no queda controlada.
+- El USD total baja porque una corrida escalada gasta la escalera completa. La mediana por par cambia −0.003 USD.
+
+### De dónde sale el tiempo extra
+
+- Las llamadas a la API suman unos 150 s por corrida en los dos brazos, a 117 tokens/s.
+- El informe tarda menos de 0.5 s por archivo, también con la caché fría.
+- Los dos brazos planean la misma cantidad de archivos (mediana 2 contra 1).
+- La etapa 5 domina cada corrida: `gate_mutacion` corre el comando de aceptación una vez por mutante.
+- En repos que no son Python, ese comando corre la suite entera (por ejemplo, `mvn test`).
+- Ningún commit cambió la etapa 5 entre las dos fechas.
+- En el chatbot, cada mutante tarda 115 s hoy y tardaba 75 s el 2026-10-02.
+- La causa más probable es la carga de la máquina, sin prueba directa. El informe no explica el tiempo.
+
+## Decisión sobre el informe
+
+- El informe de impacto queda en el planner y en el coder.
+- La etapa 5 es el costo de tiempo dominante del pipeline. Paralelizar los mutantes es una mejora candidata, sin medir.

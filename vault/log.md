@@ -40,3 +40,6 @@ Append-only, parseable: `grep "^## \[" log.md`. Ops: write | ingest | migrate | 
 ## [2026-10-01] write | Cursor como explorador o borrador para Opus no ahorra cupo; Sonnet es el mejor planner sin Opus [orchestration]
 ## [2026-10-02] write | Surcos y conectividad funcional (Häkkinen 2025) no sirven para entrenar LLM ni para mmorch [orchestration]
 ## [2026-10-02] write | Planner de SDLC sobre corridas reales: Sonnet y Cursor no superan al reasoner [orchestration]
+## [2026-10-04] write | Contener a cursor-agent sin interfaz en Windows: que frena y que no [orchestration]
+## [2026-10-04] write | Tamaño de la tarea contra éxito en SDLC: tendencia por archivos, sin datos para escalones grandes [orchestration]
+## [2026-10-04] write | Plan MoE (capa de confianza por token): qué sirve a mmorch y qué le da mmorch al plan [orchestration]
