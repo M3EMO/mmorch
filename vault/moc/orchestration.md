@@ -27,3 +27,4 @@
 - [[planner-de-sdlc-sobre-corridas-reales-sonnet-y-cursor-no-sup]] — measured · conf media: 12 corridas reales x 2 repeticiones; potencia baja para diferencias chicas
 - [[prime-agent-veredicto-code-level-robar-rollback-estructural-]] — verified · conf 0.85
 - [[surcos-y-conectividad-funcional-häkkinen-2025-no-sirven-para]] — verdict · conf alta para "no aplica"; el estudio es una prueba de concepto
+- [[tamaño-de-la-tarea-contra-éxito-en-sdlc-tendencia-por-archiv]] — measured · conf baja: 107 corridas, las 72 del banco vienen de 12 tareas
