@@ -8,6 +8,7 @@
 - [[auditoria-mmorch_auto_repair.py-2026-08-21]] — seed
 - [[auditoria-mmorch_autoresearch.py-2026-08-22]] — seed
 - [[auditoria-mmorch_budget.py-2026-08-29]] — seed
+- [[contener-a-cursor-agent-sin-interfaz-en-windows-que-frena-y-]] — measured · conf alta: sondas reales con cursor-agent 2026.10.01, una corrida por caso
 - [[corpus-training-no-tiene-senal-de-routing-2026-09-04]] — applied
 - [[cursor-como-explorador-o-borrador-para-opus-no-ahorra-cupo-s]] — measured · conf media: 50 preguntas y 12 tareas sintéticas; el rol B es un piloto
 - [[darwin-godel-machine-self-improving-agents]] — applied · conf 0.9
