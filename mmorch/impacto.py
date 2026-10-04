@@ -220,6 +220,26 @@ def _external_report(target: Path, rel: str) -> str:
         return ""
 
 
+def lectores(root: Path, target: Path) -> list[str]:
+    """Modulos que comparten con `target` algun literal de datos no comun: los lectores acoplados que el informe
+    lista (orchestration-e4d: el acoplamiento del plan de SDLC). Vacio si el lenguaje no tiene parser."""
+    root, target = root.resolve(), target.resolve()
+    if target.suffix not in _LANGS or not target.is_file():
+        return []
+    rel = target.relative_to(root).as_posix()
+    try:
+        toks = _all_tokens(root, target.suffix)
+        mine = toks.get(rel) or _LANGS[target.suffix][2](target.read_text(encoding="utf-8"))
+    except (ImportError, SyntaxError, UnicodeDecodeError, ValueError, OSError):
+        return []
+    out: set[str] = set()
+    for t in mine:
+        others = [r for r, tk in toks.items() if r != rel and t in tk]
+        if 0 < len(others) <= COMMON:
+            out.update(others)
+    return sorted(out)
+
+
 def _literal_report(root: Path, target: Path) -> str:
     """Literales de datos que `target` comparte con otros modulos del mismo lenguaje."""
     root, target = root.resolve(), target.resolve()

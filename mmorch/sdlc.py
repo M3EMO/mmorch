@@ -694,11 +694,52 @@ def _en_techo(f: str) -> bool:
 
 
 def _tamano(files: list[str]) -> dict:
-    """orchestration-e4d: archivos del plan y tokens (bytes/4) de los que ya existen: lo que el coder lee y modifica.
+    """orchestration-e4d: archivos del plan, tokens (bytes/4) de los que ya existen y acoplamiento: modulos FUERA del
+    plan que comparten literales de datos con los archivos del plan (mmorch.impacto.lectores).
     Escalones x4 del ticket: minima <=4k, chica <=16k, media <=64k, grande >64k."""
+    from .impacto import lectores
     tok = sum((WT / f).stat().st_size // 4 for f in files if (WT / f).is_file())
     escalon = "minima" if tok <= 4000 else "chica" if tok <= 16000 else "media" if tok <= 64000 else "grande"
-    return {"archivos": len(files), "tokens": tok, "escalon": escalon}
+    lect: set[str] = set()
+    for f in files:
+        if (WT / f).is_file():
+            lect.update(lectores(WT, WT / f))
+    fuera = sorted(lect - set(files))
+    return {"archivos": len(files), "tokens": tok, "escalon": escalon, "acople": len(fuera), "lectores": fuera[:20]}
+
+
+def _informe(f: str, tope: int = 4000) -> str:
+    """Informe de impacto de un archivo que ya existe en el worktree (lectores acoplados), recortado."""
+    from .impacto import report
+    try:
+        return report(WT, WT / f)[:tope] if (WT / f).is_file() else ""
+    except Exception:  # ponytail: el informe ayuda, nunca rompe la etapa
+        return ""
+
+
+def _informe_spec(spec_md: str) -> str:
+    """orchestration-e4d: informe de impacto de los archivos que la spec nombra y ya existen. El reasoner planea sin
+    ver el repo; asi sabe que otros modulos leen lo que va a cambiar (banco del mapa de impacto: 42% -> 96%)."""
+    nombrados = [f for f in dict.fromkeys(re.findall(r"[\w./-]+\.(?:" + "|".join(_exts()) + r")\b", spec_md))
+                 if (WT / f).is_file()]
+    return "\n\n".join(x for x in (_informe(f, 3000) for f in nombrados[:6]) if x)[:8000]
+
+
+def _proponer_division(spec_md: str, plan_md: str) -> None:
+    """Plan grande: el planner propone dividir la tarea y la propuesta queda en docs/sdlc/division.md. La etapa igual
+    se detiene: cada parte es una feature nueva con su test de aceptacion, y eso lo decide un humano o Claude."""
+    max_a = int(CFG.get("tamano_max_archivos", 8))
+    try:
+        out = _planner("Sos un tech lead. Dividis una tarea grande en features chicas e independientes.",
+                       f"Este plan supera el tamano que el pipeline maneja bien ({state['plan_tamano']}). Dividi la "
+                       f"tarea en 2 a 4 features, cada una con a lo sumo {max_a} archivos, en el orden en que conviene "
+                       "construirlas. Para cada feature: titulo, requisitos R<n> de la spec que cubre, archivos y un "
+                       "criterio de aceptacion verificable. Formato: '## Feature N: titulo'.\n\n"
+                       f"PLAN:\n{plan_md}\n\nSPEC:\n{spec_md}")
+    except RuntimeError as e:  # el planner caido no tapa el motivo del corte
+        out = f"(no se pudo proponer la division: {e})"
+    _write("docs/sdlc/division.md", out)
+    write_supervision("ESCALATE_HUMAN: tarea grande; propuesta de division en docs/sdlc/division.md")
 
 
 def gate_tamano(files: list[str]) -> tuple[bool, str]:
@@ -1291,6 +1332,10 @@ def plan():
            f"'## Stack' = UNA linea con el lenguaje, los frameworks y las librerias que usa el cambio (lo que ya usa el "
            f"repo; nada nuevo sin que la spec lo pida). '## Prueba' = `{prueba}`.\n"
            f"Archivos OBLIGATORIOS en '## Archivos': {_need_files()}.\n\nSPEC:\n{spec_md}")  # D14-diag: el plan omitia test_capas
+    inf = _informe_spec(spec_md)
+    if inf:   # orchestration-e4d: el planner ve los lectores acoplados de lo que la spec nombra
+        ask += ("\n\nINFORME DE IMPACTO (otros modulos leen literales de los archivos que nombra la spec; si el cambio "
+                f"altera esos literales, sus lectores tambien van en '## Archivos'):\n{inf}")
     out = _planner("Sos un tech lead. Escribis planes ejecutables. NO regeneres los tests.", ask)
     for intento in range(2):  # D2 r1: una reescritura con el motivo del gate, como en spec
         _write("docs/sdlc/plan.md", out)
@@ -1305,8 +1350,9 @@ def plan():
             ok, note = gate_traza_plan(spec_md, block, files)
         if ok:
             ok, note = gate_tamano(files)
-            if not ok:
-                return ok, note   # un plan grande no se arregla reescribiendo: hay que dividir la tarea
+            if not ok:   # un plan grande no se arregla reescribiendo: hay que dividir la tarea
+                _proponer_division(spec_md, out)
+                return ok, note + " (propuesta en docs/sdlc/division.md)"
         if ok or intento:
             return ok, note
         out = _planner("Sos un tech lead. Reescribis el plan completo con el formato obligatorio.",
@@ -1354,6 +1400,9 @@ def build():
     for f in state["plan_files"]:
         cur = (WT / f).read_text(encoding="utf-8") if (WT / f).exists() else ""
         cur_ctx = f"ARCHIVO ACTUAL {f} (devolvelo COMPLETO con el cambio minimo):\n{cur}\n\n" if cur.strip() else ""
+        inf = _informe(f) if cur.strip() else ""   # orchestration-e4d: el coder ve quien lee lo que cambia
+        if inf:
+            cur_ctx += f"{inf}\n\n"
         out = llm(CODER, _rol(f) + "Devolves SOLO el codigo del archivo pedido, sin explicacion ni markdown.",
                   f"Escribi {f}. Tiene que importar con los archivos ya escritos y pasar los tests de aceptacion.\n\n{cur_ctx}"
                   f"PLAN:\n{plan_md}\n\nSPEC:\n{spec_md}\n\nTAREA:\n{TASK.task}\n\nTESTS:\n{_tests_text()}\n\n"
