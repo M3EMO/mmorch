@@ -24,6 +24,7 @@
 - [[moc-autolearning]]
 - [[nodos-jerárquicos-de-verificadores-techo-n-eff-no-depende-de]] — applied · conf 0.85
 - [[paper-engram-architecture-vs-retention-2026-08-19]] — seed
+- [[plan-moe-capa-de-confianza-por-token-qué-sirve-a-mmorch-y-qu]] — verdict · conf media: lectura del plan del usuario del 2026-10-04, sin experimentos
 - [[planner-de-sdlc-sobre-corridas-reales-sonnet-y-cursor-no-sup]] — measured · conf media: 12 corridas reales x 2 repeticiones; potencia baja para diferencias chicas
 - [[prime-agent-veredicto-code-level-robar-rollback-estructural-]] — verified · conf 0.85
 - [[surcos-y-conectividad-funcional-häkkinen-2025-no-sirven-para]] — verdict · conf alta para "no aplica"; el estudio es una prueba de concepto
