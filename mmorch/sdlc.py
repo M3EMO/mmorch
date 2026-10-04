@@ -693,6 +693,28 @@ def _en_techo(f: str) -> bool:
     return f in _need_files() or not t or any(_calza(f, pat) for pat in t)  # sin techo (bench, FEATURES viejas): todo vale
 
 
+def _tamano(files: list[str]) -> dict:
+    """orchestration-e4d: archivos del plan y tokens (bytes/4) de los que ya existen: lo que el coder lee y modifica.
+    Escalones x4 del ticket: minima <=4k, chica <=16k, media <=64k, grande >64k."""
+    tok = sum((WT / f).stat().st_size // 4 for f in files if (WT / f).is_file())
+    escalon = "minima" if tok <= 4000 else "chica" if tok <= 16000 else "media" if tok <= 64000 else "grande"
+    return {"archivos": len(files), "tokens": tok, "escalon": escalon}
+
+
+def gate_tamano(files: list[str]) -> tuple[bool, str]:
+    """Baranda de tamaño (orchestration-e4d, 2026-10-04). Las 107 corridas medidas tienen <= 8 archivos y <= 16k tokens;
+    fuera de ese rango no hay datos, asi que la etapa 3 frena y pide dividir la tarea. El exito sin Claude cae con los
+    archivos (1: 0.89, 2-3: 0.81, 4-7: 0.65) pero no hay evidencia de que dividir ayude: los umbrales se revisan con
+    20 corridas de 4 o mas archivos. Por repo: `tamano_max_archivos` y `tamano_max_tokens` en sdlc.toml."""
+    t = state["plan_tamano"] = _tamano(files)
+    max_a, max_t = int(CFG.get("tamano_max_archivos", 8)), int(CFG.get("tamano_max_tokens", 16000))
+    ok = t["archivos"] <= max_a and t["tokens"] <= max_t
+    detalle = f"{t['archivos']} archivos, {t['tokens']} tokens ({t['escalon']})"
+    if not ok:
+        detalle += f": supera {max_a} archivos o {max_t} tokens; dividi la tarea en features mas chicas"
+    return rec_gate("tamano-plan", ok, detalle)
+
+
 def gate_plan_allowlist(plan_md: str, files: list[str]) -> tuple[bool, str]:
     m = re.search(r"## Archivos\b(.*?)(?:\n## |\Z)", plan_md, re.S | re.I)
     block = m.group(1) if m else plan_md
@@ -1281,6 +1303,10 @@ def plan():
         ok, note = gate_plan_allowlist(out, files)
         if ok:
             ok, note = gate_traza_plan(spec_md, block, files)
+        if ok:
+            ok, note = gate_tamano(files)
+            if not ok:
+                return ok, note   # un plan grande no se arregla reescribiendo: hay que dividir la tarea
         if ok or intento:
             return ok, note
         out = _planner("Sos un tech lead. Reescribis el plan completo con el formato obligatorio.",
