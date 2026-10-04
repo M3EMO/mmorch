@@ -4,7 +4,7 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**118 módulos · 44 MCP tools · 1054 tests.**
+**119 módulos · 44 MCP tools · 1067 tests.**
 
 El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
 
@@ -41,6 +41,7 @@ El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/cost.py` | Cost model — USD from token counts, using REGISTRY prices. |
 | `mmorch/curation.py` | Curacion humana de propuestas — logica compartida entre scripts/veredicto.py, |
 | `mmorch/curiosity.py` | curiosity — deteccion de TENSION en la memoria (modulo cognitivo #3). |
+| `mmorch/cursor_worker.py` | cursor_worker — despachador de Cursor como trabajador de Claude (orchestration-ayz). |
 | `mmorch/dataset.py` | dataset — construye un dataset de CALIDAD DE CÓDIGO desde git history, SIN labels |
 | `mmorch/decision_mining.py` | Mineria de DECISIONES humanas desde transcripts de Claude Code. |
 | `mmorch/docs_extract.py` | Extracción de texto de documentos (PDF hoy) — dos niveles, medidos en |

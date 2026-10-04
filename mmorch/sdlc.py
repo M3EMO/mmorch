@@ -171,31 +171,14 @@ _SIN_SHELL = ("CLAUDECODE", "SHELL", "BASH", "BASH_ENV", "MSYSTEM")   # cursor-a
 
 
 def _cursor_argv() -> list[str]:
-    """node + index.js de la version mas nueva de cursor-agent (el .cmd pasa por PowerShell y corta un prompt multilinea)."""
-    vs = pathlib.Path(os.environ.get("LOCALAPPDATA", "")) / "cursor-agent" / "versions"
-    v = max((p for p in vs.iterdir() if re.match(r"\d{4}\.\d+\.\d+-", p.name)),
-            key=lambda p: tuple(int(x) for x in p.name.split("-")[0].split(".")))
-    return [str(v / "node.exe"), str(v / "index.js")]
+    from .cursor_worker import cursor_argv   # una sola fuente: el despachador de Cursor (orchestration-ayz)
+    return cursor_argv()
 
 
 def _agent_run(argv: list[str], prompt: str | None, env: dict, timeout: float) -> tuple[int, str]:
-    """Corre un agente en el worktree. Timeout = falla tecnica (RuntimeError, como una API caida), con el arbol
-    entero muerto: cursor-agent lanza hijos (node, rg) que un kill simple deja vivos en Windows."""
-    p = subprocess.Popen(argv, cwd=WT, stdin=subprocess.PIPE if prompt is not None else subprocess.DEVNULL,
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
-                         env=env)
-    try:
-        out, err = p.communicate(prompt, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True)
-        else:
-            p.kill()
-        p.communicate()
-        raise RuntimeError(f"planner: timeout de {timeout:.0f} s") from None
-    if p.returncode:
-        raise RuntimeError(f"planner: rc={p.returncode} {(err or out)[-300:]}")
-    return p.returncode, out
+    """Corre un agente en el worktree (timeout o rc != 0 = falla tecnica, ver cursor_worker.run_agent)."""
+    from .cursor_worker import run_agent
+    return 0, run_agent(argv, WT, prompt, env, timeout)
 
 
 def _planner(system: str, user: str) -> str:
