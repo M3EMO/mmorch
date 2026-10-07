@@ -77,3 +77,20 @@ Brazo reasoner con el informe (3114940) contra la línea base del banco 34k, 24 
 
 - El informe de impacto queda en el planner y en el coder.
 - La etapa 5 es el costo de tiempo dominante del pipeline. Paralelizar los mutantes es una mejora candidata, sin medir.
+
+## Revisión de la baranda con 20 corridas de 4+ archivos (2026-10-07, orchestration-xm9)
+
+Lote de replay sobre las 4 tareas reales con 4 o más archivos (5 repeticiones cada una), con el pipeline actual:
+informe de impacto, tipo público Java (7b6) y muestra de mutantes (cbr). Datos: `orch-spike` f9cec00. USD 12.98.
+
+| Archivos del plan | Corridas | Éxito sin Claude |
+|---|---|---|
+| 1 | 4 | 4/4 |
+| 2-3 | 5 | 4/5 |
+| 4-7 | 11 | 6/11 |
+
+- El planner no repite el tamaño original: `ssb-5f9d4018` tenía 8 archivos y ahora planea 1 en 4 de 5 corridas.
+- El fracaso depende de la tarea. Con 6 archivos, `chatbot-468b1e3a` pasa 5/5 y `ssb-b3f3c218` pasa 1/5.
+- `ssb-b3f3c218` falla siempre por compilación de TypeScript. Acumula 4/9 entre los tres lotes.
+- Bajar la baranda a 4 archivos frenaría tareas que pasan. La baranda queda en más de 8 archivos o 16k tokens.
+- La muestra de mutantes bajó la etapa 5 del chatbot de 23-31 min a 6-13 min, y la de ssb a menos de 3 min.
