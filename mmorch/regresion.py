@@ -54,7 +54,7 @@ _LLM_TIMEOUT = 180      # 60s no alcanza con un diff grande: medido, 3/5 timeout
 # test que no pasaba ni en base. Medido sobre los mismos 5 casos —
 # flash-lite 3/5, deepseek-reasoner sin corridas validas (timeouts),
 # gemini-2.5-flash 5/5.
-MODELO = "gemini-2.5-flash"
+MODELO = "glm-5.2"   # sin gemini (2026-09-19); el 5/5 del docstring fue con gemini, re-medir
 
 
 def declara_intencion(diff: str) -> bool:

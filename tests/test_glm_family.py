@@ -11,6 +11,14 @@ def test_glm_registered_as_zhipu():
     assert cfg.family_of("glm-4.5-air") == "zhipu"
 
 
+def test_defaults_are_cross_family():
+    # 2026-09-19: verifier default = glm (zhipu), generador = deepseek. El invariante que importa
+    # es generador != verificador; GLM ya no es "tercera familia" respecto del verificador.
+    assert cfg.family_of(cfg.DEFAULT_GENERATOR) != cfg.family_of(cfg.DEFAULT_VERIFIER)
+    assert cfg.family_of("glm-4.5-air") != cfg.family_of(cfg.DEFAULT_GENERATOR)
+    assert cfg.family_of(cfg.DEFAULT_VERIFIER) == "zhipu"
+
+
 def test_glm_is_cross_family_vs_defaults():
     # 2026-09-22 google fuera: el verifier default ES zhipu. Lo que importa es que
     # GLM y el verifier default sean cross-family vs el generador deepseek (OneFlow).

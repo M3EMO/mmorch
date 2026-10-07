@@ -34,7 +34,7 @@ FIDELITY_MIN = 0.8
 MIN_CHARS = 3000       # pre-filtro determinista (spec vault-global ticket 05):
                        # docs chicos no pagan babel ni leidos; medido 2026-08-03,
                        # un prompt de 298 chars salio destruido (16 chars)
-DEFAULT_ENCODER = "gemini-2.5-flash-lite"   # medido: cumple el char budget
+DEFAULT_ENCODER = "glm-4.5-air"   # sin gemini (decision 2026-09-19); char budget NO medido con glm, re-medir
 DEFAULT_READER = DEFAULT_GENERATOR          # deepseek: cross-family vs encoder
 CHUNK_CHARS = 6000     # docs mas grandes se comprimen por chunks (compliance
                        # del char-budget cae con inputs grandes, medido 08-02)

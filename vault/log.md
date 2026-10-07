@@ -28,6 +28,8 @@ Append-only, parseable: `grep "^## \[" log.md`. Ops: write | ingest | migrate | 
 ## [2026-09-10] write | Suite unidad + regresión + mutación: práctica documentada (ticket 13) [mmorch]
 ## [2026-09-15] write | Ticket 08 SDLC: como lo subjetivo baja a checker — 5 opciones medidas por otros (2026-09) [mmorch]
 ## [2026-09-17] write | Juez visual VLM para sprites: ordena pero no puntua (2026-09) [mmorch]
+## [2026-09-19] write | Hype Market — research de genero, comps y ciencia para un incremental de burbujas en Steam [hypemarket]
+## [2026-09-19] write | Hype Market — iteracion 1: el playtest guionado refuta el balance v0 y las barras de sesgo [hypemarket]
 ## [2026-09-24] write | Banco de acople por datos: TypedDict, dueño único, round-trip, escala y trinquete (2026-09-24) [mmorch]
 ## [2026-09-24] write | Placement y autorouting open-source para PCB [pcb-builder]
 ## [2026-09-24] write | Formatos abiertos de intercambio PCB [pcb-builder]
