@@ -62,6 +62,15 @@ against ~$0.05 for `deepseek-reasoner` on the same items (~17x). `glm-5.2` stays
 verifier for subjective work, where GOAL requires another family; checkable work without an oracle
 goes to `CHECKABLE_VERIFIER` (`deepseek-reasoner`).
 
+**Subjective branch (2026-10-07, `ablation_selfpref.py`, pre-registered in a6abfe8).** No computed
+truth here, but the risk the invariant guards against is measurable: a judge favouring its own family.
+`deepseek-chat` and `glm-4.5-air` answer 100 subjective prompts; `deepseek-reasoner` and `glm-5.2` pick the
+better answer in both orders. The DeepSeek judge prefers DeepSeek answers 0.85 of the time, the GLM judge
+0.82: self-preference index 0.03, 90% CI [-0.015, 0.075] -> inconclusive under the pre-registered rule.
+Any family bias is small (under ~7.5 points); length does not explain it (DeepSeek answers were shorter).
+This measures judge bias, not judge accuracy. Whether GOAL.md keeps cross-family for subjective work is the
+human's call.
+
 The SELF arm replicated independently three times (specificity 0.558 / 0.606 / 0.594 against
 three different counterparts), so the ~40% false-reject rate of thinking-off `deepseek-chat`
 is stable, not one-run noise.
