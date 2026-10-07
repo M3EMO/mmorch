@@ -49,6 +49,7 @@ Every run appends to `logs/ablation_results.jsonl`; re-run with
 | `gemini-2.5-flash` | google | 1.00 | 0.982 | 0.991 | $0.135 |
 | `glm-4.5-air` | zhipu | 0.99 | 0.977 | 0.986 | $0.332 |
 | `glm-5.2` (thinking ON, 2026-10-07) | zhipu | 1.00 | 1.00 | 1.00 | ~$0.85 |
+| `Qwen/Qwen3-4B` open-weight, vLLM on a Colab T4 (2026-10-07) | qwen | 1.00 | 0.977 | 0.989 | 0 API $, 40 min of T4 |
 
 Three models from **three different families** all land at ~0.99. The only one that collapses
 to 0.77 is the one with reasoning switched off — same family and same weights as the best of
@@ -70,6 +71,11 @@ better answer in both orders. The DeepSeek judge prefers DeepSeek answers 0.85 o
 Any family bias is small (under ~7.5 points); length does not explain it (DeepSeek answers were shorter).
 This measures judge bias, not judge accuracy. Whether GOAL.md keeps cross-family for subjective work is the
 human's call.
+
+**Open-weight verifier on a GPU (2026-10-07, `scripts/colab_verificador.py`, ticket pcb).** The same
+350 paired items, judged by `Qwen/Qwen3-4B` (thinking ON) served with vLLM on a Colab T4: balanced accuracy
+0.989, one unparseable reply, no per-call API cost. A 4B model with reasoning lands with the API verifiers, so
+checkable verification can run off the API when a GPU is at hand.
 
 The SELF arm replicated independently three times (specificity 0.558 / 0.606 / 0.594 against
 three different counterparts), so the ~40% false-reject rate of thinking-off `deepseek-chat`
