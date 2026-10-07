@@ -186,6 +186,20 @@ REGISTRY: dict[str, ModelSpec] = {
         role="SOLO ablacion: glm-5.2 sin thinking (gate que falla, misma familia que 4.5-air)",
         extra_body=(("thinking", {"type": "disabled"}),),
     ),
+    # orchestration-fo1: encoder de babel. Con thinking, glm-4.5-air gastaba ~4.6k tokens de salida por chunk de 2k
+    # y pasaba los 180 s; comprimir no necesita razonar. Mismo precio que glm-4.5-air.
+    "glm-4.5-air-nothink": ModelSpec(
+        key="glm-4.5-air-nothink",
+        family="zhipu",
+        provider="zhipu",
+        model_id="glm-4.5-air",
+        base_url="https://api.z.ai/api/paas/v4",
+        api_key_env="ZHIPU_API_KEY",
+        price_in=0.20,
+        price_out=1.10,
+        role="encoder de babel (compresion sin razonamiento)",
+        extra_body=(("thinking", {"type": "disabled"}),),
+    ),
     # orchestration-0a6: juez visual de sprites (antes gemini-2.5-flash). Vision OpenAI-compatible (image_url).
     # Precio verificado 2026-10-07 en docs.z.ai/guides/overview/pricing.
     "glm-4.6v": ModelSpec(

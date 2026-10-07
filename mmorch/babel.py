@@ -34,7 +34,9 @@ FIDELITY_MIN = 0.8
 MIN_CHARS = 3000       # pre-filtro determinista (spec vault-global ticket 05):
                        # docs chicos no pagan babel ni leidos; medido 2026-08-03,
                        # un prompt de 298 chars salio destruido (16 chars)
-DEFAULT_ENCODER = "glm-4.5-air"   # sin gemini (decision 2026-09-19); char budget NO medido con glm, re-medir
+DEFAULT_ENCODER = "glm-4.5-air-nothink"   # fo1 2026-10-07: con thinking pasaba los 180 s; sin thinking 11 s.
+                       # 5 notas del vault (8-19k): ratio 0.50-0.86 (1/5 pasa RATIO_MAX), fidelidad 0.5-1.0;
+                       # deepseek-chat 0.63-0.89 (2/5). Las notas ya densas comprimen poco: los gates deciden.
 DEFAULT_READER = DEFAULT_GENERATOR          # deepseek: cross-family vs encoder
 CHUNK_CHARS = 6000     # docs mas grandes se comprimen por chunks (compliance
                        # del char-budget cae con inputs grandes, medido 08-02)
@@ -49,8 +51,9 @@ def lexicon_version() -> str:
 
 def _call_default(model: str, messages: list[dict]) -> str:
     from .providers import call as _call
+    # 180 s: glm-4.5-air razona antes de comprimir y un chunk de 6k pasaba los 60 s del default (fo1, 2026-10-07)
     return _call(model, messages, pattern="babel", node="babel",
-                 temperature=0.0).text
+                 temperature=0.0, timeout=180).text
 
 
 def _lexicon_text() -> str:
