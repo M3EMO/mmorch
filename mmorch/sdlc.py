@@ -280,10 +280,28 @@ def one_file(code: str, rel: str) -> str:
     """Gate un-archivo (r1 2026-09-11): el coder imito las cabeceras "# path" del prompt y pego 3 archivos en uno."""
     parts = re.split(r"(?m)^(?:#|//)\s*" + _file_re() + r"\s*$", code)
     if len(parts) < 3:
-        return code
+        return _tipo_propio(code, rel)
     secs = {parts[i]: parts[i + 1].strip() for i in range(1, len(parts), 2)}
     rec_gate("un-archivo", rel in secs, f"{rel}: recorte de {list(secs)}")
-    return secs.get(rel, code)
+    return _tipo_propio(secs.get(rel, code), rel)
+
+
+# ponytail: solo tipos de primer nivel en columna 0 (el estilo de javac y de los formateadores); uno indentado no cuenta
+_TIPO_PUBLICO = re.compile(r"(?m)^public\s+(?:(?:abstract|final|sealed|non-sealed|strictfp)\s+)*"
+                           r"(?:class|interface|enum|record|@interface)\s+(\w+)")
+
+
+def _tipo_propio(code: str, rel: str) -> str:
+    """orchestration-7b6: en Java el tipo publico tiene el nombre del archivo. Pedido Opcion.java, el coder devolvio la
+    clase Negocio (y Opcion en Bot.java, 519 -> 101 lineas): ese codigo no se escribe. Devuelve "" y el que llama
+    conserva el archivo."""
+    if not rel.endswith(".java"):
+        return code
+    ajenos = [t for t in _TIPO_PUBLICO.findall(code) if t != pathlib.Path(rel).stem]
+    if ajenos:
+        rec_gate("tipo-del-archivo", False, f"{rel}: declara public {ajenos[0]}")
+        return ""
+    return code
 
 
 def sh(cmd, timeout: float | None = None, keep: int = 6000):
@@ -319,7 +337,8 @@ def _rol(f: str | None = None) -> str:
         c.pop(None, None)
         lang = c.most_common(1)[0][0] if c else _lenguaje()
     stack = state.get("plan_stack")
-    return f"Sos un programador {lang} senior" + (f" (stack del plan: {stack})" if stack else "") + ". "
+    tipo = f"En {f} el unico tipo publico se llama {pathlib.Path(f).stem}. " if f and f.endswith(".java") else ""
+    return f"Sos un programador {lang} senior" + (f" (stack del plan: {stack})" if stack else "") + ". " + tipo
 
 
 def _lenguaje() -> str:
@@ -1194,7 +1213,9 @@ def self_check() -> int:
     if test_counts("2 failed, 1 passed in 0.1s") != {"run": 3, "failed": 2} or test_counts("3 passed in 0.1s") != {"run": 3, "failed": 0}:
         fails.append("counts")
     if one_file("# limiter/__init__.py\nfrom x import y\n\n# limiter/core.py\nclass TokenBucket: pass\n", "limiter/core.py") != "class TokenBucket: pass" \
-            or one_file("class A: pass", "a.py") != "class A: pass":
+            or one_file("class A: pass", "a.py") != "class A: pass" \
+            or one_file("public class Negocio {}", "x/Opcion.java") != "" \
+            or one_file("public class Opcion {\n    public static class Item {}\n}", "x/Opcion.java") == "":
         fails.append("un-archivo")
     tests = {"test_a", "test_b"}
     sp = "## Requisitos\n- R1: x\n- R2: y\n\n## Trazabilidad\n| ID | tests |\n|---|---|\n| R1 | test_a |\n| R2 | test_a, test_b |\n"
@@ -1408,8 +1429,9 @@ def build():
                   f"PLAN:\n{plan_md}\n\nSPEC:\n{spec_md}\n\nTAREA:\n{TASK.task}\n\nTESTS:\n{_tests_text()}\n\n"
                   f"ARCHIVOS YA ESCRITOS:\n{_joined(written) or '(ninguno)'}")
         code = one_file(strip_fence(out), f)
-        _write(f, code)
-        written[f] = code
+        if code:   # "" = el coder devolvio otro archivo (7b6): queda el actual y el fix loop lo vuelve a pedir
+            _write(f, code)
+        written[f] = code or cur
         bok, bnote = gate_baseline()
         if not bok:
             return False, bnote

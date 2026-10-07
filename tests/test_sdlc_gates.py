@@ -38,6 +38,36 @@ def test_one_file_recorta_su_seccion(run):
     assert S.one_file("solo = 1\n", "pkg/a.py") == "solo = 1\n"
 
 
+class _Corte(Exception):
+    pass
+
+
+def test_build_no_escribe_la_clase_de_otro_archivo(run, monkeypatch):
+    # orchestration-7b6: pedido Opcion.java, el coder devolvio la clase Negocio y piso el archivo
+    assert S.one_file("public class Negocio {\n}\n", "src/Opcion.java") == ""
+    assert S.one_file("public final class Opcion {\n    public static class Item {}\n}\n", "src/Opcion.java")
+    wt = S.WT
+    (wt / "docs" / "sdlc").mkdir(parents=True)
+    (wt / "src").mkdir()
+    for n in ("spec", "plan"):
+        (wt / "docs" / "sdlc" / f"{n}.md").write_text("x\n", encoding="utf-8")
+    orig = "public class Opcion {\n    int id;\n}\n"
+    (wt / "src" / "Opcion.java").write_text(orig, encoding="utf-8")
+    S.state["plan_files"] = ["src/Opcion.java"]
+    monkeypatch.setattr(S, "llm", lambda *a, **k: "public class Negocio {\n}\n")
+    monkeypatch.setattr(S, "gate_baseline", lambda: (True, "ok"))
+
+    def corta(*a, **k):
+        raise _Corte
+
+    monkeypatch.setattr(S, "gate_compile", corta)
+    try:
+        S.build()
+    except _Corte:
+        pass
+    assert (wt / "src" / "Opcion.java").read_text(encoding="utf-8") == orig
+
+
 def test_plan_allowlist_tests_ajenos_no_y_obligatorios_si(run):
     ok, _ = S.gate_plan_allowlist("## Archivos\n- `pkg/a.py` [R1]\n- `tests/test_capas.py` [R1]\n", ["pkg/a.py", "tests/test_capas.py"])
     assert ok
