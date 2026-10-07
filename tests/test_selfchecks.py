@@ -23,7 +23,6 @@ EXCLUIR = {
     "server": "levanta el HTTP server real y bloquea (main loop, no self-check)",
     "cli": "entrypoint CLI: parsea argv y ejecuta comandos reales",
     "nightly": "pipeline nocturno completo: LLM/API real y estado del home real",
-    "plugin_worker": "worker CLI: main() exige argv de job (IndexError sin args)",
     "babel": "asserta lexicon_version() del vault REAL — vacio en el home aislado",
     "sdlc": "CLI del pipeline: corre etapas con API real; sus gates puros van en test_sdlc_gates.py",
 }
@@ -38,7 +37,7 @@ def _modulos_con_selfcheck() -> list[str]:
 
 
 MODULOS = [m for m in _modulos_con_selfcheck() if m not in EXCLUIR]
-assert len(MODULOS) >= 35  # 40 -> 35: retirados project_driver/integrate/build, lang (ticket 05) y workflow_engine/workflow_spec (role-chains), f"el descubrimiento colapso: {len(MODULOS)} modulos"
+assert len(MODULOS) >= 30  # 40 -> 35: retirados project_driver/integrate/build, lang (ticket 05) y workflow_engine/workflow_spec (role-chains); 35 -> 30: poda de grafts de Paperclip (orchestration-r5z), f"el descubrimiento colapso: {len(MODULOS)} modulos"
 
 
 @pytest.mark.parametrize("mod", MODULOS)

@@ -28,6 +28,17 @@ def test_adversarial_verify_crossfamily_ok(monkeypatch):
     assert v.passed is True and v.confidence == 0.9
 
 
+def test_verifier_default_por_tipo(monkeypatch):
+    # sin verifier explicito: subjetivo -> cross-family; checkeable -> deepseek-reasoner (medido)
+    usados = []
+    monkeypatch.setattr(P, "call", lambda model, *a, **k: usados.append(model) or
+                        _fake_result('{"passed":true,"confidence":0.9}', model))
+    adversarial_verify("x", rubric="r", gen_model="deepseek-chat")
+    adversarial_verify("x", rubric="r", gen_model="deepseek-chat", task_kind="checkable")
+    assert P.family_of(usados[0]) != "deepseek"
+    assert usados[1] == "deepseek-reasoner"
+
+
 # ---- Anti-sicofancia / parse robusto (H-5) ----
 def test_passed_string_false_is_false():
     assert _coerce_passed("false") is False

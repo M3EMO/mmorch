@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from mmorch.killswitch import paused
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +91,7 @@ def try_automerge(repo: str, branch: str, *, base: str,
     veredicto y sha del merge (rollback = `git revert -m 1 <merge_sha>`)."""
     logs = Path(repo) / "logs"
     result: dict
-    if (logs / "loop_paused").exists():
+    if paused(logs):
         result = {"merged": False, "zone": "paused", "branch": branch,
                   "veredicto": "paused", "checks": [], "diff_hash": None,
                   "merge_sha": None}

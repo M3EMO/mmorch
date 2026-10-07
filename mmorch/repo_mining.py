@@ -25,6 +25,7 @@ from itertools import zip_longest
 from pathlib import Path
 
 from mmorch.iohelpers import atomic_write_json, load_json_tolerant
+from mmorch.killswitch import paused
 
 _PERSIST = threading.Lock()
 
@@ -235,7 +236,7 @@ def consume_queue(orch_root: str, *, today: str, llm_fn=None,
     escritura de candidatas va bajo _PERSIST. Cada linea consumida se comenta
     con su resultado; una que falla vuelve a quedar libre para otra noche."""
     q = Path(orch_root) / "logs" / "repos_queue.txt"
-    if (Path(orch_root) / "logs" / "loop_paused").exists():
+    if paused(Path(orch_root) / "logs"):
         return {"skipped": "paused"}
     if not q.exists():
         return {"skipped": "sin cola"}

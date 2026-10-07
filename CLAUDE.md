@@ -33,6 +33,8 @@ Reload Claude Code para cargar tools nuevos.
 
 ## Donde leer el resto
 - Hilo con Cursor: `logs/canal.jsonl` (`mmorch.canal`). Nadie despierta al otro.
+- Delegar implementacion a Cursor: `python -m mmorch.cursor_worker correr <repo> <pedido.md>` en segundo plano;
+  despues `corregir` (una vez), `aplicar` o `descartar`. Contrato y limites: docstring de `mmorch/cursor_worker.py`.
 - Capacidades (cuando elegir un patron): `docs/capabilities.md`
 - Feedback y memoria (como estan hechos): `mmorch/feedback.py`, `mmorch/memory.py`
 - Tests: `tests/` es el gate para promover codigo nuevo

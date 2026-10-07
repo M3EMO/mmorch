@@ -106,3 +106,15 @@ DEFERRED (reason):
 - G11 worker pool (vs per-invoke), event/webhook/ui-slot contributions — YAGNI until invoke rate / a real 3rd-party need.
 - G6 attach-gate-on-execution + participants/auto-advance — product-shaped.
 - **G10 authz PDP** — deferred: mmorch is single-user (decision 2026-06-24).
+
+## Poda 2026-09-29 (orchestration-r5z)
+Evaluados contra el flujo SDLC (que corre solo casi todas las noches: hardening, auto_repair y project_repair).
+Ninguno aporta a SDLC: SDLC ya tiene worktree descartable (G3), veredictos humanos en `logs/sdlc/veredictos.jsonl` (G8),
+gates por comando en `sdlc.toml` (G11), timeouts por llamada (G9: 1 de 31 corridas sin cierre) y no divide features en
+subtareas (G1/G7). `budget_policy` (G5) podria dar un tope mensual a las corridas autonomas; el usuario eligio no poner tope.
+- Podados: `job_graph` (G1/G7), `portability` (G2/G4), `durable_runs` (G9), `feedback_trace` (G8), `plugins` + `plugin_worker`
+  + `plugins/example` (G11), con sus 8 rutas del server y el heartbeat de `server_engine`. Evidencia: cero llamadores fuera
+  del server, el cliente Lotus ya se habia podado (c95c3db), `feedback_traces.jsonl` nunca se creo, nada llama a `/jobs/reap`,
+  y `MMORCH_PLUGINS_ALLOW` vacio negaba todo.
+- Quedan: `exec_policy` (G3) y `budget_policy` (G5), que protegen `/run/project`.
+- Efecto lateral: `workflow_store.gc_blocks` solo lo llamaba `/jobs/reap`, que nadie invocaba; queda sin llamador en produccion.

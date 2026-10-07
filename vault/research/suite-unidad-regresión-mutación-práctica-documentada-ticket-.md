@@ -1,5 +1,5 @@
 ---
-title: Suite unidad + regresión + mutación: práctica documentada (ticket 13)
+title: "Suite unidad + regresión + mutación: práctica documentada (ticket 13)"
 created: 2026-09-10
 tags: [research, mmorch, research, mutation, ci, sdlc, ticket-13]
 status: verified

@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 
 from mmorch.iohelpers import atomic_write_json, load_json_tolerant
+from mmorch.killswitch import paused
 
 _RETRY_DAYS = 5
 
@@ -37,7 +38,7 @@ def repair_projects(orch_root: str, *, today: str, build_fn=None,
     corrida, cuando la de HOY ya lo habia reclasificado de failing a errors."""
     from mmorch.projects import _load as load_projects
     logs = Path(logs_dir or (Path(orch_root) / "logs"))
-    if (logs / "loop_paused").exists():
+    if paused(logs):
         return {"skipped": "paused"}
     if rec is None:
         try:

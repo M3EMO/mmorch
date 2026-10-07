@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from .automerge import try_automerge
+from .killswitch import pause, paused
 from .observation import evaluate as evaluate_observation
 from .promotion import PromotionStore
 from .runtime_checkout import RuntimeCheckout
@@ -124,6 +125,8 @@ def preflight(
 
     checks: dict[str, bool] = {}
     evidence: dict = {}
+    # Gate 1 del spec: mismo layout que auto_apply_nightly (repo/logs).
+    checks["kill_switch"] = not paused(Path(repo) / "logs")
 
     def capture(name: str, fn: Callable[[], object] | None) -> object | None:
         if fn is None:
@@ -196,8 +199,8 @@ def preflight(
 
 
 def _pause(store: PromotionStore) -> None:
-    store.root.mkdir(parents=True, exist_ok=True)
-    (store.root / "loop_paused").touch()
+    # El store vive en logs/auto_apply: el kill-switch global esta en logs/.
+    pause(store.root.parent)
 
 
 def _halt(

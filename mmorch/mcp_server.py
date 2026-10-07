@@ -28,7 +28,7 @@ except Exception as e:  # pragma: no cover
 
 from mmorch import (fan_out, adversarial_verify, route, cascade, ensemble_verify,
                     ideate_and_screen, recall as _recall)
-from mmorch.config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
+from mmorch.config import DEFAULT_GENERATOR
 from mmorch.metrics import summary, error_rates, cache_stats
 from mmorch.learn import analyze as _learn_analyze, recommend as _learn_recommend
 from mmorch.memory import (remember as _remember, stats as _mem_stats,
@@ -306,7 +306,7 @@ def mmorch_adversarial_verify(
     artifact: str,
     rubric: str,
     gen_model: str = DEFAULT_GENERATOR,
-    verifier_model: str = DEFAULT_VERIFIER,
+    verifier_model: str = "",
     task_kind: str = "subjective",
 ) -> str:
     """Verify an artifact with an adversarial skeptic. Cross-family is TASK-AWARE (#2).
@@ -317,13 +317,14 @@ def mmorch_adversarial_verify(
     ALLOWED (cost lever) — §18.4+ablation show cross-family adds no detection there.
     CAVEAT: on hard checkable tasks any LLM verifier is unreliable (~74% false-refute);
     prefer a tool/code check when you can compute the truth.
+    verifier_model="" elige por tipo (subjetivo cross-family, checkeable deepseek-reasoner).
     The verifier refutes by default. Returns {passed, confidence, refutations, cost_usd}.
     """
     v = adversarial_verify(
         artifact,
         rubric=rubric,
         gen_model=gen_model,
-        verifier_model=verifier_model,
+        verifier_model=verifier_model or None,
         phase="mcp",
         task_kind=task_kind,
     )

@@ -19,6 +19,8 @@ dependencies = [
 # real del venv (1.27.2, aun pre-1.28) para que el pin refleje lo verificado.
 mcp = ["mcp>=1.27.2,<2"]
 memory = ["fastembed>=0.3.0"]   # embeddings locales (bge-small). Sin esto: recall coarse-only.
+impacto-ts = ["tree-sitter>=0.23", "tree-sitter-typescript>=0.23"]   # informe de impacto en .ts/.tsx (mmorch.impacto)
+impacto-java = ["tree-sitter>=0.23", "tree-sitter-java>=0.23"]   # informe de impacto en .java (mmorch.impacto)
 checkers = ["sqlglot>=20", "pint>=0.23", "sympy>=1.12", "radon>=6.0", "coverage>=7.0"]
 docs = ["pypdfium2>=5.0"]   # extraccion de texto de PDF (docs_extract.py) —
                             # SIN torch, es lo que usa el pipeline nocturno

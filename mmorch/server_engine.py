@@ -8,7 +8,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import threading
-import time
 import uuid
 
 from .events import emit
@@ -55,9 +54,6 @@ def _rubric_drive(jid: str, state: dict, cancel: threading.Event):
                 # best-effort; never break the job on a store hiccup — but a silent skip
                 # here means a later resume re-pays this step from scratch with no one told.
                 emit("job", "warn", job_id=jid, detail=f"checkpoint no persistido: {str(e)[:150]}")
-            with _JOBS_LOCK:                       # G9: progress -> heartbeat, don't reap active jobs
-                if jid in _JOBS:
-                    _JOBS[jid]["heartbeat"] = time.time()
             submit(state, out)
             try:                                   # Phase B: persist resumable state after each step
                 workflow_store.record_job_spec(jid, "rubric", {"state": state})

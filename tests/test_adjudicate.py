@@ -172,6 +172,37 @@ def test_applies_to_in_frontmatter_after_strong_match(tmp_path):
     assert "cuerpo" in content       # cuerpo preservado
 
 
+# YAML invalido real (2026-10-02): titulo con ': ' y URL con '?' dentro de una lista inline
+FM_INVALIDO = (
+    "title: Decision systems: majority voting requiere independencia\n"
+    "status: seed   # comentario que yaml.dump borraba\n"
+    "sources: [https://openreview.net/pdf?id=qY, docs/rlm.md]\n"
+)
+
+
+def test_yaml_invalido_no_borra_el_frontmatter(tmp_path):
+    """_update_frontmatter descartaba TODO el frontmatter ante un YAMLError."""
+    notes_dir, note_file = make_note(
+        tmp_path, "---\napplies_to:\n- viejo\n" + FM_INVALIDO + "---\ncuerpo")
+    project_dir = make_project(tmp_path)
+    run_incremental(str(notes_dir), {"proj1": str(project_dir)},
+                    FakeGenerator({"score": 0.9}), FakeVerifier(),
+                    logs_dir=str(tmp_path / "logs"))
+    content = note_file.read_text(encoding="utf-8")
+    assert content == "---\napplies_to:\n- proj1\n" + FM_INVALIDO + "---\ncuerpo"
+
+
+def test_status_applied_con_yaml_invalido_no_se_rejuzga(tmp_path):
+    fm = FM_INVALIDO.replace("status: seed", "status: applied")
+    notes_dir, note_file = make_note(tmp_path, "---\n" + fm + "---\ncuerpo")
+    project_dir = make_project(tmp_path)
+    result = run_incremental(str(notes_dir), {"proj1": str(project_dir)},
+                             FakeGenerator({"score": 0.9}), FakeVerifier(),
+                             logs_dir=str(tmp_path / "logs"))
+    assert result["judged"] == 0
+    assert note_file.read_text(encoding="utf-8") == "---\n" + fm + "---\ncuerpo"
+
+
 def test_codegraph_present_when_dir_exists(tmp_path):
     _, note_file = make_note(tmp_path)
     project_dir = make_project(tmp_path)

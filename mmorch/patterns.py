@@ -14,7 +14,7 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
-from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER, family_of
+from .config import CHECKABLE_VERIFIER, DEFAULT_GENERATOR, DEFAULT_VERIFIER, family_of
 from .providers import CallResult, call
 from .metrics import log_event
 
@@ -121,7 +121,7 @@ def adversarial_verify(
     *,
     rubric: str,
     gen_model: str = DEFAULT_GENERATOR,
-    verifier_model: str = DEFAULT_VERIFIER,
+    verifier_model: str | None = None,
     phase: str = "",
     task_kind: str = "subjective",
     checker: str | None = None,
@@ -144,7 +144,12 @@ def adversarial_verify(
       CAVEAT: on HARD checkable tasks LLM verification is itself unreliable (~74%
       false-refute, ablation_prompt) regardless of family — prefer a TOOL/code check
       over any LLM verifier when you can compute the truth directly.
+
+    verifier_model=None elige por tipo: CHECKABLE_VERIFIER (deepseek-reasoner, el medido)
+    en checkeable, DEFAULT_VERIFIER (cross-family) en subjetivo.
     """
+    if verifier_model is None:
+        verifier_model = CHECKABLE_VERIFIER if task_kind == "checkable" else DEFAULT_VERIFIER
     # tool-verify determinista: cero API, 100% confiable en lo computable.
     if checker is not None:
         from .checkers import check

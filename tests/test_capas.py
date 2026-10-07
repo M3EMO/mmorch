@@ -22,13 +22,14 @@ REPO = Path(__file__).resolve().parents[1]
 PKG = REPO / "mmorch"
 
 _ENTRADAS = ("mcp_server", "server", "nightly", "cli", "auto_apply_nightly", "hillclimb", "autoresearch",
-             "sdlc")  # sdlc: CLI `python -m mmorch.sdlc` (ticket 05 paso 1); el paso 2 lo cablea a server_engine
+             "sdlc",  # sdlc: CLI `python -m mmorch.sdlc` (ticket 05 paso 1); el paso 2 lo cablea a server_engine
+             "context_blocks")  # CLI de los hooks ~/.claude/hooks/context-block-*.js (ver test_hook_modules)
 _DINAMICOS = {"loop"}   # cargado por nombre desde loop_nightly; 4173 usos en 90 dias
 
 # Medido 2026-09-14 con este mismo analisis (15). Cada uno: se cablea (y sale de aca) o se borra (y sale
-# de aca). Nunca crece. plugin_worker es el subproceso de plugins: se ejecuta por path, no por import.
+# de aca). Nunca crece.
 _NO_ALCANZADOS = {
-    "plugin_worker", "synth_store",
+    "synth_store",
 }
 
 
@@ -125,7 +126,7 @@ def test_R4_museo_por_modulo_no_crece():
 
 
 def test_R5_sin_importlib_hacia_modulos_propios():
-    # D14 (2026-09-14): el coder esquivo R1 con importlib.import_module('.effort'). plugins carga por path, es la excepcion.
-    culpables = sorted(m for m, p in _modulos().items() if m != "plugins"
-                       and re.search(r"import_module\(\s*['\"](?:\.|mmorch\.)|__import__\(\s*['\"]mmorch", p.read_text(encoding="utf-8", errors="replace")))
+    # D14 (2026-09-14): el coder esquivo R1 con importlib.import_module('.effort').
+    culpables = sorted(m for m, p in _modulos().items()
+                       if re.search(r"import_module\(\s*['\"](?:\.|mmorch\.)|__import__\(\s*['\"]mmorch", p.read_text(encoding="utf-8", errors="replace")))
     assert culpables == [], f"import dinamico de modulos propios (usar import estatico): {culpables}"

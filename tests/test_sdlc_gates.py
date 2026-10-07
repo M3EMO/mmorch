@@ -262,4 +262,4 @@ def test_lint_cuenta_hallazgos_nuevos_por_archivo_contra_la_base(tmp_path, monke
 def test_plan_files_acepta_filas_de_tabla(run):
     # orchestration-r18: el planner escribe tablas aunque se le pidan vinetas
     plan = "| Ruta | Accion |\n|---|---|\n| `pkg/a.py` | modificar |\n| `tests/test_otro.py` | crear |\n- `pkg/b.py`\n"
-    assert S._plan_files(plan) == ["pkg/a.py", "pkg/b.py"]
+    assert sorted(S._plan_files(plan)) == ["pkg/a.py", "pkg/b.py"]  # mmorch/auto lee la lista antes que la tabla

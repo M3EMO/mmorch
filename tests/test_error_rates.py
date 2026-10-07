@@ -1,6 +1,8 @@
 """Observabilidad de fallos: error_class (rate_limit/budget_cap/timeout) + error_rates().
 Señal MEDIDA prerequisito de cualquier futuro load-balancing (anti-scope-creep). No rutea."""
 import sys, pathlib
+
+import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import mmorch.metrics as MET
 import mmorch.providers as P
@@ -69,7 +71,7 @@ def test_error_rates_window_n_limits(tmp_path, monkeypatch):
 
 # ---- ticket 13 (audit-2026-08): tail-read path for window_n-only consumers -------------
 def test_error_rates_window_n_matches_full_read_equivalent(tmp_path, monkeypatch):
-    """window_n sin window_s ahora usa read_jsonl_tail() en vez de read_events() completo
+    """window_n usa read_jsonl_tail() en vez de read_events() completo
     -> el resultado tiene que ser IDENTICO al camino viejo (full read + slice)."""
     _seed_log(tmp_path, monkeypatch)
     tail_path = MET.log_path()
@@ -81,12 +83,13 @@ def test_error_rates_window_n_matches_full_read_equivalent(tmp_path, monkeypatch
     assert fast["window_events"] == len(old_events) == 3
 
 
-def test_error_rates_window_s_still_uses_full_read(tmp_path, monkeypatch):
-    # window_s se aplica ADEMAS de window_n -> sigue necesitando la historia completa
-    # (no sabemos cuántas líneas entran en S segundos) — no debe romperse.
+def test_error_rates_sin_ventana_lee_toda_la_historia(tmp_path, monkeypatch):
+    # window_n=None es la unica forma de mirar toda la historia (window_s se borro el
+    # 2026-09-26: sin llamadores en produccion y fuente de fallas en el banco de acople).
     _seed_log(tmp_path, monkeypatch)
-    r = MET.error_rates(window_n=200, window_s=3600 * 24 * 365)
-    assert r["window_events"] == 5
+    assert MET.error_rates(window_n=None)["window_events"] == 5
+    with pytest.raises(TypeError):
+        MET.error_rates(window_s=3600)   # type: ignore[call-arg]
 
 
 # ---- providers wiring: el except y el budget-cap loggean error_class ---------

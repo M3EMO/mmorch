@@ -18,6 +18,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from mmorch.killswitch import paused
 
 
 def _git(cwd: str, *args: str) -> subprocess.CompletedProcess:
@@ -43,7 +44,7 @@ def run_train(repo: str, *, base: str, today: str | None = None,
     """Arma el tren en un worktree aislado: merge secuencial + suite sobre la
     union. Retorna {train_branch, merged, skipped_conflict, gate}."""
     logs = Path(repo) / "logs"
-    if (logs / "loop_paused").exists():
+    if paused(logs):
         return {"skipped": "paused"}
     today = today or time.strftime("%Y-%m-%d")
     branches = yellow_branches(repo, base=base)

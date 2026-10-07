@@ -13,6 +13,7 @@ import json
 import threading
 import time
 from pathlib import Path
+from typing import Any, TypedDict
 
 from .iohelpers import read_jsonl_cached, read_jsonl_tail
 
@@ -22,6 +23,23 @@ from .paths import logs_dir
 
 _LOG_DIR = logs_dir()
 _LOG_PATH = _LOG_DIR / "metrics.jsonl"
+
+
+class MetricEvent(TypedDict, total=False):
+    """Contrato de una linea de metrics.jsonl: escritor y lectores lo comparten, asi mypy
+    ve el acople por datos que el grafo de llamadas no ve (banco de acople 2026-09-24)."""
+    ts: float
+    iso: str
+    phase: str
+    pattern: str
+    node: str
+    model: str
+    family: str
+    in_tokens: int
+    out_tokens: int
+    cost_usd: float
+    latency_s: float
+    extra: dict[str, Any]
 
 
 def log_path() -> Path:
@@ -68,7 +86,7 @@ def log_event(
     phase: str = "",
     **extra,
 ) -> None:
-    record = {
+    record: MetricEvent = {
         "ts": time.time(),
         "iso": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
         "phase": phase,
@@ -91,37 +109,28 @@ def log_event(
             fh.write(line + "\n")
 
 
-def read_events() -> list[dict]:
+def read_events() -> list[MetricEvent]:
     # Ticket 13 (audit-2026-08): cacheado por (mtime_ns, size) — metrics.jsonl es
     # append-only sin rotación, así que "no cambió de tamaño/mtime" == "misma historia".
     return read_jsonl_cached(_LOG_PATH)
 
 
-def error_rates(*, window_n: int | None = 200, window_s: float | None = None) -> dict:
+def error_rates(*, window_n: int | None = 200) -> dict:
     """429-rate y budget-cap-hit-rate por modelo/familia sobre una ventana reciente.
 
     Señal de observabilidad PURA (no rutea nada): es el prerequisito MEDIDO que cualquier
     futuro load-balancing tendría que citar pa justificarse bajo anti-scope-creep. El
     error_class lo pone providers._classify_error / el gate de budget.
 
-    window_n: últimos N eventos (default 200). window_s: solo eventos de los últimos S
-    segundos (si se da, se aplica ADEMÁS de window_n). Denominador = todos los eventos del
-    modelo en la ventana (éxitos + errores + cap-hits) = tasa sobre intentos reales.
+    window_n: últimos N eventos (default 200); None = toda la historia. Denominador = todos
+    los eventos del modelo en la ventana (éxitos + errores + cap-hits) = tasa sobre intentos
+    reales. Ticket 13: con window_n lee el TAIL del archivo (caso caliente: intuition.healthy()
+    en cada route()) en vez de parsear la historia completa.
 
-    Ticket 13: cuando solo se pide window_n (el caso caliente — intuition.healthy() en
-    cada route()), lee el TAIL del archivo directo en vez de parsear la historia completa
-    vía read_events(). window_s exige mirar más atrás que N líneas (no sabemos cuántas
-    entran en S segundos) así que ahí cae al read_events() cacheado (igual de rápido en
-    calls repetidas, sólo el primer parse post-mtime-change paga el costo completo)."""
-    if window_s is None and window_n is not None:
-        events = read_jsonl_tail(log_path(), window_n)
-    else:
-        events = read_events()
-        if window_s is not None:
-            cut = time.time() - window_s
-            events = [e for e in events if e.get("ts", 0) >= cut]
-        if window_n is not None:
-            events = events[-window_n:]
+    Sin ventana por tiempo: el parámetro `window_s` no tenía llamadores en producción y generó
+    fallas no detectadas en las 5 tandas del banco de acople (m32, h101, h218, h302, h408,
+    h415); borrarlo cerró esa clase entera (2026-09-26)."""
+    events: list[MetricEvent] = read_jsonl_tail(log_path(), window_n) if window_n is not None else read_events()
 
     def _blank() -> dict:
         return {"calls": 0, "rate_limit": 0, "budget_cap": 0, "timeout": 0, "other_error": 0}

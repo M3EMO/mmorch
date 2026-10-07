@@ -68,6 +68,56 @@ def test_moc_excluye_infra_y_archive(tmp_vault):
     assert "viejo" not in moc and "lexicon" not in moc
 
 
+def test_moc_incluye_tags_inline_y_applies_to_en_bloque(tmp_vault):
+    """2026-10-01: regenerate_moc solo leia `tags` inline y borraba del MOC las notas que
+    declaran el proyecto en `applies_to` como lista YAML en bloque."""
+    research = tmp_vault / "research"
+    research.mkdir()
+    (research / "inline.md").write_text(
+        "---\ntitle: inline\ntags: [research, orchestration]\n---\nx", encoding="utf-8")
+    (research / "bloque.md").write_text(
+        "---\ntitle: bloque\napplies_to:\n- orchestration\n- .claude\n"
+        "status: applied\nconfidence: 0.9\n---\nx", encoding="utf-8")
+    (research / "parecido.md").write_text(
+        "---\ntitle: parecido\napplies_to:\n- orchestration-old\n---\nx", encoding="utf-8")
+    moc = vault_mod.regenerate_moc("orchestration").read_text(encoding="utf-8")
+    assert "[[inline]]" in moc
+    assert "- [[bloque]] — applied · conf 0.9" in moc
+    assert "parecido" not in moc, "membresia exacta: 'orchestration-old' no es el proyecto"
+
+
+def test_moc_de_proyectos_con_el_mismo_slug_no_se_pisan(tmp_vault):
+    """'.claude' y 'Claude' daban el mismo _slug ('claude'): el ultimo MOC regenerado
+    pisaba al otro."""
+    research = tmp_vault / "research"
+    research.mkdir()
+    (research / "a.md").write_text("---\napplies_to:\n- .claude\n---\nx", encoding="utf-8")
+    (research / "b.md").write_text("---\napplies_to:\n- Claude\n---\nx", encoding="utf-8")
+    dot, mayus = vault_mod.regenerate_moc(".claude"), vault_mod.regenerate_moc("Claude")
+    assert dot.name.lower() != mayus.name.lower()
+    assert "[[a]]" in dot.read_text(encoding="utf-8")
+    assert "[[a]]" not in mayus.read_text(encoding="utf-8")
+    assert "[[b]]" in mayus.read_text(encoding="utf-8")
+    assert vault_mod.regenerate_moc("orchestration").name == "orchestration.md"
+    assert vault_mod._moc_path("Claude") == mayus, "write_research_note devuelve este path"
+
+
+def test_frontmatter_de_write_note_es_yaml_valido(tmp_vault):
+    """2026-10-02: write_note escribia 'title: a: b' y URLs con '?' en [..] sin comillas;
+    el YAML invalido hacia que adjudicate borrara el frontmatter entero."""
+    yaml = pytest.importorskip("yaml")
+    title = "Decision systems: majority voting — panel"
+    sources = ["https://openreview.net/pdf?id=qY", "docs/rlm.md", "a, b"]
+    p = vault_mod.write_note("research", title, "cuerpo", frontmatter={
+        "tags": ["research", "orchestration"], "status": "applied",
+        "confidence": "alta: medido", "sources": sources})
+    fm = yaml.safe_load(p.read_text(encoding="utf-8").split("---")[1])
+    assert fm["title"] == title and fm["sources"] == sources
+    assert fm["tags"] == ["research", "orchestration"]
+    moc = vault_mod.regenerate_moc("orchestration").read_text(encoding="utf-8")
+    assert "— applied · conf alta: medido" in moc, "el MOC debe mostrar el valor sin comillas"
+
+
 def test_bridge_remember_y_cola_babel(tmp_vault):
     calls, rem, enq = _fakes()
     p = write_validated("Nota tres", "b" * 50, project="mmorch",

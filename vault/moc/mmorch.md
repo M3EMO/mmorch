@@ -2,27 +2,44 @@
 
 ## research
 - [[abc-engine-vs-sdlc-6-etapas-vs-híbrido-con-claude-sobre-una-]] — validated · conf alta en lo medido (una feature, un repo); baja para generalizar sin las 3 features del ticket 06
+- [[auditoria-mmorch_ablation.py-2026-08-19]] — seed
 - [[auditoria-mmorch_adjudicate.py-2026-08-20]] — seed
+- [[auditoria-mmorch_arbitration.py-2026-08-21]] — seed
 - [[auditoria-mmorch_architecture.py-2026-08-21]] — seed
 - [[auditoria-mmorch_auto_apply.py-2026-09-04]] — seed
+- [[auditoria-mmorch_auto_repair.py-2026-08-21]] — seed
 - [[auditoria-mmorch_automerge.py-2026-08-21]] — seed
+- [[auditoria-mmorch_autoresearch.py-2026-08-22]] — seed
 - [[auditoria-mmorch_babel.py-2026-08-23]] — seed
 - [[auditoria-mmorch_bench.py-2026-08-24]] — seed
 - [[auditoria-mmorch_bucketrank.py-2026-08-25]] — seed
+- [[auditoria-mmorch_budget.py-2026-08-29]] — seed
 - [[auditoria-mmorch_budget_policy.py-2026-08-30]] — seed
 - [[auditoria-mmorch_bughunt.py-2026-08-31]] — seed
 - [[auditoria-mmorch_bursts.py-2026-09-01]] — seed
 - [[babel-para-prompts-refutado-por-medicion]] — refuted · conf 0.95
+- [[banco-de-acople-por-datos-typeddict-dueño-único-round-trip-e]] — measured · conf media
 - [[checkers-sintetizados-por-tipo-synth-promocion-con-borde-y-d]] — validated · conf alta en lo medido; la pregunta de familia queda sin respuesta por falta de errores
 - [[convenciones-de-arquitectura-de-repo-plantilla-gates-y-ci]] — seed · conf alta en fuentes oficiales; GATE-N.md no aparece en ellas
+- [[darwin-godel-machine-self-improving-agents]] — applied · conf 0.9
 - [[docling-vs-pypdfium2-2026-08-19]] — applied
+- [[estudio-funciones-integrables-a-mmorch-y-vault]] — verified · conf 0.85
+- [[frugalgpt-cascade-y-model-routing]] — applied · conf 0.8
 - [[hallazgo-flakiness-suite-completa-2026-08-19]] — seed
 - [[hallazgo-project-integrate-selfcheck-roto-2026-08-20]] — seed
+- [[informe-de-impacto-evita-el-error-del-lector-acoplado-42-a-9]] — measured · conf media
 - [[juez-visual-vlm-para-sprites-ordena-pero-no-puntua-2026-09]] — verified · conf 0.8
+- [[llm-as-jury-ensemble-y-errores-correlacionados]] — applied · conf 0.9
 - [[loops-de-parche-y-escalación-cuando-falla-un-check-agentes-v]] — seed · conf 0.8
 - [[lotus-cierre-y-migracion-a-mmorch-2026-09-15]] — applied · conf 0.9
+- [[markdoc-stripe-veredicto-code-level-y-demo-corrida]] — evergreen · conf alta — clonado, API leída, demo ejecutada con casos válido e inválido
+- [[minado-loushang-2026-08-19]] — seed
+- [[minado-pybreaker-2026-08-30]] — seed
 - [[mmorch-modulos-sin-uso-medicion-2026-09-14]] — verified · conf 0.7
+- [[moc-autolearning]]
 - [[mojo-candidata-2026-08-19]] — seed
+- [[paper-engram-architecture-vs-retention-2026-08-19]] — seed
+- [[prime-agent-veredicto-code-level-robar-rollback-estructural-]] — verified · conf 0.85
 - [[sdlc-6-etapas-validacion-6-de-6-verde-2026-09]] — verified · conf 0.9
 - [[sdlc-6-gates-herramientas-y-prácticas-de-industria-por-ticke]] — draft · conf medium
 - [[suite-unidad-regresión-mutación-práctica-documentada-ticket-]] — verified · conf 0.85

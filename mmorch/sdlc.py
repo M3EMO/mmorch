@@ -3,7 +3,9 @@
 Reemplaza a project_integrate.build_project como engine de /project. Validado 6/6 en el bench y D2..D15 sobre
 mmorch (research/07-resultados.md del mapa sdlc-6-gates). Gates deterministas (contrato, allowlist, trazabilidad,
 compile, test-compile, cambio-minimo, sin-clones, docstring, suite total por nombre, lint, alcance) y escalera
-fix loop 3 -> reasoner x2 -> Claude (edit) -> humano. La etapa es el checkpoint: run-log.json + from_stage.
+fix loop 3 -> reasoner x2 -> Claude (edit) -> humano, en la etapa 4 (exito = compila) y en la 5 (exito = aceptacion).
+Si falta el compilador, la etapa 4 va directo a Claude para el entorno. G3 y test-compile descuentan los errores que la
+base ya tenia sin la aceptacion propia (tests rojos por diseño de otras features). La etapa es el checkpoint: run-log.json + from_stage.
 
 Uso como biblioteca: `build_feature(name, task, repo, accept={rel: contenido}, files=[...], contract=[...])`.
 Uso como CLI (bench o feature ya configurada por el llamador): `python -m mmorch.sdlc --task <bench> --wt <dir>`.
@@ -46,7 +48,6 @@ WRITER = os.environ.get("SDLC_WRITER", "deepseek-reasoner")
 CODER = os.environ.get("SDLC_CODER", "deepseek-v4-pro")
 DIAG = os.environ.get("SDLC_DIAG", WRITER)  # medicion 2026-09-15: diagnostico con/sin razonamiento
 PY = sys.executable
-METRICS = logs_dir() / "metrics.jsonl"
 # El pipeline es agnostico: compila/lintea/acepta por COMANDO (sdlc.toml). Esta tabla solo sugiere el compile_cmd en `init`.
 _LANG_HINT = {"py": "python -m compileall -q .", "java": "mvn -q test-compile", "kt": "gradle -q compileTestKotlin",
               "ts": "npx tsc --noEmit", "tsx": "npx tsc --noEmit", "jsx": "npx tsc --noEmit", "js": "node --check {files}", "go": "go build ./... && go vet ./...",
@@ -142,7 +143,7 @@ def configure(task, *, contract, feat=None, wt=None, phase=None, max_fix=3, writ
     state.clear()
     state.update({"proto": "mmorch.sdlc", "task": TASK_NAME, "stages": [], "gates": [], "calls": 0,
                   "human_interventions": 0, "claude_calls": 0, "gate_rejects": [], "escalated_to_claude": False})
-    SNAP.clear(); SEEN.clear(); _orig_files.clear()
+    SNAP.clear(); SEEN.clear(); _orig_files.clear(); _COMPILE_BASE.clear()
     RUNS.mkdir(parents=True, exist_ok=True)
 
 
@@ -152,7 +153,8 @@ def llm(model, system, user, timeout=400):
         r = call(model, [{"role": "system", "content": system}, {"role": "user", "content": user}],
                  pattern=PHASE, node=model, phase=PHASE, temperature=0.0, timeout=timeout, max_tokens=32768)
     except RuntimeError as e:  # D13: el reasoner agoto 32k tokens razonando -> un intento con el coder
-        if "respuesta vacia" not in str(e) or model == CODER:
+        # "respuesta vac" sin la vocal final: providers escribe "vacía" con tilde y el match exacto nunca disparaba
+        if "respuesta vac" not in str(e) or model == CODER:
             raise
         rec_gate("presupuesto-razonamiento", False, f"{model}: {str(e)[:120]}; reintento con {CODER}")
         return llm(CODER, system, user, timeout)
@@ -163,6 +165,78 @@ def llm(model, system, user, timeout=400):
         _flush()
         raise StageFailed("usd-tope", f"US${usd}: escala a humano")
     return r.text
+
+
+_SIN_SHELL = ("CLAUDECODE", "SHELL", "BASH", "BASH_ENV", "MSYSTEM")   # cursor-agent rompe los hooks con el bash de Git
+
+
+def _cursor_argv() -> list[str]:
+    from .cursor_worker import cursor_argv   # una sola fuente: el despachador de Cursor (orchestration-ayz)
+    return cursor_argv()
+
+
+def _agent_run(argv: list[str], prompt: str | None, env: dict, timeout: float) -> tuple[int, str]:
+    """Corre un agente en el worktree (timeout o rc != 0 = falla tecnica, ver cursor_worker.run_agent)."""
+    from .cursor_worker import run_agent
+    return 0, run_agent(argv, WT, prompt, env, timeout)
+
+
+def _planner(system: str, user: str) -> str:
+    """Planner de la etapa 3 (orchestration-34k). SDLC_PLANNER vacio = el WRITER, una llamada sin ver el repo.
+    `claude:<modelo>` y `cursor:<modelo>` corren un agente de SOLO LECTURA en el worktree, sin MCP ni hooks."""
+    p = os.environ.get("SDLC_PLANNER", "") or WRITER
+    if not p.startswith(("claude:", "cursor:")):
+        return llm(p, system, user)
+    kind, model = p.split(":", 1)
+    prompt = (f"{system}\n\nExplora el repo de este directorio con tus herramientas de lectura antes de planear. No edites "
+              f"ningun archivo. Tu respuesta final es SOLO el contenido de plan.md.\n\n{user}")
+    env = {k: v for k, v in os.environ.items() if k not in _SIN_SHELL}
+    timeout = float(CFG.get("planner_timeout_s", 1200))
+    state["calls"] += 1
+    state["planner"] = p
+    if kind == "claude":
+        from .claude_exec import claude_bin
+        argv = claude_bin() + ["-p", "--model", model, "--restricted", "--strict-mcp-config", "--tools", "Read,Grep,Glob",
+                               "--no-session-persistence", "--output-format", "json"]   # el prompt va por stdin: --tools es variadico
+        _, out = _agent_run(argv, prompt, env, timeout)
+        try:
+            d = json.loads((out.strip().splitlines() or ["{}"])[-1])
+        except ValueError:
+            raise RuntimeError(f"planner claude: salida sin JSON: {out[-300:]}") from None
+        state["planner_usd"] = round(state.get("planner_usd", 0.0) + (d.get("total_cost_usd") or 0.0), 4)
+        if d.get("is_error") or not d.get("result"):   # cupo agotado, auth: falla tecnica, no un plan malo
+            raise RuntimeError(f"planner claude: {str(d.get('result') or d)[:300]}")
+        return str(d["result"])
+    cfg, cli = WT / ".cursor", WT / ".cursor" / "cli.json"
+    nuevo = not cfg.exists()   # el repo puede versionar su propio .cursor/ (reglas): la limpieza solo deshace lo nuestro
+    previo = cli.read_bytes() if cli.exists() else None
+    cfg.mkdir(exist_ok=True)   # sin interfaz Cursor ve Gmail/Calendar/Drive de sus plugins: deny Mcp(*:*) (medido 2026-10-01)
+    cli.write_text(json.dumps({"permissions": {"allow": [], "deny": ["Mcp(*:*)"]}}), encoding="utf-8")
+    try:
+        _, out = _agent_run(_cursor_argv() + ["-p", "--trust", "--mode", "plan", "--workspace", str(WT), "--model", model,
+                                              "--output-format", "stream-json", prompt], None, env, timeout)
+    finally:
+        if nuevo:
+            shutil.rmtree(cfg, ignore_errors=True)
+        elif previo is None:
+            cli.unlink(missing_ok=True)
+        else:
+            cli.write_bytes(previo)
+    plan_txt, result = "", ""
+    for line in out.splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if ev.get("type") == "result":
+            result = str(ev.get("result") or "")
+            u = ev.get("usage") or {}
+            state["planner_tokens"] = state.get("planner_tokens", 0) + (u.get("inputTokens") or 0) + (u.get("outputTokens") or 0)
+        elif ev.get("type") == "tool_call" and "createPlanToolCall" in (ev.get("tool_call") or {}):
+            plan_txt = str((ev["tool_call"]["createPlanToolCall"].get("args") or {}).get("plan") or plan_txt)
+    if not (plan_txt or result):
+        raise RuntimeError(f"planner cursor: sin plan ni result: {out[-300:]}")
+    return plan_txt or result   # --mode plan deja el plan en createPlan, no en result
 
 
 def rec_gate(gid, ok, detail):
@@ -223,6 +297,45 @@ def sh(cmd, timeout: float | None = None, keep: int = 6000):
     except subprocess.TimeoutExpired:
         return False, f"TIMEOUT {timeout or CFG['cmd_timeout_s']}s: {(cmd if isinstance(cmd, str) else ' '.join(cmd))[:200]}"
     return p.returncode == 0, (p.stdout + p.stderr)[-keep:]
+
+
+_LANG_NAMES = {".py": "Python", ".ts": "TypeScript", ".tsx": "TypeScript", ".js": "JavaScript", ".jsx": "JavaScript",
+               ".mjs": "JavaScript", ".java": "Java", ".kt": "Kotlin", ".go": "Go", ".rs": "Rust", ".cs": "C#",
+               ".cpp": "C++", ".c": "C", ".rb": "Ruby", ".php": "PHP", ".swift": "Swift"}
+# Salidas de un comando que no existe (shell de Windows en ingles y castellano, POSIX, y avisos de npx/tsc).
+_NO_TOOL = re.compile(r"is not recognized as an internal or external command|no se reconoce como un comando"
+                      r"|command not found|: not found\b|To get access to the TypeScript compiler"
+                      r"|could not determine executable to run|El sistema no puede encontrar el archivo especificado", re.I)
+
+
+def _rol(f: str | None = None) -> str:
+    """Rol del coder armado desde el plan (orchestration-7ys: antes decia Python siempre, tambien en repos TypeScript
+    y Java, que son justo donde el build cortaba por compilacion). Lenguaje del archivo `f` (o el mayoritario del
+    plan) y el stack que declara la seccion `## Stack` del plan."""
+    from collections import Counter
+    lang = _LANG_NAMES.get(pathlib.Path(f).suffix) if f else None
+    if not lang:
+        c = Counter(_LANG_NAMES.get(pathlib.Path(x).suffix) for x in state.get("plan_files", []))
+        c.pop(None, None)
+        lang = c.most_common(1)[0][0] if c else _lenguaje()
+    stack = state.get("plan_stack")
+    return f"Sos un programador {lang} senior" + (f" (stack del plan: {stack})" if stack else "") + ". "
+
+
+def _lenguaje() -> str:
+    """Lenguaje principal del repo: la primera `ext` de sdlc.toml (py si no declara)."""
+    return _LANG_NAMES.get("." + _exts()[0], _exts()[0])
+
+
+def _plan_stack(plan_md: str) -> str:
+    """Seccion `## Stack` del plan en una linea: lenguaje, frameworks y librerias que usa el cambio."""
+    m = re.search(r"## Stack\b(.*?)(?:\n## |\Z)", plan_md or "", re.S | re.I)
+    return " ".join(m.group(1).split()).strip(" -*:")[:200] if m else ""
+
+
+def _toolchain_missing(log: str) -> bool:
+    """El compilador del repo no esta instalado o no esta en PATH: las vueltas del coder no pueden arreglarlo."""
+    return bool(_NO_TOOL.search(log or ""))
 
 
 def _cmd(key: str, files) -> str:
@@ -389,7 +502,7 @@ def gate_mutacion() -> tuple[bool, str]:
         for m in (_mutants(orig, max_n=8, lineas=cambiadas) if _es_py(f) else _mutantes_texto(orig, max_n=8, lineas=cambiadas)):
             p.write_text(m, encoding="utf-8")
             try:
-                if not _es_py(f) and compile_cmd and not sh(_cmd("compile_cmd", [f]))[0]:
+                if not _es_py(f) and compile_cmd and not _compila(_cmd("compile_cmd", [f]))[0]:
                     continue  # mortinato: no compila, no cuenta
                 total += 1
                 if _accept_mata():
@@ -499,9 +612,20 @@ def _accept_paths():
     return paths
 
 
-def accept():
+def _accept_por_cmd() -> str | None:
+    """El comando del repo es el oraculo si no hay tests nombrados o si estan en otro lenguaje; None = pytest."""
     cmd = ACCEPT_CMD or CFG.get("accept_cmd")  # payload o sdlc.toml
-    if cmd and (not TASK.accept_files or not all(_es_py(f) for f in TASK.accept_files)):
+    return str(cmd) if cmd and (not TASK.accept_files or not all(_es_py(f) for f in TASK.accept_files)) else None
+
+
+def _accept_desc() -> str:
+    """La aceptacion como la corre accept(), para los prompts (decia pytest tambien en repos TypeScript)."""
+    return _accept_por_cmd() or f"pytest {' '.join(_accept_paths())} -q"
+
+
+def accept():
+    cmd = _accept_por_cmd()
+    if cmd:
         ok, log = sh(str(cmd))  # sin tests nombrados, o tests en otro lenguaje: el comando del repo es el oraculo
         if (WT / REVIEW_REL).exists():
             # 2026-09-17: la revision deja un test pytest; en ChatBot (Java) `mvn test` no lo corria y un BLOCK real
@@ -569,6 +693,69 @@ def _en_techo(f: str) -> bool:
     return f in _need_files() or not t or any(_calza(f, pat) for pat in t)  # sin techo (bench, FEATURES viejas): todo vale
 
 
+def _tamano(files: list[str]) -> dict:
+    """orchestration-e4d: archivos del plan, tokens (bytes/4) de los que ya existen y acoplamiento: modulos FUERA del
+    plan que comparten literales de datos con los archivos del plan (mmorch.impacto.lectores).
+    Escalones x4 del ticket: minima <=4k, chica <=16k, media <=64k, grande >64k."""
+    from .impacto import lectores
+    tok = sum((WT / f).stat().st_size // 4 for f in files if (WT / f).is_file())
+    escalon = "minima" if tok <= 4000 else "chica" if tok <= 16000 else "media" if tok <= 64000 else "grande"
+    lect: set[str] = set()
+    for f in files:
+        if (WT / f).is_file():
+            lect.update(lectores(WT, WT / f))
+    fuera = sorted(lect - set(files))
+    return {"archivos": len(files), "tokens": tok, "escalon": escalon, "acople": len(fuera), "lectores": fuera[:20]}
+
+
+def _informe(f: str, tope: int = 4000) -> str:
+    """Informe de impacto de un archivo que ya existe en el worktree (lectores acoplados), recortado."""
+    from .impacto import report
+    try:
+        return report(WT, WT / f)[:tope] if (WT / f).is_file() else ""
+    except Exception:  # ponytail: el informe ayuda, nunca rompe la etapa
+        return ""
+
+
+def _informe_spec(spec_md: str) -> str:
+    """orchestration-e4d: informe de impacto de los archivos que la spec nombra y ya existen. El reasoner planea sin
+    ver el repo; asi sabe que otros modulos leen lo que va a cambiar (banco del mapa de impacto: 42% -> 96%)."""
+    nombrados = [f for f in dict.fromkeys(re.findall(r"[\w./-]+\.(?:" + "|".join(_exts()) + r")\b", spec_md))
+                 if (WT / f).is_file()]
+    return "\n\n".join(x for x in (_informe(f, 3000) for f in nombrados[:6]) if x)[:8000]
+
+
+def _proponer_division(spec_md: str, plan_md: str) -> None:
+    """Plan grande: el planner propone dividir la tarea y la propuesta queda en docs/sdlc/division.md. La etapa igual
+    se detiene: cada parte es una feature nueva con su test de aceptacion, y eso lo decide un humano o Claude."""
+    max_a = int(CFG.get("tamano_max_archivos", 8))
+    try:
+        out = _planner("Sos un tech lead. Dividis una tarea grande en features chicas e independientes.",
+                       f"Este plan supera el tamano que el pipeline maneja bien ({state['plan_tamano']}). Dividi la "
+                       f"tarea en 2 a 4 features, cada una con a lo sumo {max_a} archivos, en el orden en que conviene "
+                       "construirlas. Para cada feature: titulo, requisitos R<n> de la spec que cubre, archivos y un "
+                       "criterio de aceptacion verificable. Formato: '## Feature N: titulo'.\n\n"
+                       f"PLAN:\n{plan_md}\n\nSPEC:\n{spec_md}")
+    except RuntimeError as e:  # el planner caido no tapa el motivo del corte
+        out = f"(no se pudo proponer la division: {e})"
+    _write("docs/sdlc/division.md", out)
+    write_supervision("ESCALATE_HUMAN: tarea grande; propuesta de division en docs/sdlc/division.md")
+
+
+def gate_tamano(files: list[str]) -> tuple[bool, str]:
+    """Baranda de tamaño (orchestration-e4d, 2026-10-04). Las 107 corridas medidas tienen <= 8 archivos y <= 16k tokens;
+    fuera de ese rango no hay datos, asi que la etapa 3 frena y pide dividir la tarea. El exito sin Claude cae con los
+    archivos (1: 0.89, 2-3: 0.81, 4-7: 0.65) pero no hay evidencia de que dividir ayude: los umbrales se revisan con
+    20 corridas de 4 o mas archivos. Por repo: `tamano_max_archivos` y `tamano_max_tokens` en sdlc.toml."""
+    t = state["plan_tamano"] = _tamano(files)
+    max_a, max_t = int(CFG.get("tamano_max_archivos", 8)), int(CFG.get("tamano_max_tokens", 16000))
+    ok = t["archivos"] <= max_a and t["tokens"] <= max_t
+    detalle = f"{t['archivos']} archivos, {t['tokens']} tokens ({t['escalon']})"
+    if not ok:
+        detalle += f": supera {max_a} archivos o {max_t} tokens; dividi la tarea en features mas chicas"
+    return rec_gate("tamano-plan", ok, detalle)
+
+
 def gate_plan_allowlist(plan_md: str, files: list[str]) -> tuple[bool, str]:
     m = re.search(r"## Archivos\b(.*?)(?:\n## |\Z)", plan_md, re.S | re.I)
     block = m.group(1) if m else plan_md
@@ -609,11 +796,17 @@ def gate_traza_spec(spec_md: str, tests: set[str]) -> tuple[bool, str]:
 
 
 def gate_traza_plan(spec_md: str, plan_block: str, files: list[str]) -> tuple[bool, str]:
-    """Trazabilidad lado plan: cada R<n> de la spec aparece en el plan; cada archivo cita >= 1 R<n>."""
+    """Trazabilidad lado plan: cada R<n> de la spec aparece en el plan; cada archivo cita >= 1 R<n>. Un item es una
+    linea de lista o una fila de tabla; un rango `R2–R10` cita R2..R10 (SSB F7a)."""
     ids = set(re.findall(r"\bR\d+\b", spec_md))
+    plan_block = re.sub(r"\bR(\d+)\s*[–-]\s*R(\d+)\b",
+                        lambda m: ", ".join(f"R{i}" for i in range(int(m[1]), int(m[2]) + 1)), plan_block)
     huerfanos = sorted(i for i in ids if not re.search(rf"\b{i}\b", plan_block))
-    items = re.findall(r"(?m)^\s*[-*]\s*(.*)$", plan_block)
-    sin_id = [f for f in files if not any(f in it and re.search(r"\bR\d+\b", it) for it in items)]
+    items = re.findall(r"(?m)^\s*[-*]\s*(.*)$", plan_block) + _filas_tabla(plan_block)
+
+    def nombra(it: str, f: str) -> bool:  # la ruta, o su nombre suelto si el plan lo escribio sin carpeta (F4b)
+        return f in it or bool(re.search(r"(?<![\w/.-])" + re.escape(f.rsplit("/", 1)[-1]) + r"(?![\w.-])", it))
+    sin_id = [f for f in files if not any(nombra(it, f) and re.search(r"\bR\d+\b", it) for it in items)]
     if huerfanos or sin_id:
         return rec_gate("trazabilidad-plan", False, f"IDs sin unidad: {huerfanos}; archivos sin ID: {sin_id}")
     return rec_gate("trazabilidad-plan", True, "ok")
@@ -667,9 +860,44 @@ def gate_compile(files) -> tuple[bool, str]:
         cmd = CFG.get("compile_cmd")
         if not cmd:
             return rec_gate("G3-compile", True, f"sin compile_cmd para {otros}: no se compila")
-        ok, log = sh(_cmd("compile_cmd", otros))
-        return rec_gate("G3-compile", ok, "compila" if ok else log[-800:])
+        ok, log, previos = _compila(_cmd("compile_cmd", otros))
+        return rec_gate("G3-compile", ok, _nota_compila(previos) if ok else log[-800:])
     return rec_gate("G3-compile", True, "compila")
+
+
+_COMPILE_BASE: dict[str, set[str]] = {}  # comando -> errores de la base sin la aceptacion; se vacia en configure()
+
+
+def _errores_compilador(log: str) -> set[str]:
+    """Errores sin linea ni columna: `ruta(l,c): error ...` (tsc) o `ruta:l:c: ...` (javac, go, gcc). Sin warnings."""
+    return {f"{m[1]}: {m[2].strip()}"
+            for m in re.finditer(r"(?m)^\s*(\S+?\.\w+)(?:\(\d+,\d+\)|:\d+(?::\d+)?):?\s+(.+)$", log)
+            if not m[2].lower().startswith("warning")}
+
+
+def _compila(cmd: str) -> tuple[bool, str, list[str]]:
+    """Corre `cmd` y descuenta los errores que la base ya tenia SIN la aceptacion de esta feature. Un compilador de
+    proyecto entero (tsc) ve los tests rojos por diseño de OTRAS features: en SSB F3a el TS2307 del test de F3b tumbaba
+    G3. Una regresion en otro archivo sigue bloqueando (su error no esta en la base), igual que un error del test de
+    aceptacion propio. Sin errores legibles en la salida no descuenta nada. Devuelve (ok, log, errores previos)."""
+    ok, log = sh(cmd)
+    ahora = set() if ok else _errores_compilador(log)
+    if not ahora or not state.get("plan_files"):
+        return ok, log, []
+    if cmd not in _COMPILE_BASE:
+        _, blog = _en_base(lambda: _sin_aceptacion(lambda: sh(cmd)))
+        _COMPILE_BASE[cmd] = _errores_compilador(blog)
+    previos = sorted(ahora & _COMPILE_BASE[cmd])
+    if len(previos) < len(ahora):
+        return False, log, previos
+    state["compile_previos"] = previos
+    return True, log, previos
+
+
+def _nota_compila(previos: list[str]) -> str:
+    if not previos:
+        return "compila"
+    return f"compila salvo {len(previos)} errores previos de la base, ajenos a esta feature: {'; '.join(previos)[:600]}"
 
 
 def gate_test_compile() -> tuple[bool, str]:
@@ -680,23 +908,20 @@ def gate_test_compile() -> tuple[bool, str]:
         cmd = CFG.get("compile_cmd")
         if not cmd:
             return rec_gate("test-compile", True, "tests no-Python sin compile_cmd: no se compila")
-        ok, log = sh(_cmd("compile_cmd", _accept_paths()))
-        return rec_gate("test-compile", ok, "ok" if ok else log[-800:])
+        ok, log, previos = _compila(_cmd("compile_cmd", _accept_paths()))
+        return rec_gate("test-compile", ok, ("ok" if not previos else _nota_compila(previos)) if ok else log[-800:])
     ok, log = sh([PY, "-m", "pytest", *_accept_paths(), "--collect-only", "-q", "-p", "no:cacheprovider"])
     return rec_gate("test-compile", ok, "ok" if ok else log[-800:])
 
 
-def ledger_usd():
-    if not METRICS.exists():
+def ledger_usd() -> float | None:
+    from .metrics import log_path, read_events
+    if not log_path().exists():
         return None
     t0 = state.get("t0_epoch") or 0
     usd = 0.0
     state["usd_by_family"] = {}
-    for line in METRICS.read_text(encoding="utf-8").splitlines()[-8000:]:
-        try:
-            r = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for r in read_events()[-8000:]:
         if r.get("phase") == PHASE and float(r.get("ts") or 0) >= t0:
             c = float(r.get("cost_usd") or 0)
             usd += c
@@ -802,11 +1027,13 @@ def _revert(backup):
         _write(f, old)
 
 
-def _dump_diag_case(log: str) -> None:
+def _dump_diag_case(log: str, kind: str = "test") -> None:
     d = RUNS / "diag-cases"; d.mkdir(parents=True, exist_ok=True)
-    case = {"task": TASK_NAME, "phase": PHASE, "base_sha": state.get("base_sha"), "log": log[-20000:],
-            "files": _all_code(), "orig": dict(_orig_files), "tests": _tests_text(), "task_text": TASK.task}
-    (d / f"{PHASE}-{int(time.time())}.json").write_text(json.dumps(case, ensure_ascii=False), encoding="utf-8")
+    case = {"task": TASK_NAME, "phase": PHASE, "kind": kind, "base_sha": state.get("base_sha"), "log": log[-20000:],
+            "files": _all_code(), "orig": dict(_orig_files), "tests": _tests_text(), "task_text": TASK.task,
+            "compile_cmd": CFG.get("compile_cmd")}
+    stem = PHASE if kind == "test" else f"{PHASE}-{kind}"
+    (d / f"{stem}-{int(time.time())}.json").write_text(json.dumps(case, ensure_ascii=False), encoding="utf-8")
 
 
 def reasoner_rounds(log) -> tuple[bool, str]:
@@ -828,7 +1055,7 @@ def reasoner_rounds(log) -> tuple[bool, str]:
             files, instr = list(written)[:1], {}
         backup = {f: written[f] for f in files}
         for f in files:
-            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero.",
+            out = llm(CODER, _rol(f) + "Devolves SOLO el archivo entero.",
                       f"Aplica ESTA instruccion a {f}. No toques los tests.\n"
                       f"INSTRUCCION: {instr.get(f, 'corregi el fallo del test')}\n\n"
                       f"SALIDA:\n{log}\n\nARCHIVOS:\n{_joined(written)}")
@@ -863,7 +1090,7 @@ def claude_fix(log) -> tuple[bool, str]:
     state["claude_calls"] += 1
     before = _tree()
     r = _revisor(f"Los tests de aceptacion fallan. Arregla el codigo en {state['plan_files']} hasta que "
-                 f"`pytest {' '.join(_accept_paths())} -q` pase. NO toques tests ni docs. Al final responde en una linea que cambiaste.\n\n"
+                 f"`{_accept_desc()}` pase. NO toques tests ni docs. Al final responde en una linea que cambiaste.\n\n"
                  f"TAREA:\n{TASK.task}\n\nSALIDA:\n{log}")
     write_supervision(f"nivel 3 Claude (rc={r.get('returncode')}): {(r.get('result') or '')[:2000]}")
     gate_alcance("claude-fix-alcance", before, tuple(state["plan_files"]))
@@ -873,6 +1100,81 @@ def claude_fix(log) -> tuple[bool, str]:
     if ok:
         state["suite_total"] = test_counts(log)
     return ok, "Claude verde" if ok else "Claude rojo: escala a humano"
+
+
+# Archivos de entorno que Claude puede tocar para dejar andar el compilador (sin tocar el codigo ni los tests).
+_ENV_FILES = ("sdlc.toml", "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "tsconfig",
+              "node_modules/", "pom.xml", "build.gradle", "settings.gradle", "gradle", "mvnw", ".mvn/",
+              "requirements", "pyproject.toml")
+
+
+def _claude_compile(log: str, compiles, *, env: bool) -> tuple[bool, str]:
+    """Claude en el worktree para la etapa build (orchestration-7ys). env=True: falta el compilador; resuelve el
+    entorno del proyecto sin tocar el sistema. env=False: errores de compilacion; arregla los archivos del plan.
+    Exito = compila (no los tests de aceptacion, que corren en la etapa 5)."""
+    state["escalated_to_claude"] = True
+    state["claude_calls"] += 1
+    before = _tree()
+    cmd = CFG.get("compile_cmd") or "py_compile"
+    if env:
+        prompt = (f"El comando de compilacion del proyecto no encuentra su herramienta: `{cmd}`.\n\nSALIDA:\n{log}\n\n"
+                  "Resolve el entorno SIN instalar nada global ni fuera de este directorio: usa la herramienta local del "
+                  "proyecto (npx, mvnw, gradlew, el venv del repo), agrega la dependencia de desarrollo al manifiesto e "
+                  "instalala en el proyecto, o corregi `compile_cmd` en sdlc.toml. No toques codigo fuente, tests ni docs. "
+                  "Si no se puede sin tocar el sistema, no cambies nada. Al final responde en una linea que hiciste o que falta.")
+        allowed = _ENV_FILES
+    else:
+        prompt = (f"El codigo no compila con `{cmd}`. Arregla {state['plan_files']} hasta que compile. "
+                  f"NO toques tests ni docs. Al final responde en una linea que cambiaste.\n\nTAREA:\n{TASK.task}\n\nSALIDA:\n{log}")
+        allowed = tuple(state["plan_files"])
+    r = _revisor(prompt)
+    write_supervision(f"nivel 3 Claude build ({'entorno' if env else 'compila'}, rc={r.get('returncode')}): "
+                      f"{(r.get('result') or '')[:2000]}")
+    gate_alcance("claude-build-alcance", before, allowed)
+    if env:
+        new = _toml(WT).get("compile_cmd")
+        if new:
+            CFG["compile_cmd"] = new
+    if not gate_baseline()[0]:
+        subprocess.run(["git", "checkout", "--", *SNAP], cwd=WT)
+    return compiles()
+
+
+def _compile_ladder(log: str, compiles) -> tuple[bool, str, str]:
+    """Escalera de la etapa build (orchestration-7ys): diagnostico x2 y despues Claude; exito = compila.
+    Antes la etapa cortaba tras 3 vueltas del coder sin escalar. Cada entrada queda como caso replayable."""
+    _dump_diag_case(log, kind="compile")
+    for i in range(REASONER_TRIES):
+        written = _all_code()
+        pick = llm(DIAG, 'Sos un diagnosticador. Respondes SOLO JSON: {"files": [paths], "instructions": {path: "una instruccion"}}. Una instruccion por archivo.',
+                   f"El codigo no compila. Diagnostica y indica QUE cambiar.\n\nERROR DEL COMPILADOR:\n{log}\n\n"
+                   f"TAREA:\n{TASK.task}\n\nARCHIVOS:\n{_joined(written)}")
+        write_supervision(f"reasoner build {i+1}: {pick[:2000]}")
+        try:
+            data = json.loads(strip_fence(pick))
+            files = [f for f in data.get("files", []) if f in written]
+            instr = data.get("instructions") or {}
+        except Exception:
+            files, instr = [], {}
+        files = files or list(written)[:1]
+        backup = {f: written[f] for f in files}
+        for f in files:
+            out = llm(CODER, _rol(f) + "Devolves SOLO el archivo entero.",
+                      f"Aplica ESTA instruccion a {f} para que compile. No toques los tests.\n"
+                      f"INSTRUCCION: {instr.get(f, 'corregi el error del compilador')}\n\n"
+                      f"ERROR DEL COMPILADOR:\n{log}\n\nARCHIVOS:\n{_joined(written)}")
+            code = one_file(strip_fence(out), f)
+            if code:
+                _write(f, code)
+        if not gate_baseline()[0]:
+            _revert(backup)
+            continue
+        ok, log = compiles()
+        state["compile_ladder"] = state.get("compile_ladder", []) + [{"i": i + 1, "files": files, "ok": ok}]
+        if ok:
+            return True, f"reasoner build {i+1} compila", log
+    ok, log = _claude_compile(log, compiles, env=False)
+    return ok, "Claude build compila" if ok else "Claude build rojo: escala a humano", log
 
 
 def self_check() -> int:
@@ -962,8 +1264,10 @@ def aceptacion():
 def spec():
     tpl = (TPL / "spec-template.md").read_text(encoding="utf-8")
     tests = _test_names()
+    lang = _lenguaje()   # SSB (TypeScript) recibia "Python 3.12" en la spec
+    stack = "Python 3.12, sin dependencias" if lang == "Python" else f"{lang}, sin dependencias que el repo no use ya"
     ask = (f"Escribi spec.md siguiendo EXACTAMENTE esta plantilla (mismas secciones, IDs R<n> unicos, tabla de trazabilidad "
-           f"que cita tests por su nombre exacto de entre {sorted(tests)}). Python 3.12, sin dependencias.\n\n"
+           f"que cita tests por su nombre exacto de entre {sorted(tests)}). {stack}.\n\n"
            f"PLANTILLA:\n{tpl}\n\nTAREA:\n{TASK.task}\n\nTESTS DE ACEPTACION (no se modifican):\n{_tests_text()}\n\n"
            "Omiti las lineas de instruccion de la plantilla. Sin marcadores pendientes. Solo markdown.")
     out = llm(WRITER, "Sos un ingeniero de software. Escribis specs precisas en markdown, sin relleno.", ask)
@@ -1019,44 +1323,76 @@ def spec_review():
 @stage("3-plan")
 def plan():
     spec_md = (WT / "docs/sdlc/spec.md").read_text(encoding="utf-8")
+    ext = (CFG.get("ext") or ["py"])[0]   # orchestration-7ys: el ejemplo y la prueba siguen al lenguaje del repo
+    prueba = ACCEPT_CMD or CFG.get("accept_cmd") or f"python -m pytest {' '.join(_accept_paths())} -q"
     ask = (f"Escribi plan.md. Formato OBLIGATORIO: seccion '## Archivos' con un item por archivo a escribir, asi:\n"
-           f"- `path.py` [R1, R3] [P]\n"
+           f"- `path.{ext}` [R1, R3] [P]\n"
            f"Cada item cita los IDs R<n> de la spec que cubre. Todo R<n> de la spec aparece en algun item. "
            f"[P] marca archivos que NO importan a otros del plan (paralelizables); los demas van en orden de dependencia. "
-           f"'## Prueba' = `python -m pytest {' '.join(_accept_paths())} -q`.\n"
+           f"'## Stack' = UNA linea con el lenguaje, los frameworks y las librerias que usa el cambio (lo que ya usa el "
+           f"repo; nada nuevo sin que la spec lo pida). '## Prueba' = `{prueba}`.\n"
            f"Archivos OBLIGATORIOS en '## Archivos': {_need_files()}.\n\nSPEC:\n{spec_md}")  # D14-diag: el plan omitia test_capas
-    out = llm(WRITER, "Sos un tech lead. Escribis planes ejecutables. NO regeneres los tests.", ask)
+    inf = _informe_spec(spec_md)
+    if inf:   # orchestration-e4d: el planner ve los lectores acoplados de lo que la spec nombra
+        ask += ("\n\nINFORME DE IMPACTO (otros modulos leen literales de los archivos que nombra la spec; si el cambio "
+                f"altera esos literales, sus lectores tambien van en '## Archivos'):\n{inf}")
+    out = _planner("Sos un tech lead. Escribis planes ejecutables. NO regeneres los tests.", ask)
     for intento in range(2):  # D2 r1: una reescritura con el motivo del gate, como en spec
         _write("docs/sdlc/plan.md", out)
         m = re.search(r"## Archivos\b(.*?)(?:\n## |\Z)", out, re.S | re.I)
         block = m.group(1) if m else out
         files = _plan_files(block)
         state["plan_files"] = files
+        state["plan_stack"] = _plan_stack(out)   # el rol del coder sale del plan (_rol)
         state["plan_parallel"] = [f for f in files if re.search(rf"{re.escape(f)}`?[^\n]*\[P\]", block)]  # ticket 05 lo ejecuta en paralelo
         ok, note = gate_plan_allowlist(out, files)
         if ok:
             ok, note = gate_traza_plan(spec_md, block, files)
+        if ok:
+            ok, note = gate_tamano(files)
+            if not ok:   # un plan grande no se arregla reescribiendo: hay que dividir la tarea
+                _proponer_division(spec_md, out)
+                return ok, note + " (propuesta en docs/sdlc/division.md)"
         if ok or intento:
             return ok, note
-        out = llm(WRITER, "Sos un tech lead. Reescribis el plan completo con el formato obligatorio.",
+        out = _planner("Sos un tech lead. Reescribis el plan completo con el formato obligatorio.",
                   f"Este plan fallo el gate: {note}. Corregilo.\n\nPLAN ACTUAL:\n{out}\n\nSPEC:\n{spec_md}")
     return ok, note
 
 
 def _plan_files(block: str) -> list[str]:
-    """Archivos del plan = SOLO los items de la lista (D2 r1: una mencion en prosa 'sin tocar X.py' se colaba).
-
-    Tambien la primera celda de una fila de tabla (`| `ruta` | accion |`): el planner escribe tablas
-    aunque se le pida vinetas (orchestration-r18) y el gate rechazaba planes correctos.
-    """
-    items = re.findall(r"(?m)^\s*(?:[-*]|\|)\s*`?" + _file_re() + r"`?", block)
+    """Archivos del plan = SOLO los items de la lista (D2 r1: una mencion en prosa 'sin tocar X.py' se colaba) y, en
+    una tabla, las rutas entre backticks de la primera celda que nombra alguna (SSB F7a: el plan vino en tabla).
+    Un nombre sin carpeta (`resolver.ts`, SSB F4b) pasa a la unica ruta del plan o del repo con ese nombre."""
+    items = re.findall(r"(?m)^\s*[-*]\s*`?" + _file_re() + r"`?", block)
+    for fila in _filas_tabla(block):
+        celda = next((c for c in fila.split("|") if re.search("`" + _file_re() + "`", c)), "")
+        items += re.findall("`" + _file_re() + "`", celda)
+    items = [_ruta_unica(f, items) for f in items]
     return [f for f in dict.fromkeys(items) if not f.startswith(TESTS_PREFIX) or f in _need_files()]  # D14-diag: test_capas es obligatorio en cableos
+
+
+def _filas_tabla(block: str) -> list[str]:
+    return re.findall(r"(?m)^\s*\|(.*)\|\s*$", block)
+
+
+def _ruta_unica(f: str, listados: list[str]) -> str:
+    """`resolver.ts` -> `src/encuadre/resolver.ts` si hay UNA candidata con ese nombre: entre las rutas del plan o, si
+    no, entre los archivos del repo dentro del techo. Con cero o varias queda igual y el gate la rechaza por nombre."""
+    if "/" in f or (_techo() and _en_techo(f)):
+        return f
+    cands = {x for x in listados if x.rsplit("/", 1)[-1] == f and "/" in x}
+    if not cands and _techo():
+        ls = subprocess.run(["git", "ls-files"], cwd=WT, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        cands = {x for x in ls.stdout.splitlines() if x.rsplit("/", 1)[-1] == f and "/" in x and _en_techo(x)}
+    return cands.pop() if len(cands) == 1 else f
 
 
 @stage("4-build")
 def build():
     spec_md = (WT / "docs/sdlc/spec.md").read_text(encoding="utf-8")
     plan_md = (WT / "docs/sdlc/plan.md").read_text(encoding="utf-8")
+    state["plan_stack"] = _plan_stack(plan_md)   # tambien al reanudar desde la etapa 4, sin pasar por plan()
     written = {}
     docs_before = _docstrings(state["plan_files"])  # gate docstring-intacto (D4)
     _orig_files.clear()
@@ -1064,7 +1400,10 @@ def build():
     for f in state["plan_files"]:
         cur = (WT / f).read_text(encoding="utf-8") if (WT / f).exists() else ""
         cur_ctx = f"ARCHIVO ACTUAL {f} (devolvelo COMPLETO con el cambio minimo):\n{cur}\n\n" if cur.strip() else ""
-        out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el codigo del archivo pedido, sin explicacion ni markdown.",
+        inf = _informe(f) if cur.strip() else ""   # orchestration-e4d: el coder ve quien lee lo que cambia
+        if inf:
+            cur_ctx += f"{inf}\n\n"
+        out = llm(CODER, _rol(f) + "Devolves SOLO el codigo del archivo pedido, sin explicacion ni markdown.",
                   f"Escribi {f}. Tiene que importar con los archivos ya escritos y pasar los tests de aceptacion.\n\n{cur_ctx}"
                   f"PLAN:\n{plan_md}\n\nSPEC:\n{spec_md}\n\nTAREA:\n{TASK.task}\n\nTESTS:\n{_tests_text()}\n\n"
                   f"ARCHIVOS YA ESCRITOS:\n{_joined(written) or '(ninguno)'}")
@@ -1078,28 +1417,46 @@ def build():
         ok, log = gate_compile(state["plan_files"])
         return (ok, log) if not ok else gate_test_compile()
 
+    def _hasta_compilar(ok: bool, log: str) -> tuple[bool, str]:
+        """Fix loop del coder x3 y despues la escalera; exito = compila. Corre tras escribir y tras cada re-pedido:
+        en SSB F7a2 el re-pedido de cambio-minimo rompio la compilacion y la etapa cortaba sin escalar."""
+        for _ in range(3):  # r1 2026-09-11: test-compile tambien entra al fix loop, antes cortaba sin vuelta
+            if ok:
+                break
+            for f in state["plan_files"]:
+                out = llm(CODER, _rol(f) + "Devolves SOLO el codigo corregido del archivo pedido, un solo archivo.",
+                          f"py_compile o la importacion de los tests fallo. Corregi {f}.\n\nERROR:\n{log}\n\nARCHIVOS:\n{_joined(written)}")
+                code = one_file(strip_fence(out), f)
+                if code and code != written[f]:
+                    _write(f, code); written[f] = code
+            ok, log = _compiles()
+            if not gate_baseline()[0]:
+                return False, "baseline roto en compile-fix"
+        if not ok:  # orchestration-7ys: la misma escalera que la etapa 5, con exito = compila
+            ok, ladder_note, log = _compile_ladder(log, _compiles)
+            if not ok:
+                write_supervision(f"ESCALATE_HUMAN: compila: fix 3 + reasoner 2 + Claude agotados.\n{log[-1500:]}")
+                return False, f"G3 rechaza tras 3 vueltas y la escalera ({ladder_note}): {log[-300:]}"
+        written.update(_all_code())  # la escalera escribe en disco: los gates de abajo miran lo que compila (F7a2)
+        return True, "compila"
+
     ok, log = _compiles()
-    for _ in range(3):  # r1 2026-09-11: test-compile tambien entra al fix loop, antes cortaba sin vuelta
-        if ok:
-            break
-        for f in state["plan_files"]:
-            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el codigo corregido del archivo pedido, un solo archivo.",
-                      f"py_compile o la importacion de los tests fallo. Corregi {f}.\n\nERROR:\n{log}\n\nARCHIVOS:\n{_joined(written)}")
-            code = one_file(strip_fence(out), f)
-            if code and code != written[f]:
-                _write(f, code); written[f] = code
-        ok, log = _compiles()
-        if not gate_baseline()[0]:
-            return False, "baseline roto en compile-fix"
+    if not ok and _toolchain_missing(log):  # orchestration-7ys: sin compilador las vueltas del coder no sirven
+        rec_gate("toolchain", False, log[-300:])
+        ok, log = _claude_compile(log, _compiles, env=True)
+        if not ok and _toolchain_missing(log):
+            write_supervision(f"ESCALATE_HUMAN: falta el compilador y Claude no lo resolvio\n{log[-1500:]}")
+            return False, f"toolchain: {log[-300:]}"
+    ok, note = _hasta_compilar(ok, log)
     if not ok:
-        return False, f"G3 rechaza tras 3 vueltas: {log[-300:]}"
+        return False, note
     cok, cnote = gate_clones(written)
     if not cok:
         return False, cnote
     mok, mnote = gate_cambio_minimo(docs_before, written)
     if not mok:  # D11: el coder borro 216 lineas de project_loop.py para agregar 10; una vuelta de re-pedido
         for f in [f for f in written if f in mnote]:
-            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero.",
+            out = llm(CODER, _rol(f) + "Devolves SOLO el archivo entero.",
                       f"Tu version de {f} borro codigo existente que la tarea NO pide tocar ({mnote}). "
                       f"Parti del ARCHIVO ORIGINAL y aplica SOLO el cambio pedido, conservando todo lo demas.\n\n"
                       f"TAREA:\n{TASK.task}\n\nARCHIVO ORIGINAL:\n{_orig_files.get(f, '')}\n\nTU VERSION:\n{written[f]}")
@@ -1107,20 +1464,32 @@ def build():
             if code:
                 _write(f, code); written[f] = code
         mok, mnote = gate_cambio_minimo(docs_before, written)
-        if not mok or not _compiles()[0]:
+        if not mok:
             return False, f"cambio-minimo: {mnote}"
+        ok, note = _hasta_compilar(*_compiles())
+        if not ok:
+            return False, f"cambio-minimo ok pero no compila: {note}"
+        mok, mnote = gate_cambio_minimo(docs_before, written)  # la escalera puede volver a borrar
+        if not mok:
+            return False, f"cambio-minimo tras la escalera: {mnote}"
     dok, dnote = gate_docstring(docs_before)
     if not dok:  # una vuelta del coder para restaurarlo; si insiste, la etapa falla
         for f in [f for f, d in docs_before.items() if d and not _docstrings([f]).get(f)]:
-            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero.",
+            out = llm(CODER, _rol(f) + "Devolves SOLO el archivo entero.",
                       f"Restaura el docstring de modulo original de {f} al inicio del archivo, sin cambiar nada mas.\n\n"
                       f"DOCSTRING ORIGINAL:\n\"\"\"{docs_before[f]}\"\"\"\n\nARCHIVO ACTUAL:\n{(WT / f).read_text(encoding='utf-8')}")
             code = one_file(strip_fence(out), f)
             if code:
                 _write(f, code); written[f] = code
         dok, dnote = gate_docstring(docs_before)
-        if not dok or not _compiles()[0]:
+        if not dok:
             return False, f"docstring: {dnote}"
+        ok, note = _hasta_compilar(*_compiles())
+        if not ok:
+            return False, f"docstring ok pero no compila: {note}"
+        dok, dnote = gate_docstring(docs_before)
+        if not dok:
+            return False, f"docstring tras la escalera: {dnote}"
     return True, "G3 + test-compile + docstring ok"
 
 
@@ -1133,7 +1502,7 @@ def test():
     while not ok and vueltas < MAX_FIX:
         vueltas += 1
         written = _all_code()
-        pick = llm(CODER, 'Sos un programador Python senior. Respondes SOLO un JSON: {"files": [paths], "why": str}.',
+        pick = llm(CODER, _rol() + 'Respondes SOLO un JSON: {"files": [paths], "why": str}.',
                    f"Los tests fallan. Que archivos cambiar (los MENOS posibles)?\n\nSALIDA:\n{log}\n\n"
                    f"TAREA:\n{TASK.task}\n\nTESTS:\n{_tests_text()}\n\nARCHIVOS:\n{_joined(written)}")
         try:
@@ -1144,7 +1513,7 @@ def test():
             files = state["plan_files"][:1]
         backup = {f: written[f] for f in files}
         for f in files:
-            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero. No toques los tests.",
+            out = llm(CODER, _rol(f) + "Devolves SOLO el archivo entero. No toques los tests.",
                       f"Arregla {f}. Los tests NO se modifican.\n\nSALIDA:\n{log}\n\nTAREA:\n{TASK.task}\n\n"
                       f"TESTS:\n{_tests_text()}\n\nARCHIVOS:\n{_joined(written)}")
             code = one_file(strip_fence(out), f)
@@ -1191,7 +1560,7 @@ def test():
         if not dok:
             backup = _all_code()
             nuevo = next(f for f in state["plan_files"] if f in dnote)
-            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero.",
+            out = llm(CODER, _rol(nuevo) + "Devolves SOLO el archivo entero.",
                       f"Ningun test ejecuta estas lineas de {nuevo}. Borra el codigo que la tarea no pide (ramas y formatos "
                       f"que nunca ocurren) sin cambiar el comportamiento que los tests fijan.\n\nMEDIDA:\n{dnote}\n\n"
                       f"TAREA:\n{TASK.task}\n\nTESTS:\n{_tests_text()}\n\nARCHIVOS:\n{_joined(backup)}")
@@ -1209,7 +1578,7 @@ def test():
                 return False, f"codigo muerto: {dnote[:200]}"
         lok, lnote = gate_lint()
         if not lok:  # D2 r1: el pre-commit del repo rechazo 2 errores de mypy; ahora es gate con escalera
-            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero.",
+            out = llm(CODER, _rol(state["plan_files"][0]) + "Devolves SOLO el archivo entero.",
                       f"ruff/mypy reportan errores nuevos. Corregi {state['plan_files'][0]} sin cambiar comportamiento.\n\n"
                       f"ERRORES:\n{lnote}\n\nARCHIVOS:\n{_joined(_all_code())}")
             code = one_file(strip_fence(out), state["plan_files"][0])
@@ -1231,7 +1600,7 @@ def test():
             # D11: la regresion de suite iba directo a humano; ahora sigue la escalera (coder -> Claude -> humano)
             new = state["suite_total"]["new_failures"][:20]
             _, flog = sh([PY, "-m", "pytest", *new, "-q", "-x", "-p", "no:cacheprovider"])
-            out = llm(CODER, "Sos un programador Python senior. Devolves SOLO el archivo entero.",
+            out = llm(CODER, _rol(state["plan_files"][0]) + "Devolves SOLO el archivo entero.",
                       f"Tu cambio en {state['plan_files'][0]} rompio tests existentes que antes pasaban. Corregilo conservando "
                       f"la feature nueva y el comportamiento previo.\n\nTESTS ROTOS:\n{flog[-4000:]}\n\nARCHIVOS:\n{_joined(_all_code())}")
             code = one_file(strip_fence(out), state["plan_files"][0])
@@ -1348,19 +1717,20 @@ def _seed_accept() -> None:
                         f"sdlc: test de aceptacion {TASK_NAME} (rojo por diseño)"], cwd=WT, check=True)
 
 
-def run(from_stage: float = 2) -> dict:
-    """Corre las etapas desde `from_stage` (2 spec, 2.5 spec-review, 3 plan, 4 build, 5 test, 5.5 review, 6 pr).
-    La etapa es el checkpoint (ticket 05 D4): reanudar = mismo worktree + from_stage."""
+def run(from_stage: float = 2, to_stage: float = 6) -> dict:
+    """Corre las etapas desde `from_stage` hasta `to_stage` (2 spec, 2.5 spec-review, 3 plan, 4 build, 5 test, 5.5 review,
+    6 pr). La etapa es el checkpoint (ticket 05 D4): reanudar = mismo worktree + from_stage. `to_stage` < 6 corta antes
+    del PR (orchestration-34k: repetir una corrida real sin revision ni PR)."""
     _RUN_USD["usd"] = 0.0
     register_run_tracker(_RUN_USD)  # W3.4: tope USD por-run medido en proceso, no solo por el ledger
     try:
-        return _run_stages(from_stage)
+        return _run_stages(from_stage, to_stage)
     finally:
         unregister_run_tracker(_RUN_USD)
         state["usd_run"] = round(_RUN_USD["usd"], 4)
 
 
-def _run_stages(from_stage: float) -> dict:
+def _run_stages(from_stage: float, to_stage: float = 6) -> dict:
     # D3 r1: el pre-commit de mmorch corre `python -m ruff` y resolvia al Python del sistema (sin ruff).
     os.environ["PATH"] = os.path.dirname(PY) + os.pathsep + os.environ.get("PATH", "")
     if not (WT / ".git").exists():
@@ -1403,7 +1773,7 @@ def _run_stages(from_stage: float) -> dict:
     stages = {1: aceptacion, 2: spec, 2.5: spec_review, 3: plan, 4: build, 5: test, 5.5: review, 6: pr}
     try:
         for k in sorted(stages):
-            if k >= from_stage:
+            if from_stage <= k <= to_stage:
                 stages[k]()
                 if k == 5.5 and state.get("review_block"):
                     test()  # una vuelta mas con el test de Claude; si sigue rojo, escala

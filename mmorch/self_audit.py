@@ -19,6 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from mmorch.iohelpers import atomic_write_json, load_json_tolerant
+from mmorch.killswitch import paused
 
 _RETRY_DAYS = 30  # 119 modulos / 1 por noche ~ 4 meses por vuelta completa
 _SKIP = {"__init__.py"}
@@ -182,7 +183,7 @@ def audit_module(module_rel: str, *, orch_root: str, today: str,
 def run_one(orch_root: str, *, today: str, llm_fn=None, verify_fn=None) -> dict:
     """Vuelta nocturna: elige el proximo modulo en la rotacion y lo audita."""
     root = Path(orch_root)
-    if (root / "logs" / "loop_paused").exists():
+    if paused(root / "logs"):
         return {"skipped": "paused"}
     state_path = root / "logs" / "self_audit_state.json"
     state = load_json_tolerant(state_path, {})

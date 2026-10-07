@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 
 from mmorch.iohelpers import atomic_write_json, load_json_tolerant
+from mmorch.killswitch import paused
 
 _RETRY_DAYS = 7  # un modulo intentado no se reintenta hasta pasada una semana
 
@@ -67,7 +68,7 @@ def harden(repo_dir: str, *, today: str, build_fn=None, survivors_fn=None,
     Todo inyectable para tests. Retorna dict con lo que paso (fail-soft, el
     nightly no muere por esto)."""
     logs = logs_dir or str(Path(repo_dir) / "logs")
-    if (Path(logs) / "loop_paused").exists():
+    if paused(logs):
         return {"skipped": "paused"}
 
     worst = load_last_map(logs)

@@ -6,6 +6,8 @@ aca viven hechos/decisiones/research curados, navegables por humano (Obsidian).
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import date
 from pathlib import Path
@@ -31,6 +33,17 @@ def _safe_folder(folder: str) -> Path:
     return d
 
 
+def _yaml_str(v, *, flow: bool = False) -> str:
+    """Escalar YAML: plano si yaml lo lee igual, entre comillas dobles si no (un string
+    JSON es YAML valido). Medido 2026-10-02: 'title: a: b' y una URL con '?' dentro de
+    [..] dejaban el frontmatter ilegible, y adjudicate lo borraba entero."""
+    s = str(v)
+    risky = (not s or s != s.strip() or s.startswith(tuple("-?:,[]{}#&*!|>'\"%@`"))
+             or ": " in s or " #" in s or s.endswith(":")
+             or (flow and any(c in s for c in ",[]{}:?#")))
+    return json.dumps(s, ensure_ascii=False) if risky else s
+
+
 def write_note(folder: str, title: str, body: str, *, frontmatter: dict | None = None) -> Path:
     """Escribe una nota markdown con frontmatter YAML simple. Devuelve el path.
 
@@ -43,9 +56,9 @@ def write_note(folder: str, title: str, body: str, *, frontmatter: dict | None =
     lines = ["---"]
     for k, v in fm.items():
         if isinstance(v, list):
-            lines.append(f"{k}: [{', '.join(str(x) for x in v)}]")
+            lines.append(f"{k}: [{', '.join(_yaml_str(x, flow=True) for x in v)}]")
         else:
-            lines.append(f"{k}: {v}")
+            lines.append(f"{k}: {_yaml_str(v)}")
     lines.append("---\n")
     text = "\n".join(lines) + body.strip() + "\n"
 
@@ -79,7 +92,7 @@ def _split_frontmatter(txt: str) -> tuple[dict, str]:
 
 def _read_frontmatter_only(p: Path) -> dict:
     """Lee SOLO el bloque frontmatter (hasta el 2do '---'), sin cargar el body entero.
-    regenerate_moc solo necesita tags/status/confidence del frontmatter -> evita
+    regenerate_moc solo necesita tags/applies_to/status/confidence del frontmatter -> evita
     read_text() de todo el .md (O(vault) por write cuando el vault crece)."""
     lines: list[str] = []
     with p.open(encoding="utf-8") as fh:
@@ -90,12 +103,36 @@ def _read_frontmatter_only(p: Path) -> dict:
             if ln.strip() == "---":
                 break
             lines.append(ln)
-    fm = {}
+    fm: dict = {}
+    open_key = None  # clave con valor vacio: puede abrir una lista en bloque ("- item")
     for ln in lines:
+        item = re.match(r"\s*-\s+(.*)", ln)
+        if item and open_key is not None:
+            fm[open_key] = [*(fm[open_key] or []), item.group(1).strip()]
+            continue
         if ":" in ln:
             k, _, v = ln.partition(":")
-            fm[k.strip()] = v.strip()
+            fm[k.strip()] = _unquote(v.strip())
+            open_key = k.strip() if not v.strip() else None
     return fm
+
+
+def _unquote(v: str) -> str:
+    """Inverso de _yaml_str para el lector por lineas: '"a: b"' -> 'a: b'."""
+    if len(v) >= 2 and v[0] == v[-1] == '"':
+        try:
+            return json.loads(v)
+        except ValueError:
+            return v[1:-1]
+    return v
+
+
+def _as_list(v: str | list) -> list[str]:
+    """Lista del frontmatter en cualquiera de sus formas: en bloque ya llega como list,
+    inline llega como string "[a, b]". Items exactos (membresia por igualdad, nunca
+    substring: 'ai' no debe matchear 'ai-notes')."""
+    items = v if isinstance(v, list) else v.strip("[]").split(",")
+    return [x.strip().strip("'\"") for x in items if x.strip()]
 
 
 def log_op(op: str, title: str, *, base: Path | None = None) -> None:
@@ -188,7 +225,18 @@ def write_research_note(title: str, body: str, *, project: str, folder: str = "r
     p = write_validated(title, body, project=project, folder=folder,
                         frontmatter=fm, remember_fn=_bridge,
                         enqueue_babel_fn=_babel_async)
-    return p, VAULT / "moc" / f"{project}.md"
+    return p, _moc_path(project)
+
+
+def _moc_path(project: str) -> Path:
+    """Path del MOC de un proyecto. _slug pierde informacion ('.claude' y 'Claude' dan
+    'claude', y Windows no distingue mayusculas): un nombre que no es su propio slug
+    lleva un sufijo con hash del nombre exacto, asi dos proyectos nunca comparten MOC.
+    Los nombres que ya son slug (orchestration, mmorch) conservan su archivo."""
+    slug = _slug(project)
+    if slug != project:
+        slug = f"{slug}-{hashlib.sha256(project.encode('utf-8')).hexdigest()[:8]}"
+    return VAULT / "moc" / f"{slug}.md"
 
 
 def regenerate_moc(project: str) -> Path:
@@ -206,10 +254,10 @@ def regenerate_moc(project: str) -> Path:
             if p.name.endswith(".babel.md"):
                 continue
             fm = _read_frontmatter_only(p)
-            # tags viene como string "[a, b, c]" del frontmatter: parsear a lista
-            # (membresia exacta — substring haria que 'ai' matchee 'ai-notes')
-            tags = fm.get("tags", "").strip("[]").replace(",", " ").split()
-            if project not in tags:
+            # una nota declara su proyecto en `tags` o en `applies_to` (notas viejas,
+            # 2026-10-01: sin esto desaparecian del MOC en cada regeneracion)
+            members = _as_list(fm.get("tags", "")) + _as_list(fm.get("applies_to", ""))
+            if project not in members:
                 continue
             # los frontmatter viejos traen comentarios inline ("applied   # ..."):
             # el MOC muestra solo el valor
@@ -225,9 +273,8 @@ def regenerate_moc(project: str) -> Path:
                 parts.append(f"· {babel_ok}")
             sections.setdefault(folder.name, []).append(" ".join(parts))
 
-    moc_dir = VAULT / "moc"
-    moc_dir.mkdir(parents=True, exist_ok=True)
-    moc_path = moc_dir / f"{_slug(project)}.md"
+    moc_path = _moc_path(project)
+    moc_path.parent.mkdir(parents=True, exist_ok=True)
 
     lines = [f"# {project}", ""]
     for sec in sorted(sections):

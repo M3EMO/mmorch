@@ -72,7 +72,7 @@ def _stat_key(path: Path) -> tuple[int, int] | None:
         return None
 
 
-def read_jsonl_cached(path: Path) -> list[dict]:
+def read_jsonl_cached(path: Path) -> list[Any]:
     """`read_jsonl_tolerant(path)` con cache módulo-level por (mtime_ns, size): si el
     archivo no cambió desde la última lectura, devuelve la MISMA lista ya parseada en vez
     de reparsear miles de líneas por call (route/budget lo llaman antes de cada API call,
@@ -90,7 +90,7 @@ def read_jsonl_cached(path: Path) -> list[dict]:
         return parsed
 
 
-def read_jsonl_tail(path: Path, max_lines: int, *, chunk_size: int = 65536) -> list[dict]:
+def read_jsonl_tail(path: Path, max_lines: int, *, chunk_size: int = 65536) -> list[Any]:
     """Lee solo las últimas `max_lines` líneas de un .jsonl append-only, sin parsear la
     historia completa: seekea desde el final leyendo de a `chunk_size` bytes hasta juntar
     suficientes newlines (o llegar al principio del archivo). Para consumidores VENTANEADOS
