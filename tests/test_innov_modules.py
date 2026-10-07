@@ -73,6 +73,17 @@ def test_memo_roundtrip(tmp_path):
     assert m2.get(CA.key_of("a", "b")) == {"x": 1}
 
 
+def test_memo_no_pisa_lo_de_otro_proceso_ni_un_archivo_corrupto(tmp_path):
+    # orchestration-p4s: dos procesos con su propio Memo; antes el segundo put borraba lo del primero
+    a, b = CA.Memo(path=tmp_path / "memo.json"), CA.Memo(path=tmp_path / "memo.json")
+    a.put("ka", 1)
+    b.put("kb", 2)
+    assert CA.Memo(path=tmp_path / "memo.json")._d == {"ka": 1, "kb": 2}
+    (tmp_path / "memo.json").write_text("{roto", encoding="utf-8")
+    assert len(CA.Memo(path=tmp_path / "memo.json")) == 0
+    assert (tmp_path / "memo.json.corrupt").read_text(encoding="utf-8") == "{roto"
+
+
 def test_memoized_verify_hits_cache(tmp_path, monkeypatch):
     calls = {"n": 0}
     def fake_av(*a, **k):

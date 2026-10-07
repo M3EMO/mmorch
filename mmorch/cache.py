@@ -28,21 +28,30 @@ def key_of(*parts: str) -> str:
 class Memo:
     def __init__(self, path: Path = _PATH):
         self.path = path
-        self._d: dict = {}
-        if path.exists():
-            try:
-                self._d = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                # NO resetear en silencio: se re-pagaria API por verifies ya cacheados.
-                _log.warning("memo cache corrupto en %s; arrancando vacio", path)
-                self._d = {}
+        self._d: dict = self._leer()
+
+    def _leer(self) -> dict:
+        """El archivo en disco. Corrupto: se aparta a .corrupt (orchestration-p4s: el primer put lo pisaba y se
+        perdian todos los verifies cacheados) y se arranca vacio."""
+        if not self.path.exists():
+            return {}
+        try:
+            return json.loads(self.path.read_text(encoding="utf-8"))
+        except Exception:
+            aparte = self.path.with_suffix(".json.corrupt")
+            os.replace(self.path, aparte)
+            _log.warning("memo cache corrupto en %s; apartado en %s, arrancando vacio", self.path, aparte)
+            return {}
 
     def get(self, key: str):
         return self._d.get(key)
 
     def put(self, key: str, value) -> None:
+        # ponytail: _LOCK es por proceso. Releer y fusionar antes de escribir deja la carrera entre procesos
+        # (server, nightly, CLI) en el instante entre leer y reemplazar; antes cada put pisaba lo que el otro
+        # proceso habia escrito desde que arranco. Lock de archivo si la carrera aparece medida.
         with _LOCK:
-            self._d[key] = value
+            self._d = {**self._leer(), **self._d, key: value}
             self.path.parent.mkdir(parents=True, exist_ok=True)
             # write atomico (tmp + replace): un crash a mitad de write no corrompe el cache.
             tmp = self.path.with_suffix(".json.tmp")
