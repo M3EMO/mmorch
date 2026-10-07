@@ -10,6 +10,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "duckdb>=1.0.0",
     "numpy>=1.26.0",
+    "pyyaml>=6.0",   # adjudicate.py (loop nocturno) lo importa directo; antes llegaba transitiva (1zi)
 ]
 
 [project.optional-dependencies]
@@ -32,6 +33,7 @@ docs-rico = ["docling-slim[format-pdf-pypdfium2]>=2.120"]
 server = ["starlette>=0.37", "uvicorn>=0.27", "httpx>=0.27",
           "pywinpty>=2.0; platform_system=='Windows'"]          # nivel 3: live server + fleet + PTY (ConPTY)
 factory = ["scikit-learn>=1.4"]                                 # fabrica de modelos (logreg/GBRT)
+sprites = ["Pillow>=10"]                                        # juez visual y revision de sprites (sprites.py)
 # todo lo necesario pa un host always-on (deploy multi-host): pip install mmorch[host]
 host = ["mmorch[mcp,memory,checkers,server,factory]"]
 # Pin exacto (== la version del venv): los gates corren en pre-commit y un
