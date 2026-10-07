@@ -13,6 +13,7 @@ Uso como CLI (bench o feature ya configurada por el llamador): `python -m mmorch
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import os
 import pathlib
@@ -511,32 +512,41 @@ def gate_mutacion() -> tuple[bool, str]:
         return rec_gate("mutacion", True, "sin oraculo de aceptacion: sin mutacion")
     killed = total = 0
     compile_cmd = CFG.get("compile_cmd")
+    minimo = CFG.get("mutation_min")
+    # orchestration-cbr: cada mutante corre la aceptacion entera (en Java y TS, la suite) y la etapa 5 tardaba 10-30
+    # min por un puntaje que solo observa (ningun repo fija mutation_min). Sin minimo: una muestra repartida entre
+    # los archivos. Con minimo, el gate bloquea y prueba todos.
+    tope = None if minimo is not None else int(CFG.get("mutation_muestra", 5))
+    por_archivo = []
     for f in state.get("plan_files", []):
-        p = WT / f
-        if not p.exists():
+        if not (WT / f).exists():
             continue
-        orig = p.read_text(encoding="utf-8")
+        orig = (WT / f).read_text(encoding="utf-8")
         # 2026-09-17: solo las lineas que cambio la feature; mutar el archivo entero medía los tests viejos (score 0.25)
         cambiadas = _lineas_cambiadas(f)
-        for m in (_mutants(orig, max_n=8, lineas=cambiadas) if _es_py(f) else _mutantes_texto(orig, max_n=8, lineas=cambiadas)):
-            p.write_text(m, encoding="utf-8")
-            try:
-                if not _es_py(f) and compile_cmd and not _compila(_cmd("compile_cmd", [f]))[0]:
-                    continue  # mortinato: no compila, no cuenta
-                total += 1
-                if _accept_mata():
-                    killed += 1
-            finally:
-                p.write_text(orig, encoding="utf-8")
+        muts = _mutants(orig, max_n=8, lineas=cambiadas) if _es_py(f) else _mutantes_texto(orig, max_n=8, lineas=cambiadas)
+        por_archivo.append([(f, orig, m) for m in muts])
+    for f, orig, m in (x for ronda in itertools.zip_longest(*por_archivo) for x in ronda if x):  # de a uno por archivo
+        if tope is not None and total >= tope:
+            break
+        p = WT / f
+        p.write_text(m, encoding="utf-8")
+        try:
+            if not _es_py(f) and compile_cmd and not _compila(_cmd("compile_cmd", [f]))[0]:
+                continue  # mortinato: no compila, no cuenta
+            total += 1
+            if _accept_mata():
+                killed += 1
+        finally:
+            p.write_text(orig, encoding="utf-8")
     if not total:
         state["mutation_score"] = None
         return rec_gate("mutacion", True, "sin mutantes posibles")
     score = round(killed / total, 3)
     state["mutation_score"] = score
-    minimo = CFG.get("mutation_min")
     if minimo is not None and score < float(minimo):
         return rec_gate("mutacion", False, f"mutation score {score} < {minimo} ({killed}/{total})")
-    return rec_gate("mutacion", True, f"mutation score {score} ({killed}/{total})" + ("" if minimo is not None else " (observa: sin mutation_min)"))
+    return rec_gate("mutacion", True, f"mutation score {score} ({killed}/{total})" + ("" if minimo is not None else f" (observa: sin mutation_min, muestra de {tope})"))
 
 
 def _en_base(fn):

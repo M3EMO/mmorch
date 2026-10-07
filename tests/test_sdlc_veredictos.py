@@ -44,6 +44,18 @@ def test_mutacion_observa_sin_umbral_y_bloquea_con_umbral(tmp_path):
     assert not ok and "mutation score" in nota
 
 
+def test_mutacion_sin_umbral_prueba_una_muestra(tmp_path):
+    # orchestration-cbr: sin mutation_min el gate solo observa; no paga un mutante por cada linea cambiada
+    repo = _repo(tmp_path)
+    _configura(repo, STRONG)
+    (repo / "sdlc.toml").write_text((repo / "sdlc.toml").read_text(encoding="utf-8") + "mutation_muestra = 1\n",
+                                    encoding="utf-8")
+    S.configure(S.TASK, contract=[], feat={"repo": str(repo), "files": ["pkg/a.py"], "suite": ["tests"]}, wt=repo)
+    S.state["plan_files"] = ["pkg/a.py"]
+    ok, nota = S.gate_mutacion()
+    assert ok and "/1)" in nota and "muestra de 1" in nota
+
+
 def test_registrar_veredicto_lee_el_test_de_la_branch(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     subprocess.run(["git", "checkout", "-q", "-b", "rama"], cwd=repo, check=True)
