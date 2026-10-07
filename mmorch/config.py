@@ -12,7 +12,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class ModelSpec:
     key: str            # internal handle
-    family: str         # anthropic | deepseek | moonshot | google
+    family: str         # deepseek | zhipu activas; google y moonshot sin uso (0a6, 2026-09-22)
     provider: str       # billing/endpoint surface
     model_id: str       # API model identifier
     base_url: str | None
@@ -159,8 +159,8 @@ REGISTRY: dict[str, ModelSpec] = {
     ),
     # glm-5.2: sucesor de 4.6 a PROBAR en el pool de intuition (pedido usuario 2026-07-02).
     # 4.6 midió 34% error ventaneado (timeouts) — el health-floor lo demota solo; 5.2 entra
-    # a competir por ejecución (el sig-bandit decide). Precios PROVISORIOS copiados de 4.6,
-    # VOLATILES — reverificar contra z.ai antes de fijar budgets.
+    # a competir por ejecución (el sig-bandit decide). Precio verificado 2026-10-07 en
+    # docs.z.ai/guides/overview/pricing: 1.40/4.40 (antes 0.60/2.20 copiados de 4.6, la mitad del real).
     "glm-5.2": ModelSpec(
         key="glm-5.2",
         family="zhipu",
@@ -168,8 +168,8 @@ REGISTRY: dict[str, ModelSpec] = {
         model_id="glm-5.2",
         base_url="https://api.z.ai/api/paas/v4",
         api_key_env="ZHIPU_API_KEY",
-        price_in=0.60,
-        price_out=2.20,
+        price_in=1.40,
+        price_out=4.40,
         role="candidato intuition-pool (3ra familia, reemplaza a 4.6 health-floored)",
     ),
     # Espejo de deepseek-v4-pro-nothink para la familia zhipu (misma razon, misma fecha).
@@ -181,10 +181,23 @@ REGISTRY: dict[str, ModelSpec] = {
         model_id="glm-5.2",
         base_url="https://api.z.ai/api/paas/v4",
         api_key_env="ZHIPU_API_KEY",
-        price_in=0.60,
-        price_out=2.20,
+        price_in=1.40,
+        price_out=4.40,
         role="SOLO ablacion: glm-5.2 sin thinking (gate que falla, misma familia que 4.5-air)",
         extra_body=(("thinking", {"type": "disabled"}),),
+    ),
+    # orchestration-0a6: juez visual de sprites (antes gemini-2.5-flash). Vision OpenAI-compatible (image_url).
+    # Precio verificado 2026-10-07 en docs.z.ai/guides/overview/pricing.
+    "glm-4.6v": ModelSpec(
+        key="glm-4.6v",
+        family="zhipu",
+        provider="zhipu",
+        model_id="glm-4.6v",
+        base_url="https://api.z.ai/api/paas/v4",
+        api_key_env="ZHIPU_API_KEY",
+        price_in=0.30,
+        price_out=0.90,
+        role="juez visual de sprites (sombra, ticket 15)",
     ),
 }
 

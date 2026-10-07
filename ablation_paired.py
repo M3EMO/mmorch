@@ -29,7 +29,8 @@ import math
 import random
 import sys
 import pathlib
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutTimeout
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from mmorch.providers import call
@@ -37,8 +38,11 @@ from mmorch.patterns import _parse_verdict
 from mmorch.config import spec, family_of
 
 SELF_VERIFIER = "deepseek-chat"      # arm A
-CROSS_VERIFIER = "gemini-2.5-flash"  # arm B (cross-family vs SELF)
+CROSS_VERIFIER = "glm-5.2"  # arm B (cross-family vs SELF); gemini fuera desde 2026-09-22 (0a6)
 COST_CAP_USD = 2.0                   # guard: abortar si la estimacion lo supera sin --yes
+# 2026-10-07 (0a6): un hilo quedo colgado sin conexion ni CPU y el `with` esperaba para siempre; 700 llamadas
+# pagadas y cero resultado. Pasado el plazo, los pares pendientes cuentan como caidos y el proceso sale.
+DEADLINE_S = 45 * 60
 
 
 # --------------------------------------------------------------------------- #
@@ -329,9 +333,11 @@ def main():
     rows: list[dict] = []
     dropped = 0
     cost = 0.0
-    with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = [ex.submit(_judge_item, g) for g in gold]
-        for j, fut in enumerate(as_completed(futs), 1):
+    ex = ThreadPoolExecutor(max_workers=args.workers)
+    futs = [ex.submit(_judge_item, g) for g in gold]
+    j = 0
+    try:
+        for j, fut in enumerate(as_completed(futs, timeout=DEADLINE_S), 1):
             r = fut.result()
             if r is None:
                 dropped += 1
@@ -339,7 +345,11 @@ def main():
                 rows.append(r)
                 cost += r["cost"]
             if j % 50 == 0:
-                print(f"  ... {j}/{len(gold)} (${cost:.3f}, {dropped} caidos)")
+                print(f"  ... {j}/{len(gold)} (${cost:.3f}, {dropped} caidos)", flush=True)
+    except FutTimeout:
+        dropped += len(gold) - j
+        print(f"AVISO: plazo de {DEADLINE_S // 60} min vencido; {len(gold) - j} pares pendientes cuentan como caidos.")
+    ex.shutdown(wait=False, cancel_futures=True)
     if not rows:
         sys.exit("todos los pares cayeron (API caida?). Sin resultado.")
     if dropped:
@@ -393,3 +403,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    sys.stdout.flush()
+    os._exit(0)   # no esperar hilos colgados del pool (ver DEADLINE_S)

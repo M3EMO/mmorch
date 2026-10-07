@@ -48,11 +48,19 @@ Every run appends to `logs/ablation_results.jsonl`; re-run with
 | **`deepseek-reasoner`** (same weights, thinking ON) | deepseek | 1.00 | 0.994 | **0.997** | **$0.074** |
 | `gemini-2.5-flash` | google | 1.00 | 0.982 | 0.991 | $0.135 |
 | `glm-4.5-air` | zhipu | 0.99 | 0.977 | 0.986 | $0.332 |
+| `glm-5.2` (thinking ON, 2026-10-07) | zhipu | 1.00 | 1.00 | 1.00 | ~$0.85 |
 
 Three models from **three different families** all land at ~0.99. The only one that collapses
 to 0.77 is the one with reasoning switched off — same family and same weights as the best of
 the four. Cost runs exactly inverse to quality: the best verifier is also the cheapest
 (1.8x cheaper than Gemini, 4.5x cheaper than GLM).
+
+**Re-run 2026-10-07 (Gemini out, ticket 0a6).** Same seed, paired: `deepseek-reasoner` and
+`glm-5.2` both score 1.00 / 1.00 on all 350 items (McNemar: no discordant pairs). The set is now
+saturated for thinking-ON verifiers, so it no longer ranks them. Cost does: `glm-5.2` spent ~$0.85
+against ~$0.05 for `deepseek-reasoner` on the same items (~17x). `glm-5.2` stays the cross-family
+verifier for subjective work, where GOAL requires another family; checkable work without an oracle
+goes to `CHECKABLE_VERIFIER` (`deepseek-reasoner`).
 
 The SELF arm replicated independently three times (specificity 0.558 / 0.606 / 0.594 against
 three different counterparts), so the ~40% false-reject rate of thinking-off `deepseek-chat`

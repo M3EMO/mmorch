@@ -44,7 +44,7 @@ def ensemble_verify(
     FALLA si >= min_veto verificadores refutan. min_veto=1 = el mas esceptico
     (un solo veto invalida). Sube true-negatives (anti-sicofancia mas fuerte).
 
-    NOTA familias: con solo deepseek+google activos, el ensemble usa varios google
+    NOTA familias: con solo deepseek+zhipu activos, el ensemble usa varios glm
     vs gen deepseek (cross-family OK, pero diversidad ENTRE verificadores limitada).
     Activar mas familias (Kimi, etc.) decorrelaciona mejor (research: error
     correlacionado por confounders compartidos).

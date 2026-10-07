@@ -3,7 +3,7 @@
 Encadena los modulos F1-F4 en el orden del spec, fail-soft (un paso que explota
 queda en errors y el nightly sigue). Guardrails: kill-switch logs/loop_paused,
 budget por contador mensual de llamadas LLM, jueces cross-family (DeepSeek
-propone / Gemini refuta) via el unico seam _llm_json.
+propone / GLM refuta) via el unico seam _llm_json.
 """
 
 from __future__ import annotations

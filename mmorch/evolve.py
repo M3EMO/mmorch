@@ -125,7 +125,7 @@ def _default_goal_fn():
 
 def _ensemble_check(change: Change, ensemble_fn):
     """Escéptico cross-family de seguridad/no-regresión. Si hay ≥2 familias de verificador
-    -> ensemble-AZUL real. Hoy (Kimi inactivo) solo Google activa como verificador ->
+    -> ensemble-AZUL real. Hoy (Kimi inactivo) solo zhipu activa como verificador ->
     degrada a UN cross-family verify (honesto: marca ensemble_degraded). Inyectable."""
     if ensemble_fn is not None:
         return bool(ensemble_fn(change)), False

@@ -1,6 +1,6 @@
 """mmorch — multi-model orchestration harness (migrated patterns).
 
-Cheap, deterministic orchestration over external model APIs (DeepSeek, Gemini, ...).
+Cheap, deterministic orchestration over external model APIs (DeepSeek, GLM, ...).
 The orchestration is plain Python code; the models are nodes. This conserves Claude
 cupo by moving bulk generation and cross-family verification off the plan.
 

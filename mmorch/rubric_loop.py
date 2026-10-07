@@ -11,7 +11,7 @@ Roles:
                evidencia ejecutable, el LLM sobra.
 
 Transporte (la respuesta a "gastar del plan y no de API"):
-  - MODO API : run_rubric_loop() llama DeepSeek (gen) + Gemini (juez) via providers.call.
+  - MODO API : run_rubric_loop() llama DeepSeek (gen) + GLM (juez) via providers.call.
                Par SIEMPRE cross-family (OneFlow).
   - MODO PLAN: el motor es una MAQUINA DE ESTADOS con estado JSON-serializable.
                start() -> next_action() -> submit() -> ... La sesion Claude (plan, cupo)
@@ -319,7 +319,7 @@ def _close_loop(state: dict) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# MODO API: loop completo automatico (DeepSeek genera, Gemini juzga, centavos)
+# MODO API: loop completo automatico (DeepSeek genera, GLM juzga, centavos)
 # --------------------------------------------------------------------------- #
 def run_rubric_loop(task: str, criteria: list[dict], *, K: int = 5,
                     gen_model: str | None = None,

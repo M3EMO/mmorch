@@ -404,7 +404,7 @@ def mmorch_route(
 def mmorch_review_code(code: str = "", path: str = "") -> str:
     """Senior code reviewer (cero cupo): flag where code breaks the mmorch coding principles
     (docs/coding-principles.md) — module depth/cohesion/coupling, DRY, nesting, naming, scope,
-    why-comments, KISS, security. Cross-family refuted (DeepSeek↔Gemini) so style-opinion nitpicks
+    why-comments, KISS, security. Cross-family refuted (DeepSeek↔GLM) so style-opinion nitpicks
     get pruned; subjective review, so truth is judgement not execution. Pass `code` inline OR a
     `path` to read from disk (path only used when `code` is empty). Secret gate (library-side,
     W5.1): refuses secret-looking paths (.env/*.key/*.pem/id_rsa/...) AND inline code containing
@@ -757,7 +757,7 @@ def mmorch_record_outcome(
     label so the bandit + calibration learn. This is what was missing: 611 calls
     logged but ~1 outcome -> the learning machinery was starved.
 
-    arm: the decision being scored, e.g. "deepseek-chat@0.6" or "gemini-2.5-flash".
+    arm: the decision being scored, e.g. "deepseek-chat@0.6" or "glm-5.2".
     reward: [0,1] real outcome — 1=correct, 0=wrong, fraction=partial. NOT the
     model's self-reported confidence (anti-sycophancy: agreement != confirmation).
     predicted_conf: what the system believed at decision time (enables calibration/ECE);

@@ -9,7 +9,7 @@ cosas que no pidio. Solucion estructural:
      el caller las hace al usuario y devuelve respuestas).
   2. DRAFT      — modelo barato (deepseek) produce {spec, inferences[], open_questions[]}
      schema-gated. Las inferencias van en un CANAL SEPARADO, nunca mezcladas en `spec`.
-  3. REFUTE     — critico CROSS-FAMILY (gemini), esceptico por default, etiqueta cada
+  3. REFUTE     — critico CROSS-FAMILY (DEFAULT_VERIFIER, glm), esceptico por default, etiqueta cada
      inferencia SAFE / BEYOND_INTENT / WRONG. Su trabajo es cazar el sobrepaso.
   4. GATE       — SAFE entra al spec; BEYOND_INTENT baja a open_questions (se le
      pregunta al usuario, NO se aplica); WRONG se descarta; verdict ausente -> se trata

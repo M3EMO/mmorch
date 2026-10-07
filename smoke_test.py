@@ -1,11 +1,11 @@
 """Smoke test — proves the cross-family slice end to end (config B, §18.4).
 
 1. fan_out: 2 trivial generation tasks on DeepSeek (bulk node).
-2. adversarial_verify: Gemini (Google) refutes a DeepSeek-authored artifact.
+2. adversarial_verify: GLM (Zhipu) refutes a DeepSeek-authored artifact.
 3. confirms metrics JSONL is written and prints the cost summary.
 
 Run:  python smoke_test.py
-Needs DEEPSEEK_API_KEY and GEMINI_API_KEY in ~/.claude/orchestration/.env
+Needs DEEPSEEK_API_KEY and ZHIPU_API_KEY in ~/.claude/orchestration/.env
 """
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def main() -> int:
                   "(ver warning de fan_out arriba).")
             return 1
 
-        print("\n[2/2] adversarial_verify: Gemini refutes a planted bug ...")
+        print("\n[2/2] adversarial_verify: GLM refutes a planted bug ...")
         artifact = "def add(a, b):\n    return a - b  # intended: a + b"
         verdict = adversarial_verify(
             artifact,

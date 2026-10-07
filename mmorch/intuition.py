@@ -209,13 +209,13 @@ if __name__ == "__main__":
     bb = ThompsonBandit(tmp)
     code_task = "Resolvé en Python: def f(a): devolvé la suma ```python```"
     other_task = "Fix the crash in the auth handler"
-    # deepseek wins on the code signature; gemini loses there
+    # deepseek wins on the code signature; glm loses there
     for _ in range(8):
         record("deepseek-chat", 1.0, code_task, bandit=bb)
-        record("gemini-2.5-flash", 0.0, code_task, bandit=bb)
-    pick = select(["deepseek-chat", "gemini-2.5-flash"], code_task, bandit=bb)
+        record("glm-5.2", 0.0, code_task, bandit=bb)
+    pick = select(["deepseek-chat", "glm-5.2"], code_task, bandit=bb)
     assert pick == "deepseek-chat", f"sig bandit should prefer deepseek on code sig, got {pick}"
-    cands = candidates(["deepseek-chat", "gemini-2.5-flash"], code_task, bandit=bb)
+    cands = candidates(["deepseek-chat", "glm-5.2"], code_task, bandit=bb)
     assert cands[0][0] == "deepseek-chat" and cands[0][1] > cands[1][1], cands
     # coherence: code sig is familiar, the other sig is cold (0). El bandit DESCUENTA
     # (Thompson discounted) -> 16 updates dan n efectivo ~14, no 16 exacto; el assert
@@ -223,9 +223,9 @@ if __name__ == "__main__":
     assert coherence(code_task, bandit=bb) >= 10, coherence(code_task, bandit=bb)
     assert coherence(other_task, bandit=bb) == 0, coherence(other_task, bandit=bb)
     # Phase 3 GATE: familiar+good -> commit; cold -> escalate.
-    act, mdl, _r = decide(["deepseek-chat", "gemini-2.5-flash"], code_task, bandit=bb)
+    act, mdl, _r = decide(["deepseek-chat", "glm-5.2"], code_task, bandit=bb)
     assert act == "commit" and mdl == "deepseek-chat", (act, mdl)
-    act2, mdl2, _r = decide(["deepseek-chat", "gemini-2.5-flash"], other_task, bandit=bb)
+    act2, mdl2, _r = decide(["deepseek-chat", "glm-5.2"], other_task, bandit=bb)
     assert act2 == "escalate" and mdl2 is None, (act2, mdl2)
     # Phase 4 INSIGHT: a cold task that's structurally adjacent inherits the neighbor's evidence.
     warm = "Generá en Python def f(a): devolvé la suma"
