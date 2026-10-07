@@ -203,6 +203,18 @@ def test_guard_fastpath_ignora_newline_final_del_eof():
     assert EV._diff_only_adds_guards(before, after) is True
 
 
+def test_guard_fastpath_rechaza_guards_cosmeticos():
+    # orchestration-1o6: nada se pierde y aparece "raise", pero el guard no protege nada
+    before = "def f(x):\n    return x\n"
+    incondicional = "def f(x):\n    raise ValueError('x')\n    return x\n"      # rompe f: es una regresion
+    muerto = "def f(x):\n    if False:\n        raise ValueError\n    return x\n"
+    comentario = "def f(x):\n    # TODO: raise si x es None\n    return x\n"
+    for after in (incondicional, muerto, comentario):
+        assert EV._diff_only_adds_guards(before, after) is False, after
+    fastapi = "def f(x):\n    if x < 0:\n        return JSONResponse(status_code=400, content='x')\n    return x\n"
+    assert EV._diff_only_adds_guards(before, fastapi) is True
+
+
 def test_guard_fastpath_una_linea_removida_no_se_cubre_dos_veces():
     # dos removidas identicas, un solo add identico -> no alcanza para cubrir ambas
     before = "a = 1\nlog(x)\nlog(x)\nb = 2\n"

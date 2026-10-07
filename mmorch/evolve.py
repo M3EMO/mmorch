@@ -200,7 +200,48 @@ def _diff_only_adds_guards(before: str, after: str) -> bool:
         if added_content[content] <= 0:
             return False               # se perdio texto real, no solo se re-indento
         added_content[content] -= 1    # consumido: no sirve para "cubrir" otra linea removida
-    return any(_GUARD_ADD_PAT.search(ln) for ln in added)
+    return any(_GUARD_ADD_PAT.search(ln) for ln in added) and _guards_condicionales(before, after)
+
+
+def _guards_condicionales(before: str, after: str) -> bool:
+    """orchestration-1o6: el regex aprobaba guards cosmeticos — un `raise` en un comentario, `if False: raise` o un
+    `raise` incondicional (que rompe la funcion: es una regresion, no una guarda). Con el AST, cada guard NUEVO
+    (raise, status_code=40x, return ...error...) tiene que vivir bajo un `if` cuya condicion lee una variable, o en
+    un `except`; y tiene que haber al menos uno. Codigo que no parsea como Python cae al verificador LLM."""
+    import ast
+    import difflib
+    try:
+        arbol = ast.parse(after)
+    except SyntaxError:
+        return False
+    a_lineas = after.splitlines()
+    nuevas = {j + 1 for op, _, _, j1, j2 in difflib.SequenceMatcher(None, before.splitlines(), a_lineas).get_opcodes()
+              if op in ("insert", "replace") for j in range(j1, j2)}
+    padres = {h: p for p in ast.walk(arbol) for h in ast.iter_child_nodes(p)}
+
+    def condicional(n: ast.AST) -> bool:
+        while n in padres:
+            n = padres[n]
+            if isinstance(n, ast.ExceptHandler):
+                return True
+            if isinstance(n, ast.If) and any(isinstance(x, ast.Name) for x in ast.walk(n.test)):
+                return True
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return False
+        return False
+
+    def es_guard(n: ast.AST) -> bool:
+        if getattr(n, "lineno", 0) not in nuevas:
+            return False
+        linea = a_lineas[n.lineno - 1]  # type: ignore[attr-defined]
+        if isinstance(n, ast.Raise):
+            return True
+        if isinstance(n, ast.Return):
+            return bool(re.search(r"\berror\b", linea, re.I))
+        return isinstance(n, (ast.keyword, ast.Assign)) and bool(re.search(r"status_code\s*=\s*40\d", linea))
+
+    guards = [n for n in ast.walk(arbol) if es_guard(n)]
+    return bool(guards) and all(condicional(g) for g in guards)
 
 
 def _cost_check(change: Change, cost_fn) -> bool:
