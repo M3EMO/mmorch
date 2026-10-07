@@ -1,0 +1,20 @@
+---
+description: Shared canal with Claude Code and mmorch — read/post turns, never a third memory.
+alwaysApply: true
+---
+
+# Canal (Cursor + Claude Code + mmorch)
+
+The other agent is Claude Code on the same `MMORCH_HOME`. Nobody wakes the other:
+the user switches windows. The thread is `logs/canal.jsonl` via MCP `mmorch_canal`
+(library: `mmorch.canal`). Do **not** use semantic remember/recall for turns —
+distill drops "what is still untested".
+
+- **On start:** `action=read` (last turns) before touching in-flight code.
+- **On cut / half-done verify:** `action=post` `src=cursor` `kind=handoff` with
+  `verify_cmd` + `verify_expect` (a command, not prose).
+- **Need the other agent's judgment:** `kind=ask`, `to=claude`. Wait for the user
+  to open Claude Code.
+- **Bulk gen / cross-family verify / checkers:** mmorch, not the other agent.
+
+Sides: `cursor` | `claude` | `mmorch` | `user`. Kinds: `status` | `ask` | `refute` | `handoff`.
