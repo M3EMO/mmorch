@@ -25,6 +25,7 @@ EXCLUIR = {
     "nightly": "pipeline nocturno completo: LLM/API real y estado del home real",
     "babel": "asserta lexicon_version() del vault REAL — vacio en el home aislado",
     "sdlc": "CLI del pipeline: corre etapas con API real; sus gates puros van en test_sdlc_gates.py",
+    "cursor_worker": "CLI: lanza cursor-agent real en un worktree; sus piezas puras van en test_cursor_worker.py",
 }
 
 
