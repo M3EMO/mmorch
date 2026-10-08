@@ -45,3 +45,20 @@ Todos los planners que fallan omiten a los lectores y planean solo el escritor. 
 ## Consecuencia
 
 Cursor rinde como implementador (ticket 04), no como ayudante de exploración o planificación para Opus. Para la etapa de plan de SDLC, donde no hay Opus, Sonnet es el mejor planner medido; Cursor es la opción sin costo. Falta medirlo sobre corridas reales de SDLC, que hoy planean con una sola llamada del reasoner desde la spec.
+
+## Actualización (2026-10-08): Haiku 5.5 como planner
+
+Brazo exploratorio posterior al congelamiento, con el mismo banco de 12 tareas (8 acopladas, 4 de control) y 3
+repeticiones. Datos: `orch-spike` fa6ff51.
+
+| Planner | Acopladas | Control | Mediana |
+|---|---|---|---|
+| Sonnet 5.5 | 24/24 | 12/12 | 20 s |
+| Haiku 5.5 (`claude-haiku-5-5`) | 22/24 | 12/12 | 15 s |
+| Cursor | 19/24 | 12/12 | 60 s |
+| Haiku 4.5 | 16/24 | 12/12 | 25 s |
+| DeepSeek v4 pro | 16/24 | 12/12 | — |
+
+- Haiku 5.5 sube 6 tareas acopladas respecto de Haiku 4.5 y queda a 2 de Sonnet.
+- Gasta cupo del plan, pero mucho menos que Sonnet; es el candidato barato a planner del SDLC.
+- Falta validarlo sobre corridas reales (banco 34k) antes de cambiar el planner por defecto.
