@@ -1,9 +1,9 @@
 """Code-flow patterns (§7), migrated as deterministic Python.
 
-MVP: fan_out (bulk in parallel) + adversarial_verify (cross-family skeptic).
+MVP: fan_out (bulk in parallel) + adversarial_verify (skeptic verifier).
 Hard rules enforced here:
-  - OneFlow (§7): never a homogeneous multi-agent. Verifier MUST differ in family
-    from the generator, else the multi-agent is simulable by one agent → wasted.
+  - Verifier family is free (GOAL 2026-10-07): measured no cross-family gain on checkable
+    work and family bias < 7.5 pts on subjective work. What matters is reasoning ON.
   - Anti-sycophancy (§8): the verifier is prompted to REFUTE by default; agreement
     is not treated as confirmation.
 """
@@ -161,14 +161,6 @@ def adversarial_verify(
         return Verdict(passed=r.passed, confidence=1.0,
                        refutations=[] if r.passed else [r.detail],
                        raw=r.detail, verifier_model=f"tool:{checker}", cost_usd=0.0)
-
-    if task_kind != "checkable" and family_of(gen_model) == family_of(verifier_model):
-        raise ValueError(
-            f"OneFlow violation: generator ({gen_model}, {family_of(gen_model)}) and "
-            f"verifier ({verifier_model}, {family_of(verifier_model)}) share a family "
-            f"for a SUBJECTIVE task. Use a cross-family verifier (§4), or pass "
-            f"task_kind='checkable' if the claim has computable ground-truth."
-        )
 
     user = (
         f"RUBRIC:\n{rubric}\n\n"

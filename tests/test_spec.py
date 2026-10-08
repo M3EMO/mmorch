@@ -72,9 +72,3 @@ def test_spec_body_overreach_escalates(monkeypatch):
     assert r.spec == "" and r.raw_draft == "SPEC BASE"
 
 
-def test_critique_refuses_same_family():
-    # OneFlow: drafter y critico misma familia (deepseek) -> ValueError antes de llamar.
-    import pytest
-    with pytest.raises(ValueError):
-        S._critique("x", "", ["inf"], "SPEC", gen_model="deepseek-chat",
-                    verifier_model="deepseek-reasoner", phase="t")

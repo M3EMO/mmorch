@@ -1,8 +1,8 @@
 """code_review — cero-cupo senior reviewer: read code, flag where it breaks the mmorch coding
-principles (docs/coding-principles.md), cross-family refuted so style-opinion noise gets pruned.
+principles (docs/coding-principles.md), refuted by a reasoning verifier so style-opinion noise gets pruned.
 
-Reviewing principle-adherence is a SUBJECTIVE judgement (no executable ground truth), so the
-generator→verifier pair MUST be cross-family (OneFlow): a model endorses its own blind spots.
+Reviewing principle-adherence is a SUBJECTIVE judgement (no executable ground truth). The verifier
+family is free since GOAL 2026-10-07 (measured: no cross-family gain; family bias < 7.5 pts).
 The refuter drops weak/wrong/nitpick findings by default; it never invents authority the lens
 doesn't grant. Two cheap external calls (find + refute), zero Claude cupo.
 
@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import re
 
-from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER, family_of
+from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
 from .providers import call
 from .textutil import extract_fence
 
@@ -79,11 +79,8 @@ def _refute(code: str, findings: list[dict], model: str) -> list[dict]:
 
 def review(code: str, *, path: str = "", gen_model: str = DEFAULT_GENERATOR,
            verifier_model: str = DEFAULT_VERIFIER, find=None, refute=None) -> dict:
-    """Review `code` against the principles lens, cross-family refuted. Returns
+    """Review `code` against the principles lens, refuted by the verifier. Returns
     {path, findings:[...], n_raw, n_confirmed, dropped}. `find`/`refute` are injectable (test seam)."""
-    if family_of(gen_model) == family_of(verifier_model):
-        raise ValueError(f"subjective review needs cross-family: {gen_model} and {verifier_model} "
-                         f"are both {family_of(gen_model)}")
     find = find or (lambda: _find(code, path, gen_model))
     refute = refute or (lambda fs: _refute(code, fs, verifier_model))
     raw = find()
@@ -158,10 +155,4 @@ if __name__ == "__main__":
     assert len(_parse('```json\n[{"problem":"p"}]\n```')) == 1
     assert len(_parse('noise [{"problem":"p","severity":"HIGH"}] tail')) == 1
     assert _parse("no json here") == []
-    # cross-family guard fires on same-family
-    try:
-        review("x", gen_model="deepseek-chat", verifier_model="deepseek-reasoner")
-        assert False, "should reject same-family"
-    except ValueError:
-        pass
-    print("code_review OK — find/refute seam, cross-family guard, parse tolerance")
+    print("code_review OK — find/refute seam, parse tolerance")

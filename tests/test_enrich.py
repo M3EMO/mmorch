@@ -26,13 +26,11 @@ def test_judge_drops_overreaching_assumptions():
     assert r["enriched"].startswith("hace una func")  # original preservado al frente
 
 
-def test_oneflow_same_family_rejected():
-    try:
-        EN.enrich_prompt("x", gen_model="deepseek-chat", judge_model="deepseek-reasoner",
-                         gen_fn=lambda p: "{}", judge_fn=lambda p: "[]")
-        assert False, "debio rechazar gen/judge misma familia"
-    except ValueError as e:
-        assert "OneFlow" in str(e)
+def test_misma_familia_permitida():
+    # GOAL 2026-10-07: gen y juez pueden compartir familia (antes: ValueError OneFlow)
+    out = EN.enrich_prompt("x", gen_model="deepseek-chat", judge_model="deepseek-reasoner",
+                           gen_fn=lambda p: "{}", judge_fn=lambda p: "[]")
+    assert "enriched" in out
 
 
 def test_judge_refutes_all_on_garbage():

@@ -492,9 +492,9 @@ def mmorch_ensemble_verify(
     gen_model: str = DEFAULT_GENERATOR,
     verifier_models: list[str] | None = None,
 ) -> str:
-    """Ensemble adversarial verify (I-3): K cross-family skeptics + majority vote
-    (tie -> fail). More robust than a single verifier. Each verifier must be
-    cross-family vs the generator (OneFlow). Returns JSON
+    """Ensemble adversarial verify (I-3): K skeptic verifiers + majority vote
+    (tie -> fail). More robust than a single verifier. Verifier family is free
+    (GOAL 2026-10-07). Returns JSON
     {passed, confidence, n_passed, n_total, refutations, cost_usd}.
     """
     ev = ensemble_verify(artifact, rubric=rubric, gen_model=gen_model,

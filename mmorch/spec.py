@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER, family_of
+from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
 from .schema import gated_json
 
 # --- schemas (validado-o-rechaza, §9) ---------------------------------------
@@ -101,15 +101,9 @@ def _draft(raw_request: str, answers: str, *, model: str, phase: str) -> dict:
 
 def _critique(raw_request: str, answers: str, inferences: list[str], spec_text: str, *,
               gen_model: str, verifier_model: str, phase: str) -> dict:
-    """Critico CROSS-FAMILY: (a) etiqueta cada inferencia, (b) escudriña el CUERPO del
+    """Critico (familia libre desde GOAL 2026-10-07): (a) etiqueta cada inferencia, (b) escudriña el CUERPO del
     spec por sobrepaso que el drafter metio salteando el canal de inferencias. Refuta
-    por default — la duda cae a BEYOND_INTENT (no se aplica). Misma familia = se rechaza
-    (OneFlow, tarea subjetiva)."""
-    if family_of(gen_model) == family_of(verifier_model):
-        raise ValueError(
-            f"OneFlow violation: drafter ({gen_model}, {family_of(gen_model)}) y critico "
-            f"({verifier_model}, {family_of(verifier_model)}) comparten familia. El spec "
-            f"es subjetivo: usa un critico cross-family (§4).")
+    por default — la duda cae a BEYOND_INTENT (no se aplica)."""
     listing = "\n".join(f"{i}. {inf}" for i, inf in enumerate(inferences))
     sys = (
         "Sos un critico adversarial de OTRA familia que el redactor. Dos trabajos:\n"

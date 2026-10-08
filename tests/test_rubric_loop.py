@@ -76,13 +76,6 @@ def test_mixed_checkable_runs_free_subjective_goes_to_judge(monkeypatch):
     assert st["phase"] == "done" and calls["judge"] == 1
 
 
-def test_oneflow_same_family_rejected():
-    try:
-        RL.start_rubric("t", CHECKABLE, gen_model="deepseek-chat",
-                        judge_model="deepseek-reasoner")
-        assert False, "debio rechazar gen y judge misma familia"
-    except ValueError as e:
-        assert "OneFlow" in str(e)
 
 
 def test_close_loop_records_outcome_with_context(monkeypatch):

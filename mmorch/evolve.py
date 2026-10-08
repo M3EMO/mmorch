@@ -134,7 +134,7 @@ def _ensemble_check(change: Change, ensemble_fn):
     verifier_families = {s.family for k, s in REGISTRY.items()
                          if s.family != "deepseek" and os.getenv(s.api_key_env)}
     rubric = ("¿Este cambio es SEGURO y NO introduce regresión ni viola invariantes "
-              "(reversibilidad, zona roja, OneFlow)? Refutá si hay riesgo.")
+              "(reversibilidad, zona roja, anti-sicofancia)? Refutá si hay riesgo.")
     if len(verifier_families) >= 2:
         from .ensemble import ensemble_verify
         ev = ensemble_verify(change.after, rubric=rubric, phase="evolve")
@@ -707,7 +707,7 @@ def propose_patch(target_file: str, finding: str, *, gen_model: str | None = Non
          f"Arreglalo sin reintroducir el problema original.\n") if feedback else ""
     prompt = (
         f"Sos un mejorador de codigo Python. Resolve este hallazgo SIN romper la API publica "
-        f"ni los invariantes (cross-family, OneFlow, anti-sicofancia, observabilidad).\n\n"
+        f"ni los invariantes (reversibilidad, anti-sicofancia, observabilidad).\n\n"
         f"HALLAZGO: {finding}\n\nARCHIVO {target_file}:\n{src}\n{fb}\n"
         f"Devolve el CONTENIDO COMPLETO nuevo del archivo, sin explicacion, en un bloque de codigo.")
     out = fan_out([prompt], gen_model=gen_model or DEFAULT_GENERATOR, phase="evolve")[0].text

@@ -12,7 +12,7 @@ Roles:
 
 Transporte (la respuesta a "gastar del plan y no de API"):
   - MODO API : run_rubric_loop() llama DeepSeek (gen) + GLM (juez) via providers.call.
-               Par SIEMPRE cross-family (OneFlow).
+               La familia del juez es libre (GOAL 2026-10-07).
   - MODO PLAN: el motor es una MAQUINA DE ESTADOS con estado JSON-serializable.
                start() -> next_action() -> submit() -> ... La sesion Claude (plan, cupo)
                ejecuta cada accion con subagentes y devuelve el output. mmorch conduce,
@@ -32,7 +32,6 @@ import json
 import uuid
 
 from .checkers import check
-from .config import family_of
 
 from .textutil import extract_fence as _extract_block  # dedup of the local fence helper
 
@@ -71,7 +70,7 @@ def start_rubric(task: str, criteria: list[dict], *, K: int = 5, arm: str = "",
         — ctx admite placeholders "{attempt}" (texto crudo) y "{attempt_code}"
           (bloque de codigo extraido del intento).
       {"id": str, "desc": str, "kind": "subjective"}
-    Regla dura OneFlow: en modo API gen y judge deben ser cross-family."""
+    La familia del juez es libre desde GOAL 2026-10-07."""
     from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
     gen_model = gen_model or DEFAULT_GENERATOR
     judge_model = judge_model or DEFAULT_VERIFIER
@@ -85,9 +84,6 @@ def start_rubric(task: str, criteria: list[dict], *, K: int = 5, arm: str = "",
         except Exception:
             pass
     validate_criteria(criteria)
-    if family_of(gen_model) == family_of(judge_model):
-        raise ValueError("OneFlow: gen y judge deben ser de familias DISTINTAS "
-                         f"({gen_model} vs {judge_model})")
     # Scout entorno-primero (Fable 5): brief de grounding como prefijo estable del ejecutor.
     # Determinista por default ($0); scout_llm=True suma una call barata de exploracion.
     scout_brief = ""

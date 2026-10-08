@@ -21,10 +21,9 @@ Reload Claude Code para cargar tools nuevos.
   sintesis critica, tie-break) — eso es Opus.
 
 ## Reglas de turno (apuntes; el contrato es GOAL.md)
-- **Cross-family / OneFlow.** Par generador→verificador (o competidor→juez) en
-  familias distintas si la tarea es subjetiva. Same-family solo en checkeable
-  ruteado a un checker. `adversarial_verify()` tira error si coinciden familia
-  en subjetivo. Anti-sicofancia: el verificador refuta por default.
+- **Verificador.** Familia libre desde 2026-10-07 (cross-family no mejoro en checkeable;
+  sesgo de familia en subjetivo < 7.5 pts). Default `deepseek-reasoner`: razona, refuta por
+  default y es el mas barato medido. Anti-sicofancia: el acuerdo no es confirmacion.
 - **Anti-reward-hacking.** En `hillclimb`, `score` = checker o comando — nunca LLM-judge.
 - **Observabilidad.** Cada nodo loggea a `logs/metrics.jsonl`. Sin metricas no hay
   break-even.
@@ -42,8 +41,7 @@ Reload Claude Code para cargar tools nuevos.
   Motor: `mmorch/evolve.py`. Research: `vault/`
 - Prosa STE: `python tools/ste-lint.py docs/*.md --fail-over 5` (`--lang es` ok)
 
-Ablacion cross-family: research en vault, no un backlog de codigo. No escalar
-sin metricas verdes.
+Mediciones de verificadores: seccion "Measured" del README. No escalar sin metricas verdes.
 
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->

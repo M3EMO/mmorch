@@ -28,10 +28,10 @@ def test_ensemble_not_degraded_with_two_families(monkeypatch):
     assert ev.ensemble_degraded is False
 
 
-def test_default_ensemble_is_degraded(monkeypatch):
+def test_default_ensemble_mezcla_familias(monkeypatch):
     _fake_av(monkeypatch)
     ev = EN.ensemble_verify("x", rubric="r", gen_model="deepseek-chat")
-    assert ev.ensemble_degraded is True   # el default (2 google) es homogeneo — honesto
+    assert ev.ensemble_degraded is False   # default: deepseek-reasoner + glm-4.5-air, dos familias
 
 
 def test_budget_status_tool_matches_module(monkeypatch):

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 
-from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER, family_of
+from .config import DEFAULT_GENERATOR, DEFAULT_VERIFIER
 
 from .textutil import extract_fence  # dedup of the local fence helper
 
@@ -51,13 +51,10 @@ def _build_final(prompt: str, kept: list[str], questions: list[str]) -> str:
 def enrich_prompt(prompt: str, *, gen_model: str | None = None, judge_model: str | None = None,
                   gen_fn=None, judge_fn=None) -> dict:
     """Devuelve {enriched, assumptions(kept), rejected, questions, raw_enriched}.
-    OneFlow: gen y judge cross-family (refuta misma-familia). gen_fn/judge_fn inyectables
+    Familia del juez libre (GOAL 2026-10-07). gen_fn/judge_fn inyectables
     (tests/modo plan); por default usan providers.call (API barata)."""
     gen_model = gen_model or DEFAULT_GENERATOR
     judge_model = judge_model or DEFAULT_VERIFIER
-    if family_of(gen_model) == family_of(judge_model):
-        raise ValueError(f"OneFlow: enricher {gen_model} y juez {judge_model} misma familia")
-
     if gen_fn is None or judge_fn is None:
         from .providers import call
         def _mk(model):

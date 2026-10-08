@@ -1,7 +1,6 @@
 """Invariantes de patterns: OneFlow, anti-sicofancia, fan_out graceful. API mockeada."""
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-import pytest
 import mmorch.patterns as P
 from mmorch.patterns import (fan_out, adversarial_verify, _parse_verdict,
                              _coerce_passed, _coerce_conf)
@@ -12,12 +11,12 @@ def _fake_result(text="ok", model="deepseek-chat", family="deepseek"):
     return CallResult(model, family, text, 1, 1, 0.0, 0.0)
 
 
-# ---- OneFlow (§4/§7) ----
-def test_adversarial_verify_rejects_same_family(monkeypatch):
-    # gen deepseek-chat + verifier deepseek-reasoner = misma familia -> raise.
-    with pytest.raises(ValueError, match="OneFlow"):
-        adversarial_verify("x", rubric="r", gen_model="deepseek-chat",
-                           verifier_model="deepseek-reasoner")
+# ---- familia libre (GOAL 2026-10-07: cross-family sin ganancia medida) ----
+def test_adversarial_verify_acepta_misma_familia(monkeypatch):
+    # antes: gen deepseek-chat + verifier deepseek-reasoner en subjetivo -> ValueError OneFlow
+    monkeypatch.setattr(P, "call", lambda model, *a, **k: _fake_result('{"verdict":"correcto","refutations":[]}', model))
+    v = adversarial_verify("x", rubric="r", gen_model="deepseek-chat", verifier_model="deepseek-reasoner")
+    assert v.passed and v.verifier_model == "deepseek-reasoner"
 
 
 def test_adversarial_verify_crossfamily_ok(monkeypatch):
@@ -29,13 +28,13 @@ def test_adversarial_verify_crossfamily_ok(monkeypatch):
 
 
 def test_verifier_default_por_tipo(monkeypatch):
-    # sin verifier explicito: subjetivo -> cross-family; checkeable -> deepseek-reasoner (medido)
+    # sin verifier explicito: subjetivo y checkeable -> deepseek-reasoner (medido 2026-09-07 y 2026-10-07)
     usados = []
     monkeypatch.setattr(P, "call", lambda model, *a, **k: usados.append(model) or
                         _fake_result('{"passed":true,"confidence":0.9}', model))
     adversarial_verify("x", rubric="r", gen_model="deepseek-chat")
     adversarial_verify("x", rubric="r", gen_model="deepseek-chat", task_kind="checkable")
-    assert P.family_of(usados[0]) != "deepseek"
+    assert usados[0] == "deepseek-reasoner"
     assert usados[1] == "deepseek-reasoner"
 
 

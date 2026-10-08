@@ -217,7 +217,7 @@ REGISTRY: dict[str, ModelSpec] = {
 
 # Default node assignments for the MVP slice.
 DEFAULT_GENERATOR = "deepseek-chat"        # -> deepseek-v4-flash no-thinking
-DEFAULT_VERIFIER = "glm-5.2"               # subjetivo: GOAL exige cross-family vs el generador deepseek; thinking prendido
+DEFAULT_VERIFIER = "deepseek-reasoner"     # GOAL 2026-10-07: familia libre; el mejor medido y el mas barato (glm-5.2 ~17x)
 CHECKABLE_VERIFIER = "deepseek-reasoner"   # checkeable sin oraculo: el mejor MEDIDO (n=350, acc. bal. 0.997); same-family permitido ahi
 DEFAULT_ROUTER = "glm-4.5-air"              # 2026-09-22: el zhipu mas barato; google fuera
 

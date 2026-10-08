@@ -1,7 +1,6 @@
 """Tests I-2..I-5: route, ensemble_verify, memo cache, innovate. API mockeada."""
 import sys, pathlib, importlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-import pytest
 
 # NOTA: `import mmorch.route` devuelve la FUNCION route (el __init__ la importa y
 # shadowea el submodulo del mismo nombre). import_module trae el MODULO real desde
@@ -59,10 +58,11 @@ def test_ensemble_tie_fails(monkeypatch):
     assert ev.n_passed == 1 and ev.passed is False  # 1 de 2 = empate -> falla
 
 
-def test_ensemble_rejects_same_family_verifier():
-    with pytest.raises(ValueError, match="OneFlow"):
-        EN.ensemble_verify("a", rubric="r", gen_model="deepseek-chat",
-                           verifier_models=["deepseek-reasoner"])
+def test_ensemble_acepta_verificador_de_la_misma_familia(monkeypatch):
+    # GOAL 2026-10-07: la familia del verificador es libre (antes: ValueError OneFlow)
+    monkeypatch.setattr(EN, "adversarial_verify", lambda *a, **k: Verdict(True, 0.9, [], "raw", "deepseek-reasoner", 0.0))
+    ev = EN.ensemble_verify("a", rubric="r", gen_model="deepseek-chat", verifier_models=["deepseek-reasoner"])
+    assert ev.passed
 
 
 # ---- I-4 memo cache ----

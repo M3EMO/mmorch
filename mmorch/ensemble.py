@@ -2,7 +2,7 @@
 
 Un solo verificador puede no atrapar un fallo (justo lo que paso con las
 alucinaciones de DeepSeek en el self-audit). K verificadores reducen ese riesgo.
-Cada verificador DEBE ser cross-family vs el generador (OneFlow). Empate -> falla
+La familia de cada verificador es libre (GOAL 2026-10-07). Empate -> falla
 (default-refuta, anti-sicofancia).
 """
 from __future__ import annotations
@@ -50,11 +50,6 @@ def ensemble_verify(
     correlacionado por confounders compartidos).
     """
     verifier_models = verifier_models or [DEFAULT_VERIFIER, "glm-4.5-air"]
-    gf = family_of(gen_model)
-    for vm in verifier_models:
-        if family_of(vm) == gf:
-            raise ValueError(
-                f"OneFlow: verifier {vm} comparte familia ({gf}) con gen {gen_model}.")
     # Calls independientes -> paralelas; map preserva el orden de verdicts por indice.
     with ThreadPoolExecutor(max_workers=len(verifier_models)) as ex:
         verdicts = list(ex.map(
@@ -139,10 +134,6 @@ def pair_verify(artifact: str, *, rubric: str, gen_model: str = DEFAULT_GENERATO
     `verify_fn(artifact, rubric, gen_model, verifier_model)->Verdict` inyectable
     (self-check cero-costo); default = adversarial_verify."""
     verifier_models = verifier_models or ["glm-5.2", "glm-4.5-air"]
-    gf = family_of(gen_model)
-    for vm in verifier_models:
-        if family_of(vm) == gf:
-            raise ValueError(f"OneFlow: verifier {vm} comparte familia ({gf}) con gen.")
     if verify_fn is None:
         def verify_fn(a, r, g, v):
             return adversarial_verify(a, rubric=r, gen_model=g, verifier_model=v)
