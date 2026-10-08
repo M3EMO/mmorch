@@ -59,3 +59,13 @@ def logs_dir() -> Path:
 def db_path(name: str) -> Path:
     """Path de una DB por nombre (chat.db, workflow.db) bajo data_dir()."""
     return data_dir() / name
+
+
+def venv_python(root: str | Path) -> str | None:
+    """Python del `.venv` de un proyecto: `Scripts/python.exe` en Windows, `bin/python` en Linux y macOS (la laptop
+    Fedora, 2026-10-08). Sin venv devuelve None."""
+    for rel in ("Scripts/python.exe", "bin/python"):
+        py = Path(root) / ".venv" / rel
+        if py.exists():
+            return str(py)
+    return None

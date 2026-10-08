@@ -271,8 +271,8 @@ def check_projects(projects: dict, *, run_fn=None, timeout: float = 600.0) -> di
     from pathlib import Path as _P
 
     def _default_run(path: str) -> bool:
-        py = _P(path) / ".venv" / "Scripts" / "python.exe"
-        exe = str(py) if py.exists() else _sys.executable
+        from .paths import venv_python
+        exe = venv_python(path) or _sys.executable
         import os
         import tempfile
         bt = tempfile.mkdtemp(prefix="mmorch_health_")

@@ -199,11 +199,13 @@ def _rmtree(d: Path) -> None:
 
 
 def cursor_argv() -> list[str]:
-    """node + index.js de la version mas nueva de cursor-agent (el .cmd pasa por PowerShell y corta un prompt multilinea)."""
-    vs = Path(os.environ.get("LOCALAPPDATA", "")) / "cursor-agent" / "versions"
+    """node + index.js de la version mas nueva de cursor-agent (el .cmd pasa por PowerShell y corta un prompt multilinea).
+    ponytail: en Linux se asume la carpeta del instalador oficial (~/.local/share/cursor-agent); verificar si cambia."""
+    base = Path(os.environ.get("LOCALAPPDATA", "")) if os.name == "nt" else Path.home() / ".local" / "share"
+    vs = base / "cursor-agent" / "versions"
     v = max((p for p in vs.iterdir() if re.match(r"\d{4}\.\d+\.\d+-", p.name)),
             key=lambda p: tuple(int(x) for x in p.name.split("-")[0].split(".")))
-    return [str(v / "node.exe"), str(v / "index.js")]
+    return [str(v / ("node.exe" if os.name == "nt" else "node")), str(v / "index.js")]
 
 
 def run_agent(argv: list[str], cwd: Path, prompt: str | None, env: dict, timeout: float) -> str:

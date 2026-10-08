@@ -71,9 +71,9 @@ def repair_projects(orch_root: str, *, today: str, build_fn=None,
     retry_after = (date.fromisoformat(today)
                    + timedelta(days=_RETRY_DAYS)).isoformat()
 
-    venv_py = Path(path) / ".venv" / "Scripts" / "python.exe"
     import sys as _sys
-    py = str(venv_py) if venv_py.exists() else _sys.executable
+    from .paths import venv_python
+    py = venv_python(path) or _sys.executable
     import tempfile
     bt = tempfile.mkdtemp(prefix="mmorch_bt_")
     gate_cmd = f'"{py}" -m pytest -q -x --basetemp={bt}'

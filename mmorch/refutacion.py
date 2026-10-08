@@ -92,8 +92,8 @@ def refutar(caso: dict, *, runtime: str = "mmorch", modelo: str = "deepseek-reas
 
 
 def _python_del_repo(repo: str) -> str:
-    py = Path(repo) / ".venv" / "Scripts" / "python.exe"
-    return str(py) if py.exists() else sys.executable
+    from .paths import venv_python
+    return venv_python(repo) or sys.executable
 
 
 class Banco:
