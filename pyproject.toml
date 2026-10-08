@@ -38,7 +38,7 @@ sprites = ["Pillow>=10"]                                        # juez visual y 
 host = ["mmorch[mcp,memory,checkers,server,factory]"]
 # Pin exacto (== la version del venv): los gates corren en pre-commit y un
 # bump silencioso de ruff/mypy cambiaria que codigo pasa el gate.
-dev = ["ruff==0.15.20", "mypy==2.1.0"]                          # gates estaticos (ambos enforced en 0)
+dev = ["ruff==0.15.20", "mypy==2.1.0", "pytest>=8"]                          # gates estaticos (ambos enforced en 0)
 
 [project.scripts]
 mmorch-server = "mmorch.server:main"
