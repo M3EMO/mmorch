@@ -8,6 +8,7 @@
 - [[auditoria-mmorch_auto_repair.py-2026-08-21]] — seed
 - [[auditoria-mmorch_autoresearch.py-2026-08-22]] — seed
 - [[auditoria-mmorch_budget.py-2026-08-29]] — seed
+- [[colab-con-gpu-verificador-open-weight-looped-transformer-y-s]] — measured · conf media: una corrida por experimento (aaf con 3 semillas); T4 de Colab Pro, 2026-10-07
 - [[contener-a-cursor-agent-sin-interfaz-en-windows-que-frena-y-]] — measured · conf alta: sondas reales con cursor-agent 2026.10.01, una corrida por caso
 - [[corpus-training-no-tiene-senal-de-routing-2026-09-04]] — applied
 - [[cursor-como-explorador-o-borrador-para-opus-no-ahorra-cupo-s]] — measured · conf media: 50 preguntas y 12 tareas sintéticas; el rol B es un piloto

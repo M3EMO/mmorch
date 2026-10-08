@@ -45,3 +45,4 @@ Append-only, parseable: `grep "^## \[" log.md`. Ops: write | ingest | migrate | 
 ## [2026-10-04] write | Contener a cursor-agent sin interfaz en Windows: que frena y que no [orchestration]
 ## [2026-10-04] write | Tamaño de la tarea contra éxito en SDLC: tendencia por archivos, sin datos para escalones grandes [orchestration]
 ## [2026-10-04] write | Plan MoE (capa de confianza por token): qué sirve a mmorch y qué le da mmorch al plan [orchestration]
+## [2026-10-07] write | Colab con GPU: verificador open-weight, looped transformer y señal del enrutador MoE [orchestration]
