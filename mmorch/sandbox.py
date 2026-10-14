@@ -65,17 +65,39 @@ def docker_available() -> bool:
     return engine() is not None
 
 
+# Ruta absoluta de Windows dentro de un argumento: C:\x, C:/x o C:\\x (escapada en JSON). Corta en espacios y comillas.
+# shortcut: una ruta con espacios se traduce solo hasta el primero; el worktree y el temp del SDLC no llevan espacios.
+_WIN_ABS = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s\"'<>|*?]*")
+
+
+def ruta_contenedor(p: str) -> str:
+    """Ruta del host -> ruta dentro del contenedor Linux. Con letra de unidad (Windows): C:\\x\\y -> /c/x/y, la
+    convencion de Docker Desktop. Cualquier otra ruta queda igual."""
+    w = pathlib.PureWindowsPath(p)
+    if len(w.drive) != 2 or not w.root:
+        return p
+    return "/" + w.drive[0].lower() + "/" + "/".join(w.parts[1:])
+
+
+def traducir_rutas(texto: str) -> str:
+    """Reescribe cada ruta absoluta de Windows de un argumento o de un comando shell (orchestration-9qx)."""
+    return _WIN_ABS.sub(lambda m: ruta_contenedor(m.group(0)), texto)
+
+
 def container_argv(cmd: list[str] | str, *, image: str, cwd: str, mounts: list[str], name: str, eng: str,
-                   ro: list[str] = ()) -> list[str]:
+                   ro: list[str] = (), win: bool | None = None) -> list[str]:
     """Un comando del worktree del SDLC dentro de un contenedor (orchestration-s8w). Monta cada ruta en la MISMA ruta
     (los comandos traen rutas absolutas del host). Endurecido como _run_docker, salvo --read-only: la suite escribe
-    en el worktree. `ro` = rutas de solo lectura (el repo principal, destino de los symlinks de seed_globs)."""
-    selinux = os.path.exists("/sys/fs/selinux")  # Fedora: sin relabel el contenedor no lee el montaje
-    vols = [a for m in mounts for a in ("-v", f"{m}:{m}" + (":Z" if selinux else ""))]
-    vols += [a for m in ro for a in ("-v", f"{m}:{m}:ro" + (",z" if selinux else ""))]  # z: etiqueta compartida
-    body = ["sh", "-c", cmd] if isinstance(cmd, str) else cmd
+    en el worktree. `ro` = rutas de solo lectura (el repo principal, destino de los symlinks de seed_globs).
+    Windows (`win`, default os.name): C:\\ no existe en Linux; montajes, cwd y argumentos pasan a /c/..."""
+    win = os.name == "nt" if win is None else win
+    tr = traducir_rutas if win else (lambda x: x)
+    selinux = not win and os.path.exists("/sys/fs/selinux")  # Fedora: sin relabel el contenedor no lee el montaje
+    vols = [a for m in mounts for a in ("-v", f"{m}:{tr(m)}" + (":Z" if selinux else ""))]
+    vols += [a for m in ro for a in ("-v", f"{m}:{tr(m)}:ro" + (",z" if selinux else ""))]  # z: etiqueta compartida
+    body = ["sh", "-c", tr(cmd)] if isinstance(cmd, str) else [tr(a) for a in cmd]
     return [eng, "run", "--rm", "--name", name, "--network", "none", "--memory", "4g", "--pids-limit", "1024",
-            "--cap-drop", "ALL", *vols, "-w", cwd, "-e", "PYTHONDONTWRITEBYTECODE=1", image, *body]
+            "--cap-drop", "ALL", *vols, "-w", tr(cwd), "-e", "PYTHONDONTWRITEBYTECODE=1", image, *body]
 
 
 def run_sandboxed(code: str, *, timeout: float = 5.0, input_text: str = "",

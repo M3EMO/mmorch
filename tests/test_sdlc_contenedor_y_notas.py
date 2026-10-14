@@ -1,5 +1,6 @@
 """orchestration-4rf (notas de campo en el prompt del coder) y orchestration-s8w (comandos del repo en un contenedor).
 Cero API. El test de integracion corre solo si hay docker/podman y la imagen ya esta local (no descarga nada)."""
+import json
 import shutil
 import subprocess
 import types
@@ -47,6 +48,27 @@ def test_container_argv_monta_en_la_misma_ruta_y_sin_red():
     assert SB.container_argv("echo hi", image="img", cwd="/w", mounts=[], name="n", eng="docker")[-3:] == ["sh", "-c", "echo hi"]
     ro = SB.container_argv("x", image="img", cwd="/w", mounts=[], name="n", eng="docker", ro=["/repo"])
     assert ro[ro.index("-v") + 1].startswith("/repo:/repo:ro")
+
+
+
+def test_ruta_contenedor_traduce_solo_rutas_de_windows():
+    assert SB.ruta_contenedor(r"C:\Users\m\wt") == "/c/Users/m/wt"
+    assert SB.ruta_contenedor("/home/mpera/wt") == "/home/mpera/wt"
+    assert SB.ruta_contenedor("C:rel") == "C:rel"  # sin raiz: no es absoluta
+    assert SB.traducir_rutas(r"pytest --basetemp=C:\Temp\pyt-sdlc-1 -q") == "pytest --basetemp=/c/Temp/pyt-sdlc-1 -q"
+    assert SB.traducir_rutas(json.dumps([r"C:\wt\a.py"])) == '["/c/wt/a.py"]'  # escapada en JSON
+    assert SB.traducir_rutas("mvn -q -B -f backend/pom.xml test") == "mvn -q -B -f backend/pom.xml test"
+
+
+def test_container_argv_en_windows_monta_c_en_barra_c():
+    wt = r"C:\Users\m\wt"
+    a = SB.container_argv(["python", "-c", "x", json.dumps([wt + r"\a.py"])], image="img", cwd=wt, mounts=[wt],
+                          name="n", eng="docker", ro=[r"C:\repo"], win=True)
+    vols = [a[i + 1] for i, x in enumerate(a) if x == "-v"]
+    assert vols == [wt + ":/c/Users/m/wt", r"C:\repo:/c/repo:ro"]  # sin :Z: Windows no tiene SELinux
+    assert a[a.index("-w") + 1] == "/c/Users/m/wt"
+    assert a[-1] == '["/c/Users/m/wt/a.py"]'
+    assert SB.container_argv("cd C:/x && ls", image="i", cwd="/w", mounts=[], name="n", eng="d", win=True)[-1] == "cd /c/x && ls"
 
 
 def test_integracion_seed_globs_resuelve_el_symlink_al_repo(tmp_path):

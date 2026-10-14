@@ -320,8 +320,6 @@ def sh(cmd, timeout: float | None = None, keep: int = 6000, *, host: bool = Fals
         eng = engine()
         if not eng:
             raise StageFailed("contenedor", f"sdlc.toml pide la imagen {img}, pero no hay docker ni podman en PATH")
-        if os.name == "nt":  # shortcut: monta las rutas del host tal cual; Windows necesita mapear C:\ a /c (WSL) antes
-            raise StageFailed("contenedor", "el modo contenedor todavia no corre en Windows")
         if isinstance(cmd, list) and cmd and cmd[0] == PY:
             cmd = ["python", *cmd[1:]]  # el venv del host no corre en la imagen: el interprete es el de la imagen
         name = f"sdlc-{PHASE}-{os.getpid()}-{time.time_ns()}"
@@ -470,9 +468,14 @@ def _cobertura(files: list[str]) -> dict[str, tuple[int, list[int]]] | None:
     if not ok or not destino.exists():
         return None
     datos = json.loads(destino.read_text(encoding="utf-8"))
+    if CFG.get("contenedor"):  # las claves salen del contenedor: en Windows son /c/..., sin normcase
+        from .sandbox import ruta_contenedor
+        clave = lambda p: ruta_contenedor(os.path.abspath(p))  # noqa: E731
+    else:
+        clave = lambda p: os.path.normcase(os.path.abspath(p))  # noqa: E731
     out = {}
     for f in files:
-        d = datos[os.path.normcase(os.path.abspath(WT / f))]
+        d = datos[clave(WT / f)]
         out[f] = (len(d["ejecutables"]), sorted(set(d["ejecutables"]) - set(d["corridas"])))
     return out
 
