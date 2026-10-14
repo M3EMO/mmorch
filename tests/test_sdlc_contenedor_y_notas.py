@@ -45,6 +45,23 @@ def test_container_argv_monta_en_la_misma_ruta_y_sin_red():
     assert [v.split(":")[0] == v.split(":")[1] for v in vols] == [True, True]
     assert a[-4:] == ["img", "python", "-m", "pytest"]
     assert SB.container_argv("echo hi", image="img", cwd="/w", mounts=[], name="n", eng="docker")[-3:] == ["sh", "-c", "echo hi"]
+    ro = SB.container_argv("x", image="img", cwd="/w", mounts=[], name="n", eng="docker", ro=["/repo"])
+    assert ro[ro.index("-v") + 1].startswith("/repo:/repo:ro")
+
+
+def test_integracion_seed_globs_resuelve_el_symlink_al_repo(tmp_path):
+    if not _imagen_local():
+        pytest.skip(f"sin docker/podman o sin la imagen {IMG} local")
+    repo, wt = tmp_path / "repo", tmp_path / "wt"
+    (repo / "node_modules").mkdir(parents=True)
+    (repo / "node_modules" / "dep.txt").write_text("ok", encoding="utf-8")
+    wt.mkdir()
+    (wt / "node_modules").symlink_to(repo / "node_modules", target_is_directory=True)
+    t = types.SimpleNamespace(name="c", task="t", accept_files={})
+    S.configure(t, contract=[], feat={"repo": str(repo), "files": ["a.py"], "suite": []}, wt=wt, accept_cmd="python -c pass")
+    S.CFG.update(contenedor=IMG, seed_globs=["node_modules"])
+    ok, out = S.sh("cat node_modules/dep.txt && ! touch node_modules/otro 2>/dev/null")
+    assert ok and out.strip() == "ok"  # se lee a traves del symlink y el repo queda de solo lectura
 
 
 def test_sh_en_modo_contenedor_reemplaza_el_python_del_host(tmp_path, monkeypatch):

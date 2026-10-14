@@ -65,12 +65,14 @@ def docker_available() -> bool:
     return engine() is not None
 
 
-def container_argv(cmd: list[str] | str, *, image: str, cwd: str, mounts: list[str], name: str, eng: str) -> list[str]:
+def container_argv(cmd: list[str] | str, *, image: str, cwd: str, mounts: list[str], name: str, eng: str,
+                   ro: list[str] = ()) -> list[str]:
     """Un comando del worktree del SDLC dentro de un contenedor (orchestration-s8w). Monta cada ruta en la MISMA ruta
     (los comandos traen rutas absolutas del host). Endurecido como _run_docker, salvo --read-only: la suite escribe
-    en el worktree."""
-    z = ":Z" if os.path.exists("/sys/fs/selinux") else ""  # SELinux (Fedora): sin relabel el contenedor no lee el montaje
-    vols = [a for m in mounts for a in ("-v", f"{m}:{m}{z}")]
+    en el worktree. `ro` = rutas de solo lectura (el repo principal, destino de los symlinks de seed_globs)."""
+    selinux = os.path.exists("/sys/fs/selinux")  # Fedora: sin relabel el contenedor no lee el montaje
+    vols = [a for m in mounts for a in ("-v", f"{m}:{m}" + (":Z" if selinux else ""))]
+    vols += [a for m in ro for a in ("-v", f"{m}:{m}:ro" + (",z" if selinux else ""))]  # z: etiqueta compartida
     body = ["sh", "-c", cmd] if isinstance(cmd, str) else cmd
     return [eng, "run", "--rm", "--name", name, "--network", "none", "--memory", "4g", "--pids-limit", "1024",
             "--cap-drop", "ALL", *vols, "-w", cwd, "-e", "PYTHONDONTWRITEBYTECODE=1", image, *body]

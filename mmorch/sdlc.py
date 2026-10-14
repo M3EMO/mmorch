@@ -325,7 +325,9 @@ def sh(cmd, timeout: float | None = None, keep: int = 6000, *, host: bool = Fals
         if isinstance(cmd, list) and cmd and cmd[0] == PY:
             cmd = ["python", *cmd[1:]]  # el venv del host no corre en la imagen: el interprete es el de la imagen
         name = f"sdlc-{PHASE}-{os.getpid()}-{time.time_ns()}"
-        cmd = container_argv(cmd, image=img, cwd=str(WT), mounts=[str(WT), *mounts], name=name, eng=eng)
+        # seed_globs enlaza dirs del repo principal (node_modules, caches): sin montarlo, el symlink queda roto adentro
+        ro = [str(FEAT["repo"])] if FEAT and FEAT.get("repo") and CFG.get("seed_globs") else []
+        cmd = container_argv(cmd, image=img, cwd=str(WT), mounts=[str(WT), *mounts], name=name, eng=eng, ro=ro)
     try:
         p = subprocess.run(cmd, cwd=WT, capture_output=True, text=True, encoding="utf-8", errors="replace",
                            timeout=timeout or CFG["cmd_timeout_s"], shell=isinstance(cmd, str), env=env)
