@@ -305,16 +305,34 @@ def _tipo_propio(code: str, rel: str) -> str:
     return code
 
 
-def sh(cmd, timeout: float | None = None, keep: int = 6000):
-    """Lista = exec directo; str = comando shell (accept_cmd del repo). `python` en un comando = el interprete del repo."""
+def sh(cmd, timeout: float | None = None, keep: int = 6000, *, host: bool = False, mounts: tuple[str, ...] = ()):
+    """Lista = exec directo; str = comando shell (accept_cmd del repo). `python` en un comando = el interprete del repo.
+    Con `contenedor = "<imagen>"` en sdlc.toml el comando corre en esa imagen, sin red (orchestration-s8w); `host=True`
+    lo deja afuera (herramientas de mmorch que no ejecutan codigo generado). `mounts` = rutas extra que el comando lee
+    o escribe fuera del worktree."""
     # PYTHONDONTWRITEBYTECODE: dos mutantes del mismo tamaño escritos en el mismo segundo reusaban el .pyc del anterior
     # y el mutante "sobrevivia" (medido en Adepor 2026-09-15: 2 falsos vivos de 7).
     env = {**os.environ, "PATH": os.path.dirname(PY) + os.pathsep + os.environ.get("PATH", ""), "PYTHONDONTWRITEBYTECODE": "1"}
+    texto = (cmd if isinstance(cmd, str) else " ".join(cmd))[:200]
+    img = None if host else CFG.get("contenedor")
+    if img:
+        from .sandbox import container_argv, engine
+        eng = engine()
+        if not eng:
+            raise StageFailed("contenedor", f"sdlc.toml pide la imagen {img}, pero no hay docker ni podman en PATH")
+        if os.name == "nt":  # shortcut: monta las rutas del host tal cual; Windows necesita mapear C:\ a /c (WSL) antes
+            raise StageFailed("contenedor", "el modo contenedor todavia no corre en Windows")
+        if isinstance(cmd, list) and cmd and cmd[0] == PY:
+            cmd = ["python", *cmd[1:]]  # el venv del host no corre en la imagen: el interprete es el de la imagen
+        name = f"sdlc-{PHASE}-{os.getpid()}-{time.time_ns()}"
+        cmd = container_argv(cmd, image=img, cwd=str(WT), mounts=[str(WT), *mounts], name=name, eng=eng)
     try:
         p = subprocess.run(cmd, cwd=WT, capture_output=True, text=True, encoding="utf-8", errors="replace",
                            timeout=timeout or CFG["cmd_timeout_s"], shell=isinstance(cmd, str), env=env)
     except subprocess.TimeoutExpired:
-        return False, f"TIMEOUT {timeout or CFG['cmd_timeout_s']}s: {(cmd if isinstance(cmd, str) else ' '.join(cmd))[:200]}"
+        if img:  # matar el cliente no para el contenedor: sin esto queda corriendo
+            subprocess.run([eng, "rm", "-f", name], capture_output=True)
+        return False, f"TIMEOUT {timeout or CFG['cmd_timeout_s']}s: {texto}"
     return p.returncode == 0, (p.stdout + p.stderr)[-keep:]
 
 
@@ -339,7 +357,18 @@ def _rol(f: str | None = None) -> str:
         lang = c.most_common(1)[0][0] if c else _lenguaje()
     stack = state.get("plan_stack")
     tipo = f"En {f} el unico tipo publico se llama {pathlib.Path(f).stem}. " if f and f.endswith(".java") else ""
-    return f"Sos un programador {lang} senior" + (f" (stack del plan: {stack})" if stack else "") + ". " + tipo
+    return f"Sos un programador {lang} senior" + (f" (stack del plan: {stack})" if stack else "") + ". " + tipo + _notas()
+
+
+def _notas() -> str:
+    """orchestration-4rf: SDLC_NOTAS = archivo con notas de campo de corridas previas del repo (brazo N1). Sin la
+    variable, el prompt del coder queda identico. Bloque congelado en .scratch/builder-e2e/research/4rf-preregistro.md §7.5."""
+    p = os.environ.get("SDLC_NOTAS")
+    if not p:
+        return ""
+    return ("\nNotas de campo de corridas anteriores sobre este repo (de la más reciente a la más vieja):\n<<<\n"
+            + pathlib.Path(p).read_text(encoding="utf-8").strip()
+            + "\n>>>\nUsalas si aplican. Pueden no aplicar a este archivo.\n")
 
 
 def _lenguaje() -> str:
@@ -435,7 +464,7 @@ def _cobertura(files: list[str]) -> dict[str, tuple[int, list[int]]] | None:
     3.12+). None = no se pudo medir (interprete viejo o la aceptacion no corre)."""
     destino = pathlib.Path(tempfile.mkdtemp()) / "cobertura.json"
     ok, _ = sh([PY, "-c", _COBERTURA, str(destino), json.dumps([str(WT / f) for f in files]),
-                *_accept_paths(), "-q", "-p", "no:cacheprovider"])
+                *_accept_paths(), "-q", "-p", "no:cacheprovider"], mounts=(str(destino.parent),))
     if not ok or not destino.exists():
         return None
     datos = json.loads(destino.read_text(encoding="utf-8"))
@@ -1725,8 +1754,8 @@ def _hallazgos_por_archivo(files: list[str]) -> tuple[dict[str, int], str]:
     """ruff + mypy de mmorch sobre `files`; devuelve {archivo: hallazgos} y el log crudo."""
     if not files:
         return {}, ""
-    _, rl = sh([sys.executable, "-m", "ruff", "check", "--output-format", "concise", *files])
-    _, ml = sh([sys.executable, "-m", "mypy", "--ignore-missing-imports", *files])
+    _, rl = sh([sys.executable, "-m", "ruff", "check", "--output-format", "concise", *files], host=True)
+    _, ml = sh([sys.executable, "-m", "mypy", "--ignore-missing-imports", *files], host=True)
     cuenta: dict[str, int] = {}
     for m in re.finditer(r"(?m)^(\S+?):\d+:(?:\d+: |\s*error:)", rl + "\n" + ml):
         f = m.group(1).replace("\\", "/")

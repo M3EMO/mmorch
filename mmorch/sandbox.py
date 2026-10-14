@@ -56,8 +56,24 @@ def policy_violations(code: str, deny: tuple = _POLICY_DENY) -> list[str]:
     return [p for p in deny if re.search(p, code)]
 
 
+def engine() -> str | None:
+    """docker si esta en PATH; si no, podman (Fedora lo trae rootless y acepta los mismos flags)."""
+    return next((e for e in ("docker", "podman") if shutil.which(e)), None)
+
+
 def docker_available() -> bool:
-    return shutil.which("docker") is not None
+    return engine() is not None
+
+
+def container_argv(cmd: list[str] | str, *, image: str, cwd: str, mounts: list[str], name: str, eng: str) -> list[str]:
+    """Un comando del worktree del SDLC dentro de un contenedor (orchestration-s8w). Monta cada ruta en la MISMA ruta
+    (los comandos traen rutas absolutas del host). Endurecido como _run_docker, salvo --read-only: la suite escribe
+    en el worktree."""
+    z = ":Z" if os.path.exists("/sys/fs/selinux") else ""  # SELinux (Fedora): sin relabel el contenedor no lee el montaje
+    vols = [a for m in mounts for a in ("-v", f"{m}:{m}{z}")]
+    body = ["sh", "-c", cmd] if isinstance(cmd, str) else cmd
+    return [eng, "run", "--rm", "--name", name, "--network", "none", "--memory", "4g", "--pids-limit", "1024",
+            "--cap-drop", "ALL", *vols, "-w", cwd, "-e", "PYTHONDONTWRITEBYTECODE=1", image, *body]
 
 
 def run_sandboxed(code: str, *, timeout: float = 5.0, input_text: str = "",
@@ -126,7 +142,7 @@ def _run_docker(code: str, timeout: float, extra_files: dict[str, str] | None,
             (tdp / name).write_text(content, encoding="utf-8")
         target = argv if argv is not None else ["_run.py"]
         cmd = [
-            "docker", "run", "--rm", "--network", "none", "--read-only",
+            engine(), "run", "--rm", "--network", "none", "--read-only",
             "--memory", "256m", "--pids-limit", "128", "--cap-drop", "ALL",
             "--tmpfs", "/tmp:rw,size=64m", "-v", f"{td}:/work:ro", "-w", "/work",
             "python:3.12-slim", "python", *target,
