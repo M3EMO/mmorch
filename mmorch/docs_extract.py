@@ -118,9 +118,13 @@ def extract_rich_images(pdf: Path, out_md: Path, *, converter_fn=None) -> tuple[
             format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)})
         converter_fn = conv.convert
 
-    from docling_core.types.doc import ImageRefMode
+    try:
+        from docling_core.types.doc import ImageRefMode
+        mode = ImageRefMode.REFERENCED
+    except ImportError:  # converter_fn inyectado sin docling instalado: el seam promete correr sin torch
+        mode = "referenced"
     doc = converter_fn(str(pdf)).document
-    doc.save_as_markdown(out_md, image_mode=ImageRefMode.REFERENCED)
+    doc.save_as_markdown(out_md, image_mode=mode)
 
     artifacts_dir = out_md.parent / f"{out_md.stem}_artifacts"
     images = sorted(artifacts_dir.glob("*.png")) if artifacts_dir.exists() else []

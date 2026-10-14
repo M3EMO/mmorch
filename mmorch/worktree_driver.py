@@ -120,7 +120,7 @@ class Worktree:
         """Remove the worktree dir; the branch ref persists unless keep_branch=False."""
         for link in self._links:      # unlink seeded dirs FIRST: never recursive-delete into main-tree data
             try:
-                os.rmdir(link)        # on a junction/dir-symlink this removes only the link
+                _rm_link(link)        # removes only the link, never the target
             except OSError:
                 pass
         self._links = []
@@ -129,6 +129,12 @@ class Worktree:
         if not keep_branch:
             _git(self.repo, "branch", "-D", self.branch)
         _git(self.repo, "worktree", "prune")
+
+
+def _rm_link(p: str) -> None:
+    """Borra solo el enlace. Windows: rmdir quita un junction o symlink de directorio. POSIX: rmdir sobre un symlink
+    da ENOTDIR (el enlace sobrevivia en Linux, 2026-10-14); unlink lo quita sin tocar el destino."""
+    os.rmdir(p) if os.name == "nt" else os.unlink(p)
 
 
 def unlink_seeds(path: str) -> list[str]:
@@ -144,7 +150,7 @@ def unlink_seeds(path: str) -> list[str]:
             if os.path.islink(p) or (os.name == "nt" and os.lstat(p).st_file_attributes & 0x400):  # REPARSE_POINT
                 dirs.remove(d)  # nunca descender por el enlace
                 try:
-                    os.rmdir(p)
+                    _rm_link(p)
                     fuera.append(p)
                 except OSError:
                     pass

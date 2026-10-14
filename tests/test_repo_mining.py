@@ -1,4 +1,5 @@
 """Tests de repo_mining — repo git local como 'remoto', fakes de LLM."""
+import pytest
 
 import subprocess
 from pathlib import Path
@@ -150,6 +151,7 @@ def test_collect_context_incluye_pdfs_del_repo(tmp_path):
     """Antes de docs_extract, ningun PDF entraba al contexto del juez —
     ahora un PDF suelto (whitepaper, docs/architecture.pdf) se lee via
     pypdfium2 (sin torch) y aparece en _collect_context."""
+    pytest.importorskip("pypdfium2")  # extra opcional [docs]
     from mmorch.repo_mining import _collect_context
     repo = tmp_path / "repo"
     repo.mkdir()

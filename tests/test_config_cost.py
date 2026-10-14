@@ -2,7 +2,7 @@
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import pytest
-from mmorch.config import REGISTRY, family_of, spec, DEFAULT_GENERATOR, DEFAULT_VERIFIER
+from mmorch.config import REGISTRY, spec, DEFAULT_VERIFIER, CHECKABLE_VERIFIER
 from mmorch.cost import cost_usd
 
 
@@ -18,9 +18,11 @@ def test_unknown_model_raises():
         spec("nope")
 
 
-def test_default_pair_is_cross_family():
-    # INVARIANTE §4: generador y verificador default DEBEN diferir en familia.
-    assert family_of(DEFAULT_GENERATOR) != family_of(DEFAULT_VERIFIER)
+def test_default_verifiers_reason():
+    # GOAL 2026-10-08: "El verificador razona"; la familia es libre (sin cross-family desde 2026-10-07).
+    # Medido 2026-09-07: con thinking apagado el verificador rechaza ~40% del trabajo correcto.
+    for key in (DEFAULT_VERIFIER, CHECKABLE_VERIFIER):
+        assert ("thinking", {"type": "disabled"}) not in spec(key).extra_body
 
 
 def test_anthropic_not_a_node():

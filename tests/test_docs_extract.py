@@ -1,4 +1,5 @@
 """Tests de docs_extract (pypdfium2, sin torch — fail-soft si no esta instalado)."""
+import pytest
 
 from pathlib import Path
 
@@ -42,6 +43,7 @@ def test_extract_text_archivo_no_es_pdf_no_rompe(tmp_path):
 
 
 def test_extract_text_pdf_real(tmp_path):
+    pytest.importorskip("pypdfium2")  # extra opcional [docs]
     p = tmp_path / "doc.pdf"
     _make_pdf(p, "contenido de prueba mmorch")
     texto = extract_text(p)
@@ -56,6 +58,7 @@ def test_extract_text_respeta_cap_de_chars(tmp_path):
 
 
 def test_collect_pdfs_junta_varios_y_cap_por_archivo(tmp_path):
+    pytest.importorskip("pypdfium2")  # extra opcional [docs]
     repo = tmp_path / "repo"
     repo.mkdir()
     _make_pdf(repo / "a.pdf", "contenido A")
@@ -74,6 +77,7 @@ def test_collect_pdfs_sin_pdfs_devuelve_vacio(tmp_path):
 
 
 def test_collect_pdfs_respeta_max_files(tmp_path):
+    pytest.importorskip("pypdfium2")  # extra opcional [docs]
     repo = tmp_path / "repo"
     repo.mkdir()
     for i in range(5):

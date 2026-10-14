@@ -74,10 +74,13 @@ def test_unlink_seeds_desengancha_anidados_sin_borrar_el_destino(tmp_path):
     (real / "dato.txt").write_text("no me borres", encoding="utf-8")
     wt = tmp_path / "wt" / "app"
     wt.mkdir(parents=True)
-    r = subprocess.run(["cmd", "/c", "mklink", "/J", str(wt / "node_modules"), str(real)], capture_output=True)
-    if r.returncode != 0:
-        import pytest
-        pytest.skip("sin junctions en este entorno")
+    if os.name == "nt":
+        r = subprocess.run(["cmd", "/c", "mklink", "/J", str(wt / "node_modules"), str(real)], capture_output=True)
+        if r.returncode != 0:
+            import pytest
+            pytest.skip("sin junctions en este entorno")
+    else:
+        os.symlink(real, wt / "node_modules", target_is_directory=True)
     assert unlink_seeds(str(tmp_path / "wt")) == [str(wt / "node_modules")]
     shutil.rmtree(tmp_path / "wt")
     assert (real / "dato.txt").read_text(encoding="utf-8") == "no me borres"

@@ -13,9 +13,9 @@ _REPO_GOAL = pathlib.Path(__file__).resolve().parents[1] / "GOAL.md"
 
 def test_load_goal_has_contract():
     g = load_goal(_REPO_GOAL)
-    assert "north star" in g.lower()
-    assert "Invariantes" in g and "Non-goals" in g
-    assert "ZONA ROJA" in g or "zona roja" in g.lower()
+    # GOAL.md corto, editado por el usuario 2026-10-08 (3af3452): secciones en castellano
+    assert "## Propósito" in g and "## Invariantes" in g and "## Fuera de alcance" in g
+    assert "zona roja" in g.lower()
 
 
 def test_goal_hash_stable():

@@ -22,7 +22,7 @@ Reload Claude Code para cargar tools nuevos.
 
 ## Reglas de turno (apuntes; el contrato es GOAL.md)
 - **Verificador.** Familia libre desde 2026-10-07 (cross-family no mejoro en checkeable;
-  sesgo de familia en subjetivo < 7.5 pts). Default `deepseek-reasoner`: razona, refuta por
+  sesgo de familia en subjetivo < 7.5 pts). Default `DEFAULT_VERIFIER` (`mmorch/config.py`): razona, refuta por
   default y es el mas barato medido. Anti-sicofancia: el acuerdo no es confirmacion.
 - **Anti-reward-hacking.** En `hillclimb`, `score` = checker o comando — nunca LLM-judge.
 - **Observabilidad.** Cada nodo loggea a `logs/metrics.jsonl`. Sin metricas no hay
