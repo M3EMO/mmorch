@@ -3,7 +3,15 @@ Label: wayfinder:map · Creado: 2026-10-13 · Tickets en `issues/` · Tracker: l
 
 ## Destination
 
-Provisorio, lo fija el ticket 01. Una decisión respaldada por bancos sobre la arquitectura de un builder que arma un producto desde una idea, módulo por módulo. El veredicto de cada módulo y del producto combina tests computables con evidencia que un agente junta al manejar el producto real. Un prototipo arma de punta a punta un producto chico de varios módulos.
+Fijado por el ticket 01 (2026-10-15). El builder es una herramienta GENERAL: arma entregables (productos, servicios, flujos, funcionalidades) y cada uno queda medido como banco de mmorch. El mapa termina cuando el builder arma de punta a punta la calculadora de sueldo neto de F2 con cinco condiciones:
+
+1. La capa computable queda verde: casos de neto, agente que maneja el preview, consola sin errores, Lighthouse y metadatos.
+2. El usuario interviene solo en dos paradas (walkthrough y preview final), con menos de 1 h en total.
+3. El gasto de APIs queda debajo de US$5.
+4. El run-log registra coder sorteado, fricción, USD, cupo y horas del usuario.
+5. El juez en sombra deja su opinión con rúbricas, sin bloquear.
+
+Detalle completo: `brainstorms/2026-10-14-builder-e2e-destino.md`.
 
 ## Notes
 
@@ -24,14 +32,20 @@ Provisorio, lo fija el ticket 01. Una decisión respaldada por bancos sobre la a
 
 <!-- una línea por ticket resuelto: gist + link -->
 
+- [Destino y alcance](issues/01-destino-y-alcance.md) — herramienta general medida como banco; primer entregable F2 sueldo neto; termina en el preview verificado; capa computable bloquea y el juicio con rúbricas va en sombra; walkthrough como Artifact y dos paradas humanas; APIs US$5; Claude en descomposición, planner y agente del preview; coder Haiku o DeepSeek por sorteo.
+
 - [Inventario: qué del SDLC sirve por módulo y qué falta](issues/02-inventario-sdlc.md) — el SDLC sirve para el módulo 2 en adelante; bloquean el bootstrap del repo vacío, la descomposición (`division.md` sin consumidor) y el encadenado entre módulos (cada corrida parte del HEAD).
 
 ## Not yet specified
 
-- Tipos de producto que cubre el builder (web, CLI, API, app de escritorio, juego).
+- Oráculo por tipo de entregable (producto, servicio, flujo, funcionalidad): ticket 03.
+- Haiku 5.5 como coder: rutearlo por la CLI de Claude, como el planner `claude:<modelo>`; la familia anthropic no entra al REGISTRY.
+- `human_interventions` del SDLC nunca se incrementa: contarlo para medir las horas del usuario.
+- Tope de US$5 por entregable que sume todos sus módulos.
 - Quién descompone en módulos y con qué contrato entre módulos.
-- Costo por producto: cupo de Claude contra API barata contra pool de Cursor.
 
 ## Out of scope
 
 - Modificar juegos: eso es universal-modder, clonado aparte en el escritorio.
+- Agente de publicación (hosting, dominio, AdSense): esfuerzo aparte, con gate humano por zona roja.
+- Segundo entregable de otro tipo: destino del mapa siguiente.
