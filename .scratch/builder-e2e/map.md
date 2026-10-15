@@ -32,6 +32,8 @@ Detalle completo: `brainstorms/2026-10-14-builder-e2e-destino.md`.
 
 <!-- una línea por ticket resuelto: gist + link -->
 
+- [Errores del entorno contra errores del código](issues/07-errores-del-entorno.md) — builtin o paquete declarado pero ausente = entorno; paquete inventado o import relativo = código; en contenedor Claude no instala y nombra qué falta en la imagen. Caso real: de 3 vueltas + 2 escaladas a 0 vueltas + 1 llamada con diagnóstico claro.
+
 - [Descomposición en módulos](issues/04-descomposicion-modular.md) — prototipo real: bootstrap con contratos antes del código, 3 módulos en cadena por el SDLC (built, 0 escaladas, ~9 min), integración verde con el driver contra 70 casos ocultos; US$0,14 de DeepSeek. Hallazgos: títulos `test_R<n>_` en tests no Python; el SDLC no separa errores del entorno; encadenado a mano.
 
 - [Driver de producto mínimo](issues/05-driver-de-producto.md) — Playwright en el contenedor sin red maneja el sitio real; 10 variantes, exactitud balanceada 1,000, ~6 s cada una; los casos ocultos cargan el veredicto y las metamórficas no atrapan tope, tramos ni ejemplos hardcodeados; imagen `builder-driver` de 2,4 GB.

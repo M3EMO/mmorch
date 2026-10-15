@@ -383,8 +383,37 @@ def _plan_stack(plan_md: str) -> str:
 
 
 def _toolchain_missing(log: str) -> bool:
-    """El compilador del repo no esta instalado o no esta en PATH: las vueltas del coder no pueden arreglarlo."""
-    return bool(_NO_TOOL.search(log or ""))
+    """El compilador del repo no esta instalado o no esta en PATH, o falta una dependencia del entorno: las vueltas
+    del coder no pueden arreglarlo."""
+    return bool(_NO_TOOL.search(log or "")) or _falta_del_entorno(log) is not None
+
+
+# Dependencia ausente (tsc, Node, Python, Maven y cargo sin red). El nombre, si lo hay, queda en el grupo `n`.
+_NO_DEP = re.compile(r"TS2307: Cannot find module '(?![./])(?P<n>[^']+)'|TS2688: Cannot find type definition file"
+                     r"|ERR_MODULE_NOT_FOUND\]: Cannot find package '(?P<n2>[^']+)'"
+                     r"|ModuleNotFoundError: No module named '(?P<n3>[^'.]+)"
+                     r"|Could not resolve dependencies for project|Non-resolvable (?:parent|import) POM"
+                     r"|no matching package named `[^`]+`|failed to get `[^`]+` as a dependency")
+_MANIFIESTOS = ("package.json", "pyproject.toml", "requirements.txt", "requirements-dev.txt", "Cargo.toml", "pom.xml")
+
+
+def _falta_del_entorno(log: str) -> str | None:
+    """orchestration-7ys / ticket 07 de builder-e2e: la linea que muestra una dependencia que el ENTORNO no trae.
+    Cuenta un builtin (`node:test`, tipos de Node) o un paquete DECLARADO en un manifiesto del repo; Maven y cargo
+    sin red solo fallan asi con dependencias declaradas. Un paquete que nadie declaro es un error del codigo: el coder
+    lo invento. Medido 2026-10-15: TS2307 de `node:test` costo 3 vueltas del coder y 2 escaladas a Claude en vano."""
+    manifiestos = None
+    for m in _NO_DEP.finditer(log or ""):
+        nombre = m.group("n") or m.group("n2") or m.group("n3")
+        if not nombre or nombre.startswith("node:"):
+            return m.group(0)
+        if manifiestos is None:
+            manifiestos = " ".join((WT / f).read_text(encoding="utf-8", errors="replace")
+                                   for f in _MANIFIESTOS if (WT / f).is_file())
+        raiz = "/".join(nombre.split("/")[:2]) if nombre.startswith("@") else nombre.split("/")[0]   # @scope/pkg o pkg
+        if re.search(rf"[\"'\s]{re.escape(raiz)}[\"'\s=<>~^\[]", manifiestos):
+            return m.group(0)
+    return None
 
 
 def _cmd(key: str, files) -> str:
@@ -1180,11 +1209,16 @@ def _claude_compile(log: str, compiles, *, env: bool) -> tuple[bool, str]:
     before = _tree()
     cmd = CFG.get("compile_cmd") or "py_compile"
     if env:
-        prompt = (f"El comando de compilacion del proyecto no encuentra su herramienta: `{cmd}`.\n\nSALIDA:\n{log}\n\n"
+        prompt = (f"El comando de compilacion `{cmd}` no encuentra su herramienta o una dependencia del entorno "
+                  f"(no es un error del codigo).\n\nSALIDA:\n{log}\n\n"
                   "Resolve el entorno SIN instalar nada global ni fuera de este directorio: usa la herramienta local del "
                   "proyecto (npx, mvnw, gradlew, el venv del repo), agrega la dependencia de desarrollo al manifiesto e "
                   "instalala en el proyecto, o corregi `compile_cmd` en sdlc.toml. No toques codigo fuente, tests ni docs. "
                   "Si no se puede sin tocar el sistema, no cambies nada. Al final responde en una linea que hiciste o que falta.")
+        if CFG.get("contenedor"):  # ticket 07 de builder-e2e: sin este aviso Claude intentaba `npm install` sin red
+            prompt += (f"\n\nLos comandos corren en la imagen `{CFG['contenedor']}` SIN RED: no instales nada. Si alcanza con "
+                       "cambiar la configuracion del proyecto (tsconfig, sdlc.toml), hacelo. Si la imagen necesita algo, no "
+                       "cambies nada y nombra que hay que agregar a la imagen.")
         allowed = _ENV_FILES
     else:
         prompt = (f"El codigo no compila con `{cmd}`. Arregla {state['plan_files']} hasta que compile. "
@@ -1511,7 +1545,8 @@ def build():
         rec_gate("toolchain", False, log[-300:])
         ok, log = _claude_compile(log, _compiles, env=True)
         if not ok and _toolchain_missing(log):
-            write_supervision(f"ESCALATE_HUMAN: falta el compilador y Claude no lo resolvio\n{log[-1500:]}")
+            write_supervision(f"ESCALATE_HUMAN: falta el compilador o una dependencia del entorno y Claude no lo resolvio; "
+                              f"su diagnostico queda arriba en esta supervision\n{log[-1500:]}")
             return False, f"toolchain: {log[-300:]}"
     ok, note = _hasta_compilar(ok, log)
     if not ok:
