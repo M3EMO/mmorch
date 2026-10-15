@@ -32,6 +32,8 @@ Detalle completo: `brainstorms/2026-10-14-builder-e2e-destino.md`.
 
 <!-- una línea por ticket resuelto: gist + link -->
 
+- [Walkthrough como Artifact](issues/08-walkthrough-artifact.md) — página privada con seis secciones, comentario y ok por sección; los oks viven en la colección `oks` y Claude los lee antes de lanzar el builder; el de F2 está publicado y espera los oks del usuario.
+
 - [Lighthouse y axe-core en el driver](issues/11-lighthouse-y-axe.md) — corren sin red en `builder-driver`; variantes siguen en 1,000; el sitio real de F2 queda rojo por un input sin etiqueta (axe critical) que Lighthouse aprobaba con 0,91.
 
 - [Bootstrap y encadenado automáticos](issues/06-bootstrap-y-encadenado.md) — `python -m mmorch.builder <plan> <carpeta>`: bootstrap, módulos en cadena por el SDLC e integración en contenedor; F2 armado desde una carpeta vacía con un solo comando en ~8 min, integración verde.

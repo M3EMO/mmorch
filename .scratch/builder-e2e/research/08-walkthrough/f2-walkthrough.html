@@ -1,0 +1,241 @@
+<title>Walkthrough F2 sueldo neto</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700&family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: una columna de lectura, como un recibo de sueldo revisado sección por sección; cada sección cierra con su ok. */
+:root {
+  --bg: #f6f7f9; --paper: #ffffff; --ink: #172235; --muted: #5a6577; --rule: #d9dee6;
+  --accent: #2f6fa3; --accent-soft: #e4eef7; --ok: #1d7a4a; --ok-soft: #e2f3ea; --warn: #9a5b00; --warn-soft: #fbefdc;
+  --f-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --f-body: "Atkinson Hyperlegible", "Segoe UI", Roboto, sans-serif;
+  --f-num: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #11161f; --paper: #171e2a; --ink: #e6ebf2; --muted: #9aa6b8; --rule: #2a3444;
+  --accent: #7fb2de; --accent-soft: #1d2b3c; --ok: #5cc48c; --ok-soft: #16301f; --warn: #e3a54a; --warn-soft: #33270f; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #11161f; --paper: #171e2a; --ink: #e6ebf2; --muted: #9aa6b8; --rule: #2a3444;
+  --accent: #7fb2de; --accent-soft: #1d2b3c; --ok: #5cc48c; --ok-soft: #16301f; --warn: #e3a54a; --warn-soft: #33270f; color-scheme: dark }
+body { background: var(--bg); color: var(--ink); font: 16px/1.6 var(--f-body); }
+.wrap { max-width: 46rem; margin: 0 auto; padding-inline: 16px; padding-block: 2rem 4rem; display: grid; gap: 1.5rem; }
+h1, h2 { font-family: var(--f-display); text-wrap: balance; line-height: 1.2; margin: 0; }
+h1 { font-size: 1.9rem; }
+h2 { font-size: 1.3rem; }
+p { margin: 0; max-width: 65ch; }
+.eyebrow { font: 600 .75rem/1 var(--f-num); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+header { display: grid; gap: .75rem; }
+.estado { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; padding: .9rem 1rem; border: 1px solid var(--rule); background: var(--paper); border-radius: 6px; }
+.estado strong { font-family: var(--f-num); }
+.barra { flex: 1 1 10rem; height: 8px; background: var(--rule); border-radius: 4px; overflow: hidden; }
+.barra i { display: block; height: 100%; width: 0; background: var(--ok); transition: width .3s; }
+section { background: var(--paper); border: 1px solid var(--rule); border-radius: 6px; padding: 1.25rem; display: grid; gap: .9rem; min-width: 0; }
+section.con-ok { border-color: var(--ok); }
+.cab { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .5rem; align-items: baseline; }
+.chip { font: 600 .75rem/1 var(--f-num); padding: .35rem .55rem; border-radius: 999px; background: var(--warn-soft); color: var(--warn); }
+.con-ok .chip { background: var(--ok-soft); color: var(--ok); }
+.acciones { display: flex; flex-wrap: wrap; gap: .5rem; padding-top: .25rem; border-top: 1px dashed var(--rule); }
+button { font: 700 .9rem/1 var(--f-body); padding: .65rem .95rem; border-radius: 6px; border: 1px solid var(--accent); background: var(--paper); color: var(--accent); cursor: pointer; }
+button.primario { background: var(--accent); color: var(--paper); }
+.con-ok button.primario { background: var(--ok); border-color: var(--ok); }
+button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+button:disabled { opacity: .55; cursor: default; }
+.aviso { font-size: .85rem; color: var(--muted); }
+.decision { background: var(--warn-soft); color: var(--ink); border-left: 3px solid var(--warn); padding: .75rem .9rem; border-radius: 0 6px 6px 0; }
+.decision b { color: var(--warn); }
+ul, ol { margin: 0; padding-left: 1.2rem; display: grid; gap: .35rem; }
+.tabla { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font: 600 .75rem/1.3 var(--f-num); text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+td.n { font-family: var(--f-num); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.puntos { font-family: var(--f-num); letter-spacing: .1em; color: var(--accent); }
+/* Boceto: pantalla de la calculadora dibujada con cajas, sin imagen */
+.boceto { border: 2px solid var(--ink); border-radius: 8px; padding: 1rem; display: grid; gap: .7rem; background: var(--bg); }
+.b-h1 { font: 700 1.1rem var(--f-display); }
+.b-fila { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.b-input { flex: 1 1 10rem; border: 1px solid var(--muted); border-radius: 4px; padding: .45rem .6rem; font-family: var(--f-num); color: var(--muted); background: var(--paper); }
+.b-btn { border: 1px solid var(--accent); background: var(--accent); color: var(--paper); border-radius: 4px; padding: .45rem .8rem; font-weight: 700; }
+.b-neto { font: 600 1.6rem var(--f-num); }
+.b-desglose { display: grid; grid-template-columns: 1fr auto; gap: .2rem 1rem; font-size: .9rem; }
+.b-desglose span:nth-child(even) { font-family: var(--f-num); text-align: right; }
+.b-nota { font-size: .8rem; color: var(--muted); }
+@media (prefers-reduced-motion: reduce) { .barra i { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <span class="eyebrow">Walkthrough · parada 1 de 2 · builder-e2e</span>
+    <h1>Calculadora de sueldo neto (F2)</h1>
+    <p>Esta página explica qué va a construir el builder y cómo lo va a verificar. Revisá cada sección. Comentá lo que no te cierre y dale ok cuando esté bien. El builder arranca solo cuando las seis secciones tienen ok.</p>
+    <div class="estado" aria-live="polite">
+      <span><strong id="cuenta">0 de 6</strong> secciones con ok</span>
+      <div class="barra" aria-hidden="true"><i id="barra"></i></div>
+      <span class="aviso" id="estado-db">Conectando con el registro de oks…</span>
+    </div>
+  </header>
+
+  <section id="idea" data-seccion="idea">
+    <div class="cab"><h2>La idea</h2><span class="chip">pendiente</span></div>
+    <p>Un sitio estático en español que calcula el sueldo neto de un empleado en relación de dependencia en Argentina, con el desglose de aportes y Ganancias.</p>
+    <p>El builder termina cuando el sitio funciona en una vista previa local y el agente lo verificó. Publicarlo con dominio y anuncios es otro paso, con otro agente.</p>
+    <div class="acciones"><button class="primario" data-ok>Dar ok</button><button data-comentar>Comentar</button></div>
+  </section>
+
+  <section id="boceto" data-seccion="boceto">
+    <div class="cab"><h2>El boceto</h2><span class="chip">pendiente</span></div>
+    <p>Una sola pantalla. El neto aparece grande, y el desglose explica de dónde sale.</p>
+    <div class="boceto" role="img" aria-label="Boceto de la pantalla: título, campo de sueldo bruto, botón Calcular, neto grande y desglose">
+      <div class="b-h1">Calculadora de sueldo neto</div>
+      <div class="b-fila"><span class="b-input">Sueldo bruto mensual: 3.500.000</span><span class="b-btn">Calcular</span></div>
+      <div><div class="b-nota">Tu sueldo neto</div><div class="b-neto">$ 2.893.757,86</div></div>
+      <div class="b-desglose">
+        <span>Jubilación (11 %)</span><span>$ 385.000,00</span>
+        <span>PAMI (3 %)</span><span>$ 105.000,00</span>
+        <span>Obra social (3 %)</span><span>$ 105.000,00</span>
+        <span>Ganancias</span><span>$ 11.242,14</span>
+      </div>
+      <div class="b-nota">Tablas de ARCA vigentes de julio a diciembre de 2026. Texto breve que explica aportes y Ganancias.</div>
+    </div>
+    <div class="acciones"><button class="primario" data-ok>Dar ok</button><button data-comentar>Comentar</button></div>
+  </section>
+
+  <section id="modulos" data-seccion="modulos">
+    <div class="cab"><h2>Los módulos y su orden</h2><span class="chip">pendiente</span></div>
+    <p>El builder arma tres módulos en cadena. Cada módulo parte del anterior. El orden sale de la rúbrica de valor, esfuerzo y riesgo.</p>
+    <div class="tabla"><table>
+      <thead><tr><th>Orden</th><th>Módulo</th><th>Qué hace</th><th>Valor</th><th>Esfuerzo</th><th>Riesgo</th></tr></thead>
+      <tbody>
+        <tr><td class="n">1</td><td>Parámetros</td><td>Guarda las tablas oficiales con su fuente y su vigencia.</td><td><span class="puntos">●●●●●</span></td><td><span class="puntos">●○○○○</span></td><td><span class="puntos">●●○○○</span></td></tr>
+        <tr><td class="n">2</td><td>Cálculo</td><td>Calcula aportes, Ganancias y neto con la convención aprobada.</td><td><span class="puntos">●●●●●</span></td><td><span class="puntos">●●○○○</span></td><td><span class="puntos">●●●○○</span></td></tr>
+        <tr><td class="n">3</td><td>Interfaz</td><td>Arma la página, el formulario y el texto.</td><td><span class="puntos">●●●●○</span></td><td><span class="puntos">●●○○○</span></td><td><span class="puntos">●●○○○</span></td></tr>
+      </tbody>
+    </table></div>
+    <p class="aviso">El esfuerzo sale del tamaño del plan medido en corridas previas: los tres quedaron en el escalón mínimo. El riesgo suma el acople con otros módulos (cero en un repo nuevo) y la incertidumbre de los datos. El valor es juicio.</p>
+    <div class="acciones"><button class="primario" data-ok>Dar ok</button><button data-comentar>Comentar</button></div>
+  </section>
+
+  <section id="casos" data-seccion="casos">
+    <div class="cab"><h2>La verdad del oráculo</h2><span class="chip">pendiente</span></div>
+    <p>Esta tabla es la pieza más importante. El builder mide la calculadora contra 70 casos ocultos. El coder nunca los ve.</p>
+    <div class="tabla"><table>
+      <thead><tr><th>Parámetro</th><th>Valor</th><th>Fuente</th></tr></thead>
+      <tbody>
+        <tr><td>Ganancia no imponible anual</td><td class="n">$ 5.585.736,93</td><td><a href="https://www.afip.gob.ar/gananciasYBienes/ganancias/personas-humanas-sucesiones-indivisas/deducciones/documentos/Deducciones-personales-art-30-jul-dic-2026.pdf" target="_blank" rel="noopener">ARCA, art. 30, jul–dic 2026</a> (verificado)</td></tr>
+        <tr><td>Deducción especial anual</td><td class="n">$ 26.811.537,29</td><td>ARCA, art. 30 inc. c) ap. 2 (verificado)</td></tr>
+        <tr><td>Escala de Ganancias</td><td class="n">9 tramos, 5 % a 35 %</td><td><a href="https://www.afip.gob.ar/gananciasYBienes/ganancias/personas-humanas-sucesiones-indivisas/declaracion-jurada/documentos/Tabla-Art-94-LIG-per-jul-a-dic-2026.pdf" target="_blank" rel="noopener">ARCA, art. 94</a> (verificado)</td></tr>
+        <tr><td>Tope de la base de aportes</td><td class="n">$ 4.769.631,49</td><td>ANSES Res. 284/2026, octubre (solo fuentes secundarias)</td></tr>
+        <tr><td>Aportes</td><td class="n">11 % + 3 % + 3 %</td><td>Jubilación, PAMI y obra social</td></tr>
+      </tbody>
+    </table></div>
+    <p>Los casos cubren los bordes: el umbral de Ganancias, el tope y cada cambio de tramo, con un peso de más y de menos. Suman 40 sueldos al azar. Seis ejemplos:</p>
+    <div class="tabla"><table>
+      <thead><tr><th>Caso</th><th>Bruto</th><th>Aportes</th><th>Ganancias</th><th>Neto</th></tr></thead>
+      <tbody>
+        <tr><td>Un peso bajo el umbral</td><td class="n">3.252.737,38</td><td class="n">552.965,35</td><td class="n">0,00</td><td class="n">2.699.772,03</td></tr>
+        <tr><td>Un peso sobre el umbral</td><td class="n">3.252.739,38</td><td class="n">552.965,69</td><td class="n">0,04</td><td class="n">2.699.773,64</td></tr>
+        <tr><td>En el tope</td><td class="n">4.769.631,49</td><td class="n">810.837,35</td><td class="n">172.352,21</td><td class="n">3.786.441,93</td></tr>
+        <tr><td>Cambio al tramo del 9 %</td><td class="n">3.470.459,44</td><td class="n">589.978,10</td><td class="n">9.035,46</td><td class="n">2.871.445,88</td></tr>
+        <tr><td>Al azar</td><td class="n">7.654.321,00</td><td class="n">810.837,35</td><td class="n">908.678,42</td><td class="n">5.934.805,23</td></tr>
+        <tr><td>Al azar, alto</td><td class="n">25.000.000,00</td><td class="n">810.837,35</td><td class="n">6.925.854,70</td><td class="n">17.263.307,95</td></tr>
+      </tbody>
+    </table></div>
+    <div class="decision"><b>Decisión tuya.</b> La convención actual anualiza el sueldo: 12 meses, sin aguinaldo, soltero y sin hijos. La convención acumulativa de la RG 4.003 da otra retención en un mes dado. ¿Seguimos con la anualizada?</div>
+    <div class="decision"><b>Decisión tuya.</b> El tope de ANSES sale de fuentes secundarias. ¿Lo aceptás, o lo verificamos antes en el Boletín Oficial?</div>
+    <div class="acciones"><button class="primario" data-ok>Dar ok</button><button data-comentar>Comentar</button></div>
+  </section>
+
+  <section id="verificacion" data-seccion="verificacion">
+    <div class="cab"><h2>Cómo verifica el agente</h2><span class="chip">pendiente</span></div>
+    <p>Cada módulo pasa un test de contrato escrito antes del código. Después, un agente abre el sitio real en un navegador sin red y junta evidencia.</p>
+    <div class="tabla"><table>
+      <thead><tr><th>Chequeo</th><th>Qué mira</th><th>Efecto</th></tr></thead>
+      <tbody>
+        <tr><td>Casos ocultos</td><td>Los 70 netos, con tolerancia de un peso.</td><td>Bloquea</td></tr>
+        <tr><td>Relaciones de control</td><td>El neto crece con el bruto, y vale el 83 % bajo el umbral.</td><td>Bloquea</td></tr>
+        <tr><td>Consola y red</td><td>Sin errores y sin pedidos a internet.</td><td>Bloquea</td></tr>
+        <tr><td>Accesibilidad (axe)</td><td>Sin violaciones críticas ni serias.</td><td>Bloquea</td></tr>
+        <tr><td>Lighthouse</td><td>SEO y accesibilidad de 0,9 o más.</td><td>Bloquea</td></tr>
+        <tr><td>Metadatos</td><td>Título, descripción, idioma, canonical y un solo h1.</td><td>Bloquea</td></tr>
+        <tr><td>Juez en sombra</td><td>Texto y aspecto, con rúbricas, de a pares.</td><td>Solo opina</td></tr>
+      </tbody>
+    </table></div>
+    <div class="decision"><b>Hallazgo de la última corrida.</b> axe encontró que el campo del sueldo no tiene etiqueta. El contrato de la interfaz no lo exigía. Propongo agregar esa exigencia al contrato del módulo 3.</div>
+    <div class="acciones"><button class="primario" data-ok>Dar ok</button><button data-comentar>Comentar</button></div>
+  </section>
+
+  <section id="costo" data-seccion="costo">
+    <div class="cab"><h2>El costo estimado</h2><span class="chip">pendiente</span></div>
+    <p>Las cifras salen de las corridas medidas del prototipo, no de una estimación teórica.</p>
+    <div class="tabla"><table>
+      <thead><tr><th>Recurso</th><th>Estimado</th><th>Tope aprobado</th></tr></thead>
+      <tbody>
+        <tr><td>APIs (DeepSeek)</td><td class="n">≈ US$ 0,15</td><td class="n">US$ 5,00</td></tr>
+        <tr><td>Cupo de Claude: planner Sonnet</td><td class="n">≈ US$ 0,16 equiv.</td><td>sin tope fijo</td></tr>
+        <tr><td>Cupo de Claude: revisión y coder Haiku</td><td class="n">sin medir</td><td>se mide en esta corrida</td></tr>
+        <tr><td>Tiempo</td><td class="n">≈ 8 a 10 min</td><td>—</td></tr>
+        <tr><td>Tu tiempo</td><td class="n">esta revisión + la final</td><td class="n">menos de 1 h</td></tr>
+      </tbody>
+    </table></div>
+    <div class="acciones"><button class="primario" data-ok>Dar ok</button><button data-comentar>Comentar</button></div>
+  </section>
+</div>
+
+<script>
+const secciones = [...document.querySelectorAll("section[data-seccion]")];
+const estadoDb = document.getElementById("estado-db");
+let oks = {};
+
+function pintar() {
+  let n = 0;
+  for (const s of secciones) {
+    const ok = !!(oks[s.dataset.seccion] && oks[s.dataset.seccion].ok);
+    n += ok ? 1 : 0;
+    s.classList.toggle("con-ok", ok);
+    s.querySelector(".chip").textContent = ok ? "con ok" : "pendiente";
+    s.querySelector("[data-ok]").textContent = ok ? "Quitar ok" : "Dar ok";
+  }
+  document.getElementById("cuenta").textContent = `${n} de ${secciones.length}`;
+  document.getElementById("barra").style.width = `${(100 * n) / secciones.length}%`;
+}
+pintar();
+
+(async () => {
+  const [db, user, comments] = await Promise.all([claude.use("db"), claude.use("user"), claude.use("comments")]);
+  for (const s of secciones) {
+    const b = s.querySelector("[data-comentar]");
+    if (!comments) { b.hidden = true; continue; }
+    b.addEventListener("click", () => comments.openComposer({ element: s.querySelector("h2") }).catch((e) => {
+      if (e && e.code === "unavailable") b.hidden = true;
+    }));
+  }
+  if (!db) {
+    estadoDb.textContent = "Sin registro de oks en esta vista. Iniciá sesión en claude.ai para dar ok.";
+    secciones.forEach((s) => (s.querySelector("[data-ok]").disabled = true));
+    return;
+  }
+  const quien = user ? await user.id() : null;
+  db.collection("oks").onSnapshot((snap) => {
+    oks = {};
+    snap.docs.forEach((d) => (oks[d.id] = d.data()));
+    estadoDb.textContent = "Los oks quedan guardados y Claude los lee antes de arrancar.";
+    pintar();
+  }, () => { estadoDb.textContent = "No se pudo leer el registro de oks. Recargá la página."; });
+  for (const s of secciones) {
+    const b = s.querySelector("[data-ok]");
+    b.addEventListener("click", async () => {
+      const id = s.dataset.seccion;
+      const ahora = !(oks[id] && oks[id].ok);
+      b.disabled = true;
+      try {
+        await db.doc(`oks/${id}`).set({ ok: ahora, por: quien, ts: Date.now() });
+      } catch (e) {
+        estadoDb.textContent = e && e.code === "not_granted"
+          ? "Tu acceso a esta página no permite dar ok."
+          : "No se guardó el ok. Probá de nuevo.";
+      } finally {
+        b.disabled = false;
+      }
+    });
+  }
+})();
+</script>
