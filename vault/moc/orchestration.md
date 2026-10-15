@@ -24,6 +24,7 @@
 - [[minado-pybreaker-2026-08-30]] — seed
 - [[moc-autolearning]]
 - [[nodos-jerárquicos-de-verificadores-techo-n-eff-no-depende-de]] — applied · conf 0.85
+- [[oráculo-agente-por-tipo-de-entregable-2026-10-15]] — verdict · conf media: fracciones razonadas, no medidas; loopback y cifras de ARCA verificados
 - [[paper-engram-architecture-vs-retention-2026-08-19]] — seed
 - [[plan-moe-capa-de-confianza-por-token-qué-sirve-a-mmorch-y-qu]] — verdict · conf media: lectura del plan del usuario del 2026-10-04, sin experimentos
 - [[planner-de-sdlc-sobre-corridas-reales-sonnet-y-cursor-no-sup]] — measured · conf media: 12 corridas reales x 2 repeticiones; potencia baja para diferencias chicas

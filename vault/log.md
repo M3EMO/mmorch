@@ -47,3 +47,4 @@ Append-only, parseable: `grep "^## \[" log.md`. Ops: write | ingest | migrate | 
 ## [2026-10-04] write | Plan MoE (capa de confianza por token): qué sirve a mmorch y qué le da mmorch al plan [orchestration]
 ## [2026-10-07] write | Colab con GPU: verificador open-weight, looped transformer y señal del enrutador MoE [orchestration]
 ## [2026-10-13] write | REA (morluto/rea) — veredicto de prueba 2026-10-13 [orchestration]
+## [2026-10-15] write | Oráculo agente por tipo de entregable (2026-10-15) [orchestration]
