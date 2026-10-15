@@ -4,8 +4,10 @@ Uso: python driver.py <dir_del_sitio> <casos.json>   -> imprime un JSON con la e
 import functools
 import http.server
 import json
+import os
 import random
 import re
+import subprocess
 import sys
 import threading
 
@@ -42,6 +44,11 @@ with sync_playwright() as p:
         desc: (document.querySelector('meta[name=description]') || {}).content || '',
         h1: document.querySelectorAll('h1').length, canonical: !!document.querySelector('link[rel=canonical]')})""")
 
+    # ticket 11: axe-core inyectado en la pagina real; bloquean las violaciones critical y serious
+    pg.add_script_tag(path="/usr/local/lib/node_modules/axe-core/axe.min.js")
+    axe = pg.evaluate("async () => (await axe.run()).violations.map(v => ({id: v.id, impact: v.impact}))")
+    chrome = p.chromium.executable_path
+
     def calcular(g):
         pg.fill("#bruto", str(g))
         pg.click("[data-testid=calcular]")
@@ -58,7 +65,17 @@ with sync_playwright() as p:
     bajos = [round(rnd.uniform(100_000, verdad["umbral"] - 1), 2) for _ in range(10)]
     ns_bajos = [calcular(g) for g in bajos]
     nav.close()
+# ticket 11: Lighthouse contra el mismo servidor local, sin red; desempeño solo avisa (ruidoso en contenedor)
+lh = subprocess.run(["lighthouse", url, "--output=json", "--output-path=stdout", "--quiet",
+                     "--only-categories=seo,accessibility,performance",
+                     "--chrome-flags=--headless=new --no-sandbox --disable-dev-shm-usage"],
+                    capture_output=True, text=True, timeout=300, env={**os.environ, "CHROME_PATH": chrome})  # ignora --chrome-path
 srv.shutdown()
+try:
+    cats = json.loads(lh.stdout)["categories"]
+    lighthouse = {k: cats[k]["score"] for k in ("seo", "accessibility", "performance")}
+except (ValueError, KeyError):
+    lighthouse = {"error": (lh.stderr or lh.stdout)[-300:]}
 
 checks = {
     "casos_ocultos": not fallos,
@@ -66,9 +83,12 @@ checks = {
     "neto_083_bajo_umbral": all(x is not None and abs(x - 0.83 * g) <= 1 for g, x in zip(bajos, ns_bajos)),
     "consola_limpia": not ev["consola"],
     "sin_requests_externos": not ev["externos"],
+    "axe_sin_graves": not [v for v in axe if v["impact"] in ("critical", "serious")],
+    "lighthouse_seo_a11y": all((lighthouse.get(k) or 0) >= 0.9 for k in ("seo", "accessibility")),
     "metadatos": meta["lang"] == "es-AR" and 30 <= len(meta["title"]) <= 60 and 70 <= len(meta["desc"]) <= 160
     and meta["h1"] == 1 and meta["canonical"],
 }
 print(json.dumps({"veredicto": all(checks.values()), "checks": checks, "fallos": fallos[:3], "n_fallos": len(fallos),
-                  "consola": ev["consola"][:3], "externos": ev["externos"][:3], "meta": meta}, ensure_ascii=False))
+                  "consola": ev["consola"][:3], "externos": ev["externos"][:3], "meta": meta,
+                  "axe": axe[:5], "lighthouse": lighthouse}, ensure_ascii=False))
 sys.exit(0 if all(checks.values()) else 1)   # el builder lee el codigo de salida

@@ -32,6 +32,8 @@ Detalle completo: `brainstorms/2026-10-14-builder-e2e-destino.md`.
 
 <!-- una línea por ticket resuelto: gist + link -->
 
+- [Lighthouse y axe-core en el driver](issues/11-lighthouse-y-axe.md) — corren sin red en `builder-driver`; variantes siguen en 1,000; el sitio real de F2 queda rojo por un input sin etiqueta (axe critical) que Lighthouse aprobaba con 0,91.
+
 - [Bootstrap y encadenado automáticos](issues/06-bootstrap-y-encadenado.md) — `python -m mmorch.builder <plan> <carpeta>`: bootstrap, módulos en cadena por el SDLC e integración en contenedor; F2 armado desde una carpeta vacía con un solo comando en ~8 min, integración verde.
 
 - [Errores del entorno contra errores del código](issues/07-errores-del-entorno.md) — builtin o paquete declarado pero ausente = entorno; paquete inventado o import relativo = código; en contenedor Claude no instala y nombra qué falta en la imagen. Caso real: de 3 vueltas + 2 escaladas a 0 vueltas + 1 llamada con diagnóstico claro.
@@ -50,7 +52,8 @@ Detalle completo: `brainstorms/2026-10-14-builder-e2e-destino.md`.
 
 - Tickets 06 a 11 (creados 2026-10-15) cubren lo que falta para el destino: bootstrap y encadenado, errores del entorno, walkthrough, juez en sombra, Haiku coder, Lighthouse y axe.
 - Promovidos a bd porque son del SDLC en general: `usd_run` en null y hooks del usuario en la revisión 5b (orchestration-gkw y orchestration-xdi).
-- Prueba fuerte del driver: defectos de corridas reales del coder, no plantados por el autor del driver.
+- Prueba fuerte del driver: defectos de corridas reales del coder, no plantados por el autor del driver. Primer caso real: el input sin etiqueta de F2 (ticket 11).
+- Integración roja sin vuelta atrás: hoy el builder corta; falta devolver el defecto al módulo que lo causó (por ejemplo, m3 con el hallazgo de axe como nueva aceptación).
 - `human_interventions` del SDLC nunca se incrementa: contarlo para medir las horas del usuario.
 - Tope de US$5 por entregable que sume todos sus módulos.
 

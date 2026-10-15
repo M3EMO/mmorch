@@ -7,6 +7,8 @@
    "neto_083_bajo_umbral": true,
    "consola_limpia": true,
    "sin_requests_externos": true,
+   "axe_sin_graves": true,
+   "lighthouse_seo_a11y": true,
    "metadatos": true
   },
   "fallos": [],
@@ -19,10 +21,25 @@
    "desc": "Calculá tu sueldo neto en Argentina: aportes de jubilación, PAMI, obra social y Ganancias con las tablas de ARCA de julio a diciembre de 2026.",
    "h1": 1,
    "canonical": true
+  },
+  "axe": [
+   {
+    "id": "landmark-one-main",
+    "impact": "moderate"
+   },
+   {
+    "id": "region",
+    "impact": "moderate"
+   }
+  ],
+  "lighthouse": {
+   "seo": 1,
+   "accessibility": 1,
+   "performance": 1
   },
   "nombre": "ok_plano",
   "esperado": true,
-  "segundos": 5.7
+  "segundos": 15.6
  },
  {
   "veredicto": true,
@@ -32,6 +49,8 @@
    "neto_083_bajo_umbral": true,
    "consola_limpia": true,
    "sin_requests_externos": true,
+   "axe_sin_graves": true,
+   "lighthouse_seo_a11y": true,
    "metadatos": true
   },
   "fallos": [],
@@ -44,10 +63,25 @@
    "desc": "Calculá tu sueldo neto en Argentina: aportes de jubilación, PAMI, obra social y Ganancias con las tablas de ARCA de julio a diciembre de 2026.",
    "h1": 1,
    "canonical": true
+  },
+  "axe": [
+   {
+    "id": "landmark-one-main",
+    "impact": "moderate"
+   },
+   {
+    "id": "region",
+    "impact": "moderate"
+   }
+  ],
+  "lighthouse": {
+   "seo": 1,
+   "accessibility": 1,
+   "performance": 1
   },
   "nombre": "ok_formato_ar",
   "esperado": true,
-  "segundos": 6.0
+  "segundos": 15.3
  },
  {
   "veredicto": true,
@@ -57,6 +91,8 @@
    "neto_083_bajo_umbral": true,
    "consola_limpia": true,
    "sin_requests_externos": true,
+   "axe_sin_graves": true,
+   "lighthouse_seo_a11y": true,
    "metadatos": true
   },
   "fallos": [],
@@ -70,9 +106,24 @@
    "h1": 1,
    "canonical": true
   },
+  "axe": [
+   {
+    "id": "landmark-one-main",
+    "impact": "moderate"
+   },
+   {
+    "id": "region",
+    "impact": "moderate"
+   }
+  ],
+  "lighthouse": {
+   "seo": 1,
+   "accessibility": 1,
+   "performance": 1
+  },
   "nombre": "ok_h1_distinto",
   "esperado": true,
-  "segundos": 6.4
+  "segundos": 15.3
  },
  {
   "veredicto": false,
@@ -82,6 +133,8 @@
    "neto_083_bajo_umbral": true,
    "consola_limpia": true,
    "sin_requests_externos": true,
+   "axe_sin_graves": true,
+   "lighthouse_seo_a11y": true,
    "metadatos": true
   },
   "fallos": [
@@ -111,9 +164,24 @@
    "h1": 1,
    "canonical": true
   },
+  "axe": [
+   {
+    "id": "landmark-one-main",
+    "impact": "moderate"
+   },
+   {
+    "id": "region",
+    "impact": "moderate"
+   }
+  ],
+  "lighthouse": {
+   "seo": 1,
+   "accessibility": 1,
+   "performance": 1
+  },
   "nombre": "bug_sin_tope",
   "esperado": false,
-  "segundos": 7.4
+  "segundos": 15.3
  },
  {
   "veredicto": false,
@@ -123,6 +191,8 @@
    "neto_083_bajo_umbral": true,
    "consola_limpia": true,
    "sin_requests_externos": true,
+   "axe_sin_graves": true,
+   "lighthouse_seo_a11y": true,
    "metadatos": true
   },
   "fallos": [
@@ -142,9 +212,24 @@
    "h1": 1,
    "canonical": true
   },
+  "axe": [
+   {
+    "id": "landmark-one-main",
+    "impact": "moderate"
+   },
+   {
+    "id": "region",
+    "impact": "moderate"
+   }
+  ],
+  "lighthouse": {
+   "seo": 1,
+   "accessibility": 1,
+   "performance": 1
+  },
   "nombre": "bug_tramo",
   "esperado": false,
-  "segundos": 5.8
+  "segundos": 15.3
  },
  {
   "veredicto": false,
@@ -154,6 +239,8 @@
    "neto_083_bajo_umbral": false,
    "consola_limpia": true,
    "sin_requests_externos": true,
+   "axe_sin_graves": true,
+   "lighthouse_seo_a11y": true,
    "metadatos": true
   },
   "fallos": [
@@ -183,9 +270,24 @@
    "h1": 1,
    "canonical": true
   },
+  "axe": [
+   {
+    "id": "landmark-one-main",
+    "impact": "moderate"
+   },
+   {
+    "id": "region",
+    "impact": "moderate"
+   }
+  ],
+  "lighthouse": {
+   "seo": 1,
+   "accessibility": 1,
+   "performance": 1
+  },
   "nombre": "bug_aporte_16",
   "esperado": false,
-  "segundos": 5.4
+  "segundos": 15.3
  },
  {
   "veredicto": false,
@@ -195,6 +297,8 @@
    "neto_083_bajo_umbral": true,
    "consola_limpia": true,
    "sin_requests_externos": true,
+   "axe_sin_graves": true,
+   "lighthouse_seo_a11y": true,
    "metadatos": true
   },
   "fallos": [
@@ -224,9 +328,24 @@
    "h1": 1,
    "canonical": true
   },
+  "axe": [
+   {
+    "id": "landmark-one-main",
+    "impact": "moderate"
+   },
+   {
+    "id": "region",
+    "impact": "moderate"
+   }
+  ],
+  "lighthouse": {
+   "seo": 1,
+   "accessibility": 1,
+   "performance": 1
+  },
   "nombre": "bug_hardcode_publicos",
   "esperado": false,
-  "segundos": 5.3
+  "segundos": 15.3
  },
  {
   "veredicto": false,
@@ -236,6 +355,8 @@
    "neto_083_bajo_umbral": true,
    "consola_limpia": false,
    "sin_requests_externos": true,
+   "axe_sin_graves": true,
+   "lighthouse_seo_a11y": true,
    "metadatos": true
   },
   "fallos": [],
@@ -251,9 +372,24 @@
    "h1": 1,
    "canonical": true
   },
+  "axe": [
+   {
+    "id": "landmark-one-main",
+    "impact": "moderate"
+   },
+   {
+    "id": "region",
+    "impact": "moderate"
+   }
+  ],
+  "lighthouse": {
+   "seo": 1,
+   "accessibility": 1,
+   "performance": 1
+  },
   "nombre": "bug_consola",
   "esperado": false,
-  "segundos": 5.9
+  "segundos": 15.3
  },
  {
   "veredicto": false,
@@ -263,14 +399,18 @@
    "neto_083_bajo_umbral": true,
    "consola_limpia": false,
    "sin_requests_externos": false,
+   "axe_sin_graves": true,
+   "lighthouse_seo_a11y": true,
    "metadatos": true
   },
   "fallos": [],
   "n_fallos": 0,
   "consola": [
+   "Failed to load resource: net::ERR_INTERNET_DISCONNECTED",
    "Failed to load resource: net::ERR_INTERNET_DISCONNECTED"
   ],
   "externos": [
+   "https://fonts.googleapis.com/css2?family=Inter",
    "https://fonts.googleapis.com/css2?family=Inter"
   ],
   "meta": {
@@ -280,9 +420,24 @@
    "h1": 1,
    "canonical": true
   },
+  "axe": [
+   {
+    "id": "landmark-one-main",
+    "impact": "moderate"
+   },
+   {
+    "id": "region",
+    "impact": "moderate"
+   }
+  ],
+  "lighthouse": {
+   "seo": 1,
+   "accessibility": 1,
+   "performance": 1
+  },
   "nombre": "bug_externo",
   "esperado": false,
-  "segundos": 5.3
+  "segundos": 15.3
  },
  {
   "veredicto": false,
@@ -292,6 +447,8 @@
    "neto_083_bajo_umbral": true,
    "consola_limpia": true,
    "sin_requests_externos": true,
+   "axe_sin_graves": true,
+   "lighthouse_seo_a11y": true,
    "metadatos": false
   },
   "fallos": [],
@@ -305,8 +462,23 @@
    "h1": 1,
    "canonical": false
   },
+  "axe": [
+   {
+    "id": "landmark-one-main",
+    "impact": "moderate"
+   },
+   {
+    "id": "region",
+    "impact": "moderate"
+   }
+  ],
+  "lighthouse": {
+   "seo": 0.9,
+   "accessibility": 1,
+   "performance": 1
+  },
   "nombre": "bug_meta",
   "esperado": false,
-  "segundos": 5.8
+  "segundos": 15.3
  }
 ]
