@@ -44,17 +44,11 @@ Detalle completo: `brainstorms/2026-10-14-builder-e2e-destino.md`.
 
 ## Not yet specified
 
-- Lighthouse y axe-core dentro de la imagen `builder-driver`: sin probar.
+- Tickets 06 a 11 (creados 2026-10-15) cubren lo que falta para el destino: bootstrap y encadenado, errores del entorno, walkthrough, juez en sombra, Haiku coder, Lighthouse y axe.
+- Promovidos a bd porque son del SDLC en general: `usd_run` en null y hooks del usuario en la revisión 5b (orchestration-gkw y orchestration-xdi).
 - Prueba fuerte del driver: defectos de corridas reales del coder, no plantados por el autor del driver.
-- Automatizar el bootstrap del repo vacío y el encadenado de módulos (hoy a mano en `research/04-modular/correr_modulos.py`).
-- Separar errores del entorno de errores del código en la etapa 4: `_toolchain_missing` no reconoce `TS2307` y Claude escala en vano.
-- `usd_run` queda en `null` en el run-log; el costo sale de `logs/metrics.jsonl`.
-- La revisión 5b corre con los hooks del usuario (la regla ETS se mete en el veredicto).
-- Generador del walkthrough como Artifact y juez en sombra con rúbricas: sin construir.
-- Haiku 5.5 como coder: rutearlo por la CLI de Claude, como el planner `claude:<modelo>`; la familia anthropic no entra al REGISTRY.
 - `human_interventions` del SDLC nunca se incrementa: contarlo para medir las horas del usuario.
 - Tope de US$5 por entregable que sume todos sus módulos.
-- Quién descompone en módulos y con qué contrato entre módulos.
 
 ## Out of scope
 
