@@ -1,0 +1,58 @@
+[
+ {
+  "status": "built",
+  "failed_stage": null,
+  "failed_note": null,
+  "usd_run": null,
+  "claude_calls": 2,
+  "escalated_to_claude": false,
+  "planner": "claude:sonnet",
+  "planner_usd": 0.0313,
+  "modulo": "m1-parametros",
+  "minutos": 1.9,
+  "gate_rejects": 0,
+  "rechazos": [],
+  "compile_ladder": 0,
+  "reasoner_rounds": 0,
+  "test_rounds": 1
+ },
+ {
+  "status": "built",
+  "failed_stage": null,
+  "failed_note": null,
+  "usd_run": null,
+  "claude_calls": 2,
+  "escalated_to_claude": false,
+  "planner": "claude:sonnet",
+  "planner_usd": 0.0437,
+  "modulo": "m2-calculo",
+  "minutos": 4.0,
+  "gate_rejects": 0,
+  "rechazos": [],
+  "compile_ladder": 0,
+  "reasoner_rounds": 0,
+  "test_rounds": 1
+ },
+ {
+  "status": "built",
+  "failed_stage": null,
+  "failed_note": null,
+  "usd_run": null,
+  "claude_calls": 2,
+  "escalated_to_claude": false,
+  "planner": "claude:sonnet",
+  "planner_usd": 0.0836,
+  "modulo": "m3-interfaz",
+  "minutos": 3.2,
+  "gate_rejects": 1,
+  "rechazos": [
+   "trazabilidad-plan"
+  ],
+  "compile_ladder": 0,
+  "reasoner_rounds": 0,
+  "test_rounds": 1
+ },
+ {
+  "integracion": "{\"veredicto\": true, \"checks\": {\"casos_ocultos\": true, \"monotono\": true, \"neto_083_bajo_umbral\": true, \"consola_limpia\": true, \"sin_requests_externos\": true, \"metadatos\": true}, \"fallos\": [], \"n_fallos\": 0, \"consola\": [], \"externos\": [], \"meta\": {\"lang\": \"es-AR\", \"title\": \"Sueldo neto en Argentina: calculá tus aportes y Ganancias\", \"desc\": \"Calculá tu sueldo neto en Argentina: descontá jubilación, PAMI, obra social y Ganancias con las tablas vigentes.\", \"h1\": 1, \"canonical\": true}}"
+ }
+]
