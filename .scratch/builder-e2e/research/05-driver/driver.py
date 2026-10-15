@@ -1,10 +1,12 @@
 """Oraculo agente minimo (ticket 05): maneja el sitio real con Playwright, junta evidencia y dicta un veredicto
 determinista. Corre DENTRO del contenedor sin red: sirve el sitio en 127.0.0.1 y lo abre con Chromium headless.
-Uso: python driver.py <dir_del_sitio> <casos.json>   -> imprime un JSON con la evidencia y el veredicto."""
+Uso: python driver.py <dir_del_sitio> <casos.json> [dir_capturas]   -> imprime un JSON con evidencia y veredicto.
+Con dir_capturas (ticket 09) guarda texto.txt, escritorio.png y movil.png para el juez en sombra."""
 import functools
 import http.server
 import json
 import os
+import pathlib
 import random
 import re
 import subprocess
@@ -64,6 +66,14 @@ with sync_playwright() as p:
     ns = [calcular(g) for g in gs]
     bajos = [round(rnd.uniform(100_000, verdad["umbral"] - 1), 2) for _ in range(10)]
     ns_bajos = [calcular(g) for g in bajos]
+    if len(sys.argv) > 3:   # ticket 09: evidencia para el juez en sombra, despues de un calculo de ejemplo
+        cap = pathlib.Path(sys.argv[3])
+        cap.mkdir(parents=True, exist_ok=True)
+        calcular(3_500_000)
+        (cap / "texto.txt").write_text(pg.inner_text("body"), encoding="utf-8")
+        pg.screenshot(path=str(cap / "escritorio.png"), full_page=True)
+        pg.set_viewport_size({"width": 390, "height": 844})
+        pg.screenshot(path=str(cap / "movil.png"), full_page=True)
     nav.close()
 # ticket 11: Lighthouse contra el mismo servidor local, sin red; desempeño solo avisa (ruidoso en contenedor)
 lh = subprocess.run(["lighthouse", url, "--output=json", "--output-path=stdout", "--quiet",

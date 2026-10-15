@@ -1,0 +1,15 @@
+Calculadora de sueldo neto
+
+Del sueldo bruto se descuentan los aportes de jubilación, PAMI y obra social. El impuesto a las Ganancias se retiene únicamente cuando el bruto supera el mínimo no imponible. Vigencia de las tablas: 2026-07.
+
+Sueldo bruto (pesos)  Calcular
+Neto
+$ 2.893.757,86
+Jubilación
+$ 385.000,00
+PAMI
+$ 105.000,00
+Obra social
+$ 105.000,00
+Ganancias
+$ 11.242,14

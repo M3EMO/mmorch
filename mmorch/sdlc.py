@@ -142,7 +142,7 @@ def configure(task, *, contract, feat=None, wt=None, phase=None, max_fix=3, writ
     CFG = _cfg()
     PY = _repo_python()
     state.clear()
-    state.update({"proto": "mmorch.sdlc", "task": TASK_NAME, "stages": [], "gates": [], "calls": 0,
+    state.update({"proto": "mmorch.sdlc", "task": TASK_NAME, "coder": CODER, "stages": [], "gates": [], "calls": 0,
                   "human_interventions": 0, "claude_calls": 0, "gate_rejects": [], "escalated_to_claude": False})
     SNAP.clear(); SEEN.clear(); _orig_files.clear(); _COMPILE_BASE.clear()
     RUNS.mkdir(parents=True, exist_ok=True)
@@ -150,6 +150,11 @@ def configure(task, *, contract, feat=None, wt=None, phase=None, max_fix=3, writ
 
 def llm(model, system, user, timeout=400):
     state["calls"] += 1
+    if str(model).startswith("claude:"):   # builder-e2e ticket 10: Haiku como coder por la CLI (la familia anthropic no es un nodo)
+        env = {k: v for k, v in os.environ.items() if k not in _SIN_SHELL}
+        texto, usd = _claude_texto(model.split(":", 1)[1], user, env, timeout, tools="", rol="coder", system=system)
+        state["claude_coder_usd"] = round(state.get("claude_coder_usd", 0.0) + usd, 4)
+        return texto
     try:
         r = call(model, [{"role": "system", "content": system}, {"role": "user", "content": user}],
                  pattern=PHASE, node=model, phase=PHASE, temperature=0.0, timeout=timeout, max_tokens=32768)
@@ -182,6 +187,25 @@ def _agent_run(argv: list[str], prompt: str | None, env: dict, timeout: float) -
     return 0, run_agent(argv, WT, prompt, env, timeout)
 
 
+def _claude_texto(model: str, prompt: str, env: dict, timeout: float, *, tools: str, rol: str,
+                  system: str | None = None) -> tuple[str, float]:
+    """`claude -p` headless, aislado (--restricted ignora los settings y hooks del usuario; sin MCP ni sesion).
+    Devuelve (texto, US$ equivalentes de cupo). `tools=""` = sin herramientas: solo texto (rol coder)."""
+    from .claude_exec import claude_bin
+    argv = claude_bin() + ["-p", "--model", model, "--restricted", "--strict-mcp-config", "--tools", tools,
+                           "--no-session-persistence", "--output-format", "json"]   # el prompt va por stdin: --tools es variadico
+    if system:
+        argv += ["--system-prompt", system]
+    _, out = _agent_run(argv, prompt, env, timeout)
+    try:
+        d = json.loads((out.strip().splitlines() or ["{}"])[-1])
+    except ValueError:
+        raise RuntimeError(f"{rol} claude: salida sin JSON: {out[-300:]}") from None
+    if d.get("is_error") or not d.get("result"):   # cupo agotado, auth: falla tecnica, no un resultado malo
+        raise RuntimeError(f"{rol} claude: {str(d.get('result') or d)[:300]}")
+    return str(d["result"]), float(d.get("total_cost_usd") or 0.0)
+
+
 def _planner(system: str, user: str) -> str:
     """Planner de la etapa 3 (orchestration-34k). SDLC_PLANNER vacio = el WRITER, una llamada sin ver el repo.
     `claude:<modelo>` y `cursor:<modelo>` corren un agente de SOLO LECTURA en el worktree, sin MCP ni hooks."""
@@ -196,18 +220,9 @@ def _planner(system: str, user: str) -> str:
     state["calls"] += 1
     state["planner"] = p
     if kind == "claude":
-        from .claude_exec import claude_bin
-        argv = claude_bin() + ["-p", "--model", model, "--restricted", "--strict-mcp-config", "--tools", "Read,Grep,Glob",
-                               "--no-session-persistence", "--output-format", "json"]   # el prompt va por stdin: --tools es variadico
-        _, out = _agent_run(argv, prompt, env, timeout)
-        try:
-            d = json.loads((out.strip().splitlines() or ["{}"])[-1])
-        except ValueError:
-            raise RuntimeError(f"planner claude: salida sin JSON: {out[-300:]}") from None
-        state["planner_usd"] = round(state.get("planner_usd", 0.0) + (d.get("total_cost_usd") or 0.0), 4)
-        if d.get("is_error") or not d.get("result"):   # cupo agotado, auth: falla tecnica, no un plan malo
-            raise RuntimeError(f"planner claude: {str(d.get('result') or d)[:300]}")
-        return str(d["result"])
+        texto, usd = _claude_texto(model, prompt, env, timeout, tools="Read,Grep,Glob", rol="planner")
+        state["planner_usd"] = round(state.get("planner_usd", 0.0) + usd, 4)
+        return texto
     cfg, cli = WT / ".cursor", WT / ".cursor" / "cli.json"
     nuevo = not cfg.exists()   # el repo puede versionar su propio .cursor/ (reglas): la limpieza solo deshace lo nuestro
     previo = cli.read_bytes() if cli.exists() else None

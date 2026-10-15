@@ -1,0 +1,4 @@
+Calculadora de sueldo neto
+ Calcular $ 2.893.757,86 $ 385.000,00 $ 105.000,00 $ 105.000,00 $ 11.242,14
+
+Los aportes jubilatorios, PAMI y obra social se descuentan del bruto. Ganancias se retiene según las tablas vigentes desde 2026-07 a 2026-12.

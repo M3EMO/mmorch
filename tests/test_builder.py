@@ -28,7 +28,7 @@ def _plan(tmp_path, modulos):
 def _falso(falla=()):
     vistos = []
 
-    def build_feature(name, task, repo, *, accept, files, wt, phase):
+    def build_feature(name, task, repo, *, accept, files, wt, phase, coder=None):
         _git(repo, "worktree", "add", "-q", "-b", f"sdlc/{phase}", str(wt), "HEAD")
         vistos.append(sorted(p.name for p in wt.glob("*.txt")))   # lo que el modulo encontro al arrancar
         if name in falla:
@@ -62,3 +62,33 @@ def test_corta_en_el_primer_modulo_que_no_se_construye(tmp_path, monkeypatch):
     assert B.main([str(_plan(tmp_path, ["m1", "m2", "m3"])), str(tmp_path / "repo")]) == 1
     assert len(vistos) == 2   # m3 nunca corre
     assert "m2.txt" not in _git(tmp_path / "repo", "ls-files")
+
+
+def test_sorteo_balanceado_y_reproducible():
+    a = B.sortear(["x", "y"], 5, 7)
+    assert sorted(a).count("x") in (2, 3) and a == B.sortear(["x", "y"], 5, 7)
+    assert B.sortear(["x", "y"], 4, 7).count("x") == 2
+
+
+def test_cada_modulo_registra_su_coder(tmp_path, monkeypatch):
+    fake, _ = _falso()
+    monkeypatch.setattr(S, "build_feature", fake)
+    filas = B.armar(str(_plan(tmp_path, ["m1", "m2"])), str(tmp_path / "repo"))
+    assert sorted(f["coder"] for f in filas) == sorted(B.CODERS)
+
+
+def test_el_juez_opina_en_sombra_y_no_cambia_el_veredicto(tmp_path, monkeypatch):
+    import mmorch.juez_sombra as J
+    fake, _ = _falso()
+    monkeypatch.setattr(S, "build_feature", fake)
+    monkeypatch.setattr(J, "comparar", lambda a, b, r: {"mejor": "B"})
+    p = _plan(tmp_path, ["m1"])
+    plan = json.loads(p.read_text())
+    plan["juez"] = {"contra": "capturas/ref", "rubricas": ["seo_texto"]}
+    p.write_text(json.dumps(plan))
+    for d in ("capturas/repo", "capturas/ref"):
+        (tmp_path / "plan" / d).mkdir(parents=True)
+        (tmp_path / "plan" / d / "texto.txt").write_text("x", encoding="utf-8")
+    assert B.main([str(p), str(tmp_path / "repo")]) == 0   # la opinion "B" (la referencia gana) no tumba nada
+    assert {"juez": "seo_texto", "contra": "capturas/ref", "mejor": "B"} in B.armar.__globals__["juzgar"](
+        tmp_path / "repo", plan["juez"], tmp_path / "plan")

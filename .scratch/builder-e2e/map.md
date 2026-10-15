@@ -32,6 +32,9 @@ Detalle completo: `brainstorms/2026-10-14-builder-e2e-destino.md`.
 
 <!-- una línea por ticket resuelto: gist + link -->
 
+- [Juez en sombra con rúbricas](issues/09-juez-en-sombra.md) — `mmorch/juez_sombra.py`: de a pares, orden invertido, sin puntajes, nunca bloquea; texto de F2 consistente (gana prototipo-04, coincide con el orquestador); visual caído por saldo de GLM.
+- [Haiku 5.5 como coder](issues/10-haiku-coder.md) — coder `claude:<modelo>` por la CLI aislada y sorteo balanceado con semilla en el builder; Haiku construyó m1 por US$0,0015 equiv.; DeepSeek falló m3 en esa corrida.
+
 - [Walkthrough como Artifact](issues/08-walkthrough-artifact.md) — página privada con seis secciones, comentario y ok por sección; los oks viven en la colección `oks` y Claude los lee antes de lanzar el builder; el de F2 está publicado y espera los oks del usuario.
 
 - [Lighthouse y axe-core en el driver](issues/11-lighthouse-y-axe.md) — corren sin red en `builder-driver`; variantes siguen en 1,000; el sitio real de F2 queda rojo por un input sin etiqueta (axe critical) que Lighthouse aprobaba con 0,91.
@@ -54,6 +57,8 @@ Detalle completo: `brainstorms/2026-10-14-builder-e2e-destino.md`.
 
 - Tickets 06 a 11 (creados 2026-10-15) cubren lo que falta para el destino: bootstrap y encadenado, errores del entorno, walkthrough, juez en sombra, Haiku coder, Lighthouse y axe.
 - Promovidos a bd porque son del SDLC en general: `usd_run` en null y hooks del usuario en la revisión 5b (orchestration-gkw y orchestration-xdi).
+- VLM del juez visual: GLM sin saldo (código 1113); recargar o elegir otro modelo con visión.
+- Kappa del juez: el usuario etiqueta pares de entregables (mínimo 20) para decidir si sale de sombra.
 - Prueba fuerte del driver: defectos de corridas reales del coder, no plantados por el autor del driver. Primer caso real: el input sin etiqueta de F2 (ticket 11).
 - Integración roja sin vuelta atrás: hoy el builder corta; falta devolver el defecto al módulo que lo causó (por ejemplo, m3 con el hallazgo de axe como nueva aceptación).
 - `human_interventions` del SDLC nunca se incrementa: contarlo para medir las horas del usuario.
