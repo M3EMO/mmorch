@@ -1,0 +1,54 @@
+{
+ "bootstrap": {
+  "package.json": "bootstrap/package.json",
+  "tsconfig.json": "bootstrap/tsconfig.json",
+  "tsconfig.build.json": "bootstrap/tsconfig.build.json",
+  "Dockerfile.sdlc": "bootstrap/Dockerfile.sdlc",
+  "sdlc.toml": "bootstrap/sdlc.toml",
+  "README.md": "bootstrap/README.md",
+  "src/tipos.ts": "bootstrap/src/tipos.ts"
+ },
+ "modulos": [
+  {
+   "nombre": "m1-parametros",
+   "tarea": "Crear src/parametros.ts que exporta `PARAMETROS: Parametros` (tipo de src/tipos.ts, importado con extension .ts). Valores aprobados en el walkthrough: topeBaseImponible 4769631.49 (ANSES oct 2026); gananciaNoImponible 5585736.93 y deduccionEspecial 26811537.29 (ARCA art. 30, jul-dic 2026); aportes jubilacion 0.11, pami 0.03, obraSocial 0.03. Escala anual del art. 94 (desde, fijo, tasa): (0, 0, 0.05), (2168491.89, 108424.59, 0.09), (4336983.77, 303588.86, 0.12), (6505475.65, 563807.89, 0.15), (9758213.49, 1051718.57, 0.19), (19516426.99, 2905779.13, 0.23), (29274640.48, 5150168.23, 0.27), (43911960.73, 9102244.70, 0.31), (65867941.10, 15908598.62, 0.35). vigencia {desde: '2026-07', hasta: '2026-12'}; fuentes: https://www.afip.gob.ar/gananciasYBienes/ganancias/personas-humanas-sucesiones-indivisas/deducciones/documentos/Deducciones-personales-art-30-jul-dic-2026.pdf y https://www.afip.gob.ar/gananciasYBienes/ganancias/personas-humanas-sucesiones-indivisas/declaracion-jurada/documentos/Tabla-Art-94-LIG-per-jul-a-dic-2026.pdf.",
+   "files": [
+    "src/parametros.ts"
+   ],
+   "contrato": "../04-modular/contratos/parametros.contract.test.ts",
+   "accept": "tests/parametros.contract.test.ts"
+  },
+  {
+   "nombre": "m2-calculo",
+   "tarea": "Crear src/calculo.ts que exporta `calcularNeto: CalcularNeto` (src/tipos.ts). Convencion aprobada: base de aportes = min(bruto, topeBaseImponible); cada aporte = tasa x base; base anual de Ganancias = 12 x (bruto - aportes) - gananciaNoImponible - deduccionEspecial; si es <= 0 no hay impuesto; si no, impuesto anual = fijo + tasa x (base - desde) del tramo con mayor `desde` <= base; ganancias mensual = impuesto anual / 12; neto = bruto - aportes - ganancias. Sin SAC, soltero, sin hijos. Funcion pura, sin redondeos intermedios.",
+   "files": [
+    "src/calculo.ts"
+   ],
+   "contrato": "../04-modular/contratos/calculo.contract.test.ts",
+   "accept": "tests/calculo.contract.test.ts"
+  },
+  {
+   "nombre": "m3-interfaz",
+   "tarea": "Crear index.html (lang es-AR) y src/app.ts. La pagina tiene un solo h1, title de 30 a 60 caracteres, meta description de 70 a 160 caracteres, link canonical https://ejemplo.com.ar/sueldo-neto, un input id='bruto', un boton data-testid='calcular' y salidas data-testid='neto', 'jubilacion', 'pami', 'obra-social' y 'ganancias' en pesos con formato es-AR. Carga solo <script type=\"module\" src=\"dist/app.js\"></script> (dist sale de tsc -p tsconfig.build.json); nada externo: sin fuentes, CDN ni analytics. app.ts usa calcularNeto y PARAMETROS al hacer click en calcular. Texto breve en español que explica los aportes y Ganancias con la fecha de vigencia de las tablas.",
+   "files": [
+    "src/app.ts",
+    "index.html"
+   ],
+   "contrato": "../04-modular/contratos/ui.contract.test.ts",
+   "accept": "tests/ui.contract.test.ts"
+  }
+ ],
+ "integracion": [
+  {
+   "imagen": "f2-sdlc",
+   "cmd": "tsc -p tsconfig.build.json"
+  },
+  {
+   "imagen": "builder-driver",
+   "cmd": "python {base}/../05-driver/driver.py {repo} {base}/../05-driver/casos.json",
+   "montajes": [
+    "../05-driver"
+   ]
+  }
+ ]
+}

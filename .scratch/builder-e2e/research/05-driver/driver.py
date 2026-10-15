@@ -71,3 +71,4 @@ checks = {
 }
 print(json.dumps({"veredicto": all(checks.values()), "checks": checks, "fallos": fallos[:3], "n_fallos": len(fallos),
                   "consola": ev["consola"][:3], "externos": ev["externos"][:3], "meta": meta}, ensure_ascii=False))
+sys.exit(0 if all(checks.values()) else 1)   # el builder lee el codigo de salida

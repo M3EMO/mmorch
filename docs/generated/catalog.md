@@ -4,7 +4,7 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**119 módulos · 44 MCP tools · 1095 tests.**
+**120 módulos · 44 MCP tools · 1098 tests.**
 
 El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
 
@@ -25,6 +25,7 @@ El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/budget.py` | budget — BudgetKeeper: techo de gasto mensual (ataca el incidente +$5). |
 | `mmorch/budget_policy.py` | budget_policy — scoped budget policies (graft G5 from paperclip). |
 | `mmorch/bughunt.py` | BUG-HUNTER logico de mmorch: mutation-survivors como mapa de donde un bug silencioso viviria. |
+| `mmorch/builder.py` | builder — arma un entregable desde una carpeta vacia, modulo por modulo, por el SDLC (builder-e2e ticket 06). |
 | `mmorch/bursts.py` | Bursts de arXiv — temas recién acuñados, que ningún tag todavía nombra. |
 | `mmorch/cache.py` | memo (I-4) — cache content-hash de resultados/verdicts. Salta re-gen/re-verify |
 | `mmorch/canal.py` | canal — hilo ordenado entre Cursor, Claude Code y mmorch. |

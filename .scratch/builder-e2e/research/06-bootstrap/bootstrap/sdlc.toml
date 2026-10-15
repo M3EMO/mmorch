@@ -1,0 +1,10 @@
+# Bootstrap a mano del prototipo del ticket 04 (.scratch/builder-e2e). Los contratos (src/tipos.ts y los tests de
+# contrato) entran ANTES del codigo; cada modulo pasa por el SDLC con su test como aceptacion.
+accept_cmd = "node --experimental-strip-types --test \"tests/**/*.test.ts\""
+suite_cmd = "node --experimental-strip-types --test \"tests/**/*.test.ts\""
+compile_cmd = "tsc -p tsconfig.json"
+ext = ["ts", "html"]
+approve_accept = false
+usd_max = 3.0
+contenedor = "f2-sdlc"
+files = ["src/**/*.ts", "index.html"]

@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 
@@ -85,7 +86,7 @@ def traducir_rutas(texto: str) -> str:
 
 
 def container_argv(cmd: list[str] | str, *, image: str, cwd: str, mounts: list[str], name: str, eng: str,
-                   ro: list[str] = (), win: bool | None = None) -> list[str]:
+                   ro: Sequence[str] = (), win: bool | None = None) -> list[str]:
     """Un comando del worktree del SDLC dentro de un contenedor (orchestration-s8w). Monta cada ruta en la MISMA ruta
     (los comandos traen rutas absolutas del host). Endurecido como _run_docker, salvo --read-only: la suite escribe
     en el worktree. `ro` = rutas de solo lectura (el repo principal, destino de los symlinks de seed_globs).
@@ -166,7 +167,7 @@ def _run_docker(code: str, timeout: float, extra_files: dict[str, str] | None,
             (tdp / name).write_text(content, encoding="utf-8")
         target = argv if argv is not None else ["_run.py"]
         cmd = [
-            engine(), "run", "--rm", "--network", "none", "--read-only",
+            engine() or "docker", "run", "--rm", "--network", "none", "--read-only",
             "--memory", "256m", "--pids-limit", "128", "--cap-drop", "ALL",
             "--tmpfs", "/tmp:rw,size=64m", "-v", f"{td}:/work:ro", "-w", "/work",
             "python:3.12-slim", "python", *target,

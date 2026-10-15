@@ -1,0 +1,4 @@
+# Imagen del SDLC de mmorch para este repo (sdlc.toml: contenedor = "f2-sdlc"). Corre sin red.
+# Node 22 corre los tests .ts con --experimental-strip-types; tsc chequea tipos y emite dist/ para el navegador.
+FROM docker.io/library/node:22-slim
+RUN npm install -g typescript@5.9

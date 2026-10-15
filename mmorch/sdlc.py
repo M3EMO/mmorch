@@ -315,6 +315,8 @@ def sh(cmd, timeout: float | None = None, keep: int = 6000, *, host: bool = Fals
     env = {**os.environ, "PATH": os.path.dirname(PY) + os.pathsep + os.environ.get("PATH", ""), "PYTHONDONTWRITEBYTECODE": "1"}
     texto = (cmd if isinstance(cmd, str) else " ".join(cmd))[:200]
     img = None if host else CFG.get("contenedor")
+    eng: str | None = None
+    name = ""
     if img:
         from .sandbox import container_argv, engine
         eng = engine()
@@ -330,7 +332,7 @@ def sh(cmd, timeout: float | None = None, keep: int = 6000, *, host: bool = Fals
         p = subprocess.run(cmd, cwd=WT, capture_output=True, text=True, encoding="utf-8", errors="replace",
                            timeout=timeout or CFG["cmd_timeout_s"], shell=isinstance(cmd, str), env=env)
     except subprocess.TimeoutExpired:
-        if img:  # matar el cliente no para el contenedor: sin esto queda corriendo
+        if img and eng:  # matar el cliente no para el contenedor: sin esto queda corriendo
             subprocess.run([eng, "rm", "-f", name], capture_output=True)
         return False, f"TIMEOUT {timeout or CFG['cmd_timeout_s']}s: {texto}"
     return p.returncode == 0, (p.stdout + p.stderr)[-keep:]
