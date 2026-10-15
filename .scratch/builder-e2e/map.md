@@ -32,6 +32,8 @@ Detalle completo: `brainstorms/2026-10-14-builder-e2e-destino.md`.
 
 <!-- una línea por ticket resuelto: gist + link -->
 
+- [Driver de producto mínimo](issues/05-driver-de-producto.md) — Playwright en el contenedor sin red maneja el sitio real; 10 variantes, exactitud balanceada 1,000, ~6 s cada una; los casos ocultos cargan el veredicto y las metamórficas no atrapan tope, tramos ni ejemplos hardcodeados; imagen `builder-driver` de 2,4 GB.
+
 - [Oráculo agente por tipo de entregable](issues/03-oraculo-agente.md) — la verdad vive fuera del worktree y el coder no la ve; CLI ~90 %, API ~85 %, web ~70 %, flujo ~60 % computable; el loopback funciona sin red; para F2 bloquean casos ocultos, relaciones metamórficas, consola, Lighthouse, axe y metadatos; la convención anualizada o acumulativa se decide en el walkthrough.
 
 - [Destino y alcance](issues/01-destino-y-alcance.md) — herramienta general medida como banco; primer entregable F2 sueldo neto; termina en el preview verificado; capa computable bloquea y el juicio con rúbricas va en sombra; walkthrough como Artifact y dos paradas humanas; APIs US$5; Claude en descomposición, planner y agente del preview; coder Haiku o DeepSeek por sorteo.
@@ -40,7 +42,8 @@ Detalle completo: `brainstorms/2026-10-14-builder-e2e-destino.md`.
 
 ## Not yet specified
 
-- Imagen con Playwright y Lighthouse dentro del contenedor sin red: sin probar (~0,9 GB); primer riesgo práctico del ticket 05.
+- Lighthouse y axe-core dentro de la imagen `builder-driver`: sin probar.
+- Prueba fuerte del driver: defectos de corridas reales del coder, no plantados por el autor del driver.
 - Haiku 5.5 como coder: rutearlo por la CLI de Claude, como el planner `claude:<modelo>`; la familia anthropic no entra al REGISTRY.
 - `human_interventions` del SDLC nunca se incrementa: contarlo para medir las horas del usuario.
 - Tope de US$5 por entregable que sume todos sus módulos.

@@ -1,0 +1,312 @@
+[
+ {
+  "veredicto": true,
+  "checks": {
+   "casos_ocultos": true,
+   "monotono": true,
+   "neto_083_bajo_umbral": true,
+   "consola_limpia": true,
+   "sin_requests_externos": true,
+   "metadatos": true
+  },
+  "fallos": [],
+  "n_fallos": 0,
+  "consola": [],
+  "externos": [],
+  "meta": {
+   "lang": "es-AR",
+   "title": "Calculadora de sueldo neto 2026 en Argentina",
+   "desc": "Calculá tu sueldo neto en Argentina: aportes de jubilación, PAMI, obra social y Ganancias con las tablas de ARCA de julio a diciembre de 2026.",
+   "h1": 1,
+   "canonical": true
+  },
+  "nombre": "ok_plano",
+  "esperado": true,
+  "segundos": 5.7
+ },
+ {
+  "veredicto": true,
+  "checks": {
+   "casos_ocultos": true,
+   "monotono": true,
+   "neto_083_bajo_umbral": true,
+   "consola_limpia": true,
+   "sin_requests_externos": true,
+   "metadatos": true
+  },
+  "fallos": [],
+  "n_fallos": 0,
+  "consola": [],
+  "externos": [],
+  "meta": {
+   "lang": "es-AR",
+   "title": "Calculadora de sueldo neto 2026 en Argentina",
+   "desc": "Calculá tu sueldo neto en Argentina: aportes de jubilación, PAMI, obra social y Ganancias con las tablas de ARCA de julio a diciembre de 2026.",
+   "h1": 1,
+   "canonical": true
+  },
+  "nombre": "ok_formato_ar",
+  "esperado": true,
+  "segundos": 6.0
+ },
+ {
+  "veredicto": true,
+  "checks": {
+   "casos_ocultos": true,
+   "monotono": true,
+   "neto_083_bajo_umbral": true,
+   "consola_limpia": true,
+   "sin_requests_externos": true,
+   "metadatos": true
+  },
+  "fallos": [],
+  "n_fallos": 0,
+  "consola": [],
+  "externos": [],
+  "meta": {
+   "lang": "es-AR",
+   "title": "Calculadora de sueldo neto 2026 en Argentina",
+   "desc": "Calculá tu sueldo neto en Argentina: aportes de jubilación, PAMI, obra social y Ganancias con las tablas de ARCA de julio a diciembre de 2026.",
+   "h1": 1,
+   "canonical": true
+  },
+  "nombre": "ok_h1_distinto",
+  "esperado": true,
+  "segundos": 6.4
+ },
+ {
+  "veredicto": false,
+  "checks": {
+   "casos_ocultos": false,
+   "monotono": true,
+   "neto_083_bajo_umbral": true,
+   "consola_limpia": true,
+   "sin_requests_externos": true,
+   "metadatos": true
+  },
+  "fallos": [
+   {
+    "bruto": 5136978.12,
+    "esperado": 4083992.7,
+    "visto": 4033409.06
+   },
+   {
+    "bruto": 5136979.12,
+    "esperado": 4083993.51,
+    "visto": 4033409.74
+   },
+   {
+    "bruto": 5136980.12,
+    "esperado": 4083994.28,
+    "visto": 4033410.41
+   }
+  ],
+  "n_fallos": 47,
+  "consola": [],
+  "externos": [],
+  "meta": {
+   "lang": "es-AR",
+   "title": "Calculadora de sueldo neto 2026 en Argentina",
+   "desc": "Calculá tu sueldo neto en Argentina: aportes de jubilación, PAMI, obra social y Ganancias con las tablas de ARCA de julio a diciembre de 2026.",
+   "h1": 1,
+   "canonical": true
+  },
+  "nombre": "bug_sin_tope",
+  "esperado": false,
+  "segundos": 7.4
+ },
+ {
+  "veredicto": false,
+  "checks": {
+   "casos_ocultos": false,
+   "monotono": true,
+   "neto_083_bajo_umbral": true,
+   "consola_limpia": true,
+   "sin_requests_externos": true,
+   "metadatos": true
+  },
+  "fallos": [
+   {
+    "bruto": 6033302.2,
+    "esperado": 4770836.73,
+    "visto": 4774162.28
+   }
+  ],
+  "n_fallos": 1,
+  "consola": [],
+  "externos": [],
+  "meta": {
+   "lang": "es-AR",
+   "title": "Calculadora de sueldo neto 2026 en Argentina",
+   "desc": "Calculá tu sueldo neto en Argentina: aportes de jubilación, PAMI, obra social y Ganancias con las tablas de ARCA de julio a diciembre de 2026.",
+   "h1": 1,
+   "canonical": true
+  },
+  "nombre": "bug_tramo",
+  "esperado": false,
+  "segundos": 5.8
+ },
+ {
+  "veredicto": false,
+  "checks": {
+   "casos_ocultos": false,
+   "monotono": true,
+   "neto_083_bajo_umbral": false,
+   "consola_limpia": true,
+   "sin_requests_externos": true,
+   "metadatos": true
+  },
+  "fallos": [
+   {
+    "bruto": 1305063.92,
+    "esperado": 1083203.05,
+    "visto": 1096253.69
+   },
+   {
+    "bruto": 1459318.55,
+    "esperado": 1211234.4,
+    "visto": 1225827.58
+   },
+   {
+    "bruto": 1836641.31,
+    "esperado": 1524412.29,
+    "visto": 1542778.7
+   }
+  ],
+  "n_fallos": 70,
+  "consola": [],
+  "externos": [],
+  "meta": {
+   "lang": "es-AR",
+   "title": "Calculadora de sueldo neto 2026 en Argentina",
+   "desc": "Calculá tu sueldo neto en Argentina: aportes de jubilación, PAMI, obra social y Ganancias con las tablas de ARCA de julio a diciembre de 2026.",
+   "h1": 1,
+   "canonical": true
+  },
+  "nombre": "bug_aporte_16",
+  "esperado": false,
+  "segundos": 5.4
+ },
+ {
+  "veredicto": false,
+  "checks": {
+   "casos_ocultos": false,
+   "monotono": true,
+   "neto_083_bajo_umbral": true,
+   "consola_limpia": true,
+   "sin_requests_externos": true,
+   "metadatos": true
+  },
+  "fallos": [
+   {
+    "bruto": 3470457.44,
+    "esperado": 2871444.33,
+    "visto": 2880479.68
+   },
+   {
+    "bruto": 3470458.44,
+    "esperado": 2871445.12,
+    "visto": 2880480.51
+   },
+   {
+    "bruto": 3470459.44,
+    "esperado": 2871445.88,
+    "visto": 2880481.34
+   }
+  ],
+  "n_fallos": 63,
+  "consola": [],
+  "externos": [],
+  "meta": {
+   "lang": "es-AR",
+   "title": "Calculadora de sueldo neto 2026 en Argentina",
+   "desc": "Calculá tu sueldo neto en Argentina: aportes de jubilación, PAMI, obra social y Ganancias con las tablas de ARCA de julio a diciembre de 2026.",
+   "h1": 1,
+   "canonical": true
+  },
+  "nombre": "bug_hardcode_publicos",
+  "esperado": false,
+  "segundos": 5.3
+ },
+ {
+  "veredicto": false,
+  "checks": {
+   "casos_ocultos": true,
+   "monotono": true,
+   "neto_083_bajo_umbral": true,
+   "consola_limpia": false,
+   "sin_requests_externos": true,
+   "metadatos": true
+  },
+  "fallos": [],
+  "n_fallos": 0,
+  "consola": [
+   "fallo al cargar tablas"
+  ],
+  "externos": [],
+  "meta": {
+   "lang": "es-AR",
+   "title": "Calculadora de sueldo neto 2026 en Argentina",
+   "desc": "Calculá tu sueldo neto en Argentina: aportes de jubilación, PAMI, obra social y Ganancias con las tablas de ARCA de julio a diciembre de 2026.",
+   "h1": 1,
+   "canonical": true
+  },
+  "nombre": "bug_consola",
+  "esperado": false,
+  "segundos": 5.9
+ },
+ {
+  "veredicto": false,
+  "checks": {
+   "casos_ocultos": true,
+   "monotono": true,
+   "neto_083_bajo_umbral": true,
+   "consola_limpia": false,
+   "sin_requests_externos": false,
+   "metadatos": true
+  },
+  "fallos": [],
+  "n_fallos": 0,
+  "consola": [
+   "Failed to load resource: net::ERR_INTERNET_DISCONNECTED"
+  ],
+  "externos": [
+   "https://fonts.googleapis.com/css2?family=Inter"
+  ],
+  "meta": {
+   "lang": "es-AR",
+   "title": "Calculadora de sueldo neto 2026 en Argentina",
+   "desc": "Calculá tu sueldo neto en Argentina: aportes de jubilación, PAMI, obra social y Ganancias con las tablas de ARCA de julio a diciembre de 2026.",
+   "h1": 1,
+   "canonical": true
+  },
+  "nombre": "bug_externo",
+  "esperado": false,
+  "segundos": 5.3
+ },
+ {
+  "veredicto": false,
+  "checks": {
+   "casos_ocultos": true,
+   "monotono": true,
+   "neto_083_bajo_umbral": true,
+   "consola_limpia": true,
+   "sin_requests_externos": true,
+   "metadatos": false
+  },
+  "fallos": [],
+  "n_fallos": 0,
+  "consola": [],
+  "externos": [],
+  "meta": {
+   "lang": "en",
+   "title": "Calculadora de sueldo neto 2026 en Argentina",
+   "desc": "",
+   "h1": 1,
+   "canonical": false
+  },
+  "nombre": "bug_meta",
+  "esperado": false,
+  "segundos": 5.8
+ }
+]

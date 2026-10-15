@@ -1,0 +1,12 @@
+{
+ "ok_plano": true,
+ "ok_formato_ar": true,
+ "ok_h1_distinto": true,
+ "bug_sin_tope": false,
+ "bug_tramo": false,
+ "bug_aporte_16": false,
+ "bug_hardcode_publicos": false,
+ "bug_consola": false,
+ "bug_externo": false,
+ "bug_meta": false
+}
