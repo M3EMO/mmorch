@@ -20,7 +20,7 @@ Corrida final tras los seis oks del walkthrough, rearmada con `test_R5` en el co
 | Condición | Estado |
 |---|---|
 | 1. Capa computable verde | Cumplida: 3 módulos built, integración verde (casos ocultos, metamórficas, consola, red, axe, Lighthouse, metadatos). |
-| 2. Dos paradas y menos de 1 h del usuario | Parada 1 hecha (walkthrough), sin medir. Parada 2 rechazada en 5 min (preview). `python -m mmorch.builder parada` mide las paradas desde 2026-10-16. |
+| 2. Dos paradas y menos de 1 h del usuario | Parada 1 hecha (walkthrough), sin medir. Parada 2 rechazada en 5 min (preview); segunda vuelta abierta el 2026-10-16. `python -m mmorch.builder parada` mide las paradas desde 2026-10-16. |
 | 3. APIs < US$5 | Cumplida: ~US$0,07 de DeepSeek en la corrida rearmada (~US$0,17 en la previa); planner Sonnet ~US$0,16 equiv. de cupo; Haiku US$0,002. |
 | 4. Run-log completo | Coder, rechazos, cupo y USD por módulo sí (`orchestration-gkw` cerrado); horas del usuario desde la parada 2. |
 | 5. Juez en sombra con rúbricas | Texto sí: prefiere prototipo-04 en los dos órdenes, también tras el rearmado con etiquetas; el log no guarda el motivo. Visual no: GLM sin saldo. |
@@ -31,6 +31,9 @@ Hallazgos de la corrida final:
 - El juez detectó un defecto real que la capa computable no exigía: el desglose sin etiquetas. Ya es computable: `test_R5_desglose_con_etiquetas` en el contrato del módulo 3 pasa en prototipo-04 y falla en el sitio final, igual que la opinión del juez.
 - La parada 2 rechazó el sitio rearmado. El usuario escribió 10e100: el sitio lo acepta y el monto desborda la pantalla. El usuario también juzgó el diseño muy básico: el sitio no tiene estilos.
 - Ningún caso oculto probó una entrada absurda, y ningún contrato pide un rango de entrada. El rechazo es el primer defecto que encontró un humano y no la capa computable.
+- La parada 2 pasó a contratos: `test_R6` (entrada validada), el driver prueba entradas inválidas y scroll a 390 px, y `m4-estilos` exige mínimos de diseño. Controles: un sitio que valida pasa; 10e100 sin validar desborda y falla.
+- Rearmar F2 destapó dos defectos del SDLC, ya arreglados con test. El arreglo de compilación reescribía archivos sanos (`62fecfd`). El parser del plan leía notas como archivos (`ad5f4ad`).
+- Cuarto rearmado verde: 4 módulos, 0 rechazos, ~US$0,10 de API, 11 min. El juez de texto ahora prefiere el sitio nuevo en los dos órdenes.
 - El rearmado desde cero con `test_R5` salió verde: m1 Haiku, m2 y m3 DeepSeek, 0 rechazos, 8,5 min. El sitio muestra cada monto con su etiqueta.
 
 ## Notes

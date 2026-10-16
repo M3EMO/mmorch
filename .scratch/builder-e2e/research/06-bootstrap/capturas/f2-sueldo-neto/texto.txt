@@ -1,5 +1,8 @@
-Calculadora de sueldo neto
-Sueldo bruto  Calcular
+Sueldo neto
+Sueldo bruto (ARS)  Calcular
+
+Los aportes se calculan sobre el bruto: jubilación 11%, PAMI 3% y obra social 3%. Ganancias se retiene sobre el excedente del mínimo no imponible. Tablas vigentes de 2026-07 a 2026-12.
+
 Neto
 $ 2.893.757,86
 Jubilación
@@ -10,5 +13,3 @@ Obra social
 $ 105.000,00
 Ganancias
 $ 11.242,14
-
-Los aportes incluyen jubilación, PAMI y obra social. El impuesto a las Ganancias se calcula según las tablas vigentes de julio a diciembre de 2026.
