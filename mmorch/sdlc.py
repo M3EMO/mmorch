@@ -355,7 +355,9 @@ def sh(cmd, timeout: float | None = None, keep: int = 6000, *, host: bool = Fals
 
 _LANG_NAMES = {".py": "Python", ".ts": "TypeScript", ".tsx": "TypeScript", ".js": "JavaScript", ".jsx": "JavaScript",
                ".mjs": "JavaScript", ".java": "Java", ".kt": "Kotlin", ".go": "Go", ".rs": "Rust", ".cs": "C#",
-               ".cpp": "C++", ".c": "C", ".rb": "Ruby", ".php": "PHP", ".swift": "Swift"}
+               ".cpp": "C++", ".c": "C", ".rb": "Ruby", ".php": "PHP", ".swift": "Swift",
+               # builder-e2e: sin estas, index.html caia al lenguaje del plan y el coder escribia TypeScript adentro
+               ".html": "HTML", ".css": "CSS"}
 # Salidas de un comando que no existe (shell de Windows en ingles y castellano, POSIX, y avisos de npx/tsc).
 _NO_TOOL = re.compile(r"is not recognized as an internal or external command|no se reconoce como un comando"
                       r"|command not found|: not found\b|To get access to the TypeScript compiler"

@@ -23,3 +23,12 @@ def test_coder_claude_va_por_la_cli_aislada_y_suma_su_cupo(tmp_path, monkeypatch
     assert "--restricted" in argv and argv[argv.index("--tools") + 1] == ""   # sin hooks del usuario y sin herramientas
     assert argv[argv.index("--system-prompt") + 1] == "Sos un programador Python senior." and prompt == "escribi a.py"
     assert S.state["claude_coder_usd"] == 0.0246 and S.state["coder"] == "claude:claude-haiku-5-5"
+
+
+def test_rol_de_un_html_es_html_aunque_el_plan_sea_typescript(tmp_path):
+    t = types.SimpleNamespace(name="c", task="t", accept_files={})
+    S.configure(t, contract=[], feat={"repo": str(tmp_path), "files": ["src/app.ts"], "suite": []}, wt=tmp_path,
+                accept_cmd="python -c pass")
+    S.state["plan_files"] = ["src/app.ts", "src/calculo.ts", "index.html"]
+    assert S._rol("index.html").startswith("Sos un programador HTML senior")
+    assert S._rol("src/app.ts").startswith("Sos un programador TypeScript senior")

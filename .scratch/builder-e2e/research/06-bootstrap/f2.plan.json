@@ -29,7 +29,7 @@
   },
   {
    "nombre": "m3-interfaz",
-   "tarea": "Crear index.html (lang es-AR) y src/app.ts. La pagina tiene un solo h1, title de 30 a 60 caracteres, meta description de 70 a 160 caracteres, link canonical https://ejemplo.com.ar/sueldo-neto, un input id='bruto', un boton data-testid='calcular' y salidas data-testid='neto', 'jubilacion', 'pami', 'obra-social' y 'ganancias' en pesos con formato es-AR. Carga solo <script type=\"module\" src=\"dist/app.js\"></script> (dist sale de tsc -p tsconfig.build.json); nada externo: sin fuentes, CDN ni analytics. app.ts usa calcularNeto y PARAMETROS al hacer click en calcular. Texto breve en español que explica los aportes y Ganancias con la fecha de vigencia de las tablas.",
+   "tarea": "Crear index.html (lang es-AR) y src/app.ts. La pagina tiene un solo h1, title de 30 a 60 caracteres, meta description de 70 a 160 caracteres, link canonical https://ejemplo.com.ar/sueldo-neto, un input id='bruto' con <label for='bruto'> visible, un boton data-testid='calcular' y salidas data-testid='neto', 'jubilacion', 'pami', 'obra-social' y 'ganancias' en pesos con formato es-AR. Carga solo <script type=\"module\" src=\"dist/app.js\"></script> (dist sale de tsc -p tsconfig.build.json); nada externo: sin fuentes, CDN ni analytics. app.ts usa calcularNeto y PARAMETROS al hacer click en calcular. Texto breve en español que explica los aportes y Ganancias con la fecha de vigencia de las tablas.",
    "files": [
     "src/app.ts",
     "index.html"
@@ -45,10 +45,17 @@
   },
   {
    "imagen": "builder-driver",
-   "cmd": "python {base}/../05-driver/driver.py {repo} {base}/../05-driver/casos.json",
+   "cmd": "python {base}/../05-driver/driver.py {repo} {base}/../05-driver/casos.json {capturas}",
    "montajes": [
     "../05-driver"
    ]
   }
- ]
+ ],
+ "juez": {
+  "contra": "../09-juez/capturas/prototipo-04",
+  "rubricas": [
+   "seo_texto",
+   "visual"
+  ]
+ }
 }

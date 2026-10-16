@@ -62,7 +62,7 @@ def _una_vez(primero: Path, segundo: Path, rubrica: str, modelo: str, llamar) ->
     if llamar is None:
         from .providers import call as llamar
     res = llamar(modelo, mensaje, pattern="juez-sombra", node=modelo, phase=f"juez-{rubrica}", temperature=0.0,
-                 max_tokens=4096, timeout=180)
+                 max_tokens=16384, timeout=300)   # 4096: el reasoner agotaba el presupuesto razonando
     crudo = res.text if hasattr(res, "text") else str(res)
     try:
         return json.loads(crudo[crudo.index("{"):crudo.rindex("}") + 1])

@@ -12,6 +12,12 @@ test("test_R1_contrato_del_driver: contrato del driver: input, boton y salida co
   for (const k of ["jubilacion", "pami", "obra-social", "ganancias"]) assert.equal(cuenta(new RegExp(`data-testid="${k}"`, "g")), 1, k);
 });
 
+test("test_R4_input_con_etiqueta: el campo del bruto tiene una etiqueta accesible (hallazgo de axe, walkthrough F2)", () => {
+  const etiquetado = /<label[^>]*for="bruto"/.test(html) || /<input[^>]*id="bruto"[^>]*aria-label="[^"]+"/.test(html)
+    || /<input[^>]*aria-label="[^"]+"[^>]*id="bruto"/.test(html);
+  assert.ok(etiquetado, "falta <label for=\"bruto\"> o aria-label en el input");
+});
+
 test("test_R2_metadatos_seo: metadatos SEO", () => {
   assert.match(html, /<html[^>]*lang="es-AR"/);
   const title = (html.match(/<title>([^<]*)<\/title>/) || [])[1] || "";
