@@ -1542,7 +1542,8 @@ def build():
         for _ in range(3):  # r1 2026-09-11: test-compile tambien entra al fix loop, antes cortaba sin vuelta
             if ok:
                 break
-            for f in state["plan_files"]:
+            # F2 m3: pedir TODOS reescribia validacion.ts (sano) con el contenido de app.ts, el que tenia el error
+            for f in [f for f in state["plan_files"] if f in log] or state["plan_files"]:
                 out = llm(CODER, _rol(f) + "Devolves SOLO el codigo corregido del archivo pedido, un solo archivo.",
                           f"py_compile o la importacion de los tests fallo. Corregi {f}.\n\nERROR:\n{log}\n\nARCHIVOS:\n{_joined(written)}")
                 code = one_file(strip_fence(out), f)

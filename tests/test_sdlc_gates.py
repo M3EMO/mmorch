@@ -68,6 +68,36 @@ def test_build_no_escribe_la_clase_de_otro_archivo(run, monkeypatch):
     assert (wt / "src" / "Opcion.java").read_text(encoding="utf-8") == orig
 
 
+def test_compile_fix_solo_pide_los_archivos_que_nombra_el_error(run, monkeypatch):
+    # F2 m3 (2026-10-16): el error era de app.ts y el coder tambien reescribio validacion.ts con el codigo de app.ts
+    wt = S.WT
+    (wt / "docs" / "sdlc").mkdir(parents=True)
+    (wt / "src").mkdir()
+    for n in ("spec", "plan"):
+        (wt / "docs" / "sdlc" / f"{n}.md").write_text("x\n", encoding="utf-8")
+    S.state["plan_files"] = ["src/validacion.ts", "src/app.ts"]
+    pedidos = []
+
+    def coder(model, system, prompt):
+        pedidos.append(prompt)
+        return f"export const v{len(pedidos)} = {len(pedidos)};\n"
+
+    monkeypatch.setattr(S, "llm", coder)
+    monkeypatch.setattr(S, "gate_baseline", lambda: (True, "ok"))
+    logs = iter([(False, "src/app.ts(42,9): error TS2741"), (True, "ok")])
+    monkeypatch.setattr(S, "gate_compile", lambda files: next(logs))
+    monkeypatch.setattr(S, "gate_test_compile", lambda: (True, "ok"))
+
+    def corta(*a, **k):
+        raise _Corte
+
+    monkeypatch.setattr(S, "gate_clones", corta)
+    with pytest.raises(_Corte):
+        S.build()
+    arreglos = [p.split("\n")[0] for p in pedidos if p.startswith("py_compile")]
+    assert arreglos == ["py_compile o la importacion de los tests fallo. Corregi src/app.ts."]
+
+
 def test_plan_allowlist_tests_ajenos_no_y_obligatorios_si(run):
     ok, _ = S.gate_plan_allowlist("## Archivos\n- `pkg/a.py` [R1]\n- `tests/test_capas.py` [R1]\n", ["pkg/a.py", "tests/test_capas.py"])
     assert ok
