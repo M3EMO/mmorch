@@ -81,7 +81,7 @@ def test_el_juez_opina_en_sombra_y_no_cambia_el_veredicto(tmp_path, monkeypatch)
     import mmorch.juez_sombra as J
     fake, _ = _falso()
     monkeypatch.setattr(S, "build_feature", fake)
-    monkeypatch.setattr(J, "comparar", lambda a, b, r: {"mejor": "B"})
+    monkeypatch.setattr(J, "comparar", lambda a, b, r: {"mejor": "B", "motivo_ab": "B etiqueta el desglose", "error": ""})
     p = _plan(tmp_path, ["m1"])
     plan = json.loads(p.read_text())
     plan["juez"] = {"contra": "capturas/ref", "rubricas": ["seo_texto"]}
@@ -90,5 +90,18 @@ def test_el_juez_opina_en_sombra_y_no_cambia_el_veredicto(tmp_path, monkeypatch)
         (tmp_path / "plan" / d).mkdir(parents=True)
         (tmp_path / "plan" / d / "texto.txt").write_text("x", encoding="utf-8")
     assert B.main([str(p), str(tmp_path / "repo")]) == 0   # la opinion "B" (la referencia gana) no tumba nada
-    assert {"juez": "seo_texto", "contra": "capturas/ref", "mejor": "B"} in B.armar.__globals__["juzgar"](
+    assert {"juez": "seo_texto", "contra": "capturas/ref", "mejor": "B", "motivo": "B etiqueta el desglose"} in B.armar.__globals__["juzgar"](
         tmp_path / "repo", plan["juez"], tmp_path / "plan")
+
+
+def test_parada_mide_minutos_y_rechazos_del_usuario(tmp_path, monkeypatch):
+    monkeypatch.setenv("MMORCH_HOME", str(tmp_path))
+    B.parada("f2", "preview", "abrir", ts=0)
+    B.parada("otro", "preview", "abrir", ts=0)   # otro entregable no se mezcla
+    assert B.parada("f2", "preview", "rechazado", "10e100 desborda", ts=600)["minutos"] == 10.0
+    B.parada("f2", "preview", "aprobado", ts=900)   # cierre sin apertura: no suma
+    B.parada("f2", "preview", "abrir", ts=1000)
+    total = B.parada("f2", "preview", "aprobado", ts=1300)
+    assert total == {"entregable": "f2", "minutos": 15.0, "rechazos": 1, "aprobadas": ["preview"]}
+    with pytest.raises(ValueError):
+        B.parada("f2", "preview", "cerrar")

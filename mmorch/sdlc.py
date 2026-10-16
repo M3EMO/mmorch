@@ -1847,7 +1847,6 @@ def run(from_stage: float = 2, to_stage: float = 6) -> dict:
         return _run_stages(from_stage, to_stage)
     finally:
         unregister_run_tracker(_RUN_USD)
-        state["usd_run"] = round(_RUN_USD["usd"], 4)
 
 
 def _run_stages(from_stage: float, to_stage: float = 6) -> dict:
@@ -1902,6 +1901,7 @@ def _run_stages(from_stage: float, to_stage: float = 6) -> dict:
         print(str(e), flush=True)
     state["minutes_total"] = round((time.time() - state["t0_epoch"]) / 60, 2)
     state["usd"] = ledger_usd()
+    state["usd_run"] = round(_RUN_USD["usd"], 4)  # antes del flush y del return: en el finally de run() llegaba tarde
     _flush()
     here = RUNS / f"run-log-{PHASE}.json"
     here.write_text(LOG.read_text(encoding="utf-8"), encoding="utf-8")

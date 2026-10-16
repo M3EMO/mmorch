@@ -11,6 +11,8 @@ El plan es la salida de la descomposicion (Opus, aprobada en el walkthrough). Ru
      "juez": {"contra": "capturas/otro-entregable", "rubricas": ["seo_texto", "visual"]}}   # opcional: sombra
 Bootstrap: commit inicial y, si hay Dockerfile.sdlc y `contenedor` en sdlc.toml, construye la imagen (con red).
 `{capturas}` en un comando de integracion = carpeta donde el driver deja evidencia para el juez en sombra.
+Paradas del usuario (ticket 01: walkthrough y preview), medidas de abrir a cerrar:
+    python -m mmorch.builder parada <entregable> <walkthrough|preview> <abrir|aprobado|rechazado> [nota]
 Encadenado: cada modulo construido se fusiona en main antes del siguiente. Corta en el primer modulo que no queda
 construido; el resto no corre. Devuelve una fila por modulo y otra por comando de integracion.
 """
@@ -23,6 +25,7 @@ import subprocess
 import sys
 import time
 
+from .paths import logs_dir
 from .sandbox import container_argv, engine
 
 
@@ -76,7 +79,7 @@ def construir(repo: pathlib.Path, modulos: list[dict], wts: pathlib.Path) -> lis
                                files=m["files"], wt=wts / m["nombre"], phase=fase, coder=m.get("coder"))
         except StageFailed as e:
             st = {"status": "stage_failed", "failed_stage": e.stage, "failed_note": e.note}
-        fila = {"modulo": m["nombre"], "coder": m.get("coder"), "coder_cupo_usd": st.get("claude_coder_usd"),
+        fila = {"modulo": m["nombre"], "coder": m.get("coder"), "coder_cupo_usd": st.get("claude_coder_usd"), "usd": st.get("usd_run"),
                 "status": st.get("status"), "failed_stage": st.get("failed_stage"),
                 "minutos": round((time.time() - t0) / 60, 1), "claude_calls": st.get("claude_calls"),
                 "rechazos": [g["gate"] for g in st.get("gate_rejects", [])]}
@@ -104,8 +107,11 @@ def juzgar(repo: pathlib.Path, juez: dict, base: pathlib.Path) -> list[dict]:
     nuevo, ref = _capturas(base, repo), (base / juez["contra"]).resolve()
     if not (nuevo / "texto.txt").exists() or not (ref / "texto.txt").exists():
         return [{"juez": "sin capturas", "nuevo": str(nuevo), "contra": str(ref)}]
-    return [{"juez": r, "contra": juez["contra"], "mejor": comparar(nuevo, ref, r)["mejor"]}
-            for r in juez.get("rubricas", ["seo_texto", "visual"])]
+    filas = []
+    for r in juez.get("rubricas", ["seo_texto", "visual"]):
+        d = comparar(nuevo, ref, r)
+        filas.append({"juez": r, "contra": juez["contra"], "mejor": d["mejor"], "motivo": d["motivo_ab"] or d["error"]})
+    return filas
 
 
 def integrar(repo: pathlib.Path, pasos: list[dict], base: pathlib.Path) -> list[dict]:
@@ -138,8 +144,40 @@ def armar(plan_path: str, repo_dir: str) -> list[dict]:
     return filas
 
 
+def _paradas() -> pathlib.Path:
+    return logs_dir() / "builder" / "paradas.jsonl"
+
+
+def parada(entregable: str, nombre: str, evento: str, nota: str = "", *, ts: float | None = None) -> dict:
+    """Anota una parada y devuelve el total del entregable: minutos del usuario y rechazos (destino: < 1 h, 2 paradas).
+    shortcut: reloj de pared de abrir a cerrar, cota superior (el usuario puede no estar mirando); upgrade si hace
+    falta tiempo activo."""
+    if evento not in ("abrir", "aprobado", "rechazado"):
+        raise ValueError(f"evento desconocido: {evento}")
+    _paradas().parent.mkdir(parents=True, exist_ok=True)
+    with _paradas().open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"ts": time.time() if ts is None else ts, "entregable": entregable, "parada": nombre, "evento": evento,
+                            "nota": nota}, ensure_ascii=False) + "\n")
+    abiertas: dict[str, float] = {}
+    minutos, rechazos, aprobadas = 0.0, 0, []
+    for d in (json.loads(x) for x in _paradas().read_text(encoding="utf-8").splitlines() if x.strip()):
+        if d["entregable"] != entregable:
+            continue
+        if d["evento"] == "abrir":
+            abiertas[d["parada"]] = d["ts"]
+        elif d["parada"] in abiertas:   # un cierre sin apertura no suma minutos que no se midieron
+            minutos += (d["ts"] - abiertas.pop(d["parada"])) / 60
+            rechazos += d["evento"] == "rechazado"
+            if d["evento"] == "aprobado":
+                aprobadas.append(d["parada"])
+    return {"entregable": entregable, "minutos": round(minutos, 1), "rechazos": rechazos, "aprobadas": aprobadas}
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
+    if args[:1] == ["parada"] and len(args) in (4, 5):
+        print(json.dumps(parada(*args[1:]), ensure_ascii=False))
+        return 0
     if len(args) != 2:
         print(__doc__)
         return 2

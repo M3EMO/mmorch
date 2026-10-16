@@ -74,17 +74,18 @@ def comparar(a: Path, b: Path, rubrica: str, *, modelo: str | None = None, llama
     """Opinion de a pares sobre las capturas del driver (carpetas con texto.txt y PNGs). NUNCA bloquea."""
     modelo = modelo or (VLM if rubrica == "visual" else DEFAULT_VERIFIER)
     try:
-        ab = _una_vez(a, b, rubrica, modelo, llamar).get("mejor", "")
-        ba = _una_vez(b, a, rubrica, modelo, llamar).get("mejor", "")
+        r_ab, r_ba = _una_vez(a, b, rubrica, modelo, llamar), _una_vez(b, a, rubrica, modelo, llamar)
     except Exception as e:  # noqa: BLE001 — la sombra nunca puede tumbar una corrida
-        ab, ba, error = "", "", str(e)[:200]
+        r_ab, r_ba, error = {}, {}, str(e)[:200]
     else:
         error = ""
+    ab, ba = r_ab.get("mejor", ""), r_ba.get("mejor", "")
     directo = {"primero": "A", "segundo": "B"}.get(ab, ab)
     invertido = {"primero": "B", "segundo": "A"}.get(ba, ba)
     mejor = directo if directo == invertido else "inconsistente"
     d = {"ts": time.time(), "rubrica": rubrica, "a": str(a), "b": str(b), "modelo": modelo, "mejor": mejor,
-         "orden_ab": directo, "orden_ba": invertido, "error": error}
+         "orden_ab": directo, "orden_ba": invertido, "motivo_ab": r_ab.get("motivo", ""), "motivo_ba": r_ba.get("motivo", ""),
+         "error": error}
     _sombra().parent.mkdir(parents=True, exist_ok=True)
     with _sombra().open("a", encoding="utf-8") as f:
         f.write(json.dumps(d, ensure_ascii=False) + "\n")
@@ -111,10 +112,11 @@ if __name__ == "__main__":
         for d, t in ((a, "texto A"), (b, "texto B")):
             d.mkdir()
             (d / "texto.txt").write_text(t, encoding="utf-8")
-        respuestas = iter(['{"mejor": "primero"}', '{"mejor": "segundo"}', '{"mejor": "primero"}', '{"mejor": "primero"}'])
+        respuestas = iter(['{"mejor": "primero", "motivo": "A explica los aportes"}', '{"mejor": "segundo"}', '{"mejor": "primero"}', '{"mejor": "primero"}'])
         falso = lambda *a, **k: next(respuestas)  # noqa: E731
         import os
         os.environ.setdefault("MMORCH_HOME", td)
-        assert comparar(a, b, "seo_texto", llamar=falso)["mejor"] == "A"   # A gana en los dos ordenes
+        op = comparar(a, b, "seo_texto", llamar=falso)
+        assert op["mejor"] == "A" and op["motivo_ab"] == "A explica los aportes"   # A gana en los dos ordenes
         assert comparar(a, b, "seo_texto", llamar=falso)["mejor"] == "inconsistente"   # cada orden elige al primero
     print("juez_sombra ok")

@@ -103,6 +103,20 @@ def test_run_recupera_el_test_al_reanudar(tmp_path):
     assert "tests/test_sdlc_m.py" in t.accept_files
 
 
+def test_run_log_trae_el_costo_del_run(tmp_path, monkeypatch):
+    """orchestration-gkw: usd_run se anotaba despues del flush y del return, asi que quedaba en null."""
+    from mmorch.providers import _track_cost
+    repo = _repo(tmp_path)
+    _configura(repo, STRONG)
+    monkeypatch.setattr(S, "RUNS", tmp_path / "logs")
+    (tmp_path / "logs").mkdir()
+    (repo / "docs" / "sdlc").mkdir(parents=True)
+    (repo / "docs" / "sdlc" / "plan.md").write_text("## Archivos\n- `pkg/a.py` [R1]\n", encoding="utf-8")
+    monkeypatch.setattr(S, "snapshot_baseline", lambda: _track_cost(0.25))   # una api-call durante el run
+    assert S.run(from_stage=99)["usd_run"] == 0.25
+    assert json.loads(S.LOG.read_text(encoding="utf-8"))["usd_run"] == 0.25
+
+
 def test_tests_nombrados_en_cualquier_lenguaje(tmp_path):
     """El server reconoce el test de aceptacion que nombra el payload aunque no sea .py (Estudio, ChatBot)."""
     from mmorch.server_engine import _tests_nombrados
