@@ -1,5 +1,14 @@
 Calculadora de sueldo neto
+Sueldo bruto  Calcular
+Neto
+$ 2.893.757,86
+Jubilación
+$ 385.000,00
+PAMI
+$ 105.000,00
+Obra social
+$ 105.000,00
+Ganancias
+$ 11.242,14
 
-Los aportes de jubilación, PAMI y obra social se descuentan del sueldo bruto. Ganancias se calcula según las tablas vigentes de julio a diciembre de 2026.
-
-Sueldo bruto  Calcular $ 2.893.757,86 $ 385.000,00 $ 105.000,00 $ 105.000,00 $ 11.242,14
+Los aportes incluyen jubilación, PAMI y obra social. El impuesto a las Ganancias se calcula según las tablas vigentes de julio a diciembre de 2026.

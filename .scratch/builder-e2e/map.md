@@ -15,20 +15,21 @@ Detalle completo: `brainstorms/2026-10-14-builder-e2e-destino.md`.
 
 ## Estado del destino (2026-10-16)
 
-Corrida final tras los seis oks del walkthrough: `~/Proyectos/F2-seo-calculadoras/f2-sueldo-neto` (repo local).
+Corrida final tras los seis oks del walkthrough, rearmada con `test_R5` en el contrato: `~/Proyectos/F2-seo-calculadoras/f2-sueldo-neto` (repo local). La corrida previa sin etiquetas quedó en `.fallidas/f2-sueldo-neto-2-sin-etiquetas`.
 
 | Condición | Estado |
 |---|---|
 | 1. Capa computable verde | Cumplida: 3 módulos built, integración verde (casos ocultos, metamórficas, consola, red, axe, Lighthouse, metadatos). |
 | 2. Dos paradas y menos de 1 h del usuario | Parada 1 hecha (walkthrough). Parada 2 pendiente (preview). Las horas no se miden: `human_interventions` sigue en 0. |
-| 3. APIs < US$5 | Cumplida: ~US$0,17 de DeepSeek; planner Sonnet ~US$0,16 equiv. de cupo; Haiku US$0,002. |
+| 3. APIs < US$5 | Cumplida: ~US$0,07 de DeepSeek en la corrida rearmada (~US$0,17 en la previa); planner Sonnet ~US$0,16 equiv. de cupo; Haiku US$0,002. |
 | 4. Run-log completo | Parcial: coder sorteado, rechazos y cupo sí; USD por run no (`orchestration-gkw`); horas del usuario no. |
-| 5. Juez en sombra con rúbricas | Texto sí: prefiere la referencia prototipo-04 en los dos órdenes (desglose sin etiquetas en el final). Visual no: GLM sin saldo. |
+| 5. Juez en sombra con rúbricas | Texto sí: prefiere prototipo-04 en los dos órdenes, también tras el rearmado con etiquetas; el log no guarda el motivo. Visual no: GLM sin saldo. |
 
 Hallazgos de la corrida final:
 
 - Bug del SDLC arreglado: `_LANG_NAMES` no conocía `.html`, así que el coder recibía `index.html` como "programador TypeScript" y escribía TypeScript adentro. Primer intento fallido guardado en `~/Proyectos/F2-seo-calculadoras/.fallidas/`.
 - El juez detectó un defecto real que la capa computable no exigía: el desglose sin etiquetas. Ya es computable: `test_R5_desglose_con_etiquetas` en el contrato del módulo 3 pasa en prototipo-04 y falla en el sitio final, igual que la opinión del juez.
+- El rearmado desde cero con `test_R5` salió verde: m1 Haiku, m2 y m3 DeepSeek, 0 rechazos, 8,5 min. El sitio muestra cada monto con su etiqueta.
 
 ## Notes
 
