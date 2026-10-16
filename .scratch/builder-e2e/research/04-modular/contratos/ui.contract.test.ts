@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
+import { validarBruto } from "../src/validacion.ts";
 
 const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const cuenta = (re: RegExp) => (html.match(re) || []).length;
@@ -42,4 +43,19 @@ test("test_R3_modulo_compilado_sin_externos: carga el modulo compilado y nada ex
   assert.match(html, /<script type="module" src="dist\/app\.js"><\/script>/);
   assert.equal(cuenta(/(src|href)="https?:\/\/(?!ejemplo\.com\.ar)/g), 0);
   assert.ok(existsSync(new URL("../src/app.ts", import.meta.url)));
+});
+
+test("test_R6_entrada_validada: rechaza montos absurdos, negativos o no numericos con un error visible (parada 2)", () => {
+  for (const t of ["10e100", "1e6", "1000000000.01", "99999999999", "-5", "abc", "", "  ", "Infinity", "NaN", "1.2.3", "5,123"]) {
+    const r = validarBruto(t);
+    assert.ok(!r.ok && r.error.trim().length > 0, `acepto "${t}"`);
+  }
+  const validos: [string, number][] = [["3500000", 3500000], ["0", 0], ["1000000000", 1e9], [" 2500000 ", 2500000],
+    ["1234567.89", 1234567.89], ["1234567,5", 1234567.5]];
+  for (const [t, v] of validos) {
+    const r = validarBruto(t);
+    assert.ok(r.ok && Math.abs(r.bruto - v) < 1e-9, `rechazo "${t}"`);
+  }
+  assert.match(html, /<[^>]*data-testid="error"[^>]*(role="alert"|aria-live="(polite|assertive)")|<[^>]*(role="alert"|aria-live="(polite|assertive)")[^>]*data-testid="error"/,
+    "falta el elemento data-testid=\"error\" con role=\"alert\" o aria-live");
 });

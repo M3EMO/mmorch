@@ -29,13 +29,24 @@
   },
   {
    "nombre": "m3-interfaz",
-   "tarea": "Crear index.html (lang es-AR) y src/app.ts. La pagina tiene un solo h1, title de 30 a 60 caracteres, meta description de 70 a 160 caracteres, link canonical https://ejemplo.com.ar/sueldo-neto, un input id='bruto' con <label for='bruto'> visible, un boton data-testid='calcular' y salidas data-testid='neto', 'jubilacion', 'pami', 'obra-social' y 'ganancias' en pesos con formato es-AR; cada salida va justo despues de su etiqueta visible (Neto, Jubilación, PAMI, Obra social, Ganancias), por ejemplo <dt>PAMI</dt><dd><output data-testid='pami'></output></dd>. Carga solo <script type=\"module\" src=\"dist/app.js\"></script> (dist sale de tsc -p tsconfig.build.json); nada externo: sin fuentes, CDN ni analytics. app.ts usa calcularNeto y PARAMETROS al hacer click en calcular. Texto breve en español que explica los aportes y Ganancias con la fecha de vigencia de las tablas.",
+   "tarea": "Crear index.html (lang es-AR) y src/app.ts. La pagina tiene un solo h1, title de 30 a 60 caracteres, meta description de 70 a 160 caracteres, link canonical https://ejemplo.com.ar/sueldo-neto, un input id='bruto' con <label for='bruto'> visible, un boton data-testid='calcular' y salidas data-testid='neto', 'jubilacion', 'pami', 'obra-social' y 'ganancias' en pesos con formato es-AR; cada salida va justo despues de su etiqueta visible (Neto, Jubilación, PAMI, Obra social, Ganancias), por ejemplo <dt>PAMI</dt><dd><output data-testid='pami'></output></dd>. Carga solo <script type=\"module\" src=\"dist/app.js\"></script> (dist sale de tsc -p tsconfig.build.json); nada externo: sin fuentes, CDN ni analytics. Crear tambien src/validacion.ts que exporta `validarBruto: ValidarBruto` (src/tipos.ts): recorta espacios y acepta solo digitos con hasta 2 decimales separados por punto o coma, de 0 a BRUTO_MAX; rechaza notacion cientifica (10e100), negativos, texto, vacio, Infinity y NaN con un mensaje en español. index.html tiene un <p data-testid='error' role='alert' hidden></p>. app.ts, al hacer click en calcular, valida con validarBruto: si es invalido muestra el error y vacia todas las salidas; si es valido oculta el error y usa calcularNeto y PARAMETROS. Texto breve en español que explica los aportes y Ganancias con la fecha de vigencia de las tablas.",
    "files": [
+    "src/validacion.ts",
     "src/app.ts",
     "index.html"
    ],
    "contrato": "../04-modular/contratos/ui.contract.test.ts",
    "accept": "tests/ui.contract.test.ts"
+  },
+  {
+   "nombre": "m4-estilos",
+   "tarea": "Crear estilos.css y enlazarlo en index.html con <link rel=\"stylesheet\" href=\"estilos.css\"> (local, nada externo, sin atributos style en linea; no cambies ids, data-testid, etiquetas ni textos). Diseño de una herramienta financiera seria y legible, no generico: fondo papel calido y texto casi negro, un solo color de acento verde petroleo para el neto. Colores como variables en :root (minimo 4) redefinidas en @media (prefers-color-scheme: dark); body toma el fondo de una variable. Contenido centrado con max-width cerca de 40rem y margen lateral de 16px en movil. El neto resalta: regla propia para [data-testid=\"neto\"] con font-size mayor y el acento. El desglose es una tabla visual: cada etiqueta a la izquierda y su monto alineado a la derecha, con una linea fina entre filas. Montos con font-variant-numeric: tabular-nums y overflow-wrap: anywhere. Input y boton grandes y comodos al tacto, con foco visible. El error se ve en rojo legible. Contraste AA en los dos temas. Fuentes del sistema.",
+   "files": [
+    "estilos.css",
+    "index.html"
+   ],
+   "contrato": "../04-modular/contratos/estilos.contract.test.ts",
+   "accept": "tests/estilos.contract.test.ts"
   }
  ],
  "integracion": [

@@ -66,6 +66,17 @@ with sync_playwright() as p:
     ns = [calcular(g) for g in gs]
     bajos = [round(rnd.uniform(100_000, verdad["umbral"] - 1), 2) for _ in range(10)]
     ns_bajos = [calcular(g) for g in bajos]
+    def rechaza(texto):
+        """Parada 2: una entrada invalida borra el resultado previo y muestra un error visible."""
+        calcular(3_500_000)
+        pg.evaluate("v => { document.querySelector('#bruto').value = v }", texto)   # fill() no escribe texto en type=number
+        pg.click("[data-testid=calcular]")
+        error = pg.locator("[data-testid=error]")
+        return numero(pg.inner_text("[data-testid=neto]")) is None and error.count() == 1 and error.is_visible() \
+            and error.inner_text().strip() != ""
+
+    invalidas_ok = [rechaza(t) for t in ("10e100", "1e13", "-5", "abc", "")]
+    tope_ok = calcular(1_000_000_000) is not None and not pg.locator("[data-testid=error]").is_visible()
     if len(sys.argv) > 3:   # ticket 09: evidencia para el juez en sombra, despues de un calculo de ejemplo
         cap = pathlib.Path(sys.argv[3])
         cap.mkdir(parents=True, exist_ok=True)
@@ -74,6 +85,9 @@ with sync_playwright() as p:
         pg.screenshot(path=str(cap / "escritorio.png"), full_page=True)
         pg.set_viewport_size({"width": 390, "height": 844})
         pg.screenshot(path=str(cap / "movil.png"), full_page=True)
+    pg.set_viewport_size({"width": 390, "height": 844})   # parada 2: el monto mas largo valido no desborda en movil
+    calcular(1_000_000_000)
+    sin_scroll = pg.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     nav.close()
 # ticket 11: Lighthouse contra el mismo servidor local, sin red; desempeño solo avisa (ruidoso en contenedor)
 lh = subprocess.run(["lighthouse", url, "--output=json", "--output-path=stdout", "--quiet",
@@ -91,6 +105,8 @@ checks = {
     "casos_ocultos": not fallos,
     "monotono": None not in ns and all(b >= a - 0.01 for a, b in zip(ns, ns[1:])),
     "neto_083_bajo_umbral": all(x is not None and abs(x - 0.83 * g) <= 1 for g, x in zip(bajos, ns_bajos)),
+    "entrada_validada": all(invalidas_ok) and tope_ok,
+    "sin_scroll_horizontal_movil": sin_scroll,
     "consola_limpia": not ev["consola"],
     "sin_requests_externos": not ev["externos"],
     "axe_sin_graves": not [v for v in axe if v["impact"] in ("critical", "serious")],
