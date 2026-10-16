@@ -1482,12 +1482,24 @@ def _plan_files(block: str) -> list[str]:
     """Archivos del plan = SOLO los items de la lista (D2 r1: una mencion en prosa 'sin tocar X.py' se colaba) y, en
     una tabla, las rutas entre backticks de la primera celda que nombra alguna (SSB F7a: el plan vino en tabla).
     Un nombre sin carpeta (`resolver.ts`, SSB F4b) pasa a la unica ruta del plan o del repo con ese nombre."""
-    items = re.findall(r"(?m)^\s*[-*]\s*`?" + _file_re() + r"`?", block)
+    items = re.findall(r"(?m)^\s*[-*]\s*`?" + _file_re() + r"`?", _primera_lista(block))
     for fila in _filas_tabla(block):
         celda = next((c for c in fila.split("|") if re.search("`" + _file_re() + "`", c)), "")
         items += re.findall("`" + _file_re() + "`", celda)
     items = [_ruta_unica(f, items) for f in items]
     return [f for f in dict.fromkeys(items) if not f.startswith(TESTS_PREFIX) or f in _need_files()]  # D14-diag: test_capas es obligatorio en cableos
+
+
+def _primera_lista(block: str) -> str:
+    """Solo la PRIMERA lista: una linea en prosa la corta. F2 m1: debajo de "Notas de ejecucion:" venia
+    "- `src/tipos.ts` ya existe ... no se modifica" y trazabilidad-plan lo exigia con ID (6 de 12 planes reales)."""
+    lineas: list[str] = []
+    for linea in block.splitlines():
+        if re.match(r"\s*[-*]\s", linea) or (lineas and (not linea.strip() or linea[:1] in " \t")):
+            lineas.append(linea)
+        elif lineas:
+            break
+    return "\n".join(lineas)
 
 
 def _filas_tabla(block: str) -> list[str]:

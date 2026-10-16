@@ -98,6 +98,13 @@ def test_compile_fix_solo_pide_los_archivos_que_nombra_el_error(run, monkeypatch
     assert arreglos == ["py_compile o la importacion de los tests fallo. Corregi src/app.ts."]
 
 
+def test_plan_files_ignora_las_notas_debajo_de_la_lista(run):
+    # F2 m1 (2026-10-16): la nota "no se modifica" entraba como archivo del plan y trazabilidad-plan cortaba el modulo
+    block = ("\n- `pkg/a.py` [R1]\n\n- `pkg/b.py` [R2]\n  sigue el item\n\nNotas de ejecucion:\n"
+             "- `pkg/tipos.py` ya existe, no se modifica.\n")
+    assert S._plan_files(block) == ["pkg/a.py", "pkg/b.py"]
+
+
 def test_plan_allowlist_tests_ajenos_no_y_obligatorios_si(run):
     ok, _ = S.gate_plan_allowlist("## Archivos\n- `pkg/a.py` [R1]\n- `tests/test_capas.py` [R1]\n", ["pkg/a.py", "tests/test_capas.py"])
     assert ok
