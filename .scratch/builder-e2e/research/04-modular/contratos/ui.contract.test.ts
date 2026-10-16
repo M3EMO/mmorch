@@ -18,6 +18,16 @@ test("test_R4_input_con_etiqueta: el campo del bruto tiene una etiqueta accesibl
   assert.ok(etiquetado, "falta <label for=\"bruto\"> o aria-label en el input");
 });
 
+test("test_R5_desglose_con_etiquetas: cada monto tiene su etiqueta visible justo antes (hallazgo del juez en sombra)", () => {
+  const etiquetas: [string, RegExp][] = [["neto", /neto/i], ["jubilacion", /jubilaci[oó]n/i], ["pami", /pami/i],
+    ["obra-social", /obra social/i], ["ganancias", /ganancias/i]];
+  for (const [id, etiqueta] of etiquetas) {
+    const i = html.indexOf(`data-testid="${id}"`);
+    const antes = html.slice(Math.max(0, i - 300), i).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+    assert.ok(i >= 0 && etiqueta.test(antes.slice(-60)), `la salida "${id}" no tiene su etiqueta visible justo antes`);
+  }
+});
+
 test("test_R2_metadatos_seo: metadatos SEO", () => {
   assert.match(html, /<html[^>]*lang="es-AR"/);
   const title = (html.match(/<title>([^<]*)<\/title>/) || [])[1] || "";

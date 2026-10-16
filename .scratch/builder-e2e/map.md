@@ -28,7 +28,7 @@ Corrida final tras los seis oks del walkthrough: `~/Proyectos/F2-seo-calculadora
 Hallazgos de la corrida final:
 
 - Bug del SDLC arreglado: `_LANG_NAMES` no conocía `.html`, así que el coder recibía `index.html` como "programador TypeScript" y escribía TypeScript adentro. Primer intento fallido guardado en `~/Proyectos/F2-seo-calculadoras/.fallidas/`.
-- El juez detectó un defecto real que la capa computable no exige: el desglose sin etiquetas. Ese criterio se puede volver computable (cada monto con etiqueta visible) en el contrato del módulo 3.
+- El juez detectó un defecto real que la capa computable no exigía: el desglose sin etiquetas. Ya es computable: `test_R5_desglose_con_etiquetas` en el contrato del módulo 3 pasa en prototipo-04 y falla en el sitio final, igual que la opinión del juez.
 
 ## Notes
 

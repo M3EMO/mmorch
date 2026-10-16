@@ -29,7 +29,7 @@
   },
   {
    "nombre": "m3-interfaz",
-   "tarea": "Crear index.html (lang es-AR) y src/app.ts. La pagina tiene un solo h1, title de 30 a 60 caracteres, meta description de 70 a 160 caracteres, link canonical https://ejemplo.com.ar/sueldo-neto, un input id='bruto' con <label for='bruto'> visible, un boton data-testid='calcular' y salidas data-testid='neto', 'jubilacion', 'pami', 'obra-social' y 'ganancias' en pesos con formato es-AR. Carga solo <script type=\"module\" src=\"dist/app.js\"></script> (dist sale de tsc -p tsconfig.build.json); nada externo: sin fuentes, CDN ni analytics. app.ts usa calcularNeto y PARAMETROS al hacer click en calcular. Texto breve en español que explica los aportes y Ganancias con la fecha de vigencia de las tablas.",
+   "tarea": "Crear index.html (lang es-AR) y src/app.ts. La pagina tiene un solo h1, title de 30 a 60 caracteres, meta description de 70 a 160 caracteres, link canonical https://ejemplo.com.ar/sueldo-neto, un input id='bruto' con <label for='bruto'> visible, un boton data-testid='calcular' y salidas data-testid='neto', 'jubilacion', 'pami', 'obra-social' y 'ganancias' en pesos con formato es-AR; cada salida va justo despues de su etiqueta visible (Neto, Jubilación, PAMI, Obra social, Ganancias), por ejemplo <dt>PAMI</dt><dd><output data-testid='pami'></output></dd>. Carga solo <script type=\"module\" src=\"dist/app.js\"></script> (dist sale de tsc -p tsconfig.build.json); nada externo: sin fuentes, CDN ni analytics. app.ts usa calcularNeto y PARAMETROS al hacer click en calcular. Texto breve en español que explica los aportes y Ganancias con la fecha de vigencia de las tablas.",
    "files": [
     "src/app.ts",
     "index.html"
