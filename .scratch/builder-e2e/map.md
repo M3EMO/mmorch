@@ -23,7 +23,7 @@ Entregable aprobado en la parada 2: `~/Proyectos/F2-seo-calculadoras/f2-sueldo-n
 | 2. Dos paradas y menos de 1 h del usuario | Cumplida con medición parcial: walkthrough sin medir; preview rechazada en 5 min y aprobada en la segunda vuelta, sin medir (el reloj de pared pasó 8 h). |
 | 3. APIs < US$5 | Cumplida: ~US$0,10 de API en el rearmado final; las corridas fallidas suman ~US$0,23. |
 | 4. Run-log completo | Cumplida: coder, rechazos, cupo y USD por módulo; paradas del usuario con `python -m mmorch.builder parada`. |
-| 5. Juez en sombra con rúbricas | Texto sí: prefiere el sitio final en los dos órdenes y guarda el motivo. Visual no: GLM sin saldo. |
+| 5. Juez en sombra con rúbricas | Cumplida: texto (DeepSeek) y visual (Sonnet 5.5 por la CLI, cupo ~US$0,04) prefieren el sitio final en los dos órdenes y guardan el motivo. |
 
 Hallazgo abierto de la parada 2: el texto dice "los aportes se calculan sobre el bruto", pero arriba del tope de ANSES usan el tope. El cálculo es correcto; el texto confunde. Candidato a `test_R7` del contrato de interfaz.
 

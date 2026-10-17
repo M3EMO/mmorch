@@ -4,19 +4,24 @@ Generaliza el juez visual de sprites.py: compara dos entregables (A y B) con una
 binarios, sin puntajes numericos (medido 2026-09-17: un juez VLM ordena pero puntua mal). Cada par se juzga dos
 veces con el orden invertido; si los dos ordenes no coinciden, la opinion es "inconsistente" (sesgo de posicion).
 Todo va a logs/sdlc/juez_sombra.jsonl. Sale de sombra solo con kappa >= KAPPA_MIN contra pares etiquetados por el
-usuario (`confiable`). Texto: DEFAULT_VERIFIER (razona). Imagen: el VLM de sprites.
+usuario (`confiable`). Texto: DEFAULT_VERIFIER (razona). Imagen: Sonnet 5.5 por la CLI de Claude, con cupo
+(decision del usuario 2026-10-17: GLM sin saldo).
 """
 from __future__ import annotations
 
 import base64
 import json
+import os
+import subprocess
+import tempfile
 import time
 from pathlib import Path
 
 from .config import DEFAULT_VERIFIER
 from .paths import logs_dir
-from .sprites import JUEZ as VLM
 from .sprites import kappa
+
+VLM = "claude:claude-sonnet-5-5"   # un modelo `claude:` corre por la CLI y gasta cupo, nunca por API
 
 KAPPA_MIN, MIN_PARES = 0.6, 20
 RUBRICAS = {   # anclas del ticket 03 (research de builder-e2e)
@@ -46,6 +51,28 @@ def _imagen(p: Path) -> dict:
     return {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(p.read_bytes()).decode()}}
 
 
+def _claude(modelo: str, mensaje: list[dict], **_) -> dict:
+    """La CLI headless y aislada (sin herramientas, hooks ni MCP). Las imagenes van como bloques por stream-json."""
+    from .claude_exec import claude_bin
+    bloques = []
+    for parte in mensaje[0]["content"] if isinstance(mensaje[0]["content"], list) else [{"type": "text", "text": mensaje[0]["content"]}]:
+        if parte["type"] == "text":
+            bloques.append(parte)
+        else:   # data:image/png;base64,<datos> (formato OpenAI de _imagen)
+            tipo, datos = parte["image_url"]["url"][5:].split(";base64,")
+            bloques.append({"type": "image", "source": {"type": "base64", "media_type": tipo, "data": datos}})
+    argv = claude_bin() + ["-p", "--model", modelo.split(":", 1)[1], "--restricted", "--strict-mcp-config", "--tools", "",
+                           "--no-session-persistence", "--input-format", "stream-json", "--output-format", "stream-json",
+                           "--verbose"]
+    entrada = json.dumps({"type": "user", "message": {"role": "user", "content": bloques}})
+    with tempfile.TemporaryDirectory() as cwd:
+        r = subprocess.run(argv, input=entrada, capture_output=True, text=True, timeout=300, cwd=cwd, env=os.environ.copy())
+    fin = next((d for d in map(json.loads, filter(str.strip, reversed(r.stdout.splitlines()))) if d.get("type") == "result"), {})
+    if fin.get("is_error") or not fin.get("result"):
+        raise RuntimeError(f"juez claude: {str(fin.get('result') or r.stderr)[:200]}")
+    return {"text": fin["result"], "cupo_usd": float(fin.get("total_cost_usd") or 0.0)}
+
+
 def _una_vez(primero: Path, segundo: Path, rubrica: str, modelo: str, llamar) -> dict:
     r = RUBRICAS[rubrica]
     texto = (f"Comparás dos entregables. {r['pregunta']}\nAnclas de referencia (no las uses como puntaje): "
@@ -59,15 +86,18 @@ def _una_vez(primero: Path, segundo: Path, rubrica: str, modelo: str, llamar) ->
     else:
         mensaje = [{"role": "user", "content": texto + "\n\nPRIMERO:\n" + (primero / "texto.txt").read_text(encoding="utf-8")
                     + "\n\nSEGUNDO:\n" + (segundo / "texto.txt").read_text(encoding="utf-8")}]
+    if llamar is None and modelo.startswith("claude:"):
+        llamar = _claude
     if llamar is None:
         from .providers import call as llamar
     res = llamar(modelo, mensaje, pattern="juez-sombra", node=modelo, phase=f"juez-{rubrica}", temperature=0.0,
                  max_tokens=16384, timeout=300)   # 4096: el reasoner agotaba el presupuesto razonando
-    crudo = res.text if hasattr(res, "text") else str(res)
+    crudo = res["text"] if isinstance(res, dict) else res.text if hasattr(res, "text") else str(res)
+    cupo = res.get("cupo_usd", 0.0) if isinstance(res, dict) else 0.0
     try:
-        return json.loads(crudo[crudo.index("{"):crudo.rindex("}") + 1])
+        return json.loads(crudo[crudo.index("{"):crudo.rindex("}") + 1]) | {"_cupo": cupo}
     except ValueError:
-        return {"mejor": "", "motivo": f"respuesta no parseable: {crudo[:200]}"}
+        return {"mejor": "", "motivo": f"respuesta no parseable: {crudo[:200]}", "_cupo": cupo}
 
 
 def comparar(a: Path, b: Path, rubrica: str, *, modelo: str | None = None, llamar=None) -> dict:
@@ -85,7 +115,7 @@ def comparar(a: Path, b: Path, rubrica: str, *, modelo: str | None = None, llama
     mejor = directo if directo == invertido else "inconsistente"
     d = {"ts": time.time(), "rubrica": rubrica, "a": str(a), "b": str(b), "modelo": modelo, "mejor": mejor,
          "orden_ab": directo, "orden_ba": invertido, "motivo_ab": r_ab.get("motivo", ""), "motivo_ba": r_ba.get("motivo", ""),
-         "error": error}
+         "cupo_usd": round(r_ab.get("_cupo", 0.0) + r_ba.get("_cupo", 0.0), 4), "error": error}
     _sombra().parent.mkdir(parents=True, exist_ok=True)
     with _sombra().open("a", encoding="utf-8") as f:
         f.write(json.dumps(d, ensure_ascii=False) + "\n")
