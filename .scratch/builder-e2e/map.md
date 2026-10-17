@@ -13,17 +13,19 @@ Fijado por el ticket 01 (2026-10-15). El builder es una herramienta GENERAL: arm
 
 Detalle completo: `brainstorms/2026-10-14-builder-e2e-destino.md`.
 
-## Estado del destino (2026-10-16)
+## Estado del destino (2026-10-17)
 
-Corrida final tras los seis oks del walkthrough, rearmada con `test_R5` en el contrato: `~/Proyectos/F2-seo-calculadoras/f2-sueldo-neto` (repo local). La corrida previa sin etiquetas quedó en `.fallidas/f2-sueldo-neto-2-sin-etiquetas`.
+Entregable aprobado en la parada 2: `~/Proyectos/F2-seo-calculadoras/f2-sueldo-neto` (repo local, cuarto rearmado, 4 módulos). Las corridas previas quedaron en `.fallidas/`.
 
 | Condición | Estado |
 |---|---|
-| 1. Capa computable verde | Cumplida: 3 módulos built, integración verde (casos ocultos, metamórficas, consola, red, axe, Lighthouse, metadatos). |
-| 2. Dos paradas y menos de 1 h del usuario | Parada 1 hecha (walkthrough), sin medir. Parada 2 rechazada en 5 min (preview); segunda vuelta abierta el 2026-10-16. `python -m mmorch.builder parada` mide las paradas desde 2026-10-16. |
-| 3. APIs < US$5 | Cumplida: ~US$0,07 de DeepSeek en la corrida rearmada (~US$0,17 en la previa); planner Sonnet ~US$0,16 equiv. de cupo; Haiku US$0,002. |
-| 4. Run-log completo | Coder, rechazos, cupo y USD por módulo sí (`orchestration-gkw` cerrado); horas del usuario desde la parada 2. |
-| 5. Juez en sombra con rúbricas | Texto sí: prefiere prototipo-04 en los dos órdenes, también tras el rearmado con etiquetas; el log no guarda el motivo. Visual no: GLM sin saldo. |
+| 1. Capa computable verde | Cumplida: 4 módulos built, integración verde (casos ocultos, metamórficas, entrada validada, sin scroll a 390 px, consola, red, axe, Lighthouse, metadatos). |
+| 2. Dos paradas y menos de 1 h del usuario | Cumplida con medición parcial: walkthrough sin medir; preview rechazada en 5 min y aprobada en la segunda vuelta, sin medir (el reloj de pared pasó 8 h). |
+| 3. APIs < US$5 | Cumplida: ~US$0,10 de API en el rearmado final; las corridas fallidas suman ~US$0,23. |
+| 4. Run-log completo | Cumplida: coder, rechazos, cupo y USD por módulo; paradas del usuario con `python -m mmorch.builder parada`. |
+| 5. Juez en sombra con rúbricas | Texto sí: prefiere el sitio final en los dos órdenes y guarda el motivo. Visual no: GLM sin saldo. |
+
+Hallazgo abierto de la parada 2: el texto dice "los aportes se calculan sobre el bruto", pero arriba del tope de ANSES usan el tope. El cálculo es correcto; el texto confunde. Candidato a `test_R7` del contrato de interfaz.
 
 Hallazgos de la corrida final:
 
