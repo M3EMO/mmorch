@@ -24,7 +24,7 @@ from sdlc.sprites import kappa
 VLM = "claude:claude-sonnet-5-5"   # un modelo `claude:` corre por la CLI y gasta cupo, nunca por API
 
 KAPPA_MIN, MIN_PARES = 0.6, 20
-RUBRICAS = {   # anclas del ticket 03 (research de builder-e2e)
+RUBRICAS: dict[str, dict] = {   # anclas del ticket 03 (research de builder-e2e)
     "seo_texto": {
         "pregunta": "¿Cuál texto sirve mejor a quien busca calcular su sueldo neto en Argentina?",
         "anclas": {1: "genérico o de relleno, sin explicar aportes, con keyword stuffing o datos sin fecha",
@@ -67,7 +67,7 @@ def _claude(modelo: str, mensaje: list[dict], **_) -> dict:
     entrada = json.dumps({"type": "user", "message": {"role": "user", "content": bloques}})
     with tempfile.TemporaryDirectory() as cwd:
         r = subprocess.run(argv, input=entrada, capture_output=True, text=True, timeout=300, cwd=cwd, env=os.environ.copy())
-    fin = next((d for d in map(json.loads, filter(str.strip, reversed(r.stdout.splitlines()))) if d.get("type") == "result"), {})
+    fin: dict = next((d for d in map(json.loads, filter(str.strip, reversed(r.stdout.splitlines()))) if d.get("type") == "result"), {})
     if fin.get("is_error") or not fin.get("result"):
         raise RuntimeError(f"juez claude: {str(fin.get('result') or r.stderr)[:200]}")
     return {"text": fin["result"], "cupo_usd": float(fin.get("total_cost_usd") or 0.0)}

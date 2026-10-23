@@ -147,7 +147,7 @@ def unlink_seeds(path: str) -> list[str]:
     for raiz, dirs, _ in os.walk(path, topdown=True):
         for d in list(dirs):
             p = os.path.join(raiz, d)
-            if os.path.islink(p) or (os.name == "nt" and os.lstat(p).st_file_attributes & 0x400):  # REPARSE_POINT
+            if os.path.islink(p) or (os.name == "nt" and getattr(os.lstat(p), "st_file_attributes", 0) & 0x400):  # REPARSE_POINT
                 dirs.remove(d)  # nunca descender por el enlace
                 try:
                     _rm_link(p)
