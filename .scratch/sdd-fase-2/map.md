@@ -45,6 +45,8 @@ Lo que el código hace hoy (leído en `sdlc/pipeline.py`, rama `mmorch/auto` en 
 
 <!-- una línea por ticket resuelto: gist + link -->
 
+- [Unidad de la spec viva](issues/01-unidad-de-la-spec-viva.md) — spec viva por área (`docs/specs/<area>/spec.md`), delta y plan en `changes/<slug>.md`; área = nombre y globs en `sdlc.toml`, derivada de los `files` del llamador; sin área sigue el camino de hoy; dos áreas cortan y proponen división.
+
 ## Not yet specified
 
 Los tickets abiertos llevan las decisiones. Orden sugerido (frontera primero):

@@ -25,3 +25,7 @@ Preguntas derivadas:
 ## Test de aceptación propuesto
 
 El run-log de una corrida real (`logs/` del SDLC) muestra cuatro hechos. Primero, la feature parte de una spec base y deja un delta que pasa su gate. Segundo, la spec fusionada queda en el PR. Tercero, la suite total no marca como regresión los tests de los IDs del delta. Cuarto, al menos un test de propiedades mata un mutante propio, sin un LLM en el veredicto.
+
+## Comments
+
+- 2026-10-23, desde el grilling del ticket 01: el repo de la corrida necesita áreas declaradas en `sdlc.toml`. El esfuerzo aparte `orchestration-4u6` (bd) decide cómo se actualizan los repos propios a las convenciones. Si ese esfuerzo no terminó, el área se declara a mano en el repo de la corrida.

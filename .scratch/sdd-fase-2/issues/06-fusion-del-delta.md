@@ -25,3 +25,7 @@ Preguntas derivadas:
 ## Test de aceptación propuesto
 
 `tests/test_sdlc_delta.py::test_fusion_del_delta`: una spec base con R1, R2 y R3 y un delta (`MODIFIED R1`, `REMOVED R2`, `ADDED R4`). La spec fusionada tiene R1 con el texto nuevo, R3 sin cambios, R4 y ninguna mención de R2. Aplicar el mismo delta dos veces falla con un error claro y no duplica R4. El delta queda guardado en la ruta de cambios que fija el ticket 01.
+
+## Comments
+
+- 2026-10-23, desde el ticket 01 (aprobado por el usuario): dos features con el mismo nombre en la misma área producen el mismo `<slug>`. La segunda pisa `docs/specs/<area>/changes/<slug>.md`. Hoy pasa lo mismo con `docs/specs/<slug>/`. Este ticket decide si el archivo del delta evita el choque.
