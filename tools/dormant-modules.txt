@@ -4,3 +4,4 @@
 
 context_blocks   # lo invoca ~/.claude/hooks/context-block-watch.js con `python -m mmorch.context_blocks tick` — el caller vive fuera del repo
 plugin_worker    # subprocess host aislado: plugins.py lo lanza por path (_WORKER, plugins.py:27), nunca lo importa — el aislamiento es el punto
+sdlc_bench       # CLI manual `python -m mmorch.sdlc_bench --task <bench>`: mmorch mide el builder sdlc cuando un humano lo pide; nadie lo programa

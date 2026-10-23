@@ -152,14 +152,14 @@ def _tests_nombrados(external_test: str | None, root) -> list[str]:
 
 
 _BUILD_HIJO = """import json, pathlib, sys
-from mmorch.sdlc import build_feature
+from sdlc.pipeline import build_feature
 kw = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 pathlib.Path(sys.argv[2]).write_text(json.dumps(build_feature(**kw), default=str), encoding="utf-8")
 """
 
 
 def _build_en_proceso(kw: dict) -> dict:
-    """Cada feature corre en su propio proceso. Los globals de mmorch.sdlc son por proceso: dos jobs avanzan en paralelo
+    """Cada feature corre en su propio proceso. Los globals de sdlc.pipeline son por proceso: dos jobs avanzan en paralelo
     sin pisarse el worktree (2026-09-16 un lock los serializaba; el gasto igual queda en metrics.jsonl)."""
     import json
     import subprocess
@@ -181,7 +181,7 @@ def _run_project_build_job(jid: str, task: str, project: str, external_test: str
                            max_depth: int = 2, seed_globs: list | None = None, parent=None,
                            gen_model: str | None = None, max_fix: int | None = None,
                            files: list | None = None, from_stage: float | None = None, resume_branch: str | None = None):
-    """El pipeline de 6 etapas (mmorch.sdlc, ticket 05) como job del server. Corre en un worktree AISLADO de
+    """El pipeline de 6 etapas (paquete sdlc, ticket 05) como job del server. Corre en un worktree AISLADO de
     `project` (arbol principal intacto, resultado en una review branch). `external_test` = comando de aceptacion;
     si nombra archivos tests/*.py que existen en el repo, esos son los tests de aceptacion del pipeline.
     Estado terminal: built -> done; integration_failed (etapa 5) -> gate; otro fallo -> escalate.
@@ -201,7 +201,7 @@ def _run_project_build_job(jid: str, task: str, project: str, external_test: str
         with _JOBS_LOCK:
             _JOBS[jid]["review_branch"] = wt.branch
         # F4: un checkout fresco no tiene los artefactos gitignorados que la aceptacion lee (.venv, caches).
-        from .sdlc import _toml
+        from sdlc.pipeline import _toml
         n_seed = wt.seed(list(dict.fromkeys((seed_globs or []) + list(_toml(repo).get("seed_globs", [])) + [".venv", "venv"])))
         emit("job", "running", job_id=jid,
              detail=f"sdlc {project} -> {wt.branch}{f' (+{n_seed} seeded)' if n_seed else ''}: {task[:70]}")

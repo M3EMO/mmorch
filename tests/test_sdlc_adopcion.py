@@ -9,7 +9,7 @@ import types
 
 import pytest
 
-import mmorch.sdlc as S
+import sdlc.pipeline as S
 
 RED = "def test_R1_suma():\n    from pkg.a import suma\n    assert suma(1, 2) == 3\n"
 

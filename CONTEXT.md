@@ -24,6 +24,10 @@ _Avoid_: LLM-judge, verifier (cuando hay ground truth)
 Escéptico LLM, familia distinta al autor, refuta por default. El acuerdo no confirma.
 _Avoid_: reviewer amable, self-score como label
 
+**SDLC (builder)**:
+El paquete `sdlc/`: construye features con 6 etapas y gates deterministas. Usa a mmorch como biblioteca; mmorch lo mide desde afuera (`mmorch.sdlc_bench`).
+_Avoid_: tratar al SDLC como parte del banco, pedir un A/B del bench para cada cambio del builder
+
 **Canal**:
 Hilo JSONL ordenado entre Cursor, Claude Code y mmorch. Turnos, no conocimiento destilado.
 _Avoid_: remember/recall para handoff, chat que despierta al otro proceso

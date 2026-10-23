@@ -15,7 +15,7 @@ import mmorch.iohelpers as IO
 import mmorch.learn as L
 import mmorch.metrics as MET
 import mmorch.schedule as S
-import mmorch.sdlc as SD
+import sdlc.pipeline as SD
 
 
 @pytest.fixture(autouse=True)

@@ -24,12 +24,14 @@ import tempfile
 import uuid
 from pathlib import Path
 
+import sdlc
+
 from .paths import logs_dir
 from .projects import resolve
 from .worktree_driver import Worktree, _git
 
 
-SKILL = Path(__file__).with_name("sdlc_templates") / "refutar-tests.md"
+SKILL = Path(sdlc.__file__).with_name("templates") / "refutar-tests.md"
 _BLOQUE = re.compile(r"```[\w.]*\n(.*?)```", re.S)
 
 

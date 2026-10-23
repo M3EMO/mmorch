@@ -1,7 +1,7 @@
 """Ticket 07 de builder-e2e: la etapa 4 separa una dependencia que el ENTORNO no trae de un error del codigo. Cero API."""
 import json
 
-import mmorch.sdlc as S
+import sdlc.pipeline as S
 
 CASO_REAL = ("tests/parametros.contract.test.ts(1,22): error TS2307: Cannot find module 'node:test' or its corresponding "
              "type declarations.\n")   # logs/sdlc/diag-cases de la corrida del 2026-10-15: 3 vueltas y 2 escaladas en vano

@@ -8,7 +8,7 @@ import types
 
 import pytest
 
-import mmorch.sdlc as S
+import sdlc.pipeline as S
 
 
 def _wt(tmp_path, monkeypatch):

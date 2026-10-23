@@ -10,7 +10,7 @@ import types
 import pytest
 
 import mmorch.providers as PV
-import mmorch.sdlc as S
+import sdlc.pipeline as S
 
 
 def _error_real_de_providers(monkeypatch) -> RuntimeError:

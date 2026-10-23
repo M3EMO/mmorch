@@ -4,7 +4,7 @@ import types
 
 from PIL import Image
 
-import mmorch.sprites as S
+import sdlc.sprites as S
 
 PALETA = ["#000000", "#3c3c5a", "#78c878", "#e6e678"]
 LADO = 16

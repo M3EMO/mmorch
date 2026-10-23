@@ -8,7 +8,7 @@ Si falta el compilador, la etapa 4 va directo a Claude para el entorno. G3 y tes
 base ya tenia sin la aceptacion propia (tests rojos por diseño de otras features). La etapa es el checkpoint: run-log.json + from_stage.
 
 Uso como biblioteca: `build_feature(name, task, repo, accept={rel: contenido}, files=[...], contract=[...])`.
-Uso como CLI (bench o feature ya configurada por el llamador): `python -m mmorch.sdlc --task <bench> --wt <dir>`.
+Uso como CLI: `python -m sdlc init <repo>` (adopcion). El bench de mmorch lo corre como consumidor (`mmorch.sdlc_bench`).
 """
 from __future__ import annotations
 
@@ -27,16 +27,15 @@ import time
 import types
 from typing import Any
 
-from . import bench
-from .paths import logs_dir
-from .providers import call, register_run_tracker, unregister_run_tracker
+from mmorch.paths import logs_dir
+from mmorch.providers import call, register_run_tracker, unregister_run_tracker
 
 # Globals de corrida: los fija configure() (antes venian de argv). Ninguna funcion los lee antes de configure().
 TASK_NAME = ""
 WT = pathlib.Path(".")
 PHASE = ""
 FEAT: dict | None = None
-TASK: Any = None  # SimpleNamespace(name, task, accept_files) o bench.BenchTask
+TASK: Any = None  # SimpleNamespace(name, task, accept_files) o una task del bench de mmorch
 CONTRACT: list[str] = []
 TESTS_PREFIX = "tests_accept/"
 MAX_FIX = 3
@@ -68,7 +67,7 @@ def _file_re() -> str:
 
 def _es_py(f: str) -> bool:
     return f.endswith(".py")
-TPL = pathlib.Path(__file__).resolve().parent / "sdlc_templates"  # spec-kit recortado (tickets 02 y 11)
+TPL = pathlib.Path(__file__).resolve().parent / "templates"  # spec-kit recortado (tickets 02 y 11)
 
 
 def _toml(root) -> dict:
@@ -120,7 +119,7 @@ class StageFailed(Exception):
 
 def configure(task, *, contract, feat=None, wt=None, phase=None, max_fix=3, writer=None, coder=None, diag=None,
               accept_cmd=None):
-    """Fija la corrida. `task` tiene .name, .task y .accept_files ({rel: contenido}); bench.get_task sirve tal cual.
+    """Fija la corrida. `task` tiene .name, .task y .accept_files ({rel: contenido}); una task del bench sirve tal cual.
     `feat` (dict repo/files/suite) = feature sobre un repo existente; None = task del bench (paquete nuevo)."""
     global TASK_NAME, WT, PHASE, FEAT, TASK, CONTRACT, TESTS_PREFIX, MAX_FIX, LOG, REVIEW_REL, CFG, WRITER, CODER, DIAG, ACCEPT_CMD, PY
     ACCEPT_CMD = accept_cmd
@@ -142,7 +141,7 @@ def configure(task, *, contract, feat=None, wt=None, phase=None, max_fix=3, writ
     CFG = _cfg()
     PY = _repo_python()
     state.clear()
-    state.update({"proto": "mmorch.sdlc", "task": TASK_NAME, "coder": CODER, "stages": [], "gates": [], "calls": 0,
+    state.update({"proto": "sdlc", "task": TASK_NAME, "coder": CODER, "stages": [], "gates": [], "calls": 0,
                   "human_interventions": 0, "claude_calls": 0, "gate_rejects": [], "escalated_to_claude": False})
     SNAP.clear(); SEEN.clear(); _orig_files.clear(); _COMPILE_BASE.clear()
     RUNS.mkdir(parents=True, exist_ok=True)
@@ -177,13 +176,13 @@ _SIN_SHELL = ("CLAUDECODE", "SHELL", "BASH", "BASH_ENV", "MSYSTEM")   # cursor-a
 
 
 def _cursor_argv() -> list[str]:
-    from .cursor_worker import cursor_argv   # una sola fuente: el despachador de Cursor (orchestration-ayz)
+    from mmorch.cursor_worker import cursor_argv   # una sola fuente: el despachador de Cursor (orchestration-ayz)
     return cursor_argv()
 
 
 def _agent_run(argv: list[str], prompt: str | None, env: dict, timeout: float) -> tuple[int, str]:
     """Corre un agente en el worktree (timeout o rc != 0 = falla tecnica, ver cursor_worker.run_agent)."""
-    from .cursor_worker import run_agent
+    from mmorch.cursor_worker import run_agent
     return 0, run_agent(argv, WT, prompt, env, timeout)
 
 
@@ -191,7 +190,7 @@ def _claude_texto(model: str, prompt: str, env: dict, timeout: float, *, tools: 
                   system: str | None = None) -> tuple[str, float]:
     """`claude -p` headless, aislado (--restricted ignora los settings y hooks del usuario; sin MCP ni sesion).
     Devuelve (texto, US$ equivalentes de cupo). `tools=""` = sin herramientas: solo texto (rol coder)."""
-    from .claude_exec import claude_bin
+    from mmorch.claude_exec import claude_bin
     argv = claude_bin() + ["-p", "--model", model, "--restricted", "--strict-mcp-config", "--tools", tools,
                            "--no-session-persistence", "--output-format", "json"]   # el prompt va por stdin: --tools es variadico
     if system:
@@ -333,7 +332,7 @@ def sh(cmd, timeout: float | None = None, keep: int = 6000, *, host: bool = Fals
     eng: str | None = None
     name = ""
     if img:
-        from .sandbox import container_argv, engine
+        from mmorch.sandbox import container_argv, engine
         eng = engine()
         if not eng:
             raise StageFailed("contenedor", f"sdlc.toml pide la imagen {img}, pero no hay docker ni podman en PATH")
@@ -388,6 +387,16 @@ def _notas() -> str:
     return ("\nNotas de campo de corridas anteriores sobre este repo (de la más reciente a la más vieja):\n<<<\n"
             + pathlib.Path(p).read_text(encoding="utf-8").strip()
             + "\n>>>\nUsalas si aplican. Pueden no aplicar a este archivo.\n")
+
+
+def _constitucion() -> str:
+    """orchestration-fcr: reglas fijas del repo destino (sdlc.toml `constitution`, default GOAL.md) para spec y plan,
+    como la constitucion de Spec Kit. Sin el archivo, el prompt queda identico."""
+    p = WT / str(CFG.get("constitution", "GOAL.md"))
+    if not p.is_file():
+        return ""
+    return (f"\n\nCONSTITUCION DEL REPO ({p.name}; reglas fijas: la spec y el plan no las contradicen):\n"
+            + p.read_text(encoding="utf-8").strip()[:6000])
 
 
 def _lenguaje() -> str:
@@ -517,7 +526,7 @@ def _cobertura(files: list[str]) -> dict[str, tuple[int, list[int]]] | None:
         return None
     datos = json.loads(destino.read_text(encoding="utf-8"))
     if CFG.get("contenedor"):  # las claves salen del contenedor: en Windows son /c/..., sin normcase
-        from .sandbox import ruta_contenedor
+        from mmorch.sandbox import ruta_contenedor
         clave = lambda p: ruta_contenedor(os.path.abspath(p))  # noqa: E731
     else:
         clave = lambda p: os.path.normcase(os.path.abspath(p))  # noqa: E731
@@ -589,7 +598,7 @@ def gate_mutacion() -> tuple[bool, str]:
     """Ticket 08 D2 (opcion D): el test de aceptacion mata mutantes del codigo final. Score = muertos / total sobre los
     archivos del plan (mutantes de checkers._mutants: operadores, comparaciones, booleanos, enteros). Bloquea SOLO con
     `mutation_min` en sdlc.toml; sin numero medido, observa y deja state["mutation_score"]."""
-    from .checkers import _mutants
+    from mmorch.checkers import _mutants
     if not TASK.accept_files and not (ACCEPT_CMD or CFG.get("accept_cmd")):
         return rec_gate("mutacion", True, "sin oraculo de aceptacion: sin mutacion")
     killed = total = 0
@@ -808,7 +817,7 @@ def _tamano(files: list[str]) -> dict:
     """orchestration-e4d: archivos del plan, tokens (bytes/4) de los que ya existen y acoplamiento: modulos FUERA del
     plan que comparten literales de datos con los archivos del plan (mmorch.impacto.lectores).
     Escalones x4 del ticket: minima <=4k, chica <=16k, media <=64k, grande >64k."""
-    from .impacto import lectores
+    from mmorch.impacto import lectores
     tok = sum((WT / f).stat().st_size // 4 for f in files if (WT / f).is_file())
     escalon = "minima" if tok <= 4000 else "chica" if tok <= 16000 else "media" if tok <= 64000 else "grande"
     lect: set[str] = set()
@@ -821,7 +830,7 @@ def _tamano(files: list[str]) -> dict:
 
 def _informe(f: str, tope: int = 4000) -> str:
     """Informe de impacto de un archivo que ya existe en el worktree (lectores acoplados), recortado."""
-    from .impacto import report
+    from mmorch.impacto import report
     try:
         return report(WT, WT / f)[:tope] if (WT / f).is_file() else ""
     except Exception:  # ponytail: el informe ayuda, nunca rompe la etapa
@@ -1026,7 +1035,7 @@ def gate_test_compile() -> tuple[bool, str]:
 
 
 def ledger_usd() -> float | None:
-    from .metrics import log_path, read_events
+    from mmorch.metrics import log_path, read_events
     if not log_path().exists():
         return None
     t0 = state.get("t0_epoch") or 0
@@ -1187,7 +1196,7 @@ def reasoner_rounds(log) -> tuple[bool, str]:
 def _revisor(prompt: str, *, mode: str = "edit", timeout: float | None = None) -> dict:
     """Ticket 11: el agente que revisa y corrige es configurable por repo (`reviewer_cmd` en sdlc.toml, prompt por
     stdin); sin esa clave manda la seam de mmorch (`claude -p` por default, env MMORCH_EXECUTOR)."""
-    from .claude_exec import CmdExecutor, get_executor
+    from mmorch.claude_exec import CmdExecutor, get_executor
     os.environ.pop("CLAUDECODE", None)  # ponytail: el CLI no anida dentro de una sesion Claude Code
     cmd = CFG.get("reviewer_cmd")
     ex = CmdExecutor(str(cmd)) if cmd else get_executor()
@@ -1333,6 +1342,19 @@ def self_check() -> int:
     return 1 if fails else 0
 
 
+def _slug() -> str:
+    return re.sub(r'[^a-z0-9]+', '_', TASK_NAME.lower()).strip('_')[:40]
+
+
+def _archivar_spec() -> None:
+    """orchestration-3s7: spec y plan quedan en docs/specs/<feature>/ (spec-anchored). docs/sdlc/ es la mesa de
+    trabajo que la feature siguiente pisa."""
+    for n in ("spec.md", "plan.md"):
+        src = WT / "docs/sdlc" / n
+        if src.exists():
+            _write(f"docs/specs/{_slug() or 'sdlc'}/{n}", src.read_text(encoding="utf-8"))
+
+
 @stage("1-aceptacion")
 def aceptacion():
     """Etapa 1 (ticket 12 D5): Claude escribe el test de aceptacion desde la tarea. Gates deterministas: nombra
@@ -1340,9 +1362,8 @@ def aceptacion():
     se detiene en `awaiting_approval`: un humano (o el agente del ticket 14) aprueba y reanuda desde la etapa 2."""
     if TASK.accept_files:
         return True, "tests de aceptacion provistos por el llamador"
-    slug = re.sub(r'[^a-z0-9]+', '_', TASK_NAME.lower()).strip('_')[:40]
     ext = _exts()[0]
-    rel = str(CFG.get("accept_test", f"{TESTS_PREFIX}test_sdlc_{{slug}}.{ext}")).replace("{slug}", slug)
+    rel = str(CFG.get("accept_test", f"{TESTS_PREFIX}test_sdlc_{{slug}}.{ext}")).replace("{slug}", _slug())
     state["claude_calls"] += 1
     before = _tree()
     marco = "pytest" if _es_py(rel) else f"framework de tests del repo; lo corre `{ACCEPT_CMD or CFG.get('accept_cmd')}`"
@@ -1387,7 +1408,7 @@ def spec():
     ask = (f"Escribi spec.md siguiendo EXACTAMENTE esta plantilla (mismas secciones, IDs R<n> unicos, tabla de trazabilidad "
            f"que cita tests por su nombre exacto de entre {sorted(tests)}). {stack}.\n\n"
            f"PLANTILLA:\n{tpl}\n\nTAREA:\n{TASK.task}\n\nTESTS DE ACEPTACION (no se modifican):\n{_tests_text()}\n\n"
-           "Omiti las lineas de instruccion de la plantilla. Sin marcadores pendientes. Solo markdown.")
+           "Omiti las lineas de instruccion de la plantilla. Sin marcadores pendientes. Solo markdown." + _constitucion())
     out = llm(WRITER, "Sos un ingeniero de software. Escribis specs precisas en markdown, sin relleno.", ask)
     _write("docs/sdlc/spec.md", out)
 
@@ -1449,7 +1470,7 @@ def plan():
            f"[P] marca archivos que NO importan a otros del plan (paralelizables); los demas van en orden de dependencia. "
            f"'## Stack' = UNA linea con el lenguaje, los frameworks y las librerias que usa el cambio (lo que ya usa el "
            f"repo; nada nuevo sin que la spec lo pida). '## Prueba' = `{prueba}`.\n"
-           f"Archivos OBLIGATORIOS en '## Archivos': {_need_files()}.\n\nSPEC:\n{spec_md}")  # D14-diag: el plan omitia test_capas
+           f"Archivos OBLIGATORIOS en '## Archivos': {_need_files()}.\n\nSPEC:\n{spec_md}" + _constitucion())  # D14-diag: el plan omitia test_capas
     inf = _informe_spec(spec_md)
     if inf:   # orchestration-e4d: el planner ve los lectores acoplados de lo que la spec nombra
         ask += ("\n\nINFORME DE IMPACTO (otros modulos leen literales de los archivos que nombra la spec; si el cambio "
@@ -1786,6 +1807,7 @@ def review():
 
 @stage("6-pr")
 def pr():
+    _archivar_spec()
     subprocess.run(["git", "add", "-A"], cwd=WT, check=True)
     subprocess.run(["git", "-c", "user.name=map12", "-c", "user.email=map12082004@gmail.com", "commit", "-q", "-m",
                     f"sdlc: {TASK_NAME} - pipeline 6 etapas, gates + escalera + revision Claude"], cwd=WT, check=True)
@@ -1873,9 +1895,7 @@ def _run_stages(from_stage: float, to_stage: float = 6) -> dict:
             # D13/D14: un intento anterior dejo la branch creada -> `-b` falla (255). Se reusa la branch existente.
             args = ["worktree", "add", "-q", str(WT), br] if exists else ["worktree", "add", "-q", "-b", br, str(WT), "HEAD"]
             subprocess.run(["git", "-C", FEAT["repo"], *args], check=True)
-        elif hasattr(TASK, "held_out"):  # bench.BenchTask
-            bench.materialize(TASK, str(WT))
-        else:  # directorio plano ya materializado por el llamador (workflow_race): el pipeline necesita git
+        else:  # directorio plano ya materializado por el llamador (bench de mmorch, workflow_race): el pipeline necesita git
             subprocess.run(["git", "init", "-q"], cwd=WT, check=True)
             subprocess.run(["git", "add", "-A"], cwd=WT, check=True)
             subprocess.run(["git", "-c", "user.name=mmorch", "-c", "user.email=mmorch@local", "commit", "-q", "-m", "base"], cwd=WT)
@@ -2046,6 +2066,7 @@ def init(repo: str) -> dict:
             "# el test de aceptacion que escribe la etapa 1 antes de gastar (ticket 12 D5).\n"
             "# Otros lenguajes: `ext`, `compile_cmd` (G3 y test-compile), `lint_cmd` ({files} = archivos del plan),\n"
             "# `suite_cmd` (suite total si no es pytest), `seed_globs` (ignorados que el worktree necesita), `accept_test` ({slug}).\n"
+            "# `constitution`: reglas fijas que leen spec y plan (default GOAL.md; sin el archivo, nada).\n"
             "# Umbrales: `cobertura_min` (0.8; fraccion de un .py NUEVO que corre la aceptacion), `mutation_min` (sin: observa).\n"
             "# `reviewer_cmd`: agente que revisa y corrige (prompt por stdin, `{modo}` = plan|edit); sin esta clave, `claude -p`.\n"
             "# [sprites]: dir, lado, paleta, tope_colores, hitboxes, animaciones, referencias. Lo determinista bloquea;\n"
@@ -2067,42 +2088,17 @@ def init(repo: str) -> dict:
     marca = "## SDLC (pipeline de 6 etapas)"
     if ag.exists() and marca not in ag.read_text(encoding="utf-8"):
         ag.write_text(ag.read_text(encoding="utf-8").rstrip("\n") + f"\n\n{marca}\n\nEste repo construye features con "
-                      "`mmorch.sdlc` (skill `/project`). Contrato del repo en `sdlc.toml`; artefactos de cada corrida en "
+                      "el paquete `sdlc` (skill `/project`). Contrato del repo en `sdlc.toml`; artefactos de cada corrida en "
                       "`docs/sdlc/` de la review branch.\n", encoding="utf-8")
         hecho.append("AGENTS.md")
     return {"repo": str(root), "hecho": hecho}
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: `python -m mmorch.sdlc init <repo>` | `--task <bench> [--wt DIR] [--phase P] [--from-stage N]`."""
+    """CLI: `python -m sdlc init <repo>`. El modo bench vive en mmorch (`python -m mmorch.sdlc_bench`)."""
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv[:1] == ["init"]:
-        print(json.dumps(init(argv[1] if len(argv) > 1 else "."), ensure_ascii=False))
-        return 0
-
-    def arg(flag, default):
-        return argv[argv.index(flag) + 1] if flag in argv else default
-
-    for _s in (sys.stdout, sys.stderr):  # D10: la consola cp1252 tiro UnicodeEncodeError por un "->" de Claude
-        getattr(_s, "reconfigure", lambda **k: None)(encoding="utf-8", errors="replace")
-    name = arg("--task", "rate-limiter")
-    task = bench.get_task(name)
-    configure(task, contract=BENCH_CONTRACTS.get(name, []), wt=arg("--wt", None), phase=arg("--phase", None),
-              max_fix=arg("--max-fix", 3))
-    if "--self-check" in argv:
-        return self_check()
-    return 0 if run(float(arg("--from-stage", "2"))).get("status") == "built" else 1
-
-
-# Tokens que la spec tiene que nombrar verbatim (G1) para las tasks del bench.
-BENCH_CONTRACTS = {
-    "rate-limiter": ["TokenBucket", "MultiLimiter", "allow", "capacity", "refill_per_s", "now", "key",
-                     "limiter/core.py", "limiter/multi.py", "limiter/__init__.py"],
-    "etl-pipeline": ["parse_lines", "normalize", "to_summary", "run", "maxsplit", "count", "total", "by_name",
-                     "etl/extract.py", "etl/transform.py", "etl/load.py", "etl/__init__.py"],
-    "lru-ttl-cache": ["LRUCache", "maxsize", "ttl_s", "get", "put", "now", "None", "cache/core.py", "cache/__init__.py"],
-}
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    if argv[:1] != ["init"]:
+        print("uso: python -m sdlc init <repo>", file=sys.stderr)
+        return 2
+    print(json.dumps(init(argv[1] if len(argv) > 1 else "."), ensure_ascii=False))
+    return 0

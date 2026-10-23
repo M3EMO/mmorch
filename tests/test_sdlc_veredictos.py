@@ -6,7 +6,7 @@ import types
 
 from starlette.testclient import TestClient
 
-import mmorch.sdlc as S
+import sdlc.pipeline as S
 
 STRONG = "def test_R1_suma():\n    from pkg.a import suma\n    assert suma(1, 2) == 3\n    assert suma(2, 3) == 5\n    assert suma(-1, 1) == 0\n"
 WEAK = "def test_R1_suma():\n    from pkg.a import suma\n    assert suma(0, 0) == 0\n"

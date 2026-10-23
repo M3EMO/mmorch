@@ -25,8 +25,8 @@ import subprocess
 import sys
 import time
 
-from .paths import logs_dir
-from .sandbox import container_argv, engine
+from mmorch.paths import logs_dir
+from mmorch.sandbox import container_argv, engine
 
 
 CODERS = ["deepseek-v4-pro", "claude:claude-haiku-5-5"]   # ticket 01: Haiku 5.5 o DeepSeek v4 pro por sorteo
@@ -70,7 +70,7 @@ def bootstrap(repo: pathlib.Path, archivos: dict[str, pathlib.Path]) -> str:
 
 def construir(repo: pathlib.Path, modulos: list[dict], wts: pathlib.Path) -> list[dict]:
     """Cada modulo por el SDLC; el construido se fusiona en main y el siguiente parte de ahi (hueco 3 del ticket 02)."""
-    from .sdlc import StageFailed, build_feature
+    from .pipeline import StageFailed, build_feature
     filas = []
     for m in modulos:
         t0, fase = time.time(), f"builder-{m['nombre']}"
@@ -103,7 +103,7 @@ def _capturas(base: pathlib.Path, repo: pathlib.Path) -> pathlib.Path:
 
 def juzgar(repo: pathlib.Path, juez: dict, base: pathlib.Path) -> list[dict]:
     """Ticket 09: opinion de a pares contra un entregable de referencia. Va a sombra y NUNCA cambia el veredicto."""
-    from .juez_sombra import comparar
+    from mmorch.juez_sombra import comparar
     nuevo, ref = _capturas(base, repo), (base / juez["contra"]).resolve()
     if not (nuevo / "texto.txt").exists() or not (ref / "texto.txt").exists():
         return [{"juez": "sin capturas", "nuevo": str(nuevo), "contra": str(ref)}]

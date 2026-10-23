@@ -30,6 +30,11 @@ Reload Claude Code para cargar tools nuevos.
 - **Modelos.** Roles y precios: `mmorch/config.py`. Aca solo el invariante de
   familias: bulk y verificador no comparten familia.
 
+## SDLC = builder, mmorch = banco
+- El pipeline de 6 etapas vive en el paquete `sdlc/` (decision del usuario 2026-10-22). Construye; no mide.
+- `sdlc` importa de `mmorch`; mmorch solo lo importa para correrlo (server, nocturno) o medirlo (`mmorch.sdlc_bench`).
+- Un cambio al builder se juzga con tests, gates y corridas reales, sin A/B obligatorio del bench.
+
 ## Donde leer el resto
 - Hilo con Cursor: `logs/canal.jsonl` (`mmorch.canal`). Nadie despierta al otro.
 - Delegar implementacion a Cursor: `python -m mmorch.cursor_worker correr <repo> <pedido.md>` en segundo plano;

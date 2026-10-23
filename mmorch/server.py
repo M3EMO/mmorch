@@ -293,7 +293,7 @@ async def run_project(request):
 
 async def run_workflow(request):
     """POST /run/workflow {workflow_name: "project-build", project, external_test, task, ...}: el pipeline de 6 etapas
-    (mmorch.sdlc) como job del server. (Los role-chains cooperativos se retiraron el 2026-09-15.)"""
+    (paquete sdlc) como job del server. (Los role-chains cooperativos se retiraron el 2026-09-15.)"""
     from starlette.responses import JSONResponse
     if not _token_ok(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -305,7 +305,7 @@ async def run_workflow(request):
     if not task:
         return JSONResponse({"error": "task required"}, status_code=400)
     import uuid as _u
-    # project-build = el pipeline de 6 etapas (mmorch.sdlc, ticket 05), NOT a role-chain spec. Needs a
+    # project-build = el pipeline de 6 etapas (paquete sdlc, ticket 05), NOT a role-chain spec. Needs a
     # registered project + the acceptance command. Runs isolated -> review branch.
     if body.get("workflow_name") == "project-build":
         project = body.get("project", "")
@@ -322,7 +322,7 @@ async def run_workflow(request):
                 return JSONResponse({"error": "resume desde la etapa 2 requiere verdict {label: aprobado|rechazado, motivo}"},
                                     status_code=400)
             from .projects import resolve as _resolve
-            from .sdlc import registrar_veredicto
+            from sdlc.pipeline import registrar_veredicto
             registrar_veredicto(_resolve(project), resume_branch, v["label"], str(v["motivo"]).strip(), task,
                                 test_rel=str(v.get("test_rel", "")))  # modo grill: el test lo nombra el llamador
             if v["label"] == "rechazado":

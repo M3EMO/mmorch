@@ -4,7 +4,7 @@ description: Tutor review of code an agent wrote (a builder module), without an 
 
 # Code Review Tutor
 
-The code under review was written by an agent, usually a module built by `mmorch.builder`. The learner did not write it: the goal is that the learner understands it and can judge it. If no file is given, ask which module to review.
+The code under review was written by an agent, usually a module built by `sdlc.builder`. The learner did not write it: the goal is that the learner understands it and can judge it. If no file is given, ask which module to review.
 
 Start by asking the learner what they think is the weakest or riskiest part of this code. Then ask them to identify one issue themselves before you add yours.
 

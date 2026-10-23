@@ -2,7 +2,7 @@
 import json
 import types
 
-import mmorch.sdlc as S
+import sdlc.pipeline as S
 
 
 def test_coder_claude_va_por_la_cli_aislada_y_suma_su_cupo(tmp_path, monkeypatch):

@@ -4,7 +4,7 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**121 módulos · 44 MCP tools · 1108 tests.**
+**119 módulos · 44 MCP tools · 1110 tests.**
 
 El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
 
@@ -25,7 +25,6 @@ El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/budget.py` | budget — BudgetKeeper: techo de gasto mensual (ataca el incidente +$5). |
 | `mmorch/budget_policy.py` | budget_policy — scoped budget policies (graft G5 from paperclip). |
 | `mmorch/bughunt.py` | BUG-HUNTER logico de mmorch: mutation-survivors como mapa de donde un bug silencioso viviria. |
-| `mmorch/builder.py` | builder — arma un entregable desde una carpeta vacia, modulo por modulo, por el SDLC (builder-e2e ticket 06). |
 | `mmorch/bursts.py` | Bursts de arXiv — temas recién acuñados, que ningún tag todavía nombra. |
 | `mmorch/cache.py` | memo (I-4) — cache content-hash de resultados/verdicts. Salta re-gen/re-verify |
 | `mmorch/canal.py` | canal — hilo ordenado entre Cursor, Claude Code y mmorch. |
@@ -106,7 +105,7 @@ El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/schedule.py` | schedule — ADVISORY de ventana off-peak (DeepSeek descuenta fuerte fuera de hora pico). |
 | `mmorch/schema.py` | schema (§9) — structured-output gates. Hoy los parsers de mmorch son best-effort |
 | `mmorch/scout.py` | scout — pre-pass ENTORNO-PRIMERO (el patron central de Fable 5: 'primero aprende el |
-| `mmorch/sdlc.py` | sdlc — pipeline de 6 etapas con gates (spec -> plan -> build -> test -> review -> pr). Ticket 05, paso 1. |
+| `mmorch/sdlc_bench.py` | sdlc_bench — mmorch mide el builder `sdlc` sobre las tasks congeladas del bench (el SDLC ya no trae modo bench). |
 | `mmorch/self_audit.py` | Auto-auditoria — el juez de mmorch se mira a si mismo, modulo por modulo. |
 | `mmorch/server.py` | server — mmorch VISUAL nivel 3: progreso live de cada subagente + control TOTAL remoto. |
 | `mmorch/server_core.py` | server_core — shared in-process state + tiny request helpers for the server route modules. |
@@ -119,7 +118,6 @@ El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/slim.py` | Slim — auto-eficientización de código: menos verbose, misma conducta. |
 | `mmorch/spec.py` | spec — spec-builder barato que INFIERE mas alla de lo dicho, pero aplica |
 | `mmorch/speedup.py` | speedup — make a function faster, cero-cupo, kept only on MEASURED+CORRECT improvement. |
-| `mmorch/sprites.py` | sprites — oraculo visual del pipeline (ticket 15 del mapa sdlc-6-gates). |
 | `mmorch/stuck_detector.py` | Detector de estancamiento — tendencias sobre la historia nocturna, cero LLM. |
 | `mmorch/sync.py` | sync — GitHub como bus de sincronizacion entre maquinas. El host always-on (ej pc-mateo) |
 | `mmorch/synth_store.py` | synth_store — registro persistente de checkers SINTETIZADOS y promovidos, por tipo. |

@@ -56,7 +56,7 @@ def pick_target(worst: list[dict], state: dict, *, today: str,
 
 def _default_build(task: str, wt_path: str, gate_cmd: str) -> dict:
     # ticket 05: pipeline de 6 etapas; la suite/gate del repo es el oraculo (accept_cmd), files = techo de sdlc.toml
-    from mmorch.sdlc import build_feature
+    from sdlc.pipeline import build_feature
     r = build_feature("harden", task, wt_path, accept_cmd=gate_cmd, wt=wt_path, max_fix=3)
     return {"status": r.get("status"), "detail": r.get("failed_note", "")}
 

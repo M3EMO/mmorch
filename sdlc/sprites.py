@@ -23,7 +23,7 @@ import numpy as np
 from PIL import Image
 from typing import Sequence
 
-from .paths import logs_dir
+from mmorch.paths import logs_dir
 
 CRITERIOS = ("silueta legible al tamano objetivo", "paleta coherente con la referencia",
              "luz y sombra consistentes", "lectura clara a la distancia de juego")
@@ -124,7 +124,7 @@ def _parte_imagen(img: Image.Image, escala: int = ESCALA) -> dict:
 def juez_visual(nuevo: Path, referencia: Path, *, criterios=CRITERIOS, modelo: str = JUEZ,
                 llamar=None) -> dict:
     """Compara de a pares y contesta la rubrica binaria. NO decide nada: su salida va a sombra."""
-    from .providers import call
+    from mmorch.providers import call
     texto = ("Sos un revisor de arte de un juego 2D. La PRIMERA imagen es una referencia YA APROBADA; la SEGUNDA es la "
              "candidata. Las dos estan agrandadas con vecino-mas-cercano, asi que los bordes duros son correctos.\n"
              "Responde SOLO un JSON: {\"mejor\": \"referencia\"|\"candidata\"|\"empate\", \"criterios\": {"

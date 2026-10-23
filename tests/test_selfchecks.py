@@ -24,9 +24,8 @@ EXCLUIR = {
     "cli": "entrypoint CLI: parsea argv y ejecuta comandos reales",
     "nightly": "pipeline nocturno completo: LLM/API real y estado del home real",
     "babel": "asserta lexicon_version() del vault REAL — vacio en el home aislado",
-    "sdlc": "CLI del pipeline: corre etapas con API real; sus gates puros van en test_sdlc_gates.py",
+    "sdlc_bench": "CLI: corre el builder sdlc con API real sobre una task del bench",
     "cursor_worker": "CLI: lanza cursor-agent real en un worktree; sus piezas puras van en test_cursor_worker.py",
-    "builder": "CLI: arma un entregable con el SDLC real; sus piezas puras van en test_builder.py",
 }
 
 

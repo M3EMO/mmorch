@@ -82,7 +82,7 @@ committed locally and surfaced to the user is a valid end state — do NOT treat
 
 ## SDLC (pipeline de 6 etapas)
 
-Este repo construye features con `mmorch.sdlc` (skill `/project`). Contrato del repo en `sdlc.toml`; artefactos de cada corrida en `docs/sdlc/` de la review branch.
+Este repo construye features con el paquete `sdlc` (skill `/project`). Contrato del repo en `sdlc.toml`; artefactos de cada corrida en `docs/sdlc/` de la review branch.
 
 Gates que bloquean en la etapa 5: suite total sin fallos nuevos (el baseline se mide SIN los tests de aceptacion), lint
 y tipos sin hallazgos nuevos por archivo contra la base, codigo muerto en un `.py` nuevo (`cobertura_min`, default 0.8),

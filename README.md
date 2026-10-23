@@ -212,6 +212,11 @@ short of green with no gate to tell it so. Full write-up: `docs/ab-sdlc-2026-09-
 Next: the wayfinder map `.scratch/sdlc-6-gates/` (13 tickets) — the pipeline replaces the
 engine and becomes a per-repo convention.
 
+Since 2026-10-22 the pipeline is its own package, `sdlc/` (next to `mmorch/`): a **builder**, not
+part of the bench. It uses mmorch as a library (providers, sandbox, checkers). mmorch measures it
+as one more consumer: `python -m mmorch.sdlc_bench --task <bench>`. Adoption is
+`python -m sdlc init <repo>`; multi-module builds are `python -m sdlc.builder <plan> <dir>`.
+
 ### 6-stage pipeline on the validation set (2026-09-11/13)
 
 Driver v3 (`.scratch/sdlc-6-gates/research/04-driver-v3/driver_py.py`): spec → Claude spec review
@@ -244,7 +249,7 @@ empty detail) in the one hard run. Per-run logs and findings:
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **121 módulos · 44 MCP tools (15 expuestas por default) · 1108 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
+_Auto-generado por `mmorch.docgen`._ **119 módulos · 44 MCP tools (15 expuestas por default) · 1110 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->

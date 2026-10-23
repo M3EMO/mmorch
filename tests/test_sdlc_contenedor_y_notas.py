@@ -8,7 +8,7 @@ import types
 import pytest
 
 import mmorch.sandbox as SB
-import mmorch.sdlc as S
+import sdlc.pipeline as S
 
 IMG = "docker.io/library/python:3.12-slim"
 

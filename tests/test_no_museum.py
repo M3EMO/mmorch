@@ -68,6 +68,7 @@ def _live_references() -> set[str]:
     refs: set[str] = set()
     files = [f for f in PKG.glob("*.py") if f.name != "__init__.py"]
     files += list((REPO / "scripts").glob("*.py"))
+    files += list((REPO / "sdlc").glob("*.py"))  # el builder usa a mmorch como biblioteca: sus llamadas son vivas
     for f in files:
         for node in ast.walk(ast.parse(f.read_text(encoding="utf-8"))):
             if isinstance(node, ast.Name):

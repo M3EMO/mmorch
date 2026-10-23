@@ -3,7 +3,7 @@ cuando falta el compilador. Cero API: llm y el revisor son dobles; el "compilado
 import json
 import types
 
-import mmorch.sdlc as S
+import sdlc.pipeline as S
 
 ROTO = "export const f = (x: number): number => ROTO;\n"
 BIEN = "export const f = (x: number): number => x + 1;\n"

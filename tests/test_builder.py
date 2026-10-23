@@ -1,12 +1,12 @@
-"""mmorch.builder (builder-e2e ticket 06): bootstrap desde una carpeta vacia y encadenado de modulos. Cero API: un
+"""sdlc.builder (builder-e2e ticket 06): bootstrap desde una carpeta vacia y encadenado de modulos. Cero API: un
 build_feature falso crea la rama de cada modulo con un worktree real."""
 import json
 import subprocess
 
 import pytest
 
-import mmorch.builder as B
-import mmorch.sdlc as S
+import sdlc.builder as B
+import sdlc.pipeline as S
 
 
 def _git(repo, *a):

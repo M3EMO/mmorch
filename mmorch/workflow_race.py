@@ -4,7 +4,7 @@ alimenta un bandit propio (mismo ThompsonBandit descontado del sig-bandit) — a
 puede consultar qué forma de workflow funciona mejor para cada forma de task, y el sistema
 EVOLUCIONA su estrategia, no solo su código.
 
-Variantes v1 = vueltas de fix del pipeline de 6 etapas (mmorch.sdlc, ticket 05). El formato es
+Variantes v1 = vueltas de fix del pipeline de 6 etapas (paquete sdlc, ticket 05). El formato es
 data (dict) a propósito: una variante futura puede venir de un mutador (COPRO-lite sobre
 specs) sin tocar este runner. Scoring 100% determinista (anti-Goodhart: pass = acceptance
 congelado del bench; costo = delta real de metrics; tiempo = reloj) — ningún LLM juzga.
@@ -36,7 +36,7 @@ def _default_build_fn(task_text: str, repo: str, accept_cmd: str, cfg: dict) -> 
     """Ticket 05: el pipeline de 6 etapas sobre el directorio materializado (`repo`); `accept_cmd` es el oraculo."""
     import types
 
-    from . import sdlc
+    from sdlc import pipeline as sdlc
     t = types.SimpleNamespace(name=Path(repo).name, task=task_text, accept_files={})
     sdlc.configure(t, contract=[], wt=repo, max_fix=cfg.get("max_fix", 3), accept_cmd=accept_cmd)
     return sdlc.run()

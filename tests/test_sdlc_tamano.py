@@ -2,7 +2,7 @@
 de 16k tokens de archivos existentes) y deja el tamaño en el run-log. Cero API."""
 import types
 
-import mmorch.sdlc as S
+import sdlc.pipeline as S
 
 
 def _wt(tmp_path, monkeypatch, toml=""):

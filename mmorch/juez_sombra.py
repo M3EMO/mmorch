@@ -19,7 +19,7 @@ from pathlib import Path
 
 from .config import DEFAULT_VERIFIER
 from .paths import logs_dir
-from .sprites import kappa
+from sdlc.sprites import kappa
 
 VLM = "claude:claude-sonnet-5-5"   # un modelo `claude:` corre por la CLI y gasta cupo, nunca por API
 

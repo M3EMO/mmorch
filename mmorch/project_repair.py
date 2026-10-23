@@ -91,7 +91,7 @@ def repair_projects(orch_root: str, *, today: str, build_fn=None,
             f"Estilo del repo."
         )
         if build_fn is None:
-            from mmorch.sdlc import build_feature
+            from sdlc.pipeline import build_feature
 
             def build_fn(t, w, g):
                 # ticket 05: la suite roja es el oraculo (accept_cmd); files = techo de sdlc.toml del repo

@@ -15,7 +15,7 @@ import types
 
 import pytest
 
-import mmorch.sdlc as S
+import sdlc.pipeline as S
 
 R_ALL = " ".join(f"R{i}" for i in range(1, 11))
 

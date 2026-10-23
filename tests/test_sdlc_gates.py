@@ -1,4 +1,4 @@
-"""Gates puros de mmorch.sdlc (ticket 05, paso 1). Cero API, cero git: configure() con una task ficticia.
+"""Gates puros de sdlc.pipeline (ticket 05, paso 1). Cero API, cero git: configure() con una task ficticia.
 
 Cada caso viene de un defecto real del driver (research/07-resultados.md del mapa sdlc-6-gates):
 - strip_fence: una valla ``` DENTRO de un string cortaba el archivo (D2, D11-diag2).
@@ -13,7 +13,7 @@ import types
 
 import pytest
 
-import mmorch.sdlc as S
+import sdlc.pipeline as S
 
 INNER = 'x = "```\\n{cur}\\n```"\ny = 1'
 

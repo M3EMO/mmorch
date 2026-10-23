@@ -3,7 +3,7 @@ docstring, clones por lineas. Cero API, cero compilador real: accept_cmd/compile
 import sys
 import types
 
-import mmorch.sdlc as S
+import sdlc.pipeline as S
 
 JS = "// modulo a\n// segunda linea\nconst x = require('y');\nfunction f(a, b) {\n  if (a == b && a > 0) { return a + b; }\n  return false;\n}\n"
 RS = "//! crate doc\n//! linea 2\nuse std::fmt;\npub fn f(a: i32) -> bool {\n    a >= 1 && true\n}\n"
