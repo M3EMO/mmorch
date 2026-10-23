@@ -10,7 +10,7 @@ Aplicar la convención del ticket 11 a los repos vivos del usuario: QueTePario/C
 
 ## Resolucion (en curso, 2026-09-15, HITL)
 
-- D5 (usuario acepta): un repo entra por `python -m mmorch.sdlc init <repo>` (sdlc.toml con techo de archivos,
+- D5 (usuario acepta): un repo entra por `python -m sdlc init <repo>` (sdlc.toml con techo de archivos,
   accept_cmd, suite, `approve_accept`; docs/sdlc/ con plantillas; puntero en AGENTS.md) y el pipeline gana la
   etapa 1 "aceptacion": Claude escribe `tests/test_sdlc_<id>.py` desde la tarea; gates deterministas: compila
   (collect-only), falla en HEAD (rojo por diseño), nombra R<n>. Aprobacion humana OBLIGATORIA por default
@@ -19,17 +19,17 @@ Aplicar la convención del ticket 11 a los repos vivos del usuario: QueTePario/C
 
 ## Ejecucion
 
-- Mecanismo HECHO (2026-09-15): `python -m mmorch.sdlc init <repo>` + etapa 1 "aceptacion" en `mmorch/sdlc.py`,
+- Mecanismo HECHO (2026-09-15): `python -m sdlc init <repo>` + etapa 1 "aceptacion" en `sdlc/pipeline.py`,
   tests en `tests/test_sdlc_adopcion.py` (init idempotente; etapa 1: rojo -> awaiting_approval; verde en HEAD -> rechazo;
   sin R<n> -> rechazo; approve_accept=false sigue). `build_feature` arranca en la etapa 1 cuando el llamador no trae tests.
 - Aplicado a `orchestration` (sdlc.toml en la raiz, docs/sdlc/, AGENTS.md). Pendiente por repo, a pedido del usuario:
-  QueTePario/ChatBot, Estudio, Portfolio financiero, Proyecto_Adepor (`python -m mmorch.sdlc init <ruta>` y ajustar
+  QueTePario/ChatBot, Estudio, Portfolio financiero, Proyecto_Adepor (`python -m sdlc init <ruta>` y ajustar
   `accept_cmd`/`files`). Lotus ya no existe.
 
 ## Adopcion por repo (2026-09-15, sesion 2)
 
 Sonda por repo: worktree detached desde HEAD, dependencias ignoradas enlazadas (como `seed`), comando real.
-Cada hueco del pipeline que la sonda expuso quedo corregido con test en `mmorch/sdlc.py`:
+Cada hueco del pipeline que la sonda expuso quedo corregido con test en `sdlc/pipeline.py`:
 
 - `3df3a38` interprete del repo: la suite y los comandos corrian con el Python de mmorch, no con la `.venv` del repo.
 - `1ffb704` `{files}` en `compile_cmd`/`lint_cmd` (los hints `<archivo>` de init nunca se reemplazaban); la config del

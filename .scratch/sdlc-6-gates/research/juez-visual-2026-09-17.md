@@ -47,4 +47,4 @@ etiquetados por calidad: las etiquetas salen de los veredictos del usuario.
 
 10 defectos inyectados, 10 atrapados, 0 falsos positivos sobre el sprite bueno: tamano, paleta cerrada, tope de colores,
 alfa binario, pixel huerfano, borde sucio, hitbox en el aire, drift entre frames, paleta inestable, loop abierto.
-Corre con Pillow y numpy, sin red. Ese prototipo se convirtio en `mmorch/sprites.py`.
+Corre con Pillow y numpy, sin red. Ese prototipo se convirtio en `sdlc/sprites.py`.

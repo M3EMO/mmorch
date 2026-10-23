@@ -10,7 +10,7 @@ import time
 RAIZ = pathlib.Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(RAIZ))
 from mmorch.sandbox import container_argv, engine  # noqa: E402
-from mmorch.sdlc import StageFailed, build_feature  # noqa: E402
+from sdlc.pipeline import StageFailed, build_feature  # noqa: E402
 
 AQUI = pathlib.Path(__file__).resolve().parent
 REPO = pathlib.Path.home() / "Proyectos/F2-seo-calculadoras/prototipo-04"

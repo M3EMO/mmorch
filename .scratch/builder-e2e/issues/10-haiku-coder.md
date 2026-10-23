@@ -8,7 +8,7 @@ Map: ../map.md
 
 ¿Cómo entra Haiku 5.5 como coder sin romper el invariante del REGISTRY (la familia anthropic no es un nodo)?
 
-- Ruta: la CLI de Claude, como el planner `claude:<modelo>` de `mmorch/sdlc.py`.
+- Ruta: la CLI de Claude, como el planner `claude:<modelo>` de `sdlc/pipeline.py`.
 - Sorteo por módulo, mitad y mitad, con semilla fija, entre Haiku 5.5 y DeepSeek v4 pro.
 - El run-log guarda el coder sorteado, la fricción, el éxito, los dólares y el cupo.
 
@@ -16,8 +16,8 @@ Map: ../map.md
 
 Resuelto (2026-10-15). Un coder `claude:<modelo>` corre por la CLI de Claude, sin pasar por el REGISTRY (la familia anthropic sigue sin ser un nodo).
 
-- `mmorch/sdlc.py`: `llm()` desvía `claude:<modelo>` a `_claude_texto()`, la misma llamada aislada del planner (`--restricted`, sin MCP, sin sesión), pero sin herramientas (`--tools ""`) y con el rol del coder como `--system-prompt`. El costo queda en `claude_coder_usd` y el coder en `state["coder"]`.
-- `mmorch/builder.py`: `sortear()` reparte DeepSeek v4 pro y `claude-haiku-5-5` mitad y mitad (±1), mezclados con semilla fija. El plan puede cambiar `coders` y `semilla`. Cada fila registra el coder y su cupo.
+- `sdlc/pipeline.py`: `llm()` desvía `claude:<modelo>` a `_claude_texto()`, la misma llamada aislada del planner (`--restricted`, sin MCP, sin sesión), pero sin herramientas (`--tools ""`) y con el rol del coder como `--system-prompt`. El costo queda en `claude_coder_usd` y el coder en `state["coder"]`.
+- `sdlc/builder.py`: `sortear()` reparte DeepSeek v4 pro y `claude-haiku-5-5` mitad y mitad (±1), mezclados con semilla fija. El plan puede cambiar `coders` y `semilla`. Cada fila registra el coder y su cupo.
 - Tests: `tests/test_sdlc_coder_claude.py` y `tests/test_builder.py`.
 
 Corrida real con sorteo (F2, `prototipo-10`, semilla 20261015):

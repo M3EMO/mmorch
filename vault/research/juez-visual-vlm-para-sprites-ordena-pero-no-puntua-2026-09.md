@@ -36,7 +36,7 @@ entre frames, paleta inestable, loop abierto). Nadie publica el chequeo de hitbo
 
 ## Decision que sostiene (mmorch)
 
-`mmorch/sprites.py`: la capa determinista BLOQUEA en la etapa 5; el juez visual pregunta de a pares contra una
+`sdlc/sprites.py`: la capa determinista BLOQUEA en la etapa 5; el juez visual pregunta de a pares contra una
 referencia aprobada mas una rubrica binaria, nunca puntaje absoluto, y queda EN SOMBRA hasta 50 sprites etiquetados
 por el humano con kappa >= 0.6. El sprite viaja agrandado x8 con vecino-mas-cercano por la caida de acierto en
 imagenes chicas. El endpoint OpenAI-compatible de Gemini acepta `image_url`, asi que no hizo falta tocar el proveedor.

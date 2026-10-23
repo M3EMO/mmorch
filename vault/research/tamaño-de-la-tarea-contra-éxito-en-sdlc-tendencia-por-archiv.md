@@ -4,7 +4,7 @@ created: 2026-10-04
 tags: [research, orchestration, sdlc, tamano, gate, plan, carga-cuantizada]
 status: measured
 confidence: "baja: 107 corridas, las 72 del banco vienen de 12 tareas"
-sources: [bd orchestration-e4d, orch-spike/scripts/sdlc_tamano (e16590b), mmorch/sdlc.py gate_tamano (85c3de8), informe de impacto (3114940), orch-spike/scripts/sdlc_planner/pares_e4d.py (8eb8218)]
+sources: [bd orchestration-e4d, orch-spike/scripts/sdlc_tamano (e16590b), sdlc/pipeline.py gate_tamano (85c3de8), informe de impacto (3114940), orch-spike/scripts/sdlc_planner/pares_e4d.py (8eb8218)]
 ---
 ## Pregunta
 

@@ -6,7 +6,7 @@ Map: ../map.md
 
 ## Question
 
-¿Qué partes de `mmorch/sdlc.py` y de la skill `/project` sirven sin cambios para construir un módulo, y qué falta para un producto de varios módulos?
+¿Qué partes de `sdlc/pipeline.py` y de la skill `/project` sirven sin cambios para construir un módulo, y qué falta para un producto de varios módulos?
 
 - Mapear las 6 etapas, los gates y el fix ladder contra el ciclo de universal-modder.
 - Listar los supuestos de una sola feature sobre un repo existente que rompen con un repo vacío.
@@ -20,13 +20,13 @@ Resuelto (2026-10-14) por lectura de código, sin ejecutar nada. El SDLC sirve c
 
 Huecos, del que más bloquea al que menos:
 
-1. Bootstrap del repo vacío: `open_worktree` exige HEAD (`mmorch/worktree_driver.py:161`) y `build_feature` exige `accept` (`mmorch/sdlc.py:1839`).
-2. Descomposición: `gate_tamano` escribe `division.md` y se detiene (`mmorch/sdlc.py:757`); nada consume ese archivo.
-3. Encadenado: cada corrida parte del HEAD del repo (`mmorch/sdlc.py:1774`), no de la rama del módulo anterior.
-4. Stack: la spec fija "Python 3.12, sin dependencias" (`mmorch/sdlc.py:1300`) y el plan prohíbe dependencias nuevas (`mmorch/sdlc.py:1362`).
+1. Bootstrap del repo vacío: `open_worktree` exige HEAD (`mmorch/worktree_driver.py:161`) y `build_feature` exige `accept` (`sdlc/pipeline.py:1839`).
+2. Descomposición: `gate_tamano` escribe `division.md` y se detiene (`sdlc/pipeline.py:757`); nada consume ese archivo.
+3. Encadenado: cada corrida parte del HEAD del repo (`sdlc/pipeline.py:1774`), no de la rama del módulo anterior.
+4. Stack: la spec fija "Python 3.12, sin dependencias" (`sdlc/pipeline.py:1300`) y el plan prohíbe dependencias nuevas (`sdlc/pipeline.py:1362`).
 5. Oráculo de integración: hoy existe solo como regresión de la suite total (`gate_suite_total`).
 6. Agente que maneja el producto real: no existe.
-7. Aprobación humana de la aceptación por módulo (`approve_accept`, `mmorch/sdlc.py:1287`).
+7. Aprobación humana de la aceptación por módulo (`approve_accept`, `sdlc/pipeline.py:1287`).
 8. Nota de campo: el run-log sirve como materia prima, pero no guarda la ruta del repo y nadie lo lee de vuelta.
 9. Tests de aceptación que se recolecten sin el código (inferido, sin verificar).
 

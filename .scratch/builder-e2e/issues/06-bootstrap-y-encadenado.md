@@ -14,9 +14,9 @@ Map: ../map.md
 
 ## Answer
 
-Resuelto (2026-10-15). Módulo nuevo `mmorch/builder.py`, con tests en `tests/test_builder.py`.
+Resuelto (2026-10-15). Módulo nuevo `sdlc/builder.py`, con tests en `tests/test_builder.py`.
 
-    python -m mmorch.builder <plan.json> <carpeta_vacia>
+    python -m sdlc.builder <plan.json> <carpeta_vacia>
 
 - El plan es la salida de la descomposición: archivos del bootstrap, módulos en orden (tarea, archivos, contrato) e integración (comandos en contenedor, con `{repo}` y `{base}`).
 - `bootstrap()` nunca pisa una carpeta con contenido; hace el commit inicial y construye la imagen si hay `Dockerfile.sdlc` y `contenedor`.

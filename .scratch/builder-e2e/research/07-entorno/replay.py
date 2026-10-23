@@ -8,7 +8,7 @@ import sys
 
 RAIZ = pathlib.Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(RAIZ))
-from mmorch.sdlc import StageFailed, build_feature  # noqa: E402
+from sdlc.pipeline import StageFailed, build_feature  # noqa: E402
 
 repo, wt = sys.argv[1], pathlib.Path(sys.argv[2])
 contrato = RAIZ / ".scratch/builder-e2e/research/04-modular/contratos/parametros.contract.test.ts"

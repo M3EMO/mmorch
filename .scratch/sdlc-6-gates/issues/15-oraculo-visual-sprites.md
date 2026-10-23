@@ -22,7 +22,7 @@ Evidencia completa: `research/juez-visual-2026-09-17.md` (dos investigaciones we
 `research/sprites_checks.py` (10 defectos inyectados, 10 atrapados, 0 falsos positivos).
 
 - D1 (usuario): se construye TODO ahora, no se espera al juego: capa determinista que BLOQUEA, camino de imagenes y
-  juez visual EN SOMBRA. Implementado en `mmorch/sprites.py` + `gate_sprites()` en la etapa 5 + bloque `[sprites]` de
+  juez visual EN SOMBRA. Implementado en `sdlc/sprites.py` + `gate_sprites()` en la etapa 5 + bloque `[sprites]` de
   `sdlc.toml` (dir, lado, paleta, tope_colores, hitboxes, animaciones, referencias). Sin ese bloque el gate no mide nada.
 - D2 (usuario): el juez pregunta de a PARES contra una referencia aprobada Y contesta una rubrica binaria por criterio;
   nunca puntaje absoluto (gemini-2.5-flash: Pearson 0.459 pero 32.1% de acierto exacto).

@@ -22,7 +22,7 @@ Cómo funciona:
 - Opus arma la página a partir del plan del entregable, los contratos, la tabla de casos y las corridas medidas. Las seis secciones son las del ticket 01.
 - Cada sección tiene un botón "Comentar", que abre el compositor de comentarios de claude.ai pegado a esa sección (`comments` en modo `composer_only`, sin pedir permiso).
 - Cada sección tiene un botón "Dar ok", que guarda `{ok, por, ts}` en la colección `oks` (capacidades `db` y `user`).
-- La compuerta: antes de lanzar `python -m mmorch.builder`, Claude lee `oks` con `ArtifactData`; el builder arranca solo con las seis secciones en `ok: true`. Los comentarios se leen con `ArtifactComments`.
+- La compuerta: antes de lanzar `python -m sdlc.builder`, Claude lee `oks` con `ArtifactData`; el builder arranca solo con las seis secciones en `ok: true`. Los comentarios se leen con `ArtifactComments`.
 - Las decisiones abiertas van marcadas dentro de su sección: la convención anualizada o acumulativa, el tope de ANSES de fuente secundaria y la etiqueta del input que encontró axe.
 
 Verificado: la colección `oks` responde vacía después de publicar. Sin verificar: los clics de ok y de comentario, que solo puede hacer el usuario.

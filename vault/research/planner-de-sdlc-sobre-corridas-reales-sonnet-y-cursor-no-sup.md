@@ -4,7 +4,7 @@ created: 2026-10-02
 tags: [research, orchestration, sdlc, planner, cursor, sonnet, reasoner, banco, corridas-reales]
 status: measured
 confidence: "media: 12 corridas reales x 2 repeticiones; potencia baja para diferencias chicas"
-sources: [bd orchestration-34k, orch-spike/scripts/sdlc_planner (7058afe congelado, fc933ae resultados), mmorch/sdlc.py (e6f358b)]
+sources: [bd orchestration-34k, orch-spike/scripts/sdlc_planner (7058afe congelado, fc933ae resultados), sdlc/pipeline.py (e6f358b)]
 ---
 ## Pregunta
 
@@ -36,4 +36,4 @@ sources: [bd orchestration-34k, orch-spike/scripts/sdlc_planner (7058afe congela
 - En corridas reales la diferencia entre planners se achica mucho frente al banco sintético. Las features reales tocan 1 a 3 archivos, y la spec revisada ya nombra los archivos: planear es fácil.
 - El cuello de botella es el coder: las fallas son de compilación en la etapa 4 en los tres brazos.
 - Las métricas secundarias favorecen a Cursor (menos escaladas, menos rechazos, menos USD), pero no alcanzan el umbral y Cursor tarda más.
-- El cambio en `mmorch/sdlc.py` queda: `SDLC_PLANNER` permite elegir el planner sin tocar el default.
+- El cambio en `sdlc/pipeline.py` queda: `SDLC_PLANNER` permite elegir el planner sin tocar el default.

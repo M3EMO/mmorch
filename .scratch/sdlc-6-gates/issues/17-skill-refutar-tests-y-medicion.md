@@ -20,7 +20,7 @@ HITL solo para cargar la API key de DeepSeek en la config de Hermes (el agente n
 
 ## Answer (2026-09-17): el refutador previo a la aprobacion NO aprueba
 
-- Skill escrita: `mmorch/sdlc_templates/refutar-tests.md` (formato SKILL.md, comun a Claude y Hermes). Runner:
+- Skill escrita: `sdlc/templates/refutar-tests.md` (formato SKILL.md, comun a Claude y Hermes). Runner:
   `refutar(caso, runtime="mmorch"|"hermes", max_n=...)` en `mmorch/refutacion.py`.
 - Medicion (tabla y crudos en `research/refutacion-medicion-2026-09-17.md` y `logs/refutacion/`): 3 versiones de la
   skill, 25 corridas, 0 aciertos. v1 (3 propuestas) 0/9 con 0 falsas alarmas; v2 (metodo "implementacion perezosa")

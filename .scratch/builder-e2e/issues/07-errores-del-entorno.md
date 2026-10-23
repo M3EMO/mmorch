@@ -9,12 +9,12 @@ Map: ../map.md
 ¿Cómo distingue la etapa 4 un error del entorno de un error del código, para no gastar vueltas del coder ni escaladas a Claude?
 
 - Caso real del ticket 04: `TS2307 Cannot find module 'node:test'` (faltaban tipos en la imagen); el coder hizo 3 vueltas y Claude 2 escaladas en vano.
-- `_toolchain_missing` (`mmorch/sdlc.py`) reconoce comandos ausentes, pero no módulos ni tipos ausentes del entorno.
+- `_toolchain_missing` (`sdlc/pipeline.py`) reconoce comandos ausentes, pero no módulos ni tipos ausentes del entorno.
 - Medir con los casos guardados en `logs/sdlc/diag-cases/`: cuántas escaladas eran errores del entorno.
 
 ## Answer
 
-Resuelto (2026-10-15). Cambio en `mmorch/sdlc.py` con tests en `tests/test_sdlc_entorno.py`; repetición real en `research/07-entorno/replay.py`.
+Resuelto (2026-10-15). Cambio en `sdlc/pipeline.py` con tests en `tests/test_sdlc_entorno.py`; repetición real en `research/07-entorno/replay.py`.
 
 Regla nueva (`_falta_del_entorno`, usada por `_toolchain_missing`):
 

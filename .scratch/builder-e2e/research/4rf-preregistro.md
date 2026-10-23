@@ -15,10 +15,10 @@ Issue: bd `orchestration-4rf`. Mapa relacionado: `.scratch/builder-e2e/map.md`.
 `deepseek-reasoner` revisó el borrador por `/verify-cross` y lo refutó con 6 hallazgos (US$0.004). El ensemble no corrió porque un proveedor devolvió saldo insuficiente (código 1113). Los cambios son estos:
 
 - Fuga (§5): una corrida previa entra solo si su commit resultante es ancestro del commit base del ítem. Las ramas de revisión sin merge quedan afuera. El validador de §7.5 suma un chequeo de archivos nuevos del ítem.
-- Asimetría (§6): cada repetición corre en un worktree nuevo, desde el commit base, con un PHASE único. El código reusa una rama `sdlc/<PHASE>` existente (`mmorch/sdlc.py:1774`), y eso contaminaría las repeticiones. El orden de los brazos se sortea con semilla.
-- Métrica (§8.1): "corrida fallida" queda definida. Los gates son código determinista y el coder no puede saltearlos. Los gates posteriores al verde corren solo con aceptación verde (`mmorch/sdlc.py:1585`), y la imputación cubre las corridas sin verde.
+- Asimetría (§6): cada repetición corre en un worktree nuevo, desde el commit base, con un PHASE único. El código reusa una rama `sdlc/<PHASE>` existente (`sdlc/pipeline.py:1774`), y eso contaminaría las repeticiones. El orden de los brazos se sortea con semilla.
+- Métrica (§8.1): "corrida fallida" queda definida. Los gates son código determinista y el coder no puede saltearlos. Los gates posteriores al verde corren solo con aceptación verde (`sdlc/pipeline.py:1585`), y la imputación cubre las corridas sin verde.
 - Regla (§9): un solo estimando, la media de `d_i`. El bootstrap remuestrea ítems. Los márgenes quedan en unidades explícitas. La no inferioridad dice "a lo sumo un ítem".
-- Confusores (§11): se suman el orden y el caché de la API. La temperatura ya vale 0 en `llm()` (`mmorch/sdlc.py:154`); la API no acepta semilla.
+- Confusores (§11): se suman el orden y el caché de la API. La temperatura ya vale 0 en `llm()` (`sdlc/pipeline.py:154`); la API no acepta semilla.
 - Fallas técnicas (§8.3): se suma un análisis de sensibilidad que las cuenta como fallas del brazo.
 
 ## 1. Pregunta
@@ -35,14 +35,14 @@ Una nota de campo copia el formato de universal-modder. Cada corrida deja una no
 
 ## 3. Hechos verificados en el código (commit `40a0868`)
 
-- Las 11 llamadas con rol de coder pasan por `_rol()` (`mmorch/sdlc.py:330`): `llm(CODER, _rol(...) ...)`.
+- Las 11 llamadas con rol de coder pasan por `_rol()` (`sdlc/pipeline.py:330`): `llm(CODER, _rol(...) ...)`.
 - Hay una excepción en la línea 161. Si el reasoner agota su presupuesto, `llm()` reintenta con el modelo del coder y el prompt del reasoner. Ese reintento no recibe notas en ningún brazo.
 - Las llamadas del diagnosticador (`llm(DIAG, ...)`, líneas 1075 y 1178) no pasan por `_rol()`.
 - El planner (`_planner`, línea 185) no lee memoria ni corridas previas.
 - `rec_gate` (línea 243) agrega cada rechazo a `state["gate_rejects"]`.
 - El estado guarda `compile_ladder` (línea 1202), `reasoner_rounds` (línea 1098), `test_rounds` (línea 1531) y `escalated_to_claude` (líneas 1118 y 1144).
 - `_flush` escribe el estado completo en `run-log.json`. Con worktree, la ruta es `<wt>/docs/sdlc/run-log.json` (línea 133).
-- Ningún archivo de `mmorch/sdlc.py` llama a `recall`, `remember` ni lee run-logs de otra corrida.
+- Ningún archivo de `sdlc/pipeline.py` llama a `recall`, `remember` ni lee run-logs de otra corrida.
 
 ## 3.1 Prueba de humo del generador (2026-10-14)
 
@@ -64,7 +64,7 @@ Si un hecho falla, este pre-registro se corrige y se vuelve a revisar antes de c
 ## 5. Ítems
 
 - Base: las 12 corridas repetibles de `34k` (9 de SSB, 1 de Estudio y 2 de ChatBot).
-- Commit base del ítem: el `base_sha` de su run-log histórico (`mmorch/sdlc.py:1791`).
+- Commit base del ítem: el `base_sha` de su run-log histórico (`sdlc/pipeline.py:1791`).
 - Regla de elegibilidad: una corrida histórica `j` del mismo repo da nota al ítem `i` solo si se cumplen dos condiciones.
   - La corrida `j` empezó antes que la corrida histórica de `i`.
   - El commit resultante de `j` es ancestro del commit base de `i` (`git merge-base --is-ancestor`).
@@ -136,7 +136,7 @@ Usalas si aplican. Pueden no aplicar a este archivo.
 
 - Tope: 1500 tokens, estimados como 4 caracteres por token. Si las notas superan el tope, entran las más recientes.
 - El run-log entra al prompt de generación truncado a 40 000 caracteres de JSON.
-- Implementación: `scripts/notas_campo.py` (tests en `tests/test_notas_campo.py`). Lectura en el coder: `_notas()` en `mmorch/sdlc.py`, activada por la variable `SDLC_NOTAS`.
+- Implementación: `scripts/notas_campo.py` (tests en `tests/test_notas_campo.py`). Lectura en el coder: `_notas()` en `sdlc/pipeline.py`, activada por la variable `SDLC_NOTAS`.
 - Un validador aborta en dos casos, antes de congelar `notas.json`:
   - El bloque contiene el nombre del archivo del test de aceptación del ítem.
   - El bloque nombra un archivo que el ítem agrega entre su commit base y su commit histórico final (incluye su test de aceptación).
@@ -149,7 +149,7 @@ Usalas si aplican. Pueden no aplicar a este archivo.
 
 - Una corrida fallida es una corrida cuya aceptación no queda verde sin escalar a Claude. Incluye las que cortan en cualquier etapa.
 - Una corrida fallida corta antes y acumula menos fricción. Para no premiar esa falla, su F se reemplaza por la F máxima observada en ese ítem en cualquier brazo y repetición.
-- Los gates son código determinista: el coder no puede saltear un gate. Los gates posteriores al verde corren solo si la aceptación queda verde (`mmorch/sdlc.py:1585`).
+- Los gates son código determinista: el coder no puede saltear un gate. Los gates posteriores al verde corren solo si la aceptación queda verde (`sdlc/pipeline.py:1585`).
 - El análisis informa además la F por etapa alcanzada.
 - La F de un ítem es la media de sus 3 repeticiones.
 
@@ -201,7 +201,7 @@ Un script congelado aplica la regla. Nadie decide mirando los números.
 - Largo del contexto: N1 recibe más texto que N0. El banco no separa el efecto del contenido del efecto del largo. Un brazo placebo con texto neutro del mismo largo queda para el banco ampliado.
 - Calidad de la nota: si `deepseek-chat` escribe notas pobres, el banco mide esas notas y no la idea. El análisis informa cuántas notas dicen "desconocido".
 - Pocos ítems de ChatBot: la primaria queda dominada por SSB.
-- No determinismo: la temperatura vale 0 en `llm()` (`mmorch/sdlc.py:154`), pero la API de DeepSeek no acepta semilla. Las 3 repeticiones existen por eso.
+- No determinismo: la temperatura vale 0 en `llm()` (`sdlc/pipeline.py:154`), pero la API de DeepSeek no acepta semilla. Las 3 repeticiones existen por eso.
 - Orden y caché: el caché de contexto de DeepSeek puede cambiar el costo entre corridas. El sorteo intercalado de §6 reparte ese efecto entre brazos. El análisis informa la F por posición en el orden.
 - Run-logs sin ruta del repo: `state` guarda task, phase y `base_sha`, pero no el repo. El arnés asocia cada run-log a su repo por la ruta donde lo encuentra.
 - Cambio de código: N1 necesita que `_rol()` lea el bloque de notas desde una variable de entorno. Sin esa variable, `_rol()` queda igual. El cambio lleva un test.

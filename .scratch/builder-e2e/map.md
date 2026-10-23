@@ -22,7 +22,7 @@ Entregable aprobado en la parada 2: `~/Proyectos/F2-seo-calculadoras/f2-sueldo-n
 | 1. Capa computable verde | Cumplida: 4 módulos built, integración verde (casos ocultos, metamórficas, entrada validada, sin scroll a 390 px, consola, red, axe, Lighthouse, metadatos). |
 | 2. Dos paradas y menos de 1 h del usuario | Cumplida con medición parcial: walkthrough sin medir; preview rechazada en 5 min y aprobada en la segunda vuelta, sin medir (el reloj de pared pasó 8 h). |
 | 3. APIs < US$5 | Cumplida: ~US$0,10 de API en el rearmado final; las corridas fallidas suman ~US$0,23. |
-| 4. Run-log completo | Cumplida: coder, rechazos, cupo y USD por módulo; paradas del usuario con `python -m mmorch.builder parada`. |
+| 4. Run-log completo | Cumplida: coder, rechazos, cupo y USD por módulo; paradas del usuario con `python -m sdlc.builder parada`. |
 | 5. Juez en sombra con rúbricas | Cumplida: texto (DeepSeek) y visual (Sonnet 5.5 por la CLI, cupo ~US$0,04) prefieren el sitio final en los dos órdenes y guardan el motivo. |
 
 Hallazgo abierto de la parada 2: el texto dice "los aportes se calculan sobre el bruto", pero arriba del tope de ANSES usan el tope. El cálculo es correcto; el texto confunde. Candidato a `test_R7` del contrato de interfaz.
@@ -46,9 +46,9 @@ Hallazgos de la corrida final:
   - El agente maneja el producto y junta evidencia: capturas, logs, respuestas HTTP y salidas de la CLI.
   - Aserciones deterministas sobre la evidencia dictan el veredicto computable.
   - Un verificador separado, con razonamiento prendido, juzga solo el resto no computable.
-  - Ese verificador empieza en sombra, como el juez visual de `gate_sprites` (`mmorch/sdlc.py:462`), hasta que una medición lo habilite.
+  - Ese verificador empieza en sombra, como el juez visual de `gate_sprites` (`sdlc/pipeline.py:462`), hasta que una medición lo habilite.
 - Debilidad de universal-modder que no se copia: el agente que escribe el mod también lee la captura y dicta el veredicto.
-- Lo que ya existe: la skill `/project` con el SDLC de 6 etapas (`mmorch/sdlc.py`), modo grill para la aceptación, gates deterministas y fix ladder.
+- Lo que ya existe: la skill `/project` con el SDLC de 6 etapas (`sdlc/pipeline.py`), modo grill para la aceptación, gates deterministas y fix ladder.
 - Lo que falta: descomposición desde cero en módulos, oráculo de integración entre módulos, agente que maneja el producto y memoria entre corridas.
 - Insumo en bd: `orchestration-4rf` mide notas de campo de corridas previas en el SDLC. Primaria: rechazos de gates y escalones del fix ladder; secundaria: éxito por ítem.
 - Dato previo (`orchestration-34k`): en corridas reales el planner ya acierta 0.875 por ítem; el cuello de botella es el coder de la etapa 4.
@@ -64,7 +64,7 @@ Hallazgos de la corrida final:
 
 - [Lighthouse y axe-core en el driver](issues/11-lighthouse-y-axe.md) — corren sin red en `builder-driver`; variantes siguen en 1,000; el sitio real de F2 queda rojo por un input sin etiqueta (axe critical) que Lighthouse aprobaba con 0,91.
 
-- [Bootstrap y encadenado automáticos](issues/06-bootstrap-y-encadenado.md) — `python -m mmorch.builder <plan> <carpeta>`: bootstrap, módulos en cadena por el SDLC e integración en contenedor; F2 armado desde una carpeta vacía con un solo comando en ~8 min, integración verde.
+- [Bootstrap y encadenado automáticos](issues/06-bootstrap-y-encadenado.md) — `python -m sdlc.builder <plan> <carpeta>`: bootstrap, módulos en cadena por el SDLC e integración en contenedor; F2 armado desde una carpeta vacía con un solo comando en ~8 min, integración verde.
 
 - [Errores del entorno contra errores del código](issues/07-errores-del-entorno.md) — builtin o paquete declarado pero ausente = entorno; paquete inventado o import relativo = código; en contenedor Claude no instala y nombra qué falta en la imagen. Caso real: de 3 vueltas + 2 escaladas a 0 vueltas + 1 llamada con diagnóstico claro.
 

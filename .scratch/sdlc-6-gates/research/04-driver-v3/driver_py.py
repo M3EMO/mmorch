@@ -1,11 +1,11 @@
 """CLI de validacion del pipeline (tickets 06/07 y reparacion por modulos D2..D15).
 
-Desde el ticket 05 (paso 1, 2026-09-15) el pipeline vive en `mmorch/sdlc.py`; este script solo conserva la tabla
-FEATURES (tareas de dogfood sobre mmorch, con su test de aceptacion en accept/<id>/) y llama a mmorch.sdlc.
+Desde el ticket 05 (paso 1, 2026-09-15) el pipeline vive en `sdlc/pipeline.py`; este script solo conserva la tabla
+FEATURES (tareas de dogfood sobre mmorch, con su test de aceptacion en accept/<id>/) y llama a sdlc.pipeline.
 
 Uso:
   python driver_py.py --task D15 --wt <dir> [--phase sdlc-D15-r1] [--from-stage 5] [--self-check]
-  python driver_py.py --task rate-limiter --wt <dir>      (task del bench: mmorch.sdlc.main)
+  python driver_py.py --task rate-limiter --wt <dir>      (task del bench: mmorch.sdlc_bench.main)
 """
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ import sys
 import types
 
 sys.path.insert(0, r"C:\Users\map12\.claude\orchestration")
-from mmorch import sdlc  # noqa: E402
+from mmorch import sdlc_bench  # noqa: E402
+from sdlc import pipeline as sdlc  # noqa: E402
 
 
 def _arg(flag, default):
@@ -254,7 +255,7 @@ if __name__ == "__main__":
         _s.reconfigure(encoding="utf-8", errors="replace")
     feat = FEATURES.get(TASK_NAME)
     if not feat:
-        sys.exit(sdlc.main(sys.argv[1:]))
+        sys.exit(sdlc_bench.main(sys.argv[1:]))
     feat = dict(feat, accept={rel: pathlib.Path(src).read_text(encoding="utf-8") for rel, src in feat["accept"].items()})
     task = types.SimpleNamespace(name=TASK_NAME, task=feat["task"], accept_files=feat["accept"])
     sdlc.configure(task, contract=feat["contract"], feat=feat, wt=_arg("--wt", None), phase=_arg("--phase", None),
