@@ -4,6 +4,8 @@ Date: 2026-10-23 · Goal: decidir qué costumbres mantiene al día el mecanismo 
 ## Summary / key decisions
 
 - `docs/sdlc/gates/` no entra al contrato del repo; los gates pasan a mmorch (`orchestration-bpn`). `contract_version` pasa al ticket 03 (P2).
+- Constitución: sin default nuevo; aviso del oráculo, nunca desvío; el usuario la declara por repo (P3).
+- Artefactos de corrida en `docs/sdlc/`: fuera del contrato; limpieza de main en bd `orchestration-eeq` (P4).
 - Grupos que entran: SDLC + SDD + `.gitignore` de secretos + `bd init` (P1, usuario). Forma de `bd init`: la decide `orchestration-ior` (P1c).
 
 ## Q&A log
@@ -33,5 +35,15 @@ Date: 2026-10-23 · Goal: decidir qué costumbres mantiene al día el mecanismo 
 - Hechos: `sdlc/pipeline.py` ya importa de mmorch (`checkers._mutants`, `impacto`, `sandbox`, `providers`). mmorch importa `sdlc` en `auto_repair`, `hardening`, `juez_sombra`, `project_repair` y `refutacion`: el ciclo de imports ya existe.
 - Matiz confirmado por el usuario: el chequeo y la medición del gate pasan a mmorch; la orquestación queda en `sdlc/`; los umbrales siguen en `sdlc.toml`.
 - Decisión: bd `orchestration-bpn` creado (2026-10-23) para el traslado, relacionado con `orchestration-4u6`, con sesión aparte.
+
+### P3 — Constitución fuera de orchestration
+- Asked: ¿qué constitución lee el pipeline en repos sin `GOAL.md`?
+- Captured: el usuario confirma la recomendación.
+- Decisión: el mecanismo nunca crea un archivo de constitución. El oráculo reporta "sin constitución" como aviso, no como desvío. El usuario declara `constitution = "<ruta>"` en cada repo con reglas fijas. `CLAUDE.md` no es default (cambia seguido; `orchestration-ior` puede reorganizarlo).
+
+### P4 — Artefactos de corrida en `docs/sdlc/`
+- Asked: ¿mesa de trabajo o historia? ¿bd de limpieza?
+- Captured: el usuario confirma que quedan fuera del contrato y pide el bd de limpieza.
+- Decisión: el mecanismo no toca `spec.md`, `plan.md`, `run-log.json`, `suite*.log`, `supervision.md` de `docs/sdlc/`, y el oráculo no los chequea. bd `orchestration-eeq` (2026-10-23): la mesa no llega a main al mergear. Un `.gitignore` queda descartado porque rompe el checkpoint `run-log.json`.
 
 ## Open flags (pending input)
