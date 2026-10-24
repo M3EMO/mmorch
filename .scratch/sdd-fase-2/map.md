@@ -51,6 +51,7 @@ Lo que el código hace hoy (leído en `sdlc/pipeline.py`, rama `mmorch/auto` en 
 - [Formato del delta y su gate](issues/04-formato-y-gate-del-delta.md) — el writer escribe solo el delta (`MODIFIED` repite el requisito entero); el código fusiona y exige que el diff nombre exactamente los IDs del delta; `REMOVED` con motivo; sin `RENAMED`; 2b edita solo el delta; la etapa 1 recibe los próximos números libres.
 - [Delta contra la regresión de suite](issues/05-delta-y-suite-total.md) — tests viejos de `MODIFIED` y `REMOVED` se mueven por código a `removidos/` antes de la parada única; un ID por test y un archivo por ID (`tests/sdlc/<area>/test_R<n>_<slug>.<ext>`); la etapa 1 declara las bajas con motivo; la suite cuenta un test faltante fuera de la lista de movimientos como regresión.
 - [Fusión del delta al archivar](issues/06-fusion-del-delta.md) — requisitos como bloques; Trazabilidad y rutas derivadas por código; firmas al plan; pre-commit que chequea sin escribir (derivadas, IDs únicos, requisito sin delta); dos commits en la etapa 6; delta en `changes/<slug>-<sha>.md`.
+- [Qué es un requisito ubicuo](issues/07-requisito-ubicuo.md) — marca `R3 [prop]: <regla>` pegada al ID; criterio: regla sobre un conjunto de entradas generable, con o sin disparador; vale con área y sin área; EARS no elige requisitos.
 
 ## Not yet specified
 
@@ -72,6 +73,8 @@ Los tickets abiertos llevan las decisiones. Orden sugerido (frontera primero):
 | 12 | [La skill /project pasa los archivos de la tarea](issues/12-skill-project-pasa-files.md) | task | 01 |
 
 Las dos capacidades comparten un solo punto: el ticket 08 decide si un requisito `MODIFIED` del delta recibe tests de propiedades. Fuera de ese punto, la rama de deltas (01 a 06) y la rama de propiedades (07 a 10) avanzan en paralelo.
+
+- EARS en la plantilla de spec: mejora posible de la redacción, a medir aparte (decisión del ticket 07, 2026-10-23). No elige requisitos con propiedades; eso lo hace la marca `[prop]`.
 
 ## Out of scope
 

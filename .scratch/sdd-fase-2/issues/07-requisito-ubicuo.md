@@ -1,6 +1,6 @@
 # Qué es un requisito ubicuo
 Type: grilling
-Status: open
+Status: resolved
 Blocked by:
 Map: ../map.md
 
@@ -27,3 +27,29 @@ Preguntas derivadas:
 ## Test de aceptación propuesto
 
 `tests/test_sdlc_propiedades.py::test_detecta_requisitos_ubicuos`: una spec de juguete con cuatro requisitos, dos ubicuos y dos con disparador. La función de detección devuelve exactamente los dos ubicuos según la regla elegida. Una spec sin requisitos ubicuos devuelve la lista vacía y el SDLC sigue el camino de hoy.
+
+## Answer
+
+Resuelto por grilling con el usuario (2026-10-23). Registro completo: `brainstorms/2026-10-23-sdd-fase-2-ticket-07.md`.
+
+- Un requisito con test de propiedades lleva una marca explícita pegada al ID: `R3 [prop]: <regla>`. Un regex la lee.
+- El criterio de la marca es una regla que vale para un conjunto de entradas generable, con disparador o sin él. El criterio queda escrito en `spec-template.md`.
+- El writer marca en la etapa 2. La etapa 2b aplica el criterio al revisar.
+- La marca vale con área y sin área. Una spec sin marcas sigue igual que hoy.
+- EARS no se adopta para elegir requisitos: la detección por ausencia de disparador es frágil y no hay medición a favor. EARS queda como mejora posible de la plantilla, a medir aparte.
+
+### Test de aceptación aprobado
+
+`tests/test_sdlc_propiedades.py::test_detecta_marcas` usa una spec con cuatro requisitos, dos con marca:
+
+1. La detección devuelve exactamente los dos IDs marcados.
+2. Un texto que menciona `[prop]` dentro de otra regla no marca ese requisito.
+3. Una marca mal escrita, como `[Prop]` o `[props]`, no cuenta como marca.
+4. Una spec sin marcas devuelve una lista vacía, y la corrida sigue igual que hoy.
+5. Un `MODIFIED` que quita la marca deja el requisito sin marca en la spec fusionada.
+6. La detección funciona igual en la spec de un área y en `docs/sdlc/spec.md`.
+7. `gate_traza_spec` sigue encontrando R3 cuando R3 lleva la marca.
+8. La plantilla `spec-template.md` incluye el criterio de la marca.
+9. Un `ADDED` con marca deja el requisito marcado en la spec fusionada.
+10. Un `MODIFIED` que solo agrega o quita la marca pasa el gate del ticket 04.
+11. La spec base que escribe la etapa 0 también puede llevar marcas.
