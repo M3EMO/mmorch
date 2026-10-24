@@ -31,3 +31,4 @@ Preguntas derivadas:
 ## Comments
 
 - 2026-10-23, desde el ticket 02 (decisión del usuario): los tests de un ID `REMOVED` no se borran. Se mueven a `docs/specs/<area>/removidos/`, fuera de la suite. `docs/specs/<area>/removidos/README.md` lista cada ID eliminado. Este ticket decide qué etapa hace el movimiento y qué pasa con los tests de `MODIFIED`.
+- 2026-10-23, desde el ticket 03 (aprobado por el usuario): los tests de caracterización `tests/test_sdlc_<area>_base_<slug>.py` entran a `SNAP` tras la aprobación. Un delta que cambia un comportamiento caracterizado los hace fallar. Este ticket decide cómo un `MODIFIED` habilita ese fallo sin abrir la puerta a borrar tests.
