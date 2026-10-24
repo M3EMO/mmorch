@@ -46,7 +46,7 @@ Repos con `sdlc.toml` fuera de la lista del pedido: `~/Proyectos/mf-moe`, `~/Pro
 
 ## Tickets
 
-Todos son grilling. Frontera sin bloqueo (2026-10-23): 05, 06, 07 y 08.
+Todos son grilling. Frontera sin bloqueo (2026-10-23): 05, 06 y 08.
 
 - [01 Qué costumbres entran](issues/01-que-costumbres-entran.md)
 - [02 Qué repos entran y dónde vive la lista](issues/02-que-repos-entran.md)
@@ -65,6 +65,7 @@ Todos son grilling. Frontera sin bloqueo (2026-10-23): 05, 06, 07 y 08.
 - [02 Qué repos entran](issues/02-que-repos-entran.md) — un repo por invocación más `--todos`, que descubre carpetas con `.git` directorio y `sdlc.toml` (repos anidados sí, worktrees no); sin exclusión; Adepor entra (revierte 2026-09-17, `init` en el ticket 07); solo la laptop corre `--upgrade`; test de 10 puntos (2026-10-23).
 - [03 Mecanismo de actualización](issues/03-mecanismo-de-actualizacion.md) — `doctor` (oráculo, sin escrituras) + `init --upgrade` (lista cerrada de arreglos seguros, convergencia sin migraciones); sin `contract_version` (clave desconocida = aviso); el pipeline registra `doctor` en `run-log.json` y sigue; todo en `sdlc/`; test de 15 puntos aprobado (2026-10-23).
 - [04 No pisar ediciones manuales](issues/04-no-pisar-ediciones-manuales.md) — lista de hashes publicados para plantillas (solo crece, test la exige); bloques con el formato de marcas de `orchestration-ior` (hash en la marca, `v:`); editado = aviso con diff; `@AGENTS.md` sin marcas; hash sobre LF, sin bajar de versión; test de 13 puntos más `test_lista_de_hashes` (2026-10-23).
+- [07 Orden de adopción y forma de aplicar](issues/07-orden-de-adopcion.md) — `--upgrade` por repo, aborta si toca un archivo sucio, commitea sus rutas y pushea siempre (agente pide OK); solo en la rama default (clave `rama`, `origin/HEAD`, `main`/`master`); orden mf-moe → Portfolio, ssb, ChatBot → F2 → Estudio → orchestration → Adepor; adoptado = veredicto de `doctor`; test de 16 puntos (2026-10-23).
 
 ## Fog
 
