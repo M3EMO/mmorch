@@ -65,3 +65,7 @@ Resuelto por grilling con el usuario (2026-10-23). Registro completo: `brainstor
 14. Un commit que cambia un requisito de `spec.md` sin sumar un archivo a `changes/` hace fallar el pre-commit.
 15. Una etapa 6 reanudada tras una falla no vuelve a aplicar el delta, y termina igual.
 16. Correr `--regenerar` dos veces seguidas no deja diferencias.
+
+## Comments (después de resolver)
+
+- 2026-10-23, desde el esfuerzo `orchestration-4u6` (ticket 06 de `.scratch/repos-convenciones/`, P3 y P4; el usuario confirmó los nombres; registro en `brainstorms/2026-10-23-repos-convenciones-ticket-06.md` de la rama `claude/youthful-bohr-f13d78`): la etapa 6 archiva la ficha de la feature si existe `docs/sdlc/features/<slug>.md`. Con área, la copia va a `docs/specs/<area>/changes/<slug>-<sha>.ficha.md`, con el mismo sha que el delta y el plan. Sin área, va a `docs/specs/<slug>/ficha.md`. Una feature sin ficha no cambia. Las fichas de features ya mergeadas quedan donde están. La copia entra al primer commit de la etapa 6 (el de la spec).

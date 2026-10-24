@@ -74,3 +74,8 @@ Resuelto por grilling con el usuario (2026-10-23) y corregido tras verificarlo c
 `tests/test_sdlc_delta.py::test_chequeo_de_solapamiento`: dos áreas `a/*.py` y `a/sub/*.py` sobre un repo git de juguete. El chequeo nombra `a/sub/x.py` como archivo en dos áreas.
 
 `tests/test_sdlc_delta.py::test_archivo_con_area`: con área, la etapa 6 deja `changes/<slug>.md` y `changes/<slug>.plan.md` y no crea `docs/specs/<slug>/`. Un `sdlc.toml` sin áreas mantiene verde `tests/test_sdlc_sdd.py::test_dos_features_dejan_dos_specs`.
+
+## Comments
+
+- 2026-10-23, desde el esfuerzo `orchestration-4u6` (ticket 06 de `.scratch/repos-convenciones/`, el usuario eligió B; registro en `brainstorms/2026-10-23-repos-convenciones-ticket-06.md` de la rama `claude/youthful-bohr-f13d78`): `sdlc.toml` admite una tabla opcional `[spec_de_area]` con `nombre = "ruta"`. Apunta a la spec de un área que no sigue `docs/specs/<area>/spec.md`, como las specs planas `docs/specs/NN-<tema>.md` de Adepor. Un área sin entrada usa el default. La función de `test_spec_base_de_una_tarea` lee `[spec_de_area]` antes del default; suma un caso al test.
+- Pendiente de esa extensión: dónde viven `changes/` y `removidos/` de un área con spec plana. Se pregunta al usuario al cerrar la rama de propiedades.

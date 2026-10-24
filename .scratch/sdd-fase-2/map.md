@@ -52,6 +52,7 @@ Lo que el código hace hoy (leído en `sdlc/pipeline.py`, rama `mmorch/auto` en 
 - [Delta contra la regresión de suite](issues/05-delta-y-suite-total.md) — tests viejos de `MODIFIED` y `REMOVED` se mueven por código a `removidos/` antes de la parada única; un ID por test y un archivo por ID (`tests/sdlc/<area>/test_R<n>_<slug>.<ext>`); la etapa 1 declara las bajas con motivo; la suite cuenta un test faltante fuera de la lista de movimientos como regresión.
 - [Fusión del delta al archivar](issues/06-fusion-del-delta.md) — requisitos como bloques; Trazabilidad y rutas derivadas por código; firmas al plan; pre-commit que chequea sin escribir (derivadas, IDs únicos, requisito sin delta); dos commits en la etapa 6; delta en `changes/<slug>-<sha>.md`.
 - [Qué es un requisito ubicuo](issues/07-requisito-ubicuo.md) — marca `R3 [prop]: <regla>` pegada al ID; criterio: regla sobre un conjunto de entradas generable, con o sin disparador; vale con área y sin área; EARS no elige requisitos.
+- [Etapa y autor de los tests de propiedades](issues/08-etapa-de-las-propiedades.md) — Claude los escribe en la etapa 1 y la parada única los aprueba; las marcas salen de ahí; pueden pasar en HEAD si el ID tiene otro test rojo; el coder por API no ve su código (Claude por la CLI sí, límite aceptado).
 
 ## Not yet specified
 

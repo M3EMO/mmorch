@@ -53,3 +53,7 @@ Resuelto por grilling con el usuario (2026-10-23). Registro completo: `brainstor
 9. Un `ADDED` con marca deja el requisito marcado en la spec fusionada.
 10. Un `MODIFIED` que solo agrega o quita la marca pasa el gate del ticket 04.
 11. La spec base que escribe la etapa 0 también puede llevar marcas.
+
+## Comments
+
+- 2026-10-23, enmienda desde el ticket 08 (decisión del usuario): los tests de propiedades nacen en la etapa 1 y la parada única los aprueba. Las marcas `[prop]` salen de ahí: un ID con test de propiedades lleva marca. El writer de la etapa 2 copia esas marcas y un gate exige que coincidan. La etapa 2b ya no agrega ni quita marcas por su cuenta; el criterio de la plantilla guía a Claude en la etapa 1.
