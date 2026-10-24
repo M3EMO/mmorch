@@ -59,8 +59,15 @@ Resuelto por grilling con el usuario (2026-10-23) y corregido tras verificarlo c
 7. Un área más un archivo suelto devuelve el área.
 8. Otro orden de los `files` da el mismo resultado.
 9. Una tarea sin `files` que nombra `sdlc/pipeline.py` en el texto devuelve el área de ese archivo.
+10. Con `files` en el área X y una ruta del área Y en el texto, gana el área X.
+11. Una tarea sin `files` con rutas de dos áreas en el texto corta igual que el caso 4.
 
-`tests/test_sdlc_delta.py::test_plan_fuera_de_area`: un plan con un archivo de otra área falla `gate_plan_allowlist`. Con `bd` simulado, la primera vez se llama `bd create` con la label `sdlc-fuera-de-area:<area>`. Un segundo archivo de la misma área llama `bd update --append-notes` sobre el mismo issue. Un repo sin `.beads` usa el bd de orchestration.
+`tests/test_sdlc_delta.py::test_plan_fuera_de_area`: un plan con un archivo de otra área falla `gate_plan_allowlist`. Con `bd` simulado, la primera vez se llama `bd create` con la label `sdlc-fuera-de-area:<area>`. Un segundo archivo de la misma área llama `bd update --append-notes` sobre el mismo issue. Un repo sin `.beads` usa el bd de orchestration. Cuatro casos más:
+
+- Un plan con un archivo del área y un archivo sin área pasa `gate_plan_allowlist`.
+- Un `bd` que falla no rompe la corrida, y `division.md` y `fuera_de_area` quedan escritos igual.
+- Un issue cerrado con la misma label no recibe notas, y el pipeline crea uno nuevo.
+- Un archivo rechazado dos veces en la misma corrida se suma una sola vez al issue.
 
 `tests/test_sdlc_delta.py::test_chequeo_de_solapamiento`: dos áreas `a/*.py` y `a/sub/*.py` sobre un repo git de juguete. El chequeo nombra `a/sub/x.py` como archivo en dos áreas.
 

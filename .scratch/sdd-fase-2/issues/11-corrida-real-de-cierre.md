@@ -29,3 +29,4 @@ El run-log de una corrida real (`logs/` del SDLC) muestra cuatro hechos. Primero
 ## Comments
 
 - 2026-10-23, desde el grilling del ticket 01: el repo de la corrida necesita áreas declaradas en `sdlc.toml`. El esfuerzo aparte `orchestration-4u6` (bd) decide cómo se actualizan los repos propios a las convenciones. Si ese esfuerzo no terminó, el área se declara a mano en el repo de la corrida.
+- 2026-10-23, desde el ticket 01 (aprobado por el usuario): ningún test unitario prueba que `bd` corre en el host y no en el contenedor. La corrida real verifica que el issue `sdlc-fuera-de-area:<area>` aparece en el bd correcto.

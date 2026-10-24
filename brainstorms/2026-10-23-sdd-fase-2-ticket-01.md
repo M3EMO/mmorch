@@ -109,3 +109,9 @@ Claude cruzó las respuestas Q1 a Q9 con `sdlc/pipeline.py`, `mmorch/server_engi
 - Asked: ¿semántica aparte para áreas (A), prohibir `*` suelto (B) o mantener `_calza()` y chequear con `git ls-files` (C)?
 - Captured: el usuario elige **C**. Una sola semántica para techo y áreas. Un chequeo lista los archivos de cada área sobre `git ls-files` y nombra los archivos que caen en dos áreas, antes de correr. B descartada: en `fnmatch`, `**` y `*` calzan igual.
 - Flags: ninguno.
+
+### Q14 — Test de aceptación tras V1-V4
+- Asked: ¿falta algo en el test corregido?
+- Captured: el usuario aprueba seis casos más: `files` ganan sobre rutas del texto; texto con dos áreas corta; plan con archivo del área + archivo sin área pasa; `bd` que falla no rompe la corrida y deja `division.md` y `fuera_de_area`; issue cerrado con la label -> issue nuevo; archivo rechazado dos veces -> una sola nota.
+- Captured: nota aprobada en el ticket 11: la corrida real verifica que `bd` corre en el host y deja el issue en el bd correcto.
+- Flags: ninguno. Ticket 01 cerrado de nuevo.
