@@ -35,8 +35,10 @@ North-star: <una línea>
 <!-- BEGIN BEADS INTEGRATION ... -->
 <!-- END BEADS INTEGRATION -->
 
+<!-- BEGIN SDLC bd-propias v:1 hash:<h> -->
 ## Reglas propias de bd
 - <reglas que mandan sobre el bloque de bd>
+<!-- END SDLC bd-propias -->
 
 ## SDLC
 - <puntero que escribe `python -m sdlc init`>
@@ -85,6 +87,7 @@ El lint no cuenta las líneas del bloque de bd.
 2. bd init commitea si git tiene identidad; el comando deshace ese commit y deja los archivos en stage.
 3. El comando crea `AGENTS.md` si falta y agrega `@AGENTS.md` al final de `CLAUDE.md` si falta.
 4. El comando agrega `## Reglas propias de bd` desde `sdlc/templates/agentes/bd-propias.md` si falta el encabezado.
+   El bloque lleva marcas `<!-- BEGIN SDLC bd-propias v:1 hash:<h> -->` y `<!-- END SDLC bd-propias -->`.
 5. El comando busca en git el original de cada bloque de bd editado. El original es la revisión cuyo cuerpo da el hash del marcador.
 6. Las líneas agregadas o cambiadas respecto del original van a una sección `reintegradas`, byte a byte.
 7. Un cambio que solo toca espacios no cuenta como regla propia.
@@ -100,6 +103,8 @@ Garantías:
 - bd administra sus propios hooks: comandos `bd ...` en `settings.json` y secciones con marcadores en `.git/hooks`.
 - Todo hook que no es de bd queda igual. Si bd lo cambia, el comando restaura `settings.json` y sale con código 1.
 - bd tiene el hash del marcador como `sha256(cuerpo.strip())[:8]`. `bd setup claude --check` mira solo ese hash.
+- Los bloques del SDLC usan el mismo formato y el mismo hash que bd: `<!-- BEGIN SDLC <nombre> v:1 hash:<h> -->`.
+- Las líneas reintegradas no llevan marcas, porque son texto del usuario.
 
 ## Fuera de alcance
 

@@ -93,6 +93,9 @@ def test_bloque_viejo_editado_se_reintegra_sin_pisar_bytes(env):
     assert agents.startswith("# r\n") and "## Reglas propias de bd\n" in agents
     assert all(agents.count(x) == 1 for x in PROPIAS) and "reintegradas del bloque" in agents
     assert agents.index("END BEADS") < agents.index("## Reglas propias de bd\n")  # orden de D6
+    plantilla = A.TPL_PROPIAS.read_text(encoding="utf-8")
+    assert A.marcado("bd-propias", plantilla) in agents  # marcas de inicio y cierre, hash del interior
+    assert "reintegradas" not in A.marcado("bd-propias", plantilla)  # lo reintegrado es del usuario, sin marcas
     assert len(A.BLOQUE.findall(agents)) == 1 and "BEADS" not in claude
     despues = json.loads((repo / ".claude" / "settings.json").read_text(encoding="utf-8"))
     assert A.sin_bd(despues) == A.sin_bd(SETTINGS)

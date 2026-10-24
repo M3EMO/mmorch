@@ -42,6 +42,11 @@ def _hash(cuerpo: str) -> str:
     return hashlib.sha256(cuerpo.strip().encode()).hexdigest()[:8]
 
 
+def marcado(nombre: str, interior: str) -> str:
+    """Bloque con marcas de inicio y cierre, mismo formato y hash que bd (ticket 04 de repos-convenciones)."""
+    return f"<!-- BEGIN SDLC {nombre} v:1 hash:{_hash(interior)} -->\n{interior}<!-- END SDLC {nombre} -->\n"
+
+
 def _norma(linea: str) -> str:
     return " ".join(linea.split())
 
@@ -164,7 +169,7 @@ def bd_append(repo: str, hoy: str | None = None) -> dict:
     # las reglas propias van despues del bloque de bd (D6): se agregan sobre lo que dejo bd setup
     t_agents = con_bd = agents.read_text(encoding="utf-8")
     if PROPIAS not in t_agents:
-        t_agents = _append(t_agents, TPL_PROPIAS.read_text(encoding="utf-8"))
+        t_agents = _append(t_agents, marcado("bd-propias", TPL_PROPIAS.read_text(encoding="utf-8")))
     vistas = {_norma(x) for x in t_agents.splitlines()}
     escritas: dict[str, int] = {}
     for marca, lineas in propias.items():
