@@ -6,6 +6,9 @@ Date: 2026-10-23 · Goal: decidir qué costumbres mantiene al día el mecanismo 
 - `docs/sdlc/gates/` no entra al contrato del repo; los gates pasan a mmorch (`orchestration-bpn`). `contract_version` pasa al ticket 03 (P2).
 - Constitución: sin default nuevo; aviso del oráculo, nunca desvío; el usuario la declara por repo (P3).
 - Artefactos de corrida en `docs/sdlc/`: fuera del contrato; limpieza de main en bd `orchestration-eeq` (P4).
+- Costumbre nueva = fila en la tabla única con chequeo determinista; ticket propio solo si toca archivos editados a mano (P5). Crear `AGENTS.md` cuando falta: lo decide `orchestration-ior`.
+- Regla de formato: aviso del oráculo con lista de YAML permitidos; nunca convierte (P6).
+- Test de aceptación aprobado con 11 puntos (P7). Ticket 01 resuelto.
 - Grupos que entran: SDLC + SDD + `.gitignore` de secretos + `bd init` (P1, usuario). Forma de `bd init`: la decide `orchestration-ior` (P1c).
 
 ## Q&A log
@@ -19,8 +22,8 @@ Date: 2026-10-23 · Goal: decidir qué costumbres mantiene al día el mecanismo 
 - Asked: ¿el mecanismo corre `bd init` solo, o solo reporta y el usuario lo corre?
 - Captured: el usuario pregunta si se puede crear `.beads/` sin reescribir `CLAUDE.md` y `AGENTS.md`, o con un append.
 - Hecho verificado (`bd init --help`, bd 1.3.1): existen `--skip-agents` (no toca AGENTS.md ni la config de Claude/Codex/Cursor), `--init-if-missing` (idempotente) y `--skip-hooks`.
-- Pendiente: confirmación del usuario sobre la forma propuesta (P1c).
-- Flags: el usuario quiere una estructura más limpia de `CLAUDE.md` y `AGENTS.md`. Claude recomienda un bd aparte -> usuario decide.
+- Resuelto en P1c.
+- Flags: el usuario quiere una estructura más limpia de `CLAUDE.md` y `AGENTS.md`. Resuelto en P1c con el bd `orchestration-ior`.
 
 ### P1c — Forma de `bd init` y estructura de los md
 - Asked: ¿`bd init --skip-agents` más un bloque con marca en `AGENTS.md`, con o sin `--skip-hooks`? ¿Bd aparte para la estructura de los md?
@@ -46,4 +49,21 @@ Date: 2026-10-23 · Goal: decidir qué costumbres mantiene al día el mecanismo 
 - Captured: el usuario confirma que quedan fuera del contrato y pide el bd de limpieza.
 - Decisión: el mecanismo no toca `spec.md`, `plan.md`, `run-log.json`, `suite*.log`, `supervision.md` de `docs/sdlc/`, y el oráculo no los chequea. bd `orchestration-eeq` (2026-10-23): la mesa no llega a main al mergear. Un `.gitignore` queda descartado porque rompe el checkpoint `run-log.json`.
 
+### P5 — Cómo entra una costumbre nueva
+- Asked: ¿un ticket por costumbre nueva, o un commit que agrega una fila a la tabla única?
+- Captured: el usuario confirma la recomendación.
+- Decisión: una costumbre nueva entra con un commit que agrega una fila a la tabla única (por ejemplo `sdlc/convenciones.py`). `test_lista_unica_de_costumbres` exige un chequeo determinista por fila. Hace falta ticket propio solo si la costumbre cambia archivos editados a mano.
+- Nota: la pregunta "¿se crea `AGENTS.md` cuando falta?" pasó a `orchestration-ior`; el usuario no objetó.
+
+### P6 — Regla de formato en el oráculo
+- Asked: ¿la regla TOML/JSON/YAML entra como aviso o como desvío?
+- Captured: el usuario confirma la recomendación.
+- Decisión: entra como aviso. El oráculo compara los YAML del repo con una lista de YAML permitidos (`.pre-commit-config.yaml`, `.beads/*.yaml`, `.github/workflows/*.yml`, `docker-compose.yml`) y reporta el resto. Nunca convierte un archivo.
+
+### P7 — Test de aceptación
+- Asked: ¿apruebas el test de 7 puntos? Después: ¿falta algo?
+- Captured: el usuario preguntó si faltaba algo. Claude corrigió el punto 2 (el grupo SDD solo chequea repos con áreas) y agregó los puntos 8 a 11. El usuario aprobó el test con esos cambios.
+- Decisión: test aprobado (ver el `## Answer` del ticket 01).
+
 ## Open flags (pending input)
+- Ninguno. Las preguntas que salieron del alcance viven en `orchestration-ior`, `orchestration-bpn`, `orchestration-eeq` y el ticket 03.
