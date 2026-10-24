@@ -1,6 +1,6 @@
 # Cómo no pisar lo que el usuario editó a mano
 Type: grilling
-Status: open
+Status: claimed
 Blocked by: 03
 Map: ../map.md
 

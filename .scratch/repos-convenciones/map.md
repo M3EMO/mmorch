@@ -46,7 +46,7 @@ Repos con `sdlc.toml` fuera de la lista del pedido: `~/Proyectos/mf-moe`, `~/Pro
 
 ## Tickets
 
-Todos son grilling. Frontera sin bloqueo (2026-10-23): 02, 04, 05 y 06.
+Todos son grilling. Frontera sin bloqueo (2026-10-23): 02, 04, 05, 06 y 08.
 
 - [01 Qué costumbres entran](issues/01-que-costumbres-entran.md)
 - [02 Qué repos entran y dónde vive la lista](issues/02-que-repos-entran.md)
@@ -55,6 +55,7 @@ Todos son grilling. Frontera sin bloqueo (2026-10-23): 02, 04, 05 y 06.
 - [05 Valores que dependen de la máquina](issues/05-valores-por-maquina.md)
 - [06 Specs y fichas con otra forma](issues/06-specs-con-otra-forma.md) — bloqueado por 01.
 - [07 Orden de adopción y forma de aplicar](issues/07-orden-de-adopcion.md) — bloqueado por 02, 03 y 04.
+- [08 Cómo entra la propuesta de áreas](issues/08-propuesta-de-areas.md) — recibido de `sdd-fase-2` (2026-10-23).
 
 ## Decisions so far
 
