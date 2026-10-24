@@ -27,3 +27,7 @@ Preguntas derivadas:
 ## Test de aceptación propuesto
 
 `tests/test_sdlc_delta.py::test_suite_total_con_delta`: un baseline con `test_R1_viejo` verde y un delta `MODIFIED R1`. Tras el cambio, `test_R1_viejo` falla y `test_R2_viejo` también falla. El gate acepta el fallo de R1 según la opción elegida y marca R2 como regresión. Un segundo caso: el coder borra `test_R2_viejo`, y el gate lo detecta como regresión (test desaparecido), no como verde.
+
+## Comments
+
+- 2026-10-23, desde el ticket 02 (decisión del usuario): los tests de un ID `REMOVED` no se borran. Se mueven a `docs/specs/<area>/removidos/`, fuera de la suite. `docs/specs/<area>/removidos/README.md` lista cada ID eliminado. Este ticket decide qué etapa hace el movimiento y qué pasa con los tests de `MODIFIED`.

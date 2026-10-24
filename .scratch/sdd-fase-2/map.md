@@ -46,6 +46,7 @@ Lo que el código hace hoy (leído en `sdlc/pipeline.py`, rama `mmorch/auto` en 
 <!-- una línea por ticket resuelto: gist + link -->
 
 - [Unidad de la spec viva](issues/01-unidad-de-la-spec-viva.md) — spec viva por área (`docs/specs/<area>/spec.md`), delta y plan en `changes/<slug>.md`; área = nombre y globs en `sdlc.toml`, derivada de los `files` del llamador; sin `files`, rutas del texto de la tarea; sin área sigue el camino de hoy; dos áreas cortan con `division.md` determinista; el plan no sale del área y lo rechazado va a bd por label `sdlc-fuera-de-area:<area>`; chequeo de solapamiento con `git ls-files`.
+- [Espacio de IDs entre features](issues/02-espacio-de-ids.md) — numeración local al área; `ADDED` toma el menor número libre; nunca se renumera; la trazabilidad cita `ruta::test`; los tests de un ID eliminado van a `docs/specs/<area>/removidos/` con su `README.md`, fuera de la suite.
 
 ## Not yet specified
 

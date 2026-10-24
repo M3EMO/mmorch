@@ -29,3 +29,4 @@ Preguntas derivadas:
 ## Comments
 
 - 2026-10-23, desde el ticket 01 (aprobado por el usuario): dos features con el mismo nombre en la misma área producen el mismo `<slug>`. La segunda pisa `docs/specs/<area>/changes/<slug>.md`. Hoy pasa lo mismo con `docs/specs/<slug>/`. Este ticket decide si el archivo del delta evita el choque.
+- 2026-10-23, desde el ticket 02 (aprobado por el usuario): dos ramas en paralelo pueden tomar el mismo número libre, por ejemplo R3. La fusión chequea cada `ADDED` contra la spec base del momento de fusionar, no contra la del momento en que nació el delta.
