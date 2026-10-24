@@ -53,6 +53,7 @@ Lo que el código hace hoy (leído en `sdlc/pipeline.py`, rama `mmorch/auto` en 
 - [Fusión del delta al archivar](issues/06-fusion-del-delta.md) — requisitos como bloques; Trazabilidad y rutas derivadas por código; firmas al plan; pre-commit que chequea sin escribir (derivadas, IDs únicos, requisito sin delta); dos commits en la etapa 6; delta en `changes/<slug>-<sha>.md`.
 - [Qué es un requisito ubicuo](issues/07-requisito-ubicuo.md) — marca `R3 [prop]: <regla>` pegada al ID; criterio: regla sobre un conjunto de entradas generable, con o sin disparador; vale con área y sin área; EARS no elige requisitos.
 - [Etapa y autor de los tests de propiedades](issues/08-etapa-de-las-propiedades.md) — Claude los escribe en la etapa 1 y la parada única los aprueba; las marcas salen de ahí; pueden pasar en HEAD si el ID tiene otro test rojo; el coder por API no ve su código (Claude por la CLI sí, límite aceptado).
+- [Propiedades sin duplicar gate_mutacion](issues/09-propiedades-y-mutacion.md) — atribución por test sobre las corridas que ya existen, sin `-x`; propiedad vacua anotada, bloquea solo con `mutation_min`; perfil de 20 ejemplos dentro de los mutantes.
 
 ## Not yet specified
 
