@@ -111,12 +111,12 @@ La revision de Claude bloquea dejando un test, que tambien se corre en repos que
 agente que revisa y corrige (prompt por stdin, `{modo}` = plan|edit). El juez visual de sprites solo observa hasta tener
 50 assets etiquetados con kappa 0.6. El veredicto humano del test de aceptacion no se registra en nombre del usuario.
 
-<!-- BEGIN SDLC bd-propias v:1 hash:ef5990a0 -->
+<!-- BEGIN SDLC bd-propias v:1 hash:39a2efef -->
 ## Reglas propias de bd
 
 - Estas reglas mandan sobre el bloque de bd.
 - TodoWrite y TaskCreate valen para planes efímeros de una sesión; bd guarda el backlog durable.
-- La memoria vive en MEMORY.md y en `mmorch_remember`; nunca en `bd remember`.
+- La memoria vive en MEMORY.md y en la memoria semántica de mmorch; nunca en `bd remember`.
 - Push = ASK: proponé el commit, el push o el PR y esperá el OK explícito del usuario.
 - Un trabajo commiteado localmente y reportado al usuario es un final válido.
 <!-- END SDLC bd-propias -->
@@ -133,7 +133,7 @@ agente que revisa y corrige (prompt por stdin, `{modo}` = plan|edit). El juez vi
   `docs/agents/issue-tracker.md`.
 - Run `bd prime` for command reference.
 - Memory: the global auto-memory (MEMORY.md) and mmorch's own semantic memory
-  (`mmorch_remember`/`mmorch_recall`) are the knowledge stores. Do NOT route knowledge
+  (its remember/recall tools) are the knowledge stores. Do NOT route knowledge
   to `bd remember` — it would be a third competing system that fights MEMORY.md.
 When ending a session: file follow-up issues, run quality gates if code changed,
 update issue status, hand off context.
