@@ -143,7 +143,7 @@ def run_sandboxed(code: str, *, timeout: float = 5.0, input_text: str = "",
         # CREATE_NO_WINDOW on Windows: no console pop/stall, and the child does NOT inherit a
         # stdio MCP server's pipes (input= gives it its own closed stdin). Lets callers spawned
         # from the MCP server (speedup) use this runner without the inherited-stdin hang.
-        kw = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+        kw = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}  # type: ignore[attr-defined]
         try:
             p = subprocess.run(cmd, cwd=td, input=input_text, capture_output=True,  # type: ignore[call-overload]
                                text=True, timeout=timeout, env=env, **kw)  # **kw=creationflags confuses overload; valid at runtime
