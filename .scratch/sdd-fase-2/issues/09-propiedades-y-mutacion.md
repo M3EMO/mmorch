@@ -57,3 +57,7 @@ Resuelto por grilling con el usuario (2026-10-24). Registro completo: `brainstor
 9. El cálculo de `mutation_score` no cambia respecto de hoy.
 10. Un mutante que mata primero el test de ejemplo igual registra el resultado de la propiedad.
 11. Con `accept_cmd` de otro lenguaje, el run-log avisa que no hay atribución por test, y el gate queda igual que hoy.
+
+## Comments
+
+- 2026-10-24, enmienda desde el ticket 10 (decisión del usuario): las propiedades entran en Python y en TypeScript, y la atribución por test sale de un reporte JUnit XML con un solo parser (`node --test --test-reporter=junit`, vitest, `pytest --junitxml`). El caso 11 aplica solo a un runner que no da JUnit.

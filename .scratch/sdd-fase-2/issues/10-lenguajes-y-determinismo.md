@@ -1,6 +1,6 @@
 # Lenguajes, dependencia y determinismo
 Type: grilling
-Status: open
+Status: resolved
 Blocked by:
 Map: ../map.md
 
@@ -33,3 +33,33 @@ Opciones a decidir sobre el determinismo:
 ## Test de aceptación propuesto
 
 `tests/test_sdlc_propiedades.py::test_propiedad_determinista`: un test de propiedades que falla solo con una entrada rara. El gate corre dos veces sobre el mismo código y da el mismo veredicto las dos veces. Un repo sin la librería instalada recibe el diagnóstico de error del entorno de la etapa 4, no un fallo del código. Con la opción A, un repo TypeScript no recibe tests de propiedades y su corrida no cambia.
+
+## Answer
+
+Resuelto por grilling con el usuario (2026-10-24). Registro completo: `brainstorms/2026-10-24-sdd-fase-2-ticket-10.md`.
+
+- Los tests de propiedades entran en Python con Hypothesis y en TypeScript con fast-check, desde el inicio. El autor elige la librería por lenguaje.
+- La atribución por test sale de un reporte JUnit XML, con un solo parser: `pytest --junitxml`, `node --test --test-reporter=junit` y vitest. Un runner sin JUnit sigue sin atribución (enmienda al ticket 09).
+- La etapa 1 detecta la librería por código. Sin librería, la corrida sigue sin propiedades y el run-log anota la falta.
+- La librería se agrega al repo por el esfuerzo `orchestration-4u6`, con aprobación del usuario. `doctor` muestra la falta como aviso.
+- Dentro de los gates, la semilla es fija. La semilla sale del sha del commit base y queda en el run-log.
+- Semilla y perfil llegan por un archivo auxiliar ignorado por git, escrito en el worktree durante la corrida. pytest lo carga con `-p` y `node --test` con `--import`. El repo no cambia.
+- El perfil apaga la base de ejemplos de Hypothesis (`database=None`), para que una corrida no dependa de la anterior. Dentro de los mutantes, el perfil corre 20 ejemplos (ticket 09).
+
+### Test de aceptación aprobado
+
+`tests/test_sdlc_propiedades.py::test_propiedad_determinista` usa un test de propiedades que falla solo con una entrada rara:
+
+1. El gate corre dos veces sobre el mismo código y da el mismo veredicto.
+2. Dos commits base distintos producen semillas distintas, y el run-log anota cada una.
+3. El mismo commit base siempre produce la misma semilla.
+4. Un repo Python sin Hypothesis sigue sin propiedades, y el run-log anota la falta.
+5. Un repo TypeScript sin fast-check sigue igual, con la misma anotación.
+6. Un repo TypeScript con fast-check y `node --test` recibe propiedades y atribución por JUnit.
+7. El parser de JUnit lee igual la salida de pytest y la de `node --test`.
+8. El archivo auxiliar no aparece en `git status` ni entra a ningún commit.
+9. El perfil de 20 ejemplos se activa solo dentro de los mutantes.
+10. Un runner sin salida JUnit sigue sin atribución, como dice el caso 11 del ticket 09.
+11. Una corrida no deja la carpeta `.hypothesis/` en el worktree.
+12. Dentro del contenedor sin red, el archivo auxiliar carga igual que en el host.
+13. Sin librería, el prompt de la etapa 1 no pide propiedades. En ese caso, el gate de marcas del ticket 08 pasa sin marcas.
