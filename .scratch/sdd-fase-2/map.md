@@ -56,6 +56,8 @@ Lo que el código hace hoy (leído en `sdlc/pipeline.py`, rama `mmorch/auto` en 
 - [Propiedades sin duplicar gate_mutacion](issues/09-propiedades-y-mutacion.md) — atribución por test sobre las corridas que ya existen, sin `-x`; propiedad vacua anotada, bloquea solo con `mutation_min`; perfil de 20 ejemplos dentro de los mutantes.
 - [Lenguajes, dependencia y determinismo](issues/10-lenguajes-y-determinismo.md) — Python (Hypothesis) y TypeScript (fast-check); atribución por JUnit XML; sin librería, sin propiedades y anotado (adopción por `orchestration-4u6`); semilla del sha base; archivo auxiliar ignorado por git; `database=None`.
 - [Corrida real de cierre](issues/11-corrida-real-de-cierre.md) — dos corridas: `tools/ste-lint.py` en orchestration (Python) y formato argentino de `validarBruto()` en F2 (TypeScript); evidencia por mutantes; `usd_max = 3.0`; cuatro precondiciones y doce condiciones por corrida.
+- [La skill /project pasa los archivos](issues/12-skill-project-pasa-files.md) — la skill pide siempre `files` y avisa si el repo declara áreas y la tarea no nombra archivos; hecho el 2026-10-24.
+- Implementación de 01 a 10 y 12: hecha el 2026-10-24 (`sdlc/areas.py`, `sdlc/propiedades.py`, `sdlc/pipeline.py`; tests `tests/test_sdlc_delta.py` y `tests/test_sdlc_propiedades.py`). Falta el ticket 11 (dos corridas reales).
 
 ## Not yet specified
 

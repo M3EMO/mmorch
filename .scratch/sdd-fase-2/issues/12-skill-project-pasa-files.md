@@ -1,6 +1,6 @@
 # La skill /project pasa los archivos de la tarea
 Type: task
-Status: open
+Status: resolved
 Blocked by: 01
 Map: ../map.md
 
@@ -21,3 +21,14 @@ Puntos a resolver al implementar:
 ## Test de aceptación propuesto
 
 Una corrida de `/project` sobre un repo con áreas declaradas llega a `build_feature` con `files` no vacío, o con una ruta en el texto de la tarea. El run-log de esa corrida nombra el área resuelta. Una corrida sobre un repo sin áreas no cambia respecto de hoy.
+
+## Answer
+
+Hecho el 2026-10-24, junto con la implementación de los tickets 01 a 10.
+
+- La skill `~/.claude/skills/project/SKILL.md` pide siempre `files`. Primero los saca del texto de la tarea, después de la conversación, y si no aparecen pregunta.
+- Antes de lanzar, la skill lee `sdlc.toml`. Con `[areas]` y sin archivos ni rutas en el texto, avisa y pide los archivos.
+- La skill muestra en la parada única los tests de las etapas 0 y 1, los movimientos a `removidos/` y las bajas.
+- La skill explica el corte `0-areas` con `division.md` y los dos commits de la etapa 6.
+- El servidor ya pasaba `files` a `build_feature`; no cambió. El run-log nombra el área en la clave `area`.
+- La skill no vive en ningún repo git: el cambio queda solo en `~/.claude/skills/project/SKILL.md`.

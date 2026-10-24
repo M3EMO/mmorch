@@ -4,6 +4,8 @@ _GPY=".venv/Scripts/python.exe"; [ -x "$_GPY" ] || _GPY=".venv/bin/python"; [ -x
 "$_GPY" -m ruff check mmorch sdlc mcp_server.py tests || { echo >&2 "ruff gate failed (fix it, or 'git commit --no-verify' to bypass)"; exit 1; }
 # --- mypy type gate (enforced): mismo trato que ruff, 0 errores o no hay commit. ---
 "$_GPY" -m mypy mmorch sdlc mcp_server.py || { echo >&2 "mypy gate failed (fix it, or 'git commit --no-verify' to bypass)"; exit 1; }
+# --- specs por area (sdd-fase-2 ticket 06): partes derivadas al dia, IDs unicos, requisitos solo por delta. No escribe. ---
+"$_GPY" -m sdlc specs --chequear . || { echo >&2 "specs gate failed (python -m sdlc specs --regenerar)"; exit 1; }
 # Catalogo generado + README auto-blocks. Falla el commit si docgen falla.
 # --check (copias en contratos / stale) corre en pytest y en scripts/gates.py.
 PY="$_GPY"
