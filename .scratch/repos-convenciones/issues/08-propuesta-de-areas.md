@@ -1,6 +1,6 @@
 # Cómo entra la propuesta de áreas al mecanismo
 Type: grilling
-Status: claimed
+Status: resolved
 Blocked by:
 Map: ../map.md
 
@@ -36,3 +36,45 @@ Preguntas derivadas:
 ## Test de aceptación propuesto
 
 `tests/test_sdlc_convenciones.py::test_propuesta_de_areas`: en `tmp_path`, un repo con tres carpetas de código recibe una propuesta de tres áreas sin llamadas al LLM. Con el `llm` simulado que falla, la propuesta por carpeta sale igual. Sin aprobación, `sdlc.toml` queda byte a byte igual. Con aprobación, `tomllib` lee `[areas]` y cada nombre cumple `[a-z0-9_-]+`. `doctor` y `--upgrade` siguen con cero llamadas al LLM.
+
+## Answer
+
+Resuelto por grilling con el usuario (2026-10-24). Registro completo: `brainstorms/2026-10-24-repos-convenciones-ticket-08.md`.
+
+- La propuesta corre en un comando aparte, `python -m sdlc areas <repo>`. `doctor` y `--upgrade` siguen sin LLM.
+- `areas <repo>` escribe `docs/sdlc/areas-propuesta.toml`. El usuario puede editar ese archivo antes de aprobarlo.
+- `areas <repo> --aprobar` valida la propuesta con las reglas de `doctor` y la pasa a `sdlc.toml`.
+- `--aprobar` sigue las reglas del ticket 07: rama default, aborta si `sdlc.toml` está sucio, commitea solo `sdlc.toml` y pushea siempre. Después borra la propuesta.
+- Un agente pide OK antes de `--aprobar`, porque pushea. `areas <repo>` sin `--aprobar` no commitea ni pushea.
+- El paso 2 usa `DEFAULT_GENERATOR` (`mmorch/config.py`) con `mmorch.providers.call`. El modelo devuelve JSON con operaciones `unir` o `partir` y un motivo.
+- Un validador determinista aplica las operaciones válidas. Una respuesta inválida o una falla deja la propuesta por carpeta sin cambios.
+- `[areas]` y `[spec_de_area]` van como tablas al final de `sdlc.toml`.
+- Un archivo que calza con dos áreas es desvío de `doctor` y rechazo de `--aprobar`.
+- La propuesta lista las specs planas sin área, y el LLM recibe sus títulos como contexto. El usuario asigna en el archivo de propuesta.
+- `doctor` avisa "sin áreas" solo cuando el repo tiene specs planas en `docs/specs/`.
+- El área `raiz` lista cada archivo suelto de la raíz por su nombre exacto. Techo y áreas comparten la semántica de `_calza()`, donde `*` cruza carpetas (ticket 01 de `sdd-fase-2`).
+- Un repo que ya declara `[areas]` no recibe propuesta. Cambiar áreas declaradas es una edición a mano de `sdlc.toml`.
+
+### Test de aceptación aprobado
+
+`tests/test_sdlc_convenciones.py::test_propuesta_de_areas` arma repos en `tmp_path` con un `llm` simulado y verifica diecinueve puntos:
+
+1. Un repo con tres carpetas de código recibe una propuesta de tres áreas en `docs/sdlc/areas-propuesta.toml`.
+2. Con el `llm` simulado que falla, la propuesta por carpeta sale igual.
+3. Una operación `unir` válida del `llm` une dos áreas, y la propuesta anota su motivo.
+4. Una operación que nombra una carpeta inexistente se descarta, y una respuesta que no es JSON también.
+5. Sin `--aprobar`, `sdlc.toml` queda byte a byte igual y no hay commit.
+6. Con `--aprobar`, `tomllib` lee `[areas]` al final del archivo, y cada nombre cumple `[a-z0-9_-]+`.
+7. Tras `--aprobar`, la propuesta desaparece, el commit contiene solo `sdlc.toml` y el remoto bare recibe el push.
+8. `--aprobar` rechaza una propuesta con un archivo en dos áreas, sin escribir nada.
+9. `--aprobar` aborta en una rama que no es la default o con `sdlc.toml` sucio.
+10. Un área que el usuario renombró a mano en la propuesta entra con ese nombre.
+11. La propuesta lista las specs planas sin área, y el prompt del `llm` contiene sus títulos.
+12. `doctor` avisa "sin áreas" solo si `docs/specs/` tiene specs planas, y da desvío por un archivo en dos áreas.
+13. `doctor` y `--upgrade` siguen con cero llamadas al `llm`.
+14. Un repo que ya declara `[areas]` hace que `areas` aborte con un mensaje, sin escribir una propuesta.
+15. Una propuesta existente nunca se pisa, así que `areas` aborta si el archivo ya existe.
+16. El paso 1 toma carpetas con código trackeado y salta `tests/`, `docs/` y las carpetas con punto, como `init()`.
+17. El área `raiz` lista cada archivo suelto por nombre exacto, y ningún archivo de la propuesta calza con dos áreas.
+18. Un nombre de carpeta inválido, como `Motor_Cuotas`, pasa a minúsculas, y un choque de nombres aborta la propuesta.
+19. La llamada al `llm` queda registrada en `logs/metrics.jsonl`.

@@ -5,6 +5,9 @@ Contexto heredado: `doctor` y `--upgrade` nunca llaman a un LLM (ticket 03, punt
 
 ## Summary / key decisions
 
+- Test de aceptación aprobado con 19 puntos (P8), con el punto 17 corregido en P9. Ticket 08 resuelto.
+- Área `raiz`: lista cada archivo suelto de la raíz por su nombre exacto, sin comodines; `_calza()` no cambia (P9).
+- Aviso "sin áreas" de `doctor` solo cuando el repo tiene specs planas en `docs/specs/` (como Adepor) (P7).
 - Specs planas: la propuesta sigue por carpeta; el archivo de propuesta lista las specs planas sin área; el LLM del paso 2 recibe el título de cada spec plana como contexto; el usuario asigna en el archivo de propuesta (P6).
 - Archivo que calza con dos áreas: desvío de `doctor` (nombra el archivo y las dos áreas) y rechazo en `--aprobar` (P5).
 - `[areas]` y `[spec_de_area]` van como tablas al final de `sdlc.toml` (las claves sueltas del ticket 03 van antes del primer encabezado).
@@ -18,7 +21,7 @@ Contexto heredado: `doctor` y `--upgrade` nunca llaman a un LLM (ticket 03, punt
 ### P1 — Dónde corre la propuesta
 - Asked: ¿A (comando aparte `areas`), B (bandera `--areas` en `--upgrade`) o C (paso 1 en `doctor`, paso 2 aparte)?
 - Captured: el usuario eligió A.
-- Pendiente: Claude dijo que `doctor` agrega un aviso a cada repo sin áreas; ese aviso puede ser ruido en los diez repos -> revisar en una pregunta posterior.
+- Pendiente resuelto en P7.
 
 ### P2 — Forma de aprobar
 - Asked: ¿A (archivo de propuesta + `--aprobar`), B (imprimir y copiar a mano) o C (diálogo interactivo)?
@@ -42,4 +45,21 @@ Contexto heredado: `doctor` y `--upgrade` nunca llaman a un LLM (ticket 03, punt
 - Captured: el usuario eligió C.
 - Motivo: A deja áreas sin globs si el LLM falla; C conserva la regla "la propuesta por carpeta funciona sola".
 
+### P7 — Aviso de repo sin áreas
+- Asked: ¿A (aviso en cada repo sin áreas), B (nunca) o C (solo con specs planas)?
+- Captured: el usuario eligió C.
+- Motivo: un aviso en los diez repos es ruido; las áreas son voluntarias (ticket 01).
+
+### P8 — Test de aceptación
+- Asked: ¿apruebas el test de 13 puntos? El usuario preguntó si faltaba algo.
+- Captured: Claude agregó los puntos 14 a 19 (repo con áreas aborta, propuesta existente no se pisa, carpetas como en `init()`, área `raiz`, nombres normalizados, registro en `logs/metrics.jsonl`). El usuario aprobó.
+- Error hallado después de la aprobación: `_calza()` usa `fnmatch`, y en `fnmatch` el `*` también calza con `/`. Un glob `*.py` en `raiz` calza con todos los `.py` del repo, así que cada archivo quedaría en dos áreas. El punto 17 necesita otra forma -> P9.
+
+### P9 — Forma del área `raiz`
+- Asked: ¿A (nombres exactos) o B (cambiar `_calza()` para que un glob sin `/` calce solo en la raíz)?
+- Dato de la sesión de SDD fase 2: el usuario ya decidió (ticket 01 de `sdd-fase-2`, V4 y Q13) que techo y áreas comparten la semántica de `_calza()`. B contradice esa decisión.
+- Captured: el usuario eligió A.
+- Consecuencia: el punto 17 del test queda como "el área `raiz` lista cada archivo suelto por nombre exacto, y ningún archivo de la propuesta calza con dos áreas".
+
 ## Open flags (pending input)
+- Ninguno.
