@@ -246,10 +246,26 @@ empty detail) in the one hard run. Per-run logs and findings:
 `.scratch/sdlc-6-gates/research/07-resultados.md`. D2/D3 PRs sit on branches
 `sdlc/sdlc-D2-r1`, `sdlc/sdlc-D3-r1b` (not merged).
 
+### SDLC gate checks (2026-10-23, bd orchestration-bpn)
+
+The check half of each `sdlc/pipeline.py` gate moves to `mmorch/gates.py`; `mmorch/gates_bench.py` measures it.
+A case's label comes from how it was built, never from the gate's own rule or an LLM: a red case for
+`sin-clones` is a copy with up to 30% of its lines rewritten; a green case is two independent modules that
+share imports and headers. Real incidents ride along, flagged when only a reconstruction survives.
+Re-run with `python -m mmorch.gates_bench --seed 42 --n 400`; rows go to `logs/ablation_results.jsonl`.
+
+| gate | n | catches clones | doesn't false-reject | balanced acc | detection by edit share |
+|---|---|---|---|---|---|
+| `sin-clones` (threshold 0.8) | 401 | 0.706 | 1.00 | 0.853 | 0-10%: 1.00 · 10-20%: 0.97 · 20-30%: 0.02 |
+
+The 0.8 line-overlap threshold misses almost every copy with 20-30% of its lines edited. The green
+generator shares only imports and headers, so a 1.00 specificity is an upper bound until harder green
+cases (sibling modules with the same structure) join the set.
+
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **119 módulos · 44 MCP tools (15 expuestas por default) · 1110 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
+_Auto-generado por `mmorch.docgen`._ **121 módulos · 44 MCP tools (15 expuestas por default) · 1119 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->

@@ -27,6 +27,7 @@ import time
 import types
 from typing import Any
 
+from mmorch.gates import sin_clones
 from mmorch.paths import logs_dir
 from mmorch.providers import call, register_run_tracker, unregister_run_tracker
 
@@ -1086,16 +1087,8 @@ def _docstrings(files) -> dict:
 
 
 def gate_clones(written: dict) -> tuple[bool, str]:
-    """D6: el coder escribio el contenido de plugins.py dentro de plugin_worker.py. Dos archivos del plan
-    con > 80% de lineas identicas es un clon, no una feature. Determinista, USD 0."""
-    files = list(written)
-    for i, a in enumerate(files):
-        la = {l.strip() for l in written[a].splitlines() if l.strip()}
-        for b in files[i + 1:]:
-            lb = {l.strip() for l in written[b].splitlines() if l.strip()}
-            if la and lb and len(la & lb) / min(len(la), len(lb)) > 0.8:
-                return rec_gate("sin-clones", False, f"{a} y {b} comparten > 80% de lineas")
-    return rec_gate("sin-clones", True, "ok")
+    """Chequeo en mmorch.gates.sin_clones (orchestration-bpn); aca solo se registra."""
+    return rec_gate("sin-clones", *sin_clones(written))
 
 
 _orig_files: dict[str, str] = {}
