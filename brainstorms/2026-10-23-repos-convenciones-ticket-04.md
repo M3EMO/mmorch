@@ -7,6 +7,8 @@ Hecho (git log, 2026-10-23): `spec-template.md` tuvo una sola versión en toda l
 
 ## Summary / key decisions
 
+- Test de aceptación aprobado: `test_respeta_ediciones` (13 puntos) y `test_lista_de_hashes` (P6). Ticket 04 resuelto.
+- Hash con saltos LF; la escritura conserva el estilo de salto del archivo (P6, punto 12).
 - Formato de marcas (de `orchestration-ior`, commit `0073a83`): `<!-- BEGIN SDLC <nombre> v:<n> hash:<h> -->` ... `<!-- END SDLC <nombre> -->`, con `h = sha256(interior.strip())[:8]`. Hash distinto = interior editado; `v:` menor al publicado = bloque viejo.
 - La línea `@AGENTS.md` de `CLAUDE.md` va sin marcas; `doctor` chequea que exista; si falta, `--upgrade` la agrega al inicio del archivo (arreglo nuevo en la lista del ticket 03) (P5).
 - Bloques con marca: inicio y cierre; `--upgrade` reescribe el interior solo si coincide con una versión publicada; interior editado = aviso con diff. El puntero actual del SDLC (sin cierre) da aviso y no se toca (P4).
@@ -44,4 +46,10 @@ Hecho (git log, 2026-10-23): `spec-template.md` tuvo una sola versión en toda l
 - Captured: el usuario eligió A, y con eso aprobó el arreglo nuevo "agregar la línea `@AGENTS.md` al inicio de `CLAUDE.md` si falta".
 - Decisión: enmienda a la lista cerrada del ticket 03 (registrada en sus `## Comments`).
 
+### P6 — Test de aceptación
+- Asked: ¿apruebas el test de 10 puntos? El usuario preguntó si faltaba algo.
+- Captured: Claude agregó tres casos: sin bajar de versión (11), saltos CRLF (12) y marca rota o duplicada (13). El usuario aprobó los dos tests con esos puntos.
+- Decisión: test aprobado (ver el `## Answer` del ticket 04). Claude avisa a md-estructura que el hash se calcula sobre texto con saltos LF.
+
 ## Open flags (pending input)
+- Rama propia o árbol actual para aplicar `--upgrade` -> ticket 07.
