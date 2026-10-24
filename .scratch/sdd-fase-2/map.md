@@ -50,6 +50,7 @@ Lo que el código hace hoy (leído en `sdlc/pipeline.py`, rama `mmorch/auto` en 
 - [Spec base de un área sin spec](issues/03-spec-base-brownfield.md) — etapa 0-caracterizar solo para archivos que Contrato no nombra; Claude escribe `tests/test_sdlc_<area>_base_<slug>.py` (verde en HEAD, mata mutantes, `caracterizacion_min` opcional); una sola parada aprueba caracterización y aceptación; el writer escribe la spec base desde los tests aprobados.
 - [Formato del delta y su gate](issues/04-formato-y-gate-del-delta.md) — el writer escribe solo el delta (`MODIFIED` repite el requisito entero); el código fusiona y exige que el diff nombre exactamente los IDs del delta; `REMOVED` con motivo; sin `RENAMED`; 2b edita solo el delta; la etapa 1 recibe los próximos números libres.
 - [Delta contra la regresión de suite](issues/05-delta-y-suite-total.md) — tests viejos de `MODIFIED` y `REMOVED` se mueven por código a `removidos/` antes de la parada única; un ID por test y un archivo por ID (`tests/sdlc/<area>/test_R<n>_<slug>.<ext>`); la etapa 1 declara las bajas con motivo; la suite cuenta un test faltante fuera de la lista de movimientos como regresión.
+- [Fusión del delta al archivar](issues/06-fusion-del-delta.md) — requisitos como bloques; Trazabilidad y rutas derivadas por código; firmas al plan; pre-commit que chequea sin escribir (derivadas, IDs únicos, requisito sin delta); dos commits en la etapa 6; delta en `changes/<slug>-<sha>.md`.
 
 ## Not yet specified
 
