@@ -83,22 +83,23 @@ def _cfg():
          "approve_accept": True}
     if FEAT and FEAT.get("repo"):
         d.update(_toml(FEAT["repo"]))  # sdlc.toml recien adoptado y sin commitear: el worktree (HEAD) aun no lo tiene
-    d.update(_toml(WT))
-    legacy = WT / "docs" / "sdlc" / "sdlc.toml"
-    if legacy.exists():
-        import tomllib
-        d.update(tomllib.loads(legacy.read_text(encoding="utf-8")))
+    d.update(_toml(WT))  # docs/sdlc/sdlc.toml ya no se lee: pisaba la raiz sin aviso (repos-convenciones 03)
     return d
 
 
 def _repo_python() -> str:
     """Interprete del repo (ticket 12): `python` de sdlc.toml, o el venv sembrado en el worktree (el server siembra
     .venv/venv), o el de mmorch. Sin esto la suite de un repo con dependencias propias corre con el Python equivocado."""
-    for c in ([CFG["python"]] if CFG.get("python") else []) + [
+    return _python_de(WT, CFG) or sys.executable
+
+
+def _python_de(root, cfg: dict) -> str | None:
+    """Regla unica del interprete de un repo: la usan el pipeline y `sdlc propiedades` (repos-convenciones 09)."""
+    for c in ([cfg["python"]] if cfg.get("python") else []) + [
             ".venv/Scripts/python.exe", ".venv/bin/python", "venv/Scripts/python.exe", "venv/bin/python"]:
-        if (WT / c).exists():
-            return str(WT / c)
-    return sys.executable
+        if (pathlib.Path(root) / c).exists():
+            return str(pathlib.Path(root) / c)
+    return None
 
 
 CFG: dict = {}
@@ -1972,6 +1973,11 @@ def build_feature(name: str, task: str, repo: str, *, accept: dict[str, str] | N
     with _RUN_LOCK:
         configure(t, contract=feat["contract"], feat=feat, wt=wt, phase=phase, max_fix=max_fix, writer=writer, coder=coder,
                   accept_cmd=accept_cmd)
+        try:  # repos-convenciones 03: el estado del repo queda en el run-log y ningun desvio frena la corrida
+            from .convenciones import doctor
+            state["doctor"] = doctor(repo)
+        except Exception as e:  # noqa: BLE001 - un doctor roto no puede frenar un build
+            state["doctor"] = {"error": f"{type(e).__name__}: {e}"}
         return run(from_stage)
 
 
@@ -2042,23 +2048,7 @@ def init(repo: str) -> dict:
     hecho: list[str] = []
     toml = root / "sdlc.toml"
     if not toml.exists():
-        skip = {"tests", "tests_accept", ".venv", "venv", "node_modules", "build", "dist", "docs", "target", "__pycache__"}
-        conteo: dict[str, int] = {}
-        dirs: dict[str, set[str]] = {}
-        ls = subprocess.run(["git", "ls-files"], cwd=root, capture_output=True, text=True, encoding="utf-8")
-        # repo git: solo lo trackeado (Portfolio tenia _kimi_exp/ y _tmp_*.py sin trackear); si no, el arbol entero
-        for q in ([root / x for x in ls.stdout.splitlines()] if ls.returncode == 0 and ls.stdout else root.rglob("*")):
-            if not q.is_file():
-                continue
-            rel = q.relative_to(root)
-            if any(part in skip or part.startswith(".") for part in rel.parts):
-                continue
-            ext = q.suffix.lstrip(".").lower()
-            if ext in _LANG_HINT:
-                conteo[ext] = conteo.get(ext, 0) + 1
-                dirs.setdefault(ext, set()).add(rel.parts[0] if len(rel.parts) > 1 else "")
-        exts = [e for e, _ in sorted(conteo.items(), key=lambda kv: -kv[1])][:3] or ["py"]
-        globs = sorted({(f"{d}/**/*.{e}" if d else f"*.{e}") for e in exts for d in dirs.get(e, {""})})
+        exts, globs = _globs_iniciales(root)
         hints = "\n".join(f"# compile_cmd = \"{_LANG_HINT[e]}\"   # {e}" for e in exts if e != "py")
         toml.write_text(
             "# sdlc.toml — convencion por repo (ticket 11). `files` es el TECHO (patrones) de lo que el pipeline puede\n"
@@ -2085,23 +2075,47 @@ def init(repo: str) -> dict:
             shutil.copy(t, d / t.name)
             hecho.append(f"docs/sdlc/{t.name}")
     ag = root / "AGENTS.md"
-    marca = "## SDLC (pipeline de 6 etapas)"
-    if ag.exists() and marca not in ag.read_text(encoding="utf-8"):
-        ag.write_text(ag.read_text(encoding="utf-8").rstrip("\n") + f"\n\n{marca}\n\nEste repo construye features con "
-                      "el paquete `sdlc` (skill `/project`). Contrato del repo en `sdlc.toml`; artefactos de cada corrida en "
-                      "`docs/sdlc/` de la review branch.\n", encoding="utf-8")
+    if ag.exists() and "## SDLC (pipeline de 6 etapas)" not in ag.read_text(encoding="utf-8"):
+        from .convenciones import puntero_marcado  # el mismo bloque con marcas que mantiene `init --upgrade`
+        ag.write_text(ag.read_text(encoding="utf-8").rstrip("\n") + "\n\n" + puntero_marcado(), encoding="utf-8")
         hecho.append("AGENTS.md")
     return {"repo": str(root), "hecho": hecho}
 
 
+SKIP_INIT = {"tests", "tests_accept", ".venv", "venv", "node_modules", "build", "dist", "docs", "target", "__pycache__"}
+
+
+def _globs_iniciales(root: pathlib.Path) -> tuple[list[str], list[str]]:
+    """Lenguajes (hasta 3, por cantidad de archivos) y techo `files` por directorio, como los escribe `init`."""
+    conteo: dict[str, int] = {}
+    dirs: dict[str, set[str]] = {}
+    ls = subprocess.run(["git", "ls-files"], cwd=root, capture_output=True, text=True, encoding="utf-8")
+    # repo git: solo lo trackeado (Portfolio tenia _kimi_exp/ y _tmp_*.py sin trackear); si no, el arbol entero
+    for q in ([root / x for x in ls.stdout.splitlines()] if ls.returncode == 0 and ls.stdout else root.rglob("*")):
+        if not q.is_file():
+            continue
+        rel = q.relative_to(root)
+        if any(part in SKIP_INIT or part.startswith(".") for part in rel.parts):
+            continue
+        ext = q.suffix.lstrip(".").lower()
+        if ext in _LANG_HINT:
+            conteo[ext] = conteo.get(ext, 0) + 1
+            dirs.setdefault(ext, set()).add(rel.parts[0] if len(rel.parts) > 1 else "")
+    exts = [e for e, _ in sorted(conteo.items(), key=lambda kv: -kv[1])][:3] or ["py"]
+    return exts, sorted({(f"{d}/**/*.{e}" if d else f"*.{e}") for e in exts for d in dirs.get(e, {""})})
+
+
 def main(argv: list[str] | None = None) -> int:
-    """CLI: `python -m sdlc init|bd|lint-md <repo>`. El modo bench vive en mmorch (`python -m mmorch.sdlc_bench`)."""
+    """CLI: `python -m sdlc init [--upgrade]|doctor|areas|propiedades|bd|lint-md <repo>`. El modo bench vive en mmorch (`python -m mmorch.sdlc_bench`)."""
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] in (["bd"], ["lint-md"]):
         from . import agentes
         return agentes.main(argv)
+    if argv[:1] in (["doctor"], ["areas"], ["propiedades"]) or argv[:2] == ["init", "--upgrade"]:
+        from . import convenciones
+        return convenciones.main(argv)
     if argv[:1] != ["init"]:
-        print("uso: python -m sdlc init|bd|lint-md <repo>", file=sys.stderr)
+        print("uso: python -m sdlc init [--upgrade]|doctor|areas|propiedades|bd|lint-md <repo>", file=sys.stderr)
         return 2
     print(json.dumps(init(argv[1] if len(argv) > 1 else "."), ensure_ascii=False))
     return 0

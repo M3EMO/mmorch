@@ -78,3 +78,12 @@ Todos son grilling y están resueltos (2026-10-24). El paso siguiente es impleme
 - La implementación de las áreas depende de `orchestration-69j`. Este esfuerzo no puede escribir áreas hasta que ese código exista.
 - Nadie midió cuántas veces el usuario edita a mano las plantillas de `docs/sdlc/`. Hoy todas las copias sondeadas son idénticas a `sdlc/templates/`.
 - Las convenciones de otros agentes (Cursor, Codex) en `AGENTS.md` pueden chocar con el puntero del SDLC.
+
+## Implementación (2026-10-24)
+
+- `sdlc/convenciones.py` implementa `doctor`, `init --upgrade`, `areas` y `propiedades`. Tests: `tests/test_sdlc_convenciones.py`, un test por ticket con los puntos aprobados.
+- `sdlc/plantillas_publicadas.json` guarda los hashes publicados de cada plantilla. `test_lista_de_hashes` exige el hash vigente.
+- `sdlc/pipeline.py`: `_cfg()` ya no lee `docs/sdlc/sdlc.toml`; `_python_de()` es la regla única del intérprete; `init()` escribe el puntero con marcas; `build_feature` guarda `doctor` en el run-log.
+- Desvío del formato del ticket 04: en `Dockerfile.sdlc` las marcas usan comentarios `#`, porque un comentario HTML rompe `docker build`. El hash y la versión son iguales.
+- `--upgrade` no corre `python -m sdlc bd`: `doctor` marca `.beads/` y nombra ese comando, como piden los tests de los tickets 01 y 03.
+- `test_archivo_de_la_ficha` (ticket 06, etapa 6) queda para la implementación de `sdd-fase-2`; `spec_base()` de `sdlc/convenciones.py` sirve para resolver la spec de un área.
