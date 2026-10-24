@@ -22,6 +22,9 @@ Preguntas de forma a decidir:
 - ¿Un repo con árbol sucio se salta, se aborta o se actualiza igual?
 - ¿El cambio queda en una rama nueva del repo destino, o en la rama actual?
 - ¿Quién commitea: el mecanismo con un mensaje fijo, o el usuario? El push queda siempre del lado del usuario.
+- ¿`--upgrade --todos` escribe en todos los repos de una vez, o solo `doctor --todos` corre en lote? (ticket 02)
+- ¿Cómo entra Adepor? El ticket 02 decidió adoptarlo con `init` dentro de este ticket. Falta una sonda que verifique que `tests/` corre sin red (`tests/test_ingesta_cuotas.py` usa `requests`).
+- La laptop es la única máquina que corre `--upgrade` (ticket 02).
 - ¿Qué cuenta como "adoptado": el oráculo verde, o además una corrida real del pipeline?
 
 ## Test de aceptación propuesto
