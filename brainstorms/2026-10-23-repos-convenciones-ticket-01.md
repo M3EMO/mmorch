@@ -3,6 +3,7 @@ Date: 2026-10-23 · Goal: decidir qué costumbres mantiene al día el mecanismo 
 
 ## Summary / key decisions
 
+- `docs/sdlc/gates/` no entra al contrato del repo; los gates pasan a mmorch (`orchestration-bpn`). `contract_version` pasa al ticket 03 (P2).
 - Grupos que entran: SDLC + SDD + `.gitignore` de secretos + `bd init` (P1, usuario). Forma de `bd init`: la decide `orchestration-ior` (P1c).
 
 ## Q&A log
@@ -30,6 +31,7 @@ Date: 2026-10-23 · Goal: decidir qué costumbres mantiene al día el mecanismo 
 - Captured: el usuario dice "cambiemos a que los gates pasen en mmorch de forma que siga siendo el banco de medicion". `contract_version` pasa al ticket 03.
 - Decisión: `docs/sdlc/gates/` no entra al contrato del repo. Los gates pasan a mmorch, que mide cada gate.
 - Hechos: `sdlc/pipeline.py` ya importa de mmorch (`checkers._mutants`, `impacto`, `sandbox`, `providers`). mmorch importa `sdlc` en `auto_repair`, `hardening`, `juez_sombra`, `project_repair` y `refutacion`: el ciclo de imports ya existe.
-- Pendiente: Claude propone un matiz (qué parte del gate se mueve) y un bd propio para el traslado -> usuario.
+- Matiz confirmado por el usuario: el chequeo y la medición del gate pasan a mmorch; la orquestación queda en `sdlc/`; los umbrales siguen en `sdlc.toml`.
+- Decisión: bd `orchestration-bpn` creado (2026-10-23) para el traslado, relacionado con `orchestration-4u6`, con sesión aparte.
 
 ## Open flags (pending input)
