@@ -121,3 +121,8 @@ Claude cruzó las respuestas Q1 a Q9 con `sdlc/pipeline.py`, `mmorch/server_engi
 - Captured: el usuario responde "B y c" y confirma el orden: (1) el mecanismo propone un área por carpeta, sin LLM; (2) un LLM sugiere ajustes sobre esa propuesta (unir o partir carpetas); (3) el usuario aprueba antes de que entre a `sdlc.toml`. La propuesta por carpeta funciona sola si el LLM falla.
 - Captured: el usuario confirma el formato `[areas]` con `nombre = [globs]` y nombre `[a-z0-9_-]+`.
 - Flags: el mecanismo vive en el esfuerzo `orchestration-4u6`; Claude avisó a la sesión de repos con las palabras del usuario.
+
+### Q16 — Dónde vive `removidos/` de un área con spec plana (2026-10-24)
+- Contexto: la sesión de repos (ticket 06 de `.scratch/repos-convenciones/`) fijó que los deltas de un área con `[spec_de_area]` van a `docs/specs/<area>/changes/`.
+- Asked: ¿`docs/specs/<area>/removidos/` junto a `changes/` (A) o una carpeta al lado de la spec plana (B)?
+- Captured: el usuario elige **A**. Cada área guarda su historia en `docs/specs/<area>/`, sin importar dónde viva su spec. El código busca `changes/` y `removidos/` con la misma regla.
