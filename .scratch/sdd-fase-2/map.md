@@ -55,6 +55,7 @@ Lo que el código hace hoy (leído en `sdlc/pipeline.py`, rama `mmorch/auto` en 
 - [Etapa y autor de los tests de propiedades](issues/08-etapa-de-las-propiedades.md) — Claude los escribe en la etapa 1 y la parada única los aprueba; las marcas salen de ahí; pueden pasar en HEAD si el ID tiene otro test rojo; el coder por API no ve su código (Claude por la CLI sí, límite aceptado).
 - [Propiedades sin duplicar gate_mutacion](issues/09-propiedades-y-mutacion.md) — atribución por test sobre las corridas que ya existen, sin `-x`; propiedad vacua anotada, bloquea solo con `mutation_min`; perfil de 20 ejemplos dentro de los mutantes.
 - [Lenguajes, dependencia y determinismo](issues/10-lenguajes-y-determinismo.md) — Python (Hypothesis) y TypeScript (fast-check); atribución por JUnit XML; sin librería, sin propiedades y anotado (adopción por `orchestration-4u6`); semilla del sha base; archivo auxiliar ignorado por git; `database=None`.
+- [Corrida real de cierre](issues/11-corrida-real-de-cierre.md) — dos corridas: `tools/ste-lint.py` en orchestration (Python) y formato argentino de `validarBruto()` en F2 (TypeScript); evidencia por mutantes; `usd_max = 3.0`; cuatro precondiciones y doce condiciones por corrida.
 
 ## Not yet specified
 
