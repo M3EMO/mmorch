@@ -115,3 +115,9 @@ Claude cruzó las respuestas Q1 a Q9 con `sdlc/pipeline.py`, `mmorch/server_engi
 - Captured: el usuario aprueba seis casos más: `files` ganan sobre rutas del texto; texto con dos áreas corta; plan con archivo del área + archivo sin área pasa; `bd` que falla no rompe la corrida y deja `division.md` y `fuera_de_area`; issue cerrado con la label -> issue nuevo; archivo rechazado dos veces -> una sola nota.
 - Captured: nota aprobada en el ticket 11: la corrida real verifica que `bd` corre en el host y deja el issue en el bd correcto.
 - Flags: ninguno. Ticket 01 cerrado de nuevo.
+
+### Q15 — Formato de `[areas]` y quién propone las primeras áreas (pregunta del usuario durante el ticket 03)
+- Asked: formato `[areas]` en `sdlc.toml` (`nombre = [globs]`, nombre `[a-z0-9_-]+` = carpeta `docs/specs/<area>/`); ¿usuario a mano (A), mecanismo del esfuerzo de repos propone por carpeta (B) o LLM propone leyendo el código (C)?
+- Captured: el usuario responde "B y c" y confirma el orden: (1) el mecanismo propone un área por carpeta, sin LLM; (2) un LLM sugiere ajustes sobre esa propuesta (unir o partir carpetas); (3) el usuario aprueba antes de que entre a `sdlc.toml`. La propuesta por carpeta funciona sola si el LLM falla.
+- Captured: el usuario confirma el formato `[areas]` con `nombre = [globs]` y nombre `[a-z0-9_-]+`.
+- Flags: el mecanismo vive en el esfuerzo `orchestration-4u6`; Claude avisó a la sesión de repos con las palabras del usuario.

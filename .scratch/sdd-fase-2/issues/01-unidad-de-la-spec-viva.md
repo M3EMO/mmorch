@@ -45,6 +45,8 @@ Resuelto por grilling con el usuario (2026-10-23) y corregido tras verificarlo c
 - Un área más archivos sin área: vale el área y los archivos sueltos se ignoran.
 - No hay specs archivadas para migrar: ningún `docs/specs/*/spec.md` existe en `/home/mpera` (búsqueda del 2026-10-23).
 - Un área declarada sin `spec.md` todavía queda para el ticket 03.
+- Formato confirmado: tabla `[areas]` en `sdlc.toml`, con `nombre = [globs]`. El nombre admite `[a-z0-9_-]+` y es la carpeta `docs/specs/<area>/`.
+- Las primeras áreas de un repo salen en tres pasos: propuesta por carpeta sin LLM, ajustes sugeridos por un LLM, aprobación del usuario. El mecanismo vive en el esfuerzo `orchestration-4u6`.
 
 ### Test de aceptación aprobado
 
