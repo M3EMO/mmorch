@@ -1,6 +1,6 @@
 # Cómo entra la propuesta de áreas al mecanismo
 Type: grilling
-Status: open
+Status: claimed
 Blocked by:
 Map: ../map.md
 
