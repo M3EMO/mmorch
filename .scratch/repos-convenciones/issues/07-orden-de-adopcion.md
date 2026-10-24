@@ -76,3 +76,24 @@ Cada repo deja abajo, en `## Comments`, tres salidas: `doctor` antes, `--upgrade
 14. El mensaje del commit sigue un formato fijo y nombra cada arreglo aplicado.
 15. El push nunca usa `--force`, y un push rechazado nunca se reintenta con fuerza.
 16. El push corre con `GIT_TERMINAL_PROMPT=0` y un timeout, y un timeout conserva el commit local con aviso.
+
+## Comments
+
+### Adopción (2026-10-24)
+
+Cada repo corrió `doctor` antes, `init --upgrade` y `doctor` después, desde la rama `claude/youthful-bohr-f13d78`.
+El OK del usuario cubre el push de cada repo. Salidas completas en el scratchpad de la sesión.
+
+- mf-moe: antes exit 1 (claude-import); upgrade claude-import, commit `0d4b6cd`, push sin remoto: el commit queda local; después exit 3 (sin desvíos).
+- Portfolio-financiero: antes exit 1 (agents, beads, claude-import, gitignore, plantillas); upgrade agents, claude-import, gitignore, plantillas, commit `35d840a`, push ok; después exit 1 (beads).
+- ssb: antes exit 1 (agents, beads, gitignore); upgrade agents, gitignore, commit `81aba51`, push ok; después exit 1 (beads).
+- ChatBot: antes exit 1 (agents, beads, gitignore); upgrade agents, gitignore, commit `b6d1994`, push ok; después exit 1 (beads).
+- prototipo-04: antes exit 1 (agents, beads, gitignore); upgrade agents, gitignore, commit `3b3723e`, push sin remoto: el commit queda local; después exit 1 (beads).
+- prototipo-06: antes exit 1 (agents, beads, gitignore); upgrade agents, gitignore, commit `e48bd0c`, push sin remoto: el commit queda local; después exit 1 (beads).
+- prototipo-10: antes exit 1 (agents, beads, gitignore); upgrade agents, gitignore, commit `53bc60b`, push sin remoto: el commit queda local; después exit 1 (beads).
+- f2-sueldo-neto: antes exit 1 (agents, beads, gitignore); upgrade agents, gitignore, commit `00c4ed0`, push sin remoto: el commit queda local; después exit 1 (beads).
+- Estudio: antes exit 1 (agents, beads, claude-import, gitignore, plantillas); upgrade agents, claude-import, gitignore, plantillas, commit `e8a8f8b`, push ok; después exit 1 (beads).
+- Adepor (`~/BetDeportivo`): sonda en un worktree de `main`, 161 tests verdes sin red (`unshare -rn`, 8,7 s); `init` commiteado en `bb56c10`; antes exit 1 (agents, claude-import, gitignore); upgrade agents, claude-import, gitignore, commit `1277290`, push ok; después exit 3 (sin desvíos). El checkout del usuario en `audit/prod-ready-2026-10` no se tocó.
+- orchestration: `sdlc.toml` sin la `suite` de Windows y con `rama = "mmorch/auto"` (commit `da69624` en el checkout principal, sin push). `--upgrade` queda en espera: `origin/mmorch/auto` no existe, y el push publicaría la rama entera. Decide el usuario.
+- `.beads/` falta en Portfolio, ssb, ChatBot, los cuatro F2 y Estudio. El arreglo es `python -m sdlc bd <repo>` (`orchestration-ior`). Decide el usuario.
+- Hallazgo: `init` escribe `"*.py"` en el techo cuando hay archivos en la raíz. En `_calza()` el `*` cruza carpetas, así que ese glob abre el techo a todo el repo (Adepor lo tiene).
