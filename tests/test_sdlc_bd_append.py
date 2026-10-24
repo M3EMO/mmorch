@@ -88,7 +88,7 @@ def test_bloque_viejo_editado_se_reintegra_sin_pisar_bytes(env):
     r = A.bd_append(str(repo), hoy="2026-10-23")
 
     claude = (repo / "CLAUDE.md").read_text(encoding="utf-8")
-    assert claude.startswith(A.BLOQUE.sub("", claude_antes)) and claude.rstrip().endswith("@AGENTS.md")
+    assert claude == "@AGENTS.md\n\n" + A.BLOQUE.sub("", claude_antes)  # import al inicio, resto intacto
     agents = (repo / "AGENTS.md").read_text(encoding="utf-8")
     assert agents.startswith("# r\n") and "## Reglas propias de bd\n" in agents
     assert all(agents.count(x) == 1 for x in PROPIAS) and "reintegradas del bloque" in agents
@@ -138,7 +138,7 @@ def test_bloque_intacto_duplicado_queda_una_vez_en_agents(env):
     A.bd_append(str(repo))
     claude = (repo / "CLAUDE.md").read_text(encoding="utf-8")
     agents = (repo / "AGENTS.md").read_text(encoding="utf-8")
-    assert claude.startswith("# mf\n\n- Convenciones.\n\n") and "BEADS" not in claude
+    assert claude == "@AGENTS.md\n\n# mf\n\n- Convenciones.\n\n"
     assert agents.startswith("# AGENTS\n\n" + actual) and len(A.BLOQUE.findall(agents)) == 1
 
 
@@ -162,7 +162,7 @@ def test_seccion_propia_existente_y_claude_sin_salto_final(env):
     A.bd_append(str(repo))
     claude = (repo / "CLAUDE.md").read_text(encoding="utf-8")
     agents = (repo / "AGENTS.md").read_text(encoding="utf-8")
-    assert claude.startswith("# p\n\nsin salto final") and claude.endswith("@AGENTS.md\n")
+    assert claude == "@AGENTS.md\n\n# p\n\nsin salto final"
     assert agents.startswith(propia) and "mandan sobre el bloque" not in agents
 
 
@@ -205,3 +205,31 @@ def test_lint_hallazgos(tmp_path):
     for esperado in ("parrafo", "203 caracteres", "fuera de orden", "falta `## Mapa`", "node aviso.js",
                      "CLAUDE.md: 62 lineas propias", "falta la linea @AGENTS.md"):
         assert esperado in h, esperado
+
+
+def test_crlf_conserva_el_salto_del_archivo(env):
+    """Clones del escritorio Windows: el comando no convierte un archivo CRLF a LF."""
+    repo = _repo(env)
+    (repo / "CLAUDE.md").write_bytes(b"# w\r\n\r\nregla\r\n")
+    (repo / "AGENTS.md").write_bytes(b"# w\r\n\r\n- mio\r\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    A.bd_append(str(repo))
+    assert (repo / "CLAUDE.md").read_bytes() == b"@AGENTS.md\r\n\r\n# w\r\n\r\nregla\r\n"
+    agents = (repo / "AGENTS.md").read_bytes()
+    assert agents.startswith(b"# w\r\n\r\n- mio\r\n") and agents.count(b"\n") == agents.count(b"\r\n")
+    assert subprocess.run(["bd", "setup", "claude", "--check"], cwd=repo, capture_output=True).returncode == 0
+
+
+@pytest.mark.parametrize("roto", [
+    "<!-- BEGIN SDLC bd-propias v:1 hash:00000000 -->\n- mio sin cierre\n",
+    "<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:00000000 -->\n- bd sin cierre\n",
+    _bloque(VIEJO) + "\n" + _bloque(VIEJO),
+])
+def test_marcas_rotas_salen_2_y_no_escriben(env, roto):
+    repo = _repo(env)
+    _commit(repo, {"CLAUDE.md": "@AGENTS.md\n", "AGENTS.md": "# r\n\n" + roto}, "base")
+    fotos = _fotos(repo)
+    with pytest.raises(A.Rechazo) as e:
+        A.bd_append(str(repo))
+    assert e.value.codigo == 2 and _fotos(repo) == fotos

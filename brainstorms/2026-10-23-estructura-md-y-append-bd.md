@@ -134,5 +134,12 @@ Date: 2026-10-23 · Goal: acordar la estructura de `CLAUDE.md` y `AGENTS.md` en 
 - Los tres clones quedan con prefijo intacto, segunda corrida sin cambios, `bd setup claude --check` en 0 y el bloque de bd antes de las reglas propias.
 - `lint-md` sobre esos clones da 68, 26 y 19 hallazgos. Es lo esperado: la prosa se migra en `orchestration-4u6`.
 
+## Ajustes del ticket 04 de repos-convenciones (decisión del usuario, 2026-10-23)
+
+- `@AGENTS.md` va al inicio de `CLAUDE.md` y sin marcas. Reemplaza el append al final de la propuesta de diseño.
+- Los bloques del SDLC usan el formato de bd: `<!-- BEGIN SDLC <nombre> v:1 hash:<h> -->` y `<!-- END SDLC <nombre> -->`.
+- El hash usa el interior con saltos LF, y la escritura conserva CRLF.
+- Un `BEGIN` sin `END` o un nombre repetido deja el archivo intacto.
+
 ## Open flags (pending input)
 - Hooks globales (`~/.claude/settings.json`): qué significa "armar mejor" -> usuario, en el issue de bd aparte.

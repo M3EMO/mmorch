@@ -85,7 +85,7 @@ El lint no cuenta las líneas del bloque de bd.
 
 1. El comando corre `bd init --skip-agents --skip-hooks --init-if-missing` si falta `.beads/`.
 2. bd init commitea si git tiene identidad; el comando deshace ese commit y deja los archivos en stage.
-3. El comando crea `AGENTS.md` si falta y agrega `@AGENTS.md` al final de `CLAUDE.md` si falta.
+3. El comando crea `AGENTS.md` si falta y agrega `@AGENTS.md` al inicio de `CLAUDE.md` si falta, sin marcas.
 4. El comando agrega `## Reglas propias de bd` desde `sdlc/templates/agentes/bd-propias.md` si falta el encabezado.
    El bloque lleva marcas `<!-- BEGIN SDLC bd-propias v:1 hash:<h> -->` y `<!-- END SDLC bd-propias -->`.
 5. El comando busca en git el original de cada bloque de bd editado. El original es la revisión cuyo cuerpo da el hash del marcador.
@@ -105,6 +105,8 @@ Garantías:
 - bd tiene el hash del marcador como `sha256(cuerpo.strip())[:8]`. `bd setup claude --check` mira solo ese hash.
 - Los bloques del SDLC usan el mismo formato y el mismo hash que bd: `<!-- BEGIN SDLC <nombre> v:1 hash:<h> -->`.
 - Las líneas reintegradas no llevan marcas, porque son texto del usuario.
+- El hash de una marca usa el interior con saltos LF. La escritura conserva el salto del archivo, LF o CRLF.
+- Un `BEGIN` sin `END` o un nombre de bloque repetido corta la corrida con código 2, antes de escribir.
 
 ## Fuera de alcance
 

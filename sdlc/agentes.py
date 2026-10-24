@@ -39,7 +39,30 @@ class Rechazo(Exception):
 
 
 def _hash(cuerpo: str) -> str:
-    return hashlib.sha256(cuerpo.strip().encode()).hexdigest()[:8]
+    return hashlib.sha256(cuerpo.replace("\r\n", "\n").strip().encode()).hexdigest()[:8]
+
+
+def _leer(p: pathlib.Path) -> tuple[str, str]:
+    """Texto con saltos LF y el salto del archivo: los clones del escritorio Windows tienen CRLF (ticket 04)."""
+    if not p.exists():
+        return "", "\n"
+    crudo = p.read_bytes().decode("utf-8")
+    return crudo.replace("\r\n", "\n"), "\r\n" if "\r\n" in crudo else "\n"
+
+
+def _escribir(p: pathlib.Path, texto: str, eol: str) -> None:
+    # shortcut: un archivo con saltos mezclados queda entero con CRLF; si aparece uno, guardar el salto por linea
+    p.write_bytes(texto.replace("\n", eol).encode("utf-8"))
+
+
+def _marcas_rotas(texto: str) -> str | None:
+    """BEGIN sin END o un nombre repetido: el archivo queda intacto y no se agrega bloque (ticket 04)."""
+    if texto.count("<!-- BEGIN BEADS INTEGRATION") != len(BLOQUE.findall(texto)) or len(BLOQUE.findall(texto)) > 1:
+        return "bloque de bd sin cierre o repetido"
+    abre = re.findall(r"<!-- BEGIN SDLC (\S+)", texto)
+    if sorted(abre) != sorted(re.findall(r"<!-- END SDLC (\S+) -->", texto)) or len(set(abre)) != len(abre):
+        return "bloque SDLC sin cierre o repetido"
+    return None
 
 
 def marcado(nombre: str, interior: str) -> str:
@@ -69,7 +92,7 @@ def _original(root: pathlib.Path, marca: str) -> str | None:
         for nombre in ("CLAUDE.md", "AGENTS.md"):
             for m in BLOQUE.finditer(_git(root, "show", f"{rev}:{nombre}").stdout):
                 if m.group(1) == marca and _hash(m.group(2)) == marca:
-                    return m.group(2)
+                    return m.group(2).replace("\r\n", "\n")
     return None
 
 
@@ -134,7 +157,11 @@ def bd_append(repo: str, hoy: str | None = None) -> dict:
     if _git(root, "rev-parse", "--git-dir").returncode:
         raise Rechazo(2, f"{root} no es un repo git")
     claude, agents = root / "CLAUDE.md", root / "AGENTS.md"
-    antes = {p: p.read_text(encoding="utf-8") if p.exists() else "" for p in (claude, agents)}
+    leido = {p: _leer(p) for p in (claude, agents)}
+    antes = {p: t for p, (t, _) in leido.items()}
+    for p, t in antes.items():
+        if rota := _marcas_rotas(t):
+            raise Rechazo(2, f"{p.name}: {rota}; no escribo nada")
 
     # fase 1, sin escribir: un bloque editado sin original corta aca
     propias: dict[str, list[str]] = {}
@@ -151,11 +178,11 @@ def bd_append(repo: str, hoy: str | None = None) -> dict:
         hecho.append("bd init")
     t_claude = BLOQUE.sub("", t_claude)  # el bloque de bd vive en AGENTS.md (D1); aca ya es texto puro de bd
     if IMPORT not in t_claude.splitlines():
-        t_claude = _append(t_claude, IMPORT + "\n")
+        t_claude = IMPORT + "\n" + ("\n" + t_claude if t_claude else "")  # al inicio y sin marcas (ticket 04)
     t_agents = t_agents or f"# {root.name}\n"
     for p, t in ((claude, t_claude), (agents, t_agents)):
         if t != antes[p]:
-            p.write_text(t, encoding="utf-8")
+            _escribir(p, t, leido[p][1])
             hecho.append(p.name)
 
     settings = root / ".claude" / "settings.json"
@@ -164,11 +191,12 @@ def bd_append(repo: str, hoy: str | None = None) -> dict:
     if s_antes is not None and sin_bd(json.loads(s_antes)) != sin_bd(json.loads(settings.read_text(encoding="utf-8"))):
         settings.write_bytes(s_antes)
         raise Rechazo(1, "bd setup claude cambio hooks que no son de bd; settings.json restaurado")
-    if claude.read_text(encoding="utf-8") != t_claude:
+    if _leer(claude)[0] != t_claude:
         raise Rechazo(1, "bd setup claude escribio en CLAUDE.md pese a @AGENTS.md")
     # las reglas propias van despues del bloque de bd (D6): se agregan sobre lo que dejo bd setup
-    t_agents = con_bd = agents.read_text(encoding="utf-8")
-    if PROPIAS not in t_agents:
+    t_agents, eol = _leer(agents)
+    con_bd = t_agents
+    if PROPIAS not in t_agents and "<!-- BEGIN SDLC bd-propias" not in t_agents:
         t_agents = _append(t_agents, marcado("bd-propias", TPL_PROPIAS.read_text(encoding="utf-8")))
     vistas = {_norma(x) for x in t_agents.splitlines()}
     escritas: dict[str, int] = {}
@@ -183,7 +211,7 @@ def bd_append(repo: str, hoy: str | None = None) -> dict:
             fecha = hoy or datetime.date.today().isoformat()
             t_agents = _append(t_agents, f"{PROPIAS} — reintegradas del bloque {marca} ({fecha})\n\n" + "".join(nuevas))
     if t_agents != con_bd:
-        agents.write_text(t_agents, encoding="utf-8")
+        _escribir(agents, t_agents, eol)
         hecho += [] if agents.name in hecho else [agents.name]
 
     dir_hooks = _git_hooks(root)
@@ -219,7 +247,7 @@ def lint(repo: str) -> list[str]:
         if not p.exists():
             hallazgos.append(f"{nombre}: falta")
             continue
-        textos[nombre] = t = BLOQUE.sub("", p.read_text(encoding="utf-8"))
+        textos[nombre] = t = BLOQUE.sub("", _leer(p)[0])
         en_codigo, cuenta = False, 0
         for i, linea in enumerate(t.splitlines(), 1):
             if linea.startswith("```"):
