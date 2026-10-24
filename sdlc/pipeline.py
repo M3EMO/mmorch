@@ -2095,10 +2095,13 @@ def init(repo: str) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: `python -m sdlc init <repo>`. El modo bench vive en mmorch (`python -m mmorch.sdlc_bench`)."""
+    """CLI: `python -m sdlc init|bd|lint-md <repo>`. El modo bench vive en mmorch (`python -m mmorch.sdlc_bench`)."""
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] in (["bd"], ["lint-md"]):
+        from . import agentes
+        return agentes.main(argv)
     if argv[:1] != ["init"]:
-        print("uso: python -m sdlc init <repo>", file=sys.stderr)
+        print("uso: python -m sdlc init|bd|lint-md <repo>", file=sys.stderr)
         return 2
     print(json.dumps(init(argv[1] if len(argv) > 1 else "."), ensure_ascii=False))
     return 0
