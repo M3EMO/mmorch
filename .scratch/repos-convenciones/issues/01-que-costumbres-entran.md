@@ -1,6 +1,6 @@
 # Qué costumbres entran al contrato de actualización
 Type: grilling
-Status: open
+Status: claimed
 Blocked by:
 Map: ../map.md
 

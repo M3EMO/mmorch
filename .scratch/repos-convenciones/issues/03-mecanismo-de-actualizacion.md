@@ -19,6 +19,7 @@ Opciones a decidir:
 
 Preguntas derivadas:
 
+- ¿`sdlc.toml` guarda `contract_version`, como decidió el ticket 11 de `sdlc-6-gates`? El ticket 01 de este mapa pasó la pregunta acá (2026-10-23). Hoy ningún código la lee.
 - ¿El pipeline rechaza correr sobre un repo desactualizado, avisa o sigue?
 - ¿Una clave nueva con default en código (por ejemplo `cobertura_min`) se escribe en el `sdlc.toml`, o el default alcanza?
 - ¿Una clave retirada (por ejemplo `docs/sdlc/sdlc.toml` legacy) se borra, se marca o se deja?
