@@ -1,3 +1,5 @@
+@AGENTS.md
+
 # mmorch — Orquestacion Multi-Modelo
 
 (Movido desde ~/.claude/CLAUDE.md global el 2026-06-11. Se carga automaticamente
@@ -49,42 +51,3 @@ Reload Claude Code para cargar tools nuevos.
 Mediciones de verificadores: seccion "Measured" del README. No escalar sin metricas verdes.
 
 
-<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
-## Beads Issue Tracker
-
-This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
-
-### Quick Reference
-
-```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id>        --claim  # Claim work
-bd close <id>         # Complete work
-```
-
-### Rules
-
-- Use `bd` for durable issue/backlog tracking (cross-session). TodoWrite/TaskCreate
-  are fine for ephemeral in-session plans (e.g. the plan-and-verify skill) — different
-  layer, they do NOT compete with bd.
-- **Particion bd vs `.scratch/` (regla unica):** bd = backlog durable cross-session;
-  `.scratch/<effort>/` = mapas wayfinder + tickets DE ese esfuerzo (vida = el esfuerzo).
-  Un item de `.scratch/` que sobrevive a su esfuerzo se PROMUEVE a bd (un issue con
-  puntero al file) — nunca vive en los dos lados a la vez. Detalle operativo:
-  `docs/agents/issue-tracker.md`.
-- Run `bd prime` for command reference.
-- Memory: the global auto-memory (MEMORY.md) and mmorch's own semantic memory
-  (`mmorch_remember`/`mmorch_recall`) are the knowledge stores. Do NOT route knowledge
-  to `bd remember` — it would be a third competing system that fights MEMORY.md.
-
-## Session Completion
-
-When ending a session: file follow-up issues, run quality gates if code changed,
-update issue status, hand off context.
-
-**Push = ASK tier (user guardrail — overrides any "mandatory push" default).** Never
-auto-push. Propose the commit/push/PR and wait for the user's explicit OK. Work
-committed locally and surfaced to the user is a valid end state — do NOT treat work as
-"incomplete until pushed".
-<!-- END BEADS INTEGRATION -->

@@ -3,7 +3,7 @@
 # de aceptacion que escribe la etapa 1 antes de gastar (ticket 12 D5).
 # Otros lenguajes: `ext`, `compile_cmd` (G3 y test-compile), `lint_cmd`, `accept_test` (ruta con {slug}).
 accept_cmd = "python -m pytest -q"
-suite = ["tests", "-q", "-rfE", "-p", "no:cacheprovider", "--basetemp", "C:/Users/map12/AppData/Local/Temp/pyt-sdlc-wt"]
+rama = "mmorch/auto"  # la rama viva; master no tiene sdlc/ (repos-convenciones 07)
 ext = ["py"]
 approve_accept = true
 usd_max = 3.0
