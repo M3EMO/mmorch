@@ -10,6 +10,8 @@ Decisiones: brainstorms/2026-10-23-gates-a-mmorch.md.
 """
 from __future__ import annotations
 
+import re
+
 
 def sin_clones(written: dict[str, str], umbral: float = 0.8) -> tuple[bool, str]:
     """D6: el coder escribio el contenido de plugins.py dentro de plugin_worker.py. Dos archivos del plan
@@ -22,3 +24,16 @@ def sin_clones(written: dict[str, str], umbral: float = 0.8) -> tuple[bool, str]
             if la and lb and len(la & lb) / min(len(la), len(lb)) > umbral:
                 return False, f"{a} y {b} comparten > {umbral:.0%} de lineas"
     return True, "ok"
+
+
+def clarificaciones(spec_md: str) -> tuple[bool, str]:
+    """Salida de la revision de spec (ticket 11, de clarify.md): seccion con 0..5 preguntas respondidas."""
+    m = re.search(r"## Clarificaciones\b(.*?)(?:\n## |\Z)", spec_md, re.S)
+    if not m:
+        return False, "falta ## Clarificaciones"
+    qs = re.findall(r"(?m)^- P\d+: .+\| R: \S.*\| afecta: \S+", m.group(1))  # D11-diag: "afecta: Contrato" tambien vale
+    if not qs and re.search(r"sin preguntas|0 preguntas|ninguna pregunta|no hay preguntas", m.group(1), re.I):
+        return True, "0 preguntas"  # D11-diag: Claude escribio "0 preguntas" en vez del literal
+    if not 1 <= len(qs) <= 5:
+        return False, f"{len(qs)} preguntas validas (esperado 1..5)"
+    return True, f"{len(qs)} preguntas respondidas"

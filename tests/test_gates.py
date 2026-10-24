@@ -43,3 +43,26 @@ def test_bench_ninguna_copia_supera_el_limite_de_edicion():
         orig = gates_bench._modulo(rng)
         _, frac = gates_bench._copia_editada(rng, orig)
         assert frac <= gates_bench._MAX_EDICION
+
+
+def test_clarificaciones_cuenta_preguntas_respondidas():
+    ok, detalle = gates.clarificaciones("## Clarificaciones\n- P1: cap? | R: SUPUESTO: float | afecta: R1\n## Otra\n")
+    assert ok and detalle == "1 preguntas respondidas"
+
+
+def test_clarificaciones_acepta_cero_declaradas():
+    assert gates.clarificaciones("## Clarificaciones\n- sin preguntas: la spec cubre el barrido.\n") == (True, "0 preguntas")
+
+
+def test_clarificaciones_rechaza_sin_seccion_vacia_o_mas_de_cinco():
+    assert gates.clarificaciones("## Casos\n") == (False, "falta ## Clarificaciones")
+    assert not gates.clarificaciones("## Clarificaciones\n- P1: cap? | R:  | afecta: R1\n")[0]
+    seis = "".join(f"- P{i}: q? | R: si | afecta: R1\n" for i in range(1, 7))
+    assert gates.clarificaciones("## Clarificaciones\n" + seis) == (False, "6 preguntas validas (esperado 1..5)")
+
+
+def test_bench_los_casos_aparte_no_entran_a_la_metrica_principal():
+    r = gates_bench.medir("spec-review", n=60, seed=1)
+    assert r["aparte"] == ["espacios", "negrita", "numerada"]
+    assert r["n"] == r["tp"] + r["fn"] + r["tn"] + r["fp"] < 60 + r["incidentes"]
+    assert set(r["aparte"]) <= set(r["acierto_por_grupo"])

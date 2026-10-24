@@ -254,18 +254,24 @@ A case's label comes from how it was built, never from the gate's own rule or an
 share imports and headers. Real incidents ride along, flagged when only a reconstruction survives.
 Re-run with `python -m mmorch.gates_bench --seed 42 --n 400`; rows go to `logs/ablation_results.jsonl`.
 
-| gate | n | catches clones | doesn't false-reject | balanced acc | detection by edit share |
+| gate | n | catches bad | doesn't false-reject | balanced acc | accuracy by group |
 |---|---|---|---|---|---|
-| `sin-clones` (threshold 0.8) | 401 | 0.706 | 1.00 | 0.853 | 0-10%: 1.00 · 10-20%: 0.97 · 20-30%: 0.02 |
+| `sin-clones` (threshold 0.8) | 401 | 0.706 | 1.00 | 0.853 | copy 0-10%: 1.00 · 10-20%: 0.97 · 20-30%: 0.02 |
+| `spec-review` | 287 | 0.615 | 1.00 | 0.807 | `TBD` answer: 0.00 · one empty answer: 0.14 · missing/empty/6 questions: 1.00 |
 
 The 0.8 line-overlap threshold misses almost every copy with 20-30% of its lines edited. The green
 generator shares only imports and headers, so a 1.00 specificity is an upper bound until harder green
-cases (sibling modules with the same structure) join the set.
+cases (sibling modules with the same structure) join the set (bd `orchestration-cuz`).
+
+`spec-review` counts well-formed answered questions, so one unanswered question passes when another is
+well formed, and `R: TBD` always passes. Format variants the template forbids (extra spaces, bold, numbered
+list) are reported apart and kept out of the headline: each one is rejected every time (accuracy 0.00), which
+costs a retry, not a wrong result.
 
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **121 módulos · 44 MCP tools (15 expuestas por default) · 1119 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
+_Auto-generado por `mmorch.docgen`._ **121 módulos · 44 MCP tools (15 expuestas por default) · 1123 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->

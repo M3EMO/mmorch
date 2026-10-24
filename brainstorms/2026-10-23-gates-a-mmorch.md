@@ -12,6 +12,7 @@ Date: 2026-10-23 · Goal: decidir modulo destino, regla de imports, orden de tra
 - D9: un gate que mide bajo se traslada igual; el README publica el numero y un numero bajo abre un bd. El traslado no cambia comportamiento.
 - D10: cada incidente reconstruido lleva una marca en la lista literal de `gates_bench.py`.
 - D11: OK al traslado de `sin-clones`. Un caso rojo es una copia con hasta 30% de lineas editadas.
+- D12: un caso puede marcarse `aparte`: no entra a la metrica principal y su acierto se publica por grupo (variantes de formato de spec-review).
 - D8: `mmorch/gates_bench.py` con semilla; filas en `logs/ablation_results.jsonl`; tabla por gate en README "Measured".
 
 ## Contexto medido (antes de la primera pregunta)
@@ -130,4 +131,11 @@ Los demas ejecutan comandos con `sh` y leen el worktree `WT`.
 - Medicion (`python -m mmorch.gates_bench --seed 42 --n 400`): n=401, sensibilidad 0.706, especificidad 1.00, accuracy balanceada 0.853, falso rechazo 0.
 - Deteccion por tramo de edicion: 0-10% = 1.00, 10-20% = 0.97, 20-30% = 0.02. El umbral 0.8 casi no detecta copias con 20-30% editado.
 - La especificidad 1.00 es una cota superior: el generador verde comparte solo imports y cabeceras.
-- Pendiente: definir que numero cuenta como "bajo" para abrir un bd segun D9 -> usuario.
+- Resuelto 2026-10-24: el usuario pidio abrir el bd para `sin-clones` (0.853) -> `orchestration-cuz`.
+
+## Segundo gate: spec-review (2026-10-24)
+- `clarificaciones` paso a `mmorch/gates.py`. Resultado final con D12: n=287, sensibilidad 0.615, especificidad 1.00, acc. balanceada 0.807. Bd `orchestration-96p` abierto por D9.
+- Medicion preliminar (seed 42, n=402): acc. balanceada 0.523, sensibilidad 0.615, falso rechazo 0.569.
+- Por grupo: canonica 1.00, cero 1.00, espacios 0.00, negrita 0.00, numerada 0.00, respuesta_tbd 0.00, respuesta_vacia 0.14, sin_seccion 1.00, seccion_vacia 1.00, seis_preguntas 1.00.
+- Hallazgo: una pregunta sin respuesta pasa si otra pregunta de la seccion esta bien escrita.
+- Q10 resuelta: el usuario eligio (c). El bench excluye las variantes de formato (espacios, negrita, numerada) de la metrica principal y publica su acierto aparte, como costo de reintento. Con (c): n=287, sensibilidad 0.615, especificidad 1.00, acc. balanceada 0.808 (corrige un 0.86 que di sin calcular).

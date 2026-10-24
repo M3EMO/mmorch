@@ -27,7 +27,7 @@ import time
 import types
 from typing import Any
 
-from mmorch.gates import sin_clones
+from mmorch.gates import clarificaciones, sin_clones
 from mmorch.paths import logs_dir
 from mmorch.providers import call, register_run_tracker, unregister_run_tracker
 
@@ -934,16 +934,8 @@ def gate_traza_plan(spec_md: str, plan_block: str, files: list[str]) -> tuple[bo
 
 
 def gate_clarificaciones(spec_md: str) -> tuple[bool, str]:
-    """Salida de la revision de spec (ticket 11, de clarify.md): seccion con 0..5 preguntas respondidas."""
-    m = re.search(r"## Clarificaciones\b(.*?)(?:\n## |\Z)", spec_md, re.S)
-    if not m:
-        return rec_gate("spec-review", False, "falta ## Clarificaciones")
-    qs = re.findall(r"(?m)^- P\d+: .+\| R: \S.*\| afecta: \S+", m.group(1))  # D11-diag: "afecta: Contrato" tambien vale
-    if not qs and re.search(r"sin preguntas|0 preguntas|ninguna pregunta|no hay preguntas", m.group(1), re.I):
-        return rec_gate("spec-review", True, "0 preguntas")  # D11-diag: Claude escribio "0 preguntas" en vez del literal
-    if not 1 <= len(qs) <= 5:
-        return rec_gate("spec-review", False, f"{len(qs)} preguntas validas (esperado 1..5)")
-    return rec_gate("spec-review", True, f"{len(qs)} preguntas respondidas")
+    """Chequeo en mmorch.gates.clarificaciones (orchestration-bpn); aca solo se registra."""
+    return rec_gate("spec-review", *clarificaciones(spec_md))
 
 
 def _tree() -> dict[str, str]:
