@@ -46,7 +46,7 @@ Repos con `sdlc.toml` fuera de la lista del pedido: `~/Proyectos/mf-moe`, `~/Pro
 
 ## Tickets
 
-Todos son grilling. Frontera sin bloqueo (2026-10-23): 02, 03, 05 y 06.
+Todos son grilling. Frontera sin bloqueo (2026-10-23): 02, 04, 05 y 06.
 
 - [01 Qué costumbres entran](issues/01-que-costumbres-entran.md)
 - [02 Qué repos entran y dónde vive la lista](issues/02-que-repos-entran.md)
@@ -61,6 +61,7 @@ Todos son grilling. Frontera sin bloqueo (2026-10-23): 02, 03, 05 y 06.
 <!-- una línea por ticket resuelto: gist + link -->
 
 - [01 Qué costumbres entran](issues/01-que-costumbres-entran.md) — SDLC + SDD + `.gitignore` de secretos + `bd init`; `bd init` y los md van a `orchestration-ior`; gates a mmorch en `orchestration-bpn`; `contract_version` al 03; constitución y formato como avisos; mesa de `docs/sdlc/` fuera (`orchestration-eeq`); test de 11 puntos aprobado (2026-10-23).
+- [03 Mecanismo de actualización](issues/03-mecanismo-de-actualizacion.md) — `doctor` (oráculo, sin escrituras) + `init --upgrade` (lista cerrada de arreglos seguros, convergencia sin migraciones); sin `contract_version` (clave desconocida = aviso); el pipeline registra `doctor` en `run-log.json` y sigue; todo en `sdlc/`; test de 15 puntos aprobado (2026-10-23).
 
 ## Fog
 
