@@ -77,3 +77,7 @@ Resguardos de cada escritura: escritura atómica; `tomllib` relee `sdlc.toml` y 
 13. En un repo conforme, `--upgrade` no escribe ningún archivo.
 14. Si `doctor` lanza una excepción, `build_feature` guarda el error en `run-log.json` y sigue.
 15. Tras `--upgrade`, ningún archivo temporal queda en el repo.
+
+## Comments
+
+- Enmienda del 2026-10-23 (grilling del ticket 04, P5): la lista cerrada de arreglos seguros suma "agregar la línea `@AGENTS.md` al inicio de `CLAUDE.md` si falta". La línea va sin marcas. El usuario aprobó el arreglo al elegir la opción A.
