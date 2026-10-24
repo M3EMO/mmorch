@@ -1,6 +1,6 @@
 # Delta contra la regresión de suite
 Type: grilling
-Status: open
+Status: resolved
 Blocked by: 04
 Map: ../map.md
 
@@ -32,3 +32,35 @@ Preguntas derivadas:
 
 - 2026-10-23, desde el ticket 02 (decisión del usuario): los tests de un ID `REMOVED` no se borran. Se mueven a `docs/specs/<area>/removidos/`, fuera de la suite. `docs/specs/<area>/removidos/README.md` lista cada ID eliminado. Este ticket decide qué etapa hace el movimiento y qué pasa con los tests de `MODIFIED`.
 - 2026-10-23, desde el ticket 03 (aprobado por el usuario): los tests de caracterización `tests/test_sdlc_<area>_base_<slug>.py` entran a `SNAP` tras la aprobación. Un delta que cambia un comportamiento caracterizado los hace fallar. Este ticket decide cómo un `MODIFIED` habilita ese fallo sin abrir la puerta a borrar tests.
+
+## Answer
+
+Resuelto por grilling con el usuario (2026-10-23). Registro completo: `brainstorms/2026-10-23-sdd-fase-2-ticket-05.md`.
+
+- El test viejo de un `MODIFIED` se mueve por código a `docs/specs/<area>/removidos/`, igual que un `REMOVED`. El test nuevo de la etapa 1 lo reemplaza. Nadie edita un test aprobado.
+- El código encuentra el test viejo por `ruta::test` en la tabla de trazabilidad, sin juicio.
+- En modo área, un test cubre un solo ID, y cada ID tiene su propio archivo en todos los lenguajes: `tests/sdlc/<area>/test_R<n>_<slug>.<ext>`. Esta regla enmienda el nombre del ticket 03.
+- Un `MODIFIED` se infiere en la etapa 1: un `test_R<n>` nuevo con un ID que ya existe en el área.
+- Un `REMOVED` no tiene test nuevo. Claude declara en la etapa 1 la lista de IDs a eliminar, cada uno con su motivo. El `REMOVED` del delta debe coincidir con esa lista.
+- Los movimientos corren al final de la etapa 1, antes de la parada única. Ahí se ven juntos los tests nuevos, los que salen y los motivos.
+- `gate_suite_total` compara los tests recolectados antes y después. Un test faltante que no figura en la lista de movimientos cuenta como regresión ("test desaparecido").
+- El coder de la etapa 4 nunca toca un test viejo. `gate_plan_allowlist` rechaza `tests/` en el plan, y `gate_alcance` revierte lo que Claude toca fuera de alcance.
+- Riesgo a cuidar al implementar: pytest falla si dos archivos de test comparten nombre base sin `__init__.py`.
+
+### Test de aceptación aprobado
+
+`tests/test_sdlc_delta.py::test_suite_total_con_delta` usa un área con R1, R2, R4 y R5, cada uno en su archivo:
+
+1. Un `test_R1` nuevo de la etapa 1 mueve el archivo viejo de R1 a `removidos/` antes de la parada.
+2. La lista de bajas de la etapa 1 nombra R2 con su motivo. El código mueve el archivo de R2 y suma el motivo al `README.md`.
+3. Un delta con un `REMOVED` fuera de la lista de bajas falla.
+4. Una baja de la lista que falta en el delta también falla.
+5. La suite no cuenta los archivos movidos como fallo ni como test faltante.
+6. Un coder que borra el archivo de R4 produce la regresión "test desaparecido".
+7. Un fallo nuevo en R5, sin relación con el delta, cuenta como regresión.
+8. Un plan que nombra un archivo bajo `tests/` falla `gate_plan_allowlist`.
+9. Una tabla que cita el mismo test en dos filas falla.
+10. Una corrida sin área deja `gate_suite_total` igual que hoy.
+11. Un `files` del llamador bajo `tests/sdlc/<area>/` se rechaza en modo área.
+12. Una lista de bajas que nombra un ID inexistente en el área falla.
+13. Una corrida reanudada desde la etapa 2 no repite los movimientos de la etapa 1.

@@ -59,3 +59,7 @@ Resuelto por grilling con el usuario (2026-10-23). Registro completo: `brainstor
 11. Los mutantes salen solo del archivo caracterizado, no del área entera.
 12. Tras la aprobación, un coder que edita un test de caracterización falla `gate_baseline`.
 13. Los requisitos de la spec base toman el menor número libre del área.
+
+## Comments
+
+- 2026-10-23, enmienda desde el ticket 05 (decisión del usuario): en modo área, cada ID tiene su propio archivo de test, en todos los lenguajes. La caracterización deja `tests/sdlc/<area>/test_R<n>_<slug>.<ext>`, un archivo por requisito base, en vez de `tests/test_sdlc_<area>_base_<slug>.py`. Los casos 10 y 12 del test aprobado se leen sobre esos archivos.
