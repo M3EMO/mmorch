@@ -72,3 +72,40 @@ Date: 2026-10-23 · Goal: decidir sobre qué unidad se escribe el delta del buil
 
 ## Open flags (pending input)
 - Mapa wayfinder de `orchestration-4u6` (actualizar repos a las convenciones) -> usuario decide cuándo se chartea.
+
+## Verificación contra el código (2026-10-23, pedida por el usuario durante el ticket 02)
+
+Claude cruzó las respuestas Q1 a Q9 con `sdlc/pipeline.py`, `mmorch/server_engine.py`, `sdlc/builder.py` y la skill `/project`.
+
+- **V1 (real) — el camino común no trae `files`.** La skill `/project` hace `--files` opcional: con `sdlc.toml`, el techo alcanza (`_resolve_files` devuelve el techo si `files is None`). Entonces `FEAT["files"]` queda `[]` y, por Q3 + Q4, la corrida nunca tiene área ni delta. Solo `sdlc/builder.py` pasa `files` siempre. Reabre Q3.
+- **V2 (real) — el corte por dos áreas no puede usar `_proponer_division()`.** Esa función llama al planner con la spec y el plan, que no existen antes de la etapa 2. El caso 5 del test exige cero llamadas al LLM. Contradicción entre los casos 4 y 5.
+- **V3 (real) — el plan puede salir del área.** El área sale de los `files` del llamador, pero el plan de la etapa 3 puede sumar archivos dentro del techo. Un plan que escribe archivos de otra área cambia esa área sin delta y su spec envejece.
+- **V4 (menor) — `fnmatch` cruza carpetas.** `_calza()` usa `fnmatch`, donde `*` también calza con `/`: `mmorch/*.py` calza con `mmorch/sub/x.py` (verificado). Un área declarada con `*` cubre subcarpetas y puede solaparse con otra sin que el usuario lo note (Q8 corta).
+
+### Q3 revisada (por V1) — De dónde sale el área sin `files`
+- Asked: ¿exigir `--files` cuando hay áreas (A), rutas del texto de la tarea por regex (B), parámetro `area=` (C)?
+- Captured: el usuario elige **A con B como respaldo determinista**. El área sale de los `files` del llamador; la skill `/project` debe pasar `--files` (ticket 12 nuevo). Sin `files`, el área sale de las rutas que nombra el texto de la tarea, con un regex como `_need_files()`. Sin rutas, camino de hoy (Q4).
+- Captured: V1 -> el usuario pide "un ticket para actualizar o mejorar la skill /project". Creado: `.scratch/sdd-fase-2/issues/12-skill-project-pasa-files.md`.
+- Flags: V2, V3 y V4 pendientes (Q11, Q12, Q13).
+
+### Q11 (por V2) — Qué escribe el corte por dos áreas
+- Asked: ¿`division.md` determinista con cada área y sus archivos (A), corte sin archivo (B) o planner con solo la tarea (C)?
+- Captured: el usuario elige **A**. El corte escribe `docs/sdlc/division.md` agrupando los archivos por área con los mismos globs, sin LLM. No reusa `_proponer_division()` (pide spec y plan, que no existen antes de la etapa 1). El caso 5 del test (cero llamadas al LLM) queda consistente con el caso 4.
+- Flags: ninguno.
+
+### Q12 (por V3) — El plan sale del área
+- Asked: ¿plan limitado al área + archivos sin área (A), cortar después del plan (B) o segundo delta (C)?
+- Captured: el usuario elige **A**. `gate_plan_allowlist` rechaza archivos de otra área; la vuelta de reescritura de la etapa 3 ya existe.
+- Captured: el usuario agrega "que se cree un ticket para otra corrida". Aprobado con tres pasos: el gate anota cada archivo rechazado con su área en `docs/sdlc/division.md`; el run-log guarda la lista bajo una clave fija (`fuera_de_area`); la skill `/project` la lee al terminar.
+- Captured: el usuario no quiere depender de que un agente recuerde: "No puede hacerse inmediatamente? y que si despues hay un archivo nuevo en esa misma area se 'sume' al bd?". Claude verificó: `bd create` acepta `--labels` y `bd update` acepta `--append-notes`, así que un issue por área con label fija admite crear o sumar sin juicio.
+- Flags: en qué bd se crea el issue cuando el repo destino no es orchestration (Q12b).
+
+### Q12b — En qué bd va el issue de fuera de área
+- Asked: ¿bd del repo destino si tiene `.beads`, si no el de orchestration (A); siempre orchestration con `repo:<nombre>` (B); solo el del repo destino, si no md (C)?
+- Captured: el usuario elige **A**. Diseño aprobado: la etapa 3 (host) llama a `bd` en el momento; label fija `sdlc-fuera-de-area:<area>`; issue abierto con esa label -> `bd update --append-notes` con el archivo y la tarea; sin issue -> `bd create` con la label. `division.md` y run-log quedan como copia.
+- Flags: el usuario pregunta si cada proyecto propio debería usar beads -> pertenece al esfuerzo `orchestration-4u6` (sesión de repos, ticket 01 "qué costumbres entran").
+
+### Q13 (por V4) — Solapamiento sorpresa por `fnmatch`
+- Asked: ¿semántica aparte para áreas (A), prohibir `*` suelto (B) o mantener `_calza()` y chequear con `git ls-files` (C)?
+- Captured: el usuario elige **C**. Una sola semántica para techo y áreas. Un chequeo lista los archivos de cada área sobre `git ls-files` y nombra los archivos que caen en dos áreas, antes de correr. B descartada: en `fnmatch`, `**` y `*` calzan igual.
+- Flags: ninguno.

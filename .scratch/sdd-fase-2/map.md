@@ -45,7 +45,7 @@ Lo que el código hace hoy (leído en `sdlc/pipeline.py`, rama `mmorch/auto` en 
 
 <!-- una línea por ticket resuelto: gist + link -->
 
-- [Unidad de la spec viva](issues/01-unidad-de-la-spec-viva.md) — spec viva por área (`docs/specs/<area>/spec.md`), delta y plan en `changes/<slug>.md`; área = nombre y globs en `sdlc.toml`, derivada de los `files` del llamador; sin área sigue el camino de hoy; dos áreas cortan y proponen división.
+- [Unidad de la spec viva](issues/01-unidad-de-la-spec-viva.md) — spec viva por área (`docs/specs/<area>/spec.md`), delta y plan en `changes/<slug>.md`; área = nombre y globs en `sdlc.toml`, derivada de los `files` del llamador; sin `files`, rutas del texto de la tarea; sin área sigue el camino de hoy; dos áreas cortan con `division.md` determinista; el plan no sale del área y lo rechazado va a bd por label `sdlc-fuera-de-area:<area>`; chequeo de solapamiento con `git ls-files`.
 
 ## Not yet specified
 
@@ -64,6 +64,7 @@ Los tickets abiertos llevan las decisiones. Orden sugerido (frontera primero):
 | 09 | [Propiedades sin duplicar gate_mutacion](issues/09-propiedades-y-mutacion.md) | grilling | 08 |
 | 10 | [Lenguajes, dependencia y determinismo](issues/10-lenguajes-y-determinismo.md) | grilling | — |
 | 11 | [Corrida real de cierre](issues/11-corrida-real-de-cierre.md) | grilling | 03, 05, 06, 09, 10 |
+| 12 | [La skill /project pasa los archivos de la tarea](issues/12-skill-project-pasa-files.md) | task | 01 |
 
 Las dos capacidades comparten un solo punto: el ticket 08 decide si un requisito `MODIFIED` del delta recibe tests de propiedades. Fuera de ese punto, la rama de deltas (01 a 06) y la rama de propiedades (07 a 10) avanzan en paralelo.
 
