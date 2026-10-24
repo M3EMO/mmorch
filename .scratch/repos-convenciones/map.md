@@ -28,6 +28,7 @@ Cada repo propio del usuario converge a las convenciones vigentes con un comando
 | Ficha `docs/sdlc/features/<slug>.md` por feature | embudo wayfinder→SDLC (map de `sdlc-6-gates`, 2026-09-15) | No la crea; la escriben las sesiones a mano. |
 | `contract_version`: el pipeline rechaza un contrato que no entiende | ticket 11 de `sdlc-6-gates` | **Decidido y nunca implementado**: cero apariciones en `sdlc/`, `mmorch/` y `tests/`. |
 | `docs/sdlc/gates/` como parte obligatoria del contrato | ticket 11 de `sdlc-6-gates` | Nunca implementado; `init` no lo crea. |
+| `Dockerfile.sdlc` de la imagen de `contenedor` | bootstrap de `sdlc/builder.py` | No lo crea; el builder lo escribe en repos nuevos. Entra a la tabla por el ticket 09. |
 | `CLAUDE.md` índice corto, `AGENTS.md`, `docs/claude/`, `tests/README.md`, `.gitignore` con secretos, `bd init`, `sdlc init` | skill `new-project` (`~/.claude/skills/new-project/SKILL.md`) | Solo aplica a repos nuevos. |
 
 ### Estado por repo (sonda de solo lectura, 2026-10-23)
@@ -46,7 +47,7 @@ Repos con `sdlc.toml` fuera de la lista del pedido: `~/Proyectos/mf-moe`, `~/Pro
 
 ## Tickets
 
-Todos son grilling. Frontera sin bloqueo (2026-10-24): 09.
+Todos son grilling y están resueltos (2026-10-24). El paso siguiente es implementar `doctor`, `--upgrade`, `areas` y `propiedades` con los tests aprobados.
 
 - [01 Qué costumbres entran](issues/01-que-costumbres-entran.md)
 - [02 Qué repos entran y dónde vive la lista](issues/02-que-repos-entran.md)
@@ -70,6 +71,7 @@ Todos son grilling. Frontera sin bloqueo (2026-10-24): 09.
 - [05 Valores que dependen de la máquina](issues/05-valores-por-maquina.md) — sin rutas absolutas: `doctor` da desvío por letra de unidad, `/`, `~` o `\\` en cualquier texto de `sdlc.toml` (`shlex.split` en comandos); orchestration borra `suite` a mano; variables solo de respaldo; test de 11 puntos (2026-10-23).
 - [06 Specs y fichas con otra forma](issues/06-specs-con-otra-forma.md) — archivos sueltos de `docs/specs/` ignorados; specs planas de Adepor como áreas con `[spec_de_area]`; deltas siempre en `docs/specs/<area>/changes/`; la etapa 6 archiva la ficha (`<slug>-<sha>.ficha.md`, nombres comparados con `_slug()`); tests de 9 y 5 puntos (2026-10-23).
 - [08 Propuesta de áreas](issues/08-propuesta-de-areas.md) — comando aparte `areas` (propuesta en archivo + `--aprobar` con reglas del 07); paso 2 con `DEFAULT_GENERATOR` y JSON validado; archivo en dos áreas = desvío; aviso "sin áreas" solo con specs planas; área `raiz` por nombres exactos (`*` cruza carpetas en `_calza()`); test de 19 puntos (2026-10-24).
+- [09 Librería de tests de propiedades](issues/09-libreria-de-propiedades.md) — comando aparte `propiedades` con `--aprobar` (reglas del 07); detección por archivo de dependencias y respaldo en el entorno local; aviso, nunca desvío; gestor de cada repo (`uv add`, extra `dev`, `requirements.txt` con `==`, `npm i -D`); con `contenedor`, bloque con marcas en `Dockerfile.sdlc` y rebuild; test de 20 puntos (2026-10-24).
 
 ## Fog
 
