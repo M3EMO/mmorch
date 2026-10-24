@@ -27,6 +27,12 @@ Preguntas derivadas:
 - ¿La constitución default `GOAL.md` sirve fuera de orchestration? Ningún otro repo sondeado tiene `GOAL.md`; varios tienen `CLAUDE.md`.
 - ¿Los artefactos de corrida en `docs/sdlc/` (`spec.md`, `plan.md`, `run-log.json`, `suite.log`) son mesa de trabajo o historia? ChatBot y los prototipos F2 los tienen commiteados.
 - ¿Una costumbre nueva entra al contrato con un ticket propio, o la agrega cualquier commit a `sdlc/`?
+- ¿Entra la regla de formato de archivo como costumbre? La regla tiene tres casos:
+  - Un humano escribe la configuración de su propio proyecto, y el archivo usa TOML.
+  - Un programa le pasa datos a otro programa, y el archivo usa JSON con un JSON Schema.
+  - Una herramienta externa exige YAML (pre-commit, bd, GitHub Actions, frontmatter), y el archivo usa YAML.
+
+  El usuario prefirió JSON sobre YAML para contratos entre proyectos (chat del 2026-10-23). Falta decidir si la regla entra al oráculo. Con la regla adentro, el oráculo marca como desvío un YAML de configuración propia.
 
 ## Test de aceptación propuesto
 
