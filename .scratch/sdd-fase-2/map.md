@@ -48,6 +48,7 @@ Lo que el código hace hoy (leído en `sdlc/pipeline.py`, rama `mmorch/auto` en 
 - [Unidad de la spec viva](issues/01-unidad-de-la-spec-viva.md) — spec viva por área (`docs/specs/<area>/spec.md`), delta y plan en `changes/<slug>.md`; área = nombre y globs en `sdlc.toml`, derivada de los `files` del llamador; sin `files`, rutas del texto de la tarea; sin área sigue el camino de hoy; dos áreas cortan con `division.md` determinista; el plan no sale del área y lo rechazado va a bd por label `sdlc-fuera-de-area:<area>`; chequeo de solapamiento con `git ls-files`.
 - [Espacio de IDs entre features](issues/02-espacio-de-ids.md) — numeración local al área; `ADDED` toma el menor número libre; nunca se renumera; la trazabilidad cita `ruta::test`; los tests de un ID eliminado van a `docs/specs/<area>/removidos/` con su `README.md`, fuera de la suite.
 - [Spec base de un área sin spec](issues/03-spec-base-brownfield.md) — etapa 0-caracterizar solo para archivos que Contrato no nombra; Claude escribe `tests/test_sdlc_<area>_base_<slug>.py` (verde en HEAD, mata mutantes, `caracterizacion_min` opcional); una sola parada aprueba caracterización y aceptación; el writer escribe la spec base desde los tests aprobados.
+- [Formato del delta y su gate](issues/04-formato-y-gate-del-delta.md) — el writer escribe solo el delta (`MODIFIED` repite el requisito entero); el código fusiona y exige que el diff nombre exactamente los IDs del delta; `REMOVED` con motivo; sin `RENAMED`; 2b edita solo el delta; la etapa 1 recibe los próximos números libres.
 
 ## Not yet specified
 
