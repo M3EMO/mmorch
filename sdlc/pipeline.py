@@ -2089,6 +2089,7 @@ def _globs_iniciales(root: pathlib.Path) -> tuple[list[str], list[str]]:
     """Lenguajes (hasta 3, por cantidad de archivos) y techo `files` por directorio, como los escribe `init`."""
     conteo: dict[str, int] = {}
     dirs: dict[str, set[str]] = {}
+    sueltos: dict[str, set[str]] = {}  # en `_calza()` el `*` cruza carpetas: `*.py` abriria el techo a todo el repo
     ls = subprocess.run(["git", "ls-files"], cwd=root, capture_output=True, text=True, encoding="utf-8")
     # repo git: solo lo trackeado (Portfolio tenia _kimi_exp/ y _tmp_*.py sin trackear); si no, el arbol entero
     for q in ([root / x for x in ls.stdout.splitlines()] if ls.returncode == 0 and ls.stdout else root.rglob("*")):
@@ -2100,9 +2101,13 @@ def _globs_iniciales(root: pathlib.Path) -> tuple[list[str], list[str]]:
         ext = q.suffix.lstrip(".").lower()
         if ext in _LANG_HINT:
             conteo[ext] = conteo.get(ext, 0) + 1
-            dirs.setdefault(ext, set()).add(rel.parts[0] if len(rel.parts) > 1 else "")
+            if len(rel.parts) > 1:
+                dirs.setdefault(ext, set()).add(rel.parts[0])
+            else:
+                sueltos.setdefault(ext, set()).add(rel.name)
     exts = [e for e, _ in sorted(conteo.items(), key=lambda kv: -kv[1])][:3] or ["py"]
-    return exts, sorted({(f"{d}/**/*.{e}" if d else f"*.{e}") for e in exts for d in dirs.get(e, {""})})
+    globs = {f"{d}/**/*.{e}" for e in exts for d in dirs.get(e, set())} | {f for e in exts for f in sueltos.get(e, set())}
+    return exts, sorted(globs) or [f"*.{exts[0]}"]  # repo sin codigo: el techo nace abierto hasta el primer archivo
 
 
 def main(argv: list[str] | None = None) -> int:

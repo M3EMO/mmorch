@@ -750,3 +750,13 @@ def test_libreria_de_propiedades(env):
     with pytest.raises(C.Rechazo, match="esperada main"):
         C.propiedades(str(rb), aprobar=True, run=Fake())
     assert os.path.exists(rb / "requirements.txt")
+
+
+def test_init_techo_sin_comodin_en_la_raiz(env):
+    """`init` lista por nombre exacto los archivos sueltos de la raiz: `*.py` calza con todo el repo en `_calza()`."""
+    repo = _repo(env / "techo", {"motor.py": "", "util.py": "", "pkg/a.py": "", "tests/test_x.py": "", "README.md": ""})
+    P.init(str(repo))
+    files = C.tomllib.loads((repo / "sdlc.toml").read_text(encoding="utf-8"))["files"]
+    assert files == ["motor.py", "pkg/**/*.py", "util.py"]
+    assert not any(P._calza("tests/test_x.py", g) for g in files)
+    assert all(any(P._calza(f, g) for g in files) for f in ("motor.py", "pkg/a.py", "util.py"))
