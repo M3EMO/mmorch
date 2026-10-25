@@ -45,7 +45,7 @@ destilada (un turno destilado pierde "que falta probar").
 - Bulk / verify / checkers: mmorch, no el otro agente.
 - Nombres de tools: `docs/generated/catalog.md`.
 
-<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
+<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:1105d646 -->
 ## Beads Issue Tracker
 
 This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
@@ -53,31 +53,51 @@ This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full 
 ### Quick Reference
 
 ```bash
-bd ready # Find available work
-bd show <id> # View issue details
-bd update <id> --claim # Claim work
-bd close <id> # Complete work
+bd ready              # Find available work
+bd show <id>          # View issue details
+bd update <id> --claim  # Claim work
+bd close <id>         # Complete work
 ```
 
 ### Rules
 
-- Use `bd` for durable issue/backlog tracking (cross-session). TodoWrite/TaskCreate
- are fine for ephemeral in-session plans (e.g. the plan-and-verify skill) — different
- layer, they do NOT compete with bd.
-- Run `bd prime` for command reference.
-- Memory: the global auto-memory (MEMORY.md) and mmorch's own semantic memory
- (`mmorch_remember`/`mmorch_recall`) are the knowledge stores. Do NOT route knowledge
- to `bd remember` — it would be a third competing system that fights MEMORY.md.
+- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
+- Run `bd prime` for detailed command reference and session close protocol
+- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
+
+**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/core-concepts/sync-concepts.md for details and anti-patterns.
+
+## Agent Context Profiles
+
+The managed Beads block is task-tracking guidance, not permission to override repository, user, or orchestrator instructions.
+
+- **Conservative (default)**: Use `bd` for task tracking. Do not run git commits, git pushes, or Dolt remote sync unless explicitly asked. At handoff, report changed files, validation, and suggested next commands.
+- **Minimal**: Keep tool instruction files as pointers to `bd prime`; use the same conservative git policy unless active instructions say otherwise.
+- **Team-maintainer**: Only when the repository explicitly opts in, agents may close beads, run quality gates, commit, and push as part of session close. A current "do not commit" or "do not push" instruction still wins.
 
 ## Session Completion
 
-When ending a session: file follow-up issues, run quality gates if code changed,
-update issue status, hand off context.
+This protocol applies when ending a Beads implementation workflow. It is subordinate to explicit user, repository, and orchestrator instructions.
 
-**Push = ASK tier (user guardrail — overrides any "mandatory push" default).** Never
-auto-push. Propose the commit/push/PR and wait for the user's explicit OK. Work
-committed locally and surfaced to the user is a valid end state — do NOT treat work as
-"incomplete until pushed".
+1. **File issues for remaining work** - Create beads for anything that needs follow-up
+2. **Run quality gates** (if code changed) - Tests, linters, builds
+3. **Update issue status** - Close finished work, update in-progress items
+4. **Handle git/sync by active profile**:
+   ```bash
+   # Conservative/minimal/default: report status and proposed commands; wait for approval.
+   git status
+
+   # Team-maintainer opt-in only, unless current instructions forbid it:
+   git pull --rebase
+   git push
+   git status
+   ```
+5. **Hand off** - Summarize changes, validation, issue status, and any blocked sync/commit/push step
+
+**Critical rules:**
+- Explicit user or orchestrator instructions override this Beads block.
+- Do not commit or push without clear authority from the active profile or the current user request.
+- If a required sync or push is blocked, stop and report the exact command and error.
 <!-- END BEADS INTEGRATION -->
 
 ## SDLC (pipeline de 6 etapas)
@@ -90,3 +110,34 @@ mutacion solo sobre las lineas cambiadas (`mutation_min`; sin la clave, observa)
 La revision de Claude bloquea dejando un test, que tambien se corre en repos que no son Python. `reviewer_cmd` cambia el
 agente que revisa y corrige (prompt por stdin, `{modo}` = plan|edit). El juez visual de sprites solo observa hasta tener
 50 assets etiquetados con kappa 0.6. El veredicto humano del test de aceptacion no se registra en nombre del usuario.
+
+<!-- BEGIN SDLC bd-propias v:1 hash:39a2efef -->
+## Reglas propias de bd
+
+- Estas reglas mandan sobre el bloque de bd.
+- TodoWrite y TaskCreate valen para planes efímeros de una sesión; bd guarda el backlog durable.
+- La memoria vive en MEMORY.md y en la memoria semántica de mmorch; nunca en `bd remember`.
+- Push = ASK: proponé el commit, el push o el PR y esperá el OK explícito del usuario.
+- Un trabajo commiteado localmente y reportado al usuario es un final válido.
+<!-- END SDLC bd-propias -->
+
+## Reglas propias de bd — reintegradas del bloque ca08a54f (2026-10-23)
+
+- Use `bd` for durable issue/backlog tracking (cross-session). TodoWrite/TaskCreate
+  are fine for ephemeral in-session plans (e.g. the plan-and-verify skill) — different
+  layer, they do NOT compete with bd.
+- **Particion bd vs `.scratch/` (regla unica):** bd = backlog durable cross-session;
+  `.scratch/<effort>/` = mapas wayfinder + tickets DE ese esfuerzo (vida = el esfuerzo).
+  Un item de `.scratch/` que sobrevive a su esfuerzo se PROMUEVE a bd (un issue con
+  puntero al file) — nunca vive en los dos lados a la vez. Detalle operativo:
+  `docs/agents/issue-tracker.md`.
+- Run `bd prime` for command reference.
+- Memory: the global auto-memory (MEMORY.md) and mmorch's own semantic memory
+  (its remember/recall tools) are the knowledge stores. Do NOT route knowledge
+  to `bd remember` — it would be a third competing system that fights MEMORY.md.
+When ending a session: file follow-up issues, run quality gates if code changed,
+update issue status, hand off context.
+**Push = ASK tier (user guardrail — overrides any "mandatory push" default).** Never
+auto-push. Propose the commit/push/PR and wait for the user's explicit OK. Work
+committed locally and surfaced to the user is a valid end state — do NOT treat work as
+"incomplete until pushed".
