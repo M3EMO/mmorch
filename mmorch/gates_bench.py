@@ -132,6 +132,70 @@ def _casos_spec_review(rng: random.Random, n: int) -> list[Caso]:
     return casos
 
 
+# --------------------------------------------------------------------------- trazabilidad-plan
+
+_DIRS = ["src/escena", "src/servicio", "pkg", "mmorch", "app/core"]
+_EXT = ["py", "ts", "java"]
+
+
+def _render_traza(rng: random.Random, asignado: dict[str, list[int]], estilo: str) -> str:
+    """Seccion '## Archivos' con el formato que pide plan() o una variante que el gate acepta a proposito."""
+    def ids(ns: list[int]) -> str:
+        if estilo == "rango" and len(ns) > 1:
+            return f"R{ns[0]}{rng.choice(['–', '-'])}R{ns[-1]}"
+        return ", ".join(f"R{n}" for n in ns)
+    if estilo == "tabla":
+        filas = [f"| `{f}` | {rng.choice(['nuevo', 'ampliar'])} | {_nombre(rng)} ({ids(ns)}). |" for f, ns in asignado.items()]
+        return "\n| Archivo | Accion | Que aporta |\n|---|---|---|\n" + "\n".join(filas) + "\n"
+    nombre = (lambda f: f.rsplit("/", 1)[-1]) if estilo == "nombre_suelto" else (lambda f: f)
+    return "\n" + "\n".join(f"- `{nombre(f)}` [{ids(ns)}]" + rng.choice(["", " [P]"]) for f, ns in asignado.items()) + "\n"
+
+
+def _casos_traza_plan(rng: random.Random, n: int) -> list[Caso]:
+    """Verde = cada R<n> de la spec esta asignado a un archivo y cada archivo cita un R<n> de la spec. El contrato es el
+    pedido de plan(): "Cada item cita los IDs R<n> de la spec que cubre. Todo R<n> de la spec aparece en algun item."
+    Variantes verdes = las que el gate acepta a proposito (tabla de SSB F7a, rangos, nombre sin carpeta de F4b).
+    Rojo = un R<n> sin archivo, un archivo sin R<n>, un R<n> que solo aparece en prosa fuera de los items, o un
+    archivo que solo cita un ID que la spec no tiene."""
+    casos: list[Caso] = []
+    verdes, rojos = ["lista", "tabla", "rango", "nombre_suelto"], ["id_huerfano", "archivo_sin_id", "id_en_prosa", "id_inexistente"]
+    for k in range(n):
+        rojo = bool(k % 2)
+        tipo = rng.choice(rojos if rojo else verdes)
+        n_r, n_f = rng.randint(2, 8), rng.randint(1, 4)
+        files = list(dict.fromkeys(f"{rng.choice(_DIRS)}/{_nombre(rng)}.{rng.choice(_EXT)}" for _ in range(n_f)))
+        cortes = sorted(rng.sample(range(2, n_r + 1), min(len(files), n_r) - 1))  # cada bloque con >= 1 R
+        bloques = [list(range(a, b)) for a, b in zip([1, *cortes], [*cortes, n_r + 1], strict=True)]  # R contiguos por archivo
+        asignado = dict(zip(files, bloques, strict=False))  # con mas archivos que R, sobran archivos
+        files = list(asignado)
+        spec_ids = list(range(1, n_r + 1))
+        extra = ""
+        if tipo in ("id_huerfano", "id_en_prosa"):
+            spec_ids.append(n_r + 1)
+            if tipo == "id_en_prosa":
+                extra = f"\nNota: R{n_r + 1} queda para una feature futura.\n"
+        block = _render_traza(rng, asignado, "lista" if rojo else tipo) + extra
+        if tipo in ("archivo_sin_id", "id_inexistente"):
+            f = f"{rng.choice(_DIRS)}/{_nombre(rng)}_extra.{rng.choice(_EXT)}"
+            files.append(f)
+            block += f"- `{f}`" + (" [R99]" if tipo == "id_inexistente" else ": helper comun") + "\n"
+        spec = "## Requisitos\n" + "".join(f"- R{i}: {_nombre(rng)}.\n" for i in spec_ids)
+        casos.append({"args": (spec, block, files), "rojo": rojo, "origen": "generado", "grupo": tipo})
+    return casos
+
+
+_F7A = """
+| Archivo | Acción | Qué aporta |
+|---|---|---|
+| `src/escena/tipos.ts` | ampliar | `TimelineApp.cameras?` y `ClaveCamaraApp` (R1). |
+| `src/escena/construir.ts` | ampliar | `timeline.cameras[id]` desde `camara.claves` (R1). Sin cambios para F1 (`src/escena/png.ts`). |
+| `src/servicio/tipos.ts` | nuevo | `EscenaSpec`, `PlanoSpec`, `Look`, `Reporte` (R2). |
+| `src/servicio/escena.ts` | nuevo | `construirEscena`, `editarEscena`, `leerEscena`, `verificarPlano` (R2–R10). |
+| `tests/` | nuevo | Los tests de la tabla de Trazabilidad. |
+
+No se escribe Python: TypeScript ejecutado por Node 24 sin build.
+"""
+
 _PLUGINS = '''"""Registro de plugins."""
 from __future__ import annotations
 import importlib
@@ -162,12 +226,25 @@ INCIDENTES: dict[str, list[Caso]] = {
         {"args": ("## Clarificaciones\n- P1: ¿x? | R: si | afecta: Contrato\n",), "rojo": False, "origen": "D11-diag",
          "grupo": None, "reconstruido": True},
     ],
+    "trazabilidad-plan": [
+        # SSB F7a (2026-09-28): plan en tabla con un rango R2–R10; el gate de entonces decia "plan omite" los 4 archivos.
+        {"args": ("## Requisitos\n" + " ".join(f"R{i}" for i in range(1, 11)) + "\n", _F7A,
+                  ["src/escena/tipos.ts", "src/escena/construir.ts", "src/servicio/tipos.ts", "src/servicio/escena.ts"]),
+         "rojo": False, "origen": "SSB F7a", "grupo": None, "reconstruido": True},
+        # SSB F4b (2026-09-30): la nota de un archivo lo nombra sin carpeta.
+        {"args": ("## Requisitos\nR1 R2 R3\n", "\n- `src/encuadre/resolver.ts` [R1, R2, R3]\n\nNotas por archivo:\n\n"
+                  "- `resolver.ts`: único módulo del feature. Importa `Vec3` de `../escena/tipos.ts`.\n",
+                  ["src/encuadre/resolver.ts"]),
+         "rojo": False, "origen": "SSB F4b", "grupo": None, "reconstruido": True},
+    ],
 }
 
 CHEQUEOS: dict[str, Callable[..., tuple[bool, str]]] = {"sin-clones": gates.sin_clones,
-                                                         "spec-review": gates.clarificaciones}
+                                                         "spec-review": gates.clarificaciones,
+                                                         "trazabilidad-plan": gates.traza_plan}
 GENERADORES: dict[str, Callable[[random.Random, int], list[Caso]]] = {"sin-clones": _casos_sin_clones,
-                                                                    "spec-review": _casos_spec_review}
+                                                                    "spec-review": _casos_spec_review,
+                                                                    "trazabilidad-plan": _casos_traza_plan}
 
 
 def medir(gate: str, n: int = 400, seed: int = 42) -> dict[str, Any]:

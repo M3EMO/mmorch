@@ -139,3 +139,12 @@ Los demas ejecutan comandos con `sh` y leen el worktree `WT`.
 - Por grupo: canonica 1.00, cero 1.00, espacios 0.00, negrita 0.00, numerada 0.00, respuesta_tbd 0.00, respuesta_vacia 0.14, sin_seccion 1.00, seccion_vacia 1.00, seis_preguntas 1.00.
 - Hallazgo: una pregunta sin respuesta pasa si otra pregunta de la seccion esta bien escrita.
 - Q10 resuelta: el usuario eligio (c). El bench excluye las variantes de formato (espacios, negrita, numerada) de la metrica principal y publica su acierto aparte, como costo de reintento. Con (c): n=287, sensibilidad 0.615, especificidad 1.00, acc. balanceada 0.808 (corrige un 0.86 que di sin calcular).
+
+## Tercer gate: trazabilidad-plan (2026-10-24)
+- `traza_plan` y `filas_tabla` pasaron a `mmorch/gates.py`; `_plan_files` de pipeline usa `filas_tabla`.
+- Contrato de las etiquetas: el pedido de `plan()` ("cada item cita los IDs R<n> de la spec; todo R<n> aparece en algun item").
+- Verdes: lista canonica, tabla (SSB F7a), rango, nombre sin carpeta (F4b); el gate los acepta a proposito, sin casos aparte.
+- Rojos: ID huerfano, archivo sin ID, ID solo en prosa, ID que la spec no tiene.
+- Resultado (seed 42, n=402): sensibilidad 0.52, especificidad 1.00, acc. balanceada 0.76. ID en prosa 0.00, ID inexistente 0.00.
+- Bd `orchestration-1tj` abierto por D9.
+- Un bug del generador (bloque vacio de IDs) daba especificidad 0.59; se corrigio y un test lo cubre.

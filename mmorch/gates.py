@@ -37,3 +37,25 @@ def clarificaciones(spec_md: str) -> tuple[bool, str]:
     if not 1 <= len(qs) <= 5:
         return False, f"{len(qs)} preguntas validas (esperado 1..5)"
     return True, f"{len(qs)} preguntas respondidas"
+
+
+def filas_tabla(block: str) -> list[str]:
+    """Filas de una tabla markdown (sin los `|` de los bordes)."""
+    return re.findall(r"(?m)^\s*\|(.*)\|\s*$", block)
+
+
+def traza_plan(spec_md: str, plan_block: str, files: list[str]) -> tuple[bool, str]:
+    """Trazabilidad lado plan: cada R<n> de la spec aparece en el plan; cada archivo cita >= 1 R<n>. Un item es una
+    linea de lista o una fila de tabla; un rango `R2–R10` cita R2..R10 (SSB F7a)."""
+    ids = set(re.findall(r"\bR\d+\b", spec_md))
+    plan_block = re.sub(r"\bR(\d+)\s*[–-]\s*R(\d+)\b",
+                        lambda m: ", ".join(f"R{i}" for i in range(int(m[1]), int(m[2]) + 1)), plan_block)
+    huerfanos = sorted(i for i in ids if not re.search(rf"\b{i}\b", plan_block))
+    items = re.findall(r"(?m)^\s*[-*]\s*(.*)$", plan_block) + filas_tabla(plan_block)
+
+    def nombra(it: str, f: str) -> bool:  # la ruta, o su nombre suelto si el plan lo escribio sin carpeta (F4b)
+        return f in it or bool(re.search(r"(?<![\w/.-])" + re.escape(f.rsplit("/", 1)[-1]) + r"(?![\w.-])", it))
+    sin_id = [f for f in files if not any(nombra(it, f) and re.search(r"\bR\d+\b", it) for it in items)]
+    if huerfanos or sin_id:
+        return False, f"IDs sin unidad: {huerfanos}; archivos sin ID: {sin_id}"
+    return True, "ok"

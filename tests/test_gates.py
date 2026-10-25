@@ -66,3 +66,24 @@ def test_bench_los_casos_aparte_no_entran_a_la_metrica_principal():
     assert r["aparte"] == ["espacios", "negrita", "numerada"]
     assert r["n"] == r["tp"] + r["fn"] + r["tn"] + r["fp"] < 60 + r["incidentes"]
     assert set(r["aparte"]) <= set(r["acierto_por_grupo"])
+
+
+def test_traza_plan_acepta_rango_y_nombre_sin_carpeta():
+    block = "- `pkg/a.py` [R1–R3]\n\nNotas:\n- `b.py`: usa R4\n"
+    assert gates.traza_plan("R1 R2 R3 R4", block, ["pkg/a.py", "pkg/b.py"]) == (True, "ok")
+
+
+def test_traza_plan_rechaza_id_huerfano_y_archivo_sin_id():
+    ok, detalle = gates.traza_plan("R1 R2", "- `pkg/a.py` [R1]\n- `pkg/b.py`\n", ["pkg/a.py", "pkg/b.py"])
+    assert not ok and detalle == "IDs sin unidad: ['R2']; archivos sin ID: ['pkg/b.py']"
+
+
+def test_filas_tabla_quita_los_bordes():
+    assert gates.filas_tabla("| a | b |\n|---|---|\ntexto\n") == [" a | b ", "---|---"]
+
+
+def test_bench_traza_plan_ningun_archivo_verde_queda_sin_ids():
+    import random
+    for c in gates_bench._casos_traza_plan(random.Random(5), 80):
+        if not c["rojo"]:
+            assert "[]" not in c["args"][1] and "()" not in c["args"][1]
