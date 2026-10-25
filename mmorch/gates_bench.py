@@ -196,6 +196,50 @@ _F7A = """
 No se escribe Python: TypeScript ejecutado por Node 24 sin build.
 """
 
+# --------------------------------------------------------------------------- trazabilidad-spec
+
+
+def _casos_traza_spec(rng: random.Random, n: int) -> list[Caso]:
+    """Contrato = spec-template.md: "Cada R<n> cita al menos un test de aceptacion por su nombre exacto. Un test puede
+    cubrir varios IDs. Un ID sin test es un fallo del gate." Sin tests nombrados ni archivos de aceptacion, accept_cmd
+    es el oraculo y alcanzan los IDs (verde). Rojo = sin IDs, un ID sin fila, una fila que cita un test que no existe,
+    una fila con la celda vacia, o la tabla ausente con tests nombrados."""
+    casos: list[Caso] = []
+    verdes = ["canonica", "varios_tests", "test_comun", "backticks", "sin_tests_nombrados"]
+    rojos = ["sin_ids", "id_sin_fila", "test_inexistente", "celda_vacia", "sin_tabla"]
+    for k in range(n):
+        rojo = bool(k % 2)
+        tipo = rng.choice(rojos if rojo else verdes)
+        n_r = rng.randint(1, 8)
+        ids = list(range(1, n_r + 1))
+        tests = {i: [f"test_R{i}_{_nombre(rng)}"] for i in ids}
+        if tipo == "varios_tests":
+            for i in ids:
+                tests[i].append(f"test_R{i}_{_nombre(rng)}_borde")
+        if tipo == "test_comun" and n_r > 1:
+            tests[2] = tests[1]
+        nombres = {x for ts in tests.values() for x in ts}
+        celda = (lambda ts: ", ".join(f"`{x}`" for x in ts)) if tipo == "backticks" else (lambda ts: ", ".join(ts))
+        filas = {i: f"| R{i} | {celda(tests[i])} |" for i in ids}
+        malo = rng.choice(ids)
+        if tipo == "id_sin_fila":
+            del filas[malo]
+        elif tipo == "test_inexistente":
+            filas[malo] = f"| R{malo} | test_R{malo}_{_nombre(rng)}_viejo |"
+        elif tipo == "celda_vacia":
+            filas[malo] = f"| R{malo} |  |"
+        if tipo == "sin_ids":
+            req = "".join(f"- {_nombre(rng)}: entrada -> salida.\n" for _ in ids)
+        else:
+            req = "".join(f"- R{i}: {_nombre(rng)}: entrada -> salida.\n" for i in ids)
+        tabla = "" if tipo in ("sin_tabla", "sin_ids") else (
+            "## Trazabilidad\n\n| ID | tests |\n|---|---|\n" + "\n".join(filas.values()) + "\n\n")
+        spec = f"# Spec\n\n## Requisitos\n\n{req}\n{tabla}" + rng.choice(["", "## Casos borde\n\n- vacio.\n"])
+        hay = tipo != "sin_tests_nombrados"
+        casos.append({"args": (spec, nombres if hay else set(), hay), "rojo": rojo, "origen": "generado", "grupo": tipo})
+    return casos
+
+
 _PLUGINS = '''"""Registro de plugins."""
 from __future__ import annotations
 import importlib
@@ -241,10 +285,12 @@ INCIDENTES: dict[str, list[Caso]] = {
 
 CHEQUEOS: dict[str, Callable[..., tuple[bool, str]]] = {"sin-clones": gates.sin_clones,
                                                          "spec-review": gates.clarificaciones,
-                                                         "trazabilidad-plan": gates.traza_plan}
+                                                         "trazabilidad-plan": gates.traza_plan,
+                                                         "trazabilidad-spec": gates.traza_spec}
 GENERADORES: dict[str, Callable[[random.Random, int], list[Caso]]] = {"sin-clones": _casos_sin_clones,
                                                                     "spec-review": _casos_spec_review,
-                                                                    "trazabilidad-plan": _casos_traza_plan}
+                                                                    "trazabilidad-plan": _casos_traza_plan,
+                                                                    "trazabilidad-spec": _casos_traza_spec}
 
 
 def medir(gate: str, n: int = 400, seed: int = 42) -> dict[str, Any]:

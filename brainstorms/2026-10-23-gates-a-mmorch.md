@@ -148,3 +148,9 @@ Los demas ejecutan comandos con `sh` y leen el worktree `WT`.
 - Resultado (seed 42, n=402): sensibilidad 0.52, especificidad 1.00, acc. balanceada 0.76. ID en prosa 0.00, ID inexistente 0.00.
 - Bd `orchestration-1tj` abierto por D9.
 - Un bug del generador (bloque vacio de IDs) daba especificidad 0.59; se corrigio y un test lo cubre.
+
+## Cuarto gate: trazabilidad-spec (2026-10-24)
+- `traza_spec(spec_md, tests, hay_aceptacion)` paso a `mmorch/gates.py`; pipeline pasa `bool(TASK.accept_files)`.
+- Contrato de las etiquetas: `sdlc/templates/spec-template.md` (cada R<n> cita un test existente por nombre).
+- Resultado (seed 42, n=400): 1.00 en todos los grupos. Sin incidente real registrado; el numero cubre solo las reglas del template.
+- El usuario pidio "trazabilidad-spec y toml"; leo "toml" como `plan-allowlist` (lee el techo de `sdlc.toml`) -> confirmar.

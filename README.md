@@ -259,6 +259,7 @@ Re-run with `python -m mmorch.gates_bench --seed 42 --n 400`; rows go to `logs/a
 | `sin-clones` (threshold 0.8) | 401 | 0.706 | 1.00 | 0.853 | copy 0-10%: 1.00 · 10-20%: 0.97 · 20-30%: 0.02 |
 | `spec-review` | 287 | 0.615 | 1.00 | 0.807 | `TBD` answer: 0.00 · one empty answer: 0.14 · missing/empty/6 questions: 1.00 |
 | `trazabilidad-plan` | 402 | 0.520 | 1.00 | 0.760 | ID only in prose: 0.00 · ID not in spec: 0.00 · orphan ID / file without ID: 1.00 |
+| `trazabilidad-spec` | 400 | 1.00 | 1.00 | 1.00 | every group 1.00 (no real incident on record) |
 
 The 0.8 line-overlap threshold misses almost every copy with 20-30% of its lines edited. The green
 generator shares only imports and headers, so a 1.00 specificity is an upper bound until harder green
@@ -273,10 +274,13 @@ costs a retry, not a wrong result.
 item, so an ID mentioned only in a prose note passes as covered and a file citing only `R99` (not in the spec)
 passes as traced. Every accepted variant (tables, `R2–R5` ranges, bare file names) passes every time.
 
+`trazabilidad-spec` scores 1.00 on every case the spec template describes (missing row, empty cell,
+unknown test, no table, no IDs). That covers the template's own rules only; no failure of this gate is on record.
+
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **121 módulos · 44 MCP tools (15 expuestas por default) · 1127 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
+_Auto-generado por `mmorch.docgen`._ **121 módulos · 44 MCP tools (15 expuestas por default) · 1129 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->

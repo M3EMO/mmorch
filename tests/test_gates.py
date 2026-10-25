@@ -87,3 +87,14 @@ def test_bench_traza_plan_ningun_archivo_verde_queda_sin_ids():
     for c in gates_bench._casos_traza_plan(random.Random(5), 80):
         if not c["rojo"]:
             assert "[]" not in c["args"][1] and "()" not in c["args"][1]
+
+
+def test_traza_spec_exige_tabla_con_tests_existentes():
+    spec = "## Requisitos\n- R1: a.\n- R2: b.\n\n## Trazabilidad\n\n| ID | tests |\n|---|---|\n| R1 | test_a |\n| R2 | `test_a`, test_b |\n"
+    assert gates.traza_spec(spec, {"test_a", "test_b"}, True) == (True, "2 IDs cubiertos")
+    assert gates.traza_spec(spec, {"test_a"}, True) == (False, "sin test: []; tests inexistentes: ['test_b']")
+
+
+def test_traza_spec_sin_tests_nombrados_alcanzan_los_ids():
+    assert gates.traza_spec("- R1: a.\n", set(), False)[0]
+    assert gates.traza_spec("- sin ids\n", set(), False) == (False, "sin IDs R<n>")

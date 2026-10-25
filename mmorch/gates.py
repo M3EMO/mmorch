@@ -59,3 +59,21 @@ def traza_plan(spec_md: str, plan_block: str, files: list[str]) -> tuple[bool, s
     if huerfanos or sin_id:
         return False, f"IDs sin unidad: {huerfanos}; archivos sin ID: {sin_id}"
     return True, "ok"
+
+
+def traza_spec(spec_md: str, tests: set[str], hay_aceptacion: bool) -> tuple[bool, str]:
+    """Trazabilidad lado spec (ticket 02): IDs R<n> y tabla que cita tests existentes por nombre. Sin tests nombrados
+    ni archivos de aceptacion, el oraculo es accept_cmd y alcanzan los IDs."""
+    ids = set(re.findall(r"\bR\d+\b", spec_md))
+    if not ids:
+        return False, "sin IDs R<n>"
+    if not tests and not hay_aceptacion:
+        return True, f"{len(ids)} IDs; sin tests nombrados (accept_cmd es el oraculo)"
+    m = re.search(r"## Trazabilidad\b(.*?)(?:\n## |\Z)", spec_md, re.S)
+    rows = re.findall(r"(?m)^\|\s*(R\d+)\s*\|([^|]*)\|", m.group(1) if m else "")
+    cov = {rid: set(re.findall(r"test_\w+", cell)) for rid, cell in rows}
+    sin_test = sorted(i for i in ids if not cov.get(i))
+    inexist = sorted(t for ts in cov.values() for t in ts if t not in tests)
+    if sin_test or inexist:
+        return False, f"sin test: {sin_test}; tests inexistentes: {inexist}"
+    return True, f"{len(ids)} IDs cubiertos"

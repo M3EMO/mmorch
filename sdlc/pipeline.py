@@ -27,7 +27,7 @@ import time
 import types
 from typing import Any
 
-from mmorch.gates import clarificaciones, filas_tabla, sin_clones, traza_plan
+from mmorch.gates import clarificaciones, filas_tabla, sin_clones, traza_plan, traza_spec
 from mmorch.paths import logs_dir
 from mmorch.providers import call, register_run_tracker, unregister_run_tracker
 
@@ -900,20 +900,8 @@ def _test_names() -> set[str]:
 
 
 def gate_traza_spec(spec_md: str, tests: set[str]) -> tuple[bool, str]:
-    """Trazabilidad lado spec (ticket 02): IDs R<n> y tabla que cita tests existentes por nombre."""
-    ids = set(re.findall(r"\bR\d+\b", spec_md))
-    if not ids:
-        return rec_gate("trazabilidad-spec", False, "sin IDs R<n>")
-    if not tests and not getattr(TASK, "accept_files", None):
-        return rec_gate("trazabilidad-spec", True, f"{len(ids)} IDs; sin tests nombrados (accept_cmd es el oraculo)")
-    m = re.search(r"## Trazabilidad\b(.*?)(?:\n## |\Z)", spec_md, re.S)
-    rows = re.findall(r"(?m)^\|\s*(R\d+)\s*\|([^|]*)\|", m.group(1) if m else "")
-    cov = {rid: set(re.findall(r"test_\w+", cell)) for rid, cell in rows}
-    sin_test = sorted(i for i in ids if not cov.get(i))
-    inexist = sorted(t for ts in cov.values() for t in ts if t not in tests)
-    if sin_test or inexist:
-        return rec_gate("trazabilidad-spec", False, f"sin test: {sin_test}; tests inexistentes: {inexist}")
-    return rec_gate("trazabilidad-spec", True, f"{len(ids)} IDs cubiertos")
+    """Chequeo en mmorch.gates.traza_spec (orchestration-bpn); aca solo se registra."""
+    return rec_gate("trazabilidad-spec", *traza_spec(spec_md, tests, bool(getattr(TASK, "accept_files", None))))
 
 
 def gate_traza_plan(spec_md: str, plan_block: str, files: list[str]) -> tuple[bool, str]:
