@@ -154,3 +154,9 @@ Los demas ejecutan comandos con `sh` y leen el worktree `WT`.
 - Contrato de las etiquetas: `sdlc/templates/spec-template.md` (cada R<n> cita un test existente por nombre).
 - Resultado (seed 42, n=400): 1.00 en todos los grupos. Sin incidente real registrado; el numero cubre solo las reglas del template.
 - El usuario pidio "trazabilidad-spec y toml"; leo "toml" como `plan-allowlist` (lee el techo de `sdlc.toml`) -> confirmar.
+
+## Quinto gate: plan-allowlist (2026-10-24)
+- `plan_allowlist`, `calza` y `en_techo` pasaron a `mmorch/gates.py`; pipeline conserva `_calza` (alias) y `_en_techo` (delega).
+- Contrato de las etiquetas: el pedido de `plan()` y el techo de `sdlc.toml`.
+- Resultado (seed 42, n=400): sensibilidad 0.815, especificidad 1.00, acc. balanceada 0.907.
+- Hallazgo de seguridad: `pkg/../../x.py` calza con `pkg/**/*.py` (fnmatch deja que * cruce /). `_plan_files` conserva `..` y `_write` no verifica el worktree. Bd `orchestration-5s7` (P2).

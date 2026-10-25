@@ -27,7 +27,8 @@ import time
 import types
 from typing import Any
 
-from mmorch.gates import clarificaciones, filas_tabla, sin_clones, traza_plan, traza_spec
+from mmorch.gates import calza as _calza
+from mmorch.gates import clarificaciones, en_techo, filas_tabla, plan_allowlist, sin_clones, traza_plan, traza_spec
 from mmorch.paths import logs_dir
 from mmorch.providers import call, register_run_tracker, unregister_run_tracker
 
@@ -803,15 +804,8 @@ def _techo() -> list[str]:
     return list((FEAT or {}).get("techo") or [])
 
 
-def _calza(f: str, pat: str) -> bool:
-    """fnmatch con `**/` opcional: `pkg/**/*.py` incluye `pkg/a.py` (fnmatch solo exigia un directorio intermedio)."""
-    import fnmatch
-    return fnmatch.fnmatch(f, pat) or fnmatch.fnmatch(f, pat.replace("**/", ""))
-
-
 def _en_techo(f: str) -> bool:
-    t = _techo()
-    return f in _need_files() or not t or any(_calza(f, pat) for pat in t)  # sin techo (bench, FEATURES viejas): todo vale
+    return en_techo(f, _need_files(), _techo())
 
 
 def _tamano(files: list[str]) -> dict:
@@ -878,19 +872,8 @@ def gate_tamano(files: list[str]) -> tuple[bool, str]:
 
 
 def gate_plan_allowlist(plan_md: str, files: list[str]) -> tuple[bool, str]:
-    m = re.search(r"## Archivos\b(.*?)(?:\n## |\Z)", plan_md, re.S | re.I)
-    block = m.group(1) if m else plan_md
-    # un cableo puede listar tests/test_capas.py (esta en FEAT["files"]); cualquier otro tests/ sigue prohibido
-    ajenos = [t for t in re.findall(r"(?im)^\s*[-*]+\s*`?(" + re.escape(TESTS_PREFIX) + r"[\w/.-]*)", block) if t not in _need_files()]
-    if ajenos:
-        return rec_gate("plan-allowlist", False, f"plan lista {ajenos} como archivo a escribir")
-    need = [f for f in _need_files() if f not in files]
-    if need:
-        return rec_gate("plan-allowlist", False, f"plan omite {need}")
-    fuera = [f for f in files if not _en_techo(f)]
-    if fuera:
-        return rec_gate("plan-allowlist", False, f"plan lista archivos fuera del techo de sdlc.toml: {fuera}")
-    return rec_gate("plan-allowlist", True, f"{files}")
+    """Chequeo en mmorch.gates.plan_allowlist (orchestration-bpn); aca solo se registra."""
+    return rec_gate("plan-allowlist", *plan_allowlist(plan_md, files, _need_files(), _techo(), TESTS_PREFIX))
 
 
 def _test_names() -> set[str]:

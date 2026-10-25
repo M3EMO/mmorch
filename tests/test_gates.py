@@ -98,3 +98,17 @@ def test_traza_spec_exige_tabla_con_tests_existentes():
 def test_traza_spec_sin_tests_nombrados_alcanzan_los_ids():
     assert gates.traza_spec("- R1: a.\n", set(), False)[0]
     assert gates.traza_spec("- sin ids\n", set(), False) == (False, "sin IDs R<n>")
+
+
+def test_plan_allowlist_rechaza_test_ajeno_omision_y_fuera_del_techo():
+    plan = "## Archivos\n- `pkg/a.py` [R1]\n- `tests/test_capas.py` [R1]\n"
+    need, techo = ["pkg/a.py", "tests/test_capas.py"], ["pkg/**/*.py", "tests/test_capas.py"]
+    assert gates.plan_allowlist(plan, ["pkg/a.py", "tests/test_capas.py"], need, techo, "tests/")[0]
+    assert "test_otro" in gates.plan_allowlist(plan + "- `tests/test_otro.py`\n", need, need, techo, "tests/")[1]
+    assert "omite" in gates.plan_allowlist(plan, ["pkg/a.py"], need, techo, "tests/")[1]
+    assert "fuera del techo" in gates.plan_allowlist(plan, need + ["otro/x.py"], need, techo, "tests/")[1]
+
+
+def test_calza_y_en_techo():
+    assert gates.calza("src/App.java", "src/**/*.java") and gates.en_techo("x/y.py", [], [])
+    assert not gates.en_techo("otro/x.py", ["pkg/a.py"], ["pkg/**/*.py"])

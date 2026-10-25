@@ -77,3 +77,30 @@ def traza_spec(spec_md: str, tests: set[str], hay_aceptacion: bool) -> tuple[boo
     if sin_test or inexist:
         return False, f"sin test: {sin_test}; tests inexistentes: {inexist}"
     return True, f"{len(ids)} IDs cubiertos"
+
+
+def calza(f: str, pat: str) -> bool:
+    """fnmatch con `**/` opcional: `pkg/**/*.py` incluye `pkg/a.py` (fnmatch solo exigia un directorio intermedio)."""
+    import fnmatch
+    return fnmatch.fnmatch(f, pat) or fnmatch.fnmatch(f, pat.replace("**/", ""))
+
+
+def en_techo(f: str, need: list[str], techo: list[str]) -> bool:
+    return f in need or not techo or any(calza(f, pat) for pat in techo)  # sin techo (bench, FEATURES viejas): todo vale
+
+
+def plan_allowlist(plan_md: str, files: list[str], need: list[str], techo: list[str], tests_prefix: str) -> tuple[bool, str]:
+    """El plan no escribe tests ajenos, incluye los archivos obligatorios y no sale del techo de sdlc.toml."""
+    m = re.search(r"## Archivos\b(.*?)(?:\n## |\Z)", plan_md, re.S | re.I)
+    block = m.group(1) if m else plan_md
+    # un cableo puede listar tests/test_capas.py (esta en FEAT["files"]); cualquier otro tests/ sigue prohibido
+    ajenos = [t for t in re.findall(r"(?im)^\s*[-*]+\s*`?(" + re.escape(tests_prefix) + r"[\w/.-]*)", block) if t not in need]
+    if ajenos:
+        return False, f"plan lista {ajenos} como archivo a escribir"
+    faltan = [f for f in need if f not in files]
+    if faltan:
+        return False, f"plan omite {faltan}"
+    fuera = [f for f in files if not en_techo(f, need, techo)]
+    if fuera:
+        return False, f"plan lista archivos fuera del techo de sdlc.toml: {fuera}"
+    return True, f"{files}"

@@ -240,6 +240,48 @@ def _casos_traza_spec(rng: random.Random, n: int) -> list[Caso]:
     return casos
 
 
+# --------------------------------------------------------------------------- plan-allowlist
+
+
+def _casos_plan_allowlist(rng: random.Random, n: int) -> list[Caso]:
+    """Contrato = el pedido de plan() y el techo de sdlc.toml: el plan lista los archivos OBLIGATORIOS, no escribe tests
+    salvo los obligatorios (un cableo como tests/test_capas.py) y no sale del techo. Rojo = lista un test ajeno, omite
+    un obligatorio, lista un archivo fuera del techo, o una ruta que sale del directorio del techo con `..`."""
+    casos: list[Caso] = []
+    verdes = ["canonica", "cableo_test", "anidado", "sin_techo"]
+    rojos = ["test_ajeno", "omite_obligatorio", "fuera_del_techo", "ruta_con_puntos"]
+    for k in range(n):
+        rojo = bool(k % 2)
+        tipo = rng.choice(rojos if rojo else verdes)
+        d, ext = rng.choice(["pkg", "src", "app/core"]), rng.choice(_EXT)
+        techo = [] if tipo == "sin_techo" else [f"{d}/**/*.{ext}"]
+        need = [f"{d}/{_nombre(rng)}.{ext}" for _ in range(rng.randint(1, 2))]
+        files = need + [f"{d}/{_nombre(rng)}_extra.{ext}" for _ in range(rng.randint(0, 2))]
+        if tipo == "cableo_test":
+            need.append("tests/test_capas.py")
+            techo.append("tests/test_capas.py")
+            files.append("tests/test_capas.py")
+        elif tipo == "anidado":
+            files.append(f"{d}/{_nombre(rng)}/{_nombre(rng)}.{ext}")
+        elif tipo == "sin_techo":
+            files.append(f"{_nombre(rng)}/{_nombre(rng)}.{ext}")
+        elif tipo == "fuera_del_techo":
+            files.append(f"otro/{_nombre(rng)}.{ext}")
+        elif tipo == "ruta_con_puntos":
+            files.append(f"{d}/../../{_nombre(rng)}.{ext}")
+        items = [f"- `{f}` [R1]" for f in files]
+        if tipo == "test_ajeno":
+            items.append(f"- `tests/test_{_nombre(rng)}.py` [R1]")  # _plan_files lo descarta de files: el gate lo ve en el plan
+        if tipo == "omite_obligatorio":
+            falta = rng.choice(need)
+            items = [i for i in items if f"`{falta}`" not in i]
+            files = [f for f in files if f != falta]
+        rng.shuffle(items)
+        plan = "# Plan\n\n## Archivos\n\n" + "\n".join(items) + "\n\n## Prueba\n\n`python -m pytest -q`\n"
+        casos.append({"args": (plan, files, need, techo, "tests/"), "rojo": rojo, "origen": "generado", "grupo": tipo})
+    return casos
+
+
 _PLUGINS = '''"""Registro de plugins."""
 from __future__ import annotations
 import importlib
@@ -286,11 +328,13 @@ INCIDENTES: dict[str, list[Caso]] = {
 CHEQUEOS: dict[str, Callable[..., tuple[bool, str]]] = {"sin-clones": gates.sin_clones,
                                                          "spec-review": gates.clarificaciones,
                                                          "trazabilidad-plan": gates.traza_plan,
-                                                         "trazabilidad-spec": gates.traza_spec}
+                                                         "trazabilidad-spec": gates.traza_spec,
+                                                         "plan-allowlist": gates.plan_allowlist}
 GENERADORES: dict[str, Callable[[random.Random, int], list[Caso]]] = {"sin-clones": _casos_sin_clones,
                                                                     "spec-review": _casos_spec_review,
                                                                     "trazabilidad-plan": _casos_traza_plan,
-                                                                    "trazabilidad-spec": _casos_traza_spec}
+                                                                    "trazabilidad-spec": _casos_traza_spec,
+                                                                    "plan-allowlist": _casos_plan_allowlist}
 
 
 def medir(gate: str, n: int = 400, seed: int = 42) -> dict[str, Any]:
