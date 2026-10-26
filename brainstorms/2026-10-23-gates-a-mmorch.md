@@ -73,7 +73,7 @@ Los demas ejecutan comandos con `sh` y leen el worktree `WT`.
 
 - Los tests `tests/test_sdlc_*.py` guardan incidentes reales (D4, D6, D11, SSB F7a). Cada uno es un caso con etiqueta.
 - `logs/sdlc/run-log-*.json` en esta laptop: 10 corridas. Guardan la salida del gate, no la verdad.
-- `logs/sdlc/veredictos.jsonl` no existe en esta laptop. Puede existir en el escritorio Windows.
+- `logs/sdlc/veredictos.jsonl` no existe en esta laptop. El escritorio Windows ya no existe (2026-10-26).
 
 ## Q&A log
 
@@ -100,7 +100,7 @@ Los demas ejecutan comandos con `sh` y leen el worktree `WT`.
 ### Q5 — Fuente de casos etiquetados
 - Asked: (a) incidentes de `tests/test_sdlc_*.py` + mutacion de artefactos con etiqueta por construccion; (b) solo run-logs con veredicto humano; (c) (a) ahora y (b) cuando haya veredictos.
 - Captured: el usuario eligio (c). Ahora: incidentes reales ya guardados en tests (D4, D6, D11, SSB F7a) y casos generados por mutacion de un artefacto verde; la etiqueta sale por construccion, nunca de un LLM. Despues: se suman run-logs reales con veredicto humano posterior (`veredictos.jsonl`) cuando existan. Metrica propuesta: accuracy balanceada y tasa de falso rechazo (las del README "Measured").
-- Flags: `veredictos.jsonl` no existe en la laptop; puede existir en el escritorio Windows -> usuario.
+- Flags: `veredictos.jsonl` no existe en la laptop. Resuelto 2026-10-26: el escritorio Windows ya no existe; los veredictos salen de corridas nuevas.
 
 ### Q6 — Medicion en este bd o en uno aparte
 - Asked: bd aparte (recomendado) o (b) medir `sin-clones` en este bd junto con su traslado.
