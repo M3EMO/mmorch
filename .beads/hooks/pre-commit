@@ -1,6 +1,8 @@
 #!/bin/sh
 # --- ruff lint gate (enforced, fast): blocks the commit on a lint error. ---
-_GPY=".venv/Scripts/python.exe"; [ -x "$_GPY" ] || _GPY=".venv/bin/python"; [ -x "$_GPY" ] || _GPY="python"   # Windows, Linux
+# orchestration-e8s: un worktree no tiene .venv; el venv vive en el checkout principal (git-common-dir/..).
+_ROOT=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
+_GPY="$_ROOT/.venv/Scripts/python.exe"; [ -x "$_GPY" ] || _GPY="$_ROOT/.venv/bin/python"; [ -x "$_GPY" ] || _GPY="python"   # Windows, Linux
 "$_GPY" -m ruff check mmorch sdlc mcp_server.py tests || { echo >&2 "ruff gate failed (fix it, or 'git commit --no-verify' to bypass)"; exit 1; }
 # --- mypy type gate (enforced): mismo trato que ruff, 0 errores o no hay commit. ---
 "$_GPY" -m mypy mmorch sdlc mcp_server.py || { echo >&2 "mypy gate failed (fix it, or 'git commit --no-verify' to bypass)"; exit 1; }

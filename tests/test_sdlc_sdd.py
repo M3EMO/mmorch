@@ -29,3 +29,16 @@ def test_constitucion_entra_al_prompt_solo_si_existe(tmp_path, monkeypatch):
     assert "Nunca un LLM juez" in S._constitucion()
     monkeypatch.setitem(S.CFG, "constitution", "docs/reglas.md")
     assert S._constitucion() == ""
+
+
+def test_write_no_sale_del_worktree(tmp_path):
+    # orchestration-5s7: un plan con `..` o una ruta absoluta no escribe fuera del worktree
+    import pytest
+    t = types.SimpleNamespace(name="f", task="x", accept_files={})
+    S.configure(t, contract=[], feat={"repo": str(tmp_path), "files": [], "suite": []}, wt=tmp_path / "wt")
+    for rel in ("pkg/../../fuera.py", str(tmp_path / "abs.py")):
+        with pytest.raises(S.StageFailed):
+            S._write(rel, "x = 1")
+    assert not (tmp_path / "fuera.py").exists() and not (tmp_path / "abs.py").exists()
+    S._write("pkg/a.py", "x = 1")
+    assert (tmp_path / "wt/pkg/a.py").exists()
