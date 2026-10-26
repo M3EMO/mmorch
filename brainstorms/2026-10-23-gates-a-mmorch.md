@@ -168,3 +168,9 @@ Los demas ejecutan comandos con `sh` y leen el worktree `WT`.
 - Resultados (seed 42): cambio-minimo 0.803, docstring-intacto 0.679, un-archivo 0.662, tipo-del-archivo 0.819. Especificidad 1.00 en los cuatro.
 - Huecos: subcadena de la tarea habilita lo que prohibe ("sin reescribir", "no toques ningun docstring"); minimo de 40 lineas; cabeceras `# File: ruta`; anotacion en la misma linea.
 - Bds por D9: `orchestration-rlg`, `orchestration-weo`, `orchestration-6qb`, `orchestration-i79`.
+
+## Bugs medidos resueltos (2026-10-26)
+- `orchestration-5s7`: `plan_allowlist` rechaza segmentos `..` y rutas absolutas; `ruta_con_puntos` = 1.00. La otra mitad (`_write` dentro del worktree) vino de `mmorch/auto`.
+- `orchestration-1tj`: `traza_plan` cuenta IDs solo en items y solo IDs de la spec; 1.00.
+- `orchestration-96p`: `clarificaciones` rechaza una `- P<n>:` sin respuesta o con TBD; 1.00 en la metrica principal. Las variantes de formato siguen aparte (0.00).
+- `orchestration-cuz`: generador verde de modulos hermanos; umbral 0.8 -> 0.66. Copias >= 0.69, hermanos <= 0.65 (5 semillas x 2000). Limite: medido solo sobre Python sintetico.

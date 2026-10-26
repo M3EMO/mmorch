@@ -256,45 +256,33 @@ Re-run with `python -m mmorch.gates_bench --seed 42 --n 400`; rows go to `logs/a
 
 | gate | n | catches bad | doesn't false-reject | balanced acc | accuracy by group |
 |---|---|---|---|---|---|
-| `sin-clones` (threshold 0.8) | 401 | 0.706 | 1.00 | 0.853 | copy 0-10%: 1.00 · 10-20%: 0.97 · 20-30%: 0.02 |
-| `spec-review` | 287 | 0.615 | 1.00 | 0.807 | `TBD` answer: 0.00 · one empty answer: 0.14 · missing/empty/6 questions: 1.00 |
-| `trazabilidad-plan` | 402 | 0.520 | 1.00 | 0.760 | ID only in prose: 0.00 · ID not in spec: 0.00 · orphan ID / file without ID: 1.00 |
+| `sin-clones` (threshold 0.66) | 401 | 1.00 | 1.00 | 1.00 | copy 20-30%: 1.00 (0.03 at 0.8) · sibling modules: 1.00 |
+| `spec-review` | 287 | 1.00 | 1.00 | 1.00 | `TBD` answer: 1.00 (was 0.00) · one empty answer: 1.00 (was 0.14) |
+| `trazabilidad-plan` | 402 | 1.00 | 1.00 | 1.00 | ID only in prose: 1.00 (was 0.00) · ID not in spec: 1.00 (was 0.00) |
 | `trazabilidad-spec` | 400 | 1.00 | 1.00 | 1.00 | every group 1.00 (no real incident on record) |
-| `plan-allowlist` | 400 | 0.815 | 1.00 | 0.907 | path with `..`: 0.00 · foreign test / missing file / outside the ceiling: 1.00 |
+| `plan-allowlist` | 400 | 1.00 | 1.00 | 1.00 | path with `..`: 1.00 (was 0.00) |
 | `cambio-minimo` | 401 | 0.607 | 1.00 | 0.803 | rewrite of a file under 40 lines: 0.38 · task says "sin reescribir": 0.00 · cut 40-70%: 0.82 |
 | `docstring-intacto` | 401 | 0.358 | 1.00 | 0.679 | docstring replaced by `TODO`: 0.00 · task says "no toques ningun docstring": 0.00 · deleted: 1.00 |
 | `un-archivo` | 401 | 0.325 | 1.00 | 0.662 | `# File: path` headers: 0.00 · backticked path headers: 0.00 · other files only: 1.00 |
 | `tipo-del-archivo` | 402 | 0.639 | 1.00 | 0.819 | annotation on the same line (`@Deprecated public class X`): 0.00 · foreign class/interface: 1.00 |
 
-The 0.8 line-overlap threshold misses almost every copy with 20-30% of its lines edited. The green
-generator shares only imports and headers, so a 1.00 specificity is an upper bound until harder green
-cases (sibling modules with the same structure) join the set (bd `orchestration-cuz`).
+Fixed after measuring (2026-10-26). `sin-clones`: copies with up to 30% edited share >= 0.69 of their lines and
+sibling modules (same header, imports and signatures, own bodies) <= 0.65 over 5 seeds x 2000 cases, so the
+threshold moved from 0.8 to 0.66; it is measured on synthetic Python only. `spec-review` now rejects any `- P<n>:`
+line without an answer or with `TBD`. `trazabilidad-plan` counts IDs only on file items and only IDs the spec has.
+`plan-allowlist` rejects `..` segments and absolute paths; the writer also refuses paths outside the worktree.
+Format variants `spec-review` forbids (extra spaces, bold, numbered list) stay apart from the headline: each is
+rejected every time, which costs a retry, not a wrong result.
 
-`spec-review` counts well-formed answered questions, so one unanswered question passes when another is
-well formed, and `R: TBD` always passes. Format variants the template forbids (extra spaces, bold, numbered
-list) are reported apart and kept out of the headline: each one is rejected every time (accuracy 0.00), which
-costs a retry, not a wrong result.
-
-`trazabilidad-plan` looks for each spec ID anywhere in the `## Archivos` block and for any `R<n>` on a file's
-item, so an ID mentioned only in a prose note passes as covered and a file citing only `R99` (not in the spec)
-passes as traced. Every accepted variant (tables, `R2–R5` ranges, bare file names) passes every time.
-
-`trazabilidad-spec` scores 1.00 on every case the spec template describes (missing row, empty cell,
-unknown test, no table, no IDs). That covers the template's own rules only; no failure of this gate is on record.
-
-`plan-allowlist` lets `pkg/../../x.py` through the `pkg/**/*.py` ceiling, because `fnmatch` lets `*` cross
-`/`. The plan parser keeps `..` and the file writer does not check that a path stays inside the worktree, so a
-planner's output can write outside it (bd `orchestration-5s7`).
-
-`cambio-minimo` and `docstring-intacto` read the task for a substring (`reescrib`, `docstring`), so a task that
-forbids the change also unlocks it. `cambio-minimo` needs 40 lines gone, so a small file can be rewritten whole.
-`un-archivo` only splits `# path` / `// path` headers. `tipo-del-archivo` needs `public` in column 0. Bds
-`orchestration-rlg`, `orchestration-weo`, `orchestration-6qb`, `orchestration-i79`.
+Still open. `cambio-minimo` and `docstring-intacto` read the task for a substring (`reescrib`, `docstring`), so
+a task that forbids the change also unlocks it. `cambio-minimo` needs 40 lines gone, so a small file can be
+rewritten whole. `un-archivo` only splits `# path` / `// path` headers. `tipo-del-archivo` needs `public` in
+column 0. Bds `orchestration-rlg`, `orchestration-weo`, `orchestration-6qb`, `orchestration-i79`.
 
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **121 módulos · 44 MCP tools (15 expuestas por default) · 1198 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
+_Auto-generado por `mmorch.docgen`._ **121 módulos · 44 MCP tools (15 expuestas por default) · 1200 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->

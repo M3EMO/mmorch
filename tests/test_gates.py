@@ -6,7 +6,7 @@ BASE = "import os\n\ndef f(a):\n    return a + 1\n\ndef g(b):\n    return b * 2\
 
 def test_sin_clones_rechaza_una_copia_con_otro_encabezado():
     ok, detalle = gates.sin_clones({"a.py": BASE, "b.py": "# worker\n" + BASE})
-    assert not ok and "a.py y b.py" in detalle and "80%" in detalle
+    assert not ok and "a.py y b.py" in detalle and "66%" in detalle
 
 
 def test_sin_clones_acepta_modulos_distintos_con_imports_comunes():
@@ -20,8 +20,13 @@ def test_sin_clones_ignora_archivos_vacios():
 def test_sin_clones_el_borde_exacto_no_es_clon():
     # 4 de 5 lineas compartidas = 0.8 exacto: el gate exige > umbral
     a = "l1\nl2\nl3\nl4\nl5\n"
-    assert gates.sin_clones({"a.py": a, "b.py": "l1\nl2\nl3\nl4\nOTRA\n"})[0]
-    assert not gates.sin_clones({"a.py": a, "b.py": "l1\nl2\nl3\nl4\nl5\nOTRA\n"})[0]
+    assert gates.sin_clones({"a.py": a, "b.py": "l1\nl2\nl3\nl4\nOTRA\n"}, umbral=0.8)[0]
+    assert not gates.sin_clones({"a.py": a, "b.py": "l1\nl2\nl3\nl4\nl5\nOTRA\n"}, umbral=0.8)[0]
+
+
+def test_sin_clones_detecta_copias_editadas_y_respeta_hermanos():
+    r = gates_bench.medir("sin-clones", n=400, seed=9)
+    assert r["acierto_por_grupo"]["copia 20-30%"] == 1.0 and r["acierto_por_grupo"]["hermanos"] == 1.0
 
 
 def test_bench_cada_chequeo_tiene_generador_e_incidentes_marcados():
@@ -139,3 +144,11 @@ def test_tipo_propio():
     assert gates.tipo_propio("public final class Opcion {\n    public static class Item {}\n}\n", "src/Opcion.java")[0]
     assert gates.tipo_propio("public class Negocio {}\n", "src/Opcion.java") == (False, "src/Opcion.java: declara public Negocio")
     assert gates.tipo_propio("public class Negocio {}\n", "src/x.ts")[0]
+
+
+def test_bugs_medidos_quedan_en_uno():
+    # orchestration-5s7, -1tj, -96p: cada hueco medido se cierra sin bajar la especificidad
+    for g in ("plan-allowlist", "trazabilidad-plan", "spec-review"):
+        r = gates_bench.medir(g, n=200, seed=4)
+        assert r["sensibilidad"] == 1.0 and r["especificidad"] == 1.0, (g, r["acierto_por_grupo"])
+    assert not gates.plan_allowlist("## Archivos\n- `/etc/x.py`\n", ["/etc/x.py"], [], [], "tests/")[0]

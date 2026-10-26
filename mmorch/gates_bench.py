@@ -73,9 +73,13 @@ def _casos_sin_clones(rng: random.Random, n: int) -> list[Caso]:
             tramo = f"{int(frac * 10) * 10}-{int(frac * 10) * 10 + 10}%"
             casos.append({"args": ({"pkg/a.py": "\n".join(a), "pkg/b.py": "\n".join(b)},), "rojo": True,
                           "origen": "generado", "grupo": f"copia {tramo}"})
-        else:
+        elif k % 4 == 0:
             casos.append({"args": ({"pkg/a.py": "\n".join(a), "pkg/b.py": "\n".join(_modulo(rng))},), "rojo": False,
                           "origen": "generado", "grupo": "independientes"})
+        else:  # orchestration-cuz: modulos hermanos, mismo esqueleto (cabecera, imports, firmas) y cuerpos propios
+            b = [l if not l.startswith("    ") else "    " + _sentencia(rng).split("\n")[0] for l in a]
+            casos.append({"args": ({"pkg/a.py": "\n".join(a), "pkg/b.py": "\n".join(b)},), "rojo": False,
+                          "origen": "generado", "grupo": "hermanos"})
     return casos
 
 

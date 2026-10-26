@@ -13,9 +13,15 @@ from __future__ import annotations
 import re
 
 
-def sin_clones(written: dict[str, str], umbral: float = 0.8) -> tuple[bool, str]:
+# orchestration-cuz (gates_bench, 5 semillas x 2000 casos): las copias con hasta 30% editado comparten >= 0.69 de
+# lineas y los modulos hermanos <= 0.65; con 0.8 el gate dejaba pasar casi todas las copias con 20-30% editado.
+# shortcut: medido sobre modulos Python sinteticos; revisar con hermanos reales (tests, DTOs Java) si aparece un falso rojo
+UMBRAL_CLON = 0.66
+
+
+def sin_clones(written: dict[str, str], umbral: float = UMBRAL_CLON) -> tuple[bool, str]:
     """D6: el coder escribio el contenido de plugins.py dentro de plugin_worker.py. Dos archivos del plan
-    con > 80% de lineas identicas es un clon, no una feature. Determinista, USD 0."""
+    que comparten mas de `umbral` de sus lineas son un clon, no una feature. Determinista, USD 0."""
     files = list(written)
     for i, a in enumerate(files):
         la = {l.strip() for l in written[a].splitlines() if l.strip()}
@@ -32,6 +38,11 @@ def clarificaciones(spec_md: str) -> tuple[bool, str]:
     if not m:
         return False, "falta ## Clarificaciones"
     qs = re.findall(r"(?m)^- P\d+: .+\| R: \S.*\| afecta: \S+", m.group(1))  # D11-diag: "afecta: Contrato" tambien vale
+    # orchestration-96p: una pregunta sin respuesta (o con TBD) no se tapa con otra bien escrita
+    abiertas = [l for l in re.findall(r"(?m)^- (P\d+):.*$", m.group(1))
+                if not re.search(rf"(?m)^- {l}: .+\| R: (?!(?i:tbd|\?+|pendiente)\s*\|)\S.*\| afecta: \S+", m.group(1))]
+    if abiertas:
+        return False, f"preguntas sin respuesta: {abiertas}"
     if not qs and re.search(r"sin preguntas|0 preguntas|ninguna pregunta|no hay preguntas", m.group(1), re.I):
         return True, "0 preguntas"  # D11-diag: Claude escribio "0 preguntas" en vez del literal
     if not 1 <= len(qs) <= 5:
@@ -45,17 +56,19 @@ def filas_tabla(block: str) -> list[str]:
 
 
 def traza_plan(spec_md: str, plan_block: str, files: list[str]) -> tuple[bool, str]:
-    """Trazabilidad lado plan: cada R<n> de la spec aparece en el plan; cada archivo cita >= 1 R<n>. Un item es una
-    linea de lista o una fila de tabla; un rango `R2–R10` cita R2..R10 (SSB F7a)."""
+    """Trazabilidad lado plan: cada R<n> de la spec aparece en algun item; cada archivo cita >= 1 R<n> de la spec. Un
+    item es una linea de lista o una fila de tabla; un rango `R2–R10` cita R2..R10 (SSB F7a). Una mencion en prosa no
+    cubre un ID y un ID que la spec no tiene no traza un archivo (orchestration-1tj)."""
     ids = set(re.findall(r"\bR\d+\b", spec_md))
     plan_block = re.sub(r"\bR(\d+)\s*[–-]\s*R(\d+)\b",
                         lambda m: ", ".join(f"R{i}" for i in range(int(m[1]), int(m[2]) + 1)), plan_block)
-    huerfanos = sorted(i for i in ids if not re.search(rf"\b{i}\b", plan_block))
     items = re.findall(r"(?m)^\s*[-*]\s*(.*)$", plan_block) + filas_tabla(plan_block)
+    citados = {r for it in items for r in re.findall(r"\bR\d+\b", it)}
+    huerfanos = sorted(ids - citados)
 
     def nombra(it: str, f: str) -> bool:  # la ruta, o su nombre suelto si el plan lo escribio sin carpeta (F4b)
         return f in it or bool(re.search(r"(?<![\w/.-])" + re.escape(f.rsplit("/", 1)[-1]) + r"(?![\w.-])", it))
-    sin_id = [f for f in files if not any(nombra(it, f) and re.search(r"\bR\d+\b", it) for it in items)]
+    sin_id = [f for f in files if not any(nombra(it, f) and set(re.findall(r"\bR\d+\b", it)) & ids for it in items)]
     if huerfanos or sin_id:
         return False, f"IDs sin unidad: {huerfanos}; archivos sin ID: {sin_id}"
     return True, "ok"
@@ -100,6 +113,10 @@ def plan_allowlist(plan_md: str, files: list[str], need: list[str], techo: list[
     faltan = [f for f in need if f not in files]
     if faltan:
         return False, f"plan omite {faltan}"
+    # orchestration-5s7: `*` de fnmatch cruza `/`, asi que `pkg/../../x.py` calzaba con `pkg/**/*.py`
+    salen = [f for f in files if f.startswith(("/", "\\")) or ".." in re.split(r"[/\\]", f) or re.match(r"[A-Za-z]:", f)]
+    if salen:
+        return False, f"plan lista rutas que salen del repo: {salen}"
     fuera = [f for f in files if not en_techo(f, need, techo)]
     if fuera:
         return False, f"plan lista archivos fuera del techo de sdlc.toml: {fuera}"
