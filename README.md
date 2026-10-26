@@ -261,8 +261,8 @@ Re-run with `python -m mmorch.gates_bench --seed 42 --n 400`; rows go to `logs/a
 | `trazabilidad-plan` | 402 | 1.00 | 1.00 | 1.00 | ID only in prose: 1.00 (was 0.00) · ID not in spec: 1.00 (was 0.00) |
 | `trazabilidad-spec` | 400 | 1.00 | 1.00 | 1.00 | every group 1.00 (no real incident on record) |
 | `plan-allowlist` | 400 | 1.00 | 1.00 | 1.00 | path with `..`: 1.00 (was 0.00) |
-| `cambio-minimo` | 401 | 0.607 | 1.00 | 0.803 | rewrite of a file under 40 lines: 0.38 · task says "sin reescribir": 0.00 · cut 40-70%: 0.82 |
-| `docstring-intacto` | 401 | 0.358 | 1.00 | 0.679 | docstring replaced by `TODO`: 0.00 · task says "no toques ningun docstring": 0.00 · deleted: 1.00 |
+| `cambio-minimo` | 401 | 0.940 | 1.00 | 0.970 | rewrite of a file under 40 lines: 1.00 (was 0.38) · task forbids rewriting: 1.00 (was 0.00) · cut 40-70%: 0.79 |
+| `docstring-intacto` | 401 | 0.905 | 1.00 | 0.953 | docstring replaced by `TODO`: 1.00 (was 0.00) · task forbids touching docstrings: 0.70 (was 0.00) |
 | `un-archivo` | 401 | 1.00 | 1.00 | 1.00 | `# File: path` / backticked headers written right: 1.00 (was 0.00); measures what `one_file` writes |
 | `tipo-del-archivo` | 402 | 1.00 | 1.00 | 1.00 | annotation on the same line (`@Deprecated public class X`): 1.00 (was 0.00) |
 
@@ -274,9 +274,11 @@ line without an answer or with `TBD`. `trazabilidad-plan` counts IDs only on fil
 Format variants `spec-review` forbids (extra spaces, bold, numbered list) stay apart from the headline: each is
 rejected every time, which costs a retry, not a wrong result.
 
-Still open. `cambio-minimo` and `docstring-intacto` read the task for a substring (`reescrib`, `docstring`), so
-a task that forbids the change also unlocks it. `cambio-minimo` needs 40 lines gone, so a small file can be
-rewritten whole. Bds `orchestration-rlg`, `orchestration-weo`.
+`cambio-minimo` and `docstring-intacto` used to read the task for a substring (`reescrib`, `docstring`), so a
+task that forbade the change also unlocked it. They now skip a mention after a negation or a keep-verb ("sin",
+"no", "deja", "conserva"); a prohibition phrased another way ("los docstrings quedan igual") still unlocks it,
+which is the remaining 0.70. `cambio-minimo` needed 40 lines gone, so a small file could be rewritten whole; the
+floor is now min(40, half the file). A cut of 40% on a 80-133 line file still passes.
 
 `un-archivo` is measured on what `one_file` writes (verdict plus cut), not on the verdict alone: with the
 verdict alone, a `# File: path` answer passed and the whole text landed in one file. With labels fixed that way,
@@ -285,7 +287,7 @@ the gate scored 0.744 before `orchestration-6qb` and 1.00 after.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **121 módulos · 44 MCP tools (15 expuestas por default) · 1203 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
+_Auto-generado por `mmorch.docgen`._ **121 módulos · 44 MCP tools (15 expuestas por default) · 1205 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->

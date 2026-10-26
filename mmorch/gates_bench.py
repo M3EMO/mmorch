@@ -299,16 +299,17 @@ def _casos_cambio_minimo(rng: random.Random, n: int) -> list[Caso]:
     Rojo = una reescritura no pedida (por tamaño del original), un recorte de 40-70% de las lineas, o una reescritura
     cuando la tarea dice explicitamente que no se reescriba."""
     casos: list[Caso] = []
-    verdes, rojos = ["parche", "archivo_nuevo", "tarea_pide_reescribir"], ["reescritura", "recorte", "tarea_prohibe_reescribir"]
+    verdes = ["parche", "parche_archivo_chico", "archivo_nuevo", "tarea_pide_reescribir"]
+    rojos = ["reescritura", "recorte", "tarea_prohibe_reescribir"]
     for k in range(n):
         rojo = bool(k % 2)
         tipo = rng.choice(rojos if rojo else verdes)
-        orig = _archivo(rng, rng.randint(1, 8))
+        orig = _archivo(rng, 1) if tipo == "parche_archivo_chico" else _archivo(rng, rng.randint(1, 8))
         tarea = "Agrega una guarda contra montos negativos en pkg/a.py."
         grupo = tipo
-        if tipo == "parche":
-            nuevo = _copia_editada(rng, orig)[0] if rng.random() < 0.5 else list(orig)
-            idx = rng.sample(range(len(nuevo)), int(rng.uniform(0, 0.10) * len(nuevo)))
+        if tipo in ("parche", "parche_archivo_chico"):
+            nuevo = _copia_editada(rng, orig)[0] if tipo == "parche_archivo_chico" else list(orig)  # chico: hasta 30%
+            idx = [] if tipo == "parche_archivo_chico" else rng.sample(range(len(nuevo)), int(rng.uniform(0, 0.10) * len(nuevo)))
             for i in idx:
                 nuevo[i] = nuevo[i][:len(nuevo[i]) - len(nuevo[i].lstrip())] + _sentencia(rng).split("\n")[0]
             nuevo += ["    if n < 0:", "        raise ValueError(n)"]
@@ -318,9 +319,13 @@ def _casos_cambio_minimo(rng: random.Random, n: int) -> list[Caso]:
         else:
             nuevo = _archivo(rng, max(1, len(orig) // 25))
             if tipo == "tarea_pide_reescribir":
-                tarea = "Reescribi pkg/a.py con una sola funcion publica."
+                tarea = rng.choice(["Reescribi pkg/a.py con una sola funcion publica.",
+                                    "Hay que reescribir pkg/a.py: el modulo viejo no se entiende.",
+                                    "Refactor: reescribí el parser de pkg/a.py desde cero."])
             elif tipo == "tarea_prohibe_reescribir":
-                tarea = "Agrega la guarda sin reescribir pkg/a.py."
+                tarea = rng.choice(["Agrega la guarda sin reescribir pkg/a.py.", "Agrega la guarda; no reescribas pkg/a.py.",
+                                    "Agrega la guarda y nunca reescribas el archivo entero.",
+                                    "Agrega la guarda. Conserva pkg/a.py tal cual, solo suma lineas."])
             else:
                 grupo = f"reescritura {'<40' if len(orig) < 40 else '>=40'} lineas"
         o = {} if tipo == "archivo_nuevo" else {"pkg/a.py": "\n".join(orig)}
@@ -352,8 +357,12 @@ def _casos_docstring(rng: random.Random, n: int) -> list[Caso]:
             despues[malo] = f"{antes[malo]} Agrega timeout."
         elif tipo in ("borrado", "tarea_docstrings", "tarea_prohibe"):
             despues[malo] = None
-            tarea = {"tarea_docstrings": "Actualiza los docstrings de pkg/.",
-                     "tarea_prohibe": "Agrega timeout; no toques ningun docstring."}.get(tipo, tarea)
+            tarea = {"tarea_docstrings": rng.choice(["Actualiza los docstrings de pkg/.", "Borra el docstring viejo de run.",
+                                                     "Los docstrings estan desactualizados: reescribilos."]),
+                     "tarea_prohibe": rng.choice(["Agrega timeout; no toques ningun docstring.",
+                                                  "Agrega timeout sin cambiar los docstrings.",
+                                                  "Agrega timeout. Deja los docstrings como estan.",
+                                                  "Agrega timeout; los docstrings quedan igual."])}.get(tipo, tarea)
         elif tipo == "marcador":
             despues[malo] = rng.choice(["TODO", ".", "..."])
         casos.append({"args": (antes, despues, tarea), "rojo": rojo, "origen": "generado", "grupo": tipo})

@@ -178,3 +178,8 @@ Los demas ejecutan comandos con `sh` y leen el worktree `WT`.
 ## Huecos de un-archivo y tipo-del-archivo (2026-10-26)
 - `orchestration-6qb`: `secciones` reconoce `# File: ruta`, `### ruta`, backticks y negritas. Error mio de etiqueta corregido: el banco mide lo que escribe `one_file` (veredicto + recorte); con esa etiqueta, 0.744 antes y 1.00 despues.
 - `orchestration-i79`: `_TIPO_PUBLICO` acepta anotaciones en la misma linea; 1.00.
+
+## Huecos de cambio-minimo y docstring-intacto (2026-10-26)
+- `pide(tarea, raiz)`: la tarea nombra la raiz sin negacion ni verbo de conservacion. Limite: una prohibicion con otra forma ("quedan igual") pasa; el banco la incluye a proposito.
+- `orchestration-rlg`: minimo de borradas = min(40, mitad del archivo); generador verde nuevo `parche_archivo_chico`. 0.803 -> 0.970.
+- `orchestration-weo`: un docstring reducido a `TODO` o `.` cuenta como borrado. 0.679 -> 0.953.

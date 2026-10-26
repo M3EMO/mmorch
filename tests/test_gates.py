@@ -164,3 +164,16 @@ def test_secciones_reconoce_cabeceras_con_prefijo_y_backticks():
 def test_tipo_propio_ve_la_anotacion_en_la_misma_linea():
     assert not gates.tipo_propio('@SuppressWarnings("x") public class Otro {}\n', "src/Opcion.java")[0]
     assert gates.tipo_propio("@Deprecated public final class Opcion {}\n", "src/Opcion.java")[0]
+
+
+def test_pide_respeta_la_negacion():
+    assert gates.pide("Reescribi pkg/a.py", "reescrib") and gates.pide("Actualiza los docstrings", "docstring")
+    for t in ("Agrega la guarda sin reescribir a.py", "no reescribas a.py", "Deja los docstrings como estan"):
+        assert not gates.pide(t, "reescrib" if "reescrib" in t else "docstring"), t
+
+
+def test_cambio_minimo_archivo_chico_y_docstring_marcador():
+    orig = {"a.py": "\n".join(f"x{i} = {i}" for i in range(20))}
+    assert not gates.cambio_minimo(orig, {"a.py": "nuevo = 1\n"}, "agrega una guarda")[0]
+    assert gates.cambio_minimo(orig, {"a.py": orig["a.py"].replace("x1 = 1", "x1 = 2")}, "agrega una guarda")[0]
+    assert not gates.docstring_intacto({"a.py": "Modulo de ruteo."}, {"a.py": "TODO"}, "t")[0]

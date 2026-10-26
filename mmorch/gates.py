@@ -123,10 +123,20 @@ def plan_allowlist(plan_md: str, files: list[str], need: list[str], techo: list[
     return True, f"{files}"
 
 
+def pide(tarea: str, raiz: str) -> bool:
+    """La tarea nombra `raiz` sin negarla: "sin reescribir" o "no toques ningun docstring" no piden el cambio
+    (orchestration-rlg, -weo)."""
+    t = tarea.lower()
+    # shortcut: negacion y verbos de conservacion por regex; una prohibicion con otra forma ("quedan igual") pasa
+    return raiz in t and not re.search(r"\b(?:no|sin|nunca|ni|deja|dej[aá]|conserva|conserv[aá]|manten[eé]|respeta)\b"
+                                       r"[^.;:\n]{0,30}" + raiz, t)
+
+
 def cambio_minimo(orig: dict[str, str], written: dict[str, str], tarea: str) -> tuple[bool, str]:
     """D11: el coder reescribio project_loop.py (-216 lineas) para agregar una guarda. Sobre un archivo que ya existia,
-    borrar mas del 30% de sus lineas (minimo 40) sin que la tarea diga 'reescrib' es un cambio no pedido. USD 0."""
-    if "reescrib" in tarea.lower():
+    borrar mas del 30% de sus lineas sin que la tarea pida reescribir es un cambio no pedido. El minimo era 40 lineas
+    y un archivo chico se podia reescribir entero: ahora el minimo es min(40, la mitad del archivo). USD 0."""
+    if pide(tarea, "reescrib"):
         return True, "la tarea pide reescribir"
     malos = []
     for f, texto in orig.items():
@@ -135,17 +145,22 @@ def cambio_minimo(orig: dict[str, str], written: dict[str, str], tarea: str) -> 
         old_lines = [l for l in texto.splitlines() if l.strip()]
         new_set = {l.strip() for l in written[f].splitlines()}
         borradas = sum(1 for l in old_lines if l.strip() not in new_set)
-        if borradas > max(40, int(0.3 * len(old_lines))):
+        if borradas > max(int(0.3 * len(old_lines)), min(40, len(old_lines) // 2)):
             malos.append(f"{f}: {borradas} de {len(old_lines)} lineas originales desaparecieron")
     return not malos, "ok" if not malos else "; ".join(malos)
+
+
+def _vacio(doc: str | None) -> bool:
+    """Un docstring ausente o reducido a un marcador (`TODO`, `.`) cuenta como borrado (orchestration-weo)."""
+    return not doc or len(re.sub(r"\W", "", doc)) < 3 or doc.strip().upper().rstrip(".:") in {"TODO", "TBD", "FIXME", "XXX"}
 
 
 def docstring_intacto(antes: dict[str, str | None], despues: dict[str, str | None], tarea: str) -> tuple[bool, str]:
     """D4: el coder borro el docstring del modulo (22 lineas) y ningun test lo ve. Determinista, USD 0:
     un docstring de modulo que existia antes tiene que seguir existiendo, salvo que la tarea hable de docstrings."""
-    if "docstring" in tarea.lower():
+    if pide(tarea, "docstring"):
         return True, "la tarea lo cubre"
-    perdidos = [f for f, d in antes.items() if d and not despues.get(f)]
+    perdidos = [f for f, d in antes.items() if d and _vacio(despues.get(f))]
     return not perdidos, "ok" if not perdidos else f"docstring de modulo borrado en {perdidos}"
 
 
