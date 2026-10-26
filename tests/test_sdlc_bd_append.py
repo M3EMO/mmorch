@@ -2,7 +2,8 @@
 
 Corre el binario bd real con un HOME temporal. Casos: bloque viejo editado (reintegra), sin original en git (exit 2,
 nada cambia), bloque intacto duplicado (mf-moe), misma edicion en los dos bloques (orchestration), seccion propia
-existente, CLAUDE.md sin salto final. Criterio: bytes previos intactos, idempotente, `bd setup claude --check` pasa.
+existente, CLAUDE.md sin salto final. Criterio: bytes previos intactos, idempotente, un bloque de bd en AGENTS.md y
+settings.json sin el hook bd prime (orchestration-1hd).
 """
 import hashlib
 import json
@@ -104,9 +105,8 @@ def test_bloque_viejo_editado_se_reintegra_sin_pisar_bytes(env):
     assert len(A.BLOQUE.findall(agents)) == 1 and "BEADS" not in claude
     despues = json.loads((repo / ".claude" / "settings.json").read_text(encoding="utf-8"))
     assert A.sin_bd(despues) == A.sin_bd(SETTINGS)
-    assert any(h["command"].startswith("bd prime") for g in despues["hooks"]["SessionStart"] for h in g["hooks"])
+    assert despues == A.sin_bd(SETTINGS)  # sin bd prime: el hook previo tambien sale (orchestration-1hd)
     assert "echo USER-HOOK" in hook.read_text(encoding="utf-8")
-    assert subprocess.run(["bd", "setup", "claude", "--check"], cwd=repo, capture_output=True).returncode == 0
     assert _git(repo, "rev-parse", "HEAD") == head  # sin commit nuevo, aunque corrio bd init
     assert (repo / ".beads").is_dir() and r["reintegradas"]
     assert ".beads/config.yaml" in _git(repo, "diff", "--cached", "--name-only")  # bd init queda en stage
@@ -223,7 +223,7 @@ def test_crlf_conserva_el_salto_del_archivo(env):
     assert (repo / "CLAUDE.md").read_bytes() == b"@AGENTS.md\r\n\r\n# w\r\n\r\nregla\r\n"
     agents = (repo / "AGENTS.md").read_bytes()
     assert agents.startswith(b"# w\r\n\r\n- mio\r\n") and agents.count(b"\n") == agents.count(b"\r\n")
-    assert subprocess.run(["bd", "setup", "claude", "--check"], cwd=repo, capture_output=True).returncode == 0
+    assert not (repo / ".claude" / "settings.json").exists()  # bd setup claude lo creo solo para bd prime
 
 
 @pytest.mark.parametrize("roto", [

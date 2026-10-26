@@ -188,9 +188,19 @@ def bd_append(repo: str, hoy: str | None = None) -> dict:
     settings = root / ".claude" / "settings.json"
     s_antes = settings.read_bytes() if settings.exists() else None
     _bd(root, "setup", "claude")
-    if s_antes is not None and sin_bd(json.loads(s_antes)) != sin_bd(json.loads(settings.read_text(encoding="utf-8"))):
+    limpio = sin_bd(json.loads(settings.read_text(encoding="utf-8"))) if settings.exists() else {}
+    if s_antes is not None and sin_bd(json.loads(s_antes)) != limpio:
         settings.write_bytes(s_antes)
         raise Rechazo(1, "bd setup claude cambio hooks que no son de bd; settings.json restaurado")
+    # orchestration-1hd: el hook bd prime contradice las reglas propias de bd en cada sesion; no se instala
+    if s_antes is not None and json.loads(s_antes) == limpio:
+        settings.write_bytes(s_antes)
+    elif limpio:
+        settings.write_text(json.dumps(limpio, indent=2) + "\n", encoding="utf-8")
+        hecho.append("settings.json")
+    elif settings.exists():
+        settings.unlink()
+        hecho += [] if s_antes is None else ["settings.json"]
     if _leer(claude)[0] != t_claude:
         raise Rechazo(1, "bd setup claude escribio en CLAUDE.md pese a @AGENTS.md")
     # las reglas propias van despues del bloque de bd (D6): se agregan sobre lo que dejo bd setup
@@ -222,9 +232,8 @@ def bd_append(repo: str, hoy: str | None = None) -> dict:
         if propio not in (dir_hooks / nombre).read_text(encoding="utf-8"):
             raise Rechazo(1, f"bd hooks install perdio lineas propias de .git/hooks/{nombre}")
 
-    check = _bd(root, "setup", "claude", "--check")
-    if check.returncode:
-        raise Rechazo(1, f"bd setup claude --check fallo: {check.stdout.strip()[-400:]}")
+    if len(BLOQUE.findall(_leer(agents)[0])) != 1:  # `bd setup claude --check` exige el hook bd prime (1hd)
+        raise Rechazo(1, "AGENTS.md no tiene un bloque de bd")
     return {"repo": str(root), "hecho": hecho, "reintegradas": escritas}
 
 

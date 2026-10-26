@@ -26,7 +26,6 @@ North-star: <una línea>
 - <una regla por línea>
 
 ## Hooks
-- SessionStart: `bd prime --hook-json`
 - pre-commit (git): <qué corre>
 
 ## Mapa
@@ -93,16 +92,18 @@ El lint no cuenta las líneas del bloque de bd.
 7. Un cambio que solo toca espacios no cuenta como regla propia.
 8. El comando devuelve cada bloque editado a su original, y bd lo refresca en el mismo lugar.
 9. El comando saca el bloque de bd de `CLAUDE.md`.
-10. El comando corre `bd setup claude`, `bd hooks install` y `bd setup claude --check`.
+10. El comando corre `bd setup claude` y `bd hooks install`.
+11. El comando saca de `settings.json` los hooks `bd ...`, porque `bd prime` contradice las reglas propias.
+12. El comando exige un solo bloque de bd en `AGENTS.md`. `bd setup claude --check` exige el hook, y el comando no lo corre.
 
 Garantías:
 
 - Los bytes fuera de los bloques de bd quedan intactos.
 - Una segunda corrida no cambia ningún byte.
 - Un bloque editado sin original en git corta la corrida con código 2, antes de escribir.
-- bd administra sus propios hooks: comandos `bd ...` en `settings.json` y secciones con marcadores en `.git/hooks`.
+- bd administra sus secciones con marcadores en `.git/hooks`. `settings.json` no guarda comandos `bd ...`.
 - Todo hook que no es de bd queda igual. Si bd lo cambia, el comando restaura `settings.json` y sale con código 1.
-- bd tiene el hash del marcador como `sha256(cuerpo.strip())[:8]`. `bd setup claude --check` mira solo ese hash.
+- bd tiene el hash del marcador como `sha256(cuerpo.strip())[:8]`. `bd setup claude` refresca solo un hash viejo.
 - Los bloques del SDLC usan el mismo formato y el mismo hash que bd: `<!-- BEGIN SDLC <nombre> v:1 hash:<h> -->`.
 - Las líneas reintegradas no llevan marcas, porque son texto del usuario.
 - El hash de una marca usa el interior con saltos LF. La escritura conserva el salto del archivo, LF o CRLF.
