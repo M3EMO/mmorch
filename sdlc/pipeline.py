@@ -196,7 +196,7 @@ def _agent_run(argv: list[str], prompt: str | None, env: dict, timeout: float) -
 
 def _claude_texto(model: str, prompt: str, env: dict, timeout: float, *, tools: str, rol: str,
                   system: str | None = None) -> tuple[str, float]:
-    """`claude -p` headless, aislado (--restricted ignora los settings y hooks del usuario; sin MCP ni sesion).
+    """`claude -p` headless, aislado (--restricted saca las tools que corren codigo; sin MCP ni sesion).
     Devuelve (texto, US$ equivalentes de cupo). `tools=""` = sin herramientas: solo texto (rol coder)."""
     from mmorch.claude_exec import claude_bin
     argv = claude_bin() + ["-p", "--model", model, "--restricted", "--strict-mcp-config", "--tools", tools,
@@ -1264,10 +1264,12 @@ def reasoner_rounds(log) -> tuple[bool, str]:
 def _revisor(prompt: str, *, mode: str = "edit", timeout: float | None = None) -> dict:
     """Ticket 11: el agente que revisa y corrige es configurable por repo (`reviewer_cmd` en sdlc.toml, prompt por
     stdin); sin esa clave manda la seam de mmorch (`claude -p` por default, env MMORCH_EXECUTOR)."""
-    from mmorch.claude_exec import CmdExecutor, get_executor
+    from mmorch.claude_exec import ClaudeCliExecutor, CmdExecutor, get_executor
     os.environ.pop("CLAUDECODE", None)  # ponytail: el CLI no anida dentro de una sesion Claude Code
     cmd = CFG.get("reviewer_cmd")
     ex = CmdExecutor(str(cmd)) if cmd else get_executor()
+    if isinstance(ex, ClaudeCliExecutor):  # orchestration-xdi: sin settings del usuario no corren sus hooks ni plugins
+        ex = ClaudeCliExecutor(("--setting-sources", "project,local"))
     r = ex.run(prompt, str(WT), mode=mode, timeout=float(timeout or CFG["cmd_timeout_s"]))
     return {"ok": r.ok, "result": r.result, "returncode": r.returncode, "steps": r.steps}
 
@@ -1424,6 +1426,29 @@ def _archivar_spec() -> None:
     ficha = _ficha()
     if ficha:
         _write(f"docs/specs/{_slug() or 'sdlc'}/ficha.md", ficha.read_text(encoding="utf-8"))
+
+
+# Mesa de trabajo de docs/sdlc/: la review branch la conserva (run-log.json es el checkpoint de from_stage); main no.
+MESA = ("spec.md", "plan.md", "delta.md", "bajas.md", "division.md", "run-log.json", "suite.log", "suite-baseline.log",
+        "supervision.md")
+
+
+def mergear(repo: str, rama: str, mensaje: str | None = None) -> tuple[bool, str]:
+    """orchestration-eeq: fusiona la review branch sin la mesa; la etapa 6 ya archivo spec y plan en docs/specs/.
+    Un choque solo en la mesa se resuelve sacandola; cualquier otro choque aborta el merge."""
+    def g(*a: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", repo, *a], capture_output=True, text=True)
+    mesa = [f"docs/sdlc/{n}" for n in MESA]
+    mg = g("merge", "--no-ff", "--no-commit", rama)
+    en_merge = g("rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0
+    choques = set(g("diff", "--name-only", "--diff-filter=U").stdout.split()) - set(mesa)
+    if not en_merge or choques:
+        if en_merge:
+            g("merge", "--abort")
+        return False, (mg.stdout + mg.stderr)[-400:]
+    g("rm", "-r", "-q", "-f", "--ignore-unmatch", "--", *mesa)
+    c = g("commit", "-q", "--no-edit", *(["-m", mensaje] if mensaje else []))
+    return c.returncode == 0, (c.stdout + c.stderr)[-400:]
 
 
 def _ficha() -> pathlib.Path | None:
@@ -2597,8 +2622,9 @@ def _globs_iniciales(root: pathlib.Path) -> tuple[list[str], list[str]]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: `python -m sdlc init [--upgrade]|doctor|areas|propiedades|bd|lint-md <repo>` y
-    `python -m sdlc specs --chequear|--regenerar [repo]` (pre-commit de sdd-fase-2 ticket 06: chequear nunca escribe).
+    """CLI: `python -m sdlc init [--upgrade]|doctor|areas|propiedades|bd|lint-md <repo>`,
+    `python -m sdlc specs --chequear|--regenerar [repo]` (pre-commit de sdd-fase-2 ticket 06: chequear nunca escribe) y
+    `python -m sdlc mergear <repo> <review_branch>` (merge sin la mesa de docs/sdlc/).
     El modo bench vive en mmorch (`python -m mmorch.sdlc_bench`)."""
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["specs"] and argv[1:2] in (["--chequear"], ["--regenerar"]):
@@ -2609,6 +2635,10 @@ def main(argv: list[str] | None = None) -> int:
         errores = areas.chequear(repo)
         print("\n".join(errores) if errores else "specs al dia")
         return 1 if errores else 0
+    if argv[:1] == ["mergear"] and len(argv) == 3:
+        ok, salida = mergear(argv[1], argv[2])
+        print(salida.strip() or ("mergeado sin docs/sdlc/" if ok else "merge fallido"))
+        return 0 if ok else 1
     if argv[:1] in (["bd"], ["lint-md"]):
         from . import agentes
         return agentes.main(argv)
@@ -2617,7 +2647,7 @@ def main(argv: list[str] | None = None) -> int:
         return convenciones.main(argv)
     if argv[:1] != ["init"]:
         print("uso: python -m sdlc init [--upgrade]|doctor|areas|propiedades|bd|lint-md <repo> | "
-              "python -m sdlc specs --chequear|--regenerar [repo]", file=sys.stderr)
+              "python -m sdlc specs --chequear|--regenerar [repo] | python -m sdlc mergear <repo> <rama>", file=sys.stderr)
         return 2
     print(json.dumps(init(argv[1] if len(argv) > 1 else "."), ensure_ascii=False))
     return 0

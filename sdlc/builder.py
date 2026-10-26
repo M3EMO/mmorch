@@ -70,7 +70,7 @@ def bootstrap(repo: pathlib.Path, archivos: dict[str, pathlib.Path]) -> str:
 
 def construir(repo: pathlib.Path, modulos: list[dict], wts: pathlib.Path) -> list[dict]:
     """Cada modulo por el SDLC; el construido se fusiona en main y el siguiente parte de ahi (hueco 3 del ticket 02)."""
-    from .pipeline import StageFailed, build_feature
+    from .pipeline import StageFailed, build_feature, mergear
     filas = []
     for m in modulos:
         t0, fase = time.time(), f"builder-{m['nombre']}"
@@ -87,11 +87,10 @@ def construir(repo: pathlib.Path, modulos: list[dict], wts: pathlib.Path) -> lis
         if st.get("status") != "built":
             fila["nota"] = (st.get("failed_note") or "")[:400]
             break
-        mg = _git(repo, "merge", "--no-ff", "-m", f"builder: integra {m['nombre']}", f"sdlc/{fase}")
+        ok, salida = mergear(str(repo), f"sdlc/{fase}", f"builder: integra {m['nombre']}")
         _git(repo, "worktree", "remove", "--force", str(wts / m["nombre"]))
-        if mg.returncode:
-            fila.update(status="merge_failed", nota=(mg.stdout + mg.stderr)[-400:])
-            _git(repo, "merge", "--abort")
+        if not ok:
+            fila.update(status="merge_failed", nota=salida)
             break
     return filas
 

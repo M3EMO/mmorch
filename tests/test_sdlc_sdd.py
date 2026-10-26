@@ -42,3 +42,48 @@ def test_write_no_sale_del_worktree(tmp_path):
     assert not (tmp_path / "fuera.py").exists() and not (tmp_path / "abs.py").exists()
     S._write("pkg/a.py", "x = 1")
     assert (tmp_path / "wt/pkg/a.py").exists()
+
+
+def test_mergear_deja_la_mesa_fuera_de_main(tmp_path):
+    """orchestration-eeq: main recibe codigo y docs/specs/; la review branch conserva docs/sdlc/ para reanudar."""
+    import subprocess
+    from sdlc.pipeline import mergear
+
+    def g(*a):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=tmp_path, check=True,
+                              capture_output=True, text=True).stdout
+
+    def escribir(archivos):
+        for rel, txt in archivos.items():
+            (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / rel).write_text(txt, encoding="utf-8")
+        g("add", "-A")
+
+    g("init", "-q", "-b", "main")
+    escribir({"a.py": "x = 1\n", "docs/sdlc/run-log.json": "{\"viejo\": 1}\n", "docs/sdlc/features/f.md": "ficha\n"})
+    g("commit", "-q", "-m", "base con mesa vieja")
+    g("checkout", "-q", "-b", "sdlc/f")
+    escribir({"b.py": "y = 2\n", "docs/sdlc/run-log.json": "{\"stage\": 6}\n", "docs/sdlc/spec.md": "spec\n",
+              "docs/sdlc/suite.log": "ok\n", "docs/specs/f/spec.md": "spec\n"})
+    g("commit", "-q", "-m", "feature")
+    g("checkout", "-q", "main")
+    escribir({"docs/sdlc/run-log.json": "{\"otro\": 1}\n"})  # choque solo en la mesa: se resuelve sacandola
+    g("commit", "-q", "-m", "otra corrida")
+
+    ok, salida = mergear(str(tmp_path), "sdlc/f", "integra f")
+    assert ok, salida
+    en_main = set(g("ls-files").split())
+    assert {"a.py", "b.py", "docs/specs/f/spec.md", "docs/sdlc/features/f.md"} <= en_main
+    assert not {f"docs/sdlc/{n}" for n in ("run-log.json", "spec.md", "suite.log")} & en_main
+    assert not (tmp_path / "docs/sdlc/run-log.json").exists()
+    assert "docs/sdlc/run-log.json" in g("ls-tree", "-r", "--name-only", "sdlc/f").split()
+    assert g("log", "-1", "--format=%s").strip() == "integra f"
+
+    g("checkout", "-q", "-b", "sdlc/choque", "HEAD~1")
+    escribir({"a.py": "x = 3\n"})
+    g("commit", "-q", "-m", "choque en codigo")
+    g("checkout", "-q", "main")
+    escribir({"a.py": "x = 4\n"})
+    g("commit", "-q", "-m", "main cambia a.py")
+    assert not mergear(str(tmp_path), "sdlc/choque")[0]
+    assert g("status", "--porcelain") == ""  # el choque fuera de la mesa aborta y deja main limpio

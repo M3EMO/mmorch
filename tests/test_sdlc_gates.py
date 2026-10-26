@@ -244,6 +244,19 @@ def test_reviewer_configurable_por_repo(tmp_path, monkeypatch):
     assert S._revisor("x")["result"] == "seam" and llamado[0]["mode"] == "edit"
 
 
+def test_revisor_claude_sin_settings_del_usuario(tmp_path, monkeypatch):
+    """orchestration-xdi: el `claude -p` del revisor no carga los settings del usuario (hooks como el Stop ETS)."""
+    import mmorch.claude_exec as CE
+    t = types.SimpleNamespace(name="rev", task="t", accept_files={})
+    S.configure(t, contract=[], feat={"repo": str(tmp_path), "files": ["a.py"], "suite": []}, wt=tmp_path)
+    S.CFG.pop("reviewer_cmd", None)
+    monkeypatch.delenv("MMORCH_EXECUTOR", raising=False)
+    visto = {}
+    monkeypatch.setattr(CE, "run_claude", lambda prompt, cwd, **k: visto.update(k) or {"ok": True})
+    assert S._revisor("x")["ok"]
+    assert visto["extra_args"] == ("--setting-sources", "project,local")
+
+
 def _repo_git(wt):
     (wt / "pkg").mkdir(parents=True)
     (wt / "pkg" / "viejo.py").write_text("def f(x):\n    return x\n", encoding="utf-8")

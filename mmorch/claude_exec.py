@@ -38,14 +38,14 @@ _PERM = {"plan": "plan", "edit": "acceptEdits", "read": "plan"}
 
 
 def run_claude(prompt: str, cwd: str, *, mode: str = "plan", timeout: float = 600.0,
-               job_id: str = "", model: str | None = None) -> dict:
+               job_id: str = "", model: str | None = None, extra_args: tuple[str, ...] = ()) -> dict:
     """Corre claude -p headless en `cwd` sobre el PLAN. Streamea tool-uses al bus.
     Devuelve {ok, result, returncode, steps}. mode 'plan'=read-only, 'edit'=acceptEdits."""
     if not os.path.isdir(cwd):
         return {"ok": False, "result": f"cwd inexistente: {cwd}", "returncode": None, "steps": 0}
     pm = _PERM.get(mode, "plan")
     argv = claude_bin() + ["-p", "--output-format", "stream-json", "--verbose",
-                           "--permission-mode", pm]
+                           "--permission-mode", pm, *extra_args]
     if model:
         argv += ["--model", model]
     emit("job", "running", job_id=job_id, node=f"claude:{mode}", detail=f"cwd={os.path.basename(cwd)}")
@@ -128,9 +128,13 @@ class ClaudeCliExecutor:
     """Backend actual: delega en run_claude (claude -p headless). Delegar — y no mover el
     codigo — mantiene monkeypatcheable run_claude en los tests existentes."""
 
+    def __init__(self, extra_args: tuple[str, ...] = ()):
+        self.extra_args = extra_args
+
     def run(self, prompt: str, cwd: str, *, mode: str = "plan", timeout: float = 600.0,
             job_id: str = "", model: str | None = None) -> ExecResult:
-        r = run_claude(prompt, cwd, mode=mode, timeout=timeout, job_id=job_id, model=model)
+        r = run_claude(prompt, cwd, mode=mode, timeout=timeout, job_id=job_id, model=model,
+                       extra_args=self.extra_args)
         # .get con defaults: los fakes de tests devuelven dicts parciales ({"ok": True})
         return ExecResult(ok=bool(r.get("ok")), result=str(r.get("result", "")),
                           returncode=r.get("returncode"), steps=int(r.get("steps", 0)))

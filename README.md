@@ -298,7 +298,7 @@ the gate scored 0.744 before `orchestration-6qb` and 1.00 after.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **119 módulos · 44 MCP tools (15 expuestas por default) · 1199 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
+_Auto-generado por `mmorch.docgen`._ **119 módulos · 44 MCP tools (15 expuestas por default) · 1201 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
