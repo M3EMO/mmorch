@@ -44,12 +44,11 @@ def ensemble_verify(
     FALLA si >= min_veto verificadores refutan. min_veto=1 = el mas esceptico
     (un solo veto invalida). Sube true-negatives (anti-sicofancia mas fuerte).
 
-    NOTA familias: con solo deepseek+zhipu activos, el ensemble usa varios glm
-    vs gen deepseek (cross-family OK, pero diversidad ENTRE verificadores limitada).
-    Activar mas familias (Kimi, etc.) decorrelaciona mejor (research: error
+    NOTA familias: con deepseek + anthropic (Haiku por API) activos, el default
+    es un verificador por familia. Mas familias decorrelacionan mejor (research: error
     correlacionado por confounders compartidos).
     """
-    verifier_models = verifier_models or [DEFAULT_VERIFIER, "glm-4.5-air"]
+    verifier_models = verifier_models or [DEFAULT_VERIFIER, "claude-haiku-5-5"]
     # Calls independientes -> paralelas; map preserva el orden de verdicts por indice.
     with ThreadPoolExecutor(max_workers=len(verifier_models)) as ex:
         verdicts = list(ex.map(
@@ -133,7 +132,7 @@ def pair_verify(artifact: str, *, rubric: str, gen_model: str = DEFAULT_GENERATO
     """2 jueces cross-family con fast-path de costo y desacuerdo explicito.
     `verify_fn(artifact, rubric, gen_model, verifier_model)->Verdict` inyectable
     (self-check cero-costo); default = adversarial_verify."""
-    verifier_models = verifier_models or ["glm-5.2", "glm-4.5-air"]
+    verifier_models = verifier_models or [DEFAULT_VERIFIER, "claude-haiku-5-5"]   # 2026-10-26: zhipu sin saldo
     if verify_fn is None:
         def verify_fn(a, r, g, v):
             return adversarial_verify(a, rubric=r, gen_model=g, verifier_model=v)

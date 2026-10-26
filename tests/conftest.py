@@ -7,6 +7,9 @@ import tempfile
 # logs reales, el bandit de ruteo y el vault (auditoria 2026-10-26). Los subprocess heredan el env.
 os.environ["MMORCH_HOME"] = tempfile.mkdtemp(prefix="mmorch-test-")
 atexit.register(shutil.rmtree, os.environ["MMORCH_HOME"], True)
+# Un test sin mock no gasta: la CLI real (cupo) falla rapido y la clave vacia gana a .env (dotenv no pisa el env).
+os.environ["MMORCH_CLAUDE_BIN"] = "false"
+os.environ["ANTHROPIC_API_KEY"] = ""
 
 import pytest  # noqa: E402
 

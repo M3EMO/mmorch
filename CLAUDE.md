@@ -29,8 +29,8 @@ Reload Claude Code para cargar tools nuevos.
 - **Anti-reward-hacking.** En `hillclimb`, `score` = checker o comando — nunca LLM-judge.
 - **Observabilidad.** Cada nodo loggea a `logs/metrics.jsonl`. Sin metricas no hay
   break-even.
-- **Modelos.** Roles y precios: `mmorch/config.py`. Aca solo el invariante de
-  familias: bulk y verificador no comparten familia.
+- **Modelos.** Roles y precios: `mmorch/config.py`. Desde 2026-10-26, Haiku 5.5
+  reemplaza a zhipu (sin saldo) por API, en dolares y sin cupo.
 
 ## SDLC = builder, mmorch = banco
 - El pipeline de 6 etapas vive en el paquete `sdlc/` (decision del usuario 2026-10-22). Construye; no mide.

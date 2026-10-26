@@ -24,16 +24,18 @@ class ModelSpec:
                             # ej (("thinking", {"type": "disabled"}),) pa DeepSeek V4
 
 
-# OpenAI-compatible endpoints. Anthropic/Opus is NOT here on purpose: it is the
-# orchestrator (Claude Code itself / cupo), never invoked as an external node.
+# OpenAI-compatible endpoints. Opus is NOT here on purpose: it is the orchestrator
+# (Claude Code itself / cupo), never invoked as an external node. Haiku si es nodo: provider
+# "anthropic" por la Messages API con ANTHROPIC_API_KEY, en dolares y sin cupo (usuario 2026-10-26).
 REGISTRY: dict[str, ModelSpec] = {
-    # Keys internas estables (no romper brazos del bandit); model_id EXPLICITO v4 —
-    # los alias deepseek-chat/reasoner ya no figuran en /models (deprecacion probable).
+    # Keys internas estables (no romper brazos del bandit). model_id = nombre vigente:
+    # /models (2026-10-15) solo lista deepseek-flash y deepseek-v4-pro; deepseek-chat,
+    # deepseek-reasoner y deepseek-v4-flash son alias de deepseek-flash.
     "deepseek-chat": ModelSpec(
         key="deepseek-chat",
         family="deepseek",
         provider="deepseek",
-        model_id="deepseek-v4-flash",      # explicito; thinking APAGADO pa bulk
+        model_id="deepseek-flash",         # V4.1 Flash; thinking APAGADO pa bulk
         base_url="https://api.deepseek.com/v1",
         api_key_env="DEEPSEEK_API_KEY",
         price_in=0.14,
@@ -45,12 +47,13 @@ REGISTRY: dict[str, ModelSpec] = {
         key="deepseek-reasoner",
         family="deepseek",
         provider="deepseek",
-        model_id="deepseek-v4-flash",      # explicito; thinking default (razonamiento)
+        model_id="deepseek-flash",         # V4.1 Flash; thinking PRENDIDO explicito
         base_url="https://api.deepseek.com/v1",
         api_key_env="DEEPSEEK_API_KEY",
         price_in=0.14,
         price_out=0.28,
         role="independent reasoning/audit (thinking)",
+        extra_body=(("thinking", {"type": "enabled"}),),
     ),
     "deepseek-v4-pro": ModelSpec(
         key="deepseek-v4-pro",
@@ -213,17 +216,30 @@ REGISTRY: dict[str, ModelSpec] = {
         price_out=0.90,
         role="juez visual de sprites (sombra, ticket 15)",
     ),
+    # 2026-10-26: reemplaza a zhipu (cuenta sin saldo, 429 desde 2026-10-16). Precio hasta 100k tokens
+    # de prompt (0.50/2.50 arriba), cache 2026-10-06 de la skill claude-api: reverificar.
+    "claude-haiku-5-5": ModelSpec(
+        key="claude-haiku-5-5",
+        family="anthropic",
+        provider="anthropic",
+        model_id="claude-haiku-5-5",
+        base_url=None,
+        api_key_env="ANTHROPIC_API_KEY",
+        price_in=0.10,
+        price_out=0.50,
+        role="router, encoder de babel, juez visual y verificador de ensemble",
+    ),
 }
 
 # Default node assignments for the MVP slice.
-DEFAULT_GENERATOR = "deepseek-chat"        # -> deepseek-v4-flash no-thinking
+DEFAULT_GENERATOR = "deepseek-chat"        # -> deepseek-flash no-thinking
 DEFAULT_VERIFIER = "deepseek-reasoner"     # GOAL 2026-10-07: familia libre; el mejor medido y el mas barato (glm-5.2 ~17x)
 CHECKABLE_VERIFIER = "deepseek-reasoner"   # checkeable sin oraculo: el mejor MEDIDO (n=350, acc. bal. 0.997); same-family permitido ahi
-DEFAULT_ROUTER = "glm-4.5-air"              # 2026-09-22: el zhipu mas barato; google fuera
+DEFAULT_ROUTER = "claude-haiku-5-5"         # 2026-10-26: zhipu sin saldo; Haiku por API
 
 # Candidate generator pool the intuition layer (signature-keyed bandit) picks among when
 # routing is left to it. Bare valid REGISTRY keys only, spanning families (decorrelate).
-DEFAULT_INTUITION_POOL = ["deepseek-chat", "deepseek-v4-pro", "glm-5.2"]  # 2026-09-22: sin google
+DEFAULT_INTUITION_POOL = ["deepseek-chat", "deepseek-v4-pro", "claude-haiku-5-5"]  # 2026-10-26: sin zhipu
 
 
 def family_of(model_key: str) -> str:

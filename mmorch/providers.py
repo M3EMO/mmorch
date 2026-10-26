@@ -237,6 +237,66 @@ def _client(model_key: str) -> "OpenAI":
     return _CLIENTS[cache_key]
 
 
+def _claude_bloques(content) -> list[dict]:
+    """Contenido OpenAI -> bloques de Anthropic. Las imagenes llegan como data:<tipo>;base64,<datos> (sprites, juez_sombra)."""
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    bloques = []
+    for parte in content:
+        if parte["type"] == "image_url":
+            tipo, datos = parte["image_url"]["url"][5:].split(";base64,")
+            bloques.append({"type": "image", "source": {"type": "base64", "media_type": tipo, "data": datos}})
+        else:
+            bloques.append(parte)
+    return bloques
+
+
+_ANTHROPIC = None
+
+
+def _call_anthropic(model_key: str, family: str, model_id: str, key_env: str, messages: list[dict], *,
+                    pattern: str, node: str, phase: str, max_tokens: int | None, timeout: float,
+                    off_peak: bool) -> CallResult:
+    """Messages API con el SDK oficial: cobra dolares de ANTHROPIC_API_KEY, nunca cupo. Sin temperature
+    (la API la rechaza desde 2026-10-21); thinking y effort quedan en el default del modelo."""
+    global _ANTHROPIC
+    import anthropic
+    if not os.getenv(key_env):
+        raise MissingKeyError(f"env var {key_env} not set (needed for {model_key}). "
+                              f"Put it in ~/.claude/orchestration/.env")
+    if _ANTHROPIC is None:
+        _ANTHROPIC = anthropic.Anthropic()
+    system = "\n\n".join(str(m["content"]) for m in messages if m["role"] == "system")
+    msgs = [{"role": m["role"], "content": _claude_bloques(m["content"])} for m in messages if m["role"] != "system"]
+    t0 = time.perf_counter()
+    try:
+        resp = _ANTHROPIC.messages.create(model=model_id, max_tokens=max_tokens or 16384, messages=msgs,  # type: ignore[arg-type]
+                                          timeout=timeout, system=system or anthropic.omit)
+    except Exception as e:
+        _breaker_record(model_key, ok=False)
+        log_event(pattern=pattern, node=node, model=model_key, family=family, in_tokens=0, out_tokens=0,
+                  cost_usd=0.0, latency_s=time.perf_counter() - t0, phase=phase, error=type(e).__name__,
+                  error_msg=str(e)[:200], error_class=_classify_error(e), off_peak=off_peak)
+        raise
+    _breaker_record(model_key, ok=True)
+    latency = time.perf_counter() - t0
+    u = resp.usage
+    cached = u.cache_read_input_tokens or 0
+    in_tok = u.input_tokens + cached + (u.cache_creation_input_tokens or 0)
+    c = cost_usd(model_key, in_tok, u.output_tokens, cached)
+    _track_cost(c)
+    log_event(pattern=pattern, node=node, model=model_key, family=family, in_tokens=in_tok, out_tokens=u.output_tokens,
+              cost_usd=c, latency_s=latency, phase=phase, cached_tokens=cached, off_peak=off_peak)
+    text = "".join(b.text for b in resp.content if b.type == "text")
+    if resp.stop_reason == "refusal":
+        raise RuntimeError(f"{model_key}: rechazo ({getattr(resp.stop_details, 'category', None)})")
+    if not text.strip():   # "respuesta vac": pipeline.llm matchea ese texto para reintentar con el coder
+        raise RuntimeError(f"{model_key}: respuesta vacía (stop_reason={resp.stop_reason}, max_tokens={max_tokens}); "
+                           "subir max_tokens")
+    return CallResult(model_key=model_key, family=family, text=text, in_tokens=in_tok, out_tokens=u.output_tokens,
+                      cost_usd=c, latency_s=latency, model_version=resp.model)
+
+
 def call(
     model_key: str,
     messages: list[dict] | str,
@@ -303,6 +363,11 @@ def call(
                   error=type(e).__name__, error_msg=str(e)[:200], error_class="breaker_open",
                   off_peak=off_peak)
         raise
+
+    if s.provider == "anthropic":
+        return _call_anthropic(effective_model, s.family, s.model_id, s.api_key_env, messages, pattern=pattern,
+                               node=node or effective_model, phase=phase, max_tokens=max_tokens, timeout=timeout,
+                               off_peak=off_peak)
 
     client = _client(effective_model)
     if s.extra_body:

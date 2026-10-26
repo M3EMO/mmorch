@@ -27,7 +27,7 @@ from mmorch.paths import logs_dir
 
 CRITERIOS = ("silueta legible al tamano objetivo", "paleta coherente con la referencia",
              "luz y sombra consistentes", "lectura clara a la distancia de juego")
-JUEZ = "glm-4.6v"   # orchestration-0a6: sin gemini; zhipu con vision
+JUEZ = "claude-haiku-5-5"   # 2026-10-26: zhipu sin saldo; Haiku con vision por API
 ESCALA = 8          # vecino-mas-cercano: un sprite de 32px viaja como 256px
 MIN_ITEMS = 50      # ticket 15 D3: antes de confiar en el juez
 KAPPA_MIN = 0.6

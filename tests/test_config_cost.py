@@ -26,5 +26,6 @@ def test_default_verifiers_reason():
 
 
 def test_anthropic_not_a_node():
-    # Opus es el orquestador, NUNCA un nodo externo -> no debe estar en REGISTRY.
-    assert not any(s.family == "anthropic" for s in REGISTRY.values())
+    # Opus es el orquestador, NUNCA un nodo externo. Haiku si: por la Messages API (decision del usuario 2026-10-26).
+    anthropic = [s for s in REGISTRY.values() if s.family == "anthropic"]
+    assert all(s.provider == "anthropic" and "opus" not in s.model_id for s in anthropic)
