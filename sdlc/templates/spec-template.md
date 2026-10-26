@@ -10,6 +10,8 @@ Cada archivo, clase y metodo con firma y tipos exactos. Paths exactos.
 ## Requisitos
 
 Uno por linea. Comportamiento observable, no implementacion. Sin marcadores pendientes.
+Marca `[prop]` pegada al ID (`- R3 [prop]: <regla>`) cuando la regla vale para un conjunto de entradas generable, con
+disparador o sin el: ese requisito tiene un test de propiedades (`test_R3_prop_...`). Sin propiedades, sin marcas.
 
 - R1: <regla de comportamiento con su orden de evaluacion>
 - R2: <...>

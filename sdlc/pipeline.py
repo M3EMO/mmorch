@@ -32,6 +32,8 @@ from mmorch.gates import clarificaciones, en_techo, filas_tabla, plan_allowlist,
 from mmorch.paths import logs_dir
 from mmorch.providers import call, register_run_tracker, unregister_run_tracker
 
+from . import areas, propiedades
+
 # Globals de corrida: los fija configure() (antes venian de argv). Ninguna funcion los lee antes de configure().
 TASK_NAME = ""
 WT = pathlib.Path(".")
@@ -70,6 +72,7 @@ def _file_re() -> str:
 def _es_py(f: str) -> bool:
     return f.endswith(".py")
 TPL = pathlib.Path(__file__).resolve().parent / "templates"  # spec-kit recortado (tickets 02 y 11)
+_ORCH = pathlib.Path(__file__).resolve().parents[1]   # bd de respaldo para los archivos fuera de area (ticket 01)
 
 
 def _toml(root) -> dict:
@@ -85,22 +88,23 @@ def _cfg():
          "approve_accept": True}
     if FEAT and FEAT.get("repo"):
         d.update(_toml(FEAT["repo"]))  # sdlc.toml recien adoptado y sin commitear: el worktree (HEAD) aun no lo tiene
-    d.update(_toml(WT))
-    legacy = WT / "docs" / "sdlc" / "sdlc.toml"
-    if legacy.exists():
-        import tomllib
-        d.update(tomllib.loads(legacy.read_text(encoding="utf-8")))
+    d.update(_toml(WT))  # docs/sdlc/sdlc.toml ya no se lee: pisaba la raiz sin aviso (repos-convenciones 03)
     return d
 
 
 def _repo_python() -> str:
     """Interprete del repo (ticket 12): `python` de sdlc.toml, o el venv sembrado en el worktree (el server siembra
     .venv/venv), o el de mmorch. Sin esto la suite de un repo con dependencias propias corre con el Python equivocado."""
-    for c in ([CFG["python"]] if CFG.get("python") else []) + [
+    return _python_de(WT, CFG) or sys.executable
+
+
+def _python_de(root, cfg: dict) -> str | None:
+    """Regla unica del interprete de un repo: la usan el pipeline y `sdlc propiedades` (repos-convenciones 09)."""
+    for c in ([cfg["python"]] if cfg.get("python") else []) + [
             ".venv/Scripts/python.exe", ".venv/bin/python", "venv/Scripts/python.exe", "venv/bin/python"]:
-        if (WT / c).exists():
-            return str(WT / c)
-    return sys.executable
+        if (pathlib.Path(root) / c).exists():
+            return str(pathlib.Path(root) / c)
+    return None
 
 
 CFG: dict = {}
@@ -481,13 +485,74 @@ def _mutantes_texto(code: str, max_n: int = 8, lineas: set[int] | None = None) -
     return out
 
 
-def _accept_mata() -> bool:
-    """True si la aceptacion FALLA con el mutante puesto (mutante muerto)."""
-    if TASK.accept_files and all(_es_py(f) for f in TASK.accept_files):
-        ok, _ = sh([PY, "-m", "pytest", *_accept_paths(), "-q", "-x", "-p", "no:cacheprovider"])
+def _accept_mata() -> tuple[bool, list[str] | None]:
+    """(mutante muerto = la aceptacion FALLA, tests que fallaron o None si el runner no da JUnit). Sin -x: una
+    propiedad corre aunque el ejemplo falle primero (ticket 09). Dentro de los mutantes, el perfil de 20 ejemplos."""
+    files = _accept_paths() if TASK.accept_files and all(_es_py(f) for f in TASK.accept_files) else []
+    ok, _, res = _corre_con_junit(files, mut=True)
+    return not ok, (sorted(t for t, paso in res.items() if not paso) if res is not None else None)
+
+
+def _corre_con_junit(files: list[str], *, mut: bool = False) -> tuple[bool, str, dict[str, bool] | None]:
+    """Corre `files` con pytest, o el comando de aceptacion del repo, con reporte JUnit (ticket 10: un solo parser).
+    Devuelve (ok, log, {test: paso}); None = el runner no da JUnit."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="sdlc-junit-"))
+    xml = d / "junit.xml"
+    if files and all(_es_py(f) for f in files):
+        ok, log = sh([PY, "-m", "pytest", *files, "-q", "-p", "no:cacheprovider", f"--junitxml={xml}", *_prop_args(mut)],
+                     mounts=(str(d),))
     else:
-        ok, _ = sh(str(ACCEPT_CMD or CFG.get("accept_cmd") or "false"))
-    return not ok
+        base = _cmd_prop(str(ACCEPT_CMD or CFG.get("accept_cmd") or "false"), mut)
+        ok, log = sh(propiedades.con_junit(base, str(xml)) or base, mounts=(str(d),))
+    res = propiedades.junit(xml) if xml.is_file() else None
+    shutil.rmtree(d, ignore_errors=True)
+    return ok, log, res
+
+
+def _prop_args(mut: bool = False) -> list[str]:
+    """pytest carga el perfil de Hypothesis (archivo auxiliar) con la semilla del sha base (ticket 10)."""
+    p = state.get("propiedades") or {}
+    if p.get("libreria") != "hypothesis":
+        return []
+    aux = propiedades.AUX_PY_MUT if mut else propiedades.AUX_PY
+    return ["-p", aux.removesuffix(".py"), f"--hypothesis-seed={p['semilla']}"]
+
+
+def _cmd_prop(cmd: str, mut: bool = False) -> str:
+    """`node ...` carga el perfil de fast-check con --import (ticket 10)."""
+    return propiedades.con_aux_node(cmd, mut) if (state.get("propiedades") or {}).get("libreria") == "fast-check" else cmd
+
+
+def _preparar_propiedades() -> None:
+    """Ticket 10: la libreria se detecta por codigo (Hypothesis en Python, fast-check en TypeScript/JavaScript). Sin
+    libreria, la corrida sigue sin propiedades y el run-log lo anota. Con libreria, semilla del sha base y perfil en
+    archivos auxiliares del worktree, ignorados por git (.git/info/exclude): el repo no cambia."""
+    lang, seed = _lenguaje(), propiedades.semilla(_sha_corrida())
+    falta = {"Python": "hypothesis", "TypeScript": "fast-check", "JavaScript": "fast-check"}.get(lang)
+    if falta == "hypothesis":
+        lib = falta if sh([PY, "-c", "import hypothesis"])[0] else None
+    else:
+        lib = falta if falta and (WT / "node_modules" / "fast-check").exists() else None
+    state["propiedades"] = {"libreria": lib, "semilla": seed}
+    if not lib:
+        state["propiedades"]["nota"] = (f"sin {falta}: la corrida sigue sin propiedades (adopcion: orchestration-4u6)"
+                                        if falta else f"{lang}: sin libreria de propiedades")
+        return
+    nombres = propiedades.escribir_aux(WT, seed, lib)
+    ex = subprocess.run(["git", "rev-parse", "--git-path", "info/exclude"], cwd=WT, capture_output=True, text=True).stdout.strip()
+    if ex:
+        p = WT / ex
+        p.parent.mkdir(parents=True, exist_ok=True)
+        previo = p.read_text(encoding="utf-8") if p.exists() else ""
+        nuevos = [n for n in nombres if n not in previo.split()]
+        if nuevos:
+            p.write_text(previo + ("" if previo.endswith("\n") or not previo else "\n") + "\n".join(nuevos) + "\n", encoding="utf-8")
+
+
+def _sha_corrida() -> str:
+    """Sha corto del commit base de la corrida: semilla de las propiedades y nombre del delta archivado."""
+    sha = state.get("sha_corrida") or state.get("base_sha") or "HEAD"
+    return subprocess.run(["git", "rev-parse", "--short", sha], cwd=WT, capture_output=True, text=True).stdout.strip() or sha
 
 
 _COBERTURA = r'''
@@ -523,7 +588,7 @@ def _cobertura(files: list[str]) -> dict[str, tuple[int, list[int]]] | None:
     3.12+). None = no se pudo medir (interprete viejo o la aceptacion no corre)."""
     destino = pathlib.Path(tempfile.mkdtemp()) / "cobertura.json"
     ok, _ = sh([PY, "-c", _COBERTURA, str(destino), json.dumps([str(WT / f) for f in files]),
-                *_accept_paths(), "-q", "-p", "no:cacheprovider"], mounts=(str(destino.parent),))
+                *_accept_paths(), "-q", "-p", "no:cacheprovider", *_prop_args()], mounts=(str(destino.parent),))
     if not ok or not destino.exists():
         return None
     datos = json.loads(destino.read_text(encoding="utf-8"))
@@ -619,6 +684,7 @@ def gate_mutacion() -> tuple[bool, str]:
         cambiadas = _lineas_cambiadas(f)
         muts = _mutants(orig, max_n=8, lineas=cambiadas) if _es_py(f) else _mutantes_texto(orig, max_n=8, lineas=cambiadas)
         por_archivo.append([(f, orig, m) for m in muts])
+    mutantes: list[dict] = []   # ticket 09: por mutante, que tests fallaron (atribucion sobre las mismas corridas)
     for f, orig, m in (x for ronda in itertools.zip_longest(*por_archivo) for x in ronda if x):  # de a uno por archivo
         if tope is not None and total >= tope:
             break
@@ -628,8 +694,9 @@ def gate_mutacion() -> tuple[bool, str]:
             if not _es_py(f) and compile_cmd and not _compila(_cmd("compile_cmd", [f]))[0]:
                 continue  # mortinato: no compila, no cuenta
             total += 1
-            if _accept_mata():
-                killed += 1
+            muerto, fallaron = _accept_mata()
+            killed += muerto
+            mutantes.append({"archivo": f, "fallaron": fallaron})
         finally:
             p.write_text(orig, encoding="utf-8")
     if not total:
@@ -637,9 +704,24 @@ def gate_mutacion() -> tuple[bool, str]:
         return rec_gate("mutacion", True, "sin mutantes posibles")
     score = round(killed / total, 3)
     state["mutation_score"] = score
+    state["mutantes"] = mutantes
+    vacuas = _propiedades_vacuas(mutantes)
     if minimo is not None and score < float(minimo):
         return rec_gate("mutacion", False, f"mutation score {score} < {minimo} ({killed}/{total})")
+    if minimo is not None and vacuas:   # con mutation_min corren todos los mutantes: sin muertes, la propiedad es vacua
+        return rec_gate("mutacion", False, f"propiedades vacuas (no matan ningun mutante): {vacuas}")
     return rec_gate("mutacion", True, f"mutation score {score} ({killed}/{total})" + ("" if minimo is not None else f" (observa: sin mutation_min, muestra de {tope})"))
+
+
+def _propiedades_vacuas(mutantes: list[dict]) -> list[str]:
+    """Ticket 09: una propiedad que no mata ningun mutante queda anotada como vacua (un ejemplo nunca)."""
+    if any(m["fallaron"] is None for m in mutantes):
+        state["atribucion"] = "sin atribucion por test: el runner de la aceptacion no da JUnit"
+        return []
+    props = [t for rel in TASK.accept_files if (WT / rel).is_file()
+             for t in propiedades.propiedades(rel, (WT / rel).read_text(encoding="utf-8"))]
+    state["propiedades_vacuas"] = sorted(t for t in props if not any(t in m["fallaron"] for m in mutantes))
+    return state["propiedades_vacuas"]
 
 
 def _en_base(fn):
@@ -684,7 +766,7 @@ def _suite_cmd_total(sha: str) -> tuple[bool, str]:
         if "TIMEOUT" in blog:
             return rec_gate("suite-total", False, f"baseline: {blog[:200]}")
         base_file.write_text("verde" if bok else "rojo", encoding="utf-8")
-    ok, log = sh(str(CFG["suite_cmd"]), timeout=CFG["suite_timeout_s"], keep=400000)
+    ok, log = sh(_cmd_prop(str(CFG["suite_cmd"])), timeout=CFG["suite_timeout_s"], keep=400000)
     _write("docs/sdlc/suite.log", log)
     base_verde = base_file.read_text(encoding="utf-8") == "verde"
     state["suite_total"] = {"suite_cmd": ok, "baseline_verde": base_verde}
@@ -699,25 +781,28 @@ def gate_suite_total() -> tuple[bool, str]:
     # D3 r1b: el baseline medido en el arbol principal no vale (tests sin commitear, metadata del paquete).
     # Se mide EN el worktree, sobre el commit base, una vez por sha; se cachea en suite-baseline-<sha>.txt.
     sha = subprocess.run(["git", "rev-parse", "--short", state.get("base_sha", "HEAD~1")], cwd=WT, capture_output=True, text=True).stdout.strip()
+    faltan = _desaparecidos() if state.get("area") else []
+    if faltan:   # ticket 05: un fallo se ve en la suite; un test borrado no
+        return rec_gate("suite-total", False, f"test desaparecido (fuera de los movimientos de la etapa 1): {faltan}")
     if CFG.get("suite_cmd"):
         return _suite_cmd_total(sha)
     base_file = RUNS / f"suite-baseline-{sha}.txt"
     if not base_file.exists():
-        _, blog = _en_base(lambda: sh([PY, "-m", "pytest", *_suite_args("base")], timeout=CFG["suite_timeout_s"], keep=400000))
+        _, blog = _en_base(lambda: sh([PY, "-m", "pytest", *_suite_args("base"), *_prop_args()], timeout=CFG["suite_timeout_s"], keep=400000))
         _write("docs/sdlc/suite-baseline.log", blog)
         if "TIMEOUT" in blog:  # D15: un baseline vacio por timeout se cacheaba y volvia "nuevos" a los rojos previos
             return rec_gate("suite-total", False, f"baseline: {blog[:200]}")
         base_file.write_text("\n".join(re.findall(r"(?m)^(?:FAILED|ERROR) \S+", blog)) + "\n", encoding="utf-8")
     # D8: la suite del worktree traia 594 ERROR (setup) que el gate no miraba porque solo leia FAILED.
     base = set(re.findall(r"(?m)^(?:FAILED|ERROR) (\S+)", base_file.read_text(encoding="utf-8")))
-    ok, log = sh([PY, "-m", "pytest", *_suite_args("final")], timeout=CFG["suite_timeout_s"], keep=400000)
+    ok, log = sh([PY, "-m", "pytest", *_suite_args("final"), *_prop_args()], timeout=CFG["suite_timeout_s"], keep=400000)
     _write("docs/sdlc/suite.log", log)
     now = set(re.findall(r"(?m)^(?:FAILED|ERROR) (\S+)", log))
     new = sorted(now - base)
     if new and "TIMEOUT" not in log:
         # D2 r1: 3 tests de providers fallaron en la suite y pasaron solos -> flaky bajo carga.
         # Un fallo nuevo cuenta como regresion solo si se repite AISLADO (determinista, sin juicio).
-        _, rlog = sh([PY, "-m", "pytest", *new[:50], "-q", "-rfE", "-p", "no:cacheprovider"], keep=400000)
+        _, rlog = sh([PY, "-m", "pytest", *new[:50], "-q", "-rfE", "-p", "no:cacheprovider", *_prop_args()], keep=400000)
         flaky = sorted(set(new) - set(re.findall(r"(?m)^(?:FAILED|ERROR) (\S+)", rlog)))
         new = sorted(set(new) - set(flaky))
         state["suite_flaky"] = flaky
@@ -725,6 +810,14 @@ def gate_suite_total() -> tuple[bool, str]:
     if "TIMEOUT" in log:
         return rec_gate("suite-total", False, log[:200])
     return rec_gate("suite-total", not new, "sin fallos nuevos" if not new else f"fallos nuevos: {new}")
+
+
+def _desaparecidos() -> list[str]:
+    """Archivos de test de HEAD que ya no estan en el worktree y no figuran en los movimientos de la etapa 1."""
+    out = subprocess.run(["git", "diff", "--name-only", "--diff-filter=D", "HEAD", "--", "tests/"], cwd=WT,
+                         capture_output=True, text=True, encoding="utf-8").stdout.split()
+    movidos = {m["de"] for m in state.get("movimientos", [])}
+    return [f for f in out if f not in movidos]
 
 
 def _accept_paths():
@@ -748,14 +841,14 @@ def _accept_desc() -> str:
 def accept():
     cmd = _accept_por_cmd()
     if cmd:
-        ok, log = sh(str(cmd))  # sin tests nombrados, o tests en otro lenguaje: el comando del repo es el oraculo
+        ok, log = sh(_cmd_prop(str(cmd)))  # sin tests nombrados, o tests en otro lenguaje: el comando del repo es el oraculo
         if (WT / REVIEW_REL).exists():
             # 2026-09-17: la revision deja un test pytest; en ChatBot (Java) `mvn test` no lo corria y un BLOCK real
             # (clave de deduplicacion con "|" sin escapar) paso como "sin evidencia". Corre despues: puede usar lo compilado.
             rok, rlog = sh([PY, "-m", "pytest", REVIEW_REL, "-q", "-p", "no:cacheprovider"])
             ok, log = ok and rok, f"{log}\n{rlog}"
         return ok, log
-    return sh([PY, "-m", "pytest", *_accept_paths(), "-q", "-p", "no:cacheprovider"])
+    return sh([PY, "-m", "pytest", *_accept_paths(), "-q", "-p", "no:cacheprovider", *_prop_args()])
 
 
 def test_counts(log):
@@ -872,8 +965,82 @@ def gate_tamano(files: list[str]) -> tuple[bool, str]:
 
 
 def gate_plan_allowlist(plan_md: str, files: list[str]) -> tuple[bool, str]:
-    """Chequeo en mmorch.gates.plan_allowlist (orchestration-bpn); aca solo se registra."""
-    return rec_gate("plan-allowlist", *plan_allowlist(plan_md, files, _need_files(), _techo(), TESTS_PREFIX))
+    """Chequeo en mmorch.gates.plan_allowlist (orchestration-bpn); aca se registra y se cruza con el area."""
+    ok, detalle = plan_allowlist(plan_md, files, _need_files(), _techo(), TESTS_PREFIX)
+    if not ok:
+        return rec_gate("plan-allowlist", False, detalle)
+    if state.get("area"):   # ticket 01: el plan no sale del area (los archivos sin area valen)
+        ar = areas.areas(CFG)
+        otra_area = {f: otras for f in files if (otras := [a for a in areas.areas_de(f, ar) if a != state["area"]])}
+        for f, otras in otra_area.items():
+            for a in otras:
+                _fuera_de_area(a, f)
+        if otra_area:
+            return rec_gate("plan-allowlist", False, f"plan lista archivos de otra area (anotados en bd): {otra_area}")
+    return rec_gate("plan-allowlist", True, detalle)
+
+
+def _bd(args: list[str], cwd) -> tuple[bool, str]:
+    """`bd` en el host. Devuelve (ok, stdout) o (False, motivo)."""
+    try:
+        r = subprocess.run(["bd", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+    return r.returncode == 0, r.stdout if r.returncode == 0 else r.stderr[-300:]
+
+
+def _fuera_de_area(area: str, f: str) -> None:
+    """Ticket 01: un archivo que el plan quiso tocar en otra area va a bd en el momento. Label fija por area: con un
+    issue abierto suma una nota, sin issue lo crea. bd del repo destino si tiene .beads, si no el de orchestration.
+    Copia en division.md y en el run-log (`fuera_de_area`). Un bd que falla no rompe la corrida."""
+    vistos = state.setdefault("fuera_de_area", {}).setdefault(area, [])
+    if f in vistos:
+        return
+    vistos.append(f)
+    div = WT / "docs/sdlc/division.md"
+    previo = div.read_text(encoding="utf-8") if div.exists() else "# Division por areas\n"
+    if "## Fuera de area (plan)" not in previo:
+        previo = previo.rstrip("\n") + "\n\n## Fuera de area (plan)\n\n"
+    _write("docs/sdlc/division.md", previo + f"- `{f}` (area {area}): tarea {TASK_NAME}\n")
+    label, nota = f"sdlc-fuera-de-area:{area}", f"{f} (tarea {TASK_NAME}, desde el area {state.get('area')})"
+    cwd = FEAT["repo"] if FEAT and (pathlib.Path(FEAT["repo"]) / ".beads").is_dir() else str(_ORCH)
+    ok, out = _bd(["list", "--label", label, "--status", "open", "--json"], cwd)
+    try:
+        abiertos = json.loads(out) if ok else None
+    except ValueError:
+        abiertos = None
+    if abiertos:
+        ok, out = _bd(["update", abiertos[0]["id"], "--append-notes", nota], cwd)
+    elif abiertos is not None:
+        ok, out = _bd(["create", "--title", f"sdlc: cambios pendientes en el area {area}", "--labels", label,
+                       "--description", f"Archivos que un plan del SDLC quiso tocar fuera de su area:\n{nota}", "--json"], cwd)
+    rec_gate("bd-fuera-de-area", ok, f"{f} -> {label}" if ok else f"bd fallo ({out[:200]}): {f} queda en division.md")
+
+
+def _resolver_area() -> str | None:
+    """Ticket 01: el area sale de los `files` del llamador (sin `files`, de las rutas del texto) cruzados con `[areas]`
+    de sdlc.toml. Devuelve la ruta de su spec, o None (sin area: el camino de hoy). Dos areas cortan antes de la etapa 1
+    con un division.md determinista, sin LLM."""
+    for k in ("area", "area_spec", "area_archivos"):
+        state.pop(k, None)
+    ar = areas.areas(CFG)
+    files = list((FEAT or {}).get("files") or [])
+    por = areas.area_de_tarea(files, TASK.task, ar, _exts()) if ar else {}
+    if not por:
+        return None
+    tests_area = [f for f in files if f.startswith("tests/sdlc/")]
+    if tests_area:
+        raise StageFailed("0-areas", f"files bajo tests/sdlc/ en modo area: {tests_area} (esos tests los escribe la etapa 1)")
+    state["areas_solapadas"] = areas.solapados(WT, ar)
+    if len(por) > 1:
+        _write("docs/sdlc/division.md", areas.division(por))
+        write_supervision("ESCALATE_HUMAN: la tarea toca varias areas; division en docs/sdlc/division.md")
+        rec_gate("areas", False, f"{list(por)}")
+        raise StageFailed("0-areas", f"la tarea toca {len(por)} areas {list(por)}: division en docs/sdlc/division.md")
+    ((area, archivos),) = por.items()
+    state.update(area=area, area_spec=areas.ruta_spec(area, CFG), area_archivos=archivos)
+    rec_gate("areas", True, f"area {area}: {archivos}")
+    return state["area_spec"]
 
 
 def _test_names() -> set[str]:
@@ -1073,7 +1240,8 @@ def gate_docstring(before: dict) -> tuple[bool, str]:
 
 
 def _tests_text():
-    t = "\n\n".join(f"# {k}\n{(WT / k).read_text(encoding='utf-8')}" for k in TASK.accept_files)
+    """Los tests para los prompts por API, sin el codigo de las propiedades (ticket 08: el coder ve su salida)."""
+    t = "\n\n".join(f"# {k}\n{propiedades.sin_propiedades(k, (WT / k).read_text(encoding='utf-8'))}" for k in TASK.accept_files)
     if (WT / REVIEW_REL).exists():
         t += f"\n\n# {REVIEW_REL} (revision de Claude, no se toca)\n" + (WT / REVIEW_REL).read_text(encoding="utf-8")
     return t
@@ -1292,30 +1460,239 @@ def _slug() -> str:
 
 def _archivar_spec() -> None:
     """orchestration-3s7: spec y plan quedan en docs/specs/<feature>/ (spec-anchored). docs/sdlc/ es la mesa de
-    trabajo que la feature siguiente pisa."""
+    trabajo que la feature siguiente pisa. La ficha de la feature, si existe, va al lado."""
     for n in ("spec.md", "plan.md"):
         src = WT / "docs/sdlc" / n
         if src.exists():
             _write(f"docs/specs/{_slug() or 'sdlc'}/{n}", src.read_text(encoding="utf-8"))
+    ficha = _ficha()
+    if ficha:
+        _write(f"docs/specs/{_slug() or 'sdlc'}/ficha.md", ficha.read_text(encoding="utf-8"))
+
+
+def _ficha() -> pathlib.Path | None:
+    """Ficha de la feature en docs/sdlc/features/ (orchestration-4u6): el nombre se compara pasado por la regla de
+    `_slug()`, porque las fichas reales usan guiones y mayusculas (`F1-escena.md`)."""
+    d = WT / "docs/sdlc/features"
+    norma = lambda s: re.sub(r"[^a-z0-9]+", "_", s.lower()).strip("_")[:40]  # noqa: E731
+    return next((p for p in sorted(d.glob("*.md")) if norma(p.stem) == _slug()), None) if d.is_dir() else None
+
+
+def _spec_area_md() -> str:
+    """La spec viva del area en el worktree; un area sin spec parte de un esqueleto (ticket 03)."""
+    p = WT / state["area_spec"]
+    if p.is_file():
+        return p.read_text(encoding="utf-8")
+    return f"# Spec del area {state['area']}\n\n## Contrato\n\n## Requisitos\n\n## Trazabilidad\n"
+
+
+def _ids_del_area() -> set[int]:
+    """Numeros usados en el area: requisitos de la spec y archivos de test `tests/sdlc/<area>/test_R<n>_*`."""
+    ids = set(areas.requisitos(_spec_area_md())) | set(areas.archivos_por_id(WT, state["area"]))
+    return {areas.numero(i) for i in ids}
+
+
+def _ids_con_prop(rels) -> list[str]:
+    return sorted({i for rel in rels if (WT / rel).is_file()
+                   for i in propiedades.gate_propiedades(rel, (WT / rel).read_text(encoding="utf-8"))[1]}, key=areas.numero)
+
+
+def _archivar_area() -> tuple[bool, str]:
+    """Ticket 06: la etapa 6 funde el delta en la spec viva por codigo, deriva Contrato y Trazabilidad, y archiva delta,
+    plan y ficha en changes/<slug>-<sha>. El delta archivado marca la fusion hecha: una etapa 6 reanudada no la repite."""
+    area, spec_rel = state["area"], state["area_spec"]
+    base = f"docs/specs/{area}/changes/{_slug() or 'sdlc'}-{_sha_corrida()}"
+    if not (WT / f"{base}.md").exists():
+        delta = (WT / "docs/sdlc/delta.md").read_text(encoding="utf-8")
+        try:
+            fus = areas.fusionar(_spec_area_md(), delta)
+        except ValueError as e:
+            return rec_gate("fusion", False, str(e))
+        _write(f"{base}.plan.md", (WT / "docs/sdlc/plan.md").read_text(encoding="utf-8"))   # el Contrato lee los planes
+        viva = areas.regenerar(fus, WT, area)
+        errores = areas.gate_traza_area(viva, WT)
+        if errores:
+            (WT / f"{base}.plan.md").unlink()
+            return rec_gate("fusion", False, f"requisito fusionado sin archivo de test: {errores}")
+        _write(spec_rel, viva)
+        ficha = _ficha()
+        if ficha:
+            _write(f"{base}.ficha.md", ficha.read_text(encoding="utf-8"))
+        _write(f"{base}.md", delta)   # ultimo: su existencia dice que la fusion termino
+    # nivel 6.2 del curso: el PR se lee desde el diff de la spec, en su propio commit
+    _commit(f"sdlc: {TASK_NAME} - spec del area {area} (delta, fusion y removidos)", [f"docs/specs/{area}", spec_rel])
+    return rec_gate("fusion", True, f"{spec_rel} + {base}.md")
+
+
+def _commit(msg: str, rutas: list[str] | None = None) -> bool:
+    """git add y commit de todo el arbol o solo de `rutas`; sin cambios no commitea."""
+    lim = ["--", *dict.fromkeys(rutas)] if rutas else []
+    subprocess.run(["git", "add", "-A", *lim], cwd=WT, check=True)
+    if subprocess.run(["git", "diff", "--cached", "--quiet", *lim], cwd=WT).returncode == 0:
+        return False
+    subprocess.run(["git", "-c", "user.name=map12", "-c", "user.email=map12082004@gmail.com", "commit", "-q", "-m", msg, *lim],
+                   cwd=WT, check=True)
+    return True
+
+
+def _pide_propiedades(cuando: str = "La propiedad puede pasar hoy si su ID tiene otro test que falla.") -> str:
+    """Pedido de tests de propiedades para la etapa 1 (o la 0); vacio sin libreria (ticket 10: sin propiedades)."""
+    lib = (state.get("propiedades") or {}).get("libreria")
+    if not lib:
+        return ""
+    como = "Hypothesis (`@given`)" if lib == "hypothesis" else "fast-check (`fc.assert(fc.property(...))`)"
+    return (f" Si un requisito es una regla que vale para un conjunto de entradas generable, sumale un test de propiedades "
+            f"con {como}, nombrado test_R<n>_prop_..., en el archivo de ese ID. {cuando}")
+
+
+def _marco(rel: str) -> str:
+    return "pytest" if _es_py(rel) else f"framework de tests del repo; lo corre `{ACCEPT_CMD or CFG.get('accept_cmd')}`"
+
+
+def _lista_tests(rels) -> str:
+    """Archivos y nombres de test, para la parada unica (las propiedades se ven junto con los demas)."""
+    return "\n".join(f"- {r}: {', '.join(dict.fromkeys(areas.tests_en((WT / r).read_text(encoding='utf-8'), r)))}"
+                     for r in rels if (WT / r).is_file())
+
+
+def _parada(rels: list[str], extra: str = "") -> tuple[bool, str]:
+    """Una sola parada humana (approve_accept) con todos los oraculos nuevos de las etapas 0 y 1."""
+    state["accept_files"] = list(TASK.accept_files)
+    _seed_accept()
+    snapshot_baseline()
+    if CFG.get("approve_accept", True):
+        state["awaiting_approval"] = rels[0]
+        write_supervision(f"ESPERA_HUMANO: aprobar {', '.join(rels)} y reanudar desde la etapa 2 (from_stage=2)\n"
+                          f"{_lista_tests(list(TASK.accept_files))}{extra}")
+        return False, f"esperando aprobacion humana de {', '.join(rels)} (reanudar desde la etapa 2)"
+    return True, f"{rels}: sin aprobacion (approve_accept=false)"
+
+
+def _gate_archivos_por_id(rels: list[str], permitidos: list[str]) -> list[str]:
+    """Modo area (tickets 04 y 05): `tests/sdlc/<area>/test_R<n>_<slug>.<ext>`, un ID por archivo y por test, con un
+    numero permitido; el nombre base no se repite en tests/ (pytest no importa dos modulos con el mismo nombre)."""
+    errores, d = [], f"tests/sdlc/{state['area']}/"
+    todos = subprocess.run(["git", "ls-files", "-co", "--exclude-standard", "tests"], cwd=WT, capture_output=True,
+                           text=True).stdout.split()
+    for rel in rels:
+        m = re.fullmatch(re.escape(d) + r"test_(R\d+)_\w+\.\w+", rel)
+        if not m:
+            errores.append(f"{rel}: el nombre debe ser {d}test_R<n>_<slug>.<ext>")
+            continue
+        rid, nombres = m.group(1), areas.tests_en((WT / rel).read_text(encoding="utf-8"), rel)
+        ajenos = [t for t in nombres if not t.startswith(f"test_{rid}_")]
+        if not nombres or ajenos:
+            errores.append(f"{rel}: cada test cubre solo {rid} (test_{rid}_...); ajenos o faltantes: {ajenos}")
+        if rid not in permitidos:
+            errores.append(f"{rel}: {rid} esta fuera de los numeros ofrecidos {permitidos}")
+        if any(o != rel and o.rsplit("/", 1)[-1] == rel.rsplit("/", 1)[-1] for o in todos):
+            errores.append(f"{rel}: otro archivo de tests/ tiene el mismo nombre")
+        errores += propiedades.gate_propiedades(rel, (WT / rel).read_text(encoding="utf-8"))[0]
+    return errores
+
+
+def _nuevos_del_area(gid: str, before: dict[str, str], extra: tuple[str, ...] = ()) -> tuple[list[str] | None, str]:
+    """Archivos que Claude creo o cambio en tests/sdlc/<area>/. Tocar otra cosa (salvo `extra`) revierte y rechaza."""
+    d = f"tests/sdlc/{state['area']}/"
+    ok, nota = gate_alcance(gid, before, (d, *extra))
+    if not ok:
+        return None, nota
+    after = _tree()
+    return sorted(p for p in after if p.startswith(d) and before.get(p) != after[p]), "ok"
+
+
+def _fallan(rels: list[str], res: dict[str, bool] | None, log: str) -> list[str]:
+    """Tests de `rels` que fallaron segun JUnit (o, sin JUnit, los nombres que aparecen como FAILED en el log)."""
+    nombres = [t for r in rels for t in areas.tests_en((WT / r).read_text(encoding="utf-8"), r)]
+    if res is not None:
+        return [t for t in nombres if res.get(t) is False]
+    return [t for t in nombres if re.search(rf"\b{t}\b", log) and "FAIL" in log]
+
+
+@stage("0-caracterizar")
+def caracterizar():
+    """Ticket 03: los archivos de la tarea que la spec del area no nombra en Contrato se caracterizan antes del delta.
+    Claude escribe un archivo por requisito base (`tests/sdlc/<area>/test_R<n>_<slug>`, menores numeros libres). Gates
+    deterministas: solo esos archivos nuevos, pasan en HEAD, matan >= 1 mutante del archivo caracterizado
+    (`caracterizacion_min` opcional). La parada humana es la de la etapa 1: una sola para los dos."""
+    if not state.get("area"):
+        return True, "sin area: no caracteriza"
+    cubiertas = set(areas.rutas_cubiertas(_spec_area_md()))
+    nuevos = [f for f in state.get("area_archivos", []) if f not in cubiertas and (WT / f).is_file()]
+    if not nuevos:
+        return True, "sin archivos nuevos en el area"
+    area, ext = state["area"], _exts()[0]
+    ofrecidos = [f"R{n}" for n in areas.libres(_ids_del_area(), 10)]
+    state["claude_calls"] += 1
+    before = _tree()
+    r = _revisor(f"Escribi tests de CARACTERIZACION ({_marco(f'x.{ext}')}, sin red) del comportamiento ACTUAL de "
+                 f"{nuevos}: fijan lo que el codigo hace hoy, no lo que la tarea pide. Un archivo por requisito: "
+                 f"tests/sdlc/{area}/test_R<n>_{_slug()}.{ext}, con tests test_R<n>_... del mismo ID. Usa los IDs en este "
+                 f"orden, sin saltear: {', '.join(ofrecidos)}. Todos los tests DEBEN pasar hoy y detectar un cambio del "
+                 f"codigo." + _pide_propiedades("Tambien debe pasar hoy.") + " No toques ningun otro archivo."
+                 f"\n\nTAREA (contexto):\n{TASK.task}")
+    write_supervision(f"caracterizacion (Claude, rc={r.get('returncode')}): {(r.get('result') or '')[:1000]}")
+    tests, nota = _nuevos_del_area("caracterizacion-alcance", before)
+    if tests is None:
+        return False, nota
+    tocados = [t for t in tests if t in before]
+    if tocados or not tests:
+        gate_alcance("caracterizacion-alcance", before, ())   # revierte lo tocado
+        return rec_gate("caracterizacion-alcance", False, f"la etapa 0 solo crea archivos nuevos; toco {tocados}" if tocados
+                        else "Claude no dejo tests de caracterizacion")
+    ids = sorted({re.match(r"test_(R\d+)_", t.rsplit("/", 1)[-1]).group(1) for t in tests
+                  if re.match(r"test_(R\d+)_", t.rsplit("/", 1)[-1])}, key=areas.numero)
+    errores = _gate_archivos_por_id(tests, ofrecidos)
+    if not errores and ids != ofrecidos[:len(ids)]:
+        errores.append(f"los requisitos base toman los menores numeros libres: {ofrecidos[:len(ids)]} (dejo {ids})")
+    if errores:
+        return rec_gate("caracterizacion-ids", False, "; ".join(errores))
+    ok, log, res = _corre_con_junit(tests)
+    if not ok:
+        return rec_gate("caracterizacion-verde", False, f"falla en HEAD: {_fallan(tests, res, log) or log[-400:]}")
+    from mmorch.checkers import _mutants
+    mutantes = []
+    for f in nuevos:   # solo el archivo caracterizado, todas sus lineas (no hay cambio todavia)
+        orig = (WT / f).read_text(encoding="utf-8")
+        for m in (_mutants(orig, max_n=8) if _es_py(f) else _mutantes_texto(orig, max_n=8)):
+            (WT / f).write_text(m, encoding="utf-8")
+            try:
+                mutantes.append({"archivo": f, "muerto": not _corre_con_junit(tests, mut=True)[0]})
+            finally:
+                (WT / f).write_text(orig, encoding="utf-8")
+    muertos = sum(m["muerto"] for m in mutantes)
+    score = round(muertos / len(mutantes), 3) if mutantes else None
+    state["caracterizacion"] = {"archivos": nuevos, "tests": tests, "ids": ids, "score": score, "mutantes": mutantes}
+    minimo = CFG.get("caracterizacion_min")
+    if mutantes and not muertos:
+        return rec_gate("caracterizacion-mutantes", False, f"los tests no matan ningun mutante de {nuevos} (vacuos)")
+    if score is not None and minimo is not None and score < float(minimo):
+        return rec_gate("caracterizacion-mutantes", False, f"puntaje de caracterizacion {score} < {minimo} ({muertos}/{len(mutantes)})")
+    for t in tests:
+        TASK.accept_files[t] = (WT / t).read_text(encoding="utf-8")
+    state["accept_files"] = list(TASK.accept_files)
+    return rec_gate("caracterizacion-mutantes", True, f"{ids}: verdes en HEAD, puntaje {score} ({muertos}/{len(mutantes)})")
 
 
 @stage("1-aceptacion")
 def aceptacion():
     """Etapa 1 (ticket 12 D5): Claude escribe el test de aceptacion desde la tarea. Gates deterministas: nombra
     test_R<n>_..., compila (collect-only) y FALLA en HEAD (rojo por diseño). Con `approve_accept` (default) la corrida
-    se detiene en `awaiting_approval`: un humano (o el agente del ticket 14) aprueba y reanuda desde la etapa 2."""
-    if TASK.accept_files:
+    se detiene en `awaiting_approval`: un humano (o el agente del ticket 14) aprueba y reanuda desde la etapa 2.
+    Con propiedades (ticket 08): cada ID necesita al menos un test rojo; una propiedad puede pasar en HEAD."""
+    if TASK.accept_files and not state.get("caracterizacion"):
         return True, "tests de aceptacion provistos por el llamador"
+    if state.get("area"):
+        return _aceptacion_area()
     ext = _exts()[0]
     rel = str(CFG.get("accept_test", f"{TESTS_PREFIX}test_sdlc_{{slug}}.{ext}")).replace("{slug}", _slug())
     state["claude_calls"] += 1
     before = _tree()
-    marco = "pytest" if _es_py(rel) else f"framework de tests del repo; lo corre `{ACCEPT_CMD or CFG.get('accept_cmd')}`"
-    r = _revisor(f"Escribi SOLO el archivo {rel}: el test de aceptacion ({marco}, sin red) de esta TAREA. Un test por "
+    r = _revisor(f"Escribi SOLO el archivo {rel}: el test de aceptacion ({_marco(rel)}, sin red) de esta TAREA. Un test por "
                    f"requisito, nombrados test_R1_..., test_R2_... con el ID en el nombre (funcion o titulo del test); "
                    f"comentario o docstring de modulo con el contrato "
-                   f"R<n>. El test DEBE fallar hoy (el codigo aun no existe o no cumple) y pasar cuando la tarea este hecha. "
-                 f"No toques ningun otro archivo.\n\nTAREA:\n{TASK.task}")
+                   f"R<n>. El test DEBE fallar hoy (el codigo aun no existe o no cumple) y pasar cuando la tarea este hecha."
+                 f"{_pide_propiedades()} No toques ningun otro archivo.\n\nTAREA:\n{TASK.task}")
     write_supervision(f"aceptacion (Claude, rc={r.get('returncode')}): {(r.get('result') or '')[:1000]}")
     if not gate_alcance("aceptacion-alcance", before, (rel,))[0] or not (WT / rel).exists():
         return False, f"Claude no dejo {rel} (o toco otros archivos)"
@@ -1323,34 +1700,198 @@ def aceptacion():
     ids = sorted(set(re.findall(r"(?m)^def test_(R\d+)" if _es_py(rel) else r"\btest_(R\d+)", text)))
     if not ids:
         return rec_gate("aceptacion-ids", False, "sin tests test_R<n>_...")
+    perr, state["ids_con_prop"] = propiedades.gate_propiedades(rel, text)
+    if perr:
+        return rec_gate("aceptacion-propiedades", False, "; ".join(perr))
     if _es_py(rel):
         ok_c, log = sh([PY, "-m", "pytest", rel, "--collect-only", "-q", "-p", "no:cacheprovider"])
         if not ok_c:
             return rec_gate("aceptacion-compila", False, log[-600:])
-        ok_r, _ = sh([PY, "-m", "pytest", rel, "-q", "-p", "no:cacheprovider"])
-    else:  # otro lenguaje: el comando del repo compila y corre; debe estar ROJO
-        ok_r, _ = sh(str(ACCEPT_CMD or CFG.get("accept_cmd") or "false"))
+    # otro lenguaje: el comando del repo compila y corre; debe estar ROJO
+    ok_r, log, res = _corre_con_junit([rel] if _es_py(rel) else [])
     if ok_r:
         return rec_gate("aceptacion-roja", False, f"{rel} ya pasa en HEAD: no mide la tarea")
+    if state["ids_con_prop"]:
+        rojos = _fallan([rel], res, log)
+        sin_rojo = [i for i in ids if not any(t.startswith(f"test_{i}_") for t in rojos)]
+        if sin_rojo:
+            return rec_gate("aceptacion-roja", False, f"{sin_rojo}: ningun test rojo en HEAD (una propiedad sola no mide el cambio)")
     rec_gate("aceptacion-roja", True, f"{rel} roja en HEAD, R: {ids}")
     TASK.accept_files[rel] = text
-    _seed_accept()
-    snapshot_baseline()
-    if CFG.get("approve_accept", True):
-        state["awaiting_approval"] = rel
-        write_supervision(f"ESPERA_HUMANO: aprobar {rel} y reanudar desde la etapa 2 (from_stage=2)")
-        return False, f"esperando aprobacion humana de {rel} (reanudar desde la etapa 2)"
-    return True, f"{rel}: R {ids}, roja en HEAD, sin aprobacion (approve_accept=false)"
+    ok, note = _parada([rel])
+    return ok, note if not ok else f"{rel}: R {ids}, roja en HEAD, sin aprobacion (approve_accept=false)"
+
+
+def _aceptacion_area() -> tuple[bool, str]:
+    """Etapa 1 en modo area (tickets 04 y 05): un archivo por ID en tests/sdlc/<area>/; un ID que ya existe es un
+    MODIFIED y uno nuevo toma un numero libre ofrecido. Las bajas (REMOVED) van con motivo en docs/sdlc/bajas.md. Antes
+    de la parada, el codigo mueve a removidos/ los tests viejos de cada MODIFIED y de cada baja."""
+    area, ext = state["area"], _exts()[0]
+    d = f"tests/sdlc/{area}/"
+    existentes = [f"R{n}" for n in sorted(_ids_del_area())]
+    ofrecidos = [f"R{n}" for n in areas.libres(_ids_del_area(), 5)]
+    antes = {r: (WT / r).read_bytes() for rs in areas.archivos_por_id(WT, area).values() for r in rs}
+    state["claude_calls"] += 1
+    before = _tree()
+    r = _revisor(f"Escribi los tests de aceptacion ({_marco(f'x.{ext}')}, sin red) de esta TAREA en {d}, UN archivo por "
+                 f"requisito: {d}test_R<n>_{_slug()}.{ext}, con tests test_R<n>_... del mismo ID. Un requisito que ya existe "
+                 f"en el area ({', '.join(existentes) or 'ninguno'}) y cambia usa su ID; uno nuevo toma el primero libre de "
+                 f"{', '.join(ofrecidos)}. Cada ID que escribas necesita al menos un test que FALLE hoy y pase cuando la tarea "
+                 f"este hecha.{_pide_propiedades()} Si la tarea elimina requisitos del area, escribi docs/sdlc/bajas.md con "
+                 f"una linea por ID: `- R<n>: motivo`. No toques ningun otro archivo.\n\n"
+                 f"SPEC DEL AREA ({state['area_spec']}):\n{_spec_area_md()}\n\nTAREA:\n{TASK.task}")
+    write_supervision(f"aceptacion (Claude, rc={r.get('returncode')}): {(r.get('result') or '')[:1000]}")
+    nuevos, nota = _nuevos_del_area("aceptacion-alcance", before, ("docs/sdlc/bajas.md",))
+    if nuevos is None:
+        return False, nota
+    bajas = areas.leer_delta("## REMOVED\n" + ((WT / "docs/sdlc/bajas.md").read_text(encoding="utf-8")
+                                                if (WT / "docs/sdlc/bajas.md").is_file() else ""))["REMOVED"]
+    if not nuevos and not bajas:
+        return False, f"Claude no dejo tests en {d} ni bajas"
+    errores = _gate_archivos_por_id(nuevos, existentes + ofrecidos)
+    errores += [f"baja {i}: no existe en el area" for i in bajas if i not in existentes]
+    errores += [f"baja {i} sin motivo" for i, m in bajas.items() if not m]
+    if errores:
+        return rec_gate("aceptacion-ids", False, "; ".join(errores))
+    ids = sorted({re.match(r"test_(R\d+)_", n.rsplit("/", 1)[-1]).group(1) for n in nuevos}, key=areas.numero)  # type: ignore[union-attr]
+    if nuevos:
+        if all(_es_py(n) for n in nuevos):
+            ok_c, log = sh([PY, "-m", "pytest", *nuevos, "--collect-only", "-q", "-p", "no:cacheprovider"])
+            if not ok_c:
+                return rec_gate("aceptacion-compila", False, log[-600:])
+        ok_r, log, res = _corre_con_junit(nuevos if all(_es_py(n) for n in nuevos) else [])
+        rojos = _fallan(nuevos, res, log)
+        sin_rojo = [i for i in ids if not any(t.startswith(f"test_{i}_") for t in rojos)]
+        if sin_rojo or ok_r:
+            return rec_gate("aceptacion-roja", False, f"{sin_rojo or ids}: ningun test rojo en HEAD (no mide la tarea)")
+    etiqueta, movs = f"{_slug()}-{_sha_corrida()}", []
+    for rel, contenido in antes.items():
+        rid = re.match(r"test_(R\d+)_", rel.rsplit("/", 1)[-1]).group(1)  # type: ignore[union-attr]
+        if rid in ids or rid in bajas:
+            tipo, motivo = ("MODIFIED", "reemplazado por un test nuevo") if rid in ids else ("REMOVED", bajas[rid])
+            dst = areas.mover(WT, area, rel, rid, tipo, motivo, etiqueta, contenido=contenido if rel in nuevos else None)
+            movs.append({"id": rid, "de": rel, "a": dst})
+            if rel not in nuevos:
+                TASK.accept_files.pop(rel, None)
+    state.update(movimientos=movs, bajas=bajas, ids_etapa1=ids)
+    rec_gate("aceptacion-roja", True, f"R: {ids}, bajas {sorted(bajas)}, movidos {[m['de'] for m in movs]}")
+    for n in nuevos:
+        TASK.accept_files[n] = (WT / n).read_text(encoding="utf-8")
+    state["ids_con_prop"] = _ids_con_prop([r for rs in areas.archivos_por_id(WT, area).values() for r in rs])
+    salen = "".join(f"\n- sale {m['de']} -> {m['a']} ({m['id']})" for m in movs) + \
+        "".join(f"\n- baja {i}: {m}" for i, m in bajas.items())
+    return _parada(nuevos or ["docs/sdlc/bajas.md"], salen)
+
+
+def gate_marcas(spec_md: str) -> tuple[bool, str]:
+    """Ticket 08: los IDs marcados `[prop]` son exactamente los IDs con test de propiedades (entre los IDs de la spec).
+    Sin propiedades y sin marcas, pasa (spec de hoy)."""
+    ids = set(areas.requisitos(spec_md)) or set(re.findall(r"\bR\d+\b", spec_md))
+    marcados, con_prop = set(propiedades.marcas(spec_md)), set(state.get("ids_con_prop") or []) & ids
+    sin_test, sin_marca = sorted(marcados - con_prop), sorted(con_prop - marcados)
+    if sin_test or sin_marca:
+        return rec_gate("marcas-prop", False, f"marca [prop] sin test de propiedades: {sin_test}; "
+                                              f"test de propiedades sin marca [prop]: {sin_marca}")
+    return rec_gate("marcas-prop", True, f"marcas {sorted(marcados)}")
+
+
+def _pide_marcas(ids: list[str]) -> str:
+    return f" Marca `[prop]` pegada al ID (`- R<n> [prop]: ...`) exactamente en {ids}, y en ningun otro." if ids else ""
+
+
+def gate_delta(delta_md: str) -> tuple[bool, str]:
+    """Modo area (tickets 04, 05 y 08): el delta contra la spec base del area, sus tests `ruta::test`, los IDs y las
+    bajas de la etapa 1 y las marcas. Fusiona por codigo, exige que el diff nombre exactamente los IDs del delta y deja
+    la spec fusionada en docs/sdlc/spec.md, que leen el plan y el build."""
+    base, area = _spec_area_md(), state["area"]
+    errores = areas.gate_delta(base, delta_md, areas.tests_por_id(WT, area))
+    d = areas.leer_delta(delta_md)
+    cambian, etapa1 = set(d["ADDED"]) | set(d["MODIFIED"]), set(state.get("ids_etapa1") or [])
+    if cambian != etapa1:
+        errores.append(f"ADDED+MODIFIED {sorted(cambian)} no coincide con los tests de la etapa 1 {sorted(etapa1)}")
+    bajas = set(state.get("bajas") or {})
+    if set(d["REMOVED"]) != bajas:
+        errores.append(f"REMOVED {sorted(d['REMOVED'])} no coincide con las bajas de la etapa 1 {sorted(bajas)}")
+    fus = ""
+    if not errores:
+        fus = areas.regenerar(areas.fusionar(base, delta_md), WT, area)
+        errores += areas.chequeo_diff(base, fus, delta_md)
+        errores += [f"faltan tokens del contrato {t}" for t in CONTRACT if t not in fus + delta_md]
+        ok_m, nota_m = gate_marcas(fus)
+        if not ok_m:
+            errores.append(nota_m)
+    if errores:
+        return rec_gate("delta", False, "; ".join(errores))
+    _write("docs/sdlc/spec.md", fus)
+    return rec_gate("delta", True, f"ADDED {sorted(d['ADDED'])}, MODIFIED {sorted(d['MODIFIED'])}, REMOVED {sorted(d['REMOVED'])}")
+
+
+def _spec_base() -> tuple[bool, str]:
+    """Ticket 03: tras la aprobacion, el writer escribe los requisitos base desde los tests de caracterizacion
+    aprobados. El codigo arma la spec del area: Contrato con los archivos caracterizados y Trazabilidad derivada."""
+    car, area = state["caracterizacion"], state["area"]
+    ids, props = car["ids"], [i for i in state.get("ids_con_prop") or [] if i in car["ids"]]
+    tests = "\n\n".join(f"# {t}\n{propiedades.sin_propiedades(t, (WT / t).read_text(encoding='utf-8'))}"
+                        for t in car["tests"] if (WT / t).is_file())
+    ask = (f"Escribi los requisitos base del area {area}: el comportamiento ACTUAL de {car['archivos']} que fijan estos "
+           f"tests de caracterizacion aprobados. Un bloque por ID, exactamente {ids}: `- R<n>: regla`, y debajo, "
+           "indentadas, `  Casos borde: ...` y `  Criterio: ...`." + _pide_marcas(props)
+           + f" Solo los bloques, sin encabezados.\n\nTESTS:\n{tests}" + _constitucion())
+    out, why = "", ""
+    for _ in range(2):
+        out = llm(WRITER, "Sos un ingeniero de software. Escribis requisitos precisos en markdown, sin relleno.",
+                  ask + (f"\n\nTu respuesta anterior fallo el gate: {why}" if why else ""))
+        got = areas.requisitos(out)
+        why = "; ".join(x for x in (f"IDs {sorted(got)} != {ids}" if sorted(got, key=areas.numero) != ids else "",
+                                    f"marcas {propiedades.marcas(out)} != {props}" if propiedades.marcas(out) != props else "") if x)
+        if not why:
+            break
+    if why:
+        return rec_gate("spec-base", False, why)
+    md = _spec_area_md()
+    md = areas.con_requisitos(md, areas.requisitos(md) | areas.requisitos(out))
+    _write(state["area_spec"], areas.regenerar(md, WT, area, car["archivos"]))
+    return rec_gate("spec-base", True, f"{state['area_spec']}: {ids}")
+
+
+def _spec_area() -> tuple[bool, str]:
+    """Etapa 2 en modo area (ticket 04): el writer escribe SOLO el delta; el codigo lo fusiona y lo chequea."""
+    car = state.get("caracterizacion")
+    if car and not set(car["ids"]) <= set(areas.requisitos(_spec_area_md())):
+        ok, note = _spec_base()
+        if not ok:
+            return False, note
+    base, existentes = _spec_area_md(), set(areas.requisitos(_spec_area_md()))
+    etapa1 = state.get("ids_etapa1") or []
+    added, modified = [i for i in etapa1 if i not in existentes], [i for i in etapa1 if i in existentes]
+    props = [i for i in state.get("ids_con_prop") or [] if i in etapa1]
+    ask = (f"Escribi el delta de esta feature sobre la spec del area {state['area']}. Formato OBLIGATORIO, solo estas "
+           "secciones (omiti las vacias):\n## ADDED\n- R<n>: <regla>\n  Casos borde: ...\n  Criterio: ...\n## MODIFIED\n"
+           "- R<n>: <el requisito ENTERO, con su texto nuevo, casos borde y criterio>\n## REMOVED\n- R<n>: <motivo>\n\n"
+           f"ADDED: {added}. MODIFIED: {modified}. REMOVED (con estos motivos): {state.get('bajas') or {}}."
+           + _pide_marcas(props) + f"\n\nSPEC DEL AREA:\n{base}\n\nTAREA:\n{TASK.task}\n\n"
+           f"TESTS DE ACEPTACION (no se modifican):\n{_tests_text()}\n\nSolo markdown." + _constitucion())
+    out = llm(WRITER, "Sos un ingeniero de software. Escribis deltas de specs precisos en markdown, sin relleno.", ask)
+    _write("docs/sdlc/delta.md", out)
+    ok, note = gate_delta(out)
+    if not ok:
+        out = llm(WRITER, "Sos un ingeniero. Reescribis el delta completo con el formato obligatorio.",
+                  f"Este delta fallo el gate: {note}. Corregilo.\n\n{ask}\n\nDELTA ACTUAL:\n{out}")
+        _write("docs/sdlc/delta.md", out)
+        ok, note = gate_delta(out)
+    return ok, note
 
 
 @stage("2-spec")
 def spec():
+    if state.get("area"):
+        return _spec_area()
     tpl = (TPL / "spec-template.md").read_text(encoding="utf-8")
     tests = _test_names()
     lang = _lenguaje()   # SSB (TypeScript) recibia "Python 3.12" en la spec
     stack = "Python 3.12, sin dependencias" if lang == "Python" else f"{lang}, sin dependencias que el repo no use ya"
     ask = (f"Escribi spec.md siguiendo EXACTAMENTE esta plantilla (mismas secciones, IDs R<n> unicos, tabla de trazabilidad "
-           f"que cita tests por su nombre exacto de entre {sorted(tests)}). {stack}.\n\n"
+           f"que cita tests por su nombre exacto de entre {sorted(tests)}). {stack}.{_pide_marcas(state.get('ids_con_prop') or [])}\n\n"
            f"PLANTILLA:\n{tpl}\n\nTAREA:\n{TASK.task}\n\nTESTS DE ACEPTACION (no se modifican):\n{_tests_text()}\n\n"
            "Omiti las lineas de instruccion de la plantilla. Sin marcadores pendientes. Solo markdown." + _constitucion())
     out = llm(WRITER, "Sos un ingeniero de software. Escribis specs precisas en markdown, sin relleno.", ask)
@@ -1359,7 +1900,9 @@ def spec():
     def _falla():
         missing = [s for s in CONTRACT if s not in out]
         tok, tnote = gate_traza_spec(out, tests)
-        return (f"faltan tokens {missing}; " if missing else "") + ("TBD; " if "TBD" in out else "") + ("" if tok else tnote)
+        mok, mnote = gate_marcas(out)
+        return (f"faltan tokens {missing}; " if missing else "") + ("TBD; " if "TBD" in out else "") + ("" if tok else tnote) \
+            + ("" if mok else f"; {mnote}")
 
     why = _falla()
     if why:
@@ -1378,6 +1921,8 @@ def spec():
 def spec_review():
     """Claude revisa la spec con spec-review.md (de clarify.md): <= 5 preguntas, respondidas en la spec."""
     guide = (TPL / "spec-review.md").read_text(encoding="utf-8")
+    if state.get("area"):
+        return _spec_review_area(guide)
     state["claude_calls"] += 1
     before = _tree()
     r = _revisor(f"{guide}\n\nTAREA:\n{TASK.task}\n\nEdita SOLO docs/sdlc/spec.md segun estas reglas. NO escribas codigo ni crees "
@@ -1400,7 +1945,34 @@ def spec_review():
         ok, note = gate_clarificaciones(spec_md)
         if ok:
             ok, note = gate_traza_spec(spec_md, _test_names())
+    if ok:
+        ok, note = gate_marcas(spec_md)   # ticket 08: la revision no agrega ni quita marcas por su cuenta
     return ok, note
+
+
+def _spec_review_area(guide: str) -> tuple[bool, str]:
+    """Etapa 2b en modo area (ticket 04): Claude lee la spec fusionada como contexto y edita SOLO el delta; las
+    clarificaciones quedan en el delta. El gate del delta vuelve a correr despues. Tocar otra cosa rechaza la etapa."""
+    note = ""
+    for intento in range(2):
+        state["claude_calls"] += 1
+        before = _tree()
+        r = _revisor(f"{guide}\n\nTAREA:\n{TASK.task}\n\nLa spec fusionada del area esta en docs/sdlc/spec.md: leela como "
+                     "contexto, NO la edites. Edita SOLO docs/sdlc/delta.md: ahi van `## Clarificaciones` y los cambios a "
+                     "los requisitos de ADDED, MODIFIED y REMOVED. NO escribas codigo ni toques ningun otro archivo. "
+                     "Responde en una linea cuantas preguntas hiciste."
+                     + (f"\n\nTu revision anterior fallo este gate: {note}. Corregi docs/sdlc/delta.md." if intento else ""))
+        write_supervision(f"revision del delta (Claude, rc={r.get('returncode')}): {(r.get('result') or '')[:1500]}")
+        ok, note = gate_alcance("spec-review-alcance", before, ("docs/sdlc/delta.md",))
+        if not ok:
+            return False, note
+        delta = (WT / "docs/sdlc/delta.md").read_text(encoding="utf-8")
+        ok, note = gate_clarificaciones(delta)
+        if ok:
+            ok, note = gate_delta(delta)
+        if ok:
+            return ok, note
+    return False, note
 
 
 @stage("3-plan")
@@ -1415,6 +1987,11 @@ def plan():
            f"'## Stack' = UNA linea con el lenguaje, los frameworks y las librerias que usa el cambio (lo que ya usa el "
            f"repo; nada nuevo sin que la spec lo pida). '## Prueba' = `{prueba}`.\n"
            f"Archivos OBLIGATORIOS en '## Archivos': {_need_files()}.\n\nSPEC:\n{spec_md}" + _constitucion())  # D14-diag: el plan omitia test_capas
+    # ticket 01: con area, la spec fusionada trae todos los requisitos del area; el plan cubre solo los que cambian
+    ids_md = " ".join(state.get("ids_etapa1") or []) if state.get("area") else spec_md
+    if state.get("area"):
+        ask += (f"\n\nIDs que cambia esta feature (los unicos R<n> que el plan cita; los demas de la spec del area ya "
+                f"estan hechos): {state.get('ids_etapa1') or []}. Solo archivos del area {state['area']} o sin area.")
     inf = _informe_spec(spec_md)
     if inf:   # orchestration-e4d: el planner ve los lectores acoplados de lo que la spec nombra
         ask += ("\n\nINFORME DE IMPACTO (otros modulos leen literales de los archivos que nombra la spec; si el cambio "
@@ -1430,7 +2007,7 @@ def plan():
         state["plan_parallel"] = [f for f in files if re.search(rf"{re.escape(f)}`?[^\n]*\[P\]", block)]  # ticket 05 lo ejecuta en paralelo
         ok, note = gate_plan_allowlist(out, files)
         if ok:
-            ok, note = gate_traza_plan(spec_md, block, files)
+            ok, note = gate_traza_plan(ids_md, block, files)
         if ok:
             ok, note = gate_tamano(files)
             if not ok:   # un plan grande no se arregla reescribiendo: hay que dividir la tarea
@@ -1747,10 +2324,13 @@ def review():
 
 @stage("6-pr")
 def pr():
-    _archivar_spec()
-    subprocess.run(["git", "add", "-A"], cwd=WT, check=True)
-    subprocess.run(["git", "-c", "user.name=map12", "-c", "user.email=map12082004@gmail.com", "commit", "-q", "-m",
-                    f"sdlc: {TASK_NAME} - pipeline 6 etapas, gates + escalera + revision Claude"], cwd=WT, check=True)
+    if state.get("area"):
+        ok, note = _archivar_area()
+        if not ok:
+            return False, note
+    else:
+        _archivar_spec()
+    _commit(f"sdlc: {TASK_NAME} - pipeline 6 etapas, gates + escalera + revision Claude")
     base = state.get("base_sha", "HEAD~1")
     ds = subprocess.run(["git", "diff", "--stat", base], cwd=WT, capture_output=True, text=True).stdout
     state["diffstat"] = ds.strip().splitlines()[-1] if ds.strip() else ""
@@ -1812,6 +2392,11 @@ def _seed_accept() -> None:
                         f"sdlc: test de aceptacion {TASK_NAME} (rojo por diseño)"], cwd=WT, check=True)
 
 
+# Claves del run-log que una corrida reanudada recupera (SDD fase 2): area, movimientos y bajas de la etapa 1.
+_PERSISTE = ("area", "area_spec", "area_archivos", "accept_files", "movimientos", "bajas", "ids_etapa1", "ids_con_prop",
+             "caracterizacion", "sha_corrida", "fuera_de_area")
+
+
 def run(from_stage: float = 2, to_stage: float = 6) -> dict:
     """Corre las etapas desde `from_stage` hasta `to_stage` (2 spec, 2.5 spec-review, 3 plan, 4 build, 5 test, 5.5 review,
     6 pr). La etapa es el checkpoint (ticket 05 D4): reanudar = mismo worktree + from_stage. `to_stage` < 6 corta antes
@@ -1840,16 +2425,22 @@ def _run_stages(from_stage: float, to_stage: float = 6) -> dict:
             subprocess.run(["git", "add", "-A"], cwd=WT, check=True)
             subprocess.run(["git", "-c", "user.name=mmorch", "-c", "user.email=mmorch@local", "commit", "-q", "-m", "base"], cwd=WT)
         print("materializado", WT, flush=True)
-    if not TASK.accept_files and LOG.exists():  # resume tras awaiting_approval: el test ya vive en la branch
+    previo: dict = {}
+    if LOG.exists():
         try:
-            rel = json.loads(LOG.read_text(encoding="utf-8")).get("awaiting_approval")
-            if rel and (WT / rel).exists():
-                TASK.accept_files[rel] = (WT / rel).read_text(encoding="utf-8")
+            previo = json.loads(LOG.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            pass
+            previo = {}
+    if not TASK.accept_files:  # resume tras awaiting_approval: los tests ya viven en la branch
+        for rel in [previo.get("awaiting_approval"), *previo.get("accept_files", [])]:
+            if rel and (WT / rel).is_file():
+                TASK.accept_files[rel] = (WT / rel).read_text(encoding="utf-8")
+    if from_stage > 1:   # area, movimientos y bajas de la etapa 1 siguen valiendo: una reanudacion no los repite
+        state.update({k: previo[k] for k in _PERSISTE if k in previo})
     _seed_accept()  # tambien sobre un worktree abierto por el server: el test de aceptacion entra commiteado
     state["base_sha"] = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=WT, capture_output=True, text=True).stdout.strip() \
         if from_stage <= 3 else "HEAD~1"  # en resume no se conoce: HEAD~1 como antes
+    state.setdefault("sha_corrida", state["base_sha"] if from_stage <= 1 else _sha_corrida())
     gi = WT / ".gitignore"
     if not gi.exists():
         gi.write_text("__pycache__/\n", encoding="utf-8")  # r1-r3: la review hace git add -A antes del pr
@@ -1862,10 +2453,14 @@ def _run_stages(from_stage: float, to_stage: float = 6) -> dict:
         state["plan_files"] = _plan_files(m.group(1) if m else plan_md)
     for t in TPL.glob("*.md"):  # convencion por repo (ticket 11): las plantillas viajan con el repo
         _write(f"docs/sdlc/{t.name}", t.read_text(encoding="utf-8"))
-    stages = {1: aceptacion, 2: spec, 2.5: spec_review, 3: plan, 4: build, 5: test, 5.5: review, 6: pr}
+    stages = {0: caracterizar, 1: aceptacion, 2: spec, 2.5: spec_review, 3: plan, 4: build, 5: test, 5.5: review, 6: pr}
+    inicio = 0 if from_stage == 1 else from_stage   # la etapa 0 corre siempre antes de la 1 (sin area no hace nada)
     try:
+        if from_stage <= 1:
+            _resolver_area()
+        _preparar_propiedades()
         for k in sorted(stages):
-            if from_stage <= k <= to_stage:
+            if inicio <= k <= to_stage:
                 stages[k]()
                 if k == 5.5 and state.get("review_block"):
                     test()  # una vuelta mas con el test de Claude; si sigue rojo, escala
@@ -1912,6 +2507,11 @@ def build_feature(name: str, task: str, repo: str, *, accept: dict[str, str] | N
     with _RUN_LOCK:
         configure(t, contract=feat["contract"], feat=feat, wt=wt, phase=phase, max_fix=max_fix, writer=writer, coder=coder,
                   accept_cmd=accept_cmd)
+        try:  # repos-convenciones 03: el estado del repo queda en el run-log y ningun desvio frena la corrida
+            from .convenciones import doctor
+            state["doctor"] = doctor(repo)
+        except Exception as e:  # noqa: BLE001 - un doctor roto no puede frenar un build
+            state["doctor"] = {"error": f"{type(e).__name__}: {e}"}
         return run(from_stage)
 
 
@@ -1982,23 +2582,7 @@ def init(repo: str) -> dict:
     hecho: list[str] = []
     toml = root / "sdlc.toml"
     if not toml.exists():
-        skip = {"tests", "tests_accept", ".venv", "venv", "node_modules", "build", "dist", "docs", "target", "__pycache__"}
-        conteo: dict[str, int] = {}
-        dirs: dict[str, set[str]] = {}
-        ls = subprocess.run(["git", "ls-files"], cwd=root, capture_output=True, text=True, encoding="utf-8")
-        # repo git: solo lo trackeado (Portfolio tenia _kimi_exp/ y _tmp_*.py sin trackear); si no, el arbol entero
-        for q in ([root / x for x in ls.stdout.splitlines()] if ls.returncode == 0 and ls.stdout else root.rglob("*")):
-            if not q.is_file():
-                continue
-            rel = q.relative_to(root)
-            if any(part in skip or part.startswith(".") for part in rel.parts):
-                continue
-            ext = q.suffix.lstrip(".").lower()
-            if ext in _LANG_HINT:
-                conteo[ext] = conteo.get(ext, 0) + 1
-                dirs.setdefault(ext, set()).add(rel.parts[0] if len(rel.parts) > 1 else "")
-        exts = [e for e, _ in sorted(conteo.items(), key=lambda kv: -kv[1])][:3] or ["py"]
-        globs = sorted({(f"{d}/**/*.{e}" if d else f"*.{e}") for e in exts for d in dirs.get(e, {""})})
+        exts, globs = _globs_iniciales(root)
         hints = "\n".join(f"# compile_cmd = \"{_LANG_HINT[e]}\"   # {e}" for e in exts if e != "py")
         toml.write_text(
             "# sdlc.toml — convencion por repo (ticket 11). `files` es el TECHO (patrones) de lo que el pipeline puede\n"
@@ -2008,6 +2592,8 @@ def init(repo: str) -> dict:
             "# `suite_cmd` (suite total si no es pytest), `seed_globs` (ignorados que el worktree necesita), `accept_test` ({slug}).\n"
             "# `constitution`: reglas fijas que leen spec y plan (default GOAL.md; sin el archivo, nada).\n"
             "# Umbrales: `cobertura_min` (0.8; fraccion de un .py NUEVO que corre la aceptacion), `mutation_min` (sin: observa).\n"
+            "# [areas] nombre = [globs]: spec viva por area en docs/specs/<area>/spec.md (o [spec_de_area] nombre = \"ruta\"),\n"
+            "# deltas en docs/specs/<area>/changes/; `caracterizacion_min` (sin: basta un mutante muerto).\n"
             "# `reviewer_cmd`: agente que revisa y corrige (prompt por stdin, `{modo}` = plan|edit); sin esta clave, `claude -p`.\n"
             "# [sprites]: dir, lado, paleta, tope_colores, hitboxes, animaciones, referencias. Lo determinista bloquea;\n"
             "# el juez visual de `referencias` solo observa hasta kappa 0.6 sobre 50 sprites etiquetados (ticket 15).\n"
@@ -2025,20 +2611,63 @@ def init(repo: str) -> dict:
             shutil.copy(t, d / t.name)
             hecho.append(f"docs/sdlc/{t.name}")
     ag = root / "AGENTS.md"
-    marca = "## SDLC (pipeline de 6 etapas)"
-    if ag.exists() and marca not in ag.read_text(encoding="utf-8"):
-        ag.write_text(ag.read_text(encoding="utf-8").rstrip("\n") + f"\n\n{marca}\n\nEste repo construye features con "
-                      "el paquete `sdlc` (skill `/project`). Contrato del repo en `sdlc.toml`; artefactos de cada corrida en "
-                      "`docs/sdlc/` de la review branch.\n", encoding="utf-8")
+    if ag.exists() and "## SDLC (pipeline de 6 etapas)" not in ag.read_text(encoding="utf-8"):
+        from .convenciones import puntero_marcado  # el mismo bloque con marcas que mantiene `init --upgrade`
+        ag.write_text(ag.read_text(encoding="utf-8").rstrip("\n") + "\n\n" + puntero_marcado(), encoding="utf-8")
         hecho.append("AGENTS.md")
     return {"repo": str(root), "hecho": hecho}
 
 
+SKIP_INIT = {"tests", "tests_accept", ".venv", "venv", "node_modules", "build", "dist", "docs", "target", "__pycache__"}
+
+
+def _globs_iniciales(root: pathlib.Path) -> tuple[list[str], list[str]]:
+    """Lenguajes (hasta 3, por cantidad de archivos) y techo `files` por directorio, como los escribe `init`."""
+    conteo: dict[str, int] = {}
+    dirs: dict[str, set[str]] = {}
+    sueltos: dict[str, set[str]] = {}  # en `_calza()` el `*` cruza carpetas: `*.py` abriria el techo a todo el repo
+    ls = subprocess.run(["git", "ls-files"], cwd=root, capture_output=True, text=True, encoding="utf-8")
+    # repo git: solo lo trackeado (Portfolio tenia _kimi_exp/ y _tmp_*.py sin trackear); si no, el arbol entero
+    for q in ([root / x for x in ls.stdout.splitlines()] if ls.returncode == 0 and ls.stdout else root.rglob("*")):
+        if not q.is_file():
+            continue
+        rel = q.relative_to(root)
+        if any(part in SKIP_INIT or part.startswith(".") for part in rel.parts):
+            continue
+        ext = q.suffix.lstrip(".").lower()
+        if ext in _LANG_HINT:
+            conteo[ext] = conteo.get(ext, 0) + 1
+            if len(rel.parts) > 1:
+                dirs.setdefault(ext, set()).add(rel.parts[0])
+            else:
+                sueltos.setdefault(ext, set()).add(rel.name)
+    exts = [e for e, _ in sorted(conteo.items(), key=lambda kv: -kv[1])][:3] or ["py"]
+    globs = {f"{d}/**/*.{e}" for e in exts for d in dirs.get(e, set())} | {f for e in exts for f in sueltos.get(e, set())}
+    return exts, sorted(globs) or [f"*.{exts[0]}"]  # repo sin codigo: el techo nace abierto hasta el primer archivo
+
+
 def main(argv: list[str] | None = None) -> int:
-    """CLI: `python -m sdlc init <repo>`. El modo bench vive en mmorch (`python -m mmorch.sdlc_bench`)."""
+    """CLI: `python -m sdlc init [--upgrade]|doctor|areas|propiedades|bd|lint-md <repo>` y
+    `python -m sdlc specs --chequear|--regenerar [repo]` (pre-commit de sdd-fase-2 ticket 06: chequear nunca escribe).
+    El modo bench vive en mmorch (`python -m mmorch.sdlc_bench`)."""
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["specs"] and argv[1:2] in (["--chequear"], ["--regenerar"]):
+        repo = argv[2] if len(argv) > 2 else "."
+        if argv[1] == "--regenerar":
+            print(json.dumps({"regeneradas": areas.regenerar_repo(repo)}, ensure_ascii=False))
+            return 0
+        errores = areas.chequear(repo)
+        print("\n".join(errores) if errores else "specs al dia")
+        return 1 if errores else 0
+    if argv[:1] in (["bd"], ["lint-md"]):
+        from . import agentes
+        return agentes.main(argv)
+    if argv[:1] in (["doctor"], ["areas"], ["propiedades"]) or argv[:2] == ["init", "--upgrade"]:
+        from . import convenciones
+        return convenciones.main(argv)
     if argv[:1] != ["init"]:
-        print("uso: python -m sdlc init <repo>", file=sys.stderr)
+        print("uso: python -m sdlc init [--upgrade]|doctor|areas|propiedades|bd|lint-md <repo> | "
+              "python -m sdlc specs --chequear|--regenerar [repo]", file=sys.stderr)
         return 2
     print(json.dumps(init(argv[1] if len(argv) > 1 else "."), ensure_ascii=False))
     return 0
