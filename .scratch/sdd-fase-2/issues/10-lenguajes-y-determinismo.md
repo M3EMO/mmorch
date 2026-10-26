@@ -63,3 +63,7 @@ Resuelto por grilling con el usuario (2026-10-24). Registro completo: `brainstor
 11. Una corrida no deja la carpeta `.hypothesis/` en el worktree.
 12. Dentro del contenedor sin red, el archivo auxiliar carga igual que en el host.
 13. Sin librería, el prompt de la etapa 1 no pide propiedades. En ese caso, el gate de marcas del ticket 08 pasa sin marcas.
+
+## Comments
+
+- 2026-10-24, desde el esfuerzo `orchestration-4u6` (ticket 09 de `.scratch/repos-convenciones/`, resuelto; commit `b73d92d` de la rama `claude/youthful-bohr-f13d78`): la librería entra con `python -m sdlc propiedades <repo>`. Sin `--aprobar` muestra los cambios planeados; con `--aprobar` declara, instala, commitea y pushea. `doctor` da aviso, nunca desvío, cuando falta. En repos con `contenedor`, un bloque con marcas en `Dockerfile.sdlc` instala fast-check en `/node_modules` de la imagen. ChatBot (Java) queda fuera.

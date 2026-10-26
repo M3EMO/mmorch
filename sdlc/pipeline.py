@@ -1223,6 +1223,8 @@ def _all_code():
 
 def _write(rel, code):
     p = WT / rel
+    if not p.resolve().is_relative_to(WT.resolve()):  # orchestration-5s7: las rutas salen de un LLM (frontera de confianza)
+        raise StageFailed("write", f"ruta fuera del worktree: {rel}")
     p.parent.mkdir(parents=True, exist_ok=True)
     if code and not code.endswith("\n"):
         code += "\n"  # D4: strip_fence borraba la linea final y el diff mostraba "No newline at end of file"
