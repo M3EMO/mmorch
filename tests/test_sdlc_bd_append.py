@@ -18,6 +18,11 @@ pytestmark = pytest.mark.skipif(shutil.which("bd") is None, reason="falta el bin
 REAL_SETTINGS = pathlib.Path.home() / ".claude" / "settings.json"
 
 
+def _bd_en_real() -> bool:
+    """Un leak de bd al HOME real agrega hooks `bd`; otras sesiones editan ese archivo, asi que los bytes no sirven (orchestration-1z1)."""
+    return REAL_SETTINGS.exists() and b"bd prime" in REAL_SETTINGS.read_bytes()
+
+
 def _bloque(cuerpo: str) -> str:
     h = hashlib.sha256(cuerpo.strip().encode()).hexdigest()[:8]
     return f"<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:{h} -->\n{cuerpo}<!-- END BEADS INTEGRATION -->\n"
@@ -74,7 +79,7 @@ SETTINGS = {
 
 
 def test_bloque_viejo_editado_se_reintegra_sin_pisar_bytes(env):
-    real = REAL_SETTINGS.read_bytes() if REAL_SETTINGS.exists() else None
+    real = _bd_en_real()
     repo = _repo(env)
     _commit(repo, {"CLAUDE.md": "# Repo\n\nregla mia\n\n" + _bloque(VIEJO) + "\nmio abajo\n",
                    ".claude/settings.json": json.dumps(SETTINGS, indent=4) + "\n"}, "base")
@@ -109,7 +114,7 @@ def test_bloque_viejo_editado_se_reintegra_sin_pisar_bytes(env):
     fotos = _fotos(repo)
     assert A.bd_append(str(repo))["hecho"] == []
     assert _fotos(repo) == fotos  # idempotente
-    assert (REAL_SETTINGS.read_bytes() if REAL_SETTINGS.exists() else None) == real
+    assert _bd_en_real() == real
     assert any((env / "home").iterdir())  # bd uso el HOME temporal
 
 
