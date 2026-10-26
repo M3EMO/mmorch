@@ -129,6 +129,7 @@ def test_evolve_red_linea_con_zone_y_reason(tmp_path, monkeypatch):
         returncode = 1
         stdout = ""
     monkeypatch.setattr(E, "_git", lambda *a, cwd: _R())
+    monkeypatch.setenv("MMORCH_HOME", str(tmp_path))  # evolve_red va a logs_dir()
     c = E.snapshot_change("a.py", "def a(): return 1", "fix a", root=tmp_path)
     r = E.coordinated_evolve_round(
         [c], root=tmp_path, path=tmp_path / "pr_state.json",
@@ -150,6 +151,7 @@ def test_evolve_red_reason_prefiere_suite_roja(tmp_path, monkeypatch):
         returncode = 1
         stdout = ""
     monkeypatch.setattr(E, "_git", lambda *a, cwd: _R())
+    monkeypatch.setenv("MMORCH_HOME", str(tmp_path))  # evolve_red va a logs_dir()
     c = E.snapshot_change("a.py", "x=1", "fix", root=tmp_path)
     E.coordinated_evolve_round(
         [c], root=tmp_path, path=tmp_path / "pr_state.json",

@@ -615,10 +615,9 @@ def coordinated_evolve_round(candidates: list[Change], *, root: Path = ROOT,
                               if fit.get("failed") else "")
                           or fit.get("detail", "")[-300:]
                           or "sandbox_fail_sin_detalle")
-                # mkdir: un root sin logs/ (instancia fresca) tiraba OSError y el
-                # except lo tragaba — el rechazo desaparecia sin dejar rastro
-                (root / "logs").mkdir(parents=True, exist_ok=True)
-                with open(root / "logs" / "evolve_red.jsonl", "a",
+                # estado bajo MMORCH_HOME, no bajo root (codigo): con root los
+                # selfchecks escribian "fix a" en el log real (auditoria 2026-10-26)
+                with open(paths.logs_dir() / "evolve_red.jsonl", "a",
                           encoding="utf-8") as fh:
                     fh.write(json.dumps(
                         {"ts": time.time(), "target": c.target,
@@ -642,7 +641,7 @@ def coordinated_evolve_round(candidates: list[Change], *, root: Path = ROOT,
             if not fit_ok:
                 blocked_fitness.append(c.target)
                 try:
-                    with open(root / "logs" / "evolve_red.jsonl", "a",
+                    with open(paths.logs_dir() / "evolve_red.jsonl", "a",
                               encoding="utf-8") as fh:
                         fh.write(json.dumps(
                             {"ts": time.time(), "target": c.target, "kind": "fitness_fail",
@@ -663,7 +662,7 @@ def coordinated_evolve_round(candidates: list[Change], *, root: Path = ROOT,
             if not aligned:
                 blocked_goal.append(c.target)
                 try:
-                    with open(root / "logs" / "evolve_red.jsonl", "a",
+                    with open(paths.logs_dir() / "evolve_red.jsonl", "a",
                               encoding="utf-8") as fh:
                         fh.write(json.dumps(
                             {"ts": time.time(), "target": c.target, "kind": "goal_misaligned",

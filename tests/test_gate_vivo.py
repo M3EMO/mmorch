@@ -80,6 +80,7 @@ def _fit_ok(c):
 def _round(tmp_path, monkeypatch, aligned_fn, fitness_fn=_fit_ok):
     """1 candidato verde que pasa sandbox; devuelve (resultado, pr_calls, state_path)."""
     monkeypatch.setattr(E, "_git", lambda *a, cwd: SimpleNamespace(returncode=1, stdout=""))
+    monkeypatch.setenv("MMORCH_HOME", str(tmp_path))  # evolve_red va a logs_dir()
     (tmp_path / "logs").mkdir()
     state = tmp_path / "pr_state.json"
     pr_calls = []
