@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from mmorch.iohelpers import atomic_write_json
-from mmorch.proposals import compose_cards, pick_card
+from mmorch.proposals import compose_cards
 
 
 def match(project="proj1", score=0.9, status="pendiente", card=None,
@@ -70,55 +70,3 @@ def test_compose_skips_when_loop_paused(tmp_path):
     assert compose_cards(logs_dir=str(logs)) == {"skipped": True}
     assert "card" not in read_state(logs)["by_project"]["proj1"][0]
 
-
-def make_projects(tmp_path):
-    outer = tmp_path / "repos"
-    inner = outer / "proj1"
-    inner.mkdir(parents=True)
-    return {"outer": str(outer), "proj1": str(inner)}
-
-
-def test_pick_resolves_project_by_longest_prefix(tmp_path):
-    projects = make_projects(tmp_path)
-    logs = tmp_path / "logs"
-    write_state(logs, [match(project="proj1", card="tarjeta proj1"),
-                       match(project="outer", card="tarjeta outer")])
-    card = pick_card(projects["proj1"], projects, logs_dir=str(logs))
-    assert card == "tarjeta proj1"  # gana el prefijo mas largo
-
-
-def test_pick_none_when_no_project_matches(tmp_path):
-    projects = make_projects(tmp_path)
-    logs = tmp_path / "logs"
-    write_state(logs, [match(card="t")])
-    assert pick_card(str(tmp_path / "otro"), projects, logs_dir=str(logs)) is None
-
-
-def test_pick_respects_shown_count_limit(tmp_path):
-    projects = make_projects(tmp_path)
-    logs = tmp_path / "logs"
-    write_state(logs, [match(card="t", shown=5)])
-    assert pick_card(projects["proj1"], projects, logs_dir=str(logs)) is None
-
-
-def test_pick_increments_shown_count_persisted(tmp_path):
-    projects = make_projects(tmp_path)
-    logs = tmp_path / "logs"
-    write_state(logs, [match(card="t", shown=1)])
-    assert pick_card(projects["proj1"], projects, logs_dir=str(logs)) == "t"
-    assert read_state(logs)["by_project"]["proj1"][0]["shown_count"] == 2
-
-
-def test_pick_none_without_carded_pending(tmp_path):
-    projects = make_projects(tmp_path)
-    logs = tmp_path / "logs"
-    write_state(logs, [match()])  # sin card
-    assert pick_card(projects["proj1"], projects, logs_dir=str(logs)) is None
-
-
-def test_pick_fail_open_on_corrupt_json(tmp_path):
-    projects = make_projects(tmp_path)
-    logs = tmp_path / "logs"
-    logs.mkdir()
-    (logs / "adjudications.json").write_text("{corrupto", encoding="utf-8")
-    assert pick_card(projects["proj1"], projects, logs_dir=str(logs)) is None

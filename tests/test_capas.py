@@ -22,8 +22,7 @@ REPO = Path(__file__).resolve().parents[1]
 PKG = REPO / "mmorch"
 
 _ENTRADAS = ("mcp_server", "server", "nightly", "cli", "auto_apply_nightly", "hillclimb", "autoresearch",
-             "sdlc_bench",  # CLI `python -m mmorch.sdlc_bench`: mmorch mide el builder sdlc (paquete aparte)
-             "context_blocks")  # CLI de los hooks ~/.claude/hooks/context-block-*.js (ver test_hook_modules)
+             "sdlc_bench")  # CLI `python -m mmorch.sdlc_bench`: mmorch mide el builder sdlc (paquete aparte)
 _DINAMICOS = {"loop"}   # cargado por nombre desde loop_nightly; 4173 usos en 90 dias
 
 # Medido 2026-09-14 con este mismo analisis (15). Cada uno: se cablea (y sale de aca) o se borra (y sale

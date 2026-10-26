@@ -3,7 +3,7 @@
 Corre cuando quieras (o mensual): junta las fuentes vivas y emite JSONL
 normalizado en training/ (gitignoreado — datos, no fuente). Cada linea:
 {"kind", "input", "output"|"label", "meta"}. Redaccion: los traces son
-local-only; el export pasa por el redact de sessions si esta disponible.
+local-only; _write pasa cada string por sessions.redact antes de escribir.
 
 Fuentes -> datasets:
   logs/idea_loop_traces.jsonl  -> sft_judge.jsonl      (prompt -> output json)
@@ -36,11 +36,23 @@ def _finish(row: dict, tier: str) -> dict:
     return row
 
 
+def _redact(x):
+    """Redacta cada string de la fila; sobre el JSON serializado rompería los escapes."""
+    from mmorch.sessions import redact
+    if isinstance(x, str):
+        return redact(x)[0]
+    if isinstance(x, dict):
+        return {k: _redact(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_redact(v) for v in x]
+    return x
+
+
 def _write(name: str, rows: list) -> int:
     OUT.mkdir(exist_ok=True)
     with open(OUT / name, "w", encoding="utf-8") as f:
         for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False, default=str) + "\n")
+            f.write(json.dumps(_redact(r), ensure_ascii=False, default=str) + "\n")
     return len(rows)
 
 
