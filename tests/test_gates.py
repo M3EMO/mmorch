@@ -112,3 +112,30 @@ def test_plan_allowlist_rechaza_test_ajeno_omision_y_fuera_del_techo():
 def test_calza_y_en_techo():
     assert gates.calza("src/App.java", "src/**/*.java") and gates.en_techo("x/y.py", [], [])
     assert not gates.en_techo("otro/x.py", ["pkg/a.py"], ["pkg/**/*.py"])
+
+
+def test_cambio_minimo_rechaza_reescritura_y_acepta_parche_o_pedido():
+    orig = {"pkg/a.py": "\n".join(f"x{i} = {i}" for i in range(100))}
+    assert not gates.cambio_minimo(orig, {"pkg/a.py": "nuevo = 1\n"}, "agrega una guarda")[0]
+    assert gates.cambio_minimo(orig, {"pkg/a.py": orig["pkg/a.py"] + "\nguarda = 1\n"}, "agrega una guarda") == (True, "ok")
+    assert gates.cambio_minimo(orig, {"pkg/a.py": "nuevo = 1\n"}, "Reescribi a.py") == (True, "la tarea pide reescribir")
+
+
+def test_docstring_intacto():
+    assert gates.docstring_intacto({"a.py": "doc"}, {"a.py": "doc nuevo"}, "t") == (True, "ok")
+    assert gates.docstring_intacto({"a.py": "doc"}, {"a.py": None}, "t") == (False, "docstring de modulo borrado en ['a.py']")
+    assert gates.docstring_intacto({"a.py": "doc"}, {"a.py": None}, "cambia el docstring")[0]
+
+
+def test_un_archivo_y_secciones():
+    fre = r"((?:[\w.-]+/)*[\w.-]+\.(?:py))"
+    code = "# pkg/a.py\nA = 1\n# pkg/b.py\nB = 2\n"
+    assert gates.secciones(code, fre) == {"pkg/a.py": "A = 1", "pkg/b.py": "B = 2"}
+    assert gates.un_archivo(code, "pkg/a.py", fre)[0] and not gates.un_archivo(code, "pkg/c.py", fre)[0]
+    assert gates.secciones("solo = 1\n", fre) == {} and gates.un_archivo("solo = 1\n", "pkg/a.py", fre)[0]
+
+
+def test_tipo_propio():
+    assert gates.tipo_propio("public final class Opcion {\n    public static class Item {}\n}\n", "src/Opcion.java")[0]
+    assert gates.tipo_propio("public class Negocio {}\n", "src/Opcion.java") == (False, "src/Opcion.java: declara public Negocio")
+    assert gates.tipo_propio("public class Negocio {}\n", "src/x.ts")[0]

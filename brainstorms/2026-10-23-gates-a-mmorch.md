@@ -160,3 +160,11 @@ Los demas ejecutan comandos con `sh` y leen el worktree `WT`.
 - Contrato de las etiquetas: el pedido de `plan()` y el techo de `sdlc.toml`.
 - Resultado (seed 42, n=400): sensibilidad 0.815, especificidad 1.00, acc. balanceada 0.907.
 - Hallazgo de seguridad: `pkg/../../x.py` calza con `pkg/**/*.py` (fnmatch deja que * cruce /). `_plan_files` conserva `..` y `_write` no verifica el worktree. Bd `orchestration-5s7` (P2).
+
+## Gates 6 a 9: cambio-minimo, docstring-intacto, un-archivo, tipo-del-archivo (2026-10-26)
+- Pedido de la sesion que lanzo esta (2026-10-26): terminar la fase 1 y resolver los bugs medidos; merge de `origin/mmorch/auto` (880ffea).
+- Los cuatro pasaron a `mmorch/gates.py` en un solo commit, no en cuatro: comparten gates.py, pipeline.py y gates_bench.py. Desvio de D3.
+- `docstring-intacto` era fase 2 por D3; la lectura de disco (`_docstrings`) quedo en pipeline y el chequeo compara dicts.
+- Resultados (seed 42): cambio-minimo 0.803, docstring-intacto 0.679, un-archivo 0.662, tipo-del-archivo 0.819. Especificidad 1.00 en los cuatro.
+- Huecos: subcadena de la tarea habilita lo que prohibe ("sin reescribir", "no toques ningun docstring"); minimo de 40 lineas; cabeceras `# File: ruta`; anotacion en la misma linea.
+- Bds por D9: `orchestration-rlg`, `orchestration-weo`, `orchestration-6qb`, `orchestration-i79`.

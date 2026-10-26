@@ -104,3 +104,59 @@ def plan_allowlist(plan_md: str, files: list[str], need: list[str], techo: list[
     if fuera:
         return False, f"plan lista archivos fuera del techo de sdlc.toml: {fuera}"
     return True, f"{files}"
+
+
+def cambio_minimo(orig: dict[str, str], written: dict[str, str], tarea: str) -> tuple[bool, str]:
+    """D11: el coder reescribio project_loop.py (-216 lineas) para agregar una guarda. Sobre un archivo que ya existia,
+    borrar mas del 30% de sus lineas (minimo 40) sin que la tarea diga 'reescrib' es un cambio no pedido. USD 0."""
+    if "reescrib" in tarea.lower():
+        return True, "la tarea pide reescribir"
+    malos = []
+    for f, texto in orig.items():
+        if f not in written or not texto.strip():
+            continue
+        old_lines = [l for l in texto.splitlines() if l.strip()]
+        new_set = {l.strip() for l in written[f].splitlines()}
+        borradas = sum(1 for l in old_lines if l.strip() not in new_set)
+        if borradas > max(40, int(0.3 * len(old_lines))):
+            malos.append(f"{f}: {borradas} de {len(old_lines)} lineas originales desaparecieron")
+    return not malos, "ok" if not malos else "; ".join(malos)
+
+
+def docstring_intacto(antes: dict[str, str | None], despues: dict[str, str | None], tarea: str) -> tuple[bool, str]:
+    """D4: el coder borro el docstring del modulo (22 lineas) y ningun test lo ve. Determinista, USD 0:
+    un docstring de modulo que existia antes tiene que seguir existiendo, salvo que la tarea hable de docstrings."""
+    if "docstring" in tarea.lower():
+        return True, "la tarea lo cubre"
+    perdidos = [f for f, d in antes.items() if d and not despues.get(f)]
+    return not perdidos, "ok" if not perdidos else f"docstring de modulo borrado en {perdidos}"
+
+
+def secciones(code: str, file_re: str) -> dict[str, str]:
+    """Secciones `# ruta` / `// ruta` de una respuesta del coder; {} si no tiene cabeceras de archivo."""
+    parts = re.split(r"(?m)^(?:#|//)\s*" + file_re + r"\s*$", code)
+    return {parts[i]: parts[i + 1].strip() for i in range(1, len(parts), 2)} if len(parts) >= 3 else {}
+
+
+def un_archivo(code: str, rel: str, file_re: str) -> tuple[bool, str]:
+    """Gate un-archivo (r1 2026-09-11): el coder imito las cabeceras "# path" del prompt y pego 3 archivos en uno.
+    Con varias secciones, una tiene que ser la del archivo pedido."""
+    secs = secciones(code, file_re)
+    if not secs:
+        return True, f"{rel}: un solo archivo"
+    return rel in secs, f"{rel}: recorte de {list(secs)}"
+
+
+# ponytail: solo tipos de primer nivel en columna 0 (el estilo de javac y de los formateadores); uno indentado no cuenta
+_TIPO_PUBLICO = re.compile(r"(?m)^public\s+(?:(?:abstract|final|sealed|non-sealed|strictfp)\s+)*"
+                           r"(?:class|interface|enum|record|@interface)\s+(\w+)")
+
+
+def tipo_propio(code: str, rel: str) -> tuple[bool, str]:
+    """orchestration-7b6: en Java el tipo publico tiene el nombre del archivo. Pedido Opcion.java, el coder devolvio la
+    clase Negocio (y Opcion en Bot.java, 519 -> 101 lineas)."""
+    if not rel.endswith(".java"):
+        return True, f"{rel}: no es Java"
+    stem = rel.rsplit("/", 1)[-1][:-len(".java")]
+    ajenos = [t for t in _TIPO_PUBLICO.findall(code) if t != stem]
+    return (False, f"{rel}: declara public {ajenos[0]}") if ajenos else (True, f"{rel}: tipo propio")

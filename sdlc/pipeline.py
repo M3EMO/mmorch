@@ -28,7 +28,8 @@ import types
 from typing import Any
 
 from mmorch.gates import calza as _calza
-from mmorch.gates import clarificaciones, en_techo, filas_tabla, plan_allowlist, sin_clones, traza_plan, traza_spec
+from mmorch.gates import (cambio_minimo, clarificaciones, docstring_intacto, en_techo, filas_tabla, plan_allowlist,
+                          secciones, sin_clones, tipo_propio, traza_plan, traza_spec, un_archivo)
 from mmorch.paths import logs_dir
 from mmorch.providers import call, register_run_tracker, unregister_run_tracker
 
@@ -298,29 +299,19 @@ def strip_fence(t):
 
 
 def one_file(code: str, rel: str) -> str:
-    """Gate un-archivo (r1 2026-09-11): el coder imito las cabeceras "# path" del prompt y pego 3 archivos en uno."""
-    parts = re.split(r"(?m)^(?:#|//)\s*" + _file_re() + r"\s*$", code)
-    if len(parts) < 3:
+    """Gate un-archivo: chequeo en mmorch.gates.un_archivo; aca se registra y se recorta la seccion del archivo."""
+    secs = secciones(code, _file_re())
+    if not secs:
         return _tipo_propio(code, rel)
-    secs = {parts[i]: parts[i + 1].strip() for i in range(1, len(parts), 2)}
-    rec_gate("un-archivo", rel in secs, f"{rel}: recorte de {list(secs)}")
+    rec_gate("un-archivo", *un_archivo(code, rel, _file_re()))
     return _tipo_propio(secs.get(rel, code), rel)
 
 
-# ponytail: solo tipos de primer nivel en columna 0 (el estilo de javac y de los formateadores); uno indentado no cuenta
-_TIPO_PUBLICO = re.compile(r"(?m)^public\s+(?:(?:abstract|final|sealed|non-sealed|strictfp)\s+)*"
-                           r"(?:class|interface|enum|record|@interface)\s+(\w+)")
-
-
 def _tipo_propio(code: str, rel: str) -> str:
-    """orchestration-7b6: en Java el tipo publico tiene el nombre del archivo. Pedido Opcion.java, el coder devolvio la
-    clase Negocio (y Opcion en Bot.java, 519 -> 101 lineas): ese codigo no se escribe. Devuelve "" y el que llama
-    conserva el archivo."""
-    if not rel.endswith(".java"):
-        return code
-    ajenos = [t for t in _TIPO_PUBLICO.findall(code) if t != pathlib.Path(rel).stem]
-    if ajenos:
-        rec_gate("tipo-del-archivo", False, f"{rel}: declara public {ajenos[0]}")
+    """Chequeo en mmorch.gates.tipo_propio. Un tipo ajeno no se escribe: devuelve "" y el que llama conserva el archivo."""
+    ok, detalle = tipo_propio(code, rel)
+    if not ok:
+        rec_gate("tipo-del-archivo", False, detalle)
         return ""
     return code
 
@@ -1213,30 +1204,13 @@ _orig_files: dict[str, str] = {}
 
 
 def gate_cambio_minimo(before: dict, written: dict) -> tuple[bool, str]:
-    """D11: el coder reescribio project_loop.py (-216 lineas) para agregar una guarda. Sobre un archivo que ya existia,
-    borrar mas del 30% de sus lineas (minimo 40) sin que la tarea diga 'reescrib' es un cambio no pedido. USD 0."""
-    if "reescrib" in TASK.task.lower():
-        return rec_gate("cambio-minimo", True, "la tarea pide reescribir")
-    malos = []
-    for f, orig in _orig_files.items():
-        if f not in written or not orig.strip():
-            continue
-        old_lines = [l for l in orig.splitlines() if l.strip()]
-        new_set = {l.strip() for l in written[f].splitlines()}
-        borradas = sum(1 for l in old_lines if l.strip() not in new_set)
-        if borradas > max(40, int(0.3 * len(old_lines))):
-            malos.append(f"{f}: {borradas} de {len(old_lines)} lineas originales desaparecieron")
-    return rec_gate("cambio-minimo", not malos, "ok" if not malos else "; ".join(malos))
+    """Chequeo en mmorch.gates.cambio_minimo (orchestration-bpn); aca solo se registra."""
+    return rec_gate("cambio-minimo", *cambio_minimo(_orig_files, written, TASK.task))
 
 
 def gate_docstring(before: dict) -> tuple[bool, str]:
-    """D4: el coder borro el docstring del modulo (22 lineas) y ningun test lo ve. Determinista, USD 0:
-    un docstring de modulo que existia antes tiene que seguir existiendo, salvo que la tarea hable de docstrings."""
-    if "docstring" in TASK.task.lower():
-        return rec_gate("docstring-intacto", True, "la tarea lo cubre")
-    after = _docstrings(before)
-    perdidos = [f for f, d in before.items() if d and not after.get(f)]
-    return rec_gate("docstring-intacto", not perdidos, "ok" if not perdidos else f"docstring de modulo borrado en {perdidos}")
+    """Chequeo en mmorch.gates.docstring_intacto; la lectura de los docstrings queda aca (_docstrings)."""
+    return rec_gate("docstring-intacto", *docstring_intacto(before, _docstrings(before), TASK.task))
 
 
 def _tests_text():

@@ -282,6 +282,138 @@ def _casos_plan_allowlist(rng: random.Random, n: int) -> list[Caso]:
     return casos
 
 
+# --------------------------------------------------------------------------- cambio-minimo
+
+
+def _archivo(rng: random.Random, n_mod: int) -> list[str]:
+    return [l for _ in range(n_mod) for l in _modulo(rng)]
+
+
+def _casos_cambio_minimo(rng: random.Random, n: int) -> list[Caso]:
+    """Intencion = D11: el coder reescribe o recorta un archivo existente cuando la tarea pedia un cambio chico. Verde =
+    un parche (hasta 10% de lineas editadas mas unas lineas nuevas), un archivo nuevo, o una tarea que pide reescribir.
+    Rojo = una reescritura no pedida (por tamaño del original), un recorte de 40-70% de las lineas, o una reescritura
+    cuando la tarea dice explicitamente que no se reescriba."""
+    casos: list[Caso] = []
+    verdes, rojos = ["parche", "archivo_nuevo", "tarea_pide_reescribir"], ["reescritura", "recorte", "tarea_prohibe_reescribir"]
+    for k in range(n):
+        rojo = bool(k % 2)
+        tipo = rng.choice(rojos if rojo else verdes)
+        orig = _archivo(rng, rng.randint(1, 8))
+        tarea = "Agrega una guarda contra montos negativos en pkg/a.py."
+        grupo = tipo
+        if tipo == "parche":
+            nuevo = _copia_editada(rng, orig)[0] if rng.random() < 0.5 else list(orig)
+            idx = rng.sample(range(len(nuevo)), int(rng.uniform(0, 0.10) * len(nuevo)))
+            for i in idx:
+                nuevo[i] = nuevo[i][:len(nuevo[i]) - len(nuevo[i].lstrip())] + _sentencia(rng).split("\n")[0]
+            nuevo += ["    if n < 0:", "        raise ValueError(n)"]
+        elif tipo == "recorte":
+            keep = sorted(rng.sample(range(len(orig)), int(len(orig) * rng.uniform(0.30, 0.60))))
+            nuevo = [orig[i] for i in keep] + ["    if n < 0:", "        raise ValueError(n)"]
+        else:
+            nuevo = _archivo(rng, max(1, len(orig) // 25))
+            if tipo == "tarea_pide_reescribir":
+                tarea = "Reescribi pkg/a.py con una sola funcion publica."
+            elif tipo == "tarea_prohibe_reescribir":
+                tarea = "Agrega la guarda sin reescribir pkg/a.py."
+            else:
+                grupo = f"reescritura {'<40' if len(orig) < 40 else '>=40'} lineas"
+        o = {} if tipo == "archivo_nuevo" else {"pkg/a.py": "\n".join(orig)}
+        casos.append({"args": (o, {"pkg/a.py": "\n".join(nuevo)}, tarea), "rojo": rojo, "origen": "generado", "grupo": grupo})
+    return casos
+
+
+# --------------------------------------------------------------------------- docstring-intacto
+
+_DOC = ["Banco de mmorch: mide verificadores sobre tareas con verdad computada.", "Registro de plugins del engine.",
+        "Ruteo multi-modelo.\n\nDecide que modelo corre cada nodo y loggea a metrics.jsonl."]
+
+
+def _casos_docstring(rng: random.Random, n: int) -> list[Caso]:
+    """Intencion = D4: un docstring de modulo que existia desaparece sin que la tarea lo pida. Verde = intacto, editado,
+    sin docstring antes ni despues, o una tarea que pide cambiar los docstrings. Rojo = borrado, reemplazado por un
+    marcador vacio de contenido (`TODO`, `.`), o borrado cuando la tarea dice que no se toquen."""
+    casos: list[Caso] = []
+    verdes, rojos = ["intacto", "editado", "sin_docstring", "tarea_docstrings"], ["borrado", "marcador", "tarea_prohibe"]
+    for k in range(n):
+        rojo = bool(k % 2)
+        tipo = rng.choice(rojos if rojo else verdes)
+        fs = [f"pkg/{_nombre(rng)}.py" for _ in range(rng.randint(1, 3))]
+        antes: dict[str, str | None] = {f: (None if tipo == "sin_docstring" else rng.choice(_DOC)) for f in fs}
+        despues = dict(antes)
+        malo = rng.choice(fs)
+        tarea = "Agrega el parametro timeout a la funcion run."
+        if tipo == "editado":
+            despues[malo] = f"{antes[malo]} Agrega timeout."
+        elif tipo in ("borrado", "tarea_docstrings", "tarea_prohibe"):
+            despues[malo] = None
+            tarea = {"tarea_docstrings": "Actualiza los docstrings de pkg/.",
+                     "tarea_prohibe": "Agrega timeout; no toques ningun docstring."}.get(tipo, tarea)
+        elif tipo == "marcador":
+            despues[malo] = rng.choice(["TODO", ".", "..."])
+        casos.append({"args": (antes, despues, tarea), "rojo": rojo, "origen": "generado", "grupo": tipo})
+    return casos
+
+
+# --------------------------------------------------------------------------- un-archivo
+
+_FILE_RE = r"((?:[\w.-]+/)*[\w.-]+\.(?:py|ts|java))"  # el de sdlc/pipeline._file_re con ext = [py, ts, java]
+
+
+def _casos_un_archivo(rng: random.Random, n: int) -> list[Caso]:
+    """Intencion = r1 2026-09-11: el coder pega varios archivos en una respuesta y el recorte no encuentra el pedido.
+    Verde = un solo archivo, o varias secciones `# ruta` que incluyen la pedida (el pipeline recorta la suya). Rojo =
+    varias secciones sin la pedida, o varias secciones con una cabecera que el recorte no reconoce (`# File: ruta`,
+    o la ruta entre backticks): el pipeline escribe todo el texto en el archivo pedido."""
+    casos: list[Caso] = []
+    verdes, rojos = ["un_solo_archivo", "con_el_pedido"], ["sin_el_pedido", "cabecera_con_prefijo", "cabecera_en_backticks"]
+    for k in range(n):
+        rojo = bool(k % 2)
+        tipo = rng.choice(rojos if rojo else verdes)
+        rel = f"pkg/{_nombre(rng)}.py"
+        otros = [f"pkg/{_nombre(rng)}_otro.py" for _ in range(rng.randint(1, 2))]
+        cuerpo = lambda: "\n".join(_modulo(rng))  # noqa: E731
+        if tipo == "un_solo_archivo":
+            code = cuerpo()
+        else:
+            rutas = otros if tipo == "sin_el_pedido" else rng.sample([rel, *otros], len(otros) + 1)
+            cab = {"cabecera_con_prefijo": "# File: {}", "cabecera_en_backticks": "# `{}`"}.get(tipo, rng.choice(["# {}", "// {}"]))
+            code = "\n\n".join(cab.format(r) + "\n" + cuerpo() for r in rutas)
+        casos.append({"args": (code, rel, _FILE_RE), "rojo": rojo, "origen": "generado", "grupo": tipo})
+    return casos
+
+
+# --------------------------------------------------------------------------- tipo-del-archivo
+
+
+def _casos_tipo_propio(rng: random.Random, n: int) -> list[Caso]:
+    """Intencion = orchestration-7b6: en Java el tipo publico de primer nivel lleva el nombre del archivo; el coder
+    devolvio otra clase. Verde = el tipo propio (con modificadores o con tipos anidados publicos) o un archivo que no es
+    Java. Rojo = un tipo publico ajeno (clase, interfaz, con modificadores) o con la anotacion en la misma linea."""
+    casos: list[Caso] = []
+    verdes, rojos = ["tipo_propio", "con_anidado", "no_java"], ["tipo_ajeno", "interfaz_ajena", "anotacion_en_linea"]
+    for k in range(n):
+        rojo = bool(k % 2)
+        tipo = rng.choice(rojos if rojo else verdes)
+        propio = _nombre(rng).replace("_", "").capitalize()
+        ajeno = propio + rng.choice(["Service", "Negocio", "Item"])
+        mod = rng.choice(["", "final ", "abstract "])
+        rel = f"src/main/{propio}.java"
+        cuerpo = "{\n    private int n;\n}\n"
+        code = {"tipo_propio": f"public {mod}class {propio} {cuerpo}",
+                "con_anidado": f"public class {propio} {{\n    public static class {ajeno} {{}}\n}}\n",
+                "no_java": f"export class {ajeno} {cuerpo}",
+                "tipo_ajeno": f"public {mod}class {ajeno} {cuerpo}",
+                "interfaz_ajena": f"public interface {ajeno} {cuerpo}",
+                "anotacion_en_linea": f"@Deprecated public class {ajeno} {cuerpo}"}[tipo]
+        if tipo == "no_java":
+            rel = f"src/{propio}.ts"
+        code = "package app;\n\nimport java.util.List;\n\n" + code if rel.endswith(".java") else code
+        casos.append({"args": (code, rel), "rojo": rojo, "origen": "generado", "grupo": tipo})
+    return casos
+
+
 _PLUGINS = '''"""Registro de plugins."""
 from __future__ import annotations
 import importlib
@@ -323,18 +455,52 @@ INCIDENTES: dict[str, list[Caso]] = {
                   ["src/encuadre/resolver.ts"]),
          "rojo": False, "origen": "SSB F4b", "grupo": None, "reconstruido": True},
     ],
+    "cambio-minimo": [
+        # D11: el coder reescribio project_loop.py (-216 lineas) para agregar una guarda. El texto original no se guardo.
+        {"args": ({"mmorch/project_loop.py": "\n".join(f"linea_{i} = {i}" for i in range(300))},
+                  {"mmorch/project_loop.py": "\n".join(f"linea_{i} = {i}" for i in range(84)) + "\nif guarda:\n    pass"},
+                  "Agrega una guarda en project_loop.py."),
+         "rojo": True, "origen": "D11", "grupo": None, "reconstruido": True},
+    ],
+    "docstring-intacto": [
+        # D4: el coder borro el docstring de modulo (22 lineas). Solo sobrevive la descripcion.
+        {"args": ({"mmorch/x.py": "\n".join(f"linea {i} del docstring" for i in range(22))}, {"mmorch/x.py": None},
+                  "Agrega una opcion."),
+         "rojo": True, "origen": "D4", "grupo": None, "reconstruido": True},
+    ],
+    "un-archivo": [
+        # r1 2026-09-11: el coder imito las cabeceras "# path" del prompt y pego 3 archivos en uno.
+        {"args": ("# limiter/__init__.py\nfrom x import y\n\n# limiter/core.py\nclass TokenBucket: pass\n\n"
+                  "# limiter/util.py\nZ = 1\n", "limiter/core.py", _FILE_RE),
+         "rojo": False, "origen": "r1 2026-09-11", "grupo": None, "reconstruido": True},
+    ],
+    "tipo-del-archivo": [
+        # orchestration-7b6: pedido Opcion.java, el coder devolvio la clase Negocio; pedido Bot.java, devolvio Opcion.
+        {"args": ("public class Negocio {\n}\n", "src/Opcion.java"), "rojo": True, "origen": "orchestration-7b6",
+         "grupo": None, "reconstruido": True},
+        {"args": ("public class Opcion {\n}\n", "src/Bot.java"), "rojo": True, "origen": "orchestration-7b6",
+         "grupo": None, "reconstruido": True},
+    ],
 }
 
 CHEQUEOS: dict[str, Callable[..., tuple[bool, str]]] = {"sin-clones": gates.sin_clones,
                                                          "spec-review": gates.clarificaciones,
                                                          "trazabilidad-plan": gates.traza_plan,
                                                          "trazabilidad-spec": gates.traza_spec,
-                                                         "plan-allowlist": gates.plan_allowlist}
+                                                         "plan-allowlist": gates.plan_allowlist,
+                                                         "cambio-minimo": gates.cambio_minimo,
+                                                         "docstring-intacto": gates.docstring_intacto,
+                                                         "un-archivo": gates.un_archivo,
+                                                         "tipo-del-archivo": gates.tipo_propio}
 GENERADORES: dict[str, Callable[[random.Random, int], list[Caso]]] = {"sin-clones": _casos_sin_clones,
                                                                     "spec-review": _casos_spec_review,
                                                                     "trazabilidad-plan": _casos_traza_plan,
                                                                     "trazabilidad-spec": _casos_traza_spec,
-                                                                    "plan-allowlist": _casos_plan_allowlist}
+                                                                    "plan-allowlist": _casos_plan_allowlist,
+                                                                    "cambio-minimo": _casos_cambio_minimo,
+                                                                    "docstring-intacto": _casos_docstring,
+                                                                    "un-archivo": _casos_un_archivo,
+                                                                    "tipo-del-archivo": _casos_tipo_propio}
 
 
 def medir(gate: str, n: int = 400, seed: int = 42) -> dict[str, Any]:
