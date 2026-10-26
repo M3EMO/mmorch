@@ -4,7 +4,7 @@
 
 Fuente: introspección de `mmorch/*.py` (1ª línea del docstring) y `mmorch/mcp_server.py`. Contratos y ‘cuándo elegir’: ver `docs/SOURCES.md`.
 
-**119 módulos · 44 MCP tools · 1174 tests.**
+**121 módulos · 44 MCP tools · 1211 tests.**
 
 El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_MCP_PROFILE=full` registra todas. Criterio y telemetría: `docs/cursor-setup.md`.
 
@@ -56,6 +56,8 @@ El server expone **15** de esas 44 con el perfil por default (`core`); `MMORCH_M
 | `mmorch/fleet.py` | fleet — control unificado de varios hosts mmorch en el tailnet. Cada maquina corre su |
 | `mmorch/frontier.py` | Frontera de temas — rompe el círculo cerrado del auto-descubrimiento. |
 | `mmorch/fuel.py` | Fuel module: candidate proposal lifecycle for roadmap loops. |
+| `mmorch/gates.py` | Chequeos de los gates del SDLC (bd orchestration-bpn, 2026-10-23). |
+| `mmorch/gates_bench.py` | Banco de los gates del SDLC (bd orchestration-bpn, 2026-10-23): precision de cada chequeo de mmorch/gates.py. |
 | `mmorch/goal.py` | goal — ancla anti-goal-drift, modelada sobre el `/goal` nativo de Claude Code. |
 | `mmorch/hardening.py` | Hardening loop: mmorch se blinda solo contra sus puntos ciegos. |
 | `mmorch/health.py` | Health module for mmorch: dead-man's switch detection. |

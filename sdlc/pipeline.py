@@ -27,6 +27,10 @@ import time
 import types
 from typing import Any
 
+from mmorch.gates import calza as _calza
+from mmorch.gates import (baseline_intacto, cambio_minimo, clarificaciones, codigo_muerto, conteo_hallazgos,
+                          errores_compilador, errores_nuevos, fallos, lint, mutacion, regresion, docstring_intacto, en_techo, filas_tabla, plan_allowlist,
+                          secciones, sin_clones, tamano, tipo_propio, traza_plan, traza_spec, un_archivo)
 from mmorch.paths import logs_dir
 from mmorch.providers import call, register_run_tracker, unregister_run_tracker
 
@@ -296,29 +300,19 @@ def strip_fence(t):
 
 
 def one_file(code: str, rel: str) -> str:
-    """Gate un-archivo (r1 2026-09-11): el coder imito las cabeceras "# path" del prompt y pego 3 archivos en uno."""
-    parts = re.split(r"(?m)^(?:#|//)\s*" + _file_re() + r"\s*$", code)
-    if len(parts) < 3:
+    """Gate un-archivo: chequeo en mmorch.gates.un_archivo; aca se registra y se recorta la seccion del archivo."""
+    secs = secciones(code, _file_re())
+    if not secs:
         return _tipo_propio(code, rel)
-    secs = {parts[i]: parts[i + 1].strip() for i in range(1, len(parts), 2)}
-    rec_gate("un-archivo", rel in secs, f"{rel}: recorte de {list(secs)}")
+    rec_gate("un-archivo", *un_archivo(code, rel, _file_re()))
     return _tipo_propio(secs.get(rel, code), rel)
 
 
-# ponytail: solo tipos de primer nivel en columna 0 (el estilo de javac y de los formateadores); uno indentado no cuenta
-_TIPO_PUBLICO = re.compile(r"(?m)^public\s+(?:(?:abstract|final|sealed|non-sealed|strictfp)\s+)*"
-                           r"(?:class|interface|enum|record|@interface)\s+(\w+)")
-
-
 def _tipo_propio(code: str, rel: str) -> str:
-    """orchestration-7b6: en Java el tipo publico tiene el nombre del archivo. Pedido Opcion.java, el coder devolvio la
-    clase Negocio (y Opcion en Bot.java, 519 -> 101 lineas): ese codigo no se escribe. Devuelve "" y el que llama
-    conserva el archivo."""
-    if not rel.endswith(".java"):
-        return code
-    ajenos = [t for t in _TIPO_PUBLICO.findall(code) if t != pathlib.Path(rel).stem]
-    if ajenos:
-        rec_gate("tipo-del-archivo", False, f"{rel}: declara public {ajenos[0]}")
+    """Chequeo en mmorch.gates.tipo_propio. Un tipo ajeno no se escribe: devuelve "" y el que llama conserva el archivo."""
+    ok, detalle = tipo_propio(code, rel)
+    if not ok:
+        rec_gate("tipo-del-archivo", False, detalle)
         return ""
     return code
 
@@ -652,11 +646,8 @@ def gate_codigo_muerto() -> tuple[bool, str]:
     medida = _cobertura(nuevos)
     if medida is None:
         return rec_gate("codigo-muerto", True, f"no se pudo medir con {PY} (sys.monitoring pide Python 3.12+)")
-    minimo = float(CFG.get("cobertura_min", 0.8))
     state["cobertura_nueva"] = {f: round(1 - len(falta) / max(total, 1), 3) for f, (total, falta) in medida.items()}
-    bajos = {f: medida[f][1] for f, c in state["cobertura_nueva"].items() if c < minimo}
-    detalle = "; ".join(f"{f}: {state['cobertura_nueva'][f]} corre, lineas sin ejecutar {falta}" for f, falta in bajos.items())
-    return rec_gate("codigo-muerto", not bajos, detalle or f"cobertura de archivos nuevos {state['cobertura_nueva']} >= {minimo}")
+    return rec_gate("codigo-muerto", *codigo_muerto(medida, float(CFG.get("cobertura_min", 0.8))))
 
 
 def gate_mutacion() -> tuple[bool, str]:
@@ -699,16 +690,10 @@ def gate_mutacion() -> tuple[bool, str]:
             p.write_text(orig, encoding="utf-8")
     if not total:
         state["mutation_score"] = None
-        return rec_gate("mutacion", True, "sin mutantes posibles")
-    score = round(killed / total, 3)
-    state["mutation_score"] = score
+        return rec_gate("mutacion", *mutacion(0, 0, minimo, [], tope))
+    state["mutation_score"] = round(killed / total, 3)
     state["mutantes"] = mutantes
-    vacuas = _propiedades_vacuas(mutantes)
-    if minimo is not None and score < float(minimo):
-        return rec_gate("mutacion", False, f"mutation score {score} < {minimo} ({killed}/{total})")
-    if minimo is not None and vacuas:   # con mutation_min corren todos los mutantes: sin muertes, la propiedad es vacua
-        return rec_gate("mutacion", False, f"propiedades vacuas (no matan ningun mutante): {vacuas}")
-    return rec_gate("mutacion", True, f"mutation score {score} ({killed}/{total})" + ("" if minimo is not None else f" (observa: sin mutation_min, muestra de {tope})"))
+    return rec_gate("mutacion", *mutacion(killed, total, minimo, _propiedades_vacuas(mutantes), tope))
 
 
 def _propiedades_vacuas(mutantes: list[dict]) -> list[str]:
@@ -790,19 +775,18 @@ def gate_suite_total() -> tuple[bool, str]:
         _write("docs/sdlc/suite-baseline.log", blog)
         if "TIMEOUT" in blog:  # D15: un baseline vacio por timeout se cacheaba y volvia "nuevos" a los rojos previos
             return rec_gate("suite-total", False, f"baseline: {blog[:200]}")
-        base_file.write_text("\n".join(re.findall(r"(?m)^(?:FAILED|ERROR) \S+", blog)) + "\n", encoding="utf-8")
+        base_file.write_text("".join(f"FAILED {t}\n" for t in sorted(fallos(blog))), encoding="utf-8")
     # D8: la suite del worktree traia 594 ERROR (setup) que el gate no miraba porque solo leia FAILED.
-    base = set(re.findall(r"(?m)^(?:FAILED|ERROR) (\S+)", base_file.read_text(encoding="utf-8")))
+    base = fallos(base_file.read_text(encoding="utf-8"))
     ok, log = sh([PY, "-m", "pytest", *_suite_args("final"), *_prop_args()], timeout=CFG["suite_timeout_s"], keep=400000)
     _write("docs/sdlc/suite.log", log)
-    now = set(re.findall(r"(?m)^(?:FAILED|ERROR) (\S+)", log))
+    now = fallos(log)
     new = sorted(now - base)
     if new and "TIMEOUT" not in log:
         # D2 r1: 3 tests de providers fallaron en la suite y pasaron solos -> flaky bajo carga.
         # Un fallo nuevo cuenta como regresion solo si se repite AISLADO (determinista, sin juicio).
         _, rlog = sh([PY, "-m", "pytest", *new[:50], "-q", "-rfE", "-p", "no:cacheprovider", *_prop_args()], keep=400000)
-        flaky = sorted(set(new) - set(re.findall(r"(?m)^(?:FAILED|ERROR) (\S+)", rlog)))
-        new = sorted(set(new) - set(flaky))
+        new, flaky = regresion(base, now, rlog)
         state["suite_flaky"] = flaky
     state["suite_total"] = test_counts(log) | {"new_failures": new, "baseline_failures": len(base)} if test_counts(log) else {"log": log[-300:]}
     if "TIMEOUT" in log:
@@ -895,14 +879,8 @@ def _techo() -> list[str]:
     return list((FEAT or {}).get("techo") or [])
 
 
-def _calza(f: str, pat: str) -> bool:
-    """fnmatch con `**/` opcional: `pkg/**/*.py` incluye `pkg/a.py`. Techo y areas comparten esta semantica."""
-    return areas.calza(f, pat)
-
-
 def _en_techo(f: str) -> bool:
-    t = _techo()
-    return f in _need_files() or not t or any(_calza(f, pat) for pat in t)  # sin techo (bench, FEATURES viejas): todo vale
+    return en_techo(f, _need_files(), _techo())
 
 
 def _tamano(files: list[str]) -> dict:
@@ -960,27 +938,14 @@ def gate_tamano(files: list[str]) -> tuple[bool, str]:
     archivos (1: 0.89, 2-3: 0.81, 4-7: 0.65) pero no hay evidencia de que dividir ayude: los umbrales se revisan con
     20 corridas de 4 o mas archivos. Por repo: `tamano_max_archivos` y `tamano_max_tokens` en sdlc.toml."""
     t = state["plan_tamano"] = _tamano(files)
-    max_a, max_t = int(CFG.get("tamano_max_archivos", 8)), int(CFG.get("tamano_max_tokens", 16000))
-    ok = t["archivos"] <= max_a and t["tokens"] <= max_t
-    detalle = f"{t['archivos']} archivos, {t['tokens']} tokens ({t['escalon']})"
-    if not ok:
-        detalle += f": supera {max_a} archivos o {max_t} tokens; dividi la tarea en features mas chicas"
-    return rec_gate("tamano-plan", ok, detalle)
+    return rec_gate("tamano-plan", *tamano(t, int(CFG.get("tamano_max_archivos", 8)), int(CFG.get("tamano_max_tokens", 16000))))
 
 
 def gate_plan_allowlist(plan_md: str, files: list[str]) -> tuple[bool, str]:
-    m = re.search(r"## Archivos\b(.*?)(?:\n## |\Z)", plan_md, re.S | re.I)
-    block = m.group(1) if m else plan_md
-    # un cableo puede listar tests/test_capas.py (esta en FEAT["files"]); cualquier otro tests/ sigue prohibido
-    ajenos = [t for t in re.findall(r"(?im)^\s*[-*]+\s*`?(" + re.escape(TESTS_PREFIX) + r"[\w/.-]*)", block) if t not in _need_files()]
-    if ajenos:
-        return rec_gate("plan-allowlist", False, f"plan lista {ajenos} como archivo a escribir")
-    need = [f for f in _need_files() if f not in files]
-    if need:
-        return rec_gate("plan-allowlist", False, f"plan omite {need}")
-    fuera = [f for f in files if not _en_techo(f)]
-    if fuera:
-        return rec_gate("plan-allowlist", False, f"plan lista archivos fuera del techo de sdlc.toml: {fuera}")
+    """Chequeo en mmorch.gates.plan_allowlist (orchestration-bpn); aca se registra y se cruza con el area."""
+    ok, detalle = plan_allowlist(plan_md, files, _need_files(), _techo(), TESTS_PREFIX)
+    if not ok:
+        return rec_gate("plan-allowlist", False, detalle)
     if state.get("area"):   # ticket 01: el plan no sale del area (los archivos sin area valen)
         ar = areas.areas(CFG)
         otra_area = {f: otras for f in files if (otras := [a for a in areas.areas_de(f, ar) if a != state["area"]])}
@@ -989,7 +954,7 @@ def gate_plan_allowlist(plan_md: str, files: list[str]) -> tuple[bool, str]:
                 _fuera_de_area(a, f)
         if otra_area:
             return rec_gate("plan-allowlist", False, f"plan lista archivos de otra area (anotados en bd): {otra_area}")
-    return rec_gate("plan-allowlist", True, f"{files}")
+    return rec_gate("plan-allowlist", True, detalle)
 
 
 def _bd(args: list[str], cwd) -> tuple[bool, str]:
@@ -1062,50 +1027,18 @@ def _test_names() -> set[str]:
 
 
 def gate_traza_spec(spec_md: str, tests: set[str]) -> tuple[bool, str]:
-    """Trazabilidad lado spec (ticket 02): IDs R<n> y tabla que cita tests existentes por nombre."""
-    ids = set(re.findall(r"\bR\d+\b", spec_md))
-    if not ids:
-        return rec_gate("trazabilidad-spec", False, "sin IDs R<n>")
-    if not tests and not getattr(TASK, "accept_files", None):
-        return rec_gate("trazabilidad-spec", True, f"{len(ids)} IDs; sin tests nombrados (accept_cmd es el oraculo)")
-    m = re.search(r"## Trazabilidad\b(.*?)(?:\n## |\Z)", spec_md, re.S)
-    rows = re.findall(r"(?m)^\|\s*(R\d+)\s*\|([^|]*)\|", m.group(1) if m else "")
-    cov = {rid: set(re.findall(r"test_\w+", cell)) for rid, cell in rows}
-    sin_test = sorted(i for i in ids if not cov.get(i))
-    inexist = sorted(t for ts in cov.values() for t in ts if t not in tests)
-    if sin_test or inexist:
-        return rec_gate("trazabilidad-spec", False, f"sin test: {sin_test}; tests inexistentes: {inexist}")
-    return rec_gate("trazabilidad-spec", True, f"{len(ids)} IDs cubiertos")
+    """Chequeo en mmorch.gates.traza_spec (orchestration-bpn); aca solo se registra."""
+    return rec_gate("trazabilidad-spec", *traza_spec(spec_md, tests, bool(getattr(TASK, "accept_files", None))))
 
 
 def gate_traza_plan(spec_md: str, plan_block: str, files: list[str]) -> tuple[bool, str]:
-    """Trazabilidad lado plan: cada R<n> de la spec aparece en el plan; cada archivo cita >= 1 R<n>. Un item es una
-    linea de lista o una fila de tabla; un rango `R2–R10` cita R2..R10 (SSB F7a)."""
-    ids = set(re.findall(r"\bR\d+\b", spec_md))
-    plan_block = re.sub(r"\bR(\d+)\s*[–-]\s*R(\d+)\b",
-                        lambda m: ", ".join(f"R{i}" for i in range(int(m[1]), int(m[2]) + 1)), plan_block)
-    huerfanos = sorted(i for i in ids if not re.search(rf"\b{i}\b", plan_block))
-    items = re.findall(r"(?m)^\s*[-*]\s*(.*)$", plan_block) + _filas_tabla(plan_block)
-
-    def nombra(it: str, f: str) -> bool:  # la ruta, o su nombre suelto si el plan lo escribio sin carpeta (F4b)
-        return f in it or bool(re.search(r"(?<![\w/.-])" + re.escape(f.rsplit("/", 1)[-1]) + r"(?![\w.-])", it))
-    sin_id = [f for f in files if not any(nombra(it, f) and re.search(r"\bR\d+\b", it) for it in items)]
-    if huerfanos or sin_id:
-        return rec_gate("trazabilidad-plan", False, f"IDs sin unidad: {huerfanos}; archivos sin ID: {sin_id}")
-    return rec_gate("trazabilidad-plan", True, "ok")
+    """Chequeo en mmorch.gates.traza_plan (orchestration-bpn); aca solo se registra."""
+    return rec_gate("trazabilidad-plan", *traza_plan(spec_md, plan_block, files))
 
 
 def gate_clarificaciones(spec_md: str) -> tuple[bool, str]:
-    """Salida de la revision de spec (ticket 11, de clarify.md): seccion con 0..5 preguntas respondidas."""
-    m = re.search(r"## Clarificaciones\b(.*?)(?:\n## |\Z)", spec_md, re.S)
-    if not m:
-        return rec_gate("spec-review", False, "falta ## Clarificaciones")
-    qs = re.findall(r"(?m)^- P\d+: .+\| R: \S.*\| afecta: \S+", m.group(1))  # D11-diag: "afecta: Contrato" tambien vale
-    if not qs and re.search(r"sin preguntas|0 preguntas|ninguna pregunta|no hay preguntas", m.group(1), re.I):
-        return rec_gate("spec-review", True, "0 preguntas")  # D11-diag: Claude escribio "0 preguntas" en vez del literal
-    if not 1 <= len(qs) <= 5:
-        return rec_gate("spec-review", False, f"{len(qs)} preguntas validas (esperado 1..5)")
-    return rec_gate("spec-review", True, f"{len(qs)} preguntas respondidas")
+    """Chequeo en mmorch.gates.clarificaciones (orchestration-bpn); aca solo se registra."""
+    return rec_gate("spec-review", *clarificaciones(spec_md))
 
 
 def _tree() -> dict[str, str]:
@@ -1127,8 +1060,9 @@ def gate_alcance(gid: str, before: dict[str, str], allowed: tuple[str, ...]) -> 
 
 
 def gate_baseline() -> tuple[bool, str]:
-    bad = [rel for rel, h in SNAP.items() if not (WT / rel).exists() or sha_file(rel) != h]
-    return rec_gate("baseline-intacto", not bad, "ok" if not bad else f"toco {bad}")
+    """Chequeo en mmorch.gates.baseline_intacto; los hashes del worktree se leen aca."""
+    ahora = {rel: sha_file(rel) if (WT / rel).exists() else None for rel in SNAP}
+    return rec_gate("baseline-intacto", *baseline_intacto(SNAP, ahora))
 
 
 def gate_compile(files) -> tuple[bool, str]:
@@ -1151,27 +1085,20 @@ def gate_compile(files) -> tuple[bool, str]:
 _COMPILE_BASE: dict[str, set[str]] = {}  # comando -> errores de la base sin la aceptacion; se vacia en configure()
 
 
-def _errores_compilador(log: str) -> set[str]:
-    """Errores sin linea ni columna: `ruta(l,c): error ...` (tsc) o `ruta:l:c: ...` (javac, go, gcc). Sin warnings."""
-    return {f"{m[1]}: {m[2].strip()}"
-            for m in re.finditer(r"(?m)^\s*(\S+?\.\w+)(?:\(\d+,\d+\)|:\d+(?::\d+)?):?\s+(.+)$", log)
-            if not m[2].lower().startswith("warning")}
-
-
 def _compila(cmd: str) -> tuple[bool, str, list[str]]:
     """Corre `cmd` y descuenta los errores que la base ya tenia SIN la aceptacion de esta feature. Un compilador de
     proyecto entero (tsc) ve los tests rojos por diseño de OTRAS features: en SSB F3a el TS2307 del test de F3b tumbaba
     G3. Una regresion en otro archivo sigue bloqueando (su error no esta en la base), igual que un error del test de
     aceptacion propio. Sin errores legibles en la salida no descuenta nada. Devuelve (ok, log, errores previos)."""
     ok, log = sh(cmd)
-    ahora = set() if ok else _errores_compilador(log)
+    ahora = set() if ok else errores_compilador(log)
     if not ahora or not state.get("plan_files"):
         return ok, log, []
     if cmd not in _COMPILE_BASE:
         _, blog = _en_base(lambda: _sin_aceptacion(lambda: sh(cmd)))
-        _COMPILE_BASE[cmd] = _errores_compilador(blog)
-    previos = sorted(ahora & _COMPILE_BASE[cmd])
-    if len(previos) < len(ahora):
+        _COMPILE_BASE[cmd] = errores_compilador(blog)
+    sin_nuevos, previos = errores_nuevos(ahora, _COMPILE_BASE[cmd])
+    if not sin_nuevos:
         return False, log, previos
     state["compile_previos"] = previos
     return True, log, previos
@@ -1251,46 +1178,21 @@ def _docstrings(files) -> dict:
 
 
 def gate_clones(written: dict) -> tuple[bool, str]:
-    """D6: el coder escribio el contenido de plugins.py dentro de plugin_worker.py. Dos archivos del plan
-    con > 80% de lineas identicas es un clon, no una feature. Determinista, USD 0."""
-    files = list(written)
-    for i, a in enumerate(files):
-        la = {l.strip() for l in written[a].splitlines() if l.strip()}
-        for b in files[i + 1:]:
-            lb = {l.strip() for l in written[b].splitlines() if l.strip()}
-            if la and lb and len(la & lb) / min(len(la), len(lb)) > 0.8:
-                return rec_gate("sin-clones", False, f"{a} y {b} comparten > 80% de lineas")
-    return rec_gate("sin-clones", True, "ok")
+    """Chequeo en mmorch.gates.sin_clones (orchestration-bpn); aca solo se registra."""
+    return rec_gate("sin-clones", *sin_clones(written))
 
 
 _orig_files: dict[str, str] = {}
 
 
 def gate_cambio_minimo(before: dict, written: dict) -> tuple[bool, str]:
-    """D11: el coder reescribio project_loop.py (-216 lineas) para agregar una guarda. Sobre un archivo que ya existia,
-    borrar mas del 30% de sus lineas (minimo 40) sin que la tarea diga 'reescrib' es un cambio no pedido. USD 0."""
-    if "reescrib" in TASK.task.lower():
-        return rec_gate("cambio-minimo", True, "la tarea pide reescribir")
-    malos = []
-    for f, orig in _orig_files.items():
-        if f not in written or not orig.strip():
-            continue
-        old_lines = [l for l in orig.splitlines() if l.strip()]
-        new_set = {l.strip() for l in written[f].splitlines()}
-        borradas = sum(1 for l in old_lines if l.strip() not in new_set)
-        if borradas > max(40, int(0.3 * len(old_lines))):
-            malos.append(f"{f}: {borradas} de {len(old_lines)} lineas originales desaparecieron")
-    return rec_gate("cambio-minimo", not malos, "ok" if not malos else "; ".join(malos))
+    """Chequeo en mmorch.gates.cambio_minimo (orchestration-bpn); aca solo se registra."""
+    return rec_gate("cambio-minimo", *cambio_minimo(_orig_files, written, TASK.task))
 
 
 def gate_docstring(before: dict) -> tuple[bool, str]:
-    """D4: el coder borro el docstring del modulo (22 lineas) y ningun test lo ve. Determinista, USD 0:
-    un docstring de modulo que existia antes tiene que seguir existiendo, salvo que la tarea hable de docstrings."""
-    if "docstring" in TASK.task.lower():
-        return rec_gate("docstring-intacto", True, "la tarea lo cubre")
-    after = _docstrings(before)
-    perdidos = [f for f, d in before.items() if d and not after.get(f)]
-    return rec_gate("docstring-intacto", not perdidos, "ok" if not perdidos else f"docstring de modulo borrado en {perdidos}")
+    """Chequeo en mmorch.gates.docstring_intacto; la lectura de los docstrings queda aca (_docstrings)."""
+    return rec_gate("docstring-intacto", *docstring_intacto(before, _docstrings(before), TASK.task))
 
 
 def _tests_text():
@@ -2079,7 +1981,7 @@ def _plan_files(block: str) -> list[str]:
     una tabla, las rutas entre backticks de la primera celda que nombra alguna (SSB F7a: el plan vino en tabla).
     Un nombre sin carpeta (`resolver.ts`, SSB F4b) pasa a la unica ruta del plan o del repo con ese nombre."""
     items = re.findall(r"(?m)^\s*[-*]\s*`?" + _file_re() + r"`?", _primera_lista(block))
-    for fila in _filas_tabla(block):
+    for fila in filas_tabla(block):
         celda = next((c for c in fila.split("|") if re.search("`" + _file_re() + "`", c)), "")
         items += re.findall("`" + _file_re() + "`", celda)
     items = [_ruta_unica(f, items) for f in items]
@@ -2096,10 +1998,6 @@ def _primera_lista(block: str) -> str:
         elif lineas:
             break
     return "\n".join(lineas)
-
-
-def _filas_tabla(block: str) -> list[str]:
-    return re.findall(r"(?m)^\s*\|(.*)\|\s*$", block)
 
 
 def _ruta_unica(f: str, listados: list[str]) -> str:
@@ -2414,12 +2312,10 @@ def gate_lint() -> tuple[bool, str]:
     # cero absoluto en cada archivo tocado, y la deuda vieja de un repo (Portfolio: 730 ruff + 144 mypy) bloqueaba
     # cualquier reparacion. En un repo limpio da lo mismo: la base es cero. Un archivo nuevo parte de cero.
     ahora, log = _hallazgos_por_archivo(files)
-    base, _ = _en_base(lambda: _hallazgos_por_archivo([f for f in files if (WT / f).exists()]))
+    base, blog = _en_base(lambda: _hallazgos_por_archivo([f for f in files if (WT / f).exists()]))
     state["lint_new"] = {f: [base.get(f, 0), ahora.get(f, 0)] for f in files}
-    peor = {f: v for f, v in state["lint_new"].items() if v[1] > v[0]}
-    if not peor:
-        return rec_gate("lint", True, f"sin hallazgos nuevos (base, ahora): {state['lint_new']}")
-    return rec_gate("lint", False, f"hallazgos nuevos (base, ahora): {peor}\n{log[-1200:]}")
+    ok, detalle = lint(blog, log, files)
+    return rec_gate("lint", ok, detalle if ok else f"{detalle}\n{log[-1200:]}")
 
 
 def _hallazgos_por_archivo(files: list[str]) -> tuple[dict[str, int], str]:
@@ -2428,11 +2324,7 @@ def _hallazgos_por_archivo(files: list[str]) -> tuple[dict[str, int], str]:
         return {}, ""
     _, rl = sh([sys.executable, "-m", "ruff", "check", "--output-format", "concise", *files], host=True)
     _, ml = sh([sys.executable, "-m", "mypy", "--ignore-missing-imports", *files], host=True)
-    cuenta: dict[str, int] = {}
-    for m in re.finditer(r"(?m)^(\S+?):\d+:(?:\d+: |\s*error:)", rl + "\n" + ml):
-        f = m.group(1).replace("\\", "/")
-        cuenta[f] = cuenta.get(f, 0) + 1
-    return cuenta, rl + "\n" + ml
+    return conteo_hallazgos(rl + "\n" + ml), rl + "\n" + ml
 
 
 def _seed_accept() -> None:

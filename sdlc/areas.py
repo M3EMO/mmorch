@@ -10,20 +10,16 @@ arbol del repo; el pipeline las cablea a sus etapas.
 """
 from __future__ import annotations
 
-import fnmatch
 import pathlib
 import re
 import subprocess
+
+from mmorch.gates import calza  # una sola semantica para techo y areas: `*` cruza carpetas
 
 _NOMBRE = re.compile(r"[a-z0-9_-]+")
 _BLOQUE = re.compile(r"(?m)^- (R\d+)(?: \[prop\])?(?::|$)")
 _SECCIONES_DELTA = ("ADDED", "MODIFIED", "REMOVED")
 REGENERAR = "python -m sdlc specs --regenerar"
-
-
-def calza(f: str, pat: str) -> bool:
-    """fnmatch con `**/` opcional: `pkg/**/*.py` incluye `pkg/a.py`. `*` cruza carpetas (misma semantica que el techo)."""
-    return fnmatch.fnmatch(f, pat) or fnmatch.fnmatch(f, pat.replace("**/", ""))
 
 
 def areas(cfg: dict) -> dict[str, list[str]]:
