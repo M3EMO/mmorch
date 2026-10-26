@@ -365,26 +365,39 @@ def _casos_docstring(rng: random.Random, n: int) -> list[Caso]:
 _FILE_RE = r"((?:[\w.-]+/)*[\w.-]+\.(?:py|ts|java))"  # el de sdlc/pipeline._file_re con ext = [py, ts, java]
 
 
+def _un_archivo_en_pipeline(code: str, rel: str, file_re: str, esperado: str | None) -> tuple[bool, str]:
+    """El gate como lo usa `one_file`: veredicto mas recorte. Pasa solo si lo que se escribiria es el archivo pedido."""
+    ok, detalle = gates.un_archivo(code, rel, file_re)
+    if not ok:
+        return False, detalle
+    escrito = gates.secciones(code, file_re).get(rel, code)
+    return escrito.strip() == (esperado or "").strip(), detalle
+
+
 def _casos_un_archivo(rng: random.Random, n: int) -> list[Caso]:
-    """Intencion = r1 2026-09-11: el coder pega varios archivos en una respuesta y el recorte no encuentra el pedido.
-    Verde = un solo archivo, o varias secciones `# ruta` que incluyen la pedida (el pipeline recorta la suya). Rojo =
-    varias secciones sin la pedida, o varias secciones con una cabecera que el recorte no reconoce (`# File: ruta`,
-    o la ruta entre backticks): el pipeline escribe todo el texto en el archivo pedido."""
+    """Intencion = r1 2026-09-11: el coder pega varios archivos en una respuesta. Positivo = lo correcto es rechazar:
+    ninguna seccion es la del archivo pedido. Verde = el pipeline debe escribir el archivo pedido: un solo archivo, o
+    varias secciones que lo incluyen con cualquier cabecera plausible (`# ruta`, `// ruta`, `# File: ruta`, la ruta
+    entre backticks). Se mide el resultado de `one_file` (veredicto mas recorte), no solo el veredicto: antes de
+    orchestration-6qb el gate pasaba `# File: ruta` y el pipeline escribia todo el texto en el archivo pedido."""
     casos: list[Caso] = []
-    verdes, rojos = ["un_solo_archivo", "con_el_pedido"], ["sin_el_pedido", "cabecera_con_prefijo", "cabecera_en_backticks"]
+    verdes = ["un_solo_archivo", "con_el_pedido", "cabecera_con_prefijo", "cabecera_en_backticks"]
+    rojos = ["sin_el_pedido", "sin_el_pedido_con_prefijo"]
     for k in range(n):
         rojo = bool(k % 2)
         tipo = rng.choice(rojos if rojo else verdes)
         rel = f"pkg/{_nombre(rng)}.py"
         otros = [f"pkg/{_nombre(rng)}_otro.py" for _ in range(rng.randint(1, 2))]
-        cuerpo = lambda: "\n".join(_modulo(rng))  # noqa: E731
+        cuerpos = {r: "\n".join(_modulo(rng)) for r in [rel, *otros]}
         if tipo == "un_solo_archivo":
-            code = cuerpo()
+            code = cuerpos[rel]
         else:
-            rutas = otros if tipo == "sin_el_pedido" else rng.sample([rel, *otros], len(otros) + 1)
-            cab = {"cabecera_con_prefijo": "# File: {}", "cabecera_en_backticks": "# `{}`"}.get(tipo, rng.choice(["# {}", "// {}"]))
-            code = "\n\n".join(cab.format(r) + "\n" + cuerpo() for r in rutas)
-        casos.append({"args": (code, rel, _FILE_RE), "rojo": rojo, "origen": "generado", "grupo": tipo})
+            rutas = otros if rojo else rng.sample([rel, *otros], len(otros) + 1)
+            cab = {"cabecera_con_prefijo": "# File: {}", "sin_el_pedido_con_prefijo": "# File: {}",
+                   "cabecera_en_backticks": "# `{}`"}.get(tipo, rng.choice(["# {}", "// {}"]))
+            code = "\n\n".join(cab.format(r) + "\n" + cuerpos[r] for r in rutas)
+        casos.append({"args": (code, rel, _FILE_RE, None if rojo else cuerpos[rel]), "rojo": rojo, "origen": "generado",
+                      "grupo": tipo})
     return casos
 
 
@@ -475,7 +488,7 @@ INCIDENTES: dict[str, list[Caso]] = {
     "un-archivo": [
         # r1 2026-09-11: el coder imito las cabeceras "# path" del prompt y pego 3 archivos en uno.
         {"args": ("# limiter/__init__.py\nfrom x import y\n\n# limiter/core.py\nclass TokenBucket: pass\n\n"
-                  "# limiter/util.py\nZ = 1\n", "limiter/core.py", _FILE_RE),
+                  "# limiter/util.py\nZ = 1\n", "limiter/core.py", _FILE_RE, "class TokenBucket: pass"),
          "rojo": False, "origen": "r1 2026-09-11", "grupo": None, "reconstruido": True},
     ],
     "tipo-del-archivo": [
@@ -494,7 +507,7 @@ CHEQUEOS: dict[str, Callable[..., tuple[bool, str]]] = {"sin-clones": gates.sin_
                                                          "plan-allowlist": gates.plan_allowlist,
                                                          "cambio-minimo": gates.cambio_minimo,
                                                          "docstring-intacto": gates.docstring_intacto,
-                                                         "un-archivo": gates.un_archivo,
+                                                         "un-archivo": _un_archivo_en_pipeline,
                                                          "tipo-del-archivo": gates.tipo_propio}
 GENERADORES: dict[str, Callable[[random.Random, int], list[Caso]]] = {"sin-clones": _casos_sin_clones,
                                                                     "spec-review": _casos_spec_review,

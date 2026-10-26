@@ -174,3 +174,7 @@ Los demas ejecutan comandos con `sh` y leen el worktree `WT`.
 - `orchestration-1tj`: `traza_plan` cuenta IDs solo en items y solo IDs de la spec; 1.00.
 - `orchestration-96p`: `clarificaciones` rechaza una `- P<n>:` sin respuesta o con TBD; 1.00 en la metrica principal. Las variantes de formato siguen aparte (0.00).
 - `orchestration-cuz`: generador verde de modulos hermanos; umbral 0.8 -> 0.66. Copias >= 0.69, hermanos <= 0.65 (5 semillas x 2000). Limite: medido solo sobre Python sintetico.
+
+## Huecos de un-archivo y tipo-del-archivo (2026-10-26)
+- `orchestration-6qb`: `secciones` reconoce `# File: ruta`, `### ruta`, backticks y negritas. Error mio de etiqueta corregido: el banco mide lo que escribe `one_file` (veredicto + recorte); con esa etiqueta, 0.744 antes y 1.00 despues.
+- `orchestration-i79`: `_TIPO_PUBLICO` acepta anotaciones en la misma linea; 1.00.

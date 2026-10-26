@@ -151,7 +151,9 @@ def docstring_intacto(antes: dict[str, str | None], despues: dict[str, str | Non
 
 def secciones(code: str, file_re: str) -> dict[str, str]:
     """Secciones `# ruta` / `// ruta` de una respuesta del coder; {} si no tiene cabeceras de archivo."""
-    parts = re.split(r"(?m)^(?:#|//)\s*" + file_re + r"\s*$", code)
+    # orchestration-6qb: tambien `# File: ruta`, `### ruta` y la ruta entre backticks o negritas
+    parts = re.split(r"(?m)^(?:#+|//)\s*(?:(?:file|archivo|path|ruta)\s*:\s*)?[`*]*" + file_re + r"[`*]*\s*$", code,
+                     flags=re.I)
     return {parts[i]: parts[i + 1].strip() for i in range(1, len(parts), 2)} if len(parts) >= 3 else {}
 
 
@@ -165,7 +167,8 @@ def un_archivo(code: str, rel: str, file_re: str) -> tuple[bool, str]:
 
 
 # ponytail: solo tipos de primer nivel en columna 0 (el estilo de javac y de los formateadores); uno indentado no cuenta
-_TIPO_PUBLICO = re.compile(r"(?m)^public\s+(?:(?:abstract|final|sealed|non-sealed|strictfp)\s+)*"
+# orchestration-i79: una anotacion en la misma linea (`@Deprecated public class X`) tambien cuenta
+_TIPO_PUBLICO = re.compile(r"(?m)^(?:@[\w.]+(?:\([^)\n]*\))?\s+)*public\s+(?:(?:abstract|final|sealed|non-sealed|strictfp)\s+)*"
                            r"(?:class|interface|enum|record|@interface)\s+(\w+)")
 
 

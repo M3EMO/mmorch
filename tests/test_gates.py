@@ -152,3 +152,15 @@ def test_bugs_medidos_quedan_en_uno():
         r = gates_bench.medir(g, n=200, seed=4)
         assert r["sensibilidad"] == 1.0 and r["especificidad"] == 1.0, (g, r["acierto_por_grupo"])
     assert not gates.plan_allowlist("## Archivos\n- `/etc/x.py`\n", ["/etc/x.py"], [], [], "tests/")[0]
+
+
+def test_secciones_reconoce_cabeceras_con_prefijo_y_backticks():
+    fre = r"((?:[\w.-]+/)*[\w.-]+\.(?:py))"
+    for cab in ("# File: {}", "# `{}`", "### {}", "// **{}**"):
+        code = cab.format("pkg/a.py") + "\nA = 1\n" + cab.format("pkg/b.py") + "\nB = 2\n"
+        assert gates.secciones(code, fre) == {"pkg/a.py": "A = 1", "pkg/b.py": "B = 2"}, cab
+
+
+def test_tipo_propio_ve_la_anotacion_en_la_misma_linea():
+    assert not gates.tipo_propio('@SuppressWarnings("x") public class Otro {}\n', "src/Opcion.java")[0]
+    assert gates.tipo_propio("@Deprecated public final class Opcion {}\n", "src/Opcion.java")[0]

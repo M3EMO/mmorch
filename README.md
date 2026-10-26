@@ -263,8 +263,8 @@ Re-run with `python -m mmorch.gates_bench --seed 42 --n 400`; rows go to `logs/a
 | `plan-allowlist` | 400 | 1.00 | 1.00 | 1.00 | path with `..`: 1.00 (was 0.00) |
 | `cambio-minimo` | 401 | 0.607 | 1.00 | 0.803 | rewrite of a file under 40 lines: 0.38 · task says "sin reescribir": 0.00 · cut 40-70%: 0.82 |
 | `docstring-intacto` | 401 | 0.358 | 1.00 | 0.679 | docstring replaced by `TODO`: 0.00 · task says "no toques ningun docstring": 0.00 · deleted: 1.00 |
-| `un-archivo` | 401 | 0.325 | 1.00 | 0.662 | `# File: path` headers: 0.00 · backticked path headers: 0.00 · other files only: 1.00 |
-| `tipo-del-archivo` | 402 | 0.639 | 1.00 | 0.819 | annotation on the same line (`@Deprecated public class X`): 0.00 · foreign class/interface: 1.00 |
+| `un-archivo` | 401 | 1.00 | 1.00 | 1.00 | `# File: path` / backticked headers written right: 1.00 (was 0.00); measures what `one_file` writes |
+| `tipo-del-archivo` | 402 | 1.00 | 1.00 | 1.00 | annotation on the same line (`@Deprecated public class X`): 1.00 (was 0.00) |
 
 Fixed after measuring (2026-10-26). `sin-clones`: copies with up to 30% edited share >= 0.69 of their lines and
 sibling modules (same header, imports and signatures, own bodies) <= 0.65 over 5 seeds x 2000 cases, so the
@@ -276,13 +276,16 @@ rejected every time, which costs a retry, not a wrong result.
 
 Still open. `cambio-minimo` and `docstring-intacto` read the task for a substring (`reescrib`, `docstring`), so
 a task that forbids the change also unlocks it. `cambio-minimo` needs 40 lines gone, so a small file can be
-rewritten whole. `un-archivo` only splits `# path` / `// path` headers. `tipo-del-archivo` needs `public` in
-column 0. Bds `orchestration-rlg`, `orchestration-weo`, `orchestration-6qb`, `orchestration-i79`.
+rewritten whole. Bds `orchestration-rlg`, `orchestration-weo`.
+
+`un-archivo` is measured on what `one_file` writes (verdict plus cut), not on the verdict alone: with the
+verdict alone, a `# File: path` answer passed and the whole text landed in one file. With labels fixed that way,
+the gate scored 0.744 before `orchestration-6qb` and 1.00 after.
 
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **121 módulos · 44 MCP tools (15 expuestas por default) · 1201 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
+_Auto-generado por `mmorch.docgen`._ **121 módulos · 44 MCP tools (15 expuestas por default) · 1203 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->
