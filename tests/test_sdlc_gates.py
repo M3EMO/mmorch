@@ -151,7 +151,8 @@ def test_files_from_toml_es_el_techo(tmp_path):
 def test_resolve_files_toml_es_techo_y_el_payload_solo_acota(tmp_path):
     with pytest.raises(ValueError):
         S._resolve_files(str(tmp_path), None)
-    assert S._resolve_files(str(tmp_path), ["pkg/a.py"]) == ["pkg/a.py"]  # sin toml: lo que dice el llamador
+    with pytest.raises(ValueError, match="sdlc init"):  # sdlc.toml obligatorio (2026-10-26): files no lo reemplaza
+        S._resolve_files(str(tmp_path), ["pkg/a.py"])
     (tmp_path / "sdlc.toml").write_text('files = ["pkg/a.py", "pkg/b.py"]\n', encoding="utf-8")
     assert S._resolve_files(str(tmp_path), None) == ["pkg/a.py", "pkg/b.py"]
     assert S._resolve_files(str(tmp_path), ["pkg/b.py"]) == ["pkg/a.py", "pkg/b.py"]  # devuelve el techo; b es obligatorio
@@ -218,6 +219,7 @@ def test_build_feature_serializa_corridas_paralelas(tmp_path, monkeypatch):
         return {}
     monkeypatch.setattr(S, "configure", lambda *a, **k: None)
     monkeypatch.setattr(S, "run", run)
+    (tmp_path / "sdlc.toml").write_text('files = ["a.py"]\n', encoding="utf-8")
     hilos = [threading.Thread(target=S.build_feature, args=(f"f{i}", "t", str(tmp_path)),
                               kwargs={"accept_cmd": "x", "files": ["a.py"]}) for i in range(3)]
     for h in hilos:

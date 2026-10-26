@@ -2492,26 +2492,20 @@ def build_feature(name: str, task: str, repo: str, *, accept: dict[str, str] | N
 
 def _resolve_files(repo: str, files: list[str] | None) -> list[str]:
     """Devuelve el TECHO (patrones fnmatch de `files` en sdlc.toml). Un `files` del llamador solo acota: cada archivo
-    tiene que caer dentro del techo; sin toml, el techo es exactamente lo que dice el llamador."""
+    tiene que caer dentro del techo. sdlc.toml es obligatorio (decision del usuario 2026-10-26): es la ficha del repo."""
     p = pathlib.Path(repo) / "sdlc.toml"
-    techo = _files_from_toml(repo) if p.exists() else None
-    if files is None:
-        if techo is None:
-            raise ValueError(f"sin `files` y sin {p}: el pipeline no sabe que archivos puede tocar (ticket 05 D2)")
-        return techo
-    if techo is not None:
-        fuera = [f for f in files if not any(_calza(f, pat) for pat in techo)]
-        if fuera:
-            raise ValueError(f"files fuera del techo de {p}: {fuera} (el payload solo acota, no amplia)")
-        return techo
-    return list(files)
+    techo = _files_from_toml(repo)
+    fuera = [f for f in files or [] if not any(_calza(f, pat) for pat in techo)]
+    if fuera:
+        raise ValueError(f"files fuera del techo de {p}: {fuera} (el payload solo acota, no amplia)")
+    return techo
 
 
 def _files_from_toml(repo: str) -> list[str]:
     import tomllib
     p = pathlib.Path(repo) / "sdlc.toml"
     if not p.exists():
-        raise ValueError(f"sin `files` y sin {p}: el pipeline no sabe que archivos puede tocar (ticket 05 D2)")
+        raise ValueError(f"sin {p}: el repo no adopto el SDLC; corre `python -m sdlc init {repo}` y revisa `files`")
     files = tomllib.loads(p.read_text(encoding="utf-8")).get("files") or []
     if not files:
         raise ValueError(f"{p} no declara `files`")
