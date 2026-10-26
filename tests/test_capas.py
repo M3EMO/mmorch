@@ -9,6 +9,8 @@ Reglas:
 - R1 ningun modulo alcanzado importa uno de _NO_ALCANZADOS (si lo cablean, sale de la lista en el mismo commit).
 - R2 no aparecen modulos NUEVOS sin alcanzar: cada modulo nuevo entra cableado o no entra.
 - R3 cada entrada de la lista existe: al borrar un modulo se lo saca de la lista (ratchet honesto).
+- R6 los chequeos (gates, checkers) no importan `sdlc`, ni directo ni por un modulo de mmorch que importen.
+- R7 la lista de modulos de mmorch que importan `sdlc` solo achica (orchestration-bpn, 2026-10-23).
 """
 from __future__ import annotations
 
@@ -22,7 +24,8 @@ REPO = Path(__file__).resolve().parents[1]
 PKG = REPO / "mmorch"
 
 _ENTRADAS = ("mcp_server", "server", "nightly", "cli", "auto_apply_nightly", "hillclimb", "autoresearch",
-             "sdlc_bench")  # CLI `python -m mmorch.sdlc_bench`: mmorch mide el builder sdlc (paquete aparte)
+             "sdlc_bench",  # CLI `python -m mmorch.sdlc_bench`: mmorch mide el builder sdlc (paquete aparte)
+             "gates_bench")  # CLI `python -m mmorch.gates_bench`: precision de los chequeos de mmorch/gates.py
 _DINAMICOS = {"loop"}   # cargado por nombre desde loop_nightly; 4173 usos en 90 dias
 
 # Medido 2026-09-14 con este mismo analisis (15). Cada uno: se cablea (y sale de aca) o se borra (y sale
@@ -30,6 +33,12 @@ _DINAMICOS = {"loop"}   # cargado por nombre desde loop_nightly; 4173 usos en 90
 _NO_ALCANZADOS = {
     "synth_store",
 }
+
+# Medido 2026-10-23: el builder `sdlc` importa de mmorch y estos modulos de mmorch importan `sdlc` (ciclo).
+# Cada uno: deja de importar `sdlc` (y sale de aca) o se borra. Nunca crece.
+_IMPORTAN_SDLC = {"auto_repair", "hardening", "juez_sombra", "project_repair", "refutacion", "server",
+                  "server_engine", "sdlc_bench", "workflow_race"}
+_CHEQUEOS = ("gates", "checkers")
 
 
 def _modulos() -> dict[str, Path]:
@@ -130,3 +139,31 @@ def test_R5_sin_importlib_hacia_modulos_propios():
     culpables = sorted(m for m, p in _modulos().items()
                        if re.search(r"import_module\(\s*['\"](?:\.|mmorch\.)|__import__\(\s*['\"]mmorch", p.read_text(encoding="utf-8", errors="replace")))
     assert culpables == [], f"import dinamico de modulos propios (usar import estatico): {culpables}"
+
+
+def _importa_sdlc(path: Path) -> bool:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except SyntaxError:
+        return False
+    return any((isinstance(n, ast.ImportFrom) and n.level == 0 and (n.module or "").split(".")[0] == "sdlc")
+               or (isinstance(n, ast.Import) and any(a.name.split(".")[0] == "sdlc" for a in n.names))
+               for n in ast.walk(tree))
+
+
+def test_R6_los_chequeos_no_importan_sdlc():
+    mods = _modulos()
+    seen, stack = set(_CHEQUEOS), list(_CHEQUEOS)
+    while stack:
+        for d in _imports(mods[stack.pop()], set(mods)):
+            if d not in seen:
+                seen.add(d)
+                stack.append(d)
+    culpables = sorted(m for m in seen if _importa_sdlc(mods[m]))
+    assert culpables == [], f"los chequeos alcanzan modulos que importan sdlc (mmorch mide, sdlc construye): {culpables}"
+
+
+def test_R7_los_importadores_de_sdlc_solo_achican():
+    ahora = {m for m, p in _modulos().items() if _importa_sdlc(p)}
+    assert ahora - _IMPORTAN_SDLC == set(), f"modulos nuevos de mmorch que importan sdlc: {sorted(ahora - _IMPORTAN_SDLC)}"
+    assert _IMPORTAN_SDLC - ahora == set(), f"ya no importan sdlc (sacarlos de la lista): {sorted(_IMPORTAN_SDLC - ahora)}"
