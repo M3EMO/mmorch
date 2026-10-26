@@ -66,3 +66,4 @@ Cada corrida cumple doce condiciones en su run-log:
 12. El run-log anota cuánto tiempo pasó la corrida esperando la aprobación humana.
 
 El mapa falla si alguna condición falla en alguna de las dos corridas. Cada falla vuelve como ticket nuevo a este mapa.
+- 2026-10-24, desde `orchestration-4u6` (ticket 09 de `.scratch/repos-convenciones/`): las precondiciones de librería se cumplen con `python -m sdlc propiedades <repo> --aprobar` en orchestration y en F2. F2 usa `contenedor`, así que la imagen se reconstruye con el comando de `sdlc/builder.py`.
