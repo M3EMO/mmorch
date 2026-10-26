@@ -12,4 +12,10 @@ files = [
     "mmorch/*.py",
     "scripts/*.py",
     "tests/test_capas.py",
+    "tools/ste-lint.py",
 ]
+
+# Areas (sdd-fase-2): spec viva en docs/specs/<area>/spec.md, deltas en docs/specs/<area>/changes/.
+# Primera area para la corrida de cierre del ticket 11 (aprobada por el usuario el 2026-10-24).
+[areas]
+ste-lint = ["tools/ste-lint.py"]
