@@ -11,6 +11,7 @@ Decisiones: brainstorms/2026-10-23-gates-a-mmorch.md.
 from __future__ import annotations
 
 import re
+from collections import Counter
 
 
 # orchestration-cuz (gates_bench, 5 semillas x 2000 casos): las copias con hasta 30% editado comparten >= 0.69 de
@@ -135,7 +136,7 @@ def pide(tarea: str, raiz: str) -> bool:
 def cambio_minimo(orig: dict[str, str], written: dict[str, str], tarea: str) -> tuple[bool, str]:
     """D11: el coder reescribio project_loop.py (-216 lineas) para agregar una guarda. Sobre un archivo que ya existia,
     borrar mas del 30% de sus lineas sin que la tarea pida reescribir es un cambio no pedido. El minimo era 40 lineas
-    y un archivo chico se podia reescribir entero: ahora el minimo es min(40, la mitad del archivo). USD 0."""
+    y un archivo chico se podia reescribir entero: ahora el minimo es min(40, la mitad del archivo, con piso 5). USD 0."""
     if pide(tarea, "reescrib"):
         return True, "la tarea pide reescribir"
     malos = []
@@ -145,7 +146,8 @@ def cambio_minimo(orig: dict[str, str], written: dict[str, str], tarea: str) -> 
         old_lines = [l for l in texto.splitlines() if l.strip()]
         new_set = {l.strip() for l in written[f].splitlines()}
         borradas = sum(1 for l in old_lines if l.strip() not in new_set)
-        if borradas > max(int(0.3 * len(old_lines)), min(40, len(old_lines) // 2)):
+        # piso de 5: cambiar la unica linea de un archivo de 1 linea es un parche (test_sdlc_build_escalera)
+        if borradas > max(int(0.3 * len(old_lines)), min(40, max(len(old_lines) // 2, 5))):
             malos.append(f"{f}: {borradas} de {len(old_lines)} lineas originales desaparecieron")
     return not malos, "ok" if not malos else "; ".join(malos)
 
@@ -211,3 +213,90 @@ def tamano(t: dict, max_archivos: int, max_tokens: int) -> tuple[bool, str]:
     if not ok:
         detalle += f": supera {max_archivos} archivos o {max_tokens} tokens; dividi la tarea en features mas chicas"
     return ok, detalle
+
+
+# --------------------------------------------------------------------------- fase 3: decisiones sobre salidas medidas
+# (D4: la ejecucion -sh, sandbox, mutantes, baselines- queda en sdlc/pipeline.py; aca solo se decide sobre su salida)
+
+
+def errores_compilador(log: str) -> set[str]:
+    """Errores sin linea ni columna: `ruta(l,c): error ...` (tsc), `ruta:l:c: ...` (javac, go, gcc) o `error[E..]: msg`
+    con la ruta en la linea `--> ruta:l:c` (rustc, orchestration-fkp). Sin warnings."""
+    out = {f"{m[1]}: {m[2].strip()}"
+           for m in re.finditer(r"(?m)^\s*(\S+?\.\w+)(?:\(\d+,\d+\)|:\d+(?::\d+)?):?\s+(.+)$", log)
+           if not m[2].lower().startswith("warning")}
+    return out | {f"{m[2]}: error: {m[1].strip()}"
+                  for m in re.finditer(r"(?m)^error(?:\[\w+\])?: (.+)\n\s*--> (\S+?):\d+:\d+", log)}
+
+
+def errores_nuevos(ahora: set[str], base: set[str]) -> tuple[bool, list[str]]:
+    """(sin errores nuevos, errores previos descontados): un error que la base ya tenia no bloquea (SSB F3a)."""
+    previos = sorted(ahora & base)
+    return len(previos) == len(ahora), previos
+
+
+def fallos(log: str) -> set[str]:
+    """Tests FAILED/ERROR de un log de pytest con -rfE (D8: los ERROR de setup tambien cuentan). El nodeid llega hasta
+    el ` - mensaje`: un parametro con espacios (`test_p[caso 1]`) no se corta (orchestration-fkp)."""
+    return {m.strip() for m in re.findall(r"(?m)^(?:FAILED|ERROR) (.+?)(?: - .*)?$", log)}
+
+
+def regresion(base: set[str], ahora: set[str], aislado: str | None) -> tuple[list[str], list[str]]:
+    """(fallos nuevos, flaky): un fallo nuevo es regresion solo si se repite aislado (D2 r1). `aislado` = log de la
+    corrida aislada de los nuevos; None = no se corrio."""
+    nuevos = sorted(ahora - base)
+    if not nuevos or aislado is None:
+        return nuevos, []
+    flaky = sorted(set(nuevos) - fallos(aislado))
+    return sorted(set(nuevos) - set(flaky)), flaky
+
+
+def conteo_hallazgos(log: str) -> dict[str, int]:
+    """{archivo: hallazgos} de un log de `ruff --output-format concise` y `mypy`."""
+    cuenta: dict[str, int] = {}
+    for m in re.finditer(r"(?m)^(\S+?):\d+:(?:\d+: |\s*error:)", log):
+        f = m.group(1).replace("\\", "/")
+        cuenta[f] = cuenta.get(f, 0) + 1
+    return cuenta
+
+
+def hallazgos(log: str) -> Counter[tuple[str, str]]:
+    """Hallazgos de ruff/mypy como (archivo, mensaje) sin linea ni columna: uno movido de linea sigue siendo el mismo."""
+    out: Counter[tuple[str, str]] = Counter()
+    for m in re.finditer(r"(?m)^(\S+?):\d+:(?:\d+:)?\s*((?:error:\s*)?.+)$", log):
+        if m[2].startswith(("note:", "warning:")):
+            continue
+        out[(m[1].replace("\\", "/"), re.sub(r"\bline \d+", "line N", m[2].strip()))] += 1
+    return out
+
+
+def lint(log_base: str, log: str, files: list[str]) -> tuple[bool, str]:
+    """Ticket 1 de portfolio-circuito: sin hallazgos NUEVOS por archivo contra la base. Compara hallazgos, no cantidades:
+    uno arreglado y otro nuevo en el mismo archivo es rojo (orchestration-fkp)."""
+    base, ahora = conteo_hallazgos(log_base), conteo_hallazgos(log)
+    base_ahora = {f: [base.get(f, 0), ahora.get(f, 0)] for f in files}
+    nuevos = [f"{f}: {msg}" for (f, msg), _ in (hallazgos(log) - hallazgos(log_base)).items() if f in files]
+    if not nuevos:
+        return True, f"sin hallazgos nuevos (base, ahora): {base_ahora}"
+    return False, f"hallazgos nuevos (base, ahora): {base_ahora}; {sorted(nuevos)[:10]}"
+
+
+def mutacion(killed: int, total: int, minimo: float | None, vacuas: list, tope: int | None) -> tuple[bool, str]:
+    """Ticket 08 D2: el test de aceptacion mata mutantes del codigo final. Bloquea SOLO con `mutation_min`."""
+    if not total:
+        return True, "sin mutantes posibles"
+    score = round(killed / total, 3)
+    if minimo is not None and score < float(minimo):
+        return False, f"mutation score {score} < {minimo} ({killed}/{total})"
+    if minimo is not None and vacuas:   # con mutation_min corren todos los mutantes: sin muertes, la propiedad es vacua
+        return False, f"propiedades vacuas (no matan ningun mutante): {vacuas}"
+    return True, f"mutation score {score} ({killed}/{total})" + ("" if minimo is not None else f" (observa: sin mutation_min, muestra de {tope})")
+
+
+def codigo_muerto(medida: dict[str, tuple[int, list[int]]], minimo: float) -> tuple[bool, str]:
+    """2026-09-17: fraccion de lineas ejecutables de los .py nuevos que corre la aceptacion; rojo bajo `minimo`.
+    `medida` = {archivo: (lineas ejecutables, lineas sin ejecutar)}."""
+    cobertura = {f: round(1 - len(falta) / max(total, 1), 3) for f, (total, falta) in medida.items()}
+    bajos = {f: medida[f][1] for f, c in cobertura.items() if c < minimo}
+    detalle = "; ".join(f"{f}: {cobertura[f]} corre, lineas sin ejecutar {falta}" for f, falta in bajos.items())
+    return not bajos, detalle or f"cobertura de archivos nuevos {cobertura} >= {minimo}"

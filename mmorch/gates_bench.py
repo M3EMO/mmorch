@@ -477,6 +477,125 @@ def _casos_baseline(rng: random.Random, n: int) -> list[Caso]:
     return casos
 
 
+# --------------------------------------------------------------------------- fase 3: G3-compile, suite-total, lint
+# (D4: un caso es un log con su etiqueta; la ejecucion que lo produce queda en sdlc/pipeline.py)
+
+
+def _error_compilador(rng: random.Random, f: str, estilo: str, msg: str) -> str:
+    l, c = rng.randint(1, 300), rng.randint(1, 80)
+    return {"tsc": f"{f}({l},{c}): error {msg}", "javac": f"{f}:{l}: error: {msg}", "gcc": f"{f}:{l}:{c}: error: {msg}",
+            "rustc": f"error[E0425]: {msg}\n  --> {f}:{l}:{c}"}[estilo]
+
+
+def _compila_contra_base(ok: bool, log: str, log_base: str) -> tuple[bool, str]:
+    """G3 como lo usa `_compila`: sin errores legibles no descuenta nada; con errores, solo descuenta los de la base."""
+    ahora = set() if ok else gates.errores_compilador(log)
+    if not ahora:
+        return ok, "compila" if ok else "falla sin errores legibles"
+    sin_nuevos, previos = gates.errores_nuevos(ahora, gates.errores_compilador(log_base))
+    return sin_nuevos, f"previos {previos}"
+
+
+def _casos_compile(rng: random.Random, n: int) -> list[Caso]:
+    """Intencion = SSB F3a: un compilador de proyecto entero ve errores previos de otras features; solo un error NUEVO
+    es rojo. Verde = compila, o solo errores que la base ya tenia (el mismo error puede moverse de linea). Rojo = un
+    error nuevo en otro archivo o en el mismo, o una falla sin errores legibles. `rustc_previo` es verde: el formato
+    de rustc pone la ruta en otra linea."""
+    casos: list[Caso] = []
+    verdes = ["limpio", "previos_tsc", "previos_javac", "previo_otra_linea", "rustc_previo"]
+    rojos = ["nuevo_otro_archivo", "nuevo_mismo_archivo", "sin_errores_legibles"]
+    for k in range(n):
+        rojo = bool(k % 2)
+        tipo = rng.choice(rojos if rojo else verdes)
+        estilo = {"previos_tsc": "tsc", "previos_javac": "javac", "rustc_previo": "rustc"}.get(tipo, rng.choice(["tsc", "javac", "gcc"]))
+        ext = {"tsc": "ts", "javac": "java", "gcc": "c", "rustc": "rs"}[estilo]
+        previos = [(f"tests/{_nombre(rng)}.{ext}", f"TS2307: Cannot find module '{_nombre(rng)}'") for _ in range(rng.randint(1, 3))]
+        base = "\n".join(_error_compilador(rng, f, estilo, m) for f, m in previos)
+        ahora = list(previos)
+        if tipo == "nuevo_otro_archivo":
+            ahora.append((f"src/{_nombre(rng)}.{ext}", f"TS2322: Type 'string' is not assignable to '{_nombre(rng)}'"))
+        elif tipo == "nuevo_mismo_archivo":
+            ahora.append((previos[0][0], f"TS2551: Property '{_nombre(rng)}' does not exist"))
+        log = "\n".join(_error_compilador(rng, f, estilo, m) for f, m in ahora)  # lineas nuevas: el error se mueve
+        if tipo == "sin_errores_legibles":
+            log = rng.choice(["Segmentation fault (core dumped)", "javac: out of memory", "error: linker `cc` not found"])
+        casos.append({"args": (tipo == "limpio", "" if tipo == "limpio" else log, base), "rojo": rojo,
+                      "origen": "generado", "grupo": tipo})
+    return casos
+
+
+def _regresion_suite(log_base: str, log: str, aislado: str | None) -> tuple[bool, str]:
+    """suite-total como lo usa `gate_suite_total`: fallos por nombre contra la base, y un nuevo cuenta solo si se repite
+    aislado."""
+    nuevos, flaky = gates.regresion(gates.fallos(log_base), gates.fallos(log), aislado)
+    return not nuevos, f"nuevos {nuevos}, flaky {flaky}"
+
+
+def _casos_suite(rng: random.Random, n: int) -> list[Caso]:
+    """Intencion = ticket 13 y D2 r1: la suite del repo no gana fallos nuevos deterministas. Verde = los mismos fallos
+    que la base (en otro orden), menos fallos, o un fallo nuevo que pasa aislado (flaky). Rojo = un FAILED o un ERROR
+    nuevo que se repite aislado, o un parametro nuevo de un test parametrizado cuyo id tiene un espacio."""
+    casos: list[Caso] = []
+    verdes, rojos = ["mismos_fallos", "fallo_arreglado", "flaky"], ["nuevo_determinista", "nuevo_error_setup", "parametro_con_espacio"]
+    for k in range(n):
+        rojo = bool(k % 2)
+        tipo = rng.choice(rojos if rojo else verdes)
+        previos = [f"tests/test_{_nombre(rng)}.py::test_{_nombre(rng)}" for _ in range(rng.randint(1, 4))]
+        if tipo == "parametro_con_espacio":
+            previos.append(f"tests/test_{_nombre(rng)}.py::test_p[caso 1]")
+        ahora = list(previos)
+        aislado = None
+        if tipo == "fallo_arreglado":
+            ahora = ahora[1:]
+        elif tipo in ("flaky", "nuevo_determinista", "nuevo_error_setup"):
+            nuevo = f"tests/test_{_nombre(rng)}.py::test_{_nombre(rng)}"
+            ahora.append(nuevo)
+            aislado = "1 passed" if tipo == "flaky" else f"{'ERROR' if tipo == 'nuevo_error_setup' else 'FAILED'} {nuevo} - x\n1 failed"
+        elif tipo == "parametro_con_espacio":
+            ahora.append(previos[-1].replace("[caso 1]", "[caso 2]"))
+            aislado = f"FAILED {ahora[-1]} - x\n1 failed"
+        rng.shuffle(ahora)
+        setup = tipo == "nuevo_error_setup"
+        log_base = "\n".join(f"FAILED {t} - AssertionError" for t in previos) + f"\n{len(previos)} failed, 40 passed"
+        log = "\n".join(f"{'ERROR' if setup and t not in previos else 'FAILED'} {t} - AssertionError" for t in ahora) \
+            + f"\n{len(ahora)} failed, 40 passed"
+        casos.append({"args": (log_base, log, aislado), "rojo": rojo, "origen": "generado", "grupo": tipo})
+    return casos
+
+
+def _casos_lint(rng: random.Random, n: int) -> list[Caso]:
+    """Intencion = ticket 1 de portfolio-circuito: el cambio no agrega hallazgos de ruff ni de mypy; la deuda vieja no
+    bloquea. Verde = los mismos hallazgos (tambien movidos de linea), menos hallazgos, o un archivo nuevo limpio. Rojo =
+    un hallazgo nuevo de ruff o de mypy, o un hallazgo arreglado y otro nuevo en el mismo archivo."""
+    casos: list[Caso] = []
+    verdes, rojos = ["mismos", "movidos", "menos", "archivo_nuevo_limpio"], ["nuevo_ruff", "nuevo_mypy", "uno_por_otro"]
+    codigos = ["F401 `os` imported but unused", "E501 Line too long (130 > 120)", "B905 `zip()` without `strict=`"]
+    for k in range(n):
+        rojo = bool(k % 2)
+        tipo = rng.choice(rojos if rojo else verdes)
+        files = [f"pkg/{_nombre(rng)}.py" for _ in range(rng.randint(1, 3))]
+        hall = [(f, rng.randint(1, 200), rng.choice(codigos)) for f in files for _ in range(rng.randint(0, 3))]
+        ahora = list(hall)
+        if tipo == "movidos":
+            ahora = [(f, l + rng.randint(1, 9), c) for f, l, c in hall]
+        elif tipo == "menos" and hall:
+            ahora = hall[1:]
+        elif tipo == "archivo_nuevo_limpio":
+            files.append(f"pkg/{_nombre(rng)}_nuevo.py")
+        elif tipo == "nuevo_ruff":
+            ahora.append((files[0], 7, "F841 Local variable `x` is assigned to but never used"))
+        elif tipo == "uno_por_otro":
+            if not hall:
+                hall = [(files[0], 3, codigos[0])]
+            ahora = hall[1:] + [(hall[0][0], 9, "F841 Local variable `x` is assigned to but never used")]
+        fmt = lambda hs: "\n".join(f"{f}:{l}:1: {c}" for f, l, c in hs)  # noqa: E731
+        log, log_base = fmt(ahora), fmt(hall)
+        if tipo == "nuevo_mypy":
+            log += f"\n{files[0]}:12: error: Incompatible return value type  [return-value]"
+        casos.append({"args": (log_base, log, files), "rojo": rojo, "origen": "generado", "grupo": tipo})
+    return casos
+
+
 _PLUGINS = '''"""Registro de plugins."""
 from __future__ import annotations
 import importlib
@@ -555,7 +674,10 @@ CHEQUEOS: dict[str, Callable[..., tuple[bool, str]]] = {"sin-clones": gates.sin_
                                                          "docstring-intacto": gates.docstring_intacto,
                                                          "un-archivo": _un_archivo_en_pipeline,
                                                          "tipo-del-archivo": gates.tipo_propio,
-                                                         "baseline-intacto": gates.baseline_intacto}
+                                                         "baseline-intacto": gates.baseline_intacto,
+                                                         "G3-compile": _compila_contra_base,
+                                                         "suite-total": _regresion_suite,
+                                                         "lint": gates.lint}
 GENERADORES: dict[str, Callable[[random.Random, int], list[Caso]]] = {"sin-clones": _casos_sin_clones,
                                                                     "spec-review": _casos_spec_review,
                                                                     "trazabilidad-plan": _casos_traza_plan,
@@ -565,7 +687,10 @@ GENERADORES: dict[str, Callable[[random.Random, int], list[Caso]]] = {"sin-clone
                                                                     "docstring-intacto": _casos_docstring,
                                                                     "un-archivo": _casos_un_archivo,
                                                                     "tipo-del-archivo": _casos_tipo_propio,
-                                                                    "baseline-intacto": _casos_baseline}
+                                                                    "baseline-intacto": _casos_baseline,
+                                                                    "G3-compile": _casos_compile,
+                                                                    "suite-total": _casos_suite,
+                                                                    "lint": _casos_lint}
 
 
 def medir(gate: str, n: int = 400, seed: int = 42) -> dict[str, Any]:

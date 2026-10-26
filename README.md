@@ -267,6 +267,10 @@ Re-run with `python -m mmorch.gates_bench --seed 42 --n 400`; rows go to `logs/a
 | `tipo-del-archivo` | 402 | 1.00 | 1.00 | 1.00 | annotation on the same line (`@Deprecated public class X`): 1.00 (was 0.00) |
 | `baseline-intacto` | 400 | 1.00 | 1.00 | 1.00 | weakened assert / deleted / added test / whitespace: 1.00 |
 | `tamano-plan` | — | — | — | — | not measurable with built cases: the label is a run outcome (bd `orchestration-amp`) |
+| `G3-compile` | 400 | 1.00 | 1.00 | 1.00 | rustc errors already in the base: 1.00 (was 0.00) · new error, other or same file: 1.00 |
+| `suite-total` | 400 | 1.00 | 1.00 | 1.00 | new param of a test whose id has a space: 1.00 (was 0.00) · flaky: 1.00 |
+| `lint` | 400 | 1.00 | 1.00 | 1.00 | one finding fixed and another added in the same file: 1.00 (was 0.00) |
+| `mutacion`, `codigo-muerto` | — | — | — | — | the decision is a threshold; measured against human verdicts and runs (bd `orchestration-1yu`) |
 
 Fixed after measuring (2026-10-26). `sin-clones`: copies with up to 30% edited share >= 0.69 of their lines and
 sibling modules (same header, imports and signatures, own bodies) <= 0.65 over 5 seeds x 2000 cases, so the
@@ -280,7 +284,12 @@ rejected every time, which costs a retry, not a wrong result.
 task that forbade the change also unlocked it. They now skip a mention after a negation or a keep-verb ("sin",
 "no", "deja", "conserva"); a prohibition phrased another way ("los docstrings quedan igual") still unlocks it,
 which is the remaining 0.70. `cambio-minimo` needed 40 lines gone, so a small file could be rewritten whole; the
-floor is now min(40, half the file). A cut of 40% on a 80-133 line file still passes.
+floor is now min(40, half the file, at least 5). A cut of 40% on a 80-133 line file still passes.
+
+Phase 3 gates (compile, suite, lint) are measured on logs: the run that makes the log stays in `sdlc/`, the
+decision on it is in `mmorch/gates.py`. Before the fixes the gates scored 0.893, 0.828 and 0.818: rustc puts the
+path on a ` --> path:l:c` line, a parametrized test id was cut at its first space, and lint compared counts per
+file instead of findings (one fixed plus one new summed to zero).
 
 `un-archivo` is measured on what `one_file` writes (verdict plus cut), not on the verdict alone: with the
 verdict alone, a `# File: path` answer passed and the whole text landed in one file. With labels fixed that way,
@@ -289,7 +298,7 @@ the gate scored 0.744 before `orchestration-6qb` and 1.00 after.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **121 módulos · 44 MCP tools (15 expuestas por default) · 1206 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
+_Auto-generado por `mmorch.docgen`._ **121 módulos · 44 MCP tools (15 expuestas por default) · 1211 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->

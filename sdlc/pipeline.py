@@ -28,7 +28,8 @@ import types
 from typing import Any
 
 from mmorch.gates import calza as _calza
-from mmorch.gates import (baseline_intacto, cambio_minimo, clarificaciones, docstring_intacto, en_techo, filas_tabla, plan_allowlist,
+from mmorch.gates import (baseline_intacto, cambio_minimo, clarificaciones, codigo_muerto, conteo_hallazgos,
+                          errores_compilador, errores_nuevos, fallos, lint, mutacion, regresion, docstring_intacto, en_techo, filas_tabla, plan_allowlist,
                           secciones, sin_clones, tamano, tipo_propio, traza_plan, traza_spec, un_archivo)
 from mmorch.paths import logs_dir
 from mmorch.providers import call, register_run_tracker, unregister_run_tracker
@@ -645,11 +646,8 @@ def gate_codigo_muerto() -> tuple[bool, str]:
     medida = _cobertura(nuevos)
     if medida is None:
         return rec_gate("codigo-muerto", True, f"no se pudo medir con {PY} (sys.monitoring pide Python 3.12+)")
-    minimo = float(CFG.get("cobertura_min", 0.8))
     state["cobertura_nueva"] = {f: round(1 - len(falta) / max(total, 1), 3) for f, (total, falta) in medida.items()}
-    bajos = {f: medida[f][1] for f, c in state["cobertura_nueva"].items() if c < minimo}
-    detalle = "; ".join(f"{f}: {state['cobertura_nueva'][f]} corre, lineas sin ejecutar {falta}" for f, falta in bajos.items())
-    return rec_gate("codigo-muerto", not bajos, detalle or f"cobertura de archivos nuevos {state['cobertura_nueva']} >= {minimo}")
+    return rec_gate("codigo-muerto", *codigo_muerto(medida, float(CFG.get("cobertura_min", 0.8))))
 
 
 def gate_mutacion() -> tuple[bool, str]:
@@ -692,16 +690,10 @@ def gate_mutacion() -> tuple[bool, str]:
             p.write_text(orig, encoding="utf-8")
     if not total:
         state["mutation_score"] = None
-        return rec_gate("mutacion", True, "sin mutantes posibles")
-    score = round(killed / total, 3)
-    state["mutation_score"] = score
+        return rec_gate("mutacion", *mutacion(0, 0, minimo, [], tope))
+    state["mutation_score"] = round(killed / total, 3)
     state["mutantes"] = mutantes
-    vacuas = _propiedades_vacuas(mutantes)
-    if minimo is not None and score < float(minimo):
-        return rec_gate("mutacion", False, f"mutation score {score} < {minimo} ({killed}/{total})")
-    if minimo is not None and vacuas:   # con mutation_min corren todos los mutantes: sin muertes, la propiedad es vacua
-        return rec_gate("mutacion", False, f"propiedades vacuas (no matan ningun mutante): {vacuas}")
-    return rec_gate("mutacion", True, f"mutation score {score} ({killed}/{total})" + ("" if minimo is not None else f" (observa: sin mutation_min, muestra de {tope})"))
+    return rec_gate("mutacion", *mutacion(killed, total, minimo, _propiedades_vacuas(mutantes), tope))
 
 
 def _propiedades_vacuas(mutantes: list[dict]) -> list[str]:
@@ -783,19 +775,18 @@ def gate_suite_total() -> tuple[bool, str]:
         _write("docs/sdlc/suite-baseline.log", blog)
         if "TIMEOUT" in blog:  # D15: un baseline vacio por timeout se cacheaba y volvia "nuevos" a los rojos previos
             return rec_gate("suite-total", False, f"baseline: {blog[:200]}")
-        base_file.write_text("\n".join(re.findall(r"(?m)^(?:FAILED|ERROR) \S+", blog)) + "\n", encoding="utf-8")
+        base_file.write_text("".join(f"FAILED {t}\n" for t in sorted(fallos(blog))), encoding="utf-8")
     # D8: la suite del worktree traia 594 ERROR (setup) que el gate no miraba porque solo leia FAILED.
-    base = set(re.findall(r"(?m)^(?:FAILED|ERROR) (\S+)", base_file.read_text(encoding="utf-8")))
+    base = fallos(base_file.read_text(encoding="utf-8"))
     ok, log = sh([PY, "-m", "pytest", *_suite_args("final"), *_prop_args()], timeout=CFG["suite_timeout_s"], keep=400000)
     _write("docs/sdlc/suite.log", log)
-    now = set(re.findall(r"(?m)^(?:FAILED|ERROR) (\S+)", log))
+    now = fallos(log)
     new = sorted(now - base)
     if new and "TIMEOUT" not in log:
         # D2 r1: 3 tests de providers fallaron en la suite y pasaron solos -> flaky bajo carga.
         # Un fallo nuevo cuenta como regresion solo si se repite AISLADO (determinista, sin juicio).
         _, rlog = sh([PY, "-m", "pytest", *new[:50], "-q", "-rfE", "-p", "no:cacheprovider", *_prop_args()], keep=400000)
-        flaky = sorted(set(new) - set(re.findall(r"(?m)^(?:FAILED|ERROR) (\S+)", rlog)))
-        new = sorted(set(new) - set(flaky))
+        new, flaky = regresion(base, now, rlog)
         state["suite_flaky"] = flaky
     state["suite_total"] = test_counts(log) | {"new_failures": new, "baseline_failures": len(base)} if test_counts(log) else {"log": log[-300:]}
     if "TIMEOUT" in log:
@@ -1094,27 +1085,20 @@ def gate_compile(files) -> tuple[bool, str]:
 _COMPILE_BASE: dict[str, set[str]] = {}  # comando -> errores de la base sin la aceptacion; se vacia en configure()
 
 
-def _errores_compilador(log: str) -> set[str]:
-    """Errores sin linea ni columna: `ruta(l,c): error ...` (tsc) o `ruta:l:c: ...` (javac, go, gcc). Sin warnings."""
-    return {f"{m[1]}: {m[2].strip()}"
-            for m in re.finditer(r"(?m)^\s*(\S+?\.\w+)(?:\(\d+,\d+\)|:\d+(?::\d+)?):?\s+(.+)$", log)
-            if not m[2].lower().startswith("warning")}
-
-
 def _compila(cmd: str) -> tuple[bool, str, list[str]]:
     """Corre `cmd` y descuenta los errores que la base ya tenia SIN la aceptacion de esta feature. Un compilador de
     proyecto entero (tsc) ve los tests rojos por diseño de OTRAS features: en SSB F3a el TS2307 del test de F3b tumbaba
     G3. Una regresion en otro archivo sigue bloqueando (su error no esta en la base), igual que un error del test de
     aceptacion propio. Sin errores legibles en la salida no descuenta nada. Devuelve (ok, log, errores previos)."""
     ok, log = sh(cmd)
-    ahora = set() if ok else _errores_compilador(log)
+    ahora = set() if ok else errores_compilador(log)
     if not ahora or not state.get("plan_files"):
         return ok, log, []
     if cmd not in _COMPILE_BASE:
         _, blog = _en_base(lambda: _sin_aceptacion(lambda: sh(cmd)))
-        _COMPILE_BASE[cmd] = _errores_compilador(blog)
-    previos = sorted(ahora & _COMPILE_BASE[cmd])
-    if len(previos) < len(ahora):
+        _COMPILE_BASE[cmd] = errores_compilador(blog)
+    sin_nuevos, previos = errores_nuevos(ahora, _COMPILE_BASE[cmd])
+    if not sin_nuevos:
         return False, log, previos
     state["compile_previos"] = previos
     return True, log, previos
@@ -2328,12 +2312,10 @@ def gate_lint() -> tuple[bool, str]:
     # cero absoluto en cada archivo tocado, y la deuda vieja de un repo (Portfolio: 730 ruff + 144 mypy) bloqueaba
     # cualquier reparacion. En un repo limpio da lo mismo: la base es cero. Un archivo nuevo parte de cero.
     ahora, log = _hallazgos_por_archivo(files)
-    base, _ = _en_base(lambda: _hallazgos_por_archivo([f for f in files if (WT / f).exists()]))
+    base, blog = _en_base(lambda: _hallazgos_por_archivo([f for f in files if (WT / f).exists()]))
     state["lint_new"] = {f: [base.get(f, 0), ahora.get(f, 0)] for f in files}
-    peor = {f: v for f, v in state["lint_new"].items() if v[1] > v[0]}
-    if not peor:
-        return rec_gate("lint", True, f"sin hallazgos nuevos (base, ahora): {state['lint_new']}")
-    return rec_gate("lint", False, f"hallazgos nuevos (base, ahora): {peor}\n{log[-1200:]}")
+    ok, detalle = lint(blog, log, files)
+    return rec_gate("lint", ok, detalle if ok else f"{detalle}\n{log[-1200:]}")
 
 
 def _hallazgos_por_archivo(files: list[str]) -> tuple[dict[str, int], str]:
@@ -2342,11 +2324,7 @@ def _hallazgos_por_archivo(files: list[str]) -> tuple[dict[str, int], str]:
         return {}, ""
     _, rl = sh([sys.executable, "-m", "ruff", "check", "--output-format", "concise", *files], host=True)
     _, ml = sh([sys.executable, "-m", "mypy", "--ignore-missing-imports", *files], host=True)
-    cuenta: dict[str, int] = {}
-    for m in re.finditer(r"(?m)^(\S+?):\d+:(?:\d+: |\s*error:)", rl + "\n" + ml):
-        f = m.group(1).replace("\\", "/")
-        cuenta[f] = cuenta.get(f, 0) + 1
-    return cuenta, rl + "\n" + ml
+    return conteo_hallazgos(rl + "\n" + ml), rl + "\n" + ml
 
 
 def _seed_accept() -> None:

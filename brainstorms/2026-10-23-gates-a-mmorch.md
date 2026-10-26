@@ -188,3 +188,9 @@ Los demas ejecutan comandos con `sh` y leen el worktree `WT`.
 - `baseline_intacto(snap, ahora)` y `tamano(t, max_archivos, max_tokens)` pasaron a `mmorch/gates.py`; los hashes y `_tamano` (lectura de disco) quedan en pipeline (D3).
 - baseline-intacto: 1.00 en todos los grupos.
 - tamano-plan: sin numero de gates_bench; su etiqueta es el resultado de una corrida. Bd `orchestration-amp` para medirlo con run-logs. Por D7 queda trasladado sin numero propio, con el bd como deuda.
+
+## Fase 3 (2026-10-26)
+- Decisiones en `mmorch/gates.py`: `errores_compilador`, `errores_nuevos`, `fallos`, `regresion`, `conteo_hallazgos`, `hallazgos`, `lint`, `mutacion`, `codigo_muerto`. La ejecucion (sh, sandbox, mutantes, baselines) queda en pipeline (D4).
+- G3-compile, suite-total y lint se miden sobre logs construidos: 0.893, 0.828, 0.818 antes; 1.00 despues (bd `orchestration-fkp`).
+- mutacion y codigo-muerto: su decision es un umbral; se miden con veredictos y corridas (bd `orchestration-1yu`).
+- Regresion propia corregida: la regla de archivo chico de cambio-minimo (d282dcd) marcaba el parche de un archivo de 1 linea; piso de 5 lineas. Lo detecto test_sdlc_build_escalera.

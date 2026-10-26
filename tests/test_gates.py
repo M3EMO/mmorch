@@ -184,3 +184,35 @@ def test_baseline_intacto_y_tamano():
     assert gates.baseline_intacto({"t.py": "h1"}, {"t.py": None}) == (False, "toco ['t.py']")
     t = {"archivos": 9, "tokens": 100, "escalon": "minima"}
     assert not gates.tamano(t, 8, 16000)[0] and gates.tamano(t | {"archivos": 8}, 8, 16000)[0]
+
+
+def test_cambio_minimo_un_archivo_de_una_linea_admite_su_parche():
+    assert gates.cambio_minimo({"a.ts": "export const a = 1;"}, {"a.ts": "export const a = 2;"}, "t")[0]
+
+
+def test_errores_compilador_lee_tsc_javac_y_rustc():
+    log = "src/a.ts(3,5): error TS2307: x\nsrc/B.java:9: error: y\nwarning: z\nerror[E0425]: cannot find `q`\n  --> src/main.rs:3:5\n"
+    assert gates.errores_compilador(log) == {"src/a.ts: error TS2307: x", "src/B.java: error: y",
+                                              "src/main.rs: error: cannot find `q`"}
+    assert gates.errores_nuevos({"a", "b"}, {"a"}) == (False, ["a"]) and gates.errores_nuevos({"a"}, {"a", "c"}) == (True, ["a"])
+
+
+def test_fallos_y_regresion():
+    log = "FAILED tests/t.py::test_p[caso 1] - AssertionError\nERROR tests/u.py::test_q\n1 failed"
+    assert gates.fallos(log) == {"tests/t.py::test_p[caso 1]", "tests/u.py::test_q"}
+    assert gates.regresion({"a"}, {"a", "b", "c"}, "FAILED b - x") == (["b"], ["c"])
+    assert gates.regresion({"a"}, {"a"}, None) == ([], [])
+
+
+def test_lint_compara_hallazgos_y_no_cantidades():
+    base = "pkg/a.py:3:1: F401 `os` imported but unused\n"
+    assert gates.lint(base, "pkg/a.py:9:1: F401 `os` imported but unused\n", ["pkg/a.py"])[0]  # movido
+    ok, detalle = gates.lint(base, "pkg/a.py:9:1: F841 Local variable `x` is assigned to but never used\n", ["pkg/a.py"])
+    assert not ok and "F841" in detalle
+
+
+def test_mutacion_y_codigo_muerto():
+    assert gates.mutacion(0, 0, None, [], 5) == (True, "sin mutantes posibles")
+    assert not gates.mutacion(1, 4, 0.5, [], None)[0] and gates.mutacion(3, 4, 0.5, [], None)[0]
+    assert not gates.mutacion(3, 4, 0.5, ["prop"], None)[0]
+    assert gates.codigo_muerto({"a.py": (10, [1])}, 0.8)[0] and not gates.codigo_muerto({"a.py": (10, [1, 2, 3])}, 0.8)[0]
