@@ -331,7 +331,7 @@ def _casos_cambio_minimo(rng: random.Random, n: int) -> list[Caso]:
 # --------------------------------------------------------------------------- docstring-intacto
 
 _DOC = ["Banco de mmorch: mide verificadores sobre tareas con verdad computada.", "Registro de plugins del engine.",
-        "Ruteo multi-modelo.\n\nDecide que modelo corre cada nodo y loggea a metrics.jsonl."]
+        "Ruteo multi-modelo.\n\nDecide que modelo corre cada nodo y registra su costo."]
 
 
 def _casos_docstring(rng: random.Random, n: int) -> list[Caso]:
