@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 import time
 from typing import Any, Callable
 
@@ -440,6 +441,42 @@ def _casos_tipo_propio(rng: random.Random, n: int) -> list[Caso]:
     return casos
 
 
+# --------------------------------------------------------------------------- baseline-intacto
+
+
+def _casos_baseline(rng: random.Random, n: int) -> list[Caso]:
+    """Intencion: los tests de aceptacion quedan congelados durante el build. Rojo = el coder debilita un assert,
+    borra el archivo, le agrega un test o solo le cambia espacios (el archivo ya no es el aprobado). Verde = intacto,
+    reescrito con los mismos bytes, o un cambio en un archivo que no es de aceptacion. El hash se calcula aca, igual
+    que `sdlc/pipeline.sha_file`."""
+    import hashlib
+    h = lambda s: hashlib.sha256(s.encode("utf-8")).hexdigest()  # noqa: E731
+    casos: list[Caso] = []
+    verdes, rojos = ["intacto", "reescrito_igual", "otro_archivo"], ["assert_debilitado", "borrado", "test_agregado", "espacios"]
+    for k in range(n):
+        rojo = bool(k % 2)
+        tipo = rng.choice(rojos if rojo else verdes)
+        tests = {f"tests/test_sdlc_{_nombre(rng)}.py":
+                 "".join(f"def test_R{i}_{_nombre(rng)}():\n    assert {_nombre(rng)}({i}) == {rng.randint(0, 99)}\n\n"
+                         for i in range(1, rng.randint(2, 5))) for _ in range(rng.randint(1, 2))}
+        ahora = dict(tests)
+        rel = rng.choice(list(tests))
+        if tipo == "assert_debilitado":
+            ahora[rel] = re.sub(r"== \d+", "is not None", ahora[rel], count=1)
+        elif tipo == "test_agregado":
+            ahora[rel] += "def test_extra():\n    assert True\n"
+        elif tipo == "espacios":
+            ahora[rel] = ahora[rel].replace("    assert", "        assert", 1)
+        hashes: dict[str, str | None] = {r: h(c) for r, c in ahora.items()}
+        if tipo == "borrado":
+            hashes[rel] = None
+        if tipo == "otro_archivo":
+            hashes["pkg/a.py"] = h("x = 2\n")
+        casos.append({"args": ({r: h(c) for r, c in tests.items()}, hashes), "rojo": rojo, "origen": "generado",
+                      "grupo": tipo})
+    return casos
+
+
 _PLUGINS = '''"""Registro de plugins."""
 from __future__ import annotations
 import importlib
@@ -517,7 +554,8 @@ CHEQUEOS: dict[str, Callable[..., tuple[bool, str]]] = {"sin-clones": gates.sin_
                                                          "cambio-minimo": gates.cambio_minimo,
                                                          "docstring-intacto": gates.docstring_intacto,
                                                          "un-archivo": _un_archivo_en_pipeline,
-                                                         "tipo-del-archivo": gates.tipo_propio}
+                                                         "tipo-del-archivo": gates.tipo_propio,
+                                                         "baseline-intacto": gates.baseline_intacto}
 GENERADORES: dict[str, Callable[[random.Random, int], list[Caso]]] = {"sin-clones": _casos_sin_clones,
                                                                     "spec-review": _casos_spec_review,
                                                                     "trazabilidad-plan": _casos_traza_plan,
@@ -526,7 +564,8 @@ GENERADORES: dict[str, Callable[[random.Random, int], list[Caso]]] = {"sin-clone
                                                                     "cambio-minimo": _casos_cambio_minimo,
                                                                     "docstring-intacto": _casos_docstring,
                                                                     "un-archivo": _casos_un_archivo,
-                                                                    "tipo-del-archivo": _casos_tipo_propio}
+                                                                    "tipo-del-archivo": _casos_tipo_propio,
+                                                                    "baseline-intacto": _casos_baseline}
 
 
 def medir(gate: str, n: int = 400, seed: int = 42) -> dict[str, Any]:

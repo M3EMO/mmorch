@@ -177,3 +177,10 @@ def test_cambio_minimo_archivo_chico_y_docstring_marcador():
     assert not gates.cambio_minimo(orig, {"a.py": "nuevo = 1\n"}, "agrega una guarda")[0]
     assert gates.cambio_minimo(orig, {"a.py": orig["a.py"].replace("x1 = 1", "x1 = 2")}, "agrega una guarda")[0]
     assert not gates.docstring_intacto({"a.py": "Modulo de ruteo."}, {"a.py": "TODO"}, "t")[0]
+
+
+def test_baseline_intacto_y_tamano():
+    assert gates.baseline_intacto({"t.py": "h1"}, {"t.py": "h1", "otro.py": "x"}) == (True, "ok")
+    assert gates.baseline_intacto({"t.py": "h1"}, {"t.py": None}) == (False, "toco ['t.py']")
+    t = {"archivos": 9, "tokens": 100, "escalon": "minima"}
+    assert not gates.tamano(t, 8, 16000)[0] and gates.tamano(t | {"archivos": 8}, 8, 16000)[0]

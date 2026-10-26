@@ -183,3 +183,8 @@ Los demas ejecutan comandos con `sh` y leen el worktree `WT`.
 - `pide(tarea, raiz)`: la tarea nombra la raiz sin negacion ni verbo de conservacion. Limite: una prohibicion con otra forma ("quedan igual") pasa; el banco la incluye a proposito.
 - `orchestration-rlg`: minimo de borradas = min(40, mitad del archivo); generador verde nuevo `parche_archivo_chico`. 0.803 -> 0.970.
 - `orchestration-weo`: un docstring reducido a `TODO` o `.` cuenta como borrado. 0.679 -> 0.953.
+
+## Fase 2: baseline-intacto y tamano-plan (2026-10-26)
+- `baseline_intacto(snap, ahora)` y `tamano(t, max_archivos, max_tokens)` pasaron a `mmorch/gates.py`; los hashes y `_tamano` (lectura de disco) quedan en pipeline (D3).
+- baseline-intacto: 1.00 en todos los grupos.
+- tamano-plan: sin numero de gates_bench; su etiqueta es el resultado de una corrida. Bd `orchestration-amp` para medirlo con run-logs. Por D7 queda trasladado sin numero propio, con el bd como deuda.

@@ -265,6 +265,8 @@ Re-run with `python -m mmorch.gates_bench --seed 42 --n 400`; rows go to `logs/a
 | `docstring-intacto` | 401 | 0.905 | 1.00 | 0.953 | docstring replaced by `TODO`: 1.00 (was 0.00) · task forbids touching docstrings: 0.70 (was 0.00) |
 | `un-archivo` | 401 | 1.00 | 1.00 | 1.00 | `# File: path` / backticked headers written right: 1.00 (was 0.00); measures what `one_file` writes |
 | `tipo-del-archivo` | 402 | 1.00 | 1.00 | 1.00 | annotation on the same line (`@Deprecated public class X`): 1.00 (was 0.00) |
+| `baseline-intacto` | 400 | 1.00 | 1.00 | 1.00 | weakened assert / deleted / added test / whitespace: 1.00 |
+| `tamano-plan` | — | — | — | — | not measurable with built cases: the label is a run outcome (bd `orchestration-amp`) |
 
 Fixed after measuring (2026-10-26). `sin-clones`: copies with up to 30% edited share >= 0.69 of their lines and
 sibling modules (same header, imports and signatures, own bodies) <= 0.65 over 5 seeds x 2000 cases, so the
@@ -287,7 +289,7 @@ the gate scored 0.744 before `orchestration-6qb` and 1.00 after.
 ## What's here
 
 <!-- mmorch:auto:stats -->
-_Auto-generado por `mmorch.docgen`._ **121 módulos · 44 MCP tools (15 expuestas por default) · 1205 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
+_Auto-generado por `mmorch.docgen`._ **121 módulos · 44 MCP tools (15 expuestas por default) · 1206 tests.** Catálogo: [`docs/generated/catalog.md`](docs/generated/catalog.md).
 <!-- /mmorch:auto:stats -->
 
 <!-- mmorch:auto:modules -->

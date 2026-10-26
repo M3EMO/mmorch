@@ -195,3 +195,19 @@ def tipo_propio(code: str, rel: str) -> tuple[bool, str]:
     stem = rel.rsplit("/", 1)[-1][:-len(".java")]
     ajenos = [t for t in _TIPO_PUBLICO.findall(code) if t != stem]
     return (False, f"{rel}: declara public {ajenos[0]}") if ajenos else (True, f"{rel}: tipo propio")
+
+
+def baseline_intacto(snap: dict[str, str], ahora: dict[str, str | None]) -> tuple[bool, str]:
+    """Los tests de aceptacion congelados no cambian: mismo hash que en la foto (None = el archivo ya no existe)."""
+    bad = [rel for rel, h in snap.items() if ahora.get(rel) != h]
+    return not bad, "ok" if not bad else f"toco {bad}"
+
+
+def tamano(t: dict, max_archivos: int, max_tokens: int) -> tuple[bool, str]:
+    """Baranda de tamaño (orchestration-e4d): las 107 corridas medidas tienen <= 8 archivos y <= 16k tokens; fuera de
+    ese rango no hay datos. `t` = archivos, tokens y escalon del plan (sdlc/pipeline._tamano)."""
+    ok = t["archivos"] <= max_archivos and t["tokens"] <= max_tokens
+    detalle = f"{t['archivos']} archivos, {t['tokens']} tokens ({t['escalon']})"
+    if not ok:
+        detalle += f": supera {max_archivos} archivos o {max_tokens} tokens; dividi la tarea en features mas chicas"
+    return ok, detalle

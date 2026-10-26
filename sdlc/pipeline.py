@@ -28,8 +28,8 @@ import types
 from typing import Any
 
 from mmorch.gates import calza as _calza
-from mmorch.gates import (cambio_minimo, clarificaciones, docstring_intacto, en_techo, filas_tabla, plan_allowlist,
-                          secciones, sin_clones, tipo_propio, traza_plan, traza_spec, un_archivo)
+from mmorch.gates import (baseline_intacto, cambio_minimo, clarificaciones, docstring_intacto, en_techo, filas_tabla, plan_allowlist,
+                          secciones, sin_clones, tamano, tipo_propio, traza_plan, traza_spec, un_archivo)
 from mmorch.paths import logs_dir
 from mmorch.providers import call, register_run_tracker, unregister_run_tracker
 
@@ -947,12 +947,7 @@ def gate_tamano(files: list[str]) -> tuple[bool, str]:
     archivos (1: 0.89, 2-3: 0.81, 4-7: 0.65) pero no hay evidencia de que dividir ayude: los umbrales se revisan con
     20 corridas de 4 o mas archivos. Por repo: `tamano_max_archivos` y `tamano_max_tokens` en sdlc.toml."""
     t = state["plan_tamano"] = _tamano(files)
-    max_a, max_t = int(CFG.get("tamano_max_archivos", 8)), int(CFG.get("tamano_max_tokens", 16000))
-    ok = t["archivos"] <= max_a and t["tokens"] <= max_t
-    detalle = f"{t['archivos']} archivos, {t['tokens']} tokens ({t['escalon']})"
-    if not ok:
-        detalle += f": supera {max_a} archivos o {max_t} tokens; dividi la tarea en features mas chicas"
-    return rec_gate("tamano-plan", ok, detalle)
+    return rec_gate("tamano-plan", *tamano(t, int(CFG.get("tamano_max_archivos", 8)), int(CFG.get("tamano_max_tokens", 16000))))
 
 
 def gate_plan_allowlist(plan_md: str, files: list[str]) -> tuple[bool, str]:
@@ -1074,8 +1069,9 @@ def gate_alcance(gid: str, before: dict[str, str], allowed: tuple[str, ...]) -> 
 
 
 def gate_baseline() -> tuple[bool, str]:
-    bad = [rel for rel, h in SNAP.items() if not (WT / rel).exists() or sha_file(rel) != h]
-    return rec_gate("baseline-intacto", not bad, "ok" if not bad else f"toco {bad}")
+    """Chequeo en mmorch.gates.baseline_intacto; los hashes del worktree se leen aca."""
+    ahora = {rel: sha_file(rel) if (WT / rel).exists() else None for rel in SNAP}
+    return rec_gate("baseline-intacto", *baseline_intacto(SNAP, ahora))
 
 
 def gate_compile(files) -> tuple[bool, str]:
