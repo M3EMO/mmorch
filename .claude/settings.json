@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"/home/mpera/.claude/hooks/never-edit-guard.js\"",
+            "timeout": 5,
+            "statusMessage": "never-edit guard"
+          }
+        ]
+      }
+    ]
+  }
+}

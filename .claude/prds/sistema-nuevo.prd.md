@@ -53,6 +53,10 @@ Propuesta del mapa (`docs/contexto/mapa.md`):
 - Repo: el sistema nuevo vive en rama aparte, `sistema-nuevo`, con worktree propio. mmorch se retira al final, cuando el sistema nuevo pase las métricas.
 - Cada integración se planea en su propia sesión con `/plan`.
 - Todo se construye con ECC.
+- Modelos por rol (decisión del usuario, 2026-10-27): "El plan debe crearlo opus, sonnet organiza a los builders, haiku debe ser el builder."
+- Producto (decisión del usuario, 2026-10-27): Root, Graft, ECC y REA forman un producto completo, con ECC entero. ECC, Graft y REA se reconstruyen después.
+- Herencia de mmorch (decisión del usuario, 2026-10-27): las mediciones de "Measured" valen como evidencia, pero el método queda en revisión. Se conserva el hash del GOAL. `metrics.jsonl` se importa en solo lectura. El código arranca de cero.
+- Root (decisión del usuario, 2026-10-27): Root es un evaluador de alto nivel (seguridad, diseño, eficiencia, estructura, arquitectura) y aprende. Route balancea DeepSeek y Anthropic contra el cupo. Lenguaje: Rust. Root maneja TOML, Dockerfile y YAML. El vault queda fuera de Root porque el sistema empieza de cero.
 
 ## Delivery Milestones
 <!-- Business outcomes, not engineering tasks. /plan turns each into a plan. -->
@@ -60,7 +64,7 @@ Propuesta del mapa (`docs/contexto/mapa.md`):
 
 | # | Milestone | Outcome | Status | Plan |
 |---|---|---|---|---|
-| 1 | Root: reemplaza el banco y el ruteo de mmorch | Route, Oracle, Observe y Track corren desde el bootstrap del banco | pending | — |
+| 1 | Root: reemplaza el banco y el ruteo de mmorch | Route, Oracle, Observe y Track corren desde el bootstrap del banco | in-progress | `.claude/plans/root.plan.md` |
 | 2 | Graft: reemplaza el SDLC | El SDLC de Graft completa tareas sin intervención humana | pending | — |
 | 3 | REA: se suma al pipeline | Un paso del pipeline usa REA y deja evidencia verificable | pending | — |
 | 4 | CAB: Code Agent Builder | El sistema construye agentes de código desde una especificación | pending | — |
