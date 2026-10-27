@@ -8,7 +8,8 @@
 ## Summary
 
 Root es un binario de Rust llamado `root`. Root evalúa el valor de un proyecto, rutea trabajo entre cupo y APIs, observa cada corrida y aprende de lo que registra.
-El Oracle no se limita a contar tests. Juzga seis dimensiones: funciona, seguridad, eficiencia, estructura, arquitectura y diseño.
+El Oracle trabaja como un project manager, no como un pseudo-compilador. Responde tres preguntas: qué prometió la spec, qué cumple el producto y si está listo para entregarse.
+Juzga nueve dimensiones: completitud, funciona, entrega, pruebas, seguridad, eficiencia, estructura, arquitectura y diseño. Entrega un informe con una decisión (listo, no listo, bloqueado), los requisitos faltantes, los riesgos y los próximos pasos.
 Root también mide su propio evaluador: una dimensión entra al puntaje global solo si su calibración la respalda.
 
 ## Decisiones del usuario (2026-10-27)
@@ -32,6 +33,8 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 10 | Lenguaje Rust (confirmado). El paquete se llama `root`. |
 | 10b | La configuración de Root es solo TOML (`root.toml`, `tarea.toml`). El Oracle evalúa TOML, YAML y Dockerfile en los proyectos (Tarea 9b). Root nunca lee YAML como configuración. |
 | — | Roles: Opus escribe este plan. Sonnet organiza a los builders. Haiku construye. |
+| 11 | "Las mediciones deben ser competentes, no me sirve un pseudo-compilador. Necesito un PM." Revisión de las Tareas 6 a 19: ver "Revisión PM" al final. |
+| 12 | P1: se acepta la propuesta de bloqueo, más rúbricas basadas en estándares de la industria para completitud, diseño y el resto de las dimensiones. P2: el usuario califica a ciegas. P3: el usuario aprueba los requisitos; la spec sale de una sesión `/grill-me`. P4: recall ≥ 0,8. |
 
 ## Patterns to Mirror
 
@@ -77,20 +80,42 @@ Toda línea JSONL lleva `"v": 1`. Un cambio de formato sube `v`, y los lectores 
 
 ### `tarea.toml`
 
+memora y brasa están escritos en Rust. Sus oráculos son tests de caja negra en pytest. Por eso `lenguaje` (el del proyecto) y la imagen (la del oráculo) son campos distintos.
+
 ```toml
 nombre = "memora"
-lenguaje = "python"
-imagen = "root-oraculo-python:1"        # imagen del contenedor de evaluación
+lenguaje = "rust"                        # elige el perfil de sondas (Tarea 9)
+imagen = "root-oraculo-rust:1"           # Rust + Python/pytest para los oráculos de caja negra
 containerfile = "bootstrap/Dockerfile"   # opcional: si existe, el Oracle construye la imagen desde el Dockerfile del proyecto
 spec = "bootstrap/docs/SPEC.md"
 [contrato]
 cmd = "pytest -q -p no:cacheprovider --junitxml=/salida/contrato.xml /repo/tests"
 [oculto]
 cmd = "pytest -q -p no:cacheprovider --junitxml=/salida/oculto.xml /oraculo/oculto"
-[[sonda]]                                # una sonda determinista por dimensión
-dimension = "seguridad"
-cmd = "bandit -r /repo -f json -o /salida/seguridad.json"
-parser = "bandit-json"
+
+[[requisito]]                            # Tarea 9c: lo que el producto promete, sección por sección de la spec
+id = "R1"
+titulo = "Protocolo RESP2"
+seccion = "## Protocolo"
+peso = 3                                 # 1..=3, importancia para el usuario del producto
+pruebas = ["test_m1_protocolo"]          # archivos o ids de tests ocultos: el caso feliz
+bordes = ["test_m1_protocolo::test_trama_partida", "test_m1_protocolo::test_error_resp"]  # bordes y errores
+escenarios = ["e2e-set-get"]             # escenarios de [[escenario]] que lo prueban
+criterios = ["completitud.alcance"]      # ítems de rúbrica que este requisito alimenta
+
+[[escenario]]                            # Tarea 9d: un flujo real de usuario, en un contenedor limpio
+id = "e2e-set-get"
+cmd = "/oraculo/escenarios/set_get.sh"   # sale 0 si el flujo funciona
+
+[entrega]                                # Tarea 9d: comprobaciones de "listo para producción"
+instalar = "cargo build --release"
+correr = "./target/release/memora --config memora.conf.example"
+archivos = ["README.md", "Dockerfile", "memora.conf.example", ".github/workflows/ci.yml"]
+
+[pruebas]                                # Tarea 9e: calidad de los tests del propio proyecto
+mutantes_max = 60
+minutos_max = 20
+
 [eficiencia]
 cmd = "python /oraculo/bench.py /repo"   # imprime JSON {"ops_s": f64}
 piso = 5000.0
@@ -144,6 +169,71 @@ pub struct Fila { pub v: u32, pub id: String, pub ts: f64, pub tarea: String, pu
                   pub commit_root: String, pub veredicto: Veredicto, pub resumen: Resumen }
 ```
 
+#### Extensión PM (Tarea 5b, solo agrega; no cambia lo que construyeron las Tareas 1 a 5)
+
+```rust
+// Dimension suma tres variantes al final: Completitud, Entrega, Pruebas.
+pub enum Cumplimiento { Cumplido, Parcial, Ausente, SinVeredicto }
+pub struct EstadoRequisito { pub id: String, pub titulo: String, pub peso: u8,
+                             pub cumplimiento: Cumplimiento, pub evidencia: Vec<String> } // ids de tests, escenarios o hallazgos
+pub enum Decision { Listo, NoListo, Bloqueado }
+pub struct Accion { pub prioridad: u8, pub texto: String, pub refs: Vec<String> }        // refs = ids de requisitos o hallazgos
+pub struct Informe { pub decision: Decision, pub motivo: String,
+                     pub requisitos: Vec<EstadoRequisito>,
+                     pub bloqueantes: Vec<String>,      // ids de hallazgos
+                     pub riesgos: Vec<Accion>,          // máximo 5, ordenados por impacto
+                     pub proximos_pasos: Vec<Accion>,   // máximo 5
+                     pub resumen: String }              // prosa; cada oración cita un id
+// Hallazgo suma `id: String` (estable: hash de dimensión+archivo+cita) e `impacto: Vec<String>` (requisitos que afecta).
+// Veredicto suma `informe: Option<Informe>` con #[serde(default)].
+```
+
+#### Rúbricas (Tarea 8b; decisión 12)
+
+Toda dimensión se puntúa con una rúbrica. Cada ítem de la rúbrica tiene niveles anclados y cita el estándar del que sale. Root no inventa criterios.
+
+| Dimensión | Estándar de referencia |
+|---|---|
+| Completitud, Funciona | ISO/IEC 25010:2023, idoneidad funcional (completitud, corrección, pertinencia). Trazabilidad requisito→prueba según ISO/IEC/IEEE 29148. |
+| Seguridad | OWASP ASVS 5.0, nivel 1 (los capítulos que aplican al producto) y CWE Top 25 para los hallazgos de código. |
+| Entrega | CIS Docker Benchmark, sección 4 (imágenes), y los chequeos locales de OpenSSF Scorecard (dependencias fijadas, SAST, workflows peligrosos). |
+| Pruebas | ISO/IEC 25010, testeabilidad, medida con el puntaje de mutación. |
+| Eficiencia | ISO/IEC 25010, eficiencia de desempeño (tiempo, recursos, capacidad) contra el `piso` de la tarea. |
+| Estructura, Arquitectura, Diseño | ISO/IEC 25010, mantenibilidad (modularidad, reusabilidad, analizabilidad, modificabilidad, testeabilidad). En Rust, además, el checklist de Rust API Guidelines. |
+
+Los textos de ISO tienen copyright. Las rúbricas citan solo el nombre y la cláusula de cada característica, y Root escribe sus propias anclas. ASVS y CWE tienen licencia abierta y se citan con su id.
+
+```toml
+# rubricas/diseno.toml — se compila dentro del binario (include_str!); su hash va en cada Veredicto
+id = "diseno"
+version = 1
+[[item]]
+id = "diseno.modularidad"
+fuente = "ISO/IEC 25010:2023 §mantenibilidad/modularidad"
+mide = "juez"                  # "sonda" si es checkeable; "juez" si no; "mixto" si la sonda fija un tope
+peso = 3
+bloquea = false                # true: nivel 0 en este ítem da Decision::Bloqueado (Tarea 13b)
+anclas = [                     # nivel 0..=3; cada nivel exige evidencia citada
+  "0: un módulo concentra varios requisitos sin límites; un cambio toca todo",
+  "1: hay módulos, pero con dependencias cruzadas o ciclos",
+  "2: cada requisito vive en un módulo con una interfaz clara; quedan acoples puntuales",
+  "3: módulos con una responsabilidad, sin ciclos, con interfaces chicas y probadas",
+]
+```
+
+```rust
+// Extensión de la Tarea 5b para rúbricas (solo agrega):
+pub struct NivelItem { pub item: String, pub nivel: u8 /*0..=3*/, pub evidencia: Vec<String>, pub fuente: Fuente }
+// Puntaje suma `items: Vec<NivelItem>` con #[serde(default)]. Veredicto suma `rubricas: Vec<String>` ("diseno@<hash>").
+```
+
+El valor de una dimensión es la media ponderada de sus ítems: `Σ peso·nivel / (3·Σ peso)`.
+Un ítem `sonda` lo fija una sonda. Un ítem `juez` lo fija el juez, y su nivel se descarta si su evidencia no pasa el gate. Un ítem `mixto` lo fija el juez, pero la sonda le pone un tope: con ciclos de módulos, `diseno.modularidad` no supera 1.
+Dos veredictos con hashes de rúbrica distintos no se comparan: `root track comparar` lo rechaza.
+
+La `Decision` sale de reglas deterministas, nunca de un LLM. Las reglas viven en `[decision]` de `root.toml` (Tarea 13b).
+El LLM solo escribe `resumen`, `riesgos` y `proximos_pasos`. Cada oración debe citar un id existente: el gate de evidencia descarta las que no citan.
+
 `global` es la media ponderada de las dimensiones con `calibrada = true`. Si ninguna dimensión está calibrada, `global` es `None`.
 `Estado::Verde` exige tres condiciones: contrato completo, oculto sin regresiones y `global` mayor o igual a `umbral_verde` de `root.toml`.
 
@@ -155,6 +245,8 @@ pub fn elegir(p: &Pedido, pol: &Politica, uso: &Uso) -> Eleccion;            // 
 // oracle
 pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo>;
 pub fn calibrar(tarea: &Tarea, dim: Dimension, n: usize, semilla: u64) -> Result<Calibracion, ErrorOraculo>;
+pub fn informar(v: &Veredicto, tarea: &Tarea, reglas: &ReglasDecision) -> Result<Informe, ErrorOraculo>;
+pub fn validar(casos: &Path) -> Result<Validez, ErrorOraculo>;  // ¿el juicio de Root coincide con resultados conocidos?
 // observe
 pub fn registrar(ev: &Evento) -> io::Result<()>;                              // append con lock
 pub fn leer_sesion_claude(json: &Path, corrida: &str) -> Result<Vec<Evento>, ErrorObserve>;
@@ -187,6 +279,8 @@ root route --rol <rol> --tipo <tipo> [--checkeable] [--tokens N]   -> Eleccion
 root llama --rol <rol> --tipo <tipo> --prompt-file <f> --corrida <id> -> Respuesta
 root oraculo evaluar --tarea <t> --repo <dir>                        -> Veredicto
 root oraculo calibrar --tarea <t> --dimension <d> [--n 20] [--semilla 42] -> Calibracion
+root oraculo informe --tarea <t> --repo <dir> [--md]                 -> Informe (JSON, o markdown legible)
+root oraculo validar --casos <dir>                                   -> Validez
 root observa claude --json <salida-de-claude-p> --corrida <id>
 root observa evento --corrida <id> --tipo <humano|plan-aprobado|gate> [--detalle txt]
 root observa resumen --corrida <id>                                  -> Resumen
@@ -222,10 +316,16 @@ root mcp                               # servidor MCP por stdio
 | `src/track/{mod,stats}.rs` | CREATE | Filas, comparación y cota de Wilson |
 | `src/oracle/{mod,tarea,contenedor,junit,sondas,juez,evidencia,calibra}.rs` | CREATE | Evaluador de alto nivel |
 | `src/oracle/configs.rs` | CREATE | Sondas de TOML, YAML y Dockerfile |
+| `src/oracle/perfiles/{mod,rust,python}.rs` | CREATE | Sondas por lenguaje del proyecto evaluado |
+| `src/oracle/{requisitos,entrega,mutacion,mapa,informe,validez}.rs` | CREATE | Las partes de "project manager" |
+| `src/tipos.rs` | UPDATE (Tarea 5b) | Extensión PM y de rúbricas, solo agrega |
+| `rubricas/{completitud,funciona,seguridad,entrega,pruebas,eficiencia,estructura,arquitectura,diseno}.toml` | CREATE (Opus redacta, el usuario aprueba) | Rúbricas con anclas y la cita de su estándar |
+| `src/oracle/rubrica.rs` | CREATE | Carga, hash y puntaje de las rúbricas |
+| `imagenes/oraculo-rust/Containerfile` | CREATE | Rust, clippy, cargo-audit, cargo-mutants, gitleaks, hadolint, Python y pytest |
 | `src/proveedores/{mod,deepseek,anthropic}.rs` | CREATE | Llamadas a las APIs |
 | `src/route/{mod,politica}.rs`, `src/aprende.rs` | CREATE | Ruteo y aprendizaje |
 | `src/corre.rs`, `src/mcp.rs`, `src/importar.rs` | CREATE | Runner, servidor MCP e importación |
-| `imagenes/oraculo-python/Containerfile` | CREATE | Imagen de evaluación (pytest, bandit, radon, gitleaks, hadolint) |
+| `imagenes/oraculo-python/Containerfile` | CREATE (después de la de Rust) | Para proyectos Python: pytest, bandit, radon, mutmut, gitleaks, hadolint |
 | `tests/*.rs`, `tests/fixtures/` | CREATE | Integración |
 | `GOAL.borrador.md` | CREATE (Opus, ya escrito) | Borrador del GOAL para que el usuario lo lea |
 | `GOAL.md`, `GOAL.hash` | — (solo el usuario) | El usuario copia el borrador a mano y corre `root goal autorizar` |
@@ -269,27 +369,61 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
 - **Action**: `agregar`, `filas`, `comparar` y `estadisticas` con la cota inferior de Wilson al 90%. `root importar-mmorch` copia `metrics.jsonl` a `importado/` y lo convierte a `Evento` con `extra.origen = "mmorch"`. Nunca escribe sobre el original.
 - **Validate**: `cargo test track` (Wilson con 0/0, 5/5 y 50/100 contra valores tabulados); importar el `metrics.jsonl` real deja 575 eventos y el md5 del original sin cambios.
 
+### Tarea 5b: Extensión PM de los tipos
+- **Action**: agregar a `src/tipos.rs` los tipos de "Extensión PM". Solo agrega: las variantes nuevas de `Dimension` van al final, y los campos nuevos llevan `#[serde(default)]`. Corre después de que Sonnet cierre las Tareas 1 a 5.
+- **Validate**: `cargo test tipos` (un `Veredicto` v1 sin `informe` se sigue leyendo; ida y vuelta JSON de `Informe`) y `root esquema informe | jq .`. Incluye `NivelItem` y los campos `items` y `rubricas`.
+
 ### Tarea 6: Contenedor y junit
 - **Action**: `oracle/contenedor.rs` arma el `podman run` de la sección "Cómo corre el oráculo". Aplica un timeout. Un error de infraestructura devuelve `ErrorOraculo::Infra` y nunca un veredicto. `oracle/junit.rs` cuenta pass, fail y skip por archivo.
 - **Mirror**: `evaluar.py:17-50`.
 - **Validate**: `cargo test --test contenedor` (un comando que escribe fuera de `/salida` falla; con `--network none`, `curl` falla; un junit con 3 tests y 1 falla da 2/3)
 
 ### Tarea 7: Tareas memora y brasa
-- **Action**: crear `oraculos/memora` y `oraculos/brasa` desde `~/Proyectos/bench-ecc-sdlc/bootstrap/` y `.scratch/ecc-vs-sdlc/oraculo/`. Construir `imagenes/oraculo-python`. Los oráculos se copian a `ROOT_HOME`, nunca al repo de Root.
+- **Action**: crear `oraculos/memora` y `oraculos/brasa` desde `~/Proyectos/bench-ecc-sdlc/bootstrap/` y `.scratch/ecc-vs-sdlc/oraculo/`. Construir `imagenes/oraculo-rust`: los dos proyectos son Rust y sus oráculos son pytest de caja negra (`ORACULO_REPO`, ver `oraculo/memora/conftest.py`). brasa necesita un adaptador de CPU (lavapipe) en la imagen: ver `~/Proyectos/bench-ecc-sdlc/probe-gpu/`. Los oráculos se copian a `ROOT_HOME`, nunca al repo de Root.
+- **Requisitos**: Opus redacta `[[requisito]]` y `[[escenario]]` de cada tarea desde la spec. Cada sección de la spec da al menos un requisito. Los tests ocultos `test_m<n>_*.py` ya siguen los módulos de la spec, así que cada requisito apunta a sus archivos. El usuario aprueba la lista una vez (pregunta P3). La lista es material oculto: vive en `ROOT_HOME`, no en el repo.
 - **Validate**: `root oraculo evaluar --tarea memora --repo ~/Proyectos/bench-ecc-sdlc/memora-ecc` da contrato 61/61 y oculto 48/48. brasa-ecc da 53/53 y 15/16.
 
 ### Tarea 8: Proveedores
 - **Action**: DeepSeek (API compatible con OpenAI) y Anthropic Messages. Reintentos y breaker como en `providers.py`. El costo sale de los precios de `root.toml`. Cada llamada registra un `Evento`. Las claves salen de variables de entorno y nunca entran a un log.
 - **Validate**: `cargo test proveedores` con un servidor HTTP falso (429 reintenta; 3 fallas abren el breaker; la clave no aparece en `eventos.jsonl`)
 
-### Tarea 9: Sondas deterministas
-- **Action**: una sonda por dimensión checkeable:
-  - **seguridad**: bandit y gitleaks.
-  - **estructura**: duplicación, tamaño de archivos y funciones, complejidad con radon.
-  - **arquitectura**: ciclos de import y reglas de `capas`.
+### Tarea 8b: Rúbricas
+- **Action**: Opus redacta las nueve rúbricas de "Rúbricas", con 3 a 6 ítems cada una. Cada ítem cita su estándar. El usuario las aprueba una vez antes de que el Oracle las use, igual que los requisitos. `oracle/rubrica.rs` las compila dentro del binario, calcula su hash y aplica la fórmula del puntaje y los topes de los ítems `mixto`.
+- **Validate**: `cargo test rubrica` cubre cuatro casos:
+  - Un ítem sin `fuente` no carga.
+  - Un nivel fuera de 0..=3 no carga.
+  - Cambiar un ancla cambia el hash.
+  - `comparar` rechaza dos rúbricas con hashes distintos.
+- **Gate humano**: el usuario aprueba `rubricas/*.toml` antes de la Tarea 12.
+
+### Tarea 9: Sondas deterministas por perfil de lenguaje
+- **Action**: `oracle/perfiles/` elige las sondas por `lenguaje`. El perfil `rust` va primero porque memora y brasa son Rust. El perfil `python` va después.
+  - **seguridad**: gitleaks, `cargo audit` (dependencias con CVE), conteo de `unsafe` y de `unwrap()`/`expect()` en código que no es de test. En Python: bandit.
+  - **estructura**: tamaño de archivos y funciones, duplicación y `cargo clippy` (solo las categorías `correctness`, `suspicious` y `perf`; el estilo no cuenta). En Python: radon.
+  - **arquitectura**: grafo de módulos desde `mod`/`use` (o `import`), ciclos y reglas de `capas`.
   - **eficiencia**: el comando `[eficiencia]` contra `piso`.
-  Cada sonda devuelve `Puntaje` y `Hallazgo`s con `archivo:línea`.
-- **Validate**: `cargo test --test sondas` sobre fixtures con un defecto conocido por sonda.
+  Cada sonda devuelve `Puntaje` y `Hallazgo`s con `id`, `archivo:línea` e `impacto` (requisitos afectados, por la ruta del archivo).
+- **Regla anti pseudo-compilador**: un hallazgo sin impacto en un requisito y con severidad 1 no baja el puntaje: solo se lista. El puntaje pondera por severidad y por el `peso` del requisito afectado, nunca por conteo bruto de avisos.
+- **Validate**: `cargo test --test sondas` sobre fixtures Rust y Python con un defecto conocido por sonda; un fixture con 200 avisos de estilo y 0 defectos reales obtiene el puntaje máximo.
+
+### Tarea 9c: Completitud por requisito
+- **Action**: `oracle/requisitos.rs` cruza cada `[[requisito]]` con el junit oculto y los escenarios. Cada requisito recibe un nivel de la rúbrica `completitud`, y el nivel sale solo de pruebas, sin LLM:
+  - **0 Ausente**: ningún test verde.
+  - **1 Parcial**: algunos tests de `pruebas` verdes.
+  - **2 Caso feliz**: todos los tests de `pruebas` verdes, pero falta algún borde o escenario.
+  - **3 Cumplido**: todo `pruebas`, `bordes` y `escenarios` en verde.
+  
+  El puntaje de `Completitud` es `Σ peso·nivel / (3·Σ peso)`. Los requisitos salen de la spec, y la spec sale de una sesión `/grill-me` con el usuario (decisión 12). En memora y brasa, la spec ya existe en el banco.
+- **Validate**: `root oraculo evaluar --tarea memora --repo .../memora-sdlc` marca `Ausente` los módulos que el SDLC no construyó (el SDLC construyó 2 de 9 módulos, según `docs/contexto/mapa.md`). memora-ecc queda con todos `Cumplido`.
+
+### Tarea 9d: Entrega y escenarios de usuario
+- **Action**: `oracle/entrega.rs` clona el repo en un contenedor limpio y corre `[entrega].instalar` y `[entrega].correr`. Verifica `[entrega].archivos`. Construye el `Dockerfile` del proyecto y lo arranca, y verifica que corre sin root. Después corre cada `[[escenario]]` contra el producto levantado. Un escenario es un flujo real de usuario, como conectar un cliente, guardar un valor, reiniciar y leerlo. Es lo que un PM prueba a mano antes de aprobar.
+- **Validate**: `cargo test --test entrega` (un repo sin README da un hallazgo; un Dockerfile que corre como root da un hallazgo; un escenario que sale con código 1 deja su requisito en `Parcial`)
+
+### Tarea 9e: Calidad de las pruebas del proyecto
+- **Action**: `oracle/mutacion.rs` corre `cargo-mutants` (o `mutmut` en Python) sobre los tests del propio proyecto. Respeta `[pruebas].mutantes_max` y `minutos_max`. El puntaje de `Pruebas` es la proporción de mutantes muertos. Un mutante vivo da un hallazgo: "este cambio de comportamiento no lo detecta ningún test".
+- **Mirror**: el veredicto ECC-F1 usó mutaciones para separar tests reales de tests decorativos (`docs/contexto/veredicto-ecc-f1.md`).
+- **Validate**: `cargo test --test mutacion` (un fixture con tests sin asserts obtiene un puntaje menor que el mismo fixture con asserts)
 
 ### Tarea 9b: Sondas de TOML, YAML y Dockerfile
 - **Action**: `oracle/configs.rs` busca los archivos `*.toml`, `*.yaml`, `*.yml`, `Dockerfile` y `Containerfile` del repo evaluado. `yaml-rust2` se usa solo en este archivo: Root nunca lee su propia configuración en YAML.
@@ -301,7 +435,11 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
 - **Calibración**: la Tarea 12 suma los tres defectos de Dockerfile y un secreto en YAML a su conjunto de mutaciones.
 
 ### Tarea 10: Juez de diseño y arquitectura
-- **Action**: el juez evalúa solo lo que ninguna sonda cubre: diseño, legibilidad y coherencia de la arquitectura. Usa `root route --rol juzga`; por defecto, `deepseek-reasoner` con razonamiento prendido. Recibe una rúbrica fija. Refuta por default. Cada hallazgo exige `archivo`, `línea` y `cita` textual.
+- **Action**: el juez evalúa solo lo que ninguna sonda cubre: si el diseño y la arquitectura sirven a la spec. El juez no revisa estilo. Recibe la spec, los requisitos, el mapa del repo de `oracle/mapa.rs` (módulos, API pública, grafo de dependencias, tamaños) y los hallazgos de las sondas. Después abre los archivos que el mapa señala. El juez puntúa cada ítem `juez` o `mixto` de las rúbricas de diseño, arquitectura y estructura, con un nivel de 0 a 3. Cada nivel cita la evidencia que exige su ancla. Las anclas responden lo que un PM técnico pregunta:
+  - ¿Qué requisito queda difícil de extender o de mantener con esta estructura?
+  - ¿Qué decisión de diseño es un riesgo para producción, como un estado global, un bloqueo o un error que se traga?
+  - ¿Qué falta para operar el producto: logs, configuración, manejo de errores?
+  Cada hallazgo exige `archivo`, `línea`, `cita` e `impacto`. Un hallazgo sin requisito afectado se descarta. Usa `root route --rol juzga`, con razonamiento prendido. Refuta por default. El modelo del juez lo decide la calibración y no este plan: la Tarea 12 compara `deepseek-reasoner` contra Sonnet u Opus por cupo, y Route elige con lo medido.
 - **Mirror**: los invariantes "checkeable va a un oráculo" y "el verificador razona y refuta".
 - **Validate**: `cargo test juez` con un proveedor falso (un JSON roto da `SinVeredicto`, nunca verde)
 
@@ -310,13 +448,50 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
 - **Validate**: `cargo test evidencia` (una cita inventada se descarta; una cita con otra indentación se acepta)
 
 ### Tarea 12: Calibración (mide al evaluador)
-- **Action**: `root oraculo calibrar` parte de un repo conocido como bueno, por ejemplo memora-ecc. Inyecta defectos por construcción: un secreto en el código, SQL concatenado, un bucle O(n²) en el camino caliente, un ciclo entre capas, un archivo dios. Cada caso alterado tiene etiqueta "defecto". Cada copia sin alterar tiene etiqueta "limpio". El resultado es la sensibilidad, la especificidad y la exactitud balanceada por dimensión, en `calibracion.json`. Con exactitud balanceada mayor o igual a 0,9, la dimensión queda `calibrada`.
+- **Action**: `root oraculo calibrar` parte de un repo conocido como bueno, por ejemplo memora-ecc. Inyecta en Rust defectos por construcción que un PM consideraría graves:
+  - un secreto en el código;
+  - un `unwrap()` en la ruta que parsea la entrada de la red;
+  - un bucle O(n²) en el camino caliente;
+  - un ciclo entre capas;
+  - un archivo dios;
+  - un módulo de la spec borrado (completitud);
+  - un error que se traga con `let _ =`;
+  - un test cuyo assert se borró (pruebas);
+  - un Dockerfile que corre como root (entrega). Cada caso alterado tiene etiqueta "defecto". Cada copia sin alterar tiene etiqueta "limpio". El resultado es la sensibilidad, la especificidad y la exactitud balanceada por dimensión, en `calibracion.json`. Con exactitud balanceada mayor o igual a 0,9, la dimensión queda `calibrada`.
 - **Mirror**: `gates_bench`, donde la etiqueta sale de la construcción.
 - **Validate**: `root oraculo calibrar --tarea memora --dimension seguridad --n 20 --semilla 42` escribe una fila. Con la misma semilla, el resultado se repite igual.
 
+- **Por ítem**: cada defecto inyectado apunta a un ítem de rúbrica, por ejemplo `seguridad.secretos` o `diseno.modularidad`. La calibración informa la exactitud balanceada por ítem además de por dimensión.
+- **Límite**: la calibración prueba que Root **detecta** defectos conocidos. No prueba que Root **juzga bien** un proyecto real. Para eso está la Tarea 12b.
+
+### Tarea 12b: Validez (¿Root juzga como un PM competente?)
+- **Action**: `root oraculo validar` corre Root sobre casos cuyo resultado se conoce por una fuente externa a Root. Ni la regla evaluada ni un LLM ponen la etiqueta. Hay tres fuentes:
+  - **Orden conocido**: memora-ecc contra memora-sdlc, brasa-ecc contra brasa-sdlc, y commits viejos contra commits nuevos del mismo repo. Root debe ordenar cada par como lo ordena el resultado medido.
+  - **Defectos reales conocidos**: los 4 que la revisión de Opus encontró en F1 y no encontró ECC (`docs/contexto/veredicto-ecc-f1.md`), los 3 bugs reales del code-review de ECC en F1, y los defectos registrados en los logs del banco. Root debe encontrar cada uno con su `archivo:línea`. Esto mide el recall sobre problemas reales, no inyectados.
+  - **Juicio humano** (decisión 12): `root oraculo validar --preparar-ciego` arma 6 paquetes: memora y brasa construidos por ECC con Sonnet, ECC con Haiku y el SDLC. Cada paquete es una copia anónima, sin `AGENTS.md`, `sdlc.toml`, logs, rastros de ECC ni autor de git, con un id al azar. También arma un formulario TOML con las mismas rúbricas. El usuario pone un nivel por ítem y una decisión por paquete, sin ver el veredicto de Root. `root oraculo validar` lee los formularios.
+  El resultado va a `validez.json` con tres métricas:
+  - la exactitud de orden;
+  - el recall de defectos reales (umbral 0,8, decisión 12);
+  - el acuerdo con el usuario: kappa de Cohen ponderado por ítem, acuerdo en la decisión y Spearman del orden de los 6 paquetes.
+  El acuerdo por ítem también mide la rúbrica: un ítem con kappa bajo indica un ancla ambigua.
+- **Validate**: `root oraculo validar --casos $ROOT_HOME/validez/` escribe las tres métricas. Si falta una fuente, la métrica queda como "sin medir", nunca como 0 ni como 1.
+
 ### Tarea 13: Oracle completo
-- **Action**: `evaluar` arma el `Veredicto` con contrato, oculto, sondas, juez y gate de evidencia. Calcula `global` solo con dimensiones calibradas y marca las demás como "sin calibrar".
-- **Validate**: `root oraculo evaluar --tarea memora --repo .../memora-ecc --json | jq '.puntajes'` lista seis dimensiones; memora-sdlc obtiene un `global` menor que memora-ecc.
+- **Action**: `evaluar` arma el `Veredicto` con contrato, oculto, completitud, entrega, pruebas, sondas, juez y gate de evidencia. Calcula `global` solo con dimensiones calibradas y marca las demás como "sin calibrar".
+- **Validate**: `root oraculo evaluar --tarea memora --repo .../memora-ecc --json | jq '.puntajes'` lista nueve dimensiones; memora-sdlc obtiene un `global` menor que memora-ecc.
+
+### Tarea 13b: Informe del PM
+- **Action**: `oracle/informe.rs` arma el `Informe` desde el `Veredicto`:
+  - La `Decision` sale de `[decision]` de `root.toml` por reglas deterministas (decisión 12):
+    - `Bloqueado` si un requisito de peso 3 queda en nivel 0, si hay un hallazgo de seguridad de severidad 3, o si un ítem de rúbrica marcado `bloquea = true` queda en nivel 0. Un ejemplo de ese ítem es `seguridad.secretos`.
+    - `NoListo` si `Completitud` < 0,9 o si una dimensión calibrada queda bajo su `minimo` de `root.toml`.
+    - `Listo` en otro caso.
+    El informe nombra la regla que disparó la decisión.
+  - `requisitos` lista cada requisito con su estado y su evidencia.
+  - `riesgos` y `proximos_pasos` son 5 ítems como máximo, ordenados por `peso` del requisito y por severidad.
+  - Un LLM escribe `resumen` y redacta los textos de `riesgos` y `proximos_pasos`. Cada oración cita un id existente; el gate de evidencia descarta las demás.
+  - `root oraculo informe --md` imprime el informe legible: decisión, por qué, qué falta, qué arreglar primero.
+- **Validate**: el informe de memora-sdlc da `NoListo` o `Bloqueado` y nombra los módulos ausentes en `proximos_pasos`. El informe de memora-ecc no inventa faltantes: cada ítem cita un id real. Un test con un LLM falso que cita un id inexistente pierde esa oración.
 
 ### Tarea 14: Route
 - **Action**: `elegir` es una función pura. Primero aplica tres invariantes:
@@ -334,7 +509,7 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
 ### Tarea 16: Runner
 - **Action**: `root corre` corre primero `root goal verificar` y se detiene si el GOAL no está autorizado. Después copia el bootstrap a un directorio nuevo y corre `claude -p` por rol con `route`. Usa `ECC_DISABLED_HOOKS` y los permisos que niegan `oraculos/`. Registra `PlanAprobado` y `Humano`. Al final evalúa y agrega la `Fila`.
 - **Mirror**: `correr-ecc-rol.sh`.
-- **Validate**: `root corre --tarea memora --config ecc-haiku` deja una fila en `runs.jsonl` con un veredicto de seis dimensiones y un resumen.
+- **Validate**: `root corre --tarea memora --config ecc-haiku` deja una fila en `runs.jsonl` con un veredicto de nueve dimensiones, un `Informe` y un resumen.
 
 ### Tarea 17: Servidor MCP
 - **Action**: JSON-RPC por stdio (`initialize`, `tools/list`, `tools/call`) con las cuatro herramientas. Cada herramienta llama a la misma función que su subcomando.
@@ -363,7 +538,9 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 root goal verificar
 root oraculo evaluar --tarea memora --repo ~/Proyectos/bench-ecc-sdlc/memora-ecc --json   # 61/61, 48/48
 root oraculo evaluar --tarea brasa  --repo ~/Proyectos/bench-ecc-sdlc/brasa-ecc  --json   # 53/53, 15/16
-for d in seguridad estructura arquitectura eficiencia diseno; do root oraculo calibrar --tarea memora --dimension $d --n 20 --semilla 42; done
+for d in completitud entrega pruebas seguridad estructura arquitectura eficiencia diseno; do root oraculo calibrar --tarea memora --dimension $d --n 20 --semilla 42; done
+root oraculo informe --tarea memora --repo ~/Proyectos/bench-ecc-sdlc/memora-sdlc --md   # NoListo o Bloqueado, con los módulos ausentes
+root oraculo validar --casos $ROOT_HOME/validez/
 root corre --tarea memora --config ecc-haiku && root track listar --tarea memora
 root aprende --replay
 ```
@@ -375,7 +552,11 @@ root aprende --replay
 | Haiku entra en ciclos con el borrow checker de Rust | Media | Tareas de menos de ~150 líneas; `cargo check` en cada paso; escalada a Sonnet después de 3 fallas |
 | La biblioteca de YAML queda sin mantenimiento (`serde_yaml` ya está archivado) | Media | Verificar la fecha de la última versión en la Tarea 1; el parseo vive solo en `configs.rs`, así que cambiar de biblioteca toca un archivo |
 | hadolint no corre sin la imagen de evaluación | Baja | La sonda falla cerrada: sin hadolint, la dimensión da `SinVeredicto`, nunca un puntaje limpio |
-| El juez de diseño es subjetivo y la calibración solo cubre defectos inyectados | Alta | Una dimensión sin calibrar no entra a `global`. El "buen diseño" holístico queda medido solo en parte, y el veredicto lo dice. |
+| El juez de diseño es subjetivo y la calibración solo cubre defectos inyectados | Alta | Una dimensión sin calibrar no entra a `global`. La Tarea 12b mide el juicio sobre casos reales. Sin juicio humano (P2), el acuerdo con el usuario queda "sin medir" y el informe lo dice. |
+| Root degenera en un agregador de linters (pseudo-compilador) | Media | La Tarea 9 pondera por impacto en requisitos, no por conteo; el test de "200 avisos de estilo, 0 defectos" lo fija |
+| Opus escribe los requisitos y también diseña el juez: el sesgo de la lista pasa al juicio | Media | El usuario aprueba la lista (P3); la Tarea 12b mide contra resultados externos |
+| `cargo-mutants` tarda mucho en brasa (render con GPU) | Alta | `mutantes_max` y `minutos_max` en `tarea.toml`; al llegar al tope, `Pruebas` informa la muestra que alcanzó |
+| brasa necesita un adaptador de CPU en el contenedor | Alta | lavapipe en `oraculo-rust`; la Tarea 7 reproduce 53/53 antes de seguir |
 | El builder lee los oráculos ocultos (mismo usuario) | Media | Permisos que niegan `oraculos/`; detección en el transcript invalida la corrida |
 | El cupo no se observa directo: `claude -p` da USD equivalentes, no el % del plan | Confirmada | El balance usa USD equivalentes y un tope configurable |
 | ECC entero (decisión a) trae hooks que escriben secretos en `~/.claude/` | Confirmada | `root corre` apaga esos hooks por defecto; la reconstrucción de ECC los elimina |
@@ -385,10 +566,46 @@ root aprende --replay
 | `GOAL.md` falta cuando arranca `root corre` | Media | `root corre` corre `root goal verificar` primero y sale con código 3 sin GOAL autorizado |
 
 ## Acceptance
-- [ ] Las tareas 1 a 19, incluida la 9b, están completas.
+- [ ] Las tareas 1 a 19 y sus variantes 5b, 9b, 9c, 9d, 9e, 12b y 13b están completas.
 - [ ] La validación pasa.
 - [ ] El Oracle reproduce 61/61 y 48/48 en memora-ecc, y 53/53 y 15/16 en brasa-ecc.
 - [ ] Cada dimensión en `global` tiene exactitud balanceada ≥ 0,9 en su calibración.
+- [ ] Root ordena bien los pares de orden conocido (ECC contra SDLC en memora y brasa).
+- [ ] Root encuentra los defectos reales conocidos de la Tarea 12b, con `archivo:línea`. Recall ≥ 0,8 (decisión 12).
+- [ ] Las nueve rúbricas están aprobadas por el usuario, y cada `Veredicto` lleva sus hashes.
+- [ ] `validez.json` informa el acuerdo con la calificación a ciegas del usuario. El umbral de acuerdo depende de P5.
+- [ ] El informe de memora-sdlc da `NoListo` o `Bloqueado` y nombra los módulos ausentes.
 - [ ] `root corre` arma memora desde el bootstrap con Haiku y deja una fila completa.
 - [ ] `docs/interfaces.md` coincide con los esquemas que imprime `root esquema`.
 - [ ] Los patrones de este plan se copian, no se reinventan.
+
+## Revisión PM (2026-10-27)
+
+Pedido del usuario: "Las mediciones deben ser competentes, no me sirve un pseudo-compilador. Necesito un PM".
+Revisión de las Tareas 6 a 19. Las Tareas 1 a 5 no cambian: Sonnet ya las construye.
+
+**Qué fallaba en la versión aprobada**
+- Las sondas eran de Python (bandit, radon), pero memora y brasa son Rust. Sobre estos proyectos, esas sondas no medían nada.
+- El plan medía "pasa los tests" y sumaba avisos de linters. Eso es un pseudo-compilador.
+- Ninguna tarea respondía lo que pregunta un PM: qué prometió la spec, qué falta, si está listo y qué hacer primero.
+- La calibración probaba detección de defectos inyectados, no la calidad del juicio sobre proyectos reales.
+
+**Qué se agregó**
+- Tarea 5b: tipos `Informe`, `Decision` y `EstadoRequisito`, solo agregados.
+- Tarea 9 por perfil de lenguaje (Rust primero), ponderada por impacto y no por conteo.
+- Tarea 9c: completitud por requisito de la spec.
+- Tarea 9d: entrega e instalación limpia, más escenarios reales de usuario.
+- Tarea 9e: calidad de los tests del proyecto, por mutación.
+- Tarea 10: el juez revisa el diseño contra la spec, con un mapa del repo, y no revisa estilo.
+- Tarea 12b: validez contra resultados externos (orden conocido, defectos reales, juicio humano).
+- Tarea 13b: informe del PM con decisión determinista y prosa citada.
+
+**Preguntas respondidas (decisión 12)**
+- **P1.** Se acepta la propuesta, más rúbricas basadas en estándares de la industria: Tarea 8b y regla de decisión de la Tarea 13b.
+- **P2.** Sí: el usuario califica a ciegas los 6 paquetes de la Tarea 12b.
+- **P3.** Sí: el usuario aprueba los requisitos. La spec sale de una sesión `/grill-me`.
+- **P4.** Recall ≥ 0,8.
+
+**Preguntas abiertas (sin responder)**
+- **P5.** ¿Qué acuerdo con tu calificación exige el hito? El plan propone un kappa ponderado ≥ 0,6 por dimensión (acuerdo "sustancial") y la misma decisión en 5 de los 6 paquetes. Otra opción es medir primero y fijar el umbral al ver el número.
+
