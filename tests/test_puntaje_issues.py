@@ -15,11 +15,25 @@ def test_escalas():
 
 
 def test_commit_compartido_reparte_y_el_id_es_palabra_entera():
-    commits = [("a", "fix (orchestration-xdi, orchestration-eeq)", 100), ("b", "eeq: test", 10),
-               ("c", "amplia el reporte", 50), ("d", "ver amp", 8)]
+    commits = [{"h": h, "msg": m, "n": n, "files": []} for h, m, n in (
+        ("a", "fix (orchestration-xdi, orchestration-eeq)", 100), ("b", "eeq: test", 10),
+        ("c", "amplia el reporte", 50), ("d", "ver amp", 8))]
     assert P.lineas_por_issue(["xdi", "eeq", "amp"], commits) == {"xdi": 50, "eeq": 60, "amp": 8}
 
 
 def test_puntajes_json_completo():
     for i, p in json.loads(P.PUNTAJES.read_text(encoding="utf-8")).items():
         assert {"titulo", "estado", "V", "A", "E"} <= set(p) and all(0 <= p[k] <= 5 for k in "VAE"), i
+
+
+def test_fraccion_corridas_por_gate_o_etapa():
+    logs = [{"gates": [{"id": "plan-allowlist"}], "stages": [{"stage": "3-plan"}]},
+            {"gates": [{"id": "lint"}], "stages": [{"stage": "5b-review"}]},
+            {"gates": [], "stages": []}]
+    assert P.fraccion_corridas(["plan-allowlist"], logs) == (1, 2)
+    assert P.fraccion_corridas(["5b-review", "plan-allowlist"], logs) == (2, 2)
+
+
+def test_tests_de_filtra_tests_python():
+    assert P.tests_de({"files": ["tests/test_a.py", "tests/datos.json", "mmorch/x.py", "tests/conftest.py"]}) == [
+        "tests/test_a.py", "tests/conftest.py"]

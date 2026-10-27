@@ -60,6 +60,26 @@ La fórmula es `(2*V + 2*A + E) / 5`.
 - 4: Un test reproduce el problema antes del arreglo.
 - 5: Un oráculo midió el efecto en varias corridas.
 
+## Criterios medidos
+
+Un oráculo reemplaza al juicio del JSON cuando existe.
+La tabla muestra en mayúscula cada criterio medido y en minúscula cada criterio de juicio.
+Las mediciones corren en worktrees temporales y quedan en `logs/puntaje_cache.json`.
+
+- V sale de `gates_bench` cuando el JSON nombra el gate en `gates`.
+- El script corre los casos del bench del commit contra el gate anterior y contra el gate nuevo.
+- V es 5 por la mejora del grupo que más mejoró, y E es 5.
+- E es 4 cuando los tests del commit fallan antes del arreglo y pasan después.
+- E baja a 3 cuando esos tests matan menos de la mitad de los mutantes de las líneas cambiadas.
+- Un test rojo cuenta solo si falla un assert, con salida 1 de pytest.
+- Un error de import no cuenta, porque mover un paquete no reproduce un problema.
+- A sale de los run-logs cuando el JSON nombra gates o etapas en `traza`.
+- A es 5 por la fracción de corridas donde corrió alguno de ellos.
+- `mut` es la fracción de mutantes muertos en las líneas que cambió el commit.
+- `mut` mide la fuerza de los tests y no entra en el impacto.
+
+Límite: los run-logs de la laptop son pocos, y A mide solo esa muestra.
+
 ## Uso
 
 1. Agregá el issue a `docs/agents/puntajes.json` con `V`, `A`, `E` y una nota.
