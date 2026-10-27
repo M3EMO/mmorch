@@ -43,7 +43,7 @@ fn help_lista_todos_los_subcomandos() {
 
 #[test]
 fn subcomando_sin_implementar_sale_con_3() {
-    let salida = root(&["esquema", "veredicto"]);
+    let salida = root(&["aprende"]);
     assert_eq!(codigo(&salida), 3);
     let stderr = String::from_utf8_lossy(&salida.stderr);
     assert!(stderr.contains("no implementado"), "stderr: {stderr}");
