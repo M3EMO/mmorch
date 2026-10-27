@@ -1,0 +1,64 @@
+# Imagen del Oracle para proyectos Rust: memora, brasa y la sonda probe-gpu.
+# El contenedor de evaluación corre con --network none. Por eso las dependencias
+# de Cargo se bajan durante el build de la imagen, dentro de /cargo.
+# Construir con scripts/construir-imagen-oraculo.sh (el contexto trae solo manifiestos).
+# TODO Tarea 9: gitleaks, hadolint, cargo-audit y cargo-mutants se suman en esa tarea.
+FROM docker.io/library/rust:1
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      python3 \
+      python3-pytest \
+      mesa-vulkan-drivers \
+      libvulkan1 \
+      ca-certificates \
+      git \
+      curl \
+ && rm -rf /var/lib/apt/lists/*
+
+# CARGO_NET_OFFLINE=true en runtime. Las capas de abajo lo anulan solo para bajar crates.
+ENV CARGO_HOME=/cargo \
+    CARGO_NET_OFFLINE=true \
+    VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+
+# Una capa por proyecto: manifiestos, un src/main.rs vacío y cargo fetch con red.
+COPY manifiestos/bootstrap/memora/ /deps/bootstrap/memora/
+RUN cd /deps/bootstrap/memora \
+ && mkdir -p src && echo 'fn main(){}' > src/main.rs \
+ && CARGO_NET_OFFLINE=false cargo fetch --locked
+
+COPY manifiestos/bootstrap/brasa/ /deps/bootstrap/brasa/
+RUN cd /deps/bootstrap/brasa \
+ && mkdir -p src && echo 'fn main(){}' > src/main.rs \
+ && CARGO_NET_OFFLINE=false cargo fetch --locked
+
+COPY manifiestos/memora-ecc/ /deps/memora-ecc/
+RUN cd /deps/memora-ecc \
+ && mkdir -p src && echo 'fn main(){}' > src/main.rs \
+ && CARGO_NET_OFFLINE=false cargo fetch --locked
+
+COPY manifiestos/memora-sdlc/ /deps/memora-sdlc/
+RUN cd /deps/memora-sdlc \
+ && mkdir -p src && echo 'fn main(){}' > src/main.rs \
+ && CARGO_NET_OFFLINE=false cargo fetch --locked
+
+COPY manifiestos/brasa-ecc/ /deps/brasa-ecc/
+RUN cd /deps/brasa-ecc \
+ && mkdir -p src && echo 'fn main(){}' > src/main.rs \
+ && CARGO_NET_OFFLINE=false cargo fetch --locked
+
+COPY manifiestos/brasa-sdlc/ /deps/brasa-sdlc/
+RUN cd /deps/brasa-sdlc \
+ && mkdir -p src && echo 'fn main(){}' > src/main.rs \
+ && CARGO_NET_OFFLINE=false cargo fetch --locked
+
+COPY manifiestos/probe-gpu/ /deps/probe-gpu/
+RUN cd /deps/probe-gpu \
+ && mkdir -p src && echo 'fn main(){}' > src/main.rs \
+ && CARGO_NET_OFFLINE=false cargo fetch --locked
+
+# Lectura para cualquier usuario. El contenedor corre con el uid del host.
+RUN chmod -R a+rX /cargo
+
+# Debian instala lvp_icd.json. La ruta de VK_ICD_FILENAMES usa el nombre de Fedora.
+RUN ln -s lvp_icd.json /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
