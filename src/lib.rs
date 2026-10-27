@@ -40,13 +40,15 @@ fn oraculo_evaluar(json: bool, nombre: &str, repo: &Path) -> Result<u8, Error> {
         println!("{}", serde_json::to_string_pretty(&veredicto)?);
     } else {
         println!(
-            "{}: contrato {}/{}, oculto {}/{}, estado {}",
+            "{}: contrato {}/{}, oculto {}/{}, estado {}, repeticiones {}, inestables {}",
             repo.display(),
             veredicto.contrato.pasa,
             veredicto.contrato.total,
             veredicto.oculto.pasa,
             veredicto.oculto.total,
-            etiqueta_estado(veredicto.estado)
+            etiqueta_estado(veredicto.estado),
+            veredicto.repeticiones,
+            veredicto.inestables.len()
         );
     }
     Ok(oracle::codigo_de_estado(veredicto.estado))

@@ -57,16 +57,22 @@ instalar_tarea() {
     mkdir -p "$dst/oculto"
     cp -a "$src_o/test_oculto_$t.py" "$src_o/conftest.py" "$dst/oculto/"
 
-    cat >"$dst/tarea.toml" <<EOF
+    # tarea.toml solo se escribe la primera vez: después lo editan personas ([[entorno]], etc.).
+    if [ -e "$dst/tarea.toml" ]; then
+        echo "tarea.toml conservado: $dst/tarea.toml"
+    else
+        cat >"$dst/tarea.toml" <<EOF
 nombre = "$t"
 lenguaje = "rust"
 imagen = "localhost/root-oraculo-rust:1"
 spec = "bootstrap/docs/SPEC.md"
+repeticiones = 3
 [contrato]
 cmd = "ORACULO_REPO=/repo CARGO_TARGET_DIR=/salida/target python3 -m pytest -q -p no:cacheprovider --junitxml=/salida/contrato.xml /oraculo/contrato"
 [oculto]
 cmd = "ORACULO_REPO=/repo CARGO_TARGET_DIR=/salida/target python3 -m pytest -q -p no:cacheprovider --junitxml=/salida/oculto.xml /oraculo/oculto"
 EOF
+    fi
 
     echo "OK    $t -> $dst"
 }

@@ -7,6 +7,7 @@ use std::path::Path;
 
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
+use serde::{Deserialize, Serialize};
 
 use super::ErrorOraculo;
 use crate::tipos::Conteo;
@@ -20,10 +21,20 @@ pub struct ConteoArchivo {
     pub fallas: Vec<String>,
 }
 
-/// Junit leído: conteo por archivo y propiedades `"<test>.<nombre>" -> valor`.
+/// Resultado de un test en una corrida.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResultadoTest {
+    Pasa,
+    Falla,
+    Omite,
+}
+
+/// Junit leído: conteo por archivo, resultado por test y propiedades `"<test>.<nombre>" -> valor`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Junit {
     pub archivos: BTreeMap<String, ConteoArchivo>,
+    /// Clave `"<archivo>::<nombre>"`, donde `<archivo>` es el último segmento de `classname`.
+    pub tests: BTreeMap<String, ResultadoTest>,
     pub propiedades: BTreeMap<String, String>,
 }
 
@@ -125,14 +136,24 @@ fn cierra(caso: &mut Option<Caso>, junit: &mut Junit) {
     let Some(c) = caso.take() else {
         return;
     };
-    let archivo = junit.archivos.entry(c.archivo).or_default();
-    if c.omitido {
-        archivo.omite += 1;
+    let resultado = if c.omitido {
+        ResultadoTest::Omite
     } else if c.fallado {
-        archivo.falla += 1;
-        archivo.fallas.push(c.nombre);
+        ResultadoTest::Falla
     } else {
-        archivo.pasa += 1;
+        ResultadoTest::Pasa
+    };
+    junit
+        .tests
+        .insert(format!("{}::{}", c.archivo, c.nombre), resultado);
+    let archivo = junit.archivos.entry(c.archivo).or_default();
+    match resultado {
+        ResultadoTest::Omite => archivo.omite += 1,
+        ResultadoTest::Falla => {
+            archivo.falla += 1;
+            archivo.fallas.push(c.nombre);
+        }
+        ResultadoTest::Pasa => archivo.pasa += 1,
     }
 }
 
@@ -239,6 +260,19 @@ mod tests {
             Err(ErrorOraculo::Junit(_))
         ));
         assert!(matches!(parsear(""), Err(ErrorOraculo::Junit(_))));
+    }
+
+    #[test]
+    fn repeticiones_junit_guarda_resultado_por_archivo_y_nombre() {
+        let xml = r#"<testsuite>
+  <testcase classname="tests.test_a" name="t1"/>
+  <testcase classname="tests.test_a" name="t2"><failure message="x"/></testcase>
+  <testcase classname="tests.test_a" name="t3"><skipped message="no"/></testcase>
+</testsuite>"#;
+        let j = parsear(xml).expect("parsea");
+        assert_eq!(j.tests["test_a::t1"], ResultadoTest::Pasa);
+        assert_eq!(j.tests["test_a::t2"], ResultadoTest::Falla);
+        assert_eq!(j.tests["test_a::t3"], ResultadoTest::Omite);
     }
 
     #[test]

@@ -197,6 +197,12 @@ pub struct Veredicto {
     /// Hashes de rúbrica, por ejemplo "diseno@<hash>".
     #[serde(default)]
     pub rubricas: Vec<String>,
+    /// Repeticiones del oculto que corrieron. Un veredicto viejo lee 0.
+    #[serde(default)]
+    pub repeticiones: u32,
+    /// Ids ordenados de los tests inestables del oculto. Un veredicto viejo lee vacío.
+    #[serde(default)]
+    pub inestables: Vec<String>,
 }
 
 impl Default for Veredicto {
@@ -215,6 +221,8 @@ impl Default for Veredicto {
             costo_usd: 0.0,
             informe: None,
             rubricas: Vec::new(),
+            repeticiones: 1,
+            inestables: Vec::new(),
         }
     }
 }
@@ -388,6 +396,8 @@ mod tests {
             costo_usd: 0.42,
             informe: None,
             rubricas: Vec::new(),
+            repeticiones: 3,
+            inestables: vec!["test_f::t_flaky".into()],
         }
     }
 
@@ -642,6 +652,23 @@ mod tests {
         assert!(v.puntajes[0].items.is_empty());
         assert_eq!(v.hallazgos[0].id, "");
         assert!(v.hallazgos[0].impacto.is_empty());
+    }
+
+    #[test]
+    fn repeticiones_veredicto_v1_se_lee_con_cero_y_vacio() {
+        let texto = r#"{"v":1,"tarea":"memora","repo":"r","commit":"c",
+            "contrato":{"pasa":1,"total":1},"oculto":{"pasa":0,"total":0},
+            "puntajes":[],"hallazgos":[],"global":null,"estado":"sin_veredicto",
+            "costo_usd":0.0}"#;
+        let v: Veredicto = serde_json::from_str(texto).expect("v1 se acepta");
+        assert_eq!(v.repeticiones, 0);
+        assert!(v.inestables.is_empty());
+    }
+
+    #[test]
+    fn repeticiones_veredicto_nuevo_vale_1_por_defecto() {
+        assert_eq!(Veredicto::default().repeticiones, 1);
+        assert!(Veredicto::default().inestables.is_empty());
     }
 
     #[test]

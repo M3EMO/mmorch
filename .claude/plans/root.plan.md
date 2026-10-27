@@ -39,6 +39,8 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 14 | El binario se llama `r00t`. El crate, `root.toml`, `ROOT_HOME` y las herramientas MCP `root_*` conservan el nombre `root`. |
 | 15 | P6, topes duros: API 100 USD por mes; sesiones de Claude en la nube 250 USD por mes; cupo 35 USD equivalentes por 5 horas (corrección del usuario sobre los 100 iniciales). Un tope nunca se supera sin un gate humano. Ver Tarea 14. |
 | 16 | "De que son los tests? ya dije no quiero un compilador de codigo, quiero un evaluador con criterio, un project manager con datos para decidir." Los tests ocultos son una fuente de evidencia de completitud, no el veredicto. El hito ya no exige reproducir conteos del banco: exige que la decisión del PM sea estable y que cada diferencia tenga una causa con evidencia. Ver "Revisión PM 2". |
+| 17 | P10: "Si puede. Es lo mas correcto para tener librerias funcionales ya." Root baja dependencias con red en una fase previa a la evaluación (opción a). La respuesta del usuario es la autorización permanente que pide la zona roja del GOAL para la red. Ver Tarea 6b. |
+| 18 | P11: "La idea es armar una ficha tecnica, arquitectonica, de diseño y de producto en los spec. La idea es hacerlo mas especifico, no ambigüedades." Cada spec lleva una ficha estructurada con cuatro partes. Root revisa la ficha antes de evaluar, y una ambigüedad se corrige en la ficha en vez de excluir un test. Ver Tarea 9f. |
 
 ## Patterns to Mirror
 
@@ -134,6 +136,7 @@ capas = [["protocolo"], ["comandos"], ["almacen"]]   # una capa importa solo cap
 - El Oracle levanta un contenedor nuevo con `podman run --rm --network none`. El repo copiado se monta en `/repo:ro,z`. `oraculos/<tarea>` se monta en `/oraculo:ro,z`. `/salida` es el único directorio con escritura.
 - El tag `z` es obligatorio en Fedora: SELinux bloquea el montaje sin ese tag.
 - Los tests ocultos corren desde `/oraculo` y apuntan a `/repo`: `PYTHONPATH=/repo`, o el equivalente del lenguaje.
+- **Fase de descarga** (decisión 17, Tarea 6b): antes de evaluar, un contenedor aparte baja las dependencias con red. Ese contenedor no monta `/oraculo` y no compila nada. Solo corre `cargo fetch --locked` (o `pip download` contra PyPI) y escribe en `$ROOT_HOME/cache/<lenguaje>/`. Después, la evaluación monta esa caché en solo lectura y corre con `--network none` y `CARGO_NET_OFFLINE=true`, como antes.
 - El builder corre como el mismo usuario. Por eso puede leer `ROOT_HOME` aunque no lo monte. Hay dos defensas:
   - El runner niega `Read` y `Bash` sobre `oraculos/` en los permisos de la sesión.
   - Observe busca la ruta `oraculos/` en el transcript. Si la encuentra, la corrida queda inválida.
@@ -191,6 +194,54 @@ pub struct Informe { pub decision: Decision, pub motivo: String,
 // Hallazgo suma `id: String` (estable: hash de dimensión+archivo+cita) e `impacto: Vec<String>` (requisitos que afecta).
 // Veredicto suma `informe: Option<Informe>` con #[serde(default)].
 ```
+
+#### Ficha del spec (Tarea 9f; decisión 18)
+
+Cada spec lleva un `ficha.toml` junto a `SPEC.md`. La prosa de `SPEC.md` explica, y la ficha fija los datos que Root mide. Cada dato de la ficha tiene un id que la prosa puede citar.
+
+```toml
+[producto]
+usuarios = ["operador que corre memora como caché"]
+problema = "..."
+fuera_de_alcance = ["clúster", "TLS"]
+[[producto.requisito]]
+id = "R1"
+titulo = "Protocolo RESP2"
+peso = 3
+aceptacion = "un cliente redis-py 5.x completa SET/GET de 10 000 claves sin error"   # medible: número, comando o salida exacta
+pruebas = ["test_m1_protocolo"]          # se copia a [[requisito]] de tarea.toml
+
+[tecnica]
+lenguaje = "rust"
+version_minima = "1.85"
+dependencias_permitidas = ["tokio", "bytes"]
+plataformas = ["linux-x86_64"]
+[[tecnica.limite]]
+id = "T1"
+metrica = "ops_s"
+minimo = 5000.0
+unidad = "operaciones por segundo"       # se copia a [eficiencia] de tarea.toml
+
+[arquitectura]
+capas = [["protocolo"], ["comandos"], ["almacen"]]   # se copia a [arquitectura] de tarea.toml
+persistencia = "AOF en disco, fsync cada segundo"
+concurrencia = "un hilo por conexión, almacén con lock por shard"
+[[arquitectura.interfaz]]
+id = "A1"
+modulo = "almacen"
+publica = ["get", "set", "del", "expire"]
+
+[diseno]
+errores = "todo error de red responde -ERR <mensaje> y no corta otras conexiones"
+logs = "a stderr, un evento por línea, nivel configurable"
+configuracion = "archivo memora.conf; cada directiva documentada en memora.conf.example"
+[[diseno.regla]]
+id = "D1"
+texto = "ningún unwrap() en código que procesa entrada de la red"
+item = "diseno.robustez"                 # ítem de rúbrica que esta regla ancla
+```
+
+`r00t ficha tarea` arma un borrador de `tarea.toml` desde la ficha. El usuario sigue aprobando los requisitos (decisión 12).
 
 #### Rúbricas (Tarea 8b; decisión 12)
 
@@ -299,6 +350,8 @@ r00t goal verificar | autorizar        # autorizar exige una TTY y una confirmac
 r00t importar-mmorch --desde <metrics.jsonl>
 r00t esquema <tipo>                    # imprime el JSON Schema del tipo
 r00t mcp                               # servidor MCP por stdio
+r00t ficha revisar --ficha <ficha.toml> [--spec <SPEC.md>]           -> Revision (ambigüedades con cita)
+r00t ficha tarea --ficha <ficha.toml> --nombre <t>                   -> borrador de tarea.toml
 ```
 
 ### Herramientas MCP (reemplazan el ruteo del MCP `mmorch`)
@@ -326,6 +379,9 @@ r00t mcp                               # servidor MCP por stdio
 | `src/oracle/configs.rs` | CREATE | Sondas de TOML, YAML y Dockerfile |
 | `src/oracle/perfiles/{mod,rust,python}.rs` | CREATE | Sondas por lenguaje del proyecto evaluado |
 | `src/oracle/{requisitos,entrega,mutacion,mapa,informe,validez}.rs` | CREATE | Las partes de "project manager" |
+| `src/oracle/descarga.rs` | CREATE (Tarea 6b) | Fase de descarga de dependencias con red |
+| `src/ficha.rs` | CREATE (Tarea 9f) | Formato y revisión de la ficha del spec |
+| `$ROOT_HOME/oraculos/{memora,brasa}/ficha.toml` | CREATE (Opus redacta, el usuario aprueba) | Fichas de las dos tareas del banco |
 | `src/tipos.rs` | UPDATE (Tarea 5b) | Extensión PM y de rúbricas, solo agrega |
 | `rubricas/{completitud,funciona,seguridad,entrega,pruebas,eficiencia,estructura,arquitectura,diseno}.toml` | CREATE (Opus redacta, el usuario aprueba) | Rúbricas con anclas y la cita de su estándar |
 | `src/oracle/rubrica.rs` | CREATE | Carga, hash y puntaje de las rúbricas |
@@ -399,6 +455,24 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
 - **Mirror**: `evaluar.py:17-50`.
 - **Validate**: `cargo test --test contenedor` (un comando que escribe fuera de `/salida` falla; con `--network none`, `curl` falla; un junit con 3 tests y 1 falla da 2/3)
 
+### Tarea 6b: Fase de descarga de dependencias (decisión 17)
+- **Action**: `oracle/descarga.rs` corre antes de cada evaluación, en un contenedor aparte con red:
+  - Monta el repo copiado en `/repo:ro,z` y `$ROOT_HOME/cache/<lenguaje>/` en escritura. No monta `/oraculo`.
+  - En Rust corre `cargo fetch --locked`. En Python corre `pip download -r requirements.txt --index-url https://pypi.org/simple`. No corre builds ni scripts de compilación.
+  - Antes de bajar nada, lee `Cargo.lock`. Una fuente que no es crates.io, como `git+...` o un registro privado, se rechaza: el resultado es `SinVeredicto` más un hallazgo de entrega. P12 decide si esas fuentes se aceptan.
+  - Sin `Cargo.lock`, corre `cargo generate-lockfile` y deja un hallazgo de entrega: el build no es reproducible.
+  - Registra un evento `Gate` con la lista de paquetes bajados y sus fuentes (invariante de observabilidad).
+  - Un registro que no responde da `SinVeredicto` con causa "infraestructura". Un paquete que no existe o fue retirado da un hallazgo de entrega: el producto no instala.
+  
+  La evaluación monta la caché en solo lectura, con `--network none` y `CARGO_NET_OFFLINE=true`.
+- **Límite**: el filtro de fuentes depende del comando, no de la red. El contenedor de descarga ve toda la red, pero solo corre `cargo fetch` y `pip download`. Un filtro por dominio necesita un proxy y queda fuera del hito 1.
+- **Validate**: `cargo test --test descarga`:
+  - Un repo con una dependencia de crates.io fuera de la imagen compila en la evaluación sin red.
+  - Un `Cargo.lock` con `git+` da `SinVeredicto` y no baja nada.
+  - El contenedor de descarga no ve `/oraculo`.
+  - La segunda evaluación del mismo repo no vuelve a bajar nada: usa la caché.
+- **Orden**: va después de las Tareas 7 y 8. La Tarea 7 sigue con la imagen precargada de la 7a.
+
 ### Tarea 7: Tareas memora y brasa
 - **Action**: crear `oraculos/memora` y `oraculos/brasa` desde `~/Proyectos/bench-ecc-sdlc/bootstrap/` y `.scratch/ecc-vs-sdlc/oraculo/`. Construir `imagenes/oraculo-rust`: los dos proyectos son Rust y sus oráculos son pytest de caja negra (`ORACULO_REPO`, ver `oraculo/memora/conftest.py`). brasa necesita un adaptador de CPU (lavapipe) en la imagen: ver `~/Proyectos/bench-ecc-sdlc/probe-gpu/`. Los oráculos se copian a `ROOT_HOME`, nunca al repo de Root.
 - **Requisitos**: Opus redacta `[[requisito]]` y `[[escenario]]` de cada tarea desde la spec. Cada sección de la spec da al menos un requisito. Los tests ocultos `test_m<n>_*.py` ya siguen los módulos de la spec, así que cada requisito apunta a sus archivos. El usuario aprueba la lista una vez (pregunta P3). La lista es material oculto: vive en `ROOT_HOME`, no en el repo.
@@ -468,6 +542,27 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
 - **Mirror**: el formato `Puntaje` + `Hallazgo` de la Tarea 9.
 - **Validate**: `cargo test --test configs` (un YAML con tabulación inválida da un hallazgo con la línea exacta; un Dockerfile `FROM python:latest` sin `USER` da 2 hallazgos; un Dockerfile correcto da 0)
 - **Calibración**: la Tarea 12 suma los tres defectos de Dockerfile y un secreto en YAML a su conjunto de mutaciones.
+
+### Tarea 9f: Ficha del spec y revisión de ambigüedades (decisión 18)
+- **Action**: `ficha.rs` carga `ficha.toml` y `r00t ficha revisar` la revisa como un PM revisa un spec antes de construir. Hay dos capas.
+  - **Reglas deterministas**:
+    - Están las cuatro partes.
+    - Cada requisito tiene `aceptacion`, y la aceptación incluye un número con unidad, un comando, una salida exacta o un id de test.
+    - No aparece `TBD`, `etc.`, `...`, ni palabras vagas sin número: "rápido", "adecuado", "robusto", "escalable", "fácil", "suficiente".
+    - Cada capa de `[arquitectura]` existe como módulo en el mapa del repo una vez construido.
+    - Cada `[[diseno.regla]]` apunta a un ítem de rúbrica existente.
+    - Cada `[[tecnica.limite]]` tiene unidad.
+  - **Juez**: busca frases con dos lecturas posibles, como el orden de `spin` de brasa. Cada ambigüedad cita la frase exacta y las dos lecturas. El gate de evidencia descarta las que no citan.
+  
+  `r00t ficha tarea` arma el borrador de `tarea.toml`: `[[requisito]]` desde `[[producto.requisito]]`, `[eficiencia]` desde `[[tecnica.limite]]` y `[arquitectura]` desde `[arquitectura].capas`.
+- **Efecto en la evaluación**: un requisito con una ambigüedad abierta queda "no evaluable" y figura en `Informe.confianza` con la cita. La salida no es excluir el test: se aclara la ficha y se vuelve a evaluar. La causa `oraculo` de la Tarea 7 deja de existir una vez que la ficha se aclara.
+- **memora y brasa**: Opus redacta sus fichas desde las specs del banco. Cada ambigüedad que encuentre la revisión pasa al usuario como pregunta, y su respuesta va a la ficha. Si un test contradice la ficha aclarada, se corrige el test con la aprobación del usuario.
+- **Calibración**: la Tarea 12 suma ambigüedades inyectadas en una ficha limpia: una aceptación sin número, una palabra vaga, una frase con dos lecturas. Así mide la sensibilidad y la especificidad de `r00t ficha revisar`.
+- **Validate**: `cargo test ficha`:
+  - Una ficha completa da 0 hallazgos.
+  - "responde rápido" sin número da 1 hallazgo con su línea.
+  - Un requisito sin `aceptacion` da 1 hallazgo.
+  - `r00t ficha tarea` sobre la ficha de memora da un `tarea.toml` que `r00t oraculo evaluar` acepta.
 
 ### Tarea 10: Juez de diseño y arquitectura
 - **Action**: el juez evalúa solo lo que ninguna sonda cubre: si el diseño y la arquitectura sirven a la spec. El juez no revisa estilo. Recibe la spec, los requisitos, el mapa del repo de `oracle/mapa.rs` (módulos, API pública, grafo de dependencias, tamaños) y los hallazgos de las sondas. Después abre los archivos que el mapa señala. El juez puntúa cada ítem `juez` o `mixto` de las rúbricas de diseño, arquitectura y estructura, con un nivel de 0 a 3. Cada nivel cita la evidencia que exige su ancla. Las anclas responden lo que un PM técnico pregunta:
@@ -637,7 +732,9 @@ r00t aprende --replay
 | ECC entero (decisión a) trae hooks que escriben secretos en `~/.claude/` | Confirmada | `r00t corre` apaga esos hooks por defecto; la reconstrucción de ECC los elimina |
 | Haiku no está medido (decisión 7) | Media | Cada fila de `runs.jsonl` mide a Haiku de hecho; `r00t track comparar` lo hace visible |
 | Podman sin el tag `z` falla por SELinux | Alta en Fedora | El tag `z` es fijo en `contenedor.rs` y tiene un test |
-| El contenedor corre sin red: un repo con dependencias que no están en la imagen no compila | Alta para todo repo fuera del banco | La Tarea 7a precarga las dependencias de memora y brasa. Para otros repos decide P10. Mientras tanto, una dependencia faltante da `SinVeredicto` con la causa "dependencias no disponibles sin red". Nunca da un rojo que culpe al producto. |
+| El contenedor corre sin red: un repo con dependencias que no están en la imagen no compila | Resuelto por la decisión 17 | Fase de descarga de la Tarea 6b. Hasta que exista, rige `SinVeredicto` con la causa "dependencias no disponibles sin red". |
+| Un paquete malicioso entra por la fase de descarga | Baja | La descarga no compila. El build corre después sin red, con el repo en solo lectura y sin acceso a `ROOT_HOME`, salvo la caché. Las fuentes `git+` se rechazan (P12). `cargo audit` marca los paquetes con CVE (Tarea 9). |
+| Una ficha mal escrita traslada su ambigüedad al juicio de Root | Media | `r00t ficha revisar` corre antes de evaluar. Un requisito ambiguo queda "no evaluable" y nunca se juzga contra una de sus dos lecturas. |
 | Un test inestable se lee como un defecto del producto, o al revés | Alta (ya pasó con `test_blpop_fifo_entre_clientes`) | Repeticiones y clasificación por causa con evidencia (Tarea 7). Sin evidencia, el origen queda "sin determinar" y el informe lo dice. |
 | Un agente corre `r00t goal autorizar` por Bash | Baja | `autorizar` exige TTY; la sesión `claude -p` no tiene TTY |
 | `GOAL.md` falta cuando arranca `r00t corre` | Media | `r00t corre` corre `r00t goal verificar` primero y sale con código 3 sin GOAL autorizado |
@@ -731,10 +828,11 @@ Pedido del usuario: "De que son los tests? ya dije no quiero un compilador de co
 - Riesgo nuevo: contenedor sin red (P10).
 
 **Preguntas abiertas (sin responder)**
-- **P10.** ¿Root puede usar red para bajar dependencias antes de evaluar un repo que no es del banco? Tu GOAL pone "red fuera del repo" en zona roja con gate humano. Hay tres opciones:
-  - **a.** Una fase de descarga con red, limitada a crates.io y PyPI, antes de cortar la red. En esa fase el oráculo oculto no está montado y no corre ningún build. Pide tu autorización una vez, como regla permanente.
-  - **b.** Una descarga con red que vos aprobás en cada evaluación, con un comando corrido a mano.
-  - **c.** Sin red nunca: un repo cuyas dependencias no están en la imagen recibe `SinVeredicto`.
-  Hasta tu respuesta, rige la opción c.
-- **P11.** Algunos tests fallan por el entorno o por una frase ambigua de la spec. ¿Querés aprobar vos cada exclusión de esos tests, igual que los requisitos? Si no, el informe solo la lista con su motivo.
+- **P10.** Respondida (decisión 17): sí, con una fase de descarga previa. Es la opción a.
+- **P11.** Respondida en parte (decisión 18): las ambigüedades se corrigen en una ficha del spec, no con exclusiones. Queda abierta la parte del entorno (P13).
+
+**Preguntas abiertas (sin responder)**
+- **P12.** ¿La fase de descarga acepta solo crates.io y PyPI, o también dependencias por git y otros registros, como npm o un registro privado? Hasta tu respuesta, se aceptan solo crates.io y PyPI.
+- **P13.** Algunos tests fallan por el entorno, no por la spec. Un ejemplo es un render con lavapipe en lugar de una GPU. Una ficha no arregla ese caso. ¿Querés aprobar cada exclusión por entorno, o alcanza con que el informe la liste con su motivo? Hasta tu respuesta, el informe la lista.
+- **P14.** ¿La ficha es obligatoria para que Root evalúe un proyecto? Hasta tu respuesta, es opcional. Sin ficha, Root usa solo los requisitos de `tarea.toml`, y `Informe.confianza` dice "sin ficha".
 

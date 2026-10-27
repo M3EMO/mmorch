@@ -65,6 +65,7 @@ for t in $TAREAS; do
     chequeo "$t: tarea.toml existe" test -f "$D/tarea.toml"
     chequeo "$t: tarea.toml parsea como TOML" \
         python3 -c 'import tomllib,sys; tomllib.load(open(sys.argv[1],"rb"))' "$D/tarea.toml"
+    chequeo "$t: tarea.toml trae repeticiones = 3" grep -qx 'repeticiones = 3' "$D/tarea.toml"
     chequeo "$t: bootstrap/docs/SPEC.md existe" test -f "$D/bootstrap/docs/SPEC.md"
     chequeo "$t: contrato/conftest.py existe" test -f "$D/contrato/conftest.py"
     chequeo "$t: contrato/test_m1_*.py existe" existe_glob "$D/contrato/test_m1_*.py"
@@ -77,6 +78,16 @@ for t in $TAREAS; do
     chequeo "$t: oculto/conftest.py existe" test -f "$D/oculto/conftest.py"
     chequeo "$t: bootstrap sin .git ni target" \
         bash -c "[ ! -e '$D/bootstrap/.git' ] && [ ! -e '$D/bootstrap/target' ]"
+done
+
+# Un tarea.toml editado a mano sobrevive a otra corrida del instalador.
+for t in $TAREAS; do
+    echo "# editado" >>"$ROOT_HOME/oraculos/$t/tarea.toml"
+done
+chequeo "instalador corre (3a vez, con tarea.toml editado)" "$INSTALADOR"
+for t in $TAREAS; do
+    chequeo "$t: tarea.toml editado se conserva" \
+        grep -qx '# editado' "$ROOT_HOME/oraculos/$t/tarea.toml"
 done
 
 chequeo "nada escrito en el repo de Root (oraculos)" sin_rastro_en_repo

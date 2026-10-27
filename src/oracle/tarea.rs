@@ -16,8 +16,17 @@ pub struct Tarea {
     pub imagen: String,
     pub containerfile: Option<String>,
     pub spec: String,
+    /// Veces que corre el oculto. Cada repetición usa un contenedor nuevo.
+    #[serde(default = "repeticiones_por_defecto")]
+    pub repeticiones: u32,
     pub contrato: Comando,
     pub oculto: Comando,
+    /// Tests cuya diferencia viene del entorno (por ejemplo, lavapipe contra GPU).
+    #[serde(default)]
+    pub entorno: Vec<Exclusion>,
+    /// Tests que dependen de una frase ambigua de la spec.
+    #[serde(default)]
+    pub oraculo_dudoso: Vec<Exclusion>,
     /// Carpeta de la tarea. Se monta como `/oraculo`. No viene del TOML.
     #[serde(skip)]
     pub dir: PathBuf,
@@ -29,6 +38,17 @@ pub struct Comando {
     pub cmd: String,
 }
 
+/// Un test excluido del cálculo, con su motivo. `test` tiene la forma `archivo::nombre`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Exclusion {
+    pub test: String,
+    pub motivo: String,
+}
+
+fn repeticiones_por_defecto() -> u32 {
+    1
+}
+
 impl Tarea {
     /// Lee `<dir>/tarea.toml`.
     pub fn cargar_de(dir: &Path) -> Result<Tarea, ErrorOraculo> {
@@ -37,8 +57,31 @@ impl Tarea {
             .map_err(|e| ErrorOraculo::Tarea(format!("no se pudo leer {}: {e}", ruta.display())))?;
         let mut tarea: Tarea = toml::from_str(&texto)
             .map_err(|e| ErrorOraculo::Tarea(format!("{}: {e}", ruta.display())))?;
+        tarea
+            .validar()
+            .map_err(|e| ErrorOraculo::Tarea(format!("{}: {e}", ruta.display())))?;
         tarea.dir = dir.to_path_buf();
         Ok(tarea)
+    }
+
+    /// Repeticiones de 1 o más. Cada test excluido tiene un motivo y aparece una sola vez.
+    fn validar(&self) -> Result<(), String> {
+        if self.repeticiones == 0 {
+            return Err("repeticiones debe ser 1 o más".into());
+        }
+        let mut vistos = std::collections::BTreeSet::new();
+        for exclusion in self.entorno.iter().chain(&self.oraculo_dudoso) {
+            if exclusion.motivo.trim().is_empty() {
+                return Err(format!("exclusión de {} sin motivo", exclusion.test));
+            }
+            if !vistos.insert(exclusion.test.as_str()) {
+                return Err(format!(
+                    "el test {} está excluido dos veces",
+                    exclusion.test
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Lee la tarea `nombre` de `<root_home()>/oraculos/<nombre>/`.
@@ -150,6 +193,67 @@ capas = [["protocolo"], ["comandos"]]
     fn tarea_toml_invalido_da_error() {
         let dir = tempfile::tempdir().expect("temp dir");
         escribir(dir.path(), "nombre = ");
+        assert!(matches!(
+            Tarea::cargar_de(dir.path()),
+            Err(ErrorOraculo::Tarea(_))
+        ));
+    }
+
+    #[test]
+    fn repeticiones_por_defecto_es_1() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), MINIMO);
+        let t = Tarea::cargar_de(dir.path()).expect("parsea");
+        assert_eq!(t.repeticiones, 1);
+        assert!(t.entorno.is_empty());
+        assert!(t.oraculo_dudoso.is_empty());
+    }
+
+    #[test]
+    fn repeticiones_leen_exclusiones_de_entorno_y_oraculo() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let texto = MINIMO.replace("[contrato]", "repeticiones = 3\n\n[contrato]")
+            + "\n[[entorno]]\ntest = \"a::b\"\nmotivo = \"lavapipe\"\n\
+               \n[[oraculo_dudoso]]\ntest = \"c::d\"\nmotivo = \"orden de spin\"\n";
+        escribir(dir.path(), &texto);
+        let t = Tarea::cargar_de(dir.path()).expect("parsea");
+        assert_eq!(t.repeticiones, 3);
+        assert_eq!(t.entorno[0].test, "a::b");
+        assert_eq!(t.oraculo_dudoso[0].motivo, "orden de spin");
+    }
+
+    #[test]
+    fn repeticiones_cero_es_error_de_carga() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(
+            dir.path(),
+            &MINIMO.replace("[contrato]", "repeticiones = 0\n\n[contrato]"),
+        );
+        assert!(matches!(
+            Tarea::cargar_de(dir.path()),
+            Err(ErrorOraculo::Tarea(_))
+        ));
+    }
+
+    #[test]
+    fn exclusion_sin_motivo_es_error_de_carga() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let texto = format!("{MINIMO}\n[[entorno]]\ntest = \"a::b\"\nmotivo = \"  \"\n");
+        escribir(dir.path(), &texto);
+        assert!(matches!(
+            Tarea::cargar_de(dir.path()),
+            Err(ErrorOraculo::Tarea(_))
+        ));
+    }
+
+    #[test]
+    fn exclusion_del_mismo_test_dos_veces_es_error_de_carga() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let texto = format!(
+            "{MINIMO}\n[[entorno]]\ntest = \"a::b\"\nmotivo = \"x\"\n\
+             \n[[oraculo_dudoso]]\ntest = \"a::b\"\nmotivo = \"y\"\n"
+        );
+        escribir(dir.path(), &texto);
         assert!(matches!(
             Tarea::cargar_de(dir.path()),
             Err(ErrorOraculo::Tarea(_))

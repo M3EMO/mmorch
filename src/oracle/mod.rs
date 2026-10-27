@@ -4,6 +4,7 @@ pub mod contenedor;
 pub mod junit;
 pub mod tarea;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -14,6 +15,7 @@ use std::time::Duration;
 use thiserror::Error as ErrorDerive;
 
 use crate::tipos::{Conteo, Estado, VERSION, Veredicto};
+use junit::{Junit, ResultadoTest};
 use tarea::Tarea;
 
 /// Carpetas de la raíz del repo que no se copian: artefactos del builder e historial de git.
@@ -65,6 +67,7 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
     fs::set_permissions(salida.path(), fs::Permissions::from_mode(0o777))
         .map_err(|e| infra("permisos de la salida", e))?;
 
+    // El contrato corre una vez. El oculto corre `repeticiones` veces, cada una en un contenedor nuevo.
     let contrato = correr_suite(
         &repo_copia,
         tarea,
@@ -72,23 +75,35 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
         &tarea.contrato.cmd,
         XML_CONTRATO,
         o,
-    )?;
-    let oculto = correr_suite(
-        &repo_copia,
-        tarea,
-        salida.path(),
-        &tarea.oculto.cmd,
-        XML_OCULTO,
-        o,
-    )?;
-    let estado = estado_de(&contrato, &oculto);
+    )?
+    .conteo();
+    let mut junits = Vec::new();
+    for _ in 0..tarea.repeticiones {
+        borrar_oculto(salida.path())?;
+        junits.push(correr_suite(
+            &repo_copia,
+            tarea,
+            salida.path(),
+            &tarea.oculto.cmd,
+            XML_OCULTO,
+            o,
+        )?);
+    }
+    let excluidos: BTreeSet<String> = tarea
+        .entorno
+        .iter()
+        .chain(&tarea.oraculo_dudoso)
+        .map(|e| e.test.clone())
+        .collect();
+    let clasificado = clasificar(&junits, &excluidos);
+    let estado = estado_de(&contrato, &clasificado.conteo);
     Ok(Veredicto {
         v: VERSION,
         tarea: tarea.nombre.clone(),
         repo: nombre_de(&repo),
         commit: commit_de(&repo),
         contrato,
-        oculto,
+        oculto: clasificado.conteo,
         puntajes: Vec::new(),
         hallazgos: Vec::new(),
         global: None,
@@ -96,14 +111,71 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
         costo_usd: 0.0,
         informe: None,
         rubricas: Vec::new(),
+        repeticiones: junits.len() as u32,
+        inestables: clasificado.inestables,
     })
+}
+
+/// Borra el `oculto.xml` de la repetición anterior. Sin borrarlo, una repetición sin XML pasaría con datos viejos.
+fn borrar_oculto(salida: &Path) -> Result<(), ErrorOraculo> {
+    match fs::remove_file(salida.join(XML_OCULTO)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(infra("borrar oculto.xml", e)),
+    }
+}
+
+/// Resultado de clasificar los tests del oculto a través de sus repeticiones.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Clasificacion {
+    /// Tests estables con su resultado (`Pasa` o `Falla`). Los omitidos no aparecen.
+    estables: BTreeMap<String, ResultadoTest>,
+    /// Ids ordenados de los tests con resultados mezclados.
+    inestables: Vec<String>,
+    /// Conteo del oculto. Un inestable no pasa, pero sí cuenta en el total.
+    conteo: Conteo,
+}
+
+/// Clasifica cada test por sus repeticiones. Los excluidos no entran al cálculo.
+/// Un test con resultados distintos entre repeticiones, o ausente en alguna, es inestable.
+fn clasificar(junits: &[Junit], excluidos: &BTreeSet<String>) -> Clasificacion {
+    let ids: BTreeSet<&str> = junits
+        .iter()
+        .flat_map(|j| j.tests.keys().map(String::as_str))
+        .collect();
+    let mut c = Clasificacion::default();
+    for id in ids {
+        if excluidos.contains(id) {
+            continue;
+        }
+        let resultados: Vec<Option<ResultadoTest>> =
+            junits.iter().map(|j| j.tests.get(id).copied()).collect();
+        match resultados.first().copied().flatten() {
+            Some(r) if resultados.iter().all(|x| *x == Some(r)) => {
+                if r != ResultadoTest::Omite {
+                    c.estables.insert(id.to_string(), r);
+                }
+            }
+            _ => c.inestables.push(id.to_string()),
+        }
+    }
+    let pasa = c
+        .estables
+        .values()
+        .filter(|r| **r == ResultadoTest::Pasa)
+        .count();
+    c.conteo = Conteo {
+        pasa: pasa as u32,
+        total: (c.estables.len() + c.inestables.len()) as u32,
+    };
+    c
 }
 
 fn infra(contexto: &str, e: io::Error) -> ErrorOraculo {
     ErrorOraculo::Infra(format!("{contexto}: {e}"))
 }
 
-/// Corre un comando de la tarea y cuenta su junit. Sin junit no hay conteo: es error de infraestructura.
+/// Corre un comando de la tarea y lee su junit. Sin junit no hay conteo: es error de infraestructura.
 fn correr_suite(
     repo: &Path,
     tarea: &Tarea,
@@ -111,7 +183,7 @@ fn correr_suite(
     cmd: &str,
     xml: &str,
     o: &OpcionesOraculo,
-) -> Result<Conteo, ErrorOraculo> {
+) -> Result<Junit, ErrorOraculo> {
     let ejecucion = contenedor::Ejecucion {
         imagen: tarea.imagen.clone(),
         repo: Some(repo.to_path_buf()),
@@ -130,7 +202,7 @@ fn correr_suite(
             resultado.stderr.trim()
         )));
     }
-    Ok(junit::leer(&ruta)?.conteo())
+    junit::leer(&ruta)
 }
 
 /// Copia `origen` a `destino` sin `target/` ni `.git/` de la raíz y sin enlaces simbólicos.
@@ -291,6 +363,93 @@ mod tests {
             estado_de(&conteo(2, 2), &conteo(2, 2)),
             Estado::SinVeredicto
         );
+    }
+
+    fn junit_de(filas: &[(&str, ResultadoTest)]) -> Junit {
+        let mut j = Junit::default();
+        for (clave, resultado) in filas {
+            j.tests.insert((*clave).to_string(), *resultado);
+        }
+        j
+    }
+
+    fn sin_exclusiones() -> BTreeSet<String> {
+        BTreeSet::new()
+    }
+
+    #[test]
+    fn repeticiones_todo_pasa_en_todas_cuenta_como_estable() {
+        let j = junit_de(&[("a::t1", ResultadoTest::Pasa)]);
+        let c = clasificar(&[j.clone(), j.clone(), j], &sin_exclusiones());
+        assert_eq!(c.conteo, Conteo { pasa: 1, total: 1 });
+        assert!(c.inestables.is_empty());
+    }
+
+    #[test]
+    fn repeticiones_falla_en_todas_es_estable_que_falla() {
+        let j = junit_de(&[("a::t1", ResultadoTest::Falla)]);
+        let c = clasificar(&[j.clone(), j.clone(), j], &sin_exclusiones());
+        assert_eq!(c.conteo, Conteo { pasa: 0, total: 1 });
+        assert_eq!(c.estables["a::t1"], ResultadoTest::Falla);
+    }
+
+    #[test]
+    fn inestable_resultados_mezclados_no_pasan() {
+        let r1 = junit_de(&[
+            ("a::t_flaky", ResultadoTest::Falla),
+            ("a::t_ok", ResultadoTest::Pasa),
+        ]);
+        let r2 = junit_de(&[
+            ("a::t_flaky", ResultadoTest::Pasa),
+            ("a::t_ok", ResultadoTest::Pasa),
+        ]);
+        let r3 = junit_de(&[
+            ("a::t_flaky", ResultadoTest::Falla),
+            ("a::t_ok", ResultadoTest::Pasa),
+        ]);
+        let c = clasificar(&[r1, r2, r3], &sin_exclusiones());
+        assert_eq!(c.inestables, vec!["a::t_flaky".to_string()]);
+        assert_eq!(c.conteo, Conteo { pasa: 1, total: 2 });
+    }
+
+    #[test]
+    fn repeticiones_omitido_en_todas_no_cuenta() {
+        let j = junit_de(&[("a::t1", ResultadoTest::Omite)]);
+        let c = clasificar(&[j.clone(), j], &sin_exclusiones());
+        assert_eq!(c.conteo, Conteo { pasa: 0, total: 0 });
+        assert!(c.inestables.is_empty());
+    }
+
+    #[test]
+    fn repeticiones_test_ausente_en_una_repeticion_es_inestable() {
+        let con = junit_de(&[("a::t1", ResultadoTest::Pasa)]);
+        let sin = junit_de(&[]);
+        let c = clasificar(&[con, sin], &sin_exclusiones());
+        assert_eq!(c.inestables, vec!["a::t1".to_string()]);
+    }
+
+    #[test]
+    fn exclusion_entorno_no_cuenta_en_el_calculo() {
+        let r1 = junit_de(&[
+            ("a::t_flaky", ResultadoTest::Falla),
+            ("a::t_ok", ResultadoTest::Pasa),
+        ]);
+        let r2 = junit_de(&[
+            ("a::t_flaky", ResultadoTest::Pasa),
+            ("a::t_ok", ResultadoTest::Pasa),
+        ]);
+        let excluidos = BTreeSet::from(["a::t_flaky".to_string()]);
+        let c = clasificar(&[r1, r2], &excluidos);
+        assert!(c.inestables.is_empty());
+        assert_eq!(c.conteo, Conteo { pasa: 1, total: 1 });
+    }
+
+    #[test]
+    fn exclusion_de_test_inexistente_se_ignora() {
+        let j = junit_de(&[("a::t1", ResultadoTest::Pasa)]);
+        let excluidos = BTreeSet::from(["a::no_existe".to_string()]);
+        let c = clasificar(&[j.clone(), j], &excluidos);
+        assert_eq!(c.conteo, Conteo { pasa: 1, total: 1 });
     }
 
     #[test]
