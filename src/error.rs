@@ -2,6 +2,8 @@ use std::io;
 
 use thiserror::Error as ErrorDerive;
 
+use crate::goal::ErrorGoal;
+
 /// Errores de la biblioteca. Cada variante tiene su código de salida.
 #[derive(Debug, ErrorDerive)]
 pub enum Error {
@@ -21,6 +23,8 @@ pub enum Error {
     ConfigToml(#[from] toml::de::Error),
     #[error("error de JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("{0}")]
+    Goal(#[from] ErrorGoal),
 }
 
 impl Error {
@@ -28,6 +32,7 @@ impl Error {
     pub fn codigo_de_salida(&self) -> u8 {
         match self {
             Error::Uso(_) => 2,
+            Error::Goal(e) => e.codigo_de_salida(),
             Error::NoImplementado(_)
             | Error::ConfigLeer { .. }
             | Error::ConfigToml(_)
