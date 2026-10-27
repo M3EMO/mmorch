@@ -1,0 +1,261 @@
+## Measured
+
+Paired ablations over a seeded gold set of 350 arithmetic items with **computed** labels
+(no human, no LLM in the ground truth). Same `--seed` = same items, so arms compare directly.
+Every run appends to `logs/ablation_results.jsonl`; re-run with
+`python ablation_paired.py --n 350 --self X --cross Y --yes`.
+
+| verifier | family | catches bugs | doesn't false-reject | balanced acc | cost |
+|---|---|---|---|---|---|
+| `deepseek-chat` (thinking OFF) | deepseek | 0.94 | **0.56-0.61** | 0.77 | — |
+| **`deepseek-reasoner`** (same weights, thinking ON) | deepseek | 1.00 | 0.994 | **0.997** | **$0.074** |
+| `gemini-2.5-flash` | google | 1.00 | 0.982 | 0.991 | $0.135 |
+| `glm-4.5-air` | zhipu | 0.99 | 0.977 | 0.986 | $0.332 |
+| `glm-5.2` (thinking ON, 2026-10-07) | zhipu | 1.00 | 1.00 | 1.00 | ~$0.85 |
+| `Qwen/Qwen3-4B` open-weight, vLLM on a Colab T4 (2026-10-07) | qwen | 1.00 | 0.977 | 0.989 | 0 API $, 40 min of T4 |
+
+Three models from **three different families** all land at ~0.99. The only one that collapses
+to 0.77 is the one with reasoning switched off — same family and same weights as the best of
+the four. Cost runs exactly inverse to quality: the best verifier is also the cheapest
+(1.8x cheaper than Gemini, 4.5x cheaper than GLM).
+
+**Re-run 2026-10-07 (Gemini out, ticket 0a6).** Same seed, paired: `deepseek-reasoner` and
+`glm-5.2` both score 1.00 / 1.00 on all 350 items (McNemar: no discordant pairs). The set is now
+saturated for thinking-ON verifiers, so it no longer ranks them. Cost does: `glm-5.2` spent ~$0.85
+against ~$0.05 for `deepseek-reasoner` on the same items (~17x). `glm-5.2` stays the cross-family
+verifier for subjective work, where GOAL requires another family; checkable work without an oracle
+goes to `CHECKABLE_VERIFIER` (`deepseek-reasoner`).
+
+**Subjective branch (2026-10-07, `ablation_selfpref.py`, pre-registered in a6abfe8).** No computed
+truth here, but the risk the invariant guards against is measurable: a judge favouring its own family.
+`deepseek-chat` and `glm-4.5-air` answer 100 subjective prompts; `deepseek-reasoner` and `glm-5.2` pick the
+better answer in both orders. The DeepSeek judge prefers DeepSeek answers 0.85 of the time, the GLM judge
+0.82: self-preference index 0.03, 90% CI [-0.015, 0.075] -> inconclusive under the pre-registered rule.
+Any family bias is small (under ~7.5 points); length does not explain it (DeepSeek answers were shorter).
+This measures judge bias, not judge accuracy. Whether GOAL.md keeps cross-family for subjective work is the
+human's call.
+
+**Open-weight verifier on a GPU (2026-10-07, `scripts/colab_verificador.py`, ticket pcb).** The same
+350 paired items, judged by `Qwen/Qwen3-4B` (thinking ON) served with vLLM on a Colab T4: balanced accuracy
+0.989, one unparseable reply, no per-call API cost. A 4B model with reasoning lands with the API verifiers, so
+checkable verification can run off the API when a GPU is at hand.
+
+The SELF arm replicated independently three times (specificity 0.558 / 0.606 / 0.594 against
+three different counterparts), so the ~40% false-reject rate of thinking-off `deepseek-chat`
+is stable, not one-run noise.
+
+**What this establishes.** The failure mode of a cheap verifier is not letting errors through
+(sensitivity is ~0.94 everywhere) — it is **refuting correct work**: thinking-off DeepSeek
+falsely rejects ~40% of right answers. Verifier choice moves balanced accuracy 0.77 -> 0.99.
+
+**What this refutes (about capability, not about GOAL).** The 2026-09-04 cross-family run (self 0.75 vs cross 0.99, McNemar
+b=0 c=79, p≈0) was read as evidence for cross-family decorrelation. The intra-family control
+run on 2026-09-07 reproduces it almost exactly (0.77 vs 0.997, b=0 c=78, p≈0) using **the same
+model, the same weights** — `deepseek-chat` and `deepseek-reasoner` are both `deepseek-v4-flash`
+and differ only in `thinking: disabled`. So the effect was **reasoning, not family**. Gemini did
+not win by being Google; it won by thinking — and it cost ~2x more than the DeepSeek model that
+does it better. A third family (zhipu) reproduces the same pattern at 4.5x the cost.
+
+**Scope — this does NOT refute the `GOAL.md` OneFlow invariant.** That invariant is scoped:
+cross-family for *subjective* tasks, same-family allowed on *checkable* ones. Every item here is
+checkable (computed truth), i.e. the branch where same-family is already permitted — and the
+best verifier measured (`deepseek-reasoner`) is indeed same-family. The result lands inside the
+carve-out GOAL already has; the subjective branch, where the invariant actually binds, was not
+touched by a single item.
+
+**What remains untested.** Whether cross-family pairing decorrelates errors on *subjective*
+tasks (the claim GOAL makes); one task domain (arithmetic) only; injected errors, so this
+measures detection, not a verifier's blind spot for its own mistakes. Strictly, a checkable
+arithmetic item should go to `checkers.py` and not to any LLM — these arms measure LLM
+verifiers on a domain where mmorch's own rule says not to use one.
+
+### Stacking gates (2026-09-08)
+
+A 4-gate ablation (`ablation_stages.py`, n=299, $1.44, 2 models per family so "different
+family" and "different model" are separable) tested a specific claim from an SDLC review: that
+chaining N review gates compounds false-rejection, so `(1 - false_reject_rate)^N` predicts
+survival of good work through the pipeline. **That formula assumes every gate is equally bad —
+false.**
+
+| gate | false-rejects (of 150 correct) | specificity |
+|---|---|---|
+| `deepseek-chat` (thinking OFF) | 61 | 0.593 |
+| `deepseek-v4-pro` | 0 | **1.000** |
+| `glm-4.5-air` | 2 | 0.987 |
+| `glm-5.2` | 1 | 0.993 |
+
+Chained specificity barely moves with gate count: K=2 -> 0.593, K=3 -> 0.587, K=4 -> 0.587.
+**A chain's specificity is set by its worst gate, not by how many gates it has.** Adding good
+gates next to a bad one is nearly free — and does nothing to undo the bad one's damage.
+Sensitivity was 1.000 in all 11 chains: one good gate already catches everything a chain of
+four catches, so in this domain stacking gates buys zero extra detection and pays the
+false-rejection cost of its weakest link.
+
+Independence held (observed vs. product-of-marginals gap <=0.005 everywhere), but the test was
+underpowered to say anything about decorrelation: 3 of 4 gates had 0-2 errors out of 150, so
+there was almost nothing to correlate (phi undefined in half the pairs). `deepseek-v4-pro`
+measured a **perfect verifier** on this gold set (0 false-rejects, 0 missed bugs, n=299) —
+unplanned, and worth a second look. A follow-up on harder items (comparable non-trivial error
+rates across gates, larger n) is needed before decorrelation can be confirmed either way; see
+`logs/ablation_results.jsonl` (experiment `ablation_stages`) for the full per-pair phi table
+and `logs/ablation_stages_items.jsonl` for raw per-item verdicts (re-analyzable without new
+API calls).
+
+### Synthesized checkers (2026-09-09/10)
+
+The user's idea: instead of asking a model to *compute* an answer, ask it to *write the
+function* and let a sandbox run it. Three gates were measured on the same hard gold set
+(`ablation_stages_hard.py`, n=50-80, computed truth):
+
+| gate | what the model does | specificity | cost / item |
+|---|---|---|---|
+| `deepseek-chat` (manual) | computes the answer in its head | 0.35-0.50 | $0.0046 |
+| `code:deepseek-chat` | writes `solve()` for THIS item; sandbox runs it | 0.98 | $0.00003 |
+| `code:deepseek-v4-pro` | same, thinking on | **1.00** (130/130) | $0.0017 |
+| `synth:deepseek-chat` | writes `solve(params)` ONCE per problem *kind*, promoted against computed truth, then cached | 1.00 | ~$0 (10 calls total) |
+
+Same model, same weights: 0.35 -> 0.98 by changing the *method*, at 150x lower cost. The
+two remaining `code:` failures were format (a bare expression, the system prompt echoed
+back), not arithmetic. phi between the manual and the code gate of the same model was
+-0.07 / +0.06 / +0.11 across three runs: **errors decorrelate by method, not by family.**
+
+`synth:` is `checkers.py` written by the model. A synthesized function is *promoted* only
+if it reproduces computed truth on 3 random items **plus one edge instance** (minimum
+legal parameters; the EvalPlus finding that edge tests cut pass@1 by 10-29 points). A
+function that fails promotion refutes its whole kind (fail-closed). Cost is per kind, not
+per item, so n stops mattering.
+
+**Kind-level decorrelation (`ablation_synth_kinds.py`, 57 algorithmic kinds, 6 models,
+$0.77).** Each kind has its own reference solver (brute-force verified); the function
+receives typed `params`, not prose — an earlier text-parsing design produced 12 false
+"failures" from decoy digits in the statement (`n/2`, `1..92`, `responder -1`) and
+correlated the models through *my* text. Result:
+
+| model | kinds promoted | kinds failed | missed bugs | cost |
+|---|---|---|---|---|
+| `deepseek-chat` (thinking off) | 53/57 | **4** | 0 | $0.003 |
+| `deepseek-v4-pro` | 57/57 | 0 | 0 | $0.37 |
+| **`deepseek-reasoner`** | **57/57** | 0 | 0 | **$0.03** |
+| `glm-4.5-air` | 54/54 | 0 | 0 | $0.21 |
+| `glm-5.2` | 49/49 | 0 | 0 | $0.16 |
+
+Zero missed bugs in 274 synthesized functions. The four `deepseek-chat` failures are all
+real spec bugs — `p*q` instead of `lcm(p,q)` in inclusion-exclusion, swapped terms in the
+tiling recurrence, "largest prime factor" returning 1 when the number factors completely
+(caught only by the edge item), a wrong transfer matrix for "strings without ab". Every
+other model wrote a correct function for every kind, edge cases and a 20-second time
+limit included. **phi is undefined for every pair: there are no errors to correlate.**
+The decorrelation question (same-family vs cross-family) is unanswerable at this
+difficulty — four of five models simply do not fail. What *is* established: for
+well-specified, typed, single-function tasks, a thinking model synthesizes a correct
+checker essentially always, and `deepseek-reasoner` does it at 12x less than `v4-pro`.
+
+Harness lessons, paid for four times this week: a phi of +1.0 between two different
+models was the harness every time (a 60s timeout, a `≡` character through cp1252 stdin,
+decoy digits in the prompt, and API-dropped rows counted as failures). Raw model output
+and rejected sources are now persisted per row so the next diagnosis is read, not guessed.
+
+### Pipeline vs engine on a real feature (2026-09-10)
+
+One feature (port of a 290-line Python intent matcher to Java 17, 35-assert acceptance test,
+Python as oracle), three ways of building it from the same baseline commit:
+
+| arm | who decides at the gates | acceptance | calls | USD | min | interventions |
+|---|---|---|---|---|---|---|
+| A: `/project` engine | nobody | **red**, 5 attempts | 11-21 | 0.81 | ~120 | 4 engine fixes |
+| B: 6-stage pipeline, scripted | the script | **green** (v2) | 31 | 1.13 | 22 | 0 human, 2 harness |
+| C: 6-stage pipeline, hybrid | Claude at the gates | **green** | 9 | 0.16 | 9 | 2 by Claude, 4 min |
+
+B and C shared the spec and plan (deepseek-reasoner) and the coder (deepseek-v4-pro); only
+what happened after the first red test differed. B's blind fix loop (rewrite all 9 files)
+broke its own build; a targeted loop (the model names the files, compile gate with revert)
+went green in 2 rounds. C needed one 4-line fix that a `mvn test-compile` gate would have
+caught for free. A exposed four engine defects (fixed: 58ce334, ea8b775) and ended one method
+short of green with no gate to tell it so. Full write-up: `docs/ab-sdlc-2026-09-10/README.md`.
+Next: the wayfinder map `.scratch/sdlc-6-gates/` (13 tickets) — the pipeline replaces the
+engine and becomes a per-repo convention.
+
+Since 2026-10-22 the pipeline is its own package, `sdlc/` (next to `mmorch/`): a **builder**, not
+part of the bench. It uses mmorch as a library (providers, sandbox, checkers). mmorch measures it
+as one more consumer: `python -m mmorch.sdlc_bench --task <bench>`. Adoption is
+`python -m sdlc init <repo>`; multi-module builds are `python -m sdlc.builder <plan> <dir>`.
+
+### 6-stage pipeline on the validation set (2026-09-11/13)
+
+Driver v3 (`.scratch/sdlc-6-gates/research/04-driver-v3/driver_py.py`): spec → Claude spec review
+(≤5 questions, from spec-kit `clarify`) → plan → build → test → Claude diff review → PR. Every
+gate is deterministic (contract tokens, R<n> traceability, plan allowlist, py_compile,
+collect-only, per-unit regression, progress caps, scope of each Claude pass, lint, full-suite
+regression by test name) except the two fixed Claude reviews, which may block ONLY by leaving a
+failing test. Escalation: 3 fix rounds → deepseek-reasoner ×2 → Claude → human. Coder
+deepseek-v4-pro, writer deepseek-reasoner. Protocol and win criterion: ticket 07.
+
+| feature | runs | green | USD (median) | wall min | max level | Claude blocked with a test | human |
+|---|---|---|---|---|---|---|---|
+| S2 `rate-limiter` (old engine: 0/3) | 5 | 5/5 | 0.03 | 2-3 | 0 | 0 | 0 |
+| D3 stuck detector in `build_unit` (mmorch itself) | 1 | 1/1 | 0.04 | 34 (25 = full suite ×2) | 0 | 0 (one NOTE, no test) | 0 |
+| S3 `etl-pipeline` (3 cross-importing modules) | 1 | 1/1 | 0.04 | 6 | 0 | 0 | 0 |
+| D2 `test-compile` gate in `build_project` (mmorch itself) | 1 | 1/1 | 0.84 | ~60 | 3 | **2, both real** | 0 |
+| S1 `lru-ttl-cache` (held-out, run once, last) | 1 | 1/1 | 0.02 | 4 | 0 | 0 | 0 |
+
+D1 (`gen_model` reaches the recursion) was already green at baseline — its acceptance test
+stays as a regression test, no run. Verdict against ticket 07: 6/6 green including the
+held-out, median US$0.037 per feature, 0 human interventions before level 4 — the pipeline
+**wins**. D2 is the only expensive one, and the cost was a driver defect: the target file
+contains "```" inside a string and the fence stripper cut it, which pushed the ladder to Claude
+twice. The runs surfaced 9 driver defects, all caught by deterministic gates at US$0. The fixed
+Claude diff review caught 0 defects in 8 small runs and 2 real ones (a swallowed timeout, an
+empty detail) in the one hard run. Per-run logs and findings:
+`.scratch/sdlc-6-gates/research/07-resultados.md`. D2/D3 PRs sit on branches
+`sdlc/sdlc-D2-r1`, `sdlc/sdlc-D3-r1b` (not merged).
+
+### SDLC gate checks (2026-10-23, bd orchestration-bpn)
+
+The check half of each `sdlc/pipeline.py` gate moves to `mmorch/gates.py`; `mmorch/gates_bench.py` measures it.
+A case's label comes from how it was built, never from the gate's own rule or an LLM: a red case for
+`sin-clones` is a copy with up to 30% of its lines rewritten; a green case is two independent modules that
+share imports and headers. Real incidents ride along, flagged when only a reconstruction survives.
+Re-run with `python -m mmorch.gates_bench --seed 42 --n 400`; rows go to `logs/ablation_results.jsonl`.
+
+| gate | n | catches bad | doesn't false-reject | balanced acc | accuracy by group |
+|---|---|---|---|---|---|
+| `sin-clones` (threshold 0.66) | 401 | 1.00 | 1.00 | 1.00 | copy 20-30%: 1.00 (0.03 at 0.8) · sibling modules: 1.00 |
+| `spec-review` | 287 | 1.00 | 1.00 | 1.00 | `TBD` answer: 1.00 (was 0.00) · one empty answer: 1.00 (was 0.14) |
+| `trazabilidad-plan` | 402 | 1.00 | 1.00 | 1.00 | ID only in prose: 1.00 (was 0.00) · ID not in spec: 1.00 (was 0.00) |
+| `trazabilidad-spec` | 400 | 1.00 | 1.00 | 1.00 | every group 1.00 (no real incident on record) |
+| `plan-allowlist` | 400 | 1.00 | 1.00 | 1.00 | path with `..`: 1.00 (was 0.00) |
+| `cambio-minimo` | 401 | 0.940 | 1.00 | 0.970 | rewrite of a file under 40 lines: 1.00 (was 0.38) · task forbids rewriting: 1.00 (was 0.00) · cut 40-70%: 0.79 |
+| `docstring-intacto` | 401 | 0.905 | 1.00 | 0.953 | docstring replaced by `TODO`: 1.00 (was 0.00) · task forbids touching docstrings: 0.70 (was 0.00) |
+| `un-archivo` | 401 | 1.00 | 1.00 | 1.00 | `# File: path` / backticked headers written right: 1.00 (was 0.00); measures what `one_file` writes |
+| `tipo-del-archivo` | 402 | 1.00 | 1.00 | 1.00 | annotation on the same line (`@Deprecated public class X`): 1.00 (was 0.00) |
+| `baseline-intacto` | 400 | 1.00 | 1.00 | 1.00 | weakened assert / deleted / added test / whitespace: 1.00 |
+| `tamano-plan` | — | — | — | — | not measurable with built cases: the label is a run outcome (bd `orchestration-amp`) |
+| `G3-compile` | 400 | 1.00 | 1.00 | 1.00 | rustc errors already in the base: 1.00 (was 0.00) · new error, other or same file: 1.00 |
+| `suite-total` | 400 | 1.00 | 1.00 | 1.00 | new param of a test whose id has a space: 1.00 (was 0.00) · flaky: 1.00 |
+| `lint` | 400 | 1.00 | 1.00 | 1.00 | one finding fixed and another added in the same file: 1.00 (was 0.00) |
+| `mutacion`, `codigo-muerto` | — | — | — | — | the decision is a threshold; measured against human verdicts and runs (bd `orchestration-1yu`) |
+
+Fixed after measuring (2026-10-26). `sin-clones`: copies with up to 30% edited share >= 0.69 of their lines and
+sibling modules (same header, imports and signatures, own bodies) <= 0.65 over 5 seeds x 2000 cases, so the
+threshold moved from 0.8 to 0.66; it is measured on synthetic Python only. `spec-review` now rejects any `- P<n>:`
+line without an answer or with `TBD`. `trazabilidad-plan` counts IDs only on file items and only IDs the spec has.
+`plan-allowlist` rejects `..` segments and absolute paths; the writer also refuses paths outside the worktree.
+Format variants `spec-review` forbids (extra spaces, bold, numbered list) stay apart from the headline: each is
+rejected every time, which costs a retry, not a wrong result.
+
+`cambio-minimo` and `docstring-intacto` used to read the task for a substring (`reescrib`, `docstring`), so a
+task that forbade the change also unlocked it. They now skip a mention after a negation or a keep-verb ("sin",
+"no", "deja", "conserva"); a prohibition phrased another way ("los docstrings quedan igual") still unlocks it,
+which is the remaining 0.70. `cambio-minimo` needed 40 lines gone, so a small file could be rewritten whole; the
+floor is now min(40, half the file, at least 5). A cut of 40% on a 80-133 line file still passes.
+
+Phase 3 gates (compile, suite, lint) are measured on logs: the run that makes the log stays in `sdlc/`, the
+decision on it is in `mmorch/gates.py`. Before the fixes the gates scored 0.893, 0.828 and 0.818: rustc puts the
+path on a ` --> path:l:c` line, a parametrized test id was cut at its first space, and lint compared counts per
+file instead of findings (one fixed plus one new summed to zero).
+
+`un-archivo` is measured on what `one_file` writes (verdict plus cut), not on the verdict alone: with the
+verdict alone, a `# File: path` answer passed and the whole text landed in one file. With labels fixed that way,
+the gate scored 0.744 before `orchestration-6qb` and 1.00 after.
+
+## What's here
