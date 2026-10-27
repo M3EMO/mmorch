@@ -138,6 +138,16 @@ pub enum TipoEvento {
     Gate,
 }
 
+impl From<TipoEvento> for crate::tipos::TipoEvento {
+    fn from(tipo: TipoEvento) -> Self {
+        match tipo {
+            TipoEvento::Humano => crate::tipos::TipoEvento::Humano,
+            TipoEvento::PlanAprobado => crate::tipos::TipoEvento::PlanAprobado,
+            TipoEvento::Gate => crate::tipos::TipoEvento::Gate,
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum TrackAccion {
     /// Agrega una fila desde un archivo JSON.

@@ -3,6 +3,7 @@ use std::io;
 use thiserror::Error as ErrorDerive;
 
 use crate::goal::ErrorGoal;
+use crate::observe::ErrorObserve;
 
 /// Errores de la biblioteca. Cada variante tiene su código de salida.
 #[derive(Debug, ErrorDerive)]
@@ -25,6 +26,8 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("{0}")]
     Goal(#[from] ErrorGoal),
+    #[error("{0}")]
+    Observe(#[from] ErrorObserve),
 }
 
 impl Error {
@@ -36,7 +39,8 @@ impl Error {
             Error::NoImplementado(_)
             | Error::ConfigLeer { .. }
             | Error::ConfigToml(_)
-            | Error::Json(_) => 3,
+            | Error::Json(_)
+            | Error::Observe(_) => 3,
         }
     }
 }
