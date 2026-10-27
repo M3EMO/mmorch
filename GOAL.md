@@ -1,7 +1,7 @@
 # Root — GOAL
 
-> Contrato anti-drift. `root goal verificar` lo compara con `GOAL.hash` antes de cada corrida.
-> Editarlo es zona roja: lo edita el humano y lo re-autoriza con `root goal autorizar`.
+> Contrato anti-drift. `r00t goal verificar` lo compara con `GOAL.hash` antes de cada corrida.
+> Editarlo es zona roja: lo edita el humano y lo re-autoriza con `r00t goal autorizar`.
 
 ## Propósito
 Root evalúa, rutea y aprende.
@@ -14,7 +14,7 @@ Root aprende de cada corrida: lo que registra cambia la próxima elección.
   comunicaciones en nombre del usuario, este GOAL y las políticas de seguridad.
 - **Checkeable va a un oráculo**, nunca a un LLM.
 - **El verificador razona y refuta por default**; el acuerdo no es confirmación. La familia es libre.
-- **Nada se auto-aplica** sin rollback probado y una validación verde (tests, oráculo, costo y `root goal verificar`).
+- **Nada se auto-aplica** sin rollback probado y una validación verde (tests, oráculo, costo y `r00t goal verificar`).
 - **Costo acotado** por el balance de `root.toml`; barato no significa degradar la calidad medida.
 - **Observabilidad:** toda corrida y toda auto-acción quedan en `eventos.jsonl` y `runs.jsonl`.
 - **[nuevo] El evaluador se mide a sí mismo:** una dimensión entra al puntaje global solo si su calibración

@@ -37,7 +37,7 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 12 | P1: se acepta la propuesta de bloqueo, más rúbricas basadas en estándares de la industria para completitud, diseño y el resto de las dimensiones. P2: el usuario califica a ciegas. P3: el usuario aprueba los requisitos; la spec sale de una sesión `/grill-me`. P4: recall ≥ 0,8. |
 | 13 | P5: kappa ponderado ≥ 0,6 por dimensión y la misma decisión en 5 de los 6 paquetes. |
 | 14 | El binario se llama `r00t`. El crate, `root.toml`, `ROOT_HOME` y las herramientas MCP `root_*` conservan el nombre `root`. |
-| 15 | P6, topes duros: API 100 USD por mes; "nube" 250 USD por mes; cupo 100 USD equivalentes por 5 horas. Un tope nunca se supera sin un gate humano. Ver Tarea 14 y P8. |
+| 15 | P6, topes duros: API 100 USD por mes; sesiones de Claude en la nube 250 USD por mes; cupo 35 USD equivalentes por 5 horas (corrección del usuario sobre los 100 iniciales). Un tope nunca se supera sin un gate humano. Ver Tarea 14. |
 
 ## Patterns to Mirror
 
@@ -289,6 +289,8 @@ r00t oraculo validar --casos <dir>                                   -> Validez
 r00t observa claude --archivo <salida-de-claude-p> --corrida <id>   # --json queda como flag global
 r00t observa evento --corrida <id> --tipo <humano|plan-aprobado|gate> [--detalle txt]
 r00t observa resumen --corrida <id>                                  -> Resumen
+r00t observa uso                                                     -> Uso y margen de cada tope
+r00t observa claude --archivo <f> --corrida <id> --via nube          # registra una sesión de Claude en la nube
 r00t track agregar --fila <archivo.json> | listar [--tarea t] | comparar --a c1 --b c2 --tarea t
 r00t aprende [--replay]                                              -> Politica | métrica de replay
 r00t corre --tarea <t> --config <c>                                  -> Fila
@@ -523,12 +525,12 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
   [balance]
   prefiere_api_sobre = 0.9          # fracción del tope de cupo del bloque
   [balance.cupo]
-  tope_usd = 100.0                  # USD equivalentes de lista, por bloque de 5 horas
+  tope_usd = 35.0                   # USD equivalentes de lista, por bloque de 5 horas
   bloque_horas = 5
   [balance.api]
   tope_usd = 100.0                  # DeepSeek + Anthropic por API, por mes calendario
   [balance.nube]
-  tope_usd = 250.0                  # por mes calendario; Route no lo usa hasta resolver P8
+  tope_usd = 250.0                  # sesiones de Claude en la nube, por mes calendario
   ```
   - **Bloque de cupo**: imita la ventana de 5 horas del plan de Claude. Un bloque empieza con el primer evento `Via::Cupo` después de que venció el bloque anterior, y dura `bloque_horas`. `observe::uso` suma el `cost_usd` de los eventos `Cupo` del bloque vigente.
   - **Mes calendario**: suma los eventos `Via::Api` desde el día 1 a las 00:00, hora local. Es el mismo período con que facturan los proveedores.
@@ -539,16 +541,22 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
     4. Si la API del mes llega al 100% del tope, la API queda prohibida hasta el mes siguiente.
     5. Si las dos vías están prohibidas, `elegir` devuelve `SinPresupuesto` con el próximo momento de reapertura. `r00t route` y `r00t llama` salen con código 3 y registran un evento `Gate`. Root nunca sube un tope solo: subirlo es zona roja (dinero) y lo hace el humano en `root.toml`.
   - **Antes de cada llamada**: `r00t llama` estima el peor costo con `max_tokens` y los precios de `root.toml`. Si ese costo pasa el resto del tope, rechaza la llamada antes de enviarla. Así ninguna llamada supera el tope a mitad de camino. El módulo `proveedores` de la Tarea 8 no cambia: el chequeo vive en `r00t llama`.
-  - **Límite**: el cupo se mide en USD equivalentes de lista (`costUSD` de `claude -p`), no en el porcentaje real del plan. Con ese porcentaje, el tope de 100 USD equivalentes puede no coincidir con el corte real de Anthropic.
+  - **Límite**: el cupo se mide en USD equivalentes de lista (`costUSD` de `claude -p`), no en el porcentaje real del plan. Con ese porcentaje, el tope de 35 USD equivalentes puede no coincidir con el corte real de Anthropic.
+  - **Nube (decisión 15)**: el tope de 250 USD cubre las sesiones de Claude en la nube. La Tarea 14 suma la variante `Via::Nube` al final del enum; el cambio solo agrega. Una sesión en la nube se registra con `r00t observa claude --via nube`, y `observe::uso` la suma al mes calendario.
+    - En el hito 1, Root no lanza sesiones en la nube, así que Route nunca elige `Via::Nube`. El tope solo se informa en `r00t observa uso`, y al llegar al 100% se registra un evento `Gate`.
+    - Root solo cuenta las sesiones en la nube que alguien registra. Una sesión que nadie registra no suma, y `r00t observa uso` lo advierte en su salida.
+    - Una sesión en la nube suma también al bloque de cupo (P9, decisión del usuario).
   Hay dos fuentes de datos para las estadísticas:
   - Los roles `Planifica`, `Organiza` y `Construye` usan las `Fila`s: el éxito es `Decision::Listo`, agrupado por `Fila.modelos[rol]` y `tarea`.
   - Los roles `Delega`, `Verifica` y `Juzga` usan los eventos `Llamada` con `extra.exito`. El chequeo posterior a la llamada escribe ese campo.
 - **Validate**: `cargo test route` con una tabla de casos:
   - Checkeable da `Oraculo`, aunque los dos topes estén agotados.
   - Un juez sin razonamiento es imposible.
-  - Cupo del bloque en 95 USD da API.
-  - Cupo en 100 USD y API en 40 USD dan API.
-  - Cupo en 100 USD y API en 100 USD dan `SinPresupuesto`, con la hora de fin del bloque.
+  - Cupo del bloque en 32 USD (más del 90% de 35) da API.
+  - Cupo en 35 USD y API en 40 USD dan API.
+  - Cupo en 35 USD y API en 100 USD dan `SinPresupuesto`, con la hora de fin del bloque.
+  - Una sesión en la nube de 10 USD suma 10 al mes de nube y 10 al bloque de cupo (P9).
+  - Nube en 250 USD registra un evento `Gate` y no cambia la elección de Route.
   - Un evento de cupo de hace 6 horas no cuenta para el bloque vigente.
   - Un gasto de API del mes anterior no cuenta.
   - Una llamada estimada en 3 USD con 2 USD de margen se rechaza sin enviarse.
@@ -677,14 +685,11 @@ Respuestas a las preguntas de Sonnet al cerrar las Tareas 1 a 5. Los cambios de 
    - El flag: `--json` sigue siendo el flag global de toda la CLI, porque es el contrato de salida. El flag de entrada pasa a `--archivo`, porque `--salida` se confunde con la salida del comando.
 
 **Nombre del binario (decisión 14).** Todo comando de este plan se escribe `r00t <subcomando>`. El crate `root`, `root.toml`, `ROOT_HOME` y las herramientas MCP `root_*` no cambian.
-`GOAL.md` está autorizado y nombra `root goal verificar` y `root goal autorizar`. Ningún agente puede editarlo. Si el usuario quiere el nombre nuevo ahí, lo edita a mano y vuelve a correr `r00t goal autorizar`. Ver P7.
+`GOAL.md` nombra `r00t goal verificar` y `r00t goal autorizar`. El usuario lo editó a mano y lo re-autorizó (hash 311a6371c0cd414a). Ver P7.
 
 **Preguntas abiertas (sin responder)**
-- **P6.** Respondida (decisión 15): API 100 USD por mes, nube 250 USD por mes y cupo 100 USD equivalentes por 5 horas.
-- **P8.** ¿Qué es "la nube" en el tope de 250 USD por mes? Root hoy no gasta en ninguna nube. Hay tres lecturas posibles:
-  - GPU en la nube, por ejemplo Colab, para un verificador de pesos abiertos;
-  - sesiones de Claude Code en la nube (claude.ai/code);
-  - el gasto total, que incluye la API y la nube.
-  Hasta tu respuesta, el tope queda en `root.toml` y Route no lo usa.
-- **P7.** ¿Actualizás `GOAL.md` para que diga `r00t goal` en lugar de `root goal`? El sentido no cambia, pero el texto autorizado nombra un comando que ya no existe.
+- **P6.** Respondida (decisión 15): API 100 USD por mes, nube 250 USD por mes y cupo 35 USD equivalentes por 5 horas.
+- **P8.** Respondida (decisión 15): "la nube" son las sesiones de Claude en la nube.
+- **P9.** Respondida por el usuario (textual): "P9: sí, una sesión en la nube cuenta en el cupo de 5 horas y en los 250 USD por mes."
+- **P7.** Cerrada: el usuario cambió `GOAL.md` a `r00t goal` y lo re-autorizó (textual: "ya puse autorizar."). `r00t goal verificar` da 311a6371c0cd414a.
 
