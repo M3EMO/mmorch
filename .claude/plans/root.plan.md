@@ -41,6 +41,9 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 16 | "De que son los tests? ya dije no quiero un compilador de codigo, quiero un evaluador con criterio, un project manager con datos para decidir." Los tests ocultos son una fuente de evidencia de completitud, no el veredicto. El hito ya no exige reproducir conteos del banco: exige que la decisión del PM sea estable y que cada diferencia tenga una causa con evidencia. Ver "Revisión PM 2". |
 | 17 | P10: "Si puede. Es lo mas correcto para tener librerias funcionales ya." Root baja dependencias con red en una fase previa a la evaluación (opción a). La respuesta del usuario es la autorización permanente que pide la zona roja del GOAL para la red. Ver Tarea 6b. |
 | 18 | P11: "La idea es armar una ficha tecnica, arquitectonica, de diseño y de producto en los spec. La idea es hacerlo mas especifico, no ambigüedades." Cada spec lleva una ficha estructurada con cuatro partes. Root revisa la ficha antes de evaluar, y una ambigüedad se corrige en la ficha en vez de excluir un test. Ver Tarea 9f. |
+| 19 | P13: "que diga pendiente o probar en collab". Un test que falla por el entorno queda `Pendiente` en el informe: no se cobra al producto ni se excluye en silencio. La otra salida es correrlo en Colab con GPU, con la aprobación del usuario (P15). Ver Tarea 7f. |
+| 20 | P14: "en el spec. Obligatoria". La ficha vive dentro de `SPEC.md`, en una sección `## Ficha` con un bloque TOML. Sin ficha, Root no evalúa. Ver Tarea 9f. |
+| — | P12: el usuario respondió "P12 si". La pregunta ofrecía dos opciones, así que la respuesta no elige una. Rige la lectura conservadora (solo crates.io y PyPI) hasta la aclaración P12b. |
 
 ## Patterns to Mirror
 
@@ -180,7 +183,7 @@ pub struct Fila { pub v: u32, pub id: String, pub ts: f64, pub tarea: String, pu
 
 ```rust
 // Dimension suma tres variantes al final: Completitud, Entrega, Pruebas.
-pub enum Cumplimiento { Cumplido, Parcial, Ausente, SinVeredicto }
+pub enum Cumplimiento { Cumplido, Parcial, Ausente, SinVeredicto, Pendiente } // Pendiente: Tarea 7f, al final
 pub struct EstadoRequisito { pub id: String, pub titulo: String, pub peso: u8,
                              pub cumplimiento: Cumplimiento, pub evidencia: Vec<String> } // ids de tests, escenarios o hallazgos
 pub enum Decision { Listo, NoListo, Bloqueado }
@@ -195,9 +198,11 @@ pub struct Informe { pub decision: Decision, pub motivo: String,
 // Veredicto suma `informe: Option<Informe>` con #[serde(default)].
 ```
 
-#### Ficha del spec (Tarea 9f; decisión 18)
+#### Ficha del spec (Tarea 9f; decisiones 18 y 20)
 
-Cada spec lleva un `ficha.toml` junto a `SPEC.md`. La prosa de `SPEC.md` explica, y la ficha fija los datos que Root mide. Cada dato de la ficha tiene un id que la prosa puede citar.
+La ficha vive dentro de `SPEC.md`, en una sección `## Ficha` con un solo bloque ` ```toml `. La prosa del spec explica, y la ficha fija los datos que Root mide. Cada dato de la ficha tiene un id que la prosa puede citar.
+La ficha es obligatoria: un spec sin `## Ficha`, o con un bloque que no parsea, hace que `r00t oraculo evaluar` salga con código 2 y sin veredicto.
+El builder ve el spec y su ficha, porque la ficha es la promesa del producto. Por eso la ficha nunca nombra tests ocultos: la relación requisito→test vive en `tarea.toml`, en `ROOT_HOME`.
 
 ```toml
 [producto]
@@ -209,7 +214,7 @@ id = "R1"
 titulo = "Protocolo RESP2"
 peso = 3
 aceptacion = "un cliente redis-py 5.x completa SET/GET de 10 000 claves sin error"   # medible: número, comando o salida exacta
-pruebas = ["test_m1_protocolo"]          # se copia a [[requisito]] de tarea.toml
+# sin `pruebas`: los ids de tests ocultos van solo en tarea.toml
 
 [tecnica]
 lenguaje = "rust"
@@ -241,7 +246,7 @@ texto = "ningún unwrap() en código que procesa entrada de la red"
 item = "diseno.robustez"                 # ítem de rúbrica que esta regla ancla
 ```
 
-`r00t ficha tarea` arma un borrador de `tarea.toml` desde la ficha. El usuario sigue aprobando los requisitos (decisión 12).
+`r00t ficha tarea` arma un borrador de `tarea.toml` desde la ficha. El borrador deja `pruebas`, `bordes` y `escenarios` vacíos: Opus los completa en `ROOT_HOME`. El usuario aprueba los requisitos al aprobar la ficha, en un solo gate (decisión 12).
 
 #### Rúbricas (Tarea 8b; decisión 12)
 
@@ -350,8 +355,9 @@ r00t goal verificar | autorizar        # autorizar exige una TTY y una confirmac
 r00t importar-mmorch --desde <metrics.jsonl>
 r00t esquema <tipo>                    # imprime el JSON Schema del tipo
 r00t mcp                               # servidor MCP por stdio
-r00t ficha revisar --ficha <ficha.toml> [--spec <SPEC.md>]           -> Revision (ambigüedades con cita)
-r00t ficha tarea --ficha <ficha.toml> --nombre <t>                   -> borrador de tarea.toml
+r00t ficha revisar --spec <SPEC.md>                                  -> Revision (ambigüedades con cita)
+r00t ficha tarea --spec <SPEC.md> --nombre <t>                       -> borrador de tarea.toml
+r00t oraculo pendientes --tarea <t> --repo <dir>                     -> paquete para correr los tests pendientes en Colab (Tarea 7f)
 ```
 
 ### Herramientas MCP (reemplazan el ruteo del MCP `mmorch`)
@@ -381,7 +387,8 @@ r00t ficha tarea --ficha <ficha.toml> --nombre <t>                   -> borrador
 | `src/oracle/{requisitos,entrega,mutacion,mapa,informe,validez}.rs` | CREATE | Las partes de "project manager" |
 | `src/oracle/descarga.rs` | CREATE (Tarea 6b) | Fase de descarga de dependencias con red |
 | `src/ficha.rs` | CREATE (Tarea 9f) | Formato y revisión de la ficha del spec |
-| `$ROOT_HOME/oraculos/{memora,brasa}/ficha.toml` | CREATE (Opus redacta, el usuario aprueba) | Fichas de las dos tareas del banco |
+| `$ROOT_HOME/oraculos/{memora,brasa}/bootstrap/docs/SPEC.md` | UPDATE (Opus redacta `## Ficha`, el usuario aprueba) | Fichas de las dos tareas del banco, dentro del spec (decisión 20) |
+| `src/oracle/pendientes.rs` | CREATE (Tarea 7f) | Paquete de tests pendientes por entorno para Colab |
 | `src/tipos.rs` | UPDATE (Tarea 5b) | Extensión PM y de rúbricas, solo agrega |
 | `rubricas/{completitud,funciona,seguridad,entrega,pruebas,eficiencia,estructura,arquitectura,diseno}.toml` | CREATE (Opus redacta, el usuario aprueba) | Rúbricas con anclas y la cita de su estándar |
 | `src/oracle/rubrica.rs` | CREATE | Carga, hash y puntaje de las rúbricas |
@@ -459,7 +466,8 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
 - **Action**: `oracle/descarga.rs` corre antes de cada evaluación, en un contenedor aparte con red:
   - Monta el repo copiado en `/repo:ro,z` y `$ROOT_HOME/cache/<lenguaje>/` en escritura. No monta `/oraculo`.
   - En Rust corre `cargo fetch --locked`. En Python corre `pip download -r requirements.txt --index-url https://pypi.org/simple`. No corre builds ni scripts de compilación.
-  - Antes de bajar nada, lee `Cargo.lock`. Una fuente que no es crates.io, como `git+...` o un registro privado, se rechaza: el resultado es `SinVeredicto` más un hallazgo de entrega. P12 decide si esas fuentes se aceptan.
+  - Antes de bajar nada, lee `Cargo.lock`. Una fuente que no es crates.io, como `git+...` o un registro privado, se rechaza: el resultado es `SinVeredicto` más un hallazgo de entrega. Hasta la aclaración P12b, rigen solo crates.io y PyPI.
+  - En Rust baja también la base de avisos de RustSec a `$ROOT_HOME/cache/rustsec/`. La evaluación corre `cargo audit --no-fetch --db /cache/rustsec` sin red (Tarea 9). La base no se precarga en la imagen.
   - Sin `Cargo.lock`, corre `cargo generate-lockfile` y deja un hallazgo de entrega: el build no es reproducible.
   - Registra un evento `Gate` con la lista de paquetes bajados y sus fuentes (invariante de observabilidad).
   - Un registro que no responde da `SinVeredicto` con causa "infraestructura". Un paquete que no existe o fue retirado da un hallazgo de entrega: el producto no instala.
@@ -475,13 +483,13 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
 
 ### Tarea 7: Tareas memora y brasa
 - **Action**: crear `oraculos/memora` y `oraculos/brasa` desde `~/Proyectos/bench-ecc-sdlc/bootstrap/` y `.scratch/ecc-vs-sdlc/oraculo/`. Construir `imagenes/oraculo-rust`: los dos proyectos son Rust y sus oráculos son pytest de caja negra (`ORACULO_REPO`, ver `oraculo/memora/conftest.py`). brasa necesita un adaptador de CPU (lavapipe) en la imagen: ver `~/Proyectos/bench-ecc-sdlc/probe-gpu/`. Los oráculos se copian a `ROOT_HOME`, nunca al repo de Root.
-- **Requisitos**: Opus redacta `[[requisito]]` y `[[escenario]]` de cada tarea desde la spec. Cada sección de la spec da al menos un requisito. Los tests ocultos `test_m<n>_*.py` ya siguen los módulos de la spec, así que cada requisito apunta a sus archivos. El usuario aprueba la lista una vez (pregunta P3). La lista es material oculto: vive en `ROOT_HOME`, no en el repo.
+- **Requisitos**: Opus redacta `[[requisito]]` y `[[escenario]]` de cada tarea desde la spec. Cada sección de la spec da al menos un requisito. Los tests ocultos `test_m<n>_*.py` ya siguen los módulos de la spec, así que cada requisito apunta a sus archivos. El usuario aprueba los requisitos al aprobar la ficha (decisión 20, Tarea 9f). La relación requisito→test es material oculto: vive en `tarea.toml`, en `ROOT_HOME`, no en el repo.
 - **Qué mide esta tarea** (decisión 16): que el instrumento del PM sea confiable. No mide que el Oracle repita los conteos del banco. Esos conteos vienen de una sola corrida en el host, así que también son una muestra.
 - **Repeticiones**: `tarea.toml` suma `repeticiones = 3`. El Oracle corre la suite oculta esa cantidad de veces y guarda la tasa de éxito de cada test. Un test con resultados mezclados queda `inestable`. `Veredicto` suma, solo agregando, `repeticiones: u32` e `inestables: Vec<String>`.
 - **Causa de cada diferencia**: cada test que difiere del banco se clasifica con evidencia en una de cuatro causas:
   - `producto`: falla en todas las repeticiones. Es un hallazgo con impacto en su requisito.
   - `inestable`: resultados mezclados. Es un hallazgo de "comportamiento no determinista" en su requisito. El origen queda "producto", "test" o "sin determinar", según la evidencia.
-  - `entorno`: el mismo commit pasa en el host y falla en el contenedor, por ejemplo por lavapipe contra GPU. Va a `[[entorno]]` de `tarea.toml` con su motivo y no se cobra al producto. Quién aprueba la exclusión depende de P11; hasta entonces, el informe la lista con su motivo.
+  - `entorno`: el mismo commit pasa en el host y falla en el contenedor, por ejemplo por lavapipe contra GPU. Va a `[[entorno]]` de `tarea.toml` con su motivo y no se cobra al producto. El informe lo muestra como `Pendiente` (decisión 19, Tarea 7f).
   - `oraculo`: el test depende de una frase ambigua de la spec, como el orden de `spin` (ticket 08). Va a `[[oraculo_dudoso]]` con su motivo y tampoco se cobra al producto.
   Las causas y su evidencia quedan en `oraculos/<tarea>/diferencias.md`.
 - **Validate** (criterio del PM, no del compilador):
@@ -494,6 +502,28 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
 - **Action**: DeepSeek (API compatible con OpenAI) y Anthropic Messages. Reintentos y breaker como en `providers.py`. El costo sale de los precios de `root.toml`. Cada llamada registra un `Evento`. Las claves salen de variables de entorno y nunca entran a un log.
 - **Validate**: `cargo test proveedores` con un servidor HTTP falso (429 reintenta; 3 fallas abren el breaker; la clave no aparece en `eventos.jsonl`)
 
+### Tarea 8c: Ajustes a la Tarea 8 (desempates 4 y 5 de "Desempates técnicos 2")
+- **Action**: dos cambios en `proveedores`:
+  - Solo una falla transitoria cuenta para el breaker: 5xx, 429 con los reintentos agotados, timeout y error de conexión. Un 400, 401, 403, 404 o 422 no se reintenta y no cuenta. Un 401 o 403 da `ErrorProveedor::Auth`; un 400, 404 o 422 da `ErrorProveedor::Pedido`. Los dos salen con código 3.
+  - Si la llamada tuvo éxito y `registrar` falla, `llamar` devuelve `ErrorProveedor::EventoNoRegistrado { respuesta, evento, causa }`. `r00t llama` imprime la respuesta en stdout, la línea JSON del `Evento` en stderr, y sale con código 3.
+- **Validate**: `cargo test proveedores`:
+  - Cinco 401 seguidos no abren el breaker, y cada uno hace un solo pedido al servidor falso.
+  - Tres 503 seguidos abren el breaker.
+  - Con `eventos.jsonl` sin permiso de escritura, una llamada exitosa da `EventoNoRegistrado` con la respuesta completa adentro.
+
+### Tarea 7f: Repeticiones, pendientes por entorno y directorio temporal (desempates 3 y 6; decisión 19)
+- **Action**: cuatro cambios sobre la Tarea 7:
+  - **Repeticiones**: `repeticiones` pasa de 3 a 5 y vale para el contrato y para el oculto. Un test con resultados mezclados se vuelve a correr solo, hasta 10 corridas en total. Root guarda su tasa con la cota de Wilson al 90%. `tarea.toml` suma `repeticiones_inestable = 10`.
+  - **Pendiente**: un test de `[[entorno]]` no entra al nivel de su requisito y figura como `Pendiente` con su motivo. Un requisito cuya evidencia está toda en `[[entorno]]` queda `Cumplimiento::Pendiente`. `Pendiente` no baja la `Completitud` ni dispara una regla de `Decision`. El informe lo muestra junto a la decisión, en `confianza`.
+  - **Colab**: `r00t oraculo pendientes` arma un directorio con el repo, los tests pendientes y un script `correr.sh` que escribe junit. Root no lanza Colab: el usuario lo corre, o aprueba que un agente lo corra (P15). `r00t oraculo pendientes --importar <junit>` registra el resultado como evidencia de origen `colab`, con un evento `Gate`.
+  - **Temporal**: `evaluar` crea sus directorios temporales en `$ROOT_HOME/tmp/` con `tempfile::Builder::tempdir_in`, nunca en `TMPDIR` ni en `/tmp`. Al arrancar, borra los directorios de `$ROOT_HOME/tmp/` con más de 24 horas. Un disco sin espacio da `ErrorOraculo::Infra`.
+- **Validate**: `cargo test oracle`:
+  - Un test falso con tasa 0,5 queda `inestable` y llega a 10 corridas.
+  - Un test estable corre 5 veces y no más.
+  - El contrato también corre 5 veces.
+  - Un requisito con su único test en `[[entorno]]` da `Pendiente`, y la `Completitud` es la misma que sin ese requisito.
+  - Con `TMPDIR=/nada`, `evaluar` funciona y no escribe fuera de `$ROOT_HOME/tmp/`.
+
 ### Tarea 8b: Rúbricas
 - **Action**: Opus redacta las nueve rúbricas de "Rúbricas", con 3 a 6 ítems cada una. Cada ítem cita su estándar. El usuario las aprueba una vez antes de que el Oracle las use, igual que los requisitos. `oracle/rubrica.rs` las compila dentro del binario, calcula su hash y aplica la fórmula del puntaje y los topes de los ítems `mixto`.
 - **Validate**: `cargo test rubrica` cubre cuatro casos:
@@ -505,7 +535,7 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
 
 ### Tarea 9: Sondas deterministas por perfil de lenguaje
 - **Action**: `oracle/perfiles/` elige las sondas por `lenguaje`. El perfil `rust` va primero porque memora y brasa son Rust. El perfil `python` va después.
-  - **seguridad**: gitleaks, `cargo audit` (dependencias con CVE), conteo de `unsafe` y de `unwrap()`/`expect()` en código que no es de test. En Python: bandit.
+  - **seguridad**: gitleaks, `cargo audit --no-fetch` con la base de RustSec de la Tarea 6b (dependencias con CVE; sin la base, `SinVeredicto`), conteo de `unsafe` y de `unwrap()`/`expect()` en código que no es de test. En Python: bandit.
   - **estructura**: tamaño de archivos y funciones, duplicación y `cargo clippy` (solo las categorías `correctness`, `suspicious` y `perf`; el estilo no cuenta). En Python: radon.
   - **arquitectura**: grafo de módulos desde `mod`/`use` (o `import`), ciclos y reglas de `capas`.
   - **eficiencia**: el comando `[eficiencia]` contra `piso`.
@@ -520,7 +550,7 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
   - **2 Caso feliz**: todos los tests de `pruebas` verdes, pero falta algún borde o escenario.
   - **3 Cumplido**: todo `pruebas`, `bordes` y `escenarios` en verde, en todas las repeticiones.
   
-  Un requisito con un test `inestable` no supera el nivel 2, y su hallazgo entra al informe. Un test de causa `entorno` u `oraculo` se excluye del cálculo y figura en el informe como dato excluido, con su motivo.
+  Un requisito con un test `inestable` no supera el nivel 2, y su hallazgo entra al informe. Un test de causa `entorno` se excluye del cálculo y figura como `Pendiente`, con su motivo (Tarea 7f). Un test de causa `oraculo` se trata igual solo hasta que exista la ficha aclarada (Tarea 9f).
   
   El puntaje de `Completitud` es `Σ peso·nivel / (3·Σ peso)`. Los requisitos salen de la spec, y la spec sale de una sesión `/grill-me` con el usuario (decisión 12). En memora y brasa, la spec ya existe en el banco.
 - **Validate**: `r00t oraculo evaluar --tarea memora --repo .../memora-sdlc` marca `Ausente` los módulos que el SDLC no construyó (el SDLC construyó 2 de 9 módulos, según `docs/contexto/mapa.md`). memora-ecc queda con todos `Cumplido`.
@@ -543,8 +573,8 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
 - **Validate**: `cargo test --test configs` (un YAML con tabulación inválida da un hallazgo con la línea exacta; un Dockerfile `FROM python:latest` sin `USER` da 2 hallazgos; un Dockerfile correcto da 0)
 - **Calibración**: la Tarea 12 suma los tres defectos de Dockerfile y un secreto en YAML a su conjunto de mutaciones.
 
-### Tarea 9f: Ficha del spec y revisión de ambigüedades (decisión 18)
-- **Action**: `ficha.rs` carga `ficha.toml` y `r00t ficha revisar` la revisa como un PM revisa un spec antes de construir. Hay dos capas.
+### Tarea 9f: Ficha del spec y revisión de ambigüedades (decisiones 18 y 20)
+- **Action**: `ficha.rs` extrae el bloque TOML de la sección `## Ficha` de `SPEC.md`, y `r00t ficha revisar` la revisa como un PM revisa un spec antes de construir. La ficha es obligatoria: `evaluar` sin ficha válida sale con código 2. Hay dos capas.
   - **Reglas deterministas**:
     - Están las cuatro partes.
     - Cada requisito tiene `aceptacion`, y la aceptación incluye un número con unidad, un comando, una salida exacta o un id de test.
@@ -557,12 +587,17 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
   `r00t ficha tarea` arma el borrador de `tarea.toml`: `[[requisito]]` desde `[[producto.requisito]]`, `[eficiencia]` desde `[[tecnica.limite]]` y `[arquitectura]` desde `[arquitectura].capas`.
 - **Efecto en la evaluación**: un requisito con una ambigüedad abierta queda "no evaluable" y figura en `Informe.confianza` con la cita. La salida no es excluir el test: se aclara la ficha y se vuelve a evaluar. La causa `oraculo` de la Tarea 7 deja de existir una vez que la ficha se aclara.
 - **memora y brasa**: Opus redacta sus fichas desde las specs del banco. Cada ambigüedad que encuentre la revisión pasa al usuario como pregunta, y su respuesta va a la ficha. Si un test contradice la ficha aclarada, se corrige el test con la aprobación del usuario.
+  Las dos preguntas de spec que Sonnet ya hizo (el orden FIFO de `BLPOP` en memora y "espacio local" en el `spin` de brasa) entran por este camino: el usuario las responde y la respuesta va a la ficha.
+- **Gate humano**: el usuario aprueba las fichas de memora y brasa. Ese gate reemplaza la aprobación separada de requisitos (P3). Sin fichas aprobadas, la ficha obligatoria impide evaluar memora y brasa.
 - **Calibración**: la Tarea 12 suma ambigüedades inyectadas en una ficha limpia: una aceptación sin número, una palabra vaga, una frase con dos lecturas. Así mide la sensibilidad y la especificidad de `r00t ficha revisar`.
 - **Validate**: `cargo test ficha`:
   - Una ficha completa da 0 hallazgos.
   - "responde rápido" sin número da 1 hallazgo con su línea.
   - Un requisito sin `aceptacion` da 1 hallazgo.
-  - `r00t ficha tarea` sobre la ficha de memora da un `tarea.toml` que `r00t oraculo evaluar` acepta.
+  - Un `SPEC.md` sin `## Ficha` hace que `r00t oraculo evaluar` salga con código 2.
+  - Una ficha con un campo `pruebas` da 1 hallazgo: la ficha no nombra tests ocultos.
+  - `r00t ficha tarea` sobre una ficha de fixture da un `tarea.toml` que `r00t oraculo evaluar` acepta. La misma prueba sobre memora espera su ficha aprobada.
+- **Transición**: la obligación entra con esta tarea. Las tareas de antes (7f, 6b) siguen evaluando sin ficha hasta que se construya la 9f.
 
 ### Tarea 10: Juez de diseño y arquitectura
 - **Action**: el juez evalúa solo lo que ninguna sonda cubre: si el diseño y la arquitectura sirven a la spec. El juez no revisa estilo. Recibe la spec, los requisitos, el mapa del repo de `oracle/mapa.rs` (módulos, API pública, grafo de dependencias, tamaños) y los hallazgos de las sondas. Después abre los archivos que el mapa señala. El juez puntúa cada ítem `juez` o `mixto` de las rúbricas de diseño, arquitectura y estructura, con un nivel de 0 a 3. Cada nivel cita la evidencia que exige su ancla. Las anclas responden lo que un PM técnico pregunta:
@@ -621,7 +656,7 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
   - `riesgos` y `proximos_pasos` son 5 ítems como máximo, ordenados por `peso` del requisito y por severidad.
   - Un LLM escribe `resumen` y redacta los textos de `riesgos` y `proximos_pasos`. Cada oración cita un id existente; el gate de evidencia descarta las demás.
   - `r00t oraculo informe --md` imprime el informe legible: decisión, por qué, qué falta, qué arreglar primero.
-  - **Datos para decidir** (decisión 16): `Informe` suma, solo agregando, `confianza: Confianza`. `Confianza` lista las repeticiones, los tests inestables, los tests excluidos por entorno u oráculo, las dimensiones sin calibrar y las partes sin veredicto. El informe muestra la confianza junto a la decisión. Una decisión `Listo` con 3 dimensiones sin calibrar dice exactamente eso.
+  - **Datos para decidir** (decisión 16): `Informe` suma, solo agregando, `confianza: Confianza`. `Confianza` lista las repeticiones, los tests inestables con su tasa, los requisitos y tests `Pendiente` por entorno, las ambigüedades abiertas de la ficha, las dimensiones sin calibrar y las partes sin veredicto. El informe muestra la confianza junto a la decisión. Una decisión `Listo` con 3 dimensiones sin calibrar dice exactamente eso.
 - **Validate**: el informe de memora-sdlc da `NoListo` o `Bloqueado` y nombra los módulos ausentes en `proximos_pasos`. El informe de memora-ecc no inventa faltantes: cada ítem cita un id real. Un test con un LLM falso que cita un id inexistente pierde esa oración.
 
 ### Tarea 14: Route
@@ -740,7 +775,8 @@ r00t aprende --replay
 | `GOAL.md` falta cuando arranca `r00t corre` | Media | `r00t corre` corre `r00t goal verificar` primero y sale con código 3 sin GOAL autorizado |
 
 ## Acceptance
-- [ ] Las tareas 1 a 19 y sus variantes 5b, 9b, 9c, 9d, 9e, 12b y 13b están completas.
+- [ ] Las tareas 1 a 19 y sus variantes 5b, 5c, 6b, 7f, 8b, 8c, 9b, 9c, 9d, 9e, 9f, 12b y 13b están completas.
+- [ ] Cada test `Pendiente` por entorno figura en el informe con su motivo, o tiene un resultado importado de Colab.
 - [ ] La validación pasa.
 - [ ] La decisión y los niveles por requisito de memora-ecc y brasa-ecc no cambian en 3 evaluaciones seguidas.
 - [ ] Cada diferencia contra los números del banco tiene una causa y una evidencia (Tarea 7).
@@ -831,8 +867,51 @@ Pedido del usuario: "De que son los tests? ya dije no quiero un compilador de co
 - **P10.** Respondida (decisión 17): sí, con una fase de descarga previa. Es la opción a.
 - **P11.** Respondida en parte (decisión 18): las ambigüedades se corrigen en una ficha del spec, no con exclusiones. Queda abierta la parte del entorno (P13).
 
+**Preguntas respondidas**
+- **P12.** El usuario respondió "P12 si". La respuesta no elige entre las dos opciones: queda la aclaración P12b.
+- **P13.** Respondida (decisión 19): el informe dice `Pendiente`, o el test se prueba en Colab.
+- **P14.** Respondida (decisión 20): la ficha va en el spec y es obligatoria.
+
+## Desempates técnicos 2 (Opus, 2026-10-27, después de la Tarea 8)
+
+Respuestas a las preguntas de Sonnet al cerrar las Tareas 7 y 8. Los cambios de código van en las Tareas 7f y 8c.
+
+3. **Repeticiones.** Suben a 5 para el contrato y para el oculto. Con un test que falla 3 de cada 10 veces, 3 corridas lo dejan pasar como estable un 34% de las veces; 5 corridas, un 17%. Un test con resultados mezclados se vuelve a correr solo hasta 10 corridas, para medir su tasa. Correr la suite entera 10 veces cuesta mucho y no cambia la decisión del PM. El contrato también se repite: un test visible inestable es evidencia del producto, igual que uno oculto.
+4. **Breaker.** No: un 400 o un 401 no abren el breaker. El breaker protege de un servicio caído, y un 4xx dice que el pedido o la clave están mal. Reintentar un 401 no lo arregla, y abrir el breaker escondería la causa real. Un 4xx distinto de 429 no se reintenta y sale como error de infraestructura con su causa.
+5. **Evento no escribible.** Se mantiene el error, pero el error lleva la respuesta. Devolver la respuesta con un aviso deja un gasto fuera de `eventos.jsonl`: rompe el invariante de observabilidad, y Route calcula los topes con un uso menor que el real. Perder la respuesta empuja a reintentar y a pagar dos veces. Con `EventoNoRegistrado { respuesta, evento, causa }`, nada se pierde y un humano puede asentar el evento a mano desde stderr.
+6. **`TMPDIR`.** `evaluar` no depende de `TMPDIR`. Sus temporales van a `$ROOT_HOME/tmp/`, que está en el disco de `/home`. El tmpfs de `/tmp` tiene 7,7 GB y una compilación de brasa ya lo llenó.
+7. **Base de RustSec.** `cargo audit` necesita su base de avisos, y la evaluación corre sin red. La fase de descarga (Tarea 6b) la baja a la caché. No se precarga en la imagen, de acuerdo con la instrucción anterior de no precargar más dependencias.
+
+## Orden de construcción (Opus, 2026-10-27)
+
+Sonnet construye en este orden. Ninguna de estas tareas espera a un humano:
+
+1. Tarea 8c: breaker y evento no escribible.
+2. Tarea 7f: repeticiones, `Pendiente`, paquete para Colab y temporales en `ROOT_HOME`.
+3. Tarea 6b: fase de descarga, con la base de RustSec.
+4. Tarea 11: gate de evidencia. La usan 9f, 10 y 13b.
+5. Tarea 8b, solo el código: `oracle/rubrica.rs` con rúbricas de fixture en `tests/fixtures/`. Las nueve rúbricas reales las redacta Opus.
+6. Tarea 9f: ficha y revisión, con fichas de fixture.
+7. Tareas 9 y 9b: sondas del perfil `rust` y de configs.
+8. Tareas 9c, 9d y 9e, con fixtures. Su `Validate` sobre memora y brasa espera al gate G1.
+9. Tarea 10: juez, con proveedor falso y rúbricas de fixture.
+10. Tareas 14, 15, 17 y 18.
+
+Gates humanos que frenan el resto:
+
+- **G1, fichas.** Opus redacta `## Ficha` de memora y brasa, con las preguntas de ambigüedad. El usuario las responde y aprueba las fichas. Frena: el `Validate` real de 7, 9c, 13 y 13b.
+- **G2, rúbricas.** Opus redacta las nueve rúbricas. El usuario las aprueba. Frena: 12, 13 y 16.
+- **G3, calificación a ciegas.** El usuario califica los 6 paquetes de la Tarea 12b. Frena: la métrica de acuerdo de 12b.
+- **P15, Colab.** No frena nada. Sin aprobación, los tests de entorno quedan `Pendiente`.
+
+Las Tareas 12, 12b, 13, 13b, 16 y 19 van después de G1 y G2. Opus redacta G1 y G2 en otra sesión, mientras Sonnet construye la lista de arriba.
+
 **Preguntas abiertas (sin responder)**
-- **P12.** ¿La fase de descarga acepta solo crates.io y PyPI, o también dependencias por git y otros registros, como npm o un registro privado? Hasta tu respuesta, se aceptan solo crates.io y PyPI.
-- **P13.** Algunos tests fallan por el entorno, no por la spec. Un ejemplo es un render con lavapipe en lugar de una GPU. Una ficha no arregla ese caso. ¿Querés aprobar cada exclusión por entorno, o alcanza con que el informe la liste con su motivo? Hasta tu respuesta, el informe la lista.
-- **P14.** ¿La ficha es obligatoria para que Root evalúe un proyecto? Hasta tu respuesta, es opcional. Sin ficha, Root usa solo los requisitos de `tarea.toml`, y `Informe.confianza` dice "sin ficha".
+- **P12b.** Respondiste "P12 si" a una pregunta con dos opciones. ¿Cuál elegís?
+  - a) La descarga acepta solo crates.io y PyPI. Hoy rige esta.
+  - b) La descarga acepta además dependencias por git y otros registros, como npm o uno privado. Esta opción amplía la red de la zona roja.
+- **P15.** ¿Aprobás correr en Colab con GPU los tests pendientes por entorno? Hoy el único es `test_rendimiento[gpu-10000-res1]` de brasa. Una GPU T4 es gratis; una A100 o H100 consume compute units. Hay tres respuestas posibles:
+  - a) No: los tests quedan `Pendiente` y vos los corrés a mano cuando quieras.
+  - b) Sí, solo con T4, y un agente lo corre.
+  - c) Sí, con A100 o H100, y un agente lo corre. Cada corrida pide tu aprobación.
 
