@@ -3,7 +3,9 @@ use std::io;
 use thiserror::Error as ErrorDerive;
 
 use crate::goal::ErrorGoal;
+use crate::importar::ErrorImportar;
 use crate::observe::ErrorObserve;
+use crate::track::ErrorTrack;
 
 /// Errores de la biblioteca. Cada variante tiene su código de salida.
 #[derive(Debug, ErrorDerive)]
@@ -28,6 +30,10 @@ pub enum Error {
     Goal(#[from] ErrorGoal),
     #[error("{0}")]
     Observe(#[from] ErrorObserve),
+    #[error("{0}")]
+    Track(#[from] ErrorTrack),
+    #[error("{0}")]
+    Importar(#[from] ErrorImportar),
 }
 
 impl Error {
@@ -40,7 +46,9 @@ impl Error {
             | Error::ConfigLeer { .. }
             | Error::ConfigToml(_)
             | Error::Json(_)
-            | Error::Observe(_) => 3,
+            | Error::Observe(_)
+            | Error::Track(_)
+            | Error::Importar(_) => 3,
         }
     }
 }

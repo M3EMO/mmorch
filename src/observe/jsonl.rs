@@ -66,17 +66,21 @@ fn ruta_hermana(ruta: &Path, sufijo: &str) -> PathBuf {
 
 /// Lee las líneas no vacías del archivo, con lock compartido. Si no existe, da una lista vacía.
 pub fn leer_lineas(ruta: &Path) -> io::Result<Vec<String>> {
-    if !ruta.exists() {
-        return Ok(Vec::new());
-    }
-    let candado = abrir_candado(ruta)?;
-    FileExt::lock_shared(&candado)?;
-    let texto = fs::read_to_string(ruta)?;
-    Ok(texto
+    Ok(leer_texto(ruta)?
         .lines()
         .filter(|linea| !linea.trim().is_empty())
         .map(str::to_string)
         .collect())
+}
+
+/// Texto completo del archivo, con lock compartido. Si no existe, da un texto vacío.
+pub fn leer_texto(ruta: &Path) -> io::Result<String> {
+    if !ruta.exists() {
+        return Ok(String::new());
+    }
+    let candado = abrir_candado(ruta)?;
+    FileExt::lock_shared(&candado)?;
+    fs::read_to_string(ruta)
 }
 
 #[cfg(test)]
