@@ -1,5 +1,7 @@
 //! Tipos compartidos de Root. Sus formas JSON forman parte de la interfaz fija.
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -8,7 +10,9 @@ use serde_json::Value;
 /// Versión del formato de las líneas JSONL y de los objetos persistidos.
 pub const VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Rol {
     Planifica,
@@ -44,6 +48,9 @@ pub enum Dimension {
     Estructura,
     Arquitectura,
     Diseno,
+    Completitud,
+    Entrega,
+    Pruebas,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -52,6 +59,23 @@ pub enum Estado {
     Verde,
     Rojo,
     SinVeredicto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Cumplimiento {
+    Cumplido,
+    Parcial,
+    Ausente,
+    SinVeredicto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Decision {
+    Listo,
+    NoListo,
+    Bloqueado,
 }
 
 /// Quién produjo un hallazgo: una sonda determinista o un juez con modelo.
@@ -94,6 +118,21 @@ pub struct Hallazgo {
     pub cita: String,
     pub detalle: String,
     pub fuente: Fuente,
+    /// Estable: hash de dimensión, archivo y cita.
+    #[serde(default)]
+    pub id: String,
+    /// Ids de los requisitos que afecta.
+    #[serde(default)]
+    pub impacto: Vec<String>,
+}
+
+/// Nivel de un ítem de rúbrica. `nivel` va de 0 a 3.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct NivelItem {
+    pub item: String,
+    pub nivel: u8,
+    pub evidencia: Vec<String>,
+    pub fuente: Fuente,
 }
 
 /// `valor` va de 0 a 1.
@@ -103,6 +142,40 @@ pub struct Puntaje {
     pub valor: f32,
     pub calibrada: bool,
     pub exactitud_balanceada: Option<f32>,
+    #[serde(default)]
+    pub items: Vec<NivelItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct EstadoRequisito {
+    pub id: String,
+    pub titulo: String,
+    pub peso: u8,
+    pub cumplimiento: Cumplimiento,
+    /// Ids de tests, escenarios o hallazgos.
+    pub evidencia: Vec<String>,
+}
+
+/// `refs` lleva ids de requisitos o hallazgos.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Accion {
+    pub prioridad: u8,
+    pub texto: String,
+    pub refs: Vec<String>,
+}
+
+/// `riesgos` y `proximos_pasos` tienen como máximo 5 entradas.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Informe {
+    pub decision: Decision,
+    pub motivo: String,
+    pub requisitos: Vec<EstadoRequisito>,
+    /// Ids de hallazgos.
+    pub bloqueantes: Vec<String>,
+    pub riesgos: Vec<Accion>,
+    pub proximos_pasos: Vec<Accion>,
+    /// Prosa. Cada oración cita un id.
+    pub resumen: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -119,6 +192,11 @@ pub struct Veredicto {
     pub global: Option<f32>,
     pub estado: Estado,
     pub costo_usd: f64,
+    #[serde(default)]
+    pub informe: Option<Informe>,
+    /// Hashes de rúbrica, por ejemplo "diseno@<hash>".
+    #[serde(default)]
+    pub rubricas: Vec<String>,
 }
 
 impl Default for Veredicto {
@@ -135,6 +213,8 @@ impl Default for Veredicto {
             global: None,
             estado: Estado::SinVeredicto,
             costo_usd: 0.0,
+            informe: None,
+            rubricas: Vec::new(),
         }
     }
 }
@@ -211,6 +291,9 @@ pub struct Fila {
     pub commit_root: String,
     pub veredicto: Veredicto,
     pub resumen: Resumen,
+    /// Modelo que cumplió cada rol en la corrida.
+    #[serde(default)]
+    pub modelos: BTreeMap<Rol, String>,
 }
 
 impl Default for Fila {
@@ -224,6 +307,7 @@ impl Default for Fila {
             commit_root: String::new(),
             veredicto: Veredicto::default(),
             resumen: Resumen::default(),
+            modelos: BTreeMap::new(),
         }
     }
 }
@@ -286,6 +370,7 @@ mod tests {
                 valor: 0.95,
                 calibrada: true,
                 exactitud_balanceada: Some(0.97),
+                items: Vec::new(),
             }],
             hallazgos: vec![Hallazgo {
                 dimension: Dimension::Seguridad,
@@ -295,10 +380,14 @@ mod tests {
                 cita: "password = 'x'".into(),
                 detalle: "secreto literal".into(),
                 fuente: Fuente::Sonda("bandit".into()),
+                id: "h-1".into(),
+                impacto: vec!["req.login".into()],
             }],
             global: Some(0.95),
             estado: Estado::Verde,
             costo_usd: 0.42,
+            informe: None,
+            rubricas: Vec::new(),
         }
     }
 
@@ -334,6 +423,7 @@ mod tests {
             commit_root: "def5678".into(),
             veredicto: veredicto(),
             resumen: resumen(),
+            modelos: BTreeMap::new(),
         }
     }
 
@@ -437,6 +527,7 @@ mod tests {
             valor: 0.5,
             calibrada: false,
             exactitud_balanceada: None,
+            items: Vec::new(),
         });
         ida_y_vuelta(&Hallazgo {
             dimension: Dimension::Arquitectura,
@@ -448,6 +539,8 @@ mod tests {
             fuente: Fuente::Juez {
                 modelo: "deepseek-reasoner".into(),
             },
+            id: "h-7".into(),
+            impacto: vec!["req.almacen".into()],
         });
     }
 
@@ -506,5 +599,132 @@ mod tests {
         assert_eq!(valor["extra"]["reintentos"], 2);
         assert_eq!(valor["via"], "api");
         assert_eq!(valor["tipo"], "llamada");
+    }
+
+    fn informe() -> Informe {
+        Informe {
+            decision: Decision::NoListo,
+            motivo: "hay un bloqueante".into(),
+            requisitos: vec![EstadoRequisito {
+                id: "req.login".into(),
+                titulo: "Login con contraseña".into(),
+                peso: 3,
+                cumplimiento: Cumplimiento::Parcial,
+                evidencia: vec!["test_login".into()],
+            }],
+            bloqueantes: vec!["h-1".into()],
+            riesgos: vec![Accion {
+                prioridad: 1,
+                texto: "No hay límite de intentos".into(),
+                refs: vec!["req.login".into()],
+            }],
+            proximos_pasos: vec![Accion {
+                prioridad: 2,
+                texto: "Agregar prueba de bloqueo".into(),
+                refs: Vec::new(),
+            }],
+            resumen: "El login falla. Ver h-1.".into(),
+        }
+    }
+
+    #[test]
+    fn tipos_veredicto_v1_sin_campos_nuevos_se_lee() {
+        let texto = r#"{"v":1,"tarea":"memora","repo":"r","commit":"c",
+            "contrato":{"pasa":1,"total":1},"oculto":{"pasa":0,"total":0},
+            "puntajes":[{"dimension":"seguridad","valor":0.5,"calibrada":true,
+            "exactitud_balanceada":null}],
+            "hallazgos":[{"dimension":"seguridad","severidad":1,"archivo":"a.py",
+            "linea":3,"cita":"x","detalle":"d","fuente":{"Sonda":"bandit"}}],
+            "global":null,"estado":"sin_veredicto","costo_usd":0.0}"#;
+        let v: Veredicto = serde_json::from_str(texto).expect("v1 se acepta");
+        assert_eq!(v.informe, None);
+        assert!(v.rubricas.is_empty());
+        assert!(v.puntajes[0].items.is_empty());
+        assert_eq!(v.hallazgos[0].id, "");
+        assert!(v.hallazgos[0].impacto.is_empty());
+    }
+
+    #[test]
+    fn tipos_fila_v1_sin_modelos_se_lee_con_mapa_vacio() {
+        let texto = r#"{"v":1,"id":"f-1","ts":1.0,"tarea":"memora","config":"c",
+            "commit_root":"x","veredicto":{"v":1,"tarea":"memora","repo":"r",
+            "commit":"c","contrato":{"pasa":1,"total":1},"oculto":{"pasa":0,"total":0},
+            "puntajes":[],"hallazgos":[],"global":null,"estado":"sin_veredicto",
+            "costo_usd":0.0},"resumen":{"usd_api":0.0,"usd_cupo":0.0,"minutos":0.0,
+            "turnos":0,"intervenciones":0,"invalida":false}}"#;
+        let f: Fila = serde_json::from_str(texto).expect("v1 se acepta");
+        assert!(f.modelos.is_empty());
+    }
+
+    #[test]
+    fn tipos_fila_con_modelos_ida_y_vuelta() {
+        let mut f = fila();
+        f.modelos.insert(Rol::Construye, "haiku".into());
+        f.modelos.insert(Rol::Organiza, "sonnet".into());
+        ida_y_vuelta(&f);
+        let valor = serde_json::to_value(&f).unwrap();
+        assert_eq!(valor["modelos"]["construye"], "haiku");
+        assert_eq!(valor["modelos"]["organiza"], "sonnet");
+    }
+
+    #[test]
+    fn tipos_ida_y_vuelta_de_informe_en_veredicto() {
+        ida_y_vuelta(&informe());
+        let mut v = veredicto();
+        v.informe = Some(informe());
+        v.rubricas = vec!["diseno@abc".into()];
+        ida_y_vuelta(&v);
+    }
+
+    #[test]
+    fn tipos_ida_y_vuelta_de_nivelitem_requisito_y_accion() {
+        ida_y_vuelta(&NivelItem {
+            item: "diseno.modularidad".into(),
+            nivel: 2,
+            evidencia: vec!["src/tipos.rs:10".into()],
+            fuente: Fuente::Juez {
+                modelo: "deepseek-reasoner".into(),
+            },
+        });
+        ida_y_vuelta(&EstadoRequisito {
+            id: "req.login".into(),
+            titulo: "Login".into(),
+            peso: 2,
+            cumplimiento: Cumplimiento::SinVeredicto,
+            evidencia: Vec::new(),
+        });
+        ida_y_vuelta(&Accion {
+            prioridad: 3,
+            texto: "Separar el módulo".into(),
+            refs: vec!["h-2".into()],
+        });
+        for x in [
+            Cumplimiento::Cumplido,
+            Cumplimiento::Parcial,
+            Cumplimiento::Ausente,
+            Cumplimiento::SinVeredicto,
+        ] {
+            ida_y_vuelta(&x);
+        }
+        for x in [Decision::Listo, Decision::NoListo, Decision::Bloqueado] {
+            ida_y_vuelta(&x);
+        }
+    }
+
+    #[test]
+    fn tipos_dimension_nuevas_al_final_en_snake_case() {
+        for (dimension, texto) in [
+            (Dimension::Completitud, "completitud"),
+            (Dimension::Entrega, "entrega"),
+            (Dimension::Pruebas, "pruebas"),
+        ] {
+            assert_eq!(serde_json::to_value(dimension).unwrap(), texto);
+            ida_y_vuelta(&dimension);
+        }
+        assert_eq!(
+            serde_json::to_value(Dimension::Funciona).unwrap(),
+            "funciona"
+        );
+        assert_eq!(serde_json::to_value(Dimension::Diseno).unwrap(), "diseno");
     }
 }
