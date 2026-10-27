@@ -31,7 +31,7 @@ Root aprende de cada corrida: lo que registra cambia la próxima elección.
 ## Fuera de alcance
 - Multi-usuario.
 - Acciones del mundo real sin gate humano.
-- Complejidad que ninguna métrica justifica.
+- Complejidad sin un criterio declarado de cuándo funciona.
 
 ## Regla de alineación
 Un cambio pasa solo si sirve al propósito, no viola un invariante, no entra en lo que está fuera de
