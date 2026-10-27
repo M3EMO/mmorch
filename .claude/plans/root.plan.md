@@ -37,6 +37,7 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 12 | P1: se acepta la propuesta de bloqueo, más rúbricas basadas en estándares de la industria para completitud, diseño y el resto de las dimensiones. P2: el usuario califica a ciegas. P3: el usuario aprueba los requisitos; la spec sale de una sesión `/grill-me`. P4: recall ≥ 0,8. |
 | 13 | P5: kappa ponderado ≥ 0,6 por dimensión y la misma decisión en 5 de los 6 paquetes. |
 | 14 | El binario se llama `r00t`. El crate, `root.toml`, `ROOT_HOME` y las herramientas MCP `root_*` conservan el nombre `root`. |
+| 15 | P6, topes duros: API 100 USD por mes; "nube" 250 USD por mes; cupo 100 USD equivalentes por 5 horas. Un tope nunca se supera sin un gate humano. Ver Tarea 14 y P8. |
 
 ## Patterns to Mirror
 
@@ -243,7 +244,9 @@ El LLM solo escribe `resumen`, `riesgos` y `proximos_pasos`. Cada oración debe 
 
 ```rust
 // route
-pub fn elegir(p: &Pedido, pol: &Politica, uso: &Uso) -> Eleccion;            // pura, sin I/O
+pub fn elegir(p: &Pedido, pol: &Politica, uso: &Uso, b: &Balance) -> Result<Eleccion, SinPresupuesto>; // pura, sin I/O
+// observe
+pub fn uso(ahora: f64) -> Result<Uso, ErrorObserve>;   // Uso { cupo_bloque_usd, cupo_bloque_inicio, api_mes_usd, nube_mes_usd }
 // oracle
 pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo>;
 pub fn calibrar(tarea: &Tarea, dim: Dimension, n: usize, semilla: u64) -> Result<Calibracion, ErrorOraculo>;
@@ -514,11 +517,41 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
   - Los roles `Verifica` y `Juzga` siempre llevan `razonamiento = true`.
   - Un rol `Planifica`, `Organiza` o `Construye` respeta la asignación de `root.toml` (Opus, Sonnet, Haiku).
   
-  Después aplica el balance: entre los modelos con cota de Wilson mayor o igual al umbral, elige el más barato. Si el uso de cupo supera el tope de `[balance]`, prefiere la API. Si no hay datos, usa el default de `root.toml`.
+  Después aplica el balance: entre los modelos con cota de Wilson mayor o igual al umbral, elige el más barato. Si no hay datos, usa el default de `root.toml`.
+- **Topes (decisión 15)**: `[balance]` de `root.toml` reemplaza el campo `tope_cupo_usd` de la Tarea 2 por tres topes:
+  ```toml
+  [balance]
+  prefiere_api_sobre = 0.9          # fracción del tope de cupo del bloque
+  [balance.cupo]
+  tope_usd = 100.0                  # USD equivalentes de lista, por bloque de 5 horas
+  bloque_horas = 5
+  [balance.api]
+  tope_usd = 100.0                  # DeepSeek + Anthropic por API, por mes calendario
+  [balance.nube]
+  tope_usd = 250.0                  # por mes calendario; Route no lo usa hasta resolver P8
+  ```
+  - **Bloque de cupo**: imita la ventana de 5 horas del plan de Claude. Un bloque empieza con el primer evento `Via::Cupo` después de que venció el bloque anterior, y dura `bloque_horas`. `observe::uso` suma el `cost_usd` de los eventos `Cupo` del bloque vigente.
+  - **Mes calendario**: suma los eventos `Via::Api` desde el día 1 a las 00:00, hora local. Es el mismo período con que facturan los proveedores.
+  - **Reglas de `elegir`**, en orden:
+    1. `Via::Oraculo` no gasta y nunca se frena.
+    2. Si el cupo del bloque llega a `prefiere_api_sobre × tope`, Route prefiere la API, siempre que la API tenga margen.
+    3. Si el cupo del bloque llega al 100% del tope, el cupo queda prohibido hasta que termine el bloque.
+    4. Si la API del mes llega al 100% del tope, la API queda prohibida hasta el mes siguiente.
+    5. Si las dos vías están prohibidas, `elegir` devuelve `SinPresupuesto` con el próximo momento de reapertura. `r00t route` y `r00t llama` salen con código 3 y registran un evento `Gate`. Root nunca sube un tope solo: subirlo es zona roja (dinero) y lo hace el humano en `root.toml`.
+  - **Antes de cada llamada**: `r00t llama` estima el peor costo con `max_tokens` y los precios de `root.toml`. Si ese costo pasa el resto del tope, rechaza la llamada antes de enviarla. Así ninguna llamada supera el tope a mitad de camino. El módulo `proveedores` de la Tarea 8 no cambia: el chequeo vive en `r00t llama`.
+  - **Límite**: el cupo se mide en USD equivalentes de lista (`costUSD` de `claude -p`), no en el porcentaje real del plan. Con ese porcentaje, el tope de 100 USD equivalentes puede no coincidir con el corte real de Anthropic.
   Hay dos fuentes de datos para las estadísticas:
   - Los roles `Planifica`, `Organiza` y `Construye` usan las `Fila`s: el éxito es `Decision::Listo`, agrupado por `Fila.modelos[rol]` y `tarea`.
   - Los roles `Delega`, `Verifica` y `Juzga` usan los eventos `Llamada` con `extra.exito`. El chequeo posterior a la llamada escribe ese campo.
-- **Validate**: `cargo test route` con una tabla de casos (checkeable da Oráculo; un juez sin razonamiento es imposible; cupo al 95% elige la API)
+- **Validate**: `cargo test route` con una tabla de casos:
+  - Checkeable da `Oraculo`, aunque los dos topes estén agotados.
+  - Un juez sin razonamiento es imposible.
+  - Cupo del bloque en 95 USD da API.
+  - Cupo en 100 USD y API en 40 USD dan API.
+  - Cupo en 100 USD y API en 100 USD dan `SinPresupuesto`, con la hora de fin del bloque.
+  - Un evento de cupo de hace 6 horas no cuenta para el bloque vigente.
+  - Un gasto de API del mes anterior no cuenta.
+  - Una llamada estimada en 3 USD con 2 USD de margen se rechaza sin enviarse.
 
 ### Tarea 15: Aprende
 - **Action**: `recalcular` lee filas y eventos y escribe `politica.json`. `r00t aprende --replay` aprende con el primer 70% de las filas y mide el 30% restante. Compara la política aprendida contra la de `root.toml` en éxito y en USD.
@@ -636,7 +669,7 @@ Respuestas a las preguntas de Sonnet al cerrar las Tareas 1 a 5. Los cambios de 
    - `umbral_verde = 0.8`: se confirma.
    - `umbral_wilson = 0.5`: se confirma. Con la cota inferior de Wilson al 90%, 3 éxitos de 3 dan ~0,54. Un modelo entra después de 3 corridas buenas y sale ante una mala racha.
    - `prefiere_api_sobre = 0.9`: se confirma, como fracción del tope.
-   - `tope_cupo_usd = 200`: queda como valor provisorio. El monto y el período son una decisión del usuario (P6).
+   - `tope_cupo_usd = 200`: lo reemplazan los tres topes de la decisión 15 (Tarea 14).
 4. **Rotación.** Sí: `resumir` y `filas` leen los archivos `.N` en orden y después el vigente. Una corrida que cruza una rotación debe contar entera (Tarea 5c).
 5. **Detalles.**
    - `float_roundtrip`: sí. Las comparaciones exactas de costos y los snapshots de esquema no deben depender de 1 ULP.
@@ -647,6 +680,11 @@ Respuestas a las preguntas de Sonnet al cerrar las Tareas 1 a 5. Los cambios de 
 `GOAL.md` está autorizado y nombra `root goal verificar` y `root goal autorizar`. Ningún agente puede editarlo. Si el usuario quiere el nombre nuevo ahí, lo edita a mano y vuelve a correr `r00t goal autorizar`. Ver P7.
 
 **Preguntas abiertas (sin responder)**
-- **P6.** ¿Cuánto cupo por período acepta Route antes de preferir la API? El código usa 200 USD equivalentes sin período. Propuesta: 200 USD equivalentes por ventana móvil de 7 días.
+- **P6.** Respondida (decisión 15): API 100 USD por mes, nube 250 USD por mes y cupo 100 USD equivalentes por 5 horas.
+- **P8.** ¿Qué es "la nube" en el tope de 250 USD por mes? Root hoy no gasta en ninguna nube. Hay tres lecturas posibles:
+  - GPU en la nube, por ejemplo Colab, para un verificador de pesos abiertos;
+  - sesiones de Claude Code en la nube (claude.ai/code);
+  - el gasto total, que incluye la API y la nube.
+  Hasta tu respuesta, el tope queda en `root.toml` y Route no lo usa.
 - **P7.** ¿Actualizás `GOAL.md` para que diga `r00t goal` en lugar de `root goal`? El sentido no cambia, pero el texto autorizado nombra un comando que ya no existe.
 
