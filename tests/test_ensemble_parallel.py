@@ -10,7 +10,7 @@ from mmorch.patterns import Verdict
 def test_ensemble_verify_preserves_order_under_uneven_latency(monkeypatch):
     # el primer verificador tarda mas que el segundo -> si el orden dependiera del
     # orden de finalizacion (no del indice), verdicts saldria invertido.
-    delays = {"gemini-2.5-flash": 0.08, "kimi-k2.5": 0.0}
+    delays = {"gemini-2.5-flash": 0.08, "claude-haiku-5-5": 0.0}
 
     def _fake_av(art, *, gen_model, verifier_model, rubric=None, phase=""):
         time.sleep(delays.get(verifier_model, 0.0))
@@ -19,16 +19,16 @@ def test_ensemble_verify_preserves_order_under_uneven_latency(monkeypatch):
 
     monkeypatch.setattr(EN, "adversarial_verify", _fake_av)
     ev = EN.ensemble_verify("x", rubric="r", gen_model="deepseek-chat",
-                            verifier_models=["gemini-2.5-flash", "kimi-k2.5"])
-    assert [v.verifier_model for v in ev.verdicts] == ["gemini-2.5-flash", "kimi-k2.5"]
+                            verifier_models=["gemini-2.5-flash", "claude-haiku-5-5"])
+    assert [v.verifier_model for v in ev.verdicts] == ["gemini-2.5-flash", "claude-haiku-5-5"]
 
 
 def test_ensemble_verify_parallel_matches_serial_result(monkeypatch):
     """Equivalencia: mismo input -> mismo EnsembleVerdict que la version serial
     (list comprehension), solo mas rapido en wall-clock."""
-    verifier_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "kimi-k2.5"]
+    verifier_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "claude-haiku-5-5"]
     outcomes = {"gemini-2.5-flash": (True, 0.9), "gemini-2.5-flash-lite": (False, 0.3),
-                "kimi-k2.5": (True, 0.7)}
+                "claude-haiku-5-5": (True, 0.7)}
 
     def _fake_av(art, *, gen_model, verifier_model, rubric=None, phase=""):
         passed, conf = outcomes[verifier_model]
@@ -64,6 +64,6 @@ def test_ensemble_verify_faster_than_serial_would_be(monkeypatch):
     monkeypatch.setattr(EN, "adversarial_verify", _fake_av)
     t0 = time.monotonic()
     EN.ensemble_verify("x", rubric="r", gen_model="deepseek-chat",
-                       verifier_models=["gemini-2.5-flash", "gemini-2.5-flash-lite", "kimi-k2.5"])
+                       verifier_models=["gemini-2.5-flash", "gemini-2.5-flash-lite", "claude-haiku-5-5"])
     elapsed = time.monotonic() - t0
     assert elapsed < 0.25, f"esperado paralelo <0.25s, tardo {elapsed:.3f}s"

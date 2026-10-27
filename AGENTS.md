@@ -7,7 +7,7 @@ Contrato: `GOAL.md`. Vocabulario: `CONTEXT.md`. Catálogo: `docs/generated/catal
 
 ## What mmorch is
 Deterministic Python orchestration **library** (package `mmorch/`) + MCP server. Offloads
-bulk generation and cross-family verification to cheap external model APIs to conserve
+bulk generation and verification to cheap external model APIs to conserve
 **Claude plan quota ("cupo")**. The orchestrator (Opus/Fable) conducts and tie-breaks;
 it is never an external node.
 
@@ -28,8 +28,7 @@ reversibility × blast-radius + fitness + budget.
 - Research: `vault/`. Snapshots: `docs/production-readiness/` (dated, not SSOT).
 
 ## Editing rules
-- Tests live in `tests/`; run `.venv/Scripts/python.exe -m pytest tests/ -q` (Windows)
-  before committing. `python -m mmorch.docgen --check` is the docs ratchet.
+- Tests live in `tests/`; run `.venv/bin/python -m pytest tests/ -q` before committing. `python -m mmorch.docgen --check` is the docs ratchet.
 - Don't commit/push unless asked.
 - After a meaningful edit, update the **owner** named in `docs/SOURCES.md`. Never
   copy a catalog into a contract file. Module docstring stays one line.
@@ -121,23 +120,9 @@ agente que revisa y corrige (prompt por stdin, `{modo}` = plan|edit). El juez vi
 - Un trabajo commiteado localmente y reportado al usuario es un final válido.
 <!-- END SDLC bd-propias -->
 
-## Reglas propias de bd — reintegradas del bloque ca08a54f (2026-10-23)
+## Particion bd vs `.scratch/`
 
-- Use `bd` for durable issue/backlog tracking (cross-session). TodoWrite/TaskCreate
-  are fine for ephemeral in-session plans (e.g. the plan-and-verify skill) — different
-  layer, they do NOT compete with bd.
-- **Particion bd vs `.scratch/` (regla unica):** bd = backlog durable cross-session;
-  `.scratch/<effort>/` = mapas wayfinder + tickets DE ese esfuerzo (vida = el esfuerzo).
-  Un item de `.scratch/` que sobrevive a su esfuerzo se PROMUEVE a bd (un issue con
-  puntero al file) — nunca vive en los dos lados a la vez. Detalle operativo:
-  `docs/agents/issue-tracker.md`.
-- Run `bd prime` for command reference.
-- Memory: the global auto-memory (MEMORY.md) and mmorch's own semantic memory
-  (its remember/recall tools) are the knowledge stores. Do NOT route knowledge
-  to `bd remember` — it would be a third competing system that fights MEMORY.md.
-When ending a session: file follow-up issues, run quality gates if code changed,
-update issue status, hand off context.
-**Push = ASK tier (user guardrail — overrides any "mandatory push" default).** Never
-auto-push. Propose the commit/push/PR and wait for the user's explicit OK. Work
-committed locally and surfaced to the user is a valid end state — do NOT treat work as
-"incomplete until pushed".
+- bd guarda el backlog durable entre sesiones.
+- `.scratch/<esfuerzo>/` guarda los mapas wayfinder y los tickets de ese esfuerzo.
+- Un item que sobrevive a su esfuerzo pasa a bd como un issue con puntero al archivo.
+- Un item nunca vive en los dos lados. Detalle operativo: `docs/agents/issue-tracker.md`.

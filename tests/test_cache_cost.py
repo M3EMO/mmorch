@@ -13,8 +13,8 @@ def test_effective_cache_price_from_override(tmp_path):
     pj.write_text(json.dumps({"deepseek-chat": {"price_cache_in": 0.0028}}), encoding="utf-8")
     assert PR.effective_cache_price("deepseek-chat", path=pj) == 0.0028
     # sin override -> fallback a price_in (sin descuento)
-    pin, _ = PR.effective_prices("gemini-3.1-flash-lite", path=pj)
-    assert PR.effective_cache_price("gemini-3.1-flash-lite", path=pj) == pin
+    pin, _ = PR.effective_prices("gemini-2.5-flash-lite", path=pj)
+    assert PR.effective_cache_price("gemini-2.5-flash-lite", path=pj) == pin
 
 
 def test_repo_prices_json_has_deepseek_cache():

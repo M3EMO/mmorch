@@ -42,7 +42,7 @@ def test_catalog_markdown_has_modules_and_tools():
 
 
 def test_contract_hits_catches_registry_and_tools():
-    keys = ["deepseek-chat", "gemini-3.1-flash-lite"]
+    keys = ["deepseek-chat", "gemini-2.5-flash-lite"]
     hits = DG.contract_hits(
         "use deepseek-chat then mmorch_fan_out; 12 tests and 3 tools here",
         keys)

@@ -18,7 +18,7 @@ def test_judge_drops_overreaching_assumptions():
     judge = lambda p: json.dumps([{"i": 0, "keep": True}, {"i": 1, "keep": False},
                                   {"i": 2, "keep": True}])
     r = EN.enrich_prompt("hace una func", gen_fn=gen, judge_fn=judge,
-                         gen_model="deepseek-chat", judge_model="gemini-3.1-flash-lite")
+                         gen_model="deepseek-chat", judge_model="gemini-2.5-flash-lite")
     assert r["assumptions"] == ["a0 razonable", "a2 razonable"]
     assert r["rejected"] == ["a1 INVENTADO"]
     assert "a1 INVENTADO" not in r["enriched"]      # el inventado NO entra al prompt final
@@ -37,7 +37,7 @@ def test_judge_refutes_all_on_garbage():
     gen = lambda p: GEN_OUT
     judge = lambda p: "no es json"          # juez ilegible -> nadie keep (refute by default)
     r = EN.enrich_prompt("x", gen_fn=gen, judge_fn=judge,
-                         gen_model="deepseek-chat", judge_model="gemini-3.1-flash-lite")
+                         gen_model="deepseek-chat", judge_model="gemini-2.5-flash-lite")
     assert r["assumptions"] == [] and len(r["rejected"]) == 3
 
 
@@ -46,7 +46,7 @@ def test_no_assumptions_no_judge_call():
     def judge(p):
         raise AssertionError("juez NO debe llamarse sin assumptions")
     r = EN.enrich_prompt("x", gen_fn=gen, judge_fn=judge,
-                         gen_model="deepseek-chat", judge_model="gemini-3.1-flash-lite")
+                         gen_model="deepseek-chat", judge_model="gemini-2.5-flash-lite")
     assert r["assumptions"] == [] and "q?" in r["enriched"]
 
 

@@ -250,7 +250,7 @@ for a,d in [([],1),([5],0),([1,3,5,7],2),([1,1,1],0),([5,4,3,2],-1),([1,2,4,8],1
 '''),
 ]
 
-MODELS = ["glm-4.6", "deepseek-v4-pro"]
+MODELS = ["glm-5.2", "deepseek-v4-pro"]   # glm-4.6 salio del registry (2026-10-26)
 API_TIMEOUT = 300.0      # alto: GLM-4.6 razona largo en tareas duras (evita APITimeoutError)
 MAX_TRIES = 4            # reintentos ante timeout/rate-limit
 SPACING = 3.0           # seg entre calls (afloja el throttle de z.ai)

@@ -24,7 +24,7 @@ def test_ensemble_not_degraded_with_two_families(monkeypatch):
     _fake_av(monkeypatch)
     # google + moonshot = 2 familias (kimi inactivo pero family_of lo conoce)
     ev = EN.ensemble_verify("x", rubric="r", gen_model="deepseek-chat",
-                            verifier_models=["gemini-2.5-flash", "kimi-k2.5"])
+                            verifier_models=["gemini-2.5-flash", "claude-haiku-5-5"])
     assert ev.ensemble_degraded is False
 
 

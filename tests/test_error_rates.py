@@ -47,7 +47,7 @@ def _seed_log(tmp_path, monkeypatch):
     ev(model="deepseek-chat", family="deepseek", in_tokens=0, out_tokens=0, cost_usd=0.0, latency_s=0.0,
        error="BudgetExceeded", error_class="budget_cap")
     # gemini: 1 ok
-    ev(model="gemini-3.1-flash-lite", family="google", in_tokens=8, out_tokens=4, cost_usd=0.0005, latency_s=0.2)
+    ev(model="gemini-2.5-flash-lite", family="google", in_tokens=8, out_tokens=4, cost_usd=0.0005, latency_s=0.2)
     return p
 
 
@@ -58,7 +58,7 @@ def test_error_rates_per_model(tmp_path, monkeypatch):
     assert ds["calls"] == 4 and ds["rate_limit"] == 1 and ds["budget_cap"] == 1
     assert ds["rate_limit_rate"] == 0.25 and ds["budget_cap_rate"] == 0.25
     assert r["by_family"]["deepseek"]["rate_limit"] == 1
-    gm = r["by_model"]["gemini-3.1-flash-lite"]
+    gm = r["by_model"]["gemini-2.5-flash-lite"]
     assert gm["calls"] == 1 and gm["rate_limit"] == 0 and gm["error_rate"] == 0.0
 
 

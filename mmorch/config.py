@@ -12,7 +12,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class ModelSpec:
     key: str            # internal handle
-    family: str         # deepseek | zhipu activas; google y moonshot sin uso (0a6, 2026-09-22)
+    family: str         # deepseek | anthropic activas; google y zhipu sin clave: solo re-correr ablaciones del README
     provider: str       # billing/endpoint surface
     model_id: str       # API model identifier
     base_url: str | None
@@ -84,17 +84,6 @@ REGISTRY: dict[str, ModelSpec] = {
         role="SOLO ablacion: v4-pro sin thinking (gate que falla, misma familia que chat)",
         extra_body=(("thinking", {"type": "disabled"}),),
     ),
-    "gemini-3.1-flash-lite": ModelSpec(
-        key="gemini-3.1-flash-lite",
-        family="google",
-        provider="google",
-        model_id="gemini-3.1-flash-lite",
-        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-        api_key_env="GEMINI_API_KEY",
-        price_in=0.25,
-        price_out=1.50,
-        role="cross-family verifier / judge (Tier 2)",
-    ),
     "gemini-2.5-flash": ModelSpec(
         key="gemini-2.5-flash",
         family="google",
@@ -117,18 +106,6 @@ REGISTRY: dict[str, ModelSpec] = {
         price_out=0.40,
         role="routing / classification",
     ),
-    # --- Configured but inactive until keys exist (Moonshot/Kimi) ---
-    "kimi-k2.5": ModelSpec(
-        key="kimi-k2.5",
-        family="moonshot",
-        provider="moonshot",
-        model_id="kimi-k2.5",
-        base_url="https://api.moonshot.ai/v1",
-        api_key_env="MOONSHOT_API_KEY",
-        price_in=0.60,
-        price_out=3.00,
-        role="UI / bulk / synthesis / cheap nodes",
-    ),
     # j76: GLM (Zhipu/THUDM) = 3ra familia ACTIVA -> rompe el techo de decorrelacion
     # cross-family de 2 (deepseek+google) a 3. OpenAI-compatible, cero cupo. family
     # 'zhipu' es distinta de deepseek/google/moonshot -> family_of() la trata como
@@ -145,20 +122,6 @@ REGISTRY: dict[str, ModelSpec] = {
         price_in=0.20,
         price_out=1.10,
         role="3ra familia: verificador/juez cross-family + nodo barato",
-    ),
-    # bof: GLM-4.6 full = coder agentico top open-weight. Rival a MEDIR vs
-    # deepseek-v4-pro en code_loop (head-to-head por ejecucion, el bandit decide).
-    # Precios jun-2026 ref, VOLATILES — reverificar.
-    "glm-4.6": ModelSpec(
-        key="glm-4.6",
-        family="zhipu",
-        provider="zhipu",
-        model_id="glm-4.6",
-        base_url="https://api.z.ai/api/paas/v4",
-        api_key_env="ZHIPU_API_KEY",
-        price_in=0.60,
-        price_out=2.20,
-        role="coder agentico / code-heavy executor (head-to-head vs deepseek-v4-pro, bof)",
     ),
     # glm-5.2: sucesor de 4.6 a PROBAR en el pool de intuition (pedido usuario 2026-07-02).
     # 4.6 midió 34% error ventaneado (timeouts) — el health-floor lo demota solo; 5.2 entra
@@ -188,33 +151,6 @@ REGISTRY: dict[str, ModelSpec] = {
         price_out=4.40,
         role="SOLO ablacion: glm-5.2 sin thinking (gate que falla, misma familia que 4.5-air)",
         extra_body=(("thinking", {"type": "disabled"}),),
-    ),
-    # orchestration-fo1: encoder de babel. Con thinking, glm-4.5-air gastaba ~4.6k tokens de salida por chunk de 2k
-    # y pasaba los 180 s; comprimir no necesita razonar. Mismo precio que glm-4.5-air.
-    "glm-4.5-air-nothink": ModelSpec(
-        key="glm-4.5-air-nothink",
-        family="zhipu",
-        provider="zhipu",
-        model_id="glm-4.5-air",
-        base_url="https://api.z.ai/api/paas/v4",
-        api_key_env="ZHIPU_API_KEY",
-        price_in=0.20,
-        price_out=1.10,
-        role="encoder de babel (compresion sin razonamiento)",
-        extra_body=(("thinking", {"type": "disabled"}),),
-    ),
-    # orchestration-0a6: juez visual de sprites (antes gemini-2.5-flash). Vision OpenAI-compatible (image_url).
-    # Precio verificado 2026-10-07 en docs.z.ai/guides/overview/pricing.
-    "glm-4.6v": ModelSpec(
-        key="glm-4.6v",
-        family="zhipu",
-        provider="zhipu",
-        model_id="glm-4.6v",
-        base_url="https://api.z.ai/api/paas/v4",
-        api_key_env="ZHIPU_API_KEY",
-        price_in=0.30,
-        price_out=0.90,
-        role="juez visual de sprites (sombra, ticket 15)",
     ),
     # 2026-10-26: reemplaza a zhipu (cuenta sin saldo, 429 desde 2026-10-16). Precio hasta 100k tokens
     # de prompt (0.50/2.50 arriba), cache 2026-10-06 de la skill claude-api: reverificar.
