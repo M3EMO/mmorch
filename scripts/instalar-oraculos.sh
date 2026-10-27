@@ -66,7 +66,8 @@ nombre = "$t"
 lenguaje = "rust"
 imagen = "localhost/root-oraculo-rust:1"
 spec = "bootstrap/docs/SPEC.md"
-repeticiones = 3
+repeticiones = 5
+repeticiones_inestable = 10
 [contrato]
 cmd = "ORACULO_REPO=/repo CARGO_TARGET_DIR=/salida/target python3 -m pytest -q -p no:cacheprovider --junitxml=/salida/contrato.xml /oraculo/contrato"
 [oculto]

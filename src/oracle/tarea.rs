@@ -16,9 +16,12 @@ pub struct Tarea {
     pub imagen: String,
     pub containerfile: Option<String>,
     pub spec: String,
-    /// Veces que corre el oculto. Cada repetición usa un contenedor nuevo.
+    /// Veces que corre cada suite completa (contrato y oculto). Cada corrida usa un contenedor nuevo.
     #[serde(default = "repeticiones_por_defecto")]
     pub repeticiones: u32,
+    /// Corridas totales de un test inestable, contando las completas. No puede ser menor que `repeticiones`.
+    #[serde(default = "repeticiones_inestable_por_defecto")]
+    pub repeticiones_inestable: u32,
     pub contrato: Comando,
     pub oculto: Comando,
     /// Tests cuya diferencia viene del entorno (por ejemplo, lavapipe contra GPU).
@@ -36,6 +39,10 @@ pub struct Tarea {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Comando {
     pub cmd: String,
+    /// Comando de las corridas extra de los tests inestables. `{tests}` se reemplaza por los node ids.
+    /// Si falta, se deriva de `cmd`, que debe terminar en el directorio de la suite.
+    #[serde(default)]
+    pub reintento: Option<String>,
 }
 
 /// Un test excluido del cálculo, con su motivo. `test` tiene la forma `archivo::nombre`.
@@ -47,6 +54,10 @@ pub struct Exclusion {
 
 fn repeticiones_por_defecto() -> u32 {
     1
+}
+
+fn repeticiones_inestable_por_defecto() -> u32 {
+    10
 }
 
 impl Tarea {
@@ -68,6 +79,12 @@ impl Tarea {
     fn validar(&self) -> Result<(), String> {
         if self.repeticiones == 0 {
             return Err("repeticiones debe ser 1 o más".into());
+        }
+        if self.repeticiones_inestable < self.repeticiones {
+            return Err(format!(
+                "repeticiones_inestable ({}) es menor que repeticiones ({})",
+                self.repeticiones_inestable, self.repeticiones
+            ));
         }
         let mut vistos = std::collections::BTreeSet::new();
         for exclusion in self.entorno.iter().chain(&self.oraculo_dudoso) {
@@ -233,6 +250,53 @@ capas = [["protocolo"], ["comandos"]]
             Tarea::cargar_de(dir.path()),
             Err(ErrorOraculo::Tarea(_))
         ));
+    }
+
+    #[test]
+    fn repeticiones_inestable_por_defecto_es_10() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), MINIMO);
+        let t = Tarea::cargar_de(dir.path()).expect("parsea");
+        assert_eq!(t.repeticiones_inestable, 10);
+    }
+
+    #[test]
+    fn repeticiones_inestable_menor_que_repeticiones_es_error_de_carga() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let texto = MINIMO.replace(
+            "[contrato]",
+            "repeticiones = 5\nrepeticiones_inestable = 4\n\n[contrato]",
+        );
+        escribir(dir.path(), &texto);
+        assert!(matches!(
+            Tarea::cargar_de(dir.path()),
+            Err(ErrorOraculo::Tarea(_))
+        ));
+    }
+
+    #[test]
+    fn repeticiones_inestable_igual_a_repeticiones_carga() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let texto = MINIMO.replace(
+            "[contrato]",
+            "repeticiones = 5\nrepeticiones_inestable = 5\n\n[contrato]",
+        );
+        escribir(dir.path(), &texto);
+        let t = Tarea::cargar_de(dir.path()).expect("parsea");
+        assert_eq!((t.repeticiones, t.repeticiones_inestable), (5, 5));
+    }
+
+    #[test]
+    fn repeticiones_reintento_se_lee_de_la_suite() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let texto = MINIMO.replace(
+            "cmd = \"pytest -q /oraculo/oculto\"",
+            "cmd = \"pytest -q /oraculo/oculto\"\nreintento = \"pytest -q {tests}\"",
+        );
+        escribir(dir.path(), &texto);
+        let t = Tarea::cargar_de(dir.path()).expect("parsea");
+        assert_eq!(t.oculto.reintento.as_deref(), Some("pytest -q {tests}"));
+        assert_eq!(t.contrato.reintento, None);
     }
 
     #[test]

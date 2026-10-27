@@ -2,11 +2,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Mutex, MutexGuard, Once};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use root::oracle::tarea::Tarea;
 use root::oracle::{ErrorOraculo, OpcionesOraculo, evaluar};
 use root::tipos::{Conteo, Estado, Veredicto};
+use root::track::stats::wilson_inferior;
 
 const IMAGEN: &str = "docker.io/library/alpine:3.20";
 const LIMITE: Duration = Duration::from_secs(120);
@@ -49,18 +50,36 @@ fn escribe_xml(xml: &str, junit: &str) -> String {
     format!("cat > /salida/{xml} <<FIN\n{junit}\nFIN")
 }
 
-/// Escribe un `tarea.toml` con dos comandos. Incluye secciones de etapas futuras.
-fn escribir_tarea(dir: &Path, contrato: &str, oculto: &str) {
-    escribir_tarea_extra(
-        dir,
-        contrato,
-        oculto,
-        "",
-        "[[requisito]]\nid = \"R1\"\ntitulo = \"ignorado\"\n",
-    );
+/// Comando `sh` que alterna: cuenta sus corridas en `/salida/<contador>`.
+/// `t_flaky` falla en las impares, así que su muestra queda mezclada.
+fn alterna(contador: &str, xml: &str) -> String {
+    format!(
+        "n=$(cat /salida/{contador} 2>/dev/null || echo 0); n=$((n+1)); echo $n > /salida/{contador}; \
+         if [ $((n % 2)) -eq 1 ]; then F='<failure message=\"x\"/>'; else F=''; fi; \
+         cat > /salida/{xml} <<FIN\n<testsuite><testcase classname=\"tests.test_f\" name=\"t_ok\"/><testcase classname=\"tests.test_f\" name=\"t_flaky\">$F</testcase></testsuite>\nFIN"
+    )
 }
 
-/// `raiz` son claves de la raíz (van tras `spec`); `tablas` van al final del archivo.
+/// Comando `sh` que cuenta sus corridas en `/salida/<contador>`. Falla `t_cuenta` desde la corrida 6.
+/// Si el oráculo corriera más de 5 veces un test estable, ese test quedaría inestable.
+fn cuenta(contador: &str, xml: &str) -> String {
+    format!(
+        "n=$(cat /salida/{contador} 2>/dev/null || echo 0); n=$((n+1)); echo $n > /salida/{contador}; \
+         if [ $n -gt 5 ]; then F='<failure message=\"x\"/>'; else F=''; fi; \
+         cat > /salida/{xml} <<FIN\n<testsuite><testcase classname=\"tests.test_c\" name=\"t_ok\"/><testcase classname=\"tests.test_c\" name=\"t_cuenta\">$F</testcase></testsuite>\nFIN"
+    )
+}
+
+/// Bloque TOML de una suite: su `cmd` y, si hay, su `reintento`.
+fn bloque(cmd: &str, reintento: Option<&str>) -> String {
+    match reintento {
+        Some(r) => format!("cmd = '''{cmd}'''\nreintento = '''{r}'''\n"),
+        None => format!("cmd = '''{cmd}'''\n"),
+    }
+}
+
+/// Escribe un `tarea.toml` con dos suites ya armadas. `raiz` son claves de la raíz (van tras `spec`);
+/// `tablas` van al final del archivo.
 fn escribir_tarea_extra(dir: &Path, contrato: &str, oculto: &str, raiz: &str, tablas: &str) {
     let texto = format!(
         r#"nombre = "tarea-prueba"
@@ -70,15 +89,25 @@ spec = "docs/SPEC.md"
 {raiz}
 
 [contrato]
-cmd = '''{contrato}'''
-
+{contrato}
 [oculto]
-cmd = '''{oculto}'''
+{oculto}
 
 {tablas}
 "#
     );
     fs::write(dir.join("tarea.toml"), texto).expect("escribe tarea.toml");
+}
+
+/// Escribe un `tarea.toml` con dos comandos. Incluye secciones de etapas futuras.
+fn escribir_tarea(dir: &Path, contrato: &str, oculto: &str) {
+    escribir_tarea_extra(
+        dir,
+        &bloque(contrato, None),
+        &bloque(oculto, None),
+        "",
+        "[[requisito]]\nid = \"R1\"\ntitulo = \"ignorado\"\n",
+    );
 }
 
 fn tarea_con(contrato: &str, oculto: &str) -> (tempfile::TempDir, Tarea) {
@@ -92,19 +121,30 @@ fn tarea_con_extra(
     tablas: &str,
 ) -> (tempfile::TempDir, Tarea) {
     let dir = tempfile::tempdir().expect("temp dir");
-    escribir_tarea_extra(dir.path(), contrato, oculto, raiz, tablas);
+    escribir_tarea_extra(
+        dir.path(),
+        &bloque(contrato, None),
+        &bloque(oculto, None),
+        raiz,
+        tablas,
+    );
     let tarea = Tarea::cargar_de(dir.path()).expect("carga la tarea");
     (dir, tarea)
 }
 
-/// Oculto que alterna: cuenta ejecuciones en `/salida/n`. `t_flaky` falla en las impares.
-fn oculto_alterna() -> String {
-    "n=$(cat /salida/n 2>/dev/null || echo 0); n=$((n+1)); echo $n > /salida/n; \
-     if [ $((n % 2)) -eq 1 ]; then F='<failure message=\"x\"/>'; else F=''; fi; \
-     cat > /salida/oculto.xml <<FIN
-<testsuite><testcase classname=\"tests.test_f\" name=\"t_ok\"/><testcase classname=\"tests.test_f\" name=\"t_flaky\">$F</testcase></testsuite>
-FIN"
-        .to_string()
+/// Tarea con contrato que pasa y oculto alterno, con su `reintento` igual al comando.
+fn tarea_alterna(raiz: &str, tablas: &str) -> (tempfile::TempDir, Tarea) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let oculto = alterna("n", "oculto.xml");
+    escribir_tarea_extra(
+        dir.path(),
+        &bloque(&escribe_xml("contrato.xml", JUNIT_DOS_OK), None),
+        &bloque(&oculto, Some(&oculto)),
+        raiz,
+        tablas,
+    );
+    let tarea = Tarea::cargar_de(dir.path()).expect("carga la tarea");
+    (dir, tarea)
 }
 
 fn repo_con_contenido() -> tempfile::TempDir {
@@ -119,8 +159,12 @@ fn repo_con_contenido() -> tempfile::TempDir {
     repo
 }
 
-fn opciones() -> OpcionesOraculo {
-    OpcionesOraculo { timeout: LIMITE }
+/// Opciones con `home` propio: el test nunca escribe en el ROOT_HOME real.
+fn opciones(home: &Path) -> OpcionesOraculo {
+    OpcionesOraculo {
+        timeout: LIMITE,
+        home: Some(home.to_path_buf()),
+    }
 }
 
 fn listar(dir: &Path) -> Vec<PathBuf> {
@@ -136,12 +180,38 @@ fn listar(dir: &Path) -> Vec<PathBuf> {
     salida
 }
 
+/// Nombres de las carpetas `evaluar-*` que hay directamente en `dir`.
+fn temporales_en(dir: &Path) -> Vec<String> {
+    let Ok(entradas) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut nombres: Vec<String> = entradas
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("evaluar-"))
+        .collect();
+    nombres.sort();
+    nombres
+}
+
+fn poner_mtime(ruta: &Path, cuando: SystemTime) {
+    fs::File::open(ruta)
+        .expect("abre la carpeta")
+        .set_modified(cuando)
+        .expect("fija la fecha");
+}
+
 fn root_cli(root_home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_r00t"))
-        .env("ROOT_HOME", root_home)
-        .args(args)
-        .output()
-        .expect("no se pudo ejecutar el binario r00t")
+    root_cli_env(root_home, &[], args)
+}
+
+fn root_cli_env(root_home: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
+    let mut orden = Command::new(env!("CARGO_BIN_EXE_r00t"));
+    orden.env("ROOT_HOME", root_home).args(args);
+    for (clave, valor) in env {
+        orden.env(clave, valor);
+    }
+    orden.output().expect("no se pudo ejecutar el binario r00t")
 }
 
 #[test]
@@ -152,7 +222,8 @@ fn oraculo_todo_pasa_da_conteos_completos_y_sin_veredicto() {
         &escribe_xml("oculto.xml", JUNIT_DOS_OK),
     );
     let repo = repo_con_contenido();
-    let v: Veredicto = evaluar(repo.path(), &tarea, &opciones()).expect("evalúa");
+    let home = tempfile::tempdir().expect("home");
+    let v: Veredicto = evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa");
     assert_eq!(v.contrato, Conteo { pasa: 2, total: 2 });
     assert_eq!(v.oculto, Conteo { pasa: 2, total: 2 });
     assert_eq!(v.estado, Estado::SinVeredicto);
@@ -168,7 +239,8 @@ fn oraculo_una_falla_en_oculto_da_rojo() {
         &escribe_xml("oculto.xml", JUNIT_UNA_FALLA),
     );
     let repo = repo_con_contenido();
-    let v = evaluar(repo.path(), &tarea, &opciones()).expect("evalúa");
+    let home = tempfile::tempdir().expect("home");
+    let v = evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa");
     assert_eq!(v.oculto, Conteo { pasa: 1, total: 2 });
     assert_eq!(v.estado, Estado::Rojo);
 }
@@ -178,7 +250,8 @@ fn oraculo_comando_sin_xml_da_infra_y_no_hay_veredicto() {
     let _g = preparar();
     let (_dir, tarea) = tarea_con(&escribe_xml("contrato.xml", JUNIT_DOS_OK), "true");
     let repo = repo_con_contenido();
-    let res = evaluar(repo.path(), &tarea, &opciones());
+    let home = tempfile::tempdir().expect("home");
+    let res = evaluar(repo.path(), &tarea, &opciones(home.path()));
     assert!(
         matches!(res, Err(ErrorOraculo::Infra(_))),
         "se esperaba Infra sin veredicto, llegó {res:?}"
@@ -202,8 +275,9 @@ echo '</testsuite>'; } > /salida/contrato.xml";
     );
     let repo = repo_con_contenido();
     let antes = listar(repo.path());
+    let home = tempfile::tempdir().expect("home");
 
-    let v = evaluar(repo.path(), &tarea, &opciones()).expect("evalúa");
+    let v = evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa");
 
     assert_eq!(
         v.contrato,
@@ -285,14 +359,10 @@ fn oraculo_cli_evaluar_sin_json_imprime_una_linea_y_sale_con_1_si_hay_rojo() {
 #[test]
 fn inestable_tres_repeticiones_marca_el_test_que_alterna() {
     let _g = preparar();
-    let (_dir, tarea) = tarea_con_extra(
-        &escribe_xml("contrato.xml", JUNIT_DOS_OK),
-        &oculto_alterna(),
-        "repeticiones = 3",
-        "",
-    );
+    let (_dir, tarea) = tarea_alterna("repeticiones = 3", "");
     let repo = repo_con_contenido();
-    let v = evaluar(repo.path(), &tarea, &opciones()).expect("evalúa");
+    let home = tempfile::tempdir().expect("home");
+    let v = evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa");
     assert_eq!(v.repeticiones, 3);
     assert_eq!(v.inestables, vec!["test_f::t_flaky".to_string()]);
     assert_eq!(v.oculto, Conteo { pasa: 1, total: 2 });
@@ -300,19 +370,108 @@ fn inestable_tres_repeticiones_marca_el_test_que_alterna() {
 }
 
 #[test]
-fn exclusion_oraculo_dudoso_saca_al_test_de_los_inestables() {
+fn inestable_tasa_llega_a_10_corridas_y_su_wilson_es_consistente() {
     let _g = preparar();
-    let (_dir, tarea) = tarea_con_extra(
-        &escribe_xml("contrato.xml", JUNIT_DOS_OK),
-        &oculto_alterna(),
+    let (_dir, tarea) = tarea_alterna("repeticiones = 5\nrepeticiones_inestable = 10", "");
+    let repo = repo_con_contenido();
+    let home = tempfile::tempdir().expect("home");
+    let v = evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa");
+    assert_eq!(v.repeticiones, 5, "las corridas completas");
+    assert_eq!(v.inestables, vec!["test_f::t_flaky".to_string()]);
+    let tasa = &v.tasas["oculto:test_f::t_flaky"];
+    assert_eq!(tasa.total, 10, "5 completas más 5 extra");
+    assert_eq!(tasa.pasa, 5, "pasa en las pares");
+    assert!((tasa.wilson_inf - wilson_inferior(5, 10)).abs() < 1e-12);
+    assert!(
+        !v.tasas.contains_key("oculto:test_f::t_ok"),
+        "los estables no tienen tasa"
+    );
+}
+
+#[test]
+fn inestable_exclusion_oraculo_dudoso_saca_al_test_de_los_inestables() {
+    let _g = preparar();
+    let (_dir, tarea) = tarea_alterna(
         "repeticiones = 3",
         "[[oraculo_dudoso]]\ntest = \"test_f::t_flaky\"\nmotivo = \"la spec no fija el orden\"\n",
     );
     let repo = repo_con_contenido();
-    let v = evaluar(repo.path(), &tarea, &opciones()).expect("evalúa");
+    let home = tempfile::tempdir().expect("home");
+    let v = evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa");
     assert!(v.inestables.is_empty());
+    assert!(v.tasas.is_empty());
     assert_eq!(v.oculto, Conteo { pasa: 1, total: 1 });
     assert_eq!(v.estado, Estado::SinVeredicto);
+}
+
+#[test]
+fn inestable_contrato_figura_y_no_completa_el_contrato() {
+    let _g = preparar();
+    let dir = tempfile::tempdir().expect("temp dir");
+    escribir_tarea_extra(
+        dir.path(),
+        &bloque(
+            &alterna("n-c", "contrato.xml"),
+            Some(&alterna("n-c", "contrato.xml")),
+        ),
+        &bloque(&escribe_xml("oculto.xml", JUNIT_DOS_OK), None),
+        "repeticiones = 3",
+        "",
+    );
+    let tarea = Tarea::cargar_de(dir.path()).expect("carga");
+    let repo = repo_con_contenido();
+    let home = tempfile::tempdir().expect("home");
+    let v = evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa");
+    assert_eq!(v.inestables_contrato, vec!["test_f::t_flaky".to_string()]);
+    assert_eq!(
+        v.contrato,
+        Conteo { pasa: 1, total: 2 },
+        "el inestable no pasa"
+    );
+    assert!(v.inestables.is_empty(), "el oculto no tiene inestables");
+    assert!(v.tasas.contains_key("contrato:test_f::t_flaky"));
+    assert_eq!(v.estado, Estado::Rojo);
+}
+
+#[test]
+fn repeticiones_estable_corre_5_veces_y_no_hay_extras() {
+    let _g = preparar();
+    let (_dir, tarea) = tarea_con_extra(
+        &escribe_xml("contrato.xml", JUNIT_DOS_OK),
+        &cuenta("n-oculto", "oculto.xml"),
+        "repeticiones = 5",
+        "",
+    );
+    let repo = repo_con_contenido();
+    let home = tempfile::tempdir().expect("home");
+    let v = evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa");
+    assert_eq!(v.repeticiones, 5);
+    assert_eq!(v.oculto, Conteo { pasa: 2, total: 2 });
+    assert!(
+        v.inestables.is_empty(),
+        "un extra habría vuelto inestable a t_cuenta"
+    );
+    assert!(v.tasas.is_empty());
+}
+
+#[test]
+fn repeticiones_contrato_corre_5_veces_y_no_hay_extras() {
+    let _g = preparar();
+    let (_dir, tarea) = tarea_con_extra(
+        &cuenta("n-contrato", "contrato.xml"),
+        &escribe_xml("oculto.xml", JUNIT_DOS_OK),
+        "repeticiones = 5",
+        "",
+    );
+    let repo = repo_con_contenido();
+    let home = tempfile::tempdir().expect("home");
+    let v = evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa");
+    assert_eq!(v.repeticiones, 5);
+    assert_eq!(v.contrato, Conteo { pasa: 2, total: 2 });
+    assert!(
+        v.inestables_contrato.is_empty(),
+        "un extra habría vuelto inestable a t_cuenta"
+    );
 }
 
 #[test]
@@ -331,7 +490,8 @@ fn repeticiones_sin_xml_en_una_repeticion_es_infra() {
         "",
     );
     let repo = repo_con_contenido();
-    let res = evaluar(repo.path(), &tarea, &opciones());
+    let home = tempfile::tempdir().expect("home");
+    let res = evaluar(repo.path(), &tarea, &opciones(home.path()));
     assert!(
         matches!(res, Err(ErrorOraculo::Infra(_))),
         "una repetición sin XML es Infra, llegó {res:?}"
@@ -344,10 +504,11 @@ fn repeticiones_cli_json_imprime_repeticiones_e_inestables() {
     let home = tempfile::tempdir().expect("temp dir");
     let dir = home.path().join("oraculos").join("tarea-prueba");
     fs::create_dir_all(&dir).expect("dir");
+    let oculto = alterna("n", "oculto.xml");
     escribir_tarea_extra(
         &dir,
-        &escribe_xml("contrato.xml", JUNIT_DOS_OK),
-        &oculto_alterna(),
+        &bloque(&escribe_xml("contrato.xml", JUNIT_DOS_OK), None),
+        &bloque(&oculto, Some(&oculto)),
         "repeticiones = 3",
         "",
     );
@@ -369,4 +530,96 @@ fn repeticiones_cli_json_imprime_repeticiones_e_inestables() {
         serde_json::from_slice(&salida.stdout).expect("stdout es un objeto JSON");
     assert_eq!(json["repeticiones"], 3);
     assert_eq!(json["inestables"], serde_json::json!(["test_f::t_flaky"]));
+    assert_eq!(
+        json["tasas"]["oculto:test_f::t_flaky"]["total"], 10,
+        "3 completas más 7 extra"
+    );
+}
+
+#[test]
+fn temporales_evaluar_con_tmpdir_inexistente_usa_root_home() {
+    let _g = preparar();
+    let home = tempfile::tempdir().expect("temp dir");
+    let dir = home.path().join("oraculos").join("tarea-prueba");
+    fs::create_dir_all(&dir).expect("dir");
+    escribir_tarea(
+        &dir,
+        &escribe_xml("contrato.xml", JUNIT_DOS_OK),
+        &escribe_xml("oculto.xml", JUNIT_DOS_OK),
+    );
+    let repo = repo_con_contenido();
+    let ruta = repo.path().to_str().expect("ruta UTF-8").to_string();
+    let antes = temporales_en(Path::new("/tmp"));
+    let salida = root_cli_env(
+        home.path(),
+        &[("TMPDIR", "/nada")],
+        &[
+            "--json",
+            "oraculo",
+            "evaluar",
+            "--tarea",
+            "tarea-prueba",
+            "--repo",
+            &ruta,
+        ],
+    );
+    assert_eq!(salida.status.code(), Some(3), "sin veredicto sale con 3");
+    let json: serde_json::Value =
+        serde_json::from_slice(&salida.stdout).expect("stdout es un objeto JSON");
+    assert_eq!(json["contrato"]["total"], 2);
+    assert!(home.path().join("tmp").is_dir(), "usa ROOT_HOME/tmp");
+    assert!(
+        temporales_en(&home.path().join("tmp")).is_empty(),
+        "no queda ningún temporal"
+    );
+    assert_eq!(
+        temporales_en(Path::new("/tmp")),
+        antes,
+        "/tmp no recibe temporales"
+    );
+}
+
+#[test]
+fn temporales_evaluar_borra_las_carpetas_viejas_de_home_tmp() {
+    let _g = preparar();
+    let home = tempfile::tempdir().expect("home");
+    let tmp = home.path().join("tmp");
+    let viejo = tmp.join("evaluar-viejo");
+    let reciente = tmp.join("evaluar-reciente");
+    let ajeno = tmp.join("ajeno.txt");
+    fs::create_dir_all(&viejo).expect("dir");
+    fs::write(viejo.join("resto"), "x").expect("escribe");
+    fs::create_dir_all(&reciente).expect("dir");
+    fs::write(&ajeno, "x").expect("escribe");
+    poner_mtime(&viejo, SystemTime::now() - Duration::from_secs(25 * 3600));
+
+    let (_dir, tarea) = tarea_con(
+        &escribe_xml("contrato.xml", JUNIT_DOS_OK),
+        &escribe_xml("oculto.xml", JUNIT_DOS_OK),
+    );
+    let repo = repo_con_contenido();
+    evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa");
+
+    assert!(
+        !viejo.exists(),
+        "la carpeta de más de 24 h se borra al arrancar"
+    );
+    assert!(reciente.exists(), "la carpeta reciente se conserva");
+    assert!(ajeno.exists(), "un archivo ajeno se conserva");
+}
+
+#[test]
+fn temporales_home_tmp_como_archivo_da_infra() {
+    let home = tempfile::tempdir().expect("home");
+    fs::write(home.path().join("tmp"), "no es carpeta").expect("escribe");
+    let (_dir, tarea) = tarea_con(
+        &escribe_xml("contrato.xml", JUNIT_DOS_OK),
+        &escribe_xml("oculto.xml", JUNIT_DOS_OK),
+    );
+    let repo = repo_con_contenido();
+    let res = evaluar(repo.path(), &tarea, &opciones(home.path()));
+    assert!(
+        matches!(res, Err(ErrorOraculo::Infra(_))),
+        "un temporal que no se crea es Infra, llegó {res:?}"
+    );
 }

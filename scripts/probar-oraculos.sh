@@ -65,7 +65,8 @@ for t in $TAREAS; do
     chequeo "$t: tarea.toml existe" test -f "$D/tarea.toml"
     chequeo "$t: tarea.toml parsea como TOML" \
         python3 -c 'import tomllib,sys; tomllib.load(open(sys.argv[1],"rb"))' "$D/tarea.toml"
-    chequeo "$t: tarea.toml trae repeticiones = 3" grep -qx 'repeticiones = 3' "$D/tarea.toml"
+    chequeo "$t: tarea.toml trae repeticiones = 5" grep -qx 'repeticiones = 5' "$D/tarea.toml"
+    chequeo "$t: tarea.toml trae repeticiones_inestable = 10" grep -qx 'repeticiones_inestable = 10' "$D/tarea.toml"
     chequeo "$t: bootstrap/docs/SPEC.md existe" test -f "$D/bootstrap/docs/SPEC.md"
     chequeo "$t: contrato/conftest.py existe" test -f "$D/contrato/conftest.py"
     chequeo "$t: contrato/test_m1_*.py existe" existe_glob "$D/contrato/test_m1_*.py"

@@ -178,6 +178,14 @@ pub struct Informe {
     pub resumen: String,
 }
 
+/// Tasa de aprobación de un test inestable, con la cota inferior de Wilson al 90%.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TasaTest {
+    pub pasa: u32,
+    pub total: u32,
+    pub wilson_inf: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Veredicto {
     #[serde(deserialize_with = "version_valida")]
@@ -203,6 +211,12 @@ pub struct Veredicto {
     /// Ids ordenados de los tests inestables del oculto. Un veredicto viejo lee vacío.
     #[serde(default)]
     pub inestables: Vec<String>,
+    /// Ids ordenados de los tests inestables del contrato. Un veredicto viejo lee vacío.
+    #[serde(default)]
+    pub inestables_contrato: Vec<String>,
+    /// Tasa de cada test inestable. Claves `contrato:<id>` u `oculto:<id>`. Un veredicto viejo lee vacío.
+    #[serde(default)]
+    pub tasas: BTreeMap<String, TasaTest>,
 }
 
 impl Default for Veredicto {
@@ -223,6 +237,8 @@ impl Default for Veredicto {
             rubricas: Vec::new(),
             repeticiones: 1,
             inestables: Vec::new(),
+            inestables_contrato: Vec::new(),
+            tasas: BTreeMap::new(),
         }
     }
 }
@@ -398,6 +414,8 @@ mod tests {
             rubricas: Vec::new(),
             repeticiones: 3,
             inestables: vec!["test_f::t_flaky".into()],
+            inestables_contrato: Vec::new(),
+            tasas: BTreeMap::new(),
         }
     }
 
@@ -663,6 +681,31 @@ mod tests {
         let v: Veredicto = serde_json::from_str(texto).expect("v1 se acepta");
         assert_eq!(v.repeticiones, 0);
         assert!(v.inestables.is_empty());
+    }
+
+    #[test]
+    fn inestable_veredicto_viejo_lee_tasas_y_contrato_vacios() {
+        let texto = r#"{"v":1,"tarea":"t","repo":"r","commit":"","contrato":{"pasa":1,"total":1},
+            "oculto":{"pasa":1,"total":1},"puntajes":[],"hallazgos":[],"global":null,
+            "estado":"sin_veredicto","costo_usd":0.0}"#;
+        let v: Veredicto = serde_json::from_str(texto).expect("v1 se acepta");
+        assert!(v.tasas.is_empty());
+        assert!(v.inestables_contrato.is_empty());
+    }
+
+    #[test]
+    fn inestable_tasa_test_ida_y_vuelta_en_veredicto() {
+        let mut v = Veredicto::default();
+        v.tasas.insert(
+            "oculto:test_f::t_flaky".into(),
+            TasaTest {
+                pasa: 5,
+                total: 10,
+                wilson_inf: 0.3,
+            },
+        );
+        v.inestables_contrato = vec!["test_c::t".into()];
+        ida_y_vuelta(&v);
     }
 
     #[test]
