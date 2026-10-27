@@ -14,11 +14,54 @@ pub mod track;
 pub use cli::Cli;
 pub use error::Error;
 
-use cli::{Comando, GoalAccion, ObservaAccion, TrackAccion};
-use tipos::Fila;
+use std::path::Path;
 
-/// Ejecuta un subcomando. Por ahora solo `esquema`, `goal`, `observa`, `track` e `importar-mmorch` tienen lógica.
-pub fn ejecutar(cli: &Cli) -> Result<(), Error> {
+use cli::{Comando, GoalAccion, ObservaAccion, OraculoAccion, TrackAccion};
+use oracle::OpcionesOraculo;
+use oracle::tarea::Tarea;
+use tipos::{Estado, Fila};
+
+/// Ejecuta un subcomando y devuelve su código de salida. Los errores salen por `Err`.
+/// Por ahora `oraculo evaluar`, `esquema`, `goal`, `observa`, `track` e `importar-mmorch` tienen lógica.
+pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
+    match &cli.comando {
+        Comando::Oraculo {
+            accion: OraculoAccion::Evaluar { tarea, repo },
+        } => oraculo_evaluar(cli.json, tarea, repo),
+        _ => ejecutar_sin_codigo(cli).map(|()| 0),
+    }
+}
+
+/// `oraculo evaluar`: imprime el veredicto. El código de salida sale de su estado.
+fn oraculo_evaluar(json: bool, nombre: &str, repo: &Path) -> Result<u8, Error> {
+    let tarea = Tarea::cargar(nombre)?;
+    let veredicto = oracle::evaluar(repo, &tarea, &OpcionesOraculo::default())?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&veredicto)?);
+    } else {
+        println!(
+            "{}: contrato {}/{}, oculto {}/{}, estado {}",
+            repo.display(),
+            veredicto.contrato.pasa,
+            veredicto.contrato.total,
+            veredicto.oculto.pasa,
+            veredicto.oculto.total,
+            etiqueta_estado(veredicto.estado)
+        );
+    }
+    Ok(oracle::codigo_de_estado(veredicto.estado))
+}
+
+fn etiqueta_estado(estado: Estado) -> &'static str {
+    match estado {
+        Estado::Verde => "verde",
+        Estado::Rojo => "rojo",
+        Estado::SinVeredicto => "sin_veredicto",
+    }
+}
+
+/// Subcomandos sin código propio: salen con 0 o con error.
+fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
     match &cli.comando {
         Comando::Esquema { tipo } => {
             println!("{}", esquema::json(tipo)?);

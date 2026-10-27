@@ -62,3 +62,10 @@ RUN chmod -R a+rX /cargo
 
 # Debian instala lvp_icd.json. La ruta de VK_ICD_FILENAMES usa el nombre de Fedora.
 RUN ln -s lvp_icd.json /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+
+# Módulo redis que usa memora (test_redis_py). Versión medida en el banco: 8.1.0.
+# Capa al final: no invalida las capas de Cargo de arriba.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3-pip \
+ && rm -rf /var/lib/apt/lists/* \
+ && PIP_ROOT_USER_ACTION=ignore pip install --no-cache-dir --break-system-packages redis==8.1.0

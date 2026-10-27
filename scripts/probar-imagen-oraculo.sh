@@ -76,6 +76,7 @@ chequeo "(c) existe $LVP" correr "$IMAGEN" test -f "$LVP"
 chequeo "(d) build offline bootstrap/memora" build_offline memora "$BANCO/bootstrap/memora" memora
 chequeo "(d) build offline bootstrap/brasa" build_offline brasa "$BANCO/bootstrap/brasa" brasa
 chequeo "(e) probe-gpu build offline y usa llvmpipe" gpu_llvmpipe
+chequeo "(f) python3 importa redis 8.1.0" correr "$IMAGEN" python3 -c 'import redis; assert redis.__version__ == "8.1.0"'
 
 if [ "$FALLOS" -gt 0 ]; then
     echo "$FALLOS chequeo(s) con FALLA"
