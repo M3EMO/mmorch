@@ -33,6 +33,19 @@ pub struct Config {
     pub balance: Balance,
     pub umbral_verde: f32,
     pub umbral_wilson: f32,
+    pub proveedores: ConfigProveedores,
+}
+
+/// Sección `[proveedores]`: URLs de las APIs, espera base de reintentos y timeout por intento.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct ConfigProveedores {
+    pub deepseek_url: String,
+    pub anthropic_url: String,
+    /// Espera antes del primer reintento, en milisegundos. Cada reintento la duplica.
+    pub espera_base_ms: u64,
+    /// Tiempo máximo de cada intento HTTP, en segundos.
+    pub timeout_s: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -66,6 +79,18 @@ impl Default for Config {
             balance: Balance::default(),
             umbral_verde: 0.8,
             umbral_wilson: 0.5,
+            proveedores: ConfigProveedores::default(),
+        }
+    }
+}
+
+impl Default for ConfigProveedores {
+    fn default() -> Self {
+        ConfigProveedores {
+            deepseek_url: "https://api.deepseek.com".into(),
+            anthropic_url: "https://api.anthropic.com".into(),
+            espera_base_ms: 500,
+            timeout_s: 120,
         }
     }
 }
@@ -137,6 +162,10 @@ usd_salida = 5.0
 [balance]
 tope_cupo_usd = 50.0
 prefiere_api_sobre = 0.8
+
+[proveedores]
+deepseek_url = "http://127.0.0.1:9/ds"
+espera_base_ms = 1
 "#;
         let config = Config::desde_texto(texto).expect("debe parsear");
         assert_eq!(config.modelos.construye, "sonnet");
@@ -146,6 +175,9 @@ prefiere_api_sobre = 0.8
         assert_eq!(config.balance.prefiere_api_sobre, 0.8);
         assert_eq!(config.umbral_verde, 0.75);
         assert_eq!(config.umbral_wilson, 0.6);
+        assert_eq!(config.proveedores.deepseek_url, "http://127.0.0.1:9/ds");
+        assert_eq!(config.proveedores.espera_base_ms, 1);
+        assert_eq!(config.proveedores.timeout_s, 120);
     }
 
     #[test]

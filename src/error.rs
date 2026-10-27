@@ -6,6 +6,7 @@ use crate::goal::ErrorGoal;
 use crate::importar::ErrorImportar;
 use crate::observe::ErrorObserve;
 use crate::oracle::ErrorOraculo;
+use crate::proveedores::ErrorProveedor;
 use crate::track::ErrorTrack;
 
 /// Errores de la biblioteca. Cada variante tiene su código de salida.
@@ -37,6 +38,8 @@ pub enum Error {
     Importar(#[from] ErrorImportar),
     #[error("{0}")]
     Oraculo(#[from] ErrorOraculo),
+    #[error("{0}")]
+    Proveedor(#[from] ErrorProveedor),
 }
 
 impl Error {
@@ -52,7 +55,8 @@ impl Error {
             | Error::Observe(_)
             | Error::Track(_)
             | Error::Importar(_)
-            | Error::Oraculo(_) => 3,
+            | Error::Oraculo(_)
+            | Error::Proveedor(_) => 3,
         }
     }
 }

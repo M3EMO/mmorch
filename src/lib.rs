@@ -8,6 +8,7 @@ pub mod goal;
 pub mod importar;
 pub mod observe;
 pub mod oracle;
+pub mod proveedores;
 pub mod tipos;
 pub mod track;
 
