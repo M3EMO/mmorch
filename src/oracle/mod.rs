@@ -1,6 +1,7 @@
 //! Oracle: corre los tests en un contenedor sin red y cuenta el resultado desde junit.
 
 pub mod contenedor;
+pub mod descarga;
 pub mod junit;
 pub mod pendientes;
 pub mod tarea;
@@ -16,7 +17,7 @@ use std::time::{Duration, SystemTime};
 use thiserror::Error as ErrorDerive;
 
 use crate::config::root_home;
-use crate::tipos::{Conteo, Estado, TasaTest, VERSION, Veredicto};
+use crate::tipos::{Conteo, Estado, Hallazgo, TasaTest, VERSION, Veredicto};
 use crate::track::stats::wilson_inferior;
 use junit::{Junit, ResultadoTest};
 use tarea::{Comando, Tarea};
@@ -69,12 +70,15 @@ impl Default for OpcionesOraculo {
     }
 }
 
-/// Lo que cada suite necesita para correr: la copia del repo, la salida y las opciones.
+/// Lo que cada suite necesita para correr: la copia del repo, la salida, las opciones
+/// y las cachés que la fase de descarga dejó listas.
 struct Corrida<'a> {
     repo: &'a Path,
     tarea: &'a Tarea,
     salida: &'a Path,
     o: &'a OpcionesOraculo,
+    cache: Option<PathBuf>,
+    rustsec: Option<PathBuf>,
 }
 
 /// Evalúa `repo` con la tarea: corre el contrato y el oculto sobre una copia del repo.
@@ -91,6 +95,18 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
     let copia = temporal(&tmp).map_err(|e| infra("directorio temporal", e))?;
     let repo_copia = copia.path().join("repo");
     copiar_repo(&repo, &repo_copia).map_err(|e| infra("copia del repo", e))?;
+    // La descarga va antes de cualquier suite: es la única fase con red (decisión 17).
+    let (cache, rustsec, hallazgos) =
+        match descarga::preparar(&repo_copia, tarea, &home, o.timeout)? {
+            descarga::Preparacion::Lista {
+                cache,
+                rustsec,
+                hallazgos,
+            } => (cache, rustsec, hallazgos),
+            descarga::Preparacion::SinVeredicto(hallazgos) => {
+                return Ok(sin_veredicto(&repo, tarea, &colab, hallazgos));
+            }
+        };
     let salida = temporal(&tmp).map_err(|e| infra("directorio de salida", e))?;
     // Podman rootless: si el contenedor corre con otro uid, la salida debe ser escribible por todos.
     fs::set_permissions(salida.path(), fs::Permissions::from_mode(0o777))
@@ -101,6 +117,8 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
         tarea,
         salida: salida.path(),
         o,
+        cache,
+        rustsec,
     };
     // El contrato no tiene exclusiones: solo el oculto las usa.
     let contrato = evaluar_suite(
@@ -133,7 +151,7 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
         contrato: contrato.conteo,
         oculto: oculto.conteo,
         puntajes: Vec::new(),
-        hallazgos: Vec::new(),
+        hallazgos,
         global: None,
         estado,
         costo_usd: 0.0,
@@ -145,6 +163,24 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
         tasas,
         pendientes: pendientes::desde(tarea, &colab),
     })
+}
+
+/// Veredicto de una evaluación que no corrió: sin conteos, con sus hallazgos y pendientes.
+fn sin_veredicto(
+    repo: &Path,
+    tarea: &Tarea,
+    colab: &BTreeMap<String, pendientes::ColabEntrada>,
+    hallazgos: Vec<Hallazgo>,
+) -> Veredicto {
+    Veredicto {
+        tarea: tarea.nombre.clone(),
+        repo: nombre_de(repo),
+        commit: commit_de(repo),
+        repeticiones: tarea.repeticiones,
+        hallazgos,
+        pendientes: pendientes::desde(tarea, colab),
+        ..Veredicto::default()
+    }
 }
 
 /// Carpeta temporal dentro de `tmp`, con el prefijo de `evaluar`.
@@ -344,14 +380,23 @@ fn correr_una(c: &Corrida, cmd: &str, xml: &str) -> Result<Junit, ErrorOraculo> 
 
 /// Corre un comando de la tarea y lee su junit. Sin junit no hay conteo: es error de infraestructura.
 fn correr_suite(c: &Corrida, cmd: &str, xml: &str) -> Result<Junit, ErrorOraculo> {
+    // Con caché de Rust, la suite arranca cargo contra los vendors sin red (decisión 17).
+    let cmd = match c.cache {
+        Some(_) => format!("{}{cmd}", descarga::PRELUDIO),
+        None => cmd.to_string(),
+    };
     let ejecucion = contenedor::Ejecucion {
         imagen: c.tarea.imagen.clone(),
         repo: Some(c.repo.to_path_buf()),
         oraculo: Some(c.tarea.dir.clone()),
         salida: c.salida.to_path_buf(),
-        cmd: cmd.to_string(),
+        cmd,
         env: Vec::new(),
         timeout: c.o.timeout,
+        red: false,
+        cache: c.cache.clone(),
+        cache_rw: false,
+        rustsec: c.rustsec.clone(),
     };
     let resultado = contenedor::ejecutar(&ejecucion)?;
     let ruta = c.salida.join(xml);

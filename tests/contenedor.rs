@@ -47,6 +47,10 @@ fn ejecucion(repo: &std::path::Path, salida: &std::path::Path, cmd: &str) -> Eje
         cmd: cmd.into(),
         env: vec![],
         timeout: LIMITE,
+        red: false,
+        cache: None,
+        cache_rw: false,
+        rustsec: None,
     }
 }
 

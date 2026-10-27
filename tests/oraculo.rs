@@ -83,7 +83,7 @@ fn bloque(cmd: &str, reintento: Option<&str>) -> String {
 fn escribir_tarea_extra(dir: &Path, contrato: &str, oculto: &str, raiz: &str, tablas: &str) {
     let texto = format!(
         r#"nombre = "tarea-prueba"
-lenguaje = "rust"
+lenguaje = "shell"
 imagen = "{IMAGEN}"
 spec = "docs/SPEC.md"
 {raiz}

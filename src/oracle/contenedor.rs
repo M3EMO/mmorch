@@ -33,6 +33,13 @@ pub struct Ejecucion {
     pub cmd: String,
     pub env: Vec<(String, String)>,
     pub timeout: Duration,
+    /// Sin `red` el contenedor corre con `--network none`. Con `red` sale a internet.
+    pub red: bool,
+    /// Carpeta montada en `/cache`. Solo lectura, salvo que `cache_rw` sea verdadero.
+    pub cache: Option<PathBuf>,
+    pub cache_rw: bool,
+    /// Base de RustSec montada en solo lectura en `/rustsec`.
+    pub rustsec: Option<PathBuf>,
 }
 
 /// Lo que dejó el comando dentro del contenedor. Solo la cola de la salida.
@@ -46,18 +53,11 @@ pub struct Resultado {
 
 /// Argumentos de `podman run`, sin el binario `podman`.
 pub fn argumentos(e: &Ejecucion, nombre: &str) -> Vec<String> {
-    let mut args: Vec<String> = [
-        "run",
-        "--rm",
-        "--name",
-        nombre,
-        "--network",
-        "none",
-        "--tmpfs",
-        "/tmp:rw",
-    ]
-    .map(String::from)
-    .into();
+    let mut args: Vec<String> = ["run", "--rm", "--name", nombre].map(String::from).into();
+    if !e.red {
+        args.extend(["--network", "none"].map(String::from));
+    }
+    args.extend(["--tmpfs", "/tmp:rw"].map(String::from));
     if let Some(repo) = &e.repo {
         montaje(&mut args, repo, "/repo", &format!("ro,{SUFIJO_SELINUX}"));
     }
@@ -66,6 +66,22 @@ pub fn argumentos(e: &Ejecucion, nombre: &str) -> Vec<String> {
             &mut args,
             oraculo,
             "/oraculo",
+            &format!("ro,{SUFIJO_SELINUX}"),
+        );
+    }
+    if let Some(cache) = &e.cache {
+        let opciones = if e.cache_rw {
+            SUFIJO_SELINUX.to_string()
+        } else {
+            format!("ro,{SUFIJO_SELINUX}")
+        };
+        montaje(&mut args, cache, "/cache", &opciones);
+    }
+    if let Some(rustsec) = &e.rustsec {
+        montaje(
+            &mut args,
+            rustsec,
+            "/rustsec",
             &format!("ro,{SUFIJO_SELINUX}"),
         );
     }
@@ -126,6 +142,8 @@ fn validar_rutas(e: &Ejecucion) -> Result<(), ErrorOraculo> {
         .repo
         .iter()
         .chain(e.oraculo.iter())
+        .chain(e.cache.iter())
+        .chain(e.rustsec.iter())
         .chain(std::iter::once(&e.salida));
     for ruta in rutas {
         if !ruta.exists() {
@@ -209,6 +227,10 @@ mod tests {
             cmd: "pytest -q".into(),
             env: vec![("PYTHONPATH".into(), "/repo".into())],
             timeout: Duration::from_secs(60),
+            red: false,
+            cache: None,
+            cache_rw: false,
+            rustsec: None,
         }
     }
 

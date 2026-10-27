@@ -1,0 +1,971 @@
+//! Fase de descarga (decisión 17): baja las dependencias con red antes de evaluar.
+//! Corre en un contenedor aparte. Ese contenedor nunca monta `/oraculo` y solo corre
+//! `cargo vendor` (Rust) o `pip download` (Python). La evaluación usa la caché sin red.
+
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use serde::Deserialize;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+
+use super::contenedor::{self, Ejecucion};
+use super::tarea::Tarea;
+use super::{CARPETA_TEMPORALES, ErrorOraculo, infra, temporal};
+use crate::observe;
+use crate::tipos::{Dimension, Fuente, Hallazgo, TipoEvento};
+
+/// Lo que la evaluación necesita de la fase de descarga.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Preparacion {
+    /// La evaluación sigue. `cache` y `rustsec` son las carpetas que monta cada suite.
+    Lista {
+        cache: Option<PathBuf>,
+        rustsec: Option<PathBuf>,
+        hallazgos: Vec<Hallazgo>,
+    },
+    /// La evaluación no corre: no hay veredicto, solo hallazgos.
+    SinVeredicto(Vec<Hallazgo>),
+}
+
+/// Origen de un paquete del `Cargo.lock`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Origen {
+    /// Miembro del workspace o path: no tiene `source`.
+    Workspace,
+    /// crates.io, por registro o por sparse.
+    CratesIo,
+    /// Cualquier otra fuente. Guarda el valor del `source`.
+    Rechazado(String),
+}
+
+/// Un `[[package]]` del `Cargo.lock`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaqueteLock {
+    pub nombre: String,
+    pub version: String,
+    pub origen: Origen,
+    /// Línea 1-indexed del `source`. Cero si no tiene `source`.
+    pub linea: u32,
+    /// Texto de la línea del `source`, sin espacios de los extremos.
+    pub cita: String,
+}
+
+/// Lectura de la salida de error de un contenedor de descarga.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Diagnostico {
+    /// Registro caído o sin red: no hay veredicto.
+    Infra(String),
+    /// El producto no instala (paquete inexistente o retirado). Guarda la línea útil.
+    Producto(String),
+    /// Ningún patrón conocido. Se trata como infraestructura.
+    Desconocido(String),
+}
+
+/// Qué hacer con la base de RustSec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Accion {
+    Clonar,
+    Actualizar,
+    Nada,
+}
+
+/// Prefijo de cada suite: deja la caché de dependencias visible para cargo, sin escribir en ella.
+pub const PRELUDIO: &str = "export CARGO_HOME=/tmp/cargo-home && mkdir -p \"$CARGO_HOME\" && cp /cache/config.toml \"$CARGO_HOME/config.toml\" && ";
+
+const CARPETA_CACHE: &str = "cache";
+const CARPETA_RUST: &str = "rust";
+const CARPETA_PYTHON: &str = "python";
+const CARPETA_RUSTSEC: &str = "rustsec";
+const SUFIJO_PARCIAL: &str = ".parcial";
+const ARCHIVO_CONFIG: &str = "config.toml";
+const ARCHIVO_LOCK: &str = "Cargo.lock";
+const ARCHIVO_REQUIREMENTS: &str = "requirements.txt";
+const ARCHIVO_EVENTOS: &str = "eventos.jsonl";
+/// Fuentes de crates.io aceptadas en el `Cargo.lock`.
+const ORIGENES_CRATES_IO: [&str; 2] = [
+    "registry+https://github.com/rust-lang/crates.io-index",
+    "sparse+https://index.crates.io/",
+];
+const CARGO_HOME_DESCARGA: &str = "/tmp/cargo-dl";
+const COMANDO_VENDOR: &str =
+    "cd /repo && cargo vendor --locked --versioned-dirs /cache/vendor > /cache/config.toml";
+const COMANDO_LOCK: &str = "mkdir -p /tmp/w && cp -r /repo/. /tmp/w/ && cd /tmp/w && cargo generate-lockfile && cp Cargo.lock /salida/Cargo.lock";
+const URL_RUSTSEC: &str = "https://github.com/RustSec/advisory-db";
+const CADUCIDAD_RUSTSEC: Duration = Duration::from_secs(24 * 3600);
+/// Fragmentos (en minúscula) de errores de red o de registro caído.
+const PATRONES_INFRA: [&str; 5] = [
+    "failed to download",
+    "could not resolve host",
+    "network is unreachable",
+    "spurious network error",
+    "timed out",
+];
+/// Fragmentos (en minúscula) de errores de un paquete que no existe o fue retirado.
+const PATRONES_PRODUCTO: [&str; 4] = [
+    "no matching package",
+    "failed to select a version",
+    "yanked",
+    "no matching distribution found",
+];
+/// Largo máximo de la línea útil de un error.
+const LARGO_LINEA_UTIL: usize = 300;
+
+/// Hash corto de un contenido: primeros 16 caracteres hex de su sha256.
+pub fn hash_corto(contenido: &[u8]) -> String {
+    Sha256::digest(contenido)
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[derive(Deserialize)]
+struct LockArchivo {
+    #[serde(default)]
+    package: Vec<LockPaquete>,
+}
+
+#[derive(Deserialize)]
+struct LockPaquete {
+    name: String,
+    version: String,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+/// Lee un `Cargo.lock` y da sus paquetes con origen y línea del `source`.
+pub fn analizar_lock(texto: &str) -> Result<Vec<PaqueteLock>, String> {
+    let lock: LockArchivo = toml::from_str(texto).map_err(|e| e.to_string())?;
+    let fuentes = lineas_de_source(texto);
+    if fuentes.len() != lock.package.len() {
+        return Err(format!(
+            "{} bloques [[package]] en el texto, {} al parsear",
+            fuentes.len(),
+            lock.package.len()
+        ));
+    }
+    Ok(lock
+        .package
+        .into_iter()
+        .zip(fuentes)
+        .map(|(paquete, fuente)| {
+            let origen = match paquete.source.as_deref() {
+                None => Origen::Workspace,
+                Some(valor) if ORIGENES_CRATES_IO.contains(&valor) => Origen::CratesIo,
+                Some(valor) => Origen::Rechazado(valor.to_string()),
+            };
+            let (linea, cita) = fuente.unwrap_or((0, String::new()));
+            PaqueteLock {
+                nombre: paquete.name,
+                version: paquete.version,
+                origen,
+                linea,
+                cita,
+            }
+        })
+        .collect())
+}
+
+/// Una entrada por bloque `[[package]]`: línea y texto de su `source`, si lo tiene.
+fn lineas_de_source(texto: &str) -> Vec<Option<(u32, String)>> {
+    let mut bloques: Vec<Option<(u32, String)>> = Vec::new();
+    for (indice, linea) in texto.lines().enumerate() {
+        let limpia = linea.trim();
+        if limpia == "[[package]]" {
+            bloques.push(None);
+        } else if limpia.starts_with("source = ")
+            && let Some(ultimo) = bloques.last_mut()
+            && ultimo.is_none()
+        {
+            let numero = u32::try_from(indice + 1).unwrap_or(u32::MAX);
+            *ultimo = Some((numero, limpia.to_string()));
+        }
+    }
+    bloques
+}
+
+/// Clasifica el stderr de un contenedor de descarga. La infraestructura gana a un producto roto.
+pub fn diagnosticar(stderr: &str) -> Diagnostico {
+    let minuscula = stderr.to_lowercase();
+    if PATRONES_INFRA.iter().any(|p| minuscula.contains(p)) {
+        return Diagnostico::Infra(linea_util(stderr));
+    }
+    if PATRONES_PRODUCTO.iter().any(|p| minuscula.contains(p)) {
+        return Diagnostico::Producto(linea_util(stderr));
+    }
+    Diagnostico::Desconocido(linea_util(stderr))
+}
+
+/// Primera línea de error del texto. Sin una, la primera línea no vacía.
+fn linea_util(texto: &str) -> String {
+    let lineas: Vec<&str> = texto
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    lineas
+        .iter()
+        .find(|l| l.to_lowercase().contains("error"))
+        .or(lineas.first())
+        .map_or("sin salida de error".to_string(), |l| {
+            l.chars().take(LARGO_LINEA_UTIL).collect()
+        })
+}
+
+/// Comando de `pip download` contra PyPI. El destino es `/cache`.
+pub fn comando_pip(requirements: &str) -> String {
+    format!(
+        "python3 -m pip download -r {requirements} --index-url https://pypi.org/simple -d /cache"
+    )
+}
+
+/// Qué hacer con la base de RustSec según si existe y su edad.
+pub fn accion_rustsec(existe: bool, edad: Option<Duration>) -> Accion {
+    if !existe {
+        return Accion::Clonar;
+    }
+    match edad {
+        Some(edad) if edad <= CADUCIDAD_RUSTSEC => Accion::Nada,
+        _ => Accion::Actualizar,
+    }
+}
+
+/// Borra la carpeta parcial de una descarga anterior que no terminó.
+pub fn limpiar_parcial(dir: &Path) -> io::Result<()> {
+    match fs::remove_dir_all(dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Hallazgo de entrega. El `id` sale de la dimensión, el archivo y la cita.
+fn hallazgo(archivo: &str, linea: u32, cita: &str, severidad: u8, detalle: String) -> Hallazgo {
+    let id = hash_corto(format!("entrega|{archivo}|{cita}").as_bytes());
+    Hallazgo {
+        dimension: Dimension::Entrega,
+        severidad,
+        archivo: archivo.into(),
+        linea,
+        cita: cita.into(),
+        detalle,
+        fuente: Fuente::Sonda("descarga".into()),
+        id,
+        impacto: Vec::new(),
+    }
+}
+
+/// Hallazgo de una fuente que no es crates.io.
+fn hallazgo_rechazo(paquete: &PaqueteLock, fuente: &str) -> Hallazgo {
+    let detalle = format!(
+        "fuente no aceptada en {}: {fuente}. Hasta la aclaración P12b solo rigen crates.io y PyPI.",
+        paquete.nombre
+    );
+    hallazgo("Cargo.lock", paquete.linea, &paquete.cita, 3, detalle)
+}
+
+fn hallazgo_no_instala(linea: &str) -> Hallazgo {
+    hallazgo(
+        "Cargo.toml",
+        0,
+        linea,
+        3,
+        format!("el producto no instala: {linea}"),
+    )
+}
+
+fn hallazgo_sin_lock() -> Hallazgo {
+    hallazgo(
+        ARCHIVO_LOCK,
+        0,
+        "",
+        2,
+        "el repo no trae Cargo.lock: el build no es reproducible".into(),
+    )
+}
+
+fn hallazgo_lock_invalido(error: &str) -> Hallazgo {
+    hallazgo(
+        ARCHIVO_LOCK,
+        0,
+        "",
+        3,
+        format!("Cargo.lock inválido: {error}"),
+    )
+}
+
+/// Lo que se registra en el evento `Gate` de una descarga.
+struct Registro {
+    lenguaje: &'static str,
+    hash: Option<String>,
+    cache_hit: bool,
+    paquetes: Vec<Value>,
+    rustsec: Option<String>,
+    motivo: Option<&'static str>,
+}
+
+impl Registro {
+    /// Registro de una descarga que cortó la evaluación.
+    fn corte(lenguaje: &'static str, hash: Option<String>, motivo: &'static str) -> Self {
+        Registro {
+            lenguaje,
+            hash,
+            cache_hit: false,
+            paquetes: Vec::new(),
+            rustsec: None,
+            motivo: Some(motivo),
+        }
+    }
+}
+
+/// Corre la fase de descarga para la tarea. Ver la decisión 17 en `root.plan.md`.
+pub fn preparar(
+    repo: &Path,
+    tarea: &Tarea,
+    home: &Path,
+    timeout: Duration,
+) -> Result<Preparacion, ErrorOraculo> {
+    let (preparacion, registro) = match tarea.lenguaje.as_str() {
+        "rust" => preparar_rust(repo, tarea, home, timeout)?,
+        "python" => preparar_python(repo, tarea, home, timeout)?,
+        _ => {
+            return Ok(Preparacion::Lista {
+                cache: None,
+                rustsec: None,
+                hallazgos: Vec::new(),
+            });
+        }
+    };
+    if let Some(registro) = registro {
+        registrar(home, tarea, &registro)?;
+    }
+    Ok(preparacion)
+}
+
+type Paso = (Preparacion, Option<Registro>);
+
+fn preparar_rust(
+    repo: &Path,
+    tarea: &Tarea,
+    home: &Path,
+    timeout: Duration,
+) -> Result<Paso, ErrorOraculo> {
+    let mut hallazgos = Vec::new();
+    let lock = repo.join(ARCHIVO_LOCK);
+    if !lock.is_file() {
+        if let Some(linea) = generar_lock(repo, tarea, home, timeout)? {
+            return Ok(corte(
+                hallazgo_no_instala(&linea),
+                Registro::corte("rust", None, "no-instala"),
+            ));
+        }
+        hallazgos.push(hallazgo_sin_lock());
+    }
+    let texto = fs::read_to_string(&lock).map_err(|e| infra("leer Cargo.lock", e))?;
+    let hash = hash_corto(texto.as_bytes());
+    let paquetes = match analizar_lock(&texto) {
+        Ok(paquetes) => paquetes,
+        Err(error) => {
+            return Ok(corte(
+                hallazgo_lock_invalido(&error),
+                Registro::corte("rust", Some(hash), "lock-invalido"),
+            ));
+        }
+    };
+    let rechazado = paquetes.iter().find_map(|p| match &p.origen {
+        Origen::Rechazado(fuente) => Some((p, fuente.clone())),
+        _ => None,
+    });
+    if let Some((paquete, fuente)) = rechazado {
+        return Ok(corte(
+            hallazgo_rechazo(paquete, &fuente),
+            Registro::corte("rust", Some(hash), "rechazo"),
+        ));
+    }
+    let destino = home.join(CARPETA_CACHE).join(CARPETA_RUST).join(&hash);
+    let cache_hit = destino.join(ARCHIVO_CONFIG).is_file();
+    if !cache_hit && let Some(linea) = descargar_vendor(repo, tarea, home, &hash, timeout)? {
+        return Ok(corte(
+            hallazgo_no_instala(&linea),
+            Registro::corte("rust", Some(hash), "no-instala"),
+        ));
+    }
+    let (rustsec, estado) = actualizar_rustsec(home, tarea, timeout)?;
+    let registro = Registro {
+        lenguaje: "rust",
+        hash: Some(hash),
+        cache_hit,
+        paquetes: paquetes_json(&paquetes),
+        rustsec: Some(estado),
+        motivo: None,
+    };
+    let preparacion = Preparacion::Lista {
+        cache: Some(destino),
+        rustsec,
+        hallazgos,
+    };
+    Ok((preparacion, Some(registro)))
+}
+
+fn preparar_python(
+    repo: &Path,
+    tarea: &Tarea,
+    home: &Path,
+    timeout: Duration,
+) -> Result<Paso, ErrorOraculo> {
+    let sin_nada = Preparacion::Lista {
+        cache: None,
+        rustsec: None,
+        hallazgos: Vec::new(),
+    };
+    let requirements = repo.join(ARCHIVO_REQUIREMENTS);
+    if !requirements.is_file() {
+        return Ok((sin_nada, None));
+    }
+    let contenido = fs::read(&requirements).map_err(|e| infra("leer requirements.txt", e))?;
+    let hash = hash_corto(&contenido);
+    let destino = home.join(CARPETA_CACHE).join(CARPETA_PYTHON).join(&hash);
+    fs::create_dir_all(&destino).map_err(|e| infra("crear la caché de Python", e))?;
+    let salida = temporal_de(home)?;
+    let ejecucion = Ejecucion {
+        imagen: tarea.imagen.clone(),
+        repo: Some(repo.to_path_buf()),
+        oraculo: None,
+        salida: salida.path().to_path_buf(),
+        cmd: comando_pip("/repo/requirements.txt"),
+        env: Vec::new(),
+        timeout,
+        red: true,
+        cache: Some(destino),
+        cache_rw: true,
+        rustsec: None,
+    };
+    match ejecutar_descarga(&ejecucion) {
+        Ok(()) => {
+            let registro = Registro {
+                lenguaje: "python",
+                hash: Some(hash),
+                cache_hit: false,
+                paquetes: Vec::new(),
+                rustsec: None,
+                motivo: None,
+            };
+            Ok((sin_nada, Some(registro)))
+        }
+        Err(Diagnostico::Producto(linea)) => Ok(corte(
+            hallazgo_no_instala(&linea),
+            Registro::corte("python", Some(hash), "no-instala"),
+        )),
+        Err(diagnostico) => Err(error_de(diagnostico)),
+    }
+}
+
+fn corte(hallazgo: Hallazgo, registro: Registro) -> Paso {
+    (Preparacion::SinVeredicto(vec![hallazgo]), Some(registro))
+}
+
+/// Carpeta temporal de la descarga, dentro de `ROOT_HOME/tmp`.
+fn temporal_de(home: &Path) -> Result<tempfile::TempDir, ErrorOraculo> {
+    let tmp = home.join(CARPETA_TEMPORALES);
+    fs::create_dir_all(&tmp).map_err(|e| infra("directorio temporal de ROOT_HOME", e))?;
+    temporal(&tmp).map_err(|e| infra("directorio temporal de la descarga", e))
+}
+
+/// Variables de la descarga: red abierta y `CARGO_HOME` en tmpfs.
+fn entorno_descarga() -> Vec<(String, String)> {
+    vec![
+        ("CARGO_NET_OFFLINE".into(), "false".into()),
+        ("CARGO_HOME".into(), CARGO_HOME_DESCARGA.into()),
+    ]
+}
+
+/// Corre un contenedor de descarga. Un fallo llega como `Diagnostico`.
+fn ejecutar_descarga(ejecucion: &Ejecucion) -> Result<(), Diagnostico> {
+    match contenedor::ejecutar(ejecucion) {
+        Err(ErrorOraculo::Infra(m)) => Err(Diagnostico::Infra(m)),
+        Err(otro) => Err(Diagnostico::Desconocido(otro.to_string())),
+        Ok(resultado) if resultado.codigo == 0 => Ok(()),
+        Ok(resultado) => Err(diagnosticar(&resultado.stderr)),
+    }
+}
+
+/// Error de la evaluación para un fallo de descarga que no es del producto.
+fn error_de(diagnostico: Diagnostico) -> ErrorOraculo {
+    match diagnostico {
+        Diagnostico::Infra(m) => ErrorOraculo::Infra(format!("infraestructura: {m}")),
+        Diagnostico::Producto(m) | Diagnostico::Desconocido(m) => {
+            ErrorOraculo::Infra(format!("la descarga falló: {m}"))
+        }
+    }
+}
+
+/// Corre `cargo generate-lockfile` en una copia descartable y copia el lock al repo.
+/// Da `Some(linea)` si el producto no instala.
+fn generar_lock(
+    repo: &Path,
+    tarea: &Tarea,
+    home: &Path,
+    timeout: Duration,
+) -> Result<Option<String>, ErrorOraculo> {
+    let salida = temporal_de(home)?;
+    let ejecucion = Ejecucion {
+        imagen: tarea.imagen.clone(),
+        repo: Some(repo.to_path_buf()),
+        oraculo: None,
+        salida: salida.path().to_path_buf(),
+        cmd: COMANDO_LOCK.into(),
+        env: entorno_descarga(),
+        timeout,
+        red: true,
+        cache: None,
+        cache_rw: false,
+        rustsec: None,
+    };
+    match ejecutar_descarga(&ejecucion) {
+        Ok(()) => {
+            fs::copy(salida.path().join(ARCHIVO_LOCK), repo.join(ARCHIVO_LOCK))
+                .map_err(|e| infra("copiar el Cargo.lock generado", e))?;
+            Ok(None)
+        }
+        Err(Diagnostico::Producto(linea)) => Ok(Some(linea)),
+        Err(diagnostico) => Err(error_de(diagnostico)),
+    }
+}
+
+/// Carpeta parcial de una caché: `<hash>.parcial`, al lado de la carpeta final.
+fn parcial_de(dir: &Path) -> PathBuf {
+    let nombre = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    dir.with_file_name(format!("{nombre}{SUFIJO_PARCIAL}"))
+}
+
+/// Corre `cargo vendor` en la carpeta parcial y la renombra al final.
+/// Da `Some(linea)` si el producto no instala. Un fallo borra la carpeta parcial.
+fn descargar_vendor(
+    repo: &Path,
+    tarea: &Tarea,
+    home: &Path,
+    hash: &str,
+    timeout: Duration,
+) -> Result<Option<String>, ErrorOraculo> {
+    let destino = home.join(CARPETA_CACHE).join(CARPETA_RUST).join(hash);
+    let parcial = parcial_de(&destino);
+    limpiar_parcial(&parcial).map_err(|e| infra("borrar la descarga parcial", e))?;
+    fs::create_dir_all(&parcial).map_err(|e| infra("crear la caché parcial", e))?;
+    let salida = temporal_de(home)?;
+    let ejecucion = Ejecucion {
+        imagen: tarea.imagen.clone(),
+        repo: Some(repo.to_path_buf()),
+        oraculo: None,
+        salida: salida.path().to_path_buf(),
+        cmd: COMANDO_VENDOR.into(),
+        env: entorno_descarga(),
+        timeout,
+        red: true,
+        cache: Some(parcial.clone()),
+        cache_rw: true,
+        rustsec: None,
+    };
+    match ejecutar_descarga(&ejecucion) {
+        Ok(()) if parcial.join(ARCHIVO_CONFIG).is_file() => {
+            if destino.exists() {
+                fs::remove_dir_all(&destino).map_err(|e| infra("borrar la caché previa", e))?;
+            }
+            fs::rename(&parcial, &destino).map_err(|e| infra("cerrar la caché", e))?;
+            Ok(None)
+        }
+        Ok(()) => {
+            limpiar_parcial(&parcial).map_err(|e| infra("borrar la descarga parcial", e))?;
+            Err(ErrorOraculo::Infra(
+                "infraestructura: cargo vendor no dejó config.toml".into(),
+            ))
+        }
+        Err(diagnostico) => {
+            limpiar_parcial(&parcial).map_err(|e| infra("borrar la descarga parcial", e))?;
+            match diagnostico {
+                Diagnostico::Producto(linea) => Ok(Some(linea)),
+                otro => Err(error_de(otro)),
+            }
+        }
+    }
+}
+
+/// Antigüedad de la base de RustSec: la de `FETCH_HEAD` si existe, si no la de la carpeta.
+fn edad_de(dir: &Path) -> Option<Duration> {
+    let marca = dir.join(".git").join("FETCH_HEAD");
+    let ruta = if marca.is_file() {
+        marca
+    } else {
+        dir.to_path_buf()
+    };
+    fs::metadata(ruta).ok()?.modified().ok()?.elapsed().ok()
+}
+
+/// Deja la base de RustSec al día. Un fallo no bloquea: vuelve como estado `error: ...`.
+fn actualizar_rustsec(
+    home: &Path,
+    tarea: &Tarea,
+    timeout: Duration,
+) -> Result<(Option<PathBuf>, String), ErrorOraculo> {
+    let dir = home.join(CARPETA_CACHE).join(CARPETA_RUSTSEC);
+    let existe = dir.is_dir();
+    let accion = accion_rustsec(existe, if existe { edad_de(&dir) } else { None });
+    if accion == Accion::Nada {
+        return Ok((Some(dir), "cache".into()));
+    }
+    let cmd = match accion {
+        Accion::Clonar => {
+            fs::create_dir_all(&dir).map_err(|e| infra("crear la base de RustSec", e))?;
+            format!("git clone --depth 1 {URL_RUSTSEC} /cache")
+        }
+        _ => "git -C /cache pull --ff-only".to_string(),
+    };
+    let salida = temporal_de(home)?;
+    let ejecucion = Ejecucion {
+        imagen: tarea.imagen.clone(),
+        repo: None,
+        oraculo: None,
+        salida: salida.path().to_path_buf(),
+        cmd,
+        env: Vec::new(),
+        timeout,
+        red: true,
+        cache: Some(dir.clone()),
+        cache_rw: true,
+        rustsec: None,
+    };
+    match ejecutar_descarga(&ejecucion) {
+        Ok(()) => Ok((Some(dir), "ok".into())),
+        Err(diagnostico) => {
+            let motivo = match diagnostico {
+                Diagnostico::Infra(m) | Diagnostico::Producto(m) | Diagnostico::Desconocido(m) => m,
+            };
+            if accion == Accion::Clonar {
+                let _ = fs::remove_dir_all(&dir);
+                return Ok((None, format!("error: {motivo}")));
+            }
+            Ok((Some(dir), format!("error: {motivo}")))
+        }
+    }
+}
+
+fn paquetes_json(paquetes: &[PaqueteLock]) -> Vec<Value> {
+    paquetes
+        .iter()
+        .map(|p| {
+            let fuente = match p.origen {
+                Origen::Workspace => "workspace",
+                _ => "crates.io",
+            };
+            json!({"nombre": p.nombre, "version": p.version, "fuente": fuente})
+        })
+        .collect()
+}
+
+/// Registra el evento `Gate` de la descarga en `eventos.jsonl` de `home`.
+fn registrar(home: &Path, tarea: &Tarea, registro: &Registro) -> Result<(), ErrorOraculo> {
+    let mut evento = observe::evento_manual(
+        &format!("descarga-{}", tarea.nombre),
+        TipoEvento::Gate,
+        None,
+    );
+    evento.fase = "descarga".into();
+    evento
+        .extra
+        .insert("lenguaje".into(), json!(registro.lenguaje));
+    evento.extra.insert("hash".into(), json!(registro.hash));
+    evento
+        .extra
+        .insert("cache_hit".into(), json!(registro.cache_hit));
+    evento
+        .extra
+        .insert("paquetes".into(), Value::Array(registro.paquetes.clone()));
+    if let Some(rustsec) = &registro.rustsec {
+        evento.extra.insert("rustsec".into(), json!(rustsec));
+    }
+    if let Some(motivo) = registro.motivo {
+        evento.extra.insert("motivo".into(), json!(motivo));
+    }
+    observe::registrar_en(&home.join(ARCHIVO_EVENTOS), &evento)
+        .map_err(|e| infra("registrar el evento de descarga", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oracle::contenedor::{self, Ejecucion};
+
+    const LOCK: &str = "# This file is automatically @generated by Cargo.\n\
+version = 4\n\
+\n\
+[[package]]\n\
+name = \"app\"\n\
+version = \"0.1.0\"\n\
+\n\
+[[package]]\n\
+name = \"humantime\"\n\
+version = \"2.1.0\"\n\
+source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+checksum = \"abc\"\n\
+\n\
+[[package]]\n\
+name = \"ext\"\n\
+version = \"1.0.0\"\n\
+source = \"git+https://github.com/x/ext?rev=1#1\"\n";
+
+    fn ejecucion() -> Ejecucion {
+        Ejecucion {
+            imagen: "localhost/root-oraculo-rust:1".into(),
+            repo: Some(PathBuf::from("/x/repo")),
+            oraculo: None,
+            salida: PathBuf::from("/x/salida"),
+            cmd: "cargo vendor".into(),
+            env: vec![],
+            timeout: Duration::from_secs(60),
+            red: false,
+            cache: None,
+            cache_rw: false,
+            rustsec: None,
+        }
+    }
+
+    fn montajes(args: &[String]) -> Vec<String> {
+        args.windows(2)
+            .filter(|p| p[0] == "-v")
+            .map(|p| p[1].clone())
+            .collect()
+    }
+
+    #[test]
+    fn descarga_hash_corto_es_estable_y_de_16_hex() {
+        let h = hash_corto(b"");
+        assert_eq!(h, "e3b0c44298fc1c14");
+        assert_eq!(hash_corto(LOCK.as_bytes()), hash_corto(LOCK.as_bytes()));
+        assert_ne!(hash_corto(b"a"), hash_corto(b"b"));
+    }
+
+    #[test]
+    fn descarga_lock_acepta_workspace_y_crates_io_registry_y_sparse() {
+        let texto = "version = 4\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+[[package]]\nname = \"a\"\nversion = \"1\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n\n\
+[[package]]\nname = \"b\"\nversion = \"2\"\nsource = \"sparse+https://index.crates.io/\"\n";
+        let paquetes = analizar_lock(texto).expect("parsea");
+        let origenes: Vec<&Origen> = paquetes.iter().map(|p| &p.origen).collect();
+        assert_eq!(
+            origenes,
+            vec![&Origen::Workspace, &Origen::CratesIo, &Origen::CratesIo]
+        );
+    }
+
+    #[test]
+    fn descarga_lock_rechaza_git_y_registro_privado_con_la_linea_del_source() {
+        let paquetes = analizar_lock(LOCK).expect("parsea");
+        let ext = paquetes.iter().find(|p| p.nombre == "ext").expect("ext");
+        assert_eq!(
+            ext.origen,
+            Origen::Rechazado("git+https://github.com/x/ext?rev=1#1".into())
+        );
+        assert_eq!(ext.linea, 17, "la línea del source de ext");
+        assert_eq!(
+            ext.cita,
+            "source = \"git+https://github.com/x/ext?rev=1#1\""
+        );
+
+        let privado = "version = 4\n[[package]]\nname = \"p\"\nversion = \"1\"\n\
+source = \"registry+https://registro.ejemplo.com/index\"\n";
+        let p = analizar_lock(privado).expect("parsea");
+        assert!(matches!(p[0].origen, Origen::Rechazado(_)));
+        assert_eq!(p[0].linea, 5);
+    }
+
+    #[test]
+    fn descarga_lock_sin_source_da_linea_cero() {
+        let paquetes = analizar_lock(LOCK).expect("parsea");
+        assert_eq!(paquetes[0].linea, 0);
+        assert_eq!(paquetes[0].origen, Origen::Workspace);
+    }
+
+    #[test]
+    fn descarga_lock_invalido_da_error() {
+        assert!(analizar_lock("esto no es toml = = =").is_err());
+    }
+
+    #[test]
+    fn descarga_hallazgo_de_rechazo_tiene_linea_cita_y_id_estable() {
+        let paquetes = analizar_lock(LOCK).expect("parsea");
+        let ext = paquetes.iter().find(|p| p.nombre == "ext").expect("ext");
+        let h = hallazgo_rechazo(ext, "git+https://github.com/x/ext?rev=1#1");
+        assert_eq!(h.dimension, Dimension::Entrega);
+        assert_eq!(h.severidad, 3);
+        assert_eq!(h.archivo, "Cargo.lock");
+        assert_eq!(h.linea, 17);
+        assert_eq!(h.cita, ext.cita);
+        assert!(
+            h.detalle.contains("P12b"),
+            "menciona la aclaración: {}",
+            h.detalle
+        );
+        assert!(h.detalle.contains("crates.io"));
+        assert!(h.detalle.contains("PyPI"));
+        assert_eq!(h.fuente, Fuente::Sonda("descarga".into()));
+        let esperado = hash_corto(format!("entrega|Cargo.lock|{}", ext.cita).as_bytes());
+        assert_eq!(h.id, esperado);
+    }
+
+    #[test]
+    fn descarga_clasifica_fallas_de_red_como_infraestructura() {
+        for stderr in [
+            "error: failed to download `humantime v2.1.0`",
+            "Could not resolve host: index.crates.io",
+            "connect: Network is unreachable",
+            "spurious network error (3 tries remaining)",
+            "operation timed out",
+        ] {
+            assert!(
+                matches!(diagnosticar(stderr), Diagnostico::Infra(_)),
+                "debe ser infra: {stderr}"
+            );
+        }
+    }
+
+    #[test]
+    fn descarga_clasifica_paquete_inexistente_o_retirado_como_producto() {
+        let inexistente = "error: no matching package named `root-no-existe-xyz-987` found\n\
+location searched: crates.io index";
+        let d = diagnosticar(inexistente);
+        assert_eq!(
+            d,
+            Diagnostico::Producto(
+                "error: no matching package named `root-no-existe-xyz-987` found".into()
+            )
+        );
+        assert!(matches!(
+            diagnosticar("error: failed to select a version for the requirement `x = \"=1.0.0\"`"),
+            Diagnostico::Producto(_)
+        ));
+        assert!(matches!(
+            diagnosticar("error: version 1.0.0 of x is yanked"),
+            Diagnostico::Producto(_)
+        ));
+    }
+
+    #[test]
+    fn descarga_infraestructura_gana_a_producto_en_el_mismo_stderr() {
+        let mezclado =
+            "error: no matching package named `x` found\nCould not resolve host: index.crates.io";
+        assert!(matches!(diagnosticar(mezclado), Diagnostico::Infra(_)));
+    }
+
+    #[test]
+    fn descarga_clasifica_error_sin_patron_como_desconocido() {
+        assert!(matches!(
+            diagnosticar("error: algo raro"),
+            Diagnostico::Desconocido(_)
+        ));
+    }
+
+    #[test]
+    fn descarga_comando_pip_usa_pypi_y_el_destino_cache() {
+        let c = comando_pip("/repo/requirements.txt");
+        assert!(c.contains("pip download -r /repo/requirements.txt"), "{c}");
+        assert!(c.contains("--index-url https://pypi.org/simple"), "{c}");
+        assert!(c.ends_with("-d /cache"), "{c}");
+    }
+
+    #[test]
+    fn descarga_accion_rustsec_clona_si_no_existe_y_actualiza_si_es_vieja() {
+        let dia = Duration::from_secs(24 * 3600);
+        assert_eq!(accion_rustsec(false, None), Accion::Clonar);
+        assert_eq!(
+            accion_rustsec(true, Some(Duration::from_secs(3600))),
+            Accion::Nada
+        );
+        assert_eq!(
+            accion_rustsec(true, Some(dia + Duration::from_secs(1))),
+            Accion::Actualizar
+        );
+        assert_eq!(accion_rustsec(true, None), Accion::Actualizar);
+    }
+
+    #[test]
+    fn descarga_limpiar_parcial_borra_la_carpeta_y_tolera_que_no_exista() {
+        let home = tempfile::tempdir().expect("temp dir");
+        let parcial = home.path().join("abc.parcial");
+        std::fs::create_dir_all(parcial.join("vendor")).expect("dir");
+        std::fs::write(parcial.join("config.toml"), "x").expect("escribe");
+        limpiar_parcial(&parcial).expect("limpia");
+        assert!(!parcial.exists());
+        limpiar_parcial(&parcial).expect("sin carpeta no es error");
+    }
+
+    #[test]
+    fn descarga_argumentos_sin_red_mantienen_network_none() {
+        let args = contenedor::argumentos(&ejecucion(), "n");
+        let pos = args.iter().position(|a| a == "--network").expect("network");
+        assert_eq!(args[pos + 1], "none");
+    }
+
+    #[test]
+    fn descarga_argumentos_con_red_no_cortan_la_red() {
+        let mut e = ejecucion();
+        e.red = true;
+        let args = contenedor::argumentos(&e, "n");
+        assert!(!args.iter().any(|a| a == "--network"), "{args:?}");
+    }
+
+    #[test]
+    fn descarga_argumentos_cache_ro_y_rw_con_selinux() {
+        let mut e = ejecucion();
+        e.cache = Some(PathBuf::from("/x/cache"));
+        let ro = montajes(&contenedor::argumentos(&e, "n"));
+        assert!(ro.contains(&"/x/cache:/cache:ro,z".to_string()), "{ro:?}");
+
+        e.cache_rw = true;
+        let rw = montajes(&contenedor::argumentos(&e, "n"));
+        assert!(rw.contains(&"/x/cache:/cache:z".to_string()), "{rw:?}");
+    }
+
+    #[test]
+    fn descarga_argumentos_rustsec_se_monta_solo_lectura() {
+        let mut e = ejecucion();
+        e.rustsec = Some(PathBuf::from("/x/rustsec"));
+        let m = montajes(&contenedor::argumentos(&e, "n"));
+        assert!(m.contains(&"/x/rustsec:/rustsec:ro,z".to_string()), "{m:?}");
+    }
+
+    #[test]
+    fn descarga_argumentos_sin_oraculo_no_montan_oraculo() {
+        let mut e = ejecucion();
+        e.red = true;
+        e.cache = Some(PathBuf::from("/x/cache"));
+        e.cache_rw = true;
+        let args = contenedor::argumentos(&e, "n");
+        assert!(
+            !montajes(&args).iter().any(|m| m.contains(":/oraculo")),
+            "no monta /oraculo: {args:?}"
+        );
+    }
+
+    #[test]
+    fn descarga_argumentos_todos_los_montajes_llevan_z() {
+        let mut e = ejecucion();
+        e.oraculo = Some(PathBuf::from("/x/oraculo"));
+        e.cache = Some(PathBuf::from("/x/cache"));
+        e.rustsec = Some(PathBuf::from("/x/rustsec"));
+        for m in montajes(&contenedor::argumentos(&e, "n")) {
+            assert!(m.ends_with(",z") || m.ends_with(":z"), "sin z: {m}");
+        }
+    }
+
+    #[test]
+    fn descarga_preludio_arma_cargo_home_y_copia_la_config() {
+        assert!(PRELUDIO.contains("export CARGO_HOME=/tmp/cargo-home"));
+        assert!(PRELUDIO.contains("cp /cache/config.toml \"$CARGO_HOME/config.toml\""));
+        assert!(PRELUDIO.ends_with("&& "));
+    }
+}
