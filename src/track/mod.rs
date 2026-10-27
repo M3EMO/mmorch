@@ -21,8 +21,9 @@ pub enum ErrorTrack {
     Io(#[from] io::Error),
     #[error("error de JSON: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("runs.jsonl: la línea {linea} es inválida: {fuente}")]
+    #[error("{archivo}: la línea {linea} es inválida: {fuente}")]
     Linea {
+        archivo: String,
         linea: usize,
         #[source]
         fuente: serde_json::Error,
@@ -86,37 +87,44 @@ pub fn filas(filtro: &Filtro) -> Result<Vec<Fila>, ErrorTrack> {
 /// Filas del archivo indicado que pasan el filtro. Un archivo inexistente da una lista vacía.
 pub fn filas_de(ruta: &Path, filtro: &Filtro) -> Result<Vec<Fila>, ErrorTrack> {
     let mut filas = Vec::new();
-    // El número de línea cuenta también las líneas en blanco, que se omiten.
-    for (indice, linea) in jsonl::leer_texto(ruta)?.lines().enumerate() {
-        if linea.trim().is_empty() {
-            continue;
-        }
-        let fila: Fila = serde_json::from_str(linea).map_err(|fuente| ErrorTrack::Linea {
-            linea: indice + 1,
-            fuente,
-        })?;
-        if filtro.admite(&fila) {
-            filas.push(fila);
+    for archivo in jsonl::archivos_en_orden(ruta)? {
+        // El número de línea cuenta también las líneas en blanco, que se omiten. Es el de cada archivo.
+        for (indice, linea) in jsonl::leer_texto(&archivo)?.lines().enumerate() {
+            if linea.trim().is_empty() {
+                continue;
+            }
+            let fila: Fila = serde_json::from_str(linea).map_err(|fuente| ErrorTrack::Linea {
+                archivo: archivo.display().to_string(),
+                linea: indice + 1,
+                fuente,
+            })?;
+            if filtro.admite(&fila) {
+                filas.push(fila);
+            }
         }
     }
     Ok(filas)
 }
 
-/// Estadística por configuración de las filas de `tipo`. El rol aún no se usa.
-pub fn estadisticas(_rol: Rol, tipo: &str) -> Result<Vec<StatModelo>, ErrorTrack> {
-    // Fila no registra rol todavía.
+/// Estadística por modelo del rol de las filas de `tipo`.
+pub fn estadisticas(rol: Rol, tipo: &str) -> Result<Vec<StatModelo>, ErrorTrack> {
     let filtro = Filtro {
         tarea: Some(tipo.into()),
         config: None,
     };
-    Ok(estadisticas_de(&filas(&filtro)?))
+    Ok(estadisticas_de(&filas(&filtro)?, rol))
 }
 
-/// Estadística por configuración de una lista de filas, en orden de etiqueta.
-pub fn estadisticas_de(filas: &[Fila]) -> Vec<StatModelo> {
+/// Estadística por modelo de `rol` de una lista de filas, en orden de etiqueta.
+/// Una fila sin modelo para ese rol usa su `config` como etiqueta.
+pub fn estadisticas_de(filas: &[Fila], rol: Rol) -> Vec<StatModelo> {
     let mut grupos: BTreeMap<&str, Vec<&Fila>> = BTreeMap::new();
     for fila in filas {
-        grupos.entry(fila.config.as_str()).or_default().push(fila);
+        let etiqueta = fila
+            .modelos
+            .get(&rol)
+            .map_or(fila.config.as_str(), String::as_str);
+        grupos.entry(etiqueta).or_default().push(fila);
     }
     grupos
         .into_iter()
@@ -191,7 +199,7 @@ pub fn comparar_en(ruta: &Path, a: &str, b: &str, tarea: &str) -> Result<Compara
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tipos::{Resumen, Veredicto};
+    use crate::tipos::{Resumen, Rol, Veredicto};
     use tempfile::TempDir;
 
     fn fila(tarea: &str, config: &str, estado: Estado) -> Fila {
@@ -227,6 +235,29 @@ mod tests {
         agregar_en(&ruta, &f).expect("agrega");
         let leidas = filas_de(&ruta, &Filtro::default()).expect("lee");
         assert_eq!(leidas, vec![f]);
+    }
+
+    #[test]
+    fn track_filas_lee_archivos_rotados_antes_que_el_vigente() {
+        let dir = TempDir::new().expect("temp dir");
+        let ruta = dir.path().join("runs.jsonl");
+        // Umbral de 100 bytes: cada fila supera el umbral, así que cada escritura rota.
+        let escribe = |id: &str| {
+            let mut f = fila("memora", "haiku", Estado::Verde);
+            f.id = id.into();
+            let linea = serde_json::to_string(&f).expect("serializa");
+            jsonl::agregar(&ruta, &linea, 100).expect("escribe");
+        };
+        escribe("f-1");
+        escribe("f-2");
+        escribe("f-3");
+        assert!(dir.path().join("runs.jsonl.2").exists());
+        let ids: Vec<String> = filas_de(&ruta, &Filtro::default())
+            .expect("lee")
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(ids, vec!["f-1", "f-2", "f-3"]);
     }
 
     #[test]
@@ -280,6 +311,28 @@ mod tests {
     }
 
     #[test]
+    fn track_estadisticas_agrupan_por_modelo_del_rol() {
+        let con_modelo = |modelo: &str| {
+            let mut f = con_usd(fila("memora", "haiku", Estado::Verde), 1.0);
+            f.modelos.insert(Rol::Construye, modelo.into());
+            f
+        };
+        let filas = vec![con_modelo("modelo-a"), con_modelo("modelo-b")];
+        let stats = estadisticas_de(&filas, Rol::Construye);
+        assert_eq!(stats.len(), 2);
+        assert_eq!(stats[0].etiqueta, "modelo-a");
+        assert_eq!(stats[1].etiqueta, "modelo-b");
+    }
+
+    #[test]
+    fn track_estadisticas_sin_modelo_del_rol_usan_la_config() {
+        let sin_modelos = con_usd(fila("memora", "haiku", Estado::Verde), 1.0);
+        let stats = estadisticas_de(&[sin_modelos], Rol::Construye);
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].etiqueta, "haiku");
+    }
+
+    #[test]
     fn track_estadisticas_excluyen_invalidas_y_cuentan_verde() {
         let filas = vec![
             con_usd(fila("memora", "haiku", Estado::Verde), 1.0),
@@ -287,7 +340,7 @@ mod tests {
             invalida(con_usd(fila("memora", "haiku", Estado::Verde), 9.0)),
             con_usd(fila("memora", "opus", Estado::Verde), 2.0),
         ];
-        let stats = estadisticas_de(&filas);
+        let stats = estadisticas_de(&filas, Rol::Construye);
         assert_eq!(stats.len(), 2);
         assert_eq!(stats[0].etiqueta, "haiku");
         assert_eq!(stats[0].n, 2);

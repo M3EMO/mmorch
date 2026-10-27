@@ -64,6 +64,45 @@ fn ruta_hermana(ruta: &Path, sufijo: &str) -> PathBuf {
     ruta.with_file_name(format!("{nombre}{sufijo}"))
 }
 
+/// Archivos de un log en orden de escritura: los rotados `<nombre>.N` por N ascendente (el más
+/// antiguo primero) y al final el vigente, si existe. Un directorio inexistente da una lista vacía.
+pub fn archivos_en_orden(ruta: &Path) -> io::Result<Vec<PathBuf>> {
+    let padre = ruta
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let entradas = match fs::read_dir(padre) {
+        Ok(entradas) => entradas,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let nombre = ruta
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let prefijo = format!("{nombre}.");
+    let mut rotados: Vec<(u32, PathBuf)> = Vec::new();
+    for entrada in entradas {
+        let entrada = entrada?;
+        let otro = entrada.file_name().to_string_lossy().into_owned();
+        let Some(sufijo) = otro.strip_prefix(&prefijo) else {
+            continue;
+        };
+        if !sufijo.is_empty()
+            && sufijo.bytes().all(|b| b.is_ascii_digit())
+            && let Ok(numero) = sufijo.parse::<u32>()
+        {
+            rotados.push((numero, entrada.path()));
+        }
+    }
+    rotados.sort_by_key(|(numero, _)| *numero);
+    let mut archivos: Vec<PathBuf> = rotados.into_iter().map(|(_, ruta)| ruta).collect();
+    if ruta.exists() {
+        archivos.push(ruta.to_path_buf());
+    }
+    Ok(archivos)
+}
+
 /// Lee las líneas no vacías del archivo, con lock compartido. Si no existe, da una lista vacía.
 pub fn leer_lineas(ruta: &Path) -> io::Result<Vec<String>> {
     Ok(leer_texto(ruta)?
@@ -132,6 +171,43 @@ mod tests {
             "bbbbbbbbbb\n"
         );
         assert_eq!(fs::read_to_string(&ruta).expect("activo"), "cccccccccc\n");
+    }
+
+    #[test]
+    fn observe_archivos_en_orden_ordena_rotados_por_numero_y_pone_el_vigente_al_final() {
+        let dir = TempDir::new().expect("temp dir");
+        let ruta = dir.path().join("eventos.jsonl");
+        for sufijo in ["10", "2", "1"] {
+            fs::write(dir.path().join(format!("eventos.jsonl.{sufijo}")), "x\n").expect("rotado");
+        }
+        fs::write(dir.path().join("eventos.jsonl.lock"), "").expect("candado");
+        fs::write(&ruta, "vigente\n").expect("vigente");
+        let nombres: Vec<String> = archivos_en_orden(&ruta)
+            .expect("lista")
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .expect("nombre")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(
+            nombres,
+            vec![
+                "eventos.jsonl.1",
+                "eventos.jsonl.2",
+                "eventos.jsonl.10",
+                "eventos.jsonl"
+            ]
+        );
+    }
+
+    #[test]
+    fn observe_archivos_en_orden_de_ruta_inexistente_da_lista_vacia() {
+        let dir = TempDir::new().expect("temp dir");
+        let lista = archivos_en_orden(&dir.path().join("no-existe.jsonl")).expect("no es error");
+        assert!(lista.is_empty());
     }
 
     #[test]

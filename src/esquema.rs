@@ -9,7 +9,7 @@ use crate::tipos::{
     Puntaje, Resumen, Veredicto,
 };
 
-/// Nombres que acepta `root esquema`.
+/// Nombres que acepta `r00t esquema`.
 const TIPOS: &[&str] = &[
     "veredicto",
     "evento",

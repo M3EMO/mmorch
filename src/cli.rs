@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 /// Root: evalúa el valor de un proyecto y rutea trabajo entre modelos.
 #[derive(Debug, Parser)]
-#[command(name = "root", version, about)]
+#[command(name = "r00t", version, about)]
 pub struct Cli {
     /// Imprime un solo objeto JSON en stdout.
     #[arg(long, global = true)]
@@ -110,8 +110,8 @@ pub enum OraculoAccion {
 pub enum ObservaAccion {
     /// Registra la salida JSON de `claude -p`.
     Claude {
-        #[arg(long = "salida")]
-        salida: PathBuf,
+        #[arg(long = "archivo")]
+        archivo: PathBuf,
         #[arg(long)]
         corrida: String,
     },

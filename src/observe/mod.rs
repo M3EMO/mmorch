@@ -46,14 +46,15 @@ pub fn resumir(corrida: &str) -> Result<Resumen, ErrorObserve> {
 
 /// Resume la corrida indicada del archivo dado. Si el archivo no existe, da un resumen vacío.
 pub fn resumir_en(ruta: &Path, corrida: &str) -> Result<Resumen, ErrorObserve> {
-    let eventos = jsonl::leer_lineas(ruta)?
-        .iter()
-        .map(|linea| serde_json::from_str::<Evento>(linea))
-        .collect::<Result<Vec<Evento>, serde_json::Error>>()?;
-    let de_la_corrida: Vec<Evento> = eventos
-        .into_iter()
-        .filter(|ev| ev.corrida == corrida)
-        .collect();
+    let mut de_la_corrida: Vec<Evento> = Vec::new();
+    for archivo in jsonl::archivos_en_orden(ruta)? {
+        for linea in jsonl::leer_lineas(&archivo)? {
+            let ev: Evento = serde_json::from_str(&linea)?;
+            if ev.corrida == corrida {
+                de_la_corrida.push(ev);
+            }
+        }
+    }
     Ok(resumir_eventos(&de_la_corrida))
 }
 
@@ -70,7 +71,12 @@ pub fn resumir_eventos(eventos: &[Evento]) -> Resumen {
             Some(Via::Cupo) => resumen.usd_cupo += ev.cost_usd,
             _ => {}
         }
-        resumen.minutos += ev.latency_s / 60.0;
+        // Solo el Sesion y las llamadas por API suman minutos; las de cupo ya están en el Sesion.
+        let suma_minutos = ev.tipo == TipoEvento::Sesion
+            || (ev.tipo == TipoEvento::Llamada && ev.via == Some(Via::Api));
+        if suma_minutos {
+            resumen.minutos += ev.latency_s / 60.0;
+        }
         if ev.tipo == TipoEvento::Sesion {
             resumen.turnos = resumen.turnos.saturating_add(turnos_de(ev));
         }
@@ -187,7 +193,24 @@ mod tests {
         let resumen = resumir_eventos(&eventos);
         assert_eq!(resumen.usd_api, 0.5);
         assert_eq!(resumen.usd_cupo, 1.25);
-        assert_eq!(resumen.minutos, 2.0);
+        // El cupo no suma minutos: su tiempo ya está en el evento Sesion.
+        assert_eq!(resumen.minutos, 0.5);
+    }
+
+    #[test]
+    fn observe_minutos_no_cuentan_dos_veces_la_llamada_de_cupo() {
+        let sesion = Evento {
+            tipo: TipoEvento::Sesion,
+            corrida: "c1".into(),
+            latency_s: 60.0,
+            ..Evento::default()
+        };
+        let llamada_cupo = Evento {
+            latency_s: 60.0,
+            ..con_costo(Via::Cupo, 0.0, 0.0)
+        };
+        let resumen = resumir_eventos(&[sesion, llamada_cupo]);
+        assert_eq!(resumen.minutos, 1.0);
     }
 
     #[test]
@@ -214,6 +237,23 @@ mod tests {
         let resumen =
             resumir_en(&dir.path().join("no-existe.jsonl"), "c1").expect("sin archivo no es error");
         assert_eq!(resumen, Resumen::default());
+    }
+
+    #[test]
+    fn observe_resumir_cuenta_intervenciones_escritas_antes_de_rotar() {
+        let dir = TempDir::new().expect("temp dir");
+        let ruta = dir.path().join("eventos.jsonl");
+        // Umbral de 100 bytes: cada evento supera el umbral, así que cada escritura rota.
+        let escribe = |ev: &Evento| {
+            let linea = serde_json::to_string(ev).expect("serializa");
+            jsonl::agregar(&ruta, &linea, 100).expect("escribe");
+        };
+        escribe(&evento(TipoEvento::PlanAprobado, 100.0));
+        escribe(&evento(TipoEvento::Humano, 101.0));
+        escribe(&evento(TipoEvento::Humano, 102.0));
+        assert!(dir.path().join("eventos.jsonl.1").exists());
+        let resumen = resumir_en(&ruta, "c1").expect("resume");
+        assert_eq!(resumen.intervenciones, 2);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::process::{Command, Output};
 const GOAL_FIXTURE: &str = "# GOAL de prueba\n\nContenido de fixture.\n";
 
 fn root_en(dir: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_root"))
+    Command::new(env!("CARGO_BIN_EXE_r00t"))
         .current_dir(dir)
         .args(args)
         .output()

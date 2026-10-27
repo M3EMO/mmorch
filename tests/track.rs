@@ -6,7 +6,7 @@ use root::tipos::{Estado, Fila, Veredicto};
 use serde_json::Value;
 
 fn root_con_home(home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_root"))
+    Command::new(env!("CARGO_BIN_EXE_r00t"))
         .env("ROOT_HOME", home)
         .args(args)
         .output()

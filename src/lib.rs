@@ -85,8 +85,8 @@ fn track_accion(json: bool, accion: &TrackAccion) -> Result<(), Error> {
 /// Subcomandos `observa`: registran eventos y muestran el resumen de una corrida.
 fn observa(json: bool, accion: &ObservaAccion) -> Result<(), Error> {
     match accion {
-        ObservaAccion::Claude { salida, corrida } => {
-            let eventos = observe::claude::leer_sesion_claude(salida, corrida)?;
+        ObservaAccion::Claude { archivo, corrida } => {
+            let eventos = observe::claude::leer_sesion_claude(archivo, corrida)?;
             for ev in &eventos {
                 observe::registrar(ev).map_err(observe::ErrorObserve::from)?;
             }

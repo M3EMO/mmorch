@@ -1,7 +1,7 @@
 use std::process::{Command, Output};
 
 fn root(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_root"))
+    Command::new(env!("CARGO_BIN_EXE_r00t"))
         .args(args)
         .output()
         .expect("no se pudo ejecutar el binario root")

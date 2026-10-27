@@ -1,7 +1,7 @@
 use std::process::{Command, Output};
 
 fn root(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_root"))
+    Command::new(env!("CARGO_BIN_EXE_r00t"))
         .args(args)
         .output()
         .expect("no se pudo ejecutar el binario root")
@@ -39,6 +39,14 @@ fn help_lista_todos_los_subcomandos() {
             "falta '{nombre}' en --help:\n{stdout}"
         );
     }
+}
+
+#[test]
+fn help_del_binario_dice_r00t() {
+    let salida = root(&["--help"]);
+    assert_eq!(codigo(&salida), 0);
+    let stdout = String::from_utf8_lossy(&salida.stdout);
+    assert!(stdout.contains("Usage: r00t"), "stdout:\n{stdout}");
 }
 
 #[test]
