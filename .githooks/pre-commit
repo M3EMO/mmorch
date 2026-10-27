@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Gates de calidad antes de cada commit.
+set -e
+
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
