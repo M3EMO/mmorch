@@ -407,7 +407,7 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
 - **Causa de cada diferencia**: cada test que difiere del banco se clasifica con evidencia en una de cuatro causas:
   - `producto`: falla en todas las repeticiones. Es un hallazgo con impacto en su requisito.
   - `inestable`: resultados mezclados. Es un hallazgo de "comportamiento no determinista" en su requisito. El origen queda "producto", "test" o "sin determinar", según la evidencia.
-  - `entorno`: el mismo commit pasa en el host y falla en el contenedor, por ejemplo por lavapipe contra GPU. Va a `[[entorno]]` de `tarea.toml` con su motivo, y el usuario lo aprueba como a los requisitos. No se cobra al producto.
+  - `entorno`: el mismo commit pasa en el host y falla en el contenedor, por ejemplo por lavapipe contra GPU. Va a `[[entorno]]` de `tarea.toml` con su motivo y no se cobra al producto. Quién aprueba la exclusión depende de P11; hasta entonces, el informe la lista con su motivo.
   - `oraculo`: el test depende de una frase ambigua de la spec, como el orden de `spin` (ticket 08). Va a `[[oraculo_dudoso]]` con su motivo y tampoco se cobra al producto.
   Las causas y su evidencia quedan en `oraculos/<tarea>/diferencias.md`.
 - **Validate** (criterio del PM, no del compilador):
