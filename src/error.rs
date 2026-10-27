@@ -6,6 +6,7 @@ use crate::goal::ErrorGoal;
 use crate::importar::ErrorImportar;
 use crate::observe::ErrorObserve;
 use crate::oracle::ErrorOraculo;
+use crate::oracle::rubrica::ErrorRubrica;
 use crate::proveedores::ErrorProveedor;
 use crate::track::ErrorTrack;
 
@@ -40,6 +41,8 @@ pub enum Error {
     Oraculo(#[from] ErrorOraculo),
     #[error("{0}")]
     Proveedor(#[from] ErrorProveedor),
+    #[error("{0}")]
+    Rubrica(#[from] ErrorRubrica),
 }
 
 impl Error {
@@ -56,7 +59,8 @@ impl Error {
             | Error::Track(_)
             | Error::Importar(_)
             | Error::Oraculo(_)
-            | Error::Proveedor(_) => 3,
+            | Error::Proveedor(_)
+            | Error::Rubrica(_) => 3,
         }
     }
 }

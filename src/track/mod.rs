@@ -3,7 +3,7 @@
 pub mod stats;
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -28,6 +28,9 @@ pub enum ErrorTrack {
         #[source]
         fuente: serde_json::Error,
     },
+    /// Las filas de las dos configuraciones usan rúbricas distintas. Sus puntajes no son comparables.
+    #[error("rúbricas distintas: {a:?} frente a {b:?}; no se comparan")]
+    RubricasDistintas { a: Vec<String>, b: Vec<String> },
 }
 
 /// Filtro de filas. Un campo en `None` no filtra.
@@ -177,6 +180,26 @@ pub fn comparar_en(ruta: &Path, a: &str, b: &str, tarea: &str) -> Result<Compara
         config: None,
     };
     let todas = filas_de(ruta, &filtro)?;
+    // Dos configuraciones con filas y rúbricas distintas no se comparan (Tarea 8b).
+    // Una config sin filas tiene n = 0 y no es error.
+    let del =
+        |config: &str| -> Vec<&Fila> { todas.iter().filter(|f| f.config == config).collect() };
+    let (filas_a, filas_b) = (del(a), del(b));
+    if !filas_a.is_empty() && !filas_b.is_empty() {
+        let rubricas_de = |filas: &[&Fila]| -> BTreeSet<String> {
+            filas
+                .iter()
+                .flat_map(|f| f.veredicto.rubricas.iter().cloned())
+                .collect()
+        };
+        let (ra, rb) = (rubricas_de(&filas_a), rubricas_de(&filas_b));
+        if ra != rb {
+            return Err(ErrorTrack::RubricasDistintas {
+                a: ra.into_iter().collect(),
+                b: rb.into_iter().collect(),
+            });
+        }
+    }
     let de = |config: &str| {
         let del_config: Vec<&Fila> = todas.iter().filter(|f| f.config == config).collect();
         stat_de(config, &del_config)
@@ -379,6 +402,85 @@ mod tests {
         agregar_en(&ruta, &fila("memora", "q", Estado::Verde)).expect("q");
         let cmp = comparar_en(&ruta, "p", "q", "memora").expect("compara");
         assert_eq!(cmp.mejor, None);
+    }
+
+    fn con_rubricas(mut f: Fila, rubricas: &[&str]) -> Fila {
+        f.veredicto.rubricas = rubricas.iter().map(|r| (*r).to_string()).collect();
+        f
+    }
+
+    #[test]
+    fn rubrica_track_comparar_rechaza_hashes_distintos() {
+        let dir = TempDir::new().expect("temp dir");
+        let ruta = dir.path().join("runs.jsonl");
+        let p = con_rubricas(fila("memora", "p", Estado::Verde), &["diseno@aaaa"]);
+        let q = con_rubricas(fila("memora", "q", Estado::Verde), &["diseno@bbbb"]);
+        agregar_en(&ruta, &p).expect("p");
+        agregar_en(&ruta, &q).expect("q");
+        match comparar_en(&ruta, "p", "q", "memora") {
+            Err(ErrorTrack::RubricasDistintas { a, b }) => {
+                assert_eq!(a, vec!["diseno@aaaa".to_string()]);
+                assert_eq!(b, vec!["diseno@bbbb".to_string()]);
+            }
+            otro => panic!("se esperaba RubricasDistintas, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn rubrica_track_comparar_rechaza_si_solo_una_config_tiene_rubricas() {
+        let dir = TempDir::new().expect("temp dir");
+        let ruta = dir.path().join("runs.jsonl");
+        agregar_en(
+            &ruta,
+            &con_rubricas(fila("memora", "p", Estado::Verde), &["diseno@aaaa"]),
+        )
+        .expect("p");
+        agregar_en(&ruta, &fila("memora", "q", Estado::Verde)).expect("q");
+        assert!(matches!(
+            comparar_en(&ruta, "p", "q", "memora"),
+            Err(ErrorTrack::RubricasDistintas { .. })
+        ));
+    }
+
+    #[test]
+    fn rubrica_track_comparar_mismas_rubricas_compara() {
+        let dir = TempDir::new().expect("temp dir");
+        let ruta = dir.path().join("runs.jsonl");
+        agregar_en(
+            &ruta,
+            &con_rubricas(fila("memora", "p", Estado::Verde), &["diseno@aaaa"]),
+        )
+        .expect("p");
+        agregar_en(
+            &ruta,
+            &con_rubricas(fila("memora", "q", Estado::Rojo), &["diseno@aaaa"]),
+        )
+        .expect("q");
+        let cmp = comparar_en(&ruta, "p", "q", "memora").expect("compara");
+        assert_eq!(cmp.mejor.as_deref(), Some("p"));
+    }
+
+    #[test]
+    fn rubrica_track_comparar_sin_rubricas_en_ninguna_compara() {
+        let dir = TempDir::new().expect("temp dir");
+        let ruta = dir.path().join("runs.jsonl");
+        agregar_en(&ruta, &fila("memora", "p", Estado::Verde)).expect("p");
+        agregar_en(&ruta, &fila("memora", "q", Estado::Verde)).expect("q");
+        assert!(comparar_en(&ruta, "p", "q", "memora").is_ok());
+    }
+
+    #[test]
+    fn rubrica_track_comparar_con_config_sin_filas_no_es_error() {
+        let dir = TempDir::new().expect("temp dir");
+        let ruta = dir.path().join("runs.jsonl");
+        agregar_en(
+            &ruta,
+            &con_rubricas(fila("memora", "p", Estado::Verde), &["diseno@aaaa"]),
+        )
+        .expect("p");
+        let cmp = comparar_en(&ruta, "p", "q", "memora").expect("no es error");
+        assert_eq!(cmp.b.n, 0);
+        assert_eq!(cmp.mejor.as_deref(), Some("p"));
     }
 
     #[test]

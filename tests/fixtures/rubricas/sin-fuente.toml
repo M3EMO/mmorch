@@ -1,0 +1,15 @@
+# Fixture de prueba: el ítem no tiene fuente, así que no carga.
+id = "diseno"
+version = 1
+
+[[item]]
+id = "diseno.modularidad"
+mide = "juez"
+peso = 3
+bloquea = false
+anclas = [
+  "0: un módulo concentra varios requisitos; un cambio toca todo",
+  "1: hay módulos, pero con dependencias cruzadas o ciclos",
+  "2: cada requisito vive en un módulo con interfaz clara",
+  "3: módulos con una responsabilidad, sin ciclos, con interfaces chicas",
+]

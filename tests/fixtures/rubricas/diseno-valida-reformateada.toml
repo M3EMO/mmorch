@@ -1,0 +1,39 @@
+# Mismo contenido que diseno-valida.toml, con otro orden de claves,
+# otros espacios y comentarios. El hash no debe cambiar.
+version   = 1
+id        = "diseno"
+
+[[item]]
+anclas   = ["0: un módulo concentra varios requisitos; un cambio toca todo", "1: hay módulos, pero con dependencias cruzadas o ciclos", "2: cada requisito vive en un módulo con interfaz clara", "3: módulos con una responsabilidad, sin ciclos, con interfaces chicas"]
+peso     = 3   # comentario al lado del peso
+mide     = "juez"
+bloquea  = false
+fuente   = "ISO/IEC 25010:2023 §mantenibilidad/modularidad"
+id       = "diseno.modularidad"
+
+# Comentario entre ítems.
+[[item]]
+bloquea = true
+id      = "diseno.ciclos"
+peso    = 2
+mide    = "sonda"
+fuente  = "fixture de sonda: grafo de módulos"
+anclas  = [
+  "0: hay ciclos entre módulos del núcleo",
+  "1: hay ciclos fuera del núcleo",
+  "2: un ciclo aislado en un módulo auxiliar",
+  "3: el grafo de módulos es acíclico",
+]
+
+[[item]]
+id      = "diseno.tope"
+mide    = "mixto"
+peso    = 1
+bloquea = false
+fuente  = "fixture mixto: el juez fija el nivel, la sonda pone el tope"
+anclas  = [
+  "0: la interfaz expone detalles internos",
+  "1: la interfaz mezcla responsabilidades",
+  "2: la interfaz es clara, con excepciones menores",
+  "3: la interfaz es chica y se prueba sola",
+]

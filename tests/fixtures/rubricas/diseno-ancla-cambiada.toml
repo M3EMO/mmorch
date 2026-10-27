@@ -1,0 +1,42 @@
+# Fixture de prueba: igual a diseno-valida.toml, salvo el texto de una ancla.
+id = "diseno"
+version = 1
+
+[[item]]
+id = "diseno.modularidad"
+fuente = "ISO/IEC 25010:2023 §mantenibilidad/modularidad"
+mide = "juez"
+peso = 3
+bloquea = false
+anclas = [
+  "0: un módulo concentra varios requisitos; un cambio toca todo",
+  "1: hay módulos, pero con dependencias cruzadas o ciclos",
+  "2: cada requisito vive en un módulo con interfaz clara y probada",
+  "3: módulos con una responsabilidad, sin ciclos, con interfaces chicas",
+]
+
+[[item]]
+id = "diseno.ciclos"
+fuente = "fixture de sonda: grafo de módulos"
+mide = "sonda"
+peso = 2
+bloquea = true
+anclas = [
+  "0: hay ciclos entre módulos del núcleo",
+  "1: hay ciclos fuera del núcleo",
+  "2: un ciclo aislado en un módulo auxiliar",
+  "3: el grafo de módulos es acíclico",
+]
+
+[[item]]
+id = "diseno.tope"
+fuente = "fixture mixto: el juez fija el nivel, la sonda pone el tope"
+mide = "mixto"
+peso = 1
+bloquea = false
+anclas = [
+  "0: la interfaz expone detalles internos",
+  "1: la interfaz mezcla responsabilidades",
+  "2: la interfaz es clara, con excepciones menores",
+  "3: la interfaz es chica y se prueba sola",
+]
