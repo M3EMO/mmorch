@@ -5,6 +5,7 @@ pub mod deepseek;
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::Write;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread;
@@ -57,6 +58,16 @@ pub enum ErrorProveedor {
     SinClave(String),
     #[error("{proveedor} respondió HTTP {estado}")]
     Http { estado: u16, proveedor: String },
+    #[error("{proveedor} rechazó la clave: HTTP {estado}")]
+    Auth { estado: u16, proveedor: String },
+    #[error("{proveedor} rechazó el pedido: HTTP {estado}")]
+    Pedido { estado: u16, proveedor: String },
+    #[error("no se pudo registrar el evento: {causa}")]
+    EventoNoRegistrado {
+        respuesta: Box<Respuesta>,
+        evento: Box<Evento>,
+        causa: String,
+    },
     #[error("error de red: {0}")]
     Red(String),
     #[error("breaker abierto para {0}")]
@@ -76,6 +87,9 @@ impl ErrorProveedor {
     fn clase(&self) -> String {
         let corta = match self {
             Self::Http { estado, .. } => return format!("http_{estado}"),
+            Self::Auth { estado, .. } => return format!("auth_{estado}"),
+            Self::Pedido { estado, .. } => return format!("pedido_{estado}"),
+            Self::EventoNoRegistrado { .. } => "evento",
             Self::Red(_) => "red",
             Self::Respuesta(_) => "respuesta",
             Self::BreakerAbierto(_) => "breaker",
@@ -87,12 +101,8 @@ impl ErrorProveedor {
         corta.into()
     }
 
-    /// Errores que cuentan como falla para el breaker: los que vienen de la red o del proveedor.
-    fn cuenta_como_falla(&self) -> bool {
-        matches!(self, Self::Http { .. } | Self::Red(_) | Self::Respuesta(_))
-    }
-
-    /// Errores que un reintento puede arreglar: red, 429 y 5xx.
+    /// Errores que un reintento puede arreglar: red, 429 y 5xx. Son también las fallas del breaker:
+    /// cuando llegan aquí, los reintentos ya se agotaron.
     fn es_transitorio(&self) -> bool {
         match self {
             Self::Red(_) => true,
@@ -303,8 +313,7 @@ pub fn llamar_con(
             if costo.is_none() {
                 ev.extra.insert("precio_faltante".into(), json!(true));
             }
-            registra(ctx.home, &ev)?;
-            Ok(Respuesta {
+            let respuesta = Respuesta {
                 texto: crudo.texto,
                 in_tokens: crudo.in_tokens,
                 out_tokens: crudo.out_tokens,
@@ -312,14 +321,22 @@ pub fn llamar_con(
                 latency_s,
                 modelo: modelo.to_string(),
                 intentos,
-            })
+            };
+            match registra(ctx.home, &ev) {
+                Ok(()) => Ok(respuesta),
+                Err(causa) => Err(ErrorProveedor::EventoNoRegistrado {
+                    respuesta: Box::new(respuesta),
+                    evento: Box::new(ev),
+                    causa: causa.to_string(),
+                }),
+            }
         }
         Err(err) => {
-            if err.cuenta_como_falla() {
+            if err.es_transitorio() {
                 ctx.breaker.registra_falla(familia, (ctx.reloj)());
             }
             ev.extra.insert("error".into(), json!(err.clase()));
-            registra(ctx.home, &ev)?;
+            registra(ctx.home, &ev).map_err(|causa| ErrorProveedor::Observe(causa.to_string()))?;
             Err(err)
         }
     }
@@ -419,7 +436,7 @@ fn un_intento(
     let estado = respuesta.status().as_u16();
     if !(200..300).contains(&estado) {
         let proveedor = familia(proveedor).into();
-        return Err(ErrorProveedor::Http { estado, proveedor });
+        return Err(error_de_estado(estado, proveedor));
     }
     let texto = respuesta
         .body_mut()
@@ -428,6 +445,15 @@ fn un_intento(
     match proveedor {
         Proveedor::Deepseek => deepseek::leer(&texto),
         Proveedor::Anthropic => anthropic::leer(&texto),
+    }
+}
+
+/// 401 y 403 son `Auth`. Los otros 4xx salvo 429 son `Pedido`. 429, 5xx y lo demás son `Http`.
+fn error_de_estado(estado: u16, proveedor: String) -> ErrorProveedor {
+    match estado {
+        401 | 403 => ErrorProveedor::Auth { estado, proveedor },
+        400..=499 if estado != 429 => ErrorProveedor::Pedido { estado, proveedor },
+        _ => ErrorProveedor::Http { estado, proveedor },
     }
 }
 
@@ -459,9 +485,42 @@ fn evento(
     ev
 }
 
-fn registra(home: &Path, ev: &Evento) -> Result<(), ErrorProveedor> {
+fn registra(home: &Path, ev: &Evento) -> std::io::Result<()> {
     observe::registrar_en(&home.join(ARCHIVO_EVENTOS), ev)
-        .map_err(|e| ErrorProveedor::Observe(e.to_string()))
+}
+
+/// Contrato de `r00t llama`. Éxito: la respuesta en `out` y 0.
+/// Evento no registrado: la respuesta en `out`, la línea JSON del evento en `err` y 3.
+/// Otro error: su mensaje en `err` y 3. Ningún mensaje lleva la clave.
+pub fn imprimir_para_cli(
+    res: Result<Respuesta, ErrorProveedor>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> u8 {
+    match res {
+        Ok(respuesta) => {
+            escribe_linea(out, &respuesta);
+            0
+        }
+        Err(ErrorProveedor::EventoNoRegistrado {
+            respuesta, evento, ..
+        }) => {
+            escribe_linea(out, &respuesta);
+            escribe_linea(err, &evento);
+            3
+        }
+        Err(otro) => {
+            let _ = writeln!(err, "{otro}");
+            3
+        }
+    }
+}
+
+/// Escribe una línea JSON. Los tipos de `Respuesta` y `Evento` no fallan al serializarse.
+fn escribe_linea<T: Serialize>(dest: &mut dyn Write, valor: &T) {
+    if let Ok(linea) = serde_json::to_string(valor) {
+        let _ = writeln!(dest, "{linea}");
+    }
 }
 
 #[cfg(test)]

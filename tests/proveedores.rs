@@ -11,7 +11,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use root::config::Config;
-use root::proveedores::{Breaker, Clave, Claves, Contexto, ErrorProveedor, Prompt, llamar_con};
+use root::proveedores::{
+    Breaker, Clave, Claves, Contexto, ErrorProveedor, Prompt, Respuesta, imprimir_para_cli,
+    llamar_con,
+};
 use root::tipos::{Eleccion, Proveedor, Via};
 use serde_json::Value;
 
@@ -342,7 +345,10 @@ fn proveedores_400_no_reintenta() {
     )
     .expect_err("400 falla");
 
-    assert!(matches!(err, ErrorProveedor::Http { estado: 400, .. }));
+    assert!(
+        matches!(err, ErrorProveedor::Pedido { .. }),
+        "llegó {err:?}"
+    );
     assert_eq!(srv.peticiones(), 1);
 }
 
@@ -535,4 +541,361 @@ fn proveedores_json_malformado_en_200_no_reintenta() {
     .expect_err("JSON malo falla");
     assert!(matches!(err, ErrorProveedor::Respuesta(_)));
     assert_eq!(srv.peticiones(), 1);
+}
+
+#[test]
+fn proveedores_401_cinco_veces_no_abre_el_breaker() {
+    let mut respuestas = vec![(401, "{}"); 5];
+    respuestas.push((200, DEEPSEEK_OK));
+    let srv = Servidor::arranca(respuestas);
+    let cfg = config(&srv.url, &srv.url);
+    let home = tempfile::tempdir().expect("home");
+    let breaker = Breaker::new();
+    let claves = claves_de_prueba();
+    let base = Instant::now();
+    let reloj = || base;
+    let ctx = Contexto {
+        cfg: &cfg,
+        home: home.path(),
+        breaker: &breaker,
+        claves: &claves,
+        reloj: &reloj,
+    };
+    let e = eleccion(Proveedor::Deepseek, "deepseek-chat");
+
+    for _ in 0..5 {
+        let err = llamar_con(&ctx, &e, &prompt(), "c11").expect_err("401 falla");
+        assert!(matches!(err, ErrorProveedor::Auth { .. }), "llegó {err:?}");
+    }
+    assert_eq!(srv.peticiones(), 5, "un 401 no se reintenta");
+    let evs = eventos(home.path());
+    assert_eq!(evs.len(), 5);
+    assert!(evs.iter().all(|ev| ev["extra"]["error"] == "auth_401"));
+
+    let r = llamar_con(&ctx, &e, &prompt(), "c11").expect("el breaker sigue cerrado");
+    assert_eq!(r.texto, "hola");
+    assert_eq!(srv.peticiones(), 6);
+}
+
+#[test]
+fn proveedores_400_cinco_veces_no_abre_el_breaker() {
+    let mut respuestas = vec![(400, "{}"); 5];
+    respuestas.push((200, DEEPSEEK_OK));
+    let srv = Servidor::arranca(respuestas);
+    let cfg = config(&srv.url, &srv.url);
+    let home = tempfile::tempdir().expect("home");
+    let breaker = Breaker::new();
+    let claves = claves_de_prueba();
+    let base = Instant::now();
+    let reloj = || base;
+    let ctx = Contexto {
+        cfg: &cfg,
+        home: home.path(),
+        breaker: &breaker,
+        claves: &claves,
+        reloj: &reloj,
+    };
+    let e = eleccion(Proveedor::Deepseek, "deepseek-chat");
+
+    for _ in 0..5 {
+        let err = llamar_con(&ctx, &e, &prompt(), "c12").expect_err("400 falla");
+        assert!(
+            matches!(err, ErrorProveedor::Pedido { .. }),
+            "llegó {err:?}"
+        );
+    }
+    assert_eq!(srv.peticiones(), 5, "un 400 no se reintenta");
+    let evs = eventos(home.path());
+    assert!(evs.iter().all(|ev| ev["extra"]["error"] == "pedido_400"));
+
+    let r = llamar_con(&ctx, &e, &prompt(), "c12").expect("el breaker sigue cerrado");
+    assert_eq!(r.texto, "hola");
+    assert_eq!(srv.peticiones(), 6);
+}
+
+#[test]
+fn proveedores_403_404_422_dan_auth_o_pedido_sin_reintentar() {
+    let srv = Servidor::arranca(vec![(403, "{}"), (404, "{}"), (422, "{}")]);
+    let cfg = config(&srv.url, &srv.url);
+    let home = tempfile::tempdir().expect("home");
+    let breaker = Breaker::new();
+    let claves = claves_de_prueba();
+    let base = Instant::now();
+    let reloj = || base;
+    let ctx = Contexto {
+        cfg: &cfg,
+        home: home.path(),
+        breaker: &breaker,
+        claves: &claves,
+        reloj: &reloj,
+    };
+    let e = eleccion(Proveedor::Deepseek, "deepseek-chat");
+
+    let err_403 = llamar_con(&ctx, &e, &prompt(), "c13").expect_err("403 falla");
+    assert!(
+        matches!(err_403, ErrorProveedor::Auth { .. }),
+        "llegó {err_403:?}"
+    );
+    let err_404 = llamar_con(&ctx, &e, &prompt(), "c13").expect_err("404 falla");
+    assert!(
+        matches!(err_404, ErrorProveedor::Pedido { .. }),
+        "llegó {err_404:?}"
+    );
+    let err_422 = llamar_con(&ctx, &e, &prompt(), "c13").expect_err("422 falla");
+    assert!(
+        matches!(err_422, ErrorProveedor::Pedido { .. }),
+        "llegó {err_422:?}"
+    );
+    assert_eq!(srv.peticiones(), 3);
+}
+
+#[test]
+fn proveedores_503_tres_seguidos_abren_el_breaker() {
+    let srv = Servidor::arranca(vec![(503, "{}"); 9]);
+    let cfg = config(&srv.url, &srv.url);
+    let home = tempfile::tempdir().expect("home");
+    let breaker = Breaker::new();
+    let claves = claves_de_prueba();
+    let base = Instant::now();
+    let reloj = || base;
+    let ctx = Contexto {
+        cfg: &cfg,
+        home: home.path(),
+        breaker: &breaker,
+        claves: &claves,
+        reloj: &reloj,
+    };
+    let e = eleccion(Proveedor::Deepseek, "deepseek-chat");
+
+    for _ in 0..3 {
+        let err = llamar_con(&ctx, &e, &prompt(), "c14").expect_err("503 falla");
+        assert!(
+            matches!(err, ErrorProveedor::Http { estado: 503, .. }),
+            "llegó {err:?}"
+        );
+    }
+    assert_eq!(srv.peticiones(), 9, "cada llamada reintenta hasta agotar");
+
+    let err = llamar_con(&ctx, &e, &prompt(), "c14").expect_err("breaker abierto");
+    assert!(
+        matches!(err, ErrorProveedor::BreakerAbierto(_)),
+        "llegó {err:?}"
+    );
+    assert_eq!(
+        srv.peticiones(),
+        9,
+        "con el breaker abierto no sale ningún pedido"
+    );
+}
+
+#[test]
+fn proveedores_429_agotado_cuenta_como_falla_del_breaker() {
+    let srv = Servidor::arranca(vec![(429, "{}"); 9]);
+    let cfg = config(&srv.url, &srv.url);
+    let home = tempfile::tempdir().expect("home");
+    let breaker = Breaker::new();
+    let claves = claves_de_prueba();
+    let base = Instant::now();
+    let reloj = || base;
+    let ctx = Contexto {
+        cfg: &cfg,
+        home: home.path(),
+        breaker: &breaker,
+        claves: &claves,
+        reloj: &reloj,
+    };
+    let e = eleccion(Proveedor::Deepseek, "deepseek-chat");
+
+    for _ in 0..3 {
+        let err = llamar_con(&ctx, &e, &prompt(), "c15").expect_err("429 falla");
+        assert!(
+            matches!(err, ErrorProveedor::Http { estado: 429, .. }),
+            "llegó {err:?}"
+        );
+    }
+    assert_eq!(srv.peticiones(), 9);
+
+    let err = llamar_con(&ctx, &e, &prompt(), "c15").expect_err("breaker abierto");
+    assert!(
+        matches!(err, ErrorProveedor::BreakerAbierto(_)),
+        "llegó {err:?}"
+    );
+    assert_eq!(srv.peticiones(), 9);
+}
+
+#[test]
+fn proveedores_json_malformado_no_abre_el_breaker() {
+    let mut respuestas = vec![(200, "no es json"); 3];
+    respuestas.push((200, DEEPSEEK_OK));
+    let srv = Servidor::arranca(respuestas);
+    let cfg = config(&srv.url, &srv.url);
+    let home = tempfile::tempdir().expect("home");
+    let breaker = Breaker::new();
+    let claves = claves_de_prueba();
+    let base = Instant::now();
+    let reloj = || base;
+    let ctx = Contexto {
+        cfg: &cfg,
+        home: home.path(),
+        breaker: &breaker,
+        claves: &claves,
+        reloj: &reloj,
+    };
+    let e = eleccion(Proveedor::Deepseek, "deepseek-chat");
+
+    for _ in 0..3 {
+        let err = llamar_con(&ctx, &e, &prompt(), "c16").expect_err("JSON malo falla");
+        assert!(matches!(err, ErrorProveedor::Respuesta(_)), "llegó {err:?}");
+    }
+    let r = llamar_con(&ctx, &e, &prompt(), "c16").expect("el breaker sigue cerrado");
+    assert_eq!(r.texto, "hola");
+    assert_eq!(srv.peticiones(), 4);
+}
+
+#[test]
+fn proveedores_evento_no_escribible_devuelve_la_respuesta_completa() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let cfg = config(&srv.url, &srv.url);
+    let home = tempfile::tempdir().expect("home");
+    // Un directorio con el nombre del archivo impide abrirlo para escribir, aun como root.
+    fs::create_dir(home.path().join("eventos.jsonl")).expect("directorio");
+    let breaker = Breaker::new();
+    let claves = claves_de_prueba();
+    let base = Instant::now();
+    let reloj = || base;
+    let ctx = Contexto {
+        cfg: &cfg,
+        home: home.path(),
+        breaker: &breaker,
+        claves: &claves,
+        reloj: &reloj,
+    };
+
+    let err = llamar_con(
+        &ctx,
+        &eleccion(Proveedor::Deepseek, "deepseek-chat"),
+        &prompt(),
+        "c17",
+    )
+    .expect_err("el evento no se puede escribir");
+
+    match err {
+        ErrorProveedor::EventoNoRegistrado {
+            respuesta,
+            evento,
+            causa,
+        } => {
+            assert_eq!(respuesta.texto, "hola");
+            assert_eq!((respuesta.in_tokens, respuesta.out_tokens), (100, 50));
+            assert!(respuesta.cost_usd > 0.0);
+            assert_eq!(respuesta.intentos, 1);
+            assert_eq!(evento.corrida, "c17");
+            assert_eq!(evento.extra["intentos"], 1);
+            assert!(!causa.is_empty());
+        }
+        otro => panic!("esperaba EventoNoRegistrado, llegó {otro:?}"),
+    }
+    // La llamada salió bien: el breaker sigue cerrado y no hubo reintentos.
+    assert_eq!(srv.peticiones(), 1);
+}
+
+fn respuesta_de_prueba() -> Respuesta {
+    Respuesta {
+        texto: "hola".into(),
+        in_tokens: 100,
+        out_tokens: 50,
+        cost_usd: 0.0002,
+        latency_s: 0.1,
+        modelo: "deepseek-chat".into(),
+        intentos: 1,
+    }
+}
+
+#[test]
+fn proveedores_cli_exito_escribe_la_respuesta_y_devuelve_0() {
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let codigo = imprimir_para_cli(Ok(respuesta_de_prueba()), &mut out, &mut err);
+
+    assert_eq!(codigo, 0);
+    let json: Value = serde_json::from_slice(&out).expect("stdout es JSON");
+    assert_eq!(json["texto"], "hola");
+    assert_eq!(json["in_tokens"], 100);
+    assert!(err.is_empty());
+}
+
+#[test]
+fn proveedores_cli_evento_no_registrado_respuesta_en_stdout_y_evento_en_stderr() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let cfg = config(&srv.url, &srv.url);
+    let home = tempfile::tempdir().expect("home");
+    fs::create_dir(home.path().join("eventos.jsonl")).expect("directorio");
+    let breaker = Breaker::new();
+    let claves = claves_de_prueba();
+    let base = Instant::now();
+    let reloj = || base;
+    let ctx = Contexto {
+        cfg: &cfg,
+        home: home.path(),
+        breaker: &breaker,
+        claves: &claves,
+        reloj: &reloj,
+    };
+    let res = llamar_con(
+        &ctx,
+        &eleccion(Proveedor::Deepseek, "deepseek-chat"),
+        &prompt(),
+        "c18",
+    );
+
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let codigo = imprimir_para_cli(res, &mut out, &mut err);
+
+    assert_eq!(codigo, 3);
+    let json: Value = serde_json::from_slice(&out).expect("stdout es JSON");
+    assert_eq!(json["texto"], "hola");
+    let linea: Value = serde_json::from_slice(&err).expect("stderr es una línea JSON");
+    assert_eq!(linea["corrida"], "c18");
+    assert_eq!(linea["extra"]["intentos"], 1);
+    assert!(!String::from_utf8_lossy(&out).contains(CLAVE_PRUEBA));
+    assert!(!String::from_utf8_lossy(&err).contains(CLAVE_PRUEBA));
+}
+
+#[test]
+fn proveedores_cli_error_da_codigo_3_y_no_muestra_la_clave() {
+    let srv = Servidor::arranca(vec![(401, "{}")]);
+    let cfg = config(&srv.url, &srv.url);
+    let home = tempfile::tempdir().expect("home");
+    let breaker = Breaker::new();
+    let claves = claves_de_prueba();
+    let base = Instant::now();
+    let reloj = || base;
+    let ctx = Contexto {
+        cfg: &cfg,
+        home: home.path(),
+        breaker: &breaker,
+        claves: &claves,
+        reloj: &reloj,
+    };
+    let res = llamar_con(
+        &ctx,
+        &eleccion(Proveedor::Deepseek, "deepseek-chat"),
+        &prompt(),
+        "c19",
+    );
+
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let codigo = imprimir_para_cli(res, &mut out, &mut err);
+
+    assert_eq!(codigo, 3);
+    assert!(out.is_empty());
+    let texto_err = String::from_utf8(err).expect("UTF-8");
+    assert!(
+        texto_err.contains("401"),
+        "el mensaje nombra el estado: {texto_err}"
+    );
+    assert!(!texto_err.contains(CLAVE_PRUEBA));
+    assert!(!String::from_utf8_lossy(&out).contains(CLAVE_PRUEBA));
 }
