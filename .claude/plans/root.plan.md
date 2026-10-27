@@ -38,6 +38,7 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 13 | P5: kappa ponderado ≥ 0,6 por dimensión y la misma decisión en 5 de los 6 paquetes. |
 | 14 | El binario se llama `r00t`. El crate, `root.toml`, `ROOT_HOME` y las herramientas MCP `root_*` conservan el nombre `root`. |
 | 15 | P6, topes duros: API 100 USD por mes; sesiones de Claude en la nube 250 USD por mes; cupo 35 USD equivalentes por 5 horas (corrección del usuario sobre los 100 iniciales). Un tope nunca se supera sin un gate humano. Ver Tarea 14. |
+| 16 | "De que son los tests? ya dije no quiero un compilador de codigo, quiero un evaluador con criterio, un project manager con datos para decidir." Los tests ocultos son una fuente de evidencia de completitud, no el veredicto. El hito ya no exige reproducir conteos del banco: exige que la decisión del PM sea estable y que cada diferencia tenga una causa con evidencia. Ver "Revisión PM 2". |
 
 ## Patterns to Mirror
 
@@ -238,7 +239,7 @@ La `Decision` sale de reglas deterministas, nunca de un LLM. Las reglas viven en
 El LLM solo escribe `resumen`, `riesgos` y `proximos_pasos`. Cada oración debe citar un id existente: el gate de evidencia descarta las que no citan.
 
 `global` es la media ponderada de las dimensiones con `calibrada = true`. Si ninguna dimensión está calibrada, `global` es `None`.
-`Estado::Verde` exige tres condiciones: contrato completo, oculto sin regresiones y `global` mayor o igual a `umbral_verde` de `root.toml`.
+`Estado` se deriva de la `Decision` del informe (Tarea 13b): `Listo` da `Verde`; `NoListo` y `Bloqueado` dan `Rojo`; sin informe, `SinVeredicto`. Ningún conteo de tests decide el estado por sí solo (decisión 16).
 
 ### Funciones públicas
 
@@ -401,7 +402,19 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
 ### Tarea 7: Tareas memora y brasa
 - **Action**: crear `oraculos/memora` y `oraculos/brasa` desde `~/Proyectos/bench-ecc-sdlc/bootstrap/` y `.scratch/ecc-vs-sdlc/oraculo/`. Construir `imagenes/oraculo-rust`: los dos proyectos son Rust y sus oráculos son pytest de caja negra (`ORACULO_REPO`, ver `oraculo/memora/conftest.py`). brasa necesita un adaptador de CPU (lavapipe) en la imagen: ver `~/Proyectos/bench-ecc-sdlc/probe-gpu/`. Los oráculos se copian a `ROOT_HOME`, nunca al repo de Root.
 - **Requisitos**: Opus redacta `[[requisito]]` y `[[escenario]]` de cada tarea desde la spec. Cada sección de la spec da al menos un requisito. Los tests ocultos `test_m<n>_*.py` ya siguen los módulos de la spec, así que cada requisito apunta a sus archivos. El usuario aprueba la lista una vez (pregunta P3). La lista es material oculto: vive en `ROOT_HOME`, no en el repo.
-- **Validate**: `r00t oraculo evaluar --tarea memora --repo ~/Proyectos/bench-ecc-sdlc/memora-ecc` da contrato 61/61 y oculto 48/48. brasa-ecc da 53/53 y 15/16.
+- **Qué mide esta tarea** (decisión 16): que el instrumento del PM sea confiable. No mide que el Oracle repita los conteos del banco. Esos conteos vienen de una sola corrida en el host, así que también son una muestra.
+- **Repeticiones**: `tarea.toml` suma `repeticiones = 3`. El Oracle corre la suite oculta esa cantidad de veces y guarda la tasa de éxito de cada test. Un test con resultados mezclados queda `inestable`. `Veredicto` suma, solo agregando, `repeticiones: u32` e `inestables: Vec<String>`.
+- **Causa de cada diferencia**: cada test que difiere del banco se clasifica con evidencia en una de cuatro causas:
+  - `producto`: falla en todas las repeticiones. Es un hallazgo con impacto en su requisito.
+  - `inestable`: resultados mezclados. Es un hallazgo de "comportamiento no determinista" en su requisito. El origen queda "producto", "test" o "sin determinar", según la evidencia.
+  - `entorno`: el mismo commit pasa en el host y falla en el contenedor, por ejemplo por lavapipe contra GPU. Va a `[[entorno]]` de `tarea.toml` con su motivo, y el usuario lo aprueba como a los requisitos. No se cobra al producto.
+  - `oraculo`: el test depende de una frase ambigua de la spec, como el orden de `spin` (ticket 08). Va a `[[oraculo_dudoso]]` con su motivo y tampoco se cobra al producto.
+  Las causas y su evidencia quedan en `oraculos/<tarea>/diferencias.md`.
+- **Validate** (criterio del PM, no del compilador):
+  - memora-ecc y brasa-ecc reciben el mismo nivel en cada requisito en 3 evaluaciones seguidas.
+  - Cada diferencia contra los números del banco tiene una causa y una evidencia en `diferencias.md`. Ninguna queda "sin diagnosticar".
+  - memora-ecc queda arriba de memora-sdlc en completitud.
+  - Ya no se exige un conteo exacto como 61/61 o 48/48.
 
 ### Tarea 8: Proveedores
 - **Action**: DeepSeek (API compatible con OpenAI) y Anthropic Messages. Reintentos y breaker como en `providers.py`. El costo sale de los precios de `root.toml`. Cada llamada registra un `Evento`. Las claves salen de variables de entorno y nunca entran a un log.
@@ -431,7 +444,9 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
   - **0 Ausente**: ningún test verde.
   - **1 Parcial**: algunos tests de `pruebas` verdes.
   - **2 Caso feliz**: todos los tests de `pruebas` verdes, pero falta algún borde o escenario.
-  - **3 Cumplido**: todo `pruebas`, `bordes` y `escenarios` en verde.
+  - **3 Cumplido**: todo `pruebas`, `bordes` y `escenarios` en verde, en todas las repeticiones.
+  
+  Un requisito con un test `inestable` no supera el nivel 2, y su hallazgo entra al informe. Un test de causa `entorno` u `oraculo` se excluye del cálculo y figura en el informe como dato excluido, con su motivo.
   
   El puntaje de `Completitud` es `Σ peso·nivel / (3·Σ peso)`. Los requisitos salen de la spec, y la spec sale de una sesión `/grill-me` con el usuario (decisión 12). En memora y brasa, la spec ya existe en el banco.
 - **Validate**: `r00t oraculo evaluar --tarea memora --repo .../memora-sdlc` marca `Ausente` los módulos que el SDLC no construyó (el SDLC construyó 2 de 9 módulos, según `docs/contexto/mapa.md`). memora-ecc queda con todos `Cumplido`.
@@ -511,6 +526,7 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
   - `riesgos` y `proximos_pasos` son 5 ítems como máximo, ordenados por `peso` del requisito y por severidad.
   - Un LLM escribe `resumen` y redacta los textos de `riesgos` y `proximos_pasos`. Cada oración cita un id existente; el gate de evidencia descarta las demás.
   - `r00t oraculo informe --md` imprime el informe legible: decisión, por qué, qué falta, qué arreglar primero.
+  - **Datos para decidir** (decisión 16): `Informe` suma, solo agregando, `confianza: Confianza`. `Confianza` lista las repeticiones, los tests inestables, los tests excluidos por entorno u oráculo, las dimensiones sin calibrar y las partes sin veredicto. El informe muestra la confianza junto a la decisión. Una decisión `Listo` con 3 dimensiones sin calibrar dice exactamente eso.
 - **Validate**: el informe de memora-sdlc da `NoListo` o `Bloqueado` y nombra los módulos ausentes en `proximos_pasos`. El informe de memora-ecc no inventa faltantes: cada ítem cita un id real. Un test con un LLM falso que cita un id inexistente pierde esa oración.
 
 ### Tarea 14: Route
@@ -595,8 +611,8 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
 ```bash
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 r00t goal verificar
-r00t oraculo evaluar --tarea memora --repo ~/Proyectos/bench-ecc-sdlc/memora-ecc --json   # 61/61, 48/48
-r00t oraculo evaluar --tarea brasa  --repo ~/Proyectos/bench-ecc-sdlc/brasa-ecc  --json   # 53/53, 15/16
+r00t oraculo evaluar --tarea memora --repo ~/Proyectos/bench-ecc-sdlc/memora-ecc --json   # niveles por requisito estables en 3 corridas
+r00t oraculo evaluar --tarea brasa  --repo ~/Proyectos/bench-ecc-sdlc/brasa-ecc  --json   # cada diferencia con causa en diferencias.md
 for d in completitud entrega pruebas seguridad estructura arquitectura eficiencia diseno; do r00t oraculo calibrar --tarea memora --dimension $d --n 20 --semilla 42; done
 r00t oraculo informe --tarea memora --repo ~/Proyectos/bench-ecc-sdlc/memora-sdlc --md   # NoListo o Bloqueado, con los módulos ausentes
 r00t oraculo validar --casos $ROOT_HOME/validez/
@@ -621,13 +637,17 @@ r00t aprende --replay
 | ECC entero (decisión a) trae hooks que escriben secretos en `~/.claude/` | Confirmada | `r00t corre` apaga esos hooks por defecto; la reconstrucción de ECC los elimina |
 | Haiku no está medido (decisión 7) | Media | Cada fila de `runs.jsonl` mide a Haiku de hecho; `r00t track comparar` lo hace visible |
 | Podman sin el tag `z` falla por SELinux | Alta en Fedora | El tag `z` es fijo en `contenedor.rs` y tiene un test |
+| El contenedor corre sin red: un repo con dependencias que no están en la imagen no compila | Alta para todo repo fuera del banco | La Tarea 7a precarga las dependencias de memora y brasa. Para otros repos decide P10. Mientras tanto, una dependencia faltante da `SinVeredicto` con la causa "dependencias no disponibles sin red". Nunca da un rojo que culpe al producto. |
+| Un test inestable se lee como un defecto del producto, o al revés | Alta (ya pasó con `test_blpop_fifo_entre_clientes`) | Repeticiones y clasificación por causa con evidencia (Tarea 7). Sin evidencia, el origen queda "sin determinar" y el informe lo dice. |
 | Un agente corre `r00t goal autorizar` por Bash | Baja | `autorizar` exige TTY; la sesión `claude -p` no tiene TTY |
 | `GOAL.md` falta cuando arranca `r00t corre` | Media | `r00t corre` corre `r00t goal verificar` primero y sale con código 3 sin GOAL autorizado |
 
 ## Acceptance
 - [ ] Las tareas 1 a 19 y sus variantes 5b, 9b, 9c, 9d, 9e, 12b y 13b están completas.
 - [ ] La validación pasa.
-- [ ] El Oracle reproduce 61/61 y 48/48 en memora-ecc, y 53/53 y 15/16 en brasa-ecc.
+- [ ] La decisión y los niveles por requisito de memora-ecc y brasa-ecc no cambian en 3 evaluaciones seguidas.
+- [ ] Cada diferencia contra los números del banco tiene una causa y una evidencia (Tarea 7).
+- [ ] Cada informe muestra su `confianza`.
 - [ ] Cada dimensión en `global` tiene exactitud balanceada ≥ 0,9 en su calibración.
 - [ ] Root ordena bien los pares de orden conocido (ECC contra SDLC en memora y brasa).
 - [ ] Root encuentra los defectos reales conocidos de la Tarea 12b, con `archivo:línea`. Recall ≥ 0,8 (decisión 12).
@@ -692,4 +712,29 @@ Respuestas a las preguntas de Sonnet al cerrar las Tareas 1 a 5. Los cambios de 
 - **P8.** Respondida (decisión 15): "la nube" son las sesiones de Claude en la nube.
 - **P9.** Respondida por el usuario (textual): "P9: sí, una sesión en la nube cuenta en el cupo de 5 horas y en los 250 USD por mes."
 - **P7.** Cerrada: el usuario cambió `GOAL.md` a `r00t goal` y lo re-autorizó (textual: "ya puse autorizar."). `r00t goal verificar` da 311a6371c0cd414a.
+
+## Revisión PM 2 (2026-10-27, Tarea 7)
+
+Pedido del usuario: "De que son los tests? ya dije no quiero un compilador de codigo, quiero un evaluador con criterio, un project manager con datos para decidir".
+
+**Qué medía todavía como un compilador**
+- La Tarea 7 exigía repetir un conteo exacto (61/61, 48/48, 53/53, 15/16). Ese conteo viene de una sola corrida en el host. Perseguir el número no dice nada nuevo sobre el producto.
+- `Estado::Verde` se decidía por conteos de tests y no por la decisión del PM.
+- Un test inestable no tenía lugar: quedaba como "falla" o como "pasa" según la corrida.
+- El informe no decía cuánto confiar en sus propios datos.
+
+**Qué cambió**
+- Tarea 7: criterio de estabilidad de la decisión, repeticiones y una causa con evidencia por diferencia.
+- Tarea 9c: un requisito con un test inestable no llega al nivel 3; los tests de causa `entorno` u `oraculo` se excluyen con motivo.
+- Tarea 13b: `Informe.confianza`.
+- `Estado` se deriva de la `Decision`.
+- Riesgo nuevo: contenedor sin red (P10).
+
+**Preguntas abiertas (sin responder)**
+- **P10.** ¿Root puede usar red para bajar dependencias antes de evaluar un repo que no es del banco? Tu GOAL pone "red fuera del repo" en zona roja con gate humano. Hay tres opciones:
+  - **a.** Una fase de descarga con red, limitada a crates.io y PyPI, antes de cortar la red. En esa fase el oráculo oculto no está montado y no corre ningún build. Pide tu autorización una vez, como regla permanente.
+  - **b.** Una descarga con red que vos aprobás en cada evaluación, con un comando corrido a mano.
+  - **c.** Sin red nunca: un repo cuyas dependencias no están en la imagen recibe `SinVeredicto`.
+  Hasta tu respuesta, rige la opción c.
+- **P11.** Algunos tests fallan por el entorno o por una frase ambigua de la spec. ¿Querés aprobar vos cada exclusión de esos tests, igual que los requisitos? Si no, el informe solo la lista con su motivo.
 
