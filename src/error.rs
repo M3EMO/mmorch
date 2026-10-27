@@ -5,6 +5,7 @@ use thiserror::Error as ErrorDerive;
 use crate::goal::ErrorGoal;
 use crate::importar::ErrorImportar;
 use crate::observe::ErrorObserve;
+use crate::oracle::ErrorOraculo;
 use crate::track::ErrorTrack;
 
 /// Errores de la biblioteca. Cada variante tiene su código de salida.
@@ -34,6 +35,8 @@ pub enum Error {
     Track(#[from] ErrorTrack),
     #[error("{0}")]
     Importar(#[from] ErrorImportar),
+    #[error("{0}")]
+    Oraculo(#[from] ErrorOraculo),
 }
 
 impl Error {
@@ -48,7 +51,8 @@ impl Error {
             | Error::Json(_)
             | Error::Observe(_)
             | Error::Track(_)
-            | Error::Importar(_) => 3,
+            | Error::Importar(_)
+            | Error::Oraculo(_) => 3,
         }
     }
 }

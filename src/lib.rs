@@ -7,6 +7,7 @@ pub mod esquema;
 pub mod goal;
 pub mod importar;
 pub mod observe;
+pub mod oracle;
 pub mod tipos;
 pub mod track;
 
