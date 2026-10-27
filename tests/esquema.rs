@@ -71,3 +71,12 @@ fn esquema_tipo_desconocido_sale_con_2() {
     let stderr = String::from_utf8_lossy(&salida.stderr);
     assert!(stderr.contains("uso"), "stderr: {stderr}");
 }
+
+#[test]
+fn esquema_pendiente_imprime_json_schema() {
+    let salida = root(&["esquema", "pendiente"]);
+    assert_eq!(codigo(&salida), 0);
+    let schema: serde_json::Value =
+        serde_json::from_slice(&salida.stdout).expect("stdout debe ser JSON válido");
+    assert_eq!(schema["title"], "Pendiente");
+}

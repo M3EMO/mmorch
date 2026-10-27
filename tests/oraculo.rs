@@ -623,3 +623,271 @@ fn temporales_home_tmp_como_archivo_da_infra() {
         "un temporal que no se crea es Infra, llegó {res:?}"
     );
 }
+
+// ---- Tarea 7f: tests pendientes por entorno ----
+
+const ENTORNO_O2: &str =
+    "[[entorno]]\ntest = \"test_o::o2\"\nmotivo = \"lavapipe no emula la GPU\"\n";
+const JUNIT_IMPORTAR: &str = r#"<testsuite><testcase classname="tests.test_o" name="o2"/><testcase classname="tests.test_ajeno" name="otro"/></testsuite>"#;
+
+/// Tarea con un test en `[[entorno]]` y los archivos de su suite oculta ya escritos.
+fn tarea_con_pendiente(home: &Path, entorno: &str) -> PathBuf {
+    let dir = home.join("oraculos").join("tarea-prueba");
+    fs::create_dir_all(dir.join("oculto")).expect("dir");
+    escribir_tarea_extra(
+        &dir,
+        &bloque(&escribe_xml("contrato.xml", JUNIT_DOS_OK), None),
+        &bloque(&escribe_xml("oculto.xml", JUNIT_UNA_FALLA), None),
+        "",
+        entorno,
+    );
+    dir
+}
+
+#[test]
+fn pendiente_entorno_lista_el_test_y_no_cuenta() {
+    let _g = preparar();
+    let (_dir, tarea) = tarea_con_extra(
+        &escribe_xml("contrato.xml", JUNIT_DOS_OK),
+        &escribe_xml("oculto.xml", JUNIT_UNA_FALLA),
+        "",
+        ENTORNO_O2,
+    );
+    let repo = repo_con_contenido();
+    let home = tempfile::tempdir().expect("home");
+    let v = evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa");
+    assert_eq!(v.oculto, Conteo { pasa: 1, total: 1 }, "o2 sale del conteo");
+    assert_eq!(v.pendientes.len(), 1);
+    assert_eq!(v.pendientes[0].test, "test_o::o2");
+    assert_eq!(v.pendientes[0].motivo, "lavapipe no emula la GPU");
+    assert_eq!(v.pendientes[0].colab, None);
+    assert_eq!(v.estado, Estado::SinVeredicto);
+}
+
+#[test]
+fn pendiente_entorno_sin_test_en_el_junit_tambien_se_lista() {
+    let _g = preparar();
+    let (_dir, tarea) = tarea_con_extra(
+        &escribe_xml("contrato.xml", JUNIT_DOS_OK),
+        &escribe_xml("oculto.xml", JUNIT_DOS_OK),
+        "",
+        "[[entorno]]\ntest = \"test_z::no_corre\"\nmotivo = \"no existe en este entorno\"\n",
+    );
+    let repo = repo_con_contenido();
+    let home = tempfile::tempdir().expect("home");
+    let v = evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa");
+    assert_eq!(v.pendientes.len(), 1);
+    assert_eq!(v.oculto, Conteo { pasa: 2, total: 2 });
+}
+
+#[test]
+fn pendiente_paquete_crea_repo_tests_correr_y_leeme() {
+    let home = tempfile::tempdir().expect("home");
+    let entorno =
+        "[[entorno]]\ntest = \"test_x::test_rendimiento[gpu-10000-res1]\"\nmotivo = \"lavapipe\"\n";
+    let dir = tarea_con_pendiente(home.path(), entorno);
+    fs::write(
+        dir.join("oculto/test_x.py"),
+        "def test_rendimiento(): pass\n",
+    )
+    .expect("escribe");
+    fs::write(dir.join("oculto/conftest.py"), "# fixtures\n").expect("escribe");
+    let repo = repo_con_contenido();
+    let ruta = repo.path().to_str().expect("ruta UTF-8").to_string();
+
+    let salida = root_cli(
+        home.path(),
+        &[
+            "--json",
+            "oraculo",
+            "pendientes",
+            "--tarea",
+            "tarea-prueba",
+            "--repo",
+            &ruta,
+        ],
+    );
+    assert_eq!(salida.status.code(), Some(0));
+    let json: serde_json::Value =
+        serde_json::from_slice(&salida.stdout).expect("stdout es un objeto JSON");
+    assert_eq!(
+        json["tests"],
+        serde_json::json!(["test_x::test_rendimiento[gpu-10000-res1]"])
+    );
+    let paquete = PathBuf::from(json["dir"].as_str().expect("dir es texto"));
+    assert!(paquete.starts_with(home.path().join("pendientes")));
+    assert!(
+        !paquete.starts_with(env!("CARGO_MANIFEST_DIR")),
+        "el paquete no va dentro del worktree"
+    );
+    assert!(paquete.join("repo/a.txt").is_file());
+    assert!(paquete.join("repo/src/lib.rs").is_file());
+    assert!(!paquete.join("repo/target").exists(), "sin target/");
+    assert!(!paquete.join("repo/.git").exists(), "sin .git/");
+    assert!(paquete.join("tests/test_x.py").is_file());
+    assert!(paquete.join("tests/conftest.py").is_file());
+    let correr = fs::read_to_string(paquete.join("correr.sh")).expect("correr.sh");
+    assert!(correr.contains("'tests/test_x.py::test_rendimiento[gpu-10000-res1]'"));
+    let modo = fs::metadata(paquete.join("correr.sh"))
+        .expect("meta")
+        .permissions();
+    assert!(
+        std::os::unix::fs::PermissionsExt::mode(&modo) & 0o111 != 0,
+        "correr.sh es ejecutable"
+    );
+    assert!(paquete.join("LEEME.txt").is_file());
+    assert!(
+        repo.path().join("target/x").exists(),
+        "el repo original no cambia"
+    );
+}
+
+#[test]
+fn pendiente_sin_tests_pendientes_no_crea_nada() {
+    let home = tempfile::tempdir().expect("home");
+    let dir = home.path().join("oraculos").join("tarea-prueba");
+    fs::create_dir_all(&dir).expect("dir");
+    escribir_tarea(
+        &dir,
+        &escribe_xml("contrato.xml", JUNIT_DOS_OK),
+        &escribe_xml("oculto.xml", JUNIT_DOS_OK),
+    );
+    let repo = repo_con_contenido();
+    let ruta = repo.path().to_str().expect("ruta UTF-8").to_string();
+    let salida = root_cli(
+        home.path(),
+        &[
+            "oraculo",
+            "pendientes",
+            "--tarea",
+            "tarea-prueba",
+            "--repo",
+            &ruta,
+        ],
+    );
+    assert_eq!(salida.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&salida.stdout).trim_end(),
+        "tests: []"
+    );
+    assert!(!home.path().join("pendientes").exists(), "no crea nada");
+}
+
+#[test]
+fn pendiente_archivo_inexistente_es_error_de_tarea() {
+    let home = tempfile::tempdir().expect("home");
+    tarea_con_pendiente(
+        home.path(),
+        "[[entorno]]\ntest = \"test_falta::t\"\nmotivo = \"x\"\n",
+    );
+    let repo = repo_con_contenido();
+    let ruta = repo.path().to_str().expect("ruta UTF-8").to_string();
+    let salida = root_cli(
+        home.path(),
+        &[
+            "oraculo",
+            "pendientes",
+            "--tarea",
+            "tarea-prueba",
+            "--repo",
+            &ruta,
+        ],
+    );
+    assert_eq!(
+        salida.status.code(),
+        Some(3),
+        "falta el archivo: error de tarea"
+    );
+    assert!(
+        !home.path().join("pendientes").exists(),
+        "no deja un paquete a medias"
+    );
+}
+
+#[test]
+fn pendiente_importar_guarda_colab_y_evento_gate() {
+    let _g = preparar();
+    let home = tempfile::tempdir().expect("home");
+    let dir = tarea_con_pendiente(home.path(), ENTORNO_O2);
+    fs::write(dir.join("oculto/conftest.py"), "").expect("escribe");
+    let repo = repo_con_contenido();
+    let ruta = repo.path().to_str().expect("ruta UTF-8").to_string();
+    let junit = home.path().join("pendientes.xml");
+    fs::write(&junit, JUNIT_IMPORTAR).expect("escribe el junit");
+    let ruta_junit = junit.to_str().expect("ruta UTF-8").to_string();
+
+    let salida = root_cli(
+        home.path(),
+        &[
+            "--json",
+            "oraculo",
+            "pendientes",
+            "--tarea",
+            "tarea-prueba",
+            "--repo",
+            &ruta,
+            "--importar",
+            &ruta_junit,
+        ],
+    );
+    assert_eq!(salida.status.code(), Some(0));
+    let json: serde_json::Value =
+        serde_json::from_slice(&salida.stdout).expect("stdout es un objeto JSON");
+    assert_eq!(json["importados"], 1);
+    assert_eq!(json["ignorados"], 1, "test_ajeno::otro no está en entorno");
+
+    let colab: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(home.path().join("evidencia/tarea-prueba/colab.json"))
+            .expect("colab.json"),
+    )
+    .expect("colab.json es JSON");
+    assert_eq!(colab["test_o::o2"]["resultado"], "pasa");
+    assert_eq!(
+        colab["test_o::o2"]["junit_sha256"].as_str().map(str::len),
+        Some(64)
+    );
+    assert!(colab.get("test_ajeno::otro").is_none());
+
+    let eventos = fs::read_to_string(home.path().join("eventos.jsonl")).expect("eventos.jsonl");
+    let gates: Vec<serde_json::Value> = eventos
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("línea JSON"))
+        .filter(|e: &serde_json::Value| e["tipo"] == "gate")
+        .collect();
+    assert_eq!(gates.len(), 1, "un solo evento gate");
+    assert_eq!(gates[0]["extra"]["origen"], "colab");
+    assert_eq!(gates[0]["corrida"], "pendientes-tarea-prueba");
+    assert_eq!(gates[0]["fase"], "pendientes");
+
+    let tarea = Tarea::cargar_de(&dir).expect("carga la tarea");
+    let v = evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa");
+    assert_eq!(v.pendientes[0].colab.as_deref(), Some("pasa"));
+}
+
+#[test]
+fn pendiente_importar_junit_malformado_o_faltante_sale_3() {
+    let home = tempfile::tempdir().expect("home");
+    tarea_con_pendiente(home.path(), ENTORNO_O2);
+    let repo = repo_con_contenido();
+    let ruta = repo.path().to_str().expect("ruta UTF-8").to_string();
+    let malo = home.path().join("malo.xml");
+    fs::write(&malo, "<testsuite>").expect("escribe");
+    for junit in [malo, home.path().join("no-existe.xml")] {
+        let ruta_junit = junit.to_str().expect("ruta UTF-8").to_string();
+        let salida = root_cli(
+            home.path(),
+            &[
+                "oraculo",
+                "pendientes",
+                "--tarea",
+                "tarea-prueba",
+                "--repo",
+                &ruta,
+                "--importar",
+                &ruta_junit,
+            ],
+        );
+        assert_eq!(salida.status.code(), Some(3), "junit {ruta_junit} inválido");
+    }
+    assert!(!home.path().join("evidencia").exists(), "no guarda nada");
+}

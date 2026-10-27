@@ -55,6 +55,49 @@ fn oraculo_evaluar(json: bool, nombre: &str, repo: &Path) -> Result<u8, Error> {
     Ok(oracle::codigo_de_estado(veredicto.estado))
 }
 
+/// `oraculo pendientes`: arma el paquete de los tests pendientes, o importa el junit de Colab.
+fn oraculo_pendientes(
+    json: bool,
+    nombre: &str,
+    repo: &Path,
+    importar: Option<&Path>,
+) -> Result<(), Error> {
+    let tarea = Tarea::cargar(nombre)?;
+    let home = config::root_home();
+    if let Some(junit) = importar {
+        let resumen = oracle::pendientes::importar(&home, &tarea, junit)?;
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({"importados": resumen.importados, "ignorados": resumen.ignorados})
+            );
+        } else {
+            println!(
+                "importados: {}, ignorados: {}",
+                resumen.importados, resumen.ignorados
+            );
+        }
+        return Ok(());
+    }
+    match oracle::pendientes::crear(&home, &tarea, repo)? {
+        None if json => println!("{}", serde_json::json!({"dir": null, "tests": []})),
+        None => println!("tests: []"),
+        Some(paquete) => {
+            let dir = paquete.dir.display().to_string();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"dir": dir, "tests": paquete.tests})
+                );
+            } else {
+                println!("dir: {dir}");
+                println!("tests: {}", serde_json::to_string(&paquete.tests)?);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn etiqueta_estado(estado: Estado) -> &'static str {
     match estado {
         Estado::Verde => "verde",
@@ -89,6 +132,14 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
                 }
             }
         }
+        Comando::Oraculo {
+            accion:
+                OraculoAccion::Pendientes {
+                    tarea,
+                    repo,
+                    importar,
+                },
+        } => oraculo_pendientes(cli.json, tarea, repo, importar.as_deref()),
         Comando::Observa { accion } => observa(cli.json, accion),
         Comando::Track { accion } => track_accion(cli.json, accion),
         Comando::ImportarMmorch { desde } => {

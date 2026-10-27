@@ -93,6 +93,17 @@ pub enum OraculoAccion {
         #[arg(long)]
         repo: PathBuf,
     },
+    /// Arma el paquete de los tests pendientes por entorno para correrlos en Colab.
+    /// Con `--importar`, guarda el junit que trajo de vuelta.
+    Pendientes {
+        #[arg(long)]
+        tarea: String,
+        #[arg(long)]
+        repo: PathBuf,
+        /// Junit que dejó `correr.sh`. Sin este flag se arma el paquete.
+        #[arg(long)]
+        importar: Option<PathBuf>,
+    },
     /// Calibra una dimensión del Oracle.
     Calibrar {
         #[arg(long)]
@@ -187,6 +198,7 @@ impl Comando {
             Comando::Llama { .. } => "llama",
             Comando::Oraculo { accion } => match accion {
                 OraculoAccion::Evaluar { .. } => "oraculo evaluar",
+                OraculoAccion::Pendientes { .. } => "oraculo pendientes",
                 OraculoAccion::Calibrar { .. } => "oraculo calibrar",
             },
             Comando::Observa { accion } => match accion {

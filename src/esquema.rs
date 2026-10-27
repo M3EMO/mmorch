@@ -6,7 +6,7 @@ use crate::config::Config;
 use crate::error::Error;
 use crate::tipos::{
     Accion, Conteo, Eleccion, EstadoRequisito, Evento, Fila, Hallazgo, Informe, NivelItem, Pedido,
-    Puntaje, Resumen, Veredicto,
+    Pendiente, Puntaje, Resumen, Veredicto,
 };
 
 /// Nombres que acepta `r00t esquema`.
@@ -25,6 +25,7 @@ const TIPOS: &[&str] = &[
     "estadorequisito",
     "accion",
     "nivelitem",
+    "pendiente",
 ];
 
 /// JSON Schema (formato pretty) del tipo indicado por su nombre en minúsculas.
@@ -44,6 +45,7 @@ pub fn json(tipo: &str) -> Result<String, Error> {
         "estadorequisito" => imprimir::<EstadoRequisito>(),
         "accion" => imprimir::<Accion>(),
         "nivelitem" => imprimir::<NivelItem>(),
+        "pendiente" => imprimir::<Pendiente>(),
         otro => Err(Error::Uso(format!(
             "tipo desconocido '{otro}'. Tipos: {}",
             TIPOS.join(", ")

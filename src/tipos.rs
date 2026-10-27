@@ -68,6 +68,18 @@ pub enum Cumplimiento {
     Parcial,
     Ausente,
     SinVeredicto,
+    Pendiente,
+}
+
+/// Test que falla por el entorno y no se cobra al producto. Figura en el informe con su motivo.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Pendiente {
+    /// Id del test con forma `archivo::nombre`.
+    pub test: String,
+    pub motivo: String,
+    /// Resultado importado de Colab: "pasa", "falla" u "omite". Ausente si no se importó.
+    #[serde(default)]
+    pub colab: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -217,6 +229,10 @@ pub struct Veredicto {
     /// Tasa de cada test inestable. Claves `contrato:<id>` u `oculto:<id>`. Un veredicto viejo lee vacío.
     #[serde(default)]
     pub tasas: BTreeMap<String, TasaTest>,
+    /// Tests de `[[entorno]]`, con su motivo. No entran al conteo. Un veredicto viejo lee vacío.
+    /// Completitud y el nivel por requisito llegan con la Tarea 9c; por ahora solo se listan.
+    #[serde(default)]
+    pub pendientes: Vec<Pendiente>,
 }
 
 impl Default for Veredicto {
@@ -239,6 +255,7 @@ impl Default for Veredicto {
             inestables: Vec::new(),
             inestables_contrato: Vec::new(),
             tasas: BTreeMap::new(),
+            pendientes: Vec::new(),
         }
     }
 }
@@ -416,6 +433,7 @@ mod tests {
             inestables: vec!["test_f::t_flaky".into()],
             inestables_contrato: Vec::new(),
             tasas: BTreeMap::new(),
+            pendientes: Vec::new(),
         }
     }
 
@@ -773,6 +791,7 @@ mod tests {
             Cumplimiento::Parcial,
             Cumplimiento::Ausente,
             Cumplimiento::SinVeredicto,
+            Cumplimiento::Pendiente,
         ] {
             ida_y_vuelta(&x);
         }
@@ -796,5 +815,50 @@ mod tests {
             "funciona"
         );
         assert_eq!(serde_json::to_value(Dimension::Diseno).unwrap(), "diseno");
+    }
+
+    #[test]
+    fn pendiente_cumplimiento_serializa_pendiente() {
+        assert_eq!(
+            serde_json::to_value(Cumplimiento::Pendiente).unwrap(),
+            "pendiente"
+        );
+        ida_y_vuelta(&Cumplimiento::Pendiente);
+    }
+
+    #[test]
+    fn pendiente_ida_y_vuelta_con_y_sin_colab() {
+        ida_y_vuelta(&Pendiente {
+            test: "test_f::t_gpu".into(),
+            motivo: "lavapipe no emula la GPU".into(),
+            colab: None,
+        });
+        ida_y_vuelta(&Pendiente {
+            test: "test_f::t_gpu".into(),
+            motivo: "lavapipe no emula la GPU".into(),
+            colab: Some("pasa".into()),
+        });
+    }
+
+    #[test]
+    fn pendiente_veredicto_con_pendientes_ida_y_vuelta() {
+        let mut v = Veredicto::default();
+        assert!(v.pendientes.is_empty());
+        v.pendientes.push(Pendiente {
+            test: "test_f::t_gpu".into(),
+            motivo: "entorno".into(),
+            colab: None,
+        });
+        ida_y_vuelta(&v);
+    }
+
+    #[test]
+    fn pendiente_veredicto_v1_sin_pendientes_se_lee_vacio() {
+        let texto = r#"{"v":1,"tarea":"memora","repo":"r","commit":"c",
+            "contrato":{"pasa":1,"total":1},"oculto":{"pasa":0,"total":0},
+            "puntajes":[],"hallazgos":[],"global":null,"estado":"sin_veredicto",
+            "costo_usd":0.0}"#;
+        let v: Veredicto = serde_json::from_str(texto).expect("v1 se acepta");
+        assert!(v.pendientes.is_empty());
     }
 }

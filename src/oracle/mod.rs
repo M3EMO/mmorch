@@ -2,6 +2,7 @@
 
 pub mod contenedor;
 pub mod junit;
+pub mod pendientes;
 pub mod tarea;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -82,6 +83,7 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
         .map_err(|e| ErrorOraculo::Infra(format!("no existe el repo {}: {e}", repo.display())))?;
     // Los temporales van a ROOT_HOME, nunca a TMPDIR ni a /tmp (desempate 6).
     let home = o.home.clone().unwrap_or_else(root_home);
+    let colab = pendientes::colab_de(&home, &tarea.nombre)?;
     let tmp = home.join(CARPETA_TEMPORALES);
     fs::create_dir_all(&tmp).map_err(|e| infra("directorio temporal de ROOT_HOME", e))?;
     limpiar_temporales(&tmp, SystemTime::now());
@@ -141,6 +143,7 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
         inestables: oculto.inestables,
         inestables_contrato: contrato.inestables,
         tasas,
+        pendientes: pendientes::desde(tarea, &colab),
     })
 }
 
