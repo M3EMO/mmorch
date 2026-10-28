@@ -44,6 +44,12 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 19 | P13: "que diga pendiente o probar en collab". Un test que falla por el entorno queda `Pendiente` en el informe: no se cobra al producto ni se excluye en silencio. La otra salida es correrlo en Colab con GPU, con la aprobación del usuario (P15). Ver Tarea 7f. |
 | 20 | P14: "en el spec. Obligatoria". La ficha vive dentro de `SPEC.md`, en una sección `## Ficha` con un bloque TOML. Sin ficha, Root no evalúa. Ver Tarea 9f. |
 | — | P12: el usuario respondió "P12 si". La pregunta ofrecía dos opciones, así que la respuesta no elige una. Rige la lectura conservadora (solo crates.io y PyPI) hasta la aclaración P12b. |
+| 21 | P12b: "b". La descarga acepta además dependencias por git y otros registros. Es la autorización del usuario para esa red de la zona roja. Ver Tarea 6c. |
+| 22 | P15: "b". Un agente corre en Colab los tests pendientes por entorno, solo con una GPU T4. Ver Tarea 7h. |
+| 23 | P16: "a". La imagen `oraculo-rust` instala `clippy`, `gitleaks`, `cargo-audit`, `hadolint` y `cargo-mutants`, con versiones fijas y hash verificado. Ver Tarea 7g. |
+| 24 | P17: "c+b". La parte c) se aplica: Root baja la imagen base con red y construye con `--network none` (Tarea 9d2). La parte b) espera la aclaración P17b. |
+| 25 | P18: "c pero que tambien evolucione a esquemas o arquitecturas de agentes". La parte c) se aplica: Aprende propone y el usuario aplica en `root.toml` (Tarea 15c). La segunda parte espera la aclaración P18b. |
+| 26 | P19 y P20: "si". La SPEC de memora exige orden FIFO entre clientes bloqueados en `BLPOP`. "En el espacio local" de brasa significa los ejes locales del nodo. Las dos respuestas van a las fichas (G1). |
 
 ## Patterns to Mirror
 
@@ -478,13 +484,40 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
   - (a) Un `Cargo.toml` con `git =` y sin `Cargo.lock` hace que `cargo generate-lockfile` clone esa fuente antes del filtro.
   - (b) Un `requirements.txt` con una URL o con `git+` pasa el filtro de PyPI.
   
-  Si P12b queda en a), los dos huecos se cierran: Root rechaza esas fuentes antes de cualquier comando con red. Si P12b queda en b), Opus rediseña el filtro. Hasta la respuesta, el código de la 6b no cambia y los dos huecos siguen abiertos.
+  P12b quedó en b) (decisión 21). La Tarea 6c rediseña el filtro y cierra los dos huecos de otra forma: git y URL pasan a ser fuentes aceptadas, pero Root las lista y las registra antes de cualquier comando con red.
 - **Validate**: `cargo test --test descarga`:
   - Un repo con una dependencia de crates.io fuera de la imagen compila en la evaluación sin red.
   - Un `Cargo.lock` con `git+` da `SinVeredicto` y no baja nada.
   - El contenedor de descarga no ve `/oraculo`.
   - La segunda evaluación del mismo repo no vuelve a bajar nada: usa la caché.
 - **Orden**: va después de las Tareas 7 y 8. La Tarea 7 sigue con la imagen precargada de la 7a.
+
+### Tarea 6c: Filtro de fuentes con git y otros registros (decisión 21)
+- **Qué cambia**: la descarga acepta crates.io, PyPI, repositorios git y otros registros públicos. Lo que no cambia es la regla central de la 6b: la descarga nunca corre código del proyecto ni de sus dependencias, y la evaluación sigue sin red.
+- **Action**: `oracle/descarga.rs` pasa a tres pasos:
+  1. **Inventario, sin red.** Root lee `Cargo.toml` (con los miembros del workspace), `Cargo.lock` y `requirements.txt`, y arma la lista de fuentes. Cada fuente lleva su tipo (`registro`, `git` o `url`), su dirección y su versión o commit. Root registra esa lista en un evento `Gate` antes de usar la red. Así se cierran los dos huecos de la 6b: nada sale a la red sin quedar en la lista.
+  2. **Reglas del inventario.** Root rechaza cuatro casos antes de usar la red, con `SinVeredicto` y un hallazgo de entrega:
+     - un protocolo que no es `https`, como `ssh://`, `git://`, `http://` o `file://`;
+     - una dependencia `path =` que apunta fuera del repo;
+     - una dirección con credenciales adentro, como `https://usuario:clave@...`;
+     - un registro que pide credenciales. Pasar credenciales al contenedor es zona roja y espera a P21.
+     Una dependencia git sin commit fijo no se rechaza: Root baja la punta de la rama, registra el commit que obtuvo y deja un hallazgo de entrega, porque el build no es reproducible.
+  3. **Descarga, sin ejecutar nada.**
+     - Rust: `cargo fetch` baja crates y repositorios git. `cargo fetch` no corre `build.rs`. Sin `Cargo.lock`, `cargo generate-lockfile` corre después del inventario.
+     - Python desde un índice: `pip download --only-binary=:all:`. Un paquete sin wheel no pasa por `pip`, porque `pip` correría su `setup.py` para leer los metadatos. Root baja ese sdist con `curl` desde la URL que da el índice y verifica su hash. Las dependencias de un sdist no se resuelven en la descarga: si falta alguna, la instalación sin red falla y deja un hallazgo de entrega ("requirements incompleto").
+     - Python desde git o URL: Root clona con `git clone` al commit pedido, o baja el archivo con `curl`. No corre `pip` sobre esa fuente con red. La evaluación lo instala sin red, con `pip install --no-index --find-links /cache/python`.
+  Después de bajar, Root registra otro evento `Gate` con el hash de cada fuente obtenida. Cuando el lock trae hash (`checksum` de Cargo, `--hash` de pip), Root lo verifica.
+- **npm y otros ecosistemas**: el hito 1 tiene perfiles solo para Rust y Python. Una fuente npm se acepta en el inventario, pero no se baja hasta que exista un perfil de ese lenguaje.
+- **Límite**: igual que en la 6b, el filtro depende del comando y no de la red. Un filtro por dominio necesita un proxy y queda fuera del hito 1.
+- **Validate**: `cargo test --test descarga`:
+  - Un `Cargo.toml` con `git = "https://..."` y sin `Cargo.lock` registra el `Gate` del inventario antes de cualquier comando con red.
+  - Una dependencia git por `https` con commit fijo se baja, y la evaluación compila sin red.
+  - Una dependencia `ssh://` da `SinVeredicto` y no baja nada.
+  - Una dirección con credenciales da `SinVeredicto` y la credencial no aparece en `eventos.jsonl`.
+  - Una dependencia `path = "../afuera"` da `SinVeredicto`.
+  - Un `requirements.txt` con `git+https://...@<commit>` se clona sin correr `pip` con red, y la evaluación lo instala sin red.
+  - Un sdist de fixture cuyo `setup.py` escribe un archivo al ejecutarse se baja, y ese archivo no aparece después de la descarga.
+  - Una dependencia git sin commit fijo da un hallazgo de entrega con el commit obtenido.
 
 ### Tarea 7: Tareas memora y brasa
 - **Action**: crear `oraculos/memora` y `oraculos/brasa` desde `~/Proyectos/bench-ecc-sdlc/bootstrap/` y `.scratch/ecc-vs-sdlc/oraculo/`. Construir `imagenes/oraculo-rust`: los dos proyectos son Rust y sus oráculos son pytest de caja negra (`ORACULO_REPO`, ver `oraculo/memora/conftest.py`). brasa necesita un adaptador de CPU (lavapipe) en la imagen: ver `~/Proyectos/bench-ecc-sdlc/probe-gpu/`. Los oráculos se copian a `ROOT_HOME`, nunca al repo de Root.
@@ -529,6 +562,29 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
   - Un requisito con su único test en `[[entorno]]` da `Pendiente`, y la `Completitud` es la misma que sin ese requisito.
   - Con `TMPDIR=/nada`, `evaluar` funciona y no escribe fuera de `$ROOT_HOME/tmp/`.
 
+### Tarea 7g: Herramientas en la imagen `oraculo-rust` (decisión 23)
+- **Action**: `imagenes/oraculo-rust/Containerfile` instala cinco herramientas. Construir la imagen usa la red una vez; evaluar sigue sin red.
+  - `clippy` con `rustup component add`, en la misma versión de Rust de la imagen.
+  - `cargo-audit` y `cargo-mutants` con `cargo install --locked --version <fija>`.
+  - `gitleaks` y `hadolint` como binarios de sus releases, con versión fija y `sha256sum -c` contra el hash publicado.
+  El Containerfile anota la versión y la fuente de cada herramienta. El tag de la imagen sube a `root-oraculo-rust:2`, y las tareas memora y brasa lo usan.
+- **Límite**: la instrucción anterior "no precargues más dependencias" sigue vigente para las dependencias de los proyectos. Estas cinco herramientas son la excepción que autorizó el usuario. La base de RustSec sigue bajando en la fase de descarga.
+- **Validate**:
+  - `podman run --rm --network none root-oraculo-rust:2 sh -c 'cargo clippy --version && cargo audit --version && cargo mutants --version && gitleaks version && hadolint --version'` sale con 0.
+  - `cargo test --test sondas` corre las sondas con herramientas sobre los fixtures en la imagen real, y ninguna da `SinVeredicto` por herramienta ausente.
+
+### Tarea 7h: Tests pendientes en Colab con T4 (decisión 22)
+- **Action**: `r00t oraculo pendientes --colab` corre el paquete de la Tarea 7f en Colab con la CLI `colab` (`~/.local/bin/colab`).
+  - Antes de empezar, Sonnet lee `colab --help` y confirma que la CLI puede pedir una T4. Si no puede, la tarea se detiene y vuelve a Opus.
+  - Pide un runtime con GPU T4. Antes de correr los tests, ejecuta `nvidia-smi` en el runtime. Si la GPU no es una T4, libera el runtime y sale con código 3, sin correr nada. Root nunca pide una A100 ni una H100.
+  - Sube el paquete, corre `correr.sh`, baja el junit y libera el runtime. Después corre el mismo camino que `--importar`.
+  - Registra un evento `Gate` al pedir el runtime, con el tipo de GPU, y otro al liberarlo.
+  - Sin sesión de la CLI, sale con código 3 y pide al usuario que corra el login. El login es OAuth y lo hace el usuario.
+  - El paquete lleva los tests ocultos a Colab. El builder no accede a Colab, así que el invariante del oráculo oculto se mantiene. El paquete nunca lleva claves de API.
+- **Validate**:
+  - `cargo test oracle` con una CLI `colab` falsa: una GPU que no es T4 da código 3 y no corre los tests; una T4 importa el junit y deja dos eventos `Gate`.
+  - Una corrida real sobre `test_rendimiento[gpu-10000-res1]` de brasa, después de G1, cambia ese test de `Pendiente` a un resultado con origen `colab`.
+
 ### Tarea 8b: Rúbricas
 - **Action**: Opus redacta las nueve rúbricas de "Rúbricas", con 3 a 6 ítems cada una. Cada ítem cita su estándar. El usuario las aprueba una vez antes de que el Oracle las use, igual que los requisitos. `oracle/rubrica.rs` las compila dentro del binario, calcula su hash y aplica la fórmula del puntaje y los topes de los ítems `mixto`.
 - **Validate**: `cargo test rubrica` cubre cuatro casos:
@@ -562,8 +618,22 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
 - **Validate**: `r00t oraculo evaluar --tarea memora --repo .../memora-sdlc` marca `Ausente` los módulos que el SDLC no construyó (el SDLC construyó 2 de 9 módulos, según `docs/contexto/mapa.md`). memora-ecc queda con todos `Cumplido`.
 
 ### Tarea 9d: Entrega y escenarios de usuario
-- **Action**: `oracle/entrega.rs` clona el repo en un contenedor limpio y corre `[entrega].instalar` y `[entrega].correr`. Verifica `[entrega].archivos`. Construye el `Dockerfile` del proyecto y lo arranca, y verifica que corre sin root. Hoy solo verifica el Dockerfile en forma estática: construirlo necesita red, y eso espera a P17. Después corre cada `[[escenario]]` contra el producto levantado. Un escenario es un flujo real de usuario, como conectar un cliente, guardar un valor, reiniciar y leerlo. Es lo que un PM prueba a mano antes de aprobar.
+- **Action**: `oracle/entrega.rs` clona el repo en un contenedor limpio y corre `[entrega].instalar` y `[entrega].correr`. Verifica `[entrega].archivos`. Construye el `Dockerfile` del proyecto y lo arranca, y verifica que corre sin root. La construcción sigue la Tarea 9d2 (decisión 24). Después corre cada `[[escenario]]` contra el producto levantado. Un escenario es un flujo real de usuario, como conectar un cliente, guardar un valor, reiniciar y leerlo. Es lo que un PM prueba a mano antes de aprobar.
 - **Validate**: `cargo test --test entrega` (un repo sin README da un hallazgo; un Dockerfile que corre como root da un hallazgo; un escenario que sale con código 1 deja su requisito en `Parcial`)
+
+### Tarea 9d2: Construir el Dockerfile sin red (decisión 24, parte c)
+- **Action**: `oracle/entrega.rs` construye el `Dockerfile` del proyecto en dos pasos:
+  1. Con red, en la fase de descarga, Root lee cada `FROM` y corre solo `podman pull` de esa imagen. No corre ningún `RUN`. Registra la imagen y su digest en el evento `Gate` de la descarga.
+  2. Sin red, `podman build --network none --pull=never` construye la imagen con el repo copiado como contexto. Después la arranca con `--network none`, verifica que corre sin root y corre los `[[escenario]]` que no necesitan red.
+  - Un `RUN` que falla por falta de red deja la construcción `Pendiente`, con el motivo y la línea del Dockerfile. No se cobra al producto.
+  - Un `RUN` que falla por otra causa da un hallazgo de entrega: la imagen no construye.
+  - Para separar las dos causas, Root busca en la salida los errores de resolución de nombres y de conexión. Sin esa evidencia, la causa es "producto".
+- **Pendiente de P17b**: el plan no construye con red. La parte b) de la respuesta espera la aclaración.
+- **Validate**: `cargo test --test entrega`:
+  - Un Dockerfile `FROM` con `COPY` y sin `RUN` de red construye y arranca sin root.
+  - Un Dockerfile con `RUN apt-get install` queda `Pendiente` con su línea.
+  - Un Dockerfile con `RUN false` da un hallazgo de entrega.
+  - El paso con red no ejecuta ningún `RUN`: un `RUN touch /marca` no deja la marca en la imagen base bajada.
 
 ### Tarea 9e: Calidad de las pruebas del proyecto
 - **Action**: `oracle/mutacion.rs` corre `cargo-mutants` (o `mutmut` en Python) sobre los tests del propio proyecto. Respeta `[pruebas].mutantes_max` y `minutos_max`. El puntaje de `Pruebas` es la proporción de mutantes muertos. Un mutante vivo da un hallazgo: "este cambio de comportamiento no lo detecta ningún test".
@@ -719,6 +789,18 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
 - **Action**: `recalcular` lee filas y eventos y escribe `politica.json`. `r00t aprende --replay` aprende con el primer 70% de las filas y mide el 30% restante. Compara la política aprendida contra la de `root.toml` en éxito y en USD.
 - **Validate**: `cargo test aprende` (con filas sintéticas donde Haiku acierta igual que Sonnet a menor costo, la política elige Haiku)
 
+### Tarea 15c: Aprende propone cambios en los roles fijos (decisión 25, parte c)
+- **Action**: `recalcular` suma, solo agregando, `propuestas: Vec<Propuesta>` a `politica.json`.
+  - Una `Propuesta` nombra el rol, el modelo actual de `root.toml`, el modelo propuesto, la evidencia y la diferencia esperada. La evidencia es `n`, éxitos, cota de Wilson y USD medio de cada modelo, con los ids de las filas.
+  - Solo hay propuesta para Planifica, Organiza y Construye. Hace falta una cota de Wilson del modelo propuesto ≥ `umbral_wilson` y al menos 3 filas por modelo. El propuesto debe acertar igual o mejor, o acertar igual y costar menos.
+  - Route no lee `propuestas`: esos roles siguen respetando `root.toml`. El usuario aplica una propuesta a mano en `root.toml`.
+  - `r00t aprende` imprime las propuestas, y con `--json` las incluye en el objeto. Cada propuesta impresa registra un evento `Gate`.
+- **Pendiente de P18b**: la evolución hacia "esquemas o arquitecturas de agentes" no entra en esta tarea hasta la aclaración.
+- **Validate**: `cargo test aprende`:
+  - Con filas sintéticas donde Haiku organiza igual que Sonnet a menor costo, hay una propuesta para Organiza, y `elegir` sigue devolviendo Sonnet para Organiza.
+  - Con 2 filas por modelo no hay propuesta.
+  - Un `politica.json` viejo, sin `propuestas`, se sigue leyendo.
+
 ### Tarea 16: Runner
 - **Action**: `r00t corre` corre primero `r00t goal verificar` y se detiene si el GOAL no está autorizado. Después copia el bootstrap a un directorio nuevo y corre `claude -p` por rol con `route`. Usa `ECC_DISABLED_HOOKS` y los permisos que niegan `oraculos/`. Registra `PlanAprobado` y `Humano`. Al final evalúa y agrega la `Fila`.
 - **Mirror**: `correr-ecc-rol.sh`.
@@ -776,7 +858,7 @@ r00t aprende --replay
 | Haiku no está medido (decisión 7) | Media | Cada fila de `runs.jsonl` mide a Haiku de hecho; `r00t track comparar` lo hace visible |
 | Podman sin el tag `z` falla por SELinux | Alta en Fedora | El tag `z` es fijo en `contenedor.rs` y tiene un test |
 | El contenedor corre sin red: un repo con dependencias que no están en la imagen no compila | Resuelto por la decisión 17 | Fase de descarga de la Tarea 6b. Hasta que exista, rige `SinVeredicto` con la causa "dependencias no disponibles sin red". |
-| Un paquete malicioso entra por la fase de descarga | Baja | La descarga no compila. El build corre después sin red, con el repo en solo lectura y sin acceso a `ROOT_HOME`, salvo la caché. Las fuentes `git+` se rechazan (P12). `cargo audit` marca los paquetes con CVE (Tarea 9). |
+| Un paquete malicioso entra por la fase de descarga | Baja | La descarga no compila. El build corre después sin red, con el repo en solo lectura y sin acceso a `ROOT_HOME`, salvo la caché. Desde la decisión 21, git y otros registros se aceptan: la Tarea 6c los registra antes de usar la red, rechaza protocolos sin `https` y credenciales, y nunca corre `build.rs` ni `setup.py` con red. `cargo audit` marca los paquetes con CVE (Tarea 9). |
 | Una ficha mal escrita traslada su ambigüedad al juicio de Root | Media | `r00t ficha revisar` corre antes de evaluar. Un requisito ambiguo queda "no evaluable" y nunca se juzga contra una de sus dos lecturas. |
 | Un test inestable se lee como un defecto del producto, o al revés | Alta (ya pasó con `test_blpop_fifo_entre_clientes`) | Repeticiones y clasificación por causa con evidencia (Tarea 7). Sin evidencia, el origen queda "sin determinar" y el informe lo dice. |
 | Un agente corre `r00t goal autorizar` por Bash | Baja | `autorizar` exige TTY; la sesión `claude -p` no tiene TTY |
@@ -910,10 +992,18 @@ Gates humanos que frenan el resto:
 - **G1, fichas.** Opus redacta `## Ficha` de memora y brasa, con las preguntas de ambigüedad. El usuario las responde y aprueba las fichas. Frena: el `Validate` real de 7, 9c, 13 y 13b.
 - **G2, rúbricas.** Opus redacta las nueve rúbricas. El usuario las aprueba. Frena: 12, 13 y 16.
 - **G3, calificación a ciegas.** El usuario califica los 6 paquetes de la Tarea 12b. Frena: la métrica de acuerdo de 12b.
-- **P15, Colab.** No frena nada. Sin aprobación, los tests de entorno quedan `Pendiente`.
-- **P16, herramientas en la imagen.** Frena la calibración (Tarea 12) de seguridad, estructura, pruebas y entrega. No frena 14, 15, 17 ni 18.
-- **P17, construir el Dockerfile.** Frena la parte dinámica de la 9d. No frena nada más.
-- **P18, aprender en los roles fijos.** No frena 17, 18 ni 19. Si la respuesta es b) o c), agrega una tarea chica sobre Route o Aprende.
+- **P15, Colab.** Respondida (decisión 22): solo T4. Tarea 7h.
+- **P16, herramientas en la imagen.** Respondida (decisión 23). Tarea 7g.
+- **P17, construir el Dockerfile.** La parte c) está aplicada (Tarea 9d2). La parte b) espera a P17b.
+- **P18, aprender en los roles fijos.** La parte c) está aplicada (Tarea 15c). La segunda parte espera a P18b.
+- **P21, credenciales de registros.** Frena solo los registros que piden credenciales (Tarea 6c).
+
+**Respuestas para las fichas (G1, decisión 26).** Opus las escribe en `## Ficha` al redactar G1:
+- **memora**: el requisito de `BLPOP` exige orden FIFO entre clientes bloqueados. Su aceptación cita `test_blpop_fifo_entre_clientes`. Ese test es correcto, y su falla de 9 en 30 corridas es un defecto del producto con origen "producto".
+- **brasa**: "en el espacio local" significa los ejes locales del nodo. `test_spin_despues_de_rotacion` es correcto. brasa-ecc falla porque `scene.rs:271` aplica el spin en los ejes del padre: es un defecto del producto. La causa `oraculo` de ese test desaparece de `diferencias.md`.
+- Con esas dos respuestas, ningún test de memora ni de brasa queda en `[[oraculo_dudoso]]`.
+
+**Orden nuevo (después de 15b, 17, 18 y 19):** 6c, 7g, 9d2, 15c y 7h. La 6c va primero porque el filtro vigente no refleja la decisión 21. La 7g va antes de la 9d2 porque `hadolint` entra con la imagen. La 7h va última: necesita el login de Colab del usuario, y su corrida real espera a G1.
 
 Las Tareas 12, 12b, 13, 13b, 16 y 19 van después de G1 y G2. Opus redacta G1 y G2 en otra sesión, mientras Sonnet construye la lista de arriba.
 
@@ -989,7 +1079,29 @@ Respuestas a las preguntas 1, 3, 4 y 5 de Sonnet y a sus notas. La pregunta 2 es
   - Con `umbral_wilson` por defecto, 2 de 2 no entran a la política y 3 de 3 sí.
   - El test de la nube de la Tarea 14 con 32 USD en el bloque da API.
 
+**Preguntas respondidas (2026-10-28)**
+- P12b: b (decisión 21). P15: b (decisión 22). P16: a (decisión 23). P17: c+b (decisión 24, en parte). P18: c, más una segunda parte (decisión 25, en parte). P19 y P20: sí (decisión 26).
+
 **Preguntas abiertas (sin responder)**
+- **P17b.** Respondiste "c+b" para construir el Dockerfile. La parte c) ya está en el plan. ¿Cómo entra la parte b), que construye con red y corre el código de los `RUN` con red?
+  - a) Como respaldo automático: si la construcción sin red queda `Pendiente`, Root la repite con red.
+  - b) Como respaldo con tu aprobación: Root la repite con red solo después de que vos la apruebes, caso por caso.
+  - c) Siempre las dos: Root construye sin red y con red, y compara los resultados.
+  
+  Hasta tu respuesta, Root no construye con red.
+- **P18b.** Respondiste "c pero que tambien evolucione a esquemas o arquitecturas de agentes". La parte c) ya está en el plan. ¿Qué querés que evolucione?
+  - a) En el hito 1, Aprende propone también cambios de forma: qué roles hay, en qué orden y si hay un verificador. Vos los aplicás a mano, igual que en c).
+  - b) Eso va al hito 4 (CAB), que genera y mide arquitecturas de agentes. El hito 1 solo guarda en cada `Fila` la forma de la corrida para que CAB la use.
+  - c) Otra cosa. En ese caso, describila en una oración.
+  
+  Hasta tu respuesta, Aprende propone solo modelos por rol.
+- **P21.** La decisión 21 acepta "otros registros", incluso uno privado. Un registro privado pide credenciales, y pasar credenciales al contenedor de descarga es zona roja (claves). ¿Qué elegís?
+  - a) Solo registros públicos. Un registro que pide credenciales da `SinVeredicto`.
+  - b) Root lee la credencial de una variable de entorno nombrada en `root.toml`, la pasa solo al contenedor de descarga y nunca la escribe en un log.
+  
+  Hasta tu respuesta, rige a).
+
+**Preguntas ya respondidas (texto original)**
 - **P12b.** Respondiste "P12 si" a una pregunta con dos opciones. ¿Cuál elegís?
   - a) La descarga acepta solo crates.io y PyPI. Hoy rige esta.
   - b) La descarga acepta además dependencias por git y otros registros, como npm o uno privado. Esta opción amplía la red de la zona roja.
