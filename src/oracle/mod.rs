@@ -1,5 +1,6 @@
 //! Oracle: corre los tests en un contenedor sin red y cuenta el resultado desde junit.
 
+pub mod configs;
 pub mod contenedor;
 pub mod descarga;
 pub mod evidencia;

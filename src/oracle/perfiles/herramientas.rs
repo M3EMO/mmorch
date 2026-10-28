@@ -288,7 +288,7 @@ fn error_de_compilacion(reporte: &str) -> Option<String> {
 /// Largo máximo de la cola de stderr que entra al motivo.
 const COLA_MOTIVO: usize = 300;
 
-fn sin_veredicto(dimension: Dimension, motivo: impl Into<String>) -> ResultadoSonda {
+pub(crate) fn sin_veredicto(dimension: Dimension, motivo: impl Into<String>) -> ResultadoSonda {
     ResultadoSonda {
         dimension,
         valor: None,
@@ -297,7 +297,7 @@ fn sin_veredicto(dimension: Dimension, motivo: impl Into<String>) -> ResultadoSo
     }
 }
 
-fn con_veredicto(
+pub(crate) fn con_veredicto(
     dimension: Dimension,
     hallazgos: Vec<Hallazgo>,
     requisitos: &[Requisito],
@@ -312,7 +312,7 @@ fn con_veredicto(
 
 /// Si la herramienta no está en la imagen, o no se puede consultar, la sonda no tiene veredicto.
 /// Así no corre el comando real.
-fn falta_herramienta(
+pub(crate) fn falta_herramienta(
     ej: &dyn EjecutorHerramienta,
     dimension: Dimension,
     nombre: &str,
