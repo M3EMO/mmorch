@@ -87,6 +87,7 @@ exec)
   case "$f" in
     */gpu.py) echo "ROOT_GPU=$GPU" ;;
     */prepara.py) echo "ROOT_PREPARADO=1" ;;
+    */prepara-rust.py) echo "ROOT_RUST=rustup" ;;
     */corre.py)
       if [ "$CORRER_FALLA" = 1 ]; then echo "boom" >&2; exit 1; fi
       echo "ROOT_CORRIDA_CODIGO=0" ;;
@@ -223,12 +224,13 @@ fn colab_t4_importa_y_registra_pedir_y_liberar() {
     );
 
     let gates = e.eventos_runtime();
-    assert_eq!(gates.len(), 2, "pedir y liberar: {gates:?}");
+    assert_eq!(gates.len(), 3, "pedir, preparar-rust y liberar: {gates:?}");
     assert_eq!(gates[0]["extra"]["accion"], "pedir");
     assert_eq!(gates[0]["extra"]["gpu_pedida"], "T4");
-    assert_eq!(gates[1]["extra"]["accion"], "liberar");
+    assert_eq!(gates[1]["extra"]["accion"], "preparar-rust");
+    assert_eq!(gates[2]["extra"]["accion"], "liberar");
     assert!(
-        gates[1]["extra"]["gpu_observada"]
+        gates[2]["extra"]["gpu_observada"]
             .as_str()
             .is_some_and(|g| g.contains("T4")),
         "{gates:?}"
@@ -435,6 +437,7 @@ exec)
   case "$f" in
     */gpu.py) echo "ROOT_GPU=Tesla T4" ;;
     */prepara.py) echo "ROOT_PREPARADO=1" ;;
+    */prepara-rust.py) echo "ROOT_RUST=rustup" ;;
     */corre.py) echo $$ > "$DIR/pid.txt"; {corre} ;;
   esac
   exit 0 ;;

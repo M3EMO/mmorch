@@ -2,8 +2,10 @@
 //! vectores de argumentos, nunca por cadenas de shell. El único dato del usuario que llega a
 //! Colab es el nombre de sesión, y se valida antes.
 //!
-//! La preparación (`prepara.py`) instala Rust y pytest en el runtime de Colab, en la cuenta
-//! de Google del usuario. No instala nada en la máquina donde corre Root.
+//! La preparación (`prepara.py`) instala pytest en el runtime de Colab, en la cuenta de Google
+//! del usuario. Rust lo prepara `prepara-rust.py`, con `rustup-init` verificado por sha256. Si
+//! Rust no queda listo, Root compila el producto en su máquina y sube el binario (respaldo). Root
+//! no instala nada en su propia máquina.
 //!
 //! Antes de pedir el runtime, Root anota la sesión en `$ROOT_HOME/colab/activo.json`. La borra
 //! al liberar el runtime. `SIGINT`, `SIGTERM` y el tope de duración también liberan el runtime.
@@ -46,6 +48,8 @@ const PASO_SONDEO: Duration = Duration::from_millis(50);
 const SEG_GPU: u64 = 300;
 /// Tiempo de `exec` para preparar el runtime.
 const SEG_PREPARAR: u64 = 1800;
+/// Tiempo de `exec` para probar el binario de respaldo.
+const SEG_PRUEBA_BINARIO: u64 = 120;
 /// Tiempo de `exec` para correr `correr.sh`.
 const SEG_CORRER: u64 = 2400;
 /// La única GPU que Root pide.
@@ -121,13 +125,11 @@ lineas = [l.strip() for l in r.stdout.splitlines() if l.strip()]
 print("ROOT_GPU=" + (lineas[0] if r.returncode == 0 and lineas else ""))
 "#;
 
-/// Script de preparación. Descomprime el paquete y deja Rust y pytest listos en el runtime.
-/// Instala el toolchain en el runtime de Colab (cuenta del usuario), no en la máquina de Root.
-const GUION_PREPARAR: &str = r#"import os, shutil, subprocess, sys
+/// Script de preparación. Descomprime el paquete e instala pytest en el runtime. Rust no va acá:
+/// lo prepara `guion_rust`, con `rustup-init` verificado.
+const GUION_PREPARAR: &str = r#"import os, subprocess, sys
 os.makedirs("root-paquete", exist_ok=True)
 subprocess.run(["tar", "-xzf", "root-paquete.tar.gz", "-C", "root-paquete"], check=True)
-if shutil.which("cargo") is None and not os.path.exists(os.path.expanduser("~/.cargo/bin/cargo")):
-    subprocess.run("curl https://sh.rustup.rs -sSf | sh -s -- -y", shell=True, check=True)
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "pytest"], check=True)
 print("ROOT_PREPARADO=1")
 "#;
@@ -139,6 +141,134 @@ env["PATH"] = os.path.expanduser("~/.cargo/bin") + os.pathsep + env.get("PATH", 
 r = subprocess.run(["bash", "correr.sh"], cwd="root-paquete", env=env, timeout=2100)
 print("ROOT_CORRIDA_CODIGO=%d" % r.returncode)
 "#;
+
+/// Base de las descargas de `rustup-init` (y de su `.sha256`) para x86_64.
+pub const BASE_RUSTUP: &str = "https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu";
+
+/// Script que deja Rust listo en el runtime. Baja `rustup-init` y su `.sha256` desde `base`,
+/// compara el hash y solo si coincide lo corre. Imprime `ROOT_RUST=ya`, `ROOT_RUST=rustup` o
+/// `ROOT_RUST=falla:<causa>` (`descarga`, `hash` o `instalacion`). Nunca usa `shell=True`,
+/// `curl` ni una tubería a `sh`.
+pub fn guion_rust(base: &str) -> String {
+    let base = serde_json::to_string(base).expect("una cadena se serializa");
+    format!(
+        r#"import hashlib, os, shutil, subprocess, sys, urllib.request
+BASE = {base}
+CARPETA = "root-rust"
+BINARIO = os.path.join(CARPETA, "rustup-init")
+SUMA = BINARIO + ".sha256"
+
+def salir(resultado):
+    print("ROOT_RUST=" + resultado)
+    sys.exit(0)
+
+if shutil.which("cargo") or os.path.exists(os.path.expanduser("~/.cargo/bin/cargo")):
+    salir("ya")
+
+os.makedirs(CARPETA, exist_ok=True)
+try:
+    for origen, destino in [(BASE + "/rustup-init", BINARIO), (BASE + "/rustup-init.sha256", SUMA)]:
+        with urllib.request.urlopen(origen, timeout=120) as respuesta, open(destino, "wb") as archivo:
+            shutil.copyfileobj(respuesta, archivo)
+except Exception:
+    salir("falla:descarga")
+
+with open(SUMA) as archivo:
+    partes = archivo.read().split()
+esperado = partes[0].lower() if partes else ""
+with open(BINARIO, "rb") as archivo:
+    obtenido = hashlib.sha256(archivo.read()).hexdigest()
+if obtenido != esperado:
+    os.remove(BINARIO)
+    salir("falla:hash")
+
+os.chmod(BINARIO, 0o755)
+ruta = os.path.abspath(BINARIO)
+try:
+    codigo = subprocess.run([ruta, "-y", "--profile", "minimal", "--no-modify-path"], timeout=1500).returncode
+except (subprocess.TimeoutExpired, OSError):
+    salir("falla:instalacion")
+salir("rustup" if codigo == 0 else "falla:instalacion")
+"#
+    )
+}
+
+/// Script que prueba el binario subido: `--version` y, si falla, `--help`. Imprime
+/// `ROOT_BINARIO=ok` o `ROOT_BINARIO=falla:<código>`. Sin permiso de ejecución sale 126 y sin
+/// archivo 127, como en la shell.
+fn guion_probar_binario(nombre: &str) -> String {
+    let nombre = serde_json::to_string(nombre).expect("una cadena se serializa");
+    format!(
+        r#"import os, subprocess
+RUTA = os.path.abspath(os.path.join("root-paquete", "bin", {nombre}))
+
+def correr(opcion):
+    return subprocess.run([RUTA, opcion], capture_output=True, timeout=60)
+
+try:
+    os.chmod(RUTA, 0o755)
+    resultado = correr("--version")
+    if resultado.returncode != 0:
+        resultado = correr("--help")
+    codigo = resultado.returncode
+except subprocess.TimeoutExpired:
+    codigo = 124
+except FileNotFoundError:
+    codigo = 127
+except OSError:
+    codigo = 126
+print("ROOT_BINARIO=ok" if codigo == 0 else "ROOT_BINARIO=falla:%d" % codigo)
+"#
+    )
+}
+
+/// Lo que `Cargo.toml` aporta al nombre del binario.
+#[derive(Deserialize)]
+struct CargoToml {
+    package: Option<Nombrado>,
+    #[serde(default)]
+    bin: Vec<Nombrado>,
+}
+
+#[derive(Deserialize)]
+struct Nombrado {
+    name: Option<String>,
+}
+
+/// Nombre del binario que compila el repo: el del primer `[[bin]]` si tiene uno, o el de
+/// `[package]`. `None` si no se puede leer o si el nombre no es seguro para armar rutas y scripts.
+fn nombre_binario(repo: &Path) -> Option<String> {
+    let texto = fs::read_to_string(repo.join("Cargo.toml")).ok()?;
+    let cargo: CargoToml = toml::from_str(&texto).ok()?;
+    let nombre = cargo
+        .bin
+        .first()
+        .and_then(|bin| bin.name.clone())
+        .or_else(|| cargo.package.and_then(|paquete| paquete.name))?;
+    let seguro = !nombre.is_empty()
+        && nombre
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    seguro.then_some(nombre)
+}
+
+/// Compila el producto en la máquina del usuario, con la imagen de la tarea, y devuelve la ruta
+/// del binario. Es el respaldo cuando Rust no queda listo en Colab.
+pub trait CompiladorLocal {
+    fn compilar(&self, repo: &Path, tarea: &Tarea) -> Result<PathBuf, ErrorOraculo>;
+}
+
+/// Compilador real: por ahora no compila, y así el respaldo queda pendiente.
+pub struct CompiladorPodman;
+
+impl CompiladorLocal for CompiladorPodman {
+    fn compilar(&self, _repo: &Path, _tarea: &Tarea) -> Result<PathBuf, ErrorOraculo> {
+        // Parte laptop de la Tarea 7k: compilar con podman en la imagen de la tarea.
+        Err(ErrorOraculo::Infra(
+            "respaldo de compilación local sin implementar en la nube: lo arma la parte laptop de la Tarea 7k".into(),
+        ))
+    }
+}
 
 /// Salida de una llamada a la CLI `colab`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -362,6 +492,7 @@ where
 ///
 /// Antes de pedir, libera el runtime que quedó anotado en `activo.json`. `cancelar` y `tope`
 /// cortan la corrida: al cortarla, Root libera el runtime y sale con error.
+#[allow(clippy::too_many_arguments)]
 pub fn correr_en_colab(
     cli: &dyn ColabCli,
     paquete: &Path,
@@ -370,6 +501,7 @@ pub fn correr_en_colab(
     nombre_sesion: &str,
     cancelar: &Senales,
     tope: Duration,
+    compilador: &dyn CompiladorLocal,
 ) -> Result<ResultadoColab, ErrorOraculo> {
     let inicio = Instant::now();
     validar_sesion(nombre_sesion)?;
@@ -383,6 +515,12 @@ pub fn correr_en_colab(
     let tmp = home.join("tmp").join(format!("colab-{nombre_sesion}"));
     fs::create_dir_all(&tmp).map_err(|e| infra("carpeta temporal de Colab", e))?;
     let corrida = format!("colab-{}", tarea.nombre);
+    let trabajo = Trabajo {
+        paquete,
+        tarea,
+        corrida: &corrida,
+        compilador,
+    };
     escribir_activo(home, nombre_sesion)?;
 
     // La CLI no tiene un chequeo de login sin efectos: `new` hace de chequeo, con plazo corto.
@@ -447,7 +585,7 @@ pub fn correr_en_colab(
 
     let mut gpu = String::from("desconocida");
     let trabajo = match registro {
-        Ok(()) => trabajar(cli, &lim, paquete, home, &tmp, nombre_sesion, &mut gpu),
+        Ok(()) => trabajar(cli, &lim, home, &tmp, nombre_sesion, &mut gpu, &trabajo),
         Err(e) => Err(e),
     };
     match trabajo {
@@ -630,15 +768,23 @@ fn apartar_ilegible(home: &Path) -> Result<(), ErrorOraculo> {
     registrar(home, CORRIDA_ANOTADA, extra)
 }
 
+/// Lo que `trabajar` necesita del paquete, de la tarea y del compilador del respaldo de Rust.
+struct Trabajo<'a> {
+    paquete: &'a Path,
+    tarea: &'a Tarea,
+    corrida: &'a str,
+    compilador: &'a dyn CompiladorLocal,
+}
+
 /// Lo que corre con el runtime ya pedido. Si falla, `correr_en_colab` libera el runtime.
 fn trabajar(
     cli: &dyn ColabCli,
     lim: &Limites,
-    paquete: &Path,
     home: &Path,
     tmp: &Path,
     sesion: &str,
     gpu: &mut String,
+    trabajo: &Trabajo,
 ) -> Result<PathBuf, ErrorOraculo> {
     let guion_gpu = escribir(tmp, "gpu.py", GUION_GPU)?;
     let lectura = exec(cli, lim, sesion, SEG_GPU, &guion_gpu)?;
@@ -654,7 +800,7 @@ fn trabajar(
         )));
     }
 
-    let tar = empaquetar(paquete, tmp)?;
+    let tar = empaquetar(trabajo.paquete, tmp)?;
     let subida = paso(
         cli,
         lim,
@@ -678,6 +824,8 @@ fn trabajar(
             preparado.stderr.trim()
         )));
     }
+
+    preparar_rust(cli, lim, home, tmp, sesion, trabajo)?;
 
     let guion_correr = escribir(tmp, "corre.py", GUION_CORRER)?;
     let corrida = exec(cli, lim, sesion, SEG_CORRER, &guion_correr)?;
@@ -703,6 +851,114 @@ fn trabajar(
         )));
     }
     Ok(junit)
+}
+
+/// Prepara Rust en el runtime y registra el `Gate` `preparar-rust` con el camino que usó:
+/// `rustup` o `ya-instalado` (el `rustup-init` verificado), `binario-local` (el respaldo que
+/// corrió) o `pendiente`. Si Rust no queda listo, devuelve el error que deja los tests Pendiente.
+fn preparar_rust(
+    cli: &dyn ColabCli,
+    lim: &Limites,
+    home: &Path,
+    tmp: &Path,
+    sesion: &str,
+    trabajo: &Trabajo,
+) -> Result<(), ErrorOraculo> {
+    let resultado = match rust_en_runtime(cli, lim, sesion, tmp) {
+        Ok(camino) => Ok(camino),
+        Err(causa_rust) => binario_local(cli, lim, sesion, tmp, trabajo)
+            .map(|()| "binario-local")
+            .map_err(|causa_respaldo| format!("{causa_rust}; respaldo: {causa_respaldo}")),
+    };
+    let (camino, causa) = match &resultado {
+        Ok(camino) => (*camino, None),
+        Err(causa) => ("pendiente", Some(causa.clone())),
+    };
+    registrar(
+        home,
+        trabajo.corrida,
+        json!({"accion": "preparar-rust", "camino": camino, "causa": causa}),
+    )?;
+    resultado.map(|_| ()).map_err(|causa| {
+        ErrorOraculo::Colab(format!(
+            "Rust no quedó listo en Colab: {causa}; los tests siguen Pendiente"
+        ))
+    })
+}
+
+/// Corre `prepara-rust.py` en el runtime. Devuelve `rustup` o `ya-instalado`, o la causa de la falla.
+fn rust_en_runtime(
+    cli: &dyn ColabCli,
+    lim: &Limites,
+    sesion: &str,
+    tmp: &Path,
+) -> Result<&'static str, String> {
+    let guion =
+        escribir(tmp, "prepara-rust.py", &guion_rust(BASE_RUSTUP)).map_err(|e| e.to_string())?;
+    let salida = exec(cli, lim, sesion, SEG_PREPARAR, &guion)
+        .map_err(|e| format!("prepara-rust.py: {e}"))?;
+    if salida.codigo != 0 {
+        return Err(format!(
+            "prepara-rust.py salió con código {}: {}",
+            salida.codigo,
+            salida.stderr.trim()
+        ));
+    }
+    match marcador(&salida.stdout, "ROOT_RUST=").as_deref() {
+        Some("ya") => Ok("ya-instalado"),
+        Some("rustup") => Ok("rustup"),
+        Some(otro) => Err(format!("prepara-rust.py: {otro}")),
+        None => Err("prepara-rust.py no dio resultado".into()),
+    }
+}
+
+/// Respaldo: compila el producto en la máquina local, sube el binario a `root-paquete/bin/` y lo
+/// prueba en el runtime. Si algo falla, devuelve la causa y no se corre `corre.py`.
+fn binario_local(
+    cli: &dyn ColabCli,
+    lim: &Limites,
+    sesion: &str,
+    tmp: &Path,
+    trabajo: &Trabajo,
+) -> Result<(), String> {
+    // Una corrida ya cortada no compila ni sube nada: la parada la maneja `correr_en_colab`.
+    if let Some(senal) = lim.cancelar.recibida() {
+        return Err(format!("Interrumpido por {senal}"));
+    }
+    if lim.vencido() {
+        return Err("tope de la corrida".into());
+    }
+    let repo = trabajo.paquete.join("repo");
+    let nombre = nombre_binario(&repo).ok_or("sin nombre de binario")?;
+    let binario = trabajo
+        .compilador
+        .compilar(&repo, trabajo.tarea)
+        .map_err(|e| e.to_string())?;
+    let destino = format!("{CARPETA_REMOTA}/bin/{nombre}");
+    let subida = paso(
+        cli,
+        lim,
+        &args(&["upload", "-s", sesion, &ruta(&binario), &destino]),
+        TIMEOUT_LLAMADA,
+    )
+    .map_err(|e| e.to_string())?;
+    if subida.codigo != 0 {
+        return Err(format!(
+            "no se pudo subir el binario: {}",
+            subida.stderr.trim()
+        ));
+    }
+    let guion = escribir(tmp, "prueba-binario.py", &guion_probar_binario(&nombre))
+        .map_err(|e| e.to_string())?;
+    let prueba = exec(cli, lim, sesion, SEG_PRUEBA_BINARIO, &guion).map_err(|e| e.to_string())?;
+    match marcador(&prueba.stdout, "ROOT_BINARIO=").as_deref() {
+        Some("ok") => Ok(()),
+        Some(otro) => Err(format!("el binario no corre en Colab ({otro})")),
+        None => Err(format!(
+            "prueba-binario.py no dio resultado (código {})",
+            prueba.codigo
+        )),
+    }
 }
 
 /// Llama a la CLI con el plazo dado, sin pasar de lo que queda del tope. Una señal o un plazo
@@ -1148,9 +1404,11 @@ fn ruta(p: &Path) -> String {
 mod tests {
     use super::*;
     use crate::oracle::tarea::{Comando, Exclusion};
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::os::unix::fs::PermissionsExt;
     use std::rc::Rc;
+
+    use sha2::{Digest, Sha256};
 
     const JUNIT: &str = r#"<testsuite><testcase classname="tests.test_o" name="o2"/></testsuite>"#;
 
@@ -1206,6 +1464,7 @@ mod tests {
             sesion,
             &Senales::default(),
             TOPE_HOLGADO,
+            &CompiladorPodman,
         )
     }
 
@@ -1230,6 +1489,8 @@ mod tests {
                 match archivo.as_deref() {
                     Some(f) if f.ends_with("gpu.py") => salida(0, &format!("ROOT_GPU={gpu}"), ""),
                     Some(f) if f.ends_with("prepara.py") => salida(0, "ROOT_PREPARADO=1", ""),
+                    Some(f) if f.ends_with("prepara-rust.py") => salida(0, "ROOT_RUST=rustup", ""),
+                    Some(f) if f.ends_with("prueba-binario.py") => salida(0, "ROOT_BINARIO=ok", ""),
                     Some(f) if f.ends_with("corre.py") => salida(0, "ROOT_CORRIDA_CODIGO=0", ""),
                     _ => salida(2, "", "archivo desconocido"),
                 }
@@ -1279,6 +1540,11 @@ mod tests {
         fs::write(dir.join("tests/test_o.py"), "x").expect("escribe");
         fs::write(dir.join("correr.sh"), "#!/usr/bin/env bash\n").expect("escribe");
         fs::write(dir.join("LEEME.txt"), "pasos\n").expect("escribe");
+        fs::write(
+            dir.join("repo/Cargo.toml"),
+            "[package]\nname = \"memora\"\n",
+        )
+        .expect("escribe");
         dir
     }
 
@@ -1483,9 +1749,10 @@ mod tests {
         assert_eq!(r.sesion, "root-memora-1");
         assert!(r.junit.is_file());
         let gates = eventos_runtime(home.path());
-        assert_eq!(gates.len(), 2);
+        assert_eq!(gates.len(), 3, "pedir, preparar-rust y liberar: {gates:?}");
         assert_eq!(gates[0]["extra"]["gpu_pedida"], "T4");
-        assert_eq!(gates[1]["extra"]["gpu_observada"], "Tesla T4");
+        assert_eq!(gates[1]["extra"]["accion"], "preparar-rust");
+        assert_eq!(gates[2]["extra"]["gpu_observada"], "Tesla T4");
     }
 
     #[test]
@@ -1609,7 +1876,7 @@ mod tests {
     /// `stop_cuerpo` es el cuerpo del caso `stop`: el texto y el código con que responde.
     fn falso_corre_lenta_stop(dir: &Path, segundos: u32, stop_cuerpo: &str) -> PathBuf {
         let guion = format!(
-            "#!/bin/sh\necho \"$*\" >> '{d}/llamadas.log'\ncase \"$1\" in\nexec)\n  case \"$*\" in\n    *gpu.py*) echo 'ROOT_GPU=Tesla T4' ;;\n    *prepara.py*) echo ROOT_PREPARADO=1 ;;\n    *corre.py*) echo $$ > '{d}/pid.txt'; sleep {segundos} ;;\n  esac ;;\nstop) {stop_cuerpo} ;;\n*) exit 0 ;;\nesac\nexit 0\n",
+            "#!/bin/sh\necho \"$*\" >> '{d}/llamadas.log'\ncase \"$1\" in\nexec)\n  case \"$*\" in\n    *gpu.py*) echo 'ROOT_GPU=Tesla T4' ;;\n    *prepara.py*) echo ROOT_PREPARADO=1 ;;\n    *prepara-rust.py*) echo ROOT_RUST=rustup ;;\n    *corre.py*) echo $$ > '{d}/pid.txt'; sleep {segundos} ;;\n  esac ;;\nstop) {stop_cuerpo} ;;\n*) exit 0 ;;\nesac\nexit 0\n",
             d = dir.display()
         );
         let ruta = dir.join("colab-lenta");
@@ -1804,6 +2071,7 @@ mod tests {
             "root-memora-1",
             &senales,
             TOPE_HOLGADO,
+            &CompiladorPodman,
         );
         assert!(
             inicio.elapsed() < Duration::from_secs(10),
@@ -1853,6 +2121,7 @@ mod tests {
             "root-memora-1",
             &Senales::default(),
             Duration::from_secs(2),
+            &CompiladorPodman,
         );
         assert!(
             inicio.elapsed() < Duration::from_secs(10),
@@ -1883,6 +2152,369 @@ mod tests {
             .parse()
             .expect("PID");
         assert!(!proceso_vivo(pid), "la CLI falsa quedó viva");
+    }
+
+    /// Compilador falso: cuenta sus llamadas y devuelve siempre el mismo binario.
+    struct CompiladorFalso {
+        llamadas: Cell<u32>,
+        binario: PathBuf,
+    }
+
+    impl CompiladorLocal for CompiladorFalso {
+        fn compilar(&self, _repo: &Path, _tarea: &Tarea) -> Result<PathBuf, ErrorOraculo> {
+            self.llamadas.set(self.llamadas.get() + 1);
+            Ok(self.binario.clone())
+        }
+    }
+
+    /// Un archivo que hace de binario compilado.
+    fn binario_falso(base: &Path) -> PathBuf {
+        let ruta = base.join("memora-compilado");
+        fs::write(&ruta, "binario").expect("escribe el binario");
+        ruta
+    }
+
+    /// Responde `stdout` al `exec` del guion que termina en `guion`, y `base` al resto.
+    fn cambiando(
+        base: impl Fn(&[String]) -> SalidaColab + 'static,
+        guion: &'static str,
+        stdout: &'static str,
+    ) -> impl Fn(&[String]) -> SalidaColab + 'static {
+        move |args: &[String]| {
+            if args[0] == "exec" && args.last().is_some_and(|a| a.ends_with(guion)) {
+                salida(0, stdout, "")
+            } else {
+                base(args)
+            }
+        }
+    }
+
+    /// Fragmentos que ningún guion de Root puede tener: nada de descargar y ejecutar por tubería.
+    const PROHIBIDOS: [&str; 4] = ["| sh", "|sh", "sh.rustup.rs", "shell=True"];
+
+    /// Los fragmentos prohibidos que aparecen en `texto`.
+    fn prohibidos_en(texto: &str) -> Vec<&'static str> {
+        PROHIBIDOS
+            .iter()
+            .copied()
+            .filter(|p| texto.contains(p))
+            .collect()
+    }
+
+    /// Los `Gate` de `preparar-rust` de la corrida.
+    fn gates_rust(home: &Path) -> Vec<Value> {
+        eventos_runtime(home)
+            .into_iter()
+            .filter(|g| g["extra"]["accion"] == "preparar-rust")
+            .collect()
+    }
+
+    /// `python3` según el PATH del test. Sin él, el test falla con un mensaje claro.
+    fn python3_del_path() -> PathBuf {
+        std::env::var_os("PATH")
+            .and_then(|p| {
+                std::env::split_paths(&p)
+                    .map(|d| d.join("python3"))
+                    .find(|c| c.is_file())
+            })
+            .expect("python3 debe estar en el PATH para correr el guion de Rust")
+    }
+
+    /// Corre `guion_rust` con `python3` y devuelve su salida. `base` se sirve con `file://`.
+    /// El PATH es mínimo y HOME apunta a una carpeta vacía: no hay `cargo` que encontrar.
+    fn correr_guion_rust(base: &Path) -> String {
+        let guiones = tempfile::tempdir().expect("guiones");
+        let archivo = guiones.path().join("prepara-rust.py");
+        fs::write(&archivo, guion_rust(&format!("file://{}", base.display())))
+            .expect("escribe el guion");
+        let trabajo = tempfile::tempdir().expect("trabajo");
+        let home = tempfile::tempdir().expect("home");
+        let salida = Command::new(python3_del_path())
+            .arg(&archivo)
+            .current_dir(trabajo.path())
+            .env_clear()
+            .env("HOME", home.path())
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .expect("no se pudo correr python3");
+        assert_eq!(
+            salida.status.code(),
+            Some(0),
+            "stderr: {}",
+            String::from_utf8_lossy(&salida.stderr)
+        );
+        String::from_utf8_lossy(&salida.stdout).into_owned()
+    }
+
+    #[test]
+    fn colab_rust_hash_malo_no_corre_rustup_y_usa_el_binario() {
+        let base = tempfile::tempdir().expect("base");
+        let home = tempfile::tempdir().expect("home");
+        let binario = binario_falso(base.path());
+        let guiones: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let guiones_en = Rc::clone(&guiones);
+        let respuesta = cambiando(feliz("Tesla T4"), "prepara-rust.py", "ROOT_RUST=falla:hash");
+        let falso = Falso::nuevo(move |args: &[String]| {
+            if args[0] == "exec" {
+                let guion = args.last().expect("ruta del guion");
+                let texto = fs::read_to_string(guion).expect("el guion se puede leer");
+                guiones_en.borrow_mut().push(texto);
+            }
+            respuesta(args)
+        });
+        let compilador = CompiladorFalso {
+            llamadas: Cell::new(0),
+            binario,
+        };
+        let r = correr_en_colab(
+            &falso,
+            &paquete(base.path()),
+            &tarea(),
+            home.path(),
+            "root-memora-1",
+            &Senales::default(),
+            TOPE_HOLGADO,
+            &compilador,
+        );
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(compilador.llamadas.get(), 1, "compila una vez");
+
+        let lineas = falso.lineas();
+        let i_subida = lineas
+            .iter()
+            .position(|l| {
+                l.starts_with("upload -s root-memora-1 ") && l.ends_with(" root-paquete/bin/memora")
+            })
+            .unwrap_or_else(|| panic!("falta la subida del binario: {lineas:?}"));
+        let i_prueba = lineas
+            .iter()
+            .position(|l| l.contains("prueba-binario.py"))
+            .unwrap_or_else(|| panic!("falta prueba-binario.py: {lineas:?}"));
+        let i_corre = lineas
+            .iter()
+            .position(|l| l.contains("corre.py"))
+            .unwrap_or_else(|| panic!("falta corre.py: {lineas:?}"));
+        assert!(i_subida < i_prueba && i_prueba < i_corre, "{lineas:?}");
+
+        let gates = gates_rust(home.path());
+        assert_eq!(gates.len(), 1, "{gates:?}");
+        assert_eq!(gates[0]["extra"]["camino"], "binario-local", "{gates:?}");
+        assert!(gates[0]["extra"]["causa"].is_null(), "{gates:?}");
+
+        for guion in guiones.borrow().iter() {
+            assert!(
+                prohibidos_en(guion).is_empty(),
+                "un guion trae texto prohibido {:?}:\n{guion}",
+                prohibidos_en(guion)
+            );
+        }
+    }
+
+    #[test]
+    fn colab_rust_hash_bueno_corre_rustup_y_no_compila() {
+        let base = tempfile::tempdir().expect("base");
+        let home = tempfile::tempdir().expect("home");
+        let compilador = CompiladorFalso {
+            llamadas: Cell::new(0),
+            binario: binario_falso(base.path()),
+        };
+        let falso = Falso::nuevo(feliz("Tesla T4"));
+        let r = correr_en_colab(
+            &falso,
+            &paquete(base.path()),
+            &tarea(),
+            home.path(),
+            "root-memora-1",
+            &Senales::default(),
+            TOPE_HOLGADO,
+            &compilador,
+        );
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(
+            compilador.llamadas.get(),
+            0,
+            "no compila en la máquina local"
+        );
+        assert!(falso.lineas().iter().any(|l| l.contains("corre.py")));
+        let gates = gates_rust(home.path());
+        assert_eq!(gates.len(), 1, "{gates:?}");
+        assert_eq!(gates[0]["extra"]["camino"], "rustup", "{gates:?}");
+    }
+
+    #[test]
+    fn colab_rust_binario_que_no_corre_queda_pendiente() {
+        let base = tempfile::tempdir().expect("base");
+        let home = tempfile::tempdir().expect("home");
+        let respuesta = cambiando(
+            cambiando(
+                feliz("Tesla T4"),
+                "prepara-rust.py",
+                "ROOT_RUST=falla:descarga",
+            ),
+            "prueba-binario.py",
+            "ROOT_BINARIO=falla:126",
+        );
+        let falso = Falso::nuevo(respuesta);
+        let compilador = CompiladorFalso {
+            llamadas: Cell::new(0),
+            binario: binario_falso(base.path()),
+        };
+        let r = correr_en_colab(
+            &falso,
+            &paquete(base.path()),
+            &tarea(),
+            home.path(),
+            "root-memora-1",
+            &Senales::default(),
+            TOPE_HOLGADO,
+            &compilador,
+        );
+        match r {
+            Err(ErrorOraculo::Colab(m)) => assert!(
+                m.starts_with("Rust no quedó listo en Colab: ")
+                    && m.contains("los tests siguen Pendiente"),
+                "{m}"
+            ),
+            otro => panic!("esperaba el error de Rust pendiente, llegó {otro:?}"),
+        }
+        let lineas = falso.lineas();
+        assert!(
+            !lineas
+                .iter()
+                .any(|l| l.starts_with("exec") && l.contains("corre.py")),
+            "no debe correr corre.py: {lineas:?}"
+        );
+        assert!(
+            lineas.last().is_some_and(|l| l.starts_with("stop -s")),
+            "el runtime se libera: {lineas:?}"
+        );
+        let gates = gates_rust(home.path());
+        assert_eq!(gates.len(), 1, "{gates:?}");
+        assert_eq!(gates[0]["extra"]["camino"], "pendiente", "{gates:?}");
+        assert!(
+            gates[0]["extra"]["causa"]
+                .as_str()
+                .is_some_and(|c| c.contains("falla:126")),
+            "{gates:?}"
+        );
+    }
+
+    #[test]
+    fn colab_rust_compilador_real_de_la_nube_queda_pendiente() {
+        let base = tempfile::tempdir().expect("base");
+        let home = tempfile::tempdir().expect("home");
+        let falso = Falso::nuevo(cambiando(
+            feliz("Tesla T4"),
+            "prepara-rust.py",
+            "ROOT_RUST=falla:hash",
+        ));
+        let r = correr_en_colab(
+            &falso,
+            &paquete(base.path()),
+            &tarea(),
+            home.path(),
+            "root-memora-1",
+            &Senales::default(),
+            TOPE_HOLGADO,
+            &CompiladorPodman,
+        );
+        match r {
+            Err(ErrorOraculo::Colab(m)) => assert!(m.contains("Pendiente"), "{m}"),
+            otro => panic!("esperaba el error de Rust pendiente, llegó {otro:?}"),
+        }
+        let lineas = falso.lineas();
+        assert!(
+            !lineas
+                .iter()
+                .any(|l| l.starts_with("exec") && l.contains("corre.py")),
+            "{lineas:?}"
+        );
+    }
+
+    #[test]
+    fn colab_ningun_guion_usa_curl_pipe_sh() {
+        let rust = guion_rust(BASE_RUSTUP);
+        let prueba = guion_probar_binario("memora");
+        let guiones: [(&str, &str); 5] = [
+            ("gpu", GUION_GPU),
+            ("prepara", GUION_PREPARAR),
+            ("corre", GUION_CORRER),
+            ("rust", rust.as_str()),
+            ("prueba-binario", prueba.as_str()),
+        ];
+        for (nombre, texto) in guiones {
+            assert!(
+                prohibidos_en(texto).is_empty(),
+                "el guion {nombre} trae {:?}",
+                prohibidos_en(texto)
+            );
+        }
+    }
+
+    #[test]
+    fn colab_guion_rust_hash_malo_no_ejecuta_rustup_init() {
+        let base = tempfile::tempdir().expect("base");
+        let marca = base.path().join("marca");
+        fs::write(
+            base.path().join("rustup-init"),
+            format!("#!/bin/sh\ntouch '{}'\n", marca.display()),
+        )
+        .expect("escribe rustup-init");
+        fs::write(
+            base.path().join("rustup-init.sha256"),
+            format!("{}  rustup-init\n", "0".repeat(64)),
+        )
+        .expect("escribe el sha256");
+        let salida = correr_guion_rust(base.path());
+        assert!(salida.contains("ROOT_RUST=falla:hash"), "{salida}");
+        assert!(
+            !marca.exists(),
+            "rustup-init corrió con un hash que no coincide"
+        );
+    }
+
+    #[test]
+    fn colab_guion_rust_hash_bueno_ejecuta_rustup_init() {
+        let base = tempfile::tempdir().expect("base");
+        let marca = base.path().join("marca");
+        fs::write(
+            base.path().join("rustup-init"),
+            format!("#!/bin/sh\ntouch '{}'\n", marca.display()),
+        )
+        .expect("escribe rustup-init");
+        let contenido = fs::read(base.path().join("rustup-init")).expect("lee rustup-init");
+        let hash: String = Sha256::digest(&contenido)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        fs::write(
+            base.path().join("rustup-init.sha256"),
+            format!("{hash}  rustup-init\n"),
+        )
+        .expect("escribe el sha256");
+        let salida = correr_guion_rust(base.path());
+        assert!(salida.contains("ROOT_RUST=rustup"), "{salida}");
+        assert!(marca.exists(), "rustup-init debía correr con el hash bueno");
+    }
+
+    #[test]
+    fn colab_nombre_binario_sale_de_cargo_toml() {
+        let base = tempfile::tempdir().expect("base");
+        let con = |texto: &str| {
+            fs::write(base.path().join("Cargo.toml"), texto).expect("escribe Cargo.toml");
+            nombre_binario(base.path())
+        };
+        assert_eq!(
+            con("[package]\nname = \"memora\"\n").as_deref(),
+            Some("memora")
+        );
+        assert_eq!(
+            con("[package]\nname = \"memora\"\n[[bin]]\nname = \"r\"\npath = \"src/main.rs\"\n")
+                .as_deref(),
+            Some("r")
+        );
+        assert_eq!(con("[workspace]\n"), None);
+        assert_eq!(con("[package]\nname = \"mem ora\"\n"), None);
     }
 
     #[test]
@@ -1961,6 +2593,7 @@ mod tests {
             "root-memora-1",
             &senales,
             TOPE_HOLGADO,
+            &CompiladorPodman,
         );
         match r {
             Err(ErrorOraculo::Colab(m)) => {

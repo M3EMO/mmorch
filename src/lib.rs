@@ -115,8 +115,16 @@ fn oraculo_colab(
     })?;
     let tope = std::time::Duration::from_secs_f64(cfg.colab.minutos_max * 60.0);
     let sesion = oracle::colab::nombre_sesion(&tarea.nombre);
-    let resultado =
-        oracle::colab::correr_en_colab(&cli, &paquete.dir, tarea, home, &sesion, &senales, tope)?;
+    let resultado = oracle::colab::correr_en_colab(
+        &cli,
+        &paquete.dir,
+        tarea,
+        home,
+        &sesion,
+        &senales,
+        tope,
+        &oracle::colab::CompiladorPodman,
+    )?;
     let resumen = oracle::pendientes::importar(home, tarea, &resultado.junit)?;
     if json {
         println!(
