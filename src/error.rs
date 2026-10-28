@@ -55,6 +55,7 @@ impl Error {
             Error::Uso(_) => 2,
             Error::Goal(e) => e.codigo_de_salida(),
             Error::Ficha(e) => e.codigo_de_salida(),
+            Error::Oraculo(e) => e.codigo_de_salida(),
             Error::NoImplementado(_)
             | Error::ConfigLeer { .. }
             | Error::ConfigToml(_)
@@ -62,7 +63,6 @@ impl Error {
             | Error::Observe(_)
             | Error::Track(_)
             | Error::Importar(_)
-            | Error::Oraculo(_)
             | Error::Proveedor(_)
             | Error::Rubrica(_) => 3,
         }

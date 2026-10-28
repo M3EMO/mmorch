@@ -97,7 +97,13 @@ spec = "docs/SPEC.md"
 "#
     );
     fs::write(dir.join("tarea.toml"), texto).expect("escribe tarea.toml");
+    // `evaluar` exige una ficha válida en el spec de la tarea (Tarea 9f).
+    fs::create_dir_all(dir.join("docs")).expect("dir docs");
+    fs::write(dir.join("docs/SPEC.md"), SPEC_CON_FICHA).expect("escribe SPEC.md");
 }
+
+/// Spec con ficha válida: el mismo fixture que usan los tests de `ficha`.
+const SPEC_CON_FICHA: &str = include_str!("fixtures/fichas/spec-completa.md");
 
 /// Escribe un `tarea.toml` con dos comandos. Incluye secciones de etapas futuras.
 fn escribir_tarea(dir: &Path, contrato: &str, oculto: &str) {

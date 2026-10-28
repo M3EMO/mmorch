@@ -119,6 +119,13 @@ fn tarea_con(home: &Path, contrato: &str, oculto: &str) -> Tarea {
          [contrato]\ncmd = '''{contrato}'''\n\n[oculto]\ncmd = '''{oculto}'''\n"
     );
     fs::write(dir.join("tarea.toml"), texto).expect("escribe tarea.toml");
+    // `evaluar` exige una ficha válida en el spec de la tarea (Tarea 9f).
+    fs::create_dir_all(dir.join("docs")).expect("dir docs");
+    fs::write(
+        dir.join("docs/SPEC.md"),
+        include_str!("fixtures/fichas/spec-completa.md"),
+    )
+    .expect("escribe SPEC.md");
     Tarea::cargar_de(&dir).expect("carga la tarea")
 }
 

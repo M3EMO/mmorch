@@ -18,11 +18,13 @@ pub use error::Error;
 
 use std::path::Path;
 
-use cli::{Comando, FichaAccion, GoalAccion, ObservaAccion, OraculoAccion, TrackAccion};
-use ficha::{ContextoRevision, ErrorFicha, Revision};
+use cli::{
+    Comando, FichaAccion, GoalAccion, ObservaAccion, OraculoAccion, ProveedorJuez, TrackAccion,
+};
+use ficha::{ContextoRevision, ErrorFicha, JuezProveedor, Revision};
 use oracle::OpcionesOraculo;
 use oracle::tarea::Tarea;
-use tipos::{Estado, Fila};
+use tipos::{Eleccion, Estado, Fila, Proveedor, Via};
 
 /// Ejecuta un subcomando y devuelve su código de salida. Los errores salen por `Err`.
 /// Por ahora `oraculo evaluar`, `ficha`, `esquema`, `goal`, `observa`, `track` e `importar-mmorch` tienen lógica.
@@ -102,19 +104,27 @@ fn oraculo_pendientes(
 }
 
 /// Subcomandos `ficha`: revisan el spec o arman el borrador de `tarea.toml`.
-/// `revisar` sale con 0 si no hay hallazgos, 1 si los hay. Los errores de ficha salen con 2.
+/// `revisar` sale con 0 si no hay hallazgos ni ambigüedades, 1 si los hay, y 3 si el juez
+/// pidió corrida y quedó `sin_veredicto`. Los errores de ficha salen con 2.
 fn ficha_accion(json: bool, accion: &FichaAccion) -> Result<u8, Error> {
     match accion {
-        FichaAccion::Revisar { spec } => {
+        FichaAccion::Revisar {
+            spec,
+            juez_proveedor,
+            juez_modelo,
+        } => {
             let texto = leer_spec(spec)?;
-            let revision = ficha::revisar(&texto, &ContextoRevision::default())?;
+            let ctx = ContextoRevision::default();
+            let revision = match juez_de(*juez_proveedor, juez_modelo.as_deref()) {
+                Some(juez) => ficha::revisar_con_juez(&texto, &ctx, &juez)?,
+                None => ficha::revisar(&texto, &ctx)?,
+            };
             if json {
                 println!("{}", serde_json::to_string_pretty(&revision)?);
             } else {
                 imprimir_revision(&revision);
             }
-            let limpia = revision.hallazgos.is_empty() && revision.ambiguedades.is_empty();
-            Ok(if limpia { 0 } else { 1 })
+            Ok(codigo_de_revision(&revision))
         }
         FichaAccion::Tarea { spec, nombre } => {
             let texto = leer_spec(spec)?;
@@ -132,6 +142,32 @@ fn leer_spec(spec: &Path) -> Result<String, ErrorFicha> {
     })
 }
 
+/// Juez real si se pasan proveedor y modelo. Sin ellos no corre el juez.
+fn juez_de(proveedor: Option<ProveedorJuez>, modelo: Option<&str>) -> Option<JuezProveedor> {
+    let (proveedor, modelo) = (proveedor?, modelo?);
+    Some(JuezProveedor {
+        eleccion: Eleccion {
+            via: Via::Api,
+            proveedor: Some(Proveedor::from(proveedor)),
+            modelo: Some(modelo.to_string()),
+            razonamiento: true,
+            motivo: "juez de ficha".into(),
+        },
+        corrida: "ficha-revisar".into(),
+    })
+}
+
+/// Código de `ficha revisar`: 3 si el juez no dio veredicto, 1 si hay hallazgos, 0 si no.
+fn codigo_de_revision(revision: &Revision) -> u8 {
+    if revision.juez.starts_with("sin_veredicto") {
+        3
+    } else if revision.hallazgos.is_empty() && revision.ambiguedades.is_empty() {
+        0
+    } else {
+        1
+    }
+}
+
 /// Una línea por hallazgo y por ambigüedad: `linea: regla: detalle`.
 fn imprimir_revision(revision: &Revision) {
     for h in &revision.hallazgos {
@@ -139,6 +175,9 @@ fn imprimir_revision(revision: &Revision) {
     }
     for a in &revision.ambiguedades {
         println!("{}: ambigüedad: {}", a.linea, a.frase);
+    }
+    if revision.juez.starts_with("sin_veredicto") {
+        println!("juez: {}", revision.juez);
     }
     if revision.hallazgos.is_empty() && revision.ambiguedades.is_empty() {
         println!("sin hallazgos");

@@ -19,6 +19,7 @@ use std::time::{Duration, SystemTime};
 use thiserror::Error as ErrorDerive;
 
 use crate::config::root_home;
+use crate::ficha::{self, ErrorFicha};
 use crate::tipos::{Conteo, Estado, Hallazgo, TasaTest, VERSION, Veredicto};
 use crate::track::stats::wilson_inferior;
 use junit::{Junit, ResultadoTest};
@@ -40,7 +41,7 @@ const CADUCIDAD: Duration = Duration::from_secs(24 * 3600);
 const DIR_CONTRATO: &str = "/oraculo/contrato";
 const DIR_OCULTO: &str = "/oraculo/oculto";
 
-/// Errores del Oracle. Salen con código 3. Ante uno de ellos no hay veredicto.
+/// Errores del Oracle. Salen con código 3, salvo `Ficha` (2). Ante uno de ellos no hay veredicto.
 #[derive(Debug, ErrorDerive)]
 pub enum ErrorOraculo {
     /// Infraestructura: podman ausente, timeout, error de podman o E/S.
@@ -52,6 +53,19 @@ pub enum ErrorOraculo {
     /// La tarea no existe, no se lee o su `tarea.toml` es inválido.
     #[error("tarea inválida: {0}")]
     Tarea(String),
+    /// El spec de la tarea no tiene una ficha válida. Sin ficha no se evalúa.
+    #[error("ficha del spec: {0}")]
+    Ficha(#[from] ErrorFicha),
+}
+
+impl ErrorOraculo {
+    /// Código de salida: 2 si la ficha falta o no es válida, 3 en los demás casos.
+    pub fn codigo_de_salida(&self) -> u8 {
+        match self {
+            ErrorOraculo::Ficha(e) => e.codigo_de_salida(),
+            _ => 3,
+        }
+    }
 }
 
 /// Opciones de una evaluación.
@@ -85,6 +99,7 @@ struct Corrida<'a> {
 
 /// Evalúa `repo` con la tarea: corre el contrato y el oculto sobre una copia del repo.
 pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> {
+    verificar_ficha(tarea)?;
     let repo = fs::canonicalize(repo)
         .map_err(|e| ErrorOraculo::Infra(format!("no existe el repo {}: {e}", repo.display())))?;
     // Los temporales van a ROOT_HOME, nunca a TMPDIR ni a /tmp (desempate 6).
@@ -165,6 +180,17 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
         tasas,
         pendientes: pendientes::desde(tarea, &colab),
     })
+}
+
+/// Lee el spec de la tarea y exige una ficha válida. Va antes de copiar o descargar nada.
+fn verificar_ficha(tarea: &Tarea) -> Result<(), ErrorOraculo> {
+    let ruta = tarea.dir.join(&tarea.spec);
+    let texto = fs::read_to_string(&ruta).map_err(|fuente| ErrorFicha::Leer {
+        ruta: ruta.display().to_string(),
+        fuente,
+    })?;
+    ficha::extraer(&texto)?;
+    Ok(())
 }
 
 /// Veredicto de una evaluación que no corrió: sin conteos, con sus hallazgos y pendientes.

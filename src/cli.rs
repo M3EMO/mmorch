@@ -91,10 +91,16 @@ pub enum Comando {
 
 #[derive(Debug, Subcommand)]
 pub enum FichaAccion {
-    /// Revisa la ficha del spec con reglas deterministas.
+    /// Revisa la ficha del spec con reglas deterministas. Con `--juez-*`, también el juez.
     Revisar {
         #[arg(long)]
         spec: PathBuf,
+        /// Proveedor del juez de ambigüedades. Exige `--juez-modelo`.
+        #[arg(long, value_enum, requires = "juez_modelo")]
+        juez_proveedor: Option<ProveedorJuez>,
+        /// Modelo del juez de ambigüedades. Exige `--juez-proveedor`.
+        #[arg(long, requires = "juez_proveedor")]
+        juez_modelo: Option<String>,
     },
     /// Arma el borrador de `tarea.toml` desde la ficha.
     Tarea {
@@ -103,6 +109,22 @@ pub enum FichaAccion {
         #[arg(long)]
         nombre: String,
     },
+}
+
+/// Proveedores que puede usar el juez de la ficha.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ProveedorJuez {
+    Deepseek,
+    Anthropic,
+}
+
+impl From<ProveedorJuez> for crate::tipos::Proveedor {
+    fn from(proveedor: ProveedorJuez) -> Self {
+        match proveedor {
+            ProveedorJuez::Deepseek => crate::tipos::Proveedor::Deepseek,
+            ProveedorJuez::Anthropic => crate::tipos::Proveedor::Anthropic,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]

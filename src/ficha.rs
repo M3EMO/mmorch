@@ -1,5 +1,7 @@
-//! Ficha del spec: el bloque TOML de `## Ficha` que Root mide, y su revisión determinista.
-//! Sin LLM. La capa del juez de ambigüedades llega en otra tarea.
+//! Ficha del spec: el bloque TOML de `## Ficha` que Root mide, y su revisión.
+//! Las reglas deterministas no usan LLM. El juez de ambigüedades vive en `juez`.
+
+pub mod juez;
 
 use std::collections::BTreeSet;
 
@@ -7,7 +9,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error as ErrorDerive;
 
-/// Errores de la ficha. Todos salen con código 2: sin ficha válida no hay evaluación.
+pub use juez::{JuezAmbiguedad, JuezProveedor, revisar_con_juez};
+
+/// Errores de la ficha. Salen con código 2: sin ficha válida no hay evaluación.
+/// La excepción es `Juez`, un fallo de infraestructura: sale con 3.
 #[derive(Debug, ErrorDerive)]
 pub enum ErrorFicha {
     #[error("el spec no tiene sección `## Ficha`")]
@@ -26,12 +31,17 @@ pub enum ErrorFicha {
         #[source]
         fuente: std::io::Error,
     },
+    #[error("el juez falló: {0}")]
+    Juez(String),
 }
 
 impl ErrorFicha {
-    /// Código de salida del proceso: 2, error de uso.
+    /// Código de salida del proceso: 2 por error de uso, 3 por fallo del juez.
     pub fn codigo_de_salida(&self) -> u8 {
-        2
+        match self {
+            ErrorFicha::Juez(_) => 3,
+            _ => 2,
+        }
     }
 }
 
@@ -132,7 +142,7 @@ pub struct HallazgoFicha {
     pub detalle: String,
 }
 
-/// Una frase con dos lecturas posibles. La produce el juez, que llega en otra tarea.
+/// Una frase con dos lecturas posibles. La produce el juez y la acepta el gate de evidencia.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Ambiguedad {
     pub frase: String,
@@ -142,11 +152,15 @@ pub struct Ambiguedad {
 }
 
 /// Resultado de revisar un spec. `ambiguedades` queda vacía hasta que corra el juez.
+/// `juez` es `"no corrido"`, `"ok"` (el JSON parseó) o `"sin_veredicto: <causa>"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Revision {
     pub hallazgos: Vec<HallazgoFicha>,
     pub ambiguedades: Vec<Ambiguedad>,
     pub juez: String,
+    /// Frases que el juez citó y el gate de evidencia descartó.
+    #[serde(default)]
+    pub descartadas: Vec<String>,
 }
 
 /// Datos del repo que algunas reglas comparan. `None` apaga la regla.
@@ -191,6 +205,7 @@ pub fn revisar(spec: &str, ctx: &ContextoRevision) -> Result<Revision, ErrorFich
         hallazgos: revisar_reglas(&ficha, &bloque, ctx),
         ambiguedades: Vec::new(),
         juez: JUEZ_NO_CORRIDO.into(),
+        descartadas: Vec::new(),
     })
 }
 

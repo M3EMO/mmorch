@@ -1,10 +1,52 @@
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
-use root::ficha::{self, ContextoRevision, ErrorFicha};
+use root::ficha::{self, ContextoRevision, ErrorFicha, JuezAmbiguedad, revisar_con_juez};
 use root::oracle::tarea::Tarea;
+use root::oracle::{ErrorOraculo, OpcionesOraculo, evaluar};
+use root::proveedores::Prompt;
+
+/// Juez falso: devuelve una respuesta fija y guarda cada prompt que recibe.
+struct JuezFalso {
+    respuesta: Result<String, String>,
+    prompts: RefCell<Vec<Prompt>>,
+}
+
+impl JuezFalso {
+    fn ok(texto: &str) -> JuezFalso {
+        JuezFalso {
+            respuesta: Ok(texto.to_string()),
+            prompts: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn falla(causa: &str) -> JuezFalso {
+        JuezFalso {
+            respuesta: Err(causa.to_string()),
+            prompts: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl JuezAmbiguedad for JuezFalso {
+    fn consultar(&self, prompt: &Prompt) -> Result<String, ErrorFicha> {
+        self.prompts.borrow_mut().push(prompt.clone());
+        self.respuesta.clone().map_err(ErrorFicha::Juez)
+    }
+}
+
+/// Frase real de `spec-completa.md`: `concurrencia` de `[arquitectura]`.
+const FRASE_REAL: &str = "un lock por fragmento del almacén";
+
+/// Arreglo JSON con una ambigüedad de la frase real.
+fn ambiguedad_real() -> String {
+    format!(
+        r#"[{{"frase": "{FRASE_REAL}", "lectura_a": "lock por fragmento de clave", "lectura_b": "lock por fragmento de nodo"}}]"#
+    )
+}
 
 fn fixture(nombre: &str) -> String {
     let ruta = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -329,4 +371,301 @@ fn ficha_esquema_revision_sale_0() {
     assert_eq!(codigo(&salida), 0);
     let schema: serde_json::Value = serde_json::from_slice(&salida.stdout).expect("stdout es JSON");
     assert_eq!(schema["title"], "Revision");
+}
+
+#[test]
+fn ficha_esquema_revision_lista_descartadas() {
+    let salida = root(&["esquema", "revision"]);
+    let texto = String::from_utf8_lossy(&salida.stdout);
+    assert!(texto.contains("descartadas"), "{texto}");
+}
+
+#[test]
+fn ficha_juez_ambiguedad_real_entra_con_su_linea_y_juez_ok() {
+    let texto = fixture("spec-completa.md");
+    let juez = JuezFalso::ok(&ambiguedad_real());
+    let revision = revisar_con_juez(&texto, &ctx_vacio(), &juez).expect("revisa");
+    assert_eq!(revision.juez, "ok");
+    assert_eq!(
+        revision.ambiguedades.len(),
+        1,
+        "{:?}",
+        revision.ambiguedades
+    );
+    assert_eq!(revision.ambiguedades[0].frase, FRASE_REAL);
+    assert_eq!(
+        revision.ambiguedades[0].linea,
+        linea_con(&texto, "concurrencia =")
+    );
+    assert!(revision.descartadas.is_empty());
+}
+
+#[test]
+fn ficha_juez_frase_inventada_se_descarta() {
+    let texto = fixture("spec-completa.md");
+    let json = r#"[{"frase": "el nodo replica en tres zonas", "lectura_a": "sincrónica", "lectura_b": "asincrónica"}]"#;
+    let revision = revisar_con_juez(&texto, &ctx_vacio(), &JuezFalso::ok(json)).expect("revisa");
+    assert_eq!(revision.juez, "ok");
+    assert!(
+        revision.ambiguedades.is_empty(),
+        "{:?}",
+        revision.ambiguedades
+    );
+    assert_eq!(revision.descartadas, vec!["el nodo replica en tres zonas"]);
+}
+
+#[test]
+fn ficha_juez_frase_con_otro_espaciado_se_acepta() {
+    let texto = fixture("spec-completa.md");
+    let json = r#"[{"frase": "un   lock  por fragmento del almacén", "lectura_a": "por clave", "lectura_b": "por nodo"}]"#;
+    let revision = revisar_con_juez(&texto, &ctx_vacio(), &JuezFalso::ok(json)).expect("revisa");
+    assert_eq!(revision.ambiguedades.len(), 1, "{:?}", revision);
+    assert_eq!(
+        revision.ambiguedades[0].linea,
+        linea_con(&texto, "concurrencia =")
+    );
+}
+
+#[test]
+fn ficha_juez_lecturas_iguales_o_vacias_se_descartan() {
+    let texto = fixture("spec-completa.md");
+    let json = format!(
+        r#"[{{"frase": "{FRASE_REAL}", "lectura_a": "igual", "lectura_b": "igual"}},
+            {{"frase": "{FRASE_REAL}", "lectura_a": "algo", "lectura_b": ""}}]"#
+    );
+    let revision = revisar_con_juez(&texto, &ctx_vacio(), &JuezFalso::ok(&json)).expect("revisa");
+    assert!(
+        revision.ambiguedades.is_empty(),
+        "{:?}",
+        revision.ambiguedades
+    );
+    assert_eq!(revision.descartadas.len(), 2, "{:?}", revision.descartadas);
+}
+
+#[test]
+fn ficha_juez_json_roto_es_sin_veredicto_y_nunca_ok() {
+    let texto = fixture("spec-completa.md");
+    let revision =
+        revisar_con_juez(&texto, &ctx_vacio(), &JuezFalso::ok("no es json")).expect("revisa");
+    assert!(
+        revision.juez.starts_with("sin_veredicto"),
+        "{}",
+        revision.juez
+    );
+    assert!(revision.ambiguedades.is_empty());
+}
+
+#[test]
+fn ficha_juez_objeto_en_vez_de_arreglo_es_sin_veredicto() {
+    let texto = fixture("spec-completa.md");
+    let json = format!(r#"{{"frase": "{FRASE_REAL}", "lectura_a": "a", "lectura_b": "b"}}"#);
+    let revision = revisar_con_juez(&texto, &ctx_vacio(), &JuezFalso::ok(&json)).expect("revisa");
+    assert!(
+        revision.juez.starts_with("sin_veredicto"),
+        "{}",
+        revision.juez
+    );
+    assert!(revision.ambiguedades.is_empty());
+}
+
+#[test]
+fn ficha_juez_campos_faltantes_es_sin_veredicto() {
+    let texto = fixture("spec-completa.md");
+    let json = format!(r#"[{{"frase": "{FRASE_REAL}", "lectura_a": "a"}}]"#);
+    let revision = revisar_con_juez(&texto, &ctx_vacio(), &JuezFalso::ok(&json)).expect("revisa");
+    assert!(
+        revision.juez.starts_with("sin_veredicto"),
+        "{}",
+        revision.juez
+    );
+    assert!(revision.ambiguedades.is_empty());
+}
+
+#[test]
+fn ficha_juez_arreglo_envuelto_en_bloque_json_se_acepta() {
+    let texto = fixture("spec-completa.md");
+    let envuelto = format!("```json\n{}\n```", ambiguedad_real());
+    let revision =
+        revisar_con_juez(&texto, &ctx_vacio(), &JuezFalso::ok(&envuelto)).expect("revisa");
+    assert_eq!(revision.juez, "ok");
+    assert_eq!(revision.ambiguedades.len(), 1);
+}
+
+#[test]
+fn ficha_juez_texto_fuera_del_bloque_es_sin_veredicto() {
+    let texto = fixture("spec-completa.md");
+    let json = format!("Revisé el spec:\n{}", ambiguedad_real());
+    let revision = revisar_con_juez(&texto, &ctx_vacio(), &JuezFalso::ok(&json)).expect("revisa");
+    assert!(
+        revision.juez.starts_with("sin_veredicto"),
+        "{}",
+        revision.juez
+    );
+}
+
+#[test]
+fn ficha_juez_arreglo_vacio_es_ok_sin_ambiguedades() {
+    let texto = fixture("spec-completa.md");
+    let revision = revisar_con_juez(&texto, &ctx_vacio(), &JuezFalso::ok("[]")).expect("revisa");
+    assert_eq!(revision.juez, "ok");
+    assert!(revision.ambiguedades.is_empty());
+    assert!(revision.descartadas.is_empty());
+}
+
+#[test]
+fn ficha_juez_error_del_proveedor_es_sin_veredicto_y_deterministas_siguen() {
+    let texto = fixture("spec-vaga.md");
+    let revision =
+        revisar_con_juez(&texto, &ctx_vacio(), &JuezFalso::falla("HTTP 500")).expect("revisa");
+    assert!(
+        revision.juez.starts_with("sin_veredicto"),
+        "{}",
+        revision.juez
+    );
+    assert!(revision.juez.contains("HTTP 500"), "{}", revision.juez);
+    assert!(revision.ambiguedades.is_empty());
+    assert!(!revision.hallazgos.is_empty());
+}
+
+#[test]
+fn ficha_juez_prompt_fijo_refuta_pide_json_y_lleva_el_spec() {
+    let texto = fixture("spec-completa.md");
+    let juez = JuezFalso::ok("[]");
+    revisar_con_juez(&texto, &ctx_vacio(), &juez).expect("revisa");
+    let prompts = juez.prompts.borrow();
+    assert_eq!(prompts.len(), 1);
+    let prompt = &prompts[0];
+    let sistema = prompt.sistema.as_deref().expect("hay prompt de sistema");
+    assert!(sistema.contains("REFUTA"), "{sistema}");
+    assert!(sistema.contains("JSON"), "{sistema}");
+    assert_eq!(prompt.usuario, texto);
+    assert_eq!(prompt.max_tokens, 4000);
+    assert_eq!(prompt.fase, "ficha");
+}
+
+#[test]
+fn ficha_juez_sin_ficha_es_error_de_ficha() {
+    let texto = fixture("spec-sin-ficha.md");
+    let error =
+        revisar_con_juez(&texto, &ctx_vacio(), &JuezFalso::ok("[]")).expect_err("debe fallar");
+    assert!(matches!(error, ErrorFicha::SinFicha), "{error:?}");
+}
+
+#[test]
+fn ficha_juez_error_codigo_de_salida_es_3() {
+    let error = ErrorFicha::Juez("x".into());
+    assert_eq!(error.codigo_de_salida(), 3);
+}
+
+#[test]
+fn ficha_cli_juez_proveedor_sin_modelo_sale_2() {
+    let salida = root(&[
+        "ficha",
+        "revisar",
+        "--spec",
+        &ruta_fixture("spec-completa.md"),
+        "--juez-proveedor",
+        "deepseek",
+    ]);
+    assert_eq!(codigo(&salida), 2);
+}
+
+#[test]
+fn ficha_cli_juez_sin_clave_da_sin_veredicto_y_sale_3() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let salida = Command::new(env!("CARGO_BIN_EXE_r00t"))
+        .env("ROOT_HOME", home.path())
+        .env_remove("DEEPSEEK_API_KEY")
+        .args([
+            "--json",
+            "ficha",
+            "revisar",
+            "--spec",
+            &ruta_fixture("spec-completa.md"),
+            "--juez-proveedor",
+            "deepseek",
+            "--juez-modelo",
+            "deepseek-reasoner",
+        ])
+        .output()
+        .expect("ejecuta r00t");
+    assert_eq!(
+        codigo(&salida),
+        3,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&salida.stdout).expect("stdout es JSON");
+    assert!(
+        json["juez"]
+            .as_str()
+            .is_some_and(|j| j.starts_with("sin_veredicto")),
+        "{json}"
+    );
+}
+
+#[test]
+fn ficha_evaluar_sin_ficha_da_error_de_ficha_antes_de_contenedores() {
+    let home = tempfile::tempdir().expect("home");
+    let repo = tempfile::tempdir().expect("repo");
+    let dir = home.path().join("oraculos").join("tarea-prueba");
+    fs::create_dir_all(dir.join("docs")).expect("dir");
+    fs::write(dir.join("docs/SPEC.md"), fixture("spec-sin-ficha.md")).expect("spec");
+    fs::write(
+        dir.join("tarea.toml"),
+        "nombre = \"tarea-prueba\"\nlenguaje = \"rust\"\nimagen = \"x\"\nspec = \"docs/SPEC.md\"\n\n[contrato]\ncmd = 'true'\n\n[oculto]\ncmd = 'true'\n",
+    )
+    .expect("tarea");
+    let tarea = Tarea::cargar_de(&dir).expect("carga");
+    let opciones = OpcionesOraculo {
+        timeout: std::time::Duration::from_secs(5),
+        home: Some(home.path().to_path_buf()),
+    };
+    let res = evaluar(repo.path(), &tarea, &opciones);
+    assert!(
+        matches!(res, Err(ErrorOraculo::Ficha(ErrorFicha::SinFicha))),
+        "{res:?}"
+    );
+}
+
+#[test]
+fn ficha_cli_evaluar_sin_ficha_sale_2() {
+    let home = tempfile::tempdir().expect("home");
+    let repo = tempfile::tempdir().expect("repo");
+    let dir = home.path().join("oraculos").join("tarea-prueba");
+    fs::create_dir_all(dir.join("docs")).expect("dir");
+    fs::write(dir.join("docs/SPEC.md"), fixture("spec-sin-ficha.md")).expect("spec");
+    fs::write(
+        dir.join("tarea.toml"),
+        "nombre = \"tarea-prueba\"\nlenguaje = \"rust\"\nimagen = \"x\"\nspec = \"docs/SPEC.md\"\n\n[contrato]\ncmd = 'true'\n\n[oculto]\ncmd = 'true'\n",
+    )
+    .expect("tarea");
+    let salida = Command::new(env!("CARGO_BIN_EXE_r00t"))
+        .env("ROOT_HOME", home.path())
+        .args([
+            "oraculo",
+            "evaluar",
+            "--tarea",
+            "tarea-prueba",
+            "--repo",
+            repo.path().to_str().expect("ruta UTF-8"),
+        ])
+        .output()
+        .expect("ejecuta r00t");
+    assert_eq!(codigo(&salida), 2);
+    assert!(String::from_utf8_lossy(&salida.stderr).contains("## Ficha"));
+}
+
+#[test]
+fn ficha_tarea_borrador_de_fixture_acepta_tarea_y_spec_resuelve() {
+    let texto = fixture("spec-completa.md");
+    let (ficha_leida, _) = ficha::extraer(&texto).expect("parsea");
+    let borrador = ficha::borrador_tarea(&ficha_leida, "memora").expect("borrador");
+    let dir = tempfile::tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("bootstrap/docs")).expect("dir");
+    fs::write(dir.path().join("bootstrap/docs/SPEC.md"), &texto).expect("spec");
+    fs::write(dir.path().join("tarea.toml"), &borrador).expect("tarea");
+    let tarea = Tarea::cargar_de(dir.path()).expect("Tarea acepta el borrador");
+    let spec = fs::read_to_string(dir.path().join(&tarea.spec)).expect("lee el spec");
+    ficha::extraer(&spec).expect("la ficha resuelve");
 }
