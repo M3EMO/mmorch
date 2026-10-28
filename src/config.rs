@@ -34,6 +34,7 @@ pub struct Config {
     pub balance: Balance,
     pub ruteo: Ruteo,
     pub umbral_verde: f32,
+    /// Cota inferior de Wilson (90%, unilateral) que un candidato debe alcanzar para entrar a la política.
     pub umbral_wilson: f32,
     pub proveedores: ConfigProveedores,
 }
@@ -119,7 +120,7 @@ impl Default for Config {
             balance: Balance::default(),
             ruteo: Ruteo::default(),
             umbral_verde: 0.8,
-            umbral_wilson: 0.5,
+            umbral_wilson: 0.6,
             proveedores: ConfigProveedores::default(),
         }
     }
@@ -194,16 +195,56 @@ impl Default for Ruteo {
     }
 }
 
+/// Tablas de `[balance]` con tope propio. Si una existe, debe declarar `tope_usd`.
+const TABLAS_CON_TOPE: &[&str] = &["cupo", "api", "nube"];
+
+/// Rechaza una tabla de tope sin `tope_usd`. Un TOML roto sigue siendo error de parseo (código 3).
+fn exigir_topes_declarados(texto: &str) -> Result<(), Error> {
+    let crudo: toml::Table = toml::from_str(texto)?;
+    let Some(balance) = crudo.get("balance").and_then(toml::Value::as_table) else {
+        return Ok(());
+    };
+    for nombre in TABLAS_CON_TOPE {
+        let Some(tabla) = balance.get(*nombre) else {
+            continue;
+        };
+        let declara_tope = tabla.as_table().is_some_and(|t| t.contains_key("tope_usd"));
+        if !declara_tope {
+            return Err(Error::ConfigValor(format!(
+                "[balance.{nombre}] exige tope_usd"
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl Config {
     /// Parsea el texto de un `root.toml`. Un texto vacío da los defaults.
     pub fn desde_texto(texto: &str) -> Result<Config, Error> {
-        let config: Config = toml::from_str(texto)?;
+        exigir_topes_declarados(texto)?;
+        let mut config: Config = toml::from_str(texto)?;
+        // Las entradas del usuario suman a los equivalentes de los defaults; no los reemplazan.
+        for (alias, modelo) in Ruteo::default().api_equivalente {
+            config.ruteo.api_equivalente.entry(alias).or_insert(modelo);
+        }
         config.validar()?;
         Ok(config)
     }
 
-    /// Rechaza topes en cero o negativos, `bloque_horas` en cero y `prefiere_api_sobre` fuera de (0, 1].
+    /// Rechaza topes en cero o negativos, `bloque_horas` en cero, `prefiere_api_sobre` fuera de (0, 1]
+    /// y un alias de cupo en `[modelos]` sin `api_equivalente` en `[ruteo]`.
     fn validar(&self) -> Result<(), Error> {
+        for alias in [
+            &self.modelos.planifica,
+            &self.modelos.organiza,
+            &self.modelos.construye,
+        ] {
+            if !self.ruteo.api_equivalente.contains_key(alias) {
+                return Err(Error::ConfigValor(format!(
+                    "el alias \"{alias}\" de [modelos] no tiene api_equivalente en [ruteo]"
+                )));
+            }
+        }
         let b = &self.balance;
         let topes = [
             ("balance.cupo.tope_usd", b.cupo.tope_usd),
@@ -380,12 +421,13 @@ tope_usd = 200.0
             "[balance.cupo]\ntope_usd = -1.0",
             "[balance.api]\ntope_usd = 0.0",
             "[balance.nube]\ntope_usd = 0.0",
-            "[balance.cupo]\nbloque_horas = 0",
+            "[balance.cupo]\ntope_usd = 35.0\nbloque_horas = 0",
             "[balance]\nprefiere_api_sobre = 0.0",
             "[balance]\nprefiere_api_sobre = 1.5",
             "[balance]\nprefiere_api_sobre = -0.1",
         ] {
-            assert!(Config::desde_texto(texto).is_err(), "debe fallar: {texto}");
+            let error = Config::desde_texto(texto).expect_err("debe fallar");
+            assert_eq!(error.codigo_de_salida(), 2, "{texto}");
         }
     }
 
@@ -394,6 +436,66 @@ tope_usd = 200.0
         let c =
             Config::desde_texto("[balance]\nprefiere_api_sobre = 1.0").expect("1.0 está en (0, 1]");
         assert_eq!(c.balance.prefiere_api_sobre, 1.0);
+    }
+
+    #[test]
+    fn route_tabla_de_tope_sin_tope_usd_da_codigo_2() {
+        for (tabla, texto) in [
+            ("balance.cupo", "[balance.cupo]\nbloque_horas = 4\n"),
+            ("balance.api", "[balance.api]\n"),
+            ("balance.nube", "[balance.nube]\n"),
+        ] {
+            let error = Config::desde_texto(texto).expect_err("sin tope_usd debe fallar");
+            assert_eq!(error.codigo_de_salida(), 2, "{tabla}");
+            let mensaje = error.to_string();
+            assert!(
+                mensaje.contains(&format!("[{tabla}] exige tope_usd")),
+                "{tabla}: {mensaje}"
+            );
+        }
+    }
+
+    #[test]
+    fn route_tope_negativo_da_codigo_2() {
+        let error = Config::desde_texto("[balance.api]\ntope_usd = -1.0")
+            .expect_err("tope negativo debe fallar");
+        assert_eq!(error.codigo_de_salida(), 2);
+    }
+
+    #[test]
+    fn route_cupo_con_tope_sin_bloque_usa_5_horas() {
+        let c = Config::desde_texto("[balance.cupo]\ntope_usd = 20.0").expect("debe parsear");
+        assert_eq!(c.balance.cupo.tope_usd, 20.0);
+        assert_eq!(c.balance.cupo.bloque_horas, 5);
+    }
+
+    #[test]
+    fn route_toml_malformado_sigue_siendo_codigo_3() {
+        let error = Config::desde_texto("[balance\n").expect_err("TOML roto debe fallar");
+        assert_eq!(error.codigo_de_salida(), 3);
+    }
+
+    #[test]
+    fn route_alias_de_cupo_sin_api_equivalente_da_codigo_2() {
+        let error = Config::desde_texto("[modelos]\norganiza = \"mistral\"\n")
+            .expect_err("sin api_equivalente debe fallar");
+        assert_eq!(error.codigo_de_salida(), 2);
+        let mensaje = error.to_string();
+        assert!(
+            mensaje
+                .contains("el alias \"mistral\" de [modelos] no tiene api_equivalente en [ruteo]"),
+            "{mensaje}"
+        );
+    }
+
+    #[test]
+    fn route_alias_de_cupo_con_api_equivalente_carga() {
+        let texto = "[modelos]\norganiza = \"mistral\"\n\n\
+                     [ruteo.api_equivalente.mistral]\nproveedor = \"deepseek\"\nmodelo = \"mistral-large\"\n";
+        let c = Config::desde_texto(texto).expect("con equivalente debe cargar");
+        assert_eq!(c.ruteo.api_equivalente["mistral"].modelo, "mistral-large");
+        // Una entrada del usuario suma a los defaults: opus y sonnet siguen definidos.
+        assert_eq!(c.ruteo.api_equivalente["opus"].modelo, "claude-opus-5-5");
     }
 
     #[test]

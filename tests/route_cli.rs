@@ -193,3 +193,27 @@ fn route_cli_politica_ilegible_sale_con_3() {
     let stderr = String::from_utf8_lossy(&salida.stderr);
     assert!(stderr.contains("politica.json"), "stderr: {stderr}");
 }
+
+#[test]
+fn route_cli_tabla_api_sin_tope_sale_con_2_y_nombra_la_tabla() {
+    let home = tempfile::tempdir().expect("home");
+    fs::write(home.path().join("root.toml"), "[balance.api]\n").expect("root.toml");
+    let salida = root_con_home(home.path(), &["route", "--rol", "delega", "--tipo", "bulk"]);
+    assert_eq!(codigo(&salida), 2);
+    let stderr = String::from_utf8_lossy(&salida.stderr);
+    assert!(
+        stderr.contains("[balance.api] exige tope_usd"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn route_cli_sin_root_toml_usa_defaults_y_sale_con_0() {
+    let home = tempfile::tempdir().expect("home");
+    let salida = root_con_home(
+        home.path(),
+        &["--json", "route", "--rol", "delega", "--tipo", "bulk"],
+    );
+    assert_eq!(codigo(&salida), 0);
+    assert_eq!(json(&salida)["modelo"], "deepseek-chat");
+}

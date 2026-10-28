@@ -22,8 +22,18 @@ const DETALLE_RAIZ: &str =
     "la última etapa no define un USER no-root: el contenedor corre como root";
 /// Carpetas que no se recorren, en cualquier nivel del repo.
 const CARPETAS_IGNORADAS: &[&str] = &["target", ".git", "node_modules", "vendor"];
-/// Segmentos que, solos, marcan un secreto en una clave. `api` seguido de `key` también cuenta.
-const SEGMENTOS_SECRETO: &[&str] = &["password", "passwd", "secret", "token", "apikey", "key"];
+/// Segmentos que, solos, marcan un secreto en una clave.
+const SEGMENTOS_SECRETO: &[&str] = &["password", "passwd", "secret", "token", "apikey"];
+/// `key` marca un secreto solo si el segmento anterior es uno de estos.
+const PREFIJOS_KEY_SECRETA: &[&str] = &[
+    "api",
+    "secret",
+    "private",
+    "access",
+    "auth",
+    "signing",
+    "encryption",
+];
 /// Valores de relleno que no son secretos reales.
 const PLACEHOLDERS: &[&str] = &["changeme", "xxx", "redacted", "example"];
 
@@ -305,13 +315,16 @@ fn separar_yaml(linea: &str) -> Option<(&str, &str)> {
     Some((&linea[..indice], &linea[indice + 1..]))
 }
 
-/// Verdadero si un segmento de la clave es un segmento de secreto, o si `api` va seguido de `key`.
+/// Verdadero si un segmento de la clave es de secreto, o si `key` va tras un prefijo de secreto.
+/// `primary_key` y `sort_key` no cuentan; `api_key` y `signingKey` sí.
 fn es_clave_secreta(clave: &str) -> bool {
     let segmentos = segmentos_de(clave);
     segmentos
         .iter()
         .any(|s| SEGMENTOS_SECRETO.contains(&s.as_str()))
-        || segmentos.windows(2).any(|p| p[0] == "api" && p[1] == "key")
+        || segmentos
+            .windows(2)
+            .any(|p| p[1] == "key" && PREFIJOS_KEY_SECRETA.contains(&p[0].as_str()))
 }
 
 /// Parte una clave en segmentos en minúsculas: por `_`, `-` y `.`, y por mayúsculas internas.
@@ -903,6 +916,43 @@ mod tests {
             let r = sonda_secretos_configs(repo.path(), &[]);
             assert_eq!(r.hallazgos.len(), esperado, "{texto:?}: {:?}", r.hallazgos);
             assert!(!serializado(&r).contains("hunter2"), "sin valor: {texto:?}");
+        }
+    }
+
+    #[test]
+    fn configs_secretos_key_solo_cuenta_tras_prefijo_de_secreto() {
+        let casos: [(&str, &str, &str, usize); 12] = [
+            ("a.toml", "primary_key = \"vprim1\"\n", "vprim1", 0),
+            ("c.yaml", "foreign_key: vfor1\n", "vfor1", 0),
+            ("a.toml", "sort_key = \"vsort1\"\n", "vsort1", 0),
+            ("a.toml", "key = \"vsolo1\"\n", "vsolo1", 0),
+            ("a.toml", "secret_key = \"vsec1\"\n", "vsec1", 1),
+            ("a.toml", "token = \"vtok1\"\n", "vtok1", 1),
+            ("a.toml", "api_key = \"${API_KEY}\"\n", "API_KEY", 0),
+            ("c.yaml", "apiKey: vapi1\n", "vapi1", 1),
+            ("a.toml", "signingKey = \"vsign1\"\n", "vsign1", 1),
+            ("a.toml", "tokenizer = \"vbpe1\"\n", "vbpe1", 0),
+            ("a.toml", "max_tokens = 4096\n", "4096", 0),
+            ("a.toml", "auth_key = \"vauth1\"\n", "vauth1", 1),
+        ];
+        for (ruta, texto, valor, esperado) in casos {
+            let repo = repo_con(ruta, texto);
+            let r = sonda_secretos_configs(repo.path(), &[]);
+            assert_eq!(r.hallazgos.len(), esperado, "{texto:?}: {:?}", r.hallazgos);
+            assert!(!serializado(&r).contains(valor), "sin valor: {texto:?}");
+        }
+    }
+
+    #[test]
+    fn configs_dockerfile_key_solo_cuenta_tras_prefijo_de_secreto() {
+        let casos = [("ENV PRIVATE_KEY=vpriv1", 1), ("ENV SORT_KEY=vsort1", 0)];
+        for (linea, esperado) in casos {
+            let texto = format!("FROM python:3.12-slim\n{linea}\nUSER app\n");
+            let repo = repo_con("Dockerfile", &texto);
+            let r = sonda_dockerfile_reglas(repo.path(), &[]);
+            assert_eq!(r.hallazgos.len(), esperado, "{linea}: {:?}", r.hallazgos);
+            assert!(!serializado(&r).contains("vpriv1"), "sin valor: {linea}");
+            assert!(!serializado(&r).contains("vsort1"), "sin valor: {linea}");
         }
     }
 

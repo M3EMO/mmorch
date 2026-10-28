@@ -111,6 +111,8 @@ pub fn elegir(
         Via::Oraculo | Via::Nube => false,
     };
     if prohibida {
+        // `root.toml` exige un equivalente por cada alias de cupo (ver `Config::validar`).
+        // Este caso solo ocurre con una `Config` armada a mano: se devuelve `SinPresupuesto`.
         let alterna = match elegida.via {
             Via::Api if !cupo.lleno => Some(opcion_cupo(
                 &cfg.modelos.organiza,
@@ -507,7 +509,7 @@ mod tests {
             "delega:bulk",
             vec![
                 candidato("modelo-a", Via::Api, 0.7, 0.001),
-                candidato("modelo-b", Via::Api, 0.6, 0.0005),
+                candidato("modelo-b", Via::Api, 0.65, 0.0005),
                 candidato("modelo-c", Via::Api, 0.3, 0.0001),
             ],
         );
@@ -538,6 +540,67 @@ mod tests {
         .expect("hay margen");
         assert_eq!(e.modelo.as_deref(), Some("deepseek-chat"));
         assert_eq!(e.proveedor, Some(Proveedor::Deepseek));
+    }
+
+    #[test]
+    fn route_umbral_wilson_por_defecto_es_0_6() {
+        assert_eq!(Config::default().umbral_wilson, 0.6);
+    }
+
+    #[test]
+    fn route_candidato_de_dos_de_dos_no_entra_con_el_umbral_por_defecto() {
+        let cfg = Config::default();
+        let wilson = crate::track::stats::wilson_inferior(2, 2);
+        assert!((wilson - 0.549).abs() < 1e-3, "wilson {wilson}");
+        let casos = [
+            (Rol::Delega, "delega:bulk", "deepseek-chat"),
+            (Rol::Verifica, "verifica:bulk", "deepseek-reasoner"),
+            (Rol::Juzga, "juzga:bulk", "deepseek-reasoner"),
+        ];
+        for (rol, clave, default) in casos {
+            let pol = politica_con(clave, vec![candidato("barato", Via::Api, wilson, 0.0001)]);
+            let e = elegir_en(&pedido(rol, false), &pol, &uso(0.0, None, 0.0), &cfg)
+                .expect("hay margen");
+            assert_eq!(e.modelo.as_deref(), Some(default), "rol {rol:?}");
+        }
+    }
+
+    #[test]
+    fn route_candidato_de_tres_de_tres_entra_con_el_umbral_por_defecto() {
+        let cfg = Config::default();
+        let wilson = crate::track::stats::wilson_inferior(3, 3);
+        assert!((wilson - 0.646).abs() < 1e-3, "wilson {wilson}");
+        let pol = politica_con(
+            "delega:bulk",
+            vec![candidato("barato", Via::Api, wilson, 0.0001)],
+        );
+        let e = elegir_en(
+            &pedido(Rol::Delega, false),
+            &pol,
+            &uso(0.0, None, 0.0),
+            &cfg,
+        )
+        .expect("hay margen");
+        assert_eq!(e.modelo.as_deref(), Some("barato"));
+    }
+
+    #[test]
+    fn route_candidato_de_tres_de_cuatro_no_entra_con_el_umbral_por_defecto() {
+        let cfg = Config::default();
+        let wilson = crate::track::stats::wilson_inferior(3, 4);
+        assert!((wilson - 0.43).abs() < 1e-2, "wilson {wilson}");
+        let pol = politica_con(
+            "delega:bulk",
+            vec![candidato("barato", Via::Api, wilson, 0.0001)],
+        );
+        let e = elegir_en(
+            &pedido(Rol::Delega, false),
+            &pol,
+            &uso(0.0, None, 0.0),
+            &cfg,
+        )
+        .expect("hay margen");
+        assert_eq!(e.modelo.as_deref(), Some("deepseek-chat"));
     }
 
     #[test]

@@ -33,7 +33,8 @@ pub enum Error {
     /// Un tope impide la elección o la llamada. Sale con código 3. El evento `Gate` ya quedó escrito.
     #[error("{0}")]
     Tope(String),
-    /// Un valor de `root.toml` está fuera de rango, por ejemplo un tope en cero.
+    /// Un valor de `root.toml` está fuera de rango, por ejemplo un tope en cero, o falta un
+    /// campo que su tabla exige. Sale con código 2: es error de configuración del usuario.
     #[error("root.toml inválido: {0}")]
     ConfigValor(String),
     /// Ninguna vía tiene margen. Sale con código 3; el humano sube el tope en `root.toml`.
@@ -69,10 +70,10 @@ impl Error {
             Error::Goal(e) => e.codigo_de_salida(),
             Error::Ficha(e) => e.codigo_de_salida(),
             Error::Oraculo(e) => e.codigo_de_salida(),
+            Error::ConfigValor(_) => 2,
             Error::NoImplementado(_)
             | Error::ConfigLeer { .. }
             | Error::ConfigToml(_)
-            | Error::ConfigValor(_)
             | Error::SinPresupuesto(_)
             | Error::Tope(_)
             | Error::Json(_)

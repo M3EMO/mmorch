@@ -78,6 +78,7 @@ fn llamada(modelo: &str, familia: &str, costo: f64, exito: bool) -> Evento {
     }
 }
 
+/// Doce llamadas por modelo de delega/resumen. `deepseek-lite` es el más barato y no es el default.
 fn sembrar_eventos(home: &Path) {
     let ruta = home.join("eventos.jsonl");
     for i in 0..12 {
@@ -85,7 +86,24 @@ fn sembrar_eventos(home: &Path) {
             .expect("siembra");
         observe::registrar_en(&ruta, &llamada("claude-haiku", "anthropic", 0.01, true))
             .expect("siembra");
+        observe::registrar_en(&ruta, &llamada("deepseek-lite", "deepseek", 0.0002, true))
+            .expect("siembra");
     }
+}
+
+/// `r00t route` para delega/resumen en la API. Devuelve la elección como JSON.
+fn route_delega_resumen(home: &Path) -> Value {
+    let salida = root_con_home(
+        home,
+        &["route", "--rol", "delega", "--tipo", "resumen", "--json"],
+    );
+    assert_eq!(
+        codigo(&salida),
+        0,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    json_de(&salida)
 }
 
 #[test]
@@ -157,17 +175,12 @@ fn aprende_route_lee_la_politica_escrita_y_elige_el_barato() {
         "{}",
         String::from_utf8_lossy(&aprende.stderr)
     );
-    let ruta = root_con_home(
-        home.path(),
-        &["route", "--rol", "delega", "--tipo", "resumen", "--json"],
-    );
-    assert_eq!(
-        codigo(&ruta),
-        0,
-        "{}",
-        String::from_utf8_lossy(&ruta.stderr)
-    );
-    let eleccion = json_de(&ruta);
-    assert_eq!(eleccion["modelo"], "deepseek-chat");
-    assert_eq!(eleccion["via"], "api");
+    // Con la política escrita, Route elige el más barato con Wilson sobre el umbral.
+    let con_politica = route_delega_resumen(home.path());
+    assert_eq!(con_politica["modelo"], "deepseek-lite");
+    assert_eq!(con_politica["via"], "api");
+    // Sin `politica.json`, Route vuelve al default de `[ruteo]`.
+    fs::remove_file(home.path().join(NOMBRE_POLITICA)).expect("borra la política");
+    let sin_politica = route_delega_resumen(home.path());
+    assert_eq!(sin_politica["modelo"], "deepseek-chat");
 }

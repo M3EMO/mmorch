@@ -542,6 +542,53 @@ mod tests {
     }
 
     #[test]
+    fn aprende_con_el_umbral_por_defecto_2_de_2_no_entra_y_3_de_3_si() {
+        let umbral = f64::from(Config::default().umbral_wilson);
+        let dos = repetir(2, |i| {
+            con_ts(
+                fila_construye("haiku", 0.5, true),
+                i as f64,
+                &format!("d{i}"),
+            )
+        });
+        let pol = recalcular(&dos, &[]);
+        assert_eq!(
+            modelo_preferido(&pol, Rol::Construye, "memora", "sonnet", umbral),
+            "sonnet"
+        );
+        let tres = repetir(3, |i| {
+            con_ts(
+                fila_construye("haiku", 0.5, true),
+                i as f64,
+                &format!("t{i}"),
+            )
+        });
+        let pol = recalcular(&tres, &[]);
+        assert_eq!(
+            modelo_preferido(&pol, Rol::Construye, "memora", "sonnet", umbral),
+            "haiku"
+        );
+    }
+
+    #[test]
+    fn aprende_con_el_umbral_por_defecto_3_de_4_no_entra() {
+        let umbral = f64::from(Config::default().umbral_wilson);
+        let mut filas = repetir(3, |i| {
+            con_ts(
+                fila_construye("haiku", 0.5, true),
+                i as f64,
+                &format!("c{i}"),
+            )
+        });
+        filas.push(con_ts(fila_construye("haiku", 0.5, false), 3.0, "c3"));
+        let pol = recalcular(&filas, &[]);
+        assert_eq!(
+            modelo_preferido(&pol, Rol::Construye, "memora", "sonnet", umbral),
+            "sonnet"
+        );
+    }
+
+    #[test]
     fn aprende_sin_datos_da_el_default() {
         let pol = recalcular(&[], &[]);
         assert!(pol.estadisticas.is_empty());
