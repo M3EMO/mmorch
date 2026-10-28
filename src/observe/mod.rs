@@ -2,6 +2,9 @@
 
 pub mod claude;
 pub mod jsonl;
+pub mod uso;
+
+pub use uso::uso;
 
 use std::io;
 use std::path::{Path, PathBuf};

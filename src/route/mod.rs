@@ -31,6 +31,20 @@ pub fn proximo_mes(ahora: f64, offset_s: i32) -> f64 {
         .unix_timestamp() as f64
 }
 
+/// Inicio del mes calendario que contiene `ahora`, en epoch segundos.
+///
+/// `offset_s` es el desfase local en segundos (0 es UTC). El mes empieza el día 1 a las 00:00 local.
+pub fn inicio_mes(ahora: f64, offset_s: i32) -> f64 {
+    let desfase = UtcOffset::from_whole_seconds(offset_s).unwrap_or(UtcOffset::UTC);
+    let local = OffsetDateTime::from_unix_timestamp(ahora.floor() as i64)
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+        .to_offset(desfase);
+    let inicio = Date::from_calendar_date(local.year(), local.month(), 1).unwrap_or(local.date());
+    PrimitiveDateTime::new(inicio, Time::MIDNIGHT)
+        .assume_offset(desfase)
+        .unix_timestamp() as f64
+}
+
 /// Opción de modelo antes del balance.
 struct Opcion {
     via: Via,
@@ -568,6 +582,35 @@ mod tests {
         // UTC-5 el 2026-10-31 18:00 local: el mes cierra 2026-11-01T05:00Z.
         let ahora = PROXIMO_MES_UTC - HORA;
         assert_eq!(proximo_mes(ahora, -18_000), PROXIMO_MES_UTC + 5.0 * HORA);
+    }
+
+    #[test]
+    fn route_inicio_mes_en_utc_es_el_primero_a_las_cero() {
+        // 2026-10-15T12:00:00Z -> 2026-10-01T00:00:00Z
+        assert_eq!(inicio_mes(AHORA, 0), 1_790_812_800.0);
+    }
+
+    #[test]
+    fn route_inicio_mes_en_el_primer_segundo_es_ese_mismo_instante() {
+        let primer_segundo = 1_790_812_800.0;
+        assert_eq!(inicio_mes(primer_segundo, 0), primer_segundo);
+    }
+
+    #[test]
+    fn route_inicio_mes_en_diciembre_no_pasa_de_mes() {
+        // 2026-12-15T12:00:00Z -> 2026-12-01T00:00:00Z
+        let dic = 1_797_336_000.0;
+        assert_eq!(inicio_mes(dic, 0), 1_796_083_200.0);
+    }
+
+    #[test]
+    fn route_inicio_mes_con_offset_corre_el_borde() {
+        // UTC-3: 2026-10-01 00:00 local son las 03:00Z.
+        assert_eq!(inicio_mes(AHORA, -10_800), 1_790_812_800.0 + 3.0 * HORA);
+        // UTC+2: el 2026-11-01 01:00Z ya es el 1 de noviembre local a las 03:00.
+        // El mes empezó el 2026-11-01 00:00 local, que es 2026-10-31T22:00Z.
+        let ahora = PROXIMO_MES_UTC + HORA;
+        assert_eq!(inicio_mes(ahora, 7200), PROXIMO_MES_UTC - 7200.0);
     }
 
     #[test]
