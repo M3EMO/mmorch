@@ -2119,6 +2119,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       },
       "default": {}
     },
+    "propuestas": {
+      "description": "Cambios sugeridos en los roles fijos. Route no los lee.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Propuesta"
+      }
+    },
     "v": {
       "type": "integer",
       "format": "uint32",
@@ -2176,11 +2184,132 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "usd_medio"
       ]
     },
+    "Diferencia": {
+      "description": "Cambio esperado al aplicar la propuesta. `usd` positivo significa que ahorra.",
+      "type": "object",
+      "properties": {
+        "exito": {
+          "description": "Tasa de éxito propuesta menos la actual.",
+          "type": "number",
+          "format": "double"
+        },
+        "usd": {
+          "description": "USD medio actual menos el propuesto.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "exito",
+        "usd"
+      ]
+    },
+    "Evidencia": {
+      "description": "Evidencia de una propuesta: el modelo actual de `root.toml` y el propuesto.",
+      "type": "object",
+      "properties": {
+        "actual": {
+          "$ref": "#/$defs/EvidenciaModelo"
+        },
+        "propuesto": {
+          "$ref": "#/$defs/EvidenciaModelo"
+        }
+      },
+      "required": [
+        "actual",
+        "propuesto"
+      ]
+    },
+    "EvidenciaModelo": {
+      "description": "Estadísticas de un modelo en una tarea, con los ids de las filas que lo sustentan.",
+      "type": "object",
+      "properties": {
+        "exitos": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "filas": {
+          "description": "Ids de las filas válidas que cuentan para este modelo, ordenados.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "modelo": {
+          "type": "string"
+        },
+        "n": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "usd_medio": {
+          "type": "number",
+          "format": "double"
+        },
+        "wilson_inf": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "modelo",
+        "n",
+        "exitos",
+        "wilson_inf",
+        "usd_medio",
+        "filas"
+      ]
+    },
+    "Propuesta": {
+      "description": "Cambio que Aprende sugiere en un rol fijo. El usuario lo aplica a mano en `root.toml`.",
+      "type": "object",
+      "properties": {
+        "diferencia_esperada": {
+          "$ref": "#/$defs/Diferencia"
+        },
+        "evidencia": {
+          "$ref": "#/$defs/Evidencia"
+        },
+        "modelo_actual": {
+          "type": "string"
+        },
+        "modelo_propuesto": {
+          "type": "string"
+        },
+        "rol": {
+          "$ref": "#/$defs/Rol"
+        },
+        "tarea": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "rol",
+        "tarea",
+        "modelo_actual",
+        "modelo_propuesto",
+        "evidencia",
+        "diferencia_esperada"
+      ]
+    },
     "Proveedor": {
       "type": "string",
       "enum": [
         "anthropic",
         "deepseek"
+      ]
+    },
+    "Rol": {
+      "type": "string",
+      "enum": [
+        "planifica",
+        "organiza",
+        "construye",
+        "verifica",
+        "juzga",
+        "delega"
       ]
     },
     "Via": {
@@ -2199,6 +2328,136 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "type": "string",
           "const": "nube"
         }
+      ]
+    }
+  }
+}
+```
+
+### propuesta
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Propuesta",
+  "description": "Cambio que Aprende sugiere en un rol fijo. El usuario lo aplica a mano en `root.toml`.",
+  "type": "object",
+  "properties": {
+    "diferencia_esperada": {
+      "$ref": "#/$defs/Diferencia"
+    },
+    "evidencia": {
+      "$ref": "#/$defs/Evidencia"
+    },
+    "modelo_actual": {
+      "type": "string"
+    },
+    "modelo_propuesto": {
+      "type": "string"
+    },
+    "rol": {
+      "$ref": "#/$defs/Rol"
+    },
+    "tarea": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "rol",
+    "tarea",
+    "modelo_actual",
+    "modelo_propuesto",
+    "evidencia",
+    "diferencia_esperada"
+  ],
+  "$defs": {
+    "Diferencia": {
+      "description": "Cambio esperado al aplicar la propuesta. `usd` positivo significa que ahorra.",
+      "type": "object",
+      "properties": {
+        "exito": {
+          "description": "Tasa de éxito propuesta menos la actual.",
+          "type": "number",
+          "format": "double"
+        },
+        "usd": {
+          "description": "USD medio actual menos el propuesto.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "exito",
+        "usd"
+      ]
+    },
+    "Evidencia": {
+      "description": "Evidencia de una propuesta: el modelo actual de `root.toml` y el propuesto.",
+      "type": "object",
+      "properties": {
+        "actual": {
+          "$ref": "#/$defs/EvidenciaModelo"
+        },
+        "propuesto": {
+          "$ref": "#/$defs/EvidenciaModelo"
+        }
+      },
+      "required": [
+        "actual",
+        "propuesto"
+      ]
+    },
+    "EvidenciaModelo": {
+      "description": "Estadísticas de un modelo en una tarea, con los ids de las filas que lo sustentan.",
+      "type": "object",
+      "properties": {
+        "exitos": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "filas": {
+          "description": "Ids de las filas válidas que cuentan para este modelo, ordenados.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "modelo": {
+          "type": "string"
+        },
+        "n": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "usd_medio": {
+          "type": "number",
+          "format": "double"
+        },
+        "wilson_inf": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "modelo",
+        "n",
+        "exitos",
+        "wilson_inf",
+        "usd_medio",
+        "filas"
+      ]
+    },
+    "Rol": {
+      "type": "string",
+      "enum": [
+        "planifica",
+        "organiza",
+        "construye",
+        "verifica",
+        "juzga",
+        "delega"
       ]
     }
   }

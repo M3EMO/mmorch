@@ -277,14 +277,68 @@ fn aprende_accion(json: bool, replay: bool) -> Result<(), Error> {
         return Ok(());
     }
     let eventos = aprende::leer_eventos(&observe::ruta_eventos())?;
-    let pol = aprende::recalcular(&filas, &eventos);
+    let actuales = aprende::RolesActuales::de_config(&cfg);
+    let pol = aprende::recalcular(&filas, &eventos, &actuales);
     aprende::escribir_politica(&home, &pol).map_err(aprende::ErrorAprende::from)?;
+    registrar_propuestas(&pol)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&pol)?);
     } else {
         imprimir_politica(&pol, f64::from(cfg.umbral_wilson));
+        imprimir_propuestas(&pol.propuestas);
     }
     Ok(())
+}
+
+/// Un `Gate` por propuesta en `eventos.jsonl`. Sin propuestas, no escribe nada.
+fn registrar_propuestas(pol: &route::Politica) -> Result<(), Error> {
+    for p in &pol.propuestas {
+        let mut extra = serde_json::Map::new();
+        extra.insert("rol".into(), serde_json::to_value(p.rol)?);
+        extra.insert("tarea".into(), serde_json::json!(p.tarea));
+        extra.insert("modelo_actual".into(), serde_json::json!(p.modelo_actual));
+        extra.insert(
+            "modelo_propuesto".into(),
+            serde_json::json!(p.modelo_propuesto),
+        );
+        extra.insert("evidencia".into(), serde_json::to_value(&p.evidencia)?);
+        extra.insert(
+            "diferencia".into(),
+            serde_json::to_value(&p.diferencia_esperada)?,
+        );
+        observe::registrar(&observe::evento_gate("aprende", "propuesta", extra))
+            .map_err(observe::ErrorObserve::from)?;
+    }
+    Ok(())
+}
+
+/// Sección «propuestas»: una línea por propuesta, o «sin propuestas».
+fn imprimir_propuestas(propuestas: &[route::politica::Propuesta]) {
+    if propuestas.is_empty() {
+        println!("propuestas: sin propuestas");
+        return;
+    }
+    println!("propuestas:");
+    for p in propuestas {
+        let (act, prop) = (&p.evidencia.actual, &p.evidencia.propuesto);
+        println!(
+            "{}:{}: {} -> {} (éxito {:+.3}, USD {:+.4}; evidencia: {} {}/{}/{:.3}, {} {}/{}/{:.3})",
+            route::politica::nombre_rol(p.rol),
+            p.tarea,
+            p.modelo_actual,
+            p.modelo_propuesto,
+            p.diferencia_esperada.exito,
+            -p.diferencia_esperada.usd,
+            act.modelo,
+            act.n,
+            act.exitos,
+            act.wilson_inf,
+            prop.modelo,
+            prop.n,
+            prop.exitos,
+            prop.wilson_inf,
+        );
+    }
 }
 
 /// Una línea por clave: el mejor modelo con su n, Wilson y USD medio.

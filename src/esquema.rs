@@ -8,6 +8,7 @@ use crate::error::Error;
 use crate::ficha::Revision;
 use crate::observe::uso::UsoMargenes;
 use crate::route::Politica;
+use crate::route::politica::Propuesta;
 use crate::tipos::{
     Accion, Conteo, Eleccion, EstadoRequisito, Evento, Fila, Hallazgo, Informe, NivelItem, Pedido,
     Pendiente, Puntaje, Resumen, SinPresupuesto, Uso, Veredicto,
@@ -34,6 +35,7 @@ const TIPOS: &[&str] = &[
     "uso",
     "sinpresupuesto",
     "politica",
+    "propuesta",
     "usomargenes",
     "replay",
 ];
@@ -60,6 +62,7 @@ pub fn json(tipo: &str) -> Result<String, Error> {
         "uso" => imprimir::<Uso>(),
         "sinpresupuesto" => imprimir::<SinPresupuesto>(),
         "politica" => imprimir::<Politica>(),
+        "propuesta" => imprimir::<Propuesta>(),
         "usomargenes" => imprimir::<UsoMargenes>(),
         "replay" => imprimir::<Replay>(),
         otro => Err(Error::Uso(format!(

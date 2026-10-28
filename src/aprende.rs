@@ -13,7 +13,7 @@ use thiserror::Error as ErrorDerive;
 
 use crate::config::Config;
 use crate::observe::jsonl;
-use crate::route::politica::nombre_rol;
+use crate::route::politica::{Diferencia, Evidencia, EvidenciaModelo, Propuesta, nombre_rol};
 use crate::route::{Candidato, Politica};
 use crate::tipos::{Decision, Estado, Evento, Fila, Proveedor, Rol, TipoEvento, Via};
 use crate::track::stats::wilson_inferior;
@@ -118,10 +118,167 @@ pub fn modelo_preferido(
         .map_or_else(|| default.to_string(), |c| c.modelo.clone())
 }
 
+/// Modelos de `root.toml` para los roles fijos, y el umbral de Wilson con el que se propone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RolesActuales {
+    pub planifica: String,
+    pub organiza: String,
+    pub construye: String,
+    pub umbral_wilson: f64,
+}
+
+impl Default for RolesActuales {
+    fn default() -> Self {
+        RolesActuales {
+            planifica: "opus".into(),
+            organiza: "sonnet".into(),
+            construye: "haiku".into(),
+            umbral_wilson: 0.6,
+        }
+    }
+}
+
+impl RolesActuales {
+    /// Modelos y umbral de `root.toml`.
+    pub fn de_config(cfg: &Config) -> Self {
+        RolesActuales {
+            planifica: cfg.modelos.planifica.clone(),
+            organiza: cfg.modelos.organiza.clone(),
+            construye: cfg.modelos.construye.clone(),
+            umbral_wilson: f64::from(cfg.umbral_wilson),
+        }
+    }
+}
+
 /// Recalcula la política desde las filas y los eventos. Función pura: no escribe y no lee el reloj.
-pub fn recalcular(filas: &[Fila], eventos: &[Evento]) -> Politica {
-    let refs: Vec<&Fila> = filas.iter().collect();
-    politica_de(&refs, eventos)
+///
+/// Las filas se ordenan por id antes de sumar. Así el resultado no depende del orden de entrada.
+pub fn recalcular(filas: &[Fila], eventos: &[Evento], actuales: &RolesActuales) -> Politica {
+    let mut refs: Vec<&Fila> = filas.iter().collect();
+    refs.sort_by(|a, b| a.id.cmp(&b.id).then(a.ts.total_cmp(&b.ts)));
+    let mut pol = politica_de(&refs, eventos);
+    pol.propuestas = propuestas_de(&refs, actuales);
+    pol
+}
+
+/// Filas mínimas por modelo para proponer un cambio. Con menos, no hay comparación.
+const FILAS_PROPUESTA: u32 = 3;
+
+/// Acumulado de un modelo en una tarea de un rol fijo.
+#[derive(Default)]
+struct AcumEvidencia {
+    ids: Vec<String>,
+    exitos: u32,
+    usd: f64,
+}
+
+impl AcumEvidencia {
+    fn evidencia(self, modelo: &str) -> EvidenciaModelo {
+        let n = u32::try_from(self.ids.len()).unwrap_or(u32::MAX);
+        let mut filas = self.ids;
+        filas.sort();
+        EvidenciaModelo {
+            modelo: modelo.into(),
+            n,
+            exitos: self.exitos,
+            wilson_inf: wilson_inferior(self.exitos, n),
+            usd_medio: self.usd / f64::from(n),
+            filas,
+        }
+    }
+}
+
+/// Modelo de `root.toml` para un rol fijo. Solo Planifica, Organiza y Construye llegan aquí.
+fn modelo_actual(rol: Rol, actuales: &RolesActuales) -> &str {
+    match rol {
+        Rol::Planifica => &actuales.planifica,
+        Rol::Organiza => &actuales.organiza,
+        _ => &actuales.construye,
+    }
+}
+
+fn tasa(e: &EvidenciaModelo) -> f64 {
+    f64::from(e.exitos) / f64::from(e.n)
+}
+
+/// Verdadero si `propuesto` acierta más que `actual`, o acierta igual y cuesta menos.
+fn mejora_sobre(propuesto: &EvidenciaModelo, actual: &EvidenciaModelo) -> bool {
+    let (tp, ta) = (tasa(propuesto), tasa(actual));
+    tp > ta || (tp == ta && propuesto.usd_medio < actual.usd_medio)
+}
+
+/// Mayor tasa de éxito, luego menor costo, luego nombre.
+fn orden_propuesta(a: &EvidenciaModelo, b: &EvidenciaModelo) -> std::cmp::Ordering {
+    tasa(b)
+        .total_cmp(&tasa(a))
+        .then(a.usd_medio.total_cmp(&b.usd_medio))
+        .then(a.modelo.cmp(&b.modelo))
+}
+
+// Propuestas para los roles fijos. Route no las lee: el usuario las aplica en `root.toml`.
+// P18b pendiente: "esquemas o arquitecturas de agentes". No se implementa hasta la aclaración.
+fn propuestas_de(filas: &[&Fila], actuales: &RolesActuales) -> Vec<Propuesta> {
+    let mut acum: BTreeMap<(Rol, String), BTreeMap<String, AcumEvidencia>> = BTreeMap::new();
+    for fila in filas.iter().filter(|f| !f.resumen.invalida) {
+        for rol in ROLES_FILA {
+            let Some(modelo) = fila.modelos.get(&rol) else {
+                continue;
+            };
+            let a = acum
+                .entry((rol, fila.tarea.clone()))
+                .or_default()
+                .entry(modelo.clone())
+                .or_default();
+            a.ids.push(fila.id.clone());
+            if exito_de_fila(fila) {
+                a.exitos += 1;
+            }
+            a.usd += fila.resumen.usd_api + fila.resumen.usd_cupo;
+        }
+    }
+    let mut propuestas = Vec::new();
+    for ((rol, tarea), modelos) in acum {
+        let evidencias: BTreeMap<String, EvidenciaModelo> = modelos
+            .into_iter()
+            .map(|(modelo, a)| {
+                let e = a.evidencia(&modelo);
+                (modelo, e)
+            })
+            .collect();
+        let Some(actual) = evidencias.get(modelo_actual(rol, actuales)) else {
+            continue;
+        };
+        if actual.n < FILAS_PROPUESTA {
+            continue;
+        }
+        let mejor = evidencias
+            .values()
+            .filter(|c| {
+                c.modelo != actual.modelo
+                    && c.n >= FILAS_PROPUESTA
+                    && c.wilson_inf >= actuales.umbral_wilson
+                    && mejora_sobre(c, actual)
+            })
+            .min_by(|a, b| orden_propuesta(a, b));
+        let Some(propuesto) = mejor else {
+            continue;
+        };
+        propuestas.push(Propuesta {
+            rol,
+            tarea,
+            modelo_actual: actual.modelo.clone(),
+            modelo_propuesto: propuesto.modelo.clone(),
+            diferencia_esperada: Diferencia {
+                exito: tasa(propuesto) - tasa(actual),
+                usd: actual.usd_medio - propuesto.usd_medio,
+            },
+            evidencia: Evidencia {
+                actual: actual.clone(),
+                propuesto: propuesto.clone(),
+            },
+        });
+    }
+    propuestas
 }
 
 /// Acumulado de un grupo: intentos, éxitos y USD totales, con el via y el proveedor del grupo.
@@ -208,6 +365,7 @@ fn politica_de(filas: &[&Fila], eventos: &[Evento]) -> Politica {
     Politica {
         v: crate::tipos::VERSION,
         estadisticas,
+        propuestas: Vec::new(),
     }
 }
 
@@ -504,7 +662,7 @@ mod tests {
     fn aprende_caso_del_plan_elige_haiku_por_costo() {
         let mut filas = diez("haiku", 0.5);
         filas.extend(diez("sonnet", 2.0));
-        let pol = recalcular(&filas, &[]);
+        let pol = recalcular(&filas, &[], &RolesActuales::default());
         let candidatos = &pol.estadisticas[&Politica::clave(Rol::Construye, "memora")];
         assert_eq!(candidatos.len(), 2);
         let h = candidato_de(&pol, "construye:memora", "haiku");
@@ -534,7 +692,7 @@ mod tests {
             )
         }));
         filas.extend(diez("sonnet", 2.0));
-        let pol = recalcular(&filas, &[]);
+        let pol = recalcular(&filas, &[], &RolesActuales::default());
         assert_eq!(
             modelo_preferido(&pol, Rol::Construye, "memora", "sonnet", 0.5),
             "sonnet"
@@ -551,7 +709,7 @@ mod tests {
                 &format!("d{i}"),
             )
         });
-        let pol = recalcular(&dos, &[]);
+        let pol = recalcular(&dos, &[], &RolesActuales::default());
         assert_eq!(
             modelo_preferido(&pol, Rol::Construye, "memora", "sonnet", umbral),
             "sonnet"
@@ -563,7 +721,7 @@ mod tests {
                 &format!("t{i}"),
             )
         });
-        let pol = recalcular(&tres, &[]);
+        let pol = recalcular(&tres, &[], &RolesActuales::default());
         assert_eq!(
             modelo_preferido(&pol, Rol::Construye, "memora", "sonnet", umbral),
             "haiku"
@@ -581,7 +739,7 @@ mod tests {
             )
         });
         filas.push(con_ts(fila_construye("haiku", 0.5, false), 3.0, "c3"));
-        let pol = recalcular(&filas, &[]);
+        let pol = recalcular(&filas, &[], &RolesActuales::default());
         assert_eq!(
             modelo_preferido(&pol, Rol::Construye, "memora", "sonnet", umbral),
             "sonnet"
@@ -590,7 +748,7 @@ mod tests {
 
     #[test]
     fn aprende_sin_datos_da_el_default() {
-        let pol = recalcular(&[], &[]);
+        let pol = recalcular(&[], &[], &RolesActuales::default());
         assert!(pol.estadisticas.is_empty());
         assert_eq!(
             modelo_preferido(&pol, Rol::Construye, "memora", "sonnet", 0.5),
@@ -604,7 +762,7 @@ mod tests {
             con_ts(fila_construye("haiku", 0.5, true), 1.0, "a"),
             con_ts(fila_construye("haiku", 0.5, false), 2.0, "b"),
         ];
-        let pol = recalcular(&filas, &[]);
+        let pol = recalcular(&filas, &[], &RolesActuales::default());
         assert!(
             (candidato_de(&pol, "construye:memora", "haiku").wilson_inf - 0.164252).abs() < 1e-5
         );
@@ -620,7 +778,7 @@ mod tests {
             con_informe(fila_construye("haiku", 0.5, true), Decision::NoListo),
             con_informe(fila_construye("haiku", 0.5, true), Decision::Listo),
         ];
-        let pol = recalcular(&filas, &[]);
+        let pol = recalcular(&filas, &[], &RolesActuales::default());
         let c = candidato_de(&pol, "construye:memora", "haiku");
         assert_eq!((c.n, c.exitos), (2, 1));
     }
@@ -631,7 +789,7 @@ mod tests {
             fila_construye("haiku", 0.5, true),
             fila_construye("haiku", 0.5, false),
         ];
-        let pol = recalcular(&filas, &[]);
+        let pol = recalcular(&filas, &[], &RolesActuales::default());
         let c = candidato_de(&pol, "construye:memora", "haiku");
         assert_eq!((c.n, c.exitos), (2, 1));
     }
@@ -640,7 +798,7 @@ mod tests {
     fn aprende_filas_invalidas_no_cuentan() {
         let mut mala = fila_construye("haiku", 0.5, true);
         mala.resumen.invalida = true;
-        let pol = recalcular(&[mala], &[]);
+        let pol = recalcular(&[mala], &[], &RolesActuales::default());
         assert!(pol.estadisticas.is_empty());
     }
 
@@ -650,13 +808,13 @@ mod tests {
             tarea: "memora".into(),
             ..Fila::default()
         };
-        let pol = recalcular(&[sin_modelo], &[]);
+        let pol = recalcular(&[sin_modelo], &[], &RolesActuales::default());
         assert!(pol.estadisticas.is_empty());
     }
 
     #[test]
     fn aprende_alias_de_cupo_lleva_proveedor_anthropic() {
-        let pol = recalcular(&diez("haiku", 0.5), &[]);
+        let pol = recalcular(&diez("haiku", 0.5), &[], &RolesActuales::default());
         let c = candidato_de(&pol, "construye:memora", "haiku");
         assert_eq!(c.proveedor, Some(Proveedor::Anthropic));
         assert_eq!(c.via, Via::Cupo);
@@ -685,7 +843,7 @@ mod tests {
                 0.01,
             ));
         }
-        let pol = recalcular(&[], &eventos);
+        let pol = recalcular(&[], &eventos, &RolesActuales::default());
         assert_eq!(
             modelo_preferido(&pol, Rol::Delega, "resumen", "claude-haiku", 0.5),
             "deepseek-chat"
@@ -730,7 +888,7 @@ mod tests {
                 0.1,
             ),
         ];
-        let pol = recalcular(&[], &eventos);
+        let pol = recalcular(&[], &eventos, &RolesActuales::default());
         assert!(pol.estadisticas.is_empty());
     }
 
@@ -747,9 +905,13 @@ mod tests {
             Some(true),
             0.001,
         )];
-        let a = recalcular(&filas, &eventos);
+        let a = recalcular(&filas, &eventos, &RolesActuales::default());
         filas.reverse();
-        let b = recalcular(&filas, &eventos.iter().rev().cloned().collect::<Vec<_>>());
+        let b = recalcular(
+            &filas,
+            &eventos.iter().rev().cloned().collect::<Vec<_>>(),
+            &RolesActuales::default(),
+        );
         assert_eq!(
             serde_json::to_string(&a).unwrap(),
             serde_json::to_string(&b).unwrap()
@@ -759,7 +921,7 @@ mod tests {
     #[test]
     fn aprende_escribir_y_leer_ida_y_vuelta_sin_tmp() {
         let dir = TempDir::new().expect("temp dir");
-        let pol = recalcular(&diez("haiku", 0.5), &[]);
+        let pol = recalcular(&diez("haiku", 0.5), &[], &RolesActuales::default());
         escribir_politica(dir.path(), &pol).expect("escribe");
         let leida = leer_politica(dir.path()).expect("lee");
         assert_eq!(leida, pol);
@@ -881,5 +1043,296 @@ mod tests {
         invertidas.reverse();
         let cfg = cfg_construye_sonnet();
         assert_eq!(replay(&filas, &cfg), replay(&invertidas, &cfg));
+    }
+
+    /// Fila de la tarea "memora" con `modelo` en `rol`, `usd` de cupo, éxito y `id`.
+    fn fila_de_rol(rol: Rol, modelo: &str, usd: f64, exito: bool, id: &str) -> Fila {
+        let mut f = Fila {
+            id: id.into(),
+            tarea: "memora".into(),
+            veredicto: Veredicto {
+                estado: if exito { Estado::Verde } else { Estado::Rojo },
+                ..Veredicto::default()
+            },
+            resumen: Resumen {
+                usd_cupo: usd,
+                ..Resumen::default()
+            },
+            ..Fila::default()
+        };
+        f.modelos.insert(rol, modelo.into());
+        f
+    }
+
+    /// `n` filas de `modelo` en `rol`, de las que `exitos` aciertan. Ids: `prefijo` y un número.
+    fn serie(
+        rol: Rol,
+        prefijo: &str,
+        modelo: &str,
+        n: usize,
+        exitos: usize,
+        usd: f64,
+    ) -> Vec<Fila> {
+        (0..n)
+            .map(|i| fila_de_rol(rol, modelo, usd, i < exitos, &format!("{prefijo}{i:02}")))
+            .collect()
+    }
+
+    /// Única propuesta de la política. Falla si hay otra cantidad.
+    fn unica(pol: &Politica) -> &Propuesta {
+        assert_eq!(pol.propuestas.len(), 1, "propuestas: {:?}", pol.propuestas);
+        &pol.propuestas[0]
+    }
+
+    /// Diez de `haiku` (0.5 USD) y diez de `sonnet` (2 USD) para organiza. Sonnet es el actual.
+    fn organiza_haiku_y_sonnet() -> Vec<Fila> {
+        let mut filas = serie(Rol::Organiza, "h", "haiku", 10, 10, 0.5);
+        filas.extend(serie(Rol::Organiza, "s", "sonnet", 10, 10, 2.0));
+        filas
+    }
+
+    #[test]
+    fn aprende_caso_del_plan_propone_haiku_para_organiza() {
+        let pol = recalcular(&organiza_haiku_y_sonnet(), &[], &RolesActuales::default());
+        let p = unica(&pol);
+        assert_eq!(p.rol, Rol::Organiza);
+        assert_eq!(p.tarea, "memora");
+        assert_eq!(p.modelo_actual, "sonnet");
+        assert_eq!(p.modelo_propuesto, "haiku");
+        let (act, prop) = (&p.evidencia.actual, &p.evidencia.propuesto);
+        assert_eq!((act.modelo.as_str(), act.n, act.exitos), ("sonnet", 10, 10));
+        assert_eq!(
+            (prop.modelo.as_str(), prop.n, prop.exitos),
+            ("haiku", 10, 10)
+        );
+        assert!((prop.wilson_inf - 0.858931).abs() < 1e-5);
+        assert!((act.wilson_inf - 0.858931).abs() < 1e-5);
+        assert!((act.usd_medio - 2.0).abs() < 1e-12);
+        assert!((prop.usd_medio - 0.5).abs() < 1e-12);
+        assert_eq!(
+            prop.filas,
+            (0..10).map(|i| format!("h{i:02}")).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            act.filas,
+            (0..10).map(|i| format!("s{i:02}")).collect::<Vec<_>>()
+        );
+        assert!((p.diferencia_esperada.usd - 1.5).abs() < 1e-12);
+        assert_eq!(p.diferencia_esperada.exito, 0.0);
+    }
+
+    #[test]
+    fn aprende_caso_del_plan_route_organiza_sigue_con_sonnet() {
+        let pol = recalcular(&organiza_haiku_y_sonnet(), &[], &RolesActuales::default());
+        assert_eq!(unica(&pol).modelo_propuesto, "haiku");
+        let pedido = crate::tipos::Pedido {
+            rol: Rol::Organiza,
+            tipo: "memora".into(),
+            checkeable: false,
+            tokens_estimados: 1000,
+        };
+        let uso = crate::tipos::Uso {
+            cupo_bloque_usd: 0.0,
+            cupo_bloque_inicio: None,
+            api_mes_usd: 0.0,
+            nube_mes_usd: 0.0,
+        };
+        let eleccion =
+            crate::route::elegir(&pedido, &pol, &uso, &Config::default(), 1_792_065_600.0, 0)
+                .expect("elige");
+        assert_eq!(eleccion.modelo.as_deref(), Some("sonnet"));
+    }
+
+    #[test]
+    fn aprende_propone_tambien_para_construye() {
+        let mut filas = serie(Rol::Construye, "h", "haiku", 10, 10, 2.0);
+        filas.extend(serie(Rol::Construye, "s", "sonnet", 10, 10, 0.5));
+        let pol = recalcular(&filas, &[], &RolesActuales::default());
+        let p = unica(&pol);
+        assert_eq!(
+            (p.rol, p.modelo_actual.as_str(), p.modelo_propuesto.as_str()),
+            (Rol::Construye, "haiku", "sonnet")
+        );
+    }
+
+    #[test]
+    fn aprende_con_2_filas_por_modelo_no_propone() {
+        let mut filas = serie(Rol::Organiza, "h", "haiku", 2, 2, 0.5);
+        filas.extend(serie(Rol::Organiza, "s", "sonnet", 2, 2, 2.0));
+        let pol = recalcular(&filas, &[], &RolesActuales::default());
+        assert!(pol.propuestas.is_empty());
+    }
+
+    #[test]
+    fn aprende_con_3_y_3_filas_propone() {
+        let mut filas = serie(Rol::Organiza, "h", "haiku", 3, 3, 0.5);
+        filas.extend(serie(Rol::Organiza, "s", "sonnet", 3, 3, 2.0));
+        let pol = recalcular(&filas, &[], &RolesActuales::default());
+        let p = unica(&pol);
+        assert_eq!(p.modelo_propuesto, "haiku");
+        assert_eq!(p.evidencia.propuesto.n, 3);
+    }
+
+    #[test]
+    fn aprende_actual_con_2_filas_y_propuesto_con_10_no_propone() {
+        let mut filas = serie(Rol::Organiza, "s", "sonnet", 2, 2, 2.0);
+        filas.extend(serie(Rol::Organiza, "h", "haiku", 10, 10, 0.5));
+        let pol = recalcular(&filas, &[], &RolesActuales::default());
+        assert!(pol.propuestas.is_empty());
+    }
+
+    #[test]
+    fn aprende_propuesto_que_acierta_menos_no_propone() {
+        // Haiku acierta 19 de 20 (0.95). Sonnet acierta 10 de 10 (1.0).
+        let mut filas = serie(Rol::Organiza, "s", "sonnet", 10, 10, 2.0);
+        filas.extend(serie(Rol::Organiza, "h", "haiku", 20, 19, 0.5));
+        let pol = recalcular(&filas, &[], &RolesActuales::default());
+        assert!(pol.propuestas.is_empty());
+    }
+
+    #[test]
+    fn aprende_propuesto_que_acierta_igual_y_cuesta_igual_o_mas_no_propone() {
+        let mut filas = serie(Rol::Organiza, "s", "sonnet", 10, 10, 2.0);
+        filas.extend(serie(Rol::Organiza, "h", "haiku", 10, 10, 2.0));
+        filas.extend(serie(Rol::Organiza, "o", "opus", 10, 10, 3.0));
+        let pol = recalcular(&filas, &[], &RolesActuales::default());
+        assert!(pol.propuestas.is_empty());
+    }
+
+    #[test]
+    fn aprende_propuesto_que_acierta_mejor_aunque_cueste_mas_propone() {
+        // Sonnet acierta 5 de 10 y cuesta 0.5. Opus acierta 10 de 10 y cuesta 3.
+        let mut filas = serie(Rol::Organiza, "s", "sonnet", 10, 5, 0.5);
+        filas.extend(serie(Rol::Organiza, "o", "opus", 10, 10, 3.0));
+        let pol = recalcular(&filas, &[], &RolesActuales::default());
+        let p = unica(&pol);
+        assert_eq!(p.modelo_propuesto, "opus");
+        assert!((p.diferencia_esperada.exito - 0.5).abs() < 1e-12);
+        assert!((p.diferencia_esperada.usd - -2.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn aprende_filas_invalidas_no_cuentan_para_la_propuesta() {
+        let mut filas = serie(Rol::Organiza, "s", "sonnet", 10, 10, 2.0);
+        let mut haiku = serie(Rol::Organiza, "h", "haiku", 10, 10, 0.5);
+        for f in haiku.iter_mut().take(7) {
+            f.resumen.invalida = true;
+        }
+        filas.extend(haiku);
+        let pol = recalcular(&filas, &[], &RolesActuales::default());
+        let p = unica(&pol);
+        assert_eq!(p.evidencia.propuesto.n, 3);
+        assert_eq!(p.evidencia.propuesto.filas, vec!["h07", "h08", "h09"]);
+    }
+
+    #[test]
+    fn aprende_varios_candidatos_gana_la_tasa_mas_alta() {
+        // "barato" acierta 19 de 20 y cuesta 0.1. "alto" acierta 20 de 20 y cuesta 0.9.
+        let mut filas = serie(Rol::Organiza, "s", "sonnet", 10, 10, 2.0);
+        filas.extend(serie(Rol::Organiza, "b", "barato", 20, 19, 0.1));
+        filas.extend(serie(Rol::Organiza, "a", "alto", 20, 20, 0.9));
+        let pol = recalcular(&filas, &[], &RolesActuales::default());
+        assert_eq!(unica(&pol).modelo_propuesto, "alto");
+    }
+
+    #[test]
+    fn aprende_empate_de_tasa_gana_el_mas_barato() {
+        let mut filas = serie(Rol::Organiza, "s", "sonnet", 10, 10, 2.0);
+        filas.extend(serie(Rol::Organiza, "a", "alfa", 10, 10, 0.9));
+        filas.extend(serie(Rol::Organiza, "z", "zeta", 10, 10, 0.5));
+        let pol = recalcular(&filas, &[], &RolesActuales::default());
+        assert_eq!(unica(&pol).modelo_propuesto, "zeta");
+    }
+
+    #[test]
+    fn aprende_empate_de_tasa_y_costo_gana_el_nombre_menor() {
+        let mut filas = serie(Rol::Organiza, "s", "sonnet", 10, 10, 2.0);
+        filas.extend(serie(Rol::Organiza, "z", "zeta", 10, 10, 0.5));
+        filas.extend(serie(Rol::Organiza, "b", "beta", 10, 10, 0.5));
+        let pol = recalcular(&filas, &[], &RolesActuales::default());
+        assert_eq!(unica(&pol).modelo_propuesto, "beta");
+    }
+
+    #[test]
+    fn aprende_propuestas_son_deterministas_en_distinto_orden() {
+        let mut filas = organiza_haiku_y_sonnet();
+        filas.extend(serie(Rol::Organiza, "b", "barato", 12, 11, 0.1));
+        let a = recalcular(&filas, &[], &RolesActuales::default());
+        filas.reverse();
+        let b = recalcular(&filas, &[], &RolesActuales::default());
+        assert!(!a.propuestas.is_empty());
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn aprende_umbral_de_roles_actuales_veta_la_propuesta() {
+        // Haiku 3 de 3 tiene Wilson 0.646. Con umbral 0.7 no alcanza.
+        let mut filas = serie(Rol::Organiza, "s", "sonnet", 3, 3, 2.0);
+        filas.extend(serie(Rol::Organiza, "h", "haiku", 3, 3, 0.5));
+        let actuales = RolesActuales {
+            umbral_wilson: 0.7,
+            ..RolesActuales::default()
+        };
+        assert!(recalcular(&filas, &[], &actuales).propuestas.is_empty());
+    }
+
+    #[test]
+    fn aprende_roles_actuales_leen_root_toml() {
+        let mut cfg = Config::default();
+        cfg.modelos.organiza = "haiku".into();
+        cfg.umbral_wilson = 0.7;
+        let actuales = RolesActuales::de_config(&cfg);
+        assert_eq!(actuales.organiza, "haiku");
+        assert_eq!(actuales.umbral_wilson, f64::from(0.7_f32));
+    }
+
+    #[test]
+    fn aprende_politica_con_propuestas_ida_y_vuelta() {
+        let dir = TempDir::new().expect("temp dir");
+        let pol = recalcular(&organiza_haiku_y_sonnet(), &[], &RolesActuales::default());
+        assert!(!pol.propuestas.is_empty());
+        escribir_politica(dir.path(), &pol).expect("escribe");
+        assert_eq!(leer_politica(dir.path()).expect("lee"), pol);
+    }
+
+    #[test]
+    fn aprende_politica_vieja_sin_propuestas_se_lee() {
+        let dir = TempDir::new().expect("temp dir");
+        fs::write(
+            dir.path().join(NOMBRE_POLITICA),
+            r#"{"v":1,"estadisticas":{}}"#,
+        )
+        .expect("escribe");
+        let pol = leer_politica(dir.path()).expect("lee");
+        assert!(pol.propuestas.is_empty());
+    }
+
+    #[test]
+    fn aprende_propuesta_se_serializa_con_sus_campos() {
+        // Los tipos de propuesta se construyen a mano desde fuera del módulo de política.
+        let ev = EvidenciaModelo {
+            modelo: "m".into(),
+            n: 3,
+            exitos: 3,
+            wilson_inf: 0.646,
+            usd_medio: 1.0,
+            filas: vec!["a".into()],
+        };
+        let p = Propuesta {
+            rol: Rol::Construye,
+            tarea: "memora".into(),
+            modelo_actual: "haiku".into(),
+            modelo_propuesto: "m".into(),
+            evidencia: Evidencia {
+                actual: ev.clone(),
+                propuesto: ev,
+            },
+            diferencia_esperada: Diferencia {
+                exito: 0.0,
+                usd: 0.5,
+            },
+        };
+        let texto = serde_json::to_string(&p).expect("serializa");
+        assert!(texto.contains("\"modelo_propuesto\":\"m\""));
     }
 }

@@ -184,3 +184,148 @@ fn aprende_route_lee_la_politica_escrita_y_elige_el_barato() {
     let sin_politica = route_delega_resumen(home.path());
     assert_eq!(sin_politica["modelo"], "deepseek-chat");
 }
+
+/// Fila de `rol` con `modelo` y `usd` de cupo. Éxito verde.
+fn fila_de(rol: Rol, id: &str, modelo: &str, usd: f64) -> Fila {
+    let mut f = Fila {
+        id: id.into(),
+        tarea: "memora".into(),
+        veredicto: root::tipos::Veredicto {
+            estado: Estado::Verde,
+            ..Default::default()
+        },
+        resumen: root::tipos::Resumen {
+            usd_cupo: usd,
+            ..Default::default()
+        },
+        ..Fila::default()
+    };
+    f.modelos.insert(rol, modelo.into());
+    f
+}
+
+/// Diez de haiku (0.5 USD) y diez de sonnet (2 USD) para organiza, todas con éxito.
+fn sembrar_organiza(home: &Path) {
+    let ruta = home.join("runs.jsonl");
+    for i in 0..10 {
+        track::agregar_en(
+            &ruta,
+            &fila_de(Rol::Organiza, &format!("h{i}"), "haiku", 0.5),
+        )
+        .expect("siembra una fila");
+        track::agregar_en(
+            &ruta,
+            &fila_de(Rol::Organiza, &format!("s{i}"), "sonnet", 2.0),
+        )
+        .expect("siembra una fila");
+    }
+}
+
+/// Eventos `Gate` con `fase == "propuesta"` en `eventos.jsonl` de `home`.
+fn gates_propuesta(home: &Path) -> Vec<Evento> {
+    root::aprende::leer_eventos(&home.join("eventos.jsonl"))
+        .expect("lee eventos")
+        .into_iter()
+        .filter(|ev| ev.tipo == TipoEvento::Gate && ev.fase == "propuesta")
+        .collect()
+}
+
+#[test]
+fn aprende_json_incluye_propuesta_y_registra_un_gate() {
+    let home = TempDir::new().expect("temp dir");
+    sembrar_organiza(home.path());
+    let salida = root_con_home(home.path(), &["aprende", "--json"]);
+    assert_eq!(
+        codigo(&salida),
+        0,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let json = json_de(&salida);
+    let propuestas = json["propuestas"].as_array().expect("hay propuestas");
+    assert_eq!(propuestas.len(), 1);
+    assert_eq!(propuestas[0]["modelo_propuesto"], "haiku");
+    assert_eq!(propuestas[0]["rol"], "organiza");
+    let gates = gates_propuesta(home.path());
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].corrida, "aprende");
+    assert_eq!(gates[0].extra["rol"], "organiza");
+    assert_eq!(gates[0].extra["tarea"], "memora");
+    assert_eq!(gates[0].extra["modelo_propuesto"], "haiku");
+}
+
+#[test]
+fn aprende_texto_imprime_la_propuesta() {
+    let home = TempDir::new().expect("temp dir");
+    sembrar_organiza(home.path());
+    let salida = root_con_home(home.path(), &["aprende"]);
+    assert_eq!(codigo(&salida), 0);
+    let texto = String::from_utf8_lossy(&salida.stdout);
+    assert!(texto.contains("propuestas"), "{texto}");
+    assert!(
+        texto.contains("organiza:memora: sonnet -> haiku"),
+        "{texto}"
+    );
+    assert!(!texto.contains("sin propuestas"), "{texto}");
+    assert_eq!(gates_propuesta(home.path()).len(), 1);
+}
+
+#[test]
+fn aprende_sin_propuestas_no_registra_gate_y_lo_dice() {
+    let home = TempDir::new().expect("temp dir");
+    let ruta = home.path().join("runs.jsonl");
+    for i in 0..2 {
+        track::agregar_en(
+            &ruta,
+            &fila_de(Rol::Organiza, &format!("h{i}"), "haiku", 0.5),
+        )
+        .expect("siembra una fila");
+        track::agregar_en(
+            &ruta,
+            &fila_de(Rol::Organiza, &format!("s{i}"), "sonnet", 2.0),
+        )
+        .expect("siembra una fila");
+    }
+    let salida = root_con_home(home.path(), &["aprende"]);
+    assert_eq!(codigo(&salida), 0);
+    let texto = String::from_utf8_lossy(&salida.stdout);
+    assert!(texto.contains("sin propuestas"), "{texto}");
+    assert!(gates_propuesta(home.path()).is_empty());
+}
+
+#[test]
+fn aprende_replay_no_registra_gate_ni_escribe_propuestas() {
+    let home = TempDir::new().expect("temp dir");
+    sembrar_organiza(home.path());
+    let salida = root_con_home(home.path(), &["aprende", "--replay", "--json"]);
+    assert_eq!(codigo(&salida), 0);
+    assert!(gates_propuesta(home.path()).is_empty());
+    assert!(!home.path().join(NOMBRE_POLITICA).exists());
+}
+
+#[test]
+fn aprende_route_organiza_sigue_con_sonnet_aunque_haya_propuesta() {
+    let home = TempDir::new().expect("temp dir");
+    sembrar_organiza(home.path());
+    let aprende = root_con_home(home.path(), &["aprende"]);
+    assert_eq!(codigo(&aprende), 0);
+    let salida = root_con_home(
+        home.path(),
+        &["route", "--rol", "organiza", "--tipo", "memora", "--json"],
+    );
+    assert_eq!(
+        codigo(&salida),
+        0,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    assert_eq!(json_de(&salida)["modelo"], "sonnet");
+}
+
+#[test]
+fn aprende_esquema_propuesta_sale_con_0() {
+    let home = TempDir::new().expect("temp dir");
+    let salida = root_con_home(home.path(), &["esquema", "propuesta"]);
+    assert_eq!(codigo(&salida), 0);
+    assert!(json_de(&salida)["properties"]["evidencia"].is_object());
+}
