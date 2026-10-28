@@ -562,7 +562,7 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
 - **Validate**: `r00t oraculo evaluar --tarea memora --repo .../memora-sdlc` marca `Ausente` los módulos que el SDLC no construyó (el SDLC construyó 2 de 9 módulos, según `docs/contexto/mapa.md`). memora-ecc queda con todos `Cumplido`.
 
 ### Tarea 9d: Entrega y escenarios de usuario
-- **Action**: `oracle/entrega.rs` clona el repo en un contenedor limpio y corre `[entrega].instalar` y `[entrega].correr`. Verifica `[entrega].archivos`. Construye el `Dockerfile` del proyecto y lo arranca, y verifica que corre sin root. Después corre cada `[[escenario]]` contra el producto levantado. Un escenario es un flujo real de usuario, como conectar un cliente, guardar un valor, reiniciar y leerlo. Es lo que un PM prueba a mano antes de aprobar.
+- **Action**: `oracle/entrega.rs` clona el repo en un contenedor limpio y corre `[entrega].instalar` y `[entrega].correr`. Verifica `[entrega].archivos`. Construye el `Dockerfile` del proyecto y lo arranca, y verifica que corre sin root. Hoy solo verifica el Dockerfile en forma estática: construirlo necesita red, y eso espera a P17. Después corre cada `[[escenario]]` contra el producto levantado. Un escenario es un flujo real de usuario, como conectar un cliente, guardar un valor, reiniciar y leerlo. Es lo que un PM prueba a mano antes de aprobar.
 - **Validate**: `cargo test --test entrega` (un repo sin README da un hallazgo; un Dockerfile que corre como root da un hallazgo; un escenario que sale con código 1 deja su requisito en `Parcial`)
 
 ### Tarea 9e: Calidad de las pruebas del proyecto
@@ -909,6 +909,8 @@ Gates humanos que frenan el resto:
 - **G2, rúbricas.** Opus redacta las nueve rúbricas. El usuario las aprueba. Frena: 12, 13 y 16.
 - **G3, calificación a ciegas.** El usuario califica los 6 paquetes de la Tarea 12b. Frena: la métrica de acuerdo de 12b.
 - **P15, Colab.** No frena nada. Sin aprobación, los tests de entorno quedan `Pendiente`.
+- **P16, herramientas en la imagen.** Frena la calibración (Tarea 12) de seguridad, estructura, pruebas y entrega. No frena 14, 15, 17 ni 18.
+- **P17, construir el Dockerfile.** Frena la parte dinámica de la 9d. No frena nada más.
 
 Las Tareas 12, 12b, 13, 13b, 16 y 19 van después de G1 y G2. Opus redacta G1 y G2 en otra sesión, mientras Sonnet construye la lista de arriba.
 
@@ -933,6 +935,30 @@ Respuestas a las preguntas de Sonnet al cerrar las Tareas 7f, 6b y 9f. Los cambi
   - Un 503 con `eventos.jsonl` sin permiso de escritura da `ErrorNoRegistrado`, y el mensaje contiene el 503.
   - `r00t oraculo evaluar` sin ficha escribe "sin ficha" una sola vez en stderr.
 
+**Avance (2026-10-27):** Sonnet cerró 9f2, 9, 9b, 9c, 9d, 9e y 10, con 583 tests verdes (commit c9f398c). Hay tres límites conocidos:
+- La imagen `oraculo-rust` no trae `clippy`, `gitleaks`, `cargo-audit`, `hadolint` ni `cargo-mutants`. Sus sondas están probadas con salidas de fixture, y con la imagen real dan `SinVeredicto`. Ninguna corrió de verdad (P16).
+- La 9d verifica el Dockerfile solo en forma estática (P17).
+- memora y brasa siguen sin evaluarse hasta G1.
+
+## Desempates técnicos 4 (Opus, 2026-10-27, después de la Tarea 10)
+
+Respuestas a las preguntas 3 a 6 de Sonnet y a sus notas. Los cambios de código van en la Tarea 10b. Las preguntas 1 y 2 tocan la red: van al usuario como P16 y P17.
+
+3. **Nivel 0 sin evidencia.** Queda en `faltantes`, no vale 0. Toda ancla exige evidencia citada, también la del nivel 0. Un 0 sin evidencia cobra al producto un defecto que nadie probó: es un rojo falso. En `faltantes`, el ítem queda sin veredicto y `Informe.confianza` lo lista. Un 0 por ausencia ("no hay logs") cita el lugar donde debería estar, por ejemplo el `main.rs` o el módulo del mapa. Las anclas de nivel 0 de las rúbricas reales (G2) dirán qué evidencia prueba una ausencia.
+4. **Doble penalización.** Un defecto da un solo hallazgo. Un Dockerfile sin `USER` es un hallazgo de Entrega, emitido por la 9d. La tabla de rúbricas asigna el CIS Docker Benchmark a Entrega, y la Tarea 12 ya lo inyecta como defecto de entrega. La 9b deja de emitir la regla de `USER`, y conserva la imagen base sin versión y el secreto en `ENV` o `ARG`. La regla general: dos sondas que miran el mismo `archivo:línea` con la misma regla emiten un hallazgo, y la sonda dueña es la que nombra la tabla de rúbricas.
+5. **Falso positivo de secretos.** Sí: se afina antes de la Tarea 12. La clave se parte en segmentos por `_`, `-`, `.` y por mayúsculas internas. Hay secreto solo si un segmento es igual a `password`, `passwd`, `secret`, `token`, `apikey` o `key`, o si dos segmentos seguidos forman `api_key`. El valor debe ser literal: `${VAR}`, `<...>` y un valor vacío no cuentan. El caso viene de una revisión, no de los datos de la calibración. Por eso afinarlo no contamina la medición de la Tarea 12.
+6. **Elección de juez inválida.** Sí: va en una variante propia, `ErrorOraculo::Eleccion(String)`, con código 2. Una elección sin razonamiento, sin API o sin modelo es un error de configuración de `root.toml` o de Route, no una falla de infraestructura. Sigue sin dar veredicto. `ErrorOraculo::Infra` queda para podman, timeouts y E/S.
+7. **Constante compartida.** Sí. `perfiles::rust` exporta `pub const REGLA_CICLO: &str = "ciclo de módulos"`. La sonda arma el detalle con esa constante, y el juez la usa para el tope. Un test de integración corre la sonda sobre un fixture con un ciclo y comprueba que el juez topa `diseno.modularidad` en 1. Si alguien cambia el texto, ese test falla.
+8. **Juez con extractos.** Se acepta para el hito 1. El juez recibe extractos con número de línea elegidos por el mapa, en lugar de abrir archivos con herramientas. `proveedores::llamar` no tiene bucle de herramientas, y agregarlo excede el hito. El límite: el juez no ve lo que el mapa no señala. La Tarea 12b mide ese costo con los defectos reales conocidos.
+
+### Tarea 10b: Ajustes a las Tareas 9b, 9d y 10
+- **Action**: los desempates 4 a 7 de arriba.
+- **Validate**: `cargo test`:
+  - Un Dockerfile sin `USER` da exactamente 1 hallazgo en la evaluación entera, de dimensión Entrega.
+  - `tokenizer = "bpe"` da 0 hallazgos. `auth_token = "abc123"` da 1. `api_key = "${API_KEY}"` da 0.
+  - Una elección de juez sin razonamiento da `ErrorOraculo::Eleccion` y sale con código 2.
+  - La sonda de arquitectura sobre un fixture con un ciclo hace que el juez tope `diseno.modularidad` en 1.
+
 **Preguntas abiertas (sin responder)**
 - **P12b.** Respondiste "P12 si" a una pregunta con dos opciones. ¿Cuál elegís?
   - a) La descarga acepta solo crates.io y PyPI. Hoy rige esta.
@@ -943,4 +969,16 @@ Respuestas a las preguntas de Sonnet al cerrar las Tareas 7f, 6b y 9f. Los cambi
   - a) No: los tests quedan `Pendiente` y vos los corrés a mano cuando quieras.
   - b) Sí, solo con T4, y un agente lo corre.
   - c) Sí, con A100 o H100, y un agente lo corre. Cada corrida pide tu aprobación.
+- **P16. Herramientas en la imagen.** `oraculo-rust` no trae `clippy`, `gitleaks`, `cargo-audit`, `hadolint` ni `cargo-mutants`. Sin ellas, cuatro dimensiones salen `SinVeredicto`: seguridad, estructura, pruebas y la parte de hadolint de entrega. Instalarlas necesita red al construir la imagen, no al evaluar. ¿Qué elegís?
+  - a) Instalarlas en la imagen, con versiones fijas y hash verificado. La red se usa una vez, al construir la imagen. Costo: la imagen crece unos cientos de MB, y compilar `cargo-audit` y `cargo-mutants` tarda varios minutos. Riesgo: confiar en esas cinco herramientas. Las versiones fijas y los hashes acotan ese riesgo.
+  - b) No instalarlas. Costo: las cuatro dimensiones quedan `SinVeredicto`, la Tarea 12 no puede calibrarlas y no entran a `global`. El criterio "nueve dimensiones" de la Tarea 13 no se cumple.
+  - c) Correrlas en el host, fuera del contenedor. Riesgo: `cargo-mutants` compila y corre el código del builder en tu máquina, con red y sin aislamiento. No lo recomiendo.
+  
+  Mi recomendación es a): es la única opción que mide las nueve dimensiones sin correr código ajeno fuera del contenedor.
+- **P17. Construir el Dockerfile del proyecto.** La 9d hoy solo lo revisa en forma estática. ¿Qué elegís?
+  - a) Seguir solo con la revisión estática. Costo: nada nuevo. Límite: Root no sabe si la imagen construye ni si arranca, y la Tarea 9d queda incompleta.
+  - b) Construirlo con red. Riesgo: cada `RUN` del Dockerfile es código del builder, y correría con red. Puede sacar datos o bajar cualquier cosa. Es más que la fase de descarga, que no corre scripts.
+  - c) Bajar con red solo la imagen base (`FROM`), sin correr nada, y construir con `--network none`. Un `RUN` que necesita red falla, y la construcción queda `Pendiente` con su motivo: no se cobra al producto. Costo: la red baja imágenes de un registro, igual que en la fase de descarga. Límite: un Dockerfile que instala paquetes con `apt-get` queda `Pendiente`.
+  
+  Mi recomendación es c): prueba la construcción sin correr código ajeno con red.
 
