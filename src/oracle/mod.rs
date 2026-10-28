@@ -194,6 +194,13 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
     })
 }
 
+/// Carga la tarea `nombre` de `ROOT_HOME` y la evalúa con las opciones por defecto.
+/// La usan `r00t oraculo evaluar` y la herramienta MCP `root_evaluar`.
+pub fn evaluar_por_nombre(nombre: &str, repo: &Path) -> Result<Veredicto, ErrorOraculo> {
+    let tarea = Tarea::cargar(nombre)?;
+    evaluar(repo, &tarea, &OpcionesOraculo::default())
+}
+
 /// Lee el spec de la tarea y exige una ficha válida. Va antes de copiar o descargar nada.
 fn verificar_ficha(tarea: &Tarea) -> Result<(), ErrorOraculo> {
     let ruta = tarea.dir.join(&tarea.spec);

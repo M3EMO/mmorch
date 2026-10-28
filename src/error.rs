@@ -60,6 +60,9 @@ pub enum Error {
     Ficha(#[from] ErrorFicha),
     #[error(transparent)]
     Aprende(#[from] ErrorAprende),
+    /// Error de E/S de stdin o stdout en `r00t mcp`. Sale con código 3.
+    #[error("error de E/S del servidor MCP: {0}")]
+    Mcp(io::Error),
 }
 
 impl Error {
@@ -82,6 +85,7 @@ impl Error {
             | Error::Importar(_)
             | Error::Proveedor(_)
             | Error::Rubrica(_)
+            | Error::Mcp(_)
             | Error::Aprende(_) => 3,
         }
     }

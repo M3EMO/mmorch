@@ -10,7 +10,7 @@ use serde_json::{Map, json};
 use crate::config::{Config, root_home};
 use crate::error::Error;
 use crate::observe::{self, uso};
-use crate::proveedores::{self, Prompt};
+use crate::proveedores::{self, Prompt, Respuesta};
 use crate::route::politica::nombre_rol;
 use crate::route::{self, Politica};
 use crate::tipos::{Eleccion, Pedido, Proveedor, Rol, SinPresupuesto, Uso, Via};
@@ -32,6 +32,13 @@ pub fn cargar_politica(ruta: &Path) -> Result<Politica, Error> {
 
 /// `r00t route`: imprime la elección. Con `SinPresupuesto` registra un `Gate` y sale con 3.
 pub fn route(json: bool, rol: Rol, tipo: &str, checkeable: bool, tokens: u32) -> Result<(), Error> {
+    let eleccion = rutear(rol, tipo, checkeable, tokens)?;
+    imprimir_eleccion(json, &eleccion)
+}
+
+/// Elige la vía y el modelo de un pedido. Con `SinPresupuesto` registra el `Gate`.
+/// La usan `r00t route` y la herramienta MCP `root_route`.
+pub fn rutear(rol: Rol, tipo: &str, checkeable: bool, tokens: u32) -> Result<Eleccion, Error> {
     let home = root_home();
     let cfg = Config::cargar(&home.join("root.toml"))?;
     let pol = cargar_politica(&home.join("politica.json"))?;
@@ -44,11 +51,10 @@ pub fn route(json: bool, rol: Rol, tipo: &str, checkeable: bool, tokens: u32) ->
         checkeable,
         tokens_estimados: tokens,
     };
-    let eleccion = elegir_o_gate(&pedido, &pol, &gasto, &cfg, ahora, offset, CORRIDA_ROUTE)?;
-    imprimir_eleccion(json, &eleccion)
+    elegir_o_gate(&pedido, &pol, &gasto, &cfg, ahora, offset, CORRIDA_ROUTE)
 }
 
-/// `r00t llama`: rutea, chequea el costo y llama. Devuelve el código de `imprimir_para_cli`.
+/// `r00t llama`: lee el prompt, rutea, chequea el costo y llama. Devuelve el código de `imprimir_para_cli`.
 pub fn llama(
     rol: Rol,
     tipo: &str,
@@ -56,15 +62,38 @@ pub fn llama(
     corrida: &str,
     max_tokens: u32,
 ) -> Result<u8, Error> {
-    let home = root_home();
-    let cfg = Config::cargar(&home.join("root.toml"))?;
-    let pol = cargar_politica(&home.join("politica.json"))?;
     let usuario = fs::read_to_string(prompt_file).map_err(|e| {
         Error::Uso(format!(
             "no se pudo leer --prompt-file {}: {e}",
             prompt_file.display()
         ))
     })?;
+    let resultado = llamar_con_chequeo(rol, tipo, usuario, corrida, max_tokens);
+    let mut out = io::stdout().lock();
+    let mut err = io::stderr().lock();
+    match resultado {
+        Err(Error::Proveedor(e)) => Ok(proveedores::imprimir_para_cli(Err(e), &mut out, &mut err)),
+        Err(otro) => Err(otro),
+        Ok(respuesta) => Ok(proveedores::imprimir_para_cli(
+            Ok(respuesta),
+            &mut out,
+            &mut err,
+        )),
+    }
+}
+
+/// Rutea, chequea el costo y llama. Sin vía API, tope o precio, no hay llamada: sale `Err`.
+/// Los errores del proveedor llegan como `Error::Proveedor`. La usan `r00t llama` y `root_llama`.
+pub fn llamar_con_chequeo(
+    rol: Rol,
+    tipo: &str,
+    usuario: String,
+    corrida: &str,
+    max_tokens: u32,
+) -> Result<Respuesta, Error> {
+    let home = root_home();
+    let cfg = Config::cargar(&home.join("root.toml"))?;
+    let pol = cargar_politica(&home.join("politica.json"))?;
     let ahora = observe::ahora().0;
     let offset = uso::offset_local();
     let gasto = uso_actual(&cfg, ahora, offset)?;
@@ -95,12 +124,7 @@ pub fn llama(
         max_tokens,
         fase: "llama".into(),
     };
-    let resultado = proveedores::llamar(&eleccion, &prompt, corrida);
-    Ok(proveedores::imprimir_para_cli(
-        resultado,
-        &mut io::stdout().lock(),
-        &mut io::stderr().lock(),
-    ))
+    Ok(proveedores::llamar(&eleccion, &prompt, corrida)?)
 }
 
 /// Gasto actual de `eventos.jsonl`. Un log ilegible es error: sin gasto no se puede decidir.

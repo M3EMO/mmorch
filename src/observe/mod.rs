@@ -116,6 +116,15 @@ pub fn evento_manual(corrida: &str, tipo: TipoEvento, detalle: Option<&str>) -> 
     }
 }
 
+/// Registra un evento manual en `eventos.jsonl` de `ROOT_HOME`. La usan `observa evento` y `root_registrar`.
+pub fn registrar_manual(
+    corrida: &str,
+    tipo: TipoEvento,
+    detalle: Option<&str>,
+) -> Result<(), ErrorObserve> {
+    registrar(&evento_manual(corrida, tipo, detalle)).map_err(ErrorObserve::from)
+}
+
 /// Evento `Gate`: un tope o un bloqueo que Root decidió. Lleva la fase y los datos en `extra`.
 pub fn evento_gate(corrida: &str, fase: &str, extra: serde_json::Map<String, Value>) -> Evento {
     let mut ev = evento_manual(corrida, TipoEvento::Gate, None);

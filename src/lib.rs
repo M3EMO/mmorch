@@ -8,6 +8,7 @@ pub mod esquema;
 pub mod ficha;
 pub mod goal;
 pub mod importar;
+pub mod mcp;
 pub mod observe;
 pub mod oracle;
 pub mod proveedores;
@@ -18,6 +19,7 @@ pub mod track;
 pub use cli::Cli;
 pub use error::Error;
 
+use std::io;
 use std::path::Path;
 
 use cli::{
@@ -25,7 +27,6 @@ use cli::{
     ViaRegistro,
 };
 use ficha::{ContextoRevision, ErrorFicha, JuezProveedor, Revision};
-use oracle::OpcionesOraculo;
 use oracle::tarea::Tarea;
 use tipos::{Eleccion, Estado, Fila, Proveedor, Via};
 
@@ -57,14 +58,20 @@ pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
             corrida,
             max_tokens,
         } => route::comando::llama((*rol).into(), tipo, prompt_file, corrida, *max_tokens),
+        Comando::Mcp => {
+            let entrada = io::stdin();
+            let salida = io::stdout();
+            mcp::servir(entrada.lock(), salida.lock())
+                .map(|()| 0)
+                .map_err(Error::Mcp)
+        }
         _ => ejecutar_sin_codigo(cli).map(|()| 0),
     }
 }
 
 /// `oraculo evaluar`: imprime el veredicto. El código de salida sale de su estado.
 fn oraculo_evaluar(json: bool, nombre: &str, repo: &Path) -> Result<u8, Error> {
-    let tarea = Tarea::cargar(nombre)?;
-    let veredicto = oracle::evaluar(repo, &tarea, &OpcionesOraculo::default())?;
+    let veredicto = oracle::evaluar_por_nombre(nombre, repo)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&veredicto)?);
     } else {
@@ -390,8 +397,7 @@ fn observa(json: bool, accion: &ObservaAccion) -> Result<(), Error> {
             tipo,
             detalle,
         } => {
-            let ev = observe::evento_manual(corrida, (*tipo).into(), detalle.as_deref());
-            observe::registrar(&ev).map_err(observe::ErrorObserve::from)?;
+            observe::registrar_manual(corrida, (*tipo).into(), detalle.as_deref())?;
             imprimir_registrados(json, 1);
         }
         ObservaAccion::Resumen { corrida } => {
