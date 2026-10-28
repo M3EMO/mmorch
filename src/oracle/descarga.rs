@@ -5,6 +5,7 @@
 
 pub mod inventario;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -258,14 +259,26 @@ pub fn preparar(
     home: &Path,
     timeout: Duration,
 ) -> Result<Preparacion, ErrorOraculo> {
+    preparar_con_imagenes(repo, tarea, home, timeout).map(|(preparacion, _)| preparacion)
+}
+
+/// Como `preparar`, y además devuelve las imágenes base que la fase vio (con su problema, si lo hubo).
+pub fn preparar_con_imagenes(
+    repo: &Path,
+    tarea: &Tarea,
+    home: &Path,
+    timeout: Duration,
+) -> Result<(Preparacion, Vec<ImagenBase>), ErrorOraculo> {
     let inv = inventario::inventariar(repo)?;
     registrar_inventario(home, tarea, &inv)?;
     if !inv.rechazos.is_empty() {
-        return Ok(Preparacion::SinVeredicto(hallazgos_de_rechazos(
-            &inv.rechazos,
-        )));
+        return Ok((
+            Preparacion::SinVeredicto(hallazgos_de_rechazos(&inv.rechazos)),
+            Vec::new(),
+        ));
     }
     // Las imágenes base van antes de las dependencias: sin ellas el Dockerfile no construye (Tarea 9d2).
+    // Un pull que falla no corta la fase: queda en el Gate y la construcción da sin veredicto (Tarea 7i).
     let imagenes = if hay_dockerfile(repo) {
         Some(traer_imagenes_base(repo)?)
     } else {
@@ -275,6 +288,7 @@ pub fn preparar(
         .as_deref()
         .map(hallazgos_de_imagenes)
         .unwrap_or_default();
+    let devueltas = imagenes.clone().unwrap_or_default();
     if imagenes
         .iter()
         .flatten()
@@ -285,7 +299,7 @@ pub fn preparar(
         registro.motivo = Some("credenciales");
         registro.imagenes = imagenes;
         registrar(home, tarea, &registro)?;
-        return Ok(Preparacion::SinVeredicto(hallazgos_imagen));
+        return Ok((Preparacion::SinVeredicto(hallazgos_imagen), devueltas));
     }
     let (preparacion, registro) = match tarea.lenguaje.as_str() {
         "rust" => preparar_rust(repo, tarea, home, timeout, &inv)?,
@@ -315,7 +329,7 @@ pub fn preparar(
     if let Some(registro) = registro {
         registrar(home, tarea, &registro)?;
     }
-    Ok(preparacion)
+    Ok((preparacion, devueltas))
 }
 
 /// Agrega hallazgos a una preparación, sea cual sea su variante.
@@ -733,26 +747,193 @@ fn registrar(home: &Path, tarea: &Tarea, registro: &Registro) -> Result<(), Erro
         .map_err(|e| infra("registrar el evento de descarga", e))
 }
 
-/// Imagen base de un `FROM` de un Dockerfile del repo (Tarea 9d2). Sin `digest` no hubo descarga.
+/// Imagen base de un `FROM` de un Dockerfile del repo (Tarea 9d2). Sin `digest` no hubo imagen local.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ImagenBase {
     pub archivo: String,
     pub linea: u32,
     pub cita: String,
+    /// La imagen tal como está escrita en el `FROM`. El `Gate` la lista así.
     pub imagen: String,
+    /// La imagen con los `ARG` resueltos. `None` si la variable quedó sin valor.
+    pub resuelta: Option<String>,
     pub digest: Option<String>,
-    /// Motivo por el que no se resolvió la imagen (una variable `$VAR` sin resolver).
+    /// Verdadero solo si `podman pull` bajó la imagen en esta fase.
+    pub descargada: bool,
+    /// Motivo por el que no se resolvió el `FROM` (una variable sin valor).
     pub sin_resolver: Option<String>,
     /// Por qué el registro no entregó la imagen.
     pub problema: Option<Problema>,
 }
 
-/// Motivo por el que una imagen base no se bajó.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+/// Motivo por el que una imagen base no se bajó. En el `Gate` se escribe como texto.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Problema {
+    /// Inexistente o privada: el registro responde lo mismo para los dos casos.
     NoExiste,
     Credenciales,
+    /// Red o registro caído. Guarda la causa, sin el prefijo.
+    Infraestructura(String),
+}
+
+impl Serialize for Problema {
+    fn serialize<S: serde::Serializer>(&self, serializador: S) -> Result<S::Ok, S::Error> {
+        let texto = match self {
+            Problema::NoExiste => "no_existe".to_string(),
+            Problema::Credenciales => "credenciales".to_string(),
+            Problema::Infraestructura(causa) => format!("infraestructura: {causa}"),
+        };
+        serializador.serialize_str(&texto)
+    }
+}
+
+/// Un `FROM` con su imagen resuelta. `resuelto` es `Err` si una variable quedó sin valor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FromResuelto {
+    pub linea: u32,
+    /// La imagen tal como está escrita en el `FROM`.
+    pub escrito: String,
+    pub resuelto: Result<String, String>,
+}
+
+/// Resuelve los `FROM` de un Dockerfile con los `ARG` que van antes del primer `FROM` (Tarea 7i).
+/// Un `ARG` después del primer `FROM` es de su etapa: no entra en los `FROM`, como en `docker build`.
+pub fn resolver_froms(texto: &str) -> Vec<FromResuelto> {
+    froms_del_texto(texto).into_iter().map(|f| f.from).collect()
+}
+
+/// Un `FROM` del texto, con su alias de etapa y su cita (para el `Gate` y la construcción).
+struct FromEnTexto {
+    from: FromResuelto,
+    alias: Option<String>,
+    cita: String,
+}
+
+fn froms_del_texto(texto: &str) -> Vec<FromEnTexto> {
+    let mut globales: BTreeMap<String, Option<String>> = BTreeMap::new();
+    let mut vio_from = false;
+    let mut salida = Vec::new();
+    for inst in instrucciones(texto) {
+        let (kw, resto) = palabra_clave(&inst.logico);
+        match kw.as_str() {
+            "ARG" if !vio_from => globales.extend(args_declarados(resto)),
+            "FROM" => {
+                vio_from = true;
+                let (imagen, alias) = parsear_from(resto);
+                let Some(escrito) = imagen else {
+                    continue;
+                };
+                let resuelto = expandir(&escrito, &globales);
+                salida.push(FromEnTexto {
+                    from: FromResuelto {
+                        linea: inst.linea,
+                        escrito,
+                        resuelto,
+                    },
+                    alias,
+                    cita: inst.cita.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+    salida
+}
+
+/// Nombres y valores por defecto de un `ARG`. `ARG NOMBRE` no tiene valor.
+fn args_declarados(resto: &str) -> Vec<(String, Option<String>)> {
+    resto
+        .split_whitespace()
+        .map(|token| match token.split_once('=') {
+            Some((nombre, valor)) => (nombre.to_string(), Some(quitar_comillas(valor))),
+            None => (token.to_string(), None),
+        })
+        .collect()
+}
+
+fn quitar_comillas(texto: &str) -> String {
+    texto.trim_matches(|c| c == '"' || c == '\'').to_string()
+}
+
+/// Sustituye `${NOMBRE}`, `${NOMBRE:-defecto}` y `$NOMBRE` con los `ARG` globales.
+/// Una variable sin valor, o un resultado vacío, es `Err` con el motivo.
+fn expandir(texto: &str, globales: &BTreeMap<String, Option<String>>) -> Result<String, String> {
+    let mut salida = String::new();
+    let mut resto = texto;
+    while let Some(pos) = resto.find('$') {
+        salida.push_str(&resto[..pos]);
+        let tras = &resto[pos + 1..];
+        if let Some(cuerpo) = tras.strip_prefix('{') {
+            let fin = cuerpo
+                .find('}')
+                .ok_or_else(|| format!("llave sin cerrar en {texto}"))?;
+            salida.push_str(&valor_de_expresion(&cuerpo[..fin], globales)?);
+            resto = &cuerpo[fin + 1..];
+        } else {
+            let nombre: String = tras
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if nombre.is_empty() {
+                salida.push('$');
+                resto = tras;
+                continue;
+            }
+            salida.push_str(&valor_de_nombre(&nombre, globales)?);
+            resto = &tras[nombre.len()..];
+        }
+    }
+    salida.push_str(resto);
+    if salida.is_empty() {
+        return Err("la imagen quedó vacía".into());
+    }
+    Ok(salida)
+}
+
+/// Valor de lo que va entre llaves: `NOMBRE` o `NOMBRE:-defecto`. Otras formas no se soportan.
+fn valor_de_expresion(
+    expresion: &str,
+    globales: &BTreeMap<String, Option<String>>,
+) -> Result<String, String> {
+    match expresion.split_once(":-") {
+        Some((nombre, defecto)) => {
+            Ok(valor_de(nombre, globales).unwrap_or_else(|| defecto.to_string()))
+        }
+        None if expresion.contains(':') => Err(format!("expansión no soportada: ${{{expresion}}}")),
+        None => valor_de_nombre(expresion, globales),
+    }
+}
+
+/// Valor de un `ARG` global. Sin valor, o vacío, es `None`.
+fn valor_de(nombre: &str, globales: &BTreeMap<String, Option<String>>) -> Option<String> {
+    globales
+        .get(nombre)
+        .cloned()
+        .flatten()
+        .filter(|valor| !valor.is_empty())
+}
+
+fn valor_de_nombre(
+    nombre: &str,
+    globales: &BTreeMap<String, Option<String>>,
+) -> Result<String, String> {
+    valor_de(nombre, globales).ok_or_else(|| format!("variable sin valor: {nombre}"))
+}
+
+/// Verdadero si hay que correr `podman pull`. Criterio de la Tarea 7i:
+/// - Falta en el almacén local: se baja.
+/// - Está local y el `FROM` no fija digest: se acepta la local, sin red. Un tag móvil como `:latest`
+///   no se verifica, así que no se intenta ver si hay una versión nueva.
+/// - Está local y el `FROM` fija un digest (`@sha256:`): se baja solo si el digest local no es ese.
+pub fn necesita_pull(
+    existe_local: bool,
+    digest_fijado: Option<&str>,
+    digest_local: Option<&str>,
+) -> bool {
+    if !existe_local {
+        return true;
+    }
+    digest_fijado.is_some_and(|fijado| digest_local != Some(fijado))
 }
 
 /// Causa de un `podman pull` fallido.
@@ -782,26 +963,57 @@ fn hay_dockerfile(repo: &Path) -> bool {
         .any(|a| a.tipo == TipoConfig::Dockerfile)
 }
 
-/// Resultado de bajar una imagen base: el digest, o el motivo por el que el registro no la dio.
+/// Resultado de mirar una imagen base: local o bajada, o el motivo por el que el registro no la dio.
 enum Bajada {
-    Lista(Option<String>),
+    Lista {
+        digest: Option<String>,
+        descargada: bool,
+    },
     Problema(Problema),
 }
 
-/// Corre `podman pull` de la imagen. Un fallo de red o de registro caído es `Infra`.
+/// Corre `podman pull` de la imagen. Un fallo de red o de registro caído es `Problema::Infraestructura`.
 fn bajar_imagen(imagen: &str) -> Result<Bajada, ErrorOraculo> {
-    let pull = correr_podman(&["pull", imagen], PLAZO_PULL)?;
+    let pull = match correr_podman(&["pull", imagen], PLAZO_PULL) {
+        Ok(pull) => pull,
+        Err(ErrorOraculo::Infra(motivo)) => {
+            return Ok(Bajada::Problema(Problema::Infraestructura(format!(
+                "no se pudo bajar {imagen}: {motivo}"
+            ))));
+        }
+        Err(otro) => return Err(otro),
+    };
     if pull.codigo == 0 {
-        return Ok(Bajada::Lista(digest_de(imagen)?));
+        return Ok(Bajada::Lista {
+            digest: digest_de(imagen)?,
+            descargada: true,
+        });
     }
     let texto = format!("{}\n{}", pull.stdout, pull.stderr);
-    match causa_de_pull(&texto) {
-        Causa::NoExiste => Ok(Bajada::Problema(Problema::NoExiste)),
-        Causa::Credenciales => Ok(Bajada::Problema(Problema::Credenciales)),
-        Causa::Otra(linea) => Err(ErrorOraculo::Infra(format!(
-            "no se pudo bajar {imagen}: {linea}"
-        ))),
+    Ok(Bajada::Problema(match causa_de_pull(&texto) {
+        Causa::NoExiste => Problema::NoExiste,
+        Causa::Credenciales => Problema::Credenciales,
+        Causa::Otra(linea) => {
+            Problema::Infraestructura(format!("no se pudo bajar {imagen}: {linea}"))
+        }
+    }))
+}
+
+/// Mira una imagen base: la local si basta, o la baja. El criterio está en `necesita_pull`.
+fn traer(imagen: &str) -> Result<Bajada, ErrorOraculo> {
+    let (nombre, fijado) = match imagen.split_once('@') {
+        Some((nombre, digest)) => (nombre, Some(digest)),
+        None => (imagen, None),
+    };
+    let existe = correr_podman(&["image", "exists", nombre], PLAZO_CORTO)?.codigo == 0;
+    let digest_local = if existe { digest_de(nombre)? } else { None };
+    if !necesita_pull(existe, fijado, digest_local.as_deref()) {
+        return Ok(Bajada::Lista {
+            digest: digest_local,
+            descargada: false,
+        });
     }
+    bajar_imagen(imagen)
 }
 
 /// Digest de una imagen ya bajada. `None` si podman no lo informa.
@@ -817,19 +1029,23 @@ fn digest_de(imagen: &str) -> Result<Option<String>, ErrorOraculo> {
     Ok((!digest.is_empty()).then(|| digest.to_string()))
 }
 
-/// Hallazgos de las imágenes base que el registro no dio. Credenciales también es hallazgo, con sin veredicto.
+/// Hallazgos de las imágenes base que el registro no dio. Solo credenciales cobra hallazgo, con sin veredicto.
+/// Una imagen inexistente o privada da sin veredicto en la construcción, y una falla de red no corta.
 fn hallazgos_de_imagenes(imagenes: &[ImagenBase]) -> Vec<Hallazgo> {
     imagenes
         .iter()
-        .filter_map(|i| {
-            let detalle = match i.problema? {
-                Problema::NoExiste => format!("la imagen base no existe: {}", i.imagen),
-                Problema::Credenciales => format!(
+        .filter_map(|i| match i.problema.as_ref()? {
+            Problema::Credenciales => Some(hallazgo(
+                &i.archivo,
+                i.linea,
+                &i.cita,
+                3,
+                format!(
                     "la imagen base pide credenciales: no se pasan (zona roja, P21): {}",
                     i.imagen
                 ),
-            };
-            Some(hallazgo(&i.archivo, i.linea, &i.cita, 3, detalle))
+            )),
+            Problema::NoExiste | Problema::Infraestructura(_) => None,
         })
         .collect()
 }
@@ -845,36 +1061,40 @@ pub fn traer_imagenes_base(repo: &Path) -> Result<Vec<ImagenBase>, ErrorOraculo>
         let texto = fs::read_to_string(repo.join(&archivo.ruta_relativa))
             .map_err(|e| infra("leer el Dockerfile", e))?;
         let mut alias_previos: Vec<String> = Vec::new();
-        for inst in instrucciones(&texto) {
-            let (kw, resto) = palabra_clave(&inst.logico);
-            if kw != "FROM" {
+        for f in froms_del_texto(&texto) {
+            let FromEnTexto { from, alias, cita } = f;
+            let nombre = from
+                .resuelto
+                .as_ref()
+                .map_or(from.escrito.as_str(), String::as_str);
+            let es_etapa = nombre.eq_ignore_ascii_case("scratch")
+                || alias_previos.iter().any(|a| a.eq_ignore_ascii_case(nombre));
+            alias_previos.extend(alias.map(|a| a.to_lowercase()));
+            if es_etapa {
                 continue;
             }
-            let (imagen, alias) = parsear_from(resto);
-            let es_etapa = imagen.as_deref().is_some_and(|i| {
-                i.eq_ignore_ascii_case("scratch")
-                    || alias_previos.iter().any(|a| a.eq_ignore_ascii_case(i))
-            });
-            alias_previos.extend(alias.map(|a| a.to_lowercase()));
-            let Some(imagen) = imagen.filter(|_| !es_etapa) else {
-                continue;
-            };
             let mut base = ImagenBase {
                 archivo: archivo.ruta_relativa.clone(),
-                linea: inst.linea,
-                cita: inst.cita.clone(),
-                imagen: imagen.clone(),
+                linea: from.linea,
+                cita,
+                imagen: from.escrito.clone(),
+                resuelta: None,
                 digest: None,
+                descargada: false,
                 sin_resolver: None,
                 problema: None,
             };
-            if imagen.contains('$') {
-                base.sin_resolver =
-                    Some("la imagen usa una variable: no se puede resolver sin los ARG".into());
-            } else {
-                match bajar_imagen(&imagen)? {
-                    Bajada::Lista(digest) => base.digest = digest,
-                    Bajada::Problema(problema) => base.problema = Some(problema),
+            match &from.resuelto {
+                Err(motivo) => base.sin_resolver = Some(motivo.clone()),
+                Ok(imagen) => {
+                    base.resuelta = Some(imagen.clone());
+                    match traer(imagen)? {
+                        Bajada::Lista { digest, descargada } => {
+                            base.digest = digest;
+                            base.descargada = descargada;
+                        }
+                        Bajada::Problema(problema) => base.problema = Some(problema),
+                    }
                 }
             }
             salida.push(base);
@@ -1202,5 +1422,100 @@ location searched: crates.io index";
         );
         let red = "Error: dial tcp: lookup registro.ejemplo: no such host";
         assert!(matches!(causa_de_pull(red), Causa::Otra(_)));
+    }
+
+    fn resuelto(texto: &str, i: usize) -> Result<String, String> {
+        resolver_froms(texto)[i].resuelto.clone()
+    }
+
+    #[test]
+    fn descarga_resolver_froms_arg_antes_del_from_sustituye_llaves_y_dolar() {
+        let texto = "ARG BASE=debian:12\nFROM ${BASE}\n";
+        assert_eq!(resuelto(texto, 0), Ok("debian:12".to_string()));
+        let sin_llaves = "ARG BASE=debian:12\nFROM $BASE AS x\n";
+        assert_eq!(resuelto(sin_llaves, 0), Ok("debian:12".to_string()));
+        let fijo = resolver_froms("FROM docker.io/library/alpine:3.20\n");
+        assert_eq!(
+            fijo,
+            [FromResuelto {
+                linea: 1,
+                escrito: "docker.io/library/alpine:3.20".into(),
+                resuelto: Ok("docker.io/library/alpine:3.20".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn descarga_resolver_froms_arg_sin_valor_y_variable_ausente_quedan_sin_resolver() {
+        let sin_valor = resolver_froms("ARG SIN_VALOR\nFROM ${SIN_VALOR}\n");
+        assert_eq!(sin_valor[0].linea, 2);
+        assert_eq!(sin_valor[0].escrito, "${SIN_VALOR}");
+        assert!(sin_valor[0].resuelto.is_err(), "{sin_valor:?}");
+        assert!(resuelto("FROM ${NO_DECLARADA}\n", 0).is_err());
+    }
+
+    #[test]
+    fn descarga_resolver_froms_default_con_dos_puntos_guion_usa_el_defecto() {
+        let texto = "ARG X\nFROM ${X:-alpine:3.20}\n";
+        assert_eq!(resuelto(texto, 0), Ok("alpine:3.20".to_string()));
+        let con_valor = "ARG X=debian:12\nFROM ${X:-alpine:3.20}\n";
+        assert_eq!(resuelto(con_valor, 0), Ok("debian:12".to_string()));
+    }
+
+    #[test]
+    fn descarga_resolver_froms_arg_en_etapa_no_cambia_el_from_anterior() {
+        // Un ARG declarado después del primer FROM es de su etapa: no entra en FROM posteriores.
+        let texto = "ARG BASE=alpine:3.20\nFROM ${BASE}\nARG BASE=debian:12\nFROM ${BASE}\n";
+        let froms = resolver_froms(texto);
+        assert_eq!(froms.len(), 2, "{froms:?}");
+        assert_eq!(froms[0].resuelto, Ok("alpine:3.20".to_string()));
+        assert_eq!(froms[1].resuelto, Ok("alpine:3.20".to_string()));
+    }
+
+    #[test]
+    fn descarga_necesita_pull_solo_si_falta_o_el_digest_fijado_no_coincide() {
+        // Falta en el almacén: hay que bajarla.
+        assert!(necesita_pull(false, None, None));
+        // Local y sin digest fijado (tag móvil como `:latest`): se acepta la local, sin red.
+        assert!(!necesita_pull(true, None, Some("sha256:a")));
+        // Local con el digest fijado igual: no se baja.
+        assert!(!necesita_pull(true, Some("sha256:a"), Some("sha256:a")));
+        // Local con un digest fijado distinto, o sin digest local que comparar: se baja.
+        assert!(necesita_pull(true, Some("sha256:a"), Some("sha256:b")));
+        assert!(necesita_pull(true, Some("sha256:a"), None));
+    }
+
+    #[test]
+    fn descarga_problema_infraestructura_se_escribe_como_texto_con_prefijo() {
+        let json =
+            serde_json::to_value(Problema::Infraestructura("dial tcp".into())).expect("serializa");
+        assert_eq!(json, serde_json::json!("infraestructura: dial tcp"));
+        assert_eq!(
+            serde_json::to_value(Problema::NoExiste).expect("serializa"),
+            serde_json::json!("no_existe")
+        );
+    }
+
+    #[test]
+    fn descarga_hallazgos_de_imagenes_solo_cobran_credenciales() {
+        let base = |problema| ImagenBase {
+            archivo: "Dockerfile".into(),
+            linea: 1,
+            cita: "FROM x".into(),
+            imagen: "x".into(),
+            resuelta: Some("x".into()),
+            digest: None,
+            descargada: false,
+            sin_resolver: None,
+            problema: Some(problema),
+        };
+        let imagenes = [
+            base(Problema::NoExiste),
+            base(Problema::Infraestructura("dial tcp".into())),
+            base(Problema::Credenciales),
+        ];
+        let hallazgos = hallazgos_de_imagenes(&imagenes);
+        assert_eq!(hallazgos.len(), 1, "{hallazgos:?}");
+        assert!(hallazgos[0].detalle.contains("credenciales"));
     }
 }

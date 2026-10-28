@@ -164,6 +164,103 @@ fn configs_hadolint_json_roto_es_sin_veredicto() {
     assert!(rs[3].motivo.is_some());
 }
 
+/// Responde "presente" a `command -v hadolint`. Al ejecutar hadolint da `resp` tal cual.
+fn con_hadolint_respuesta(resp: SalidaHerramienta) -> Falso {
+    Falso::nuevo(move |cmd| {
+        if cmd.starts_with("command -v") {
+            salida(0, "")
+        } else {
+            resp.clone()
+        }
+    })
+}
+
+/// Repo con un Dockerfile mínimo. Las sondas de hadolint lo leen de aquí.
+fn repo_con_dockerfile() -> tempfile::TempDir {
+    let repo = tempfile::tempdir().expect("temp dir");
+    escribir(
+        repo.path(),
+        "Dockerfile",
+        "FROM debian:bookworm-slim\nUSER app\n",
+    );
+    repo
+}
+
+#[test]
+fn sonda_hadolint_salida_vacia_es_sin_veredicto() {
+    let repo = repo_con_dockerfile();
+    let ej = con_hadolint_respuesta(SalidaHerramienta {
+        codigo: 1,
+        stdout: String::new(),
+        stderr: "fallo al leer".into(),
+        ..Default::default()
+    });
+    let rs = sondas_configs(repo.path(), &ej, &tarea_de("rust"));
+    assert_eq!(rs[3].valor, None);
+    let motivo = rs[3].motivo.clone().unwrap_or_default();
+    assert!(motivo.contains("reporte vacío"), "{motivo}");
+    assert!(motivo.contains("fallo al leer"), "{motivo}");
+}
+
+#[test]
+fn sonda_hadolint_json_truncado_es_sin_veredicto() {
+    let repo = repo_con_dockerfile();
+    let ej = con_hadolint_respuesta(SalidaHerramienta {
+        codigo: 1,
+        stdout: "[{\"code\":\"DL3007\",\"level\":\"warn".into(),
+        ..Default::default()
+    });
+    let rs = sondas_configs(repo.path(), &ej, &tarea_de("rust"));
+    assert_eq!(rs[3].valor, None);
+    let motivo = rs[3].motivo.clone().unwrap_or_default();
+    assert!(motivo.contains("JSON truncado"), "{motivo}");
+}
+
+#[test]
+fn sonda_hadolint_sin_json_y_codigo_distinto_de_cero_es_sin_veredicto() {
+    let repo = repo_con_dockerfile();
+    let ej = con_hadolint_respuesta(SalidaHerramienta {
+        codigo: 2,
+        stdout: "hadolint: error interno".into(),
+        ..Default::default()
+    });
+    let rs = sondas_configs(repo.path(), &ej, &tarea_de("rust"));
+    assert_eq!(rs[3].valor, None);
+    let motivo = rs[3].motivo.clone().unwrap_or_default();
+    assert!(motivo.contains("sin JSON"), "{motivo}");
+    assert!(motivo.contains("código 2"), "{motivo}");
+}
+
+#[test]
+fn sonda_hadolint_arreglo_vacio_con_codigo_cero_da_uno() {
+    let repo = repo_con_dockerfile();
+    let ej = con_hadolint_respuesta(salida_con_codigo(0, "[]"));
+    let rs = sondas_configs(repo.path(), &ej, &tarea_de("rust"));
+    assert_eq!(rs[3].motivo, None);
+    assert_eq!(rs[3].valor, Some(1.0));
+    assert!(rs[3].hallazgos.is_empty());
+}
+
+#[test]
+fn sonda_hadolint_hallazgos_con_codigo_uno_son_validos() {
+    // hadolint sale con 1 cuando hay cualquier hallazgo: el veredicto sale del JSON.
+    let json = r#"[{"code":"DL3008","level":"warning","line":2,"message":"pin","file":"/repo/Dockerfile"}]"#;
+    let repo = repo_con_dockerfile();
+    let ej = con_hadolint_respuesta(salida_con_codigo(1, json));
+    let rs = sondas_configs(repo.path(), &ej, &tarea_de("rust"));
+    assert_eq!(rs[3].motivo, None);
+    assert_eq!(rs[3].hallazgos.len(), 1);
+    assert_eq!(rs[3].hallazgos[0].severidad, 1);
+}
+
+fn salida_con_codigo(codigo: i32, stdout: &str) -> SalidaHerramienta {
+    SalidaHerramienta {
+        codigo,
+        stdout: stdout.into(),
+        ..Default::default()
+    }
+}
+
 #[test]
 fn configs_repo_sin_archivos_de_configuracion_no_recibe_penalizacion() {
     let repo = tempfile::tempdir().expect("temp dir");

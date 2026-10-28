@@ -76,6 +76,7 @@ echo "$*" >> "$DIR/llamadas.log"
 env >> "$DIR/entorno.txt"
 case "$1" in
 new)
+  if [ "$AUTH" = cuelga ]; then echo $$ > "$DIR/pid.txt"; sleep 300; exit 0; fi
   if [ "$AUTH" = falta ]; then echo "Not logged in: authenticate with OAuth first" >&2; exit 1; fi
   exit 0 ;;
 exec)
@@ -110,6 +111,11 @@ esac
 /// Corre `oraculo pendientes` con el falso como `ROOT_COLAB_BIN`. La clave de prueba
 /// queda en el entorno de `r00t`: el falso no debe verla.
 fn correr(e: &Escenario, binario: &Path, extra: &[&str]) -> Output {
+    correr_con(e, binario, extra, None)
+}
+
+/// Como `correr`. `plazo` pone `ROOT_COLAB_PLAZO_PRIMER_PASO_S`, variable solo para tests.
+fn correr_con(e: &Escenario, binario: &Path, extra: &[&str], plazo: Option<&str>) -> Output {
     let repo = e.repo.path().to_str().expect("ruta UTF-8").to_string();
     let mut args: Vec<&str> = vec![
         "oraculo",
@@ -120,13 +126,26 @@ fn correr(e: &Escenario, binario: &Path, extra: &[&str]) -> Output {
         repo.as_str(),
     ];
     args.extend_from_slice(extra);
-    Command::new(env!("CARGO_BIN_EXE_r00t"))
+    let mut orden = Command::new(env!("CARGO_BIN_EXE_r00t"));
+    orden
         .env("ROOT_HOME", e.home.path())
         .env("ROOT_COLAB_BIN", binario)
         .env("DEEPSEEK_API_KEY", "sk-test-SECRETO")
-        .args(&args)
-        .output()
-        .expect("no se pudo ejecutar r00t")
+        .args(&args);
+    if let Some(segundos) = plazo {
+        orden.env("ROOT_COLAB_PLAZO_PRIMER_PASO_S", segundos);
+    }
+    orden.output().expect("no se pudo ejecutar r00t")
+}
+
+/// Vivo si `kill -0` lo acepta. Llama a la CLI `kill` con argumentos, sin shell.
+fn proceso_vivo(pid: i32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// Ningún argumento de ninguna llamada pide otra GPU, TPU ni RAM alta.
@@ -315,6 +334,47 @@ fn colab_sin_pendientes_no_toca_colab() {
     assert_eq!(salida.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&salida.stdout).contains("tests: []"));
     assert!(e.llamadas().is_empty(), "no debe invocar la CLI");
+}
+
+#[test]
+fn colab_primer_paso_sin_respuesta_sale_3_en_menos_de_15_s() {
+    let e = Escenario::nuevo(ENTORNO_O2);
+    let falso = falso(e.falso.path(), "Tesla T4", "cuelga", false);
+    let inicio = std::time::Instant::now();
+    let salida = correr_con(&e, &falso, &["--colab"], Some("2"));
+    assert!(
+        inicio.elapsed() < std::time::Duration::from_secs(15),
+        "tardó {:?}",
+        inicio.elapsed()
+    );
+    let stderr = String::from_utf8_lossy(&salida.stderr).into_owned();
+    assert_eq!(salida.status.code(), Some(3), "stderr: {stderr}");
+    assert!(
+        stderr.contains("60 segundos") && stderr.contains("login"),
+        "{stderr}"
+    );
+
+    let lineas = e.llamadas();
+    assert!(
+        lineas.first().is_some_and(|l| l.starts_with("new -s")),
+        "{lineas:?}"
+    );
+    assert!(
+        lineas.last().is_some_and(|l| l.starts_with("stop -s")),
+        "{lineas:?}"
+    );
+    assert!(
+        !lineas
+            .iter()
+            .any(|l| l.starts_with("upload") || l.starts_with("exec")),
+        "{lineas:?}"
+    );
+    let pid: i32 = fs::read_to_string(e.falso.path().join("pid.txt"))
+        .expect("pid.txt")
+        .trim()
+        .parse()
+        .expect("PID numérico");
+    assert!(!proceso_vivo(pid), "la CLI falsa quedó colgada");
 }
 
 #[test]

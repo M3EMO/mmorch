@@ -65,6 +65,16 @@ pub struct Aviso {
     pub detalle: String,
 }
 
+/// Un hallazgo de entrega que no corta la evaluación. La cita va redactada.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HallazgoInventario {
+    pub severidad: u8,
+    pub archivo: String,
+    pub linea: u32,
+    pub cita: String,
+    pub detalle: String,
+}
+
 /// Lo que el repo declara. Se arma sin red.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Inventario {
@@ -73,6 +83,8 @@ pub struct Inventario {
     pub avisos: Vec<Aviso>,
     /// Dependencias git sin `rev` y sin commit en el lock: el build no es reproducible.
     pub sin_commit: Vec<Aviso>,
+    /// Hallazgos de entrega sin corte: un `--extra-index-url` deja uno de severidad 1.
+    pub hallazgos: Vec<HallazgoInventario>,
 }
 
 /// Lee los manifiestos y el lock del repo y arma el inventario. Sin red.
@@ -83,7 +95,7 @@ pub fn inventariar(repo: &Path) -> Result<Inventario, ErrorOraculo> {
     Ok(inv)
 }
 
-/// Oculta la credencial de cada dirección `esquema://usuario:clave@host` del texto.
+/// Oculta la credencial de cada dirección `esquema://...` del texto. Ver `corte_credencial`.
 pub fn redactar(texto: &str) -> String {
     let mut salida = String::with_capacity(texto.len());
     let mut resto = texto;
@@ -91,20 +103,45 @@ pub fn redactar(texto: &str) -> String {
         let (antes, despues) = resto.split_at(pos + 3);
         salida.push_str(antes);
         let fin = despues
-            .find(|c: char| c == '/' || c == '"' || c == '\'' || c.is_whitespace())
+            .find(|c: char| c == '"' || c == '\'' || c.is_whitespace())
             .unwrap_or(despues.len());
-        let (autoridad, cola) = despues.split_at(fin);
-        match autoridad.rfind('@') {
+        let (token, cola) = despues.split_at(fin);
+        match corte_credencial(token) {
             Some(i) => {
                 salida.push_str("***");
-                salida.push_str(&autoridad[i..]);
+                salida.push_str(&token[i..]);
             }
-            None => salida.push_str(autoridad),
+            // Un token puede traer otro `://` dentro (un `?url=` de redirección).
+            None => salida.push_str(&redactar(token)),
         }
         resto = cola;
     }
     salida.push_str(resto);
     salida
+}
+
+/// Posición del `@` que cierra la credencial de `resto`, el texto después de `://`.
+/// Hay credencial si el `@` va en la autoridad, antes del primer `/`, `?` o `#`.
+/// También la hay si la autoridad trae `usuario:clave`: la clave puede llevar `/`, `?`, `#` o `@`.
+/// Un `@` en la ruta, sin `usuario:` antes, no cuenta: `host/p?e=a@b.c`, `github.com/x/y@ref`.
+fn corte_credencial(resto: &str) -> Option<usize> {
+    let fin_autoridad = resto.find(['/', '?', '#']).unwrap_or(resto.len());
+    let autoridad = &resto[..fin_autoridad];
+    if let Some(i) = autoridad.rfind('@') {
+        return Some(i);
+    }
+    if tiene_usuario(autoridad) {
+        return resto.rfind('@');
+    }
+    None
+}
+
+/// `true` si la autoridad trae `usuario:clave`. Un `:` seguido solo de dígitos es un puerto.
+fn tiene_usuario(autoridad: &str) -> bool {
+    match autoridad.split_once(':') {
+        Some((_, despues)) => despues.is_empty() || !despues.chars().all(|c| c.is_ascii_digit()),
+        None => false,
+    }
 }
 
 /// Origen de un paquete del `Cargo.lock`.
@@ -203,12 +240,14 @@ fn origen_de(valor: Option<&str>) -> Origen {
         return Origen::CratesIo;
     }
     if let Some(git) = valor.strip_prefix("git+") {
+        // Se redacta antes de cortar: un `#` o un `?` dentro de la clave no la deja a la vista.
+        let git = redactar(git);
         let (resto, commit) = match git.rsplit_once('#') {
-            Some((resto, commit)) => (resto, Some(commit.to_string())),
-            None => (git, None),
+            Some((resto, commit)) => (resto.to_string(), Some(commit.to_string())),
+            None => (git.clone(), None),
         };
         return Origen::Git {
-            url: sin_consulta(resto).to_string(),
+            url: sin_consulta(&resto).to_string(),
             commit,
         };
     }
@@ -254,8 +293,7 @@ fn motivo_de_url(url: &str) -> Option<String> {
             "protocolo no aceptado: {esquema}; solo se acepta https"
         ));
     }
-    let autoridad = resto.split('/').next().unwrap_or(resto);
-    if autoridad.contains('@') {
+    if corte_credencial(resto).is_some() {
         return Some("dirección con credenciales: se rechaza".into());
     }
     None
@@ -825,23 +863,50 @@ fn inventariar_requirements(repo: &Path, inv: &mut Inventario) -> Result<(), Err
         return Ok(());
     };
     let t = Texto::nuevo(ARCHIVO_REQUIREMENTS, &texto);
-    let mut pypi: Option<u32> = None;
+    let logicas = lineas_logicas(&texto);
+    // Pasada 1: cada `--index-url` va primero. Reemplaza a PyPI, así que PyPI no se lista.
+    // Varios `--index-url`: se listan todos, por conservador. pip usa el último.
     let mut indice_propio = false;
-    for (linea, logica) in lineas_logicas(&texto) {
-        let mut resto = logica.trim();
-        if let Some(i) = resto.find(" --hash") {
-            resto = resto[..i].trim();
+    for (linea, logica) in &logicas {
+        if let Some(valor) = opcion(contenido(logica), &["-i", "--index-url"]) {
+            indice_propio = true;
+            fuente_de_indice(&t, *linea, valor, inv);
         }
-        if let Some(i) = resto.find(" #") {
-            resto = resto[..i].trim();
-        }
+    }
+    // Sin `--index-url`, pip usa PyPI como base. Va antes de los `--extra-index-url`.
+    if !indice_propio {
+        push_unico(
+            &mut inv.fuentes,
+            Fuente {
+                tipo: TipoFuente::Registro,
+                direccion: INDICE_PYPI.into(),
+                version: None,
+                archivo: ARCHIVO_REQUIREMENTS.into(),
+                linea: 0,
+            },
+        );
+    }
+    // Pasada 2: el resto de las líneas, en el orden del archivo.
+    for (linea, logica) in &logicas {
+        let linea = *linea;
+        let resto = contenido(logica);
         if resto.is_empty() || resto.starts_with('#') {
             continue;
         }
-        if let Some(valor) = opcion(resto, &["-i", "--index-url"]) {
-            indice_propio = true;
+        if opcion(resto, &["-i", "--index-url"]).is_some() {
+            continue;
+        }
+        if let Some(valor) = opcion(resto, &["--extra-index-url"]) {
             fuente_de_indice(&t, linea, valor, inv);
-        } else if let Some(valor) = opcion(resto, &["--extra-index-url", "-f", "--find-links"]) {
+            inv.hallazgos.push(HallazgoInventario {
+                severidad: 1,
+                archivo: ARCHIVO_REQUIREMENTS.into(),
+                linea,
+                cita: t.cita(linea),
+                detalle: "mezclar índices (--extra-index-url) permite la confusión de dependencias"
+                    .into(),
+            });
+        } else if let Some(valor) = opcion(resto, &["-f", "--find-links"]) {
             fuente_de_indice(&t, linea, valor, inv);
         } else if opcion(resto, &["-r", "--requirement", "-c", "--constraint"]).is_some() {
             inv.avisos
@@ -863,26 +928,22 @@ fn inventariar_requirements(repo: &Path, inv: &mut Inventario) -> Result<(), Err
             directa(url.trim(), linea, &t, inv);
         } else if es_directa(resto) {
             directa(resto, linea, &t, inv);
-        } else {
-            pypi.get_or_insert(linea);
         }
-    }
-    // Con `--index-url`, pip deja de usar PyPI: solo entonces PyPI no es fuente.
-    if let Some(linea) = pypi
-        && !indice_propio
-    {
-        push_unico(
-            &mut inv.fuentes,
-            Fuente {
-                tipo: TipoFuente::Registro,
-                direccion: INDICE_PYPI.into(),
-                version: None,
-                archivo: ARCHIVO_REQUIREMENTS.into(),
-                linea,
-            },
-        );
+        // Un nombre de paquete no agrega fuente: lo sirve el índice ya listado.
     }
     Ok(())
+}
+
+/// Contenido de una línea lógica: sin comentario, sin `--hash` y sin espacios de los extremos.
+fn contenido(logica: &str) -> &str {
+    let mut resto = logica.trim();
+    if let Some(i) = resto.find(" --hash") {
+        resto = resto[..i].trim();
+    }
+    if let Some(i) = resto.find(" #") {
+        resto = resto[..i].trim();
+    }
+    resto
 }
 
 /// Une las líneas que terminan en `\` con la siguiente. Da la línea de inicio de cada una.
@@ -942,12 +1003,13 @@ fn fuente_de_indice(t: &Texto, linea: u32, url: &str, inv: &mut Inventario) {
 
 /// Referencia directa de un requisito: `git+https://...@commit` o una URL de archivo.
 fn directa(url: &str, linea: u32, t: &Texto, inv: &mut Inventario) {
+    // Antes de cortar el fragmento: un `#` dentro de la clave no debe esconder la credencial.
+    if let Some(motivo) = motivo_de_url(url) {
+        inv.rechazos.push(rechazo(t, linea, motivo));
+        return;
+    }
     let sin_fragmento = url.split('#').next().unwrap_or(url);
     if let Some(git) = sin_fragmento.strip_prefix("git+") {
-        if let Some(motivo) = motivo_de_url(git) {
-            inv.rechazos.push(rechazo(t, linea, motivo));
-            return;
-        }
         let (base, version) = separar_referencia(git);
         push_unico(
             &mut inv.fuentes,
@@ -959,10 +1021,6 @@ fn directa(url: &str, linea: u32, t: &Texto, inv: &mut Inventario) {
                 linea,
             },
         );
-        return;
-    }
-    if let Some(motivo) = motivo_de_url(sin_fragmento) {
-        inv.rechazos.push(rechazo(t, linea, motivo));
         return;
     }
     push_unico(
@@ -1308,5 +1366,246 @@ source = \"git+https://u:p@host/x?rev=1#aaaa\"\n";
             "git = \"https://***@h/x\" y https://a/b"
         );
         assert_eq!(redactar("sin url aquí"), "sin url aquí");
+    }
+
+    fn direcciones(inv: &Inventario) -> Vec<&str> {
+        inv.fuentes.iter().map(|f| f.direccion.as_str()).collect()
+    }
+
+    #[test]
+    fn descarga_inventario_requirements_sin_indice_lista_pypi_como_unica_fuente() {
+        let inv = inventario_de(&[("requirements.txt", "requests==2.31.0\n")]);
+        assert_eq!(direcciones(&inv), ["https://pypi.org/simple"], "{inv:?}");
+        assert_eq!(inv.fuentes[0].tipo, TipoFuente::Registro);
+        assert!(inv.hallazgos.is_empty(), "{inv:?}");
+    }
+
+    #[test]
+    fn descarga_inventario_index_url_reemplaza_a_pypi() {
+        let texto = "--index-url https://pypi.ejemplo.org/simple\nrequests==2.31.0\n";
+        let inv = inventario_de(&[("requirements.txt", texto)]);
+        assert_eq!(
+            direcciones(&inv),
+            ["https://pypi.ejemplo.org/simple"],
+            "{inv:?}"
+        );
+        assert!(!direcciones(&inv).iter().any(|d| d.contains("pypi.org")));
+    }
+
+    #[test]
+    fn descarga_inventario_extra_index_url_suma_pypi_y_deja_hallazgo() {
+        let texto = "requests==2.31.0\n--extra-index-url https://pypi.ejemplo.org/simple\n";
+        let inv = inventario_de(&[("requirements.txt", texto)]);
+        assert_eq!(
+            direcciones(&inv),
+            ["https://pypi.org/simple", "https://pypi.ejemplo.org/simple"],
+            "{inv:?}"
+        );
+        assert_eq!(inv.hallazgos.len(), 1, "{inv:?}");
+        let h = &inv.hallazgos[0];
+        assert_eq!(h.severidad, 1);
+        assert_eq!(h.archivo, "requirements.txt");
+        assert_eq!(h.linea, 2);
+        assert_eq!(
+            h.detalle,
+            "mezclar índices (--extra-index-url) permite la confusión de dependencias"
+        );
+        assert!(h.cita.contains("--extra-index-url"), "{}", h.cita);
+    }
+
+    #[test]
+    fn descarga_inventario_dos_extra_index_url_dan_tres_fuentes_y_dos_hallazgos() {
+        let texto = "requests\n--extra-index-url https://a.example/simple\n\
+--extra-index-url https://b.example/simple\n";
+        let inv = inventario_de(&[("requirements.txt", texto)]);
+        assert_eq!(
+            direcciones(&inv),
+            [
+                "https://pypi.org/simple",
+                "https://a.example/simple",
+                "https://b.example/simple"
+            ],
+            "{inv:?}"
+        );
+        let lineas: Vec<u32> = inv.hallazgos.iter().map(|h| h.linea).collect();
+        assert_eq!(lineas, [2, 3], "{inv:?}");
+    }
+
+    #[test]
+    fn descarga_inventario_index_url_mas_extra_lista_base_primero_sin_pypi() {
+        let texto = "requests\n--extra-index-url https://extra.example/simple\n\
+--index-url https://base.example/simple\n";
+        let inv = inventario_de(&[("requirements.txt", texto)]);
+        assert_eq!(
+            direcciones(&inv),
+            [
+                "https://base.example/simple",
+                "https://extra.example/simple"
+            ],
+            "{inv:?}"
+        );
+        assert_eq!(inv.hallazgos.len(), 1, "{inv:?}");
+        assert_eq!(inv.hallazgos[0].linea, 2);
+    }
+
+    #[test]
+    fn descarga_inventario_formas_de_opcion_son_equivalentes() {
+        for linea in [
+            "-i https://base.example/simple",
+            "--index-url=https://base.example/simple",
+            "--index-url https://base.example/simple",
+            "   -i    https://base.example/simple   ",
+        ] {
+            let texto = format!("{linea}\nrequests\n");
+            let inv = inventario_de(&[("requirements.txt", &texto)]);
+            assert_eq!(
+                direcciones(&inv),
+                ["https://base.example/simple"],
+                "{texto}"
+            );
+        }
+        let texto = "--index-url=https://base.example/simple\n\
+--extra-index-url=https://extra.example/simple\nrequests\n";
+        let inv = inventario_de(&[("requirements.txt", texto)]);
+        assert_eq!(
+            direcciones(&inv),
+            [
+                "https://base.example/simple",
+                "https://extra.example/simple"
+            ],
+            "{inv:?}"
+        );
+        assert_eq!(inv.hallazgos.len(), 1, "{inv:?}");
+    }
+
+    #[test]
+    fn descarga_inventario_extra_index_url_http_es_rechazo_y_deja_hallazgo() {
+        let texto = "--extra-index-url http://x/simple\nrequests\n";
+        let inv = inventario_de(&[("requirements.txt", texto)]);
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+        assert_eq!(inv.rechazos[0].linea, 1);
+        assert_eq!(direcciones(&inv), ["https://pypi.org/simple"], "{inv:?}");
+        assert_eq!(inv.hallazgos.len(), 1, "{inv:?}");
+    }
+
+    #[test]
+    fn descarga_inventario_index_url_con_credencial_es_rechazo_sin_filtrar() {
+        let texto = "--index-url https://u:clave@host/simple\nrequests\n";
+        let inv = inventario_de(&[("requirements.txt", texto)]);
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+        assert_eq!(inv.rechazos[0].cita, "--index-url https://***@host/simple");
+        assert!(inv.fuentes.is_empty(), "{inv:?}");
+        let json = serde_json::to_string(&inv).expect("serializa");
+        assert!(!json.contains("clave"), "{json}");
+        assert!(!json.contains("u:clave@"), "{json}");
+    }
+
+    #[test]
+    fn descarga_inventario_extra_index_url_con_token_es_rechazo_sin_filtrar() {
+        let texto = "requests\n--extra-index-url https://tok@host/simple\n";
+        let inv = inventario_de(&[("requirements.txt", texto)]);
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+        assert_eq!(direcciones(&inv), ["https://pypi.org/simple"], "{inv:?}");
+        assert_eq!(inv.hallazgos.len(), 1, "{inv:?}");
+        assert!(inv.hallazgos[0].cita.contains("***@host"), "{inv:?}");
+        let json = serde_json::to_string(&inv).expect("serializa");
+        assert!(!json.contains("tok@"), "{json}");
+    }
+
+    #[test]
+    fn descarga_inventario_orden_de_fuentes_es_estable() {
+        let texto = "--index-url https://base.example/simple\n\
+--extra-index-url https://b.example/simple\n\
+--extra-index-url https://a.example/simple\n\
+requests\ngit+https://github.com/x/y@abc#egg=y\n";
+        let dir = repo_con(&[("requirements.txt", texto)]);
+        let primera = inventariar(dir.path()).expect("inventaria sin red");
+        let segunda = inventariar(dir.path()).expect("inventaria sin red");
+        assert_eq!(primera, segunda);
+        assert_eq!(
+            direcciones(&primera),
+            [
+                "https://base.example/simple",
+                "https://b.example/simple",
+                "https://a.example/simple",
+                "https://github.com/x/y"
+            ],
+            "{primera:?}"
+        );
+        assert_eq!(primera.hallazgos.len(), 2, "{primera:?}");
+    }
+
+    #[test]
+    fn descarga_inventario_git_con_contrasena_con_barra_es_rechazo_sin_filtrar() {
+        let inv = inventario_cargo("foo = { git = \"https://u:cla/ve@host/x.git\" }\n");
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+        assert!(inv.fuentes.is_empty(), "{inv:?}");
+        let json = serde_json::to_string(&inv).expect("serializa");
+        assert!(!json.contains("cla/ve"), "{json}");
+        assert!(!json.contains("u:"), "{json}");
+    }
+
+    #[test]
+    fn descarga_inventario_requirements_git_con_contrasena_con_barra_es_rechazo_sin_filtrar() {
+        let inv = inventario_de(&[("requirements.txt", "git+https://u:cla/ve@host/x.git\n")]);
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+        // Sin `--index-url` PyPI sigue listado; la fuente git no entra.
+        assert_eq!(direcciones(&inv), ["https://pypi.org/simple"], "{inv:?}");
+        let json = serde_json::to_string(&inv).expect("serializa");
+        assert!(!json.contains("cla/ve"), "{json}");
+        assert!(!json.contains("u:"), "{json}");
+    }
+
+    #[test]
+    fn descarga_inventario_index_url_con_contrasena_con_interrogante_es_rechazo_sin_filtrar() {
+        let inv = inventario_de(&[(
+            "requirements.txt",
+            "--index-url https://u:p?x#y@host/z\nrequests\n",
+        )]);
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+        assert!(inv.fuentes.is_empty(), "{inv:?}");
+        let json = serde_json::to_string(&inv).expect("serializa");
+        assert!(!json.contains("p?x"), "{json}");
+        assert!(!json.contains("u:"), "{json}");
+    }
+
+    #[test]
+    fn descarga_inventario_url_directa_con_contrasena_con_numeral_es_rechazo() {
+        let inv = inventario_de(&[("requirements.txt", "https://u:p?x#y@host/z\n")]);
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+        assert_eq!(direcciones(&inv), ["https://pypi.org/simple"], "{inv:?}");
+        let json = serde_json::to_string(&inv).expect("serializa");
+        assert!(!json.contains("p?x"), "{json}");
+        assert!(!json.contains("u:"), "{json}");
+    }
+
+    #[test]
+    fn descarga_inventario_host_con_arroba_en_la_consulta_no_es_credencial() {
+        let inv = inventario_de(&[(
+            "requirements.txt",
+            "--index-url https://host/p?e=a@b.c\nrequests\n",
+        )]);
+        assert!(inv.rechazos.is_empty(), "{inv:?}");
+        assert_eq!(direcciones(&inv), ["https://host/p"], "{inv:?}");
+    }
+
+    #[test]
+    fn descarga_inventario_contrasena_con_porcentaje_arroba_es_rechazo_sin_filtrar() {
+        let inv = inventario_de(&[(
+            "requirements.txt",
+            "--extra-index-url https://u:p%40ss@host/simple\nrequests\n",
+        )]);
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+        let json = serde_json::to_string(&inv).expect("serializa");
+        assert!(!json.contains("p%40ss"), "{json}");
+        assert!(!json.contains("u:"), "{json}");
+    }
+
+    #[test]
+    fn descarga_inventario_redactar_corta_en_el_ultimo_arroba() {
+        assert_eq!(
+            redactar("https://u:cla/ve@host/x.git"),
+            "https://***@host/x.git"
+        );
     }
 }

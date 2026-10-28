@@ -88,3 +88,37 @@ fn mutacion_contenedor_sin_cargo_mutants_da_sin_veredicto() {
         Some("cargo-mutants no está en la imagen de evaluación")
     );
 }
+
+/// Imagen con `cargo-mutants` (la `:2`). Solo para la prueba real de mutación sin mutantes.
+const RUST_CON_MUTANTS: &str = "localhost/root-oraculo-rust:2";
+
+#[test]
+fn mutacion_real_sin_mutantes_no_deja_reporte_y_da_sin_veredicto() {
+    asegurar_imagen(RUST_CON_MUTANTS);
+    // Un repo sin funciones ni expresiones que mutar: cargo-mutants no escribe outcomes.json.
+    let repo = tempfile::tempdir().expect("temp dir");
+    fs::create_dir_all(repo.path().join("src")).expect("crea src");
+    fs::write(repo.path().join("src/lib.rs"), "pub struct S;\n").expect("escribe");
+    fs::write(
+        repo.path().join("Cargo.toml"),
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("escribe Cargo.toml");
+    // El preludio copia /cache/config.toml: sin él, el comando no corre y el test mentiría.
+    let cache = tempfile::tempdir().expect("temp dir");
+    fs::write(cache.path().join("config.toml"), "").expect("escribe config.toml");
+    let carpeta = tempfile::tempdir().expect("temp dir");
+    let tarea = tarea_rust(carpeta.path());
+    let ej = EjecutorContenedor {
+        imagen: RUST_CON_MUTANTS.into(),
+        repo: repo.path().into(),
+        oraculo: None,
+        rustsec: None,
+        cache: Some(cache.path().into()),
+        timeout: LIMITE,
+    };
+    let r = sonda_mutacion(&ej, &tarea);
+    assert_eq!(r.sonda.valor, None, "{:?}", r.sonda);
+    let motivo = r.sonda.motivo.unwrap_or_default();
+    assert!(motivo.contains("no dejó reporte"), "{motivo}");
+}

@@ -7,7 +7,8 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::oracle::perfiles::herramientas::{
-    EjecutorHerramienta, con_veredicto, falta_herramienta, sin_veredicto,
+    EjecutorHerramienta, JSON_TRUNCADO, con_cola, con_veredicto, falta_herramienta, motivo_json,
+    sin_veredicto,
 };
 use crate::oracle::perfiles::{ResultadoSonda, crear_hallazgo};
 use crate::oracle::tarea::{Requisito, Tarea};
@@ -122,7 +123,7 @@ pub fn parsear_hadolint(
     archivo: &str,
     requisitos: &[Requisito],
 ) -> Result<Vec<Hallazgo>, String> {
-    let defectos: Vec<DefectoHadolint> = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    let defectos: Vec<DefectoHadolint> = serde_json::from_str(json).map_err(|e| motivo_json(&e))?;
     Ok(defectos
         .into_iter()
         .filter_map(|d| {
@@ -680,16 +681,27 @@ fn sonda_hadolint(
             Ok(s) => s,
             Err(e) => return sin_veredicto(d, e.to_string()),
         };
-        match parsear_hadolint(&salida.stdout, &archivo.ruta_relativa, requisitos) {
+        let ruta = &archivo.ruta_relativa;
+        if salida.stdout.trim().is_empty() {
+            let base = format!(
+                "reporte vacío de hadolint en {ruta} (código {})",
+                salida.codigo
+            );
+            return sin_veredicto(d, con_cola(base, &salida.stderr));
+        }
+        match parsear_hadolint(&salida.stdout, ruta, requisitos) {
             Ok(mut hs) => hallazgos.append(&mut hs),
             Err(e) => {
-                return sin_veredicto(
-                    d,
+                // Un código distinto de cero con un JSON que no se puede leer: hadolint falló.
+                let base = if salida.codigo != 0 && !e.starts_with(JSON_TRUNCADO) {
                     format!(
-                        "salida de hadolint ilegible en {}: {e}",
-                        archivo.ruta_relativa
-                    ),
-                );
+                        "hadolint falló sin JSON en {ruta} (código {})",
+                        salida.codigo
+                    )
+                } else {
+                    format!("salida de hadolint en {ruta}: {e}")
+                };
+                return sin_veredicto(d, con_cola(base, &salida.stderr));
             }
         }
     }

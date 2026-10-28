@@ -226,6 +226,75 @@ fn sonda_real_gitleaks_con_clave_sintetica_da_hallazgo_sin_el_secreto() {
     assert!(!texto.contains(SECRETO), "el resultado copió el secreto");
 }
 
+/// Base de RustSec real. Si falta, el test falla con mensaje: no pasa en silencio.
+fn base_rustsec_real() -> PathBuf {
+    let home = std::env::var("HOME").expect("HOME sin definir");
+    let base = PathBuf::from(home).join(".local/share/root/cache/rustsec");
+    assert!(
+        base.is_dir(),
+        "falta la base de RustSec en {}: sin ella no hay prueba real de cargo audit",
+        base.display()
+    );
+    base
+}
+
+#[test]
+fn sonda_real_gitleaks_repo_limpio_da_uno_con_marca_de_cierre() {
+    let imagen = imagen_rust();
+    asegurar_imagen(&imagen);
+    let repo = repo_minimo();
+    let ej = ejecutor(&imagen, repo.path(), None);
+    let r = gitleaks(&ej, &tarea_rust(None));
+    assert_eq!(r.motivo, None, "gitleaks en repo limpio: {r:?}");
+    assert_eq!(r.valor, Some(1.0));
+    assert!(r.hallazgos.is_empty());
+}
+
+#[test]
+fn sonda_real_cargo_audit_base_vacia_da_reporte_vacio() {
+    let imagen = imagen_rust();
+    asegurar_imagen(&imagen);
+    let repo = repo_minimo();
+    let vacio = tempfile::tempdir().expect("temp dir");
+    let ej = ejecutor(&imagen, repo.path(), Some(vacio.path()));
+    let r = cargo_audit(&ej, &tarea_rust(None), repo.path());
+    assert_eq!(r.valor, None);
+    let motivo = r.motivo.unwrap_or_default();
+    assert!(motivo.contains("reporte vacío"), "{motivo}");
+}
+
+#[test]
+fn sonda_real_cargo_audit_repo_limpio_con_base_real_da_uno() {
+    let imagen = imagen_rust();
+    asegurar_imagen(&imagen);
+    let base = base_rustsec_real();
+    let repo = repo_minimo();
+    let ej = ejecutor(&imagen, repo.path(), Some(&base));
+    let r = cargo_audit(&ej, &tarea_rust(None), repo.path());
+    assert_eq!(r.motivo, None, "cargo audit en repo limpio: {r:?}");
+    assert_eq!(r.valor, Some(1.0));
+    assert!(r.hallazgos.is_empty());
+}
+
+#[test]
+fn sonda_real_hadolint_dockerfile_limpio_da_uno() {
+    let imagen = imagen_rust();
+    asegurar_imagen(&imagen);
+    let repo = repo_minimo();
+    // Solo un aviso de info: hadolint sale con 1 y el JSON trae un `[{...}]` sin error ni warning.
+    fs::write(
+        repo.path().join("Dockerfile"),
+        "FROM debian:12\nUSER app\nRUN echo hola\n",
+    )
+    .expect("escribe Dockerfile");
+    let ej = ejecutor(&imagen, repo.path(), None);
+    let resultados = sondas_configs(repo.path(), &ej, &tarea_rust(None));
+    let hadolint = &resultados[3];
+    assert_eq!(hadolint.motivo, None, "hadolint: {hadolint:?}");
+    assert_eq!(hadolint.valor, Some(1.0));
+    assert!(hadolint.hallazgos.is_empty());
+}
+
 #[test]
 fn sonda_real_hadolint_sobre_from_latest_da_hallazgo() {
     let imagen = imagen_rust();

@@ -14,11 +14,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::oracle::ErrorOraculo;
 use crate::oracle::configs::{self, TipoConfig, instrucciones, palabra_clave};
-use crate::oracle::contenedor::{SalidaPodman, correr_podman};
-use crate::oracle::descarga::PRELUDIO;
+use crate::oracle::contenedor::{SUFIJO_SELINUX, SalidaPodman, correr_podman};
+use crate::oracle::descarga::{self, ImagenBase, PRELUDIO, Problema};
 use crate::oracle::perfiles::herramientas::EjecutorHerramienta;
 use crate::oracle::perfiles::{ResultadoSonda, crear_hallazgo, puntuar_hallazgos};
-use crate::oracle::tarea::{Requisito, Tarea};
+use crate::oracle::tarea::{Escenario, Requisito, Tarea};
 use crate::oracle::{CARPETA_TEMPORALES, copiar_repo, infra, temporal};
 use crate::tipos::{Dimension, Hallazgo, Pendiente};
 
@@ -34,6 +34,12 @@ const LINEAS_ESCENARIO: usize = 20;
 const LOG_CORRER_COMPLETO: &str = "/tmp/entrega-correr.full.log";
 /// Límite de cada escenario, en segundos.
 const TIMEOUT_ESCENARIO: u32 = 120;
+/// Plazo del host para cada escenario dentro de la imagen. El `timeout` interno corta antes.
+const PLAZO_ESCENARIO: Duration = Duration::from_secs(TIMEOUT_ESCENARIO as u64);
+/// Código que se registra cuando un escenario supera su plazo (el mismo que devuelve `timeout`).
+const CODIGO_TIEMPO: i32 = 124;
+/// Código con que podman sale ante un error propio (imagen, contenedor o uso).
+const CODIGO_PODMAN: i32 = 125;
 
 /// Plazo por defecto de cada `podman build`.
 const PLAZO_BUILD: Duration = Duration::from_secs(20 * 60);
@@ -73,27 +79,89 @@ pub struct ResultadoDockerfile {
     pub corre_sin_root: Option<bool>,
     /// Verdadero si todos los Dockerfile del repo construyeron.
     pub construida: bool,
+    /// Motivos por los que la construcción no da veredicto (Tarea 7i). Si hay alguno, no se construye.
+    pub sin_veredicto: Vec<MotivoSinVeredicto>,
+}
+
+/// Una causa por la que la construcción no da veredicto, con la línea del `FROM`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MotivoSinVeredicto {
+    pub causa: String,
+    pub linea: u32,
+    /// La imagen tal como está escrita en el `FROM`.
+    pub imagen: Option<String>,
 }
 
 /// Construye los Dockerfile del repo con `--network none --pull=never` y verifica que corren sin root.
-/// Solo corre `podman build` y `podman run --entrypoint id`. Los `[[escenario]]` contra la imagen
-/// construida quedan fuera: los actuales corren en el contenedor de evaluación (`sonda_entrega`).
-/// La parte con red (bajar la imagen base) espera la aclaración P17b.
+/// `imagenes` son las imágenes base que vio la fase de descarga: un problema suyo da sin veredicto.
 pub fn construir_dockerfile(
     repo: &Path,
     home: &Path,
     tarea: &Tarea,
+    imagenes: &[ImagenBase],
 ) -> Result<ResultadoDockerfile, ErrorOraculo> {
-    construir_dockerfile_con(repo, home, tarea, PLAZO_BUILD)
+    construir_con(repo, home, tarea, imagenes, PLAZO_BUILD).map(|c| c.resultado)
 }
 
-/// Como `construir_dockerfile`, con el límite de cada `podman build` explícito.
-pub fn construir_dockerfile_con(
+/// Lo que sale de construir. Si todos los Dockerfile construyeron, `imagen` guarda la última imagen:
+/// los escenarios corren contra ella. Su `Drop` la borra con `podman rmi -f`.
+pub struct Construccion {
+    pub resultado: ResultadoDockerfile,
+    imagen: Option<ImagenTemporal>,
+}
+
+/// Motivos por los que la construcción no da veredicto, antes de tocar podman: un `FROM` sin valor,
+/// o una imagen base que la fase de descarga no pudo traer.
+fn motivos_sin_veredicto(
+    repo: &Path,
+    dockerfiles: &[String],
+    imagenes: &[ImagenBase],
+) -> Result<Vec<MotivoSinVeredicto>, ErrorOraculo> {
+    let mut motivos = Vec::new();
+    for ruta in dockerfiles {
+        let texto = fs::read_to_string(repo.join(ruta))
+            .map_err(|e| infra("leer el Dockerfile para construir", e))?;
+        for from in descarga::resolver_froms(&texto) {
+            if from.resuelto.is_err() {
+                motivos.push(MotivoSinVeredicto {
+                    causa: "imagen base sin resolver".into(),
+                    linea: from.linea,
+                    imagen: Some(from.escrito),
+                });
+            }
+        }
+        for imagen in imagenes.iter().filter(|i| i.archivo == *ruta) {
+            let causa = match &imagen.problema {
+                None => continue,
+                Some(Problema::NoExiste) => {
+                    "imagen base inaccesible: no existe o es privada".to_string()
+                }
+                Some(Problema::Credenciales) => {
+                    "imagen base inaccesible: pide credenciales, que Root no pasa".to_string()
+                }
+                Some(Problema::Infraestructura(_)) => format!(
+                    "infraestructura: no se pudo bajar la imagen base {}",
+                    imagen.resuelta.as_deref().unwrap_or(&imagen.imagen)
+                ),
+            };
+            motivos.push(MotivoSinVeredicto {
+                causa,
+                linea: imagen.linea,
+                imagen: Some(imagen.imagen.clone()),
+            });
+        }
+    }
+    Ok(motivos)
+}
+
+/// Construye los Dockerfile del repo y verifica que corren sin root. Un `podman build` por Dockerfile.
+fn construir_con(
     repo: &Path,
     home: &Path,
     tarea: &Tarea,
+    imagenes: &[ImagenBase],
     plazo: Duration,
-) -> Result<ResultadoDockerfile, ErrorOraculo> {
+) -> Result<Construccion, ErrorOraculo> {
     let reqs = tarea.requisito.as_slice();
     let dockerfiles: Vec<String> = configs::buscar_archivos(repo)
         .into_iter()
@@ -105,9 +173,21 @@ pub fn construir_dockerfile_con(
         pendientes: Vec::new(),
         corre_sin_root: None,
         construida: false,
+        sin_veredicto: Vec::new(),
     };
     if dockerfiles.is_empty() {
-        return Ok(resultado);
+        return Ok(Construccion {
+            resultado,
+            imagen: None,
+        });
+    }
+    let motivos = motivos_sin_veredicto(repo, &dockerfiles, imagenes)?;
+    if !motivos.is_empty() {
+        resultado.sin_veredicto = motivos;
+        return Ok(Construccion {
+            resultado,
+            imagen: None,
+        });
     }
     // La copia aísla el repo. El contexto de build sale de ella, nunca del repo original.
     let tmp = home.join(CARPETA_TEMPORALES);
@@ -119,6 +199,7 @@ pub fn construir_dockerfile_con(
     let estatica = configs::dockerfile_corre_como_root(repo, reqs).map_err(ErrorOraculo::Infra)?;
     let mut todas_ok = true;
     let mut sin_root: Vec<bool> = Vec::new();
+    let mut construidas: Vec<ImagenTemporal> = Vec::new();
     for ruta in &dockerfiles {
         let texto = fs::read_to_string(contexto.join(ruta))
             .map_err(|e| infra("leer el Dockerfile para construir", e))?;
@@ -167,10 +248,13 @@ pub fn construir_dockerfile_con(
             ));
         }
         sin_root.push(sin_root_ahora);
+        construidas.push(imagen);
     }
     resultado.construida = todas_ok;
     resultado.corre_sin_root = (!sin_root.is_empty()).then(|| sin_root.iter().all(|s| *s));
-    Ok(resultado)
+    // La imagen que se conserva es la última, y solo si todos los Dockerfile construyeron.
+    let imagen = if todas_ok { construidas.pop() } else { None };
+    Ok(Construccion { resultado, imagen })
 }
 
 /// Imagen temporal de una construcción. Su `Drop` la borra con `podman rmi -f`, pase lo que pase.
@@ -308,17 +392,276 @@ fn pide_red(salida: &str) -> bool {
     PATRONES_RED.iter().any(|p| minuscula.contains(p))
 }
 
+/// Dónde corrió un escenario: en la imagen construida, o en el contenedor de evaluación.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LugarEscenario {
+    Imagen,
+    ContenedorEvaluacion,
+}
+
 /// Resultado de la sonda de entrega: el puntaje de la dimensión y el estado de cada escenario.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResultadoEntrega {
     pub sonda: ResultadoSonda,
-    /// Id del escenario -> `true` si su `cmd` salió 0.
+    /// Id del escenario -> `true` si su `cmd` salió 0. Un escenario pendiente no está en el mapa.
     pub escenarios: BTreeMap<String, bool>,
+    /// Id del escenario -> el lugar donde corrió.
+    pub lugar_escenarios: BTreeMap<String, LugarEscenario>,
+    /// Escenarios que no se pudieron medir (p. ej. piden red con `--network none`).
+    pub pendientes: Vec<Pendiente>,
+    /// Motivos por los que la construcción no dio veredicto. Vacío si la construcción sí dio.
+    pub sin_veredicto: Vec<MotivoSinVeredicto>,
+    /// Avisos de ejecución, p. ej. una imagen sin `sh` que obligó a usar el contenedor de evaluación.
+    pub avisos: Vec<String>,
+}
+
+/// Construye los Dockerfile, corre la sonda de entrega y los escenarios. Una sola construcción.
+/// Los escenarios corren contra la imagen si construye; si no, en el contenedor de evaluación.
+pub fn entregar(
+    ej: &dyn EjecutorHerramienta,
+    repo: &Path,
+    tarea: &Tarea,
+    home: &Path,
+    imagenes: &[ImagenBase],
+) -> Result<ResultadoEntrega, ErrorOraculo> {
+    let reqs = tarea.requisito.as_slice();
+    // Los escenarios son scripts de la carpeta de la tarea: sin ella no hay nada que montar.
+    if !tarea.escenario.is_empty() && !tarea.dir.is_dir() {
+        return Err(ErrorOraculo::Infra(format!(
+            "no existe la carpeta de la tarea {}",
+            tarea.dir.display()
+        )));
+    }
+    let Construccion {
+        resultado: construccion,
+        imagen,
+    } = construir_con(repo, home, tarea, imagenes, PLAZO_BUILD)?;
+    let mut avisos = Vec::new();
+    // El contenedor de escenario sale de la imagen construida. Sin él, van al de evaluación.
+    let contenedor = match &imagen {
+        Some(img) if !tarea.escenario.is_empty() => {
+            match ContenedorEscenario::iniciar(&img.0, &tarea.dir) {
+                Ok(c) => Some(c),
+                Err(motivo) => {
+                    avisos.push(format!(
+                        "escenarios en el contenedor de evaluación: {motivo}"
+                    ));
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    let mut resultado = sonda_entrega_con(ej, repo, tarea, contenedor.is_none());
+    if let Some(c) = &contenedor {
+        for escenario in &tarea.escenario {
+            let id = escenario.id.clone();
+            match c.correr(escenario)? {
+                Prueba::Paso => {
+                    resultado.escenarios.insert(id.clone(), true);
+                }
+                Prueba::Fallo { codigo, cita } => {
+                    resultado.escenarios.insert(id.clone(), false);
+                    let detalle = format!("escenario falló (código {codigo})");
+                    resultado
+                        .sonda
+                        .hallazgos
+                        .push(hallazgo_de_escenario(escenario, &detalle, &cita, reqs));
+                }
+                Prueba::Pendiente(motivo) => resultado.pendientes.push(Pendiente {
+                    test: format!("tarea.toml::escenario-{id}"),
+                    motivo,
+                    colab: None,
+                }),
+            }
+            resultado
+                .lugar_escenarios
+                .insert(id, LugarEscenario::Imagen);
+        }
+    }
+    resultado.pendientes.extend(construccion.pendientes);
+    resultado.sonda.hallazgos.extend(construccion.hallazgos);
+    resultado.sin_veredicto = construccion.sin_veredicto;
+    resultado.avisos = avisos;
+    // Sin construcción, la entrega no da verde: el resto de la evaluación sigue con su veredicto.
+    if !resultado.sin_veredicto.is_empty() {
+        let causas: Vec<&str> = resultado
+            .sin_veredicto
+            .iter()
+            .map(|m| m.causa.as_str())
+            .collect();
+        let causas = causas.join("; ");
+        resultado.sonda.valor = None;
+        resultado.sonda.motivo = Some(match resultado.sonda.motivo.take() {
+            Some(previo) => format!("{previo}; {causas}"),
+            None => causas,
+        });
+    } else if resultado.sonda.motivo.is_none() {
+        resultado.sonda.valor = Some(puntuar_hallazgos(&resultado.sonda.hallazgos, reqs));
+    }
+    Ok(resultado)
+}
+
+/// Resultado de un escenario corrido dentro de la imagen.
+enum Prueba {
+    Paso,
+    Fallo {
+        codigo: i32,
+        cita: String,
+    },
+    /// No se puede medir sin red: el contenedor corre con `--network none`.
+    Pendiente(String),
+}
+
+/// Contenedor vivo de la imagen construida, donde los escenarios corren con `podman exec`.
+/// Su `Drop` lo borra con `podman rm -f -t 0`, pase lo que pase.
+struct ContenedorEscenario {
+    nombre: String,
+    /// Verdadero si la imagen trae `timeout`. Si no, el plazo lo pone Root desde afuera.
+    tiene_timeout: bool,
+}
+
+/// Contador de los contenedores de escenario de este proceso.
+static CONTADOR_ESCENARIO: AtomicU64 = AtomicU64::new(0);
+
+impl ContenedorEscenario {
+    /// Arranca la imagen sin red, con `sleep` o, si no está, con `tail -f /dev/null`.
+    /// Sin `sh` no sirve para escenarios: devuelve el motivo y la evaluación usa el contenedor de evaluación.
+    fn iniciar(imagen: &str, oraculo: &Path) -> Result<Self, String> {
+        // Los escenarios son scripts de la tarea: se montan en solo lectura, sin copiarlos a la imagen.
+        let montaje = format!("{}:/oraculo:ro,{SUFIJO_SELINUX}", oraculo.display());
+        let nombre = format!(
+            "root-entrega-esc-{}-{}",
+            std::process::id(),
+            CONTADOR_ESCENARIO.fetch_add(1, Ordering::Relaxed)
+        );
+        for comando in [vec!["sleep", "600"], vec!["tail", "-f", "/dev/null"]] {
+            let mut args = vec![
+                "run",
+                "-d",
+                "--network",
+                "none",
+                "--pull=never",
+                "--name",
+                nombre.as_str(),
+                "-v",
+                montaje.as_str(),
+                "--entrypoint",
+                comando[0],
+                imagen,
+            ];
+            args.extend_from_slice(&comando[1..]);
+            let arranco = correr_podman(&args, PLAZO_CORTO).is_ok_and(|s| s.codigo == 0);
+            if arranco && corriendo(&nombre) {
+                let sh = correr_podman(&["exec", nombre.as_str(), "sh", "-c", "true"], PLAZO_CORTO);
+                if sh.is_ok_and(|s| s.codigo == 0) {
+                    let tiene_timeout = correr_podman(
+                        &["exec", nombre.as_str(), "sh", "-c", "command -v timeout"],
+                        PLAZO_CORTO,
+                    )
+                    .is_ok_and(|s| s.codigo == 0);
+                    return Ok(ContenedorEscenario {
+                        nombre,
+                        tiene_timeout,
+                    });
+                }
+                quitar(&nombre);
+                return Err("la imagen no trae sh".into());
+            }
+            quitar(&nombre);
+        }
+        Err("la imagen no trae sleep ni tail: no arranca el contenedor".into())
+    }
+
+    /// Corre el `cmd` del escenario con el límite de `timeout` dentro del contenedor.
+    fn correr(&self, escenario: &Escenario) -> Result<Prueba, ErrorOraculo> {
+        let plazo_texto = TIMEOUT_ESCENARIO.to_string();
+        let mut args = vec!["exec", self.nombre.as_str()];
+        if self.tiene_timeout {
+            args.extend(["timeout", plazo_texto.as_str()]);
+        }
+        args.extend(["sh", "-c", escenario.cmd.as_str()]);
+        // El plazo de Root corta el `podman exec` a los 120 s, con o sin `timeout` en la imagen.
+        let salida = match correr_podman(&args, PLAZO_ESCENARIO) {
+            Ok(salida) => salida,
+            Err(ErrorOraculo::Infra(motivo)) if motivo.contains("superó") => {
+                return Ok(Prueba::Fallo {
+                    codigo: CODIGO_TIEMPO,
+                    cita: format!("el escenario superó {TIMEOUT_ESCENARIO} s"),
+                });
+            }
+            Err(otro) => return Err(otro),
+        };
+        if salida.codigo == CODIGO_PODMAN {
+            return Err(ErrorOraculo::Infra(format!(
+                "podman no pudo correr el escenario {}",
+                escenario.id
+            )));
+        }
+        if salida.codigo == 0 {
+            return Ok(Prueba::Paso);
+        }
+        let texto = format!("{}\n{}", salida.stdout, salida.stderr);
+        if pide_red(&texto) {
+            let linea = ultima_linea_de(&texto).unwrap_or_default();
+            return Ok(Prueba::Pendiente(format!(
+                "necesita red: el contenedor de escenario corre con --network none: {linea}"
+            )));
+        }
+        let cita = ultima_linea_de(&texto).unwrap_or_else(|| escenario.id.clone());
+        Ok(Prueba::Fallo {
+            codigo: salida.codigo,
+            cita,
+        })
+    }
+}
+
+impl Drop for ContenedorEscenario {
+    fn drop(&mut self) {
+        quitar(&self.nombre);
+    }
+}
+
+/// Borra un contenedor por nombre, sin esperar la parada. Un fallo no importa: ya hay un resultado.
+fn quitar(nombre: &str) {
+    let _ = correr_podman(&["rm", "-f", "-t", "0", nombre], PLAZO_CORTO);
+}
+
+/// Verdadero si el contenedor sigue corriendo.
+fn corriendo(nombre: &str) -> bool {
+    correr_podman(
+        &[
+            "container",
+            "inspect",
+            "--format",
+            "{{.State.Running}}",
+            nombre,
+        ],
+        PLAZO_CORTO,
+    )
+    .is_ok_and(|s| s.stdout.trim() == "true")
+}
+
+/// Última línea no vacía de un texto.
+fn ultima_linea_de(texto: &str) -> Option<String> {
+    texto
+        .lines()
+        .map(str::trim)
+        .rev()
+        .find(|l| !l.is_empty())
+        .map(str::to_string)
 }
 
 /// Script de `sh` que corre la entrega y los escenarios. Escribe `.rc` y `.log` en `/salida`.
 /// Sin `[entrega]`, solo corre los escenarios, sobre `/repo`.
 pub fn construir_script(tarea: &Tarea) -> String {
+    construir_script_con(tarea, true)
+}
+
+/// Script del contenedor de evaluación. Con `escenarios` en falso no corre ninguno: van a la imagen.
+fn construir_script_con(tarea: &Tarea, escenarios: bool) -> String {
+    let eval: &[Escenario] = if escenarios { &tarea.escenario } else { &[] };
     let mut s = String::new();
     if tarea.lenguaje == "rust" {
         // El preludio termina en `&& `: su `true` aísla un fallo de caché del resto del script.
@@ -355,7 +698,7 @@ pub fn construir_script(tarea: &Tarea) -> String {
     } else {
         s.push_str("cd /repo || exit 1\n");
     }
-    for escenario in &tarea.escenario {
+    for escenario in eval {
         s.push_str(&format!(
             "{{ timeout {TIMEOUT_ESCENARIO} sh -c {}; echo $? > {SALIDA}/entrega-escenario-{}.rc; }} \
              2>&1 | tail -n {LINEAS_ESCENARIO} > {SALIDA}/entrega-escenario-{}.log\n",
@@ -391,9 +734,24 @@ pub fn archivos_faltantes(repo: &Path, archivos: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Sonda de entrega. Un `Err` del ejecutor es infraestructura: no hay veredicto.
+/// Sonda de entrega con el contenedor de evaluación para todo. Un `Err` del ejecutor es infraestructura.
 pub fn sonda_entrega(ej: &dyn EjecutorHerramienta, repo: &Path, tarea: &Tarea) -> ResultadoEntrega {
+    sonda_entrega_con(ej, repo, tarea, true)
+}
+
+/// Sonda de entrega. `escenarios_eval` en falso deja los escenarios para la imagen construida.
+fn sonda_entrega_con(
+    ej: &dyn EjecutorHerramienta,
+    repo: &Path,
+    tarea: &Tarea,
+    escenarios_eval: bool,
+) -> ResultadoEntrega {
     let reqs = tarea.requisito.as_slice();
+    let eval: &[Escenario] = if escenarios_eval {
+        &tarea.escenario
+    } else {
+        &[]
+    };
     let mut hallazgos = Vec::new();
     let mut motivos: Vec<String> = Vec::new();
     let archivos = tarea
@@ -415,12 +773,22 @@ pub fn sonda_entrega(ej: &dyn EjecutorHerramienta, repo: &Path, tarea: &Tarea) -
         Err(motivo) => motivos.push(motivo),
     }
     let mut escenarios = BTreeMap::new();
-    if tarea.entrega.is_some() || !tarea.escenario.is_empty() {
-        match ej.ejecutar(&construir_script(tarea)) {
-            Ok(salida) => revisar_salida(&salida.archivos, tarea, &mut hallazgos, &mut escenarios),
+    if tarea.entrega.is_some() || !eval.is_empty() {
+        match ej.ejecutar(&construir_script_con(tarea, escenarios_eval)) {
+            Ok(salida) => revisar_salida(
+                &salida.archivos,
+                tarea,
+                eval,
+                &mut hallazgos,
+                &mut escenarios,
+            ),
             Err(e) => motivos.push(e.to_string()),
         }
     }
+    let lugar_escenarios = escenarios
+        .keys()
+        .map(|id| (id.clone(), LugarEscenario::ContenedorEvaluacion))
+        .collect();
     // Sin veredicto: el motivo va a la sonda y los escenarios no medidos no se inventan.
     let (valor, motivo) = if motivos.is_empty() {
         (Some(puntuar_hallazgos(&hallazgos, reqs)), None)
@@ -435,6 +803,10 @@ pub fn sonda_entrega(ej: &dyn EjecutorHerramienta, repo: &Path, tarea: &Tarea) -
             hallazgos,
         },
         escenarios,
+        lugar_escenarios,
+        pendientes: Vec::new(),
+        sin_veredicto: Vec::new(),
+        avisos: Vec::new(),
     }
 }
 
@@ -442,6 +814,7 @@ pub fn sonda_entrega(ej: &dyn EjecutorHerramienta, repo: &Path, tarea: &Tarea) -
 fn revisar_salida(
     archivos: &BTreeMap<String, String>,
     tarea: &Tarea,
+    corridos: &[Escenario],
     hallazgos: &mut Vec<Hallazgo>,
     escenarios: &mut BTreeMap<String, bool>,
 ) {
@@ -469,7 +842,7 @@ fn revisar_salida(
             DIMENSION, 3, "", 0, &cita, detalle, SONDA, reqs,
         ));
     }
-    for escenario in &tarea.escenario {
+    for escenario in corridos {
         let rc = codigo(archivos, &format!("entrega-escenario-{}.rc", escenario.id));
         let ok = rc == Some(0);
         escenarios.insert(escenario.id.clone(), ok);
@@ -481,18 +854,28 @@ fn revisar_salida(
             Some(c) => format!("escenario falló (código {c})"),
             None => "no corrió: el escenario no llegó a su código de salida".to_string(),
         };
-        let impacto: Vec<String> = reqs
-            .iter()
-            .filter(|r| r.escenarios.contains(&escenario.id))
-            .map(|r| r.id.clone())
-            .collect();
         // La cita es la última línea de su salida. Sin salida, el id del escenario.
         let cita = ultima_linea(archivos, &format!("entrega-escenario-{}.log", escenario.id))
             .unwrap_or_else(|| escenario.id.clone());
-        let mut h = crear_hallazgo(DIMENSION, 2, "", 0, &cita, &detalle, SONDA, reqs);
-        h.impacto = impacto;
-        hallazgos.push(h);
+        hallazgos.push(hallazgo_de_escenario(escenario, &detalle, &cita, reqs));
     }
+}
+
+/// Hallazgo de entrega de un escenario que no pasó. Lleva los requisitos que lo citan.
+fn hallazgo_de_escenario(
+    escenario: &Escenario,
+    detalle: &str,
+    cita: &str,
+    reqs: &[Requisito],
+) -> Hallazgo {
+    let impacto: Vec<String> = reqs
+        .iter()
+        .filter(|r| r.escenarios.contains(&escenario.id))
+        .map(|r| r.id.clone())
+        .collect();
+    let mut h = crear_hallazgo(DIMENSION, 2, "", 0, cita, detalle, SONDA, reqs);
+    h.impacto = impacto;
+    h
 }
 
 /// Código de salida de un `.rc`. `None` si el archivo falta o no es un número.

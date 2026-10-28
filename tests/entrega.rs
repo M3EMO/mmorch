@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use root::oracle::ErrorOraculo;
 use root::oracle::configs::sondas_configs;
 use root::oracle::descarga::{self, Preparacion, Problema, traer_imagenes_base};
-use root::oracle::entrega::{construir_dockerfile, sonda_entrega};
+use root::oracle::entrega::{LugarEscenario, construir_dockerfile, entregar, sonda_entrega};
 use root::oracle::junit::ResultadoTest;
 use root::oracle::perfiles::deduplicar_hallazgos;
 use root::oracle::perfiles::herramientas::{
@@ -47,13 +47,18 @@ fn ejecutor(repo: &Path) -> EjecutorContenedor {
 
 /// Tarea de lenguaje `shell`, con `extra` al final del `tarea.toml`.
 fn tarea_con(extra: &str) -> Tarea {
-    let dir = tempfile::tempdir().expect("temp dir");
+    // La carpeta sobrevive al test: `entregar` exige que `tarea.dir` exista (Tarea 7i).
+    let dir = tempfile::Builder::new()
+        .prefix("tarea-")
+        .tempdir_in(base_9d2())
+        .expect("temp dir")
+        .keep();
     let texto = format!(
         "nombre = \"x\"\nlenguaje = \"shell\"\nimagen = \"i\"\nspec = \"s\"\n\
          [contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n{extra}"
     );
-    fs::write(dir.path().join("tarea.toml"), texto).expect("escribe tarea.toml");
-    Tarea::cargar_de(dir.path()).expect("carga la tarea")
+    fs::write(dir.join("tarea.toml"), texto).expect("escribe tarea.toml");
+    Tarea::cargar_de(&dir).expect("carga la tarea")
 }
 
 /// Repo con README, Dockerfile que define `USER` y el `run.sh` dado.
@@ -359,7 +364,7 @@ fn entrega_build_sin_run_construye_arranca_sin_root_y_borra_su_imagen() {
         "{FROM_ALPINE}COPY hola.txt /hola.txt\nUSER 1000\n"
     ));
     let home = home_9d2();
-    let r = construir_dockerfile(repo.path(), home.path(), &tarea_con("")).expect("construye");
+    let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &[]).expect("construye");
     assert!(r.construida, "{r:?}");
     assert_eq!(r.corre_sin_root, Some(true), "{r:?}");
     assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
@@ -377,7 +382,7 @@ fn entrega_build_sin_user_corre_como_root_y_la_regla_no_se_duplica() {
     let repo = dockerfile_9d2(&format!("{FROM_ALPINE}COPY hola.txt /hola.txt\n"));
     let home = home_9d2();
     let tarea = tarea_con("");
-    let r = construir_dockerfile(repo.path(), home.path(), &tarea).expect("construye");
+    let r = construir_dockerfile(repo.path(), home.path(), &tarea, &[]).expect("construye");
     assert!(r.construida, "{r:?}");
     assert_eq!(r.corre_sin_root, Some(false), "{r:?}");
     // La regla de root la emite la sonda estática. La construcción no la repite.
@@ -399,7 +404,7 @@ fn entrega_build_run_apk_sin_red_queda_pendiente_con_su_linea_y_sin_hallazgo() {
     let _serie = serie();
     let repo = dockerfile_9d2(&format!("{FROM_ALPINE}RUN apk add --no-cache curl\n"));
     let home = home_9d2();
-    let r = construir_dockerfile(repo.path(), home.path(), &tarea_con("")).expect("construye");
+    let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &[]).expect("construye");
     assert!(
         r.hallazgos.is_empty(),
         "sin red no se cobra al producto: {:?}",
@@ -426,7 +431,7 @@ fn entrega_build_run_false_da_hallazgo_de_imagen_que_no_construye() {
     let _serie = serie();
     let repo = dockerfile_9d2(&format!("{FROM_ALPINE}RUN false\n"));
     let home = home_9d2();
-    let r = construir_dockerfile(repo.path(), home.path(), &tarea_con("")).expect("construye");
+    let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &[]).expect("construye");
     assert!(r.pendientes.is_empty(), "{:?}", r.pendientes);
     assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
     let h = &r.hallazgos[0];
@@ -448,7 +453,7 @@ fn entrega_build_copy_inexistente_da_hallazgo_y_no_pendiente() {
     let _serie = serie();
     let repo = dockerfile_9d2(&format!("{FROM_ALPINE}COPY no-existe /x\n"));
     let home = home_9d2();
-    let r = construir_dockerfile(repo.path(), home.path(), &tarea_con("")).expect("construye");
+    let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &[]).expect("construye");
     assert!(r.pendientes.is_empty(), "{:?}", r.pendientes);
     assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
     assert_eq!(r.hallazgos[0].linea, 2);
@@ -462,7 +467,7 @@ fn entrega_build_wget_sin_red_queda_pendiente() {
         "{FROM_ALPINE}RUN wget -q http://example.com -O /x\n"
     ));
     let home = home_9d2();
-    let r = construir_dockerfile(repo.path(), home.path(), &tarea_con("")).expect("construye");
+    let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &[]).expect("construye");
     assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
     assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
     assert!(
@@ -477,7 +482,7 @@ fn entrega_build_imagen_base_ausente_localmente_es_pendiente_no_infra() {
     let _serie = serie();
     let repo = dockerfile_9d2("FROM localhost/no-existe:9\nUSER 1000\n");
     let home = home_9d2();
-    let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""))
+    let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &[])
         .expect("la ausencia local no es infraestructura");
     assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
     assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
@@ -524,16 +529,50 @@ fn entrega_pull_baja_alpine_ignora_el_alias_y_no_ejecuta_run() {
 }
 
 #[test]
-fn entrega_pull_from_con_variable_queda_sin_resolver_y_no_baja_nada() {
+fn entrega_pull_from_con_arg_se_resuelve_y_usa_la_imagen_local() {
+    let _serie = serie();
     let repo = repo_9d2(&[(
         "Dockerfile",
         "ARG BASE=docker.io/library/alpine:3.20\nFROM ${BASE}\n",
     )]);
-    let imagenes = traer_imagenes_base(repo.path()).expect("no necesita red");
+    let imagenes = traer_imagenes_base(repo.path()).expect("la imagen es local: no hace falta red");
     assert_eq!(imagenes.len(), 1, "{imagenes:?}");
-    assert_eq!(imagenes[0].imagen, "${BASE}");
-    assert!(imagenes[0].sin_resolver.is_some(), "{:?}", imagenes[0]);
-    assert_eq!(imagenes[0].digest, None);
+    assert_eq!(
+        imagenes[0].imagen, "${BASE}",
+        "el Gate lista el FROM escrito"
+    );
+    assert_eq!(imagenes[0].resuelta.as_deref(), Some(ALPINE));
+    assert_eq!(imagenes[0].sin_resolver, None, "{:?}", imagenes[0]);
+    assert!(imagenes[0].digest.is_some(), "{:?}", imagenes[0]);
+}
+
+/// Etiqueta temporal de podman, borrada al salir de la prueba aunque falle.
+struct EtiquetaTemporal(String);
+
+impl Drop for EtiquetaTemporal {
+    fn drop(&mut self) {
+        let _ = Command::new("podman").args(["rmi", "-f", &self.0]).output();
+    }
+}
+
+#[test]
+fn entrega_imagen_base_ya_local_no_se_descarga() {
+    let _serie = serie();
+    // El registro `localhost:1` no responde. Si la fase intentara un pull, daría infraestructura.
+    let tag = "localhost:1/root-entrega-local:1";
+    let etiquetada = Command::new("podman")
+        .args(["tag", ALPINE, tag])
+        .status()
+        .expect("corre podman")
+        .success();
+    assert!(etiquetada, "no se pudo etiquetar alpine");
+    let _limpieza = EtiquetaTemporal(tag.into());
+    let repo = repo_9d2(&[("Dockerfile", &format!("FROM {tag}\nUSER 1000\n"))]);
+    let imagenes = traer_imagenes_base(repo.path()).expect("la fase no falla");
+    assert_eq!(imagenes.len(), 1, "{imagenes:?}");
+    assert!(!imagenes[0].descargada, "{:?}", imagenes[0]);
+    assert_eq!(imagenes[0].problema, None, "{:?}", imagenes[0]);
+    assert!(imagenes[0].digest.is_some(), "{:?}", imagenes[0]);
 }
 
 #[test]
@@ -555,11 +594,89 @@ fn entrega_pull_imagen_inexistente_se_marca_no_existe() {
 }
 
 #[test]
-fn entrega_pull_sin_red_falla_claro_con_infraestructura() {
+fn entrega_pull_sin_red_no_corta_y_queda_como_problema_de_infraestructura() {
     let _serie = serie();
     let repo = repo_9d2(&[("Dockerfile", "FROM localhost:1/alpine:3.20\n")]);
-    let r = traer_imagenes_base(repo.path());
-    assert!(matches!(r, Err(ErrorOraculo::Infra(_))), "{r:?}");
+    let imagenes =
+        traer_imagenes_base(repo.path()).expect("un pull fallido no es error de la fase");
+    assert_eq!(imagenes.len(), 1, "{imagenes:?}");
+    assert!(
+        matches!(imagenes[0].problema, Some(Problema::Infraestructura(_))),
+        "{:?}",
+        imagenes[0]
+    );
+    assert!(!imagenes[0].descargada, "{:?}", imagenes[0]);
+}
+
+#[test]
+fn entrega_pull_que_falla_no_corta_preparar() {
+    let _serie = serie();
+    let repo = repo_9d2(&[("Dockerfile", "FROM localhost:1/x:1\nUSER 1000\n")]);
+    let home = home_9d2();
+    let tarea = tarea_con("");
+    let (p, imagenes) =
+        descarga::preparar_con_imagenes(repo.path(), &tarea, home.path(), LIMITE_9D2)
+            .expect("preparar no corta por un pull fallido");
+    assert!(matches!(p, Preparacion::Lista { .. }), "{p:?}");
+    assert_eq!(imagenes.len(), 1, "{imagenes:?}");
+    assert!(
+        matches!(imagenes[0].problema, Some(Problema::Infraestructura(_))),
+        "{:?}",
+        imagenes[0]
+    );
+    let gates = gates_descarga(home.path(), &tarea.nombre);
+    assert_eq!(gates.len(), 1, "{gates:?}");
+    let problema = gates[0]["extra"]["imagenes"][0]["problema"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        problema.starts_with("infraestructura: "),
+        "el Gate registra la falla: {problema}"
+    );
+}
+
+#[test]
+fn entrega_pull_que_falla_da_sin_veredicto_de_infraestructura_y_el_resto_da_veredicto() {
+    let _serie = serie();
+    let repo = repo_9d2(&[
+        ("README.md", "# x\n"),
+        ("Dockerfile", "FROM localhost:1/x:1\nUSER 1000\n"),
+        ("run.sh", ""),
+    ]);
+    let home = home_9d2();
+    let tarea = tarea_con(&entrega_con("echo instalado", "sleep 60"));
+    let (_, imagenes) =
+        descarga::preparar_con_imagenes(repo.path(), &tarea, home.path(), LIMITE_9D2)
+            .expect("prepara");
+    let r = entregar(
+        &ejecutor(repo.path()),
+        repo.path(),
+        &tarea,
+        home.path(),
+        &imagenes,
+    )
+    .expect("la evaluación sigue");
+    assert_eq!(r.sin_veredicto.len(), 1, "{:?}", r.sin_veredicto);
+    assert_eq!(
+        r.sin_veredicto[0].causa,
+        "infraestructura: no se pudo bajar la imagen base localhost:1/x:1"
+    );
+    assert_eq!(r.sin_veredicto[0].linea, 1);
+    assert_eq!(
+        r.sonda.valor, None,
+        "sin construcción, la entrega no da verde"
+    );
+    // El resto de la evaluación da su veredicto: los escenarios corren en el contenedor de evaluación.
+    let esperado: BTreeMap<String, bool> =
+        [("ok".to_string(), true), ("falla".to_string(), false)].into();
+    assert_eq!(r.escenarios, esperado);
+    assert!(
+        r.lugar_escenarios
+            .values()
+            .all(|l| *l == LugarEscenario::ContenedorEvaluacion),
+        "{:?}",
+        r.lugar_escenarios
+    );
 }
 
 #[test]
@@ -588,7 +705,7 @@ fn entrega_gate_descarga_incluye_imagenes_con_su_digest() {
 }
 
 #[test]
-fn entrega_preparar_imagen_inexistente_da_hallazgo_de_imagen_base() {
+fn entrega_preparar_imagen_inexistente_no_da_hallazgo_al_producto() {
     let _serie = serie();
     let repo = repo_9d2(&[(
         "Dockerfile",
@@ -598,18 +715,319 @@ fn entrega_preparar_imagen_inexistente_da_hallazgo_de_imagen_base() {
     let p =
         descarga::preparar(repo.path(), &tarea_con(""), home.path(), LIMITE_9D2).expect("prepara");
     let Preparacion::Lista { hallazgos, .. } = p else {
-        panic!("la evaluación sigue con el hallazgo: {p:?}");
+        panic!("la evaluación sigue: la falla es de la construcción, no del producto: {p:?}");
     };
-    assert_eq!(hallazgos.len(), 1, "{hallazgos:?}");
-    let h = &hallazgos[0];
+    assert!(hallazgos.is_empty(), "{hallazgos:?}");
+}
+
+#[test]
+fn entrega_imagen_inexistente_o_privada_da_sin_veredicto_sin_hallazgo() {
+    let _serie = serie();
+    let repo = repo_9d2(&[(
+        "Dockerfile",
+        "FROM docker.io/library/root-no-existe-xyz:1\nUSER 1000\n",
+    )]);
+    let home = home_9d2();
+    let imagenes = traer_imagenes_base(repo.path()).expect("la ausencia no es infraestructura");
+    let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &imagenes)
+        .expect("construye");
+    assert_eq!(r.sin_veredicto.len(), 1, "{:?}", r.sin_veredicto);
+    let motivo = &r.sin_veredicto[0];
     assert_eq!(
-        (h.dimension, h.severidad, h.linea),
-        (Dimension::Entrega, 3, 1)
+        motivo.causa,
+        "imagen base inaccesible: no existe o es privada"
+    );
+    assert_eq!(motivo.linea, 1);
+    assert_eq!(
+        motivo.imagen.as_deref(),
+        Some("docker.io/library/root-no-existe-xyz:1")
+    );
+    assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+    assert!(r.pendientes.is_empty(), "{:?}", r.pendientes);
+    assert!(!r.construida);
+}
+
+#[test]
+fn entrega_arg_base_construye_con_el_from_resuelto() {
+    asegurar_imagen(ALPINE);
+    let _serie = serie();
+    let repo = repo_9d2(&[
+        (
+            "Dockerfile",
+            "ARG BASE=docker.io/library/alpine:3.20\nFROM ${BASE}\nCOPY hola.txt /hola.txt\nUSER 1000\n",
+        ),
+        ("hola.txt", "hola\n"),
+    ]);
+    let home = home_9d2();
+    let imagenes = traer_imagenes_base(repo.path()).expect("la imagen es local");
+    let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &imagenes)
+        .expect("construye");
+    assert!(r.sin_veredicto.is_empty(), "{:?}", r.sin_veredicto);
+    assert!(r.construida, "{r:?}");
+    assert_eq!(r.corre_sin_root, Some(true), "{r:?}");
+    assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+    assert!(
+        imagenes_temporales().is_empty(),
+        "queda una imagen temporal"
+    );
+}
+
+#[test]
+fn entrega_from_con_variable_sin_valor_da_sin_veredicto_con_su_linea() {
+    let _serie = serie();
+    let repo = repo_9d2(&[("Dockerfile", "ARG OTRO=x\nFROM ${SIN_VALOR}\nUSER 1000\n")]);
+    let home = home_9d2();
+    let imagenes = traer_imagenes_base(repo.path()).expect("no necesita red");
+    assert_eq!(
+        imagenes[0].imagen, "${SIN_VALOR}",
+        "el Gate lista el FROM escrito"
+    );
+    let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &imagenes)
+        .expect("construye");
+    assert_eq!(r.sin_veredicto.len(), 1, "{:?}", r.sin_veredicto);
+    assert_eq!(r.sin_veredicto[0].causa, "imagen base sin resolver");
+    assert_eq!(r.sin_veredicto[0].linea, 2);
+    assert_eq!(r.sin_veredicto[0].imagen.as_deref(), Some("${SIN_VALOR}"));
+    assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+    assert!(r.pendientes.is_empty(), "{:?}", r.pendientes);
+    assert!(!r.construida);
+}
+
+/// Contenedores de escenario que quedan en podman.
+fn contenedores_escenario() -> Vec<String> {
+    let salida = Command::new("podman")
+        .args(["ps", "-a", "--format", "{{.Names}}"])
+        .output()
+        .expect("corre podman ps");
+    String::from_utf8_lossy(&salida.stdout)
+        .lines()
+        .filter(|l| l.contains("root-entrega-esc"))
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn entrega_escenario_corre_contra_la_imagen_construida() {
+    asegurar_imagen(ALPINE);
+    let _serie = serie();
+    let repo = dockerfile_9d2(&format!(
+        "{FROM_ALPINE}COPY hola.txt /hola.txt\nUSER 1000\n"
+    ));
+    let home = home_9d2();
+    let tarea = tarea_con("[[escenario]]\nid = \"hola\"\ncmd = \"test -f /hola.txt\"\n");
+    let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
+    let r = entregar(
+        &Falso(salida_con(&[])),
+        repo.path(),
+        &tarea,
+        home.path(),
+        &imagenes,
+    )
+    .expect("entrega");
+    assert_eq!(r.escenarios.get("hola"), Some(&true), "{r:?}");
+    assert_eq!(
+        r.lugar_escenarios.get("hola"),
+        Some(&LugarEscenario::Imagen),
+        "{r:?}"
+    );
+    assert!(r.sonda.hallazgos.is_empty(), "{:?}", r.sonda.hallazgos);
+    assert!(
+        contenedores_escenario().is_empty(),
+        "queda un contenedor de escenario"
     );
     assert!(
-        h.detalle
-            .contains("la imagen base no existe: docker.io/library/root-no-existe-xyz:1"),
-        "{}",
-        h.detalle
+        imagenes_temporales().is_empty(),
+        "queda una imagen temporal"
     );
+}
+
+#[test]
+fn entrega_escenario_sin_construir_corre_en_contenedor_de_evaluacion() {
+    asegurar_imagen(ALPINE);
+    let _serie = serie();
+    let repo = dockerfile_9d2(&format!("{FROM_ALPINE}RUN false\n"));
+    let home = home_9d2();
+    let tarea = tarea_con("[[escenario]]\nid = \"hola\"\ncmd = \"test -f /hola.txt\"\n");
+    let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
+    let ej = Falso(salida_con(&[("entrega-escenario-hola.rc", "0\n")]));
+    let r = entregar(&ej, repo.path(), &tarea, home.path(), &imagenes).expect("entrega");
+    assert!(
+        r.sonda
+            .hallazgos
+            .iter()
+            .any(|h| h.detalle.contains("no construye")),
+        "{:?}",
+        r.sonda.hallazgos
+    );
+    assert_eq!(r.escenarios.get("hola"), Some(&true), "{r:?}");
+    assert_eq!(
+        r.lugar_escenarios.get("hola"),
+        Some(&LugarEscenario::ContenedorEvaluacion),
+        "{r:?}"
+    );
+    assert!(
+        imagenes_temporales().is_empty(),
+        "queda una imagen temporal"
+    );
+}
+
+#[test]
+fn entrega_escenario_con_red_queda_pendiente_y_no_false() {
+    asegurar_imagen(ALPINE);
+    let _serie = serie();
+    let repo = dockerfile_9d2(&format!(
+        "{FROM_ALPINE}COPY hola.txt /hola.txt\nUSER 1000\n"
+    ));
+    let home = home_9d2();
+    let tarea =
+        tarea_con("[[escenario]]\nid = \"descarga\"\ncmd = \"wget -q http://example.com -O /x\"\n");
+    let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
+    let r = entregar(
+        &Falso(salida_con(&[])),
+        repo.path(),
+        &tarea,
+        home.path(),
+        &imagenes,
+    )
+    .expect("entrega");
+    assert_eq!(r.escenarios.get("descarga"), None, "{r:?}");
+    assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
+    assert!(r.pendientes[0].motivo.contains("red"), "{:?}", r.pendientes);
+    assert!(r.sonda.hallazgos.is_empty(), "{:?}", r.sonda.hallazgos);
+    assert!(
+        contenedores_escenario().is_empty(),
+        "queda un contenedor de escenario"
+    );
+    assert!(
+        imagenes_temporales().is_empty(),
+        "queda una imagen temporal"
+    );
+}
+
+// ---- Tarea 7i-A (ajuste): los escenarios usan el `tarea.dir` montado en /oraculo ----
+
+/// Tarea cuyo `tarea.toml` vive en `dir`, que el test conserva vivo.
+fn tarea_en(dir: &Path, extra: &str) -> Tarea {
+    let texto = format!(
+        "nombre = \"x\"\nlenguaje = \"shell\"\nimagen = \"i\"\nspec = \"s\"\n\
+         [contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n{extra}"
+    );
+    fs::write(dir.join("tarea.toml"), texto).expect("escribe tarea.toml");
+    Tarea::cargar_de(dir).expect("carga la tarea")
+}
+
+#[test]
+fn entrega_escenario_de_oraculo_corre_contra_la_imagen() {
+    use std::os::unix::fs::PermissionsExt;
+    asegurar_imagen(ALPINE);
+    let _serie = serie();
+    let oraculo = tempfile::Builder::new()
+        .prefix("entrega-oraculo-")
+        .tempdir_in(base_9d2())
+        .expect("carpeta de la tarea");
+    fs::create_dir_all(oraculo.path().join("escenarios")).expect("crea escenarios/");
+    let script = oraculo.path().join("escenarios/ok.sh");
+    fs::write(&script, "#!/bin/sh\ntest -f /hola.txt\n").expect("escribe el script");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("permisos");
+    let tarea = tarea_en(
+        oraculo.path(),
+        "[[escenario]]\nid = \"ok\"\ncmd = \"/oraculo/escenarios/ok.sh\"\n",
+    );
+    let repo = dockerfile_9d2(&format!(
+        "{FROM_ALPINE}COPY hola.txt /hola.txt\nUSER 1000\n"
+    ));
+    let home = home_9d2();
+    let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
+    let r = entregar(
+        &Falso(salida_con(&[])),
+        repo.path(),
+        &tarea,
+        home.path(),
+        &imagenes,
+    )
+    .expect("entrega");
+    assert_eq!(r.escenarios.get("ok"), Some(&true), "{r:?}");
+    assert_eq!(
+        r.lugar_escenarios.get("ok"),
+        Some(&LugarEscenario::Imagen),
+        "{r:?}"
+    );
+    assert!(
+        contenedores_escenario().is_empty(),
+        "queda un contenedor de escenario"
+    );
+}
+
+#[test]
+fn entrega_imagen_construida_no_contiene_oraculo() {
+    asegurar_imagen(ALPINE);
+    let _serie = serie();
+    // Si el build viera /oraculo, esta RUN fallaría y construida sería falso.
+    let repo = dockerfile_9d2(&format!(
+        "{FROM_ALPINE}COPY hola.txt /hola.txt\nRUN test ! -e /oraculo\nUSER 1000\n"
+    ));
+    let home = home_9d2();
+    let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
+    let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &imagenes)
+        .expect("construye");
+    assert!(r.construida, "{r:?}");
+    assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+}
+
+#[test]
+fn entrega_escenario_sin_timeout_en_la_imagen_no_sale_127() {
+    asegurar_imagen(ALPINE);
+    let _serie = serie();
+    // Se quita `timeout` de la imagen: el escenario debe correr igual, con el plazo de Root.
+    let repo = dockerfile_9d2(&format!(
+        "{FROM_ALPINE}COPY hola.txt /hola.txt\nRUN rm -f /usr/bin/timeout /bin/timeout\nUSER 1000\n"
+    ));
+    let oraculo = tempfile::Builder::new()
+        .prefix("entrega-oraculo-")
+        .tempdir_in(base_9d2())
+        .expect("carpeta de la tarea");
+    let tarea = tarea_en(
+        oraculo.path(),
+        "[[escenario]]\nid = \"hola\"\ncmd = \"test -f /hola.txt\"\n",
+    );
+    let home = home_9d2();
+    let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
+    let r = entregar(
+        &Falso(salida_con(&[])),
+        repo.path(),
+        &tarea,
+        home.path(),
+        &imagenes,
+    )
+    .expect("entrega");
+    assert_eq!(r.escenarios.get("hola"), Some(&true), "{r:?}");
+    assert_eq!(
+        r.lugar_escenarios.get("hola"),
+        Some(&LugarEscenario::Imagen),
+        "{r:?}"
+    );
+}
+
+#[test]
+fn entrega_escenario_sin_carpeta_de_tarea_da_infraestructura() {
+    let _serie = serie();
+    let repo = dockerfile_9d2(&format!("{FROM_ALPINE}USER 1000\n"));
+    let oraculo = tempfile::Builder::new()
+        .prefix("entrega-oraculo-")
+        .tempdir_in(base_9d2())
+        .expect("carpeta de la tarea");
+    let tarea = tarea_en(
+        oraculo.path(),
+        "[[escenario]]\nid = \"hola\"\ncmd = \"true\"\n",
+    );
+    drop(oraculo);
+    let home = home_9d2();
+    let r = entregar(
+        &Falso(salida_con(&[])),
+        repo.path(),
+        &tarea,
+        home.path(),
+        &[],
+    );
+    assert!(matches!(r, Err(ErrorOraculo::Infra(_))), "{r:?}");
 }

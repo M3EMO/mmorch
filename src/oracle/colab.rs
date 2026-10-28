@@ -9,7 +9,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,8 +21,15 @@ use crate::observe;
 
 /// Variable que apunta al binario de la CLI. Los tests la usan con un falso.
 const VARIABLE_BINARIO: &str = "ROOT_COLAB_BIN";
+/// Solo para tests: baja el plazo del primer paso a los segundos que indique.
+const VARIABLE_PLAZO_PRUEBA: &str = "ROOT_COLAB_PLAZO_PRIMER_PASO_S";
 /// Tiempo máximo de cada llamada a la CLI, en segundos.
 const TIMEOUT_LLAMADA: Duration = Duration::from_secs(3600);
+/// Plazo del primer paso (`new`), que sirve de chequeo de sesión. La CLI responde la asignación
+/// o el error de login rápido. Si Colab tarda más de 60 s, el usuario reintenta.
+const PLAZO_PRIMER_PASO: Duration = Duration::from_secs(60);
+/// Plazo de `colab stop` cuando el primer paso no responde. Su error se ignora.
+const PLAZO_STOP_FALLIDO: Duration = Duration::from_secs(30);
 /// Tiempo de `exec` para leer la GPU.
 const SEG_GPU: u64 = 300;
 /// Tiempo de `exec` para preparar el runtime.
@@ -43,6 +50,9 @@ const ARCHIVO_EVENTOS: &str = "eventos.jsonl";
 const FASE_RUNTIME: &str = "colab-runtime";
 /// Mensaje exacto cuando la CLI no tiene sesión. Root no hace el login.
 pub const MENSAJE_SIN_SESION: &str = "Falta la sesión de Colab. Corré el login OAuth en tu terminal (por ejemplo `colab new -s prueba --gpu T4`, completá el navegador, y después `colab stop -s prueba`) y volvé a lanzar este comando.";
+/// Mensaje cuando el primer paso no responde en su plazo. Probablemente falta el login OAuth.
+/// El texto dice 60 segundos aunque un test baje el plazo, porque el mensaje es para el usuario.
+pub const MENSAJE_SIN_RESPUESTA: &str = "Colab no respondió en 60 segundos. Probablemente falta el login OAuth: corré `colab new -s prueba --gpu T4` en tu terminal, completá el navegador, `colab stop -s prueba`, y volvé a lanzar este comando.";
 /// Textos de stdout o stderr que indican que la CLI no tiene login.
 const MARCADORES_SIN_SESION: &[&str] = &[
     "login",
@@ -113,12 +123,27 @@ pub struct SalidaColab {
 /// Lanza la CLI `colab` con argumentos. Un código distinto de cero es un resultado, no un error.
 pub trait ColabCli {
     fn ejecutar(&self, args: &[String]) -> Result<SalidaColab, ErrorOraculo>;
+
+    /// Como `ejecutar`, con un plazo propio. `Ok(None)` si la CLI no terminó a tiempo.
+    fn ejecutar_con_plazo(
+        &self,
+        args: &[String],
+        _plazo: Duration,
+    ) -> Result<Option<SalidaColab>, ErrorOraculo> {
+        self.ejecutar(args).map(Some)
+    }
+
+    /// Plazo del primer paso (`new`).
+    fn plazo_primer_paso(&self) -> Duration {
+        PLAZO_PRIMER_PASO
+    }
 }
 
 /// CLI real: un proceso con entorno en lista blanca.
 pub struct ColabProceso {
     binario: PathBuf,
     timeout: Duration,
+    plazo_primer_paso: Duration,
 }
 
 impl ColabProceso {
@@ -128,26 +153,46 @@ impl ColabProceso {
             Some(valor) => PathBuf::from(valor),
             None => buscar_colab()?,
         };
+        let plazo_primer_paso = std::env::var(VARIABLE_PLAZO_PRUEBA)
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map_or(PLAZO_PRIMER_PASO, Duration::from_secs);
         Ok(ColabProceso {
             binario,
             timeout: TIMEOUT_LLAMADA,
+            plazo_primer_paso,
         })
     }
 }
 
 impl ColabCli for ColabProceso {
+    fn plazo_primer_paso(&self) -> Duration {
+        self.plazo_primer_paso
+    }
+
     fn ejecutar(&self, args: &[String]) -> Result<SalidaColab, ErrorOraculo> {
-        let mut hijo = Command::new(&self.binario)
+        self.ejecutar_con_plazo(args, self.timeout)?.ok_or_else(|| {
+            ErrorOraculo::Infra(format!("colab superó {} s", self.timeout.as_secs()))
+        })
+    }
+
+    fn ejecutar_con_plazo(
+        &self,
+        args: &[String],
+        plazo: Duration,
+    ) -> Result<Option<SalidaColab>, ErrorOraculo> {
+        let mut orden = Command::new(&self.binario);
+        orden
             .args(args)
             .env_clear()
             .envs(entorno_permitido(std::env::vars_os()))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                ErrorOraculo::Infra(format!("no se pudo lanzar {}: {e}", self.binario.display()))
-            })?;
+            .stderr(Stdio::piped());
+        propio_grupo(&mut orden);
+        let mut hijo = orden.spawn().map_err(|e| {
+            ErrorOraculo::Infra(format!("no se pudo lanzar {}: {e}", self.binario.display()))
+        })?;
         let salida = hijo.stdout.take();
         let errores = hijo.stderr.take();
         let h_salida = thread::spawn(move || leer_todo(salida));
@@ -157,24 +202,21 @@ impl ColabCli for ColabProceso {
             match hijo.try_wait() {
                 Ok(Some(estado)) => break estado,
                 Ok(None) => {
-                    if inicio.elapsed() >= self.timeout {
-                        let _ = hijo.kill();
-                        let _ = hijo.wait();
-                        return Err(ErrorOraculo::Infra(format!(
-                            "colab superó {} s",
-                            self.timeout.as_secs()
-                        )));
+                    if inicio.elapsed() >= plazo {
+                        // Sin join: un nieto vivo podría retener los pipes. Los hilos terminan solos.
+                        matar_arbol(&mut hijo);
+                        return Ok(None);
                     }
                     thread::sleep(Duration::from_millis(50));
                 }
                 Err(e) => return Err(infra("esperar a colab", e)),
             }
         };
-        Ok(SalidaColab {
+        Ok(Some(SalidaColab {
             codigo: estado.code().unwrap_or(-1),
             stdout: h_salida.join().unwrap_or_default(),
             stderr: h_errores.join().unwrap_or_default(),
-        })
+        }))
     }
 }
 
@@ -230,8 +272,17 @@ pub fn correr_en_colab(
     fs::create_dir_all(&tmp).map_err(|e| infra("carpeta temporal de Colab", e))?;
     let corrida = format!("colab-{}", tarea.nombre);
 
-    // La CLI no tiene un chequeo de login sin efectos: `new` hace de chequeo.
-    match cli.ejecutar(&args(&["new", "-s", nombre_sesion, "--gpu", GPU_PEDIDA])) {
+    // La CLI no tiene un chequeo de login sin efectos: `new` hace de chequeo, con plazo corto.
+    let nuevo = args(&["new", "-s", nombre_sesion, "--gpu", GPU_PEDIDA]);
+    let primer = match cli.ejecutar_con_plazo(&nuevo, cli.plazo_primer_paso()) {
+        Ok(None) => {
+            sin_respuesta(cli, home, &corrida, nombre_sesion)?;
+            return Err(ErrorOraculo::Colab(MENSAJE_SIN_RESPUESTA.into()));
+        }
+        Ok(Some(salida)) => Ok(salida),
+        Err(e) => Err(e),
+    };
+    match primer {
         Ok(salida) if salida.codigo == 0 => {}
         Ok(salida) if parece_sin_sesion(&salida) => {
             return Err(ErrorOraculo::Colab(MENSAJE_SIN_SESION.into()));
@@ -369,6 +420,54 @@ fn liberar(
     Err(ErrorOraculo::Infra(format!(
         "no se pudo liberar el runtime {sesion}; revísalo en Colab"
     )))
+}
+
+/// El primer paso no respondió en su plazo. Registra el intento y pide parar la sesión.
+/// El error de `stop` se ignora: el plazo corto es a propósito.
+fn sin_respuesta(
+    cli: &dyn ColabCli,
+    home: &Path,
+    corrida: &str,
+    sesion: &str,
+) -> Result<(), ErrorOraculo> {
+    registrar_pedir(home, corrida, sesion, "sin_respuesta")?;
+    let parada = cli.ejecutar_con_plazo(&args(&["stop", "-s", sesion]), PLAZO_STOP_FALLIDO);
+    let parada_ok = matches!(&parada, Ok(Some(s)) if s.codigo == 0);
+    let extra = serde_json::json!({
+        "accion": "liberar",
+        "sesion": sesion,
+        "gpu_observada": "desconocida",
+        "trabajo": "fallo",
+        "parada": if parada_ok { "ok" } else { "fallo" },
+    });
+    registrar(home, corrida, extra)
+}
+
+/// El hijo lidera su propio grupo de procesos, para matar también a sus nietos.
+#[cfg(unix)]
+fn propio_grupo(orden: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    orden.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn propio_grupo(_orden: &mut Command) {}
+
+/// Mata al hijo y a su grupo de procesos, y lo recoge. Ningún nieto debe quedar colgado.
+fn matar_arbol(hijo: &mut Child) {
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill")
+            .arg("-KILL")
+            .arg("--")
+            .arg(format!("-{}", hijo.id()))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = hijo.kill();
+    let _ = hijo.wait();
 }
 
 fn registrar_pedir(
@@ -570,6 +669,7 @@ mod tests {
     use super::*;
     use crate::oracle::tarea::{Comando, Exclusion};
     use std::cell::RefCell;
+    use std::os::unix::fs::PermissionsExt;
 
     const JUNIT: &str = r#"<testsuite><testcase classname="tests.test_o" name="o2"/></testsuite>"#;
 
@@ -887,5 +987,112 @@ mod tests {
         assert!(!es_t4("NVIDIA A100-SXM4-40GB"));
         assert!(!es_t4("T40"));
         assert!(!es_t4(""));
+    }
+
+    /// Script de una CLI que no responde a `new`. Anota su PID y duerme. `stop` sale al instante.
+    fn falso_mudo(dir: &Path) -> PathBuf {
+        let guion = format!(
+            "#!/bin/sh\necho \"$*\" >> '{d}/llamadas.log'\ncase \"$1\" in\nnew) echo $$ > '{d}/pid.txt'; sleep 300 ;;\n*) exit 0 ;;\nesac\n",
+            d = dir.display()
+        );
+        let ruta = dir.join("colab-mudo");
+        fs::write(&ruta, guion).expect("escribe el falso");
+        fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
+        ruta
+    }
+
+    /// Vivo si `kill -0` lo acepta. Llama a la CLI `kill` con argumentos, sin shell.
+    fn proceso_vivo(pid: i32) -> bool {
+        Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    #[test]
+    fn colab_plazo_primer_paso_es_60_segundos() {
+        assert_eq!(PLAZO_PRIMER_PASO, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn colab_primer_paso_sin_respuesta_sale_con_login_y_libera() {
+        let base = tempfile::tempdir().expect("base");
+        let home = tempfile::tempdir().expect("home");
+        let binario = falso_mudo(base.path());
+        let cli = ColabProceso {
+            binario,
+            timeout: TIMEOUT_LLAMADA,
+            plazo_primer_paso: Duration::from_secs(2),
+        };
+        let inicio = Instant::now();
+        let r = correr_en_colab(
+            &cli,
+            &paquete(base.path()),
+            &tarea(),
+            home.path(),
+            "root-memora-1",
+        );
+        assert!(
+            inicio.elapsed() < Duration::from_secs(10),
+            "tardó {:?}",
+            inicio.elapsed()
+        );
+        match r {
+            Err(ErrorOraculo::Colab(m)) => {
+                assert!(m.contains("60 segundos") && m.contains("login"), "{m}");
+            }
+            otro => panic!("esperaba error de Colab con login, llegó {otro:?}"),
+        }
+        let log = fs::read_to_string(base.path().join("llamadas.log")).expect("llamadas.log");
+        let lineas: Vec<&str> = log.lines().collect();
+        assert!(
+            lineas.first().is_some_and(|l| l.starts_with("new -s")),
+            "{lineas:?}"
+        );
+        assert!(
+            lineas.last().is_some_and(|l| l.starts_with("stop -s")),
+            "{lineas:?}"
+        );
+        assert!(
+            !lineas
+                .iter()
+                .any(|l| l.starts_with("upload") || l.starts_with("exec")),
+            "{lineas:?}"
+        );
+        let pid: i32 = fs::read_to_string(base.path().join("pid.txt"))
+            .expect("pid.txt")
+            .trim()
+            .parse()
+            .expect("PID numérico");
+        assert!(!proceso_vivo(pid), "la CLI falsa quedó colgada");
+    }
+
+    #[test]
+    fn colab_primer_paso_cierra_stdin() {
+        let base = tempfile::tempdir().expect("base");
+        let binario = base.path().join("colab-stdin");
+        let guion = format!(
+            "#!/bin/sh\ncat > '{}/stdin.txt'\nexit 0\n",
+            base.path().display()
+        );
+        fs::write(&binario, guion).expect("escribe");
+        fs::set_permissions(&binario, fs::Permissions::from_mode(0o755)).expect("permisos");
+        let cli = ColabProceso {
+            binario,
+            timeout: TIMEOUT_LLAMADA,
+            plazo_primer_paso: Duration::from_secs(2),
+        };
+        let salida = cli
+            .ejecutar_con_plazo(
+                &args(&["new", "-s", "root-memora-1"]),
+                Duration::from_secs(2),
+            )
+            .expect("sin error")
+            .expect("terminó a tiempo");
+        assert_eq!(salida.codigo, 0);
+        let leido = fs::read_to_string(base.path().join("stdin.txt")).expect("stdin.txt");
+        assert_eq!(leido, "", "la CLI leyó algo de stdin");
     }
 }

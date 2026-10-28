@@ -106,9 +106,25 @@ struct FugaGitleaks {
     descripcion: String,
 }
 
+/// Línea de cierre de gitleaks cuando no hay filtraciones. Va a stderr, no al reporte.
+const MARCA_GITLEAKS_LIMPIO: &str = "no leaks found";
+
+/// Motivo cuando el texto se acabó antes de cerrar el JSON.
+pub(crate) const JSON_TRUNCADO: &str = "JSON truncado";
+
+/// Motivo de un JSON que no se puede leer: «JSON truncado» si el texto se acabó, si no «ilegible».
+pub(crate) fn motivo_json(e: &serde_json::Error) -> String {
+    if e.is_eof() {
+        format!("{JSON_TRUNCADO}: {e}")
+    } else {
+        format!("JSON ilegible: {e}")
+    }
+}
+
 pub fn parsear_gitleaks(json: &str, requisitos: &[Requisito]) -> Result<Vec<Hallazgo>, String> {
     // `null` y `[]` dan lo mismo: sin filtraciones. Los campos del secreto no se deserializan.
-    let fugas: Option<Vec<FugaGitleaks>> = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    let fugas: Option<Vec<FugaGitleaks>> =
+        serde_json::from_str(json).map_err(|e| motivo_json(&e))?;
     Ok(fugas
         .unwrap_or_default()
         .into_iter()
@@ -137,17 +153,21 @@ pub fn parsear_cargo_audit(
     cargo_lock: &str,
     requisitos: &[Requisito],
 ) -> Result<Vec<Hallazgo>, String> {
-    let v: Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    let v: Value = serde_json::from_str(json).map_err(|e| motivo_json(&e))?;
+    // Sin el bloque `vulnerabilities` y su `found`, el reporte no trae su marca de fin.
     let vulnerabilidades = v
         .get("vulnerabilities")
-        .ok_or("falta el bloque vulnerabilities")?;
+        .ok_or("sin marca de fin: falta el bloque vulnerabilities")?;
+    let found = vulnerabilidades
+        .get("found")
+        .and_then(Value::as_bool)
+        .ok_or("sin marca de fin: falta vulnerabilities.found")?;
+    let lista = vulnerabilidades.get("list").and_then(Value::as_array);
+    if found != lista.is_some_and(|l| !l.is_empty()) {
+        return Err("vulnerabilities.found no coincide con la lista".into());
+    }
     let mut hallazgos = Vec::new();
-    for item in vulnerabilidades
-        .get("list")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
+    for item in lista.into_iter().flatten() {
         let nombre = texto(item, "/package/name");
         let version = texto(item, "/package/version");
         let detalle = format!(
@@ -415,9 +435,23 @@ pub fn gitleaks(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoSonda {
             con_cola("gitleaks no dejó reporte".into(), &salida.stderr),
         );
     };
+    if reporte.trim().is_empty() {
+        return sin_veredicto(
+            d,
+            con_cola("reporte vacío de gitleaks".into(), &salida.stderr),
+        );
+    }
     match parsear_gitleaks(reporte, &tarea.requisito) {
+        // Sin hallazgos, el `[]` solo vale con la línea de cierre: gitleaks la escribe al final.
+        Ok(hs) if hs.is_empty() && !salida.stderr.contains(MARCA_GITLEAKS_LIMPIO) => sin_veredicto(
+            d,
+            con_cola(
+                "sin marca de fin: gitleaks no escribió «no leaks found»".into(),
+                &salida.stderr,
+            ),
+        ),
         Ok(hs) => con_veredicto(d, hs, &tarea.requisito),
-        Err(e) => sin_veredicto(d, format!("reporte de gitleaks ilegible: {e}")),
+        Err(e) => sin_veredicto(d, format!("reporte de gitleaks: {e}")),
     }
 }
 
@@ -446,9 +480,15 @@ pub fn cargo_audit(ej: &dyn EjecutorHerramienta, tarea: &Tarea, repo: &Path) -> 
             con_cola("cargo audit no dejó reporte".into(), &salida.stderr),
         );
     };
+    if reporte.trim().is_empty() {
+        return sin_veredicto(
+            d,
+            con_cola("reporte vacío de cargo audit".into(), &salida.stderr),
+        );
+    }
     match parsear_cargo_audit(reporte, &lock, &tarea.requisito) {
         Ok(hs) => con_veredicto(d, hs, &tarea.requisito),
-        Err(e) => sin_veredicto(d, format!("reporte de cargo audit ilegible: {e}")),
+        Err(e) => sin_veredicto(d, format!("reporte de cargo audit: {e}")),
     }
 }
 
@@ -478,8 +518,13 @@ pub fn clippy(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoSonda {
     }
     // Sin cierre de build no hay prueba de que clippy corrió. Un reporte vacío cae aquí.
     let Some(exito) = cierre_de_build(reporte) else {
-        let base = "clippy no dejó un reporte válido (¿no pudo escribir Cargo.lock o compilar?)";
-        return sin_veredicto(d, con_cola(base.into(), &salida.stderr));
+        let causa = if reporte.trim().is_empty() {
+            "reporte vacío"
+        } else {
+            "sin marca de fin (build-finished)"
+        };
+        let base = format!("clippy no dejó un reporte válido: {causa}");
+        return sin_veredicto(d, con_cola(base, &salida.stderr));
     };
     // Con éxito, o con lints de clippy que hacen fallar el build, el veredicto sale de los
     // hallazgos. Un fallo sin ningún lint de clippy no es un veredicto.
@@ -632,6 +677,13 @@ mod tests {
     fn con_archivo(nombre: &str, contenido: &str) -> SalidaHerramienta {
         let mut s = salida(0, "");
         s.archivos.insert(nombre.into(), contenido.into());
+        s
+    }
+
+    /// Como `con_archivo`, con stderr. gitleaks escribe su línea de cierre en stderr.
+    fn con_archivo_y_stderr(nombre: &str, contenido: &str, stderr: &str) -> SalidaHerramienta {
+        let mut s = con_archivo(nombre, contenido);
+        s.stderr = stderr.into();
         s
     }
 
@@ -861,6 +913,81 @@ mod tests {
     }
 
     #[test]
+    fn sonda_gitleaks_reporte_vacio_es_sin_veredicto() {
+        let ej =
+            con_herramientas(|_| con_archivo_y_stderr("gitleaks.json", "  \n", "no leaks found"));
+        let r = gitleaks(&ej, &tarea_rust(None));
+        assert_eq!(r.valor, None);
+        assert!(r.motivo.unwrap_or_default().contains("reporte vacío"));
+    }
+
+    #[test]
+    fn sonda_gitleaks_reporte_truncado_es_sin_veredicto() {
+        let ej =
+            con_herramientas(|_| con_archivo_y_stderr("gitleaks.json", "[{\"RuleID\":\"aws", ""));
+        let r = gitleaks(&ej, &tarea_rust(None));
+        assert_eq!(r.valor, None);
+        assert!(r.motivo.unwrap_or_default().contains("JSON truncado"));
+    }
+
+    #[test]
+    fn sonda_gitleaks_arreglo_vacio_sin_marca_de_cierre_es_sin_veredicto() {
+        let ej = con_herramientas(|_| con_archivo_y_stderr("gitleaks.json", "[]\n", ""));
+        let r = gitleaks(&ej, &tarea_rust(None));
+        assert_eq!(r.valor, None);
+        assert!(r.motivo.unwrap_or_default().contains("sin marca de fin"));
+    }
+
+    #[test]
+    fn sonda_gitleaks_arreglo_o_null_con_marca_de_cierre_da_uno() {
+        for reporte in ["[]\n", "null\n"] {
+            let ej = con_herramientas(move |_| {
+                con_archivo_y_stderr("gitleaks.json", reporte, "INF no leaks found")
+            });
+            let r = gitleaks(&ej, &tarea_rust(None));
+            assert_eq!(r.motivo, None, "reporte {reporte:?}");
+            assert_eq!(r.valor, Some(1.0), "reporte {reporte:?}");
+            assert!(r.hallazgos.is_empty());
+        }
+    }
+
+    #[test]
+    fn sonda_cargo_audit_reporte_vacio_es_sin_veredicto() {
+        let ej = con_herramientas(|_| con_archivo("audit.json", "")).con_rustsec();
+        let r = cargo_audit(&ej, &tarea_rust(None), repo_con_lock().path());
+        assert_eq!(r.valor, None);
+        assert!(r.motivo.unwrap_or_default().contains("reporte vacío"));
+    }
+
+    #[test]
+    fn sonda_cargo_audit_reporte_truncado_es_sin_veredicto() {
+        let ej =
+            con_herramientas(|_| con_archivo("audit.json", "{\"vulnerabilities\":{\"found\":fal"))
+                .con_rustsec();
+        let r = cargo_audit(&ej, &tarea_rust(None), repo_con_lock().path());
+        assert_eq!(r.valor, None);
+        assert!(r.motivo.unwrap_or_default().contains("JSON truncado"));
+    }
+
+    #[test]
+    fn sonda_cargo_audit_sin_bloque_vulnerabilities_es_sin_marca_de_fin() {
+        let ej = con_herramientas(|_| con_archivo("audit.json", "{\"warnings\":{}}")).con_rustsec();
+        let r = cargo_audit(&ej, &tarea_rust(None), repo_con_lock().path());
+        assert_eq!(r.valor, None);
+        assert!(r.motivo.unwrap_or_default().contains("sin marca de fin"));
+    }
+
+    #[test]
+    fn sonda_cargo_audit_limpio_da_uno() {
+        let limpio = r#"{"vulnerabilities":{"found":false,"count":0,"list":[]},"warnings":{}}"#;
+        let ej = con_herramientas(move |_| con_archivo("audit.json", limpio)).con_rustsec();
+        let r = cargo_audit(&ej, &tarea_rust(None), repo_con_lock().path());
+        assert_eq!(r.motivo, None);
+        assert_eq!(r.valor, Some(1.0));
+        assert!(r.hallazgos.is_empty());
+    }
+
+    #[test]
     fn sonda_cargo_audit_sin_rustsec_no_ejecuta_nada() {
         let ej = con_herramientas(|_| panic!("no debe correr"));
         let repo = repo_con_lock();
@@ -908,6 +1035,19 @@ mod tests {
             "-A clippy::all -W clippy::correctness -W clippy::suspicious -W clippy::perf"
         ));
         assert!(cmd.contains("> /salida/clippy.json 2>/dev/null"));
+    }
+
+    #[test]
+    fn sonda_clippy_reporte_truncado_sin_build_finished_es_sin_veredicto() {
+        let reporte = "{\"reason\":\"compiler-message\",\"message\":{\"le";
+        let ej = con_herramientas(move |_| con_archivo("clippy.json", reporte));
+        let r = clippy(&ej, &tarea_rust(None));
+        assert_eq!(r.valor, None);
+        assert!(
+            r.motivo
+                .unwrap_or_default()
+                .contains("no dejó un reporte válido")
+        );
     }
 
     #[test]
@@ -1041,7 +1181,8 @@ mod tests {
     fn sonda_combinar_seguridad_sin_cargo_audit_queda_sin_puntaje_con_hallazgos() {
         let repo = repo_con_fuente("src/x.rs", "pub unsafe fn f() {}\n");
         let propia = seguridad_nativa(repo.path(), &[]);
-        let ej_gl = con_herramientas(|_| con_archivo("gitleaks.json", "[]"));
+        let ej_gl =
+            con_herramientas(|_| con_archivo_y_stderr("gitleaks.json", "[]", "no leaks found"));
         let gl = gitleaks(&ej_gl, &tarea_rust(None));
         // Sin base de RustSec: cargo audit no tiene veredicto.
         let sin_base = EjecutorFalso::nuevo(|_| Ok(salida(0, "")));
@@ -1057,11 +1198,11 @@ mod tests {
         let repo = repo_con_fuente("src/x.rs", "pub unsafe fn f() {}\n");
         fs::write(repo.path().join("Cargo.lock"), CARGO_LOCK).expect("escribe el lock");
         let propia = seguridad_nativa(repo.path(), &[]);
-        let ej_gl = con_herramientas(|_| con_archivo("gitleaks.json", "[]"));
+        let ej_gl =
+            con_herramientas(|_| con_archivo_y_stderr("gitleaks.json", "[]", "no leaks found"));
         let gl = gitleaks(&ej_gl, &tarea_rust(None));
-        let ej_ca =
-            con_herramientas(|_| con_archivo("audit.json", "{\"vulnerabilities\":{\"list\":[]}}"))
-                .con_rustsec();
+        let limpio = "{\"vulnerabilities\":{\"found\":false,\"count\":0,\"list\":[]}}";
+        let ej_ca = con_herramientas(move |_| con_archivo("audit.json", limpio)).con_rustsec();
         let ca = cargo_audit(&ej_ca, &tarea_rust(None), repo.path());
         let r = combinar(Dimension::Seguridad, vec![propia, gl, ca], &[]);
         assert!(r.valor.is_some());

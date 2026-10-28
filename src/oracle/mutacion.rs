@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::oracle::ErrorOraculo;
 use crate::oracle::descarga::PRELUDIO;
 use crate::oracle::perfiles::herramientas::{
-    EjecutorHerramienta, con_cola, falta_herramienta, sin_veredicto,
+    EjecutorHerramienta, con_cola, falta_herramienta, motivo_json, sin_veredicto,
 };
 use crate::oracle::perfiles::{ResultadoSonda, crear_hallazgo};
 use crate::oracle::tarea::{MINUTOS_MAX_DEFECTO, MUTANTES_MAX_DEFECTO, Requisito, Tarea};
@@ -35,8 +35,8 @@ pub struct ResultadoMutacion {
 /// Reporte `outcomes.json` de cargo-mutants. Solo se leen los campos que Root usa.
 #[derive(Deserialize)]
 struct Informe {
-    #[serde(default)]
-    outcomes: Vec<Resultado>,
+    /// Sin esta clave el reporte no trae su marca de fin. `None` da `SinVeredicto`.
+    outcomes: Option<Vec<Resultado>>,
 }
 
 #[derive(Deserialize)]
@@ -84,14 +84,28 @@ pub fn parsear_outcomes(
     if mutantes_max == 0 {
         return Err(ErrorOraculo::Infra("mutantes_max debe ser 1 o más".into()));
     }
+    if json.trim().is_empty() {
+        return Ok(desde_sonda(sin_veredicto(
+            DIMENSION,
+            "reporte vacío de cargo-mutants",
+        )));
+    }
     let informe: Informe = serde_json::from_str(json)
-        .map_err(|e| ErrorOraculo::Infra(format!("outcomes.json ilegible: {e}")))?;
+        .map_err(|e| ErrorOraculo::Infra(format!("outcomes.json: {}", motivo_json(&e))))?;
+    let Some(resultados) = informe.outcomes else {
+        return Ok(desde_sonda(sin_veredicto(
+            DIMENSION,
+            "sin marca de fin: falta outcomes",
+        )));
+    };
     // Cada viable: el mutante y si lo detectó algún test. `Unviable` no compila: no cuenta.
     let mut viables: Vec<(&Mutante, bool)> = Vec::new();
-    for resultado in &informe.outcomes {
+    // `Baseline` es la marca de fin: sin él, la lista no prueba que la corrida terminó.
+    let mut hay_baseline = false;
+    for resultado in &resultados {
         match &resultado.scenario {
             Escenario::Baseline => match resultado.summary.as_str() {
-                "Success" => {}
+                "Success" => hay_baseline = true,
                 "Failure" => {
                     return Ok(desde_sonda(sin_veredicto(
                         DIMENSION,
@@ -115,6 +129,12 @@ pub fn parsear_outcomes(
                 }
             },
         }
+    }
+    if !hay_baseline {
+        return Ok(desde_sonda(sin_veredicto(
+            DIMENSION,
+            "sin marca de fin: falta el escenario Baseline",
+        )));
     }
     if viables.is_empty() {
         return Ok(desde_sonda(ResultadoSonda {
@@ -475,5 +495,55 @@ mod tests {
         let r = sonda_mutacion(&ej, &t);
         assert_eq!(r.sonda.valor, None);
         assert!(r.sonda.motivo.is_some());
+    }
+
+    /// Motivo de la sonda cuando el reporte no da veredicto. Falla si no hay motivo.
+    fn motivo_de(json: &'static str) -> (Option<f32>, String) {
+        let t = tarea_con("rust", "");
+        let r = sonda_mutacion(&con_reporte(json), &t);
+        (r.sonda.valor, r.sonda.motivo.unwrap_or_default())
+    }
+
+    #[test]
+    fn mutacion_reporte_vacio_es_sin_veredicto() {
+        let (valor, motivo) = motivo_de("");
+        assert_eq!(valor, None);
+        assert!(motivo.contains("reporte vacío"), "{motivo}");
+    }
+
+    #[test]
+    fn mutacion_reporte_truncado_es_sin_veredicto() {
+        let (valor, motivo) = motivo_de(r#"{"outcomes":[{"scenario":"Baseline""#);
+        assert_eq!(valor, None);
+        assert!(motivo.contains("JSON truncado"), "{motivo}");
+    }
+
+    #[test]
+    fn mutacion_sin_clave_outcomes_es_sin_veredicto() {
+        let (valor, motivo) = motivo_de("{}");
+        assert_eq!(valor, None);
+        assert!(motivo.contains("sin marca de fin"), "{motivo}");
+    }
+
+    #[test]
+    fn mutacion_lista_outcomes_vacia_es_sin_veredicto() {
+        let (valor, motivo) = motivo_de(r#"{"outcomes":[]}"#);
+        assert_eq!(valor, None);
+        assert!(motivo.contains("sin marca de fin"), "{motivo}");
+    }
+
+    #[test]
+    fn mutacion_sin_baseline_es_sin_veredicto() {
+        let json = r#"{"outcomes":[{"scenario":{"Mutant":{"name":"m","file":"src/a.rs"}},"summary":"CaughtMutant"}]}"#;
+        let (valor, motivo) = motivo_de(json);
+        assert_eq!(valor, None);
+        assert!(motivo.contains("sin marca de fin"), "{motivo}");
+    }
+
+    #[test]
+    fn mutacion_reporte_valido_con_asserts_sigue_dando_uno() {
+        let r = sonda_mutacion(&con_reporte(CON_ASSERTS), &tarea_con("rust", ""));
+        assert_eq!(r.sonda.valor, Some(1.0));
+        assert_eq!(r.sonda.motivo, None);
     }
 }
