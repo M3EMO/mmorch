@@ -116,6 +116,14 @@ pub fn evento_manual(corrida: &str, tipo: TipoEvento, detalle: Option<&str>) -> 
     }
 }
 
+/// Evento `Gate`: un tope o un bloqueo que Root decidió. Lleva la fase y los datos en `extra`.
+pub fn evento_gate(corrida: &str, fase: &str, extra: serde_json::Map<String, Value>) -> Evento {
+    let mut ev = evento_manual(corrida, TipoEvento::Gate, None);
+    ev.fase = fase.into();
+    ev.extra = extra;
+    ev
+}
+
 /// Hora actual: segundos desde la época con decimales, y texto RFC 3339 en UTC.
 pub(crate) fn ahora() -> (f64, String) {
     let ahora = OffsetDateTime::now_utc();

@@ -6,14 +6,15 @@ use std::path::Path;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use time::UtcOffset;
+use serde_json::{Map, Value, json};
+use time::format_description::well_known::Rfc3339;
+use time::{OffsetDateTime, UtcOffset};
 
 use crate::config::{Balance, Config, root_home};
 use crate::error::Error;
-use crate::observe::{ErrorObserve, jsonl, ruta_eventos};
-use crate::route::proximo_mes;
-use crate::tipos::{Evento, Uso, Via};
+use crate::observe::{self, ErrorObserve, jsonl, ruta_eventos};
+use crate::route::{inicio_mes, proximo_mes};
+use crate::tipos::{Evento, TipoEvento, Uso, Via};
 
 /// Aviso de `r00t observa uso`: una sesión en la nube que nadie registra no suma.
 pub const AVISO_NUBE_NO_REGISTRADA: &str = "Root solo cuenta las sesiones en la nube que alguien registra; una sesión sin registrar no suma.";
@@ -58,8 +59,8 @@ pub fn calcular_uso(eventos: &[Evento], ahora: f64, offset_s: i32, bloque_horas:
     let suma_mes = |via: Via| -> f64 {
         visibles()
             .filter(|ev| ev.ts >= inicio && ev.via == Some(via))
-            .map(|ev| ev.cost_usd)
-            .sum()
+            // `fold` evita el -0.0 que `sum` da sin eventos.
+            .fold(0.0, |total, ev| total + ev.cost_usd)
     };
     Uso {
         cupo_bloque_usd,
@@ -85,19 +86,32 @@ fn bloque_vigente(eventos: &[&Evento], ahora: f64, dur: f64) -> (f64, Option<f64
     }
 }
 
+/// Desfase local actual en segundos. Si el sistema no lo da, vale 0 (UTC).
+pub fn offset_local() -> i32 {
+    UtcOffset::current_local_offset().map_or(0, |o| o.whole_seconds())
+}
+
 /// `calcular_uso` sobre `eventos.jsonl` de `ROOT_HOME` y `root.toml`. Usa el desfase local actual.
-///
-/// Si no se puede leer el desfase local, usa UTC y lo deja dicho aquí.
 pub fn uso(ahora: f64) -> Result<Uso, Error> {
     let cfg = Config::cargar(&root_home().join("root.toml"))?;
-    // Si el sistema no da el desfase local, se usa UTC.
-    let offset_s = UtcOffset::current_local_offset().map_or(0, |o| o.whole_seconds());
     Ok(uso_en(
         &ruta_eventos(),
         ahora,
-        offset_s,
+        offset_local(),
         cfg.balance.cupo.bloque_horas,
     )?)
+}
+
+/// Todos los eventos del archivo indicado y de sus rotados (`<nombre>.N`), en orden de escritura.
+/// Un archivo inexistente da una lista vacía. Una línea inválida es error.
+pub fn leer_eventos(ruta: &Path) -> Result<Vec<Evento>, ErrorObserve> {
+    let mut eventos = Vec::new();
+    for archivo in jsonl::archivos_en_orden(ruta)? {
+        for linea in jsonl::leer_lineas(&archivo)? {
+            eventos.push(serde_json::from_str::<Evento>(&linea)?);
+        }
+    }
+    Ok(eventos)
 }
 
 /// `calcular_uso` sobre el archivo indicado y todos sus rotados (`<nombre>.N`).
@@ -108,13 +122,88 @@ pub fn uso_en(
     offset_s: i32,
     bloque_horas: u32,
 ) -> Result<Uso, ErrorObserve> {
-    let mut eventos = Vec::new();
-    for archivo in jsonl::archivos_en_orden(ruta)? {
-        for linea in jsonl::leer_lineas(&archivo)? {
-            eventos.push(serde_json::from_str::<Evento>(&linea)?);
-        }
-    }
+    let eventos = leer_eventos(ruta)?;
     Ok(calcular_uso(&eventos, ahora, offset_s, bloque_horas))
+}
+
+/// Salida de `r00t observa uso`: gasto, márgenes y el aviso de la nube.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct UsoMargenes {
+    pub uso: Uso,
+    pub margenes: Margenes,
+    pub aviso: String,
+}
+
+/// Estado de `observa uso` en el momento `ahora`. Registra un `Gate` `tope-lleno` por cada tope
+/// lleno que todavía no tiene uno en su período: el bloque (cupo) o el mes (API y nube).
+pub fn estado(ahora: f64) -> Result<UsoMargenes, Error> {
+    let cfg = Config::cargar(&root_home().join("root.toml"))?;
+    let offset = offset_local();
+    let eventos = leer_eventos(&ruta_eventos())?;
+    let uso = calcular_uso(&eventos, ahora, offset, cfg.balance.cupo.bloque_horas);
+    let margenes = margenes(&uso, &cfg.balance, ahora, offset);
+    let mes = inicio_mes(ahora, offset);
+    for tope in topes_sin_gate(&eventos, &margenes, uso.cupo_bloque_inicio, mes) {
+        let m = match tope {
+            "cupo" => &margenes.cupo,
+            "api" => &margenes.api,
+            _ => &margenes.nube,
+        };
+        let extra = Map::from_iter([
+            ("tope".to_string(), json!(tope)),
+            ("usado".to_string(), json!(m.usado_usd)),
+            ("tope_usd".to_string(), json!(m.tope_usd)),
+        ]);
+        observe::registrar(&observe::evento_gate("uso", "tope-lleno", extra))
+            .map_err(ErrorObserve::from)?;
+    }
+    Ok(UsoMargenes {
+        uso,
+        margenes,
+        aviso: AVISO_NUBE_NO_REGISTRADA.into(),
+    })
+}
+
+/// Topes llenos que no tienen un `Gate` `tope-lleno` dentro de su período.
+/// El cupo cuenta desde el inicio del bloque; la API y la nube, desde el inicio del mes.
+pub fn topes_sin_gate(
+    eventos: &[Evento],
+    m: &Margenes,
+    cupo_inicio: Option<f64>,
+    inicio_mes: f64,
+) -> Vec<&'static str> {
+    let registrado = |tope: &str, desde: f64| {
+        eventos.iter().any(|ev| {
+            ev.tipo == TipoEvento::Gate
+                && ev.fase == "tope-lleno"
+                && ev.ts >= desde
+                && ev.extra.get("tope").and_then(Value::as_str) == Some(tope)
+        })
+    };
+    let mut pendientes = Vec::new();
+    if m.cupo.lleno
+        && let Some(inicio) = cupo_inicio
+        && !registrado("cupo", inicio)
+    {
+        pendientes.push("cupo");
+    }
+    if m.api.lleno && !registrado("api", inicio_mes) {
+        pendientes.push("api");
+    }
+    if m.nube.lleno && !registrado("nube", inicio_mes) {
+        pendientes.push("nube");
+    }
+    pendientes
+}
+
+/// Fecha y hora RFC 3339 de un epoch en segundos, con el desfase dado.
+pub fn iso(epoch: f64, offset_s: i32) -> String {
+    let desfase = UtcOffset::from_whole_seconds(offset_s).unwrap_or(UtcOffset::UTC);
+    OffsetDateTime::from_unix_timestamp(epoch.floor() as i64)
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+        .to_offset(desfase)
+        .format(&Rfc3339)
+        .unwrap_or_default()
 }
 
 /// Márgenes de los tres topes de `balance`, a partir del `uso` y del momento `ahora`.
@@ -440,5 +529,76 @@ mod tests {
     #[test]
     fn uso_aviso_nube_no_registrada_dice_que_no_suma() {
         assert!(AVISO_NUBE_NO_REGISTRADA.contains("no suma"));
+    }
+}
+
+#[cfg(test)]
+mod tests_topes {
+    use super::*;
+
+    const AHORA: f64 = 1_792_065_600.0;
+    const HORA: f64 = 3600.0;
+
+    fn gate(tope: &str, ts: f64) -> Evento {
+        Evento {
+            ts,
+            corrida: "uso".into(),
+            tipo: TipoEvento::Gate,
+            fase: "tope-lleno".into(),
+            extra: Map::from_iter([("tope".to_string(), json!(tope))]),
+            ..Evento::default()
+        }
+    }
+
+    fn lleno(cupo: bool, api: bool, nube: bool) -> Margenes {
+        let uso = Uso {
+            cupo_bloque_usd: if cupo { 35.0 } else { 0.0 },
+            cupo_bloque_inicio: Some(AHORA - HORA),
+            api_mes_usd: if api { 100.0 } else { 0.0 },
+            nube_mes_usd: if nube { 250.0 } else { 0.0 },
+        };
+        margenes(&uso, &Balance::default(), AHORA, 0)
+    }
+
+    #[test]
+    fn topes_sin_gate_lista_los_llenos_sin_registro() {
+        let m = lleno(true, true, true);
+        let pendientes = topes_sin_gate(&[], &m, Some(AHORA - HORA), 0.0);
+        assert_eq!(pendientes, vec!["cupo", "api", "nube"]);
+    }
+
+    #[test]
+    fn topes_sin_gate_no_repite_si_ya_hay_gate_del_periodo() {
+        let m = lleno(true, true, true);
+        let eventos = [
+            gate("cupo", AHORA - 60.0),
+            gate("api", AHORA - 60.0),
+            gate("nube", AHORA - 60.0),
+        ];
+        assert!(topes_sin_gate(&eventos, &m, Some(AHORA - HORA), 0.0).is_empty());
+    }
+
+    #[test]
+    fn topes_sin_gate_gate_de_otro_periodo_no_cuenta() {
+        let m = lleno(true, true, false);
+        // Gate del bloque anterior (antes del inicio) y del mes anterior (antes del inicio del mes).
+        let inicio_mes = AHORA - 10.0 * 24.0 * HORA;
+        let eventos = [
+            gate("cupo", AHORA - 2.0 * HORA),
+            gate("api", inicio_mes - 1.0),
+        ];
+        let pendientes = topes_sin_gate(&eventos, &m, Some(AHORA - HORA), inicio_mes);
+        assert_eq!(pendientes, vec!["cupo", "api"]);
+    }
+
+    #[test]
+    fn topes_sin_gate_tope_no_lleno_no_cuenta() {
+        let m = lleno(false, false, false);
+        assert!(topes_sin_gate(&[], &m, None, 0.0).is_empty());
+    }
+
+    #[test]
+    fn uso_iso_da_rfc3339_con_el_desfase() {
+        assert_eq!(iso(AHORA, -10_800), "2026-10-15T09:00:00-03:00");
     }
 }

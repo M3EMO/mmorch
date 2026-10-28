@@ -18,8 +18,8 @@ pub struct Cli {
 pub enum Comando {
     /// Elige el modelo para un rol y tipo de tarea.
     Route {
-        #[arg(long)]
-        rol: String,
+        #[arg(long, value_enum)]
+        rol: RolArg,
         #[arg(long)]
         tipo: String,
         #[arg(long)]
@@ -29,14 +29,17 @@ pub enum Comando {
     },
     /// Llama a un modelo con un prompt.
     Llama {
-        #[arg(long)]
-        rol: String,
+        #[arg(long, value_enum)]
+        rol: RolArg,
         #[arg(long)]
         tipo: String,
         #[arg(long)]
         prompt_file: PathBuf,
         #[arg(long)]
         corrida: String,
+        /// Tope de tokens de salida. Entra al chequeo previo de costo.
+        #[arg(long, default_value_t = 4096)]
+        max_tokens: u32,
     },
     /// Evalúa o calibra el Oracle.
     Oraculo {
@@ -87,6 +90,30 @@ pub enum Comando {
     },
     /// Inicia el servidor MCP por stdio.
     Mcp,
+}
+
+/// Roles que acepta `route` y `llama`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum RolArg {
+    Planifica,
+    Organiza,
+    Construye,
+    Verifica,
+    Juzga,
+    Delega,
+}
+
+impl From<RolArg> for crate::tipos::Rol {
+    fn from(rol: RolArg) -> Self {
+        match rol {
+            RolArg::Planifica => crate::tipos::Rol::Planifica,
+            RolArg::Organiza => crate::tipos::Rol::Organiza,
+            RolArg::Construye => crate::tipos::Rol::Construye,
+            RolArg::Verifica => crate::tipos::Rol::Verifica,
+            RolArg::Juzga => crate::tipos::Rol::Juzga,
+            RolArg::Delega => crate::tipos::Rol::Delega,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -162,13 +189,18 @@ pub enum OraculoAccion {
 
 #[derive(Debug, Subcommand)]
 pub enum ObservaAccion {
-    /// Registra la salida JSON de `claude -p`.
+    /// Registra la salida JSON de `claude -p`. Con `--via nube`, registra una sesión en la nube.
     Claude {
         #[arg(long = "archivo")]
         archivo: PathBuf,
         #[arg(long)]
         corrida: String,
+        /// Vía de los eventos: `cupo` (default) o `nube`.
+        #[arg(long, value_enum)]
+        via: Option<ViaRegistro>,
     },
+    /// Muestra el gasto y el margen de cada tope.
+    Uso,
     /// Registra un evento manual de la corrida.
     Evento {
         #[arg(long)]
@@ -200,6 +232,13 @@ impl From<TipoEvento> for crate::tipos::TipoEvento {
             TipoEvento::Gate => crate::tipos::TipoEvento::Gate,
         }
     }
+}
+
+/// Vías que acepta `observa claude --via`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ViaRegistro {
+    Cupo,
+    Nube,
 }
 
 #[derive(Debug, Subcommand)]
@@ -246,6 +285,7 @@ impl Comando {
             },
             Comando::Observa { accion } => match accion {
                 ObservaAccion::Claude { .. } => "observa claude",
+                ObservaAccion::Uso => "observa uso",
                 ObservaAccion::Evento { .. } => "observa evento",
                 ObservaAccion::Resumen { .. } => "observa resumen",
             },

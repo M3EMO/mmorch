@@ -29,6 +29,9 @@ pub enum Error {
     },
     #[error("root.toml inválido")]
     ConfigToml(#[from] toml::de::Error),
+    /// Un tope impide la elección o la llamada. Sale con código 3. El evento `Gate` ya quedó escrito.
+    #[error("{0}")]
+    Tope(String),
     /// Un valor de `root.toml` está fuera de rango, por ejemplo un tope en cero.
     #[error("root.toml inválido: {0}")]
     ConfigValor(String),
@@ -68,6 +71,7 @@ impl Error {
             | Error::ConfigToml(_)
             | Error::ConfigValor(_)
             | Error::SinPresupuesto(_)
+            | Error::Tope(_)
             | Error::Json(_)
             | Error::Observe(_)
             | Error::Track(_)

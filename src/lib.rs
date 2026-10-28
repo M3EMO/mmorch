@@ -21,6 +21,7 @@ use std::path::Path;
 
 use cli::{
     Comando, FichaAccion, GoalAccion, ObservaAccion, OraculoAccion, ProveedorJuez, TrackAccion,
+    ViaRegistro,
 };
 use ficha::{ContextoRevision, ErrorFicha, JuezProveedor, Revision};
 use oracle::OpcionesOraculo;
@@ -28,13 +29,33 @@ use oracle::tarea::Tarea;
 use tipos::{Eleccion, Estado, Fila, Proveedor, Via};
 
 /// Ejecuta un subcomando y devuelve su código de salida. Los errores salen por `Err`.
-/// Por ahora `oraculo evaluar`, `ficha`, `esquema`, `goal`, `observa`, `track` e `importar-mmorch` tienen lógica.
+/// Por ahora `route`, `llama`, `oraculo evaluar`, `ficha`, `esquema`, `goal`, `observa`, `track` e `importar-mmorch` tienen lógica.
 pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
     match &cli.comando {
         Comando::Oraculo {
             accion: OraculoAccion::Evaluar { tarea, repo },
         } => oraculo_evaluar(cli.json, tarea, repo),
         Comando::Ficha { accion } => ficha_accion(cli.json, accion),
+        Comando::Route {
+            rol,
+            tipo,
+            checkeable,
+            tokens,
+        } => route::comando::route(
+            cli.json,
+            (*rol).into(),
+            tipo,
+            *checkeable,
+            tokens.unwrap_or(0),
+        )
+        .map(|()| 0),
+        Comando::Llama {
+            rol,
+            tipo,
+            prompt_file,
+            corrida,
+            max_tokens,
+        } => route::comando::llama((*rol).into(), tipo, prompt_file, corrida, *max_tokens),
         _ => ejecutar_sin_codigo(cli).map(|()| 0),
     }
 }
@@ -264,12 +285,31 @@ fn track_accion(json: bool, accion: &TrackAccion) -> Result<(), Error> {
 /// Subcomandos `observa`: registran eventos y muestran el resumen de una corrida.
 fn observa(json: bool, accion: &ObservaAccion) -> Result<(), Error> {
     match accion {
-        ObservaAccion::Claude { archivo, corrida } => {
-            let eventos = observe::claude::leer_sesion_claude(archivo, corrida)?;
+        ObservaAccion::Claude {
+            archivo,
+            corrida,
+            via,
+        } => {
+            let mut eventos = observe::claude::leer_sesion_claude(archivo, corrida)?;
+            let via = via.map(|v| match v {
+                ViaRegistro::Cupo => Via::Cupo,
+                ViaRegistro::Nube => Via::Nube,
+            });
+            if let Some(via) = via {
+                eventos = observe::uso::con_via(eventos, via);
+            }
             for ev in &eventos {
                 observe::registrar(ev).map_err(observe::ErrorObserve::from)?;
             }
-            imprimir_registrados(json, eventos.len());
+            imprimir_claude(json, eventos.len(), via);
+        }
+        ObservaAccion::Uso => {
+            let estado = observe::uso::estado(observe::ahora().0)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&estado)?);
+            } else {
+                imprimir_uso(&estado);
+            }
         }
         ObservaAccion::Evento {
             corrida,
@@ -286,6 +326,44 @@ fn observa(json: bool, accion: &ObservaAccion) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// Salida de `observa claude`: cuántos eventos y con qué vía. Sin `--via`, la vía es `cupo`.
+fn imprimir_claude(json: bool, cuantos: usize, via: Option<Via>) {
+    let etiqueta = match via {
+        Some(Via::Nube) => "nube",
+        _ => "cupo",
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"registrados": cuantos, "via": etiqueta})
+        );
+    } else {
+        println!("Registrados {cuantos} eventos con vía {etiqueta}");
+    }
+}
+
+/// Una línea por tope: usado, tope, fracción y reapertura. Luego el aviso de la nube.
+fn imprimir_uso(estado: &observe::uso::UsoMargenes) {
+    let offset = observe::uso::offset_local();
+    let filas = [
+        ("cupo del bloque", &estado.margenes.cupo),
+        ("API del mes", &estado.margenes.api),
+        ("nube del mes", &estado.margenes.nube),
+    ];
+    for (nombre, m) in filas {
+        let reabre = m
+            .reabre
+            .map_or("-".to_string(), |r| observe::uso::iso(r, offset));
+        println!(
+            "{nombre}: {:.2} de {:.2} USD ({:.0}%), reabre {reabre}",
+            m.usado_usd,
+            m.tope_usd,
+            100.0 * m.fraccion
+        );
+    }
+    println!("{}", estado.aviso);
 }
 
 fn imprimir_registrados(json: bool, cuantos: usize) {

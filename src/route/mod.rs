@@ -1,5 +1,6 @@
 //! Route: elige el modelo y la vía de cada pedido. Función pura, sin E/S.
 
+pub mod comando;
 pub mod politica;
 
 pub use politica::{Candidato, Politica};

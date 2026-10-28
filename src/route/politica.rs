@@ -44,7 +44,7 @@ impl Politica {
     }
 }
 
-fn nombre_rol(rol: Rol) -> &'static str {
+pub fn nombre_rol(rol: Rol) -> &'static str {
     match rol {
         Rol::Planifica => "planifica",
         Rol::Organiza => "organiza",

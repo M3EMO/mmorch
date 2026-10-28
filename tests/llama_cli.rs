@@ -1,0 +1,267 @@
+//! `r00t llama` contra el servidor HTTP falso y un `ROOT_HOME` temporal.
+
+mod common;
+
+use std::fs;
+use std::path::Path;
+use std::process::{Command, Output};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use common::Servidor;
+use root::observe;
+use root::tipos::{Evento, TipoEvento, Via};
+use serde_json::Value;
+
+const CLAVE: &str = "sk-test-SECRETO-LLAMA";
+const DEEPSEEK_OK: &str = r#"{"choices":[{"message":{"content":"hola"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#;
+
+fn ahora() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("reloj")
+        .as_secs_f64()
+}
+
+fn codigo(salida: &Output) -> i32 {
+    salida
+        .status
+        .code()
+        .expect("el proceso no terminó con código")
+}
+
+/// Escribe `root.toml` con la URL falsa, un precio opcional y el prompt de prueba.
+fn preparar(home: &Path, url: &str, precios: &str) {
+    let texto = format!(
+        "[proveedores]\ndeepseek_url = \"{url}\"\nanthropic_url = \"{url}\"\nespera_base_ms = 1\n\n{precios}"
+    );
+    fs::write(home.join("root.toml"), texto).expect("root.toml");
+    fs::write(home.join("prompt.txt"), "hola").expect("prompt");
+}
+
+/// Siembra un gasto de API de `usd` dólares hace un minuto.
+fn gasto_api(home: &Path, usd: f64) {
+    let ev = Evento {
+        ts: ahora() - 60.0,
+        corrida: "previa".into(),
+        tipo: TipoEvento::Llamada,
+        via: Some(Via::Api),
+        cost_usd: usd,
+        ..Evento::default()
+    };
+    observe::registrar_en(&home.join("eventos.jsonl"), &ev).expect("siembra");
+}
+
+fn llama(home: &Path, extra: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_r00t"))
+        .env("ROOT_HOME", home)
+        .env("DEEPSEEK_API_KEY", CLAVE)
+        .env_remove("ANTHROPIC_API_KEY")
+        .args([
+            "llama",
+            "--rol",
+            "juzga",
+            "--tipo",
+            "diseno",
+            "--corrida",
+            "c1",
+        ])
+        .arg("--prompt-file")
+        .arg(home.join("prompt.txt"))
+        .args(extra)
+        .output()
+        .expect("no se pudo ejecutar el binario root")
+}
+
+fn eventos(home: &Path) -> Vec<Evento> {
+    let texto = fs::read_to_string(home.join("eventos.jsonl")).unwrap_or_default();
+    texto
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("evento válido"))
+        .collect()
+}
+
+/// Precio de `deepseek-reasoner` con costo de salida alto: 1000 tokens cuestan 3 USD.
+const PRECIO_CARO: &str = "[precios.deepseek-reasoner]\nusd_entrada = 0.0\nusd_salida = 3000.0\n";
+/// Precio de `deepseek-reasoner` con costo de salida bajo: 1000 tokens cuestan 0,000001 USD.
+const PRECIO_BARATO: &str = "[precios.deepseek-reasoner]\nusd_entrada = 0.0\nusd_salida = 0.001\n";
+
+#[test]
+fn llama_cli_tope_rechaza_la_llamada_sin_enviarla() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let home = tempfile::tempdir().expect("home");
+    preparar(home.path(), &srv.url, PRECIO_CARO);
+    gasto_api(home.path(), 98.0);
+
+    let salida = llama(home.path(), &["--max-tokens", "1000"]);
+
+    assert_eq!(codigo(&salida), 3);
+    assert_eq!(srv.peticiones(), 0, "la llamada no debe enviarse");
+    let stderr = String::from_utf8_lossy(&salida.stderr);
+    assert!(stderr.contains("margen"), "stderr: {stderr}");
+    let gates: Vec<Evento> = eventos(home.path())
+        .into_iter()
+        .filter(|ev| ev.tipo == TipoEvento::Gate)
+        .collect();
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].fase, "tope");
+    assert_eq!(gates[0].extra["modelo"], "deepseek-reasoner");
+    let estimado = gates[0].extra["estimado"].as_f64().expect("estimado");
+    let margen = gates[0].extra["margen"].as_f64().expect("margen");
+    assert!((estimado - 3.0).abs() < 1e-9, "estimado {estimado}");
+    assert!((margen - 2.0).abs() < 1e-9, "margen {margen}");
+}
+
+#[test]
+fn llama_cli_dentro_del_margen_envia_imprime_y_registra() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let home = tempfile::tempdir().expect("home");
+    preparar(home.path(), &srv.url, PRECIO_BARATO);
+    gasto_api(home.path(), 98.0);
+
+    let salida = llama(home.path(), &["--max-tokens", "1000"]);
+
+    assert_eq!(codigo(&salida), 0);
+    assert_eq!(srv.peticiones(), 1);
+    let respuesta: Value = serde_json::from_slice(&salida.stdout).expect("stdout es JSON");
+    assert_eq!(respuesta["texto"], "hola");
+    let llamadas: Vec<Evento> = eventos(home.path())
+        .into_iter()
+        .filter(|ev| ev.tipo == TipoEvento::Llamada && ev.corrida == "c1")
+        .collect();
+    assert_eq!(llamadas.len(), 1);
+    assert_eq!(llamadas[0].via, Some(Via::Api));
+    let clave = CLAVE.as_bytes();
+    for (nombre, bytes) in [
+        ("stdout", &salida.stdout),
+        ("stderr", &salida.stderr),
+        (
+            "eventos",
+            &fs::read(home.path().join("eventos.jsonl")).expect("eventos"),
+        ),
+    ] {
+        assert!(
+            !bytes.windows(clave.len()).any(|w| w == clave),
+            "la clave apareció en {nombre}"
+        );
+    }
+}
+
+#[test]
+fn llama_cli_modelo_sin_precio_rechaza_con_gate() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let home = tempfile::tempdir().expect("home");
+    preparar(
+        home.path(),
+        &srv.url,
+        "[precios.deepseek-chat]\nusd_entrada = 1.0\nusd_salida = 1.0\n",
+    );
+
+    let salida = llama(home.path(), &["--max-tokens", "1000"]);
+
+    assert_eq!(codigo(&salida), 3);
+    assert_eq!(srv.peticiones(), 0);
+    let stderr = String::from_utf8_lossy(&salida.stderr);
+    assert!(
+        stderr.contains("sin precio en root.toml para deepseek-reasoner"),
+        "stderr: {stderr}"
+    );
+    let gates: Vec<Evento> = eventos(home.path())
+        .into_iter()
+        .filter(|ev| ev.tipo == TipoEvento::Gate)
+        .collect();
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].fase, "tope");
+    assert_eq!(gates[0].extra["modelo"], "deepseek-reasoner");
+    assert!(gates[0].extra["estimado"].is_null());
+}
+
+#[test]
+fn llama_cli_rol_de_cupo_sale_con_2_sin_pedidos() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let home = tempfile::tempdir().expect("home");
+    preparar(home.path(), &srv.url, PRECIO_BARATO);
+
+    let salida = Command::new(env!("CARGO_BIN_EXE_r00t"))
+        .env("ROOT_HOME", home.path())
+        .env("DEEPSEEK_API_KEY", CLAVE)
+        .args([
+            "llama",
+            "--rol",
+            "construye",
+            "--tipo",
+            "bulk",
+            "--corrida",
+            "c1",
+        ])
+        .arg("--prompt-file")
+        .arg(home.path().join("prompt.txt"))
+        .output()
+        .expect("no se pudo ejecutar el binario root");
+
+    assert_eq!(codigo(&salida), 2);
+    assert_eq!(srv.peticiones(), 0);
+    let stderr = String::from_utf8_lossy(&salida.stderr);
+    assert!(stderr.contains("claude -p"), "stderr: {stderr}");
+}
+
+#[test]
+fn llama_cli_prompt_inexistente_sale_con_2() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let home = tempfile::tempdir().expect("home");
+    preparar(home.path(), &srv.url, PRECIO_BARATO);
+    let salida = Command::new(env!("CARGO_BIN_EXE_r00t"))
+        .env("ROOT_HOME", home.path())
+        .args([
+            "llama",
+            "--rol",
+            "juzga",
+            "--tipo",
+            "diseno",
+            "--corrida",
+            "c1",
+        ])
+        .arg("--prompt-file")
+        .arg(home.path().join("no-existe.txt"))
+        .output()
+        .expect("no se pudo ejecutar el binario root");
+    assert_eq!(codigo(&salida), 2);
+    assert_eq!(srv.peticiones(), 0);
+}
+
+#[test]
+fn llama_cli_evento_no_escribible_entrega_respuesta_y_sale_con_3() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let home = tempfile::tempdir().expect("home");
+    preparar(home.path(), &srv.url, PRECIO_BARATO);
+    // El candado de `eventos.jsonl` es un directorio: se puede leer el log, pero no escribir.
+    fs::create_dir(home.path().join("eventos.jsonl.lock")).expect("candado bloqueado");
+
+    let salida = llama(home.path(), &["--max-tokens", "1000"]);
+
+    assert_eq!(codigo(&salida), 3);
+    assert_eq!(srv.peticiones(), 1);
+    let respuesta: Value = serde_json::from_slice(&salida.stdout).expect("stdout es JSON");
+    assert_eq!(respuesta["texto"], "hola");
+    let stderr = String::from_utf8_lossy(&salida.stderr);
+    let linea_evento = stderr
+        .lines()
+        .find(|l| l.starts_with('{'))
+        .expect("una línea JSON del evento en stderr");
+    let evento: Value = serde_json::from_str(linea_evento).expect("evento JSON");
+    assert_eq!(evento["corrida"], "c1");
+}
+
+#[test]
+fn llama_cli_log_ilegible_no_envia_nada() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let home = tempfile::tempdir().expect("home");
+    preparar(home.path(), &srv.url, PRECIO_BARATO);
+    // Sin poder leer el log no se conoce el gasto: la llamada no se envía.
+    fs::create_dir(home.path().join("eventos.jsonl")).expect("log ilegible");
+
+    let salida = llama(home.path(), &["--max-tokens", "1000"]);
+
+    assert_eq!(codigo(&salida), 3);
+    assert_eq!(srv.peticiones(), 0);
+}
