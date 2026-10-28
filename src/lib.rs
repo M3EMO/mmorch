@@ -10,6 +10,7 @@ pub mod importar;
 pub mod observe;
 pub mod oracle;
 pub mod proveedores;
+pub mod route;
 pub mod tipos;
 pub mod track;
 

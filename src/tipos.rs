@@ -37,6 +37,8 @@ pub enum Via {
     Cupo,
     Api,
     Oraculo,
+    /// Sesión de Claude en la nube. Route nunca la elige; solo `observe::uso` la cuenta.
+    Nube,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -113,6 +115,39 @@ pub struct Eleccion {
     pub razonamiento: bool,
     pub motivo: String,
 }
+
+/// Gasto medido en USD equivalentes de lista. Lo arma `observe::uso`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Uso {
+    /// Gasto de cupo del bloque vigente.
+    pub cupo_bloque_usd: f64,
+    /// Epoch en segundos del primer evento del bloque vigente. `None` si no hay bloque.
+    #[serde(default)]
+    pub cupo_bloque_inicio: Option<f64>,
+    /// Gasto de API del mes calendario.
+    pub api_mes_usd: f64,
+    /// Gasto de sesiones en la nube del mes calendario.
+    pub nube_mes_usd: f64,
+}
+
+/// No hay vía con margen. `reabre` es el epoch en segundos del próximo momento con margen.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SinPresupuesto {
+    pub reabre: f64,
+    pub motivo: String,
+}
+
+impl std::fmt::Display for SinPresupuesto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "sin presupuesto hasta el epoch {}: {}",
+            self.reabre, self.motivo
+        )
+    }
+}
+
+impl std::error::Error for SinPresupuesto {}
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Conteo {

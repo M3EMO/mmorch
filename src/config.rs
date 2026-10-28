@@ -8,6 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
+use crate::tipos::Proveedor;
 
 /// Carpeta de datos de Root. Usa `ROOT_HOME` o, si no existe, `~/.local/share/root`.
 pub fn root_home() -> PathBuf {
@@ -31,6 +32,7 @@ pub struct Config {
     /// Precio por modelo, en USD por millón de tokens.
     pub precios: BTreeMap<String, Precio>,
     pub balance: Balance,
+    pub ruteo: Ruteo,
     pub umbral_verde: f32,
     pub umbral_wilson: f32,
     pub proveedores: ConfigProveedores,
@@ -63,12 +65,50 @@ pub struct Precio {
     pub usd_salida: f64,
 }
 
+/// Sección `[balance]`: topes duros de gasto. Route los lee; nunca los sube.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Balance {
-    pub tope_cupo_usd: f64,
-    /// Fracción del tope (0 a 1) a partir de la cual se prefiere la API.
+    /// Fracción del tope de cupo (en (0, 1]) a partir de la cual se prefiere la API.
     pub prefiere_api_sobre: f32,
+    pub cupo: TopeBloque,
+    pub api: TopeMes,
+    pub nube: TopeMes,
+}
+
+/// Tope de cupo por bloque de horas, imitando la ventana del plan.
+/// La tabla tiene defaults: si falta una clave, vale el default de esta sección.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct TopeBloque {
+    /// USD equivalentes de lista por bloque.
+    pub tope_usd: f64,
+    pub bloque_horas: u32,
+}
+
+/// Tope mensual. Sin defaults por campo: `api` y `nube` tienen topes distintos,
+/// así que un `[balance.nube]` sin `tope_usd` debe fallar en vez de tomar el de la API.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TopeMes {
+    /// USD por mes calendario.
+    pub tope_usd: f64,
+}
+
+/// Sección `[ruteo]`: modelo por rol cuando la vía es API, y equivalente de API de cada alias de cupo.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Ruteo {
+    pub delega: ModeloApi,
+    pub verifica: ModeloApi,
+    pub juzga: ModeloApi,
+    /// Clave: alias de cupo ("opus", "sonnet", "haiku"). Valor: su modelo en la API.
+    pub api_equivalente: BTreeMap<String, ModeloApi>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModeloApi {
+    pub proveedor: Proveedor,
+    pub modelo: String,
 }
 
 impl Default for Config {
@@ -77,6 +117,7 @@ impl Default for Config {
             modelos: Modelos::default(),
             precios: BTreeMap::new(),
             balance: Balance::default(),
+            ruteo: Ruteo::default(),
             umbral_verde: 0.8,
             umbral_wilson: 0.5,
             proveedores: ConfigProveedores::default(),
@@ -108,8 +149,47 @@ impl Default for Modelos {
 impl Default for Balance {
     fn default() -> Self {
         Balance {
-            tope_cupo_usd: 200.0,
             prefiere_api_sobre: 0.9,
+            cupo: TopeBloque::default(),
+            api: TopeMes { tope_usd: 100.0 },
+            nube: TopeMes { tope_usd: 250.0 },
+        }
+    }
+}
+
+impl Default for TopeBloque {
+    fn default() -> Self {
+        TopeBloque {
+            tope_usd: 35.0,
+            bloque_horas: 5,
+        }
+    }
+}
+
+impl Default for Ruteo {
+    fn default() -> Self {
+        let equivalente = |proveedor, modelo: &str| ModeloApi {
+            proveedor,
+            modelo: modelo.into(),
+        };
+        Ruteo {
+            delega: equivalente(Proveedor::Deepseek, "deepseek-chat"),
+            verifica: equivalente(Proveedor::Deepseek, "deepseek-reasoner"),
+            juzga: equivalente(Proveedor::Deepseek, "deepseek-reasoner"),
+            api_equivalente: BTreeMap::from([
+                (
+                    "opus".to_string(),
+                    equivalente(Proveedor::Anthropic, "claude-opus-5-5"),
+                ),
+                (
+                    "sonnet".to_string(),
+                    equivalente(Proveedor::Anthropic, "claude-sonnet-5-5"),
+                ),
+                (
+                    "haiku".to_string(),
+                    equivalente(Proveedor::Anthropic, "claude-haiku-5-5"),
+                ),
+            ]),
         }
     }
 }
@@ -117,7 +197,35 @@ impl Default for Balance {
 impl Config {
     /// Parsea el texto de un `root.toml`. Un texto vacío da los defaults.
     pub fn desde_texto(texto: &str) -> Result<Config, Error> {
-        Ok(toml::from_str(texto)?)
+        let config: Config = toml::from_str(texto)?;
+        config.validar()?;
+        Ok(config)
+    }
+
+    /// Rechaza topes en cero o negativos, `bloque_horas` en cero y `prefiere_api_sobre` fuera de (0, 1].
+    fn validar(&self) -> Result<(), Error> {
+        let b = &self.balance;
+        let topes = [
+            ("balance.cupo.tope_usd", b.cupo.tope_usd),
+            ("balance.api.tope_usd", b.api.tope_usd),
+            ("balance.nube.tope_usd", b.nube.tope_usd),
+        ];
+        for (campo, valor) in topes {
+            if valor.is_nan() || valor <= 0.0 {
+                return Err(Error::ConfigValor(format!("{campo} debe ser mayor que 0")));
+            }
+        }
+        if b.cupo.bloque_horas == 0 {
+            return Err(Error::ConfigValor(
+                "balance.cupo.bloque_horas debe ser al menos 1".into(),
+            ));
+        }
+        if !(b.prefiere_api_sobre > 0.0 && b.prefiere_api_sobre <= 1.0) {
+            return Err(Error::ConfigValor(
+                "balance.prefiere_api_sobre debe estar en (0, 1]".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Lee `root.toml`. Si el archivo no existe, devuelve el default.
@@ -160,8 +268,10 @@ usd_entrada = 1.0
 usd_salida = 5.0
 
 [balance]
-tope_cupo_usd = 50.0
 prefiere_api_sobre = 0.8
+
+[balance.cupo]
+tope_usd = 50.0
 
 [proveedores]
 deepseek_url = "http://127.0.0.1:9/ds"
@@ -171,7 +281,8 @@ espera_base_ms = 1
         assert_eq!(config.modelos.construye, "sonnet");
         assert_eq!(config.modelos.planifica, "opus");
         assert_eq!(config.precios["haiku"].usd_salida, 5.0);
-        assert_eq!(config.balance.tope_cupo_usd, 50.0);
+        assert_eq!(config.balance.cupo.tope_usd, 50.0);
+        assert_eq!(config.balance.cupo.bloque_horas, 5);
         assert_eq!(config.balance.prefiere_api_sobre, 0.8);
         assert_eq!(config.umbral_verde, 0.75);
         assert_eq!(config.umbral_wilson, 0.6);
@@ -204,6 +315,85 @@ espera_base_ms = 1
     fn config_root_home_ignora_variable_vacia() {
         let ruta = resolver_root_home(Some(PathBuf::new()), Some(PathBuf::from("/h")));
         assert_eq!(ruta, PathBuf::from("/h/.local/share/root"));
+    }
+
+    #[test]
+    fn route_balance_subtablas_parsean() {
+        let texto = r#"
+[balance]
+prefiere_api_sobre = 0.8
+
+[balance.cupo]
+tope_usd = 40.0
+bloque_horas = 4
+
+[balance.api]
+tope_usd = 90.0
+
+[balance.nube]
+tope_usd = 200.0
+"#;
+        let c = Config::desde_texto(texto).expect("debe parsear");
+        assert_eq!(c.balance.prefiere_api_sobre, 0.8);
+        assert_eq!(c.balance.cupo.tope_usd, 40.0);
+        assert_eq!(c.balance.cupo.bloque_horas, 4);
+        assert_eq!(c.balance.api.tope_usd, 90.0);
+        assert_eq!(c.balance.nube.tope_usd, 200.0);
+    }
+
+    #[test]
+    fn route_balance_defaults_35_5_100_250_09() {
+        let c = Config::default();
+        assert_eq!(c.balance.prefiere_api_sobre, 0.9);
+        assert_eq!(c.balance.cupo.tope_usd, 35.0);
+        assert_eq!(c.balance.cupo.bloque_horas, 5);
+        assert_eq!(c.balance.api.tope_usd, 100.0);
+        assert_eq!(c.balance.nube.tope_usd, 250.0);
+    }
+
+    #[test]
+    fn route_root_toml_viejo_con_tope_cupo_usd_no_falla() {
+        let c = Config::desde_texto("[balance]\ntope_cupo_usd = 50.0\n")
+            .expect("una clave desconocida no rompe el parseo");
+        assert_eq!(c.balance.cupo.tope_usd, 35.0);
+    }
+
+    #[test]
+    fn route_ruteo_defaults() {
+        let c = Config::default();
+        assert_eq!(c.ruteo.delega.proveedor, Proveedor::Deepseek);
+        assert_eq!(c.ruteo.delega.modelo, "deepseek-chat");
+        assert_eq!(c.ruteo.verifica.proveedor, Proveedor::Deepseek);
+        assert_eq!(c.ruteo.verifica.modelo, "deepseek-reasoner");
+        assert_eq!(c.ruteo.juzga.modelo, "deepseek-reasoner");
+        let eq = &c.ruteo.api_equivalente;
+        assert_eq!(eq["opus"].proveedor, Proveedor::Anthropic);
+        assert_eq!(eq["opus"].modelo, "claude-opus-5-5");
+        assert_eq!(eq["sonnet"].modelo, "claude-sonnet-5-5");
+        assert_eq!(eq["haiku"].modelo, "claude-haiku-5-5");
+    }
+
+    #[test]
+    fn route_topes_invalidos_son_error() {
+        for texto in [
+            "[balance.cupo]\ntope_usd = 0.0",
+            "[balance.cupo]\ntope_usd = -1.0",
+            "[balance.api]\ntope_usd = 0.0",
+            "[balance.nube]\ntope_usd = 0.0",
+            "[balance.cupo]\nbloque_horas = 0",
+            "[balance]\nprefiere_api_sobre = 0.0",
+            "[balance]\nprefiere_api_sobre = 1.5",
+            "[balance]\nprefiere_api_sobre = -0.1",
+        ] {
+            assert!(Config::desde_texto(texto).is_err(), "debe fallar: {texto}");
+        }
+    }
+
+    #[test]
+    fn route_prefiere_api_sobre_uno_es_valido() {
+        let c =
+            Config::desde_texto("[balance]\nprefiere_api_sobre = 1.0").expect("1.0 está en (0, 1]");
+        assert_eq!(c.balance.prefiere_api_sobre, 1.0);
     }
 
     #[test]

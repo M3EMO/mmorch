@@ -9,6 +9,7 @@ use crate::observe::ErrorObserve;
 use crate::oracle::ErrorOraculo;
 use crate::oracle::rubrica::ErrorRubrica;
 use crate::proveedores::ErrorProveedor;
+use crate::tipos::SinPresupuesto;
 use crate::track::ErrorTrack;
 
 /// Errores de la biblioteca. Cada variante tiene su código de salida.
@@ -28,6 +29,12 @@ pub enum Error {
     },
     #[error("root.toml inválido")]
     ConfigToml(#[from] toml::de::Error),
+    /// Un valor de `root.toml` está fuera de rango, por ejemplo un tope en cero.
+    #[error("root.toml inválido: {0}")]
+    ConfigValor(String),
+    /// Ninguna vía tiene margen. Sale con código 3; el humano sube el tope en `root.toml`.
+    #[error(transparent)]
+    SinPresupuesto(#[from] SinPresupuesto),
     #[error("error de JSON")]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
@@ -59,6 +66,8 @@ impl Error {
             Error::NoImplementado(_)
             | Error::ConfigLeer { .. }
             | Error::ConfigToml(_)
+            | Error::ConfigValor(_)
+            | Error::SinPresupuesto(_)
             | Error::Json(_)
             | Error::Observe(_)
             | Error::Track(_)
