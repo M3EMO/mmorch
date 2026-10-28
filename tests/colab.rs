@@ -1,10 +1,12 @@
 //! `r00t oraculo pendientes --colab` contra el binario real y una CLI `colab` falsa.
 //! Ningún test toca Colab: el falso registra cada invocación en `llamadas.log`.
 
-use std::fs;
+use std::fs::{self, File};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 const JUNIT_COLAB: &str =
     r#"<testsuite><testcase classname="tests.test_o" name="o2"/></testsuite>"#;
@@ -116,6 +118,13 @@ fn correr(e: &Escenario, binario: &Path, extra: &[&str]) -> Output {
 
 /// Como `correr`. `plazo` pone `ROOT_COLAB_PLAZO_PRIMER_PASO_S`, variable solo para tests.
 fn correr_con(e: &Escenario, binario: &Path, extra: &[&str], plazo: Option<&str>) -> Output {
+    orden(e, binario, extra, plazo)
+        .output()
+        .expect("no se pudo ejecutar r00t")
+}
+
+/// Orden de `r00t oraculo pendientes` con la CLI falsa, sin ejecutarla. `extra` va después de la tarea y el repo.
+fn orden(e: &Escenario, binario: &Path, extra: &[&str], plazo: Option<&str>) -> Command {
     let repo = e.repo.path().to_str().expect("ruta UTF-8").to_string();
     let mut args: Vec<&str> = vec![
         "oraculo",
@@ -135,7 +144,7 @@ fn correr_con(e: &Escenario, binario: &Path, extra: &[&str], plazo: Option<&str>
     if let Some(segundos) = plazo {
         orden.env("ROOT_COLAB_PLAZO_PRIMER_PASO_S", segundos);
     }
-    orden.output().expect("no se pudo ejecutar r00t")
+    orden
 }
 
 /// Vivo si `kill -0` lo acepta. Llama a la CLI `kill` con argumentos, sin shell.
@@ -337,13 +346,13 @@ fn colab_sin_pendientes_no_toca_colab() {
 }
 
 #[test]
-fn colab_primer_paso_sin_respuesta_sale_3_en_menos_de_15_s() {
+fn colab_primer_paso_sin_respuesta_sale_3_en_menos_de_5_s() {
     let e = Escenario::nuevo(ENTORNO_O2);
     let falso = falso(e.falso.path(), "Tesla T4", "cuelga", false);
     let inicio = std::time::Instant::now();
-    let salida = correr_con(&e, &falso, &["--colab"], Some("2"));
+    let salida = correr_con(&e, &falso, &["--colab"], Some("1"));
     assert!(
-        inicio.elapsed() < std::time::Duration::from_secs(15),
+        inicio.elapsed() < std::time::Duration::from_secs(5),
         "tardó {:?}",
         inicio.elapsed()
     );
@@ -403,4 +412,320 @@ fn colab_paquete_con_env_no_se_sube() {
         String::from_utf8_lossy(&salida.stderr)
     );
     assert!(e.llamadas().is_empty(), "nada llega a Colab");
+}
+
+/// Script `colab` falso para señales, tope y liberación. `corre` es el cuerpo del caso `corre.py`
+/// de `exec`; `stop_codigo` es el código de salida de `stop`. `pid.txt` guarda el PID del script.
+fn falso_a_medida(dir: &Path, corre: &str, stop_codigo: i32) -> PathBuf {
+    falso_a_medida_stop(dir, corre, &format!("exit {stop_codigo}"))
+}
+
+/// Como `falso_a_medida`, pero el caso `stop` es el cuerpo de shell `stop_cuerpo`.
+fn falso_a_medida_stop(dir: &Path, corre: &str, stop_cuerpo: &str) -> PathBuf {
+    let guion = format!(
+        r#"#!/bin/sh
+DIR='{dir}'
+echo "$*" >> "$DIR/llamadas.log"
+case "$1" in
+new|upload|download) exit 0 ;;
+stop) {stop_cuerpo} ;;
+exec)
+  f=""; prev=""
+  for a in "$@"; do if [ "$prev" = "-f" ]; then f="$a"; fi; prev="$a"; done
+  case "$f" in
+    */gpu.py) echo "ROOT_GPU=Tesla T4" ;;
+    */prepara.py) echo "ROOT_PREPARADO=1" ;;
+    */corre.py) echo $$ > "$DIR/pid.txt"; {corre} ;;
+  esac
+  exit 0 ;;
+*) exit 2 ;;
+esac
+"#,
+        dir = dir.display(),
+        stop_cuerpo = stop_cuerpo,
+        corre = corre,
+    );
+    let ruta = dir.join("colab-a-medida");
+    fs::write(&ruta, guion).expect("escribe el falso");
+    fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos");
+    ruta
+}
+
+/// Espera hasta que el log de la CLI falsa muestre `marca`. Falla si no aparece en `segundos`.
+fn esperar_en_log(e: &Escenario, marca: &str, segundos: u64) {
+    let limite = Instant::now() + Duration::from_secs(segundos);
+    while Instant::now() < limite {
+        if e.llamadas().iter().any(|l| l.contains(marca)) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("no apareció {marca} en el log: {:?}", e.llamadas());
+}
+
+/// Espera a que `hijo` termine, hasta `segundos`. `None` si sigue vivo al vencer el plazo.
+fn esperar_salida(hijo: &mut Child, segundos: u64) -> Option<ExitStatus> {
+    let limite = Instant::now() + Duration::from_secs(segundos);
+    while Instant::now() < limite {
+        if let Ok(Some(estado)) = hijo.try_wait() {
+            return Some(estado);
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    None
+}
+
+/// Envía una señal con el comando `kill`, sin shell.
+fn enviar_senal(pid: u32, senal: &str) {
+    let estado = Command::new("kill")
+        .arg(senal)
+        .arg(pid.to_string())
+        .status()
+        .expect("no se pudo ejecutar kill");
+    assert!(estado.success(), "kill {senal} {pid} falló");
+}
+
+/// Corrida `--colab` interrumpida por `senal` mientras `corre.py` duerme. Root debe liberar y salir con 3.
+fn senal_durante_la_corrida(senal: &str, nombre_senal: &str) {
+    let e = Escenario::nuevo(ENTORNO_O2);
+    let falso = falso_a_medida(e.falso.path(), "sleep 60", 0);
+    let salida_stdout = File::create(e.home.path().join("stdout.txt")).expect("stdout");
+    let salida_stderr = File::create(e.home.path().join("stderr.txt")).expect("stderr");
+    let mut hijo = orden(&e, &falso, &["--colab"], None)
+        .stdout(Stdio::from(salida_stdout))
+        .stderr(Stdio::from(salida_stderr))
+        .spawn()
+        .expect("no se pudo lanzar r00t");
+    esperar_en_log(&e, "corre.py", 30);
+    enviar_senal(hijo.id(), senal);
+    let estado = esperar_salida(&mut hijo, 10).expect("Root debe salir en menos de 10 s");
+    let stderr = fs::read_to_string(e.home.path().join("stderr.txt")).unwrap_or_default();
+    assert_eq!(estado.code(), Some(3), "stderr: {stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "Interrumpido por {nombre_senal}: se liberó el runtime de Colab"
+        )),
+        "{stderr}"
+    );
+
+    let lineas = e.llamadas();
+    assert!(
+        lineas.iter().any(|l| l.starts_with("stop -s")),
+        "falta el stop: {lineas:?}"
+    );
+    let gates = e.eventos_runtime();
+    assert!(
+        gates.iter().any(|g| g["extra"]["accion"] == "liberar"
+            && g["extra"]["motivo"]
+                .as_str()
+                .is_some_and(|m| m.contains(nombre_senal))),
+        "{gates:?}"
+    );
+    assert!(
+        !e.home.path().join("colab").join("activo.json").exists(),
+        "activo.json debe borrarse tras liberar"
+    );
+    let pid: i32 = fs::read_to_string(e.falso.path().join("pid.txt"))
+        .expect("pid.txt")
+        .trim()
+        .parse()
+        .expect("PID numérico");
+    assert!(!proceso_vivo(pid), "la CLI falsa quedó viva");
+}
+
+#[test]
+fn colab_sigint_durante_la_corrida_libera_y_sale_3() {
+    senal_durante_la_corrida("-INT", "SIGINT");
+}
+
+#[test]
+fn colab_sigterm_durante_la_corrida_libera_y_sale_3() {
+    senal_durante_la_corrida("-TERM", "SIGTERM");
+}
+
+#[test]
+fn colab_huerfano_se_libera_antes_de_new_y_sigue() {
+    let e = Escenario::nuevo(ENTORNO_O2);
+    let carpeta = e.home.path().join("colab");
+    fs::create_dir_all(&carpeta).expect("carpeta colab");
+    fs::write(carpeta.join("activo.json"), ACTIVO_VIEJO_TEST).expect("activo.json");
+    let falso = falso(e.falso.path(), "Tesla T4", "ok", false);
+    let salida = correr(&e, &falso, &["--colab"]);
+    assert_eq!(
+        salida.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let lineas = e.llamadas();
+    let i_stop = posicion(&lineas, "stop de la sesión vieja", |l| {
+        l == "stop -s vieja"
+    });
+    let i_new = posicion(&lineas, "new", |l| l.starts_with("new -s"));
+    assert!(i_stop < i_new, "el huérfano va antes de new: {lineas:?}");
+    let gates = e.eventos_runtime();
+    assert!(
+        gates
+            .iter()
+            .any(|g| g["extra"]["accion"] == "liberar-huerfano"),
+        "{gates:?}"
+    );
+    assert!(!carpeta.join("activo.json").exists());
+    assert!(e.colab_json().exists(), "la corrida nueva sigue y termina");
+}
+
+const ACTIVO_VIEJO_TEST: &str = r#"{"v":1,"sesion":"vieja","pedido_ts":1,"gpu_pedida":"T4"}"#;
+
+/// `r00t oraculo pendientes --liberar`, sin tarea ni repo.
+fn liberar(e: &Escenario, binario: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_r00t"))
+        .env("ROOT_HOME", e.home.path())
+        .env("ROOT_COLAB_BIN", binario)
+        .args(["oraculo", "pendientes", "--liberar"])
+        .output()
+        .expect("no se pudo ejecutar r00t")
+}
+
+#[test]
+fn colab_liberar_solo_hace_stop_y_sale_0() {
+    let e = Escenario::nuevo("");
+    let carpeta = e.home.path().join("colab");
+    fs::create_dir_all(&carpeta).expect("carpeta colab");
+    fs::write(carpeta.join("activo.json"), ACTIVO_VIEJO_TEST).expect("activo.json");
+    let falso = falso_a_medida(e.falso.path(), "exit 0", 0);
+    let salida = liberar(&e, &falso);
+    assert_eq!(
+        salida.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    assert_eq!(e.llamadas(), vec!["stop -s vieja".to_string()]);
+    assert!(!carpeta.join("activo.json").exists());
+}
+
+#[test]
+fn colab_liberar_sin_archivo_dice_no_hay_runtime() {
+    let e = Escenario::nuevo("");
+    let falso = falso_a_medida(e.falso.path(), "exit 0", 0);
+    let salida = liberar(&e, &falso);
+    assert_eq!(salida.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&salida.stdout).contains("no hay runtime anotado"),
+        "stdout: {}",
+        String::from_utf8_lossy(&salida.stdout)
+    );
+    assert!(e.llamadas().is_empty(), "sin archivo no se llama a la CLI");
+}
+
+#[test]
+fn colab_liberar_con_cli_que_falla_sale_3_y_conserva_archivo() {
+    let e = Escenario::nuevo("");
+    let carpeta = e.home.path().join("colab");
+    fs::create_dir_all(&carpeta).expect("carpeta colab");
+    fs::write(carpeta.join("activo.json"), ACTIVO_VIEJO_TEST).expect("activo.json");
+    let falso = falso_a_medida(e.falso.path(), "exit 0", 1);
+    let salida = liberar(&e, &falso);
+    assert_eq!(salida.status.code(), Some(3));
+    assert!(
+        carpeta.join("activo.json").exists(),
+        "sin parada confirmada el archivo sigue"
+    );
+}
+
+#[test]
+fn colab_liberar_con_sesion_invalida_renombra_a_ilegible() {
+    let e = Escenario::nuevo("");
+    let carpeta = e.home.path().join("colab");
+    fs::create_dir_all(&carpeta).expect("carpeta colab");
+    let texto = r#"{"v":1,"sesion":"a b;rm","pedido_ts":1,"gpu_pedida":"T4"}"#;
+    fs::write(carpeta.join("activo.json"), texto).expect("activo.json");
+    let falso = falso_a_medida(e.falso.path(), "exit 0", 0);
+    let salida = liberar(&e, &falso);
+    assert_eq!(salida.status.code(), Some(0));
+    assert!(
+        e.llamadas().is_empty(),
+        "la sesión inválida no llega a la CLI"
+    );
+    assert!(!carpeta.join("activo.json").exists());
+    assert_eq!(
+        fs::read_to_string(carpeta.join("activo.json.ilegible")).expect("conservado"),
+        texto
+    );
+}
+
+#[test]
+fn colab_activo_no_queda_tras_corrida_exitosa() {
+    let e = Escenario::nuevo(ENTORNO_O2);
+    let falso = falso(e.falso.path(), "Tesla T4", "ok", false);
+    let salida = correr(&e, &falso, &["--colab"]);
+    assert_eq!(salida.status.code(), Some(0));
+    assert!(!e.home.path().join("colab").join("activo.json").exists());
+}
+
+/// Lanza `--colab` con `falso`, espera a que `corre.py` empiece, manda `senal` y espera la salida.
+/// Devuelve el código de salida y el stderr de Root.
+fn colab_interrumpido(e: &Escenario, falso: &Path, senal: &str) -> (Option<i32>, String) {
+    let salida_stderr = File::create(e.home.path().join("stderr.txt")).expect("stderr");
+    let mut hijo = orden(e, falso, &["--colab"], None)
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(salida_stderr))
+        .spawn()
+        .expect("no se pudo lanzar r00t");
+    esperar_en_log(e, "corre.py", 30);
+    enviar_senal(hijo.id(), senal);
+    let codigo = esperar_salida(&mut hijo, 10).and_then(|s| s.code());
+    let stderr = fs::read_to_string(e.home.path().join("stderr.txt")).unwrap_or_default();
+    (codigo, stderr)
+}
+
+#[test]
+fn colab_sigint_con_sesion_inexistente_confirma_y_borra_activo() {
+    let e = Escenario::nuevo(ENTORNO_O2);
+    let falso = falso_a_medida_stop(
+        e.falso.path(),
+        "sleep 60",
+        "echo 'session not found' >&2; exit 1",
+    );
+    let (codigo, stderr) = colab_interrumpido(&e, &falso, "-INT");
+    assert_eq!(codigo, Some(3), "stderr: {stderr}");
+    assert!(
+        stderr.contains("Interrumpido por SIGINT: se liberó el runtime de Colab"),
+        "{stderr}"
+    );
+    assert!(
+        !e.home.path().join("colab").join("activo.json").exists(),
+        "la sesión ya no existía: activo.json se borra"
+    );
+    let gates = e.eventos_runtime();
+    assert!(
+        gates.iter().any(|g| g["extra"]["accion"] == "liberar"
+            && g["extra"]["confirmada"] == true
+            && g["extra"]["nota"] == "la sesión ya no existía"),
+        "{gates:?}"
+    );
+}
+
+#[test]
+fn colab_sigint_con_error_de_red_en_stop_conserva_activo() {
+    let e = Escenario::nuevo(ENTORNO_O2);
+    let falso = falso_a_medida_stop(
+        e.falso.path(),
+        "sleep 60",
+        "echo 'error de red' >&2; exit 1",
+    );
+    let (codigo, stderr) = colab_interrumpido(&e, &falso, "-INT");
+    assert_eq!(codigo, Some(3), "stderr: {stderr}");
+    assert!(stderr.contains("no se confirmó la parada"), "{stderr}");
+    assert!(
+        e.home.path().join("colab").join("activo.json").exists(),
+        "sin parada confirmada el archivo se conserva"
+    );
+    let gates = e.eventos_runtime();
+    assert!(
+        gates
+            .iter()
+            .any(|g| g["extra"]["accion"] == "liberar" && g["extra"]["confirmada"] == false),
+        "{gates:?}"
+    );
 }

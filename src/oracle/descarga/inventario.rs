@@ -9,6 +9,7 @@ use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
 use toml::{Table, Value};
+use url::Host;
 
 use crate::oracle::ErrorOraculo;
 
@@ -25,6 +26,8 @@ const ORIGENES_CRATES_IO: [&str; 2] = [
 ];
 const INDICE_CRATES_IO: &str = "https://index.crates.io/";
 const INDICE_PYPI: &str = "https://pypi.org/simple";
+const HOST_CRATES_IO: &str = "index.crates.io";
+const HOST_PYPI: &str = "pypi.org";
 
 /// Tipo de una fuente declarada en el repo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +48,9 @@ pub struct Fuente {
     /// `Cargo.toml`, `Cargo.lock` o `requirements.txt`, relativo al repo.
     pub archivo: String,
     pub linea: u32,
+    /// Host real de la dirección, sin credenciales. Vacío si la fuente no es una URL.
+    #[serde(default)]
+    pub host: String,
 }
 
 /// Una fuente que no se acepta. La cita va redactada.
@@ -87,6 +93,98 @@ pub struct Inventario {
     pub hallazgos: Vec<HallazgoInventario>,
 }
 
+/// Dirección leída con el parser de URL (RFC 3986). Sin credenciales: el parser ya las rechazó.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UrlAnalizada {
+    pub esquema: String,
+    pub host: String,
+    pub puerto: Option<u16>,
+    pub ruta: String,
+}
+
+/// Motivo por el que `analizar_url` no acepta una dirección.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MotivoRechazoUrl {
+    SinProtocolo,
+    Protocolo(String),
+    Credenciales,
+    Invalida,
+}
+
+impl MotivoRechazoUrl {
+    /// Texto que va al rechazo. Nunca incluye la dirección.
+    pub fn texto(&self) -> String {
+        match self {
+            MotivoRechazoUrl::SinProtocolo => {
+                "forma sin protocolo (scp o ruta): solo se acepta https".into()
+            }
+            MotivoRechazoUrl::Protocolo(esquema) => {
+                format!("protocolo no aceptado: {esquema}; solo se acepta https")
+            }
+            MotivoRechazoUrl::Credenciales => "dirección con credenciales: se rechaza".into(),
+            MotivoRechazoUrl::Invalida => "dirección inválida".into(),
+        }
+    }
+}
+
+/// Prefijos de herramienta que pip, Cargo y los registros ponen delante de una dirección.
+const PREFIJOS_HERRAMIENTA: [&str; 5] = ["git+", "hg+", "svn+", "sparse+", "registry+"];
+
+/// Analiza una dirección con el parser de URL. Sin red.
+/// Orden: espacios, forma sin `://`, parseo, protocolo `https`, credenciales, host.
+pub fn analizar_url(texto: &str) -> Result<UrlAnalizada, MotivoRechazoUrl> {
+    let sin_prefijo = PREFIJOS_HERRAMIENTA
+        .iter()
+        .find_map(|p| texto.strip_prefix(p))
+        .unwrap_or(texto);
+    // RFC 3986: una dirección no lleva espacios ni caracteres de control.
+    if sin_prefijo
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(MotivoRechazoUrl::Invalida);
+    }
+    // La forma scp (`git@host:ruta`) y las rutas no llevan `://`: no son URL.
+    if !sin_prefijo.contains("://") {
+        return Err(MotivoRechazoUrl::SinProtocolo);
+    }
+    let url = url::Url::parse(sin_prefijo).map_err(|_| MotivoRechazoUrl::Invalida)?;
+    let esquema = url.scheme().to_string();
+    if esquema != "https" {
+        return Err(MotivoRechazoUrl::Protocolo(esquema));
+    }
+    let con_credencial =
+        !url.username().is_empty() || url.password().is_some_and(|clave| !clave.is_empty());
+    if con_credencial {
+        return Err(MotivoRechazoUrl::Credenciales);
+    }
+    let host = match url.host() {
+        Some(Host::Domain(nombre)) => nombre.to_string(),
+        Some(Host::Ipv4(direccion)) => direccion.to_string(),
+        Some(Host::Ipv6(direccion)) => direccion.to_string(),
+        None => return Err(MotivoRechazoUrl::Invalida),
+    };
+    Ok(UrlAnalizada {
+        esquema,
+        host,
+        puerto: url.port(),
+        ruta: url.path().to_string(),
+    })
+}
+
+impl UrlAnalizada {
+    /// `esquema://host[:puerto]ruta`. Sin credenciales, sin consulta y sin fragmento.
+    fn base(&self) -> String {
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        let puerto = self.puerto.map(|p| format!(":{p}")).unwrap_or_default();
+        format!("{}://{host}{puerto}{}", self.esquema, self.ruta)
+    }
+}
+
 /// Lee los manifiestos y el lock del repo y arma el inventario. Sin red.
 pub fn inventariar(repo: &Path) -> Result<Inventario, ErrorOraculo> {
     let mut inv = Inventario::default();
@@ -95,7 +193,8 @@ pub fn inventariar(repo: &Path) -> Result<Inventario, ErrorOraculo> {
     Ok(inv)
 }
 
-/// Oculta la credencial de cada dirección `esquema://...` del texto. Ver `corte_credencial`.
+/// Oculta lo que va antes del último `@` de cada dirección del texto. Es conservadora: sirve
+/// para citas aunque la URL no parsee. Las decisiones no usan esta función, usan `analizar_url`.
 pub fn redactar(texto: &str) -> String {
     let mut salida = String::with_capacity(texto.len());
     let mut resto = texto;
@@ -106,42 +205,17 @@ pub fn redactar(texto: &str) -> String {
             .find(|c: char| c == '"' || c == '\'' || c.is_whitespace())
             .unwrap_or(despues.len());
         let (token, cola) = despues.split_at(fin);
-        match corte_credencial(token) {
+        match token.rfind('@') {
             Some(i) => {
                 salida.push_str("***");
                 salida.push_str(&token[i..]);
             }
-            // Un token puede traer otro `://` dentro (un `?url=` de redirección).
-            None => salida.push_str(&redactar(token)),
+            None => salida.push_str(token),
         }
         resto = cola;
     }
     salida.push_str(resto);
     salida
-}
-
-/// Posición del `@` que cierra la credencial de `resto`, el texto después de `://`.
-/// Hay credencial si el `@` va en la autoridad, antes del primer `/`, `?` o `#`.
-/// También la hay si la autoridad trae `usuario:clave`: la clave puede llevar `/`, `?`, `#` o `@`.
-/// Un `@` en la ruta, sin `usuario:` antes, no cuenta: `host/p?e=a@b.c`, `github.com/x/y@ref`.
-fn corte_credencial(resto: &str) -> Option<usize> {
-    let fin_autoridad = resto.find(['/', '?', '#']).unwrap_or(resto.len());
-    let autoridad = &resto[..fin_autoridad];
-    if let Some(i) = autoridad.rfind('@') {
-        return Some(i);
-    }
-    if tiene_usuario(autoridad) {
-        return resto.rfind('@');
-    }
-    None
-}
-
-/// `true` si la autoridad trae `usuario:clave`. Un `:` seguido solo de dígitos es un puerto.
-fn tiene_usuario(autoridad: &str) -> bool {
-    match autoridad.split_once(':') {
-        Some((_, despues)) => despues.is_empty() || !despues.chars().all(|c| c.is_ascii_digit()),
-        None => false,
-    }
 }
 
 /// Origen de un paquete del `Cargo.lock`.
@@ -240,11 +314,10 @@ fn origen_de(valor: Option<&str>) -> Origen {
         return Origen::CratesIo;
     }
     if let Some(git) = valor.strip_prefix("git+") {
-        // Se redacta antes de cortar: un `#` o un `?` dentro de la clave no la deja a la vista.
-        let git = redactar(git);
+        // El commit va después del último `#`. El resto se analiza tal cual, sin redactar.
         let (resto, commit) = match git.rsplit_once('#') {
             Some((resto, commit)) => (resto.to_string(), Some(commit.to_string())),
-            None => (git.clone(), None),
+            None => (git.to_string(), None),
         };
         return Origen::Git {
             url: sin_consulta(&resto).to_string(),
@@ -262,41 +335,14 @@ fn origen_de(valor: Option<&str>) -> Origen {
     Origen::Otro(valor.to_string())
 }
 
-/// Quita el prefijo de herramienta (`git+`, `sparse+`, `registry+`) de una dirección.
-fn quitar_prefijo(url: &str) -> &str {
-    ["git+", "sparse+", "registry+"]
-        .iter()
-        .find_map(|p| url.strip_prefix(p))
-        .unwrap_or(url)
-}
-
+/// Quita la consulta. La autoridad termina antes de `?`, así que el parser da la misma decisión.
 fn sin_consulta(url: &str) -> &str {
     url.split('?').next().unwrap_or(url)
 }
 
-/// Dirección sin prefijo, sin consulta y sin fragmento.
-fn direccion_base(url: &str) -> String {
-    let sin_prefijo = quitar_prefijo(url);
-    let sin_fragmento = sin_prefijo.split('#').next().unwrap_or(sin_prefijo);
-    sin_consulta(sin_fragmento).to_string()
-}
-
-/// Motivo por el que una dirección no se acepta, o `None` si se acepta.
-/// Solo `https`, y sin credenciales en la autoridad.
+/// Motivo por el que una dirección no se acepta, o `None` si se acepta. Usa `analizar_url`.
 fn motivo_de_url(url: &str) -> Option<String> {
-    let url = quitar_prefijo(url);
-    let Some((esquema, resto)) = url.split_once("://") else {
-        return Some("forma sin protocolo (scp o ruta): solo se acepta https".into());
-    };
-    if !esquema.eq_ignore_ascii_case("https") {
-        return Some(format!(
-            "protocolo no aceptado: {esquema}; solo se acepta https"
-        ));
-    }
-    if corte_credencial(resto).is_some() {
-        return Some("dirección con credenciales: se rechaza".into());
-    }
-    None
+    analizar_url(url).err().map(|m| m.texto())
 }
 
 /// Separa la referencia (`@rama` o `@commit`) de la ruta de una URL git.
@@ -459,6 +505,7 @@ fn crates_io_fuente(archivo: &str, linea: u32) -> Fuente {
     Fuente {
         tipo: TipoFuente::Registro,
         direccion: INDICE_CRATES_IO.into(),
+        host: HOST_CRATES_IO.into(),
         version: None,
         archivo: archivo.into(),
         linea,
@@ -677,7 +724,7 @@ fn inventariar_cargo(repo: &Path, inv: &mut Inventario) -> Result<(), ErrorOracu
             Origen::Git {
                 url,
                 commit: Some(c),
-            } => Some((url.clone(), c.clone())),
+            } => analizar_url(url).ok().map(|u| (u.base(), c.clone())),
             _ => None,
         })
         .collect();
@@ -710,26 +757,28 @@ fn inventariar_cargo(repo: &Path, inv: &mut Inventario) -> Result<(), ErrorOracu
             Origen::CratesIo => {
                 crates_lock.get_or_insert(p.linea);
             }
-            Origen::Git { url, commit } => match motivo_de_url(url) {
-                Some(motivo) => inv.rechazos.push(rechazo_de_lock(p, motivo)),
-                None => push_unico(
+            Origen::Git { url, commit } => match analizar_url(url) {
+                Err(motivo) => inv.rechazos.push(rechazo_de_lock(p, motivo.texto())),
+                Ok(u) => push_unico(
                     &mut inv.fuentes,
                     Fuente {
                         tipo: TipoFuente::Git,
-                        direccion: redactar(url),
+                        direccion: u.base(),
+                        host: u.host,
                         version: commit.clone(),
                         archivo: ARCHIVO_LOCK.into(),
                         linea: p.linea,
                     },
                 ),
             },
-            Origen::Registro { url } => match motivo_de_url(url) {
-                Some(motivo) => inv.rechazos.push(rechazo_de_lock(p, motivo)),
-                None => push_unico(
+            Origen::Registro { url } => match analizar_url(url) {
+                Err(motivo) => inv.rechazos.push(rechazo_de_lock(p, motivo.texto())),
+                Ok(u) => push_unico(
                     &mut inv.fuentes,
                     Fuente {
                         tipo: TipoFuente::Registro,
-                        direccion: redactar(&direccion_base(url)),
+                        direccion: u.base(),
+                        host: u.host,
                         version: None,
                         archivo: ARCHIVO_LOCK.into(),
                         linea: p.linea,
@@ -783,11 +832,14 @@ fn revisar_dep(
         return;
     }
     if let Some(url) = &git {
-        if let Some(motivo) = motivo_de_url(url) {
-            inv.rechazos.push(rechazo(&m.texto, linea, motivo));
-            return;
-        }
-        let base = direccion_base(url);
+        let u = match analizar_url(url) {
+            Ok(u) => u,
+            Err(motivo) => {
+                inv.rechazos.push(rechazo(&m.texto, linea, motivo.texto()));
+                return;
+            }
+        };
+        let base = u.base();
         let commit_lock = commits.get(&base).cloned();
         let rev = texto_de("rev");
         let fijo = rev.is_some() || commit_lock.is_some();
@@ -799,7 +851,8 @@ fn revisar_dep(
             &mut inv.fuentes,
             Fuente {
                 tipo: TipoFuente::Git,
-                direccion: redactar(&base),
+                direccion: base.clone(),
+                host: u.host,
                 version,
                 archivo: m.texto.ruta.clone(),
                 linea,
@@ -829,21 +882,22 @@ fn revisar_dep(
             ));
             return;
         }
-        let direccion = match tabla.and_then(|t| t.get("index")).and_then(Value::as_str) {
-            Some(url) => {
-                if let Some(motivo) = motivo_de_url(url) {
-                    inv.rechazos.push(rechazo(&m.texto, linea, motivo));
+        let (direccion, host) = match tabla.and_then(|t| t.get("index")).and_then(Value::as_str) {
+            Some(url) => match analizar_url(url) {
+                Ok(u) => (u.base(), u.host),
+                Err(motivo) => {
+                    inv.rechazos.push(rechazo(&m.texto, linea, motivo.texto()));
                     return;
                 }
-                direccion_base(url)
-            }
-            None => format!("registry:{nombre}"),
+            },
+            None => (format!("registry:{nombre}"), String::new()),
         };
         push_unico(
             &mut inv.fuentes,
             Fuente {
                 tipo: TipoFuente::Registro,
-                direccion: redactar(&direccion),
+                direccion,
+                host,
                 version: None,
                 archivo: m.texto.ruta.clone(),
                 linea,
@@ -880,6 +934,7 @@ fn inventariar_requirements(repo: &Path, inv: &mut Inventario) -> Result<(), Err
             Fuente {
                 tipo: TipoFuente::Registro,
                 direccion: INDICE_PYPI.into(),
+                host: HOST_PYPI.into(),
                 version: None,
                 archivo: ARCHIVO_REQUIREMENTS.into(),
                 linea: 0,
@@ -985,15 +1040,19 @@ fn es_directa(texto: &str) -> bool {
 
 /// Fuente de un índice (`--index-url`, `--extra-index-url`, `--find-links`).
 fn fuente_de_indice(t: &Texto, linea: u32, url: &str, inv: &mut Inventario) {
-    if let Some(motivo) = motivo_de_url(url) {
-        inv.rechazos.push(rechazo(t, linea, motivo));
-        return;
-    }
+    let u = match analizar_url(url) {
+        Ok(u) => u,
+        Err(motivo) => {
+            inv.rechazos.push(rechazo(t, linea, motivo.texto()));
+            return;
+        }
+    };
     push_unico(
         &mut inv.fuentes,
         Fuente {
             tipo: TipoFuente::Registro,
-            direccion: redactar(&direccion_base(url)),
+            direccion: u.base(),
+            host: u.host,
             version: None,
             archivo: t.ruta.clone(),
             linea,
@@ -1003,19 +1062,21 @@ fn fuente_de_indice(t: &Texto, linea: u32, url: &str, inv: &mut Inventario) {
 
 /// Referencia directa de un requisito: `git+https://...@commit` o una URL de archivo.
 fn directa(url: &str, linea: u32, t: &Texto, inv: &mut Inventario) {
-    // Antes de cortar el fragmento: un `#` dentro de la clave no debe esconder la credencial.
-    if let Some(motivo) = motivo_de_url(url) {
-        inv.rechazos.push(rechazo(t, linea, motivo));
-        return;
-    }
-    let sin_fragmento = url.split('#').next().unwrap_or(url);
-    if let Some(git) = sin_fragmento.strip_prefix("git+") {
-        let (base, version) = separar_referencia(git);
+    let u = match analizar_url(url) {
+        Ok(u) => u,
+        Err(motivo) => {
+            inv.rechazos.push(rechazo(t, linea, motivo.texto()));
+            return;
+        }
+    };
+    if url.starts_with("git+") {
+        let (base, version) = separar_referencia(&u.base());
         push_unico(
             &mut inv.fuentes,
             Fuente {
                 tipo: TipoFuente::Git,
-                direccion: redactar(&base),
+                direccion: base,
+                host: u.host,
                 version,
                 archivo: t.ruta.clone(),
                 linea,
@@ -1027,7 +1088,8 @@ fn directa(url: &str, linea: u32, t: &Texto, inv: &mut Inventario) {
         &mut inv.fuentes,
         Fuente {
             tipo: TipoFuente::Url,
-            direccion: redactar(sin_fragmento),
+            direccion: u.base(),
+            host: u.host,
             version: None,
             archivo: t.ruta.clone(),
             linea,
@@ -1075,6 +1137,7 @@ mod tests {
             vec![Fuente {
                 tipo: TipoFuente::Git,
                 direccion: "https://github.com/x/y".into(),
+                host: "github.com".into(),
                 version: Some("abc123".into()),
                 archivo: "Cargo.toml".into(),
                 linea: 6,
@@ -1153,6 +1216,7 @@ source = \"git+https://github.com/x/t?rev=r1#aaaa\"\n";
             vec![Fuente {
                 tipo: TipoFuente::Git,
                 direccion: "https://github.com/x/z".into(),
+                host: "github.com".into(),
                 version: Some("r1".into()),
                 archivo: "crates/a/Cargo.toml".into(),
                 linea: 6,
@@ -1168,6 +1232,7 @@ source = \"git+https://github.com/x/t?rev=r1#aaaa\"\n";
             vec![Fuente {
                 tipo: TipoFuente::Registro,
                 direccion: "https://index.crates.io/".into(),
+                host: "index.crates.io".into(),
                 version: None,
                 archivo: "Cargo.toml".into(),
                 linea: 6,
@@ -1187,6 +1252,7 @@ git+https://github.com/x/y@abc123#egg=y\nhttps://host/p.tar.gz\n-r otro.txt\n";
                 Fuente {
                     tipo: TipoFuente::Registro,
                     direccion: "https://pypi.example/simple".into(),
+                    host: "pypi.example".into(),
                     version: None,
                     archivo: "requirements.txt".into(),
                     linea: 3,
@@ -1194,6 +1260,7 @@ git+https://github.com/x/y@abc123#egg=y\nhttps://host/p.tar.gz\n-r otro.txt\n";
                 Fuente {
                     tipo: TipoFuente::Git,
                     direccion: "https://github.com/x/y".into(),
+                    host: "github.com".into(),
                     version: Some("abc123".into()),
                     archivo: "requirements.txt".into(),
                     linea: 4,
@@ -1201,6 +1268,7 @@ git+https://github.com/x/y@abc123#egg=y\nhttps://host/p.tar.gz\n-r otro.txt\n";
                 Fuente {
                     tipo: TipoFuente::Url,
                     direccion: "https://host/p.tar.gz".into(),
+                    host: "host".into(),
                     version: None,
                     archivo: "requirements.txt".into(),
                     linea: 5,
@@ -1607,5 +1675,138 @@ requests\ngit+https://github.com/x/y@abc#egg=y\n";
             redactar("https://u:cla/ve@host/x.git"),
             "https://***@host/x.git"
         );
+    }
+
+    #[test]
+    fn descarga_inventario_analizar_url_token_en_la_ruta_da_host_tok() {
+        let u = analizar_url("https://tok/en@host").expect("acepta");
+        assert_eq!(u.host, "tok");
+        assert_eq!(u.ruta, "/en@host");
+        assert_eq!(u.esquema, "https");
+        assert_eq!(u.puerto, None);
+    }
+
+    #[test]
+    fn descarga_inventario_analizar_url_credenciales_son_rechazo() {
+        for url in [
+            "https://usuario:clave@host/x",
+            "https://token@host",
+            "https://u:p%40ss@host",
+        ] {
+            assert_eq!(
+                analizar_url(url),
+                Err(MotivoRechazoUrl::Credenciales),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn descarga_inventario_analizar_url_parseo_invalido_es_direccion_invalida() {
+        for url in [
+            "https://u:cla/ve@host/x.git",
+            "https://host:99999/x",
+            "https://ho st/x",
+            "https://host/a b",
+        ] {
+            assert_eq!(analizar_url(url), Err(MotivoRechazoUrl::Invalida), "{url}");
+        }
+        assert_eq!(MotivoRechazoUrl::Invalida.texto(), "dirección inválida");
+    }
+
+    #[test]
+    fn descarga_inventario_analizar_url_protocolos_sin_https_son_rechazo() {
+        assert_eq!(
+            analizar_url("ssh://git@github.com/x/y"),
+            Err(MotivoRechazoUrl::Protocolo("ssh".into()))
+        );
+        assert_eq!(
+            analizar_url("git://github.com/x/y"),
+            Err(MotivoRechazoUrl::Protocolo("git".into()))
+        );
+        assert_eq!(
+            analizar_url("http://github.com/x/y"),
+            Err(MotivoRechazoUrl::Protocolo("http".into()))
+        );
+        assert_eq!(
+            analizar_url("file:///tmp/x"),
+            Err(MotivoRechazoUrl::Protocolo("file".into()))
+        );
+        assert_eq!(
+            analizar_url("git@github.com:x/y.git"),
+            Err(MotivoRechazoUrl::SinProtocolo)
+        );
+    }
+
+    #[test]
+    fn descarga_inventario_analizar_url_ipv6_da_host_sin_corchetes_y_puerto() {
+        let u = analizar_url("https://[::1]:8443/x").expect("acepta");
+        assert_eq!(u.host, "::1");
+        assert_eq!(u.puerto, Some(8443));
+    }
+
+    #[test]
+    fn descarga_inventario_analizar_url_minusculas_prefijo_y_fragmento() {
+        let u = analizar_url("HTTPS://Host.COM/x").expect("acepta");
+        assert_eq!(u.host, "host.com");
+        assert_eq!(u.esquema, "https");
+        let g = analizar_url("git+https://github.com/x/y@abc123#egg=y").expect("acepta");
+        assert_eq!(g.host, "github.com");
+        assert_eq!(g.ruta, "/x/y@abc123");
+        let h = analizar_url("hg+https://host/x").expect("acepta");
+        assert_eq!(h.esquema, "https");
+    }
+
+    #[test]
+    fn descarga_inventario_analizar_url_arroba_en_la_consulta_no_es_credencial() {
+        let u = analizar_url("https://host/p?e=a@b.c").expect("acepta");
+        assert_eq!(u.host, "host");
+        assert_eq!(u.ruta, "/p");
+    }
+
+    #[test]
+    fn descarga_inventario_git_con_token_en_la_ruta_se_acepta_y_registra_el_host_real() {
+        let inv = inventario_cargo("foo = { git = \"https://tok/en@host/x.git\", rev = \"r1\" }\n");
+        assert!(inv.rechazos.is_empty(), "{inv:?}");
+        assert_eq!(inv.fuentes.len(), 1, "{inv:?}");
+        assert_eq!(inv.fuentes[0].host, "tok");
+    }
+
+    #[test]
+    fn descarga_inventario_usuario_con_barra_en_la_clave_motivo_es_direccion_invalida() {
+        let inv = inventario_cargo("foo = { git = \"https://u:cla/ve@host/x.git\" }\n");
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+        assert_eq!(inv.rechazos[0].motivo, "dirección inválida");
+        let json = serde_json::to_string(&inv).expect("serializa");
+        assert!(!json.contains("cla/ve"), "{json}");
+    }
+
+    #[test]
+    fn descarga_inventario_requirements_host_con_arroba_en_consulta_registra_host() {
+        let inv = inventario_de(&[(
+            "requirements.txt",
+            "--index-url https://host/p?e=a@b.c\nrequests\n",
+        )]);
+        assert_eq!(inv.fuentes[0].host, "host", "{inv:?}");
+    }
+
+    #[test]
+    fn descarga_inventario_pypi_por_defecto_registra_su_host() {
+        let inv = inventario_de(&[("requirements.txt", "requests==2.31.0\n")]);
+        assert_eq!(inv.fuentes[0].host, "pypi.org", "{inv:?}");
+    }
+
+    #[test]
+    fn descarga_redactar_es_conservador_con_el_arroba_en_la_ruta() {
+        assert_eq!(redactar("https://tok/en@host/x"), "https://***@host/x");
+    }
+
+    #[test]
+    fn descarga_inventario_cita_no_muestra_credencial_si_la_url_no_parsea() {
+        let inv = inventario_cargo("foo = { git = \"https://usuario:clave@ho st/x\" }\n");
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+        let json = serde_json::to_string(&inv).expect("serializa");
+        assert!(!json.contains("clave"), "{json}");
+        assert!(!json.contains("usuario:"), "{json}");
     }
 }

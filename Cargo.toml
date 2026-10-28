@@ -16,10 +16,12 @@ schemars = "1.2.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 sha2 = "0.11.1"
+signal-hook = "0.4.5"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 time = { version = "0.3.55", features = ["formatting", "local-offset"] }
 toml = "1.1.8"
+url = "2.5.8"
 ureq = "3.5.0"
 yaml-rust2 = "0.13.0"
 

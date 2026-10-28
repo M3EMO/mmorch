@@ -87,7 +87,7 @@ pub fn parsear_outcomes(
     if json.trim().is_empty() {
         return Ok(desde_sonda(sin_veredicto(
             DIMENSION,
-            "reporte vacío de cargo-mutants",
+            "no dejó reporte: el archivo outcomes.json está vacío",
         )));
     }
     let informe: Informe = serde_json::from_str(json)
@@ -140,7 +140,7 @@ pub fn parsear_outcomes(
         return Ok(desde_sonda(ResultadoSonda {
             dimension: DIMENSION,
             valor: None,
-            motivo: Some("no hay mutantes viables para medir".into()),
+            motivo: Some("sin mutantes para medir: ningún mutante es viable".into()),
             hallazgos: Vec::new(),
         }));
     }
@@ -233,7 +233,7 @@ pub fn sonda_mutacion(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoM
         Err(e) => return desde_sonda(sin_veredicto(DIMENSION, e.to_string())),
     };
     let Some(json) = salida.archivos.get(ARCHIVO_OUTCOMES) else {
-        let base = format!("cargo-mutants no dejó reporte (código {})", salida.codigo);
+        let base = format!("no dejó reporte (cargo-mutants código {})", salida.codigo);
         return desde_sonda(sin_veredicto(DIMENSION, con_cola(base, &salida.stderr)));
     };
     parsear_outcomes(json, mutantes_max(tarea), &tarea.requisito)
@@ -252,6 +252,8 @@ mod tests {
         include_str!("../../tests/fixtures/mutacion/outcomes-con-asserts.json");
     const SIN_ASSERTS: &str =
         include_str!("../../tests/fixtures/mutacion/outcomes-sin-asserts.json");
+    const SIN_MUTANTES: &str =
+        include_str!("../../tests/fixtures/mutacion/outcomes-sin-mutantes.json");
 
     /// Tarea mínima. `extra` agrega tablas al final, como `[pruebas]`.
     fn tarea_con(lenguaje: &str, extra: &str) -> Tarea {
@@ -389,11 +391,59 @@ mod tests {
             {"scenario":{"Mutant":{"name":"m","file":"src/a.rs"}},"summary":"Unviable"}]}"#;
         let r = parsear_outcomes(json, 60, &[]).expect("parsea");
         assert_eq!(r.sonda.valor, None);
-        assert_eq!(
-            r.sonda.motivo.as_deref(),
-            Some("no hay mutantes viables para medir")
+        assert!(
+            r.sonda
+                .motivo
+                .unwrap_or_default()
+                .starts_with("sin mutantes para medir"),
         );
         assert_eq!(r.muestra, 0);
+    }
+
+    #[test]
+    fn mutacion_reporte_valido_sin_mutantes_da_motivo_sin_mutantes_para_medir() {
+        let r = parsear_outcomes(SIN_MUTANTES, 60, &[]).expect("parsea");
+        assert_eq!(r.sonda.valor, None);
+        assert!(r.sonda.hallazgos.is_empty());
+        let motivo = r.sonda.motivo.unwrap_or_default();
+        assert!(motivo.starts_with("sin mutantes para medir"), "{motivo}");
+    }
+
+    #[test]
+    fn mutacion_sin_reporte_motivo_empieza_con_no_dejo_reporte() {
+        let t = tarea_con("rust", "");
+        let ej = Falso::nuevo(|cmd| {
+            Ok(SalidaHerramienta {
+                codigo: if cmd.starts_with("command -v") { 0 } else { 2 },
+                ..Default::default()
+            })
+        });
+        let r = sonda_mutacion(&ej, &t);
+        let motivo = r.sonda.motivo.unwrap_or_default();
+        assert!(motivo.starts_with("no dejó reporte"), "{motivo}");
+    }
+
+    #[test]
+    fn mutacion_los_dos_motivos_de_cero_mutantes_son_distintos() {
+        let t = tarea_con("rust", "");
+        let sin_reporte = Falso::nuevo(|cmd| {
+            Ok(SalidaHerramienta {
+                codigo: if cmd.starts_with("command -v") { 0 } else { 2 },
+                ..Default::default()
+            })
+        });
+        let motivo_sin_reporte = sonda_mutacion(&sin_reporte, &t)
+            .sonda
+            .motivo
+            .unwrap_or_default();
+        let motivo_sin_mutantes = parsear_outcomes(SIN_MUTANTES, 60, &[])
+            .expect("parsea")
+            .sonda
+            .motivo
+            .unwrap_or_default();
+        assert!(!motivo_sin_reporte.is_empty());
+        assert!(!motivo_sin_mutantes.is_empty());
+        assert_ne!(motivo_sin_reporte, motivo_sin_mutantes);
     }
 
     #[test]
@@ -508,7 +558,7 @@ mod tests {
     fn mutacion_reporte_vacio_es_sin_veredicto() {
         let (valor, motivo) = motivo_de("");
         assert_eq!(valor, None);
-        assert!(motivo.contains("reporte vacío"), "{motivo}");
+        assert!(motivo.starts_with("no dejó reporte"), "{motivo}");
     }
 
     #[test]

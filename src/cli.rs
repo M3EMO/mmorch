@@ -167,16 +167,21 @@ pub enum OraculoAccion {
     /// Arma el paquete de los tests pendientes por entorno para correrlos en Colab.
     /// Con `--importar`, guarda el junit que trajo de vuelta.
     Pendientes {
-        #[arg(long)]
-        tarea: String,
-        #[arg(long)]
-        repo: PathBuf,
+        /// Tarea. Obligatoria salvo con `--liberar`.
+        #[arg(long, required_unless_present = "liberar")]
+        tarea: Option<String>,
+        /// Repo. Obligatorio salvo con `--liberar`.
+        #[arg(long, required_unless_present = "liberar")]
+        repo: Option<PathBuf>,
         /// Junit que dejó `correr.sh`. Sin este flag se arma el paquete.
         #[arg(long, conflicts_with = "colab")]
         importar: Option<PathBuf>,
         /// Corre el paquete en un runtime T4 de Colab, importa el junit y libera el runtime.
         #[arg(long, conflicts_with = "importar")]
         colab: bool,
+        /// Libera el runtime de Colab anotado en `activo.json`, si hay uno, y sale.
+        #[arg(long, conflicts_with_all = ["colab", "importar"])]
+        liberar: bool,
     },
     /// Calibra una dimensión del Oracle.
     Calibrar {

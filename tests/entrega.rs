@@ -316,7 +316,9 @@ fn repo_9d2(archivos: &[(&str, &str)]) -> tempfile::TempDir {
         .tempdir_in(base_9d2())
         .expect("repo temporal");
     for (ruta, texto) in archivos {
-        fs::write(repo.path().join(ruta), texto).expect("escribe el archivo");
+        let destino = repo.path().join(ruta);
+        fs::create_dir_all(destino.parent().expect("con carpeta")).expect("crea carpetas");
+        fs::write(destino, texto).expect("escribe el archivo");
     }
     repo
 }
@@ -586,7 +588,7 @@ fn entrega_pull_imagen_inexistente_se_marca_no_existe() {
     assert_eq!(imagenes.len(), 1, "{imagenes:?}");
     assert_eq!(
         imagenes[0].problema,
-        Some(Problema::NoExiste),
+        Some(Problema::ImagenInaccesible),
         "{:?}",
         imagenes[0]
     );
@@ -1030,4 +1032,404 @@ fn entrega_escenario_sin_carpeta_de_tarea_da_infraestructura() {
         &[],
     );
     assert!(matches!(r, Err(ErrorOraculo::Infra(_))), "{r:?}");
+}
+
+// ---- Tarea 7j: un solo Dockerfile, imagen sin `sh` y causa "pide credenciales" ----
+
+/// Tarea con `containerfile` en la raíz del `tarea.toml` y `extra` al final.
+fn tarea_con_containerfile(containerfile: &str, extra: &str) -> Tarea {
+    let dir = tempfile::Builder::new()
+        .prefix("tarea-")
+        .tempdir_in(base_9d2())
+        .expect("temp dir")
+        .keep();
+    let texto = format!(
+        "containerfile = \"{containerfile}\"\nnombre = \"x\"\nlenguaje = \"shell\"\nimagen = \"i\"\n\
+         spec = \"s\"\n[contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n{extra}"
+    );
+    fs::write(dir.join("tarea.toml"), texto).expect("escribe tarea.toml");
+    Tarea::cargar_de(&dir).expect("carga la tarea")
+}
+
+const ESCENARIO_MARCA_RAIZ: &str = "[[escenario]]\nid = \"marca\"\ncmd = \"test -f /marca-raiz\"\n";
+
+#[test]
+fn entrega_dockerfile_de_la_raiz_gana_y_solo_se_construye_uno() {
+    asegurar_imagen(ALPINE);
+    let _serie = serie();
+    // La raíz copia `hola.txt`. El otro Dockerfile copia un archivo que no existe: si se construyera, fallaría.
+    let repo = repo_9d2(&[
+        (
+            "Dockerfile",
+            "FROM docker.io/library/alpine:3.20\nCOPY hola.txt /hola.txt\nUSER 1000\n",
+        ),
+        ("hola.txt", "hola\n"),
+        (
+            "docker/otro.Dockerfile",
+            "FROM docker.io/library/alpine:3.20\nCOPY no-existe /x\nUSER 1000\n",
+        ),
+    ]);
+    let home = home_9d2();
+    let tarea = tarea_con("[[escenario]]\nid = \"hola\"\ncmd = \"test -f /hola.txt\"\n");
+    let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
+    let c = construir_dockerfile(repo.path(), home.path(), &tarea, &imagenes).expect("construye");
+    assert!(c.construida, "la raíz debe construir: {c:?}");
+    assert!(
+        c.hallazgos.is_empty(),
+        "solo se construye la raíz: {:?}",
+        c.hallazgos
+    );
+    let r = entregar(
+        &Falso(salida_con(&[("entrega-escenario-hola.rc", "0\n")])),
+        repo.path(),
+        &tarea,
+        home.path(),
+        &imagenes,
+    )
+    .expect("entrega");
+    // El rc del escenario lo pone el ejecutor falso. Lo real: `test -f /hola.txt` corre en la imagen
+    // de la raíz, y si falla deja un hallazgo "escenario falló".
+    assert_eq!(
+        r.lugar_escenarios.get("hola"),
+        Some(&LugarEscenario::Imagen),
+        "{r:?}"
+    );
+    assert!(
+        r.sonda
+            .hallazgos
+            .iter()
+            .all(|h| !h.detalle.contains("escenario falló")),
+        "el escenario no corrió sobre la imagen de la raíz: {:?}",
+        r.sonda.hallazgos
+    );
+    assert!(
+        r.sonda
+            .hallazgos
+            .iter()
+            .all(|h| !h.detalle.contains("no construye")),
+        "{:?}",
+        r.sonda.hallazgos
+    );
+    assert!(
+        imagenes_temporales().is_empty(),
+        "queda una imagen temporal"
+    );
+}
+
+#[test]
+fn entrega_containerfile_gana_sobre_el_dockerfile_de_la_raiz() {
+    asegurar_imagen(ALPINE);
+    let _serie = serie();
+    let repo = repo_9d2(&[
+        (
+            "Dockerfile",
+            "FROM docker.io/library/alpine:3.20\nRUN false\nUSER 1000\n",
+        ),
+        (
+            "docker/app.Dockerfile",
+            "FROM docker.io/library/alpine:3.20\nRUN touch /marca-raiz\nUSER 1000\n",
+        ),
+    ]);
+    let home = home_9d2();
+    let tarea = tarea_con_containerfile("docker/app.Dockerfile", ESCENARIO_MARCA_RAIZ);
+    let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
+    let r = entregar(
+        &Falso(salida_con(&[("entrega-escenario-marca.rc", "0\n")])),
+        repo.path(),
+        &tarea,
+        home.path(),
+        &imagenes,
+    )
+    .expect("entrega");
+    assert!(
+        r.sonda
+            .hallazgos
+            .iter()
+            .all(|h| !h.detalle.contains("no construye")),
+        "el Dockerfile de la raíz no se construye: {:?}",
+        r.sonda.hallazgos
+    );
+    assert_eq!(
+        r.lugar_escenarios.get("marca"),
+        Some(&LugarEscenario::Imagen),
+        "{r:?}"
+    );
+    assert_eq!(r.escenarios.get("marca"), Some(&true), "{r:?}");
+}
+
+#[test]
+fn entrega_containerfile_inexistente_avisa_y_usa_el_criterio_siguiente() {
+    asegurar_imagen(ALPINE);
+    let _serie = serie();
+    let repo = repo_9d2(&[(
+        "Dockerfile",
+        "FROM docker.io/library/alpine:3.20\nRUN touch /marca-raiz\nUSER 1000\n",
+    )]);
+    let home = home_9d2();
+    let tarea = tarea_con_containerfile("no/existe.Dockerfile", ESCENARIO_MARCA_RAIZ);
+    let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
+    let r = entregar(
+        &Falso(salida_con(&[("entrega-escenario-marca.rc", "0\n")])),
+        repo.path(),
+        &tarea,
+        home.path(),
+        &imagenes,
+    )
+    .expect("entrega");
+    assert!(
+        r.avisos
+            .iter()
+            .any(|a| a.contains("no/existe.Dockerfile") && a.contains("no existe")),
+        "{:?}",
+        r.avisos
+    );
+    assert_eq!(
+        r.lugar_escenarios.get("marca"),
+        Some(&LugarEscenario::Imagen),
+        "el Dockerfile de la raíz sí se construye: {r:?}"
+    );
+}
+
+#[test]
+fn entrega_varios_dockerfile_sin_eleccion_no_construye_y_avisa() {
+    let _serie = serie();
+    let repo = repo_9d2(&[
+        (
+            "docker/a.Dockerfile",
+            "FROM docker.io/library/alpine:3.20\nRUN false\nUSER 1000\n",
+        ),
+        (
+            "docker/b.Dockerfile",
+            "FROM docker.io/library/alpine:3.20\nUSER 1000\n",
+        ),
+    ]);
+    let home = home_9d2();
+    let tarea = tarea_con("[[escenario]]\nid = \"hola\"\ncmd = \"true\"\n");
+    let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
+    let r = entregar(
+        &Falso(salida_con(&[("entrega-escenario-hola.rc", "0\n")])),
+        repo.path(),
+        &tarea,
+        home.path(),
+        &imagenes,
+    )
+    .expect("entrega");
+    assert!(
+        r.avisos
+            .iter()
+            .any(|a| a == "varios Dockerfile, ninguno elegido"),
+        "{:?}",
+        r.avisos
+    );
+    assert!(
+        r.avisos
+            .iter()
+            .any(|a| a.contains("docker/a.Dockerfile") && a.contains("docker/b.Dockerfile")),
+        "el aviso lista los archivos: {:?}",
+        r.avisos
+    );
+    // Ninguno se construye: el `RUN false` no da hallazgo de construcción.
+    assert!(
+        r.sonda
+            .hallazgos
+            .iter()
+            .all(|h| !h.detalle.contains("no construye")),
+        "{:?}",
+        r.sonda.hallazgos
+    );
+    assert_eq!(
+        r.lugar_escenarios.get("hola"),
+        Some(&LugarEscenario::ContenedorEvaluacion),
+        "{r:?}"
+    );
+    assert!(
+        imagenes_temporales().is_empty(),
+        "queda una imagen temporal"
+    );
+}
+
+#[test]
+fn entrega_scratch_construye_sin_red_y_corre_sin_root_por_inspect() {
+    let _serie = serie();
+    let repo = dockerfile_9d2("FROM scratch\nCOPY hola.txt /hola.txt\nUSER 1000\n");
+    let home = home_9d2();
+    let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &[]).expect("construye");
+    assert!(r.construida, "{r:?}");
+    assert_eq!(r.corre_sin_root, Some(true), "{r:?}");
+    assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+    assert!(r.pendientes.is_empty(), "{:?}", r.pendientes);
+    assert!(
+        imagenes_temporales().is_empty(),
+        "queda una imagen temporal"
+    );
+}
+
+#[test]
+fn entrega_scratch_escenarios_corren_en_contenedor_de_evaluacion_con_aviso() {
+    let _serie = serie();
+    let repo = dockerfile_9d2("FROM scratch\nCOPY hola.txt /hola.txt\nUSER 1000\n");
+    let home = home_9d2();
+    let tarea = tarea_con("[[escenario]]\nid = \"hola\"\ncmd = \"test -f /hola.txt\"\n");
+    let imagenes = descarga::traer_imagenes_base(repo.path()).expect("scratch no se baja");
+    let r = entregar(
+        &Falso(salida_con(&[("entrega-escenario-hola.rc", "0\n")])),
+        repo.path(),
+        &tarea,
+        home.path(),
+        &imagenes,
+    )
+    .expect("entrega");
+    assert!(
+        r.avisos
+            .iter()
+            .any(|a| a
+                == "la imagen no tiene sh: los escenarios corren en el contenedor de evaluación"),
+        "{:?}",
+        r.avisos
+    );
+    assert_eq!(
+        r.lugar_escenarios.get("hola"),
+        Some(&LugarEscenario::ContenedorEvaluacion),
+        "{r:?}"
+    );
+    assert_eq!(r.escenarios.get("hola"), Some(&true), "{r:?}");
+    assert!(
+        imagenes_temporales().is_empty(),
+        "queda una imagen temporal"
+    );
+}
+
+#[test]
+fn descarga_pull_no_hace_pull_de_scratch() {
+    let _serie = serie();
+    let repo = repo_9d2(&[(
+        "Dockerfile",
+        "FROM scratch\nCOPY hola.txt /hola.txt\nUSER 1000\n",
+    )]);
+    let imagenes = traer_imagenes_base(repo.path()).expect("scratch no es un pull");
+    assert!(imagenes.is_empty(), "{imagenes:?}");
+}
+
+#[test]
+fn entrega_pide_credenciales_da_causa_unificada_en_la_construccion() {
+    let _serie = serie();
+    let repo = repo_9d2(&[("Dockerfile", "FROM 127.0.0.1:1/x:1\nUSER 1000\n")]);
+    let home = home_9d2();
+    let imagenes = [descarga::ImagenBase {
+        archivo: "Dockerfile".into(),
+        linea: 1,
+        cita: "FROM 127.0.0.1:1/x:1".into(),
+        imagen: "127.0.0.1:1/x:1".into(),
+        resuelta: Some("127.0.0.1:1/x:1".into()),
+        digest: None,
+        descargada: false,
+        sin_resolver: None,
+        problema: Some(Problema::PideCredenciales),
+    }];
+    let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &imagenes)
+        .expect("construye");
+    assert_eq!(r.sin_veredicto.len(), 1, "{:?}", r.sin_veredicto);
+    assert_eq!(
+        r.sin_veredicto[0].causa,
+        "imagen base: pide credenciales (Root no las pasa)"
+    );
+}
+
+/// Servidor HTTP local que responde 401 con `WWW-Authenticate` a toda petición. Hilo suelto.
+fn servidor_401() -> u16 {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let escucha = TcpListener::bind("127.0.0.1:0").expect("escucha en loopback");
+    let puerto = escucha.local_addr().expect("puerto").port();
+    std::thread::spawn(move || {
+        for flujo in escucha.incoming() {
+            let Ok(mut flujo) = flujo else { continue };
+            let _ = flujo.set_read_timeout(Some(Duration::from_secs(5)));
+            let mut buf = [0u8; 4096];
+            let _ = flujo.read(&mut buf);
+            let _ = flujo.write_all(
+                b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"root\"\r\n\
+                  Content-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
+    });
+    puerto
+}
+
+#[test]
+fn descarga_pull_401_de_podman_pide_credenciales() {
+    let puerto = servidor_401();
+    // Root no baja con `--tls-verify=false`: el test solo mira qué dice podman ante un 401 real.
+    let salida = Command::new("podman")
+        .args([
+            "pull",
+            "--tls-verify=false",
+            &format!("127.0.0.1:{puerto}/x:1"),
+        ])
+        .output()
+        .expect("corre podman");
+    assert!(!salida.status.success(), "un 401 no puede bajar la imagen");
+    let texto = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&salida.stdout),
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    assert_eq!(
+        descarga::clasificar_error_pull(&texto),
+        Problema::PideCredenciales,
+        "{texto}"
+    );
+}
+
+/// Guarda que pone `CONTAINERS_REGISTRIES_CONF` para tratar un registro local como inseguro (HTTP).
+/// Podman lo lee al correr; sin esto, `podman pull` pide HTTPS y el 401 nunca llega.
+struct RegistroInseguro;
+
+impl RegistroInseguro {
+    fn con(puerto: u16) -> Self {
+        let conf = base_9d2().join(format!("registries-{puerto}.conf"));
+        fs::write(
+            &conf,
+            format!("[[registry]]\nlocation = \"127.0.0.1:{puerto}\"\ninsecure = true\n"),
+        )
+        .expect("escribe el registries.conf de prueba");
+        // SAFETY: los tests con podman van de a uno (`serie()`) y esta guarda la quita al salir.
+        unsafe { std::env::set_var("CONTAINERS_REGISTRIES_CONF", &conf) };
+        RegistroInseguro
+    }
+}
+
+impl Drop for RegistroInseguro {
+    fn drop(&mut self) {
+        // SAFETY: igual que en `con`: el test sigue dentro de `serie()`.
+        unsafe { std::env::remove_var("CONTAINERS_REGISTRIES_CONF") };
+    }
+}
+
+#[test]
+fn entrega_pide_credenciales_no_da_hallazgo_al_producto() {
+    let _serie = serie();
+    let puerto = servidor_401();
+    let _registro = RegistroInseguro::con(puerto);
+    let repo = repo_9d2(&[(
+        "Dockerfile",
+        &format!("FROM 127.0.0.1:{puerto}/x:1\nUSER 1000\n"),
+    )]);
+    let home = home_9d2();
+    let (p, imagenes) =
+        descarga::preparar_con_imagenes(repo.path(), &tarea_con(""), home.path(), LIMITE_9D2)
+            .expect("prepara");
+    assert_eq!(imagenes.len(), 1, "{imagenes:?}");
+    assert_eq!(
+        imagenes[0].problema,
+        Some(Problema::PideCredenciales),
+        "{imagenes:?}"
+    );
+    let Preparacion::SinVeredicto(hallazgos) = p else {
+        panic!("un 401 da sin veredicto de la fase: {p:?}");
+    };
+    assert!(
+        hallazgos.is_empty(),
+        "un 401 no cobra al producto: {hallazgos:?}"
+    );
 }

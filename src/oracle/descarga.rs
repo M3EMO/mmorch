@@ -15,8 +15,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::configs::{self, TipoConfig, instrucciones, palabra_clave, parsear_from};
+use super::configs::{instrucciones, palabra_clave, parsear_from};
 use super::contenedor::{self, Ejecucion, correr_podman};
+use super::entrega::{Eleccion, dockerfiles_del_repo, elegir_dockerfile};
 use super::tarea::Tarea;
 use super::{CARPETA_TEMPORALES, ErrorOraculo, infra, temporal};
 use crate::borrado;
@@ -95,14 +96,21 @@ const LARGO_LINEA_UTIL: usize = 300;
 const PLAZO_PULL: Duration = Duration::from_secs(15 * 60);
 /// Plazo de las consultas rápidas de podman: inspeccionar una imagen.
 const PLAZO_CORTO: Duration = Duration::from_secs(60);
-/// Fragmentos (en minúscula) de un `pull` de una imagen que no existe. Van antes que los de credenciales.
-const PATRONES_NO_EXISTE: [&str; 3] = [
-    "manifest unknown",
-    "not found",
-    "requested access to the resource is denied",
+/// Fragmentos (en minúscula) de un pedido explícito de autenticación (401). Root no pasa credenciales (P21).
+/// Van antes que los textos ambiguos: un 401 con "not found" en el mismo texto sigue siendo un 401.
+const PATRONES_PIDE_CREDENCIALES: [&str; 3] = [
+    "authentication required",
+    "401 unauthorized",
+    "basic auth credentials",
 ];
-/// Fragmentos (en minúscula) de un registro que pide credenciales. No se pasan (zona roja, P21).
-const PATRONES_CREDENCIALES: [&str; 2] = ["denied", "unauthorized"];
+/// Fragmentos (en minúscula) de un texto ambiguo: la imagen no existe o es privada.
+const PATRONES_IMAGEN_INACCESIBLE: [&str; 5] = [
+    "requested access to the resource is denied",
+    "pull access denied",
+    "manifest unknown",
+    "name unknown",
+    "not found",
+];
 
 /// Hash corto de un contenido: primeros 16 caracteres hex de su sha256.
 pub fn hash_corto(contenido: &[u8]) -> String {
@@ -280,26 +288,22 @@ pub fn preparar_con_imagenes(
     // Las imágenes base van antes de las dependencias: sin ellas el Dockerfile no construye (Tarea 9d2).
     // Un pull que falla no corta la fase: queda en el Gate y la construcción da sin veredicto (Tarea 7i).
     let imagenes = if hay_dockerfile(repo) {
-        Some(traer_imagenes_base(repo)?)
+        Some(traer_imagenes_base_de(repo, &elegido(repo, tarea))?)
     } else {
         None
     };
-    let hallazgos_imagen = imagenes
-        .as_deref()
-        .map(hallazgos_de_imagenes)
-        .unwrap_or_default();
     let devueltas = imagenes.clone().unwrap_or_default();
     if imagenes
         .iter()
         .flatten()
-        .any(|i| i.problema == Some(Problema::Credenciales))
+        .any(|i| i.problema == Some(Problema::PideCredenciales))
     {
         // Sin veredicto: no se pasan credenciales, así que no se sigue con la descarga.
         let mut registro = Registro::sin_paquetes(&tarea.lenguaje);
-        registro.motivo = Some("credenciales");
+        registro.motivo = Some("imagen base: pide credenciales");
         registro.imagenes = imagenes;
         registrar(home, tarea, &registro)?;
-        return Ok((Preparacion::SinVeredicto(hallazgos_imagen), devueltas));
+        return Ok((Preparacion::SinVeredicto(Vec::new()), devueltas));
     }
     let (preparacion, registro) = match tarea.lenguaje.as_str() {
         "rust" => preparar_rust(repo, tarea, home, timeout, &inv)?,
@@ -313,7 +317,6 @@ pub fn preparar_con_imagenes(
             None,
         ),
     };
-    let preparacion = con_hallazgos(preparacion, hallazgos_imagen);
     let registro = match (registro, imagenes) {
         (Some(mut registro), imagenes) => {
             registro.imagenes = imagenes;
@@ -330,28 +333,6 @@ pub fn preparar_con_imagenes(
         registrar(home, tarea, &registro)?;
     }
     Ok((preparacion, devueltas))
-}
-
-/// Agrega hallazgos a una preparación, sea cual sea su variante.
-fn con_hallazgos(preparacion: Preparacion, extra: Vec<Hallazgo>) -> Preparacion {
-    match preparacion {
-        Preparacion::Lista {
-            cache,
-            rustsec,
-            mut hallazgos,
-        } => {
-            hallazgos.extend(extra);
-            Preparacion::Lista {
-                cache,
-                rustsec,
-                hallazgos,
-            }
-        }
-        Preparacion::SinVeredicto(mut hallazgos) => {
-            hallazgos.extend(extra);
-            Preparacion::SinVeredicto(hallazgos)
-        }
-    }
 }
 
 /// Gate de la fase `inventario`: las fuentes que el repo declara, antes de usar la red.
@@ -770,8 +751,9 @@ pub struct ImagenBase {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Problema {
     /// Inexistente o privada: el registro responde lo mismo para los dos casos.
-    NoExiste,
-    Credenciales,
+    ImagenInaccesible,
+    /// Un pedido explícito de autenticación (401). Root no pasa credenciales.
+    PideCredenciales,
     /// Red o registro caído. Guarda la causa, sin el prefijo.
     Infraestructura(String),
 }
@@ -779,8 +761,8 @@ pub enum Problema {
 impl Serialize for Problema {
     fn serialize<S: serde::Serializer>(&self, serializador: S) -> Result<S::Ok, S::Error> {
         let texto = match self {
-            Problema::NoExiste => "no_existe".to_string(),
-            Problema::Credenciales => "credenciales".to_string(),
+            Problema::ImagenInaccesible => "imagen_inaccesible".to_string(),
+            Problema::PideCredenciales => "pide_credenciales".to_string(),
             Problema::Infraestructura(causa) => format!("infraestructura: {causa}"),
         };
         serializador.serialize_str(&texto)
@@ -936,31 +918,28 @@ pub fn necesita_pull(
     digest_fijado.is_some_and(|fijado| digest_local != Some(fijado))
 }
 
-/// Causa de un `podman pull` fallido.
-#[derive(Debug, Clone, PartialEq)]
-enum Causa {
-    NoExiste,
-    Credenciales,
-    Otra(String),
-}
-
-/// Clasifica la salida de un `podman pull` fallido. Lo que no es inexistente ni credenciales es red.
-fn causa_de_pull(salida: &str) -> Causa {
+/// Clasifica la salida de un `podman pull` fallido (Tarea 7j). Un pedido explícito de autenticación va
+/// primero. Un texto ambiguo de Docker Hub es "no existe o es privada". Lo demás es infraestructura.
+pub fn clasificar_error_pull(salida: &str) -> Problema {
     let minuscula = salida.to_lowercase();
-    if PATRONES_NO_EXISTE.iter().any(|p| minuscula.contains(p)) {
-        return Causa::NoExiste;
+    if PATRONES_PIDE_CREDENCIALES
+        .iter()
+        .any(|p| minuscula.contains(p))
+    {
+        return Problema::PideCredenciales;
     }
-    if PATRONES_CREDENCIALES.iter().any(|p| minuscula.contains(p)) {
-        return Causa::Credenciales;
+    if PATRONES_IMAGEN_INACCESIBLE
+        .iter()
+        .any(|p| minuscula.contains(p))
+    {
+        return Problema::ImagenInaccesible;
     }
-    Causa::Otra(linea_util(salida))
+    Problema::Infraestructura(linea_util(salida))
 }
 
 /// Verdadero si el repo trae al menos un Dockerfile o Containerfile.
 fn hay_dockerfile(repo: &Path) -> bool {
-    configs::buscar_archivos(repo)
-        .iter()
-        .any(|a| a.tipo == TipoConfig::Dockerfile)
+    !dockerfiles_del_repo(repo).is_empty()
 }
 
 /// Resultado de mirar una imagen base: local o bajada, o el motivo por el que el registro no la dio.
@@ -990,12 +969,11 @@ fn bajar_imagen(imagen: &str) -> Result<Bajada, ErrorOraculo> {
         });
     }
     let texto = format!("{}\n{}", pull.stdout, pull.stderr);
-    Ok(Bajada::Problema(match causa_de_pull(&texto) {
-        Causa::NoExiste => Problema::NoExiste,
-        Causa::Credenciales => Problema::Credenciales,
-        Causa::Otra(linea) => {
+    Ok(Bajada::Problema(match clasificar_error_pull(&texto) {
+        Problema::Infraestructura(linea) => {
             Problema::Infraestructura(format!("no se pudo bajar {imagen}: {linea}"))
         }
+        otro => otro,
     }))
 }
 
@@ -1029,37 +1007,29 @@ fn digest_de(imagen: &str) -> Result<Option<String>, ErrorOraculo> {
     Ok((!digest.is_empty()).then(|| digest.to_string()))
 }
 
-/// Hallazgos de las imágenes base que el registro no dio. Solo credenciales cobra hallazgo, con sin veredicto.
-/// Una imagen inexistente o privada da sin veredicto en la construcción, y una falla de red no corta.
-fn hallazgos_de_imagenes(imagenes: &[ImagenBase]) -> Vec<Hallazgo> {
-    imagenes
-        .iter()
-        .filter_map(|i| match i.problema.as_ref()? {
-            Problema::Credenciales => Some(hallazgo(
-                &i.archivo,
-                i.linea,
-                &i.cita,
-                3,
-                format!(
-                    "la imagen base pide credenciales: no se pasan (zona roja, P21): {}",
-                    i.imagen
-                ),
-            )),
-            Problema::NoExiste | Problema::Infraestructura(_) => None,
-        })
-        .collect()
+/// El Dockerfile que se construye, como lista de una ruta. Sin elección posible, la lista está vacía.
+fn elegido(repo: &Path, tarea: &Tarea) -> Vec<String> {
+    match elegir_dockerfile(repo, tarea.containerfile.as_deref()) {
+        Eleccion::Elegido(ruta) => vec![ruta],
+        Eleccion::NingunoElegido(_) | Eleccion::SinDockerfile => Vec::new(),
+    }
 }
 
-/// Baja con `podman pull` la imagen base de cada `FROM` de los Dockerfile del repo.
-/// Solo baja: no corre ningún `RUN`. Ignora `scratch` y los alias de etapas previas del mismo archivo.
+/// Baja con `podman pull` la imagen base de cada `FROM` de todos los Dockerfile del repo.
 pub fn traer_imagenes_base(repo: &Path) -> Result<Vec<ImagenBase>, ErrorOraculo> {
+    traer_imagenes_base_de(repo, &dockerfiles_del_repo(repo))
+}
+
+/// Baja con `podman pull` la imagen base de cada `FROM` de los Dockerfile `rutas` (relativas al repo).
+/// Solo baja: no corre ningún `RUN`. Ignora `scratch` y los alias de etapas previas del mismo archivo.
+pub fn traer_imagenes_base_de(
+    repo: &Path,
+    rutas: &[String],
+) -> Result<Vec<ImagenBase>, ErrorOraculo> {
     let mut salida = Vec::new();
-    for archivo in configs::buscar_archivos(repo) {
-        if archivo.tipo != TipoConfig::Dockerfile {
-            continue;
-        }
-        let texto = fs::read_to_string(repo.join(&archivo.ruta_relativa))
-            .map_err(|e| infra("leer el Dockerfile", e))?;
+    for ruta in rutas {
+        let texto =
+            fs::read_to_string(repo.join(ruta)).map_err(|e| infra("leer el Dockerfile", e))?;
         let mut alias_previos: Vec<String> = Vec::new();
         for f in froms_del_texto(&texto) {
             let FromEnTexto { from, alias, cita } = f;
@@ -1074,7 +1044,7 @@ pub fn traer_imagenes_base(repo: &Path) -> Result<Vec<ImagenBase>, ErrorOraculo>
                 continue;
             }
             let mut base = ImagenBase {
-                archivo: archivo.ruta_relativa.clone(),
+                archivo: ruta.clone(),
                 linea: from.linea,
                 cita,
                 imagen: from.escrito.clone(),
@@ -1413,15 +1383,21 @@ location searched: crates.io index";
     #[test]
     fn descarga_causa_de_pull_separa_inexistente_de_credenciales_y_red() {
         let inexistente = "Error: reading manifest 1 in docker.io/library/x: manifest unknown";
-        assert_eq!(causa_de_pull(inexistente), Causa::NoExiste);
-        let denegado = "Error: reading manifest 1 in docker.io/library/x: requested access to the resource is denied";
-        assert_eq!(causa_de_pull(denegado), Causa::NoExiste);
         assert_eq!(
-            causa_de_pull("Error: unauthorized: authentication required"),
-            Causa::Credenciales
+            clasificar_error_pull(inexistente),
+            Problema::ImagenInaccesible
+        );
+        let denegado = "Error: reading manifest 1 in docker.io/library/x: requested access to the resource is denied";
+        assert_eq!(clasificar_error_pull(denegado), Problema::ImagenInaccesible);
+        assert_eq!(
+            clasificar_error_pull("Error: unauthorized: authentication required"),
+            Problema::PideCredenciales
         );
         let red = "Error: dial tcp: lookup registro.ejemplo: no such host";
-        assert!(matches!(causa_de_pull(red), Causa::Otra(_)));
+        assert!(matches!(
+            clasificar_error_pull(red),
+            Problema::Infraestructura(_)
+        ));
     }
 
     fn resuelto(texto: &str, i: usize) -> Result<String, String> {
@@ -1491,31 +1467,66 @@ location searched: crates.io index";
             serde_json::to_value(Problema::Infraestructura("dial tcp".into())).expect("serializa");
         assert_eq!(json, serde_json::json!("infraestructura: dial tcp"));
         assert_eq!(
-            serde_json::to_value(Problema::NoExiste).expect("serializa"),
-            serde_json::json!("no_existe")
+            serde_json::to_value(Problema::ImagenInaccesible).expect("serializa"),
+            serde_json::json!("imagen_inaccesible")
         );
     }
 
     #[test]
-    fn descarga_hallazgos_de_imagenes_solo_cobran_credenciales() {
-        let base = |problema| ImagenBase {
-            archivo: "Dockerfile".into(),
-            linea: 1,
-            cita: "FROM x".into(),
-            imagen: "x".into(),
-            resuelta: Some("x".into()),
-            digest: None,
-            descargada: false,
-            sin_resolver: None,
-            problema: Some(problema),
-        };
-        let imagenes = [
-            base(Problema::NoExiste),
-            base(Problema::Infraestructura("dial tcp".into())),
-            base(Problema::Credenciales),
-        ];
-        let hallazgos = hallazgos_de_imagenes(&imagenes);
-        assert_eq!(hallazgos.len(), 1, "{hallazgos:?}");
-        assert!(hallazgos[0].detalle.contains("credenciales"));
+    fn descarga_clasifica_error_pull_pide_credenciales_con_auth_explicita() {
+        for salida in [
+            "Error: unauthorized: authentication required",
+            "Error: initializing source: 401 Unauthorized",
+            "Error: no basic auth credentials",
+            "Error: basic auth credentials missing",
+        ] {
+            assert_eq!(
+                clasificar_error_pull(salida),
+                Problema::PideCredenciales,
+                "{salida}"
+            );
+        }
+    }
+
+    #[test]
+    fn descarga_clasifica_error_pull_auth_explicita_gana_a_no_existe() {
+        let mezclado = "Error: requested access to the resource is denied\n\
+            unauthorized: authentication required";
+        assert_eq!(clasificar_error_pull(mezclado), Problema::PideCredenciales);
+    }
+
+    #[test]
+    fn descarga_clasifica_error_pull_ambiguo_es_imagen_inaccesible() {
+        for salida in [
+            "Error: requested access to the resource is denied",
+            "Error: pull access denied for x, repository does not exist or may require 'docker login'",
+            "Error: manifest unknown: manifest unknown",
+            "Error: name unknown: repository x not found",
+        ] {
+            assert_eq!(
+                clasificar_error_pull(salida),
+                Problema::ImagenInaccesible,
+                "{salida}"
+            );
+        }
+    }
+
+    #[test]
+    fn descarga_clasifica_error_pull_red_es_infraestructura() {
+        for salida in [
+            "Error: dial tcp: lookup registro.ejemplo: no such host",
+            "Error: dial tcp 127.0.0.1:1: connect: connection refused",
+        ] {
+            assert!(
+                matches!(clasificar_error_pull(salida), Problema::Infraestructura(_)),
+                "{salida}"
+            );
+        }
+    }
+
+    #[test]
+    fn descarga_clasifica_error_pull_401_de_podman_pide_credenciales() {
+        let salida = "Error: unable to copy from source docker://127.0.0.1:5099/x:1: initializing source docker://127.0.0.1:5099/x:1: reading manifest 1 in 127.0.0.1:5099/x: authentication required";
+        assert_eq!(clasificar_error_pull(salida), Problema::PideCredenciales);
     }
 }

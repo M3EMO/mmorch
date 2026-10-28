@@ -37,6 +37,15 @@ pub struct Config {
     /// Cota inferior de Wilson (90%, unilateral) que un candidato debe alcanzar para entrar a la política.
     pub umbral_wilson: f64,
     pub proveedores: ConfigProveedores,
+    pub colab: ConfigColab,
+}
+
+/// Sección `[colab]`: tope de duración de una corrida en Colab.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct ConfigColab {
+    /// Minutos máximos de una corrida en Colab. Al llegar al tope, Root libera el runtime.
+    pub minutos_max: u32,
 }
 
 /// Sección `[proveedores]`: URLs de las APIs, espera base de reintentos y timeout por intento.
@@ -122,7 +131,14 @@ impl Default for Config {
             umbral_verde: 0.8,
             umbral_wilson: 0.6,
             proveedores: ConfigProveedores::default(),
+            colab: ConfigColab::default(),
         }
+    }
+}
+
+impl Default for ConfigColab {
+    fn default() -> Self {
+        ConfigColab { minutos_max: 30 }
     }
 }
 
@@ -264,6 +280,11 @@ impl Config {
         if !(b.prefiere_api_sobre > 0.0 && b.prefiere_api_sobre <= 1.0) {
             return Err(Error::ConfigValor(
                 "balance.prefiere_api_sobre debe estar en (0, 1]".into(),
+            ));
+        }
+        if self.colab.minutos_max == 0 {
+            return Err(Error::ConfigValor(
+                "colab.minutos_max debe ser al menos 1".into(),
             ));
         }
         Ok(())
@@ -524,6 +545,30 @@ tope_usd = 200.0
         let texto = toml::to_string(&c).expect("serializa");
         let vuelta = Config::desde_texto(&texto).expect("vuelve a parsear");
         assert_eq!(vuelta.balance.prefiere_api_sobre, 0.9_f64);
+        assert_eq!(vuelta, c);
+    }
+
+    #[test]
+    fn colab_config_minutos_max_por_defecto_es_30() {
+        assert_eq!(Config::default().colab.minutos_max, 30);
+        let c = Config::desde_texto("").expect("vacío debe parsear");
+        assert_eq!(c.colab.minutos_max, 30);
+    }
+
+    #[test]
+    fn colab_config_minutos_max_cero_da_codigo_2() {
+        let error = Config::desde_texto("[colab]\nminutos_max = 0")
+            .expect_err("minutos_max = 0 debe fallar");
+        assert_eq!(error.codigo_de_salida(), 2);
+        assert!(error.to_string().contains("colab.minutos_max"), "{error}");
+    }
+
+    #[test]
+    fn colab_config_minutos_max_ida_y_vuelta() {
+        let c = Config::desde_texto("[colab]\nminutos_max = 45").expect("debe parsear");
+        assert_eq!(c.colab.minutos_max, 45);
+        let texto = toml::to_string(&c).expect("serializa");
+        let vuelta = Config::desde_texto(&texto).expect("vuelve a parsear");
         assert_eq!(vuelta, c);
     }
 }

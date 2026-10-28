@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -13,7 +13,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::oracle::ErrorOraculo;
-use crate::oracle::configs::{self, TipoConfig, instrucciones, palabra_clave};
+use crate::oracle::configs::{self, instrucciones, palabra_clave};
 use crate::oracle::contenedor::{SUFIJO_SELINUX, SalidaPodman, correr_podman};
 use crate::oracle::descarga::{self, ImagenBase, PRELUDIO, Problema};
 use crate::oracle::perfiles::herramientas::EjecutorHerramienta;
@@ -92,7 +92,7 @@ pub struct MotivoSinVeredicto {
     pub imagen: Option<String>,
 }
 
-/// Construye los Dockerfile del repo con `--network none --pull=never` y verifica que corren sin root.
+/// Construye el Dockerfile elegido con `--network none --pull=never` y verifica que corre sin root.
 /// `imagenes` son las imágenes base que vio la fase de descarga: un problema suyo da sin veredicto.
 pub fn construir_dockerfile(
     repo: &Path,
@@ -103,58 +103,68 @@ pub fn construir_dockerfile(
     construir_con(repo, home, tarea, imagenes, PLAZO_BUILD).map(|c| c.resultado)
 }
 
-/// Lo que sale de construir. Si todos los Dockerfile construyeron, `imagen` guarda la última imagen:
+/// Lo que sale de construir. Si el Dockerfile construye y la imagen trae `sh`, `imagen` guarda la imagen:
 /// los escenarios corren contra ella. Su `Drop` la borra con `podman rmi -f`.
 pub struct Construccion {
     pub resultado: ResultadoDockerfile,
     imagen: Option<ImagenTemporal>,
+    /// Avisos de la elección y de la construcción (Tarea 7j).
+    avisos: Vec<String>,
 }
 
-/// Motivos por los que la construcción no da veredicto, antes de tocar podman: un `FROM` sin valor,
-/// o una imagen base que la fase de descarga no pudo traer.
+/// Aviso cuando hay varios Dockerfile y ninguno se puede elegir.
+const AVISO_VARIOS: &str = "varios Dockerfile, ninguno elegido";
+/// Aviso cuando la imagen construida no trae `sh`: los escenarios no corren dentro de ella.
+const AVISO_SIN_SH: &str =
+    "la imagen no tiene sh: los escenarios corren en el contenedor de evaluación";
+/// Código con que podman sale cuando el ejecutable existe pero no se puede correr.
+const CODIGO_NO_EJECUTABLE: i32 = 126;
+/// Código con que podman sale cuando el ejecutable no está en la imagen.
+const CODIGO_NO_HALLADO: i32 = 127;
+
+/// Motivos por los que la construcción del Dockerfile elegido no da veredicto, antes de tocar podman:
+/// un `FROM` sin valor, o una imagen base que la fase de descarga no pudo traer.
 fn motivos_sin_veredicto(
     repo: &Path,
-    dockerfiles: &[String],
+    ruta: &str,
     imagenes: &[ImagenBase],
 ) -> Result<Vec<MotivoSinVeredicto>, ErrorOraculo> {
+    let texto = fs::read_to_string(repo.join(ruta))
+        .map_err(|e| infra("leer el Dockerfile para construir", e))?;
     let mut motivos = Vec::new();
-    for ruta in dockerfiles {
-        let texto = fs::read_to_string(repo.join(ruta))
-            .map_err(|e| infra("leer el Dockerfile para construir", e))?;
-        for from in descarga::resolver_froms(&texto) {
-            if from.resuelto.is_err() {
-                motivos.push(MotivoSinVeredicto {
-                    causa: "imagen base sin resolver".into(),
-                    linea: from.linea,
-                    imagen: Some(from.escrito),
-                });
-            }
-        }
-        for imagen in imagenes.iter().filter(|i| i.archivo == *ruta) {
-            let causa = match &imagen.problema {
-                None => continue,
-                Some(Problema::NoExiste) => {
-                    "imagen base inaccesible: no existe o es privada".to_string()
-                }
-                Some(Problema::Credenciales) => {
-                    "imagen base inaccesible: pide credenciales, que Root no pasa".to_string()
-                }
-                Some(Problema::Infraestructura(_)) => format!(
-                    "infraestructura: no se pudo bajar la imagen base {}",
-                    imagen.resuelta.as_deref().unwrap_or(&imagen.imagen)
-                ),
-            };
+    for from in descarga::resolver_froms(&texto) {
+        if from.resuelto.is_err() {
             motivos.push(MotivoSinVeredicto {
-                causa,
-                linea: imagen.linea,
-                imagen: Some(imagen.imagen.clone()),
+                causa: "imagen base sin resolver".into(),
+                linea: from.linea,
+                imagen: Some(from.escrito),
             });
         }
+    }
+    for imagen in imagenes.iter().filter(|i| i.archivo == ruta) {
+        let causa = match &imagen.problema {
+            None => continue,
+            Some(Problema::ImagenInaccesible) => {
+                "imagen base inaccesible: no existe o es privada".to_string()
+            }
+            Some(Problema::PideCredenciales) => {
+                "imagen base: pide credenciales (Root no las pasa)".to_string()
+            }
+            Some(Problema::Infraestructura(_)) => format!(
+                "infraestructura: no se pudo bajar la imagen base {}",
+                imagen.resuelta.as_deref().unwrap_or(&imagen.imagen)
+            ),
+        };
+        motivos.push(MotivoSinVeredicto {
+            causa,
+            linea: imagen.linea,
+            imagen: Some(imagen.imagen.clone()),
+        });
     }
     Ok(motivos)
 }
 
-/// Construye los Dockerfile del repo y verifica que corren sin root. Un `podman build` por Dockerfile.
+/// Construye el Dockerfile elegido y verifica que corre sin root. Un solo `podman build`.
 fn construir_con(
     repo: &Path,
     home: &Path,
@@ -163,11 +173,6 @@ fn construir_con(
     plazo: Duration,
 ) -> Result<Construccion, ErrorOraculo> {
     let reqs = tarea.requisito.as_slice();
-    let dockerfiles: Vec<String> = configs::buscar_archivos(repo)
-        .into_iter()
-        .filter(|a| a.tipo == TipoConfig::Dockerfile)
-        .map(|a| a.ruta_relativa)
-        .collect();
     let mut resultado = ResultadoDockerfile {
         hallazgos: Vec::new(),
         pendientes: Vec::new(),
@@ -175,18 +180,40 @@ fn construir_con(
         construida: false,
         sin_veredicto: Vec::new(),
     };
-    if dockerfiles.is_empty() {
-        return Ok(Construccion {
-            resultado,
-            imagen: None,
-        });
+    let mut avisos = Vec::new();
+    if let Some(c) = tarea.containerfile.as_deref()
+        && ruta_del_repo(repo, c).is_none()
+    {
+        avisos.push(format!(
+            "containerfile {c} no existe: se elige el Dockerfile por el criterio siguiente"
+        ));
     }
-    let motivos = motivos_sin_veredicto(repo, &dockerfiles, imagenes)?;
+    let ruta = match elegir_dockerfile(repo, tarea.containerfile.as_deref()) {
+        Eleccion::SinDockerfile => {
+            return Ok(Construccion {
+                resultado,
+                imagen: None,
+                avisos,
+            });
+        }
+        Eleccion::NingunoElegido(lista) => {
+            avisos.push(AVISO_VARIOS.into());
+            avisos.push(format!("Dockerfile del repo: {}", lista.join(", ")));
+            return Ok(Construccion {
+                resultado,
+                imagen: None,
+                avisos,
+            });
+        }
+        Eleccion::Elegido(ruta) => ruta,
+    };
+    let motivos = motivos_sin_veredicto(repo, &ruta, imagenes)?;
     if !motivos.is_empty() {
         resultado.sin_veredicto = motivos;
         return Ok(Construccion {
             resultado,
             imagen: None,
+            avisos,
         });
     }
     // La copia aísla el repo. El contexto de build sale de ella, nunca del repo original.
@@ -197,64 +224,66 @@ fn construir_con(
     copiar_repo(repo, &contexto).map_err(|e| infra("copia del repo para construir", e))?;
     // La regla de root la emite la sonda estática: la construcción no la repite.
     let estatica = configs::dockerfile_corre_como_root(repo, reqs).map_err(ErrorOraculo::Infra)?;
-    let mut todas_ok = true;
-    let mut sin_root: Vec<bool> = Vec::new();
-    let mut construidas: Vec<ImagenTemporal> = Vec::new();
-    for ruta in &dockerfiles {
-        let texto = fs::read_to_string(contexto.join(ruta))
-            .map_err(|e| infra("leer el Dockerfile para construir", e))?;
-        // La imagen temporal se borra al salir de la iteración, pase lo que pase.
-        let imagen = ImagenTemporal(etiqueta_unica());
-        let df = contexto.join(ruta).to_string_lossy().into_owned();
-        let ctx = contexto.to_string_lossy().into_owned();
-        let args = [
-            "build",
-            "--network",
-            "none",
-            "--pull=never",
-            "-t",
-            imagen.0.as_str(),
-            "-f",
-            df.as_str(),
-            ctx.as_str(),
-        ];
-        let build = correr_podman(&args, plazo)?;
-        if build.codigo != 0 {
-            todas_ok = false;
-            match clasificar_fallo(&build, ruta, &texto, reqs)? {
-                Desenlace::Pendiente(motivo) => resultado.pendientes.push(Pendiente {
-                    test: TEST_BUILD.into(),
-                    motivo,
-                    colab: None,
-                }),
-                Desenlace::Hallazgo(h) => resultado.hallazgos.push(h),
-            }
-            continue;
+    let texto = fs::read_to_string(contexto.join(&ruta))
+        .map_err(|e| infra("leer el Dockerfile para construir", e))?;
+    // La imagen temporal se borra al salir de la función, pase lo que pase.
+    let imagen = ImagenTemporal(etiqueta_unica());
+    let df = contexto.join(&ruta).to_string_lossy().into_owned();
+    let ctx = contexto.to_string_lossy().into_owned();
+    let args = [
+        "build",
+        "--network",
+        "none",
+        "--pull=never",
+        "-t",
+        imagen.0.as_str(),
+        "-f",
+        df.as_str(),
+        ctx.as_str(),
+    ];
+    let build = correr_podman(&args, plazo)?;
+    if build.codigo != 0 {
+        match clasificar_fallo(&build, &ruta, &texto, reqs)? {
+            Desenlace::Pendiente(motivo) => resultado.pendientes.push(Pendiente {
+                test: TEST_BUILD.into(),
+                motivo,
+                colab: None,
+            }),
+            Desenlace::Hallazgo(h) => resultado.hallazgos.push(h),
         }
-        let sin_root_ahora = corre_sin_root(&imagen.0)?;
-        if !sin_root_ahora
-            && !estatica.iter().any(|h| h.archivo == *ruta)
-            && let Some((linea, cita)) = ultimo_from(&texto)
-        {
-            resultado.hallazgos.push(crear_hallazgo(
-                DIMENSION,
-                3,
-                ruta,
-                linea,
-                &cita,
-                configs::DETALLE_RAIZ,
-                SONDA,
-                reqs,
-            ));
-        }
-        sin_root.push(sin_root_ahora);
-        construidas.push(imagen);
+        return Ok(Construccion {
+            resultado,
+            imagen: None,
+            avisos,
+        });
     }
-    resultado.construida = todas_ok;
-    resultado.corre_sin_root = (!sin_root.is_empty()).then(|| sin_root.iter().all(|s| *s));
-    // La imagen que se conserva es la última, y solo si todos los Dockerfile construyeron.
-    let imagen = if todas_ok { construidas.pop() } else { None };
-    Ok(Construccion { resultado, imagen })
+    let con_sh = tiene_sh(&imagen.0)?;
+    let sin_root = corre_sin_root(&imagen.0, con_sh)?;
+    if !sin_root
+        && !estatica.iter().any(|h| h.archivo == ruta)
+        && let Some((linea, cita)) = ultimo_from(&texto)
+    {
+        resultado.hallazgos.push(crear_hallazgo(
+            DIMENSION,
+            3,
+            &ruta,
+            linea,
+            &cita,
+            configs::DETALLE_RAIZ,
+            SONDA,
+            reqs,
+        ));
+    }
+    resultado.construida = true;
+    resultado.corre_sin_root = Some(sin_root);
+    if !con_sh {
+        avisos.push(AVISO_SIN_SH.into());
+    }
+    Ok(Construccion {
+        resultado,
+        imagen: con_sh.then_some(imagen),
+        avisos,
+    })
 }
 
 /// Imagen temporal de una construcción. Su `Drop` la borra con `podman rmi -f`, pase lo que pase.
@@ -273,13 +302,16 @@ fn etiqueta_unica() -> String {
     format!("root-entrega-{}-{n}", std::process::id())
 }
 
-/// Verdadero si la imagen corre sin root. `id -u` lo confirma. Sin `id`, vale el `USER` de la imagen.
-fn corre_sin_root(tag: &str) -> Result<bool, ErrorOraculo> {
+/// Verdadero si la imagen corre sin root. Con `sh`, `id -u` lo confirma. Sin `sh`, vale solo el `USER`.
+fn corre_sin_root(tag: &str, con_sh: bool) -> Result<bool, ErrorOraculo> {
     let inspeccion = correr_podman(
         &["image", "inspect", "--format", "{{.Config.User}}", tag],
         PLAZO_CORTO,
     )?;
     let usuario = inspeccion.stdout.trim().to_string();
+    if !con_sh {
+        return Ok(!es_root(&usuario));
+    }
     let uid = correr_podman(
         &[
             "run",
@@ -300,6 +332,32 @@ fn corre_sin_root(tag: &str) -> Result<bool, ErrorOraculo> {
         return Ok(numero != 0);
     }
     Ok(!es_root(&usuario))
+}
+
+/// Verdadero si la imagen trae `sh`. Sin `sh`, podman sale con 126 o 127 al intentar correrlo.
+fn tiene_sh(tag: &str) -> Result<bool, ErrorOraculo> {
+    let prueba = correr_podman(
+        &[
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--pull=never",
+            "--entrypoint",
+            "sh",
+            tag,
+            "-c",
+            "true",
+        ],
+        PLAZO_CORTO,
+    )?;
+    match prueba.codigo {
+        CODIGO_NO_EJECUTABLE | CODIGO_NO_HALLADO => Ok(false),
+        CODIGO_PODMAN => Err(ErrorOraculo::Infra(
+            "podman no pudo probar sh en la imagen construida".into(),
+        )),
+        _ => Ok(true),
+    }
 }
 
 /// Verdadero si el `USER` de la imagen es root o 0, o si no define ninguno.
@@ -400,6 +458,96 @@ pub enum LugarEscenario {
     ContenedorEvaluacion,
 }
 
+/// Dockerfile que se construye (Tarea 7j). Stub de la fase roja: todavía no elige nada.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Eleccion {
+    Elegido(String),
+    NingunoElegido(Vec<String>),
+    SinDockerfile,
+}
+
+/// Elige el Dockerfile a construir (Tarea 7j), por este orden: el `containerfile` de `tarea.toml` si
+/// existe; `Dockerfile` o `Containerfile` en la raíz; el único Dockerfile del repo. Si hay varios, no elige.
+pub fn elegir_dockerfile(repo: &Path, containerfile: Option<&str>) -> Eleccion {
+    if let Some(ruta) = containerfile.and_then(|c| ruta_del_repo(repo, c)) {
+        return Eleccion::Elegido(ruta);
+    }
+    let todos = dockerfiles_del_repo(repo);
+    if todos.is_empty() {
+        return Eleccion::SinDockerfile;
+    }
+    for raiz in ["Dockerfile", "Containerfile"] {
+        if todos.iter().any(|t| t == raiz) {
+            return Eleccion::Elegido(raiz.into());
+        }
+    }
+    if todos.len() == 1 {
+        return Eleccion::Elegido(todos[0].clone());
+    }
+    Eleccion::NingunoElegido(todos)
+}
+
+/// Carpetas que no entran al buscar Dockerfile. Las mismas que la sonda de `configs`.
+const CARPETAS_SIN_DOCKERFILE: [&str; 4] = ["target", ".git", "node_modules", "vendor"];
+
+/// Rutas relativas (con `/`) de los Dockerfile del repo, en orden alfabético. Suma `*.Dockerfile` y
+/// `*.Containerfile` a los nombres de `configs`, que no cambian: solo sirven para elegir qué construir.
+pub fn dockerfiles_del_repo(repo: &Path) -> Vec<String> {
+    let mut salida = Vec::new();
+    recorrer_dockerfiles(repo, repo, &mut salida);
+    salida.sort();
+    salida
+}
+
+fn recorrer_dockerfiles(repo: &Path, dir: &Path, salida: &mut Vec<String>) {
+    let Ok(entradas) = fs::read_dir(dir) else {
+        return;
+    };
+    for entrada in entradas.flatten() {
+        // `file_type` no sigue enlaces simbólicos: un enlace no entra ni causa bucles.
+        let Ok(tipo) = entrada.file_type() else {
+            continue;
+        };
+        let nombre = entrada.file_name().to_string_lossy().into_owned();
+        let ruta = entrada.path();
+        if tipo.is_dir() {
+            if !CARPETAS_SIN_DOCKERFILE.contains(&nombre.as_str()) {
+                recorrer_dockerfiles(repo, &ruta, salida);
+            }
+        } else if tipo.is_file() && es_nombre_dockerfile(&nombre) {
+            let rel = ruta.strip_prefix(repo).unwrap_or(&ruta);
+            salida.push(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
+}
+
+fn es_nombre_dockerfile(nombre: &str) -> bool {
+    nombre == "Dockerfile"
+        || nombre == "Containerfile"
+        || nombre.starts_with("Dockerfile.")
+        || nombre.ends_with(".Dockerfile")
+        || nombre.ends_with(".Containerfile")
+}
+
+/// Ruta normalizada si `ruta` es un archivo regular del repo. No sale del repo ni sigue enlaces.
+pub(crate) fn ruta_del_repo(repo: &Path, ruta: &str) -> Option<String> {
+    let mut partes = Vec::new();
+    for componente in Path::new(ruta).components() {
+        match componente {
+            Component::Normal(parte) => partes.push(parte.to_string_lossy().into_owned()),
+            Component::CurDir => {}
+            // Raíz, prefijo o `..`: la ruta sale del repo.
+            _ => return None,
+        }
+    }
+    if partes.is_empty() {
+        return None;
+    }
+    let relativa = partes.join("/");
+    let meta = fs::symlink_metadata(repo.join(&relativa)).ok()?;
+    meta.file_type().is_file().then_some(relativa)
+}
+
 /// Resultado de la sonda de entrega: el puntaje de la dimensión y el estado de cada escenario.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResultadoEntrega {
@@ -436,8 +584,9 @@ pub fn entregar(
     let Construccion {
         resultado: construccion,
         imagen,
+        avisos: avisos_construccion,
     } = construir_con(repo, home, tarea, imagenes, PLAZO_BUILD)?;
-    let mut avisos = Vec::new();
+    let mut avisos = avisos_construccion;
     // El contenedor de escenario sale de la imagen construida. Sin él, van al de evaluación.
     let contenedor = match &imagen {
         Some(img) if !tarea.escenario.is_empty() => {
@@ -1239,5 +1388,141 @@ mod tests {
         assert!(!pide_red(
             "Error: building at STEP \"RUN false\": exit status 1"
         ));
+    }
+
+    /// Repo temporal con los archivos dados (ruta, texto). Crea las carpetas que haga falta.
+    fn repo_con_archivos(archivos: &[(&str, &str)]) -> tempfile::TempDir {
+        let repo = tempfile::tempdir().expect("temp dir");
+        for (ruta, texto) in archivos {
+            let destino = repo.path().join(ruta);
+            fs::create_dir_all(destino.parent().expect("con carpeta")).expect("crea carpetas");
+            fs::write(destino, texto).expect("escribe el archivo");
+        }
+        repo
+    }
+
+    #[test]
+    fn entrega_elegir_containerfile_valido_gana_sobre_la_raiz() {
+        let repo = repo_con_archivos(&[
+            ("Dockerfile", "FROM x\n"),
+            ("bootstrap/Dockerfile", "FROM y\n"),
+        ]);
+        assert_eq!(
+            elegir_dockerfile(repo.path(), Some("bootstrap/Dockerfile")),
+            Eleccion::Elegido("bootstrap/Dockerfile".into())
+        );
+    }
+
+    #[test]
+    fn entrega_elegir_dockerfile_de_la_raiz_gana_a_otro_fuera() {
+        let repo = repo_con_archivos(&[
+            ("Dockerfile", "FROM x\n"),
+            ("docker/otro.Dockerfile", "FROM y\n"),
+        ]);
+        assert_eq!(
+            elegir_dockerfile(repo.path(), None),
+            Eleccion::Elegido("Dockerfile".into())
+        );
+    }
+
+    #[test]
+    fn entrega_elegir_containerfile_de_la_raiz_sin_dockerfile() {
+        let repo = repo_con_archivos(&[("Containerfile", "FROM x\n")]);
+        assert_eq!(
+            elegir_dockerfile(repo.path(), None),
+            Eleccion::Elegido("Containerfile".into())
+        );
+    }
+
+    #[test]
+    fn entrega_elegir_unico_dockerfile_fuera_de_la_raiz() {
+        let repo = repo_con_archivos(&[("docker/app.Dockerfile", "FROM x\n")]);
+        assert_eq!(
+            elegir_dockerfile(repo.path(), None),
+            Eleccion::Elegido("docker/app.Dockerfile".into())
+        );
+    }
+
+    #[test]
+    fn entrega_elegir_dos_fuera_de_la_raiz_sin_containerfile_es_ninguno() {
+        let repo = repo_con_archivos(&[
+            ("docker/a.Dockerfile", "FROM x\n"),
+            ("docker/b.Dockerfile", "FROM y\n"),
+        ]);
+        assert_eq!(
+            elegir_dockerfile(repo.path(), None),
+            Eleccion::NingunoElegido(vec![
+                "docker/a.Dockerfile".into(),
+                "docker/b.Dockerfile".into(),
+            ])
+        );
+    }
+
+    #[test]
+    fn entrega_elegir_containerfile_inexistente_cae_al_criterio_siguiente() {
+        let repo = repo_con_archivos(&[("Dockerfile", "FROM x\n")]);
+        assert_eq!(
+            elegir_dockerfile(repo.path(), Some("no/existe.Dockerfile")),
+            Eleccion::Elegido("Dockerfile".into())
+        );
+    }
+
+    #[test]
+    fn entrega_elegir_containerfile_fuera_del_repo_no_vale() {
+        let repo = repo_con_archivos(&[("Dockerfile", "FROM x\n")]);
+        for ruta in ["../afuera/Dockerfile", "/etc/passwd"] {
+            assert_eq!(
+                elegir_dockerfile(repo.path(), Some(ruta)),
+                Eleccion::Elegido("Dockerfile".into()),
+                "containerfile {ruta} debe ignorarse"
+            );
+        }
+    }
+
+    #[test]
+    fn entrega_elegir_sin_dockerfile_da_sin_dockerfile() {
+        let repo = repo_con_archivos(&[("README.md", "x\n")]);
+        assert_eq!(
+            elegir_dockerfile(repo.path(), None),
+            Eleccion::SinDockerfile
+        );
+    }
+
+    #[test]
+    fn entrega_elegir_ignora_dockerfiles_de_target_y_vendor() {
+        let repo = repo_con_archivos(&[
+            ("target/x/Dockerfile", "FROM x\n"),
+            ("vendor/y/Dockerfile", "FROM y\n"),
+            ("docker/a.Dockerfile", "FROM z\n"),
+        ]);
+        assert_eq!(
+            elegir_dockerfile(repo.path(), None),
+            Eleccion::Elegido("docker/a.Dockerfile".into())
+        );
+    }
+
+    #[test]
+    fn entrega_imagen_que_pide_credenciales_da_causa_unificada() {
+        let repo = repo_con_archivos(&[("Dockerfile", "FROM 127.0.0.1:1/x:1\nUSER 1000\n")]);
+        let home = tempfile::tempdir().expect("home");
+        let imagenes = [ImagenBase {
+            archivo: "Dockerfile".into(),
+            linea: 1,
+            cita: "FROM 127.0.0.1:1/x:1".into(),
+            imagen: "127.0.0.1:1/x:1".into(),
+            resuelta: Some("127.0.0.1:1/x:1".into()),
+            digest: None,
+            descargada: false,
+            sin_resolver: None,
+            problema: Some(Problema::PideCredenciales),
+        }];
+        let r = construir_dockerfile(repo.path(), home.path(), &tarea_de("shell", ""), &imagenes)
+            .expect("construye");
+        assert_eq!(r.sin_veredicto.len(), 1, "{:?}", r.sin_veredicto);
+        assert_eq!(
+            r.sin_veredicto[0].causa,
+            "imagen base: pide credenciales (Root no las pasa)"
+        );
+        assert!(!r.construida);
     }
 }

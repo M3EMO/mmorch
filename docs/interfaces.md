@@ -509,6 +509,12 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "prefiere_api_sobre": 0.9
       }
     },
+    "colab": {
+      "$ref": "#/$defs/ConfigColab",
+      "default": {
+        "minutos_max": 30
+      }
+    },
     "modelos": {
       "$ref": "#/$defs/Modelos",
       "default": {
@@ -606,6 +612,19 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "type": "number",
           "format": "double",
           "default": 0.9
+        }
+      }
+    },
+    "ConfigColab": {
+      "description": "Sección `[colab]`: tope de duración de una corrida en Colab.",
+      "type": "object",
+      "properties": {
+        "minutos_max": {
+          "description": "Minutos máximos de una corrida en Colab. Al llegar al tope, Root libera el runtime.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 30,
+          "minimum": 0
         }
       }
     },

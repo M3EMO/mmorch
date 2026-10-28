@@ -107,9 +107,15 @@ fn oraculo_colab(
         }
         return Ok(());
     };
+    let cfg = config::Config::cargar(&home.join("root.toml"))?;
     let cli = oracle::colab::ColabProceso::desde_entorno()?;
+    let senales = oracle::colab::Senales::instalar().map_err(|e| {
+        oracle::ErrorOraculo::Infra(format!("no se pudieron registrar las señales: {e}"))
+    })?;
+    let tope = std::time::Duration::from_secs(u64::from(cfg.colab.minutos_max) * 60);
     let sesion = oracle::colab::nombre_sesion(&tarea.nombre);
-    let resultado = oracle::colab::correr_en_colab(&cli, &paquete.dir, tarea, home, &sesion)?;
+    let resultado =
+        oracle::colab::correr_en_colab(&cli, &paquete.dir, tarea, home, &sesion, &senales, tope)?;
     let resumen = oracle::pendientes::importar(home, tarea, &resultado.junit)?;
     if json {
         println!(
@@ -130,16 +136,44 @@ fn oraculo_colab(
     Ok(())
 }
 
+/// `oraculo pendientes --liberar`: libera el runtime anotado en `activo.json`, si hay uno.
+fn oraculo_liberar(json: bool, home: &Path) -> Result<(), Error> {
+    let liberado = if oracle::colab::hay_runtime_anotado(home) {
+        let cli = oracle::colab::ColabProceso::desde_entorno()?;
+        oracle::colab::liberar_anotado(&cli, home)?
+    } else {
+        None
+    };
+    if json {
+        println!("{}", serde_json::json!({"liberado": liberado}));
+    } else {
+        match liberado {
+            Some(sesion) => println!("runtime liberado: {sesion}"),
+            None => println!("no hay runtime anotado"),
+        }
+    }
+    Ok(())
+}
+
 /// `oraculo pendientes`: arma el paquete de los tests pendientes, o importa el junit de Colab.
 fn oraculo_pendientes(
     json: bool,
-    nombre: &str,
-    repo: &Path,
+    nombre: Option<&str>,
+    repo: Option<&Path>,
     importar: Option<&Path>,
     colab: bool,
+    liberar: bool,
 ) -> Result<(), Error> {
-    let tarea = Tarea::cargar(nombre)?;
     let home = config::root_home();
+    if liberar {
+        return oraculo_liberar(json, &home);
+    }
+    let (Some(nombre), Some(repo)) = (nombre, repo) else {
+        return Err(Error::Uso(
+            "oraculo pendientes necesita --tarea y --repo".into(),
+        ));
+    };
+    let tarea = Tarea::cargar(nombre)?;
     if let Some(junit) = importar {
         let resumen = oracle::pendientes::importar(&home, &tarea, junit)?;
         if json {
@@ -294,8 +328,16 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
                     repo,
                     importar,
                     colab,
+                    liberar,
                 },
-        } => oraculo_pendientes(cli.json, tarea, repo, importar.as_deref(), *colab),
+        } => oraculo_pendientes(
+            cli.json,
+            tarea.as_deref(),
+            repo.as_deref(),
+            importar.as_deref(),
+            *colab,
+            *liberar,
+        ),
         Comando::Observa { accion } => observa(cli.json, accion),
         Comando::Track { accion } => track_accion(cli.json, accion),
         Comando::Aprende { replay } => aprende_accion(cli.json, *replay),
