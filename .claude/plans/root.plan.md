@@ -579,7 +579,8 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
   - Pide un runtime con GPU T4. Antes de correr los tests, ejecuta `nvidia-smi` en el runtime. Si la GPU no es una T4, libera el runtime y sale con código 3, sin correr nada. Root nunca pide una A100 ni una H100.
   - Sube el paquete, corre `correr.sh`, baja el junit y libera el runtime. Después corre el mismo camino que `--importar`.
   - Registra un evento `Gate` al pedir el runtime, con el tipo de GPU, y otro al liberarlo.
-  - Sin sesión de la CLI, sale con código 3 y pide al usuario que corra el login. El login es OAuth y lo hace el usuario.
+  - Sin sesión de la CLI, sale con código 3 y pide al usuario que corra el login. El login es OAuth y lo hace el usuario. El chequeo es el primer paso real, con stdin cerrado y un timeout de 60 segundos (Tarea 7i).
+  - La forma de instalar Rust en el runtime espera a P35. Hasta la respuesta, no hay corrida real.
   - El paquete lleva los tests ocultos a Colab. El builder no accede a Colab, así que el invariante del oráculo oculto se mantiene. El paquete nunca lleva claves de API.
 - **Validate**:
   - `cargo test oracle` con una CLI `colab` falsa: una GPU que no es T4 da código 3 y no corre los tests; una T4 importa el junit y deja dos eventos `Gate`.
@@ -1005,6 +1006,8 @@ Gates humanos que frenan el resto:
 
 **Orden nuevo (después de 15b, 17, 18 y 19):** 6c, 7g, 9d2, 15c y 7h. La 6c va primero porque el filtro vigente no refleja la decisión 21. La 7g va antes de la 9d2 porque `hadolint` entra con la imagen. La 7h va última: necesita el login de Colab del usuario, y su corrida real espera a G1.
 
+**Orden siguiente (2026-10-28, después de la 7h):** 7i y después 6c-B. La 7i va primero porque cierra un posible borrado fuera de `ROOT_HOME` y los fail-open de las sondas. Después de la 6c-B, todo lo que queda espera a G1 o a G2: 12, 12b, 13, 13b, 16, el `Validate` real de 7 y 9c, y la corrida real de la 7h.
+
 Las Tareas 12, 12b, 13, 13b, 16 y 19 van después de G1 y G2. Opus redacta G1 y G2 en otra sesión, mientras Sonnet construye la lista de arriba.
 
 **Avance (2026-10-27):** Sonnet cerró 8c, 7f, 6b, 11, 8b (código) y 9f, con 341 tests verdes (commit 4f2be05). Una evaluación real de memora-ecc, antes de la ficha obligatoria, dio contrato 61/61 y oculto 47/48, con el FIFO de `BLPOP` inestable. Desde la 9f, memora y brasa salen con código 2 hasta tener `## Ficha` (G1).
@@ -1100,6 +1103,24 @@ Respuestas a las preguntas 1, 3, 4 y 5 de Sonnet y a sus notas. La pregunta 2 es
   - b) Root lee la credencial de una variable de entorno nombrada en `root.toml`, la pasa solo al contenedor de descarga y nunca la escribe en un log.
   
   Hasta tu respuesta, rige a).
+- **P34. Configuración de cargo del repo.** Un repo puede traer `.cargo/config.toml` con `[http]` o `[net]`: un proxy, quizás con credenciales. `cargo` lo usaría en el contenedor de descarga, y el inventario no lo ve. ¿Qué elegís?
+  - a) La descarga ignora la configuración de cargo del repo: corre `cargo` desde otro directorio. Costo: un repo que define registros o fuentes ahí no baja sus dependencias y da `SinVeredicto`.
+  - b) Root lee esa configuración y suma al inventario sus `[registries]` y `[source]`. Rechaza `[http]`, `[net]` y toda credencial. Costo: más reglas que mantener.
+  - c) La descarga respeta la configuración entera. Riesgo: el repo decide por dónde sale la red, y eso escapa al inventario.
+  
+  Hasta tu respuesta, rige a). Mi recomendación es b): mantiene el inventario completo sin cortar registros legítimos.
+- **P35. Rust en Colab.** La preparación del runtime de Colab corre `curl https://sh.rustup.rs | sh` sin verificar ningún hash. Ese código corre en el runtime de tu cuenta de Google, junto a los tests ocultos. ¿Qué elegís?
+  - a) Aceptarlo como está. Riesgo: si el sitio de rustup se compromete, ese código corre en tu sesión de Colab.
+  - b) Bajar `rustup-init` para x86_64 desde `static.rust-lang.org` y verificar su `.sha256` antes de correrlo. Costo: unas líneas más. Límite: el hash viene del mismo origen, así que protege de una descarga corrupta, no de un origen comprometido.
+  - c) Compilar brasa en tu máquina, dentro de `root-oraculo-rust:2`, y llevar a Colab solo el binario. Costo: el binario puede no correr si la glibc de Colab es más vieja que la de la imagen. Colab ya no necesita Rust.
+  
+  Hasta tu respuesta, la corrida real de la 7h no se hace. Mi recomendación es c), con b) como respaldo si la glibc no coincide.
+- **P36. "Outcome" del hito 1 en el PRD.** Sonnet cambió el "Outcome" del hito 1 en `.claude/prds/sistema-nuevo.prd.md` (Tarea 19, commit 732e32d). Antes decía "Route, Oracle, Observe y Track corren desde el bootstrap del banco". Ahora dice "Route, Oracle (`evaluar`), Observe y Track corren; calibración, informe y `corre` siguen pendientes (Tareas 12, 13b y 16)". ¿Qué elegís?
+  - a) Revertirlo. El "Outcome" es la meta del hito, y la columna "Status" ya dice `in-progress`.
+  - b) Dejarlo así.
+  - c) Volver a la meta original y anotar el avance en otra línea.
+  
+  Mi recomendación es a): el texto nuevo mezcla la meta con el avance.
 
 **Preguntas ya respondidas (texto original)**
 - **P12b.** Respondiste "P12 si" a una pregunta con dos opciones. ¿Cuál elegís?
