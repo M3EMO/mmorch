@@ -160,6 +160,29 @@ pub fn colab_de(home: &Path, tarea: &str) -> Result<BTreeMap<String, ColabEntrad
     }
 }
 
+/// Resultados de Colab para el veredicto. Un `colab.json` ilegible no tumba la evaluación:
+/// sus tests quedan pendientes y el aviso va al veredicto. Un nombre de tarea inválido sigue siendo error.
+pub fn colab_para_veredicto(
+    home: &Path,
+    tarea: &str,
+) -> Result<(BTreeMap<String, ColabEntrada>, Vec<String>), ErrorOraculo> {
+    let ruta = ruta_colab(home, tarea)?;
+    let leido: Result<BTreeMap<String, ColabEntrada>, String> = match fs::read_to_string(&ruta) {
+        Ok(texto) => serde_json::from_str(&texto).map_err(|e| e.to_string()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok((BTreeMap::new(), Vec::new()));
+        }
+        Err(e) => Err(e.to_string()),
+    };
+    match leido {
+        Ok(colab) => Ok((colab, Vec::new())),
+        Err(causa) => Ok((
+            BTreeMap::new(),
+            vec![format!("{ARCHIVO_COLAB} ilegible: {causa}")],
+        )),
+    }
+}
+
 /// Los tests de `[[entorno]]` con su motivo y, si hay, su resultado de Colab.
 pub fn desde(tarea: &Tarea, colab: &BTreeMap<String, ColabEntrada>) -> Vec<Pendiente> {
     tarea

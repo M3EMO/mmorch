@@ -14,7 +14,7 @@ const MAX_TOKENS: u32 = 4000;
 /// Fase del flujo que va al `Evento` de la llamada.
 const FASE: &str = "ficha";
 const JUEZ_OK: &str = "ok";
-const SIN_VEREDICTO: &str = "sin_veredicto";
+pub(super) const SIN_VEREDICTO: &str = "sin_veredicto";
 
 /// Prompt fijo del juez. Pide un arreglo JSON y refuta por default.
 const PROMPT_SISTEMA: &str = "Sos un revisor de specs de software. Tu trabajo es encontrar frases ambiguas del SPEC.

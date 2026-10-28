@@ -68,6 +68,14 @@ pub enum ErrorProveedor {
         evento: Box<Evento>,
         causa: String,
     },
+    /// El proveedor falló y, además, el evento de esa falla no se pudo escribir.
+    /// El mensaje muestra primero el error original. Nunca lleva la clave.
+    #[error("{original}; además no se pudo registrar el evento: {causa_registro}")]
+    ErrorNoRegistrado {
+        original: Box<ErrorProveedor>,
+        causa_registro: String,
+        evento: Box<Evento>,
+    },
     #[error("error de red: {0}")]
     Red(String),
     #[error("breaker abierto para {0}")]
@@ -78,8 +86,6 @@ pub enum ErrorProveedor {
     Eleccion(String),
     #[error("{0}")]
     Config(String),
-    #[error("no se pudo registrar el evento: {0}")]
-    Observe(String),
 }
 
 impl ErrorProveedor {
@@ -96,7 +102,7 @@ impl ErrorProveedor {
             Self::SinClave(_) => "sin_clave",
             Self::Eleccion(_) => "eleccion",
             Self::Config(_) => "config",
-            Self::Observe(_) => "observe",
+            Self::ErrorNoRegistrado { original, .. } => return original.clase(),
         };
         corta.into()
     }
@@ -336,8 +342,14 @@ pub fn llamar_con(
                 ctx.breaker.registra_falla(familia, (ctx.reloj)());
             }
             ev.extra.insert("error".into(), json!(err.clase()));
-            registra(ctx.home, &ev).map_err(|causa| ErrorProveedor::Observe(causa.to_string()))?;
-            Err(err)
+            match registra(ctx.home, &ev) {
+                Ok(()) => Err(err),
+                Err(causa) => Err(ErrorProveedor::ErrorNoRegistrado {
+                    original: Box::new(err),
+                    causa_registro: causa.to_string(),
+                    evento: Box::new(ev),
+                }),
+            }
         }
     }
 }
@@ -491,6 +503,7 @@ fn registra(home: &Path, ev: &Evento) -> std::io::Result<()> {
 
 /// Contrato de `r00t llama`. Éxito: la respuesta en `out` y 0.
 /// Evento no registrado: la respuesta en `out`, la línea JSON del evento en `err` y 3.
+/// Error del proveedor con evento no registrado: su mensaje y la línea JSON del evento en `err`, y 3.
 /// Otro error: su mensaje en `err` y 3. Ningún mensaje lleva la clave.
 pub fn imprimir_para_cli(
     res: Result<Respuesta, ErrorProveedor>,
@@ -511,6 +524,9 @@ pub fn imprimir_para_cli(
         }
         Err(otro) => {
             let _ = writeln!(err, "{otro}");
+            if let ErrorProveedor::ErrorNoRegistrado { evento, .. } = &otro {
+                escribe_linea(err, &**evento);
+            }
             3
         }
     }

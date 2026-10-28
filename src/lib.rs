@@ -124,12 +124,17 @@ fn ficha_accion(json: bool, accion: &FichaAccion) -> Result<u8, Error> {
             } else {
                 imprimir_revision(&revision);
             }
-            Ok(codigo_de_revision(&revision))
+            Ok(revision.codigo_de_salida())
         }
         FichaAccion::Tarea { spec, nombre } => {
             let texto = leer_spec(spec)?;
             let (ficha_leida, _) = ficha::extraer(&texto)?;
-            print!("{}", ficha::borrador_tarea(&ficha_leida, nombre)?);
+            let toml = ficha::borrador_tarea(&ficha_leida, nombre)?;
+            if json {
+                println!("{}", serde_json::json!({"toml": toml}));
+            } else {
+                print!("{toml}");
+            }
             Ok(0)
         }
     }
@@ -155,17 +160,6 @@ fn juez_de(proveedor: Option<ProveedorJuez>, modelo: Option<&str>) -> Option<Jue
         },
         corrida: "ficha-revisar".into(),
     })
-}
-
-/// Código de `ficha revisar`: 3 si el juez no dio veredicto, 1 si hay hallazgos, 0 si no.
-fn codigo_de_revision(revision: &Revision) -> u8 {
-    if revision.juez.starts_with("sin_veredicto") {
-        3
-    } else if revision.hallazgos.is_empty() && revision.ambiguedades.is_empty() {
-        0
-    } else {
-        1
-    }
 }
 
 /// Una línea por hallazgo y por ambigüedad: `linea: regla: detalle`.

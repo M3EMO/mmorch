@@ -899,3 +899,85 @@ fn proveedores_cli_error_da_codigo_3_y_no_muestra_la_clave() {
     assert!(!texto_err.contains(CLAVE_PRUEBA));
     assert!(!String::from_utf8_lossy(&out).contains(CLAVE_PRUEBA));
 }
+
+/// Llamada con un servidor que responde 503 siempre y un `eventos.jsonl` que no se puede escribir.
+fn llamada_503_con_evento_no_escribible(
+    home: &Path,
+    corrida: &str,
+) -> Result<Respuesta, ErrorProveedor> {
+    let srv = Servidor::arranca(vec![(503, "{}"), (503, "{}"), (503, "{}")]);
+    let cfg = config(&srv.url, &srv.url);
+    // Un directorio con el nombre del archivo impide abrirlo para escribir, aun como root.
+    fs::create_dir(home.join("eventos.jsonl")).expect("directorio");
+    let breaker = Breaker::new();
+    let claves = claves_de_prueba();
+    let base = Instant::now();
+    let reloj = || base;
+    let ctx = Contexto {
+        cfg: &cfg,
+        home,
+        breaker: &breaker,
+        claves: &claves,
+        reloj: &reloj,
+    };
+    llamar_con(
+        &ctx,
+        &eleccion(Proveedor::Deepseek, "deepseek-chat"),
+        &prompt(),
+        corrida,
+    )
+}
+
+#[test]
+fn proveedores_error_original_y_registro_fallido_se_conservan_ambos() {
+    let home = tempfile::tempdir().expect("home");
+    let err = llamada_503_con_evento_no_escribible(home.path(), "c20").expect_err("503 siempre");
+
+    match &err {
+        ErrorProveedor::ErrorNoRegistrado {
+            original,
+            causa_registro,
+            evento,
+        } => {
+            assert!(
+                matches!(**original, ErrorProveedor::Http { estado: 503, .. }),
+                "{original:?}"
+            );
+            assert!(!causa_registro.is_empty());
+            assert_eq!(evento.corrida, "c20");
+            assert_eq!(evento.extra["error"], "http_503");
+        }
+        otro => panic!("esperaba ErrorNoRegistrado, llegó {otro:?}"),
+    }
+    let texto = err.to_string();
+    let causa = match &err {
+        ErrorProveedor::ErrorNoRegistrado { causa_registro, .. } => causa_registro.clone(),
+        _ => unreachable!(),
+    };
+    let en_original = texto.find("503").expect("el mensaje nombra el 503");
+    let en_causa = texto
+        .find(&causa)
+        .expect("el mensaje trae la causa del registro");
+    assert!(en_original < en_causa, "primero el original: {texto}");
+    assert!(!texto.contains(CLAVE_PRUEBA));
+}
+
+#[test]
+fn proveedores_cli_error_no_registrado_linea_del_evento_en_stderr_y_codigo_3() {
+    let home = tempfile::tempdir().expect("home");
+    let res = llamada_503_con_evento_no_escribible(home.path(), "c21");
+
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let codigo = imprimir_para_cli(res, &mut out, &mut err);
+
+    assert_eq!(codigo, 3);
+    assert!(out.is_empty());
+    let texto = String::from_utf8(err).expect("UTF-8");
+    assert!(texto.contains("503"), "{texto}");
+    let ultima = texto.lines().last().expect("hay una línea de evento");
+    let linea: Value = serde_json::from_str(ultima).expect("la última línea es el evento JSON");
+    assert_eq!(linea["corrida"], "c21");
+    assert_eq!(linea["extra"]["error"], "http_503");
+    assert!(!texto.contains(CLAVE_PRUEBA));
+}

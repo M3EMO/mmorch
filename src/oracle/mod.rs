@@ -54,7 +54,7 @@ pub enum ErrorOraculo {
     #[error("tarea inválida: {0}")]
     Tarea(String),
     /// El spec de la tarea no tiene una ficha válida. Sin ficha no se evalúa.
-    #[error("ficha del spec: {0}")]
+    #[error(transparent)]
     Ficha(#[from] ErrorFicha),
 }
 
@@ -104,7 +104,7 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
         .map_err(|e| ErrorOraculo::Infra(format!("no existe el repo {}: {e}", repo.display())))?;
     // Los temporales van a ROOT_HOME, nunca a TMPDIR ni a /tmp (desempate 6).
     let home = o.home.clone().unwrap_or_else(root_home);
-    let colab = pendientes::colab_de(&home, &tarea.nombre)?;
+    let (colab, avisos) = pendientes::colab_para_veredicto(&home, &tarea.nombre)?;
     let tmp = home.join(CARPETA_TEMPORALES);
     fs::create_dir_all(&tmp).map_err(|e| infra("directorio temporal de ROOT_HOME", e))?;
     limpiar_temporales(&tmp, SystemTime::now());
@@ -121,7 +121,7 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
                 hallazgos,
             } => (cache, rustsec, hallazgos),
             descarga::Preparacion::SinVeredicto(hallazgos) => {
-                return Ok(sin_veredicto(&repo, tarea, &colab, hallazgos));
+                return Ok(sin_veredicto(&repo, tarea, &colab, hallazgos, avisos));
             }
         };
     let salida = temporal(&tmp).map_err(|e| infra("directorio de salida", e))?;
@@ -179,6 +179,7 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
         inestables_contrato: contrato.inestables,
         tasas,
         pendientes: pendientes::desde(tarea, &colab),
+        avisos,
     })
 }
 
@@ -199,6 +200,7 @@ fn sin_veredicto(
     tarea: &Tarea,
     colab: &BTreeMap<String, pendientes::ColabEntrada>,
     hallazgos: Vec<Hallazgo>,
+    avisos: Vec<String>,
 ) -> Veredicto {
     Veredicto {
         tarea: tarea.nombre.clone(),
@@ -207,6 +209,7 @@ fn sin_veredicto(
         repeticiones: tarea.repeticiones,
         hallazgos,
         pendientes: pendientes::desde(tarea, colab),
+        avisos,
         ..Veredicto::default()
     }
 }

@@ -17,9 +17,9 @@ use crate::tipos::{Evento, Resumen, TipoEvento, Via};
 /// Errores de Observe. Salen con código 3.
 #[derive(Debug, ErrorDerive)]
 pub enum ErrorObserve {
-    #[error("error de E/S: {0}")]
+    #[error("error de E/S")]
     Io(#[from] io::Error),
-    #[error("error de JSON: {0}")]
+    #[error("error de JSON")]
     Json(#[from] serde_json::Error),
 }
 

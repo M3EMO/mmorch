@@ -20,31 +20,31 @@ pub enum Error {
     /// Argumentos inválidos. Sale con código 2.
     #[error("uso: {0}")]
     Uso(String),
-    #[error("no se pudo leer {ruta}: {fuente}")]
+    #[error("no se pudo leer {ruta}")]
     ConfigLeer {
         ruta: String,
         #[source]
         fuente: io::Error,
     },
-    #[error("root.toml inválido: {0}")]
+    #[error("root.toml inválido")]
     ConfigToml(#[from] toml::de::Error),
-    #[error("error de JSON: {0}")]
+    #[error("error de JSON")]
     Json(#[from] serde_json::Error),
-    #[error("{0}")]
+    #[error(transparent)]
     Goal(#[from] ErrorGoal),
-    #[error("{0}")]
+    #[error(transparent)]
     Observe(#[from] ErrorObserve),
-    #[error("{0}")]
+    #[error(transparent)]
     Track(#[from] ErrorTrack),
-    #[error("{0}")]
+    #[error(transparent)]
     Importar(#[from] ErrorImportar),
-    #[error("{0}")]
+    #[error(transparent)]
     Oraculo(#[from] ErrorOraculo),
-    #[error("{0}")]
+    #[error(transparent)]
     Proveedor(#[from] ErrorProveedor),
-    #[error("{0}")]
+    #[error(transparent)]
     Rubrica(#[from] ErrorRubrica),
-    #[error("{0}")]
+    #[error(transparent)]
     Ficha(#[from] ErrorFicha),
 }
 

@@ -233,6 +233,9 @@ pub struct Veredicto {
     /// Completitud y el nivel por requisito llegan con la Tarea 9c; por ahora solo se listan.
     #[serde(default)]
     pub pendientes: Vec<Pendiente>,
+    /// Problemas que no tumban la evaluación, por ejemplo un `colab.json` ilegible.
+    #[serde(default)]
+    pub avisos: Vec<String>,
 }
 
 impl Default for Veredicto {
@@ -256,6 +259,7 @@ impl Default for Veredicto {
             inestables_contrato: Vec::new(),
             tasas: BTreeMap::new(),
             pendientes: Vec::new(),
+            avisos: Vec::new(),
         }
     }
 }
@@ -434,6 +438,7 @@ mod tests {
             inestables_contrato: Vec::new(),
             tasas: BTreeMap::new(),
             pendientes: Vec::new(),
+            avisos: Vec::new(),
         }
     }
 

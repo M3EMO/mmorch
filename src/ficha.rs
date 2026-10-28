@@ -9,13 +9,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error as ErrorDerive;
 
+use juez::SIN_VEREDICTO;
 pub use juez::{JuezAmbiguedad, JuezProveedor, revisar_con_juez};
 
 /// Errores de la ficha. Salen con código 2: sin ficha válida no hay evaluación.
 /// La excepción es `Juez`, un fallo de infraestructura: sale con 3.
 #[derive(Debug, ErrorDerive)]
 pub enum ErrorFicha {
-    #[error("el spec no tiene sección `## Ficha`")]
+    #[error("sin ficha: el spec no tiene la sección `## Ficha`")]
     SinFicha,
     #[error("la sección `## Ficha` no tiene bloque ```toml")]
     SinBloque,
@@ -25,7 +26,7 @@ pub enum ErrorFicha {
     Toml(String),
     #[error("la ficha no tiene la estructura esperada: {0}")]
     Estructura(String),
-    #[error("no se pudo leer {ruta}: {fuente}")]
+    #[error("no se pudo leer {ruta}")]
     Leer {
         ruta: String,
         #[source]
@@ -161,6 +162,20 @@ pub struct Revision {
     /// Frases que el juez citó y el gate de evidencia descartó.
     #[serde(default)]
     pub descartadas: Vec<String>,
+}
+
+impl Revision {
+    /// Código de `ficha revisar`. Un hallazgo o una ambigüedad da 1, aunque el juez haya fallado.
+    /// Sale 3 solo si el juez no dio veredicto y no hay hallazgos ni ambigüedades. 0 exige las dos capas limpias.
+    pub fn codigo_de_salida(&self) -> u8 {
+        if !self.hallazgos.is_empty() || !self.ambiguedades.is_empty() {
+            1
+        } else if self.juez.starts_with(SIN_VEREDICTO) {
+            3
+        } else {
+            0
+        }
+    }
 }
 
 /// Datos del repo que algunas reglas comparan. `None` apaga la regla.

@@ -897,3 +897,51 @@ fn pendiente_importar_junit_malformado_o_faltante_sale_3() {
     }
     assert!(!home.path().join("evidencia").exists(), "no guarda nada");
 }
+
+#[test]
+fn pendiente_colab_malformado_no_tumba_evaluar_y_avisa() {
+    let _g = preparar();
+    let (_dir, tarea) = tarea_con_extra(
+        &escribe_xml("contrato.xml", JUNIT_DOS_OK),
+        &escribe_xml("oculto.xml", JUNIT_UNA_FALLA),
+        "",
+        ENTORNO_O2,
+    );
+    let repo = repo_con_contenido();
+    let home = tempfile::tempdir().expect("home");
+    let carpeta = home.path().join("evidencia").join("tarea-prueba");
+    fs::create_dir_all(&carpeta).expect("carpeta de evidencia");
+    fs::write(carpeta.join("colab.json"), "{ esto no es JSON").expect("colab.json");
+    let v = evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa sin fallar");
+    assert_eq!(v.pendientes.len(), 1);
+    assert_eq!(
+        v.pendientes[0].colab, None,
+        "queda pendiente, sin verde falso"
+    );
+    assert_eq!(v.avisos.len(), 1, "{:?}", v.avisos);
+    assert!(
+        v.avisos[0].starts_with("colab.json ilegible: "),
+        "{:?}",
+        v.avisos
+    );
+}
+
+#[test]
+fn pendiente_colab_valido_no_da_aviso() {
+    let _g = preparar();
+    let (_dir, tarea) = tarea_con_extra(
+        &escribe_xml("contrato.xml", JUNIT_DOS_OK),
+        &escribe_xml("oculto.xml", JUNIT_UNA_FALLA),
+        "",
+        ENTORNO_O2,
+    );
+    let repo = repo_con_contenido();
+    let home = tempfile::tempdir().expect("home");
+    let carpeta = home.path().join("evidencia").join("tarea-prueba");
+    fs::create_dir_all(&carpeta).expect("carpeta de evidencia");
+    let valido = r#"{"test_o::o2": {"resultado": "pasa", "junit_sha256": "abc", "ts": 1.0}}"#;
+    fs::write(carpeta.join("colab.json"), valido).expect("colab.json");
+    let v = evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa");
+    assert_eq!(v.pendientes[0].colab.as_deref(), Some("pasa"));
+    assert!(v.avisos.is_empty(), "{:?}", v.avisos);
+}

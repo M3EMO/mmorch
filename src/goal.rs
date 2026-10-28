@@ -21,7 +21,7 @@ pub enum ErrorGoal {
     /// La confirmación tecleada no coincide con el hash. Sale con código 1.
     #[error("confirmación incorrecta: no se escribió GOAL.hash (esperado {esperado})")]
     ConfirmacionIncorrecta { esperado: String },
-    #[error("error de E/S: {0}")]
+    #[error("error de E/S")]
     Io(#[from] io::Error),
 }
 

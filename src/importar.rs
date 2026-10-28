@@ -20,9 +20,9 @@ const CORRIDA: &str = "mmorch-importado";
 /// Errores de la importación. Salen con código 3.
 #[derive(Debug, ErrorDerive)]
 pub enum ErrorImportar {
-    #[error("error de E/S: {0}")]
+    #[error("error de E/S")]
     Io(#[from] io::Error),
-    #[error("metrics.jsonl: la línea {linea} no es JSON válido: {fuente}")]
+    #[error("metrics.jsonl: la línea {linea} no es JSON válido")]
     Linea {
         linea: usize,
         #[source]

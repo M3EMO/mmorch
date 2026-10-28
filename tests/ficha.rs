@@ -669,3 +669,142 @@ fn ficha_tarea_borrador_de_fixture_acepta_tarea_y_spec_resuelve() {
     let spec = fs::read_to_string(dir.path().join(&tarea.spec)).expect("lee el spec");
     ficha::extraer(&spec).expect("la ficha resuelve");
 }
+
+#[test]
+fn ficha_codigo_hallazgo_determinista_mas_juez_roto_sale_1() {
+    let texto = fixture("spec-vaga.md");
+    let revision =
+        revisar_con_juez(&texto, &ctx_vacio(), &JuezFalso::ok("esto no es JSON")).expect("revisa");
+    assert!(
+        revision.juez.starts_with("sin_veredicto"),
+        "{}",
+        revision.juez
+    );
+    assert!(!revision.hallazgos.is_empty());
+    assert_eq!(revision.codigo_de_salida(), 1);
+}
+
+#[test]
+fn ficha_codigo_ficha_limpia_mas_juez_roto_sale_3() {
+    let texto = fixture("spec-completa.md");
+    let revision =
+        revisar_con_juez(&texto, &ctx_vacio(), &JuezFalso::ok("esto no es JSON")).expect("revisa");
+    assert!(
+        revision.juez.starts_with("sin_veredicto"),
+        "{}",
+        revision.juez
+    );
+    assert!(revision.hallazgos.is_empty());
+    assert!(revision.ambiguedades.is_empty());
+    assert_eq!(revision.codigo_de_salida(), 3);
+}
+
+#[test]
+fn ficha_codigo_ficha_limpia_mas_juez_ok_sin_ambiguedades_sale_0() {
+    let texto = fixture("spec-completa.md");
+    let revision = revisar_con_juez(&texto, &ctx_vacio(), &JuezFalso::ok("[]")).expect("revisa");
+    assert_eq!(revision.juez, "ok");
+    assert_eq!(revision.codigo_de_salida(), 0);
+}
+
+#[test]
+fn ficha_codigo_sin_juez_y_ficha_limpia_sale_0() {
+    let revision = ficha::revisar(&fixture("spec-completa.md"), &ctx_vacio()).expect("revisa");
+    assert_eq!(revision.codigo_de_salida(), 0);
+}
+
+#[test]
+fn ficha_cli_tarea_json_da_objeto_con_toml_que_parsea_y_tarea_lo_acepta() {
+    let salida = root(&[
+        "--json",
+        "ficha",
+        "tarea",
+        "--spec",
+        &ruta_fixture("spec-completa.md"),
+        "--nombre",
+        "memora",
+    ]);
+    assert_eq!(
+        codigo(&salida),
+        0,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&salida.stdout).expect("stdout es un objeto JSON");
+    let texto = json["toml"].as_str().expect("clave `toml` con texto");
+    assert!(texto.contains("[[requisito]]"), "{texto}");
+    toml::from_str::<toml::Value>(texto).expect("el TOML de la clave parsea");
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("bootstrap/docs")).expect("dir");
+    fs::write(
+        dir.path().join("bootstrap/docs/SPEC.md"),
+        fixture("spec-completa.md"),
+    )
+    .expect("spec");
+    fs::write(dir.path().join("tarea.toml"), texto).expect("tarea");
+    Tarea::cargar_de(dir.path()).expect("Tarea acepta el TOML del JSON");
+}
+
+#[test]
+fn ficha_cli_tarea_sin_json_sigue_siendo_toml_puro() {
+    let salida = root(&[
+        "ficha",
+        "tarea",
+        "--spec",
+        &ruta_fixture("spec-completa.md"),
+        "--nombre",
+        "memora",
+    ]);
+    assert_eq!(codigo(&salida), 0);
+    let texto = String::from_utf8_lossy(&salida.stdout);
+    assert!(!texto.trim_start().starts_with('{'), "{texto}");
+    toml::from_str::<toml::Value>(&texto).expect("stdout es TOML puro");
+}
+
+#[test]
+fn ficha_cli_evaluar_sin_ficha_escribe_el_mensaje_una_sola_vez() {
+    let home = tempfile::tempdir().expect("home");
+    let repo = tempfile::tempdir().expect("repo");
+    let dir = home.path().join("oraculos").join("tarea-prueba");
+    fs::create_dir_all(dir.join("docs")).expect("dir");
+    fs::write(dir.join("docs/SPEC.md"), fixture("spec-sin-ficha.md")).expect("spec");
+    fs::write(
+        dir.join("tarea.toml"),
+        "nombre = \"tarea-prueba\"\nlenguaje = \"rust\"\nimagen = \"x\"\nspec = \"docs/SPEC.md\"\n\n[contrato]\ncmd = 'true'\n\n[oculto]\ncmd = 'true'\n",
+    )
+    .expect("tarea");
+    let salida = Command::new(env!("CARGO_BIN_EXE_r00t"))
+        .env("ROOT_HOME", home.path())
+        .args([
+            "oraculo",
+            "evaluar",
+            "--tarea",
+            "tarea-prueba",
+            "--repo",
+            repo.path().to_str().expect("ruta UTF-8"),
+        ])
+        .output()
+        .expect("ejecuta r00t");
+    assert_eq!(codigo(&salida), 2);
+    let stderr = String::from_utf8_lossy(&salida.stderr);
+    assert_eq!(stderr.matches("sin ficha").count(), 1, "{stderr}");
+    assert!(
+        stderr.contains("sin ficha: el spec no tiene la sección `## Ficha`"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn ficha_cli_spec_inexistente_nombra_la_causa_una_sola_vez() {
+    let ruta = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fichas/no-existe.md")
+        .display()
+        .to_string();
+    let salida = root(&["ficha", "revisar", "--spec", &ruta]);
+    assert_eq!(codigo(&salida), 2);
+    let stderr = String::from_utf8_lossy(&salida.stderr);
+    assert_eq!(stderr.matches("no se pudo leer").count(), 1, "{stderr}");
+    assert_eq!(stderr.matches("No such file").count(), 1, "{stderr}");
+}

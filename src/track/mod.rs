@@ -17,11 +17,11 @@ use crate::tipos::{Estado, Fila, Rol};
 /// Errores de Track. Salen con código 3.
 #[derive(Debug, ErrorDerive)]
 pub enum ErrorTrack {
-    #[error("error de E/S: {0}")]
+    #[error("error de E/S")]
     Io(#[from] io::Error),
-    #[error("error de JSON: {0}")]
+    #[error("error de JSON")]
     Json(#[from] serde_json::Error),
-    #[error("{archivo}: la línea {linea} es inválida: {fuente}")]
+    #[error("{archivo}: la línea {linea} es inválida")]
     Linea {
         archivo: String,
         linea: usize,
