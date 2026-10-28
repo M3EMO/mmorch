@@ -474,6 +474,11 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
   
   La evaluación monta la caché en solo lectura, con `--network none` y `CARGO_NET_OFFLINE=true`.
 - **Límite**: el filtro de fuentes depende del comando, no de la red. El contenedor de descarga ve toda la red, pero solo corre `cargo fetch` y `pip download`. Un filtro por dominio necesita un proxy y queda fuera del hito 1.
+- **Huecos del filtro** (reporte de Sonnet después de la 6b; esperan a P12b):
+  - (a) Un `Cargo.toml` con `git =` y sin `Cargo.lock` hace que `cargo generate-lockfile` clone esa fuente antes del filtro.
+  - (b) Un `requirements.txt` con una URL o con `git+` pasa el filtro de PyPI.
+  
+  Si P12b queda en a), los dos huecos se cierran: Root rechaza esas fuentes antes de cualquier comando con red. Si P12b queda en b), Opus rediseña el filtro. Hasta la respuesta, el código de la 6b no cambia y los dos huecos siguen abiertos.
 - **Validate**: `cargo test --test descarga`:
   - Un repo con una dependencia de crates.io fuera de la imagen compila en la evaluación sin red.
   - Un `Cargo.lock` con `git+` da `SinVeredicto` y no baja nada.
@@ -553,6 +558,7 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
   Un requisito con un test `inestable` no supera el nivel 2, y su hallazgo entra al informe. Un test de causa `entorno` se excluye del cálculo y figura como `Pendiente`, con su motivo (Tarea 7f). Un test de causa `oraculo` se trata igual solo hasta que exista la ficha aclarada (Tarea 9f).
   
   El puntaje de `Completitud` es `Σ peso·nivel / (3·Σ peso)`. Los requisitos salen de la spec, y la spec sale de una sesión `/grill-me` con el usuario (decisión 12). En memora y brasa, la spec ya existe en el banco.
+- **Validate con fixtures** (no espera a G1): un requisito con su único test en `[[entorno]]` da `Pendiente`, y la `Completitud` es la misma que sin ese requisito. Este caso viene de la Tarea 7f, que no tenía `[[requisito]]` para probarlo.
 - **Validate**: `r00t oraculo evaluar --tarea memora --repo .../memora-sdlc` marca `Ausente` los módulos que el SDLC no construyó (el SDLC construyó 2 de 9 módulos, según `docs/contexto/mapa.md`). memora-ecc queda con todos `Cumplido`.
 
 ### Tarea 9d: Entrega y escenarios de usuario
@@ -906,10 +912,33 @@ Gates humanos que frenan el resto:
 
 Las Tareas 12, 12b, 13, 13b, 16 y 19 van después de G1 y G2. Opus redacta G1 y G2 en otra sesión, mientras Sonnet construye la lista de arriba.
 
+**Avance (2026-10-27):** Sonnet cerró 8c, 7f, 6b, 11, 8b (código) y 9f, con 341 tests verdes (commit 4f2be05). Una evaluación real de memora-ecc, antes de la ficha obligatoria, dio contrato 61/61 y oculto 47/48, con el FIFO de `BLPOP` inestable. Desde la 9f, memora y brasa salen con código 2 hasta tener `## Ficha` (G1).
+
+## Desempates técnicos 3 (Opus, 2026-10-27, después de la Tarea 9f)
+
+Respuestas a las preguntas de Sonnet al cerrar las Tareas 7f, 6b y 9f. Los cambios de código van en la Tarea 9f2.
+
+3. **Salida de `ficha revisar`.** Con hallazgos deterministas, sale 1 aunque el juez quede `sin_veredicto`. Un hallazgo determinista ya prueba que la ficha no está limpia, así que el rojo es seguro y no depende del juez. El JSON sigue marcando al juez `sin_veredicto`. El código 3 queda para un caso: el juez sin veredicto y ningún hallazgo determinista. Root no puede decir que esa ficha está limpia. El código 0 exige las dos capas limpias.
+4. **`ficha tarea --json`.** Sí: con `--json`, imprime `{"toml": "..."}`. El contrato de la CLI dice que todo subcomando con `--json` imprime un solo objeto JSON. Sin `--json`, sigue imprimiendo el TOML.
+5. **`colab.json` malformado.** `evaluar` no falla. Los tests de ese archivo quedan `Pendiente`, que es el estado conservador: no da un verde falso. El veredicto y `Informe.confianza` dicen "colab.json ilegible" con la causa. Un aviso solo en stderr no alcanza: el dato tiene que llegar al informe. Un archivo malformado no tumba una evaluación entera por una evidencia opcional.
+6. **Error original del proveedor.** Se conservan los dos. `ErrorProveedor::ErrorNoRegistrado { original, causa_registro }` lleva el error del proveedor y la causa del registro. Su mensaje muestra primero el original, porque el original explica qué pasó con la llamada. `r00t llama` escribe la línea JSON del `Evento` en stderr y sale con código 3, igual que `EventoNoRegistrado` (desempate 5 de "Desempates técnicos 2").
+
+### Tarea 9f2: Ajustes a las Tareas 7f, 8c y 9f
+- **Action**: los desempates 3 a 6 de arriba, más un arreglo: el mensaje "sin ficha" sale una sola vez en stderr, no tres.
+- **Validate**: `cargo test`:
+  - Una ficha con 1 hallazgo determinista y un juez falso que devuelve JSON roto sale con 1.
+  - Una ficha sin hallazgos deterministas y con el mismo juez sale con 3.
+  - `r00t ficha tarea --json` imprime un objeto con la clave `toml`, y ese TOML parsea.
+  - Un `colab.json` malformado deja sus tests `Pendiente`, y `confianza` nombra el archivo.
+  - Un 503 con `eventos.jsonl` sin permiso de escritura da `ErrorNoRegistrado`, y el mensaje contiene el 503.
+  - `r00t oraculo evaluar` sin ficha escribe "sin ficha" una sola vez en stderr.
+
 **Preguntas abiertas (sin responder)**
 - **P12b.** Respondiste "P12 si" a una pregunta con dos opciones. ¿Cuál elegís?
   - a) La descarga acepta solo crates.io y PyPI. Hoy rige esta.
   - b) La descarga acepta además dependencias por git y otros registros, como npm o uno privado. Esta opción amplía la red de la zona roja.
+  
+  Tu respuesta también decide los dos huecos del filtro de la Tarea 6b. Con a), se cierran. Hasta tu respuesta, siguen abiertos.
 - **P15.** ¿Aprobás correr en Colab con GPU los tests pendientes por entorno? Hoy el único es `test_rendimiento[gpu-10000-res1]` de brasa. Una GPU T4 es gratis; una A100 o H100 consume compute units. Hay tres respuestas posibles:
   - a) No: los tests quedan `Pendiente` y vos los corrés a mano cuando quieras.
   - b) Sí, solo con T4, y un agente lo corre.
