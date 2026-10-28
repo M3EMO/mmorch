@@ -340,7 +340,7 @@ fn cola(texto: &str) -> String {
 }
 
 /// Agrega la cola de stderr al motivo, si hay.
-fn con_cola(base: String, stderr: &str) -> String {
+pub(crate) fn con_cola(base: String, stderr: &str) -> String {
     let c = cola(stderr);
     if c.is_empty() {
         base

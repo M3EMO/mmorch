@@ -390,6 +390,7 @@ mod tests {
             requisito: Vec::new(),
             arquitectura: None,
             eficiencia: None,
+            pruebas: None,
             entrega: None,
             escenario: Vec::new(),
             dir: PathBuf::new(),

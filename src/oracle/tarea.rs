@@ -39,6 +39,9 @@ pub struct Tarea {
     /// Comando de eficiencia y su piso (Tarea 9, se corre en 9-B).
     #[serde(default)]
     pub eficiencia: Option<EficienciaTarea>,
+    /// Límites de la sonda de calidad de tests por mutación (Tarea 9e). Sin tabla, rigen los defaults.
+    #[serde(default)]
+    pub pruebas: Option<PruebasTarea>,
     /// Instalación, arranque y archivos de entrega (Tarea 9d).
     #[serde(default)]
     pub entrega: Option<EntregaTarea>,
@@ -101,6 +104,28 @@ pub struct ArquitecturaTarea {
 pub struct EficienciaTarea {
     pub cmd: String,
     pub piso: f64,
+}
+
+/// Mutantes y minutos de la sonda de mutación (Tarea 9e). Ambos deben ser mayores que cero.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PruebasTarea {
+    #[serde(default = "mutantes_max_por_defecto")]
+    pub mutantes_max: u32,
+    #[serde(default = "minutos_max_por_defecto")]
+    pub minutos_max: u32,
+}
+
+/// Mutantes que se miden si la tarea no define `[pruebas]`.
+pub const MUTANTES_MAX_DEFECTO: u32 = 60;
+/// Minutos de corrida que se usan si la tarea no define `[pruebas]`.
+pub const MINUTOS_MAX_DEFECTO: u32 = 20;
+
+fn mutantes_max_por_defecto() -> u32 {
+    MUTANTES_MAX_DEFECTO
+}
+
+fn minutos_max_por_defecto() -> u32 {
+    MINUTOS_MAX_DEFECTO
 }
 
 /// Instalación y arranque del producto, en un contenedor limpio (Tarea 9d).
@@ -181,7 +206,21 @@ impl Tarea {
                 ));
             }
         }
+        self.validar_pruebas()?;
         self.validar_requisitos()
+    }
+
+    /// Los límites de `[pruebas]` deben ser mayores que cero.
+    fn validar_pruebas(&self) -> Result<(), String> {
+        if let Some(p) = &self.pruebas {
+            if p.mutantes_max == 0 {
+                return Err("pruebas.mutantes_max debe ser 1 o más".into());
+            }
+            if p.minutos_max == 0 {
+                return Err("pruebas.minutos_max debe ser 1 o más".into());
+            }
+        }
+        Ok(())
     }
 
     /// Cada escenario tiene id único, con solo `[A-Za-z0-9._-]`.
@@ -631,6 +670,52 @@ cmd = "exit 0"
                 "debe rechazar el id {id:?}"
             );
         }
+    }
+
+    const PRUEBAS: &str = "\n[pruebas]\nmutantes_max = 60\nminutos_max = 20\n";
+
+    #[test]
+    fn pruebas_tabla_se_parsea_con_sus_valores() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), &format!("{MINIMO}{PRUEBAS}"));
+        let t = Tarea::cargar_de(dir.path()).expect("parsea");
+        let p = t.pruebas.expect("pruebas");
+        assert_eq!(p.mutantes_max, 60);
+        assert_eq!(p.minutos_max, 20);
+    }
+
+    #[test]
+    fn pruebas_sin_tabla_quedan_none() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), MINIMO);
+        let t = Tarea::cargar_de(dir.path()).expect("parsea");
+        assert!(t.pruebas.is_none());
+    }
+
+    #[test]
+    fn pruebas_mutantes_max_cero_es_error_de_carga() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(
+            dir.path(),
+            &format!("{MINIMO}\n[pruebas]\nmutantes_max = 0\nminutos_max = 20\n"),
+        );
+        assert!(matches!(
+            Tarea::cargar_de(dir.path()),
+            Err(ErrorOraculo::Tarea(_))
+        ));
+    }
+
+    #[test]
+    fn pruebas_minutos_max_cero_es_error_de_carga() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(
+            dir.path(),
+            &format!("{MINIMO}\n[pruebas]\nmutantes_max = 60\nminutos_max = 0\n"),
+        );
+        assert!(matches!(
+            Tarea::cargar_de(dir.path()),
+            Err(ErrorOraculo::Tarea(_))
+        ));
     }
 
     #[test]
