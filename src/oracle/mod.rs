@@ -7,6 +7,7 @@ pub mod evidencia;
 pub mod junit;
 pub mod pendientes;
 pub mod perfiles;
+pub mod requisitos;
 pub mod rubrica;
 pub mod tarea;
 
@@ -318,7 +319,7 @@ fn comillas(texto: &str) -> String {
 
 /// Resultado de clasificar los tests de una suite a través de sus corridas.
 #[derive(Debug, Clone, Default, PartialEq)]
-struct Clasificacion {
+pub struct Clasificacion {
     /// Tests estables con su resultado (`Pasa` o `Falla`). Los omitidos no aparecen.
     estables: BTreeMap<String, ResultadoTest>,
     /// Ids ordenados de los tests inestables.

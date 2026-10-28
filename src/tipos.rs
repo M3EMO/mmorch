@@ -166,6 +166,9 @@ pub struct EstadoRequisito {
     pub cumplimiento: Cumplimiento,
     /// Ids de tests, escenarios o hallazgos.
     pub evidencia: Vec<String>,
+    /// Nivel de completitud de 0 a 3. `None` si no hay veredicto o está pendiente (Tarea 9c).
+    #[serde(default)]
+    pub nivel: Option<u8>,
 }
 
 /// `refs` lleva ids de requisitos o hallazgos.
@@ -652,6 +655,17 @@ mod tests {
         assert_eq!(valor["tipo"], "llamada");
     }
 
+    #[test]
+    fn tipos_estado_requisito_v1_sin_nivel_se_lee_como_none() {
+        let v1 = r#"{"id":"R1","titulo":"Login","peso":2,"cumplimiento":"parcial","evidencia":["a::t1"]}"#;
+        let estado: EstadoRequisito = serde_json::from_str(v1).expect("lee el formato v1");
+        assert_eq!(estado.nivel, None);
+        ida_y_vuelta(&EstadoRequisito {
+            nivel: Some(2),
+            ..estado
+        });
+    }
+
     fn informe() -> Informe {
         Informe {
             decision: Decision::NoListo,
@@ -662,6 +676,7 @@ mod tests {
                 peso: 3,
                 cumplimiento: Cumplimiento::Parcial,
                 evidencia: vec!["test_login".into()],
+                nivel: Some(1),
             }],
             bloqueantes: vec!["h-1".into()],
             riesgos: vec![Accion {
@@ -785,6 +800,7 @@ mod tests {
             peso: 2,
             cumplimiento: Cumplimiento::SinVeredicto,
             evidencia: Vec::new(),
+            nivel: None,
         });
         ida_y_vuelta(&Accion {
             prioridad: 3,
