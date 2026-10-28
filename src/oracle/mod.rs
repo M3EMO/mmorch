@@ -26,6 +26,7 @@ use std::time::{Duration, SystemTime};
 
 use thiserror::Error as ErrorDerive;
 
+use crate::borrado;
 use crate::config::root_home;
 use crate::ficha::{self, ErrorFicha};
 use crate::tipos::{Conteo, Estado, Hallazgo, TasaTest, VERSION, Veredicto};
@@ -261,18 +262,23 @@ fn limpiar_temporales(tmp: &Path, ahora: SystemTime) {
         let Ok(meta) = fs::symlink_metadata(&ruta) else {
             continue;
         };
-        if !meta.is_dir() {
-            continue;
-        }
         let Ok(modificado) = meta.modified() else {
             continue;
         };
-        if ahora
+        if !ahora
             .duration_since(modificado)
             .is_ok_and(|edad| edad > CADUCIDAD)
         {
-            let _ = fs::remove_dir_all(&ruta);
+            continue;
         }
+        // Un enlace se borra como enlace: su destino puede estar fuera de `tmp` y no se toca.
+        let _ = if meta.is_symlink() {
+            borrado::borrar_archivo_dentro(tmp, &ruta)
+        } else if meta.is_dir() {
+            borrado::borrar_dir_dentro(tmp, &ruta)
+        } else {
+            continue;
+        };
     }
 }
 
@@ -418,11 +424,8 @@ fn infra(contexto: &str, e: io::Error) -> ErrorOraculo {
 
 /// Borra el junit de la corrida anterior. Sin borrarlo, una corrida sin XML pasaría con datos viejos.
 fn borrar_xml(salida: &Path, xml: &str) -> Result<(), ErrorOraculo> {
-    match fs::remove_file(salida.join(xml)) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(infra("borrar el junit de la corrida anterior", e)),
-    }
+    borrado::borrar_archivo_dentro(salida, &salida.join(xml))
+        .map_err(|e| infra("borrar el junit de la corrida anterior", e))
 }
 
 /// Una corrida de la suite en un contenedor nuevo, con su junit.
@@ -537,6 +540,7 @@ pub fn codigo_de_estado(estado: Estado) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use filetime::{FileTime, set_symlink_file_times};
     use std::fs;
     use std::path::PathBuf;
 
@@ -808,6 +812,59 @@ mod tests {
         assert!(reciente.exists(), "la carpeta reciente se conserva");
         assert!(otra.exists(), "sin el prefijo no se toca");
         assert!(ajeno.exists(), "un archivo ajeno no se toca");
+    }
+
+    #[test]
+    fn temporales_enlace_viejo_se_borra_como_enlace_y_su_destino_queda() {
+        let home = tempfile::tempdir().expect("temp dir");
+        let tmp = home.path().join("tmp");
+        fs::create_dir_all(&tmp).expect("dir");
+        let fuera = tempfile::tempdir().expect("destino fuera de home");
+        fs::write(fuera.path().join("dato"), "x").expect("escribe");
+        let enlace = tmp.join("evaluar-viejo");
+        std::os::unix::fs::symlink(fuera.path(), &enlace).expect("enlace");
+        let ahora = SystemTime::now();
+        let viejo = FileTime::from_system_time(ahora - Duration::from_secs(25 * 3600));
+        set_symlink_file_times(&enlace, viejo, viejo).expect("fija el mtime del enlace");
+
+        limpiar_temporales(&tmp, ahora);
+
+        assert!(
+            fs::symlink_metadata(&enlace).is_err(),
+            "el enlace de más de 24 h se borra"
+        );
+        assert_eq!(
+            fs::read_to_string(fuera.path().join("dato")).expect("destino"),
+            "x",
+            "el destino queda intacto"
+        );
+    }
+
+    #[test]
+    fn temporales_enlace_reciente_se_conserva() {
+        let home = tempfile::tempdir().expect("temp dir");
+        let tmp = home.path().join("tmp");
+        fs::create_dir_all(&tmp).expect("dir");
+        let fuera = tempfile::tempdir().expect("destino fuera de home");
+        let enlace = tmp.join("evaluar-reciente");
+        std::os::unix::fs::symlink(fuera.path(), &enlace).expect("enlace");
+
+        limpiar_temporales(&tmp, SystemTime::now());
+
+        assert!(
+            fs::symlink_metadata(&enlace).is_ok(),
+            "el enlace reciente se conserva"
+        );
+    }
+
+    #[test]
+    fn oraculo_borrar_xml_rechaza_ruta_fuera_de_la_salida() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let salida = base.path().join("salida");
+        fs::create_dir_all(&salida).expect("salida");
+        fs::write(base.path().join("fuera.xml"), "x").expect("escribe");
+        assert!(borrar_xml(&salida, "../fuera.xml").is_err());
+        assert!(base.path().join("fuera.xml").exists());
     }
 
     #[test]

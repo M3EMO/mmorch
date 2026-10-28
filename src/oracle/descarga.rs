@@ -18,6 +18,7 @@ use super::configs::{self, TipoConfig, instrucciones, palabra_clave, parsear_fro
 use super::contenedor::{self, Ejecucion, correr_podman};
 use super::tarea::Tarea;
 use super::{CARPETA_TEMPORALES, ErrorOraculo, infra, temporal};
+use crate::borrado;
 use crate::observe;
 use crate::tipos::{Dimension, Fuente, Hallazgo, TipoEvento};
 use inventario::{Inventario, Origen, PaqueteLock, Rechazo, analizar_lock};
@@ -157,13 +158,14 @@ pub fn accion_rustsec(existe: bool, edad: Option<Duration>) -> Accion {
     }
 }
 
-/// Borra la carpeta parcial de una descarga anterior que no terminó.
-pub fn limpiar_parcial(dir: &Path) -> io::Result<()> {
-    match fs::remove_dir_all(dir) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
+/// Borra la carpeta parcial de una descarga anterior que no terminó. Solo borra dentro de `home`.
+pub fn limpiar_parcial(home: &Path, dir: &Path) -> io::Result<()> {
+    borrar_en_home(home, dir)
+}
+
+/// Borra una carpeta de la caché de `home` con la guarda de `borrado`. Un destino fuera de `home` se rechaza.
+fn borrar_en_home(home: &Path, ruta: &Path) -> io::Result<()> {
+    borrado::borrar_dir_dentro(home, ruta)
 }
 
 /// Hallazgo de entrega. El `id` sale de la dimensión, el archivo y la cita.
@@ -580,7 +582,7 @@ fn descargar_vendor(
 ) -> Result<Option<String>, ErrorOraculo> {
     let destino = home.join(CARPETA_CACHE).join(CARPETA_RUST).join(hash);
     let parcial = parcial_de(&destino);
-    limpiar_parcial(&parcial).map_err(|e| infra("borrar la descarga parcial", e))?;
+    limpiar_parcial(home, &parcial).map_err(|e| infra("borrar la descarga parcial", e))?;
     fs::create_dir_all(&parcial).map_err(|e| infra("crear la caché parcial", e))?;
     let salida = temporal_de(home)?;
     let ejecucion = Ejecucion {
@@ -599,19 +601,19 @@ fn descargar_vendor(
     match ejecutar_descarga(&ejecucion) {
         Ok(()) if parcial.join(ARCHIVO_CONFIG).is_file() => {
             if destino.exists() {
-                fs::remove_dir_all(&destino).map_err(|e| infra("borrar la caché previa", e))?;
+                borrar_en_home(home, &destino).map_err(|e| infra("borrar la caché previa", e))?;
             }
             fs::rename(&parcial, &destino).map_err(|e| infra("cerrar la caché", e))?;
             Ok(None)
         }
         Ok(()) => {
-            limpiar_parcial(&parcial).map_err(|e| infra("borrar la descarga parcial", e))?;
+            limpiar_parcial(home, &parcial).map_err(|e| infra("borrar la descarga parcial", e))?;
             Err(ErrorOraculo::Infra(
                 "infraestructura: cargo vendor no dejó config.toml".into(),
             ))
         }
         Err(diagnostico) => {
-            limpiar_parcial(&parcial).map_err(|e| infra("borrar la descarga parcial", e))?;
+            limpiar_parcial(home, &parcial).map_err(|e| infra("borrar la descarga parcial", e))?;
             match diagnostico {
                 Diagnostico::Producto(linea) => Ok(Some(linea)),
                 otro => Err(error_de(otro)),
@@ -671,7 +673,7 @@ fn actualizar_rustsec(
                 Diagnostico::Infra(m) | Diagnostico::Producto(m) | Diagnostico::Desconocido(m) => m,
             };
             if accion == Accion::Clonar {
-                let _ = fs::remove_dir_all(&dir);
+                let _ = borrar_en_home(home, &dir);
                 return Ok((None, format!("error: {motivo}")));
             }
             Ok((Some(dir), format!("error: {motivo}")))
@@ -1093,9 +1095,33 @@ location searched: crates.io index";
         let parcial = home.path().join("abc.parcial");
         std::fs::create_dir_all(parcial.join("vendor")).expect("dir");
         std::fs::write(parcial.join("config.toml"), "x").expect("escribe");
-        limpiar_parcial(&parcial).expect("limpia");
+        limpiar_parcial(home.path(), &parcial).expect("limpia");
         assert!(!parcial.exists());
-        limpiar_parcial(&parcial).expect("sin carpeta no es error");
+        limpiar_parcial(home.path(), &parcial).expect("sin carpeta no es error");
+    }
+
+    #[test]
+    fn descarga_limpiar_parcial_rechaza_ruta_fuera_de_home_sin_borrar() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let home = base.path().join("home");
+        let fuera = base.path().join("fuera");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&fuera).expect("fuera");
+        std::fs::write(fuera.join("dato"), "x").expect("escribe");
+        assert!(limpiar_parcial(&home, &fuera).is_err());
+        assert!(fuera.join("dato").exists());
+    }
+
+    #[test]
+    fn descarga_borrar_en_home_rechaza_ruta_fuera_de_home_sin_borrar() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let home = base.path().join("home");
+        let rustsec_fuera = base.path().join("rustsec");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&rustsec_fuera).expect("dir");
+        std::fs::write(rustsec_fuera.join("dato"), "x").expect("escribe");
+        assert!(borrar_en_home(&home, &rustsec_fuera).is_err());
+        assert!(rustsec_fuera.join("dato").exists());
     }
 
     #[test]

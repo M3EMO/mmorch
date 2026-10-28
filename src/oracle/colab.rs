@@ -7,7 +7,7 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -256,7 +256,7 @@ pub fn correr_en_colab(
     registrar_pedir(home, &corrida, nombre_sesion, "ok")?;
 
     let mut gpu = String::from("desconocida");
-    let trabajo = trabajar(cli, paquete, &tmp, nombre_sesion, &mut gpu);
+    let trabajo = trabajar(cli, paquete, home, &tmp, nombre_sesion, &mut gpu);
     let parada = liberar(cli, home, &corrida, nombre_sesion, &gpu, trabajo.is_ok());
     match (trabajo, parada) {
         (Ok(junit), Ok(())) => Ok(ResultadoColab {
@@ -270,10 +270,16 @@ pub fn correr_en_colab(
     }
 }
 
+/// Borra el tar subido. Solo borra dentro de `<home>/tmp`, con la guarda de `borrado`.
+fn borrar_tar(home: &Path, tar: &Path) -> io::Result<()> {
+    crate::borrado::borrar_archivo_dentro(&home.join("tmp"), tar)
+}
+
 /// Lo que corre con el runtime ya pedido. Si falla, `correr_en_colab` libera el runtime.
 fn trabajar(
     cli: &dyn ColabCli,
     paquete: &Path,
+    home: &Path,
     tmp: &Path,
     sesion: &str,
     gpu: &mut String,
@@ -300,7 +306,7 @@ fn trabajar(
         &ruta(&tar),
         PAQUETE_REMOTO,
     ]))?;
-    let _ = fs::remove_file(&tar);
+    let _ = borrar_tar(home, &tar);
     if subida.codigo != 0 {
         return Err(ErrorOraculo::Infra(format!(
             "no se pudo subir el paquete: {}",
@@ -726,6 +732,28 @@ mod tests {
         let r = correr_en_colab(&falso, &dir, &tarea(), home.path(), "root-memora-1");
         assert!(matches!(r, Err(ErrorOraculo::Colab(_))));
         assert!(falso.lineas().is_empty(), "nada llega a Colab");
+    }
+
+    #[test]
+    fn colab_borrar_tar_rechaza_ruta_fuera_de_home_tmp_sin_borrar() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let home = base.path().join("home");
+        let fuera = base.path().join("fuera");
+        fs::create_dir_all(home.join("tmp")).expect("home/tmp");
+        fs::create_dir_all(&fuera).expect("fuera");
+        fs::write(fuera.join("paquete.tar"), "x").expect("escribe");
+        assert!(borrar_tar(&home, &fuera.join("paquete.tar")).is_err());
+        assert!(fuera.join("paquete.tar").exists());
+    }
+
+    #[test]
+    fn colab_borrar_tar_dentro_de_home_tmp_lo_borra() {
+        let home = tempfile::tempdir().expect("home");
+        let tar = home.path().join("tmp").join("colab-x").join("paquete.tar");
+        fs::create_dir_all(tar.parent().expect("padre")).expect("dir");
+        fs::write(&tar, "x").expect("escribe");
+        borrar_tar(home.path(), &tar).expect("borra");
+        assert!(!tar.exists());
     }
 
     #[test]

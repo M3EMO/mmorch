@@ -1,6 +1,7 @@
 //! Biblioteca de Root: evalúa, rutea y observa corridas.
 
 pub mod aprende;
+pub mod borrado;
 pub mod cli;
 pub mod config;
 pub mod error;
@@ -329,7 +330,7 @@ fn aprende_accion(json: bool, replay: bool) -> Result<(), Error> {
     if json {
         println!("{}", serde_json::to_string_pretty(&pol)?);
     } else {
-        imprimir_politica(&pol, f64::from(cfg.umbral_wilson));
+        imprimir_politica(&pol, cfg.umbral_wilson);
         imprimir_propuestas(&pol.propuestas);
     }
     Ok(())

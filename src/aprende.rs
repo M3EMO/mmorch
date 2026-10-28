@@ -145,7 +145,7 @@ impl RolesActuales {
             planifica: cfg.modelos.planifica.clone(),
             organiza: cfg.modelos.organiza.clone(),
             construye: cfg.modelos.construye.clone(),
-            umbral_wilson: f64::from(cfg.umbral_wilson),
+            umbral_wilson: cfg.umbral_wilson,
         }
     }
 }
@@ -514,7 +514,7 @@ pub fn replay(filas: &[Fila], cfg: &Config) -> Replay {
     let corte = (0.7 * total as f64).floor() as usize;
     let (entrena, mide) = orden_temporal.split_at(corte);
     let pol = politica_de(entrena, &[]);
-    let umbral = f64::from(cfg.umbral_wilson);
+    let umbral = cfg.umbral_wilson;
 
     let tareas: BTreeSet<&str> = mide
         .iter()
@@ -701,7 +701,7 @@ mod tests {
 
     #[test]
     fn aprende_con_el_umbral_por_defecto_2_de_2_no_entra_y_3_de_3_si() {
-        let umbral = f64::from(Config::default().umbral_wilson);
+        let umbral = Config::default().umbral_wilson;
         let dos = repetir(2, |i| {
             con_ts(
                 fila_construye("haiku", 0.5, true),
@@ -730,7 +730,7 @@ mod tests {
 
     #[test]
     fn aprende_con_el_umbral_por_defecto_3_de_4_no_entra() {
-        let umbral = f64::from(Config::default().umbral_wilson);
+        let umbral = Config::default().umbral_wilson;
         let mut filas = repetir(3, |i| {
             con_ts(
                 fila_construye("haiku", 0.5, true),
@@ -1283,7 +1283,36 @@ mod tests {
         cfg.umbral_wilson = 0.7;
         let actuales = RolesActuales::de_config(&cfg);
         assert_eq!(actuales.organiza, "haiku");
-        assert_eq!(actuales.umbral_wilson, f64::from(0.7_f32));
+        assert_eq!(actuales.umbral_wilson, 0.7);
+    }
+
+    #[test]
+    fn aprende_wilson_exacto_0_6_entra_con_umbral_de_root_toml() {
+        let cfg = Config::desde_texto("umbral_wilson = 0.6").expect("debe parsear");
+        let umbral = RolesActuales::de_config(&cfg).umbral_wilson;
+        let mut pol = Politica::default();
+        pol.estadisticas.insert(
+            "construye:memora".into(),
+            vec![Candidato {
+                modelo: "barato".into(),
+                proveedor: None,
+                via: crate::tipos::Via::Api,
+                n: 5,
+                exitos: 3,
+                wilson_inf: 0.6,
+                usd_medio: 0.0001,
+            }],
+        );
+        assert_eq!(
+            modelo_preferido(&pol, Rol::Construye, "memora", "sonnet", umbral),
+            "barato"
+        );
+    }
+
+    #[test]
+    fn aprende_umbral_exacto_0_6_de_root_toml_llega_a_roles_actuales() {
+        let cfg = Config::desde_texto("umbral_wilson = 0.6").expect("debe parsear");
+        assert_eq!(RolesActuales::de_config(&cfg).umbral_wilson, 0.6);
     }
 
     #[test]

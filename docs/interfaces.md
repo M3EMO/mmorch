@@ -506,7 +506,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "nube": {
           "tope_usd": 250.0
         },
-        "prefiere_api_sobre": 0.8999999761581421
+        "prefiere_api_sobre": 0.9
       }
     },
     "modelos": {
@@ -567,14 +567,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     },
     "umbral_verde": {
       "type": "number",
-      "format": "float",
-      "default": 0.800000011920929
+      "format": "double",
+      "default": 0.8
     },
     "umbral_wilson": {
       "description": "Cota inferior de Wilson (90%, unilateral) que un candidato debe alcanzar para entrar a la política.",
       "type": "number",
-      "format": "float",
-      "default": 0.6000000238418579
+      "format": "double",
+      "default": 0.6
     }
   },
   "$defs": {
@@ -604,8 +604,8 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "prefiere_api_sobre": {
           "description": "Fracción del tope de cupo (en (0, 1]) a partir de la cual se prefiere la API.",
           "type": "number",
-          "format": "float",
-          "default": 0.8999999761581421
+          "format": "double",
+          "default": 0.9
         }
       }
     },

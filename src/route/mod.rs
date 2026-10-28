@@ -92,7 +92,7 @@ pub fn elegir(
     // Preferencia: con el cupo sobre `prefiere_api_sobre`, pasa a la API si hay margen y equivalente.
     let preferir_api = elegida.via == Via::Cupo
         && !cupo.lleno
-        && cupo.usd >= f64::from(cfg.balance.prefiere_api_sobre) * cupo.tope
+        && cupo.usd >= cfg.balance.prefiere_api_sobre * cupo.tope
         && api_ok;
     if let Some(eq) = equivalente(cfg, &elegida.modelo).filter(|_| preferir_api) {
         elegida = opcion_api(
@@ -178,7 +178,7 @@ fn aprendido(p: &Pedido, pol: &Politica, cfg: &Config) -> Option<Candidato> {
     if !matches!(p.rol, Rol::Delega | Rol::Verifica | Rol::Juzga) {
         return None;
     }
-    let umbral = f64::from(cfg.umbral_wilson);
+    let umbral = cfg.umbral_wilson;
     pol.estadisticas
         .get(&Politica::clave(p.rol, &p.tipo))?
         .iter()
@@ -544,7 +544,54 @@ mod tests {
 
     #[test]
     fn route_umbral_wilson_por_defecto_es_0_6() {
-        assert_eq!(Config::default().umbral_wilson, 0.6);
+        let umbral: f64 = Config::default().umbral_wilson;
+        assert_eq!(umbral, 0.6_f64);
+    }
+
+    #[test]
+    fn route_cupo_en_0_9_por_35_exacto_pasa_a_api_con_root_toml() {
+        // 0,9 × 35,0 = 31,5 exacto. Con f32 el redondeo cae por debajo y este caso pasa igual;
+        // el de 0,8 (route_cupo_en_0_8...) es el que expone el error de f32.
+        let cfg = Config::desde_texto("[balance]\nprefiere_api_sobre = 0.9").expect("debe parsear");
+        let e = elegir_en(
+            &pedido(Rol::Organiza, false),
+            &Politica::default(),
+            &uso(31.5, bloque_vigente(), 10.0),
+            &cfg,
+        )
+        .expect("hay margen en la API");
+        assert_eq!(e.via, Via::Api);
+    }
+
+    #[test]
+    fn route_wilson_exacto_0_6_entra_con_umbral_de_root_toml() {
+        let cfg = Config::desde_texto("umbral_wilson = 0.6").expect("debe parsear");
+        let pol = politica_con(
+            "delega:bulk",
+            vec![candidato("barato", Via::Api, 0.6, 0.0001)],
+        );
+        let e = elegir_en(
+            &pedido(Rol::Delega, false),
+            &pol,
+            &uso(0.0, None, 0.0),
+            &cfg,
+        )
+        .expect("hay margen");
+        assert_eq!(e.modelo.as_deref(), Some("barato"));
+    }
+
+    #[test]
+    fn route_cupo_en_0_8_por_35_exacto_pasa_a_api_con_root_toml() {
+        // 0,8 × 35,0 = 28,0 exacto: con el umbral en f32 el cupo queda por debajo y no pasa.
+        let cfg = Config::desde_texto("[balance]\nprefiere_api_sobre = 0.8").expect("debe parsear");
+        let e = elegir_en(
+            &pedido(Rol::Organiza, false),
+            &Politica::default(),
+            &uso(28.0, bloque_vigente(), 10.0),
+            &cfg,
+        )
+        .expect("hay margen en la API");
+        assert_eq!(e.via, Via::Api);
     }
 
     #[test]

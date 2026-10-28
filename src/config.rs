@@ -33,9 +33,9 @@ pub struct Config {
     pub precios: BTreeMap<String, Precio>,
     pub balance: Balance,
     pub ruteo: Ruteo,
-    pub umbral_verde: f32,
+    pub umbral_verde: f64,
     /// Cota inferior de Wilson (90%, unilateral) que un candidato debe alcanzar para entrar a la política.
-    pub umbral_wilson: f32,
+    pub umbral_wilson: f64,
     pub proveedores: ConfigProveedores,
 }
 
@@ -71,7 +71,7 @@ pub struct Precio {
 #[serde(default)]
 pub struct Balance {
     /// Fracción del tope de cupo (en (0, 1]) a partir de la cual se prefiere la API.
-    pub prefiere_api_sobre: f32,
+    pub prefiere_api_sobre: f64,
     pub cupo: TopeBloque,
     pub api: TopeMes,
     pub nube: TopeMes,
@@ -505,5 +505,25 @@ tope_usd = 200.0
             Config::cargar(ruta).expect("inexistente da default"),
             Config::default()
         );
+    }
+
+    #[test]
+    fn config_umbrales_por_defecto_son_f64_exactos() {
+        let c = Config::default();
+        let wilson: f64 = c.umbral_wilson;
+        let verde: f64 = c.umbral_verde;
+        assert_eq!(wilson, 0.6_f64);
+        assert_eq!(verde, 0.8_f64);
+    }
+
+    #[test]
+    fn config_prefiere_api_sobre_0_9_ida_y_vuelta_exacta() {
+        let c = Config::desde_texto("[balance]\nprefiere_api_sobre = 0.9").expect("debe parsear");
+        let prefiere: f64 = c.balance.prefiere_api_sobre;
+        assert_eq!(prefiere, 0.9_f64);
+        let texto = toml::to_string(&c).expect("serializa");
+        let vuelta = Config::desde_texto(&texto).expect("vuelve a parsear");
+        assert_eq!(vuelta.balance.prefiere_api_sobre, 0.9_f64);
+        assert_eq!(vuelta, c);
     }
 }
