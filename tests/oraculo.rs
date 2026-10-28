@@ -222,6 +222,7 @@ fn root_cli_env(root_home: &Path, env: &[(&str, &str)], args: &[&str]) -> Output
 
 #[test]
 fn oraculo_todo_pasa_da_conteos_completos_y_sin_veredicto() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let (_dir, tarea) = tarea_con(
         &escribe_xml("contrato.xml", JUNIT_DOS_OK),
@@ -239,6 +240,7 @@ fn oraculo_todo_pasa_da_conteos_completos_y_sin_veredicto() {
 
 #[test]
 fn oraculo_una_falla_en_oculto_da_rojo() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let (_dir, tarea) = tarea_con(
         &escribe_xml("contrato.xml", JUNIT_DOS_OK),
@@ -253,6 +255,7 @@ fn oraculo_una_falla_en_oculto_da_rojo() {
 
 #[test]
 fn oraculo_comando_sin_xml_da_infra_y_no_hay_veredicto() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let (_dir, tarea) = tarea_con(&escribe_xml("contrato.xml", JUNIT_DOS_OK), "true");
     let repo = repo_con_contenido();
@@ -266,6 +269,7 @@ fn oraculo_comando_sin_xml_da_infra_y_no_hay_veredicto() {
 
 #[test]
 fn oraculo_repo_original_intacto_y_target_no_se_copia() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     // El contrato escribe un junit con una entrada por cada nombre que ve en /repo.
     // El repo tiene a.txt, src, target y .git: la copia debe tener solo a.txt y src.
@@ -299,6 +303,7 @@ echo '</testsuite>'; } > /salida/contrato.xml";
 
 #[test]
 fn oraculo_cli_evaluar_json_imprime_veredicto() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = tempfile::tempdir().expect("temp dir");
     let dir = home.path().join("oraculos").join("tarea-prueba");
@@ -332,6 +337,7 @@ fn oraculo_cli_evaluar_json_imprime_veredicto() {
 
 #[test]
 fn oraculo_cli_evaluar_sin_json_imprime_una_linea_y_sale_con_1_si_hay_rojo() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = tempfile::tempdir().expect("temp dir");
     let dir = home.path().join("oraculos").join("tarea-prueba");
@@ -364,6 +370,7 @@ fn oraculo_cli_evaluar_sin_json_imprime_una_linea_y_sale_con_1_si_hay_rojo() {
 
 #[test]
 fn inestable_tres_repeticiones_marca_el_test_que_alterna() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let (_dir, tarea) = tarea_alterna("repeticiones = 3", "");
     let repo = repo_con_contenido();
@@ -377,6 +384,7 @@ fn inestable_tres_repeticiones_marca_el_test_que_alterna() {
 
 #[test]
 fn inestable_tasa_llega_a_10_corridas_y_su_wilson_es_consistente() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let (_dir, tarea) = tarea_alterna("repeticiones = 5\nrepeticiones_inestable = 10", "");
     let repo = repo_con_contenido();
@@ -396,6 +404,7 @@ fn inestable_tasa_llega_a_10_corridas_y_su_wilson_es_consistente() {
 
 #[test]
 fn inestable_exclusion_oraculo_dudoso_saca_al_test_de_los_inestables() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let (_dir, tarea) = tarea_alterna(
         "repeticiones = 3",
@@ -412,6 +421,7 @@ fn inestable_exclusion_oraculo_dudoso_saca_al_test_de_los_inestables() {
 
 #[test]
 fn inestable_contrato_figura_y_no_completa_el_contrato() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let dir = tempfile::tempdir().expect("temp dir");
     escribir_tarea_extra(
@@ -441,6 +451,7 @@ fn inestable_contrato_figura_y_no_completa_el_contrato() {
 
 #[test]
 fn repeticiones_estable_corre_5_veces_y_no_hay_extras() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let (_dir, tarea) = tarea_con_extra(
         &escribe_xml("contrato.xml", JUNIT_DOS_OK),
@@ -462,6 +473,7 @@ fn repeticiones_estable_corre_5_veces_y_no_hay_extras() {
 
 #[test]
 fn repeticiones_contrato_corre_5_veces_y_no_hay_extras() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let (_dir, tarea) = tarea_con_extra(
         &cuenta("n-contrato", "contrato.xml"),
@@ -482,6 +494,7 @@ fn repeticiones_contrato_corre_5_veces_y_no_hay_extras() {
 
 #[test]
 fn repeticiones_sin_xml_en_una_repeticion_es_infra() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     // La segunda ejecución no escribe XML. Si el archivo viejo sobreviviera, pasaría sin error.
     let oculto = format!(
@@ -506,6 +519,7 @@ fn repeticiones_sin_xml_en_una_repeticion_es_infra() {
 
 #[test]
 fn repeticiones_cli_json_imprime_repeticiones_e_inestables() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = tempfile::tempdir().expect("temp dir");
     let dir = home.path().join("oraculos").join("tarea-prueba");
@@ -544,6 +558,7 @@ fn repeticiones_cli_json_imprime_repeticiones_e_inestables() {
 
 #[test]
 fn temporales_evaluar_con_tmpdir_inexistente_usa_root_home() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = tempfile::tempdir().expect("temp dir");
     let dir = home.path().join("oraculos").join("tarea-prueba");
@@ -587,6 +602,7 @@ fn temporales_evaluar_con_tmpdir_inexistente_usa_root_home() {
 
 #[test]
 fn temporales_evaluar_borra_las_carpetas_viejas_de_home_tmp() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = tempfile::tempdir().expect("home");
     let tmp = home.path().join("tmp");
@@ -652,6 +668,7 @@ fn tarea_con_pendiente(home: &Path, entorno: &str) -> PathBuf {
 
 #[test]
 fn pendiente_entorno_lista_el_test_y_no_cuenta() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let (_dir, tarea) = tarea_con_extra(
         &escribe_xml("contrato.xml", JUNIT_DOS_OK),
@@ -672,6 +689,7 @@ fn pendiente_entorno_lista_el_test_y_no_cuenta() {
 
 #[test]
 fn pendiente_entorno_sin_test_en_el_junit_tambien_se_lista() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let (_dir, tarea) = tarea_con_extra(
         &escribe_xml("contrato.xml", JUNIT_DOS_OK),
@@ -812,6 +830,7 @@ fn pendiente_archivo_inexistente_es_error_de_tarea() {
 
 #[test]
 fn pendiente_importar_guarda_colab_y_evento_gate() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = tempfile::tempdir().expect("home");
     let dir = tarea_con_pendiente(home.path(), ENTORNO_O2);
@@ -900,6 +919,7 @@ fn pendiente_importar_junit_malformado_o_faltante_sale_3() {
 
 #[test]
 fn pendiente_colab_malformado_no_tumba_evaluar_y_avisa() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let (_dir, tarea) = tarea_con_extra(
         &escribe_xml("contrato.xml", JUNIT_DOS_OK),
@@ -928,6 +948,7 @@ fn pendiente_colab_malformado_no_tumba_evaluar_y_avisa() {
 
 #[test]
 fn pendiente_colab_valido_no_da_aviso() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let (_dir, tarea) = tarea_con_extra(
         &escribe_xml("contrato.xml", JUNIT_DOS_OK),

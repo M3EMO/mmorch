@@ -4,6 +4,7 @@ pub mod aprende;
 pub mod borrado;
 pub mod cli;
 pub mod config;
+pub mod entorno;
 pub mod error;
 pub mod esquema;
 pub mod ficha;

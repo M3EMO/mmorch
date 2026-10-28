@@ -60,6 +60,7 @@ fn mutacion_fixture_sin_asserts_puntaje_menor_que_con_asserts() {
 
 #[test]
 fn mutacion_contenedor_sin_cargo_mutants_da_sin_veredicto() {
+    root::saltar_sin_podman!();
     asegurar_imagen(RUST);
     let repo = tempfile::tempdir().expect("temp dir");
     fs::create_dir_all(repo.path().join("src")).expect("crea src");
@@ -94,6 +95,7 @@ const RUST_CON_MUTANTS: &str = "localhost/root-oraculo-rust:2";
 
 #[test]
 fn mutacion_real_sin_mutantes_no_deja_reporte_y_da_sin_veredicto() {
+    root::saltar_sin_podman!();
     asegurar_imagen(RUST_CON_MUTANTS);
     // Un repo sin funciones ni expresiones que mutar: cargo-mutants no escribe outcomes.json.
     let repo = tempfile::tempdir().expect("temp dir");

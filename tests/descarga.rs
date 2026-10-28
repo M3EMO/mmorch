@@ -205,6 +205,7 @@ fn evaluar_con(home: &Path, repo: &Path, tarea: &Tarea) -> Veredicto {
 
 #[test]
 fn descarga_dependencia_de_crates_io_compila_en_la_evaluacion_sin_red() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = base().join("repo-compila");
@@ -228,6 +229,7 @@ fn descarga_dependencia_de_crates_io_compila_en_la_evaluacion_sin_red() {
 
 #[test]
 fn descarga_lock_con_ssh_da_sin_veredicto_con_hallazgo_y_no_baja_nada() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = base().join("repo-git");
@@ -289,6 +291,7 @@ source = \"git+ssh://git@github.com/x/ext?rev=1#1\"\n";
 
 #[test]
 fn descarga_el_contenedor_de_descarga_no_ve_oraculo() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = base().join("repo-sin-oraculo");
@@ -323,6 +326,7 @@ fn descarga_el_contenedor_de_descarga_no_ve_oraculo() {
 
 #[test]
 fn descarga_segunda_evaluacion_usa_la_cache_y_no_toca_config() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     // Carpeta propia del test: nunca se comparte con otro test (carrera de `repo-cache`).
@@ -355,6 +359,7 @@ fn descarga_segunda_evaluacion_usa_la_cache_y_no_toca_config() {
 
 #[test]
 fn descarga_dependencia_inexistente_sin_lock_da_no_instala() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = base().join("repo-inexistente");
@@ -381,6 +386,7 @@ fn descarga_dependencia_inexistente_sin_lock_da_no_instala() {
 
 #[test]
 fn descarga_sin_lock_genera_el_lock_y_avisa_que_no_es_reproducible() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = base().join("repo-sin-lock");
@@ -411,6 +417,7 @@ fn descarga_sin_lock_genera_el_lock_y_avisa_que_no_es_reproducible() {
 
 #[test]
 fn descarga_evento_gate_lista_paquetes_con_su_fuente() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = base().join("repo-gate");
@@ -477,6 +484,7 @@ const MAIN_ITOA: &str = r#"fn main() {
 
 #[test]
 fn descarga_gate_de_inventario_se_registra_antes_de_cualquier_red() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = base().join("repo-inalcanzable");
@@ -513,6 +521,7 @@ fn descarga_gate_de_inventario_se_registra_antes_de_cualquier_red() {
 
 #[test]
 fn descarga_rechazos_no_usan_red_ni_contenedor_y_no_filtran_credenciales() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = base().join("repo-rechazos");
@@ -570,6 +579,7 @@ tres = { git = \"https://usuario:clave@host/x.git\" }\n",
 
 #[test]
 fn descarga_dependencia_git_con_rev_compila_en_la_evaluacion_sin_red() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = base().join("repo-git-rev");
@@ -610,6 +620,7 @@ fn descarga_dependencia_git_con_rev_compila_en_la_evaluacion_sin_red() {
 
 #[test]
 fn descarga_dependencia_git_sin_rev_registra_el_commit_y_avisa_que_no_es_reproducible() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = base().join("repo-git-sin-rev");
@@ -665,6 +676,7 @@ fn escribir_config(repo: &Path, texto: &str) {
 
 #[test]
 fn descarga_ignora_el_cargo_config_del_repo_y_baja_con_proxy_muerto() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = repo_propio("repo-proxy-");
@@ -685,6 +697,7 @@ fn descarga_ignora_el_cargo_config_del_repo_y_baja_con_proxy_muerto() {
 
 #[test]
 fn descarga_alias_y_rustc_wrapper_del_repo_no_afectan_la_descarga() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = repo_propio("repo-wrapper-");
@@ -997,6 +1010,7 @@ fn descarga_python_preludio_instala_sin_red_con_target_en_tmpfs() {
 
 #[test]
 fn descarga_python_wheel_de_pypi_se_instala_sin_red() {
+    root::saltar_sin_podman!();
     let _g = preparar_py();
     let home = home_de_prueba();
     let repo = repo_propio("repo-py-wheel-");
@@ -1036,6 +1050,7 @@ fn descarga_python_wheel_de_pypi_se_instala_sin_red() {
 
 #[test]
 fn descarga_python_segunda_llamada_usa_la_cache_sin_red() {
+    root::saltar_sin_podman!();
     let _g = preparar_py();
     let home = home_de_prueba();
     let repo = repo_propio("repo-py-cache-");
@@ -1058,6 +1073,7 @@ fn descarga_python_segunda_llamada_usa_la_cache_sin_red() {
 
 #[test]
 fn descarga_python_git_se_clona_al_commit_sin_pip_con_red() {
+    root::saltar_sin_podman!();
     let _g = preparar_py();
     let home = home_de_prueba();
     let repo = repo_propio("repo-py-git-");

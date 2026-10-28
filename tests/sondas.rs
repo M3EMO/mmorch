@@ -118,6 +118,7 @@ fn repo_minimo() -> tempfile::TempDir {
 
 #[test]
 fn sonda_ejecutor_real_corre_un_comando_y_devuelve_stdout() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let repo = repo_minimo();
     let ej = ejecutor(ALPINE, repo.path(), None);
@@ -128,6 +129,7 @@ fn sonda_ejecutor_real_corre_un_comando_y_devuelve_stdout() {
 
 #[test]
 fn sonda_ejecutor_real_devuelve_los_archivos_de_salida() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let repo = repo_minimo();
     let ej = ejecutor(ALPINE, repo.path(), None);
@@ -142,6 +144,7 @@ fn sonda_ejecutor_real_devuelve_los_archivos_de_salida() {
 
 #[test]
 fn sonda_ejecutor_real_codigo_distinto_de_cero_no_es_error() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let repo = repo_minimo();
     let ej = ejecutor(ALPINE, repo.path(), None);
@@ -153,6 +156,7 @@ fn sonda_ejecutor_real_codigo_distinto_de_cero_no_es_error() {
 
 #[test]
 fn sonda_ejecutor_real_corre_sin_red() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let repo = repo_minimo();
     let ej = ejecutor(ALPINE, repo.path(), None);
@@ -176,6 +180,7 @@ fn repo_con_secreto() -> tempfile::TempDir {
 
 #[test]
 fn sonda_real_ninguna_herramienta_de_la_imagen_da_sin_veredicto_por_ausencia() {
+    root::saltar_sin_podman!();
     let imagen = imagen_rust();
     asegurar_imagen(&imagen);
     let repo = repo_minimo();
@@ -210,6 +215,7 @@ fn sonda_real_ninguna_herramienta_de_la_imagen_da_sin_veredicto_por_ausencia() {
 
 #[test]
 fn sonda_real_gitleaks_con_clave_sintetica_da_hallazgo_sin_el_secreto() {
+    root::saltar_sin_podman!();
     let imagen = imagen_rust();
     asegurar_imagen(&imagen);
     let repo = repo_con_secreto();
@@ -240,6 +246,7 @@ fn base_rustsec_real() -> PathBuf {
 
 #[test]
 fn sonda_real_gitleaks_repo_limpio_da_uno_con_marca_de_cierre() {
+    root::saltar_sin_podman!();
     let imagen = imagen_rust();
     asegurar_imagen(&imagen);
     let repo = repo_minimo();
@@ -252,6 +259,7 @@ fn sonda_real_gitleaks_repo_limpio_da_uno_con_marca_de_cierre() {
 
 #[test]
 fn sonda_real_cargo_audit_base_vacia_da_reporte_vacio() {
+    root::saltar_sin_podman!();
     let imagen = imagen_rust();
     asegurar_imagen(&imagen);
     let repo = repo_minimo();
@@ -265,6 +273,7 @@ fn sonda_real_cargo_audit_base_vacia_da_reporte_vacio() {
 
 #[test]
 fn sonda_real_cargo_audit_repo_limpio_con_base_real_da_uno() {
+    root::saltar_sin_podman!();
     let imagen = imagen_rust();
     asegurar_imagen(&imagen);
     let base = base_rustsec_real();
@@ -278,6 +287,7 @@ fn sonda_real_cargo_audit_repo_limpio_con_base_real_da_uno() {
 
 #[test]
 fn sonda_real_hadolint_dockerfile_limpio_da_uno() {
+    root::saltar_sin_podman!();
     let imagen = imagen_rust();
     asegurar_imagen(&imagen);
     let repo = repo_minimo();
@@ -297,6 +307,7 @@ fn sonda_real_hadolint_dockerfile_limpio_da_uno() {
 
 #[test]
 fn sonda_real_hadolint_sobre_from_latest_da_hallazgo() {
+    root::saltar_sin_podman!();
     let imagen = imagen_rust();
     asegurar_imagen(&imagen);
     let repo = repo_minimo();
@@ -327,6 +338,7 @@ fn sonda_real_hadolint_sobre_from_latest_da_hallazgo() {
 
 #[test]
 fn sonda_real_clippy_eq_op_da_hallazgo() {
+    root::saltar_sin_podman!();
     let imagen = imagen_rust();
     asegurar_imagen(&imagen);
     let repo = repo_minimo();
@@ -351,6 +363,7 @@ fn sonda_real_clippy_eq_op_da_hallazgo() {
 
 #[test]
 fn sonda_real_clippy_repo_limpio_da_valor_sin_hallazgos() {
+    root::saltar_sin_podman!();
     let imagen = imagen_rust();
     asegurar_imagen(&imagen);
     let repo = repo_minimo();
@@ -364,6 +377,7 @@ fn sonda_real_clippy_repo_limpio_da_valor_sin_hallazgos() {
 
 #[test]
 fn sonda_real_eficiencia_en_alpine_da_valor_uno() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let repo = repo_minimo();
     let ej = ejecutor(ALPINE, repo.path(), None);
