@@ -18,7 +18,7 @@ const SONDA_SECRETOS: &str = "configs-secretos";
 const SONDA_DOCKERFILE: &str = "dockerfile";
 const SONDA_HADOLINT: &str = "hadolint";
 /// Detalle de la regla (b): el último stage corre como root. La sonda de entrega lo reusa.
-const DETALLE_RAIZ: &str =
+pub(crate) const DETALLE_RAIZ: &str =
     "la última etapa no define un USER no-root: el contenedor corre como root";
 /// Carpetas que no se recorren, en cualquier nivel del repo.
 const CARPETAS_IGNORADAS: &[&str] = &["target", ".git", "node_modules", "vendor"];
@@ -454,15 +454,15 @@ fn sonda_dockerfile_reglas(repo: &Path, requisitos: &[Requisito]) -> ResultadoSo
 }
 
 /// Una instrucción del Dockerfile, con las líneas continuadas unidas.
-struct Instruccion {
-    linea: u32,
+pub(crate) struct Instruccion {
+    pub(crate) linea: u32,
     /// Primera línea física, recortada.
-    cita: String,
+    pub(crate) cita: String,
     /// Texto lógico, sin `\` de continuación.
-    logico: String,
+    pub(crate) logico: String,
 }
 
-fn instrucciones(texto: &str) -> Vec<Instruccion> {
+pub(crate) fn instrucciones(texto: &str) -> Vec<Instruccion> {
     let mut salida = Vec::new();
     let mut actual: Option<Instruccion> = None;
     for (i, linea) in texto.lines().enumerate() {
@@ -492,14 +492,14 @@ fn instrucciones(texto: &str) -> Vec<Instruccion> {
 }
 
 /// Palabra clave en mayúsculas, y el resto de la instrucción recortado.
-fn palabra_clave(logico: &str) -> (String, &str) {
+pub(crate) fn palabra_clave(logico: &str) -> (String, &str) {
     let texto = logico.trim_start();
     let fin = texto.find(char::is_whitespace).unwrap_or(texto.len());
     (texto[..fin].to_uppercase(), texto[fin..].trim())
 }
 
 /// Imagen y nombre de etapa (`AS x`) de un `FROM`. Las banderas `--x=y` se ignoran.
-fn parsear_from(resto: &str) -> (Option<String>, Option<String>) {
+pub(crate) fn parsear_from(resto: &str) -> (Option<String>, Option<String>) {
     let mut tokens = resto.split_whitespace().filter(|t| !t.starts_with("--"));
     let imagen = tokens.next().map(str::to_string);
     let alias = match (tokens.next(), tokens.next()) {

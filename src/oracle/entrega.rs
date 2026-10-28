@@ -1,16 +1,26 @@
 //! Entrega y escenarios de usuario (Tarea 9d). Corre el producto en una copia del repo, dentro de
-//! un contenedor sin red: instala, arranca y pasa cada `[[escenario]]`. La evaluación no construye
-//! el `Dockerfile`: su verificación es estática y reusa la regla de "corre como root" de 9b.
+//! un contenedor sin red: instala, arranca y pasa cada `[[escenario]]`. La verificación estática
+//! del `Dockerfile` reusa la regla de "corre como root" de 9b. La construcción sin red
+//! (`construir_dockerfile`, Tarea 9d2) no se conecta a `evaluar`: Tarea 13 la arma.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
-use crate::oracle::configs;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::oracle::ErrorOraculo;
+use crate::oracle::configs::{self, TipoConfig, instrucciones, palabra_clave};
+use crate::oracle::contenedor::{SalidaPodman, correr_podman};
 use crate::oracle::descarga::PRELUDIO;
 use crate::oracle::perfiles::herramientas::EjecutorHerramienta;
 use crate::oracle::perfiles::{ResultadoSonda, crear_hallazgo, puntuar_hallazgos};
-use crate::oracle::tarea::Tarea;
-use crate::tipos::{Dimension, Hallazgo};
+use crate::oracle::tarea::{Requisito, Tarea};
+use crate::oracle::{CARPETA_TEMPORALES, copiar_repo, infra, temporal};
+use crate::tipos::{Dimension, Hallazgo, Pendiente};
 
 const SONDA: &str = "entrega";
 const DIMENSION: Dimension = Dimension::Entrega;
@@ -24,6 +34,279 @@ const LINEAS_ESCENARIO: usize = 20;
 const LOG_CORRER_COMPLETO: &str = "/tmp/entrega-correr.full.log";
 /// Límite de cada escenario, en segundos.
 const TIMEOUT_ESCENARIO: u32 = 120;
+
+/// Plazo por defecto de cada `podman build`.
+const PLAZO_BUILD: Duration = Duration::from_secs(20 * 60);
+/// Plazo de las consultas rápidas de podman: inspeccionar, correr `id` y borrar.
+const PLAZO_CORTO: Duration = Duration::from_secs(60);
+/// Nombre de la sonda y etiqueta del cuerpo del archivo de pendientes (Tarea 9d2).
+const TEST_BUILD: &str = "dockerfile::build";
+/// Fragmentos (en minúscula) de la salida de un `RUN` que delatan falta de red. Solo cuentan
+/// dentro de un `RUN`. "unable to locate package" no suma: sin "temporary failure" o "could not
+/// resolve" ya cuenta por los patrones de abajo.
+const PATRONES_RED: [&str; 13] = [
+    "could not resolve host",
+    "temporary failure in name resolution",
+    "network is unreachable",
+    "name or service not known",
+    "connection refused",
+    "connection timed out",
+    "failed to connect",
+    "could not connect",
+    "unable to connect",
+    "dns: transient error",
+    "temporary error (try again later)",
+    "failed to fetch",
+    "bad address",
+];
+/// Fragmentos (en minúscula) de un `FROM` cuya imagen no está local (`--pull=never`).
+const PATRONES_AUSENTE: [&str; 3] = ["image not known", "no such image", "unable to find"];
+/// Contador de las etiquetas temporales de `podman build`.
+static CONTADOR_BUILD: AtomicU64 = AtomicU64::new(0);
+
+/// Lo que sale de construir los Dockerfile del repo sin red (Tarea 9d2).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ResultadoDockerfile {
+    pub hallazgos: Vec<Hallazgo>,
+    pub pendientes: Vec<Pendiente>,
+    /// `Some(true)` si la imagen corre sin root. `None` si no hubo imagen que arrancar.
+    pub corre_sin_root: Option<bool>,
+    /// Verdadero si todos los Dockerfile del repo construyeron.
+    pub construida: bool,
+}
+
+/// Construye los Dockerfile del repo con `--network none --pull=never` y verifica que corren sin root.
+/// Solo corre `podman build` y `podman run --entrypoint id`. Los `[[escenario]]` contra la imagen
+/// construida quedan fuera: los actuales corren en el contenedor de evaluación (`sonda_entrega`).
+/// La parte con red (bajar la imagen base) espera la aclaración P17b.
+pub fn construir_dockerfile(
+    repo: &Path,
+    home: &Path,
+    tarea: &Tarea,
+) -> Result<ResultadoDockerfile, ErrorOraculo> {
+    construir_dockerfile_con(repo, home, tarea, PLAZO_BUILD)
+}
+
+/// Como `construir_dockerfile`, con el límite de cada `podman build` explícito.
+pub fn construir_dockerfile_con(
+    repo: &Path,
+    home: &Path,
+    tarea: &Tarea,
+    plazo: Duration,
+) -> Result<ResultadoDockerfile, ErrorOraculo> {
+    let reqs = tarea.requisito.as_slice();
+    let dockerfiles: Vec<String> = configs::buscar_archivos(repo)
+        .into_iter()
+        .filter(|a| a.tipo == TipoConfig::Dockerfile)
+        .map(|a| a.ruta_relativa)
+        .collect();
+    let mut resultado = ResultadoDockerfile {
+        hallazgos: Vec::new(),
+        pendientes: Vec::new(),
+        corre_sin_root: None,
+        construida: false,
+    };
+    if dockerfiles.is_empty() {
+        return Ok(resultado);
+    }
+    // La copia aísla el repo. El contexto de build sale de ella, nunca del repo original.
+    let tmp = home.join(CARPETA_TEMPORALES);
+    fs::create_dir_all(&tmp).map_err(|e| infra("directorio temporal de ROOT_HOME", e))?;
+    let copia = temporal(&tmp).map_err(|e| infra("directorio temporal de la construcción", e))?;
+    let contexto = copia.path().join("repo");
+    copiar_repo(repo, &contexto).map_err(|e| infra("copia del repo para construir", e))?;
+    // La regla de root la emite la sonda estática: la construcción no la repite.
+    let estatica = configs::dockerfile_corre_como_root(repo, reqs).map_err(ErrorOraculo::Infra)?;
+    let mut todas_ok = true;
+    let mut sin_root: Vec<bool> = Vec::new();
+    for ruta in &dockerfiles {
+        let texto = fs::read_to_string(contexto.join(ruta))
+            .map_err(|e| infra("leer el Dockerfile para construir", e))?;
+        // La imagen temporal se borra al salir de la iteración, pase lo que pase.
+        let imagen = ImagenTemporal(etiqueta_unica());
+        let df = contexto.join(ruta).to_string_lossy().into_owned();
+        let ctx = contexto.to_string_lossy().into_owned();
+        let args = [
+            "build",
+            "--network",
+            "none",
+            "--pull=never",
+            "-t",
+            imagen.0.as_str(),
+            "-f",
+            df.as_str(),
+            ctx.as_str(),
+        ];
+        let build = correr_podman(&args, plazo)?;
+        if build.codigo != 0 {
+            todas_ok = false;
+            match clasificar_fallo(&build, ruta, &texto, reqs)? {
+                Desenlace::Pendiente(motivo) => resultado.pendientes.push(Pendiente {
+                    test: TEST_BUILD.into(),
+                    motivo,
+                    colab: None,
+                }),
+                Desenlace::Hallazgo(h) => resultado.hallazgos.push(h),
+            }
+            continue;
+        }
+        let sin_root_ahora = corre_sin_root(&imagen.0)?;
+        if !sin_root_ahora
+            && !estatica.iter().any(|h| h.archivo == *ruta)
+            && let Some((linea, cita)) = ultimo_from(&texto)
+        {
+            resultado.hallazgos.push(crear_hallazgo(
+                DIMENSION,
+                3,
+                ruta,
+                linea,
+                &cita,
+                configs::DETALLE_RAIZ,
+                SONDA,
+                reqs,
+            ));
+        }
+        sin_root.push(sin_root_ahora);
+    }
+    resultado.construida = todas_ok;
+    resultado.corre_sin_root = (!sin_root.is_empty()).then(|| sin_root.iter().all(|s| *s));
+    Ok(resultado)
+}
+
+/// Imagen temporal de una construcción. Su `Drop` la borra con `podman rmi -f`, pase lo que pase.
+struct ImagenTemporal(String);
+
+impl Drop for ImagenTemporal {
+    fn drop(&mut self) {
+        // Solo borra su propia etiqueta. Un fallo no importa: la imagen quizá nunca se creó.
+        let _ = correr_podman(&["rmi", "-f", self.0.as_str()], PLAZO_CORTO);
+    }
+}
+
+/// Etiqueta única del proceso: `root-entrega-<pid>-<n>`.
+fn etiqueta_unica() -> String {
+    let n = CONTADOR_BUILD.fetch_add(1, Ordering::Relaxed);
+    format!("root-entrega-{}-{n}", std::process::id())
+}
+
+/// Verdadero si la imagen corre sin root. `id -u` lo confirma. Sin `id`, vale el `USER` de la imagen.
+fn corre_sin_root(tag: &str) -> Result<bool, ErrorOraculo> {
+    let inspeccion = correr_podman(
+        &["image", "inspect", "--format", "{{.Config.User}}", tag],
+        PLAZO_CORTO,
+    )?;
+    let usuario = inspeccion.stdout.trim().to_string();
+    let uid = correr_podman(
+        &[
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--pull=never",
+            "--entrypoint",
+            "id",
+            tag,
+            "-u",
+        ],
+        PLAZO_CORTO,
+    )?;
+    if uid.codigo == 0
+        && let Ok(numero) = uid.stdout.trim().parse::<u32>()
+    {
+        return Ok(numero != 0);
+    }
+    Ok(!es_root(&usuario))
+}
+
+/// Verdadero si el `USER` de la imagen es root o 0, o si no define ninguno.
+fn es_root(usuario: &str) -> bool {
+    let nombre = usuario.split(':').next().unwrap_or("").trim();
+    usuario.is_empty() || nombre == "root" || nombre == "0"
+}
+
+/// Línea y cita de la última instrucción `FROM` del Dockerfile.
+fn ultimo_from(texto: &str) -> Option<(u32, String)> {
+    instrucciones(texto)
+        .into_iter()
+        .rev()
+        .find(|i| palabra_clave(&i.logico).0 == "FROM")
+        .map(|i| (i.linea, i.cita))
+}
+
+/// Desenlace de un build que falló: un pendiente sin cobro, o un hallazgo del producto.
+enum Desenlace {
+    Pendiente(String),
+    Hallazgo(Hallazgo),
+}
+
+/// Separa un fallo de build en falta de red, imagen base ausente, o producto que no construye.
+/// Sin ningún `STEP` en la salida, podman no empezó: es infraestructura.
+fn clasificar_fallo(
+    build: &SalidaPodman,
+    archivo: &str,
+    texto: &str,
+    reqs: &[Requisito],
+) -> Result<Desenlace, ErrorOraculo> {
+    let salida = format!("{}\n{}", build.stdout, build.stderr);
+    let Some(paso) = paso_fallido(&salida) else {
+        let ultima = build.stderr.lines().rev().find(|l| !l.trim().is_empty());
+        return Err(ErrorOraculo::Infra(format!(
+            "podman no empezó la construcción: {}",
+            ultima.unwrap_or("sin salida de error").trim()
+        )));
+    };
+    let instrucciones_df = instrucciones(texto);
+    let (linea, cita, kw) = match instrucciones_df.get(paso.saturating_sub(1)) {
+        Some(i) => (i.linea, i.cita.clone(), palabra_clave(&i.logico).0),
+        None => match instrucciones_df
+            .iter()
+            .find(|i| palabra_clave(&i.logico).0 == "RUN")
+        {
+            Some(i) => (i.linea, i.cita.clone(), "RUN".to_string()),
+            None => (0, String::new(), String::new()),
+        },
+    };
+    let minuscula = salida.to_lowercase();
+    if kw == "FROM" {
+        if PATRONES_AUSENTE.iter().any(|p| minuscula.contains(p)) {
+            return Ok(Desenlace::Pendiente(format!(
+                "imagen base no descargada (fase de descarga no corrió): línea {linea}, {cita}"
+            )));
+        }
+        return Err(ErrorOraculo::Infra(format!(
+            "podman no pudo arrancar el FROM de la línea {linea}"
+        )));
+    }
+    if kw == "RUN" && pide_red(&salida) {
+        return Ok(Desenlace::Pendiente(format!(
+            "no se pudo construir sin red: línea {linea}, {cita}"
+        )));
+    }
+    Ok(Desenlace::Hallazgo(crear_hallazgo(
+        DIMENSION,
+        3,
+        archivo,
+        linea,
+        &cita,
+        &format!("la imagen no construye: línea {linea}"),
+        SONDA,
+        reqs,
+    )))
+}
+
+/// Número de paso (1-based) del último `STEP k/n` de la salida de `podman build`.
+fn paso_fallido(salida: &str) -> Option<usize> {
+    salida.lines().rev().find_map(|linea| {
+        let resto = linea.split("STEP ").nth(1)?;
+        resto.split('/').next()?.trim().parse::<usize>().ok()
+    })
+}
+
+/// Verdadero si la salida de un build trae evidencia de falta de red.
+fn pide_red(salida: &str) -> bool {
+    let minuscula = salida.to_lowercase();
+    PATRONES_RED.iter().any(|p| minuscula.contains(p))
+}
 
 /// Resultado de la sonda de entrega: el puntaje de la dimensión y el estado de cada escenario.
 #[derive(Debug, Clone, PartialEq)]
@@ -550,5 +833,28 @@ mod tests {
         let h = &r.sonda.hallazgos[0];
         assert_eq!(h.cita, "el login falló");
         assert_eq!(h.impacto, ["R1"]);
+    }
+
+    #[test]
+    fn entrega_ultimo_paso_sale_del_ultimo_step_de_la_salida() {
+        let salida = "STEP 1/3: FROM x\nSTEP 2/3: RUN a\nSTEP 3/3: RUN b\n\
+            Error: building at STEP \"RUN b\": while running runtime: exit status 1";
+        assert_eq!(paso_fallido(salida), Some(3));
+        assert_eq!(
+            paso_fallido("Error: creating build container: x: image not known"),
+            None
+        );
+    }
+
+    #[test]
+    fn entrega_pide_red_reconoce_los_errores_de_apk_y_wget() {
+        assert!(pide_red(
+            "WARNING: fetching x: temporary error (try again later)"
+        ));
+        assert!(pide_red("wget: bad address 'example.com'"));
+        assert!(pide_red("curl: (6) Could not resolve host: example.com"));
+        assert!(!pide_red(
+            "Error: building at STEP \"RUN false\": exit status 1"
+        ));
     }
 }

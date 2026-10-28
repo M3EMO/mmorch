@@ -10,10 +10,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::contenedor::{self, Ejecucion};
+use super::configs::{self, TipoConfig, instrucciones, palabra_clave, parsear_from};
+use super::contenedor::{self, Ejecucion, correr_podman};
 use super::tarea::Tarea;
 use super::{CARPETA_TEMPORALES, ErrorOraculo, infra, temporal};
 use crate::observe;
@@ -87,6 +89,18 @@ const PATRONES_PRODUCTO: [&str; 4] = [
 ];
 /// Largo máximo de la línea útil de un error.
 const LARGO_LINEA_UTIL: usize = 300;
+/// Plazo de cada `podman pull` de una imagen base.
+const PLAZO_PULL: Duration = Duration::from_secs(15 * 60);
+/// Plazo de las consultas rápidas de podman: inspeccionar una imagen.
+const PLAZO_CORTO: Duration = Duration::from_secs(60);
+/// Fragmentos (en minúscula) de un `pull` de una imagen que no existe. Van antes que los de credenciales.
+const PATRONES_NO_EXISTE: [&str; 3] = [
+    "manifest unknown",
+    "not found",
+    "requested access to the resource is denied",
+];
+/// Fragmentos (en minúscula) de un registro que pide credenciales. No se pasan (zona roja, P21).
+const PATRONES_CREDENCIALES: [&str; 2] = ["denied", "unauthorized"];
 
 /// Hash corto de un contenido: primeros 16 caracteres hex de su sha256.
 pub fn hash_corto(contenido: &[u8]) -> String {
@@ -200,24 +214,36 @@ fn hallazgo_lock_invalido(error: &str) -> Hallazgo {
 
 /// Lo que se registra en el evento `Gate` de una descarga.
 struct Registro {
-    lenguaje: &'static str,
+    lenguaje: String,
     hash: Option<String>,
     cache_hit: bool,
     paquetes: Vec<Value>,
     rustsec: Option<String>,
     motivo: Option<&'static str>,
+    /// Imágenes base de los Dockerfile del repo. `None` si el repo no trae Dockerfile.
+    imagenes: Option<Vec<ImagenBase>>,
 }
 
 impl Registro {
     /// Registro de una descarga que cortó la evaluación.
-    fn corte(lenguaje: &'static str, hash: Option<String>, motivo: &'static str) -> Self {
+    fn corte(lenguaje: &str, hash: Option<String>, motivo: &'static str) -> Self {
         Registro {
-            lenguaje,
+            motivo: Some(motivo),
             hash,
+            ..Registro::sin_paquetes(lenguaje)
+        }
+    }
+
+    /// Registro sin paquetes ni caché: lo que deja una fase que no descarga dependencias.
+    fn sin_paquetes(lenguaje: &str) -> Self {
+        Registro {
+            lenguaje: lenguaje.into(),
+            hash: None,
             cache_hit: false,
             paquetes: Vec::new(),
             rustsec: None,
-            motivo: Some(motivo),
+            motivo: None,
+            imagenes: None,
         }
     }
 }
@@ -237,21 +263,79 @@ pub fn preparar(
             &inv.rechazos,
         )));
     }
+    // Las imágenes base van antes de las dependencias: sin ellas el Dockerfile no construye (Tarea 9d2).
+    let imagenes = if hay_dockerfile(repo) {
+        Some(traer_imagenes_base(repo)?)
+    } else {
+        None
+    };
+    let hallazgos_imagen = imagenes
+        .as_deref()
+        .map(hallazgos_de_imagenes)
+        .unwrap_or_default();
+    if imagenes
+        .iter()
+        .flatten()
+        .any(|i| i.problema == Some(Problema::Credenciales))
+    {
+        // Sin veredicto: no se pasan credenciales, así que no se sigue con la descarga.
+        let mut registro = Registro::sin_paquetes(&tarea.lenguaje);
+        registro.motivo = Some("credenciales");
+        registro.imagenes = imagenes;
+        registrar(home, tarea, &registro)?;
+        return Ok(Preparacion::SinVeredicto(hallazgos_imagen));
+    }
     let (preparacion, registro) = match tarea.lenguaje.as_str() {
         "rust" => preparar_rust(repo, tarea, home, timeout, &inv)?,
         "python" => preparar_python(repo, tarea, home, timeout)?,
-        _ => {
-            return Ok(Preparacion::Lista {
+        _ => (
+            Preparacion::Lista {
                 cache: None,
                 rustsec: None,
                 hallazgos: Vec::new(),
-            });
+            },
+            None,
+        ),
+    };
+    let preparacion = con_hallazgos(preparacion, hallazgos_imagen);
+    let registro = match (registro, imagenes) {
+        (Some(mut registro), imagenes) => {
+            registro.imagenes = imagenes;
+            Some(registro)
         }
+        (None, Some(imagenes)) => {
+            let mut registro = Registro::sin_paquetes(&tarea.lenguaje);
+            registro.imagenes = Some(imagenes);
+            Some(registro)
+        }
+        (None, None) => None,
     };
     if let Some(registro) = registro {
         registrar(home, tarea, &registro)?;
     }
     Ok(preparacion)
+}
+
+/// Agrega hallazgos a una preparación, sea cual sea su variante.
+fn con_hallazgos(preparacion: Preparacion, extra: Vec<Hallazgo>) -> Preparacion {
+    match preparacion {
+        Preparacion::Lista {
+            cache,
+            rustsec,
+            mut hallazgos,
+        } => {
+            hallazgos.extend(extra);
+            Preparacion::Lista {
+                cache,
+                rustsec,
+                hallazgos,
+            }
+        }
+        Preparacion::SinVeredicto(mut hallazgos) => {
+            hallazgos.extend(extra);
+            Preparacion::SinVeredicto(hallazgos)
+        }
+    }
 }
 
 /// Gate de la fase `inventario`: las fuentes que el repo declara, antes de usar la red.
@@ -333,12 +417,13 @@ fn preparar_rust(
     }
     let (rustsec, estado) = actualizar_rustsec(home, tarea, timeout)?;
     let registro = Registro {
-        lenguaje: "rust",
+        lenguaje: "rust".into(),
         hash: Some(hash),
         cache_hit,
         paquetes: paquetes_json(&paquetes),
         rustsec: Some(estado),
         motivo: None,
+        imagenes: None,
     };
     let preparacion = Preparacion::Lista {
         cache: Some(destino),
@@ -385,12 +470,13 @@ fn preparar_python(
     match ejecutar_descarga(&ejecucion) {
         Ok(()) => {
             let registro = Registro {
-                lenguaje: "python",
+                lenguaje: "python".into(),
                 hash: Some(hash),
                 cache_hit: false,
                 paquetes: Vec::new(),
                 rustsec: None,
                 motivo: None,
+                imagenes: None,
             };
             Ok((sin_nada, Some(registro)))
         }
@@ -638,8 +724,161 @@ fn registrar(home: &Path, tarea: &Tarea, registro: &Registro) -> Result<(), Erro
     if let Some(motivo) = registro.motivo {
         evento.extra.insert("motivo".into(), json!(motivo));
     }
+    if let Some(imagenes) = &registro.imagenes {
+        evento.extra.insert("imagenes".into(), json!(imagenes));
+    }
     observe::registrar_en(&home.join(ARCHIVO_EVENTOS), &evento)
         .map_err(|e| infra("registrar el evento de descarga", e))
+}
+
+/// Imagen base de un `FROM` de un Dockerfile del repo (Tarea 9d2). Sin `digest` no hubo descarga.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ImagenBase {
+    pub archivo: String,
+    pub linea: u32,
+    pub cita: String,
+    pub imagen: String,
+    pub digest: Option<String>,
+    /// Motivo por el que no se resolvió la imagen (una variable `$VAR` sin resolver).
+    pub sin_resolver: Option<String>,
+    /// Por qué el registro no entregó la imagen.
+    pub problema: Option<Problema>,
+}
+
+/// Motivo por el que una imagen base no se bajó.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Problema {
+    NoExiste,
+    Credenciales,
+}
+
+/// Causa de un `podman pull` fallido.
+#[derive(Debug, Clone, PartialEq)]
+enum Causa {
+    NoExiste,
+    Credenciales,
+    Otra(String),
+}
+
+/// Clasifica la salida de un `podman pull` fallido. Lo que no es inexistente ni credenciales es red.
+fn causa_de_pull(salida: &str) -> Causa {
+    let minuscula = salida.to_lowercase();
+    if PATRONES_NO_EXISTE.iter().any(|p| minuscula.contains(p)) {
+        return Causa::NoExiste;
+    }
+    if PATRONES_CREDENCIALES.iter().any(|p| minuscula.contains(p)) {
+        return Causa::Credenciales;
+    }
+    Causa::Otra(linea_util(salida))
+}
+
+/// Verdadero si el repo trae al menos un Dockerfile o Containerfile.
+fn hay_dockerfile(repo: &Path) -> bool {
+    configs::buscar_archivos(repo)
+        .iter()
+        .any(|a| a.tipo == TipoConfig::Dockerfile)
+}
+
+/// Resultado de bajar una imagen base: el digest, o el motivo por el que el registro no la dio.
+enum Bajada {
+    Lista(Option<String>),
+    Problema(Problema),
+}
+
+/// Corre `podman pull` de la imagen. Un fallo de red o de registro caído es `Infra`.
+fn bajar_imagen(imagen: &str) -> Result<Bajada, ErrorOraculo> {
+    let pull = correr_podman(&["pull", imagen], PLAZO_PULL)?;
+    if pull.codigo == 0 {
+        return Ok(Bajada::Lista(digest_de(imagen)?));
+    }
+    let texto = format!("{}\n{}", pull.stdout, pull.stderr);
+    match causa_de_pull(&texto) {
+        Causa::NoExiste => Ok(Bajada::Problema(Problema::NoExiste)),
+        Causa::Credenciales => Ok(Bajada::Problema(Problema::Credenciales)),
+        Causa::Otra(linea) => Err(ErrorOraculo::Infra(format!(
+            "no se pudo bajar {imagen}: {linea}"
+        ))),
+    }
+}
+
+/// Digest de una imagen ya bajada. `None` si podman no lo informa.
+fn digest_de(imagen: &str) -> Result<Option<String>, ErrorOraculo> {
+    let salida = correr_podman(
+        &["image", "inspect", "--format", "{{.Digest}}", imagen],
+        PLAZO_CORTO,
+    )?;
+    if salida.codigo != 0 {
+        return Ok(None);
+    }
+    let digest = salida.stdout.trim();
+    Ok((!digest.is_empty()).then(|| digest.to_string()))
+}
+
+/// Hallazgos de las imágenes base que el registro no dio. Credenciales también es hallazgo, con sin veredicto.
+fn hallazgos_de_imagenes(imagenes: &[ImagenBase]) -> Vec<Hallazgo> {
+    imagenes
+        .iter()
+        .filter_map(|i| {
+            let detalle = match i.problema? {
+                Problema::NoExiste => format!("la imagen base no existe: {}", i.imagen),
+                Problema::Credenciales => format!(
+                    "la imagen base pide credenciales: no se pasan (zona roja, P21): {}",
+                    i.imagen
+                ),
+            };
+            Some(hallazgo(&i.archivo, i.linea, &i.cita, 3, detalle))
+        })
+        .collect()
+}
+
+/// Baja con `podman pull` la imagen base de cada `FROM` de los Dockerfile del repo.
+/// Solo baja: no corre ningún `RUN`. Ignora `scratch` y los alias de etapas previas del mismo archivo.
+pub fn traer_imagenes_base(repo: &Path) -> Result<Vec<ImagenBase>, ErrorOraculo> {
+    let mut salida = Vec::new();
+    for archivo in configs::buscar_archivos(repo) {
+        if archivo.tipo != TipoConfig::Dockerfile {
+            continue;
+        }
+        let texto = fs::read_to_string(repo.join(&archivo.ruta_relativa))
+            .map_err(|e| infra("leer el Dockerfile", e))?;
+        let mut alias_previos: Vec<String> = Vec::new();
+        for inst in instrucciones(&texto) {
+            let (kw, resto) = palabra_clave(&inst.logico);
+            if kw != "FROM" {
+                continue;
+            }
+            let (imagen, alias) = parsear_from(resto);
+            let es_etapa = imagen.as_deref().is_some_and(|i| {
+                i.eq_ignore_ascii_case("scratch")
+                    || alias_previos.iter().any(|a| a.eq_ignore_ascii_case(i))
+            });
+            alias_previos.extend(alias.map(|a| a.to_lowercase()));
+            let Some(imagen) = imagen.filter(|_| !es_etapa) else {
+                continue;
+            };
+            let mut base = ImagenBase {
+                archivo: archivo.ruta_relativa.clone(),
+                linea: inst.linea,
+                cita: inst.cita.clone(),
+                imagen: imagen.clone(),
+                digest: None,
+                sin_resolver: None,
+                problema: None,
+            };
+            if imagen.contains('$') {
+                base.sin_resolver =
+                    Some("la imagen usa una variable: no se puede resolver sin los ARG".into());
+            } else {
+                match bajar_imagen(&imagen)? {
+                    Bajada::Lista(digest) => base.digest = digest,
+                    Bajada::Problema(problema) => base.problema = Some(problema),
+                }
+            }
+            salida.push(base);
+        }
+    }
+    Ok(salida)
 }
 
 #[cfg(test)]
@@ -923,5 +1162,19 @@ location searched: crates.io index";
         assert!(PRELUDIO.contains("export CARGO_HOME=/tmp/cargo-home"));
         assert!(PRELUDIO.contains("cp /cache/config.toml \"$CARGO_HOME/config.toml\""));
         assert!(PRELUDIO.ends_with("&& "));
+    }
+
+    #[test]
+    fn descarga_causa_de_pull_separa_inexistente_de_credenciales_y_red() {
+        let inexistente = "Error: reading manifest 1 in docker.io/library/x: manifest unknown";
+        assert_eq!(causa_de_pull(inexistente), Causa::NoExiste);
+        let denegado = "Error: reading manifest 1 in docker.io/library/x: requested access to the resource is denied";
+        assert_eq!(causa_de_pull(denegado), Causa::NoExiste);
+        assert_eq!(
+            causa_de_pull("Error: unauthorized: authentication required"),
+            Causa::Credenciales
+        );
+        let red = "Error: dial tcp: lookup registro.ejemplo: no such host";
+        assert!(matches!(causa_de_pull(red), Causa::Otra(_)));
     }
 }

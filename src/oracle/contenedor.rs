@@ -136,6 +136,43 @@ pub fn ejecutar(e: &Ejecucion) -> Result<Resultado, ErrorOraculo> {
     })
 }
 
+/// Salida de un comando de podman que no es un contenedor de evaluación (pull, build, inspect).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SalidaPodman {
+    pub(crate) codigo: i32,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+}
+
+/// Corre `podman` con `args` y espera hasta `plazo`. Si vence, mata el proceso y da `Infra`.
+pub(crate) fn correr_podman(args: &[&str], plazo: Duration) -> Result<SalidaPodman, ErrorOraculo> {
+    let mut hijo = Command::new("podman")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| ErrorOraculo::Infra(format!("no se pudo lanzar podman: {err}")))?;
+    let salida = hijo.stdout.take().map(leer_en_hilo);
+    let error = hijo.stderr.take().map(leer_en_hilo);
+    let Some(estado) = esperar(&mut hijo, plazo)? else {
+        let _ = hijo.kill();
+        let _ = hijo.wait();
+        return Err(ErrorOraculo::Infra(format!(
+            "podman {} superó {} s",
+            args.first().unwrap_or(&""),
+            plazo.as_secs()
+        )));
+    };
+    let Some(codigo) = estado.code() else {
+        return Err(ErrorOraculo::Infra("podman terminó por una señal".into()));
+    };
+    Ok(SalidaPodman {
+        codigo,
+        stdout: recoger(salida),
+        stderr: recoger(error),
+    })
+}
+
 /// Falla antes de lanzar podman si falta alguna ruta montada.
 fn validar_rutas(e: &Ejecucion) -> Result<(), ErrorOraculo> {
     let rutas = e
@@ -168,7 +205,7 @@ fn lanzar(e: &Ejecucion, nombre: &str) -> Result<Child, ErrorOraculo> {
 }
 
 /// Lee un flujo completo en otro hilo para que el proceso no se bloquee al llenar el pipe.
-fn leer_en_hilo<R: Read + Send + 'static>(mut flujo: R) -> JoinHandle<Vec<u8>> {
+pub(crate) fn leer_en_hilo<R: Read + Send + 'static>(mut flujo: R) -> JoinHandle<Vec<u8>> {
     thread::spawn(move || {
         let mut bytes = Vec::new();
         let _ = flujo.read_to_end(&mut bytes);
@@ -176,13 +213,16 @@ fn leer_en_hilo<R: Read + Send + 'static>(mut flujo: R) -> JoinHandle<Vec<u8>> {
     })
 }
 
-fn recoger(hilo: Option<JoinHandle<Vec<u8>>>) -> String {
+pub(crate) fn recoger(hilo: Option<JoinHandle<Vec<u8>>>) -> String {
     let bytes = hilo.and_then(|h| h.join().ok()).unwrap_or_default();
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// Espera al proceso hasta `limite`. Da `None` si venció el plazo.
-fn esperar(hijo: &mut Child, limite: Duration) -> Result<Option<ExitStatus>, ErrorOraculo> {
+pub(crate) fn esperar(
+    hijo: &mut Child,
+    limite: Duration,
+) -> Result<Option<ExitStatus>, ErrorOraculo> {
     let plazo = Instant::now() + limite;
     loop {
         if let Some(estado) = hijo
