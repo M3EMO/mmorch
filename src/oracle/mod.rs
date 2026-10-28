@@ -5,6 +5,7 @@ pub mod contenedor;
 pub mod descarga;
 pub mod entrega;
 pub mod evidencia;
+pub mod juez;
 pub mod junit;
 pub mod mapa;
 pub mod mutacion;
