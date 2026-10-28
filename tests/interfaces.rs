@@ -23,7 +23,14 @@ const COMANDO_REGENERAR: &str = "ROOT_ACTUALIZAR_SNAPSHOT=1 cargo test --test in
 /// Fuente de `Tarea`. Sus claves de nivel superior deben aparecer en la documentación.
 const FUENTE_TAREA: &str = include_str!("../src/oracle/tarea.rs");
 /// Tablas de `Config` que deben aparecer en la documentación.
-const TABLAS_CONFIG: &[&str] = &["balance", "ruteo", "proveedores", "precios", "modelos"];
+const TABLAS_CONFIG: &[&str] = &[
+    "balance",
+    "ruteo",
+    "proveedores",
+    "precios",
+    "modelos",
+    "colab",
+];
 
 fn r00t(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_r00t"))

@@ -112,10 +112,21 @@ fn lock_generado(home: &Path) -> String {
 
 /// Escribe `tarea.toml` de prueba con sus dos suites y la carga.
 fn tarea_con(home: &Path, contrato: &str, oculto: &str) -> Tarea {
+    tarea_en_lenguaje(home, "rust", IMAGEN, contrato, oculto)
+}
+
+/// Como `tarea_con`, con el lenguaje dado.
+fn tarea_en_lenguaje(
+    home: &Path,
+    lenguaje: &str,
+    imagen: &str,
+    contrato: &str,
+    oculto: &str,
+) -> Tarea {
     let dir = home.join("oraculos").join(TAREA);
     fs::create_dir_all(&dir).expect("crea la tarea");
     let texto = format!(
-        "nombre = \"{TAREA}\"\nlenguaje = \"rust\"\nimagen = \"{IMAGEN}\"\nspec = \"docs/SPEC.md\"\n\n\
+        "nombre = \"{TAREA}\"\nlenguaje = \"{lenguaje}\"\nimagen = \"{imagen}\"\nspec = \"docs/SPEC.md\"\n\n\
          [contrato]\ncmd = '''{contrato}'''\n\n[oculto]\ncmd = '''{oculto}'''\n"
     );
     fs::write(dir.join("tarea.toml"), texto).expect("escribe tarea.toml");
@@ -314,8 +325,9 @@ fn descarga_el_contenedor_de_descarga_no_ve_oraculo() {
 fn descarga_segunda_evaluacion_usa_la_cache_y_no_toca_config() {
     let _g = preparar();
     let home = home_de_prueba();
-    let repo = base().join("repo-cache");
-    let _ = fs::remove_dir_all(&repo);
+    // Carpeta propia del test: nunca se comparte con otro test (carrera de `repo-cache`).
+    let repo_dir = repo_propio("repo-cache-");
+    let repo = repo_dir.path().to_path_buf();
     let lock = lock_generado(home.path());
     repo_con(&repo, CARGO_HUMANTIME, Some(&lock));
     let tarea = tarea_con(home.path(), &contrato_compila(), &oculto_junit_ok());
@@ -339,7 +351,6 @@ fn descarga_segunda_evaluacion_usa_la_cache_y_no_toca_config() {
     let gates = gates(home.path());
     assert_eq!(gates.len(), 2, "un Gate por descarga");
     assert_eq!(gates[1]["extra"]["cache_hit"], true);
-    let _ = fs::remove_dir_all(&repo);
 }
 
 #[test]
@@ -636,4 +647,477 @@ fn descarga_dependencia_git_sin_rev_registra_el_commit_y_avisa_que_no_es_reprodu
     );
     assert!(commit.chars().all(|c| c.is_ascii_hexdigit()), "{commit}");
     let _ = fs::remove_dir_all(&repo);
+}
+
+/// Carpeta de repo propia de un test, dentro de la base de pruebas. Se borra al salir del test.
+fn repo_propio(prefijo: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(prefijo)
+        .tempdir_in(base())
+        .expect("repo temporal")
+}
+
+/// Escribe el `.cargo/config.toml` del repo con el texto dado.
+fn escribir_config(repo: &Path, texto: &str) {
+    fs::create_dir_all(repo.join(".cargo")).expect("crea .cargo");
+    fs::write(repo.join(".cargo/config.toml"), texto).expect("escribe config");
+}
+
+#[test]
+fn descarga_ignora_el_cargo_config_del_repo_y_baja_con_proxy_muerto() {
+    let _g = preparar();
+    let home = home_de_prueba();
+    let repo = repo_propio("repo-proxy-");
+    let lock = lock_generado(home.path());
+    repo_con(repo.path(), CARGO_HUMANTIME, Some(&lock));
+    escribir_config(repo.path(), "[http]\nproxy = \"http://127.0.0.1:9\"\n");
+    let tarea = tarea_con(home.path(), &contrato_compila(), &oculto_junit_ok());
+
+    let v = evaluar_con(home.path(), repo.path(), &tarea);
+
+    assert_eq!(
+        v.contrato,
+        Conteo { pasa: 1, total: 1 },
+        "la descarga no usa el proxy del repo y la evaluación compila sin red; hallazgos: {:?}",
+        v.hallazgos
+    );
+}
+
+#[test]
+fn descarga_alias_y_rustc_wrapper_del_repo_no_afectan_la_descarga() {
+    let _g = preparar();
+    let home = home_de_prueba();
+    let repo = repo_propio("repo-wrapper-");
+    let lock = lock_generado(home.path());
+    repo_con(repo.path(), CARGO_HUMANTIME, Some(&lock));
+    escribir_config(
+        repo.path(),
+        "[alias]\nx = \"build\"\n\n[build]\nrustc-wrapper = \"/bin/false\"\n",
+    );
+    let tarea = tarea_con(home.path(), &contrato_junit_ok(), &oculto_junit_ok());
+
+    let v = evaluar_con(home.path(), repo.path(), &tarea);
+
+    assert_eq!(v.contrato, Conteo { pasa: 1, total: 1 });
+    assert!(
+        cache_rust(home.path()).join("config.toml").is_file(),
+        "la descarga dejó la caché"
+    );
+}
+
+/// Un requirements con un `--extra-index-url` y una fuente que el inventario rechaza (`ssh`).
+/// El rechazo corta antes de cualquier red, así que el test corre sin internet.
+const REQUIREMENTS_EXTRA: &str =
+    "--extra-index-url https://pypi.ejemplo.org/simple\nfoo @ ssh://x.ejemplo.org/foo.whl\n";
+
+#[test]
+fn descarga_extra_index_url_deja_hallazgo_severidad_1_en_gate_y_en_preparar() {
+    let home = home_de_prueba();
+    let repo = repo_propio("repo-extra-index-");
+    fs::write(repo.path().join("requirements.txt"), REQUIREMENTS_EXTRA).expect("requirements");
+    let tarea = tarea_en_lenguaje(
+        home.path(),
+        "python",
+        IMAGEN,
+        &contrato_junit_ok(),
+        &oculto_junit_ok(),
+    );
+
+    let preparacion = descarga::preparar(repo.path(), &tarea, home.path(), LIMITE)
+        .expect("el rechazo local no usa la red");
+
+    let descarga::Preparacion::SinVeredicto(hallazgos) = preparacion else {
+        panic!("el rechazo de ssh corta la evaluación: {preparacion:?}");
+    };
+    let mezcla = hallazgos
+        .iter()
+        .find(|h| h.severidad == 1)
+        .unwrap_or_else(|| panic!("falta el hallazgo de --extra-index-url: {hallazgos:?}"));
+    assert_eq!(mezcla.dimension, Dimension::Entrega);
+    assert_eq!(mezcla.archivo, "requirements.txt");
+    assert_eq!(mezcla.linea, 1, "la línea del --extra-index-url");
+    assert!(
+        mezcla.detalle.contains("mezclar índices"),
+        "{}",
+        mezcla.detalle
+    );
+
+    let inventario = gates_inventario(home.path());
+    assert_eq!(inventario.len(), 1, "un Gate de inventario");
+    let en_gate = inventario[0]["extra"]["hallazgos"]
+        .as_array()
+        .expect("el Gate de inventario lista los hallazgos");
+    assert!(
+        en_gate
+            .iter()
+            .any(|h| h["severidad"] == 1 && h["linea"] == 1),
+        "el Gate trae el hallazgo severidad 1 en la línea 1: {en_gate:?}"
+    );
+}
+
+#[test]
+fn descarga_sin_extra_index_url_no_deja_hallazgo_de_mezcla() {
+    let home = home_de_prueba();
+    let repo = repo_propio("repo-sin-extra-");
+    fs::write(
+        repo.path().join("requirements.txt"),
+        "foo @ ssh://x.ejemplo.org/foo.whl\n",
+    )
+    .expect("requirements");
+    let tarea = tarea_en_lenguaje(
+        home.path(),
+        "python",
+        IMAGEN,
+        &contrato_junit_ok(),
+        &oculto_junit_ok(),
+    );
+
+    let preparacion = descarga::preparar(repo.path(), &tarea, home.path(), LIMITE)
+        .expect("el rechazo local no usa la red");
+
+    let descarga::Preparacion::SinVeredicto(hallazgos) = preparacion else {
+        panic!("el rechazo de ssh corta la evaluación: {preparacion:?}");
+    };
+    assert!(
+        !hallazgos.iter().any(|h| h.severidad == 1),
+        "sin --extra-index-url no hay hallazgo de severidad 1: {hallazgos:?}"
+    );
+}
+
+// ---- Descarga de Python (Tarea 6c-B) ----
+
+use root::oracle::descarga::PRELUDIO_PYTHON;
+use root::oracle::descarga::inventario::requisitos_pip;
+use root::oracle::descarga::python::{
+    bajar_sdist_con, comando_clon, comando_curl, comando_wheels, sin_wheel,
+};
+
+/// Imagen con Python y pip (`:2`). La descarga y la evaluación de Python la usan.
+const IMAGEN_PY: &str = "localhost/root-oraculo-rust:2";
+/// Commit fijo de `six` (verificado con `git ls-remote`).
+const SIX_COMMIT: &str = "c8e394065cd541a16c040515dc0afb85cf22a7c3";
+const SIX_GIT: &str =
+    "git+https://github.com/benjaminp/six@c8e394065cd541a16c040515dc0afb85cf22a7c3#egg=six";
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// JSON de PyPI para una versión con un wheel y un sdist.
+fn json_pypi(url_sdist: &str, sha: &str) -> String {
+    format!(
+        r#"{{"urls":[{{"packagetype":"bdist_wheel","url":"https://files.pythonhosted.org/x.whl","filename":"x.whl","digests":{{"sha256":"{}"}}}},{{"packagetype":"sdist","url":"{url_sdist}","filename":"fix-1.0.tar.gz","digests":{{"sha256":"{sha}"}}}}]}}"#,
+        "0".repeat(64)
+    )
+}
+
+#[test]
+fn descarga_python_comando_wheels_usa_only_binary_y_opciones_de_indice() {
+    let req = requisitos_pip("--extra-index-url https://pypi.ejemplo.org/simple\nsix==1.16.0\n");
+    let c = comando_wheels("/cache/indice.txt", &req);
+    for esperado in [
+        "pip download",
+        "--only-binary=:all:",
+        "--no-input",
+        "--disable-pip-version-check",
+        "-r /cache/indice.txt",
+        "-d /cache",
+        "--index-url 'https://pypi.org/simple'",
+        "--extra-index-url 'https://pypi.ejemplo.org/simple'",
+    ] {
+        assert!(c.contains(esperado), "falta {esperado}: {c}");
+    }
+}
+
+#[test]
+fn descarga_python_requisitos_con_dos_indices_pasan_ambos_a_pip() {
+    let req = requisitos_pip(
+        "--index-url https://indice.ejemplo.org/simple\n--extra-index-url https://pypi.ejemplo.org/simple\nsix==1.16.0\n",
+    );
+    let c = comando_wheels("/cache/indice.txt", &req);
+    assert!(
+        c.contains("--index-url 'https://indice.ejemplo.org/simple'"),
+        "{c}"
+    );
+    assert!(
+        c.contains("--extra-index-url 'https://pypi.ejemplo.org/simple'"),
+        "{c}"
+    );
+    assert!(!c.contains("--index-url 'https://pypi.org/simple'"), "{c}");
+}
+
+#[test]
+fn descarga_python_comandos_de_red_no_corren_setup_ni_build() {
+    let req = requisitos_pip(&format!("{SIX_GIT}\nsix==1.16.0\n"));
+    let wheels = comando_wheels("/cache/indice.txt", &req);
+    let clon = comando_clon("https://github.com/benjaminp/six", "abc", Some(SIX_COMMIT));
+    let curl = comando_curl(
+        "https://files.pythonhosted.org/fix-1.0.tar.gz",
+        "fix-1.0.tar.gz",
+    );
+    for c in [&wheels, &clon, &curl] {
+        assert!(
+            !c.contains("setup.py") && !c.contains("pip install") && !c.contains("pip wheel"),
+            "ningún comando de red corre build: {c}"
+        );
+    }
+    assert!(wheels.contains("pip download"), "{wheels}");
+    assert!(
+        clon.contains("--no-checkout") && clon.contains(SIX_COMMIT),
+        "{clon}"
+    );
+    assert!(clon.contains("core.hooksPath=/dev/null"), "{clon}");
+    assert!(clon.contains("protocol.https.allow=always"), "{clon}");
+    assert!(clon.contains("protocol.allow=never"), "{clon}");
+    assert!(
+        curl.contains("--proto '=https'") && curl.contains("--tlsv1.2"),
+        "{curl}"
+    );
+    assert!(curl.contains("curl "), "{curl}");
+}
+
+#[test]
+fn descarga_python_sin_wheel_nombra_el_paquete_que_falta() {
+    let salida = "ERROR: Could not find a version that satisfies the requirement six==1.16.0 (from versions: none)\n\
+ERROR: No matching distribution found for six==1.16.0\n";
+    assert_eq!(sin_wheel(salida), Some("six==1.16.0".to_string()));
+    assert_eq!(sin_wheel("error: failed to download `x`"), None);
+}
+
+#[test]
+fn descarga_python_sdist_con_hash_correcto_se_guarda() {
+    let cache = repo_propio("cache-sdist-");
+    let bytes = b"contenido del sdist";
+    let url = "https://files.pythonhosted.org/packages/fix-1.0.tar.gz";
+    let json = json_pypi(url, &sha256_hex(bytes));
+    let sdist = bajar_sdist_con("fix", "1.0", cache.path(), |u, archivo| {
+        if u.ends_with("/json") {
+            fs::write(cache.path().join(archivo), json.as_bytes()).expect("json");
+            Ok(())
+        } else if u == url {
+            fs::write(cache.path().join(archivo), bytes).expect("sdist");
+            Ok(())
+        } else {
+            Err(format!("url inesperada: {u}"))
+        }
+    })
+    .expect("el hash coincide: se guarda");
+    assert_eq!(
+        fs::read(cache.path().join(&sdist.archivo)).expect("guardado"),
+        bytes
+    );
+    assert_eq!(sdist.sha256, sha256_hex(bytes));
+}
+
+#[test]
+fn descarga_python_sdist_con_hash_incorrecto_da_error_y_no_guarda() {
+    let cache = repo_propio("cache-sdist-malo-");
+    let url = "https://files.pythonhosted.org/packages/fix-1.0.tar.gz";
+    let json = json_pypi(url, &sha256_hex(b"el esperado"));
+    let r = bajar_sdist_con("fix", "1.0", cache.path(), |u, archivo| {
+        if u.ends_with("/json") {
+            fs::write(cache.path().join(archivo), json.as_bytes()).expect("json");
+        } else {
+            fs::write(cache.path().join(archivo), b"otro contenido").expect("sdist");
+        }
+        Ok(())
+    });
+    assert!(r.is_err(), "un hash que no coincide nunca se acepta");
+    assert!(
+        !cache.path().join("fix-1.0.tar.gz").exists(),
+        "el archivo malo se borra"
+    );
+}
+
+#[test]
+fn descarga_python_sdist_de_fixture_se_baja_y_su_setup_no_se_ejecuta() {
+    let base = repo_propio("sdist-fixture-");
+    let marca = base.path().join("marca-setup");
+    let fuente = base.path().join("fuente");
+    fs::create_dir_all(fuente.join("fix-1.0")).expect("fuente");
+    fs::write(
+        fuente.join("fix-1.0/setup.py"),
+        format!("open({:?}, 'w').close()\n", marca.display().to_string()),
+    )
+    .expect("setup.py");
+    let tgz = base.path().join("fix-1.0.tar.gz");
+    let estado = Command::new("tar")
+        .arg("-czf")
+        .arg(&tgz)
+        .arg("-C")
+        .arg(&fuente)
+        .arg("fix-1.0")
+        .status()
+        .expect("tar");
+    assert!(estado.success(), "arma el fixture");
+    let bytes = fs::read(&tgz).expect("lee el fixture");
+    let url = "https://files.pythonhosted.org/packages/fix-1.0.tar.gz";
+    let json = json_pypi(url, &sha256_hex(&bytes));
+    let cache = base.path().join("cache");
+    fs::create_dir_all(&cache).expect("cache");
+
+    let sdist = bajar_sdist_con("fix", "1.0", &cache, |u, archivo| {
+        if u.ends_with("/json") {
+            fs::write(cache.join(archivo), json.as_bytes()).expect("json");
+            Ok(())
+        } else {
+            fs::write(cache.join(archivo), &bytes).expect("sdist");
+            Ok(())
+        }
+    })
+    .expect("el sdist se baja");
+
+    assert!(
+        cache.join(&sdist.archivo).is_file(),
+        "el sdist queda guardado"
+    );
+    assert!(!marca.exists(), "el setup.py del sdist no se ejecuta");
+}
+
+#[test]
+fn descarga_python_preludio_instala_sin_red_con_target_en_tmpfs() {
+    assert!(
+        PRELUDIO_PYTHON.contains("--no-index --find-links /cache"),
+        "{PRELUDIO_PYTHON}"
+    );
+    assert!(
+        PRELUDIO_PYTHON.contains("--target /tmp/pydeps"),
+        "{PRELUDIO_PYTHON}"
+    );
+    assert!(
+        PRELUDIO_PYTHON.contains("PYTHONPATH=/tmp/pydeps"),
+        "{PRELUDIO_PYTHON}"
+    );
+    assert!(PRELUDIO_PYTHON.ends_with("&& "), "{PRELUDIO_PYTHON}");
+}
+
+#[test]
+fn descarga_python_wheel_de_pypi_se_instala_sin_red() {
+    let _g = preparar_py();
+    let home = home_de_prueba();
+    let repo = repo_propio("repo-py-wheel-");
+    fs::write(repo.path().join("requirements.txt"), "six==1.16.0\n").expect("requirements");
+    let contrato = "python3 -c 'import six' && echo '<testsuite><testcase classname=\"dep\" name=\"six\"/></testsuite>' > /salida/contrato.xml";
+    let tarea = tarea_en_lenguaje(
+        home.path(),
+        "python",
+        IMAGEN_PY,
+        contrato,
+        &oculto_junit_ok(),
+    );
+
+    let v = evaluar_con(home.path(), repo.path(), &tarea);
+
+    assert_eq!(
+        v.contrato,
+        Conteo { pasa: 1, total: 1 },
+        "hallazgos: {:?}",
+        v.hallazgos
+    );
+    let descarga = gates(home.path());
+    assert_eq!(descarga.len(), 1, "un Gate de descarga");
+    let paquetes = descarga[0]["extra"]["paquetes"]
+        .as_array()
+        .expect("paquetes");
+    assert!(
+        paquetes.iter().any(|p| {
+            p["nombre"]
+                .as_str()
+                .is_some_and(|n| n.starts_with("six-1.16.0") && n.ends_with(".whl"))
+                && p["sha256"].is_string()
+        }),
+        "el wheel de six con su sha256 en el Gate: {paquetes:?}"
+    );
+}
+
+#[test]
+fn descarga_python_segunda_llamada_usa_la_cache_sin_red() {
+    let _g = preparar_py();
+    let home = home_de_prueba();
+    let repo = repo_propio("repo-py-cache-");
+    fs::write(repo.path().join("requirements.txt"), "six==1.16.0\n").expect("requirements");
+    let tarea = tarea_en_lenguaje(
+        home.path(),
+        "python",
+        IMAGEN_PY,
+        &contrato_junit_ok(),
+        &oculto_junit_ok(),
+    );
+
+    descarga::preparar(repo.path(), &tarea, home.path(), LIMITE).expect("primera descarga");
+    descarga::preparar(repo.path(), &tarea, home.path(), LIMITE).expect("segunda descarga");
+
+    let gates = gates(home.path());
+    assert_eq!(gates.len(), 2, "un Gate por descarga");
+    assert_eq!(gates[1]["extra"]["cache_hit"], true);
+}
+
+#[test]
+fn descarga_python_git_se_clona_al_commit_sin_pip_con_red() {
+    let _g = preparar_py();
+    let home = home_de_prueba();
+    let repo = repo_propio("repo-py-git-");
+    fs::write(repo.path().join("requirements.txt"), format!("{SIX_GIT}\n")).expect("requirements");
+    let tarea = tarea_en_lenguaje(
+        home.path(),
+        "python",
+        IMAGEN_PY,
+        &contrato_junit_ok(),
+        &oculto_junit_ok(),
+    );
+
+    let prep = descarga::preparar(repo.path(), &tarea, home.path(), LIMITE).expect("clona con git");
+
+    let descarga::Preparacion::Lista { hallazgos, .. } = prep else {
+        panic!("la descarga de git no corta la evaluación");
+    };
+    assert!(
+        hallazgos.is_empty(),
+        "con commit fijo no hay hallazgo: {hallazgos:?}"
+    );
+    let gates = gates(home.path());
+    let paquetes = gates[0]["extra"]["paquetes"].as_array().expect("paquetes");
+    let six = paquetes
+        .iter()
+        .find(|p| p["fuente"] == "git")
+        .expect("la fuente git en el Gate");
+    assert_eq!(six["commit"], SIX_COMMIT);
+}
+
+#[test]
+#[ignore = "pip construye la fuente git con setuptools en aislamiento; la imagen :2 no trae setuptools y la evaluación no tiene red. Falta bajar los wheels de build en la descarga (decisión abierta)"]
+fn descarga_python_git_la_evaluacion_instala_sin_red() {
+    let _g = preparar_py();
+    let home = home_de_prueba();
+    let repo = repo_propio("repo-py-git-eval-");
+    fs::write(repo.path().join("requirements.txt"), format!("{SIX_GIT}\n")).expect("requirements");
+    let contrato = "python3 -c 'import six' && echo '<testsuite><testcase classname=\"dep\" name=\"six\"/></testsuite>' > /salida/contrato.xml";
+    let tarea = tarea_en_lenguaje(
+        home.path(),
+        "python",
+        IMAGEN_PY,
+        contrato,
+        &oculto_junit_ok(),
+    );
+    let v = evaluar_con(home.path(), repo.path(), &tarea);
+    assert_eq!(v.contrato, Conteo { pasa: 1, total: 1 });
+}
+
+/// Serializa los tests con podman y comprueba la imagen de Python (`:2`).
+fn preparar_py() -> MutexGuard<'static, ()> {
+    let guarda = SERIE.lock().unwrap_or_else(|e| e.into_inner());
+    let existe = Command::new("podman")
+        .args(["image", "exists", IMAGEN_PY])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    assert!(
+        existe,
+        "falta la imagen {IMAGEN_PY}: la descarga de Python la usa"
+    );
+    guarda
 }

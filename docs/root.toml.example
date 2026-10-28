@@ -72,6 +72,10 @@ espera_base_ms = 500
 # Tiempo máximo de cada intento HTTP, en segundos.
 timeout_s = 120
 
+# Tope de duración de una corrida en Colab, en minutos. Al llegar, Root libera el runtime y sale con código 3.
+[colab]
+minutos_max = 30
+
 # Precios por modelo. La tabla está vacía a propósito.
 # Para habilitar un modelo, descomentá su bloque y completá los dos valores.
 # USD por millón de tokens; copiá el valor de la página del proveedor.

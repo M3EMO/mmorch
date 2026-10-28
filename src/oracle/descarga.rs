@@ -4,6 +4,7 @@
 //! La evaluación usa la caché sin red.
 
 pub mod inventario;
+pub mod python;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -23,7 +24,7 @@ use super::{CARPETA_TEMPORALES, ErrorOraculo, infra, temporal};
 use crate::borrado;
 use crate::observe;
 use crate::tipos::{Dimension, Fuente, Hallazgo, TipoEvento};
-use inventario::{Inventario, Origen, PaqueteLock, Rechazo, analizar_lock};
+use inventario::{HallazgoInventario, Inventario, Origen, PaqueteLock, Rechazo, analizar_lock};
 
 /// Lo que la evaluación necesita de la fase de descarga.
 #[derive(Debug, Clone, PartialEq)]
@@ -57,6 +58,8 @@ pub enum Accion {
     Nada,
 }
 
+/// Prefijo de la suite de Python: instala desde `/cache` sin red, en `/tmp/pydeps` (la imagen no trae `ensurepip`).
+pub const PRELUDIO_PYTHON: &str = "if python3 -c 'import ensurepip' 2>/dev/null; then python3 -m venv --system-site-packages /tmp/venv-eval && . /tmp/venv-eval/bin/activate && pip install --no-index --find-links /cache --no-input --disable-pip-version-check -r /cache/requirements-offline.txt; else mkdir -p /tmp/pydeps && python3 -m pip install --no-index --find-links /cache --no-input --disable-pip-version-check --target /tmp/pydeps -r /cache/requirements-offline.txt && export PYTHONPATH=/tmp/pydeps; fi && ";
 /// Prefijo de cada suite: deja la caché de dependencias visible para cargo, sin escribir en ella.
 pub const PRELUDIO: &str = "export CARGO_HOME=/tmp/cargo-home && mkdir -p \"$CARGO_HOME\" && cp /cache/config.toml \"$CARGO_HOME/config.toml\" && ";
 
@@ -70,9 +73,10 @@ const ARCHIVO_LOCK: &str = "Cargo.lock";
 const ARCHIVO_REQUIREMENTS: &str = "requirements.txt";
 const ARCHIVO_EVENTOS: &str = "eventos.jsonl";
 const CARGO_HOME_DESCARGA: &str = "/tmp/cargo-dl";
-const COMANDO_VENDOR: &str =
-    "cd /repo && cargo vendor --locked --versioned-dirs /cache/vendor > /cache/config.toml";
-const COMANDO_LOCK: &str = "mkdir -p /tmp/w && cp -r /repo/. /tmp/w/ && cd /tmp/w && cargo generate-lockfile && cp Cargo.lock /salida/Cargo.lock";
+// Cargo lee `.cargo/config.toml` desde el cwd y sus padres. Por eso corre desde `/tmp` (tmpfs, vacío) y
+// apunta al proyecto con `--manifest-path`: así no lee el config del repo ni su proxy (P34 a).
+const COMANDO_VENDOR: &str = "cd /tmp && cargo vendor --locked --manifest-path /repo/Cargo.toml --versioned-dirs /cache/vendor > /cache/config.toml";
+const COMANDO_LOCK: &str = "mkdir -p /tmp/w && cp -r /repo/. /tmp/w/ && cd /tmp && cargo generate-lockfile --manifest-path /tmp/w/Cargo.toml && cp /tmp/w/Cargo.lock /salida/Cargo.lock";
 const URL_RUSTSEC: &str = "https://github.com/RustSec/advisory-db";
 const CADUCIDAD_RUSTSEC: Duration = Duration::from_secs(24 * 3600);
 /// Fragmentos (en minúscula) de errores de red o de registro caído.
@@ -279,11 +283,12 @@ pub fn preparar_con_imagenes(
 ) -> Result<(Preparacion, Vec<ImagenBase>), ErrorOraculo> {
     let inv = inventario::inventariar(repo)?;
     registrar_inventario(home, tarea, &inv)?;
+    // Los hallazgos del inventario (severidad 1, `--extra-index-url`) llegan a cada veredicto (Tarea 6c-B).
+    let de_inventario = hallazgos_de_inventario(&inv.hallazgos);
     if !inv.rechazos.is_empty() {
-        return Ok((
-            Preparacion::SinVeredicto(hallazgos_de_rechazos(&inv.rechazos)),
-            Vec::new(),
-        ));
+        let mut hallazgos = hallazgos_de_rechazos(&inv.rechazos);
+        hallazgos.extend(de_inventario);
+        return Ok((Preparacion::SinVeredicto(hallazgos), Vec::new()));
     }
     // Las imágenes base van antes de las dependencias: sin ellas el Dockerfile no construye (Tarea 9d2).
     // Un pull que falla no corta la fase: queda en el Gate y la construcción da sin veredicto (Tarea 7i).
@@ -303,11 +308,11 @@ pub fn preparar_con_imagenes(
         registro.motivo = Some("imagen base: pide credenciales");
         registro.imagenes = imagenes;
         registrar(home, tarea, &registro)?;
-        return Ok((Preparacion::SinVeredicto(Vec::new()), devueltas));
+        return Ok((Preparacion::SinVeredicto(de_inventario), devueltas));
     }
     let (preparacion, registro) = match tarea.lenguaje.as_str() {
         "rust" => preparar_rust(repo, tarea, home, timeout, &inv)?,
-        "python" => preparar_python(repo, tarea, home, timeout)?,
+        "python" => python::preparar_python(repo, tarea, home, timeout)?,
         _ => (
             Preparacion::Lista {
                 cache: None,
@@ -332,7 +337,7 @@ pub fn preparar_con_imagenes(
     if let Some(registro) = registro {
         registrar(home, tarea, &registro)?;
     }
-    Ok((preparacion, devueltas))
+    Ok((sumar_hallazgos(preparacion, de_inventario), devueltas))
 }
 
 /// Gate de la fase `inventario`: las fuentes que el repo declara, antes de usar la red.
@@ -342,9 +347,40 @@ fn registrar_inventario(home: &Path, tarea: &Tarea, inv: &Inventario) -> Result<
     extra.insert("fuentes".into(), json!(inv.fuentes));
     extra.insert("rechazos".into(), json!(inv.rechazos));
     extra.insert("avisos".into(), json!(inv.avisos));
+    extra.insert("hallazgos".into(), json!(inv.hallazgos));
     let evento = observe::evento_gate(&format!("descarga-{}", tarea.nombre), "inventario", extra);
     observe::registrar_en(&home.join(ARCHIVO_EVENTOS), &evento)
         .map_err(|e| infra("registrar el inventario de fuentes", e))
+}
+
+/// Un hallazgo de entrega por cada hallazgo del inventario. Las citas ya vienen redactadas.
+fn hallazgos_de_inventario(hallazgos: &[HallazgoInventario]) -> Vec<Hallazgo> {
+    hallazgos
+        .iter()
+        .map(|h| hallazgo(&h.archivo, h.linea, &h.cita, h.severidad, h.detalle.clone()))
+        .collect()
+}
+
+/// Suma hallazgos a una preparación. No cambia si la evaluación sigue o corta.
+fn sumar_hallazgos(preparacion: Preparacion, extra: Vec<Hallazgo>) -> Preparacion {
+    match preparacion {
+        Preparacion::Lista {
+            cache,
+            rustsec,
+            mut hallazgos,
+        } => {
+            hallazgos.extend(extra);
+            Preparacion::Lista {
+                cache,
+                rustsec,
+                hallazgos,
+            }
+        }
+        Preparacion::SinVeredicto(mut hallazgos) => {
+            hallazgos.extend(extra);
+            Preparacion::SinVeredicto(hallazgos)
+        }
+    }
 }
 
 /// Un hallazgo de entrega por cada rechazo del inventario. La cita ya viene redactada.
@@ -428,61 +464,6 @@ fn preparar_rust(
         hallazgos,
     };
     Ok((preparacion, Some(registro)))
-}
-
-fn preparar_python(
-    repo: &Path,
-    tarea: &Tarea,
-    home: &Path,
-    timeout: Duration,
-) -> Result<Paso, ErrorOraculo> {
-    let sin_nada = Preparacion::Lista {
-        cache: None,
-        rustsec: None,
-        hallazgos: Vec::new(),
-    };
-    // TODO 6c-B: wheels, sdist con curl, y fuentes git o URL de Python. Hoy solo corre `pip download`.
-    let requirements = repo.join(ARCHIVO_REQUIREMENTS);
-    if !requirements.is_file() {
-        return Ok((sin_nada, None));
-    }
-    let contenido = fs::read(&requirements).map_err(|e| infra("leer requirements.txt", e))?;
-    let hash = hash_corto(&contenido);
-    let destino = home.join(CARPETA_CACHE).join(CARPETA_PYTHON).join(&hash);
-    fs::create_dir_all(&destino).map_err(|e| infra("crear la caché de Python", e))?;
-    let salida = temporal_de(home)?;
-    let ejecucion = Ejecucion {
-        imagen: tarea.imagen.clone(),
-        repo: Some(repo.to_path_buf()),
-        oraculo: None,
-        salida: salida.path().to_path_buf(),
-        cmd: comando_pip("/repo/requirements.txt"),
-        env: Vec::new(),
-        timeout,
-        red: true,
-        cache: Some(destino),
-        cache_rw: true,
-        rustsec: None,
-    };
-    match ejecutar_descarga(&ejecucion) {
-        Ok(()) => {
-            let registro = Registro {
-                lenguaje: "python".into(),
-                hash: Some(hash),
-                cache_hit: false,
-                paquetes: Vec::new(),
-                rustsec: None,
-                motivo: None,
-                imagenes: None,
-            };
-            Ok((sin_nada, Some(registro)))
-        }
-        Err(Diagnostico::Producto(linea)) => Ok(corte(
-            hallazgo_no_instala(&linea),
-            Registro::corte("python", Some(hash), "no-instala"),
-        )),
-        Err(diagnostico) => Err(error_de(diagnostico)),
-    }
 }
 
 fn corte(hallazgo: Hallazgo, registro: Registro) -> Paso {

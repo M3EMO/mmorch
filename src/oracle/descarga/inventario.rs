@@ -346,7 +346,7 @@ fn motivo_de_url(url: &str) -> Option<String> {
 }
 
 /// Separa la referencia (`@rama` o `@commit`) de la ruta de una URL git.
-fn separar_referencia(url: &str) -> (String, Option<String>) {
+pub fn separar_referencia(url: &str) -> (String, Option<String>) {
     if let Some((esquema, resto)) = url.split_once("://")
         && let Some(i) = resto.find('/')
     {
@@ -1809,4 +1809,42 @@ requests\ngit+https://github.com/x/y@abc#egg=y\n";
         assert!(!json.contains("clave"), "{json}");
         assert!(!json.contains("usuario:"), "{json}");
     }
+}
+
+/// Lo que pip necesita del `requirements.txt`, leído sin red. Las fuentes ya pasaron las reglas del inventario.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequisitosPip {
+    /// Índice que reemplaza a PyPI (`--index-url`). Varios: pip usa el último.
+    pub indice_propio: Option<String>,
+    /// Índices que se suman a los demás (`--extra-index-url`), en orden.
+    pub indices_extra: Vec<String>,
+    /// Especificadores de paquete, sin opciones ni comentarios, en el orden del archivo.
+    pub especificadores: Vec<String>,
+    /// Referencias directas (`git+https://...` o URL de archivo): línea de inicio y texto.
+    pub directas: Vec<(u32, String)>,
+}
+
+/// Lee un `requirements.txt` y separa índices, especificadores y referencias directas. Sin red.
+pub fn requisitos_pip(texto: &str) -> RequisitosPip {
+    let mut salida = RequisitosPip::default();
+    for (linea, logica) in lineas_logicas(texto) {
+        let resto = contenido(&logica);
+        if resto.is_empty() || resto.starts_with('#') {
+            continue;
+        }
+        if let Some(valor) = opcion(resto, &["-i", "--index-url"]) {
+            salida.indice_propio = Some(valor.to_string());
+        } else if let Some(valor) = opcion(resto, &["--extra-index-url"]) {
+            salida.indices_extra.push(valor.to_string());
+        } else if resto.starts_with('-') {
+            // Otras opciones no llegan a `pip download`: el inventario ya dejó su aviso.
+        } else if let Some((_, url)) = resto.split_once(" @ ") {
+            salida.directas.push((linea, url.trim().to_string()));
+        } else if es_directa(resto) {
+            salida.directas.push((linea, resto.to_string()));
+        } else {
+            salida.especificadores.push(resto.to_string());
+        }
+    }
+    salida
 }

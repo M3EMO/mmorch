@@ -437,9 +437,11 @@ fn correr_una(c: &Corrida, cmd: &str, xml: &str) -> Result<Junit, ErrorOraculo> 
 /// Corre un comando de la tarea y lee su junit. Sin junit no hay conteo: es error de infraestructura.
 fn correr_suite(c: &Corrida, cmd: &str, xml: &str) -> Result<Junit, ErrorOraculo> {
     // Con caché de Rust, la suite arranca cargo contra los vendors sin red (decisión 17).
-    let cmd = match c.cache {
-        Some(_) => format!("{}{cmd}", descarga::PRELUDIO),
-        None => cmd.to_string(),
+    // Con caché, la suite arranca desde la caché sin red: cargo para Rust, pip para Python (Tarea 6c-B).
+    let cmd = match (c.cache.is_some(), c.tarea.lenguaje.as_str()) {
+        (true, "rust") => format!("{}{cmd}", descarga::PRELUDIO),
+        (true, "python") => format!("{}{cmd}", descarga::PRELUDIO_PYTHON),
+        _ => cmd.to_string(),
     };
     let ejecucion = contenedor::Ejecucion {
         imagen: c.tarea.imagen.clone(),

@@ -55,7 +55,8 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t route --rol <rol> --tipo <tipo> [--checkeable] [--tokens N]` | Elige la vía y el modelo para un rol y un tipo. | `Eleccion` | construido |
 | `r00t llama --rol <rol> --tipo <tipo> --prompt-file <f> --corrida <id> [--max-tokens N]` | Llama al modelo elegido. Registra el evento. Rechaza la llamada si no hay precio o tope. | `Respuesta` | construido |
 | `r00t oraculo evaluar --tarea <t> --repo <dir>` | Corre las suites de la tarea sobre el repo y da el veredicto. | `Veredicto` | construido. Hoy nunca da verde. |
-| `r00t oraculo pendientes --tarea <t> --repo <dir> [--importar <junit>]` | Arma el paquete de tests pendientes por entorno para Colab. Con `--importar`, guarda el junit de vuelta. | `{dir, tests}`, o `{importados, ignorados}` | construido (Tarea 7f) |
+| `r00t oraculo pendientes --tarea <t> --repo <dir> [--importar <junit> \| --colab]` | Arma el paquete de tests pendientes por entorno para Colab. Con `--importar`, guarda el junit de vuelta. Con `--colab`, corre el paquete en Colab y lo importa. | `{dir, tests}`, o `{importados, ignorados}` | construido (Tarea 7f). `--colab`: Tarea 7j |
+| `r00t oraculo pendientes --liberar` | Libera el runtime de Colab anotado en `$ROOT_HOME/colab/activo.json`, si hay uno, y sale. | sin salida JSON | construido (Tarea 7j) |
 | `r00t oraculo calibrar --tarea <t> --dimension <d> [--n 20] [--semilla 42]` | Mide la exactitud de una dimensión. | `Calibracion` | pendiente (Tarea 12). Hoy sale con `3`. |
 | `r00t oraculo informe --tarea <t> --repo <dir> [--md]` | Arma el informe del PM sobre el veredicto. | `Informe` | pendiente (Tarea 13b). No está en `--help`. |
 | `r00t oraculo validar --casos <dir>` | Mide si el juicio de Root coincide con resultados conocidos. | `Validez` | pendiente (Tarea 12b). No está en `--help`. |
@@ -75,6 +76,10 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t ficha revisar --spec <SPEC.md> [--juez-proveedor p --juez-modelo m]` | Revisa la ficha y las ambigüedades. Con los dos flags de juez, también corre el juez. | `Revision` | construido |
 | `r00t ficha tarea --spec <SPEC.md> --nombre <t>` | Arma el borrador de `tarea.toml` desde la ficha. | `{toml}` | construido |
 | `r00t mcp` | Inicia el servidor MCP por stdio. | JSON-RPC 2.0 | construido |
+
+**Colab (`oraculo pendientes --colab`).** Root pide un runtime T4 de Colab, corre el paquete, importa el junit y libera el runtime. Antes de pedirlo, Root escribe su id en `$ROOT_HOME/colab/activo.json`. Lo borra al liberar el runtime. Si el proceso muere con `SIGKILL`, el archivo queda. La próxima corrida de `--colab` libera ese runtime primero. `--liberar` hace solo esa limpieza. `SIGINT` y `SIGTERM` también liberan el runtime y registran un `Gate`. El login de Colab lo hace la persona antes de correr el comando. Root no lee el token de la CLI.
+
+**Tope de duración.** Cada corrida de `--colab` tiene un tope, `[colab].minutos_max` en `root.toml`, con 30 minutos por defecto. Al llegar al tope, Root libera el runtime y sale con código `3`.
 
 ## MCP
 
@@ -172,6 +177,7 @@ $ROOT_HOME/
     rustsec/
   tmp/                    # temporales del Oracle; se limpian por antigüedad
   evidencia/<tarea>/colab.json   # resultados importados de Colab (Tarea 7f)
+  colab/activo.json       # runtime de Colab pedido y no liberado; lo borra Root al liberarlo (Tarea 7j)
   pendientes/             # paquetes de tests pendientes por entorno (Tarea 7f)
   importado/
     mmorch-metrics.jsonl  # copia de solo lectura del log de mmorch (decisión b3)
