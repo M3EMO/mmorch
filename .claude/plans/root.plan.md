@@ -61,6 +61,7 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 35 | P38: "a". El juez de la config de cargo solo informa: sus hallazgos van al informe, y `cargo` usa todo el config. El juez nunca abre ni cierra la red. |
 | 36 | "Acepto P33b b, P39 c con P44 c, y P46 a." P39 c: memora y brasa calibran al evaluador (Tareas 12 y 12b), y la Tarea 16 mide con `r00t corre` una tarea de Graft con oráculo oculto nuevo (Tarea 16b). P44 c: memora sigue hasta G3, y después el usuario decide si sigue (gate G4). P33b y P46 son de la sesión de fichas y viven en sus borradores. |
 | 37 | P48: "P48 a pero emita sus tareas en toml". La tarea de Graft de la Tarea 16 es un lector de planes: lee un `plan.md` y emite en TOML sus tareas, dependencias y comandos `Validate`. Ver Tarea 16b. |
+| 38 | P49: "P49 b: la Tarea 16 corre Graft y memora." La corrida real de la Tarea 16 mide `graft-lector-planes` y memora, con una corrida completa más de Haiku sobre memora. |
 
 ## Patterns to Mirror
 
@@ -818,8 +819,9 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
 - **Mirror**: `correr-ecc-rol.sh`.
 - **Validate** (cambiado por la decisión 36, P39 c):
   - Mecánica: `r00t corre` sobre una tarea de fixture chica, con un proveedor falso, deja una fila en `runs.jsonl` con `Informe`, resumen y `forma`. Este caso no gasta cupo ni API.
-  - Corrida real: `r00t corre --tarea graft-lector-planes --config ecc-haiku` deja una fila con un veredicto de nueve dimensiones, un `Informe` y un resumen. Espera a G2 y a G5.
-  - memora ya no es el caso de la Tarea 16: queda para calibrar (Tareas 12 y 12b) hasta G3 y G4. P49 confirma este punto.
+  - Corrida real (decisión 38): `r00t corre --tarea graft-lector-planes --config ecc-haiku` y `r00t corre --tarea memora --config ecc-haiku`. Cada una deja una fila con un veredicto de nueve dimensiones, un `Informe` y un resumen.
+  - La corrida de Graft espera a G2 y a G5. La de memora espera a G1 y a G2.
+  - Si G4 saca a memora del banco antes de esta corrida, el planner pregunta al usuario antes de quitar la corrida de memora.
 
 ### Tarea 16b: Tarea de Graft con oráculo oculto (decisión 36)
 - **Qué tarea** (decisión 37): `graft-lector-planes`, una CLI en Rust que lee un `plan.md` y emite en TOML sus tareas, dependencias y comandos `Validate`. El hito 2 (Graft) la va a necesitar.
@@ -1043,7 +1045,7 @@ Gates humanos que frenan el resto:
 - **G4, memora después de G3.** Al cerrar G3, el usuario decide si memora sigue como banco (P44 c). Hasta entonces, memora sigue.
 - **G5, oráculo de Graft.** El usuario aprueba la ficha y los requisitos de la tarea de Graft. Frena la corrida real de la Tarea 16.
 - **P48.** Respondida (decisión 37).
-- **P49.** Frena la corrida real de la Tarea 16. No frena las tareas de nube.
+- **P49.** Respondida (decisión 38): Graft y memora.
 
 **Respuestas para las fichas (G1, decisión 26).** Opus las escribe en `## Ficha` al redactar G1:
 - **memora**: el requisito de `BLPOP` exige orden FIFO entre clientes bloqueados. Su aceptación cita `test_blpop_fifo_entre_clientes`. Ese test es correcto, y su falla de 9 en 30 corridas es un defecto del producto con origen "producto".
@@ -1474,3 +1476,5 @@ La corrida real de Colab espera a G1 y se hace en la laptop.
   - b) Graft y memora. Costo: una corrida completa más con Haiku sobre memora.
 
 **Respuestas del 2026-10-28 (decisión 37):** P48 "P48 a pero emita sus tareas en toml". P49: el usuario respondió "P49 c", pero P49 tiene solo a y b. El orquestador le pidió que aclare. Hasta la aclaración, rige a).
+
+**Respuesta del 2026-10-28 (decisión 38):** P49 "P49 b: la Tarea 16 corre Graft y memora." P49 queda cerrada.
