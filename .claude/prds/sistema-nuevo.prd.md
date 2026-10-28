@@ -57,6 +57,15 @@ Propuesta del mapa (`docs/contexto/mapa.md`):
 - Producto (decisión del usuario, 2026-10-27): Root, Graft, ECC y REA forman un producto completo, con ECC entero. ECC, Graft y REA se reconstruyen después.
 - Herencia de mmorch (decisión del usuario, 2026-10-27): las mediciones de "Measured" valen como evidencia, pero el método queda en revisión. Se conserva el hash del GOAL. `metrics.jsonl` se importa en solo lectura. El código arranca de cero.
 - Root (decisión del usuario, 2026-10-27): Root es un evaluador de alto nivel (seguridad, diseño, eficiencia, estructura, arquitectura) y aprende. Route balancea DeepSeek y Anthropic contra el cupo. Lenguaje: Rust. Root maneja TOML, Dockerfile y YAML. El vault queda fuera de Root porque el sistema empieza de cero.
+- Binario: Root es el crate `root` en Rust, y su binario se llama `r00t` (`.claude/plans/root.plan.md`, "Decisiones del usuario").
+- Dimensiones: el Oracle evalúa nueve dimensiones y actúa como project manager que entrega un informe (`.claude/plans/root.plan.md`, Tareas 9 a 13b).
+- Rúbricas: cada dimensión se puntúa con una rúbrica que cita su estándar, y Root no inventa criterios (`.claude/plans/root.plan.md`, decisión 12).
+- Ficha del spec: cada SPEC lleva una sección `## Ficha` obligatoria, y sin ella no hay veredicto (`.claude/plans/root.plan.md`, decisiones 18 y 20).
+- Repeticiones: cada suite corre varias veces, y cada diferencia lleva una causa y un origen (`.claude/plans/root.plan.md`, decisiones 16 y 19).
+- Route: los topes de cupo, API y nube limitan la elección, y un tope lleno registra un `Gate` (`.claude/plans/root.plan.md`, decisión 15).
+- Aprende: la política de Route se recalcula desde las filas y los eventos (`.claude/plans/root.plan.md`, Tarea 15).
+- Red: evaluar no usa red, salvo en la fase de descarga de dependencias (`.claude/plans/root.plan.md`, decisión 17).
+- Vault: el vault queda fuera de Root, y el nombre `mmorch` solo etiqueta los datos importados (`.claude/plans/root.plan.md`, decisiones b3 y b4).
 
 ## Delivery Milestones
 <!-- Business outcomes, not engineering tasks. /plan turns each into a plan. -->
@@ -64,7 +73,7 @@ Propuesta del mapa (`docs/contexto/mapa.md`):
 
 | # | Milestone | Outcome | Status | Plan |
 |---|---|---|---|---|
-| 1 | Root: reemplaza el banco y el ruteo de mmorch | Route, Oracle, Observe y Track corren desde el bootstrap del banco | in-progress | `.claude/plans/root.plan.md` |
+| 1 | Root: reemplaza el banco y el ruteo de mmorch | Route, Oracle (`evaluar`), Observe y Track corren; calibración, informe y `corre` siguen pendientes (Tareas 12, 13b y 16) | in-progress | `.claude/plans/root.plan.md` |
 | 2 | Graft: reemplaza el SDLC | El SDLC de Graft completa tareas sin intervención humana | pending | — |
 | 3 | REA: se suma al pipeline | Un paso del pipeline usa REA y deja evidencia verificable | pending | — |
 | 4 | CAB: Code Agent Builder | El sistema construye agentes de código desde una especificación | pending | — |

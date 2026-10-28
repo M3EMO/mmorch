@@ -1,0 +1,80 @@
+# Ejemplo de root.toml. Copialo a $ROOT_HOME/root.toml y ajustá los valores.
+# Los valores de este archivo son los defaults de Root. Sin root.toml, Root usa esos mismos defaults.
+#
+# Precios: Root no trae ningún precio. Sin precio para un modelo, `r00t llama` rechaza la llamada.
+# Falla cerrado: un tope no se esquiva por omisión. Ningún agente inventa un precio.
+# El humano copia cada precio desde la página de su proveedor.
+
+# Umbral de veredicto verde, de 0 a 1. Lo usa el informe (Tarea 13b, pendiente).
+umbral_verde = 0.8
+
+# Cota inferior de Wilson (90%, unilateral) que un candidato debe alcanzar para entrar a la política.
+umbral_wilson = 0.6
+
+# Modelo por rol cuando la vía es el cupo. Cada alias debe tener api_equivalente en [ruteo].
+[modelos]
+planifica = "opus"
+organiza = "sonnet"
+construye = "haiku"
+
+# Topes duros de gasto. Route los lee y nunca los sube.
+# Cada tabla de tope exige tope_usd. Sin esa clave, la carga falla con código 2.
+[balance]
+# Fracción del tope de cupo, en (0, 1], desde la que se prefiere la API.
+prefiere_api_sobre = 0.9
+
+# Tope de cupo por bloque de horas. Imita la ventana del plan.
+[balance.cupo]
+# USD equivalentes de lista por bloque.
+tope_usd = 35.0
+bloque_horas = 5
+
+# Tope mensual de la API, en USD por mes calendario.
+[balance.api]
+tope_usd = 100.0
+
+# Tope mensual de la nube, en USD por mes calendario.
+[balance.nube]
+tope_usd = 250.0
+
+# Ruteo cuando la vía es API. Los modelos de la API de los roles fijos.
+[ruteo.delega]
+proveedor = "deepseek"
+modelo = "deepseek-chat"
+
+[ruteo.verifica]
+proveedor = "deepseek"
+modelo = "deepseek-reasoner"
+
+[ruteo.juzga]
+proveedor = "deepseek"
+modelo = "deepseek-reasoner"
+
+# Equivalente de API de cada alias de cupo. Las entradas del usuario suman a estas tres; no las reemplazan.
+[ruteo.api_equivalente.opus]
+proveedor = "anthropic"
+modelo = "claude-opus-5-5"
+
+[ruteo.api_equivalente.sonnet]
+proveedor = "anthropic"
+modelo = "claude-sonnet-5-5"
+
+[ruteo.api_equivalente.haiku]
+proveedor = "anthropic"
+modelo = "claude-haiku-5-5"
+
+# URLs de las APIs, espera de reintentos y timeout por intento.
+[proveedores]
+deepseek_url = "https://api.deepseek.com"
+anthropic_url = "https://api.anthropic.com"
+# Espera antes del primer reintento, en milisegundos. Cada reintento la duplica.
+espera_base_ms = 500
+# Tiempo máximo de cada intento HTTP, en segundos.
+timeout_s = 120
+
+# Precios por modelo. La tabla está vacía a propósito.
+# Para habilitar un modelo, descomentá su bloque y completá los dos valores.
+# USD por millón de tokens; copiá el valor de la página del proveedor.
+# [precios."<modelo>"]
+# usd_entrada =
+# usd_salida =
