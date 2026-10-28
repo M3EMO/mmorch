@@ -145,6 +145,37 @@ fn oraculo_colab(
     Ok(())
 }
 
+/// `oraculo pendientes --vigilar`: la red de seguridad del runtime anotado. Sin `activo.json`, no
+/// toca Colab.
+fn oraculo_vigilar(json: bool, home: &Path) -> Result<(), Error> {
+    let cfg = config::Config::cargar(&home.join("root.toml"))?;
+    let tope = std::time::Duration::from_secs_f64(cfg.colab.minutos_max * 60.0);
+    let vigilancia = if oracle::colab::hay_runtime_anotado(home) {
+        let cli = oracle::colab::ColabProceso::desde_entorno()?;
+        oracle::colab::vigilar(&cli, home, tope)?
+    } else {
+        oracle::colab::Vigilancia::SinRuntime
+    };
+    let (estado, causa) = match &vigilancia {
+        oracle::colab::Vigilancia::SinRuntime => ("sin_runtime", None),
+        oracle::colab::Vigilancia::Vigente => ("vigente", None),
+        oracle::colab::Vigilancia::Liberado { causa } => ("liberado", Some(causa.as_str())),
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"vigilancia": estado, "causa": causa})
+        );
+    } else {
+        match causa {
+            Some(causa) => println!("runtime liberado: {causa}"),
+            None if estado == "vigente" => println!("runtime vigente"),
+            None => println!("no hay runtime anotado"),
+        }
+    }
+    Ok(())
+}
+
 /// `oraculo pendientes --liberar`: libera el runtime anotado en `activo.json`, si hay uno.
 fn oraculo_liberar(json: bool, home: &Path) -> Result<(), Error> {
     let liberado = if oracle::colab::hay_runtime_anotado(home) {
@@ -172,10 +203,14 @@ fn oraculo_pendientes(
     importar: Option<&Path>,
     colab: bool,
     liberar: bool,
+    vigilar: bool,
 ) -> Result<(), Error> {
     let home = config::root_home();
     if liberar {
         return oraculo_liberar(json, &home);
+    }
+    if vigilar {
+        return oraculo_vigilar(json, &home);
     }
     let (Some(nombre), Some(repo)) = (nombre, repo) else {
         return Err(Error::Uso(
@@ -338,6 +373,7 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
                     importar,
                     colab,
                     liberar,
+                    vigilar,
                 },
         } => oraculo_pendientes(
             cli.json,
@@ -346,6 +382,7 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
             importar.as_deref(),
             *colab,
             *liberar,
+            *vigilar,
         ),
         Comando::Observa { accion } => observa(cli.json, accion),
         Comando::Track { accion } => track_accion(cli.json, accion),

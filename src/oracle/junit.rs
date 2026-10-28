@@ -35,6 +35,8 @@ pub struct Junit {
     pub archivos: BTreeMap<String, ConteoArchivo>,
     /// Clave `"<archivo>::<nombre>"`, donde `<archivo>` es el último segmento de `classname`.
     pub tests: BTreeMap<String, ResultadoTest>,
+    /// Cuántos testcases trae cada id, aunque se repitan. Misma clave que `tests`.
+    pub testcases: BTreeMap<String, u32>,
     pub propiedades: BTreeMap<String, String>,
 }
 
@@ -143,9 +145,9 @@ fn cierra(caso: &mut Option<Caso>, junit: &mut Junit) {
     } else {
         ResultadoTest::Pasa
     };
-    junit
-        .tests
-        .insert(format!("{}::{}", c.archivo, c.nombre), resultado);
+    let id = id_de(&c.archivo, &c.nombre);
+    *junit.testcases.entry(id.clone()).or_default() += 1;
+    junit.tests.insert(id, resultado);
     let archivo = junit.archivos.entry(c.archivo).or_default();
     match resultado {
         ResultadoTest::Omite => archivo.omite += 1,
@@ -155,6 +157,11 @@ fn cierra(caso: &mut Option<Caso>, junit: &mut Junit) {
         }
         ResultadoTest::Pasa => archivo.pasa += 1,
     }
+}
+
+/// Id `archivo::nombre` de un testcase: la clave de `Junit::tests` y de `Junit::testcases`.
+fn id_de(archivo: &str, nombre: &str) -> String {
+    format!("{archivo}::{nombre}")
 }
 
 /// Valor de un atributo, decodificado. Ausente vale texto vacío.
@@ -273,6 +280,17 @@ mod tests {
         assert_eq!(j.tests["test_a::t1"], ResultadoTest::Pasa);
         assert_eq!(j.tests["test_a::t2"], ResultadoTest::Falla);
         assert_eq!(j.tests["test_a::t3"], ResultadoTest::Omite);
+    }
+
+    #[test]
+    fn junit_cuenta_testcases_repetidos_por_id_con_la_misma_clave() {
+        let xml = r#"<testsuite>
+  <testcase classname="tests.sub.test_a" name="t1"/>
+  <testcase classname="tests.test_a" name="t1"><failure message="x"/></testcase>
+  <testcase classname="tests.test_a" name="t1"/>
+</testsuite>"#;
+        let j = parsear(xml).expect("parsea");
+        assert_eq!(j.testcases["test_a::t1"], 3);
     }
 
     #[test]

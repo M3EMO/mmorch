@@ -167,21 +167,25 @@ pub enum OraculoAccion {
     /// Arma el paquete de los tests pendientes por entorno para correrlos en Colab.
     /// Con `--importar`, guarda el junit que trajo de vuelta.
     Pendientes {
-        /// Tarea. Obligatoria salvo con `--liberar`.
-        #[arg(long, required_unless_present = "liberar")]
+        /// Tarea. Obligatoria salvo con `--liberar` o `--vigilar`.
+        #[arg(long, required_unless_present_any = ["liberar", "vigilar"])]
         tarea: Option<String>,
-        /// Repo. Obligatorio salvo con `--liberar`.
-        #[arg(long, required_unless_present = "liberar")]
+        /// Repo. Obligatorio salvo con `--liberar` o `--vigilar`.
+        #[arg(long, required_unless_present_any = ["liberar", "vigilar"])]
         repo: Option<PathBuf>,
         /// Junit que dejó `correr.sh`. Sin este flag se arma el paquete.
-        #[arg(long, conflicts_with = "colab")]
+        #[arg(long, conflicts_with_all = ["colab", "vigilar"])]
         importar: Option<PathBuf>,
         /// Corre el paquete en un runtime T4 de Colab, importa el junit y libera el runtime.
-        #[arg(long, conflicts_with = "importar")]
+        #[arg(long, conflicts_with_all = ["importar", "vigilar"])]
         colab: bool,
         /// Libera el runtime de Colab anotado en `activo.json`, si hay uno, y sale.
-        #[arg(long, conflicts_with_all = ["colab", "importar"])]
+        #[arg(long, conflicts_with_all = ["colab", "importar", "vigilar"])]
         liberar: bool,
+        /// Revisa el runtime anotado en `activo.json`: lo libera si cumplió lo que pedía o si pasó
+        /// su tope. Un runtime vigente no se toca. Es la red de seguridad de `--colab`.
+        #[arg(long, conflicts_with_all = ["colab", "importar", "liberar"])]
+        vigilar: bool,
     },
     /// Calibra una dimensión del Oracle.
     Calibrar {

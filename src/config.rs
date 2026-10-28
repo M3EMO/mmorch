@@ -155,7 +155,7 @@ impl Default for Config {
 
 impl Default for ConfigColab {
     fn default() -> Self {
-        ConfigColab { minutos_max: 30.0 }
+        ConfigColab { minutos_max: 120.0 }
     }
 }
 
@@ -624,10 +624,18 @@ tope_usd = 200.0
     }
 
     #[test]
-    fn colab_config_minutos_max_por_defecto_es_30() {
-        assert_eq!(Config::default().colab.minutos_max, 30.0);
+    fn colab_config_minutos_max_por_defecto_es_120() {
+        assert_eq!(Config::default().colab.minutos_max, 120.0);
         let c = Config::desde_texto("").expect("vacío debe parsear");
-        assert_eq!(c.colab.minutos_max, 30.0);
+        assert_eq!(c.colab.minutos_max, 120.0);
+    }
+
+    #[test]
+    fn colab_config_sin_minutos_max_vale_120() {
+        for texto in ["", "[colab]\n"] {
+            let c = Config::desde_texto(texto).expect("debe parsear");
+            assert_eq!(c.colab.minutos_max, 120.0, "texto {texto:?}");
+        }
     }
 
     #[test]

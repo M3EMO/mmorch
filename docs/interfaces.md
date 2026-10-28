@@ -57,6 +57,7 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t oraculo evaluar --tarea <t> --repo <dir>` | Corre las suites de la tarea sobre el repo y da el veredicto. | `Veredicto` | construido. Hoy nunca da verde. |
 | `r00t oraculo pendientes --tarea <t> --repo <dir> [--importar <junit> \| --colab]` | Arma el paquete de tests pendientes por entorno para Colab. Con `--importar`, guarda el junit de vuelta. Con `--colab`, corre el paquete en Colab y lo importa. | `{dir, tests}`, o `{importados, ignorados}` | construido (Tarea 7f). `--colab`: Tarea 7j |
 | `r00t oraculo pendientes --liberar` | Libera el runtime de Colab anotado en `$ROOT_HOME/colab/activo.json`, si hay uno, y sale. | sin salida JSON | construido (Tarea 7j) |
+| `r00t oraculo pendientes --vigilar` | Red de seguridad: lee `$ROOT_HOME/colab/activo.json`. Libera el runtime si pasó su tope o si su junit cumple lo pedido. Un runtime vigente no se toca. Sin `--tarea` ni `--repo`. | `{vigilancia, causa}`, con `vigilancia` `sin_runtime`, `vigente` o `liberado` | construido (Tarea 7l) |
 | `r00t oraculo calibrar --tarea <t> --dimension <d> [--n 20] [--semilla 42]` | Mide la exactitud de una dimensión. | `Calibracion` | pendiente (Tarea 12). Hoy sale con `3`. |
 | `r00t oraculo informe --tarea <t> --repo <dir> [--md]` | Arma el informe del PM sobre el veredicto. | `Informe` | pendiente (Tarea 13b). No está en `--help`. |
 | `r00t oraculo validar --casos <dir>` | Mide si el juicio de Root coincide con resultados conocidos. | `Validez` | pendiente (Tarea 12b). No está en `--help`. |
@@ -79,7 +80,9 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 
 **Colab (`oraculo pendientes --colab`).** Root pide un runtime T4 de Colab, corre el paquete, importa el junit y libera el runtime. Antes de pedirlo, Root escribe su id en `$ROOT_HOME/colab/activo.json`. Lo borra al liberar el runtime. Si el proceso muere con `SIGKILL`, el archivo queda. La próxima corrida de `--colab` libera ese runtime primero. `--liberar` hace solo esa limpieza. `SIGINT` y `SIGTERM` también liberan el runtime y registran un `Gate`. El login de Colab lo hace la persona antes de correr el comando. Root no lee el token de la CLI.
 
-**Tope de duración.** Cada corrida de `--colab` tiene un tope, `[colab].minutos_max` en `root.toml`, con 30 minutos por defecto. Al llegar al tope, Root libera el runtime y sale con código `3`.
+**Corte temprano.** `correr.sh` corre en segundo plano en el runtime y Root lo sondea cada 60 segundos. Root libera el runtime en cuanto se cumple lo que pedía la corrida: el junit trae cada test pendiente, con tantos resultados como `repeticiones` de `tarea.toml`. Si `correr.sh` termina antes, Root libera el runtime con lo que haya. El `Gate` de liberación lleva la clave `causa`: `requisito cumplido`, `correr.sh terminó`, `tope de 2 horas` o `señal SIGINT`/`señal SIGTERM`. `--vigilar` es la red de seguridad: libera el runtime anotado si pasó su tope o si su junit cumple lo pedido, aunque la corrida ya no esté viva.
+
+**Tope de duración.** Cada corrida de `--colab` tiene un tope, `[colab].minutos_max` en `root.toml`, con 120 minutos (2 horas) por defecto, con corte temprano. Al llegar al tope, Root libera el runtime, registra un `Gate` con la causa `tope de 2 horas` y sale con código `3`. Los tests sin resultado quedan `Pendiente`.
 
 ## MCP
 
@@ -518,7 +521,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "colab": {
       "$ref": "#/$defs/ConfigColab",
       "default": {
-        "minutos_max": 30.0
+        "minutos_max": 120.0
       }
     },
     "modelos": {
@@ -637,7 +640,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "description": "Minutos máximos de una corrida en Colab. Al llegar al tope, Root libera el runtime.",
           "type": "number",
           "format": "double",
-          "default": 30.0
+          "default": 120.0
         }
       }
     },
