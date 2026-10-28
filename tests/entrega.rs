@@ -8,14 +8,16 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use root::oracle::ErrorOraculo;
+use root::oracle::configs::sondas_configs;
 use root::oracle::entrega::sonda_entrega;
 use root::oracle::junit::ResultadoTest;
+use root::oracle::perfiles::deduplicar_hallazgos;
 use root::oracle::perfiles::herramientas::{
     EjecutorContenedor, EjecutorHerramienta, SalidaHerramienta,
 };
 use root::oracle::requisitos::{ResultadosTests, evaluar_requisitos};
 use root::oracle::tarea::Tarea;
-use root::tipos::{Cumplimiento, Dimension, Fuente};
+use root::tipos::{Cumplimiento, Dimension, Fuente, Hallazgo};
 
 const ALPINE: &str = "docker.io/library/alpine:3.20";
 const LIMITE: Duration = Duration::from_secs(120);
@@ -224,4 +226,51 @@ fn entrega_podman_escenario_fallido_cita_su_ultima_linea() {
     let r = sonda_entrega(&ejecutor(repo.path()), repo.path(), &tarea);
     assert_eq!(r.escenarios.get("login"), Some(&false));
     assert_eq!(r.sonda.hallazgos[0].cita, "credencial rechazada");
+}
+
+/// Ejecutor sin hadolint: `command -v` falla y la entrega sale bien.
+struct SinHadolint;
+
+impl EjecutorHerramienta for SinHadolint {
+    fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+        if cmd.starts_with("command -v") {
+            return Ok(SalidaHerramienta {
+                codigo: 1,
+                ..Default::default()
+            });
+        }
+        Ok(salida_con(&[
+            ("entrega-instalar.rc", "0\n"),
+            ("entrega-correr.rc", "0\n"),
+        ]))
+    }
+}
+
+#[test]
+fn entrega_dockerfile_sin_user_da_un_solo_hallazgo_entre_configs_y_entrega() {
+    let repo = tempfile::tempdir().expect("temp dir");
+    fs::write(repo.path().join("README.md"), "# x\n").expect("escribe README");
+    fs::write(
+        repo.path().join("Dockerfile"),
+        "FROM debian:bookworm-slim\n",
+    )
+    .expect("escribe Dockerfile");
+    let tarea = tarea_con(
+        "[entrega]\ninstalar = \"make\"\ncorrer = \"./run\"\n\
+         archivos = [\"README.md\", \"Dockerfile\"]\n",
+    );
+    let ej = SinHadolint;
+    let configs: Vec<Hallazgo> = sondas_configs(repo.path(), &ej, &tarea)
+        .into_iter()
+        .flat_map(|r| r.hallazgos)
+        .collect();
+    let entrega = sonda_entrega(&ej, repo.path(), &tarea).sonda.hallazgos;
+    let todos: Vec<Hallazgo> = configs.into_iter().chain(entrega).collect();
+    // La unión ya trae el hallazgo una sola vez: solo la sonda de entrega emite la regla de USER.
+    assert_eq!(todos.len(), 1, "{todos:?}");
+    // Red de seguridad: la sonda dueña es la que nombra la tabla de rúbricas.
+    let hallazgos = deduplicar_hallazgos(todos);
+    assert_eq!(hallazgos.len(), 1, "{hallazgos:?}");
+    assert_eq!(hallazgos[0].dimension, Dimension::Entrega);
+    assert!(hallazgos[0].detalle.contains("USER"));
 }

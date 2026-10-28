@@ -13,6 +13,7 @@ use super::ErrorOraculo;
 use super::evidencia::{Verificacion, verificar_hallazgo};
 use super::mapa::Mapa;
 use super::perfiles::crear_hallazgo;
+use super::perfiles::rust::REGLA_CICLO;
 use super::rubrica::{ErrorRubrica, ItemRubrica, Mide, Puntuacion, Rubrica};
 use super::tarea::Requisito;
 use crate::proveedores::{self, Prompt};
@@ -22,8 +23,6 @@ use crate::tipos::{Dimension, Eleccion, Fuente, Hallazgo, NivelItem, Via};
 const MODULARIDAD: &str = "diseno.modularidad";
 /// Id de la sonda de arquitectura. Su hallazgo de ciclo fija el tope de `diseno.modularidad`.
 const SONDA_ARQUITECTURA: &str = "arquitectura-nativa";
-/// Texto con que `perfiles::rust` nombra un ciclo de módulos.
-const CICLO: &str = "ciclo de módulos";
 /// Tokens de salida por llamada del juez.
 const MAX_TOKENS: u32 = 6000;
 /// Fase del flujo que va al `Evento` de la llamada.
@@ -63,19 +62,20 @@ pub struct JuezProveedor {
 
 impl JuezProveedor {
     /// Rechaza una elección sin razonamiento, sin API o sin modelo: el verificador razona y refuta.
+    /// Es un error de configuración (`Eleccion`), no de infraestructura.
     pub fn nuevo(eleccion: Eleccion, corrida: String) -> Result<Self, ErrorOraculo> {
         if !eleccion.razonamiento {
-            return Err(ErrorOraculo::Infra(
+            return Err(ErrorOraculo::Eleccion(
                 "el juez exige razonamiento prendido; la elección lo tiene apagado".into(),
             ));
         }
         if eleccion.via != Via::Api {
-            return Err(ErrorOraculo::Infra(
+            return Err(ErrorOraculo::Eleccion(
                 "el juez exige la vía api; la elección usa otra vía".into(),
             ));
         }
         if eleccion.modelo.is_none() {
-            return Err(ErrorOraculo::Infra(
+            return Err(ErrorOraculo::Eleccion(
                 "la elección del juez no dice qué modelo usar".into(),
             ));
         }
@@ -570,7 +570,7 @@ fn procesar_hallazgo(valor: Value, cx: &Contexto) -> Result<Hallazgo, Descarte> 
 pub fn topes_desde_sondas(hallazgos: &[Hallazgo], rubricas: &[Rubrica]) -> BTreeMap<String, u8> {
     let hay_ciclo = hallazgos.iter().any(|h| {
         h.severidad == 3
-            && h.detalle.contains(CICLO)
+            && h.detalle.contains(REGLA_CICLO)
             && matches!(&h.fuente, Fuente::Sonda(s) if s == SONDA_ARQUITECTURA)
     });
     let modularidad_mixta = rubricas
@@ -1071,12 +1071,19 @@ mod tests {
 
     // Proveedor: el juez razona y usa la API.
 
+    /// Una elección inválida es un error de configuración: `Eleccion`, con código de salida 2.
+    fn assert_eleccion(error: ErrorOraculo, motivo: &str) {
+        assert!(matches!(error, ErrorOraculo::Eleccion(_)), "{error}");
+        assert!(error.to_string().contains(motivo), "{error}");
+        assert_eq!(crate::error::Error::from(error).codigo_de_salida(), 2);
+    }
+
     #[test]
     fn juez_proveedor_rechaza_razonamiento_apagado() {
         let error = JuezProveedor::nuevo(eleccion(Via::Api, false, Some(MODELO)), "c".into())
             .err()
             .expect("rechaza");
-        assert!(error.to_string().contains("razonamiento"), "{error}");
+        assert_eleccion(error, "razonamiento");
     }
 
     #[test]
@@ -1084,7 +1091,15 @@ mod tests {
         let error = JuezProveedor::nuevo(eleccion(Via::Cupo, true, Some(MODELO)), "c".into())
             .err()
             .expect("rechaza");
-        assert!(error.to_string().contains("api"), "{error}");
+        assert_eleccion(error, "api");
+    }
+
+    #[test]
+    fn juez_proveedor_rechaza_via_oraculo() {
+        let error = JuezProveedor::nuevo(eleccion(Via::Oraculo, true, Some(MODELO)), "c".into())
+            .err()
+            .expect("rechaza");
+        assert_eleccion(error, "api");
     }
 
     #[test]
@@ -1092,7 +1107,7 @@ mod tests {
         let error = JuezProveedor::nuevo(eleccion(Via::Api, true, None), "c".into())
             .err()
             .expect("rechaza");
-        assert!(error.to_string().contains("modelo"), "{error}");
+        assert_eleccion(error, "modelo");
     }
 
     #[test]
@@ -1275,5 +1290,47 @@ mod tests {
         );
         // Modularidad (peso 3, nivel 2) y tope sin nivel: (3·2) / (3·3) = 2/3.
         assert!((p.valor.expect("hay valor") - 2.0 / 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn juez_ciclo_de_la_sonda_real_topa_modularidad_en_uno() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(repo.path().join("src")).expect("crea src");
+        fs::write(
+            repo.path().join("src/a.rs"),
+            "use crate::b::algo;\npub fn f() {}\n",
+        )
+        .expect("escribe a");
+        fs::write(
+            repo.path().join("src/b.rs"),
+            "pub fn algo() {}\nuse crate::a::f;\n",
+        )
+        .expect("escribe b");
+        let sonda = crate::oracle::perfiles::rust::arquitectura_nativa(repo.path(), &[], &[]);
+        assert!(
+            sonda.hallazgos.iter().any(|h| h
+                .detalle
+                .starts_with(crate::oracle::perfiles::rust::REGLA_CICLO)),
+            "la sonda nombra el ciclo con REGLA_CICLO: {:?}",
+            sonda.hallazgos
+        );
+        let rubricas = [rubrica_mixta()];
+        let topes = topes_desde_sondas(&sonda.hallazgos, &rubricas);
+        assert_eq!(topes, BTreeMap::from([(MODULARIDAD.to_string(), 1)]));
+        let r = ResultadoJuez {
+            estado: EstadoJuez::Ok,
+            niveles: BTreeMap::from([(MODULARIDAD.to_string(), 3)]),
+            items: vec![],
+            hallazgos: vec![],
+            descartes: vec![],
+            faltantes: vec![],
+        };
+        let p = puntuar_con_juez(&rubricas[0], &r, &topes, MODELO).expect("puntúa");
+        let nivel = p
+            .items
+            .iter()
+            .find(|i| i.item == MODULARIDAD)
+            .expect("está");
+        assert_eq!(nivel.nivel, 1);
     }
 }

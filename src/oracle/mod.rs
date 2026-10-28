@@ -60,16 +60,20 @@ pub enum ErrorOraculo {
     /// La tarea no existe, no se lee o su `tarea.toml` es inválido.
     #[error("tarea inválida: {0}")]
     Tarea(String),
+    /// Elección de juez inválida: sin razonamiento, sin vía API o sin modelo. Es configuración.
+    #[error("elección inválida: {0}")]
+    Eleccion(String),
     /// El spec de la tarea no tiene una ficha válida. Sin ficha no se evalúa.
     #[error(transparent)]
     Ficha(#[from] ErrorFicha),
 }
 
 impl ErrorOraculo {
-    /// Código de salida: 2 si la ficha falta o no es válida, 3 en los demás casos.
+    /// Código de salida: 2 si la ficha o la elección del juez son inválidas, 3 en los demás casos.
     pub fn codigo_de_salida(&self) -> u8 {
         match self {
             ErrorOraculo::Ficha(e) => e.codigo_de_salida(),
+            ErrorOraculo::Eleccion(_) => 2,
             _ => 3,
         }
     }

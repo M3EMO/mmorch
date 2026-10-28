@@ -22,8 +22,8 @@ const DETALLE_RAIZ: &str =
     "la última etapa no define un USER no-root: el contenedor corre como root";
 /// Carpetas que no se recorren, en cualquier nivel del repo.
 const CARPETAS_IGNORADAS: &[&str] = &["target", ".git", "node_modules", "vendor"];
-/// Palabras que, dentro de una clave, marcan un secreto.
-const PALABRAS_SECRETO: &[&str] = &["password", "token", "api_key", "apikey", "secret"];
+/// Segmentos que, solos, marcan un secreto en una clave. `api` seguido de `key` también cuenta.
+const SEGMENTOS_SECRETO: &[&str] = &["password", "passwd", "secret", "token", "apikey", "key"];
 /// Valores de relleno que no son secretos reales.
 const PLACEHOLDERS: &[&str] = &["changeme", "xxx", "redacted", "example"];
 
@@ -305,14 +305,44 @@ fn separar_yaml(linea: &str) -> Option<(&str, &str)> {
     Some((&linea[..indice], &linea[indice + 1..]))
 }
 
+/// Verdadero si un segmento de la clave es un segmento de secreto, o si `api` va seguido de `key`.
 fn es_clave_secreta(clave: &str) -> bool {
-    let minuscula = clave.to_lowercase();
-    PALABRAS_SECRETO.iter().copied().any(|palabra| {
-        minuscula.match_indices(palabra).any(|(i, _)| {
-            // `token` seguido de `s` (max_tokens, num_tokens) es un conteo, no un secreto.
-            palabra != "token" || !minuscula[i + palabra.len()..].starts_with('s')
-        })
-    })
+    let segmentos = segmentos_de(clave);
+    segmentos
+        .iter()
+        .any(|s| SEGMENTOS_SECRETO.contains(&s.as_str()))
+        || segmentos.windows(2).any(|p| p[0] == "api" && p[1] == "key")
+}
+
+/// Parte una clave en segmentos en minúsculas: por `_`, `-` y `.`, y por mayúsculas internas.
+/// `apiKey` da `api`, `key`. `AUTH_TOKEN` da `auth`, `token`. `APIKey` da `api`, `key`.
+fn segmentos_de(clave: &str) -> Vec<String> {
+    fn cerrar(actual: &mut String, salida: &mut Vec<String>) {
+        if !actual.is_empty() {
+            salida.push(std::mem::take(actual));
+        }
+    }
+    let chars: Vec<char> = clave.chars().collect();
+    let mut salida = Vec::new();
+    let mut actual = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if matches!(c, '_' | '-' | '.') {
+            cerrar(&mut actual, &mut salida);
+            continue;
+        }
+        let empieza_parte = c.is_uppercase()
+            && i > 0
+            && (chars[i - 1].is_lowercase()
+                || chars[i - 1].is_ascii_digit()
+                || (chars[i - 1].is_uppercase()
+                    && chars.get(i + 1).is_some_and(|s| s.is_lowercase())));
+        if empieza_parte {
+            cerrar(&mut actual, &mut salida);
+        }
+        actual.extend(c.to_lowercase());
+    }
+    cerrar(&mut actual, &mut salida);
+    salida
 }
 
 /// Verdadero si el valor, sin comillas, es un número o un booleano.
@@ -374,11 +404,18 @@ pub fn dockerfile_corre_como_root(
             continue;
         }
         let texto = leer(repo, &archivo.ruta_relativa)?;
-        hallazgos.extend(
-            reglas_dockerfile(&archivo.ruta_relativa, &texto, requisitos)
-                .into_iter()
-                .filter(|h| h.detalle == DETALLE_RAIZ),
-        );
+        if let Some((linea, cita)) = ultima_etapa_corre_como_root(&texto) {
+            hallazgos.push(crear_hallazgo(
+                Dimension::Seguridad,
+                3,
+                &archivo.ruta_relativa,
+                linea,
+                &cita,
+                DETALLE_RAIZ,
+                SONDA_DOCKERFILE,
+                requisitos,
+            ));
+        }
     }
     Ok(hallazgos)
 }
@@ -526,13 +563,11 @@ fn tokens_con_comillas(texto: &str) -> Vec<String> {
     salida
 }
 
-/// Reglas propias del Dockerfile: (a) imagen sin versión, (b) último stage sin `USER` no-root,
-/// (c) secreto en `ENV` o `ARG`.
+/// Reglas propias del Dockerfile: (a) imagen sin versión y (c) secreto en `ENV` o `ARG`.
+/// La regla de `USER` no-root es de la sonda de entrega (ver `ultima_etapa_corre_como_root`).
 fn reglas_dockerfile(archivo: &str, texto: &str, requisitos: &[Requisito]) -> Vec<Hallazgo> {
     let mut hallazgos = Vec::new();
     let mut alias_previos: Vec<String> = Vec::new();
-    let mut ultimo_from: Option<Instruccion> = None;
-    let mut ultimo_user: Option<String> = None;
     for inst in instrucciones(texto) {
         let (kw, resto) = palabra_clave(&inst.logico);
         match kw.as_str() {
@@ -551,10 +586,7 @@ fn reglas_dockerfile(archivo: &str, texto: &str, requisitos: &[Requisito]) -> Ve
                     ));
                 }
                 alias_previos.extend(alias.map(|a| a.to_lowercase()));
-                ultimo_user = None;
-                ultimo_from = Some(inst);
             }
-            "USER" if !resto.is_empty() => ultimo_user = Some(resto.to_string()),
             "ENV" | "ARG" => {
                 for (clave, valor) in pares(&kw, resto) {
                     if es_clave_secreta(&clave) && es_literal_secreto(&valor) {
@@ -574,28 +606,34 @@ fn reglas_dockerfile(archivo: &str, texto: &str, requisitos: &[Requisito]) -> Ve
             _ => {}
         }
     }
-    if let Some(from) = ultimo_from {
-        let raiz = match ultimo_user.as_deref() {
-            None => true,
-            Some(usuario) => {
-                let nombre = usuario.split(':').next().unwrap_or("").to_lowercase();
-                nombre == "root" || nombre == "0"
+    hallazgos
+}
+
+/// Regla (b) "corre como root": la última etapa no define un `USER` no-root. Da la línea y la
+/// cita de su `FROM`. Sin `FROM` no hay etapa, así que no da nada.
+fn ultima_etapa_corre_como_root(texto: &str) -> Option<(u32, String)> {
+    let mut ultimo_from: Option<Instruccion> = None;
+    let mut ultimo_user: Option<String> = None;
+    for inst in instrucciones(texto) {
+        let (kw, resto) = palabra_clave(&inst.logico);
+        match kw.as_str() {
+            "FROM" => {
+                ultimo_user = None;
+                ultimo_from = Some(inst);
             }
-        };
-        if raiz {
-            hallazgos.push(crear_hallazgo(
-                Dimension::Seguridad,
-                3,
-                archivo,
-                from.linea,
-                &from.cita,
-                DETALLE_RAIZ,
-                SONDA_DOCKERFILE,
-                requisitos,
-            ));
+            "USER" if !resto.is_empty() => ultimo_user = Some(resto.to_string()),
+            _ => {}
         }
     }
-    hallazgos
+    let from = ultimo_from?;
+    let raiz = match ultimo_user.as_deref() {
+        None => true,
+        Some(usuario) => {
+            let nombre = usuario.split(':').next().unwrap_or("").to_lowercase();
+            nombre == "root" || nombre == "0"
+        }
+    };
+    raiz.then_some((from.linea, from.cita))
 }
 
 fn sonda_hadolint(
@@ -848,6 +886,38 @@ mod tests {
     }
 
     #[test]
+    fn configs_secretos_por_segmentos_exactos_no_por_subcadena() {
+        let casos: [(&str, &str, usize); 9] = [
+            ("a.toml", "tokenizer = \"bpe\"\n", 0),
+            ("a.toml", "auth_token = \"abc123\"\n", 1),
+            ("a.toml", "api_key = \"${API_KEY}\"\n", 0),
+            ("a.toml", "max_tokens = 4096\n", 0),
+            ("a.toml", "monkey = \"x\"\n", 0),
+            ("a.toml", "passwordless = \"x\"\n", 0),
+            ("a.toml", "db.password = \"p\"\n", 1),
+            ("c.yaml", "apiKey: abc\n", 1),
+            ("c.yaml", "SECRET_KEY: hunter2\n", 1),
+        ];
+        for (ruta, texto, esperado) in casos {
+            let repo = repo_con(ruta, texto);
+            let r = sonda_secretos_configs(repo.path(), &[]);
+            assert_eq!(r.hallazgos.len(), esperado, "{texto:?}: {:?}", r.hallazgos);
+            assert!(!serializado(&r).contains("hunter2"), "sin valor: {texto:?}");
+        }
+    }
+
+    #[test]
+    fn configs_dockerfile_env_api_guion_key_es_secreto() {
+        let repo = repo_con(
+            "Dockerfile",
+            "FROM python:3.12-slim\nENV API-KEY=xyz\nUSER app\n",
+        );
+        let r = sonda_dockerfile_reglas(repo.path(), &[]);
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        assert_eq!(r.hallazgos[0].cita, "API-KEY");
+    }
+
+    #[test]
     fn configs_dockerfile_env_max_tokens_numerico_no_cuenta() {
         let texto = "FROM python:3.12-slim\nENV MAX_TOKENS=4096\nUSER app\n";
         let repo = repo_con("Dockerfile", texto);
@@ -885,18 +955,14 @@ mod tests {
     }
 
     #[test]
-    fn configs_dockerfile_python_latest_sin_user_da_dos_hallazgos() {
+    fn configs_dockerfile_python_latest_sin_user_da_solo_la_imagen() {
         let repo = repo_con("Dockerfile", "FROM python:latest\n");
         let r = sonda_dockerfile_reglas(repo.path(), &[]);
-        assert_eq!(r.hallazgos.len(), 2, "{:?}", r.hallazgos);
-        assert!(
-            r.hallazgos
-                .iter()
-                .all(|h| h.cita == "FROM python:latest" && h.linea == 1)
-        );
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        let h = &r.hallazgos[0];
         assert_eq!(
-            r.hallazgos.iter().map(|h| h.severidad).collect::<Vec<_>>(),
-            [2, 3]
+            (h.cita.as_str(), h.linea, h.severidad),
+            ("FROM python:latest", 1, 2)
         );
     }
 
@@ -950,30 +1016,54 @@ mod tests {
     }
 
     #[test]
-    fn configs_dockerfile_user_root_al_final_da_regla_b() {
+    fn configs_dockerfile_user_root_al_final_no_lo_emite_la_sonda_de_reglas() {
         let repo = repo_con(
             "Dockerfile",
             "FROM debian:bookworm-slim\nUSER app\nUSER root\n",
         );
         let r = sonda_dockerfile_reglas(repo.path(), &[]);
-        assert_eq!(r.hallazgos.len(), 1);
-        assert_eq!(r.hallazgos[0].severidad, 3);
-        assert_eq!(r.hallazgos[0].cita, "FROM debian:bookworm-slim");
+        assert!(
+            r.hallazgos.is_empty(),
+            "la regla de USER es de 9d: {:?}",
+            r.hallazgos
+        );
     }
 
     #[test]
-    fn configs_dockerfile_user_cero_al_final_da_regla_b() {
+    fn configs_dockerfile_user_root_al_final_lo_da_la_regla_raiz() {
+        let repo = repo_con(
+            "Dockerfile",
+            "FROM debian:bookworm-slim\nUSER app\nUSER root\n",
+        );
+        let hs = dockerfile_corre_como_root(repo.path(), &[]).expect("lee");
+        assert_eq!(hs.len(), 1);
+        assert_eq!(hs[0].severidad, 3);
+        assert_eq!(hs[0].cita, "FROM debian:bookworm-slim");
+    }
+
+    #[test]
+    fn configs_dockerfile_user_cero_al_final_lo_da_la_regla_raiz() {
         let repo = repo_con("Dockerfile", "FROM debian:bookworm-slim\nUSER 0:0\n");
-        assert_eq!(sonda_dockerfile_reglas(repo.path(), &[]).hallazgos.len(), 1);
+        assert_eq!(
+            dockerfile_corre_como_root(repo.path(), &[])
+                .expect("lee")
+                .len(),
+            1
+        );
+        assert!(
+            sonda_dockerfile_reglas(repo.path(), &[])
+                .hallazgos
+                .is_empty()
+        );
     }
 
     #[test]
     fn configs_dockerfile_user_de_la_etapa_anterior_no_cuenta() {
         let texto = "FROM rust:1 AS builder\nUSER app\nFROM debian:bookworm-slim\n";
         let repo = repo_con("Dockerfile", texto);
-        let r = sonda_dockerfile_reglas(repo.path(), &[]);
-        assert_eq!(r.hallazgos.len(), 1, "la última etapa no tiene USER");
-        assert_eq!(r.hallazgos[0].linea, 3);
+        let hs = dockerfile_corre_como_root(repo.path(), &[]).expect("lee");
+        assert_eq!(hs.len(), 1, "la última etapa no tiene USER");
+        assert_eq!(hs[0].linea, 3);
     }
 
     #[test]

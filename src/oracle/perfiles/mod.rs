@@ -86,6 +86,15 @@ pub fn puntuar_hallazgos(hs: &[Hallazgo], reqs: &[Requisito]) -> f32 {
     (1.0 - total / 3.0).max(0.0)
 }
 
+/// Descarta los repetidos con el mismo `archivo`, `linea` y `cita`. Conserva el primero y el orden.
+/// Regla: la sonda dueña es la que nombra la tabla de rúbricas. Esto es solo una red de seguridad.
+pub fn deduplicar_hallazgos(hs: Vec<Hallazgo>) -> Vec<Hallazgo> {
+    let mut vistos = std::collections::HashSet::new();
+    hs.into_iter()
+        .filter(|h| vistos.insert((h.archivo.clone(), h.linea, h.cita.clone())))
+        .collect()
+}
+
 fn penal(h: &Hallazgo, reqs: &[Requisito]) -> f32 {
     if h.impacto.is_empty() && h.severidad < 2 {
         return 0.0;
@@ -160,6 +169,16 @@ mod tests {
     use crate::oracle::tarea::Tarea;
     use crate::tipos::{Dimension, Fuente};
     use std::fs;
+
+    #[test]
+    fn perfiles_deduplicar_quita_repetidos_y_conserva_el_primero_en_orden() {
+        let a = hallazgo_de(3, "Dockerfile", "FROM x", &[]);
+        let mut b = hallazgo_de(2, "Dockerfile", "FROM x", &[]);
+        b.dimension = Dimension::Entrega;
+        let c = hallazgo_de(1, "a.rs", "otra", &[]);
+        let salida = deduplicar_hallazgos(vec![a.clone(), b, c.clone()]);
+        assert_eq!(salida, vec![a, c]);
+    }
 
     fn tarea_en(dir: &std::path::Path, lenguaje: &str, extra: &str) -> Tarea {
         let texto = format!(

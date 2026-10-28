@@ -195,12 +195,12 @@ fn configs_ignora_archivos_dentro_de_target_y_git() {
 }
 
 #[test]
-fn configs_dockerfile_python_latest_sin_user_da_dos_hallazgos_por_la_sonda() {
+fn configs_dockerfile_python_latest_sin_user_da_un_hallazgo_por_la_sonda() {
     let repo = tempfile::tempdir().expect("temp dir");
     escribir(repo.path(), "Dockerfile", "FROM python:latest\n");
     let ej = sin_hadolint();
     let rs = sondas_configs(repo.path(), &ej, &tarea_de("python"));
-    assert_eq!(rs[2].hallazgos.len(), 2);
+    assert_eq!(rs[2].hallazgos.len(), 1, "solo la imagen sin versión");
 }
 
 #[test]

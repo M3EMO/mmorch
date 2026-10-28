@@ -12,6 +12,8 @@ use crate::tipos::{Dimension, Hallazgo};
 const SONDA_SEGURIDAD: &str = "seguridad-nativa";
 const SONDA_ESTRUCTURA: &str = "estructura-nativa";
 const SONDA_ARQUITECTURA: &str = "arquitectura-nativa";
+/// Texto con que la sonda de arquitectura nombra un ciclo de módulos. El juez lo usa para el tope.
+pub const REGLA_CICLO: &str = "ciclo de módulos";
 
 /// Límites de la sonda de estructura. Por defecto: 500 líneas, 80 por función, 10 de bloque.
 pub struct LimitesEstructura {
@@ -132,7 +134,7 @@ pub fn arquitectura_nativa(
                 &uso.archivo,
                 uso.linea,
                 &uso.cita,
-                &format!("ciclo de módulos: {}", camino.join(" -> ")),
+                &format!("{REGLA_CICLO}: {}", camino.join(" -> ")),
                 SONDA_ARQUITECTURA,
                 requisitos,
             ));
@@ -735,6 +737,7 @@ mod tests {
         assert_eq!(h.severidad, 3);
         assert_eq!((h.archivo.as_str(), h.linea), ("src/a.rs", 1));
         assert!(h.detalle.contains("a -> b -> a"), "{}", h.detalle);
+        assert!(h.detalle.starts_with(REGLA_CICLO), "{}", h.detalle);
         assert_eq!(h.dimension, Dimension::Arquitectura);
     }
 
