@@ -2,8 +2,10 @@
 //! Nunca corre `pip install`, `pip wheel` ni `setup.py`. Un sdist se baja y se guarda sin extraerlo.
 //! Dentro de cada contenedor, `/cache` es la carpeta `<hash>.parcial` del requirements.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -31,6 +33,11 @@ const PREFIJO_SDIST_PYPI: &str = "https://files.pythonhosted.org/";
 const ARCHIVO_JSON: &str = "pypi-meta.json";
 /// Plazo de cada `curl` de un archivo de red.
 const PLAZO_CURL_S: u32 = 60;
+/// Archivo con los requisitos de build que `pip download` baja como wheels en `parcial`.
+const ARCHIVO_BUILD: &str = "build-requires.txt";
+/// Requisitos de build sin `pyproject.toml`: el respaldo de PEP 517.
+const REQUISITOS_BUILD_RESPALDO: [&str; 2] = ["setuptools", "wheel"];
+const ARCHIVO_PYPROJECT: &str = "pyproject.toml";
 
 /// Sdist elegido desde PyPI: su URL, su nombre de archivo y su sha256 esperado.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,9 +295,12 @@ fn sha256_de(ruta: &Path) -> Result<String, ErrorOraculo> {
     Ok(sha256_hex(&bytes))
 }
 
-/// Resultado de la descarga: los archivos del Gate, o un corte con su hallazgo.
+/// Resultado de la descarga: los archivos del Gate y sus hallazgos, o un corte con su hallazgo.
 enum Fin {
-    Lista(Vec<Value>),
+    Lista {
+        paquetes: Vec<Value>,
+        hallazgos: Vec<Hallazgo>,
+    },
     Corta(Hallazgo, &'static str),
 }
 
@@ -328,6 +338,12 @@ pub(super) fn preparar_python(
             motivo: None,
             imagenes: None,
         };
+        // Los hallazgos de build salen de los `pyproject` guardados en la caché: sin ellos, el segundo
+        // corrido perdería el aviso del primero.
+        let mut hallazgos = hallazgos;
+        if let Some((_, de_build)) = indice_de_build_de(&destino)? {
+            hallazgos.extend(de_build);
+        }
         let preparacion = Preparacion::Lista {
             cache: Some(destino),
             rustsec: None,
@@ -350,7 +366,12 @@ pub(super) fn preparar_python(
             limpiar_parcial(home, &parcial).map_err(|e| infra("borrar la descarga parcial", e))?;
             Ok(corte(aviso, Registro::corte("python", Some(hash), motivo)))
         }
-        Fin::Lista(paquetes) => {
+        Fin::Lista {
+            paquetes,
+            hallazgos: de_build,
+        } => {
+            let mut hallazgos = hallazgos;
+            hallazgos.extend(de_build);
             if destino.exists() {
                 borrar_en_home(home, &destino)
                     .map_err(|e| infra("borrar la caché previa de Python", e))?;
@@ -462,12 +483,46 @@ fn descargar_en(
             Err(corte) => return Ok(corte),
         }
     }
+    // Build de los sdists y clones git: sus requisitos se bajan como wheels, sin ejecutar nada del proyecto.
+    let (requisitos, hallazgos) = indice_de_build_de(parcial)?.unwrap_or_default();
+    if !requisitos.is_empty() {
+        let conocidos: BTreeSet<String> = paquetes
+            .iter()
+            .filter_map(|p| p["nombre"].as_str().map(String::from))
+            .collect();
+        fs::write(
+            parcial.join(ARCHIVO_BUILD),
+            format!("{}\n", requisitos.join("\n")),
+        )
+        .map_err(|e| infra("escribir los requisitos de build", e))?;
+        let cmd = comando_wheels(&format!("/cache/{ARCHIVO_BUILD}"), req);
+        let salida = correr(home, tarea, repo, parcial, cmd, timeout)?;
+        if salida.codigo != 0 {
+            return match diagnosticar(&salida.stderr) {
+                Diagnostico::Producto(linea) => {
+                    Ok(Fin::Corta(hallazgo_no_instala(&linea), "no-instala"))
+                }
+                otro => Err(error_de(otro)),
+            };
+        }
+        for entrada in fs::read_dir(parcial).map_err(|e| infra("leer la caché de Python", e))? {
+            let entrada = entrada.map_err(|e| infra("leer la caché de Python", e))?;
+            let nombre = entrada.file_name().to_string_lossy().into_owned();
+            if nombre.ends_with(".whl") && !conocidos.contains(&nombre) {
+                let sha = sha256_de(&entrada.path())?;
+                paquetes.push(json!({"nombre": nombre, "fuente": "pypi-build", "sha256": sha}));
+            }
+        }
+    }
     fs::write(
         parcial.join(ARCHIVO_OFFLINE),
         format!("{}\n", lineas.join("\n")),
     )
     .map_err(|e| infra("escribir requirements-offline.txt", e))?;
-    Ok(Fin::Lista(paquetes))
+    Ok(Fin::Lista {
+        paquetes,
+        hallazgos,
+    })
 }
 
 /// Baja el sdist de PyPI con `curl`, dentro del contenedor. Verifica el sha256 en el host.
@@ -586,4 +641,301 @@ fn fuente_directa(
     }
     paquetes.push(json!({"nombre": archivo, "fuente": "url", "sha256": sha}));
     Ok(Ok(format!("/cache/{archivo}")))
+}
+
+/// Requisitos de build de un `pyproject.toml`, sin ejecutar nada. Sin el texto, sin
+/// `[build-system].requires`, o si no parsea, son `setuptools` y `wheel` (el respaldo de PEP 517).
+pub fn requisitos_de_build(pyproject: Option<&str>) -> Vec<String> {
+    let Some(texto) = pyproject else {
+        return respaldo_de_build();
+    };
+    let Ok(tabla) = toml::from_str::<toml::Table>(texto) else {
+        return respaldo_de_build();
+    };
+    let requires = tabla
+        .get("build-system")
+        .and_then(|b| b.as_table())
+        .and_then(|b| b.get("requires"))
+        .and_then(|r| r.as_array());
+    let Some(requires) = requires else {
+        return respaldo_de_build();
+    };
+    let mut salida = Vec::new();
+    for item in requires {
+        // Una lista con algo que no es texto no sirve: se usa el respaldo.
+        let Some(spec) = item.as_str() else {
+            return respaldo_de_build();
+        };
+        let spec = spec.trim();
+        if !spec.is_empty() {
+            salida.push(spec.to_string());
+        }
+    }
+    salida
+}
+
+fn respaldo_de_build() -> Vec<String> {
+    REQUISITOS_BUILD_RESPALDO
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// `true` si el requisito se baja como wheel del índice: sin URL, sin `@` y sin opciones (`-e`, `-r`).
+pub fn requisito_de_build_aceptable(spec: &str) -> bool {
+    !(spec.contains("://") || spec.contains('@') || spec.starts_with('-'))
+}
+
+/// Requisitos de build que se bajan como wheels, y los hallazgos de los que no se pueden bajar.
+type IndiceBuild = (Vec<String>, Vec<Hallazgo>);
+
+/// Índice de build de varios `pyproject`: une sus requisitos sin repetir y en orden, y separa los que no
+/// se bajan como wheel. Cada uno de estos da un hallazgo de entrega de severidad 1.
+pub fn indice_de_build(pyprojects: &[Option<String>]) -> IndiceBuild {
+    let mut unicos: Vec<String> = Vec::new();
+    for pyproject in pyprojects {
+        for spec in requisitos_de_build(pyproject.as_deref()) {
+            if !unicos.contains(&spec) {
+                unicos.push(spec);
+            }
+        }
+    }
+    let mut aceptables = Vec::new();
+    let mut hallazgos = Vec::new();
+    for spec in unicos {
+        if requisito_de_build_aceptable(&spec) {
+            aceptables.push(spec);
+        } else {
+            hallazgos.push(hallazgo(
+                ARCHIVO_PYPROJECT,
+                0,
+                "",
+                1,
+                format!(
+                    "requisito de build con referencia directa: {}",
+                    redactar(&spec)
+                ),
+            ));
+        }
+    }
+    (aceptables, hallazgos)
+}
+
+/// `true` si la entrada de un tar es `<carpeta>/pyproject.toml`: exactamente una `/`.
+fn es_pyproject_de_primer_nivel(entrada: &str) -> bool {
+    let partes: Vec<&str> = entrada.split('/').collect();
+    matches!(
+        partes.as_slice(),
+        [carpeta, "pyproject.toml"]
+            if !carpeta.is_empty() && !carpeta.starts_with('-') && *carpeta != "." && *carpeta != ".."
+    )
+}
+
+/// `pyproject.toml` de primer nivel de un sdist `.tar.gz`, leído a memoria con `tar`. No extrae nada al
+/// disco ni ejecuta código del paquete. `None` si no es `.tar.gz`, si `tar` no lo lista o si no tiene esa entrada.
+pub fn pyproject_de_sdist(archivo: &Path) -> Option<String> {
+    if !archivo.file_name()?.to_str()?.ends_with(".tar.gz") {
+        return None;
+    }
+    let listado = Command::new("tar").arg("-tzf").arg(archivo).output().ok()?;
+    if !listado.status.success() {
+        return None;
+    }
+    let entrada = String::from_utf8_lossy(&listado.stdout)
+        .lines()
+        .find(|l| es_pyproject_de_primer_nivel(l))?
+        .to_string();
+    let contenido = Command::new("tar")
+        .arg("-xzOf")
+        .arg(archivo)
+        .arg(&entrada)
+        .output()
+        .ok()?;
+    if !contenido.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&contenido.stdout).into_owned())
+}
+
+/// Índice de build de las fuentes que necesitan build en `carpeta`: los sdists (`.tar.gz` y `.zip`) y los
+/// clones de `src/<dir>`. `None` si no hay ninguno, porque los wheels no necesitan build.
+fn indice_de_build_de(carpeta: &Path) -> Result<Option<IndiceBuild>, ErrorOraculo> {
+    let mut sdists = Vec::new();
+    for entrada in fs::read_dir(carpeta).map_err(|e| infra("leer la caché de Python", e))? {
+        let entrada = entrada.map_err(|e| infra("leer la caché de Python", e))?;
+        let nombre = entrada.file_name().to_string_lossy().into_owned();
+        if nombre.ends_with(".tar.gz") || nombre.ends_with(".zip") {
+            sdists.push(entrada.path());
+        }
+    }
+    let mut clones = Vec::new();
+    let src = carpeta.join("src");
+    if src.is_dir() {
+        for entrada in fs::read_dir(&src).map_err(|e| infra("leer los clones de Python", e))? {
+            let entrada = entrada.map_err(|e| infra("leer los clones de Python", e))?;
+            if entrada.file_type().is_ok_and(|t| t.is_dir()) {
+                clones.push(entrada.path());
+            }
+        }
+    }
+    if sdists.is_empty() && clones.is_empty() {
+        return Ok(None);
+    }
+    sdists.sort();
+    clones.sort();
+    let mut pyprojects: Vec<Option<String>> =
+        sdists.iter().map(|s| pyproject_de_sdist(s)).collect();
+    pyprojects.extend(
+        clones
+            .iter()
+            .map(|c| fs::read_to_string(c.join(ARCHIVO_PYPROJECT)).ok()),
+    );
+    Ok(Some(indice_de_build(&pyprojects)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lista de build que dan los respaldos de PEP 517.
+    fn respaldo() -> Vec<String> {
+        vec!["setuptools".into(), "wheel".into()]
+    }
+
+    #[test]
+    fn descarga_requisitos_de_build_sin_pyproject_son_setuptools_y_wheel() {
+        assert_eq!(requisitos_de_build(None), respaldo());
+    }
+
+    #[test]
+    fn descarga_requisitos_de_build_lee_la_lista_de_build_system() {
+        assert_eq!(
+            requisitos_de_build(Some(
+                "[build-system]\nrequires = [\"setuptools>=68\", \"wheel\"]"
+            )),
+            ["setuptools>=68", "wheel"]
+        );
+        assert_eq!(
+            requisitos_de_build(Some("[build-system]\nrequires = [\"hatchling\"]")),
+            ["hatchling"]
+        );
+    }
+
+    #[test]
+    fn descarga_requisitos_de_build_recorta_y_descarta_vacios() {
+        assert_eq!(
+            requisitos_de_build(Some(
+                "[build-system]\nrequires = [\" setuptools>=68 \", \"  \", \"wheel\"]"
+            )),
+            ["setuptools>=68", "wheel"]
+        );
+    }
+
+    #[test]
+    fn descarga_requisitos_de_build_sin_build_system_o_roto_son_el_respaldo() {
+        assert_eq!(
+            requisitos_de_build(Some("[project]\nname = \"x\"")),
+            respaldo()
+        );
+        assert_eq!(requisitos_de_build(Some("no es toml [[[")), respaldo());
+    }
+
+    #[test]
+    fn descarga_requisito_de_build_aceptable_rechaza_referencias_directas() {
+        assert!(requisito_de_build_aceptable("setuptools>=68"));
+        assert!(!requisito_de_build_aceptable("foo @ https://x/y.tar.gz"));
+        assert!(!requisito_de_build_aceptable("foo @ x"));
+        assert!(!requisito_de_build_aceptable("git+https://x/y.git"));
+        assert!(!requisito_de_build_aceptable("-e ."));
+    }
+
+    #[test]
+    fn descarga_pyproject_de_sdist_lee_el_de_primer_nivel() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let raiz = dir.path().join("pkg-1.0");
+        fs::create_dir_all(raiz.join("sub")).expect("carpetas");
+        fs::write(
+            raiz.join("pyproject.toml"),
+            "[build-system]\nrequires = [\"setuptools>=68\"]\n",
+        )
+        .expect("pyproject");
+        fs::write(
+            raiz.join("sub").join("pyproject.toml"),
+            "[build-system]\nrequires = [\"hatchling\"]\n",
+        )
+        .expect("pyproject anidado");
+        let tgz = dir.path().join("pkg-1.0.tar.gz");
+        let estado = Command::new("tar")
+            .arg("-czf")
+            .arg(&tgz)
+            .arg("-C")
+            .arg(dir.path())
+            .arg("pkg-1.0")
+            .status()
+            .expect("tar");
+        assert!(estado.success());
+        let texto = pyproject_de_sdist(&tgz).expect("el pyproject de primer nivel");
+        assert_eq!(requisitos_de_build(Some(&texto)), ["setuptools>=68"]);
+    }
+
+    #[test]
+    fn descarga_pyproject_de_sdist_sin_pyproject_o_no_tar_es_none() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let raiz = dir.path().join("pkg-2.0");
+        fs::create_dir_all(&raiz).expect("carpeta");
+        fs::write(raiz.join("setup.py"), "x = 1\n").expect("setup.py");
+        let sin_pyproject = dir.path().join("pkg-2.0.tar.gz");
+        let estado = Command::new("tar")
+            .arg("-czf")
+            .arg(&sin_pyproject)
+            .arg("-C")
+            .arg(dir.path())
+            .arg("pkg-2.0")
+            .status()
+            .expect("tar");
+        assert!(estado.success());
+        assert_eq!(pyproject_de_sdist(&sin_pyproject), None);
+
+        let no_tar = dir.path().join("falso-1.0.tar.gz");
+        fs::write(&no_tar, "esto no es un tar\n").expect("archivo");
+        assert_eq!(pyproject_de_sdist(&no_tar), None);
+
+        let zip = dir.path().join("pkg-3.0.zip");
+        fs::write(&zip, "PK\u{3}\u{4}").expect("zip");
+        assert_eq!(pyproject_de_sdist(&zip), None);
+    }
+
+    #[test]
+    fn descarga_indice_de_build_une_sin_repetidos_exactos() {
+        let pyprojects = vec![
+            Some("[build-system]\nrequires = [\"setuptools>=68\", \"wheel\"]".to_string()),
+            Some("[build-system]\nrequires = [\"wheel\"]".to_string()),
+            None,
+        ];
+        let (requisitos, hallazgos) = indice_de_build(&pyprojects);
+        assert_eq!(requisitos, ["setuptools>=68", "wheel", "setuptools"]);
+        assert!(hallazgos.is_empty());
+    }
+
+    #[test]
+    fn descarga_indice_de_build_referencia_directa_da_hallazgo_y_no_se_baja() {
+        let pyprojects = vec![Some(
+            "[build-system]\nrequires = [\"foo @ https://usuario:clave@x/y.tar.gz\", \"wheel\"]"
+                .to_string(),
+        )];
+        let (requisitos, hallazgos) = indice_de_build(&pyprojects);
+        assert_eq!(requisitos, ["wheel"]);
+        assert_eq!(hallazgos.len(), 1, "{hallazgos:?}");
+        let h = &hallazgos[0];
+        assert_eq!(h.severidad, 1);
+        assert_eq!(h.archivo, "pyproject.toml");
+        assert_eq!(h.linea, 0);
+        assert!(
+            h.detalle
+                .starts_with("requisito de build con referencia directa: "),
+            "{}",
+            h.detalle
+        );
+        assert!(!h.detalle.contains("clave"), "{}", h.detalle);
+    }
 }

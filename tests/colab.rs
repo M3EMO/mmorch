@@ -680,6 +680,63 @@ fn colab_interrumpido(e: &Escenario, falso: &Path, senal: &str) -> (Option<i32>,
 }
 
 #[test]
+fn colab_stop_con_salida_desconocida_conserva_activo() {
+    let e = Escenario::nuevo(ENTORNO_O2);
+    let falso = falso_a_medida_stop(
+        e.falso.path(),
+        "exit 0",
+        "echo 'respuesta rara 7f3' >&2; exit 1",
+    );
+    let salida = correr(&e, &falso, &["--colab"]);
+    let stderr = String::from_utf8_lossy(&salida.stderr);
+    assert_eq!(salida.status.code(), Some(3), "stderr: {stderr}");
+    assert!(
+        e.llamadas().iter().any(|l| l.starts_with("stop -s")),
+        "falta el stop: {:?}",
+        e.llamadas()
+    );
+    assert!(
+        e.home.path().join("colab").join("activo.json").exists(),
+        "una salida de stop no reconocida no confirma la parada: activo.json se conserva"
+    );
+    let gates = e.eventos_runtime();
+    let ultimo = gates.last().expect("hay un Gate de colab-runtime");
+    assert_eq!(ultimo["extra"]["accion"], "liberar", "{gates:?}");
+    assert_eq!(ultimo["extra"]["confirmada"], false, "{gates:?}");
+}
+
+#[test]
+fn colab_tope_fraccion_de_minuto_libera_en_menos_de_5_s() {
+    let e = Escenario::nuevo(ENTORNO_O2);
+    fs::write(
+        e.home.path().join("root.toml"),
+        "[colab]\nminutos_max = 0.01\n",
+    )
+    .expect("root.toml");
+    let falso = falso_a_medida(e.falso.path(), "sleep 300", 0);
+    let inicio = Instant::now();
+    let salida = correr(&e, &falso, &["--colab"]);
+    let duracion = inicio.elapsed();
+    let stderr = String::from_utf8_lossy(&salida.stderr);
+    assert!(
+        duracion < Duration::from_secs(5),
+        "tardó {duracion:?}: {stderr}"
+    );
+    assert_eq!(salida.status.code(), Some(3), "stderr: {stderr}");
+    assert!(
+        stderr.contains("Colab superó el tope de 600 ms: se liberó el runtime"),
+        "{stderr}"
+    );
+    let lineas = e.llamadas();
+    assert!(
+        lineas.iter().any(|l| l.contains("corre.py")),
+        "la corrida no llegó a corre.py: {lineas:?}"
+    );
+    let ultima = lineas.last().cloned().unwrap_or_default();
+    assert!(ultima.starts_with("stop -s"), "última llamada: {ultima}");
+}
+
+#[test]
 fn colab_sigint_con_sesion_inexistente_confirma_y_borra_activo() {
     let e = Escenario::nuevo(ENTORNO_O2);
     let falso = falso_a_medida_stop(

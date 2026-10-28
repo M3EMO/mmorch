@@ -534,7 +534,16 @@ pub fn hay_runtime_anotado(home: &Path) -> bool {
 }
 
 /// Texto del tope para el usuario: minutos si es un múltiplo exacto de minuto, si no segundos.
+/// Un tope de menos de un segundo se dice en milisegundos (o en microsegundos si no llega a 1 ms).
 pub fn describir_tope(tope: Duration) -> String {
+    if tope < Duration::from_secs(1) {
+        let milisegundos = tope.as_millis();
+        return if milisegundos > 0 {
+            format!("{milisegundos} ms")
+        } else {
+            format!("{} µs", tope.as_micros())
+        };
+    }
     let segundos = tope.as_secs();
     if segundos > 0 && segundos.is_multiple_of(60) {
         format!("{} minutos", segundos / 60)
@@ -1881,6 +1890,11 @@ mod tests {
         assert_eq!(describir_tope(Duration::from_secs(120)), "2 minutos");
         assert_eq!(describir_tope(Duration::from_secs(1800)), "30 minutos");
         assert_eq!(describir_tope(Duration::from_secs(2)), "2 segundos");
+    }
+
+    #[test]
+    fn colab_describir_tope_menos_de_un_segundo_dice_milisegundos() {
+        assert_eq!(describir_tope(Duration::from_millis(600)), "600 ms");
     }
 
     #[test]

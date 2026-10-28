@@ -490,8 +490,8 @@ pub fn elegir_dockerfile(repo: &Path, containerfile: Option<&str>) -> Eleccion {
 /// Carpetas que no entran al buscar Dockerfile. Las mismas que la sonda de `configs`.
 const CARPETAS_SIN_DOCKERFILE: [&str; 4] = ["target", ".git", "node_modules", "vendor"];
 
-/// Rutas relativas (con `/`) de los Dockerfile del repo, en orden alfabético. Suma `*.Dockerfile` y
-/// `*.Containerfile` a los nombres de `configs`, que no cambian: solo sirven para elegir qué construir.
+/// Rutas relativas (con `/`) de los Dockerfile del repo, en orden alfabético. Usa
+/// `configs::es_nombre_dockerfile`, el mismo reconocedor que la sonda de `configs`.
 pub fn dockerfiles_del_repo(repo: &Path) -> Vec<String> {
     let mut salida = Vec::new();
     recorrer_dockerfiles(repo, repo, &mut salida);
@@ -514,19 +514,11 @@ fn recorrer_dockerfiles(repo: &Path, dir: &Path, salida: &mut Vec<String>) {
             if !CARPETAS_SIN_DOCKERFILE.contains(&nombre.as_str()) {
                 recorrer_dockerfiles(repo, &ruta, salida);
             }
-        } else if tipo.is_file() && es_nombre_dockerfile(&nombre) {
+        } else if tipo.is_file() && configs::es_nombre_dockerfile(&nombre) {
             let rel = ruta.strip_prefix(repo).unwrap_or(&ruta);
             salida.push(rel.to_string_lossy().replace('\\', "/"));
         }
     }
-}
-
-fn es_nombre_dockerfile(nombre: &str) -> bool {
-    nombre == "Dockerfile"
-        || nombre == "Containerfile"
-        || nombre.starts_with("Dockerfile.")
-        || nombre.ends_with(".Dockerfile")
-        || nombre.ends_with(".Containerfile")
 }
 
 /// Ruta normalizada si `ruta` es un archivo regular del repo. No sale del repo ni sigue enlaces.

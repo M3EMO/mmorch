@@ -113,7 +113,7 @@ fn oraculo_colab(
     let senales = oracle::colab::Senales::instalar().map_err(|e| {
         oracle::ErrorOraculo::Infra(format!("no se pudieron registrar las señales: {e}"))
     })?;
-    let tope = std::time::Duration::from_secs(u64::from(cfg.colab.minutos_max) * 60);
+    let tope = std::time::Duration::from_secs_f64(cfg.colab.minutos_max * 60.0);
     let sesion = oracle::colab::nombre_sesion(&tarea.nombre);
     let resultado =
         oracle::colab::correr_en_colab(&cli, &paquete.dir, tarea, home, &sesion, &senales, tope)?;

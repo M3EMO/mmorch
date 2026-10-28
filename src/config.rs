@@ -45,7 +45,7 @@ pub struct Config {
 #[serde(default)]
 pub struct ConfigColab {
     /// Minutos máximos de una corrida en Colab. Al llegar al tope, Root libera el runtime.
-    pub minutos_max: u32,
+    pub minutos_max: f64,
 }
 
 /// Sección `[proveedores]`: URLs de las APIs, espera base de reintentos y timeout por intento.
@@ -138,7 +138,7 @@ impl Default for Config {
 
 impl Default for ConfigColab {
     fn default() -> Self {
-        ConfigColab { minutos_max: 30 }
+        ConfigColab { minutos_max: 30.0 }
     }
 }
 
@@ -282,9 +282,16 @@ impl Config {
                 "balance.prefiere_api_sobre debe estar en (0, 1]".into(),
             ));
         }
-        if self.colab.minutos_max == 0 {
+        let minutos = self.colab.minutos_max;
+        if !(minutos.is_finite() && minutos > 0.0) {
             return Err(Error::ConfigValor(
-                "colab.minutos_max debe ser al menos 1".into(),
+                "colab.minutos_max debe ser mayor que 0".into(),
+            ));
+        }
+        // Un valor finito enorme no entra en un `Duration`: `from_secs_f64` entraría en pánico.
+        if std::time::Duration::try_from_secs_f64(minutos * 60.0).is_err() {
+            return Err(Error::ConfigValor(
+                "colab.minutos_max es demasiado grande".into(),
             ));
         }
         Ok(())
@@ -550,9 +557,9 @@ tope_usd = 200.0
 
     #[test]
     fn colab_config_minutos_max_por_defecto_es_30() {
-        assert_eq!(Config::default().colab.minutos_max, 30);
+        assert_eq!(Config::default().colab.minutos_max, 30.0);
         let c = Config::desde_texto("").expect("vacío debe parsear");
-        assert_eq!(c.colab.minutos_max, 30);
+        assert_eq!(c.colab.minutos_max, 30.0);
     }
 
     #[test]
@@ -566,9 +573,42 @@ tope_usd = 200.0
     #[test]
     fn colab_config_minutos_max_ida_y_vuelta() {
         let c = Config::desde_texto("[colab]\nminutos_max = 45").expect("debe parsear");
-        assert_eq!(c.colab.minutos_max, 45);
+        assert_eq!(c.colab.minutos_max, 45.0);
         let texto = toml::to_string(&c).expect("serializa");
         let vuelta = Config::desde_texto(&texto).expect("vuelve a parsear");
         assert_eq!(vuelta, c);
+    }
+
+    #[test]
+    fn colab_config_minutos_max_acepta_fraccion() {
+        let c = Config::desde_texto("[colab]\nminutos_max = 0.01").expect("debe parsear");
+        assert_eq!(c.colab.minutos_max, 0.01);
+    }
+
+    #[test]
+    fn colab_config_minutos_max_entero_sigue_cargando() {
+        let c = Config::desde_texto("[colab]\nminutos_max = 45").expect("debe parsear");
+        assert_eq!(c.colab.minutos_max, 45.0);
+    }
+
+    #[test]
+    fn colab_config_minutos_max_enorme_da_error_y_no_panica() {
+        let error = Config::desde_texto("[colab]\nminutos_max = 1e300").expect_err("enorme");
+        assert_eq!(error.codigo_de_salida(), 2);
+        assert!(error.to_string().contains("colab.minutos_max"), "{error}");
+    }
+
+    #[test]
+    fn colab_config_minutos_max_negativo_o_infinito_da_error() {
+        for texto in ["[colab]\nminutos_max = -1.0", "[colab]\nminutos_max = inf"] {
+            let error = Config::desde_texto(texto).expect_err(texto);
+            assert_eq!(error.codigo_de_salida(), 2);
+            assert!(
+                error
+                    .to_string()
+                    .contains("colab.minutos_max debe ser mayor que 0"),
+                "{error}"
+            );
+        }
     }
 }

@@ -108,12 +108,13 @@ const PATRONES_PIDE_CREDENCIALES: [&str; 3] = [
     "basic auth credentials",
 ];
 /// Fragmentos (en minúscula) de un texto ambiguo: la imagen no existe o es privada.
-const PATRONES_IMAGEN_INACCESIBLE: [&str; 5] = [
+const PATRONES_IMAGEN_INACCESIBLE: [&str; 6] = [
     "requested access to the resource is denied",
     "pull access denied",
     "manifest unknown",
     "name unknown",
     "not found",
+    "unauthorized",
 ];
 
 /// Hash corto de un contenido: primeros 16 caracteres hex de su sha256.
@@ -1503,6 +1504,20 @@ location searched: crates.io index";
                 "{salida}"
             );
         }
+    }
+
+    #[test]
+    fn descarga_unauthorized_sin_authentication_required_es_imagen_inaccesible() {
+        assert_eq!(
+            clasificar_error_pull(
+                "Error: initializing source docker://x/y:1: unauthorized: access to the requested resource is not authorized"
+            ),
+            Problema::ImagenInaccesible
+        );
+        assert_eq!(
+            clasificar_error_pull("Error: unauthorized: authentication required"),
+            Problema::PideCredenciales
+        );
     }
 
     #[test]

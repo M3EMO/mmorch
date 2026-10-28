@@ -91,14 +91,21 @@ fn tipo_de(nombre: &str) -> Option<TipoConfig> {
         Some(TipoConfig::Toml)
     } else if nombre.ends_with(".yaml") || nombre.ends_with(".yml") {
         Some(TipoConfig::Yaml)
-    } else if nombre == "Dockerfile"
-        || nombre == "Containerfile"
-        || nombre.starts_with("Dockerfile.")
-    {
+    } else if es_nombre_dockerfile(nombre) {
         Some(TipoConfig::Dockerfile)
     } else {
         None
     }
+}
+
+/// Nombres de Dockerfile del repo: `Dockerfile`, `Containerfile`, `Dockerfile.*`, `*.Dockerfile` y
+/// `*.Containerfile`. Es el único reconocedor: `configs` y la elección de la entrega lo usan.
+pub fn es_nombre_dockerfile(nombre: &str) -> bool {
+    nombre == "Dockerfile"
+        || nombre == "Containerfile"
+        || nombre.starts_with("Dockerfile.")
+        || nombre.ends_with(".Dockerfile")
+        || nombre.ends_with(".Containerfile")
 }
 
 /// Las cuatro sondas de configuración. Valen para cualquier lenguaje.
@@ -805,6 +812,43 @@ mod tests {
     fn configs_buscar_repo_vacio_da_lista_vacia() {
         let repo = tempfile::tempdir().expect("temp dir");
         assert!(buscar_archivos(repo.path()).is_empty());
+    }
+
+    #[test]
+    fn configs_app_dockerfile_cuenta_como_dockerfile() {
+        let repo = repo_con("docker/app.Dockerfile", "FROM alpine\n");
+        assert_eq!(
+            buscar_archivos(repo.path()),
+            vec![ArchivoConfig {
+                ruta_relativa: "docker/app.Dockerfile".into(),
+                tipo: TipoConfig::Dockerfile,
+            }]
+        );
+        let r = sonda_dockerfile_reglas(repo.path(), &[]);
+        assert!(
+            r.hallazgos
+                .iter()
+                .any(|h| h.archivo == "docker/app.Dockerfile"
+                    && h.detalle.contains("imagen base sin versión")),
+            "{:?}",
+            r.hallazgos
+        );
+    }
+
+    #[test]
+    fn configs_es_nombre_dockerfile_reconoce_las_cinco_formas() {
+        for nombre in [
+            "Dockerfile",
+            "Containerfile",
+            "Dockerfile.dev",
+            "app.Dockerfile",
+            "app.Containerfile",
+        ] {
+            assert!(es_nombre_dockerfile(nombre), "{nombre}");
+        }
+        for nombre in ["dockerfile.txt", "Dockerfilex", "README.md"] {
+            assert!(!es_nombre_dockerfile(nombre), "{nombre}");
+        }
     }
 
     #[test]

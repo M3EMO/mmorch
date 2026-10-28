@@ -518,7 +518,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "colab": {
       "$ref": "#/$defs/ConfigColab",
       "default": {
-        "minutos_max": 30
+        "minutos_max": 30.0
       }
     },
     "modelos": {
@@ -627,10 +627,9 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "properties": {
         "minutos_max": {
           "description": "Minutos máximos de una corrida en Colab. Al llegar al tope, Root libera el runtime.",
-          "type": "integer",
-          "format": "uint32",
-          "default": 30,
-          "minimum": 0
+          "type": "number",
+          "format": "double",
+          "default": 30.0
         }
       }
     },
