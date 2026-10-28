@@ -387,6 +387,9 @@ mod tests {
                 },
             ],
             oraculo_dudoso: Vec::new(),
+            requisito: Vec::new(),
+            arquitectura: None,
+            eficiencia: None,
             dir: PathBuf::new(),
         };
         let mut colab = BTreeMap::new();

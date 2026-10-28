@@ -5,6 +5,7 @@ pub mod descarga;
 pub mod evidencia;
 pub mod junit;
 pub mod pendientes;
+pub mod perfiles;
 pub mod rubrica;
 pub mod tarea;
 

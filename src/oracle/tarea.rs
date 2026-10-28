@@ -30,6 +30,15 @@ pub struct Tarea {
     /// Tests que dependen de una frase ambigua de la spec.
     #[serde(default)]
     pub oraculo_dudoso: Vec<Exclusion>,
+    /// Lo que el producto promete, sección por sección de la spec (Tarea 9c).
+    #[serde(default)]
+    pub requisito: Vec<Requisito>,
+    /// Capas de la arquitectura para la sonda de módulos (Tarea 9).
+    #[serde(default)]
+    pub arquitectura: Option<ArquitecturaTarea>,
+    /// Comando de eficiencia y su piso (Tarea 9, se corre en 9-B).
+    #[serde(default)]
+    pub eficiencia: Option<EficienciaTarea>,
     /// Carpeta de la tarea. Se monta como `/oraculo`. No viene del TOML.
     #[serde(skip)]
     pub dir: PathBuf,
@@ -50,6 +59,46 @@ pub struct Comando {
 pub struct Exclusion {
     pub test: String,
     pub motivo: String,
+}
+
+/// Un requisito del producto. `modulos` lo liga al código que lo implementa.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Requisito {
+    pub id: String,
+    pub titulo: String,
+    #[serde(default)]
+    pub seccion: String,
+    /// Importancia para el usuario, de 1 a 3.
+    #[serde(default = "peso_por_defecto")]
+    pub peso: u8,
+    #[serde(default)]
+    pub pruebas: Vec<String>,
+    #[serde(default)]
+    pub bordes: Vec<String>,
+    #[serde(default)]
+    pub escenarios: Vec<String>,
+    #[serde(default)]
+    pub criterios: Vec<String>,
+    /// Módulos del código que implementan el requisito. Ej.: `protocolo`.
+    #[serde(default)]
+    pub modulos: Vec<String>,
+}
+
+/// Capas de módulos. Una capa importa solo capas posteriores.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ArquitecturaTarea {
+    pub capas: Vec<Vec<String>>,
+}
+
+/// Comando de eficiencia. Imprime JSON `{"ops_s": f64}` y debe llegar a `piso`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct EficienciaTarea {
+    pub cmd: String,
+    pub piso: f64,
+}
+
+fn peso_por_defecto() -> u8 {
+    1
 }
 
 fn repeticiones_por_defecto() -> u32 {
@@ -95,6 +144,23 @@ impl Tarea {
                 return Err(format!(
                     "el test {} está excluido dos veces",
                     exclusion.test
+                ));
+            }
+        }
+        self.validar_requisitos()
+    }
+
+    /// Cada requisito tiene id único y peso de 1 a 3.
+    fn validar_requisitos(&self) -> Result<(), String> {
+        let mut ids = std::collections::BTreeSet::new();
+        for requisito in &self.requisito {
+            if !ids.insert(requisito.id.as_str()) {
+                return Err(format!("el requisito {} está repetido", requisito.id));
+            }
+            if !(1..=3).contains(&requisito.peso) {
+                return Err(format!(
+                    "el peso de {} debe estar entre 1 y 3",
+                    requisito.id
                 ));
             }
         }
@@ -352,5 +418,100 @@ capas = [["protocolo"], ["comandos"]]
                 "debe rechazar {nombre:?}"
             );
         }
+    }
+
+    const REQUISITOS: &str = r###"
+[[requisito]]
+id = "R1"
+titulo = "Protocolo RESP2"
+seccion = "## Protocolo"
+peso = 3
+pruebas = ["test_m1_protocolo"]
+bordes = ["test_m1_protocolo::test_trama_partida"]
+escenarios = ["e2e-set-get"]
+criterios = ["completitud.alcance"]
+modulos = ["protocolo"]
+
+[[requisito]]
+id = "R2"
+titulo = "Almacen"
+
+[arquitectura]
+capas = [["protocolo"], ["comandos"], ["almacen"]]
+
+[eficiencia]
+cmd = "python /oraculo/bench.py /repo"
+piso = 5000.0
+"###;
+
+    #[test]
+    fn requisitos_arquitectura_y_eficiencia_se_parsean() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), &format!("{MINIMO}{REQUISITOS}"));
+        let t = Tarea::cargar_de(dir.path()).expect("parsea");
+        assert_eq!(t.requisito.len(), 2);
+        let r1 = &t.requisito[0];
+        assert_eq!(r1.id, "R1");
+        assert_eq!(r1.seccion, "## Protocolo");
+        assert_eq!(r1.peso, 3);
+        assert_eq!(r1.pruebas, ["test_m1_protocolo"]);
+        assert_eq!(r1.bordes, ["test_m1_protocolo::test_trama_partida"]);
+        assert_eq!(r1.escenarios, ["e2e-set-get"]);
+        assert_eq!(r1.criterios, ["completitud.alcance"]);
+        assert_eq!(r1.modulos, ["protocolo"]);
+        let r2 = &t.requisito[1];
+        assert_eq!(r2.peso, 1);
+        assert!(r2.modulos.is_empty());
+        let arq = t.arquitectura.expect("arquitectura");
+        assert_eq!(arq.capas.len(), 3);
+        assert_eq!(arq.capas[0], ["protocolo"]);
+        let efi = t.eficiencia.expect("eficiencia");
+        assert_eq!(efi.cmd, "python /oraculo/bench.py /repo");
+        assert_eq!(efi.piso, 5000.0);
+    }
+
+    #[test]
+    fn sin_requisitos_ni_secciones_quedan_vacios() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), MINIMO);
+        let t = Tarea::cargar_de(dir.path()).expect("parsea");
+        assert!(t.requisito.is_empty());
+        assert!(t.arquitectura.is_none());
+        assert!(t.eficiencia.is_none());
+    }
+
+    #[test]
+    fn requisito_peso_fuera_de_rango_es_error_de_carga() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let texto = format!("{MINIMO}\n[[requisito]]\nid = \"R1\"\ntitulo = \"x\"\npeso = 4\n");
+        escribir(dir.path(), &texto);
+        assert!(matches!(
+            Tarea::cargar_de(dir.path()),
+            Err(ErrorOraculo::Tarea(_))
+        ));
+    }
+
+    #[test]
+    fn requisito_peso_cero_es_error_de_carga() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let texto = format!("{MINIMO}\n[[requisito]]\nid = \"R1\"\ntitulo = \"x\"\npeso = 0\n");
+        escribir(dir.path(), &texto);
+        assert!(matches!(
+            Tarea::cargar_de(dir.path()),
+            Err(ErrorOraculo::Tarea(_))
+        ));
+    }
+
+    #[test]
+    fn requisito_id_duplicado_es_error_de_carga() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let texto = format!(
+            "{MINIMO}\n[[requisito]]\nid = \"R1\"\ntitulo = \"a\"\n\n[[requisito]]\nid = \"R1\"\ntitulo = \"b\"\n"
+        );
+        escribir(dir.path(), &texto);
+        assert!(matches!(
+            Tarea::cargar_de(dir.path()),
+            Err(ErrorOraculo::Tarea(_))
+        ));
     }
 }
