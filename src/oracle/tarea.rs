@@ -39,6 +39,12 @@ pub struct Tarea {
     /// Comando de eficiencia y su piso (Tarea 9, se corre en 9-B).
     #[serde(default)]
     pub eficiencia: Option<EficienciaTarea>,
+    /// Instalación, arranque y archivos de entrega (Tarea 9d).
+    #[serde(default)]
+    pub entrega: Option<EntregaTarea>,
+    /// Flujos de usuario que corren contra el producto levantado (Tarea 9d).
+    #[serde(default)]
+    pub escenario: Vec<Escenario>,
     /// Carpeta de la tarea. Se monta como `/oraculo`. No viene del TOML.
     #[serde(skip)]
     pub dir: PathBuf,
@@ -97,6 +103,33 @@ pub struct EficienciaTarea {
     pub piso: f64,
 }
 
+/// Instalación y arranque del producto, en un contenedor limpio (Tarea 9d).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct EntregaTarea {
+    /// Comando de instalación. Corre en una copia del repo.
+    pub instalar: String,
+    /// Comando que deja el producto arriba. Corre en segundo plano.
+    pub correr: String,
+    /// Archivos que el repo debe traer. Ej.: `README.md`.
+    #[serde(default)]
+    pub archivos: Vec<String>,
+    /// Segundos que se espera antes de revisar que `correr` sigue vivo.
+    #[serde(default = "espera_por_defecto")]
+    pub espera_segundos: u64,
+}
+
+/// Un flujo real de usuario. `cmd` sale 0 si el flujo funciona.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Escenario {
+    /// Nombre estable. Solo `[A-Za-z0-9._-]`. Los requisitos lo citan por este id.
+    pub id: String,
+    pub cmd: String,
+}
+
+fn espera_por_defecto() -> u64 {
+    5
+}
+
 fn peso_por_defecto() -> u8 {
     1
 }
@@ -135,6 +168,7 @@ impl Tarea {
                 self.repeticiones_inestable, self.repeticiones
             ));
         }
+        self.validar_escenarios()?;
         let mut vistos = std::collections::BTreeSet::new();
         for exclusion in self.entorno.iter().chain(&self.oraculo_dudoso) {
             if exclusion.motivo.trim().is_empty() {
@@ -148,6 +182,25 @@ impl Tarea {
             }
         }
         self.validar_requisitos()
+    }
+
+    /// Cada escenario tiene id único, con solo `[A-Za-z0-9._-]`.
+    fn validar_escenarios(&self) -> Result<(), String> {
+        let mut ids = std::collections::BTreeSet::new();
+        for escenario in &self.escenario {
+            let valido = !escenario.id.is_empty()
+                && escenario
+                    .id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+            if !valido {
+                return Err(format!("id de escenario inválido: {:?}", escenario.id));
+            }
+            if !ids.insert(escenario.id.as_str()) {
+                return Err(format!("el escenario {} está repetido", escenario.id));
+            }
+        }
+        Ok(())
     }
 
     /// Cada requisito tiene id único y peso de 1 a 3.
@@ -217,9 +270,6 @@ cmd = "/oraculo/escenarios/set_get.sh"
 
 [[sonda]]
 nombre = "gitleaks"
-
-[entrega]
-instalar = "cargo build --release"
 
 [pruebas]
 mutantes_max = 60
@@ -507,6 +557,87 @@ piso = 5000.0
         let dir = tempfile::tempdir().expect("temp dir");
         let texto = format!(
             "{MINIMO}\n[[requisito]]\nid = \"R1\"\ntitulo = \"a\"\n\n[[requisito]]\nid = \"R1\"\ntitulo = \"b\"\n"
+        );
+        escribir(dir.path(), &texto);
+        assert!(matches!(
+            Tarea::cargar_de(dir.path()),
+            Err(ErrorOraculo::Tarea(_))
+        ));
+    }
+
+    const ENTREGA: &str = r#"
+[entrega]
+instalar = "cargo build --release"
+correr = "./target/release/memora --config memora.conf.example"
+archivos = ["README.md", "Dockerfile"]
+
+[[escenario]]
+id = "e2e-set-get"
+cmd = "/oraculo/escenarios/set_get.sh"
+
+[[escenario]]
+id = "reinicio.v2_ok"
+cmd = "exit 0"
+"#;
+
+    #[test]
+    fn entrega_seccion_y_escenarios_se_parsean() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), &format!("{MINIMO}{ENTREGA}"));
+        let t = Tarea::cargar_de(dir.path()).expect("parsea");
+        let e = t.entrega.expect("entrega");
+        assert_eq!(e.instalar, "cargo build --release");
+        assert_eq!(
+            e.correr,
+            "./target/release/memora --config memora.conf.example"
+        );
+        assert_eq!(e.archivos, ["README.md", "Dockerfile"]);
+        assert_eq!(e.espera_segundos, 5, "espera por defecto de 5 s");
+        assert_eq!(t.escenario.len(), 2);
+        assert_eq!(t.escenario[0].id, "e2e-set-get");
+        assert_eq!(t.escenario[1].cmd, "exit 0");
+    }
+
+    #[test]
+    fn entrega_sin_secciones_quedan_none_y_vacio() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), MINIMO);
+        let t = Tarea::cargar_de(dir.path()).expect("parsea");
+        assert!(t.entrega.is_none());
+        assert!(t.escenario.is_empty());
+    }
+
+    #[test]
+    fn entrega_espera_segundos_y_archivos_se_leen_si_estan() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let texto = format!(
+            "{MINIMO}\n[entrega]\ninstalar = \"true\"\ncorrer = \"true\"\nespera_segundos = 2\n"
+        );
+        escribir(dir.path(), &texto);
+        let t = Tarea::cargar_de(dir.path()).expect("parsea");
+        let e = t.entrega.expect("entrega");
+        assert_eq!(e.espera_segundos, 2);
+        assert!(e.archivos.is_empty());
+    }
+
+    #[test]
+    fn entrega_id_de_escenario_con_caracteres_raros_es_error_de_carga() {
+        for id in ["a b", "a/b", "a;rm", "a$(x)", "", "ñu"] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let texto = format!("{MINIMO}\n[[escenario]]\nid = \"{id}\"\ncmd = \"exit 0\"\n");
+            escribir(dir.path(), &texto);
+            assert!(
+                matches!(Tarea::cargar_de(dir.path()), Err(ErrorOraculo::Tarea(_))),
+                "debe rechazar el id {id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn entrega_id_de_escenario_repetido_es_error_de_carga() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let texto = format!(
+            "{MINIMO}\n[[escenario]]\nid = \"a\"\ncmd = \"x\"\n\n[[escenario]]\nid = \"a\"\ncmd = \"y\"\n"
         );
         escribir(dir.path(), &texto);
         assert!(matches!(

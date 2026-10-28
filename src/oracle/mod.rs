@@ -3,6 +3,7 @@
 pub mod configs;
 pub mod contenedor;
 pub mod descarga;
+pub mod entrega;
 pub mod evidencia;
 pub mod junit;
 pub mod pendientes;

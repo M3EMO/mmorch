@@ -17,6 +17,9 @@ const SONDA_ESTRUCTURA: &str = "configs";
 const SONDA_SECRETOS: &str = "configs-secretos";
 const SONDA_DOCKERFILE: &str = "dockerfile";
 const SONDA_HADOLINT: &str = "hadolint";
+/// Detalle de la regla (b): el último stage corre como root. La sonda de entrega lo reusa.
+const DETALLE_RAIZ: &str =
+    "la última etapa no define un USER no-root: el contenedor corre como root";
 /// Carpetas que no se recorren, en cualquier nivel del repo.
 const CARPETAS_IGNORADAS: &[&str] = &["target", ".git", "node_modules", "vendor"];
 /// Palabras que, dentro de una clave, marcan un secreto.
@@ -359,6 +362,27 @@ fn es_literal_secreto(crudo: &str) -> bool {
     !PLACEHOLDERS.iter().any(|p| minuscula.contains(p))
 }
 
+/// Hallazgos de la regla (b) "corre como root" de los Dockerfile del repo. Un error de lectura
+/// da `Err`. Lo usa la sonda de entrega (Tarea 9d) para repetir solo ese caso.
+pub fn dockerfile_corre_como_root(
+    repo: &Path,
+    requisitos: &[Requisito],
+) -> Result<Vec<Hallazgo>, String> {
+    let mut hallazgos = Vec::new();
+    for archivo in buscar_archivos(repo) {
+        if archivo.tipo != TipoConfig::Dockerfile {
+            continue;
+        }
+        let texto = leer(repo, &archivo.ruta_relativa)?;
+        hallazgos.extend(
+            reglas_dockerfile(&archivo.ruta_relativa, &texto, requisitos)
+                .into_iter()
+                .filter(|h| h.detalle == DETALLE_RAIZ),
+        );
+    }
+    Ok(hallazgos)
+}
+
 fn sonda_dockerfile_reglas(repo: &Path, requisitos: &[Requisito]) -> ResultadoSonda {
     let d = Dimension::Seguridad;
     let mut hallazgos = Vec::new();
@@ -565,7 +589,7 @@ fn reglas_dockerfile(archivo: &str, texto: &str, requisitos: &[Requisito]) -> Ve
                 archivo,
                 from.linea,
                 &from.cita,
-                "la última etapa no define un USER no-root: el contenedor corre como root",
+                DETALLE_RAIZ,
                 SONDA_DOCKERFILE,
                 requisitos,
             ));

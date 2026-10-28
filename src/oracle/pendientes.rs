@@ -390,6 +390,8 @@ mod tests {
             requisito: Vec::new(),
             arquitectura: None,
             eficiencia: None,
+            entrega: None,
+            escenario: Vec::new(),
             dir: PathBuf::new(),
         };
         let mut colab = BTreeMap::new();
