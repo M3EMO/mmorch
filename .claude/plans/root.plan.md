@@ -53,11 +53,12 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 27 | P17b: "a". Si la construcción sin red queda `Pendiente`, Root la repite con red en forma automática. Es la autorización del usuario para correr con red los `RUN` del builder. Ver Tarea 9d3. |
 | 28 | P18b: "a y b". Hito 1: cada `Fila` guarda la forma de la corrida, y Aprende propone cambios de forma que el usuario aplica a mano. Hito 4 (CAB): generar y medir arquitecturas de agentes nuevas. Ver Tarea 15d. |
 | 29 | P21: "b". Root lee la credencial de un registro desde una variable de entorno nombrada en `root.toml`. La pasa solo al contenedor de descarga y nunca la escribe en un log. Es la autorización del usuario para esas claves. Ver Tarea 6d. |
-| 30 | P34: "C pero con un juez (sonnet) para delimitar necesidades." La descarga respeta el `.cargo/config.toml` del repo, y un juez Sonnet evalúa qué entradas necesita el proyecto. El papel exacto del juez espera a P38. Ver Tarea 6d. |
+| 30 | P34: "C pero con un juez (sonnet) para delimitar necesidades." La descarga respeta el `.cargo/config.toml` del repo, y un juez Sonnet evalúa qué entradas necesita el proyecto. El juez solo informa (decisión 35). Ver Tarea 6d. |
 | 31 | P35: "b con c de respaldo". Colab instala Rust con `rustup-init` verificado por su `.sha256`. Si esa instalación falla, Root compila brasa en la máquina del usuario y lleva el binario. Ver Tarea 7k. |
 | 32 | P36: "a". El "Outcome" del hito 1 en el PRD vuelve a su texto original. |
 | 33 | P37: "P37 B pero sin limite de tiempo", precisada como "hagamos que el limite sean 2 hs pero que el planner y un hook/script corten una corrida si ya se recibio lo que requeria". La cuenta de Colab es paga y el usuario acepta el gasto de la T4. Cada corrida tiene un tope de 2 horas y se corta antes si ya entregó lo que pedía. Ver Tarea 7l. |
 | 34 | "Prioricemos el uso de las sesiones de nube porque vence el 5 de noviembre, concentremos el trabajo alli." Las builds de Sonnet corren en sesiones de Claude Code en la nube, sin podman, sin `ROOT_HOME` y sin Colab, hasta el 2026-11-05. Ver "Nube o laptop". |
+| 35 | P38: "a". El juez de la config de cargo solo informa: sus hallazgos van al informe, y `cargo` usa todo el config. El juez nunca abre ni cierra la red. |
 
 ## Patterns to Mirror
 
@@ -1006,8 +1007,8 @@ Gates humanos que frenan el resto:
 - **P17, construir el Dockerfile.** La parte c) está aplicada (Tarea 9d2). La parte b) espera a P17b.
 - **P18, aprender en los roles fijos.** La parte c) está aplicada (Tarea 15c). La segunda parte espera a P18b.
 - **P21, credenciales de registros.** Respondida (decisión 29). Tarea 6d.
-- **P38, papel del juez de la config de cargo.** No frena la 6d: el juez informa hasta la respuesta.
-- **P39, memora como banco.** Frena G1, G3 y las Tareas 12, 12b, 13, 13b y 16 si la respuesta saca a memora o a brasa. No frena 6e, 6d, 9d3, 15d ni 7k.
+- **P38, papel del juez de la config de cargo.** Respondida (decisión 35): el juez solo informa.
+- **P39, memora como banco.** El usuario respondió "a o c" y todavía no eligió una. Frena G1, G3 y las Tareas 12, 12b, 13, 13b y 16 si la respuesta saca a memora o a brasa. No frena 6e, 6d, 9d3, 15d ni 7k.
 
 **Respuestas para las fichas (G1, decisión 26).** Opus las escribe en `## Ficha` al redactar G1:
 - **memora**: el requisito de `BLPOP` exige orden FIFO entre clientes bloqueados. Su aceptación cita `test_blpop_fifo_entre_clientes`. Ese test es correcto, y su falla de 9 en 30 corridas es un defecto del producto con origen "producto".
@@ -1208,7 +1209,7 @@ Respuestas a las siete preguntas de Sonnet de la build-12 y diseño de las decis
 - **Qué ve el juez.** Las entradas del config, `Cargo.toml`, el inventario y la ficha del spec. No ve el código del proyecto ni los tests ocultos.
 - **Cómo falla.** El juez corre con `r00t route --rol juzga`, con razonamiento prendido, y su modelo es Sonnet (decisión 30). El gate de evidencia descarta una respuesta sin cita. Un JSON roto o un error del proveedor da `SinVeredicto` en ese juicio, y la descarga sigue según la opción c).
 - **Qué produce.** Cada `innecesaria` o `riesgosa` da un hallazgo de entrega con su cita. Esos hallazgos entran al informe.
-- **Qué queda fuera del juez.** El juez no abre ni cierra la red, y no decide qué entradas usa `cargo`. Un LLM que decide sobre proxies o credenciales actúa en la zona roja sin gate humano, y eso choca con el GOAL. Si el usuario quiere que el juez filtre la red, P38 lo decide.
+- **Qué queda fuera del juez.** El juez no abre ni cierra la red, y no decide qué entradas usa `cargo`. Un LLM que decide sobre proxies o credenciales actúa en la zona roja sin gate humano, y eso choca con el GOAL. El usuario lo confirmó con P38 a) (decisión 35).
 
 **Credenciales de registros (decisión 29)**
 - `root.toml` suma `[[registro]]` con `nombre`, `url` y `credencial_env`. Solo el humano escribe esa lista.
