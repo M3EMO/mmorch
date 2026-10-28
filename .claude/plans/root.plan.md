@@ -1478,3 +1478,126 @@ La corrida real de Colab espera a G1 y se hace en la laptop.
 **Respuestas del 2026-10-28 (decisión 37):** P48 "P48 a pero emita sus tareas en toml". P49: el usuario respondió "P49 c", pero P49 tiene solo a y b. El orquestador le pidió que aclare. Hasta la aclaración, rige a).
 
 **Respuesta del 2026-10-28 (decisión 38):** P49 "P49 b: la Tarea 16 corre Graft y memora." P49 queda cerrada.
+
+## Revisión de nube (2026-10-28): verificación de Opus
+
+Una sesión de nube revisó el crate en el commit 573b2c4 con `/code-review high` y cuatro revisores. El informe vive en la rama `claude/amazing-ptolemy-q9kkem`, en `docs/revision/2026-10-28-revision-nube.md`. Encontró 4 hallazgos críticos, 11 altos, 16 medios y 19 bajos.
+Opus verificó cada crítico y cada alto en el código actual. El código de `src/` no cambió entre 573b2c4 y 61d279d. Un hallazgo entra solo si el defecto está en el código.
+
+| Id | Veredicto | Motivo |
+|---|---|---|
+| C1 | Confirmado | `requisitos_pip` deja una ruta local como especificador, y `es_directa` no la reconoce. Opus corrió el mismo `pip download --only-binary=:all:` sin red con un backend PEP 517 propio: pip lo ejecutó y creó el archivo marca. En la descarga eso pasa con red y con `/repo` montado. |
+| C2 | Confirmado | `juez_de` (en `lib.rs`) arma la `Eleccion` a mano, y `ficha/juez.rs` llama a `proveedores::llamar` sin `chequear_tope`. Un modelo sin precio queda registrado con 0 USD. `oracle/juez.rs` tiene la misma llamada directa. |
+| C3 | Confirmado | `Precio` usa `#[serde(default)]`, no rechaza claves desconocidas y `validar` no revisa precios. Con NaN, `estimado > margen` es falso y el chequeo pasa. |
+| C4 | Confirmado | `llamar_con_chequeo` lee el gasto, compara y llama sin lock ni reserva. El evento se escribe recién al terminar la llamada. |
+| A1 | Confirmado | `pendientes` copia los tests ocultos y `conftest.py` a `$ROOT_HOME/pendientes/`, fuera de `oraculos/`. `limpiar_temporales` solo borra `evaluar-*`. |
+| A2 | Confirmado | Las dos suites montan `tarea.dir` entero, con `oculto/`, en `/oraculo`. Sin junit, el error `Infra` lleva hasta 4000 caracteres del stderr del contenedor, donde corre el código del builder. |
+| A3 | Confirmado | Ningún código emite `TipoEvento::OraculoLeido`. Solo lo leen `resumir_eventos` y los tests. |
+| A4 | Confirmado | La clave del junit es el último tramo de `classname` más el nombre. Dos clases con el mismo nombre en archivos distintos chocan, y el mapa guarda solo una. |
+| A5 | Confirmado | Si existe el junit, el código de salida de pytest no se mira. `/salida` es escribible por el código bajo prueba. |
+| A6 | Confirmado | Un timeout es error de red y se reintenta hasta 3 veces con un solo chequeo previo. El evento de falla queda con 0 USD. |
+| A7 | Confirmado | La estimación usa un token cada tres caracteres. No es el peor caso. |
+| A8 | Confirmado en parte | `curl https://sh.rustup.rs \| sh` existe en `GUION_PREPARAR`: ya lo corrige la Tarea 7k. El paquete de Colab lleva el código del builder y los tests ocultos a un runtime con internet: eso es una decisión del usuario (P51). |
+| A9 | Confirmado (latente) | `archivos_rs` recorre solo `src/` e ignora errores de lectura. `resultado` siempre da un valor, así que sin archivos el puntaje es perfecto. |
+| A10 | Confirmado (latente) | Un test omitido en todas las corridas no entra a `estables`, y el universo de los requisitos sale de `estables`. Un requisito con un test omitido puede quedar Cumplido. |
+| A11 | Dudoso | `entrega.rs` y `configs.rs` no detectan `ADD` con una URL. Que buildah baje esa URL con `--network none` sale de su documentación, y nadie lo probó. Se verifica en la laptop. |
+| B10 | Confirmado y elevado a alto | `anthropic.rs` nunca envía `Eleccion.razonamiento`. Un juez de Anthropic, como el Sonnet de la decisión 30, corre sin razonamiento. Eso rompe el invariante "el verificador razona". |
+
+Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron uno por uno: se agrupan en las tareas de abajo según el área.
+
+### Tarea 21: Topes y llamadas a la API (C2, C3, C4, A6, A7, B10; gravedad crítica)
+- **Action**:
+  - Toda llamada a un proveedor pasa por una sola función con chequeo de tope, también el juez de la ficha y el juez del Oracle. `proveedores::llamar` deja de ser pública fuera de esa función.
+  - `Precio` exige `usd_entrada` y `usd_salida`, rechaza claves desconocidas y exige valores finitos y no negativos. `validar` revisa cada precio. Un modelo sin precio se rechaza antes de enviar, en todos los caminos.
+  - Reserva: con un lock sobre `eventos.jsonl`, Root lee el gasto, compara y escribe un evento de reserva con el costo estimado, en un solo tramo. `observe::uso` suma las reservas abiertas. El evento final de la llamada cierra su reserva con el costo real. Así dos procesos no gastan el mismo margen.
+  - Cada reintento repite el chequeo de tope. Una falla después de enviar el pedido (timeout, 5xx o un 200 que no parsea) registra el costo estimado de peor caso, con la marca `costo_estimado`.
+  - La estimación de entrada usa los bytes UTF-8 del prompt: un token nunca ocupa menos de un byte.
+  - Anthropic recibe el razonamiento: con `razonamiento = true`, el pedido lleva pensamiento extendido con un presupuesto de tokens que cuenta en la estimación. Un modelo que no lo admite da `ErrorOraculo::Eleccion` en los roles Verifica y Juzga.
+  - Medios y bajos de topes: M2 (`elegir` usa `tokens_estimados` para el cupo), M3 (la sesión importada usa su propia hora), B8 (el lock cubre la lista de archivos rotados), B9 (sin presupuesto, código 3 y `Gate`), B12 (sin `costUSD`, usa `total_cost_usd`; un costo negativo es error) y M1 (`observa claude --via nube` registra el `Gate` al cruzar el tope).
+- **Dónde**: todo en la nube. Los tests usan el servidor HTTP falso y procesos en paralelo.
+- **Validate**: `cargo test`:
+  - `ficha revisar` con juez y el tope de API lleno no envía nada.
+  - `usd_salda = 1.1` en `root.toml` falla al cargar con código 2. `usd_entrada = nan` también.
+  - Cuatro procesos en paralelo con 99 USD gastados de 100 no pasan el tope.
+  - Un servidor que tarda más que el timeout deja un evento con costo estimado distinto de 0.
+  - Un prompt de 1000 caracteres de 3 bytes estima al menos 3000 tokens de entrada.
+  - Un pedido a Anthropic con `razonamiento = true` lleva el campo de pensamiento extendido.
+
+### Tarea 22: Descarga y contenedores sin fugas (C1 y medios o bajos de seguridad; gravedad crítica)
+- **Action**:
+  - C1: el contenedor de descarga de Python no monta `/repo`. Recibe solo una copia de los `requirements*.txt` en su carpeta de trabajo. El inventario rechaza toda línea que sea una ruta local: absoluta, `./`, `../`, `file:` o un directorio del repo.
+  - M5: sin `Cargo.lock`, Root revisa las fuentes del lock generado con las mismas reglas antes de bajar nada más. El inventario sigue las dependencias `path` del repo, no solo los miembros del workspace.
+  - M4: todo `podman run` y `podman build` lleva `--http-proxy=false`.
+  - B5: todo `podman pull` lleva `--authfile`. Sin credencial de la lista de `root.toml` (decisión 29), ese archivo está vacío. Root nunca usa el `auth.json` del usuario.
+  - B4: un error de parseo de un archivo del repo no cita la línea. Cita solo el archivo y el número de línea.
+  - M16: Root lee la salida del contenedor sin seguir enlaces simbólicos. La carpeta de salida vive en `$ROOT_HOME/tmp/` con permisos 0700.
+  - B6: `ROOT_HOME` debe ser una ruta absoluta, distinta de `/` y de `$HOME`. Si no lo es, Root sale con código 2.
+  - B7: `pendientes` valida el nombre de la tarea con `nombre_seguro`.
+  - B17: los temporales de Root se borran por `src/borrado.rs`.
+- **Dónde**: las reglas y los argumentos se prueban en la nube. En la laptop se repite la prueba de C1 con podman: un backend PEP 517 que escribe una marca no la escribe.
+- **Validate**: `cargo test`:
+  - Una línea `/repo` o `./` en `requirements.txt` da `SinVeredicto` antes de usar la red.
+  - Los argumentos de cada contenedor llevan `--http-proxy=false`, y cada `podman pull` lleva `--authfile`.
+  - Un `.cargo/config.toml` roto con `token = "x"` no copia el token en el `Gate`.
+  - Un enlace en la salida que apunta a un archivo del host no se lee.
+  - `ROOT_HOME=/` sale con código 2.
+
+### Tarea 23: El oráculo oculto no sale de `oraculos/` (A1, A2, A4, A5, A10, M15, B16, B18; gravedad alta)
+- **Action**:
+  - A1 y B18: el paquete de pendientes se arma en `$ROOT_HOME/oraculos/<tarea>/pendientes/`, dentro de la ruta que niegan los permisos. Root lo borra al terminar la corrida de Colab. Las carpetas `tmp/colab-*` se borran al terminar y en `limpiar_temporales`.
+  - A2: la suite de contrato no monta `/oraculo`. El error `Infra` de la suite oculta no lleva el stderr del contenedor: el stderr va a un archivo de `$ROOT_HOME/oraculos/<tarea>/registros/`, y el mensaje nombra ese archivo. `root_evaluar` por MCP devuelve el veredicto sin ids de tests ocultos: solo conteos y niveles por requisito. La CLI para el humano los conserva.
+  - A4: la clave del junit usa el `classname` entero más el nombre. Root la convierte al node id de pytest sin perder el archivo.
+  - A5: Root corre primero `pytest --collect-only` y guarda la lista de tests. El junit vale solo si el código de salida es 0 o 1, si coincide con sus fallas y si trae exactamente los tests recolectados. Si no, la suite da `SinVeredicto`.
+  - A10: un test omitido cuenta en el universo de su requisito como "no verde". Un requisito con un test omitido no pasa del nivel 2, y si el test está en `[[entorno]]`, queda `Pendiente`.
+  - M15: el escenario monta solo la carpeta `escenarios/` de la tarea.
+  - B16: `colab.json` guarda el commit del repo, y `--importar` ignora un resultado de otro commit.
+- **Dónde**: las reglas de junit, requisitos y Colab se prueban en la nube. Los montajes y los códigos de salida de pytest se prueban en la laptop, con podman.
+- **Validate**: `cargo test`:
+  - Después de `pendientes --colab` no queda ningún archivo de tests ocultos fuera de `oraculos/`.
+  - Un producto que escribe `/oraculo/oculto/*` en stderr y mata a pytest da `SinVeredicto`, y el mensaje no trae ese texto.
+  - `test_set.TestBasico::test_vacio` y `test_get.TestBasico::test_vacio` cuentan como dos tests.
+  - Un junit con 3 tests cuando pytest recolectó 40 da `SinVeredicto`.
+  - Un requisito con un test que pasa y otro omitido no queda Cumplido.
+
+### Tarea 24: Sondas sin puntaje regalado (A9, A11, M13, M14, B13, B14; gravedad alta, latente)
+- **Action**:
+  - A9: las sondas de Rust recorren todos los `*.rs` del repo, salvo `target/`. Un error de lectura o cero archivos da `SinVeredicto`.
+  - A11: un `ADD` o `COPY` con una URL cuenta como un paso que necesita red. Sigue la regla de la decisión 27, y su fuente entra al inventario.
+  - M13: un reporte de `cargo-mutants` vale solo si la suma de sus resultados es igual a `total_mutants`. Si no, da `SinVeredicto` con la causa "reporte truncado". Root pasa `mutantes_max` a `cargo-mutants`.
+  - M14: clippy con una construcción fallida da `SinVeredicto`, aunque haya advertencias.
+  - B13: `combinar` sin partes da `None`.
+  - B14: un test con `skipped` y `error` cuenta como falla.
+- **Dónde**: todo en la nube, salvo la prueba real de A11 con buildah, que va en la laptop.
+- **Validate**: `cargo test`:
+  - Un workspace con `crates/a/src/lib.rs` que tiene `unsafe` da un hallazgo de seguridad.
+  - Un repo sin archivos `.rs` da `SinVeredicto` en seguridad, estructura y arquitectura.
+  - Un reporte de mutantes con 2 de 50 da `SinVeredicto`.
+
+### Tarea 25: Limpieza de Python y de la ficha (M6 a M12, B1 a B3, B15; gravedad media)
+- **Action**: los defectos de la descarga de Python (M6 a M12, B1 a B3) y la salida de `ficha revisar` sin juez (B15). Sin juez, `ficha revisar` sale con 3 y dice "juez no corrido", como pide el desempate 3 de "Desempates técnicos 3". `docs/interfaces.md` se alinea con esa regla.
+- **Conflicto**: la Tarea 6e de la nube también toca la descarga de Python. La Tarea 25 empieza después de que la 6e entre a la rama.
+- **Dónde**: la lógica en la nube. La instalación real sin red en la laptop.
+- **Validate**: un test por defecto, con el escenario del informe.
+
+### Tarea 26: Detección de lectura del oráculo (A3)
+- Espera a P50. Hasta la respuesta, Sonnet no la construye.
+
+**Orden (2026-10-28):** 21, 22, 23, 24 y 25. La 21 va primero porque hoy un juez puede gastar API sin tope. La 22 cierra la ejecución de código con red. Todas empiezan después de que entren las Tareas 20, 15d y 6e de la rama `claude/loving-ptolemy-9bj686`. Las tareas no dependen de números de línea: nombran funciones y archivos.
+
+**Preguntas abiertas (sin responder)**
+
+- **P50. Detección de lectura del oráculo (A3).** El GOAL dice: "una corrida que lo lee queda inválida". Hoy nada lo detecta. `claude -p` con `--output-format json` no trae las llamadas a herramientas, así que no hay transcript para revisar. Una búsqueda por texto se esquiva con un glob, una ruta relativa o un enlace. ¿Qué elegís?
+
+  - a) Detección: `r00t corre` usa `--output-format stream-json`, busca en cada llamada a herramienta las rutas de `oraculos/` y los nombres de tests ocultos, y marca la corrida inválida. Costo: bajo. Límite: un builder que esquiva el texto no queda detectado.
+  - b) Aislamiento: el builder corre en un contenedor o con otro usuario del sistema que no puede leer `ROOT_HOME`. Costo: alto, porque `claude` y su login tienen que correr dentro de ese entorno. Ventaja: leer el oráculo se vuelve imposible.
+  - c) Las dos: aislamiento como defensa y detección como registro.
+
+  Mi recomendación es c). Si el costo de b) no entra en el hito 1, a) como paso previo.
+
+- **P51. Colab con internet y tests ocultos (A8).** En Colab, el paquete lleva el código del builder y los tests ocultos juntos, y el runtime tiene internet. Un `build.rs` del builder puede mandar los tests ocultos a cualquier host. En la laptop, `--network none` lo impide. ¿Qué elegís?
+
+  - a) Aceptarlo como está. Riesgo: el oráculo de esa tarea puede filtrarse.
+  - b) Aislar la corrida: el paquete lleva las dependencias ya bajadas, y `correr.sh` corre dentro de `unshare -rn`, sin red. Si Colab no permite `unshare`, la corrida no se hace y los tests quedan `Pendiente`.
+  - c) Como b), pero si Colab no permite `unshare`, la corrida se hace igual y el informe lo avisa.
+
+  Mi recomendación es b).
