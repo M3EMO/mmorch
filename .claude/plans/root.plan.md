@@ -56,6 +56,8 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 30 | P34: "C pero con un juez (sonnet) para delimitar necesidades." La descarga respeta el `.cargo/config.toml` del repo, y un juez Sonnet evalúa qué entradas necesita el proyecto. El papel exacto del juez espera a P38. Ver Tarea 6d. |
 | 31 | P35: "b con c de respaldo". Colab instala Rust con `rustup-init` verificado por su `.sha256`. Si esa instalación falla, Root compila brasa en la máquina del usuario y lleva el binario. Ver Tarea 7k. |
 | 32 | P36: "a". El "Outcome" del hito 1 en el PRD vuelve a su texto original. |
+| 33 | P37: "P37 B pero sin limite de tiempo", precisada como "hagamos que el limite sean 2 hs pero que el planner y un hook/script corten una corrida si ya se recibio lo que requeria". La cuenta de Colab es paga y el usuario acepta el gasto de la T4. Cada corrida tiene un tope de 2 horas y se corta antes si ya entregó lo que pedía. Ver Tarea 7l. |
+| 34 | "Prioricemos el uso de las sesiones de nube porque vence el 5 de noviembre, concentremos el trabajo alli." Las builds de Sonnet corren en sesiones de Claude Code en la nube, sin podman, sin `ROOT_HOME` y sin Colab, hasta el 2026-11-05. Ver "Nube o laptop". |
 
 ## Patterns to Mirror
 
@@ -1155,7 +1157,7 @@ Respuestas a las preguntas de Sonnet al cerrar la 7i. Los cambios de código van
 1. **Ctrl-C y Colab.** Sí. La Tarea 7h ya dice que Root libera siempre el runtime, y una señal no es una excepción.
    - Root maneja SIGINT y SIGTERM: libera el runtime, registra un evento `Gate` y después sale.
    - SIGKILL no se puede manejar. Por eso Root escribe el id del runtime en `$ROOT_HOME/colab/activo.json` al pedirlo, y lo borra al liberarlo. La próxima corrida de `--colab` libera primero un runtime que quedó anotado. `r00t oraculo pendientes --liberar` hace solo esa limpieza.
-   - Toda corrida tiene un tope de duración, `[colab].minutos_max` en `root.toml`, con 30 minutos por defecto. Al llegar al tope, Root libera el runtime y sale con código 3.
+   - Toda corrida tiene un tope de duración, `[colab].minutos_max` en `root.toml`, con 30 minutos por defecto. Al llegar al tope, Root libera el runtime y sale con código 3. La decisión 33 cambia el default a 120 minutos y suma el corte temprano (Tarea 7l).
 2. **Credencial residual.** Se acepta, con una condición: Root lee las direcciones con un parser de URL según RFC 3986, no con una expresión regular. En `https://tok/en@host`, la parte de usuario termina en la primera `/`. El host real es `tok`, y `en@host` es una ruta. Ninguna credencial viaja como autenticación, y el inventario registra el host real. Todo lo que el parser lee como usuario o clave se rechaza (6c). Un token escrito en una ruta es un secreto en el repo: lo detecta gitleaks (Tarea 9), no el filtro de fuentes.
 3. **Cero mutantes.** Sigue en `SinVeredicto`, pero con dos causas distintas. Si `cargo-mutants` no dejó reporte, la causa es "no dejó reporte". Si dejó un reporte con 0 mutantes, la causa es "sin mutantes para medir". Ninguno de los dos casos es un puntaje: sin mutantes, Root no mide la calidad de los tests.
 4. **Varios Dockerfiles.** Root elige uno, por este orden:
@@ -1267,9 +1269,64 @@ Respuestas a las siete preguntas de Sonnet de la build-12 y diseño de las decis
   - Un `.sha256` que no coincide no corre `rustup-init` y pasa al binario compilado.
   - Un hash correcto corre `rustup-init` y no compila en la máquina local.
   - Ningún camino corre `curl ... | sh`.
-- **Corrida real**: espera a G1 y a P37.
+- **Corrida real**: espera a G1. P37 ya está respondida (decisión 33).
 
-**Orden siguiente (2026-10-28, después de la 6c-B):** 6e, 6d, 9d3, 15d y 7k.
+### Tarea 7l: Tope de 2 horas y corte temprano en Colab (decisión 33)
+- **Tope**: `[colab].minutos_max` vale 120 por defecto. Al llegar al tope, Root libera el runtime, registra un `Gate` con la causa "tope de 2 horas" y sale con código 3. Los tests sin resultado quedan `Pendiente`.
+- **Qué pedía cada corrida.** Hoy hay un solo tipo de corrida en Colab: `r00t oraculo pendientes --colab`. Lo que pide es checkeable:
+  - el junit de `correr.sh` existe en el runtime y parsea;
+  - cada id de test del paquete aparece en ese junit;
+  - cada id tiene tantos resultados como `repeticiones` de `tarea.toml`, y cada resultado es pasa, falla, error u omitido.
+  La preparación de Rust (Tarea 7k) no es una corrida aparte: es el primer paso de la misma corrida.
+  Un tipo de corrida nuevo no se lanza hasta que el plan escriba su criterio checkeable, igual que este.
+- **Cuándo corta Root.** Root libera el runtime con lo que pase primero:
+  1. se cumple lo que pedía la corrida;
+  2. `correr.sh` termina, con el junit completo o no;
+  3. se llega al tope de 2 horas.
+  En el caso 1, Root baja el junit, lo importa y libera el runtime aunque `correr.sh` siga corriendo. Registra un `Gate` con la causa "requisito cumplido".
+- **Quién corta.** El usuario nombró al planner y a un hook o script. Cada uno tiene un papel:
+  - **El script (corte automático).** Mientras corre la corrida, Root revisa el junit en el runtime cada 60 segundos y aplica la regla de arriba. Si la CLI `colab` no puede leer un archivo del runtime durante la corrida, el corte 1 se vuelve igual al corte 2. Sonnet lo verifica con `colab --help` y lo anota en el commit.
+  - **El vigía (red de seguridad).** `r00t oraculo pendientes --vigilar` lee `$ROOT_HOME/colab/activo.json`. Si el runtime anotado cumplió lo que pedía, o pasó las 2 horas, lo libera. Corre desde un timer de systemd de usuario cada 5 minutos en la laptop. Cubre el caso en que Root murió con SIGKILL y nadie volvió a correrlo.
+  - **El planner o el orquestador (corte manual).** Cualquier sesión puede cortar con `r00t oraculo pendientes --liberar`. El planner define en el plan el criterio de cada tipo de corrida. Ningún agente sube el tope: eso es zona roja (dinero) y lo hace el usuario en `root.toml`.
+- **Validate**: `cargo test oracle` con una CLI `colab` falsa:
+  - Un junit completo mientras `correr.sh` sigue corriendo libera el runtime y deja el `Gate` "requisito cumplido".
+  - Un junit al que le falta una repetición no corta antes de tiempo.
+  - Con `minutos_max = 0.01`, el tope libera el runtime y deja el `Gate` "tope de 2 horas".
+  - `--vigilar` con un `activo.json` vencido libera el runtime. Con uno vigente y sin junit completo, no hace nada.
+  - Sin `minutos_max` en `root.toml`, el tope vale 120.
+- **En la laptop**: instalar el timer de systemd del vigía y probarlo una vez con la CLI falsa.
+
+## Nube o laptop (decisión 34, hasta el 2026-11-05)
+
+Las sesiones en la nube no tienen podman, `ROOT_HOME` real ni Colab. Cada tarea pendiente se parte en una parte de nube y una parte de laptop. La parte de laptop junta todo lo que necesita podman, la red real de un registro o Colab.
+
+| Tarea | Nube (sin podman, sin `ROOT_HOME`, sin Colab) | Laptop |
+|---|---|---|
+| 20 | Toda la tarea | Correr la suite completa una vez y comparar |
+| 15d | Toda la tarea: es Rust puro con filas sintéticas | Nada |
+| 6e | Desempates 2 a 5; lectura de `[build-system].requires` sin ejecutar nada | El test que instala sin red el wheel de build en la evaluación (podman); quitar el `#[ignore]` de `tests/descarga.rs` |
+| 6d | Lista `[[registro]]`, coincidencia exacta de host, argumentos del contenedor, clasificación del config, juez con proveedor falso, ausencia de la credencial en eventos y errores | Descarga real con un registro de prueba y una credencial, y proxy real del config (podman y red) |
+| 9d3 | Regla de repetir con red, `Gate` previo, argumentos de `podman build` (sin `ROOT_HOME`, sin credenciales, `allow_host_loopback=false`) | Construcción real con red y sin red de un Dockerfile con `apt-get` |
+| 7k | Elección de camino con CLI falsa: hash bueno, hash malo, sin `curl … \| sh` | Compilar brasa en la imagen como respaldo (podman) |
+| 7l | Toda la lógica con CLI falsa | Timer de systemd del vigía |
+
+La corrida real de Colab espera a G1 y se hace en la laptop.
+
+### Tarea 20: Suite apta para la nube (decisión 34)
+- **Problema**: `tests/contenedor.rs`, `descarga.rs`, `entrega.rs`, `mutacion.rs`, `oraculo.rs`, `configs.rs` y `sondas.rs` llaman a podman y no se saltean sin él. El hook pre-commit corre `cargo test` entero, así que en la nube ningún commit pasa.
+- **Action**:
+  - Un test que necesita podman, la red real o archivos de la laptop llama a una guarda común. La guarda saltea el test solo si `ROOT_SIN_PODMAN=1`, y lo dice en stderr con el nombre del test.
+  - Sin esa variable, el test corre siempre y falla si falta podman. Así un salteo nunca pasa en silencio en la laptop.
+  - La sesión en la nube exporta `ROOT_SIN_PODMAN=1` y corre `git config core.hooksPath .githooks`.
+  - El primer paso en la nube es correr `cargo test` y anotar en el commit cada test que falló por el entorno.
+- **Validate**:
+  - En la nube, `ROOT_SIN_PODMAN=1 cargo test` pasa, y stderr lista los tests salteados.
+  - En la laptop, `cargo test` sin la variable corre la misma cantidad de tests que antes de la tarea.
+- **Regla de merge**: el trabajo hecho en la nube entra a la laptop solo después de que `cargo test` pasa completo en la laptop, sin `ROOT_SIN_PODMAN`.
+
+**Orden siguiente (2026-10-28, en la nube hasta el 2026-11-05):** 20, 15d y después las partes de nube de 6e, 6d, 9d3, 7k y 7l. Las partes de laptop se juntan en una sola vuelta en la laptop, en el mismo orden.
+
+**Orden anterior (2026-10-28, después de la 6c-B):** 6e, 6d, 9d3, 15d y 7k.
 - La 6e va primero: es chica y cierra la instalación sin red de Python.
 - La 6d va antes de la 9d3: la 9d3 debe probar que no recibe credenciales.
 - Después de la 7k, lo que queda espera a G1, a G2 o a P37.
@@ -1320,7 +1377,7 @@ Respuestas a las siete preguntas de Sonnet de la build-12 y diseño de las decis
   
   Hasta tu respuesta, no hay corrida real en Colab. Esa corrida ya espera a G1 y a P35.
 
-**Respuestas del 2026-10-28:** P17b "a" (decisión 27), P18b "a y b" (decisión 28), P21 "b" (decisión 29), P34 "C pero con un juez (sonnet)…" (decisión 30), P35 "b con c de respaldo" (decisión 31) y P36 "a" (decisión 32). P37 sigue abierta.
+**Respuestas del 2026-10-28:** P17b "a" (decisión 27), P18b "a y b" (decisión 28), P21 "b" (decisión 29), P34 "C pero con un juez (sonnet)…" (decisión 30), P35 "b con c de respaldo" (decisión 31) y P36 "a" (decisión 32). P37: "P37 B pero sin limite de tiempo", precisada después como un tope de 2 horas con corte temprano (decisión 33).
 
 - **P38. Papel del juez de la config de cargo.** Pediste respetar el `.cargo/config.toml` del repo con un juez Sonnet que delimite necesidades. Hoy el juez solo informa: sus hallazgos van al informe, y `cargo` usa todo el config. ¿Qué querés?
   - a) El juez solo informa. Esta opción rige hoy y respeta el GOAL.
