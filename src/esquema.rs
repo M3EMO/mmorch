@@ -2,6 +2,7 @@
 
 use schemars::{JsonSchema, schema_for};
 
+use crate::aprende::Replay;
 use crate::config::Config;
 use crate::error::Error;
 use crate::ficha::Revision;
@@ -34,6 +35,7 @@ const TIPOS: &[&str] = &[
     "sinpresupuesto",
     "politica",
     "usomargenes",
+    "replay",
 ];
 
 /// JSON Schema (formato pretty) del tipo indicado por su nombre en minúsculas.
@@ -59,6 +61,7 @@ pub fn json(tipo: &str) -> Result<String, Error> {
         "sinpresupuesto" => imprimir::<SinPresupuesto>(),
         "politica" => imprimir::<Politica>(),
         "usomargenes" => imprimir::<UsoMargenes>(),
+        "replay" => imprimir::<Replay>(),
         otro => Err(Error::Uso(format!(
             "tipo desconocido '{otro}'. Tipos: {}",
             TIPOS.join(", ")

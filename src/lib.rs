@@ -1,5 +1,6 @@
 //! Biblioteca de Root: evalúa, rutea y observa corridas.
 
+pub mod aprende;
 pub mod cli;
 pub mod config;
 pub mod error;
@@ -244,6 +245,7 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
         } => oraculo_pendientes(cli.json, tarea, repo, importar.as_deref()),
         Comando::Observa { accion } => observa(cli.json, accion),
         Comando::Track { accion } => track_accion(cli.json, accion),
+        Comando::Aprende { replay } => aprende_accion(cli.json, *replay),
         Comando::ImportarMmorch { desde } => {
             let resumen = importar::importar_mmorch(desde)?;
             println!("{}", serde_json::to_string_pretty(&resumen)?);
@@ -251,6 +253,78 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
         }
         otro => Err(Error::NoImplementado(otro.ruta().to_string())),
     }
+}
+
+/// `aprende`: recalcula y escribe `politica.json`. Con `--replay`, mide la política sin escribirla.
+fn aprende_accion(json: bool, replay: bool) -> Result<(), Error> {
+    let home = config::root_home();
+    let cfg = config::Config::cargar(&home.join("root.toml"))?;
+    let filas = track::filas(&track::Filtro::default())?;
+    if replay {
+        let medicion = aprende::replay(&filas, &cfg);
+        if json {
+            println!("{}", serde_json::to_string_pretty(&medicion)?);
+        } else {
+            imprimir_replay(&medicion);
+        }
+        return Ok(());
+    }
+    let eventos = aprende::leer_eventos(&observe::ruta_eventos())?;
+    let pol = aprende::recalcular(&filas, &eventos);
+    aprende::escribir_politica(&home, &pol).map_err(aprende::ErrorAprende::from)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&pol)?);
+    } else {
+        imprimir_politica(&pol, f64::from(cfg.umbral_wilson));
+    }
+    Ok(())
+}
+
+/// Una línea por clave: el mejor modelo con su n, Wilson y USD medio.
+fn imprimir_politica(pol: &route::Politica, umbral: f64) {
+    if pol.estadisticas.is_empty() {
+        println!("sin datos: política vacía");
+    }
+    for (clave, candidatos) in &pol.estadisticas {
+        match aprende::mejor(candidatos, umbral) {
+            Some(c) => println!(
+                "{clave} → {} (n {}, wilson {:.2}, usd {:.4})",
+                c.modelo, c.n, c.wilson_inf, c.usd_medio
+            ),
+            None => println!("{clave} → sin candidato sobre el umbral {umbral:.2}"),
+        }
+    }
+}
+
+/// Resumen legible de `aprende --replay`: las dos métricas y las mejoras.
+fn imprimir_replay(r: &aprende::Replay) {
+    println!(
+        "entrenamiento: {} filas; medición: {} filas",
+        r.entrenamiento, r.medicion
+    );
+    if let Some(aviso) = &r.advertencia {
+        println!("advertencia: {aviso}");
+    }
+    imprimir_metrica("aprendida", &r.aprendida);
+    imprimir_metrica("root.toml", &r.root_toml);
+    println!("mejora en éxito: {}", fmt_opcional(r.mejora_exito, 3));
+    println!(
+        "mejora en USD por fila: {} (positivo ahorra)",
+        fmt_opcional(r.mejora_usd, 4)
+    );
+}
+
+fn imprimir_metrica(nombre: &str, m: &aprende::MetricaPolitica) {
+    println!(
+        "{nombre}: {} filas cubiertas, éxito {}, USD medio {}",
+        m.cubiertas,
+        fmt_opcional(m.exito, 3),
+        fmt_opcional(m.usd_medio, 4)
+    );
+}
+
+fn fmt_opcional(valor: Option<f64>, decimales: usize) -> String {
+    valor.map_or("sin datos".to_string(), |v| format!("{v:.decimales$}"))
 }
 
 /// Subcomandos `track`: agregan una fila, las listan o comparan dos configuraciones.

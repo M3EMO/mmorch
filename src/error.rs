@@ -2,6 +2,7 @@ use std::io;
 
 use thiserror::Error as ErrorDerive;
 
+use crate::aprende::ErrorAprende;
 use crate::ficha::ErrorFicha;
 use crate::goal::ErrorGoal;
 use crate::importar::ErrorImportar;
@@ -56,6 +57,8 @@ pub enum Error {
     Rubrica(#[from] ErrorRubrica),
     #[error(transparent)]
     Ficha(#[from] ErrorFicha),
+    #[error(transparent)]
+    Aprende(#[from] ErrorAprende),
 }
 
 impl Error {
@@ -77,7 +80,8 @@ impl Error {
             | Error::Track(_)
             | Error::Importar(_)
             | Error::Proveedor(_)
-            | Error::Rubrica(_) => 3,
+            | Error::Rubrica(_)
+            | Error::Aprende(_) => 3,
         }
     }
 }

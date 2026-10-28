@@ -51,7 +51,7 @@ fn help_del_binario_dice_r00t() {
 
 #[test]
 fn subcomando_sin_implementar_sale_con_3() {
-    let salida = root(&["aprende"]);
+    let salida = root(&["corre", "--tarea", "memora", "--config", "ecc-haiku"]);
     assert_eq!(codigo(&salida), 3);
     let stderr = String::from_utf8_lossy(&salida.stderr);
     assert!(stderr.contains("no implementado"), "stderr: {stderr}");
