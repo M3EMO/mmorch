@@ -4,6 +4,7 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod esquema;
+pub mod ficha;
 pub mod goal;
 pub mod importar;
 pub mod observe;
@@ -17,18 +18,20 @@ pub use error::Error;
 
 use std::path::Path;
 
-use cli::{Comando, GoalAccion, ObservaAccion, OraculoAccion, TrackAccion};
+use cli::{Comando, FichaAccion, GoalAccion, ObservaAccion, OraculoAccion, TrackAccion};
+use ficha::{ContextoRevision, ErrorFicha, Revision};
 use oracle::OpcionesOraculo;
 use oracle::tarea::Tarea;
 use tipos::{Estado, Fila};
 
 /// Ejecuta un subcomando y devuelve su código de salida. Los errores salen por `Err`.
-/// Por ahora `oraculo evaluar`, `esquema`, `goal`, `observa`, `track` e `importar-mmorch` tienen lógica.
+/// Por ahora `oraculo evaluar`, `ficha`, `esquema`, `goal`, `observa`, `track` e `importar-mmorch` tienen lógica.
 pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
     match &cli.comando {
         Comando::Oraculo {
             accion: OraculoAccion::Evaluar { tarea, repo },
         } => oraculo_evaluar(cli.json, tarea, repo),
+        Comando::Ficha { accion } => ficha_accion(cli.json, accion),
         _ => ejecutar_sin_codigo(cli).map(|()| 0),
     }
 }
@@ -96,6 +99,50 @@ fn oraculo_pendientes(
         }
     }
     Ok(())
+}
+
+/// Subcomandos `ficha`: revisan el spec o arman el borrador de `tarea.toml`.
+/// `revisar` sale con 0 si no hay hallazgos, 1 si los hay. Los errores de ficha salen con 2.
+fn ficha_accion(json: bool, accion: &FichaAccion) -> Result<u8, Error> {
+    match accion {
+        FichaAccion::Revisar { spec } => {
+            let texto = leer_spec(spec)?;
+            let revision = ficha::revisar(&texto, &ContextoRevision::default())?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&revision)?);
+            } else {
+                imprimir_revision(&revision);
+            }
+            let limpia = revision.hallazgos.is_empty() && revision.ambiguedades.is_empty();
+            Ok(if limpia { 0 } else { 1 })
+        }
+        FichaAccion::Tarea { spec, nombre } => {
+            let texto = leer_spec(spec)?;
+            let (ficha_leida, _) = ficha::extraer(&texto)?;
+            print!("{}", ficha::borrador_tarea(&ficha_leida, nombre)?);
+            Ok(0)
+        }
+    }
+}
+
+fn leer_spec(spec: &Path) -> Result<String, ErrorFicha> {
+    std::fs::read_to_string(spec).map_err(|fuente| ErrorFicha::Leer {
+        ruta: spec.display().to_string(),
+        fuente,
+    })
+}
+
+/// Una línea por hallazgo y por ambigüedad: `linea: regla: detalle`.
+fn imprimir_revision(revision: &Revision) {
+    for h in &revision.hallazgos {
+        println!("{}: {}: {}", h.linea, h.regla, h.detalle);
+    }
+    for a in &revision.ambiguedades {
+        println!("{}: ambigüedad: {}", a.linea, a.frase);
+    }
+    if revision.hallazgos.is_empty() && revision.ambiguedades.is_empty() {
+        println!("sin hallazgos");
+    }
 }
 
 fn etiqueta_estado(estado: Estado) -> &'static str {

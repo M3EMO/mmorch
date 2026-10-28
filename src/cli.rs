@@ -80,8 +80,29 @@ pub enum Comando {
         /// Nombre del tipo, por ejemplo `veredicto`.
         tipo: String,
     },
+    /// Revisa la ficha de un SPEC.md o arma el borrador de `tarea.toml`.
+    Ficha {
+        #[command(subcommand)]
+        accion: FichaAccion,
+    },
     /// Inicia el servidor MCP por stdio.
     Mcp,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FichaAccion {
+    /// Revisa la ficha del spec con reglas deterministas.
+    Revisar {
+        #[arg(long)]
+        spec: PathBuf,
+    },
+    /// Arma el borrador de `tarea.toml` desde la ficha.
+    Tarea {
+        #[arg(long)]
+        spec: PathBuf,
+        #[arg(long)]
+        nombre: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -219,6 +240,10 @@ impl Comando {
             },
             Comando::ImportarMmorch { .. } => "importar-mmorch",
             Comando::Esquema { .. } => "esquema",
+            Comando::Ficha { accion } => match accion {
+                FichaAccion::Revisar { .. } => "ficha revisar",
+                FichaAccion::Tarea { .. } => "ficha tarea",
+            },
             Comando::Mcp => "mcp",
         }
     }

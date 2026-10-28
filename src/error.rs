@@ -2,6 +2,7 @@ use std::io;
 
 use thiserror::Error as ErrorDerive;
 
+use crate::ficha::ErrorFicha;
 use crate::goal::ErrorGoal;
 use crate::importar::ErrorImportar;
 use crate::observe::ErrorObserve;
@@ -43,6 +44,8 @@ pub enum Error {
     Proveedor(#[from] ErrorProveedor),
     #[error("{0}")]
     Rubrica(#[from] ErrorRubrica),
+    #[error("{0}")]
+    Ficha(#[from] ErrorFicha),
 }
 
 impl Error {
@@ -51,6 +54,7 @@ impl Error {
         match self {
             Error::Uso(_) => 2,
             Error::Goal(e) => e.codigo_de_salida(),
+            Error::Ficha(e) => e.codigo_de_salida(),
             Error::NoImplementado(_)
             | Error::ConfigLeer { .. }
             | Error::ConfigToml(_)
