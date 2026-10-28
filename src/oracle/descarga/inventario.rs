@@ -1,0 +1,1312 @@
+//! Inventario de fuentes de la fase de descarga (decisión 21). Lee los manifiestos del repo y
+//! lista de dónde sale cada dependencia. Es puro salvo leer archivos: no usa la red ni ejecuta nada.
+//! Las reglas que rechazan una fuente también viven aquí.
+
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::io;
+use std::path::{Component, Path};
+
+use serde::{Deserialize, Serialize};
+use toml::{Table, Value};
+
+use crate::oracle::ErrorOraculo;
+
+const ARCHIVO_CARGO: &str = "Cargo.toml";
+const ARCHIVO_LOCK: &str = "Cargo.lock";
+const ARCHIVO_REQUIREMENTS: &str = "requirements.txt";
+/// Archivos de configuración de Cargo que pueden declarar registros y fuentes.
+const ARCHIVOS_CONFIG: [&str; 2] = [".cargo/config.toml", ".cargo/config"];
+const TABLAS_DEPENDENCIAS: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
+/// Fuentes de crates.io aceptadas en el `Cargo.lock`.
+const ORIGENES_CRATES_IO: [&str; 2] = [
+    "registry+https://github.com/rust-lang/crates.io-index",
+    "sparse+https://index.crates.io/",
+];
+const INDICE_CRATES_IO: &str = "https://index.crates.io/";
+const INDICE_PYPI: &str = "https://pypi.org/simple";
+
+/// Tipo de una fuente declarada en el repo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TipoFuente {
+    Registro,
+    Git,
+    Url,
+}
+
+/// Una fuente que Root bajaría. `direccion` nunca lleva credenciales.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Fuente {
+    pub tipo: TipoFuente,
+    pub direccion: String,
+    /// Versión, commit, rama o tag pedidos. Vacío si el registro no pide ninguno.
+    pub version: Option<String>,
+    /// `Cargo.toml`, `Cargo.lock` o `requirements.txt`, relativo al repo.
+    pub archivo: String,
+    pub linea: u32,
+}
+
+/// Una fuente que no se acepta. La cita va redactada.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rechazo {
+    pub motivo: String,
+    pub archivo: String,
+    pub linea: u32,
+    pub cita: String,
+}
+
+/// Un aviso que no corta la evaluación. La cita va redactada.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Aviso {
+    pub archivo: String,
+    pub linea: u32,
+    pub cita: String,
+    pub detalle: String,
+}
+
+/// Lo que el repo declara. Se arma sin red.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Inventario {
+    pub fuentes: Vec<Fuente>,
+    pub rechazos: Vec<Rechazo>,
+    pub avisos: Vec<Aviso>,
+    /// Dependencias git sin `rev` y sin commit en el lock: el build no es reproducible.
+    pub sin_commit: Vec<Aviso>,
+}
+
+/// Lee los manifiestos y el lock del repo y arma el inventario. Sin red.
+pub fn inventariar(repo: &Path) -> Result<Inventario, ErrorOraculo> {
+    let mut inv = Inventario::default();
+    inventariar_cargo(repo, &mut inv)?;
+    inventariar_requirements(repo, &mut inv)?;
+    Ok(inv)
+}
+
+/// Oculta la credencial de cada dirección `esquema://usuario:clave@host` del texto.
+pub fn redactar(texto: &str) -> String {
+    let mut salida = String::with_capacity(texto.len());
+    let mut resto = texto;
+    while let Some(pos) = resto.find("://") {
+        let (antes, despues) = resto.split_at(pos + 3);
+        salida.push_str(antes);
+        let fin = despues
+            .find(|c: char| c == '/' || c == '"' || c == '\'' || c.is_whitespace())
+            .unwrap_or(despues.len());
+        let (autoridad, cola) = despues.split_at(fin);
+        match autoridad.rfind('@') {
+            Some(i) => {
+                salida.push_str("***");
+                salida.push_str(&autoridad[i..]);
+            }
+            None => salida.push_str(autoridad),
+        }
+        resto = cola;
+    }
+    salida.push_str(resto);
+    salida
+}
+
+/// Origen de un paquete del `Cargo.lock`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Origen {
+    /// Miembro del workspace o path: no tiene `source`.
+    Workspace,
+    /// crates.io, por registro o por sparse.
+    CratesIo,
+    /// Repositorio git. `url` no lleva el commit ni la consulta.
+    Git { url: String, commit: Option<String> },
+    /// Otro registro. Guarda la dirección del índice.
+    Registro { url: String },
+    /// Fuente que no se reconoce. Guarda el valor del `source`.
+    Otro(String),
+}
+
+/// Un `[[package]]` del `Cargo.lock`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaqueteLock {
+    pub nombre: String,
+    pub version: String,
+    pub origen: Origen,
+    /// Línea 1-indexed del `source`. Cero si no tiene `source`.
+    pub linea: u32,
+    /// Texto de la línea del `source`, sin espacios de los extremos.
+    pub cita: String,
+}
+
+#[derive(Deserialize)]
+struct LockArchivo {
+    #[serde(default)]
+    package: Vec<LockPaquete>,
+}
+
+#[derive(Deserialize)]
+struct LockPaquete {
+    name: String,
+    version: String,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+/// Lee un `Cargo.lock` y da sus paquetes con origen y línea del `source`.
+pub fn analizar_lock(texto: &str) -> Result<Vec<PaqueteLock>, String> {
+    let lock: LockArchivo = toml::from_str(texto).map_err(|e| e.to_string())?;
+    let fuentes = lineas_de_source(texto);
+    if fuentes.len() != lock.package.len() {
+        return Err(format!(
+            "{} bloques [[package]] en el texto, {} al parsear",
+            fuentes.len(),
+            lock.package.len()
+        ));
+    }
+    Ok(lock
+        .package
+        .into_iter()
+        .zip(fuentes)
+        .map(|(paquete, fuente)| {
+            let (linea, cita) = fuente.unwrap_or((0, String::new()));
+            PaqueteLock {
+                origen: origen_de(paquete.source.as_deref()),
+                nombre: paquete.name,
+                version: paquete.version,
+                linea,
+                cita,
+            }
+        })
+        .collect())
+}
+
+/// Una entrada por bloque `[[package]]`: línea y texto de su `source`, si lo tiene.
+fn lineas_de_source(texto: &str) -> Vec<Option<(u32, String)>> {
+    let mut bloques: Vec<Option<(u32, String)>> = Vec::new();
+    for (indice, linea) in texto.lines().enumerate() {
+        let limpia = linea.trim();
+        if limpia == "[[package]]" {
+            bloques.push(None);
+        } else if limpia.starts_with("source = ")
+            && let Some(ultimo) = bloques.last_mut()
+            && ultimo.is_none()
+        {
+            let numero = u32::try_from(indice + 1).unwrap_or(u32::MAX);
+            *ultimo = Some((numero, limpia.to_string()));
+        }
+    }
+    bloques
+}
+
+/// Clasifica el `source` de un paquete del lock.
+fn origen_de(valor: Option<&str>) -> Origen {
+    let Some(valor) = valor else {
+        return Origen::Workspace;
+    };
+    if ORIGENES_CRATES_IO.contains(&valor) {
+        return Origen::CratesIo;
+    }
+    if let Some(git) = valor.strip_prefix("git+") {
+        let (resto, commit) = match git.rsplit_once('#') {
+            Some((resto, commit)) => (resto, Some(commit.to_string())),
+            None => (git, None),
+        };
+        return Origen::Git {
+            url: sin_consulta(resto).to_string(),
+            commit,
+        };
+    }
+    if let Some(url) = valor
+        .strip_prefix("registry+")
+        .or_else(|| valor.strip_prefix("sparse+"))
+    {
+        return Origen::Registro {
+            url: url.to_string(),
+        };
+    }
+    Origen::Otro(valor.to_string())
+}
+
+/// Quita el prefijo de herramienta (`git+`, `sparse+`, `registry+`) de una dirección.
+fn quitar_prefijo(url: &str) -> &str {
+    ["git+", "sparse+", "registry+"]
+        .iter()
+        .find_map(|p| url.strip_prefix(p))
+        .unwrap_or(url)
+}
+
+fn sin_consulta(url: &str) -> &str {
+    url.split('?').next().unwrap_or(url)
+}
+
+/// Dirección sin prefijo, sin consulta y sin fragmento.
+fn direccion_base(url: &str) -> String {
+    let sin_prefijo = quitar_prefijo(url);
+    let sin_fragmento = sin_prefijo.split('#').next().unwrap_or(sin_prefijo);
+    sin_consulta(sin_fragmento).to_string()
+}
+
+/// Motivo por el que una dirección no se acepta, o `None` si se acepta.
+/// Solo `https`, y sin credenciales en la autoridad.
+fn motivo_de_url(url: &str) -> Option<String> {
+    let url = quitar_prefijo(url);
+    let Some((esquema, resto)) = url.split_once("://") else {
+        return Some("forma sin protocolo (scp o ruta): solo se acepta https".into());
+    };
+    if !esquema.eq_ignore_ascii_case("https") {
+        return Some(format!(
+            "protocolo no aceptado: {esquema}; solo se acepta https"
+        ));
+    }
+    let autoridad = resto.split('/').next().unwrap_or(resto);
+    if autoridad.contains('@') {
+        return Some("dirección con credenciales: se rechaza".into());
+    }
+    None
+}
+
+/// Separa la referencia (`@rama` o `@commit`) de la ruta de una URL git.
+fn separar_referencia(url: &str) -> (String, Option<String>) {
+    if let Some((esquema, resto)) = url.split_once("://")
+        && let Some(i) = resto.find('/')
+    {
+        let (autoridad, ruta) = resto.split_at(i);
+        if let Some((ruta, referencia)) = ruta.rsplit_once('@') {
+            return (
+                format!("{esquema}://{autoridad}{ruta}"),
+                Some(referencia.to_string()),
+            );
+        }
+    }
+    (url.to_string(), None)
+}
+
+/// `true` si `ruta`, resuelta desde `dir` (relativo al repo), queda dentro del repo.
+fn dentro_del_repo(dir: &str, ruta: &str) -> bool {
+    if Path::new(ruta).is_absolute() {
+        return false;
+    }
+    let mut pila: Vec<String> = Vec::new();
+    for componente in Path::new(dir).join(ruta).components() {
+        match componente {
+            Component::Normal(nombre) => pila.push(nombre.to_string_lossy().into_owned()),
+            Component::ParentDir => {
+                if pila.pop().is_none() {
+                    return false;
+                }
+            }
+            Component::CurDir => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Quita comillas y espacios de un encabezado o de una clave, para comparar.
+fn norma(texto: &str) -> String {
+    texto
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '"' | ' '))
+        .collect()
+}
+
+/// Línea de cada clave y cada encabezado de tabla de un TOML, por (sección, clave).
+fn ubicaciones(texto: &str) -> HashMap<(String, String), u32> {
+    let mut mapa = HashMap::new();
+    let mut seccion = String::new();
+    for (indice, linea) in texto.lines().enumerate() {
+        let numero = u32::try_from(indice + 1).unwrap_or(u32::MAX);
+        let limpia = linea.trim();
+        if limpia.starts_with('[') {
+            let encabezado = norma(limpia.trim_start_matches('[').trim_end_matches(']'));
+            if let Some((padre, hoja)) = encabezado.rsplit_once('.') {
+                mapa.entry((padre.to_string(), hoja.to_string()))
+                    .or_insert(numero);
+            }
+            seccion = encabezado;
+        } else if let Some((clave, _)) = limpia.split_once('=') {
+            let clave = clave.trim().trim_matches('"');
+            let nombre = clave.split('.').next().unwrap_or(clave);
+            mapa.entry((seccion.clone(), nombre.to_string()))
+                .or_insert(numero);
+        }
+    }
+    mapa
+}
+
+/// Texto de un archivo, con la línea de cada clave para citarla.
+struct Texto {
+    ruta: String,
+    lineas: Vec<String>,
+    ubicaciones: HashMap<(String, String), u32>,
+}
+
+impl Texto {
+    fn nuevo(ruta: &str, texto: &str) -> Texto {
+        Texto {
+            ruta: ruta.into(),
+            lineas: texto.lines().map(str::to_string).collect(),
+            ubicaciones: ubicaciones(texto),
+        }
+    }
+
+    /// Línea de la clave `clave` dentro de la sección `seccion`. Cero si no aparece.
+    fn linea(&self, seccion: &str, clave: &str) -> u32 {
+        self.ubicaciones
+            .get(&(norma(seccion), clave.to_string()))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Texto de la línea `linea`, redactado. Vacío si no hay línea.
+    fn cita(&self, linea: u32) -> String {
+        match linea
+            .checked_sub(1)
+            .and_then(|i| self.lineas.get(i as usize))
+        {
+            Some(l) => redactar(l.trim()),
+            None => String::new(),
+        }
+    }
+}
+
+/// Un manifiesto de Cargo: su carpeta relativa al repo, su texto y su tabla.
+struct Manifiesto {
+    dir: String,
+    texto: Texto,
+    tabla: Table,
+}
+
+/// Una dependencia declarada: su sección, su nombre y sus valores.
+struct Dep {
+    seccion: String,
+    nombre: String,
+    valores: Table,
+}
+
+fn rechazo(texto: &Texto, linea: u32, motivo: String) -> Rechazo {
+    Rechazo {
+        motivo: redactar(&motivo),
+        archivo: texto.ruta.clone(),
+        linea,
+        cita: texto.cita(linea),
+    }
+}
+
+fn rechazo_de_lock(paquete: &PaqueteLock, motivo: String) -> Rechazo {
+    Rechazo {
+        motivo: redactar(&motivo),
+        archivo: ARCHIVO_LOCK.into(),
+        linea: paquete.linea,
+        cita: redactar(&paquete.cita),
+    }
+}
+
+fn aviso(texto: &Texto, linea: u32, detalle: String) -> Aviso {
+    Aviso {
+        archivo: texto.ruta.clone(),
+        linea,
+        cita: texto.cita(linea),
+        detalle: redactar(&detalle),
+    }
+}
+
+/// Agrega una fuente sin repetirla: dos fuentes iguales en tipo, dirección y versión son una.
+fn push_unico(fuentes: &mut Vec<Fuente>, nueva: Fuente) {
+    let repetida = fuentes.iter().any(|f| {
+        f.tipo == nueva.tipo && f.direccion == nueva.direccion && f.version == nueva.version
+    });
+    if !repetida {
+        fuentes.push(nueva);
+    }
+}
+
+fn crates_io_fuente(archivo: &str, linea: u32) -> Fuente {
+    Fuente {
+        tipo: TipoFuente::Registro,
+        direccion: INDICE_CRATES_IO.into(),
+        version: None,
+        archivo: archivo.into(),
+        linea,
+    }
+}
+
+/// Lee un archivo si existe. Un archivo que no se puede leer es infraestructura.
+fn leer_opcional(ruta: &Path) -> Result<Option<String>, ErrorOraculo> {
+    match fs::read_to_string(ruta) {
+        Ok(texto) => Ok(Some(texto)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(ErrorOraculo::Infra(format!("leer {}: {e}", ruta.display()))),
+    }
+}
+
+/// Parsea un manifiesto. Un TOML inválido es rechazo: Cargo no instalaría el producto.
+fn manifiesto(ruta: &str, dir: &str, texto: &str, inv: &mut Inventario) -> Option<Manifiesto> {
+    match toml::from_str::<Table>(texto) {
+        Ok(tabla) => Some(Manifiesto {
+            dir: dir.into(),
+            texto: Texto::nuevo(ruta, texto),
+            tabla,
+        }),
+        Err(e) => {
+            inv.rechazos.push(Rechazo {
+                motivo: redactar(&format!("{ruta} inválido: {e}")),
+                archivo: ruta.into(),
+                linea: 0,
+                cita: String::new(),
+            });
+            None
+        }
+    }
+}
+
+/// Carpetas de los miembros del workspace. Solo `dir` y `dir/*`; `exclude` no se lee.
+fn miembros(repo: &Path, raiz: &Table, inv: &mut Inventario) -> Vec<String> {
+    let mut dirs: Vec<String> = Vec::new();
+    let lista = raiz
+        .get("workspace")
+        .and_then(Value::as_table)
+        .and_then(|w| w.get("members"))
+        .and_then(Value::as_array);
+    let Some(lista) = lista else {
+        return dirs;
+    };
+    for patron in lista.iter().filter_map(Value::as_str) {
+        let patron = patron.trim_start_matches("./").trim_end_matches('/');
+        let base = if patron == "*" {
+            Some("")
+        } else {
+            patron.strip_suffix("/*")
+        };
+        match base {
+            Some(base) => {
+                let Ok(entradas) = fs::read_dir(repo.join(base)) else {
+                    continue;
+                };
+                let mut nombres: Vec<String> = entradas
+                    .flatten()
+                    .filter(|e| e.path().join(ARCHIVO_CARGO).is_file())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect();
+                nombres.sort();
+                for nombre in nombres {
+                    let dir = if base.is_empty() {
+                        nombre
+                    } else {
+                        format!("{base}/{nombre}")
+                    };
+                    if !dirs.contains(&dir) {
+                        dirs.push(dir);
+                    }
+                }
+            }
+            None if patron.contains('*') => inv.avisos.push(Aviso {
+                archivo: ARCHIVO_CARGO.into(),
+                linea: 0,
+                cita: String::new(),
+                detalle: redactar(&format!("glob no soportado en members: {patron}")),
+            }),
+            None if patron.is_empty() || patron == "." => {}
+            None => {
+                if !dirs.iter().any(|d| d == patron) {
+                    dirs.push(patron.to_string());
+                }
+            }
+        }
+    }
+    dirs
+}
+
+/// Dependencias de un manifiesto: las cuatro tablas, las de `target`, las de `workspace` y las de `patch`.
+fn dependencias(tabla: &Table) -> Vec<Dep> {
+    let mut salida = Vec::new();
+    for tabla_dep in TABLAS_DEPENDENCIAS {
+        agregar_dependencias(&mut salida, tabla.get(tabla_dep), tabla_dep);
+    }
+    if let Some(ws) = tabla.get("workspace").and_then(Value::as_table) {
+        agregar_dependencias(
+            &mut salida,
+            ws.get("dependencies"),
+            "workspace.dependencies",
+        );
+    }
+    if let Some(destinos) = tabla.get("target").and_then(Value::as_table) {
+        for (cfg, valor) in destinos {
+            let Some(t) = valor.as_table() else {
+                continue;
+            };
+            for tabla_dep in TABLAS_DEPENDENCIAS {
+                let seccion = format!("target.{cfg}.{tabla_dep}");
+                agregar_dependencias(&mut salida, t.get(tabla_dep), &seccion);
+            }
+        }
+    }
+    if let Some(parches) = tabla.get("patch").and_then(Value::as_table) {
+        for (fuente, valor) in parches {
+            agregar_dependencias(&mut salida, Some(valor), &format!("patch.{fuente}"));
+        }
+    }
+    salida
+}
+
+/// Agrega las entradas de una tabla de dependencias. Un texto suelto es una versión de crates.io.
+fn agregar_dependencias(salida: &mut Vec<Dep>, valor: Option<&Value>, seccion: &str) {
+    let Some(tabla) = valor.and_then(Value::as_table) else {
+        return;
+    };
+    for (nombre, dep) in tabla {
+        let valores = match dep {
+            Value::Table(t) => t.clone(),
+            Value::String(version) => {
+                let mut t = Table::new();
+                t.insert("version".into(), Value::String(version.clone()));
+                t
+            }
+            _ => continue,
+        };
+        salida.push(Dep {
+            seccion: norma(seccion),
+            nombre: nombre.clone(),
+            valores,
+        });
+    }
+}
+
+/// Lee `.cargo/config.toml` (o `config`) del repo. Un TOML inválido es rechazo.
+fn leer_config(repo: &Path, inv: &mut Inventario) -> Result<Option<Manifiesto>, ErrorOraculo> {
+    for ruta in ARCHIVOS_CONFIG {
+        if let Some(texto) = leer_opcional(&repo.join(ruta))? {
+            return Ok(manifiesto(ruta, "", &texto, inv));
+        }
+    }
+    Ok(None)
+}
+
+/// Tabla `[registries.<nombre>]` de la configuración del repo, si existe.
+fn registro_de<'a>(config: Option<&'a Manifiesto>, nombre: &str) -> Option<&'a Table> {
+    config?
+        .tabla
+        .get("registries")?
+        .as_table()?
+        .get(nombre)?
+        .as_table()
+}
+
+/// Fuentes de reemplazo de `[source.*]`: su `registry` y su `git` pasan por las mismas reglas.
+fn revisar_fuentes_config(config: &Manifiesto, inv: &mut Inventario) {
+    let Some(fuentes) = config.tabla.get("source").and_then(Value::as_table) else {
+        return;
+    };
+    for (nombre, valor) in fuentes {
+        let Some(tabla) = valor.as_table() else {
+            continue;
+        };
+        for clave in ["registry", "git"] {
+            let Some(url) = tabla.get(clave).and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some(motivo) = motivo_de_url(url) {
+                let linea = config.texto.linea(&format!("source.{nombre}"), clave);
+                inv.rechazos.push(rechazo(&config.texto, linea, motivo));
+            }
+        }
+    }
+}
+
+/// Inventario de los manifiestos de Cargo y del `Cargo.lock`.
+fn inventariar_cargo(repo: &Path, inv: &mut Inventario) -> Result<(), ErrorOraculo> {
+    let Some(texto_raiz) = leer_opcional(&repo.join(ARCHIVO_CARGO))? else {
+        return Ok(());
+    };
+    let Some(raiz) = manifiesto(ARCHIVO_CARGO, "", &texto_raiz, inv) else {
+        return Ok(());
+    };
+    let paquetes = match leer_opcional(&repo.join(ARCHIVO_LOCK))? {
+        Some(texto) => match analizar_lock(&texto) {
+            Ok(paquetes) => paquetes,
+            Err(e) => {
+                inv.rechazos.push(Rechazo {
+                    motivo: redactar(&format!("Cargo.lock inválido: {e}")),
+                    archivo: ARCHIVO_LOCK.into(),
+                    linea: 0,
+                    cita: String::new(),
+                });
+                Vec::new()
+            }
+        },
+        None => Vec::new(),
+    };
+    // El lock fija el commit de cada fuente git: ese commit reemplaza a la rama o al tag.
+    let commits: BTreeMap<String, String> = paquetes
+        .iter()
+        .filter_map(|p| match &p.origen {
+            Origen::Git {
+                url,
+                commit: Some(c),
+            } => Some((url.clone(), c.clone())),
+            _ => None,
+        })
+        .collect();
+
+    let mut manifiestos = vec![raiz];
+    for dir in miembros(repo, &manifiestos[0].tabla, inv) {
+        let ruta = format!("{dir}/{ARCHIVO_CARGO}");
+        if let Some(texto) = leer_opcional(&repo.join(&ruta))?
+            && let Some(m) = manifiesto(&ruta, &dir, &texto, inv)
+        {
+            manifiestos.push(m);
+        }
+    }
+
+    let config = leer_config(repo, inv)?;
+    let mut crates_io: Option<(String, u32)> = None;
+    for m in &manifiestos {
+        for dep in dependencias(&m.tabla) {
+            revisar_dep(&dep, m, config.as_ref(), &commits, inv, &mut crates_io);
+        }
+    }
+    if let Some(config) = &config {
+        revisar_fuentes_config(config, inv);
+    }
+
+    let mut crates_lock: Option<u32> = None;
+    for p in &paquetes {
+        match &p.origen {
+            Origen::Workspace => {}
+            Origen::CratesIo => {
+                crates_lock.get_or_insert(p.linea);
+            }
+            Origen::Git { url, commit } => match motivo_de_url(url) {
+                Some(motivo) => inv.rechazos.push(rechazo_de_lock(p, motivo)),
+                None => push_unico(
+                    &mut inv.fuentes,
+                    Fuente {
+                        tipo: TipoFuente::Git,
+                        direccion: redactar(url),
+                        version: commit.clone(),
+                        archivo: ARCHIVO_LOCK.into(),
+                        linea: p.linea,
+                    },
+                ),
+            },
+            Origen::Registro { url } => match motivo_de_url(url) {
+                Some(motivo) => inv.rechazos.push(rechazo_de_lock(p, motivo)),
+                None => push_unico(
+                    &mut inv.fuentes,
+                    Fuente {
+                        tipo: TipoFuente::Registro,
+                        direccion: redactar(&direccion_base(url)),
+                        version: None,
+                        archivo: ARCHIVO_LOCK.into(),
+                        linea: p.linea,
+                    },
+                ),
+            },
+            Origen::Otro(valor) => inv.rechazos.push(rechazo_de_lock(
+                p,
+                format!("fuente no reconocida en Cargo.lock: {valor}"),
+            )),
+        }
+    }
+    // crates.io es la fuente por defecto: una sola entrada, la del lock si existe.
+    match (crates_lock, crates_io) {
+        (Some(linea), _) => push_unico(&mut inv.fuentes, crates_io_fuente(ARCHIVO_LOCK, linea)),
+        (None, Some((archivo, linea))) => {
+            push_unico(&mut inv.fuentes, crates_io_fuente(&archivo, linea))
+        }
+        (None, None) => {}
+    }
+    Ok(())
+}
+
+/// Aplica las reglas a una dependencia de un manifiesto. Una fuente aceptada va a `inv.fuentes`.
+fn revisar_dep(
+    dep: &Dep,
+    m: &Manifiesto,
+    config: Option<&Manifiesto>,
+    commits: &BTreeMap<String, String>,
+    inv: &mut Inventario,
+    crates_io: &mut Option<(String, u32)>,
+) {
+    let linea = m.texto.linea(&dep.seccion, &dep.nombre);
+    let texto_de = |clave: &str| {
+        dep.valores
+            .get(clave)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let git = texto_de("git");
+    let path = texto_de("path");
+    let registro = texto_de("registry");
+    if let Some(ruta) = &path
+        && !dentro_del_repo(&m.dir, ruta)
+    {
+        inv.rechazos.push(rechazo(
+            &m.texto,
+            linea,
+            format!("path fuera del repo: {ruta}"),
+        ));
+        return;
+    }
+    if let Some(url) = &git {
+        if let Some(motivo) = motivo_de_url(url) {
+            inv.rechazos.push(rechazo(&m.texto, linea, motivo));
+            return;
+        }
+        let base = direccion_base(url);
+        let commit_lock = commits.get(&base).cloned();
+        let rev = texto_de("rev");
+        let fijo = rev.is_some() || commit_lock.is_some();
+        let version = commit_lock
+            .or(rev)
+            .or_else(|| texto_de("tag"))
+            .or_else(|| texto_de("branch"));
+        push_unico(
+            &mut inv.fuentes,
+            Fuente {
+                tipo: TipoFuente::Git,
+                direccion: redactar(&base),
+                version,
+                archivo: m.texto.ruta.clone(),
+                linea,
+            },
+        );
+        if !fijo {
+            inv.sin_commit.push(Aviso {
+                archivo: m.texto.ruta.clone(),
+                linea,
+                cita: m.texto.cita(linea),
+                detalle: redactar(&format!(
+                    "dependencia git sin commit fijo: {} ({base}): el build no es reproducible",
+                    dep.nombre
+                )),
+            });
+        }
+        return;
+    }
+    if let Some(nombre) = &registro {
+        let tabla = registro_de(config, nombre);
+        // Un registro con token o con proveedor de credenciales no se usa: la clave no entra al contenedor (P21).
+        if tabla.is_some_and(|t| t.contains_key("token") || t.contains_key("credential-provider")) {
+            inv.rechazos.push(rechazo(
+                &m.texto,
+                linea,
+                format!("registro privado que pide credenciales: {nombre}"),
+            ));
+            return;
+        }
+        let direccion = match tabla.and_then(|t| t.get("index")).and_then(Value::as_str) {
+            Some(url) => {
+                if let Some(motivo) = motivo_de_url(url) {
+                    inv.rechazos.push(rechazo(&m.texto, linea, motivo));
+                    return;
+                }
+                direccion_base(url)
+            }
+            None => format!("registry:{nombre}"),
+        };
+        push_unico(
+            &mut inv.fuentes,
+            Fuente {
+                tipo: TipoFuente::Registro,
+                direccion: redactar(&direccion),
+                version: None,
+                archivo: m.texto.ruta.clone(),
+                linea,
+            },
+        );
+        return;
+    }
+    // Se cita la primera línea de crates.io del archivo, no la primera en orden alfabético.
+    if path.is_none() && crates_io.as_ref().is_none_or(|(_, previa)| linea < *previa) {
+        *crates_io = Some((m.texto.ruta.clone(), linea));
+    }
+}
+
+/// Inventario de `requirements.txt`. Sin red: solo lee el texto.
+fn inventariar_requirements(repo: &Path, inv: &mut Inventario) -> Result<(), ErrorOraculo> {
+    let Some(texto) = leer_opcional(&repo.join(ARCHIVO_REQUIREMENTS))? else {
+        return Ok(());
+    };
+    let t = Texto::nuevo(ARCHIVO_REQUIREMENTS, &texto);
+    let mut pypi: Option<u32> = None;
+    let mut indice_propio = false;
+    for (linea, logica) in lineas_logicas(&texto) {
+        let mut resto = logica.trim();
+        if let Some(i) = resto.find(" --hash") {
+            resto = resto[..i].trim();
+        }
+        if let Some(i) = resto.find(" #") {
+            resto = resto[..i].trim();
+        }
+        if resto.is_empty() || resto.starts_with('#') {
+            continue;
+        }
+        if let Some(valor) = opcion(resto, &["-i", "--index-url"]) {
+            indice_propio = true;
+            fuente_de_indice(&t, linea, valor, inv);
+        } else if let Some(valor) = opcion(resto, &["--extra-index-url", "-f", "--find-links"]) {
+            fuente_de_indice(&t, linea, valor, inv);
+        } else if opcion(resto, &["-r", "--requirement", "-c", "--constraint"]).is_some() {
+            inv.avisos
+                .push(aviso(&t, linea, format!("no se sigue: {resto}")));
+        } else if let Some(valor) = opcion(resto, &["-e", "--editable"]) {
+            if es_directa(valor) {
+                directa(valor, linea, &t, inv);
+            } else {
+                inv.avisos.push(aviso(
+                    &t,
+                    linea,
+                    format!("editable local, no se sigue: {valor}"),
+                ));
+            }
+        } else if resto.starts_with('-') {
+            inv.avisos
+                .push(aviso(&t, linea, format!("opción no soportada: {resto}")));
+        } else if let Some((_, url)) = resto.split_once(" @ ") {
+            directa(url.trim(), linea, &t, inv);
+        } else if es_directa(resto) {
+            directa(resto, linea, &t, inv);
+        } else {
+            pypi.get_or_insert(linea);
+        }
+    }
+    // Con `--index-url`, pip deja de usar PyPI: solo entonces PyPI no es fuente.
+    if let Some(linea) = pypi
+        && !indice_propio
+    {
+        push_unico(
+            &mut inv.fuentes,
+            Fuente {
+                tipo: TipoFuente::Registro,
+                direccion: INDICE_PYPI.into(),
+                version: None,
+                archivo: ARCHIVO_REQUIREMENTS.into(),
+                linea,
+            },
+        );
+    }
+    Ok(())
+}
+
+/// Une las líneas que terminan en `\` con la siguiente. Da la línea de inicio de cada una.
+fn lineas_logicas(texto: &str) -> Vec<(u32, String)> {
+    let mut salida = Vec::new();
+    let mut acumulado: Option<(u32, String)> = None;
+    for (indice, linea) in texto.lines().enumerate() {
+        let numero = u32::try_from(indice + 1).unwrap_or(u32::MAX);
+        let (inicio, mut contenido) = acumulado.take().unwrap_or((numero, String::new()));
+        let limpia = linea.trim_end();
+        if let Some(continuada) = limpia.strip_suffix('\\') {
+            contenido.push_str(continuada);
+            contenido.push(' ');
+            acumulado = Some((inicio, contenido));
+        } else {
+            contenido.push_str(limpia);
+            salida.push((inicio, contenido));
+        }
+    }
+    if let Some(pendiente) = acumulado {
+        salida.push(pendiente);
+    }
+    salida
+}
+
+/// Valor de una opción de pip (`-i x`, `--index-url=x`). `None` si la línea no es esa opción.
+fn opcion<'a>(linea: &'a str, nombres: &[&str]) -> Option<&'a str> {
+    nombres.iter().find_map(|nombre| {
+        let resto = linea.strip_prefix(nombre)?;
+        (resto.starts_with(' ') || resto.starts_with('='))
+            .then(|| resto.trim_start_matches([' ', '=']).trim())
+    })
+}
+
+/// `true` si el texto es una referencia directa: `git+...` o una URL con `://`.
+fn es_directa(texto: &str) -> bool {
+    texto.starts_with("git+") || texto.contains("://")
+}
+
+/// Fuente de un índice (`--index-url`, `--extra-index-url`, `--find-links`).
+fn fuente_de_indice(t: &Texto, linea: u32, url: &str, inv: &mut Inventario) {
+    if let Some(motivo) = motivo_de_url(url) {
+        inv.rechazos.push(rechazo(t, linea, motivo));
+        return;
+    }
+    push_unico(
+        &mut inv.fuentes,
+        Fuente {
+            tipo: TipoFuente::Registro,
+            direccion: redactar(&direccion_base(url)),
+            version: None,
+            archivo: t.ruta.clone(),
+            linea,
+        },
+    );
+}
+
+/// Referencia directa de un requisito: `git+https://...@commit` o una URL de archivo.
+fn directa(url: &str, linea: u32, t: &Texto, inv: &mut Inventario) {
+    let sin_fragmento = url.split('#').next().unwrap_or(url);
+    if let Some(git) = sin_fragmento.strip_prefix("git+") {
+        if let Some(motivo) = motivo_de_url(git) {
+            inv.rechazos.push(rechazo(t, linea, motivo));
+            return;
+        }
+        let (base, version) = separar_referencia(git);
+        push_unico(
+            &mut inv.fuentes,
+            Fuente {
+                tipo: TipoFuente::Git,
+                direccion: redactar(&base),
+                version,
+                archivo: t.ruta.clone(),
+                linea,
+            },
+        );
+        return;
+    }
+    if let Some(motivo) = motivo_de_url(sin_fragmento) {
+        inv.rechazos.push(rechazo(t, linea, motivo));
+        return;
+    }
+    push_unico(
+        &mut inv.fuentes,
+        Fuente {
+            tipo: TipoFuente::Url,
+            direccion: redactar(sin_fragmento),
+            version: None,
+            archivo: t.ruta.clone(),
+            linea,
+        },
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo_con(archivos: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("temp dir");
+        for (ruta, texto) in archivos {
+            let destino = dir.path().join(ruta);
+            if let Some(padre) = destino.parent() {
+                std::fs::create_dir_all(padre).expect("crea carpeta");
+            }
+            std::fs::write(destino, texto).expect("escribe");
+        }
+        dir
+    }
+
+    fn inventario_de(archivos: &[(&str, &str)]) -> Inventario {
+        let dir = repo_con(archivos);
+        inventariar(dir.path()).expect("inventaria sin red")
+    }
+
+    /// Manifiesto cuya primera dependencia queda en la línea 6.
+    fn manifiesto(deps: &str) -> String {
+        format!("[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[dependencies]\n{deps}")
+    }
+
+    fn inventario_cargo(deps: &str) -> Inventario {
+        inventario_de(&[("Cargo.toml", &manifiesto(deps))])
+    }
+
+    #[test]
+    fn descarga_inventario_git_con_rev_da_fuente_git_con_el_rev_como_version() {
+        let inv =
+            inventario_cargo("foo = { git = \"https://github.com/x/y\", rev = \"abc123\" }\n");
+        assert!(inv.rechazos.is_empty(), "{:?}", inv.rechazos);
+        assert_eq!(
+            inv.fuentes,
+            vec![Fuente {
+                tipo: TipoFuente::Git,
+                direccion: "https://github.com/x/y".into(),
+                version: Some("abc123".into()),
+                archivo: "Cargo.toml".into(),
+                linea: 6,
+            }]
+        );
+        assert!(inv.sin_commit.is_empty());
+    }
+
+    #[test]
+    fn descarga_inventario_git_con_branch_sin_rev_marca_sin_commit_fijo() {
+        let inv =
+            inventario_cargo("foo = { git = \"https://github.com/x/y\", branch = \"main\" }\n");
+        assert_eq!(inv.fuentes.len(), 1);
+        assert_eq!(inv.fuentes[0].version.as_deref(), Some("main"));
+        assert_eq!(inv.sin_commit.len(), 1, "{inv:?}");
+        assert!(inv.sin_commit[0].detalle.contains("sin commit fijo"));
+    }
+
+    #[test]
+    fn descarga_inventario_lock_aporta_el_commit_de_la_fuente_git() {
+        let lock = "version = 4\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+[[package]]\nname = \"y\"\nversion = \"0.1.0\"\n\
+source = \"git+https://github.com/x/y?branch=main#0123456789abcdef0123456789abcdef01234567\"\n";
+        let inv = inventario_de(&[
+            (
+                "Cargo.toml",
+                &manifiesto("foo = { git = \"https://github.com/x/y\", branch = \"main\" }\n"),
+            ),
+            ("Cargo.lock", lock),
+        ]);
+        assert!(inv.rechazos.is_empty(), "{:?}", inv.rechazos);
+        let git: Vec<&Fuente> = inv
+            .fuentes
+            .iter()
+            .filter(|f| f.tipo == TipoFuente::Git)
+            .collect();
+        assert_eq!(
+            git.len(),
+            1,
+            "la fuente del manifiesto y la del lock son una: {inv:?}"
+        );
+        assert_eq!(
+            git[0].version.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+        assert!(inv.sin_commit.is_empty(), "el lock fija el commit");
+    }
+
+    #[test]
+    fn descarga_inventario_lock_solo_da_fuente_git_con_su_commit() {
+        let lock = "version = 4\n\n[[package]]\nname = \"t\"\nversion = \"0.1.0\"\n\
+source = \"git+https://github.com/x/t?rev=r1#aaaa\"\n";
+        let inv = inventario_de(&[("Cargo.toml", &manifiesto("")), ("Cargo.lock", lock)]);
+        let git = inv
+            .fuentes
+            .iter()
+            .find(|f| f.tipo == TipoFuente::Git)
+            .expect("git");
+        assert_eq!(git.direccion, "https://github.com/x/t");
+        assert_eq!(git.version.as_deref(), Some("aaaa"));
+        assert_eq!(git.archivo, "Cargo.lock");
+    }
+
+    #[test]
+    fn descarga_inventario_workspace_con_members_glob_encuentra_deps_de_los_miembros() {
+        let inv = inventario_de(&[
+            ("Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n"),
+            (
+                "crates/a/Cargo.toml",
+                &manifiesto("z = { git = \"https://github.com/x/z\", rev = \"r1\" }\n"),
+            ),
+        ]);
+        assert!(inv.rechazos.is_empty(), "{:?}", inv.rechazos);
+        assert_eq!(
+            inv.fuentes,
+            vec![Fuente {
+                tipo: TipoFuente::Git,
+                direccion: "https://github.com/x/z".into(),
+                version: Some("r1".into()),
+                archivo: "crates/a/Cargo.toml".into(),
+                linea: 6,
+            }]
+        );
+    }
+
+    #[test]
+    fn descarga_inventario_dependencias_por_version_dan_un_solo_registro_crates_io() {
+        let inv = inventario_cargo("serde = \"1\"\nrand = { version = \"0.8\" }\n");
+        assert_eq!(
+            inv.fuentes,
+            vec![Fuente {
+                tipo: TipoFuente::Registro,
+                direccion: "https://index.crates.io/".into(),
+                version: None,
+                archivo: "Cargo.toml".into(),
+                linea: 6,
+            }]
+        );
+    }
+
+    #[test]
+    fn descarga_inventario_requirements_lista_indice_git_url_y_avisos() {
+        let texto = "# comentario\nrequests==2.31.0\n--index-url https://pypi.example/simple\n\
+git+https://github.com/x/y@abc123#egg=y\nhttps://host/p.tar.gz\n-r otro.txt\n";
+        let inv = inventario_de(&[("requirements.txt", texto)]);
+        assert!(inv.rechazos.is_empty(), "{:?}", inv.rechazos);
+        assert_eq!(
+            inv.fuentes,
+            vec![
+                Fuente {
+                    tipo: TipoFuente::Registro,
+                    direccion: "https://pypi.example/simple".into(),
+                    version: None,
+                    archivo: "requirements.txt".into(),
+                    linea: 3,
+                },
+                Fuente {
+                    tipo: TipoFuente::Git,
+                    direccion: "https://github.com/x/y".into(),
+                    version: Some("abc123".into()),
+                    archivo: "requirements.txt".into(),
+                    linea: 4,
+                },
+                Fuente {
+                    tipo: TipoFuente::Url,
+                    direccion: "https://host/p.tar.gz".into(),
+                    version: None,
+                    archivo: "requirements.txt".into(),
+                    linea: 5,
+                },
+            ]
+        );
+        assert_eq!(inv.avisos.len(), 1, "{:?}", inv.avisos);
+        assert_eq!(inv.avisos[0].linea, 6);
+        assert!(inv.avisos[0].detalle.contains("otro.txt"));
+    }
+
+    #[test]
+    fn descarga_inventario_requirements_con_nombres_sin_indice_usa_pypi() {
+        let inv = inventario_de(&[("requirements.txt", "requests==2.31.0\n")]);
+        assert_eq!(inv.fuentes.len(), 1);
+        assert_eq!(inv.fuentes[0].direccion, "https://pypi.org/simple");
+        assert_eq!(inv.fuentes[0].tipo, TipoFuente::Registro);
+    }
+
+    #[test]
+    fn descarga_inventario_protocolos_sin_https_son_rechazo() {
+        for url in [
+            "ssh://git@github.com/x/y",
+            "git://github.com/x/y",
+            "http://github.com/x/y",
+            "file:///tmp/x",
+            "git@github.com:x/y.git",
+        ] {
+            let inv = inventario_cargo(&format!("foo = {{ git = \"{url}\" }}\n"));
+            assert_eq!(inv.rechazos.len(), 1, "debe rechazar {url}: {inv:?}");
+            assert!(inv.fuentes.is_empty(), "no lista {url}: {inv:?}");
+            assert_eq!(inv.rechazos[0].archivo, "Cargo.toml");
+            assert_eq!(inv.rechazos[0].linea, 6);
+        }
+    }
+
+    #[test]
+    fn descarga_inventario_path_fuera_del_repo_es_rechazo() {
+        let inv = inventario_cargo("afuera = { path = \"../afuera\" }\n");
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+        assert!(inv.rechazos[0].motivo.contains("fuera del repo"));
+    }
+
+    #[test]
+    fn descarga_inventario_path_dentro_del_repo_no_es_rechazo() {
+        let inv = inventario_cargo("local = { path = \"crates/local\" }\n");
+        assert!(inv.rechazos.is_empty(), "{:?}", inv.rechazos);
+        assert!(inv.fuentes.is_empty(), "un path local no baja nada");
+    }
+
+    #[test]
+    fn descarga_inventario_path_de_miembro_que_escapa_es_rechazo() {
+        let inv = inventario_de(&[
+            ("Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n"),
+            (
+                "crates/a/Cargo.toml",
+                &manifiesto("x = { path = \"../../../afuera\" }\n"),
+            ),
+        ]);
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+    }
+
+    #[test]
+    fn descarga_inventario_credencial_en_url_es_rechazo_y_no_se_filtra() {
+        let inv = inventario_cargo("foo = { git = \"https://usuario:clave@host/x.git\" }\n");
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+        let json = serde_json::to_string(&inv).expect("serializa");
+        assert!(!json.contains("clave"), "{json}");
+        assert!(!json.contains("usuario:"), "{json}");
+        assert!(json.contains("https://***@host/x.git"), "{json}");
+        assert!(!format!("{inv:?}").contains("clave"));
+    }
+
+    #[test]
+    fn descarga_inventario_registro_privado_con_token_es_rechazo_sin_token() {
+        let inv = inventario_de(&[
+            (
+                "Cargo.toml",
+                &manifiesto("secreto = { version = \"1\", registry = \"privado\" }\n"),
+            ),
+            (
+                ".cargo/config.toml",
+                "[registries.privado]\nindex = \"sparse+https://reg.example/index/\"\ntoken = \"TOKEN-SECRETO-123\"\n",
+            ),
+        ]);
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+        assert!(inv.rechazos[0].motivo.contains("credenciales"));
+        let json = serde_json::to_string(&inv).expect("serializa");
+        assert!(!json.contains("TOKEN-SECRETO-123"), "{json}");
+    }
+
+    #[test]
+    fn descarga_inventario_registro_privado_sin_credenciales_se_lista() {
+        let inv = inventario_de(&[
+            (
+                "Cargo.toml",
+                &manifiesto("secreto = { version = \"1\", registry = \"publico\" }\n"),
+            ),
+            (
+                ".cargo/config.toml",
+                "[registries.publico]\nindex = \"sparse+https://reg.example/index/\"\n",
+            ),
+        ]);
+        assert!(inv.rechazos.is_empty(), "{:?}", inv.rechazos);
+        assert_eq!(inv.fuentes[0].direccion, "https://reg.example/index/");
+        assert_eq!(inv.fuentes[0].tipo, TipoFuente::Registro);
+    }
+
+    #[test]
+    fn descarga_inventario_index_url_con_credenciales_es_rechazo() {
+        let inv = inventario_de(&[(
+            "requirements.txt",
+            "--index-url https://u:p@host/simple\nrequests==1\n",
+        )]);
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+        let json = serde_json::to_string(&inv).expect("serializa");
+        assert!(!json.contains("u:p@"), "{json}");
+        assert!(!json.contains(":p@"), "{json}");
+    }
+
+    #[test]
+    fn descarga_inventario_dependencia_en_tabla_con_ssh_es_rechazo() {
+        let texto = "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[dependencies.foo]\ngit = \"ssh://git@github.com/x/y\"\n";
+        let inv = inventario_de(&[("Cargo.toml", texto)]);
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+        assert_eq!(
+            inv.rechazos[0].linea, 5,
+            "la línea del encabezado de la tabla"
+        );
+    }
+
+    #[test]
+    fn descarga_inventario_patch_con_ssh_es_rechazo() {
+        let texto = "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[patch.crates-io]\nfoo = { git = \"ssh://host/x\" }\n";
+        let inv = inventario_de(&[("Cargo.toml", texto)]);
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+    }
+
+    #[test]
+    fn descarga_inventario_lock_con_credenciales_es_rechazo() {
+        let lock = "version = 4\n\n[[package]]\nname = \"t\"\nversion = \"0.1.0\"\n\
+source = \"git+https://u:p@host/x?rev=1#aaaa\"\n";
+        let inv = inventario_de(&[("Cargo.toml", &manifiesto("")), ("Cargo.lock", lock)]);
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+        assert_eq!(inv.rechazos[0].archivo, "Cargo.lock");
+        assert_eq!(inv.rechazos[0].linea, 6);
+        let json = serde_json::to_string(&inv).expect("serializa");
+        assert!(!json.contains("u:p@"), "{json}");
+    }
+
+    #[test]
+    fn descarga_inventario_cargo_toml_invalido_es_rechazo() {
+        let inv = inventario_de(&[("Cargo.toml", "esto no es toml = = =")]);
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+        assert!(inv.rechazos[0].motivo.starts_with("Cargo.toml inválido"));
+    }
+
+    #[test]
+    fn descarga_redactar_oculta_la_credencial_y_respeta_el_resto() {
+        assert_eq!(redactar("https://u:p@h/x"), "https://***@h/x");
+        assert_eq!(
+            redactar("git = \"https://t@h/x\" y https://a/b"),
+            "git = \"https://***@h/x\" y https://a/b"
+        );
+        assert_eq!(redactar("sin url aquí"), "sin url aquí");
+    }
+}

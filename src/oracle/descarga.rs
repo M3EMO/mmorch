@@ -1,13 +1,15 @@
-//! Fase de descarga (decisión 17): baja las dependencias con red antes de evaluar.
-//! Corre en un contenedor aparte. Ese contenedor nunca monta `/oraculo` y solo corre
-//! `cargo vendor` (Rust) o `pip download` (Python). La evaluación usa la caché sin red.
+//! Fase de descarga (decisiones 17 y 21): baja las dependencias con red antes de evaluar.
+//! Antes de la red, `inventario` lista las fuentes del repo y aplica sus reglas. Corre en un
+//! contenedor aparte. Ese contenedor nunca monta `/oraculo` y no ejecuta código del proyecto.
+//! La evaluación usa la caché sin red.
+
+pub mod inventario;
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -16,6 +18,7 @@ use super::tarea::Tarea;
 use super::{CARPETA_TEMPORALES, ErrorOraculo, infra, temporal};
 use crate::observe;
 use crate::tipos::{Dimension, Fuente, Hallazgo, TipoEvento};
+use inventario::{Inventario, Origen, PaqueteLock, Rechazo, analizar_lock};
 
 /// Lo que la evaluación necesita de la fase de descarga.
 #[derive(Debug, Clone, PartialEq)]
@@ -28,29 +31,6 @@ pub enum Preparacion {
     },
     /// La evaluación no corre: no hay veredicto, solo hallazgos.
     SinVeredicto(Vec<Hallazgo>),
-}
-
-/// Origen de un paquete del `Cargo.lock`.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Origen {
-    /// Miembro del workspace o path: no tiene `source`.
-    Workspace,
-    /// crates.io, por registro o por sparse.
-    CratesIo,
-    /// Cualquier otra fuente. Guarda el valor del `source`.
-    Rechazado(String),
-}
-
-/// Un `[[package]]` del `Cargo.lock`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PaqueteLock {
-    pub nombre: String,
-    pub version: String,
-    pub origen: Origen,
-    /// Línea 1-indexed del `source`. Cero si no tiene `source`.
-    pub linea: u32,
-    /// Texto de la línea del `source`, sin espacios de los extremos.
-    pub cita: String,
 }
 
 /// Lectura de la salida de error de un contenedor de descarga.
@@ -84,11 +64,6 @@ const ARCHIVO_CONFIG: &str = "config.toml";
 const ARCHIVO_LOCK: &str = "Cargo.lock";
 const ARCHIVO_REQUIREMENTS: &str = "requirements.txt";
 const ARCHIVO_EVENTOS: &str = "eventos.jsonl";
-/// Fuentes de crates.io aceptadas en el `Cargo.lock`.
-const ORIGENES_CRATES_IO: [&str; 2] = [
-    "registry+https://github.com/rust-lang/crates.io-index",
-    "sparse+https://index.crates.io/",
-];
 const CARGO_HOME_DESCARGA: &str = "/tmp/cargo-dl";
 const COMANDO_VENDOR: &str =
     "cd /repo && cargo vendor --locked --versioned-dirs /cache/vendor > /cache/config.toml";
@@ -120,71 +95,6 @@ pub fn hash_corto(contenido: &[u8]) -> String {
         .take(8)
         .map(|byte| format!("{byte:02x}"))
         .collect()
-}
-
-#[derive(Deserialize)]
-struct LockArchivo {
-    #[serde(default)]
-    package: Vec<LockPaquete>,
-}
-
-#[derive(Deserialize)]
-struct LockPaquete {
-    name: String,
-    version: String,
-    #[serde(default)]
-    source: Option<String>,
-}
-
-/// Lee un `Cargo.lock` y da sus paquetes con origen y línea del `source`.
-pub fn analizar_lock(texto: &str) -> Result<Vec<PaqueteLock>, String> {
-    let lock: LockArchivo = toml::from_str(texto).map_err(|e| e.to_string())?;
-    let fuentes = lineas_de_source(texto);
-    if fuentes.len() != lock.package.len() {
-        return Err(format!(
-            "{} bloques [[package]] en el texto, {} al parsear",
-            fuentes.len(),
-            lock.package.len()
-        ));
-    }
-    Ok(lock
-        .package
-        .into_iter()
-        .zip(fuentes)
-        .map(|(paquete, fuente)| {
-            let origen = match paquete.source.as_deref() {
-                None => Origen::Workspace,
-                Some(valor) if ORIGENES_CRATES_IO.contains(&valor) => Origen::CratesIo,
-                Some(valor) => Origen::Rechazado(valor.to_string()),
-            };
-            let (linea, cita) = fuente.unwrap_or((0, String::new()));
-            PaqueteLock {
-                nombre: paquete.name,
-                version: paquete.version,
-                origen,
-                linea,
-                cita,
-            }
-        })
-        .collect())
-}
-
-/// Una entrada por bloque `[[package]]`: línea y texto de su `source`, si lo tiene.
-fn lineas_de_source(texto: &str) -> Vec<Option<(u32, String)>> {
-    let mut bloques: Vec<Option<(u32, String)>> = Vec::new();
-    for (indice, linea) in texto.lines().enumerate() {
-        let limpia = linea.trim();
-        if limpia == "[[package]]" {
-            bloques.push(None);
-        } else if limpia.starts_with("source = ")
-            && let Some(ultimo) = bloques.last_mut()
-            && ultimo.is_none()
-        {
-            let numero = u32::try_from(indice + 1).unwrap_or(u32::MAX);
-            *ultimo = Some((numero, limpia.to_string()));
-        }
-    }
-    bloques
 }
 
 /// Clasifica el stderr de un contenedor de descarga. La infraestructura gana a un producto roto.
@@ -258,15 +168,6 @@ fn hallazgo(archivo: &str, linea: u32, cita: &str, severidad: u8, detalle: Strin
     }
 }
 
-/// Hallazgo de una fuente que no es crates.io.
-fn hallazgo_rechazo(paquete: &PaqueteLock, fuente: &str) -> Hallazgo {
-    let detalle = format!(
-        "fuente no aceptada en {}: {fuente}. Hasta la aclaración P12b solo rigen crates.io y PyPI.",
-        paquete.nombre
-    );
-    hallazgo("Cargo.lock", paquete.linea, &paquete.cita, 3, detalle)
-}
-
 fn hallazgo_no_instala(linea: &str) -> Hallazgo {
     hallazgo(
         "Cargo.toml",
@@ -321,15 +222,23 @@ impl Registro {
     }
 }
 
-/// Corre la fase de descarga para la tarea. Ver la decisión 17 en `root.plan.md`.
+/// Corre la fase de descarga para la tarea. Ver las decisiones 17 y 21 en `root.plan.md`.
+/// Orden fijo: inventario sin red, Gate del inventario, rechazos sin red, y recién después la red.
 pub fn preparar(
     repo: &Path,
     tarea: &Tarea,
     home: &Path,
     timeout: Duration,
 ) -> Result<Preparacion, ErrorOraculo> {
+    let inv = inventario::inventariar(repo)?;
+    registrar_inventario(home, tarea, &inv)?;
+    if !inv.rechazos.is_empty() {
+        return Ok(Preparacion::SinVeredicto(hallazgos_de_rechazos(
+            &inv.rechazos,
+        )));
+    }
     let (preparacion, registro) = match tarea.lenguaje.as_str() {
-        "rust" => preparar_rust(repo, tarea, home, timeout)?,
+        "rust" => preparar_rust(repo, tarea, home, timeout, &inv)?,
         "python" => preparar_python(repo, tarea, home, timeout)?,
         _ => {
             return Ok(Preparacion::Lista {
@@ -345,6 +254,34 @@ pub fn preparar(
     Ok(preparacion)
 }
 
+/// Gate de la fase `inventario`: las fuentes que el repo declara, antes de usar la red.
+fn registrar_inventario(home: &Path, tarea: &Tarea, inv: &Inventario) -> Result<(), ErrorOraculo> {
+    let mut extra = serde_json::Map::new();
+    extra.insert("lenguaje".into(), json!(tarea.lenguaje));
+    extra.insert("fuentes".into(), json!(inv.fuentes));
+    extra.insert("rechazos".into(), json!(inv.rechazos));
+    extra.insert("avisos".into(), json!(inv.avisos));
+    let evento = observe::evento_gate(&format!("descarga-{}", tarea.nombre), "inventario", extra);
+    observe::registrar_en(&home.join(ARCHIVO_EVENTOS), &evento)
+        .map_err(|e| infra("registrar el inventario de fuentes", e))
+}
+
+/// Un hallazgo de entrega por cada rechazo del inventario. La cita ya viene redactada.
+fn hallazgos_de_rechazos(rechazos: &[Rechazo]) -> Vec<Hallazgo> {
+    rechazos
+        .iter()
+        .map(|r| {
+            hallazgo(
+                &r.archivo,
+                r.linea,
+                &r.cita,
+                3,
+                format!("fuente no aceptada: {}", r.motivo),
+            )
+        })
+        .collect()
+}
+
 type Paso = (Preparacion, Option<Registro>);
 
 fn preparar_rust(
@@ -352,6 +289,7 @@ fn preparar_rust(
     tarea: &Tarea,
     home: &Path,
     timeout: Duration,
+    inv: &Inventario,
 ) -> Result<Paso, ErrorOraculo> {
     let mut hallazgos = Vec::new();
     let lock = repo.join(ARCHIVO_LOCK);
@@ -375,22 +313,22 @@ fn preparar_rust(
             ));
         }
     };
-    let rechazado = paquetes.iter().find_map(|p| match &p.origen {
-        Origen::Rechazado(fuente) => Some((p, fuente.clone())),
-        _ => None,
-    });
-    if let Some((paquete, fuente)) = rechazado {
-        return Ok(corte(
-            hallazgo_rechazo(paquete, &fuente),
-            Registro::corte("rust", Some(hash), "rechazo"),
-        ));
-    }
     let destino = home.join(CARPETA_CACHE).join(CARPETA_RUST).join(&hash);
     let cache_hit = destino.join(ARCHIVO_CONFIG).is_file();
     if !cache_hit && let Some(linea) = descargar_vendor(repo, tarea, home, &hash, timeout)? {
         return Ok(corte(
             hallazgo_no_instala(&linea),
             Registro::corte("rust", Some(hash), "no-instala"),
+        ));
+    }
+    // Una dependencia git sin commit fijo: el build no es reproducible (decisión 21).
+    for aviso in &inv.sin_commit {
+        hallazgos.push(hallazgo(
+            &aviso.archivo,
+            aviso.linea,
+            &aviso.cita,
+            2,
+            aviso.detalle.clone(),
         ));
     }
     let (rustsec, estado) = actualizar_rustsec(home, tarea, timeout)?;
@@ -421,6 +359,7 @@ fn preparar_python(
         rustsec: None,
         hallazgos: Vec::new(),
     };
+    // TODO 6c-B: wheels, sdist con curl, y fuentes git o URL de Python. Hoy solo corre `pip download`.
     let requirements = repo.join(ARCHIVO_REQUIREMENTS);
     if !requirements.is_file() {
         return Ok((sin_nada, None));
@@ -654,15 +593,23 @@ fn actualizar_rustsec(
     }
 }
 
+/// Paquetes del lock para el Gate de la descarga. Un paquete git lleva el commit obtenido.
 fn paquetes_json(paquetes: &[PaqueteLock]) -> Vec<Value> {
     paquetes
         .iter()
         .map(|p| {
-            let fuente = match p.origen {
-                Origen::Workspace => "workspace",
-                _ => "crates.io",
+            let (fuente, commit) = match &p.origen {
+                Origen::Workspace => ("workspace", None),
+                Origen::CratesIo => ("crates.io", None),
+                Origen::Git { commit, .. } => ("git", commit.clone()),
+                Origen::Registro { .. } => ("registro", None),
+                Origen::Otro(_) => ("otro", None),
             };
-            json!({"nombre": p.nombre, "version": p.version, "fuente": fuente})
+            let mut paquete = json!({"nombre": p.nombre, "version": p.version, "fuente": fuente});
+            if let Some(commit) = commit {
+                paquete["commit"] = json!(commit);
+            }
+            paquete
         })
         .collect()
 }
@@ -763,12 +710,15 @@ source = \"git+https://github.com/x/ext?rev=1#1\"\n";
     }
 
     #[test]
-    fn descarga_lock_rechaza_git_y_registro_privado_con_la_linea_del_source() {
+    fn descarga_lock_da_origen_git_con_commit_y_registro_con_su_linea() {
         let paquetes = analizar_lock(LOCK).expect("parsea");
         let ext = paquetes.iter().find(|p| p.nombre == "ext").expect("ext");
         assert_eq!(
             ext.origen,
-            Origen::Rechazado("git+https://github.com/x/ext?rev=1#1".into())
+            Origen::Git {
+                url: "https://github.com/x/ext".into(),
+                commit: Some("1".into()),
+            }
         );
         assert_eq!(ext.linea, 17, "la línea del source de ext");
         assert_eq!(
@@ -779,7 +729,12 @@ source = \"git+https://github.com/x/ext?rev=1#1\"\n";
         let privado = "version = 4\n[[package]]\nname = \"p\"\nversion = \"1\"\n\
 source = \"registry+https://registro.ejemplo.com/index\"\n";
         let p = analizar_lock(privado).expect("parsea");
-        assert!(matches!(p[0].origen, Origen::Rechazado(_)));
+        assert_eq!(
+            p[0].origen,
+            Origen::Registro {
+                url: "https://registro.ejemplo.com/index".into()
+            }
+        );
         assert_eq!(p[0].linea, 5);
     }
 
@@ -796,24 +751,25 @@ source = \"registry+https://registro.ejemplo.com/index\"\n";
     }
 
     #[test]
-    fn descarga_hallazgo_de_rechazo_tiene_linea_cita_y_id_estable() {
-        let paquetes = analizar_lock(LOCK).expect("parsea");
-        let ext = paquetes.iter().find(|p| p.nombre == "ext").expect("ext");
-        let h = hallazgo_rechazo(ext, "git+https://github.com/x/ext?rev=1#1");
+    fn descarga_hallazgos_de_rechazo_son_entrega_severidad_3_con_cita_e_id_estable() {
+        let rechazo = Rechazo {
+            motivo: "protocolo no aceptado: ssh; solo se acepta https".into(),
+            archivo: "Cargo.lock".into(),
+            linea: 17,
+            cita: "source = \"git+ssh://***@github.com/x/ext\"".into(),
+        };
+        let hallazgos = hallazgos_de_rechazos(std::slice::from_ref(&rechazo));
+        assert_eq!(hallazgos.len(), 1);
+        let h = &hallazgos[0];
         assert_eq!(h.dimension, Dimension::Entrega);
         assert_eq!(h.severidad, 3);
         assert_eq!(h.archivo, "Cargo.lock");
         assert_eq!(h.linea, 17);
-        assert_eq!(h.cita, ext.cita);
-        assert!(
-            h.detalle.contains("P12b"),
-            "menciona la aclaración: {}",
-            h.detalle
-        );
-        assert!(h.detalle.contains("crates.io"));
-        assert!(h.detalle.contains("PyPI"));
+        assert_eq!(h.cita, rechazo.cita);
+        assert!(h.detalle.contains("no aceptada"), "{}", h.detalle);
+        assert!(h.detalle.contains("ssh"), "{}", h.detalle);
         assert_eq!(h.fuente, Fuente::Sonda("descarga".into()));
-        let esperado = hash_corto(format!("entrega|Cargo.lock|{}", ext.cita).as_bytes());
+        let esperado = hash_corto(format!("entrega|Cargo.lock|{}", rechazo.cita).as_bytes());
         assert_eq!(h.id, esperado);
     }
 
