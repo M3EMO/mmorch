@@ -6,6 +6,7 @@ pub mod descarga;
 pub mod entrega;
 pub mod evidencia;
 pub mod junit;
+pub mod mapa;
 pub mod mutacion;
 pub mod pendientes;
 pub mod perfiles;

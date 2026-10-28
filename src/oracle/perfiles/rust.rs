@@ -31,25 +31,25 @@ impl Default for LimitesEstructura {
 }
 
 /// Un fuente `.rs` del repo: ruta relativa con `/` y sus líneas.
-struct Archivo {
-    ruta: String,
-    lineas: Vec<String>,
+pub(crate) struct Archivo {
+    pub(crate) ruta: String,
+    pub(crate) lineas: Vec<String>,
 }
 
 /// Una línea con su número, su texto crudo y su texto sin comentarios ni cadenas.
-struct Linea {
-    numero: u32,
-    cruda: String,
-    limpia: String,
+pub(crate) struct Linea {
+    pub(crate) numero: u32,
+    pub(crate) cruda: String,
+    pub(crate) limpia: String,
     /// Verdadero dentro de un bloque `#[cfg(test)]`.
-    de_test: bool,
+    pub(crate) de_test: bool,
 }
 
 /// Una arista entre módulos: el primer uso del módulo origen hacia el destino.
-struct Uso {
-    archivo: String,
-    linea: u32,
-    cita: String,
+pub(crate) struct Uso {
+    pub(crate) archivo: String,
+    pub(crate) linea: u32,
+    pub(crate) cita: String,
 }
 
 /// Seguridad: cada `unsafe` (severidad 2) y cada `unwrap()`/`expect(` (severidad 1) fuera de tests.
@@ -167,7 +167,7 @@ fn resultado(dimension: Dimension, hallazgos: Vec<Hallazgo>, reqs: &[Requisito])
     }
 }
 
-fn archivos_rs(repo: &Path) -> Vec<Archivo> {
+pub(crate) fn archivos_rs(repo: &Path) -> Vec<Archivo> {
     let mut salida = Vec::new();
     recorrer(repo, &repo.join("src"), &mut salida);
     salida.sort_by(|a, b| a.ruta.cmp(&b.ruta));
@@ -235,7 +235,7 @@ fn limpiar_linea(linea: &str) -> String {
 }
 
 /// Marca cada línea como de test o no. Un bloque `#[cfg(test)]` cuenta con sus llaves.
-fn analizar(texto: &[String]) -> Vec<Linea> {
+pub(crate) fn analizar(texto: &[String]) -> Vec<Linea> {
     let mut profundidad: i32 = 0;
     let mut bloque_test: Option<i32> = None;
     let mut pendiente = false;
@@ -273,7 +273,7 @@ fn analizar(texto: &[String]) -> Vec<Linea> {
 }
 
 /// Verdadero si `palabra` aparece como token completo (no dentro de `unsafe_code`).
-fn tiene_token(linea: &str, palabra: &str) -> bool {
+pub(crate) fn tiene_token(linea: &str, palabra: &str) -> bool {
     linea
         .split(|c: char| !(c.is_alphanumeric() || c == '_'))
         .any(|t| t == palabra)
@@ -450,7 +450,7 @@ fn lineas_significativas(archivo: &Archivo) -> Vec<(u32, String, String)> {
 }
 
 /// Aristas `origen -> destino` por `crate::X` fuera de tests. Guarda el primer uso de cada una.
-fn aristas_entre_modulos(
+pub(crate) fn aristas_entre_modulos(
     archivos: &[Archivo],
     modulos: &BTreeSet<String>,
 ) -> BTreeMap<(String, String), Uso> {
