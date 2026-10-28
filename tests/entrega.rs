@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 use root::oracle::ErrorOraculo;
 use root::oracle::configs::sondas_configs;
 use root::oracle::descarga::{self, Preparacion, Problema, traer_imagenes_base};
-use root::oracle::entrega::{LugarEscenario, construir_dockerfile, entregar, sonda_entrega};
+use root::oracle::entrega::{
+    LugarEscenario, ResultadoDockerfile, construir_dockerfile, entregar, sonda_entrega,
+};
 use root::oracle::junit::ResultadoTest;
 use root::oracle::perfiles::deduplicar_hallazgos;
 use root::oracle::perfiles::herramientas::{
@@ -408,28 +410,48 @@ fn entrega_build_sin_user_corre_como_root_y_la_regla_no_se_duplica() {
     );
 }
 
+/// Un `RUN` que pide red se repite con red (Tarea 9d3). La laptop puede tener red o no: los dos
+/// desenlaces válidos son construir con red (hallazgo de severidad 1) o quedar pendiente con su línea.
+fn afirma_repeticion_con_red(r: &ResultadoDockerfile, linea: u32, pista: &str) {
+    assert!(
+        !r.hallazgos
+            .iter()
+            .any(|h| h.detalle.contains("la imagen no construye")),
+        "{:?}",
+        r.hallazgos
+    );
+    if r.con_red {
+        assert!(r.construida, "{r:?}");
+        assert!(r.pendientes.is_empty(), "{:?}", r.pendientes);
+        let de_red: Vec<_> = r
+            .hallazgos
+            .iter()
+            .filter(|h| h.detalle == "la imagen necesita red para construirse")
+            .collect();
+        assert_eq!(de_red.len(), 1, "{:?}", r.hallazgos);
+        assert_eq!((de_red[0].severidad, de_red[0].linea), (1, linea));
+    } else {
+        assert!(!r.construida, "{r:?}");
+        assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+        assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
+        let motivo = &r.pendientes[0].motivo;
+        assert!(
+            motivo.contains(&format!("línea {linea}")) && motivo.contains(pista),
+            "{motivo}"
+        );
+        assert_eq!(r.corre_sin_root, None);
+    }
+}
+
 #[test]
-fn entrega_build_run_apk_sin_red_queda_pendiente_con_su_linea_y_sin_hallazgo() {
+fn entrega_build_run_apk_sin_red_se_repite_con_red_o_queda_pendiente() {
     root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let _serie = serie();
     let repo = dockerfile_9d2(&format!("{FROM_ALPINE}RUN apk add --no-cache curl\n"));
     let home = home_9d2();
     let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &[]).expect("construye");
-    assert!(
-        r.hallazgos.is_empty(),
-        "sin red no se cobra al producto: {:?}",
-        r.hallazgos
-    );
-    assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
-    assert_eq!(r.pendientes[0].test, "dockerfile::build");
-    let motivo = &r.pendientes[0].motivo;
-    assert!(
-        motivo.contains("línea 2") && motivo.contains("apk"),
-        "{motivo}"
-    );
-    assert!(!r.construida);
-    assert_eq!(r.corre_sin_root, None);
+    afirma_repeticion_con_red(&r, 2, "apk");
     assert!(
         imagenes_temporales().is_empty(),
         "queda una imagen temporal"
@@ -473,7 +495,7 @@ fn entrega_build_copy_inexistente_da_hallazgo_y_no_pendiente() {
 }
 
 #[test]
-fn entrega_build_wget_sin_red_queda_pendiente() {
+fn entrega_build_wget_sin_red_se_repite_con_red_o_queda_pendiente() {
     root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let _serie = serie();
@@ -482,13 +504,7 @@ fn entrega_build_wget_sin_red_queda_pendiente() {
     ));
     let home = home_9d2();
     let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &[]).expect("construye");
-    assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
-    assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
-    assert!(
-        r.pendientes[0].motivo.contains("línea 2"),
-        "{:?}",
-        r.pendientes
-    );
+    afirma_repeticion_con_red(&r, 2, "wget");
 }
 
 #[test]

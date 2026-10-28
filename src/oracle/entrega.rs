@@ -1,7 +1,8 @@
 //! Entrega y escenarios de usuario (Tarea 9d). Corre el producto en una copia del repo, dentro de
 //! un contenedor sin red: instala, arranca y pasa cada `[[escenario]]`. La verificación estática
 //! del `Dockerfile` reusa la regla de "corre como root" de 9b. La construcción sin red
-//! (`construir_dockerfile`, Tarea 9d2) no se conecta a `evaluar`: Tarea 13 la arma.
+//! (`construir_dockerfile`, Tarea 9d2) no se conecta a `evaluar`: Tarea 13 la arma. Si un `RUN`
+//! pide red, la construcción se repite una vez con red, sin credenciales ni montajes (Tarea 9d3).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -11,7 +12,9 @@ use std::time::Duration;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
+use crate::observe;
 use crate::oracle::ErrorOraculo;
 use crate::oracle::configs::{self, instrucciones, palabra_clave};
 use crate::oracle::contenedor::{SUFIJO_SELINUX, SalidaPodman, correr_podman};
@@ -69,6 +72,12 @@ const PATRONES_RED: [&str; 13] = [
 const PATRONES_AUSENTE: [&str; 3] = ["image not known", "no such image", "unable to find"];
 /// Contador de las etiquetas temporales de `podman build`.
 static CONTADOR_BUILD: AtomicU64 = AtomicU64::new(0);
+/// Detalle del hallazgo de entrega cuando la imagen solo se construye con red (Tarea 9d3).
+const DETALLE_NECESITA_RED: &str = "la imagen necesita red para construirse";
+/// Fase del `Gate` que registra la repetición del build con red (Tarea 9d3).
+const FASE_CONSTRUCCION_RED: &str = "construccion-red";
+/// Archivo de eventos de `ROOT_HOME`, el mismo que usan los demás módulos.
+const ARCHIVO_EVENTOS: &str = "eventos.jsonl";
 
 /// Lo que sale de construir los Dockerfile del repo sin red (Tarea 9d2).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -81,6 +90,9 @@ pub struct ResultadoDockerfile {
     pub construida: bool,
     /// Motivos por los que la construcción no da veredicto (Tarea 7i). Si hay alguno, no se construye.
     pub sin_veredicto: Vec<MotivoSinVeredicto>,
+    /// Verdadero si la imagen salió del build con red (Tarea 9d3).
+    #[serde(default)]
+    pub con_red: bool,
 }
 
 /// Una causa por la que la construcción no da veredicto, con la línea del `FROM`.
@@ -93,21 +105,123 @@ pub struct MotivoSinVeredicto {
 }
 
 /// Construye el Dockerfile elegido con `--network none --pull=never` y verifica que corre sin root.
-/// `imagenes` son las imágenes base que vio la fase de descarga: un problema suyo da sin veredicto.
+/// Si un `RUN` pide red, lo repite una vez con red (Tarea 9d3). `imagenes` son las imágenes base
+/// que vio la fase de descarga: un problema suyo da sin veredicto.
 pub fn construir_dockerfile(
     repo: &Path,
     home: &Path,
     tarea: &Tarea,
     imagenes: &[ImagenBase],
 ) -> Result<ResultadoDockerfile, ErrorOraculo> {
-    construir_con(repo, home, tarea, imagenes, PLAZO_BUILD).map(|c| c.resultado)
+    construir_con(repo, home, tarea, imagenes, PLAZO_BUILD, &PodmanReal).map(|c| c.resultado)
+}
+
+/// Corre `podman` con argumentos. El real llama a `correr_podman`; los tests usan un falso.
+pub(crate) trait Podman {
+    fn correr(&self, args: &[&str], plazo: Duration) -> Result<SalidaPodman, ErrorOraculo>;
+}
+
+/// Podman real: lanza el binario con `correr_podman`.
+struct PodmanReal;
+
+impl Podman for PodmanReal {
+    fn correr(&self, args: &[&str], plazo: Duration) -> Result<SalidaPodman, ErrorOraculo> {
+        correr_podman(args, plazo)
+    }
+}
+
+/// Argumentos de `podman build` (Tarea 9d3). Sin red, `--network none`. Con red, la red de usuario de
+/// podman sin acceso al host, y nada más: sin montajes, secretos, `--build-arg`, `--authfile` ni `--env`.
+/// La forma exacta de la opción de red se verifica en la laptop (podman real).
+fn args_build(red: bool, etiqueta: &str, dockerfile: &str, contexto: &str) -> Vec<String> {
+    let red = if red {
+        "slirp4netns:allow_host_loopback=false"
+    } else {
+        "none"
+    };
+    vec![
+        "build".into(),
+        "--network".into(),
+        red.into(),
+        "--pull=never".into(),
+        "-t".into(),
+        etiqueta.into(),
+        "-f".into(),
+        dockerfile.into(),
+        contexto.into(),
+    ]
+}
+
+/// Corre un `podman build` con los argumentos de `args_build`.
+fn correr_build(
+    podman: &dyn Podman,
+    red: bool,
+    etiqueta: &str,
+    dockerfile: &str,
+    contexto: &str,
+    plazo: Duration,
+) -> Result<SalidaPodman, ErrorOraculo> {
+    let args = args_build(red, etiqueta, dockerfile, contexto);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    podman.correr(&refs, plazo)
+}
+
+/// Pendiente del build, con su test y su motivo.
+fn pendiente_de_build(motivo: String) -> Pendiente {
+    Pendiente {
+        test: TEST_BUILD.into(),
+        motivo,
+        colab: None,
+    }
+}
+
+/// Anota un desenlace de build fallido: el pendiente o el hallazgo del producto.
+fn anotar_desenlace(resultado: &mut ResultadoDockerfile, desenlace: Desenlace) {
+    match desenlace {
+        Desenlace::Pendiente(motivo) | Desenlace::PendienteRed { motivo, .. } => {
+            resultado.pendientes.push(pendiente_de_build(motivo));
+        }
+        Desenlace::Hallazgo(h) => resultado.hallazgos.push(h),
+    }
+}
+
+/// Registra el `Gate` de la repetición con red (Tarea 9d3): las `RUN` del Dockerfile y la que falló sin red.
+/// Va antes del build con red. Si no se puede registrar, no se construye con red.
+fn registrar_repeticion(
+    home: &Path,
+    tarea: &Tarea,
+    ruta: &str,
+    texto: &str,
+    linea: u32,
+    cita: &str,
+) -> Result<(), ErrorOraculo> {
+    let run: Vec<Value> = instrucciones(texto)
+        .into_iter()
+        .filter(|i| palabra_clave(&i.logico).0 == "RUN")
+        .map(|i| json!({"linea": i.linea, "cita": i.cita}))
+        .collect();
+    let mut extra = serde_json::Map::new();
+    extra.insert("accion".into(), json!("repetir-con-red"));
+    extra.insert("dockerfile".into(), json!(ruta));
+    extra.insert(
+        "fallo_sin_red".into(),
+        json!({"linea": linea, "cita": cita}),
+    );
+    extra.insert("run".into(), json!(run));
+    let evento = observe::evento_gate(
+        &format!("entrega-{}", tarea.nombre),
+        FASE_CONSTRUCCION_RED,
+        extra,
+    );
+    observe::registrar_en(&home.join(ARCHIVO_EVENTOS), &evento)
+        .map_err(|e| infra("registrar la repetición con red", e))
 }
 
 /// Lo que sale de construir. Si el Dockerfile construye y la imagen trae `sh`, `imagen` guarda la imagen:
 /// los escenarios corren contra ella. Su `Drop` la borra con `podman rmi -f`.
-pub struct Construccion {
+pub struct Construccion<'a> {
     pub resultado: ResultadoDockerfile,
-    imagen: Option<ImagenTemporal>,
+    imagen: Option<ImagenTemporal<'a>>,
     /// Avisos de la elección y de la construcción (Tarea 7j).
     avisos: Vec<String>,
 }
@@ -164,14 +278,20 @@ fn motivos_sin_veredicto(
     Ok(motivos)
 }
 
+/// Aviso de la repetición con red (Tarea 9d3) cuando el host tampoco tiene red.
+const AVISO_RED_TAMPOCO: &str = "la construcción con red tampoco tuvo red";
+/// Aviso cuando el build con red no llega a construir por un error de podman: queda el Pendiente.
+const AVISO_RED_NO_ARRANCO: &str = "la construcción con red no arrancó";
+
 /// Construye el Dockerfile elegido y verifica que corre sin root. Un solo `podman build`.
-fn construir_con(
+fn construir_con<'a>(
     repo: &Path,
     home: &Path,
     tarea: &Tarea,
     imagenes: &[ImagenBase],
     plazo: Duration,
-) -> Result<Construccion, ErrorOraculo> {
+    podman: &'a dyn Podman,
+) -> Result<Construccion<'a>, ErrorOraculo> {
     let reqs = tarea.requisito.as_slice();
     let mut resultado = ResultadoDockerfile {
         hallazgos: Vec::new(),
@@ -179,6 +299,7 @@ fn construir_con(
         corre_sin_root: None,
         construida: false,
         sin_veredicto: Vec::new(),
+        con_red: false,
     };
     let mut avisos = Vec::new();
     if let Some(c) = tarea.containerfile.as_deref()
@@ -227,38 +348,82 @@ fn construir_con(
     let texto = fs::read_to_string(contexto.join(&ruta))
         .map_err(|e| infra("leer el Dockerfile para construir", e))?;
     // La imagen temporal se borra al salir de la función, pase lo que pase.
-    let imagen = ImagenTemporal(etiqueta_unica());
+    let imagen = ImagenTemporal {
+        etiqueta: etiqueta_unica(),
+        podman,
+    };
     let df = contexto.join(&ruta).to_string_lossy().into_owned();
     let ctx = contexto.to_string_lossy().into_owned();
-    let args = [
-        "build",
-        "--network",
-        "none",
-        "--pull=never",
-        "-t",
-        imagen.0.as_str(),
-        "-f",
-        df.as_str(),
-        ctx.as_str(),
-    ];
-    let build = correr_podman(&args, plazo)?;
+    let mut build = correr_build(podman, false, &imagen.etiqueta, &df, &ctx, plazo)?;
+    let mut con_red = false;
     if build.codigo != 0 {
         match clasificar_fallo(&build, &ruta, &texto, reqs)? {
-            Desenlace::Pendiente(motivo) => resultado.pendientes.push(Pendiente {
-                test: TEST_BUILD.into(),
+            Desenlace::PendienteRed {
+                linea,
+                cita,
                 motivo,
-                colab: None,
-            }),
-            Desenlace::Hallazgo(h) => resultado.hallazgos.push(h),
+            } => {
+                // Regla de repetir (Tarea 9d3): una sola vez, con red y el mismo contexto. El Gate va antes.
+                registrar_repeticion(home, tarea, &ruta, &texto, linea, &cita)?;
+                // Un error de podman en el respaldo (opción de red rechazada, timeout) no borra el
+                // Pendiente del primer build: queda con un aviso y nunca da verde.
+                let con_red_salida = correr_build(podman, true, &imagen.etiqueta, &df, &ctx, plazo)
+                    .and_then(|salida| {
+                        if salida.codigo == 0 {
+                            return Ok((salida, None));
+                        }
+                        clasificar_fallo(&salida, &ruta, &texto, reqs).map(|d| (salida, Some(d)))
+                    });
+                let desenlace_red = match con_red_salida {
+                    Ok((salida, desenlace)) => {
+                        build = salida;
+                        desenlace
+                    }
+                    Err(error) => {
+                        avisos.push(format!("{AVISO_RED_NO_ARRANCO}: {error}"));
+                        resultado.pendientes.push(pendiente_de_build(motivo));
+                        return Ok(Construccion {
+                            resultado,
+                            imagen: None,
+                            avisos,
+                        });
+                    }
+                };
+                if build.codigo == 0 {
+                    con_red = true;
+                    resultado.hallazgos.push(crear_hallazgo(
+                        DIMENSION,
+                        1,
+                        &ruta,
+                        linea,
+                        &cita,
+                        DETALLE_NECESITA_RED,
+                        SONDA,
+                        reqs,
+                    ));
+                } else {
+                    match desenlace_red {
+                        Some(Desenlace::PendienteRed { motivo, .. }) => {
+                            avisos.push(AVISO_RED_TAMPOCO.into());
+                            resultado.pendientes.push(pendiente_de_build(motivo));
+                        }
+                        Some(otro) => anotar_desenlace(&mut resultado, otro),
+                        None => {}
+                    }
+                }
+            }
+            otro => anotar_desenlace(&mut resultado, otro),
         }
-        return Ok(Construccion {
-            resultado,
-            imagen: None,
-            avisos,
-        });
+        if build.codigo != 0 {
+            return Ok(Construccion {
+                resultado,
+                imagen: None,
+                avisos,
+            });
+        }
     }
-    let con_sh = tiene_sh(&imagen.0)?;
-    let sin_root = corre_sin_root(&imagen.0, con_sh)?;
+    let con_sh = tiene_sh(podman, &imagen.etiqueta)?;
+    let sin_root = corre_sin_root(podman, &imagen.etiqueta, con_sh)?;
     if !sin_root
         && !estatica.iter().any(|h| h.archivo == ruta)
         && let Some((linea, cita)) = ultimo_from(&texto)
@@ -276,6 +441,7 @@ fn construir_con(
     }
     resultado.construida = true;
     resultado.corre_sin_root = Some(sin_root);
+    resultado.con_red = con_red;
     if !con_sh {
         avisos.push(AVISO_SIN_SH.into());
     }
@@ -287,12 +453,17 @@ fn construir_con(
 }
 
 /// Imagen temporal de una construcción. Su `Drop` la borra con `podman rmi -f`, pase lo que pase.
-struct ImagenTemporal(String);
+struct ImagenTemporal<'a> {
+    etiqueta: String,
+    podman: &'a dyn Podman,
+}
 
-impl Drop for ImagenTemporal {
+impl Drop for ImagenTemporal<'_> {
     fn drop(&mut self) {
         // Solo borra su propia etiqueta. Un fallo no importa: la imagen quizá nunca se creó.
-        let _ = correr_podman(&["rmi", "-f", self.0.as_str()], PLAZO_CORTO);
+        let _ = self
+            .podman
+            .correr(&["rmi", "-f", self.etiqueta.as_str()], PLAZO_CORTO);
     }
 }
 
@@ -303,8 +474,8 @@ fn etiqueta_unica() -> String {
 }
 
 /// Verdadero si la imagen corre sin root. Con `sh`, `id -u` lo confirma. Sin `sh`, vale solo el `USER`.
-fn corre_sin_root(tag: &str, con_sh: bool) -> Result<bool, ErrorOraculo> {
-    let inspeccion = correr_podman(
+fn corre_sin_root(podman: &dyn Podman, tag: &str, con_sh: bool) -> Result<bool, ErrorOraculo> {
+    let inspeccion = podman.correr(
         &["image", "inspect", "--format", "{{.Config.User}}", tag],
         PLAZO_CORTO,
     )?;
@@ -312,7 +483,7 @@ fn corre_sin_root(tag: &str, con_sh: bool) -> Result<bool, ErrorOraculo> {
     if !con_sh {
         return Ok(!es_root(&usuario));
     }
-    let uid = correr_podman(
+    let uid = podman.correr(
         &[
             "run",
             "--rm",
@@ -335,8 +506,8 @@ fn corre_sin_root(tag: &str, con_sh: bool) -> Result<bool, ErrorOraculo> {
 }
 
 /// Verdadero si la imagen trae `sh`. Sin `sh`, podman sale con 126 o 127 al intentar correrlo.
-fn tiene_sh(tag: &str) -> Result<bool, ErrorOraculo> {
-    let prueba = correr_podman(
+fn tiene_sh(podman: &dyn Podman, tag: &str) -> Result<bool, ErrorOraculo> {
+    let prueba = podman.correr(
         &[
             "run",
             "--rm",
@@ -377,7 +548,14 @@ fn ultimo_from(texto: &str) -> Option<(u32, String)> {
 
 /// Desenlace de un build que falló: un pendiente sin cobro, o un hallazgo del producto.
 enum Desenlace {
+    /// Imagen base del `FROM` que no está local: no se repite.
     Pendiente(String),
+    /// Un `RUN` que pide red: la regla de repetir con red (Tarea 9d3) decide qué sigue.
+    PendienteRed {
+        motivo: String,
+        linea: u32,
+        cita: String,
+    },
     Hallazgo(Hallazgo),
 }
 
@@ -420,9 +598,12 @@ fn clasificar_fallo(
         )));
     }
     if kw == "RUN" && pide_red(&salida) {
-        return Ok(Desenlace::Pendiente(format!(
-            "no se pudo construir sin red: línea {linea}, {cita}"
-        )));
+        let motivo = format!("no se pudo construir sin red: línea {linea}, {cita}");
+        return Ok(Desenlace::PendienteRed {
+            motivo,
+            linea,
+            cita,
+        });
     }
     Ok(Desenlace::Hallazgo(crear_hallazgo(
         DIMENSION,
@@ -577,12 +758,12 @@ pub fn entregar(
         resultado: construccion,
         imagen,
         avisos: avisos_construccion,
-    } = construir_con(repo, home, tarea, imagenes, PLAZO_BUILD)?;
+    } = construir_con(repo, home, tarea, imagenes, PLAZO_BUILD, &PodmanReal)?;
     let mut avisos = avisos_construccion;
     // El contenedor de escenario sale de la imagen construida. Sin él, van al de evaluación.
     let contenedor = match &imagen {
         Some(img) if !tarea.escenario.is_empty() => {
-            match ContenedorEscenario::iniciar(&img.0, &tarea.dir) {
+            match ContenedorEscenario::iniciar(&img.etiqueta, &tarea.dir) {
                 Ok(c) => Some(c),
                 Err(motivo) => {
                     avisos.push(format!(
@@ -1039,6 +1220,7 @@ mod tests {
     use crate::oracle::perfiles::herramientas::SalidaHerramienta;
     use std::cell::{Cell, RefCell};
     use std::fs;
+    use std::rc::Rc;
 
     /// Ejecutor de mentira: responde siempre lo mismo y cuenta las llamadas.
     struct Falso {
@@ -1516,5 +1698,426 @@ mod tests {
             "imagen base: pide credenciales (Root no las pasa)"
         );
         assert!(!r.construida);
+    }
+
+    // ---- Tarea 9d3: repetir el build con red cuando un RUN pide red ----
+
+    /// Dockerfile de la 9d3: la línea 2 es un `RUN` que pide red.
+    const DF_RED: &str = "FROM debian:12\nRUN apt-get install -y curl\nUSER app\n";
+
+    /// Salida de `podman build` sin red: el `RUN` de la línea 2 falla por el DNS.
+    fn salida_sin_red() -> SalidaPodman {
+        SalidaPodman {
+            codigo: 1,
+            stdout: "STEP 1/2: FROM debian:12\nSTEP 2/2: RUN apt-get install -y curl\n".into(),
+            stderr: "Temporary failure in name resolution\n".into(),
+        }
+    }
+
+    /// Salida de un comando que sale 0.
+    fn salida_ok() -> SalidaPodman {
+        SalidaPodman {
+            codigo: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+
+    /// Lo que responde el podman falso a cada llamada.
+    type RespuestaFalsa = dyn Fn(&[&str]) -> SalidaPodman;
+
+    /// Podman falso: responde con `responde` y guarda cada llamada, en orden.
+    struct PodmanFalso {
+        llamadas: RefCell<Vec<Vec<String>>>,
+        responde: Box<RespuestaFalsa>,
+    }
+
+    impl PodmanFalso {
+        fn nuevo(responde: impl Fn(&[&str]) -> SalidaPodman + 'static) -> Self {
+            PodmanFalso {
+                llamadas: RefCell::new(Vec::new()),
+                responde: Box::new(responde),
+            }
+        }
+
+        /// Los argumentos de cada `build`, en orden.
+        fn builds(&self) -> Vec<Vec<String>> {
+            self.llamadas
+                .borrow()
+                .iter()
+                .filter(|a| a[0] == "build")
+                .cloned()
+                .collect()
+        }
+    }
+
+    impl Podman for PodmanFalso {
+        fn correr(&self, args: &[&str], _plazo: Duration) -> Result<SalidaPodman, ErrorOraculo> {
+            self.llamadas
+                .borrow_mut()
+                .push(args.iter().map(|a| a.to_string()).collect());
+            Ok((self.responde)(args))
+        }
+    }
+
+    /// Verdadero si el `build` usa la red de usuario de podman (la de la 9d3).
+    fn es_build_con_red(args: &[&str]) -> bool {
+        args.iter().any(|a| a.starts_with("slirp4netns"))
+    }
+
+    /// Respuesta de mentira: el `build` sin red da `sin_red` y con red da `con_red`. El resto sale
+    /// sano: `id -u` da 1000 (no es root) e `image inspect` da `app`.
+    fn responde_build(
+        sin_red: SalidaPodman,
+        con_red: SalidaPodman,
+    ) -> impl Fn(&[&str]) -> SalidaPodman {
+        move |args| match args[0] {
+            "build" if es_build_con_red(args) => con_red.clone(),
+            "build" => sin_red.clone(),
+            "run" if args.contains(&"id") => SalidaPodman {
+                codigo: 0,
+                stdout: "1000\n".into(),
+                stderr: String::new(),
+            },
+            "image" => SalidaPodman {
+                codigo: 0,
+                stdout: "app\n".into(),
+                stderr: String::new(),
+            },
+            _ => salida_ok(),
+        }
+    }
+
+    /// Los `Gate` de la fase `construccion-red` que hay en `eventos.jsonl` de `home`.
+    fn gates_de_repeticion(home: &Path) -> Vec<serde_json::Value> {
+        let Ok(texto) = fs::read_to_string(home.join("eventos.jsonl")) else {
+            return Vec::new();
+        };
+        texto
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("línea JSON"))
+            .filter(|v| v["tipo"] == "gate" && v["fase"] == "construccion-red")
+            .collect()
+    }
+
+    /// Afirma que `args` no trae montajes ni credenciales, y que la ruta de `home` aparece solo en
+    /// el `-f` y en el contexto (la copia en `home/tmp`, que es contexto y no un montaje).
+    fn assert_sin_credenciales_ni_montajes(args: &[String], home: &str) {
+        const PROHIBIDOS: [&str; 6] = [
+            "-v",
+            "--volume",
+            "--secret",
+            "--build-arg",
+            "--authfile",
+            "--env",
+        ];
+        for a in args {
+            assert!(!PROHIBIDOS.contains(&a.as_str()), "{a} en {args:?}");
+            assert!(
+                !PROHIBIDOS.iter().any(|p| a.starts_with(&format!("{p}="))),
+                "{a} en {args:?}"
+            );
+        }
+        let ultimo = args.len() - 1;
+        for (i, a) in args.iter().enumerate() {
+            if a.contains(home) {
+                let es_df = i > 0 && args[i - 1] == "-f";
+                assert!(
+                    es_df || i == ultimo,
+                    "la ruta de ROOT_HOME va en {a}: {args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn entrega_red_pendiente_por_red_se_repite_y_deja_hallazgo_sev_1() {
+        let repo = repo_con_archivos(&[("Dockerfile", DF_RED)]);
+        let home = tempfile::tempdir().expect("home");
+        let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), salida_ok()));
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("construye");
+        let r = &c.resultado;
+        assert!(r.construida, "{r:?}");
+        assert!(r.con_red, "{r:?}");
+        assert!(r.pendientes.is_empty(), "{:?}", r.pendientes);
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        let h = &r.hallazgos[0];
+        assert_eq!(
+            (
+                h.severidad,
+                h.archivo.as_str(),
+                h.linea,
+                h.cita.as_str(),
+                h.detalle.as_str()
+            ),
+            (
+                1,
+                "Dockerfile",
+                2,
+                "RUN apt-get install -y curl",
+                "la imagen necesita red para construirse"
+            )
+        );
+        // El trait no recibe variables de entorno: lo que el build recibe son solo sus argumentos.
+        let builds = podman.builds();
+        assert_eq!(builds.len(), 2, "{builds:?}");
+        assert!(builds[0].contains(&"none".to_string()), "{:?}", builds[0]);
+        assert!(
+            builds[1].contains(&"slirp4netns:allow_host_loopback=false".to_string()),
+            "{:?}",
+            builds[1]
+        );
+        assert_sin_credenciales_ni_montajes(&builds[1], &home.path().to_string_lossy());
+    }
+
+    #[test]
+    fn entrega_red_construye_sin_red_no_se_repite() {
+        let repo = repo_con_archivos(&[("Dockerfile", "FROM debian:12\nUSER app\n")]);
+        let home = tempfile::tempdir().expect("home");
+        let podman = PodmanFalso::nuevo(responde_build(salida_ok(), salida_ok()));
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("construye");
+        assert!(c.resultado.construida, "{:?}", c.resultado);
+        assert!(!c.resultado.con_red, "{:?}", c.resultado);
+        assert_eq!(podman.builds().len(), 1, "{:?}", podman.builds());
+        assert!(
+            gates_de_repeticion(home.path()).is_empty(),
+            "no debe haber Gate de la repetición"
+        );
+    }
+
+    #[test]
+    fn entrega_red_args_sin_credenciales_ni_montajes() {
+        let (home, df, ctx) = ("/h", "/h/tmp/c/repo/Dockerfile", "/h/tmp/c/repo");
+        let args = args_build(true, "etiqueta", df, ctx);
+        assert_eq!(
+            args,
+            [
+                "build",
+                "--network",
+                "slirp4netns:allow_host_loopback=false",
+                "--pull=never",
+                "-t",
+                "etiqueta",
+                "-f",
+                df,
+                ctx
+            ]
+        );
+        assert_sin_credenciales_ni_montajes(&args, home);
+        // Sin red, los argumentos son los de siempre.
+        assert_eq!(
+            args_build(false, "etiqueta", df, ctx),
+            [
+                "build",
+                "--network",
+                "none",
+                "--pull=never",
+                "-t",
+                "etiqueta",
+                "-f",
+                df,
+                ctx
+            ]
+        );
+    }
+
+    #[test]
+    fn entrega_red_gate_previo_lista_los_run_y_va_antes_del_build() {
+        let repo = repo_con_archivos(&[("Dockerfile", DF_RED)]);
+        let home = tempfile::tempdir().expect("home");
+        // Al pedir el build con red, el falso anota si el Gate ya estaba en eventos.jsonl.
+        let estaba: Rc<Cell<Option<bool>>> = Rc::new(Cell::new(None));
+        let (anota, eventos) = (Rc::clone(&estaba), home.path().join("eventos.jsonl"));
+        let base = responde_build(salida_sin_red(), salida_ok());
+        let podman = PodmanFalso::nuevo(move |args| {
+            if args[0] == "build" && es_build_con_red(args) {
+                let texto = fs::read_to_string(&eventos).unwrap_or_default();
+                anota.set(Some(texto.contains("construccion-red")));
+            }
+            base(args)
+        });
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("construye");
+        assert!(c.resultado.con_red, "{:?}", c.resultado);
+        assert_eq!(
+            estaba.get(),
+            Some(true),
+            "el Gate debe estar antes del build con red"
+        );
+        let gates = gates_de_repeticion(home.path());
+        assert_eq!(gates.len(), 1, "{gates:?}");
+        let g = &gates[0];
+        assert_eq!(g["corrida"], "entrega-x");
+        assert_eq!(g["extra"]["accion"], "repetir-con-red");
+        assert_eq!(g["extra"]["dockerfile"], "Dockerfile");
+        assert_eq!(g["extra"]["fallo_sin_red"]["linea"], 2);
+        assert_eq!(
+            g["extra"]["fallo_sin_red"]["cita"],
+            "RUN apt-get install -y curl"
+        );
+        let run = g["extra"]["run"].as_array().expect("lista de RUN");
+        assert_eq!(run.len(), 1, "{run:?}");
+        assert_eq!(run[0]["linea"], 2);
+    }
+
+    #[test]
+    fn entrega_red_segundo_build_falla_da_la_imagen_no_construye() {
+        let repo = repo_con_archivos(&[("Dockerfile", DF_RED)]);
+        let home = tempfile::tempdir().expect("home");
+        // El build con red falla por un error que no es de red: el `RUN` no construye.
+        let con_red_falla = SalidaPodman {
+            codigo: 1,
+            stdout: "STEP 1/2: FROM debian:12\nSTEP 2/2: RUN apt-get install -y curl\n".into(),
+            stderr: "E: Unable to locate package curl\n".into(),
+        };
+        let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), con_red_falla));
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("construye");
+        let r = &c.resultado;
+        assert!(!r.construida, "{r:?}");
+        assert!(r.pendientes.is_empty(), "{:?}", r.pendientes);
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        assert!(
+            r.hallazgos[0].detalle.contains("la imagen no construye"),
+            "{}",
+            r.hallazgos[0].detalle
+        );
+        assert_eq!(podman.builds().len(), 2, "{:?}", podman.builds());
+    }
+
+    #[test]
+    fn entrega_red_pendiente_de_from_no_se_repite() {
+        let repo = repo_con_archivos(&[(
+            "Dockerfile",
+            "FROM localhost/no-existe:9\nRUN apt-get install -y curl\nUSER app\n",
+        )]);
+        let home = tempfile::tempdir().expect("home");
+        let sin_imagen = SalidaPodman {
+            codigo: 1,
+            stdout: "STEP 1/2: FROM localhost/no-existe:9\n".into(),
+            stderr: "Error: creating build container: localhost/no-existe:9: image not known\n"
+                .into(),
+        };
+        let podman = PodmanFalso::nuevo(responde_build(sin_imagen, salida_ok()));
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("construye");
+        let r = &c.resultado;
+        assert!(!r.construida, "{r:?}");
+        assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
+        assert!(
+            r.pendientes[0].motivo.contains("imagen base no descargada"),
+            "{:?}",
+            r.pendientes
+        );
+        assert_eq!(podman.builds().len(), 1, "{:?}", podman.builds());
+        assert!(gates_de_repeticion(home.path()).is_empty());
+    }
+
+    #[test]
+    fn entrega_red_sin_red_en_el_host_queda_pendiente_con_aviso() {
+        let repo = repo_con_archivos(&[("Dockerfile", DF_RED)]);
+        let home = tempfile::tempdir().expect("home");
+        let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), salida_sin_red()));
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("construye");
+        let r = &c.resultado;
+        assert!(!r.construida, "{r:?}");
+        assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+        assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
+        assert!(
+            r.pendientes[0].motivo.contains("línea 2"),
+            "{:?}",
+            r.pendientes
+        );
+        assert!(
+            c.avisos.iter().any(|a| a == AVISO_RED_TAMPOCO),
+            "{:?}",
+            c.avisos
+        );
+        assert_eq!(podman.builds().len(), 2, "{:?}", podman.builds());
+        assert_eq!(gates_de_repeticion(home.path()).len(), 1);
+    }
+
+    #[test]
+    fn entrega_red_podman_rechaza_la_red_conserva_el_pendiente_con_aviso() {
+        let repo = repo_con_archivos(&[("Dockerfile", DF_RED)]);
+        let home = tempfile::tempdir().expect("home");
+        // Podman rechaza la opción de red: sale 125 sin ningún STEP.
+        let rechazo = SalidaPodman {
+            codigo: 125,
+            stdout: String::new(),
+            stderr: "Error: invalid network option\n".into(),
+        };
+        let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), rechazo));
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("un fallo del respaldo con red no tumba la construcción");
+        let r = &c.resultado;
+        assert!(!r.construida, "{r:?}");
+        assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+        assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
+        assert!(
+            r.pendientes[0].motivo.contains("línea 2"),
+            "{:?}",
+            r.pendientes
+        );
+        assert!(
+            c.avisos
+                .iter()
+                .any(|a| a.starts_with(AVISO_RED_NO_ARRANCO) && a.contains("invalid network")),
+            "{:?}",
+            c.avisos
+        );
     }
 }
