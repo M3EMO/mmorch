@@ -1,0 +1,87 @@
+{
+  "database": {
+    "advisory-count": 620,
+    "last-commit": "3f2a9c1d7b8e4f6a0c5d2e1b9a8f7e6d5c4b3a21",
+    "last-updated": "2026-10-20T08:12:44+00:00"
+  },
+  "lockfile": {
+    "dependency-count": 118
+  },
+  "settings": {
+    "target_arch": [],
+    "target_os": [],
+    "severity": null,
+    "ignore": [],
+    "informational_warnings": ["unmaintained", "unsound", "notice"],
+    "image_name": null
+  },
+  "vulnerabilities": {
+    "found": true,
+    "count": 1,
+    "list": [
+      {
+        "advisory": {
+          "id": "RUSTSEC-2020-0071",
+          "package": "time",
+          "title": "Potential segfault in the time crate",
+          "description": "Unix-like operating systems may segfault due to dereferencing a dangling pointer in specific circumstances.",
+          "date": "2020-11-18",
+          "aliases": ["CVE-2020-26235"],
+          "related": [],
+          "categories": ["memory-corruption"],
+          "keywords": ["segfault"],
+          "cvss": null,
+          "informational": null,
+          "references": [],
+          "url": "https://github.com/time-rs/time/issues/293",
+          "withdrawn": null
+        },
+        "affected": null,
+        "package": {
+          "name": "time",
+          "version": "0.1.43",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "checksum": "ca8a0b2e3c6d4f1a9e7b5c3d1f0a8e6b4c2d9f7a",
+          "dependencies": []
+        },
+        "versions": {
+          "patched": [">=0.2.23"],
+          "unaffected": []
+        }
+      }
+    ]
+  },
+  "warnings": {
+    "unmaintained": [
+      {
+        "kind": "unmaintained",
+        "package": {
+          "name": "atty",
+          "version": "0.2.14",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "checksum": "d9e8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d0",
+          "dependencies": []
+        },
+        "advisory": {
+          "id": "RUSTSEC-2021-0145",
+          "package": "atty",
+          "title": "Potential unaligned read",
+          "description": "On Windows, atty dereferences a potentially unaligned pointer.",
+          "date": "2021-07-04",
+          "aliases": [],
+          "related": [],
+          "categories": [],
+          "keywords": [],
+          "cvss": null,
+          "informational": "unmaintained",
+          "references": [],
+          "url": null,
+          "withdrawn": null
+        },
+        "versions": null,
+        "affected": null
+      }
+    ],
+    "yanked": []
+  }
+}

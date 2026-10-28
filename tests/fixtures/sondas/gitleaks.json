@@ -1,0 +1,42 @@
+[
+  {
+    "Description": "Amazon Web Services Access Key ID",
+    "StartLine": 12,
+    "EndLine": 12,
+    "StartColumn": 17,
+    "EndColumn": 37,
+    "Match": "AKIAFIXTURE0000000001",
+    "Secret": "AKIAFIXTURE0000000001",
+    "File": "/repo/src/config.rs",
+    "SymlinkFile": "",
+    "Commit": "",
+    "Entropy": 3.4,
+    "Author": "",
+    "Email": "",
+    "Date": "",
+    "Message": "",
+    "Tags": [],
+    "RuleID": "aws-access-key-id",
+    "Fingerprint": "/repo/src/config.rs:aws-access-key-id:12"
+  },
+  {
+    "Description": "Generic API Key",
+    "StartLine": 40,
+    "EndLine": 40,
+    "StartColumn": 9,
+    "EndColumn": 52,
+    "Match": "api_key = \"clavefalsa0000000000000000000000\"",
+    "Secret": "clavefalsa0000000000000000000000",
+    "File": "/repo/src/cliente/mod.rs",
+    "SymlinkFile": "",
+    "Commit": "",
+    "Entropy": 4.1,
+    "Author": "",
+    "Email": "",
+    "Date": "",
+    "Message": "",
+    "Tags": [],
+    "RuleID": "generic-api-key",
+    "Fingerprint": "/repo/src/cliente/mod.rs:generic-api-key:40"
+  }
+]

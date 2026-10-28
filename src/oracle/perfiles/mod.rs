@@ -1,5 +1,6 @@
 //! Perfiles de sondas por lenguaje del proyecto (Tarea 9). Cada sonda da un `ResultadoSonda`.
 
+pub mod herramientas;
 pub mod rust;
 
 use std::path::Path;

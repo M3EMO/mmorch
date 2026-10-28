@@ -1,0 +1,3 @@
+compilando bench...
+listo
+{"ops_s": 7000}
