@@ -1008,6 +1008,8 @@ Gates humanos que frenan el resto:
 
 **Orden siguiente (2026-10-28, después de la 7h):** 7i y después 6c-B. La 7i va primero porque cierra un posible borrado fuera de `ROOT_HOME` y los fail-open de las sondas. Después de la 6c-B, todo lo que queda espera a G1 o a G2: 12, 12b, 13, 13b, 16, el `Validate` real de 7 y 9c, y la corrida real de la 7h.
 
+**Orden siguiente (2026-10-28, después de la 7i):** 7j y después 6c-B, con lo que faltó de la 7i. La 7j va primero porque cierra el riesgo de un runtime de Colab encendido después de un Ctrl-C. Ese riesgo no está activo todavía: la corrida real espera a G1, P35 y P37.
+
 Las Tareas 12, 12b, 13, 13b, 16 y 19 van después de G1 y G2. Opus redacta G1 y G2 en otra sesión, mientras Sonnet construye la lista de arriba.
 
 **Avance (2026-10-27):** Sonnet cerró 8c, 7f, 6b, 11, 8b (código) y 9f, con 341 tests verdes (commit 4f2be05). Una evaluación real de memora-ecc, antes de la ficha obligatoria, dio contrato 61/61 y oculto 47/48, con el FIFO de `BLPOP` inestable. Desde la 9f, memora y brasa salen con código 2 hasta tener `## Ficha` (G1).
@@ -1131,6 +1133,44 @@ Respuestas a las preguntas técnicas de Sonnet de las dos últimas vueltas. Las 
 ### Tarea 6c-B: Descarga de Python (decisión 21)
 - **Action**: la mitad Python de la Tarea 6c: wheels con `pip download --only-binary=:all:`, sdist con `curl` desde la URL del índice con verificación de hash, y fuentes git o URL con `git clone` o `curl`. La evaluación instala sin red con `pip install --no-index --find-links /cache/python`. Las reglas y el `Validate` de Python son los de la 6c.
 - **Orden**: después de la 7i. memora y brasa son Rust, así que la 6c-B no frena a G1 ni a G2.
+- **Lo que faltó de la 7i** (entra en la 6c-B):
+  - P34 a): la descarga corre `cargo` desde un directorio donde no descubre el `.cargo/config.toml` del repo. Hoy lo sigue leyendo.
+  - El evento `Gate` de la fase `inventario` escribe también los hallazgos de Python, como el de `--extra-index-url`.
+- **Validate extra**: un repo con `.cargo/config.toml` que define `[http] proxy = "http://127.0.0.1:9"` baja sus dependencias sin usar ese proxy.
+
+**Avance (2026-10-28):** Sonnet cerró la 7i (commits d11c39a y c51a57c), con 942 tests verdes. La 6c-B no entró en la vuelta. 21 tests de la 7i ya pasaban antes de su implementación y quedaron como guardas. Se aceptan: cubren comportamiento que ya existía, y el commit los lista.
+
+## Desempates técnicos 7 (Opus, 2026-10-28, después de la Tarea 7i)
+
+Respuestas a las preguntas de Sonnet al cerrar la 7i. Los cambios de código van en la Tarea 7j. La pregunta sobre el costo de la T4 va al usuario como P37.
+
+1. **Ctrl-C y Colab.** Sí. La Tarea 7h ya dice que Root libera siempre el runtime, y una señal no es una excepción.
+   - Root maneja SIGINT y SIGTERM: libera el runtime, registra un evento `Gate` y después sale.
+   - SIGKILL no se puede manejar. Por eso Root escribe el id del runtime en `$ROOT_HOME/colab/activo.json` al pedirlo, y lo borra al liberarlo. La próxima corrida de `--colab` libera primero un runtime que quedó anotado. `r00t oraculo pendientes --liberar` hace solo esa limpieza.
+   - Toda corrida tiene un tope de duración, `[colab].minutos_max` en `root.toml`, con 30 minutos por defecto. Al llegar al tope, Root libera el runtime y sale con código 3.
+2. **Credencial residual.** Se acepta, con una condición: Root lee las direcciones con un parser de URL según RFC 3986, no con una expresión regular. En `https://tok/en@host`, la parte de usuario termina en la primera `/`. El host real es `tok`, y `en@host` es una ruta. Ninguna credencial viaja como autenticación, y el inventario registra el host real. Todo lo que el parser lee como usuario o clave se rechaza (6c). Un token escrito en una ruta es un secreto en el repo: lo detecta gitleaks (Tarea 9), no el filtro de fuentes.
+3. **Cero mutantes.** Sigue en `SinVeredicto`, pero con dos causas distintas. Si `cargo-mutants` no dejó reporte, la causa es "no dejó reporte". Si dejó un reporte con 0 mutantes, la causa es "sin mutantes para medir". Ninguno de los dos casos es un puntaje: sin mutantes, Root no mide la calidad de los tests.
+4. **Varios Dockerfiles.** Root elige uno, por este orden:
+   1. el campo `containerfile` de `tarea.toml`, si existe;
+   2. `Dockerfile` o `Containerfile` en la raíz del repo;
+   3. el único Dockerfile del repo, si hay uno solo.
+   Sin elección posible, los escenarios corren en el contenedor de evaluación, y el informe dice "varios Dockerfile, ninguno elegido". Todos los Dockerfiles se siguen revisando en forma estática.
+5. **Imagen sin `sh`.** Se prueba con `FROM scratch` y un `COPY` de un archivo. Esa imagen no tiene `sh` y se construye sin red, porque `scratch` no se baja.
+6. **Causa "pide credenciales".** Se queda, solo cuando el registro responde un pedido explícito de autenticación, como un 401 con `authentication required`. El texto ambiguo de Docker Hub sigue con la causa del desempate 1 de "Desempates técnicos 6". En los dos casos, la construcción da `SinVeredicto`.
+- **Test de Colab con plazo real.** Un test que espera 60 segundos de verdad es inestable en una máquina cargada. El plazo se inyecta: en los tests vale 1 segundo, y en producción, 60.
+
+### Tarea 7j: Ajustes a las Tareas 7h, 7i, 9d2 y 9e
+- **Action**: los desempates 1 a 6 de arriba y el plazo inyectable de Colab.
+- **Validate**: `cargo test`:
+  - Con una CLI `colab` falsa, un SIGINT durante la corrida libera el runtime y deja un `Gate`.
+  - Un `activo.json` de una corrida anterior hace que `--colab` libere ese runtime antes de pedir otro.
+  - Una corrida que pasa `minutos_max` libera el runtime y sale con código 3.
+  - `https://usuario:clave@host/x` se rechaza. `https://tok/en@host` registra el host `tok`.
+  - Un reporte de `cargo-mutants` con 0 mutantes da `SinVeredicto` con la causa "sin mutantes para medir".
+  - Con `Dockerfile` en la raíz y `docker/otro.Dockerfile`, los escenarios usan el de la raíz. Con dos Dockerfiles fuera de la raíz y sin `containerfile`, el informe dice "ninguno elegido".
+  - Una imagen `FROM scratch` hace que los escenarios corran en el contenedor de evaluación, con aviso.
+  - Un 401 explícito del registro da la causa "pide credenciales".
+  - El test del plazo de Colab termina en menos de 5 segundos.
 
 **Preguntas respondidas (2026-10-28)**
 - P12b: b (decisión 21). P15: b (decisión 22). P16: a (decisión 23). P17: c+b (decisión 24, en parte). P18: c, más una segunda parte (decisión 25, en parte). P19 y P20: sí (decisión 26).
@@ -1171,6 +1211,12 @@ Respuestas a las preguntas técnicas de Sonnet de las dos últimas vueltas. Las 
   - c) Volver a la meta original y anotar el avance en otra línea.
   
   Mi recomendación es a): el texto nuevo mezcla la meta con el avance.
+- **P37. Costo de la T4 en Colab.** Respondiste P15 con "solo T4" porque el plan decía que la T4 es gratis. Eso vale para una cuenta gratuita de Colab. En una cuenta paga (Pro o pago por uso), la T4 también gasta compute units. ¿Cuál es tu caso?
+  - a) Cuenta gratuita: la T4 no gasta. Rige el tope de 30 minutos por corrida.
+  - b) Cuenta paga, y aceptás el gasto de la T4 con el tope de 30 minutos por corrida.
+  - c) Cuenta paga, y cada corrida en Colab pide tu aprobación antes de empezar.
+  
+  Hasta tu respuesta, no hay corrida real en Colab. Esa corrida ya espera a G1 y a P35.
 
 **Preguntas ya respondidas (texto original)**
 - **P12b.** Respondiste "P12 si" a una pregunta con dos opciones. ¿Cuál elegís?
