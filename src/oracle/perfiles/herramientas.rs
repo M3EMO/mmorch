@@ -476,11 +476,27 @@ pub fn clippy(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoSonda {
     if let Some(error) = error_de_compilacion(reporte) {
         return sin_veredicto(d, format!("el código no compila: {error}"));
     }
-    con_veredicto(
-        d,
-        parsear_clippy(reporte, &tarea.requisito),
-        &tarea.requisito,
-    )
+    // Sin cierre de build no hay prueba de que clippy corrió. Un reporte vacío cae aquí.
+    let Some(exito) = cierre_de_build(reporte) else {
+        let base = "clippy no dejó un reporte válido (¿no pudo escribir Cargo.lock o compilar?)";
+        return sin_veredicto(d, con_cola(base.into(), &salida.stderr));
+    };
+    // Con éxito, o con lints de clippy que hacen fallar el build, el veredicto sale de los
+    // hallazgos. Un fallo sin ningún lint de clippy no es un veredicto.
+    let hallazgos = parsear_clippy(reporte, &tarea.requisito);
+    if !exito && hallazgos.is_empty() {
+        return sin_veredicto(d, con_cola("el código no compila".into(), &salida.stderr));
+    }
+    con_veredicto(d, hallazgos, &tarea.requisito)
+}
+
+/// Éxito del build según la línea `build-finished` de cargo. `None` si el reporte no la trae.
+fn cierre_de_build(reporte: &str) -> Option<bool> {
+    reporte
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|v| v["reason"] == "build-finished")
+        .and_then(|v| v["success"].as_bool())
 }
 
 /// Eficiencia: corre `eficiencia.cmd` del oráculo. Por debajo del piso, un hallazgo de severidad 3.
@@ -905,6 +921,51 @@ mod tests {
     #[test]
     fn sonda_clippy_no_compila_es_sin_veredicto() {
         let reporte = r#"{"reason":"compiler-message","message":{"code":{"code":"E0425"},"level":"error","message":"cannot find value `y`","spans":[{"file_name":"src/x.rs","is_primary":true,"line_start":3,"text":[{"text":"let a = y;"}]}]}}"#;
+        let ej = con_herramientas(move |_| con_archivo("clippy.json", reporte));
+        let r = clippy(&ej, &tarea_rust(None));
+        assert_eq!(r.valor, None);
+        assert!(r.motivo.unwrap_or_default().contains("no compila"));
+    }
+
+    #[test]
+    fn sonda_clippy_reporte_vacio_es_sin_veredicto() {
+        let ej = con_herramientas(|_| con_archivo("clippy.json", ""));
+        let r = clippy(&ej, &tarea_rust(None));
+        assert_eq!(r.valor, None);
+        assert!(
+            r.motivo
+                .unwrap_or_default()
+                .contains("no dejó un reporte válido")
+        );
+    }
+
+    #[test]
+    fn sonda_clippy_solo_artifacts_sin_build_finished_es_sin_veredicto() {
+        let reporte = "{\"reason\":\"compiler-artifact\",\"target\":{\"name\":\"x\"}}\n";
+        let ej = con_herramientas(move |_| con_archivo("clippy.json", reporte));
+        let r = clippy(&ej, &tarea_rust(None));
+        assert_eq!(r.valor, None);
+        assert!(
+            r.motivo
+                .unwrap_or_default()
+                .contains("no dejó un reporte válido")
+        );
+    }
+
+    #[test]
+    fn sonda_clippy_build_finished_ok_sin_mensajes_da_uno() {
+        let reporte = "{\"reason\":\"compiler-artifact\",\"target\":{\"name\":\"x\"}}\n\
+                       {\"reason\":\"build-finished\",\"success\":true}\n";
+        let ej = con_herramientas(move |_| con_archivo("clippy.json", reporte));
+        let r = clippy(&ej, &tarea_rust(None));
+        assert_eq!(r.motivo, None);
+        assert_eq!(r.valor, Some(1.0));
+        assert!(r.hallazgos.is_empty());
+    }
+
+    #[test]
+    fn sonda_clippy_build_finished_falso_sin_error_es_no_compila() {
+        let reporte = "{\"reason\":\"build-finished\",\"success\":false}\n";
         let ej = con_herramientas(move |_| con_archivo("clippy.json", reporte));
         let r = clippy(&ej, &tarea_rust(None));
         assert_eq!(r.valor, None);

@@ -3,7 +3,7 @@
 # Uso: scripts/probar-imagen-oraculo.sh
 set -euo pipefail
 
-IMAGEN=${IMAGEN:-localhost/root-oraculo-rust:1}
+IMAGEN=${IMAGEN:-localhost/root-oraculo-rust:2}
 BANCO=${BANCO:-$HOME/Proyectos/bench-ecc-sdlc}
 LVP=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
 
@@ -77,6 +77,13 @@ chequeo "(d) build offline bootstrap/memora" build_offline memora "$BANCO/bootst
 chequeo "(d) build offline bootstrap/brasa" build_offline brasa "$BANCO/bootstrap/brasa" brasa
 chequeo "(e) probe-gpu build offline y usa llvmpipe" gpu_llvmpipe
 chequeo "(f) python3 importa redis 8.1.0" correr "$IMAGEN" python3 -c 'import redis; assert redis.__version__ == "8.1.0"'
+
+# Herramientas de la tarea 7g: cada una responde a su comando de versión, sin red.
+chequeo "(g) cargo clippy --version" correr "$IMAGEN" cargo clippy --version
+chequeo "(g) cargo audit --version" correr "$IMAGEN" cargo audit --version
+chequeo "(g) cargo mutants --version" correr "$IMAGEN" cargo mutants --version
+chequeo "(g) gitleaks version" correr "$IMAGEN" gitleaks version
+chequeo "(g) hadolint --version" correr "$IMAGEN" hadolint --version
 
 if [ "$FALLOS" -gt 0 ]; then
     echo "$FALLOS chequeo(s) con FALLA"

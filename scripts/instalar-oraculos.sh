@@ -64,7 +64,7 @@ instalar_tarea() {
         cat >"$dst/tarea.toml" <<EOF
 nombre = "$t"
 lenguaje = "rust"
-imagen = "localhost/root-oraculo-rust:1"
+imagen = "localhost/root-oraculo-rust:2"
 spec = "bootstrap/docs/SPEC.md"
 repeticiones = 5
 repeticiones_inestable = 10

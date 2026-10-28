@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Construye la imagen root-oraculo-rust:1 con los manifiestos de los proyectos del banco.
+# Construye la imagen root-oraculo-rust:2 con los manifiestos de los proyectos del banco.
+# Usa la red una vez (dependencias y herramientas). Evaluar después corre sin red.
 # Uso: scripts/construir-imagen-oraculo.sh
 set -euo pipefail
 
 RAIZ=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BANCO=${BANCO:-$HOME/Proyectos/bench-ecc-sdlc}
-IMAGEN=${IMAGEN:-root-oraculo-rust:1}
+IMAGEN=${IMAGEN:-root-oraculo-rust:2}
 PROYECTOS=(
     bootstrap/memora
     bootstrap/brasa
