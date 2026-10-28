@@ -546,6 +546,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "timeout_s": 120
       }
     },
+    "registro": {
+      "description": "Registros privados de paquetes (`[[registro]]`). Solo los escribe el humano.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/RegistroConfig"
+      }
+    },
     "ruteo": {
       "$ref": "#/$defs/Ruteo",
       "default": {
@@ -714,6 +722,27 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "anthropic",
         "deepseek"
       ]
+    },
+    "RegistroConfig": {
+      "description": "Una entrada `[[registro]]`: un registro privado y la variable de entorno que tiene su credencial.\nRoot pasa la credencial solo a un repo cuyo registro tiene el mismo host que `url`.",
+      "type": "object",
+      "properties": {
+        "credencial_env": {
+          "description": "Variable de entorno de Root que tiene la credencial. Su valor nunca se escribe en un archivo.",
+          "type": "string",
+          "default": ""
+        },
+        "nombre": {
+          "description": "Nombre del registro. Cargo lo usa en `CARGO_REGISTRIES_<NOMBRE>_TOKEN`.",
+          "type": "string",
+          "default": ""
+        },
+        "url": {
+          "description": "Dirección del índice, con `https` y host.",
+          "type": "string",
+          "default": ""
+        }
+      }
     },
     "Ruteo": {
       "description": "Sección `[ruteo]`: modelo por rol cuando la vía es API, y equivalente de API de cada alias de cupo.",

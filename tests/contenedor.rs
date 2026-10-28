@@ -51,6 +51,7 @@ fn ejecucion(repo: &std::path::Path, salida: &std::path::Path, cmd: &str) -> Eje
         cache: None,
         cache_rw: false,
         rustsec: None,
+        secretos: Vec::new(),
     }
 }
 

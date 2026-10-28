@@ -3,7 +3,9 @@
 //! contenedor aparte. Ese contenedor nunca monta `/oraculo` y no ejecuta código del proyecto.
 //! La evaluación usa la caché sin red.
 
+pub mod credenciales;
 pub mod inventario;
+pub mod juez_config;
 pub mod python;
 
 use std::collections::BTreeMap;
@@ -19,12 +21,17 @@ use sha2::{Digest, Sha256};
 use super::configs::{instrucciones, palabra_clave, parsear_from};
 use super::contenedor::{self, Ejecucion, correr_podman};
 use super::entrega::{Eleccion, dockerfiles_del_repo, elegir_dockerfile};
+use super::juez::ModeloJuez;
 use super::tarea::Tarea;
 use super::{CARPETA_TEMPORALES, ErrorOraculo, infra, temporal};
 use crate::borrado;
 use crate::observe;
 use crate::tipos::{Dimension, Fuente, Hallazgo, TipoEvento};
-use inventario::{HallazgoInventario, Inventario, Origen, PaqueteLock, Rechazo, analizar_lock};
+use credenciales::{Credencial, credenciales_cargo, redactar_secretos};
+use inventario::{
+    EntradaConfig, HallazgoInventario, Inventario, Origen, PaqueteLock, Rechazo, analizar_lock,
+};
+use juez_config::ResultadoJuicio;
 
 /// Lo que la evaluación necesita de la fase de descarga.
 #[derive(Debug, Clone, PartialEq)]
@@ -73,10 +80,13 @@ const ARCHIVO_LOCK: &str = "Cargo.lock";
 const ARCHIVO_REQUIREMENTS: &str = "requirements.txt";
 const ARCHIVO_EVENTOS: &str = "eventos.jsonl";
 const CARGO_HOME_DESCARGA: &str = "/tmp/cargo-dl";
-// Cargo lee `.cargo/config.toml` desde el cwd y sus padres. Por eso corre desde `/tmp` (tmpfs, vacío) y
-// apunta al proyecto con `--manifest-path`: así no lee el config del repo ni su proxy (P34 a).
-const COMANDO_VENDOR: &str = "cd /tmp && cargo vendor --locked --manifest-path /repo/Cargo.toml --versioned-dirs /cache/vendor > /cache/config.toml";
-const COMANDO_LOCK: &str = "mkdir -p /tmp/w && cp -r /repo/. /tmp/w/ && cd /tmp && cargo generate-lockfile --manifest-path /tmp/w/Cargo.toml && cp /tmp/w/Cargo.lock /salida/Cargo.lock";
+// Cargo lee `.cargo/config.toml` desde el cwd y sus padres. La descarga corre desde `/repo`, como un build
+// del proyecto: respeta su config, incluido un proxy o un registro (decisión 30). Los padres de `/repo`
+// en el contenedor no tienen config.
+const COMANDO_VENDOR: &str =
+    "cd /repo && cargo vendor --locked --versioned-dirs /cache/vendor > /cache/config.toml";
+// La copia `/tmp/w` trae `.cargo/` del repo: el lock sale con el mismo config que la descarga.
+const COMANDO_LOCK: &str = "mkdir -p /tmp/w && cp -r /repo/. /tmp/w/ && cd /tmp/w && cargo generate-lockfile && cp /tmp/w/Cargo.lock /salida/Cargo.lock";
 const URL_RUSTSEC: &str = "https://github.com/RustSec/advisory-db";
 const CADUCIDAD_RUSTSEC: Duration = Duration::from_secs(24 * 3600);
 /// Fragmentos (en minúscula) de errores de red o de registro caído.
@@ -184,9 +194,25 @@ fn borrar_en_home(home: &Path, ruta: &Path) -> io::Result<()> {
 
 /// Hallazgo de entrega. El `id` sale de la dimensión, el archivo y la cita.
 fn hallazgo(archivo: &str, linea: u32, cita: &str, severidad: u8, detalle: String) -> Hallazgo {
-    let id = hash_corto(format!("entrega|{archivo}|{cita}").as_bytes());
+    hallazgo_en(Dimension::Entrega, archivo, linea, cita, severidad, detalle)
+}
+
+/// Hallazgo de una dimensión dada. El `id` sale de la dimensión, el archivo y la cita.
+fn hallazgo_en(
+    dimension: Dimension,
+    archivo: &str,
+    linea: u32,
+    cita: &str,
+    severidad: u8,
+    detalle: String,
+) -> Hallazgo {
+    let etiqueta = serde_json::to_value(dimension)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default();
+    let id = hash_corto(format!("{etiqueta}|{archivo}|{cita}").as_bytes());
     Hallazgo {
-        dimension: Dimension::Entrega,
+        dimension,
         severidad,
         archivo: archivo.into(),
         linea,
@@ -282,15 +308,51 @@ pub fn preparar_con_imagenes(
     home: &Path,
     timeout: Duration,
 ) -> Result<(Preparacion, Vec<ImagenBase>), ErrorOraculo> {
+    preparar_con_juez(repo, tarea, home, timeout, None)
+        .map(|(preparacion, imagenes, _)| (preparacion, imagenes))
+}
+
+/// Como `preparar_con_imagenes`, con el juez de la configuración de Cargo (decisión 30): corre después
+/// del Gate del inventario y antes de la red, y solo informa. Nadie de producción pasa un juez todavía.
+pub fn preparar_con_juez(
+    repo: &Path,
+    tarea: &Tarea,
+    home: &Path,
+    timeout: Duration,
+    juez: Option<&dyn ModeloJuez>,
+) -> Result<(Preparacion, Vec<ImagenBase>, Option<ResultadoJuicio>), ErrorOraculo> {
     let inv = inventario::inventariar(repo)?;
     registrar_inventario(home, tarea, &inv)?;
+    let juicio = match juez {
+        Some(juez) => {
+            let resultado = juez_config::juzgar_repo(juez, repo, tarea, &inv);
+            if !inv.config_cargo.is_empty() {
+                registrar_juicio(home, tarea, &resultado)?;
+            }
+            Some(resultado)
+        }
+        None => None,
+    };
     // Los hallazgos del inventario (severidad 1, `--extra-index-url`) llegan a cada veredicto (Tarea 6c-B).
-    let de_inventario = hallazgos_de_inventario(&inv.hallazgos);
+    // Los del juicio de la configuración van con ellos.
+    let mut extra = hallazgos_de_inventario(&inv.hallazgos);
+    if let Some(resultado) = &juicio {
+        extra.extend(juez_config::hallazgos_de_juicio(
+            resultado,
+            &inv.config_cargo,
+        ));
+    }
     if !inv.rechazos.is_empty() {
         let mut hallazgos = hallazgos_de_rechazos(&inv.rechazos);
-        hallazgos.extend(de_inventario);
-        return Ok((Preparacion::SinVeredicto(hallazgos), Vec::new()));
+        hallazgos.extend(extra);
+        return Ok((Preparacion::SinVeredicto(hallazgos), Vec::new(), juicio));
     }
+    // Las credenciales de los registros privados salen de `root.toml` y del entorno de Root. Solo van a
+    // los contenedores de descarga de Rust: nunca a la evaluación, a Python ni a la construcción (decisión 29).
+    let config = crate::config::Config::cargar(&home.join("root.toml"))
+        .map_err(|e| ErrorOraculo::Infra(format!("configuración de registros: {e}")))?;
+    let credenciales =
+        credenciales_cargo(&inv, &config.registros, |nombre| std::env::var(nombre).ok());
     // Las imágenes base van antes de las dependencias: sin ellas el Dockerfile no construye (Tarea 9d2).
     // Un pull que falla no corta la fase: queda en el Gate y la construcción da sin veredicto (Tarea 7i).
     let imagenes = if hay_dockerfile(repo) {
@@ -309,10 +371,10 @@ pub fn preparar_con_imagenes(
         registro.motivo = Some("imagen base: pide credenciales");
         registro.imagenes = imagenes;
         registrar(home, tarea, &registro)?;
-        return Ok((Preparacion::SinVeredicto(de_inventario), devueltas));
+        return Ok((Preparacion::SinVeredicto(extra), devueltas, juicio));
     }
     let (preparacion, registro) = match tarea.lenguaje.as_str() {
-        "rust" => preparar_rust(repo, tarea, home, timeout, &inv)?,
+        "rust" => preparar_rust(repo, tarea, home, timeout, &inv, &credenciales)?,
         "python" => python::preparar_python(repo, tarea, home, timeout)?,
         _ => (
             Preparacion::Lista {
@@ -338,7 +400,33 @@ pub fn preparar_con_imagenes(
     if let Some(registro) = registro {
         registrar(home, tarea, &registro)?;
     }
-    Ok((sumar_hallazgos(preparacion, de_inventario), devueltas))
+    Ok((sumar_hallazgos(preparacion, extra), devueltas, juicio))
+}
+
+/// Gate de la fase `juez-config`: el juicio de la configuración, o la causa de su sin veredicto.
+fn registrar_juicio(
+    home: &Path,
+    tarea: &Tarea,
+    resultado: &ResultadoJuicio,
+) -> Result<(), ErrorOraculo> {
+    let mut extra = serde_json::Map::new();
+    match resultado {
+        ResultadoJuicio::Juzgado {
+            juicios,
+            descartados,
+        } => {
+            extra.insert("estado".into(), json!("juzgado"));
+            extra.insert("juicios".into(), json!(juicios));
+            extra.insert("descartados".into(), json!(descartados));
+        }
+        ResultadoJuicio::SinVeredicto { causa } => {
+            extra.insert("estado".into(), json!("sin_veredicto"));
+            extra.insert("causa".into(), json!(causa));
+        }
+    }
+    let evento = observe::evento_gate(&format!("descarga-{}", tarea.nombre), "juez-config", extra);
+    observe::registrar_en(&home.join(ARCHIVO_EVENTOS), &evento)
+        .map_err(|e| infra("registrar el juicio de la configuración", e))
 }
 
 /// Gate de la fase `inventario`: las fuentes que el repo declara, antes de usar la red.
@@ -349,16 +437,43 @@ fn registrar_inventario(home: &Path, tarea: &Tarea, inv: &Inventario) -> Result<
     extra.insert("rechazos".into(), json!(inv.rechazos));
     extra.insert("avisos".into(), json!(inv.avisos));
     extra.insert("hallazgos".into(), json!(inv.hallazgos));
+    // Solo lo que toca la red: el Gate lo lista antes de que la descarga la use (decisión 30).
+    let config_cargo: Vec<Value> = inv
+        .config_cargo
+        .iter()
+        .filter(|e| e.red)
+        .map(entrada_config_gate)
+        .collect();
+    extra.insert("config_cargo".into(), Value::Array(config_cargo));
     let evento = observe::evento_gate(&format!("descarga-{}", tarea.nombre), "inventario", extra);
     observe::registrar_en(&home.join(ARCHIVO_EVENTOS), &evento)
         .map_err(|e| infra("registrar el inventario de fuentes", e))
 }
 
-/// Un hallazgo de entrega por cada hallazgo del inventario. Las citas ya vienen redactadas.
+/// Lo que el `Gate` muestra de una entrada de config que toca la red.
+fn entrada_config_gate(entrada: &EntradaConfig) -> Value {
+    json!({
+        "archivo": entrada.archivo,
+        "linea": entrada.linea,
+        "clave": entrada.clave,
+        "cita": entrada.cita,
+    })
+}
+
+/// Un hallazgo por cada hallazgo del inventario, con su dimensión. Las citas ya vienen redactadas.
 fn hallazgos_de_inventario(hallazgos: &[HallazgoInventario]) -> Vec<Hallazgo> {
     hallazgos
         .iter()
-        .map(|h| hallazgo(&h.archivo, h.linea, &h.cita, h.severidad, h.detalle.clone()))
+        .map(|h| {
+            hallazgo_en(
+                h.dimension,
+                &h.archivo,
+                h.linea,
+                &h.cita,
+                h.severidad,
+                h.detalle.clone(),
+            )
+        })
         .collect()
 }
 
@@ -408,11 +523,12 @@ fn preparar_rust(
     home: &Path,
     timeout: Duration,
     inv: &Inventario,
+    credenciales: &[Credencial],
 ) -> Result<Paso, ErrorOraculo> {
     let mut hallazgos = Vec::new();
     let lock = repo.join(ARCHIVO_LOCK);
     if !lock.is_file() {
-        if let Some(linea) = generar_lock(repo, tarea, home, timeout)? {
+        if let Some(linea) = generar_lock(repo, tarea, home, timeout, credenciales)? {
             return Ok(corte(
                 hallazgo_no_instala(&linea),
                 Registro::corte("rust", None, "no-instala"),
@@ -433,7 +549,9 @@ fn preparar_rust(
     };
     let destino = home.join(CARPETA_CACHE).join(CARPETA_RUST).join(&hash);
     let cache_hit = destino.join(ARCHIVO_CONFIG).is_file();
-    if !cache_hit && let Some(linea) = descargar_vendor(repo, tarea, home, &hash, timeout)? {
+    if !cache_hit
+        && let Some(linea) = descargar_vendor(repo, tarea, home, &hash, timeout, credenciales)?
+    {
         return Ok(corte(
             hallazgo_no_instala(&linea),
             Registro::corte("rust", Some(hash), "no-instala"),
@@ -486,14 +604,36 @@ fn entorno_descarga() -> Vec<(String, String)> {
     ]
 }
 
-/// Corre un contenedor de descarga. Un fallo llega como `Diagnostico`.
-fn ejecutar_descarga(ejecucion: &Ejecucion) -> Result<(), Diagnostico> {
-    match contenedor::ejecutar(ejecucion) {
+/// Corre un contenedor de descarga. Un fallo llega como `Diagnostico`, sin ningún valor de `credenciales`.
+fn ejecutar_descarga(
+    ejecucion: &Ejecucion,
+    credenciales: &[Credencial],
+) -> Result<(), Diagnostico> {
+    let resultado = match contenedor::ejecutar(ejecucion) {
         Err(ErrorOraculo::Infra(m)) => Err(Diagnostico::Infra(m)),
         Err(otro) => Err(Diagnostico::Desconocido(otro.to_string())),
         Ok(resultado) if resultado.codigo == 0 => Ok(()),
         Ok(resultado) => Err(diagnosticar(&resultado.stderr)),
+    };
+    resultado.map_err(|diagnostico| redactar_diagnostico(diagnostico, credenciales))
+}
+
+/// Quita de un diagnóstico cualquier valor de credencial (decisión 29).
+fn redactar_diagnostico(diagnostico: Diagnostico, credenciales: &[Credencial]) -> Diagnostico {
+    let quitar = |texto: String| redactar_secretos(&texto, credenciales);
+    match diagnostico {
+        Diagnostico::Infra(m) => Diagnostico::Infra(quitar(m)),
+        Diagnostico::Producto(m) => Diagnostico::Producto(quitar(m)),
+        Diagnostico::Desconocido(m) => Diagnostico::Desconocido(quitar(m)),
     }
+}
+
+/// Credenciales como pares (variable, valor) para el entorno del contenedor de descarga.
+fn secretos_de(credenciales: &[Credencial]) -> Vec<(String, String)> {
+    credenciales
+        .iter()
+        .map(|c| (c.variable.clone(), c.valor().to_string()))
+        .collect()
 }
 
 /// Error de la evaluación para un fallo de descarga que no es del producto.
@@ -507,12 +647,13 @@ fn error_de(diagnostico: Diagnostico) -> ErrorOraculo {
 }
 
 /// Corre `cargo generate-lockfile` en una copia descartable y copia el lock al repo.
-/// Da `Some(linea)` si el producto no instala.
+/// Da `Some(linea)` si el producto no instala. Las `credenciales` van solo a este contenedor de descarga.
 fn generar_lock(
     repo: &Path,
     tarea: &Tarea,
     home: &Path,
     timeout: Duration,
+    credenciales: &[Credencial],
 ) -> Result<Option<String>, ErrorOraculo> {
     let salida = temporal_de(home)?;
     let ejecucion = Ejecucion {
@@ -527,8 +668,9 @@ fn generar_lock(
         cache: None,
         cache_rw: false,
         rustsec: None,
+        secretos: secretos_de(credenciales),
     };
-    match ejecutar_descarga(&ejecucion) {
+    match ejecutar_descarga(&ejecucion, credenciales) {
         Ok(()) => {
             fs::copy(salida.path().join(ARCHIVO_LOCK), repo.join(ARCHIVO_LOCK))
                 .map_err(|e| infra("copiar el Cargo.lock generado", e))?;
@@ -550,12 +692,14 @@ fn parcial_de(dir: &Path) -> PathBuf {
 
 /// Corre `cargo vendor` en la carpeta parcial y la renombra al final.
 /// Da `Some(linea)` si el producto no instala. Un fallo borra la carpeta parcial.
+/// Las `credenciales` van solo a este contenedor de descarga.
 fn descargar_vendor(
     repo: &Path,
     tarea: &Tarea,
     home: &Path,
     hash: &str,
     timeout: Duration,
+    credenciales: &[Credencial],
 ) -> Result<Option<String>, ErrorOraculo> {
     let destino = home.join(CARPETA_CACHE).join(CARPETA_RUST).join(hash);
     let parcial = parcial_de(&destino);
@@ -574,8 +718,9 @@ fn descargar_vendor(
         cache: Some(parcial.clone()),
         cache_rw: true,
         rustsec: None,
+        secretos: secretos_de(credenciales),
     };
-    match ejecutar_descarga(&ejecucion) {
+    match ejecutar_descarga(&ejecucion, credenciales) {
         Ok(()) if parcial.join(ARCHIVO_CONFIG).is_file() => {
             if destino.exists() {
                 borrar_en_home(home, &destino).map_err(|e| infra("borrar la caché previa", e))?;
@@ -642,8 +787,9 @@ fn actualizar_rustsec(
         cache: Some(dir.clone()),
         cache_rw: true,
         rustsec: None,
+        secretos: Vec::new(),
     };
-    match ejecutar_descarga(&ejecucion) {
+    match ejecutar_descarga(&ejecucion, &[]) {
         Ok(()) => Ok((Some(dir), "ok".into())),
         Err(diagnostico) => {
             let motivo = match diagnostico {
@@ -1058,7 +1204,9 @@ pub fn traer_imagenes_base_de(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RegistroConfig;
     use crate::oracle::contenedor::{self, Ejecucion};
+    use inventario::RegistroNombrado;
 
     const LOCK: &str = "# This file is automatically @generated by Cargo.\n\
 version = 4\n\
@@ -1091,6 +1239,7 @@ source = \"git+https://github.com/x/ext?rev=1#1\"\n";
             cache: None,
             cache_rw: false,
             rustsec: None,
+            secretos: Vec::new(),
         }
     }
 
@@ -1524,5 +1673,121 @@ location searched: crates.io index";
     fn descarga_clasifica_error_pull_401_de_podman_pide_credenciales() {
         let salida = "Error: unable to copy from source docker://127.0.0.1:5099/x:1: initializing source docker://127.0.0.1:5099/x:1: reading manifest 1 in 127.0.0.1:5099/x: authentication required";
         assert_eq!(clasificar_error_pull(salida), Problema::PideCredenciales);
+    }
+
+    #[test]
+    fn descarga_comando_vendor_corre_desde_el_repo_para_leer_su_config() {
+        assert!(
+            COMANDO_VENDOR.starts_with("cd /repo && cargo vendor --locked"),
+            "{COMANDO_VENDOR}"
+        );
+        assert!(
+            COMANDO_VENDOR.ends_with("--versioned-dirs /cache/vendor > /cache/config.toml"),
+            "{COMANDO_VENDOR}"
+        );
+    }
+
+    #[test]
+    fn descarga_comando_lock_genera_en_la_copia_del_repo_con_su_config() {
+        assert!(
+            COMANDO_LOCK.contains("cp -r /repo/. /tmp/w/"),
+            "{COMANDO_LOCK}"
+        );
+        assert!(
+            COMANDO_LOCK.contains("cd /tmp/w && cargo generate-lockfile"),
+            "{COMANDO_LOCK}"
+        );
+        assert!(
+            COMANDO_LOCK.ends_with("cp /tmp/w/Cargo.lock /salida/Cargo.lock"),
+            "{COMANDO_LOCK}"
+        );
+    }
+
+    /// Credencial de prueba: `registros_nombrados` y `[[registro]]` con host igual, valor `valor-secreto-9`.
+    fn credencial_de_prueba() -> Vec<Credencial> {
+        let inv = Inventario {
+            registros_nombrados: vec![RegistroNombrado {
+                nombre: "priv".into(),
+                direccion: "https://reg.example/index/".into(),
+            }],
+            ..Inventario::default()
+        };
+        let registros = vec![RegistroConfig {
+            nombre: "priv".into(),
+            url: "https://reg.example/index/".into(),
+            credencial_env: "ROOT_TOKEN_PRIV".into(),
+        }];
+        credenciales_cargo(&inv, &registros, |_| Some("valor-secreto-9".into()))
+    }
+
+    #[test]
+    fn descarga_redactar_diagnostico_quita_el_secreto_en_todas_sus_formas() {
+        let creds = credencial_de_prueba();
+        assert_eq!(creds.len(), 1, "{creds:?}");
+        for diagnostico in [
+            Diagnostico::Infra("401 con valor-secreto-9".into()),
+            Diagnostico::Producto("paquete valor-secreto-9".into()),
+            Diagnostico::Desconocido("algo valor-secreto-9".into()),
+        ] {
+            let texto = format!("{:?}", redactar_diagnostico(diagnostico, &creds));
+            assert!(!texto.contains("valor-secreto-9"), "{texto}");
+            assert!(texto.contains("***"), "{texto}");
+        }
+    }
+
+    /// Tarea de Rust mínima, cargada desde un `tarea.toml` temporal.
+    fn tarea_rust_minima() -> Tarea {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let texto = "nombre = \"x\"\nlenguaje = \"rust\"\nimagen = \"i\"\nspec = \"s\"\n\
+                     [contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n";
+        fs::write(dir.path().join("tarea.toml"), texto).expect("escribe tarea.toml");
+        Tarea::cargar_de(dir.path()).expect("carga la tarea")
+    }
+
+    #[test]
+    fn descarga_gate_del_inventario_lista_solo_las_entradas_de_red_del_config() {
+        let home = tempfile::tempdir().expect("home temporal");
+        let tarea = tarea_rust_minima();
+        let inv = Inventario {
+            config_cargo: vec![
+                EntradaConfig {
+                    archivo: ".cargo/config.toml".into(),
+                    linea: 2,
+                    seccion: "http".into(),
+                    clave: "http.proxy".into(),
+                    red: true,
+                    cita: "proxy = \"http://***@proxy:3128\"".into(),
+                },
+                EntradaConfig {
+                    archivo: ".cargo/config.toml".into(),
+                    linea: 5,
+                    seccion: "alias".into(),
+                    clave: "alias.b".into(),
+                    red: false,
+                    cita: "b = \"build\"".into(),
+                },
+            ],
+            ..Inventario::default()
+        };
+        registrar_inventario(home.path(), &tarea, &inv).expect("registra el inventario");
+
+        let texto = fs::read_to_string(home.path().join("eventos.jsonl")).expect("eventos");
+        let evento: Value = texto
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).expect("línea JSON"))
+            .find(|v| v["fase"] == "inventario")
+            .expect("Gate del inventario");
+        let config = evento["extra"]["config_cargo"]
+            .as_array()
+            .expect("config_cargo en el Gate");
+        assert_eq!(config.len(), 1, "{config:?}");
+        assert_eq!(config[0]["clave"], "http.proxy");
+        assert_eq!(config[0]["linea"], 2);
+        assert_eq!(config[0]["archivo"], ".cargo/config.toml");
+        assert_eq!(config[0]["cita"], "proxy = \"http://***@proxy:3128\"");
+        assert!(
+            !texto.contains("alias.b"),
+            "una entrada sin red no entra al Gate: {texto}"
+        );
     }
 }

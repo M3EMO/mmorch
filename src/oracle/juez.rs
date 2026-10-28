@@ -418,7 +418,7 @@ fn arreglo(valor: Option<Value>, clave: &str) -> Result<Vec<Value>, String> {
 }
 
 /// Quita un bloque ```json ... ``` que envuelve todo el texto. Cualquier otro texto queda igual.
-fn desenvuelto(texto: &str) -> &str {
+pub(crate) fn desenvuelto(texto: &str) -> &str {
     let t = texto.trim();
     let Some(resto) = t.strip_prefix("```") else {
         return t;

@@ -12,6 +12,7 @@ use toml::{Table, Value};
 use url::Host;
 
 use crate::oracle::ErrorOraculo;
+use crate::tipos::Dimension;
 
 const ARCHIVO_CARGO: &str = "Cargo.toml";
 const ARCHIVO_LOCK: &str = "Cargo.lock";
@@ -71,7 +72,8 @@ pub struct Aviso {
     pub detalle: String,
 }
 
-/// Un hallazgo de entrega que no corta la evaluación. La cita va redactada.
+/// Un hallazgo que no corta la evaluación: de entrega, o de seguridad si es un secreto escrito en el repo.
+/// La cita va redactada y nunca lleva el valor del secreto.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HallazgoInventario {
     pub severidad: u8,
@@ -79,6 +81,25 @@ pub struct HallazgoInventario {
     pub linea: u32,
     pub cita: String,
     pub detalle: String,
+    /// Entrega si no se indica otra cosa (los hallazgos viejos no la traen).
+    #[serde(default = "dimension_entrega")]
+    pub dimension: Dimension,
+}
+
+fn dimension_entrega() -> Dimension {
+    Dimension::Entrega
+}
+
+/// Una entrada de `.cargo/config.toml` o `config`. `clave` es la ruta con puntos (`http.proxy`).
+/// `red` marca lo que toca la red: el `Gate` del inventario la lista antes de usarla. `cita` no lleva secretos.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntradaConfig {
+    pub archivo: String,
+    pub linea: u32,
+    pub seccion: String,
+    pub clave: String,
+    pub red: bool,
+    pub cita: String,
 }
 
 /// Lo que el repo declara. Se arma sin red.
@@ -91,6 +112,20 @@ pub struct Inventario {
     pub sin_commit: Vec<Aviso>,
     /// Hallazgos de entrega sin corte: un `--extra-index-url` deja uno de severidad 1.
     pub hallazgos: Vec<HallazgoInventario>,
+    /// Registros que una dependencia usa por nombre (`registry = "x"`). Sin repetir por nombre.
+    #[serde(default)]
+    pub registros_nombrados: Vec<RegistroNombrado>,
+    /// Entradas de `.cargo/config.toml` y `config` del repo, todas. Las de `red = true` van al `Gate`.
+    #[serde(default)]
+    pub config_cargo: Vec<EntradaConfig>,
+}
+
+/// Un registro que el repo usa por nombre. `direccion` es la de su índice (`[registries.<nombre>]`),
+/// sin credenciales. Sin `index` queda `registry:<nombre>`, que no tiene host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistroNombrado {
+    pub nombre: String,
+    pub direccion: String,
 }
 
 /// Dirección leída con el parser de URL (RFC 3986). Sin credenciales: el parser ya las rechazó.
@@ -190,7 +225,28 @@ pub fn inventariar(repo: &Path) -> Result<Inventario, ErrorOraculo> {
     let mut inv = Inventario::default();
     inventariar_cargo(repo, &mut inv)?;
     inventariar_requirements(repo, &mut inv)?;
+    inventariar_config_cargo(repo, &mut inv)?;
     Ok(inv)
+}
+
+/// Clasifica `.cargo/config.toml` y `config` del repo (decisión 30). No depende del manifiesto: un
+/// secreto en el config es un secreto aunque falte `Cargo.toml`. Un TOML inválido ya es rechazo en
+/// `inventariar_cargo`, así que aquí se omite.
+fn inventariar_config_cargo(repo: &Path, inv: &mut Inventario) -> Result<(), ErrorOraculo> {
+    for ruta in ARCHIVOS_CONFIG {
+        let Some(texto) = leer_opcional(&repo.join(ruta))? else {
+            continue;
+        };
+        if let Ok(tabla) = toml::from_str::<Table>(&texto) {
+            let config = Manifiesto {
+                dir: String::new(),
+                texto: Texto::nuevo(ruta, &texto),
+                tabla,
+            };
+            clasificar_config(&config, inv);
+        }
+    }
+    Ok(())
 }
 
 /// Oculta lo que va antes del último `@` de cada dirección del texto. Es conservadora: sirve
@@ -407,7 +463,7 @@ fn ubicaciones(texto: &str) -> HashMap<(String, String), u32> {
         } else if let Some((clave, _)) = limpia.split_once('=') {
             let clave = clave.trim().trim_matches('"');
             let nombre = clave.split('.').next().unwrap_or(clave);
-            mapa.entry((seccion.clone(), nombre.to_string()))
+            mapa.entry((seccion.clone(), norma(nombre)))
                 .or_insert(numero);
         }
     }
@@ -433,7 +489,7 @@ impl Texto {
     /// Línea de la clave `clave` dentro de la sección `seccion`. Cero si no aparece.
     fn linea(&self, seccion: &str, clave: &str) -> u32 {
         self.ubicaciones
-            .get(&(norma(seccion), clave.to_string()))
+            .get(&(norma(seccion), norma(clave)))
             .copied()
             .unwrap_or(0)
     }
@@ -653,24 +709,29 @@ fn agregar_dependencias(salida: &mut Vec<Dep>, valor: Option<&Value>, seccion: &
     }
 }
 
-/// Lee `.cargo/config.toml` (o `config`) del repo. Un TOML inválido es rechazo.
-fn leer_config(repo: &Path, inv: &mut Inventario) -> Result<Option<Manifiesto>, ErrorOraculo> {
+/// Lee `.cargo/config.toml` y `.cargo/config` del repo: los dos que existan, en ese orden. Cargo los lee
+/// en `/repo`. Un TOML inválido es rechazo.
+fn leer_configs(repo: &Path, inv: &mut Inventario) -> Result<Vec<Manifiesto>, ErrorOraculo> {
+    let mut salida = Vec::new();
     for ruta in ARCHIVOS_CONFIG {
-        if let Some(texto) = leer_opcional(&repo.join(ruta))? {
-            return Ok(manifiesto(ruta, "", &texto, inv));
+        if let Some(texto) = leer_opcional(&repo.join(ruta))?
+            && let Some(m) = manifiesto(ruta, "", &texto, inv)
+        {
+            salida.push(m);
         }
     }
-    Ok(None)
+    Ok(salida)
 }
 
-/// Tabla `[registries.<nombre>]` de la configuración del repo, si existe.
-fn registro_de<'a>(config: Option<&'a Manifiesto>, nombre: &str) -> Option<&'a Table> {
-    config?
-        .tabla
-        .get("registries")?
-        .as_table()?
-        .get(nombre)?
-        .as_table()
+/// Tabla `[registries.<nombre>]` de la configuración del repo, en el primer archivo que la declara.
+fn registro_de<'a>(configs: &'a [Manifiesto], nombre: &str) -> Option<&'a Table> {
+    configs.iter().find_map(|c| {
+        c.tabla
+            .get("registries")?
+            .as_table()?
+            .get(nombre)?
+            .as_table()
+    })
 }
 
 /// Fuentes de reemplazo de `[source.*]`: su `registry` y su `git` pasan por las mismas reglas.
@@ -691,6 +752,112 @@ fn revisar_fuentes_config(config: &Manifiesto, inv: &mut Inventario) {
                 inv.rechazos.push(rechazo(&config.texto, linea, motivo));
             }
         }
+    }
+}
+
+/// Clasifica las entradas de un config de Cargo (decisión 30). Una por tabla de `registries`, `source` y
+/// `target`, y una por clave de `http`, `net`, `env`, `build` y `alias`. Las de la raíz van como `otra`.
+/// Tocan la red `registries.*`, `source.*`, `http.proxy` y `net.git-fetch-with-cli`. Un secreto escrito en
+/// el repo (un token de registro, o usuario y clave en el proxy) da un hallazgo de seguridad severidad 3.
+fn clasificar_config(config: &Manifiesto, inv: &mut Inventario) {
+    let texto = &config.texto;
+    for (seccion, valor) in &config.tabla {
+        match (seccion.as_str(), valor) {
+            ("registries" | "source" | "target", Value::Table(tablas)) => {
+                for (nombre, tabla) in tablas.iter().filter(|(_, t)| t.is_table()) {
+                    inv.config_cargo.push(EntradaConfig {
+                        archivo: texto.ruta.clone(),
+                        linea: texto.linea(seccion, nombre),
+                        seccion: seccion.clone(),
+                        clave: format!("{seccion}.{nombre}"),
+                        red: matches!(seccion.as_str(), "registries" | "source"),
+                        cita: format!("[{seccion}.{nombre}]"),
+                    });
+                    let Some(t) = tabla.as_table() else {
+                        continue;
+                    };
+                    if seccion == "registries" {
+                        for clave in ["token", "credential-provider"] {
+                            if t.contains_key(clave) {
+                                inv.hallazgos.push(hallazgo_de_seguridad(
+                                    &texto.ruta,
+                                    texto.linea(&format!("registries.{nombre}"), clave),
+                                    format!("{clave} = \"***\""),
+                                    format!(
+                                        "registro con {clave} escrito en el repo: registries.{nombre}"
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            ("http" | "net" | "env" | "build" | "alias", Value::Table(claves)) => {
+                for (clave, valor_clave) in claves {
+                    let ruta = format!("{seccion}.{clave}");
+                    let red = matches!(ruta.as_str(), "http.proxy" | "net.git-fetch-with-cli");
+                    let cita = cita_de_valor(clave, valor_clave);
+                    if ruta == "http.proxy" && valor_clave.as_str().is_some_and(|u| u.contains('@'))
+                    {
+                        inv.hallazgos.push(hallazgo_de_seguridad(
+                            &texto.ruta,
+                            texto.linea(seccion, clave),
+                            cita.clone(),
+                            "proxy con credenciales escritas en el repo: http.proxy".into(),
+                        ));
+                    }
+                    inv.config_cargo.push(EntradaConfig {
+                        archivo: texto.ruta.clone(),
+                        linea: texto.linea(seccion, clave),
+                        seccion: seccion.clone(),
+                        clave: ruta,
+                        red,
+                        cita,
+                    });
+                }
+            }
+            _ => inv.config_cargo.push(EntradaConfig {
+                archivo: texto.ruta.clone(),
+                linea: texto.linea("", seccion),
+                seccion: "otra".into(),
+                clave: seccion.clone(),
+                red: false,
+                cita: cita_de_valor(seccion, valor),
+            }),
+        }
+    }
+}
+
+/// Cita de una clave del config sin su secreto: en un texto, lo que va antes del último `@` se oculta.
+fn cita_de_valor(clave: &str, valor: &Value) -> String {
+    match valor {
+        Value::String(texto) => {
+            let visible = match texto.rfind('@') {
+                Some(i) => format!("***{}", &texto[i..]),
+                None => texto.clone(),
+            };
+            format!("{clave} = \"{visible}\"")
+        }
+        Value::Table(_) => format!("[{clave}]"),
+        Value::Array(_) => format!("{clave} = [...]"),
+        otro => format!("{clave} = {otro}"),
+    }
+}
+
+/// Hallazgo de seguridad severidad 3: un secreto escrito en el repo. Cita y detalle no llevan su valor.
+fn hallazgo_de_seguridad(
+    archivo: &str,
+    linea: u32,
+    cita: String,
+    detalle: String,
+) -> HallazgoInventario {
+    HallazgoInventario {
+        severidad: 3,
+        archivo: archivo.into(),
+        linea,
+        cita: redactar(&cita),
+        detalle: redactar(&detalle),
+        dimension: Dimension::Seguridad,
     }
 }
 
@@ -739,14 +906,14 @@ fn inventariar_cargo(repo: &Path, inv: &mut Inventario) -> Result<(), ErrorOracu
         }
     }
 
-    let config = leer_config(repo, inv)?;
+    let configs = leer_configs(repo, inv)?;
     let mut crates_io: Option<(String, u32)> = None;
     for m in &manifiestos {
         for dep in dependencias(&m.tabla) {
-            revisar_dep(&dep, m, config.as_ref(), &commits, inv, &mut crates_io);
+            revisar_dep(&dep, m, &configs, &commits, inv, &mut crates_io);
         }
     }
-    if let Some(config) = &config {
+    for config in &configs {
         revisar_fuentes_config(config, inv);
     }
 
@@ -806,7 +973,7 @@ fn inventariar_cargo(repo: &Path, inv: &mut Inventario) -> Result<(), ErrorOracu
 fn revisar_dep(
     dep: &Dep,
     m: &Manifiesto,
-    config: Option<&Manifiesto>,
+    configs: &[Manifiesto],
     commits: &BTreeMap<String, String>,
     inv: &mut Inventario,
     crates_io: &mut Option<(String, u32)>,
@@ -872,16 +1039,9 @@ fn revisar_dep(
         return;
     }
     if let Some(nombre) = &registro {
-        let tabla = registro_de(config, nombre);
-        // Un registro con token o con proveedor de credenciales no se usa: la clave no entra al contenedor (P21).
-        if tabla.is_some_and(|t| t.contains_key("token") || t.contains_key("credential-provider")) {
-            inv.rechazos.push(rechazo(
-                &m.texto,
-                linea,
-                format!("registro privado que pide credenciales: {nombre}"),
-            ));
-            return;
-        }
+        // Un token o un proveedor de credenciales escritos en el repo son un secreto: hallazgo de seguridad
+        // (`clasificar_config`). La fuente se acepta, y Root pasa su credencial solo si el host coincide.
+        let tabla = registro_de(configs, nombre);
         let (direccion, host) = match tabla.and_then(|t| t.get("index")).and_then(Value::as_str) {
             Some(url) => match analizar_url(url) {
                 Ok(u) => (u.base(), u.host),
@@ -892,6 +1052,12 @@ fn revisar_dep(
             },
             None => (format!("registry:{nombre}"), String::new()),
         };
+        if !inv.registros_nombrados.iter().any(|r| r.nombre == *nombre) {
+            inv.registros_nombrados.push(RegistroNombrado {
+                nombre: nombre.clone(),
+                direccion: direccion.clone(),
+            });
+        }
         push_unico(
             &mut inv.fuentes,
             Fuente {
@@ -960,6 +1126,7 @@ fn inventariar_requirements(repo: &Path, inv: &mut Inventario) -> Result<(), Err
                 cita: t.cita(linea),
                 detalle: "mezclar índices (--extra-index-url) permite la confusión de dependencias"
                     .into(),
+                dimension: Dimension::Entrega,
             });
         } else if let Some(valor) = opcion(resto, &["-f", "--find-links"]) {
             fuente_de_indice(&t, linea, valor, inv);
@@ -1343,7 +1510,7 @@ git+https://github.com/x/y@abc123#egg=y\nhttps://host/p.tar.gz\n-r otro.txt\n";
     }
 
     #[test]
-    fn descarga_inventario_registro_privado_con_token_es_rechazo_sin_token() {
+    fn descarga_inventario_registro_privado_con_token_se_acepta_con_hallazgo_de_seguridad() {
         let inv = inventario_de(&[
             (
                 "Cargo.toml",
@@ -1354,10 +1521,38 @@ git+https://github.com/x/y@abc123#egg=y\nhttps://host/p.tar.gz\n-r otro.txt\n";
                 "[registries.privado]\nindex = \"sparse+https://reg.example/index/\"\ntoken = \"TOKEN-SECRETO-123\"\n",
             ),
         ]);
-        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
-        assert!(inv.rechazos[0].motivo.contains("credenciales"));
+        assert!(inv.rechazos.is_empty(), "la fuente se acepta: {inv:?}");
+        assert_eq!(direcciones(&inv), ["https://reg.example/index/"], "{inv:?}");
+        let seguridad: Vec<&HallazgoInventario> = inv
+            .hallazgos
+            .iter()
+            .filter(|h| h.dimension == Dimension::Seguridad)
+            .collect();
+        assert_eq!(seguridad.len(), 1, "{inv:?}");
+        assert_eq!(seguridad[0].severidad, 3);
+        assert_eq!(seguridad[0].archivo, ".cargo/config.toml");
+        assert_eq!(seguridad[0].linea, 3);
         let json = serde_json::to_string(&inv).expect("serializa");
         assert!(!json.contains("TOKEN-SECRETO-123"), "{json}");
+        assert!(!format!("{inv:?}").contains("TOKEN-SECRETO-123"));
+    }
+
+    #[test]
+    fn inventario_registro_con_credential_provider_es_hallazgo_de_seguridad() {
+        let inv = inventario_de(&[(
+            ".cargo/config.toml",
+            "[registries.privado]\nindex = \"sparse+https://reg.example/index/\"\ncredential-provider = \"proveedor-secreto-7\"\n",
+        )]);
+        let seguridad: Vec<&HallazgoInventario> = inv
+            .hallazgos
+            .iter()
+            .filter(|h| h.dimension == Dimension::Seguridad)
+            .collect();
+        assert_eq!(seguridad.len(), 1, "{inv:?}");
+        assert_eq!(seguridad[0].severidad, 3);
+        assert_eq!(seguridad[0].linea, 3);
+        let json = serde_json::to_string(&inv).expect("serializa");
+        assert!(!json.contains("proveedor-secreto-7"), "{json}");
     }
 
     #[test]
@@ -1808,6 +2003,91 @@ requests\ngit+https://github.com/x/y@abc#egg=y\n";
         let json = serde_json::to_string(&inv).expect("serializa");
         assert!(!json.contains("clave"), "{json}");
         assert!(!json.contains("usuario:"), "{json}");
+    }
+
+    fn config_de(texto: &str) -> Inventario {
+        inventario_de(&[(".cargo/config.toml", texto)])
+    }
+
+    fn entrada<'a>(inv: &'a Inventario, clave: &str) -> &'a EntradaConfig {
+        inv.config_cargo
+            .iter()
+            .find(|e| e.clave == clave)
+            .unwrap_or_else(|| panic!("falta la entrada {clave}: {:?}", inv.config_cargo))
+    }
+
+    #[test]
+    fn inventario_http_proxy_suma_entrada_de_red_y_no_da_hallazgo() {
+        let inv = config_de("[http]\nproxy = \"http://127.0.0.1:9\"\n");
+        let e = entrada(&inv, "http.proxy");
+        assert!(e.red, "{e:?}");
+        assert_eq!(e.seccion, "http");
+        assert_eq!(e.archivo, ".cargo/config.toml");
+        assert_eq!(e.linea, 2);
+        assert!(inv.hallazgos.is_empty(), "{inv:?}");
+    }
+
+    #[test]
+    fn inventario_proxy_con_usuario_y_clave_es_hallazgo_de_seguridad_sin_filtrar() {
+        let inv = config_de("[http]\nproxy = \"http://u:clave@proxy:3128\"\n");
+        let h = inv
+            .hallazgos
+            .iter()
+            .find(|h| h.dimension == Dimension::Seguridad)
+            .expect("hallazgo de seguridad");
+        assert_eq!(h.severidad, 3);
+        assert_eq!(h.archivo, ".cargo/config.toml");
+        assert_eq!(h.linea, 2);
+        assert!(entrada(&inv, "http.proxy").red);
+        // El campo `clave` del JSON se llama igual que la contraseña: se busca el secreto con su contexto.
+        assert!(
+            !h.cita.contains("clave") && !h.detalle.contains("clave"),
+            "{h:?}"
+        );
+        let json = serde_json::to_string(&inv).expect("serializa");
+        for texto in [json, format!("{inv:?}")] {
+            assert!(!texto.contains("u:clave"), "{texto}");
+            assert!(!texto.contains("clave@"), "{texto}");
+            assert!(!texto.contains("u:"), "{texto}");
+        }
+    }
+
+    #[test]
+    fn inventario_net_git_fetch_with_cli_es_entrada_de_red() {
+        let inv = config_de("[net]\ngit-fetch-with-cli = true\n");
+        let e = entrada(&inv, "net.git-fetch-with-cli");
+        assert!(e.red, "{e:?}");
+        assert_eq!(e.seccion, "net");
+        assert_eq!(e.linea, 2);
+    }
+
+    #[test]
+    fn inventario_alias_y_build_son_entradas_sin_red() {
+        let inv = config_de("[alias]\nb = \"build\"\n\n[build]\nrustc-wrapper = \"x\"\n");
+        assert!(!entrada(&inv, "alias.b").red, "{inv:?}");
+        assert!(!entrada(&inv, "build.rustc-wrapper").red, "{inv:?}");
+        assert!(inv.config_cargo.iter().all(|e| !e.red), "{inv:?}");
+        assert!(inv.hallazgos.is_empty(), "{inv:?}");
+    }
+
+    #[test]
+    fn inventario_source_y_registries_son_entradas_de_red_y_target_no() {
+        let texto = "[registries.privado]\nindex = \"sparse+https://reg.example/index/\"\n\n\
+[source.privado]\nregistry = \"sparse+https://reg.example/index/\"\n\n\
+[target.x86_64-unknown-linux-gnu]\nrunner = \"x\"\n";
+        let inv = config_de(texto);
+        let registro = entrada(&inv, "registries.privado");
+        assert!(registro.red);
+        assert_eq!(registro.linea, 1);
+        assert_eq!(registro.cita, "[registries.privado]");
+        assert!(entrada(&inv, "source.privado").red);
+        assert!(!entrada(&inv, "target.x86_64-unknown-linux-gnu").red);
+    }
+
+    #[test]
+    fn inventario_lee_config_sin_extension_ademas_del_toml() {
+        let inv = inventario_de(&[(".cargo/config", "[http]\nproxy = \"http://127.0.0.1:9\"\n")]);
+        assert_eq!(entrada(&inv, "http.proxy").archivo, ".cargo/config");
     }
 }
 

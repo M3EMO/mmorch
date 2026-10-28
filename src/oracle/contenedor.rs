@@ -23,8 +23,8 @@ static CONTADOR: AtomicU64 = AtomicU64::new(0);
 /// Tag de SELinux obligatorio en los montajes (Fedora).
 pub const SUFIJO_SELINUX: &str = "z";
 
-/// Qué correr, con qué montajes y con qué límite de tiempo.
-#[derive(Debug, Clone)]
+/// Qué correr, con qué montajes y con qué límite de tiempo. Su `Debug` oculta el valor de los secretos.
+#[derive(Clone)]
 pub struct Ejecucion {
     pub imagen: String,
     pub repo: Option<PathBuf>,
@@ -40,6 +40,33 @@ pub struct Ejecucion {
     pub cache_rw: bool,
     /// Base de RustSec montada en solo lectura en `/rustsec`.
     pub rustsec: Option<PathBuf>,
+    /// Secretos (nombre, valor) que el contenedor hereda del entorno de Root con `-e NOMBRE`.
+    /// El valor nunca va en los argumentos: `lanzar` lo pone en el entorno de `podman`.
+    pub secretos: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for Ejecucion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let secretos: Vec<String> = self
+            .secretos
+            .iter()
+            .map(|(nombre, _)| format!("{nombre}=***"))
+            .collect();
+        f.debug_struct("Ejecucion")
+            .field("imagen", &self.imagen)
+            .field("repo", &self.repo)
+            .field("oraculo", &self.oraculo)
+            .field("salida", &self.salida)
+            .field("cmd", &self.cmd)
+            .field("env", &self.env)
+            .field("timeout", &self.timeout)
+            .field("red", &self.red)
+            .field("cache", &self.cache)
+            .field("cache_rw", &self.cache_rw)
+            .field("rustsec", &self.rustsec)
+            .field("secretos", &secretos)
+            .finish()
+    }
 }
 
 /// Lo que dejó el comando dentro del contenedor. Solo la cola de la salida.
@@ -89,6 +116,10 @@ pub fn argumentos(e: &Ejecucion, nombre: &str) -> Vec<String> {
     for (clave, valor) in &e.env {
         args.push("-e".into());
         args.push(format!("{clave}={valor}"));
+    }
+    for (nombre, _) in &e.secretos {
+        args.push("-e".into());
+        args.push(nombre.clone());
     }
     args.push(e.imagen.clone());
     args.extend(["sh", "-c"].map(String::from));
@@ -198,6 +229,7 @@ fn nombre_unico() -> String {
 fn lanzar(e: &Ejecucion, nombre: &str) -> Result<Child, ErrorOraculo> {
     Command::new("podman")
         .args(argumentos(e, nombre))
+        .envs(e.secretos.iter().map(|(n, v)| (n.as_str(), v.as_str())))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -271,6 +303,7 @@ mod tests {
             cache: None,
             cache_rw: false,
             rustsec: None,
+            secretos: Vec::new(),
         }
     }
 
@@ -314,6 +347,30 @@ mod tests {
         let args = argumentos(&e, "n");
         assert_eq!(args.iter().filter(|a| *a == "-v").count(), 1);
         assert!(args.contains(&"/tmp/s:/salida:z".to_string()));
+    }
+
+    #[test]
+    fn contenedor_secreto_va_por_entorno_y_no_en_los_argumentos() {
+        let mut e = ejecucion();
+        e.secretos = vec![(
+            "CARGO_REGISTRIES_PRIV_TOKEN".into(),
+            "valor-secreto-9".into(),
+        )];
+        let args = argumentos(&e, "n");
+        assert!(
+            contiene_par(&args, "-e", "CARGO_REGISTRIES_PRIV_TOKEN"),
+            "{args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a.contains("valor-secreto-9")),
+            "el valor no va en los argumentos: {args:?}"
+        );
+        let depuracion = format!("{e:?}");
+        assert!(
+            !depuracion.contains("valor-secreto-9"),
+            "el Debug no muestra el valor: {depuracion}"
+        );
+        assert!(depuracion.contains("CARGO_REGISTRIES_PRIV_TOKEN"));
     }
 
     #[test]

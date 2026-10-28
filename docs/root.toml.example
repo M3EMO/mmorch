@@ -82,3 +82,11 @@ minutos_max = 30
 # [precios."<modelo>"]
 # usd_entrada =
 # usd_salida =
+
+# Registros privados de paquetes. Solo los escribe el humano: un repo no puede agregar uno.
+# Root pasa la credencial solo a un repo cuyo registro tiene el mismo host que url.
+# La credencial no va en este archivo: va en la variable de entorno que nombra credencial_env.
+# [[registro]]
+# nombre = "privado"
+# url = "https://registro.ejemplo.com/index/"
+# credencial_env = "ROOT_TOKEN_PRIVADO"

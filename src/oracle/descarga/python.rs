@@ -281,6 +281,7 @@ fn correr(
         cache: Some(parcial.to_path_buf()),
         cache_rw: true,
         rustsec: None,
+        secretos: Vec::new(),
     };
     let resultado = contenedor::ejecutar(&ejecucion)?;
     Ok(Salida {
