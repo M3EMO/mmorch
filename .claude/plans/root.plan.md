@@ -1082,6 +1082,56 @@ Respuestas a las preguntas 1, 3, 4 y 5 de Sonnet y a sus notas. La pregunta 2 es
   - Con `umbral_wilson` por defecto, 2 de 2 no entran a la política y 3 de 3 sí.
   - El test de la nube de la Tarea 14 con 32 USD en el bloque da API.
 
+**Avance (2026-10-28):** Sonnet cerró 15b, 17, 18, 19, 6c, 7g, 9d2, 15c y 7h, con 851 tests verdes (commit 099dd2f). Hay cuatro límites conocidos:
+- La 6c cubre solo Rust. La descarga de Python queda en la Tarea 6c-B.
+- La 9d2 corre los `[[escenario]]` en el contenedor de evaluación, no contra la imagen construida (Tarea 7i).
+- La 7h no se probó contra Colab real: espera a G1 y a P35.
+- Otra sesión de Opus (cfc01dff) redactó G1 y G2 sin commitear: las fichas en `$ROOT_HOME/oraculos/{memora,brasa}/bootstrap/docs/SPEC.md` y las rúbricas en `docs/borradores/rubricas/`. Sus preguntas al usuario son P22 a P33.
+
+## Desempates técnicos 6 (Opus, 2026-10-28, después de la Tarea 7h)
+
+Respuestas a las preguntas técnicas de Sonnet de las dos últimas vueltas. Las preguntas sobre red, credenciales, código remoto sin verificar y el texto del PRD van al usuario como P34 a P36. Los cambios de código van en la Tarea 7i.
+
+**Preguntas de esta vuelta**
+1. **Imagen base privada o inexistente.** Da `SinVeredicto` en la construcción, con la causa "imagen base inaccesible: no existe o es privada". Sin evidencia que separe los dos casos, cobrar al producto sería un rojo falso. No es P21: Root no pasa credenciales, solo clasifica un error. `Informe.confianza` lista el caso.
+2. **`FROM ${VAR}`.** Root resuelve primero los `ARG` declarados antes del `FROM` con su valor por defecto. Si la variable queda sin valor, la construcción da `SinVeredicto` con la causa "imagen base sin resolver" y la línea. El `Gate` sigue listando el `FROM` tal como está escrito.
+3. **Evaluar con Dockerfile sin conexión.** Un pull que falla no corta la evaluación. Root no baja una imagen base que ya existe en el almacén local de podman con el mismo digest. Si el pull falla, solo la construcción del Dockerfile queda `SinVeredicto` con causa "infraestructura", y el resto de la evaluación sigue sin red. El invariante se cumple: esa parte no da verde.
+4. **Proxy en `.cargo/config.toml`.** Toca red y credenciales: va al usuario como P34. Hasta la respuesta, rige la opción a) de P34, que es la más cerrada.
+5. **Login de Colab.** Root no lee `~/.config/colab-cli/token.json`: ese archivo es interno de la CLI. El usuario hace el login a mano antes de `--colab`, como dice la Tarea 7h. El primer paso real (`colab new`) sirve de chequeo: corre con stdin cerrado y un timeout de 60 segundos. Si no responde, Root sale con código 3 y pide el login. Nunca espera 60 minutos.
+6. **Índices de Python.** Sí. El inventario lista los índices que `pip` usa de verdad. `--index-url` reemplaza a PyPI, y cada `--extra-index-url` se suma. Un índice que no es `https` o que trae credenciales se rechaza, igual que en la 6c. Un `--extra-index-url` deja además un hallazgo de entrega de severidad 1: mezclar índices permite la confusión de dependencias.
+7. **rustup en Colab.** Es código remoto sin verificar: va al usuario como P35.
+
+**Preguntas de la vuelta anterior**
+1. **Repeticiones en `diferencias.md`.** Sí, el diagnóstico se repite con 5 repeticiones. Se repite una sola vez, después de G1, en el `Validate` real de la Tarea 7. Las fichas cambian dos causas (FIFO y spin, decisión 26), así que repetirlo antes sería trabajo doble.
+2. **PRD.** Va al usuario como P36.
+3. **FIFO de `BLPOP` y "espacio local".** Respondidas (decisión 26): las dos respuestas son "sí" y van a las fichas.
+4. **Umbral con `f32`.** Sí: todo umbral, cota y monto en USD pasa a `f64`. Un `f32` no representa 0,6 exacto, y la comparación con una cota en `f64` falla en el borde.
+5. **P12b, P15, P16, P17 y P18.** Respondidas (decisiones 21 a 25). Quedan abiertas P17b, P18b, P21 y P34 a P36.
+
+**Notas de Sonnet**
+- **Fail-open de clippy.** El arreglo vale para todas las sondas con herramientas. Un reporte vacío, truncado o sin su marca de fin da `SinVeredicto`, nunca un valor limpio. La Tarea 7i revisa gitleaks, `cargo audit`, hadolint y `cargo-mutants` con la misma regla.
+- **`~/.cache/root-dbg/` desapareció.** Borrar datos fuera del sandbox es zona roja. La causa no está probada, así que la Tarea 7i revisa todo borrado de Root. `limpiar_temporales` no debe seguir enlaces simbólicos ni salir de `$ROOT_HOME/tmp/`.
+- **Escenarios de la 9d2.** Si la imagen construye, los `[[escenario]]` corren contra la imagen construida, como pide la 9d2. Si no construye, corren en el contenedor de evaluación. El informe dice dónde corrió cada uno.
+- **Tests en rojo.** Los tests unitarios de la 7h se aceptan. Desde la 7i, cada test nuevo se ve en rojo antes de su implementación, y el mensaje del commit lo dice.
+
+### Tarea 7i: Ajustes a las Tareas 6c, 7g, 7h, 9d2 y 15b
+- **Action**: los desempates 1, 2, 3, 5 y 6 de esta vuelta, el desempate 4 de la vuelta anterior (`f64`) y las tres notas: fail-open, borrados y escenarios.
+- **Validate**: `cargo test`:
+  - Una imagen base que podman no puede bajar deja la construcción `SinVeredicto`, y el resto de la evaluación da su veredicto.
+  - Con la imagen base ya presente en el almacén local y sin red, la construcción no intenta un pull.
+  - `ARG BASE=debian:12` seguido de `FROM ${BASE}` se resuelve. `FROM ${SIN_VALOR}` da `SinVeredicto` con su línea.
+  - Una CLI `colab` falsa que no responde hace salir a Root con código 3 en 60 segundos o menos.
+  - Un `requirements.txt` con `--extra-index-url https://...` lista los dos índices y deja un hallazgo de severidad 1.
+  - Un reporte vacío de gitleaks, `cargo audit`, hadolint o `cargo-mutants` da `SinVeredicto`.
+  - Un enlace simbólico dentro de `$ROOT_HOME/tmp/` que apunta afuera se borra como enlace, y su destino queda intacto.
+  - Una cota de Wilson exacta de 0,6 entra con `umbral_wilson = 0.6`.
+  - Un escenario corre contra la imagen construida cuando la imagen construye, y el informe nombra el lugar.
+- **Además**: Sonnet busca todo `remove_dir_all` y `remove_file` de `src/` (con `grep -w` y `codegraph callers`) y anota en el commit que ninguno sale de `ROOT_HOME`.
+
+### Tarea 6c-B: Descarga de Python (decisión 21)
+- **Action**: la mitad Python de la Tarea 6c: wheels con `pip download --only-binary=:all:`, sdist con `curl` desde la URL del índice con verificación de hash, y fuentes git o URL con `git clone` o `curl`. La evaluación instala sin red con `pip install --no-index --find-links /cache/python`. Las reglas y el `Validate` de Python son los de la 6c.
+- **Orden**: después de la 7i. memora y brasa son Rust, así que la 6c-B no frena a G1 ni a G2.
+
 **Preguntas respondidas (2026-10-28)**
 - P12b: b (decisión 21). P15: b (decisión 22). P16: a (decisión 23). P17: c+b (decisión 24, en parte). P18: c, más una segunda parte (decisión 25, en parte). P19 y P20: sí (decisión 26).
 
