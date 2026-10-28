@@ -59,6 +59,7 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 33 | P37: "P37 B pero sin limite de tiempo", precisada como "hagamos que el limite sean 2 hs pero que el planner y un hook/script corten una corrida si ya se recibio lo que requeria". La cuenta de Colab es paga y el usuario acepta el gasto de la T4. Cada corrida tiene un tope de 2 horas y se corta antes si ya entregó lo que pedía. Ver Tarea 7l. |
 | 34 | "Prioricemos el uso de las sesiones de nube porque vence el 5 de noviembre, concentremos el trabajo alli." Las builds de Sonnet corren en sesiones de Claude Code en la nube, sin podman, sin `ROOT_HOME` y sin Colab, hasta el 2026-11-05. Ver "Nube o laptop". |
 | 35 | P38: "a". El juez de la config de cargo solo informa: sus hallazgos van al informe, y `cargo` usa todo el config. El juez nunca abre ni cierra la red. |
+| 36 | "Acepto P33b b, P39 c con P44 c, y P46 a." P39 c: memora y brasa calibran al evaluador (Tareas 12 y 12b), y la Tarea 16 mide con `r00t corre` una tarea de Graft con oráculo oculto nuevo (Tarea 16b). P44 c: memora sigue hasta G3, y después el usuario decide si sigue (gate G4). P33b y P46 son de la sesión de fichas y viven en sus borradores. |
 
 ## Patterns to Mirror
 
@@ -814,7 +815,33 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
 ### Tarea 16: Runner
 - **Action**: `r00t corre` corre primero `r00t goal verificar` y se detiene si el GOAL no está autorizado. Después copia el bootstrap a un directorio nuevo y corre `claude -p` por rol con `route`. Usa `ECC_DISABLED_HOOKS` y los permisos que niegan `oraculos/`. Registra `PlanAprobado` y `Humano`. Al final evalúa y agrega la `Fila`.
 - **Mirror**: `correr-ecc-rol.sh`.
-- **Validate**: `r00t corre --tarea memora --config ecc-haiku` deja una fila en `runs.jsonl` con un veredicto de nueve dimensiones, un `Informe` y un resumen.
+- **Validate** (cambiado por la decisión 36, P39 c):
+  - Mecánica: `r00t corre` sobre una tarea de fixture chica, con un proveedor falso, deja una fila en `runs.jsonl` con `Informe`, resumen y `forma`. Este caso no gasta cupo ni API.
+  - Corrida real: `r00t corre --tarea graft-<nombre> --config ecc-haiku` deja una fila con un veredicto de nueve dimensiones, un `Informe` y un resumen. Espera a G2, a G5 y a P48.
+  - memora ya no es el caso de la Tarea 16: queda para calibrar (Tareas 12 y 12b) hasta G3 y G4. P49 confirma este punto.
+
+### Tarea 16b: Tarea de Graft con oráculo oculto (decisión 36)
+- **Qué tarea**: la elige el usuario en P48. Debe ser una pieza que el hito 2 (Graft) va a necesitar, chica, con salida checkeable y probable por caja negra.
+- **Quién escribe el oráculo**: Opus, en una sesión aparte, sin builders. Escribe tres cosas:
+  - la `## Ficha` de su `SPEC.md`, que el builder sí ve;
+  - los tests ocultos de caja negra y `tarea.toml` con `[[requisito]]`, `pruebas` y `bordes`;
+  - una implementación de referencia mínima.
+  El usuario aprueba la ficha y los requisitos (G5), igual que en G1. Sonnet construye solo lo que falte en Root para correr la tarea, nunca el oráculo.
+- **Cómo se prueba el oráculo** (la etiqueta sale de la construcción, como en `gates_bench`):
+  - Cada test oculto pasa sobre la implementación de referencia. Así ningún test pide algo imposible.
+  - Cada test oculto falla sobre el bootstrap vacío. Así ningún test da un verde regalado.
+  - `r00t ficha revisar` da 0 ambigüedades abiertas sobre la ficha aprobada.
+- **Cómo el builder queda sin verlo**:
+  - El oráculo, la referencia y `tarea.toml` viven solo en `$ROOT_HOME/oraculos/graft-<nombre>/`. Nunca entran al repo de Root ni a git. El repo se sube a GitHub y lo leen las sesiones en la nube.
+  - El bootstrap del builder lleva solo `SPEC.md` con su ficha y los tests de `contrato/`.
+  - `r00t corre` niega `Read` y `Bash` sobre `oraculos/` en los permisos de la sesión del builder.
+  - Observe busca la ruta `oraculos/` y nombres de tests ocultos en el transcript. Un hallazgo invalida la corrida.
+  - La sesión que escribe el oráculo no construye la tarea, y la sesión que construye no lee nada de esa sesión.
+- **Validate**:
+  - Los tres chequeos de "Cómo se prueba el oráculo" pasan.
+  - `git ls-files | grep -i graft-` no lista archivos del oráculo.
+  - Una corrida de prueba que lee un archivo de `oraculos/` queda inválida.
+- **Dónde corre**: escribir el oráculo es trabajo de Opus. Probar el oráculo y correr la Tarea 16 necesita podman y `ROOT_HOME`, así que va en la laptop.
 
 ### Tarea 17: Servidor MCP
 - **Action**: JSON-RPC por stdio (`initialize`, `tools/list`, `tools/call`) con las cuatro herramientas. Cada herramienta llama a la misma función que su subcomando.
@@ -1008,7 +1035,10 @@ Gates humanos que frenan el resto:
 - **P18, aprender en los roles fijos.** La parte c) está aplicada (Tarea 15c). La segunda parte espera a P18b.
 - **P21, credenciales de registros.** Respondida (decisión 29). Tarea 6d.
 - **P38, papel del juez de la config de cargo.** Respondida (decisión 35): el juez solo informa.
-- **P39, memora como banco.** El usuario respondió "a o c" y todavía no eligió una. Frena G1, G3 y las Tareas 12, 12b, 13, 13b y 16 si la respuesta saca a memora o a brasa. No frena 6e, 6d, 9d3, 15d ni 7k.
+- **P39, memora como banco.** Respondida (decisión 36): opción c.
+- **G4, memora después de G3.** Al cerrar G3, el usuario decide si memora sigue como banco (P44 c). Hasta entonces, memora sigue.
+- **G5, oráculo de Graft.** El usuario aprueba la ficha y los requisitos de la tarea de Graft. Frena la corrida real de la Tarea 16.
+- **P48 y P49.** Frenan la Tarea 16b y la corrida real de la Tarea 16. No frenan las tareas de nube.
 
 **Respuestas para las fichas (G1, decisión 26).** Opus las escribe en `## Ficha` al redactar G1:
 - **memora**: el requisito de `BLPOP` exige orden FIFO entre clientes bloqueados. Su aceptación cita `test_blpop_fifo_entre_clientes`. Ese test es correcto, y su falla de 9 en 30 corridas es un defecto del producto con origen "producto".
@@ -1423,3 +1453,17 @@ La corrida real de Colab espera a G1 y se hace en la laptop.
   
   Hoy rige a). Mi recomendación es c): Root aprende y tu decisión sobre los roles no cambia sin tu aprobación.
 
+**Respuestas del 2026-10-28 (decisión 36):** P39 c y P44 c. P39 queda cerrada.
+
+- **P48. ¿Qué tarea de Graft mide la Tarea 16?** Graft todavía no tiene PRD de hito ni plan. La tarea debe ser chica, checkeable y útil para el hito 2.
+
+  - a) Lector de planes: lee un `plan.md` como el de Root y emite en JSON sus tareas, dependencias y comandos `Validate`. Se escribe en Rust y se usa como CLI.
+  - b) Gate de etapa: recibe una tarea y un commit, corre su `Validate` y registra el resultado con `r00t observa evento`. Se escribe en Rust y se usa como CLI.
+  - c) Esperar al plan del hito 2 y elegir desde ahí. Hasta entonces, la Tarea 16 se valida solo con la tarea de fixture.
+
+  Mi recomendación es a): no depende de otras piezas de Graft y su salida se compara exacta.
+
+- **P49. ¿La Tarea 16 corre también memora?** La opción c de P39 decía "cambiar la Tarea 16 para que mida una tarea de Graft". El orquestador lo resumió como "además". Las dos lecturas cuestan distinto.
+
+  - a) Solo Graft. memora queda para calibrar. Esta opción rige hoy, porque sigue el texto de c.
+  - b) Graft y memora. Costo: una corrida completa más con Haiku sobre memora.
