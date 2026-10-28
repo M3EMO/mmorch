@@ -74,7 +74,8 @@ pub enum Comando {
         accion: GoalAccion,
     },
     /// Importa el log de métricas de mmorch en solo lectura.
-    ImportarMmorch {
+    #[command(name = "importar-mmorch")]
+    ImportarExterno {
         #[arg(long)]
         desde: PathBuf,
     },
@@ -300,7 +301,7 @@ impl Comando {
                 GoalAccion::Verificar => "goal verificar",
                 GoalAccion::Autorizar => "goal autorizar",
             },
-            Comando::ImportarMmorch { .. } => "importar-mmorch",
+            Comando::ImportarExterno { .. } => "importar-mmorch",
             Comando::Esquema { .. } => "esquema",
             Comando::Ficha { accion } => match accion {
                 FichaAccion::Revisar { .. } => "ficha revisar",

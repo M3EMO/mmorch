@@ -31,7 +31,7 @@ use oracle::tarea::Tarea;
 use tipos::{Eleccion, Estado, Fila, Proveedor, Via};
 
 /// Ejecuta un subcomando y devuelve su código de salida. Los errores salen por `Err`.
-/// Por ahora `route`, `llama`, `oraculo evaluar`, `ficha`, `esquema`, `goal`, `observa`, `track` e `importar-mmorch` tienen lógica.
+/// Por ahora `route`, `llama`, `oraculo evaluar`, `ficha`, `esquema`, `goal`, `observa`, `track` e la importación externa tienen lógica.
 pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
     match &cli.comando {
         Comando::Oraculo {
@@ -253,8 +253,8 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
         Comando::Observa { accion } => observa(cli.json, accion),
         Comando::Track { accion } => track_accion(cli.json, accion),
         Comando::Aprende { replay } => aprende_accion(cli.json, *replay),
-        Comando::ImportarMmorch { desde } => {
-            let resumen = importar::importar_mmorch(desde)?;
+        Comando::ImportarExterno { desde } => {
+            let resumen = importar::importar_externo(desde)?;
             println!("{}", serde_json::to_string_pretty(&resumen)?);
             Ok(())
         }

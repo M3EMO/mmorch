@@ -482,7 +482,7 @@ mod tests {
 
     fn evento() -> Evento {
         let mut extra = serde_json::Map::new();
-        extra.insert("origen".into(), json!("mmorch"));
+        extra.insert("origen".into(), json!("otra-fuente"));
         extra.insert("reintentos".into(), json!(2));
         Evento {
             v: VERSION,
@@ -684,7 +684,7 @@ mod tests {
     #[test]
     fn tipos_evento_extra_con_valores_reales() {
         let valor = serde_json::to_value(evento()).unwrap();
-        assert_eq!(valor["extra"]["origen"], "mmorch");
+        assert_eq!(valor["extra"]["origen"], "otra-fuente");
         assert_eq!(valor["extra"]["reintentos"], 2);
         assert_eq!(valor["via"], "api");
         assert_eq!(valor["tipo"], "llamada");

@@ -39,7 +39,7 @@ pub struct ResumenImportacion {
 }
 
 /// Importa `desde` a `ROOT_HOME`.
-pub fn importar_mmorch(desde: &Path) -> Result<ResumenImportacion, ErrorImportar> {
+pub fn importar_externo(desde: &Path) -> Result<ResumenImportacion, ErrorImportar> {
     importar(desde, &root_home())
 }
 

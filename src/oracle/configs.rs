@@ -982,7 +982,7 @@ mod tests {
                      secret_a: ''\n\
                      token_b:\n\
                      api_key: $API\n\
-                     api_key_c: \"{{ vault }}\"\n\
+                     api_key_c: \"{{ secreto_externo }}\"\n\
                      token_d: env:TOKEN\n\
                      token_e: <valor>\n\
                      token_f: changeme\n\
