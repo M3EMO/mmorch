@@ -1094,6 +1094,15 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "config": {
       "type": "string"
     },
+    "forma": {
+      "description": "Forma de la corrida. Las filas anteriores a la decisión 28 la leen vacía.",
+      "$ref": "#/$defs/Forma",
+      "default": {
+        "config": "",
+        "roles": [],
+        "verificador": false
+      }
+    },
     "id": {
       "type": "string"
     },
@@ -1281,6 +1290,29 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "peso",
         "cumplimiento",
         "evidencia"
+      ]
+    },
+    "Forma": {
+      "description": "Forma de una corrida (decisión 28): roles en orden, si hubo verificador y la configuración.",
+      "type": "object",
+      "properties": {
+        "config": {
+          "type": "string"
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Rol"
+          }
+        },
+        "verificador": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "roles",
+        "verificador",
+        "config"
       ]
     },
     "Fuente": {
@@ -1550,6 +1582,17 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "turnos",
         "intervenciones",
         "invalida"
+      ]
+    },
+    "Rol": {
+      "type": "string",
+      "enum": [
+        "planifica",
+        "organiza",
+        "construye",
+        "verifica",
+        "juzga",
+        "delega"
       ]
     },
     "TasaTest": {
@@ -2152,6 +2195,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "$ref": "#/$defs/Propuesta"
       }
     },
+    "propuestas_forma": {
+      "description": "Cambios de forma sugeridos. Route no los lee.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/PropuestaForma"
+      }
+    },
     "v": {
       "type": "integer",
       "format": "uint32",
@@ -2245,6 +2296,48 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "propuesto"
       ]
     },
+    "EvidenciaForma": {
+      "description": "Evidencia de una forma: n, éxitos, cota de Wilson, USD medio e ids de las filas.",
+      "type": "object",
+      "properties": {
+        "exitos": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "filas": {
+          "description": "Ids de las filas válidas que cuentan para esta forma, ordenados.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "forma": {
+          "$ref": "#/$defs/Forma"
+        },
+        "n": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "usd_medio": {
+          "type": "number",
+          "format": "double"
+        },
+        "wilson_inf": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "forma",
+        "n",
+        "exitos",
+        "wilson_inf",
+        "usd_medio",
+        "filas"
+      ]
+    },
     "EvidenciaModelo": {
       "description": "Estadísticas de un modelo en una tarea, con los ids de las filas que lo sustentan.",
       "type": "object",
@@ -2287,6 +2380,29 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "filas"
       ]
     },
+    "Forma": {
+      "description": "Forma de una corrida (decisión 28): roles en orden, si hubo verificador y la configuración.",
+      "type": "object",
+      "properties": {
+        "config": {
+          "type": "string"
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Rol"
+          }
+        },
+        "verificador": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "roles",
+        "verificador",
+        "config"
+      ]
+    },
     "Propuesta": {
       "description": "Cambio que Aprende sugiere en un rol fijo. El usuario lo aplica a mano en `root.toml`.",
       "type": "object",
@@ -2316,6 +2432,30 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "modelo_actual",
         "modelo_propuesto",
         "evidencia",
+        "diferencia_esperada"
+      ]
+    },
+    "PropuestaForma": {
+      "description": "Cambio de forma sugerido para una tarea. Route no lo lee: el usuario lo aplica a mano.",
+      "type": "object",
+      "properties": {
+        "actual": {
+          "$ref": "#/$defs/EvidenciaForma"
+        },
+        "diferencia_esperada": {
+          "$ref": "#/$defs/Diferencia"
+        },
+        "propuesta": {
+          "$ref": "#/$defs/EvidenciaForma"
+        },
+        "tarea": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tarea",
+        "actual",
+        "propuesta",
         "diferencia_esperada"
       ]
     },

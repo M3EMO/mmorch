@@ -370,11 +370,13 @@ fn aprende_accion(json: bool, replay: bool) -> Result<(), Error> {
     let pol = aprende::recalcular(&filas, &eventos, &actuales);
     aprende::escribir_politica(&home, &pol).map_err(aprende::ErrorAprende::from)?;
     registrar_propuestas(&pol)?;
+    registrar_propuestas_forma(&pol)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&pol)?);
     } else {
         imprimir_politica(&pol, cfg.umbral_wilson);
         imprimir_propuestas(&pol.propuestas);
+        imprimir_propuestas_forma(&pol.propuestas_forma);
     }
     Ok(())
 }
@@ -399,6 +401,83 @@ fn registrar_propuestas(pol: &route::Politica) -> Result<(), Error> {
             .map_err(observe::ErrorObserve::from)?;
     }
     Ok(())
+}
+
+/// Un `Gate` por propuesta de forma en `eventos.jsonl`. Sin propuestas, no escribe nada.
+fn registrar_propuestas_forma(pol: &route::Politica) -> Result<(), Error> {
+    for p in &pol.propuestas_forma {
+        let mut extra = serde_json::Map::new();
+        extra.insert("tarea".into(), serde_json::json!(p.tarea));
+        extra.insert(
+            "forma_actual".into(),
+            serde_json::to_value(&p.actual.forma)?,
+        );
+        extra.insert(
+            "forma_propuesta".into(),
+            serde_json::to_value(&p.propuesta.forma)?,
+        );
+        let (actual, propuesta) = (
+            serde_json::to_value(&p.actual)?,
+            serde_json::to_value(&p.propuesta)?,
+        );
+        extra.insert(
+            "evidencia".into(),
+            serde_json::json!({ "actual": actual, "propuesta": propuesta }),
+        );
+        extra.insert(
+            "diferencia".into(),
+            serde_json::to_value(&p.diferencia_esperada)?,
+        );
+        observe::registrar(&observe::evento_gate("aprende", "propuesta-forma", extra))
+            .map_err(observe::ErrorObserve::from)?;
+    }
+    Ok(())
+}
+
+/// Forma en una línea: roles unidos con `+`, verificador y config.
+fn describir_forma(forma: &tipos::Forma) -> String {
+    let roles = if forma.roles.is_empty() {
+        "sin roles".to_string()
+    } else {
+        forma
+            .roles
+            .iter()
+            .map(|r| route::politica::nombre_rol(*r))
+            .collect::<Vec<_>>()
+            .join("+")
+    };
+    let verificador = if forma.verificador {
+        "con verificador"
+    } else {
+        "sin verificador"
+    };
+    format!("{roles} ({verificador}, config {})", forma.config)
+}
+
+/// Sección «propuestas de forma»: una línea por propuesta, o «sin propuestas».
+fn imprimir_propuestas_forma(propuestas: &[route::politica::PropuestaForma]) {
+    if propuestas.is_empty() {
+        println!("propuestas de forma: sin propuestas");
+        return;
+    }
+    println!("propuestas de forma:");
+    for p in propuestas {
+        let (act, prop) = (&p.actual, &p.propuesta);
+        println!(
+            "{}: {} -> {} (éxito {:+.3}, USD {:+.4}; evidencia: actual {}/{}/{:.3}, propuesta {}/{}/{:.3})",
+            p.tarea,
+            describir_forma(&act.forma),
+            describir_forma(&prop.forma),
+            p.diferencia_esperada.exito,
+            -p.diferencia_esperada.usd,
+            act.n,
+            act.exitos,
+            act.wilson_inf,
+            prop.n,
+            prop.exitos,
+            prop.wilson_inf,
+        );
+    }
 }
 
 /// Sección «propuestas»: una línea por propuesta, o «sin propuestas».

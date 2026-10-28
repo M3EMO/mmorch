@@ -13,9 +13,11 @@ use thiserror::Error as ErrorDerive;
 
 use crate::config::Config;
 use crate::observe::jsonl;
-use crate::route::politica::{Diferencia, Evidencia, EvidenciaModelo, Propuesta, nombre_rol};
+use crate::route::politica::{
+    Diferencia, Evidencia, EvidenciaForma, EvidenciaModelo, Propuesta, PropuestaForma, nombre_rol,
+};
 use crate::route::{Candidato, Politica};
-use crate::tipos::{Decision, Estado, Evento, Fila, Proveedor, Rol, TipoEvento, Via};
+use crate::tipos::{Decision, Estado, Evento, Fila, Forma, Proveedor, Rol, TipoEvento, Via};
 use crate::track::stats::wilson_inferior;
 
 /// Nombre del archivo de política dentro de `ROOT_HOME`.
@@ -158,6 +160,7 @@ pub fn recalcular(filas: &[Fila], eventos: &[Evento], actuales: &RolesActuales) 
     refs.sort_by(|a, b| a.id.cmp(&b.id).then(a.ts.total_cmp(&b.ts)));
     let mut pol = politica_de(&refs, eventos);
     pol.propuestas = propuestas_de(&refs, actuales);
+    pol.propuestas_forma = propuestas_forma_de(&refs, actuales);
     pol
 }
 
@@ -173,16 +176,40 @@ struct AcumEvidencia {
 }
 
 impl AcumEvidencia {
-    fn evidencia(self, modelo: &str) -> EvidenciaModelo {
+    /// Cifras del acumulado: n, éxitos, cota de Wilson, USD medio e ids ordenados.
+    fn cifras(self) -> (u32, u32, f64, f64, Vec<String>) {
         let n = u32::try_from(self.ids.len()).unwrap_or(u32::MAX);
         let mut filas = self.ids;
         filas.sort();
+        (
+            n,
+            self.exitos,
+            wilson_inferior(self.exitos, n),
+            self.usd / f64::from(n),
+            filas,
+        )
+    }
+
+    fn evidencia(self, modelo: &str) -> EvidenciaModelo {
+        let (n, exitos, wilson_inf, usd_medio, filas) = self.cifras();
         EvidenciaModelo {
             modelo: modelo.into(),
             n,
-            exitos: self.exitos,
-            wilson_inf: wilson_inferior(self.exitos, n),
-            usd_medio: self.usd / f64::from(n),
+            exitos,
+            wilson_inf,
+            usd_medio,
+            filas,
+        }
+    }
+
+    fn evidencia_forma(self, forma: Forma) -> EvidenciaForma {
+        let (n, exitos, wilson_inf, usd_medio, filas) = self.cifras();
+        EvidenciaForma {
+            forma,
+            n,
+            exitos,
+            wilson_inf,
+            usd_medio,
             filas,
         }
     }
@@ -197,14 +224,31 @@ fn modelo_actual(rol: Rol, actuales: &RolesActuales) -> &str {
     }
 }
 
-fn tasa(e: &EvidenciaModelo) -> f64 {
-    f64::from(e.exitos) / f64::from(e.n)
+/// Tasa de éxito y USD medio de una evidencia, sea de modelo o de forma. Es lo que comparan las propuestas.
+trait TasaYCosto {
+    fn tasa_y_costo(&self) -> (f64, f64);
+}
+
+impl TasaYCosto for EvidenciaModelo {
+    fn tasa_y_costo(&self) -> (f64, f64) {
+        (f64::from(self.exitos) / f64::from(self.n), self.usd_medio)
+    }
+}
+
+impl TasaYCosto for EvidenciaForma {
+    fn tasa_y_costo(&self) -> (f64, f64) {
+        (f64::from(self.exitos) / f64::from(self.n), self.usd_medio)
+    }
+}
+
+fn tasa<E: TasaYCosto>(e: &E) -> f64 {
+    e.tasa_y_costo().0
 }
 
 /// Verdadero si `propuesto` acierta más que `actual`, o acierta igual y cuesta menos.
-fn mejora_sobre(propuesto: &EvidenciaModelo, actual: &EvidenciaModelo) -> bool {
-    let (tp, ta) = (tasa(propuesto), tasa(actual));
-    tp > ta || (tp == ta && propuesto.usd_medio < actual.usd_medio)
+fn mejora_sobre<E: TasaYCosto>(propuesto: &E, actual: &E) -> bool {
+    let ((tp, up), (ta, ua)) = (propuesto.tasa_y_costo(), actual.tasa_y_costo());
+    tp > ta || (tp == ta && up < ua)
 }
 
 /// Mayor tasa de éxito, luego menor costo, luego nombre.
@@ -216,7 +260,7 @@ fn orden_propuesta(a: &EvidenciaModelo, b: &EvidenciaModelo) -> std::cmp::Orderi
 }
 
 // Propuestas para los roles fijos. Route no las lee: el usuario las aplica en `root.toml`.
-// P18b pendiente: "esquemas o arquitecturas de agentes". No se implementa hasta la aclaración.
+// Las propuestas de forma (P18b, decisión 28) viven en `propuestas_forma_de`.
 fn propuestas_de(filas: &[&Fila], actuales: &RolesActuales) -> Vec<Propuesta> {
     let mut acum: BTreeMap<(Rol, String), BTreeMap<String, AcumEvidencia>> = BTreeMap::new();
     for fila in filas.iter().filter(|f| !f.resumen.invalida) {
@@ -257,7 +301,7 @@ fn propuestas_de(filas: &[&Fila], actuales: &RolesActuales) -> Vec<Propuesta> {
                 c.modelo != actual.modelo
                     && c.n >= FILAS_PROPUESTA
                     && c.wilson_inf >= actuales.umbral_wilson
-                    && mejora_sobre(c, actual)
+                    && mejora_sobre(*c, actual)
             })
             .min_by(|a, b| orden_propuesta(a, b));
         let Some(propuesto) = mejor else {
@@ -275,6 +319,82 @@ fn propuestas_de(filas: &[&Fila], actuales: &RolesActuales) -> Vec<Propuesta> {
             evidencia: Evidencia {
                 actual: actual.clone(),
                 propuesto: propuesto.clone(),
+            },
+        });
+    }
+    propuestas
+}
+
+/// Mayor tasa de éxito, luego menor costo, luego la forma. Orden determinista.
+fn orden_propuesta_forma(a: &EvidenciaForma, b: &EvidenciaForma) -> std::cmp::Ordering {
+    tasa(b)
+        .total_cmp(&tasa(a))
+        .then(a.usd_medio.total_cmp(&b.usd_medio))
+        .then(a.forma.cmp(&b.forma))
+}
+
+/// Propuestas de forma por tarea (decisión 28). Route no las lee: el usuario las aplica a mano.
+/// Agrupa por (tarea, forma) y compara con la misma regla que `propuestas_de`.
+fn propuestas_forma_de(filas: &[&Fila], actuales: &RolesActuales) -> Vec<PropuestaForma> {
+    let mut ultima: BTreeMap<&str, &Fila> = BTreeMap::new();
+    let mut acum: BTreeMap<&str, BTreeMap<Forma, AcumEvidencia>> = BTreeMap::new();
+    for &fila in filas.iter().filter(|f| !f.resumen.invalida) {
+        let tarea = fila.tarea.as_str();
+        // Forma actual: la de la última fila de la tarea (decisión del organizador; pregunta abierta al planner).
+        let reciente = ultima.get(tarea).is_none_or(|previa| {
+            fila.ts
+                .total_cmp(&previa.ts)
+                .then_with(|| fila.id.cmp(&previa.id))
+                .is_gt()
+        });
+        if reciente {
+            ultima.insert(tarea, fila);
+        }
+        let a = acum
+            .entry(tarea)
+            .or_default()
+            .entry(fila.forma.clone())
+            .or_default();
+        a.ids.push(fila.id.clone());
+        if exito_de_fila(fila) {
+            a.exitos += 1;
+        }
+        a.usd += fila.resumen.usd_api + fila.resumen.usd_cupo;
+    }
+    let mut propuestas = Vec::new();
+    for (tarea, formas) in acum {
+        let Some(reciente) = ultima.get(tarea) else {
+            continue;
+        };
+        let evidencias: BTreeMap<Forma, EvidenciaForma> = formas
+            .into_iter()
+            .map(|(forma, a)| (forma.clone(), a.evidencia_forma(forma)))
+            .collect();
+        let Some(actual) = evidencias.get(&reciente.forma) else {
+            continue;
+        };
+        if actual.n < FILAS_PROPUESTA {
+            continue;
+        }
+        let mejor = evidencias
+            .values()
+            .filter(|c| {
+                c.forma != actual.forma
+                    && c.n >= FILAS_PROPUESTA
+                    && c.wilson_inf >= actuales.umbral_wilson
+                    && mejora_sobre(*c, actual)
+            })
+            .min_by(|a, b| orden_propuesta_forma(a, b));
+        let Some(propuesta) = mejor else {
+            continue;
+        };
+        propuestas.push(PropuestaForma {
+            tarea: tarea.to_string(),
+            actual: actual.clone(),
+            propuesta: propuesta.clone(),
+            diferencia_esperada: Diferencia {
+                exito: tasa(propuesta) - tasa(actual),
+                usd: actual.usd_medio - propuesta.usd_medio,
             },
         });
     }
@@ -366,6 +486,7 @@ fn politica_de(filas: &[&Fila], eventos: &[Evento]) -> Politica {
         v: crate::tipos::VERSION,
         estadisticas,
         propuestas: Vec::new(),
+        propuestas_forma: Vec::new(),
     }
 }
 
@@ -566,7 +687,7 @@ pub fn replay(filas: &[Fila], cfg: &Config) -> Replay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tipos::{Informe, Resumen, Veredicto};
+    use crate::tipos::{Forma, Informe, Resumen, Veredicto};
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -1363,5 +1484,142 @@ mod tests {
         };
         let texto = serde_json::to_string(&p).expect("serializa");
         assert!(texto.contains("\"modelo_propuesto\":\"m\""));
+    }
+
+    /// Forma A: los cuatro roles, con verificador y config "ecc".
+    fn forma_a() -> Forma {
+        Forma {
+            roles: vec![Rol::Planifica, Rol::Organiza, Rol::Construye, Rol::Verifica],
+            verificador: true,
+            config: "ecc".into(),
+        }
+    }
+
+    /// Forma B: sin Verifica, sin verificador y con config "ecc".
+    fn forma_b() -> Forma {
+        Forma {
+            roles: vec![Rol::Planifica, Rol::Organiza, Rol::Construye],
+            verificador: false,
+            config: "ecc".into(),
+        }
+    }
+
+    /// Fila de "memora" con `forma`, `ts`, `id` y `usd` de cupo. Construye corre en haiku.
+    fn fila_de_forma(forma: &Forma, id: &str, ts: f64, usd: f64, exito: bool) -> Fila {
+        let mut f = Fila {
+            id: id.into(),
+            ts,
+            tarea: "memora".into(),
+            veredicto: Veredicto {
+                estado: if exito { Estado::Verde } else { Estado::Rojo },
+                ..Veredicto::default()
+            },
+            resumen: Resumen {
+                usd_cupo: usd,
+                ..Resumen::default()
+            },
+            forma: forma.clone(),
+            ..Fila::default()
+        };
+        f.modelos.insert(Rol::Construye, "haiku".into());
+        f
+    }
+
+    /// `n_b` filas de la forma B (1 USD, ts bajos) y `n_a` de la forma A (2 USD, ts altos). Todas con éxito.
+    /// La forma actual es la de la última fila, así que A es la actual.
+    fn formas_a_y_b(n_a: usize, n_b: usize) -> Vec<Fila> {
+        let mut filas: Vec<Fila> = (0..n_b)
+            .map(|i| fila_de_forma(&forma_b(), &format!("b{i}"), 1.0 + i as f64, 1.0, true))
+            .collect();
+        filas.extend(
+            (0..n_a)
+                .map(|i| fila_de_forma(&forma_a(), &format!("a{i}"), 6.0 + i as f64, 2.0, true)),
+        );
+        filas
+    }
+
+    /// Roles de `root.toml` con un umbral de Wilson bajo, para que 5 de 5 entre.
+    fn umbral_bajo() -> RolesActuales {
+        RolesActuales {
+            umbral_wilson: 0.4,
+            ..RolesActuales::default()
+        }
+    }
+
+    #[test]
+    fn forma_fila_vieja_sin_forma_se_lee() {
+        let mut vieja = serde_json::to_value(Fila::default()).expect("serializa");
+        vieja.as_object_mut().expect("objeto").remove("forma");
+        let fila: Fila = serde_json::from_value(vieja).expect("lee la fila vieja");
+        assert_eq!(fila.forma, Forma::default());
+    }
+
+    #[test]
+    fn forma_sin_verificador_igual_y_mas_barata_da_propuesta_y_route_no_cambia() {
+        let pol = recalcular(&formas_a_y_b(5, 5), &[], &umbral_bajo());
+        assert_eq!(pol.propuestas_forma.len(), 1, "{:?}", pol.propuestas_forma);
+        let p = &pol.propuestas_forma[0];
+        assert_eq!(p.tarea, "memora");
+        assert_eq!(p.actual.forma, forma_a());
+        assert_eq!(p.propuesta.forma, forma_b());
+        assert_eq!((p.actual.n, p.actual.exitos), (5, 5));
+        assert_eq!((p.propuesta.n, p.propuesta.exitos), (5, 5));
+        assert_eq!(p.diferencia_esperada.exito, 0.0);
+        assert!((p.diferencia_esperada.usd - 1.0).abs() < 1e-12);
+        assert!(pol.propuestas.is_empty());
+        // Route no lee `propuestas_forma`: elige lo mismo con esta política que con la vacía.
+        let pedido = crate::tipos::Pedido {
+            rol: Rol::Construye,
+            tipo: "memora".into(),
+            checkeable: false,
+            tokens_estimados: 1000,
+        };
+        let uso = crate::tipos::Uso {
+            cupo_bloque_usd: 0.0,
+            cupo_bloque_inicio: None,
+            api_mes_usd: 0.0,
+            nube_mes_usd: 0.0,
+        };
+        let cfg = Config::default();
+        let con =
+            crate::route::elegir(&pedido, &pol, &uso, &cfg, 1_792_065_600.0, 0).expect("elige");
+        let sin = crate::route::elegir(
+            &pedido,
+            &Politica::default(),
+            &uso,
+            &cfg,
+            1_792_065_600.0,
+            0,
+        )
+        .expect("elige");
+        assert_eq!(con, sin);
+    }
+
+    #[test]
+    fn forma_con_dos_filas_por_forma_no_da_propuesta() {
+        let pol = recalcular(&formas_a_y_b(2, 2), &[], &umbral_bajo());
+        assert!(pol.propuestas_forma.is_empty());
+    }
+
+    #[test]
+    fn forma_filas_invalidas_no_cuentan() {
+        let mut filas = formas_a_y_b(5, 5);
+        for f in filas.iter_mut().filter(|f| f.forma == forma_b()).take(3) {
+            f.resumen.invalida = true;
+        }
+        let pol = recalcular(&filas, &[], &umbral_bajo());
+        assert!(pol.propuestas_forma.is_empty());
+    }
+
+    #[test]
+    fn forma_politica_vieja_sin_propuestas_forma_se_lee() {
+        let dir = TempDir::new().expect("temp dir");
+        fs::write(
+            dir.path().join(NOMBRE_POLITICA),
+            r#"{"v":1,"estadisticas":{},"propuestas":[]}"#,
+        )
+        .expect("escribe");
+        let pol = leer_politica(dir.path()).expect("lee");
+        assert!(pol.propuestas_forma.is_empty());
     }
 }

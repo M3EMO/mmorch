@@ -363,6 +363,16 @@ pub struct Resumen {
     pub invalida: bool,
 }
 
+/// Forma de una corrida (decisión 28): roles en orden, si hubo verificador y la configuración.
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+pub struct Forma {
+    pub roles: Vec<Rol>,
+    pub verificador: bool,
+    pub config: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Fila {
     #[serde(deserialize_with = "version_valida")]
@@ -377,6 +387,9 @@ pub struct Fila {
     /// Modelo que cumplió cada rol en la corrida.
     #[serde(default)]
     pub modelos: BTreeMap<Rol, String>,
+    /// Forma de la corrida. Las filas anteriores a la decisión 28 la leen vacía.
+    #[serde(default)]
+    pub forma: Forma,
 }
 
 impl Default for Fila {
@@ -391,6 +404,7 @@ impl Default for Fila {
             veredicto: Veredicto::default(),
             resumen: Resumen::default(),
             modelos: BTreeMap::new(),
+            forma: Forma::default(),
         }
     }
 }
@@ -513,6 +527,7 @@ mod tests {
             veredicto: veredicto(),
             resumen: resumen(),
             modelos: BTreeMap::new(),
+            forma: Forma::default(),
         }
     }
 

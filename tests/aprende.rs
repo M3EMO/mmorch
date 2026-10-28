@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use root::aprende::NOMBRE_POLITICA;
-use root::tipos::{Estado, Evento, Fila, Rol, TipoEvento, Via};
+use root::tipos::{Estado, Evento, Fila, Forma, Rol, TipoEvento, Via};
 use root::{observe, track};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -266,7 +266,8 @@ fn aprende_texto_imprime_la_propuesta() {
         texto.contains("organiza:memora: sonnet -> haiku"),
         "{texto}"
     );
-    assert!(!texto.contains("sin propuestas"), "{texto}");
+    // La sección de formas también dice «sin propuestas» cuando no hay: se acota a la de modelos.
+    assert!(!texto.contains("propuestas: sin propuestas"), "{texto}");
     assert_eq!(gates_propuesta(home.path()).len(), 1);
 }
 
@@ -328,4 +329,88 @@ fn aprende_esquema_propuesta_sale_con_0() {
     let salida = root_con_home(home.path(), &["esquema", "propuesta"]);
     assert_eq!(codigo(&salida), 0);
     assert!(json_de(&salida)["properties"]["evidencia"].is_object());
+}
+
+/// Fila de construye en "memora" con `forma`, `ts` y `usd` de cupo. Éxito verde.
+fn fila_con_forma(forma: &Forma, id: &str, ts: f64, usd: f64) -> Fila {
+    let mut f = fila_construye(id, "haiku", usd);
+    f.ts = ts;
+    f.forma = forma.clone();
+    f
+}
+
+/// Caso 2 de la Tarea 15d: cinco filas de la forma A (2 USD, las más recientes) y cinco de la B (1 USD).
+fn sembrar_formas(home: &Path) {
+    let ruta = home.join("runs.jsonl");
+    let a = Forma {
+        roles: vec![Rol::Planifica, Rol::Organiza, Rol::Construye, Rol::Verifica],
+        verificador: true,
+        config: "ecc".into(),
+    };
+    let b = Forma {
+        roles: vec![Rol::Planifica, Rol::Organiza, Rol::Construye],
+        verificador: false,
+        config: "ecc".into(),
+    };
+    for i in 0..5 {
+        track::agregar_en(
+            &ruta,
+            &fila_con_forma(&b, &format!("b{i}"), 1.0 + f64::from(i), 1.0),
+        )
+        .expect("siembra una fila");
+        track::agregar_en(
+            &ruta,
+            &fila_con_forma(&a, &format!("a{i}"), 6.0 + f64::from(i), 2.0),
+        )
+        .expect("siembra una fila");
+    }
+}
+
+/// Gates con `fase == "propuesta-forma"` en `eventos.jsonl` de `home`.
+fn gates_propuesta_forma(home: &Path) -> Vec<Evento> {
+    root::aprende::leer_eventos(&home.join("eventos.jsonl"))
+        .expect("lee eventos")
+        .into_iter()
+        .filter(|ev| ev.tipo == TipoEvento::Gate && ev.fase == "propuesta-forma")
+        .collect()
+}
+
+#[test]
+fn aprende_imprime_y_registra_propuesta_de_forma() {
+    let home = TempDir::new().expect("temp dir");
+    sembrar_formas(home.path());
+    fs::write(home.path().join("root.toml"), "umbral_wilson = 0.4\n").expect("escribe root.toml");
+    let salida = root_con_home(home.path(), &["aprende"]);
+    assert_eq!(
+        codigo(&salida),
+        0,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let texto = String::from_utf8_lossy(&salida.stdout);
+    assert!(texto.contains("propuestas de forma:"), "{texto}");
+    assert!(
+        !texto.contains("propuestas de forma: sin propuestas"),
+        "{texto}"
+    );
+    let gates = gates_propuesta_forma(home.path());
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].corrida, "aprende");
+    assert_eq!(gates[0].extra["tarea"], "memora");
+
+    let salida = root_con_home(home.path(), &["aprende", "--json"]);
+    assert_eq!(
+        codigo(&salida),
+        0,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let json = json_de(&salida);
+    assert_eq!(
+        json["propuestas_forma"]
+            .as_array()
+            .expect("hay propuestas_forma")
+            .len(),
+        1
+    );
 }
