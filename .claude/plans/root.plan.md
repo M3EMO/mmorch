@@ -695,7 +695,8 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
   - **Antes de cada llamada**: `r00t llama` estima el peor costo con `max_tokens` y los precios de `root.toml`. Si ese costo pasa el resto del tope, rechaza la llamada antes de enviarla. Así ninguna llamada supera el tope a mitad de camino. El módulo `proveedores` de la Tarea 8 no cambia: el chequeo vive en `r00t llama`.
   - **Límite**: el cupo se mide en USD equivalentes de lista (`costUSD` de `claude -p`), no en el porcentaje real del plan. Con ese porcentaje, el tope de 35 USD equivalentes puede no coincidir con el corte real de Anthropic.
   - **Nube (decisión 15)**: el tope de 250 USD cubre las sesiones de Claude en la nube. La Tarea 14 suma la variante `Via::Nube` al final del enum; el cambio solo agrega. Una sesión en la nube se registra con `r00t observa claude --via nube`, y `observe::uso` la suma al mes calendario.
-    - En el hito 1, Root no lanza sesiones en la nube, así que Route nunca elige `Via::Nube`. El tope solo se informa en `r00t observa uso`, y al llegar al 100% se registra un evento `Gate`.
+    - En el hito 1, Root no lanza sesiones en la nube, así que Route nunca elige `Via::Nube`. El tope de nube no prohíbe ninguna vía: solo se informa en `r00t observa uso`, y al llegar al 100% se registra un evento `Gate`.
+    - La sesión en la nube sí cambia la elección de Route por otro camino: suma al bloque de cupo (P9), y el cupo del bloque activa las reglas 2 y 3.
     - Root solo cuenta las sesiones en la nube que alguien registra. Una sesión que nadie registra no suma, y `r00t observa uso` lo advierte en su salida.
     - Una sesión en la nube suma también al bloque de cupo (P9, decisión del usuario).
   Hay dos fuentes de datos para las estadísticas:
@@ -708,7 +709,8 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
   - Cupo en 35 USD y API en 40 USD dan API.
   - Cupo en 35 USD y API en 100 USD dan `SinPresupuesto`, con la hora de fin del bloque.
   - Una sesión en la nube de 10 USD suma 10 al mes de nube y 10 al bloque de cupo (P9).
-  - Nube en 250 USD registra un evento `Gate` y no cambia la elección de Route.
+  - Nube en 250 USD con el cupo del bloque en 0 registra un evento `Gate` y no cambia la elección de Route.
+  - Una sesión en la nube de 32 USD en el bloque vigente lleva el cupo sobre el 90% y da API (P9).
   - Un evento de cupo de hace 6 horas no cuenta para el bloque vigente.
   - Un gasto de API del mes anterior no cuenta.
   - Una llamada estimada en 3 USD con 2 USD de margen se rechaza sin enviarse.
@@ -834,7 +836,7 @@ Respuestas a las preguntas de Sonnet al cerrar las Tareas 1 a 5. Los cambios de 
 2. **`Fila` sin rol.** Sí: `Fila.modelos: BTreeMap<Rol, String>` entra en la Tarea 5b. Una `Fila` mide una corrida entera con varios roles, así que el mapa guarda qué modelo cumplió cada rol. Los roles por llamada (`Delega`, `Verifica`, `Juzga`) usan eventos, no filas (Tarea 14).
 3. **Defaults de `root.toml`.**
    - `umbral_verde = 0.8`: se confirma.
-   - `umbral_wilson = 0.5`: se confirma. Con la cota inferior de Wilson al 90%, 3 éxitos de 3 dan ~0,54. Un modelo entra después de 3 corridas buenas y sale ante una mala racha.
+   - `umbral_wilson = 0.5`: corregido a 0,6 en "Desempates técnicos 5". La cuenta de este punto usaba z = 1,645, y Track usa la cota unilateral al 90% (z = 1,2816).
    - `prefiere_api_sobre = 0.9`: se confirma, como fracción del tope.
    - `tope_cupo_usd = 200`: lo reemplazan los tres topes de la decisión 15 (Tarea 14).
 4. **Rotación.** Sí: `resumir` y `filas` leen los archivos `.N` en orden y después el vigente. Una corrida que cruza una rotación debe contar entera (Tarea 5c).
@@ -911,6 +913,7 @@ Gates humanos que frenan el resto:
 - **P15, Colab.** No frena nada. Sin aprobación, los tests de entorno quedan `Pendiente`.
 - **P16, herramientas en la imagen.** Frena la calibración (Tarea 12) de seguridad, estructura, pruebas y entrega. No frena 14, 15, 17 ni 18.
 - **P17, construir el Dockerfile.** Frena la parte dinámica de la 9d. No frena nada más.
+- **P18, aprender en los roles fijos.** No frena 17, 18 ni 19. Si la respuesta es b) o c), agrega una tarea chica sobre Route o Aprende.
 
 Las Tareas 12, 12b, 13, 13b, 16 y 19 van después de G1 y G2. Opus redacta G1 y G2 en otra sesión, mientras Sonnet construye la lista de arriba.
 
@@ -959,6 +962,33 @@ Respuestas a las preguntas 3 a 6 de Sonnet y a sus notas. Los cambios de código
   - Una elección de juez sin razonamiento da `ErrorOraculo::Eleccion` y sale con código 2.
   - La sonda de arquitectura sobre un fixture con un ciclo hace que el juez tope `diseno.modularidad` en 1.
 
+**Avance (2026-10-27):** Sonnet cerró 10b, 14 y 15, con 694 tests verdes (commit 77cc4e7). Hay tres límites conocidos:
+- Nada escribe todavía `extra.rol`, `extra.tipo` ni `extra.exito`. `recalcular` los lee, pero solo con datos sintéticos. Los escriben los llamadores de Verifica y Juzga en las Tareas 13 y 16.
+- No hay filas reales para Planifica, Organiza y Construye. Las produce la Tarea 16.
+- Los tests de CLI de la 15 y el test de integración de 9b con 9d no se vieron en rojo antes de implementar. La Tarea 15b lo corrige.
+
+## Desempates técnicos 5 (Opus, 2026-10-27, después de la Tarea 15)
+
+Respuestas a las preguntas 1, 3, 4 y 5 de Sonnet y a sus notas. La pregunta 2 es una decisión de producto: va al usuario como P18. Los cambios de código van en la Tarea 15b.
+
+1. **Nube y Route.** Valen las dos cosas, y el texto de la Tarea 14 ya está corregido. El tope de nube no prohíbe ninguna vía: solo registra un `Gate`. La sesión en la nube suma al bloque de cupo (P9, decisión del usuario), y por eso sí puede cambiar la elección de Route.
+3. **Tope exigido.** Se acepta. Si existe `[balance.cupo]`, `[balance.api]` o `[balance.nube]`, la tabla exige `tope_usd`, y sin ese campo la carga falla con código 2. Si la tabla no existe, rigen los topes de la decisión 15. Esos valores los fijó el usuario, así que no son un default peligroso.
+4. **Permisos de `politica.json`.** Se queda con 0600. Graft, REA y el servidor MCP corren como el mismo usuario y la pueden leer. Multi-usuario está fuera de alcance en el GOAL, y 0644 la expone a otras cuentas sin necesidad.
+5. **`key` como segmento.** Se corrige el desempate 5 de "Desempates técnicos 4". `key` solo cuenta si el segmento anterior es `api`, `secret`, `private`, `access`, `auth`, `signing` o `encryption`. Así `primary_key`, `foreign_key` y `sort_key` no cuentan. `password`, `passwd`, `secret`, `token` y `apikey` siguen contando solos. El caso viene de una revisión, no de los datos de la calibración.
+6. **Modelo sin precio.** Se acepta que `llama` falle cerrado: un tope no se esquiva por omisión. La Tarea 19 agrega `docs/root.toml.example` con la forma de `[precios]` y los valores vacíos. El humano escribe los precios desde la página de cada proveedor. Ningún agente inventa un precio.
+7. **Cupo sin `api_equivalente`.** El cupo lleno con API libre no debe dar `SinPresupuesto` por un dato faltante. La carga de `root.toml` exige `api_equivalente` en cada alias de cupo. Sin ese campo, la carga falla con código 2 y nombra el alias. Así el error aparece al cargar, no cuando el cupo se llena.
+8. **`llama` con log ilegible.** Se acepta que falle cerrado: sin `eventos.jsonl`, Root no conoce el uso y no puede respetar los topes. El test con el `.lock` como directorio alcanza.
+9. **Cota de Wilson.** Track usa la cota unilateral al 90% (z = 1,2816) desde la Tarea 5, y sus tests usan valores tabulados con esa z. Con esa cota, 2 de 2 dan 0,549, 3 de 3 dan 0,646 y 10 de 10 dan 0,859. Con `umbral_wilson = 0.5`, un modelo entraría con 2 corridas buenas, no con 3. El default sube a 0,6: 2 de 2 no alcanzan, 3 de 3 sí, y 3 de 4 dan 0,43 y salen.
+
+### Tarea 15b: Ajustes a las Tareas 10b, 14 y 15
+- **Action**: los desempates 3, 5, 7 y 9 de arriba. Además, Sonnet demuestra el rojo de los tests escritos después de implementar: revierte a mano la línea que cada test cubre, ve el test en rojo, restaura la línea y anota el resultado en el mensaje del commit.
+- **Validate**: `cargo test`:
+  - `[balance.api]` sin `tope_usd` falla con código 2.
+  - Un alias de cupo sin `api_equivalente` falla al cargar con código 2 y nombra el alias.
+  - `primary_key = "x"` da 0 hallazgos. `secret_key = "abc123"` da 1. `token = "abc123"` da 1.
+  - Con `umbral_wilson` por defecto, 2 de 2 no entran a la política y 3 de 3 sí.
+  - El test de la nube de la Tarea 14 con 32 USD en el bloque da API.
+
 **Preguntas abiertas (sin responder)**
 - **P12b.** Respondiste "P12 si" a una pregunta con dos opciones. ¿Cuál elegís?
   - a) La descarga acepta solo crates.io y PyPI. Hoy rige esta.
@@ -981,4 +1011,10 @@ Respuestas a las preguntas 3 a 6 de Sonnet y a sus notas. Los cambios de código
   - c) Bajar con red solo la imagen base (`FROM`), sin correr nada, y construir con `--network none`. Un `RUN` que necesita red falla, y la construcción queda `Pendiente` con su motivo: no se cobra al producto. Costo: la red baja imágenes de un registro, igual que en la fase de descarga. Límite: un Dockerfile que instala paquetes con `apt-get` queda `Pendiente`.
   
   Mi recomendación es c): prueba la construcción sin correr código ajeno con red.
+- **P18. Lo que aprende Root y los roles fijos.** Hoy Route respeta `root.toml` para Planifica, Organiza y Construye (Opus, Sonnet, Haiku, tu decisión). Por eso la política que calcula Aprende no cambia esos tres roles. Sí cambia Delega, Verifica y Juzga. El GOAL dice que lo que Root registra cambia la próxima elección, y también que nada se auto-aplica sin validación. ¿Qué elegís?
+  - a) Los tres roles quedan fijos en `root.toml`. Aprende solo informa qué modelo rendiría mejor. Costo: Root no aprende en esos roles.
+  - b) Route usa la política aprendida en esos roles cuando hay datos suficientes (cota de Wilson ≥ 0,6 y al menos 3 filas por modelo). Riesgo: un cambio de builder entra sin que lo mires.
+  - c) Aprende propone el cambio en `r00t aprende`, con su evidencia. Vos lo aplicás a mano en `root.toml`. Costo: un gate humano por cada cambio.
+  
+  Hoy rige a). Mi recomendación es c): Root aprende y tu decisión sobre los roles no cambia sin tu aprobación.
 
