@@ -1,5 +1,6 @@
 //! Oracle: corre los tests en un contenedor sin red y cuenta el resultado desde junit.
 
+pub mod colab;
 pub mod configs;
 pub mod contenedor;
 pub mod descarga;
@@ -66,6 +67,9 @@ pub enum ErrorOraculo {
     /// El spec de la tarea no tiene una ficha válida. Sin ficha no se evalúa.
     #[error(transparent)]
     Ficha(#[from] ErrorFicha),
+    /// Colab: sin sesión de la CLI, GPU que no es T4 o un runtime que falló. Sale con código 3.
+    #[error("{0}")]
+    Colab(String),
 }
 
 impl ErrorOraculo {

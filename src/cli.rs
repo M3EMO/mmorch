@@ -172,8 +172,11 @@ pub enum OraculoAccion {
         #[arg(long)]
         repo: PathBuf,
         /// Junit que dejó `correr.sh`. Sin este flag se arma el paquete.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "colab")]
         importar: Option<PathBuf>,
+        /// Corre el paquete en un runtime T4 de Colab, importa el junit y libera el runtime.
+        #[arg(long, conflicts_with = "importar")]
+        colab: bool,
     },
     /// Calibra una dimensión del Oracle.
     Calibrar {

@@ -90,12 +90,52 @@ fn oraculo_evaluar(json: bool, nombre: &str, repo: &Path) -> Result<u8, Error> {
     Ok(oracle::codigo_de_estado(veredicto.estado))
 }
 
+/// `oraculo pendientes --colab`: corre el paquete en Colab, importa el junit y reporta.
+/// Sin tests pendientes no toca Colab.
+fn oraculo_colab(
+    json: bool,
+    tarea: &Tarea,
+    home: &Path,
+    paquete: Option<oracle::pendientes::Paquete>,
+) -> Result<(), Error> {
+    let Some(paquete) = paquete else {
+        if json {
+            println!("{}", serde_json::json!({"dir": null, "tests": []}));
+        } else {
+            println!("tests: []");
+        }
+        return Ok(());
+    };
+    let cli = oracle::colab::ColabProceso::desde_entorno()?;
+    let sesion = oracle::colab::nombre_sesion(&tarea.nombre);
+    let resultado = oracle::colab::correr_en_colab(&cli, &paquete.dir, tarea, home, &sesion)?;
+    let resumen = oracle::pendientes::importar(home, tarea, &resultado.junit)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "importados": resumen.importados,
+                "ignorados": resumen.ignorados,
+                "gpu": resultado.gpu,
+                "sesion": resultado.sesion,
+            })
+        );
+    } else {
+        println!(
+            "gpu: {}, sesion: {}, importados: {}, ignorados: {}",
+            resultado.gpu, resultado.sesion, resumen.importados, resumen.ignorados
+        );
+    }
+    Ok(())
+}
+
 /// `oraculo pendientes`: arma el paquete de los tests pendientes, o importa el junit de Colab.
 fn oraculo_pendientes(
     json: bool,
     nombre: &str,
     repo: &Path,
     importar: Option<&Path>,
+    colab: bool,
 ) -> Result<(), Error> {
     let tarea = Tarea::cargar(nombre)?;
     let home = config::root_home();
@@ -114,7 +154,11 @@ fn oraculo_pendientes(
         }
         return Ok(());
     }
-    match oracle::pendientes::crear(&home, &tarea, repo)? {
+    let paquete = oracle::pendientes::crear(&home, &tarea, repo)?;
+    if colab {
+        return oraculo_colab(json, &tarea, &home, paquete);
+    }
+    match paquete {
         None if json => println!("{}", serde_json::json!({"dir": null, "tests": []})),
         None => println!("tests: []"),
         Some(paquete) => {
@@ -248,8 +292,9 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
                     tarea,
                     repo,
                     importar,
+                    colab,
                 },
-        } => oraculo_pendientes(cli.json, tarea, repo, importar.as_deref()),
+        } => oraculo_pendientes(cli.json, tarea, repo, importar.as_deref(), *colab),
         Comando::Observa { accion } => observa(cli.json, accion),
         Comando::Track { accion } => track_accion(cli.json, accion),
         Comando::Aprende { replay } => aprende_accion(cli.json, *replay),
