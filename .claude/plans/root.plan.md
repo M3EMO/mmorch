@@ -50,6 +50,12 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 24 | P17: "c+b". La parte c) se aplica: Root baja la imagen base con red y construye con `--network none` (Tarea 9d2). La parte b) espera la aclaración P17b. |
 | 25 | P18: "c pero que tambien evolucione a esquemas o arquitecturas de agentes". La parte c) se aplica: Aprende propone y el usuario aplica en `root.toml` (Tarea 15c). La segunda parte espera la aclaración P18b. |
 | 26 | P19 y P20: "si". La SPEC de memora exige orden FIFO entre clientes bloqueados en `BLPOP`. "En el espacio local" de brasa significa los ejes locales del nodo. Las dos respuestas van a las fichas (G1). |
+| 27 | P17b: "a". Si la construcción sin red queda `Pendiente`, Root la repite con red en forma automática. Es la autorización del usuario para correr con red los `RUN` del builder. Ver Tarea 9d3. |
+| 28 | P18b: "a y b". Hito 1: cada `Fila` guarda la forma de la corrida, y Aprende propone cambios de forma que el usuario aplica a mano. Hito 4 (CAB): generar y medir arquitecturas de agentes nuevas. Ver Tarea 15d. |
+| 29 | P21: "b". Root lee la credencial de un registro desde una variable de entorno nombrada en `root.toml`. La pasa solo al contenedor de descarga y nunca la escribe en un log. Es la autorización del usuario para esas claves. Ver Tarea 6d. |
+| 30 | P34: "C pero con un juez (sonnet) para delimitar necesidades." La descarga respeta el `.cargo/config.toml` del repo, y un juez Sonnet evalúa qué entradas necesita el proyecto. El papel exacto del juez espera a P38. Ver Tarea 6d. |
+| 31 | P35: "b con c de respaldo". Colab instala Rust con `rustup-init` verificado por su `.sha256`. Si esa instalación falla, Root compila brasa en la máquina del usuario y lleva el binario. Ver Tarea 7k. |
+| 32 | P36: "a". El "Outcome" del hito 1 en el PRD vuelve a su texto original. |
 
 ## Patterns to Mirror
 
@@ -997,7 +1003,9 @@ Gates humanos que frenan el resto:
 - **P16, herramientas en la imagen.** Respondida (decisión 23). Tarea 7g.
 - **P17, construir el Dockerfile.** La parte c) está aplicada (Tarea 9d2). La parte b) espera a P17b.
 - **P18, aprender en los roles fijos.** La parte c) está aplicada (Tarea 15c). La segunda parte espera a P18b.
-- **P21, credenciales de registros.** Frena solo los registros que piden credenciales (Tarea 6c).
+- **P21, credenciales de registros.** Respondida (decisión 29). Tarea 6d.
+- **P38, papel del juez de la config de cargo.** No frena la 6d: el juez informa hasta la respuesta.
+- **P39, memora como banco.** Frena G1, G3 y las Tareas 12, 12b, 13, 13b y 16 si la respuesta saca a memora o a brasa. No frena 6e, 6d, 9d3, 15d ni 7k.
 
 **Respuestas para las fichas (G1, decisión 26).** Opus las escribe en `## Ficha` al redactar G1:
 - **memora**: el requisito de `BLPOP` exige orden FIFO entre clientes bloqueados. Su aceptación cita `test_blpop_fifo_entre_clientes`. Ese test es correcto, y su falla de 9 en 30 corridas es un defecto del producto con origen "producto".
@@ -1172,6 +1180,100 @@ Respuestas a las preguntas de Sonnet al cerrar la 7i. Los cambios de código van
   - Un 401 explícito del registro da la causa "pide credenciales".
   - El test del plazo de Colab termina en menos de 5 segundos.
 
+**Avance (2026-10-28):** Sonnet cerró la 7j (583a66a) y la 6c-B (573b2c4), con 1022 tests verdes y 1 ignorado. La 6c-B hizo que la descarga ignore el `.cargo/config.toml` del repo (P34 a). La decisión 30 cambia esa regla: la Tarea 6d la reemplaza.
+
+## Desempates técnicos 8 (Opus, 2026-10-28, después de la 6c-B)
+
+Respuestas a las siete preguntas de Sonnet de la build-12 y diseño de las decisiones 27 a 31. Los cambios de código van en las Tareas 6e, 6d, 9d3, 15d y 7k.
+
+**Preguntas de Sonnet**
+1. **Herramientas de build de Python.** Se bajan en la descarga, no en la imagen. Son dependencias del proyecto, y la regla vigente prohíbe precargar dependencias en la imagen. Para cada sdist o fuente git, Root lee `[build-system].requires` de su `pyproject.toml` sin ejecutar nada, y baja esos wheels. Sin `pyproject.toml`, baja `setuptools` y `wheel`, que es el respaldo de PEP 517. La evaluación instala sin red desde `/cache/python`. `pip` ya está en la imagen.
+2. **Nombres de Dockerfile.** Sí: una sola función reconoce `Dockerfile`, `Containerfile`, `*.Dockerfile` y `*.Containerfile`. La usan la elección de Dockerfile y las sondas de `configs.rs`.
+3. **`unauthorized` sin más.** No va a infraestructura. Infraestructura es red caída, timeout o error de podman. Un `unauthorized` sin "authentication required" da la causa ambigua del desempate 1 de "Desempates técnicos 6": "imagen base inaccesible". Las dos causas dan `SinVeredicto`, así que la diferencia solo afecta el texto del informe. Con una credencial configurada (decisión 29), un rechazo da la causa "credencial rechazada".
+4. **Salida de `colab stop`.** Hasta verificarla en la corrida real, una salida que Root no reconoce cuenta como "liberación no confirmada". Root conserva `activo.json` y reintenta la liberación en la próxima corrida. Ante la duda, Root supone que el runtime sigue encendido, porque un runtime encendido gasta.
+5. **Tope de Colab en un test.** No se agrega una variable de entorno. `[colab].minutos_max` pasa a `f64`, y el test usa `0.01` (0,6 segundos). Una variable que acorta topes en producción es un riesgo sin necesidad.
+6. **Cero mutantes.** Confirmado por el desempate 3 de "Desempates técnicos 7". La dimensión Pruebas queda `SinVeredicto` con la causa "sin mutantes para medir", y `Informe.confianza` lo lista.
+7. **Credencial sin separador en la ruta.** Confirmado por el desempate 2 de "Desempates técnicos 7": lo cubre gitleaks.
+
+**Diseño del juez de configuración de cargo (decisión 30)**
+- **Qué decide la configuración.** La descarga respeta el `.cargo/config.toml` del repo, como pidió el usuario con la opción c).
+- **Qué hace el oráculo, sin LLM.** Todo lo checkeable va a reglas deterministas, por el invariante del GOAL:
+  - Root lee cada `.cargo/config.toml` que `cargo` descubriría desde el repo.
+  - Clasifica cada entrada: `[registries]`, `[source]`, `[http]`, `[net]`, `[env]`, `[build]`, `[target]` y `[alias]`.
+  - Suma al inventario cada entrada que toca la red: registros, fuentes, proxy y `git-fetch-with-cli`. El `Gate` del inventario las lista antes de usar la red.
+  - Un proxy o un registro con credenciales escritas en el repo es un secreto: da un hallazgo de seguridad de severidad 3. Root no lo bloquea, porque rige la opción c).
+- **Qué decide el juez.** Para cada entrada, el juez dice si el proyecto la necesita: `necesaria`, `innecesaria` o `riesgosa`. Cada respuesta cita la entrada y el motivo, por ejemplo un crate de `Cargo.toml` que vive en ese registro. Esto no es checkeable: pide entender para qué existe cada entrada.
+- **Qué ve el juez.** Las entradas del config, `Cargo.toml`, el inventario y la ficha del spec. No ve el código del proyecto ni los tests ocultos.
+- **Cómo falla.** El juez corre con `r00t route --rol juzga`, con razonamiento prendido, y su modelo es Sonnet (decisión 30). El gate de evidencia descarta una respuesta sin cita. Un JSON roto o un error del proveedor da `SinVeredicto` en ese juicio, y la descarga sigue según la opción c).
+- **Qué produce.** Cada `innecesaria` o `riesgosa` da un hallazgo de entrega con su cita. Esos hallazgos entran al informe.
+- **Qué queda fuera del juez.** El juez no abre ni cierra la red, y no decide qué entradas usa `cargo`. Un LLM que decide sobre proxies o credenciales actúa en la zona roja sin gate humano, y eso choca con el GOAL. Si el usuario quiere que el juez filtre la red, P38 lo decide.
+
+**Credenciales de registros (decisión 29)**
+- `root.toml` suma `[[registro]]` con `nombre`, `url` y `credencial_env`. Solo el humano escribe esa lista.
+- Root pasa la credencial solo si el host del registro coincide exacto con una `url` de la lista. Un repo no puede pedir la credencial para otro host: así no la saca hacia un servidor ajeno.
+- La credencial entra al contenedor de descarga como variable de entorno: `CARGO_REGISTRIES_<NOMBRE>_TOKEN` para cargo, y un archivo `netrc` temporal para pip. Root nunca la pasa al contenedor de evaluación ni a la construcción con red de la 9d3.
+- Las imágenes base privadas usan el mismo mecanismo con `podman pull --authfile`, desde un archivo temporal que Root borra al terminar.
+- La credencial no aparece en `eventos.jsonl`, en un `Gate`, en stderr ni en un error.
+
+**Construcción con red como respaldo (decisión 27)**
+- Root intenta primero sin red (Tarea 9d2). Solo si la construcción queda `Pendiente` por falta de red, la repite con red.
+- La repetición registra un `Gate` antes de empezar, con las líneas `RUN` que necesitan red.
+- El contexto de la construcción es la copia del repo. No monta `ROOT_HOME` ni `/oraculo`, y no recibe credenciales.
+- Usa la red de usuario de podman sin acceso al host (`allow_host_loopback=false`), con el mismo timeout de la evaluación.
+- Si construye, la construcción queda verde y deja un hallazgo de entrega de severidad 1: "la imagen necesita red para construirse". Si falla, el hallazgo es "la imagen no construye", sin cambios.
+
+**Hito 1 y hito 4 en P18b (decisión 28)**
+- **Hito 1 (b, datos):** `Fila` suma, solo agregando, `forma: Forma` con `#[serde(default)]`. `Forma` lista los roles de la corrida en orden, si hubo verificador y la configuración. La Tarea 16 la llena. Hasta entonces, solo hay filas sintéticas.
+- **Hito 1 (a, propuestas):** Aprende agrupa las filas por `forma` y propone un cambio de forma con la misma regla de la Tarea 15c: cota de Wilson ≥ `umbral_wilson` y al menos 3 filas por forma. Route no lee esas propuestas. El usuario las aplica a mano.
+- **Hito 4 (CAB):** generar formas y arquitecturas de agentes nuevas, construirlas y medirlas con `r00t corre`. CAB lee las `Fila` con su `forma` y las propuestas de Aprende. Nada de eso entra al hito 1.
+
+### Tarea 6e: Ajustes a las Tareas 7j y 6c-B
+- **Action**: los desempates 1 a 5 de arriba.
+- **Validate**: `cargo test`:
+  - Un sdist cuyo `pyproject.toml` pide `setuptools>=68` baja ese wheel, y la evaluación lo instala sin red.
+  - `docker/app.Dockerfile` cuenta para la elección de Dockerfile y para las sondas de `configs.rs`.
+  - Un `unauthorized` sin "authentication required" da la causa "imagen base inaccesible", no infraestructura.
+  - Una salida desconocida de `colab stop` conserva `activo.json`.
+  - El tope de Colab con `minutos_max = 0.01` libera el runtime en menos de 5 segundos.
+
+### Tarea 6d: Credenciales de registros y config de cargo con juez (decisiones 29 y 30)
+- **Action**: el diseño de "Credenciales de registros" y del "juez de configuración de cargo". La descarga vuelve a respetar el `.cargo/config.toml` del repo.
+- **Validate**: `cargo test --test descarga`:
+  - Un registro de `root.toml` con su credencial en una variable de entorno se baja, y el valor no aparece en `eventos.jsonl`, en stderr ni en los `Gate`.
+  - Un repo que apunta un registro a otro host no recibe la credencial.
+  - Un `.cargo/config.toml` con `[http] proxy` suma el proxy al inventario, y su `Gate` sale antes de la red.
+  - Un proxy con usuario y clave en el config da un hallazgo de seguridad de severidad 3.
+  - Con un juez falso que dice `innecesaria`, la descarga igual usa la entrada y el informe tiene el hallazgo de entrega.
+  - Con un juez falso que devuelve JSON roto, ese juicio queda `SinVeredicto` y la descarga sigue.
+
+### Tarea 9d3: Construcción con red como respaldo (decisión 27)
+- **Action**: el diseño de "Construcción con red como respaldo".
+- **Validate**: `cargo test --test entrega`:
+  - Un Dockerfile con `RUN apt-get install` queda `Pendiente` sin red, se repite con red y deja el hallazgo de severidad 1.
+  - Un Dockerfile que construye sin red no se repite con red.
+  - La construcción con red no recibe credenciales ni monta `ROOT_HOME`.
+  - El `Gate` previo lista las líneas `RUN` que necesitaron red.
+
+### Tarea 15d: Forma de la corrida y propuestas de forma (decisión 28, hito 1)
+- **Action**: el diseño de "Hito 1 y hito 4 en P18b", solo la parte del hito 1.
+- **Validate**: `cargo test aprende`:
+  - Una `Fila` vieja sin `forma` se sigue leyendo.
+  - Con filas sintéticas donde una forma sin verificador acierta igual y cuesta menos, hay una propuesta de forma y Route no cambia.
+  - Con 2 filas por forma no hay propuesta.
+
+### Tarea 7k: Rust en Colab (decisión 31)
+- **Action**: la preparación del runtime baja `rustup-init` para x86_64 desde `static.rust-lang.org`, verifica su `.sha256` y recién después lo corre. Si la descarga, el hash o la instalación fallan, Root compila brasa con la imagen de la tarea (hoy `root-oraculo-rust:2`) en la máquina del usuario y sube el binario. Si el binario no corre en Colab, el test queda `Pendiente` con la causa. Root registra un `Gate` con el camino que usó.
+- **Validate**: `cargo test oracle` con una CLI `colab` falsa:
+  - Un `.sha256` que no coincide no corre `rustup-init` y pasa al binario compilado.
+  - Un hash correcto corre `rustup-init` y no compila en la máquina local.
+  - Ningún camino corre `curl ... | sh`.
+- **Corrida real**: espera a G1 y a P37.
+
+**Orden siguiente (2026-10-28, después de la 6c-B):** 6e, 6d, 9d3, 15d y 7k.
+- La 6e va primero: es chica y cierra la instalación sin red de Python.
+- La 6d va antes de la 9d3: la 9d3 debe probar que no recibe credenciales.
+- Después de la 7k, lo que queda espera a G1, a G2 o a P37.
+
 **Preguntas respondidas (2026-10-28)**
 - P12b: b (decisión 21). P15: b (decisión 22). P16: a (decisión 23). P17: c+b (decisión 24, en parte). P18: c, más una segunda parte (decisión 25, en parte). P19 y P20: sí (decisión 26).
 
@@ -1217,6 +1319,22 @@ Respuestas a las preguntas de Sonnet al cerrar la 7i. Los cambios de código van
   - c) Cuenta paga, y cada corrida en Colab pide tu aprobación antes de empezar.
   
   Hasta tu respuesta, no hay corrida real en Colab. Esa corrida ya espera a G1 y a P35.
+
+**Respuestas del 2026-10-28:** P17b "a" (decisión 27), P18b "a y b" (decisión 28), P21 "b" (decisión 29), P34 "C pero con un juez (sonnet)…" (decisión 30), P35 "b con c de respaldo" (decisión 31) y P36 "a" (decisión 32). P37 sigue abierta.
+
+- **P38. Papel del juez de la config de cargo.** Pediste respetar el `.cargo/config.toml` del repo con un juez Sonnet que delimite necesidades. Hoy el juez solo informa: sus hallazgos van al informe, y `cargo` usa todo el config. ¿Qué querés?
+  - a) El juez solo informa. Esta opción rige hoy y respeta el GOAL.
+  - b) El juez decide qué entradas usa `cargo`, sin un humano. Choca con el GOAL: un LLM decidiría sobre proxies y credenciales, que son zona roja, sin gate humano. Para elegir b), tenés que cambiar el GOAL a mano.
+  - c) El juez propone qué entradas sacar, y vos aprobás antes de que la descarga deje de usarlas. Costo: un gate humano por proyecto con entradas dudosas.
+  
+  Mi recomendación es a) para el hito 1, y c) si un caso real lo pide.
+- **P39. memora como banco.** Escribiste: "No se si es rentable usar memora, la idea es armar root, graft, y acoplar ECC y REA". memora y brasa no son productos: son las únicas tareas con tests ocultos y pares ECC contra SDLC ya medidos. Con ellas, Root se mide a sí mismo, como pide el GOAL. Hoy dependen de ellas las Tareas 7, 9c, 12, 12b, 13, 13b y 16. ¿Qué elegís?
+  - a) Conservar memora y brasa como banco del hito 1. Costo: aprobar sus fichas (G1), calificar 6 paquetes a ciegas (G3) y una corrida completa con Haiku en la Tarea 16.
+  - b) Conservar solo brasa. Costo: la mitad de G1 y de G3. Límite: un solo par conocido para la validez, y brasa tiene el test de GPU pendiente.
+  - c) Conservar memora y brasa solo para calibrar (Tareas 12 y 12b), y cambiar la Tarea 16 para que `r00t corre` mida una tarea de Graft. Costo: esa tarea de Graft todavía no tiene oráculo oculto. Hay que escribirlo, o la corrida queda sin veredicto de completitud.
+  - d) Sacar memora y brasa y medir Root sobre Root y Graft. Costo: no hay tests ocultos ni pares con resultado conocido, así que las Tareas 12b y 13 pierden su referencia externa. El GOAL pide que el evaluador se mida, y eso queda sin datos hasta crear un banco nuevo.
+  
+  Mi recomendación es a) o c): el GOAL exige medir al evaluador, y hoy solo memora y brasa dan esa medida.
 
 **Preguntas ya respondidas (texto original)**
 - **P12b.** Respondiste "P12 si" a una pregunta con dos opciones. ¿Cuál elegís?

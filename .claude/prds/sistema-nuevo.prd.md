@@ -73,7 +73,7 @@ Propuesta del mapa (`docs/contexto/mapa.md`):
 
 | # | Milestone | Outcome | Status | Plan |
 |---|---|---|---|---|
-| 1 | Root: reemplaza el banco y el ruteo de mmorch | Route, Oracle (`evaluar`), Observe y Track corren; calibración, informe y `corre` siguen pendientes (Tareas 12, 13b y 16) | in-progress | `.claude/plans/root.plan.md` |
+| 1 | Root: reemplaza el banco y el ruteo de mmorch | Route, Oracle, Observe y Track corren desde el bootstrap del banco | in-progress | `.claude/plans/root.plan.md` |
 | 2 | Graft: reemplaza el SDLC | El SDLC de Graft completa tareas sin intervención humana | pending | — |
 | 3 | REA: se suma al pipeline | Un paso del pipeline usa REA y deja evidencia verificable | pending | — |
 | 4 | CAB: Code Agent Builder | El sistema construye agentes de código desde una especificación | pending | — |
