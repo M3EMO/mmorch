@@ -35,12 +35,13 @@ use crate::config::{Config, ReglasDecision, root_home};
 use crate::ficha::{self, ErrorFicha};
 use crate::proveedores::{Prompt, RespuestaJuez};
 use crate::tipos::{
-    Conteo, Dimension, Estado, EstadoRequisito, Hallazgo, Puntaje, Rol, TasaTest, VERSION,
-    Veredicto,
+    Conteo, Dimension, Estado, EstadoRequisito, Hallazgo, Pendiente, Puntaje, Rol, TasaTest,
+    VERSION, Veredicto,
 };
 use crate::track::stats::wilson_inferior;
 use calibra::Calibraciones;
 use contenedor::{Ejecucion, Resultado};
+use entrega::{FabricaEscenarios, FabricaReal, Podman, PodmanReal, ResultadoEntrega};
 use informe::{Redactor, RedactorMedido, RedactorProveedor};
 use juez::{EntradaJuez, EstadoJuez, JuezProveedor, ModeloJuez, ResultadoJuez};
 use junit::{Junit, ResultadoTest};
@@ -204,6 +205,8 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
         reglas: cfg.decision.clone(),
         redactor: redactor.as_ref().map(|r| r as &dyn Redactor),
         avisos,
+        podman: &PodmanReal,
+        escenarios: &FabricaReal,
     };
     evaluar_con(repo, tarea, o, deps)
 }
@@ -295,6 +298,10 @@ struct Dependencias<'a> {
     redactor: Option<&'a dyn Redactor>,
     /// Avisos que se conocen antes de evaluar, como un juez que no se pudo armar.
     avisos: Vec<String>,
+    /// Podman de la construcción sin red (Tarea 9d2). Producción pasa el real.
+    podman: &'a dyn Podman,
+    /// Arranca los contenedores de escenario de la imagen construida. Producción pasa la real.
+    escenarios: &'a dyn FabricaEscenarios,
 }
 
 /// Lo que la descarga deja listo para las sondas: la copia del repo y las cachés que monta cada contenedor.
@@ -350,7 +357,7 @@ fn evaluar_con(
     let juez_config = deps.juez_config.map(Medido::nuevo);
     let juez_config_ref = juez_config.as_ref().map(|m| m as &dyn ModeloJuez);
     // La descarga va antes de cualquier suite: es la única fase con red (decisión 17).
-    let (preparacion, _, _) =
+    let (preparacion, imagenes, _) =
         descarga::preparar_con_juez(&repo_copia, tarea, &home, o.timeout, juez_config_ref)?;
     let (cache, rustsec, hallazgos) = match preparacion {
         descarga::Preparacion::Lista {
@@ -423,6 +430,18 @@ fn evaluar_con(
         rustsec,
     };
     let ej = (deps.herramientas)(&preparada);
+    // La Entrega sale de `entregar_con`: construcción, sonda y escenarios en una sola pasada (desempate 7).
+    // Un error de infraestructura deja Entrega sin veredicto con su motivo, como un error del ejecutor.
+    let entrega = entrega::entregar_con(
+        ej.as_ref(),
+        &repo_copia,
+        tarea,
+        &home,
+        &imagenes,
+        deps.podman,
+        deps.escenarios,
+    )
+    .unwrap_or_else(|error| entrega::entrega_sin_veredicto(error.to_string()));
     let juez_diseno = deps.juez.map(Medido::nuevo);
     let juez = JuezDiseno {
         modelo: juez_diseno.as_ref().map(|m| m as &dyn ModeloJuez),
@@ -437,6 +456,7 @@ fn evaluar_con(
         &oculto,
         &hallazgos,
         &juez,
+        entrega,
     )?;
     let mut tasas = BTreeMap::new();
     for (id, tasa) in &contrato.tasas {
@@ -448,6 +468,8 @@ fn evaluar_con(
     let mut todos = hallazgos;
     todos.extend(medicion.hallazgos);
     avisos.extend(medicion.avisos);
+    let mut pendientes_del_veredicto = pendientes::desde(tarea, &colab);
+    pendientes_del_veredicto.extend(medicion.pendientes);
     let mut puntajes = medicion.puntajes;
     deps.calibracion.aplicar(&tarea.nombre, &mut puntajes);
     let sin_calibrar = sin_calibrar(&puntajes);
@@ -470,7 +492,7 @@ fn evaluar_con(
         inestables: oculto.inestables.clone(),
         inestables_contrato: contrato.inestables.clone(),
         tasas,
-        pendientes: pendientes::desde(tarea, &colab),
+        pendientes: pendientes_del_veredicto,
         avisos,
         requisitos: medicion.requisitos,
         sin_calibrar,
@@ -545,6 +567,8 @@ struct Medicion {
     hallazgos: Vec<Hallazgo>,
     requisitos: Vec<EstadoRequisito>,
     avisos: Vec<String>,
+    /// Lo que la construcción de la Entrega no pudo medir (Tarea 9d2). Va al `Veredicto`.
+    pendientes: Vec<Pendiente>,
 }
 
 /// El juez de diseño que `medir` usa: el modelo si se armó, su nombre y las rúbricas de la evaluación.
@@ -565,6 +589,7 @@ struct Juicio {
 
 /// Mide las nueve dimensiones con las sondas, los requisitos y el juez de diseño. `descarga` son los
 /// hallazgos de la descarga: los que tocan una dimensión con sondas entran a su puntaje.
+#[allow(clippy::too_many_arguments)]
 fn medir(
     tarea: &Tarea,
     repo: &Path,
@@ -573,9 +598,9 @@ fn medir(
     oculto: &Clasificacion,
     descarga: &[Hallazgo],
     juez: &JuezDiseno,
+    entrega: ResultadoEntrega,
 ) -> Result<Medicion, ErrorOraculo> {
     let resultados = requisitos::desde_clasificacion(oculto);
-    let entrega = entrega::sonda_entrega(ej, repo, tarea);
     let estados = requisitos::evaluar_requisitos(
         &tarea.requisito,
         &resultados,
@@ -631,11 +656,14 @@ fn medir(
             }
         })
         .collect();
+    let mut avisos = avisos;
+    avisos.extend(entrega.avisos);
     Ok(Medicion {
         puntajes,
         hallazgos,
         requisitos: estados,
         avisos,
+        pendientes: entrega.pendientes,
     })
 }
 
@@ -1513,6 +1541,9 @@ pub fn codigo_de_estado(estado: Estado) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oracle::contenedor::SalidaPodman;
+    use crate::oracle::entrega::tests::{PodmanFalso, responde_build, salida_ok, salida_sin_red};
+    use crate::oracle::entrega::{CorredorDeEscenario, FabricaEscenarios, Podman};
 
     #[test]
     fn comando_git_quita_las_variables_que_redirigen_el_repo() {
@@ -2509,7 +2540,8 @@ mod tests {
     }
 
     #[test]
-    fn oraculo_con_sondas_sanas_solo_diseno_queda_sin_veredicto() {
+    fn oraculo_con_sondas_sanas_solo_diseno_y_arquitectura_quedan_sin_veredicto() {
+        // El repo de la prueba tiene un solo `src/lib.rs`: sin módulos, Arquitectura no tiene análisis (Tarea 28).
         let base = tempfile::tempdir().expect("base");
         let v = veredicto_sano(base.path());
         let sin: Vec<Dimension> = v
@@ -2518,7 +2550,12 @@ mod tests {
             .filter(|p| p.sin_veredicto.is_some())
             .map(|p| p.dimension)
             .collect();
-        assert_eq!(sin, vec![Dimension::Diseno], "{:?}", v.puntajes);
+        assert_eq!(
+            sin,
+            vec![Dimension::Arquitectura, Dimension::Diseno],
+            "{:?}",
+            v.puntajes
+        );
         assert_eq!(v.global, None);
     }
 
@@ -2791,6 +2828,8 @@ mod tests {
             reglas: ReglasDecision::default(),
             redactor: None,
             avisos: Vec::new(),
+            podman: &PodmanNoUsado,
+            escenarios: &FabricaSinContenedores,
         }
     }
 
@@ -3346,5 +3385,138 @@ mod tests {
         let con_motivo = juntar_partes(Dimension::Estructura, sondas, sin);
         assert_eq!(con_motivo.sin_veredicto.as_deref(), Some("juez no corrido"));
         assert_eq!(con_motivo.valor, 0.0);
+    }
+
+    // ---- Tarea 28, parte 1: la Entrega del veredicto sale de `entregar_con` (desempate 7) ----
+
+    /// Dockerfile de la prueba: `FROM scratch` no baja ninguna imagen, así que la descarga no llama a podman.
+    const DF_RUN_FALSO: &str = "FROM scratch\nRUN false\nUSER app\n";
+
+    /// Podman que no debe usarse. Las pruebas que no construyen lo dejan por defecto.
+    struct PodmanNoUsado;
+
+    impl Podman for PodmanNoUsado {
+        fn correr(&self, args: &[&str], _plazo: Duration) -> Result<SalidaPodman, ErrorOraculo> {
+            Err(ErrorOraculo::Infra(format!(
+                "la prueba no debía llamar a podman: {args:?}"
+            )))
+        }
+    }
+
+    /// Fábrica de escenarios que no arranca nada: el escenario cae al contenedor de evaluación.
+    struct FabricaSinContenedores;
+
+    impl FabricaEscenarios for FabricaSinContenedores {
+        fn iniciar(
+            &self,
+            _imagen: &str,
+            _escenarios: Option<&Path>,
+        ) -> Result<Box<dyn CorredorDeEscenario + '_>, String> {
+            Err("sin contenedor de escenario en esta prueba".into())
+        }
+    }
+
+    /// Salida de un `RUN false` que falla dentro de la imagen, con el paso 2 de 2.
+    fn salida_run_falso() -> SalidaPodman {
+        SalidaPodman {
+            codigo: 1,
+            stdout: "STEP 1/2: FROM scratch\nSTEP 2/2: RUN false\n".into(),
+            stderr: "Error: building at STEP \"RUN false\": exit status 1\n".into(),
+        }
+    }
+
+    /// Dependencias de la tarea de Rust con un podman falso y la fábrica de escenarios sin contenedores.
+    fn deps_con_podman<'a>(
+        correr: Correr<'a>,
+        herramientas: FabricaHerramientas<'a>,
+        podman: &'a dyn Podman,
+    ) -> Dependencias<'a> {
+        Dependencias {
+            podman,
+            ..deps_de(correr, herramientas)
+        }
+    }
+
+    #[test]
+    fn oraculo_hallazgo_de_la_construccion_llega_al_veredicto_en_entrega() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        fs::write(repo.join("Dockerfile"), DF_RUN_FALSO).expect("Dockerfile");
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let fabrica = herramientas(&[]);
+        let podman = PodmanFalso::nuevo(responde_build(salida_run_falso(), salida_ok()));
+        let deps = deps_con_podman(&correr, &fabrica, &podman);
+        let v = evaluar_con_deps(base.path(), &repo, deps);
+        let hallazgo = v.hallazgos.iter().find(|h| {
+            h.dimension == Dimension::Entrega && h.detalle == "la imagen no construye: línea 2"
+        });
+        assert!(hallazgo.is_some(), "{:?}", v.hallazgos);
+        let entrega = puntaje_de_prueba(&v, Dimension::Entrega);
+        assert_eq!(entrega.sin_veredicto, None, "{entrega:?}");
+    }
+
+    #[test]
+    fn oraculo_construccion_sin_veredicto_deja_entrega_sin_veredicto_con_su_motivo() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        // Una variable sin valor: la imagen base no se resuelve y la construcción no da veredicto.
+        fs::write(repo.join("Dockerfile"), "FROM ${NO_DEFINIDA}\nUSER app\n").expect("Dockerfile");
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let fabrica = herramientas(&[]);
+        let podman = PodmanFalso::nuevo(responde_build(salida_ok(), salida_ok()));
+        let deps = deps_con_podman(&correr, &fabrica, &podman);
+        let v = evaluar_con_deps(base.path(), &repo, deps);
+        let entrega = puntaje_de_prueba(&v, Dimension::Entrega);
+        let motivo = entrega
+            .sin_veredicto
+            .as_deref()
+            .expect("entrega sin veredicto");
+        assert!(motivo.contains("imagen base sin resolver"), "{motivo}");
+        assert!(podman.builds().is_empty(), "{:?}", podman.builds());
+    }
+
+    #[test]
+    fn oraculo_sin_dockerfile_no_llama_a_podman_y_entrega_da_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let fabrica = herramientas(&[]);
+        let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), salida_sin_red()));
+        let deps = deps_con_podman(&correr, &fabrica, &podman);
+        let v = evaluar_con_deps(base.path(), &repo, deps);
+        assert_eq!(podman.total(), 0, "{:?}", podman.builds());
+        let entrega = puntaje_de_prueba(&v, Dimension::Entrega);
+        assert_eq!(entrega.sin_veredicto, None, "{entrega:?}");
+    }
+
+    #[test]
+    fn oraculo_pendiente_y_aviso_de_la_construccion_llegan_al_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        fs::write(
+            repo.join("Dockerfile"),
+            "FROM scratch\nRUN apt-get install -y curl\nUSER app\n",
+        )
+        .expect("Dockerfile");
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let fabrica = herramientas(&[]);
+        // Sin red, el `RUN` falla por la resolución de nombres, y con red también: queda pendiente.
+        let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), salida_sin_red()));
+        let deps = deps_con_podman(&correr, &fabrica, &podman);
+        let v = evaluar_con_deps(base.path(), &repo, deps);
+        assert!(
+            v.pendientes
+                .iter()
+                .any(|p| p.test == "dockerfile::build" && p.motivo.contains("línea 2")),
+            "{:?}",
+            v.pendientes
+        );
+        assert!(
+            v.avisos
+                .iter()
+                .any(|a| a.contains("la construcción con red tampoco tuvo red")),
+            "{:?}",
+            v.avisos
+        );
     }
 }

@@ -122,11 +122,46 @@ pub(crate) trait Podman {
 }
 
 /// Podman real: lanza el binario con `correr_podman`.
-struct PodmanReal;
+pub(crate) struct PodmanReal;
 
 impl Podman for PodmanReal {
     fn correr(&self, args: &[&str], plazo: Duration) -> Result<SalidaPodman, ErrorOraculo> {
         correr_podman(args, plazo)
+    }
+}
+
+/// Arranca el contenedor de escenario de una imagen construida (Tarea 9d2). El real usa `podman`.
+pub(crate) trait FabricaEscenarios {
+    /// Arranca `imagen` y da el corredor de sus escenarios. Un `Err` deja el motivo.
+    fn iniciar(
+        &self,
+        imagen: &str,
+        escenarios: Option<&Path>,
+    ) -> Result<Box<dyn CorredorDeEscenario + '_>, String>;
+}
+
+/// Corre un escenario dentro de su contenedor y dice cómo le fue.
+pub(crate) trait CorredorDeEscenario {
+    fn correr(&self, escenario: &Escenario) -> Result<Prueba, ErrorOraculo>;
+}
+
+/// Fábrica real: arranca el contenedor de escenario con `podman`.
+pub(crate) struct FabricaReal;
+
+impl FabricaEscenarios for FabricaReal {
+    fn iniciar(
+        &self,
+        imagen: &str,
+        escenarios: Option<&Path>,
+    ) -> Result<Box<dyn CorredorDeEscenario + '_>, String> {
+        ContenedorEscenario::iniciar(imagen, escenarios)
+            .map(|c| Box::new(c) as Box<dyn CorredorDeEscenario + '_>)
+    }
+}
+
+impl CorredorDeEscenario for ContenedorEscenario {
+    fn correr(&self, escenario: &Escenario) -> Result<Prueba, ErrorOraculo> {
+        ContenedorEscenario::correr(self, escenario)
     }
 }
 
@@ -810,6 +845,19 @@ pub fn entregar(
     home: &Path,
     imagenes: &[ImagenBase],
 ) -> Result<ResultadoEntrega, ErrorOraculo> {
+    entregar_con(ej, repo, tarea, home, imagenes, &PodmanReal, &FabricaReal)
+}
+
+/// Como `entregar`, con el podman y la fábrica de escenarios que se pasen. Producción pasa los reales.
+pub(crate) fn entregar_con(
+    ej: &dyn EjecutorHerramienta,
+    repo: &Path,
+    tarea: &Tarea,
+    home: &Path,
+    imagenes: &[ImagenBase],
+    podman: &dyn Podman,
+    fabrica: &dyn FabricaEscenarios,
+) -> Result<ResultadoEntrega, ErrorOraculo> {
     let reqs = tarea.requisito.as_slice();
     if !tarea.escenario.is_empty() && !tarea.dir.is_dir() {
         return Err(ErrorOraculo::Infra(format!(
@@ -835,12 +883,12 @@ pub fn entregar(
         resultado: construccion,
         imagen,
         avisos: avisos_construccion,
-    } = construir_con(repo, home, tarea, imagenes, PLAZO_BUILD, &PodmanReal)?;
+    } = construir_con(repo, home, tarea, imagenes, PLAZO_BUILD, podman)?;
     let mut avisos = avisos_construccion;
     // El contenedor de escenario sale de la imagen construida. Sin él, van al de evaluación.
     let contenedor = match &imagen {
         Some(img) if !tarea.escenario.is_empty() => {
-            match ContenedorEscenario::iniciar(&img.etiqueta, montaje.as_deref()) {
+            match fabrica.iniciar(&img.etiqueta, montaje.as_deref()) {
                 Ok(c) => Some(c),
                 Err(motivo) => {
                     avisos.push(format!(
@@ -903,7 +951,7 @@ pub fn entregar(
 }
 
 /// Resultado de un escenario corrido dentro de la imagen.
-enum Prueba {
+pub(crate) enum Prueba {
     Paso,
     Fallo {
         codigo: i32,
@@ -1158,6 +1206,23 @@ pub fn archivos_faltantes(repo: &Path, archivos: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Entrega sin veredicto por un error de infraestructura de la construcción: el motivo va a la sonda.
+pub(crate) fn entrega_sin_veredicto(motivo: String) -> ResultadoEntrega {
+    ResultadoEntrega {
+        sonda: ResultadoSonda {
+            dimension: DIMENSION,
+            valor: None,
+            motivo: Some(motivo),
+            hallazgos: Vec::new(),
+        },
+        escenarios: BTreeMap::new(),
+        lugar_escenarios: BTreeMap::new(),
+        pendientes: Vec::new(),
+        sin_veredicto: Vec::new(),
+        avisos: Vec::new(),
+    }
+}
+
 /// Sonda de entrega con el contenedor de evaluación para todo. Un `Err` del ejecutor es infraestructura.
 pub fn sonda_entrega(ej: &dyn EjecutorHerramienta, repo: &Path, tarea: &Tarea) -> ResultadoEntrega {
     sonda_entrega_con(ej, repo, tarea, true)
@@ -1316,7 +1381,7 @@ fn ultima_linea(archivos: &BTreeMap<String, String>, nombre: &str) -> Option<Str
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::oracle::ErrorOraculo;
     use crate::oracle::perfiles::herramientas::SalidaHerramienta;
@@ -1805,10 +1870,10 @@ mod tests {
     // ---- Tarea 9d3: repetir el build con red cuando un RUN pide red ----
 
     /// Dockerfile de la 9d3: la línea 2 es un `RUN` que pide red.
-    const DF_RED: &str = "FROM debian:12\nRUN apt-get install -y curl\nUSER app\n";
+    pub(crate) const DF_RED: &str = "FROM debian:12\nRUN apt-get install -y curl\nUSER app\n";
 
     /// Salida de `podman build` sin red: el `RUN` de la línea 2 falla por el DNS.
-    fn salida_sin_red() -> SalidaPodman {
+    pub(crate) fn salida_sin_red() -> SalidaPodman {
         SalidaPodman {
             codigo: 1,
             stdout: "STEP 1/2: FROM debian:12\nSTEP 2/2: RUN apt-get install -y curl\n".into(),
@@ -1817,7 +1882,7 @@ mod tests {
     }
 
     /// Salida de un comando que sale 0.
-    fn salida_ok() -> SalidaPodman {
+    pub(crate) fn salida_ok() -> SalidaPodman {
         SalidaPodman {
             codigo: 0,
             stdout: String::new(),
@@ -1829,21 +1894,26 @@ mod tests {
     type RespuestaFalsa = dyn Fn(&[&str]) -> SalidaPodman;
 
     /// Podman falso: responde con `responde` y guarda cada llamada, en orden.
-    struct PodmanFalso {
+    pub(crate) struct PodmanFalso {
         llamadas: RefCell<Vec<Vec<String>>>,
         responde: Box<RespuestaFalsa>,
     }
 
     impl PodmanFalso {
-        fn nuevo(responde: impl Fn(&[&str]) -> SalidaPodman + 'static) -> Self {
+        pub(crate) fn nuevo(responde: impl Fn(&[&str]) -> SalidaPodman + 'static) -> Self {
             PodmanFalso {
                 llamadas: RefCell::new(Vec::new()),
                 responde: Box::new(responde),
             }
         }
 
+        /// Cuántas llamadas recibió, de cualquier tipo.
+        pub(crate) fn total(&self) -> usize {
+            self.llamadas.borrow().len()
+        }
+
         /// Los argumentos de cada `build`, en orden.
-        fn builds(&self) -> Vec<Vec<String>> {
+        pub(crate) fn builds(&self) -> Vec<Vec<String>> {
             self.llamadas
                 .borrow()
                 .iter()
@@ -1869,7 +1939,7 @@ mod tests {
 
     /// Respuesta de mentira: el `build` sin red da `sin_red` y con red da `con_red`. El resto sale
     /// sano: `id -u` da 1000 (no es root) e `image inspect` da `app`.
-    fn responde_build(
+    pub(crate) fn responde_build(
         sin_red: SalidaPodman,
         con_red: SalidaPodman,
     ) -> impl Fn(&[&str]) -> SalidaPodman {
@@ -2568,5 +2638,69 @@ mod tests {
         assert!(!paso_con_url("COPY ./src /app"));
         assert!(!paso_con_url("RUN wget https://x.org/a"));
         assert!(!paso_con_url("ADD ./https-notas.txt /x"));
+    }
+
+    // ---- Tarea 28, parte 1: `entregar_con` con podman y fábrica de escenarios inyectables ----
+
+    /// Fábrica de escenarios falsa: cada `iniciar` cuenta la imagen que recibe y da un corredor que
+    /// pasa cada escenario sin tocar ningún contenedor.
+    struct FabricaFalsa {
+        imagenes: RefCell<Vec<String>>,
+    }
+
+    impl FabricaEscenarios for FabricaFalsa {
+        fn iniciar(
+            &self,
+            imagen: &str,
+            _escenarios: Option<&Path>,
+        ) -> Result<Box<dyn CorredorDeEscenario + '_>, String> {
+            self.imagenes.borrow_mut().push(imagen.to_string());
+            Ok(Box::new(CorredorFalso))
+        }
+    }
+
+    /// Corredor de mentira: cada escenario pasa.
+    struct CorredorFalso;
+
+    impl CorredorDeEscenario for CorredorFalso {
+        fn correr(&self, _escenario: &Escenario) -> Result<Prueba, ErrorOraculo> {
+            Ok(Prueba::Paso)
+        }
+    }
+
+    #[test]
+    fn entrega_entregar_con_corre_el_escenario_en_la_imagen_y_lo_marca_verde() {
+        let repo = repo_con_archivos(&[("Dockerfile", "FROM scratch\nUSER app\n")]);
+        let home = tempfile::tempdir().expect("home");
+        // La carpeta de la tarea tiene que seguir viva durante la prueba: `entregar` la exige.
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::write(
+            dir.path().join("tarea.toml"),
+            "nombre = \"x\"\nlenguaje = \"shell\"\nimagen = \"i\"\nspec = \"s\"\n\
+             [contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n\
+             [[escenario]]\nid = \"a\"\ncmd = \"exit 0\"\n",
+        )
+        .expect("escribe tarea.toml");
+        let t = Tarea::cargar_de(dir.path()).expect("carga la tarea");
+        let ej = Falso::sano();
+        let podman = PodmanFalso::nuevo(responde_build(salida_ok(), salida_ok()));
+        let fabrica = FabricaFalsa {
+            imagenes: RefCell::new(Vec::new()),
+        };
+        let r = entregar_con(&ej, repo.path(), &t, home.path(), &[], &podman, &fabrica)
+            .expect("entrega");
+        assert_eq!(r.escenarios.get("a"), Some(&true), "{:?}", r.escenarios);
+        assert_eq!(r.lugar_escenarios.get("a"), Some(&LugarEscenario::Imagen));
+        assert_eq!(
+            fabrica.imagenes.borrow().len(),
+            1,
+            "un contenedor de escenario"
+        );
+        assert_eq!(
+            ej.llamadas.get(),
+            0,
+            "el escenario corre una sola vez, en la imagen"
+        );
+        assert!(r.sin_veredicto.is_empty(), "{:?}", r.sin_veredicto);
     }
 }
