@@ -117,7 +117,7 @@ fn oraculo_colab(
     })?;
     let tope = std::time::Duration::from_secs_f64(cfg.colab.minutos_max * 60.0);
     let sesion = oracle::colab::nombre_sesion(&tarea.nombre);
-    let resultado = oracle::colab::correr_en_colab(
+    let corrida = oracle::colab::correr_en_colab(
         &cli,
         &paquete.dir,
         tarea,
@@ -126,8 +126,18 @@ fn oraculo_colab(
         &senales,
         tope,
         &oracle::colab::CompiladorPodman,
-    )?;
-    let resumen = oracle::pendientes::importar(home, tarea, &resultado.junit)?;
+    )
+    .and_then(|resultado| {
+        let resumen = oracle::pendientes::importar(home, tarea, &resultado.junit, &paquete.commit)?;
+        Ok((resultado, resumen))
+    });
+    // Con la corrida terminada, el paquete (con los tests ocultos) y el junit bajado se borran (A1, B18).
+    let limpieza = oracle::pendientes::limpiar_paquete(home, tarea, &paquete.dir, &sesion);
+    let (resultado, resumen) = corrida?;
+    limpieza
+        .map_err(|e| oracle::ErrorOraculo::Infra(format!("borrar el paquete de Colab: {e}")))?;
+    let mut avisos = paquete.avisos.clone();
+    avisos.extend(resumen.avisos.iter().cloned());
     if json {
         println!(
             "{}",
@@ -136,9 +146,17 @@ fn oraculo_colab(
                 "ignorados": resumen.ignorados,
                 "gpu": resultado.gpu,
                 "sesion": resultado.sesion,
+                "avisos": avisos,
+                "confianza": resumen.confianza,
             })
         );
     } else {
+        for aviso in &avisos {
+            eprintln!("aviso: {aviso}");
+        }
+        if let Some(confianza) = &resumen.confianza {
+            eprintln!("confianza: {confianza}");
+        }
         println!(
             "gpu: {}, sesion: {}, importados: {}, ignorados: {}",
             resultado.gpu, resultado.sesion, resumen.importados, resumen.ignorados
@@ -223,13 +241,25 @@ fn oraculo_pendientes(
     let tarea = Tarea::cargar(nombre)?;
     oracle::pendientes::nombre_de_tarea_valido(&tarea.nombre).map_err(Error::Uso)?;
     if let Some(junit) = importar {
-        let resumen = oracle::pendientes::importar(&home, &tarea, junit)?;
+        let commit = oracle::commit_de(repo);
+        let resumen = oracle::pendientes::importar(&home, &tarea, junit, &commit)?;
         if json {
             println!(
                 "{}",
-                serde_json::json!({"importados": resumen.importados, "ignorados": resumen.ignorados})
+                serde_json::json!({
+                    "importados": resumen.importados,
+                    "ignorados": resumen.ignorados,
+                    "avisos": resumen.avisos,
+                    "confianza": resumen.confianza,
+                })
             );
         } else {
+            for aviso in &resumen.avisos {
+                eprintln!("aviso: {aviso}");
+            }
+            if let Some(confianza) = &resumen.confianza {
+                eprintln!("confianza: {confianza}");
+            }
             println!(
                 "importados: {}, ignorados: {}",
                 resumen.importados, resumen.ignorados
@@ -237,7 +267,8 @@ fn oraculo_pendientes(
         }
         return Ok(());
     }
-    let paquete = oracle::pendientes::crear(&home, &tarea, repo)?;
+    let cache = oracle::descarga::cache_de(&home, &tarea.lenguaje, repo);
+    let paquete = oracle::pendientes::crear(&home, &tarea, repo, cache.as_deref())?;
     if colab {
         return oraculo_colab(json, &tarea, &home, paquete);
     }

@@ -68,6 +68,26 @@ pub enum Accion {
 
 /// Prefijo de la suite de Python: instala desde `/cache` sin red, en `/tmp/pydeps` (la imagen no trae `ensurepip`).
 pub const PRELUDIO_PYTHON: &str = "if python3 -c 'import ensurepip' 2>/dev/null; then python3 -m venv --system-site-packages /tmp/venv-eval && . /tmp/venv-eval/bin/activate && pip install --no-index --find-links /cache --no-input --disable-pip-version-check -r /cache/requirements-offline.txt; else mkdir -p /tmp/pydeps && python3 -m pip install --no-index --find-links /cache --no-input --disable-pip-version-check --target /tmp/pydeps -r /cache/requirements-offline.txt && export PYTHONPATH=/tmp/pydeps; fi && ";
+/// Caché de dependencias que la fase de descarga dejó para el repo (`Cargo.lock` o `requirements.txt`).
+/// `None` si no hay, o si el lenguaje no tiene caché. La mira el paquete de Colab (decisión 40).
+pub fn cache_de(home: &Path, lenguaje: &str, repo: &Path) -> Option<PathBuf> {
+    let (archivo, carpeta, marca) = match lenguaje {
+        "rust" => ("Cargo.lock", CARPETA_RUST, ARCHIVO_CONFIG),
+        "python" => (
+            "requirements.txt",
+            CARPETA_PYTHON,
+            "requirements-offline.txt",
+        ),
+        _ => return None,
+    };
+    let bytes = fs::read(repo.join(archivo)).ok()?;
+    let destino = home
+        .join(CARPETA_CACHE)
+        .join(carpeta)
+        .join(hash_corto(&bytes));
+    destino.join(marca).is_file().then_some(destino)
+}
+
 /// Prefijo de cada suite: deja la caché de dependencias visible para cargo, sin escribir en ella.
 pub const PRELUDIO: &str = "export CARGO_HOME=/tmp/cargo-home && mkdir -p \"$CARGO_HOME\" && cp /cache/config.toml \"$CARGO_HOME/config.toml\" && ";
 
@@ -673,6 +693,7 @@ fn generar_lock(
         imagen: tarea.imagen.clone(),
         repo: Some(repo.to_path_buf()),
         oraculo: None,
+        oraculo_destino: None,
         salida: salida.path().to_path_buf(),
         cmd: COMANDO_LOCK.into(),
         env: entorno_descarga(),
@@ -724,6 +745,7 @@ fn descargar_vendor(
         imagen: tarea.imagen.clone(),
         repo: Some(repo.to_path_buf()),
         oraculo: None,
+        oraculo_destino: None,
         salida: salida.path().to_path_buf(),
         cmd: COMANDO_VENDOR.into(),
         env: entorno_descarga(),
@@ -794,6 +816,7 @@ fn actualizar_rustsec(
         imagen: tarea.imagen.clone(),
         repo: None,
         oraculo: None,
+        oraculo_destino: None,
         salida: salida.path().to_path_buf(),
         cmd,
         env: Vec::new(),
@@ -1276,6 +1299,7 @@ source = \"git+https://github.com/x/ext?rev=1#1\"\n";
             imagen: "localhost/root-oraculo-rust:1".into(),
             repo: Some(PathBuf::from("/x/repo")),
             oraculo: None,
+            oraculo_destino: None,
             salida: PathBuf::from("/x/salida"),
             cmd: "cargo vendor".into(),
             env: vec![],
@@ -1555,6 +1579,28 @@ location searched: crates.io index";
         assert!(PRELUDIO.contains("export CARGO_HOME=/tmp/cargo-home"));
         assert!(PRELUDIO.contains("cp /cache/config.toml \"$CARGO_HOME/config.toml\""));
         assert!(PRELUDIO.ends_with("&& "));
+    }
+
+    #[test]
+    fn descarga_cache_de_encuentra_la_caché_del_lock_y_no_inventa_otra() {
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        let lock = b"version = 3\n";
+        fs::write(repo.path().join("Cargo.lock"), lock).expect("lock");
+        assert_eq!(
+            cache_de(home.path(), "rust", repo.path()),
+            None,
+            "sin caché no hay ruta"
+        );
+        let destino = home
+            .path()
+            .join(CARPETA_CACHE)
+            .join(CARPETA_RUST)
+            .join(hash_corto(lock));
+        fs::create_dir_all(&destino).expect("caché");
+        fs::write(destino.join(ARCHIVO_CONFIG), "x").expect("config");
+        assert_eq!(cache_de(home.path(), "rust", repo.path()), Some(destino));
+        assert_eq!(cache_de(home.path(), "shell", repo.path()), None);
     }
 
     #[test]

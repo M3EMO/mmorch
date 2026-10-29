@@ -229,7 +229,8 @@ fn root_evaluar(a: &Args) -> Result<Value, Fallo> {
             "sin veredicto para {tarea}: {detalle}"
         )));
     }
-    valor(&veredicto)
+    // A2: el agente no recibe ids de tests ocultos. La CLI `oraculo evaluar` sí los conserva.
+    valor(&oracle::redactar_para_mcp(veredicto))
 }
 
 fn root_registrar(a: &Args) -> Result<Value, Fallo> {
@@ -349,7 +350,7 @@ fn herramientas() -> Value {
         },
         {
             "name": "root_evaluar",
-            "description": "Evalúa un repositorio con una tarea del Oracle. Devuelve el mismo veredicto que `r00t --json oraculo evaluar`.",
+            "description": "Evalúa un repositorio con una tarea del Oracle. Devuelve el veredicto sin ids de tests ocultos: conteos, estado y avisos. `r00t --json oraculo evaluar` trae el veredicto completo.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

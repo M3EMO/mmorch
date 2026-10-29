@@ -308,6 +308,7 @@ fn descarga_el_contenedor_de_descarga_no_ve_oraculo() {
         imagen: IMAGEN.into(),
         repo: Some(repo.clone()),
         oraculo: None,
+        oraculo_destino: None,
         salida: salida.clone(),
         cmd: "ls /oraculo".into(),
         env: Vec::new(),

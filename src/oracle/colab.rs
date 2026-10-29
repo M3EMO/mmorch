@@ -536,6 +536,7 @@ pub fn cumple_lo_pedido(junit: &str, ids: &[String], repeticiones: u32) -> bool 
     let Ok(leido) = junit::parsear(junit) else {
         return false;
     };
+    let leido = leido.con_ids();
     ids.iter().all(|id| {
         leido
             .testcases

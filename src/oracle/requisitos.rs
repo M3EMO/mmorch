@@ -26,8 +26,13 @@ const DETALLE_INESTABLE: &str =
 
 /// Pasa la clasificación de la suite oculta a `ResultadosTests`.
 pub fn desde_clasificacion(c: &Clasificacion) -> ResultadosTests {
+    let mut tests = c.estables.clone();
+    // Un test omitido en todas sus corridas sigue en el universo del requisito, como no verde (A10).
+    for id in &c.omitidos {
+        tests.insert(id.clone(), ResultadoTest::Omite);
+    }
     ResultadosTests {
-        tests: c.estables.clone(),
+        tests,
         inestables: c.inestables.iter().cloned().collect(),
     }
 }
@@ -820,5 +825,38 @@ mod tests {
             BTreeMap::from([("a::t_est".to_string(), ResultadoTest::Pasa)])
         );
         assert_eq!(r.inestables, BTreeSet::from(["a::t_mix".to_string()]));
+    }
+
+    #[test]
+    fn requisitos_test_omitido_no_deja_cumplido() {
+        // Un test que pasa y otro que se omite: el omitido cuenta como no verde (A10).
+        let mut j1 = Junit::default();
+        j1.tests.insert("a::t1".into(), ResultadoTest::Pasa);
+        j1.tests.insert("a::t2".into(), ResultadoTest::Omite);
+        let c = clasificar(&[j1.clone(), j1], &[], &BTreeSet::new());
+        let r = desde_clasificacion(&c);
+        let reqs = vec![req("R1", 1, &["a::t1", "a::t2"], &[], &[])];
+        let estados = evalua(&reqs, &r);
+        assert_ne!(
+            estados[0].cumplimiento,
+            Cumplimiento::Cumplido,
+            "{estados:?}"
+        );
+        assert!(estados[0].nivel.is_some_and(|n| n <= 2), "{estados:?}");
+    }
+
+    #[test]
+    fn requisitos_test_omitido_por_id_exacto_no_queda_ausente() {
+        let mut j1 = Junit::default();
+        j1.tests.insert("a::t2".into(), ResultadoTest::Omite);
+        let c = clasificar(&[j1.clone(), j1], &[], &BTreeSet::new());
+        let r = desde_clasificacion(&c);
+        let reqs = vec![req("R1", 1, &["a::t2"], &[], &[])];
+        let estados = evalua(&reqs, &r);
+        assert_eq!(
+            estados[0].evidencia,
+            vec!["a::t2: omite".to_string()],
+            "{estados:?}"
+        );
     }
 }

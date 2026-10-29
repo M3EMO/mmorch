@@ -33,15 +33,38 @@ pub enum ResultadoTest {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Junit {
     pub archivos: BTreeMap<String, ConteoArchivo>,
-    /// Clave `"<archivo>::<nombre>"`, donde `<archivo>` es el último segmento de `classname`. Si un id se
-    /// repite y una corrida falla, queda en `Falla`.
+    /// Clave `"<classname>::<nombre>"` con el `classname` entero (A4). Tras `con_ids`, la clave es el
+    /// id `archivo::nombre`. Si un id se repite y una corrida falla, queda en `Falla`.
     pub tests: BTreeMap<String, ResultadoTest>,
     /// Cuántos testcases trae cada id, aunque se repitan. Misma clave que `tests`.
     pub testcases: BTreeMap<String, u32>,
     pub propiedades: BTreeMap<String, String>,
+    /// Marca de red de `correr.sh` (`con-red` o `sin-red`), si el junit la trae. Sin ella, `None`.
+    pub red: Option<String>,
 }
 
 impl Junit {
+    /// Copia con las claves de `tests` y `testcases` pasadas a ids `archivo::nombre` (`id_de_clave`).
+    /// Dos claves que dan el mismo id se juntan: una falla gana, y los testcases se suman.
+    pub fn con_ids(&self) -> Junit {
+        let mut salida = Junit {
+            archivos: self.archivos.clone(),
+            propiedades: self.propiedades.clone(),
+            red: self.red.clone(),
+            ..Junit::default()
+        };
+        for (clave, resultado) in &self.tests {
+            let entrada = salida.tests.entry(id_de_clave(clave)).or_insert(*resultado);
+            if *resultado == ResultadoTest::Falla {
+                *entrada = ResultadoTest::Falla;
+            }
+        }
+        for (clave, veces) in &self.testcases {
+            *salida.testcases.entry(id_de_clave(clave)).or_default() += veces;
+        }
+        salida
+    }
+
     /// Suma de todos los archivos. `total` es pasa más falla.
     pub fn conteo(&self) -> Conteo {
         let pasa: u32 = self.archivos.values().map(|a| a.pasa).sum();
@@ -97,7 +120,7 @@ pub fn parsear(xml: &str) -> Result<Junit, ErrorOraculo> {
 
 /// `testcase` en curso: sus marcas se acumulan hasta que se cierra.
 struct Caso {
-    archivo: String,
+    classname: String,
     nombre: String,
     omitido: bool,
     fallado: bool,
@@ -106,10 +129,15 @@ struct Caso {
 /// Procesa la apertura de un elemento. Un `testcase` abre un caso; sus hijos lo marcan.
 fn abre(e: &BytesStart, caso: &mut Option<Caso>, junit: &mut Junit) -> Result<(), ErrorOraculo> {
     match e.local_name().as_ref() {
+        "testsuite" => {
+            let marca = atributo(e, "root_red")?;
+            if !marca.is_empty() {
+                junit.red = Some(marca);
+            }
+        }
         "testcase" => {
-            let classname = atributo(e, "classname")?;
             *caso = Some(Caso {
-                archivo: classname.rsplit('.').next().unwrap_or_default().to_string(),
+                classname: atributo(e, "classname")?,
                 nombre: atributo(e, "name")?,
                 omitido: false,
                 fallado: false,
@@ -146,18 +174,24 @@ fn cierra(caso: &mut Option<Caso>, junit: &mut Junit) {
     } else {
         ResultadoTest::Pasa
     };
-    let id = id_de(&c.archivo, &c.nombre);
-    *junit.testcases.entry(id.clone()).or_default() += 1;
+    let clave = id_de(&c.classname, &c.nombre);
+    *junit.testcases.entry(clave.clone()).or_default() += 1;
     // Un id repetido con una falla queda en falla: el último pase no la tapa.
     let en_tests = if resultado == ResultadoTest::Falla
-        || junit.tests.get(&id) == Some(&ResultadoTest::Falla)
+        || junit.tests.get(&clave) == Some(&ResultadoTest::Falla)
     {
         ResultadoTest::Falla
     } else {
         resultado
     };
-    junit.tests.insert(id, en_tests);
-    let archivo = junit.archivos.entry(c.archivo).or_default();
+    junit.tests.insert(clave, en_tests);
+    let archivo_corto = c
+        .classname
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let archivo = junit.archivos.entry(archivo_corto).or_default();
     match resultado {
         ResultadoTest::Omite => archivo.omite += 1,
         ResultadoTest::Falla => {
@@ -168,9 +202,45 @@ fn cierra(caso: &mut Option<Caso>, junit: &mut Junit) {
     }
 }
 
-/// Id `archivo::nombre` de un testcase: la clave de `Junit::tests` y de `Junit::testcases`.
-fn id_de(archivo: &str, nombre: &str) -> String {
-    format!("{archivo}::{nombre}")
+/// Clave de un testcase: `classname` entero, `::` y nombre. Sin perder la clase ni el archivo (A4).
+fn id_de(classname: &str, nombre: &str) -> String {
+    format!("{classname}::{nombre}")
+}
+
+/// Id `archivo::nombre` de una clave de junit `classname::nombre` (A4). El archivo es el último
+/// segmento del `classname` con forma de módulo (`test_*`, `*_test` o `test`). Lo que sigue, con `::`,
+/// es la clase y el nombre: `tests.test_set.TestBasico::test_vacio` da `test_set::TestBasico::test_vacio`.
+pub fn id_de_clave(clave: &str) -> String {
+    let (classname, nombre) = clave.rsplit_once("::").unwrap_or(("", clave));
+    let segmentos: Vec<&str> = classname.split('.').filter(|s| !s.is_empty()).collect();
+    let indice = segmentos
+        .iter()
+        .rposition(|s| es_modulo(s))
+        .unwrap_or(segmentos.len().saturating_sub(1));
+    let archivo = segmentos.get(indice).copied().unwrap_or_default();
+    let resto: Vec<&str> = segmentos
+        .iter()
+        .skip(indice + 1)
+        .copied()
+        .chain(std::iter::once(nombre))
+        .collect();
+    format!("{archivo}::{}", resto.join("::"))
+}
+
+fn es_modulo(segmento: &str) -> bool {
+    segmento.starts_with("test_") || segmento.ends_with("_test") || segmento == "test"
+}
+
+/// Clave de junit de un node id de pytest: `tests/test_x.py::Clase::test` -> `tests.test_x.Clase::test`.
+/// `None` si el node id no tiene la forma `archivo.py::nombre`.
+pub fn clave_de_nodo(nodo: &str) -> Option<String> {
+    let (archivo, resto) = nodo.split_once("::")?;
+    let modulo = archivo.strip_suffix(".py")?.replace('/', ".");
+    let (classname, nombre) = match resto.rsplit_once("::") {
+        Some((clases, nombre)) => (format!("{modulo}.{}", clases.replace("::", ".")), nombre),
+        None => (modulo, resto),
+    };
+    Some(format!("{classname}::{nombre}"))
 }
 
 /// Valor de un atributo, decodificado. Ausente vale texto vacío.
@@ -286,20 +356,20 @@ mod tests {
   <testcase classname="tests.test_a" name="t3"><skipped message="no"/></testcase>
 </testsuite>"#;
         let j = parsear(xml).expect("parsea");
-        assert_eq!(j.tests["test_a::t1"], ResultadoTest::Pasa);
-        assert_eq!(j.tests["test_a::t2"], ResultadoTest::Falla);
-        assert_eq!(j.tests["test_a::t3"], ResultadoTest::Omite);
+        assert_eq!(j.tests["tests.test_a::t1"], ResultadoTest::Pasa);
+        assert_eq!(j.tests["tests.test_a::t2"], ResultadoTest::Falla);
+        assert_eq!(j.tests["tests.test_a::t3"], ResultadoTest::Omite);
     }
 
     #[test]
     fn junit_cuenta_testcases_repetidos_por_id_con_la_misma_clave() {
         let xml = r#"<testsuite>
-  <testcase classname="tests.sub.test_a" name="t1"/>
+  <testcase classname="tests.test_a" name="t1"/>
   <testcase classname="tests.test_a" name="t1"><failure message="x"/></testcase>
   <testcase classname="tests.test_a" name="t1"/>
 </testsuite>"#;
         let j = parsear(xml).expect("parsea");
-        assert_eq!(j.testcases["test_a::t1"], 3);
+        assert_eq!(j.testcases["tests.test_a::t1"], 3);
     }
 
     #[test]
@@ -310,7 +380,7 @@ mod tests {
   <testcase classname="tests.test_a" name="t1"/>
 </testsuite>"#;
         let j = parsear(xml).expect("parsea");
-        assert_eq!(j.tests["test_a::t1"], ResultadoTest::Falla);
+        assert_eq!(j.tests["tests.test_a::t1"], ResultadoTest::Falla);
     }
 
     #[test]
@@ -318,5 +388,75 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let res = leer(&dir.path().join("no-existe.xml"));
         assert!(matches!(res, Err(ErrorOraculo::Infra(_))));
+    }
+
+    #[test]
+    fn junit_test_set_y_test_get_con_mismo_nombre_de_clase_cuentan_dos() {
+        let xml = r#"<testsuite>
+  <testcase classname="tests.test_set.TestBasico" name="test_vacio"><failure message="x"/></testcase>
+  <testcase classname="tests.test_get.TestBasico" name="test_vacio"/>
+</testsuite>"#;
+        let j = parsear(xml).expect("parsea");
+        assert_eq!(j.tests.len(), 2, "{:?}", j.tests.keys().collect::<Vec<_>>());
+        assert_eq!(
+            j.tests["tests.test_set.TestBasico::test_vacio"],
+            ResultadoTest::Falla
+        );
+        assert_eq!(
+            j.tests["tests.test_get.TestBasico::test_vacio"],
+            ResultadoTest::Pasa
+        );
+        assert_eq!(j.conteo(), Conteo { pasa: 1, total: 2 });
+    }
+
+    #[test]
+    fn junit_clave_de_nodo_conserva_el_archivo_y_la_clase() {
+        assert_eq!(
+            clave_de_nodo("tests/test_set.py::TestBasico::test_vacio").as_deref(),
+            Some("tests.test_set.TestBasico::test_vacio")
+        );
+        assert_eq!(
+            clave_de_nodo("tests/test_x.py::test_r[gpu-1]").as_deref(),
+            Some("tests.test_x::test_r[gpu-1]")
+        );
+        assert_eq!(clave_de_nodo("sin_separador"), None);
+    }
+
+    #[test]
+    fn junit_id_de_clave_pasa_clase_y_nombre_con_el_archivo_del_modulo() {
+        assert_eq!(
+            id_de_clave("tests.test_set.TestBasico::test_vacio"),
+            "test_set::TestBasico::test_vacio"
+        );
+        assert_eq!(id_de_clave("tests.test_o::o2"), "test_o::o2");
+        assert_eq!(id_de_clave("tests.sub.test_b::t2"), "test_b::t2");
+        assert_eq!(id_de_clave("tests.utiles::t3"), "utiles::t3");
+    }
+
+    #[test]
+    fn junit_con_ids_une_claves_que_dan_el_mismo_id_y_gana_la_falla() {
+        let xml = r#"<testsuite>
+  <testcase classname="tests.sub.test_a" name="t1"><failure message="x"/></testcase>
+  <testcase classname="tests.test_a" name="t1"/>
+  <testcase classname="tests.test_b" name="t2"/>
+</testsuite>"#;
+        let j = parsear(xml).expect("parsea").con_ids();
+        assert_eq!(j.tests.len(), 2);
+        assert_eq!(j.tests["test_a::t1"], ResultadoTest::Falla);
+        assert_eq!(j.testcases["test_a::t1"], 2);
+        assert_eq!(j.tests["test_b::t2"], ResultadoTest::Pasa);
+    }
+
+    #[test]
+    fn junit_testsuite_lee_la_marca_de_red_de_correr_sh() {
+        let xml = r#"<testsuite name="pendientes" root_red="con-red">
+  <testcase classname="tests.test_a" name="t1"/>
+</testsuite>"#;
+        let j = parsear(xml).expect("parsea");
+        assert_eq!(j.red.as_deref(), Some("con-red"));
+        let sin =
+            parsear(r#"<testsuite><testcase classname="tests.test_a" name="t1"/></testsuite>"#)
+                .expect("parsea");
+        assert_eq!(sin.red, None);
     }
 }

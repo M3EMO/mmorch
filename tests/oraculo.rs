@@ -739,7 +739,12 @@ fn pendiente_paquete_crea_repo_tests_correr_y_leeme() {
         serde_json::json!(["test_x::test_rendimiento[gpu-10000-res1]"])
     );
     let paquete = PathBuf::from(json["dir"].as_str().expect("dir es texto"));
-    assert!(paquete.starts_with(home.path().join("pendientes")));
+    // A1: el paquete vive dentro de oraculos/, la carpeta que el builder no puede leer.
+    assert!(
+        paquete.starts_with(home.path().join("oraculos")),
+        "{}",
+        paquete.display()
+    );
     assert!(
         !paquete.starts_with(env!("CARGO_MANIFEST_DIR")),
         "el paquete no va dentro del worktree"

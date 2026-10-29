@@ -895,3 +895,48 @@ fn colab_vigilar_con_activo_vigente_no_llama_a_stop() {
     assert!(carpeta.join("activo.json").exists());
     assert!(e.eventos_runtime().is_empty(), "sin liberación no hay Gate");
 }
+
+/// Un test oculto que no está en `[[entorno]]` tampoco puede quedar fuera de `oraculos/` (A1, B18).
+fn secretos_fuera_de_oraculos(home: &Path) -> Vec<PathBuf> {
+    let mut hallados = Vec::new();
+    let mut pendientes = vec![home.to_path_buf()];
+    while let Some(dir) = pendientes.pop() {
+        let Ok(entradas) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entrada in entradas.flatten() {
+            let ruta = entrada.path();
+            if ruta.starts_with(home.join("oraculos")) {
+                continue;
+            }
+            if ruta.is_dir() {
+                pendientes.push(ruta);
+            } else if fs::read_to_string(&ruta).is_ok_and(|t| t.contains("def test_o2")) {
+                hallados.push(ruta);
+            }
+        }
+    }
+    hallados
+}
+
+#[test]
+fn colab_despues_de_pendientes_no_queda_oculto_fuera_de_oraculos() {
+    let e = Escenario::nuevo(ENTORNO_O2);
+    let falso = falso(e.falso.path(), "Tesla T4", "ok", false);
+    let salida = correr(&e, &falso, &["--colab"]);
+    assert_eq!(
+        salida.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let fuera = secretos_fuera_de_oraculos(e.home.path());
+    assert!(
+        fuera.is_empty(),
+        "queda material oculto fuera de oraculos/: {fuera:?}"
+    );
+    assert!(
+        !e.home.path().join("pendientes").exists(),
+        "no hay carpeta pendientes/ en ROOT_HOME"
+    );
+}

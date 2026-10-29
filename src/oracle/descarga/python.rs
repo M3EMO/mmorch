@@ -874,6 +874,7 @@ fn ejecucion_python(
         imagen: imagen.into(),
         repo: None,
         oraculo: None,
+        oraculo_destino: None,
         salida: salida.to_path_buf(),
         cmd,
         env: entorno_descarga(),

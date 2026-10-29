@@ -43,6 +43,7 @@ fn ejecucion(repo: &std::path::Path, salida: &std::path::Path, cmd: &str) -> Eje
         imagen: IMAGEN.into(),
         repo: Some(repo.into()),
         oraculo: None,
+        oraculo_destino: None,
         salida: salida.into(),
         cmd: cmd.into(),
         env: vec![],

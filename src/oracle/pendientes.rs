@@ -1,25 +1,29 @@
 //! Tests pendientes por entorno: el paquete para correrlos en Colab y la importación de su junit.
 //! Root no lanza Colab. El usuario corre `correr.sh` y trae el junit de vuelta.
+//! Todo lo que trae tests ocultos vive en `$ROOT_HOME/oraculos/<tarea>/` (A1, B18).
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+use super::descarga;
 use super::junit::{self, ResultadoTest};
 use super::tarea::Tarea;
-use super::{ErrorOraculo, comillas, copiar_repo, infra};
+use super::{ErrorOraculo, comillas, commit_de, copiar_repo, infra};
+use crate::borrado;
 use crate::observe;
 use crate::tipos::{Pendiente, TipoEvento};
 
-/// Carpeta de los paquetes dentro de `ROOT_HOME`.
-const CARPETA_PAQUETES: &str = "pendientes";
+/// Carpeta de los tests ocultos de cada tarea dentro de `ROOT_HOME`. El builder no puede leerla.
+const CARPETA_ORACULOS: &str = "oraculos";
+/// Paquete de los tests pendientes, dentro de la carpeta de la tarea.
+const CARPETA_PAQUETE: &str = "pendientes";
 /// Carpeta de los resultados importados dentro de `ROOT_HOME`.
 const CARPETA_EVIDENCIA: &str = "evidencia";
 /// Resultados de Colab de una tarea, dentro de su carpeta de evidencia.
@@ -28,6 +32,16 @@ const ARCHIVO_COLAB: &str = "colab.json";
 const ARCHIVO_EVENTOS: &str = "eventos.jsonl";
 /// Junit que deja `correr.sh` al lado del paquete.
 const XML_PENDIENTES: &str = "pendientes.xml";
+/// Commit del repo del que se armó el paquete (B16).
+pub(crate) const ARCHIVO_COMMIT: &str = "commit.txt";
+/// Copia de la caché de dependencias dentro del paquete.
+const CARPETA_CACHE_PAQUETE: &str = "cache";
+/// Carpeta de temporales de `ROOT_HOME`, donde Colab baja el junit.
+const CARPETA_TEMPORALES: &str = "tmp";
+/// Prefijo de las carpetas de Colab dentro de `tmp/`.
+const PREFIJO_COLAB: &str = "colab-";
+/// Aviso del `Gate` y del veredicto cuando Colab no permitió `unshare -rn` (decisión 40).
+pub const CONFIANZA_CON_RED: &str = "corrida de Colab con red: el oráculo pudo filtrarse";
 
 /// Resultado de un test pendiente importado de Colab.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -38,6 +52,9 @@ pub struct ColabEntrada {
     pub junit_sha256: String,
     /// Momento de la importación, en segundos desde la época.
     pub ts: f64,
+    /// Commit del repo del que salió el paquete. Un resultado de otro commit no entra al veredicto (B16).
+    #[serde(default)]
+    pub commit: String,
 }
 
 /// Paquete armado para correr los tests pendientes.
@@ -46,20 +63,42 @@ pub struct Paquete {
     pub dir: PathBuf,
     /// Ids `archivo::nombre` de los tests del paquete.
     pub tests: Vec<String>,
+    /// Commit del repo del que se armó (vacío si no es git).
+    pub commit: String,
+    /// Avisos de armado: por ejemplo, que no hay caché de dependencias.
+    pub avisos: Vec<String>,
 }
 
 /// Resumen de una importación de junit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Importacion {
     /// Tests de `[[entorno]]` que estaban en el junit.
     pub importados: usize,
     /// Tests del junit que no están en `[[entorno]]`.
     pub ignorados: usize,
+    /// Avisos: un resultado de otro commit no se importa, por ejemplo.
+    pub avisos: Vec<String>,
+    /// Confianza de la corrida. `Some` si Colab corrió con red (decisión 40).
+    pub confianza: Option<String>,
 }
 
-/// Arma el paquete de los tests de `[[entorno]]` dentro de `home/pendientes/`.
-/// Sin tests pendientes no crea nada y da `None`. Todo se valida antes de crear el directorio.
-pub fn crear(home: &Path, tarea: &Tarea, repo: &Path) -> Result<Option<Paquete>, ErrorOraculo> {
+/// Dónde vive el paquete de una tarea: `ROOT_HOME/oraculos/<tarea>/pendientes`.
+pub fn dir_paquete(home: &Path, tarea: &str) -> PathBuf {
+    home.join(CARPETA_ORACULOS)
+        .join(tarea)
+        .join(CARPETA_PAQUETE)
+}
+
+/// Arma el paquete de los tests de `[[entorno]]` dentro de `oraculos/<tarea>/pendientes/`.
+/// `cache` es la caché de dependencias de la fase de descarga, si ya existe: el paquete la lleva y
+/// `correr.sh` la usa sin red. Sin tests pendientes no crea nada y da `None`.
+/// Todo se valida antes de crear el directorio.
+pub fn crear(
+    home: &Path,
+    tarea: &Tarea,
+    repo: &Path,
+    cache: Option<&Path>,
+) -> Result<Option<Paquete>, ErrorOraculo> {
     nombre_de_tarea_valido(&tarea.nombre).map_err(ErrorOraculo::Tarea)?;
     if tarea.entorno.is_empty() {
         return Ok(None);
@@ -78,13 +117,12 @@ pub fn crear(home: &Path, tarea: &Tarea, repo: &Path) -> Result<Option<Paquete>,
         tests.push(exclusion.test.clone());
     }
 
-    let segundos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let dir = home
-        .join(CARPETA_PAQUETES)
-        .join(format!("{}-{segundos}", tarea.nombre));
-    fs::create_dir_all(home.join(CARPETA_PAQUETES)).map_err(|e| infra("carpeta de paquetes", e))?;
+    // Un paquete viejo de esta tarea (de una corrida que no llegó a limpiarse) se borra antes.
+    let dir = dir_paquete(home, &tarea.nombre);
+    let raiz_tarea = home.join(CARPETA_ORACULOS).join(&tarea.nombre);
+    borrado::borrar_dir_dentro(&raiz_tarea, &dir)
+        .map_err(|e| infra("borrar el paquete viejo", e))?;
+    fs::create_dir_all(&raiz_tarea).map_err(|e| infra("carpeta de la tarea", e))?;
     fs::create_dir(&dir).map_err(|e| infra(&format!("crear {}", dir.display()), e))?;
 
     copiar_repo(&repo, &dir.join("repo")).map_err(|e| infra("copia del repo", e))?;
@@ -99,24 +137,75 @@ pub fn crear(home: &Path, tarea: &Tarea, repo: &Path) -> Result<Option<Paquete>,
         fs::copy(&conftest, tests_dir.join("conftest.py"))
             .map_err(|e| infra("copiar conftest", e))?;
     }
-    escribir(
-        &dir.join("correr.sh"),
-        &guion_correr(&nodos, tarea.repeticiones),
-        true,
-    )?;
+    let commit = commit_de(&repo);
+    escribir(&dir.join(ARCHIVO_COMMIT), &commit, false)?;
+    let mut avisos = Vec::new();
+    let con_cache = match cache {
+        Some(origen) => {
+            copiar_repo(origen, &dir.join(CARPETA_CACHE_PAQUETE))
+                .map_err(|e| infra("copia de la caché", e))?;
+            true
+        }
+        None => {
+            avisos.push(
+                "sin caché de dependencias: corré `r00t oraculo evaluar` antes para bajarlas"
+                    .into(),
+            );
+            false
+        }
+    };
+    let guion = if con_cache {
+        guion_con_cache(&nodos, tarea.repeticiones, &tarea.lenguaje)
+    } else {
+        guion_correr(&nodos, tarea.repeticiones, "")
+    };
+    escribir(&dir.join("correr.sh"), &guion, true)?;
     escribir(&dir.join("LEEME.txt"), &leeme(&tarea.nombre, &repo), false)?;
-    Ok(Some(Paquete { dir, tests }))
+    Ok(Some(Paquete {
+        dir,
+        tests,
+        commit,
+        avisos,
+    }))
 }
 
-/// Importa el junit que dejó `correr.sh`. Guarda el resultado de cada test pendiente
-/// en `evidencia/<tarea>/colab.json` y registra un evento `Gate` con origen `colab`.
-pub fn importar(home: &Path, tarea: &Tarea, ruta: &Path) -> Result<Importacion, ErrorOraculo> {
+/// Borra lo que Colab dejó de una corrida: el paquete con los tests ocultos y `tmp/colab-<sesion>`
+/// con el junit bajado (A1, B18). Cada borrado pasa por `borrado` con su raíz.
+pub fn limpiar_paquete(home: &Path, tarea: &Tarea, paquete: &Path, sesion: &str) -> io::Result<()> {
+    let raiz_tarea = home.join(CARPETA_ORACULOS).join(&tarea.nombre);
+    borrado::borrar_dir_dentro(&raiz_tarea, paquete)?;
+    let tmp = home.join(CARPETA_TEMPORALES);
+    borrado::borrar_dir_dentro(&tmp, &tmp.join(format!("{PREFIJO_COLAB}{sesion}")))
+}
+
+/// Importa el junit que dejó `correr.sh`. `commit` es el del repo al que se importa. Si el paquete
+/// de la tarea tiene otro commit, el resultado no se importa y el aviso lo dice (B16). Si entra, guarda
+/// el resultado de cada test pendiente en `evidencia/<tarea>/colab.json` y registra un evento `Gate`.
+pub fn importar(
+    home: &Path,
+    tarea: &Tarea,
+    ruta: &Path,
+    commit: &str,
+) -> Result<Importacion, ErrorOraculo> {
     let texto = fs::read_to_string(ruta)
         .map_err(|e| ErrorOraculo::Infra(format!("no se pudo leer {}: {e}", ruta.display())))?;
     let junit = junit::parsear(&texto)?;
+    if let Some(del_paquete) = commit_del_paquete(home, &tarea.nombre)
+        && del_paquete != commit
+    {
+        return Ok(Importacion {
+            importados: 0,
+            ignorados: junit.tests.len(),
+            avisos: vec![format!(
+                "el junit es del commit {del_paquete} y el repo está en {commit}: no se importa"
+            )],
+            confianza: None,
+        });
+    }
     let sha = sha256_hex(texto.as_bytes());
     let (ts, _) = observe::ahora();
 
+    let junit = junit.con_ids();
     let mut colab = colab_de(home, &tarea.nombre)?;
     let mut resultados = BTreeMap::new();
     for exclusion in &tarea.entorno {
@@ -128,6 +217,7 @@ pub fn importar(home: &Path, tarea: &Tarea, ruta: &Path) -> Result<Importacion, 
                     resultado: etiqueta.into(),
                     junit_sha256: sha.clone(),
                     ts,
+                    commit: commit.to_string(),
                 },
             );
             resultados.insert(exclusion.test.clone(), etiqueta);
@@ -137,6 +227,9 @@ pub fn importar(home: &Path, tarea: &Tarea, ruta: &Path) -> Result<Importacion, 
     let ignorados = junit.tests.len().saturating_sub(importados);
     guardar_colab(home, &tarea.nombre, &colab)?;
 
+    // Decisión 40: si `unshare -rn` no funcionó en Colab, la corrida tuvo red y su confianza lo dice.
+    let confianza =
+        (junit.red.as_deref() == Some("con-red")).then(|| CONFIANZA_CON_RED.to_string());
     let mut evento = observe::evento_manual(
         &format!("pendientes-{}", tarea.nombre),
         TipoEvento::Gate,
@@ -146,12 +239,23 @@ pub fn importar(home: &Path, tarea: &Tarea, ruta: &Path) -> Result<Importacion, 
     evento.extra.insert("origen".into(), json!("colab"));
     evento.extra.insert("tests".into(), json!(resultados));
     evento.extra.insert("junit_sha256".into(), json!(sha));
+    if let Some(texto) = &confianza {
+        evento.extra.insert("confianza".into(), json!(texto));
+    }
     observe::registrar_en(&home.join(ARCHIVO_EVENTOS), &evento)
         .map_err(|e| infra("registrar el evento", e))?;
     Ok(Importacion {
         importados,
         ignorados,
+        avisos: Vec::new(),
+        confianza,
     })
+}
+
+/// Commit con el que se armó el paquete de la tarea. `None` si no hay paquete.
+fn commit_del_paquete(home: &Path, tarea: &str) -> Option<String> {
+    let ruta = dir_paquete(home, tarea).join(ARCHIVO_COMMIT);
+    fs::read_to_string(ruta).ok().map(|c| c.trim().to_string())
 }
 
 /// Resultados de Colab guardados para una tarea. Sin archivo, vacío.
@@ -264,11 +368,14 @@ fn localizar(tarea: &Tarea, archivo: &str) -> Result<PathBuf, ErrorOraculo> {
 }
 
 /// Script que junta los junit de cada repetición (`repeticion-N.xml`) en un solo `pendientes.xml`, con
-/// todos sus testcases. El lector de junit de Root cuenta los testcases repetidos por id.
+/// todos sus testcases. El lector de junit de Root cuenta los testcases repetidos por id. La marca
+/// `red.txt` que deja `correr.sh` va como atributo `root_red` del testsuite (decisión 40).
 const GUION_JUNTAR: &str = r#"import glob
+import os
 import xml.etree.ElementTree as ET
 raiz = ET.Element("testsuites")
 suite = ET.SubElement(raiz, "testsuite", name="pendientes")
+suite.set("root_red", open("red.txt").read().strip() if os.path.exists("red.txt") else "desconocido")
 for ruta in sorted(glob.glob("repeticion-*.xml")):
     for caso in ET.parse(ruta).getroot().iter("testcase"):
         suite.append(caso)
@@ -276,9 +383,36 @@ ET.ElementTree(raiz).write("pendientes.xml", encoding="utf-8", xml_declaration=T
 "#;
 
 /// Script que corre los nodos pendientes `repeticiones` veces y deja `pendientes.xml` al lado.
-/// Si hay una carpeta `bin/` al lado (el `cargo` mínimo del respaldo de Colab), la pone al frente del
-/// `PATH`.
-fn guion_correr(nodos: &[String], repeticiones: u32) -> String {
+/// Los tests corren dentro de `unshare -rn` (sin red, decisión 40). Si Colab no deja crear ese
+/// namespace, la corrida sigue con red y `red.txt` dice `con-red`. `prelude` prepara la caché, si la
+/// hay, y va antes de `pytest` en la misma línea. Si hay una carpeta `bin/` al lado (el `cargo` mínimo
+/// del respaldo de Colab), la pone al frente del `PATH`.
+fn guion_correr(nodos: &[String], repeticiones: u32, prelude: &str) -> String {
+    guion_con_previo(nodos, repeticiones, "", prelude)
+}
+
+/// Guion de un paquete con caché: `ROOT_CACHE` apunta a `cache/` del paquete, y su `config.toml` (y el
+/// `--find-links`) se reescriben a esa ruta, porque la caché vino con rutas `/cache` del contenedor.
+fn guion_con_cache(nodos: &[String], repeticiones: u32, lenguaje: &str) -> String {
+    let previo = "ROOT_CACHE=\"$(pwd)/cache\"\n";
+    guion_con_previo(nodos, repeticiones, previo, &preludio_de(lenguaje))
+}
+
+/// Preludio de la suite para el lenguaje, adaptado a la caché del paquete (`$ROOT_CACHE`). El
+/// `config.toml` de cargo se reescribe a `CARGO_HOME` desde la copia intacta de la caché: así correr
+/// `correr.sh` otra vez no vuelve a reescribir rutas ya reescritas.
+fn preludio_de(lenguaje: &str) -> String {
+    match lenguaje {
+        "rust" => "export CARGO_NET_OFFLINE=true && export CARGO_HOME=/tmp/cargo-home && \
+             mkdir -p \"$CARGO_HOME\" && sed \"s#/cache#$ROOT_CACHE#g\" \"$ROOT_CACHE/config.toml\" \
+             > \"$CARGO_HOME/config.toml\" && "
+            .to_string(),
+        "python" => descarga::PRELUDIO_PYTHON.replace("/cache", "\"$ROOT_CACHE\""),
+        _ => String::new(),
+    }
+}
+
+fn guion_con_previo(nodos: &[String], repeticiones: u32, previo: &str, prelude: &str) -> String {
     let lista: Vec<String> = nodos.iter().map(|n| comillas(n)).collect();
     format!(
         "#!/usr/bin/env bash\n\
@@ -287,9 +421,12 @@ fn guion_correr(nodos: &[String], repeticiones: u32) -> String {
          if [ -d bin ]; then export PATH=\"$(pwd)/bin:$PATH\"; fi\n\
          export ORACULO_REPO=\"$(pwd)/repo\"\n\
          export CARGO_TARGET_DIR=\"$(pwd)/target\"\n\
+         {previo}\
+         if unshare -rn true 2>/dev/null; then ORDEN=\"unshare -rn\"; RED=sin-red; else ORDEN=\"\"; RED=con-red; fi\n\
+         echo \"$RED\" > red.txt\n\
          estado=0\n\
          for i in $(seq 1 {repeticiones}); do\n\
-         python3 -m pytest -q -p no:cacheprovider --junitxml=repeticion-$i.xml {nodos} || estado=$?\n\
+         {prelude}$ORDEN python3 -m pytest -q -p no:cacheprovider --junitxml=repeticion-$i.xml {nodos} || estado=$?\n\
          done\n\
          python3 -I - <<'PY'\n\
          {juntar}\
@@ -369,10 +506,10 @@ mod tests {
                      [[entorno]]\ntest = \"a.py::t\"\nmotivo = \"m\"\n";
         std::fs::write(tarea_dir.path().join("tarea.toml"), texto).expect("escribe");
         let tarea = Tarea::cargar_de(tarea_dir.path()).expect("carga la tarea");
-        let r = crear(home.path(), &tarea, repo.path());
+        let r = crear(home.path(), &tarea, repo.path(), None);
         let motivo = r.err().map(|e| e.to_string()).unwrap_or_default();
         assert!(motivo.contains("nombre inválido"), "{motivo}");
-        assert!(!home.path().join(CARPETA_PAQUETES).exists());
+        assert!(!home.path().join("oraculos").exists());
     }
 
     #[test]
@@ -383,7 +520,7 @@ mod tests {
     #[test]
     fn pendiente_guion_correr_tiene_exports_pytest_y_los_nodos() {
         let nodos = vec!["tests/test_x.py::test_rendimiento[gpu-10000-res1]".to_string()];
-        let texto = guion_correr(&nodos, 1);
+        let texto = guion_correr(&nodos, 1, "");
         assert!(texto.starts_with("#!/usr/bin/env bash\n"));
         assert!(texto.contains("set -euo pipefail"));
         assert!(texto.contains("export ORACULO_REPO=\"$(pwd)/repo\""));
@@ -399,7 +536,7 @@ mod tests {
     #[test]
     fn pendiente_guion_correr_repite_la_suite_y_junta_los_junit() {
         let nodos = vec!["tests/test_x.py::test_a".to_string()];
-        let texto = guion_correr(&nodos, 3);
+        let texto = guion_correr(&nodos, 3, "");
         assert!(texto.contains("for i in $(seq 1 3); do"), "{texto}");
         assert!(texto.contains("|| estado=$?"), "{texto}");
         assert!(texto.contains("exit $estado"), "{texto}");
@@ -428,12 +565,12 @@ mod tests {
         assert!(estado.success(), "{estado:?}");
         let texto = fs::read_to_string(base.path().join("pendientes.xml")).expect("junit");
         let leido = crate::oracle::junit::parsear(&texto).expect("parsea");
-        assert_eq!(leido.testcases["test_x::test_a"], 2, "{texto}");
+        assert_eq!(leido.testcases["tests.test_x::test_a"], 2, "{texto}");
     }
 
     #[test]
     fn pendiente_guion_correr_agrega_bin_al_path_si_existe() {
-        let texto = guion_correr(&[], 1);
+        let texto = guion_correr(&[], 1, "");
         assert!(
             texto.contains("if [ -d bin ]; then export PATH=\"$(pwd)/bin:$PATH\"; fi"),
             "{texto}"
@@ -498,6 +635,7 @@ mod tests {
                 resultado: "pasa".into(),
                 junit_sha256: "abc".into(),
                 ts: 1.0,
+                commit: String::new(),
             },
         );
         let pendientes = desde(&tarea, &colab);
@@ -505,5 +643,294 @@ mod tests {
         assert_eq!(pendientes[0].colab.as_deref(), Some("pasa"));
         assert_eq!(pendientes[1].colab, None);
         assert_eq!(pendientes[1].motivo, "gpu");
+    }
+    /// Tarea mínima en `home/oraculos/<nombre>`, con un test de `[[entorno]]` y su archivo oculto.
+    fn tarea_en_oraculos(home: &Path, nombre: &str, lenguaje: &str) -> Tarea {
+        let dir = home.join("oraculos").join(nombre);
+        fs::create_dir_all(dir.join("oculto")).expect("oculto");
+        fs::write(
+            dir.join("oculto/test_a.py"),
+            "def test_uno(): pass  # SECRETO-OCULTO\n",
+        )
+        .expect("escribe");
+        let texto = format!(
+            "nombre = \"{nombre}\"\nlenguaje = \"{lenguaje}\"\nimagen = \"i\"\nspec = \"s\"\n\
+             [contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n\
+             [[entorno]]\ntest = \"test_a::uno\"\nmotivo = \"gpu\"\n"
+        );
+        fs::write(dir.join("tarea.toml"), texto).expect("tarea.toml");
+        Tarea::cargar_de(&dir).expect("carga")
+    }
+
+    fn contiene_secreto(dir: &Path) -> Vec<PathBuf> {
+        let mut hallados = Vec::new();
+        let mut pendientes = vec![dir.to_path_buf()];
+        while let Some(actual) = pendientes.pop() {
+            let Ok(entradas) = fs::read_dir(&actual) else {
+                continue;
+            };
+            for entrada in entradas.flatten() {
+                let ruta = entrada.path();
+                if ruta.is_dir() {
+                    pendientes.push(ruta);
+                } else if fs::read_to_string(&ruta).is_ok_and(|t| t.contains("SECRETO-OCULTO")) {
+                    hallados.push(ruta);
+                }
+            }
+        }
+        hallados
+    }
+
+    #[test]
+    fn pendiente_paquete_vive_dentro_de_oraculos_y_no_fuera() {
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        fs::write(repo.path().join("a.txt"), "x").expect("repo");
+        let tarea = tarea_en_oraculos(home.path(), "tarea-x", "shell");
+        let paquete = crear(home.path(), &tarea, repo.path(), None)
+            .expect("crea")
+            .expect("hay paquete");
+        assert!(
+            paquete
+                .dir
+                .starts_with(home.path().join("oraculos/tarea-x/pendientes")),
+            "{}",
+            paquete.dir.display()
+        );
+        assert!(
+            !home.path().join("pendientes").exists(),
+            "no se usa la carpeta vieja pendientes/ de ROOT_HOME"
+        );
+        assert!(
+            paquete.dir.join("tests/test_a.py").is_file(),
+            "el paquete trae el oculto"
+        );
+    }
+
+    #[test]
+    fn pendiente_borrar_paquete_y_tmp_no_deja_tests_ocultos_fuera_de_oraculos() {
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        fs::write(repo.path().join("a.txt"), "x").expect("repo");
+        let tarea = tarea_en_oraculos(home.path(), "tarea-x", "shell");
+        let paquete = crear(home.path(), &tarea, repo.path(), None)
+            .expect("crea")
+            .expect("paquete");
+        // El junit de Colab que se baja a tmp/colab-<sesion> también es material oculto.
+        let tmp = home.path().join("tmp/colab-sesion");
+        fs::create_dir_all(&tmp).expect("tmp");
+        fs::write(tmp.join("pendientes.xml"), "SECRETO-OCULTO en una falla").expect("xml");
+        assert!(
+            contiene_secreto(home.path()).len() >= 2,
+            "antes de limpiar hay material oculto en el paquete y en tmp"
+        );
+        limpiar_paquete(home.path(), &tarea, &paquete.dir, "sesion").expect("limpia");
+        let fuera: Vec<PathBuf> = contiene_secreto(home.path())
+            .into_iter()
+            .filter(|r| !r.starts_with(home.path().join("oraculos")))
+            .collect();
+        assert!(
+            fuera.is_empty(),
+            "queda material oculto fuera de oraculos: {fuera:?}"
+        );
+    }
+
+    #[test]
+    fn pendiente_importar_ignora_resultado_de_otro_commit() {
+        let home = tempfile::tempdir().expect("home");
+        let tarea = tarea_en_oraculos(home.path(), "tarea-x", "shell");
+        let paquete = home.path().join("oraculos/tarea-x/pendientes");
+        fs::create_dir_all(&paquete).expect("paquete");
+        fs::write(paquete.join(ARCHIVO_COMMIT), "aaa").expect("commit");
+        let junit = home.path().join("pendientes.xml");
+        fs::write(
+            &junit,
+            r#"<testsuite><testcase classname="tests.test_a" name="uno"/></testsuite>"#,
+        )
+        .expect("junit");
+        let otro = importar(home.path(), &tarea, &junit, "bbb").expect("importa");
+        assert_eq!(
+            otro.importados, 0,
+            "el resultado de otro commit no se importa"
+        );
+        assert!(
+            otro.avisos.iter().any(|a| a.contains("commit")),
+            "{:?}",
+            otro.avisos
+        );
+        assert!(colab_de(home.path(), "tarea-x").expect("lee").is_empty());
+        let mismo = importar(home.path(), &tarea, &junit, "aaa").expect("importa");
+        assert_eq!(mismo.importados, 1);
+        assert_eq!(
+            colab_de(home.path(), "tarea-x").expect("lee")["test_a::uno"].commit,
+            "aaa"
+        );
+    }
+
+    fn python3_real() -> PathBuf {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::split_paths(&path)
+            .map(|d| d.join("python3"))
+            .find(|p| p.is_file())
+            .expect("hay python3")
+    }
+
+    /// Arma un paquete con `correr.sh` y un `bin/` con `unshare` y `python3` falsos.
+    fn paquete_con_falsos(base: &Path, unshare: &str) -> PathBuf {
+        let dir = base.join("paquete");
+        let bin = dir.join("bin");
+        fs::create_dir_all(&bin).expect("bin");
+        fs::write(
+            dir.join("correr.sh"),
+            guion_correr(&["tests/test_a.py::t1".into()], 1, ""),
+        )
+        .expect("sh");
+        fs::write(bin.join("unshare"), unshare).expect("unshare");
+        let fake_python = format!(
+            "#!/bin/sh\n\
+             case \"$*\" in\n\
+               *\"-m pytest\"*)\n\
+                 for a in \"$@\"; do case \"$a\" in --junitxml=*) xml=\"${{a#--junitxml=}}\";; esac; done\n\
+                 printf '<testsuite><testcase classname=\"tests.test_a\" name=\"t1\"/></testsuite>' > \"$xml\"\n\
+                 exit 0;;\n\
+             esac\n\
+             exec {} \"$@\"\n",
+            python3_real().display()
+        );
+        fs::write(bin.join("python3"), fake_python).expect("python3");
+        for f in ["unshare", "python3"] {
+            fs::set_permissions(bin.join(f), fs::Permissions::from_mode(0o755)).expect("perm");
+        }
+        dir
+    }
+
+    const UNSHARE_FALLA: &str = "#!/bin/sh\nexit 1\n";
+    const UNSHARE_SANO: &str =
+        "#!/bin/sh\nwhile [ \"${1#-}\" != \"$1\" ]; do shift; done\nexec \"$@\"\n";
+
+    fn correr_paquete(dir: &Path) -> (i32, String) {
+        let salida = Command::new("bash")
+            .arg(dir.join("correr.sh"))
+            .current_dir(dir)
+            .output()
+            .expect("bash");
+        (
+            salida.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&salida.stderr).into_owned(),
+        )
+    }
+
+    #[test]
+    fn pendiente_correr_sh_con_unshare_que_falla_sigue_y_deja_marca_con_red() {
+        let base = tempfile::tempdir().expect("base");
+        let dir = paquete_con_falsos(base.path(), UNSHARE_FALLA);
+        let (codigo, error) = correr_paquete(&dir);
+        assert_eq!(codigo, 0, "la corrida sigue: {error}");
+        assert_eq!(
+            fs::read_to_string(dir.join("red.txt"))
+                .expect("marca")
+                .trim(),
+            "con-red"
+        );
+        let xml = fs::read_to_string(dir.join("pendientes.xml")).expect("junit combinado");
+        let leido = junit::parsear(&xml).expect("parsea");
+        assert_eq!(leido.red.as_deref(), Some("con-red"));
+    }
+
+    #[test]
+    fn pendiente_correr_sh_con_unshare_sano_deja_marca_sin_red() {
+        let base = tempfile::tempdir().expect("base");
+        let dir = paquete_con_falsos(base.path(), UNSHARE_SANO);
+        let (codigo, error) = correr_paquete(&dir);
+        assert_eq!(codigo, 0, "{error}");
+        assert_eq!(
+            fs::read_to_string(dir.join("red.txt"))
+                .expect("marca")
+                .trim(),
+            "sin-red"
+        );
+        let xml = fs::read_to_string(dir.join("pendientes.xml")).expect("junit");
+        assert_eq!(
+            junit::parsear(&xml).expect("parsea").red.as_deref(),
+            Some("sin-red")
+        );
+    }
+
+    #[test]
+    fn pendiente_paquete_con_cache_copia_dependencias_y_aisla_la_corrida() {
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        fs::write(repo.path().join("a.txt"), "x").expect("repo");
+        let tarea = tarea_en_oraculos(home.path(), "tarea-x", "rust");
+        let cache = tempfile::tempdir().expect("cache");
+        fs::create_dir_all(cache.path().join("vendor/serde")).expect("vendor");
+        fs::write(
+            cache.path().join("config.toml"),
+            "[source.x]\ndirectory = \"/cache/vendor\"\n",
+        )
+        .expect("config");
+        let paquete = crear(home.path(), &tarea, repo.path(), Some(cache.path()))
+            .expect("crea")
+            .expect("paquete");
+        assert!(
+            paquete.dir.join("cache/config.toml").is_file(),
+            "copia la caché"
+        );
+        assert!(
+            paquete.dir.join("cache/vendor/serde").is_dir(),
+            "copia el vendor"
+        );
+        let sh = fs::read_to_string(paquete.dir.join("correr.sh")).expect("correr.sh");
+        assert!(sh.contains("unshare -rn"), "{sh}");
+        assert!(sh.contains("ROOT_CACHE=\"$(pwd)/cache\""), "{sh}");
+        assert!(sh.contains("export CARGO_HOME=/tmp/cargo-home"), "{sh}");
+        assert!(
+            sh.contains("sed \"s#/cache#$ROOT_CACHE#g\" \"$ROOT_CACHE/config.toml\""),
+            "{sh}"
+        );
+        assert!(
+            !sh.contains("sed -i"),
+            "la caché intacta no se reescribe en el lugar: {sh}"
+        );
+        assert!(
+            !sh.contains("cp /cache/"),
+            "la caché del paquete no apunta a /cache: {sh}"
+        );
+        assert_eq!(paquete.commit, "", "el repo de prueba no es git");
+        let sintaxis = Command::new("bash")
+            .arg("-n")
+            .arg(paquete.dir.join("correr.sh"))
+            .output()
+            .expect("bash");
+        assert!(
+            sintaxis.status.success(),
+            "{}",
+            String::from_utf8_lossy(&sintaxis.stderr)
+        );
+    }
+
+    #[test]
+    fn pendiente_junit_combinado_lleva_la_marca_de_red() {
+        let base = tempfile::tempdir().expect("base");
+        fs::write(base.path().join("red.txt"), "con-red\n").expect("red");
+        fs::write(
+            base.path().join("repeticion-1.xml"),
+            r#"<testsuites><testsuite name="pytest"><testcase classname="tests.test_a" name="t1"/></testsuite></testsuites>"#,
+        )
+        .expect("rep");
+        let juntar = base.path().join("juntar.py");
+        fs::write(&juntar, GUION_JUNTAR).expect("guion");
+        let estado = Command::new("python3")
+            .arg("-I")
+            .arg(&juntar)
+            .current_dir(base.path())
+            .status()
+            .expect("py");
+        assert!(estado.success());
+        let texto = fs::read_to_string(base.path().join("pendientes.xml")).expect("xml");
+        assert_eq!(
+            junit::parsear(&texto).expect("parsea").red.as_deref(),
+            Some("con-red")
+        );
     }
 }

@@ -59,6 +59,7 @@ impl EjecutorContenedor {
             imagen: self.imagen.clone(),
             repo: Some(self.repo.clone()),
             oraculo: self.oraculo.clone(),
+            oraculo_destino: None,
             salida: salida.to_path_buf(),
             cmd: cmd.to_string(),
             env: Vec::new(),

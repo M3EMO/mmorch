@@ -179,10 +179,12 @@ $ROOT_HOME/
     rust/<hash>/
     python/<hash>/
     rustsec/
-  tmp/                    # temporales del Oracle; se limpian por antigüedad
-  evidencia/<tarea>/colab.json   # resultados importados de Colab (Tarea 7f)
+  tmp/                    # temporales del Oracle (evaluar-*, colab-*); se limpian por antigüedad
+  evidencia/<tarea>/colab.json   # resultados importados de Colab, con el commit del repo (Tarea 7f, B16)
   colab/activo.json       # runtime de Colab pedido y no liberado; lo borra Root al liberarlo (Tarea 7j)
-  pendientes/             # paquetes de tests pendientes por entorno (Tarea 7f)
+  oraculos/<tarea>/       # tests ocultos: el builder no puede leer esta carpeta (Tarea 23)
+    pendientes/           # paquete de tests pendientes por entorno; lo borra Root al terminar Colab
+    registros/            # stderr de las corridas que no dejaron junit (A2)
   importado/
     mmorch-metrics.jsonl  # copia de solo lectura del log de mmorch (decisión b3)
     mmorch-eventos.jsonl  # eventos derivados de la importación
@@ -191,7 +193,7 @@ $ROOT_HOME/
 
 Toda línea JSONL lleva `"v": 1`. Un cambio de formato sube `v`, y los lectores aceptan las versiones anteriores.
 `oraculos/<tarea>/diferencias.md` no lo crea ningún subcomando. Lo escribe la persona que compara con el banco.
-Las subcarpetas `contrato/`, `oculto/` y `bootstrap/` son convención. El Oracle lee solo `tarea.toml` y los comandos que ese archivo declara.
+Las subcarpetas `contrato/`, `oculto/` y `bootstrap/` son convención. Cada suite del contenedor monta solo su carpeta (`contrato/` o `oculto/`), y los escenarios montan solo `escenarios/`. El Oracle lee solo `tarea.toml` y los comandos que ese archivo declara.
 
 ## tarea.toml
 

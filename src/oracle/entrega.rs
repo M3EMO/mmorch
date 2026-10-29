@@ -781,11 +781,12 @@ pub fn entregar(
     imagenes: &[ImagenBase],
 ) -> Result<ResultadoEntrega, ErrorOraculo> {
     let reqs = tarea.requisito.as_slice();
-    // Los escenarios son scripts de la carpeta de la tarea: sin ella no hay nada que montar.
-    if !tarea.escenario.is_empty() && !tarea.dir.is_dir() {
+    // Los escenarios son scripts de `escenarios/`: sin esa carpeta no hay nada que montar (M15).
+    let escenarios = tarea.dir.join("escenarios");
+    if !tarea.escenario.is_empty() && !escenarios.is_dir() {
         return Err(ErrorOraculo::Infra(format!(
-            "no existe la carpeta de la tarea {}",
-            tarea.dir.display()
+            "no existe la carpeta de escenarios {}",
+            escenarios.display()
         )));
     }
     let Construccion {
@@ -797,7 +798,7 @@ pub fn entregar(
     // El contenedor de escenario sale de la imagen construida. Sin él, van al de evaluación.
     let contenedor = match &imagen {
         Some(img) if !tarea.escenario.is_empty() => {
-            match ContenedorEscenario::iniciar(&img.etiqueta, &tarea.dir) {
+            match ContenedorEscenario::iniciar(&img.etiqueta, &escenarios) {
                 Ok(c) => Some(c),
                 Err(motivo) => {
                     avisos.push(format!(
@@ -884,14 +885,14 @@ static CONTADOR_ESCENARIO: AtomicU64 = AtomicU64::new(0);
 impl ContenedorEscenario {
     /// Arranca la imagen sin red, con `sleep` o, si no está, con `tail -f /dev/null`.
     /// Sin `sh` no sirve para escenarios: devuelve el motivo y la evaluación usa el contenedor de evaluación.
-    fn iniciar(imagen: &str, oraculo: &Path) -> Result<Self, String> {
+    fn iniciar(imagen: &str, escenarios: &Path) -> Result<Self, String> {
         let nombre = format!(
             "root-entrega-esc-{}-{}",
             std::process::id(),
             CONTADOR_ESCENARIO.fetch_add(1, Ordering::Relaxed)
         );
         for comando in [vec!["sleep", "600"], vec!["tail", "-f", "/dev/null"]] {
-            let args = args_arranque(imagen, oraculo, &nombre, &comando);
+            let args = args_arranque(imagen, escenarios, &nombre, &comando);
             let refs: Vec<&str> = args.iter().map(String::as_str).collect();
             let arranco = correr_podman(&refs, PLAZO_CORTO).is_ok_and(|s| s.codigo == 0);
             if arranco && corriendo(&nombre) {
@@ -971,8 +972,12 @@ fn quitar(nombre: &str) {
 
 /// Argumentos de `podman run -d` de un escenario: sin red, sin el proxy del host (M4) y con `comando` como
 /// entrypoint. Los escenarios son scripts de la tarea: `oraculo` entra en solo lectura, sin copiarse a la imagen.
-fn args_arranque(imagen: &str, oraculo: &Path, nombre: &str, comando: &[&str]) -> Vec<String> {
-    let montaje = format!("{}:/oraculo:ro,{SUFIJO_SELINUX}", oraculo.display());
+fn args_arranque(imagen: &str, escenarios: &Path, nombre: &str, comando: &[&str]) -> Vec<String> {
+    // Solo `escenarios/` entra al contenedor: `oculto/` y `tarea.toml` quedan afuera (M15).
+    let montaje = format!(
+        "{}:/oraculo/escenarios:ro,{SUFIJO_SELINUX}",
+        escenarios.display()
+    );
     let Some((entrada, resto)) = comando.split_first() else {
         return Vec::new();
     };
@@ -1886,6 +1891,27 @@ mod tests {
             );
             assert_eq!(args.first().map(String::as_str), Some("build"));
         }
+    }
+
+    #[test]
+    fn escenario_arranque_monta_solo_la_carpeta_escenarios() {
+        // M15: el contenedor de escenario ve `escenarios/`, nunca la tarea entera (oculto/ y tarea.toml).
+        let args = args_arranque(
+            "img:1",
+            Path::new("/t/oraculos/x/escenarios"),
+            "nombre",
+            &["sleep", "600"],
+        );
+        let montajes: Vec<&String> = args
+            .windows(2)
+            .filter(|p| p[0] == "-v")
+            .map(|p| &p[1])
+            .collect();
+        assert_eq!(
+            montajes,
+            vec!["/t/oraculos/x/escenarios:/oraculo/escenarios:ro,z"],
+            "{args:?}"
+        );
     }
 
     #[test]

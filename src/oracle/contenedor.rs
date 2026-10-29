@@ -31,6 +31,8 @@ pub struct Ejecucion {
     pub imagen: String,
     pub repo: Option<PathBuf>,
     pub oraculo: Option<PathBuf>,
+    /// Destino de `oraculo` dentro del contenedor. Sin valor, `/oraculo`.
+    pub oraculo_destino: Option<String>,
     pub salida: PathBuf,
     pub cmd: String,
     pub env: Vec<(String, String)>,
@@ -60,6 +62,7 @@ impl std::fmt::Debug for Ejecucion {
             .field("imagen", &self.imagen)
             .field("repo", &self.repo)
             .field("oraculo", &self.oraculo)
+            .field("oraculo_destino", &self.oraculo_destino)
             .field("salida", &self.salida)
             .field("cmd", &self.cmd)
             .field("env", &self.env)
@@ -103,12 +106,8 @@ pub fn argumentos(e: &Ejecucion, nombre: &str) -> Vec<String> {
         );
     }
     if let Some(oraculo) = &e.oraculo {
-        montaje(
-            &mut args,
-            oraculo,
-            "/oraculo",
-            &format!("ro,{SUFIJO_SELINUX}"),
-        );
+        let destino = e.oraculo_destino.as_deref().unwrap_or("/oraculo");
+        montaje(&mut args, oraculo, destino, &format!("ro,{SUFIJO_SELINUX}"));
     }
     if let Some(cache) = &e.cache {
         let opciones = if e.cache_rw {
@@ -310,6 +309,7 @@ mod tests {
             imagen: "docker.io/library/alpine:3.20".into(),
             repo: Some(PathBuf::from("/tmp/r")),
             oraculo: Some(PathBuf::from("/tmp/o")),
+            oraculo_destino: None,
             salida: PathBuf::from("/tmp/s"),
             cmd: "pytest -q".into(),
             env: vec![("PYTHONPATH".into(), "/repo".into())],
@@ -419,6 +419,22 @@ mod tests {
         assert!(
             !args.iter().any(|a| a.contains(":/repo")),
             "sin repo no hay montaje de /repo: {args:?}"
+        );
+    }
+
+    #[test]
+    fn contenedor_oraculo_monta_en_su_destino_de_la_suite() {
+        let mut e = ejecucion();
+        e.oraculo = Some(PathBuf::from("/t/oraculos/x/contrato"));
+        e.oraculo_destino = Some("/oraculo/contrato".into());
+        let args = argumentos(&e, "n");
+        assert!(
+            args.contains(&"/t/oraculos/x/contrato:/oraculo/contrato:ro,z".to_string()),
+            "{args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a.ends_with(":/oraculo:ro,z")),
+            "{args:?}"
         );
     }
 
