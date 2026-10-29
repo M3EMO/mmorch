@@ -17,6 +17,7 @@ pub mod perfiles;
 pub mod requisitos;
 pub mod rubrica;
 pub mod tarea;
+pub mod validez;
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};

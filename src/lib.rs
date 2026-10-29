@@ -21,6 +21,7 @@ pub mod track;
 pub use cli::Cli;
 pub use error::Error;
 
+use std::fs;
 use std::io;
 use std::path::Path;
 
@@ -54,6 +55,21 @@ pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
                     repo,
                 },
         } => oraculo_calibrar(cli.json, tarea, dimension, *n, *semilla, repo.as_deref()),
+        Comando::Oraculo {
+            accion:
+                OraculoAccion::Validar {
+                    casos,
+                    preparar_ciego,
+                    fuentes,
+                    semilla,
+                },
+        } => oraculo_validar(
+            cli.json,
+            casos,
+            *preparar_ciego,
+            fuentes.as_deref(),
+            *semilla,
+        ),
         Comando::Ficha { accion } => ficha_accion(cli.json, accion),
         Comando::Route {
             rol,
@@ -149,6 +165,83 @@ fn oraculo_calibrar(
 /// Una métrica con dos decimales, o `sin medir` si no tiene casos de una clase.
 fn medida(valor: Option<f32>) -> String {
     valor.map_or_else(|| "sin medir".to_string(), |v| format!("{v:.2}"))
+}
+
+/// `oraculo validar`: mide la validez del juicio de Root y escribe `casos/validez.json` (Tarea 12b). Con
+/// `--preparar-ciego`, arma los paquetes a ciegas. Sale con 0 aunque una métrica no cumpla: es una medida.
+fn oraculo_validar(
+    json: bool,
+    casos: &Path,
+    preparar_ciego: bool,
+    fuentes: Option<&Path>,
+    semilla: Option<u64>,
+) -> Result<u8, Error> {
+    if preparar_ciego {
+        let fuentes =
+            fuentes.ok_or_else(|| Error::Uso("--preparar-ciego exige --fuentes".into()))?;
+        let semilla = semilla.unwrap_or_else(oracle::validez::semilla_del_reloj);
+        let preparado = oracle::validez::preparar_ciego(casos, fuentes, semilla)?;
+        if preparado.sin_rubricas {
+            eprintln!(
+                "aviso: no hay rúbricas embebidas; el formulario lleva solo la decisión y el orden"
+            );
+        }
+        if json {
+            println!("{}", serde_json::to_string_pretty(&preparado)?);
+        } else {
+            println!(
+                "{} paquetes a ciegas en {}",
+                preparado.paquetes.len(),
+                casos.join("ciego").display()
+            );
+        }
+        return Ok(0);
+    }
+    let validez = oracle::validez::validar(casos)?;
+    let texto = serde_json::to_string_pretty(&validez)?;
+    let ruta = casos.join(oracle::validez::ARCHIVO);
+    fs::write(&ruta, format!("{texto}\n"))
+        .map_err(|e| oracle::ErrorOraculo::Infra(format!("escribir {}: {e}", ruta.display())))?;
+    if json {
+        println!("{texto}");
+    } else {
+        imprimir_validez(&validez);
+    }
+    Ok(0)
+}
+
+/// Resumen legible de `validez.json`: una línea por métrica, con su umbral si lo tiene.
+fn imprimir_validez(v: &oracle::validez::Validez) {
+    let linea = |nombre: &str, m: &oracle::validez::Metrica| {
+        let cumple = match (m.cumple, m.umbral) {
+            (Some(true), Some(u)) => format!(", cumple (umbral {u:.2})"),
+            (Some(false), Some(u)) => format!(", no cumple (umbral {u:.2})"),
+            (Some(true), None) => ", cumple".to_string(),
+            (Some(false), None) => ", no cumple".to_string(),
+            (None, _) => String::new(),
+        };
+        let motivo = m
+            .motivo
+            .as_deref()
+            .map(|t| format!(" ({t})"))
+            .unwrap_or_default();
+        println!("{nombre}: {}{cumple}{motivo}", medida(m.valor));
+    };
+    linea("exactitud de orden", &v.exactitud_orden);
+    linea("recall de defectos", &v.recall);
+    linea("acuerdo en la decisión", &v.acuerdo_decision);
+    linea("spearman del orden", &v.spearman);
+    for k in &v.kappa_dimension {
+        let motivo = k
+            .motivo
+            .as_deref()
+            .map(|t| format!(" ({t})"))
+            .unwrap_or_default();
+        println!("kappa {}: {}{motivo}", k.clave, medida(k.valor));
+    }
+    for aviso in &v.avisos {
+        println!("aviso: {aviso}");
+    }
 }
 
 /// `oraculo informe`: imprime el informe del veredicto, en JSON o en markdown con `--md`. El código de

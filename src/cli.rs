@@ -214,6 +214,22 @@ pub enum OraculoAccion {
         #[arg(long)]
         repo: Option<PathBuf>,
     },
+    /// Mide si el juicio de Root coincide con resultados conocidos (Tarea 12b). Con `--preparar-ciego`,
+    /// arma los paquetes a ciegas de `--fuentes` en `casos/ciego/`.
+    Validar {
+        /// Carpeta de casos: `orden.toml`, `defectos.toml` y `ciego/`.
+        #[arg(long)]
+        casos: PathBuf,
+        /// Arma los paquetes a ciegas en vez de medir. Exige `--fuentes`.
+        #[arg(long, requires = "fuentes")]
+        preparar_ciego: bool,
+        /// Manifiesto con las `[[fuente]]` del paquete a ciegas. Exige `--preparar-ciego`.
+        #[arg(long, requires = "preparar_ciego")]
+        fuentes: Option<PathBuf>,
+        /// Semilla de los ids del paquete a ciegas. Sin ella, vale el reloj. Exige `--preparar-ciego`.
+        #[arg(long, requires = "preparar_ciego")]
+        semilla: Option<u64>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -323,6 +339,7 @@ impl Comando {
                 OraculoAccion::Informe { .. } => "oraculo informe",
                 OraculoAccion::Pendientes { .. } => "oraculo pendientes",
                 OraculoAccion::Calibrar { .. } => "oraculo calibrar",
+                OraculoAccion::Validar { .. } => "oraculo validar",
             },
             Comando::Observa { accion } => match accion {
                 ObservaAccion::Claude { .. } => "observa claude",

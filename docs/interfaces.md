@@ -59,6 +59,8 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t oraculo pendientes --liberar` | Libera el runtime de Colab anotado en `$ROOT_HOME/colab/activo.json`, si hay uno, y sale. | sin salida JSON | construido (Tarea 7j) |
 | `r00t oraculo pendientes --vigilar` | Red de seguridad: lee `$ROOT_HOME/colab/activo.json`. Libera el runtime si pasó su tope o si su junit cumple lo pedido. Un runtime vigente no se toca. Sin `--tarea` ni `--repo`. | `{vigilancia, causa}`, con `vigilancia` `sin_runtime`, `vigente` o `liberado` | construido (Tarea 7l) |
 | `r00t oraculo calibrar --tarea <t> --dimension <d> [--n 20] [--semilla 42] [--repo <dir>]` | Calibra una dimensión con defectos inyectados: mitad con defecto, mitad limpia. Mide la sensibilidad, la especificidad y la exactitud balanceada, por dimensión y por ítem, contra una línea base. Agrega una fila a `$ROOT_HOME/calibracion.json` e imprime la fila. Sin `--repo`, usa `[calibracion] repo` de `tarea.toml`; sin ninguno, sale con `2`. | `Fila` | construido (Tarea 12). |
+| `r00t oraculo validar --casos <dir> [--json]` | Mide si el juicio de Root coincide con los casos de `<dir>` (orden conocido, defectos reales y el formulario a ciegas). Escribe `<dir>/validez.json`. Una métrica sin datos queda sin medir, nunca 0 ni 1. Sale con `0` aunque una métrica no cumpla. | `Validez` | construido (Tarea 12b). Formatos: sección ## Validez. |
+| `r00t oraculo validar --preparar-ciego --fuentes <manifiesto.toml> --casos <dir> [--semilla N]` | Arma un paquete anónimo por fuente en `<dir>/ciego/`, con su formulario, y la clave `ciego/clave.toml`. | ids de los paquetes | construido (Tarea 12b). |
 | `r00t oraculo informe --tarea <t> --repo <dir> [--md]` | Arma el informe del PM sobre el veredicto: decisión, regla que la disparó, requisitos, bloqueantes, riesgos, próximos pasos y confianza. Sin `--md`, imprime JSON; con `--md`, markdown legible. | `Informe` | construido (Tarea 13b). |
 | `r00t oraculo validar --casos <dir>` | Mide si el juicio de Root coincide con resultados conocidos. | `Validez` | pendiente (Tarea 12b). No está en `--help`. |
 | `r00t observa claude --archivo <salida-de-claude-p> --corrida <id> [--via cupo\|nube]` | Registra la salida JSON de `claude -p`. Con `--via nube`, registra una sesión en la nube. | `{registrados, via}` | construido |
@@ -438,6 +440,7 @@ Los tipos se documentan con su JSON Schema en `## Esquemas`. La fuente es `src/t
 | `politica` | `route` | construido |
 | `usomargenes` | `observe::uso` | construido |
 | `replay` | `aprende` | construido |
+| `validez` | `oracle::validez` | construido (Tarea 12b) |
 
 Enums: `Rol`, `Proveedor` (`anthropic`, `deepseek`), `Via` (`cupo`, `api`, `oraculo`, `nube`), `Dimension`, `Estado` (`verde`, `rojo`, `sin_veredicto`), `Cumplimiento`, `Decision`, `Fuente`, `TipoEvento`. Sus valores aparecen en los esquemas.
 
@@ -454,7 +457,7 @@ Funciones que usa el código:
 | `oracle::evaluar(repo, tarea, opciones)` | construido | `oracle::evaluar_por_nombre(nombre, repo)` lee la tarea desde `ROOT_HOME`. |
 | `oracle::calibra::calibrar_tarea(home, nombre, dimension, n, semilla, repo, evaluador)` | construido (Tarea 12) | Calibra y agrega la fila a `calibracion.json`. `calibrar_con` recibe la tarea y el repo ya resueltos. |
 | `oracle::informe::informar(veredicto, tarea, reglas, redactor)` | construido (Tarea 13b) | El redactor es opcional. `informar_con` recibe además las rúbricas. |
-| `oracle::validar(casos)` | pendiente (Tarea 12b) | |
+| `oracle::validez::validar(casos)` | construido (Tarea 12b) | `validar_con` recibe el evaluador. `preparar_ciego(casos, fuentes, semilla)` arma los paquetes a ciegas. |
 | `track::agregar(fila)` | construido | |
 | `track::filas(filtro)` | construido | |
 | `track::comparar(a, b, tarea)` | construido | Rechaza hashes de rúbrica distintos. |
@@ -462,6 +465,32 @@ Funciones que usa el código:
 | `aprende::recalcular(filas, eventos)` | construido | Función pura. |
 | `proveedores::llamar(eleccion, prompt, corrida)` | construido | Registra el evento. |
 | `goal::verificar_goal(repo)` | construido | |
+
+## Validez
+
+`r00t oraculo validar --casos <dir>` mide si el juicio de Root coincide con resultados que una fuente externa conoce. Escribe `<dir>/validez.json`, tipo `validez`, y resume cada métrica en texto. Con `--json` imprime el mismo objeto.
+
+**Carpeta de casos.** Todo archivo es opcional. Sin archivo, su métrica queda sin medir: `valor` vale `null` y `motivo` dice por qué. Nunca vale 0 ni 1.
+
+- `orden.toml`: `[[par]]` con `tarea`, `mejor`, `peor` y `fuente` (de dónde sale el orden). `mejor` y `peor` son rutas de repo relativas a `<dir>`.
+- `defectos.toml`: `[[defecto]]` con `tarea`, `repo`, `archivo`, `linea`, `fuente` (por ejemplo "revisión de Opus F1") y `detalle`. `repo` es relativo a `<dir>`.
+- `ciego/`: los paquetes a ciegas que arma `--preparar-ciego`. `ciego/clave.toml` es la clave que lee Root: `[[paquete]]` con `id`, `tarea`, `origen` y `repo`. El paquete y su formulario no nombran el origen.
+
+**Métricas.**
+
+- *Exactitud de orden*: fracción de pares donde Root pone `mejor` por encima de `peor`. Root compara primero la decisión (listo, no listo, bloqueado). A igual decisión compara el `global` si los dos lo tienen; si no, la completitud. Un empate o un par sin veredicto cuenta como fallo. No tiene umbral.
+- *Recall de defectos*: fracción de defectos con un hallazgo del veredicto en el mismo `archivo` y a ±3 líneas de `linea`. Umbral 0,8 (decisión 12).
+- *Acuerdo con el usuario*: `acuerdo_decision` cuenta los paquetes cuya decisión de Root coincide con la del formulario; cumple con 5 de 6 (decisión 13). `kappa_dimension` es el kappa de Cohen con pesos cuadráticos sobre los niveles 0 a 3, sumando los ítems de cada dimensión; cumple con 0,6 o más. `kappa_item` lo mide por ítem, sin umbral: un kappa bajo marca un ancla ambigua. `spearman` correlaciona el `orden` del formulario (1 es el mejor) con el orden de Root.
+
+Un par, defecto o paquete que no tiene dato del usuario o de Root queda fuera de su métrica, y `avisos` lo cuenta. Un error del evaluador aborta la medición y no escribe `validez.json`.
+
+**Paquetes a ciegas.** `r00t oraculo validar --preparar-ciego --fuentes <manifiesto.toml> --casos <dir> [--semilla N]` lee el manifiesto. Su `[[fuente]]` tiene `tarea`, `origen` y `repo` (ruta absoluta o relativa al manifiesto). Por cada fuente arma `<dir>/ciego/<id>/` con:
+
+- `repo/`: copia del repo sin los nombres `AGENTS.md`, `CLAUDE.md`, `sdlc.toml`, `.claude`, `.git`, `logs` y `target` en cualquier nivel; sin archivos `*.log` ni nombres que empiecen con `.ecc`; sin enlaces simbólicos. Estos nombres son los rastros de ECC, de SDLC, de git, de logs y de build.
+- `formulario.toml`: `decision` (`listo`, `no_listo` o `bloqueado`), `orden` (posición entre los del lote; 1 es el mejor) y un `[[item]]` por ítem de rúbrica, con `nivel` de 0 a 3. Las anclas van como comentario. Sin rúbricas embebidas, el formulario lleva solo la decisión y el orden, y el comando avisa en stderr.
+- El `id` tiene 8 caracteres hexadecimales y sale de un PRNG con la semilla (`--semilla`, o el reloj). Ningún `id` contiene el origen ni la tarea. Si `<dir>/ciego/` ya tiene contenido, el comando sale con `2`.
+
+Las rúbricas del formulario salen de `rubrica::cargar_embebidas()`, las mismas que usa Root.
 
 ## Esquemas
 
@@ -3815,6 +3844,179 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "cupo_bloque_usd",
         "api_mes_usd",
         "nube_mes_usd"
+      ]
+    }
+  }
+}
+```
+
+### validez
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Validez",
+  "description": "Resultado de `validar`. Cada métrica lleva su `valor`, su `cumple` y, si no se mide, su `motivo`.",
+  "type": "object",
+  "properties": {
+    "acuerdo_decision": {
+      "description": "Paquetes con la misma `Decision` que el usuario. `cumple`: 5 de 6 (decisión 13).",
+      "$ref": "#/$defs/Metrica"
+    },
+    "avisos": {
+      "description": "Casos que quedaron fuera o datos que faltan, con su motivo.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "exactitud_orden": {
+      "description": "Fracción de pares de `orden.toml` que Root ordena como el resultado medido. Sin umbral.",
+      "$ref": "#/$defs/Metrica"
+    },
+    "kappa_dimension": {
+      "description": "Una entrada por dimensión, en el orden de `TODAS_LAS_DIMENSIONES`. `cumple`: kappa >= 0,6.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Kappa"
+      }
+    },
+    "kappa_item": {
+      "description": "Una entrada por ítem de los formularios. Sin umbral: un kappa bajo marca un ancla ambigua.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Kappa"
+      }
+    },
+    "recall": {
+      "description": "Fracción de defectos reales que Root encuentra con `archivo` y `linea` a ±3. Umbral 0,8.",
+      "$ref": "#/$defs/Metrica"
+    },
+    "spearman": {
+      "description": "Spearman entre el `orden` de los formularios y el orden de Root. Sin umbral.",
+      "$ref": "#/$defs/Metrica"
+    },
+    "v": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "v",
+    "exactitud_orden",
+    "recall",
+    "acuerdo_decision",
+    "kappa_dimension",
+    "kappa_item",
+    "spearman",
+    "avisos"
+  ],
+  "$defs": {
+    "Kappa": {
+      "description": "Kappa de Cohen con pesos cuadráticos. `clave` es una dimensión (`seguridad`) o un ítem (`seguridad.secretos`).",
+      "type": "object",
+      "properties": {
+        "casos": {
+          "description": "Pares de niveles (usuario, Root) que entraron al kappa.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "clave": {
+          "type": "string"
+        },
+        "cumple": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "motivo": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "umbral": {
+          "description": "Umbral de la dimensión (0,6). `None` en los ítems, que solo son diagnóstico de anclas.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "valor": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        }
+      },
+      "required": [
+        "clave",
+        "casos"
+      ]
+    },
+    "Metrica": {
+      "description": "Una medida de validez. Sin casos válidos, `valor` es `None` y `motivo` dice por qué.",
+      "type": "object",
+      "properties": {
+        "aciertos": {
+          "description": "Aciertos entre los casos. Solo en las fracciones; `None` en las demás.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "casos": {
+          "description": "Casos válidos que entraron a la medida.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "cumple": {
+          "description": "`true` si `valor` llega al umbral. `None` sin umbral o sin medir.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "motivo": {
+          "description": "Por qué la métrica no se mide. Solo con `valor` en `None`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "umbral": {
+          "description": "Umbral de la métrica. `None` si el plan no fija uno.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "valor": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        }
+      },
+      "required": [
+        "casos"
       ]
     }
   }
