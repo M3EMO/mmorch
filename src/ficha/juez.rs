@@ -44,6 +44,7 @@ impl JuezAmbiguedad for JuezProveedor {
             .map(|respuesta| RespuestaJuez {
                 texto: respuesta.texto,
                 truncada: respuesta.truncada,
+                costo_usd: respuesta.cost_usd,
             })
             .map_err(|e| ErrorFicha::Juez(e.to_string()))
     }

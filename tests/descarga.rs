@@ -1168,6 +1168,7 @@ impl ModeloJuez for JuezFalso {
         Ok(RespuestaJuez {
             texto: self.respuesta.clone(),
             truncada: false,
+            costo_usd: 0.0,
         })
     }
 }

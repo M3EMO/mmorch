@@ -29,6 +29,7 @@ impl JuezFalso {
             respuesta: Ok(RespuestaJuez {
                 texto: texto.to_string(),
                 truncada: false,
+                costo_usd: 0.0,
             }),
             prompts: RefCell::new(Vec::new()),
         }
@@ -45,6 +46,7 @@ impl JuezFalso {
             respuesta: Ok(RespuestaJuez {
                 texto: texto.to_string(),
                 truncada: true,
+                costo_usd: 0.0,
             }),
             prompts: RefCell::new(Vec::new()),
         }

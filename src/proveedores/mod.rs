@@ -66,6 +66,8 @@ pub struct Respuesta {
 pub struct RespuestaJuez {
     pub texto: String,
     pub truncada: bool,
+    /// Costo de la llamada en USD. Cero si el proveedor no lo informa.
+    pub costo_usd: f64,
 }
 
 /// Causa de `sin_veredicto` cuando el modelo llegó al tope de salida. Nombra el tope pedido.

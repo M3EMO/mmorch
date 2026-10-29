@@ -337,6 +337,7 @@ mod tests {
                 respuesta: Ok(RespuestaJuez {
                     texto: texto.into(),
                     truncada: false,
+                    costo_usd: 0.0,
                 }),
                 llamadas: Cell::new(0),
             }
@@ -348,6 +349,7 @@ mod tests {
                 respuesta: Ok(RespuestaJuez {
                     texto: texto.into(),
                     truncada: true,
+                    costo_usd: 0.0,
                 }),
                 llamadas: Cell::new(0),
             }

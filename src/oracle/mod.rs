@@ -1,5 +1,6 @@
 //! Oracle: corre los tests en un contenedor sin red y cuenta el resultado desde junit.
 
+pub mod calibra;
 pub mod colab;
 pub mod configs;
 pub mod contenedor;
@@ -16,6 +17,7 @@ pub mod requisitos;
 pub mod rubrica;
 pub mod tarea;
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
@@ -27,17 +29,21 @@ use std::time::{Duration, SystemTime};
 use thiserror::Error as ErrorDerive;
 
 use crate::borrado;
-use crate::config::root_home;
+use crate::config::{Config, root_home};
 use crate::ficha::{self, ErrorFicha};
+use crate::proveedores::{Prompt, RespuestaJuez};
 use crate::tipos::{
-    Conteo, Dimension, Estado, EstadoRequisito, Hallazgo, Puntaje, TasaTest, VERSION, Veredicto,
+    Conteo, Dimension, Estado, EstadoRequisito, Hallazgo, Puntaje, Rol, TasaTest, VERSION,
+    Veredicto,
 };
 use crate::track::stats::wilson_inferior;
+use calibra::Calibraciones;
 use contenedor::{Ejecucion, Resultado};
-use juez::ModeloJuez;
+use juez::{EntradaJuez, EstadoJuez, JuezProveedor, ModeloJuez, ResultadoJuez};
 use junit::{Junit, ResultadoTest};
 use perfiles::herramientas::{EjecutorContenedor, EjecutorHerramienta};
 use perfiles::{ResultadoSonda, combinar, deduplicar_hallazgos};
+use rubrica::{Mide, Rubrica};
 use tarea::{Comando, Tarea};
 
 /// Carpetas de la raíz del repo que no se copian: artefactos del builder e historial de git.
@@ -157,12 +163,73 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
             timeout: o.timeout,
         })
     };
+    let home = o.home.clone().unwrap_or_else(root_home);
+    let rubricas = rubrica::cargar_embebidas()
+        .map_err(|e| ErrorOraculo::Infra(format!("rúbricas embebidas: {e}")))?;
+    let calibracion = Calibraciones::cargar(&home)?;
+    let mut avisos = Vec::new();
+    let juez_config = juez_config_de_produccion(&home, &mut avisos);
+    // Sin ítems del juez en las rúbricas, no se arma: no hay nada que llamar ni gastar.
+    let juez = juez::hay_pedidos(&rubricas)
+        .then(|| juez_diseno_de_produccion(&mut avisos))
+        .flatten();
+    let nombre = juez
+        .as_ref()
+        .and_then(|j| j.eleccion.modelo.clone())
+        .unwrap_or_default();
     let deps = Dependencias {
         correr: &correr_en_podman,
         herramientas: &herramientas,
-        juez_config: None,
+        juez: juez.as_ref().map(|j| j as &dyn ModeloJuez),
+        modelo_juez: &nombre,
+        juez_config: juez_config.as_ref().map(|j| j as &dyn ModeloJuez),
+        calibracion: &calibracion,
+        rubricas: &rubricas,
+        avisos,
     };
     evaluar_con(repo, tarea, o, deps)
+}
+
+/// Corrida con la que el juez de diseño de producción aparece en el `Gate` y en el registro.
+const CORRIDA_JUEZ_DISENO: &str = "oraculo-juez-diseno";
+
+/// Juez de la configuración de Cargo de producción. Sin `root.toml` legible o sin modelo válido, no hay
+/// juez y el aviso lo dice. La descarga sigue y el juicio queda sin veredicto.
+fn juez_config_de_produccion(home: &Path, avisos: &mut Vec<String>) -> Option<JuezProveedor> {
+    let cfg = match Config::cargar(&home.join("root.toml")) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            avisos.push(format!("juez de la configuración sin armar: {e}"));
+            return None;
+        }
+    };
+    match descarga::juez_config::juez_config_real(&cfg) {
+        Ok(juez) => Some(juez),
+        Err(e) => {
+            avisos.push(format!("juez de la configuración sin armar: {e}"));
+            None
+        }
+    }
+}
+
+/// Juez de diseño de producción: la elección de Route para `juzga`, con su respaldo. Sin presupuesto o
+/// sin elección válida, no hay juez y el aviso lo dice.
+fn juez_diseno_de_produccion(avisos: &mut Vec<String>) -> Option<JuezProveedor> {
+    let tokens = juez::LimitesPrompt::default().max_tokens;
+    let eleccion = match crate::route::comando::rutear(Rol::Juzga, "diseno", false, tokens) {
+        Ok(eleccion) => eleccion,
+        Err(e) => {
+            avisos.push(format!("juez de diseño sin armar: {e}"));
+            return None;
+        }
+    };
+    match JuezProveedor::nuevo(eleccion, CORRIDA_JUEZ_DISENO.into()) {
+        Ok(juez) => Some(juez),
+        Err(e) => {
+            avisos.push(format!("juez de diseño sin armar: {e}"));
+            None
+        }
+    }
 }
 
 /// Dependencias de una evaluación. `evaluar` arma las de producción; los tests dan ejecutores falsos.
@@ -171,8 +238,18 @@ struct Dependencias<'a> {
     correr: Correr<'a>,
     /// Arma el ejecutor de las sondas. Va después de la descarga: necesita la copia y las cachés.
     herramientas: FabricaHerramientas<'a>,
+    /// Juez de diseño (Tarea 10). `None`: no se armó o no corre, y Diseño queda sin veredicto.
+    juez: Option<&'a dyn ModeloJuez>,
+    /// Nombre del modelo del juez de diseño. Va a la fuente de cada nivel y de cada hallazgo.
+    modelo_juez: &'a str,
     /// Juez de la configuración de Cargo (decisión 30). `None`: la configuración no se juzga.
     juez_config: Option<&'a dyn ModeloJuez>,
+    /// Calibración de Root (Tarea 12). Vacía: nada está calibrado y `global` es `None`.
+    calibracion: &'a Calibraciones,
+    /// Rúbricas de la evaluación. Producción pasa las embebidas.
+    rubricas: &'a [Rubrica],
+    /// Avisos que se conocen antes de evaluar, como un juez que no se pudo armar.
+    avisos: Vec<String>,
 }
 
 /// Lo que la descarga deja listo para las sondas: la copia del repo y las cachés que monta cada contenedor.
@@ -206,14 +283,16 @@ fn evaluar_con(
     deps: Dependencias,
 ) -> Result<Veredicto, ErrorOraculo> {
     verificar_ficha(tarea)?;
-    let rubricas = rubricas_embebidas()?;
+    let rubricas = rubrica::etiquetas(deps.rubricas);
     let repo = fs::canonicalize(repo)
         .map_err(|e| ErrorOraculo::Infra(format!("no existe el repo {}: {e}", repo.display())))?;
     // Los temporales van a ROOT_HOME, nunca a TMPDIR ni a /tmp (desempate 6).
     let home = o.home.clone().unwrap_or_else(root_home);
-    let (colab, mut avisos) = pendientes::colab_para_veredicto(&home, &tarea.nombre)?;
+    let (colab, avisos_colab) = pendientes::colab_para_veredicto(&home, &tarea.nombre)?;
     let commit = commit_de(&repo);
     let (colab, aviso_commit) = filtrar_colab_por_commit(colab, &commit);
+    let mut avisos = deps.avisos;
+    avisos.extend(avisos_colab);
     avisos.extend(aviso_commit);
     let tmp = home.join(CARPETA_TEMPORALES);
     fs::create_dir_all(&tmp).map_err(|e| infra("directorio temporal de ROOT_HOME", e))?;
@@ -222,9 +301,12 @@ fn evaluar_con(
     let copia = temporal(&tmp).map_err(|e| infra("directorio temporal", e))?;
     let repo_copia = copia.path().join("repo");
     copiar_repo(&repo, &repo_copia).map_err(|e| infra("copia del repo", e))?;
+    // Cada juez suma el costo de sus llamadas. El de la configuración va antes que las suites.
+    let juez_config = deps.juez_config.map(Medido::nuevo);
+    let juez_config_ref = juez_config.as_ref().map(|m| m as &dyn ModeloJuez);
     // La descarga va antes de cualquier suite: es la única fase con red (decisión 17).
     let (preparacion, _, _) =
-        descarga::preparar_con_juez(&repo_copia, tarea, &home, o.timeout, deps.juez_config)?;
+        descarga::preparar_con_juez(&repo_copia, tarea, &home, o.timeout, juez_config_ref)?;
     let (cache, rustsec, hallazgos) = match preparacion {
         descarga::Preparacion::Lista {
             cache,
@@ -233,9 +315,8 @@ fn evaluar_con(
         } => (cache, rustsec, hallazgos),
         descarga::Preparacion::SinVeredicto(hallazgos) => {
             let motivo = motivo_de_la_descarga(&hallazgos);
-            return Ok(sin_veredicto(
-                &repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo,
-            ));
+            let v = sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
+            return Ok(con_costo(v, &juez_config));
         }
     };
     let salida = temporal(&tmp).map_err(|e| infra("directorio de salida", e))?;
@@ -265,9 +346,8 @@ fn evaluar_con(
         Suite::SinVeredicto(motivo) => {
             avisos.push(format!("contrato: {motivo}"));
             let motivo = format!("suite del contrato sin veredicto: {motivo}");
-            return Ok(sin_veredicto(
-                &repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo,
-            ));
+            let v = sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
+            return Ok(con_costo(v, &juez_config));
         }
     };
     let excluidos: BTreeSet<String> = tarea
@@ -288,9 +368,8 @@ fn evaluar_con(
         Suite::SinVeredicto(motivo) => {
             avisos.push(format!("oculto: {motivo}"));
             let motivo = format!("suite oculta sin veredicto: {motivo}");
-            return Ok(sin_veredicto(
-                &repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo,
-            ));
+            let v = sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
+            return Ok(con_costo(v, &juez_config));
         }
     };
     let preparada = Preparada {
@@ -299,6 +378,12 @@ fn evaluar_con(
         rustsec,
     };
     let ej = (deps.herramientas)(&preparada);
+    let juez_diseno = deps.juez.map(Medido::nuevo);
+    let juez = JuezDiseno {
+        modelo: juez_diseno.as_ref().map(|m| m as &dyn ModeloJuez),
+        nombre: deps.modelo_juez,
+        rubricas: deps.rubricas,
+    };
     let medicion = medir(
         tarea,
         &repo_copia,
@@ -306,7 +391,8 @@ fn evaluar_con(
         &contrato,
         &oculto,
         &hallazgos,
-    );
+        &juez,
+    )?;
     let estado = estado_de(&contrato.conteo, &oculto.conteo);
     let mut tasas = BTreeMap::new();
     for (id, tasa) in &contrato.tasas {
@@ -317,7 +403,11 @@ fn evaluar_con(
     }
     let mut todos = hallazgos;
     todos.extend(medicion.hallazgos);
-    let sin_calibrar = sin_calibrar(&medicion.puntajes);
+    avisos.extend(medicion.avisos);
+    let mut puntajes = medicion.puntajes;
+    deps.calibracion.aplicar(&tarea.nombre, &mut puntajes);
+    let sin_calibrar = sin_calibrar(&puntajes);
+    let global = calibra::global_de(&puntajes);
     Ok(Veredicto {
         v: VERSION,
         tarea: tarea.nombre.clone(),
@@ -325,11 +415,11 @@ fn evaluar_con(
         commit,
         contrato: contrato.conteo.clone(),
         oculto: oculto.conteo.clone(),
-        puntajes: medicion.puntajes,
+        puntajes,
         hallazgos: deduplicar_hallazgos(todos),
-        global: None,
+        global,
         estado,
-        costo_usd: 0.0,
+        costo_usd: costo_de(&juez_config) + costo_de(&juez_diseno),
         informe: None,
         rubricas,
         repeticiones: tarea.repeticiones,
@@ -343,16 +433,71 @@ fn evaluar_con(
     })
 }
 
-/// Lo que las sondas aportan al veredicto: los nueve puntajes, los hallazgos de las sondas y el
-/// estado de cada requisito.
+/// Envoltorio que suma el costo de las llamadas de un juez. `evaluar_con` lo lee para `costo_usd`.
+struct Medido<'a> {
+    juez: &'a dyn ModeloJuez,
+    costo: Cell<f64>,
+}
+
+impl<'a> Medido<'a> {
+    fn nuevo(juez: &'a dyn ModeloJuez) -> Self {
+        Medido {
+            juez,
+            costo: Cell::new(0.0),
+        }
+    }
+
+    fn costo(&self) -> f64 {
+        self.costo.get()
+    }
+}
+
+impl ModeloJuez for Medido<'_> {
+    fn consultar(&self, prompt: &Prompt) -> Result<RespuestaJuez, ErrorOraculo> {
+        let respuesta = self.juez.consultar(prompt)?;
+        self.costo.set(self.costo.get() + respuesta.costo_usd);
+        Ok(respuesta)
+    }
+}
+
+/// Costo de un juez medido, o cero si no se armó.
+fn costo_de(juez: &Option<Medido>) -> f64 {
+    juez.as_ref().map_or(0.0, Medido::costo)
+}
+
+/// Veredicto de una evaluación que no corrió, con el costo de los jueces que sí llamó.
+fn con_costo(mut v: Veredicto, juez_config: &Option<Medido>) -> Veredicto {
+    v.costo_usd = costo_de(juez_config);
+    v
+}
+
+/// Lo que las sondas y el juez aportan al veredicto: los nueve puntajes, los hallazgos, el estado de cada
+/// requisito y los avisos del juez (los hallazgos que el gate de evidencia descartó).
 struct Medicion {
     puntajes: Vec<Puntaje>,
     hallazgos: Vec<Hallazgo>,
     requisitos: Vec<EstadoRequisito>,
+    avisos: Vec<String>,
 }
 
-/// Mide las nueve dimensiones con las sondas y los requisitos. `descarga` son los hallazgos de la
-/// descarga: los que tocan una dimensión con sondas entran a su puntaje.
+/// El juez de diseño que `medir` usa: el modelo si se armó, su nombre y las rúbricas de la evaluación.
+struct JuezDiseno<'a> {
+    modelo: Option<&'a dyn ModeloJuez>,
+    nombre: &'a str,
+    rubricas: &'a [Rubrica],
+}
+
+/// Lo que el juez aporta a `medir`: su resultado si corrió, sus hallazgos que pasan el gate y los topes
+/// que las sondas ponen a los ítems `mixto`.
+struct Juicio {
+    resultado: Option<ResultadoJuez>,
+    hallazgos: Vec<Hallazgo>,
+    avisos: Vec<String>,
+    topes: BTreeMap<String, u8>,
+}
+
+/// Mide las nueve dimensiones con las sondas, los requisitos y el juez de diseño. `descarga` son los
+/// hallazgos de la descarga: los que tocan una dimensión con sondas entran a su puntaje.
 fn medir(
     tarea: &Tarea,
     repo: &Path,
@@ -360,7 +505,8 @@ fn medir(
     contrato: &Clasificacion,
     oculto: &Clasificacion,
     descarga: &[Hallazgo],
-) -> Medicion {
+    juez: &JuezDiseno,
+) -> Result<Medicion, ErrorOraculo> {
     let resultados = requisitos::desde_clasificacion(oculto);
     let entrega = entrega::sonda_entrega(ej, repo, tarea);
     let estados = requisitos::evaluar_requisitos(
@@ -376,15 +522,24 @@ fn medir(
     sondas.extend(perfiles::sondas_nativas(repo, tarea));
     sondas.extend(perfiles::herramientas::sondas_herramientas(ej, tarea, repo));
     let mut hallazgos: Vec<Hallazgo> = sondas.iter().flat_map(|s| s.hallazgos.clone()).collect();
+    // El juez ve los hallazgos de las sondas (el ciclo de módulos topa `diseno.modularidad`).
+    let juicio = juzgar_diseno(tarea, juez, repo, &hallazgos)?;
     hallazgos.extend(requisitos::hallazgos_inestables(
         &tarea.requisito,
         &resultados,
     ));
+    let Juicio {
+        resultado,
+        hallazgos: de_juez,
+        avisos,
+        topes,
+    } = juicio;
+    hallazgos.extend(de_juez);
     let puntajes = DIMENSIONES
         .iter()
         .map(|&dimension| match dimension {
             Dimension::Funciona => funciona(tarea, contrato, oculto, &entrega.escenarios),
-            Dimension::Diseno => sin_veredicto_puntaje(dimension, "juez no corrido".into()),
+            Dimension::Diseno => puntaje_diseno(juez, resultado.as_ref(), &topes),
             Dimension::Completitud => {
                 requisitos::puntaje_completitud(&estados).unwrap_or_else(|| {
                     sin_veredicto_puntaje(dimension, "ningún requisito tiene nivel medido".into())
@@ -401,14 +556,161 @@ fn medir(
                     .filter(|h| h.dimension == dimension)
                     .cloned()
                     .collect();
-                puntaje_de(dimension, de_la_dimension, extra, tarea)
+                let de_sondas = puntaje_de(dimension, de_la_dimension, extra, tarea);
+                match parte_juez(dimension, juez, resultado.as_ref(), &topes) {
+                    Some(de_juez) => juntar_partes(dimension, de_sondas, de_juez),
+                    None => de_sondas,
+                }
             }
         })
         .collect();
-    Medicion {
+    Ok(Medicion {
         puntajes,
         hallazgos,
         requisitos: estados,
+        avisos,
+    })
+}
+
+/// Corre el juez de diseño sobre la copia del repo y filtra sus hallazgos con el gate de evidencia.
+/// Sin modelo, o sin ítems de juez en las rúbricas, no lo llama: el juicio queda vacío.
+fn juzgar_diseno(
+    tarea: &Tarea,
+    juez: &JuezDiseno,
+    repo: &Path,
+    sondas: &[Hallazgo],
+) -> Result<Juicio, ErrorOraculo> {
+    let topes = juez::topes_desde_sondas(sondas, juez.rubricas);
+    let Some(modelo) = juez.modelo.filter(|_| juez::hay_pedidos(juez.rubricas)) else {
+        return Ok(Juicio {
+            resultado: None,
+            hallazgos: Vec::new(),
+            avisos: Vec::new(),
+            topes,
+        });
+    };
+    let spec_ruta = tarea.dir.join(&tarea.spec);
+    let spec = fs::read_to_string(&spec_ruta).map_err(|e| infra("leer la spec del juez", e))?;
+    let mapa = mapa::construir(repo)?;
+    let entrada = EntradaJuez {
+        spec: &spec,
+        requisitos: &tarea.requisito,
+        mapa: &mapa,
+        hallazgos_sondas: sondas,
+        rubricas: juez.rubricas,
+        repo,
+    };
+    let mut resultado = juez::juzgar(
+        &entrada,
+        modelo,
+        juez.nombre,
+        &juez::LimitesPrompt::default(),
+    );
+    let filtrado = evidencia::filtrar_hallazgos(repo, std::mem::take(&mut resultado.hallazgos));
+    let mut avisos = Vec::new();
+    if !filtrado.descartados.is_empty() {
+        avisos.push(format!(
+            "{} hallazgos del juez de diseño no pasaron el gate de evidencia",
+            filtrado.descartados.len()
+        ));
+    }
+    Ok(Juicio {
+        resultado: Some(resultado),
+        hallazgos: filtrado.validos,
+        avisos,
+        topes,
+    })
+}
+
+/// Rúbrica de los ítems `juez` y `mixto` de una dimensión, juntados de las rúbricas que la nombran. Los
+/// ítems de sonda no pasan: sus niveles los fija la sonda, no el juez. `None` si no hay ítems del juez.
+fn rubrica_del_juez(rubricas: &[Rubrica], dimension: Dimension) -> Option<Rubrica> {
+    let mut id = None;
+    let mut version = 0;
+    let mut items = Vec::new();
+    for r in rubricas
+        .iter()
+        .filter(|r| juez::dimension_de(&r.id) == Some(dimension))
+    {
+        id.get_or_insert_with(|| r.id.clone());
+        version = r.version;
+        items.extend(r.item.iter().filter(|i| i.mide != Mide::Sonda).cloned());
+    }
+    (!items.is_empty()).then(|| Rubrica {
+        id: id.unwrap_or_default(),
+        version,
+        item: items,
+    })
+}
+
+/// Parte del juez de una dimensión. `None` si sus rúbricas no tienen ítems del juez. Sin juez, sin juicio
+/// o con `SinVeredicto`, la parte no tiene veredicto y lleva la causa.
+fn parte_juez(
+    dimension: Dimension,
+    juez: &JuezDiseno,
+    resultado: Option<&ResultadoJuez>,
+    topes: &BTreeMap<String, u8>,
+) -> Option<Puntaje> {
+    let rubrica = rubrica_del_juez(juez.rubricas, dimension)?;
+    let Some(resultado) = resultado else {
+        return Some(sin_veredicto_puntaje(dimension, "juez no corrido".into()));
+    };
+    if let EstadoJuez::SinVeredicto(causa) = &resultado.estado {
+        return Some(sin_veredicto_puntaje(dimension, causa.clone()));
+    }
+    let completo = juez::con_faltantes_en_cero(resultado, &rubrica, juez.nombre);
+    let puntuacion = match juez::puntuar_con_juez(&rubrica, &completo, topes, juez.nombre) {
+        Ok(puntuacion) => puntuacion,
+        Err(e) => {
+            return Some(sin_veredicto_puntaje(dimension, format!("rúbrica: {e}")));
+        }
+    };
+    Some(match puntuacion.valor {
+        Some(valor) => Puntaje {
+            dimension,
+            valor,
+            calibrada: false,
+            exactitud_balanceada: None,
+            items: puntuacion.items,
+            sin_veredicto: None,
+        },
+        None => sin_veredicto_puntaje(dimension, "ningún ítem tiene nivel".into()),
+    })
+}
+
+/// Diseño toma su valor solo del juez. Sin ítems de diseño en las rúbricas, o sin juez, no hay veredicto.
+fn puntaje_diseno(
+    juez: &JuezDiseno,
+    resultado: Option<&ResultadoJuez>,
+    topes: &BTreeMap<String, u8>,
+) -> Puntaje {
+    parte_juez(Dimension::Diseno, juez, resultado, topes).unwrap_or_else(|| {
+        let motivo = if juez.rubricas.is_empty() {
+            "sin rúbricas embebidas"
+        } else {
+            "sin ítems de diseño en las rúbricas"
+        };
+        sin_veredicto_puntaje(Dimension::Diseno, motivo.into())
+    })
+}
+
+/// Junta las partes de una dimensión: sondas y juez. Si una parte no tiene veredicto, la dimensión lo
+/// lleva con los motivos. Si tienen, promedio simple de los valores, con los ítems del juez.
+fn juntar_partes(dimension: Dimension, sondas: Puntaje, juez: Puntaje) -> Puntaje {
+    let motivos: Vec<String> = [sondas.sin_veredicto.clone(), juez.sin_veredicto.clone()]
+        .into_iter()
+        .flatten()
+        .collect();
+    if !motivos.is_empty() {
+        return sin_veredicto_puntaje(dimension, motivos.join("; "));
+    }
+    Puntaje {
+        dimension,
+        valor: (sondas.valor + juez.valor) / 2.0,
+        calibrada: false,
+        exactitud_balanceada: None,
+        items: juez.items,
+        sin_veredicto: None,
     }
 }
 
@@ -548,13 +850,6 @@ fn sin_calibrar(puntajes: &[Puntaje]) -> Vec<Dimension> {
         .filter(|p| p.sin_veredicto.is_none() && !p.calibrada)
         .map(|p| p.dimension)
         .collect()
-}
-
-/// Etiquetas (`nombre@hash`) de las rúbricas embebidas. Un error aquí sale como infraestructura.
-fn rubricas_embebidas() -> Result<Vec<String>, ErrorOraculo> {
-    let rubricas = rubrica::cargar_embebidas()
-        .map_err(|e| ErrorOraculo::Infra(format!("rúbricas embebidas: {e}")))?;
-    Ok(rubrica::etiquetas(&rubricas))
 }
 
 /// Motivo de una descarga sin veredicto: el detalle de su primer hallazgo, si lo hay.
@@ -1151,8 +1446,9 @@ mod tests {
     use super::*;
     use crate::oracle::perfiles::herramientas::{EjecutorHerramienta, SalidaHerramienta};
     use crate::oracle::tarea::{Escenario, Exclusion};
-    use crate::tipos::{Cumplimiento, Dimension, EstadoRequisito, Puntaje};
+    use crate::tipos::{Cumplimiento, Dimension, EstadoRequisito, Fuente, NivelItem, Puntaje};
     use filetime::{FileTime, set_symlink_file_times};
+    use serde_json::{Value, json};
     use std::fs;
     use std::path::PathBuf;
 
@@ -1890,6 +2186,11 @@ mod tests {
     const COLECCION_CONTRATO: &str =
         "tests/test_a.py::t1\ntests/test_a.py::t2\n2 tests collected\n";
     const JUNIT_CONTRATO: &str = r#"<testsuite><testcase classname="tests.test_a" name="t1"/><testcase classname="tests.test_a" name="t2"/></testsuite>"#;
+    /// Contrato con la primera prueba fallando: el memora-sdlc falso de la prueba de calibración.
+    const JUNIT_CONTRATO_CON_FALLA: &str = r#"<testsuite><testcase classname="tests.test_a" name="t1"><failure message="x"/></testcase><testcase classname="tests.test_a" name="t2"/></testsuite>"#;
+    const MODELO_JUEZ: &str = "juez-falso";
+    const MODULARIDAD_ID: &str = "diseno.modularidad";
+    const TOPE_ID: &str = "diseno.tope";
     const JUNIT_CONTRATO_INCOMPLETO: &str =
         r#"<testsuite><testcase classname="tests.test_a" name="t1"/></testsuite>"#;
     const COLECCION_OCULTO: &str = "tests/test_b.py::t3\ntests/test_b.py::t4\n2 tests collected\n";
@@ -1968,6 +2269,8 @@ mod tests {
     /// Ejecutor de herramientas falso. Responde como una imagen sana, salvo las de `faltan`.
     struct HerramientasSanas {
         faltan: Vec<&'static str>,
+        /// Si `true`, gitleaks reporta una filtración de secreto.
+        fuga: bool,
     }
 
     impl EjecutorHerramienta for HerramientasSanas {
@@ -1978,7 +2281,14 @@ mod tests {
             } else if cmd == "cargo clippy --version" {
                 salida.codigo = i32::from(self.faltan.contains(&"clippy"));
             } else if cmd.contains("gitleaks detect") {
-                salida.archivos.insert("gitleaks.json".into(), "[]".into());
+                let reporte = if self.fuga {
+                    r#"[{"RuleID":"generic-api-key","File":"src/lib.rs","StartLine":1,"Description":"clave en el código"}]"#
+                } else {
+                    "[]"
+                };
+                salida
+                    .archivos
+                    .insert("gitleaks.json".into(), reporte.into());
                 salida.stderr = "no leaks found".into();
             } else if cmd.contains("cargo audit") {
                 salida.archivos.insert(
@@ -2012,6 +2322,17 @@ mod tests {
         move |_: &Preparada| {
             Box::new(HerramientasSanas {
                 faltan: faltan.to_vec(),
+                fuga: false,
+            })
+        }
+    }
+
+    /// Fábrica de herramientas con una filtración de secreto en gitleaks.
+    fn herramientas_con_fuga() -> impl Fn(&Preparada) -> Box<dyn EjecutorHerramienta> {
+        |_: &Preparada| {
+            Box::new(HerramientasSanas {
+                faltan: Vec::new(),
+                fuga: true,
             })
         }
     }
@@ -2031,12 +2352,7 @@ mod tests {
         correr: &dyn Fn(&contenedor::Ejecucion) -> Result<contenedor::Resultado, ErrorOraculo>,
         herramientas: &dyn Fn(&Preparada) -> Box<dyn EjecutorHerramienta>,
     ) -> Result<Veredicto, ErrorOraculo> {
-        let deps = Dependencias {
-            correr,
-            herramientas,
-            juez_config: None,
-        };
-        evaluar_con(repo, tarea, &opciones(home), deps)
+        evaluar_con(repo, tarea, &opciones(home), deps_de(correr, herramientas))
     }
 
     /// Veredicto de la tarea de Rust con todas las sondas sanas y la suite del contrato completa.
@@ -2092,12 +2408,37 @@ mod tests {
     }
 
     #[test]
-    fn oraculo_diseno_queda_sin_veredicto_con_juez_no_corrido() {
+    fn oraculo_diseno_sin_rubricas_embebidas_queda_sin_veredicto() {
         let base = tempfile::tempdir().expect("base");
         let v = veredicto_sano(base.path());
         let diseno = puntaje_de_prueba(&v, Dimension::Diseno);
-        assert_eq!(diseno.sin_veredicto.as_deref(), Some("juez no corrido"));
+        assert_eq!(
+            diseno.sin_veredicto.as_deref(),
+            Some("sin rúbricas embebidas")
+        );
         assert_eq!(diseno.valor, 0.0);
+    }
+
+    #[test]
+    fn oraculo_diseno_sin_juez_con_rubricas_dice_juez_no_corrido() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let rubricas = [rubrica_diseno()];
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con(
+            &repo,
+            &tarea,
+            &opciones(&home),
+            Dependencias {
+                rubricas: &rubricas,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        )
+        .expect("evalúa");
+        let diseno = puntaje_de_prueba(&v, Dimension::Diseno);
+        assert_eq!(diseno.sin_veredicto.as_deref(), Some("juez no corrido"));
     }
 
     #[test]
@@ -2281,5 +2622,552 @@ mod tests {
             texto.contains("no instala"),
             "un motivo sin ids queda: {texto}"
         );
+    }
+
+    /// Tabla de calibración con la misma exactitud en todas las dimensiones de `tarea-rust`.
+    static SIN_CALIBRAR: Calibraciones = Calibraciones {
+        v: calibra::VERSION,
+        filas: Vec::new(),
+    };
+
+    /// Dependencias sin juez, sin calibración y sin rúbricas: las de una evaluación sin nada extra.
+    fn deps_de<'a>(correr: Correr<'a>, herramientas: FabricaHerramientas<'a>) -> Dependencias<'a> {
+        Dependencias {
+            correr,
+            herramientas,
+            juez: None,
+            modelo_juez: "",
+            juez_config: None,
+            calibracion: &SIN_CALIBRAR,
+            rubricas: &[],
+            avisos: Vec::new(),
+        }
+    }
+
+    /// Juez falso: responde un texto fijo con su costo y cuenta las llamadas.
+    struct JuezFalso {
+        texto: String,
+        costo: f64,
+        llamadas: Cell<u32>,
+    }
+
+    impl JuezFalso {
+        fn con(texto: &str, costo: f64) -> Self {
+            Self {
+                texto: texto.into(),
+                costo,
+                llamadas: Cell::new(0),
+            }
+        }
+
+        fn llamadas(&self) -> u32 {
+            self.llamadas.get()
+        }
+    }
+
+    impl ModeloJuez for JuezFalso {
+        fn consultar(&self, _prompt: &Prompt) -> Result<RespuestaJuez, ErrorOraculo> {
+            self.llamadas.set(self.llamadas.get() + 1);
+            Ok(RespuestaJuez {
+                texto: self.texto.clone(),
+                truncada: false,
+                costo_usd: self.costo,
+            })
+        }
+    }
+
+    /// Rúbrica de diseño de la fixture: `diseno.modularidad` (juez), `diseno.ciclos` (sonda) y `diseno.tope` (mixto).
+    fn rubrica_diseno() -> Rubrica {
+        Rubrica::desde_toml(&fixture_rubrica("diseno-valida.toml")).expect("carga")
+    }
+
+    /// La fixture con `diseno.modularidad` como `mixto`, para probar el tope de los ciclos.
+    fn rubrica_diseno_mixta() -> Rubrica {
+        let texto =
+            fixture_rubrica("diseno-valida.toml").replace("mide = \"juez\"", "mide = \"mixto\"");
+        Rubrica::desde_toml(&texto).expect("carga")
+    }
+
+    fn fixture_rubrica(nombre: &str) -> String {
+        let ruta = format!(
+            "{}/tests/fixtures/rubricas/{nombre}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        fs::read_to_string(ruta).expect("lee la fixture")
+    }
+
+    /// Repo de Rust en `dir` con el `Cargo.lock` dado y los archivos `(ruta, texto)`.
+    fn repo_con(dir: PathBuf, lock: &str, archivos: &[(&str, &str)]) -> PathBuf {
+        fs::create_dir_all(dir.join("src")).expect("src");
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .expect("Cargo.toml");
+        fs::write(dir.join("Cargo.lock"), lock).expect("Cargo.lock");
+        for (ruta, texto) in archivos {
+            fs::write(dir.join(ruta), texto).expect("archivo");
+        }
+        dir
+    }
+
+    /// Repo con `.cargo/config.toml` de una entrada que no toca la red (`[build] jobs`).
+    fn repo_con_config(base: &Path) -> PathBuf {
+        let repo = repo_rust(base, LOCK_SANO);
+        fs::create_dir_all(repo.join(".cargo")).expect(".cargo");
+        fs::write(repo.join(".cargo/config.toml"), "[build]\njobs = 2\n").expect("config");
+        repo
+    }
+
+    /// Evidencia que cita la línea 1 de `src/lib.rs` del repo de `repo_rust`.
+    fn ev_lib() -> Value {
+        json!({"archivo": "src/lib.rs", "linea": 1, "cita": "pub fn f() -> u8 { 1 }"})
+    }
+
+    fn item_juez(id: &str, nivel: i64, evidencia: Value) -> Value {
+        json!({"item": id, "nivel": nivel, "evidencia": evidencia})
+    }
+
+    fn hallazgo_juez(item: &str, archivo: &str, linea: u32, cita: &str, detalle: &str) -> Value {
+        json!({
+            "item": item,
+            "severidad": 2,
+            "archivo": archivo,
+            "linea": linea,
+            "cita": cita,
+            "detalle": detalle,
+            "impacto": ["R1"],
+        })
+    }
+
+    fn respuesta_juez(items: Value, hallazgos: Value) -> String {
+        json!({"items": items, "hallazgos": hallazgos}).to_string()
+    }
+
+    /// Evaluación de la tarea de Rust con `deps` sobre un repo y una caché de `base`.
+    fn evaluar_con_deps(base: &Path, repo: &Path, deps: Dependencias) -> Veredicto {
+        let tarea = tarea_rust(base);
+        let home = home_con_cache(base, LOCK_SANO);
+        evaluar_con(repo, &tarea, &opciones(&home), deps).expect("evalúa")
+    }
+
+    #[test]
+    fn oraculo_diseno_con_juez_que_cita_tiene_valor_y_no_queda_sin_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let juez = JuezFalso::con(
+            &respuesta_juez(
+                json!([
+                    item_juez(MODULARIDAD_ID, 2, json!([ev_lib()])),
+                    item_juez(TOPE_ID, 2, json!([ev_lib()])),
+                ]),
+                json!([]),
+            ),
+            0.25,
+        );
+        let rubricas = [rubrica_diseno()];
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        let diseno = puntaje_de_prueba(&v, Dimension::Diseno);
+        assert_eq!(diseno.sin_veredicto, None, "{diseno:?}");
+        // (3·2 + 1·2) / (3·4) = 2/3
+        assert!((diseno.valor - 2.0 / 3.0).abs() < 1e-6, "{}", diseno.valor);
+        assert_eq!(juez.llamadas(), 1);
+        assert!((v.costo_usd - 0.25).abs() < 1e-9, "{}", v.costo_usd);
+    }
+
+    #[test]
+    fn oraculo_diseno_con_juez_de_json_roto_queda_sin_veredicto_y_nunca_verde() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let juez = JuezFalso::con("esto no es json", 0.0);
+        let rubricas = [rubrica_diseno()];
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        let diseno = puntaje_de_prueba(&v, Dimension::Diseno);
+        let causa = diseno.sin_veredicto.as_deref().expect("sin veredicto");
+        assert!(causa.contains("JSON inválido"), "{causa}");
+        assert_eq!(diseno.valor, 0.0);
+        assert_ne!(v.estado, Estado::Verde);
+        assert_eq!(v.global, None);
+    }
+
+    #[test]
+    fn oraculo_hallazgo_del_juez_con_cita_inventada_no_entra_al_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let texto = respuesta_juez(
+            json!([item_juez(MODULARIDAD_ID, 2, json!([ev_lib()]))]),
+            json!([
+                hallazgo_juez(
+                    MODULARIDAD_ID,
+                    "src/lib.rs",
+                    1,
+                    "pub fn f() -> u8 { 1 }",
+                    "hallazgo válido"
+                ),
+                hallazgo_juez(
+                    MODULARIDAD_ID,
+                    "src/lib.rs",
+                    1,
+                    "fn inventada() -> bool { false }",
+                    "hallazgo inventado"
+                ),
+            ]),
+        );
+        let juez = JuezFalso::con(&texto, 0.0);
+        let rubricas = [rubrica_diseno()];
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        assert!(
+            v.hallazgos
+                .iter()
+                .any(|h| h.detalle == "hallazgo válido" && h.dimension == Dimension::Diseno),
+            "{:?}",
+            v.hallazgos
+        );
+        assert!(
+            !v.hallazgos
+                .iter()
+                .any(|h| h.detalle == "hallazgo inventado"),
+            "{:?}",
+            v.hallazgos
+        );
+    }
+
+    #[test]
+    fn oraculo_mixto_de_diseno_con_ciclos_no_supera_el_tope() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_con(
+            base.path().join("ciclo"),
+            LOCK_SANO,
+            &[
+                ("src/lib.rs", "pub fn f() -> u8 { 1 }\n"),
+                ("src/a.rs", "use crate::b::algo;\npub fn f() {}\n"),
+                ("src/b.rs", "pub fn algo() {}\nuse crate::a::f;\n"),
+            ],
+        );
+        let texto = respuesta_juez(
+            json!([
+                item_juez(
+                    MODULARIDAD_ID,
+                    3,
+                    json!([{"archivo": "src/a.rs", "linea": 1, "cita": "use crate::b::algo;"}])
+                ),
+                item_juez(
+                    TOPE_ID,
+                    3,
+                    json!([{"archivo": "src/b.rs", "linea": 1, "cita": "pub fn algo() {}"}])
+                ),
+            ]),
+            json!([]),
+        );
+        let juez = JuezFalso::con(&texto, 0.0);
+        let rubricas = [rubrica_diseno_mixta()];
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        assert!(
+            v.hallazgos
+                .iter()
+                .any(|h| h.detalle.starts_with(perfiles::rust::REGLA_CICLO)),
+            "la sonda de arquitectura ve el ciclo: {:?}",
+            v.hallazgos
+        );
+        let diseno = puntaje_de_prueba(&v, Dimension::Diseno);
+        let modularidad = diseno
+            .items
+            .iter()
+            .find(|i| i.item == MODULARIDAD_ID)
+            .expect("modularidad tiene nivel");
+        assert_eq!(modularidad.nivel, 1, "el ciclo topa el mixto en 1");
+        // (3·1 + 1·3) / (3·4) = 1/2
+        assert!((diseno.valor - 0.5).abs() < 1e-6, "{}", diseno.valor);
+    }
+
+    #[test]
+    fn oraculo_calibracion_marca_calibradas_y_global_es_la_de_seguridad() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        fs::write(
+            home.join(calibra::ARCHIVO),
+            json!({"v": 1, "filas": [
+                {"tarea": "tarea-rust", "dimension": "seguridad", "n": 20, "semilla": 42,
+                 "ts": 1.0, "exactitud_balanceada": 0.95},
+                {"tarea": "tarea-rust", "dimension": "diseno", "n": 20, "semilla": 42,
+                 "ts": 1.0, "exactitud_balanceada": 0.7},
+            ]})
+            .to_string(),
+        )
+        .expect("calibración");
+        let calibracion = Calibraciones::cargar(&home).expect("carga");
+        let juez = JuezFalso::con(
+            &respuesta_juez(
+                json!([item_juez(MODULARIDAD_ID, 2, json!([ev_lib()]))]),
+                json!([]),
+            ),
+            0.0,
+        );
+        let rubricas = [rubrica_diseno()];
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                calibracion: &calibracion,
+                rubricas: &rubricas,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        let seguridad = puntaje_de_prueba(&v, Dimension::Seguridad);
+        assert!(seguridad.calibrada);
+        assert_eq!(seguridad.exactitud_balanceada, Some(0.95));
+        let diseno = puntaje_de_prueba(&v, Dimension::Diseno);
+        assert!(!diseno.calibrada);
+        assert_eq!(diseno.exactitud_balanceada, Some(0.7));
+        let global = v.global.expect("hay una calibrada con veredicto");
+        assert!((global - seguridad.valor).abs() < 1e-6, "{global}");
+        assert!(v.sin_calibrar.contains(&Dimension::Diseno));
+        assert!(!v.sin_calibrar.contains(&Dimension::Seguridad));
+        let con_veredicto: Vec<Dimension> = v
+            .puntajes
+            .iter()
+            .filter(|p| p.sin_veredicto.is_none() && p.dimension != Dimension::Seguridad)
+            .map(|p| p.dimension)
+            .collect();
+        assert_eq!(v.sin_calibrar, con_veredicto);
+    }
+
+    #[test]
+    fn oraculo_sin_calibracion_global_es_none() {
+        let base = tempfile::tempdir().expect("base");
+        let v = veredicto_sano(base.path());
+        assert_eq!(v.global, None);
+        assert!(v.puntajes.iter().all(|p| !p.calibrada));
+    }
+
+    #[test]
+    fn oraculo_juez_de_config_innecesaria_llega_al_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_con_config(base.path());
+        let juez_config = JuezFalso::con(
+            &json!([{
+                "clave": "build.jobs",
+                "necesidad": "innecesaria",
+                "motivo": "el proyecto no lo usa",
+                "cita": "jobs = 2",
+            }])
+            .to_string(),
+            0.0,
+        );
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez_config: Some(&juez_config),
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        assert_eq!(juez_config.llamadas(), 1);
+        assert!(
+            v.hallazgos.iter().any(|h| h.dimension == Dimension::Entrega
+                && h.fuente
+                    == Fuente::Juez {
+                        modelo: "juez-config".into()
+                    }
+                && h.detalle.contains("innecesaria")),
+            "{:?}",
+            v.hallazgos
+        );
+    }
+
+    #[test]
+    fn oraculo_costo_usd_suma_las_llamadas_de_los_dos_jueces() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_con_config(base.path());
+        let juez_config = JuezFalso::con(
+            &json!([{
+                "clave": "build.jobs",
+                "necesidad": "necesaria",
+                "motivo": "se usa",
+                "cita": "jobs = 2",
+            }])
+            .to_string(),
+            0.1,
+        );
+        let juez = JuezFalso::con(
+            &respuesta_juez(
+                json!([item_juez(MODULARIDAD_ID, 2, json!([ev_lib()]))]),
+                json!([]),
+            ),
+            0.25,
+        );
+        let rubricas = [rubrica_diseno()];
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                juez_config: Some(&juez_config),
+                rubricas: &rubricas,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        assert!((v.costo_usd - 0.35).abs() < 1e-9, "{}", v.costo_usd);
+    }
+
+    #[test]
+    fn oraculo_diseno_sin_rubricas_no_llama_al_juez() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let juez = JuezFalso::con("no se usa", 0.0);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        assert_eq!(juez.llamadas(), 0);
+        let diseno = puntaje_de_prueba(&v, Dimension::Diseno);
+        assert_eq!(
+            diseno.sin_veredicto.as_deref(),
+            Some("sin rúbricas embebidas")
+        );
+    }
+
+    #[test]
+    fn oraculo_memora_sdlc_con_mas_fallas_da_global_menor_que_ecc() {
+        let base = tempfile::tempdir().expect("base");
+        let lib = [("src/lib.rs", "pub fn f() -> u8 { 1 }\n")];
+        let ecc = repo_con(base.path().join("memora-ecc"), LOCK_SANO, &lib);
+        let sdlc = repo_con(base.path().join("memora-sdlc"), LOCK_SANO, &lib);
+        let filas = [
+            Dimension::Funciona,
+            Dimension::Seguridad,
+            Dimension::Eficiencia,
+            Dimension::Estructura,
+            Dimension::Arquitectura,
+            Dimension::Completitud,
+            Dimension::Entrega,
+            Dimension::Pruebas,
+        ]
+        .into_iter()
+        .map(|dimension| calibra::Fila {
+            tarea: "tarea-rust".into(),
+            dimension,
+            n: 20,
+            semilla: 42,
+            ts: 1.0,
+            sensibilidad: Some(0.95),
+            especificidad: Some(0.95),
+            exactitud_balanceada: Some(0.95),
+            items: BTreeMap::new(),
+        })
+        .collect();
+        let calibracion = Calibraciones {
+            v: calibra::VERSION,
+            filas,
+        };
+        let correr_ecc = correr_suites(JUNIT_CONTRATO);
+        let correr_sdlc = correr_suites(JUNIT_CONTRATO_CON_FALLA);
+        let fabrica_sdlc = herramientas_con_fuga();
+        let ecc_v = evaluar_con_deps(
+            base.path(),
+            &ecc,
+            Dependencias {
+                calibracion: &calibracion,
+                ..deps_de(&correr_ecc, &herramientas(&[]))
+            },
+        );
+        let sdlc_v = evaluar_con_deps(
+            base.path(),
+            &sdlc,
+            Dependencias {
+                calibracion: &calibracion,
+                ..deps_de(&correr_sdlc, &fabrica_sdlc)
+            },
+        );
+        let global_ecc = ecc_v.global.expect("ecc tiene global");
+        let global_sdlc = sdlc_v.global.expect("sdlc tiene global");
+        assert!(
+            global_sdlc < global_ecc,
+            "sdlc {global_sdlc} debe quedar bajo ecc {global_ecc}"
+        );
+    }
+
+    #[test]
+    fn oraculo_juntar_partes_promedia_y_lleva_el_motivo() {
+        let sondas = Puntaje {
+            dimension: Dimension::Estructura,
+            valor: 1.0,
+            calibrada: false,
+            exactitud_balanceada: None,
+            items: Vec::new(),
+            sin_veredicto: None,
+        };
+        let juez = Puntaje {
+            valor: 0.5,
+            items: vec![NivelItem {
+                item: "estructura.capas".into(),
+                nivel: 1,
+                evidencia: Vec::new(),
+                fuente: Fuente::Juez {
+                    modelo: MODELO_JUEZ.into(),
+                },
+            }],
+            ..sondas.clone()
+        };
+        let junta = juntar_partes(Dimension::Estructura, sondas.clone(), juez);
+        assert!((junta.valor - 0.75).abs() < 1e-6, "{}", junta.valor);
+        assert_eq!(junta.items.len(), 1);
+        let sin = sin_veredicto_puntaje(Dimension::Estructura, "juez no corrido".into());
+        let con_motivo = juntar_partes(Dimension::Estructura, sondas, sin);
+        assert_eq!(con_motivo.sin_veredicto.as_deref(), Some("juez no corrido"));
+        assert_eq!(con_motivo.valor, 0.0);
     }
 }

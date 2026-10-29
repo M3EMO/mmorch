@@ -498,6 +498,119 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
 }
 ```
 
+### calibracion
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Calibraciones",
+  "description": "Contenido de `calibracion.json`. Sin archivo, no hay filas: nada está calibrado.",
+  "type": "object",
+  "properties": {
+    "filas": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Fila"
+      }
+    },
+    "v": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "v"
+  ],
+  "$defs": {
+    "Dimension": {
+      "type": "string",
+      "enum": [
+        "funciona",
+        "seguridad",
+        "eficiencia",
+        "estructura",
+        "arquitectura",
+        "diseno",
+        "completitud",
+        "entrega",
+        "pruebas"
+      ]
+    },
+    "Fila": {
+      "description": "Una medición de una dimensión de una tarea, con su muestra.",
+      "type": "object",
+      "properties": {
+        "dimension": {
+          "$ref": "#/$defs/Dimension"
+        },
+        "especificidad": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "exactitud_balanceada": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "items": {
+          "description": "Exactitud balanceada de cada ítem de rúbrica, por ejemplo `seguridad.secretos`.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "format": "float"
+          },
+          "default": {}
+        },
+        "n": {
+          "description": "Casos medidos.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "semilla": {
+          "description": "Semilla de la muestra: con la misma semilla, la medición se repite igual.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "sensibilidad": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "tarea": {
+          "type": "string"
+        },
+        "ts": {
+          "description": "Epoch en segundos de la medición. Gana la fila más reciente.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "tarea",
+        "dimension",
+        "n",
+        "semilla",
+        "ts"
+      ]
+    }
+  }
+}
+```
+
 ### config
 
 ```json
