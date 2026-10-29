@@ -58,7 +58,7 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t oraculo pendientes --tarea <t> --repo <dir> [--importar <junit> \| --colab]` | Arma el paquete de tests pendientes por entorno para Colab. Con `--importar`, guarda el junit de vuelta. Con `--colab`, corre el paquete en Colab y lo importa. | `{dir, tests}`, o `{importados, ignorados}` | construido (Tarea 7f). `--colab`: Tarea 7j |
 | `r00t oraculo pendientes --liberar` | Libera el runtime de Colab anotado en `$ROOT_HOME/colab/activo.json`, si hay uno, y sale. | sin salida JSON | construido (Tarea 7j) |
 | `r00t oraculo pendientes --vigilar` | Red de seguridad: lee `$ROOT_HOME/colab/activo.json`. Libera el runtime si pasó su tope o si su junit cumple lo pedido. Un runtime vigente no se toca. Sin `--tarea` ni `--repo`. | `{vigilancia, causa}`, con `vigilancia` `sin_runtime`, `vigente` o `liberado` | construido (Tarea 7l) |
-| `r00t oraculo calibrar --tarea <t> --dimension <d> [--n 20] [--semilla 42]` | Mide la exactitud de una dimensión. | `Calibracion` | pendiente (Tarea 12). Hoy sale con `3`. |
+| `r00t oraculo calibrar --tarea <t> --dimension <d> [--n 20] [--semilla 42] [--repo <dir>]` | Calibra una dimensión con defectos inyectados: mitad con defecto, mitad limpia. Mide la sensibilidad, la especificidad y la exactitud balanceada, por dimensión y por ítem, contra una línea base. Agrega una fila a `$ROOT_HOME/calibracion.json` e imprime la fila. Sin `--repo`, usa `[calibracion] repo` de `tarea.toml`; sin ninguno, sale con `2`. | `Fila` | construido (Tarea 12). |
 | `r00t oraculo informe --tarea <t> --repo <dir> [--md]` | Arma el informe del PM sobre el veredicto: decisión, regla que la disparó, requisitos, bloqueantes, riesgos, próximos pasos y confianza. Sin `--md`, imprime JSON; con `--md`, markdown legible. | `Informe` | construido (Tarea 13b). |
 | `r00t oraculo validar --casos <dir>` | Mide si el juicio de Root coincide con resultados conocidos. | `Validez` | pendiente (Tarea 12b). No está en `--help`. |
 | `r00t observa claude --archivo <salida-de-claude-p> --corrida <id> [--via cupo\|nube]` | Registra la salida JSON de `claude -p`. Con `--via nube`, registra una sesión en la nube. | `{registrados, via}` | construido |
@@ -166,9 +166,10 @@ $ROOT_HOME/
   root.toml               # modelos, precios, balance, umbrales (lo escribe el humano)
   eventos.jsonl           # Observe: una línea por evento, "v": 1
   eventos.jsonl.lock      # cerrojo de Observe
+  calibracion.lock        # cerrojo de Oracle al agregar una calibración
   runs.jsonl              # Track: una línea por corrida, "v": 1
   politica.json           # Aprende: política de Route recalculada
-  calibracion.json        # Oracle: exactitud medida por dimensión (pendiente, Tarea 12)
+  calibracion.json        # Oracle: exactitud medida por dimensión (Tarea 12)
   oraculos/<tarea>/
     tarea.toml            # definición de la tarea
     contrato/             # tests visibles para el builder (convención de carpeta)
@@ -224,6 +225,7 @@ Ruta: `$ROOT_HOME/oraculos/<tarea>/tarea.toml`. Lo lee `Tarea::cargar_de` (`src/
 | `[pruebas]` `mutantes_max`, `minutos_max` | entero | no | 60, 20 | Límites de la sonda de mutación. Ambos deben ser 1 o más. |
 | `[eficiencia]` `cmd`, `piso` | texto, número | no | | `cmd` imprime `{"ops_s": f64}`. Debe llegar a `piso`. |
 | `[arquitectura]` `capas` | lista de listas | no | | Una capa importa solo capas posteriores. |
+| `[calibracion]` `repo` | texto | no | | Repo bueno de `r00t oraculo calibrar` cuando no se pasa `--repo`. Una ruta relativa se resuelve desde la carpeta de la tarea. |
 
 Las claves que Root no conoce se ignoran al parsear. Por eso una tarea con secciones de etapas futuras carga igual.
 
@@ -450,7 +452,7 @@ Funciones que usa el código:
 | `observe::claude::leer_sesion_claude(json, corrida)` | construido | Lee la salida de `claude -p`. |
 | `observe::resumir(corrida)` | construido | Devuelve `Resumen`. |
 | `oracle::evaluar(repo, tarea, opciones)` | construido | `oracle::evaluar_por_nombre(nombre, repo)` lee la tarea desde `ROOT_HOME`. |
-| `oracle::calibrar(tarea, dim, n, semilla)` | pendiente (Tarea 12) | |
+| `oracle::calibra::calibrar_tarea(home, nombre, dimension, n, semilla, repo, evaluador)` | construido (Tarea 12) | Calibra y agrega la fila a `calibracion.json`. `calibrar_con` recibe la tarea y el repo ya resueltos. |
 | `oracle::informe::informar(veredicto, tarea, reglas, redactor)` | construido (Tarea 13b) | El redactor es opcional. `informar_con` recibe además las rúbricas. |
 | `oracle::validar(casos)` | pendiente (Tarea 12b) | |
 | `track::agregar(fila)` | construido | |
@@ -542,6 +544,13 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "description": "Una medición de una dimensión de una tarea, con su muestra.",
       "type": "object",
       "properties": {
+        "defectos": {
+          "description": "Defectos aplicados y medidos. La sensibilidad sale de ellos.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
         "dimension": {
           "$ref": "#/$defs/Dimension"
         },
@@ -570,10 +579,24 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           },
           "default": {}
         },
-        "n": {
-          "description": "Casos medidos.",
+        "limpios": {
+          "description": "Copias sin alterar medidas. La especificidad sale de ellas.",
           "type": "integer",
           "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "n": {
+          "description": "Casos medidos: los defectos aplicados más los limpios. No cuenta los `no_aplicable`.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "no_aplicable": {
+          "description": "Casos que no se pudieron aplicar al repo, por ejemplo sin Dockerfile. No entran a las métricas.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
           "minimum": 0
         },
         "semilla": {

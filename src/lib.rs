@@ -44,6 +44,16 @@ pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
         Comando::Oraculo {
             accion: OraculoAccion::Informe { tarea, repo, md },
         } => oraculo_informe(tarea, repo, *md),
+        Comando::Oraculo {
+            accion:
+                OraculoAccion::Calibrar {
+                    tarea,
+                    dimension,
+                    n,
+                    semilla,
+                    repo,
+                },
+        } => oraculo_calibrar(cli.json, tarea, dimension, *n, *semilla, repo.as_deref()),
         Comando::Ficha { accion } => ficha_accion(cli.json, accion),
         Comando::Route {
             rol,
@@ -95,6 +105,50 @@ fn oraculo_evaluar(json: bool, nombre: &str, repo: &Path) -> Result<u8, Error> {
         );
     }
     Ok(oracle::codigo_de_estado(veredicto.estado))
+}
+
+/// `oraculo calibrar`: calibra una dimensión con el Oracle de producción, agrega la fila a
+/// `calibracion.json` de `ROOT_HOME` e imprime la fila. Los errores de uso salen con 2.
+fn oraculo_calibrar(
+    json: bool,
+    nombre: &str,
+    dimension: &str,
+    n: u32,
+    semilla: u64,
+    repo: Option<&Path>,
+) -> Result<u8, Error> {
+    let home = config::root_home();
+    let fila = oracle::calibra::calibrar_tarea(
+        &home,
+        nombre,
+        dimension,
+        n,
+        semilla,
+        repo,
+        &|tarea, ruta| oracle::evaluar(ruta, tarea, &oracle::OpcionesOraculo::default()),
+    )?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&fila)?);
+    } else {
+        println!(
+            "{}/{}: sensibilidad {}, especificidad {}, exactitud {}, casos {} (defectos {}, limpios {}, no aplicables {})",
+            fila.tarea,
+            fila.dimension.clave(),
+            medida(fila.sensibilidad),
+            medida(fila.especificidad),
+            medida(fila.exactitud_balanceada),
+            fila.n,
+            fila.defectos,
+            fila.limpios,
+            fila.no_aplicable
+        );
+    }
+    Ok(0)
+}
+
+/// Una métrica con dos decimales, o `sin medir` si no tiene casos de una clase.
+fn medida(valor: Option<f32>) -> String {
+    valor.map_or_else(|| "sin medir".to_string(), |v| format!("{v:.2}"))
 }
 
 /// `oraculo informe`: imprime el informe del veredicto, en JSON o en markdown con `--md`. El código de

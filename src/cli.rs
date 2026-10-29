@@ -210,6 +210,9 @@ pub enum OraculoAccion {
         n: u32,
         #[arg(long, default_value_t = 42)]
         semilla: u64,
+        /// Repo bueno. Sin él, se usa `[calibracion] repo` de `tarea.toml`.
+        #[arg(long)]
+        repo: Option<PathBuf>,
     },
 }
 

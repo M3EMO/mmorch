@@ -104,6 +104,9 @@ pub enum ErrorOraculo {
     /// `root.toml` no carga. Lleva el código de salida que dio `Config`: 2 si un valor está fuera de rango.
     #[error("root.toml inválido: {1}")]
     Configuracion(u8, String),
+    /// Uso de `oraculo calibrar`: dimensión sin defectos, `n` cero o sin repo bueno. Es error de uso: sale con 2.
+    #[error("{0}")]
+    Uso(String),
 }
 
 impl ErrorOraculo {
@@ -111,7 +114,7 @@ impl ErrorOraculo {
     pub fn codigo_de_salida(&self) -> u8 {
         match self {
             ErrorOraculo::Ficha(e) => e.codigo_de_salida(),
-            ErrorOraculo::Eleccion(_) => 2,
+            ErrorOraculo::Eleccion(_) | ErrorOraculo::Uso(_) => 2,
             ErrorOraculo::Configuracion(codigo, _) => *codigo,
             _ => 3,
         }
@@ -1895,6 +1898,7 @@ mod tests {
             pruebas: None,
             entrega: None,
             escenario: Vec::new(),
+            calibracion: None,
             dir: base.to_path_buf(),
         }
     }
@@ -3155,6 +3159,9 @@ mod tests {
             tarea: "tarea-rust".into(),
             dimension,
             n: 20,
+            defectos: 10,
+            limpios: 10,
+            no_aplicable: 0,
             semilla: 42,
             ts: 1.0,
             sensibilidad: Some(0.95),

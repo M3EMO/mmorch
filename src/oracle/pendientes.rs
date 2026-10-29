@@ -626,6 +626,7 @@ mod tests {
             pruebas: None,
             entrega: None,
             escenario: Vec::new(),
+            calibracion: None,
             dir: PathBuf::new(),
         };
         let mut colab = BTreeMap::new();
