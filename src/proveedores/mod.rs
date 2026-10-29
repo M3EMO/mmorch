@@ -28,6 +28,10 @@ const ENFRIAMIENTO: Duration = Duration::from_secs(60);
 const ARCHIVO_EVENTOS: &str = "eventos.jsonl";
 const ARCHIVO_CONFIG: &str = "root.toml";
 
+/// Tope de tokens de salida de los dos jueces (ficha y Oracle).
+/// 32 000: valor sin confirmar en la documentación oficial de DeepSeek (no publica el default; terceros reportan un máximo de salida de 384 K para deepseek-flash y deepseek-v4-pro). Es un techo, no un gasto.
+pub const MAX_TOKENS_JUEZ: u32 = 32_000;
+
 /// Lo que se le pide a un modelo.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Prompt {
@@ -48,6 +52,21 @@ pub struct Respuesta {
     pub latency_s: f64,
     pub modelo: String,
     pub intentos: u32,
+    /// `true` si el modelo se detuvo por el tope de salida. Es éxito con costo real.
+    #[serde(default)]
+    pub truncada: bool,
+}
+
+/// Lo que un juez recibe del modelo: el texto y si el tope de salida lo cortó.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RespuestaJuez {
+    pub texto: String,
+    pub truncada: bool,
+}
+
+/// Causa de `sin_veredicto` cuando el modelo llegó al tope de salida. Nombra el tope pedido.
+pub fn causa_tope_alcanzado(max_tokens: u32) -> String {
+    format!("tope de salida alcanzado ({max_tokens} tokens)")
 }
 
 /// Errores de proveedores. Salen con código 3.
@@ -261,6 +280,8 @@ pub(crate) struct Crudo {
     pub texto: String,
     pub in_tokens: u64,
     pub out_tokens: u64,
+    /// `true` si el proveedor cortó la respuesta por el tope de salida.
+    pub truncada: bool,
 }
 
 /// Campo de texto de una respuesta JSON, por puntero. Ausente es `ErrorProveedor::Respuesta`.
@@ -319,6 +340,9 @@ pub fn llamar_con(
             if costo.is_none() {
                 ev.extra.insert("precio_faltante".into(), json!(true));
             }
+            if crudo.truncada {
+                ev.extra.insert("truncada".into(), json!(true));
+            }
             let respuesta = Respuesta {
                 texto: crudo.texto,
                 in_tokens: crudo.in_tokens,
@@ -327,6 +351,7 @@ pub fn llamar_con(
                 latency_s,
                 modelo: modelo.to_string(),
                 intentos,
+                truncada: crudo.truncada,
             };
             match registra(ctx.home, &ev) {
                 Ok(()) => Ok(respuesta),

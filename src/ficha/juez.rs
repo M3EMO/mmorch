@@ -6,11 +6,9 @@ use serde_json::Value;
 
 use super::{Ambiguedad, ContextoRevision, ErrorFicha, Revision, revisar};
 use crate::oracle::evidencia::cita_en_archivo;
-use crate::proveedores::{self, Prompt};
+use crate::proveedores::{self, Prompt, RespuestaJuez};
 use crate::tipos::Eleccion;
 
-/// Tokens de salida por llamada del juez.
-const MAX_TOKENS: u32 = 4000;
 /// Fase del flujo que va al `Evento` de la llamada.
 const FASE: &str = "ficha";
 const JUEZ_OK: &str = "ok";
@@ -31,7 +29,7 @@ Sin ambigüedades: responde []";
 
 /// Un modelo que responde al prompt del juez.
 pub trait JuezAmbiguedad {
-    fn consultar(&self, prompt: &Prompt) -> Result<String, ErrorFicha>;
+    fn consultar(&self, prompt: &Prompt) -> Result<RespuestaJuez, ErrorFicha>;
 }
 
 /// Juez real: llama al proveedor de `eleccion`. Un error del proveedor no expone claves.
@@ -41,24 +39,37 @@ pub struct JuezProveedor {
 }
 
 impl JuezAmbiguedad for JuezProveedor {
-    fn consultar(&self, prompt: &Prompt) -> Result<String, ErrorFicha> {
+    fn consultar(&self, prompt: &Prompt) -> Result<RespuestaJuez, ErrorFicha> {
         proveedores::llamar(&self.eleccion, prompt, &self.corrida)
-            .map(|respuesta| respuesta.texto)
+            .map(|respuesta| RespuestaJuez {
+                texto: respuesta.texto,
+                truncada: respuesta.truncada,
+            })
             .map_err(|e| ErrorFicha::Juez(e.to_string()))
     }
 }
 
-/// Corre las reglas deterministas y luego el juez. Un fallo del juez deja `sin_veredicto`.
+/// Corre las reglas deterministas y luego el juez, con el tope por defecto.
 pub fn revisar_con_juez(
     spec: &str,
     ctx: &ContextoRevision,
     juez: &dyn JuezAmbiguedad,
 ) -> Result<Revision, ErrorFicha> {
+    revisar_con_tope(spec, ctx, juez, proveedores::MAX_TOKENS_JUEZ)
+}
+
+/// Como `revisar_con_juez`, con el tope de salida del juez en `max_tokens`.
+pub fn revisar_con_tope(
+    spec: &str,
+    ctx: &ContextoRevision,
+    juez: &dyn JuezAmbiguedad,
+    max_tokens: u32,
+) -> Result<Revision, ErrorFicha> {
     let mut revision = revisar(spec, ctx)?;
     let prompt = Prompt {
         sistema: Some(PROMPT_SISTEMA.into()),
         usuario: spec.into(),
-        max_tokens: MAX_TOKENS,
+        max_tokens,
         fase: FASE.into(),
     };
     match juicio(juez, &prompt) {
@@ -75,8 +86,12 @@ pub fn revisar_con_juez(
 
 /// Pide el juicio y lo parsea. El error es la causa en texto, lista para `juez`.
 fn juicio(juez: &dyn JuezAmbiguedad, prompt: &Prompt) -> Result<Vec<Cruda>, String> {
-    let texto = juez.consultar(prompt).map_err(|e| e.to_string())?;
-    parsear(&texto)
+    let respuesta = juez.consultar(prompt).map_err(|e| e.to_string())?;
+    // Antes de parsear: una respuesta cortada por el tope no es JSON roto, es truncada.
+    if respuesta.truncada {
+        return Err(proveedores::causa_tope_alcanzado(prompt.max_tokens));
+    }
+    parsear(&respuesta.texto)
 }
 
 /// Una ambigüedad tal como la devuelve el modelo, antes del gate.

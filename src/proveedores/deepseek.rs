@@ -27,13 +27,27 @@ pub(crate) fn armar(url_base: &str, clave: &Clave, modelo: &str, prompt: &Prompt
 }
 
 /// Lee el texto de la respuesta. Ignora `reasoning_content`.
+/// Con `finish_reason` = `length` el tope cortó la respuesta. Con razonamiento, el contenido puede venir vacío o nulo.
 pub(crate) fn leer(texto: &str) -> Result<Crudo, ErrorProveedor> {
     let json: Value =
         serde_json::from_str(texto).map_err(|e| ErrorProveedor::Respuesta(e.to_string()))?;
+    let truncada = json
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+        == Some("length");
+    let texto = if truncada {
+        json.pointer("/choices/0/message/content")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    } else {
+        texto_en(&json, "/choices/0/message/content")?
+    };
     Ok(Crudo {
-        texto: texto_en(&json, "/choices/0/message/content")?,
+        texto,
         in_tokens: entero_en(&json, "/usage/prompt_tokens")?,
         out_tokens: entero_en(&json, "/usage/completion_tokens")?,
+        truncada,
     })
 }
 

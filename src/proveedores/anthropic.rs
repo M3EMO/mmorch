@@ -40,10 +40,12 @@ pub(crate) fn leer(texto: &str) -> Result<Crudo, ErrorProveedor> {
         .filter(|bloque| bloque.get("type").and_then(Value::as_str) == Some("text"))
         .filter_map(|bloque| bloque.get("text").and_then(Value::as_str))
         .collect();
+    let truncada = json.get("stop_reason").and_then(Value::as_str) == Some("max_tokens");
     Ok(Crudo {
         texto,
         in_tokens: entero_en(&json, "/usage/input_tokens")?,
         out_tokens: entero_en(&json, "/usage/output_tokens")?,
+        truncada,
     })
 }
 

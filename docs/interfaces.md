@@ -73,7 +73,7 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t goal autorizar` | Autoriza un cambio al GOAL. Exige una TTY y una confirmación tecleada. | sin salida JSON | construido |
 | `r00t importar-mmorch --desde <metrics.jsonl>` | Copia en solo lectura el log de métricas de mmorch. | resumen de la importación | construido |
 | `r00t esquema <tipo>` | Imprime el JSON Schema de un tipo. Ver `## Esquemas`. | JSON Schema | construido |
-| `r00t ficha revisar --spec <SPEC.md> [--juez-proveedor p --juez-modelo m]` | Revisa la ficha y las ambigüedades. Con los dos flags de juez, también corre el juez. | `Revision` | construido |
+| `r00t ficha revisar --spec <SPEC.md> [--juez-proveedor p --juez-modelo m [--juez-max-tokens n]]` | Revisa la ficha y las ambigüedades. Con los dos flags de juez, también corre el juez. `--juez-max-tokens` fija el tope de salida del juez: 32 000 por defecto, al menos 1, y exige `--juez-modelo`. | `Revision` | construido |
 | `r00t ficha tarea --spec <SPEC.md> --nombre <t>` | Arma el borrador de `tarea.toml` desde la ficha. | `{toml}` | construido |
 | `r00t mcp` | Inicia el servidor MCP por stdio. | JSON-RPC 2.0 | construido |
 
@@ -287,6 +287,7 @@ La prosa del spec explica. La ficha fija los datos que Root mide. Cada dato tien
 - El builder ve el spec y su ficha. La ficha nunca nombra tests ocultos. La relación requisito→test vive en `tarea.toml`.
 - `r00t ficha tarea` arma un borrador de `tarea.toml`. El borrador deja `pruebas`, `bordes` y `escenarios` vacíos. La persona que aprueba la ficha completa esos campos en `ROOT_HOME`.
 - `r00t ficha revisar` aplica reglas deterministas. Con `--juez-proveedor` y `--juez-modelo`, también corre el juez de ambigüedades.
+- Si el juez llega al tope de salida, su causa es `sin_veredicto: tope de salida alcanzado (N tokens)`. N es el tope pedido. Esa causa no dice «JSON inválido».
 
 Tablas de la ficha:
 

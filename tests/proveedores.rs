@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use root::config::Config;
 use root::proveedores::{
-    Breaker, Clave, Claves, Contexto, ErrorProveedor, Prompt, Respuesta, imprimir_para_cli,
-    llamar_con,
+    Breaker, Clave, Claves, Contexto, ErrorProveedor, MAX_TOKENS_JUEZ, Prompt, Respuesta,
+    causa_tope_alcanzado, imprimir_para_cli, llamar_con,
 };
 use root::tipos::{Eleccion, Proveedor, Via};
 use serde_json::Value;
@@ -808,6 +808,7 @@ fn respuesta_de_prueba() -> Respuesta {
         latency_s: 0.1,
         modelo: "deepseek-chat".into(),
         intentos: 1,
+        truncada: false,
     }
 }
 
@@ -980,4 +981,179 @@ fn proveedores_cli_error_no_registrado_linea_del_evento_en_stderr_y_codigo_3() {
     assert_eq!(linea["corrida"], "c21");
     assert_eq!(linea["extra"]["error"], "http_503");
     assert!(!texto.contains(CLAVE_PRUEBA));
+}
+
+// Respuestas truncadas por el tope de salida (Tarea 10c).
+
+/// DeepSeek gastó todo el tope en razonamiento: contenido vacío y `finish_reason` = `length`.
+const DEEPSEEK_LENGTH_VACIO: &str = r#"{"choices":[{"message":{"content":"","reasoning_content":"pensé mucho"},"finish_reason":"length"}],"usage":{"prompt_tokens":100,"completion_tokens":32000}}"#;
+const DEEPSEEK_STOP: &str = r#"{"choices":[{"message":{"content":"hola"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":50}}"#;
+const ANTHROPIC_MAX_TOKENS: &str = r#"{"content":[{"type":"text","text":"ho"}],"stop_reason":"max_tokens","usage":{"input_tokens":10,"output_tokens":5}}"#;
+const ANTHROPIC_END_TURN: &str = r#"{"content":[{"type":"text","text":"hola"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}"#;
+
+/// Llama una vez al proveedor con `cfg` y devuelve el resultado y el `home` con su `eventos.jsonl`.
+fn llamada_con_servidor(
+    cfg: &Config,
+    proveedor: Proveedor,
+    modelo: &str,
+    corrida: &str,
+) -> (Result<Respuesta, ErrorProveedor>, tempfile::TempDir) {
+    let home = tempfile::tempdir().expect("home");
+    let breaker = Breaker::new();
+    let claves = claves_de_prueba();
+    let base = Instant::now();
+    let reloj = || base;
+    let ctx = Contexto {
+        cfg,
+        home: home.path(),
+        breaker: &breaker,
+        claves: &claves,
+        reloj: &reloj,
+    };
+    let res = llamar_con(&ctx, &eleccion(proveedor, modelo), &prompt(), corrida);
+    (res, home)
+}
+
+#[test]
+fn proveedores_deepseek_length_con_contenido_vacio_es_exito_truncado() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_LENGTH_VACIO)]);
+    let cfg = config(&srv.url, &srv.url);
+    let (res, home) = llamada_con_servidor(&cfg, Proveedor::Deepseek, "deepseek-chat", "t1");
+
+    let r = res.expect("una respuesta truncada es éxito, no error");
+    assert!(r.truncada);
+    assert_eq!(r.texto, "");
+    assert_eq!(r.intentos, 1);
+    // Cobra los tokens reales: 100 de entrada y 32 000 de salida.
+    let esperado = 100.0 * 1.0 / 1e6 + 32_000.0 * 2.0 / 1e6;
+    assert!((r.cost_usd - esperado).abs() < 1e-12, "{}", r.cost_usd);
+
+    let evs = eventos(home.path());
+    assert_eq!(evs.len(), 1);
+    assert!(evs[0]["cost_usd"].as_f64().expect("costo") > 0.0);
+    assert_eq!(evs[0]["extra"]["truncada"], true);
+    assert!(evs[0]["extra"].get("error").is_none());
+}
+
+#[test]
+fn proveedores_deepseek_length_no_abre_el_breaker() {
+    let mut respuestas = vec![(200, DEEPSEEK_LENGTH_VACIO); 3];
+    respuestas.push((200, DEEPSEEK_OK));
+    let srv = Servidor::arranca(respuestas);
+    let cfg = config(&srv.url, &srv.url);
+    let home = tempfile::tempdir().expect("home");
+    let breaker = Breaker::new();
+    let claves = claves_de_prueba();
+    let base = Instant::now();
+    let reloj = || base;
+    let ctx = Contexto {
+        cfg: &cfg,
+        home: home.path(),
+        breaker: &breaker,
+        claves: &claves,
+        reloj: &reloj,
+    };
+    let e = eleccion(Proveedor::Deepseek, "deepseek-chat");
+
+    for _ in 0..3 {
+        let r = llamar_con(&ctx, &e, &prompt(), "t2").expect("truncada no es falla");
+        assert!(r.truncada);
+    }
+    let r = llamar_con(&ctx, &e, &prompt(), "t2").expect("el breaker sigue cerrado");
+    assert_eq!(r.texto, "hola");
+    assert_eq!(srv.peticiones(), 4);
+}
+
+#[test]
+fn proveedores_deepseek_length_con_contenido_null_es_truncada_vacia() {
+    let srv = Servidor::arranca(vec![(
+        200,
+        r#"{"choices":[{"message":{"content":null},"finish_reason":"length"}],"usage":{"prompt_tokens":100,"completion_tokens":32000}}"#,
+    )]);
+    let cfg = config(&srv.url, &srv.url);
+    let (res, _home) = llamada_con_servidor(&cfg, Proveedor::Deepseek, "deepseek-chat", "t3");
+
+    let r = res.expect("content null con length es truncada, no error de respuesta");
+    assert!(r.truncada);
+    assert_eq!(r.texto, "");
+}
+
+#[test]
+fn proveedores_deepseek_stop_no_es_truncada() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_STOP)]);
+    let cfg = config(&srv.url, &srv.url);
+    let (res, home) = llamada_con_servidor(&cfg, Proveedor::Deepseek, "deepseek-chat", "t4");
+
+    let r = res.expect("200 da respuesta");
+    assert!(!r.truncada);
+    assert_eq!(r.texto, "hola");
+    assert!(eventos(home.path())[0]["extra"].get("truncada").is_none());
+}
+
+#[test]
+fn proveedores_deepseek_sin_finish_reason_no_es_truncada() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let cfg = config(&srv.url, &srv.url);
+    let (res, _home) = llamada_con_servidor(&cfg, Proveedor::Deepseek, "deepseek-chat", "t5");
+
+    assert!(!res.expect("200 da respuesta").truncada);
+}
+
+#[test]
+fn proveedores_anthropic_max_tokens_es_truncada_con_costo_real() {
+    let srv = Servidor::arranca(vec![(200, ANTHROPIC_MAX_TOKENS)]);
+    let cfg = config(&srv.url, &srv.url);
+    let (res, home) = llamada_con_servidor(&cfg, Proveedor::Anthropic, "claude-haiku-5-5", "t6");
+
+    let r = res.expect("truncada es éxito");
+    assert!(r.truncada);
+    assert_eq!(r.texto, "ho");
+    assert!((r.cost_usd - (10.0 * 4.0 + 5.0 * 8.0) / 1e6).abs() < 1e-12);
+    let evs = eventos(home.path());
+    assert!(evs[0]["cost_usd"].as_f64().expect("costo") > 0.0);
+    assert_eq!(evs[0]["extra"]["truncada"], true);
+}
+
+#[test]
+fn proveedores_anthropic_end_turn_no_es_truncada() {
+    let srv = Servidor::arranca(vec![(200, ANTHROPIC_END_TURN)]);
+    let cfg = config(&srv.url, &srv.url);
+    let (res, _home) = llamada_con_servidor(&cfg, Proveedor::Anthropic, "claude-haiku-5-5", "t7");
+
+    assert!(!res.expect("200 da respuesta").truncada);
+}
+
+#[test]
+fn proveedores_truncada_sin_precio_no_cobra_y_marca_precio_faltante() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_LENGTH_VACIO)]);
+    let mut cfg = config(&srv.url, &srv.url);
+    cfg.precios.clear();
+    let (res, home) = llamada_con_servidor(&cfg, Proveedor::Deepseek, "deepseek-chat", "t8");
+
+    let r = res.expect("truncada es éxito");
+    assert!(r.truncada);
+    assert_eq!(r.cost_usd, 0.0);
+    let ev = &eventos(home.path())[0];
+    assert_eq!(ev["extra"]["precio_faltante"], true);
+    assert_eq!(ev["extra"]["truncada"], true);
+}
+
+#[test]
+fn proveedores_respuesta_sin_campo_truncada_se_lee_como_falsa() {
+    let texto = r#"{"texto":"hola","in_tokens":1,"out_tokens":1,"cost_usd":0.0,"latency_s":0.1,"modelo":"m","intentos":1}"#;
+    let r: Respuesta = serde_json::from_str(texto).expect("sin el campo, sigue leyendo");
+    assert!(!r.truncada);
+}
+
+#[test]
+fn proveedores_causa_tope_alcanzado_nombra_los_tokens() {
+    assert_eq!(
+        causa_tope_alcanzado(32_000),
+        "tope de salida alcanzado (32000 tokens)"
+    );
+}
+
+#[test]
+fn proveedores_tope_de_los_jueces_es_32000() {
+    assert_eq!(MAX_TOKENS_JUEZ, 32_000);
 }

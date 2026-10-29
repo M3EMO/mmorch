@@ -221,11 +221,13 @@ fn ficha_accion(json: bool, accion: &FichaAccion) -> Result<u8, Error> {
             spec,
             juez_proveedor,
             juez_modelo,
+            juez_max_tokens,
         } => {
             let texto = leer_spec(spec)?;
             let ctx = ContextoRevision::default();
+            let tope = juez_max_tokens.unwrap_or(crate::proveedores::MAX_TOKENS_JUEZ);
             let revision = match juez_de(*juez_proveedor, juez_modelo.as_deref()) {
-                Some(juez) => ficha::revisar_con_juez(&texto, &ctx, &juez)?,
+                Some(juez) => ficha::revisar_con_tope(&texto, &ctx, &juez, tope)?,
                 None => ficha::revisar(&texto, &ctx)?,
             };
             if json {

@@ -1,24 +1,49 @@
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use root::ficha::{self, ContextoRevision, ErrorFicha, JuezAmbiguedad, revisar_con_juez};
+use root::ficha::{
+    self, ContextoRevision, ErrorFicha, JuezAmbiguedad, revisar_con_juez, revisar_con_tope,
+};
 use root::oracle::tarea::Tarea;
 use root::oracle::{ErrorOraculo, OpcionesOraculo, evaluar};
-use root::proveedores::Prompt;
+use root::proveedores::{Prompt, RespuestaJuez};
+
+mod common;
+
+use common::Servidor;
 
 /// Juez falso: devuelve una respuesta fija y guarda cada prompt que recibe.
 struct JuezFalso {
-    respuesta: Result<String, String>,
+    respuesta: Result<RespuestaJuez, String>,
     prompts: RefCell<Vec<Prompt>>,
 }
 
 impl JuezFalso {
     fn ok(texto: &str) -> JuezFalso {
         JuezFalso {
-            respuesta: Ok(texto.to_string()),
+            respuesta: Ok(RespuestaJuez {
+                texto: texto.to_string(),
+                truncada: false,
+            }),
+            prompts: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// El modelo se quedó sin tope de salida: texto vacío y `truncada`.
+    fn truncada() -> JuezFalso {
+        JuezFalso::truncada_con("")
+    }
+
+    /// Respuesta truncada con un texto que, por sí solo, sí parsearía.
+    fn truncada_con(texto: &str) -> JuezFalso {
+        JuezFalso {
+            respuesta: Ok(RespuestaJuez {
+                texto: texto.to_string(),
+                truncada: true,
+            }),
             prompts: RefCell::new(Vec::new()),
         }
     }
@@ -32,7 +57,7 @@ impl JuezFalso {
 }
 
 impl JuezAmbiguedad for JuezFalso {
-    fn consultar(&self, prompt: &Prompt) -> Result<String, ErrorFicha> {
+    fn consultar(&self, prompt: &Prompt) -> Result<RespuestaJuez, ErrorFicha> {
         self.prompts.borrow_mut().push(prompt.clone());
         self.respuesta.clone().map_err(ErrorFicha::Juez)
     }
@@ -539,7 +564,7 @@ fn ficha_juez_prompt_fijo_refuta_pide_json_y_lleva_el_spec() {
     assert!(sistema.contains("REFUTA"), "{sistema}");
     assert!(sistema.contains("JSON"), "{sistema}");
     assert_eq!(prompt.usuario, texto);
-    assert_eq!(prompt.max_tokens, 4000);
+    assert_eq!(prompt.max_tokens, 32_000);
     assert_eq!(prompt.fase, "ficha");
 }
 
@@ -807,4 +832,206 @@ fn ficha_cli_spec_inexistente_nombra_la_causa_una_sola_vez() {
     let stderr = String::from_utf8_lossy(&salida.stderr);
     assert_eq!(stderr.matches("no se pudo leer").count(), 1, "{stderr}");
     assert_eq!(stderr.matches("No such file").count(), 1, "{stderr}");
+}
+
+// Tope de salida del juez de la ficha (Tarea 10c). Ningún test sale a internet: los pedidos van al servidor falso.
+
+const CLAVE_FALSA: &str = "sk-test-FICHA-TOPE";
+/// El juez responde un arreglo vacío y termina con `stop`.
+const JUEZ_LISTA_VACIA: &str = r#"{"choices":[{"message":{"content":"[]"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+/// El juez gastó todo el tope en razonamiento: contenido vacío y `finish_reason` = `length`.
+const JUEZ_TRUNCADO: &str = r#"{"choices":[{"message":{"content":"","reasoning_content":"pensé"},"finish_reason":"length"}],"usage":{"prompt_tokens":100,"completion_tokens":32000}}"#;
+
+/// `ficha revisar` con el juez de DeepSeek apuntado al servidor falso. `ROOT_HOME` es `home`.
+fn revisar_contra(srv: &Servidor, home: &Path, extra: &[&str]) -> Output {
+    let texto = format!(
+        "[proveedores]\ndeepseek_url = \"{}\"\nespera_base_ms = 1\n\n[precios.\"deepseek-flash\"]\nusd_entrada = 0.14\nusd_salida = 0.28\n",
+        srv.url
+    );
+    fs::write(home.join("root.toml"), texto).expect("root.toml");
+    Command::new(env!("CARGO_BIN_EXE_r00t"))
+        .env("ROOT_HOME", home)
+        .env("DEEPSEEK_API_KEY", CLAVE_FALSA)
+        .env_remove("ANTHROPIC_API_KEY")
+        .args([
+            "--json",
+            "ficha",
+            "revisar",
+            "--spec",
+            &ruta_fixture("spec-completa.md"),
+            "--juez-proveedor",
+            "deepseek",
+            "--juez-modelo",
+            "deepseek-flash",
+        ])
+        .args(extra)
+        .output()
+        .expect("ejecuta r00t")
+}
+
+fn max_tokens_del_pedido(srv: &Servidor) -> serde_json::Value {
+    let cuerpo: serde_json::Value =
+        serde_json::from_str(&srv.cuerpo(0)).expect("el cuerpo es JSON");
+    cuerpo["max_tokens"].clone()
+}
+
+#[test]
+fn ficha_revisar_con_tope_pasa_el_tope_al_prompt() {
+    let texto = fixture("spec-completa.md");
+    let juez = JuezFalso::ok("[]");
+    revisar_con_tope(&texto, &ctx_vacio(), &juez, 8000).expect("revisa");
+    assert_eq!(juez.prompts.borrow()[0].max_tokens, 8000);
+}
+
+#[test]
+fn ficha_juez_truncado_da_sin_veredicto_con_la_causa_del_tope() {
+    let texto = fixture("spec-vaga.md");
+    let revision = revisar_con_juez(&texto, &ctx_vacio(), &JuezFalso::truncada()).expect("revisa");
+    assert_eq!(
+        revision.juez,
+        "sin_veredicto: tope de salida alcanzado (32000 tokens)"
+    );
+    assert!(
+        !revision.juez.contains("JSON inválido"),
+        "{}",
+        revision.juez
+    );
+    // Las reglas deterministas siguen presentes aunque el juez se haya truncado.
+    assert!(!revision.hallazgos.is_empty(), "{:?}", revision.hallazgos);
+    assert!(revision.ambiguedades.is_empty());
+    assert_eq!(revision.codigo_de_salida(), 1);
+}
+
+#[test]
+fn ficha_juez_truncado_mira_la_bandera_antes_de_parsear() {
+    // El texto parsearía bien; la bandera manda igual.
+    let texto = fixture("spec-completa.md");
+    let juez = JuezFalso::truncada_con(&ambiguedad_real());
+    let revision = revisar_con_juez(&texto, &ctx_vacio(), &juez).expect("revisa");
+    assert_eq!(
+        revision.juez,
+        "sin_veredicto: tope de salida alcanzado (32000 tokens)"
+    );
+    assert!(revision.ambiguedades.is_empty());
+}
+
+#[test]
+fn ficha_codigo_truncado_en_ficha_limpia_sale_3() {
+    let texto = fixture("spec-completa.md");
+    let revision = revisar_con_juez(&texto, &ctx_vacio(), &JuezFalso::truncada()).expect("revisa");
+    assert!(revision.hallazgos.is_empty());
+    assert!(revision.ambiguedades.is_empty());
+    assert_eq!(revision.codigo_de_salida(), 3);
+}
+
+#[test]
+fn ficha_juez_no_truncado_json_roto_sigue_siendo_json_invalido() {
+    let texto = fixture("spec-completa.md");
+    let revision =
+        revisar_con_juez(&texto, &ctx_vacio(), &JuezFalso::ok("no es json")).expect("revisa");
+    assert!(revision.juez.contains("JSON inválido"), "{}", revision.juez);
+}
+
+#[test]
+fn ficha_cli_juez_pide_32000_de_tope_por_defecto() {
+    let srv = Servidor::arranca(vec![(200, JUEZ_LISTA_VACIA)]);
+    let home = tempfile::tempdir().expect("home");
+    let salida = revisar_contra(&srv, home.path(), &[]);
+    assert_eq!(
+        codigo(&salida),
+        0,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    assert_eq!(max_tokens_del_pedido(&srv), 32_000);
+}
+
+#[test]
+fn ficha_cli_juez_max_tokens_llega_al_cuerpo_del_pedido() {
+    let srv = Servidor::arranca(vec![(200, JUEZ_LISTA_VACIA)]);
+    let home = tempfile::tempdir().expect("home");
+    let salida = revisar_contra(&srv, home.path(), &["--juez-max-tokens", "8000"]);
+    assert_eq!(
+        codigo(&salida),
+        0,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    assert_eq!(max_tokens_del_pedido(&srv), 8000);
+}
+
+#[test]
+fn ficha_cli_juez_max_tokens_cero_sale_2() {
+    // Sin clave: si el valor 0 se aceptara, el juez daría sin_veredicto y no saldría ningún pedido.
+    let home = tempfile::tempdir().expect("home");
+    let salida = Command::new(env!("CARGO_BIN_EXE_r00t"))
+        .env("ROOT_HOME", home.path())
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .args([
+            "ficha",
+            "revisar",
+            "--spec",
+            &ruta_fixture("spec-completa.md"),
+            "--juez-proveedor",
+            "deepseek",
+            "--juez-modelo",
+            "deepseek-flash",
+            "--juez-max-tokens",
+            "0",
+        ])
+        .output()
+        .expect("ejecuta r00t");
+    assert_eq!(codigo(&salida), 2);
+}
+
+#[test]
+fn ficha_cli_juez_max_tokens_sin_proveedor_sale_2() {
+    let salida = root(&[
+        "ficha",
+        "revisar",
+        "--spec",
+        &ruta_fixture("spec-completa.md"),
+        "--juez-max-tokens",
+        "8000",
+    ]);
+    assert_eq!(codigo(&salida), 2);
+}
+
+#[test]
+fn ficha_cli_juez_max_tokens_sin_modelo_sale_2() {
+    let salida = root(&[
+        "ficha",
+        "revisar",
+        "--spec",
+        &ruta_fixture("spec-completa.md"),
+        "--juez-proveedor",
+        "deepseek",
+        "--juez-max-tokens",
+        "8000",
+    ]);
+    assert_eq!(codigo(&salida), 2);
+}
+
+#[test]
+fn ficha_cli_respuesta_truncada_da_la_causa_del_tope_y_registra_costo() {
+    let srv = Servidor::arranca(vec![(200, JUEZ_TRUNCADO)]);
+    let home = tempfile::tempdir().expect("home");
+    let salida = revisar_contra(&srv, home.path(), &[]);
+    assert_eq!(
+        codigo(&salida),
+        3,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&salida.stdout).expect("stdout es JSON");
+    assert_eq!(
+        json["juez"],
+        "sin_veredicto: tope de salida alcanzado (32000 tokens)"
+    );
+    let eventos = fs::read_to_string(home.path().join("eventos.jsonl")).expect("eventos");
+    let ultimo = eventos.lines().last().expect("hay un evento");
+    let evento: serde_json::Value = serde_json::from_str(ultimo).expect("JSON");
+    assert_eq!(evento["extra"]["truncada"], true);
+    assert!(evento["cost_usd"].as_f64().expect("costo") > 0.0);
 }

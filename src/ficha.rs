@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error as ErrorDerive;
 
 use juez::SIN_VEREDICTO;
-pub use juez::{JuezAmbiguedad, JuezProveedor, revisar_con_juez};
+pub use juez::{JuezAmbiguedad, JuezProveedor, revisar_con_juez, revisar_con_tope};
 
 /// Errores de la ficha. Salen con código 2: sin ficha válida no hay evaluación.
 /// La excepción es `Juez`, un fallo de infraestructura: sale con 3.

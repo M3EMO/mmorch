@@ -129,6 +129,9 @@ pub enum FichaAccion {
         /// Modelo del juez de ambigüedades. Exige `--juez-proveedor`.
         #[arg(long, requires = "juez_proveedor")]
         juez_modelo: Option<String>,
+        /// Tope de tokens de salida del juez. Exige `--juez-modelo`. Por defecto, 32 000.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..), requires = "juez_modelo")]
+        juez_max_tokens: Option<u32>,
     },
     /// Arma el borrador de `tarea.toml` desde la ficha.
     Tarea {

@@ -1,4 +1,6 @@
 //! Servidor HTTP falso en 127.0.0.1 para las pruebas de la CLI. Ninguna prueba sale a internet.
+// Cada crate de test usa una parte distinta de este módulo.
+#![allow(dead_code)]
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -10,6 +12,7 @@ use std::thread;
 pub struct Servidor {
     pub url: String,
     pedidos: Arc<Mutex<usize>>,
+    cuerpos: Arc<Mutex<Vec<String>>>,
 }
 
 impl Servidor {
@@ -17,12 +20,15 @@ impl Servidor {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind en loopback");
         let url = format!("http://{}", listener.local_addr().expect("dirección"));
         let pedidos = Arc::new(Mutex::new(0usize));
+        let cuerpos = Arc::new(Mutex::new(Vec::new()));
         let cola = Arc::new(Mutex::new(VecDeque::from(respuestas)));
         let cuenta = Arc::clone(&pedidos);
+        let registro = Arc::clone(&cuerpos);
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
-                leer_pedido(&stream);
+                let recibido = leer_pedido(&stream);
+                registro.lock().expect("lock").push(recibido);
                 *cuenta.lock().expect("lock") += 1;
                 let (codigo, cuerpo) = cola
                     .lock()
@@ -36,17 +42,27 @@ impl Servidor {
                 let _ = stream.write_all(respuesta.as_bytes());
             }
         });
-        Servidor { url, pedidos }
+        Servidor {
+            url,
+            pedidos,
+            cuerpos,
+        }
     }
 
     /// Cuántos pedidos llegaron al servidor.
     pub fn peticiones(&self) -> usize {
         *self.pedidos.lock().expect("lock")
     }
+
+    /// Cuerpo del pedido número `indice` (desde 0), tal como llegó.
+    pub fn cuerpo(&self, indice: usize) -> String {
+        self.cuerpos.lock().expect("lock")[indice].clone()
+    }
 }
 
 /// Lee cabeceras y cuerpo del pedido para que el cliente no reciba un cierre prematuro.
-fn leer_pedido(stream: &TcpStream) {
+/// Devuelve el cuerpo como texto.
+fn leer_pedido(stream: &TcpStream) -> String {
     let mut lector = BufReader::new(stream);
     let mut linea = String::new();
     lector.read_line(&mut linea).expect("línea de inicio");
@@ -66,4 +82,5 @@ fn leer_pedido(stream: &TcpStream) {
     }
     let mut cuerpo = vec![0u8; largo];
     lector.read_exact(&mut cuerpo).expect("cuerpo");
+    String::from_utf8_lossy(&cuerpo).into_owned()
 }

@@ -16,15 +16,13 @@ use super::perfiles::crear_hallazgo;
 use super::perfiles::rust::REGLA_CICLO;
 use super::rubrica::{ErrorRubrica, ItemRubrica, Mide, Puntuacion, Rubrica};
 use super::tarea::Requisito;
-use crate::proveedores::{self, Prompt};
+use crate::proveedores::{self, Prompt, RespuestaJuez};
 use crate::tipos::{Dimension, Eleccion, Fuente, Hallazgo, NivelItem, Via};
 
 /// Ítem de la rúbrica de modularidad. Su tope lo pone un ciclo de módulos.
 const MODULARIDAD: &str = "diseno.modularidad";
 /// Id de la sonda de arquitectura. Su hallazgo de ciclo fija el tope de `diseno.modularidad`.
 const SONDA_ARQUITECTURA: &str = "arquitectura-nativa";
-/// Tokens de salida por llamada del juez.
-const MAX_TOKENS: u32 = 6000;
 /// Fase del flujo que va al `Evento` de la llamada.
 const FASE: &str = "juez-diseno";
 /// Marca que se agrega al final de un extracto recortado.
@@ -51,7 +49,7 @@ Sin hallazgos: \"hallazgos\":[]. Sin ítems con evidencia: \"items\":[].";
 
 /// Un modelo que responde al prompt del juez.
 pub trait ModeloJuez {
-    fn consultar(&self, prompt: &Prompt) -> Result<String, ErrorOraculo>;
+    fn consultar(&self, prompt: &Prompt) -> Result<RespuestaJuez, ErrorOraculo>;
 }
 
 /// Juez real: llama al proveedor de `eleccion`. Solo acepta una elección que razona y usa la API.
@@ -84,9 +82,12 @@ impl JuezProveedor {
 }
 
 impl ModeloJuez for JuezProveedor {
-    fn consultar(&self, prompt: &Prompt) -> Result<String, ErrorOraculo> {
+    fn consultar(&self, prompt: &Prompt) -> Result<RespuestaJuez, ErrorOraculo> {
         proveedores::llamar(&self.eleccion, prompt, &self.corrida)
-            .map(|respuesta| respuesta.texto)
+            .map(|respuesta| RespuestaJuez {
+                texto: respuesta.texto,
+                truncada: respuesta.truncada,
+            })
             .map_err(|e| ErrorOraculo::Infra(e.to_string()))
     }
 }
@@ -108,6 +109,8 @@ pub struct LimitesPrompt {
     pub extractos_total: usize,
     pub extracto_max: usize,
     pub hallazgos_max: usize,
+    /// Tope de tokens de salida del juez.
+    pub max_tokens: u32,
 }
 
 impl Default for LimitesPrompt {
@@ -117,6 +120,7 @@ impl Default for LimitesPrompt {
             extractos_total: 40_000,
             extracto_max: 6000,
             hallazgos_max: 40,
+            max_tokens: proveedores::MAX_TOKENS_JUEZ,
         }
     }
 }
@@ -186,7 +190,7 @@ pub fn construir_prompt(e: &EntradaJuez, limites: &LimitesPrompt) -> Prompt {
     Prompt {
         sistema: Some(PROMPT_SISTEMA.into()),
         usuario,
-        max_tokens: MAX_TOKENS,
+        max_tokens: limites.max_tokens,
         fase: FASE.into(),
     }
 }
@@ -289,11 +293,17 @@ pub fn juzgar(
         .flat_map(|r| r.item.iter())
         .map(|item| (item.id.clone(), item.mide))
         .collect();
-    let texto = match modelo.consultar(&construir_prompt(e, limites)) {
-        Ok(texto) => texto,
+    let prompt = construir_prompt(e, limites);
+    let tope = prompt.max_tokens;
+    let salida = match modelo.consultar(&prompt) {
+        Ok(salida) => salida,
         Err(err) => return sin_veredicto(format!("el modelo falló: {err}"), &pedidos),
     };
-    let respuesta = match parsear(&texto) {
+    // Antes de parsear: una respuesta cortada por el tope no es JSON roto, es truncada.
+    if salida.truncada {
+        return sin_veredicto(proveedores::causa_tope_alcanzado(tope), &pedidos);
+    }
+    let respuesta = match parsear(&salida.texto) {
         Ok(respuesta) => respuesta,
         Err(causa) => return sin_veredicto(causa, &pedidos),
     };
@@ -724,16 +734,30 @@ mod tests {
         }
     }
 
-    /// Modelo falso: devuelve un texto fijo y guarda cada prompt recibido.
+    /// Modelo falso: devuelve una respuesta fija y guarda cada prompt recibido.
     struct Falso {
-        respuesta: Result<String, String>,
+        respuesta: Result<RespuestaJuez, String>,
         visto: RefCell<Vec<Prompt>>,
     }
 
     impl Falso {
         fn con(texto: String) -> Self {
             Self {
-                respuesta: Ok(texto),
+                respuesta: Ok(RespuestaJuez {
+                    texto,
+                    truncada: false,
+                }),
+                visto: RefCell::new(Vec::new()),
+            }
+        }
+
+        /// Respuesta truncada por el tope de salida, con el texto que se le pase.
+        fn truncada_con(texto: String) -> Self {
+            Self {
+                respuesta: Ok(RespuestaJuez {
+                    texto,
+                    truncada: true,
+                }),
                 visto: RefCell::new(Vec::new()),
             }
         }
@@ -747,7 +771,7 @@ mod tests {
     }
 
     impl ModeloJuez for Falso {
-        fn consultar(&self, prompt: &Prompt) -> Result<String, ErrorOraculo> {
+        fn consultar(&self, prompt: &Prompt) -> Result<RespuestaJuez, ErrorOraculo> {
             self.visto.borrow_mut().push(prompt.clone());
             self.respuesta.clone().map_err(ErrorOraculo::Infra)
         }
@@ -808,6 +832,56 @@ mod tests {
             fuente: Fuente::Sonda(SONDA_ARQUITECTURA.into()),
             id: String::new(),
             impacto: vec!["R1".into()],
+        }
+    }
+
+    // Respuesta truncada por el tope de salida: se mira antes de parsear.
+
+    #[test]
+    fn juez_truncado_da_sin_veredicto_con_la_causa_del_tope() {
+        let c = caso();
+        let texto = respuesta(json!([]), json!([]));
+        let r = juzgar(
+            &c.entrada(),
+            &Falso::truncada_con(texto),
+            MODELO,
+            &LimitesPrompt::default(),
+        );
+        assert_eq!(
+            r.estado,
+            EstadoJuez::SinVeredicto("tope de salida alcanzado (32000 tokens)".into())
+        );
+        assert!(r.niveles.is_empty());
+        assert!(r.items.is_empty());
+        assert!(r.hallazgos.is_empty());
+    }
+
+    #[test]
+    fn juez_truncado_con_texto_vacio_no_dice_json_invalido() {
+        let c = caso();
+        let r = juzgar(
+            &c.entrada(),
+            &Falso::truncada_con(String::new()),
+            MODELO,
+            &LimitesPrompt::default(),
+        );
+        match &r.estado {
+            EstadoJuez::SinVeredicto(causa) => {
+                assert!(causa.starts_with("tope de salida alcanzado"), "{causa}");
+                assert!(!causa.contains("JSON"), "{causa}");
+            }
+            otro => panic!("esperaba SinVeredicto, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn juez_no_truncado_json_roto_sigue_con_su_causa() {
+        let r = juzgar_con(&caso(), "{\"items\": [".into());
+        match &r.estado {
+            EstadoJuez::SinVeredicto(causa) => {
+                assert!(causa.starts_with("JSON inválido"), "{causa}");
+            }
+            otro => panic!("esperaba SinVeredicto, llegó {otro:?}"),
         }
     }
 
@@ -1134,7 +1208,17 @@ mod tests {
         );
         assert!(p.usuario.contains("3: módulos con una responsabilidad"));
         assert_eq!(p.fase, FASE);
-        assert_eq!(p.max_tokens, MAX_TOKENS);
+        assert_eq!(p.max_tokens, 32_000);
+    }
+
+    #[test]
+    fn juez_limites_max_tokens_llega_al_prompt() {
+        let c = caso();
+        let limites = LimitesPrompt {
+            max_tokens: 8000,
+            ..LimitesPrompt::default()
+        };
+        assert_eq!(construir_prompt(&c.entrada(), &limites).max_tokens, 8000);
     }
 
     #[test]
