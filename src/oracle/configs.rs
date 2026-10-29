@@ -506,6 +506,27 @@ pub(crate) fn palabra_clave(logico: &str) -> (String, &str) {
     (texto[..fin].to_uppercase(), texto[fin..].trim())
 }
 
+/// Fuentes remotas de un `ADD` o `COPY` (A11): las que llevan `://` o empiezan con `git@`. La última
+/// palabra es el destino y no cuenta. Las banderas `--x` se ignoran, y también la forma JSON. Vacío si
+/// la instrucción no es `ADD` ni `COPY`.
+pub(crate) fn fuentes_remotas(logico: &str) -> Vec<&str> {
+    let (kw, resto) = palabra_clave(logico);
+    if kw != "ADD" && kw != "COPY" {
+        return Vec::new();
+    }
+    let tokens: Vec<&str> = resto
+        .split_whitespace()
+        .filter(|t| !t.starts_with("--"))
+        .map(|t| t.trim_matches(|c: char| "[],\"'".contains(c)))
+        .collect();
+    let fuentes = &tokens[..tokens.len().saturating_sub(1)];
+    fuentes
+        .iter()
+        .copied()
+        .filter(|t| t.contains("://") || t.starts_with("git@"))
+        .collect()
+}
+
 /// Imagen y nombre de etapa (`AS x`) de un `FROM`. Las banderas `--x=y` se ignoran.
 pub(crate) fn parsear_from(resto: &str) -> (Option<String>, Option<String>) {
     let mut tokens = resto.split_whitespace().filter(|t| !t.starts_with("--"));

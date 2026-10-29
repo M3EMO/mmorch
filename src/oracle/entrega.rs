@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use crate::observe;
 use crate::oracle::ErrorOraculo;
 use crate::oracle::configs::{self, instrucciones, palabra_clave};
-use crate::oracle::contenedor::{SUFIJO_SELINUX, SalidaPodman, correr_podman};
+use crate::oracle::contenedor::{PROXY_FUERA, SUFIJO_SELINUX, SalidaPodman, correr_podman};
 use crate::oracle::descarga::{self, ImagenBase, PRELUDIO, Problema};
 use crate::oracle::perfiles::herramientas::EjecutorHerramienta;
 use crate::oracle::perfiles::{ResultadoSonda, crear_hallazgo, puntuar_hallazgos};
@@ -130,17 +130,14 @@ impl Podman for PodmanReal {
     }
 }
 
-/// Argumentos de `podman build` (Tarea 9d3). Sin red, `--network none`. Con red, la red de usuario de
-/// podman sin acceso al host, y nada más: sin montajes, secretos, `--build-arg`, `--authfile` ni `--env`.
-/// La forma exacta de la opción de red se verifica en la laptop (podman real).
+/// Argumentos de `podman build` (Tarea 9d3). Sin red, `--network none`. Con red, `pasta` (el default de
+/// Podman 5) con `--no-map-gw`: el contenedor no alcanza la dirección del host. Sin montajes, secretos,
+/// `--build-arg`, `--authfile` ni `--env`. Que el host no sea alcanzable se prueba en la laptop.
 fn args_build(red: bool, etiqueta: &str, dockerfile: &str, contexto: &str) -> Vec<String> {
-    let red = if red {
-        "slirp4netns:allow_host_loopback=false"
-    } else {
-        "none"
-    };
+    let red = if red { "pasta:--no-map-gw" } else { "none" };
     vec![
         "build".into(),
+        PROXY_FUERA.into(),
         "--network".into(),
         red.into(),
         "--pull=never".into(),
@@ -185,8 +182,9 @@ fn anotar_desenlace(resultado: &mut ResultadoDockerfile, desenlace: Desenlace) {
     }
 }
 
-/// Registra el `Gate` de la repetición con red (Tarea 9d3): las `RUN` del Dockerfile y la que falló sin red.
-/// Va antes del build con red. Si no se puede registrar, no se construye con red.
+/// Registra el `Gate` de la repetición con red (Tarea 9d3): la primera `RUN` que falló sin red y todas las
+/// `RUN` del Dockerfile. No dice que todas necesitan red. Va antes del build con red. Si no se puede
+/// registrar, no se construye con red.
 fn registrar_repeticion(
     home: &Path,
     tarea: &Tarea,
@@ -197,17 +195,17 @@ fn registrar_repeticion(
 ) -> Result<(), ErrorOraculo> {
     let run: Vec<Value> = instrucciones(texto)
         .into_iter()
-        .filter(|i| palabra_clave(&i.logico).0 == "RUN")
+        .filter(|i| paso_que_necesita_red(&i.logico))
         .map(|i| json!({"linea": i.linea, "cita": i.cita}))
         .collect();
     let mut extra = serde_json::Map::new();
     extra.insert("accion".into(), json!("repetir-con-red"));
     extra.insert("dockerfile".into(), json!(ruta));
     extra.insert(
-        "fallo_sin_red".into(),
+        "primera_run_sin_red".into(),
         json!({"linea": linea, "cita": cita}),
     );
-    extra.insert("run".into(), json!(run));
+    extra.insert("runs_del_dockerfile".into(), json!(run));
     let evento = observe::evento_gate(
         &format!("entrega-{}", tarea.nombre),
         FASE_CONSTRUCCION_RED,
@@ -363,8 +361,22 @@ fn construir_con<'a>(
     let ctx = contexto.to_string_lossy().into_owned();
     let mut build = correr_build(podman, false, &imagen.etiqueta, &df, &ctx, plazo)?;
     let mut con_red = false;
-    if build.codigo != 0 {
-        match clasificar_fallo(&build, &ruta, &texto, reqs)? {
+    // Un `ADD` con URL baja desde el host aunque el build vaya sin red: que salga 0 no prueba que sea
+    // sin red. Ese paso manda la repetición con red, igual que un `RUN` que falla sin red (A11).
+    let paso_url = instrucciones(&texto)
+        .into_iter()
+        .find(|i| paso_con_url(&i.logico))
+        .map(|i| (i.linea, i.cita));
+    if build.codigo != 0 || paso_url.is_some() {
+        let desenlace = match (build.codigo, paso_url) {
+            (0, Some((linea, cita))) => Desenlace::PendienteRed {
+                motivo: format!("paso con URL que baja desde el host: línea {linea}, {cita}"),
+                linea,
+                cita,
+            },
+            _ => clasificar_fallo(&build, &ruta, &texto, reqs)?,
+        };
+        match desenlace {
             Desenlace::PendienteRed {
                 linea,
                 cita,
@@ -497,6 +509,7 @@ fn corre_sin_root(podman: &dyn Podman, tag: &str, con_sh: bool) -> Result<bool, 
     let uid = podman.correr(
         &[
             "run",
+            PROXY_FUERA,
             "--rm",
             "--network",
             "none",
@@ -521,6 +534,7 @@ fn tiene_sh(podman: &dyn Podman, tag: &str) -> Result<bool, ErrorOraculo> {
     let prueba = podman.correr(
         &[
             "run",
+            PROXY_FUERA,
             "--rm",
             "--network",
             "none",
@@ -587,14 +601,19 @@ fn clasificar_fallo(
         )));
     };
     let instrucciones_df = instrucciones(texto);
-    let (linea, cita, kw) = match instrucciones_df.get(paso.saturating_sub(1)) {
-        Some(i) => (i.linea, i.cita.clone(), palabra_clave(&i.logico).0),
+    let (linea, cita, kw, red_paso) = match instrucciones_df.get(paso.saturating_sub(1)) {
+        Some(i) => (
+            i.linea,
+            i.cita.clone(),
+            palabra_clave(&i.logico).0,
+            paso_que_necesita_red(&i.logico),
+        ),
         None => match instrucciones_df
             .iter()
             .find(|i| palabra_clave(&i.logico).0 == "RUN")
         {
-            Some(i) => (i.linea, i.cita.clone(), "RUN".to_string()),
-            None => (0, String::new(), String::new()),
+            Some(i) => (i.linea, i.cita.clone(), "RUN".to_string(), true),
+            None => (0, String::new(), String::new(), false),
         },
     };
     let minuscula = salida.to_lowercase();
@@ -608,7 +627,7 @@ fn clasificar_fallo(
             "podman no pudo arrancar el FROM de la línea {linea}"
         )));
     }
-    if kw == "RUN" && pide_red(&salida) {
+    if red_paso && pide_red(&salida) {
         let motivo = format!("no se pudo construir sin red: línea {linea}, {cita}");
         return Ok(Desenlace::PendienteRed {
             motivo,
@@ -657,6 +676,17 @@ fn es_linea_red_no_configurada(linea: &str) -> bool {
     let red_sin_binario =
         (minuscula.contains("slirp4netns") || minuscula.contains("pasta")) && falla;
     red_sin_binario || (minuscula.contains("netavark") && minuscula.contains("error"))
+}
+
+/// Verdadero si el paso `ADD` o `COPY` trae una fuente remota (A11). Buildah la baja desde el host, así
+/// que cuenta como paso que necesita red, igual que un `RUN` (decisión 27).
+fn paso_con_url(logico: &str) -> bool {
+    !configs::fuentes_remotas(logico).is_empty()
+}
+
+/// Verdadero si el paso necesita red al construirse: un `RUN`, o un `ADD`/`COPY` con una URL (A11).
+fn paso_que_necesita_red(logico: &str) -> bool {
+    palabra_clave(logico).0 == "RUN" || paso_con_url(logico)
 }
 
 /// Verdadero si la salida de un build trae evidencia de falta de red.
@@ -781,13 +811,26 @@ pub fn entregar(
     imagenes: &[ImagenBase],
 ) -> Result<ResultadoEntrega, ErrorOraculo> {
     let reqs = tarea.requisito.as_slice();
-    // Los escenarios son scripts de la carpeta de la tarea: sin ella no hay nada que montar.
     if !tarea.escenario.is_empty() && !tarea.dir.is_dir() {
         return Err(ErrorOraculo::Infra(format!(
             "no existe la carpeta de la tarea {}",
             tarea.dir.display()
         )));
     }
+    // Un escenario que nombra `/oraculo` necesita sus scripts en `escenarios/` (M15).
+    // Los que son comandos en línea no montan nada: la carpeta es opcional para ellos.
+    let escenarios = tarea.dir.join("escenarios");
+    let usa_oraculo = tarea
+        .escenario
+        .iter()
+        .any(|e| escenario_usa_oraculo(&e.cmd));
+    if usa_oraculo && !escenarios.is_dir() {
+        return Err(ErrorOraculo::Infra(format!(
+            "no existe la carpeta de escenarios {}",
+            escenarios.display()
+        )));
+    }
+    let montaje = escenarios.is_dir().then_some(escenarios);
     let Construccion {
         resultado: construccion,
         imagen,
@@ -797,7 +840,7 @@ pub fn entregar(
     // El contenedor de escenario sale de la imagen construida. Sin él, van al de evaluación.
     let contenedor = match &imagen {
         Some(img) if !tarea.escenario.is_empty() => {
-            match ContenedorEscenario::iniciar(&img.etiqueta, &tarea.dir) {
+            match ContenedorEscenario::iniciar(&img.etiqueta, montaje.as_deref()) {
                 Ok(c) => Some(c),
                 Err(motivo) => {
                     avisos.push(format!(
@@ -884,31 +927,16 @@ static CONTADOR_ESCENARIO: AtomicU64 = AtomicU64::new(0);
 impl ContenedorEscenario {
     /// Arranca la imagen sin red, con `sleep` o, si no está, con `tail -f /dev/null`.
     /// Sin `sh` no sirve para escenarios: devuelve el motivo y la evaluación usa el contenedor de evaluación.
-    fn iniciar(imagen: &str, oraculo: &Path) -> Result<Self, String> {
-        // Los escenarios son scripts de la tarea: se montan en solo lectura, sin copiarlos a la imagen.
-        let montaje = format!("{}:/oraculo:ro,{SUFIJO_SELINUX}", oraculo.display());
+    fn iniciar(imagen: &str, escenarios: Option<&Path>) -> Result<Self, String> {
         let nombre = format!(
             "root-entrega-esc-{}-{}",
             std::process::id(),
             CONTADOR_ESCENARIO.fetch_add(1, Ordering::Relaxed)
         );
         for comando in [vec!["sleep", "600"], vec!["tail", "-f", "/dev/null"]] {
-            let mut args = vec![
-                "run",
-                "-d",
-                "--network",
-                "none",
-                "--pull=never",
-                "--name",
-                nombre.as_str(),
-                "-v",
-                montaje.as_str(),
-                "--entrypoint",
-                comando[0],
-                imagen,
-            ];
-            args.extend_from_slice(&comando[1..]);
-            let arranco = correr_podman(&args, PLAZO_CORTO).is_ok_and(|s| s.codigo == 0);
+            let args = args_arranque(imagen, escenarios, &nombre, &comando);
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            let arranco = correr_podman(&refs, PLAZO_CORTO).is_ok_and(|s| s.codigo == 0);
             if arranco && corriendo(&nombre) {
                 let sh = correr_podman(&["exec", nombre.as_str(), "sh", "-c", "true"], PLAZO_CORTO);
                 if sh.is_ok_and(|s| s.codigo == 0) {
@@ -982,6 +1010,46 @@ impl Drop for ContenedorEscenario {
 /// Borra un contenedor por nombre, sin esperar la parada. Un fallo no importa: ya hay un resultado.
 fn quitar(nombre: &str) {
     let _ = correr_podman(&["rm", "-f", "-t", "0", nombre], PLAZO_CORTO);
+}
+
+/// Un escenario usa `/oraculo` si su `cmd` nombra esa ruta: sus scripts viven en `escenarios/`.
+pub fn escenario_usa_oraculo(cmd: &str) -> bool {
+    cmd.contains("/oraculo")
+}
+
+/// Argumentos de `podman run -d` de un escenario: sin red, sin el proxy del host (M4) y con `comando` como
+/// entrypoint. Los escenarios son scripts de la tarea: `oraculo` entra en solo lectura, sin copiarse a la imagen.
+/// Sin `escenarios` no monta nada: los comandos en línea no lo necesitan.
+fn args_arranque(
+    imagen: &str,
+    escenarios: Option<&Path>,
+    nombre: &str,
+    comando: &[&str],
+) -> Vec<String> {
+    let Some((entrada, resto)) = comando.split_first() else {
+        return Vec::new();
+    };
+    let mut args: Vec<String> = vec![
+        "run".into(),
+        "-d".into(),
+        PROXY_FUERA.into(),
+        "--network".into(),
+        "none".into(),
+        "--pull=never".into(),
+        "--name".into(),
+        nombre.into(),
+    ];
+    // Solo `escenarios/` entra al contenedor: `oculto/` y `tarea.toml` quedan afuera (M15).
+    if let Some(dir) = escenarios {
+        args.push("-v".into());
+        args.push(format!(
+            "{}:/oraculo/escenarios:ro,{SUFIJO_SELINUX}",
+            dir.display()
+        ));
+    }
+    args.extend(["--entrypoint".into(), (*entrada).into(), imagen.into()]);
+    args.extend(resto.iter().map(|a| a.to_string()));
+    args
 }
 
 /// Verdadero si el contenedor sigue corriendo.
@@ -1796,7 +1864,7 @@ mod tests {
 
     /// Verdadero si el `build` usa la red de usuario de podman (la de la 9d3).
     fn es_build_con_red(args: &[&str]) -> bool {
-        args.iter().any(|a| a.starts_with("slirp4netns"))
+        args.iter().any(|a| a.starts_with("pasta"))
     }
 
     /// Respuesta de mentira: el `build` sin red da `sin_red` y con red da `con_red`. El resto sale
@@ -1866,6 +1934,93 @@ mod tests {
     }
 
     #[test]
+    fn entrega_args_build_llevan_http_proxy_false_con_y_sin_red() {
+        for red in [false, true] {
+            let args = args_build(red, "etiqueta", "Dockerfile", ".");
+            assert!(
+                args.contains(&"--http-proxy=false".to_string()),
+                "red={red}: {args:?}"
+            );
+            assert_eq!(args.first().map(String::as_str), Some("build"));
+        }
+    }
+
+    #[test]
+    fn escenario_usa_oraculo_detecta_la_ruta_de_la_tarea() {
+        assert!(escenario_usa_oraculo("/oraculo/escenarios/set_get.sh"));
+        assert!(escenario_usa_oraculo("sh /oraculo/x.sh && true"));
+    }
+
+    #[test]
+    fn escenario_usa_oraculo_no_mira_comandos_en_linea() {
+        assert!(!escenario_usa_oraculo("exit 0"));
+        assert!(!escenario_usa_oraculo("test -f /hola.txt"));
+        assert!(!escenario_usa_oraculo("wget -q http://example.com -O /x"));
+    }
+
+    #[test]
+    fn escenario_arranque_monta_solo_la_carpeta_escenarios() {
+        // M15: el contenedor de escenario ve `escenarios/`, nunca la tarea entera (oculto/ y tarea.toml).
+        let args = args_arranque(
+            "img:1",
+            Some(Path::new("/t/oraculos/x/escenarios")),
+            "nombre",
+            &["sleep", "600"],
+        );
+        let montajes: Vec<&String> = args
+            .windows(2)
+            .filter(|p| p[0] == "-v")
+            .map(|p| &p[1])
+            .collect();
+        assert_eq!(
+            montajes,
+            vec!["/t/oraculos/x/escenarios:/oraculo/escenarios:ro,z"],
+            "{args:?}"
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.contains(":/oraculo:") || a.ends_with(":/oraculo")),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn escenario_arranque_sin_carpeta_no_monta_nada() {
+        let args = args_arranque("img:1", None, "nombre", &["sleep", "600"]);
+        assert!(!args.iter().any(|a| a == "-v"), "{args:?}");
+        assert!(!args.iter().any(|a| a.contains("/oraculo")), "{args:?}");
+        assert!(args.iter().any(|a| a == "img:1"), "{args:?}");
+    }
+
+    #[test]
+    fn entrega_arranque_de_escenario_lleva_http_proxy_false() {
+        let args = args_arranque("img:1", Some(Path::new("/o")), "nombre", &["sleep", "600"]);
+        let proxy = args.iter().position(|a| a == "--http-proxy=false");
+        let imagen = args.iter().position(|a| a == "img:1");
+        assert!(proxy.is_some() && proxy < imagen, "{args:?}");
+        assert_eq!(args.first().map(String::as_str), Some("run"));
+    }
+
+    #[test]
+    fn entrega_run_de_la_comprobacion_lleva_http_proxy_false() {
+        let podman = PodmanFalso::nuevo(|_| salida_ok());
+        let _ = corre_sin_root(&podman, "etiqueta", true);
+        let _ = tiene_sh(&podman, "etiqueta");
+        let runs: Vec<Vec<String>> = podman
+            .llamadas
+            .borrow()
+            .iter()
+            .filter(|a| a[0] == "run")
+            .cloned()
+            .collect();
+        assert_eq!(runs.len(), 2, "{runs:?}");
+        for args in runs {
+            assert!(args.contains(&"--http-proxy=false".to_string()), "{args:?}");
+        }
+    }
+
+    #[test]
     fn entrega_red_pendiente_por_red_se_repite_y_deja_hallazgo_sev_1() {
         let repo = repo_con_archivos(&[("Dockerfile", DF_RED)]);
         let home = tempfile::tempdir().expect("home");
@@ -1906,7 +2061,7 @@ mod tests {
         assert_eq!(builds.len(), 2, "{builds:?}");
         assert!(builds[0].contains(&"none".to_string()), "{:?}", builds[0]);
         assert!(
-            builds[1].contains(&"slirp4netns:allow_host_loopback=false".to_string()),
+            builds[1].contains(&"pasta:--no-map-gw".to_string()),
             "{:?}",
             builds[1]
         );
@@ -1944,8 +2099,9 @@ mod tests {
             args,
             [
                 "build",
+                "--http-proxy=false",
                 "--network",
-                "slirp4netns:allow_host_loopback=false",
+                "pasta:--no-map-gw",
                 "--pull=never",
                 "-t",
                 "etiqueta",
@@ -1960,6 +2116,7 @@ mod tests {
             args_build(false, "etiqueta", df, ctx),
             [
                 "build",
+                "--http-proxy=false",
                 "--network",
                 "none",
                 "--pull=never",
@@ -2008,14 +2165,53 @@ mod tests {
         assert_eq!(g["corrida"], "entrega-x");
         assert_eq!(g["extra"]["accion"], "repetir-con-red");
         assert_eq!(g["extra"]["dockerfile"], "Dockerfile");
-        assert_eq!(g["extra"]["fallo_sin_red"]["linea"], 2);
+        assert_eq!(g["extra"]["primera_run_sin_red"]["linea"], 2);
         assert_eq!(
-            g["extra"]["fallo_sin_red"]["cita"],
+            g["extra"]["primera_run_sin_red"]["cita"],
             "RUN apt-get install -y curl"
         );
-        let run = g["extra"]["run"].as_array().expect("lista de RUN");
+        let run = g["extra"]["runs_del_dockerfile"]
+            .as_array()
+            .expect("lista de RUN");
         assert_eq!(run.len(), 1, "{run:?}");
         assert_eq!(run[0]["linea"], 2);
+    }
+
+    #[test]
+    fn entrega_red_gate_separa_la_run_que_fallo_de_todas_las_run() {
+        // La línea 2 no pide red; solo la 3 falla sin red. El Gate no dice que todas las RUN la necesitan.
+        const DF: &str = "FROM debian:12\nRUN echo listo\nRUN apt-get install -y curl\nUSER app\n";
+        let repo = repo_con_archivos(&[("Dockerfile", DF)]);
+        let home = tempfile::tempdir().expect("home");
+        let sin_red = SalidaPodman {
+            codigo: 1,
+            stdout: "STEP 1/3: FROM debian:12\nSTEP 2/3: RUN echo listo\nSTEP 3/3: RUN apt-get install -y curl\n"
+                .into(),
+            stderr: "Temporary failure in name resolution\n".into(),
+        };
+        let podman = PodmanFalso::nuevo(responde_build(sin_red, salida_ok()));
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("construye");
+        assert!(c.resultado.con_red, "{:?}", c.resultado);
+        let gates = gates_de_repeticion(home.path());
+        let g = &gates[0]["extra"];
+        assert_eq!(g["primera_run_sin_red"]["linea"], 3, "{g}");
+        assert_eq!(
+            g["primera_run_sin_red"]["cita"],
+            "RUN apt-get install -y curl"
+        );
+        let runs = g["runs_del_dockerfile"].as_array().expect("lista de RUN");
+        let lineas: Vec<u64> = runs.iter().filter_map(|r| r["linea"].as_u64()).collect();
+        assert_eq!(lineas, vec![2, 3], "{runs:?}");
+        assert!(g.get("fallo_sin_red").is_none(), "{g}");
+        assert!(g.get("run").is_none(), "{g}");
     }
 
     #[test]
@@ -2289,5 +2485,88 @@ mod tests {
             "{:?}",
             c.avisos
         );
+    }
+
+    /// Dockerfile con un `ADD` de una URL: buildah la baja desde el host aunque el build vaya sin red (A11).
+    const DF_ADD_URL: &str = "FROM debian:12\nADD https://ejemplo.com/x.tar.gz /x\nUSER app\n";
+
+    #[test]
+    fn entrega_red_add_con_url_que_construye_sin_red_se_repite_con_red() {
+        // El build sin red sale 0, pero el ADD bajó la URL desde el host: cuenta como paso con red.
+        let repo = repo_con_archivos(&[("Dockerfile", DF_ADD_URL)]);
+        let home = tempfile::tempdir().expect("home");
+        let podman = PodmanFalso::nuevo(responde_build(salida_ok(), salida_ok()));
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("construye");
+        assert!(c.resultado.con_red, "{:?}", c.resultado);
+        assert_eq!(podman.builds().len(), 2, "{:?}", podman.builds());
+        assert!(es_build_con_red(
+            &podman.builds()[1]
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        ));
+        let h = c.resultado.hallazgos.first().expect("hay hallazgo");
+        assert_eq!(h.severidad, 1);
+        assert_eq!(h.detalle, DETALLE_NECESITA_RED);
+        let gates = gates_de_repeticion(home.path());
+        let runs = gates[0]["extra"]["runs_del_dockerfile"]
+            .as_array()
+            .expect("lista de pasos");
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert_eq!(runs[0]["cita"], "ADD https://ejemplo.com/x.tar.gz /x");
+    }
+
+    #[test]
+    fn entrega_red_add_con_url_que_falla_sin_red_queda_pendiente_y_se_repite() {
+        const SALIDA_ADD: &str =
+            "STEP 1/3: FROM debian:12\nSTEP 2/3: ADD https://ejemplo.com/x.tar.gz /x\n";
+        let sin_red = SalidaPodman {
+            codigo: 1,
+            stdout: SALIDA_ADD.into(),
+            stderr: "dial tcp: lookup ejemplo.com: Temporary failure in name resolution\n".into(),
+        };
+        let repo = repo_con_archivos(&[("Dockerfile", DF_ADD_URL)]);
+        let home = tempfile::tempdir().expect("home");
+        let podman = PodmanFalso::nuevo(responde_build(sin_red, salida_ok()));
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("construye");
+        assert!(c.resultado.con_red, "{:?}", c.resultado);
+        assert!(
+            c.resultado
+                .hallazgos
+                .iter()
+                .all(|h| h.detalle != "la imagen no construye: línea 2"),
+            "{:?}",
+            c.resultado.hallazgos
+        );
+        assert_eq!(gates_de_repeticion(home.path()).len(), 1);
+    }
+
+    #[test]
+    fn entrega_paso_con_url_reconoce_add_y_copy_con_fuente_remota() {
+        assert!(paso_con_url("ADD https://x.org/a.tar.gz /a"));
+        assert!(paso_con_url("ADD --chown=app https://x.org/a /a"));
+        assert!(paso_con_url("COPY git@github.com:x/y.git /y"));
+        assert!(paso_con_url(r#"ADD ["https://x.org/a", "/a"]"#));
+        assert!(paso_con_url("ADD git://x.org/y /y"));
+        assert!(!paso_con_url("ADD ./local.tar.gz /x"));
+        assert!(!paso_con_url("COPY ./src /app"));
+        assert!(!paso_con_url("RUN wget https://x.org/a"));
+        assert!(!paso_con_url("ADD ./https-notas.txt /x"));
     }
 }

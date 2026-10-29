@@ -87,6 +87,7 @@ impl ModeloJuez for JuezProveedor {
             .map(|respuesta| RespuestaJuez {
                 texto: respuesta.texto,
                 truncada: respuesta.truncada,
+                costo_usd: respuesta.cost_usd,
             })
             .map_err(|e| ErrorOraculo::Infra(e.to_string()))
     }
@@ -195,6 +196,11 @@ pub fn construir_prompt(e: &EntradaJuez, limites: &LimitesPrompt) -> Prompt {
     }
 }
 
+/// Hay ítems que el juez puntúa. Sin ellos no hace falta llamarlo.
+pub fn hay_pedidos(rubricas: &[Rubrica]) -> bool {
+    !pedidos_de(rubricas).is_empty()
+}
+
 /// Ítems que el juez puntúa: `juez` o `mixto`, con una dimensión conocida por su prefijo.
 fn pedidos_de(rubricas: &[Rubrica]) -> Vec<(&ItemRubrica, Dimension)> {
     rubricas
@@ -205,7 +211,7 @@ fn pedidos_de(rubricas: &[Rubrica]) -> Vec<(&ItemRubrica, Dimension)> {
         .collect()
 }
 
-fn dimension_de(id: &str) -> Option<Dimension> {
+pub(crate) fn dimension_de(id: &str) -> Option<Dimension> {
     match id.split('.').next()? {
         "diseno" => Some(Dimension::Diseno),
         "arquitectura" => Some(Dimension::Arquitectura),
@@ -594,6 +600,27 @@ pub fn topes_desde_sondas(hallazgos: &[Hallazgo], rubricas: &[Rubrica]) -> BTree
     }
 }
 
+/// Completa con nivel 0 los ítems de `rubrica` que el juez no respondió. Refuta por default: lo que
+/// no tiene evidencia no sube el puntaje, pero tampoco lo deja fuera del promedio. Sin `Ok`, no cambia.
+pub fn con_faltantes_en_cero(r: &ResultadoJuez, rubrica: &Rubrica, modelo: &str) -> ResultadoJuez {
+    let mut completo = r.clone();
+    if completo.estado != EstadoJuez::Ok {
+        return completo;
+    }
+    for id in r.faltantes.iter().filter(|id| es_item_de(rubrica, id)) {
+        completo.niveles.insert(id.clone(), 0);
+        completo.items.push(NivelItem {
+            item: id.clone(),
+            nivel: 0,
+            evidencia: Vec::new(),
+            fuente: Fuente::Juez {
+                modelo: modelo.into(),
+            },
+        });
+    }
+    completo
+}
+
 /// Puntúa una rúbrica con el resultado del juez. Con `SinVeredicto` el valor es `None`.
 pub fn puntuar_con_juez(
     rubrica: &Rubrica,
@@ -639,6 +666,7 @@ fn es_item_de(rubrica: &Rubrica, id: &str) -> bool {
 mod tests {
     use super::*;
     use crate::oracle::mapa::construir as construir_mapa;
+    use crate::tipos::Rol;
     use serde_json::json;
     use std::cell::RefCell;
     use std::fs;
@@ -692,6 +720,7 @@ mod tests {
             modelo: modelo.map(String::from),
             razonamiento,
             motivo: "prueba".into(),
+            rol: Some(Rol::Juzga),
         }
     }
 
@@ -746,6 +775,7 @@ mod tests {
                 respuesta: Ok(RespuestaJuez {
                     texto,
                     truncada: false,
+                    costo_usd: 0.0,
                 }),
                 visto: RefCell::new(Vec::new()),
             }
@@ -757,6 +787,7 @@ mod tests {
                 respuesta: Ok(RespuestaJuez {
                     texto,
                     truncada: true,
+                    costo_usd: 0.0,
                 }),
                 visto: RefCell::new(Vec::new()),
             }
@@ -1416,5 +1447,56 @@ mod tests {
             .find(|i| i.item == MODULARIDAD)
             .expect("está");
         assert_eq!(nivel.nivel, 1);
+    }
+
+    #[test]
+    fn juez_hay_pedidos_con_rubrica_solo_de_sondas_es_falso() {
+        let solo_sondas = fixture("diseno-valida.toml")
+            .replace("mide = \"juez\"", "mide = \"sonda\"")
+            .replace("mide = \"mixto\"", "mide = \"sonda\"");
+        let rubrica = Rubrica::desde_toml(&solo_sondas).expect("carga");
+        assert!(!hay_pedidos(&[rubrica]));
+        assert!(hay_pedidos(&[rubrica_valida()]));
+        assert!(!hay_pedidos(&[]));
+    }
+
+    #[test]
+    fn juez_faltantes_en_cero_cuentan_en_el_promedio_sin_evidencia() {
+        let c = caso();
+        // El juez responde solo modularidad (nivel 2); el tope de la rúbrica queda sin respuesta.
+        let texto = respuesta(
+            json!([item_nivel(MODULARIDAD, 2, json!([real()]))]),
+            json!([]),
+        );
+        let r = juzgar_con(&c, texto);
+        assert_eq!(r.faltantes, vec![TOPE.to_string()]);
+        let completo = con_faltantes_en_cero(&r, &c.rubricas[0], MODELO);
+        let p =
+            puntuar_con_juez(&c.rubricas[0], &completo, &BTreeMap::new(), MODELO).expect("puntúa");
+        // (3·2 + 1·0) / (3·4) = 0.5: el ítem sin respuesta pesa cero, no sale del promedio.
+        assert!((p.valor.expect("hay valor") - 0.5).abs() < 1e-6);
+        let tope = p.items.iter().find(|i| i.item == TOPE).expect("está");
+        assert_eq!(tope.nivel, 0);
+        assert!(tope.evidencia.is_empty());
+        assert_eq!(
+            tope.fuente,
+            Fuente::Juez {
+                modelo: MODELO.into()
+            }
+        );
+    }
+
+    #[test]
+    fn juez_faltantes_en_cero_no_cambia_un_juicio_sin_veredicto() {
+        let c = caso();
+        let r = ResultadoJuez {
+            estado: EstadoJuez::SinVeredicto("JSON inválido".into()),
+            niveles: BTreeMap::new(),
+            items: Vec::new(),
+            hallazgos: Vec::new(),
+            descartes: Vec::new(),
+            faltantes: vec![MODULARIDAD.into(), TOPE.into()],
+        };
+        assert_eq!(con_faltantes_en_cero(&r, &c.rubricas[0], MODELO), r);
     }
 }

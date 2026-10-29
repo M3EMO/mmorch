@@ -1080,6 +1080,95 @@ fn entrega_escenario_sin_carpeta_de_tarea_da_infraestructura() {
     assert!(matches!(r, Err(ErrorOraculo::Infra(_))), "{r:?}");
 }
 
+#[test]
+fn entrega_escenario_en_linea_sin_carpeta_de_escenarios_no_monta_nada() {
+    root::saltar_sin_podman!();
+    asegurar_imagen(ALPINE);
+    let _serie = serie();
+    // Un `cmd` en línea no usa `/oraculo`: no hace falta `escenarios/` y no se monta nada (M15).
+    let repo = dockerfile_9d2(&format!("{FROM_ALPINE}USER 1000\n"));
+    let tarea = tarea_con("[[escenario]]\nid = \"ok\"\ncmd = \"exit 0\"\n");
+    assert!(!tarea.dir.join("escenarios").exists());
+    let home = home_9d2();
+    let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
+    let r = entregar(
+        &Falso(salida_con(&[])),
+        repo.path(),
+        &tarea,
+        home.path(),
+        &imagenes,
+    )
+    .expect("entrega sin Infra");
+    assert_eq!(r.escenarios.get("ok"), Some(&true), "{r:?}");
+    assert_eq!(
+        r.lugar_escenarios.get("ok"),
+        Some(&LugarEscenario::Imagen),
+        "{r:?}"
+    );
+    assert!(
+        contenedores_escenario().is_empty(),
+        "queda un contenedor de escenario"
+    );
+}
+
+#[test]
+fn entrega_escenario_que_usa_oraculo_sin_carpeta_da_infraestructura() {
+    // Guarda: el `cmd` usa `/oraculo`, así que sin `escenarios/` no hay nada que montar. Infra antes de construir.
+    let repo = dockerfile_9d2(&format!("{FROM_ALPINE}USER 1000\n"));
+    let tarea = tarea_con("[[escenario]]\nid = \"ok\"\ncmd = \"/oraculo/escenarios/ok.sh\"\n");
+    let home = home_9d2();
+    let r = entregar(
+        &Falso(salida_con(&[])),
+        repo.path(),
+        &tarea,
+        home.path(),
+        &[],
+    );
+    match r {
+        Err(ErrorOraculo::Infra(motivo)) => {
+            assert!(motivo.contains("carpeta de escenarios"), "{motivo}");
+        }
+        otro => panic!("se esperaba Infra, salió {otro:?}"),
+    }
+}
+
+#[test]
+fn entrega_escenario_con_carpeta_monta_solo_escenarios() {
+    // Guarda: con `escenarios/`, el contenedor ve solo esa carpeta. `tarea.toml` no entra (M15).
+    root::saltar_sin_podman!();
+    use std::os::unix::fs::PermissionsExt;
+    asegurar_imagen(ALPINE);
+    let _serie = serie();
+    let oraculo = tempfile::Builder::new()
+        .prefix("entrega-oraculo-")
+        .tempdir_in(base_9d2())
+        .expect("carpeta de la tarea");
+    fs::create_dir_all(oraculo.path().join("escenarios")).expect("crea escenarios/");
+    let script = oraculo.path().join("escenarios/ok.sh");
+    fs::write(
+        &script,
+        "#!/bin/sh\ntest -d /oraculo/escenarios && test ! -e /oraculo/tarea.toml\n",
+    )
+    .expect("escribe el script");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("permisos");
+    let tarea = tarea_en(
+        oraculo.path(),
+        "[[escenario]]\nid = \"ok\"\ncmd = \"/oraculo/escenarios/ok.sh\"\n",
+    );
+    let repo = dockerfile_9d2(&format!("{FROM_ALPINE}USER 1000\n"));
+    let home = home_9d2();
+    let imagenes = descarga::traer_imagenes_base(repo.path()).expect("la imagen es local");
+    let r = entregar(
+        &Falso(salida_con(&[])),
+        repo.path(),
+        &tarea,
+        home.path(),
+        &imagenes,
+    )
+    .expect("entrega");
+    assert_eq!(r.escenarios.get("ok"), Some(&true), "{r:?}");
+}
+
 // ---- Tarea 7j: un solo Dockerfile, imagen sin `sh` y causa "pide credenciales" ----
 
 /// Tarea con `containerfile` en la raíz del `tarea.toml` y `extra` al final.

@@ -1,16 +1,18 @@
 //! Glue de `r00t route` y `r00t llama`: lee `root.toml` y `politica.json`, llama al núcleo puro
-//! `elegir`, chequea el costo antes de llamar y registra un `Gate` en cada rechazo.
+//! `elegir` y registra un `Gate` en cada rechazo de presupuesto. El tope de API lo chequea
+//! `proveedores::llamar`, antes de enviar.
 
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::time::Instant;
 
 use serde_json::{Map, json};
 
 use crate::config::{Config, root_home};
 use crate::error::Error;
 use crate::observe::{self, uso};
-use crate::proveedores::{self, Prompt, Respuesta};
+use crate::proveedores::{self, Claves, ErrorProveedor, Prompt, Respuesta};
 use crate::route::politica::nombre_rol;
 use crate::route::{self, Politica};
 use crate::tipos::{Eleccion, Pedido, Proveedor, Rol, SinPresupuesto, Uso, Via};
@@ -51,7 +53,7 @@ pub fn rutear(rol: Rol, tipo: &str, checkeable: bool, tokens: u32) -> Result<Ele
         checkeable,
         tokens_estimados: tokens,
     };
-    elegir_o_gate(&pedido, &pol, &gasto, &cfg, ahora, offset, CORRIDA_ROUTE)
+    elegir_final(&pedido, &pol, &gasto, &cfg, ahora, offset, CORRIDA_ROUTE)
 }
 
 /// `r00t llama`: lee el prompt, rutea, chequea el costo y llama. Devuelve el código de `imprimir_para_cli`.
@@ -82,8 +84,10 @@ pub fn llama(
     }
 }
 
-/// Rutea, chequea el costo y llama. Sin vía API, tope o precio, no hay llamada: sale `Err`.
-/// Los errores del proveedor llegan como `Error::Proveedor`. La usan `r00t llama` y `root_llama`.
+/// Rutea y llama. Sin vía API, tope o precio, no hay llamada: sale `Err`.
+/// Con el tope de API lleno, un rol de API que cae al cupo sale como tope (B9).
+/// Los errores del proveedor llegan como `Error::Proveedor`, y un tope como `Error::Tope`.
+/// La usan `r00t llama` y `root_llama`.
 pub fn llamar_con_chequeo(
     rol: Rol,
     tipo: &str,
@@ -103,28 +107,62 @@ pub fn llamar_con_chequeo(
         checkeable: false,
         tokens_estimados: max_tokens,
     };
-    let eleccion = elegir_o_gate(&pedido, &pol, &gasto, &cfg, ahora, offset, corrida)?;
+    let eleccion = elegir_final(&pedido, &pol, &gasto, &cfg, ahora, offset, corrida)?;
     if eleccion.via == Via::Cupo {
+        if let Some(error) = rechazo_api_llena(&pedido, &gasto, &cfg, ahora, offset, corrida) {
+            return Err(error);
+        }
         return Err(Error::Uso(
             "este rol va por cupo: lo corre `claude -p`, no `r00t llama`".into(),
         ));
     }
-    let modelo = eleccion.modelo.clone().unwrap_or_default();
-    chequear_tope(
-        &cfg,
-        &gasto,
-        &modelo,
-        usuario.chars().count(),
-        max_tokens,
-        corrida,
-    )?;
     let prompt = Prompt {
         sistema: None,
         usuario,
         max_tokens,
         fase: "llama".into(),
     };
-    Ok(proveedores::llamar(&eleccion, &prompt, corrida)?)
+    proveedores::llamar(&eleccion, &prompt, corrida).map_err(de_proveedor)
+}
+
+/// Con el tope de API del mes lleno, un rol que va por API (delega, verifica, juzga) no tiene
+/// otra vía en `r00t llama`: registra un `Gate` de presupuesto y da el error de tope (B9).
+/// Los demás roles y los topes con margen devuelven `None`.
+fn rechazo_api_llena(
+    pedido: &Pedido,
+    gasto: &Uso,
+    cfg: &Config,
+    ahora: f64,
+    offset: i32,
+    corrida: &str,
+) -> Option<Error> {
+    let tope = cfg.balance.api.tope_usd;
+    let api_llena = gasto.api_mes_usd >= tope;
+    if !api_llena || !matches!(pedido.rol, Rol::Delega | Rol::Verifica | Rol::Juzga) {
+        return None;
+    }
+    let reabre = uso::iso(route::proximo_mes(ahora, offset), offset);
+    let usado = gasto.api_mes_usd;
+    let extra = Map::from_iter([
+        ("motivo".to_string(), json!("tope de API del mes lleno")),
+        ("usado".to_string(), json!(usado)),
+        ("tope_usd".to_string(), json!(tope)),
+        ("reabre".to_string(), json!(reabre)),
+        ("rol".to_string(), json!(nombre_rol(pedido.rol))),
+        ("tipo".to_string(), json!(pedido.tipo)),
+    ]);
+    let mensaje = format!(
+        "sin presupuesto: el tope de API del mes está lleno ({usado:.2} de {tope:.2} USD); reabre {reabre}"
+    );
+    Some(gate_y_error(corrida, "presupuesto", extra, mensaje))
+}
+
+/// Un tope sale como `Error::Tope`, con el mismo código 3 que el chequeo que vivía aquí.
+fn de_proveedor(e: ErrorProveedor) -> Error {
+    match e {
+        ErrorProveedor::Tope(mensaje) => Error::Tope(mensaje),
+        otro => Error::Proveedor(otro),
+    }
 }
 
 /// Gasto actual de `eventos.jsonl`. Un log ilegible es error: sin gasto no se puede decidir.
@@ -135,6 +173,27 @@ fn uso_actual(cfg: &Config, ahora: f64, offset: i32) -> Result<Uso, Error> {
         offset,
         cfg.balance.cupo.bloque_horas,
     )?)
+}
+
+/// Elige la vía y aplica el respaldo de Verifica y Juzga si el proveedor principal no está disponible.
+/// Un modelo fuera de la lista de razonamiento da error de elección (código 2).
+fn elegir_final(
+    pedido: &Pedido,
+    pol: &Politica,
+    gasto: &Uso,
+    cfg: &Config,
+    ahora: f64,
+    offset: i32,
+    corrida: &str,
+) -> Result<Eleccion, Error> {
+    let elegida = elegir_o_gate(pedido, pol, gasto, cfg, ahora, offset, corrida)?;
+    let claves = Claves::del_entorno();
+    let instante = Instant::now();
+    let breaker = proveedores::breaker_global();
+    let disponible = |p: Proveedor| proveedores::disponible(&claves, breaker, p, instante);
+    let final_ = route::con_respaldo(elegida, cfg, &disponible);
+    route::exigir_modelo_que_razona(&final_)?;
+    Ok(final_)
 }
 
 /// Elige la vía. Con `SinPresupuesto` registra el `Gate` y devuelve el error con la hora de reapertura.
@@ -161,51 +220,6 @@ fn rechazo_presupuesto(sp: &SinPresupuesto, pedido: &Pedido, offset: i32, corrid
     ]);
     let mensaje = format!("sin presupuesto: {}; reabre {reabre}", sp.motivo);
     gate_y_error(corrida, "presupuesto", extra, mensaje)
-}
-
-/// Chequeo previo de costo: el peor caso del pedido no puede pasar el margen del tope de API.
-/// Sin precio para el modelo no hay estimación, así que se rechaza (falla cerrado).
-fn chequear_tope(
-    cfg: &Config,
-    gasto: &Uso,
-    modelo: &str,
-    caracteres: usize,
-    max_tokens: u32,
-    corrida: &str,
-) -> Result<(), Error> {
-    let tope = cfg.balance.api.tope_usd;
-    let margen = tope - gasto.api_mes_usd;
-    let Some(precio) = cfg.precios.get(modelo) else {
-        let extra = margen_y_modelo(None, margen, modelo);
-        let mensaje = format!(
-            "sin precio en root.toml para {modelo}: no se puede estimar el costo, la llamada no se envía"
-        );
-        return Err(gate_y_error(corrida, "tope", extra, mensaje));
-    };
-    // Estimación conservadora: un token cada tres caracteres, y todo el máximo de salida.
-    let in_est = (caracteres as f64 / 3.0).ceil();
-    let estimado =
-        in_est * precio.usd_entrada / 1e6 + f64::from(max_tokens) * precio.usd_salida / 1e6;
-    if estimado > margen {
-        let extra = margen_y_modelo(Some(estimado), margen, modelo);
-        let mensaje = format!(
-            "llamada rechazada antes de enviarla: costo estimado {estimado:.6} USD, margen {margen:.6} USD del tope de API de {tope:.2} USD"
-        );
-        return Err(gate_y_error(corrida, "tope", extra, mensaje));
-    }
-    Ok(())
-}
-
-fn margen_y_modelo(
-    estimado: Option<f64>,
-    margen: f64,
-    modelo: &str,
-) -> Map<String, serde_json::Value> {
-    Map::from_iter([
-        ("estimado".to_string(), json!(estimado)),
-        ("margen".to_string(), json!(margen)),
-        ("modelo".to_string(), json!(modelo)),
-    ])
 }
 
 /// Registra el `Gate` y devuelve el error de tope. Si el registro falla, el mensaje lo dice.
@@ -248,7 +262,7 @@ fn etiqueta_via(via: Via) -> &'static str {
     }
 }
 
-fn etiqueta_proveedor(proveedor: Proveedor) -> &'static str {
+pub(crate) fn etiqueta_proveedor(proveedor: Proveedor) -> &'static str {
     match proveedor {
         Proveedor::Anthropic => "anthropic",
         Proveedor::Deepseek => "deepseek",

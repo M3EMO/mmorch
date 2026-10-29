@@ -3,17 +3,19 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use root::ficha::{
     self, ContextoRevision, ErrorFicha, JuezAmbiguedad, revisar_con_juez, revisar_con_tope,
 };
+use root::observe;
 use root::oracle::tarea::Tarea;
 use root::oracle::{ErrorOraculo, OpcionesOraculo, evaluar};
 use root::proveedores::{Prompt, RespuestaJuez};
+use root::tipos::{Evento, TipoEvento, Via};
 
 mod common;
-
-use common::Servidor;
+use common::{Servidor, sse_deepseek};
 
 /// Juez falso: devuelve una respuesta fija y guarda cada prompt que recibe.
 struct JuezFalso {
@@ -27,6 +29,7 @@ impl JuezFalso {
             respuesta: Ok(RespuestaJuez {
                 texto: texto.to_string(),
                 truncada: false,
+                costo_usd: 0.0,
             }),
             prompts: RefCell::new(Vec::new()),
         }
@@ -43,6 +46,7 @@ impl JuezFalso {
             respuesta: Ok(RespuestaJuez {
                 texto: texto.to_string(),
                 truncada: true,
+                costo_usd: 0.0,
             }),
             prompts: RefCell::new(Vec::new()),
         }
@@ -120,7 +124,20 @@ fn ficha_completa_da_cero_hallazgos() {
     let revision = ficha::revisar(&texto, &ctx_vacio()).expect("la ficha parsea");
     assert!(revision.hallazgos.is_empty(), "{:?}", revision.hallazgos);
     assert!(revision.ambiguedades.is_empty());
-    assert_eq!(revision.juez, "no corrido");
+    assert_eq!(revision.juez, "sin_veredicto: juez no corrido");
+}
+
+#[test]
+fn ficha_sin_juez_sin_hallazgos_sale_3_y_no_0() {
+    let texto = fixture("spec-completa.md");
+    let revision = ficha::revisar(&texto, &ctx_vacio()).expect("la ficha parsea");
+    assert!(revision.hallazgos.is_empty(), "{:?}", revision.hallazgos);
+    assert_eq!(
+        revision.codigo_de_salida(),
+        3,
+        "sin juez no hay veredicto limpio: {}",
+        revision.juez
+    );
 }
 
 #[test]
@@ -328,7 +345,7 @@ fn ficha_borrador_parsea_y_tarea_lo_acepta() {
 }
 
 #[test]
-fn ficha_cli_revisar_completa_sale_0() {
+fn ficha_cli_revisar_completa_sin_juez_sale_3_y_dice_juez_no_corrido() {
     let salida = root(&[
         "ficha",
         "revisar",
@@ -337,10 +354,12 @@ fn ficha_cli_revisar_completa_sale_0() {
     ]);
     assert_eq!(
         codigo(&salida),
-        0,
+        3,
         "{}",
         String::from_utf8_lossy(&salida.stderr)
     );
+    let texto = String::from_utf8_lossy(&salida.stdout);
+    assert!(texto.contains("juez no corrido"), "{texto}");
 }
 
 #[test]
@@ -733,9 +752,9 @@ fn ficha_codigo_ficha_limpia_mas_juez_ok_sin_ambiguedades_sale_0() {
 }
 
 #[test]
-fn ficha_codigo_sin_juez_y_ficha_limpia_sale_0() {
+fn ficha_codigo_sin_juez_y_ficha_limpia_sale_3() {
     let revision = ficha::revisar(&fixture("spec-completa.md"), &ctx_vacio()).expect("revisa");
-    assert_eq!(revision.codigo_de_salida(), 0);
+    assert_eq!(revision.codigo_de_salida(), 3);
 }
 
 #[test]
@@ -838,9 +857,13 @@ fn ficha_cli_spec_inexistente_nombra_la_causa_una_sola_vez() {
 
 const CLAVE_FALSA: &str = "sk-test-FICHA-TOPE";
 /// El juez responde un arreglo vacío y termina con `stop`.
-const JUEZ_LISTA_VACIA: &str = r#"{"choices":[{"message":{"content":"[]"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+fn juez_lista_vacia() -> String {
+    sse_deepseek("[]", 1, 1, "stop")
+}
 /// El juez gastó todo el tope en razonamiento: contenido vacío y `finish_reason` = `length`.
-const JUEZ_TRUNCADO: &str = r#"{"choices":[{"message":{"content":"","reasoning_content":"pensé"},"finish_reason":"length"}],"usage":{"prompt_tokens":100,"completion_tokens":32000}}"#;
+fn juez_truncado() -> String {
+    sse_deepseek("", 100, 32000, "length")
+}
 
 /// `ficha revisar` con el juez de DeepSeek apuntado al servidor falso. `ROOT_HOME` es `home`.
 fn revisar_contra(srv: &Servidor, home: &Path, extra: &[&str]) -> Output {
@@ -934,7 +957,7 @@ fn ficha_juez_no_truncado_json_roto_sigue_siendo_json_invalido() {
 
 #[test]
 fn ficha_cli_juez_pide_32000_de_tope_por_defecto() {
-    let srv = Servidor::arranca(vec![(200, JUEZ_LISTA_VACIA)]);
+    let srv = Servidor::arranca(vec![(200, juez_lista_vacia())]);
     let home = tempfile::tempdir().expect("home");
     let salida = revisar_contra(&srv, home.path(), &[]);
     assert_eq!(
@@ -948,7 +971,7 @@ fn ficha_cli_juez_pide_32000_de_tope_por_defecto() {
 
 #[test]
 fn ficha_cli_juez_max_tokens_llega_al_cuerpo_del_pedido() {
-    let srv = Servidor::arranca(vec![(200, JUEZ_LISTA_VACIA)]);
+    let srv = Servidor::arranca(vec![(200, juez_lista_vacia())]);
     let home = tempfile::tempdir().expect("home");
     let salida = revisar_contra(&srv, home.path(), &["--juez-max-tokens", "8000"]);
     assert_eq!(
@@ -1015,7 +1038,7 @@ fn ficha_cli_juez_max_tokens_sin_modelo_sale_2() {
 
 #[test]
 fn ficha_cli_respuesta_truncada_da_la_causa_del_tope_y_registra_costo() {
-    let srv = Servidor::arranca(vec![(200, JUEZ_TRUNCADO)]);
+    let srv = Servidor::arranca(vec![(200, juez_truncado())]);
     let home = tempfile::tempdir().expect("home");
     let salida = revisar_contra(&srv, home.path(), &[]);
     assert_eq!(
@@ -1034,4 +1057,105 @@ fn ficha_cli_respuesta_truncada_da_la_causa_del_tope_y_registra_costo() {
     let evento: serde_json::Value = serde_json::from_str(ultimo).expect("JSON");
     assert_eq!(evento["extra"]["truncada"], true);
     assert!(evento["cost_usd"].as_f64().expect("costo") > 0.0);
+}
+
+fn deepseek_juez_vacio() -> String {
+    sse_deepseek("[]", 10, 5, "stop")
+}
+
+/// `root.toml` con el servidor falso como proveedor y un precio para `deepseek-reasoner`.
+fn home_juez(url: &str, precio: &str) -> tempfile::TempDir {
+    let home = tempfile::tempdir().expect("home");
+    let texto = format!(
+        "[proveedores]\ndeepseek_url = \"{url}\"\nespera_base_ms = 1\n\n[precios.deepseek-reasoner]\n{precio}\n"
+    );
+    fs::write(home.path().join("root.toml"), texto).expect("root.toml");
+    home
+}
+
+/// `r00t ficha revisar` con el juez de DeepSeek y `ROOT_HOME` de `home`.
+fn revisar_con_juez_cli(home: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_r00t"))
+        .env("ROOT_HOME", home)
+        .env("DEEPSEEK_API_KEY", "sk-test-SECRETO-FICHA")
+        .args([
+            "ficha",
+            "revisar",
+            "--spec",
+            &ruta_fixture("spec-completa.md"),
+            "--juez-proveedor",
+            "deepseek",
+            "--juez-modelo",
+            "deepseek-reasoner",
+        ])
+        .output()
+        .expect("no se pudo ejecutar el binario root")
+}
+
+#[test]
+fn ficha_cli_juez_con_tope_lleno_no_envia_y_sale_3() {
+    let srv = Servidor::arranca(vec![(200, deepseek_juez_vacio())]);
+    let home = home_juez(&srv.url, "usd_entrada = 1.0\nusd_salida = 2.0");
+    // 100 USD de API este mes: el tope por defecto de 100 USD ya está lleno.
+    let gasto = Evento {
+        ts: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("reloj")
+            .as_secs_f64(),
+        corrida: "previa".into(),
+        tipo: TipoEvento::Llamada,
+        via: Some(Via::Api),
+        cost_usd: 100.0,
+        ..Evento::default()
+    };
+    observe::registrar_en(&home.path().join("eventos.jsonl"), &gasto).expect("siembra");
+
+    let salida = revisar_con_juez_cli(home.path());
+
+    assert_eq!(
+        codigo(&salida),
+        3,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    assert_eq!(
+        srv.peticiones(),
+        0,
+        "el juez no debe enviar con el tope lleno"
+    );
+    let stdout = String::from_utf8_lossy(&salida.stdout);
+    assert!(stdout.contains("sin_veredicto"), "{stdout}");
+    assert!(stdout.contains("margen"), "{stdout}");
+}
+
+#[test]
+fn ficha_cli_juez_dentro_del_margen_envia_una_vez() {
+    let srv = Servidor::arranca(vec![(200, deepseek_juez_vacio())]);
+    let home = home_juez(&srv.url, "usd_entrada = 1.0\nusd_salida = 2.0");
+
+    let salida = revisar_con_juez_cli(home.path());
+
+    assert_eq!(
+        codigo(&salida),
+        0,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    assert_eq!(srv.peticiones(), 1);
+}
+
+#[test]
+fn ficha_cli_juez_con_root_toml_invalido_sale_2_sin_pedidos() {
+    let srv = Servidor::arranca(vec![(200, deepseek_juez_vacio())]);
+    let home = home_juez(&srv.url, "usd_entrada = 1.0\nusd_salda = 2.0");
+
+    let salida = revisar_con_juez_cli(home.path());
+
+    assert_eq!(
+        codigo(&salida),
+        2,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    assert_eq!(srv.peticiones(), 0);
 }

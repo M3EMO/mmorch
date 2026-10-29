@@ -11,6 +11,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{ResultadoSonda, crear_hallazgo, puntuar_hallazgos};
+use crate::config::root_home;
 use crate::oracle::ErrorOraculo;
 use crate::oracle::contenedor::{self, Ejecucion};
 use crate::oracle::descarga::PRELUDIO;
@@ -58,6 +59,7 @@ impl EjecutorContenedor {
             imagen: self.imagen.clone(),
             repo: Some(self.repo.clone()),
             oraculo: self.oraculo.clone(),
+            oraculo_destino: None,
             salida: salida.to_path_buf(),
             cmd: cmd.to_string(),
             env: Vec::new(),
@@ -66,6 +68,7 @@ impl EjecutorContenedor {
             cache: self.cache.clone(),
             cache_rw: false,
             rustsec: self.rustsec.clone(),
+            trabajo: None,
             secretos: Vec::new(),
         }
     }
@@ -73,13 +76,8 @@ impl EjecutorContenedor {
 
 impl EjecutorHerramienta for EjecutorContenedor {
     fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
-        let salida = tempfile::Builder::new()
-            .prefix("sondas-")
-            .tempdir()
+        let salida = carpeta_de_salida(&root_home().join("tmp"))
             .map_err(|e| ErrorOraculo::Infra(format!("carpeta de salida: {e}")))?;
-        // El contenedor escribe con otro uid: la carpeta de salida se abre a todos.
-        fs::set_permissions(salida.path(), fs::Permissions::from_mode(0o777))
-            .map_err(|e| ErrorOraculo::Infra(format!("permisos de /salida: {e}")))?;
         let resultado = contenedor::ejecutar(&self.ejecucion(cmd, salida.path()))?;
         Ok(SalidaHerramienta {
             codigo: resultado.codigo,
@@ -370,14 +368,28 @@ pub(crate) fn con_cola(base: String, stderr: &str) -> String {
     }
 }
 
-/// Lee los archivos sueltos de `dir`. Las subcarpetas, como `target/`, no se leen.
+/// Carpeta de `/salida` dentro de `tmp` (`ROOT_HOME/tmp`). `tempdir_in` la crea con modo 0700: ningún otro
+/// usuario local la escribe (M16). Un contenedor con otro uid no la escribe si la imagen no corre como root.
+fn carpeta_de_salida(tmp: &Path) -> std::io::Result<tempfile::TempDir> {
+    fs::create_dir_all(tmp)?;
+    let salida = tempfile::Builder::new().prefix("sondas-").tempdir_in(tmp)?;
+    // Explícito: no depende del modo por defecto de `tempfile`.
+    fs::set_permissions(salida.path(), fs::Permissions::from_mode(0o700))?;
+    Ok(salida)
+}
+
+/// Lee los archivos sueltos de `dir`. Las subcarpetas, como `target/`, no se leen. Un enlace no se sigue:
+/// el contenedor podría apuntarlo a un archivo del host (M16).
 fn leer_salida(dir: &Path) -> Result<BTreeMap<String, String>, ErrorOraculo> {
     let entradas =
         fs::read_dir(dir).map_err(|e| ErrorOraculo::Infra(format!("leer /salida: {e}")))?;
     let mut archivos = BTreeMap::new();
     for entrada in entradas.flatten() {
         let ruta = entrada.path();
-        if !ruta.is_file() {
+        let Ok(meta) = fs::symlink_metadata(&ruta) else {
+            continue;
+        };
+        if !meta.file_type().is_file() {
             continue;
         }
         let bytes = fs::read(&ruta)
@@ -527,10 +539,11 @@ pub fn clippy(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoSonda {
         let base = format!("clippy no dejó un reporte válido: {causa}");
         return sin_veredicto(d, con_cola(base, &salida.stderr));
     };
-    // Con éxito, o con lints de clippy que hacen fallar el build, el veredicto sale de los
-    // hallazgos. Un fallo sin ningún lint de clippy no es un veredicto.
+    // Con éxito, o con un lint de clippy de nivel error que hace fallar el build, el veredicto sale de
+    // los hallazgos. Un fallo sin ese error no lo explica un lint: una advertencia no da veredicto (M14).
     let hallazgos = parsear_clippy(reporte, &tarea.requisito);
-    if !exito && hallazgos.is_empty() {
+    let lint_que_falla = hallazgos.iter().any(|h| h.severidad == 3);
+    if !exito && !lint_que_falla {
         return sin_veredicto(d, con_cola("el código no compila".into(), &salida.stderr));
     }
     con_veredicto(d, hallazgos, &tarea.requisito)
@@ -1114,6 +1127,40 @@ mod tests {
     }
 
     #[test]
+    fn sonda_clippy_build_fallido_con_advertencia_y_sin_error_de_lint_es_sin_veredicto() {
+        // El build falla por otra causa (un build.rs, por ejemplo). La advertencia no lo explica.
+        let reporte = "{\"reason\":\"compiler-message\",\"message\":{\"code\":{\"code\":\"clippy::needless_return\"},\"level\":\"warning\",\"message\":\"unneeded return\",\"spans\":[{\"file_name\":\"crates/a/src/lib.rs\",\"is_primary\":true,\"line_start\":2,\"text\":[{\"text\":\"    return 1;\"}]}]}}\n\
+                       {\"reason\":\"build-finished\",\"success\":false}\n";
+        let ej = con_herramientas(move |_| con_archivo("clippy.json", reporte));
+        let r = clippy(&ej, &tarea_rust(None));
+        assert_eq!(r.valor, None, "{:?}", r.hallazgos);
+        assert!(r.motivo.unwrap_or_default().contains("no compila"));
+    }
+
+    #[test]
+    fn sonda_clippy_build_fallido_con_error_de_lint_da_veredicto() {
+        // Un lint `deny` hace fallar el build: ese fallo sí lo explica el lint.
+        let reporte = "{\"reason\":\"compiler-message\",\"message\":{\"code\":{\"code\":\"clippy::unwrap_used\"},\"level\":\"error\",\"message\":\"used unwrap\",\"spans\":[{\"file_name\":\"src/x.rs\",\"is_primary\":true,\"line_start\":3,\"text\":[{\"text\":\"x.unwrap()\"}]}]}}\n\
+                       {\"reason\":\"build-finished\",\"success\":false}\n";
+        let ej = con_herramientas(move |_| con_archivo("clippy.json", reporte));
+        let r = clippy(&ej, &tarea_rust(None));
+        assert_eq!(r.motivo, None);
+        assert_eq!(r.hallazgos.len(), 1);
+        assert!(r.valor.is_some());
+    }
+
+    #[test]
+    fn sonda_clippy_error_de_compilacion_con_advertencias_es_sin_veredicto() {
+        let reporte = "{\"reason\":\"compiler-message\",\"message\":{\"code\":{\"code\":\"clippy::needless_return\"},\"level\":\"warning\",\"message\":\"unneeded return\",\"spans\":[{\"file_name\":\"src/x.rs\",\"is_primary\":true,\"line_start\":2,\"text\":[{\"text\":\"    return 1;\"}]}]}}\n\
+                       {\"reason\":\"compiler-message\",\"message\":{\"code\":{\"code\":\"E0425\"},\"level\":\"error\",\"message\":\"cannot find value `y`\",\"spans\":[{\"file_name\":\"src/x.rs\",\"is_primary\":true,\"line_start\":3,\"text\":[{\"text\":\"let a = y;\"}]}]}}\n\
+                       {\"reason\":\"build-finished\",\"success\":false}\n";
+        let ej = con_herramientas(move |_| con_archivo("clippy.json", reporte));
+        let r = clippy(&ej, &tarea_rust(None));
+        assert_eq!(r.valor, None);
+        assert!(r.motivo.unwrap_or_default().contains("no compila"));
+    }
+
+    #[test]
     fn sonda_eficiencia_sin_tabla_no_penaliza_ni_corre_nada() {
         let ej = con_herramientas(|_| panic!("no debe correr"));
         let r = eficiencia(&ej, &tarea_rust(None));
@@ -1188,7 +1235,7 @@ mod tests {
         // Sin base de RustSec: cargo audit no tiene veredicto.
         let sin_base = EjecutorFalso::nuevo(|_| Ok(salida(0, "")));
         let ca = cargo_audit(&sin_base, &tarea_rust(None), repo.path());
-        let r = combinar(Dimension::Seguridad, vec![propia, gl, ca], &[]);
+        let r = combinar(Dimension::Seguridad, vec![propia, gl, ca], &[]).expect("hay partes");
         assert_eq!(r.valor, None, "sin cargo audit no hay puntaje de seguridad");
         assert_eq!(r.hallazgos.len(), 1, "conserva el unsafe");
         assert_eq!(r.motivo.as_deref(), Some("sin base de RustSec"));
@@ -1205,7 +1252,7 @@ mod tests {
         let limpio = "{\"vulnerabilities\":{\"found\":false,\"count\":0,\"list\":[]}}";
         let ej_ca = con_herramientas(move |_| con_archivo("audit.json", limpio)).con_rustsec();
         let ca = cargo_audit(&ej_ca, &tarea_rust(None), repo.path());
-        let r = combinar(Dimension::Seguridad, vec![propia, gl, ca], &[]);
+        let r = combinar(Dimension::Seguridad, vec![propia, gl, ca], &[]).expect("hay partes");
         assert!(r.valor.is_some());
         assert_eq!(r.hallazgos.len(), 1);
         // Un unsafe de severidad 2 sin impacto: penal 2/9, valor 25/27.
@@ -1220,7 +1267,7 @@ mod tests {
         let propia = estructura_nativa(repo.path(), &[], &LimitesEstructura::default());
         let ej = con_herramientas(|_| salida(101, ""));
         let cl = clippy(&ej, &tarea_rust(None));
-        let r = combinar(Dimension::Estructura, vec![propia, cl], &[]);
+        let r = combinar(Dimension::Estructura, vec![propia, cl], &[]).expect("hay partes");
         assert_eq!(r.valor, None);
         assert!(
             r.hallazgos
@@ -1235,7 +1282,7 @@ mod tests {
         let propia = estructura_nativa(repo.path(), &[], &LimitesEstructura::default());
         let ej = con_herramientas(|_| con_archivo("clippy.json", CLIPPY));
         let cl = clippy(&ej, &tarea_rust(None));
-        let r = combinar(Dimension::Estructura, vec![propia, cl], &[]);
+        let r = combinar(Dimension::Estructura, vec![propia, cl], &[]).expect("hay partes");
         assert!(r.valor.is_some());
         assert_eq!(r.hallazgos.len(), 2);
     }
@@ -1266,6 +1313,39 @@ mod tests {
         assert!(args.contains(&format!("{}:/cache:ro,z", cache.path().display())));
         assert!(args.contains(&format!("{}:/salida:z", salida_dir.path().display())));
         assert!(ej.tiene_rustsec());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn herramientas_leer_salida_no_sigue_enlaces_al_host() {
+        let host = tempfile::tempdir().expect("archivos del host");
+        let secreto = host.path().join("id_rsa");
+        fs::write(&secreto, "CLAVE-DEL-HOST").expect("escribe");
+        let salida = tempfile::tempdir().expect("salida");
+        fs::write(salida.path().join("ok.log"), "bien").expect("escribe");
+        std::os::unix::fs::symlink(&secreto, salida.path().join("x.log")).expect("enlace");
+        let archivos = leer_salida(salida.path()).expect("lee la salida");
+        assert_eq!(archivos.get("ok.log").map(String::as_str), Some("bien"));
+        assert!(!archivos.contains_key("x.log"), "{archivos:?}");
+        assert!(
+            !archivos.values().any(|v| v.contains("CLAVE-DEL-HOST")),
+            "{archivos:?}"
+        );
+    }
+
+    #[test]
+    fn herramientas_carpeta_de_salida_es_privada_y_vive_en_home_tmp() {
+        let home = tempfile::tempdir().expect("home");
+        let tmp = home.path().join("tmp");
+        fs::create_dir_all(&tmp).expect("tmp");
+        let salida = carpeta_de_salida(&tmp).expect("crea la salida");
+        assert_eq!(salida.path().parent(), Some(tmp.as_path()));
+        let modo = fs::metadata(salida.path())
+            .expect("metadatos")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(modo, 0o700, "la salida no se abre a otros usuarios");
     }
 
     #[test]

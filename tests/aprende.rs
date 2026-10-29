@@ -182,7 +182,7 @@ fn aprende_route_lee_la_politica_escrita_y_elige_el_barato() {
     // Sin `politica.json`, Route vuelve al default de `[ruteo]`.
     fs::remove_file(home.path().join(NOMBRE_POLITICA)).expect("borra la política");
     let sin_politica = route_delega_resumen(home.path());
-    assert_eq!(sin_politica["modelo"], "deepseek-chat");
+    assert_eq!(sin_politica["modelo"], "deepseek-flash");
 }
 
 /// Fila de `rol` con `modelo` y `usd` de cupo. Éxito verde.

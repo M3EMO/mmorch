@@ -191,3 +191,191 @@ fn uso_cli_observa_claude_sin_via_registra_cupo() {
     assert!(registrados.iter().any(|ev| ev.via == Some(Via::Cupo)));
     assert!(registrados.iter().all(|ev| ev.via != Some(Via::Nube)));
 }
+
+/// 2026-10-31T12:00:00Z.
+const OCTUBRE_FIN_UTC: f64 = 1_793_448_000.0;
+
+fn gasto_de_api_de_octubre(home: &Path) -> f64 {
+    observe::uso::uso_en(&home.join("eventos.jsonl"), OCTUBRE_FIN_UTC, 0, 5)
+        .expect("lee")
+        .api_mes_usd
+}
+
+fn sesion_json(home: &Path, nombre: &str, contenido: &str) -> PathBuf {
+    let ruta = home.join(nombre);
+    fs::write(&ruta, contenido).expect("escribe la sesión");
+    ruta
+}
+
+#[test]
+fn uso_cli_costo_manual_suma_al_gasto_de_api_de_octubre() {
+    let home = tempfile::tempdir().expect("home");
+    let salida = root_con_home(
+        home.path(),
+        &[
+            "observa",
+            "costo",
+            "--usd",
+            "0.50",
+            "--motivo",
+            "x",
+            "--fecha",
+            "2026-10-29",
+        ],
+    );
+    assert_eq!(codigo(&salida), 0);
+    let registrados = eventos(home.path());
+    assert_eq!(registrados.len(), 1);
+    let ev = &registrados[0];
+    assert_eq!(ev.tipo, TipoEvento::Llamada);
+    assert_eq!(ev.via, Some(Via::Api));
+    assert_eq!(ev.extra["manual"], true);
+    assert_eq!(ev.extra["motivo"], "x");
+    assert!((gasto_de_api_de_octubre(home.path()) - 0.5).abs() < 1e-12);
+}
+
+#[test]
+fn uso_cli_costo_manual_json_imprime_el_evento() {
+    let home = tempfile::tempdir().expect("home");
+    let salida = root_con_home(
+        home.path(),
+        &[
+            "--json", "observa", "costo", "--usd", "1.25", "--motivo", "y",
+        ],
+    );
+    assert_eq!(codigo(&salida), 0);
+    let ev: Evento = serde_json::from_slice(&salida.stdout).expect("stdout es un evento");
+    assert_eq!(ev.cost_usd, 1.25);
+    assert_eq!(ev.via, Some(Via::Api));
+}
+
+#[test]
+fn uso_cli_costo_manual_con_monto_invalido_sale_con_2_y_no_escribe() {
+    for usd in ["-1", "0", "nan", "inf"] {
+        let home = tempfile::tempdir().expect("home");
+        let salida = root_con_home(
+            home.path(),
+            &["observa", "costo", "--usd", usd, "--motivo", "x"],
+        );
+        assert_eq!(codigo(&salida), 2, "usd {usd}");
+        assert!(
+            eventos(home.path()).is_empty(),
+            "usd {usd} no debe escribir"
+        );
+    }
+}
+
+#[test]
+fn uso_cli_costo_manual_con_fecha_que_no_parsea_sale_con_2_y_no_escribe() {
+    let home = tempfile::tempdir().expect("home");
+    let salida = root_con_home(
+        home.path(),
+        &[
+            "observa",
+            "costo",
+            "--usd",
+            "0.5",
+            "--motivo",
+            "x",
+            "--fecha",
+            "29/10/2026",
+        ],
+    );
+    assert_eq!(codigo(&salida), 2);
+    assert!(eventos(home.path()).is_empty());
+}
+
+#[test]
+fn uso_cli_observa_claude_nube_que_cruza_el_tope_registra_gate() {
+    let home = tempfile::tempdir().expect("home");
+    let sesion = sesion_json(
+        home.path(),
+        "sesion.json",
+        r#"{"total_cost_usd": 251.0, "num_turns": 3}"#,
+    );
+    let salida = root_con_home(
+        home.path(),
+        &[
+            "observa",
+            "claude",
+            "--archivo",
+            sesion.to_str().expect("ruta UTF-8"),
+            "--corrida",
+            "cn",
+            "--via",
+            "nube",
+        ],
+    );
+    assert_eq!(codigo(&salida), 0);
+    let gates = gates_de_tope(home.path(), "nube");
+    assert_eq!(gates.len(), 1, "debe registrar el Gate al cruzar el tope");
+    assert_eq!(gates[0].extra["tope_usd"], 250.0);
+    assert_eq!(gates[0].extra["usado"], 251.0);
+}
+
+#[test]
+fn uso_cli_observa_claude_nube_bajo_el_tope_no_registra_gate() {
+    let home = tempfile::tempdir().expect("home");
+    let sesion = sesion_json(home.path(), "sesion.json", r#"{"total_cost_usd": 100.0}"#);
+    let salida = root_con_home(
+        home.path(),
+        &[
+            "observa",
+            "claude",
+            "--archivo",
+            sesion.to_str().expect("ruta UTF-8"),
+            "--corrida",
+            "cn",
+            "--via",
+            "nube",
+        ],
+    );
+    assert_eq!(codigo(&salida), 0);
+    assert!(gates_de_tope(home.path(), "nube").is_empty());
+}
+
+#[test]
+fn uso_cli_observa_claude_nube_no_repite_el_gate_del_mes() {
+    let home = tempfile::tempdir().expect("home");
+    for nombre in ["uno.json", "dos.json"] {
+        let sesion = sesion_json(home.path(), nombre, r#"{"total_cost_usd": 251.0}"#);
+        let salida = root_con_home(
+            home.path(),
+            &[
+                "observa",
+                "claude",
+                "--archivo",
+                sesion.to_str().expect("ruta UTF-8"),
+                "--corrida",
+                "cn",
+                "--via",
+                "nube",
+            ],
+        );
+        assert_eq!(codigo(&salida), 0);
+    }
+    assert_eq!(gates_de_tope(home.path(), "nube").len(), 1);
+}
+
+#[test]
+fn uso_cli_observa_claude_con_costo_negativo_sale_con_3_y_no_registra_nada() {
+    let home = tempfile::tempdir().expect("home");
+    let sesion = sesion_json(
+        home.path(),
+        "sesion.json",
+        r#"{"modelUsage": {"claude-haiku-5-5": {"costUSD": -0.5}}}"#,
+    );
+    let salida = root_con_home(
+        home.path(),
+        &[
+            "observa",
+            "claude",
+            "--archivo",
+            sesion.to_str().expect("ruta UTF-8"),
+            "--corrida",
+            "cneg",
+        ],
+    );
+    assert_eq!(codigo(&salida), 3);
+    assert!(eventos(home.path()).is_empty());
+}

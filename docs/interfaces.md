@@ -36,14 +36,14 @@ Con `--json`, cada subcomando construido imprime un solo objeto JSON en stdout.
 
 | Código | Significado | Dónde sale hoy |
 |---|---|---|
-| `0` | ok o verde | `route`, `llama`, `observa`, `track`, `aprende`, `goal`, `importar-mmorch`, `ficha tarea`, `ficha revisar` sin hallazgos. `oraculo evaluar` no da `0` hoy: nunca emite verde (ver abajo). |
-| `1` | rojo | `oraculo evaluar` con tests que fallan. `ficha revisar` con hallazgos o ambigüedades. |
+| `0` | ok o verde | `route`, `llama`, `observa`, `track`, `aprende`, `goal`, `importar-mmorch`, `ficha tarea`, `ficha revisar` sin hallazgos y con el juez en `ok` (con `--juez-proveedor` y `--juez-modelo`). `oraculo evaluar` e `oraculo informe` con decisión `Listo` (ver abajo). |
+| `1` | rojo | `oraculo evaluar` e `oraculo informe` con decisión `NoListo` o `Bloqueado`. `ficha revisar` con hallazgos o ambigüedades, aunque el juez haya fallado. |
 | `2` | error de uso | Argumentos inválidos (clap). `root.toml` con un valor fuera de rango. Un spec sin `## Ficha` o con una ficha inválida. Un tipo desconocido en `esquema`. |
-| `3` | error de infraestructura, o sin veredicto | Un tope que impide la elección o la llamada (`route`, `llama`). Un error de proveedor, de Observe o de Track. `oraculo evaluar` sin veredicto. Los subcomandos **pendientes** salen con `3` porque aún no tienen lógica. |
+| `3` | error de infraestructura, o sin veredicto | Un tope que impide la elección o la llamada (`route`, `llama`). Un error de proveedor, de Observe o de Track. `oraculo evaluar` sin veredicto (descarga o suite sin veredicto). `ficha revisar` sin hallazgos y sin veredicto del juez: sin `--juez-*` el juez queda `sin_veredicto: juez no corrido` y el código es 3, nunca 0. Los subcomandos **pendientes** salen con `3` porque aún no tienen lógica. |
 
-`oraculo evaluar` sale con `1` si alguna suite tiene tests que fallan.
-Sale con `3` si todas las suites pasan, porque el veredicto aún no tiene informe.
-Hoy no hay forma de dar `0`: el verde exige el informe de la Tarea 13b (**pendiente**).
+`oraculo evaluar` y `oraculo informe` salen según la decisión del informe (Tarea 13b): `Listo` da `0`, `NoListo` y `Bloqueado` dan `1`.
+Sin informe (una descarga o una suite sin veredicto), salen con `3`.
+El estado del veredicto sale de la decisión, no de los conteos de tests: un test que falla fuera de un requisito de peso 3 no basta para `NoListo`.
 Ningún conteo de tests decide el estado por sí solo. Esto sigue la decisión 16 del plan.
 
 ## CLI
@@ -54,17 +54,20 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 |---|---|---|---|
 | `r00t route --rol <rol> --tipo <tipo> [--checkeable] [--tokens N]` | Elige la vía y el modelo para un rol y un tipo. | `Eleccion` | construido |
 | `r00t llama --rol <rol> --tipo <tipo> --prompt-file <f> --corrida <id> [--max-tokens N]` | Llama al modelo elegido. Registra el evento. Rechaza la llamada si no hay precio o tope. | `Respuesta` | construido |
-| `r00t oraculo evaluar --tarea <t> --repo <dir>` | Corre las suites de la tarea sobre el repo y da el veredicto. | `Veredicto` | construido. Hoy nunca da verde. |
+| `r00t oraculo evaluar --tarea <t> --repo <dir>` | Corre las suites de la tarea sobre el repo y da el veredicto, con su informe. | `Veredicto` | construido (Tarea 13b). |
 | `r00t oraculo pendientes --tarea <t> --repo <dir> [--importar <junit> \| --colab]` | Arma el paquete de tests pendientes por entorno para Colab. Con `--importar`, guarda el junit de vuelta. Con `--colab`, corre el paquete en Colab y lo importa. | `{dir, tests}`, o `{importados, ignorados}` | construido (Tarea 7f). `--colab`: Tarea 7j |
 | `r00t oraculo pendientes --liberar` | Libera el runtime de Colab anotado en `$ROOT_HOME/colab/activo.json`, si hay uno, y sale. | sin salida JSON | construido (Tarea 7j) |
 | `r00t oraculo pendientes --vigilar` | Red de seguridad: lee `$ROOT_HOME/colab/activo.json`. Libera el runtime si pasó su tope o si su junit cumple lo pedido. Un runtime vigente no se toca. Sin `--tarea` ni `--repo`. | `{vigilancia, causa}`, con `vigilancia` `sin_runtime`, `vigente` o `liberado` | construido (Tarea 7l) |
-| `r00t oraculo calibrar --tarea <t> --dimension <d> [--n 20] [--semilla 42]` | Mide la exactitud de una dimensión. | `Calibracion` | pendiente (Tarea 12). Hoy sale con `3`. |
-| `r00t oraculo informe --tarea <t> --repo <dir> [--md]` | Arma el informe del PM sobre el veredicto. | `Informe` | pendiente (Tarea 13b). No está en `--help`. |
+| `r00t oraculo calibrar --tarea <t> --dimension <d> [--n 20] [--semilla 42] [--repo <dir>]` | Calibra una dimensión con defectos inyectados: mitad con defecto, mitad limpia. Mide la sensibilidad, la especificidad y la exactitud balanceada, por dimensión y por ítem, contra una línea base. Agrega una fila a `$ROOT_HOME/calibracion.json` e imprime la fila. Sin `--repo`, usa `[calibracion] repo` de `tarea.toml`; sin ninguno, sale con `2`. | `Fila` | construido (Tarea 12). |
+| `r00t oraculo validar --casos <dir> [--json]` | Mide si el juicio de Root coincide con los casos de `<dir>` (orden conocido, defectos reales y el formulario a ciegas). Escribe `<dir>/validez.json`. Una métrica sin datos queda sin medir, nunca 0 ni 1. Sale con `0` aunque una métrica no cumpla. | `Validez` | construido (Tarea 12b). Formatos: sección ## Validez. |
+| `r00t oraculo validar --preparar-ciego --fuentes <manifiesto.toml> --casos <dir> [--semilla N]` | Arma un paquete anónimo por fuente en `<dir>/ciego/`, con su formulario, y la clave `ciego/clave.toml`. | ids de los paquetes | construido (Tarea 12b). |
+| `r00t oraculo informe --tarea <t> --repo <dir> [--md]` | Arma el informe del PM sobre el veredicto: decisión, regla que la disparó, requisitos, bloqueantes, riesgos, próximos pasos y confianza. Sin `--md`, imprime JSON; con `--md`, markdown legible. | `Informe` | construido (Tarea 13b). |
 | `r00t oraculo validar --casos <dir>` | Mide si el juicio de Root coincide con resultados conocidos. | `Validez` | pendiente (Tarea 12b). No está en `--help`. |
 | `r00t observa claude --archivo <salida-de-claude-p> --corrida <id> [--via cupo\|nube]` | Registra la salida JSON de `claude -p`. Con `--via nube`, registra una sesión en la nube. | `{registrados, via}` | construido |
 | `r00t observa evento --corrida <id> --tipo <humano\|plan-aprobado\|gate> [--detalle txt]` | Registra un evento manual de la corrida. | evento registrado | construido |
 | `r00t observa resumen --corrida <id>` | Resume una corrida. | `Resumen` | construido |
 | `r00t observa uso` | Muestra el gasto y el margen de cada tope. | margen por tope | construido |
+| `r00t observa costo --usd <n> --motivo <texto> [--fecha <iso>]` | Registra un costo de API que Root no vio (decisión 46). `--usd` debe ser finito y mayor que 0. `--fecha` es `AAAA-MM-DD` (12:00 locales) o RFC 3339; sin él, vale la hora actual. | evento `Llamada` registrado | construido |
 | `r00t track agregar --fila <archivo.json>` | Agrega una fila a `runs.jsonl`. | `{agregada}` | construido |
 | `r00t track listar [--tarea t]` | Lista las filas, opcionalmente de una tarea. | lista de `Fila` | construido |
 | `r00t track comparar --a <c1> --b <c2> --tarea <t>` | Compara dos corridas de una tarea. | comparación | construido |
@@ -74,15 +77,15 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t goal autorizar` | Autoriza un cambio al GOAL. Exige una TTY y una confirmación tecleada. | sin salida JSON | construido |
 | `r00t importar-mmorch --desde <metrics.jsonl>` | Copia en solo lectura el log de métricas de mmorch. | resumen de la importación | construido |
 | `r00t esquema <tipo>` | Imprime el JSON Schema de un tipo. Ver `## Esquemas`. | JSON Schema | construido |
-| `r00t ficha revisar --spec <SPEC.md> [--juez-proveedor p --juez-modelo m [--juez-max-tokens n]]` | Revisa la ficha y las ambigüedades. Con los dos flags de juez, también corre el juez. `--juez-max-tokens` fija el tope de salida del juez: 32 000 por defecto, al menos 1, y exige `--juez-modelo`. | `Revision` | construido |
+| `r00t ficha revisar --spec <SPEC.md> [--juez-proveedor p --juez-modelo m [--juez-max-tokens n]]` | Revisa la ficha y las ambigüedades. Con los dos flags de juez, también corre el juez. Sin ellos, el juez queda `sin_veredicto: juez no corrido`: sin hallazgos, sale 3. `--juez-max-tokens` fija el tope de salida del juez: 32 000 por defecto, al menos 1, y exige `--juez-modelo`. | `Revision` | construido |
 | `r00t ficha tarea --spec <SPEC.md> --nombre <t>` | Arma el borrador de `tarea.toml` desde la ficha. | `{toml}` | construido |
 | `r00t mcp` | Inicia el servidor MCP por stdio. | JSON-RPC 2.0 | construido |
 
 **Colab (`oraculo pendientes --colab`).** Root pide un runtime T4 de Colab, corre el paquete, importa el junit y libera el runtime. Antes de pedirlo, Root escribe su id en `$ROOT_HOME/colab/activo.json`. Lo borra al liberar el runtime. Si el proceso muere con `SIGKILL`, el archivo queda. La próxima corrida de `--colab` libera ese runtime primero. `--liberar` hace solo esa limpieza. `SIGINT` y `SIGTERM` también liberan el runtime y registran un `Gate`. El login de Colab lo hace la persona antes de correr el comando. Root no lee el token de la CLI.
 
-**Corte temprano.** `correr.sh` corre en segundo plano en el runtime y Root lo sondea cada 60 segundos. Root libera el runtime en cuanto se cumple lo que pedía la corrida: el junit trae cada test pendiente, con tantos resultados como `repeticiones` de `tarea.toml`. Si `correr.sh` termina antes, Root libera el runtime con lo que haya. El `Gate` de liberación lleva la clave `causa`: `requisito cumplido`, `correr.sh terminó`, `tope de 2 horas` o `señal SIGINT`/`señal SIGTERM`. `--vigilar` es la red de seguridad: libera el runtime anotado si pasó su tope o si su junit cumple lo pedido, aunque la corrida ya no esté viva.
+**Corte temprano.** `correr.sh` corre en segundo plano en el runtime y Root lo sondea cada 60 segundos. Root libera el runtime en cuanto se cumple lo que pedía la corrida: el junit trae cada test pendiente, con tantos resultados como `repeticiones` de `tarea.toml`. Si `correr.sh` termina antes, Root libera el runtime con lo que haya. El `Gate` de liberación lleva la clave `causa`: `requisito cumplido`, `correr.sh terminó`, `tope de duración`, `señal SIGINT`/`señal SIGTERM`, `gpu-no-t4` (la GPU no es una T4), `runtime-no-asignado` (`colab new` no dio el runtime) o `error-en-corrida` (un paso falló a mitad de la corrida). `--vigilar` es la red de seguridad: libera el runtime anotado si pasó su tope o si su junit cumple lo pedido, aunque la corrida ya no esté viva.
 
-**Tope de duración.** Cada corrida de `--colab` tiene un tope, `[colab].minutos_max` en `root.toml`, con 120 minutos (2 horas) por defecto, con corte temprano. Al llegar al tope, Root libera el runtime, registra un `Gate` con la causa `tope de 2 horas` y sale con código `3`. Los tests sin resultado quedan `Pendiente`.
+**Tope de duración.** Cada corrida de `--colab` tiene un tope, `[colab].minutos_max` en `root.toml`, con 120 minutos (2 horas) por defecto, con corte temprano. Al llegar al tope, Root libera el runtime, registra un `Gate` con la causa `tope de duración` y sale con código `3`. El `motivo` del `Gate` lleva el tope real, por ejemplo `tope de 120 minutos`. Los tests sin resultado quedan `Pendiente`.
 
 ## MCP
 
@@ -165,9 +168,10 @@ $ROOT_HOME/
   root.toml               # modelos, precios, balance, umbrales (lo escribe el humano)
   eventos.jsonl           # Observe: una línea por evento, "v": 1
   eventos.jsonl.lock      # cerrojo de Observe
+  calibracion.lock        # cerrojo de Oracle al agregar una calibración
   runs.jsonl              # Track: una línea por corrida, "v": 1
   politica.json           # Aprende: política de Route recalculada
-  calibracion.json        # Oracle: exactitud medida por dimensión (pendiente, Tarea 12)
+  calibracion.json        # Oracle: exactitud medida por dimensión (Tarea 12)
   oraculos/<tarea>/
     tarea.toml            # definición de la tarea
     contrato/             # tests visibles para el builder (convención de carpeta)
@@ -178,10 +182,12 @@ $ROOT_HOME/
     rust/<hash>/
     python/<hash>/
     rustsec/
-  tmp/                    # temporales del Oracle; se limpian por antigüedad
-  evidencia/<tarea>/colab.json   # resultados importados de Colab (Tarea 7f)
+  tmp/                    # temporales del Oracle (evaluar-*, colab-*); se limpian por antigüedad
+  evidencia/<tarea>/colab.json   # resultados importados de Colab, con el commit del repo (Tarea 7f, B16)
   colab/activo.json       # runtime de Colab pedido y no liberado; lo borra Root al liberarlo (Tarea 7j)
-  pendientes/             # paquetes de tests pendientes por entorno (Tarea 7f)
+  oraculos/<tarea>/       # tests ocultos: el builder no puede leer esta carpeta (Tarea 23)
+    pendientes/           # paquete de tests pendientes por entorno; lo borra Root al terminar Colab
+    registros/            # stderr de las corridas que no dejaron junit (A2)
   importado/
     mmorch-metrics.jsonl  # copia de solo lectura del log de mmorch (decisión b3)
     mmorch-eventos.jsonl  # eventos derivados de la importación
@@ -190,7 +196,7 @@ $ROOT_HOME/
 
 Toda línea JSONL lleva `"v": 1`. Un cambio de formato sube `v`, y los lectores aceptan las versiones anteriores.
 `oraculos/<tarea>/diferencias.md` no lo crea ningún subcomando. Lo escribe la persona que compara con el banco.
-Las subcarpetas `contrato/`, `oculto/` y `bootstrap/` son convención. El Oracle lee solo `tarea.toml` y los comandos que ese archivo declara.
+Las subcarpetas `contrato/`, `oculto/` y `bootstrap/` son convención. Cada suite del contenedor monta solo su carpeta (`contrato/` o `oculto/`), y los escenarios montan solo `escenarios/`. El Oracle lee solo `tarea.toml` y los comandos que ese archivo declara.
 
 ## tarea.toml
 
@@ -221,6 +227,7 @@ Ruta: `$ROOT_HOME/oraculos/<tarea>/tarea.toml`. Lo lee `Tarea::cargar_de` (`src/
 | `[pruebas]` `mutantes_max`, `minutos_max` | entero | no | 60, 20 | Límites de la sonda de mutación. Ambos deben ser 1 o más. |
 | `[eficiencia]` `cmd`, `piso` | texto, número | no | | `cmd` imprime `{"ops_s": f64}`. Debe llegar a `piso`. |
 | `[arquitectura]` `capas` | lista de listas | no | | Una capa importa solo capas posteriores. |
+| `[calibracion]` `repo` | texto | no | | Repo bueno de `r00t oraculo calibrar` cuando no se pasa `--repo`. Una ruta relativa se resuelve desde la carpeta de la tarea. |
 
 Las claves que Root no conoce se ignoran al parsear. Por eso una tarea con secciones de etapas futuras carga igual.
 
@@ -433,6 +440,7 @@ Los tipos se documentan con su JSON Schema en `## Esquemas`. La fuente es `src/t
 | `politica` | `route` | construido |
 | `usomargenes` | `observe::uso` | construido |
 | `replay` | `aprende` | construido |
+| `validez` | `oracle::validez` | construido (Tarea 12b) |
 
 Enums: `Rol`, `Proveedor` (`anthropic`, `deepseek`), `Via` (`cupo`, `api`, `oraculo`, `nube`), `Dimension`, `Estado` (`verde`, `rojo`, `sin_veredicto`), `Cumplimiento`, `Decision`, `Fuente`, `TipoEvento`. Sus valores aparecen en los esquemas.
 
@@ -447,9 +455,9 @@ Funciones que usa el código:
 | `observe::claude::leer_sesion_claude(json, corrida)` | construido | Lee la salida de `claude -p`. |
 | `observe::resumir(corrida)` | construido | Devuelve `Resumen`. |
 | `oracle::evaluar(repo, tarea, opciones)` | construido | `oracle::evaluar_por_nombre(nombre, repo)` lee la tarea desde `ROOT_HOME`. |
-| `oracle::calibrar(tarea, dim, n, semilla)` | pendiente (Tarea 12) | |
-| `oracle::informar(veredicto, tarea, reglas)` | pendiente (Tarea 13b) | |
-| `oracle::validar(casos)` | pendiente (Tarea 12b) | |
+| `oracle::calibra::calibrar_tarea(home, nombre, dimension, n, semilla, repo, evaluador)` | construido (Tarea 12) | Calibra y agrega la fila a `calibracion.json`. `calibrar_con` recibe la tarea y el repo ya resueltos. |
+| `oracle::informe::informar(veredicto, tarea, reglas, redactor)` | construido (Tarea 13b) | El redactor es opcional. `informar_con` recibe además las rúbricas. |
+| `oracle::validez::validar(casos)` | construido (Tarea 12b) | `validar_con` recibe el evaluador. `preparar_ciego(casos, fuentes, semilla)` arma los paquetes a ciegas. |
 | `track::agregar(fila)` | construido | |
 | `track::filas(filtro)` | construido | |
 | `track::comparar(a, b, tarea)` | construido | Rechaza hashes de rúbrica distintos. |
@@ -457,6 +465,32 @@ Funciones que usa el código:
 | `aprende::recalcular(filas, eventos)` | construido | Función pura. |
 | `proveedores::llamar(eleccion, prompt, corrida)` | construido | Registra el evento. |
 | `goal::verificar_goal(repo)` | construido | |
+
+## Validez
+
+`r00t oraculo validar --casos <dir>` mide si el juicio de Root coincide con resultados que una fuente externa conoce. Escribe `<dir>/validez.json`, tipo `validez`, y resume cada métrica en texto. Con `--json` imprime el mismo objeto.
+
+**Carpeta de casos.** Todo archivo es opcional. Sin archivo, su métrica queda sin medir: `valor` vale `null` y `motivo` dice por qué. Nunca vale 0 ni 1.
+
+- `orden.toml`: `[[par]]` con `tarea`, `mejor`, `peor` y `fuente` (de dónde sale el orden). `mejor` y `peor` son rutas de repo relativas a `<dir>`.
+- `defectos.toml`: `[[defecto]]` con `tarea`, `repo`, `archivo`, `linea`, `fuente` (por ejemplo "revisión de Opus F1") y `detalle`. `repo` es relativo a `<dir>`.
+- `ciego/`: los paquetes a ciegas que arma `--preparar-ciego`. `ciego/clave.toml` es la clave que lee Root: `[[paquete]]` con `id`, `tarea`, `origen` y `repo`. El paquete y su formulario no nombran el origen.
+
+**Métricas.**
+
+- *Exactitud de orden*: fracción de pares donde Root pone `mejor` por encima de `peor`. Root compara primero la decisión (listo, no listo, bloqueado). A igual decisión compara el `global` si los dos lo tienen; si no, la completitud. Un empate o un par sin veredicto cuenta como fallo. No tiene umbral.
+- *Recall de defectos*: fracción de defectos con un hallazgo del veredicto en el mismo `archivo` y a ±3 líneas de `linea`. Umbral 0,8 (decisión 12).
+- *Acuerdo con el usuario*: `acuerdo_decision` cuenta los paquetes cuya decisión de Root coincide con la del formulario; cumple con 5 de 6 (decisión 13). `kappa_dimension` es el kappa de Cohen con pesos cuadráticos sobre los niveles 0 a 3, sumando los ítems de cada dimensión; cumple con 0,6 o más. `kappa_item` lo mide por ítem, sin umbral: un kappa bajo marca un ancla ambigua. `spearman` correlaciona el `orden` del formulario (1 es el mejor) con el orden de Root.
+
+Un par, defecto o paquete que no tiene dato del usuario o de Root queda fuera de su métrica, y `avisos` lo cuenta. Un error del evaluador aborta la medición y no escribe `validez.json`.
+
+**Paquetes a ciegas.** `r00t oraculo validar --preparar-ciego --fuentes <manifiesto.toml> --casos <dir> [--semilla N]` lee el manifiesto. Su `[[fuente]]` tiene `tarea`, `origen` y `repo` (ruta absoluta o relativa al manifiesto). Por cada fuente arma `<dir>/ciego/<id>/` con:
+
+- `repo/`: copia del repo sin los nombres `AGENTS.md`, `CLAUDE.md`, `sdlc.toml`, `.claude`, `.git`, `logs` y `target` en cualquier nivel; sin archivos `*.log` ni nombres que empiecen con `.ecc`; sin enlaces simbólicos. Estos nombres son los rastros de ECC, de SDLC, de git, de logs y de build.
+- `formulario.toml`: `decision` (`listo`, `no_listo` o `bloqueado`), `orden` (posición entre los del lote; 1 es el mejor) y un `[[item]]` por ítem de rúbrica, con `nivel` de 0 a 3. Las anclas van como comentario. Sin rúbricas embebidas, el formulario lleva solo la decisión y el orden, y el comando avisa en stderr.
+- El `id` tiene 8 caracteres hexadecimales y sale de un PRNG con la semilla (`--semilla`, o el reloj). Ningún `id` contiene el origen ni la tarea. Si `<dir>/ciego/` ya tiene contenido, el comando sale con `2`.
+
+Las rúbricas del formulario salen de `rubrica::cargar_embebidas()`, las mismas que usa Root.
 
 ## Esquemas
 
@@ -495,6 +529,140 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
 }
 ```
 
+### calibracion
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Calibraciones",
+  "description": "Contenido de `calibracion.json`. Sin archivo, no hay filas: nada está calibrado.",
+  "type": "object",
+  "properties": {
+    "filas": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Fila"
+      }
+    },
+    "v": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "v"
+  ],
+  "$defs": {
+    "Dimension": {
+      "type": "string",
+      "enum": [
+        "funciona",
+        "seguridad",
+        "eficiencia",
+        "estructura",
+        "arquitectura",
+        "diseno",
+        "completitud",
+        "entrega",
+        "pruebas"
+      ]
+    },
+    "Fila": {
+      "description": "Una medición de una dimensión de una tarea, con su muestra.",
+      "type": "object",
+      "properties": {
+        "defectos": {
+          "description": "Defectos aplicados y medidos. La sensibilidad sale de ellos.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "dimension": {
+          "$ref": "#/$defs/Dimension"
+        },
+        "especificidad": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "exactitud_balanceada": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "items": {
+          "description": "Exactitud balanceada de cada ítem de rúbrica, por ejemplo `seguridad.secretos`.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "format": "float"
+          },
+          "default": {}
+        },
+        "limpios": {
+          "description": "Copias sin alterar medidas. La especificidad sale de ellas.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "n": {
+          "description": "Casos medidos: los defectos aplicados más los limpios. No cuenta los `no_aplicable`.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "no_aplicable": {
+          "description": "Casos que no se pudieron aplicar al repo, por ejemplo sin Dockerfile. No entran a las métricas.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "semilla": {
+          "description": "Semilla de la muestra: con la misma semilla, la medición se repite igual.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "sensibilidad": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "tarea": {
+          "type": "string"
+        },
+        "ts": {
+          "description": "Epoch en segundos de la medición. Gana la fila más reciente.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "tarea",
+        "dimension",
+        "n",
+        "semilla",
+        "ts"
+      ]
+    }
+  }
+}
+```
+
 ### config
 
 ```json
@@ -525,6 +693,21 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "minutos_max": 120.0
       }
     },
+    "decision": {
+      "description": "Sección `[decision]`: reglas deterministas del informe (Tarea 13b).",
+      "$ref": "#/$defs/ReglasDecision",
+      "default": {
+        "completitud_minima": 0.9,
+        "minimo": {}
+      }
+    },
+    "jueces": {
+      "description": "Sección `[jueces]`: modelo de los jueces que no pasan por `route`.",
+      "$ref": "#/$defs/Jueces",
+      "default": {
+        "config_modelo": "claude-sonnet-5-5"
+      }
+    },
     "modelos": {
       "$ref": "#/$defs/Modelos",
       "default": {
@@ -539,7 +722,36 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "additionalProperties": {
         "$ref": "#/$defs/Precio"
       },
-      "default": {}
+      "default": {
+        "claude-haiku-5-5": {
+          "umbral_entrada": 100000,
+          "usd_entrada": 0.1,
+          "usd_entrada_alto": 0.5,
+          "usd_salida": 0.5,
+          "usd_salida_alto": 2.5
+        },
+        "claude-sonnet-5-5": {
+          "umbral_entrada": null,
+          "usd_entrada": 2.0,
+          "usd_entrada_alto": null,
+          "usd_salida": 10.0,
+          "usd_salida_alto": null
+        },
+        "deepseek-flash": {
+          "umbral_entrada": null,
+          "usd_entrada": 0.14,
+          "usd_entrada_alto": null,
+          "usd_salida": 0.28,
+          "usd_salida_alto": null
+        },
+        "deepseek-v4-pro": {
+          "umbral_entrada": null,
+          "usd_entrada": 1.74,
+          "usd_entrada_alto": null,
+          "usd_salida": 3.48,
+          "usd_salida_alto": null
+        }
+      }
     },
     "proveedores": {
       "$ref": "#/$defs/ConfigProveedores",
@@ -547,6 +759,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "anthropic_url": "https://api.anthropic.com",
         "deepseek_url": "https://api.deepseek.com",
         "espera_base_ms": 500,
+        "timeout_juez_s": 1200,
         "timeout_s": 120
       }
     },
@@ -576,16 +789,24 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           }
         },
         "delega": {
-          "modelo": "deepseek-chat",
+          "modelo": "deepseek-flash",
           "proveedor": "deepseek"
         },
         "juzga": {
-          "modelo": "deepseek-reasoner",
-          "proveedor": "deepseek"
+          "modelo": "deepseek-flash",
+          "proveedor": "deepseek",
+          "respaldo": {
+            "modelo": "claude-haiku-5-5",
+            "proveedor": "anthropic"
+          }
         },
         "verifica": {
-          "modelo": "deepseek-reasoner",
-          "proveedor": "deepseek"
+          "modelo": "deepseek-flash",
+          "proveedor": "deepseek",
+          "respaldo": {
+            "modelo": "claude-haiku-5-5",
+            "proveedor": "anthropic"
+          }
         }
       }
     },
@@ -664,12 +885,29 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": 500,
           "minimum": 0
         },
+        "timeout_juez_s": {
+          "description": "Tiempo máximo de cada intento de los roles Verifica y Juzga, en segundos. Un juez puede\nescribir hasta `MAX_TOKENS_JUEZ` tokens.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 1200,
+          "minimum": 0
+        },
         "timeout_s": {
           "description": "Tiempo máximo de cada intento HTTP, en segundos.",
           "type": "integer",
           "format": "uint64",
           "default": 120,
           "minimum": 0
+        }
+      }
+    },
+    "Jueces": {
+      "description": "Sección `[jueces]`: el modelo del juez de la configuración de Cargo (decisión 47). Vía API.\nEl proveedor sale del nombre: `claude-*` es Anthropic y `deepseek-*` es DeepSeek.",
+      "type": "object",
+      "properties": {
+        "config_modelo": {
+          "type": "string",
+          "default": "claude-sonnet-5-5"
         }
       }
     },
@@ -681,6 +919,17 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         },
         "proveedor": {
           "$ref": "#/$defs/Proveedor"
+        },
+        "respaldo": {
+          "description": "Modelo que Route usa si el proveedor principal no está disponible. Solo en Verifica y Juzga.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModeloApi"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -706,19 +955,53 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       }
     },
     "Precio": {
+      "description": "Precio de un modelo, en USD por millón de tokens. Sus dos claves son obligatorias. El tramo alto\n(`umbral_entrada`, `usd_entrada_alto`, `usd_salida_alto`) es opcional, pero va completo o no va.",
       "type": "object",
       "properties": {
+        "umbral_entrada": {
+          "description": "Tokens de entrada por encima de los que el pedido entero cuesta al precio alto.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
         "usd_entrada": {
+          "description": "USD por millón de tokens de entrada.",
           "type": "number",
+          "format": "double"
+        },
+        "usd_entrada_alto": {
+          "description": "USD por millón de tokens de entrada, en el tramo alto.",
+          "type": [
+            "number",
+            "null"
+          ],
           "format": "double",
-          "default": 0.0
+          "default": null
         },
         "usd_salida": {
+          "description": "USD por millón de tokens de salida.",
           "type": "number",
+          "format": "double"
+        },
+        "usd_salida_alto": {
+          "description": "USD por millón de tokens de salida, en el tramo alto.",
+          "type": [
+            "number",
+            "null"
+          ],
           "format": "double",
-          "default": 0.0
+          "default": null
         }
-      }
+      },
+      "additionalProperties": false,
+      "required": [
+        "usd_entrada",
+        "usd_salida"
+      ]
     },
     "Proveedor": {
       "type": "string",
@@ -745,6 +1028,35 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "description": "Dirección del índice, con `https` y host.",
           "type": "string",
           "default": ""
+        },
+        "usuario_env": {
+          "description": "Variable de entorno de Root con el usuario para pip. Sin ella, el usuario es `__token__`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "ReglasDecision": {
+      "description": "Sección `[decision]`: las reglas que deciden `Listo`, `NoListo` o `Bloqueado` (Tarea 13b). Todo valor\nva de 0 a 1 y es finito; si no, la carga falla con código 2.",
+      "type": "object",
+      "properties": {
+        "completitud_minima": {
+          "description": "Completitud mínima para `Listo`.",
+          "type": "number",
+          "format": "double",
+          "default": 0.9
+        },
+        "minimo": {
+          "description": "Mínimo por dimensión, con la clave de la dimensión (`seguridad`, `diseno`...). Solo rige\nsobre dimensiones calibradas. Vacío por defecto.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "format": "double"
+          },
+          "default": {}
         }
       }
     },
@@ -776,22 +1088,30 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "delega": {
           "$ref": "#/$defs/ModeloApi",
           "default": {
-            "modelo": "deepseek-chat",
+            "modelo": "deepseek-flash",
             "proveedor": "deepseek"
           }
         },
         "juzga": {
           "$ref": "#/$defs/ModeloApi",
           "default": {
-            "modelo": "deepseek-reasoner",
-            "proveedor": "deepseek"
+            "modelo": "deepseek-flash",
+            "proveedor": "deepseek",
+            "respaldo": {
+              "modelo": "claude-haiku-5-5",
+              "proveedor": "anthropic"
+            }
           }
         },
         "verifica": {
           "$ref": "#/$defs/ModeloApi",
           "default": {
-            "modelo": "deepseek-reasoner",
-            "proveedor": "deepseek"
+            "modelo": "deepseek-flash",
+            "proveedor": "deepseek",
+            "respaldo": {
+              "modelo": "claude-haiku-5-5",
+              "proveedor": "anthropic"
+            }
           }
         }
       }
@@ -888,6 +1208,18 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "razonamiento": {
       "type": "boolean"
     },
+    "rol": {
+      "description": "Rol del pedido. `route` lo llena siempre; un juez armado a mano lo pone en `Juzga`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Rol"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
     "via": {
       "$ref": "#/$defs/Via"
     }
@@ -903,6 +1235,17 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "enum": [
         "anthropic",
         "deepseek"
+      ]
+    },
+    "Rol": {
+      "type": "string",
+      "enum": [
+        "planifica",
+        "organiza",
+        "construye",
+        "verifica",
+        "juzga",
+        "delega"
       ]
     },
     "Via": {
@@ -1080,14 +1423,23 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
   ],
   "$defs": {
     "TipoEvento": {
-      "type": "string",
-      "enum": [
-        "llamada",
-        "sesion",
-        "humano",
-        "plan_aprobado",
-        "gate",
-        "oraculo_leido"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "llamada",
+            "sesion",
+            "humano",
+            "plan_aprobado",
+            "gate",
+            "oraculo_leido"
+          ]
+        },
+        {
+          "description": "Monto que una llamada a la API reserva antes de enviar el pedido. Lo cierra el `Llamada`.",
+          "type": "string",
+          "const": "reserva"
+        }
       ]
     },
     "Via": {
@@ -1219,6 +1571,75 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "texto",
         "refs"
       ]
+    },
+    "Confianza": {
+      "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos\nsalen del `Veredicto`; `ambiguedades` queda vacío porque el veredicto no trae la ficha.",
+      "type": "object",
+      "properties": {
+        "ambiguedades": {
+          "description": "Ambigüedades abiertas de la ficha. Vacío: el veredicto no las trae.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "avisos": {
+          "description": "Avisos del veredicto, por ejemplo una corrida de Colab con red.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "inestables": {
+          "description": "Tests inestables con su tasa. Claves `contrato:<id>` u `oculto:<id>`, como `Veredicto.tasas`.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/TasaTest"
+          },
+          "default": {}
+        },
+        "repeticiones": {
+          "description": "Repeticiones del oculto que corrieron.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "requisitos_pendientes": {
+          "description": "Requisitos en estado `Pendiente`: un test falla por el entorno.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "sin_calibrar": {
+          "description": "Dimensiones con veredicto que no están calibradas.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Dimension"
+          }
+        },
+        "sin_veredicto": {
+          "description": "Dimensiones sin veredicto, con su motivo.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ParteSinVeredicto"
+          }
+        },
+        "tests_pendientes": {
+          "description": "Tests de `[[entorno]]` con su motivo.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Pendiente"
+          }
+        }
+      }
     },
     "Conteo": {
       "type": "object",
@@ -1449,6 +1870,20 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
             "type": "string"
           }
         },
+        "confianza": {
+          "description": "Datos para decidir. Un informe viejo lee `Confianza` vacía.",
+          "$ref": "#/$defs/Confianza",
+          "default": {
+            "ambiguedades": [],
+            "avisos": [],
+            "inestables": {},
+            "repeticiones": 0,
+            "requisitos_pendientes": [],
+            "sin_calibrar": [],
+            "sin_veredicto": [],
+            "tests_pendientes": []
+          }
+        },
         "decision": {
           "$ref": "#/$defs/Decision"
         },
@@ -1518,6 +1953,22 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "fuente"
       ]
     },
+    "ParteSinVeredicto": {
+      "description": "Una dimensión sin veredicto y el motivo.",
+      "type": "object",
+      "properties": {
+        "dimension": {
+          "$ref": "#/$defs/Dimension"
+        },
+        "motivo": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "dimension",
+        "motivo"
+      ]
+    },
     "Pendiente": {
       "description": "Test que falla por el entorno y no se cobra al producto. Figura en el informe con su motivo.",
       "type": "object",
@@ -1566,6 +2017,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "items": {
             "$ref": "#/$defs/NivelItem"
           }
+        },
+        "sin_veredicto": {
+          "description": "Por qué la dimensión no tiene veredicto. Con `Some`, `valor` vale 0 y ningún lector lo usa.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "valor": {
           "type": "number",
@@ -1743,12 +2202,28 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "repo": {
           "type": "string"
         },
+        "requisitos": {
+          "description": "Estado de cada requisito de la tarea. Un veredicto viejo lee vacío.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EstadoRequisito"
+          }
+        },
         "rubricas": {
           "description": "Hashes de rúbrica, por ejemplo \"diseno@<hash>\".",
           "type": "array",
           "default": [],
           "items": {
             "type": "string"
+          }
+        },
+        "sin_calibrar": {
+          "description": "Dimensiones con veredicto que todavía no están calibradas. Un veredicto viejo lee vacío.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Dimension"
           }
         },
         "tarea": {
@@ -1915,6 +2390,20 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "type": "string"
       }
     },
+    "confianza": {
+      "description": "Datos para decidir. Un informe viejo lee `Confianza` vacía.",
+      "$ref": "#/$defs/Confianza",
+      "default": {
+        "ambiguedades": [],
+        "avisos": [],
+        "inestables": {},
+        "repeticiones": 0,
+        "requisitos_pendientes": [],
+        "sin_calibrar": [],
+        "sin_veredicto": [],
+        "tests_pendientes": []
+      }
+    },
     "decision": {
       "$ref": "#/$defs/Decision"
     },
@@ -1980,6 +2469,75 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "refs"
       ]
     },
+    "Confianza": {
+      "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos\nsalen del `Veredicto`; `ambiguedades` queda vacío porque el veredicto no trae la ficha.",
+      "type": "object",
+      "properties": {
+        "ambiguedades": {
+          "description": "Ambigüedades abiertas de la ficha. Vacío: el veredicto no las trae.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "avisos": {
+          "description": "Avisos del veredicto, por ejemplo una corrida de Colab con red.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "inestables": {
+          "description": "Tests inestables con su tasa. Claves `contrato:<id>` u `oculto:<id>`, como `Veredicto.tasas`.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/TasaTest"
+          },
+          "default": {}
+        },
+        "repeticiones": {
+          "description": "Repeticiones del oculto que corrieron.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "requisitos_pendientes": {
+          "description": "Requisitos en estado `Pendiente`: un test falla por el entorno.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "sin_calibrar": {
+          "description": "Dimensiones con veredicto que no están calibradas.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Dimension"
+          }
+        },
+        "sin_veredicto": {
+          "description": "Dimensiones sin veredicto, con su motivo.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ParteSinVeredicto"
+          }
+        },
+        "tests_pendientes": {
+          "description": "Tests de `[[entorno]]` con su motivo.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Pendiente"
+          }
+        }
+      }
+    },
     "Cumplimiento": {
       "type": "string",
       "enum": [
@@ -1996,6 +2554,20 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "listo",
         "no_listo",
         "bloqueado"
+      ]
+    },
+    "Dimension": {
+      "type": "string",
+      "enum": [
+        "funciona",
+        "seguridad",
+        "eficiencia",
+        "estructura",
+        "arquitectura",
+        "diseno",
+        "completitud",
+        "entrega",
+        "pruebas"
       ]
     },
     "EstadoRequisito": {
@@ -2041,6 +2613,72 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "peso",
         "cumplimiento",
         "evidencia"
+      ]
+    },
+    "ParteSinVeredicto": {
+      "description": "Una dimensión sin veredicto y el motivo.",
+      "type": "object",
+      "properties": {
+        "dimension": {
+          "$ref": "#/$defs/Dimension"
+        },
+        "motivo": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "dimension",
+        "motivo"
+      ]
+    },
+    "Pendiente": {
+      "description": "Test que falla por el entorno y no se cobra al producto. Figura en el informe con su motivo.",
+      "type": "object",
+      "properties": {
+        "colab": {
+          "description": "Resultado importado de Colab: \"pasa\", \"falla\" u \"omite\". Ausente si no se importó.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "motivo": {
+          "type": "string"
+        },
+        "test": {
+          "description": "Id del test con forma `archivo::nombre`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "test",
+        "motivo"
+      ]
+    },
+    "TasaTest": {
+      "description": "Tasa de aprobación de un test inestable, con la cota inferior de Wilson al 90%.",
+      "type": "object",
+      "properties": {
+        "pasa": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "wilson_inf": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "pasa",
+        "total",
+        "wilson_inf"
       ]
     }
   }
@@ -2690,6 +3328,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "$ref": "#/$defs/NivelItem"
       }
     },
+    "sin_veredicto": {
+      "description": "Por qué la dimensión no tiene veredicto. Con `Some`, `valor` vale 0 y ningún lector lo usa.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
     "valor": {
       "type": "number",
       "format": "float"
@@ -2922,7 +3568,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Revision",
-  "description": "Resultado de revisar un spec. `ambiguedades` queda vacía hasta que corra el juez.\n`juez` es `\"no corrido\"`, `\"ok\"` (el JSON parseó) o `\"sin_veredicto: <causa>\"`.",
+  "description": "Resultado de revisar un spec. `ambiguedades` queda vacía hasta que corra el juez.\n`juez` es `\"ok\"` (el JSON parseó) o `\"sin_veredicto: <causa>\"`. Sin juez, la causa es `juez no corrido`.",
   "type": "object",
   "properties": {
     "ambiguedades": {
@@ -3204,6 +3850,179 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
 }
 ```
 
+### validez
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Validez",
+  "description": "Resultado de `validar`. Cada métrica lleva su `valor`, su `cumple` y, si no se mide, su `motivo`.",
+  "type": "object",
+  "properties": {
+    "acuerdo_decision": {
+      "description": "Paquetes con la misma `Decision` que el usuario. `cumple`: 5 de 6 (decisión 13).",
+      "$ref": "#/$defs/Metrica"
+    },
+    "avisos": {
+      "description": "Casos que quedaron fuera o datos que faltan, con su motivo.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "exactitud_orden": {
+      "description": "Fracción de pares de `orden.toml` que Root ordena como el resultado medido. Sin umbral.",
+      "$ref": "#/$defs/Metrica"
+    },
+    "kappa_dimension": {
+      "description": "Una entrada por dimensión, en el orden de `TODAS_LAS_DIMENSIONES`. `cumple`: kappa >= 0,6.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Kappa"
+      }
+    },
+    "kappa_item": {
+      "description": "Una entrada por ítem de los formularios. Sin umbral: un kappa bajo marca un ancla ambigua.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Kappa"
+      }
+    },
+    "recall": {
+      "description": "Fracción de defectos reales que Root encuentra con `archivo` y `linea` a ±3. Umbral 0,8.",
+      "$ref": "#/$defs/Metrica"
+    },
+    "spearman": {
+      "description": "Spearman entre el `orden` de los formularios y el orden de Root. Sin umbral.",
+      "$ref": "#/$defs/Metrica"
+    },
+    "v": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "v",
+    "exactitud_orden",
+    "recall",
+    "acuerdo_decision",
+    "kappa_dimension",
+    "kappa_item",
+    "spearman",
+    "avisos"
+  ],
+  "$defs": {
+    "Kappa": {
+      "description": "Kappa de Cohen con pesos cuadráticos. `clave` es una dimensión (`seguridad`) o un ítem (`seguridad.secretos`).",
+      "type": "object",
+      "properties": {
+        "casos": {
+          "description": "Pares de niveles (usuario, Root) que entraron al kappa.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "clave": {
+          "type": "string"
+        },
+        "cumple": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "motivo": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "umbral": {
+          "description": "Umbral de la dimensión (0,6). `None` en los ítems, que solo son diagnóstico de anclas.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "valor": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        }
+      },
+      "required": [
+        "clave",
+        "casos"
+      ]
+    },
+    "Metrica": {
+      "description": "Una medida de validez. Sin casos válidos, `valor` es `None` y `motivo` dice por qué.",
+      "type": "object",
+      "properties": {
+        "aciertos": {
+          "description": "Aciertos entre los casos. Solo en las fracciones; `None` en las demás.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "casos": {
+          "description": "Casos válidos que entraron a la medida.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "cumple": {
+          "description": "`true` si `valor` llega al umbral. `None` sin umbral o sin medir.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "motivo": {
+          "description": "Por qué la métrica no se mide. Solo con `valor` en `None`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "umbral": {
+          "description": "Umbral de la métrica. `None` si el plan no fija uno.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "valor": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        }
+      },
+      "required": [
+        "casos"
+      ]
+    }
+  }
+}
+```
+
 ### veredicto
 
 ```json
@@ -3300,12 +4119,28 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "repo": {
       "type": "string"
     },
+    "requisitos": {
+      "description": "Estado de cada requisito de la tarea. Un veredicto viejo lee vacío.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/EstadoRequisito"
+      }
+    },
     "rubricas": {
       "description": "Hashes de rúbrica, por ejemplo \"diseno@<hash>\".",
       "type": "array",
       "default": [],
       "items": {
         "type": "string"
+      }
+    },
+    "sin_calibrar": {
+      "description": "Dimensiones con veredicto que todavía no están calibradas. Un veredicto viejo lee vacío.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Dimension"
       }
     },
     "tarea": {
@@ -3363,6 +4198,75 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "texto",
         "refs"
       ]
+    },
+    "Confianza": {
+      "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos\nsalen del `Veredicto`; `ambiguedades` queda vacío porque el veredicto no trae la ficha.",
+      "type": "object",
+      "properties": {
+        "ambiguedades": {
+          "description": "Ambigüedades abiertas de la ficha. Vacío: el veredicto no las trae.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "avisos": {
+          "description": "Avisos del veredicto, por ejemplo una corrida de Colab con red.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "inestables": {
+          "description": "Tests inestables con su tasa. Claves `contrato:<id>` u `oculto:<id>`, como `Veredicto.tasas`.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/TasaTest"
+          },
+          "default": {}
+        },
+        "repeticiones": {
+          "description": "Repeticiones del oculto que corrieron.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "requisitos_pendientes": {
+          "description": "Requisitos en estado `Pendiente`: un test falla por el entorno.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "sin_calibrar": {
+          "description": "Dimensiones con veredicto que no están calibradas.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Dimension"
+          }
+        },
+        "sin_veredicto": {
+          "description": "Dimensiones sin veredicto, con su motivo.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ParteSinVeredicto"
+          }
+        },
+        "tests_pendientes": {
+          "description": "Tests de `[[entorno]]` con su motivo.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Pendiente"
+          }
+        }
+      }
     },
     "Conteo": {
       "type": "object",
@@ -3570,6 +4474,20 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
             "type": "string"
           }
         },
+        "confianza": {
+          "description": "Datos para decidir. Un informe viejo lee `Confianza` vacía.",
+          "$ref": "#/$defs/Confianza",
+          "default": {
+            "ambiguedades": [],
+            "avisos": [],
+            "inestables": {},
+            "repeticiones": 0,
+            "requisitos_pendientes": [],
+            "sin_calibrar": [],
+            "sin_veredicto": [],
+            "tests_pendientes": []
+          }
+        },
         "decision": {
           "$ref": "#/$defs/Decision"
         },
@@ -3639,6 +4557,22 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "fuente"
       ]
     },
+    "ParteSinVeredicto": {
+      "description": "Una dimensión sin veredicto y el motivo.",
+      "type": "object",
+      "properties": {
+        "dimension": {
+          "$ref": "#/$defs/Dimension"
+        },
+        "motivo": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "dimension",
+        "motivo"
+      ]
+    },
     "Pendiente": {
       "description": "Test que falla por el entorno y no se cobra al producto. Figura en el informe con su motivo.",
       "type": "object",
@@ -3687,6 +4621,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "items": {
             "$ref": "#/$defs/NivelItem"
           }
+        },
+        "sin_veredicto": {
+          "description": "Por qué la dimensión no tiene veredicto. Con `Some`, `valor` vale 0 y ningún lector lo usa.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "valor": {
           "type": "number",

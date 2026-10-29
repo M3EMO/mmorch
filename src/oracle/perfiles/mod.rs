@@ -30,6 +30,7 @@ impl ResultadoSonda {
             calibrada: false,
             exactitud_balanceada: None,
             items: Vec::new(),
+            sin_veredicto: None,
         })
     }
 }
@@ -109,11 +110,15 @@ fn penal(h: &Hallazgo, reqs: &[Requisito]) -> f32 {
 }
 
 /// Junta las partes de una dimensión. Si una parte no tiene veredicto, el resultado tampoco.
+/// Sin partes no hay nada que combinar: `None` (B13), nunca un 1,0 sin prueba.
 pub fn combinar(
     dimension: Dimension,
     partes: Vec<ResultadoSonda>,
     reqs: &[Requisito],
-) -> ResultadoSonda {
+) -> Option<ResultadoSonda> {
+    if partes.is_empty() {
+        return None;
+    }
     let incompleta = partes.iter().any(|p| p.valor.is_none());
     let motivos: Vec<String> = partes
         .iter()
@@ -123,12 +128,12 @@ pub fn combinar(
     let hallazgos: Vec<Hallazgo> = partes.into_iter().flat_map(|p| p.hallazgos).collect();
     let valor = (!incompleta).then(|| puntuar_hallazgos(&hallazgos, reqs));
     let motivo = (incompleta && !motivos.is_empty()).then(|| motivos.join("; "));
-    ResultadoSonda {
+    Some(ResultadoSonda {
         dimension,
         valor,
         motivo,
         hallazgos,
-    }
+    })
 }
 
 /// Sondas del perfil del lenguaje de la tarea. Hoy solo existe el perfil `rust`.
@@ -269,10 +274,16 @@ mod tests {
             motivo: Some("falta cargo audit".into()),
             hallazgos: Vec::new(),
         };
-        let r = combinar(Dimension::Seguridad, vec![con_hallazgo, sin_veredicto], &[]);
+        let r = combinar(Dimension::Seguridad, vec![con_hallazgo, sin_veredicto], &[])
+            .expect("hay partes");
         assert_eq!(r.valor, None);
         assert_eq!(r.motivo.as_deref(), Some("falta cargo audit"));
         assert_eq!(r.hallazgos.len(), 1, "conserva los hallazgos");
+    }
+
+    #[test]
+    fn sonda_combinar_sin_partes_no_da_puntaje() {
+        assert!(combinar(Dimension::Seguridad, Vec::new(), &[]).is_none());
     }
 
     #[test]
@@ -283,7 +294,7 @@ mod tests {
             motivo: None,
             hallazgos: vec![hallazgo_de(sev, "src/x.rs", &format!("c{sev}"), &[])],
         };
-        let r = combinar(Dimension::Seguridad, vec![parte(2), parte(2)], &[]);
+        let r = combinar(Dimension::Seguridad, vec![parte(2), parte(2)], &[]).expect("hay partes");
         assert_eq!(r.motivo, None);
         assert_eq!(r.hallazgos.len(), 2);
         let esperado = puntuar_hallazgos(&r.hallazgos, &[]);

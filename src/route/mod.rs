@@ -7,7 +7,8 @@ pub use politica::{Candidato, Politica};
 
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
-use crate::config::{Config, ModeloApi};
+use crate::config::{Config, ModeloApi, Precio};
+use crate::oracle::ErrorOraculo;
 use crate::tipos::{Eleccion, Pedido, Proveedor, Rol, SinPresupuesto, Uso, Via};
 
 /// Inicio del próximo mes calendario después de `ahora`, en epoch segundos.
@@ -81,6 +82,7 @@ pub fn elegir(
             modelo: None,
             razonamiento: false,
             motivo: "checkeable: el oráculo decide sin llamar a ningún modelo".into(),
+            rol: Some(p.rol),
         });
     }
     // Invariante 2: Verifica y Juzga siempre razonan, con cualquier modelo y cualquier presupuesto.
@@ -88,6 +90,11 @@ pub fn elegir(
     let api_ok = uso.api_mes_usd < cfg.balance.api.tope_usd;
     let cupo = estado_cupo(uso, cfg, ahora);
     let mut elegida = opcion_base(p, pol, cfg);
+    let cupo = if elegida.via == Via::Cupo {
+        cupo_para_pedido(cupo, p, cfg, &elegida.modelo, ahora)
+    } else {
+        cupo
+    };
 
     // Preferencia: con el cupo sobre `prefiere_api_sobre`, pasa a la API si hay margen y equivalente.
     let preferir_api = elegida.via == Via::Cupo
@@ -134,7 +141,66 @@ pub fn elegir(
         modelo: Some(elegida.modelo),
         razonamiento,
         motivo: elegida.motivo,
+        rol: Some(p.rol),
     })
+}
+
+/// Modelos de API que admiten razonamiento. Verifica y Juzga solo pueden usar estos (lista cerrada).
+const MODELOS_CON_RAZONAMIENTO: &[&str] = &[
+    "deepseek-flash",
+    "deepseek-v4-pro",
+    "claude-haiku-5-5",
+    "claude-sonnet-5-5",
+    "claude-opus-5-5",
+];
+
+/// Cambia una elección de Verifica o Juzga por el respaldo de su rol si el proveedor principal no
+/// está disponible: sin clave o con el breaker abierto. Con el proveedor disponible, o sin respaldo,
+/// devuelve la elección igual. El respaldo lleva razonamiento y dice por qué entró.
+pub fn con_respaldo(e: Eleccion, cfg: &Config, disponible: &dyn Fn(Proveedor) -> bool) -> Eleccion {
+    let (Some(rol), Some(principal)) = (e.rol, e.proveedor) else {
+        return e;
+    };
+    if e.via != Via::Api || !matches!(rol, Rol::Verifica | Rol::Juzga) || disponible(principal) {
+        return e;
+    }
+    let ruteo = match rol {
+        Rol::Verifica => &cfg.ruteo.verifica,
+        _ => &cfg.ruteo.juzga,
+    };
+    let Some(respaldo) = ruteo.respaldo.as_deref() else {
+        return e;
+    };
+    Eleccion {
+        via: Via::Api,
+        proveedor: Some(respaldo.proveedor),
+        modelo: Some(respaldo.modelo.clone()),
+        razonamiento: true,
+        motivo: format!(
+            "respaldo de [ruteo.{}]: {} no está disponible (sin clave o con el breaker abierto); usa {}",
+            politica::nombre_rol(rol),
+            comando::etiqueta_proveedor(principal),
+            respaldo.modelo
+        ),
+        rol: Some(rol),
+    }
+}
+
+/// Un modelo de API que Verifica o Juzga usan debe admitir razonamiento. Fuera de la lista cerrada,
+/// es error de elección (código 2). Las demás elecciones pasan.
+pub fn exigir_modelo_que_razona(e: &Eleccion) -> Result<(), ErrorOraculo> {
+    if e.via != Via::Api || !matches!(e.rol, Some(Rol::Verifica | Rol::Juzga)) {
+        return Ok(());
+    }
+    let modelo = e.modelo.as_deref().unwrap_or_default();
+    if MODELOS_CON_RAZONAMIENTO.contains(&modelo) {
+        return Ok(());
+    }
+    Err(ErrorOraculo::Eleccion(format!(
+        "el modelo {modelo:?} no admite razonamiento para {}; los modelos válidos son {}",
+        e.rol.map_or("-", politica::nombre_rol),
+        MODELOS_CON_RAZONAMIENTO.join(", ")
+    )))
 }
 
 /// Modelo base del rol. Solo `Delega`, `Verifica` y `Juzga` cambian con la política aprendida.
@@ -228,6 +294,31 @@ fn estado_cupo(uso: &Uso, cfg: &Config, ahora: f64) -> Cupo {
         tope,
         lleno: !vencido && fin.is_some() && usd >= tope,
         fin,
+    }
+}
+
+/// Costo en USD de un pedido de `tokens` de entrada y `tokens` de salida, al precio dado. Con la
+/// entrada por encima del umbral del tramo alto, cuenta al precio alto.
+fn costo_de_tokens(precio: &Precio, tokens: u32) -> f64 {
+    let (entrada, salida) = precio.tarifa_para(u64::from(tokens));
+    f64::from(tokens) * (entrada + salida) / 1_000_000.0
+}
+
+/// Cupo para un pedido (M2). Si el gasto del bloque más el costo estimado del pedido pasa el tope,
+/// el cupo cuenta como lleno para ese pedido. Sin precio para el equivalente, no hay estimación.
+fn cupo_para_pedido(cupo: Cupo, p: &Pedido, cfg: &Config, alias: &str, ahora: f64) -> Cupo {
+    let Some(precio) = equivalente(cfg, alias).and_then(|eq| cfg.precios.get(&eq.modelo)) else {
+        return cupo;
+    };
+    if cupo.usd + costo_de_tokens(precio, p.tokens_estimados) <= cupo.tope {
+        return cupo;
+    }
+    // El bloque del pedido empieza ahora si no hay uno vigente: así el reabre queda en el futuro.
+    let dur = f64::from(cfg.balance.cupo.bloque_horas) * 3600.0;
+    Cupo {
+        lleno: true,
+        fin: Some(cupo.fin.filter(|fin| *fin > ahora).unwrap_or(ahora + dur)),
+        ..cupo
     }
 }
 
@@ -538,7 +629,7 @@ mod tests {
             &cfg,
         )
         .expect("hay margen");
-        assert_eq!(e.modelo.as_deref(), Some("deepseek-chat"));
+        assert_eq!(e.modelo.as_deref(), Some("deepseek-flash"));
         assert_eq!(e.proveedor, Some(Proveedor::Deepseek));
     }
 
@@ -600,9 +691,9 @@ mod tests {
         let wilson = crate::track::stats::wilson_inferior(2, 2);
         assert!((wilson - 0.549).abs() < 1e-3, "wilson {wilson}");
         let casos = [
-            (Rol::Delega, "delega:bulk", "deepseek-chat"),
-            (Rol::Verifica, "verifica:bulk", "deepseek-reasoner"),
-            (Rol::Juzga, "juzga:bulk", "deepseek-reasoner"),
+            (Rol::Delega, "delega:bulk", "deepseek-flash"),
+            (Rol::Verifica, "verifica:bulk", "deepseek-flash"),
+            (Rol::Juzga, "juzga:bulk", "deepseek-flash"),
         ];
         for (rol, clave, default) in casos {
             let pol = politica_con(clave, vec![candidato("barato", Via::Api, wilson, 0.0001)]);
@@ -647,7 +738,7 @@ mod tests {
             &cfg,
         )
         .expect("hay margen");
-        assert_eq!(e.modelo.as_deref(), Some("deepseek-chat"));
+        assert_eq!(e.modelo.as_deref(), Some("deepseek-flash"));
     }
 
     #[test]
@@ -750,6 +841,97 @@ mod tests {
         assert_eq!(serde_json::from_str::<Politica>(&texto).expect("lee"), pol);
     }
 
+    /// Estadísticas y propuestas de modelo y de forma: Route no las lee, y la elección no debe cambiar.
+    #[test]
+    fn route_propuestas_no_cambian_la_eleccion_en_ningun_rol() {
+        use crate::route::politica::{
+            Diferencia, Evidencia, EvidenciaForma, EvidenciaModelo, Propuesta, PropuestaForma,
+        };
+        let cfg = Config::default();
+        let u = uso(10.0, bloque_vigente(), 0.0);
+        let mut con = Politica::default();
+        for rol in [
+            Rol::Planifica,
+            Rol::Organiza,
+            Rol::Construye,
+            Rol::Verifica,
+            Rol::Juzga,
+            Rol::Delega,
+        ] {
+            con.estadisticas.insert(
+                Politica::clave(rol, "bulk"),
+                vec![
+                    candidato("haiku", Via::Api, 0.9, 0.001),
+                    candidato("sonnet", Via::Api, 0.5, 0.01),
+                ],
+            );
+        }
+        let modelo = |m: &str, exito: f64| EvidenciaModelo {
+            modelo: m.into(),
+            n: 50,
+            exitos: 40,
+            wilson_inf: exito,
+            usd_medio: 0.01,
+            filas: Vec::new(),
+        };
+        con.propuestas.push(Propuesta {
+            rol: Rol::Organiza,
+            tarea: "memora".into(),
+            modelo_actual: "sonnet".into(),
+            modelo_propuesto: "haiku".into(),
+            evidencia: Evidencia {
+                actual: modelo("sonnet", 0.5),
+                propuesto: modelo("haiku", 0.9),
+            },
+            diferencia_esperada: Diferencia {
+                exito: 0.4,
+                usd: 0.009,
+            },
+        });
+        let forma = |roles: Vec<Rol>| EvidenciaForma {
+            forma: crate::tipos::Forma {
+                roles,
+                verificador: false,
+                config: "ecc".into(),
+            },
+            n: 50,
+            exitos: 40,
+            wilson_inf: 0.7,
+            usd_medio: 0.01,
+            filas: Vec::new(),
+        };
+        con.propuestas_forma.push(PropuestaForma {
+            tarea: "memora".into(),
+            actual: forma(vec![Rol::Planifica, Rol::Organiza, Rol::Construye]),
+            propuesta: forma(vec![Rol::Planifica]),
+            diferencia_esperada: Diferencia {
+                exito: 0.0,
+                usd: 0.005,
+            },
+        });
+        let mut sin = con.clone();
+        sin.propuestas.clear();
+        sin.propuestas_forma.clear();
+        for rol in [
+            Rol::Planifica,
+            Rol::Organiza,
+            Rol::Construye,
+            Rol::Verifica,
+            Rol::Juzga,
+            Rol::Delega,
+        ] {
+            let p = pedido(rol, false);
+            let con_eleccion = elegir_en(&p, &con, &u, &cfg)
+                .ok()
+                .map(|e| (e.via, e.modelo));
+            let sin_eleccion = elegir_en(&p, &sin, &u, &cfg)
+                .ok()
+                .map(|e| (e.via, e.modelo));
+            assert!(con_eleccion.is_some(), "{rol:?} sin elección");
+            assert_eq!(con_eleccion, sin_eleccion, "{rol:?}");
+        }
+    }
+
     #[test]
     fn route_via_nube_serializa_nube() {
         assert_eq!(serde_json::to_value(Via::Nube).expect("serializa"), "nube");
@@ -762,6 +944,88 @@ mod tests {
         assert_eq!(Politica::default().v, 1);
     }
 
+    fn pedido_con_tokens(rol: Rol, tokens: u32) -> Pedido {
+        Pedido {
+            tokens_estimados: tokens,
+            ..pedido(rol, false)
+        }
+    }
+
+    /// Config con el precio de Opus (alias `opus` de cupo): 15 USD de entrada y 75 de salida por millón.
+    /// Prefiere la API solo al tope lleno, para aislar el chequeo del pedido.
+    fn cfg_con_precio_de_opus() -> Config {
+        Config::desde_texto(
+            "[balance]\nprefiere_api_sobre = 1.0\n\n[precios.claude-opus-5-5]\nusd_entrada = 15.0\nusd_salida = 75.0\n",
+        )
+        .expect("debe parsear")
+    }
+
+    #[test]
+    fn route_pedido_grande_con_cupo_casi_lleno_pasa_a_api() {
+        // 1 millón de tokens de entrada y de salida cuestan 90 USD: 34,99 + 90 pasan el tope de 35.
+        let e = elegir_en(
+            &pedido_con_tokens(Rol::Planifica, 1_000_000),
+            &Politica::default(),
+            &uso(34.99, bloque_vigente(), 10.0),
+            &cfg_con_precio_de_opus(),
+        )
+        .expect("hay margen en la API");
+        assert_eq!(e.via, Via::Api);
+        assert_eq!(e.modelo.as_deref(), Some("claude-opus-5-5"));
+    }
+
+    #[test]
+    fn route_pedido_chico_con_cupo_casi_lleno_sigue_en_cupo() {
+        // 100 tokens cuestan 0,009 USD: 34,99 + 0,009 no pasan el tope.
+        let e = elegir_en(
+            &pedido_con_tokens(Rol::Planifica, 100),
+            &Politica::default(),
+            &uso(34.99, bloque_vigente(), 10.0),
+            &cfg_con_precio_de_opus(),
+        )
+        .expect("sigue en cupo");
+        assert_eq!(e.via, Via::Cupo);
+    }
+
+    #[test]
+    fn route_sin_precio_del_equivalente_no_estima_y_sigue_en_cupo() {
+        let cfg =
+            Config::desde_texto("[balance]\nprefiere_api_sobre = 1.0\n").expect("debe parsear");
+        let e = elegir_en(
+            &pedido_con_tokens(Rol::Planifica, 1_000_000),
+            &Politica::default(),
+            &uso(34.99, bloque_vigente(), 10.0),
+            &cfg,
+        )
+        .expect("sigue en cupo");
+        assert_eq!(e.via, Via::Cupo);
+    }
+
+    #[test]
+    fn route_pedido_que_pasa_el_cupo_con_api_llena_no_reabre_en_el_pasado() {
+        // El bloque venció hace seis horas. El pedido no entra y la API del mes está llena.
+        let err = elegir_en(
+            &pedido_con_tokens(Rol::Planifica, 1_000_000),
+            &Politica::default(),
+            &uso(0.0, Some(AHORA - 6.0 * HORA), 100.0),
+            &cfg_con_precio_de_opus(),
+        )
+        .expect_err("cupo y API sin margen");
+        assert!(err.reabre > AHORA, "reabre {} debe ser futuro", err.reabre);
+    }
+
+    #[test]
+    fn route_costo_de_tokens_suma_entrada_y_salida() {
+        let precio = crate::config::Precio {
+            usd_entrada: 15.0,
+            usd_salida: 75.0,
+            umbral_entrada: None,
+            usd_entrada_alto: None,
+            usd_salida_alto: None,
+        };
+        assert_eq!(costo_de_tokens(&precio, 1_000_000), 90.0);
+    }
+
     #[test]
     fn route_sin_presupuesto_sale_con_codigo_3() {
         let error = crate::error::Error::from(crate::tipos::SinPresupuesto {
@@ -769,5 +1033,151 @@ mod tests {
             motivo: "agotado".into(),
         });
         assert_eq!(error.codigo_de_salida(), 3);
+    }
+
+    fn eleccion_api(rol: Rol, proveedor: Proveedor, modelo: &str) -> Eleccion {
+        Eleccion {
+            via: Via::Api,
+            proveedor: Some(proveedor),
+            modelo: Some(modelo.into()),
+            razonamiento: true,
+            motivo: "prueba".into(),
+            rol: Some(rol),
+        }
+    }
+
+    #[test]
+    fn route_eleccion_lleva_el_rol_del_pedido() {
+        let cfg = Config::default();
+        for rol in [
+            Rol::Planifica,
+            Rol::Organiza,
+            Rol::Construye,
+            Rol::Verifica,
+            Rol::Juzga,
+            Rol::Delega,
+        ] {
+            for checkeable in [false, true] {
+                let e = elegir_en(
+                    &pedido(rol, checkeable),
+                    &Politica::default(),
+                    &uso(0.0, None, 0.0),
+                    &cfg,
+                )
+                .expect("hay vía");
+                assert_eq!(e.rol, Some(rol), "rol {rol:?} checkeable {checkeable}");
+            }
+        }
+    }
+
+    #[test]
+    fn route_con_respaldo_sin_clave_juzga_usa_haiku_con_razonamiento() {
+        let cfg = Config::default();
+        let e = eleccion_api(Rol::Juzga, Proveedor::Deepseek, "deepseek-flash");
+        let sin_deepseek = |p: Proveedor| p != Proveedor::Deepseek;
+        let r = con_respaldo(e, &cfg, &sin_deepseek);
+        assert_eq!(r.via, Via::Api);
+        assert_eq!(r.proveedor, Some(Proveedor::Anthropic));
+        assert_eq!(r.modelo.as_deref(), Some("claude-haiku-5-5"));
+        assert!(r.razonamiento);
+        assert_eq!(r.rol, Some(Rol::Juzga));
+        assert!(r.motivo.contains("respaldo"), "{}", r.motivo);
+        assert!(r.motivo.contains("deepseek"), "{}", r.motivo);
+    }
+
+    #[test]
+    fn route_con_respaldo_breaker_abierto_juzga_usa_respaldo() {
+        let cfg = Config::default();
+        let e = eleccion_api(Rol::Juzga, Proveedor::Deepseek, "deepseek-flash");
+        let breaker_abierto = |_: Proveedor| false;
+        let r = con_respaldo(e, &cfg, &breaker_abierto);
+        assert_eq!(r.modelo.as_deref(), Some("claude-haiku-5-5"));
+    }
+
+    #[test]
+    fn route_con_respaldo_verifica_usa_su_respaldo() {
+        let cfg = Config::default();
+        let e = eleccion_api(Rol::Verifica, Proveedor::Deepseek, "deepseek-flash");
+        let r = con_respaldo(e, &cfg, &|_| false);
+        assert_eq!(r.proveedor, Some(Proveedor::Anthropic));
+        assert_eq!(r.rol, Some(Rol::Verifica));
+    }
+
+    #[test]
+    fn route_con_respaldo_con_proveedor_disponible_no_cambia() {
+        let cfg = Config::default();
+        let e = eleccion_api(Rol::Juzga, Proveedor::Deepseek, "deepseek-flash");
+        let r = con_respaldo(e.clone(), &cfg, &|_| true);
+        assert_eq!(r, e);
+    }
+
+    #[test]
+    fn route_con_respaldo_delega_sin_clave_no_cambia() {
+        let cfg = Config::default();
+        let e = eleccion_api(Rol::Delega, Proveedor::Deepseek, "deepseek-flash");
+        let r = con_respaldo(e.clone(), &cfg, &|_| false);
+        assert_eq!(r, e);
+    }
+
+    #[test]
+    fn route_con_respaldo_cupo_y_oraculo_no_cambian() {
+        let cfg = Config::default();
+        let cupo = Eleccion {
+            via: Via::Cupo,
+            proveedor: Some(Proveedor::Anthropic),
+            modelo: Some("haiku".into()),
+            razonamiento: false,
+            motivo: "prueba".into(),
+            rol: Some(Rol::Juzga),
+        };
+        assert_eq!(con_respaldo(cupo.clone(), &cfg, &|_| false), cupo);
+    }
+
+    #[test]
+    fn route_modelos_que_razonan_pasan_la_lista_cerrada() {
+        for modelo in [
+            "deepseek-flash",
+            "deepseek-v4-pro",
+            "claude-haiku-5-5",
+            "claude-sonnet-5-5",
+            "claude-opus-5-5",
+        ] {
+            for rol in [Rol::Verifica, Rol::Juzga] {
+                let e = eleccion_api(rol, Proveedor::Deepseek, modelo);
+                assert!(
+                    exigir_modelo_que_razona(&e).is_ok(),
+                    "{modelo} para {rol:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn route_modelo_fuera_de_la_lista_para_verifica_o_juzga_da_error_de_eleccion() {
+        for rol in [Rol::Verifica, Rol::Juzga] {
+            let e = eleccion_api(rol, Proveedor::Deepseek, "deepseek-reasoner");
+            let error = exigir_modelo_que_razona(&e).expect_err("fuera de la lista");
+            assert!(matches!(error, ErrorOraculo::Eleccion(_)), "{error}");
+            assert_eq!(error.codigo_de_salida(), 2);
+        }
+    }
+
+    #[test]
+    fn route_delega_no_exige_la_lista_de_razonamiento() {
+        let e = eleccion_api(Rol::Delega, Proveedor::Deepseek, "deepseek-chat");
+        assert!(exigir_modelo_que_razona(&e).is_ok());
+    }
+
+    #[test]
+    fn route_respaldo_fuera_de_la_lista_da_error_de_eleccion() {
+        let cfg = Config::desde_texto(
+            "[ruteo.juzga]\nproveedor = \"deepseek\"\nmodelo = \"deepseek-flash\"\n\
+             [ruteo.juzga.respaldo]\nproveedor = \"anthropic\"\nmodelo = \"claude-foo\"\n",
+        )
+        .expect("carga");
+        let e = eleccion_api(Rol::Juzga, Proveedor::Deepseek, "deepseek-flash");
+        let elegida = con_respaldo(e, &cfg, &|_| false);
+        assert_eq!(elegida.modelo.as_deref(), Some("claude-foo"));
+        assert!(exigir_modelo_que_razona(&elegida).is_err());
     }
 }

@@ -49,9 +49,14 @@ pub struct Arista {
     pub linea: u32,
 }
 
-/// Construye el mapa de `repo` leyendo `src/`. Sin `src/` da un mapa vacío.
+/// Construye el mapa de `repo` leyendo `src/`. Sin `src/` da un mapa vacío. Un error de lectura da error.
 pub fn construir(repo: &Path) -> Result<Mapa, ErrorOraculo> {
-    let archivos = archivos_rs(repo);
+    // El mapa lee solo `src/`: los fuentes de fuera (tests, crates) no entran a sus módulos.
+    let archivos: Vec<_> = archivos_rs(repo)
+        .map_err(ErrorOraculo::Infra)?
+        .into_iter()
+        .filter(|a| a.ruta.starts_with("src/"))
+        .collect();
     let mut por_nombre: BTreeMap<String, ModuloMapa> = BTreeMap::new();
     for archivo in &archivos {
         let nombre = nombre_de_modulo(&archivo.ruta);

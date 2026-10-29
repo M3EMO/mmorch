@@ -21,6 +21,7 @@ pub mod track;
 pub use cli::Cli;
 pub use error::Error;
 
+use std::fs;
 use std::io;
 use std::path::Path;
 
@@ -30,15 +31,45 @@ use cli::{
 };
 use ficha::{ContextoRevision, ErrorFicha, JuezProveedor, Revision};
 use oracle::tarea::Tarea;
-use tipos::{Eleccion, Estado, Fila, Proveedor, Via};
+use tipos::{Eleccion, Estado, Fila, Proveedor, Rol, Via};
 
 /// Ejecuta un subcomando y devuelve su código de salida. Los errores salen por `Err`.
 /// Por ahora `route`, `llama`, `oraculo evaluar`, `ficha`, `esquema`, `goal`, `observa`, `track` e la importación externa tienen lógica.
 pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
+    // Una `ROOT_HOME` mala (relativa, `/` o `$HOME`) sale con 2 antes de tocar nada (B6).
+    config::validar_root_home_actual()?;
     match &cli.comando {
         Comando::Oraculo {
             accion: OraculoAccion::Evaluar { tarea, repo },
         } => oraculo_evaluar(cli.json, tarea, repo),
+        Comando::Oraculo {
+            accion: OraculoAccion::Informe { tarea, repo, md },
+        } => oraculo_informe(tarea, repo, *md),
+        Comando::Oraculo {
+            accion:
+                OraculoAccion::Calibrar {
+                    tarea,
+                    dimension,
+                    n,
+                    semilla,
+                    repo,
+                },
+        } => oraculo_calibrar(cli.json, tarea, dimension, *n, *semilla, repo.as_deref()),
+        Comando::Oraculo {
+            accion:
+                OraculoAccion::Validar {
+                    casos,
+                    preparar_ciego,
+                    fuentes,
+                    semilla,
+                },
+        } => oraculo_validar(
+            cli.json,
+            casos,
+            *preparar_ciego,
+            fuentes.as_deref(),
+            *semilla,
+        ),
         Comando::Ficha { accion } => ficha_accion(cli.json, accion),
         Comando::Route {
             rol,
@@ -92,6 +123,146 @@ fn oraculo_evaluar(json: bool, nombre: &str, repo: &Path) -> Result<u8, Error> {
     Ok(oracle::codigo_de_estado(veredicto.estado))
 }
 
+/// `oraculo calibrar`: calibra una dimensión con el Oracle de producción, agrega la fila a
+/// `calibracion.json` de `ROOT_HOME` e imprime la fila. Los errores de uso salen con 2.
+fn oraculo_calibrar(
+    json: bool,
+    nombre: &str,
+    dimension: &str,
+    n: u32,
+    semilla: u64,
+    repo: Option<&Path>,
+) -> Result<u8, Error> {
+    let home = config::root_home();
+    let fila = oracle::calibra::calibrar_tarea(
+        &home,
+        nombre,
+        dimension,
+        n,
+        semilla,
+        repo,
+        &|tarea, ruta| oracle::evaluar(ruta, tarea, &oracle::OpcionesOraculo::default()),
+    )?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&fila)?);
+    } else {
+        println!(
+            "{}/{}: sensibilidad {}, especificidad {}, exactitud {}, casos {} (defectos {}, limpios {}, no aplicables {})",
+            fila.tarea,
+            fila.dimension.clave(),
+            medida(fila.sensibilidad),
+            medida(fila.especificidad),
+            medida(fila.exactitud_balanceada),
+            fila.n,
+            fila.defectos,
+            fila.limpios,
+            fila.no_aplicable
+        );
+    }
+    Ok(0)
+}
+
+/// Una métrica con dos decimales, o `sin medir` si no tiene casos de una clase.
+fn medida(valor: Option<f32>) -> String {
+    valor.map_or_else(|| "sin medir".to_string(), |v| format!("{v:.2}"))
+}
+
+/// `oraculo validar`: mide la validez del juicio de Root y escribe `casos/validez.json` (Tarea 12b). Con
+/// `--preparar-ciego`, arma los paquetes a ciegas. Sale con 0 aunque una métrica no cumpla: es una medida.
+fn oraculo_validar(
+    json: bool,
+    casos: &Path,
+    preparar_ciego: bool,
+    fuentes: Option<&Path>,
+    semilla: Option<u64>,
+) -> Result<u8, Error> {
+    if preparar_ciego {
+        let fuentes =
+            fuentes.ok_or_else(|| Error::Uso("--preparar-ciego exige --fuentes".into()))?;
+        let semilla = semilla.unwrap_or_else(oracle::validez::semilla_del_reloj);
+        let preparado = oracle::validez::preparar_ciego(casos, fuentes, semilla)?;
+        if preparado.sin_rubricas {
+            eprintln!(
+                "aviso: no hay rúbricas embebidas; el formulario lleva solo la decisión y el orden"
+            );
+        }
+        if json {
+            println!("{}", serde_json::to_string_pretty(&preparado)?);
+        } else {
+            println!(
+                "{} paquetes a ciegas en {}",
+                preparado.paquetes.len(),
+                casos.join("ciego").display()
+            );
+        }
+        return Ok(0);
+    }
+    let validez = oracle::validez::validar(casos)?;
+    let texto = serde_json::to_string_pretty(&validez)?;
+    let ruta = casos.join(oracle::validez::ARCHIVO);
+    fs::write(&ruta, format!("{texto}\n"))
+        .map_err(|e| oracle::ErrorOraculo::Infra(format!("escribir {}: {e}", ruta.display())))?;
+    if json {
+        println!("{texto}");
+    } else {
+        imprimir_validez(&validez);
+    }
+    Ok(0)
+}
+
+/// Resumen legible de `validez.json`: una línea por métrica, con su umbral si lo tiene.
+fn imprimir_validez(v: &oracle::validez::Validez) {
+    let linea = |nombre: &str, m: &oracle::validez::Metrica| {
+        let cumple = match (m.cumple, m.umbral) {
+            (Some(true), Some(u)) => format!(", cumple (umbral {u:.2})"),
+            (Some(false), Some(u)) => format!(", no cumple (umbral {u:.2})"),
+            (Some(true), None) => ", cumple".to_string(),
+            (Some(false), None) => ", no cumple".to_string(),
+            (None, _) => String::new(),
+        };
+        let motivo = m
+            .motivo
+            .as_deref()
+            .map(|t| format!(" ({t})"))
+            .unwrap_or_default();
+        println!("{nombre}: {}{cumple}{motivo}", medida(m.valor));
+    };
+    linea("exactitud de orden", &v.exactitud_orden);
+    linea("recall de defectos", &v.recall);
+    linea("acuerdo en la decisión", &v.acuerdo_decision);
+    linea("spearman del orden", &v.spearman);
+    for k in &v.kappa_dimension {
+        let motivo = k
+            .motivo
+            .as_deref()
+            .map(|t| format!(" ({t})"))
+            .unwrap_or_default();
+        println!("kappa {}: {}{motivo}", k.clave, medida(k.valor));
+    }
+    for aviso in &v.avisos {
+        println!("aviso: {aviso}");
+    }
+}
+
+/// `oraculo informe`: imprime el informe del veredicto, en JSON o en markdown con `--md`. El código de
+/// salida sale del estado, como en `evaluar`. Sin informe (sin veredicto), sale con 3 y lo dice en stderr.
+fn oraculo_informe(nombre: &str, repo: &Path, md: bool) -> Result<u8, Error> {
+    let veredicto = oracle::evaluar_por_nombre(nombre, repo)?;
+    let Some(informe) = &veredicto.informe else {
+        eprintln!(
+            "sin informe: el veredicto no tiene decisión (estado {})",
+            etiqueta_estado(veredicto.estado)
+        );
+        return Ok(oracle::codigo_de_estado(veredicto.estado));
+    };
+    if md {
+        print!("{}", oracle::informe::markdown(nombre, informe));
+    } else {
+        println!("{}", serde_json::to_string_pretty(informe)?);
+    }
+    Ok(oracle::codigo_de_estado(veredicto.estado))
+}
+
 /// `oraculo pendientes --colab`: corre el paquete en Colab, importa el junit y reporta.
 /// Sin tests pendientes no toca Colab.
 fn oraculo_colab(
@@ -115,7 +286,7 @@ fn oraculo_colab(
     })?;
     let tope = std::time::Duration::from_secs_f64(cfg.colab.minutos_max * 60.0);
     let sesion = oracle::colab::nombre_sesion(&tarea.nombre);
-    let resultado = oracle::colab::correr_en_colab(
+    let corrida = oracle::colab::correr_en_colab(
         &cli,
         &paquete.dir,
         tarea,
@@ -124,8 +295,18 @@ fn oraculo_colab(
         &senales,
         tope,
         &oracle::colab::CompiladorPodman,
-    )?;
-    let resumen = oracle::pendientes::importar(home, tarea, &resultado.junit)?;
+    )
+    .and_then(|resultado| {
+        let resumen = oracle::pendientes::importar(home, tarea, &resultado.junit, &paquete.commit)?;
+        Ok((resultado, resumen))
+    });
+    // Con la corrida terminada, el paquete (con los tests ocultos) y el junit bajado se borran (A1, B18).
+    let limpieza = oracle::pendientes::limpiar_paquete(home, tarea, &paquete.dir, &sesion);
+    let (resultado, resumen) = corrida?;
+    limpieza
+        .map_err(|e| oracle::ErrorOraculo::Infra(format!("borrar el paquete de Colab: {e}")))?;
+    let mut avisos = paquete.avisos.clone();
+    avisos.extend(resumen.avisos.iter().cloned());
     if json {
         println!(
             "{}",
@@ -134,9 +315,17 @@ fn oraculo_colab(
                 "ignorados": resumen.ignorados,
                 "gpu": resultado.gpu,
                 "sesion": resultado.sesion,
+                "avisos": avisos,
+                "confianza": resumen.confianza,
             })
         );
     } else {
+        for aviso in &avisos {
+            eprintln!("aviso: {aviso}");
+        }
+        if let Some(confianza) = &resumen.confianza {
+            eprintln!("confianza: {confianza}");
+        }
         println!(
             "gpu: {}, sesion: {}, importados: {}, ignorados: {}",
             resultado.gpu, resultado.sesion, resumen.importados, resumen.ignorados
@@ -217,15 +406,29 @@ fn oraculo_pendientes(
             "oraculo pendientes necesita --tarea y --repo".into(),
         ));
     };
+    oracle::pendientes::nombre_de_tarea_valido(nombre).map_err(Error::Uso)?;
     let tarea = Tarea::cargar(nombre)?;
+    oracle::pendientes::nombre_de_tarea_valido(&tarea.nombre).map_err(Error::Uso)?;
     if let Some(junit) = importar {
-        let resumen = oracle::pendientes::importar(&home, &tarea, junit)?;
+        let commit = oracle::commit_de(repo);
+        let resumen = oracle::pendientes::importar(&home, &tarea, junit, &commit)?;
         if json {
             println!(
                 "{}",
-                serde_json::json!({"importados": resumen.importados, "ignorados": resumen.ignorados})
+                serde_json::json!({
+                    "importados": resumen.importados,
+                    "ignorados": resumen.ignorados,
+                    "avisos": resumen.avisos,
+                    "confianza": resumen.confianza,
+                })
             );
         } else {
+            for aviso in &resumen.avisos {
+                eprintln!("aviso: {aviso}");
+            }
+            if let Some(confianza) = &resumen.confianza {
+                eprintln!("confianza: {confianza}");
+            }
             println!(
                 "importados: {}, ignorados: {}",
                 resumen.importados, resumen.ignorados
@@ -233,7 +436,8 @@ fn oraculo_pendientes(
         }
         return Ok(());
     }
-    let paquete = oracle::pendientes::crear(&home, &tarea, repo)?;
+    let cache = oracle::descarga::cache_de(&home, &tarea.lenguaje, repo, &tarea.imagen);
+    let paquete = oracle::pendientes::crear(&home, &tarea, repo, cache.as_deref())?;
     if colab {
         return oraculo_colab(json, &tarea, &home, paquete);
     }
@@ -270,6 +474,10 @@ fn ficha_accion(json: bool, accion: &FichaAccion) -> Result<u8, Error> {
             let texto = leer_spec(spec)?;
             let ctx = ContextoRevision::default();
             let tope = juez_max_tokens.unwrap_or(crate::proveedores::MAX_TOKENS_JUEZ);
+            // Con juez, los precios y el tope de API salen de root.toml: un archivo inválido es error de uso.
+            if juez_proveedor.is_some() {
+                config::Config::cargar(&config::root_home().join("root.toml"))?;
+            }
             let revision = match juez_de(*juez_proveedor, juez_modelo.as_deref()) {
                 Some(juez) => ficha::revisar_con_tope(&texto, &ctx, &juez, tope)?,
                 None => ficha::revisar(&texto, &ctx)?,
@@ -312,6 +520,7 @@ fn juez_de(proveedor: Option<ProveedorJuez>, modelo: Option<&str>) -> Option<Jue
             modelo: Some(modelo.to_string()),
             razonamiento: true,
             motivo: "juez de ficha".into(),
+            rol: Some(Rol::Juzga),
         },
         corrida: "ficha-revisar".into(),
     })
@@ -651,7 +860,22 @@ fn observa(json: bool, accion: &ObservaAccion) -> Result<(), Error> {
             for ev in &eventos {
                 observe::registrar(ev).map_err(observe::ErrorObserve::from)?;
             }
+            if via == Some(Via::Nube) {
+                observe::uso::gate_nube_si_lleno(observe::ahora().0)?;
+            }
             imprimir_claude(json, eventos.len(), via);
+        }
+        ObservaAccion::Costo { usd, motivo, fecha } => {
+            let ahora = observe::ahora().0;
+            let offset = observe::uso::offset_local();
+            let evento =
+                observe::evento_costo_manual(*usd, motivo, fecha.as_deref(), ahora, offset)?;
+            observe::registrar(&evento).map_err(observe::ErrorObserve::from)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&evento)?);
+            } else {
+                println!("Registrado un costo de API de {usd} USD: {motivo}");
+            }
         }
         ObservaAccion::Uso => {
             let estado = observe::uso::estado(observe::ahora().0)?;

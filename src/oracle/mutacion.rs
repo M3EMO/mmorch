@@ -37,6 +37,9 @@ pub struct ResultadoMutacion {
 struct Informe {
     /// Sin esta clave el reporte no trae su marca de fin. `None` da `SinVeredicto`.
     outcomes: Option<Vec<Resultado>>,
+    /// Mutantes que cargo-mutants encontró. Sin la clave vale 0.
+    #[serde(default)]
+    total_mutants: u32,
 }
 
 #[derive(Deserialize)]
@@ -134,6 +137,20 @@ pub fn parsear_outcomes(
         return Ok(desde_sonda(sin_veredicto(
             DIMENSION,
             "sin marca de fin: falta el escenario Baseline",
+        )));
+    }
+    // Un reporte vale solo si trae un resultado por cada mutante que cargo-mutants encontró (M13).
+    let mutantes_en_reporte = resultados
+        .iter()
+        .filter(|r| matches!(r.scenario, Escenario::Mutant(_)))
+        .count();
+    if mutantes_en_reporte != informe.total_mutants as usize {
+        return Ok(desde_sonda(sin_veredicto(
+            DIMENSION,
+            format!(
+                "reporte truncado: trae {mutantes_en_reporte} de {} mutantes",
+                informe.total_mutants
+            ),
         )));
     }
     if viables.is_empty() {
@@ -363,7 +380,7 @@ mod tests {
                 r#"{{"scenario":{{"Mutant":{{"name":"m{i}","file":"src/a.rs","span":{{"start":{{"line":{i},"column":1}}}}}}}},"summary":"{resumen}"}}"#
             ));
         }
-        let json = format!(r#"{{"outcomes":[{}]}}"#, outs.join(","));
+        let json = format!(r#"{{"total_mutants":20,"outcomes":[{}]}}"#, outs.join(","));
         let r = parsear_outcomes(&json, 5, &[]).expect("parsea");
         assert_eq!(r.muestra, 5);
         assert!(r.truncado);
@@ -387,7 +404,7 @@ mod tests {
 
     #[test]
     fn mutacion_sin_viables_da_valor_none() {
-        let json = r#"{"outcomes":[{"scenario":"Baseline","summary":"Success"},
+        let json = r#"{"total_mutants":1,"outcomes":[{"scenario":"Baseline","summary":"Success"},
             {"scenario":{"Mutant":{"name":"m","file":"src/a.rs"}},"summary":"Unviable"}]}"#;
         let r = parsear_outcomes(json, 60, &[]).expect("parsea");
         assert_eq!(r.sonda.valor, None);
@@ -595,5 +612,21 @@ mod tests {
         let r = sonda_mutacion(&con_reporte(CON_ASSERTS), &tarea_con("rust", ""));
         assert_eq!(r.sonda.valor, Some(1.0));
         assert_eq!(r.sonda.motivo, None);
+    }
+
+    #[test]
+    fn mutacion_reporte_con_2_mutantes_de_50_es_reporte_truncado() {
+        let json = r#"{"total_mutants":50,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"m1","file":"src/a.rs","span":{"start":{"line":3}}}},"summary":"CaughtMutant"},{"scenario":{"Mutant":{"name":"m2","file":"src/a.rs","span":{"start":{"line":4}}}},"summary":"MissedMutant"}]}"#;
+        let (valor, motivo) = motivo_de(json);
+        assert_eq!(valor, None);
+        assert!(motivo.contains("reporte truncado"), "{motivo}");
+    }
+
+    #[test]
+    fn mutacion_reporte_sin_total_mutants_con_mutantes_es_reporte_truncado() {
+        let json = r#"{"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"m1","file":"src/a.rs"}},"summary":"CaughtMutant"}]}"#;
+        let (valor, motivo) = motivo_de(json);
+        assert_eq!(valor, None);
+        assert!(motivo.contains("reporte truncado"), "{motivo}");
     }
 }

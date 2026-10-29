@@ -167,6 +167,16 @@ pub enum OraculoAccion {
         #[arg(long)]
         repo: PathBuf,
     },
+    /// Arma el informe del PM: la decisión, su regla, lo que falta y qué arreglar primero.
+    Informe {
+        #[arg(long)]
+        tarea: String,
+        #[arg(long)]
+        repo: PathBuf,
+        /// Imprime markdown legible en vez de JSON.
+        #[arg(long)]
+        md: bool,
+    },
     /// Arma el paquete de los tests pendientes por entorno para correrlos en Colab.
     /// Con `--importar`, guarda el junit que trajo de vuelta.
     Pendientes {
@@ -200,6 +210,25 @@ pub enum OraculoAccion {
         n: u32,
         #[arg(long, default_value_t = 42)]
         semilla: u64,
+        /// Repo bueno. Sin él, se usa `[calibracion] repo` de `tarea.toml`.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+    /// Mide si el juicio de Root coincide con resultados conocidos (Tarea 12b). Con `--preparar-ciego`,
+    /// arma los paquetes a ciegas de `--fuentes` en `casos/ciego/`.
+    Validar {
+        /// Carpeta de casos: `orden.toml`, `defectos.toml` y `ciego/`.
+        #[arg(long)]
+        casos: PathBuf,
+        /// Arma los paquetes a ciegas en vez de medir. Exige `--fuentes`.
+        #[arg(long, requires = "fuentes")]
+        preparar_ciego: bool,
+        /// Manifiesto con las `[[fuente]]` del paquete a ciegas. Exige `--preparar-ciego`.
+        #[arg(long, requires = "preparar_ciego")]
+        fuentes: Option<PathBuf>,
+        /// Semilla de los ids del paquete a ciegas. Sin ella, vale el reloj. Exige `--preparar-ciego`.
+        #[arg(long, requires = "preparar_ciego")]
+        semilla: Option<u64>,
     },
 }
 
@@ -217,6 +246,17 @@ pub enum ObservaAccion {
     },
     /// Muestra el gasto y el margen de cada tope.
     Uso,
+    /// Registra un costo de API que Root no vio, con su motivo (decisión 46).
+    Costo {
+        /// Monto en USD. Debe ser finito y mayor que 0.
+        #[arg(long, allow_negative_numbers = true)]
+        usd: f64,
+        #[arg(long)]
+        motivo: String,
+        /// Fecha: `AAAA-MM-DD` (12:00 locales) o RFC 3339. Sin ella, vale la hora actual.
+        #[arg(long)]
+        fecha: Option<String>,
+    },
     /// Registra un evento manual de la corrida.
     Evento {
         #[arg(long)]
@@ -296,12 +336,15 @@ impl Comando {
             Comando::Llama { .. } => "llama",
             Comando::Oraculo { accion } => match accion {
                 OraculoAccion::Evaluar { .. } => "oraculo evaluar",
+                OraculoAccion::Informe { .. } => "oraculo informe",
                 OraculoAccion::Pendientes { .. } => "oraculo pendientes",
                 OraculoAccion::Calibrar { .. } => "oraculo calibrar",
+                OraculoAccion::Validar { .. } => "oraculo validar",
             },
             Comando::Observa { accion } => match accion {
                 ObservaAccion::Claude { .. } => "observa claude",
                 ObservaAccion::Uso => "observa uso",
+                ObservaAccion::Costo { .. } => "observa costo",
                 ObservaAccion::Evento { .. } => "observa evento",
                 ObservaAccion::Resumen { .. } => "observa resumen",
             },

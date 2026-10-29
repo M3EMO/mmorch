@@ -62,9 +62,15 @@ const SEG_ESTADO: u64 = 300;
 const CAUSA_REQUISITO: &str = "requisito cumplido";
 /// Causa del `Gate` de liberación cuando `correr.sh` terminó, con el junit completo o no.
 const CAUSA_TERMINO: &str = "correr.sh terminó";
-/// Causa del `Gate` de liberación al llegar al tope. Es el tipo de corte que fija el plan: el valor
-/// real del tope va en `motivo`, porque `minutos_max` se puede cambiar.
-const CAUSA_TOPE: &str = "tope de 2 horas";
+/// Causa del `Gate` de liberación al llegar al tope de duración. El valor real del tope va en `motivo`,
+/// porque `minutos_max` se puede cambiar.
+const CAUSA_TOPE: &str = "tope de duración";
+/// Causa del `Gate` cuando la GPU del runtime no es una T4.
+const CAUSA_GPU_NO_T4: &str = "gpu-no-t4";
+/// Causa del `Gate` cuando `colab new` no asignó el runtime (un fallo que no es de login).
+const CAUSA_RUNTIME_NO_ASIGNADO: &str = "runtime-no-asignado";
+/// Causa del `Gate` cuando un paso de la corrida falla a mitad, sin señal ni tope.
+const CAUSA_ERROR_CORRIDA: &str = "error-en-corrida";
 /// La única GPU que Root pide.
 const GPU_PEDIDA: &str = "T4";
 /// Nombre del paquete dentro del runtime. Es el mismo en la subida y en la preparación.
@@ -99,9 +105,9 @@ const MARCADORES_SIN_SESION: &[&str] = &[
     "401",
 ];
 /// Textos de stdout o stderr que indican que la sesión ya no existe: el runtime ya no está, y la
-/// parada cuenta como confirmada. A confirmar con la CLI real (no se ejecutó).
+/// parada cuenta como confirmada. A confirmar con la CLI real (no se ejecutó). `not found` no está:
+/// una salida desconocida no confirma la parada (desempate 4 de "Desempates técnicos 8").
 const MARCADORES_SESION_INEXISTENTE: &[&str] = &[
-    "not found",
     "no existe",
     "inexistente",
     "does not exist",
@@ -228,13 +234,16 @@ fn guion_probar_binario(nombre: &str) -> String {
     let nombre = serde_json::to_string(nombre).expect("una cadena se serializa");
     format!(
         r#"import os, subprocess
-RUTA = os.path.abspath(os.path.join("root-paquete", "bin", {nombre}))
+RUTA = os.path.abspath(os.path.join("root-paquete", "target", "debug", {nombre}))
+CARGO = os.path.abspath(os.path.join("root-paquete", "bin", "cargo"))
 
 def correr(opcion):
     return subprocess.run([RUTA, opcion], capture_output=True, timeout=60)
 
 try:
     os.chmod(RUTA, 0o755)
+    if os.path.exists(CARGO):
+        os.chmod(CARGO, 0o755)
     resultado = correr("--version")
     if resultado.returncode != 0:
         resultado = correr("--help")
@@ -246,6 +255,27 @@ except FileNotFoundError:
 except OSError:
     codigo = 126
 print("ROOT_BINARIO=ok" if codigo == 0 else "ROOT_BINARIO=falla:%d" % codigo)
+"#
+    )
+}
+
+/// `cargo` mínimo del respaldo (Tarea 7k). El runtime no tiene compilador: el binario ya viene en
+/// `target/debug`. Solo acepta `build -q --bin <nombre>`, sale con 0 si el binario existe, y falla con un
+/// mensaje ante cualquier otra orden.
+fn guion_cargo(nombre: &str) -> String {
+    format!(
+        r#"#!/usr/bin/env bash
+# cargo mínimo de Root: el binario de respaldo ya viene compilado en target/debug.
+if [ "$*" != "build -q --bin {nombre}" ]; then
+  echo "cargo de Root: solo acepta 'build -q --bin {nombre}'; el runtime no tiene compilador (orden: $*)" >&2
+  exit 1
+fi
+destino="${{CARGO_TARGET_DIR:-$(dirname "$0")/../target}}/debug/{nombre}"
+if [ ! -f "$destino" ]; then
+  echo "cargo de Root: falta el binario $destino" >&2
+  exit 1
+fi
+exit 0
 "#
     )
 }
@@ -506,6 +536,7 @@ pub fn cumple_lo_pedido(junit: &str, ids: &[String], repeticiones: u32) -> bool 
     let Ok(leido) = junit::parsear(junit) else {
         return false;
     };
+    let leido = leido.con_ids();
     ids.iter().all(|id| {
         leido
             .testcases
@@ -554,12 +585,12 @@ pub fn vigilar(
         inicio: Instant::now(),
         tope: TIMEOUT_LLAMADA,
     };
-    let cumple = match bajar_junit(cli, &lim, &activo.sesion, &junit)? {
+    let cumple = match bajar_junit(cli, &lim, home, &activo.sesion, &junit)? {
         Ok(()) => fs::read_to_string(&junit)
             .is_ok_and(|texto| cumple_lo_pedido(&texto, &activo.ids, repeticiones)),
         Err(_) => false,
     };
-    let _ = fs::remove_file(&junit);
+    let _ = crate::borrado::borrar_archivo_dentro(home, &junit);
     if cumple {
         return parar_vigilado(cli, home, &activo, CAUSA_REQUISITO, CAUSA_REQUISITO);
     }
@@ -715,7 +746,7 @@ pub fn correr_en_colab(
                 &corrida,
                 nombre_sesion,
                 "desconocida",
-                None,
+                Fin::Fallo(None),
                 parada,
             );
             return Err(ErrorOraculo::Colab(MENSAJE_SIN_RESPUESTA.into()));
@@ -746,15 +777,27 @@ pub fn correr_en_colab(
                 nombre_sesion,
                 "desconocida",
                 falla,
+                Some(CAUSA_RUNTIME_NO_ASIGNADO),
             );
             return Err(sumar_error(error, registro));
         }
     }
     let registro = registrar_pedir(home, &corrida, nombre_sesion, "ok");
 
-    let mut gpu = String::from("desconocida");
+    let mut observado = Observado {
+        gpu: String::from("desconocida"),
+        causa: None,
+    };
     let trabajo = match registro {
-        Ok(()) => trabajar(cli, &lim, home, &tmp, nombre_sesion, &mut gpu, &trabajo),
+        Ok(()) => trabajar(
+            cli,
+            &lim,
+            home,
+            &tmp,
+            nombre_sesion,
+            &mut observado,
+            &trabajo,
+        ),
         Err(e) => Err(e),
     };
     match trabajo {
@@ -768,13 +811,13 @@ pub fn correr_en_colab(
                 home,
                 &corrida,
                 nombre_sesion,
-                &gpu,
-                Some(corte.causa),
+                &observado.gpu,
+                Fin::Bien(corte.causa),
                 parada,
             ) {
                 Ok(()) => Ok(ResultadoColab {
                     junit: corte.junit,
-                    gpu,
+                    gpu: observado.gpu,
                     sesion: nombre_sesion.into(),
                 }),
                 // Una señal cortó la parada: se libera con su causa igual.
@@ -784,21 +827,27 @@ pub fn correr_en_colab(
                     home,
                     &corrida,
                     nombre_sesion,
-                    &gpu,
+                    &observado.gpu,
                     e,
+                    None,
                 )),
                 Err(e) => Err(e),
             }
         }
-        Err(e) => Err(cerrar_con_error(
-            cli,
-            &lim,
-            home,
-            &corrida,
-            nombre_sesion,
-            &gpu,
-            e,
-        )),
+        Err(e) => {
+            // Sin causa propia (GPU, señal o tope), el trabajo que falló es `error-en-corrida`.
+            let causa = observado.causa.unwrap_or(CAUSA_ERROR_CORRIDA);
+            Err(cerrar_con_error(
+                cli,
+                &lim,
+                home,
+                &corrida,
+                nombre_sesion,
+                &observado.gpu,
+                e,
+                Some(causa),
+            ))
+        }
     }
 }
 
@@ -970,6 +1019,13 @@ fn ids_de(tarea: &Tarea) -> Vec<String> {
         .collect()
 }
 
+/// Lo que se ve del runtime mientras corre: la GPU que dijo tener y, si la corrida cortó por la GPU, la
+/// causa del `Gate`.
+struct Observado {
+    gpu: String,
+    causa: Option<&'static str>,
+}
+
 /// Lo que `trabajar` necesita del paquete, de la tarea y del compilador del respaldo de Rust.
 struct Trabajo<'a> {
     paquete: &'a Path,
@@ -985,7 +1041,7 @@ fn trabajar(
     home: &Path,
     tmp: &Path,
     sesion: &str,
-    gpu: &mut String,
+    observado: &mut Observado,
     trabajo: &Trabajo,
 ) -> Result<Corte, ErrorOraculo> {
     let guion_gpu = escribir(tmp, "gpu.py", GUION_GPU)?;
@@ -995,10 +1051,12 @@ fn trabajar(
     } else {
         None
     };
-    *gpu = leida.clone().unwrap_or_else(|| "desconocida".into());
+    observado.gpu = leida.clone().unwrap_or_else(|| "desconocida".into());
     if !leida.as_deref().is_some_and(es_t4) {
+        observado.causa = Some(CAUSA_GPU_NO_T4);
         return Err(ErrorOraculo::Colab(format!(
-            "la GPU del runtime no es una T4 ({gpu}); no se corrió ningún test"
+            "la GPU del runtime no es una T4 ({}); no se corrió ningún test",
+            observado.gpu
         )));
     }
 
@@ -1051,7 +1109,7 @@ fn trabajar(
         }
         // a. Bajada del junit: un fallo significa que todavía no hay junit.
         // b. Corte 1: el junit cumple lo pedido. Se importa y se libera aunque `correr.sh` siga.
-        if bajar_junit(cli, lim, sesion, &junit)?.is_ok()
+        if bajar_junit(cli, lim, home, sesion, &junit)?.is_ok()
             && fs::read_to_string(&junit)
                 .is_ok_and(|texto| cumple_lo_pedido(&texto, &ids, trabajo.tarea.repeticiones))
         {
@@ -1062,7 +1120,7 @@ fn trabajar(
         }
         // c. Estado: `correr.sh` terminó. Corte 2 con el junit que haya; si no hay, error.
         if estado_terminado(cli, lim, sesion, &guion_estado)? {
-            return match bajar_junit(cli, lim, sesion, &junit)? {
+            return match bajar_junit(cli, lim, home, sesion, &junit)? {
                 Ok(()) => Ok(Corte {
                     junit,
                     causa: CAUSA_TERMINO,
@@ -1082,11 +1140,12 @@ fn trabajar(
 fn bajar_junit(
     cli: &dyn ColabCli,
     lim: &Limites,
+    home: &Path,
     sesion: &str,
     destino: &Path,
 ) -> Result<Result<(), String>, ErrorOraculo> {
     // Archivo propio de la corrida: un junit de un sondeo anterior no debe contar como nuevo.
-    let _ = fs::remove_file(destino);
+    let _ = crate::borrado::borrar_archivo_dentro(home, destino);
     let remoto = format!("{CARPETA_REMOTA}/{XML_PENDIENTES}");
     match paso(
         cli,
@@ -1199,8 +1258,9 @@ fn rust_en_runtime(
     }
 }
 
-/// Respaldo: compila el producto en la máquina local, sube el binario a `root-paquete/bin/` y lo
-/// prueba en el runtime. Si algo falla, devuelve la causa y no se corre `corre.py`.
+/// Respaldo: compila el producto en la máquina local, sube el binario a `root-paquete/target/debug/` y el
+/// `cargo` mínimo a `root-paquete/bin/`, y prueba el binario en el runtime. Si algo falla, devuelve la
+/// causa y no se corre `corre.py`.
 fn binario_local(
     cli: &dyn ColabCli,
     lim: &Limites,
@@ -1217,11 +1277,20 @@ fn binario_local(
     }
     let repo = trabajo.paquete.join("repo");
     let nombre = nombre_binario(&repo).ok_or("sin nombre de binario")?;
+    // El nombre entra en el `cargo` mínimo, que es un guion de shell: solo letras, números, - y _.
+    let nombre_seguro = !nombre.is_empty()
+        && nombre
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !nombre_seguro {
+        return Err(format!("nombre de binario inválido: {nombre:?}"));
+    }
     let binario = trabajo
         .compilador
         .compilar(&repo, trabajo.tarea)
         .map_err(|e| e.to_string())?;
-    let destino = format!("{CARPETA_REMOTA}/bin/{nombre}");
+    // El binario va donde el `cargo` mínimo lo busca: `target/debug` del paquete (CARGO_TARGET_DIR).
+    let destino = format!("{CARPETA_REMOTA}/target/debug/{nombre}");
     let subida = paso(
         cli,
         lim,
@@ -1233,6 +1302,21 @@ fn binario_local(
         return Err(format!(
             "no se pudo subir el binario: {}",
             subida.stderr.trim()
+        ));
+    }
+    let cargo = escribir(tmp, "cargo", &guion_cargo(&nombre)).map_err(|e| e.to_string())?;
+    let destino_cargo = format!("{CARPETA_REMOTA}/bin/cargo");
+    let subida_cargo = paso(
+        cli,
+        lim,
+        &args(&["upload", "-s", sesion, &ruta(&cargo), &destino_cargo]),
+        TIMEOUT_LLAMADA,
+    )
+    .map_err(|e| e.to_string())?;
+    if subida_cargo.codigo != 0 {
+        return Err(format!(
+            "no se pudo subir el cargo mínimo: {}",
+            subida_cargo.stderr.trim()
         ));
     }
     let guion = escribir(tmp, "prueba-binario.py", &guion_probar_binario(&nombre))
@@ -1294,6 +1378,8 @@ fn exec(
 /// Cierra una corrida que falló con el runtime pedido y devuelve el error a mostrar.
 /// Una señal o el tope tienen su propio `Gate`, su motivo y su mensaje. Sin causa especial,
 /// libera de forma normal: esa parada también la puede cortar una señal.
+/// `causa` es la del `Gate` si el error no es una señal ni el tope (esos tienen su propia causa).
+#[allow(clippy::too_many_arguments)]
 fn cerrar_con_error(
     cli: &dyn ColabCli,
     lim: &Limites,
@@ -1302,15 +1388,16 @@ fn cerrar_con_error(
     sesion: &str,
     gpu: &str,
     error: ErrorOraculo,
+    causa: Option<&str>,
 ) -> ErrorOraculo {
-    if let Some(causa) = cerrar_por_causa(cli, lim, home, corrida, sesion, gpu) {
-        return causa;
+    if let Some(causa_corte) = cerrar_por_causa(cli, lim, home, corrida, sesion, gpu) {
+        return causa_corte;
     }
     let parada = Parada {
         plazo: TIMEOUT_LLAMADA,
         cancelar: lim.cancelar,
     };
-    match liberar(cli, home, corrida, sesion, gpu, None, parada) {
+    match liberar(cli, home, corrida, sesion, gpu, Fin::Fallo(causa), parada) {
         Ok(()) => error,
         Err(parada_fallida) => cerrar_por_causa(cli, lim, home, corrida, sesion, gpu)
             .unwrap_or_else(|| ErrorOraculo::Infra(format!("{error}; además, {parada_fallida}"))),
@@ -1423,28 +1510,39 @@ fn sumar_error(error: ErrorOraculo, registro: Result<(), ErrorOraculo>) -> Error
     }
 }
 
+/// Cómo terminó lo que se libera. `Bien` trae la causa del corte. `Fallo` trae la causa del error, si la hay.
+#[derive(Clone, Copy)]
+enum Fin<'a> {
+    Bien(&'a str),
+    Fallo(Option<&'a str>),
+}
+
 /// Para el runtime y registra el `Gate` de liberación. Con la parada confirmada, borra `activo.json`.
-/// Devuelve error si la parada no se confirma: el archivo se conserva. `corte` es la causa de un
-/// trabajo que salió bien; sin ella, el trabajo falló y el `Gate` no lleva causa.
+/// Devuelve error si la parada no se confirma: el archivo se conserva. El `Gate` lleva `causa` si
+/// `fin` la trae.
 fn liberar(
     cli: &dyn ColabCli,
     home: &Path,
     corrida: &str,
     sesion: &str,
     gpu: &str,
-    corte: Option<&str>,
+    fin: Fin,
     parada: Parada,
 ) -> Result<(), ErrorOraculo> {
     let confirmacion = confirmar_parada(cli, sesion, parada);
+    let (trabajo, causa) = match fin {
+        Fin::Bien(causa) => ("ok", Some(causa)),
+        Fin::Fallo(causa) => ("fallo", causa),
+    };
     let mut extra = json!({
         "accion": "liberar",
         "sesion": sesion,
         "gpu_observada": gpu,
-        "trabajo": if corte.is_some() { "ok" } else { "fallo" },
+        "trabajo": trabajo,
         "parada": if confirmacion.confirmada() { "ok" } else { "fallo" },
         "confirmada": confirmacion.confirmada(),
     });
-    if let Some(causa) = corte {
+    if let Some(causa) = causa {
         extra["causa"] = json!(causa);
     }
     if let Some(nota) = confirmacion.nota() {
@@ -1842,6 +1940,7 @@ mod tests {
             pruebas: None,
             entrega: None,
             escenario: Vec::new(),
+            calibracion: None,
             dir: PathBuf::new(),
         }
     }
@@ -2021,6 +2120,158 @@ mod tests {
         let lineas = falso.lineas();
         assert!(!lineas.iter().any(|l| l.starts_with("upload")));
         assert!(lineas.last().is_some_and(|l| l.starts_with("stop -s")));
+    }
+
+    #[test]
+    fn colab_tope_de_30_minutos_dice_tope_de_duracion_y_motivo_30() {
+        let home = tempfile::tempdir().expect("home");
+        let falso = Falso::nuevo(|_: &[String]| salida(0, "", ""));
+        let lim = Limites {
+            cancelar: &Senales::default(),
+            inicio: Instant::now()
+                .checked_sub(Duration::from_secs(31 * 60))
+                .expect("un instante 31 minutos atrás"),
+            tope: Duration::from_secs(30 * 60),
+        };
+        let error = cerrar_por_causa(
+            &falso,
+            &lim,
+            home.path(),
+            "colab-memora",
+            "root-memora-1",
+            "T4",
+        );
+        assert!(matches!(error, Some(ErrorOraculo::Colab(_))), "{error:?}");
+        let gates = eventos_runtime(home.path());
+        assert!(
+            gates.iter().any(|g| g["extra"]["accion"] == "liberar"
+                && g["extra"]["causa"] == "tope de duración"
+                && g["extra"]["motivo"] == "tope de 30 minutos"),
+            "{gates:?}"
+        );
+    }
+
+    #[test]
+    fn colab_gpu_no_t4_gate_lleva_causa_gpu_no_t4() {
+        let base = tempfile::tempdir().expect("base");
+        let home = tempfile::tempdir().expect("home");
+        let falso = Falso::nuevo(feliz("NVIDIA A100-SXM4-40GB"));
+        let _ = correr_prueba(
+            &falso,
+            &paquete(base.path()),
+            &tarea(),
+            home.path(),
+            "root-memora-1",
+        );
+        let gates = eventos_runtime(home.path());
+        assert!(
+            gates
+                .iter()
+                .any(|g| g["extra"]["accion"] == "liberar" && g["extra"]["causa"] == "gpu-no-t4"),
+            "{gates:?}"
+        );
+    }
+
+    #[test]
+    fn colab_fallo_al_pedir_runtime_gate_lleva_causa_runtime_no_asignado() {
+        let base = tempfile::tempdir().expect("base");
+        let home = tempfile::tempdir().expect("home");
+        let falso = Falso::nuevo(|args: &[String]| {
+            if args[0] == "new" {
+                salida(1, "", "no capacity for T4")
+            } else {
+                salida(0, "", "")
+            }
+        });
+        let r = correr_prueba(
+            &falso,
+            &paquete(base.path()),
+            &tarea(),
+            home.path(),
+            "root-memora-1",
+        );
+        assert!(r.is_err(), "{r:?}");
+        let gates = eventos_runtime(home.path());
+        assert!(
+            gates.iter().any(|g| g["extra"]["accion"] == "liberar"
+                && g["extra"]["causa"] == "runtime-no-asignado"),
+            "{gates:?}"
+        );
+    }
+
+    #[test]
+    fn colab_error_a_mitad_de_corrida_gate_lleva_causa_error_en_corrida() {
+        let base = tempfile::tempdir().expect("base");
+        let home = tempfile::tempdir().expect("home");
+        let bueno = feliz("Tesla T4");
+        let falso = Falso::nuevo(move |args: &[String]| {
+            if args[0] == "exec" && args.iter().any(|a| a.ends_with("corre.py")) {
+                return salida(1, "", "boom");
+            }
+            bueno(args)
+        });
+        let r = correr_prueba(
+            &falso,
+            &paquete(base.path()),
+            &tarea(),
+            home.path(),
+            "root-memora-1",
+        );
+        assert!(matches!(r, Err(ErrorOraculo::Infra(_))), "{r:?}");
+        let gates = eventos_runtime(home.path());
+        assert!(
+            gates
+                .iter()
+                .any(|g| g["extra"]["accion"] == "liberar"
+                    && g["extra"]["causa"] == "error-en-corrida"),
+            "{gates:?}"
+        );
+    }
+
+    /// Corre el `cargo` mínimo de `correr.sh` con `bash`, en `dir`, con `bin/cargo` escrito allí.
+    fn correr_cargo_minimo(dir: &Path, orden: &[&str]) -> std::process::ExitStatus {
+        let ruta = dir.join("bin").join("cargo");
+        fs::create_dir_all(dir.join("bin")).expect("carpeta bin");
+        fs::write(&ruta, guion_cargo("brasa")).expect("escribe cargo");
+        // La salida se captura: el mensaje de error del `cargo` mínimo no llena la salida de los tests.
+        Command::new("bash")
+            .arg(&ruta)
+            .args(orden)
+            .current_dir(dir)
+            .env_remove("CARGO_TARGET_DIR")
+            .output()
+            .expect("bash corre el cargo mínimo")
+            .status
+    }
+
+    /// Crea `target/debug/brasa` dentro de `dir`, como deja el paquete del respaldo.
+    fn poner_binario(dir: &Path) {
+        let debug = dir.join("target").join("debug");
+        fs::create_dir_all(&debug).expect("target/debug");
+        fs::write(debug.join("brasa"), "binario").expect("binario");
+    }
+
+    #[test]
+    fn colab_cargo_minimo_build_bin_con_binario_sale_0() {
+        let base = tempfile::tempdir().expect("base");
+        poner_binario(base.path());
+        let estado = correr_cargo_minimo(base.path(), &["build", "-q", "--bin", "brasa"]);
+        assert!(estado.success(), "{estado:?}");
+    }
+
+    #[test]
+    fn colab_cargo_minimo_build_bin_sin_binario_falla() {
+        let base = tempfile::tempdir().expect("base");
+        let estado = correr_cargo_minimo(base.path(), &["build", "-q", "--bin", "brasa"]);
+        assert!(!estado.success(), "{estado:?}");
+    }
+
+    #[test]
+    fn colab_cargo_minimo_build_release_falla_aun_con_binario() {
+        let base = tempfile::tempdir().expect("base");
+        poner_binario(base.path());
+        let estado = correr_cargo_minimo(base.path(), &["build", "--release"]);
+        assert!(!estado.success(), "{estado:?}");
     }
 
     #[test]
@@ -2315,10 +2566,24 @@ mod tests {
     fn colab_liberar_anotado_sesion_inexistente_se_ignora_y_borra() {
         let home = tempfile::tempdir().expect("home");
         let ruta = escribir_activo_de_prueba(home.path(), ACTIVO_VIEJO);
-        let falso = Falso::nuevo(|_: &[String]| salida(1, "", "session not found"));
+        let falso = Falso::nuevo(|_: &[String]| salida(1, "", "session does not exist"));
         let r = liberar_anotado(&falso, home.path());
         assert_eq!(r.expect("sin error"), Some("vieja".to_string()));
         assert!(!ruta.exists());
+    }
+
+    #[test]
+    fn colab_liberar_anotado_stop_con_not_found_conserva_activo() {
+        // "not found" no prueba que la sesión ya no exista: la salida es desconocida y la parada no se confirma.
+        let home = tempfile::tempdir().expect("home");
+        let ruta = escribir_activo_de_prueba(home.path(), ACTIVO_VIEJO);
+        let falso = Falso::nuevo(|_: &[String]| salida(1, "", "session not found"));
+        let r = liberar_anotado(&falso, home.path());
+        assert!(r.is_err(), "{r:?}");
+        assert!(
+            ruta.exists(),
+            "una salida con 'not found' conserva activo.json"
+        );
     }
 
     #[test]
@@ -2459,7 +2724,7 @@ mod tests {
         assert!(
             gates.iter().any(|g| g["extra"]["accion"] == "liberar"
                 && g["extra"]["motivo"] == "tope de 2 segundos"
-                && g["extra"]["causa"] == "tope de 2 horas"),
+                && g["extra"]["causa"] == "tope de duración"),
             "{gates:?}"
         );
         assert!(!home.path().join("colab").join("activo.json").exists());
@@ -2600,9 +2865,16 @@ mod tests {
         let i_subida = lineas
             .iter()
             .position(|l| {
-                l.starts_with("upload -s root-memora-1 ") && l.ends_with(" root-paquete/bin/memora")
+                l.starts_with("upload -s root-memora-1 ")
+                    && l.ends_with(" root-paquete/target/debug/memora")
             })
             .unwrap_or_else(|| panic!("falta la subida del binario: {lineas:?}"));
+        let i_cargo = lineas
+            .iter()
+            .position(|l| {
+                l.starts_with("upload -s root-memora-1 ") && l.ends_with(" root-paquete/bin/cargo")
+            })
+            .unwrap_or_else(|| panic!("falta la subida del cargo mínimo: {lineas:?}"));
         let i_prueba = lineas
             .iter()
             .position(|l| l.contains("prueba-binario.py"))
@@ -2612,6 +2884,10 @@ mod tests {
             .position(|l| l.contains("corre.py"))
             .unwrap_or_else(|| panic!("falta corre.py: {lineas:?}"));
         assert!(i_subida < i_prueba && i_prueba < i_corre, "{lineas:?}");
+        assert!(
+            i_cargo < i_prueba,
+            "el cargo mínimo se sube antes de la prueba: {lineas:?}"
+        );
 
         let gates = gates_rust(home.path());
         assert_eq!(gates.len(), 1, "{gates:?}");
@@ -2881,7 +3157,8 @@ mod tests {
     fn colab_senal_con_sesion_inexistente_confirma_y_borra() {
         let base = tempfile::tempdir().expect("base");
         let home = tempfile::tempdir().expect("home");
-        let binario = falso_corre_lenta_stop(base.path(), "echo 'session not found' >&2; exit 1");
+        let binario =
+            falso_corre_lenta_stop(base.path(), "echo 'session does not exist' >&2; exit 1");
         let cli = ColabProceso {
             binario,
             plazo_primer_paso: Duration::from_secs(1),
@@ -3112,7 +3389,7 @@ mod tests {
         let falso = Falso::nuevo(feliz("Tesla T4"));
         let r = vigilar(&falso, home.path(), Duration::from_secs(7200));
         match r {
-            Ok(Vigilancia::Liberado { causa }) => assert_eq!(causa, "tope de 2 horas"),
+            Ok(Vigilancia::Liberado { causa }) => assert_eq!(causa, "tope de duración"),
             otro => panic!("esperaba Liberado por el tope, llegó {otro:?}"),
         }
         assert_eq!(falso.lineas(), vec!["stop -s vieja".to_string()]);
@@ -3122,7 +3399,7 @@ mod tests {
             gates
                 .iter()
                 .any(|g| g["extra"]["accion"] == "vigilar"
-                    && g["extra"]["causa"] == "tope de 2 horas"),
+                    && g["extra"]["causa"] == "tope de duración"),
             "{gates:?}"
         );
     }

@@ -43,6 +43,7 @@ fn ejecucion(repo: &std::path::Path, salida: &std::path::Path, cmd: &str) -> Eje
         imagen: IMAGEN.into(),
         repo: Some(repo.into()),
         oraculo: None,
+        oraculo_destino: None,
         salida: salida.into(),
         cmd: cmd.into(),
         env: vec![],
@@ -51,6 +52,7 @@ fn ejecucion(repo: &std::path::Path, salida: &std::path::Path, cmd: &str) -> Eje
         cache: None,
         cache_rw: false,
         rustsec: None,
+        trabajo: None,
         secretos: Vec::new(),
     }
 }

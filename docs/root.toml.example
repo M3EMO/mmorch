@@ -1,15 +1,29 @@
 # Ejemplo de root.toml. Copialo a $ROOT_HOME/root.toml y ajustá los valores.
 # Los valores de este archivo son los defaults de Root. Sin root.toml, Root usa esos mismos defaults.
 #
-# Precios: Root no trae ningún precio. Sin precio para un modelo, `r00t llama` rechaza la llamada.
-# Falla cerrado: un tope no se esquiva por omisión. Ningún agente inventa un precio.
-# El humano copia cada precio desde la página de su proveedor.
+# Precios: Root trae precios por defecto para deepseek-flash, deepseek-v4-pro, claude-haiku-5-5 y
+# claude-sonnet-5-5 (abajo). Un modelo sin precio, `r00t llama` lo rechaza: falla cerrado.
+# Un [precios.<modelo>] de root.toml reemplaza el default de ese modelo; los de los demás se conservan.
 
-# Umbral de veredicto verde, de 0 a 1. Lo usa el informe (Tarea 13b, pendiente).
+# Umbral de veredicto verde, de 0 a 1. Hoy no lo lee ninguna regla: la decisión sale de [decision].
 umbral_verde = 0.8
 
 # Cota inferior de Wilson (90%, unilateral) que un candidato debe alcanzar para entrar a la política.
 umbral_wilson = 0.6
+
+# Reglas de la decisión del informe (Tarea 13b). Son deterministas: ningún LLM las decide.
+# Un requisito de peso 3 en nivel 0, un hallazgo de seguridad de severidad 3 o un ítem de rúbrica con
+# `bloquea = true` en nivel 0 dan Bloqueado. Sin ellos, la decisión es NoListo si la completitud queda
+# bajo `completitud_minima`, si la completitud no tiene veredicto, o si una dimensión calibrada queda bajo
+# su mínimo. Si no, es Listo. Cada valor va de 0 a 1 y es finito; si no, Root sale con código 2.
+[decision]
+# Completitud mínima para Listo. Default: 0.9.
+completitud_minima = 0.9
+
+# Mínimo por dimensión. Solo rige sobre dimensiones calibradas. Vacío por defecto. Las claves son las
+# dimensiones: funciona, seguridad, eficiencia, estructura, arquitectura, diseno, completitud, entrega, pruebas.
+# Ejemplo: seguridad = 0.8 da NoListo a una seguridad calibrada por debajo de 0,8.
+[decision.minimo]
 
 # Modelo por rol cuando la vía es el cupo. Cada alias debe tener api_equivalente en [ruteo].
 [modelos]
@@ -38,17 +52,30 @@ tope_usd = 100.0
 tope_usd = 250.0
 
 # Ruteo cuando la vía es API. Los modelos de la API de los roles fijos.
+# Verifica y Juzga razonan siempre. Sus modelos deben estar en la lista que admite razonamiento:
+# deepseek-flash, deepseek-v4-pro, claude-haiku-5-5, claude-sonnet-5-5 y claude-opus-5-5.
+# Un modelo fuera de la lista da error de elección (código 2).
 [ruteo.delega]
 proveedor = "deepseek"
-modelo = "deepseek-chat"
+modelo = "deepseek-flash"
 
+# respaldo: Route lo usa solo si el proveedor principal no está disponible (sin clave o con el
+# breaker abierto). Lleva razonamiento. Delega no tiene respaldo.
 [ruteo.verifica]
 proveedor = "deepseek"
-modelo = "deepseek-reasoner"
+modelo = "deepseek-flash"
+
+[ruteo.verifica.respaldo]
+proveedor = "anthropic"
+modelo = "claude-haiku-5-5"
 
 [ruteo.juzga]
 proveedor = "deepseek"
-modelo = "deepseek-reasoner"
+modelo = "deepseek-flash"
+
+[ruteo.juzga.respaldo]
+proveedor = "anthropic"
+modelo = "claude-haiku-5-5"
 
 # Equivalente de API de cada alias de cupo. Las entradas del usuario suman a estas tres; no las reemplazan.
 [ruteo.api_equivalente.opus]
@@ -69,19 +96,48 @@ deepseek_url = "https://api.deepseek.com"
 anthropic_url = "https://api.anthropic.com"
 # Espera antes del primer reintento, en milisegundos. Cada reintento la duplica.
 espera_base_ms = 500
-# Tiempo máximo de cada intento HTTP, en segundos.
+# Tiempo máximo de cada intento HTTP, en segundos. Lo usan los roles que no son Verifica ni Juzga.
+# Debe ser mayor que 0: si no, la carga falla con código 2.
 timeout_s = 120
+# Tiempo máximo de cada intento de Verifica y Juzga, en segundos. Un juez puede escribir hasta
+# 32 000 tokens. Debe ser mayor que 0.
+timeout_juez_s = 1200
+
+# Juez de la configuración de Cargo (decisión 47). Vía API y con razonamiento. El proveedor sale del
+# nombre: claude-* es Anthropic y deepseek-* es DeepSeek. Sin precio para el modelo, el juez da sin
+# veredicto y la descarga sigue.
+[jueces]
+config_modelo = "claude-sonnet-5-5"
 
 # Tope de duración de una corrida en Colab, en minutos (120 por defecto, 2 horas). Al llegar, Root libera el runtime y sale con código 3.
 [colab]
 minutos_max = 120
 
-# Precios por modelo. La tabla está vacía a propósito.
-# Para habilitar un modelo, descomentá su bloque y completá los dos valores.
-# USD por millón de tokens; copiá el valor de la página del proveedor.
-# [precios."<modelo>"]
-# usd_entrada =
-# usd_salida =
+# Precios por modelo, en USD por millón de tokens. Son los defaults de Root; cada uno cita su origen.
+# claude-haiku-5-5 tiene tramo alto: si la entrada de un pedido pasa umbral_entrada, el pedido entero
+# cuesta al precio alto. Los tres tramos van juntos o no van.
+# origen: mmorch/config.py (decisión 41)
+[precios."deepseek-flash"]
+usd_entrada = 0.14
+usd_salida = 0.28
+
+# origen: mmorch/config.py (decisión 41)
+[precios."deepseek-v4-pro"]
+usd_entrada = 1.74
+usd_salida = 3.48
+
+# origen: referencia de la API de Anthropic, tabla cacheada el 2026-10-06 (decisión 44)
+[precios."claude-haiku-5-5"]
+usd_entrada = 0.10
+usd_salida = 0.50
+umbral_entrada = 100000
+usd_entrada_alto = 0.50
+usd_salida_alto = 2.50
+
+# origen: referencia de la API de Anthropic, tabla cacheada el 2026-10-06 (decisión 47)
+[precios."claude-sonnet-5-5"]
+usd_entrada = 2.00
+usd_salida = 10.00
 
 # Registros privados de paquetes. Solo los escribe el humano: un repo no puede agregar uno.
 # Root pasa la credencial solo a un repo cuyo registro tiene el mismo host que url.

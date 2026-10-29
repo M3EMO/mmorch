@@ -2,6 +2,7 @@
 //!
 //! `calcular_uso` y `margenes` son puras. `uso` y `uso_en` leen `eventos.jsonl`.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use schemars::JsonSchema;
@@ -58,16 +59,38 @@ pub fn calcular_uso(eventos: &[Evento], ahora: f64, offset_s: i32, bloque_horas:
     let inicio = crate::route::inicio_mes(ahora, offset_s);
     let suma_mes = |via: Via| -> f64 {
         visibles()
-            .filter(|ev| ev.ts >= inicio && ev.via == Some(via))
+            .filter(|ev| ev.ts >= inicio && ev.via == Some(via) && ev.tipo != TipoEvento::Reserva)
             // `fold` evita el -0.0 que `sum` da sin eventos.
             .fold(0.0, |total, ev| total + ev.cost_usd)
     };
+    let vigentes: Vec<&Evento> = visibles().collect();
     Uso {
         cupo_bloque_usd,
         cupo_bloque_inicio,
-        api_mes_usd: suma_mes(Via::Api),
+        api_mes_usd: suma_mes(Via::Api) + reservas_abiertas_usd(&vigentes, inicio),
         nube_mes_usd: suma_mes(Via::Nube),
     }
+}
+
+/// Costo de las reservas de API del mes que ningún evento cerró. Un evento cierra las reservas que
+/// lista en `extra.reservas`. Una reserva sin id, o sin cierre, cuenta como gasto.
+fn reservas_abiertas_usd(eventos: &[&Evento], inicio: f64) -> f64 {
+    let cerradas: HashSet<&str> = eventos
+        .iter()
+        .filter_map(|ev| ev.extra.get("reservas")?.as_array())
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    eventos
+        .iter()
+        .filter(|ev| ev.tipo == TipoEvento::Reserva && ev.via == Some(Via::Api) && ev.ts >= inicio)
+        .filter(|ev| {
+            !ev.extra
+                .get("reserva")
+                .and_then(Value::as_str)
+                .is_some_and(|id| cerradas.contains(id))
+        })
+        .fold(0.0, |total, ev| total + ev.cost_usd)
 }
 
 /// Gasto e inicio del bloque que contiene `ahora`. `eventos` van ordenados por `ts` y con `ts <= ahora`.
@@ -103,15 +126,32 @@ pub fn uso(ahora: f64) -> Result<Uso, Error> {
 }
 
 /// Todos los eventos del archivo indicado y de sus rotados (`<nombre>.N`), en orden de escritura.
-/// Un archivo inexistente da una lista vacía. Una línea inválida es error.
+/// Un archivo inexistente da una lista vacía. Una línea inválida es error. Lista y lee con un solo
+/// lock compartido, para que una rotación no deje afuera un archivo.
 pub fn leer_eventos(ruta: &Path) -> Result<Vec<Evento>, ErrorObserve> {
-    let mut eventos = Vec::new();
-    for archivo in jsonl::archivos_en_orden(ruta)? {
-        for linea in jsonl::leer_lineas(&archivo)? {
-            eventos.push(serde_json::from_str::<Evento>(&linea)?);
-        }
-    }
-    Ok(eventos)
+    jsonl::con_lock_compartido(ruta, |log| -> Result<Vec<Evento>, ErrorObserve> {
+        eventos_de(log.lineas()?)
+    })
+}
+
+/// `f` con los eventos del archivo y sus rotados, leídos bajo el lock exclusivo. `f` escribe con
+/// `log`: leer, decidir y escribir pasan en un solo tramo, sin que otro proceso se cuele.
+pub fn con_eventos_bloqueados<T>(
+    ruta: &Path,
+    f: impl FnOnce(&[Evento], &jsonl::Escritura<'_>) -> Result<T, ErrorObserve>,
+) -> Result<T, ErrorObserve> {
+    jsonl::con_lock_exclusivo(ruta, |log| -> Result<T, ErrorObserve> {
+        let eventos = eventos_de(log.lineas()?)?;
+        f(&eventos, log)
+    })
+}
+
+/// Parsea las líneas de un log. Una línea inválida es error.
+fn eventos_de(lineas: Vec<String>) -> Result<Vec<Evento>, ErrorObserve> {
+    lineas
+        .iter()
+        .map(|linea| Ok(serde_json::from_str::<Evento>(linea)?))
+        .collect()
 }
 
 /// `calcular_uso` sobre el archivo indicado y todos sus rotados (`<nombre>.N`).
@@ -144,24 +184,45 @@ pub fn estado(ahora: f64) -> Result<UsoMargenes, Error> {
     let margenes = margenes(&uso, &cfg.balance, ahora, offset);
     let mes = inicio_mes(ahora, offset);
     for tope in topes_sin_gate(&eventos, &margenes, uso.cupo_bloque_inicio, mes) {
-        let m = match tope {
-            "cupo" => &margenes.cupo,
-            "api" => &margenes.api,
-            _ => &margenes.nube,
-        };
-        let extra = Map::from_iter([
-            ("tope".to_string(), json!(tope)),
-            ("usado".to_string(), json!(m.usado_usd)),
-            ("tope_usd".to_string(), json!(m.tope_usd)),
-        ]);
-        observe::registrar(&observe::evento_gate("uso", "tope-lleno", extra))
-            .map_err(ErrorObserve::from)?;
+        registrar_gate_tope(tope, &margenes)?;
     }
     Ok(UsoMargenes {
         uso,
         margenes,
         aviso: AVISO_NUBE_NO_REGISTRADA.into(),
     })
+}
+
+/// Tras registrar sesiones en la nube: si el tope de nube del mes está lleno y no tiene `Gate`
+/// en ese mes, lo registra. Los topes de cupo y de API no se tocan.
+pub fn gate_nube_si_lleno(ahora: f64) -> Result<(), Error> {
+    let cfg = Config::cargar(&root_home().join("root.toml"))?;
+    let offset = offset_local();
+    let eventos = leer_eventos(&ruta_eventos())?;
+    let uso = calcular_uso(&eventos, ahora, offset, cfg.balance.cupo.bloque_horas);
+    let margenes = margenes(&uso, &cfg.balance, ahora, offset);
+    let mes = inicio_mes(ahora, offset);
+    if topes_sin_gate(&eventos, &margenes, uso.cupo_bloque_inicio, mes).contains(&"nube") {
+        registrar_gate_tope("nube", &margenes)?;
+    }
+    Ok(())
+}
+
+/// Registra el `Gate` `tope-lleno` de un tope, con su gasto y su límite.
+fn registrar_gate_tope(tope: &str, margenes: &Margenes) -> Result<(), Error> {
+    let m = match tope {
+        "cupo" => &margenes.cupo,
+        "api" => &margenes.api,
+        _ => &margenes.nube,
+    };
+    let extra = Map::from_iter([
+        ("tope".to_string(), json!(tope)),
+        ("usado".to_string(), json!(m.usado_usd)),
+        ("tope_usd".to_string(), json!(m.tope_usd)),
+    ]);
+    observe::registrar(&observe::evento_gate("uso", "tope-lleno", extra))
+        .map_err(ErrorObserve::from)?;
+    Ok(())
 }
 
 /// Topes llenos que no tienen un `Gate` `tope-lleno` dentro de su período.
@@ -292,6 +353,78 @@ mod tests {
 
     fn calcular(eventos: &[Evento]) -> Uso {
         calcular_uso(eventos, AHORA, 0, 5)
+    }
+
+    /// Reserva de API de `cost_usd` con el id `id`, como la escribe la llamada antes de enviar.
+    fn reserva(id: &str, ts: f64, cost_usd: f64) -> Evento {
+        Evento {
+            ts,
+            via: Some(Via::Api),
+            cost_usd,
+            tipo: TipoEvento::Reserva,
+            corrida: "c1".into(),
+            extra: serde_json::Map::from_iter([("reserva".to_string(), json!(id))]),
+            ..Evento::default()
+        }
+    }
+
+    /// Evento final de una llamada que cierra las reservas `ids`.
+    fn cierre(ts: f64, cost_usd: f64, ids: &[&str]) -> Evento {
+        Evento {
+            extra: serde_json::Map::from_iter([("reservas".to_string(), json!(ids))]),
+            ..api(ts, cost_usd)
+        }
+    }
+
+    #[test]
+    fn uso_leer_eventos_toma_el_lock_antes_de_listar_los_archivos() {
+        use std::fs::OpenOptions;
+        use std::thread;
+        use std::time::Duration;
+
+        let dir = TempDir::new().expect("temp dir");
+        let ruta = dir.path().join("eventos.jsonl");
+        let linea = |ev: &Evento| serde_json::to_string(ev).expect("serializa");
+        fs::write(&ruta, format!("{}\n", linea(&api(AHORA - HORA, 1.0)))).expect("vigente");
+        // Un escritor toma el lock exclusivo y el lector espera detrás de él.
+        let escritor = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(dir.path().join("eventos.jsonl.lock"))
+            .expect("candado");
+        fs4::FileExt::lock(&escritor).expect("lock exclusivo");
+        let ruta_lector = ruta.clone();
+        let lector = thread::spawn(move || leer_eventos(&ruta_lector));
+        // Tiempo para que el lector liste los archivos, si los lista antes de tomar el lock.
+        thread::sleep(Duration::from_millis(200));
+        // El escritor rota el log con el lock tomado, como en `jsonl::agregar`.
+        fs::rename(&ruta, dir.path().join("eventos.jsonl.1")).expect("rota");
+        fs::write(&ruta, format!("{}\n", linea(&api(AHORA, 2.0)))).expect("vigente nuevo");
+        drop(escritor);
+        let eventos = lector.join().expect("hilo").expect("lee");
+        assert_eq!(eventos.len(), 2, "el evento rotado no debe perderse");
+    }
+
+    #[test]
+    fn uso_reserva_abierta_suma_al_mes() {
+        let uso = calcular(&[reserva("r1", AHORA - HORA, 0.5)]);
+        assert_eq!(uso.api_mes_usd, 0.5);
+    }
+
+    #[test]
+    fn uso_reserva_cerrada_por_su_llamada_no_suma_dos_veces() {
+        let eventos = [
+            reserva("r1", AHORA - 2.0 * HORA, 0.5),
+            cierre(AHORA - HORA, 0.4, &["r1"]),
+        ];
+        assert!((calcular(&eventos).api_mes_usd - 0.4).abs() < 1e-12);
+    }
+
+    #[test]
+    fn uso_reserva_de_otro_mes_no_suma() {
+        let uso = calcular(&[reserva("r1", INICIO_OCTUBRE_UTC - HORA, 0.5)]);
+        assert_eq!(uso.api_mes_usd, 0.0);
     }
 
     #[test]

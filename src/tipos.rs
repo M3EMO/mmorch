@@ -55,6 +55,43 @@ pub enum Dimension {
     Pruebas,
 }
 
+/// Las nueve dimensiones, en el orden de `Dimension`.
+pub const TODAS_LAS_DIMENSIONES: [Dimension; 9] = [
+    Dimension::Funciona,
+    Dimension::Seguridad,
+    Dimension::Eficiencia,
+    Dimension::Estructura,
+    Dimension::Arquitectura,
+    Dimension::Diseno,
+    Dimension::Completitud,
+    Dimension::Entrega,
+    Dimension::Pruebas,
+];
+
+impl Dimension {
+    /// Clave de `root.toml` y de los JSON: el nombre en snake_case, como lo escribe serde.
+    pub fn clave(self) -> &'static str {
+        match self {
+            Dimension::Funciona => "funciona",
+            Dimension::Seguridad => "seguridad",
+            Dimension::Eficiencia => "eficiencia",
+            Dimension::Estructura => "estructura",
+            Dimension::Arquitectura => "arquitectura",
+            Dimension::Diseno => "diseno",
+            Dimension::Completitud => "completitud",
+            Dimension::Entrega => "entrega",
+            Dimension::Pruebas => "pruebas",
+        }
+    }
+
+    /// Dimensión de una clave de `root.toml`. `None` si la clave no existe.
+    pub fn desde_clave(clave: &str) -> Option<Dimension> {
+        TODAS_LAS_DIMENSIONES
+            .into_iter()
+            .find(|d| d.clave() == clave)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Estado {
@@ -114,6 +151,9 @@ pub struct Eleccion {
     pub modelo: Option<String>,
     pub razonamiento: bool,
     pub motivo: String,
+    /// Rol del pedido. `route` lo llena siempre; un juez armado a mano lo pone en `Juzga`.
+    #[serde(default)]
+    pub rol: Option<Rol>,
 }
 
 /// Gasto medido en USD equivalentes de lista. Lo arma `observe::uso`.
@@ -191,6 +231,9 @@ pub struct Puntaje {
     pub exactitud_balanceada: Option<f32>,
     #[serde(default)]
     pub items: Vec<NivelItem>,
+    /// Por qué la dimensión no tiene veredicto. Con `Some`, `valor` vale 0 y ningún lector lo usa.
+    #[serde(default)]
+    pub sin_veredicto: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -226,6 +269,9 @@ pub struct Informe {
     pub proximos_pasos: Vec<Accion>,
     /// Prosa. Cada oración cita un id.
     pub resumen: String,
+    /// Datos para decidir. Un informe viejo lee `Confianza` vacía.
+    #[serde(default)]
+    pub confianza: Confianza,
 }
 
 /// Tasa de aprobación de un test inestable, con la cota inferior de Wilson al 90%.
@@ -234,6 +280,43 @@ pub struct TasaTest {
     pub pasa: u32,
     pub total: u32,
     pub wilson_inf: f64,
+}
+
+/// Una dimensión sin veredicto y el motivo.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ParteSinVeredicto {
+    pub dimension: Dimension,
+    pub motivo: String,
+}
+
+/// Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos
+/// salen del `Veredicto`; `ambiguedades` queda vacío porque el veredicto no trae la ficha.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Confianza {
+    /// Repeticiones del oculto que corrieron.
+    #[serde(default)]
+    pub repeticiones: u32,
+    /// Tests inestables con su tasa. Claves `contrato:<id>` u `oculto:<id>`, como `Veredicto.tasas`.
+    #[serde(default)]
+    pub inestables: BTreeMap<String, TasaTest>,
+    /// Requisitos en estado `Pendiente`: un test falla por el entorno.
+    #[serde(default)]
+    pub requisitos_pendientes: Vec<String>,
+    /// Tests de `[[entorno]]` con su motivo.
+    #[serde(default)]
+    pub tests_pendientes: Vec<Pendiente>,
+    /// Ambigüedades abiertas de la ficha. Vacío: el veredicto no las trae.
+    #[serde(default)]
+    pub ambiguedades: Vec<String>,
+    /// Dimensiones con veredicto que no están calibradas.
+    #[serde(default)]
+    pub sin_calibrar: Vec<Dimension>,
+    /// Dimensiones sin veredicto, con su motivo.
+    #[serde(default)]
+    pub sin_veredicto: Vec<ParteSinVeredicto>,
+    /// Avisos del veredicto, por ejemplo una corrida de Colab con red.
+    #[serde(default)]
+    pub avisos: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -274,6 +357,12 @@ pub struct Veredicto {
     /// Problemas que no tumban la evaluación, por ejemplo un `colab.json` ilegible.
     #[serde(default)]
     pub avisos: Vec<String>,
+    /// Estado de cada requisito de la tarea. Un veredicto viejo lee vacío.
+    #[serde(default)]
+    pub requisitos: Vec<EstadoRequisito>,
+    /// Dimensiones con veredicto que todavía no están calibradas. Un veredicto viejo lee vacío.
+    #[serde(default)]
+    pub sin_calibrar: Vec<Dimension>,
 }
 
 impl Default for Veredicto {
@@ -298,6 +387,8 @@ impl Default for Veredicto {
             tasas: BTreeMap::new(),
             pendientes: Vec::new(),
             avisos: Vec::new(),
+            requisitos: Vec::new(),
+            sin_calibrar: Vec::new(),
         }
     }
 }
@@ -311,6 +402,8 @@ pub enum TipoEvento {
     PlanAprobado,
     Gate,
     OraculoLeido,
+    /// Monto que una llamada a la API reserva antes de enviar el pedido. Lo cierra el `Llamada`.
+    Reserva,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -468,6 +561,7 @@ mod tests {
                 calibrada: true,
                 exactitud_balanceada: Some(0.97),
                 items: Vec::new(),
+                sin_veredicto: None,
             }],
             hallazgos: vec![Hallazgo {
                 dimension: Dimension::Seguridad,
@@ -491,6 +585,8 @@ mod tests {
             tasas: BTreeMap::new(),
             pendientes: Vec::new(),
             avisos: Vec::new(),
+            requisitos: Vec::new(),
+            sin_calibrar: Vec::new(),
         }
     }
 
@@ -569,6 +665,7 @@ mod tests {
             TipoEvento::PlanAprobado,
             TipoEvento::Gate,
             TipoEvento::OraculoLeido,
+            TipoEvento::Reserva,
         ] {
             ida_y_vuelta(&x);
         }
@@ -614,6 +711,7 @@ mod tests {
             modelo: Some("deepseek-chat".into()),
             razonamiento: false,
             motivo: "cupo al 95%".into(),
+            rol: Some(Rol::Construye),
         });
         ida_y_vuelta(&Eleccion {
             via: Via::Oraculo,
@@ -621,6 +719,7 @@ mod tests {
             modelo: None,
             razonamiento: false,
             motivo: "checkeable".into(),
+            rol: None,
         });
         ida_y_vuelta(&Conteo {
             pasa: 15,
@@ -632,6 +731,7 @@ mod tests {
             calibrada: false,
             exactitud_balanceada: None,
             items: Vec::new(),
+            sin_veredicto: None,
         });
         ida_y_vuelta(&Hallazgo {
             dimension: Dimension::Arquitectura,
@@ -740,6 +840,10 @@ mod tests {
                 refs: Vec::new(),
             }],
             resumen: "El login falla. Ver h-1.".into(),
+            confianza: Confianza {
+                repeticiones: 5,
+                ..Confianza::default()
+            },
         }
     }
 
@@ -758,6 +862,37 @@ mod tests {
         assert!(v.puntajes[0].items.is_empty());
         assert_eq!(v.hallazgos[0].id, "");
         assert!(v.hallazgos[0].impacto.is_empty());
+    }
+
+    #[test]
+    fn tipos_veredicto_sin_requisitos_ni_sin_calibrar_se_lee_vacio() {
+        let mut json = serde_json::to_value(veredicto()).expect("serializa");
+        json.as_object_mut()
+            .expect("objeto")
+            .retain(|k, _| k != "requisitos" && k != "sin_calibrar");
+        let v: Veredicto = serde_json::from_value(json).expect("un veredicto viejo se acepta");
+        assert!(v.requisitos.is_empty());
+        assert!(v.sin_calibrar.is_empty());
+    }
+
+    #[test]
+    fn tipos_puntaje_sin_sin_veredicto_se_lee_none() {
+        let texto = r#"{"dimension":"seguridad","valor":0.5,"calibrada":false,
+            "exactitud_balanceada":null}"#;
+        let p: Puntaje = serde_json::from_str(texto).expect("un puntaje viejo se acepta");
+        assert_eq!(p.sin_veredicto, None);
+    }
+
+    #[test]
+    fn tipos_ida_y_vuelta_de_puntaje_sin_veredicto() {
+        ida_y_vuelta(&Puntaje {
+            dimension: Dimension::Diseno,
+            valor: 0.0,
+            calibrada: false,
+            exactitud_balanceada: None,
+            items: Vec::new(),
+            sin_veredicto: Some("juez no corrido".into()),
+        });
     }
 
     #[test]

@@ -7,17 +7,19 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use common::Servidor;
+use common::{Servidor, rompe_el_log_en_el_pedido, sse_deepseek};
 use root::observe;
 use root::tipos::{Evento, TipoEvento, Via};
 use serde_json::{Value, json};
 
 const CLAVE: &str = "sk-test-SECRETO-MCP";
-const DEEPSEEK_OK: &str = r#"{"choices":[{"message":{"content":"hola"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#;
-const PRECIO_CARO: &str = "[precios.deepseek-reasoner]\nusd_entrada = 0.0\nusd_salida = 3000.0\n";
-const PRECIO_BARATO: &str = "[precios.deepseek-reasoner]\nusd_entrada = 0.0\nusd_salida = 0.001\n";
+fn deepseek_ok() -> String {
+    sse_deepseek("hola", 10, 5, "stop")
+}
+const PRECIO_CARO: &str = "[precios.deepseek-flash]\nusd_entrada = 0.0\nusd_salida = 3000.0\n";
+const PRECIO_BARATO: &str = "[precios.deepseek-flash]\nusd_entrada = 0.0\nusd_salida = 0.001\n";
 const TAREA_MINIMA: &str = r#"
 nombre = "memora"
 lenguaje = "rust"
@@ -109,9 +111,12 @@ fn codigo_rpc(resp: &Value) -> i64 {
     resp["error"]["code"].as_i64().expect("código de error")
 }
 
+/// `r00t` con el mismo entorno que el servidor MCP de `mcp()`, para comparar la misma elección.
 fn root_cli(home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_r00t"))
         .env("ROOT_HOME", home)
+        .env("DEEPSEEK_API_KEY", CLAVE)
+        .env_remove("ANTHROPIC_API_KEY")
         .args(args)
         .output()
         .expect("no se pudo ejecutar el binario root")
@@ -365,7 +370,7 @@ fn mcp_registrar_escribe_el_evento_y_el_resumen_lo_cuenta() {
 
 #[test]
 fn mcp_llama_envia_una_vez_y_registra_con_corrida_mcp() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let srv = Servidor::arranca(vec![(200, deepseek_ok())]);
     let home = tempfile::tempdir().expect("home");
     preparar(home.path(), &srv.url, PRECIO_BARATO);
     gasto_api(home.path(), 98.0);
@@ -398,7 +403,7 @@ fn mcp_llama_envia_una_vez_y_registra_con_corrida_mcp() {
 
 #[test]
 fn mcp_llama_devuelve_la_misma_respuesta_que_la_cli() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK), (200, DEEPSEEK_OK)]);
+    let srv = Servidor::arranca(vec![(200, deepseek_ok()), (200, deepseek_ok())]);
     let home = tempfile::tempdir().expect("home");
     preparar(home.path(), &srv.url, PRECIO_BARATO);
 
@@ -446,7 +451,7 @@ fn mcp_llama_devuelve_la_misma_respuesta_que_la_cli() {
 
 #[test]
 fn mcp_llama_tope_es_error_de_herramienta_y_no_envia() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let srv = Servidor::arranca(vec![(200, deepseek_ok())]);
     let home = tempfile::tempdir().expect("home");
     preparar(home.path(), &srv.url, PRECIO_CARO);
     gasto_api(home.path(), 98.0);
@@ -470,7 +475,7 @@ fn mcp_llama_tope_es_error_de_herramienta_y_no_envia() {
 
 #[test]
 fn mcp_llama_rol_de_cupo_es_error_de_herramienta_sin_pedidos() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let srv = Servidor::arranca(vec![(200, deepseek_ok())]);
     let home = tempfile::tempdir().expect("home");
     preparar(home.path(), &srv.url, PRECIO_BARATO);
 
@@ -615,11 +620,15 @@ fn bloques_de(resp: &Value) -> Vec<String> {
 
 #[test]
 fn mcp_llama_evento_no_registrado_entrega_respuesta_y_evento() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
     let home = tempfile::tempdir().expect("home");
+    // La reserva se escribe; al recibir el pedido, el log pasa a ser un directorio. La llamada
+    // sale, y su evento final no se puede escribir.
+    let srv = Servidor::arranca_con(
+        vec![(200, deepseek_ok())],
+        Duration::ZERO,
+        Some(rompe_el_log_en_el_pedido(home.path(), 1)),
+    );
     preparar(home.path(), &srv.url, PRECIO_BARATO);
-    // El candado de `eventos.jsonl` es un directorio: la llamada sale, el evento no se escribe.
-    fs::create_dir(home.path().join("eventos.jsonl.lock")).expect("candado bloqueado");
 
     let resp = herramienta(
         home.path(),
@@ -647,11 +656,15 @@ fn mcp_llama_evento_no_registrado_entrega_respuesta_y_evento() {
 
 #[test]
 fn mcp_llama_error_del_proveedor_sin_evento_entrega_error_y_evento() {
-    // Sin cola, el servidor responde 500 a todos los intentos. El evento de la falla tampoco se escribe.
-    let srv = Servidor::arranca(vec![]);
+    // Sin cola, el servidor responde 500 a todos los intentos. Al tercero, el log pasa a ser un
+    // directorio: el evento de la falla no se puede escribir.
     let home = tempfile::tempdir().expect("home");
+    let srv = Servidor::arranca_con(
+        vec![],
+        Duration::ZERO,
+        Some(rompe_el_log_en_el_pedido(home.path(), 3)),
+    );
     preparar(home.path(), &srv.url, PRECIO_BARATO);
-    fs::create_dir(home.path().join("eventos.jsonl.lock")).expect("candado bloqueado");
 
     let resp = herramienta(
         home.path(),

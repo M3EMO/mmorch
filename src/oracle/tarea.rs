@@ -48,6 +48,9 @@ pub struct Tarea {
     /// Flujos de usuario que corren contra el producto levantado (Tarea 9d).
     #[serde(default)]
     pub escenario: Vec<Escenario>,
+    /// Calibración del Oracle (Tarea 12). Sin tabla, `oraculo calibrar` pide `--repo`.
+    #[serde(default)]
+    pub calibracion: Option<CalibracionTarea>,
     /// Carpeta de la tarea. Se monta como `/oraculo`. No viene del TOML.
     #[serde(skip)]
     pub dir: PathBuf,
@@ -141,6 +144,14 @@ pub struct EntregaTarea {
     /// Segundos que se espera antes de revisar que `correr` sigue vivo.
     #[serde(default = "espera_por_defecto")]
     pub espera_segundos: u64,
+}
+
+/// `[calibracion]` de `tarea.toml`: el repo bueno que `oraculo calibrar` usa sin `--repo`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct CalibracionTarea {
+    /// Repo bueno. Una ruta relativa se resuelve desde la carpeta de la tarea.
+    #[serde(default)]
+    pub repo: Option<String>,
 }
 
 /// Un flujo real de usuario. `cmd` sale 0 si el flujo funciona.
@@ -266,7 +277,7 @@ impl Tarea {
 }
 
 /// Carga la tarea desde una base dada. El nombre no puede traer rutas.
-fn cargar_en(home: &Path, nombre: &str) -> Result<Tarea, ErrorOraculo> {
+pub fn cargar_en(home: &Path, nombre: &str) -> Result<Tarea, ErrorOraculo> {
     let con_ruta =
         nombre.is_empty() || nombre.contains(['/', '\\']) || nombre == "." || nombre == "..";
     if con_ruta {
