@@ -3759,6 +3759,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "margenes": {
       "$ref": "#/$defs/Margenes"
     },
+    "reservas_viejas": {
+      "description": "Reservas de API abiertas con más de dos veces `timeout_juez_s`. Solo un humano las corrige.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ReservaVieja"
+      }
+    },
     "uso": {
       "$ref": "#/$defs/Uso"
     }
@@ -3830,6 +3838,44 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "cupo",
         "api",
         "nube"
+      ]
+    },
+    "ReservaVieja": {
+      "description": "Una reserva de API abierta y vieja. `r00t observa uso` la lista para que un humano la corrija.",
+      "type": "object",
+      "properties": {
+        "antiguedad_s": {
+          "description": "Segundos desde que se escribió la reserva, hasta el momento de la consulta.",
+          "type": "number",
+          "format": "double"
+        },
+        "corrida": {
+          "type": "string"
+        },
+        "modelo": {
+          "description": "Modelo de la llamada, si la reserva lo trae.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reserva": {
+          "description": "Id de la reserva. `None` si la reserva no trae id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "usd": {
+          "description": "Costo de peor caso que la reserva apartó.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "corrida",
+        "antiguedad_s",
+        "usd"
       ]
     },
     "Uso": {

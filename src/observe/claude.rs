@@ -6,9 +6,12 @@ use std::time::UNIX_EPOCH;
 
 use serde_json::{Map, Value, json};
 
-use crate::observe::ErrorObserve;
 use crate::observe::uso::iso;
+use crate::observe::{ErrorObserve, evento_gate};
 use crate::tipos::{Evento, TipoEvento, Via};
+
+/// Fase del `Gate` de una sesión importada sin costo.
+pub const FASE_COSTO_DESCONOCIDO: &str = "costo-desconocido";
 
 /// Lee la salida de `claude -p` y da, por objeto JSON, una `Llamada` por modelo de `modelUsage`
 /// y un `Sesion`. La hora de los eventos es el inicio de la sesión: el mtime del archivo menos
@@ -35,6 +38,31 @@ pub fn leer_sesion_claude(json: &Path, corrida: &str) -> Result<Vec<Evento>, Err
         .into_iter()
         .flat_map(|objeto| eventos_desde(objeto, corrida, fin))
         .collect())
+}
+
+/// Un `Gate` `costo-desconocido` por cada `Sesion` que marca `costo_desconocido`. El tope no puede
+/// sumar esa sesión, así que el `Gate` lo dice en la misma corrida y con el id de la sesión.
+pub fn gates_de_costo_desconocido(eventos: &[Evento]) -> Vec<Evento> {
+    eventos
+        .iter()
+        .filter(|ev| {
+            ev.tipo == TipoEvento::Sesion
+                && ev.extra.get("costo_desconocido").and_then(Value::as_bool) == Some(true)
+        })
+        .map(|ev| {
+            let extra = Map::from_iter([
+                (
+                    "motivo".to_string(),
+                    json!("sesión sin costo: el tope no la puede sumar"),
+                ),
+                (
+                    "sesion".to_string(),
+                    ev.extra.get("session_id").cloned().unwrap_or(Value::Null),
+                ),
+            ]);
+            evento_gate(&ev.corrida, FASE_COSTO_DESCONOCIDO, extra)
+        })
+        .collect()
 }
 
 /// Hora en que terminó la sesión: el mtime del archivo, en epoch segundos.

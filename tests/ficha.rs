@@ -615,6 +615,58 @@ fn ficha_cli_juez_proveedor_sin_modelo_sale_2() {
 }
 
 #[test]
+fn ficha_cli_juez_modelo_fuera_de_la_lista_sale_2_y_lo_nombra() {
+    let home = tempfile::tempdir().expect("temp dir");
+    // Sin clave: si la regla no corta antes, la salida sería 3 y no 2.
+    let salida = Command::new(env!("CARGO_BIN_EXE_r00t"))
+        .env("ROOT_HOME", home.path())
+        .env_remove("DEEPSEEK_API_KEY")
+        .args([
+            "ficha",
+            "revisar",
+            "--spec",
+            &ruta_fixture("spec-completa.md"),
+            "--juez-proveedor",
+            "deepseek",
+            "--juez-modelo",
+            "deepseek-chat",
+        ])
+        .output()
+        .expect("ejecuta r00t");
+    assert_eq!(codigo(&salida), 2);
+    let stderr = String::from_utf8_lossy(&salida.stderr);
+    assert!(stderr.contains("deepseek-chat"), "stderr: {stderr}");
+    assert!(stderr.contains("deepseek-v4-pro"), "stderr: {stderr}");
+}
+
+#[test]
+fn ficha_cli_juez_modelo_de_la_lista_no_sale_con_2_por_la_regla() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let salida = Command::new(env!("CARGO_BIN_EXE_r00t"))
+        .env("ROOT_HOME", home.path())
+        .env_remove("DEEPSEEK_API_KEY")
+        .args([
+            "ficha",
+            "revisar",
+            "--spec",
+            &ruta_fixture("spec-completa.md"),
+            "--juez-proveedor",
+            "deepseek",
+            "--juez-modelo",
+            "deepseek-v4-pro",
+        ])
+        .output()
+        .expect("ejecuta r00t");
+    // Sin clave, el juez no llama a la red: sale con 3 por falta de clave, no con el mensaje de la lista.
+    assert_eq!(codigo(&salida), 3);
+    let stderr = String::from_utf8_lossy(&salida.stderr);
+    assert!(
+        !stderr.contains("no admite razonamiento"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
 fn ficha_cli_juez_sin_clave_da_sin_veredicto_y_sale_3() {
     let home = tempfile::tempdir().expect("temp dir");
     let salida = Command::new(env!("CARGO_BIN_EXE_r00t"))
@@ -629,7 +681,7 @@ fn ficha_cli_juez_sin_clave_da_sin_veredicto_y_sale_3() {
             "--juez-proveedor",
             "deepseek",
             "--juez-modelo",
-            "deepseek-reasoner",
+            "deepseek-v4-pro",
         ])
         .output()
         .expect("ejecuta r00t");
@@ -1063,11 +1115,11 @@ fn deepseek_juez_vacio() -> String {
     sse_deepseek("[]", 10, 5, "stop")
 }
 
-/// `root.toml` con el servidor falso como proveedor y un precio para `deepseek-reasoner`.
+/// `root.toml` con el servidor falso como proveedor y un precio para `deepseek-v4-pro`.
 fn home_juez(url: &str, precio: &str) -> tempfile::TempDir {
     let home = tempfile::tempdir().expect("home");
     let texto = format!(
-        "[proveedores]\ndeepseek_url = \"{url}\"\nespera_base_ms = 1\n\n[precios.deepseek-reasoner]\n{precio}\n"
+        "[proveedores]\ndeepseek_url = \"{url}\"\nespera_base_ms = 1\n\n[precios.deepseek-v4-pro]\n{precio}\n"
     );
     fs::write(home.path().join("root.toml"), texto).expect("root.toml");
     home
@@ -1086,7 +1138,7 @@ fn revisar_con_juez_cli(home: &Path) -> Output {
             "--juez-proveedor",
             "deepseek",
             "--juez-modelo",
-            "deepseek-reasoner",
+            "deepseek-v4-pro",
         ])
         .output()
         .expect("no se pudo ejecutar el binario root")

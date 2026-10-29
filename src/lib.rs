@@ -474,11 +474,16 @@ fn ficha_accion(json: bool, accion: &FichaAccion) -> Result<u8, Error> {
             let texto = leer_spec(spec)?;
             let ctx = ContextoRevision::default();
             let tope = juez_max_tokens.unwrap_or(crate::proveedores::MAX_TOKENS_JUEZ);
+            let juez = juez_de(*juez_proveedor, juez_modelo.as_deref());
+            // El juez de la ficha razona: un modelo fuera de la lista cerrada sale con 2 antes de llamar.
+            if let Some(juez) = &juez {
+                route::exigir_modelo_que_razona(&juez.eleccion)?;
+            }
             // Con juez, los precios y el tope de API salen de root.toml: un archivo inválido es error de uso.
             if juez_proveedor.is_some() {
                 config::Config::cargar(&config::root_home().join("root.toml"))?;
             }
-            let revision = match juez_de(*juez_proveedor, juez_modelo.as_deref()) {
+            let revision = match juez {
                 Some(juez) => ficha::revisar_con_tope(&texto, &ctx, &juez, tope)?,
                 None => ficha::revisar(&texto, &ctx)?,
             };
@@ -860,6 +865,9 @@ fn observa(json: bool, accion: &ObservaAccion) -> Result<(), Error> {
             for ev in &eventos {
                 observe::registrar(ev).map_err(observe::ErrorObserve::from)?;
             }
+            for gate in observe::claude::gates_de_costo_desconocido(&eventos) {
+                observe::registrar(&gate).map_err(observe::ErrorObserve::from)?;
+            }
             if via == Some(Via::Nube) {
                 observe::uso::gate_nube_si_lleno(observe::ahora().0)?;
             }
@@ -936,7 +944,33 @@ fn imprimir_uso(estado: &observe::uso::UsoMargenes) {
             100.0 * m.fraccion
         );
     }
+    imprimir_reservas_viejas(&estado.reservas_viejas);
     println!("{}", estado.aviso);
+}
+
+/// Una línea por reserva abierta y vieja, con su id, corrida, modelo, antigüedad y monto.
+fn imprimir_reservas_viejas(viejas: &[observe::uso::ReservaVieja]) {
+    if viejas.is_empty() {
+        println!("Reservas abiertas de más de dos veces timeout_juez_s: ninguna.");
+        return;
+    }
+    println!("Reservas abiertas de más de dos veces timeout_juez_s:");
+    for r in viejas {
+        let id = r.reserva.as_deref().unwrap_or("sin id");
+        let modelo = r
+            .modelo
+            .as_deref()
+            .map_or(String::new(), |m| format!(", modelo {m}"));
+        println!(
+            "  {id}: corrida {}{modelo}, antigüedad {:.1} h, {:.2} USD",
+            r.corrida,
+            r.antiguedad_s / 3600.0,
+            r.usd
+        );
+    }
+    println!(
+        "Solo una persona corrige estas reservas con `r00t observa costo`, que solo suma gasto."
+    );
 }
 
 fn imprimir_registrados(json: bool, cuantos: usize) {
