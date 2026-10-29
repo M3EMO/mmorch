@@ -195,7 +195,7 @@ fn registrar_repeticion(
 ) -> Result<(), ErrorOraculo> {
     let run: Vec<Value> = instrucciones(texto)
         .into_iter()
-        .filter(|i| palabra_clave(&i.logico).0 == "RUN")
+        .filter(|i| paso_que_necesita_red(&i.logico))
         .map(|i| json!({"linea": i.linea, "cita": i.cita}))
         .collect();
     let mut extra = serde_json::Map::new();
@@ -361,8 +361,22 @@ fn construir_con<'a>(
     let ctx = contexto.to_string_lossy().into_owned();
     let mut build = correr_build(podman, false, &imagen.etiqueta, &df, &ctx, plazo)?;
     let mut con_red = false;
-    if build.codigo != 0 {
-        match clasificar_fallo(&build, &ruta, &texto, reqs)? {
+    // Un `ADD` con URL baja desde el host aunque el build vaya sin red: que salga 0 no prueba que sea
+    // sin red. Ese paso manda la repetición con red, igual que un `RUN` que falla sin red (A11).
+    let paso_url = instrucciones(&texto)
+        .into_iter()
+        .find(|i| paso_con_url(&i.logico))
+        .map(|i| (i.linea, i.cita));
+    if build.codigo != 0 || paso_url.is_some() {
+        let desenlace = match (build.codigo, paso_url) {
+            (0, Some((linea, cita))) => Desenlace::PendienteRed {
+                motivo: format!("paso con URL que baja desde el host: línea {linea}, {cita}"),
+                linea,
+                cita,
+            },
+            _ => clasificar_fallo(&build, &ruta, &texto, reqs)?,
+        };
+        match desenlace {
             Desenlace::PendienteRed {
                 linea,
                 cita,
@@ -587,14 +601,19 @@ fn clasificar_fallo(
         )));
     };
     let instrucciones_df = instrucciones(texto);
-    let (linea, cita, kw) = match instrucciones_df.get(paso.saturating_sub(1)) {
-        Some(i) => (i.linea, i.cita.clone(), palabra_clave(&i.logico).0),
+    let (linea, cita, kw, red_paso) = match instrucciones_df.get(paso.saturating_sub(1)) {
+        Some(i) => (
+            i.linea,
+            i.cita.clone(),
+            palabra_clave(&i.logico).0,
+            paso_que_necesita_red(&i.logico),
+        ),
         None => match instrucciones_df
             .iter()
             .find(|i| palabra_clave(&i.logico).0 == "RUN")
         {
-            Some(i) => (i.linea, i.cita.clone(), "RUN".to_string()),
-            None => (0, String::new(), String::new()),
+            Some(i) => (i.linea, i.cita.clone(), "RUN".to_string(), true),
+            None => (0, String::new(), String::new(), false),
         },
     };
     let minuscula = salida.to_lowercase();
@@ -608,7 +627,7 @@ fn clasificar_fallo(
             "podman no pudo arrancar el FROM de la línea {linea}"
         )));
     }
-    if kw == "RUN" && pide_red(&salida) {
+    if red_paso && pide_red(&salida) {
         let motivo = format!("no se pudo construir sin red: línea {linea}, {cita}");
         return Ok(Desenlace::PendienteRed {
             motivo,
@@ -657,6 +676,17 @@ fn es_linea_red_no_configurada(linea: &str) -> bool {
     let red_sin_binario =
         (minuscula.contains("slirp4netns") || minuscula.contains("pasta")) && falla;
     red_sin_binario || (minuscula.contains("netavark") && minuscula.contains("error"))
+}
+
+/// Verdadero si el paso `ADD` o `COPY` trae una fuente remota (A11). Buildah la baja desde el host, así
+/// que cuenta como paso que necesita red, igual que un `RUN` (decisión 27).
+fn paso_con_url(logico: &str) -> bool {
+    !configs::fuentes_remotas(logico).is_empty()
+}
+
+/// Verdadero si el paso necesita red al construirse: un `RUN`, o un `ADD`/`COPY` con una URL (A11).
+fn paso_que_necesita_red(logico: &str) -> bool {
+    palabra_clave(logico).0 == "RUN" || paso_con_url(logico)
 }
 
 /// Verdadero si la salida de un build trae evidencia de falta de red.
@@ -2406,5 +2436,88 @@ mod tests {
             "{:?}",
             c.avisos
         );
+    }
+
+    /// Dockerfile con un `ADD` de una URL: buildah la baja desde el host aunque el build vaya sin red (A11).
+    const DF_ADD_URL: &str = "FROM debian:12\nADD https://ejemplo.com/x.tar.gz /x\nUSER app\n";
+
+    #[test]
+    fn entrega_red_add_con_url_que_construye_sin_red_se_repite_con_red() {
+        // El build sin red sale 0, pero el ADD bajó la URL desde el host: cuenta como paso con red.
+        let repo = repo_con_archivos(&[("Dockerfile", DF_ADD_URL)]);
+        let home = tempfile::tempdir().expect("home");
+        let podman = PodmanFalso::nuevo(responde_build(salida_ok(), salida_ok()));
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("construye");
+        assert!(c.resultado.con_red, "{:?}", c.resultado);
+        assert_eq!(podman.builds().len(), 2, "{:?}", podman.builds());
+        assert!(es_build_con_red(
+            &podman.builds()[1]
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        ));
+        let h = c.resultado.hallazgos.first().expect("hay hallazgo");
+        assert_eq!(h.severidad, 1);
+        assert_eq!(h.detalle, DETALLE_NECESITA_RED);
+        let gates = gates_de_repeticion(home.path());
+        let runs = gates[0]["extra"]["runs_del_dockerfile"]
+            .as_array()
+            .expect("lista de pasos");
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert_eq!(runs[0]["cita"], "ADD https://ejemplo.com/x.tar.gz /x");
+    }
+
+    #[test]
+    fn entrega_red_add_con_url_que_falla_sin_red_queda_pendiente_y_se_repite() {
+        const SALIDA_ADD: &str =
+            "STEP 1/3: FROM debian:12\nSTEP 2/3: ADD https://ejemplo.com/x.tar.gz /x\n";
+        let sin_red = SalidaPodman {
+            codigo: 1,
+            stdout: SALIDA_ADD.into(),
+            stderr: "dial tcp: lookup ejemplo.com: Temporary failure in name resolution\n".into(),
+        };
+        let repo = repo_con_archivos(&[("Dockerfile", DF_ADD_URL)]);
+        let home = tempfile::tempdir().expect("home");
+        let podman = PodmanFalso::nuevo(responde_build(sin_red, salida_ok()));
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("construye");
+        assert!(c.resultado.con_red, "{:?}", c.resultado);
+        assert!(
+            c.resultado
+                .hallazgos
+                .iter()
+                .all(|h| h.detalle != "la imagen no construye: línea 2"),
+            "{:?}",
+            c.resultado.hallazgos
+        );
+        assert_eq!(gates_de_repeticion(home.path()).len(), 1);
+    }
+
+    #[test]
+    fn entrega_paso_con_url_reconoce_add_y_copy_con_fuente_remota() {
+        assert!(paso_con_url("ADD https://x.org/a.tar.gz /a"));
+        assert!(paso_con_url("ADD --chown=app https://x.org/a /a"));
+        assert!(paso_con_url("COPY git@github.com:x/y.git /y"));
+        assert!(paso_con_url(r#"ADD ["https://x.org/a", "/a"]"#));
+        assert!(paso_con_url("ADD git://x.org/y /y"));
+        assert!(!paso_con_url("ADD ./local.tar.gz /x"));
+        assert!(!paso_con_url("COPY ./src /app"));
+        assert!(!paso_con_url("RUN wget https://x.org/a"));
+        assert!(!paso_con_url("ADD ./https-notas.txt /x"));
     }
 }

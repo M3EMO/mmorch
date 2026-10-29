@@ -12,6 +12,7 @@ use toml::{Table, Value};
 use url::Host;
 
 use crate::oracle::ErrorOraculo;
+use crate::oracle::configs::{fuentes_remotas, instrucciones};
 use crate::tipos::Dimension;
 
 const ARCHIVO_CARGO: &str = "Cargo.toml";
@@ -226,7 +227,24 @@ pub fn inventariar(repo: &Path) -> Result<Inventario, ErrorOraculo> {
     inventariar_cargo(repo, &mut inv)?;
     inventariar_requirements(repo, &mut inv)?;
     inventariar_config_cargo(repo, &mut inv)?;
+    inventariar_dockerfiles(repo, &mut inv)?;
     Ok(inv)
+}
+
+/// Las URL de los `ADD` y `COPY` de los Dockerfile del repo (A11). Buildah las baja desde el host, así
+/// que son fuentes como las demás: una dirección que no se acepta es rechazo.
+fn inventariar_dockerfiles(repo: &Path, inv: &mut Inventario) -> Result<(), ErrorOraculo> {
+    for ruta in crate::oracle::entrega::dockerfiles_del_repo(repo) {
+        let texto = fs::read_to_string(repo.join(&ruta))
+            .map_err(|e| ErrorOraculo::Infra(format!("leer {ruta} para el inventario: {e}")))?;
+        let t = Texto::nuevo(&ruta, &texto);
+        for instruccion in instrucciones(&texto) {
+            for url in fuentes_remotas(&instruccion.logico) {
+                directa(url, instruccion.linea, &t, inv);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Clasifica `.cargo/config.toml` y `config` del repo (decisión 30). No depende del manifiesto: un
@@ -2353,6 +2371,47 @@ requests\ngit+https://github.com/x/y@abc#egg=y\n";
     fn inventario_lee_config_sin_extension_ademas_del_toml() {
         let inv = inventario_de(&[(".cargo/config", "[http]\nproxy = \"http://127.0.0.1:9\"\n")]);
         assert_eq!(entrada(&inv, "http.proxy").archivo, ".cargo/config");
+    }
+
+    #[test]
+    fn inventario_add_con_url_en_dockerfile_suma_la_fuente_de_tipo_url() {
+        let inv = inventario_de(&[(
+            "Dockerfile",
+            "FROM debian:12\nADD https://ejemplo.com/x.tar.gz /x\n",
+        )]);
+        assert_eq!(
+            inv.fuentes,
+            vec![Fuente {
+                tipo: TipoFuente::Url,
+                direccion: "https://ejemplo.com/x.tar.gz".into(),
+                host: "ejemplo.com".into(),
+                version: None,
+                archivo: "Dockerfile".into(),
+                linea: 2,
+            }]
+        );
+        assert!(inv.rechazos.is_empty(), "{:?}", inv.rechazos);
+    }
+
+    #[test]
+    fn inventario_copy_y_add_locales_no_suman_fuentes() {
+        let inv = inventario_de(&[(
+            "Dockerfile",
+            "FROM debian:12\nCOPY ./src /app\nADD ./x.tar.gz /x\n",
+        )]);
+        assert!(inv.fuentes.is_empty(), "{:?}", inv.fuentes);
+    }
+
+    #[test]
+    fn inventario_add_con_url_no_https_es_rechazo() {
+        let inv = inventario_de(&[(
+            "Dockerfile",
+            "FROM debian:12\nADD http://ejemplo.com/x.tar.gz /x\n",
+        )]);
+        assert!(inv.fuentes.is_empty(), "{:?}", inv.fuentes);
+        assert_eq!(inv.rechazos.len(), 1, "{:?}", inv.rechazos);
+        assert_eq!(inv.rechazos[0].archivo, "Dockerfile");
+        assert_eq!(inv.rechazos[0].linea, 2);
     }
 }
 

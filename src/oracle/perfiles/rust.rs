@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::Path;
 
+use super::herramientas::sin_veredicto;
 use super::{ResultadoSonda, crear_hallazgo, modulo_de, puntuar_hallazgos};
 use crate::goal::calcular_hash;
 use crate::oracle::tarea::Requisito;
@@ -56,8 +57,12 @@ pub(crate) struct Uso {
 
 /// Seguridad: cada `unsafe` (severidad 2) y cada `unwrap()`/`expect(` (severidad 1) fuera de tests.
 pub fn seguridad_nativa(repo: &Path, requisitos: &[Requisito]) -> ResultadoSonda {
+    let archivos = match fuentes_o_sin_veredicto(repo, Dimension::Seguridad) {
+        Ok(archivos) => archivos,
+        Err(sin) => return sin,
+    };
     let mut hallazgos = Vec::new();
-    for archivo in archivos_rs(repo) {
+    for archivo in &archivos {
         if es_archivo_de_test(&archivo.ruta) {
             continue;
         }
@@ -97,7 +102,10 @@ pub fn estructura_nativa(
     requisitos: &[Requisito],
     limites: &LimitesEstructura,
 ) -> ResultadoSonda {
-    let archivos = archivos_rs(repo);
+    let archivos = match fuentes_o_sin_veredicto(repo, Dimension::Estructura) {
+        Ok(archivos) => archivos,
+        Err(sin) => return sin,
+    };
     let mut hallazgos = Vec::new();
     for archivo in &archivos {
         if archivo.lineas.len() > limites.archivo_lineas {
@@ -115,7 +123,10 @@ pub fn arquitectura_nativa(
     capas: &[Vec<String>],
     requisitos: &[Requisito],
 ) -> ResultadoSonda {
-    let archivos = archivos_rs(repo);
+    let archivos = match fuentes_o_sin_veredicto(repo, Dimension::Arquitectura) {
+        Ok(archivos) => archivos,
+        Err(sin) => return sin,
+    };
     let modulos: BTreeSet<String> = archivos.iter().filter_map(|a| modulo_de(&a.ruta)).collect();
     let aristas = aristas_entre_modulos(&archivos, &modulos);
     let mut adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -169,34 +180,54 @@ fn resultado(dimension: Dimension, hallazgos: Vec<Hallazgo>, reqs: &[Requisito])
     }
 }
 
-pub(crate) fn archivos_rs(repo: &Path) -> Vec<Archivo> {
+/// Todos los `*.rs` del repo, salvo los de `target/` y las carpetas ocultas (`.git`, por ejemplo).
+/// Un error de lectura falla entero: con un archivo sin leer, la sonda no sabe qué falta (A9).
+pub(crate) fn archivos_rs(repo: &Path) -> Result<Vec<Archivo>, String> {
     let mut salida = Vec::new();
-    recorrer(repo, &repo.join("src"), &mut salida);
+    recorrer(repo, repo, &mut salida)?;
     salida.sort_by(|a, b| a.ruta.cmp(&b.ruta));
-    salida
+    Ok(salida)
 }
 
-fn recorrer(repo: &Path, dir: &Path, salida: &mut Vec<Archivo>) {
-    let Ok(entradas) = fs::read_dir(dir) else {
-        return;
+/// Los fuentes que una sonda necesita. Un error de lectura o un repo sin `.rs` no da veredicto (A9).
+fn fuentes_o_sin_veredicto(
+    repo: &Path,
+    dimension: Dimension,
+) -> Result<Vec<Archivo>, ResultadoSonda> {
+    let archivos = archivos_rs(repo).map_err(|motivo| sin_veredicto(dimension, motivo))?;
+    if archivos.is_empty() {
+        return Err(sin_veredicto(dimension, "no hay archivos .rs en el repo"));
+    }
+    Ok(archivos)
+}
+
+fn recorrer(repo: &Path, dir: &Path, salida: &mut Vec<Archivo>) -> Result<(), String> {
+    let rel = |p: &Path| {
+        p.strip_prefix(repo)
+            .unwrap_or(p)
+            .to_string_lossy()
+            .replace('\\', "/")
     };
-    for entrada in entradas.flatten() {
+    let entradas =
+        fs::read_dir(dir).map_err(|e| format!("no se pudo leer la carpeta {}: {e}", rel(dir)))?;
+    for entrada in entradas {
+        let entrada = entrada.map_err(|e| format!("no se pudo leer {}: {e}", rel(dir)))?;
         let ruta = entrada.path();
         if ruta.is_dir() {
-            if entrada.file_name().to_str() != Some("target") {
-                recorrer(repo, &ruta, salida);
+            let nombre = entrada.file_name().to_string_lossy().into_owned();
+            if nombre != "target" && !nombre.starts_with('.') {
+                recorrer(repo, &ruta, salida)?;
             }
         } else if ruta.extension().is_some_and(|e| e == "rs") {
-            let Ok(texto) = fs::read_to_string(&ruta) else {
-                continue;
-            };
-            let rel = ruta.strip_prefix(repo).unwrap_or(&ruta);
+            let texto = fs::read_to_string(&ruta)
+                .map_err(|e| format!("no se pudo leer {}: {e}", rel(&ruta)))?;
             salida.push(Archivo {
-                ruta: rel.to_string_lossy().replace('\\', "/"),
+                ruta: rel(&ruta),
                 lineas: texto.lines().map(String::from).collect(),
             });
         }
     }
+    Ok(())
 }
 
 /// Test por ruta: carpeta `tests`, o nombre `*_test.rs` / `*_tests.rs`.
@@ -786,5 +817,76 @@ mod tests {
         escribir(dir.path(), "src/almacen/mod.rs", "pub fn x() {}\n");
         let r = arquitectura_nativa(dir.path(), &capas(), &[]);
         assert!(r.hallazgos.is_empty());
+    }
+
+    #[test]
+    fn rust_sonda_recorre_crates_fuera_de_src() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), "crates/a/src/lib.rs", "pub unsafe fn f() {}\n");
+        let r = seguridad_nativa(dir.path(), &[]);
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        assert_eq!(r.hallazgos[0].archivo, "crates/a/src/lib.rs");
+        assert!(r.valor.is_some_and(|v| v < 1.0), "{:?}", r.valor);
+    }
+
+    #[test]
+    fn rust_sonda_no_recorre_target_ni_carpetas_ocultas() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), "src/lib.rs", "pub fn f() {}\n");
+        escribir(
+            dir.path(),
+            "target/debug/build/x.rs",
+            "pub unsafe fn g() {}\n",
+        );
+        escribir(dir.path(), ".git/hooks/x.rs", "pub unsafe fn h() {}\n");
+        let r = seguridad_nativa(dir.path(), &[]);
+        assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+        assert_eq!(r.valor, Some(1.0));
+    }
+
+    #[test]
+    fn rust_repo_sin_archivos_rs_da_sin_veredicto_en_tres_dimensiones() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), "README.md", "sin fuentes\n");
+        let capas = capas();
+        let sondas = [
+            seguridad_nativa(dir.path(), &[]),
+            estructura_nativa(dir.path(), &[], &LimitesEstructura::default()),
+            arquitectura_nativa(dir.path(), &capas, &[]),
+        ];
+        for r in &sondas {
+            assert_eq!(r.valor, None, "{:?}", r.dimension);
+            assert!(
+                r.motivo
+                    .as_deref()
+                    .is_some_and(|m| m.contains("no hay archivos .rs")),
+                "{:?}",
+                r.motivo
+            );
+        }
+    }
+
+    #[test]
+    fn rust_repo_inexistente_da_sin_veredicto() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ausente = dir.path().join("no-existe");
+        let r = seguridad_nativa(&ausente, &[]);
+        assert_eq!(r.valor, None);
+        assert!(r.motivo.is_some());
+    }
+
+    #[test]
+    fn rust_archivo_ilegible_da_sin_veredicto_y_no_puntaje() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), "src/lib.rs", "pub fn f() {}\n");
+        // Bytes que no son UTF-8: `read_to_string` falla y la sonda no puede leer el fuente.
+        fs::write(dir.path().join("src/roto.rs"), [0xff, 0xfe, 0x00, 0x9f]).expect("escribe");
+        let r = seguridad_nativa(dir.path(), &[]);
+        assert_eq!(r.valor, None, "{:?}", r.motivo);
+        assert!(r.motivo.is_some());
+        let e = estructura_nativa(dir.path(), &[], &LimitesEstructura::default());
+        assert_eq!(e.valor, None);
+        let a = arquitectura_nativa(dir.path(), &capas(), &[]);
+        assert_eq!(a.valor, None);
     }
 }

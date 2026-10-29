@@ -167,10 +167,11 @@ fn cierra(caso: &mut Option<Caso>, junit: &mut Junit) {
     let Some(c) = caso.take() else {
         return;
     };
-    let resultado = if c.omitido {
-        ResultadoTest::Omite
-    } else if c.fallado {
+    // Una falla o un error gana al omitido: un `skipped` con `error` cuenta como falla (B14).
+    let resultado = if c.fallado {
         ResultadoTest::Falla
+    } else if c.omitido {
+        ResultadoTest::Omite
     } else {
         ResultadoTest::Pasa
     };
@@ -458,5 +459,17 @@ mod tests {
             parsear(r#"<testsuite><testcase classname="tests.test_a" name="t1"/></testsuite>"#)
                 .expect("parsea");
         assert_eq!(sin.red, None);
+    }
+
+    #[test]
+    fn junit_skipped_mas_error_cuenta_como_falla() {
+        let xml = r#"<testsuite>
+  <testcase classname="tests.test_a" name="t1"><skipped message="no"/><error message="teardown">boom</error></testcase>
+  <testcase classname="tests.test_a" name="t2"><error message="y"/><skipped message="no"/></testcase>
+</testsuite>"#;
+        let j = parsear(xml).expect("parsea");
+        assert_eq!(j.conteo(), Conteo { pasa: 0, total: 2 });
+        assert_eq!(j.archivos["test_a"].omite, 0);
+        assert_eq!(j.archivos["test_a"].fallas, vec!["t1", "t2"]);
     }
 }
