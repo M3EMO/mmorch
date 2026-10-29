@@ -2,10 +2,11 @@
 
 pub mod anthropic;
 pub mod deepseek;
+mod sse;
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -28,6 +29,8 @@ const VENTANA_FALLAS: Duration = Duration::from_secs(60);
 const ENFRIAMIENTO: Duration = Duration::from_secs(60);
 const ARCHIVO_EVENTOS: &str = "eventos.jsonl";
 const ARCHIVO_CONFIG: &str = "root.toml";
+/// Plazo de inactividad por defecto: sin bytes durante este tiempo, la conexión se corta.
+const INACTIVIDAD: Duration = Duration::from_secs(120);
 
 /// Tope de tokens de salida de los dos jueces (ficha y Oracle).
 /// 32 000: valor sin confirmar en la documentación oficial de DeepSeek (no publica el default; terceros reportan un máximo de salida de 384 K para deepseek-flash y deepseek-v4-pro). Es un techo, no un gasto.
@@ -298,6 +301,23 @@ pub fn breaker_global() -> &'static Breaker {
     BREAKER.get_or_init(Breaker::new)
 }
 
+/// Plazos de cada intento. `inactividad` corta una conexión sin bytes; `total` corta una respuesta
+/// que nunca termina. Sin `total`, vale el timeout de la llamada (`timeout_s` o `timeout_juez_s`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Plazos {
+    pub inactividad: Duration,
+    pub total: Option<Duration>,
+}
+
+impl Default for Plazos {
+    fn default() -> Self {
+        Plazos {
+            inactividad: INACTIVIDAD,
+            total: None,
+        }
+    }
+}
+
 /// Todo lo que `llamar_con` necesita. Los tests lo arman con un reloj y claves propios.
 pub struct Contexto<'a> {
     pub cfg: &'a Config,
@@ -306,6 +326,8 @@ pub struct Contexto<'a> {
     pub breaker: &'a Breaker,
     pub claves: &'a Claves,
     pub reloj: &'a dyn Fn() -> Instant,
+    /// Plazos de cada intento. `llamar` usa `Plazos::default()`.
+    pub plazos: Plazos,
 }
 
 /// Pedido HTTP ya armado, sin enviar.
@@ -325,12 +347,13 @@ pub(crate) struct Crudo {
     pub truncada: bool,
 }
 
-/// Campo de texto de una respuesta JSON, por puntero. Ausente es `ErrorProveedor::Respuesta`.
-pub(crate) fn texto_en(json: &Value, ruta: &str) -> Result<String, ErrorProveedor> {
-    json.pointer(ruta)
+/// Mensaje de un evento de error del stream. Sin `message`, un texto genérico.
+pub(crate) fn mensaje_de_error(error: &Value) -> String {
+    error
+        .get("message")
         .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| ErrorProveedor::Respuesta(format!("falta {ruta}")))
+        .unwrap_or("error en el stream")
+        .to_string()
 }
 
 /// Campo entero de una respuesta JSON, por puntero. Ausente es `ErrorProveedor::Respuesta`.
@@ -353,6 +376,7 @@ pub fn llamar(e: &Eleccion, prompt: &Prompt, corrida: &str) -> Result<Respuesta,
         breaker: breaker_global(),
         claves: &claves,
         reloj: &reloj,
+        plazos: Plazos::default(),
     };
     llamar_con(&ctx, e, prompt, corrida)
 }
@@ -366,8 +390,10 @@ struct Llamada<'a> {
     corrida: &'a str,
     /// `true` si la elección pide razonamiento. Va al cuerpo de cada intento.
     razonamiento: bool,
-    /// Plazo de cada intento, en segundos: el de los jueces para Verifica y Juzga.
-    timeout_s: u64,
+    /// Corte por inactividad de cada intento: sin bytes durante este tiempo.
+    inactividad: Duration,
+    /// Plazo total de cada intento, cuerpo incluido: el timeout de la llamada.
+    total: Duration,
     precio: Precio,
     /// Peor caso de un intento: la entrada estimada y todo `max_tokens`, al precio del modelo.
     peor_caso: f64,
@@ -398,7 +424,11 @@ pub fn llamar_con(
         prompt,
         corrida,
         razonamiento: e.razonamiento,
-        timeout_s: timeout_para(&ctx.cfg.proveedores, e.rol),
+        inactividad: ctx.plazos.inactividad,
+        total: ctx
+            .plazos
+            .total
+            .unwrap_or_else(|| Duration::from_secs(timeout_para(&ctx.cfg.proveedores, e.rol))),
         peor_caso: costo_peor_caso(&precio, tokens_entrada_estimados(prompt), prompt.max_tokens),
         precio,
         intentos: 0,
@@ -650,19 +680,11 @@ fn reintentar(
     clave: &Clave,
     llamada: &mut Llamada,
 ) -> Result<Crudo, ErrorProveedor> {
-    let agente = agente(llamada.timeout_s);
+    let agente = agente(llamada.inactividad, llamada.total);
     let mut espera = Duration::from_millis(ctx.cfg.proveedores.espera_base_ms);
     loop {
         reservar(ctx, llamada)?;
-        let resultado = un_intento(
-            &agente,
-            ctx.cfg,
-            llamada.proveedor,
-            clave,
-            llamada.modelo,
-            llamada.prompt,
-            llamada.razonamiento,
-        );
+        let resultado = un_intento(&agente, ctx.cfg, clave, llamada);
         match resultado {
             Ok(crudo) => return Ok(crudo),
             Err(err) => {
@@ -681,38 +703,38 @@ fn reintentar(
 }
 
 /// Cliente HTTP. Un 4xx o 5xx llega como respuesta, no como error, para clasificar el estado.
-fn agente(timeout_s: u64) -> ureq::Agent {
+/// `inactividad` corta cada lectura que se queda sin bytes; `total` corta el intento entero, cuerpo
+/// incluido, así que un modelo que nunca termina no cuelga la llamada.
+fn agente(inactividad: Duration, total: Duration) -> ureq::Agent {
     let config = ureq::Agent::config_builder()
         .http_status_as_error(false)
-        .timeout_per_call(Some(Duration::from_secs(timeout_s)))
+        .timeout_per_read(Some(inactividad))
+        .timeout_global(Some(total))
         .build();
     ureq::Agent::new_with_config(config)
 }
 
-/// Un intento HTTP: envía, revisa el estado y lee el cuerpo con el parser del proveedor.
+/// Un intento HTTP: envía el pedido en streaming y lee el cuerpo SSE con el acumulador del proveedor.
 fn un_intento(
     agente: &ureq::Agent,
     cfg: &Config,
-    proveedor: Proveedor,
     clave: &Clave,
-    modelo: &str,
-    prompt: &Prompt,
-    razonamiento: bool,
+    llamada: &Llamada,
 ) -> Result<Crudo, ErrorProveedor> {
-    let pet = match proveedor {
+    let pet = match llamada.proveedor {
         Proveedor::Deepseek => deepseek::armar(
             &cfg.proveedores.deepseek_url,
             clave,
-            modelo,
-            prompt,
-            razonamiento,
+            llamada.modelo,
+            llamada.prompt,
+            llamada.razonamiento,
         ),
         Proveedor::Anthropic => anthropic::armar(
             &cfg.proveedores.anthropic_url,
             clave,
-            modelo,
-            prompt,
-            razonamiento,
+            llamada.modelo,
+            llamada.prompt,
+            llamada.razonamiento,
         ),
     };
     let mut pedido = agente.post(&pet.url);
@@ -722,16 +744,72 @@ fn un_intento(
     let mut respuesta = pedido.send(pet.cuerpo.as_str()).map_err(error_al_enviar)?;
     let estado = respuesta.status().as_u16();
     if !(200..300).contains(&estado) {
-        let proveedor = familia(proveedor).into();
+        let proveedor = familia(llamada.proveedor).into();
         return Err(error_de_estado(estado, proveedor));
     }
-    let texto = respuesta
-        .body_mut()
-        .read_to_string()
-        .map_err(error_despues_de_enviar)?;
-    match proveedor {
-        Proveedor::Deepseek => deepseek::leer(&texto),
-        Proveedor::Anthropic => anthropic::leer(&texto),
+    let mut cuerpo = respuesta.body_mut().as_reader();
+    leer_stream(&mut cuerpo, llamada.proveedor)
+}
+
+/// Pasa el cuerpo por el parser SSE y por el acumulador del proveedor. Un error de lectura o de
+/// evento corta la lectura: la llamada falla con su error.
+fn leer_stream(cuerpo: &mut impl Read, proveedor: Proveedor) -> Result<Crudo, ErrorProveedor> {
+    let mut parser = sse::Parser::default();
+    let mut flujo = Flujo::para(proveedor);
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = match cuerpo.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(error_de_lectura(err)),
+        };
+        for evento in parser.alimentar(&buf[..n]) {
+            flujo.consumir(&evento)?;
+        }
+    }
+    flujo.cerrar()
+}
+
+/// Acumulador del stream de cada proveedor.
+enum Flujo {
+    Deepseek(deepseek::Acumulador),
+    Anthropic(anthropic::Acumulador),
+}
+
+impl Flujo {
+    fn para(proveedor: Proveedor) -> Flujo {
+        match proveedor {
+            Proveedor::Deepseek => Flujo::Deepseek(deepseek::Acumulador::default()),
+            Proveedor::Anthropic => Flujo::Anthropic(anthropic::Acumulador::default()),
+        }
+    }
+
+    fn consumir(&mut self, evento: &sse::EventoSse) -> Result<(), ErrorProveedor> {
+        match self {
+            Flujo::Deepseek(acumulador) => acumulador.consumir(&evento.datos),
+            Flujo::Anthropic(acumulador) => {
+                acumulador.consumir(evento.evento.as_deref(), &evento.datos)
+            }
+        }
+    }
+
+    fn cerrar(self) -> Result<Crudo, ErrorProveedor> {
+        match self {
+            Flujo::Deepseek(acumulador) => acumulador.cerrar(),
+            Flujo::Anthropic(acumulador) => acumulador.cerrar(),
+        }
+    }
+}
+
+/// Falla leyendo el cuerpo, después de enviar. Un plazo agotado es `Timeout`; lo demás, `Cortada`.
+fn error_de_lectura(err: io::Error) -> ErrorProveedor {
+    if err.kind() == io::ErrorKind::TimedOut {
+        return ErrorProveedor::Timeout(err.to_string());
+    }
+    match err.downcast::<ureq::Error>() {
+        Ok(err) => error_despues_de_enviar(err),
+        Err(err) => ErrorProveedor::Cortada(err.to_string()),
     }
 }
 

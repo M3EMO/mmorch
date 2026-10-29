@@ -15,7 +15,7 @@ use root::proveedores::{Prompt, RespuestaJuez};
 use root::tipos::{Evento, TipoEvento, Via};
 
 mod common;
-use common::Servidor;
+use common::{Servidor, sse_deepseek};
 
 /// Juez falso: devuelve una respuesta fija y guarda cada prompt que recibe.
 struct JuezFalso {
@@ -840,9 +840,13 @@ fn ficha_cli_spec_inexistente_nombra_la_causa_una_sola_vez() {
 
 const CLAVE_FALSA: &str = "sk-test-FICHA-TOPE";
 /// El juez responde un arreglo vacío y termina con `stop`.
-const JUEZ_LISTA_VACIA: &str = r#"{"choices":[{"message":{"content":"[]"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+fn juez_lista_vacia() -> String {
+    sse_deepseek("[]", 1, 1, "stop")
+}
 /// El juez gastó todo el tope en razonamiento: contenido vacío y `finish_reason` = `length`.
-const JUEZ_TRUNCADO: &str = r#"{"choices":[{"message":{"content":"","reasoning_content":"pensé"},"finish_reason":"length"}],"usage":{"prompt_tokens":100,"completion_tokens":32000}}"#;
+fn juez_truncado() -> String {
+    sse_deepseek("", 100, 32000, "length")
+}
 
 /// `ficha revisar` con el juez de DeepSeek apuntado al servidor falso. `ROOT_HOME` es `home`.
 fn revisar_contra(srv: &Servidor, home: &Path, extra: &[&str]) -> Output {
@@ -936,7 +940,7 @@ fn ficha_juez_no_truncado_json_roto_sigue_siendo_json_invalido() {
 
 #[test]
 fn ficha_cli_juez_pide_32000_de_tope_por_defecto() {
-    let srv = Servidor::arranca(vec![(200, JUEZ_LISTA_VACIA)]);
+    let srv = Servidor::arranca(vec![(200, juez_lista_vacia())]);
     let home = tempfile::tempdir().expect("home");
     let salida = revisar_contra(&srv, home.path(), &[]);
     assert_eq!(
@@ -950,7 +954,7 @@ fn ficha_cli_juez_pide_32000_de_tope_por_defecto() {
 
 #[test]
 fn ficha_cli_juez_max_tokens_llega_al_cuerpo_del_pedido() {
-    let srv = Servidor::arranca(vec![(200, JUEZ_LISTA_VACIA)]);
+    let srv = Servidor::arranca(vec![(200, juez_lista_vacia())]);
     let home = tempfile::tempdir().expect("home");
     let salida = revisar_contra(&srv, home.path(), &["--juez-max-tokens", "8000"]);
     assert_eq!(
@@ -1017,7 +1021,7 @@ fn ficha_cli_juez_max_tokens_sin_modelo_sale_2() {
 
 #[test]
 fn ficha_cli_respuesta_truncada_da_la_causa_del_tope_y_registra_costo() {
-    let srv = Servidor::arranca(vec![(200, JUEZ_TRUNCADO)]);
+    let srv = Servidor::arranca(vec![(200, juez_truncado())]);
     let home = tempfile::tempdir().expect("home");
     let salida = revisar_contra(&srv, home.path(), &[]);
     assert_eq!(
@@ -1038,7 +1042,9 @@ fn ficha_cli_respuesta_truncada_da_la_causa_del_tope_y_registra_costo() {
     assert!(evento["cost_usd"].as_f64().expect("costo") > 0.0);
 }
 
-const DEEPSEEK_JUEZ_VACIO: &str = r#"{"choices":[{"message":{"content":"[]"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#;
+fn deepseek_juez_vacio() -> String {
+    sse_deepseek("[]", 10, 5, "stop")
+}
 
 /// `root.toml` con el servidor falso como proveedor y un precio para `deepseek-reasoner`.
 fn home_juez(url: &str, precio: &str) -> tempfile::TempDir {
@@ -1071,7 +1077,7 @@ fn revisar_con_juez_cli(home: &Path) -> Output {
 
 #[test]
 fn ficha_cli_juez_con_tope_lleno_no_envia_y_sale_3() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_JUEZ_VACIO)]);
+    let srv = Servidor::arranca(vec![(200, deepseek_juez_vacio())]);
     let home = home_juez(&srv.url, "usd_entrada = 1.0\nusd_salida = 2.0");
     // 100 USD de API este mes: el tope por defecto de 100 USD ya está lleno.
     let gasto = Evento {
@@ -1107,7 +1113,7 @@ fn ficha_cli_juez_con_tope_lleno_no_envia_y_sale_3() {
 
 #[test]
 fn ficha_cli_juez_dentro_del_margen_envia_una_vez() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_JUEZ_VACIO)]);
+    let srv = Servidor::arranca(vec![(200, deepseek_juez_vacio())]);
     let home = home_juez(&srv.url, "usd_entrada = 1.0\nusd_salida = 2.0");
 
     let salida = revisar_con_juez_cli(home.path());
@@ -1123,7 +1129,7 @@ fn ficha_cli_juez_dentro_del_margen_envia_una_vez() {
 
 #[test]
 fn ficha_cli_juez_con_root_toml_invalido_sale_2_sin_pedidos() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_JUEZ_VACIO)]);
+    let srv = Servidor::arranca(vec![(200, deepseek_juez_vacio())]);
     let home = home_juez(&srv.url, "usd_entrada = 1.0\nusd_salda = 2.0");
 
     let salida = revisar_con_juez_cli(home.path());

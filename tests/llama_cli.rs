@@ -8,13 +8,15 @@ use std::process::{Command, Output};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use common::Servidor;
+use common::{Servidor, sse_deepseek};
 use root::observe;
 use root::tipos::{Evento, TipoEvento, Via};
 use serde_json::Value;
 
 const CLAVE: &str = "sk-test-SECRETO-LLAMA";
-const DEEPSEEK_OK: &str = r#"{"choices":[{"message":{"content":"hola"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#;
+fn deepseek_ok() -> String {
+    sse_deepseek("hola", 10, 5, "stop")
+}
 
 fn ahora() -> f64 {
     SystemTime::now()
@@ -97,7 +99,7 @@ const PRECIO_BARATO: &str = "[precios.deepseek-flash]\nusd_entrada = 0.0\nusd_sa
 
 #[test]
 fn llama_cli_tope_rechaza_la_llamada_sin_enviarla() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let srv = Servidor::arranca(vec![(200, deepseek_ok())]);
     let home = tempfile::tempdir().expect("home");
     preparar(home.path(), &srv.url, PRECIO_CARO);
     gasto_api(home.path(), 98.0);
@@ -123,7 +125,7 @@ fn llama_cli_tope_rechaza_la_llamada_sin_enviarla() {
 
 #[test]
 fn llama_cli_dentro_del_margen_envia_imprime_y_registra() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let srv = Servidor::arranca(vec![(200, deepseek_ok())]);
     let home = tempfile::tempdir().expect("home");
     preparar(home.path(), &srv.url, PRECIO_BARATO);
     gasto_api(home.path(), 98.0);
@@ -158,7 +160,7 @@ fn llama_cli_dentro_del_margen_envia_imprime_y_registra() {
 
 #[test]
 fn llama_cli_modelo_sin_precio_rechaza_con_gate() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let srv = Servidor::arranca(vec![(200, deepseek_ok())]);
     let home = tempfile::tempdir().expect("home");
     // El juez usa un modelo de la lista de razonamiento que no tiene precio por defecto: Root lo
     // rechaza antes de enviar.
@@ -190,7 +192,7 @@ fn llama_cli_modelo_sin_precio_rechaza_con_gate() {
 
 #[test]
 fn llama_cli_rol_de_cupo_sale_con_2_sin_pedidos() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let srv = Servidor::arranca(vec![(200, deepseek_ok())]);
     let home = tempfile::tempdir().expect("home");
     preparar(home.path(), &srv.url, PRECIO_BARATO);
 
@@ -219,7 +221,7 @@ fn llama_cli_rol_de_cupo_sale_con_2_sin_pedidos() {
 
 #[test]
 fn llama_cli_prompt_inexistente_sale_con_2() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let srv = Servidor::arranca(vec![(200, deepseek_ok())]);
     let home = tempfile::tempdir().expect("home");
     preparar(home.path(), &srv.url, PRECIO_BARATO);
     let salida = Command::new(env!("CARGO_BIN_EXE_r00t"))
@@ -243,7 +245,7 @@ fn llama_cli_prompt_inexistente_sale_con_2() {
 
 #[test]
 fn llama_cli_reserva_no_escribible_no_envia_nada() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let srv = Servidor::arranca(vec![(200, deepseek_ok())]);
     let home = tempfile::tempdir().expect("home");
     preparar(home.path(), &srv.url, PRECIO_BARATO);
     // `eventos.jsonl` es un enlace a una carpeta que no existe: el log se lee como vacío, pero
@@ -265,7 +267,9 @@ fn llama_cli_reserva_no_escribible_no_envia_nada() {
 }
 
 /// Respuesta de DeepSeek con 1000 tokens de salida: a 600 USD por millón, cuesta 0,6 USD.
-const DEEPSEEK_1000: &str = r#"{"choices":[{"message":{"content":"hola"}}],"usage":{"prompt_tokens":10,"completion_tokens":1000}}"#;
+fn deepseek_1000() -> String {
+    sse_deepseek("hola", 10, 1000, "stop")
+}
 /// Precio de `deepseek-flash` con 1000 tokens de salida a 0,6 USD (peor caso de cada pedido).
 const PRECIO_SEISCIENTOS: &str =
     "[precios.deepseek-flash]\nusd_entrada = 0.0\nusd_salida = 600.0\n";
@@ -273,7 +277,7 @@ const PRECIO_SEISCIENTOS: &str =
 #[test]
 fn llama_cli_cuatro_procesos_no_pasan_el_tope_de_api() {
     // Cada pedido tarda 300 ms: los cuatro procesos llegan mientras el primero sigue en vuelo.
-    let srv = Servidor::arranca_lento(vec![(200, DEEPSEEK_1000); 4], Duration::from_millis(300));
+    let srv = Servidor::arranca_lento(vec![(200, deepseek_1000()); 4], Duration::from_millis(300));
     let home = tempfile::tempdir().expect("home");
     preparar(home.path(), &srv.url, PRECIO_SEISCIENTOS);
     // Tope de 100 USD con 99 gastados: margen de 1 USD, para uno de los cuatro pedidos.
@@ -310,7 +314,7 @@ fn llama_cli_cuatro_procesos_no_pasan_el_tope_de_api() {
 
 #[test]
 fn llama_cli_log_ilegible_no_envia_nada() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let srv = Servidor::arranca(vec![(200, deepseek_ok())]);
     let home = tempfile::tempdir().expect("home");
     preparar(home.path(), &srv.url, PRECIO_BARATO);
     // Sin poder leer el log no se conoce el gasto: la llamada no se envía.
@@ -346,7 +350,7 @@ fn llama_con_rol(home: &Path, rol: &str) -> Output {
 #[test]
 fn llama_cli_roles_de_api_con_tope_de_api_lleno_registran_gate_y_salen_con_3() {
     for rol in ["delega", "verifica", "juzga"] {
-        let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+        let srv = Servidor::arranca(vec![(200, deepseek_ok())]);
         let home = tempfile::tempdir().expect("home");
         preparar(home.path(), &srv.url, "");
         gasto_api(home.path(), 100.0);

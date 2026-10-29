@@ -4,6 +4,8 @@
 
 mod common;
 
+use common::sse_anthropic;
+
 use std::fs;
 
 use root::config::Config;
@@ -11,14 +13,15 @@ use root::oracle::descarga::inventario::inventariar;
 use root::oracle::descarga::juez_config::{ResultadoJuicio, juez_config_real, juzgar_config};
 use serde_json::Value;
 
-const ANTHROPIC_OK: &str =
-    r#"{"content":[{"type":"text","text":"[]"}],"usage":{"input_tokens":10,"output_tokens":5}}"#;
+fn anthropic_ok() -> String {
+    sse_anthropic(&["[]"], 10, 5, "end_turn")
+}
 const CARGO_TOML: &str = "[package]\nname = \"dep-prueba\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nhumantime = \"2\"\n";
 const CONFIG_PROXY: &str = "[http]\nproxy = \"http://127.0.0.1:9\"\n";
 
 #[test]
 fn juez_config_usa_jueces_config_modelo_y_sin_precio_no_envia() {
-    let srv = common::Servidor::arranca(vec![(200, ANTHROPIC_OK)]);
+    let srv = common::Servidor::arranca(vec![(200, anthropic_ok())]);
     let home = tempfile::tempdir().expect("home");
     let repo = tempfile::tempdir().expect("repo");
     fs::create_dir_all(repo.path().join(".cargo")).expect("crea .cargo");

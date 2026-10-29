@@ -9,13 +9,15 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use common::{Servidor, rompe_el_log_en_el_pedido};
+use common::{Servidor, rompe_el_log_en_el_pedido, sse_deepseek};
 use root::observe;
 use root::tipos::{Evento, TipoEvento, Via};
 use serde_json::{Value, json};
 
 const CLAVE: &str = "sk-test-SECRETO-MCP";
-const DEEPSEEK_OK: &str = r#"{"choices":[{"message":{"content":"hola"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#;
+fn deepseek_ok() -> String {
+    sse_deepseek("hola", 10, 5, "stop")
+}
 const PRECIO_CARO: &str = "[precios.deepseek-flash]\nusd_entrada = 0.0\nusd_salida = 3000.0\n";
 const PRECIO_BARATO: &str = "[precios.deepseek-flash]\nusd_entrada = 0.0\nusd_salida = 0.001\n";
 const TAREA_MINIMA: &str = r#"
@@ -368,7 +370,7 @@ fn mcp_registrar_escribe_el_evento_y_el_resumen_lo_cuenta() {
 
 #[test]
 fn mcp_llama_envia_una_vez_y_registra_con_corrida_mcp() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let srv = Servidor::arranca(vec![(200, deepseek_ok())]);
     let home = tempfile::tempdir().expect("home");
     preparar(home.path(), &srv.url, PRECIO_BARATO);
     gasto_api(home.path(), 98.0);
@@ -401,7 +403,7 @@ fn mcp_llama_envia_una_vez_y_registra_con_corrida_mcp() {
 
 #[test]
 fn mcp_llama_devuelve_la_misma_respuesta_que_la_cli() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK), (200, DEEPSEEK_OK)]);
+    let srv = Servidor::arranca(vec![(200, deepseek_ok()), (200, deepseek_ok())]);
     let home = tempfile::tempdir().expect("home");
     preparar(home.path(), &srv.url, PRECIO_BARATO);
 
@@ -449,7 +451,7 @@ fn mcp_llama_devuelve_la_misma_respuesta_que_la_cli() {
 
 #[test]
 fn mcp_llama_tope_es_error_de_herramienta_y_no_envia() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let srv = Servidor::arranca(vec![(200, deepseek_ok())]);
     let home = tempfile::tempdir().expect("home");
     preparar(home.path(), &srv.url, PRECIO_CARO);
     gasto_api(home.path(), 98.0);
@@ -473,7 +475,7 @@ fn mcp_llama_tope_es_error_de_herramienta_y_no_envia() {
 
 #[test]
 fn mcp_llama_rol_de_cupo_es_error_de_herramienta_sin_pedidos() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let srv = Servidor::arranca(vec![(200, deepseek_ok())]);
     let home = tempfile::tempdir().expect("home");
     preparar(home.path(), &srv.url, PRECIO_BARATO);
 
@@ -622,7 +624,7 @@ fn mcp_llama_evento_no_registrado_entrega_respuesta_y_evento() {
     // La reserva se escribe; al recibir el pedido, el log pasa a ser un directorio. La llamada
     // sale, y su evento final no se puede escribir.
     let srv = Servidor::arranca_con(
-        vec![(200, DEEPSEEK_OK)],
+        vec![(200, deepseek_ok())],
         Duration::ZERO,
         Some(rompe_el_log_en_el_pedido(home.path(), 1)),
     );
