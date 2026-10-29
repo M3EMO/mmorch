@@ -1762,3 +1762,90 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
   Mi recomendación es c): el tope ve el gasto posible y no te pide trabajo.
 
 **Respuesta del 2026-10-29:** P54 "P54 c" (decisión 46). P54 queda cerrada. La corrida de la parte a de G1h terminó: memora en 97 segundos y brasa en 154, cada una en un intento.
+
+## G1, G2 y la mezcla de la nube 1 (2026-10-29)
+
+**Gates cumplidos**
+- **G2** se cumplió con el commit 8c5d5f0: las nueve rúbricas aprobadas por el usuario viven en `rubricas/`.
+- **G1** se cumplió el 2026-10-29. El usuario escribió: "Apruebo G1. Mezclá la build de la nube y que el builder resuelva la compilación." El juez de ambigüedades corrió con razonamiento sobre las fichas de memora y brasa. Opus corrigió 3 hallazgos, y un segundo juez dio 0 hallazgos.
+- **Mezcla**: la build de la nube 1 (Tareas 20, 15d y las partes de nube de 6e, 6d, 9d3, 7k y 7l) entró en c5ff327, junto con la Tarea 10c. `cargo test` con podman da 1152 tests en verde. El informe es `docs/builds/2026-10-28-build-nube-1.md`.
+- En la mezcla, el builder arregló dos puntos: `juez_config.rs` usa `RespuestaJuez` con la causa "tope de salida alcanzado", y en `entrega.rs` un fallo de configuración de red de podman deja `Pendiente` con aviso, no un rojo falso.
+
+**Tareas desbloqueadas por G1 y G2**
+- El `Validate` real de las Tareas 7 y 9c. El diagnóstico de `diferencias.md` se repite con 5 repeticiones, como pedía el desempate 1 de "Desempates técnicos 6".
+- Las Tareas 12, 12b (código), 13 y 13b.
+- La corrida de memora de la Tarea 16 (decisión 38). La corrida de Graft sigue esperando a G5.
+- La corrida real de Colab de la Tarea 7h (decisiones 22, 33 y 40).
+- G3 queda abierto: el usuario califica a ciegas los 6 paquetes cuando la Tarea 12b los arme.
+
+## Desempates técnicos 10 (Opus, 2026-10-29, después de la mezcla de la nube 1)
+
+**Preguntas del builder de la mezcla**
+- **a) Red del build de respaldo.** Root cambia a `pasta`, que es el default de Podman 5. No hace falta instalar `slirp4netns`. El argumento pasa a `--network pasta:--no-map-gw`. Con `--no-map-gw`, el contenedor no alcanza la dirección del host, y eso cumple la regla de la decisión 27 (`allow_host_loopback=false`). Un test de laptop abre un puerto en `127.0.0.1` del host y prueba que el build no lo alcanza.
+- **b) `tokens_estimados` del juez de config.** Se queda en 32 000. El chequeo de Route debe ver el peor caso. Si el margen del mes no alcanza para ese peor caso, rechazar al juez es lo correcto: el tope existe para eso. Con `deepseek-flash`, el peor caso es 0,009 USD.
+
+**Preguntas del informe de la nube 1**
+1. **Forma actual (15d).** Se confirma la regla del organizador, acotada a la tarea: la forma actual es la de la última fila válida de esa tarea, por `ts` y después por `id`. `root.toml` no define formas.
+2. **Prueba de Route (15d).** No alcanza. Un test suma propuestas de forma y de modelo a `politica.json` y compara `elegir` con y sin ellas en los seis roles. Planifica, Organiza y Construye no deben cambiar.
+3. **Marcador `not found` (7l).** Se saca hasta verificar la CLI real. Una salida desconocida conserva `activo.json`, como pide el desempate 4 de "Desempates técnicos 8".
+4. **`tar` en el host (6e).** La lectura pasa adentro del contenedor de descarga. El sdist viene de la red, y Root no abre en el host un archivo ajeno. El contenedor lee `pyproject.toml` con `tarfile` de Python, sin extraer a disco, y devuelve `[build-system].requires`.
+5. **Modelo del juez de config (6d).** Manda la decisión 30: el juez es Sonnet. `[jueces]` suma `config_modelo`, con `claude-sonnet-5-5` por defecto, y la llamada pasa por la función con tope de la Tarea 21. Sonnet no tiene precio por defecto: P55 lo decide. Sin precio, el juez da `SinVeredicto` y la descarga sigue (decisión 35).
+6. **Host y puerto (6d).** Se confirma. La coincidencia exacta de host y puerto es más estricta que la del plan, y evita mandar la credencial a otro servicio del mismo host.
+7. **Usuario de pip (6d).** `[[registro]]` suma `usuario_env`, opcional. Sin ese campo, el usuario es `__token__`, la convención de los índices compatibles con PyPI para tokens.
+8. **Conexión del juez de config (6d).** La conecta la Tarea 13, que arma el `Veredicto` completo.
+9. **Opción de red (9d3).** Resuelta en a): `pasta:--no-map-gw`.
+10. **Gate previo (9d3).** Se acepta, con dos campos separados: `primera_run_sin_red`, con la línea que falló, y `runs_del_dockerfile`, con todas. El Gate no afirma que todas necesitan red.
+11. **Binario en Colab (7k).** El `conftest.py` oculto de brasa corre `cargo build -q --bin brasa` y usa `target/debug/brasa`. Ese archivo dice "No modificar". En el camino `binario-local`, Root compila brasa en la imagen con el perfil `debug` y deja el binario en `target/debug/brasa` del paquete. `correr.sh` pone en el `PATH` un `cargo` mínimo: acepta solo `build -q --bin brasa`, sale con 0 si el binario existe, y falla con un mensaje claro ante cualquier otra orden.
+12. **Causa del tope (7l).** La causa pasa a "tope de duración", y `motivo` lleva los minutos reales. "tope de 2 horas" solo vale con el default.
+13. **Repeticiones en Colab (7l).** `correr.sh` repite la suite pendiente `repeticiones` veces y junta los junit. El criterio de corte de la Tarea 7l no cambia.
+14. **Causas de los demás cortes (7l).** Sí. La lista cerrada suma `gpu-no-t4`, `runtime-no-asignado` y `error-en-corrida`.
+
+### Tarea 27: Ajustes de la mezcla de la nube 1
+- **Action**: los desempates a) y 1 a 14 de arriba.
+- **Dónde**: en la nube, salvo el test de `pasta` contra el host, que va en la laptop.
+- **Validate**: `cargo test`:
+  - Los argumentos del build de respaldo llevan `--network pasta:--no-map-gw`.
+  - Con propuestas en `politica.json`, `elegir` da lo mismo en Planifica, Organiza y Construye.
+  - Una salida de `colab stop` con "not found" conserva `activo.json`.
+  - La lectura de `pyproject.toml` de un sdist corre en el contenedor de descarga: en la nube se prueba el comando que arma Root.
+  - Sin `usuario_env`, el `netrc` de pip usa `__token__`.
+  - Con `minutos_max = 30`, el Gate del tope dice "tope de duración" y su motivo dice 30.
+  - El `cargo` mínimo de `correr.sh` sale con 0 ante `build -q --bin brasa` con el binario presente, y falla ante `build --release`.
+
+## Orden de trabajo (2026-10-29): la nube primero
+
+El crédito de nube vence el 2026-11-05. La nube toma toda la lógica que se prueba sin podman, sin Colab, sin claves y sin la credencial de Claude.
+
+**Nube, sesión 2.** Arranca desde la punta de `claude/root-e7813e` que trae `docs/builds/brief-nube-2.md` (un commit después de c5ff327). El brief completo es ese archivo. Orden:
+1. 21: topes y llamadas a la API, con `r00t observa costo`.
+2. 21b: razonamiento explícito, modelos vigentes, precios por tramos, `timeout_juez_s` y `[jueces].config_modelo`.
+3. 21c: streaming.
+4. 27: ajustes de la mezcla de la nube 1.
+5. 22: descarga y contenedores sin fugas (parte de nube).
+6. 23: el oráculo oculto no sale de `oraculos/` (parte de nube).
+7. 24: sondas sin puntaje regalado (parte de nube).
+8. 13: Oracle completo, con ejecutor y proveedor falsos. Conecta el juez de config.
+9. 13b: informe del PM, con un LLM falso.
+10. 12: calibración, con ejecutor falso.
+11. 12b: validez, solo el código y el armado de los paquetes a ciegas.
+12. 26: lector de `stream-json` y búsqueda de lecturas del oráculo (parte de nube).
+13. 25: limpieza de Python y de la ficha.
+
+**Laptop.** Cada parte necesita al menos uno de estos recursos: podman, Colab, claves de API o la credencial de Claude.
+- Podman: las partes de laptop de 6e, 6d, 9d3, 7k, 22, 23, 24 y 27, el timer del vigía de la 7l, y la suite completa sin `ROOT_SIN_PODMAN` antes de cada mezcla.
+- Podman y `ROOT_HOME` real: el `Validate` real de 7 y 9c, con el diagnóstico de `diferencias.md` en 5 repeticiones; la calibración real (12); el veredicto real (13) y el informe real (13b) de memora y brasa.
+- Claves de API: el GET a `/models` de DeepSeek (21b), y el evento de 0,50 USD de la decisión 46 después de la 21.
+- Colab: la corrida real de la 7h sobre `test_rendimiento[gpu-10000-res1]` de brasa, con T4, tope de 2 horas y `unshare -rn`.
+- Credencial de Claude y podman: el contenedor del builder (Tarea 26, decisión 43) y la Tarea 16 con memora.
+- Opus: el oráculo de `graft-lector-planes` (Tarea 16b) y G5.
+- Usuario: G3, la calificación a ciegas de la 12b.
+
+**Preguntas abiertas (sin responder)**
+
+- **P55. Precio de Sonnet.** El juez de la config de cargo es Sonnet (decisión 30). Root no tiene un precio por defecto para `claude-sonnet-5-5`, así que `r00t llama` rechaza esa llamada y el juez da `SinVeredicto`. Para Haiku elegiste que un agente busque el precio y Root lo use sin tu confirmación (decisión 44). ¿Qué elegís para Sonnet?
+
+  - a) La misma regla que Haiku: un agente busca el precio vigente en la referencia de la API de Anthropic y Root lo usa sin tu confirmación.
+  - b) Vos escribís el precio de Sonnet en `root.toml`.
+  - c) El juez de config usa Haiku con razonamiento en lugar de Sonnet. Este cambio contradice la decisión 30.
+
+  Hasta tu respuesta, rige b). Mi recomendación es a).
