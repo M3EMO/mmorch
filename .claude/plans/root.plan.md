@@ -67,6 +67,7 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 41 | G1d: "haiku con razonamiento". G1e: "usar un modelo disponible de deepseek." G1f: "d". DeepSeek usa modelos vigentes y envía `thinking` explícito. Haiku con razonamiento es el respaldo de Verifica y Juzga. Los precios de DeepSeek salen de `mmorch/config.py`: `deepseek-flash` 0,14 y 0,28 USD, `deepseek-v4-pro` 1,74 y 3,48 USD por millón de tokens. Ver Tarea 21b. |
 | 42 | G1g: "G1g a, pero no pueden estar el tope de tokens ya alto de por si?" Sonnet sube el tope de salida de los dos jueces, y después Opus corre otra vez el juez de la ficha. Respuesta a la pregunta del usuario: sí, el tope por defecto debe ser alto. El tope de salida es un techo, no un gasto: Root paga solo los tokens que el modelo usa. El tope de API de Route sigue acotando el costo, porque su chequeo previo cuenta el peor caso. El default pasa a 32 000 tokens. Ver Tarea 10c. |
 | 43 | P53: "P53 a". El builder corre en un contenedor de podman sin `ROOT_HOME`, con la credencial de Claude montada en solo lectura. Ver Tarea 26. |
+| 44 | P52: "P52 c pero yo no lo confirmo." Un agente busca el precio vigente de Haiku y Root lo usa sin confirmación del usuario. El orquestador lo buscó en la referencia de la API de Anthropic (skill `claude-api`, tabla cacheada el 2026-10-06). `claude-haiku-5-5` cuesta 0,10 USD por millón de tokens de entrada y 0,50 de salida, con hasta 100 000 tokens de entrada. Con más de 100 000 tokens de entrada, cuesta 0,50 y 2,50 USD. Coincide con `mmorch/config.py`. Ver Tarea 21b. |
 
 ## Patterns to Mirror
 
@@ -1534,7 +1535,7 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
 - **Action**:
   - Una constante compartida, `MAX_TOKENS_JUEZ = 32_000`, reemplaza los dos topes fijos. La usan `ficha/juez.rs` y `oracle/juez.rs`.
   - `r00t ficha revisar` suma `--juez-max-tokens <n>` para cambiar el tope en una corrida. El ajuste en `root.toml` llega con la Tarea 21b, que es dueña de `config.rs`.
-  - `Respuesta` y `Crudo` suman, solo agregando, `truncada: bool` con `#[serde(default)]`. DeepSeek la marca con `finish_reason = "length"`. Anthropic la marca con `stop_reason = "max_tokens"`.
+  - `Respuesta` y `Crudo` suman `truncada: bool`. Solo `Respuesta` lleva `#[serde(default)]`, porque `Crudo` es interno y no se serializa. DeepSeek la marca con `finish_reason = "length"`. Anthropic la marca con `stop_reason = "max_tokens"`.
   - Una respuesta truncada sigue el camino de éxito: Root registra su costo real. No es un error del proveedor, así que no vale 0 USD.
   - Los dos jueces miran `truncada` antes de parsear. Si es verdadera, el juicio queda `SinVeredicto` con la causa "tope de salida alcanzado (N tokens)". Esa causa reemplaza a "JSON inválido".
   - `docs/interfaces.md` se regenera por el campo nuevo.
@@ -1543,7 +1544,7 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
   - Las Tareas 20, 15d y 6e de la nube tocan la guarda de tests, Aprende, los tipos de `Fila` y la descarga de Python. Ninguna toca estos archivos.
   - La 10c no toca `config.rs`, el chequeo de tope ni el cuerpo de los pedidos. Esas partes son de las Tareas 21 y 21b.
   - Las Tareas 21 y 21b arrancan desde una base que ya incluye la 10c. El orquestador hace push de la 10c, y la rama de la nube se rebasa antes de empezar la 21.
-  - En la 21b, la constante `MAX_TOKENS_JUEZ` pasa a ser el default de un campo de `root.toml`, y el presupuesto de pensamiento de Anthropic sale de ese tope.
+  - En la 21b, la constante `MAX_TOKENS_JUEZ` pasa a ser el default de un campo de `root.toml`. El pensamiento de Anthropic cuenta dentro de ese tope.
 - **Dónde**: en la laptop, con el builder local. No necesita podman ni Colab.
 - **Validate**: `cargo test proveedores` y `cargo test juez`:
   - Una respuesta falsa de DeepSeek con `finish_reason = "length"` y contenido vacío da `truncada = true` y registra su costo real.
@@ -1562,15 +1563,24 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
   - DeepSeek envía siempre `thinking` en forma explícita: `{"type": "enabled"}` si `Eleccion.razonamiento` es verdadero, y `{"type": "disabled"}` si es falso.
   - Los defaults de `[ruteo]` pasan a modelos vigentes: Delega usa `deepseek-flash` sin razonamiento. Verifica y Juzga usan `deepseek-flash` con razonamiento. `deepseek-v4-pro` queda disponible en `[precios]` para quien lo configure.
   - Un `root.toml` viejo con `deepseek-chat` o `deepseek-reasoner` se sigue leyendo. Root lo traduce a `deepseek-flash` con el razonamiento que pide el rol, y avisa en stderr.
-  - Anthropic recibe el razonamiento: con `razonamiento = true`, el pedido lleva pensamiento extendido con un presupuesto de tokens. Ese presupuesto cuenta en la estimación de costo de la Tarea 21.
+  - Anthropic recibe el razonamiento con `thinking: {"type": "adaptive"}` (decisión 44). Root nunca envía `budget_tokens`: en Haiku 5.5, ese formato devuelve un error 400. Root no envía `output_config`, así que rige el esfuerzo por defecto, `medium`.
+    - El pensamiento cuenta dentro de `max_tokens`. El chequeo previo de la Tarea 21 ya cuenta `max_tokens` entero como peor caso, así que no hace falta otra estimación.
+    - Con `razonamiento = false`, Root omite el parámetro. Un modelo que razona por defecto razona igual: eso cuesta más, pero no rompe ningún invariante.
+    - Antes de escribir el código, Sonnet confirma con la skill `claude-api` que Sonnet 5.5 y Opus 5.5 aceptan `adaptive`. Si un modelo lo rechaza, el error 400 sale como `ErrorProveedor::Pedido` con código 3, y Sonnet lo anota en el commit.
   - Respaldo (G1d): `[ruteo.verifica]` y `[ruteo.juzga]` suman `respaldo`, con Haiku por defecto. Route usa el respaldo solo si el proveedor principal no está disponible: sin clave, o con el breaker abierto. El respaldo también lleva razonamiento. Si un modelo no admite razonamiento, Verifica y Juzga dan `ErrorOraculo::Eleccion`.
-  - Precios por defecto (G1f): `deepseek-flash` 0,14 y 0,28 USD, y `deepseek-v4-pro` 1,74 y 3,48 USD por millón de tokens. Cada valor cita su origen en un comentario: `mmorch/config.py`. Un `[precios]` de `root.toml` reemplaza el default. El precio de Haiku espera a P52.
+  - Precios por defecto (G1f y decisión 44): `deepseek-flash` 0,14 y 0,28 USD, `deepseek-v4-pro` 1,74 y 3,48 USD, y `claude-haiku-5-5` 0,10 y 0,50 USD por millón de tokens. Cada valor cita su origen en un comentario: `mmorch/config.py` para DeepSeek, y la referencia de la API de Anthropic del 2026-10-06 para Haiku. Un `[precios]` de `root.toml` reemplaza el default.
+  - Precio por tramos: `Precio` suma, solo agregando, `umbral_entrada`, `usd_entrada_alto` y `usd_salida_alto`. Los tres son opcionales, pero van juntos: uno sin los otros falla al cargar con código 2. Haiku los lleva con 100 000, 0,50 y 2,50.
+    - Costo real: si los tokens de entrada del pedido pasan `umbral_entrada`, el pedido entero usa el precio alto, entrada y salida. Si no, usa el precio normal.
+    - Chequeo previo: la estimación de entrada de la Tarea 21 es una cota superior de los tokens reales. Si esa estimación no pasa el umbral, la entrada real tampoco, y el precio normal es seguro. Si la pasa, el chequeo usa el precio alto.
   - `docs/root.toml.example` muestra esos defaults en lugar de valores vacíos.
 - **Dónde**: todo en la nube, con el servidor HTTP falso.
 - **Validate**: `cargo test proveedores` y `cargo test config`:
   - Un pedido de Juzga a DeepSeek lleva `"thinking": {"type": "enabled"}` en el cuerpo.
   - Un pedido de Delega a DeepSeek lleva `"thinking": {"type": "disabled"}`.
-  - Un pedido a Anthropic con `razonamiento = true` lleva el campo de pensamiento extendido.
+  - Un pedido a Anthropic con `razonamiento = true` lleva `"thinking": {"type": "adaptive"}` y no lleva `budget_tokens`.
+  - Un pedido a Anthropic con `razonamiento = false` no lleva `thinking`.
+  - Un pedido a Haiku con 150 000 tokens de entrada cuesta con 0,50 y 2,50 USD. Uno con 1000 tokens cuesta con 0,10 y 0,50.
+  - Un `[precios]` con `umbral_entrada` y sin `usd_salida_alto` falla al cargar con código 2.
   - Sin `root.toml`, Verifica y Juzga eligen `deepseek-flash` con razonamiento, y `r00t llama` tiene precio para ese modelo.
   - Un `root.toml` con `deepseek-reasoner` se lee como `deepseek-flash` con razonamiento.
   - Sin `DEEPSEEK_API_KEY`, Juzga elige el respaldo Haiku con razonamiento.
@@ -1653,6 +1663,13 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
 
 **Ya, en local (2026-10-29):** la Tarea 10c corre en el builder local, antes de todo lo demás. G1 la espera.
 
+**Avance (2026-10-29):** el builder cerró la Tarea 10c en el commit 2bf0593, con 1048 tests en verde. Opus puede correr otra vez el juez de la ficha (G1).
+
+**Desempates técnicos 9 (Opus, 2026-10-29, después de la Tarea 10c)**
+1. **`extra.truncada` solo cuando es `true`.** Se queda así. Sigue el mismo patrón que `precio_faltante`: un campo ausente vale falso. Un `false` explícito en cada evento agrega ruido y no da información. Los lectores tratan la ausencia como falso, y `docs/interfaces.md` lo dice.
+2. **`content` nulo con `finish_reason = "length"`.** Se acepta como texto vacío, porque `truncada` ya lleva la causa. Con `finish_reason = "stop"` y `content` nulo, el caso sigue siendo un error de respuesta. Si falta un test de ese segundo caso, la Tarea 21b lo agrega.
+3. **`Crudo` sin `serde`.** Se acepta. `Crudo` es interno y nunca se serializa, así que no necesita `#[serde(default)]`. `Respuesta`, que sí sale en JSON, ya lo lleva. Corrijo el texto de la Tarea 10c, que pedía el atributo en los dos structs.
+
 **Orden (2026-10-29):** 21, 21b, 22, 23, 24, 25 y la parte de nube de 26. La 21b va justo después de la 21: hoy ningún juez razona, y Verifica y Juzga apuntan a un alias viejo. La 21b necesita la validación de precios de la 21.
 
 **Orden anterior (2026-10-28):** 21, 22, 23, 24 y 25. La 21 va primero porque hoy un juez puede gastar API sin tope. La 22 cierra la ejecución de código con red. Todas empiezan después de que entren las Tareas 20, 15d y 6e de la rama `claude/loving-ptolemy-9bj686`. Las tareas no dependen de números de línea: nombran funciones y archivos.
@@ -1693,3 +1710,5 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
   Mi recomendación es a): no cambia el sistema y deja el builder en un entorno descartable.
 
 **Respuestas del 2026-10-29:** G1g "G1g a, pero no pueden estar el tope de tokens ya alto de por si?" (decisión 42) y P53 "P53 a" (decisión 43). P52 sigue abierta.
+
+**Respuesta del 2026-10-29:** P52 "P52 c pero yo no lo confirmo." (decisión 44). P52 queda cerrada.
