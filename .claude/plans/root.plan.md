@@ -70,6 +70,7 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 44 | P52: "P52 c pero yo no lo confirmo." Un agente busca el precio vigente de Haiku y Root lo usa sin confirmación del usuario. El orquestador lo buscó en la referencia de la API de Anthropic (skill `claude-api`, tabla cacheada el 2026-10-06). `claude-haiku-5-5` cuesta 0,10 USD por millón de tokens de entrada y 0,50 de salida, con hasta 100 000 tokens de entrada. Con más de 100 000 tokens de entrada, cuesta 0,50 y 2,50 USD. Coincide con `mmorch/config.py`. Ver Tarea 21b. |
 | 45 | G1h: "G1h: a ahora para correr el juez, y b como corrección en el código." Ahora: Opus sube `[proveedores].timeout_s` a 900 segundos en `root.toml` y corre otra vez el juez de la ficha. En el código: los dos jueces tienen un timeout propio, más largo que el de las demás llamadas. Ver Tareas 21, 21b y 21c. |
 | 46 | P54: "P54 c". Opus registra 0,50 USD como peor caso de los 3 intentos cortados del juez de memora, con un evento de costo manual. Ver Tarea 21. |
+| 47 | P55: "P55 a". Un agente busca el precio de Sonnet y Root lo usa sin confirmación del usuario, igual que con Haiku (decisión 44). El orquestador lo buscó en la referencia de la API de Anthropic (skill `claude-api`, tabla cacheada el 2026-10-06). `claude-sonnet-5-5` cuesta 2 USD por millón de tokens de entrada y 10 USD por millón de salida. La tabla no muestra tramos por tamaño de entrada. Ver Tarea 21b. |
 
 ## Patterns to Mirror
 
@@ -1582,7 +1583,7 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
     - Con `razonamiento = false`, Root omite el parámetro. Un modelo que razona por defecto razona igual: eso cuesta más, pero no rompe ningún invariante.
     - Antes de escribir el código, Sonnet confirma con la skill `claude-api` que Sonnet 5.5 y Opus 5.5 aceptan `adaptive`. Si un modelo lo rechaza, el error 400 sale como `ErrorProveedor::Pedido` con código 3, y Sonnet lo anota en el commit.
   - Respaldo (G1d): `[ruteo.verifica]` y `[ruteo.juzga]` suman `respaldo`, con Haiku por defecto. Route usa el respaldo solo si el proveedor principal no está disponible: sin clave, o con el breaker abierto. El respaldo también lleva razonamiento. Si un modelo no admite razonamiento, Verifica y Juzga dan `ErrorOraculo::Eleccion`.
-  - Precios por defecto (G1f y decisión 44): `deepseek-flash` 0,14 y 0,28 USD, `deepseek-v4-pro` 1,74 y 3,48 USD, y `claude-haiku-5-5` 0,10 y 0,50 USD por millón de tokens. Cada valor cita su origen en un comentario: `mmorch/config.py` para DeepSeek, y la referencia de la API de Anthropic del 2026-10-06 para Haiku. Un `[precios]` de `root.toml` reemplaza el default.
+  - Precios por defecto (G1f y decisión 44): `deepseek-flash` 0,14 y 0,28 USD, `deepseek-v4-pro` 1,74 y 3,48 USD, `claude-haiku-5-5` 0,10 y 0,50 USD, y `claude-sonnet-5-5` 2 y 10 USD por millón de tokens (decisión 47). Cada valor cita su origen en un comentario: `mmorch/config.py` para DeepSeek, y la referencia de la API de Anthropic del 2026-10-06 para Haiku y Sonnet. Sonnet no lleva tramos: la tabla no los muestra. Un `[precios]` de `root.toml` reemplaza el default.
   - Precio por tramos: `Precio` suma, solo agregando, `umbral_entrada`, `usd_entrada_alto` y `usd_salida_alto`. Los tres son opcionales, pero van juntos: uno sin los otros falla al cargar con código 2. Haiku los lleva con 100 000, 0,50 y 2,50.
     - Costo real: si los tokens de entrada del pedido pasan `umbral_entrada`, el pedido entero usa el precio alto, entrada y salida. Si no, usa el precio normal.
     - Chequeo previo: la estimación de entrada de la Tarea 21 es una cota superior de los tokens reales. Si esa estimación no pasa el umbral, la entrada real tampoco, y el precio normal es seguro. Si la pasa, el chequeo usa el precio alto.
@@ -1603,6 +1604,7 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
   - Un pedido a Anthropic con `razonamiento = false` no lleva `thinking`.
   - Un pedido a Haiku con 150 000 tokens de entrada cuesta con 0,50 y 2,50 USD. Uno con 1000 tokens cuesta con 0,10 y 0,50.
   - Un `[precios]` con `umbral_entrada` y sin `usd_salida_alto` falla al cargar con código 2.
+  - Sin `root.toml`, `claude-sonnet-5-5` tiene precio de 2 y 10 USD, sin tramos, y el juez de config puede llamarlo.
   - Sin `root.toml`, Verifica y Juzga eligen `deepseek-flash` con razonamiento, y `r00t llama` tiene precio para ese modelo.
   - Un `root.toml` con `deepseek-reasoner` se lee como `deepseek-flash` con razonamiento.
   - Sin `DEEPSEEK_API_KEY`, Juzga elige el respaldo Haiku con razonamiento.
@@ -1849,3 +1851,11 @@ El crédito de nube vence el 2026-11-05. La nube toma toda la lógica que se pru
   - c) El juez de config usa Haiku con razonamiento en lugar de Sonnet. Este cambio contradice la decisión 30.
 
   Hasta tu respuesta, rige b). Mi recomendación es a).
+
+**Respuesta del 2026-10-29:** P55 "P55 a" (decisión 47). P55 queda cerrada. El precio de Sonnet entra en la Tarea 21b, que es dueña de los precios por defecto.
+
+### Mensaje para la nube 2
+
+El orquestador manda este texto a la sesión de nube 2, que arrancó desde 574c785:
+
+> El usuario respondió P55 con la opción a (decisión 47 del plan). Esto reemplaza la nota del brief que prohibía un precio para Sonnet. En la Tarea 21b, sumá `claude-sonnet-5-5` a los precios por defecto: 2 USD por millón de tokens de entrada y 10 USD por millón de salida. Sonnet no lleva tramos por tamaño de entrada. El comentario del precio cita su origen: la referencia de la API de Anthropic, tabla cacheada el 2026-10-06. Agregá un test: sin `root.toml`, `claude-sonnet-5-5` tiene ese precio y el juez de config puede llamarlo. Con eso, `[jueces].config_modelo` sigue en `claude-sonnet-5-5`, como pide la decisión 30. Anotá este cambio en el informe de la build.
