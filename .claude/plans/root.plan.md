@@ -71,6 +71,7 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 45 | G1h: "G1h: a ahora para correr el juez, y b como corrección en el código." Ahora: Opus sube `[proveedores].timeout_s` a 900 segundos en `root.toml` y corre otra vez el juez de la ficha. En el código: los dos jueces tienen un timeout propio, más largo que el de las demás llamadas. Ver Tareas 21, 21b y 21c. |
 | 46 | P54: "P54 c". Opus registra 0,50 USD como peor caso de los 3 intentos cortados del juez de memora, con un evento de costo manual. Ver Tarea 21. |
 | 47 | P55: "P55 a". Un agente busca el precio de Sonnet y Root lo usa sin confirmación del usuario, igual que con Haiku (decisión 44). El orquestador lo buscó en la referencia de la API de Anthropic (skill `claude-api`, tabla cacheada el 2026-10-06). `claude-sonnet-5-5` cuesta 2 USD por millón de tokens de entrada y 10 USD por millón de salida. La tabla no muestra tramos por tamaño de entrada. Ver Tarea 21b. |
+| 48 | P56: "P56 c". Una dimensión sin veredicto que tiene algún ítem `bloquea = true`, como Seguridad o Completitud, da `SinDecision`. Una dimensión sin veredicto sin ítems que bloquean deja `Listo` con aviso en `confianza`. P57: "P57 a". La calibración real corre por separado en memora y en brasa, con `n = 20`, y cada calibración vale solo para su tarea. Ver Tareas 12, 13b y 28. |
 
 ## Patterns to Mirror
 
@@ -2041,3 +2042,31 @@ El crédito de nube vence el 2026-11-05. La nube va primero.
   - c) Calibrar memora y brasa con `n = 10`. Costo: la mitad. Riesgo: la cota de la exactitud queda más ancha.
 
   Mi recomendación es a): mide el evaluador en cada tarea, y el tope de API de 100 USD por mes acota el gasto.
+
+## Decisión 48 (2026-10-29): P56 c y P57 a
+
+**P56 c en las Tareas**
+- **Tarea 13b (regla de decisión).** Antes de las reglas de `Bloqueado`, `NoListo` y `Listo`, el informe revisa las dimensiones sin veredicto. Si alguna tiene un ítem `bloquea = true` en su rúbrica, la decisión es `SinDecision`, con la regla `dimension_que_bloquea_sin_veredicto: <dimensión>`. Las demás dimensiones sin veredicto no cambian la decisión, y `Informe.confianza` las lista.
+- **Tarea 28.** El desempate 9 de "Desempates técnicos 11" ya crea `SinDecision` para Completitud sin veredicto. La decisión 48 lo generaliza a toda dimensión con un ítem que bloquea. Va en el mismo commit del grupo "rúbricas e informe".
+- **Validate extra de la Tarea 28**:
+  - Seguridad sin veredicto, con su ítem `seguridad.secretos` que bloquea, da `SinDecision` y código 3.
+  - Eficiencia sin veredicto, sin ítems que bloquean, deja `Listo` con Eficiencia en `confianza`.
+  - El mensaje del informe nombra la regla y la dimensión.
+- La nube 3 sí cambia: la Tarea 28 suma esta regla. Ver "Mensaje para la nube 3".
+
+**P57 a en las Tareas**
+- **Dónde corre.** La calibración real corre en la laptop, en la parte real de la Tarea 12. Necesita podman, `ROOT_HOME` real y las claves de API. Empieza después de que la nube 3 entre a la rama, porque esa build achica cada caso a las partes que mide su dimensión.
+- **Alcance.** Ocho dimensiones en memora y ocho en brasa, con `n = 20` y semilla 42. `calibracion.json` guarda una fila por tarea y dimensión. Una calibración de memora no cuenta para brasa.
+- **Tope de gasto.** `r00t oraculo calibrar` suma `--tope-usd <n>`. La calibración real corre con `--tope-usd 25`: la estimación de 15 a 20 USD, más un 25 % de margen.
+  - Root suma el gasto de la calibración con las reservas y los eventos de su corrida (Tarea 21).
+  - Antes de cada caso, Root compara el peor caso del caso con el resto del tope. Si no alcanza, la calibración se detiene, registra un `Gate` y deja las filas hechas marcadas `incompleta`.
+  - El tope de API de 100 USD por mes sigue rigiendo por encima.
+  - Subir el tope de 25 USD es zona roja (dinero): lo decide el usuario.
+- **Medición.** La corrida real deja su gasto en `eventos.jsonl`. Opus compara ese gasto con la estimación de 15 a 20 USD y lo anota en el plan.
+- **Tarea 12 en la nube 3.** La nube 3 suma `--tope-usd` y su prueba con un proveedor falso. Ver "Mensaje para la nube 3".
+
+### Mensaje para la nube 3
+
+El orquestador manda este texto a la sesión de nube 3, que arrancó desde 6ed8be4:
+
+> El usuario respondió P56 con la opción c y P57 con la opción a (decisión 48 del plan). En la Tarea 28, generalizá `SinDecision`: toda dimensión sin veredicto que tenga un ítem `bloquea = true` en su rúbrica da `SinDecision`, con la regla `dimension_que_bloquea_sin_veredicto: <dimensión>`. Una dimensión sin veredicto sin ítems que bloquean deja `Listo`, y `Informe.confianza` la lista. Probalo con Seguridad sin veredicto, que da `SinDecision` y código 3, y con Eficiencia sin veredicto, que deja `Listo`. En la Tarea 12, sumá `--tope-usd <n>` a `r00t oraculo calibrar`. Antes de cada caso, si el peor caso no entra en el resto del tope, la calibración se detiene, registra un `Gate` y marca `incompleta` las filas hechas. Probalo con un proveedor falso. Anotá los dos cambios en el informe de la build.
