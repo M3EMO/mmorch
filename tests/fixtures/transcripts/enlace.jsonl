@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","cwd":"{CWD}","session_id":"s-5","tools":["Bash"]}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"e1","name":"Bash","input":{"command":"cat enlace/t.py"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"e1","content":"import pytest\n"}]}}
+{"type":"result","subtype":"success","is_error":false,"num_turns":1}

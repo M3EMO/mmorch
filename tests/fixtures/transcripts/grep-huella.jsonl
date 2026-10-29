@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","cwd":"{CWD}","session_id":"s-2","tools":["Grep"]}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"g1","name":"Grep","input":{"pattern":"sincroniza","path":"{CWD}"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"g1","content":"{CWD}/notas.txt:4:    {HUELLA}\n"}]}}
+{"type":"result","subtype":"success","is_error":false,"num_turns":1}

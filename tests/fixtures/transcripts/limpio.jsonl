@@ -1,0 +1,6 @@
+{"type":"system","subtype":"init","cwd":"{CWD}","session_id":"s-3","tools":["Bash","Read"]}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"l1","name":"Read","input":{"file_path":"src/lib.rs"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"l1","content":"pub mod observe;\n"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"l2","name":"Bash","input":{"command":"cargo test"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"l2","content":[{"type":"text","text":"running 2 tests\ntest test_basico ... ok\ntest test_contrato_propio ... ok\ntest result: ok. 2 passed"}]}]}}
+{"type":"result","subtype":"success","is_error":false,"num_turns":2}

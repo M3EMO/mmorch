@@ -2,6 +2,7 @@
 
 pub mod claude;
 pub mod jsonl;
+pub mod transcript;
 pub mod uso;
 
 pub use uso::uso;
