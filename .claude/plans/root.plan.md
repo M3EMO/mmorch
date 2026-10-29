@@ -65,6 +65,8 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 39 | P50: "P50 c". La lectura del oráculo se cubre con dos capas: el builder corre aislado de `ROOT_HOME`, y Root además busca lecturas en el transcript. Ver Tarea 26. |
 | 40 | P51: "P51 c". En Colab, `correr.sh` corre sin red dentro de `unshare -rn`. Si Colab no lo permite, la corrida se hace igual y el informe lo avisa. Ver Tarea 23. |
 | 41 | G1d: "haiku con razonamiento". G1e: "usar un modelo disponible de deepseek." G1f: "d". DeepSeek usa modelos vigentes y envía `thinking` explícito. Haiku con razonamiento es el respaldo de Verifica y Juzga. Los precios de DeepSeek salen de `mmorch/config.py`: `deepseek-flash` 0,14 y 0,28 USD, `deepseek-v4-pro` 1,74 y 3,48 USD por millón de tokens. Ver Tarea 21b. |
+| 42 | G1g: "G1g a, pero no pueden estar el tope de tokens ya alto de por si?" Sonnet sube el tope de salida de los dos jueces, y después Opus corre otra vez el juez de la ficha. Respuesta a la pregunta del usuario: sí, el tope por defecto debe ser alto. El tope de salida es un techo, no un gasto: Root paga solo los tokens que el modelo usa. El tope de API de Route sigue acotando el costo, porque su chequeo previo cuenta el peor caso. El default pasa a 32 000 tokens. Ver Tarea 10c. |
+| 43 | P53: "P53 a". El builder corre en un contenedor de podman sin `ROOT_HOME`, con la credencial de Claude montada en solo lectura. Ver Tarea 26. |
 
 ## Patterns to Mirror
 
@@ -1525,6 +1527,32 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
   - Un servidor que tarda más que el timeout deja un evento con costo estimado distinto de 0.
   - Un prompt de 1000 caracteres de 3 bytes estima al menos 3000 tokens de entrada.
 
+### Tarea 10c: Tope de salida de los jueces y causa "tope alcanzado" (decisión 42; local, ya)
+- **Problema**: otra sesión corrió el juez de la ficha con `deepseek-v4-pro`. Las dos llamadas gastaron justo 4000 tokens de salida, devolvieron contenido vacío y salieron con `sin_veredicto` y código 3. El tope fijo de `ficha/juez.rs` (4000) se gastó en el razonamiento. El juez del Oracle tiene el mismo defecto con 6000 en `oracle/juez.rs`. `deepseek.rs` no lee la causa de fin, así que el error dice "JSON inválido" en lugar de "tope alcanzado".
+- **Valor por defecto: 32 000 tokens.** Ese era el default de salida que DeepSeek documentaba para `deepseek-reasoner`, con un máximo de 64 000. Deja lugar al razonamiento y a la respuesta del juez. Sonnet confirma el valor vigente en la documentación de DeepSeek y lo anota en el commit. Si el máximo vigente es menor, usa ese máximo.
+  - Peor caso por llamada con 32 000 tokens: 0,009 USD con `deepseek-flash` y 0,11 USD con `deepseek-v4-pro`. El chequeo previo de Route cuenta ese peor caso contra el tope de 100 USD por mes.
+- **Action**:
+  - Una constante compartida, `MAX_TOKENS_JUEZ = 32_000`, reemplaza los dos topes fijos. La usan `ficha/juez.rs` y `oracle/juez.rs`.
+  - `r00t ficha revisar` suma `--juez-max-tokens <n>` para cambiar el tope en una corrida. El ajuste en `root.toml` llega con la Tarea 21b, que es dueña de `config.rs`.
+  - `Respuesta` y `Crudo` suman, solo agregando, `truncada: bool` con `#[serde(default)]`. DeepSeek la marca con `finish_reason = "length"`. Anthropic la marca con `stop_reason = "max_tokens"`.
+  - Una respuesta truncada sigue el camino de éxito: Root registra su costo real. No es un error del proveedor, así que no vale 0 USD.
+  - Los dos jueces miran `truncada` antes de parsear. Si es verdadera, el juicio queda `SinVeredicto` con la causa "tope de salida alcanzado (N tokens)". Esa causa reemplaza a "JSON inválido".
+  - `docs/interfaces.md` se regenera por el campo nuevo.
+- **Archivos**: `src/proveedores/mod.rs` (solo los dos structs), `src/proveedores/deepseek.rs`, `src/proveedores/anthropic.rs` (solo la lectura de `stop_reason`), `src/ficha/juez.rs`, `src/oracle/juez.rs`, `src/cli.rs` (solo el flag) y `docs/interfaces.md`.
+- **Cómo evita choques con la rama de la nube**:
+  - Las Tareas 20, 15d y 6e de la nube tocan la guarda de tests, Aprende, los tipos de `Fila` y la descarga de Python. Ninguna toca estos archivos.
+  - La 10c no toca `config.rs`, el chequeo de tope ni el cuerpo de los pedidos. Esas partes son de las Tareas 21 y 21b.
+  - Las Tareas 21 y 21b arrancan desde una base que ya incluye la 10c. El orquestador hace push de la 10c, y la rama de la nube se rebasa antes de empezar la 21.
+  - En la 21b, la constante `MAX_TOKENS_JUEZ` pasa a ser el default de un campo de `root.toml`, y el presupuesto de pensamiento de Anthropic sale de ese tope.
+- **Dónde**: en la laptop, con el builder local. No necesita podman ni Colab.
+- **Validate**: `cargo test proveedores` y `cargo test juez`:
+  - Una respuesta falsa de DeepSeek con `finish_reason = "length"` y contenido vacío da `truncada = true` y registra su costo real.
+  - Con esa respuesta, el juez de la ficha da `SinVeredicto` con la causa "tope de salida alcanzado". El mensaje no dice "JSON inválido".
+  - Una respuesta con `finish_reason = "stop"` y JSON roto sigue dando "JSON inválido".
+  - Una respuesta falsa de Anthropic con `stop_reason = "max_tokens"` da `truncada = true`.
+  - Los dos jueces piden `max_tokens = 32000` por defecto, y `--juez-max-tokens 8000` cambia el pedido de la ficha.
+- **Después**: Opus corre otra vez el juez de ambigüedades de la ficha (G1).
+
 ### Tarea 21b: Razonamiento explícito y modelos vigentes (B10 y decisión 41; gravedad alta)
 - **Problema**: el invariante "el verificador razona" no se cumple en ningún proveedor.
   - `anthropic.rs` nunca envía el razonamiento (B10).
@@ -1606,7 +1634,10 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
 - **Validate**: un test por defecto, con el escenario del informe.
 
 ### Tarea 26: Lectura del oráculo: aislamiento y detección (A3, decisión 39)
-- **Capa 1, aislamiento**: el builder de `r00t corre` no puede leer `ROOT_HOME`. El mecanismo espera a P53, porque toca credenciales o el sistema operativo.
+- **Capa 1, aislamiento** (decisión 43): el builder de `r00t corre` corre en un contenedor de podman.
+  - La imagen trae `claude` y las herramientas del builder. El contenedor monta el directorio de la corrida y la credencial de Claude en solo lectura. No monta `ROOT_HOME` ni el resto de `$HOME`.
+  - La credencial nunca entra a un log, a un evento ni a la imagen.
+  - Riesgo a verificar en la laptop: `claude` puede necesitar escribir la credencial para renovar el login. Si el montaje de solo lectura rompe esa renovación, el planner pregunta al usuario antes de cambiar el montaje.
 - **Capa 2, detección**: `r00t corre` lanza cada sesión con `--output-format stream-json` y guarda el transcript en `ROOT_HOME`, fuera del alcance del builder.
   - Root revisa cada llamada a herramienta: su entrada y su salida.
   - Busca la ruta real de `oraculos/` y de `ROOT_HOME`, también después de resolver rutas relativas y enlaces cuando el comando las nombra.
@@ -1619,6 +1650,8 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
   - Un transcript que muestra una línea larga de un test oculto, sin nombrar la ruta, también lo emite.
   - Un transcript limpio no emite nada.
   - Con el aislamiento activo, el builder no puede abrir `ROOT_HOME`.
+
+**Ya, en local (2026-10-29):** la Tarea 10c corre en el builder local, antes de todo lo demás. G1 la espera.
 
 **Orden (2026-10-29):** 21, 21b, 22, 23, 24, 25 y la parte de nube de 26. La 21b va justo después de la 21: hoy ningún juez razona, y Verifica y Juzga apuntan a un alias viejo. La 21b necesita la validación de precios de la 21.
 
@@ -1658,3 +1691,5 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
   - b) Otro usuario del sistema: vos creás una vez un usuario con `sudo useradd`, y el builder corre con ese usuario. Ese usuario no puede leer tu `$HOME`. Costo: un cambio en el sistema operativo y un login de Claude para ese usuario.
 
   Mi recomendación es a): no cambia el sistema y deja el builder en un entorno descartable.
+
+**Respuestas del 2026-10-29:** G1g "G1g a, pero no pueden estar el tope de tokens ya alto de por si?" (decisión 42) y P53 "P53 a" (decisión 43). P52 sigue abierta.
