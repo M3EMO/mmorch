@@ -38,22 +38,42 @@ pub fn route(json: bool, rol: Rol, tipo: &str, checkeable: bool, tokens: u32) ->
     imprimir_eleccion(json, &eleccion)
 }
 
-/// Elige la vía y el modelo de un pedido. Con `SinPresupuesto` registra el `Gate`.
+/// Elige la vía y el modelo de un pedido con el `ROOT_HOME` del proceso.
+/// Con `SinPresupuesto` registra el `Gate`.
 /// La usan `r00t route` y la herramienta MCP `root_route`.
 pub fn rutear(rol: Rol, tipo: &str, checkeable: bool, tokens: u32) -> Result<Eleccion, Error> {
-    let home = root_home();
+    rutear_en(&root_home(), rol, tipo, checkeable, tokens)
+}
+
+/// Como `rutear`, con `root.toml`, `politica.json` y `eventos.jsonl` de `home`. El `Gate` va a `home`.
+pub fn rutear_en(
+    home: &Path,
+    rol: Rol,
+    tipo: &str,
+    checkeable: bool,
+    tokens: u32,
+) -> Result<Eleccion, Error> {
     let cfg = Config::cargar(&home.join("root.toml"))?;
     let pol = cargar_politica(&home.join("politica.json"))?;
     let ahora = observe::ahora().0;
     let offset = uso::offset_local();
-    let gasto = uso_actual(&cfg, ahora, offset)?;
+    let gasto = uso_actual(home, &cfg, ahora, offset)?;
     let pedido = Pedido {
         rol,
         tipo: tipo.into(),
         checkeable,
         tokens_estimados: tokens,
     };
-    elegir_final(&pedido, &pol, &gasto, &cfg, ahora, offset, CORRIDA_ROUTE)
+    elegir_final(
+        home,
+        &pedido,
+        &pol,
+        &gasto,
+        &cfg,
+        ahora,
+        offset,
+        CORRIDA_ROUTE,
+    )
 }
 
 /// `r00t llama`: lee el prompt, rutea, chequea el costo y llama. Devuelve el código de `imprimir_para_cli`.
@@ -100,16 +120,17 @@ pub fn llamar_con_chequeo(
     let pol = cargar_politica(&home.join("politica.json"))?;
     let ahora = observe::ahora().0;
     let offset = uso::offset_local();
-    let gasto = uso_actual(&cfg, ahora, offset)?;
+    let gasto = uso_actual(&home, &cfg, ahora, offset)?;
     let pedido = Pedido {
         rol,
         tipo: tipo.into(),
         checkeable: false,
         tokens_estimados: max_tokens,
     };
-    let eleccion = elegir_final(&pedido, &pol, &gasto, &cfg, ahora, offset, corrida)?;
+    let eleccion = elegir_final(&home, &pedido, &pol, &gasto, &cfg, ahora, offset, corrida)?;
     if eleccion.via == Via::Cupo {
-        if let Some(error) = rechazo_api_llena(&pedido, &gasto, &cfg, ahora, offset, corrida) {
+        if let Some(error) = rechazo_api_llena(&home, &pedido, &gasto, &cfg, ahora, offset, corrida)
+        {
             return Err(error);
         }
         return Err(Error::Uso(
@@ -122,13 +143,14 @@ pub fn llamar_con_chequeo(
         max_tokens,
         fase: "llama".into(),
     };
-    proveedores::llamar(&eleccion, &prompt, corrida).map_err(de_proveedor)
+    proveedores::llamar_en(&home, &eleccion, &prompt, corrida).map_err(de_proveedor)
 }
 
 /// Con el tope de API del mes lleno, un rol que va por API (delega, verifica, juzga) no tiene
 /// otra vía en `r00t llama`: registra un `Gate` de presupuesto y da el error de tope (B9).
 /// Los demás roles y los topes con margen devuelven `None`.
 fn rechazo_api_llena(
+    home: &Path,
     pedido: &Pedido,
     gasto: &Uso,
     cfg: &Config,
@@ -154,7 +176,7 @@ fn rechazo_api_llena(
     let mensaje = format!(
         "sin presupuesto: el tope de API del mes está lleno ({usado:.2} de {tope:.2} USD); reabre {reabre}"
     );
-    Some(gate_y_error(corrida, "presupuesto", extra, mensaje))
+    Some(gate_y_error(home, corrida, "presupuesto", extra, mensaje))
 }
 
 /// Un tope sale como `Error::Tope`, con el mismo código 3 que el chequeo que vivía aquí.
@@ -165,10 +187,10 @@ fn de_proveedor(e: ErrorProveedor) -> Error {
     }
 }
 
-/// Gasto actual de `eventos.jsonl`. Un log ilegible es error: sin gasto no se puede decidir.
-fn uso_actual(cfg: &Config, ahora: f64, offset: i32) -> Result<Uso, Error> {
+/// Gasto actual de `eventos.jsonl` de `home`. Un log ilegible es error: sin gasto no se puede decidir.
+fn uso_actual(home: &Path, cfg: &Config, ahora: f64, offset: i32) -> Result<Uso, Error> {
     Ok(uso::uso_en(
-        &observe::ruta_eventos(),
+        &observe::ruta_eventos_en(home),
         ahora,
         offset,
         cfg.balance.cupo.bloque_horas,
@@ -177,7 +199,9 @@ fn uso_actual(cfg: &Config, ahora: f64, offset: i32) -> Result<Uso, Error> {
 
 /// Elige la vía y aplica el respaldo de Verifica y Juzga si el proveedor principal no está disponible.
 /// Un modelo fuera de la lista de razonamiento da error de elección (código 2).
+#[allow(clippy::too_many_arguments)]
 fn elegir_final(
+    home: &Path,
     pedido: &Pedido,
     pol: &Politica,
     gasto: &Uso,
@@ -186,7 +210,7 @@ fn elegir_final(
     offset: i32,
     corrida: &str,
 ) -> Result<Eleccion, Error> {
-    let elegida = elegir_o_gate(pedido, pol, gasto, cfg, ahora, offset, corrida)?;
+    let elegida = elegir_o_gate(home, pedido, pol, gasto, cfg, ahora, offset, corrida)?;
     let claves = Claves::del_entorno();
     let instante = Instant::now();
     let breaker = proveedores::breaker_global();
@@ -197,7 +221,9 @@ fn elegir_final(
 }
 
 /// Elige la vía. Con `SinPresupuesto` registra el `Gate` y devuelve el error con la hora de reapertura.
+#[allow(clippy::too_many_arguments)]
 fn elegir_o_gate(
+    home: &Path,
     pedido: &Pedido,
     pol: &Politica,
     gasto: &Uso,
@@ -207,10 +233,16 @@ fn elegir_o_gate(
     corrida: &str,
 ) -> Result<Eleccion, Error> {
     route::elegir(pedido, pol, gasto, cfg, ahora, offset)
-        .map_err(|sp| rechazo_presupuesto(&sp, pedido, offset, corrida))
+        .map_err(|sp| rechazo_presupuesto(home, &sp, pedido, offset, corrida))
 }
 
-fn rechazo_presupuesto(sp: &SinPresupuesto, pedido: &Pedido, offset: i32, corrida: &str) -> Error {
+fn rechazo_presupuesto(
+    home: &Path,
+    sp: &SinPresupuesto,
+    pedido: &Pedido,
+    offset: i32,
+    corrida: &str,
+) -> Error {
     let reabre = uso::iso(sp.reabre, offset);
     let extra = Map::from_iter([
         ("motivo".to_string(), json!(sp.motivo)),
@@ -219,17 +251,19 @@ fn rechazo_presupuesto(sp: &SinPresupuesto, pedido: &Pedido, offset: i32, corrid
         ("tipo".to_string(), json!(pedido.tipo)),
     ]);
     let mensaje = format!("sin presupuesto: {}; reabre {reabre}", sp.motivo);
-    gate_y_error(corrida, "presupuesto", extra, mensaje)
+    gate_y_error(home, corrida, "presupuesto", extra, mensaje)
 }
 
-/// Registra el `Gate` y devuelve el error de tope. Si el registro falla, el mensaje lo dice.
+/// Registra el `Gate` en `home` y devuelve el error de tope. Si el registro falla, el mensaje lo dice.
 fn gate_y_error(
+    home: &Path,
     corrida: &str,
     fase: &str,
     extra: Map<String, serde_json::Value>,
     mensaje: String,
 ) -> Error {
-    match observe::registrar(&observe::evento_gate(corrida, fase, extra)) {
+    let ruta = observe::ruta_eventos_en(home);
+    match observe::registrar_en(&ruta, &observe::evento_gate(corrida, fase, extra)) {
         Ok(()) => Error::Tope(mensaje),
         Err(causa) => Error::Tope(format!(
             "{mensaje}; además no se pudo registrar el Gate: {causa}"

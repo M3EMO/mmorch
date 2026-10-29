@@ -34,7 +34,12 @@ pub enum ErrorObserve {
 
 /// Ruta de `eventos.jsonl` dentro de `ROOT_HOME`.
 pub fn ruta_eventos() -> PathBuf {
-    root_home().join("eventos.jsonl")
+    ruta_eventos_en(&root_home())
+}
+
+/// Ruta de `eventos.jsonl` dentro de la carpeta `home`.
+pub fn ruta_eventos_en(home: &Path) -> PathBuf {
+    home.join("eventos.jsonl")
 }
 
 /// Agrega un evento a `eventos.jsonl` de `ROOT_HOME`.

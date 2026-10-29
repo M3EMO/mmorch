@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,6 +16,7 @@ use super::perfiles::crear_hallazgo;
 use super::perfiles::rust::REGLA_CICLO;
 use super::rubrica::{ErrorRubrica, ItemRubrica, Mide, Puntuacion, Rubrica};
 use super::tarea::Requisito;
+use crate::config::root_home;
 use crate::proveedores::{self, Prompt, RespuestaJuez};
 use crate::tipos::{Dimension, Eleccion, Fuente, Hallazgo, NivelItem, Via};
 
@@ -56,12 +57,23 @@ pub trait ModeloJuez {
 pub struct JuezProveedor {
     pub eleccion: Eleccion,
     pub corrida: String,
+    /// Carpeta de `root.toml` y `eventos.jsonl`: el `Gate` y el evento de cada llamada van aquí.
+    pub home: PathBuf,
 }
 
 impl JuezProveedor {
     /// Rechaza una elección sin razonamiento, sin API o sin modelo: el verificador razona y refuta.
     /// Es un error de configuración (`Eleccion`), no de infraestructura.
     pub fn nuevo(eleccion: Eleccion, corrida: String) -> Result<Self, ErrorOraculo> {
+        Self::nuevo_en(&root_home(), eleccion, corrida)
+    }
+
+    /// Como `nuevo`, con `home` para `root.toml` y `eventos.jsonl`.
+    pub fn nuevo_en(
+        home: &Path,
+        eleccion: Eleccion,
+        corrida: String,
+    ) -> Result<Self, ErrorOraculo> {
         if !eleccion.razonamiento {
             return Err(ErrorOraculo::Eleccion(
                 "el juez exige razonamiento prendido; la elección lo tiene apagado".into(),
@@ -77,13 +89,17 @@ impl JuezProveedor {
                 "la elección del juez no dice qué modelo usar".into(),
             ));
         }
-        Ok(Self { eleccion, corrida })
+        Ok(Self {
+            eleccion,
+            corrida,
+            home: home.to_path_buf(),
+        })
     }
 }
 
 impl ModeloJuez for JuezProveedor {
     fn consultar(&self, prompt: &Prompt) -> Result<RespuestaJuez, ErrorOraculo> {
-        proveedores::llamar(&self.eleccion, prompt, &self.corrida)
+        proveedores::llamar_en(&self.home, &self.eleccion, prompt, &self.corrida)
             .map(|respuesta| RespuestaJuez {
                 texto: respuesta.texto,
                 truncada: respuesta.truncada,

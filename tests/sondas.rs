@@ -56,7 +56,16 @@ fn ejecutor(imagen: &str, repo: &Path, rustsec: Option<&Path>) -> EjecutorConten
         rustsec: rustsec.map(Path::to_path_buf),
         cache: None,
         timeout: LIMITE,
+        home: home_sondas(),
     }
+}
+
+/// `home` de los temporales de las sondas: bajo `~/.cache`, nunca `/tmp` ni el ROOT_HOME real.
+fn home_sondas() -> std::path::PathBuf {
+    let home = std::env::var_os("HOME").expect("HOME definido");
+    let base = std::path::PathBuf::from(home).join(".cache/root-dbg/home-sondas");
+    fs::create_dir_all(&base).expect("crea la carpeta de pruebas");
+    base
 }
 
 /// Caché de Rust como la monta la evaluación: `/cache/config.toml`, que el preludio copia a

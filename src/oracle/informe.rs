@@ -3,6 +3,7 @@
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use serde::Deserialize;
 
@@ -58,6 +59,8 @@ pub trait Redactor {
 pub struct RedactorProveedor {
     pub eleccion: Eleccion,
     pub corrida: String,
+    /// Carpeta de `root.toml` y `eventos.jsonl`: el `Gate` y el evento de cada llamada van aquí.
+    pub home: PathBuf,
 }
 
 /// Forma JSON que devuelve el redactor.
@@ -81,7 +84,7 @@ impl Redactor for RedactorProveedor {
             max_tokens: MAX_TOKENS_REDACTOR,
             fase: FASE.into(),
         };
-        let respuesta = proveedores::llamar(&self.eleccion, &prompt, &self.corrida)
+        let respuesta = proveedores::llamar_en(&self.home, &self.eleccion, &prompt, &self.corrida)
             .map_err(|e| ErrorOraculo::Infra(e.to_string()))?;
         if respuesta.truncada {
             return Err(ErrorOraculo::Infra(causa_tope_alcanzado(

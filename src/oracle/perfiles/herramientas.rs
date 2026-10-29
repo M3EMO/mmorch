@@ -11,7 +11,6 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{ResultadoSonda, crear_hallazgo, puntuar_hallazgos};
-use crate::config::root_home;
 use crate::oracle::ErrorOraculo;
 use crate::oracle::contenedor::{self, Ejecucion};
 use crate::oracle::descarga::PRELUDIO;
@@ -50,6 +49,8 @@ pub struct EjecutorContenedor {
     /// Caché de dependencias. Se monta en solo lectura en `/cache`.
     pub cache: Option<PathBuf>,
     pub timeout: Duration,
+    /// `ROOT_HOME` de la evaluación: la carpeta de salida va a `home/tmp`.
+    pub home: PathBuf,
 }
 
 impl EjecutorContenedor {
@@ -76,7 +77,7 @@ impl EjecutorContenedor {
 
 impl EjecutorHerramienta for EjecutorContenedor {
     fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
-        let salida = carpeta_de_salida(&root_home().join("tmp"))
+        let salida = carpeta_de_salida(&self.home.join("tmp"))
             .map_err(|e| ErrorOraculo::Infra(format!("carpeta de salida: {e}")))?;
         let resultado = contenedor::ejecutar(&self.ejecucion(cmd, salida.path()))?;
         Ok(SalidaHerramienta {
@@ -1301,6 +1302,7 @@ mod tests {
             rustsec: Some(rustsec.path().into()),
             cache: Some(cache.path().into()),
             timeout: Duration::from_secs(60),
+            home: salida_dir.path().into(),
         };
         let args = argumentos(&ej.ejecucion("gitleaks detect", salida_dir.path()), "n");
         assert!(
@@ -1359,6 +1361,7 @@ mod tests {
             rustsec: None,
             cache: None,
             timeout: Duration::from_secs(60),
+            home: salida_dir.path().into(),
         };
         let args = argumentos(&ej.ejecucion("x", salida_dir.path()), "n");
         assert!(!args.iter().any(|a| a.ends_with(":/rustsec:ro,z")));

@@ -162,6 +162,8 @@ enum Suite {
 
 /// Evalúa `repo` con la tarea: corre el contrato y el oculto sobre una copia del repo, y las sondas.
 pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> {
+    // Todo lo que escribe la evaluación va a `home`: `root.toml`, `eventos.jsonl` y temporales.
+    let home = o.home.clone().unwrap_or_else(root_home);
     // Las sondas no montan el oráculo: los tests ocultos no entran a sus contenedores (A2).
     let herramientas = |p: &Preparada| -> Box<dyn EjecutorHerramienta> {
         Box::new(EjecutorContenedor {
@@ -171,9 +173,9 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
             rustsec: p.rustsec.clone(),
             cache: p.cache.clone(),
             timeout: o.timeout,
+            home: home.clone(),
         })
     };
-    let home = o.home.clone().unwrap_or_else(root_home);
     // Un root.toml que no carga no evalúa: las reglas de decisión tienen que ser las del usuario.
     let cfg = Config::cargar(&home.join("root.toml"))
         .map_err(|e| ErrorOraculo::Configuracion(e.codigo_de_salida(), e.to_string()))?;
@@ -181,16 +183,16 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
         .map_err(|e| ErrorOraculo::Infra(format!("rúbricas embebidas: {e}")))?;
     let calibracion = Calibraciones::cargar(&home)?;
     let mut avisos = Vec::new();
-    let juez_config = juez_config_de_produccion(&cfg, &mut avisos);
+    let juez_config = juez_config_de_produccion(&home, &cfg, &mut avisos);
     // Sin ítems del juez en las rúbricas, no se arma: no hay nada que llamar ni gastar.
     let juez = juez::hay_pedidos(&rubricas)
-        .then(|| juez_diseno_de_produccion(&mut avisos))
+        .then(|| juez_diseno_de_produccion(&home, &mut avisos))
         .flatten();
     let nombre = juez
         .as_ref()
         .and_then(|j| j.eleccion.modelo.clone())
         .unwrap_or_default();
-    let redactor = redactor_de_produccion(&mut avisos);
+    let redactor = redactor_de_produccion(&home, &mut avisos);
     let deps = Dependencias {
         correr: &correr_en_podman,
         herramientas: &herramientas,
@@ -211,8 +213,12 @@ const CORRIDA_JUEZ_DISENO: &str = "oraculo-juez-diseno";
 
 /// Juez de la configuración de Cargo de producción. Sin modelo válido, no hay juez y el aviso lo dice.
 /// La descarga sigue y el juicio queda sin veredicto.
-fn juez_config_de_produccion(cfg: &Config, avisos: &mut Vec<String>) -> Option<JuezProveedor> {
-    match descarga::juez_config::juez_config_real(cfg) {
+fn juez_config_de_produccion(
+    home: &Path,
+    cfg: &Config,
+    avisos: &mut Vec<String>,
+) -> Option<JuezProveedor> {
+    match descarga::juez_config::juez_config_real_en(home, cfg) {
         Ok(juez) => Some(juez),
         Err(e) => {
             avisos.push(format!("juez de la configuración sin armar: {e}"));
@@ -223,16 +229,17 @@ fn juez_config_de_produccion(cfg: &Config, avisos: &mut Vec<String>) -> Option<J
 
 /// Juez de diseño de producción: la elección de Route para `juzga`, con su respaldo. Sin presupuesto o
 /// sin elección válida, no hay juez y el aviso lo dice.
-fn juez_diseno_de_produccion(avisos: &mut Vec<String>) -> Option<JuezProveedor> {
+fn juez_diseno_de_produccion(home: &Path, avisos: &mut Vec<String>) -> Option<JuezProveedor> {
     let tokens = juez::LimitesPrompt::default().max_tokens;
-    let eleccion = match crate::route::comando::rutear(Rol::Juzga, "diseno", false, tokens) {
+    let eleccion = match crate::route::comando::rutear_en(home, Rol::Juzga, "diseno", false, tokens)
+    {
         Ok(eleccion) => eleccion,
         Err(e) => {
             avisos.push(format!("juez de diseño sin armar: {e}"));
             return None;
         }
     };
-    match JuezProveedor::nuevo(eleccion, CORRIDA_JUEZ_DISENO.into()) {
+    match JuezProveedor::nuevo_en(home, eleccion, CORRIDA_JUEZ_DISENO.into()) {
         Ok(juez) => Some(juez),
         Err(e) => {
             avisos.push(format!("juez de diseño sin armar: {e}"));
@@ -243,12 +250,18 @@ fn juez_diseno_de_produccion(avisos: &mut Vec<String>) -> Option<JuezProveedor> 
 
 /// Redactor de producción del informe: la elección de Route para `delega`. Sin elección válida, no hay
 /// redactor y el resumen queda determinista; el aviso lo dice.
-fn redactor_de_produccion(avisos: &mut Vec<String>) -> Option<RedactorProveedor> {
-    match crate::route::comando::rutear(Rol::Delega, "informe", false, informe::MAX_TOKENS_REDACTOR)
-    {
+fn redactor_de_produccion(home: &Path, avisos: &mut Vec<String>) -> Option<RedactorProveedor> {
+    match crate::route::comando::rutear_en(
+        home,
+        Rol::Delega,
+        "informe",
+        false,
+        informe::MAX_TOKENS_REDACTOR,
+    ) {
         Ok(eleccion) => Some(RedactorProveedor {
             eleccion,
             corrida: CORRIDA_INFORME.into(),
+            home: home.to_path_buf(),
         }),
         Err(e) => {
             avisos.push(format!("redactor del informe sin armar: {e}"));

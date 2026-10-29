@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::hash_corto;
 use super::inventario::{EntradaConfig, Inventario, redactar};
-use crate::config::Config;
+use crate::config::{Config, root_home};
 use crate::oracle::ErrorOraculo;
 use crate::oracle::juez::{JuezProveedor, ModeloJuez, desenvuelto};
 use crate::oracle::tarea::Tarea;
@@ -287,6 +287,11 @@ fn etiqueta(necesidad: Necesidad) -> &'static str {
 /// (decisión 47). El proveedor sale del nombre. La llamada pasa por `proveedores::llamar`, que chequea
 /// el tope y el precio: sin precio, el juez da sin veredicto y la descarga sigue (decisión 35).
 pub fn juez_config_real(cfg: &Config) -> Result<JuezProveedor, ErrorOraculo> {
+    juez_config_real_en(&root_home(), cfg)
+}
+
+/// Como `juez_config_real`, con `home` para `root.toml` y `eventos.jsonl`.
+pub fn juez_config_real_en(home: &Path, cfg: &Config) -> Result<JuezProveedor, ErrorOraculo> {
     let modelo = cfg.jueces.config_modelo.clone();
     let eleccion = Eleccion {
         via: Via::Api,
@@ -297,7 +302,7 @@ pub fn juez_config_real(cfg: &Config) -> Result<JuezProveedor, ErrorOraculo> {
         rol: Some(Rol::Juzga),
     };
     route::exigir_modelo_que_razona(&eleccion)?;
-    JuezProveedor::nuevo(eleccion, FASE.into())
+    JuezProveedor::nuevo_en(home, eleccion, FASE.into())
 }
 
 /// Proveedor de un modelo por su nombre: `claude-*` es Anthropic y `deepseek-*` es DeepSeek.
