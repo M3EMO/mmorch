@@ -810,11 +810,6 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         }
       }
     },
-    "umbral_verde": {
-      "type": "number",
-      "format": "double",
-      "default": 0.8
-    },
     "umbral_wilson": {
       "description": "Cota inferior de Wilson (90%, unilateral) que un candidato debe alcanzar para entrar a la política.",
       "type": "number",
@@ -1671,11 +1666,20 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ]
     },
     "Decision": {
-      "type": "string",
-      "enum": [
-        "listo",
-        "no_listo",
-        "bloqueado"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "listo",
+            "no_listo",
+            "bloqueado"
+          ]
+        },
+        {
+          "description": "Una dimensión que bloquea no tiene veredicto: no hay \"listo\" ni \"no listo\" que decir (decisión 48).",
+          "type": "string",
+          "const": "sin_decision"
+        }
       ]
     },
     "Dimension": {
@@ -2178,6 +2182,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "oculto": {
           "$ref": "#/$defs/Conteo"
         },
+        "ocultos_fallidos": {
+          "description": "Ids ordenados de los tests ocultos que fallan de forma estable. Un requisito que no los prueba da\n`NoListo` (`test_oculto_fuera_de_requisitos`). Un veredicto viejo lee vacío.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "pendientes": {
           "description": "Tests de `[[entorno]]`, con su motivo. No entran al conteo. Un veredicto viejo lee vacío.\nCompletitud y el nivel por requisito llegan con la Tarea 9c; por ahora solo se listan.",
           "type": "array",
@@ -2549,11 +2561,20 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ]
     },
     "Decision": {
-      "type": "string",
-      "enum": [
-        "listo",
-        "no_listo",
-        "bloqueado"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "listo",
+            "no_listo",
+            "bloqueado"
+          ]
+        },
+        {
+          "description": "Una dimensión que bloquea no tiene veredicto: no hay \"listo\" ni \"no listo\" que decir (decisión 48).",
+          "type": "string",
+          "const": "sin_decision"
+        }
       ]
     },
     "Dimension": {
@@ -4095,6 +4116,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "oculto": {
       "$ref": "#/$defs/Conteo"
     },
+    "ocultos_fallidos": {
+      "description": "Ids ordenados de los tests ocultos que fallan de forma estable. Un requisito que no los prueba da\n`NoListo` (`test_oculto_fuera_de_requisitos`). Un veredicto viejo lee vacío.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
     "pendientes": {
       "description": "Tests de `[[entorno]]`, con su motivo. No entran al conteo. Un veredicto viejo lee vacío.\nCompletitud y el nivel por requisito llegan con la Tarea 9c; por ahora solo se listan.",
       "type": "array",
@@ -4298,11 +4327,20 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ]
     },
     "Decision": {
-      "type": "string",
-      "enum": [
-        "listo",
-        "no_listo",
-        "bloqueado"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "listo",
+            "no_listo",
+            "bloqueado"
+          ]
+        },
+        {
+          "description": "Una dimensión que bloquea no tiene veredicto: no hay \"listo\" ni \"no listo\" que decir (decisión 48).",
+          "type": "string",
+          "const": "sin_decision"
+        }
       ]
     },
     "Dimension": {

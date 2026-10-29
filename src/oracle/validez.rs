@@ -369,12 +369,13 @@ fn posiciones<T: PartialOrd + Copy>(claves: &[T]) -> Vec<f64> {
     salida
 }
 
-/// Cuántas decisiones valen: listo 2, no listo 1, bloqueado 0.
+/// Cuántas decisiones valen: listo 2, no listo 1, bloqueado y sin decisión 0. Sin decisión cuenta como
+/// el peor: un caso sin veredicto cuenta en contra (desempate 41).
 fn rango_decision(decision: Decision) -> u8 {
     match decision {
         Decision::Listo => 2,
         Decision::NoListo => 1,
-        Decision::Bloqueado => 0,
+        Decision::Bloqueado | Decision::SinDecision => 0,
     }
 }
 

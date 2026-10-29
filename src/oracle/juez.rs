@@ -616,27 +616,6 @@ pub fn topes_desde_sondas(hallazgos: &[Hallazgo], rubricas: &[Rubrica]) -> BTree
     }
 }
 
-/// Completa con nivel 0 los ítems de `rubrica` que el juez no respondió. Refuta por default: lo que
-/// no tiene evidencia no sube el puntaje, pero tampoco lo deja fuera del promedio. Sin `Ok`, no cambia.
-pub fn con_faltantes_en_cero(r: &ResultadoJuez, rubrica: &Rubrica, modelo: &str) -> ResultadoJuez {
-    let mut completo = r.clone();
-    if completo.estado != EstadoJuez::Ok {
-        return completo;
-    }
-    for id in r.faltantes.iter().filter(|id| es_item_de(rubrica, id)) {
-        completo.niveles.insert(id.clone(), 0);
-        completo.items.push(NivelItem {
-            item: id.clone(),
-            nivel: 0,
-            evidencia: Vec::new(),
-            fuente: Fuente::Juez {
-                modelo: modelo.into(),
-            },
-        });
-    }
-    completo
-}
-
 /// Puntúa una rúbrica con el resultado del juez. Con `SinVeredicto` el valor es `None`.
 pub fn puntuar_con_juez(
     rubrica: &Rubrica,
@@ -1477,7 +1456,7 @@ mod tests {
     }
 
     #[test]
-    fn juez_faltantes_en_cero_cuentan_en_el_promedio_sin_evidencia() {
+    fn juez_puntuar_item_sin_respuesta_queda_en_faltantes_y_no_cuenta_como_cero() {
         let c = caso();
         // El juez responde solo modularidad (nivel 2); el tope de la rúbrica queda sin respuesta.
         let texto = respuesta(
@@ -1486,33 +1465,11 @@ mod tests {
         );
         let r = juzgar_con(&c, texto);
         assert_eq!(r.faltantes, vec![TOPE.to_string()]);
-        let completo = con_faltantes_en_cero(&r, &c.rubricas[0], MODELO);
-        let p =
-            puntuar_con_juez(&c.rubricas[0], &completo, &BTreeMap::new(), MODELO).expect("puntúa");
-        // (3·2 + 1·0) / (3·4) = 0.5: el ítem sin respuesta pesa cero, no sale del promedio.
-        assert!((p.valor.expect("hay valor") - 0.5).abs() < 1e-6);
-        let tope = p.items.iter().find(|i| i.item == TOPE).expect("está");
-        assert_eq!(tope.nivel, 0);
-        assert!(tope.evidencia.is_empty());
-        assert_eq!(
-            tope.fuente,
-            Fuente::Juez {
-                modelo: MODELO.into()
-            }
-        );
-    }
-
-    #[test]
-    fn juez_faltantes_en_cero_no_cambia_un_juicio_sin_veredicto() {
-        let c = caso();
-        let r = ResultadoJuez {
-            estado: EstadoJuez::SinVeredicto("JSON inválido".into()),
-            niveles: BTreeMap::new(),
-            items: Vec::new(),
-            hallazgos: Vec::new(),
-            descartes: Vec::new(),
-            faltantes: vec![MODULARIDAD.into(), TOPE.into()],
-        };
-        assert_eq!(con_faltantes_en_cero(&r, &c.rubricas[0], MODELO), r);
+        let p = puntuar_con_juez(&c.rubricas[0], &r, &BTreeMap::new(), MODELO).expect("puntúa");
+        // Solo modularidad (peso 3, nivel 2): (3·2) / (3·3) = 2/3. El tope no entra ni como 0.
+        assert!((p.valor.expect("hay valor") - 2.0 / 3.0).abs() < 1e-6);
+        // `diseno.ciclos` es de sonda: el juez no lo responde, y `puntuar_con_juez` lo lista igual.
+        assert_eq!(p.faltantes, vec![CICLOS.to_string(), TOPE.to_string()]);
+        assert!(p.items.iter().all(|i| i.item != TOPE), "{:?}", p.items);
     }
 }

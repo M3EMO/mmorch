@@ -40,7 +40,7 @@ fn validez_cli_sin_casos_escribe_sin_medir() {
 }
 
 #[test]
-fn validez_cli_preparar_ciego_avisa_sin_rubricas() {
+fn validez_cli_preparar_ciego_con_rubricas_embebidas_no_avisa() {
     let home = TempDir::new().expect("home");
     let dir = TempDir::new().expect("dir");
     let repo = dir.path().join("repo");
@@ -79,10 +79,11 @@ fn validez_cli_preparar_ciego_avisa_sin_rubricas() {
         "sale con 0: {}",
         String::from_utf8_lossy(&salida.stderr)
     );
+    // Con las rúbricas embebidas, el aviso de "sin rúbricas" no sale.
     let stderr = String::from_utf8_lossy(&salida.stderr);
     assert!(
-        stderr.contains("rúbricas"),
-        "avisa que no hay rúbricas: {stderr}"
+        !stderr.contains("no hay rúbricas embebidas"),
+        "con rúbricas embebidas no avisa: {stderr}"
     );
 
     let ciego = casos.join("ciego");

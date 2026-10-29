@@ -127,6 +127,8 @@ pub enum Decision {
     Listo,
     NoListo,
     Bloqueado,
+    /// Una dimensión que bloquea no tiene veredicto: no hay "listo" ni "no listo" que decir (decisión 48).
+    SinDecision,
 }
 
 /// Quién produjo un hallazgo: una sonda determinista o un juez con modelo.
@@ -363,6 +365,10 @@ pub struct Veredicto {
     /// Dimensiones con veredicto que todavía no están calibradas. Un veredicto viejo lee vacío.
     #[serde(default)]
     pub sin_calibrar: Vec<Dimension>,
+    /// Ids ordenados de los tests ocultos que fallan de forma estable. Un requisito que no los prueba da
+    /// `NoListo` (`test_oculto_fuera_de_requisitos`). Un veredicto viejo lee vacío.
+    #[serde(default)]
+    pub ocultos_fallidos: Vec<String>,
 }
 
 impl Default for Veredicto {
@@ -389,6 +395,7 @@ impl Default for Veredicto {
             avisos: Vec::new(),
             requisitos: Vec::new(),
             sin_calibrar: Vec::new(),
+            ocultos_fallidos: Vec::new(),
         }
     }
 }
@@ -587,6 +594,7 @@ mod tests {
             avisos: Vec::new(),
             requisitos: Vec::new(),
             sin_calibrar: Vec::new(),
+            ocultos_fallidos: Vec::new(),
         }
     }
 
@@ -1001,7 +1009,12 @@ mod tests {
         ] {
             ida_y_vuelta(&x);
         }
-        for x in [Decision::Listo, Decision::NoListo, Decision::Bloqueado] {
+        for x in [
+            Decision::Listo,
+            Decision::NoListo,
+            Decision::Bloqueado,
+            Decision::SinDecision,
+        ] {
             ida_y_vuelta(&x);
         }
     }

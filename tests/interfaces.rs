@@ -360,7 +360,6 @@ fn root_toml_example_carga_con_los_defaults() {
     assert_eq!(cfg.modelos, por_defecto.modelos);
     assert_eq!(cfg.balance, por_defecto.balance);
     assert_eq!(cfg.ruteo, por_defecto.ruteo);
-    assert_eq!(cfg.umbral_verde, por_defecto.umbral_verde);
     assert_eq!(cfg.umbral_wilson, por_defecto.umbral_wilson);
     assert_eq!(cfg.proveedores, por_defecto.proveedores);
     assert!(

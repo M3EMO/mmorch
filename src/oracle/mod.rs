@@ -474,6 +474,7 @@ fn evaluar_con(
         avisos,
         requisitos: medicion.requisitos,
         sin_calibrar,
+        ocultos_fallidos: fallidos_de(&oculto),
     };
     // La decisión sale de reglas deterministas; el estado sale de la decisión (Tarea 13b).
     let redactor_medido = deps.redactor.map(RedactorMedido::nuevo);
@@ -488,6 +489,15 @@ fn evaluar_con(
     veredicto.estado = informe::estado_de(Some(&informe));
     veredicto.informe = Some(informe);
     Ok(veredicto)
+}
+
+/// Ids ordenados de los tests de la suite oculta que fallan de forma estable. Los inestables van aparte.
+fn fallidos_de(c: &Clasificacion) -> Vec<String> {
+    c.estables
+        .iter()
+        .filter(|(_, resultado)| **resultado == ResultadoTest::Falla)
+        .map(|(id, _)| id.clone())
+        .collect()
 }
 
 /// Envoltorio que suma el costo de las llamadas de un juez. `evaluar_con` lo lee para `costo_usd`.
@@ -715,8 +725,8 @@ fn parte_juez(
     if let EstadoJuez::SinVeredicto(causa) = &resultado.estado {
         return Some(sin_veredicto_puntaje(dimension, causa.clone()));
     }
-    let completo = juez::con_faltantes_en_cero(resultado, &rubrica, juez.nombre);
-    let puntuacion = match juez::puntuar_con_juez(&rubrica, &completo, topes, juez.nombre) {
+    // Un ítem sin respuesta queda en `faltantes` y no entra al promedio: no vale 0 (desempate 3).
+    let puntuacion = match juez::puntuar_con_juez(&rubrica, resultado, topes, juez.nombre) {
         Ok(puntuacion) => puntuacion,
         Err(e) => {
             return Some(sin_veredicto_puntaje(dimension, format!("rúbrica: {e}")));
@@ -1393,6 +1403,7 @@ fn registrar_stderr(c: &Corrida, xml: &str, stderr: &str) -> Option<PathBuf> {
 pub fn redactar_para_mcp(mut v: Veredicto) -> Veredicto {
     let ocultos: BTreeSet<String> = informe::ids_ocultos(&v);
     v.inestables.clear();
+    v.ocultos_fallidos.clear();
     v.tasas.retain(|k, _| !k.starts_with("oculto:"));
     v.pendientes.clear();
     v.hallazgos.retain(|h| {
@@ -2693,11 +2704,44 @@ mod tests {
     }
 
     #[test]
-    fn oraculo_veredicto_lleva_las_etiquetas_de_rubrica() {
+    fn oraculo_veredicto_lleva_las_nueve_etiquetas_de_rubrica() {
         let base = tempfile::tempdir().expect("base");
-        let v = veredicto_sano(base.path());
-        let esperadas = rubrica::etiquetas(&rubrica::cargar_embebidas().expect("rúbricas"));
-        assert_eq!(v.rubricas, esperadas);
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let embebidas = rubrica::cargar_embebidas().expect("rúbricas");
+        let fabrica = herramientas(&[]);
+        let deps = Dependencias {
+            rubricas: &embebidas,
+            ..deps_de(&correr, &fabrica)
+        };
+        let v = evaluar_con(&repo, &tarea, &opciones(&home), deps).expect("evalúa");
+        assert_eq!(v.rubricas.len(), 9, "{:?}", v.rubricas);
+        assert_eq!(v.rubricas, rubrica::etiquetas(&embebidas));
+    }
+
+    #[test]
+    fn oraculo_redaccion_mcp_quita_los_ids_de_ocultos_fallidos() {
+        let informe = crate::tipos::Informe {
+            decision: crate::tipos::Decision::NoListo,
+            motivo: "test_oculto_fuera_de_requisitos: test_b::t9".into(),
+            requisitos: Vec::new(),
+            riesgos: Vec::new(),
+            proximos_pasos: Vec::new(),
+            bloqueantes: Vec::new(),
+            resumen: "Resumen sin ids de tests.".into(),
+            confianza: crate::tipos::Confianza::default(),
+        };
+        let v = Veredicto {
+            ocultos_fallidos: vec!["test_b::t9".into()],
+            informe: Some(informe),
+            ..Veredicto::default()
+        };
+        let r = redactar_para_mcp(v);
+        let texto = serde_json::to_string(&r).expect("json");
+        assert!(!texto.contains("test_b::t9"), "{texto}");
+        assert!(r.ocultos_fallidos.is_empty());
     }
 
     #[test]
@@ -2889,6 +2933,30 @@ mod tests {
         assert!((diseno.valor - 2.0 / 3.0).abs() < 1e-6, "{}", diseno.valor);
         assert_eq!(juez.llamadas(), 1);
         assert!((v.costo_usd - 0.25).abs() < 1e-9, "{}", v.costo_usd);
+    }
+
+    #[test]
+    fn oraculo_diseno_item_del_juez_sin_respuesta_no_baja_la_dimension() {
+        // El juez responde solo `diseno.modularidad` (peso 3, nivel 2). `diseno.tope` (mixto, peso 1)
+        // queda en `faltantes`: no vale 0. Diseño es 2/3, el valor del ítem respondido.
+        let r = ResultadoJuez {
+            estado: EstadoJuez::Ok,
+            niveles: BTreeMap::from([(MODULARIDAD_ID.to_string(), 2)]),
+            items: Vec::new(),
+            hallazgos: Vec::new(),
+            descartes: Vec::new(),
+            faltantes: vec![TOPE_ID.to_string()],
+        };
+        let rubricas = [rubrica_diseno()];
+        let juez = JuezDiseno {
+            modelo: None,
+            nombre: MODELO_JUEZ,
+            rubricas: &rubricas,
+        };
+        let p = puntaje_diseno(&juez, Some(&r), &BTreeMap::new());
+        assert_eq!(p.sin_veredicto, None, "{p:?}");
+        let valor = p.valor;
+        assert!((valor - 2.0 / 3.0).abs() < 1e-6, "{valor}");
     }
 
     #[test]

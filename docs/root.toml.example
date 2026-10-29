@@ -5,9 +5,6 @@
 # claude-sonnet-5-5 (abajo). Un modelo sin precio, `r00t llama` lo rechaza: falla cerrado.
 # Un [precios.<modelo>] de root.toml reemplaza el default de ese modelo; los de los demás se conservan.
 
-# Umbral de veredicto verde, de 0 a 1. Hoy no lo lee ninguna regla: la decisión sale de [decision].
-umbral_verde = 0.8
-
 # Cota inferior de Wilson (90%, unilateral) que un candidato debe alcanzar para entrar a la política.
 umbral_wilson = 0.6
 

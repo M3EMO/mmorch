@@ -57,7 +57,6 @@ pub struct Config {
     pub precios: BTreeMap<String, Precio>,
     pub balance: Balance,
     pub ruteo: Ruteo,
-    pub umbral_verde: f64,
     /// Cota inferior de Wilson (90%, unilateral) que un candidato debe alcanzar para entrar a la política.
     pub umbral_wilson: f64,
     pub proveedores: ConfigProveedores,
@@ -250,7 +249,6 @@ impl Default for Config {
             precios: precios_por_defecto(),
             balance: Balance::default(),
             ruteo: Ruteo::default(),
-            umbral_verde: 0.8,
             umbral_wilson: 0.6,
             proveedores: ConfigProveedores::default(),
             colab: ConfigColab::default(),
@@ -597,6 +595,9 @@ fn url_de_registro_valida(texto: &str) -> bool {
         && url.password().is_none()
 }
 
+/// Claves de la raíz de `root.toml` que ya no leen las reglas. Se aceptan con un aviso.
+const CLAVES_RETIRADAS: &[&str] = &["umbral_verde"];
+
 impl Config {
     /// Parsea el texto de un `root.toml`. Un texto vacío da los defaults.
     pub fn desde_texto(texto: &str) -> Result<Config, Error> {
@@ -615,7 +616,15 @@ impl Config {
         for (modelo, precio) in precios_por_defecto() {
             config.precios.entry(modelo).or_insert(precio);
         }
-        config.avisos = traducir_modelos_viejos(&mut config.ruteo);
+        let mut avisos = traducir_modelos_viejos(&mut config.ruteo);
+        // Claves que ya no se usan: un root.toml viejo carga, con un aviso.
+        let tabla: toml::Table = toml::from_str(texto)?;
+        for clave in CLAVES_RETIRADAS {
+            if tabla.contains_key(*clave) {
+                avisos.push(format!("{clave} ya no se usa; Root lo ignora."));
+            }
+        }
+        config.avisos = avisos;
         config.validar()?;
         Ok(config)
     }
@@ -754,7 +763,6 @@ mod tests {
     #[test]
     fn config_root_toml_con_valores_los_respeta() {
         let texto = r#"
-umbral_verde = 0.75
 umbral_wilson = 0.6
 
 [modelos]
@@ -783,7 +791,6 @@ espera_base_ms = 1
         assert_eq!(config.balance.cupo.tope_usd, 50.0);
         assert_eq!(config.balance.cupo.bloque_horas, 5);
         assert_eq!(config.balance.prefiere_api_sobre, 0.8);
-        assert_eq!(config.umbral_verde, 0.75);
         assert_eq!(config.umbral_wilson, 0.6);
         assert_eq!(config.proveedores.deepseek_url, "http://127.0.0.1:9/ds");
         assert_eq!(config.proveedores.espera_base_ms, 1);
@@ -792,7 +799,23 @@ espera_base_ms = 1
 
     #[test]
     fn config_root_toml_mal_formado_da_error() {
-        assert!(Config::desde_texto("umbral_verde = \"x\"").is_err());
+        assert!(Config::desde_texto("umbral_wilson = \"x\"").is_err());
+    }
+
+    #[test]
+    fn config_umbral_verde_de_un_root_toml_viejo_carga_con_aviso() {
+        // `umbral_verde` ya no se usa. Un root.toml viejo carga igual y el aviso lo dice.
+        let config = Config::desde_texto("umbral_verde = 0.8\n").expect("un root.toml viejo carga");
+        assert!(
+            config
+                .avisos
+                .iter()
+                .any(|a| a.contains("umbral_verde") && a.contains("ya no se usa")),
+            "{:?}",
+            config.avisos
+        );
+        let limpio = Config::desde_texto("umbral_wilson = 0.6\n").expect("carga");
+        assert!(limpio.avisos.is_empty(), "{:?}", limpio.avisos);
     }
 
     #[test]
@@ -1150,9 +1173,7 @@ tope_usd = 200.0
     fn config_umbrales_por_defecto_son_f64_exactos() {
         let c = Config::default();
         let wilson: f64 = c.umbral_wilson;
-        let verde: f64 = c.umbral_verde;
         assert_eq!(wilson, 0.6_f64);
-        assert_eq!(verde, 0.8_f64);
     }
 
     #[test]
