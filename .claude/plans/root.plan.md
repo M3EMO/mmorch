@@ -1859,3 +1859,185 @@ El crédito de nube vence el 2026-11-05. La nube toma toda la lógica que se pru
 El orquestador manda este texto a la sesión de nube 2, que arrancó desde 574c785:
 
 > El usuario respondió P55 con la opción a (decisión 47 del plan). Esto reemplaza la nota del brief que prohibía un precio para Sonnet. En la Tarea 21b, sumá `claude-sonnet-5-5` a los precios por defecto: 2 USD por millón de tokens de entrada y 10 USD por millón de salida. Sonnet no lleva tramos por tamaño de entrada. El comentario del precio cita su origen: la referencia de la API de Anthropic, tabla cacheada el 2026-10-06. Agregá un test: sin `root.toml`, `claude-sonnet-5-5` tiene ese precio y el juez de config puede llamarlo. Con eso, `[jueces].config_modelo` sigue en `claude-sonnet-5-5`, como pide la decisión 30. Anotá este cambio en el informe de la build.
+
+## Mezcla de la nube 2 (2026-10-29)
+
+**Mezcla.** La build de la nube 2 hizo las 13 tareas de su brief en la rama `claude/elegant-euler-eg8cm8` (69eea70). La laptop corrió la suite con podman y encontró 11 tests en rojo. El usuario eligió que el builder los arregle, y el arreglo es 3d145a7 en `laptop/nube2-podman`. El usuario ordenó: "Mezclá laptop/nube2-podman (nube 2 más el arreglo) en claude/root-e7813e." La mezcla es 1f98ad9.
+- El arreglo de la laptop tocó tres puntos:
+  - La carpeta `escenarios/` pasó a ser obligatoria solo si algún `cmd` usa `/oraculo`. Ese cambio arregló 10 tests de `tests/entrega.rs`.
+  - `commit_de` quita las variables `GIT_*` heredadas del hook.
+  - `descarga_dependencia_de_crates_io_compila_en_la_evaluacion_sin_red` quedó `#[ignore]` hasta resolver la pregunta 9.
+- Con podman, la suite da 1550 verdes, 0 rojos y 2 ignorados. El informe de la build es `docs/builds/2026-10-29-build-nube-2.md`.
+
+**Lo que la nube 2 dejó sin probar** (va a la laptop):
+- 21b: el GET a `/models` de DeepSeek.
+- 21c: un stream real. Falta confirmar que DeepSeek y Anthropic mandan bytes mientras razonan. Si no los mandan, el plazo de inactividad de 120 segundos corta al juez.
+- 22: la prueba de C1 con un backend PEP 517 real.
+- 23: el formato real de `pytest --collect-only -q` y su código 5, los montajes reales y `unshare -rn` en Colab.
+- 24: la prueba real de A11 con buildah.
+- 27: `pasta:--no-map-gw` contra un puerto del host, y la subida de `target/debug` y `bin` con la CLI de Colab.
+- 12 y 12b: la calibración real y la validez real.
+- 26: un transcript real de `claude -p`.
+
+**Lo que la nube 2 dejó sin hacer** (va a la nube 3, salvo lo que diga otra cosa):
+- 13: `rubrica::EMBEBIDAS` está vacío, así que el juez de diseño no corre en producción y `Veredicto.rubricas` queda vacío.
+- 13b: `Confianza.ambiguedades` queda vacío, y el aviso "corrida de Colab con red" no llega a `Veredicto.avisos`.
+- 25: M9.
+- 27: `netrc_para` y `usuario_de_pip` existen, pero no están conectadas a la descarga.
+- 24 (M13): falta confirmar en la laptop si `cargo mutants --help` ofrece un límite de mutantes.
+- 26: la capa 1 y la integración con `r00t corre`.
+- 16: el runner todavía no existe.
+
+**Tareas desbloqueadas.** G1 y G2 están cumplidos y el código de la nube 2 entró. Quedan desbloqueadas:
+- En la laptop: el `Validate` real de 7, 9c, 13 y 13b sobre memora y brasa.
+- En la laptop: la calibración real (12), que espera también a P57.
+- En la nube 3: el código de la Tarea 16 con dobles de prueba.
+- En la laptop: la corrida real de la 16 con memora, que necesita la capa 1 de la 26.
+- En la laptop: la corrida real de Colab de la 7h.
+
+## Reglas de la laptop (2026-10-29)
+
+Estas reglas valen para toda corrida de la suite o de Root en la laptop.
+
+1. **Sin claves y con un `ROOT_HOME` de prueba.** Con `DEEPSEEK_API_KEY` o `ANTHROPIC_API_KEY` en el entorno, la suite con podman gasta API real. También escribe eventos en el `ROOT_HOME` real, porque `rutear` y `llamar` leen `root_home()`. La suite corre siempre sin esas dos claves y con `ROOT_HOME` apuntando a una carpeta de prueba vacía. Solo una corrida real de Root, pedida en el plan, usa las claves y el `ROOT_HOME` real.
+2. **Compilaciones en /home.** El `/tmp` de la laptop es un tmpfs de 7,7 GB, y un `target` de cargo ya lo llenó. Toda compilación y todo temporal de la suite van en /home: `TMPDIR` y `CARGO_TARGET_DIR` apuntan a carpetas bajo `$HOME/.cache/root-tests/`.
+3. **El hook las aplica.** La Tarea 29 hace que `.githooks/pre-commit` quite las dos claves y fije `ROOT_HOME`, `TMPDIR` y `CARGO_TARGET_DIR` antes de `cargo test`. Una persona que corre `cargo test` a mano usa el mismo script: `tools/test-seguro.sh`.
+
+## Desempates técnicos 11 (Opus, 2026-10-29, después de la mezcla de la nube 2)
+
+Las preguntas 8, 5 y 43 de la nube tocan lo que el evaluador promete o el gasto: van al usuario como P56 y P57. Las demás son técnicas. Cada desempate tiene su razón en una línea.
+
+**Rúbricas, Oracle e informe**
+1. **Rúbricas embebidas.** El builder agrega los `include_str!` de los nueve archivos de `rubricas/`. El contenido ya está aprobado (G2) y no cambia. Un test compara el hash de cada rúbrica embebida con el de su archivo.
+2. **Pesos de `global`.** Se confirman pesos iguales entre las dimensiones calibradas con veredicto: el plan no dio pesos, y el peso igual es el que menos supone.
+3. **Ítems del juez sin respuesta.** Se revierte: un ítem sin respuesta queda en `faltantes`, no vale 0. Así lo fija el desempate 3 de "Desempates técnicos 4": un 0 sin evidencia es un rojo falso.
+4. **Estructura y Arquitectura.** Se confirma la media simple de sondas y juez, y una parte sin veredicto deja la dimensión sin veredicto: es la lectura más cerrada.
+5. **Calibración por tarea.** Pasa al usuario como P57, junto con la pregunta 43, porque decide el gasto.
+6. **Funciona.** Se confirma: pasan sobre medidos, sin `[[entorno]]`, con los escenarios promediados. Sigue la Tarea 9c.
+7. **Entrega.** La construcción de la 9d2 entra al veredicto, como pide la Tarea 9d. Sin `entregar`, la dimensión mide solo la mitad de lo prometido.
+8. **Listo con dimensiones sin veredicto.** Pasa al usuario como P56.
+9. **Completitud sin veredicto.** `Decision` suma, solo agregando, la variante `SinDecision`. Completitud sin veredicto da `SinDecision`, y `SinDecision` da `Estado::SinVeredicto` con código 3. Razón: el GOAL pide "sin veredicto antes que un veredicto falso", y un NoListo sin datos de completitud es un rojo falso.
+10. **Rol del redactor.** Se confirma Delega: redacta, no juzga, y el gate de evidencia filtra cada oración.
+11. **`umbral_verde` y tests fuera de requisitos.** `umbral_verde` se quita del código, y un `root.toml` viejo con ese campo se sigue leyendo con un aviso. Un test oculto que falla y no pertenece a ningún requisito da NoListo con la regla `test_oculto_fuera_de_requisitos`. Razón: un test oculto es una promesa del producto aunque la tarea no lo mapee.
+
+**Topes y proveedores**
+12. **Reservas abiertas.** Siguen contando como gasto: el proceso pudo enviar el pedido antes de morir. `r00t observa uso` lista las reservas abiertas con más de dos veces `timeout_juez_s`. Solo un humano puede corregirlas, con `observa costo`, que solo suma.
+13. **Log no escribible.** Se confirma: sin reserva escrita, no se envía nada. Es fallar cerrado, y el desempate 8 de "Desempates técnicos 5" ya lo pedía.
+14. **Clasificación de fallas.** Se confirma la tabla del organizador: es conservadora y el tope ve cada peor caso.
+15. **Cupo con `tokens_estimados`.** Se confirma: sin precio no hay estimación, como en `r00t llama`.
+16. **Sesión importada.** Se confirma `mtime - duration_ms`: es la mejor hora disponible sin un campo de inicio.
+17. **Costo sin `costUSD`.** Se confirma, con un cambio: `costo_desconocido` también deja un `Gate`, para que el tope no lo pase por alto.
+18. **`observa costo`.** Se confirma: corrida `manual`, motivo obligatorio y las 12:00 locales, que caen en el día pedido con cualquier huso.
+19. **Precio en `root.toml`.** Se confirma: un precio del usuario reemplaza al default entero, y el umbral es estricto. Heredar tramos mezclaría dos fuentes de precio.
+20. **Juez de la ficha.** Sí: `--juez-modelo` pasa por la lista de modelos que razonan. Un modelo fuera de la lista sale con código 2. Razón: el invariante "el verificador razona" vale para todo juez.
+21. **Cita del precio de DeepSeek.** Se confirma la cita "config.py del proyecto anterior (decisión 41)": cumple la regla de la Tarea 18.
+
+**Descarga y contenedores**
+22. **Nombre de carpeta como requisito.** Se quita esa regla. Desde la Tarea 22, el contenedor de descarga de Python no monta `/repo`, así que un nombre de carpeta no puede resolver al repo. La regla solo daba falsos positivos.
+23. **Opciones de pip.** `--prefer-binary` y `--only-binary` se aceptan y se ignoran: Root ya fuerza `--only-binary=:all:`. `-c` con solo versiones se acepta. `--no-binary`, `--trusted-host`, `-c` con fuentes y `-e` que no es git se siguen rechazando, porque abren la construcción o la red.
+24. **`generar_lock` de Rust.** Se confirma: `cargo generate-lockfile` no corre `build.rs`, y necesita los manifiestos de las dependencias `path`.
+25. **Clones git.** Se quedan en el host, con un tope de 1 MB por archivo. Leer un `pyproject.toml` como texto con el parser de TOML no ejecuta nada. El `tar` sí fue al contenedor, porque descomprime un archivo ajeno.
+26. **Python en la imagen.** Se confirma: la imagen trae Python 3.11, y sin `tomllib` la salida 3 es fallar cerrado.
+27. **Clave de caché de Python.** Sí: la clave suma el digest de la imagen, leído con `podman image inspect`. Un tag reconstruido no debe usar wheels de otra imagen.
+28. **Junit con ids repetidos.** `correr.sh` de Colab escribe un junit por repetición, y Root los importa como repeticiones. Un test que alterna queda inestable, igual que en la laptop.
+29. **Validación de `ROOT_HOME`.** Se confirma en `ejecutar`: cubre todos los subcomandos con un solo punto.
+30. **Gate del build con red.** Los campos pasan a llamarse `primer_paso_sin_red` y `pasos_del_dockerfile`: hoy traen `RUN`, `ADD` y `COPY` con URL.
+31. **M9.** Root resuelve solo con wheels. Si un paquete necesita a otro que solo tiene sdist, la descarga da `Pendiente` con el mensaje "B solo tiene sdist y la descarga no construye sdists". Bajar sdists con pip correría `setup.py` con red, contra la decisión 21.
+32. **Límite de cargo-mutants.** Se confirma el límite en el parser. La laptop lee `cargo mutants --help` y lo anota.
+33. **Arquitectura en workspaces.** Da `SinVeredicto` si no encuentra módulos: un 1,0 sin análisis es el mismo defecto que A9.
+
+**Oráculo oculto, Colab y transcripts**
+34. **A5 solo en pytest.** Se confirma: los otros runners no tienen `--collect-only`. Para ellos, el junit vale solo con código de salida 0 o 1.
+35. **Contrato montado.** Se acepta montar solo `contrato/` en `/oraculo/contrato`: el builder ya ve esos tests. La Tarea 23 se corrige en ese punto.
+36. **Redacción MCP.** Se confirma la lista: todo dato que nombra un test oculto queda fuera de `root_evaluar`.
+37. **Ids en `ROOT_HOME`.** Se acepta. Con la capa 1 de la Tarea 26, el builder no ve `ROOT_HOME` entero.
+38. **Paquete de pendientes.** Un lock por tarea impide dos `pendientes` simultáneos. El segundo sale con código 3 y nombra al primero.
+39. **Transcript y `ROOT_HOME`.** La búsqueda sigue cubriendo todo `ROOT_HOME`. A cambio, `r00t corre` pone la carpeta de la corrida fuera de `ROOT_HOME`, en `$HOME/.cache/root/corridas/`. Así no hay falsos positivos y la detección no se achica.
+
+**Calibración y validez**
+40. **Repo bueno.** Se confirma: `--repo` o `[calibracion] repo` de `tarea.toml`.
+41. **Detección.** Se confirma: un caso sin veredicto cuenta en contra, porque el evaluador no lo detectó.
+42. **Inyectores aproximados.** Se aceptan para el hito 1. `tarea.toml` suma `[calibracion] camino_caliente`, una lista opcional de funciones. Con esa lista, el bucle O(n²) va en una de ellas.
+43. **Costo de calibrar.** Pasa al usuario como P57.
+44. **Umbral de orden.** `cumple` exige exactitud de orden 1,0. El criterio de aceptación dice "Root ordena bien los pares de orden conocido": son pocos pares, y uno mal ordenado ya es un fallo.
+45. **Rastros en los paquetes a ciegas.** El armado borra `authors`, `repository` y `homepage` de `Cargo.toml`. También lista, por paquete, cada aparición de "ecc", "sdlc", "claude", "haiku", "sonnet" y "opus". Opus revisa esa lista antes de entregar los paquetes al usuario (G3).
+
+**Preguntas del builder de la laptop**
+- **a) `escenarios/` montada siempre.** No: se monta solo si algún `cmd` usa `/oraculo`. Los guiones de escenario son material del oráculo, y el contenedor corre el producto del builder.
+- **b) Firma de `entregar`.** Sí: `entregar_con` recibe un ejecutor, y `entregar` queda como envoltorio. Así se prueba sin podman, como la Tarea 13.
+- **c) Test ignorado.** Vuelve sin `#[ignore]`, con la aserción `SinVeredicto`, por el desempate 9.
+
+### Tarea 28: Desempates de la nube 2
+- **Action**: los desempates 1, 3, 7, 9, 11, 12, 17, 20, 22, 23, 27, 28, 30, 31, 33, 38, 39, 42, 44 y 45, y los del builder a, b y c.
+- **Dónde**: en la nube, con dobles de prueba. En la laptop van el digest de la imagen (27) y los montajes reales (a).
+- **Validate**: `cargo test`:
+  - El hash de cada rúbrica embebida coincide con el de su archivo de `rubricas/`, y `Veredicto.rubricas` trae las nueve.
+  - Un ítem del juez sin respuesta queda en `faltantes`, y la dimensión no baja.
+  - Completitud sin veredicto da `SinDecision`, `Estado::SinVeredicto` y código 3.
+  - Un test oculto que falla fuera de los requisitos da NoListo con `test_oculto_fuera_de_requisitos`.
+  - `ficha revisar --juez-modelo deepseek-chat` sale con código 2.
+  - `-c` con solo versiones se acepta, y `--trusted-host` se rechaza con su línea.
+  - Un workspace sin módulos bajo `src/` da `SinVeredicto` en Arquitectura.
+  - Dos `pendientes` simultáneos de la misma tarea: el segundo sale con código 3.
+  - Un paquete a ciegas no trae `authors`, y la lista de rastros nombra un README que dice "ECC".
+  - `descarga_dependencia_de_crates_io_compila_en_la_evaluacion_sin_red` vuelve sin `#[ignore]` y espera `SinVeredicto`.
+
+### Tarea 29: Suite segura en la laptop (Reglas de la laptop)
+- **Action**:
+  - `tools/test-seguro.sh` quita `DEEPSEEK_API_KEY` y `ANTHROPIC_API_KEY`, crea un `ROOT_HOME` de prueba vacío bajo `$HOME/.cache/root-tests/`, apunta ahí `TMPDIR` y `CARGO_TARGET_DIR`, y corre `cargo test`.
+  - `.githooks/pre-commit` usa ese script.
+  - `rutear` y `llamar` dentro de `evaluar` usan `OpcionesOraculo.home`, no `root_home()`. Así una evaluación con un `ROOT_HOME` de prueba nunca escribe en el real.
+- **Dónde**: el script y el cambio de código en la nube. La prueba con las claves exportadas, en la laptop.
+- **Validate**:
+  - Con `DEEPSEEK_API_KEY=x` exportada, `tools/test-seguro.sh` corre la suite y ningún test ve la clave.
+  - `evaluar` con `OpcionesOraculo.home` de prueba no escribe en `root_home()`.
+
+### Tarea 30: Lo que la nube 2 dejó sin hacer
+- **Action**:
+  - 13b: `Confianza.ambiguedades` recibe las ambigüedades abiertas de la ficha, y el aviso "corrida de Colab con red" llega a `Veredicto.avisos`.
+  - 27: la descarga de Python arma el `netrc` de pip con `netrc_para` y `usuario_de_pip`, solo para los registros de `root.toml` (decisión 29).
+- **Dónde**: en la nube.
+- **Validate**:
+  - Una ficha con una ambigüedad abierta la muestra en `Confianza.ambiguedades`.
+  - Un `colab.json` con la marca de red deja el aviso en `Veredicto.avisos`.
+  - Un registro de `root.toml` con `usuario_env` arma un `netrc` con ese usuario. La credencial no aparece en ningún evento.
+
+## Orden de trabajo (2026-10-29, después de la nube 2)
+
+El crédito de nube vence el 2026-11-05. La nube va primero.
+
+**Nube, sesión 3.** Arranca desde la punta de `claude/root-e7813e` que trae `docs/builds/brief-nube-3.md` (un commit después de 1f98ad9). Orden:
+1. 29: suite segura. Va primero porque protege cada corrida posterior de la laptop.
+2. 28: desempates de la nube 2.
+3. 30: lo que la nube 2 dejó sin hacer.
+4. 16: runner con dobles de prueba: un `claude` falso que emite `stream-json`, el ejecutor de contenedor falso y la carpeta de la corrida fuera de `ROOT_HOME`.
+5. 26, capa 1, solo el `Containerfile` del builder y los argumentos del contenedor. La imagen se construye en la laptop.
+6. 12: la parte técnica de P57 que no depende de la respuesta. Cada caso de calibración corre solo las partes de `evaluar` que mide su dimensión.
+
+**Laptop.**
+- Siempre: `tools/test-seguro.sh`, o el hook, sin claves y con compilaciones en /home.
+- Podman: la suite completa antes de cada mezcla; las pruebas sin probar de 22, 23, 24 y 27; el digest de la imagen (28); `cargo mutants --help` (M13); la imagen del builder (26).
+- Podman y `ROOT_HOME` real: el `Validate` real de 7 y 9c (con 5 repeticiones), y de 13 y 13b sobre memora y brasa.
+- Claves de API: el GET a `/models` (21b); un stream real de cada proveedor (21c); el evento de 0,50 USD (decisión 46); la calibración real (12), después de P57.
+- Colab: la corrida real de la 7h, con T4, `unshare -rn` y tope de 2 horas.
+- Credencial de Claude y podman: la Tarea 16 con memora, dentro del contenedor de la capa 1.
+- Opus: el oráculo de `graft-lector-planes` (16b) y G5; la revisión de los rastros de los paquetes a ciegas antes de G3.
+- Usuario: P56, P57 y G3.
+
+**Preguntas abiertas (sin responder)**
+
+- **P56. ¿Listo con dimensiones sin veredicto?** Una dimensión queda sin veredicto cuando Root no pudo medirla: falta una herramienta, falla un contenedor o falta un dato. Hoy la regla del informe permite `Listo` en ese caso, y el informe lo avisa en `confianza`. El GOAL pide "sin veredicto antes que un veredicto falso". ¿Qué elegís?
+
+  - a) `Listo` con aviso, como hoy. Riesgo: un "listo" sin medir seguridad parece un "listo" completo.
+  - b) `NoListo` si alguna dimensión queda sin veredicto. Riesgo: cobra al producto una falla del instrumento.
+  - c) `SinDecision` solo si queda sin veredicto una dimensión con algún ítem `bloquea = true`, como Seguridad o Completitud. Las demás dejan `Listo` con aviso.
+
+  Mi recomendación es c): Root no dice "listo" sin medir lo que puede bloquear, y no cobra al producto una falla del instrumento.
+
+- **P57. Alcance y costo de la calibración.** La calibración corre unas 21 evaluaciones por dimensión y por tarea, con `n = 20`. Cada evaluación llama a la API: el redactor, el juez de diseño y, a veces, el juez de config. Calcular el costo exacto necesita una corrida real. Mi estimación es de 15 a 20 USD para las ocho dimensiones en memora y brasa. Esa cifra sale del peor caso por llamada de `deepseek-flash` y no está medida. El tiempo de la laptop puede pasar de un día, porque cada evaluación corre contenedores. La Tarea 12 ya corta el costo: cada caso corre solo las partes que mide su dimensión. ¿Qué elegís?
+
+  - a) Calibrar memora y brasa por separado, con `n = 20`. Una calibración vale solo para su tarea.
+  - b) Calibrar solo memora, con `n = 20`, y usar esa calibración también en brasa. Costo: la mitad. Riesgo: la exactitud de memora puede no valer en brasa, que renderiza con GPU.
+  - c) Calibrar memora y brasa con `n = 10`. Costo: la mitad. Riesgo: la cota de la exactitud queda más ancha.
+
+  Mi recomendación es a): mide el evaluador en cada tarea, y el tope de API de 100 USD por mes acota el gasto.
