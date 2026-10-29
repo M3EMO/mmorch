@@ -5,13 +5,14 @@
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::time::Instant;
 
 use serde_json::{Map, json};
 
 use crate::config::{Config, root_home};
 use crate::error::Error;
 use crate::observe::{self, uso};
-use crate::proveedores::{self, ErrorProveedor, Prompt, Respuesta};
+use crate::proveedores::{self, Claves, ErrorProveedor, Prompt, Respuesta};
 use crate::route::politica::nombre_rol;
 use crate::route::{self, Politica};
 use crate::tipos::{Eleccion, Pedido, Proveedor, Rol, SinPresupuesto, Uso, Via};
@@ -52,7 +53,7 @@ pub fn rutear(rol: Rol, tipo: &str, checkeable: bool, tokens: u32) -> Result<Ele
         checkeable,
         tokens_estimados: tokens,
     };
-    elegir_o_gate(&pedido, &pol, &gasto, &cfg, ahora, offset, CORRIDA_ROUTE)
+    elegir_final(&pedido, &pol, &gasto, &cfg, ahora, offset, CORRIDA_ROUTE)
 }
 
 /// `r00t llama`: lee el prompt, rutea, chequea el costo y llama. Devuelve el código de `imprimir_para_cli`.
@@ -106,7 +107,7 @@ pub fn llamar_con_chequeo(
         checkeable: false,
         tokens_estimados: max_tokens,
     };
-    let eleccion = elegir_o_gate(&pedido, &pol, &gasto, &cfg, ahora, offset, corrida)?;
+    let eleccion = elegir_final(&pedido, &pol, &gasto, &cfg, ahora, offset, corrida)?;
     if eleccion.via == Via::Cupo {
         if let Some(error) = rechazo_api_llena(&pedido, &gasto, &cfg, ahora, offset, corrida) {
             return Err(error);
@@ -172,6 +173,27 @@ fn uso_actual(cfg: &Config, ahora: f64, offset: i32) -> Result<Uso, Error> {
         offset,
         cfg.balance.cupo.bloque_horas,
     )?)
+}
+
+/// Elige la vía y aplica el respaldo de Verifica y Juzga si el proveedor principal no está disponible.
+/// Un modelo fuera de la lista de razonamiento da error de elección (código 2).
+fn elegir_final(
+    pedido: &Pedido,
+    pol: &Politica,
+    gasto: &Uso,
+    cfg: &Config,
+    ahora: f64,
+    offset: i32,
+    corrida: &str,
+) -> Result<Eleccion, Error> {
+    let elegida = elegir_o_gate(pedido, pol, gasto, cfg, ahora, offset, corrida)?;
+    let claves = Claves::del_entorno();
+    let instante = Instant::now();
+    let breaker = proveedores::breaker_global();
+    let disponible = |p: Proveedor| proveedores::disponible(&claves, breaker, p, instante);
+    let final_ = route::con_respaldo(elegida, cfg, &disponible);
+    route::exigir_modelo_que_razona(&final_)?;
+    Ok(final_)
 }
 
 /// Elige la vía. Con `SinPresupuesto` registra el `Gate` y devuelve el error con la hora de reapertura.
@@ -240,7 +262,7 @@ fn etiqueta_via(via: Via) -> &'static str {
     }
 }
 
-fn etiqueta_proveedor(proveedor: Proveedor) -> &'static str {
+pub(crate) fn etiqueta_proveedor(proveedor: Proveedor) -> &'static str {
     match proveedor {
         Proveedor::Anthropic => "anthropic",
         Proveedor::Deepseek => "deepseek",

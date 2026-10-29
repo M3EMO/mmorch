@@ -30,6 +30,7 @@ const TABLAS_CONFIG: &[&str] = &[
     "precios",
     "modelos",
     "colab",
+    "jueces",
 ];
 
 fn r00t(args: &[&str]) -> Output {

@@ -38,6 +38,8 @@ pub struct Config {
     pub umbral_wilson: f64,
     pub proveedores: ConfigProveedores,
     pub colab: ConfigColab,
+    /// Sección `[jueces]`: modelo de los jueces que no pasan por `route`.
+    pub jueces: Jueces,
     /// Registros privados de paquetes (`[[registro]]`). Solo los escribe el humano.
     #[serde(default, rename = "registro")]
     pub registros: Vec<RegistroConfig>,
@@ -68,6 +70,14 @@ pub struct ConfigColab {
     pub minutos_max: f64,
 }
 
+/// Sección `[jueces]`: el modelo del juez de la configuración de Cargo (decisión 47). Vía API.
+/// El proveedor sale del nombre: `claude-*` es Anthropic y `deepseek-*` es DeepSeek.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Jueces {
+    pub config_modelo: String,
+}
+
 /// Sección `[proveedores]`: URLs de las APIs, espera base de reintentos y timeout por intento.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -78,6 +88,9 @@ pub struct ConfigProveedores {
     pub espera_base_ms: u64,
     /// Tiempo máximo de cada intento HTTP, en segundos.
     pub timeout_s: u64,
+    /// Tiempo máximo de cada intento de los roles Verifica y Juzga, en segundos. Un juez puede
+    /// escribir hasta `MAX_TOKENS_JUEZ` tokens.
+    pub timeout_juez_s: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -167,6 +180,9 @@ pub struct Ruteo {
 pub struct ModeloApi {
     pub proveedor: Proveedor,
     pub modelo: String,
+    /// Modelo que Route usa si el proveedor principal no está disponible. Solo en Verifica y Juzga.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub respaldo: Option<Box<ModeloApi>>,
 }
 
 impl Default for Config {
@@ -180,8 +196,17 @@ impl Default for Config {
             umbral_wilson: 0.6,
             proveedores: ConfigProveedores::default(),
             colab: ConfigColab::default(),
+            jueces: Jueces::default(),
             registros: Vec::new(),
             avisos: Vec::new(),
+        }
+    }
+}
+
+impl Default for Jueces {
+    fn default() -> Self {
+        Jueces {
+            config_modelo: "claude-sonnet-5-5".into(),
         }
     }
 }
@@ -199,6 +224,7 @@ impl Default for ConfigProveedores {
             anthropic_url: "https://api.anthropic.com".into(),
             espera_base_ms: 500,
             timeout_s: 120,
+            timeout_juez_s: 1200,
         }
     }
 }
@@ -279,17 +305,34 @@ pub fn traducir_modelos_viejos(ruteo: &mut Ruteo) -> Vec<String> {
     ];
     let mut avisos = Vec::new();
     for (rol, api) in roles {
-        let viejo = api.proveedor == Proveedor::Deepseek
-            && MODELOS_VIEJOS_DEEPSEEK.contains(&api.modelo.as_str());
-        if viejo {
-            avisos.push(format!(
-                "[ruteo.{rol}] usa \"{}\", un modelo viejo de DeepSeek: Root usa \"{MODELO_DEEPSEEK_VIGENTE}\"",
-                api.modelo
-            ));
-            api.modelo = MODELO_DEEPSEEK_VIGENTE.into();
+        traducir_modelo(rol, api, &mut avisos);
+        if let Some(respaldo) = api.respaldo.as_deref_mut() {
+            traducir_modelo(&format!("{rol}.respaldo"), respaldo, &mut avisos);
         }
     }
     avisos
+}
+
+/// Cambia el modelo de un `ModeloApi` si es un nombre viejo de DeepSeek, y anota el aviso.
+fn traducir_modelo(rol: &str, api: &mut ModeloApi, avisos: &mut Vec<String>) {
+    let viejo = api.proveedor == Proveedor::Deepseek
+        && MODELOS_VIEJOS_DEEPSEEK.contains(&api.modelo.as_str());
+    if viejo {
+        avisos.push(format!(
+            "[ruteo.{rol}] usa \"{}\", un modelo viejo de DeepSeek: Root usa \"{MODELO_DEEPSEEK_VIGENTE}\"",
+            api.modelo
+        ));
+        api.modelo = MODELO_DEEPSEEK_VIGENTE.into();
+    }
+}
+
+/// Respaldo de Verifica y Juzga cuando `root.toml` no escribe uno: Haiku (decisión 41).
+fn respaldo_haiku() -> Box<ModeloApi> {
+    Box::new(ModeloApi {
+        proveedor: Proveedor::Anthropic,
+        modelo: "claude-haiku-5-5".into(),
+        respaldo: None,
+    })
 }
 
 impl Default for Ruteo {
@@ -297,11 +340,17 @@ impl Default for Ruteo {
         let equivalente = |proveedor, modelo: &str| ModeloApi {
             proveedor,
             modelo: modelo.into(),
+            respaldo: None,
+        };
+        // Verifica y Juzga llevan Haiku como respaldo (decisión 41).
+        let con_respaldo = |proveedor, modelo: &str| ModeloApi {
+            respaldo: Some(respaldo_haiku()),
+            ..equivalente(proveedor, modelo)
         };
         Ruteo {
             delega: equivalente(Proveedor::Deepseek, "deepseek-flash"),
-            verifica: equivalente(Proveedor::Deepseek, "deepseek-flash"),
-            juzga: equivalente(Proveedor::Deepseek, "deepseek-flash"),
+            verifica: con_respaldo(Proveedor::Deepseek, "deepseek-flash"),
+            juzga: con_respaldo(Proveedor::Deepseek, "deepseek-flash"),
             api_equivalente: BTreeMap::from([
                 (
                     "opus".to_string(),
@@ -463,6 +512,10 @@ impl Config {
         for (alias, modelo) in Ruteo::default().api_equivalente {
             config.ruteo.api_equivalente.entry(alias).or_insert(modelo);
         }
+        // Verifica y Juzga siempre tienen respaldo: si el usuario no escribió uno, vale Haiku.
+        for api in [&mut config.ruteo.verifica, &mut config.ruteo.juzga] {
+            api.respaldo.get_or_insert_with(respaldo_haiku);
+        }
         // Un precio del usuario reemplaza el default de ese modelo; los demás defaults se conservan.
         for (modelo, precio) in precios_por_defecto() {
             config.precios.entry(modelo).or_insert(precio);
@@ -496,6 +549,39 @@ impl Config {
         for (campo, valor) in topes {
             if valor.is_nan() || valor <= 0.0 {
                 return Err(Error::ConfigValor(format!("{campo} debe ser mayor que 0")));
+            }
+        }
+        let proveedores = &self.proveedores;
+        for (campo, valor) in [
+            ("proveedores.timeout_s", proveedores.timeout_s),
+            ("proveedores.timeout_juez_s", proveedores.timeout_juez_s),
+        ] {
+            if valor == 0 {
+                return Err(Error::ConfigValor(format!("{campo} debe ser mayor que 0")));
+            }
+        }
+        // El respaldo solo vive en Verifica y Juzga, y no tiene respaldo propio.
+        if self.ruteo.delega.respaldo.is_some() {
+            return Err(Error::ConfigValor(
+                "[ruteo.delega] no admite respaldo: solo verifica y juzga lo tienen".into(),
+            ));
+        }
+        for (alias, equivalente) in &self.ruteo.api_equivalente {
+            if equivalente.respaldo.is_some() {
+                return Err(Error::ConfigValor(format!(
+                    "[ruteo.api_equivalente.{alias}] no admite respaldo: solo verifica y juzga lo tienen"
+                )));
+            }
+        }
+        for api in [&self.ruteo.verifica, &self.ruteo.juzga] {
+            if api
+                .respaldo
+                .as_deref()
+                .is_some_and(|r| r.respaldo.is_some())
+            {
+                return Err(Error::ConfigValor(
+                    "el respaldo no lleva otro respaldo".into(),
+                ));
             }
         }
         if b.cupo.bloque_horas == 0 {
@@ -1110,6 +1196,85 @@ tope_usd = 200.0
                     .contains("colab.minutos_max debe ser mayor que 0"),
                 "{error}"
             );
+        }
+    }
+
+    #[test]
+    fn config_timeouts_por_defecto_son_120_y_1200() {
+        let c = Config::desde_texto("").expect("vacío debe parsear");
+        assert_eq!(c.proveedores.timeout_s, 120);
+        assert_eq!(c.proveedores.timeout_juez_s, 1200);
+    }
+
+    #[test]
+    fn config_timeout_en_cero_da_codigo_2() {
+        for texto in [
+            "[proveedores]\ntimeout_s = 0\n",
+            "[proveedores]\ntimeout_juez_s = 0\n",
+        ] {
+            let error = Config::desde_texto(texto).expect_err(texto);
+            assert_eq!(error.codigo_de_salida(), 2, "{texto}");
+            assert!(error.to_string().contains("proveedores.timeout"), "{error}");
+        }
+    }
+
+    #[test]
+    fn config_jueces_config_modelo_por_defecto_es_sonnet() {
+        let ruta = Path::new("/ruta-que-no-existe-root-test/root.toml");
+        for c in [
+            Config::desde_texto("").expect("vacío"),
+            Config::cargar(ruta).expect("inexistente da default"),
+        ] {
+            assert_eq!(c.jueces.config_modelo, "claude-sonnet-5-5");
+        }
+    }
+
+    #[test]
+    fn config_jueces_config_modelo_se_lee_de_root_toml() {
+        let c =
+            Config::desde_texto("[jueces]\nconfig_modelo = \"deepseek-v4-pro\"\n").expect("carga");
+        assert_eq!(c.jueces.config_modelo, "deepseek-v4-pro");
+    }
+
+    #[test]
+    fn config_verifica_y_juzga_tienen_respaldo_haiku_por_defecto() {
+        let c = Config::default();
+        for api in [&c.ruteo.verifica, &c.ruteo.juzga] {
+            let respaldo = api.respaldo.as_deref().expect("respaldo por defecto");
+            assert_eq!(respaldo.proveedor, Proveedor::Anthropic);
+            assert_eq!(respaldo.modelo, "claude-haiku-5-5");
+        }
+        assert!(c.ruteo.delega.respaldo.is_none());
+    }
+
+    #[test]
+    fn config_respaldo_escrito_se_lee_y_si_falta_vale_haiku() {
+        let texto = "[ruteo.verifica]\nproveedor = \"deepseek\"\nmodelo = \"deepseek-flash\"\n\
+                     [ruteo.verifica.respaldo]\nproveedor = \"deepseek\"\nmodelo = \"deepseek-v4-pro\"\n\
+                     [ruteo.juzga]\nproveedor = \"deepseek\"\nmodelo = \"deepseek-flash\"\n";
+        let c = Config::desde_texto(texto).expect("carga");
+        let escrito = c.ruteo.verifica.respaldo.as_deref().expect("escrito");
+        assert_eq!(escrito.modelo, "deepseek-v4-pro");
+        let juzga = c
+            .ruteo
+            .juzga
+            .respaldo
+            .as_deref()
+            .expect("completa con Haiku");
+        assert_eq!(juzga.modelo, "claude-haiku-5-5");
+    }
+
+    #[test]
+    fn config_respaldo_en_delega_o_en_equivalente_da_codigo_2() {
+        for texto in [
+            "[ruteo.delega]\nproveedor = \"deepseek\"\nmodelo = \"deepseek-flash\"\n\
+             [ruteo.delega.respaldo]\nproveedor = \"anthropic\"\nmodelo = \"claude-haiku-5-5\"\n",
+            "[ruteo.api_equivalente.sonnet]\nproveedor = \"anthropic\"\nmodelo = \"claude-sonnet-5-5\"\n\
+             [ruteo.api_equivalente.sonnet.respaldo]\nproveedor = \"anthropic\"\nmodelo = \"claude-haiku-5-5\"\n",
+        ] {
+            let error = Config::desde_texto(texto).expect_err(texto);
+            assert_eq!(error.codigo_de_salida(), 2, "{texto}");
+            assert!(error.to_string().contains("respaldo"), "{error}");
         }
     }
 }

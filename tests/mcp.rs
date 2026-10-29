@@ -109,9 +109,12 @@ fn codigo_rpc(resp: &Value) -> i64 {
     resp["error"]["code"].as_i64().expect("código de error")
 }
 
+/// `r00t` con el mismo entorno que el servidor MCP de `mcp()`, para comparar la misma elección.
 fn root_cli(home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_r00t"))
         .env("ROOT_HOME", home)
+        .env("DEEPSEEK_API_KEY", CLAVE)
+        .env_remove("ANTHROPIC_API_KEY")
         .args(args)
         .output()
         .expect("no se pudo ejecutar el binario root")

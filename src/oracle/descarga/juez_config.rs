@@ -10,14 +10,13 @@ use serde::{Deserialize, Serialize};
 
 use super::hash_corto;
 use super::inventario::{EntradaConfig, Inventario, redactar};
-use crate::config::{Config, root_home};
-use crate::observe;
+use crate::config::Config;
 use crate::oracle::ErrorOraculo;
 use crate::oracle::juez::{JuezProveedor, ModeloJuez, desenvuelto};
 use crate::oracle::tarea::Tarea;
 use crate::proveedores::{MAX_TOKENS_JUEZ, Prompt, causa_tope_alcanzado};
 use crate::route;
-use crate::tipos::{Dimension, Fuente, Hallazgo, Pedido, Rol};
+use crate::tipos::{Dimension, Eleccion, Fuente, Hallazgo, Proveedor, Rol, Via};
 
 /// Fase del flujo que va al `Evento` de la llamada.
 const FASE: &str = "descarga-juez-config";
@@ -284,34 +283,34 @@ fn etiqueta(necesidad: Necesidad) -> &'static str {
     }
 }
 
-/// Juez real de la configuración: la elección de `route` para el rol `juzga`, con razonamiento y vía API.
-/// decisión 30: el modelo es Sonnet por root.toml. Si route da otro modelo, se usa el que dé route
-/// (el default de `Config` para `ruteo.juzga` es deepseek-flash).
+/// Juez real de la configuración: el modelo de `[jueces].config_modelo`, vía API y con razonamiento
+/// (decisión 47). El proveedor sale del nombre. La llamada pasa por `proveedores::llamar`, que chequea
+/// el tope y el precio: sin precio, el juez da sin veredicto y la descarga sigue (decisión 35).
 pub fn juez_config_real(cfg: &Config) -> Result<JuezProveedor, ErrorOraculo> {
-    let politica = route::comando::cargar_politica(&root_home().join("politica.json"))
-        .map_err(|e| ErrorOraculo::Infra(format!("política de ruteo: {e}")))?;
-    let ahora = observe::ahora().0;
-    let offset = observe::uso::offset_local();
-    let gasto = observe::uso::uso_en(
-        &observe::ruta_eventos(),
-        ahora,
-        offset,
-        cfg.balance.cupo.bloque_horas,
-    )
-    .map_err(|e| ErrorOraculo::Infra(format!("gasto de cupo: {e}")))?;
-    let pedido = Pedido {
-        rol: Rol::Juzga,
-        tipo: FASE.into(),
-        checkeable: false,
-        tokens_estimados: MAX_TOKENS_JUEZ,
+    let modelo = cfg.jueces.config_modelo.clone();
+    let eleccion = Eleccion {
+        via: Via::Api,
+        proveedor: Some(proveedor_de_modelo(&modelo)?),
+        modelo: Some(modelo),
+        razonamiento: true,
+        motivo: "juez de la configuración: [jueces].config_modelo".into(),
+        rol: Some(Rol::Juzga),
     };
-    let eleccion = route::elegir(&pedido, &politica, &gasto, cfg, ahora, offset).map_err(|sp| {
-        ErrorOraculo::Infra(format!(
-            "sin presupuesto para el juez de configuración: {}",
-            sp.motivo
-        ))
-    })?;
+    route::exigir_modelo_que_razona(&eleccion)?;
     JuezProveedor::nuevo(eleccion, FASE.into())
+}
+
+/// Proveedor de un modelo por su nombre: `claude-*` es Anthropic y `deepseek-*` es DeepSeek.
+fn proveedor_de_modelo(modelo: &str) -> Result<Proveedor, ErrorOraculo> {
+    if modelo.starts_with("claude-") {
+        Ok(Proveedor::Anthropic)
+    } else if modelo.starts_with("deepseek-") {
+        Ok(Proveedor::Deepseek)
+    } else {
+        Err(ErrorOraculo::Eleccion(format!(
+            "[jueces].config_modelo {modelo:?} no dice el proveedor: el nombre debe empezar con claude- o deepseek-"
+        )))
+    }
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@ pub use politica::{Candidato, Politica};
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
 use crate::config::{Config, ModeloApi, Precio};
+use crate::oracle::ErrorOraculo;
 use crate::tipos::{Eleccion, Pedido, Proveedor, Rol, SinPresupuesto, Uso, Via};
 
 /// Inicio del próximo mes calendario después de `ahora`, en epoch segundos.
@@ -81,6 +82,7 @@ pub fn elegir(
             modelo: None,
             razonamiento: false,
             motivo: "checkeable: el oráculo decide sin llamar a ningún modelo".into(),
+            rol: Some(p.rol),
         });
     }
     // Invariante 2: Verifica y Juzga siempre razonan, con cualquier modelo y cualquier presupuesto.
@@ -139,7 +141,66 @@ pub fn elegir(
         modelo: Some(elegida.modelo),
         razonamiento,
         motivo: elegida.motivo,
+        rol: Some(p.rol),
     })
+}
+
+/// Modelos de API que admiten razonamiento. Verifica y Juzga solo pueden usar estos (lista cerrada).
+const MODELOS_CON_RAZONAMIENTO: &[&str] = &[
+    "deepseek-flash",
+    "deepseek-v4-pro",
+    "claude-haiku-5-5",
+    "claude-sonnet-5-5",
+    "claude-opus-5-5",
+];
+
+/// Cambia una elección de Verifica o Juzga por el respaldo de su rol si el proveedor principal no
+/// está disponible: sin clave o con el breaker abierto. Con el proveedor disponible, o sin respaldo,
+/// devuelve la elección igual. El respaldo lleva razonamiento y dice por qué entró.
+pub fn con_respaldo(e: Eleccion, cfg: &Config, disponible: &dyn Fn(Proveedor) -> bool) -> Eleccion {
+    let (Some(rol), Some(principal)) = (e.rol, e.proveedor) else {
+        return e;
+    };
+    if e.via != Via::Api || !matches!(rol, Rol::Verifica | Rol::Juzga) || disponible(principal) {
+        return e;
+    }
+    let ruteo = match rol {
+        Rol::Verifica => &cfg.ruteo.verifica,
+        _ => &cfg.ruteo.juzga,
+    };
+    let Some(respaldo) = ruteo.respaldo.as_deref() else {
+        return e;
+    };
+    Eleccion {
+        via: Via::Api,
+        proveedor: Some(respaldo.proveedor),
+        modelo: Some(respaldo.modelo.clone()),
+        razonamiento: true,
+        motivo: format!(
+            "respaldo de [ruteo.{}]: {} no está disponible (sin clave o con el breaker abierto); usa {}",
+            politica::nombre_rol(rol),
+            comando::etiqueta_proveedor(principal),
+            respaldo.modelo
+        ),
+        rol: Some(rol),
+    }
+}
+
+/// Un modelo de API que Verifica o Juzga usan debe admitir razonamiento. Fuera de la lista cerrada,
+/// es error de elección (código 2). Las demás elecciones pasan.
+pub fn exigir_modelo_que_razona(e: &Eleccion) -> Result<(), ErrorOraculo> {
+    if e.via != Via::Api || !matches!(e.rol, Some(Rol::Verifica | Rol::Juzga)) {
+        return Ok(());
+    }
+    let modelo = e.modelo.as_deref().unwrap_or_default();
+    if MODELOS_CON_RAZONAMIENTO.contains(&modelo) {
+        return Ok(());
+    }
+    Err(ErrorOraculo::Eleccion(format!(
+        "el modelo {modelo:?} no admite razonamiento para {}; los modelos válidos son {}",
+        e.rol.map_or("-", politica::nombre_rol),
+        MODELOS_CON_RAZONAMIENTO.join(", ")
+    )))
 }
 
 /// Modelo base del rol. Solo `Delega`, `Verifica` y `Juzga` cambian con la política aprendida.
@@ -881,5 +942,151 @@ mod tests {
             motivo: "agotado".into(),
         });
         assert_eq!(error.codigo_de_salida(), 3);
+    }
+
+    fn eleccion_api(rol: Rol, proveedor: Proveedor, modelo: &str) -> Eleccion {
+        Eleccion {
+            via: Via::Api,
+            proveedor: Some(proveedor),
+            modelo: Some(modelo.into()),
+            razonamiento: true,
+            motivo: "prueba".into(),
+            rol: Some(rol),
+        }
+    }
+
+    #[test]
+    fn route_eleccion_lleva_el_rol_del_pedido() {
+        let cfg = Config::default();
+        for rol in [
+            Rol::Planifica,
+            Rol::Organiza,
+            Rol::Construye,
+            Rol::Verifica,
+            Rol::Juzga,
+            Rol::Delega,
+        ] {
+            for checkeable in [false, true] {
+                let e = elegir_en(
+                    &pedido(rol, checkeable),
+                    &Politica::default(),
+                    &uso(0.0, None, 0.0),
+                    &cfg,
+                )
+                .expect("hay vía");
+                assert_eq!(e.rol, Some(rol), "rol {rol:?} checkeable {checkeable}");
+            }
+        }
+    }
+
+    #[test]
+    fn route_con_respaldo_sin_clave_juzga_usa_haiku_con_razonamiento() {
+        let cfg = Config::default();
+        let e = eleccion_api(Rol::Juzga, Proveedor::Deepseek, "deepseek-flash");
+        let sin_deepseek = |p: Proveedor| p != Proveedor::Deepseek;
+        let r = con_respaldo(e, &cfg, &sin_deepseek);
+        assert_eq!(r.via, Via::Api);
+        assert_eq!(r.proveedor, Some(Proveedor::Anthropic));
+        assert_eq!(r.modelo.as_deref(), Some("claude-haiku-5-5"));
+        assert!(r.razonamiento);
+        assert_eq!(r.rol, Some(Rol::Juzga));
+        assert!(r.motivo.contains("respaldo"), "{}", r.motivo);
+        assert!(r.motivo.contains("deepseek"), "{}", r.motivo);
+    }
+
+    #[test]
+    fn route_con_respaldo_breaker_abierto_juzga_usa_respaldo() {
+        let cfg = Config::default();
+        let e = eleccion_api(Rol::Juzga, Proveedor::Deepseek, "deepseek-flash");
+        let breaker_abierto = |_: Proveedor| false;
+        let r = con_respaldo(e, &cfg, &breaker_abierto);
+        assert_eq!(r.modelo.as_deref(), Some("claude-haiku-5-5"));
+    }
+
+    #[test]
+    fn route_con_respaldo_verifica_usa_su_respaldo() {
+        let cfg = Config::default();
+        let e = eleccion_api(Rol::Verifica, Proveedor::Deepseek, "deepseek-flash");
+        let r = con_respaldo(e, &cfg, &|_| false);
+        assert_eq!(r.proveedor, Some(Proveedor::Anthropic));
+        assert_eq!(r.rol, Some(Rol::Verifica));
+    }
+
+    #[test]
+    fn route_con_respaldo_con_proveedor_disponible_no_cambia() {
+        let cfg = Config::default();
+        let e = eleccion_api(Rol::Juzga, Proveedor::Deepseek, "deepseek-flash");
+        let r = con_respaldo(e.clone(), &cfg, &|_| true);
+        assert_eq!(r, e);
+    }
+
+    #[test]
+    fn route_con_respaldo_delega_sin_clave_no_cambia() {
+        let cfg = Config::default();
+        let e = eleccion_api(Rol::Delega, Proveedor::Deepseek, "deepseek-flash");
+        let r = con_respaldo(e.clone(), &cfg, &|_| false);
+        assert_eq!(r, e);
+    }
+
+    #[test]
+    fn route_con_respaldo_cupo_y_oraculo_no_cambian() {
+        let cfg = Config::default();
+        let cupo = Eleccion {
+            via: Via::Cupo,
+            proveedor: Some(Proveedor::Anthropic),
+            modelo: Some("haiku".into()),
+            razonamiento: false,
+            motivo: "prueba".into(),
+            rol: Some(Rol::Juzga),
+        };
+        assert_eq!(con_respaldo(cupo.clone(), &cfg, &|_| false), cupo);
+    }
+
+    #[test]
+    fn route_modelos_que_razonan_pasan_la_lista_cerrada() {
+        for modelo in [
+            "deepseek-flash",
+            "deepseek-v4-pro",
+            "claude-haiku-5-5",
+            "claude-sonnet-5-5",
+            "claude-opus-5-5",
+        ] {
+            for rol in [Rol::Verifica, Rol::Juzga] {
+                let e = eleccion_api(rol, Proveedor::Deepseek, modelo);
+                assert!(
+                    exigir_modelo_que_razona(&e).is_ok(),
+                    "{modelo} para {rol:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn route_modelo_fuera_de_la_lista_para_verifica_o_juzga_da_error_de_eleccion() {
+        for rol in [Rol::Verifica, Rol::Juzga] {
+            let e = eleccion_api(rol, Proveedor::Deepseek, "deepseek-reasoner");
+            let error = exigir_modelo_que_razona(&e).expect_err("fuera de la lista");
+            assert!(matches!(error, ErrorOraculo::Eleccion(_)), "{error}");
+            assert_eq!(error.codigo_de_salida(), 2);
+        }
+    }
+
+    #[test]
+    fn route_delega_no_exige_la_lista_de_razonamiento() {
+        let e = eleccion_api(Rol::Delega, Proveedor::Deepseek, "deepseek-chat");
+        assert!(exigir_modelo_que_razona(&e).is_ok());
+    }
+
+    #[test]
+    fn route_respaldo_fuera_de_la_lista_da_error_de_eleccion() {
+        let cfg = Config::desde_texto(
+            "[ruteo.juzga]\nproveedor = \"deepseek\"\nmodelo = \"deepseek-flash\"\n\
+             [ruteo.juzga.respaldo]\nproveedor = \"anthropic\"\nmodelo = \"claude-foo\"\n",
+        )
+        .expect("carga");
+        let e = eleccion_api(Rol::Juzga, Proveedor::Deepseek, "deepseek-flash");
+        let elegida = con_respaldo(e, &cfg, &|_| false);
+        assert_eq!(elegida.modelo.as_deref(), Some("claude-foo"));
+        assert!(exigir_modelo_que_razona(&elegida).is_err());
     }
 }

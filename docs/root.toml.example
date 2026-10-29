@@ -38,17 +38,30 @@ tope_usd = 100.0
 tope_usd = 250.0
 
 # Ruteo cuando la vía es API. Los modelos de la API de los roles fijos.
+# Verifica y Juzga razonan siempre. Sus modelos deben estar en la lista que admite razonamiento:
+# deepseek-flash, deepseek-v4-pro, claude-haiku-5-5, claude-sonnet-5-5 y claude-opus-5-5.
+# Un modelo fuera de la lista da error de elección (código 2).
 [ruteo.delega]
 proveedor = "deepseek"
 modelo = "deepseek-flash"
 
+# respaldo: Route lo usa solo si el proveedor principal no está disponible (sin clave o con el
+# breaker abierto). Lleva razonamiento. Delega no tiene respaldo.
 [ruteo.verifica]
 proveedor = "deepseek"
 modelo = "deepseek-flash"
 
+[ruteo.verifica.respaldo]
+proveedor = "anthropic"
+modelo = "claude-haiku-5-5"
+
 [ruteo.juzga]
 proveedor = "deepseek"
 modelo = "deepseek-flash"
+
+[ruteo.juzga.respaldo]
+proveedor = "anthropic"
+modelo = "claude-haiku-5-5"
 
 # Equivalente de API de cada alias de cupo. Las entradas del usuario suman a estas tres; no las reemplazan.
 [ruteo.api_equivalente.opus]
@@ -69,8 +82,18 @@ deepseek_url = "https://api.deepseek.com"
 anthropic_url = "https://api.anthropic.com"
 # Espera antes del primer reintento, en milisegundos. Cada reintento la duplica.
 espera_base_ms = 500
-# Tiempo máximo de cada intento HTTP, en segundos.
+# Tiempo máximo de cada intento HTTP, en segundos. Lo usan los roles que no son Verifica ni Juzga.
+# Debe ser mayor que 0: si no, la carga falla con código 2.
 timeout_s = 120
+# Tiempo máximo de cada intento de Verifica y Juzga, en segundos. Un juez puede escribir hasta
+# 32 000 tokens. Debe ser mayor que 0.
+timeout_juez_s = 1200
+
+# Juez de la configuración de Cargo (decisión 47). Vía API y con razonamiento. El proveedor sale del
+# nombre: claude-* es Anthropic y deepseek-* es DeepSeek. Sin precio para el modelo, el juez da sin
+# veredicto y la descarga sigue.
+[jueces]
+config_modelo = "claude-sonnet-5-5"
 
 # Tope de duración de una corrida en Colab, en minutos (120 por defecto, 2 horas). Al llegar, Root libera el runtime y sale con código 3.
 [colab]

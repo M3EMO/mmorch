@@ -53,10 +53,18 @@ fn gasto_api(home: &Path, usd: f64) {
 }
 
 fn llama(home: &Path, extra: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_r00t"))
-        .env("ROOT_HOME", home)
-        .env("DEEPSEEK_API_KEY", CLAVE)
-        .env_remove("ANTHROPIC_API_KEY")
+    llama_con_anthropic(home, extra, None)
+}
+
+/// `r00t llama` de rol juzga. Con `anthropic`, la clave de Anthropic va en el entorno; si no, no hay.
+fn llama_con_anthropic(home: &Path, extra: &[&str], anthropic: Option<&str>) -> Output {
+    let mut orden = Command::new(env!("CARGO_BIN_EXE_r00t"));
+    orden.env("ROOT_HOME", home).env("DEEPSEEK_API_KEY", CLAVE);
+    match anthropic {
+        Some(clave) => orden.env("ANTHROPIC_API_KEY", clave),
+        None => orden.env_remove("ANTHROPIC_API_KEY"),
+    };
+    orden
         .args([
             "llama",
             "--rol",
@@ -152,20 +160,22 @@ fn llama_cli_dentro_del_margen_envia_imprime_y_registra() {
 fn llama_cli_modelo_sin_precio_rechaza_con_gate() {
     let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
     let home = tempfile::tempdir().expect("home");
-    // El juez usa un modelo sin precio: Root lo rechaza antes de enviar.
+    // El juez usa un modelo de la lista de razonamiento que no tiene precio por defecto: Root lo
+    // rechaza antes de enviar.
     preparar(
         home.path(),
         &srv.url,
-        "[ruteo.juzga]\nproveedor = \"deepseek\"\nmodelo = \"modelo-sin-precio\"\n",
+        "[ruteo.juzga]\nproveedor = \"anthropic\"\nmodelo = \"claude-opus-5-5\"\n",
     );
 
-    let salida = llama(home.path(), &["--max-tokens", "1000"]);
+    // Con la clave de Anthropic, el juez no pasa a su respaldo y llega al chequeo del precio.
+    let salida = llama_con_anthropic(home.path(), &["--max-tokens", "1000"], Some(CLAVE));
 
     assert_eq!(codigo(&salida), 3);
     assert_eq!(srv.peticiones(), 0);
     let stderr = String::from_utf8_lossy(&salida.stderr);
     assert!(
-        stderr.contains("sin precio en root.toml para modelo-sin-precio"),
+        stderr.contains("sin precio en root.toml para claude-opus-5-5"),
         "stderr: {stderr}"
     );
     let gates: Vec<Evento> = eventos(home.path())
@@ -174,7 +184,7 @@ fn llama_cli_modelo_sin_precio_rechaza_con_gate() {
         .collect();
     assert_eq!(gates.len(), 1);
     assert_eq!(gates[0].fase, "tope");
-    assert_eq!(gates[0].extra["modelo"], "modelo-sin-precio");
+    assert_eq!(gates[0].extra["modelo"], "claude-opus-5-5");
     assert!(gates[0].extra["estimado"].is_null());
 }
 

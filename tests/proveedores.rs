@@ -16,7 +16,7 @@ use root::proveedores::{
     Breaker, Clave, Claves, Contexto, ErrorProveedor, MAX_TOKENS_JUEZ, Prompt, Respuesta,
     causa_tope_alcanzado, costo_peor_caso, imprimir_para_cli, llamar_con, tokens_entrada_estimados,
 };
-use root::tipos::{Eleccion, Evento, Proveedor, TipoEvento, Via};
+use root::tipos::{Eleccion, Evento, Proveedor, Rol, TipoEvento, Via};
 use serde_json::Value;
 
 const CLAVE_PRUEBA: &str = "sk-test-SECRETO-123";
@@ -165,6 +165,7 @@ fn eleccion(proveedor: Proveedor, modelo: &str) -> Eleccion {
         modelo: Some(modelo.into()),
         razonamiento: false,
         motivo: "prueba".into(),
+        rol: None,
     }
 }
 
@@ -1628,4 +1629,31 @@ fn proveedores_haiku_con_1000_de_entrada_cobra_el_tramo_normal() {
         "costo {}",
         r.cost_usd
     );
+}
+
+#[test]
+fn proveedores_juzga_usa_timeout_juez_s_y_delega_usa_timeout_s() {
+    // El servidor tarda 2 s: con timeout_s = 1 Delega se corta, y con timeout_juez_s = 5 Juzga responde.
+    let srv = Servidor::arranca_con(
+        vec![(200, DEEPSEEK_OK), (200, DEEPSEEK_OK)],
+        Duration::from_secs(2),
+        None,
+    );
+    let mut cfg = config_por_defecto(&srv.url);
+    cfg.proveedores.timeout_s = 1;
+    cfg.proveedores.timeout_juez_s = 5;
+
+    let juzga = Eleccion {
+        rol: Some(Rol::Juzga),
+        ..eleccion_con_razonamiento(Proveedor::Deepseek, "deepseek-flash")
+    };
+    let r = llamada_con_eleccion(&cfg, &juzga, "tj1");
+    assert!(r.is_ok(), "el juez tiene 5 s y llegó {r:?}");
+
+    let delega = Eleccion {
+        rol: Some(Rol::Delega),
+        ..eleccion(Proveedor::Deepseek, "deepseek-flash")
+    };
+    let err = llamada_con_eleccion(&cfg, &delega, "td1").expect_err("delega tiene 1 s");
+    assert!(matches!(err, ErrorProveedor::Timeout(_)), "llegó {err:?}");
 }

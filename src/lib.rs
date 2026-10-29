@@ -30,7 +30,7 @@ use cli::{
 };
 use ficha::{ContextoRevision, ErrorFicha, JuezProveedor, Revision};
 use oracle::tarea::Tarea;
-use tipos::{Eleccion, Estado, Fila, Proveedor, Via};
+use tipos::{Eleccion, Estado, Fila, Proveedor, Rol, Via};
 
 /// Ejecuta un subcomando y devuelve su código de salida. Los errores salen por `Err`.
 /// Por ahora `route`, `llama`, `oraculo evaluar`, `ficha`, `esquema`, `goal`, `observa`, `track` e la importación externa tienen lógica.
@@ -316,6 +316,7 @@ fn juez_de(proveedor: Option<ProveedorJuez>, modelo: Option<&str>) -> Option<Jue
             modelo: Some(modelo.to_string()),
             razonamiento: true,
             motivo: "juez de ficha".into(),
+            rol: Some(Rol::Juzga),
         },
         corrida: "ficha-revisar".into(),
     })

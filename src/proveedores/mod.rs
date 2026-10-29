@@ -16,9 +16,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use thiserror::Error as ErrorDerive;
 
-use crate::config::{Config, Precio, root_home};
+use crate::config::{Config, ConfigProveedores, Precio, root_home};
 use crate::observe::{self, jsonl, uso};
-use crate::tipos::{Eleccion, Evento, Proveedor, TipoEvento, Via};
+use crate::tipos::{Eleccion, Evento, Proveedor, Rol, TipoEvento, Via};
 
 /// Intentos totales por llamada: el primero más dos reintentos.
 const INTENTOS_MAX: u32 = 3;
@@ -211,6 +211,17 @@ impl Claves {
     }
 }
 
+/// `true` si `proveedor` puede recibir una llamada en `ahora`: tiene clave y su breaker no está abierto.
+/// Route la usa para decidir si el respaldo entra.
+pub fn disponible(
+    claves: &Claves,
+    breaker: &Breaker,
+    proveedor: Proveedor,
+    ahora: Instant,
+) -> bool {
+    claves.para(proveedor).is_some() && breaker.permite(familia(proveedor), ahora)
+}
+
 fn leer_clave(nombre: &str) -> Option<Clave> {
     std::env::var(nombre)
         .ok()
@@ -355,6 +366,8 @@ struct Llamada<'a> {
     corrida: &'a str,
     /// `true` si la elección pide razonamiento. Va al cuerpo de cada intento.
     razonamiento: bool,
+    /// Plazo de cada intento, en segundos: el de los jueces para Verifica y Juzga.
+    timeout_s: u64,
     precio: Precio,
     /// Peor caso de un intento: la entrada estimada y todo `max_tokens`, al precio del modelo.
     peor_caso: f64,
@@ -385,6 +398,7 @@ pub fn llamar_con(
         prompt,
         corrida,
         razonamiento: e.razonamiento,
+        timeout_s: timeout_para(&ctx.cfg.proveedores, e.rol),
         peor_caso: costo_peor_caso(&precio, tokens_entrada_estimados(prompt), prompt.max_tokens),
         precio,
         intentos: 0,
@@ -620,6 +634,15 @@ fn ejecutar(ctx: &Contexto, llamada: &mut Llamada) -> Result<Crudo, ErrorProveed
     reintentar(ctx, clave, llamada)
 }
 
+/// Plazo de cada intento: `timeout_juez_s` para Verifica y Juzga, y `timeout_s` para los demás roles
+/// y para una elección sin rol.
+fn timeout_para(cfg: &ConfigProveedores, rol: Option<Rol>) -> u64 {
+    match rol {
+        Some(Rol::Verifica | Rol::Juzga) => cfg.timeout_juez_s,
+        _ => cfg.timeout_s,
+    }
+}
+
 /// Hasta `INTENTOS_MAX` intentos. Antes de cada uno, el chequeo de tope con su reserva: un reintento
 /// que no entra en el margen no se envía. Espera la base y la duplica entre intentos transitorios.
 fn reintentar(
@@ -627,7 +650,7 @@ fn reintentar(
     clave: &Clave,
     llamada: &mut Llamada,
 ) -> Result<Crudo, ErrorProveedor> {
-    let agente = agente(ctx.cfg.proveedores.timeout_s);
+    let agente = agente(llamada.timeout_s);
     let mut espera = Duration::from_millis(ctx.cfg.proveedores.espera_base_ms);
     loop {
         reservar(ctx, llamada)?;
@@ -916,5 +939,33 @@ mod tests {
             anthropic: None,
         };
         assert!(!format!("{claves:?}").contains("SECRETO"));
+    }
+
+    #[test]
+    fn proveedores_timeout_de_verifica_y_juzga_es_el_de_juez() {
+        let cfg = ConfigProveedores {
+            timeout_s: 120,
+            timeout_juez_s: 1200,
+            ..ConfigProveedores::default()
+        };
+        assert_eq!(timeout_para(&cfg, Some(Rol::Verifica)), 1200);
+        assert_eq!(timeout_para(&cfg, Some(Rol::Juzga)), 1200);
+    }
+
+    #[test]
+    fn proveedores_timeout_de_delega_planifica_y_sin_rol_es_timeout_s() {
+        let cfg = ConfigProveedores {
+            timeout_s: 120,
+            timeout_juez_s: 1200,
+            ..ConfigProveedores::default()
+        };
+        for rol in [
+            None,
+            Some(Rol::Delega),
+            Some(Rol::Planifica),
+            Some(Rol::Construye),
+        ] {
+            assert_eq!(timeout_para(&cfg, rol), 120, "rol {rol:?}");
+        }
     }
 }

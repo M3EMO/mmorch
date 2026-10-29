@@ -639,6 +639,7 @@ fn es_item_de(rubrica: &Rubrica, id: &str) -> bool {
 mod tests {
     use super::*;
     use crate::oracle::mapa::construir as construir_mapa;
+    use crate::tipos::Rol;
     use serde_json::json;
     use std::cell::RefCell;
     use std::fs;
@@ -692,6 +693,7 @@ mod tests {
             modelo: modelo.map(String::from),
             razonamiento,
             motivo: "prueba".into(),
+            rol: Some(Rol::Juzga),
         }
     }
 

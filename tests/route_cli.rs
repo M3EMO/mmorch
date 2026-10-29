@@ -238,9 +238,10 @@ fn route_cli_sin_root_toml_usa_defaults_y_sale_con_0() {
 #[test]
 fn route_cli_juzga_sin_root_toml_elige_deepseek_flash_con_razonamiento() {
     let home = tempfile::tempdir().expect("home");
-    let salida = root_con_home(
+    let salida = root_con_clave(
         home.path(),
         &["--json", "route", "--rol", "juzga", "--tipo", "x"],
+        Some("sk-test-SECRETO-ROUTE"),
     );
     assert_eq!(codigo(&salida), 0);
     let j = json(&salida);
@@ -253,9 +254,10 @@ fn route_cli_modelo_viejo_de_deepseek_avisa_en_stderr_y_usa_deepseek_flash() {
     let home = tempfile::tempdir().expect("home");
     let texto = "[ruteo.juzga]\nproveedor = \"deepseek\"\nmodelo = \"deepseek-reasoner\"\n";
     fs::write(home.path().join("root.toml"), texto).expect("root.toml");
-    let salida = root_con_home(
+    let salida = root_con_clave(
         home.path(),
         &["--json", "route", "--rol", "juzga", "--tipo", "x"],
+        Some("sk-test-SECRETO-ROUTE"),
     );
     assert_eq!(codigo(&salida), 0);
     assert_eq!(json(&salida)["modelo"], "deepseek-flash");
@@ -264,4 +266,91 @@ fn route_cli_modelo_viejo_de_deepseek_avisa_en_stderr_y_usa_deepseek_flash() {
         stderr.contains("deepseek-reasoner") && stderr.contains("deepseek-flash"),
         "stderr: {stderr}"
     );
+}
+
+/// `r00t` con `ROOT_HOME` de `home` y `DEEPSEEK_API_KEY` dada, o sin la variable si `clave` es `None`.
+fn root_con_clave(home: &Path, args: &[&str], clave: Option<&str>) -> Output {
+    let mut orden = Command::new(env!("CARGO_BIN_EXE_r00t"));
+    orden.env("ROOT_HOME", home).args(args);
+    match clave {
+        Some(valor) => orden.env("DEEPSEEK_API_KEY", valor),
+        None => orden.env_remove("DEEPSEEK_API_KEY"),
+    };
+    orden.output().expect("no se pudo ejecutar el binario root")
+}
+
+#[test]
+fn route_cli_juzga_sin_clave_de_deepseek_elige_haiku_con_razonamiento() {
+    let home = tempfile::tempdir().expect("home");
+    let salida = root_con_clave(
+        home.path(),
+        &["--json", "route", "--rol", "juzga", "--tipo", "x"],
+        None,
+    );
+    assert_eq!(codigo(&salida), 0);
+    let e = json(&salida);
+    assert_eq!(e["via"], "api");
+    assert_eq!(e["proveedor"], "anthropic");
+    assert_eq!(e["modelo"], "claude-haiku-5-5");
+    assert_eq!(e["razonamiento"], true);
+    assert_eq!(e["rol"], "juzga");
+}
+
+#[test]
+fn route_cli_juzga_con_clave_de_deepseek_elige_deepseek_flash() {
+    let home = tempfile::tempdir().expect("home");
+    let salida = root_con_clave(
+        home.path(),
+        &["--json", "route", "--rol", "juzga", "--tipo", "x"],
+        Some("sk-test-SECRETO-ROUTE"),
+    );
+    assert_eq!(codigo(&salida), 0);
+    let e = json(&salida);
+    assert_eq!(e["proveedor"], "deepseek");
+    assert_eq!(e["modelo"], "deepseek-flash");
+    assert_eq!(e["razonamiento"], true);
+}
+
+#[test]
+fn route_cli_delega_sin_clave_no_cambia_a_respaldo() {
+    let home = tempfile::tempdir().expect("home");
+    let salida = root_con_clave(
+        home.path(),
+        &["--json", "route", "--rol", "delega", "--tipo", "x"],
+        None,
+    );
+    assert_eq!(codigo(&salida), 0);
+    let e = json(&salida);
+    assert_eq!(e["proveedor"], "deepseek");
+    assert_eq!(e["modelo"], "deepseek-flash");
+    assert_eq!(e["razonamiento"], false);
+}
+
+#[test]
+fn route_cli_juzga_con_modelo_fuera_de_la_lista_sale_con_2() {
+    let home = tempfile::tempdir().expect("home");
+    let texto = "[ruteo.juzga]\nproveedor = \"deepseek\"\nmodelo = \"modelo-raro\"\n";
+    fs::write(home.path().join("root.toml"), texto).expect("root.toml");
+    let salida = root_con_clave(
+        home.path(),
+        &["route", "--rol", "juzga", "--tipo", "x"],
+        Some("sk-test-SECRETO-ROUTE"),
+    );
+    assert_eq!(codigo(&salida), 2);
+    let stderr = String::from_utf8_lossy(&salida.stderr);
+    assert!(stderr.contains("modelo-raro"), "stderr: {stderr}");
+}
+
+#[test]
+fn route_cli_respaldo_fuera_de_la_lista_sale_con_2_cuando_se_usa() {
+    let home = tempfile::tempdir().expect("home");
+    let texto = "[ruteo.juzga]\nproveedor = \"deepseek\"\nmodelo = \"deepseek-flash\"\n\
+                 [ruteo.juzga.respaldo]\nproveedor = \"anthropic\"\nmodelo = \"claude-foo\"\n";
+    fs::write(home.path().join("root.toml"), texto).expect("root.toml");
+    let salida = root_con_clave(
+        home.path(),
+        &["route", "--rol", "juzga", "--tipo", "x"],
+        None,
+    );
+    assert_eq!(codigo(&salida), 2);
 }

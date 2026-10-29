@@ -526,6 +526,13 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "minutos_max": 120.0
       }
     },
+    "jueces": {
+      "description": "Sección `[jueces]`: modelo de los jueces que no pasan por `route`.",
+      "$ref": "#/$defs/Jueces",
+      "default": {
+        "config_modelo": "claude-sonnet-5-5"
+      }
+    },
     "modelos": {
       "$ref": "#/$defs/Modelos",
       "default": {
@@ -577,6 +584,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "anthropic_url": "https://api.anthropic.com",
         "deepseek_url": "https://api.deepseek.com",
         "espera_base_ms": 500,
+        "timeout_juez_s": 1200,
         "timeout_s": 120
       }
     },
@@ -611,11 +619,19 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         },
         "juzga": {
           "modelo": "deepseek-flash",
-          "proveedor": "deepseek"
+          "proveedor": "deepseek",
+          "respaldo": {
+            "modelo": "claude-haiku-5-5",
+            "proveedor": "anthropic"
+          }
         },
         "verifica": {
           "modelo": "deepseek-flash",
-          "proveedor": "deepseek"
+          "proveedor": "deepseek",
+          "respaldo": {
+            "modelo": "claude-haiku-5-5",
+            "proveedor": "anthropic"
+          }
         }
       }
     },
@@ -694,12 +710,29 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": 500,
           "minimum": 0
         },
+        "timeout_juez_s": {
+          "description": "Tiempo máximo de cada intento de los roles Verifica y Juzga, en segundos. Un juez puede\nescribir hasta `MAX_TOKENS_JUEZ` tokens.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 1200,
+          "minimum": 0
+        },
         "timeout_s": {
           "description": "Tiempo máximo de cada intento HTTP, en segundos.",
           "type": "integer",
           "format": "uint64",
           "default": 120,
           "minimum": 0
+        }
+      }
+    },
+    "Jueces": {
+      "description": "Sección `[jueces]`: el modelo del juez de la configuración de Cargo (decisión 47). Vía API.\nEl proveedor sale del nombre: `claude-*` es Anthropic y `deepseek-*` es DeepSeek.",
+      "type": "object",
+      "properties": {
+        "config_modelo": {
+          "type": "string",
+          "default": "claude-sonnet-5-5"
         }
       }
     },
@@ -711,6 +744,17 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         },
         "proveedor": {
           "$ref": "#/$defs/Proveedor"
+        },
+        "respaldo": {
+          "description": "Modelo que Route usa si el proveedor principal no está disponible. Solo en Verifica y Juzga.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModeloApi"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -848,14 +892,22 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "$ref": "#/$defs/ModeloApi",
           "default": {
             "modelo": "deepseek-flash",
-            "proveedor": "deepseek"
+            "proveedor": "deepseek",
+            "respaldo": {
+              "modelo": "claude-haiku-5-5",
+              "proveedor": "anthropic"
+            }
           }
         },
         "verifica": {
           "$ref": "#/$defs/ModeloApi",
           "default": {
             "modelo": "deepseek-flash",
-            "proveedor": "deepseek"
+            "proveedor": "deepseek",
+            "respaldo": {
+              "modelo": "claude-haiku-5-5",
+              "proveedor": "anthropic"
+            }
           }
         }
       }
@@ -952,6 +1004,18 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "razonamiento": {
       "type": "boolean"
     },
+    "rol": {
+      "description": "Rol del pedido. `route` lo llena siempre; un juez armado a mano lo pone en `Juzga`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Rol"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
     "via": {
       "$ref": "#/$defs/Via"
     }
@@ -967,6 +1031,17 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "enum": [
         "anthropic",
         "deepseek"
+      ]
+    },
+    "Rol": {
+      "type": "string",
+      "enum": [
+        "planifica",
+        "organiza",
+        "construye",
+        "verifica",
+        "juzga",
+        "delega"
       ]
     },
     "Via": {

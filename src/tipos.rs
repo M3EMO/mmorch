@@ -114,6 +114,9 @@ pub struct Eleccion {
     pub modelo: Option<String>,
     pub razonamiento: bool,
     pub motivo: String,
+    /// Rol del pedido. `route` lo llena siempre; un juez armado a mano lo pone en `Juzga`.
+    #[serde(default)]
+    pub rol: Option<Rol>,
 }
 
 /// Gasto medido en USD equivalentes de lista. Lo arma `observe::uso`.
@@ -617,6 +620,7 @@ mod tests {
             modelo: Some("deepseek-chat".into()),
             razonamiento: false,
             motivo: "cupo al 95%".into(),
+            rol: Some(Rol::Construye),
         });
         ida_y_vuelta(&Eleccion {
             via: Via::Oraculo,
@@ -624,6 +628,7 @@ mod tests {
             modelo: None,
             razonamiento: false,
             motivo: "checkeable".into(),
+            rol: None,
         });
         ida_y_vuelta(&Conteo {
             pasa: 15,
