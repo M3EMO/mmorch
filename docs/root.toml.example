@@ -5,11 +5,25 @@
 # claude-sonnet-5-5 (abajo). Un modelo sin precio, `r00t llama` lo rechaza: falla cerrado.
 # Un [precios.<modelo>] de root.toml reemplaza el default de ese modelo; los de los demás se conservan.
 
-# Umbral de veredicto verde, de 0 a 1. Lo usa el informe (Tarea 13b, pendiente).
+# Umbral de veredicto verde, de 0 a 1. Hoy no lo lee ninguna regla: la decisión sale de [decision].
 umbral_verde = 0.8
 
 # Cota inferior de Wilson (90%, unilateral) que un candidato debe alcanzar para entrar a la política.
 umbral_wilson = 0.6
+
+# Reglas de la decisión del informe (Tarea 13b). Son deterministas: ningún LLM las decide.
+# Un requisito de peso 3 en nivel 0, un hallazgo de seguridad de severidad 3 o un ítem de rúbrica con
+# `bloquea = true` en nivel 0 dan Bloqueado. Sin ellos, la decisión es NoListo si la completitud queda
+# bajo `completitud_minima`, si la completitud no tiene veredicto, o si una dimensión calibrada queda bajo
+# su mínimo. Si no, es Listo. Cada valor va de 0 a 1 y es finito; si no, Root sale con código 2.
+[decision]
+# Completitud mínima para Listo. Default: 0.9.
+completitud_minima = 0.9
+
+# Mínimo por dimensión. Solo rige sobre dimensiones calibradas. Vacío por defecto. Las claves son las
+# dimensiones: funciona, seguridad, eficiencia, estructura, arquitectura, diseno, completitud, entrega, pruebas.
+# Ejemplo: seguridad = 0.8 da NoListo a una seguridad calibrada por debajo de 0,8.
+[decision.minimo]
 
 # Modelo por rol cuando la vía es el cupo. Cada alias debe tener api_equivalente en [ruteo].
 [modelos]

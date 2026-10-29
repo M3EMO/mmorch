@@ -7,6 +7,7 @@ pub mod contenedor;
 pub mod descarga;
 pub mod entrega;
 pub mod evidencia;
+pub mod informe;
 pub mod juez;
 pub mod junit;
 pub mod mapa;
@@ -29,7 +30,7 @@ use std::time::{Duration, SystemTime};
 use thiserror::Error as ErrorDerive;
 
 use crate::borrado;
-use crate::config::{Config, root_home};
+use crate::config::{Config, ReglasDecision, root_home};
 use crate::ficha::{self, ErrorFicha};
 use crate::proveedores::{Prompt, RespuestaJuez};
 use crate::tipos::{
@@ -39,6 +40,7 @@ use crate::tipos::{
 use crate::track::stats::wilson_inferior;
 use calibra::Calibraciones;
 use contenedor::{Ejecucion, Resultado};
+use informe::{Redactor, RedactorMedido, RedactorProveedor};
 use juez::{EntradaJuez, EstadoJuez, JuezProveedor, ModeloJuez, ResultadoJuez};
 use junit::{Junit, ResultadoTest};
 use perfiles::herramientas::{EjecutorContenedor, EjecutorHerramienta};
@@ -99,6 +101,9 @@ pub enum ErrorOraculo {
     /// Colab: sin sesión de la CLI, GPU que no es T4 o un runtime que falló. Sale con código 3.
     #[error("{0}")]
     Colab(String),
+    /// `root.toml` no carga. Lleva el código de salida que dio `Config`: 2 si un valor está fuera de rango.
+    #[error("root.toml inválido: {1}")]
+    Configuracion(u8, String),
 }
 
 impl ErrorOraculo {
@@ -107,6 +112,7 @@ impl ErrorOraculo {
         match self {
             ErrorOraculo::Ficha(e) => e.codigo_de_salida(),
             ErrorOraculo::Eleccion(_) => 2,
+            ErrorOraculo::Configuracion(codigo, _) => *codigo,
             _ => 3,
         }
     }
@@ -164,11 +170,14 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
         })
     };
     let home = o.home.clone().unwrap_or_else(root_home);
+    // Un root.toml que no carga no evalúa: las reglas de decisión tienen que ser las del usuario.
+    let cfg = Config::cargar(&home.join("root.toml"))
+        .map_err(|e| ErrorOraculo::Configuracion(e.codigo_de_salida(), e.to_string()))?;
     let rubricas = rubrica::cargar_embebidas()
         .map_err(|e| ErrorOraculo::Infra(format!("rúbricas embebidas: {e}")))?;
     let calibracion = Calibraciones::cargar(&home)?;
     let mut avisos = Vec::new();
-    let juez_config = juez_config_de_produccion(&home, &mut avisos);
+    let juez_config = juez_config_de_produccion(&cfg, &mut avisos);
     // Sin ítems del juez en las rúbricas, no se arma: no hay nada que llamar ni gastar.
     let juez = juez::hay_pedidos(&rubricas)
         .then(|| juez_diseno_de_produccion(&mut avisos))
@@ -177,6 +186,7 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
         .as_ref()
         .and_then(|j| j.eleccion.modelo.clone())
         .unwrap_or_default();
+    let redactor = redactor_de_produccion(&mut avisos);
     let deps = Dependencias {
         correr: &correr_en_podman,
         herramientas: &herramientas,
@@ -185,6 +195,8 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
         juez_config: juez_config.as_ref().map(|j| j as &dyn ModeloJuez),
         calibracion: &calibracion,
         rubricas: &rubricas,
+        reglas: cfg.decision.clone(),
+        redactor: redactor.as_ref().map(|r| r as &dyn Redactor),
         avisos,
     };
     evaluar_con(repo, tarea, o, deps)
@@ -193,17 +205,10 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
 /// Corrida con la que el juez de diseño de producción aparece en el `Gate` y en el registro.
 const CORRIDA_JUEZ_DISENO: &str = "oraculo-juez-diseno";
 
-/// Juez de la configuración de Cargo de producción. Sin `root.toml` legible o sin modelo válido, no hay
-/// juez y el aviso lo dice. La descarga sigue y el juicio queda sin veredicto.
-fn juez_config_de_produccion(home: &Path, avisos: &mut Vec<String>) -> Option<JuezProveedor> {
-    let cfg = match Config::cargar(&home.join("root.toml")) {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            avisos.push(format!("juez de la configuración sin armar: {e}"));
-            return None;
-        }
-    };
-    match descarga::juez_config::juez_config_real(&cfg) {
+/// Juez de la configuración de Cargo de producción. Sin modelo válido, no hay juez y el aviso lo dice.
+/// La descarga sigue y el juicio queda sin veredicto.
+fn juez_config_de_produccion(cfg: &Config, avisos: &mut Vec<String>) -> Option<JuezProveedor> {
+    match descarga::juez_config::juez_config_real(cfg) {
         Ok(juez) => Some(juez),
         Err(e) => {
             avisos.push(format!("juez de la configuración sin armar: {e}"));
@@ -232,6 +237,25 @@ fn juez_diseno_de_produccion(avisos: &mut Vec<String>) -> Option<JuezProveedor> 
     }
 }
 
+/// Redactor de producción del informe: la elección de Route para `delega`. Sin elección válida, no hay
+/// redactor y el resumen queda determinista; el aviso lo dice.
+fn redactor_de_produccion(avisos: &mut Vec<String>) -> Option<RedactorProveedor> {
+    match crate::route::comando::rutear(Rol::Delega, "informe", false, informe::MAX_TOKENS_REDACTOR)
+    {
+        Ok(eleccion) => Some(RedactorProveedor {
+            eleccion,
+            corrida: CORRIDA_INFORME.into(),
+        }),
+        Err(e) => {
+            avisos.push(format!("redactor del informe sin armar: {e}"));
+            None
+        }
+    }
+}
+
+/// Corrida con la que el redactor del informe aparece en el `Gate` y en el registro.
+const CORRIDA_INFORME: &str = "oraculo-informe";
+
 /// Dependencias de una evaluación. `evaluar` arma las de producción; los tests dan ejecutores falsos.
 struct Dependencias<'a> {
     /// Corre una suite de tests en un contenedor.
@@ -248,6 +272,10 @@ struct Dependencias<'a> {
     calibracion: &'a Calibraciones,
     /// Rúbricas de la evaluación. Producción pasa las embebidas.
     rubricas: &'a [Rubrica],
+    /// Reglas de la decisión (`[decision]` de `root.toml`).
+    reglas: ReglasDecision,
+    /// Redactor del informe. `None`: el resumen queda determinista.
+    redactor: Option<&'a dyn Redactor>,
     /// Avisos que se conocen antes de evaluar, como un juez que no se pudo armar.
     avisos: Vec<String>,
 }
@@ -393,7 +421,6 @@ fn evaluar_con(
         &hallazgos,
         &juez,
     )?;
-    let estado = estado_de(&contrato.conteo, &oculto.conteo);
     let mut tasas = BTreeMap::new();
     for (id, tasa) in &contrato.tasas {
         tasas.insert(format!("contrato:{id}"), tasa.clone());
@@ -408,7 +435,7 @@ fn evaluar_con(
     deps.calibracion.aplicar(&tarea.nombre, &mut puntajes);
     let sin_calibrar = sin_calibrar(&puntajes);
     let global = calibra::global_de(&puntajes);
-    Ok(Veredicto {
+    let mut veredicto = Veredicto {
         v: VERSION,
         tarea: tarea.nombre.clone(),
         repo: nombre_de(&repo),
@@ -418,7 +445,7 @@ fn evaluar_con(
         puntajes,
         hallazgos: deduplicar_hallazgos(todos),
         global,
-        estado,
+        estado: Estado::SinVeredicto,
         costo_usd: costo_de(&juez_config) + costo_de(&juez_diseno),
         informe: None,
         rubricas,
@@ -430,7 +457,20 @@ fn evaluar_con(
         avisos,
         requisitos: medicion.requisitos,
         sin_calibrar,
-    })
+    };
+    // La decisión sale de reglas deterministas; el estado sale de la decisión (Tarea 13b).
+    let redactor_medido = deps.redactor.map(RedactorMedido::nuevo);
+    let informe = informe::informar_con(
+        &veredicto,
+        tarea,
+        &deps.reglas,
+        deps.rubricas,
+        redactor_medido.as_ref().map(|r| r as &dyn Redactor),
+    )?;
+    veredicto.costo_usd += redactor_medido.as_ref().map_or(0.0, RedactorMedido::costo);
+    veredicto.estado = informe::estado_de(Some(&informe));
+    veredicto.informe = Some(informe);
+    Ok(veredicto)
 }
 
 /// Envoltorio que suma el costo de las llamadas de un juez. `evaluar_con` lo lee para `costo_usd`.
@@ -1334,13 +1374,7 @@ fn registrar_stderr(c: &Corrida, xml: &str, stderr: &str) -> Option<PathBuf> {
 /// evidencias de requisitos y de ítems de puntaje se vacían; un hallazgo que cita un test oculto se
 /// quita; el resto (conteos, estado, `avisos`, hallazgos sin ids) se conserva.
 pub fn redactar_para_mcp(mut v: Veredicto) -> Veredicto {
-    let mut ocultos: BTreeSet<String> = v.inestables.iter().cloned().collect();
-    ocultos.extend(
-        v.tasas
-            .keys()
-            .filter_map(|k| k.strip_prefix("oculto:").map(String::from)),
-    );
-    ocultos.extend(v.pendientes.iter().map(|p| p.test.clone()));
+    let ocultos: BTreeSet<String> = informe::ids_ocultos(&v);
     v.inestables.clear();
     v.tasas.retain(|k, _| !k.starts_with("oculto:"));
     v.pendientes.clear();
@@ -1366,6 +1400,7 @@ pub fn redactar_para_mcp(mut v: Veredicto) -> Veredicto {
         for requisito in &mut informe.requisitos {
             requisito.evidencia.clear();
         }
+        informe::ocultar_tests(informe, &ocultos);
     }
     v
 }
@@ -1417,21 +1452,6 @@ pub(crate) fn commit_de(repo: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// `Rojo` si algún conteo tiene fallas. Si ambos están completos, `SinVeredicto`.
-/// Nunca da `Verde`: ese estado exige un `global` por encima del umbral, y todavía no hay
-/// dimensiones calibradas que lo calculen.
-fn estado_de(contrato: &Conteo, oculto: &Conteo) -> Estado {
-    if incompleto(contrato) || incompleto(oculto) {
-        Estado::Rojo
-    } else {
-        Estado::SinVeredicto
-    }
-}
-
-fn incompleto(conteo: &Conteo) -> bool {
-    conteo.pasa < conteo.total
-}
-
 /// Código de salida de un estado: 0 verde, 1 rojo, 3 sin veredicto.
 pub fn codigo_de_estado(estado: Estado) -> u8 {
     match estado {
@@ -1446,7 +1466,9 @@ mod tests {
     use super::*;
     use crate::oracle::perfiles::herramientas::{EjecutorHerramienta, SalidaHerramienta};
     use crate::oracle::tarea::{Escenario, Exclusion};
-    use crate::tipos::{Cumplimiento, Dimension, EstadoRequisito, Fuente, NivelItem, Puntaje};
+    use crate::tipos::{
+        Cumplimiento, Decision, Dimension, EstadoRequisito, Fuente, NivelItem, Puntaje,
+    };
     use filetime::{FileTime, set_symlink_file_times};
     use serde_json::{Value, json};
     use std::fs;
@@ -1522,17 +1544,47 @@ mod tests {
     }
 
     #[test]
-    fn oraculo_estado_rojo_si_algun_conteo_tiene_fallas() {
-        assert_eq!(estado_de(&conteo(2, 2), &conteo(1, 2)), Estado::Rojo);
-        assert_eq!(estado_de(&conteo(1, 2), &conteo(2, 2)), Estado::Rojo);
+    fn oraculo_el_estado_sale_de_la_decision_y_no_del_conteo() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        // Con el mínimo por defecto, la completitud 0,75 no llega a 0,9: no listo, rojo.
+        let v = evaluar_falso(&repo, &tarea, &home, &correr, &herramientas(&[])).expect("evalúa");
+        assert_eq!(v.oculto, conteo(1, 2), "t4 falla en el oculto");
+        assert_eq!(
+            v.informe.as_ref().map(|i| i.decision),
+            Some(Decision::NoListo)
+        );
+        assert_eq!(v.estado, Estado::Rojo);
+        // Con el mínimo en 0,75, el mismo conteo da listo y verde: el conteo no decide.
+        let reglas = ReglasDecision {
+            completitud_minima: 0.75,
+            ..ReglasDecision::default()
+        };
+        let herramientas_falsas = herramientas(&[]);
+        let deps = Dependencias {
+            reglas,
+            ..deps_de(&correr, &herramientas_falsas)
+        };
+        let v = evaluar_con(&repo, &tarea, &opciones(&home), deps).expect("evalúa");
+        assert_eq!(
+            v.informe.as_ref().map(|i| i.decision),
+            Some(Decision::Listo)
+        );
+        assert_eq!(v.estado, Estado::Verde);
     }
 
     #[test]
-    fn oraculo_estado_sin_veredicto_si_todo_pasa() {
-        assert_eq!(
-            estado_de(&conteo(2, 2), &conteo(2, 2)),
-            Estado::SinVeredicto
-        );
+    fn oraculo_con_informe_el_estado_es_el_que_da_la_decision() {
+        let base = tempfile::tempdir().expect("base");
+        let v = veredicto_sano(base.path());
+        let informe = v
+            .informe
+            .as_ref()
+            .expect("con suites completas hay informe");
+        assert_eq!(v.estado, informe::estado_de(Some(informe)));
     }
 
     fn junit_de(filas: &[(&str, ResultadoTest)]) -> Junit {
@@ -2640,6 +2692,8 @@ mod tests {
             juez_config: None,
             calibracion: &SIN_CALIBRAR,
             rubricas: &[],
+            reglas: ReglasDecision::default(),
+            redactor: None,
             avisos: Vec::new(),
         }
     }

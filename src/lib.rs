@@ -41,6 +41,9 @@ pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
         Comando::Oraculo {
             accion: OraculoAccion::Evaluar { tarea, repo },
         } => oraculo_evaluar(cli.json, tarea, repo),
+        Comando::Oraculo {
+            accion: OraculoAccion::Informe { tarea, repo, md },
+        } => oraculo_informe(tarea, repo, *md),
         Comando::Ficha { accion } => ficha_accion(cli.json, accion),
         Comando::Route {
             rol,
@@ -90,6 +93,25 @@ fn oraculo_evaluar(json: bool, nombre: &str, repo: &Path) -> Result<u8, Error> {
             veredicto.repeticiones,
             veredicto.inestables.len()
         );
+    }
+    Ok(oracle::codigo_de_estado(veredicto.estado))
+}
+
+/// `oraculo informe`: imprime el informe del veredicto, en JSON o en markdown con `--md`. El código de
+/// salida sale del estado, como en `evaluar`. Sin informe (sin veredicto), sale con 3 y lo dice en stderr.
+fn oraculo_informe(nombre: &str, repo: &Path, md: bool) -> Result<u8, Error> {
+    let veredicto = oracle::evaluar_por_nombre(nombre, repo)?;
+    let Some(informe) = &veredicto.informe else {
+        eprintln!(
+            "sin informe: el veredicto no tiene decisión (estado {})",
+            etiqueta_estado(veredicto.estado)
+        );
+        return Ok(oracle::codigo_de_estado(veredicto.estado));
+    };
+    if md {
+        print!("{}", oracle::informe::markdown(nombre, informe));
+    } else {
+        println!("{}", serde_json::to_string_pretty(informe)?);
     }
     Ok(oracle::codigo_de_estado(veredicto.estado))
 }

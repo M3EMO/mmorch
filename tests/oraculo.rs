@@ -221,7 +221,7 @@ fn root_cli_env(root_home: &Path, env: &[(&str, &str)], args: &[&str]) -> Output
 }
 
 #[test]
-fn oraculo_todo_pasa_da_conteos_completos_y_sin_veredicto() {
+fn oraculo_todo_pasa_sin_requisitos_da_conteos_completos_y_rojo() {
     root::saltar_sin_podman!();
     let _g = preparar();
     let (_dir, tarea) = tarea_con(
@@ -233,7 +233,8 @@ fn oraculo_todo_pasa_da_conteos_completos_y_sin_veredicto() {
     let v: Veredicto = evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa");
     assert_eq!(v.contrato, Conteo { pasa: 2, total: 2 });
     assert_eq!(v.oculto, Conteo { pasa: 2, total: 2 });
-    assert_eq!(v.estado, Estado::SinVeredicto);
+    // Sin requisitos, la completitud no tiene veredicto: la decisión es no listo, y el estado, rojo.
+    assert_eq!(v.estado, Estado::Rojo);
     assert_eq!(v.tarea, "tarea-prueba");
     assert_eq!(v.global, None);
 }
@@ -326,13 +327,17 @@ fn oraculo_cli_evaluar_json_imprime_veredicto() {
             repo.path().to_str().expect("ruta UTF-8"),
         ],
     );
-    assert_eq!(salida.status.code(), Some(3), "sin veredicto sale con 3");
+    assert_eq!(
+        salida.status.code(),
+        Some(1),
+        "sin requisitos no hay listo: rojo sale con 1"
+    );
     let json: serde_json::Value =
         serde_json::from_slice(&salida.stdout).expect("stdout es un objeto JSON");
     assert_eq!(json["contrato"]["pasa"], 2);
     assert_eq!(json["contrato"]["total"], 2);
     assert_eq!(json["oculto"]["total"], 2);
-    assert_eq!(json["estado"], "sin_veredicto");
+    assert_eq!(json["estado"], "rojo");
 }
 
 #[test]
@@ -416,7 +421,11 @@ fn inestable_exclusion_oraculo_dudoso_saca_al_test_de_los_inestables() {
     assert!(v.inestables.is_empty());
     assert!(v.tasas.is_empty());
     assert_eq!(v.oculto, Conteo { pasa: 1, total: 1 });
-    assert_eq!(v.estado, Estado::SinVeredicto);
+    assert_eq!(
+        v.estado,
+        Estado::Rojo,
+        "sin requisitos, la completitud no tiene veredicto"
+    );
 }
 
 #[test]
@@ -584,7 +593,11 @@ fn temporales_evaluar_con_tmpdir_inexistente_usa_root_home() {
             &ruta,
         ],
     );
-    assert_eq!(salida.status.code(), Some(3), "sin veredicto sale con 3");
+    assert_eq!(
+        salida.status.code(),
+        Some(1),
+        "sin requisitos no hay listo: rojo sale con 1"
+    );
     let json: serde_json::Value =
         serde_json::from_slice(&salida.stdout).expect("stdout es un objeto JSON");
     assert_eq!(json["contrato"]["total"], 2);
@@ -684,7 +697,11 @@ fn pendiente_entorno_lista_el_test_y_no_cuenta() {
     assert_eq!(v.pendientes[0].test, "test_o::o2");
     assert_eq!(v.pendientes[0].motivo, "lavapipe no emula la GPU");
     assert_eq!(v.pendientes[0].colab, None);
-    assert_eq!(v.estado, Estado::SinVeredicto);
+    assert_eq!(
+        v.estado,
+        Estado::Rojo,
+        "sin requisitos, la completitud no tiene veredicto"
+    );
 }
 
 #[test]

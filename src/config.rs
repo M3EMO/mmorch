@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
-use crate::tipos::Proveedor;
+use crate::tipos::{Dimension, Proveedor};
 
 /// Carpeta de datos de Root. Usa `ROOT_HOME` o, si no existe, `~/.local/share/root`.
 pub fn root_home() -> PathBuf {
@@ -67,6 +67,9 @@ pub struct Config {
     /// Registros privados de paquetes (`[[registro]]`). Solo los escribe el humano.
     #[serde(default, rename = "registro")]
     pub registros: Vec<RegistroConfig>,
+    /// Sección `[decision]`: reglas deterministas del informe (Tarea 13b).
+    #[serde(default)]
+    pub decision: ReglasDecision,
     /// Avisos de la carga, como un nombre de modelo viejo. `Config::cargar` los imprime en stderr.
     #[serde(skip)]
     #[schemars(skip)]
@@ -87,6 +90,34 @@ pub struct RegistroConfig {
     /// Variable de entorno de Root con el usuario para pip. Sin ella, el usuario es `__token__`.
     #[serde(default)]
     pub usuario_env: Option<String>,
+}
+
+/// Sección `[decision]`: las reglas que deciden `Listo`, `NoListo` o `Bloqueado` (Tarea 13b). Todo valor
+/// va de 0 a 1 y es finito; si no, la carga falla con código 2.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct ReglasDecision {
+    /// Completitud mínima para `Listo`.
+    pub completitud_minima: f64,
+    /// Mínimo por dimensión, con la clave de la dimensión (`seguridad`, `diseno`...). Solo rige
+    /// sobre dimensiones calibradas. Vacío por defecto.
+    pub minimo: BTreeMap<String, f64>,
+}
+
+impl Default for ReglasDecision {
+    fn default() -> Self {
+        ReglasDecision {
+            completitud_minima: 0.9,
+            minimo: BTreeMap::new(),
+        }
+    }
+}
+
+impl ReglasDecision {
+    /// Mínimo que `[decision.minimo]` fija para `dimension`, si lo fija.
+    pub fn minimo_de(&self, dimension: Dimension) -> Option<f64> {
+        self.minimo.get(dimension.clave()).copied()
+    }
 }
 
 /// Sección `[colab]`: tope de duración de una corrida en Colab.
@@ -225,6 +256,7 @@ impl Default for Config {
             colab: ConfigColab::default(),
             jueces: Jueces::default(),
             registros: Vec::new(),
+            decision: ReglasDecision::default(),
             avisos: Vec::new(),
         }
     }
@@ -480,6 +512,31 @@ fn exigir_precios_declarados(texto: &str) -> Result<(), Error> {
 
 /// Reglas de cada `[[registro]]`: nombre, `url` con `https` y host sin credenciales, y variable
 /// de entorno en mayúsculas. Un nombre no puede repetirse. Los mensajes no repiten la `url`.
+/// Rango de `[decision]`: la completitud mínima y cada mínimo van de 0 a 1 y son finitos. Una clave de
+/// `[decision.minimo]` que no es dimensión también falla.
+fn validar_decision(reglas: &ReglasDecision) -> Result<(), Error> {
+    let en_rango = |valor: f64| valor.is_finite() && (0.0..=1.0).contains(&valor);
+    if !en_rango(reglas.completitud_minima) {
+        return Err(Error::ConfigValor(format!(
+            "decision.completitud_minima debe estar en [0, 1]: {}",
+            reglas.completitud_minima
+        )));
+    }
+    for (clave, valor) in &reglas.minimo {
+        if Dimension::desde_clave(clave).is_none() {
+            return Err(Error::ConfigValor(format!(
+                "[decision.minimo] {clave} no es una dimensión"
+            )));
+        }
+        if !en_rango(*valor) {
+            return Err(Error::ConfigValor(format!(
+                "[decision.minimo] {clave} debe estar en [0, 1]: {valor}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validar_registros(registros: &[RegistroConfig]) -> Result<(), Error> {
     let mut nombres: Vec<&str> = Vec::new();
     for registro in registros {
@@ -660,6 +717,7 @@ impl Config {
                 }
             }
         }
+        validar_decision(&self.decision)?;
         validar_registros(&self.registros)
     }
 
@@ -1345,5 +1403,60 @@ tope_usd = 200.0
             assert_eq!(error.codigo_de_salida(), 2, "{texto}");
             assert!(error.to_string().contains("respaldo"), "{error}");
         }
+    }
+
+    #[test]
+    fn config_decision_por_defecto_es_0_9_y_sin_minimos() {
+        let cfg = Config::desde_texto("").expect("vacío carga");
+        assert_eq!(cfg.decision.completitud_minima, 0.9);
+        assert!(cfg.decision.minimo.is_empty());
+        assert_eq!(cfg.decision, ReglasDecision::default());
+    }
+
+    #[test]
+    fn config_decision_se_lee_de_root_toml() {
+        let cfg = Config::desde_texto(
+            "[decision]\ncompletitud_minima = 0.8\n[decision.minimo]\nseguridad = 0.7\ndiseno = 0.5\n",
+        )
+        .expect("carga");
+        assert_eq!(cfg.decision.completitud_minima, 0.8);
+        assert_eq!(cfg.decision.minimo_de(Dimension::Seguridad), Some(0.7));
+        assert_eq!(cfg.decision.minimo_de(Dimension::Diseno), Some(0.5));
+        assert_eq!(cfg.decision.minimo_de(Dimension::Pruebas), None);
+    }
+
+    #[test]
+    fn config_decision_completitud_fuera_de_0_1_o_no_finita_da_codigo_2() {
+        for texto in [
+            "[decision]\ncompletitud_minima = 1.5\n",
+            "[decision]\ncompletitud_minima = -0.1\n",
+            "[decision]\ncompletitud_minima = nan\n",
+            "[decision]\ncompletitud_minima = inf\n",
+        ] {
+            let error = Config::desde_texto(texto).expect_err(texto);
+            assert_eq!(error.codigo_de_salida(), 2, "{texto}");
+            assert!(error.to_string().contains("completitud_minima"), "{error}");
+        }
+    }
+
+    #[test]
+    fn config_decision_minimo_fuera_de_0_1_o_no_finito_da_codigo_2() {
+        for texto in [
+            "[decision.minimo]\nseguridad = 1.01\n",
+            "[decision.minimo]\nseguridad = -0.2\n",
+            "[decision.minimo]\nseguridad = nan\n",
+        ] {
+            let error = Config::desde_texto(texto).expect_err(texto);
+            assert_eq!(error.codigo_de_salida(), 2, "{texto}");
+            assert!(error.to_string().contains("seguridad"), "{error}");
+        }
+    }
+
+    #[test]
+    fn config_decision_minimo_con_dimension_desconocida_da_codigo_2() {
+        let error = Config::desde_texto("[decision.minimo]\nseguridd = 0.8\n")
+            .expect_err("dimensión inexistente");
+        assert_eq!(error.codigo_de_salida(), 2);
+        assert!(error.to_string().contains("seguridd"), "{error}");
     }
 }

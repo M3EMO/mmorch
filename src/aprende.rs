@@ -724,6 +724,7 @@ mod tests {
             riesgos: Vec::new(),
             proximos_pasos: Vec::new(),
             resumen: String::new(),
+            confianza: Default::default(),
         });
         f
     }

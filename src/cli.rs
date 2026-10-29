@@ -167,6 +167,16 @@ pub enum OraculoAccion {
         #[arg(long)]
         repo: PathBuf,
     },
+    /// Arma el informe del PM: la decisión, su regla, lo que falta y qué arreglar primero.
+    Informe {
+        #[arg(long)]
+        tarea: String,
+        #[arg(long)]
+        repo: PathBuf,
+        /// Imprime markdown legible en vez de JSON.
+        #[arg(long)]
+        md: bool,
+    },
     /// Arma el paquete de los tests pendientes por entorno para correrlos en Colab.
     /// Con `--importar`, guarda el junit que trajo de vuelta.
     Pendientes {
@@ -307,6 +317,7 @@ impl Comando {
             Comando::Llama { .. } => "llama",
             Comando::Oraculo { accion } => match accion {
                 OraculoAccion::Evaluar { .. } => "oraculo evaluar",
+                OraculoAccion::Informe { .. } => "oraculo informe",
                 OraculoAccion::Pendientes { .. } => "oraculo pendientes",
                 OraculoAccion::Calibrar { .. } => "oraculo calibrar",
             },

@@ -55,6 +55,43 @@ pub enum Dimension {
     Pruebas,
 }
 
+/// Las nueve dimensiones, en el orden de `Dimension`.
+pub const TODAS_LAS_DIMENSIONES: [Dimension; 9] = [
+    Dimension::Funciona,
+    Dimension::Seguridad,
+    Dimension::Eficiencia,
+    Dimension::Estructura,
+    Dimension::Arquitectura,
+    Dimension::Diseno,
+    Dimension::Completitud,
+    Dimension::Entrega,
+    Dimension::Pruebas,
+];
+
+impl Dimension {
+    /// Clave de `root.toml` y de los JSON: el nombre en snake_case, como lo escribe serde.
+    pub fn clave(self) -> &'static str {
+        match self {
+            Dimension::Funciona => "funciona",
+            Dimension::Seguridad => "seguridad",
+            Dimension::Eficiencia => "eficiencia",
+            Dimension::Estructura => "estructura",
+            Dimension::Arquitectura => "arquitectura",
+            Dimension::Diseno => "diseno",
+            Dimension::Completitud => "completitud",
+            Dimension::Entrega => "entrega",
+            Dimension::Pruebas => "pruebas",
+        }
+    }
+
+    /// Dimensión de una clave de `root.toml`. `None` si la clave no existe.
+    pub fn desde_clave(clave: &str) -> Option<Dimension> {
+        TODAS_LAS_DIMENSIONES
+            .into_iter()
+            .find(|d| d.clave() == clave)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Estado {
@@ -232,6 +269,9 @@ pub struct Informe {
     pub proximos_pasos: Vec<Accion>,
     /// Prosa. Cada oración cita un id.
     pub resumen: String,
+    /// Datos para decidir. Un informe viejo lee `Confianza` vacía.
+    #[serde(default)]
+    pub confianza: Confianza,
 }
 
 /// Tasa de aprobación de un test inestable, con la cota inferior de Wilson al 90%.
@@ -240,6 +280,43 @@ pub struct TasaTest {
     pub pasa: u32,
     pub total: u32,
     pub wilson_inf: f64,
+}
+
+/// Una dimensión sin veredicto y el motivo.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ParteSinVeredicto {
+    pub dimension: Dimension,
+    pub motivo: String,
+}
+
+/// Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos
+/// salen del `Veredicto`; `ambiguedades` queda vacío porque el veredicto no trae la ficha.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Confianza {
+    /// Repeticiones del oculto que corrieron.
+    #[serde(default)]
+    pub repeticiones: u32,
+    /// Tests inestables con su tasa. Claves `contrato:<id>` u `oculto:<id>`, como `Veredicto.tasas`.
+    #[serde(default)]
+    pub inestables: BTreeMap<String, TasaTest>,
+    /// Requisitos en estado `Pendiente`: un test falla por el entorno.
+    #[serde(default)]
+    pub requisitos_pendientes: Vec<String>,
+    /// Tests de `[[entorno]]` con su motivo.
+    #[serde(default)]
+    pub tests_pendientes: Vec<Pendiente>,
+    /// Ambigüedades abiertas de la ficha. Vacío: el veredicto no las trae.
+    #[serde(default)]
+    pub ambiguedades: Vec<String>,
+    /// Dimensiones con veredicto que no están calibradas.
+    #[serde(default)]
+    pub sin_calibrar: Vec<Dimension>,
+    /// Dimensiones sin veredicto, con su motivo.
+    #[serde(default)]
+    pub sin_veredicto: Vec<ParteSinVeredicto>,
+    /// Avisos del veredicto, por ejemplo una corrida de Colab con red.
+    #[serde(default)]
+    pub avisos: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -763,6 +840,10 @@ mod tests {
                 refs: Vec::new(),
             }],
             resumen: "El login falla. Ver h-1.".into(),
+            confianza: Confianza {
+                repeticiones: 5,
+                ..Confianza::default()
+            },
         }
     }
 
