@@ -1,9 +1,9 @@
 # Ejemplo de root.toml. Copialo a $ROOT_HOME/root.toml y ajustá los valores.
 # Los valores de este archivo son los defaults de Root. Sin root.toml, Root usa esos mismos defaults.
 #
-# Precios: Root no trae ningún precio. Sin precio para un modelo, `r00t llama` rechaza la llamada.
-# Falla cerrado: un tope no se esquiva por omisión. Ningún agente inventa un precio.
-# El humano copia cada precio desde la página de su proveedor.
+# Precios: Root trae precios por defecto para deepseek-flash, deepseek-v4-pro, claude-haiku-5-5 y
+# claude-sonnet-5-5 (abajo). Un modelo sin precio, `r00t llama` lo rechaza: falla cerrado.
+# Un [precios.<modelo>] de root.toml reemplaza el default de ese modelo; los de los demás se conservan.
 
 # Umbral de veredicto verde, de 0 a 1. Lo usa el informe (Tarea 13b, pendiente).
 umbral_verde = 0.8
@@ -40,15 +40,15 @@ tope_usd = 250.0
 # Ruteo cuando la vía es API. Los modelos de la API de los roles fijos.
 [ruteo.delega]
 proveedor = "deepseek"
-modelo = "deepseek-chat"
+modelo = "deepseek-flash"
 
 [ruteo.verifica]
 proveedor = "deepseek"
-modelo = "deepseek-reasoner"
+modelo = "deepseek-flash"
 
 [ruteo.juzga]
 proveedor = "deepseek"
-modelo = "deepseek-reasoner"
+modelo = "deepseek-flash"
 
 # Equivalente de API de cada alias de cupo. Las entradas del usuario suman a estas tres; no las reemplazan.
 [ruteo.api_equivalente.opus]
@@ -76,12 +76,31 @@ timeout_s = 120
 [colab]
 minutos_max = 120
 
-# Precios por modelo. La tabla está vacía a propósito.
-# Para habilitar un modelo, descomentá su bloque y completá los dos valores.
-# USD por millón de tokens; copiá el valor de la página del proveedor.
-# [precios."<modelo>"]
-# usd_entrada =
-# usd_salida =
+# Precios por modelo, en USD por millón de tokens. Son los defaults de Root; cada uno cita su origen.
+# claude-haiku-5-5 tiene tramo alto: si la entrada de un pedido pasa umbral_entrada, el pedido entero
+# cuesta al precio alto. Los tres tramos van juntos o no van.
+# origen: mmorch/config.py (decisión 41)
+[precios."deepseek-flash"]
+usd_entrada = 0.14
+usd_salida = 0.28
+
+# origen: mmorch/config.py (decisión 41)
+[precios."deepseek-v4-pro"]
+usd_entrada = 1.74
+usd_salida = 3.48
+
+# origen: referencia de la API de Anthropic, tabla cacheada el 2026-10-06 (decisión 44)
+[precios."claude-haiku-5-5"]
+usd_entrada = 0.10
+usd_salida = 0.50
+umbral_entrada = 100000
+usd_entrada_alto = 0.50
+usd_salida_alto = 2.50
+
+# origen: referencia de la API de Anthropic, tabla cacheada el 2026-10-06 (decisión 47)
+[precios."claude-sonnet-5-5"]
+usd_entrada = 2.00
+usd_salida = 10.00
 
 # Registros privados de paquetes. Solo los escribe el humano: un repo no puede agregar uno.
 # Root pasa la credencial solo a un repo cuyo registro tiene el mismo host que url.

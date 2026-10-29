@@ -540,7 +540,36 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "additionalProperties": {
         "$ref": "#/$defs/Precio"
       },
-      "default": {}
+      "default": {
+        "claude-haiku-5-5": {
+          "umbral_entrada": 100000,
+          "usd_entrada": 0.1,
+          "usd_entrada_alto": 0.5,
+          "usd_salida": 0.5,
+          "usd_salida_alto": 2.5
+        },
+        "claude-sonnet-5-5": {
+          "umbral_entrada": null,
+          "usd_entrada": 2.0,
+          "usd_entrada_alto": null,
+          "usd_salida": 10.0,
+          "usd_salida_alto": null
+        },
+        "deepseek-flash": {
+          "umbral_entrada": null,
+          "usd_entrada": 0.14,
+          "usd_entrada_alto": null,
+          "usd_salida": 0.28,
+          "usd_salida_alto": null
+        },
+        "deepseek-v4-pro": {
+          "umbral_entrada": null,
+          "usd_entrada": 1.74,
+          "usd_entrada_alto": null,
+          "usd_salida": 3.48,
+          "usd_salida_alto": null
+        }
+      }
     },
     "proveedores": {
       "$ref": "#/$defs/ConfigProveedores",
@@ -577,15 +606,15 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           }
         },
         "delega": {
-          "modelo": "deepseek-chat",
+          "modelo": "deepseek-flash",
           "proveedor": "deepseek"
         },
         "juzga": {
-          "modelo": "deepseek-reasoner",
+          "modelo": "deepseek-flash",
           "proveedor": "deepseek"
         },
         "verifica": {
-          "modelo": "deepseek-reasoner",
+          "modelo": "deepseek-flash",
           "proveedor": "deepseek"
         }
       }
@@ -707,18 +736,46 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       }
     },
     "Precio": {
-      "description": "Precio de un modelo, en USD por millón de tokens. Sus dos claves son obligatorias y no admite otras.",
+      "description": "Precio de un modelo, en USD por millón de tokens. Sus dos claves son obligatorias. El tramo alto\n(`umbral_entrada`, `usd_entrada_alto`, `usd_salida_alto`) es opcional, pero va completo o no va.",
       "type": "object",
       "properties": {
+        "umbral_entrada": {
+          "description": "Tokens de entrada por encima de los que el pedido entero cuesta al precio alto.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
         "usd_entrada": {
           "description": "USD por millón de tokens de entrada.",
           "type": "number",
           "format": "double"
         },
+        "usd_entrada_alto": {
+          "description": "USD por millón de tokens de entrada, en el tramo alto.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
         "usd_salida": {
           "description": "USD por millón de tokens de salida.",
           "type": "number",
           "format": "double"
+        },
+        "usd_salida_alto": {
+          "description": "USD por millón de tokens de salida, en el tramo alto.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
         }
       },
       "additionalProperties": false,
@@ -783,21 +840,21 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "delega": {
           "$ref": "#/$defs/ModeloApi",
           "default": {
-            "modelo": "deepseek-chat",
+            "modelo": "deepseek-flash",
             "proveedor": "deepseek"
           }
         },
         "juzga": {
           "$ref": "#/$defs/ModeloApi",
           "default": {
-            "modelo": "deepseek-reasoner",
+            "modelo": "deepseek-flash",
             "proveedor": "deepseek"
           }
         },
         "verifica": {
           "$ref": "#/$defs/ModeloApi",
           "default": {
-            "modelo": "deepseek-reasoner",
+            "modelo": "deepseek-flash",
             "proveedor": "deepseek"
           }
         }

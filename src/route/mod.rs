@@ -236,9 +236,11 @@ fn estado_cupo(uso: &Uso, cfg: &Config, ahora: f64) -> Cupo {
     }
 }
 
-/// Costo en USD de un pedido de `tokens` de entrada y `tokens` de salida, al precio dado.
+/// Costo en USD de un pedido de `tokens` de entrada y `tokens` de salida, al precio dado. Con la
+/// entrada por encima del umbral del tramo alto, cuenta al precio alto.
 fn costo_de_tokens(precio: &Precio, tokens: u32) -> f64 {
-    f64::from(tokens) * (precio.usd_entrada + precio.usd_salida) / 1_000_000.0
+    let (entrada, salida) = precio.tarifa_para(u64::from(tokens));
+    f64::from(tokens) * (entrada + salida) / 1_000_000.0
 }
 
 /// Cupo para un pedido (M2). Si el gasto del bloque más el costo estimado del pedido pasa el tope,
@@ -566,7 +568,7 @@ mod tests {
             &cfg,
         )
         .expect("hay margen");
-        assert_eq!(e.modelo.as_deref(), Some("deepseek-chat"));
+        assert_eq!(e.modelo.as_deref(), Some("deepseek-flash"));
         assert_eq!(e.proveedor, Some(Proveedor::Deepseek));
     }
 
@@ -628,9 +630,9 @@ mod tests {
         let wilson = crate::track::stats::wilson_inferior(2, 2);
         assert!((wilson - 0.549).abs() < 1e-3, "wilson {wilson}");
         let casos = [
-            (Rol::Delega, "delega:bulk", "deepseek-chat"),
-            (Rol::Verifica, "verifica:bulk", "deepseek-reasoner"),
-            (Rol::Juzga, "juzga:bulk", "deepseek-reasoner"),
+            (Rol::Delega, "delega:bulk", "deepseek-flash"),
+            (Rol::Verifica, "verifica:bulk", "deepseek-flash"),
+            (Rol::Juzga, "juzga:bulk", "deepseek-flash"),
         ];
         for (rol, clave, default) in casos {
             let pol = politica_con(clave, vec![candidato("barato", Via::Api, wilson, 0.0001)]);
@@ -675,7 +677,7 @@ mod tests {
             &cfg,
         )
         .expect("hay margen");
-        assert_eq!(e.modelo.as_deref(), Some("deepseek-chat"));
+        assert_eq!(e.modelo.as_deref(), Some("deepseek-flash"));
     }
 
     #[test]
@@ -865,6 +867,9 @@ mod tests {
         let precio = crate::config::Precio {
             usd_entrada: 15.0,
             usd_salida: 75.0,
+            umbral_entrada: None,
+            usd_entrada_alto: None,
+            usd_salida_alto: None,
         };
         assert_eq!(costo_de_tokens(&precio, 1_000_000), 90.0);
     }

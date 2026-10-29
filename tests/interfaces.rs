@@ -3,7 +3,7 @@
 //! `docs/interfaces.md` debe coincidir con el binario en cuatro puntos: los JSON Schema de
 //! `r00t esquema`, los subcomandos de `r00t --help`, las herramientas de `tools/list` y los
 //! ejemplos de `tarea.toml`, ficha y rúbrica, que deben cargar.
-//! `docs/root.toml.example` debe cargar con `Config::desde_texto` y dejar `precios` vacío.
+//! `docs/root.toml.example` debe cargar con `Config::desde_texto` y traer los precios por defecto.
 //!
 //! Para regenerar la sección `## Esquemas` tras cambiar un tipo:
 //! `ROOT_ACTUALIZAR_SNAPSHOT=1 cargo test --test interfaces`.
@@ -351,38 +351,42 @@ fn evidencia_declara_herencia_fuentes_y_cambios() {
 }
 
 #[test]
-fn root_toml_example_carga_con_precios_vacios() {
+fn root_toml_example_carga_con_los_defaults() {
     let texto = leer("root.toml.example");
     let cfg = Config::desde_texto(&texto).expect("docs/root.toml.example debe cargar");
     let por_defecto = Config::default();
-    assert!(
-        cfg.precios.is_empty(),
-        "precios debe quedar vacío: {:?}",
-        cfg.precios
-    );
+    assert_eq!(cfg.precios, por_defecto.precios);
     assert_eq!(cfg.modelos, por_defecto.modelos);
     assert_eq!(cfg.balance, por_defecto.balance);
     assert_eq!(cfg.ruteo, por_defecto.ruteo);
     assert_eq!(cfg.umbral_verde, por_defecto.umbral_verde);
     assert_eq!(cfg.umbral_wilson, por_defecto.umbral_wilson);
     assert_eq!(cfg.proveedores, por_defecto.proveedores);
+    assert!(
+        cfg.avisos.is_empty(),
+        "el ejemplo no usa nombres viejos: {:?}",
+        cfg.avisos
+    );
 }
 
 #[test]
-fn root_toml_example_no_tiene_cifras_de_precio() {
+fn root_toml_example_cita_el_origen_de_cada_precio() {
     let texto = leer("root.toml.example");
-    assert!(
-        texto
-            .lines()
-            .all(|l| !l.trim_start().starts_with("[precios")),
-        "la tabla [precios] debe estar comentada"
-    );
-    for linea in texto
-        .lines()
-        .filter(|l| l.contains("usd_entrada") || l.contains("usd_salida"))
-    {
-        let valor = linea.split('=').nth(1).unwrap_or("").trim();
-        assert!(valor.is_empty(), "precio con valor en el ejemplo: {linea}");
+    let lineas: Vec<&str> = texto.lines().collect();
+    let modelos: Vec<usize> = lineas
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.starts_with("[precios."))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(modelos.len(), 4, "un bloque por modelo por defecto");
+    for i in modelos {
+        let previa = i.checked_sub(1).map(|j| lineas[j]).unwrap_or_default();
+        assert!(
+            previa.starts_with('#') && previa.contains("origen"),
+            "el bloque {} no cita su origen: {previa:?}",
+            lineas[i]
+        );
     }
 }
 

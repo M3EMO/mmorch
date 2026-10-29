@@ -286,7 +286,7 @@ fn etiqueta(necesidad: Necesidad) -> &'static str {
 
 /// Juez real de la configuración: la elección de `route` para el rol `juzga`, con razonamiento y vía API.
 /// decisión 30: el modelo es Sonnet por root.toml. Si route da otro modelo, se usa el que dé route
-/// (el default de `Config` para `ruteo.juzga` es deepseek-reasoner).
+/// (el default de `Config` para `ruteo.juzga` es deepseek-flash).
 pub fn juez_config_real(cfg: &Config) -> Result<JuezProveedor, ErrorOraculo> {
     let politica = route::comando::cargar_politica(&root_home().join("politica.json"))
         .map_err(|e| ErrorOraculo::Infra(format!("política de ruteo: {e}")))?;

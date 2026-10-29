@@ -41,6 +41,10 @@ pub struct Config {
     /// Registros privados de paquetes (`[[registro]]`). Solo los escribe el humano.
     #[serde(default, rename = "registro")]
     pub registros: Vec<RegistroConfig>,
+    /// Avisos de la carga, como un nombre de modelo viejo. `Config::cargar` los imprime en stderr.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub avisos: Vec<String>,
 }
 
 /// Una entrada `[[registro]]`: un registro privado y la variable de entorno que tiene su credencial.
@@ -84,7 +88,8 @@ pub struct Modelos {
     pub construye: String,
 }
 
-/// Precio de un modelo, en USD por millón de tokens. Sus dos claves son obligatorias y no admite otras.
+/// Precio de un modelo, en USD por millón de tokens. Sus dos claves son obligatorias. El tramo alto
+/// (`umbral_entrada`, `usd_entrada_alto`, `usd_salida_alto`) es opcional, pero va completo o no va.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Precio {
@@ -92,6 +97,30 @@ pub struct Precio {
     pub usd_entrada: f64,
     /// USD por millón de tokens de salida.
     pub usd_salida: f64,
+    /// Tokens de entrada por encima de los que el pedido entero cuesta al precio alto.
+    #[serde(default)]
+    pub umbral_entrada: Option<u64>,
+    /// USD por millón de tokens de entrada, en el tramo alto.
+    #[serde(default)]
+    pub usd_entrada_alto: Option<f64>,
+    /// USD por millón de tokens de salida, en el tramo alto.
+    #[serde(default)]
+    pub usd_salida_alto: Option<f64>,
+}
+
+impl Precio {
+    /// Precio de entrada y de salida que rige un pedido con `in_tokens` de entrada. Si la entrada
+    /// pasa `umbral_entrada` y el tramo alto está completo, es el alto; si no, el normal.
+    pub fn tarifa_para(&self, in_tokens: u64) -> (f64, f64) {
+        match (
+            self.umbral_entrada,
+            self.usd_entrada_alto,
+            self.usd_salida_alto,
+        ) {
+            (Some(umbral), Some(entrada), Some(salida)) if in_tokens > umbral => (entrada, salida),
+            _ => (self.usd_entrada, self.usd_salida),
+        }
+    }
 }
 
 /// Sección `[balance]`: topes duros de gasto. Route los lee; nunca los sube.
@@ -144,7 +173,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             modelos: Modelos::default(),
-            precios: BTreeMap::new(),
+            precios: precios_por_defecto(),
             balance: Balance::default(),
             ruteo: Ruteo::default(),
             umbral_verde: 0.8,
@@ -152,6 +181,7 @@ impl Default for Config {
             proveedores: ConfigProveedores::default(),
             colab: ConfigColab::default(),
             registros: Vec::new(),
+            avisos: Vec::new(),
         }
     }
 }
@@ -203,6 +233,65 @@ impl Default for TopeBloque {
     }
 }
 
+/// Precios por defecto. Un `[precios.<modelo>]` de `root.toml` reemplaza el de ese modelo; los de
+/// los demás modelos se conservan. Cada precio cita su origen.
+fn precios_por_defecto() -> BTreeMap<String, Precio> {
+    let plano = |usd_entrada, usd_salida| Precio {
+        usd_entrada,
+        usd_salida,
+        umbral_entrada: None,
+        usd_entrada_alto: None,
+        usd_salida_alto: None,
+    };
+    BTreeMap::from([
+        // Origen: config.py del proyecto anterior (decisión 41).
+        ("deepseek-flash".to_string(), plano(0.14, 0.28)),
+        // Origen: config.py del proyecto anterior (decisión 41).
+        ("deepseek-v4-pro".to_string(), plano(1.74, 3.48)),
+        // Origen: referencia de la API de Anthropic, tabla cacheada el 2026-10-06 (decisión 44).
+        (
+            "claude-haiku-5-5".to_string(),
+            Precio {
+                usd_entrada: 0.10,
+                usd_salida: 0.50,
+                umbral_entrada: Some(100_000),
+                usd_entrada_alto: Some(0.50),
+                usd_salida_alto: Some(2.50),
+            },
+        ),
+        // Origen: referencia de la API de Anthropic, tabla cacheada el 2026-10-06 (decisión 47).
+        ("claude-sonnet-5-5".to_string(), plano(2.00, 10.00)),
+    ])
+}
+
+/// Modelos de DeepSeek que ya no se listan. Un rol de `[ruteo]` que los nombra se lee como
+/// `deepseek-flash`.
+const MODELOS_VIEJOS_DEEPSEEK: &[&str] = &["deepseek-chat", "deepseek-reasoner"];
+const MODELO_DEEPSEEK_VIGENTE: &str = "deepseek-flash";
+
+/// Cambia a `deepseek-flash` cada rol de `[ruteo]` que nombra un modelo viejo de DeepSeek. Devuelve
+/// un aviso por cambio, con el modelo viejo y el nuevo. El razonamiento lo pone `route` por rol.
+pub fn traducir_modelos_viejos(ruteo: &mut Ruteo) -> Vec<String> {
+    let roles = [
+        ("delega", &mut ruteo.delega),
+        ("verifica", &mut ruteo.verifica),
+        ("juzga", &mut ruteo.juzga),
+    ];
+    let mut avisos = Vec::new();
+    for (rol, api) in roles {
+        let viejo = api.proveedor == Proveedor::Deepseek
+            && MODELOS_VIEJOS_DEEPSEEK.contains(&api.modelo.as_str());
+        if viejo {
+            avisos.push(format!(
+                "[ruteo.{rol}] usa \"{}\", un modelo viejo de DeepSeek: Root usa \"{MODELO_DEEPSEEK_VIGENTE}\"",
+                api.modelo
+            ));
+            api.modelo = MODELO_DEEPSEEK_VIGENTE.into();
+        }
+    }
+    avisos
+}
+
 impl Default for Ruteo {
     fn default() -> Self {
         let equivalente = |proveedor, modelo: &str| ModeloApi {
@@ -210,9 +299,9 @@ impl Default for Ruteo {
             modelo: modelo.into(),
         };
         Ruteo {
-            delega: equivalente(Proveedor::Deepseek, "deepseek-chat"),
-            verifica: equivalente(Proveedor::Deepseek, "deepseek-reasoner"),
-            juzga: equivalente(Proveedor::Deepseek, "deepseek-reasoner"),
+            delega: equivalente(Proveedor::Deepseek, "deepseek-flash"),
+            verifica: equivalente(Proveedor::Deepseek, "deepseek-flash"),
+            juzga: equivalente(Proveedor::Deepseek, "deepseek-flash"),
             api_equivalente: BTreeMap::from([
                 (
                     "opus".to_string(),
@@ -254,11 +343,14 @@ fn exigir_topes_declarados(texto: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// Claves de `[precios.<modelo>]`. Todas son obligatorias. La Tarea 21b suma aquí sus claves nuevas.
+/// Claves obligatorias de `[precios.<modelo>]`: el precio normal.
 const CLAVES_PRECIO: &[&str] = &["usd_entrada", "usd_salida"];
+/// Claves opcionales del tramo alto. Van juntas: si una está, están las tres.
+const CLAVES_TRAMO: &[&str] = &["umbral_entrada", "usd_entrada_alto", "usd_salida_alto"];
 
-/// Revisa la tabla cruda `[precios.*]` antes de deserializar. Cada modelo declara todas las claves
-/// de `CLAVES_PRECIO`, sin claves ajenas y con números. Así un error de nombre sale con código 2.
+/// Revisa la tabla cruda `[precios.*]` antes de deserializar. Cada modelo declara las claves
+/// obligatorias, sin claves ajenas y con números. El tramo alto va completo o no va. Así un error
+/// de nombre o de tramo sale con código 2.
 fn exigir_precios_declarados(texto: &str) -> Result<(), Error> {
     let crudo: toml::Table = toml::from_str(texto)?;
     let Some(precios) = crudo.get("precios").and_then(toml::Value::as_table) else {
@@ -271,12 +363,20 @@ fn exigir_precios_declarados(texto: &str) -> Result<(), Error> {
             )));
         };
         for (clave, numero) in tabla {
-            if !CLAVES_PRECIO.contains(&clave.as_str()) {
+            let conocida =
+                CLAVES_PRECIO.contains(&clave.as_str()) || CLAVES_TRAMO.contains(&clave.as_str());
+            if !conocida {
                 return Err(Error::ConfigValor(format!(
                     "[precios.{modelo}] no reconoce la clave \"{clave}\""
                 )));
             }
-            if !(numero.is_float() || numero.is_integer()) {
+            if clave == "umbral_entrada" {
+                if !numero.as_integer().is_some_and(|n| n >= 0) {
+                    return Err(Error::ConfigValor(format!(
+                        "[precios.{modelo}] umbral_entrada debe ser un entero no negativo"
+                    )));
+                }
+            } else if !(numero.is_float() || numero.is_integer()) {
                 return Err(Error::ConfigValor(format!(
                     "[precios.{modelo}] {clave} debe ser un número"
                 )));
@@ -287,6 +387,15 @@ fn exigir_precios_declarados(texto: &str) -> Result<(), Error> {
                 return Err(Error::ConfigValor(format!(
                     "[precios.{modelo}] exige {clave}"
                 )));
+            }
+        }
+        if CLAVES_TRAMO.iter().any(|c| tabla.contains_key(*c)) {
+            for clave in CLAVES_TRAMO {
+                if !tabla.contains_key(*clave) {
+                    return Err(Error::ConfigValor(format!(
+                        "[precios.{modelo}] exige {clave}: el tramo alto va con umbral_entrada, usd_entrada_alto y usd_salida_alto"
+                    )));
+                }
             }
         }
     }
@@ -354,6 +463,11 @@ impl Config {
         for (alias, modelo) in Ruteo::default().api_equivalente {
             config.ruteo.api_equivalente.entry(alias).or_insert(modelo);
         }
+        // Un precio del usuario reemplaza el default de ese modelo; los demás defaults se conservan.
+        for (modelo, precio) in precios_por_defecto() {
+            config.precios.entry(modelo).or_insert(precio);
+        }
+        config.avisos = traducir_modelos_viejos(&mut config.ruteo);
         config.validar()?;
         Ok(config)
     }
@@ -408,10 +522,13 @@ impl Config {
         }
         for (modelo, precio) in &self.precios {
             let campos = [
-                ("usd_entrada", precio.usd_entrada),
-                ("usd_salida", precio.usd_salida),
+                ("usd_entrada", Some(precio.usd_entrada)),
+                ("usd_salida", Some(precio.usd_salida)),
+                ("usd_entrada_alto", precio.usd_entrada_alto),
+                ("usd_salida_alto", precio.usd_salida_alto),
             ];
             for (campo, valor) in campos {
+                let Some(valor) = valor else { continue };
                 if !valor.is_finite() || valor < 0.0 {
                     return Err(Error::ConfigValor(format!(
                         "[precios.{modelo}] {campo} debe ser finito y no negativo"
@@ -425,7 +542,13 @@ impl Config {
     /// Lee `root.toml`. Si el archivo no existe, devuelve el default.
     pub fn cargar(ruta: &Path) -> Result<Config, Error> {
         match std::fs::read_to_string(ruta) {
-            Ok(texto) => Config::desde_texto(&texto),
+            Ok(texto) => {
+                let config = Config::desde_texto(&texto)?;
+                for aviso in &config.avisos {
+                    eprintln!("aviso: {aviso}");
+                }
+                Ok(config)
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Config::default()),
             Err(fuente) => Err(Error::ConfigLeer {
                 ruta: ruta.display().to_string(),
@@ -543,6 +666,122 @@ espera_base_ms = 1
     }
 
     #[test]
+    fn config_precio_tramo_incompleto_da_codigo_2() {
+        for texto in [
+            "[precios.x]\nusd_entrada = 1.0\nusd_salida = 2.0\numbral_entrada = 100000\n",
+            "[precios.x]\nusd_entrada = 1.0\nusd_salida = 2.0\numbral_entrada = 100000\nusd_entrada_alto = 0.5\n",
+            "[precios.x]\nusd_entrada = 1.0\nusd_salida = 2.0\numbral_entrada = 100000\nusd_salida_alto = 2.5\n",
+            "[precios.x]\nusd_entrada = 1.0\nusd_salida = 2.0\nusd_entrada_alto = 0.5\nusd_salida_alto = 2.5\n",
+        ] {
+            let error = Config::desde_texto(texto).expect_err(texto);
+            assert_eq!(error.codigo_de_salida(), 2, "{texto}");
+            assert!(error.to_string().contains("[precios.x]"), "{error}");
+        }
+    }
+
+    #[test]
+    fn config_precio_tramo_completo_carga_con_sus_valores() {
+        let texto = "[precios.x]\nusd_entrada = 0.1\nusd_salida = 0.5\numbral_entrada = 100000\nusd_entrada_alto = 0.5\nusd_salida_alto = 2.5\n";
+        let c = Config::desde_texto(texto).expect("tramo completo carga");
+        let p = &c.precios["x"];
+        assert_eq!(p.umbral_entrada, Some(100_000));
+        assert_eq!(p.usd_entrada_alto, Some(0.5));
+        assert_eq!(p.usd_salida_alto, Some(2.5));
+    }
+
+    #[test]
+    fn config_precio_tramo_con_valor_invalido_da_codigo_2() {
+        let base = "[precios.x]\nusd_entrada = 0.1\nusd_salida = 0.5\n";
+        for extra in [
+            "umbral_entrada = -5\nusd_entrada_alto = 0.5\nusd_salida_alto = 2.5\n",
+            "umbral_entrada = 1.5\nusd_entrada_alto = 0.5\nusd_salida_alto = 2.5\n",
+            "umbral_entrada = 100000\nusd_entrada_alto = nan\nusd_salida_alto = 2.5\n",
+            "umbral_entrada = 100000\nusd_entrada_alto = 0.5\nusd_salida_alto = -1.0\n",
+        ] {
+            let texto = format!("{base}{extra}");
+            let error = Config::desde_texto(&texto).expect_err(&texto);
+            assert_eq!(error.codigo_de_salida(), 2, "{texto}");
+        }
+    }
+
+    #[test]
+    fn config_precios_por_defecto_son_los_de_las_decisiones_41_44_47() {
+        let precios = Config::default().precios;
+        let modelos: Vec<&str> = precios.keys().map(String::as_str).collect();
+        assert_eq!(
+            modelos,
+            [
+                "claude-haiku-5-5",
+                "claude-sonnet-5-5",
+                "deepseek-flash",
+                "deepseek-v4-pro"
+            ]
+        );
+        let flash = &precios["deepseek-flash"];
+        assert_eq!((flash.usd_entrada, flash.usd_salida), (0.14, 0.28));
+        let pro = &precios["deepseek-v4-pro"];
+        assert_eq!((pro.usd_entrada, pro.usd_salida), (1.74, 3.48));
+        let haiku = &precios["claude-haiku-5-5"];
+        assert_eq!((haiku.usd_entrada, haiku.usd_salida), (0.10, 0.50));
+        assert_eq!(haiku.umbral_entrada, Some(100_000));
+        assert_eq!(haiku.usd_entrada_alto, Some(0.50));
+        assert_eq!(haiku.usd_salida_alto, Some(2.50));
+    }
+
+    #[test]
+    fn config_sin_root_toml_sonnet_cuesta_2_y_10_sin_tramos() {
+        let ruta = Path::new("/ruta-que-no-existe-root-test/root.toml");
+        let c = Config::cargar(ruta).expect("inexistente da default");
+        let sonnet = c
+            .precios
+            .get("claude-sonnet-5-5")
+            .expect("precio de Sonnet");
+        assert_eq!((sonnet.usd_entrada, sonnet.usd_salida), (2.0, 10.0));
+        assert_eq!(sonnet.umbral_entrada, None);
+    }
+
+    #[test]
+    fn config_precio_de_root_toml_reemplaza_solo_ese_modelo() {
+        let c = Config::desde_texto(
+            "[precios.claude-haiku-5-5]\nusd_entrada = 1.0\nusd_salida = 5.0\n",
+        )
+        .expect("carga");
+        let haiku = &c.precios["claude-haiku-5-5"];
+        assert_eq!((haiku.usd_entrada, haiku.usd_salida), (1.0, 5.0));
+        assert_eq!(
+            haiku.umbral_entrada, None,
+            "el reemplazo no hereda el tramo"
+        );
+        assert_eq!(c.precios["deepseek-flash"].usd_entrada, 0.14);
+    }
+
+    #[test]
+    fn config_ruteo_viejo_de_deepseek_se_traduce_y_avisa() {
+        let texto = "[ruteo.juzga]\nproveedor = \"deepseek\"\nmodelo = \"deepseek-reasoner\"\n";
+        let c = Config::desde_texto(texto).expect("carga");
+        assert_eq!(c.ruteo.juzga.modelo, "deepseek-flash");
+        assert_eq!(c.avisos.len(), 1, "{:?}", c.avisos);
+        assert!(
+            c.avisos[0].contains("deepseek-reasoner") && c.avisos[0].contains("deepseek-flash"),
+            "{:?}",
+            c.avisos
+        );
+    }
+
+    #[test]
+    fn config_traducir_modelos_viejos_cambia_solo_deepseek_viejo() {
+        let mut ruteo = Ruteo::default();
+        ruteo.delega.modelo = "deepseek-chat".into();
+        ruteo.verifica.modelo = "claude-sonnet-5-5".into();
+        ruteo.verifica.proveedor = Proveedor::Anthropic;
+        let avisos = traducir_modelos_viejos(&mut ruteo);
+        assert_eq!(ruteo.delega.modelo, "deepseek-flash");
+        assert_eq!(ruteo.verifica.modelo, "claude-sonnet-5-5");
+        assert_eq!(avisos.len(), 1, "{avisos:?}");
+        assert!(avisos[0].contains("[ruteo.delega]"), "{avisos:?}");
+    }
+
+    #[test]
     fn config_root_home_respeta_la_variable() {
         let ruta = resolver_root_home(
             Some(PathBuf::from("/datos/root")),
@@ -608,10 +847,10 @@ tope_usd = 200.0
     fn route_ruteo_defaults() {
         let c = Config::default();
         assert_eq!(c.ruteo.delega.proveedor, Proveedor::Deepseek);
-        assert_eq!(c.ruteo.delega.modelo, "deepseek-chat");
+        assert_eq!(c.ruteo.delega.modelo, "deepseek-flash");
         assert_eq!(c.ruteo.verifica.proveedor, Proveedor::Deepseek);
-        assert_eq!(c.ruteo.verifica.modelo, "deepseek-reasoner");
-        assert_eq!(c.ruteo.juzga.modelo, "deepseek-reasoner");
+        assert_eq!(c.ruteo.verifica.modelo, "deepseek-flash");
+        assert_eq!(c.ruteo.juzga.modelo, "deepseek-flash");
         let eq = &c.ruteo.api_equivalente;
         assert_eq!(eq["opus"].proveedor, Proveedor::Anthropic);
         assert_eq!(eq["opus"].modelo, "claude-opus-5-5");

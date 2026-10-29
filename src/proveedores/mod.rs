@@ -353,6 +353,8 @@ struct Llamada<'a> {
     modelo: &'a str,
     prompt: &'a Prompt,
     corrida: &'a str,
+    /// `true` si la elección pide razonamiento. Va al cuerpo de cada intento.
+    razonamiento: bool,
     precio: Precio,
     /// Peor caso de un intento: la entrada estimada y todo `max_tokens`, al precio del modelo.
     peor_caso: f64,
@@ -382,6 +384,7 @@ pub fn llamar_con(
         modelo,
         prompt,
         corrida,
+        razonamiento: e.razonamiento,
         peor_caso: costo_peor_caso(&precio, tokens_entrada_estimados(prompt), prompt.max_tokens),
         precio,
         intentos: 0,
@@ -635,6 +638,7 @@ fn reintentar(
             clave,
             llamada.modelo,
             llamada.prompt,
+            llamada.razonamiento,
         );
         match resultado {
             Ok(crudo) => return Ok(crudo),
@@ -670,14 +674,23 @@ fn un_intento(
     clave: &Clave,
     modelo: &str,
     prompt: &Prompt,
+    razonamiento: bool,
 ) -> Result<Crudo, ErrorProveedor> {
     let pet = match proveedor {
-        Proveedor::Deepseek => {
-            deepseek::armar(&cfg.proveedores.deepseek_url, clave, modelo, prompt)
-        }
-        Proveedor::Anthropic => {
-            anthropic::armar(&cfg.proveedores.anthropic_url, clave, modelo, prompt)
-        }
+        Proveedor::Deepseek => deepseek::armar(
+            &cfg.proveedores.deepseek_url,
+            clave,
+            modelo,
+            prompt,
+            razonamiento,
+        ),
+        Proveedor::Anthropic => anthropic::armar(
+            &cfg.proveedores.anthropic_url,
+            clave,
+            modelo,
+            prompt,
+            razonamiento,
+        ),
     };
     let mut pedido = agente.post(&pet.url);
     for (nombre, valor) in &pet.cabeceras {
@@ -736,9 +749,11 @@ fn error_de_estado(estado: u16, proveedor: String) -> ErrorProveedor {
     }
 }
 
-/// Costo en USD de unos tokens de entrada y salida, al precio de un millón de tokens.
+/// Costo en USD de unos tokens de entrada y salida. Si la entrada pasa el umbral del tramo alto,
+/// el pedido entero cuesta al precio alto.
 fn costo_usd(precio: &Precio, in_tokens: u64, out_tokens: u64) -> f64 {
-    in_tokens as f64 * precio.usd_entrada / 1e6 + out_tokens as f64 * precio.usd_salida / 1e6
+    let (entrada, salida) = precio.tarifa_para(in_tokens);
+    in_tokens as f64 * entrada / 1e6 + out_tokens as f64 * salida / 1e6
 }
 
 /// Evento de la llamada, sin tokens, costo ni intentos. Quien llama completa esos campos.
@@ -856,6 +871,40 @@ mod tests {
         b.registra_exito("anthropic");
         b.registra_falla("anthropic", t0);
         assert!(b.permite("anthropic", t0));
+    }
+
+    fn haiku_con_tramo() -> Precio {
+        Precio {
+            usd_entrada: 0.10,
+            usd_salida: 0.50,
+            umbral_entrada: Some(100_000),
+            usd_entrada_alto: Some(0.50),
+            usd_salida_alto: Some(2.50),
+        }
+    }
+
+    #[test]
+    fn proveedores_costo_sobre_el_umbral_cobra_todo_al_precio_alto() {
+        let costo = costo_usd(&haiku_con_tramo(), 150_000, 1_000);
+        let esperado = (150_000.0 * 0.50 + 1_000.0 * 2.50) / 1e6;
+        assert!((costo - esperado).abs() < 1e-12, "{costo}");
+    }
+
+    #[test]
+    fn proveedores_costo_en_el_umbral_o_debajo_usa_el_precio_normal() {
+        for in_tokens in [1_000, 100_000] {
+            let costo = costo_usd(&haiku_con_tramo(), in_tokens, 1_000);
+            let esperado = (in_tokens as f64 * 0.10 + 1_000.0 * 0.50) / 1e6;
+            assert!((costo - esperado).abs() < 1e-12, "{in_tokens}: {costo}");
+        }
+    }
+
+    #[test]
+    fn proveedores_peor_caso_usa_el_tramo_alto_si_la_estimacion_pasa_el_umbral() {
+        let alto = costo_peor_caso(&haiku_con_tramo(), 150_000, 1_000);
+        assert!((alto - (150_000.0 * 0.50 + 1_000.0 * 2.50) / 1e6).abs() < 1e-12);
+        let bajo = costo_peor_caso(&haiku_con_tramo(), 1_000, 1_000);
+        assert!((bajo - (1_000.0 * 0.10 + 1_000.0 * 0.50) / 1e6).abs() < 1e-12);
     }
 
     #[test]

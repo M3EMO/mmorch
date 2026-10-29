@@ -16,8 +16,8 @@ use serde_json::{Value, json};
 
 const CLAVE: &str = "sk-test-SECRETO-MCP";
 const DEEPSEEK_OK: &str = r#"{"choices":[{"message":{"content":"hola"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#;
-const PRECIO_CARO: &str = "[precios.deepseek-reasoner]\nusd_entrada = 0.0\nusd_salida = 3000.0\n";
-const PRECIO_BARATO: &str = "[precios.deepseek-reasoner]\nusd_entrada = 0.0\nusd_salida = 0.001\n";
+const PRECIO_CARO: &str = "[precios.deepseek-flash]\nusd_entrada = 0.0\nusd_salida = 3000.0\n";
+const PRECIO_BARATO: &str = "[precios.deepseek-flash]\nusd_entrada = 0.0\nusd_salida = 0.001\n";
 const TAREA_MINIMA: &str = r#"
 nombre = "memora"
 lenguaje = "rust"

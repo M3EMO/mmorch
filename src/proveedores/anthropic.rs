@@ -6,8 +6,16 @@ use super::{Clave, Crudo, ErrorProveedor, Peticion, Prompt, entero_en};
 
 const VERSION_API: &str = "2023-06-01";
 
-/// Arma el pedido con las cabeceras de la API de Messages.
-pub(crate) fn armar(url_base: &str, clave: &Clave, modelo: &str, prompt: &Prompt) -> Peticion {
+/// Arma el pedido con las cabeceras de la API de Messages. Con razonamiento, pide `adaptive`:
+/// `budget_tokens` da 400 en Haiku, Sonnet y Opus 5.5. Sin razonamiento omite `thinking`, porque
+/// `disabled` da 400 en Sonnet y Opus 5.5.
+pub(crate) fn armar(
+    url_base: &str,
+    clave: &Clave,
+    modelo: &str,
+    prompt: &Prompt,
+    razonamiento: bool,
+) -> Peticion {
     let mut cuerpo = json!({
         "model": modelo,
         "max_tokens": prompt.max_tokens,
@@ -15,6 +23,9 @@ pub(crate) fn armar(url_base: &str, clave: &Clave, modelo: &str, prompt: &Prompt
     });
     if let Some(sistema) = &prompt.sistema {
         cuerpo["system"] = json!(sistema);
+    }
+    if razonamiento {
+        cuerpo["thinking"] = json!({"type": "adaptive"});
     }
     Peticion {
         url: format!("{}/v1/messages", url_base.trim_end_matches('/')),
@@ -69,6 +80,7 @@ mod tests {
             &Clave::nueva("k1"),
             "claude-haiku-5-5",
             &prompt(None),
+            false,
         );
         assert_eq!(pet.url, "http://x/v1/messages");
         assert!(pet.cabeceras.contains(&("x-api-key", "k1".to_string())));
@@ -80,10 +92,38 @@ mod tests {
 
     #[test]
     fn proveedores_anthropic_cuerpo_sin_sistema_omite_el_campo() {
-        let pet = armar("http://x", &Clave::nueva("k"), "m", &prompt(None));
+        let pet = armar("http://x", &Clave::nueva("k"), "m", &prompt(None), false);
         let cuerpo: Value = serde_json::from_str(&pet.cuerpo).expect("JSON");
         assert!(cuerpo.get("system").is_none());
         assert_eq!(cuerpo["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn proveedores_anthropic_con_razonamiento_pide_adaptive_sin_budget_tokens() {
+        let pet = armar(
+            "http://x",
+            &Clave::nueva("k"),
+            "claude-haiku-5-5",
+            &prompt(None),
+            true,
+        );
+        let cuerpo: Value = serde_json::from_str(&pet.cuerpo).expect("JSON");
+        assert_eq!(cuerpo["thinking"], json!({"type": "adaptive"}));
+        assert!(!pet.cuerpo.contains("budget_tokens"), "{}", pet.cuerpo);
+        assert!(cuerpo.get("output_config").is_none());
+    }
+
+    #[test]
+    fn proveedores_anthropic_sin_razonamiento_omite_thinking() {
+        let pet = armar(
+            "http://x",
+            &Clave::nueva("k"),
+            "claude-haiku-5-5",
+            &prompt(None),
+            false,
+        );
+        let cuerpo: Value = serde_json::from_str(&pet.cuerpo).expect("JSON");
+        assert!(cuerpo.get("thinking").is_none(), "{}", pet.cuerpo);
     }
 
     #[test]

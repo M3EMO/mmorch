@@ -82,10 +82,10 @@ fn eventos(home: &Path) -> Vec<Evento> {
         .collect()
 }
 
-/// Precio de `deepseek-reasoner` con costo de salida alto: 1000 tokens cuestan 3 USD.
-const PRECIO_CARO: &str = "[precios.deepseek-reasoner]\nusd_entrada = 0.0\nusd_salida = 3000.0\n";
-/// Precio de `deepseek-reasoner` con costo de salida bajo: 1000 tokens cuestan 0,000001 USD.
-const PRECIO_BARATO: &str = "[precios.deepseek-reasoner]\nusd_entrada = 0.0\nusd_salida = 0.001\n";
+/// Precio de `deepseek-flash` (el modelo del juez) con costo de salida alto: 1000 tokens cuestan 3 USD.
+const PRECIO_CARO: &str = "[precios.deepseek-flash]\nusd_entrada = 0.0\nusd_salida = 3000.0\n";
+/// Precio de `deepseek-flash` con costo de salida bajo: 1000 tokens cuestan 0,000001 USD.
+const PRECIO_BARATO: &str = "[precios.deepseek-flash]\nusd_entrada = 0.0\nusd_salida = 0.001\n";
 
 #[test]
 fn llama_cli_tope_rechaza_la_llamada_sin_enviarla() {
@@ -106,7 +106,7 @@ fn llama_cli_tope_rechaza_la_llamada_sin_enviarla() {
         .collect();
     assert_eq!(gates.len(), 1);
     assert_eq!(gates[0].fase, "tope");
-    assert_eq!(gates[0].extra["modelo"], "deepseek-reasoner");
+    assert_eq!(gates[0].extra["modelo"], "deepseek-flash");
     let estimado = gates[0].extra["estimado"].as_f64().expect("estimado");
     let margen = gates[0].extra["margen"].as_f64().expect("margen");
     assert!((estimado - 3.0).abs() < 1e-9, "estimado {estimado}");
@@ -152,10 +152,11 @@ fn llama_cli_dentro_del_margen_envia_imprime_y_registra() {
 fn llama_cli_modelo_sin_precio_rechaza_con_gate() {
     let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
     let home = tempfile::tempdir().expect("home");
+    // El juez usa un modelo sin precio: Root lo rechaza antes de enviar.
     preparar(
         home.path(),
         &srv.url,
-        "[precios.deepseek-chat]\nusd_entrada = 1.0\nusd_salida = 1.0\n",
+        "[ruteo.juzga]\nproveedor = \"deepseek\"\nmodelo = \"modelo-sin-precio\"\n",
     );
 
     let salida = llama(home.path(), &["--max-tokens", "1000"]);
@@ -164,7 +165,7 @@ fn llama_cli_modelo_sin_precio_rechaza_con_gate() {
     assert_eq!(srv.peticiones(), 0);
     let stderr = String::from_utf8_lossy(&salida.stderr);
     assert!(
-        stderr.contains("sin precio en root.toml para deepseek-reasoner"),
+        stderr.contains("sin precio en root.toml para modelo-sin-precio"),
         "stderr: {stderr}"
     );
     let gates: Vec<Evento> = eventos(home.path())
@@ -173,7 +174,7 @@ fn llama_cli_modelo_sin_precio_rechaza_con_gate() {
         .collect();
     assert_eq!(gates.len(), 1);
     assert_eq!(gates[0].fase, "tope");
-    assert_eq!(gates[0].extra["modelo"], "deepseek-reasoner");
+    assert_eq!(gates[0].extra["modelo"], "modelo-sin-precio");
     assert!(gates[0].extra["estimado"].is_null());
 }
 
@@ -255,9 +256,9 @@ fn llama_cli_reserva_no_escribible_no_envia_nada() {
 
 /// Respuesta de DeepSeek con 1000 tokens de salida: a 600 USD por millón, cuesta 0,6 USD.
 const DEEPSEEK_1000: &str = r#"{"choices":[{"message":{"content":"hola"}}],"usage":{"prompt_tokens":10,"completion_tokens":1000}}"#;
-/// Precio de `deepseek-reasoner` con 1000 tokens de salida a 0,6 USD (peor caso de cada pedido).
+/// Precio de `deepseek-flash` con 1000 tokens de salida a 0,6 USD (peor caso de cada pedido).
 const PRECIO_SEISCIENTOS: &str =
-    "[precios.deepseek-reasoner]\nusd_entrada = 0.0\nusd_salida = 600.0\n";
+    "[precios.deepseek-flash]\nusd_entrada = 0.0\nusd_salida = 600.0\n";
 
 #[test]
 fn llama_cli_cuatro_procesos_no_pasan_el_tope_de_api() {
@@ -378,4 +379,32 @@ fn llama_cli_planifica_con_tope_de_api_lleno_sigue_con_codigo_2() {
             .iter()
             .all(|ev| ev.tipo != TipoEvento::Gate)
     );
+}
+
+#[test]
+fn llama_cli_sin_root_toml_tiene_precio_para_el_juez_y_no_dice_sin_precio() {
+    let home = tempfile::tempdir().expect("home");
+    fs::write(home.path().join("prompt.txt"), "hola").expect("prompt");
+    // Sin clave, la llamada se detiene después del chequeo de precio y antes de enviar nada.
+    let salida = Command::new(env!("CARGO_BIN_EXE_r00t"))
+        .env("ROOT_HOME", home.path())
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .args([
+            "llama",
+            "--rol",
+            "juzga",
+            "--tipo",
+            "diseno",
+            "--corrida",
+            "c1",
+        ])
+        .arg("--prompt-file")
+        .arg(home.path().join("prompt.txt"))
+        .output()
+        .expect("no se pudo ejecutar el binario root");
+    let stderr = String::from_utf8_lossy(&salida.stderr);
+    assert!(!stderr.contains("sin precio"), "stderr: {stderr}");
+    assert!(stderr.contains("falta la clave"), "stderr: {stderr}");
+    assert_eq!(codigo(&salida), 3);
 }

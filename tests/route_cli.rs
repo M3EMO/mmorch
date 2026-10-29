@@ -232,5 +232,36 @@ fn route_cli_sin_root_toml_usa_defaults_y_sale_con_0() {
         &["--json", "route", "--rol", "delega", "--tipo", "bulk"],
     );
     assert_eq!(codigo(&salida), 0);
-    assert_eq!(json(&salida)["modelo"], "deepseek-chat");
+    assert_eq!(json(&salida)["modelo"], "deepseek-flash");
+}
+
+#[test]
+fn route_cli_juzga_sin_root_toml_elige_deepseek_flash_con_razonamiento() {
+    let home = tempfile::tempdir().expect("home");
+    let salida = root_con_home(
+        home.path(),
+        &["--json", "route", "--rol", "juzga", "--tipo", "x"],
+    );
+    assert_eq!(codigo(&salida), 0);
+    let j = json(&salida);
+    assert_eq!(j["modelo"], "deepseek-flash");
+    assert_eq!(j["razonamiento"], true);
+}
+
+#[test]
+fn route_cli_modelo_viejo_de_deepseek_avisa_en_stderr_y_usa_deepseek_flash() {
+    let home = tempfile::tempdir().expect("home");
+    let texto = "[ruteo.juzga]\nproveedor = \"deepseek\"\nmodelo = \"deepseek-reasoner\"\n";
+    fs::write(home.path().join("root.toml"), texto).expect("root.toml");
+    let salida = root_con_home(
+        home.path(),
+        &["--json", "route", "--rol", "juzga", "--tipo", "x"],
+    );
+    assert_eq!(codigo(&salida), 0);
+    assert_eq!(json(&salida)["modelo"], "deepseek-flash");
+    let stderr = String::from_utf8_lossy(&salida.stderr);
+    assert!(
+        stderr.contains("deepseek-reasoner") && stderr.contains("deepseek-flash"),
+        "stderr: {stderr}"
+    );
 }

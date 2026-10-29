@@ -140,6 +140,9 @@ fn config(deepseek: &str, anthropic: &str) -> Config {
         root::config::Precio {
             usd_entrada: 1.0,
             usd_salida: 2.0,
+            umbral_entrada: None,
+            usd_entrada_alto: None,
+            usd_salida_alto: None,
         },
     );
     cfg.precios.insert(
@@ -147,6 +150,9 @@ fn config(deepseek: &str, anthropic: &str) -> Config {
         root::config::Precio {
             usd_entrada: 4.0,
             usd_salida: 8.0,
+            umbral_entrada: None,
+            usd_entrada_alto: None,
+            usd_salida_alto: None,
         },
     );
     cfg
@@ -1320,6 +1326,9 @@ fn proveedores_costo_peor_caso_suma_entrada_y_maximo_de_salida() {
     let precio = root::config::Precio {
         usd_entrada: 1.0,
         usd_salida: 2.0,
+        umbral_entrada: None,
+        usd_entrada_alto: None,
+        usd_salida_alto: None,
     };
     // Un millón de entrada a 1 USD y medio millón de salida a 2 USD por millón.
     let costo = costo_peor_caso(&precio, 1_000_000, 500_000);
@@ -1503,4 +1512,120 @@ fn proveedores_reserva_no_escribible_no_envia_nada() {
     .expect_err("sin reserva no se envía");
     assert!(matches!(err, ErrorProveedor::Tope(_)), "llegó {err:?}");
     assert_eq!(srv.peticiones(), 0);
+}
+
+/// Configuración con los precios por defecto de Root y el servidor falso como proveedor.
+fn config_por_defecto(url: &str) -> Config {
+    let mut cfg = Config::default();
+    cfg.proveedores.deepseek_url = url.into();
+    cfg.proveedores.anthropic_url = url.into();
+    cfg.proveedores.espera_base_ms = 1;
+    cfg
+}
+
+/// Una llamada con la elección dada. Devuelve el resultado; el servidor guarda el pedido.
+fn llamada_con_eleccion(
+    cfg: &Config,
+    e: &Eleccion,
+    corrida: &str,
+) -> Result<Respuesta, ErrorProveedor> {
+    let home = tempfile::tempdir().expect("home");
+    let breaker = Breaker::new();
+    let claves = claves_de_prueba();
+    let base = Instant::now();
+    let reloj = || base;
+    let ctx = Contexto {
+        cfg,
+        home: home.path(),
+        breaker: &breaker,
+        claves: &claves,
+        reloj: &reloj,
+    };
+    llamar_con(&ctx, e, &prompt(), corrida)
+}
+
+/// Elección con razonamiento, como la de Verifica y Juzga.
+fn eleccion_con_razonamiento(proveedor: Proveedor, modelo: &str) -> Eleccion {
+    Eleccion {
+        razonamiento: true,
+        ..eleccion(proveedor, modelo)
+    }
+}
+
+const ANTHROPIC_ENTRADA_ALTA: &str = r#"{"content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":150000,"output_tokens":1000}}"#;
+const ANTHROPIC_ENTRADA_BAJA: &str = r#"{"content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1000,"output_tokens":1000}}"#;
+
+#[test]
+fn proveedores_juzga_deepseek_manda_thinking_enabled() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let cfg = config_por_defecto(&srv.url);
+    let e = eleccion_con_razonamiento(Proveedor::Deepseek, "deepseek-flash");
+    llamada_con_eleccion(&cfg, &e, "j1").expect("200 da respuesta");
+    let cuerpo: Value = serde_json::from_str(&srv.pedido(0).cuerpo).expect("JSON");
+    assert_eq!(cuerpo["thinking"], serde_json::json!({"type": "enabled"}));
+}
+
+#[test]
+fn proveedores_delega_deepseek_manda_thinking_disabled() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let cfg = config_por_defecto(&srv.url);
+    let e = eleccion(Proveedor::Deepseek, "deepseek-flash");
+    llamada_con_eleccion(&cfg, &e, "d1").expect("200 da respuesta");
+    let cuerpo: Value = serde_json::from_str(&srv.pedido(0).cuerpo).expect("JSON");
+    assert_eq!(cuerpo["thinking"], serde_json::json!({"type": "disabled"}));
+}
+
+#[test]
+fn proveedores_anthropic_con_razonamiento_manda_adaptive_sin_budget_tokens() {
+    let srv = Servidor::arranca(vec![(200, ANTHROPIC_OK)]);
+    let cfg = config_por_defecto(&srv.url);
+    let e = eleccion_con_razonamiento(Proveedor::Anthropic, "claude-haiku-5-5");
+    llamada_con_eleccion(&cfg, &e, "a1").expect("200 da respuesta");
+    let pedido = srv.pedido(0);
+    let cuerpo: Value = serde_json::from_str(&pedido.cuerpo).expect("JSON");
+    assert_eq!(cuerpo["thinking"], serde_json::json!({"type": "adaptive"}));
+    assert!(
+        !pedido.cuerpo.contains("budget_tokens"),
+        "{}",
+        pedido.cuerpo
+    );
+    assert!(cuerpo.get("output_config").is_none());
+}
+
+#[test]
+fn proveedores_anthropic_sin_razonamiento_no_manda_thinking() {
+    let srv = Servidor::arranca(vec![(200, ANTHROPIC_OK)]);
+    let cfg = config_por_defecto(&srv.url);
+    let e = eleccion(Proveedor::Anthropic, "claude-haiku-5-5");
+    llamada_con_eleccion(&cfg, &e, "a2").expect("200 da respuesta");
+    let cuerpo: Value = serde_json::from_str(&srv.pedido(0).cuerpo).expect("JSON");
+    assert!(cuerpo.get("thinking").is_none(), "{cuerpo}");
+}
+
+#[test]
+fn proveedores_haiku_con_150000_de_entrada_cobra_el_tramo_alto() {
+    let srv = Servidor::arranca(vec![(200, ANTHROPIC_ENTRADA_ALTA)]);
+    let cfg = config_por_defecto(&srv.url);
+    let e = eleccion(Proveedor::Anthropic, "claude-haiku-5-5");
+    let r = llamada_con_eleccion(&cfg, &e, "h1").expect("200 da respuesta");
+    let esperado = (150_000.0 * 0.50 + 1_000.0 * 2.50) / 1e6;
+    assert!(
+        (r.cost_usd - esperado).abs() < 1e-12,
+        "costo {}",
+        r.cost_usd
+    );
+}
+
+#[test]
+fn proveedores_haiku_con_1000_de_entrada_cobra_el_tramo_normal() {
+    let srv = Servidor::arranca(vec![(200, ANTHROPIC_ENTRADA_BAJA)]);
+    let cfg = config_por_defecto(&srv.url);
+    let e = eleccion(Proveedor::Anthropic, "claude-haiku-5-5");
+    let r = llamada_con_eleccion(&cfg, &e, "h2").expect("200 da respuesta");
+    let esperado = (1_000.0 * 0.10 + 1_000.0 * 0.50) / 1e6;
+    assert!(
+        (r.cost_usd - esperado).abs() < 1e-12,
+        "costo {}",
+        r.cost_usd
+    );
 }
