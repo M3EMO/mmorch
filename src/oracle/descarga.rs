@@ -1716,6 +1716,7 @@ location searched: crates.io index";
             nombre: "priv".into(),
             url: "https://reg.example/index/".into(),
             credencial_env: "ROOT_TOKEN_PRIV".into(),
+            usuario_env: None,
         }];
         credenciales_cargo(&inv, &registros, |_| Some("valor-secreto-9".into()))
     }

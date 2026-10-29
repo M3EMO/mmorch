@@ -130,15 +130,11 @@ impl Podman for PodmanReal {
     }
 }
 
-/// Argumentos de `podman build` (Tarea 9d3). Sin red, `--network none`. Con red, la red de usuario de
-/// podman sin acceso al host, y nada más: sin montajes, secretos, `--build-arg`, `--authfile` ni `--env`.
-/// La forma exacta de la opción de red se verifica en la laptop (podman real).
+/// Argumentos de `podman build` (Tarea 9d3). Sin red, `--network none`. Con red, `pasta` (el default de
+/// Podman 5) con `--no-map-gw`: el contenedor no alcanza la dirección del host. Sin montajes, secretos,
+/// `--build-arg`, `--authfile` ni `--env`. Que el host no sea alcanzable se prueba en la laptop.
 fn args_build(red: bool, etiqueta: &str, dockerfile: &str, contexto: &str) -> Vec<String> {
-    let red = if red {
-        "slirp4netns:allow_host_loopback=false"
-    } else {
-        "none"
-    };
+    let red = if red { "pasta:--no-map-gw" } else { "none" };
     vec![
         "build".into(),
         "--network".into(),
@@ -185,8 +181,9 @@ fn anotar_desenlace(resultado: &mut ResultadoDockerfile, desenlace: Desenlace) {
     }
 }
 
-/// Registra el `Gate` de la repetición con red (Tarea 9d3): las `RUN` del Dockerfile y la que falló sin red.
-/// Va antes del build con red. Si no se puede registrar, no se construye con red.
+/// Registra el `Gate` de la repetición con red (Tarea 9d3): la primera `RUN` que falló sin red y todas las
+/// `RUN` del Dockerfile. No dice que todas necesitan red. Va antes del build con red. Si no se puede
+/// registrar, no se construye con red.
 fn registrar_repeticion(
     home: &Path,
     tarea: &Tarea,
@@ -204,10 +201,10 @@ fn registrar_repeticion(
     extra.insert("accion".into(), json!("repetir-con-red"));
     extra.insert("dockerfile".into(), json!(ruta));
     extra.insert(
-        "fallo_sin_red".into(),
+        "primera_run_sin_red".into(),
         json!({"linea": linea, "cita": cita}),
     );
-    extra.insert("run".into(), json!(run));
+    extra.insert("runs_del_dockerfile".into(), json!(run));
     let evento = observe::evento_gate(
         &format!("entrega-{}", tarea.nombre),
         FASE_CONSTRUCCION_RED,
@@ -1796,7 +1793,7 @@ mod tests {
 
     /// Verdadero si el `build` usa la red de usuario de podman (la de la 9d3).
     fn es_build_con_red(args: &[&str]) -> bool {
-        args.iter().any(|a| a.starts_with("slirp4netns"))
+        args.iter().any(|a| a.starts_with("pasta"))
     }
 
     /// Respuesta de mentira: el `build` sin red da `sin_red` y con red da `con_red`. El resto sale
@@ -1906,7 +1903,7 @@ mod tests {
         assert_eq!(builds.len(), 2, "{builds:?}");
         assert!(builds[0].contains(&"none".to_string()), "{:?}", builds[0]);
         assert!(
-            builds[1].contains(&"slirp4netns:allow_host_loopback=false".to_string()),
+            builds[1].contains(&"pasta:--no-map-gw".to_string()),
             "{:?}",
             builds[1]
         );
@@ -1945,7 +1942,7 @@ mod tests {
             [
                 "build",
                 "--network",
-                "slirp4netns:allow_host_loopback=false",
+                "pasta:--no-map-gw",
                 "--pull=never",
                 "-t",
                 "etiqueta",
@@ -2008,14 +2005,53 @@ mod tests {
         assert_eq!(g["corrida"], "entrega-x");
         assert_eq!(g["extra"]["accion"], "repetir-con-red");
         assert_eq!(g["extra"]["dockerfile"], "Dockerfile");
-        assert_eq!(g["extra"]["fallo_sin_red"]["linea"], 2);
+        assert_eq!(g["extra"]["primera_run_sin_red"]["linea"], 2);
         assert_eq!(
-            g["extra"]["fallo_sin_red"]["cita"],
+            g["extra"]["primera_run_sin_red"]["cita"],
             "RUN apt-get install -y curl"
         );
-        let run = g["extra"]["run"].as_array().expect("lista de RUN");
+        let run = g["extra"]["runs_del_dockerfile"]
+            .as_array()
+            .expect("lista de RUN");
         assert_eq!(run.len(), 1, "{run:?}");
         assert_eq!(run[0]["linea"], 2);
+    }
+
+    #[test]
+    fn entrega_red_gate_separa_la_run_que_fallo_de_todas_las_run() {
+        // La línea 2 no pide red; solo la 3 falla sin red. El Gate no dice que todas las RUN la necesitan.
+        const DF: &str = "FROM debian:12\nRUN echo listo\nRUN apt-get install -y curl\nUSER app\n";
+        let repo = repo_con_archivos(&[("Dockerfile", DF)]);
+        let home = tempfile::tempdir().expect("home");
+        let sin_red = SalidaPodman {
+            codigo: 1,
+            stdout: "STEP 1/3: FROM debian:12\nSTEP 2/3: RUN echo listo\nSTEP 3/3: RUN apt-get install -y curl\n"
+                .into(),
+            stderr: "Temporary failure in name resolution\n".into(),
+        };
+        let podman = PodmanFalso::nuevo(responde_build(sin_red, salida_ok()));
+        let c = construir_con(
+            repo.path(),
+            home.path(),
+            &tarea_de("shell", ""),
+            &[],
+            PLAZO_BUILD,
+            &podman,
+        )
+        .expect("construye");
+        assert!(c.resultado.con_red, "{:?}", c.resultado);
+        let gates = gates_de_repeticion(home.path());
+        let g = &gates[0]["extra"];
+        assert_eq!(g["primera_run_sin_red"]["linea"], 3, "{g}");
+        assert_eq!(
+            g["primera_run_sin_red"]["cita"],
+            "RUN apt-get install -y curl"
+        );
+        let runs = g["runs_del_dockerfile"].as_array().expect("lista de RUN");
+        let lineas: Vec<u64> = runs.iter().filter_map(|r| r["linea"].as_u64()).collect();
+        assert_eq!(lineas, vec![2, 3], "{runs:?}");
+        assert!(g.get("fallo_sin_red").is_none(), "{g}");
+        assert!(g.get("run").is_none(), "{g}");
     }
 
     #[test]

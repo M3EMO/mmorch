@@ -81,9 +81,9 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 
 **Colab (`oraculo pendientes --colab`).** Root pide un runtime T4 de Colab, corre el paquete, importa el junit y libera el runtime. Antes de pedirlo, Root escribe su id en `$ROOT_HOME/colab/activo.json`. Lo borra al liberar el runtime. Si el proceso muere con `SIGKILL`, el archivo queda. La próxima corrida de `--colab` libera ese runtime primero. `--liberar` hace solo esa limpieza. `SIGINT` y `SIGTERM` también liberan el runtime y registran un `Gate`. El login de Colab lo hace la persona antes de correr el comando. Root no lee el token de la CLI.
 
-**Corte temprano.** `correr.sh` corre en segundo plano en el runtime y Root lo sondea cada 60 segundos. Root libera el runtime en cuanto se cumple lo que pedía la corrida: el junit trae cada test pendiente, con tantos resultados como `repeticiones` de `tarea.toml`. Si `correr.sh` termina antes, Root libera el runtime con lo que haya. El `Gate` de liberación lleva la clave `causa`: `requisito cumplido`, `correr.sh terminó`, `tope de 2 horas` o `señal SIGINT`/`señal SIGTERM`. `--vigilar` es la red de seguridad: libera el runtime anotado si pasó su tope o si su junit cumple lo pedido, aunque la corrida ya no esté viva.
+**Corte temprano.** `correr.sh` corre en segundo plano en el runtime y Root lo sondea cada 60 segundos. Root libera el runtime en cuanto se cumple lo que pedía la corrida: el junit trae cada test pendiente, con tantos resultados como `repeticiones` de `tarea.toml`. Si `correr.sh` termina antes, Root libera el runtime con lo que haya. El `Gate` de liberación lleva la clave `causa`: `requisito cumplido`, `correr.sh terminó`, `tope de duración`, `señal SIGINT`/`señal SIGTERM`, `gpu-no-t4` (la GPU no es una T4), `runtime-no-asignado` (`colab new` no dio el runtime) o `error-en-corrida` (un paso falló a mitad de la corrida). `--vigilar` es la red de seguridad: libera el runtime anotado si pasó su tope o si su junit cumple lo pedido, aunque la corrida ya no esté viva.
 
-**Tope de duración.** Cada corrida de `--colab` tiene un tope, `[colab].minutos_max` en `root.toml`, con 120 minutos (2 horas) por defecto, con corte temprano. Al llegar al tope, Root libera el runtime, registra un `Gate` con la causa `tope de 2 horas` y sale con código `3`. Los tests sin resultado quedan `Pendiente`.
+**Tope de duración.** Cada corrida de `--colab` tiene un tope, `[colab].minutos_max` en `root.toml`, con 120 minutos (2 horas) por defecto, con corte temprano. Al llegar al tope, Root libera el runtime, registra un `Gate` con la causa `tope de duración` y sale con código `3`. El `motivo` del `Gate` lleva el tope real, por ejemplo `tope de 120 minutos`. Los tests sin resultado quedan `Pendiente`.
 
 ## MCP
 
@@ -853,6 +853,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "description": "Dirección del índice, con `https` y host.",
           "type": "string",
           "default": ""
+        },
+        "usuario_env": {
+          "description": "Variable de entorno de Root con el usuario para pip. Sin ella, el usuario es `__token__`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         }
       }
     },

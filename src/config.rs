@@ -60,6 +60,9 @@ pub struct RegistroConfig {
     pub url: String,
     /// Variable de entorno de Root que tiene la credencial. Su valor nunca se escribe en un archivo.
     pub credencial_env: String,
+    /// Variable de entorno de Root con el usuario para pip. Sin ella, el usuario es `__token__`.
+    #[serde(default)]
+    pub usuario_env: Option<String>,
 }
 
 /// Sección `[colab]`: tope de duración de una corrida en Colab.
@@ -480,6 +483,17 @@ fn validar_registros(registros: &[RegistroConfig]) -> Result<(), Error> {
             return Err(Error::ConfigValor(format!(
                 "registro \"{nombre}\": credencial_env debe ser un nombre de variable con A-Z, 0-9 o _"
             )));
+        }
+        if let Some(usuario) = registro.usuario_env.as_deref() {
+            let usuario_valida = !usuario.is_empty()
+                && usuario
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+            if !usuario_valida {
+                return Err(Error::ConfigValor(format!(
+                    "registro \"{nombre}\": usuario_env debe ser un nombre de variable con A-Z, 0-9 o _"
+                )));
+            }
         }
         if nombres.contains(&nombre) {
             return Err(Error::ConfigValor(format!(
@@ -1170,6 +1184,24 @@ tope_usd = 200.0
             let texto = registro_texto("priv", "https://reg.example/", env);
             let error = Config::desde_texto(&texto).expect_err(env);
             assert_eq!(error.codigo_de_salida(), 2, "{env}");
+        }
+    }
+
+    #[test]
+    fn registro_usuario_env_es_opcional_y_se_valida_como_variable() {
+        let base = registro_texto("priv", "https://reg.example/", "ROOT_TOKEN_PRIV");
+        let sin = Config::desde_texto(&base).expect("sin usuario_env parsea");
+        assert_eq!(sin.registros[0].usuario_env, None);
+        let con = Config::desde_texto(&format!("{base}usuario_env = \"ROOT_USUARIO_PRIV\"\n"))
+            .expect("con usuario_env parsea");
+        assert_eq!(
+            con.registros[0].usuario_env.as_deref(),
+            Some("ROOT_USUARIO_PRIV")
+        );
+        for malo in ["", "minuscula", "CON-GUION"] {
+            let texto = format!("{base}usuario_env = \"{malo}\"\n");
+            let error = Config::desde_texto(&texto).expect_err(malo);
+            assert_eq!(error.codigo_de_salida(), 2, "{malo}");
         }
     }
 

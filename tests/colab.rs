@@ -723,7 +723,7 @@ fn colab_stop_con_salida_desconocida_conserva_activo() {
 }
 
 #[test]
-fn colab_tope_minutos_001_deja_gate_tope_de_2_horas() {
+fn colab_tope_minutos_001_deja_gate_tope_de_duracion() {
     let e = Escenario::nuevo(ENTORNO_O2);
     fs::write(
         e.home.path().join("root.toml"),
@@ -759,7 +759,7 @@ fn colab_tope_minutos_001_deja_gate_tope_de_2_horas() {
     assert!(
         gates
             .iter()
-            .any(|g| g["extra"]["accion"] == "liberar" && g["extra"]["causa"] == "tope de 2 horas"),
+            .any(|g| g["extra"]["accion"] == "liberar" && g["extra"]["causa"] == "tope de duración"),
         "{gates:?}"
     );
     assert!(
@@ -774,7 +774,7 @@ fn colab_sigint_con_sesion_inexistente_confirma_y_borra_activo() {
     let falso = falso_a_medida_stop(
         e.falso.path(),
         CORRIENDO,
-        "echo 'session not found' >&2; exit 1",
+        "echo 'session does not exist' >&2; exit 1",
     );
     let (codigo, stderr) = colab_interrumpido(&e, &falso, "-INT");
     assert_eq!(codigo, Some(3), "stderr: {stderr}");
@@ -860,7 +860,7 @@ fn colab_vigilar_con_activo_vencido_libera_y_sale_0() {
     assert!(
         gates
             .iter()
-            .any(|g| g["extra"]["accion"] == "vigilar" && g["extra"]["causa"] == "tope de 2 horas"),
+            .any(|g| g["extra"]["accion"] == "vigilar" && g["extra"]["causa"] == "tope de duración"),
         "{gates:?}"
     );
 }

@@ -33,7 +33,8 @@ pub enum ResultadoTest {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Junit {
     pub archivos: BTreeMap<String, ConteoArchivo>,
-    /// Clave `"<archivo>::<nombre>"`, donde `<archivo>` es el último segmento de `classname`.
+    /// Clave `"<archivo>::<nombre>"`, donde `<archivo>` es el último segmento de `classname`. Si un id se
+    /// repite y una corrida falla, queda en `Falla`.
     pub tests: BTreeMap<String, ResultadoTest>,
     /// Cuántos testcases trae cada id, aunque se repitan. Misma clave que `tests`.
     pub testcases: BTreeMap<String, u32>,
@@ -147,7 +148,15 @@ fn cierra(caso: &mut Option<Caso>, junit: &mut Junit) {
     };
     let id = id_de(&c.archivo, &c.nombre);
     *junit.testcases.entry(id.clone()).or_default() += 1;
-    junit.tests.insert(id, resultado);
+    // Un id repetido con una falla queda en falla: el último pase no la tapa.
+    let en_tests = if resultado == ResultadoTest::Falla
+        || junit.tests.get(&id) == Some(&ResultadoTest::Falla)
+    {
+        ResultadoTest::Falla
+    } else {
+        resultado
+    };
+    junit.tests.insert(id, en_tests);
     let archivo = junit.archivos.entry(c.archivo).or_default();
     match resultado {
         ResultadoTest::Omite => archivo.omite += 1,
@@ -291,6 +300,17 @@ mod tests {
 </testsuite>"#;
         let j = parsear(xml).expect("parsea");
         assert_eq!(j.testcases["test_a::t1"], 3);
+    }
+
+    #[test]
+    fn junit_id_repetido_con_una_falla_queda_en_falla() {
+        // Con repeticiones, una falla en cualquier corrida no la tapa un pase posterior.
+        let xml = r#"<testsuite>
+  <testcase classname="tests.test_a" name="t1"><failure message="x"/></testcase>
+  <testcase classname="tests.test_a" name="t1"/>
+</testsuite>"#;
+        let j = parsear(xml).expect("parsea");
+        assert_eq!(j.tests["test_a::t1"], ResultadoTest::Falla);
     }
 
     #[test]

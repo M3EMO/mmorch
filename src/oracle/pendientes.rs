@@ -98,7 +98,11 @@ pub fn crear(home: &Path, tarea: &Tarea, repo: &Path) -> Result<Option<Paquete>,
         fs::copy(&conftest, tests_dir.join("conftest.py"))
             .map_err(|e| infra("copiar conftest", e))?;
     }
-    escribir(&dir.join("correr.sh"), &guion_correr(&nodos), true)?;
+    escribir(
+        &dir.join("correr.sh"),
+        &guion_correr(&nodos, tarea.repeticiones),
+        true,
+    )?;
     escribir(&dir.join("LEEME.txt"), &leeme(&tarea.nombre, &repo), false)?;
     Ok(Some(Paquete { dir, tests }))
 }
@@ -253,11 +257,22 @@ fn localizar(tarea: &Tarea, archivo: &str) -> Result<PathBuf, ErrorOraculo> {
     )))
 }
 
-/// Script que corre los nodos pendientes y deja `pendientes.xml` al lado.
-/// Si hay una carpeta `bin/` al lado (el binario de respaldo de Colab), la pone al frente del
-/// `PATH`. Cómo usan los tests ocultos ese binario en lugar de `cargo` es una pregunta abierta
-/// para el planner.
-fn guion_correr(nodos: &[String]) -> String {
+/// Script que junta los junit de cada repetición (`repeticion-N.xml`) en un solo `pendientes.xml`, con
+/// todos sus testcases. El lector de junit de Root cuenta los testcases repetidos por id.
+const GUION_JUNTAR: &str = r#"import glob
+import xml.etree.ElementTree as ET
+raiz = ET.Element("testsuites")
+suite = ET.SubElement(raiz, "testsuite", name="pendientes")
+for ruta in sorted(glob.glob("repeticion-*.xml")):
+    for caso in ET.parse(ruta).getroot().iter("testcase"):
+        suite.append(caso)
+ET.ElementTree(raiz).write("pendientes.xml", encoding="utf-8", xml_declaration=True)
+"#;
+
+/// Script que corre los nodos pendientes `repeticiones` veces y deja `pendientes.xml` al lado.
+/// Si hay una carpeta `bin/` al lado (el `cargo` mínimo del respaldo de Colab), la pone al frente del
+/// `PATH`.
+fn guion_correr(nodos: &[String], repeticiones: u32) -> String {
     let lista: Vec<String> = nodos.iter().map(|n| comillas(n)).collect();
     format!(
         "#!/usr/bin/env bash\n\
@@ -266,8 +281,16 @@ fn guion_correr(nodos: &[String]) -> String {
          if [ -d bin ]; then export PATH=\"$(pwd)/bin:$PATH\"; fi\n\
          export ORACULO_REPO=\"$(pwd)/repo\"\n\
          export CARGO_TARGET_DIR=\"$(pwd)/target\"\n\
-         python3 -m pytest -q -p no:cacheprovider --junitxml={XML_PENDIENTES} {}\n",
-        lista.join(" ")
+         estado=0\n\
+         for i in $(seq 1 {repeticiones}); do\n\
+         python3 -m pytest -q -p no:cacheprovider --junitxml=repeticion-$i.xml {nodos} || estado=$?\n\
+         done\n\
+         python3 -I - <<'PY'\n\
+         {juntar}\
+         PY\n\
+         exit $estado\n",
+        nodos = lista.join(" "),
+        juntar = GUION_JUNTAR,
     )
 }
 
@@ -311,6 +334,7 @@ fn etiqueta(resultado: ResultadoTest) -> &'static str {
 mod tests {
     use super::*;
     use crate::oracle::tarea::{Comando, Exclusion};
+    use std::process::Command;
 
     #[test]
     fn pendiente_etiqueta_de_resultado_en_minusculas() {
@@ -337,20 +361,57 @@ mod tests {
     #[test]
     fn pendiente_guion_correr_tiene_exports_pytest_y_los_nodos() {
         let nodos = vec!["tests/test_x.py::test_rendimiento[gpu-10000-res1]".to_string()];
-        let texto = guion_correr(&nodos);
+        let texto = guion_correr(&nodos, 1);
         assert!(texto.starts_with("#!/usr/bin/env bash\n"));
         assert!(texto.contains("set -euo pipefail"));
         assert!(texto.contains("export ORACULO_REPO=\"$(pwd)/repo\""));
         assert!(texto.contains("export CARGO_TARGET_DIR=\"$(pwd)/target\""));
         assert!(
-            texto.contains("python3 -m pytest -q -p no:cacheprovider --junitxml=pendientes.xml")
+            texto.contains(
+                "python3 -m pytest -q -p no:cacheprovider --junitxml=repeticion-$i.xml 'tests/test_x.py::test_rendimiento[gpu-10000-res1]'"
+            ),
+            "{texto}"
         );
-        assert!(texto.contains("'tests/test_x.py::test_rendimiento[gpu-10000-res1]'"));
+    }
+
+    #[test]
+    fn pendiente_guion_correr_repite_la_suite_y_junta_los_junit() {
+        let nodos = vec!["tests/test_x.py::test_a".to_string()];
+        let texto = guion_correr(&nodos, 3);
+        assert!(texto.contains("for i in $(seq 1 3); do"), "{texto}");
+        assert!(texto.contains("|| estado=$?"), "{texto}");
+        assert!(texto.contains("exit $estado"), "{texto}");
+        assert!(texto.contains("python3 -I - <<'PY'"), "{texto}");
+        assert!(texto.contains("pendientes.xml"), "{texto}");
+    }
+
+    #[test]
+    fn pendiente_junit_combinado_trae_los_testcases_de_cada_repeticion() {
+        let base = tempfile::tempdir().expect("base");
+        let caso = |nombre: &str| {
+            format!(
+                "<testsuites><testsuite name=\"pytest\"><testcase classname=\"tests.test_x\" name=\"{nombre}\"/></testsuite></testsuites>"
+            )
+        };
+        fs::write(base.path().join("repeticion-1.xml"), caso("test_a")).expect("rep 1");
+        fs::write(base.path().join("repeticion-2.xml"), caso("test_a")).expect("rep 2");
+        let juntar = base.path().join("juntar.py");
+        fs::write(&juntar, GUION_JUNTAR).expect("escribe el guion");
+        let estado = Command::new("python3")
+            .arg("-I")
+            .arg(&juntar)
+            .current_dir(base.path())
+            .status()
+            .expect("python3");
+        assert!(estado.success(), "{estado:?}");
+        let texto = fs::read_to_string(base.path().join("pendientes.xml")).expect("junit");
+        let leido = crate::oracle::junit::parsear(&texto).expect("parsea");
+        assert_eq!(leido.testcases["test_x::test_a"], 2, "{texto}");
     }
 
     #[test]
     fn pendiente_guion_correr_agrega_bin_al_path_si_existe() {
-        let texto = guion_correr(&[]);
+        let texto = guion_correr(&[], 1);
         assert!(
             texto.contains("if [ -d bin ]; then export PATH=\"$(pwd)/bin:$PATH\"; fi"),
             "{texto}"

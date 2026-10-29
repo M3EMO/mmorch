@@ -1596,6 +1596,47 @@ mod tests {
     }
 
     #[test]
+    fn forma_actual_es_la_ultima_fila_valida_de_la_tarea_por_ts() {
+        // A es la actual de memora (ts altos). Una fila de otra tarea con ts más alto no cuenta, ni una
+        // fila inválida de memora.
+        let mut filas = formas_a_y_b(5, 5);
+        let mut otra = fila_de_forma(&forma_b(), "otra-1", 999.0, 1.0, true);
+        otra.tarea = "otra".into();
+        filas.push(otra);
+        let mut invalida = fila_de_forma(&forma_b(), "b-invalida", 500.0, 1.0, true);
+        invalida.resumen.invalida = true;
+        filas.push(invalida);
+        let pol = recalcular(&filas, &[], &umbral_bajo());
+        let p = pol
+            .propuestas_forma
+            .iter()
+            .find(|p| p.tarea == "memora")
+            .expect("propuesta de memora");
+        assert_eq!(p.actual.forma, forma_a());
+        assert_eq!(p.propuesta.forma, forma_b());
+    }
+
+    #[test]
+    fn forma_actual_con_ts_empatado_gana_el_id_mayor() {
+        // La última fila de B (`b4`) tiene el mismo ts que la última de A (`a4`): gana el id mayor, B.
+        // A cuesta menos, así que B (la actual) tiene una propuesta hacia A.
+        let mut filas = formas_a_y_b(5, 5);
+        for f in filas.iter_mut() {
+            f.resumen.usd_cupo = if f.forma == forma_a() { 1.0 } else { 2.0 };
+        }
+        let b4 = filas.iter_mut().find(|f| f.id == "b4").expect("la fila b4");
+        b4.ts = 10.0;
+        let pol = recalcular(&filas, &[], &umbral_bajo());
+        let p = pol
+            .propuestas_forma
+            .iter()
+            .find(|p| p.tarea == "memora")
+            .expect("propuesta de memora");
+        assert_eq!(p.actual.forma, forma_b());
+        assert_eq!(p.propuesta.forma, forma_a());
+    }
+
+    #[test]
     fn forma_con_dos_filas_por_forma_no_da_propuesta() {
         let pol = recalcular(&formas_a_y_b(2, 2), &[], &umbral_bajo());
         assert!(pol.propuestas_forma.is_empty());

@@ -841,6 +841,97 @@ mod tests {
         assert_eq!(serde_json::from_str::<Politica>(&texto).expect("lee"), pol);
     }
 
+    /// Estadísticas y propuestas de modelo y de forma: Route no las lee, y la elección no debe cambiar.
+    #[test]
+    fn route_propuestas_no_cambian_la_eleccion_en_ningun_rol() {
+        use crate::route::politica::{
+            Diferencia, Evidencia, EvidenciaForma, EvidenciaModelo, Propuesta, PropuestaForma,
+        };
+        let cfg = Config::default();
+        let u = uso(10.0, bloque_vigente(), 0.0);
+        let mut con = Politica::default();
+        for rol in [
+            Rol::Planifica,
+            Rol::Organiza,
+            Rol::Construye,
+            Rol::Verifica,
+            Rol::Juzga,
+            Rol::Delega,
+        ] {
+            con.estadisticas.insert(
+                Politica::clave(rol, "bulk"),
+                vec![
+                    candidato("haiku", Via::Api, 0.9, 0.001),
+                    candidato("sonnet", Via::Api, 0.5, 0.01),
+                ],
+            );
+        }
+        let modelo = |m: &str, exito: f64| EvidenciaModelo {
+            modelo: m.into(),
+            n: 50,
+            exitos: 40,
+            wilson_inf: exito,
+            usd_medio: 0.01,
+            filas: Vec::new(),
+        };
+        con.propuestas.push(Propuesta {
+            rol: Rol::Organiza,
+            tarea: "memora".into(),
+            modelo_actual: "sonnet".into(),
+            modelo_propuesto: "haiku".into(),
+            evidencia: Evidencia {
+                actual: modelo("sonnet", 0.5),
+                propuesto: modelo("haiku", 0.9),
+            },
+            diferencia_esperada: Diferencia {
+                exito: 0.4,
+                usd: 0.009,
+            },
+        });
+        let forma = |roles: Vec<Rol>| EvidenciaForma {
+            forma: crate::tipos::Forma {
+                roles,
+                verificador: false,
+                config: "ecc".into(),
+            },
+            n: 50,
+            exitos: 40,
+            wilson_inf: 0.7,
+            usd_medio: 0.01,
+            filas: Vec::new(),
+        };
+        con.propuestas_forma.push(PropuestaForma {
+            tarea: "memora".into(),
+            actual: forma(vec![Rol::Planifica, Rol::Organiza, Rol::Construye]),
+            propuesta: forma(vec![Rol::Planifica]),
+            diferencia_esperada: Diferencia {
+                exito: 0.0,
+                usd: 0.005,
+            },
+        });
+        let mut sin = con.clone();
+        sin.propuestas.clear();
+        sin.propuestas_forma.clear();
+        for rol in [
+            Rol::Planifica,
+            Rol::Organiza,
+            Rol::Construye,
+            Rol::Verifica,
+            Rol::Juzga,
+            Rol::Delega,
+        ] {
+            let p = pedido(rol, false);
+            let con_eleccion = elegir_en(&p, &con, &u, &cfg)
+                .ok()
+                .map(|e| (e.via, e.modelo));
+            let sin_eleccion = elegir_en(&p, &sin, &u, &cfg)
+                .ok()
+                .map(|e| (e.via, e.modelo));
+            assert!(con_eleccion.is_some(), "{rol:?} sin elección");
+            assert_eq!(con_eleccion, sin_eleccion, "{rol:?}");
+        }
+    }
+
     #[test]
     fn route_via_nube_serializa_nube() {
         assert_eq!(serde_json::to_value(Via::Nube).expect("serializa"), "nube");

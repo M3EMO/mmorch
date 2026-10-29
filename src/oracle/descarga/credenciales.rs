@@ -119,8 +119,22 @@ pub fn credenciales_cargo(
     salida
 }
 
-/// Archivo `netrc` de una credencial, para pip. Sin conectar todavía a la descarga de Python: falta
-/// decidir de dónde sale el usuario (`root.toml` no lo tiene).
+/// Usuario del `netrc` de pip de un registro: el valor de `usuario_env`, o `__token__` si el registro no la
+/// nombra o la variable no tiene valor. `__token__` es la convención de los índices compatibles con PyPI.
+pub fn usuario_de_pip(
+    registro: &RegistroConfig,
+    leer_env: impl Fn(&str) -> Option<String>,
+) -> String {
+    registro
+        .usuario_env
+        .as_deref()
+        .and_then(leer_env)
+        .filter(|valor| !valor.is_empty())
+        .unwrap_or_else(|| "__token__".to_string())
+}
+
+/// Archivo `netrc` de una credencial, para pip. Sin conectar todavía: la descarga de Python no arma
+/// credenciales de pip (`credenciales_cargo` es solo de Cargo). Queda lista para cuando lo haga.
 pub fn netrc_para(host: &str, usuario: &str, clave: &str) -> String {
     format!("machine {host} login {usuario} password {clave}\n")
 }
@@ -153,6 +167,7 @@ mod tests {
             nombre: nombre.into(),
             url: url.into(),
             credencial_env: env.into(),
+            usuario_env: None,
         }
     }
 
@@ -277,6 +292,29 @@ mod tests {
             netrc_para("reg.example", "usuario", "clave-1"),
             "machine reg.example login usuario password clave-1\n"
         );
+    }
+
+    #[test]
+    fn credenciales_netrc_sin_usuario_env_usa_token() {
+        let sin_usuario = registro("priv", "https://reg.example/", "ROOT_TOKEN_PRIV");
+        let usuario = usuario_de_pip(&sin_usuario, |_| Some("ignorada".into()));
+        assert_eq!(usuario, "__token__");
+        assert_eq!(
+            netrc_para("reg.example", &usuario, "clave-1"),
+            "machine reg.example login __token__ password clave-1\n"
+        );
+    }
+
+    #[test]
+    fn credenciales_netrc_con_usuario_env_usa_el_valor_de_esa_variable() {
+        let mut con_usuario = registro("priv", "https://reg.example/", "ROOT_TOKEN_PRIV");
+        con_usuario.usuario_env = Some("ROOT_USUARIO_PRIV".into());
+        let usuario = usuario_de_pip(&con_usuario, |v| {
+            (v == "ROOT_USUARIO_PRIV").then(|| "alice".to_string())
+        });
+        assert_eq!(usuario, "alice");
+        // Si la variable no tiene valor, el usuario vuelve a `__token__`.
+        assert_eq!(usuario_de_pip(&con_usuario, |_| None), "__token__");
     }
 
     #[test]

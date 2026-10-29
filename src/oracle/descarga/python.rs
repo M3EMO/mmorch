@@ -2,10 +2,9 @@
 //! Nunca corre `pip install`, `pip wheel` ni `setup.py`. Un sdist se baja y se guarda sin extraerlo.
 //! Dentro de cada contenedor, `/cache` es la carpeta `<hash>.parcial` del requirements.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -38,6 +37,52 @@ const ARCHIVO_BUILD: &str = "build-requires.txt";
 /// Requisitos de build sin `pyproject.toml`: el respaldo de PEP 517.
 const REQUISITOS_BUILD_RESPALDO: [&str; 2] = ["setuptools", "wheel"];
 const ARCHIVO_PYPROJECT: &str = "pyproject.toml";
+/// Requisitos de build de cada sdist de la caché: nombre del archivo → `[build-system].requires` o `null`.
+/// Lo escribe el contenedor de descarga; el host no abre ningún sdist.
+pub const ARCHIVO_REQUISITOS_SDIST: &str = "requisitos-sdist.json";
+/// Script del contenedor de descarga: lee `[build-system].requires` de cada sdist de `/cache` con
+/// `tarfile` o `zipfile`, sin extraer nada, y deja el JSON en `/cache`. Sin `tomllib` (Python < 3.11) sale
+/// con código 3: el host falla cerrado.
+const GUION_REQUISITOS_SDIST: &str = r#"import glob, json, os, sys, tarfile, zipfile
+try:
+    import tomllib
+except ImportError:
+    sys.exit(3)
+
+def primer_nivel(nombre):
+    partes = nombre.split("/")
+    return len(partes) == 2 and partes[1] == "pyproject.toml" and partes[0] not in ("", ".", "..") and not partes[0].startswith("-")
+
+def pyproject_de(ruta):
+    if ruta.endswith(".zip"):
+        with zipfile.ZipFile(ruta) as z:
+            nombres = [n for n in z.namelist() if primer_nivel(n)]
+            return z.read(nombres[0]) if nombres else None
+    with tarfile.open(ruta, "r:*") as t:
+        for m in t.getmembers():
+            if m.isfile() and primer_nivel(m.name):
+                f = t.extractfile(m)
+                return f.read() if f else None
+    return None
+
+def requires(ruta):
+    try:
+        texto = pyproject_de(ruta)
+        if texto is None:
+            return None
+        lista = tomllib.loads(texto.decode("utf-8")).get("build-system", {}).get("requires")
+        if not isinstance(lista, list) or not all(isinstance(s, str) for s in lista):
+            return None
+        return lista
+    except Exception:
+        return None
+
+resultado = {}
+for ruta in sorted(glob.glob("/cache/*.tar.gz") + glob.glob("/cache/*.zip")):
+    resultado[os.path.basename(ruta)] = requires(ruta)
+with open("/cache/requisitos-sdist.json", "w", encoding="utf-8") as f:
+    json.dump(resultado, f)
+"#;
 
 /// Sdist elegido desde PyPI: su URL, su nombre de archivo y su sha256 esperado.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -329,7 +374,7 @@ pub(super) fn preparar_python(
     let req = requisitos_pip(&texto);
     let hallazgos = hallazgos_sin_commit(&req, &texto);
     let destino = home.join(CARPETA_CACHE).join(CARPETA_PYTHON).join(&hash);
-    if destino.join(ARCHIVO_OFFLINE).is_file() {
+    if destino.join(ARCHIVO_OFFLINE).is_file() && requisitos_sdist_listos(&destino)? {
         let registro = Registro {
             lenguaje: "python".into(),
             hash: Some(hash),
@@ -485,6 +530,23 @@ fn descargar_en(
         }
     }
     // Build de los sdists y clones git: sus requisitos se bajan como wheels, sin ejecutar nada del proyecto.
+    // Los `pyproject` de los sdists los lee el contenedor; el host solo lee el JSON que deja en la caché.
+    if !nombres_sdist(parcial)?.is_empty() {
+        let salida = correr(
+            home,
+            tarea,
+            repo,
+            parcial,
+            comando_requisitos_sdist(),
+            timeout,
+        )?;
+        if salida.codigo != 0 {
+            let motivo: String = salida.stderr.trim().chars().take(300).collect();
+            return Err(ErrorOraculo::Infra(format!(
+                "infraestructura: requisitos de build de los sdists: {motivo}"
+            )));
+        }
+    }
     let (requisitos, hallazgos) = indice_de_build_de(parcial)?.unwrap_or_default();
     if !requisitos.is_empty() {
         let conocidos: BTreeSet<String> = paquetes
@@ -690,14 +752,15 @@ pub fn requisito_de_build_aceptable(spec: &str) -> bool {
 /// Requisitos de build que se bajan como wheels, y los hallazgos de los que no se pueden bajar.
 type IndiceBuild = (Vec<String>, Vec<Hallazgo>);
 
-/// Índice de build de varios `pyproject`: une sus requisitos sin repetir y en orden, y separa los que no
-/// se bajan como wheel. Cada uno de estos da un hallazgo de entrega de severidad 1.
-pub fn indice_de_build(pyprojects: &[Option<String>]) -> IndiceBuild {
+/// Índice de build de varias fuentes, cada una con su lista de requisitos: une sus requisitos sin repetir y
+/// en orden, y separa los que no se bajan como wheel. Cada uno de estos da un hallazgo de entrega de
+/// severidad 1.
+pub fn indice_de_build(listas: &[Vec<String>]) -> IndiceBuild {
     let mut unicos: Vec<String> = Vec::new();
-    for pyproject in pyprojects {
-        for spec in requisitos_de_build(pyproject.as_deref()) {
-            if !unicos.contains(&spec) {
-                unicos.push(spec);
+    for lista in listas {
+        for spec in lista {
+            if !unicos.contains(spec) {
+                unicos.push(spec.clone());
             }
         }
     }
@@ -722,53 +785,62 @@ pub fn indice_de_build(pyprojects: &[Option<String>]) -> IndiceBuild {
     (aceptables, hallazgos)
 }
 
-/// `true` si la entrada de un tar es `<carpeta>/pyproject.toml`: exactamente una `/`.
-fn es_pyproject_de_primer_nivel(entrada: &str) -> bool {
-    let partes: Vec<&str> = entrada.split('/').collect();
-    matches!(
-        partes.as_slice(),
-        [carpeta, "pyproject.toml"]
-            if !carpeta.is_empty() && !carpeta.starts_with('-') && *carpeta != "." && *carpeta != ".."
-    )
+/// Comando del contenedor de descarga que lee los requisitos de build de los sdists de `/cache`.
+/// El script corre con `python3 -I`: no toma módulos del directorio de trabajo.
+pub fn comando_requisitos_sdist() -> String {
+    format!("python3 -I -c {}", comilla(GUION_REQUISITOS_SDIST))
 }
 
-/// `pyproject.toml` de primer nivel de un sdist `.tar.gz`, leído a memoria con `tar`. No extrae nada al
-/// disco ni ejecuta código del paquete. `None` si no es `.tar.gz`, si `tar` no lo lista o si no tiene esa entrada.
-pub fn pyproject_de_sdist(archivo: &Path) -> Option<String> {
-    if !archivo.file_name()?.to_str()?.ends_with(".tar.gz") {
-        return None;
-    }
-    let listado = Command::new("tar").arg("-tzf").arg(archivo).output().ok()?;
-    if !listado.status.success() {
-        return None;
-    }
-    let entrada = String::from_utf8_lossy(&listado.stdout)
-        .lines()
-        .find(|l| es_pyproject_de_primer_nivel(l))?
-        .to_string();
-    let contenido = Command::new("tar")
-        .arg("-xzOf")
-        .arg(archivo)
-        .arg(&entrada)
-        .output()
-        .ok()?;
-    if !contenido.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&contenido.stdout).into_owned())
-}
-
-/// Índice de build de las fuentes que necesitan build en `carpeta`: los sdists (`.tar.gz` y `.zip`) y los
-/// clones de `src/<dir>`. `None` si no hay ninguno, porque los wheels no necesitan build.
-fn indice_de_build_de(carpeta: &Path) -> Result<Option<IndiceBuild>, ErrorOraculo> {
+/// Nombres de los sdists (`.tar.gz` y `.zip`) de la caché `carpeta`, ordenados.
+fn nombres_sdist(carpeta: &Path) -> Result<Vec<String>, ErrorOraculo> {
     let mut sdists = Vec::new();
     for entrada in fs::read_dir(carpeta).map_err(|e| infra("leer la caché de Python", e))? {
         let entrada = entrada.map_err(|e| infra("leer la caché de Python", e))?;
         let nombre = entrada.file_name().to_string_lossy().into_owned();
         if nombre.ends_with(".tar.gz") || nombre.ends_with(".zip") {
-            sdists.push(entrada.path());
+            sdists.push(nombre);
         }
     }
+    sdists.sort();
+    Ok(sdists)
+}
+
+/// `true` si una caché con sdists trae `requisitos-sdist.json`. Una caché anterior, sin ese archivo, no
+/// sirve de acierto: se descarga de nuevo.
+fn requisitos_sdist_listos(carpeta: &Path) -> Result<bool, ErrorOraculo> {
+    Ok(nombres_sdist(carpeta)?.is_empty() || carpeta.join(ARCHIVO_REQUISITOS_SDIST).is_file())
+}
+
+/// Requisitos de build de cada sdist, en el orden de `nombres`, según el JSON del contenedor. Un sdist sin
+/// lista (`null`) usa el respaldo de PEP 517. Sin JSON, es infraestructura.
+fn requisitos_de_sdists(
+    carpeta: &Path,
+    nombres: &[String],
+) -> Result<Vec<Vec<String>>, ErrorOraculo> {
+    let ruta = carpeta.join(ARCHIVO_REQUISITOS_SDIST);
+    let texto = fs::read_to_string(&ruta)
+        .map_err(|e| infra("leer los requisitos de build de los sdists", e))?;
+    let mapa: BTreeMap<String, Option<Vec<String>>> =
+        serde_json::from_str(&texto).map_err(|e| {
+            ErrorOraculo::Infra(format!("requisitos de build de los sdists ilegibles: {e}"))
+        })?;
+    Ok(nombres
+        .iter()
+        .map(|nombre| match mapa.get(nombre) {
+            Some(Some(lista)) => lista
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            _ => respaldo_de_build(),
+        })
+        .collect())
+}
+
+/// Índice de build de las fuentes que necesitan build en `carpeta`: los sdists (con los requisitos que dejó
+/// el contenedor) y los clones de `src/<dir>`. `None` si no hay ninguno, porque los wheels no necesitan build.
+fn indice_de_build_de(carpeta: &Path) -> Result<Option<IndiceBuild>, ErrorOraculo> {
+    let sdists = nombres_sdist(carpeta)?;
     let mut clones = Vec::new();
     let src = carpeta.join("src");
     if src.is_dir() {
@@ -782,16 +854,20 @@ fn indice_de_build_de(carpeta: &Path) -> Result<Option<IndiceBuild>, ErrorOracul
     if sdists.is_empty() && clones.is_empty() {
         return Ok(None);
     }
-    sdists.sort();
     clones.sort();
-    let mut pyprojects: Vec<Option<String>> =
-        sdists.iter().map(|s| pyproject_de_sdist(s)).collect();
-    pyprojects.extend(
-        clones
-            .iter()
-            .map(|c| fs::read_to_string(c.join(ARCHIVO_PYPROJECT)).ok()),
-    );
-    Ok(Some(indice_de_build(&pyprojects)))
+    let mut listas = if sdists.is_empty() {
+        Vec::new()
+    } else {
+        requisitos_de_sdists(carpeta, &sdists)?
+    };
+    listas.extend(clones.iter().map(|c| {
+        requisitos_de_build(
+            fs::read_to_string(c.join(ARCHIVO_PYPROJECT))
+                .ok()
+                .as_deref(),
+        )
+    }));
+    Ok(Some(indice_de_build(&listas)))
 }
 
 #[cfg(test)]
@@ -851,80 +927,83 @@ mod tests {
     }
 
     #[test]
-    fn descarga_pyproject_de_sdist_lee_el_de_primer_nivel() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let raiz = dir.path().join("pkg-1.0");
-        fs::create_dir_all(raiz.join("sub")).expect("carpetas");
-        fs::write(
-            raiz.join("pyproject.toml"),
-            "[build-system]\nrequires = [\"setuptools>=68\"]\n",
-        )
-        .expect("pyproject");
-        fs::write(
-            raiz.join("sub").join("pyproject.toml"),
-            "[build-system]\nrequires = [\"hatchling\"]\n",
-        )
-        .expect("pyproject anidado");
-        let tgz = dir.path().join("pkg-1.0.tar.gz");
-        let estado = Command::new("tar")
-            .arg("-czf")
-            .arg(&tgz)
-            .arg("-C")
-            .arg(dir.path())
-            .arg("pkg-1.0")
-            .status()
-            .expect("tar");
-        assert!(estado.success());
-        let texto = pyproject_de_sdist(&tgz).expect("el pyproject de primer nivel");
-        assert_eq!(requisitos_de_build(Some(&texto)), ["setuptools>=68"]);
+    fn descarga_requisitos_sdist_se_leen_en_el_contenedor_con_tarfile_y_zipfile() {
+        let cmd = comando_requisitos_sdist();
+        assert!(cmd.starts_with("python3 -I -c "), "{cmd}");
+        for esperado in [
+            "tarfile",
+            "zipfile",
+            "tomllib",
+            "/cache/requisitos-sdist.json",
+        ] {
+            assert!(cmd.contains(esperado), "falta {esperado}: {cmd}");
+        }
+        // Nada del sdist se abre con `tar` en el host: el comando solo corre dentro del contenedor.
+        assert!(!cmd.contains("tar -"), "{cmd}");
     }
 
     #[test]
-    fn descarga_pyproject_de_sdist_sin_pyproject_o_no_tar_es_none() {
+    fn descarga_requisitos_de_sdists_leen_el_json_del_contenedor() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let raiz = dir.path().join("pkg-2.0");
-        fs::create_dir_all(&raiz).expect("carpeta");
-        fs::write(raiz.join("setup.py"), "x = 1\n").expect("setup.py");
-        let sin_pyproject = dir.path().join("pkg-2.0.tar.gz");
-        let estado = Command::new("tar")
-            .arg("-czf")
-            .arg(&sin_pyproject)
-            .arg("-C")
-            .arg(dir.path())
-            .arg("pkg-2.0")
-            .status()
-            .expect("tar");
-        assert!(estado.success());
-        assert_eq!(pyproject_de_sdist(&sin_pyproject), None);
+        fs::write(
+            dir.path().join(ARCHIVO_REQUISITOS_SDIST),
+            r#"{"a-1.0.tar.gz": ["hatchling", " wheel "], "b-1.0.zip": null}"#,
+        )
+        .expect("json");
+        let nombres = ["a-1.0.tar.gz".to_string(), "b-1.0.zip".to_string()];
+        let listas = requisitos_de_sdists(dir.path(), &nombres).expect("lee el json");
+        // El host recorta y descarta vacíos; un sdist sin lista usa el respaldo de PEP 517.
+        assert_eq!(
+            listas,
+            vec![
+                vec!["hatchling".to_string(), "wheel".to_string()],
+                respaldo()
+            ]
+        );
+    }
 
-        let no_tar = dir.path().join("falso-1.0.tar.gz");
-        fs::write(&no_tar, "esto no es un tar\n").expect("archivo");
-        assert_eq!(pyproject_de_sdist(&no_tar), None);
+    #[test]
+    fn descarga_requisitos_de_sdists_sin_json_es_infraestructura() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let r = requisitos_de_sdists(dir.path(), &["a-1.0.tar.gz".to_string()]);
+        assert!(matches!(r, Err(ErrorOraculo::Infra(_))), "{r:?}");
+    }
 
-        let zip = dir.path().join("pkg-3.0.zip");
-        fs::write(&zip, "PK\u{3}\u{4}").expect("zip");
-        assert_eq!(pyproject_de_sdist(&zip), None);
+    #[test]
+    fn descarga_cache_con_sdist_sin_requisitos_no_es_acierto() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert!(
+            requisitos_sdist_listos(dir.path()).expect("lee"),
+            "sin sdists"
+        );
+        fs::write(dir.path().join("a-1.0.tar.gz"), "x").expect("sdist");
+        assert!(
+            !requisitos_sdist_listos(dir.path()).expect("lee"),
+            "un sdist sin json viene de una caché anterior"
+        );
+        fs::write(dir.path().join(ARCHIVO_REQUISITOS_SDIST), "{}").expect("json");
+        assert!(requisitos_sdist_listos(dir.path()).expect("lee"));
     }
 
     #[test]
     fn descarga_indice_de_build_une_sin_repetidos_exactos() {
-        let pyprojects = vec![
-            Some("[build-system]\nrequires = [\"setuptools>=68\", \"wheel\"]".to_string()),
-            Some("[build-system]\nrequires = [\"wheel\"]".to_string()),
-            None,
+        let listas = vec![
+            vec!["setuptools>=68".to_string(), "wheel".to_string()],
+            vec!["wheel".to_string()],
+            respaldo(),
         ];
-        let (requisitos, hallazgos) = indice_de_build(&pyprojects);
+        let (requisitos, hallazgos) = indice_de_build(&listas);
         assert_eq!(requisitos, ["setuptools>=68", "wheel", "setuptools"]);
         assert!(hallazgos.is_empty());
     }
 
     #[test]
     fn descarga_indice_de_build_referencia_directa_da_hallazgo_y_no_se_baja() {
-        let pyprojects = vec![Some(
-            "[build-system]\nrequires = [\"foo @ https://usuario:clave@x/y.tar.gz\", \"wheel\"]"
-                .to_string(),
-        )];
-        let (requisitos, hallazgos) = indice_de_build(&pyprojects);
+        let listas = vec![vec![
+            "foo @ https://usuario:clave@x/y.tar.gz".to_string(),
+            "wheel".to_string(),
+        ]];
+        let (requisitos, hallazgos) = indice_de_build(&listas);
         assert_eq!(requisitos, ["wheel"]);
         assert_eq!(hallazgos.len(), 1, "{hallazgos:?}");
         let h = &hallazgos[0];
