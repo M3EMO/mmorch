@@ -1,0 +1,67 @@
+# Borrador G2 (Opus, 2026-10-28). El usuario lo aprueba antes de moverlo a rubricas/.
+# Estructura: ¿un lector encuentra y entiende el código? El estilo no cuenta.
+id = "estructura"
+version = 1
+
+[[item]]
+id = "estructura.tamano"
+fuente = "ISO/IEC 25010:2023 §mantenibilidad/analizabilidad y modularidad"
+mide = "sonda"
+peso = 2
+bloquea = false
+# Concentración F1 (P33, elegida 2026-10-28): F1 = (VC − 1) / (N − 1), con VC = líneas del archivo mayor / promedio de líneas
+# y N = cantidad de archivos de `src/`. Líneas sin comentarios, líneas vacías ni código de test (`#[cfg(test)]`, `tests.rs`).
+# Sin tope de líneas por archivo: F1 mide el reparto, no el tamaño. Script y medición: docs/borradores/concentracion/.
+# P33e (b): el ítem calcula dos niveles y toma el peor.
+#   - Nivel de archivos: F1 sobre los archivos de `src/`. Con N ≤ 2 archivos, no se calcula (P33b b).
+#   - Nivel de funciones: F1 sobre las funciones del archivo mayor, con N = cantidad de funciones.
+#   Con N ≤ 2 funciones, el nivel de funciones no se calcula. Sin ningún nivel calculado, el ítem queda sin nivel.
+# G2b (a): cortes 0,2 / 0,5 / 0,7, PROVISORIOS hasta la Tarea 12. Salen de las muestras ciegas 1 y 2
+# (docs/borradores/concentracion/acuerdo.md): con ellos, los 15 casos etiquetados caen donde dicen las etiquetas.
+# Se eligieron sobre esos mismos casos, así que la Tarea 12 los valida con casos nuevos. No bloquean G2.
+anclas = [
+  "0: F1 ≥ 0,7 en archivos o en funciones: un archivo o una función concentra el código; se cita cuál y su fracción de líneas",
+  "1: el peor F1 está entre 0,5 y 0,7: un archivo o una función domina el reparto; se cita cuál y su fracción de líneas",
+  "2: el peor F1 está entre 0,2 y 0,5: un archivo o una función sobresale con acoples puntuales; se cita cuál",
+  "3: los dos F1 calculados son menores que 0,2: sin un archivo ni una función dominante; se citan los dos N",
+]
+
+[[item]]
+id = "estructura.duplicacion"
+fuente = "ISO/IEC 25010:2023 §mantenibilidad/modificabilidad y reusabilidad"
+mide = "sonda"
+peso = 1
+bloquea = false
+anclas = [
+  "0: un bloque de 50 líneas o más aparece copiado 3 veces o más; se citan las copias",
+  "1: un bloque de 50 líneas o más aparece copiado 2 veces",
+  "2: solo hay bloques duplicados de entre 20 y 49 líneas; se citan",
+  "3: ningún bloque de 20 líneas o más aparece duplicado",
+]
+
+[[item]]
+id = "estructura.clippy"
+fuente = "ISO/IEC 25010:2023 §mantenibilidad/analizabilidad; Clippy, grupos correctness, suspicious y perf"
+mide = "sonda"
+peso = 2
+bloquea = false
+# Solo cuentan los grupos correctness, suspicious y perf (Tarea 9). Un aviso sin impacto en un requisito no baja el nivel.
+anclas = [
+  "0: hay un aviso de `clippy::correctness` en código que implementa un requisito; se cita archivo:línea",
+  "1: hay avisos de `clippy::suspicious` en código que implementa un requisito de peso 3",
+  "2: solo quedan avisos de `clippy::perf`, o avisos en requisitos de peso 1",
+  "3: 0 avisos de correctness, suspicious y perf con impacto en un requisito",
+]
+
+[[item]]
+id = "estructura.legibilidad"
+fuente = "ISO/IEC 25010:2023 §mantenibilidad/analizabilidad; Rust API Guidelines C-CASE (nombres)"
+mide = "juez"
+peso = 2
+bloquea = false
+anclas = [
+  "0: para un requisito de peso 3 no se puede ubicar el código que lo implementa desde los nombres de módulos y funciones; se cita el mapa y el requisito",
+  "1: el código de cada requisito se ubica, pero los nombres engañan: una función hace otra cosa que la que dice; se cita archivo:línea",
+  "2: los nombres dicen lo que hacen; un requisito queda repartido en 3 o más módulos sin una entrada clara; se cita",
+  "3: cada requisito se ubica desde el mapa en un módulo con nombre propio, y los nombres dicen lo que hacen",
+]

@@ -1,0 +1,89 @@
+# Borrador G2 (Opus, 2026-10-28). El usuario lo aprueba antes de moverlo a rubricas/.
+# Diseño: ¿las decisiones de diseño son un riesgo para producción? Cita `[diseno]` y `[[diseno.regla]]` de la ficha.
+id = "diseno"
+version = 1
+
+[[item]]
+id = "diseno.modularidad"
+fuente = "ISO/IEC 25010:2023 §mantenibilidad/modularidad"
+mide = "mixto"
+peso = 3
+bloquea = false
+# Tope de la sonda: con un ciclo de módulos (REGLA_CICLO), el nivel no supera 1 (Tarea 10b).
+anclas = [
+  "0: un módulo concentra 3 requisitos o más sin límites internos; se cita el módulo y los requisitos",
+  "1: hay módulos, pero con dependencias cruzadas o ciclos; se cita el `use`",
+  "2: cada requisito vive en un módulo con una interfaz clara; quedan acoples puntuales que se citan",
+  "3: módulos con una responsabilidad, sin ciclos, con interfaces chicas y probadas",
+]
+
+[[item]]
+id = "diseno.robustez"
+fuente = "ISO/IEC 25010:2023 §fiabilidad/tolerancia a fallos; CWE-248 (excepción no capturada)"
+mide = "juez"
+peso = 3
+bloquea = false
+# Ancla las reglas de la ficha con item = "diseno.robustez". La sonda seguridad.panico_en_entrada cuenta; el juez mira el diseño.
+anclas = [
+  "0: una entrada externa inválida puede tumbar el proceso entero o envenenar un estado compartido; se cita archivo:línea",
+  "1: una regla de la ficha que apunta a este ítem no se cumple en un lugar; se cita la regla y archivo:línea",
+  "2: las reglas de la ficha se cumplen; un camino de error poco probable termina el proceso sin aviso; se cita",
+  "3: toda entrada externa inválida da un error que la ficha prevé, y el proceso sigue",
+]
+
+[[item]]
+id = "diseno.errores"
+fuente = "ISO/IEC 25010:2023 §mantenibilidad/analizabilidad; Rust API Guidelines C-GOOD-ERR y C-FAILURE"
+mide = "juez"
+peso = 2
+bloquea = false
+# Pregunta del PM: ¿qué error se traga? `let _ =` o `.ok()` sobre un `Result` de E/S es la evidencia típica.
+anclas = [
+  "0: un error de E/S o de persistencia se descarta sin aviso (`let _ =`, `.ok()`, `unwrap_or_default`); se cita archivo:línea",
+  "1: los errores se propagan, pero llegan al usuario sin contexto: no dicen qué archivo, campo o comando falló; se cita",
+  "2: los errores llevan contexto; un tipo de error público no implementa `std::error::Error` o un panic posible no está documentado; se cita",
+  "3: ningún error se traga, cada uno lleva contexto y la API documenta sus errores y pánicos",
+]
+
+[[item]]
+id = "diseno.estado"
+fuente = "ISO/IEC 25010:2023 §mantenibilidad/modificabilidad; §fiabilidad/disponibilidad"
+mide = "juez"
+peso = 2
+bloquea = false
+# Pregunta del PM: ¿hay un estado global o un bloqueo que sea un riesgo para producción?
+anclas = [
+  "0: un lock se sostiene durante E/S o un `await`, y puede frenar a todos los clientes; se cita archivo:línea",
+  "1: hay estado global mutable (`static mut`, `lazy_static` con `Mutex`) que dos requisitos comparten; se cita",
+  "2: el estado compartido está encapsulado; un lock cubre más datos de los necesarios y se cita",
+  "3: el estado compartido está encapsulado, con locks de alcance mínimo y sin E/S bajo lock",
+]
+
+[[item]]
+id = "diseno.operabilidad"
+fuente = "ISO/IEC 25010:2023 §interacción/operabilidad; OWASP ASVS 5.0 V16.2.5 (nivel 2, datos sensibles en los logs)"
+mide = "juez"
+peso = 2
+bloquea = false
+# G2c (a): cita ASVS 16.2.5 (nivel 2) porque ningún requisito de nivel 1 de V16 cubre los datos sensibles en los logs.
+# Pregunta del PM: ¿qué falta para operar el producto? Compara con `[diseno].logs` y `[diseno].configuracion` de la ficha.
+anclas = [
+  "0: el producto no escribe logs donde la ficha dice, o ignora la configuración que la ficha fija; se cita main.rs o el módulo de arranque",
+  "1: hay logs, pero un fallo de arranque o de persistencia no deja ningún log; se cita el camino",
+  "2: logs y configuración siguen la ficha; un dato sensible aparece en un log, o falta el apagado ordenado; se cita",
+  "3: logs, configuración y apagado siguen la ficha, sin datos sensibles en los logs",
+]
+
+[[item]]
+id = "diseno.documentacion"
+fuente = "Rust API Guidelines C-CRATE-DOC, C-EXAMPLE y C-FAILURE; ISO/IEC 25010:2023 §mantenibilidad/analizabilidad"
+mide = "juez"
+peso = 1
+bloquea = false
+# Ancla las reglas de la ficha con item = "diseno.documentacion". Un binario sin biblioteca mide los comentarios de módulo.
+anclas = [
+  "0: la API pública que la ficha nombra no tiene rustdoc; se cita el primer ítem sin doc",
+  "1: la mitad o más de la API pública tiene rustdoc, pero falta la doc del crate o del módulo; se cita",
+  "2: toda la API pública tiene rustdoc; faltan ejemplos o la sección de errores; se cita",
+  "3: crate, módulos e ítems públicos con rustdoc, con un ejemplo y con sus errores",
+]

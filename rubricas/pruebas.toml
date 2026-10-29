@@ -1,0 +1,48 @@
+# Borrador G2 (Opus, 2026-10-28). El usuario lo aprueba antes de moverlo a rubricas/.
+# Pruebas: calidad de los tests del propio proyecto, no de los tests de Root.
+id = "pruebas"
+version = 1
+
+[[item]]
+id = "pruebas.mutacion"
+fuente = "ISO/IEC 25010:2023 §mantenibilidad/testeabilidad; puntaje de mutación con cargo-mutants"
+mide = "sonda"
+peso = 3
+bloquea = false
+# P47 (a): el usuario aprobó las bandas 25/50/75 %.
+# Muestra acotada por `[pruebas].mutantes_max` y `minutos_max`. El informe dice el tamaño de la muestra.
+anclas = [
+  "0: el proyecto no tiene tests propios, o muere menos del 25 % de los mutantes; se cita la cuenta",
+  "1: muere entre el 25 % y el 49 % de los mutantes; se citan 3 mutantes vivos",
+  "2: muere entre el 50 % y el 74 %; se citan los mutantes vivos en requisitos de peso 3",
+  "3: muere el 75 % o más de los mutantes",
+]
+
+[[item]]
+id = "pruebas.verdes"
+fuente = "ISO/IEC 25010:2023 §mantenibilidad/testeabilidad"
+mide = "sonda"
+peso = 2
+bloquea = false
+# Sonda: `cargo test` del proyecto en el contenedor, con las repeticiones de la tarea.
+anclas = [
+  "0: `cargo test` no compila; se cita el error",
+  "1: compila, y falla algún test en todas las repeticiones; se cita el test",
+  "2: pasa, pero algún test es inestable en las repeticiones; se cita su tasa",
+  "3: `cargo test` pasa en todas las repeticiones",
+]
+
+[[item]]
+id = "pruebas.alcance"
+fuente = "ISO/IEC 25010:2023 §mantenibilidad/testeabilidad; trazabilidad requisito→prueba según ISO/IEC/IEEE 29148:2018 §5.2"
+# Cita sin verificar: la cláusula de ISO/IEC/IEEE 29148 no se comparó con el texto, que es pago.
+mide = "sonda"
+peso = 2
+bloquea = false
+# Un módulo cuenta como probado si un test propio lo llama, según el mapa del repo (oracle/mapa.rs).
+anclas = [
+  "0: ningún módulo que implementa un requisito de peso 3 tiene tests propios; se citan los módulos",
+  "1: menos de la mitad de los módulos que implementan requisitos tienen tests propios",
+  "2: la mitad o más tienen tests propios; falta alguno de peso 3, que se cita",
+  "3: cada módulo que implementa un requisito tiene tests propios",
+]

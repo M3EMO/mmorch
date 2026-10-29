@@ -1,0 +1,61 @@
+# Borrador G2 (Opus, 2026-10-28). El usuario lo aprueba antes de moverlo a rubricas/.
+# Arquitectura: ¿la forma del sistema sirve a la ficha y aguanta cambios? Cita `[arquitectura]` de la ficha.
+id = "arquitectura"
+version = 1
+
+[[item]]
+id = "arquitectura.dependencias"
+fuente = "ISO/IEC 25010:2023 §mantenibilidad/modularidad"
+mide = "sonda"
+peso = 3
+bloquea = false
+# Sonda: grafo de módulos desde `mod`/`use` contra las reglas de `[arquitectura].capas`. P23 (b): memora y brasa traen capas.
+# P32 (b): un ciclo de módulos no cuenta aquí; solo topa `diseno.modularidad`. Con `capas = []`, el ítem queda sin nivel.
+anclas = [
+  "0: un módulo de un requisito de peso 3 importa una capa anterior; se cita el `use`",
+  "1: un módulo de otro requisito importa una capa anterior; se cita el `use`",
+  "2: ninguna capa importa una capa anterior; un módulo importa 4 módulos o más de otra capa; se cita",
+  "3: cada capa importa solo capas posteriores, con 3 módulos o menos de cada una",
+]
+
+[[item]]
+id = "arquitectura.adecuacion"
+fuente = "ISO/IEC 25010:2023 §mantenibilidad/modificabilidad; §fiabilidad/ausencia de fallos"
+mide = "juez"
+peso = 3
+bloquea = false
+# El juez compara el código con `[arquitectura].persistencia` y `[arquitectura].concurrencia` de la ficha.
+anclas = [
+  "0: el diseño contradice la persistencia o la concurrencia de la ficha: por ejemplo, un lock global que rompe la atomicidad prometida; se cita archivo:línea y el dato de la ficha",
+  "1: el diseño cumple la ficha, pero de una forma que impide un requisito de peso 3 o un límite de `[[tecnica.limite]]`; se cita",
+  "2: el diseño cumple la ficha; un riesgo de producción queda sin resolver (bloqueo posible, carrera) y se cita",
+  "3: persistencia y concurrencia siguen la ficha, sin riesgo citado",
+]
+
+[[item]]
+id = "arquitectura.extensibilidad"
+fuente = "ISO/IEC 25010:2023 §mantenibilidad/modificabilidad"
+mide = "juez"
+peso = 2
+bloquea = false
+# Pregunta del PM: ¿qué requisito queda difícil de extender con esta estructura?
+anclas = [
+  "0: agregar un caso del mismo tipo que uno existente (un comando, un tipo de luz) obliga a tocar 4 módulos o más; se citan",
+  "1: obliga a tocar 2 o 3 módulos, con un `match` central largo que crece; se cita",
+  "2: se agrega en 1 módulo más un registro de una línea; se cita el punto de extensión",
+  "3: se agrega en 1 módulo sin tocar otros; se cita el punto de extensión",
+]
+
+[[item]]
+id = "arquitectura.interfaces"
+fuente = "ISO/IEC 25010:2023 §mantenibilidad/modularidad y reusabilidad; Rust API Guidelines C-STRUCT-PRIVATE y C-COMMON-TRAITS"
+mide = "juez"
+peso = 2
+bloquea = false
+# Si la ficha trae `[[arquitectura.interfaz]]`, el juez la compara con la API pública real.
+anclas = [
+  "0: falta una función de `[[arquitectura.interfaz]]` de la ficha, o su firma difiere; se cita la ficha y el archivo",
+  "1: la interfaz existe, pero expone el estado interno (campos públicos que rompen un invariante); se cita",
+  "2: la interfaz es la de la ficha; expone más de lo que la ficha pide, sin daño; se cita",
+  "3: la interfaz es la de la ficha, sin estado interno expuesto",
+]

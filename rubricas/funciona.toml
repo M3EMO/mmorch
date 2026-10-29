@@ -1,0 +1,60 @@
+# Borrador G2 (Opus, 2026-10-28). El usuario lo aprueba antes de moverlo a rubricas/.
+# Funciona: ¿lo que existe da resultados correctos en uso real? Completitud pregunta si existe; Funciona, si anda.
+id = "funciona"
+version = 1
+
+[[item]]
+id = "funciona.correccion"
+fuente = "ISO/IEC 25010:2023 §idoneidad funcional/corrección funcional"
+mide = "sonda"
+peso = 3
+bloquea = false
+# Cuenta todos los tests ocultos y de contrato que no están `Pendiente`, ponderados por el peso de su requisito.
+anclas = [
+  "0: pasa menos del 50 % del peso de los tests; se cita el junit",
+  "1: pasa entre el 50 % y el 79 % del peso de los tests",
+  "2: pasa entre el 80 % y el 99 % del peso de los tests; se citan los ids rojos",
+  "3: pasa el 100 % del peso de los tests",
+]
+
+[[item]]
+id = "funciona.escenarios"
+fuente = "ISO/IEC 25010:2023 §idoneidad funcional/pertinencia funcional; escenarios de uso según ISO/IEC/IEEE 29148:2018 §6.4"
+# Cita sin verificar: la cláusula de ISO/IEC/IEEE 29148 no se comparó con el texto, que es pago.
+mide = "sonda"
+peso = 3
+bloquea = false
+anclas = [
+  "0: ningún `[[escenario]]` sale con código 0 en el contenedor limpio, o el producto no arranca para correrlos; se cita la salida",
+  "1: sale con código 0 menos de la mitad de los escenarios",
+  "2: sale con código 0 la mitad o más, pero no todos; se citan los ids rojos",
+  "3: todos los escenarios salen con código 0",
+]
+
+[[item]]
+id = "funciona.estabilidad"
+fuente = "ISO/IEC 25010:2023 §idoneidad funcional/corrección funcional (resultados repetibles)"
+mide = "sonda"
+peso = 2
+bloquea = false
+# Un test inestable cuenta aquí aunque su origen quede "sin determinar"; el informe muestra el origen.
+anclas = [
+  "0: un test de un requisito de peso 3 tiene tasa de éxito menor que 0,5 en las repeticiones; se cita su tasa",
+  "1: hay tests inestables en requisitos de peso 3; se citan sus tasas",
+  "2: hay tests inestables solo en requisitos de peso 1 o 2",
+  "3: ningún test es inestable en las repeticiones",
+]
+
+[[item]]
+id = "funciona.entrada_invalida"
+fuente = "ISO/IEC 25010:2023 §fiabilidad/tolerancia a fallos; CWE-20 (validación de entrada)"
+mide = "sonda"
+peso = 2
+bloquea = false
+# La evidencia son los tests de `bordes` que mandan entrada inválida y comprueban que el proceso sigue vivo.
+anclas = [
+  "0: una entrada inválida tumba el proceso o deja de atender a otros clientes; se cita el test y la salida",
+  "1: el proceso sigue vivo, pero la respuesta no es la que fija la ficha en `[diseno].errores`",
+  "2: la respuesta es la de la ficha, salvo en un caso que se cita",
+  "3: toda entrada inválida de los tests de bordes da la respuesta de la ficha y el proceso sigue atendiendo",
+]

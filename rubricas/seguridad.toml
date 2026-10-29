@@ -1,0 +1,62 @@
+# Borrador G2 (Opus, 2026-10-28). El usuario lo aprueba antes de moverlo a rubricas/.
+# Seguridad: solo sondas. Citas de ASVS 5.0 verificadas el 2026-10-28 contra github.com/OWASP/ASVS/tree/master/5.0/en.
+# G2c (a): un ítem cita ASVS nivel 2 solo cuando ningún requisito de nivel 1 cubre el ítem.
+# Hoy pasa en `secretos` (13.3.1) y en la parte de disponibilidad de `panico_en_entrada` (15.2.2).
+id = "seguridad"
+version = 1
+
+[[item]]
+id = "seguridad.secretos"
+fuente = "OWASP ASVS 5.0 V13.3.1 (nivel 2, Secret Management: secretos fuera del código y de los artefactos); CWE-798 (credenciales en el código)"
+mide = "sonda"
+peso = 3
+bloquea = true
+# Sondas: gitleaks, y las claves con forma de secreto en TOML, YAML, ENV y ARG (Tarea 9b, desempate 5 de DT5).
+anclas = [
+  "0: hay un secreto con valor literal en el código, en un archivo de configuración o en el historial de git; se cita archivo:línea",
+  "1: no hay secretos vivos, pero un secreto de ejemplo con forma real queda en un archivo versionado sin marca de ejemplo; se cita archivo:línea",
+  "2: no hay secretos; un valor de relleno no sigue la forma `${VAR}` o `<...>`; se cita archivo:línea",
+  "3: gitleaks y la sonda de configs dan 0 hallazgos",
+]
+
+[[item]]
+id = "seguridad.dependencias"
+fuente = "OWASP ASVS 5.0 V15.2.1 (nivel 1, componentes dentro de su plazo de remediación); CWE-1395 (dependencia con vulnerabilidad conocida)"
+mide = "sonda"
+peso = 3
+bloquea = false
+# Sonda: `cargo audit --no-fetch` con la base de RustSec de la fase de descarga. Sin la base, el ítem queda sin nivel.
+anclas = [
+  "0: una dependencia tiene un aviso de RustSec de severidad alta o crítica; se cita el id del aviso y el paquete",
+  "1: una dependencia tiene un aviso de severidad media o baja",
+  "2: no hay avisos de vulnerabilidad; hay un aviso de paquete sin mantenimiento o retirado (`unmaintained`, `yanked`)",
+  "3: `cargo audit` da 0 avisos",
+]
+
+[[item]]
+id = "seguridad.panico_en_entrada"
+fuente = "OWASP ASVS 5.0 V2.2.1 (nivel 1, validación de entrada) y V15.2.2 (nivel 2, disponibilidad ante funciones costosas); CWE-20 y CWE-400"
+mide = "sonda"
+peso = 2
+bloquea = false
+# Sonda: `unwrap()`, `expect()`, `panic!` e índices sin chequeo en código que no es de test, ponderados por el requisito que tocan.
+# Un hallazgo en código que lee entrada externa (socket, archivo, JSON) pesa severidad 3; en el resto, 1.
+anclas = [
+  "0: hay 3 o más pánicos posibles en código que lee entrada externa; se cita cada archivo:línea",
+  "1: hay 1 o 2 pánicos posibles en código que lee entrada externa",
+  "2: no hay pánicos en código que lee entrada externa; quedan en código interno con un invariante sin comentar",
+  "3: ningún pánico posible en código que lee entrada externa; los del código interno documentan su invariante",
+]
+
+[[item]]
+id = "seguridad.unsafe"
+fuente = "CWE-787 (escritura fuera de límites) y CWE-416 (uso después de liberar); Rust API Guidelines C-FAILURE (la doc incluye las consideraciones de seguridad)"
+mide = "sonda"
+peso = 1
+bloquea = false
+anclas = [
+  "0: hay un bloque `unsafe` en código que lee entrada externa, sin comentario `// SAFETY:`; se cita archivo:línea",
+  "1: hay bloques `unsafe` sin comentario `// SAFETY:` en código interno",
+  "2: todos los bloques `unsafe` tienen comentario `// SAFETY:`",
+  "3: el código no tiene `unsafe`, o cada `unsafe` tiene `// SAFETY:` y un test que lo ejercita",
+]

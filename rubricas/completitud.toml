@@ -1,0 +1,49 @@
+# Borrador G2 (Opus, 2026-10-28). El usuario lo aprueba antes de moverlo a rubricas/.
+# Completitud: ¿existe lo que la ficha promete? El nivel sale solo de pruebas, sin LLM (Tarea 9c).
+# Un test `Pendiente` por entorno no entra al cálculo. Un requisito con una ambigüedad abierta queda sin nivel.
+# P31 (a): los tres ítems quedan; la Tarea 13 ajusta la 9c para emitir `criticos` y `contrato`.
+id = "completitud"
+version = 1
+
+[[item]]
+id = "completitud.alcance"
+fuente = "ISO/IEC 25010:2023 §idoneidad funcional/completitud funcional; trazabilidad requisito→prueba según ISO/IEC/IEEE 29148:2018 §5.2"
+# Cita sin verificar: la cláusula de ISO/IEC/IEEE 29148 no se comparó con el texto, que es pago.
+mide = "sonda"
+peso = 3
+bloquea = false
+# Se aplica a cada [[requisito]]. El valor del ítem es Σ peso_req·nivel / (3·Σ peso_req).
+anclas = [
+  "0: ningún test de `pruebas` del requisito pasa; la evidencia es el junit con cada id en rojo",
+  "1: pasa una parte de los tests de `pruebas`; el informe cita los ids verdes y los rojos",
+  "2: pasan todos los tests de `pruebas`, pero falla algún borde o escenario, o algún test es inestable; el informe cita cuál",
+  "3: pasan `pruebas`, `bordes` y `escenarios` en todas las repeticiones; el informe cita los ids",
+]
+
+[[item]]
+id = "completitud.criticos"
+fuente = "ISO/IEC 25010:2023 §idoneidad funcional/completitud funcional; prioridad de requisitos según ISO/IEC/IEEE 29148:2018 §5.2.7"
+# Cita sin verificar: la cláusula de ISO/IEC/IEEE 29148 no se comparó con el texto, que es pago.
+mide = "sonda"
+peso = 2
+bloquea = false
+anclas = [
+  "0: algún requisito de peso 3 queda en nivel 0 de `completitud.alcance`; se cita su id",
+  "1: todos los requisitos de peso 3 superan el nivel 0, pero alguno queda en nivel 1; se cita su id",
+  "2: todos los requisitos de peso 3 llegan al nivel 2 o más, y alguno no llega al 3",
+  "3: todos los requisitos de peso 3 están en nivel 3",
+]
+
+[[item]]
+id = "completitud.contrato"
+fuente = "ISO/IEC 25010:2023 §idoneidad funcional/completitud funcional"
+mide = "sonda"
+peso = 1
+bloquea = false
+# El contrato es la vara pública que el builder vio. Un rojo aquí es un faltante que el builder pudo detectar solo.
+anclas = [
+  "0: pasa menos del 50 % de los tests de contrato; se cita el junit",
+  "1: pasa entre el 50 % y el 89 % de los tests de contrato",
+  "2: pasa el 90 % o más, pero no todos; se citan los ids rojos",
+  "3: pasan todos los tests de contrato en todas las repeticiones",
+]

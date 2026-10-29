@@ -1,0 +1,47 @@
+# Borrador G2 (Opus, 2026-10-28). El usuario lo aprueba antes de moverlo a rubricas/.
+# Eficiencia: contra los `[[tecnica.limite]]` de la ficha. Sin límite en la ficha, el ítem queda sin nivel.
+id = "eficiencia"
+version = 1
+
+[[item]]
+id = "eficiencia.tiempo"
+fuente = "ISO/IEC 25010:2023 §eficiencia de desempeño/comportamiento temporal"
+mide = "sonda"
+peso = 3
+bloquea = false
+# r = medido / minimo para un límite con `minimo`; r = maximo / medido para uno con `maximo`. Se toma la mediana de las repeticiones.
+anclas = [
+  "0: r < 0,5 en el límite de tiempo o de rendimiento de la ficha, o el comando de medición no termina; se cita la medición",
+  "1: 0,5 ≤ r < 0,75; se cita la medición y el límite",
+  "2: 0,75 ≤ r < 1; se cita la medición y el límite",
+  "3: r ≥ 1: cumple el límite de la ficha",
+]
+
+[[item]]
+id = "eficiencia.capacidad"
+fuente = "ISO/IEC 25010:2023 §eficiencia de desempeño/capacidad"
+mide = "sonda"
+peso = 2
+bloquea = false
+# Límites de capacidad de la ficha: clientes simultáneos, tamaño máximo de un valor, cantidad de nodos.
+anclas = [
+  "0: el producto falla o se cuelga por debajo de la mitad de un límite de capacidad; se cita el límite y la salida",
+  "1: atiende la mitad del límite, pero no el límite completo",
+  "2: atiende el límite completo con errores en menos del 1 % de los pedidos; se cita la cuenta",
+  "3: atiende cada límite de capacidad de la ficha sin errores",
+]
+
+[[item]]
+id = "eficiencia.escalado"
+fuente = "ISO/IEC 25010:2023 §eficiencia de desempeño/utilización de recursos"
+mide = "sonda"
+peso = 2
+bloquea = false
+# P47 (a): el usuario aprobó los factores 12, 20 y 50.
+# El comando de medición corre con n y con 10·n datos. k = tiempo(10·n) / tiempo(n). Detecta un O(n²) en el camino caliente.
+anclas = [
+  "0: k > 50: el costo crece como n² o peor; se citan las dos mediciones",
+  "1: 20 < k ≤ 50",
+  "2: 12 < k ≤ 20",
+  "3: k ≤ 12: el costo crece como n o n·log n",
+]

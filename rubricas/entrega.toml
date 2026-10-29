@@ -1,0 +1,75 @@
+# Borrador G2 (Opus, 2026-10-28). El usuario lo aprueba antes de moverlo a rubricas/.
+# Entrega: ¿está listo para instalarse y correr en producción? Un ítem que la ficha no exige queda sin nivel; no vale 0 ni 3.
+id = "entrega"
+version = 1
+
+[[item]]
+id = "entrega.instalacion"
+fuente = "ISO/IEC 25010:2023 §flexibilidad/instalabilidad"
+mide = "sonda"
+peso = 3
+bloquea = false
+# Sonda: la Tarea 9d corre `[entrega].instalar` y `[entrega].correr` en un contenedor limpio, sin red.
+anclas = [
+  "0: `[entrega].instalar` sale con un código distinto de 0; se cita la cola de la salida",
+  "1: instala, pero `[entrega].correr` no arranca o sale antes de atender; se cita la salida",
+  "2: instala y arranca, pero imprime avisos de compilación o de arranque que la ficha no prevé; se citan",
+  "3: instala y arranca limpio, con la salida que fija la ficha",
+]
+
+[[item]]
+id = "entrega.contenedor"
+fuente = "CIS Docker Benchmark §4.1 (usuario no root), §4.6 (HEALTHCHECK) y §4.10 (sin secretos en el Dockerfile), numeración de docker-bench-security; OpenSSF Scorecard, chequeo Pinned-Dependencies"
+# Cita verificada contra docker-bench-security (github.com/docker/docker-bench-security); el PDF del CIS pide registro y no se consultó.
+mide = "sonda"
+peso = 2
+bloquea = false
+# Solo si la ficha o `[entrega].archivos` exige un Dockerfile. La sonda dueña de `USER` es la 9d (desempate 4 de DT4).
+anclas = [
+  "0: la ficha exige un Dockerfile y falta, o la imagen no construye por una causa del producto; se cita la línea",
+  "1: la imagen construye, pero corre como root (sin `USER`) o no arranca; se cita la línea",
+  "2: corre sin root; la imagen base no fija versión, falta `HEALTHCHECK` o la imagen supera el tamaño que fija la ficha; se cita",
+  "3: construye sin red, corre sin root, la base fija versión y el contenedor atiende",
+]
+
+[[item]]
+id = "entrega.reproducible"
+fuente = "OpenSSF Scorecard, chequeo Pinned-Dependencies"
+mide = "sonda"
+peso = 2
+bloquea = false
+# Sonda: el inventario de la fase de descarga (Tarea 6c). P22 (b): `dependencias_permitidas` solo recomienda; salir de la lista no baja el nivel.
+# P41 (a): una dependencia git o URL, aunque esté fijada, deja el ítem en nivel 2.
+anclas = [
+  "0: falta `Cargo.lock` en un binario, o una dependencia no se puede bajar; se cita el hallazgo de la descarga",
+  "1: hay una dependencia git sin commit fijo; se cita el commit que bajó Root",
+  "2: todo está fijado; una dependencia sale de git o de una URL, fuera de crates.io; se cita la fuente",
+  "3: `Cargo.lock` versionado, todo fijado y todo desde crates.io",
+]
+
+[[item]]
+id = "entrega.documentacion"
+fuente = "ISO/IEC 25010:2023 §interacción/reconocibilidad de la idoneidad y aprendizaje (documentación de uso)"
+mide = "sonda"
+peso = 1
+bloquea = false
+# Sonda: los archivos de `[entrega].archivos` y las secciones que el requisito de entregable de la ficha nombra.
+anclas = [
+  "0: falta el README o falta un archivo de `[entrega].archivos`; se cita la ruta esperada",
+  "1: están los archivos, pero el README no cubre la mitad de los temas que exige la ficha",
+  "2: el README cubre la mitad o más de los temas exigidos, pero no todos; se cita el tema faltante",
+  "3: están todos los archivos y el README cubre cada tema exigido",
+]
+
+[[item]]
+id = "entrega.ci"
+fuente = "OpenSSF Scorecard, chequeos Dangerous-Workflow y Token-Permissions; CI según el requisito de entregable de la ficha"
+mide = "sonda"
+peso = 1
+bloquea = false
+anclas = [
+  "0: falta `.github/workflows/ci.yml`, o el workflow usa `pull_request_target` con checkout del código del PR; se cita la línea",
+  "1: el workflow existe, pero no corre uno de los pasos que exige la ficha (build, tests, clippy); se cita el paso faltante",
+  "2: corre todos los pasos; no declara `permissions:` o da escritura que no usa",
+  "3: corre todos los pasos y declara `permissions:` de solo lectura",
+]
