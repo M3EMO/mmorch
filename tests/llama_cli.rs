@@ -5,7 +5,8 @@ mod common;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common::Servidor;
 use root::observe;
@@ -230,26 +231,70 @@ fn llama_cli_prompt_inexistente_sale_con_2() {
 }
 
 #[test]
-fn llama_cli_evento_no_escribible_entrega_respuesta_y_sale_con_3() {
+fn llama_cli_reserva_no_escribible_no_envia_nada() {
     let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
     let home = tempfile::tempdir().expect("home");
     preparar(home.path(), &srv.url, PRECIO_BARATO);
-    // El candado de `eventos.jsonl` es un directorio: se puede leer el log, pero no escribir.
-    fs::create_dir(home.path().join("eventos.jsonl.lock")).expect("candado bloqueado");
+    // `eventos.jsonl` es un enlace a una carpeta que no existe: el log se lee como vacío, pero
+    // no se puede escribir. La reserva no se escribe y la llamada no sale.
+    std::os::unix::fs::symlink(
+        home.path()
+            .join("carpeta-inexistente")
+            .join("eventos.jsonl"),
+        home.path().join("eventos.jsonl"),
+    )
+    .expect("enlace");
 
     let salida = llama(home.path(), &["--max-tokens", "1000"]);
 
     assert_eq!(codigo(&salida), 3);
-    assert_eq!(srv.peticiones(), 1);
-    let respuesta: Value = serde_json::from_slice(&salida.stdout).expect("stdout es JSON");
-    assert_eq!(respuesta["texto"], "hola");
+    assert_eq!(srv.peticiones(), 0, "sin reserva escrita no se envía");
     let stderr = String::from_utf8_lossy(&salida.stderr);
-    let linea_evento = stderr
-        .lines()
-        .find(|l| l.starts_with('{'))
-        .expect("una línea JSON del evento en stderr");
-    let evento: Value = serde_json::from_str(linea_evento).expect("evento JSON");
-    assert_eq!(evento["corrida"], "c1");
+    assert!(stderr.contains("gasto de API"), "stderr: {stderr}");
+}
+
+/// Respuesta de DeepSeek con 1000 tokens de salida: a 600 USD por millón, cuesta 0,6 USD.
+const DEEPSEEK_1000: &str = r#"{"choices":[{"message":{"content":"hola"}}],"usage":{"prompt_tokens":10,"completion_tokens":1000}}"#;
+/// Precio de `deepseek-reasoner` con 1000 tokens de salida a 0,6 USD (peor caso de cada pedido).
+const PRECIO_SEISCIENTOS: &str =
+    "[precios.deepseek-reasoner]\nusd_entrada = 0.0\nusd_salida = 600.0\n";
+
+#[test]
+fn llama_cli_cuatro_procesos_no_pasan_el_tope_de_api() {
+    // Cada pedido tarda 300 ms: los cuatro procesos llegan mientras el primero sigue en vuelo.
+    let srv = Servidor::arranca_lento(vec![(200, DEEPSEEK_1000); 4], Duration::from_millis(300));
+    let home = tempfile::tempdir().expect("home");
+    preparar(home.path(), &srv.url, PRECIO_SEISCIENTOS);
+    // Tope de 100 USD con 99 gastados: margen de 1 USD, para uno de los cuatro pedidos.
+    gasto_api(home.path(), 99.0);
+
+    let hilos: Vec<_> = (0..4)
+        .map(|_| {
+            let home = home.path().to_path_buf();
+            thread::spawn(move || llama(&home, &["--max-tokens", "1000"]))
+        })
+        .collect();
+    let salidas: Vec<Output> = hilos.into_iter().map(|h| h.join().expect("hilo")).collect();
+
+    let enviados = salidas.iter().filter(|s| codigo(s) == 0).count();
+    assert_eq!(enviados, 1, "solo entra un pedido en el margen");
+    assert!(
+        srv.peticiones() <= 1,
+        "pedidos recibidos: {}",
+        srv.peticiones()
+    );
+    let gasto = observe::uso::uso_en(
+        &home.path().join("eventos.jsonl"),
+        ahora(),
+        observe::uso::offset_local(),
+        5,
+    )
+    .expect("lee el gasto")
+    .api_mes_usd;
+    assert!(
+        gasto <= 100.0 + 1e-9,
+        "el gasto de API pasó el tope: {gasto}"
+    );
 }
 
 #[test]

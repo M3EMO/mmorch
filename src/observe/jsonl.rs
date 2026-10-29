@@ -13,17 +13,94 @@ use fs4::FileExt;
 /// Umbral por defecto de rotación: 50 MB.
 pub const UMBRAL_POR_DEFECTO: u64 = 50 * 1024 * 1024;
 
-/// Agrega `linea` y un `\n` al archivo, con lock exclusivo.
-/// Si el archivo supera `umbral` bytes, lo renombra a `<nombre>.<n>` antes de escribir.
-pub fn agregar(ruta: &Path, linea: &str, umbral: u64) -> io::Result<()> {
+/// Acceso de lectura a un log, con el lock compartido tomado. Lo entrega `con_lock_compartido`.
+pub struct Lectura<'a> {
+    ruta: &'a Path,
+}
+
+/// Acceso de escritura a un log, con el lock exclusivo tomado. Lo entrega `con_lock_exclusivo`.
+pub struct Escritura<'a> {
+    ruta: &'a Path,
+}
+
+/// Corre `f` con el lock compartido de `ruta` tomado una sola vez. `f` lista y lee todos los
+/// archivos del log (rotados y vigente) sin volver a tomar el lock. Sin carpeta no hay log que
+/// bloquear: `f` corre igual, con un log vacío.
+pub fn con_lock_compartido<T, E: From<io::Error>>(
+    ruta: &Path,
+    f: impl FnOnce(&Lectura<'_>) -> Result<T, E>,
+) -> Result<T, E> {
+    let candado = match abrir_candado(ruta) {
+        Ok(candado) => Some(candado),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+    if let Some(candado) = &candado {
+        FileExt::lock_shared(candado)?;
+    }
+    f(&Lectura { ruta })
+}
+
+/// Corre `f` con el lock exclusivo de `ruta` tomado una sola vez. Dentro, `f` puede leer y agregar
+/// sin volver a tomar el lock: un segundo `flock` del mismo proceso se bloquearía a sí mismo.
+pub fn con_lock_exclusivo<T, E: From<io::Error>>(
+    ruta: &Path,
+    f: impl FnOnce(&Escritura<'_>) -> Result<T, E>,
+) -> Result<T, E> {
     if let Some(padre) = ruta.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(padre)?;
     }
     let candado = abrir_candado(ruta)?;
     FileExt::lock(&candado)?;
-    rotar_si_supera(ruta, umbral)?;
-    let mut archivo = OpenOptions::new().create(true).append(true).open(ruta)?;
-    archivo.write_all(format!("{linea}\n").as_bytes())
+    f(&Escritura { ruta })
+}
+
+impl Lectura<'_> {
+    /// Líneas no vacías de todos los archivos del log, en orden de escritura.
+    pub fn lineas(&self) -> io::Result<Vec<String>> {
+        lineas_de_todos(self.ruta)
+    }
+}
+
+impl Escritura<'_> {
+    /// Líneas no vacías de todos los archivos del log, en orden de escritura.
+    pub fn lineas(&self) -> io::Result<Vec<String>> {
+        lineas_de_todos(self.ruta)
+    }
+
+    /// Agrega `linea` y un `\n` al vigente. Si supera `umbral` bytes, lo rota antes de escribir.
+    pub fn agregar(&self, linea: &str, umbral: u64) -> io::Result<()> {
+        rotar_si_supera(self.ruta, umbral)?;
+        let mut archivo = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.ruta)?;
+        archivo.write_all(format!("{linea}\n").as_bytes())
+    }
+}
+
+/// Líneas no vacías de los archivos de `ruta`, rotados y vigente. Debe llamarse con el lock tomado.
+fn lineas_de_todos(ruta: &Path) -> io::Result<Vec<String>> {
+    let mut lineas = Vec::new();
+    for archivo in archivos_en_orden(ruta)? {
+        lineas.extend(leer_lineas_sin_lock(&archivo)?);
+    }
+    Ok(lineas)
+}
+
+/// Líneas no vacías de un archivo. No toma el lock: lo debe tomar quien llama.
+fn leer_lineas_sin_lock(ruta: &Path) -> io::Result<Vec<String>> {
+    Ok(fs::read_to_string(ruta)?
+        .lines()
+        .filter(|linea| !linea.trim().is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// Agrega `linea` y un `\n` al archivo, con lock exclusivo.
+/// Si el archivo supera `umbral` bytes, lo renombra a `<nombre>.<n>` antes de escribir.
+pub fn agregar(ruta: &Path, linea: &str, umbral: u64) -> io::Result<()> {
+    con_lock_exclusivo(ruta, |log| log.agregar(linea, umbral))
 }
 
 /// Abre el archivo de lock hermano. Se libera al cerrarse el `File`.
@@ -224,5 +301,21 @@ mod tests {
         agregar(&ruta, "uno", UMBRAL_POR_DEFECTO).expect("escribe");
         agregar(&ruta, "dos", UMBRAL_POR_DEFECTO).expect("escribe");
         assert_eq!(leer_lineas(&ruta).expect("lee"), vec!["uno", "dos"]);
+    }
+
+    #[test]
+    fn observe_lectura_mantiene_el_candado_mientras_lee_todos_los_archivos() {
+        let dir = TempDir::new().expect("temp dir");
+        let ruta = dir.path().join("eventos.jsonl");
+        agregar(&ruta, "aaaaaaaaaa", 10).expect("a");
+        agregar(&ruta, "bbbbbbbbbb", 10).expect("b rota a .1");
+        con_lock_compartido(&ruta, |log| -> io::Result<()> {
+            assert_eq!(log.lineas()?, vec!["aaaaaaaaaa", "bbbbbbbbbb"]);
+            // Otro descriptor no puede tomar el lock exclusivo: la lectura lo mantiene tomado.
+            let otro = abrir_candado(&ruta)?;
+            assert!(otro.try_lock().is_err(), "el lock debía seguir tomado");
+            Ok(())
+        })
+        .expect("lectura");
     }
 }

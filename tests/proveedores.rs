@@ -43,19 +43,39 @@ struct Servidor {
     pedidos: Arc<Mutex<Vec<Pedido>>>,
 }
 
+/// Función que corre al recibir el pedido número `n` (desde 1), antes de responder.
+type Gancho = (usize, Box<dyn Fn() + Send>);
+
 impl Servidor {
     /// Responde con la cola en orden. Cuando la cola se agota, responde 500.
     fn arranca(respuestas: Vec<(u16, &'static str)>) -> Servidor {
+        Servidor::arranca_con(respuestas, Duration::ZERO, None)
+    }
+
+    /// Como `arranca`: espera `demora` antes de responder y corre `gancho` al recibir su pedido.
+    fn arranca_con(
+        respuestas: Vec<(u16, &'static str)>,
+        demora: Duration,
+        gancho: Option<Gancho>,
+    ) -> Servidor {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind en loopback");
         let url = format!("http://{}", listener.local_addr().expect("dirección"));
         let pedidos = Arc::new(Mutex::new(Vec::new()));
         let cola = Arc::new(Mutex::new(VecDeque::from(respuestas)));
         let registro = Arc::clone(&pedidos);
         thread::spawn(move || {
+            let mut recibidos = 0usize;
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
                 let pedido = leer_pedido(&stream);
                 registro.lock().expect("lock").push(pedido);
+                recibidos += 1;
+                if let Some((n, funcion)) = &gancho
+                    && *n == recibidos
+                {
+                    funcion();
+                }
+                thread::sleep(demora);
                 let (codigo, cuerpo) = cola
                     .lock()
                     .expect("lock")
@@ -168,13 +188,58 @@ fn evento_no_escribible(home: &Path) {
     .expect("enlace");
 }
 
-/// Eventos de `eventos.jsonl` dentro de `home`.
-fn eventos(home: &Path) -> Vec<Value> {
+/// Todas las líneas de `eventos.jsonl` dentro de `home`, reservas incluidas.
+fn todos(home: &Path) -> Vec<Value> {
     let texto = fs::read_to_string(home.join("eventos.jsonl")).unwrap_or_default();
     texto
         .lines()
         .map(|l| serde_json::from_str(l).expect("cada línea es JSON"))
         .collect()
+}
+
+/// Eventos de `eventos.jsonl` dentro de `home`, sin las reservas.
+fn eventos(home: &Path) -> Vec<Value> {
+    todos(home)
+        .into_iter()
+        .filter(|ev| ev["tipo"] != "reserva")
+        .collect()
+}
+
+/// Reservas de `eventos.jsonl` dentro de `home`.
+fn reservas(home: &Path) -> Vec<Value> {
+    todos(home)
+        .into_iter()
+        .filter(|ev| ev["tipo"] == "reserva")
+        .collect()
+}
+
+/// Gancho que cambia `eventos.jsonl` por un directorio al recibir el pedido `n`. Las lecturas y
+/// reservas anteriores salen bien; el registro final de la llamada ya no se puede escribir.
+fn rompe_el_log_en_el_pedido(home: &Path, n: usize) -> Gancho {
+    let ruta = home.join("eventos.jsonl");
+    (
+        n,
+        Box::new(move || {
+            let _ = fs::remove_file(&ruta);
+            let _ = fs::create_dir(&ruta);
+        }),
+    )
+}
+
+/// Gasto de API del mes de `home`, con el mismo cálculo que usa Route.
+fn gasto_api_del_mes(home: &Path) -> f64 {
+    let ahora = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("reloj")
+        .as_secs_f64();
+    observe::uso::uso_en(
+        &home.join("eventos.jsonl"),
+        ahora,
+        observe::uso::offset_local(),
+        5,
+    )
+    .expect("lee el gasto")
+    .api_mes_usd
 }
 
 const DEEPSEEK_OK: &str = r#"{"choices":[{"message":{"content":"hola","reasoning_content":"pensé"}}],"usage":{"prompt_tokens":100,"completion_tokens":50}}"#;
@@ -765,10 +830,13 @@ fn proveedores_json_malformado_no_abre_el_breaker() {
 
 #[test]
 fn proveedores_evento_no_escribible_devuelve_la_respuesta_completa() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
-    let cfg = config(&srv.url, &srv.url);
     let home = tempfile::tempdir().expect("home");
-    evento_no_escribible(home.path());
+    let srv = Servidor::arranca_con(
+        vec![(200, DEEPSEEK_OK)],
+        Duration::ZERO,
+        Some(rompe_el_log_en_el_pedido(home.path(), 1)),
+    );
+    let cfg = config(&srv.url, &srv.url);
     let breaker = Breaker::new();
     let claves = claves_de_prueba();
     let base = Instant::now();
@@ -837,10 +905,13 @@ fn proveedores_cli_exito_escribe_la_respuesta_y_devuelve_0() {
 
 #[test]
 fn proveedores_cli_evento_no_registrado_respuesta_en_stdout_y_evento_en_stderr() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
-    let cfg = config(&srv.url, &srv.url);
     let home = tempfile::tempdir().expect("home");
-    evento_no_escribible(home.path());
+    let srv = Servidor::arranca_con(
+        vec![(200, DEEPSEEK_OK)],
+        Duration::ZERO,
+        Some(rompe_el_log_en_el_pedido(home.path(), 1)),
+    );
+    let cfg = config(&srv.url, &srv.url);
     let breaker = Breaker::new();
     let claves = claves_de_prueba();
     let base = Instant::now();
@@ -916,9 +987,12 @@ fn llamada_503_con_evento_no_escribible(
     home: &Path,
     corrida: &str,
 ) -> Result<Respuesta, ErrorProveedor> {
-    let srv = Servidor::arranca(vec![(503, "{}"), (503, "{}"), (503, "{}")]);
+    let srv = Servidor::arranca_con(
+        vec![(503, "{}"), (503, "{}"), (503, "{}")],
+        Duration::ZERO,
+        Some(rompe_el_log_en_el_pedido(home, 3)),
+    );
     let cfg = config(&srv.url, &srv.url);
-    evento_no_escribible(home);
     let breaker = Breaker::new();
     let claves = claves_de_prueba();
     let base = Instant::now();
@@ -1270,4 +1344,163 @@ fn proveedores_causa_tope_alcanzado_nombra_los_tokens() {
 #[test]
 fn proveedores_tope_de_los_jueces_es_32000() {
     assert_eq!(MAX_TOKENS_JUEZ, 32_000);
+}
+
+#[test]
+fn proveedores_timeout_de_lectura_deja_costo_estimado_y_error_timeout() {
+    let srv = Servidor::arranca_con(vec![(200, DEEPSEEK_OK)], Duration::from_secs(2), None);
+    let mut cfg = config(&srv.url, &srv.url);
+    cfg.proveedores.timeout_s = 1;
+    let (res, home) = llamada_con_servidor(&cfg, Proveedor::Deepseek, "deepseek-chat", "t21");
+
+    let err = res.expect_err("el servidor tarda más que el timeout");
+    assert!(matches!(err, ErrorProveedor::Timeout(_)), "llegó {err:?}");
+    let evs = eventos(home.path());
+    assert_eq!(evs.len(), 1);
+    assert_eq!(evs[0]["extra"]["error"], "timeout");
+    assert_eq!(evs[0]["extra"]["costo_estimado"], true);
+    assert!(evs[0]["cost_usd"].as_f64().expect("costo") > 0.0);
+}
+
+#[test]
+fn proveedores_timeout_de_lectura_no_se_reintenta() {
+    let srv = Servidor::arranca_con(vec![(200, DEEPSEEK_OK)], Duration::from_secs(2), None);
+    let mut cfg = config(&srv.url, &srv.url);
+    cfg.proveedores.timeout_s = 1;
+    let (res, _home) = llamada_con_servidor(&cfg, Proveedor::Deepseek, "deepseek-chat", "t22");
+
+    assert!(matches!(res, Err(ErrorProveedor::Timeout(_))));
+    assert_eq!(srv.peticiones(), 1, "repetir el pedido repite el costo");
+}
+
+#[test]
+fn proveedores_conexion_rechazada_se_reintenta_y_vale_cero() {
+    // Un puerto libre: el listener se cierra antes de llamar, así que la conexión se rechaza.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind en loopback");
+    let url = format!("http://{}", listener.local_addr().expect("dirección"));
+    drop(listener);
+    let cfg = config(&url, &url);
+    let (res, home) = llamada_con_servidor(&cfg, Proveedor::Deepseek, "deepseek-chat", "t23");
+
+    let err = res.expect_err("nadie escucha en el puerto");
+    assert!(matches!(err, ErrorProveedor::Red(_)), "llegó {err:?}");
+    let evs = eventos(home.path());
+    assert_eq!(evs[0]["extra"]["intentos"], 3);
+    assert_eq!(evs[0]["extra"]["error"], "red");
+    assert_eq!(evs[0]["cost_usd"].as_f64(), Some(0.0));
+    assert!(evs[0]["extra"].get("costo_estimado").is_none());
+    assert_eq!(reservas(home.path()).len(), 3);
+}
+
+#[test]
+fn proveedores_5xx_suma_peor_caso_por_intento_y_reintenta() {
+    let srv = Servidor::arranca(vec![ERROR_500; 3]);
+    let cfg = config(&srv.url, &srv.url);
+    let (res, home) = llamada_con_servidor(&cfg, Proveedor::Deepseek, "deepseek-chat", "t24");
+
+    let err = res.expect_err("500 agotado");
+    assert!(
+        matches!(err, ErrorProveedor::Http { estado: 500, .. }),
+        "llegó {err:?}"
+    );
+    assert_eq!(srv.peticiones(), 3);
+    let precio = cfg.precios.get("deepseek-chat").expect("precio");
+    let peor = costo_peor_caso(precio, tokens_entrada_estimados(&prompt()), 64);
+    let evs = eventos(home.path());
+    assert_eq!(evs[0]["extra"]["intentos"], 3);
+    assert_eq!(evs[0]["extra"]["costo_estimado"], true);
+    let costo = evs[0]["cost_usd"].as_f64().expect("costo");
+    assert!((costo - 3.0 * peor).abs() < 1e-12, "costo {costo}");
+}
+
+#[test]
+fn proveedores_200_que_no_parsea_cuesta_peor_caso_y_no_reintenta() {
+    let srv = Servidor::arranca(vec![(200, "no es json")]);
+    let cfg = config(&srv.url, &srv.url);
+    let (res, home) = llamada_con_servidor(&cfg, Proveedor::Deepseek, "deepseek-chat", "t25");
+
+    assert!(matches!(res, Err(ErrorProveedor::Respuesta(_))));
+    assert_eq!(srv.peticiones(), 1);
+    let precio = cfg.precios.get("deepseek-chat").expect("precio");
+    let peor = costo_peor_caso(precio, tokens_entrada_estimados(&prompt()), 64);
+    let evs = eventos(home.path());
+    assert_eq!(evs[0]["extra"]["error"], "respuesta");
+    assert_eq!(evs[0]["extra"]["costo_estimado"], true);
+    let costo = evs[0]["cost_usd"].as_f64().expect("costo");
+    assert!((costo - peor).abs() < 1e-12, "costo {costo}");
+}
+
+#[test]
+fn proveedores_200_escribe_reserva_y_la_cierra_con_el_costo_real() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let cfg = config(&srv.url, &srv.url);
+    let (res, home) = llamada_con_servidor(&cfg, Proveedor::Deepseek, "deepseek-chat", "t26");
+    res.expect("200 responde");
+
+    let precio = cfg.precios.get("deepseek-chat").expect("precio");
+    let peor = costo_peor_caso(precio, tokens_entrada_estimados(&prompt()), 64);
+    let reserva = reservas(home.path());
+    assert_eq!(reserva.len(), 1);
+    assert_eq!(reserva[0]["via"], "api");
+    assert!((reserva[0]["cost_usd"].as_f64().expect("costo") - peor).abs() < 1e-12);
+    let id = reserva[0]["extra"]["reserva"].as_str().expect("id");
+    let evs = eventos(home.path());
+    assert_eq!(evs[0]["extra"]["reservas"], serde_json::json!([id]));
+    // La reserva no suma: el gasto del mes es el costo real de la llamada, no real más peor.
+    let real = (100.0 * 1.0 + 50.0 * 2.0) / 1e6;
+    assert!((gasto_api_del_mes(home.path()) - real).abs() < 1e-12);
+}
+
+#[test]
+fn proveedores_reintento_con_tope_lleno_no_envia_y_cierra_la_reserva() {
+    let srv = Servidor::arranca(vec![ERROR_500, (200, DEEPSEEK_OK)]);
+    let mut cfg = config(&srv.url, &srv.url);
+    // Margen para un peor caso de deepseek-chat (141 millonésimas de USD), y no para dos.
+    cfg.balance.api.tope_usd = 0.0002;
+    let (res, home) = llamada_con_servidor(&cfg, Proveedor::Deepseek, "deepseek-chat", "t27");
+
+    let err = res.expect_err("el reintento no entra en el margen");
+    assert!(matches!(err, ErrorProveedor::Tope(_)), "llegó {err:?}");
+    assert_eq!(srv.peticiones(), 1, "el reintento no se envía");
+    let precio = cfg.precios.get("deepseek-chat").expect("precio");
+    let peor = costo_peor_caso(precio, tokens_entrada_estimados(&prompt()), 64);
+    let evs = eventos(home.path());
+    let llamadas: Vec<&Value> = evs.iter().filter(|ev| ev["tipo"] == "llamada").collect();
+    assert_eq!(llamadas.len(), 1, "el evento final cierra la llamada");
+    assert_eq!(llamadas[0]["extra"]["error"], "tope");
+    assert_eq!(llamadas[0]["extra"]["intentos"], 1);
+    assert_eq!(evs.iter().filter(|ev| ev["tipo"] == "gate").count(), 1);
+    // Solo el primer intento tuvo reserva: el reintento rechazado no llegó a escribirla.
+    assert_eq!(reservas(home.path()).len(), 1);
+    // La reserva del intento cortado queda cerrada: cuenta una vez, no dos.
+    assert!((gasto_api_del_mes(home.path()) - peor).abs() < 1e-12);
+}
+
+#[test]
+fn proveedores_reserva_no_escribible_no_envia_nada() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let cfg = config(&srv.url, &srv.url);
+    let home = tempfile::tempdir().expect("home");
+    evento_no_escribible(home.path());
+    let breaker = Breaker::new();
+    let claves = claves_de_prueba();
+    let base = Instant::now();
+    let reloj = || base;
+    let ctx = Contexto {
+        cfg: &cfg,
+        home: home.path(),
+        breaker: &breaker,
+        claves: &claves,
+        reloj: &reloj,
+    };
+
+    let err = llamar_con(
+        &ctx,
+        &eleccion(Proveedor::Deepseek, "deepseek-chat"),
+        &prompt(),
+        "t28",
+    )
+    .expect_err("sin reserva no se envía");
+    assert!(matches!(err, ErrorProveedor::Tope(_)), "llegó {err:?}");
+    assert_eq!(srv.peticiones(), 0);
 }

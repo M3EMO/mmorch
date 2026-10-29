@@ -7,9 +7,9 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use common::Servidor;
+use common::{Servidor, rompe_el_log_en_el_pedido};
 use root::observe;
 use root::tipos::{Evento, TipoEvento, Via};
 use serde_json::{Value, json};
@@ -615,11 +615,15 @@ fn bloques_de(resp: &Value) -> Vec<String> {
 
 #[test]
 fn mcp_llama_evento_no_registrado_entrega_respuesta_y_evento() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
     let home = tempfile::tempdir().expect("home");
+    // La reserva se escribe; al recibir el pedido, el log pasa a ser un directorio. La llamada
+    // sale, y su evento final no se puede escribir.
+    let srv = Servidor::arranca_con(
+        vec![(200, DEEPSEEK_OK)],
+        Duration::ZERO,
+        Some(rompe_el_log_en_el_pedido(home.path(), 1)),
+    );
     preparar(home.path(), &srv.url, PRECIO_BARATO);
-    // El candado de `eventos.jsonl` es un directorio: la llamada sale, el evento no se escribe.
-    fs::create_dir(home.path().join("eventos.jsonl.lock")).expect("candado bloqueado");
 
     let resp = herramienta(
         home.path(),
@@ -647,11 +651,15 @@ fn mcp_llama_evento_no_registrado_entrega_respuesta_y_evento() {
 
 #[test]
 fn mcp_llama_error_del_proveedor_sin_evento_entrega_error_y_evento() {
-    // Sin cola, el servidor responde 500 a todos los intentos. El evento de la falla tampoco se escribe.
-    let srv = Servidor::arranca(vec![]);
+    // Sin cola, el servidor responde 500 a todos los intentos. Al tercero, el log pasa a ser un
+    // directorio: el evento de la falla no se puede escribir.
     let home = tempfile::tempdir().expect("home");
+    let srv = Servidor::arranca_con(
+        vec![],
+        Duration::ZERO,
+        Some(rompe_el_log_en_el_pedido(home.path(), 3)),
+    );
     preparar(home.path(), &srv.url, PRECIO_BARATO);
-    fs::create_dir(home.path().join("eventos.jsonl.lock")).expect("candado bloqueado");
 
     let resp = herramienta(
         home.path(),

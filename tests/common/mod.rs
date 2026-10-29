@@ -7,6 +7,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 /// Responde con la cola en orden y cuenta cada pedido. Cuando la cola se agota, responde 500.
 pub struct Servidor {
@@ -15,8 +16,25 @@ pub struct Servidor {
     cuerpos: Arc<Mutex<Vec<String>>>,
 }
 
+/// Función que corre al recibir el pedido número `n` (desde 1), antes de responder.
+pub type Gancho = (usize, Box<dyn Fn() + Send>);
+
 impl Servidor {
     pub fn arranca(respuestas: Vec<(u16, &'static str)>) -> Servidor {
+        Servidor::arranca_con(respuestas, Duration::ZERO, None)
+    }
+
+    /// Como `arranca`, pero espera `demora` después de recibir cada pedido y antes de responder.
+    pub fn arranca_lento(respuestas: Vec<(u16, &'static str)>, demora: Duration) -> Servidor {
+        Servidor::arranca_con(respuestas, demora, None)
+    }
+
+    /// Como `arranca_lento`, y corre `gancho` al recibir su pedido, antes de responder.
+    pub fn arranca_con(
+        respuestas: Vec<(u16, &'static str)>,
+        demora: Duration,
+        gancho: Option<Gancho>,
+    ) -> Servidor {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind en loopback");
         let url = format!("http://{}", listener.local_addr().expect("dirección"));
         let pedidos = Arc::new(Mutex::new(0usize));
@@ -29,7 +47,17 @@ impl Servidor {
                 let Ok(mut stream) = stream else { continue };
                 let recibido = leer_pedido(&stream);
                 registro.lock().expect("lock").push(recibido);
-                *cuenta.lock().expect("lock") += 1;
+                let n = {
+                    let mut cuenta = cuenta.lock().expect("lock");
+                    *cuenta += 1;
+                    *cuenta
+                };
+                if let Some((indice, funcion)) = &gancho
+                    && *indice == n
+                {
+                    funcion();
+                }
+                thread::sleep(demora);
                 let (codigo, cuerpo) = cola
                     .lock()
                     .expect("lock")
@@ -58,6 +86,19 @@ impl Servidor {
     pub fn cuerpo(&self, indice: usize) -> String {
         self.cuerpos.lock().expect("lock")[indice].clone()
     }
+}
+
+/// Gancho que cambia `eventos.jsonl` por un directorio al recibir el pedido `n`. La reserva y los
+/// intentos anteriores se escriben bien; el registro final de la llamada ya no se puede escribir.
+pub fn rompe_el_log_en_el_pedido(home: &std::path::Path, n: usize) -> Gancho {
+    let ruta = home.join("eventos.jsonl");
+    (
+        n,
+        Box::new(move || {
+            let _ = std::fs::remove_file(&ruta);
+            let _ = std::fs::create_dir(&ruta);
+        }),
+    )
 }
 
 /// Lee cabeceras y cuerpo del pedido para que el cliente no reciba un cierre prematuro.

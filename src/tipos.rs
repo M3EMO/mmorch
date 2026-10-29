@@ -311,6 +311,8 @@ pub enum TipoEvento {
     PlanAprobado,
     Gate,
     OraculoLeido,
+    /// Monto que una llamada a la API reserva antes de enviar el pedido. Lo cierra el `Llamada`.
+    Reserva,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -569,6 +571,7 @@ mod tests {
             TipoEvento::PlanAprobado,
             TipoEvento::Gate,
             TipoEvento::OraculoLeido,
+            TipoEvento::Reserva,
         ] {
             ida_y_vuelta(&x);
         }

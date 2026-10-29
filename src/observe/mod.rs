@@ -49,15 +49,10 @@ pub fn resumir(corrida: &str) -> Result<Resumen, ErrorObserve> {
 
 /// Resume la corrida indicada del archivo dado. Si el archivo no existe, da un resumen vacío.
 pub fn resumir_en(ruta: &Path, corrida: &str) -> Result<Resumen, ErrorObserve> {
-    let mut de_la_corrida: Vec<Evento> = Vec::new();
-    for archivo in jsonl::archivos_en_orden(ruta)? {
-        for linea in jsonl::leer_lineas(&archivo)? {
-            let ev: Evento = serde_json::from_str(&linea)?;
-            if ev.corrida == corrida {
-                de_la_corrida.push(ev);
-            }
-        }
-    }
+    let de_la_corrida: Vec<Evento> = uso::leer_eventos(ruta)?
+        .into_iter()
+        .filter(|ev| ev.corrida == corrida)
+        .collect();
     Ok(resumir_eventos(&de_la_corrida))
 }
 
@@ -70,7 +65,7 @@ pub fn resumir_eventos(eventos: &[Evento]) -> Resumen {
     let mut resumen = Resumen::default();
     for ev in eventos {
         match ev.via {
-            Some(Via::Api) => resumen.usd_api += ev.cost_usd,
+            Some(Via::Api) if ev.tipo != TipoEvento::Reserva => resumen.usd_api += ev.cost_usd,
             Some(Via::Cupo) => resumen.usd_cupo += ev.cost_usd,
             _ => {}
         }
@@ -285,6 +280,19 @@ mod tests {
         registrar_en(&ruta, &con_costo(Via::Api, 0.5, 0.0)).expect("registra");
         registrar_en(&ruta, &api_c2).expect("registra");
         let resumen = resumir_en(&ruta, "c1").expect("resume");
+        assert_eq!(resumen.usd_api, 0.5);
+    }
+
+    #[test]
+    fn observe_resumir_no_suma_reservas_a_usd_api() {
+        let reserva = Evento {
+            tipo: TipoEvento::Reserva,
+            via: Some(Via::Api),
+            cost_usd: 0.9,
+            corrida: "c1".into(),
+            ..Evento::default()
+        };
+        let resumen = resumir_eventos(&[reserva, con_costo(Via::Api, 0.5, 0.0)]);
         assert_eq!(resumen.usd_api, 0.5);
     }
 

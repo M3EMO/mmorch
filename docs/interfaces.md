@@ -1086,14 +1086,23 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
   ],
   "$defs": {
     "TipoEvento": {
-      "type": "string",
-      "enum": [
-        "llamada",
-        "sesion",
-        "humano",
-        "plan_aprobado",
-        "gate",
-        "oraculo_leido"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "llamada",
+            "sesion",
+            "humano",
+            "plan_aprobado",
+            "gate",
+            "oraculo_leido"
+          ]
+        },
+        {
+          "description": "Monto que una llamada a la API reserva antes de enviar el pedido. Lo cierra el `Llamada`.",
+          "type": "string",
+          "const": "reserva"
+        }
       ]
     },
     "Via": {

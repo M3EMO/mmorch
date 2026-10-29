@@ -5,18 +5,19 @@ pub mod deepseek;
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use thiserror::Error as ErrorDerive;
 
 use crate::config::{Config, Precio, root_home};
-use crate::observe::{self, uso};
+use crate::observe::{self, jsonl, uso};
 use crate::tipos::{Eleccion, Evento, Proveedor, TipoEvento, Via};
 
 /// Intentos totales por llamada: el primero más dos reintentos.
@@ -97,6 +98,12 @@ pub enum ErrorProveedor {
     },
     #[error("error de red: {0}")]
     Red(String),
+    /// Se agotó un plazo después de enviar el pedido. Puede haber costo; no se reintenta.
+    #[error("tiempo agotado después de enviar el pedido: {0}")]
+    Timeout(String),
+    /// La conexión se cortó después de enviar el pedido. Puede haber costo; no se reintenta.
+    #[error("conexión cortada después de enviar el pedido: {0}")]
+    Cortada(String),
     #[error("breaker abierto para {0}")]
     BreakerAbierto(String),
     #[error("respuesta inesperada: {0}")]
@@ -120,6 +127,8 @@ impl ErrorProveedor {
             Self::Pedido { estado, .. } => return format!("pedido_{estado}"),
             Self::EventoNoRegistrado { .. } => "evento",
             Self::Red(_) => "red",
+            Self::Timeout(_) => "timeout",
+            Self::Cortada(_) => "red_cortada",
             Self::Respuesta(_) => "respuesta",
             Self::BreakerAbierto(_) => "breaker",
             Self::SinClave(_) => "sin_clave",
@@ -131,12 +140,28 @@ impl ErrorProveedor {
         corta.into()
     }
 
-    /// Errores que un reintento puede arreglar: red, 429 y 5xx. Son también las fallas del breaker:
-    /// cuando llegan aquí, los reintentos ya se agotaron.
+    /// Errores que un reintento puede arreglar: fallas antes de enviar el pedido, 429 y 5xx. Son
+    /// también las fallas del breaker: cuando llegan aquí, los reintentos ya se agotaron.
     fn es_transitorio(&self) -> bool {
         match self {
             Self::Red(_) => true,
             Self::Http { estado, .. } => *estado == 429 || (500..=599).contains(estado),
+            _ => false,
+        }
+    }
+
+    /// Fallas que el breaker cuenta: las transitorias y el timeout después de enviar.
+    fn cuenta_para_breaker(&self) -> bool {
+        self.es_transitorio() || matches!(self, Self::Timeout(_))
+    }
+
+    /// Fallas que cuestan el peor caso del intento: el proveedor pudo procesar el pedido. Son los
+    /// 5xx, las fallas después de enviar y un 2xx que no se puede leer. Las de antes de enviar, el
+    /// 429 y los otros 4xx cuestan cero.
+    fn cobra_peor_caso(&self) -> bool {
+        match self {
+            Self::Http { estado, .. } => (500..=599).contains(estado),
+            Self::Timeout(_) | Self::Cortada(_) | Self::Respuesta(_) => true,
             _ => false,
         }
     }
@@ -321,9 +346,28 @@ pub fn llamar(e: &Eleccion, prompt: &Prompt, corrida: &str) -> Result<Respuesta,
     llamar_con(&ctx, e, prompt, corrida)
 }
 
+/// Una llamada en curso: lo que cada intento necesita y lo que lleva gastado. Cada intento que
+/// llega a enviarse tiene su reserva, y el evento final de la llamada las cierra todas.
+struct Llamada<'a> {
+    proveedor: Proveedor,
+    modelo: &'a str,
+    prompt: &'a Prompt,
+    corrida: &'a str,
+    precio: Precio,
+    /// Peor caso de un intento: la entrada estimada y todo `max_tokens`, al precio del modelo.
+    peor_caso: f64,
+    /// Intentos que llegaron a reservarse, o sea, que se enviaron.
+    intentos: u32,
+    reservas: Vec<String>,
+    /// Costo acumulado de los intentos: real si respondieron, peor caso si costaron sin respuesta.
+    cost_usd: f64,
+    /// `true` si algún intento cobró el peor caso.
+    costo_estimado: bool,
+}
+
 /// Llamada con todas las dependencias explícitas. Registra un `Evento` por llamada.
-/// Las elecciones inválidas fallan antes de llamar y no registran evento. Un tope lleno o un
-/// modelo sin precio rechazan antes de enviar: no hay evento `Llamada`, solo un `Gate`.
+/// Las elecciones inválidas fallan antes de llamar y no registran evento. Un modelo sin precio o
+/// un tope que rechaza el primer intento no envían nada: no hay evento `Llamada`, solo un `Gate`.
 pub fn llamar_con(
     ctx: &Contexto,
     e: &Eleccion,
@@ -331,30 +375,42 @@ pub fn llamar_con(
     corrida: &str,
 ) -> Result<Respuesta, ErrorProveedor> {
     let (proveedor, modelo) = elegida(e)?;
-    let precio = chequear_tope(ctx, modelo, prompt, corrida)?;
+    let precio = precio_de(ctx, modelo, corrida)?;
     let familia = familia(proveedor);
+    let mut llamada = Llamada {
+        proveedor,
+        modelo,
+        prompt,
+        corrida,
+        peor_caso: costo_peor_caso(&precio, tokens_entrada_estimados(prompt), prompt.max_tokens),
+        precio,
+        intentos: 0,
+        reservas: Vec::new(),
+        cost_usd: 0.0,
+        costo_estimado: false,
+    };
     let inicio = Instant::now();
-    let (resultado, intentos) = ejecutar(ctx, proveedor, modelo, prompt);
+    let resultado = ejecutar(ctx, &mut llamada);
     let latency_s = inicio.elapsed().as_secs_f64();
-    let mut ev = evento(corrida, prompt, e, familia, intentos, latency_s);
+    let mut ev = evento(corrida, prompt, e, familia, latency_s);
     match resultado {
         Ok(crudo) => {
             ctx.breaker.registra_exito(familia);
-            let costo = costo_usd(&precio, crudo.in_tokens, crudo.out_tokens);
+            llamada.cost_usd += costo_usd(&llamada.precio, crudo.in_tokens, crudo.out_tokens);
             ev.in_tokens = crudo.in_tokens;
             ev.out_tokens = crudo.out_tokens;
-            ev.cost_usd = costo;
             if crudo.truncada {
                 ev.extra.insert("truncada".into(), json!(true));
             }
+            cerrar(&mut ev, &llamada);
             let respuesta = Respuesta {
                 texto: crudo.texto,
                 in_tokens: crudo.in_tokens,
                 out_tokens: crudo.out_tokens,
-                cost_usd: costo,
+                cost_usd: llamada.cost_usd,
                 latency_s,
                 modelo: modelo.to_string(),
-                intentos,
+                intentos: llamada.intentos,
                 truncada: crudo.truncada,
             };
             match registra(ctx.home, &ev) {
@@ -367,9 +423,14 @@ pub fn llamar_con(
             }
         }
         Err(err) => {
-            if err.es_transitorio() {
+            if err.cuenta_para_breaker() {
                 ctx.breaker.registra_falla(familia, (ctx.reloj)());
             }
+            // Un tope que rechaza el primer intento no reservó nada: solo queda el `Gate`.
+            if matches!(err, ErrorProveedor::Tope(_)) && llamada.reservas.is_empty() {
+                return Err(err);
+            }
+            cerrar(&mut ev, &llamada);
             ev.extra.insert("error".into(), json!(err.clase()));
             match registra(ctx.home, &ev) {
                 Ok(()) => Err(err),
@@ -383,56 +444,107 @@ pub fn llamar_con(
     }
 }
 
-/// Chequeo previo de tope: nada se envía si el modelo no tiene precio o si el peor caso del pedido
-/// no entra en el margen del tope de API. Un rechazo registra un `Gate` y devuelve `Tope`.
-/// Si el gasto no se puede leer, también rechaza: sin gasto no hay margen que probar.
-fn chequear_tope(
-    ctx: &Contexto,
-    modelo: &str,
-    prompt: &Prompt,
-    corrida: &str,
-) -> Result<Precio, ErrorProveedor> {
-    let tope = ctx.cfg.balance.api.tope_usd;
-    let margen = tope - gasto_api_mes(ctx)?;
+/// Completa el `Evento` de la llamada con sus intentos, las reservas que cierra y el costo.
+fn cerrar(ev: &mut Evento, llamada: &Llamada) {
+    ev.cost_usd = llamada.cost_usd;
+    ev.extra.insert("intentos".into(), json!(llamada.intentos));
+    ev.extra.insert("reservas".into(), json!(llamada.reservas));
+    if llamada.costo_estimado {
+        ev.extra.insert("costo_estimado".into(), json!(true));
+    }
+}
+
+/// Precio del modelo. Sin precio no hay estimación: la llamada se rechaza antes de todo, con un
+/// `Gate` y sin leer el gasto.
+fn precio_de(ctx: &Contexto, modelo: &str, corrida: &str) -> Result<Precio, ErrorProveedor> {
     let Some(precio) = ctx.cfg.precios.get(modelo) else {
         let mensaje = format!(
             "sin precio en root.toml para {modelo}: no se puede estimar el costo, la llamada no se envía"
         );
-        return Err(rechazo_tope(ctx, corrida, modelo, margen, None, mensaje));
+        return Err(rechazo_tope(ctx, corrida, modelo, None, None, mensaje));
     };
-    let estimado = costo_peor_caso(precio, tokens_entrada_estimados(prompt), prompt.max_tokens);
-    if estimado > margen {
-        let mensaje = format!(
-            "llamada rechazada antes de enviarla: costo estimado {estimado:.6} USD, margen {margen:.6} USD del tope de API de {tope:.2} USD"
-        );
-        return Err(rechazo_tope(
-            ctx,
-            corrida,
-            modelo,
-            margen,
-            Some(estimado),
-            mensaje,
-        ));
-    }
     Ok(precio.clone())
 }
 
-/// Gasto de API del mes calendario, leído de `eventos.jsonl` de `ctx.home`.
-fn gasto_api_mes(ctx: &Contexto) -> Result<f64, ErrorProveedor> {
-    let (ahora, _) = observe::ahora();
+/// Decisión del chequeo de tope de un intento.
+enum Decision {
+    Reservada,
+    Rechazada { margen: f64 },
+}
+
+/// Chequeo de tope de un intento y su reserva, en un solo tramo con el lock de `eventos.jsonl`:
+/// lee el gasto, compara el peor caso con el margen y, si entra, escribe la reserva. Un rechazo
+/// registra un `Gate` y devuelve `Tope`. Si el log no se puede leer ni escribir, también rechaza:
+/// sin gasto conocido no hay margen que probar.
+fn reservar(ctx: &Contexto, llamada: &mut Llamada) -> Result<(), ErrorProveedor> {
+    let tope = ctx.cfg.balance.api.tope_usd;
+    let offset = uso::offset_local();
+    let bloque = ctx.cfg.balance.cupo.bloque_horas;
+    let id = nueva_reserva_id(llamada.corrida);
     let ruta = ctx.home.join(ARCHIVO_EVENTOS);
-    let uso = uso::uso_en(
-        &ruta,
-        ahora,
-        uso::offset_local(),
-        ctx.cfg.balance.cupo.bloque_horas,
-    )
+    let decision = uso::con_eventos_bloqueados(&ruta, |eventos, log| {
+        // El reloj se lee con el lock tomado: una reserva que otro proceso escribió mientras este
+        // esperaba tiene un `ts` posterior, y `calcular_uso` ignora los eventos del futuro.
+        let (ahora, _) = observe::ahora();
+        let margen = tope - uso::calcular_uso(eventos, ahora, offset, bloque).api_mes_usd;
+        if llamada.peor_caso > margen {
+            return Ok(Decision::Rechazada { margen });
+        }
+        let linea =
+            serde_json::to_string(&evento_reserva(llamada, &id)).map_err(io::Error::other)?;
+        log.agregar(&linea, jsonl::UMBRAL_POR_DEFECTO)?;
+        Ok(Decision::Reservada)
+    })
     .map_err(|e| {
         ErrorProveedor::Tope(format!(
-            "no se pudo leer el gasto de API: {e}; la llamada no se envía"
+            "no se pudo leer o reservar el gasto de API: {e}; la llamada no se envía"
         ))
     })?;
-    Ok(uso.api_mes_usd)
+    match decision {
+        Decision::Reservada => {
+            llamada.reservas.push(id);
+            llamada.intentos += 1;
+            Ok(())
+        }
+        Decision::Rechazada { margen } => {
+            let estimado = llamada.peor_caso;
+            let mensaje = format!(
+                "llamada rechazada antes de enviarla: costo estimado {estimado:.6} USD, margen {margen:.6} USD del tope de API de {tope:.2} USD"
+            );
+            Err(rechazo_tope(
+                ctx,
+                llamada.corrida,
+                llamada.modelo,
+                Some(margen),
+                Some(estimado),
+                mensaje,
+            ))
+        }
+    }
+}
+
+/// Contador de reservas del proceso. Con el pid y el reloj, el id es único entre procesos.
+static CONTADOR_RESERVAS: AtomicU64 = AtomicU64::new(0);
+
+/// Id de una reserva: corrida, pid, nanosegundos y un contador del proceso.
+fn nueva_reserva_id(corrida: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let n = CONTADOR_RESERVAS.fetch_add(1, Ordering::Relaxed);
+    format!("{corrida}-{}-{nanos}-{n}", std::process::id())
+}
+
+/// Evento `Reserva` de un intento. Su peor caso cuenta como gasto hasta que la llamada lo cierre.
+fn evento_reserva(llamada: &Llamada, id: &str) -> Evento {
+    let mut ev = observe::evento_manual(llamada.corrida, TipoEvento::Reserva, None);
+    ev.fase = llamada.prompt.fase.clone();
+    ev.via = Some(Via::Api);
+    ev.modelo = Some(llamada.modelo.into());
+    ev.familia = Some(familia(llamada.proveedor).into());
+    ev.cost_usd = llamada.peor_caso;
+    ev.extra.insert("reserva".into(), json!(id));
+    ev
 }
 
 /// Registra el `Gate` del rechazo y devuelve `Tope`. Si el registro falla, el mensaje lo dice.
@@ -440,7 +552,7 @@ fn rechazo_tope(
     ctx: &Contexto,
     corrida: &str,
     modelo: &str,
-    margen: f64,
+    margen: Option<f64>,
     estimado: Option<f64>,
     mensaje: String,
 ) -> ErrorProveedor {
@@ -488,42 +600,55 @@ fn elegida(e: &Eleccion) -> Result<(Proveedor, &str), ErrorProveedor> {
     Ok((proveedor, modelo))
 }
 
-/// Resultado de todos los intentos y cuántos se hicieron. Sin clave o con breaker abierto, cero.
-fn ejecutar(
-    ctx: &Contexto,
-    proveedor: Proveedor,
-    modelo: &str,
-    prompt: &Prompt,
-) -> (Result<Crudo, ErrorProveedor>, u32) {
-    let Some(clave) = ctx.claves.para(proveedor) else {
-        return (Err(ErrorProveedor::SinClave(variable(proveedor).into())), 0);
+/// Resultado del primer intento que responde o del último que falla. Sin clave o con breaker
+/// abierto, no hay intento y no se reserva nada.
+fn ejecutar(ctx: &Contexto, llamada: &mut Llamada) -> Result<Crudo, ErrorProveedor> {
+    let Some(clave) = ctx.claves.para(llamada.proveedor) else {
+        return Err(ErrorProveedor::SinClave(variable(llamada.proveedor).into()));
     };
-    if !ctx.breaker.permite(familia(proveedor), (ctx.reloj)()) {
-        let familia = familia(proveedor).into();
-        return (Err(ErrorProveedor::BreakerAbierto(familia)), 0);
+    if !ctx
+        .breaker
+        .permite(familia(llamada.proveedor), (ctx.reloj)())
+    {
+        return Err(ErrorProveedor::BreakerAbierto(
+            familia(llamada.proveedor).into(),
+        ));
     }
-    reintentar(ctx, proveedor, clave, modelo, prompt)
+    reintentar(ctx, clave, llamada)
 }
 
-/// Hasta `INTENTOS_MAX` intentos. Espera la base y la duplica entre intentos transitorios.
+/// Hasta `INTENTOS_MAX` intentos. Antes de cada uno, el chequeo de tope con su reserva: un reintento
+/// que no entra en el margen no se envía. Espera la base y la duplica entre intentos transitorios.
 fn reintentar(
     ctx: &Contexto,
-    proveedor: Proveedor,
     clave: &Clave,
-    modelo: &str,
-    prompt: &Prompt,
-) -> (Result<Crudo, ErrorProveedor>, u32) {
+    llamada: &mut Llamada,
+) -> Result<Crudo, ErrorProveedor> {
     let agente = agente(ctx.cfg.proveedores.timeout_s);
     let mut espera = Duration::from_millis(ctx.cfg.proveedores.espera_base_ms);
-    let mut intentos = 0;
     loop {
-        intentos += 1;
-        match un_intento(&agente, ctx.cfg, proveedor, clave, modelo, prompt) {
-            Err(err) if err.es_transitorio() && intentos < INTENTOS_MAX => {
+        reservar(ctx, llamada)?;
+        let resultado = un_intento(
+            &agente,
+            ctx.cfg,
+            llamada.proveedor,
+            clave,
+            llamada.modelo,
+            llamada.prompt,
+        );
+        match resultado {
+            Ok(crudo) => return Ok(crudo),
+            Err(err) => {
+                if err.cobra_peor_caso() {
+                    llamada.cost_usd += llamada.peor_caso;
+                    llamada.costo_estimado = true;
+                }
+                if !err.es_transitorio() || llamada.intentos >= INTENTOS_MAX {
+                    return Err(err);
+                }
                 thread::sleep(espera);
                 espera *= 2;
             }
-            resultado => return (resultado, intentos),
         }
     }
 }
@@ -558,9 +683,7 @@ fn un_intento(
     for (nombre, valor) in &pet.cabeceras {
         pedido = pedido.header(*nombre, valor.as_str());
     }
-    let mut respuesta = pedido
-        .send(pet.cuerpo.as_str())
-        .map_err(|e| ErrorProveedor::Red(e.to_string()))?;
+    let mut respuesta = pedido.send(pet.cuerpo.as_str()).map_err(error_al_enviar)?;
     let estado = respuesta.status().as_u16();
     if !(200..300).contains(&estado) {
         let proveedor = familia(proveedor).into();
@@ -569,10 +692,38 @@ fn un_intento(
     let texto = respuesta
         .body_mut()
         .read_to_string()
-        .map_err(|e| ErrorProveedor::Red(e.to_string()))?;
+        .map_err(error_despues_de_enviar)?;
     match proveedor {
         Proveedor::Deepseek => deepseek::leer(&texto),
         Proveedor::Anthropic => anthropic::leer(&texto),
+    }
+}
+
+/// Falla al enviar el pedido. La resolución, el timeout de conexión, la conexión rechazada o
+/// fallida y el host no encontrado pasan antes de enviar: no cuestan y se reintentan. Lo demás
+/// puede haber costado: se trata como falla después de enviar.
+fn error_al_enviar(err: ureq::Error) -> ErrorProveedor {
+    let antes_de_enviar = match &err {
+        ureq::Error::Timeout(plazo) => {
+            matches!(plazo, ureq::Timeout::Resolve | ureq::Timeout::Connect)
+        }
+        ureq::Error::ConnectionFailed | ureq::Error::HostNotFound => true,
+        ureq::Error::Io(e) => e.kind() == io::ErrorKind::ConnectionRefused,
+        _ => false,
+    };
+    if antes_de_enviar {
+        ErrorProveedor::Red(err.to_string())
+    } else {
+        error_despues_de_enviar(err)
+    }
+}
+
+/// Falla después de enviar el pedido. Un plazo agotado es `Timeout`; lo demás, `Cortada`.
+fn error_despues_de_enviar(err: ureq::Error) -> ErrorProveedor {
+    if matches!(err, ureq::Error::Timeout(_)) {
+        ErrorProveedor::Timeout(err.to_string())
+    } else {
+        ErrorProveedor::Cortada(err.to_string())
     }
 }
 
@@ -590,22 +741,14 @@ fn costo_usd(precio: &Precio, in_tokens: u64, out_tokens: u64) -> f64 {
     in_tokens as f64 * precio.usd_entrada / 1e6 + out_tokens as f64 * precio.usd_salida / 1e6
 }
 
-/// Evento de la llamada, sin tokens ni costo. Quien llama completa esos campos.
-fn evento(
-    corrida: &str,
-    prompt: &Prompt,
-    e: &Eleccion,
-    familia: &str,
-    intentos: u32,
-    latency_s: f64,
-) -> Evento {
+/// Evento de la llamada, sin tokens, costo ni intentos. Quien llama completa esos campos.
+fn evento(corrida: &str, prompt: &Prompt, e: &Eleccion, familia: &str, latency_s: f64) -> Evento {
     let mut ev = observe::evento_manual(corrida, TipoEvento::Llamada, None);
     ev.fase = prompt.fase.clone();
     ev.via = Some(Via::Api);
     ev.modelo = e.modelo.clone();
     ev.familia = Some(familia.into());
     ev.latency_s = latency_s;
-    ev.extra.insert("intentos".into(), json!(intentos));
     ev.extra
         .insert("razonamiento".into(), json!(e.razonamiento));
     ev
