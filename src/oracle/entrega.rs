@@ -811,14 +811,26 @@ pub fn entregar(
     imagenes: &[ImagenBase],
 ) -> Result<ResultadoEntrega, ErrorOraculo> {
     let reqs = tarea.requisito.as_slice();
-    // Los escenarios son scripts de `escenarios/`: sin esa carpeta no hay nada que montar (M15).
+    if !tarea.escenario.is_empty() && !tarea.dir.is_dir() {
+        return Err(ErrorOraculo::Infra(format!(
+            "no existe la carpeta de la tarea {}",
+            tarea.dir.display()
+        )));
+    }
+    // Un escenario que nombra `/oraculo` necesita sus scripts en `escenarios/` (M15).
+    // Los que son comandos en línea no montan nada: la carpeta es opcional para ellos.
     let escenarios = tarea.dir.join("escenarios");
-    if !tarea.escenario.is_empty() && !escenarios.is_dir() {
+    let usa_oraculo = tarea
+        .escenario
+        .iter()
+        .any(|e| escenario_usa_oraculo(&e.cmd));
+    if usa_oraculo && !escenarios.is_dir() {
         return Err(ErrorOraculo::Infra(format!(
             "no existe la carpeta de escenarios {}",
             escenarios.display()
         )));
     }
+    let montaje = escenarios.is_dir().then_some(escenarios);
     let Construccion {
         resultado: construccion,
         imagen,
@@ -828,7 +840,7 @@ pub fn entregar(
     // El contenedor de escenario sale de la imagen construida. Sin él, van al de evaluación.
     let contenedor = match &imagen {
         Some(img) if !tarea.escenario.is_empty() => {
-            match ContenedorEscenario::iniciar(&img.etiqueta, &escenarios) {
+            match ContenedorEscenario::iniciar(&img.etiqueta, montaje.as_deref()) {
                 Ok(c) => Some(c),
                 Err(motivo) => {
                     avisos.push(format!(
@@ -915,7 +927,7 @@ static CONTADOR_ESCENARIO: AtomicU64 = AtomicU64::new(0);
 impl ContenedorEscenario {
     /// Arranca la imagen sin red, con `sleep` o, si no está, con `tail -f /dev/null`.
     /// Sin `sh` no sirve para escenarios: devuelve el motivo y la evaluación usa el contenedor de evaluación.
-    fn iniciar(imagen: &str, escenarios: &Path) -> Result<Self, String> {
+    fn iniciar(imagen: &str, escenarios: Option<&Path>) -> Result<Self, String> {
         let nombre = format!(
             "root-entrega-esc-{}-{}",
             std::process::id(),
@@ -1000,14 +1012,20 @@ fn quitar(nombre: &str) {
     let _ = correr_podman(&["rm", "-f", "-t", "0", nombre], PLAZO_CORTO);
 }
 
+/// Un escenario usa `/oraculo` si su `cmd` nombra esa ruta: sus scripts viven en `escenarios/`.
+pub fn escenario_usa_oraculo(cmd: &str) -> bool {
+    cmd.contains("/oraculo")
+}
+
 /// Argumentos de `podman run -d` de un escenario: sin red, sin el proxy del host (M4) y con `comando` como
 /// entrypoint. Los escenarios son scripts de la tarea: `oraculo` entra en solo lectura, sin copiarse a la imagen.
-fn args_arranque(imagen: &str, escenarios: &Path, nombre: &str, comando: &[&str]) -> Vec<String> {
-    // Solo `escenarios/` entra al contenedor: `oculto/` y `tarea.toml` quedan afuera (M15).
-    let montaje = format!(
-        "{}:/oraculo/escenarios:ro,{SUFIJO_SELINUX}",
-        escenarios.display()
-    );
+/// Sin `escenarios` no monta nada: los comandos en línea no lo necesitan.
+fn args_arranque(
+    imagen: &str,
+    escenarios: Option<&Path>,
+    nombre: &str,
+    comando: &[&str],
+) -> Vec<String> {
     let Some((entrada, resto)) = comando.split_first() else {
         return Vec::new();
     };
@@ -1020,12 +1038,16 @@ fn args_arranque(imagen: &str, escenarios: &Path, nombre: &str, comando: &[&str]
         "--pull=never".into(),
         "--name".into(),
         nombre.into(),
-        "-v".into(),
-        montaje,
-        "--entrypoint".into(),
-        (*entrada).into(),
-        imagen.into(),
     ];
+    // Solo `escenarios/` entra al contenedor: `oculto/` y `tarea.toml` quedan afuera (M15).
+    if let Some(dir) = escenarios {
+        args.push("-v".into());
+        args.push(format!(
+            "{}:/oraculo/escenarios:ro,{SUFIJO_SELINUX}",
+            dir.display()
+        ));
+    }
+    args.extend(["--entrypoint".into(), (*entrada).into(), imagen.into()]);
     args.extend(resto.iter().map(|a| a.to_string()));
     args
 }
@@ -1924,11 +1946,24 @@ mod tests {
     }
 
     #[test]
+    fn escenario_usa_oraculo_detecta_la_ruta_de_la_tarea() {
+        assert!(escenario_usa_oraculo("/oraculo/escenarios/set_get.sh"));
+        assert!(escenario_usa_oraculo("sh /oraculo/x.sh && true"));
+    }
+
+    #[test]
+    fn escenario_usa_oraculo_no_mira_comandos_en_linea() {
+        assert!(!escenario_usa_oraculo("exit 0"));
+        assert!(!escenario_usa_oraculo("test -f /hola.txt"));
+        assert!(!escenario_usa_oraculo("wget -q http://example.com -O /x"));
+    }
+
+    #[test]
     fn escenario_arranque_monta_solo_la_carpeta_escenarios() {
         // M15: el contenedor de escenario ve `escenarios/`, nunca la tarea entera (oculto/ y tarea.toml).
         let args = args_arranque(
             "img:1",
-            Path::new("/t/oraculos/x/escenarios"),
+            Some(Path::new("/t/oraculos/x/escenarios")),
             "nombre",
             &["sleep", "600"],
         );
@@ -1942,11 +1977,25 @@ mod tests {
             vec!["/t/oraculos/x/escenarios:/oraculo/escenarios:ro,z"],
             "{args:?}"
         );
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.contains(":/oraculo:") || a.ends_with(":/oraculo")),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn escenario_arranque_sin_carpeta_no_monta_nada() {
+        let args = args_arranque("img:1", None, "nombre", &["sleep", "600"]);
+        assert!(!args.iter().any(|a| a == "-v"), "{args:?}");
+        assert!(!args.iter().any(|a| a.contains("/oraculo")), "{args:?}");
+        assert!(args.iter().any(|a| a == "img:1"), "{args:?}");
     }
 
     #[test]
     fn entrega_arranque_de_escenario_lleva_http_proxy_false() {
-        let args = args_arranque("img:1", Path::new("/o"), "nombre", &["sleep", "600"]);
+        let args = args_arranque("img:1", Some(Path::new("/o")), "nombre", &["sleep", "600"]);
         let proxy = args.iter().position(|a| a == "--http-proxy=false");
         let imagen = args.iter().position(|a| a == "img:1");
         assert!(proxy.is_some() && proxy < imagen, "{args:?}");

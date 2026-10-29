@@ -1443,12 +1443,33 @@ fn nombre_de(repo: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// Variables de git que redirigen qué repo se lee. Un hook de git las exporta: el subproceso no debe heredarlas.
+const VARIABLES_GIT_DE_REPO: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+];
+
+/// Comando `git -C <repo>` sin las variables `GIT_*` de `VARIABLES_GIT_DE_REPO` heredadas del entorno.
+fn comando_git(repo: &Path, args: &[&str]) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(repo).args(args);
+    for nombre in VARIABLES_GIT_DE_REPO {
+        cmd.env_remove(nombre);
+    }
+    cmd
+}
+
 /// Commit corto del repo original. Vacío si no es un repo git.
 pub(crate) fn commit_de(repo: &Path) -> String {
-    Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["rev-parse", "--short", "HEAD"])
+    comando_git(repo, &["rev-parse", "--short", "HEAD"])
         .output()
         .ok()
         .filter(|salida| salida.status.success())
@@ -1468,6 +1489,19 @@ pub fn codigo_de_estado(estado: Estado) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn comando_git_quita_las_variables_que_redirigen_el_repo() {
+        // Un hook de git exporta GIT_DIR: el subproceso no debe leer el repo de Root en vez del evaluado.
+        let cmd = comando_git(Path::new("/x"), &["rev-parse", "HEAD"]);
+        for nombre in VARIABLES_GIT_DE_REPO {
+            assert!(
+                cmd.get_envs()
+                    .any(|(k, v)| k == std::ffi::OsStr::new(nombre) && v.is_none()),
+                "{nombre} no se quita del entorno del subproceso"
+            );
+        }
+    }
     use crate::oracle::perfiles::herramientas::{EjecutorHerramienta, SalidaHerramienta};
     use crate::oracle::tarea::{Escenario, Exclusion};
     use crate::tipos::{
