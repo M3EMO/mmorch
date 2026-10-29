@@ -1,6 +1,7 @@
 //! Fase de descarga con red real: crates.io y github.com. Necesita podman y la imagen
 //! `localhost/root-oraculo-rust:1`. Sin red, estos tests fallan con un mensaje explícito.
 
+use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -9,8 +10,12 @@ use std::time::{Duration, SystemTime};
 
 use root::oracle::contenedor::{self, Ejecucion};
 use root::oracle::descarga;
+use root::oracle::descarga::Preparacion;
+use root::oracle::descarga::juez_config::ResultadoJuicio;
+use root::oracle::juez::ModeloJuez;
 use root::oracle::tarea::Tarea;
-use root::oracle::{OpcionesOraculo, evaluar};
+use root::oracle::{ErrorOraculo, OpcionesOraculo, evaluar};
+use root::proveedores::{Prompt, RespuestaJuez};
 use root::tipos::{Conteo, Dimension, Estado, Hallazgo, Veredicto};
 use serde_json::Value;
 
@@ -205,6 +210,7 @@ fn evaluar_con(home: &Path, repo: &Path, tarea: &Tarea) -> Veredicto {
 
 #[test]
 fn descarga_dependencia_de_crates_io_compila_en_la_evaluacion_sin_red() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = base().join("repo-compila");
@@ -228,6 +234,7 @@ fn descarga_dependencia_de_crates_io_compila_en_la_evaluacion_sin_red() {
 
 #[test]
 fn descarga_lock_con_ssh_da_sin_veredicto_con_hallazgo_y_no_baja_nada() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = base().join("repo-git");
@@ -289,6 +296,7 @@ source = \"git+ssh://git@github.com/x/ext?rev=1#1\"\n";
 
 #[test]
 fn descarga_el_contenedor_de_descarga_no_ve_oraculo() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = base().join("repo-sin-oraculo");
@@ -308,6 +316,7 @@ fn descarga_el_contenedor_de_descarga_no_ve_oraculo() {
         cache: None,
         cache_rw: false,
         rustsec: None,
+        secretos: Vec::new(),
     };
 
     let r = contenedor::ejecutar(&ejecucion).expect("corre el contenedor");
@@ -323,6 +332,7 @@ fn descarga_el_contenedor_de_descarga_no_ve_oraculo() {
 
 #[test]
 fn descarga_segunda_evaluacion_usa_la_cache_y_no_toca_config() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     // Carpeta propia del test: nunca se comparte con otro test (carrera de `repo-cache`).
@@ -355,6 +365,7 @@ fn descarga_segunda_evaluacion_usa_la_cache_y_no_toca_config() {
 
 #[test]
 fn descarga_dependencia_inexistente_sin_lock_da_no_instala() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = base().join("repo-inexistente");
@@ -381,6 +392,7 @@ fn descarga_dependencia_inexistente_sin_lock_da_no_instala() {
 
 #[test]
 fn descarga_sin_lock_genera_el_lock_y_avisa_que_no_es_reproducible() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = base().join("repo-sin-lock");
@@ -411,6 +423,7 @@ fn descarga_sin_lock_genera_el_lock_y_avisa_que_no_es_reproducible() {
 
 #[test]
 fn descarga_evento_gate_lista_paquetes_con_su_fuente() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = base().join("repo-gate");
@@ -477,6 +490,7 @@ const MAIN_ITOA: &str = r#"fn main() {
 
 #[test]
 fn descarga_gate_de_inventario_se_registra_antes_de_cualquier_red() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = base().join("repo-inalcanzable");
@@ -513,6 +527,7 @@ fn descarga_gate_de_inventario_se_registra_antes_de_cualquier_red() {
 
 #[test]
 fn descarga_rechazos_no_usan_red_ni_contenedor_y_no_filtran_credenciales() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = base().join("repo-rechazos");
@@ -570,6 +585,7 @@ tres = { git = \"https://usuario:clave@host/x.git\" }\n",
 
 #[test]
 fn descarga_dependencia_git_con_rev_compila_en_la_evaluacion_sin_red() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = base().join("repo-git-rev");
@@ -610,6 +626,7 @@ fn descarga_dependencia_git_con_rev_compila_en_la_evaluacion_sin_red() {
 
 #[test]
 fn descarga_dependencia_git_sin_rev_registra_el_commit_y_avisa_que_no_es_reproducible() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = base().join("repo-git-sin-rev");
@@ -664,7 +681,8 @@ fn escribir_config(repo: &Path, texto: &str) {
 }
 
 #[test]
-fn descarga_ignora_el_cargo_config_del_repo_y_baja_con_proxy_muerto() {
+fn descarga_respeta_el_proxy_del_cargo_config_del_repo() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = repo_propio("repo-proxy-");
@@ -673,18 +691,29 @@ fn descarga_ignora_el_cargo_config_del_repo_y_baja_con_proxy_muerto() {
     escribir_config(repo.path(), "[http]\nproxy = \"http://127.0.0.1:9\"\n");
     let tarea = tarea_con(home.path(), &contrato_compila(), &oculto_junit_ok());
 
-    let v = evaluar_con(home.path(), repo.path(), &tarea);
-
-    assert_eq!(
-        v.contrato,
-        Conteo { pasa: 1, total: 1 },
-        "la descarga no usa el proxy del repo y la evaluación compila sin red; hallazgos: {:?}",
-        v.hallazgos
+    // `cargo vendor` corre en /repo y usa el proxy del config: con el proxy muerto no baja nada.
+    let error = evaluar(repo.path(), &tarea, &opciones(home.path()))
+        .expect_err("con el proxy del repo muerto, la descarga falla");
+    assert!(
+        matches!(error, root::oracle::ErrorOraculo::Infra(_)),
+        "error de infraestructura, sin veredicto: {error}"
     );
+
+    // El Gate del inventario lista el proxy antes de cualquier red.
+    let inventario = gates_inventario(home.path());
+    let config = inventario[0]["extra"]["config_cargo"]
+        .as_array()
+        .expect("config_cargo en el Gate del inventario");
+    assert!(
+        config.iter().any(|e| e["clave"] == "http.proxy"),
+        "{config:?}"
+    );
+    let _ = fs::remove_dir_all(&repo);
 }
 
 #[test]
 fn descarga_alias_y_rustc_wrapper_del_repo_no_afectan_la_descarga() {
+    root::saltar_sin_podman!();
     let _g = preparar();
     let home = home_de_prueba();
     let repo = repo_propio("repo-wrapper-");
@@ -997,6 +1026,7 @@ fn descarga_python_preludio_instala_sin_red_con_target_en_tmpfs() {
 
 #[test]
 fn descarga_python_wheel_de_pypi_se_instala_sin_red() {
+    root::saltar_sin_podman!();
     let _g = preparar_py();
     let home = home_de_prueba();
     let repo = repo_propio("repo-py-wheel-");
@@ -1036,6 +1066,7 @@ fn descarga_python_wheel_de_pypi_se_instala_sin_red() {
 
 #[test]
 fn descarga_python_segunda_llamada_usa_la_cache_sin_red() {
+    root::saltar_sin_podman!();
     let _g = preparar_py();
     let home = home_de_prueba();
     let repo = repo_propio("repo-py-cache-");
@@ -1058,6 +1089,7 @@ fn descarga_python_segunda_llamada_usa_la_cache_sin_red() {
 
 #[test]
 fn descarga_python_git_se_clona_al_commit_sin_pip_con_red() {
+    root::saltar_sin_podman!();
     let _g = preparar_py();
     let home = home_de_prueba();
     let repo = repo_propio("repo-py-git-");
@@ -1120,4 +1152,144 @@ fn preparar_py() -> MutexGuard<'static, ()> {
         "falta la imagen {IMAGEN_PY}: la descarga de Python la usa"
     );
     guarda
+}
+
+/// Juez falso de la configuración: responde un texto fijo y cuenta las llamadas.
+struct JuezFalso {
+    respuesta: String,
+    llamadas: Cell<u32>,
+}
+
+impl ModeloJuez for JuezFalso {
+    fn consultar(&self, _prompt: &Prompt) -> Result<RespuestaJuez, ErrorOraculo> {
+        self.llamadas.set(self.llamadas.get() + 1);
+        Ok(RespuestaJuez {
+            texto: self.respuesta.clone(),
+            truncada: false,
+        })
+    }
+}
+
+const CARGO_JUEZ: &str =
+    "[package]\nname = \"dep-juez\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+const CONFIG_GIT_CLI: &str = "[net]\ngit-fetch-with-cli = true\n";
+const CLAVE_GIT_CLI: &str = "net.git-fetch-with-cli";
+const CITA_GIT_CLI: &str = "git-fetch-with-cli = true";
+
+/// Repo con `Cargo.toml` mínimo y `.cargo/config.toml` con `git-fetch-with-cli`. El lenguaje `shell`
+/// no tiene perfil de descarga: la fase no usa la red ni podman, pero el inventario de cargo sí corre.
+fn repo_juez() -> tempfile::TempDir {
+    let repo = repo_propio("repo-juez-config-");
+    fs::write(repo.path().join("Cargo.toml"), CARGO_JUEZ).expect("escribe Cargo.toml");
+    escribir_config(repo.path(), CONFIG_GIT_CLI);
+    repo
+}
+
+/// Fases de los Gates de la corrida de descarga de la tarea, en el orden en que se escribieron.
+fn fases_de_gates(home: &Path) -> Vec<String> {
+    eventos_crudos(home)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str::<Value>(l).expect("línea JSON"))
+        .filter(|v| v["tipo"] == "gate" && v["corrida"] == format!("descarga-{TAREA}"))
+        .map(|v| v["fase"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+#[test]
+fn descarga_juez_config_innecesaria_deja_hallazgo_de_entrega_gate_y_sigue() {
+    let home = home_de_prueba();
+    let repo = repo_juez();
+    let tarea = tarea_en_lenguaje(
+        home.path(),
+        "shell",
+        IMAGEN,
+        &contrato_junit_ok(),
+        &oculto_junit_ok(),
+    );
+    let juez = JuezFalso {
+        respuesta: format!(
+            r#"[{{"clave":"{CLAVE_GIT_CLI}","necesidad":"innecesaria","motivo":"ningún crate usa git-fetch-with-cli","cita":"{CITA_GIT_CLI}"}}]"#
+        ),
+        llamadas: Cell::new(0),
+    };
+
+    let (preparacion, _, juicio) =
+        descarga::preparar_con_juez(repo.path(), &tarea, home.path(), LIMITE, Some(&juez))
+            .expect("el juez no corta la fase de descarga");
+
+    // La descarga sigue: el juez solo informa.
+    let Preparacion::Lista { hallazgos, .. } = &preparacion else {
+        panic!("la descarga debe seguir: {preparacion:?}");
+    };
+    let entrega: Vec<&Hallazgo> = hallazgos
+        .iter()
+        .filter(|h| h.dimension == Dimension::Entrega && h.cita == CITA_GIT_CLI)
+        .collect();
+    assert_eq!(
+        entrega.len(),
+        1,
+        "un hallazgo de entrega del juez: {hallazgos:?}"
+    );
+    assert_eq!(entrega[0].severidad, 1);
+    assert_eq!(juez.llamadas.get(), 1);
+    assert!(
+        matches!(&juicio, Some(ResultadoJuicio::Juzgado { juicios, .. }) if juicios.len() == 1),
+        "{juicio:?}"
+    );
+
+    // Gates en orden: el inventario (que lista la entrada de red) y después el juez.
+    assert_eq!(
+        fases_de_gates(home.path()),
+        vec!["inventario".to_string(), "juez-config".to_string()]
+    );
+    let inventario = gates_inventario(home.path());
+    let config = inventario[0]["extra"]["config_cargo"]
+        .as_array()
+        .expect("config_cargo en el Gate del inventario");
+    assert!(
+        config.iter().any(|e| e["clave"] == CLAVE_GIT_CLI),
+        "{config:?}"
+    );
+    let juicio_gate = gates_de(home.path(), "juez-config");
+    assert_eq!(juicio_gate.len(), 1, "{juicio_gate:?}");
+    assert_eq!(
+        juicio_gate[0]["extra"]["juicios"][0]["clave"],
+        CLAVE_GIT_CLI
+    );
+}
+
+#[test]
+fn descarga_juez_config_json_roto_deja_gate_sin_veredicto_y_sigue() {
+    let home = home_de_prueba();
+    let repo = repo_juez();
+    let tarea = tarea_en_lenguaje(
+        home.path(),
+        "shell",
+        IMAGEN,
+        &contrato_junit_ok(),
+        &oculto_junit_ok(),
+    );
+    let juez = JuezFalso {
+        respuesta: "no es json [".into(),
+        llamadas: Cell::new(0),
+    };
+
+    let (preparacion, _, juicio) =
+        descarga::preparar_con_juez(repo.path(), &tarea, home.path(), LIMITE, Some(&juez))
+            .expect("el juez roto no corta la fase de descarga");
+
+    assert!(
+        matches!(&preparacion, Preparacion::Lista { hallazgos, .. } if hallazgos.iter().all(|h| h.dimension != Dimension::Entrega)),
+        "la descarga sigue y el juez no deja hallazgos: {preparacion:?}"
+    );
+    assert_eq!(
+        juicio,
+        Some(ResultadoJuicio::SinVeredicto {
+            causa: "JSON inválido del juez".into()
+        })
+    );
+    let juicio_gate = gates_de(home.path(), "juez-config");
+    assert_eq!(juicio_gate.len(), 1, "{juicio_gate:?}");
+    assert_eq!(juicio_gate[0]["extra"]["causa"], "JSON inválido del juez");
 }

@@ -57,6 +57,7 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t oraculo evaluar --tarea <t> --repo <dir>` | Corre las suites de la tarea sobre el repo y da el veredicto. | `Veredicto` | construido. Hoy nunca da verde. |
 | `r00t oraculo pendientes --tarea <t> --repo <dir> [--importar <junit> \| --colab]` | Arma el paquete de tests pendientes por entorno para Colab. Con `--importar`, guarda el junit de vuelta. Con `--colab`, corre el paquete en Colab y lo importa. | `{dir, tests}`, o `{importados, ignorados}` | construido (Tarea 7f). `--colab`: Tarea 7j |
 | `r00t oraculo pendientes --liberar` | Libera el runtime de Colab anotado en `$ROOT_HOME/colab/activo.json`, si hay uno, y sale. | sin salida JSON | construido (Tarea 7j) |
+| `r00t oraculo pendientes --vigilar` | Red de seguridad: lee `$ROOT_HOME/colab/activo.json`. Libera el runtime si pasó su tope o si su junit cumple lo pedido. Un runtime vigente no se toca. Sin `--tarea` ni `--repo`. | `{vigilancia, causa}`, con `vigilancia` `sin_runtime`, `vigente` o `liberado` | construido (Tarea 7l) |
 | `r00t oraculo calibrar --tarea <t> --dimension <d> [--n 20] [--semilla 42]` | Mide la exactitud de una dimensión. | `Calibracion` | pendiente (Tarea 12). Hoy sale con `3`. |
 | `r00t oraculo informe --tarea <t> --repo <dir> [--md]` | Arma el informe del PM sobre el veredicto. | `Informe` | pendiente (Tarea 13b). No está en `--help`. |
 | `r00t oraculo validar --casos <dir>` | Mide si el juicio de Root coincide con resultados conocidos. | `Validez` | pendiente (Tarea 12b). No está en `--help`. |
@@ -79,7 +80,9 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 
 **Colab (`oraculo pendientes --colab`).** Root pide un runtime T4 de Colab, corre el paquete, importa el junit y libera el runtime. Antes de pedirlo, Root escribe su id en `$ROOT_HOME/colab/activo.json`. Lo borra al liberar el runtime. Si el proceso muere con `SIGKILL`, el archivo queda. La próxima corrida de `--colab` libera ese runtime primero. `--liberar` hace solo esa limpieza. `SIGINT` y `SIGTERM` también liberan el runtime y registran un `Gate`. El login de Colab lo hace la persona antes de correr el comando. Root no lee el token de la CLI.
 
-**Tope de duración.** Cada corrida de `--colab` tiene un tope, `[colab].minutos_max` en `root.toml`, con 30 minutos por defecto. Al llegar al tope, Root libera el runtime y sale con código `3`.
+**Corte temprano.** `correr.sh` corre en segundo plano en el runtime y Root lo sondea cada 60 segundos. Root libera el runtime en cuanto se cumple lo que pedía la corrida: el junit trae cada test pendiente, con tantos resultados como `repeticiones` de `tarea.toml`. Si `correr.sh` termina antes, Root libera el runtime con lo que haya. El `Gate` de liberación lleva la clave `causa`: `requisito cumplido`, `correr.sh terminó`, `tope de 2 horas` o `señal SIGINT`/`señal SIGTERM`. `--vigilar` es la red de seguridad: libera el runtime anotado si pasó su tope o si su junit cumple lo pedido, aunque la corrida ya no esté viva.
+
+**Tope de duración.** Cada corrida de `--colab` tiene un tope, `[colab].minutos_max` en `root.toml`, con 120 minutos (2 horas) por defecto, con corte temprano. Al llegar al tope, Root libera el runtime, registra un `Gate` con la causa `tope de 2 horas` y sale con código `3`. Los tests sin resultado quedan `Pendiente`.
 
 ## MCP
 
@@ -519,7 +522,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "colab": {
       "$ref": "#/$defs/ConfigColab",
       "default": {
-        "minutos_max": 30
+        "minutos_max": 120.0
       }
     },
     "modelos": {
@@ -545,6 +548,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "deepseek_url": "https://api.deepseek.com",
         "espera_base_ms": 500,
         "timeout_s": 120
+      }
+    },
+    "registro": {
+      "description": "Registros privados de paquetes (`[[registro]]`). Solo los escribe el humano.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/RegistroConfig"
       }
     },
     "ruteo": {
@@ -628,10 +639,9 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "properties": {
         "minutos_max": {
           "description": "Minutos máximos de una corrida en Colab. Al llegar al tope, Root libera el runtime.",
-          "type": "integer",
-          "format": "uint32",
-          "default": 30,
-          "minimum": 0
+          "type": "number",
+          "format": "double",
+          "default": 120.0
         }
       }
     },
@@ -716,6 +726,27 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "anthropic",
         "deepseek"
       ]
+    },
+    "RegistroConfig": {
+      "description": "Una entrada `[[registro]]`: un registro privado y la variable de entorno que tiene su credencial.\nRoot pasa la credencial solo a un repo cuyo registro tiene el mismo host que `url`.",
+      "type": "object",
+      "properties": {
+        "credencial_env": {
+          "description": "Variable de entorno de Root que tiene la credencial. Su valor nunca se escribe en un archivo.",
+          "type": "string",
+          "default": ""
+        },
+        "nombre": {
+          "description": "Nombre del registro. Cargo lo usa en `CARGO_REGISTRIES_<NOMBRE>_TOKEN`.",
+          "type": "string",
+          "default": ""
+        },
+        "url": {
+          "description": "Dirección del índice, con `https` y host.",
+          "type": "string",
+          "default": ""
+        }
+      }
     },
     "Ruteo": {
       "description": "Sección `[ruteo]`: modelo por rol cuando la vía es API, y equivalente de API de cada alias de cupo.",
@@ -1095,6 +1126,15 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "config": {
       "type": "string"
     },
+    "forma": {
+      "description": "Forma de la corrida. Las filas anteriores a la decisión 28 la leen vacía.",
+      "$ref": "#/$defs/Forma",
+      "default": {
+        "config": "",
+        "roles": [],
+        "verificador": false
+      }
+    },
     "id": {
       "type": "string"
     },
@@ -1282,6 +1322,29 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "peso",
         "cumplimiento",
         "evidencia"
+      ]
+    },
+    "Forma": {
+      "description": "Forma de una corrida (decisión 28): roles en orden, si hubo verificador y la configuración.",
+      "type": "object",
+      "properties": {
+        "config": {
+          "type": "string"
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Rol"
+          }
+        },
+        "verificador": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "roles",
+        "verificador",
+        "config"
       ]
     },
     "Fuente": {
@@ -1551,6 +1614,17 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "turnos",
         "intervenciones",
         "invalida"
+      ]
+    },
+    "Rol": {
+      "type": "string",
+      "enum": [
+        "planifica",
+        "organiza",
+        "construye",
+        "verifica",
+        "juzga",
+        "delega"
       ]
     },
     "TasaTest": {
@@ -2153,6 +2227,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "$ref": "#/$defs/Propuesta"
       }
     },
+    "propuestas_forma": {
+      "description": "Cambios de forma sugeridos. Route no los lee.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/PropuestaForma"
+      }
+    },
     "v": {
       "type": "integer",
       "format": "uint32",
@@ -2246,6 +2328,48 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "propuesto"
       ]
     },
+    "EvidenciaForma": {
+      "description": "Evidencia de una forma: n, éxitos, cota de Wilson, USD medio e ids de las filas.",
+      "type": "object",
+      "properties": {
+        "exitos": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "filas": {
+          "description": "Ids de las filas válidas que cuentan para esta forma, ordenados.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "forma": {
+          "$ref": "#/$defs/Forma"
+        },
+        "n": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "usd_medio": {
+          "type": "number",
+          "format": "double"
+        },
+        "wilson_inf": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "forma",
+        "n",
+        "exitos",
+        "wilson_inf",
+        "usd_medio",
+        "filas"
+      ]
+    },
     "EvidenciaModelo": {
       "description": "Estadísticas de un modelo en una tarea, con los ids de las filas que lo sustentan.",
       "type": "object",
@@ -2288,6 +2412,29 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "filas"
       ]
     },
+    "Forma": {
+      "description": "Forma de una corrida (decisión 28): roles en orden, si hubo verificador y la configuración.",
+      "type": "object",
+      "properties": {
+        "config": {
+          "type": "string"
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Rol"
+          }
+        },
+        "verificador": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "roles",
+        "verificador",
+        "config"
+      ]
+    },
     "Propuesta": {
       "description": "Cambio que Aprende sugiere en un rol fijo. El usuario lo aplica a mano en `root.toml`.",
       "type": "object",
@@ -2317,6 +2464,30 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "modelo_actual",
         "modelo_propuesto",
         "evidencia",
+        "diferencia_esperada"
+      ]
+    },
+    "PropuestaForma": {
+      "description": "Cambio de forma sugerido para una tarea. Route no lo lee: el usuario lo aplica a mano.",
+      "type": "object",
+      "properties": {
+        "actual": {
+          "$ref": "#/$defs/EvidenciaForma"
+        },
+        "diferencia_esperada": {
+          "$ref": "#/$defs/Diferencia"
+        },
+        "propuesta": {
+          "$ref": "#/$defs/EvidenciaForma"
+        },
+        "tarea": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tarea",
+        "actual",
+        "propuesta",
         "diferencia_esperada"
       ]
     },

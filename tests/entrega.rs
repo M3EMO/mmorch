@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 use root::oracle::ErrorOraculo;
 use root::oracle::configs::sondas_configs;
 use root::oracle::descarga::{self, Preparacion, Problema, traer_imagenes_base};
-use root::oracle::entrega::{LugarEscenario, construir_dockerfile, entregar, sonda_entrega};
+use root::oracle::entrega::{
+    LugarEscenario, ResultadoDockerfile, construir_dockerfile, entregar, sonda_entrega,
+};
 use root::oracle::junit::ResultadoTest;
 use root::oracle::perfiles::deduplicar_hallazgos;
 use root::oracle::perfiles::herramientas::{
@@ -86,6 +88,7 @@ fn entrega_con(instalar: &str, correr: &str) -> String {
 
 #[test]
 fn entrega_podman_escenarios_ok_y_falla_con_el_producto_vivo() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let repo = repo_con_run("sleep 60\n");
     let tarea = tarea_con(&entrega_con("echo instalado", "sh run.sh"));
@@ -106,6 +109,7 @@ fn entrega_podman_escenarios_ok_y_falla_con_el_producto_vivo() {
 
 #[test]
 fn entrega_podman_correr_que_termina_enseguida_da_no_arranca() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let repo = repo_con_run("");
     let tarea = tarea_con(&entrega_con("echo instalado", "echo adios; exit 1"));
@@ -121,6 +125,7 @@ fn entrega_podman_correr_que_termina_enseguida_da_no_arranca() {
 
 #[test]
 fn entrega_podman_instalar_que_falla_da_no_instala() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let repo = repo_con_run("");
     let tarea = tarea_con(&entrega_con("echo roto; exit 2", "sleep 60"));
@@ -137,6 +142,7 @@ fn entrega_podman_instalar_que_falla_da_no_instala() {
 
 #[test]
 fn entrega_podman_sin_entrega_corre_escenarios_sobre_repo() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let repo = repo_con_run("");
     let tarea = tarea_con(
@@ -208,6 +214,7 @@ fn entrega_escenario_fallido_deja_requisito_en_parcial() {
 
 #[test]
 fn entrega_podman_log_de_correr_queda_en_la_cola_de_40_lineas() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let repo = repo_con_run("");
     let tarea = tarea_con(&entrega_con("echo instalado", "seq 1 20000; sleep 60"));
@@ -225,6 +232,7 @@ fn entrega_podman_log_de_correr_queda_en_la_cola_de_40_lineas() {
 
 #[test]
 fn entrega_podman_escenario_fallido_cita_su_ultima_linea() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let repo = repo_con_run("");
     let tarea = tarea_con(
@@ -360,6 +368,7 @@ fn gates_descarga(home: &Path, nombre: &str) -> Vec<serde_json::Value> {
 
 #[test]
 fn entrega_build_sin_run_construye_arranca_sin_root_y_borra_su_imagen() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let _serie = serie();
     let repo = dockerfile_9d2(&format!(
@@ -379,6 +388,7 @@ fn entrega_build_sin_run_construye_arranca_sin_root_y_borra_su_imagen() {
 
 #[test]
 fn entrega_build_sin_user_corre_como_root_y_la_regla_no_se_duplica() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let _serie = serie();
     let repo = dockerfile_9d2(&format!("{FROM_ALPINE}COPY hola.txt /hola.txt\n"));
@@ -400,27 +410,48 @@ fn entrega_build_sin_user_corre_como_root_y_la_regla_no_se_duplica() {
     );
 }
 
+/// Un `RUN` que pide red se repite con red (Tarea 9d3). La laptop puede tener red o no: los dos
+/// desenlaces válidos son construir con red (hallazgo de severidad 1) o quedar pendiente con su línea.
+fn afirma_repeticion_con_red(r: &ResultadoDockerfile, linea: u32, pista: &str) {
+    assert!(
+        !r.hallazgos
+            .iter()
+            .any(|h| h.detalle.contains("la imagen no construye")),
+        "{:?}",
+        r.hallazgos
+    );
+    if r.con_red {
+        assert!(r.construida, "{r:?}");
+        assert!(r.pendientes.is_empty(), "{:?}", r.pendientes);
+        let de_red: Vec<_> = r
+            .hallazgos
+            .iter()
+            .filter(|h| h.detalle == "la imagen necesita red para construirse")
+            .collect();
+        assert_eq!(de_red.len(), 1, "{:?}", r.hallazgos);
+        assert_eq!((de_red[0].severidad, de_red[0].linea), (1, linea));
+    } else {
+        assert!(!r.construida, "{r:?}");
+        assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+        assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
+        let motivo = &r.pendientes[0].motivo;
+        assert!(
+            motivo.contains(&format!("línea {linea}")) && motivo.contains(pista),
+            "{motivo}"
+        );
+        assert_eq!(r.corre_sin_root, None);
+    }
+}
+
 #[test]
-fn entrega_build_run_apk_sin_red_queda_pendiente_con_su_linea_y_sin_hallazgo() {
+fn entrega_build_run_apk_sin_red_se_repite_con_red_o_queda_pendiente() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let _serie = serie();
     let repo = dockerfile_9d2(&format!("{FROM_ALPINE}RUN apk add --no-cache curl\n"));
     let home = home_9d2();
     let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &[]).expect("construye");
-    assert!(
-        r.hallazgos.is_empty(),
-        "sin red no se cobra al producto: {:?}",
-        r.hallazgos
-    );
-    assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
-    assert_eq!(r.pendientes[0].test, "dockerfile::build");
-    let motivo = &r.pendientes[0].motivo;
-    assert!(
-        motivo.contains("línea 2") && motivo.contains("apk"),
-        "{motivo}"
-    );
-    assert!(!r.construida);
-    assert_eq!(r.corre_sin_root, None);
+    afirma_repeticion_con_red(&r, 2, "apk");
     assert!(
         imagenes_temporales().is_empty(),
         "queda una imagen temporal"
@@ -429,6 +460,7 @@ fn entrega_build_run_apk_sin_red_queda_pendiente_con_su_linea_y_sin_hallazgo() {
 
 #[test]
 fn entrega_build_run_false_da_hallazgo_de_imagen_que_no_construye() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let _serie = serie();
     let repo = dockerfile_9d2(&format!("{FROM_ALPINE}RUN false\n"));
@@ -451,6 +483,7 @@ fn entrega_build_run_false_da_hallazgo_de_imagen_que_no_construye() {
 
 #[test]
 fn entrega_build_copy_inexistente_da_hallazgo_y_no_pendiente() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let _serie = serie();
     let repo = dockerfile_9d2(&format!("{FROM_ALPINE}COPY no-existe /x\n"));
@@ -462,7 +495,8 @@ fn entrega_build_copy_inexistente_da_hallazgo_y_no_pendiente() {
 }
 
 #[test]
-fn entrega_build_wget_sin_red_queda_pendiente() {
+fn entrega_build_wget_sin_red_se_repite_con_red_o_queda_pendiente() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let _serie = serie();
     let repo = dockerfile_9d2(&format!(
@@ -470,17 +504,12 @@ fn entrega_build_wget_sin_red_queda_pendiente() {
     ));
     let home = home_9d2();
     let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &[]).expect("construye");
-    assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
-    assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
-    assert!(
-        r.pendientes[0].motivo.contains("línea 2"),
-        "{:?}",
-        r.pendientes
-    );
+    afirma_repeticion_con_red(&r, 2, "wget");
 }
 
 #[test]
 fn entrega_build_imagen_base_ausente_localmente_es_pendiente_no_infra() {
+    root::saltar_sin_podman!();
     let _serie = serie();
     let repo = dockerfile_9d2("FROM localhost/no-existe:9\nUSER 1000\n");
     let home = home_9d2();
@@ -498,6 +527,7 @@ fn entrega_build_imagen_base_ausente_localmente_es_pendiente_no_infra() {
 
 #[test]
 fn entrega_pull_baja_alpine_ignora_el_alias_y_no_ejecuta_run() {
+    root::saltar_sin_podman!();
     let _serie = serie();
     let repo = repo_9d2(&[(
         "Dockerfile",
@@ -532,6 +562,7 @@ fn entrega_pull_baja_alpine_ignora_el_alias_y_no_ejecuta_run() {
 
 #[test]
 fn entrega_pull_from_con_arg_se_resuelve_y_usa_la_imagen_local() {
+    root::saltar_sin_podman!();
     let _serie = serie();
     let repo = repo_9d2(&[(
         "Dockerfile",
@@ -559,6 +590,7 @@ impl Drop for EtiquetaTemporal {
 
 #[test]
 fn entrega_imagen_base_ya_local_no_se_descarga() {
+    root::saltar_sin_podman!();
     let _serie = serie();
     // El registro `localhost:1` no responde. Si la fase intentara un pull, daría infraestructura.
     let tag = "localhost:1/root-entrega-local:1";
@@ -579,6 +611,7 @@ fn entrega_imagen_base_ya_local_no_se_descarga() {
 
 #[test]
 fn entrega_pull_imagen_inexistente_se_marca_no_existe() {
+    root::saltar_sin_podman!();
     let _serie = serie();
     let repo = repo_9d2(&[(
         "Dockerfile",
@@ -597,6 +630,7 @@ fn entrega_pull_imagen_inexistente_se_marca_no_existe() {
 
 #[test]
 fn entrega_pull_sin_red_no_corta_y_queda_como_problema_de_infraestructura() {
+    root::saltar_sin_podman!();
     let _serie = serie();
     let repo = repo_9d2(&[("Dockerfile", "FROM localhost:1/alpine:3.20\n")]);
     let imagenes =
@@ -612,6 +646,7 @@ fn entrega_pull_sin_red_no_corta_y_queda_como_problema_de_infraestructura() {
 
 #[test]
 fn entrega_pull_que_falla_no_corta_preparar() {
+    root::saltar_sin_podman!();
     let _serie = serie();
     let repo = repo_9d2(&[("Dockerfile", "FROM localhost:1/x:1\nUSER 1000\n")]);
     let home = home_9d2();
@@ -639,6 +674,7 @@ fn entrega_pull_que_falla_no_corta_preparar() {
 
 #[test]
 fn entrega_pull_que_falla_da_sin_veredicto_de_infraestructura_y_el_resto_da_veredicto() {
+    root::saltar_sin_podman!();
     let _serie = serie();
     let repo = repo_9d2(&[
         ("README.md", "# x\n"),
@@ -683,6 +719,7 @@ fn entrega_pull_que_falla_da_sin_veredicto_de_infraestructura_y_el_resto_da_vere
 
 #[test]
 fn entrega_gate_descarga_incluye_imagenes_con_su_digest() {
+    root::saltar_sin_podman!();
     let _serie = serie();
     let repo = repo_9d2(&[(
         "Dockerfile",
@@ -708,6 +745,7 @@ fn entrega_gate_descarga_incluye_imagenes_con_su_digest() {
 
 #[test]
 fn entrega_preparar_imagen_inexistente_no_da_hallazgo_al_producto() {
+    root::saltar_sin_podman!();
     let _serie = serie();
     let repo = repo_9d2(&[(
         "Dockerfile",
@@ -724,6 +762,7 @@ fn entrega_preparar_imagen_inexistente_no_da_hallazgo_al_producto() {
 
 #[test]
 fn entrega_imagen_inexistente_o_privada_da_sin_veredicto_sin_hallazgo() {
+    root::saltar_sin_podman!();
     let _serie = serie();
     let repo = repo_9d2(&[(
         "Dockerfile",
@@ -751,6 +790,7 @@ fn entrega_imagen_inexistente_o_privada_da_sin_veredicto_sin_hallazgo() {
 
 #[test]
 fn entrega_arg_base_construye_con_el_from_resuelto() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let _serie = serie();
     let repo = repo_9d2(&[
@@ -810,6 +850,7 @@ fn contenedores_escenario() -> Vec<String> {
 
 #[test]
 fn entrega_escenario_corre_contra_la_imagen_construida() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let _serie = serie();
     let repo = dockerfile_9d2(&format!(
@@ -845,6 +886,7 @@ fn entrega_escenario_corre_contra_la_imagen_construida() {
 
 #[test]
 fn entrega_escenario_sin_construir_corre_en_contenedor_de_evaluacion() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let _serie = serie();
     let repo = dockerfile_9d2(&format!("{FROM_ALPINE}RUN false\n"));
@@ -875,6 +917,7 @@ fn entrega_escenario_sin_construir_corre_en_contenedor_de_evaluacion() {
 
 #[test]
 fn entrega_escenario_con_red_queda_pendiente_y_no_false() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let _serie = serie();
     let repo = dockerfile_9d2(&format!(
@@ -920,6 +963,7 @@ fn tarea_en(dir: &Path, extra: &str) -> Tarea {
 
 #[test]
 fn entrega_escenario_de_oraculo_corre_contra_la_imagen() {
+    root::saltar_sin_podman!();
     use std::os::unix::fs::PermissionsExt;
     asegurar_imagen(ALPINE);
     let _serie = serie();
@@ -962,6 +1006,7 @@ fn entrega_escenario_de_oraculo_corre_contra_la_imagen() {
 
 #[test]
 fn entrega_imagen_construida_no_contiene_oraculo() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let _serie = serie();
     // Si el build viera /oraculo, esta RUN fallaría y construida sería falso.
@@ -978,6 +1023,7 @@ fn entrega_imagen_construida_no_contiene_oraculo() {
 
 #[test]
 fn entrega_escenario_sin_timeout_en_la_imagen_no_sale_127() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let _serie = serie();
     // Se quita `timeout` de la imagen: el escenario debe correr igual, con el plazo de Root.
@@ -1055,6 +1101,7 @@ const ESCENARIO_MARCA_RAIZ: &str = "[[escenario]]\nid = \"marca\"\ncmd = \"test 
 
 #[test]
 fn entrega_dockerfile_de_la_raiz_gana_y_solo_se_construye_uno() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let _serie = serie();
     // La raíz copia `hola.txt`. El otro Dockerfile copia un archivo que no existe: si se construyera, fallaría.
@@ -1118,6 +1165,7 @@ fn entrega_dockerfile_de_la_raiz_gana_y_solo_se_construye_uno() {
 
 #[test]
 fn entrega_containerfile_gana_sobre_el_dockerfile_de_la_raiz() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let _serie = serie();
     let repo = repo_9d2(&[
@@ -1159,6 +1207,7 @@ fn entrega_containerfile_gana_sobre_el_dockerfile_de_la_raiz() {
 
 #[test]
 fn entrega_containerfile_inexistente_avisa_y_usa_el_criterio_siguiente() {
+    root::saltar_sin_podman!();
     asegurar_imagen(ALPINE);
     let _serie = serie();
     let repo = repo_9d2(&[(
@@ -1192,6 +1241,7 @@ fn entrega_containerfile_inexistente_avisa_y_usa_el_criterio_siguiente() {
 
 #[test]
 fn entrega_varios_dockerfile_sin_eleccion_no_construye_y_avisa() {
+    root::saltar_sin_podman!();
     let _serie = serie();
     let repo = repo_9d2(&[
         (
@@ -1250,6 +1300,7 @@ fn entrega_varios_dockerfile_sin_eleccion_no_construye_y_avisa() {
 
 #[test]
 fn entrega_scratch_construye_sin_red_y_corre_sin_root_por_inspect() {
+    root::saltar_sin_podman!();
     let _serie = serie();
     let repo = dockerfile_9d2("FROM scratch\nCOPY hola.txt /hola.txt\nUSER 1000\n");
     let home = home_9d2();
@@ -1266,6 +1317,7 @@ fn entrega_scratch_construye_sin_red_y_corre_sin_root_por_inspect() {
 
 #[test]
 fn entrega_scratch_escenarios_corren_en_contenedor_de_evaluacion_con_aviso() {
+    root::saltar_sin_podman!();
     let _serie = serie();
     let repo = dockerfile_9d2("FROM scratch\nCOPY hola.txt /hola.txt\nUSER 1000\n");
     let home = home_9d2();
@@ -1358,6 +1410,7 @@ fn servidor_401() -> u16 {
 
 #[test]
 fn descarga_pull_401_de_podman_pide_credenciales() {
+    root::saltar_sin_podman!();
     let puerto = servidor_401();
     // Root no baja con `--tls-verify=false`: el test solo mira qué dice podman ante un 401 real.
     let salida = Command::new("podman")
@@ -1408,6 +1461,7 @@ impl Drop for RegistroInseguro {
 
 #[test]
 fn entrega_pide_credenciales_no_da_hallazgo_al_producto() {
+    root::saltar_sin_podman!();
     let _serie = serie();
     let puerto = servidor_401();
     let _registro = RegistroInseguro::con(puerto);

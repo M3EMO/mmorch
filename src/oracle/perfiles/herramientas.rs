@@ -66,6 +66,7 @@ impl EjecutorContenedor {
             cache: self.cache.clone(),
             cache_rw: false,
             rustsec: self.rustsec.clone(),
+            secretos: Vec::new(),
         }
     }
 }

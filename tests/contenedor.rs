@@ -51,6 +51,7 @@ fn ejecucion(repo: &std::path::Path, salida: &std::path::Path, cmd: &str) -> Eje
         cache: None,
         cache_rw: false,
         rustsec: None,
+        secretos: Vec::new(),
     }
 }
 
@@ -60,6 +61,7 @@ fn correr(e: &Ejecucion) -> Resultado {
 
 #[test]
 fn contenedor_escritura_en_repo_falla_porque_el_montaje_es_ro() {
+    root::saltar_sin_podman!();
     let _guarda = preparar();
     let repo = tempfile::tempdir().expect("temp dir");
     let salida = tempfile::tempdir().expect("temp dir");
@@ -70,6 +72,7 @@ fn contenedor_escritura_en_repo_falla_porque_el_montaje_es_ro() {
 
 #[test]
 fn contenedor_escritura_en_salida_funciona_y_llega_al_host() {
+    root::saltar_sin_podman!();
     let _guarda = preparar();
     let repo = tempfile::tempdir().expect("temp dir");
     let salida = tempfile::tempdir().expect("temp dir");
@@ -84,6 +87,7 @@ fn contenedor_escritura_en_salida_funciona_y_llega_al_host() {
 
 #[test]
 fn contenedor_red_cortada_impide_salir_a_internet() {
+    root::saltar_sin_podman!();
     let _guarda = preparar();
     let repo = tempfile::tempdir().expect("temp dir");
     let salida = tempfile::tempdir().expect("temp dir");
@@ -97,6 +101,7 @@ fn contenedor_red_cortada_impide_salir_a_internet() {
 
 #[test]
 fn contenedor_timeout_da_error_de_infraestructura_y_borra_el_contenedor() {
+    root::saltar_sin_podman!();
     let _guarda = preparar();
     let repo = tempfile::tempdir().expect("temp dir");
     let salida = tempfile::tempdir().expect("temp dir");
@@ -123,6 +128,7 @@ fn contenedor_timeout_da_error_de_infraestructura_y_borra_el_contenedor() {
 
 #[test]
 fn contenedor_imagen_inexistente_da_error_de_infraestructura() {
+    root::saltar_sin_podman!();
     let _guarda = preparar();
     let repo = tempfile::tempdir().expect("temp dir");
     let salida = tempfile::tempdir().expect("temp dir");
@@ -137,6 +143,7 @@ fn contenedor_imagen_inexistente_da_error_de_infraestructura() {
 
 #[test]
 fn contenedor_codigo_de_salida_del_comando_llega_intacto() {
+    root::saltar_sin_podman!();
     let _guarda = preparar();
     let repo = tempfile::tempdir().expect("temp dir");
     let salida = tempfile::tempdir().expect("temp dir");

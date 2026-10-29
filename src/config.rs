@@ -38,6 +38,22 @@ pub struct Config {
     pub umbral_wilson: f64,
     pub proveedores: ConfigProveedores,
     pub colab: ConfigColab,
+    /// Registros privados de paquetes (`[[registro]]`). Solo los escribe el humano.
+    #[serde(default, rename = "registro")]
+    pub registros: Vec<RegistroConfig>,
+}
+
+/// Una entrada `[[registro]]`: un registro privado y la variable de entorno que tiene su credencial.
+/// Root pasa la credencial solo a un repo cuyo registro tiene el mismo host que `url`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct RegistroConfig {
+    /// Nombre del registro. Cargo lo usa en `CARGO_REGISTRIES_<NOMBRE>_TOKEN`.
+    pub nombre: String,
+    /// Dirección del índice, con `https` y host.
+    pub url: String,
+    /// Variable de entorno de Root que tiene la credencial. Su valor nunca se escribe en un archivo.
+    pub credencial_env: String,
 }
 
 /// Sección `[colab]`: tope de duración de una corrida en Colab.
@@ -45,7 +61,7 @@ pub struct Config {
 #[serde(default)]
 pub struct ConfigColab {
     /// Minutos máximos de una corrida en Colab. Al llegar al tope, Root libera el runtime.
-    pub minutos_max: u32,
+    pub minutos_max: f64,
 }
 
 /// Sección `[proveedores]`: URLs de las APIs, espera base de reintentos y timeout por intento.
@@ -132,13 +148,14 @@ impl Default for Config {
             umbral_wilson: 0.6,
             proveedores: ConfigProveedores::default(),
             colab: ConfigColab::default(),
+            registros: Vec::new(),
         }
     }
 }
 
 impl Default for ConfigColab {
     fn default() -> Self {
-        ConfigColab { minutos_max: 30 }
+        ConfigColab { minutos_max: 120.0 }
     }
 }
 
@@ -234,6 +251,57 @@ fn exigir_topes_declarados(texto: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// Reglas de cada `[[registro]]`: nombre, `url` con `https` y host sin credenciales, y variable
+/// de entorno en mayúsculas. Un nombre no puede repetirse. Los mensajes no repiten la `url`.
+fn validar_registros(registros: &[RegistroConfig]) -> Result<(), Error> {
+    let mut nombres: Vec<&str> = Vec::new();
+    for registro in registros {
+        let nombre = registro.nombre.as_str();
+        let nombre_valido = !nombre.is_empty()
+            && nombre
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if !nombre_valido {
+            return Err(Error::ConfigValor(format!(
+                "registro.nombre \"{nombre}\" debe tener solo letras, números, - o _"
+            )));
+        }
+        if !url_de_registro_valida(&registro.url) {
+            return Err(Error::ConfigValor(format!(
+                "registro \"{nombre}\": url debe ser https, con host y sin usuario ni contraseña"
+            )));
+        }
+        let env = registro.credencial_env.as_str();
+        let env_valida = !env.is_empty()
+            && env
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+        if !env_valida {
+            return Err(Error::ConfigValor(format!(
+                "registro \"{nombre}\": credencial_env debe ser un nombre de variable con A-Z, 0-9 o _"
+            )));
+        }
+        if nombres.contains(&nombre) {
+            return Err(Error::ConfigValor(format!(
+                "registro \"{nombre}\" está repetido"
+            )));
+        }
+        nombres.push(nombre);
+    }
+    Ok(())
+}
+
+/// `true` si la URL parsea, usa `https`, tiene host y no lleva usuario ni contraseña.
+fn url_de_registro_valida(texto: &str) -> bool {
+    let Ok(url) = url::Url::parse(texto) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str().is_some_and(|h| !h.is_empty())
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
 impl Config {
     /// Parsea el texto de un `root.toml`. Un texto vacío da los defaults.
     pub fn desde_texto(texto: &str) -> Result<Config, Error> {
@@ -282,12 +350,19 @@ impl Config {
                 "balance.prefiere_api_sobre debe estar en (0, 1]".into(),
             ));
         }
-        if self.colab.minutos_max == 0 {
+        let minutos = self.colab.minutos_max;
+        if !(minutos.is_finite() && minutos > 0.0) {
             return Err(Error::ConfigValor(
-                "colab.minutos_max debe ser al menos 1".into(),
+                "colab.minutos_max debe ser mayor que 0".into(),
             ));
         }
-        Ok(())
+        // Un valor finito enorme no entra en un `Duration`: `from_secs_f64` entraría en pánico.
+        if std::time::Duration::try_from_secs_f64(minutos * 60.0).is_err() {
+            return Err(Error::ConfigValor(
+                "colab.minutos_max es demasiado grande".into(),
+            ));
+        }
+        validar_registros(&self.registros)
     }
 
     /// Lee `root.toml`. Si el archivo no existe, devuelve el default.
@@ -549,10 +624,18 @@ tope_usd = 200.0
     }
 
     #[test]
-    fn colab_config_minutos_max_por_defecto_es_30() {
-        assert_eq!(Config::default().colab.minutos_max, 30);
+    fn colab_config_minutos_max_por_defecto_es_120() {
+        assert_eq!(Config::default().colab.minutos_max, 120.0);
         let c = Config::desde_texto("").expect("vacío debe parsear");
-        assert_eq!(c.colab.minutos_max, 30);
+        assert_eq!(c.colab.minutos_max, 120.0);
+    }
+
+    #[test]
+    fn colab_config_sin_minutos_max_vale_120() {
+        for texto in ["", "[colab]\n"] {
+            let c = Config::desde_texto(texto).expect("debe parsear");
+            assert_eq!(c.colab.minutos_max, 120.0, "texto {texto:?}");
+        }
     }
 
     #[test]
@@ -566,9 +649,119 @@ tope_usd = 200.0
     #[test]
     fn colab_config_minutos_max_ida_y_vuelta() {
         let c = Config::desde_texto("[colab]\nminutos_max = 45").expect("debe parsear");
-        assert_eq!(c.colab.minutos_max, 45);
+        assert_eq!(c.colab.minutos_max, 45.0);
         let texto = toml::to_string(&c).expect("serializa");
         let vuelta = Config::desde_texto(&texto).expect("vuelve a parsear");
         assert_eq!(vuelta, c);
+    }
+
+    #[test]
+    fn colab_config_minutos_max_acepta_fraccion() {
+        let c = Config::desde_texto("[colab]\nminutos_max = 0.01").expect("debe parsear");
+        assert_eq!(c.colab.minutos_max, 0.01);
+    }
+
+    #[test]
+    fn colab_config_minutos_max_entero_sigue_cargando() {
+        let c = Config::desde_texto("[colab]\nminutos_max = 45").expect("debe parsear");
+        assert_eq!(c.colab.minutos_max, 45.0);
+    }
+
+    #[test]
+    fn colab_config_minutos_max_enorme_da_error_y_no_panica() {
+        let error = Config::desde_texto("[colab]\nminutos_max = 1e300").expect_err("enorme");
+        assert_eq!(error.codigo_de_salida(), 2);
+        assert!(error.to_string().contains("colab.minutos_max"), "{error}");
+    }
+
+    fn registro_texto(nombre: &str, url: &str, env: &str) -> String {
+        format!(
+            "[[registro]]\nnombre = \"{nombre}\"\nurl = \"{url}\"\ncredencial_env = \"{env}\"\n"
+        )
+    }
+
+    #[test]
+    fn registro_sin_seccion_da_lista_vacia() {
+        let c = Config::desde_texto("").expect("vacío debe parsear");
+        assert!(c.registros.is_empty());
+    }
+
+    #[test]
+    fn registro_valido_parsea_y_guarda_sus_tres_campos() {
+        let texto = registro_texto("priv", "https://reg.example/index/", "ROOT_TOKEN_PRIV");
+        let c = Config::desde_texto(&texto).expect("debe parsear");
+        assert_eq!(c.registros.len(), 1);
+        assert_eq!(c.registros[0].nombre, "priv");
+        assert_eq!(c.registros[0].url, "https://reg.example/index/");
+        assert_eq!(c.registros[0].credencial_env, "ROOT_TOKEN_PRIV");
+    }
+
+    #[test]
+    fn registro_con_nombre_invalido_da_codigo_2() {
+        for nombre in ["", "con espacio", "punto.no", "barra/no"] {
+            let texto = registro_texto(nombre, "https://reg.example/", "ROOT_TOKEN_X");
+            let error = Config::desde_texto(&texto).expect_err(nombre);
+            assert_eq!(error.codigo_de_salida(), 2, "{nombre}");
+            assert!(error.to_string().contains("registro"), "{error}");
+        }
+    }
+
+    #[test]
+    fn registro_con_url_que_no_es_https_o_sin_host_da_codigo_2() {
+        for url in [
+            "http://reg.example/index/",
+            "ssh://reg.example/index/",
+            "https://",
+            "no es una url",
+        ] {
+            let texto = registro_texto("priv", url, "ROOT_TOKEN_X");
+            let error = Config::desde_texto(&texto).expect_err(url);
+            assert_eq!(error.codigo_de_salida(), 2, "{url}");
+        }
+    }
+
+    #[test]
+    fn registro_con_usuario_o_clave_en_la_url_da_codigo_2() {
+        for url in ["https://u@reg.example/", "https://u:clave@reg.example/"] {
+            let texto = registro_texto("priv", url, "ROOT_TOKEN_X");
+            let error = Config::desde_texto(&texto).expect_err(url);
+            assert_eq!(error.codigo_de_salida(), 2, "{url}");
+            assert!(!error.to_string().contains("clave"), "{error}");
+        }
+    }
+
+    #[test]
+    fn registro_credencial_env_vacia_o_con_minusculas_da_codigo_2() {
+        for env in ["", "minuscula", "CON-GUION"] {
+            let texto = registro_texto("priv", "https://reg.example/", env);
+            let error = Config::desde_texto(&texto).expect_err(env);
+            assert_eq!(error.codigo_de_salida(), 2, "{env}");
+        }
+    }
+
+    #[test]
+    fn registro_nombres_repetidos_dan_codigo_2() {
+        let texto = format!(
+            "{}{}",
+            registro_texto("priv", "https://reg.example/", "ROOT_TOKEN_A"),
+            registro_texto("priv", "https://otro.example/", "ROOT_TOKEN_B")
+        );
+        let error = Config::desde_texto(&texto).expect_err("repetido");
+        assert_eq!(error.codigo_de_salida(), 2);
+        assert!(error.to_string().contains("priv"), "{error}");
+    }
+
+    #[test]
+    fn colab_config_minutos_max_negativo_o_infinito_da_error() {
+        for texto in ["[colab]\nminutos_max = -1.0", "[colab]\nminutos_max = inf"] {
+            let error = Config::desde_texto(texto).expect_err(texto);
+            assert_eq!(error.codigo_de_salida(), 2);
+            assert!(
+                error
+                    .to_string()
+                    .contains("colab.minutos_max debe ser mayor que 0"),
+                "{error}"
+            );
+        }
     }
 }

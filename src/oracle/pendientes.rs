@@ -254,12 +254,16 @@ fn localizar(tarea: &Tarea, archivo: &str) -> Result<PathBuf, ErrorOraculo> {
 }
 
 /// Script que corre los nodos pendientes y deja `pendientes.xml` al lado.
+/// Si hay una carpeta `bin/` al lado (el binario de respaldo de Colab), la pone al frente del
+/// `PATH`. Cómo usan los tests ocultos ese binario en lugar de `cargo` es una pregunta abierta
+/// para el planner.
 fn guion_correr(nodos: &[String]) -> String {
     let lista: Vec<String> = nodos.iter().map(|n| comillas(n)).collect();
     format!(
         "#!/usr/bin/env bash\n\
          set -euo pipefail\n\
          cd \"$(dirname \"$0\")\"\n\
+         if [ -d bin ]; then export PATH=\"$(pwd)/bin:$PATH\"; fi\n\
          export ORACULO_REPO=\"$(pwd)/repo\"\n\
          export CARGO_TARGET_DIR=\"$(pwd)/target\"\n\
          python3 -m pytest -q -p no:cacheprovider --junitxml={XML_PENDIENTES} {}\n",
@@ -342,6 +346,15 @@ mod tests {
             texto.contains("python3 -m pytest -q -p no:cacheprovider --junitxml=pendientes.xml")
         );
         assert!(texto.contains("'tests/test_x.py::test_rendimiento[gpu-10000-res1]'"));
+    }
+
+    #[test]
+    fn pendiente_guion_correr_agrega_bin_al_path_si_existe() {
+        let texto = guion_correr(&[]);
+        assert!(
+            texto.contains("if [ -d bin ]; then export PATH=\"$(pwd)/bin:$PATH\"; fi"),
+            "{texto}"
+        );
     }
 
     #[test]
