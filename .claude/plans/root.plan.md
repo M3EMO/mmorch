@@ -62,6 +62,9 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 36 | "Acepto P33b b, P39 c con P44 c, y P46 a." P39 c: memora y brasa calibran al evaluador (Tareas 12 y 12b), y la Tarea 16 mide con `r00t corre` una tarea de Graft con oráculo oculto nuevo (Tarea 16b). P44 c: memora sigue hasta G3, y después el usuario decide si sigue (gate G4). P33b y P46 son de la sesión de fichas y viven en sus borradores. |
 | 37 | P48: "P48 a pero emita sus tareas en toml". La tarea de Graft de la Tarea 16 es un lector de planes: lee un `plan.md` y emite en TOML sus tareas, dependencias y comandos `Validate`. Ver Tarea 16b. |
 | 38 | P49: "P49 b: la Tarea 16 corre Graft y memora." La corrida real de la Tarea 16 mide `graft-lector-planes` y memora, con una corrida completa más de Haiku sobre memora. |
+| 39 | P50: "P50 c". La lectura del oráculo se cubre con dos capas: el builder corre aislado de `ROOT_HOME`, y Root además busca lecturas en el transcript. Ver Tarea 26. |
+| 40 | P51: "P51 c". En Colab, `correr.sh` corre sin red dentro de `unshare -rn`. Si Colab no lo permite, la corrida se hace igual y el informe lo avisa. Ver Tarea 23. |
+| 41 | G1d: "haiku con razonamiento". G1e: "usar un modelo disponible de deepseek." G1f: "d". DeepSeek usa modelos vigentes y envía `thinking` explícito. Haiku con razonamiento es el respaldo de Verifica y Juzga. Los precios de DeepSeek salen de `mmorch/config.py`: `deepseek-flash` 0,14 y 0,28 USD, `deepseek-v4-pro` 1,74 y 3,48 USD por millón de tokens. Ver Tarea 21b. |
 
 ## Patterns to Mirror
 
@@ -1512,7 +1515,7 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
   - Reserva: con un lock sobre `eventos.jsonl`, Root lee el gasto, compara y escribe un evento de reserva con el costo estimado, en un solo tramo. `observe::uso` suma las reservas abiertas. El evento final de la llamada cierra su reserva con el costo real. Así dos procesos no gastan el mismo margen.
   - Cada reintento repite el chequeo de tope. Una falla después de enviar el pedido (timeout, 5xx o un 200 que no parsea) registra el costo estimado de peor caso, con la marca `costo_estimado`.
   - La estimación de entrada usa los bytes UTF-8 del prompt: un token nunca ocupa menos de un byte.
-  - Anthropic recibe el razonamiento: con `razonamiento = true`, el pedido lleva pensamiento extendido con un presupuesto de tokens que cuenta en la estimación. Un modelo que no lo admite da `ErrorOraculo::Eleccion` en los roles Verifica y Juzga.
+  - El razonamiento en los proveedores (B10) pasa a la Tarea 21b.
   - Medios y bajos de topes: M2 (`elegir` usa `tokens_estimados` para el cupo), M3 (la sesión importada usa su propia hora), B8 (el lock cubre la lista de archivos rotados), B9 (sin presupuesto, código 3 y `Gate`), B12 (sin `costUSD`, usa `total_cost_usd`; un costo negativo es error) y M1 (`observa claude --via nube` registra el `Gate` al cruzar el tope).
 - **Dónde**: todo en la nube. Los tests usan el servidor HTTP falso y procesos en paralelo.
 - **Validate**: `cargo test`:
@@ -1521,7 +1524,29 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
   - Cuatro procesos en paralelo con 99 USD gastados de 100 no pasan el tope.
   - Un servidor que tarda más que el timeout deja un evento con costo estimado distinto de 0.
   - Un prompt de 1000 caracteres de 3 bytes estima al menos 3000 tokens de entrada.
+
+### Tarea 21b: Razonamiento explícito y modelos vigentes (B10 y decisión 41; gravedad alta)
+- **Problema**: el invariante "el verificador razona" no se cumple en ningún proveedor.
+  - `anthropic.rs` nunca envía el razonamiento (B10).
+  - `deepseek.rs` no envía `thinking`. El default de Verifica y Juzga es `deepseek-reasoner`, un alias que `/models` ya no lista. mmorch lo resuelve hoy como `deepseek-flash` con `"thinking": {"type": "enabled"}`.
+  - Root no trae precios por defecto, así que `r00t llama` rechaza todo modelo hasta que el humano escriba `[precios]`.
+- **Action**:
+  - DeepSeek envía siempre `thinking` en forma explícita: `{"type": "enabled"}` si `Eleccion.razonamiento` es verdadero, y `{"type": "disabled"}` si es falso.
+  - Los defaults de `[ruteo]` pasan a modelos vigentes: Delega usa `deepseek-flash` sin razonamiento. Verifica y Juzga usan `deepseek-flash` con razonamiento. `deepseek-v4-pro` queda disponible en `[precios]` para quien lo configure.
+  - Un `root.toml` viejo con `deepseek-chat` o `deepseek-reasoner` se sigue leyendo. Root lo traduce a `deepseek-flash` con el razonamiento que pide el rol, y avisa en stderr.
+  - Anthropic recibe el razonamiento: con `razonamiento = true`, el pedido lleva pensamiento extendido con un presupuesto de tokens. Ese presupuesto cuenta en la estimación de costo de la Tarea 21.
+  - Respaldo (G1d): `[ruteo.verifica]` y `[ruteo.juzga]` suman `respaldo`, con Haiku por defecto. Route usa el respaldo solo si el proveedor principal no está disponible: sin clave, o con el breaker abierto. El respaldo también lleva razonamiento. Si un modelo no admite razonamiento, Verifica y Juzga dan `ErrorOraculo::Eleccion`.
+  - Precios por defecto (G1f): `deepseek-flash` 0,14 y 0,28 USD, y `deepseek-v4-pro` 1,74 y 3,48 USD por millón de tokens. Cada valor cita su origen en un comentario: `mmorch/config.py`. Un `[precios]` de `root.toml` reemplaza el default. El precio de Haiku espera a P52.
+  - `docs/root.toml.example` muestra esos defaults en lugar de valores vacíos.
+- **Dónde**: todo en la nube, con el servidor HTTP falso.
+- **Validate**: `cargo test proveedores` y `cargo test config`:
+  - Un pedido de Juzga a DeepSeek lleva `"thinking": {"type": "enabled"}` en el cuerpo.
+  - Un pedido de Delega a DeepSeek lleva `"thinking": {"type": "disabled"}`.
   - Un pedido a Anthropic con `razonamiento = true` lleva el campo de pensamiento extendido.
+  - Sin `root.toml`, Verifica y Juzga eligen `deepseek-flash` con razonamiento, y `r00t llama` tiene precio para ese modelo.
+  - Un `root.toml` con `deepseek-reasoner` se lee como `deepseek-flash` con razonamiento.
+  - Sin `DEEPSEEK_API_KEY`, Juzga elige el respaldo Haiku con razonamiento.
+- **En la laptop**: un pedido real a `/models` de DeepSeek confirma que `deepseek-flash` y `deepseek-v4-pro` siguen listados. Ese GET no genera costo.
 
 ### Tarea 22: Descarga y contenedores sin fugas (C1 y medios o bajos de seguridad; gravedad crítica)
 - **Action**:
@@ -1551,6 +1576,7 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
   - A10: un test omitido cuenta en el universo de su requisito como "no verde". Un requisito con un test omitido no pasa del nivel 2, y si el test está en `[[entorno]]`, queda `Pendiente`.
   - M15: el escenario monta solo la carpeta `escenarios/` de la tarea.
   - B16: `colab.json` guarda el commit del repo, y `--importar` ignora un resultado de otro commit.
+  - A8 (decisión 40): el paquete de Colab lleva las dependencias ya bajadas por la fase de descarga. `correr.sh` compila y corre los tests dentro de `unshare -rn`, sin red. Si Colab no permite `unshare`, la corrida sigue con red, registra un `Gate` y `Informe.confianza` dice "corrida de Colab con red: el oráculo pudo filtrarse".
 - **Dónde**: las reglas de junit, requisitos y Colab se prueban en la nube. Los montajes y los códigos de salida de pytest se prueban en la laptop, con podman.
 - **Validate**: `cargo test`:
   - Después de `pendientes --colab` no queda ningún archivo de tests ocultos fuera de `oraculos/`.
@@ -1579,10 +1605,24 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
 - **Dónde**: la lógica en la nube. La instalación real sin red en la laptop.
 - **Validate**: un test por defecto, con el escenario del informe.
 
-### Tarea 26: Detección de lectura del oráculo (A3)
-- Espera a P50. Hasta la respuesta, Sonnet no la construye.
+### Tarea 26: Lectura del oráculo: aislamiento y detección (A3, decisión 39)
+- **Capa 1, aislamiento**: el builder de `r00t corre` no puede leer `ROOT_HOME`. El mecanismo espera a P53, porque toca credenciales o el sistema operativo.
+- **Capa 2, detección**: `r00t corre` lanza cada sesión con `--output-format stream-json` y guarda el transcript en `ROOT_HOME`, fuera del alcance del builder.
+  - Root revisa cada llamada a herramienta: su entrada y su salida.
+  - Busca la ruta real de `oraculos/` y de `ROOT_HOME`, también después de resolver rutas relativas y enlaces cuando el comando las nombra.
+  - Busca los nombres de los tests ocultos y una huella de su contenido: líneas largas y únicas de cada archivo oculto.
+  - Un hallazgo emite un evento `OraculoLeido` con la cita, y la corrida queda inválida.
+- **Límite**: la detección es un registro, no una defensa. La defensa es el aislamiento.
+- **Dónde**: el lector de `stream-json` y la búsqueda se construyen en la nube con transcripts de fixture. El aislamiento y la integración con `r00t corre` van en la laptop, con la Tarea 16.
+- **Validate**:
+  - Un transcript de fixture con `cat ../../.local/share/root/oraculos/x/oculto/t.py` emite `OraculoLeido`.
+  - Un transcript que muestra una línea larga de un test oculto, sin nombrar la ruta, también lo emite.
+  - Un transcript limpio no emite nada.
+  - Con el aislamiento activo, el builder no puede abrir `ROOT_HOME`.
 
-**Orden (2026-10-28):** 21, 22, 23, 24 y 25. La 21 va primero porque hoy un juez puede gastar API sin tope. La 22 cierra la ejecución de código con red. Todas empiezan después de que entren las Tareas 20, 15d y 6e de la rama `claude/loving-ptolemy-9bj686`. Las tareas no dependen de números de línea: nombran funciones y archivos.
+**Orden (2026-10-29):** 21, 21b, 22, 23, 24, 25 y la parte de nube de 26. La 21b va justo después de la 21: hoy ningún juez razona, y Verifica y Juzga apuntan a un alias viejo. La 21b necesita la validación de precios de la 21.
+
+**Orden anterior (2026-10-28):** 21, 22, 23, 24 y 25. La 21 va primero porque hoy un juez puede gastar API sin tope. La 22 cierra la ejecución de código con red. Todas empiezan después de que entren las Tareas 20, 15d y 6e de la rama `claude/loving-ptolemy-9bj686`. Las tareas no dependen de números de línea: nombran funciones y archivos.
 
 **Preguntas abiertas (sin responder)**
 
@@ -1601,3 +1641,20 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
   - c) Como b), pero si Colab no permite `unshare`, la corrida se hace igual y el informe lo avisa.
 
   Mi recomendación es b).
+
+**Respuestas del 2026-10-29:** P50 "P50 c" (decisión 39), P51 "P51 c" (decisión 40), y G1d, G1e y G1f (decisión 41).
+
+- **P52. Precio de Haiku.** Tomaste los precios de `mmorch/config.py` (G1f). Ese archivo también lista `claude-haiku-5-5` a 0,10 USD de entrada y 0,50 USD de salida por millón de tokens. No verifiqué ese valor contra la lista de precios de Anthropic. Un precio bajo hace que el chequeo previo deje pasar llamadas que cuestan más. ¿Qué elegís?
+
+  - a) Usar 0,10 y 0,50 USD, de `mmorch/config.py`.
+  - b) Vos escribís el precio de Haiku en `root.toml` desde la página de Anthropic. Sin ese precio, el respaldo Haiku no se usa.
+  - c) Un agente busca el precio vigente en la documentación de Anthropic, y vos lo confirmás antes de que entre al default.
+
+  Hasta tu respuesta, rige b). Mi recomendación es c).
+
+- **P53. Cómo se aísla el builder (decisión 39).** El builder no debe poder leer `ROOT_HOME`. Las dos formas tocan zona roja. ¿Qué elegís?
+
+  - a) Contenedor de podman: el builder y `claude` corren adentro, sin montar `ROOT_HOME`. La credencial de Claude entra montada en solo lectura. Costo: armar una imagen con `claude` y sus herramientas.
+  - b) Otro usuario del sistema: vos creás una vez un usuario con `sudo useradd`, y el builder corre con ese usuario. Ese usuario no puede leer tu `$HOME`. Costo: un cambio en el sistema operativo y un login de Claude para ese usuario.
+
+  Mi recomendación es a): no cambia el sistema y deja el builder en un entorno descartable.
