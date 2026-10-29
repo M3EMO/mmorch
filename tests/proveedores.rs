@@ -8,14 +8,15 @@ use std::net::TcpListener;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use root::config::Config;
+use root::observe;
 use root::proveedores::{
     Breaker, Clave, Claves, Contexto, ErrorProveedor, MAX_TOKENS_JUEZ, Prompt, Respuesta,
-    causa_tope_alcanzado, imprimir_para_cli, llamar_con,
+    causa_tope_alcanzado, costo_peor_caso, imprimir_para_cli, llamar_con, tokens_entrada_estimados,
 };
-use root::tipos::{Eleccion, Proveedor, Via};
+use root::tipos::{Eleccion, Evento, Proveedor, TipoEvento, Via};
 use serde_json::Value;
 
 const CLAVE_PRUEBA: &str = "sk-test-SECRETO-123";
@@ -155,6 +156,16 @@ fn claves_de_prueba() -> Claves {
         deepseek: Some(Clave::nueva(CLAVE_PRUEBA)),
         anthropic: Some(Clave::nueva(CLAVE_PRUEBA)),
     }
+}
+
+/// Un `eventos.jsonl` que no se puede escribir pero sí se lee como vacío: un enlace a una carpeta
+/// que no existe. El chequeo de tope lo lee sin gasto y el registro del evento no logra abrirlo.
+fn evento_no_escribible(home: &Path) {
+    std::os::unix::fs::symlink(
+        home.join("carpeta-inexistente").join("eventos.jsonl"),
+        home.join("eventos.jsonl"),
+    )
+    .expect("enlace");
 }
 
 /// Eventos de `eventos.jsonl` dentro de `home`.
@@ -757,8 +768,7 @@ fn proveedores_evento_no_escribible_devuelve_la_respuesta_completa() {
     let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
     let cfg = config(&srv.url, &srv.url);
     let home = tempfile::tempdir().expect("home");
-    // Un directorio con el nombre del archivo impide abrirlo para escribir, aun como root.
-    fs::create_dir(home.path().join("eventos.jsonl")).expect("directorio");
+    evento_no_escribible(home.path());
     let breaker = Breaker::new();
     let claves = claves_de_prueba();
     let base = Instant::now();
@@ -830,7 +840,7 @@ fn proveedores_cli_evento_no_registrado_respuesta_en_stdout_y_evento_en_stderr()
     let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
     let cfg = config(&srv.url, &srv.url);
     let home = tempfile::tempdir().expect("home");
-    fs::create_dir(home.path().join("eventos.jsonl")).expect("directorio");
+    evento_no_escribible(home.path());
     let breaker = Breaker::new();
     let claves = claves_de_prueba();
     let base = Instant::now();
@@ -908,8 +918,7 @@ fn llamada_503_con_evento_no_escribible(
 ) -> Result<Respuesta, ErrorProveedor> {
     let srv = Servidor::arranca(vec![(503, "{}"), (503, "{}"), (503, "{}")]);
     let cfg = config(&srv.url, &srv.url);
-    // Un directorio con el nombre del archivo impide abrirlo para escribir, aun como root.
-    fs::create_dir(home.join("eventos.jsonl")).expect("directorio");
+    evento_no_escribible(home);
     let breaker = Breaker::new();
     let claves = claves_de_prueba();
     let base = Instant::now();
@@ -1124,18 +1133,123 @@ fn proveedores_anthropic_end_turn_no_es_truncada() {
 }
 
 #[test]
-fn proveedores_truncada_sin_precio_no_cobra_y_marca_precio_faltante() {
-    let srv = Servidor::arranca(vec![(200, DEEPSEEK_LENGTH_VACIO)]);
+fn proveedores_sin_precio_no_envia_y_registra_gate() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
     let mut cfg = config(&srv.url, &srv.url);
     cfg.precios.clear();
     let (res, home) = llamada_con_servidor(&cfg, Proveedor::Deepseek, "deepseek-chat", "t8");
 
-    let r = res.expect("truncada es éxito");
-    assert!(r.truncada);
-    assert_eq!(r.cost_usd, 0.0);
-    let ev = &eventos(home.path())[0];
-    assert_eq!(ev["extra"]["precio_faltante"], true);
-    assert_eq!(ev["extra"]["truncada"], true);
+    let err = res.expect_err("sin precio no hay estimación: la llamada se rechaza");
+    assert!(matches!(err, ErrorProveedor::Tope(_)), "{err}");
+    assert!(
+        err.to_string()
+            .contains("sin precio en root.toml para deepseek-chat")
+    );
+    assert_eq!(srv.peticiones(), 0, "no debe enviarse nada");
+    let evs = eventos(home.path());
+    assert_eq!(evs.len(), 1, "solo el Gate, sin evento Llamada");
+    assert_eq!(evs[0]["tipo"], "gate");
+    assert_eq!(evs[0]["fase"], "tope");
+    assert_eq!(evs[0]["extra"]["modelo"], "deepseek-chat");
+    assert!(evs[0]["extra"]["estimado"].is_null());
+}
+
+#[test]
+fn proveedores_modelo_nuevo_sin_precio_no_envia_aunque_otros_tengan_precio() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let cfg = config(&srv.url, &srv.url);
+    let (res, home) = llamada_con_servidor(&cfg, Proveedor::Deepseek, "deepseek-reasoner", "t9");
+
+    assert!(matches!(res, Err(ErrorProveedor::Tope(_))));
+    assert_eq!(srv.peticiones(), 0);
+    let evs = eventos(home.path());
+    assert_eq!(evs.len(), 1);
+    assert_eq!(evs[0]["extra"]["modelo"], "deepseek-reasoner");
+}
+
+#[test]
+fn proveedores_peor_caso_que_no_entra_en_el_margen_no_envia() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+    let mut cfg = config(&srv.url, &srv.url);
+    cfg.balance.api.tope_usd = 1.0;
+    let home = tempfile::tempdir().expect("home");
+    // Gasto de 0,99995 USD este mes: margen de 0,00005 USD.
+    let gasto = Evento {
+        ts: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("reloj")
+            .as_secs_f64(),
+        corrida: "previa".into(),
+        tipo: TipoEvento::Llamada,
+        via: Some(Via::Api),
+        cost_usd: 0.99995,
+        ..Evento::default()
+    };
+    observe::registrar_en(&home.path().join("eventos.jsonl"), &gasto).expect("siembra");
+    let breaker = Breaker::new();
+    let claves = claves_de_prueba();
+    let base = Instant::now();
+    let reloj = || base;
+    let ctx = Contexto {
+        cfg: &cfg,
+        home: home.path(),
+        breaker: &breaker,
+        claves: &claves,
+        reloj: &reloj,
+    };
+    // El peor caso es 64 tokens de salida a 2 USD por millón: 0,000128 USD, más que el margen.
+    let err = llamar_con(
+        &ctx,
+        &eleccion(Proveedor::Deepseek, "deepseek-chat"),
+        &prompt(),
+        "t10",
+    )
+    .expect_err("el peor caso no entra en el margen");
+    assert!(matches!(err, ErrorProveedor::Tope(_)), "{err}");
+    assert_eq!(srv.peticiones(), 0);
+    let gates: Vec<Value> = eventos(home.path())
+        .into_iter()
+        .filter(|ev| ev["tipo"] == "gate")
+        .collect();
+    assert_eq!(gates.len(), 1);
+    let margen = gates[0]["extra"]["margen"].as_f64().expect("margen");
+    let estimado = gates[0]["extra"]["estimado"].as_f64().expect("estimado");
+    assert!((margen - 0.00005).abs() < 1e-9, "margen {margen}");
+    assert!(estimado > margen, "estimado {estimado}");
+}
+
+#[test]
+fn proveedores_tokens_de_entrada_cuentan_bytes_utf8() {
+    // "€" ocupa 3 bytes: 1000 caracteres son 3000 bytes, y un token no ocupa menos de un byte.
+    let prompt = Prompt {
+        sistema: None,
+        usuario: "€".repeat(1000),
+        max_tokens: 1,
+        fase: "f".into(),
+    };
+    assert!(tokens_entrada_estimados(&prompt) >= 3000);
+}
+
+#[test]
+fn proveedores_tokens_de_entrada_suman_sistema_y_usuario() {
+    let prompt = Prompt {
+        sistema: Some("abc".into()),
+        usuario: "de".into(),
+        max_tokens: 1,
+        fase: "f".into(),
+    };
+    assert_eq!(tokens_entrada_estimados(&prompt), 5);
+}
+
+#[test]
+fn proveedores_costo_peor_caso_suma_entrada_y_maximo_de_salida() {
+    let precio = root::config::Precio {
+        usd_entrada: 1.0,
+        usd_salida: 2.0,
+    };
+    // Un millón de entrada a 1 USD y medio millón de salida a 2 USD por millón.
+    let costo = costo_peor_caso(&precio, 1_000_000, 500_000);
+    assert!((costo - 2.0).abs() < 1e-12, "{costo}");
 }
 
 #[test]

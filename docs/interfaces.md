@@ -706,19 +706,25 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       }
     },
     "Precio": {
+      "description": "Precio de un modelo, en USD por millón de tokens. Sus dos claves son obligatorias y no admite otras.",
       "type": "object",
       "properties": {
         "usd_entrada": {
+          "description": "USD por millón de tokens de entrada.",
           "type": "number",
-          "format": "double",
-          "default": 0.0
+          "format": "double"
         },
         "usd_salida": {
+          "description": "USD por millón de tokens de salida.",
           "type": "number",
-          "format": "double",
-          "default": 0.0
+          "format": "double"
         }
-      }
+      },
+      "additionalProperties": false,
+      "required": [
+        "usd_entrada",
+        "usd_salida"
+      ]
     },
     "Proveedor": {
       "type": "string",

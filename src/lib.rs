@@ -270,6 +270,10 @@ fn ficha_accion(json: bool, accion: &FichaAccion) -> Result<u8, Error> {
             let texto = leer_spec(spec)?;
             let ctx = ContextoRevision::default();
             let tope = juez_max_tokens.unwrap_or(crate::proveedores::MAX_TOKENS_JUEZ);
+            // Con juez, los precios y el tope de API salen de root.toml: un archivo inválido es error de uso.
+            if juez_proveedor.is_some() {
+                config::Config::cargar(&config::root_home().join("root.toml"))?;
+            }
             let revision = match juez_de(*juez_proveedor, juez_modelo.as_deref()) {
                 Some(juez) => ficha::revisar_con_tope(&texto, &ctx, &juez, tope)?,
                 None => ficha::revisar(&texto, &ctx)?,

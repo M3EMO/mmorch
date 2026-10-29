@@ -208,6 +208,23 @@ fn route_cli_tabla_api_sin_tope_sale_con_2_y_nombra_la_tabla() {
 }
 
 #[test]
+fn route_cli_precio_invalido_sale_con_2_antes_de_rutear() {
+    let casos = [
+        ("usd_entrada = 1.0\nusd_salda = 1.1", "usd_salda"),
+        ("usd_entrada = nan\nusd_salida = 1.0", "usd_entrada"),
+    ];
+    for (cuerpo, clave) in casos {
+        let home = tempfile::tempdir().expect("home");
+        let texto = format!("[precios.deepseek-chat]\n{cuerpo}\n");
+        fs::write(home.path().join("root.toml"), texto).expect("root.toml");
+        let salida = root_con_home(home.path(), &["route", "--rol", "delega", "--tipo", "bulk"]);
+        assert_eq!(codigo(&salida), 2, "{cuerpo}");
+        let stderr = String::from_utf8_lossy(&salida.stderr);
+        assert!(stderr.contains(clave), "{cuerpo}: stderr: {stderr}");
+    }
+}
+
+#[test]
 fn route_cli_sin_root_toml_usa_defaults_y_sale_con_0() {
     let home = tempfile::tempdir().expect("home");
     let salida = root_con_home(

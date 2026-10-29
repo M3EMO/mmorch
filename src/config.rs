@@ -84,10 +84,13 @@ pub struct Modelos {
     pub construye: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
+/// Precio de un modelo, en USD por millón de tokens. Sus dos claves son obligatorias y no admite otras.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Precio {
+    /// USD por millón de tokens de entrada.
     pub usd_entrada: f64,
+    /// USD por millón de tokens de salida.
     pub usd_salida: f64,
 }
 
@@ -251,6 +254,45 @@ fn exigir_topes_declarados(texto: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// Claves de `[precios.<modelo>]`. Todas son obligatorias. La Tarea 21b suma aquí sus claves nuevas.
+const CLAVES_PRECIO: &[&str] = &["usd_entrada", "usd_salida"];
+
+/// Revisa la tabla cruda `[precios.*]` antes de deserializar. Cada modelo declara todas las claves
+/// de `CLAVES_PRECIO`, sin claves ajenas y con números. Así un error de nombre sale con código 2.
+fn exigir_precios_declarados(texto: &str) -> Result<(), Error> {
+    let crudo: toml::Table = toml::from_str(texto)?;
+    let Some(precios) = crudo.get("precios").and_then(toml::Value::as_table) else {
+        return Ok(());
+    };
+    for (modelo, valor) in precios {
+        let Some(tabla) = valor.as_table() else {
+            return Err(Error::ConfigValor(format!(
+                "[precios.{modelo}] debe ser una tabla"
+            )));
+        };
+        for (clave, numero) in tabla {
+            if !CLAVES_PRECIO.contains(&clave.as_str()) {
+                return Err(Error::ConfigValor(format!(
+                    "[precios.{modelo}] no reconoce la clave \"{clave}\""
+                )));
+            }
+            if !(numero.is_float() || numero.is_integer()) {
+                return Err(Error::ConfigValor(format!(
+                    "[precios.{modelo}] {clave} debe ser un número"
+                )));
+            }
+        }
+        for clave in CLAVES_PRECIO {
+            if !tabla.contains_key(*clave) {
+                return Err(Error::ConfigValor(format!(
+                    "[precios.{modelo}] exige {clave}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Reglas de cada `[[registro]]`: nombre, `url` con `https` y host sin credenciales, y variable
 /// de entorno en mayúsculas. Un nombre no puede repetirse. Los mensajes no repiten la `url`.
 fn validar_registros(registros: &[RegistroConfig]) -> Result<(), Error> {
@@ -306,6 +348,7 @@ impl Config {
     /// Parsea el texto de un `root.toml`. Un texto vacío da los defaults.
     pub fn desde_texto(texto: &str) -> Result<Config, Error> {
         exigir_topes_declarados(texto)?;
+        exigir_precios_declarados(texto)?;
         let mut config: Config = toml::from_str(texto)?;
         // Las entradas del usuario suman a los equivalentes de los defaults; no los reemplazan.
         for (alias, modelo) in Ruteo::default().api_equivalente {
@@ -315,8 +358,9 @@ impl Config {
         Ok(config)
     }
 
-    /// Rechaza topes en cero o negativos, `bloque_horas` en cero, `prefiere_api_sobre` fuera de (0, 1]
-    /// y un alias de cupo en `[modelos]` sin `api_equivalente` en `[ruteo]`.
+    /// Rechaza topes en cero o negativos, `bloque_horas` en cero, `prefiere_api_sobre` fuera de (0, 1],
+    /// un precio que no sea finito o sea negativo, y un alias de cupo en `[modelos]` sin
+    /// `api_equivalente` en `[ruteo]`.
     fn validar(&self) -> Result<(), Error> {
         for alias in [
             &self.modelos.planifica,
@@ -361,6 +405,19 @@ impl Config {
             return Err(Error::ConfigValor(
                 "colab.minutos_max es demasiado grande".into(),
             ));
+        }
+        for (modelo, precio) in &self.precios {
+            let campos = [
+                ("usd_entrada", precio.usd_entrada),
+                ("usd_salida", precio.usd_salida),
+            ];
+            for (campo, valor) in campos {
+                if !valor.is_finite() || valor < 0.0 {
+                    return Err(Error::ConfigValor(format!(
+                        "[precios.{modelo}] {campo} debe ser finito y no negativo"
+                    )));
+                }
+            }
         }
         validar_registros(&self.registros)
     }
@@ -431,6 +488,58 @@ espera_base_ms = 1
     #[test]
     fn config_root_toml_mal_formado_da_error() {
         assert!(Config::desde_texto("umbral_verde = \"x\"").is_err());
+    }
+
+    #[test]
+    fn config_precio_con_clave_mal_escrita_da_codigo_2_y_nombra_la_clave() {
+        let error = Config::desde_texto("[precios.x]\nusd_entrada = 1.0\nusd_salda = 1.1\n")
+            .expect_err("una clave desconocida debe fallar");
+        assert_eq!(error.codigo_de_salida(), 2);
+        let mensaje = error.to_string();
+        assert!(mensaje.contains("[precios.x]"), "{mensaje}");
+        assert!(mensaje.contains("usd_salda"), "{mensaje}");
+    }
+
+    #[test]
+    fn config_precio_sin_usd_salida_da_codigo_2() {
+        let error = Config::desde_texto("[precios.x]\nusd_entrada = 1.0\n")
+            .expect_err("un precio incompleto debe fallar");
+        assert_eq!(error.codigo_de_salida(), 2);
+        assert!(
+            error.to_string().contains("[precios.x] exige usd_salida"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn config_precio_nan_inf_o_negativo_da_codigo_2() {
+        for texto in [
+            "[precios.x]\nusd_entrada = nan\nusd_salida = 1.0\n",
+            "[precios.x]\nusd_entrada = 1.0\nusd_salida = inf\n",
+            "[precios.x]\nusd_entrada = -1.0\nusd_salida = 1.0\n",
+        ] {
+            let error = Config::desde_texto(texto).expect_err("precio inválido debe fallar");
+            assert_eq!(error.codigo_de_salida(), 2, "{texto}");
+            assert!(
+                error.to_string().contains("[precios.x]"),
+                "{texto}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_precio_con_texto_en_vez_de_numero_da_codigo_2() {
+        let error = Config::desde_texto("[precios.x]\nusd_entrada = \"1\"\nusd_salida = 1.0\n")
+            .expect_err("un precio de texto debe fallar");
+        assert_eq!(error.codigo_de_salida(), 2);
+    }
+
+    #[test]
+    fn config_precio_completo_carga_con_sus_valores() {
+        let c = Config::desde_texto("[precios.x]\nusd_entrada = 0.5\nusd_salida = 2\n")
+            .expect("precio completo carga");
+        assert_eq!(c.precios["x"].usd_entrada, 0.5);
+        assert_eq!(c.precios["x"].usd_salida, 2.0);
     }
 
     #[test]

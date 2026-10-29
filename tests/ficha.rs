@@ -3,16 +3,18 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use root::ficha::{
     self, ContextoRevision, ErrorFicha, JuezAmbiguedad, revisar_con_juez, revisar_con_tope,
 };
+use root::observe;
 use root::oracle::tarea::Tarea;
 use root::oracle::{ErrorOraculo, OpcionesOraculo, evaluar};
 use root::proveedores::{Prompt, RespuestaJuez};
+use root::tipos::{Evento, TipoEvento, Via};
 
 mod common;
-
 use common::Servidor;
 
 /// Juez falso: devuelve una respuesta fija y guarda cada prompt que recibe.
@@ -1034,4 +1036,103 @@ fn ficha_cli_respuesta_truncada_da_la_causa_del_tope_y_registra_costo() {
     let evento: serde_json::Value = serde_json::from_str(ultimo).expect("JSON");
     assert_eq!(evento["extra"]["truncada"], true);
     assert!(evento["cost_usd"].as_f64().expect("costo") > 0.0);
+}
+
+const DEEPSEEK_JUEZ_VACIO: &str = r#"{"choices":[{"message":{"content":"[]"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#;
+
+/// `root.toml` con el servidor falso como proveedor y un precio para `deepseek-reasoner`.
+fn home_juez(url: &str, precio: &str) -> tempfile::TempDir {
+    let home = tempfile::tempdir().expect("home");
+    let texto = format!(
+        "[proveedores]\ndeepseek_url = \"{url}\"\nespera_base_ms = 1\n\n[precios.deepseek-reasoner]\n{precio}\n"
+    );
+    fs::write(home.path().join("root.toml"), texto).expect("root.toml");
+    home
+}
+
+/// `r00t ficha revisar` con el juez de DeepSeek y `ROOT_HOME` de `home`.
+fn revisar_con_juez_cli(home: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_r00t"))
+        .env("ROOT_HOME", home)
+        .env("DEEPSEEK_API_KEY", "sk-test-SECRETO-FICHA")
+        .args([
+            "ficha",
+            "revisar",
+            "--spec",
+            &ruta_fixture("spec-completa.md"),
+            "--juez-proveedor",
+            "deepseek",
+            "--juez-modelo",
+            "deepseek-reasoner",
+        ])
+        .output()
+        .expect("no se pudo ejecutar el binario root")
+}
+
+#[test]
+fn ficha_cli_juez_con_tope_lleno_no_envia_y_sale_3() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_JUEZ_VACIO)]);
+    let home = home_juez(&srv.url, "usd_entrada = 1.0\nusd_salida = 2.0");
+    // 100 USD de API este mes: el tope por defecto de 100 USD ya está lleno.
+    let gasto = Evento {
+        ts: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("reloj")
+            .as_secs_f64(),
+        corrida: "previa".into(),
+        tipo: TipoEvento::Llamada,
+        via: Some(Via::Api),
+        cost_usd: 100.0,
+        ..Evento::default()
+    };
+    observe::registrar_en(&home.path().join("eventos.jsonl"), &gasto).expect("siembra");
+
+    let salida = revisar_con_juez_cli(home.path());
+
+    assert_eq!(
+        codigo(&salida),
+        3,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    assert_eq!(
+        srv.peticiones(),
+        0,
+        "el juez no debe enviar con el tope lleno"
+    );
+    let stdout = String::from_utf8_lossy(&salida.stdout);
+    assert!(stdout.contains("sin_veredicto"), "{stdout}");
+    assert!(stdout.contains("margen"), "{stdout}");
+}
+
+#[test]
+fn ficha_cli_juez_dentro_del_margen_envia_una_vez() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_JUEZ_VACIO)]);
+    let home = home_juez(&srv.url, "usd_entrada = 1.0\nusd_salida = 2.0");
+
+    let salida = revisar_con_juez_cli(home.path());
+
+    assert_eq!(
+        codigo(&salida),
+        0,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    assert_eq!(srv.peticiones(), 1);
+}
+
+#[test]
+fn ficha_cli_juez_con_root_toml_invalido_sale_2_sin_pedidos() {
+    let srv = Servidor::arranca(vec![(200, DEEPSEEK_JUEZ_VACIO)]);
+    let home = home_juez(&srv.url, "usd_entrada = 1.0\nusd_salda = 2.0");
+
+    let salida = revisar_con_juez_cli(home.path());
+
+    assert_eq!(
+        codigo(&salida),
+        2,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    assert_eq!(srv.peticiones(), 0);
 }

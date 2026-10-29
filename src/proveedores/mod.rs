@@ -12,11 +12,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use thiserror::Error as ErrorDerive;
 
-use crate::config::{Config, root_home};
-use crate::observe;
+use crate::config::{Config, Precio, root_home};
+use crate::observe::{self, uso};
 use crate::tipos::{Eleccion, Evento, Proveedor, TipoEvento, Via};
 
 /// Intentos totales por llamada: el primero más dos reintentos.
@@ -105,6 +105,10 @@ pub enum ErrorProveedor {
     Eleccion(String),
     #[error("{0}")]
     Config(String),
+    /// Un tope impide la llamada antes de enviarla. El `Gate` ya quedó escrito, salvo que el
+    /// gasto no se pudo leer. Sale con código 3.
+    #[error("{0}")]
+    Tope(String),
 }
 
 impl ErrorProveedor {
@@ -121,6 +125,7 @@ impl ErrorProveedor {
             Self::SinClave(_) => "sin_clave",
             Self::Eleccion(_) => "eleccion",
             Self::Config(_) => "config",
+            Self::Tope(_) => "tope",
             Self::ErrorNoRegistrado { original, .. } => return original.clase(),
         };
         corta.into()
@@ -299,7 +304,7 @@ pub(crate) fn entero_en(json: &Value, ruta: &str) -> Result<u64, ErrorProveedor>
         .ok_or_else(|| ErrorProveedor::Respuesta(format!("falta {ruta}")))
 }
 
-/// Llama al proveedor de `e` con la configuración de `root_home()/root.toml`.
+/// Llama al proveedor de `e` con la configuración de `root_home()/root.toml`. Chequea el tope.
 pub fn llamar(e: &Eleccion, prompt: &Prompt, corrida: &str) -> Result<Respuesta, ErrorProveedor> {
     let home = root_home();
     let cfg = Config::cargar(&home.join(ARCHIVO_CONFIG))
@@ -317,7 +322,8 @@ pub fn llamar(e: &Eleccion, prompt: &Prompt, corrida: &str) -> Result<Respuesta,
 }
 
 /// Llamada con todas las dependencias explícitas. Registra un `Evento` por llamada.
-/// Las elecciones inválidas fallan antes de llamar y no registran evento.
+/// Las elecciones inválidas fallan antes de llamar y no registran evento. Un tope lleno o un
+/// modelo sin precio rechazan antes de enviar: no hay evento `Llamada`, solo un `Gate`.
 pub fn llamar_con(
     ctx: &Contexto,
     e: &Eleccion,
@@ -325,6 +331,7 @@ pub fn llamar_con(
     corrida: &str,
 ) -> Result<Respuesta, ErrorProveedor> {
     let (proveedor, modelo) = elegida(e)?;
+    let precio = chequear_tope(ctx, modelo, prompt, corrida)?;
     let familia = familia(proveedor);
     let inicio = Instant::now();
     let (resultado, intentos) = ejecutar(ctx, proveedor, modelo, prompt);
@@ -333,13 +340,10 @@ pub fn llamar_con(
     match resultado {
         Ok(crudo) => {
             ctx.breaker.registra_exito(familia);
-            let costo = costo_usd(ctx.cfg, modelo, crudo.in_tokens, crudo.out_tokens);
+            let costo = costo_usd(&precio, crudo.in_tokens, crudo.out_tokens);
             ev.in_tokens = crudo.in_tokens;
             ev.out_tokens = crudo.out_tokens;
-            ev.cost_usd = costo.unwrap_or(0.0);
-            if costo.is_none() {
-                ev.extra.insert("precio_faltante".into(), json!(true));
-            }
+            ev.cost_usd = costo;
             if crudo.truncada {
                 ev.extra.insert("truncada".into(), json!(true));
             }
@@ -347,7 +351,7 @@ pub fn llamar_con(
                 texto: crudo.texto,
                 in_tokens: crudo.in_tokens,
                 out_tokens: crudo.out_tokens,
-                cost_usd: costo.unwrap_or(0.0),
+                cost_usd: costo,
                 latency_s,
                 modelo: modelo.to_string(),
                 intentos,
@@ -377,6 +381,93 @@ pub fn llamar_con(
             }
         }
     }
+}
+
+/// Chequeo previo de tope: nada se envía si el modelo no tiene precio o si el peor caso del pedido
+/// no entra en el margen del tope de API. Un rechazo registra un `Gate` y devuelve `Tope`.
+/// Si el gasto no se puede leer, también rechaza: sin gasto no hay margen que probar.
+fn chequear_tope(
+    ctx: &Contexto,
+    modelo: &str,
+    prompt: &Prompt,
+    corrida: &str,
+) -> Result<Precio, ErrorProveedor> {
+    let tope = ctx.cfg.balance.api.tope_usd;
+    let margen = tope - gasto_api_mes(ctx)?;
+    let Some(precio) = ctx.cfg.precios.get(modelo) else {
+        let mensaje = format!(
+            "sin precio en root.toml para {modelo}: no se puede estimar el costo, la llamada no se envía"
+        );
+        return Err(rechazo_tope(ctx, corrida, modelo, margen, None, mensaje));
+    };
+    let estimado = costo_peor_caso(precio, tokens_entrada_estimados(prompt), prompt.max_tokens);
+    if estimado > margen {
+        let mensaje = format!(
+            "llamada rechazada antes de enviarla: costo estimado {estimado:.6} USD, margen {margen:.6} USD del tope de API de {tope:.2} USD"
+        );
+        return Err(rechazo_tope(
+            ctx,
+            corrida,
+            modelo,
+            margen,
+            Some(estimado),
+            mensaje,
+        ));
+    }
+    Ok(precio.clone())
+}
+
+/// Gasto de API del mes calendario, leído de `eventos.jsonl` de `ctx.home`.
+fn gasto_api_mes(ctx: &Contexto) -> Result<f64, ErrorProveedor> {
+    let (ahora, _) = observe::ahora();
+    let ruta = ctx.home.join(ARCHIVO_EVENTOS);
+    let uso = uso::uso_en(
+        &ruta,
+        ahora,
+        uso::offset_local(),
+        ctx.cfg.balance.cupo.bloque_horas,
+    )
+    .map_err(|e| {
+        ErrorProveedor::Tope(format!(
+            "no se pudo leer el gasto de API: {e}; la llamada no se envía"
+        ))
+    })?;
+    Ok(uso.api_mes_usd)
+}
+
+/// Registra el `Gate` del rechazo y devuelve `Tope`. Si el registro falla, el mensaje lo dice.
+fn rechazo_tope(
+    ctx: &Contexto,
+    corrida: &str,
+    modelo: &str,
+    margen: f64,
+    estimado: Option<f64>,
+    mensaje: String,
+) -> ErrorProveedor {
+    let extra = Map::from_iter([
+        ("estimado".to_string(), json!(estimado)),
+        ("margen".to_string(), json!(margen)),
+        ("modelo".to_string(), json!(modelo)),
+    ]);
+    let gate = observe::evento_gate(corrida, "tope", extra);
+    match registra(ctx.home, &gate) {
+        Ok(()) => ErrorProveedor::Tope(mensaje),
+        Err(causa) => ErrorProveedor::Tope(format!(
+            "{mensaje}; además no se pudo registrar el Gate: {causa}"
+        )),
+    }
+}
+
+/// Tokens de entrada estimados de un pedido: sus bytes UTF-8, sistema y usuario. Un token nunca
+/// ocupa menos de un byte, así que es una cota superior de los tokens reales.
+pub fn tokens_entrada_estimados(prompt: &Prompt) -> u64 {
+    let sistema = prompt.sistema.as_deref().map_or(0, str::len);
+    (sistema + prompt.usuario.len()) as u64
+}
+
+/// Peor caso en USD de un pedido: toda la entrada estimada y todo el máximo de salida, al precio.
+pub fn costo_peor_caso(precio: &Precio, in_est: u64, max_tokens: u32) -> f64 {
+    costo_usd(precio, in_est, u64::from(max_tokens))
 }
 
 /// Proveedor y modelo de una elección que puede ejecutarse por API.
@@ -494,11 +585,9 @@ fn error_de_estado(estado: u16, proveedor: String) -> ErrorProveedor {
     }
 }
 
-/// Costo en USD con la tabla `precios`. `None` si el modelo no tiene precio.
-fn costo_usd(cfg: &Config, modelo: &str, in_tokens: u64, out_tokens: u64) -> Option<f64> {
-    cfg.precios.get(modelo).map(|precio| {
-        in_tokens as f64 * precio.usd_entrada / 1e6 + out_tokens as f64 * precio.usd_salida / 1e6
-    })
+/// Costo en USD de unos tokens de entrada y salida, al precio de un millón de tokens.
+fn costo_usd(precio: &Precio, in_tokens: u64, out_tokens: u64) -> f64 {
+    in_tokens as f64 * precio.usd_entrada / 1e6 + out_tokens as f64 * precio.usd_salida / 1e6
 }
 
 /// Evento de la llamada, sin tokens ni costo. Quien llama completa esos campos.
