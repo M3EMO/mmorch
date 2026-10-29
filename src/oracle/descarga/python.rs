@@ -304,30 +304,18 @@ struct Salida {
     stderr: String,
 }
 
-/// Corre un comando de red con `parcial` montada en `/cache`, rw. Sin repo escribible.
+/// Corre un comando de red con `parcial` montada en `/cache`, rw. El contenedor no monta `/repo`:
+/// ve solo `trabajo`, la copia de los `requirements*.txt` (C1).
 fn correr(
     home: &Path,
     tarea: &Tarea,
-    repo: &Path,
+    trabajo: &Path,
     parcial: &Path,
     cmd: String,
     timeout: Duration,
 ) -> Result<Salida, ErrorOraculo> {
     let salida = temporal_de(home)?;
-    let ejecucion = Ejecucion {
-        imagen: tarea.imagen.clone(),
-        repo: Some(repo.to_path_buf()),
-        oraculo: None,
-        salida: salida.path().to_path_buf(),
-        cmd,
-        env: entorno_descarga(),
-        timeout,
-        red: true,
-        cache: Some(parcial.to_path_buf()),
-        cache_rw: true,
-        rustsec: None,
-        secretos: Vec::new(),
-    };
+    let ejecucion = ejecucion_python(&tarea.imagen, trabajo, parcial, salida.path(), cmd, timeout);
     let resultado = contenedor::ejecutar(&ejecucion)?;
     Ok(Salida {
         codigo: resultado.codigo,
@@ -400,7 +388,10 @@ pub(super) fn preparar_python(
     let parcial = parcial_de(&destino);
     limpiar_parcial(home, &parcial).map_err(|e| infra("borrar la descarga parcial", e))?;
     fs::create_dir_all(&parcial).map_err(|e| infra("crear la caché parcial de Python", e))?;
-    let fin = match descargar_en(home, tarea, repo, &parcial, &req, timeout) {
+    // Copia de los requirements para el contenedor: el repo no entra (C1).
+    let trabajo = temporal_de(home)?;
+    copiar_requisitos(repo, trabajo.path()).map_err(|e| infra("copiar los requirements", e))?;
+    let fin = match descargar_en(home, tarea, trabajo.path(), &parcial, &req, timeout) {
         Ok(fin) => fin,
         Err(error) => {
             limpiar_parcial(home, &parcial).map_err(|e| infra("borrar la descarga parcial", e))?;
@@ -446,7 +437,7 @@ pub(super) fn preparar_python(
 fn descargar_en(
     home: &Path,
     tarea: &Tarea,
-    repo: &Path,
+    trabajo: &Path,
     parcial: &Path,
     req: &RequisitosPip,
     timeout: Duration,
@@ -460,7 +451,7 @@ fn descargar_en(
         )
         .map_err(|e| infra("escribir el índice de pip", e))?;
         let cmd = comando_wheels(&format!("/cache/{ARCHIVO_INDICE}"), req);
-        let salida = correr(home, tarea, repo, parcial, cmd, timeout)?;
+        let salida = correr(home, tarea, trabajo, parcial, cmd, timeout)?;
         if salida.codigo == 0 {
             break;
         }
@@ -499,7 +490,7 @@ fn descargar_en(
                 "indice-propio-sdist",
             ));
         }
-        let sdist = bajar_sdist_pypi(home, tarea, repo, parcial, timeout, &nombre, &version)?;
+        let sdist = bajar_sdist_pypi(home, tarea, trabajo, parcial, timeout, &nombre, &version)?;
         paquetes
             .push(json!({"nombre": sdist.archivo, "fuente": "sdist-pypi", "sha256": sdist.sha256}));
         pendientes.remove(pos);
@@ -518,7 +509,7 @@ fn descargar_en(
         match fuente_directa(
             home,
             tarea,
-            repo,
+            trabajo,
             parcial,
             timeout,
             *linea,
@@ -535,7 +526,7 @@ fn descargar_en(
         let salida = correr(
             home,
             tarea,
-            repo,
+            trabajo,
             parcial,
             comando_requisitos_sdist(),
             timeout,
@@ -559,7 +550,7 @@ fn descargar_en(
         )
         .map_err(|e| infra("escribir los requisitos de build", e))?;
         let cmd = comando_wheels(&format!("/cache/{ARCHIVO_BUILD}"), req);
-        let salida = correr(home, tarea, repo, parcial, cmd, timeout)?;
+        let salida = correr(home, tarea, trabajo, parcial, cmd, timeout)?;
         if salida.codigo != 0 {
             return match diagnosticar(&salida.stderr) {
                 Diagnostico::Producto(linea) => {
@@ -592,7 +583,7 @@ fn descargar_en(
 fn bajar_sdist_pypi(
     home: &Path,
     tarea: &Tarea,
-    repo: &Path,
+    trabajo: &Path,
     parcial: &Path,
     timeout: Duration,
     nombre: &str,
@@ -600,7 +591,7 @@ fn bajar_sdist_pypi(
 ) -> Result<Sdist, ErrorOraculo> {
     let pedir = |url: &str, archivo: &str| -> Result<(), String> {
         let cmd = comando_curl(url, archivo);
-        match correr(home, tarea, repo, parcial, cmd, timeout) {
+        match correr(home, tarea, trabajo, parcial, cmd, timeout) {
             Ok(salida) if salida.codigo == 0 => Ok(()),
             Ok(salida) => Err(salida.stderr.trim().chars().take(300).collect()),
             Err(error) => Err(error.to_string()),
@@ -617,7 +608,7 @@ fn bajar_sdist_pypi(
 fn fuente_directa(
     home: &Path,
     tarea: &Tarea,
-    repo: &Path,
+    trabajo: &Path,
     parcial: &Path,
     timeout: Duration,
     linea: u32,
@@ -641,7 +632,7 @@ fn fuente_directa(
         }
         let dir = hash_corto(base.as_bytes());
         let cmd = comando_clon(&base, &dir, commit.as_deref());
-        let salida = correr(home, tarea, repo, parcial, cmd, timeout)?;
+        let salida = correr(home, tarea, trabajo, parcial, cmd, timeout)?;
         if salida.codigo != 0 {
             return match diagnosticar(&salida.stderr) {
                 Diagnostico::Producto(l) => {
@@ -682,7 +673,7 @@ fn fuente_directa(
     let salida = correr(
         home,
         tarea,
-        repo,
+        trabajo,
         parcial,
         comando_curl(&url, &archivo),
         timeout,
@@ -870,6 +861,46 @@ fn indice_de_build_de(carpeta: &Path) -> Result<Option<IndiceBuild>, ErrorOracul
     Ok(Some(indice_de_build(&listas)))
 }
 
+/// Ejecución del contenedor de descarga de Python: sin `/repo`, con las copias de los requisitos en `/trabajo`.
+fn ejecucion_python(
+    imagen: &str,
+    trabajo: &Path,
+    parcial: &Path,
+    salida: &Path,
+    cmd: String,
+    timeout: Duration,
+) -> Ejecucion {
+    Ejecucion {
+        imagen: imagen.into(),
+        repo: None,
+        oraculo: None,
+        salida: salida.to_path_buf(),
+        cmd,
+        env: entorno_descarga(),
+        timeout,
+        red: true,
+        cache: Some(parcial.to_path_buf()),
+        cache_rw: true,
+        rustsec: None,
+        trabajo: Some(trabajo.to_path_buf()),
+        secretos: Vec::new(),
+    }
+}
+
+/// Copia los `requirements*.txt` de la raíz del repo a `destino`. Nada más del repo entra al contenedor.
+fn copiar_requisitos(repo: &Path, destino: &Path) -> std::io::Result<()> {
+    for entrada in fs::read_dir(repo)? {
+        let entrada = entrada?;
+        let nombre = entrada.file_name().to_string_lossy().into_owned();
+        // Un enlace no cuenta como archivo: no se copia lo que apunta fuera del repo.
+        let es_archivo = entrada.file_type()?.is_file();
+        if es_archivo && nombre.starts_with("requirements") && nombre.ends_with(".txt") {
+            fs::copy(entrada.path(), destino.join(&nombre))?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1017,5 +1048,51 @@ mod tests {
             h.detalle
         );
         assert!(!h.detalle.contains("clave"), "{}", h.detalle);
+    }
+
+    #[test]
+    fn descarga_python_contenedor_no_monta_repo_y_recibe_la_copia_de_requisitos() {
+        let e = ejecucion_python(
+            "img:1",
+            Path::new("/h/tmp/trabajo"),
+            Path::new("/h/cache/parcial"),
+            Path::new("/h/tmp/salida"),
+            "pip download".into(),
+            Duration::from_secs(60),
+        );
+        let args = contenedor::argumentos(&e, "n");
+        assert!(!args.iter().any(|a| a.contains(":/repo")), "{args:?}");
+        assert!(
+            args.contains(&"/h/tmp/trabajo:/trabajo:ro,z".to_string()),
+            "{args:?}"
+        );
+        assert!(
+            args.contains(&"/h/cache/parcial:/cache:z".to_string()),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn descarga_python_copia_solo_los_requirements_de_la_raiz() {
+        let repo = tempfile::tempdir().expect("repo");
+        let destino = tempfile::tempdir().expect("trabajo");
+        for (ruta, texto) in [
+            ("requirements.txt", "requests==2.31.0\n"),
+            ("requirements-dev.txt", "pytest==8.0.0\n"),
+            ("setup.py", "raise SystemExit(1)\n"),
+            ("sub/requirements.txt", "otro==1.0\n"),
+        ] {
+            let p = repo.path().join(ruta);
+            fs::create_dir_all(p.parent().expect("padre")).expect("carpeta");
+            fs::write(p, texto).expect("escribe");
+        }
+        copiar_requisitos(repo.path(), destino.path()).expect("copia");
+        let mut nombres: Vec<String> = fs::read_dir(destino.path())
+            .expect("lee")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        nombres.sort();
+        assert_eq!(nombres, ["requirements-dev.txt", "requirements.txt"]);
     }
 }

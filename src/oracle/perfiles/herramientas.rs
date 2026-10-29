@@ -11,6 +11,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{ResultadoSonda, crear_hallazgo, puntuar_hallazgos};
+use crate::config::root_home;
 use crate::oracle::ErrorOraculo;
 use crate::oracle::contenedor::{self, Ejecucion};
 use crate::oracle::descarga::PRELUDIO;
@@ -66,6 +67,7 @@ impl EjecutorContenedor {
             cache: self.cache.clone(),
             cache_rw: false,
             rustsec: self.rustsec.clone(),
+            trabajo: None,
             secretos: Vec::new(),
         }
     }
@@ -73,13 +75,8 @@ impl EjecutorContenedor {
 
 impl EjecutorHerramienta for EjecutorContenedor {
     fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
-        let salida = tempfile::Builder::new()
-            .prefix("sondas-")
-            .tempdir()
+        let salida = carpeta_de_salida(&root_home().join("tmp"))
             .map_err(|e| ErrorOraculo::Infra(format!("carpeta de salida: {e}")))?;
-        // El contenedor escribe con otro uid: la carpeta de salida se abre a todos.
-        fs::set_permissions(salida.path(), fs::Permissions::from_mode(0o777))
-            .map_err(|e| ErrorOraculo::Infra(format!("permisos de /salida: {e}")))?;
         let resultado = contenedor::ejecutar(&self.ejecucion(cmd, salida.path()))?;
         Ok(SalidaHerramienta {
             codigo: resultado.codigo,
@@ -370,14 +367,28 @@ pub(crate) fn con_cola(base: String, stderr: &str) -> String {
     }
 }
 
-/// Lee los archivos sueltos de `dir`. Las subcarpetas, como `target/`, no se leen.
+/// Carpeta de `/salida` dentro de `tmp` (`ROOT_HOME/tmp`). `tempdir_in` la crea con modo 0700: ningún otro
+/// usuario local la escribe (M16). Un contenedor con otro uid no la escribe si la imagen no corre como root.
+fn carpeta_de_salida(tmp: &Path) -> std::io::Result<tempfile::TempDir> {
+    fs::create_dir_all(tmp)?;
+    let salida = tempfile::Builder::new().prefix("sondas-").tempdir_in(tmp)?;
+    // Explícito: no depende del modo por defecto de `tempfile`.
+    fs::set_permissions(salida.path(), fs::Permissions::from_mode(0o700))?;
+    Ok(salida)
+}
+
+/// Lee los archivos sueltos de `dir`. Las subcarpetas, como `target/`, no se leen. Un enlace no se sigue:
+/// el contenedor podría apuntarlo a un archivo del host (M16).
 fn leer_salida(dir: &Path) -> Result<BTreeMap<String, String>, ErrorOraculo> {
     let entradas =
         fs::read_dir(dir).map_err(|e| ErrorOraculo::Infra(format!("leer /salida: {e}")))?;
     let mut archivos = BTreeMap::new();
     for entrada in entradas.flatten() {
         let ruta = entrada.path();
-        if !ruta.is_file() {
+        let Ok(meta) = fs::symlink_metadata(&ruta) else {
+            continue;
+        };
+        if !meta.file_type().is_file() {
             continue;
         }
         let bytes = fs::read(&ruta)
@@ -1266,6 +1277,39 @@ mod tests {
         assert!(args.contains(&format!("{}:/cache:ro,z", cache.path().display())));
         assert!(args.contains(&format!("{}:/salida:z", salida_dir.path().display())));
         assert!(ej.tiene_rustsec());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn herramientas_leer_salida_no_sigue_enlaces_al_host() {
+        let host = tempfile::tempdir().expect("archivos del host");
+        let secreto = host.path().join("id_rsa");
+        fs::write(&secreto, "CLAVE-DEL-HOST").expect("escribe");
+        let salida = tempfile::tempdir().expect("salida");
+        fs::write(salida.path().join("ok.log"), "bien").expect("escribe");
+        std::os::unix::fs::symlink(&secreto, salida.path().join("x.log")).expect("enlace");
+        let archivos = leer_salida(salida.path()).expect("lee la salida");
+        assert_eq!(archivos.get("ok.log").map(String::as_str), Some("bien"));
+        assert!(!archivos.contains_key("x.log"), "{archivos:?}");
+        assert!(
+            !archivos.values().any(|v| v.contains("CLAVE-DEL-HOST")),
+            "{archivos:?}"
+        );
+    }
+
+    #[test]
+    fn herramientas_carpeta_de_salida_es_privada_y_vive_en_home_tmp() {
+        let home = tempfile::tempdir().expect("home");
+        let tmp = home.path().join("tmp");
+        fs::create_dir_all(&tmp).expect("tmp");
+        let salida = carpeta_de_salida(&tmp).expect("crea la salida");
+        assert_eq!(salida.path().parent(), Some(tmp.as_path()));
+        let modo = fs::metadata(salida.path())
+            .expect("metadatos")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(modo, 0o700, "la salida no se abre a otros usuarios");
     }
 
     #[test]

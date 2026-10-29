@@ -2,7 +2,7 @@
 //! lista de dónde sale cada dependencia. Es puro salvo leer archivos: no usa la red ni ejecuta nada.
 //! Las reglas que rechazan una fuente también viven aquí.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io;
 use std::path::{Component, Path};
@@ -230,20 +230,32 @@ pub fn inventariar(repo: &Path) -> Result<Inventario, ErrorOraculo> {
 }
 
 /// Clasifica `.cargo/config.toml` y `config` del repo (decisión 30). No depende del manifiesto: un
-/// secreto en el config es un secreto aunque falte `Cargo.toml`. Un TOML inválido ya es rechazo en
-/// `inventariar_cargo`, así que aquí se omite.
+/// secreto en el config es un secreto aunque falte `Cargo.toml`. Un TOML inválido es rechazo que cita
+/// solo el archivo y la línea.
 fn inventariar_config_cargo(repo: &Path, inv: &mut Inventario) -> Result<(), ErrorOraculo> {
     for ruta in ARCHIVOS_CONFIG {
         let Some(texto) = leer_opcional(&repo.join(ruta))? else {
             continue;
         };
-        if let Ok(tabla) = toml::from_str::<Table>(&texto) {
-            let config = Manifiesto {
-                dir: String::new(),
-                texto: Texto::nuevo(ruta, &texto),
-                tabla,
-            };
-            clasificar_config(&config, inv);
+        match toml::from_str::<Table>(&texto) {
+            Ok(tabla) => {
+                let config = Manifiesto {
+                    dir: String::new(),
+                    texto: Texto::nuevo(ruta, &texto),
+                    tabla,
+                };
+                clasificar_config(&config, inv);
+            }
+            Err(e) if !inv.rechazos.iter().any(|r| r.archivo == ruta) => {
+                let linea = linea_de_error(&texto, &e);
+                inv.rechazos.push(Rechazo {
+                    motivo: format!("{ruta} inválido en la línea {linea}"),
+                    archivo: ruta.into(),
+                    linea,
+                    cita: String::new(),
+                });
+            }
+            Err(_) => {}
         }
     }
     Ok(())
@@ -317,7 +329,7 @@ struct LockPaquete {
 
 /// Lee un `Cargo.lock` y da sus paquetes con origen y línea del `source`.
 pub fn analizar_lock(texto: &str) -> Result<Vec<PaqueteLock>, String> {
-    let lock: LockArchivo = toml::from_str(texto).map_err(|e| e.to_string())?;
+    let lock: LockArchivo = toml::from_str(texto).map_err(|e| mensaje_toml(texto, &e))?;
     let fuentes = lineas_de_source(texto);
     if fuentes.len() != lock.package.len() {
         return Err(format!(
@@ -419,23 +431,55 @@ pub fn separar_referencia(url: &str) -> (String, Option<String>) {
 
 /// `true` si `ruta`, resuelta desde `dir` (relativo al repo), queda dentro del repo.
 fn dentro_del_repo(dir: &str, ruta: &str) -> bool {
+    ruta_en_repo(dir, ruta).is_some()
+}
+
+/// Carpeta de `ruta` resuelta desde `dir` (relativa al repo), sin `..` que salga. `None` si sale o es absoluta.
+fn ruta_en_repo(dir: &str, ruta: &str) -> Option<String> {
     if Path::new(ruta).is_absolute() {
-        return false;
+        return None;
     }
     let mut pila: Vec<String> = Vec::new();
     for componente in Path::new(dir).join(ruta).components() {
         match componente {
             Component::Normal(nombre) => pila.push(nombre.to_string_lossy().into_owned()),
             Component::ParentDir => {
-                if pila.pop().is_none() {
-                    return false;
-                }
+                pila.pop()?;
             }
             Component::CurDir => {}
-            _ => return false,
+            _ => return None,
         }
     }
-    true
+    Some(pila.join("/"))
+}
+
+/// `true` si la carpeta `relativa` del repo existe y, con sus enlaces resueltos, queda dentro del repo.
+/// Lo que no existe no se lee, así que cuenta como dentro.
+fn dentro_fisico(repo: &Path, relativa: &str) -> bool {
+    match (
+        fs::canonicalize(repo),
+        fs::canonicalize(repo.join(relativa)),
+    ) {
+        (Ok(raiz), Ok(real)) => real.starts_with(raiz),
+        _ => true,
+    }
+}
+
+/// Mensaje de un TOML que no parsea: la línea del error, sin el texto de esa línea (B4).
+fn mensaje_toml(texto: &str, error: &toml::de::Error) -> String {
+    match linea_de_error(texto, error) {
+        0 => "TOML inválido".to_string(),
+        linea => format!("TOML inválido en la línea {linea}"),
+    }
+}
+
+/// Número de línea (1-indexed) donde está el error de TOML. Cero si el error no trae posición.
+fn linea_de_error(texto: &str, error: &toml::de::Error) -> u32 {
+    let Some(rango) = error.span() else {
+        return 0;
+    };
+    let previo = texto.get(..rango.start).unwrap_or(texto);
+    u32::try_from(previo.matches('\n').count() + 1).unwrap_or(u32::MAX)
 }
 
 /// Quita comillas y espacios de un encabezado o de una clave, para comparar.
@@ -586,10 +630,11 @@ fn manifiesto(ruta: &str, dir: &str, texto: &str, inv: &mut Inventario) -> Optio
             tabla,
         }),
         Err(e) => {
+            let linea = linea_de_error(texto, &e);
             inv.rechazos.push(Rechazo {
-                motivo: redactar(&format!("{ruta} inválido: {e}")),
+                motivo: format!("{ruta} inválido en la línea {linea}"),
                 archivo: ruta.into(),
-                linea: 0,
+                linea,
                 cita: String::new(),
             });
             None
@@ -908,17 +953,51 @@ fn inventariar_cargo(repo: &Path, inv: &mut Inventario) -> Result<(), ErrorOracu
 
     let configs = leer_configs(repo, inv)?;
     let mut crates_io: Option<(String, u32)> = None;
-    for m in &manifiestos {
-        for dep in dependencias(&m.tabla) {
-            revisar_dep(&dep, m, &configs, &commits, inv, &mut crates_io);
+    // Las dependencias `path` dentro del repo se siguen: su `Cargo.toml` también declara fuentes (M5).
+    let mut vistos: BTreeSet<String> = manifiestos.iter().map(|m| m.dir.clone()).collect();
+    let mut i = 0;
+    while i < manifiestos.len() {
+        let mut nuevos = Vec::new();
+        for dep in dependencias(&manifiestos[i].tabla) {
+            revisar_dep(
+                &dep,
+                &manifiestos[i],
+                &configs,
+                &commits,
+                inv,
+                &mut crates_io,
+            );
+            if let Some(destino) = seguir_path(repo, &manifiestos[i], &dep, inv)
+                && vistos.insert(destino.clone())
+                && let Some(m) = leer_manifiesto_en(repo, &destino, inv)?
+            {
+                nuevos.push(m);
+            }
         }
+        manifiestos.extend(nuevos);
+        i += 1;
     }
     for config in &configs {
         revisar_fuentes_config(config, inv);
     }
 
+    let crates_lock = fuentes_de_lock(&paquetes, inv);
+    // crates.io es la fuente por defecto: una sola entrada, la del lock si existe.
+    match (crates_lock, crates_io) {
+        (Some(linea), _) => push_unico(&mut inv.fuentes, crates_io_fuente(ARCHIVO_LOCK, linea)),
+        (None, Some((archivo, linea))) => {
+            push_unico(&mut inv.fuentes, crates_io_fuente(&archivo, linea))
+        }
+        (None, None) => {}
+    }
+    Ok(())
+}
+
+/// Fuentes de los paquetes de un lock, con las mismas reglas que las de los manifiestos (6c). Las aceptadas
+/// van a `inv.fuentes` y las demás a `inv.rechazos`. Da la línea de la primera fuente de crates.io del lock.
+fn fuentes_de_lock(paquetes: &[PaqueteLock], inv: &mut Inventario) -> Option<u32> {
     let mut crates_lock: Option<u32> = None;
-    for p in &paquetes {
+    for p in paquetes {
         match &p.origen {
             Origen::Workspace => {}
             Origen::CratesIo => {
@@ -958,15 +1037,46 @@ fn inventariar_cargo(repo: &Path, inv: &mut Inventario) -> Result<(), ErrorOracu
             )),
         }
     }
-    // crates.io es la fuente por defecto: una sola entrada, la del lock si existe.
-    match (crates_lock, crates_io) {
-        (Some(linea), _) => push_unico(&mut inv.fuentes, crates_io_fuente(ARCHIVO_LOCK, linea)),
-        (None, Some((archivo, linea))) => {
-            push_unico(&mut inv.fuentes, crates_io_fuente(&archivo, linea))
-        }
-        (None, None) => {}
+    crates_lock
+}
+
+/// Revisa las fuentes de un `Cargo.lock` con las reglas del inventario. Sin red. Un lock que no parsea es error.
+pub fn revisar_lock(texto: &str) -> Result<Vec<Rechazo>, String> {
+    let paquetes = analizar_lock(texto)?;
+    let mut inv = Inventario::default();
+    fuentes_de_lock(&paquetes, &mut inv);
+    Ok(inv.rechazos)
+}
+
+/// Carpeta de un `path` que se sigue: dentro del repo, con sus enlaces resueltos. Un `path` que sale del
+/// repo da rechazo y no se sigue. `None` si la dependencia no tiene `path` o no se sigue.
+fn seguir_path(repo: &Path, m: &Manifiesto, dep: &Dep, inv: &mut Inventario) -> Option<String> {
+    let ruta = dep.valores.get("path")?.as_str()?;
+    // Lo que sale del repo por la forma de la ruta lo rechaza `revisar_dep`.
+    let destino = ruta_en_repo(&m.dir, ruta)?;
+    if dentro_fisico(repo, &destino) {
+        return Some(destino);
     }
-    Ok(())
+    let linea = m.texto.linea(&dep.seccion, &dep.nombre);
+    inv.rechazos.push(rechazo(
+        &m.texto,
+        linea,
+        format!("path fuera del repo: {ruta}"),
+    ));
+    None
+}
+
+/// Manifiesto de la carpeta `dir` del repo, si tiene `Cargo.toml`. Un TOML inválido es rechazo.
+fn leer_manifiesto_en(
+    repo: &Path,
+    dir: &str,
+    inv: &mut Inventario,
+) -> Result<Option<Manifiesto>, ErrorOraculo> {
+    let ruta = format!("{dir}/{ARCHIVO_CARGO}");
+    let Some(texto) = leer_opcional(&repo.join(&ruta))? else {
+        return Ok(None);
+    };
+    Ok(manifiesto(&ruta, dir, &texto, inv))
 }
 
 /// Aplica las reglas a una dependencia de un manifiesto. Una fuente aceptada va a `inv.fuentes`.
@@ -1136,6 +1246,12 @@ fn inventariar_requirements(repo: &Path, inv: &mut Inventario) -> Result<(), Err
         } else if let Some(valor) = opcion(resto, &["-e", "--editable"]) {
             if es_directa(valor) {
                 directa(valor, linea, &t, inv);
+            } else if es_ruta_local(repo, valor) {
+                inv.rechazos.push(rechazo(
+                    &t,
+                    linea,
+                    format!("ruta local no soportada: {valor}"),
+                ));
             } else {
                 inv.avisos.push(aviso(
                     &t,
@@ -1150,6 +1266,13 @@ fn inventariar_requirements(repo: &Path, inv: &mut Inventario) -> Result<(), Err
             directa(url.trim(), linea, &t, inv);
         } else if es_directa(resto) {
             directa(resto, linea, &t, inv);
+        } else if es_ruta_local(repo, resto) {
+            // Una ruta local haría que pip compile el proyecto: el contenedor no la ve y Root la rechaza (C1).
+            inv.rechazos.push(rechazo(
+                &t,
+                linea,
+                format!("ruta local no soportada: {resto}"),
+            ));
         }
         // Un nombre de paquete no agrega fuente: lo sirve el índice ya listado.
     }
@@ -1203,6 +1326,39 @@ fn opcion<'a>(linea: &'a str, nombres: &[&str]) -> Option<&'a str> {
 /// `true` si el texto es una referencia directa: `git+...` o una URL con `://`.
 fn es_directa(texto: &str) -> bool {
     texto.starts_with("git+") || texto.contains("://")
+}
+
+/// `true` si el texto de un requisito es una ruta local: absoluta, `./`, `../`, `file:`, un archivo de paquete
+/// suelto (`.whl`, `.tar.gz`, `.zip`) o un nombre que es una carpeta del repo. Pip compila esas rutas (C1).
+fn es_ruta_local(repo: &Path, texto: &str) -> bool {
+    let texto = texto.trim();
+    let minuscula = texto.to_ascii_lowercase();
+    if minuscula.starts_with("file:")
+        || texto.starts_with(['/', '~'])
+        || texto.starts_with("./")
+        || texto.starts_with("../")
+        || texto == "."
+        || texto == ".."
+    {
+        return true;
+    }
+    if texto.contains("://") {
+        return false;
+    }
+    if texto.contains(['/', '\\']) {
+        return true;
+    }
+    let nombre = texto
+        .split(|c: char| c.is_whitespace() || "[;=<>!~@,".contains(c))
+        .next()
+        .unwrap_or("");
+    if [".whl", ".tar.gz", ".zip"]
+        .iter()
+        .any(|f| nombre.ends_with(f))
+    {
+        return true;
+    }
+    !nombre.is_empty() && repo.join(nombre).is_dir()
 }
 
 /// Fuente de un índice (`--index-url`, `--extra-index-url`, `--find-links`).
@@ -1495,6 +1651,115 @@ git+https://github.com/x/y@abc123#egg=y\nhttps://host/p.tar.gz\n-r otro.txt\n";
                 &manifiesto("x = { path = \"../../../afuera\" }\n"),
             ),
         ]);
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+    }
+
+    #[test]
+    fn descarga_inventario_path_dentro_del_repo_sigue_sus_dependencias() {
+        // Sin `Cargo.lock` el lock se genera con las fuentes de `sub`: `sub` no es miembro del workspace.
+        let inv = inventario_de(&[
+            ("Cargo.toml", &manifiesto("sub = { path = \"sub\" }\n")),
+            (
+                "sub/Cargo.toml",
+                &manifiesto("x = { git = \"http://host/x\" }\n"),
+            ),
+        ]);
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+        assert_eq!(inv.rechazos[0].archivo, "sub/Cargo.toml");
+        assert_eq!(inv.rechazos[0].linea, 6);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descarga_inventario_path_que_sale_por_enlace_es_rechazo() {
+        let fuera = tempfile::tempdir().expect("fuera del repo");
+        fs::write(
+            fuera.path().join("Cargo.toml"),
+            manifiesto("x = { git = \"https://github.com/x/y\" }\n"),
+        )
+        .expect("escribe");
+        let repo = repo_con(&[("Cargo.toml", &manifiesto("sub = { path = \"sub\" }\n"))]);
+        std::os::unix::fs::symlink(fuera.path(), repo.path().join("sub")).expect("enlace");
+        let inv = inventariar(repo.path()).expect("inventaria sin red");
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+        assert!(inv.rechazos[0].motivo.contains("fuera del repo"), "{inv:?}");
+        assert!(
+            inv.fuentes.is_empty(),
+            "no se lee nada fuera del repo: {inv:?}"
+        );
+    }
+
+    #[test]
+    fn descarga_inventario_requirements_ruta_local_es_rechazo() {
+        for linea in [
+            "/repo",
+            "/repo/sub",
+            "./",
+            "./x",
+            "../afuera",
+            "file:///tmp/x",
+            "file:x",
+            "-e ./x",
+            "-e /repo",
+            "pkg-1.0.whl",
+            "pkg-1.0.tar.gz",
+            "sub/pkg",
+            "sub",
+        ] {
+            let texto = format!("requests==2.31.0\n{linea}\n");
+            let inv = inventario_de(&[("requirements.txt", &texto), ("sub/x.txt", "")]);
+            assert!(
+                inv.rechazos
+                    .iter()
+                    .any(|r| r.archivo == "requirements.txt" && r.linea == 2),
+                "debe rechazar `{linea}`: {inv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn descarga_inventario_requirements_nombres_y_urls_no_son_rechazo() {
+        for linea in [
+            "requests==2.31.0",
+            "pkg @ https://h/x.tar.gz",
+            "https://h/x-1.0.whl",
+            "git+https://github.com/x/y@abc1234",
+        ] {
+            let inv = inventario_de(&[("requirements.txt", &format!("{linea}\n"))]);
+            assert!(
+                inv.rechazos.is_empty(),
+                "no debe rechazar `{linea}`: {inv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn descarga_inventario_toml_roto_no_copia_el_token_ni_la_linea() {
+        let secreto = "cio_SECRETO_9f3a";
+        let config = format!(
+            "[registries.privado]\nindex = \"https://x.example/index\"\ntoken = \"{secreto}\" basura\n"
+        );
+        // Sin `Cargo.toml`: la configuración rota también es rechazo, sin su contenido.
+        let inv = inventario_de(&[(".cargo/config.toml", &config)]);
+        let gate = serde_json::to_string(&inv).expect("json del inventario");
+        assert!(!gate.contains(secreto), "{gate}");
+        assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
+        assert_eq!(inv.rechazos[0].archivo, ".cargo/config.toml");
+        assert_eq!(inv.rechazos[0].linea, 3);
+        assert_eq!(inv.rechazos[0].cita, "");
+        assert!(!inv.rechazos[0].motivo.contains(secreto));
+    }
+
+    #[test]
+    fn descarga_inventario_toml_roto_con_cargo_toml_no_copia_el_token() {
+        let secreto = "cio_SECRETO_9f3a";
+        let config = format!("[registries.privado]\ntoken = \"{secreto}\" basura\n");
+        let inv = inventario_de(&[
+            ("Cargo.toml", &manifiesto("")),
+            (".cargo/config.toml", &config),
+        ]);
+        let gate = serde_json::to_string(&inv).expect("json del inventario");
+        assert!(!gate.contains(secreto), "{gate}");
         assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
     }
 

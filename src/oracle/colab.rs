@@ -584,12 +584,12 @@ pub fn vigilar(
         inicio: Instant::now(),
         tope: TIMEOUT_LLAMADA,
     };
-    let cumple = match bajar_junit(cli, &lim, &activo.sesion, &junit)? {
+    let cumple = match bajar_junit(cli, &lim, home, &activo.sesion, &junit)? {
         Ok(()) => fs::read_to_string(&junit)
             .is_ok_and(|texto| cumple_lo_pedido(&texto, &activo.ids, repeticiones)),
         Err(_) => false,
     };
-    let _ = fs::remove_file(&junit);
+    let _ = crate::borrado::borrar_archivo_dentro(home, &junit);
     if cumple {
         return parar_vigilado(cli, home, &activo, CAUSA_REQUISITO, CAUSA_REQUISITO);
     }
@@ -1108,7 +1108,7 @@ fn trabajar(
         }
         // a. Bajada del junit: un fallo significa que todavía no hay junit.
         // b. Corte 1: el junit cumple lo pedido. Se importa y se libera aunque `correr.sh` siga.
-        if bajar_junit(cli, lim, sesion, &junit)?.is_ok()
+        if bajar_junit(cli, lim, home, sesion, &junit)?.is_ok()
             && fs::read_to_string(&junit)
                 .is_ok_and(|texto| cumple_lo_pedido(&texto, &ids, trabajo.tarea.repeticiones))
         {
@@ -1119,7 +1119,7 @@ fn trabajar(
         }
         // c. Estado: `correr.sh` terminó. Corte 2 con el junit que haya; si no hay, error.
         if estado_terminado(cli, lim, sesion, &guion_estado)? {
-            return match bajar_junit(cli, lim, sesion, &junit)? {
+            return match bajar_junit(cli, lim, home, sesion, &junit)? {
                 Ok(()) => Ok(Corte {
                     junit,
                     causa: CAUSA_TERMINO,
@@ -1139,11 +1139,12 @@ fn trabajar(
 fn bajar_junit(
     cli: &dyn ColabCli,
     lim: &Limites,
+    home: &Path,
     sesion: &str,
     destino: &Path,
 ) -> Result<Result<(), String>, ErrorOraculo> {
     // Archivo propio de la corrida: un junit de un sondeo anterior no debe contar como nuevo.
-    let _ = fs::remove_file(destino);
+    let _ = crate::borrado::borrar_archivo_dentro(home, destino);
     let remoto = format!("{CARPETA_REMOTA}/{XML_PENDIENTES}");
     match paso(
         cli,

@@ -18,6 +18,30 @@ pub fn root_home() -> PathBuf {
     )
 }
 
+/// Valida la `ROOT_HOME` que resolvió `root_home()`. `ejecutar` la llama antes de cualquier subcomando (B6).
+pub fn validar_root_home_actual() -> Result<(), Error> {
+    let ruta = root_home();
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    validar_root_home(&ruta, home.as_deref()).map_err(Error::Uso)
+}
+
+/// `ROOT_HOME` debe ser absoluta, distinta de `/` y de `$HOME`. Sin `home`, solo rige la regla de `/`.
+fn validar_root_home(ruta: &Path, home: Option<&Path>) -> Result<(), String> {
+    if !ruta.is_absolute() {
+        return Err(format!(
+            "ROOT_HOME debe ser una ruta absoluta: {}",
+            ruta.display()
+        ));
+    }
+    if ruta.parent().is_none() {
+        return Err("ROOT_HOME no puede ser /".into());
+    }
+    if home == Some(ruta) {
+        return Err("ROOT_HOME no puede ser $HOME".into());
+    }
+    Ok(())
+}
+
 /// Función interna y pura: recibe las variables ya leídas.
 fn resolver_root_home(root_home: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
     root_home
@@ -894,6 +918,19 @@ espera_base_ms = 1
     fn config_root_home_por_defecto_cuelga_de_home() {
         let ruta = resolver_root_home(None, Some(PathBuf::from("/h")));
         assert_eq!(ruta, PathBuf::from("/h/.local/share/root"));
+    }
+
+    #[test]
+    fn config_root_home_valida_rechaza_raiz_relativa_y_home() {
+        let home = Path::new("/h/usuario");
+        assert!(validar_root_home(Path::new("/datos/root"), Some(home)).is_ok());
+        assert!(validar_root_home(Path::new("/datos/root"), None).is_ok());
+        assert!(validar_root_home(Path::new("/"), Some(home)).is_err());
+        assert!(validar_root_home(Path::new("datos/root"), Some(home)).is_err());
+        assert!(validar_root_home(Path::new("."), Some(home)).is_err());
+        assert!(validar_root_home(Path::new("/h/usuario"), Some(home)).is_err());
+        assert!(validar_root_home(Path::new("/h/usuario/"), Some(home)).is_err());
+        assert!(validar_root_home(Path::new("/h/usuario/./"), Some(home)).is_err());
     }
 
     #[test]

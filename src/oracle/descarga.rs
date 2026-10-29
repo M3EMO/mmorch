@@ -25,6 +25,7 @@ use super::juez::ModeloJuez;
 use super::tarea::Tarea;
 use super::{CARPETA_TEMPORALES, ErrorOraculo, infra, temporal};
 use crate::borrado;
+use crate::config::root_home;
 use crate::observe;
 use crate::tipos::{Dimension, Fuente, Hallazgo, TipoEvento};
 use credenciales::{Credencial, credenciales_cargo, redactar_secretos};
@@ -356,7 +357,7 @@ pub fn preparar_con_juez(
     // Las imágenes base van antes de las dependencias: sin ellas el Dockerfile no construye (Tarea 9d2).
     // Un pull que falla no corta la fase: queda en el Gate y la construcción da sin veredicto (Tarea 7i).
     let imagenes = if hay_dockerfile(repo) {
-        Some(traer_imagenes_base_de(repo, &elegido(repo, tarea))?)
+        Some(traer_imagenes_base_de(repo, home, &elegido(repo, tarea))?)
     } else {
         None
     };
@@ -534,6 +535,18 @@ fn preparar_rust(
                 Registro::corte("rust", None, "no-instala"),
             ));
         }
+        // El lock generado pasa por las reglas de fuentes antes de bajar nada más (M5). Un lock que no
+        // parsea no es rechazo de fuente: lo da la lectura de abajo como lock inválido.
+        let generado =
+            fs::read_to_string(&lock).map_err(|e| infra("leer el Cargo.lock generado", e))?;
+        let rechazos = inventario::revisar_lock(&generado).unwrap_or_default();
+        if !rechazos.is_empty() {
+            let registro = Registro::corte("rust", None, "fuente-no-aceptada");
+            return Ok((
+                Preparacion::SinVeredicto(hallazgos_de_rechazos(&rechazos)),
+                Some(registro),
+            ));
+        }
         hallazgos.push(hallazgo_sin_lock());
     }
     let texto = fs::read_to_string(&lock).map_err(|e| infra("leer Cargo.lock", e))?;
@@ -668,6 +681,7 @@ fn generar_lock(
         cache: None,
         cache_rw: false,
         rustsec: None,
+        trabajo: None,
         secretos: secretos_de(credenciales),
     };
     match ejecutar_descarga(&ejecucion, credenciales) {
@@ -718,6 +732,7 @@ fn descargar_vendor(
         cache: Some(parcial.clone()),
         cache_rw: true,
         rustsec: None,
+        trabajo: None,
         secretos: secretos_de(credenciales),
     };
     match ejecutar_descarga(&ejecucion, credenciales) {
@@ -787,6 +802,7 @@ fn actualizar_rustsec(
         cache: Some(dir.clone()),
         cache_rw: true,
         rustsec: None,
+        trabajo: None,
         secretos: Vec::new(),
     };
     match ejecutar_descarga(&ejecucion, &[]) {
@@ -1079,9 +1095,13 @@ enum Bajada {
     Problema(Problema),
 }
 
-/// Corre `podman pull` de la imagen. Un fallo de red o de registro caído es `Problema::Infraestructura`.
-fn bajar_imagen(imagen: &str) -> Result<Bajada, ErrorOraculo> {
-    let pull = match correr_podman(&["pull", imagen], PLAZO_PULL) {
+/// Corre `podman pull` de la imagen con un `authfile` vacío. Un fallo de red o de registro caído es
+/// `Problema::Infraestructura`.
+fn bajar_imagen(imagen: &str, home: &Path) -> Result<Bajada, ErrorOraculo> {
+    let authfile = authfile_vacio(home).map_err(|e| infra("authfile de podman pull", e))?;
+    let args = args_pull(imagen, authfile.path());
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let pull = match correr_podman(&refs, PLAZO_PULL) {
         Ok(pull) => pull,
         Err(ErrorOraculo::Infra(motivo)) => {
             return Ok(Bajada::Problema(Problema::Infraestructura(format!(
@@ -1106,7 +1126,7 @@ fn bajar_imagen(imagen: &str) -> Result<Bajada, ErrorOraculo> {
 }
 
 /// Mira una imagen base: la local si basta, o la baja. El criterio está en `necesita_pull`.
-fn traer(imagen: &str) -> Result<Bajada, ErrorOraculo> {
+fn traer(imagen: &str, home: &Path) -> Result<Bajada, ErrorOraculo> {
     let (nombre, fijado) = match imagen.split_once('@') {
         Some((nombre, digest)) => (nombre, Some(digest)),
         None => (imagen, None),
@@ -1119,7 +1139,7 @@ fn traer(imagen: &str) -> Result<Bajada, ErrorOraculo> {
             descargada: false,
         });
     }
-    bajar_imagen(imagen)
+    bajar_imagen(imagen, home)
 }
 
 /// Digest de una imagen ya bajada. `None` si podman no lo informa.
@@ -1145,13 +1165,15 @@ fn elegido(repo: &Path, tarea: &Tarea) -> Vec<String> {
 
 /// Baja con `podman pull` la imagen base de cada `FROM` de todos los Dockerfile del repo.
 pub fn traer_imagenes_base(repo: &Path) -> Result<Vec<ImagenBase>, ErrorOraculo> {
-    traer_imagenes_base_de(repo, &dockerfiles_del_repo(repo))
+    traer_imagenes_base_de(repo, &root_home(), &dockerfiles_del_repo(repo))
 }
 
 /// Baja con `podman pull` la imagen base de cada `FROM` de los Dockerfile `rutas` (relativas al repo).
 /// Solo baja: no corre ningún `RUN`. Ignora `scratch` y los alias de etapas previas del mismo archivo.
+/// Los temporales del pull van a `home/tmp`.
 pub fn traer_imagenes_base_de(
     repo: &Path,
+    home: &Path,
     rutas: &[String],
 ) -> Result<Vec<ImagenBase>, ErrorOraculo> {
     let mut salida = Vec::new();
@@ -1186,7 +1208,7 @@ pub fn traer_imagenes_base_de(
                 Err(motivo) => base.sin_resolver = Some(motivo.clone()),
                 Ok(imagen) => {
                     base.resuelta = Some(imagen.clone());
-                    match traer(imagen)? {
+                    match traer(imagen, home)? {
                         Bajada::Lista { digest, descargada } => {
                             base.digest = digest;
                             base.descargada = descargada;
@@ -1199,6 +1221,29 @@ pub fn traer_imagenes_base_de(
         }
     }
     Ok(salida)
+}
+
+/// Argumentos de `podman pull` con `--authfile` (decisión 29): solo ese archivo cuenta como credencial.
+fn args_pull(imagen: &str, authfile: &Path) -> Vec<String> {
+    vec![
+        "pull".into(),
+        "--authfile".into(),
+        authfile.display().to_string(),
+        imagen.into(),
+    ]
+}
+
+/// `authfile` de `podman pull` con `{"auths":{}}`: sin credencial de `[[registro]]`, el pull no usa ninguna.
+/// Vive en `home/tmp` y se borra al soltarlo. Root nunca usa el `auth.json` del usuario.
+fn authfile_vacio(home: &Path) -> io::Result<tempfile::NamedTempFile> {
+    let tmp = home.join(CARPETA_TEMPORALES);
+    fs::create_dir_all(&tmp)?;
+    let mut archivo = tempfile::Builder::new()
+        .prefix("authfile-")
+        .suffix(".json")
+        .tempfile_in(&tmp)?;
+    io::Write::write_all(&mut archivo, b"{\"auths\":{}}")?;
+    Ok(archivo)
 }
 
 #[cfg(test)]
@@ -1239,6 +1284,7 @@ source = \"git+https://github.com/x/ext?rev=1#1\"\n";
             cache: None,
             cache_rw: false,
             rustsec: None,
+            trabajo: None,
             secretos: Vec::new(),
         }
     }
@@ -1743,6 +1789,91 @@ location searched: crates.io index";
                      [contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n";
         fs::write(dir.path().join("tarea.toml"), texto).expect("escribe tarea.toml");
         Tarea::cargar_de(dir.path()).expect("carga la tarea")
+    }
+
+    fn tarea_python_minima() -> Tarea {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let texto = "nombre = \"x\"\nlenguaje = \"python\"\nimagen = \"i\"\nspec = \"s\"\n\
+                     [contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n";
+        fs::write(dir.path().join("tarea.toml"), texto).expect("escribe tarea.toml");
+        Tarea::cargar_de(dir.path()).expect("carga la tarea")
+    }
+
+    #[test]
+    fn descarga_python_requisito_con_ruta_local_da_sin_veredicto_antes_de_la_red() {
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        fs::create_dir_all(repo.path().join("sub")).expect("carpeta del repo");
+        let tarea = tarea_python_minima();
+        for linea in [
+            "/repo",
+            "/repo/sub",
+            "./",
+            "../afuera",
+            "file:///tmp/x",
+            "-e ./x",
+            "sub",
+            "sub/pkg",
+            "pkg-1.0.tar.gz",
+        ] {
+            let texto = format!("requests==2.31.0\n{linea}\n");
+            fs::write(repo.path().join("requirements.txt"), texto).expect("escribe");
+            let (preparacion, imagenes, _) = preparar_con_juez(
+                repo.path(),
+                &tarea,
+                home.path(),
+                Duration::from_secs(60),
+                None,
+            )
+            .expect("sin error de infraestructura");
+            match preparacion {
+                Preparacion::SinVeredicto(hallazgos) => assert!(!hallazgos.is_empty(), "{linea}"),
+                otro => panic!("{linea}: debía dar SinVeredicto, dio {otro:?}"),
+            }
+            assert!(imagenes.is_empty(), "{linea}: no se armó ningún contenedor");
+            assert!(
+                !home.path().join("cache").join("python").exists(),
+                "{linea}: no se descargó nada"
+            );
+        }
+    }
+
+    #[test]
+    fn descarga_lock_generado_con_fuente_git_http_se_rechaza_antes_de_bajar() {
+        const LOCK_HTTP: &str = "version = 4\n\n[[package]]\nname = \"ext\"\nversion = \"1.0.0\"\n\
+source = \"git+http://host/x?rev=1#abc1234\"\n";
+        let rechazos = inventario::revisar_lock(LOCK_HTTP).expect("el lock parsea");
+        assert_eq!(rechazos.len(), 1, "{rechazos:?}");
+        assert!(
+            rechazos[0].motivo.contains("protocolo no aceptado"),
+            "{rechazos:?}"
+        );
+        let sano = inventario::revisar_lock(LOCK).expect("el lock de la guarda parsea");
+        assert!(sano.is_empty(), "{sano:?}");
+    }
+
+    #[test]
+    fn descarga_pull_lleva_authfile_y_la_imagen_al_final() {
+        let args = args_pull("docker.io/library/rust:1", Path::new("/h/tmp/auth.json"));
+        assert_eq!(
+            args,
+            [
+                "pull",
+                "--authfile",
+                "/h/tmp/auth.json",
+                "docker.io/library/rust:1"
+            ]
+        );
+    }
+
+    #[test]
+    fn descarga_authfile_de_pull_vacio_no_lleva_credenciales() {
+        let home = tempfile::tempdir().expect("home");
+        let archivo = authfile_vacio(home.path()).expect("crea el authfile");
+        let texto = fs::read_to_string(archivo.path()).expect("lee");
+        let valor: Value = serde_json::from_str(&texto).expect("JSON válido");
+        assert_eq!(valor["auths"], json!({}), "{texto}");
+        assert!(archivo.path().starts_with(home.path().join("tmp")));
     }
 
     #[test]

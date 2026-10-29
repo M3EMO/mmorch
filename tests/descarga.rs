@@ -316,6 +316,7 @@ fn descarga_el_contenedor_de_descarga_no_ve_oraculo() {
         cache: None,
         cache_rw: false,
         rustsec: None,
+        trabajo: None,
         secretos: Vec::new(),
     };
 

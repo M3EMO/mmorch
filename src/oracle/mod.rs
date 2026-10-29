@@ -455,6 +455,7 @@ fn correr_suite(c: &Corrida, cmd: &str, xml: &str) -> Result<Junit, ErrorOraculo
         cache: c.cache.clone(),
         cache_rw: false,
         rustsec: c.rustsec.clone(),
+        trabajo: None,
         secretos: Vec::new(),
     };
     let resultado = contenedor::ejecutar(&ejecucion)?;

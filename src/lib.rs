@@ -35,6 +35,8 @@ use tipos::{Eleccion, Estado, Fila, Proveedor, Rol, Via};
 /// Ejecuta un subcomando y devuelve su código de salida. Los errores salen por `Err`.
 /// Por ahora `route`, `llama`, `oraculo evaluar`, `ficha`, `esquema`, `goal`, `observa`, `track` e la importación externa tienen lógica.
 pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
+    // Una `ROOT_HOME` mala (relativa, `/` o `$HOME`) sale con 2 antes de tocar nada (B6).
+    config::validar_root_home_actual()?;
     match &cli.comando {
         Comando::Oraculo {
             accion: OraculoAccion::Evaluar { tarea, repo },
@@ -217,7 +219,9 @@ fn oraculo_pendientes(
             "oraculo pendientes necesita --tarea y --repo".into(),
         ));
     };
+    oracle::pendientes::nombre_de_tarea_valido(nombre).map_err(Error::Uso)?;
     let tarea = Tarea::cargar(nombre)?;
+    oracle::pendientes::nombre_de_tarea_valido(&tarea.nombre).map_err(Error::Uso)?;
     if let Some(junit) = importar {
         let resumen = oracle::pendientes::importar(&home, &tarea, junit)?;
         if json {

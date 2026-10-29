@@ -60,6 +60,7 @@ pub struct Importacion {
 /// Arma el paquete de los tests de `[[entorno]]` dentro de `home/pendientes/`.
 /// Sin tests pendientes no crea nada y da `None`. Todo se valida antes de crear el directorio.
 pub fn crear(home: &Path, tarea: &Tarea, repo: &Path) -> Result<Option<Paquete>, ErrorOraculo> {
+    nombre_de_tarea_valido(&tarea.nombre).map_err(ErrorOraculo::Tarea)?;
     if tarea.entorno.is_empty() {
         return Ok(None);
     }
@@ -221,10 +222,15 @@ fn ruta_colab(home: &Path, tarea: &str) -> Result<PathBuf, ErrorOraculo> {
 
 /// Un nombre usado como carpeta no puede traer rutas.
 fn nombre_seguro(nombre: &str) -> Result<(), ErrorOraculo> {
+    nombre_de_tarea_valido(nombre).map_err(ErrorOraculo::Tarea)
+}
+
+/// Nombre de tarea que puede ser una carpeta: sin `/`, `\`, `.` ni `..` (B7). Lo usan el CLI y `crear`.
+pub fn nombre_de_tarea_valido(nombre: &str) -> Result<(), String> {
     let con_ruta =
         nombre.is_empty() || nombre.contains(['/', '\\']) || nombre == "." || nombre == "..";
     if con_ruta {
-        return Err(ErrorOraculo::Tarea(format!("nombre inválido: {nombre:?}")));
+        return Err(format!("nombre inválido: {nombre:?}"));
     }
     Ok(())
 }
@@ -351,6 +357,22 @@ mod tests {
             comillas(&nodo_pytest),
             "'tests/test_x.py::test_rendimiento[gpu-10000-res1]'"
         );
+    }
+
+    #[test]
+    fn pendiente_crear_no_escribe_fuera_de_home_con_nombre_de_tarea_con_ruta() {
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        let tarea_dir = tempfile::tempdir().expect("tarea");
+        let texto = "nombre = \"../../fuera\"\nlenguaje = \"rust\"\nimagen = \"i\"\nspec = \"s\"\n\
+                     [contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n\
+                     [[entorno]]\ntest = \"a.py::t\"\nmotivo = \"m\"\n";
+        std::fs::write(tarea_dir.path().join("tarea.toml"), texto).expect("escribe");
+        let tarea = Tarea::cargar_de(tarea_dir.path()).expect("carga la tarea");
+        let r = crear(home.path(), &tarea, repo.path());
+        let motivo = r.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(motivo.contains("nombre inválido"), "{motivo}");
+        assert!(!home.path().join(CARPETA_PAQUETES).exists());
     }
 
     #[test]

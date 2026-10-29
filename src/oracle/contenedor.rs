@@ -22,6 +22,8 @@ static CONTADOR: AtomicU64 = AtomicU64::new(0);
 
 /// Tag de SELinux obligatorio en los montajes (Fedora).
 pub const SUFIJO_SELINUX: &str = "z";
+/// Opción de `podman run` y `podman build` que no pasa al contenedor las variables de proxy del host (M4).
+pub(crate) const PROXY_FUERA: &str = "--http-proxy=false";
 
 /// Qué correr, con qué montajes y con qué límite de tiempo. Su `Debug` oculta el valor de los secretos.
 #[derive(Clone)]
@@ -40,6 +42,8 @@ pub struct Ejecucion {
     pub cache_rw: bool,
     /// Base de RustSec montada en solo lectura en `/rustsec`.
     pub rustsec: Option<PathBuf>,
+    /// Carpeta con copias de los `requirements*.txt`, montada en solo lectura en `/trabajo`.
+    pub trabajo: Option<PathBuf>,
     /// Secretos (nombre, valor) que el contenedor hereda del entorno de Root con `-e NOMBRE`.
     /// El valor nunca va en los argumentos: `lanzar` lo pone en el entorno de `podman`.
     pub secretos: Vec<(String, String)>,
@@ -64,6 +68,7 @@ impl std::fmt::Debug for Ejecucion {
             .field("cache", &self.cache)
             .field("cache_rw", &self.cache_rw)
             .field("rustsec", &self.rustsec)
+            .field("trabajo", &self.trabajo)
             .field("secretos", &secretos)
             .finish()
     }
@@ -81,12 +86,21 @@ pub struct Resultado {
 /// Argumentos de `podman run`, sin el binario `podman`.
 pub fn argumentos(e: &Ejecucion, nombre: &str) -> Vec<String> {
     let mut args: Vec<String> = ["run", "--rm", "--name", nombre].map(String::from).into();
+    args.push(PROXY_FUERA.into());
     if !e.red {
         args.extend(["--network", "none"].map(String::from));
     }
     args.extend(["--tmpfs", "/tmp:rw"].map(String::from));
     if let Some(repo) = &e.repo {
         montaje(&mut args, repo, "/repo", &format!("ro,{SUFIJO_SELINUX}"));
+    }
+    if let Some(trabajo) = &e.trabajo {
+        montaje(
+            &mut args,
+            trabajo,
+            "/trabajo",
+            &format!("ro,{SUFIJO_SELINUX}"),
+        );
     }
     if let Some(oraculo) = &e.oraculo {
         montaje(
@@ -212,6 +226,7 @@ fn validar_rutas(e: &Ejecucion) -> Result<(), ErrorOraculo> {
         .chain(e.oraculo.iter())
         .chain(e.cache.iter())
         .chain(e.rustsec.iter())
+        .chain(e.trabajo.iter())
         .chain(std::iter::once(&e.salida));
     for ruta in rutas {
         if !ruta.exists() {
@@ -303,6 +318,7 @@ mod tests {
             cache: None,
             cache_rw: false,
             rustsec: None,
+            trabajo: None,
             secretos: Vec::new(),
         }
     }
@@ -371,6 +387,39 @@ mod tests {
             "el Debug no muestra el valor: {depuracion}"
         );
         assert!(depuracion.contains("CARGO_REGISTRIES_PRIV_TOKEN"));
+    }
+
+    #[test]
+    fn contenedor_argumentos_llevan_http_proxy_false_con_y_sin_red() {
+        for red in [false, true] {
+            let mut e = ejecucion();
+            e.red = red;
+            let args = argumentos(&e, "n");
+            let posicion = args.iter().position(|a| a == "--http-proxy=false");
+            let imagen = args
+                .iter()
+                .position(|a| a == "docker.io/library/alpine:3.20");
+            assert!(
+                posicion.is_some() && posicion < imagen,
+                "red={red}: el proxy del host no entra al contenedor: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn contenedor_trabajo_se_monta_solo_lectura_en_trabajo_y_sin_repo() {
+        let mut e = ejecucion();
+        e.repo = None;
+        e.trabajo = Some(PathBuf::from("/tmp/t"));
+        let args = argumentos(&e, "n");
+        assert!(
+            args.contains(&"/tmp/t:/trabajo:ro,z".to_string()),
+            "{args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a.contains(":/repo")),
+            "sin repo no hay montaje de /repo: {args:?}"
+        );
     }
 
     #[test]

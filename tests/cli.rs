@@ -62,3 +62,60 @@ fn subcomando_inexistente_sale_con_2() {
     let salida = root(&["subcomando-que-no-existe"]);
     assert_eq!(codigo(&salida), 2);
 }
+
+/// Corre `r00t` con `ROOT_HOME` de `valor`, sin tocar el ROOT_HOME real.
+fn root_con_home(args: &[&str], valor: &std::ffi::OsStr) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_r00t"))
+        .args(args)
+        .env("ROOT_HOME", valor)
+        .output()
+        .expect("no se pudo ejecutar el binario root")
+}
+
+#[test]
+fn root_home_no_absoluta_o_raiz_o_home_sale_con_2_en_cualquier_subcomando() {
+    let home = std::env::var("HOME").expect("HOME definido");
+    for valor in ["/", "relativo/root", ".", home.as_str()] {
+        let salida = root_con_home(&["esquema", "veredicto"], std::ffi::OsStr::new(valor));
+        assert_eq!(codigo(&salida), 2, "ROOT_HOME={valor}");
+        let stderr = String::from_utf8_lossy(&salida.stderr);
+        assert!(stderr.contains("ROOT_HOME"), "stderr: {stderr}");
+    }
+}
+
+#[test]
+fn root_home_absoluta_temporal_sigue_funcionando() {
+    let temporal = tempfile::tempdir().expect("ROOT_HOME temporal");
+    let salida = root_con_home(&["esquema", "veredicto"], temporal.path().as_os_str());
+    assert_eq!(
+        codigo(&salida),
+        0,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+}
+
+#[test]
+fn pendientes_nombre_de_tarea_con_ruta_sale_con_2_y_no_escribe() {
+    let home = tempfile::tempdir().expect("ROOT_HOME temporal");
+    let tarea = home.path().join("oraculos").join("memora");
+    std::fs::create_dir_all(&tarea).expect("carpeta de la tarea");
+    let toml = "nombre = \"../../fuera\"\nlenguaje = \"rust\"\nimagen = \"i\"\nspec = \"s\"\n\
+                [contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n\
+                [[entorno]]\ntest = \"a.py::t\"\nmotivo = \"m\"\n";
+    std::fs::write(tarea.join("tarea.toml"), toml).expect("tarea.toml");
+    let repo = tempfile::tempdir().expect("repo");
+    let salida = Command::new(env!("CARGO_BIN_EXE_r00t"))
+        .args(["oraculo", "pendientes", "--tarea", "memora", "--repo"])
+        .arg(repo.path())
+        .env("ROOT_HOME", home.path())
+        .output()
+        .expect("binario");
+    assert_eq!(
+        codigo(&salida),
+        2,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    assert!(!home.path().join("pendientes").exists());
+}

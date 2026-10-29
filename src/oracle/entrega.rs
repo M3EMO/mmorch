@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use crate::observe;
 use crate::oracle::ErrorOraculo;
 use crate::oracle::configs::{self, instrucciones, palabra_clave};
-use crate::oracle::contenedor::{SUFIJO_SELINUX, SalidaPodman, correr_podman};
+use crate::oracle::contenedor::{PROXY_FUERA, SUFIJO_SELINUX, SalidaPodman, correr_podman};
 use crate::oracle::descarga::{self, ImagenBase, PRELUDIO, Problema};
 use crate::oracle::perfiles::herramientas::EjecutorHerramienta;
 use crate::oracle::perfiles::{ResultadoSonda, crear_hallazgo, puntuar_hallazgos};
@@ -137,6 +137,7 @@ fn args_build(red: bool, etiqueta: &str, dockerfile: &str, contexto: &str) -> Ve
     let red = if red { "pasta:--no-map-gw" } else { "none" };
     vec![
         "build".into(),
+        PROXY_FUERA.into(),
         "--network".into(),
         red.into(),
         "--pull=never".into(),
@@ -494,6 +495,7 @@ fn corre_sin_root(podman: &dyn Podman, tag: &str, con_sh: bool) -> Result<bool, 
     let uid = podman.correr(
         &[
             "run",
+            PROXY_FUERA,
             "--rm",
             "--network",
             "none",
@@ -518,6 +520,7 @@ fn tiene_sh(podman: &dyn Podman, tag: &str) -> Result<bool, ErrorOraculo> {
     let prueba = podman.correr(
         &[
             "run",
+            PROXY_FUERA,
             "--rm",
             "--network",
             "none",
@@ -882,30 +885,15 @@ impl ContenedorEscenario {
     /// Arranca la imagen sin red, con `sleep` o, si no está, con `tail -f /dev/null`.
     /// Sin `sh` no sirve para escenarios: devuelve el motivo y la evaluación usa el contenedor de evaluación.
     fn iniciar(imagen: &str, oraculo: &Path) -> Result<Self, String> {
-        // Los escenarios son scripts de la tarea: se montan en solo lectura, sin copiarlos a la imagen.
-        let montaje = format!("{}:/oraculo:ro,{SUFIJO_SELINUX}", oraculo.display());
         let nombre = format!(
             "root-entrega-esc-{}-{}",
             std::process::id(),
             CONTADOR_ESCENARIO.fetch_add(1, Ordering::Relaxed)
         );
         for comando in [vec!["sleep", "600"], vec!["tail", "-f", "/dev/null"]] {
-            let mut args = vec![
-                "run",
-                "-d",
-                "--network",
-                "none",
-                "--pull=never",
-                "--name",
-                nombre.as_str(),
-                "-v",
-                montaje.as_str(),
-                "--entrypoint",
-                comando[0],
-                imagen,
-            ];
-            args.extend_from_slice(&comando[1..]);
-            let arranco = correr_podman(&args, PLAZO_CORTO).is_ok_and(|s| s.codigo == 0);
+            let args = args_arranque(imagen, oraculo, &nombre, &comando);
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            let arranco = correr_podman(&refs, PLAZO_CORTO).is_ok_and(|s| s.codigo == 0);
             if arranco && corriendo(&nombre) {
                 let sh = correr_podman(&["exec", nombre.as_str(), "sh", "-c", "true"], PLAZO_CORTO);
                 if sh.is_ok_and(|s| s.codigo == 0) {
@@ -979,6 +967,32 @@ impl Drop for ContenedorEscenario {
 /// Borra un contenedor por nombre, sin esperar la parada. Un fallo no importa: ya hay un resultado.
 fn quitar(nombre: &str) {
     let _ = correr_podman(&["rm", "-f", "-t", "0", nombre], PLAZO_CORTO);
+}
+
+/// Argumentos de `podman run -d` de un escenario: sin red, sin el proxy del host (M4) y con `comando` como
+/// entrypoint. Los escenarios son scripts de la tarea: `oraculo` entra en solo lectura, sin copiarse a la imagen.
+fn args_arranque(imagen: &str, oraculo: &Path, nombre: &str, comando: &[&str]) -> Vec<String> {
+    let montaje = format!("{}:/oraculo:ro,{SUFIJO_SELINUX}", oraculo.display());
+    let Some((entrada, resto)) = comando.split_first() else {
+        return Vec::new();
+    };
+    let mut args: Vec<String> = vec![
+        "run".into(),
+        "-d".into(),
+        PROXY_FUERA.into(),
+        "--network".into(),
+        "none".into(),
+        "--pull=never".into(),
+        "--name".into(),
+        nombre.into(),
+        "-v".into(),
+        montaje,
+        "--entrypoint".into(),
+        (*entrada).into(),
+        imagen.into(),
+    ];
+    args.extend(resto.iter().map(|a| a.to_string()));
+    args
 }
 
 /// Verdadero si el contenedor sigue corriendo.
@@ -1863,6 +1877,45 @@ mod tests {
     }
 
     #[test]
+    fn entrega_args_build_llevan_http_proxy_false_con_y_sin_red() {
+        for red in [false, true] {
+            let args = args_build(red, "etiqueta", "Dockerfile", ".");
+            assert!(
+                args.contains(&"--http-proxy=false".to_string()),
+                "red={red}: {args:?}"
+            );
+            assert_eq!(args.first().map(String::as_str), Some("build"));
+        }
+    }
+
+    #[test]
+    fn entrega_arranque_de_escenario_lleva_http_proxy_false() {
+        let args = args_arranque("img:1", Path::new("/o"), "nombre", &["sleep", "600"]);
+        let proxy = args.iter().position(|a| a == "--http-proxy=false");
+        let imagen = args.iter().position(|a| a == "img:1");
+        assert!(proxy.is_some() && proxy < imagen, "{args:?}");
+        assert_eq!(args.first().map(String::as_str), Some("run"));
+    }
+
+    #[test]
+    fn entrega_run_de_la_comprobacion_lleva_http_proxy_false() {
+        let podman = PodmanFalso::nuevo(|_| salida_ok());
+        let _ = corre_sin_root(&podman, "etiqueta", true);
+        let _ = tiene_sh(&podman, "etiqueta");
+        let runs: Vec<Vec<String>> = podman
+            .llamadas
+            .borrow()
+            .iter()
+            .filter(|a| a[0] == "run")
+            .cloned()
+            .collect();
+        assert_eq!(runs.len(), 2, "{runs:?}");
+        for args in runs {
+            assert!(args.contains(&"--http-proxy=false".to_string()), "{args:?}");
+        }
+    }
+
+    #[test]
     fn entrega_red_pendiente_por_red_se_repite_y_deja_hallazgo_sev_1() {
         let repo = repo_con_archivos(&[("Dockerfile", DF_RED)]);
         let home = tempfile::tempdir().expect("home");
@@ -1941,6 +1994,7 @@ mod tests {
             args,
             [
                 "build",
+                "--http-proxy=false",
                 "--network",
                 "pasta:--no-map-gw",
                 "--pull=never",
@@ -1957,6 +2011,7 @@ mod tests {
             args_build(false, "etiqueta", df, ctx),
             [
                 "build",
+                "--http-proxy=false",
                 "--network",
                 "none",
                 "--pull=never",
