@@ -600,15 +600,6 @@ fn rechazo_de_lock(paquete: &PaqueteLock, motivo: String) -> Rechazo {
     }
 }
 
-fn aviso(texto: &Texto, linea: u32, detalle: String) -> Aviso {
-    Aviso {
-        archivo: texto.ruta.clone(),
-        linea,
-        cita: texto.cita(linea),
-        detalle: redactar(&detalle),
-    }
-}
-
 /// Agrega una fuente sin repetirla: dos fuentes iguales en tipo, dirección y versión son una.
 fn push_unico(fuentes: &mut Vec<Fuente>, nueva: Fuente) {
     let repetida = fuentes.iter().any(|f| {
@@ -1206,19 +1197,239 @@ fn revisar_dep(
 }
 
 /// Inventario de `requirements.txt`. Sin red: solo lee el texto.
-fn inventariar_requirements(repo: &Path, inv: &mut Inventario) -> Result<(), ErrorOraculo> {
-    let Some(texto) = leer_opcional(&repo.join(ARCHIVO_REQUIREMENTS))? else {
+/// Una línea lógica de un `requirements` del repo, con su archivo y su línea de inicio.
+/// `restriccion` marca lo que llega por `-c`: limita versiones y no instala nada.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineaReq {
+    pub archivo: String,
+    pub linea: u32,
+    pub texto: String,
+    pub restriccion: bool,
+}
+
+/// Extensiones de archivo que pip instala sin construir nada del proyecto.
+const EXTENSIONES_ARCHIVO: [&str; 3] = [".whl", ".tar.gz", ".zip"];
+
+/// Lee `requirements.txt` del repo y sigue sus `-r` y `-c`. Un archivo que no se puede seguir (sale del repo,
+/// falta, es un enlace que sale, o forma un ciclo) da un rechazo con su línea. Sin red.
+fn expandir_requisitos(
+    repo: &Path,
+    archivo: &str,
+    restriccion: bool,
+    en_curso: &mut Vec<String>,
+    salida: &mut Expansion,
+) -> Result<(), ErrorOraculo> {
+    let Some(texto) = leer_opcional(&repo.join(archivo))? else {
         return Ok(());
     };
-    let t = Texto::nuevo(ARCHIVO_REQUIREMENTS, &texto);
-    let logicas = lineas_logicas(&texto);
+    en_curso.push(archivo.to_string());
+    let t = Texto::nuevo(archivo, &texto);
+    let dir = archivo.rsplit_once('/').map_or("", |(dir, _)| dir);
+    for (linea, logica) in lineas_logicas(&texto) {
+        let resto = contenido(&logica).to_string();
+        if resto.is_empty() || resto.starts_with('#') {
+            continue;
+        }
+        let (es_r, es_c) = (
+            opcion(&resto, &["-r", "--requirement"]).is_some(),
+            opcion(&resto, &["-c", "--constraint"]).is_some(),
+        );
+        if es_r || es_c {
+            let valor =
+                opcion(&resto, &["-r", "--requirement", "-c", "--constraint"]).unwrap_or_default();
+            // Una URL no es un archivo del repo: se rechaza como `-r` que no se puede seguir.
+            let destino = if valor.contains("://") {
+                None
+            } else {
+                ruta_en_repo(dir, valor).filter(|d| repo.join(d).is_file())
+            };
+            match destino {
+                Some(d) if en_curso.contains(&d) => {
+                    salida
+                        .rechazos
+                        .push(rechazo(&t, linea, format!("ciclo de requirements: {d}")));
+                }
+                Some(d) if dentro_fisico(repo, &d) => {
+                    expandir_requisitos(repo, &d, restriccion || es_c, en_curso, salida)?;
+                }
+                _ => salida.rechazos.push(rechazo(
+                    &t,
+                    linea,
+                    format!("requirements fuera del repo, inexistente o enlazado: {valor}"),
+                )),
+            }
+            continue;
+        }
+        salida.lineas.push(LineaReq {
+            archivo: archivo.into(),
+            linea,
+            texto: resto,
+            restriccion,
+        });
+    }
+    salida.textos.insert(archivo.to_string(), t);
+    en_curso.pop();
+    Ok(())
+}
+
+/// Resultado de expandir los `requirements`: las líneas en orden, los textos por archivo y los rechazos.
+#[derive(Default)]
+struct Expansion {
+    lineas: Vec<LineaReq>,
+    textos: BTreeMap<String, Texto>,
+    rechazos: Vec<Rechazo>,
+}
+
+/// Líneas de `requirements.txt` con `-r` y `-c` seguidos. Los rechazos los reporta el inventario.
+fn lineas_requisitos(repo: &Path) -> Result<Expansion, ErrorOraculo> {
+    let mut salida = Expansion::default();
+    expandir_requisitos(
+        repo,
+        ARCHIVO_REQUIREMENTS,
+        false,
+        &mut Vec::new(),
+        &mut salida,
+    )?;
+    Ok(salida)
+}
+
+/// Textos que pip necesita: los requisitos y las restricciones (`-c`), ya expandidos. Sin red.
+/// Sin rechazos: el inventario ya los dio. Un repo con rechazos no llega a la descarga.
+pub fn textos_de_requisitos(repo: &Path) -> (String, String) {
+    let Ok(salida) = lineas_requisitos(repo) else {
+        return (String::new(), String::new());
+    };
+    let unir = |restriccion: bool| -> String {
+        let lineas: Vec<&str> = salida
+            .lineas
+            .iter()
+            .filter(|l| l.restriccion == restriccion)
+            .map(|l| l.texto.as_str())
+            .collect();
+        if lineas.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", lineas.join("\n"))
+        }
+    };
+    (unir(false), unir(true))
+}
+
+/// Referencia git que se acepta: `git+…@commit`, con el commit fijo de 7 a 40 hexadecimales (B2, M7).
+/// `#subdirectory=` se conserva; cualquier otro fragmento (`#egg=`) no cambia la fuente.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartesGit {
+    /// La URL del repo, sin `@commit` ni fragmento.
+    pub base: String,
+    pub commit: String,
+    /// Subdirectorio del repo donde está el paquete (`#subdirectory=`), relativo y sin `..`.
+    pub subdir: Option<String>,
+}
+
+/// Motivo común de toda referencia git que no se acepta.
+const MOTIVO_GIT: &str =
+    "referencia git no segura: se pide un commit fijo de 7 a 40 hexadecimales (@<commit>)";
+
+/// `true` si el texto es un commit: de 7 a 40 caracteres hexadecimales.
+pub fn es_commit(texto: &str) -> bool {
+    (7..=40).contains(&texto.len()) && texto.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// `true` si un subdirectorio es relativo, no sale del repo y solo lleva caracteres de nombre de archivo.
+fn subdir_seguro(subdir: &str) -> bool {
+    !subdir.is_empty()
+        && !subdir.starts_with('/')
+        && subdir.split('/').all(|p| {
+            !p.is_empty()
+                && p != "."
+                && p != ".."
+                && p.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
+        })
+}
+
+/// Separa una referencia `git+…` en su repo, su commit fijo y su subdirectorio. `Err` con el motivo si no se acepta.
+pub fn partes_git(raw: &str) -> Result<PartesGit, String> {
+    let sin_git = raw
+        .strip_prefix("git+")
+        .ok_or_else(|| MOTIVO_GIT.to_string())?;
+    let (url, fragmento) = match sin_git.split_once('#') {
+        Some((url, fragmento)) => (url, Some(fragmento)),
+        None => (sin_git, None),
+    };
+    let (base, commit) = separar_referencia(url);
+    let commit = commit
+        .filter(|c| es_commit(c))
+        .ok_or_else(|| MOTIVO_GIT.to_string())?;
+    let subdir = fragmento.and_then(|f| {
+        f.split('&')
+            .find_map(|par| par.strip_prefix("subdirectory="))
+            .map(str::to_string)
+    });
+    if subdir.as_deref().is_some_and(|s| !subdir_seguro(s)) {
+        return Err("subdirectory no seguro: debe ser relativo y no salir del repo".into());
+    }
+    Ok(PartesGit {
+        base,
+        commit,
+        subdir,
+    })
+}
+
+/// Motivo por el que una referencia git no se acepta, o `None` si se acepta.
+pub fn motivo_git(raw: &str) -> Option<String> {
+    partes_git(raw).err()
+}
+
+/// Rechazo de una fuente directa de requirements: la referencia git sin commit fijo y el archivo de URL
+/// sin formato de paquete. Lo demás pasa a `directa`.
+fn directa_requisito(url: &str, linea: u32, t: &Texto, inv: &mut Inventario) {
+    if url.starts_with("git+") {
+        if let Some(motivo) = motivo_git(url) {
+            inv.rechazos.push(rechazo(t, linea, motivo));
+            return;
+        }
+    } else {
+        // Primero la dirección: sus credenciales no pueden llegar a un motivo.
+        if let Some(motivo) = motivo_de_url(url) {
+            inv.rechazos.push(rechazo(t, linea, motivo));
+            return;
+        }
+        let sin_fragmento = url.split('#').next().unwrap_or(url);
+        let archivo = sin_consulta(sin_fragmento).rsplit('/').next().unwrap_or("");
+        if !EXTENSIONES_ARCHIVO.iter().any(|f| archivo.ends_with(f)) {
+            inv.rechazos.push(rechazo(
+                t,
+                linea,
+                "URL de archivo no soportada: solo .whl, .tar.gz o .zip".into(),
+            ));
+            return;
+        }
+    }
+    directa(url, linea, t, inv);
+}
+
+/// `requirements.txt` del repo y lo que sus `-r` y `-c` traen. Índices, fuentes directas y rutas locales
+/// pasan por las reglas del inventario. Lo que no se soporta da rechazo con su línea (M6).
+fn inventariar_requirements(repo: &Path, inv: &mut Inventario) -> Result<(), ErrorOraculo> {
+    if leer_opcional(&repo.join(ARCHIVO_REQUIREMENTS))?.is_none() {
+        return Ok(());
+    }
+    let Expansion {
+        lineas,
+        textos,
+        rechazos,
+    } = lineas_requisitos(repo)?;
+    inv.rechazos.extend(rechazos);
+    let sin_restriccion: Vec<&LineaReq> = lineas.iter().filter(|l| !l.restriccion).collect();
+    let texto_de = |l: &LineaReq| -> &Texto { &textos[&l.archivo] };
     // Pasada 1: cada `--index-url` va primero. Reemplaza a PyPI, así que PyPI no se lista.
     // Varios `--index-url`: se listan todos, por conservador. pip usa el último.
     let mut indice_propio = false;
-    for (linea, logica) in &logicas {
-        if let Some(valor) = opcion(contenido(logica), &["-i", "--index-url"]) {
+    for l in &sin_restriccion {
+        if let Some(valor) = opcion(&l.texto, &["-i", "--index-url"]) {
             indice_propio = true;
-            fuente_de_indice(&t, *linea, valor, inv);
+            fuente_de_indice(texto_de(l), l.linea, valor, inv);
         }
     }
     // Sin `--index-url`, pip usa PyPI como base. Va antes de los `--extra-index-url`.
@@ -1235,21 +1446,34 @@ fn inventariar_requirements(repo: &Path, inv: &mut Inventario) -> Result<(), Err
             },
         );
     }
-    // Pasada 2: el resto de las líneas, en el orden del archivo.
-    for (linea, logica) in &logicas {
-        let linea = *linea;
-        let resto = contenido(logica);
-        if resto.is_empty() || resto.starts_with('#') {
+    // Pasada 2: el resto de las líneas, en el orden del archivo y de sus `-r`.
+    for l in &lineas {
+        let t = texto_de(l);
+        let linea = l.linea;
+        let resto = l.texto.as_str();
+        if l.restriccion {
+            // Una restricción (`-c`) solo limita versiones: no trae fuentes ni opciones.
+            if resto.starts_with('-')
+                || es_directa(resto)
+                || resto.contains(" @ ")
+                || es_ruta_local(repo, resto)
+            {
+                inv.rechazos.push(rechazo(
+                    t,
+                    linea,
+                    format!("restricción no soportada: {}", redactar(resto)),
+                ));
+            }
             continue;
         }
         if opcion(resto, &["-i", "--index-url"]).is_some() {
             continue;
         }
         if let Some(valor) = opcion(resto, &["--extra-index-url"]) {
-            fuente_de_indice(&t, linea, valor, inv);
+            fuente_de_indice(t, linea, valor, inv);
             inv.hallazgos.push(HallazgoInventario {
                 severidad: 1,
-                archivo: ARCHIVO_REQUIREMENTS.into(),
+                archivo: l.archivo.clone(),
                 linea,
                 cita: t.cita(linea),
                 detalle: "mezclar índices (--extra-index-url) permite la confusión de dependencias"
@@ -1257,37 +1481,34 @@ fn inventariar_requirements(repo: &Path, inv: &mut Inventario) -> Result<(), Err
                 dimension: Dimension::Entrega,
             });
         } else if let Some(valor) = opcion(resto, &["-f", "--find-links"]) {
-            fuente_de_indice(&t, linea, valor, inv);
-        } else if opcion(resto, &["-r", "--requirement", "-c", "--constraint"]).is_some() {
-            inv.avisos
-                .push(aviso(&t, linea, format!("no se sigue: {resto}")));
+            fuente_de_indice(t, linea, valor, inv);
         } else if let Some(valor) = opcion(resto, &["-e", "--editable"]) {
             if es_directa(valor) {
-                directa(valor, linea, &t, inv);
+                directa_requisito(valor, linea, t, inv);
             } else if es_ruta_local(repo, valor) {
                 inv.rechazos.push(rechazo(
-                    &t,
+                    t,
                     linea,
                     format!("ruta local no soportada: {valor}"),
                 ));
             } else {
-                inv.avisos.push(aviso(
-                    &t,
-                    linea,
-                    format!("editable local, no se sigue: {valor}"),
-                ));
+                inv.rechazos
+                    .push(rechazo(t, linea, format!("editable no soportado: {valor}")));
             }
         } else if resto.starts_with('-') {
-            inv.avisos
-                .push(aviso(&t, linea, format!("opción no soportada: {resto}")));
+            inv.rechazos.push(rechazo(
+                t,
+                linea,
+                format!("opción no soportada: {}", redactar(resto)),
+            ));
         } else if let Some((_, url)) = resto.split_once(" @ ") {
-            directa(url.trim(), linea, &t, inv);
+            directa_requisito(url.trim(), linea, t, inv);
         } else if es_directa(resto) {
-            directa(resto, linea, &t, inv);
+            directa_requisito(resto, linea, t, inv);
         } else if es_ruta_local(repo, resto) {
             // Una ruta local haría que pip compile el proyecto: el contenedor no la ve y Root la rechaza (C1).
             inv.rechazos.push(rechazo(
-                &t,
+                t,
                 linea,
                 format!("ruta local no soportada: {resto}"),
             ));
@@ -1584,8 +1805,9 @@ source = \"git+https://github.com/x/t?rev=r1#aaaa\"\n";
     #[test]
     fn descarga_inventario_requirements_lista_indice_git_url_y_avisos() {
         let texto = "# comentario\nrequests==2.31.0\n--index-url https://pypi.example/simple\n\
-git+https://github.com/x/y@abc123#egg=y\nhttps://host/p.tar.gz\n-r otro.txt\n";
-        let inv = inventario_de(&[("requirements.txt", texto)]);
+git+https://github.com/x/y@abc1234#egg=y\nhttps://host/p.tar.gz\n-r otro.txt\n";
+        // `-r otro.txt` ahora se sigue (M6): el archivo existe y no trae fuentes.
+        let inv = inventario_de(&[("requirements.txt", texto), ("otro.txt", "")]);
         assert!(inv.rechazos.is_empty(), "{:?}", inv.rechazos);
         assert_eq!(
             inv.fuentes,
@@ -1602,7 +1824,7 @@ git+https://github.com/x/y@abc123#egg=y\nhttps://host/p.tar.gz\n-r otro.txt\n";
                     tipo: TipoFuente::Git,
                     direccion: "https://github.com/x/y".into(),
                     host: "github.com".into(),
-                    version: Some("abc123".into()),
+                    version: Some("abc1234".into()),
                     archivo: "requirements.txt".into(),
                     linea: 4,
                 },
@@ -1616,9 +1838,11 @@ git+https://github.com/x/y@abc123#egg=y\nhttps://host/p.tar.gz\n-r otro.txt\n";
                 },
             ]
         );
-        assert_eq!(inv.avisos.len(), 1, "{:?}", inv.avisos);
-        assert_eq!(inv.avisos[0].linea, 6);
-        assert!(inv.avisos[0].detalle.contains("otro.txt"));
+        assert!(
+            inv.avisos.is_empty(),
+            "nada se descarta en silencio: {:?}",
+            inv.avisos
+        );
     }
 
     #[test]
@@ -2063,7 +2287,7 @@ source = \"git+https://u:p@host/x?rev=1#aaaa\"\n";
         let texto = "--index-url https://base.example/simple\n\
 --extra-index-url https://b.example/simple\n\
 --extra-index-url https://a.example/simple\n\
-requests\ngit+https://github.com/x/y@abc#egg=y\n";
+requests\ngit+https://github.com/x/y@abc1234#egg=y\n";
         let dir = repo_con(&[("requirements.txt", texto)]);
         let primera = inventariar(dir.path()).expect("inventaria sin red");
         let segunda = inventariar(dir.path()).expect("inventaria sin red");
@@ -2413,6 +2637,139 @@ requests\ngit+https://github.com/x/y@abc#egg=y\n";
         assert_eq!(inv.rechazos[0].archivo, "Dockerfile");
         assert_eq!(inv.rechazos[0].linea, 2);
     }
+
+    #[test]
+    fn descarga_inventario_r_del_repo_se_sigue_y_su_fuente_cuenta() {
+        let inv = inventario_de(&[
+            ("requirements.txt", "-r requirements/base.txt\n"),
+            (
+                "requirements/base.txt",
+                "git+https://github.com/x/y@abc1234#egg=y\n",
+            ),
+        ]);
+        assert!(inv.rechazos.is_empty(), "{:?}", inv.rechazos);
+        assert!(
+            inv.avisos.is_empty(),
+            "nada se descarta en silencio: {:?}",
+            inv.avisos
+        );
+        let git = inv
+            .fuentes
+            .iter()
+            .find(|f| f.tipo == TipoFuente::Git)
+            .expect("la fuente git de la línea -r");
+        assert_eq!(git.archivo, "requirements/base.txt");
+        assert_eq!(git.linea, 1);
+    }
+
+    #[test]
+    fn descarga_inventario_r_o_c_que_salen_del_repo_o_faltan_son_rechazo() {
+        for linea in [
+            "-r ../afuera.txt",
+            "-r falta.txt",
+            "-c /etc/passwd",
+            "-r https://host/x.txt",
+        ] {
+            let texto = format!("requests==2.31.0\n{linea}\n");
+            let inv = inventario_de(&[("requirements.txt", &texto)]);
+            assert!(
+                inv.rechazos
+                    .iter()
+                    .any(|r| r.archivo == "requirements.txt" && r.linea == 2),
+                "debe rechazar `{linea}`: {inv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn descarga_inventario_r_con_ciclo_es_rechazo() {
+        let inv = inventario_de(&[
+            ("requirements.txt", "-r a.txt\n"),
+            ("a.txt", "-r b.txt\n"),
+            ("b.txt", "-r a.txt\n"),
+        ]);
+        assert!(
+            !inv.rechazos.is_empty(),
+            "un ciclo corta la lectura: {inv:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descarga_inventario_r_que_sale_por_enlace_es_rechazo() {
+        let fuera = repo_con(&[("secreto.txt", "requests==2.31.0\n")]);
+        let repo = repo_con(&[("requirements.txt", "-r enlace.txt\n")]);
+        std::os::unix::fs::symlink(
+            fuera.path().join("secreto.txt"),
+            repo.path().join("enlace.txt"),
+        )
+        .expect("enlace");
+        let inv = inventariar(repo.path()).expect("inventaria sin red");
+        assert!(
+            inv.rechazos
+                .iter()
+                .any(|r| r.archivo == "requirements.txt" && r.linea == 1),
+            "un enlace que sale del repo no se sigue: {inv:?}"
+        );
+    }
+
+    #[test]
+    fn descarga_inventario_c_con_referencia_directa_es_rechazo() {
+        let inv = inventario_de(&[
+            ("requirements.txt", "-c restricciones.txt\n"),
+            (
+                "restricciones.txt",
+                "git+https://github.com/x/y@abc1234#egg=y\n",
+            ),
+        ]);
+        assert!(
+            inv.rechazos
+                .iter()
+                .any(|r| r.archivo == "restricciones.txt" && r.linea == 1),
+            "una restricción no puede traer una fuente: {inv:?}"
+        );
+    }
+
+    #[test]
+    fn descarga_inventario_git_sin_commit_o_con_tag_es_rechazo_igual() {
+        for linea in [
+            "git+https://github.com/x/y#egg=y",
+            "git+https://github.com/x/y@v1.2.0#egg=y",
+            "-e git+https://github.com/x/y#egg=y",
+            "-e git+https://github.com/x/y@v1.2.0#egg=y",
+        ] {
+            let texto = format!("{linea}\n");
+            let inv = inventario_de(&[("requirements.txt", &texto)]);
+            assert!(
+                inv.rechazos.iter().any(|r| r.linea == 1),
+                "debe rechazar `{linea}` (sin commit de 7 a 40 hex): {inv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn descarga_inventario_e_con_commit_es_fuente_git_sin_rechazo() {
+        let inv = inventario_de(&[(
+            "requirements.txt",
+            "-e git+https://github.com/x/y@c8e394065cd541a16c040515dc0afb85cf22a7c3#egg=y\n",
+        )]);
+        assert!(inv.rechazos.is_empty(), "{:?}", inv.rechazos);
+        assert!(inv.fuentes.iter().any(|f| f.tipo == TipoFuente::Git));
+    }
+
+    #[test]
+    fn descarga_inventario_e_sin_fuente_y_opcion_no_soportada_son_rechazo() {
+        for linea in ["-e requests", "--prefer-binary", "--only-binary=:all:"] {
+            let texto = format!("requests==2.31.0\n{linea}\n");
+            let inv = inventario_de(&[("requirements.txt", &texto)]);
+            assert!(
+                inv.rechazos
+                    .iter()
+                    .any(|r| r.archivo == "requirements.txt" && r.linea == 2),
+                "debe rechazar `{linea}`: {inv:?}"
+            );
+        }
+    }
 }
 
 /// Lo que pip necesita del `requirements.txt`, leído sin red. Las fuentes ya pasaron las reglas del inventario.
@@ -2440,6 +2797,11 @@ pub fn requisitos_pip(texto: &str) -> RequisitosPip {
             salida.indice_propio = Some(valor.to_string());
         } else if let Some(valor) = opcion(resto, &["--extra-index-url"]) {
             salida.indices_extra.push(valor.to_string());
+        } else if let Some(valor) = opcion(resto, &["-e", "--editable"]) {
+            // `-e` de una fuente directa es lo mismo que la fuente sin `-e`. El resto ya lo rechazó el inventario.
+            if es_directa(valor) {
+                salida.directas.push((linea, valor.to_string()));
+            }
         } else if resto.starts_with('-') {
             // Otras opciones no llegan a `pip download`: el inventario ya dejó su aviso.
         } else if let Some((_, url)) = resto.split_once(" @ ") {

@@ -153,7 +153,7 @@ pub struct Ambiguedad {
 }
 
 /// Resultado de revisar un spec. `ambiguedades` queda vacía hasta que corra el juez.
-/// `juez` es `"no corrido"`, `"ok"` (el JSON parseó) o `"sin_veredicto: <causa>"`.
+/// `juez` es `"ok"` (el JSON parseó) o `"sin_veredicto: <causa>"`. Sin juez, la causa es `juez no corrido`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Revision {
     pub hallazgos: Vec<HallazgoFicha>,
@@ -188,7 +188,8 @@ pub struct ContextoRevision {
 }
 
 const ENCABEZADO: &str = "## Ficha";
-const JUEZ_NO_CORRIDO: &str = "no corrido";
+/// Causa del juez cuando no corrió. Sin juez no hay veredicto, así que `codigo_de_salida` da 3 sin hallazgos.
+const JUEZ_NO_CORRIDO: &str = "sin_veredicto: juez no corrido";
 const MARCAS_VAGAS: &[&str] = &["TBD", "etc.", "..."];
 const PALABRAS_VAGAS: &[&str] = &[
     "rápido",

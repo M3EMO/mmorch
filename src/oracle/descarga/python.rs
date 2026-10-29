@@ -10,11 +10,14 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::inventario::{RequisitosPip, redactar, requisitos_pip, separar_referencia};
+use super::inventario::{
+    PartesGit, RequisitosPip, motivo_git, partes_git, redactar, requisitos_pip,
+    textos_de_requisitos,
+};
 use super::{
     ARCHIVO_REQUIREMENTS, CARPETA_CACHE, CARPETA_PYTHON, Diagnostico, Paso, Preparacion, Registro,
-    borrar_en_home, corte, diagnosticar, entorno_descarga, error_de, hallazgo, hallazgo_no_instala,
-    hash_corto, limpiar_parcial, parcial_de, temporal_de,
+    borrar_en_home, corte, diagnosticar, entorno_descarga, error_de, hallazgo, hash_corto,
+    limpiar_parcial, parcial_de, temporal_de,
 };
 use crate::borrado;
 use crate::oracle::contenedor::{self, Ejecucion};
@@ -26,6 +29,10 @@ use crate::tipos::Hallazgo;
 const ARCHIVO_INDICE: &str = "indice-pip.txt";
 /// Lo que la evaluación instala sin red. Las URLs y los `git+` se cambian por rutas locales.
 pub const ARCHIVO_OFFLINE: &str = "requirements-offline.txt";
+/// Restricciones (`-c`) del repo, sin fuentes: pip las usa para elegir versiones y no instala nada con ellas.
+const ARCHIVO_RESTRICCIONES: &str = "restricciones.txt";
+/// Mensaje de PyPI cuando una versión no trae sdist: la plataforma no tiene wheel y no hay de dónde construir.
+const SIN_SDIST: &str = "la versión no tiene sdist en PyPI";
 const INDICE_PYPI: &str = "https://pypi.org/simple";
 const JSON_PYPI: &str = "https://pypi.org/pypi";
 const PREFIJO_SDIST_PYPI: &str = "https://files.pythonhosted.org/";
@@ -147,21 +154,36 @@ pub fn comando_wheels(indice: &str, req: &RequisitosPip) -> String {
     comando
 }
 
-/// Comando que clona una fuente git sin hooks ni submódulos, y deja el commit obtenido en un archivo.
-pub fn comando_clon(url: &str, dir: &str, commit: Option<&str>) -> String {
-    let mut comando = format!(
-        "mkdir -p /cache/src && git -c core.hooksPath=/dev/null -c protocol.allow=never -c protocol.https.allow=always clone --no-checkout {} /cache/src/{dir}",
+/// Comando que clona una fuente git sin hooks ni submódulos, en el commit fijo, y deja el commit obtenido en un
+/// archivo. El commit es obligatorio: un clon sin checkout deja un árbol vacío (M7).
+pub fn comando_clon(url: &str, dir: &str, commit: &str) -> String {
+    format!(
+        "mkdir -p /cache/src && git -c core.hooksPath=/dev/null -c protocol.allow=never -c protocol.https.allow=always clone --no-checkout {} /cache/src/{dir} && git -C /cache/src/{dir} -c core.hooksPath=/dev/null checkout --detach {commit} && git -C /cache/src/{dir} rev-parse HEAD > /cache/src/{dir}.commit",
         comilla(url)
-    );
-    if let Some(commit) = commit {
-        comando.push_str(&format!(
-            " && git -C /cache/src/{dir} -c core.hooksPath=/dev/null checkout --detach {commit}"
-        ));
+    )
+}
+
+/// Clave de un clon: repo y commit. Dos líneas del mismo repo y commit comparten el árbol (B3).
+pub fn clave_clon(partes: &PartesGit) -> String {
+    hash_corto(format!("{}@{}", partes.base, partes.commit).as_bytes())
+}
+
+/// Línea de `requirements-offline.txt` para un clon. Apunta a la copia escribible que el prelude deja en
+/// `/tmp/fuentes`: pip construye en el árbol fuente, y `/cache` es de solo lectura en la evaluación (M10).
+pub fn linea_offline_git(dir: &str, subdir: Option<&str>) -> String {
+    match subdir {
+        Some(subdir) => format!("/tmp/fuentes/{dir}/{subdir}"),
+        None => format!("/tmp/fuentes/{dir}"),
     }
-    comando.push_str(&format!(
-        " && git -C /cache/src/{dir} rev-parse HEAD > /cache/src/{dir}.commit"
-    ));
-    comando
+}
+
+/// Clave de la caché de Python: requisitos, restricciones e imagen (M8). La imagen decide qué wheels bajan
+/// (`cp38` o `cp312`), así que va en la clave, con su digest si la referencia lo trae.
+pub fn clave_cache_python(requisitos: &str, restricciones: &str, imagen: &str) -> String {
+    hash_corto(
+        format!("imagen={imagen}\n--requisitos--\n{requisitos}--restricciones--\n{restricciones}")
+            .as_bytes(),
+    )
 }
 
 /// Comando que baja un archivo por HTTPS a `/cache/<archivo>`.
@@ -194,7 +216,7 @@ pub fn sdist_de_json(json: &str) -> Result<Sdist, String> {
     let sdist = entradas
         .iter()
         .find(|e| e["packagetype"] == "sdist")
-        .ok_or_else(|| "la versión no tiene sdist en PyPI".to_string())?;
+        .ok_or_else(|| SIN_SDIST.to_string())?;
     let url = sdist["url"].as_str().unwrap_or_default();
     let archivo = sdist["filename"].as_str().unwrap_or_default();
     let sha = sdist["digests"]["sha256"].as_str().unwrap_or_default();
@@ -222,6 +244,19 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// Por qué no se baja un sdist: PyPI no tiene esa versión o no trae sdist (el producto no instala), o la
+/// descarga falló por otra causa (infraestructura).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FalloSdist {
+    NoExiste,
+    Otro(String),
+}
+
+/// `true` si curl dijo que el recurso no existe. Con `-f`, curl da `returned error: 404`.
+fn es_no_existe(motivo: &str) -> bool {
+    motivo.contains("returned error: 404")
+}
+
 /// Baja el sdist de `nombre==version` a `cache`. `pedir(url, archivo)` deja el archivo en `cache`.
 /// Verifica el sha256 de PyPI. Un hash que no coincide borra el archivo y da error. Nunca lo extrae.
 pub fn bajar_sdist_con<F>(
@@ -229,73 +264,47 @@ pub fn bajar_sdist_con<F>(
     version: &str,
     cache: &Path,
     mut pedir: F,
-) -> Result<Sdist, String>
+) -> Result<Sdist, FalloSdist>
 where
     F: FnMut(&str, &str) -> Result<(), String>,
 {
     if !caracteres_seguros(nombre) || !caracteres_seguros(version) {
-        return Err(format!("paquete o versión no seguros: {nombre}=={version}"));
+        return Err(FalloSdist::Otro(format!(
+            "paquete o versión no seguros: {nombre}=={version}"
+        )));
     }
     let url_json = format!("{JSON_PYPI}/{nombre}/{version}/json");
-    pedir(&url_json, ARCHIVO_JSON)?;
+    // Un 404 del JSON es un nombre o una versión que PyPI no tiene: un veredicto del producto (B1).
+    pedir(&url_json, ARCHIVO_JSON).map_err(|motivo| {
+        if es_no_existe(&motivo) {
+            FalloSdist::NoExiste
+        } else {
+            FalloSdist::Otro(motivo)
+        }
+    })?;
     let ruta_json = cache.join(ARCHIVO_JSON);
-    let json = fs::read_to_string(&ruta_json).map_err(|e| format!("leer el JSON de PyPI: {e}"))?;
+    let json = fs::read_to_string(&ruta_json)
+        .map_err(|e| FalloSdist::Otro(format!("leer el JSON de PyPI: {e}")))?;
     borrado::borrar_archivo_dentro(cache, &ruta_json)
-        .map_err(|e| format!("borrar el JSON: {e}"))?;
-    let sdist = sdist_de_json(&json)?;
-    pedir(&sdist.url, &sdist.archivo)?;
+        .map_err(|e| FalloSdist::Otro(format!("borrar el JSON: {e}")))?;
+    let sdist = sdist_de_json(&json).map_err(|motivo| {
+        if motivo == SIN_SDIST {
+            FalloSdist::NoExiste
+        } else {
+            FalloSdist::Otro(motivo)
+        }
+    })?;
+    pedir(&sdist.url, &sdist.archivo).map_err(FalloSdist::Otro)?;
     let ruta = cache.join(&sdist.archivo);
-    let bytes = fs::read(&ruta).map_err(|e| format!("leer el sdist: {e}"))?;
+    let bytes = fs::read(&ruta).map_err(|e| FalloSdist::Otro(format!("leer el sdist: {e}")))?;
     if sha256_hex(&bytes) != sdist.sha256 {
         let _ = borrado::borrar_archivo_dentro(cache, &ruta);
-        return Err(format!(
+        return Err(FalloSdist::Otro(format!(
             "el sha256 de {} no coincide: se descarta",
             sdist.archivo
-        ));
+        )));
     }
     Ok(sdist)
-}
-
-/// Un commit de 7 a 40 caracteres hexadecimales.
-fn es_commit(texto: &str) -> bool {
-    (7..=40).contains(&texto.len()) && texto.chars().all(|c| c.is_ascii_hexdigit())
-}
-
-/// Hallazgos de dependencias git sin commit fijo (la punta de la rama no es reproducible).
-fn hallazgos_sin_commit(req: &RequisitosPip, texto: &str) -> Vec<Hallazgo> {
-    req.directas
-        .iter()
-        .filter(|(_, raw)| raw.starts_with("git+"))
-        .filter(|(_, raw)| {
-            separar_referencia(
-                raw.trim_start_matches("git+")
-                    .split('#')
-                    .next()
-                    .unwrap_or(""),
-            )
-            .1
-            .is_none()
-        })
-        .map(|(linea, raw)| {
-            let cita = redactar(
-                texto
-                    .lines()
-                    .nth((*linea as usize).saturating_sub(1))
-                    .unwrap_or("")
-                    .trim(),
-            );
-            hallazgo(
-                ARCHIVO_REQUIREMENTS,
-                *linea,
-                &cita,
-                2,
-                format!(
-                    "dependencia git sin commit fijo: {} : el build no es reproducible",
-                    redactar(raw)
-                ),
-            )
-        })
-        .collect()
 }
 
 /// Resultado de correr un contenedor de descarga de Python: su código y su error.
@@ -356,11 +365,10 @@ pub(super) fn preparar_python(
             None,
         ));
     }
-    let bytes = fs::read(&ruta).map_err(|e| infra("leer requirements.txt", e))?;
-    let texto = String::from_utf8_lossy(&bytes).into_owned();
-    let hash = hash_corto(&bytes);
+    // El texto de `requirements.txt` con sus `-r` seguidos, y las `-c` aparte: pip no ve archivos del repo (C1, M6).
+    let (texto, restricciones) = textos_de_requisitos(repo);
+    let hash = clave_cache_python(&texto, &restricciones, &tarea.imagen);
     let req = requisitos_pip(&texto);
-    let hallazgos = hallazgos_sin_commit(&req, &texto);
     let destino = home.join(CARPETA_CACHE).join(CARPETA_PYTHON).join(&hash);
     if destino.join(ARCHIVO_OFFLINE).is_file() && requisitos_sdist_listos(&destino)? {
         let registro = Registro {
@@ -374,8 +382,8 @@ pub(super) fn preparar_python(
         };
         // Los hallazgos de build salen de los `pyproject` guardados en la caché: sin ellos, el segundo
         // corrido perdería el aviso del primero.
-        let mut hallazgos = hallazgos;
-        if let Some((_, de_build)) = indice_de_build_de(&destino)? {
+        let mut hallazgos = Vec::new();
+        if let Some((_, de_build)) = indice_de_build_de(&destino, &rutas_clon(&req))? {
             hallazgos.extend(de_build);
         }
         let preparacion = Preparacion::Lista {
@@ -391,7 +399,15 @@ pub(super) fn preparar_python(
     // Copia de los requirements para el contenedor: el repo no entra (C1).
     let trabajo = temporal_de(home)?;
     copiar_requisitos(repo, trabajo.path()).map_err(|e| infra("copiar los requirements", e))?;
-    let fin = match descargar_en(home, tarea, trabajo.path(), &parcial, &req, timeout) {
+    let fin = match descargar_en(
+        home,
+        tarea,
+        trabajo.path(),
+        &parcial,
+        &req,
+        &restricciones,
+        timeout,
+    ) {
         Ok(fin) => fin,
         Err(error) => {
             limpiar_parcial(home, &parcial).map_err(|e| infra("borrar la descarga parcial", e))?;
@@ -407,8 +423,7 @@ pub(super) fn preparar_python(
             paquetes,
             hallazgos: de_build,
         } => {
-            let mut hallazgos = hallazgos;
-            hallazgos.extend(de_build);
+            let hallazgos = de_build;
             if destino.exists() {
                 borrar_en_home(home, &destino)
                     .map_err(|e| infra("borrar la caché previa de Python", e))?;
@@ -433,6 +448,28 @@ pub(super) fn preparar_python(
     }
 }
 
+/// Líneas del índice de pip: las restricciones (`-c`), si las hay, y los especificadores pendientes.
+fn contenido_indice(pendientes: &[String], con_restricciones: bool) -> String {
+    let mut lineas = Vec::new();
+    if con_restricciones {
+        lineas.push(format!("-c /cache/{ARCHIVO_RESTRICCIONES}"));
+    }
+    lineas.extend(pendientes.iter().cloned());
+    format!("{}\n", lineas.join("\n"))
+}
+
+/// Hallazgo de un paquete que no instala desde PyPI o desde una fuente de Python. Su archivo es el requirements.
+fn hallazgo_no_instala_python(linea: &str) -> Hallazgo {
+    let linea = redactar(linea);
+    hallazgo(
+        ARCHIVO_REQUIREMENTS,
+        0,
+        &linea,
+        3,
+        format!("el producto no instala: {linea}"),
+    )
+}
+
 /// Baja wheels, sdists, fuentes git y URLs dentro de `parcial`. Escribe el archivo offline.
 fn descargar_en(
     home: &Path,
@@ -440,14 +477,34 @@ fn descargar_en(
     trabajo: &Path,
     parcial: &Path,
     req: &RequisitosPip,
+    restricciones: &str,
     timeout: Duration,
 ) -> Result<Fin, ErrorOraculo> {
+    // Una referencia git sin commit fijo, o con otro formato, corta antes de cualquier red (B2, M7).
+    for (linea, raw) in &req.directas {
+        if let Some(motivo) = motivo_git(raw).filter(|_| raw.starts_with("git+")) {
+            return Ok(Fin::Corta(
+                hallazgo(
+                    ARCHIVO_REQUIREMENTS,
+                    *linea,
+                    "",
+                    3,
+                    format!("{motivo}: {}", redactar(raw)),
+                ),
+                "git-no-seguro",
+            ));
+        }
+    }
+    if !restricciones.is_empty() {
+        fs::write(parcial.join(ARCHIVO_RESTRICCIONES), restricciones)
+            .map_err(|e| infra("escribir las restricciones de Python", e))?;
+    }
     let mut paquetes: Vec<Value> = Vec::new();
     let mut pendientes: Vec<String> = req.especificadores.clone();
     while !pendientes.is_empty() {
         fs::write(
             parcial.join(ARCHIVO_INDICE),
-            format!("{}\n", pendientes.join("\n")),
+            contenido_indice(&pendientes, !restricciones.is_empty()),
         )
         .map_err(|e| infra("escribir el índice de pip", e))?;
         let cmd = comando_wheels(&format!("/cache/{ARCHIVO_INDICE}"), req);
@@ -458,7 +515,7 @@ fn descargar_en(
         let Some(spec) = sin_wheel(&salida.stderr) else {
             return match diagnosticar(&salida.stderr) {
                 Diagnostico::Producto(linea) => {
-                    Ok(Fin::Corta(hallazgo_no_instala(&linea), "no-instala"))
+                    Ok(Fin::Corta(hallazgo_no_instala_python(&linea), "no-instala"))
                 }
                 otro => Err(error_de(otro)),
             };
@@ -490,7 +547,11 @@ fn descargar_en(
                 "indice-propio-sdist",
             ));
         }
-        let sdist = bajar_sdist_pypi(home, tarea, trabajo, parcial, timeout, &nombre, &version)?;
+        let sdist =
+            match bajar_sdist_pypi(home, tarea, trabajo, parcial, timeout, &nombre, &version)? {
+                Ok(sdist) => sdist,
+                Err(corte) => return Ok(corte),
+            };
         paquetes
             .push(json!({"nombre": sdist.archivo, "fuente": "sdist-pypi", "sha256": sdist.sha256}));
         pendientes.remove(pos);
@@ -504,7 +565,11 @@ fn descargar_en(
             paquetes.push(json!({"nombre": nombre, "fuente": "pypi", "sha256": sha}));
         }
     }
-    let mut lineas: Vec<String> = req.especificadores.clone();
+    let mut lineas: Vec<String> = Vec::new();
+    if !restricciones.is_empty() {
+        lineas.push(format!("-c /cache/{ARCHIVO_RESTRICCIONES}"));
+    }
+    lineas.extend(req.especificadores.clone());
     for (linea, raw) in &req.directas {
         match fuente_directa(
             home,
@@ -538,7 +603,8 @@ fn descargar_en(
             )));
         }
     }
-    let (requisitos, hallazgos) = indice_de_build_de(parcial)?.unwrap_or_default();
+    let (requisitos, hallazgos) =
+        indice_de_build_de(parcial, &rutas_clon(req))?.unwrap_or_default();
     if !requisitos.is_empty() {
         let conocidos: BTreeSet<String> = paquetes
             .iter()
@@ -554,7 +620,7 @@ fn descargar_en(
         if salida.codigo != 0 {
             return match diagnosticar(&salida.stderr) {
                 Diagnostico::Producto(linea) => {
-                    Ok(Fin::Corta(hallazgo_no_instala(&linea), "no-instala"))
+                    Ok(Fin::Corta(hallazgo_no_instala_python(&linea), "no-instala"))
                 }
                 otro => Err(error_de(otro)),
             };
@@ -579,7 +645,8 @@ fn descargar_en(
     })
 }
 
-/// Baja el sdist de PyPI con `curl`, dentro del contenedor. Verifica el sha256 en el host.
+/// Baja el sdist de PyPI con `curl`, dentro del contenedor. Verifica el sha256 en el host. Un nombre o una
+/// versión que PyPI no tiene da un corte con su hallazgo de "no instala".
 fn bajar_sdist_pypi(
     home: &Path,
     tarea: &Tarea,
@@ -588,7 +655,7 @@ fn bajar_sdist_pypi(
     timeout: Duration,
     nombre: &str,
     version: &str,
-) -> Result<Sdist, ErrorOraculo> {
+) -> Result<Result<Sdist, Fin>, ErrorOraculo> {
     let pedir = |url: &str, archivo: &str| -> Result<(), String> {
         let cmd = comando_curl(url, archivo);
         match correr(home, tarea, trabajo, parcial, cmd, timeout) {
@@ -597,9 +664,16 @@ fn bajar_sdist_pypi(
             Err(error) => Err(error.to_string()),
         }
     };
-    bajar_sdist_con(nombre, version, parcial, pedir).map_err(|motivo| {
-        ErrorOraculo::Infra(format!("infraestructura: sdist de {nombre}: {motivo}"))
-    })
+    match bajar_sdist_con(nombre, version, parcial, pedir) {
+        Ok(sdist) => Ok(Ok(sdist)),
+        Err(FalloSdist::NoExiste) => Ok(Err(Fin::Corta(
+            hallazgo_no_instala_python(&format!("{nombre}=={version}")),
+            "no-instala",
+        ))),
+        Err(FalloSdist::Otro(motivo)) => Err(ErrorOraculo::Infra(format!(
+            "infraestructura: sdist de {nombre}: {motivo}"
+        ))),
+    }
 }
 
 /// Una fuente git o URL del requirements. `Ok(ruta)` es la línea local que va al archivo offline.
@@ -615,38 +689,51 @@ fn fuente_directa(
     raw: &str,
     paquetes: &mut Vec<Value>,
 ) -> Result<Result<String, Fin>, ErrorOraculo> {
-    if let Some(sin_prefijo) = raw.strip_prefix("git+") {
-        let sin_fragmento = sin_prefijo.split('#').next().unwrap_or(sin_prefijo);
-        let (base, commit) = separar_referencia(sin_fragmento);
-        if !caracteres_seguros(&base) || commit.as_deref().is_some_and(|c| !es_commit(c)) {
+    if raw.starts_with("git+") {
+        let partes = match partes_git(raw) {
+            Ok(partes) => partes,
+            Err(motivo) => {
+                return Ok(Err(Fin::Corta(
+                    hallazgo(ARCHIVO_REQUIREMENTS, linea, "", 3, motivo),
+                    "git-no-seguro",
+                )));
+            }
+        };
+        if !caracteres_seguros(&partes.base) {
             return Ok(Err(Fin::Corta(
                 hallazgo(
                     ARCHIVO_REQUIREMENTS,
                     linea,
                     "",
                     3,
-                    "referencia git no segura".into(),
+                    "referencia git no segura: caracteres de shell".into(),
                 ),
                 "git-no-seguro",
             )));
         }
-        let dir = hash_corto(base.as_bytes());
-        let cmd = comando_clon(&base, &dir, commit.as_deref());
-        let salida = correr(home, tarea, trabajo, parcial, cmd, timeout)?;
-        if salida.codigo != 0 {
-            return match diagnosticar(&salida.stderr) {
-                Diagnostico::Producto(l) => {
-                    Ok(Err(Fin::Corta(hallazgo_no_instala(&l), "no-instala")))
-                }
-                otro => Err(error_de(otro)),
-            };
+        let dir = clave_clon(&partes);
+        // Un clon por repo y commit: dos líneas con distinto `#subdirectory=` comparten el árbol (B3).
+        if !parcial.join("src").join(&dir).is_dir() {
+            let cmd = comando_clon(&partes.base, &dir, &partes.commit);
+            let salida = correr(home, tarea, trabajo, parcial, cmd, timeout)?;
+            if salida.codigo != 0 {
+                return match diagnosticar(&salida.stderr) {
+                    Diagnostico::Producto(l) => Ok(Err(Fin::Corta(
+                        hallazgo_no_instala_python(&l),
+                        "no-instala",
+                    ))),
+                    otro => Err(error_de(otro)),
+                };
+            }
+            let commit_obtenido =
+                fs::read_to_string(parcial.join("src").join(format!("{dir}.commit")))
+                    .map_err(|e| infra("leer el commit de un clon git", e))?
+                    .trim()
+                    .to_string();
+            paquetes
+                .push(json!({"nombre": partes.base, "fuente": "git", "commit": commit_obtenido}));
         }
-        let commit_obtenido = fs::read_to_string(parcial.join("src").join(format!("{dir}.commit")))
-            .map_err(|e| infra("leer el commit de un clon git", e))?
-            .trim()
-            .to_string();
-        paquetes.push(json!({"nombre": base, "fuente": "git", "commit": commit_obtenido}));
-        return Ok(Ok(format!("/cache/src/{dir}")));
+        return Ok(Ok(linea_offline_git(&dir, partes.subdir.as_deref())));
     }
     // URL de archivo: `https://…/x.whl|.tar.gz|.zip`, con `#sha256=` opcional.
     let (url, sha_esperado) = match raw.split_once("#sha256=") {
@@ -828,32 +915,42 @@ fn requisitos_de_sdists(
         .collect())
 }
 
-/// Índice de build de las fuentes que necesitan build en `carpeta`: los sdists (con los requisitos que dejó
-/// el contenedor) y los clones de `src/<dir>`. `None` si no hay ninguno, porque los wheels no necesitan build.
-fn indice_de_build_de(carpeta: &Path) -> Result<Option<IndiceBuild>, ErrorOraculo> {
-    let sdists = nombres_sdist(carpeta)?;
-    let mut clones = Vec::new();
-    let src = carpeta.join("src");
-    if src.is_dir() {
-        for entrada in fs::read_dir(&src).map_err(|e| infra("leer los clones de Python", e))? {
-            let entrada = entrada.map_err(|e| infra("leer los clones de Python", e))?;
-            if entrada.file_type().is_ok_and(|t| t.is_dir()) {
-                clones.push(entrada.path());
+/// Rutas de los clones git de `req` bajo `src/`: `<clave>` o `<clave>/<subdirectory>`, sin repetidos.
+fn rutas_clon(req: &RequisitosPip) -> Vec<String> {
+    let rutas: BTreeSet<String> = req
+        .directas
+        .iter()
+        .filter_map(|(_, raw)| partes_git(raw).ok())
+        .map(|partes| {
+            let dir = clave_clon(&partes);
+            match partes.subdir {
+                Some(subdir) => format!("{dir}/{subdir}"),
+                None => dir,
             }
-        }
-    }
-    if sdists.is_empty() && clones.is_empty() {
+        })
+        .collect();
+    rutas.into_iter().collect()
+}
+
+/// Índice de build de las fuentes que necesitan build en `carpeta`: los sdists (con los requisitos que dejó
+/// el contenedor) y los clones en `rutas_clon` (con el `pyproject` de cada uno o de su subdirectorio). `None`
+/// si no hay ninguno, porque los wheels no necesitan build.
+fn indice_de_build_de(
+    carpeta: &Path,
+    rutas_clon: &[String],
+) -> Result<Option<IndiceBuild>, ErrorOraculo> {
+    let sdists = nombres_sdist(carpeta)?;
+    if sdists.is_empty() && rutas_clon.is_empty() {
         return Ok(None);
     }
-    clones.sort();
     let mut listas = if sdists.is_empty() {
         Vec::new()
     } else {
         requisitos_de_sdists(carpeta, &sdists)?
     };
-    listas.extend(clones.iter().map(|c| {
+    listas.extend(rutas_clon.iter().map(|ruta| {
         requisitos_de_build(
-            fs::read_to_string(c.join(ARCHIVO_PYPROJECT))
+            fs::read_to_string(carpeta.join("src").join(ruta).join(ARCHIVO_PYPROJECT))
                 .ok()
                 .as_deref(),
         )
@@ -1095,5 +1192,81 @@ mod tests {
             .collect();
         nombres.sort();
         assert_eq!(nombres, ["requirements-dev.txt", "requirements.txt"]);
+    }
+
+    #[test]
+    fn descarga_python_referencia_git_sin_commit_o_con_tag_se_rechaza_igual() {
+        let sin = motivo_git("git+https://github.com/x/y#egg=y");
+        let tag = motivo_git("git+https://github.com/x/y@v1.2.0#egg=y");
+        assert!(sin.is_some() && tag.is_some(), "{sin:?} {tag:?}");
+        assert_eq!(sin, tag, "la misma regla da el mismo motivo");
+        assert!(
+            motivo_git("git+https://github.com/x/y@c8e394065cd541a16c040515dc0afb85cf22a7c3#egg=y")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn descarga_python_clave_de_cache_incluye_la_imagen_y_su_digest() {
+        let a = clave_cache_python("six==1.16.0\n", "", "python:3.8");
+        let b = clave_cache_python("six==1.16.0\n", "", "python:3.12");
+        let c = clave_cache_python("six==1.16.0\n", "", "python:3.8");
+        assert_ne!(a, b, "wheels cp38 y cp312 no comparten caché");
+        assert_eq!(a, c, "misma imagen y mismo archivo: misma clave");
+        let d = clave_cache_python("six==1.16.0\n", "", "python@sha256:aaaa");
+        assert_ne!(a, d, "otro digest es otra clave");
+        let e = clave_cache_python("six==1.16.0\n", "urllib3<2\n", "python:3.8");
+        assert_ne!(a, e, "una restricción distinta es otra clave");
+    }
+
+    #[test]
+    fn descarga_python_subdirectory_se_conserva_y_dos_lineas_del_mismo_repo_no_chocan() {
+        let base = "git+https://github.com/x/mono@c8e394065cd541a16c040515dc0afb85cf22a7c3";
+        let a = partes_git(&format!("{base}#subdirectory=pkg_a")).expect("parsea");
+        let b = partes_git(&format!("{base}#egg=pkg_b&subdirectory=pkg_b")).expect("parsea");
+        assert_eq!(a.subdir.as_deref(), Some("pkg_a"));
+        assert_eq!(b.subdir.as_deref(), Some("pkg_b"));
+        let clon = clave_clon(&a);
+        assert_eq!(clon, clave_clon(&b), "mismo repo y commit: un solo clon");
+        assert_eq!(
+            linea_offline_git(&clon, a.subdir.as_deref()),
+            format!("/tmp/fuentes/{clon}/pkg_a")
+        );
+        assert_ne!(
+            linea_offline_git(&clon, a.subdir.as_deref()),
+            linea_offline_git(&clon, b.subdir.as_deref())
+        );
+    }
+
+    #[test]
+    fn descarga_python_subdirectory_insegura_es_error() {
+        for sub in ["../x", "/abs", "a/../../b", "a b", ""] {
+            let raw = format!(
+                "git+https://github.com/x/mono@c8e394065cd541a16c040515dc0afb85cf22a7c3#subdirectory={sub}"
+            );
+            assert!(
+                partes_git(&raw).is_err(),
+                "debe rechazar subdirectory `{sub}`"
+            );
+        }
+    }
+
+    #[test]
+    fn descarga_python_linea_offline_de_git_apunta_a_la_copia_escribible() {
+        assert_eq!(linea_offline_git("abc", None), "/tmp/fuentes/abc");
+    }
+
+    #[test]
+    fn descarga_python_build_de_sdist_con_setuptools_mayor_se_suma_a_los_requisitos() {
+        // Guarda (Tareas 6e y 27): el `[build-system].requires` del sdist llega a los wheels de build.
+        let listas = vec![requisitos_de_build(Some(
+            "[build-system]\nrequires = [\"setuptools>=68\"]",
+        ))];
+        let (requisitos, hallazgos) = indice_de_build(&listas);
+        assert!(
+            requisitos.contains(&"setuptools>=68".to_string()),
+            "{requisitos:?}"
+        );
+        assert!(hallazgos.is_empty());
     }
 }

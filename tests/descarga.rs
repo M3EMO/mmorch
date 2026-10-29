@@ -818,9 +818,9 @@ fn descarga_sin_extra_index_url_no_deja_hallazgo_de_mezcla() {
 // ---- Descarga de Python (Tarea 6c-B) ----
 
 use root::oracle::descarga::PRELUDIO_PYTHON;
-use root::oracle::descarga::inventario::requisitos_pip;
+use root::oracle::descarga::inventario::{requisitos_pip, textos_de_requisitos};
 use root::oracle::descarga::python::{
-    bajar_sdist_con, comando_clon, comando_curl, comando_wheels, sin_wheel,
+    FalloSdist, bajar_sdist_con, comando_clon, comando_curl, comando_wheels, sin_wheel,
 };
 
 /// Imagen con Python y pip (`:2`). La descarga y la evaluación de Python la usan.
@@ -885,7 +885,7 @@ fn descarga_python_requisitos_con_dos_indices_pasan_ambos_a_pip() {
 fn descarga_python_comandos_de_red_no_corren_setup_ni_build() {
     let req = requisitos_pip(&format!("{SIX_GIT}\nsix==1.16.0\n"));
     let wheels = comando_wheels("/cache/indice.txt", &req);
-    let clon = comando_clon("https://github.com/benjaminp/six", "abc", Some(SIX_COMMIT));
+    let clon = comando_clon("https://github.com/benjaminp/six", "abc", SIX_COMMIT);
     let curl = comando_curl(
         "https://files.pythonhosted.org/fix-1.0.tar.gz",
         "fix-1.0.tar.gz",
@@ -917,6 +917,121 @@ fn descarga_python_sin_wheel_nombra_el_paquete_que_falta() {
 ERROR: No matching distribution found for six==1.16.0\n";
     assert_eq!(sin_wheel(salida), Some("six==1.16.0".to_string()));
     assert_eq!(sin_wheel("error: failed to download `x`"), None);
+}
+
+#[test]
+fn descarga_python_paquete_que_pypi_no_tiene_es_no_existe_y_no_infra() {
+    // B1: el JSON de PyPI da 404 para un nombre mal escrito. Es un veredicto del producto, no infraestructura.
+    let cache = repo_propio("cache-404-");
+    let r = bajar_sdist_con("reqeusts", "2.31.0", cache.path(), |u, _| {
+        Err(format!(
+            "curl: (22) The requested URL returned error: 404 ({u})"
+        ))
+    });
+    assert_eq!(r.err(), Some(FalloSdist::NoExiste));
+}
+
+#[test]
+fn descarga_python_json_de_pypi_con_otro_error_sigue_siendo_otro() {
+    let cache = repo_propio("cache-timeout-");
+    let r = bajar_sdist_con("six", "1.16.0", cache.path(), |_, _| {
+        Err("curl: (28) Operation timed out".to_string())
+    });
+    assert!(matches!(r, Err(FalloSdist::Otro(_))), "{r:?}");
+}
+
+#[test]
+fn descarga_python_preludio_tiene_respaldo_si_venv_falla_y_pone_pydeps_en_el_path() {
+    // M12: `import ensurepip` puede funcionar y `venv` fallar (Debian sin python3-venv).
+    assert!(
+        PRELUDIO_PYTHON.contains("if python3 -m venv --system-site-packages /tmp/venv-eval"),
+        "{PRELUDIO_PYTHON}"
+    );
+    assert!(
+        !PRELUDIO_PYTHON.contains("import ensurepip"),
+        "{PRELUDIO_PYTHON}"
+    );
+    assert!(
+        PRELUDIO_PYTHON.contains("PATH=/tmp/pydeps/bin:$PATH"),
+        "{PRELUDIO_PYTHON}"
+    );
+}
+
+#[test]
+fn descarga_python_preludio_copia_las_fuentes_git_a_una_carpeta_escribible() {
+    // M10: setuptools escribe `*.egg-info` en el árbol fuente. `/cache` es de solo lectura en la evaluación.
+    assert!(
+        PRELUDIO_PYTHON.contains("cp -r /cache/src/. /tmp/fuentes/"),
+        "{PRELUDIO_PYTHON}"
+    );
+    let copia = PRELUDIO_PYTHON.find("cp -r").expect("la copia");
+    let instala = PRELUDIO_PYTHON.find("pip install").expect("la instalación");
+    assert!(
+        copia < instala,
+        "la copia va antes de instalar: {PRELUDIO_PYTHON}"
+    );
+}
+
+#[test]
+fn descarga_python_requisitos_e_git_con_commit_llega_a_la_descarga() {
+    // M6: `-e git+…@commit` es una fuente git, no una línea que se descarta.
+    let req = requisitos_pip(
+        "-e git+https://github.com/benjaminp/six@c8e394065cd541a16c040515dc0afb85cf22a7c3#egg=six\n",
+    );
+    assert_eq!(req.directas.len(), 1, "{req:?}");
+    assert!(
+        req.directas[0]
+            .1
+            .starts_with("git+https://github.com/benjaminp/six@")
+    );
+}
+
+#[test]
+fn descarga_python_r_del_repo_llega_aplanado_y_c_solo_como_restriccion() {
+    // M6: `-r` se sigue hasta la descarga; `-c` no instala nada, solo limita versiones.
+    let repo = repo_propio("repo-py-r-c-");
+    fs::create_dir_all(repo.path().join("requirements")).expect("carpeta");
+    fs::write(
+        repo.path().join("requirements.txt"),
+        "-r requirements/base.txt\n-c restricciones.txt\n",
+    )
+    .expect("requirements");
+    fs::write(repo.path().join("requirements/base.txt"), "six==1.16.0\n").expect("base");
+    fs::write(repo.path().join("restricciones.txt"), "urllib3<2\n").expect("restricciones");
+    let (requisitos, restricciones) = textos_de_requisitos(repo.path());
+    assert!(requisitos.contains("six==1.16.0"), "{requisitos}");
+    assert!(!requisitos.contains("urllib3"), "{requisitos}");
+    assert!(restricciones.contains("urllib3<2"), "{restricciones}");
+}
+
+#[test]
+fn descarga_python_git_sin_commit_o_con_tag_es_rechazo_sin_red() {
+    // B2 y M7: los dos casos dan el mismo rechazo, antes de cualquier contenedor. No necesita podman.
+    for linea in [
+        "git+https://github.com/benjaminp/six#egg=six",
+        "git+https://github.com/benjaminp/six@v1.16.0#egg=six",
+    ] {
+        let home = home_de_prueba();
+        let repo = repo_propio("repo-py-git-sin-ref-");
+        fs::write(repo.path().join("requirements.txt"), format!("{linea}\n"))
+            .expect("requirements");
+        let tarea = tarea_en_lenguaje(
+            home.path(),
+            "python",
+            IMAGEN,
+            &contrato_junit_ok(),
+            &oculto_junit_ok(),
+        );
+        let preparacion = descarga::preparar(repo.path(), &tarea, home.path(), LIMITE)
+            .expect("el rechazo no usa la red");
+        let descarga::Preparacion::SinVeredicto(hallazgos) = preparacion else {
+            panic!("`{linea}` debe cortar la evaluación: {preparacion:?}");
+        };
+        assert!(
+            hallazgos.iter().any(|h| h.severidad == 3 && h.linea == 1),
+            "{hallazgos:?}"
+        );
+    }
 }
 
 #[test]

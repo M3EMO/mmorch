@@ -66,25 +66,34 @@ pub enum Accion {
     Nada,
 }
 
-/// Prefijo de la suite de Python: instala desde `/cache` sin red, en `/tmp/pydeps` (la imagen no trae `ensurepip`).
-pub const PRELUDIO_PYTHON: &str = "if python3 -c 'import ensurepip' 2>/dev/null; then python3 -m venv --system-site-packages /tmp/venv-eval && . /tmp/venv-eval/bin/activate && pip install --no-index --find-links /cache --no-input --disable-pip-version-check -r /cache/requirements-offline.txt; else mkdir -p /tmp/pydeps && python3 -m pip install --no-index --find-links /cache --no-input --disable-pip-version-check --target /tmp/pydeps -r /cache/requirements-offline.txt && export PYTHONPATH=/tmp/pydeps; fi && ";
+/// Prefijo de la suite de Python: instala desde `/cache` sin red. Las fuentes git se copian a `/tmp/fuentes`,
+/// donde pip puede construir (`/cache` es de solo lectura). Si `venv` no funciona (Debian sin `python3-venv`),
+/// instala con `--target` en `/tmp/pydeps` y lo pone en el `PATH` (M10, M12).
+pub const PRELUDIO_PYTHON: &str = "mkdir -p /tmp/fuentes && if [ -d /cache/src ]; then cp -r /cache/src/. /tmp/fuentes/; fi && if python3 -m venv --system-site-packages /tmp/venv-eval; then . /tmp/venv-eval/bin/activate && pip install --no-index --find-links /cache --no-input --disable-pip-version-check -r /cache/requirements-offline.txt; else mkdir -p /tmp/pydeps && python3 -m pip install --no-index --find-links /cache --no-input --disable-pip-version-check --target /tmp/pydeps -r /cache/requirements-offline.txt && export PYTHONPATH=/tmp/pydeps PATH=/tmp/pydeps/bin:$PATH; fi && ";
 /// Caché de dependencias que la fase de descarga dejó para el repo (`Cargo.lock` o `requirements.txt`).
 /// `None` si no hay, o si el lenguaje no tiene caché. La mira el paquete de Colab (decisión 40).
-pub fn cache_de(home: &Path, lenguaje: &str, repo: &Path) -> Option<PathBuf> {
-    let (archivo, carpeta, marca) = match lenguaje {
-        "rust" => ("Cargo.lock", CARPETA_RUST, ARCHIVO_CONFIG),
-        "python" => (
-            "requirements.txt",
-            CARPETA_PYTHON,
-            "requirements-offline.txt",
-        ),
+/// `imagen` es la de la tarea: en Python entra en la clave (M8).
+pub fn cache_de(home: &Path, lenguaje: &str, repo: &Path, imagen: &str) -> Option<PathBuf> {
+    let (destino, marca) = match lenguaje {
+        "rust" => {
+            let bytes = fs::read(repo.join("Cargo.lock")).ok()?;
+            let destino = home
+                .join(CARPETA_CACHE)
+                .join(CARPETA_RUST)
+                .join(hash_corto(&bytes));
+            (destino, ARCHIVO_CONFIG)
+        }
+        "python" => {
+            if !repo.join(ARCHIVO_REQUIREMENTS).is_file() {
+                return None;
+            }
+            let (requisitos, restricciones) = inventario::textos_de_requisitos(repo);
+            let clave = python::clave_cache_python(&requisitos, &restricciones, imagen);
+            let destino = home.join(CARPETA_CACHE).join(CARPETA_PYTHON).join(clave);
+            (destino, "requirements-offline.txt")
+        }
         _ => return None,
     };
-    let bytes = fs::read(repo.join(archivo)).ok()?;
-    let destino = home
-        .join(CARPETA_CACHE)
-        .join(carpeta)
-        .join(hash_corto(&bytes));
     destino.join(marca).is_file().then_some(destino)
 }
 
@@ -1588,7 +1597,7 @@ location searched: crates.io index";
         let lock = b"version = 3\n";
         fs::write(repo.path().join("Cargo.lock"), lock).expect("lock");
         assert_eq!(
-            cache_de(home.path(), "rust", repo.path()),
+            cache_de(home.path(), "rust", repo.path(), ""),
             None,
             "sin caché no hay ruta"
         );
@@ -1599,8 +1608,11 @@ location searched: crates.io index";
             .join(hash_corto(lock));
         fs::create_dir_all(&destino).expect("caché");
         fs::write(destino.join(ARCHIVO_CONFIG), "x").expect("config");
-        assert_eq!(cache_de(home.path(), "rust", repo.path()), Some(destino));
-        assert_eq!(cache_de(home.path(), "shell", repo.path()), None);
+        assert_eq!(
+            cache_de(home.path(), "rust", repo.path(), ""),
+            Some(destino)
+        );
+        assert_eq!(cache_de(home.path(), "shell", repo.path(), ""), None);
     }
 
     #[test]

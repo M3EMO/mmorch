@@ -36,10 +36,10 @@ Con `--json`, cada subcomando construido imprime un solo objeto JSON en stdout.
 
 | Código | Significado | Dónde sale hoy |
 |---|---|---|
-| `0` | ok o verde | `route`, `llama`, `observa`, `track`, `aprende`, `goal`, `importar-mmorch`, `ficha tarea`, `ficha revisar` sin hallazgos. `oraculo evaluar` e `oraculo informe` con decisión `Listo` (ver abajo). |
-| `1` | rojo | `oraculo evaluar` e `oraculo informe` con decisión `NoListo` o `Bloqueado`. `ficha revisar` con hallazgos o ambigüedades. |
+| `0` | ok o verde | `route`, `llama`, `observa`, `track`, `aprende`, `goal`, `importar-mmorch`, `ficha tarea`, `ficha revisar` sin hallazgos y con el juez en `ok` (con `--juez-proveedor` y `--juez-modelo`). `oraculo evaluar` e `oraculo informe` con decisión `Listo` (ver abajo). |
+| `1` | rojo | `oraculo evaluar` e `oraculo informe` con decisión `NoListo` o `Bloqueado`. `ficha revisar` con hallazgos o ambigüedades, aunque el juez haya fallado. |
 | `2` | error de uso | Argumentos inválidos (clap). `root.toml` con un valor fuera de rango. Un spec sin `## Ficha` o con una ficha inválida. Un tipo desconocido en `esquema`. |
-| `3` | error de infraestructura, o sin veredicto | Un tope que impide la elección o la llamada (`route`, `llama`). Un error de proveedor, de Observe o de Track. `oraculo evaluar` sin veredicto (descarga o suite sin veredicto). Los subcomandos **pendientes** salen con `3` porque aún no tienen lógica. |
+| `3` | error de infraestructura, o sin veredicto | Un tope que impide la elección o la llamada (`route`, `llama`). Un error de proveedor, de Observe o de Track. `oraculo evaluar` sin veredicto (descarga o suite sin veredicto). `ficha revisar` sin hallazgos y sin veredicto del juez: sin `--juez-*` el juez queda `sin_veredicto: juez no corrido` y el código es 3, nunca 0. Los subcomandos **pendientes** salen con `3` porque aún no tienen lógica. |
 
 `oraculo evaluar` y `oraculo informe` salen según la decisión del informe (Tarea 13b): `Listo` da `0`, `NoListo` y `Bloqueado` dan `1`.
 Sin informe (una descarga o una suite sin veredicto), salen con `3`.
@@ -77,7 +77,7 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t goal autorizar` | Autoriza un cambio al GOAL. Exige una TTY y una confirmación tecleada. | sin salida JSON | construido |
 | `r00t importar-mmorch --desde <metrics.jsonl>` | Copia en solo lectura el log de métricas de mmorch. | resumen de la importación | construido |
 | `r00t esquema <tipo>` | Imprime el JSON Schema de un tipo. Ver `## Esquemas`. | JSON Schema | construido |
-| `r00t ficha revisar --spec <SPEC.md> [--juez-proveedor p --juez-modelo m [--juez-max-tokens n]]` | Revisa la ficha y las ambigüedades. Con los dos flags de juez, también corre el juez. `--juez-max-tokens` fija el tope de salida del juez: 32 000 por defecto, al menos 1, y exige `--juez-modelo`. | `Revision` | construido |
+| `r00t ficha revisar --spec <SPEC.md> [--juez-proveedor p --juez-modelo m [--juez-max-tokens n]]` | Revisa la ficha y las ambigüedades. Con los dos flags de juez, también corre el juez. Sin ellos, el juez queda `sin_veredicto: juez no corrido`: sin hallazgos, sale 3. `--juez-max-tokens` fija el tope de salida del juez: 32 000 por defecto, al menos 1, y exige `--juez-modelo`. | `Revision` | construido |
 | `r00t ficha tarea --spec <SPEC.md> --nombre <t>` | Arma el borrador de `tarea.toml` desde la ficha. | `{toml}` | construido |
 | `r00t mcp` | Inicia el servidor MCP por stdio. | JSON-RPC 2.0 | construido |
 
@@ -3568,7 +3568,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Revision",
-  "description": "Resultado de revisar un spec. `ambiguedades` queda vacía hasta que corra el juez.\n`juez` es `\"no corrido\"`, `\"ok\"` (el JSON parseó) o `\"sin_veredicto: <causa>\"`.",
+  "description": "Resultado de revisar un spec. `ambiguedades` queda vacía hasta que corra el juez.\n`juez` es `\"ok\"` (el JSON parseó) o `\"sin_veredicto: <causa>\"`. Sin juez, la causa es `juez no corrido`.",
   "type": "object",
   "properties": {
     "ambiguedades": {

@@ -124,7 +124,20 @@ fn ficha_completa_da_cero_hallazgos() {
     let revision = ficha::revisar(&texto, &ctx_vacio()).expect("la ficha parsea");
     assert!(revision.hallazgos.is_empty(), "{:?}", revision.hallazgos);
     assert!(revision.ambiguedades.is_empty());
-    assert_eq!(revision.juez, "no corrido");
+    assert_eq!(revision.juez, "sin_veredicto: juez no corrido");
+}
+
+#[test]
+fn ficha_sin_juez_sin_hallazgos_sale_3_y_no_0() {
+    let texto = fixture("spec-completa.md");
+    let revision = ficha::revisar(&texto, &ctx_vacio()).expect("la ficha parsea");
+    assert!(revision.hallazgos.is_empty(), "{:?}", revision.hallazgos);
+    assert_eq!(
+        revision.codigo_de_salida(),
+        3,
+        "sin juez no hay veredicto limpio: {}",
+        revision.juez
+    );
 }
 
 #[test]
@@ -332,7 +345,7 @@ fn ficha_borrador_parsea_y_tarea_lo_acepta() {
 }
 
 #[test]
-fn ficha_cli_revisar_completa_sale_0() {
+fn ficha_cli_revisar_completa_sin_juez_sale_3_y_dice_juez_no_corrido() {
     let salida = root(&[
         "ficha",
         "revisar",
@@ -341,10 +354,12 @@ fn ficha_cli_revisar_completa_sale_0() {
     ]);
     assert_eq!(
         codigo(&salida),
-        0,
+        3,
         "{}",
         String::from_utf8_lossy(&salida.stderr)
     );
+    let texto = String::from_utf8_lossy(&salida.stdout);
+    assert!(texto.contains("juez no corrido"), "{texto}");
 }
 
 #[test]
@@ -737,9 +752,9 @@ fn ficha_codigo_ficha_limpia_mas_juez_ok_sin_ambiguedades_sale_0() {
 }
 
 #[test]
-fn ficha_codigo_sin_juez_y_ficha_limpia_sale_0() {
+fn ficha_codigo_sin_juez_y_ficha_limpia_sale_3() {
     let revision = ficha::revisar(&fixture("spec-completa.md"), &ctx_vacio()).expect("revisa");
-    assert_eq!(revision.codigo_de_salida(), 0);
+    assert_eq!(revision.codigo_de_salida(), 3);
 }
 
 #[test]
