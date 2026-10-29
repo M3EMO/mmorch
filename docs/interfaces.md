@@ -1725,6 +1725,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
             "$ref": "#/$defs/NivelItem"
           }
         },
+        "sin_veredicto": {
+          "description": "Por qué la dimensión no tiene veredicto. Con `Some`, `valor` vale 0 y ningún lector lo usa.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "valor": {
           "type": "number",
           "format": "float"
@@ -1901,12 +1909,28 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "repo": {
           "type": "string"
         },
+        "requisitos": {
+          "description": "Estado de cada requisito de la tarea. Un veredicto viejo lee vacío.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EstadoRequisito"
+          }
+        },
         "rubricas": {
           "description": "Hashes de rúbrica, por ejemplo \"diseno@<hash>\".",
           "type": "array",
           "default": [],
           "items": {
             "type": "string"
+          }
+        },
+        "sin_calibrar": {
+          "description": "Dimensiones con veredicto que todavía no están calibradas. Un veredicto viejo lee vacío.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Dimension"
           }
         },
         "tarea": {
@@ -2848,6 +2872,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "$ref": "#/$defs/NivelItem"
       }
     },
+    "sin_veredicto": {
+      "description": "Por qué la dimensión no tiene veredicto. Con `Some`, `valor` vale 0 y ningún lector lo usa.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
     "valor": {
       "type": "number",
       "format": "float"
@@ -3458,12 +3490,28 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "repo": {
       "type": "string"
     },
+    "requisitos": {
+      "description": "Estado de cada requisito de la tarea. Un veredicto viejo lee vacío.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/EstadoRequisito"
+      }
+    },
     "rubricas": {
       "description": "Hashes de rúbrica, por ejemplo \"diseno@<hash>\".",
       "type": "array",
       "default": [],
       "items": {
         "type": "string"
+      }
+    },
+    "sin_calibrar": {
+      "description": "Dimensiones con veredicto que todavía no están calibradas. Un veredicto viejo lee vacío.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Dimension"
       }
     },
     "tarea": {
@@ -3845,6 +3893,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "items": {
             "$ref": "#/$defs/NivelItem"
           }
+        },
+        "sin_veredicto": {
+          "description": "Por qué la dimensión no tiene veredicto. Con `Some`, `valor` vale 0 y ningún lector lo usa.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "valor": {
           "type": "number",

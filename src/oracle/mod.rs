@@ -29,10 +29,15 @@ use thiserror::Error as ErrorDerive;
 use crate::borrado;
 use crate::config::root_home;
 use crate::ficha::{self, ErrorFicha};
-use crate::tipos::{Conteo, Estado, Hallazgo, TasaTest, VERSION, Veredicto};
+use crate::tipos::{
+    Conteo, Dimension, Estado, EstadoRequisito, Hallazgo, Puntaje, TasaTest, VERSION, Veredicto,
+};
 use crate::track::stats::wilson_inferior;
 use contenedor::{Ejecucion, Resultado};
+use juez::ModeloJuez;
 use junit::{Junit, ResultadoTest};
+use perfiles::herramientas::{EjecutorContenedor, EjecutorHerramienta};
+use perfiles::{ResultadoSonda, combinar, deduplicar_hallazgos};
 use tarea::{Comando, Tarea};
 
 /// Carpetas de la raíz del repo que no se copian: artefactos del builder e historial de git.
@@ -139,19 +144,69 @@ enum Suite {
     SinVeredicto(String),
 }
 
-/// Evalúa `repo` con la tarea: corre el contrato y el oculto sobre una copia del repo.
+/// Evalúa `repo` con la tarea: corre el contrato y el oculto sobre una copia del repo, y las sondas.
 pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> {
-    evaluar_con(repo, tarea, o, &correr_en_podman)
+    // Las sondas no montan el oráculo: los tests ocultos no entran a sus contenedores (A2).
+    let herramientas = |p: &Preparada| -> Box<dyn EjecutorHerramienta> {
+        Box::new(EjecutorContenedor {
+            imagen: tarea.imagen.clone(),
+            repo: p.repo.clone(),
+            oraculo: None,
+            rustsec: p.rustsec.clone(),
+            cache: p.cache.clone(),
+            timeout: o.timeout,
+        })
+    };
+    let deps = Dependencias {
+        correr: &correr_en_podman,
+        herramientas: &herramientas,
+        juez_config: None,
+    };
+    evaluar_con(repo, tarea, o, deps)
 }
 
-/// Como `evaluar`, con el ejecutor de contenedores que se le pase.
+/// Dependencias de una evaluación. `evaluar` arma las de producción; los tests dan ejecutores falsos.
+struct Dependencias<'a> {
+    /// Corre una suite de tests en un contenedor.
+    correr: Correr<'a>,
+    /// Arma el ejecutor de las sondas. Va después de la descarga: necesita la copia y las cachés.
+    herramientas: FabricaHerramientas<'a>,
+    /// Juez de la configuración de Cargo (decisión 30). `None`: la configuración no se juzga.
+    juez_config: Option<&'a dyn ModeloJuez>,
+}
+
+/// Lo que la descarga deja listo para las sondas: la copia del repo y las cachés que monta cada contenedor.
+struct Preparada {
+    repo: PathBuf,
+    cache: Option<PathBuf>,
+    rustsec: Option<PathBuf>,
+}
+
+/// Arma el ejecutor de herramientas de una evaluación a partir de lo que dejó la descarga.
+type FabricaHerramientas<'a> = &'a dyn Fn(&Preparada) -> Box<dyn EjecutorHerramienta>;
+
+/// Las nueve dimensiones de `Veredicto.puntajes`, en el orden de `Dimension`.
+const DIMENSIONES: [Dimension; 9] = [
+    Dimension::Funciona,
+    Dimension::Seguridad,
+    Dimension::Eficiencia,
+    Dimension::Estructura,
+    Dimension::Arquitectura,
+    Dimension::Diseno,
+    Dimension::Completitud,
+    Dimension::Entrega,
+    Dimension::Pruebas,
+];
+
+/// Como `evaluar`, con las dependencias que se le pasen.
 fn evaluar_con(
     repo: &Path,
     tarea: &Tarea,
     o: &OpcionesOraculo,
-    correr: Correr,
+    deps: Dependencias,
 ) -> Result<Veredicto, ErrorOraculo> {
     verificar_ficha(tarea)?;
+    let rubricas = rubricas_embebidas()?;
     let repo = fs::canonicalize(repo)
         .map_err(|e| ErrorOraculo::Infra(format!("no existe el repo {}: {e}", repo.display())))?;
     // Los temporales van a ROOT_HOME, nunca a TMPDIR ni a /tmp (desempate 6).
@@ -168,17 +223,21 @@ fn evaluar_con(
     let repo_copia = copia.path().join("repo");
     copiar_repo(&repo, &repo_copia).map_err(|e| infra("copia del repo", e))?;
     // La descarga va antes de cualquier suite: es la única fase con red (decisión 17).
-    let (cache, rustsec, hallazgos) =
-        match descarga::preparar(&repo_copia, tarea, &home, o.timeout)? {
-            descarga::Preparacion::Lista {
-                cache,
-                rustsec,
-                hallazgos,
-            } => (cache, rustsec, hallazgos),
-            descarga::Preparacion::SinVeredicto(hallazgos) => {
-                return Ok(sin_veredicto(&repo, tarea, &colab, hallazgos, avisos));
-            }
-        };
+    let (preparacion, _, _) =
+        descarga::preparar_con_juez(&repo_copia, tarea, &home, o.timeout, deps.juez_config)?;
+    let (cache, rustsec, hallazgos) = match preparacion {
+        descarga::Preparacion::Lista {
+            cache,
+            rustsec,
+            hallazgos,
+        } => (cache, rustsec, hallazgos),
+        descarga::Preparacion::SinVeredicto(hallazgos) => {
+            let motivo = motivo_de_la_descarga(&hallazgos);
+            return Ok(sin_veredicto(
+                &repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo,
+            ));
+        }
+    };
     let salida = temporal(&tmp).map_err(|e| infra("directorio de salida", e))?;
     // Podman rootless: si el contenedor corre con otro uid, la salida debe ser escribible por todos.
     fs::set_permissions(salida.path(), fs::Permissions::from_mode(0o777))
@@ -189,8 +248,8 @@ fn evaluar_con(
         tarea,
         salida: salida.path(),
         o,
-        cache,
-        rustsec,
+        cache: cache.clone(),
+        rustsec: rustsec.clone(),
         home: &home,
     };
     // El contrato no tiene exclusiones: solo el oculto las usa.
@@ -200,12 +259,15 @@ fn evaluar_con(
         DIR_CONTRATO,
         XML_CONTRATO,
         &BTreeSet::new(),
-        correr,
+        deps.correr,
     )? {
         Suite::Clasificada(c) => c,
         Suite::SinVeredicto(motivo) => {
             avisos.push(format!("contrato: {motivo}"));
-            return Ok(sin_veredicto(&repo, tarea, &colab, hallazgos, avisos));
+            let motivo = format!("suite del contrato sin veredicto: {motivo}");
+            return Ok(sin_veredicto(
+                &repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo,
+            ));
         }
     };
     let excluidos: BTreeSet<String> = tarea
@@ -220,43 +282,287 @@ fn evaluar_con(
         DIR_OCULTO,
         XML_OCULTO,
         &excluidos,
-        correr,
+        deps.correr,
     )? {
         Suite::Clasificada(c) => c,
         Suite::SinVeredicto(motivo) => {
             avisos.push(format!("oculto: {motivo}"));
-            return Ok(sin_veredicto(&repo, tarea, &colab, hallazgos, avisos));
+            let motivo = format!("suite oculta sin veredicto: {motivo}");
+            return Ok(sin_veredicto(
+                &repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo,
+            ));
         }
     };
+    let preparada = Preparada {
+        repo: repo_copia.clone(),
+        cache,
+        rustsec,
+    };
+    let ej = (deps.herramientas)(&preparada);
+    let medicion = medir(
+        tarea,
+        &repo_copia,
+        ej.as_ref(),
+        &contrato,
+        &oculto,
+        &hallazgos,
+    );
     let estado = estado_de(&contrato.conteo, &oculto.conteo);
     let mut tasas = BTreeMap::new();
-    for (id, tasa) in contrato.tasas {
-        tasas.insert(format!("contrato:{id}"), tasa);
+    for (id, tasa) in &contrato.tasas {
+        tasas.insert(format!("contrato:{id}"), tasa.clone());
     }
-    for (id, tasa) in oculto.tasas {
-        tasas.insert(format!("oculto:{id}"), tasa);
+    for (id, tasa) in &oculto.tasas {
+        tasas.insert(format!("oculto:{id}"), tasa.clone());
     }
+    let mut todos = hallazgos;
+    todos.extend(medicion.hallazgos);
+    let sin_calibrar = sin_calibrar(&medicion.puntajes);
     Ok(Veredicto {
         v: VERSION,
         tarea: tarea.nombre.clone(),
         repo: nombre_de(&repo),
         commit,
-        contrato: contrato.conteo,
-        oculto: oculto.conteo,
-        puntajes: Vec::new(),
-        hallazgos,
+        contrato: contrato.conteo.clone(),
+        oculto: oculto.conteo.clone(),
+        puntajes: medicion.puntajes,
+        hallazgos: deduplicar_hallazgos(todos),
         global: None,
         estado,
         costo_usd: 0.0,
         informe: None,
-        rubricas: Vec::new(),
+        rubricas,
         repeticiones: tarea.repeticiones,
-        inestables: oculto.inestables,
-        inestables_contrato: contrato.inestables,
+        inestables: oculto.inestables.clone(),
+        inestables_contrato: contrato.inestables.clone(),
         tasas,
         pendientes: pendientes::desde(tarea, &colab),
         avisos,
+        requisitos: medicion.requisitos,
+        sin_calibrar,
     })
+}
+
+/// Lo que las sondas aportan al veredicto: los nueve puntajes, los hallazgos de las sondas y el
+/// estado de cada requisito.
+struct Medicion {
+    puntajes: Vec<Puntaje>,
+    hallazgos: Vec<Hallazgo>,
+    requisitos: Vec<EstadoRequisito>,
+}
+
+/// Mide las nueve dimensiones con las sondas y los requisitos. `descarga` son los hallazgos de la
+/// descarga: los que tocan una dimensión con sondas entran a su puntaje.
+fn medir(
+    tarea: &Tarea,
+    repo: &Path,
+    ej: &dyn EjecutorHerramienta,
+    contrato: &Clasificacion,
+    oculto: &Clasificacion,
+    descarga: &[Hallazgo],
+) -> Medicion {
+    let resultados = requisitos::desde_clasificacion(oculto);
+    let entrega = entrega::sonda_entrega(ej, repo, tarea);
+    let estados = requisitos::evaluar_requisitos(
+        &tarea.requisito,
+        &resultados,
+        &entrega.escenarios,
+        &tarea.entorno,
+        &tarea.oraculo_dudoso,
+        &BTreeMap::new(),
+    );
+    let mutacion = mutacion::sonda_mutacion(ej, tarea);
+    let mut sondas = vec![entrega.sonda.clone(), mutacion.sonda.clone()];
+    sondas.extend(perfiles::sondas_nativas(repo, tarea));
+    sondas.extend(perfiles::herramientas::sondas_herramientas(ej, tarea, repo));
+    let mut hallazgos: Vec<Hallazgo> = sondas.iter().flat_map(|s| s.hallazgos.clone()).collect();
+    hallazgos.extend(requisitos::hallazgos_inestables(
+        &tarea.requisito,
+        &resultados,
+    ));
+    let puntajes = DIMENSIONES
+        .iter()
+        .map(|&dimension| match dimension {
+            Dimension::Funciona => funciona(tarea, contrato, oculto, &entrega.escenarios),
+            Dimension::Diseno => sin_veredicto_puntaje(dimension, "juez no corrido".into()),
+            Dimension::Completitud => {
+                requisitos::puntaje_completitud(&estados).unwrap_or_else(|| {
+                    sin_veredicto_puntaje(dimension, "ningún requisito tiene nivel medido".into())
+                })
+            }
+            _ => {
+                let de_la_dimension = sondas
+                    .iter()
+                    .filter(|s| s.dimension == dimension)
+                    .cloned()
+                    .collect();
+                let extra = descarga
+                    .iter()
+                    .filter(|h| h.dimension == dimension)
+                    .cloned()
+                    .collect();
+                puntaje_de(dimension, de_la_dimension, extra, tarea)
+            }
+        })
+        .collect();
+    Medicion {
+        puntajes,
+        hallazgos,
+        requisitos: estados,
+    }
+}
+
+/// Puntaje de una dimensión con sus sondas. Sin sondas no hay veredicto. Una sola sonda sin hallazgos
+/// de la descarga conserva su valor, porque eficiencia y mutación no se miden con `puntuar_hallazgos`.
+/// Con varias partes, o con hallazgos de la descarga, se juntan con `combinar`.
+fn puntaje_de(
+    dimension: Dimension,
+    mut sondas: Vec<ResultadoSonda>,
+    extra: Vec<Hallazgo>,
+    tarea: &Tarea,
+) -> Puntaje {
+    if sondas.is_empty() {
+        let motivo = format!(
+            "no hay sondas de {dimension:?} para el lenguaje {}",
+            tarea.lenguaje
+        );
+        return sin_veredicto_puntaje(dimension, motivo);
+    }
+    let juntada = if sondas.len() == 1 && extra.is_empty() {
+        sondas.pop()
+    } else {
+        if !extra.is_empty() {
+            // Parte sin valor propio: solo lleva hallazgos, que `combinar` vuelve a puntuar.
+            sondas.push(ResultadoSonda {
+                dimension,
+                valor: Some(1.0),
+                motivo: None,
+                hallazgos: extra,
+            });
+        }
+        combinar(dimension, sondas, &tarea.requisito)
+    };
+    match juntada {
+        Some(sonda) => sonda.a_puntaje().unwrap_or_else(|| {
+            sin_veredicto_puntaje(
+                dimension,
+                sonda.motivo.unwrap_or_else(|| "sin motivo".into()),
+            )
+        }),
+        None => sin_veredicto_puntaje(dimension, "sin sondas".into()),
+    }
+}
+
+/// Funciona: la fracción de tests que pasan (contrato y oculto, sin los de `[[entorno]]`) y, si la tarea
+/// tiene escenarios, la de escenarios verdes. Una parte sin veredicto deja la dimensión sin veredicto.
+fn funciona(
+    tarea: &Tarea,
+    contrato: &Clasificacion,
+    oculto: &Clasificacion,
+    escenarios: &BTreeMap<String, bool>,
+) -> Puntaje {
+    const DIMENSION: Dimension = Dimension::Funciona;
+    let entorno: BTreeSet<&str> = tarea.entorno.iter().map(|e| e.test.as_str()).collect();
+    let (pasa_contrato, total_contrato) = fraccion_pasa(contrato, &entorno);
+    let (pasa_oculto, total_oculto) = fraccion_pasa(oculto, &entorno);
+    let total = total_contrato + total_oculto;
+    if total == 0 {
+        return sin_veredicto_puntaje(DIMENSION, "no hay tests que medir".into());
+    }
+    let mut partes = vec![(pasa_contrato + pasa_oculto) as f32 / total as f32];
+    if !tarea.escenario.is_empty() {
+        let faltan: Vec<&str> = tarea
+            .escenario
+            .iter()
+            .map(|e| e.id.as_str())
+            .filter(|id| !escenarios.contains_key(*id))
+            .collect();
+        if !faltan.is_empty() {
+            let motivo = format!("escenarios sin medir: {}", faltan.join(", "));
+            return sin_veredicto_puntaje(DIMENSION, motivo);
+        }
+        let verdes = tarea
+            .escenario
+            .iter()
+            .filter(|e| escenarios.get(&e.id) == Some(&true))
+            .count();
+        partes.push(verdes as f32 / tarea.escenario.len() as f32);
+    }
+    let valor = partes.iter().sum::<f32>() / partes.len() as f32;
+    Puntaje {
+        dimension: DIMENSION,
+        valor,
+        calibrada: false,
+        exactitud_balanceada: None,
+        items: Vec::new(),
+        sin_veredicto: None,
+    }
+}
+
+/// Tests que pasan y tests medidos de una suite, sin los de `[[entorno]]`. Los omitidos no cuentan.
+fn fraccion_pasa(c: &Clasificacion, entorno: &BTreeSet<&str>) -> (u32, u32) {
+    let mut pasa: u32 = 0;
+    let mut total: u32 = 0;
+    for (id, resultado) in &c.estables {
+        if entorno.contains(id.as_str()) {
+            continue;
+        }
+        total += 1;
+        if *resultado == ResultadoTest::Pasa {
+            pasa += 1;
+        }
+    }
+    total += c
+        .inestables
+        .iter()
+        .filter(|id| !entorno.contains(id.as_str()))
+        .count() as u32;
+    (pasa, total)
+}
+
+/// Puntaje de una dimensión sin veredicto: `valor` 0 y el motivo.
+fn sin_veredicto_puntaje(dimension: Dimension, motivo: String) -> Puntaje {
+    Puntaje {
+        dimension,
+        valor: 0.0,
+        calibrada: false,
+        exactitud_balanceada: None,
+        items: Vec::new(),
+        sin_veredicto: Some(motivo),
+    }
+}
+
+/// Las nueve dimensiones sin veredicto, con el mismo motivo.
+fn puntajes_sin_veredicto(motivo: &str) -> Vec<Puntaje> {
+    DIMENSIONES
+        .iter()
+        .map(|&d| sin_veredicto_puntaje(d, motivo.to_string()))
+        .collect()
+}
+
+/// Dimensiones con veredicto que no están calibradas. Sin calibración todavía, son todas las que tienen
+/// veredicto.
+fn sin_calibrar(puntajes: &[Puntaje]) -> Vec<Dimension> {
+    puntajes
+        .iter()
+        .filter(|p| p.sin_veredicto.is_none() && !p.calibrada)
+        .map(|p| p.dimension)
+        .collect()
+}
+
+/// Etiquetas (`nombre@hash`) de las rúbricas embebidas. Un error aquí sale como infraestructura.
+fn rubricas_embebidas() -> Result<Vec<String>, ErrorOraculo> {
+    let rubricas = rubrica::cargar_embebidas()
+        .map_err(|e| ErrorOraculo::Infra(format!("rúbricas embebidas: {e}")))?;
+    Ok(rubrica::etiquetas(&rubricas))
+}
+
+/// Motivo de una descarga sin veredicto: el detalle de su primer hallazgo, si lo hay.
+fn motivo_de_la_descarga(hallazgos: &[Hallazgo]) -> String {
+    match hallazgos.first() {
+        Some(h) => format!("descarga sin veredicto: {}", h.detalle),
+        None => "descarga sin veredicto".into(),
+    }
 }
 
 /// Carga la tarea `nombre` de `ROOT_HOME` y la evalúa con las opciones por defecto.
@@ -297,13 +603,16 @@ fn verificar_ficha(tarea: &Tarea) -> Result<(), ErrorOraculo> {
     Ok(())
 }
 
-/// Veredicto de una evaluación que no corrió: sin conteos, con sus hallazgos y pendientes.
+/// Veredicto de una evaluación que no corrió: sin conteos, con sus hallazgos y pendientes. Las nueve
+/// dimensiones van sin veredicto, con `motivo`.
 fn sin_veredicto(
     repo: &Path,
     tarea: &Tarea,
     colab: &BTreeMap<String, pendientes::ColabEntrada>,
     hallazgos: Vec<Hallazgo>,
     avisos: Vec<String>,
+    rubricas: Vec<String>,
+    motivo: &str,
 ) -> Veredicto {
     Veredicto {
         tarea: tarea.nombre.clone(),
@@ -313,6 +622,8 @@ fn sin_veredicto(
         hallazgos,
         pendientes: pendientes::desde(tarea, colab),
         avisos,
+        puntajes: puntajes_sin_veredicto(motivo),
+        rubricas,
         ..Veredicto::default()
     }
 }
@@ -745,6 +1056,16 @@ pub fn redactar_para_mcp(mut v: Veredicto) -> Veredicto {
     });
     for puntaje in &mut v.puntajes {
         puntaje.items.clear();
+        let cita_oculto = puntaje
+            .sin_veredicto
+            .as_deref()
+            .is_some_and(|m| ocultos.iter().any(|id| m.contains(id.as_str())));
+        if cita_oculto {
+            puntaje.sin_veredicto = Some("motivo con ids de tests ocultos: ver la CLI".into());
+        }
+    }
+    for requisito in &mut v.requisitos {
+        requisito.evidencia.clear();
     }
     if let Some(informe) = &mut v.informe {
         for requisito in &mut informe.requisitos {
@@ -828,6 +1149,9 @@ pub fn codigo_de_estado(estado: Estado) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oracle::perfiles::herramientas::{EjecutorHerramienta, SalidaHerramienta};
+    use crate::oracle::tarea::{Escenario, Exclusion};
+    use crate::tipos::{Cumplimiento, Dimension, EstadoRequisito, Puntaje};
     use filetime::{FileTime, set_symlink_file_times};
     use std::fs;
     use std::path::PathBuf;
@@ -1553,5 +1877,409 @@ mod tests {
         );
         assert_eq!(todos.len(), 1);
         assert_eq!(sin_aviso, None);
+    }
+
+    // --- Tarea 13: evaluación completa con dependencias falsas (sin podman ni red) ---
+
+    /// Spec con ficha válida para las tareas de prueba.
+    const SPEC: &str = include_str!("../../tests/fixtures/fichas/spec-completa.md");
+    /// Cargo.lock de un repo sin dependencias externas: solo su paquete.
+    const LOCK_SANO: &str = "version = 4\n\n[[package]]\nname = \"x\"\nversion = \"0.1.0\"\n";
+    /// Cargo.lock que no parsea: el inventario lo rechaza antes de cualquier red o contenedor.
+    const LOCK_ROTO: &str = "version = 4\n[[package\n";
+    const COLECCION_CONTRATO: &str =
+        "tests/test_a.py::t1\ntests/test_a.py::t2\n2 tests collected\n";
+    const JUNIT_CONTRATO: &str = r#"<testsuite><testcase classname="tests.test_a" name="t1"/><testcase classname="tests.test_a" name="t2"/></testsuite>"#;
+    const JUNIT_CONTRATO_INCOMPLETO: &str =
+        r#"<testsuite><testcase classname="tests.test_a" name="t1"/></testsuite>"#;
+    const COLECCION_OCULTO: &str = "tests/test_b.py::t3\ntests/test_b.py::t4\n2 tests collected\n";
+    const JUNIT_OCULTO: &str = r#"<testsuite><testcase classname="tests.test_b" name="t3"/><testcase classname="tests.test_b" name="t4"><failure message="x"/></testcase></testsuite>"#;
+    /// Salida de `cargo mutants`: un mutante cazado de dos viables, con la línea de fin del Baseline.
+    const OUTCOMES: &str = r#"{"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"m","file":"src/lib.rs","span":{"start":{"line":1}}}},"summary":"CaughtMutant"}],"total_mutants":1}"#;
+
+    /// Tarea de Rust con dos requisitos, eficiencia y su spec. Los tests de la oculta son `test_b::t3` y `t4`.
+    fn tarea_rust(base: &Path) -> Tarea {
+        let dir = base.join("tarea");
+        fs::create_dir_all(&dir).expect("tarea");
+        fs::write(dir.join("spec.md"), SPEC).expect("spec");
+        let texto = "nombre = \"tarea-rust\"\nlenguaje = \"rust\"\nimagen = \"imagen-falsa\"\n\
+            spec = \"spec.md\"\nrepeticiones_inestable = 1\n\
+            [contrato]\ncmd = \"pytest -q --junitxml=/salida/contrato.xml /oraculo/contrato\"\n\
+            [oculto]\ncmd = \"pytest -q --junitxml=/salida/oculto.xml /oraculo/oculto\"\n\
+            [eficiencia]\ncmd = \"bench-eficiencia\"\npiso = 5000.0\n\
+            [[requisito]]\nid = \"R1\"\ntitulo = \"Uno\"\npeso = 3\npruebas = [\"test_b::t3\"]\n\
+            [[requisito]]\nid = \"R2\"\ntitulo = \"Dos\"\npeso = 1\npruebas = [\"test_b::t4\"]\n";
+        fs::write(dir.join("tarea.toml"), texto).expect("tarea.toml");
+        Tarea::cargar_de(&dir).expect("carga la tarea")
+    }
+
+    /// Repo de Rust con el `Cargo.lock` dado.
+    fn repo_rust(base: &Path, lock: &str) -> PathBuf {
+        let repo = base.join("repo");
+        fs::create_dir_all(repo.join("src")).expect("src");
+        fs::write(repo.join("src/lib.rs"), "pub fn f() -> u8 { 1 }\n").expect("lib.rs");
+        fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .expect("Cargo.toml");
+        fs::write(repo.join("Cargo.lock"), lock).expect("Cargo.lock");
+        repo
+    }
+
+    /// `ROOT_HOME` con la caché de dependencias del lock y la base de RustSec ya listas. Así la
+    /// descarga no levanta contenedores ni baja nada.
+    fn home_con_cache(base: &Path, lock: &str) -> PathBuf {
+        let home = base.join("home");
+        let hash = descarga::hash_corto(lock.as_bytes());
+        let cache = home.join("cache/rust").join(&hash);
+        fs::create_dir_all(&cache).expect("cache de Rust");
+        fs::write(cache.join("config.toml"), "").expect("config.toml");
+        fs::create_dir_all(home.join("cache/rustsec")).expect("base de RustSec");
+        home
+    }
+
+    /// Ejecutor de contenedores de las suites: responde la recolección y deja el junit de cada una.
+    fn correr_suites(
+        junit_contrato: &'static str,
+    ) -> impl Fn(&contenedor::Ejecucion) -> Result<contenedor::Resultado, ErrorOraculo> {
+        move |e: &contenedor::Ejecucion| {
+            let contrato = e.oraculo_destino.as_deref() == Some(DIR_CONTRATO);
+            let (coleccion, junit, xml) = if contrato {
+                (COLECCION_CONTRATO, junit_contrato, XML_CONTRATO)
+            } else {
+                (COLECCION_OCULTO, JUNIT_OCULTO, XML_OCULTO)
+            };
+            if e.cmd.contains("--collect-only") {
+                fs::write(e.salida.join(ARCHIVO_COLECCION), coleccion).expect("coleccion");
+                return Ok(resultado_falso(0, ""));
+            }
+            fs::write(e.salida.join(xml), junit).expect("junit");
+            let codigo = if junit.contains("<failure") { 1 } else { 0 };
+            Ok(resultado_falso(codigo, ""))
+        }
+    }
+
+    /// Ejecutor de suites que no debe usarse: si la evaluación corre una, el test falla.
+    fn sin_suites(_: &contenedor::Ejecucion) -> Result<contenedor::Resultado, ErrorOraculo> {
+        panic!("la descarga no debía dejar correr ninguna suite");
+    }
+
+    /// Ejecutor de herramientas falso. Responde como una imagen sana, salvo las de `faltan`.
+    struct HerramientasSanas {
+        faltan: Vec<&'static str>,
+    }
+
+    impl EjecutorHerramienta for HerramientasSanas {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            let mut salida = SalidaHerramienta::default();
+            if let Some(nombre) = cmd.strip_prefix("command -v ") {
+                salida.codigo = i32::from(self.faltan.contains(&nombre));
+            } else if cmd == "cargo clippy --version" {
+                salida.codigo = i32::from(self.faltan.contains(&"clippy"));
+            } else if cmd.contains("gitleaks detect") {
+                salida.archivos.insert("gitleaks.json".into(), "[]".into());
+                salida.stderr = "no leaks found".into();
+            } else if cmd.contains("cargo audit") {
+                salida.archivos.insert(
+                    "audit.json".into(),
+                    r#"{"vulnerabilities":{"found":false,"list":[]}}"#.into(),
+                );
+            } else if cmd.contains("--message-format=json") {
+                salida.archivos.insert(
+                    "clippy.json".into(),
+                    r#"{"reason":"build-finished","success":true}"#.into(),
+                );
+            } else if cmd == "bench-eficiencia" {
+                salida.stdout = r#"{"ops_s": 6000.0}"#.into();
+            } else if cmd.contains("cargo mutants") {
+                salida
+                    .archivos
+                    .insert("outcomes.json".into(), OUTCOMES.into());
+            }
+            Ok(salida)
+        }
+
+        fn tiene_rustsec(&self) -> bool {
+            true
+        }
+    }
+
+    /// Fábrica de herramientas falsas: no necesita la copia del repo.
+    fn herramientas(
+        faltan: &'static [&'static str],
+    ) -> impl Fn(&Preparada) -> Box<dyn EjecutorHerramienta> {
+        move |_: &Preparada| {
+            Box::new(HerramientasSanas {
+                faltan: faltan.to_vec(),
+            })
+        }
+    }
+
+    fn opciones(home: &Path) -> OpcionesOraculo {
+        OpcionesOraculo {
+            timeout: Duration::from_secs(60),
+            home: Some(home.to_path_buf()),
+        }
+    }
+
+    /// Evaluación completa con las dependencias falsas: sin juez de configuración.
+    fn evaluar_falso(
+        repo: &Path,
+        tarea: &Tarea,
+        home: &Path,
+        correr: &dyn Fn(&contenedor::Ejecucion) -> Result<contenedor::Resultado, ErrorOraculo>,
+        herramientas: &dyn Fn(&Preparada) -> Box<dyn EjecutorHerramienta>,
+    ) -> Result<Veredicto, ErrorOraculo> {
+        let deps = Dependencias {
+            correr,
+            herramientas,
+            juez_config: None,
+        };
+        evaluar_con(repo, tarea, &opciones(home), deps)
+    }
+
+    /// Veredicto de la tarea de Rust con todas las sondas sanas y la suite del contrato completa.
+    fn veredicto_sano(base: &Path) -> Veredicto {
+        let tarea = tarea_rust(base);
+        let repo = repo_rust(base, LOCK_SANO);
+        let home = home_con_cache(base, LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        evaluar_falso(&repo, &tarea, &home, &correr, &herramientas(&[])).expect("evalúa")
+    }
+
+    fn puntaje_de_prueba(v: &Veredicto, dimension: Dimension) -> &Puntaje {
+        v.puntajes
+            .iter()
+            .find(|p| p.dimension == dimension)
+            .expect("la dimensión está")
+    }
+
+    #[test]
+    fn oraculo_veredicto_lista_nueve_dimensiones_en_orden_de_dimension() {
+        let base = tempfile::tempdir().expect("base");
+        let v = veredicto_sano(base.path());
+        let dims: Vec<Dimension> = v.puntajes.iter().map(|p| p.dimension).collect();
+        assert_eq!(
+            dims,
+            vec![
+                Dimension::Funciona,
+                Dimension::Seguridad,
+                Dimension::Eficiencia,
+                Dimension::Estructura,
+                Dimension::Arquitectura,
+                Dimension::Diseno,
+                Dimension::Completitud,
+                Dimension::Entrega,
+                Dimension::Pruebas,
+            ]
+        );
+        assert_eq!(DIMENSIONES.to_vec(), dims);
+    }
+
+    #[test]
+    fn oraculo_con_sondas_sanas_solo_diseno_queda_sin_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let v = veredicto_sano(base.path());
+        let sin: Vec<Dimension> = v
+            .puntajes
+            .iter()
+            .filter(|p| p.sin_veredicto.is_some())
+            .map(|p| p.dimension)
+            .collect();
+        assert_eq!(sin, vec![Dimension::Diseno], "{:?}", v.puntajes);
+        assert_eq!(v.global, None);
+    }
+
+    #[test]
+    fn oraculo_diseno_queda_sin_veredicto_con_juez_no_corrido() {
+        let base = tempfile::tempdir().expect("base");
+        let v = veredicto_sano(base.path());
+        let diseno = puntaje_de_prueba(&v, Dimension::Diseno);
+        assert_eq!(diseno.sin_veredicto.as_deref(), Some("juez no corrido"));
+        assert_eq!(diseno.valor, 0.0);
+    }
+
+    #[test]
+    fn oraculo_sonda_sin_veredicto_deja_su_dimension_sin_veredicto_y_valor_cero() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_falso(
+            &repo,
+            &tarea,
+            &home,
+            &correr,
+            &herramientas(&["cargo-mutants"]),
+        )
+        .expect("evalúa");
+        let pruebas = puntaje_de_prueba(&v, Dimension::Pruebas);
+        let motivo = pruebas.sin_veredicto.as_deref().expect("sin veredicto");
+        assert!(motivo.contains("cargo-mutants"), "{motivo}");
+        assert_eq!(pruebas.valor, 0.0);
+        assert_eq!(v.puntajes.len(), 9, "las nueve siguen listadas");
+    }
+
+    #[test]
+    fn oraculo_requisitos_traen_un_estado_por_requisito_de_la_tarea() {
+        let base = tempfile::tempdir().expect("base");
+        let v = veredicto_sano(base.path());
+        let ids: Vec<&str> = v.requisitos.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["R1", "R2"]);
+        assert_eq!(v.requisitos[0].cumplimiento, Cumplimiento::Cumplido);
+        assert_eq!(v.requisitos[1].cumplimiento, Cumplimiento::Ausente);
+    }
+
+    #[test]
+    fn oraculo_funciona_con_3_de_4_pasando_y_sin_escenarios_da_075() {
+        let base = tempfile::tempdir().expect("base");
+        let v = veredicto_sano(base.path());
+        let funciona = puntaje_de_prueba(&v, Dimension::Funciona);
+        assert_eq!(funciona.sin_veredicto, None);
+        assert!(
+            (funciona.valor - 0.75).abs() < 1e-6,
+            "valor {}",
+            funciona.valor
+        );
+    }
+
+    #[test]
+    fn oraculo_funciona_no_cuenta_los_tests_de_entorno() {
+        let base = tempfile::tempdir().expect("base");
+        let mut tarea = tarea_de_prueba(base.path());
+        tarea.entorno = vec![Exclusion {
+            test: "test_a::t2".into(),
+            motivo: "gpu".into(),
+        }];
+        let contrato = Clasificacion {
+            estables: BTreeMap::from([
+                ("test_a::t1".to_string(), ResultadoTest::Pasa),
+                ("test_a::t2".to_string(), ResultadoTest::Falla),
+            ]),
+            ..Clasificacion::default()
+        };
+        let oculto = Clasificacion {
+            estables: BTreeMap::from([("test_b::t3".to_string(), ResultadoTest::Pasa)]),
+            ..Clasificacion::default()
+        };
+        let p = funciona(&tarea, &contrato, &oculto, &BTreeMap::new());
+        assert!(
+            (p.valor - 1.0).abs() < 1e-6,
+            "sin el de entorno quedan 2 de 2: {}",
+            p.valor
+        );
+    }
+
+    #[test]
+    fn oraculo_funciona_escenario_sin_medir_deja_la_dimension_sin_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let mut tarea = tarea_de_prueba(base.path());
+        tarea.escenario = vec![Escenario {
+            id: "e2e".into(),
+            cmd: "exit 0".into(),
+        }];
+        let contrato = Clasificacion {
+            estables: BTreeMap::from([("test_a::t1".to_string(), ResultadoTest::Pasa)]),
+            ..Clasificacion::default()
+        };
+        let p = funciona(
+            &tarea,
+            &contrato,
+            &Clasificacion::default(),
+            &BTreeMap::new(),
+        );
+        let motivo = p.sin_veredicto.expect("sin veredicto");
+        assert!(motivo.contains("e2e"), "{motivo}");
+    }
+
+    #[test]
+    fn oraculo_funciona_con_escenarios_promedia_con_correccion() {
+        let base = tempfile::tempdir().expect("base");
+        let mut tarea = tarea_de_prueba(base.path());
+        tarea.escenario = vec![Escenario {
+            id: "e2e".into(),
+            cmd: "exit 0".into(),
+        }];
+        let contrato = Clasificacion {
+            estables: BTreeMap::from([("test_a::t1".to_string(), ResultadoTest::Pasa)]),
+            ..Clasificacion::default()
+        };
+        let escenarios = BTreeMap::from([("e2e".to_string(), false)]);
+        let p = funciona(&tarea, &contrato, &Clasificacion::default(), &escenarios);
+        assert!((p.valor - 0.5).abs() < 1e-6, "(1 + 0) / 2: {}", p.valor);
+    }
+
+    #[test]
+    fn oraculo_descarga_sin_veredicto_deja_las_nueve_sin_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_ROTO);
+        let home = base.path().join("home");
+        let v = evaluar_falso(&repo, &tarea, &home, &sin_suites, &herramientas(&[]))
+            .expect("la descarga sin veredicto no es error de infraestructura");
+        assert_eq!(v.puntajes.len(), 9);
+        for p in &v.puntajes {
+            assert_eq!(p.valor, 0.0, "{:?}", p.dimension);
+            let motivo = p.sin_veredicto.as_deref().expect("sin veredicto");
+            assert!(motivo.contains("descarga"), "{motivo}");
+        }
+        assert!(
+            v.hallazgos
+                .iter()
+                .any(|h| h.dimension == Dimension::Entrega)
+        );
+    }
+
+    #[test]
+    fn oraculo_suite_sin_veredicto_deja_las_nueve_sin_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        // El junit trae 1 test y pytest recolectó 2: el contrato no da veredicto.
+        let correr = correr_suites(JUNIT_CONTRATO_INCOMPLETO);
+        let v = evaluar_falso(&repo, &tarea, &home, &correr, &herramientas(&[])).expect("evalúa");
+        assert_eq!(v.puntajes.len(), 9);
+        assert!(v.puntajes.iter().all(|p| p.sin_veredicto.is_some()));
+        let motivo = v.puntajes[0].sin_veredicto.clone().unwrap_or_default();
+        assert!(motivo.contains("contrato"), "{motivo}");
+    }
+
+    #[test]
+    fn oraculo_veredicto_lleva_las_etiquetas_de_rubrica() {
+        let base = tempfile::tempdir().expect("base");
+        let v = veredicto_sano(base.path());
+        let esperadas = rubrica::etiquetas(&rubrica::cargar_embebidas().expect("rúbricas"));
+        assert_eq!(v.rubricas, esperadas);
+    }
+
+    #[test]
+    fn oraculo_redaccion_mcp_quita_evidencia_de_requisitos_y_motivos_con_ids_ocultos() {
+        let v = Veredicto {
+            inestables: vec!["test_b::t4".into()],
+            requisitos: vec![EstadoRequisito {
+                id: "R1".into(),
+                titulo: "Uno".into(),
+                peso: 3,
+                cumplimiento: Cumplimiento::Parcial,
+                evidencia: vec!["test_b::t3: pasa".into()],
+                nivel: Some(1),
+            }],
+            puntajes: vec![
+                sin_veredicto_puntaje(Dimension::Pruebas, "falló test_b::t4".into()),
+                sin_veredicto_puntaje(Dimension::Entrega, "no instala".into()),
+            ],
+            ..Veredicto::default()
+        };
+        let r = redactar_para_mcp(v);
+        let texto = serde_json::to_string(&r).expect("json");
+        assert!(!texto.contains("test_b::t3"), "{texto}");
+        assert!(!texto.contains("test_b::t4"), "{texto}");
+        assert!(
+            texto.contains("no instala"),
+            "un motivo sin ids queda: {texto}"
+        );
     }
 }

@@ -194,6 +194,9 @@ pub struct Puntaje {
     pub exactitud_balanceada: Option<f32>,
     #[serde(default)]
     pub items: Vec<NivelItem>,
+    /// Por qué la dimensión no tiene veredicto. Con `Some`, `valor` vale 0 y ningún lector lo usa.
+    #[serde(default)]
+    pub sin_veredicto: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -277,6 +280,12 @@ pub struct Veredicto {
     /// Problemas que no tumban la evaluación, por ejemplo un `colab.json` ilegible.
     #[serde(default)]
     pub avisos: Vec<String>,
+    /// Estado de cada requisito de la tarea. Un veredicto viejo lee vacío.
+    #[serde(default)]
+    pub requisitos: Vec<EstadoRequisito>,
+    /// Dimensiones con veredicto que todavía no están calibradas. Un veredicto viejo lee vacío.
+    #[serde(default)]
+    pub sin_calibrar: Vec<Dimension>,
 }
 
 impl Default for Veredicto {
@@ -301,6 +310,8 @@ impl Default for Veredicto {
             tasas: BTreeMap::new(),
             pendientes: Vec::new(),
             avisos: Vec::new(),
+            requisitos: Vec::new(),
+            sin_calibrar: Vec::new(),
         }
     }
 }
@@ -473,6 +484,7 @@ mod tests {
                 calibrada: true,
                 exactitud_balanceada: Some(0.97),
                 items: Vec::new(),
+                sin_veredicto: None,
             }],
             hallazgos: vec![Hallazgo {
                 dimension: Dimension::Seguridad,
@@ -496,6 +508,8 @@ mod tests {
             tasas: BTreeMap::new(),
             pendientes: Vec::new(),
             avisos: Vec::new(),
+            requisitos: Vec::new(),
+            sin_calibrar: Vec::new(),
         }
     }
 
@@ -640,6 +654,7 @@ mod tests {
             calibrada: false,
             exactitud_balanceada: None,
             items: Vec::new(),
+            sin_veredicto: None,
         });
         ida_y_vuelta(&Hallazgo {
             dimension: Dimension::Arquitectura,
@@ -766,6 +781,37 @@ mod tests {
         assert!(v.puntajes[0].items.is_empty());
         assert_eq!(v.hallazgos[0].id, "");
         assert!(v.hallazgos[0].impacto.is_empty());
+    }
+
+    #[test]
+    fn tipos_veredicto_sin_requisitos_ni_sin_calibrar_se_lee_vacio() {
+        let mut json = serde_json::to_value(veredicto()).expect("serializa");
+        json.as_object_mut()
+            .expect("objeto")
+            .retain(|k, _| k != "requisitos" && k != "sin_calibrar");
+        let v: Veredicto = serde_json::from_value(json).expect("un veredicto viejo se acepta");
+        assert!(v.requisitos.is_empty());
+        assert!(v.sin_calibrar.is_empty());
+    }
+
+    #[test]
+    fn tipos_puntaje_sin_sin_veredicto_se_lee_none() {
+        let texto = r#"{"dimension":"seguridad","valor":0.5,"calibrada":false,
+            "exactitud_balanceada":null}"#;
+        let p: Puntaje = serde_json::from_str(texto).expect("un puntaje viejo se acepta");
+        assert_eq!(p.sin_veredicto, None);
+    }
+
+    #[test]
+    fn tipos_ida_y_vuelta_de_puntaje_sin_veredicto() {
+        ida_y_vuelta(&Puntaje {
+            dimension: Dimension::Diseno,
+            valor: 0.0,
+            calibrada: false,
+            exactitud_balanceada: None,
+            items: Vec::new(),
+            sin_veredicto: Some("juez no corrido".into()),
+        });
     }
 
     #[test]

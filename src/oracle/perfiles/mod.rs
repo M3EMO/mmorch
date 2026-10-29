@@ -30,6 +30,7 @@ impl ResultadoSonda {
             calibrada: false,
             exactitud_balanceada: None,
             items: Vec::new(),
+            sin_veredicto: None,
         })
     }
 }

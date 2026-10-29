@@ -123,6 +123,7 @@ pub fn puntaje_completitud(estados: &[EstadoRequisito]) -> Option<Puntaje> {
         calibrada: false,
         exactitud_balanceada: None,
         items,
+        sin_veredicto: None,
     })
 }
 
