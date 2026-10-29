@@ -69,6 +69,7 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 43 | P53: "P53 a". El builder corre en un contenedor de podman sin `ROOT_HOME`, con la credencial de Claude montada en solo lectura. Ver Tarea 26. |
 | 44 | P52: "P52 c pero yo no lo confirmo." Un agente busca el precio vigente de Haiku y Root lo usa sin confirmación del usuario. El orquestador lo buscó en la referencia de la API de Anthropic (skill `claude-api`, tabla cacheada el 2026-10-06). `claude-haiku-5-5` cuesta 0,10 USD por millón de tokens de entrada y 0,50 de salida, con hasta 100 000 tokens de entrada. Con más de 100 000 tokens de entrada, cuesta 0,50 y 2,50 USD. Coincide con `mmorch/config.py`. Ver Tarea 21b. |
 | 45 | G1h: "G1h: a ahora para correr el juez, y b como corrección en el código." Ahora: Opus sube `[proveedores].timeout_s` a 900 segundos en `root.toml` y corre otra vez el juez de la ficha. En el código: los dos jueces tienen un timeout propio, más largo que el de las demás llamadas. Ver Tareas 21, 21b y 21c. |
+| 46 | P54: "P54 c". Opus registra 0,50 USD como peor caso de los 3 intentos cortados del juez de memora, con un evento de costo manual. Ver Tarea 21. |
 
 ## Patterns to Mirror
 
@@ -1523,6 +1524,10 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
     - Un timeout de lectura no se reintenta. Repetir el pedido repite el mismo razonamiento largo y multiplica el costo, como pasó con el juez de memora: 3 intentos en 10 minutos.
     - El intento cortado registra un evento `Llamada` con `extra.error = "timeout"`, `extra.costo_estimado = true` y el costo de peor caso. El peor caso es la estimación de entrada de esta tarea más `max_tokens` de salida, al precio del tramo que corresponde (decisión 44).
     - Ese costo entra al gasto del mes y cierra la reserva de la llamada. Así el tope de API ve el gasto posible.
+  - Costo manual (decisión 46): `r00t observa costo --usd <n> --motivo <texto> [--fecha <iso>]` registra un evento `Llamada` con `via = api`, `extra.manual = true` y el motivo.
+    - El monto debe ser finito y positivo: el comando solo suma gasto, nunca lo resta.
+    - `--fecha` ubica el gasto en el mes en que ocurrió. Sin `--fecha`, vale la hora actual.
+    - Después de que la Tarea 21 entre a la rama de la laptop, Opus corre `r00t observa costo --usd 0.50 --motivo "3 intentos cortados por timeout del juez de la ficha de memora (decisión 46)" --fecha 2026-10-29`. Así el gasto cae en octubre, que es el mes de las llamadas.
   - La estimación de entrada usa los bytes UTF-8 del prompt: un token nunca ocupa menos de un byte.
   - El razonamiento en los proveedores (B10) pasa a la Tarea 21b.
   - Medios y bajos de topes: M2 (`elegir` usa `tokens_estimados` para el cupo), M3 (la sesión importada usa su propia hora), B8 (el lock cubre la lista de archivos rotados), B9 (sin presupuesto, código 3 y `Gate`), B12 (sin `costUSD`, usa `total_cost_usd`; un costo negativo es error) y M1 (`observa claude --via nube` registra el `Gate` al cruzar el tope).
@@ -1534,6 +1539,7 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
   - Un servidor que tarda más que el timeout deja un evento con costo estimado distinto de 0.
   - Ese servidor recibe un solo pedido: el timeout de lectura no se reintenta.
   - Un servidor que rechaza la conexión sí se reintenta, y sus intentos valen 0 USD.
+  - `r00t observa costo --usd 0.50 --motivo x --fecha 2026-10-29` suma 0,50 USD al gasto de octubre de 2026. Con `--usd -1`, el comando sale con código 2.
   - Un prompt de 1000 caracteres de 3 bytes estima al menos 3000 tokens de entrada.
 
 ### Tarea 10c: Tope de salida de los jueces y causa "tope alcanzado" (decisión 42; local, ya)
@@ -1583,7 +1589,11 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
   - `docs/root.toml.example` muestra esos defaults en lugar de valores vacíos.
   - Timeout de los jueces (decisión 45): `[proveedores]` suma `timeout_juez_s`, con 1200 segundos por defecto. Lo usan las llamadas de los roles Verifica y Juzga, incluidos los dos jueces. Las demás llamadas siguen con `timeout_s`, que vale 120.
     - Razón del default: un juez puede escribir hasta 32 000 tokens (decisión 42). A unos 30 tokens por segundo, eso tarda cerca de 1070 segundos. 1200 deja un margen chico.
-    - La velocidad de 30 tokens por segundo es una suposición. La corrida de la parte a deja su `latency_s` en `eventos.jsonl`. Si esa latencia supera 600 segundos, el default pasa a dos veces la latencia medida, y el commit cita el evento.
+    - La velocidad de 30 tokens por segundo era una suposición. La corrida de la parte a de G1h la midió con `deepseek-v4-pro`, en un solo intento cada una:
+      - memora: 97 segundos, 5915 tokens de entrada y 9619 de salida, 0,0438 USD. Son cerca de 99 tokens por segundo.
+      - brasa: 154 segundos, 5906 tokens de entrada y 13 010 de salida, 0,0556 USD. Son cerca de 84 tokens por segundo.
+    - Ninguna pasó de 600 segundos, así que el default sigue en 1200. A 84 tokens por segundo, los 32 000 tokens del tope tardan unos 380 segundos. 1200 deja más de tres veces ese margen para un proveedor cargado.
+    - Un timeout más largo solo cuesta tiempo de espera ante una conexión muerta. La Tarea 21c corta ese caso con su plazo de inactividad de 120 segundos.
     - Después de la 21b, Opus devuelve `[proveedores].timeout_s` a 120 en `root.toml`: el juez ya tiene su propio timeout.
 - **Dónde**: todo en la nube, con el servidor HTTP falso.
 - **Validate**: `cargo test proveedores` y `cargo test config`:
@@ -1750,3 +1760,5 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
   - c) Registrar el peor caso estimado, 0,50 USD, con el mismo evento de b), sin mirar el panel.
 
   Mi recomendación es c): el tope ve el gasto posible y no te pide trabajo.
+
+**Respuesta del 2026-10-29:** P54 "P54 c" (decisión 46). P54 queda cerrada. La corrida de la parte a de G1h terminó: memora en 97 segundos y brasa en 154, cada una en un intento.
