@@ -68,6 +68,7 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 42 | G1g: "G1g a, pero no pueden estar el tope de tokens ya alto de por si?" Sonnet sube el tope de salida de los dos jueces, y después Opus corre otra vez el juez de la ficha. Respuesta a la pregunta del usuario: sí, el tope por defecto debe ser alto. El tope de salida es un techo, no un gasto: Root paga solo los tokens que el modelo usa. El tope de API de Route sigue acotando el costo, porque su chequeo previo cuenta el peor caso. El default pasa a 32 000 tokens. Ver Tarea 10c. |
 | 43 | P53: "P53 a". El builder corre en un contenedor de podman sin `ROOT_HOME`, con la credencial de Claude montada en solo lectura. Ver Tarea 26. |
 | 44 | P52: "P52 c pero yo no lo confirmo." Un agente busca el precio vigente de Haiku y Root lo usa sin confirmación del usuario. El orquestador lo buscó en la referencia de la API de Anthropic (skill `claude-api`, tabla cacheada el 2026-10-06). `claude-haiku-5-5` cuesta 0,10 USD por millón de tokens de entrada y 0,50 de salida, con hasta 100 000 tokens de entrada. Con más de 100 000 tokens de entrada, cuesta 0,50 y 2,50 USD. Coincide con `mmorch/config.py`. Ver Tarea 21b. |
+| 45 | G1h: "G1h: a ahora para correr el juez, y b como corrección en el código." Ahora: Opus sube `[proveedores].timeout_s` a 900 segundos en `root.toml` y corre otra vez el juez de la ficha. En el código: los dos jueces tienen un timeout propio, más largo que el de las demás llamadas. Ver Tareas 21, 21b y 21c. |
 
 ## Patterns to Mirror
 
@@ -1517,6 +1518,11 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
   - `Precio` exige `usd_entrada` y `usd_salida`, rechaza claves desconocidas y exige valores finitos y no negativos. `validar` revisa cada precio. Un modelo sin precio se rechaza antes de enviar, en todos los caminos.
   - Reserva: con un lock sobre `eventos.jsonl`, Root lee el gasto, compara y escribe un evento de reserva con el costo estimado, en un solo tramo. `observe::uso` suma las reservas abiertas. El evento final de la llamada cierra su reserva con el costo real. Así dos procesos no gastan el mismo margen.
   - Cada reintento repite el chequeo de tope. Una falla después de enviar el pedido (timeout, 5xx o un 200 que no parsea) registra el costo estimado de peor caso, con la marca `costo_estimado`.
+  - Intento cortado por timeout (decisión 45):
+    - Root separa dos fallas de red. Una falla antes de enviar el pedido, como una conexión rechazada, no cuesta nada y se puede reintentar. Una falla después de enviarlo, como un timeout de lectura, puede costar.
+    - Un timeout de lectura no se reintenta. Repetir el pedido repite el mismo razonamiento largo y multiplica el costo, como pasó con el juez de memora: 3 intentos en 10 minutos.
+    - El intento cortado registra un evento `Llamada` con `extra.error = "timeout"`, `extra.costo_estimado = true` y el costo de peor caso. El peor caso es la estimación de entrada de esta tarea más `max_tokens` de salida, al precio del tramo que corresponde (decisión 44).
+    - Ese costo entra al gasto del mes y cierra la reserva de la llamada. Así el tope de API ve el gasto posible.
   - La estimación de entrada usa los bytes UTF-8 del prompt: un token nunca ocupa menos de un byte.
   - El razonamiento en los proveedores (B10) pasa a la Tarea 21b.
   - Medios y bajos de topes: M2 (`elegir` usa `tokens_estimados` para el cupo), M3 (la sesión importada usa su propia hora), B8 (el lock cubre la lista de archivos rotados), B9 (sin presupuesto, código 3 y `Gate`), B12 (sin `costUSD`, usa `total_cost_usd`; un costo negativo es error) y M1 (`observa claude --via nube` registra el `Gate` al cruzar el tope).
@@ -1526,6 +1532,8 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
   - `usd_salda = 1.1` en `root.toml` falla al cargar con código 2. `usd_entrada = nan` también.
   - Cuatro procesos en paralelo con 99 USD gastados de 100 no pasan el tope.
   - Un servidor que tarda más que el timeout deja un evento con costo estimado distinto de 0.
+  - Ese servidor recibe un solo pedido: el timeout de lectura no se reintenta.
+  - Un servidor que rechaza la conexión sí se reintenta, y sus intentos valen 0 USD.
   - Un prompt de 1000 caracteres de 3 bytes estima al menos 3000 tokens de entrada.
 
 ### Tarea 10c: Tope de salida de los jueces y causa "tope alcanzado" (decisión 42; local, ya)
@@ -1573,6 +1581,10 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
     - Costo real: si los tokens de entrada del pedido pasan `umbral_entrada`, el pedido entero usa el precio alto, entrada y salida. Si no, usa el precio normal.
     - Chequeo previo: la estimación de entrada de la Tarea 21 es una cota superior de los tokens reales. Si esa estimación no pasa el umbral, la entrada real tampoco, y el precio normal es seguro. Si la pasa, el chequeo usa el precio alto.
   - `docs/root.toml.example` muestra esos defaults en lugar de valores vacíos.
+  - Timeout de los jueces (decisión 45): `[proveedores]` suma `timeout_juez_s`, con 1200 segundos por defecto. Lo usan las llamadas de los roles Verifica y Juzga, incluidos los dos jueces. Las demás llamadas siguen con `timeout_s`, que vale 120.
+    - Razón del default: un juez puede escribir hasta 32 000 tokens (decisión 42). A unos 30 tokens por segundo, eso tarda cerca de 1070 segundos. 1200 deja un margen chico.
+    - La velocidad de 30 tokens por segundo es una suposición. La corrida de la parte a deja su `latency_s` en `eventos.jsonl`. Si esa latencia supera 600 segundos, el default pasa a dos veces la latencia medida, y el commit cita el evento.
+    - Después de la 21b, Opus devuelve `[proveedores].timeout_s` a 120 en `root.toml`: el juez ya tiene su propio timeout.
 - **Dónde**: todo en la nube, con el servidor HTTP falso.
 - **Validate**: `cargo test proveedores` y `cargo test config`:
   - Un pedido de Juzga a DeepSeek lleva `"thinking": {"type": "enabled"}` en el cuerpo.
@@ -1584,7 +1596,23 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
   - Sin `root.toml`, Verifica y Juzga eligen `deepseek-flash` con razonamiento, y `r00t llama` tiene precio para ese modelo.
   - Un `root.toml` con `deepseek-reasoner` se lee como `deepseek-flash` con razonamiento.
   - Sin `DEEPSEEK_API_KEY`, Juzga elige el respaldo Haiku con razonamiento.
+  - Una llamada de Juzga usa `timeout_juez_s`, y una de Delega usa `timeout_s`.
 - **En la laptop**: un pedido real a `/models` de DeepSeek confirma que `deepseek-flash` y `deepseek-v4-pro` siguen listados. Ese GET no genera costo.
+
+### Tarea 21c: Respuestas en streaming (decisión 45; gravedad media)
+- **Problema**: una respuesta larga sin streaming deja la conexión callada hasta el final. Un timeout total no distingue un modelo que piensa de una conexión muerta. Las SDK de Anthropic además rechazan pedidos sin streaming que pueden pasar de 10 minutos.
+- **Decisión técnica**: sí conviene el streaming, para los dos proveedores. Va en una tarea propia porque cambia el cuerpo de los pedidos y la lectura de las respuestas, que son de la 21b.
+- **Action**:
+  - DeepSeek pide `"stream": true` con `stream_options: {"include_usage": true}`. Anthropic pide `"stream": true`. Root lee los eventos SSE y arma el texto.
+  - Dos plazos: un plazo de inactividad de 120 segundos sin bytes, y un plazo total igual al timeout de la llamada (`timeout_s` o `timeout_juez_s`). El de inactividad corta una conexión muerta. El total corta un modelo que nunca termina.
+  - Los tokens y el costo salen del evento final de uso. Sin ese evento, la llamada cuenta como cortada y registra el peor caso de la Tarea 21.
+  - La causa de fin del stream (`length` o `max_tokens`) sigue marcando `truncada` (Tarea 10c).
+- **Dónde**: todo en la nube, con un servidor SSE falso.
+- **Validate**: `cargo test proveedores`:
+  - Un stream que manda un byte cada 60 segundos durante 15 minutos no se corta por inactividad. El test usa plazos inyectados y dura menos de 5 segundos.
+  - Un stream que se calla 120 segundos se corta y registra el peor caso.
+  - Un stream completo registra los tokens del evento final de uso.
+  - Un stream que termina con `finish_reason = "length"` da `truncada = true`.
 
 ### Tarea 22: Descarga y contenedores sin fugas (C1 y medios o bajos de seguridad; gravedad crítica)
 - **Action**:
@@ -1670,7 +1698,7 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
 2. **`content` nulo con `finish_reason = "length"`.** Se acepta como texto vacío, porque `truncada` ya lleva la causa. Con `finish_reason = "stop"` y `content` nulo, el caso sigue siendo un error de respuesta. Si falta un test de ese segundo caso, la Tarea 21b lo agrega.
 3. **`Crudo` sin `serde`.** Se acepta. `Crudo` es interno y nunca se serializa, así que no necesita `#[serde(default)]`. `Respuesta`, que sí sale en JSON, ya lo lleva. Corrijo el texto de la Tarea 10c, que pedía el atributo en los dos structs.
 
-**Orden (2026-10-29):** 21, 21b, 22, 23, 24, 25 y la parte de nube de 26. La 21b va justo después de la 21: hoy ningún juez razona, y Verifica y Juzga apuntan a un alias viejo. La 21b necesita la validación de precios de la 21.
+**Orden (2026-10-29, con la decisión 45):** 21, 21b, 21c, 22, 23, 24, 25 y la parte de nube de 26. La 21b va justo después de la 21: hoy ningún juez razona, y Verifica y Juzga apuntan a un alias viejo. La 21b necesita la validación de precios de la 21.
 
 **Orden anterior (2026-10-28):** 21, 22, 23, 24 y 25. La 21 va primero porque hoy un juez puede gastar API sin tope. La 22 cierra la ejecución de código con red. Todas empiezan después de que entren las Tareas 20, 15d y 6e de la rama `claude/loving-ptolemy-9bj686`. Las tareas no dependen de números de línea: nombran funciones y archivos.
 
@@ -1712,3 +1740,13 @@ Ningún crítico ni alto quedó refutado. Los medios y bajos no se verificaron u
 **Respuestas del 2026-10-29:** G1g "G1g a, pero no pueden estar el tope de tokens ya alto de por si?" (decisión 42) y P53 "P53 a" (decisión 43). P52 sigue abierta.
 
 **Respuesta del 2026-10-29:** P52 "P52 c pero yo no lo confirmo." (decisión 44). P52 queda cerrada.
+
+**Respuesta del 2026-10-29:** G1h "G1h: a ahora para correr el juez, y b como corrección en el código." (decisión 45). La parte a corre en la otra sesión de Opus.
+
+- **P54. Gasto no registrado del juez de memora.** Los 3 intentos cortados registraron 0 USD, pero DeepSeek pudo cobrarlos. Con `deepseek-v4-pro` y 32 000 tokens de salida, el peor caso es cerca de 0,11 USD por intento, más la entrada. En total son menos de 0,50 USD. El tope de API no ve ese gasto. ¿Qué elegís?
+
+  - a) Ignorarlo: el monto es chico frente al tope de 100 USD.
+  - b) Vos mirás el uso real en el panel de DeepSeek, y Opus lo registra con un evento de costo manual. La Tarea 21 suma ese evento: `r00t observa costo --usd <n> --motivo <texto>`, que solo suma gasto y nunca lo resta.
+  - c) Registrar el peor caso estimado, 0,50 USD, con el mismo evento de b), sin mirar el panel.
+
+  Mi recomendación es c): el tope ve el gasto posible y no te pide trabajo.
