@@ -9,12 +9,14 @@ pub use uso::uso;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 use thiserror::Error as ErrorDerive;
-use time::OffsetDateTime;
+use time::format_description;
 use time::format_description::well_known::Rfc3339;
+use time::{Date, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
 use crate::config::root_home;
+use crate::error::Error;
 use crate::tipos::{Evento, Resumen, TipoEvento, Via};
 
 /// Errores de Observe. Salen con código 3.
@@ -24,6 +26,9 @@ pub enum ErrorObserve {
     Io(#[from] io::Error),
     #[error("error de JSON")]
     Json(#[from] serde_json::Error),
+    /// Un costo negativo en la salida de `claude -p`. No se registra nada.
+    #[error("costo negativo en {0}: no se registra nada")]
+    CostoNegativo(String),
 }
 
 /// Ruta de `eventos.jsonl` dentro de `ROOT_HOME`.
@@ -126,6 +131,61 @@ pub fn evento_gate(corrida: &str, fase: &str, extra: serde_json::Map<String, Val
     ev.fase = fase.into();
     ev.extra = extra;
     ev
+}
+
+/// Corrida de los costos manuales de API. Agrupa lo que no pasó por una corrida de Root.
+pub const CORRIDA_COSTO_MANUAL: &str = "manual";
+
+/// Evento `Llamada` de API con un costo que Root no vio (decisión 46). `usd` debe ser finito y mayor
+/// que 0. `fecha` es `AAAA-MM-DD` (12:00 locales de ese día) o RFC 3339; sin ella vale `ahora`.
+pub fn evento_costo_manual(
+    usd: f64,
+    motivo: &str,
+    fecha: Option<&str>,
+    ahora: f64,
+    offset_s: i32,
+) -> Result<Evento, Error> {
+    if !usd.is_finite() || usd <= 0.0 {
+        return Err(Error::Uso(format!(
+            "--usd debe ser un número finito mayor que 0, no {usd}"
+        )));
+    }
+    if motivo.trim().is_empty() {
+        return Err(Error::Uso("--motivo no puede estar vacío".into()));
+    }
+    let ts = match fecha {
+        Some(texto) => ts_de_fecha(texto, offset_s)?,
+        None => ahora,
+    };
+    Ok(Evento {
+        ts,
+        iso: uso::iso(ts, 0),
+        corrida: CORRIDA_COSTO_MANUAL.into(),
+        tipo: TipoEvento::Llamada,
+        via: Some(Via::Api),
+        cost_usd: usd,
+        extra: Map::from_iter([
+            ("manual".to_string(), json!(true)),
+            ("motivo".to_string(), json!(motivo)),
+        ]),
+        ..Evento::default()
+    })
+}
+
+/// Epoch de una fecha. `AAAA-MM-DD` vale las 12:00 locales de ese día (`offset_s`); RFC 3339, su instante.
+fn ts_de_fecha(texto: &str, offset_s: i32) -> Result<f64, Error> {
+    let error = || Error::Uso(format!("--fecha no es una fecha ISO: {texto}"));
+    let formato =
+        format_description::parse_borrowed::<2>("[year]-[month]-[day]").map_err(|_| error())?;
+    if let Ok(dia) = Date::parse(texto, &formato) {
+        let desfase = UtcOffset::from_whole_seconds(offset_s).unwrap_or(UtcOffset::UTC);
+        let mediodia = Time::from_hms(12, 0, 0).map_err(|_| error())?;
+        return Ok(PrimitiveDateTime::new(dia, mediodia)
+            .assume_offset(desfase)
+            .unix_timestamp() as f64);
+    }
+    let instante = OffsetDateTime::parse(texto, &Rfc3339).map_err(|_| error())?;
+    Ok(instante.unix_timestamp() as f64 + f64::from(instante.nanosecond()) / 1e9)
 }
 
 /// Hora actual: segundos desde la época con decimales, y texto RFC 3339 en UTC.
@@ -304,6 +364,66 @@ mod tests {
         assert_eq!(ev.extra["detalle"], "ajusta el plan");
         assert!(ev.ts > 0.0);
         assert!(!ev.iso.is_empty());
+    }
+
+    /// 2026-10-31T12:00:00Z.
+    const OCTUBRE_UTC: f64 = 1_793_448_000.0;
+
+    #[test]
+    fn observe_costo_manual_con_fecha_iso_cae_a_mediodia_local() {
+        // 2026-10-29 12:00 con desfase UTC-3 es 15:00Z.
+        let ev = evento_costo_manual(0.5, "x", Some("2026-10-29"), OCTUBRE_UTC, -10_800)
+            .expect("registra");
+        assert_eq!(ev.ts, 1_793_286_000.0);
+    }
+
+    #[test]
+    fn observe_costo_manual_con_rfc3339_usa_ese_instante() {
+        // 2026-10-29T08:00 con desfase UTC-3 es 11:00Z.
+        let ev = evento_costo_manual(0.5, "x", Some("2026-10-29T08:00:00-03:00"), OCTUBRE_UTC, 0)
+            .expect("registra");
+        assert_eq!(ev.ts, 1_793_271_600.0);
+    }
+
+    #[test]
+    fn observe_costo_manual_sin_fecha_vale_la_hora_actual() {
+        let ev = evento_costo_manual(0.5, "x", None, OCTUBRE_UTC, 0).expect("registra");
+        assert_eq!(ev.ts, OCTUBRE_UTC);
+    }
+
+    #[test]
+    fn observe_costo_manual_es_llamada_de_api_con_marca_y_motivo() {
+        let ev =
+            evento_costo_manual(0.5, "juez de memora", None, OCTUBRE_UTC, 0).expect("registra");
+        assert_eq!(ev.tipo, TipoEvento::Llamada);
+        assert_eq!(ev.via, Some(Via::Api));
+        assert_eq!(ev.cost_usd, 0.5);
+        assert_eq!(ev.extra["manual"], true);
+        assert_eq!(ev.extra["motivo"], "juez de memora");
+    }
+
+    #[test]
+    fn observe_costo_manual_usd_no_finito_o_no_positivo_es_uso() {
+        for usd in [-1.0, 0.0, f64::NAN, f64::INFINITY] {
+            let error =
+                evento_costo_manual(usd, "x", None, OCTUBRE_UTC, 0).expect_err("usd inválido");
+            assert_eq!(error.codigo_de_salida(), 2, "usd {usd}");
+        }
+    }
+
+    #[test]
+    fn observe_costo_manual_fecha_que_no_parsea_es_uso() {
+        for fecha in ["29/10/2026", "2026-13-01", "ayer"] {
+            let error = evento_costo_manual(0.5, "x", Some(fecha), OCTUBRE_UTC, 0)
+                .expect_err("fecha inválida");
+            assert_eq!(error.codigo_de_salida(), 2, "fecha {fecha}");
+        }
+    }
+
+    #[test]
+    fn observe_costo_manual_motivo_vacio_es_uso() {
+        let error = evento_costo_manual(0.5, "  ", None, OCTUBRE_UTC, 0).expect_err("motivo vacío");
+        assert_eq!(error.codigo_de_salida(), 2);
     }
 
     #[test]

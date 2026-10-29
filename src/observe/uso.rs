@@ -184,24 +184,45 @@ pub fn estado(ahora: f64) -> Result<UsoMargenes, Error> {
     let margenes = margenes(&uso, &cfg.balance, ahora, offset);
     let mes = inicio_mes(ahora, offset);
     for tope in topes_sin_gate(&eventos, &margenes, uso.cupo_bloque_inicio, mes) {
-        let m = match tope {
-            "cupo" => &margenes.cupo,
-            "api" => &margenes.api,
-            _ => &margenes.nube,
-        };
-        let extra = Map::from_iter([
-            ("tope".to_string(), json!(tope)),
-            ("usado".to_string(), json!(m.usado_usd)),
-            ("tope_usd".to_string(), json!(m.tope_usd)),
-        ]);
-        observe::registrar(&observe::evento_gate("uso", "tope-lleno", extra))
-            .map_err(ErrorObserve::from)?;
+        registrar_gate_tope(tope, &margenes)?;
     }
     Ok(UsoMargenes {
         uso,
         margenes,
         aviso: AVISO_NUBE_NO_REGISTRADA.into(),
     })
+}
+
+/// Tras registrar sesiones en la nube: si el tope de nube del mes está lleno y no tiene `Gate`
+/// en ese mes, lo registra. Los topes de cupo y de API no se tocan.
+pub fn gate_nube_si_lleno(ahora: f64) -> Result<(), Error> {
+    let cfg = Config::cargar(&root_home().join("root.toml"))?;
+    let offset = offset_local();
+    let eventos = leer_eventos(&ruta_eventos())?;
+    let uso = calcular_uso(&eventos, ahora, offset, cfg.balance.cupo.bloque_horas);
+    let margenes = margenes(&uso, &cfg.balance, ahora, offset);
+    let mes = inicio_mes(ahora, offset);
+    if topes_sin_gate(&eventos, &margenes, uso.cupo_bloque_inicio, mes).contains(&"nube") {
+        registrar_gate_tope("nube", &margenes)?;
+    }
+    Ok(())
+}
+
+/// Registra el `Gate` `tope-lleno` de un tope, con su gasto y su límite.
+fn registrar_gate_tope(tope: &str, margenes: &Margenes) -> Result<(), Error> {
+    let m = match tope {
+        "cupo" => &margenes.cupo,
+        "api" => &margenes.api,
+        _ => &margenes.nube,
+    };
+    let extra = Map::from_iter([
+        ("tope".to_string(), json!(tope)),
+        ("usado".to_string(), json!(m.usado_usd)),
+        ("tope_usd".to_string(), json!(m.tope_usd)),
+    ]);
+    observe::registrar(&observe::evento_gate("uso", "tope-lleno", extra))
+        .map_err(ErrorObserve::from)?;
+    Ok(())
 }
 
 /// Topes llenos que no tienen un `Gate` `tope-lleno` dentro de su período.

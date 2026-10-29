@@ -217,6 +217,17 @@ pub enum ObservaAccion {
     },
     /// Muestra el gasto y el margen de cada tope.
     Uso,
+    /// Registra un costo de API que Root no vio, con su motivo (decisión 46).
+    Costo {
+        /// Monto en USD. Debe ser finito y mayor que 0.
+        #[arg(long, allow_negative_numbers = true)]
+        usd: f64,
+        #[arg(long)]
+        motivo: String,
+        /// Fecha: `AAAA-MM-DD` (12:00 locales) o RFC 3339. Sin ella, vale la hora actual.
+        #[arg(long)]
+        fecha: Option<String>,
+    },
     /// Registra un evento manual de la corrida.
     Evento {
         #[arg(long)]
@@ -302,6 +313,7 @@ impl Comando {
             Comando::Observa { accion } => match accion {
                 ObservaAccion::Claude { .. } => "observa claude",
                 ObservaAccion::Uso => "observa uso",
+                ObservaAccion::Costo { .. } => "observa costo",
                 ObservaAccion::Evento { .. } => "observa evento",
                 ObservaAccion::Resumen { .. } => "observa resumen",
             },

@@ -84,6 +84,7 @@ pub fn llama(
 }
 
 /// Rutea y llama. Sin vía API, tope o precio, no hay llamada: sale `Err`.
+/// Con el tope de API lleno, un rol de API que cae al cupo sale como tope (B9).
 /// Los errores del proveedor llegan como `Error::Proveedor`, y un tope como `Error::Tope`.
 /// La usan `r00t llama` y `root_llama`.
 pub fn llamar_con_chequeo(
@@ -107,6 +108,9 @@ pub fn llamar_con_chequeo(
     };
     let eleccion = elegir_o_gate(&pedido, &pol, &gasto, &cfg, ahora, offset, corrida)?;
     if eleccion.via == Via::Cupo {
+        if let Some(error) = rechazo_api_llena(&pedido, &gasto, &cfg, ahora, offset, corrida) {
+            return Err(error);
+        }
         return Err(Error::Uso(
             "este rol va por cupo: lo corre `claude -p`, no `r00t llama`".into(),
         ));
@@ -118,6 +122,38 @@ pub fn llamar_con_chequeo(
         fase: "llama".into(),
     };
     proveedores::llamar(&eleccion, &prompt, corrida).map_err(de_proveedor)
+}
+
+/// Con el tope de API del mes lleno, un rol que va por API (delega, verifica, juzga) no tiene
+/// otra vía en `r00t llama`: registra un `Gate` de presupuesto y da el error de tope (B9).
+/// Los demás roles y los topes con margen devuelven `None`.
+fn rechazo_api_llena(
+    pedido: &Pedido,
+    gasto: &Uso,
+    cfg: &Config,
+    ahora: f64,
+    offset: i32,
+    corrida: &str,
+) -> Option<Error> {
+    let tope = cfg.balance.api.tope_usd;
+    let api_llena = gasto.api_mes_usd >= tope;
+    if !api_llena || !matches!(pedido.rol, Rol::Delega | Rol::Verifica | Rol::Juzga) {
+        return None;
+    }
+    let reabre = uso::iso(route::proximo_mes(ahora, offset), offset);
+    let usado = gasto.api_mes_usd;
+    let extra = Map::from_iter([
+        ("motivo".to_string(), json!("tope de API del mes lleno")),
+        ("usado".to_string(), json!(usado)),
+        ("tope_usd".to_string(), json!(tope)),
+        ("reabre".to_string(), json!(reabre)),
+        ("rol".to_string(), json!(nombre_rol(pedido.rol))),
+        ("tipo".to_string(), json!(pedido.tipo)),
+    ]);
+    let mensaje = format!(
+        "sin presupuesto: el tope de API del mes está lleno ({usado:.2} de {tope:.2} USD); reabre {reabre}"
+    );
+    Some(gate_y_error(corrida, "presupuesto", extra, mensaje))
 }
 
 /// Un tope sale como `Error::Tope`, con el mismo código 3 que el chequeo que vivía aquí.

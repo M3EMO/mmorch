@@ -655,7 +655,22 @@ fn observa(json: bool, accion: &ObservaAccion) -> Result<(), Error> {
             for ev in &eventos {
                 observe::registrar(ev).map_err(observe::ErrorObserve::from)?;
             }
+            if via == Some(Via::Nube) {
+                observe::uso::gate_nube_si_lleno(observe::ahora().0)?;
+            }
             imprimir_claude(json, eventos.len(), via);
+        }
+        ObservaAccion::Costo { usd, motivo, fecha } => {
+            let ahora = observe::ahora().0;
+            let offset = observe::uso::offset_local();
+            let evento =
+                observe::evento_costo_manual(*usd, motivo, fecha.as_deref(), ahora, offset)?;
+            observe::registrar(&evento).map_err(observe::ErrorObserve::from)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&evento)?);
+            } else {
+                println!("Registrado un costo de API de {usd} USD: {motivo}");
+            }
         }
         ObservaAccion::Uso => {
             let estado = observe::uso::estado(observe::ahora().0)?;

@@ -310,3 +310,72 @@ fn llama_cli_log_ilegible_no_envia_nada() {
     assert_eq!(codigo(&salida), 3);
     assert_eq!(srv.peticiones(), 0);
 }
+
+/// `r00t llama` con un rol dado y el prompt de prueba.
+fn llama_con_rol(home: &Path, rol: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_r00t"))
+        .env("ROOT_HOME", home)
+        .env("DEEPSEEK_API_KEY", CLAVE)
+        .env_remove("ANTHROPIC_API_KEY")
+        .args([
+            "llama",
+            "--rol",
+            rol,
+            "--tipo",
+            "diseno",
+            "--corrida",
+            "c1",
+            "--prompt-file",
+        ])
+        .arg(home.join("prompt.txt"))
+        .output()
+        .expect("no se pudo ejecutar el binario root")
+}
+
+#[test]
+fn llama_cli_roles_de_api_con_tope_de_api_lleno_registran_gate_y_salen_con_3() {
+    for rol in ["delega", "verifica", "juzga"] {
+        let srv = Servidor::arranca(vec![(200, DEEPSEEK_OK)]);
+        let home = tempfile::tempdir().expect("home");
+        preparar(home.path(), &srv.url, "");
+        gasto_api(home.path(), 100.0);
+
+        let salida = llama_con_rol(home.path(), rol);
+
+        assert_eq!(codigo(&salida), 3, "rol {rol}");
+        assert_eq!(srv.peticiones(), 0, "rol {rol} no debe enviar");
+        let stderr = String::from_utf8_lossy(&salida.stderr);
+        assert!(
+            stderr.contains("tope de API"),
+            "rol {rol}, stderr: {stderr}"
+        );
+        let gates: Vec<Evento> = eventos(home.path())
+            .into_iter()
+            .filter(|ev| ev.tipo == TipoEvento::Gate && ev.fase == "presupuesto")
+            .collect();
+        assert_eq!(
+            gates.len(),
+            1,
+            "rol {rol} debe registrar un Gate de presupuesto"
+        );
+    }
+}
+
+#[test]
+fn llama_cli_planifica_con_tope_de_api_lleno_sigue_con_codigo_2() {
+    let srv = Servidor::arranca(vec![]);
+    let home = tempfile::tempdir().expect("home");
+    preparar(home.path(), &srv.url, "");
+    gasto_api(home.path(), 100.0);
+
+    let salida = llama_con_rol(home.path(), "planifica");
+
+    assert_eq!(codigo(&salida), 2);
+    let stderr = String::from_utf8_lossy(&salida.stderr);
+    assert!(stderr.contains("va por cupo"), "stderr: {stderr}");
+    assert!(
+        eventos(home.path())
+            .iter()
+            .all(|ev| ev.tipo != TipoEvento::Gate)
+    );
+}

@@ -65,6 +65,7 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t observa evento --corrida <id> --tipo <humano\|plan-aprobado\|gate> [--detalle txt]` | Registra un evento manual de la corrida. | evento registrado | construido |
 | `r00t observa resumen --corrida <id>` | Resume una corrida. | `Resumen` | construido |
 | `r00t observa uso` | Muestra el gasto y el margen de cada tope. | margen por tope | construido |
+| `r00t observa costo --usd <n> --motivo <texto> [--fecha <iso>]` | Registra un costo de API que Root no vio (decisión 46). `--usd` debe ser finito y mayor que 0. `--fecha` es `AAAA-MM-DD` (12:00 locales) o RFC 3339; sin él, vale la hora actual. | evento `Llamada` registrado | construido |
 | `r00t track agregar --fila <archivo.json>` | Agrega una fila a `runs.jsonl`. | `{agregada}` | construido |
 | `r00t track listar [--tarea t]` | Lista las filas, opcionalmente de una tarea. | lista de `Fila` | construido |
 | `r00t track comparar --a <c1> --b <c2> --tarea <t>` | Compara dos corridas de una tarea. | comparación | construido |

@@ -7,7 +7,7 @@ pub use politica::{Candidato, Politica};
 
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
-use crate::config::{Config, ModeloApi};
+use crate::config::{Config, ModeloApi, Precio};
 use crate::tipos::{Eleccion, Pedido, Proveedor, Rol, SinPresupuesto, Uso, Via};
 
 /// Inicio del próximo mes calendario después de `ahora`, en epoch segundos.
@@ -88,6 +88,11 @@ pub fn elegir(
     let api_ok = uso.api_mes_usd < cfg.balance.api.tope_usd;
     let cupo = estado_cupo(uso, cfg, ahora);
     let mut elegida = opcion_base(p, pol, cfg);
+    let cupo = if elegida.via == Via::Cupo {
+        cupo_para_pedido(cupo, p, cfg, &elegida.modelo, ahora)
+    } else {
+        cupo
+    };
 
     // Preferencia: con el cupo sobre `prefiere_api_sobre`, pasa a la API si hay margen y equivalente.
     let preferir_api = elegida.via == Via::Cupo
@@ -228,6 +233,29 @@ fn estado_cupo(uso: &Uso, cfg: &Config, ahora: f64) -> Cupo {
         tope,
         lleno: !vencido && fin.is_some() && usd >= tope,
         fin,
+    }
+}
+
+/// Costo en USD de un pedido de `tokens` de entrada y `tokens` de salida, al precio dado.
+fn costo_de_tokens(precio: &Precio, tokens: u32) -> f64 {
+    f64::from(tokens) * (precio.usd_entrada + precio.usd_salida) / 1_000_000.0
+}
+
+/// Cupo para un pedido (M2). Si el gasto del bloque más el costo estimado del pedido pasa el tope,
+/// el cupo cuenta como lleno para ese pedido. Sin precio para el equivalente, no hay estimación.
+fn cupo_para_pedido(cupo: Cupo, p: &Pedido, cfg: &Config, alias: &str, ahora: f64) -> Cupo {
+    let Some(precio) = equivalente(cfg, alias).and_then(|eq| cfg.precios.get(&eq.modelo)) else {
+        return cupo;
+    };
+    if cupo.usd + costo_de_tokens(precio, p.tokens_estimados) <= cupo.tope {
+        return cupo;
+    }
+    // El bloque del pedido empieza ahora si no hay uno vigente: así el reabre queda en el futuro.
+    let dur = f64::from(cfg.balance.cupo.bloque_horas) * 3600.0;
+    Cupo {
+        lleno: true,
+        fin: Some(cupo.fin.filter(|fin| *fin > ahora).unwrap_or(ahora + dur)),
+        ..cupo
     }
 }
 
@@ -760,6 +788,85 @@ mod tests {
         assert_eq!(Politica::clave(Rol::Verifica, "bulk"), "verifica:bulk");
         assert_eq!(Politica::clave(Rol::Planifica, "tests"), "planifica:tests");
         assert_eq!(Politica::default().v, 1);
+    }
+
+    fn pedido_con_tokens(rol: Rol, tokens: u32) -> Pedido {
+        Pedido {
+            tokens_estimados: tokens,
+            ..pedido(rol, false)
+        }
+    }
+
+    /// Config con el precio de Opus (alias `opus` de cupo): 15 USD de entrada y 75 de salida por millón.
+    /// Prefiere la API solo al tope lleno, para aislar el chequeo del pedido.
+    fn cfg_con_precio_de_opus() -> Config {
+        Config::desde_texto(
+            "[balance]\nprefiere_api_sobre = 1.0\n\n[precios.claude-opus-5-5]\nusd_entrada = 15.0\nusd_salida = 75.0\n",
+        )
+        .expect("debe parsear")
+    }
+
+    #[test]
+    fn route_pedido_grande_con_cupo_casi_lleno_pasa_a_api() {
+        // 1 millón de tokens de entrada y de salida cuestan 90 USD: 34,99 + 90 pasan el tope de 35.
+        let e = elegir_en(
+            &pedido_con_tokens(Rol::Planifica, 1_000_000),
+            &Politica::default(),
+            &uso(34.99, bloque_vigente(), 10.0),
+            &cfg_con_precio_de_opus(),
+        )
+        .expect("hay margen en la API");
+        assert_eq!(e.via, Via::Api);
+        assert_eq!(e.modelo.as_deref(), Some("claude-opus-5-5"));
+    }
+
+    #[test]
+    fn route_pedido_chico_con_cupo_casi_lleno_sigue_en_cupo() {
+        // 100 tokens cuestan 0,009 USD: 34,99 + 0,009 no pasan el tope.
+        let e = elegir_en(
+            &pedido_con_tokens(Rol::Planifica, 100),
+            &Politica::default(),
+            &uso(34.99, bloque_vigente(), 10.0),
+            &cfg_con_precio_de_opus(),
+        )
+        .expect("sigue en cupo");
+        assert_eq!(e.via, Via::Cupo);
+    }
+
+    #[test]
+    fn route_sin_precio_del_equivalente_no_estima_y_sigue_en_cupo() {
+        let cfg =
+            Config::desde_texto("[balance]\nprefiere_api_sobre = 1.0\n").expect("debe parsear");
+        let e = elegir_en(
+            &pedido_con_tokens(Rol::Planifica, 1_000_000),
+            &Politica::default(),
+            &uso(34.99, bloque_vigente(), 10.0),
+            &cfg,
+        )
+        .expect("sigue en cupo");
+        assert_eq!(e.via, Via::Cupo);
+    }
+
+    #[test]
+    fn route_pedido_que_pasa_el_cupo_con_api_llena_no_reabre_en_el_pasado() {
+        // El bloque venció hace seis horas. El pedido no entra y la API del mes está llena.
+        let err = elegir_en(
+            &pedido_con_tokens(Rol::Planifica, 1_000_000),
+            &Politica::default(),
+            &uso(0.0, Some(AHORA - 6.0 * HORA), 100.0),
+            &cfg_con_precio_de_opus(),
+        )
+        .expect_err("cupo y API sin margen");
+        assert!(err.reabre > AHORA, "reabre {} debe ser futuro", err.reabre);
+    }
+
+    #[test]
+    fn route_costo_de_tokens_suma_entrada_y_salida() {
+        let precio = crate::config::Precio {
+            usd_entrada: 15.0,
+            usd_salida: 75.0,
+        };
+        assert_eq!(costo_de_tokens(&precio, 1_000_000), 90.0);
     }
 
     #[test]
