@@ -170,6 +170,7 @@ fn opciones(home: &Path) -> OpcionesOraculo {
     OpcionesOraculo {
         timeout: LIMITE,
         home: Some(home.to_path_buf()),
+        partes: None,
     }
 }
 
@@ -200,6 +201,19 @@ fn temporales_en(dir: &Path) -> Vec<String> {
     nombres
 }
 
+/// Guarda la revisión del juez para el spec de la tarea, sin ambigüedades: así `evaluar` no da el
+/// aviso de "ficha sin revisión del juez" (Tarea 30).
+fn guardar_revision_del_juez(home: &Path) {
+    let revision = root::ficha::Revision {
+        hallazgos: Vec::new(),
+        ambiguedades: Vec::new(),
+        juez: "ok".into(),
+        descartadas: Vec::new(),
+    };
+    root::ficha::guardar_revision(home, SPEC_CON_FICHA, &revision)
+        .expect("guarda la revisión del juez");
+}
+
 fn poner_mtime(ruta: &Path, cuando: SystemTime) {
     fs::File::open(ruta)
         .expect("abre la carpeta")
@@ -221,7 +235,7 @@ fn root_cli_env(root_home: &Path, env: &[(&str, &str)], args: &[&str]) -> Output
 }
 
 #[test]
-fn oraculo_todo_pasa_sin_requisitos_da_conteos_completos_y_rojo() {
+fn oraculo_todo_pasa_sin_requisitos_da_conteos_completos_y_sin_veredicto() {
     root::saltar_sin_podman!();
     let _g = preparar();
     let (_dir, tarea) = tarea_con(
@@ -233,14 +247,14 @@ fn oraculo_todo_pasa_sin_requisitos_da_conteos_completos_y_rojo() {
     let v: Veredicto = evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa");
     assert_eq!(v.contrato, Conteo { pasa: 2, total: 2 });
     assert_eq!(v.oculto, Conteo { pasa: 2, total: 2 });
-    // Sin requisitos, la completitud no tiene veredicto: la decisión es no listo, y el estado, rojo.
-    assert_eq!(v.estado, Estado::Rojo);
+    // decisión 48: Seguridad sin sondas para shell y Completitud sin requisitos no tienen veredicto → SinDecision, código 3.
+    assert_eq!(v.estado, Estado::SinVeredicto);
     assert_eq!(v.tarea, "tarea-prueba");
     assert_eq!(v.global, None);
 }
 
 #[test]
-fn oraculo_una_falla_en_oculto_da_rojo() {
+fn oraculo_una_falla_en_oculto_cuenta_y_da_sin_veredicto() {
     root::saltar_sin_podman!();
     let _g = preparar();
     let (_dir, tarea) = tarea_con(
@@ -251,7 +265,8 @@ fn oraculo_una_falla_en_oculto_da_rojo() {
     let home = tempfile::tempdir().expect("home");
     let v = evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa");
     assert_eq!(v.oculto, Conteo { pasa: 1, total: 2 });
-    assert_eq!(v.estado, Estado::Rojo);
+    // decisión 48: Seguridad sin sondas para shell y Completitud sin requisitos no tienen veredicto → SinDecision, código 3.
+    assert_eq!(v.estado, Estado::SinVeredicto);
 }
 
 #[test]
@@ -327,21 +342,22 @@ fn oraculo_cli_evaluar_json_imprime_veredicto() {
             repo.path().to_str().expect("ruta UTF-8"),
         ],
     );
+    // decisión 48: Seguridad sin sondas para shell y Completitud sin requisitos no tienen veredicto → SinDecision, código 3.
     assert_eq!(
         salida.status.code(),
-        Some(1),
-        "sin requisitos no hay listo: rojo sale con 1"
+        Some(3),
+        "sin requisitos no hay veredicto: sale con 3"
     );
     let json: serde_json::Value =
         serde_json::from_slice(&salida.stdout).expect("stdout es un objeto JSON");
     assert_eq!(json["contrato"]["pasa"], 2);
     assert_eq!(json["contrato"]["total"], 2);
     assert_eq!(json["oculto"]["total"], 2);
-    assert_eq!(json["estado"], "rojo");
+    assert_eq!(json["estado"], "sin_veredicto");
 }
 
 #[test]
-fn oraculo_cli_evaluar_sin_json_imprime_una_linea_y_sale_con_1_si_hay_rojo() {
+fn oraculo_cli_evaluar_sin_json_imprime_una_linea_y_sale_con_3_sin_decision() {
     root::saltar_sin_podman!();
     let _g = preparar();
     let home = tempfile::tempdir().expect("temp dir");
@@ -365,11 +381,14 @@ fn oraculo_cli_evaluar_sin_json_imprime_una_linea_y_sale_con_1_si_hay_rojo() {
             &ruta,
         ],
     );
-    assert_eq!(salida.status.code(), Some(1));
+    // decisión 48: Seguridad sin sondas para shell y Completitud sin requisitos no tienen veredicto → SinDecision, código 3.
+    assert_eq!(salida.status.code(), Some(3));
     let stdout = String::from_utf8_lossy(&salida.stdout);
     assert_eq!(
         stdout.trim_end(),
-        format!("{ruta}: contrato 2/2, oculto 1/2, estado rojo, repeticiones 1, inestables 0")
+        format!(
+            "{ruta}: contrato 2/2, oculto 1/2, estado sin_veredicto, repeticiones 1, inestables 0"
+        )
     );
 }
 
@@ -384,7 +403,12 @@ fn inestable_tres_repeticiones_marca_el_test_que_alterna() {
     assert_eq!(v.repeticiones, 3);
     assert_eq!(v.inestables, vec!["test_f::t_flaky".to_string()]);
     assert_eq!(v.oculto, Conteo { pasa: 1, total: 2 });
-    assert_eq!(v.estado, Estado::Rojo, "un inestable no pasa: rojo");
+    // decisión 48: Seguridad sin sondas para shell y Completitud sin requisitos no tienen veredicto → SinDecision, código 3.
+    assert_eq!(
+        v.estado,
+        Estado::SinVeredicto,
+        "un inestable no pasa; sin requisitos no hay veredicto"
+    );
 }
 
 #[test]
@@ -421,9 +445,10 @@ fn inestable_exclusion_oraculo_dudoso_saca_al_test_de_los_inestables() {
     assert!(v.inestables.is_empty());
     assert!(v.tasas.is_empty());
     assert_eq!(v.oculto, Conteo { pasa: 1, total: 1 });
+    // decisión 48: Seguridad sin sondas para shell y Completitud sin requisitos no tienen veredicto → SinDecision, código 3.
     assert_eq!(
         v.estado,
-        Estado::Rojo,
+        Estado::SinVeredicto,
         "sin requisitos, la completitud no tiene veredicto"
     );
 }
@@ -455,7 +480,8 @@ fn inestable_contrato_figura_y_no_completa_el_contrato() {
     );
     assert!(v.inestables.is_empty(), "el oculto no tiene inestables");
     assert!(v.tasas.contains_key("contrato:test_f::t_flaky"));
-    assert_eq!(v.estado, Estado::Rojo);
+    // decisión 48: Seguridad sin sondas para shell y Completitud sin requisitos no tienen veredicto → SinDecision, código 3.
+    assert_eq!(v.estado, Estado::SinVeredicto);
 }
 
 #[test]
@@ -554,7 +580,12 @@ fn repeticiones_cli_json_imprime_repeticiones_e_inestables() {
             repo.path().to_str().expect("ruta UTF-8"),
         ],
     );
-    assert_eq!(salida.status.code(), Some(1), "inestable deja rojo");
+    // decisión 48: Seguridad sin sondas para shell y Completitud sin requisitos no tienen veredicto → SinDecision, código 3.
+    assert_eq!(
+        salida.status.code(),
+        Some(3),
+        "inestable sin requisitos: sin veredicto, sale con 3"
+    );
     let json: serde_json::Value =
         serde_json::from_slice(&salida.stdout).expect("stdout es un objeto JSON");
     assert_eq!(json["repeticiones"], 3);
@@ -593,10 +624,11 @@ fn temporales_evaluar_con_tmpdir_inexistente_usa_root_home() {
             &ruta,
         ],
     );
+    // decisión 48: Seguridad sin sondas para shell y Completitud sin requisitos no tienen veredicto → SinDecision, código 3.
     assert_eq!(
         salida.status.code(),
-        Some(1),
-        "sin requisitos no hay listo: rojo sale con 1"
+        Some(3),
+        "sin requisitos no hay veredicto: sale con 3"
     );
     let json: serde_json::Value =
         serde_json::from_slice(&salida.stdout).expect("stdout es un objeto JSON");
@@ -697,9 +729,10 @@ fn pendiente_entorno_lista_el_test_y_no_cuenta() {
     assert_eq!(v.pendientes[0].test, "test_o::o2");
     assert_eq!(v.pendientes[0].motivo, "lavapipe no emula la GPU");
     assert_eq!(v.pendientes[0].colab, None);
+    // decisión 48: Seguridad sin sondas para shell y Completitud sin requisitos no tienen veredicto → SinDecision, código 3.
     assert_eq!(
         v.estado,
-        Estado::Rojo,
+        Estado::SinVeredicto,
         "sin requisitos, la completitud no tiene veredicto"
     );
 }
@@ -912,6 +945,118 @@ fn pendiente_importar_guarda_colab_y_evento_gate() {
 }
 
 #[test]
+fn pendiente_importar_dos_junit_por_repeticion_deja_inestable() {
+    let home = tempfile::tempdir().expect("home");
+    tarea_con_pendiente(home.path(), ENTORNO_O2);
+    let repo = repo_con_contenido();
+    let ruta = repo.path().to_str().expect("ruta UTF-8").to_string();
+    let uno = home.path().join("pendientes-1.xml");
+    let dos = home.path().join("pendientes-2.xml");
+    fs::write(
+        &uno,
+        r#"<testsuite><testcase classname="tests.test_o" name="o2"/></testsuite>"#,
+    )
+    .expect("escribe");
+    fs::write(
+        &dos,
+        r#"<testsuite><testcase classname="tests.test_o" name="o2"><failure message="x"/></testcase></testsuite>"#,
+    )
+    .expect("escribe");
+    let ruta_uno = uno.to_str().expect("ruta UTF-8").to_string();
+    let ruta_dos = dos.to_str().expect("ruta UTF-8").to_string();
+
+    let salida = root_cli(
+        home.path(),
+        &[
+            "oraculo",
+            "pendientes",
+            "--tarea",
+            "tarea-prueba",
+            "--repo",
+            &ruta,
+            "--importar",
+            &ruta_uno,
+            &ruta_dos,
+        ],
+    );
+    assert_eq!(
+        salida.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let colab: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(home.path().join("evidencia/tarea-prueba/colab.json"))
+            .expect("colab.json"),
+    )
+    .expect("colab.json es JSON");
+    assert_eq!(colab["test_o::o2"]["resultado"], "inestable");
+    assert_eq!(colab["test_o::o2"]["tasa"]["pasa"], 1);
+    assert_eq!(colab["test_o::o2"]["tasa"]["total"], 2);
+}
+
+#[test]
+fn pendiente_con_turno_ocupado_sale_3_y_nombra_al_dueno() {
+    let home = tempfile::tempdir().expect("home");
+    let dir = tarea_con_pendiente(home.path(), ENTORNO_O2);
+    fs::write(dir.join("oculto/test_o.py"), "def test_o2(): pass\n").expect("escribe");
+    let repo = repo_con_contenido();
+    let ruta = repo.path().to_str().expect("ruta UTF-8").to_string();
+    // Otra corrida de la misma tarea tiene el turno: esta sale antes de tocar el paquete.
+    let turno =
+        root::oracle::pendientes::tomar_turno(home.path(), "tarea-prueba").expect("toma el turno");
+
+    let salida = root_cli(
+        home.path(),
+        &[
+            "oraculo",
+            "pendientes",
+            "--tarea",
+            "tarea-prueba",
+            "--repo",
+            &ruta,
+        ],
+    );
+    assert_eq!(salida.status.code(), Some(3));
+    let error = String::from_utf8_lossy(&salida.stderr);
+    assert!(
+        error.contains(&format!("pid {}", std::process::id())),
+        "nombra al dueño: {error}"
+    );
+    assert!(
+        !home
+            .path()
+            .join("oraculos/tarea-prueba/pendientes")
+            .exists(),
+        "no arma el paquete mientras otra corrida lo tiene"
+    );
+
+    drop(turno);
+    let salida = root_cli(
+        home.path(),
+        &[
+            "oraculo",
+            "pendientes",
+            "--tarea",
+            "tarea-prueba",
+            "--repo",
+            &ruta,
+        ],
+    );
+    assert_eq!(
+        salida.status.code(),
+        Some(0),
+        "sin turno ocupado, la corrida sigue: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    assert!(
+        home.path()
+            .join("oraculos/tarea-prueba/pendientes")
+            .is_dir()
+    );
+}
+
+#[test]
 fn pendiente_importar_junit_malformado_o_faltante_sale_3() {
     let home = tempfile::tempdir().expect("home");
     tarea_con_pendiente(home.path(), ENTORNO_O2);
@@ -951,6 +1096,7 @@ fn pendiente_colab_malformado_no_tumba_evaluar_y_avisa() {
     );
     let repo = repo_con_contenido();
     let home = tempfile::tempdir().expect("home");
+    guardar_revision_del_juez(home.path());
     let carpeta = home.path().join("evidencia").join("tarea-prueba");
     fs::create_dir_all(&carpeta).expect("carpeta de evidencia");
     fs::write(carpeta.join("colab.json"), "{ esto no es JSON").expect("colab.json");
@@ -980,6 +1126,7 @@ fn pendiente_colab_valido_no_da_aviso() {
     );
     let repo = repo_con_contenido();
     let home = tempfile::tempdir().expect("home");
+    guardar_revision_del_juez(home.path());
     let carpeta = home.path().join("evidencia").join("tarea-prueba");
     fs::create_dir_all(&carpeta).expect("carpeta de evidencia");
     let valido = r#"{"test_o::o2": {"resultado": "pasa", "junit_sha256": "abc", "ts": 1.0}}"#;

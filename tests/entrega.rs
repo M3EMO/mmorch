@@ -44,6 +44,7 @@ fn ejecutor(repo: &Path) -> EjecutorContenedor {
         rustsec: None,
         cache: None,
         timeout: LIMITE,
+        home: base_9d2(),
     }
 }
 

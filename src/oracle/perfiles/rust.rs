@@ -128,6 +128,13 @@ pub fn arquitectura_nativa(
         Err(sin) => return sin,
     };
     let modulos: BTreeSet<String> = archivos.iter().filter_map(|a| modulo_de(&a.ruta)).collect();
+    // Un workspace de crates no tiene módulos bajo `src/` de la raíz: sin módulos, no hay análisis.
+    if modulos.is_empty() {
+        return sin_veredicto(
+            Dimension::Arquitectura,
+            "arquitectura: no hay módulos bajo src/ (workspace sin análisis)",
+        );
+    }
     let aristas = aristas_entre_modulos(&archivos, &modulos);
     let mut adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (origen, destino) in aristas.keys() {
@@ -780,6 +787,38 @@ mod tests {
         let r = arquitectura_nativa(dir.path(), &[], &[]);
         assert!(r.hallazgos.is_empty());
         assert_eq!(r.valor, Some(1.0));
+    }
+
+    #[test]
+    fn sonda_arquitectura_workspace_sin_modulos_bajo_src_da_sin_veredicto() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(
+            dir.path(),
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/a\"]\n",
+        );
+        escribir(
+            dir.path(),
+            "crates/a/src/lib.rs",
+            "pub fn f() -> u8 { 1 }\n",
+        );
+        let r = arquitectura_nativa(dir.path(), &capas(), &[]);
+        assert_eq!(r.valor, None, "{:?}", r.hallazgos);
+        assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+        assert_eq!(
+            r.motivo.as_deref(),
+            Some("arquitectura: no hay módulos bajo src/ (workspace sin análisis)")
+        );
+    }
+
+    #[test]
+    fn sonda_arquitectura_con_src_a_y_b_sigue_con_veredicto() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), "src/a.rs", "pub fn a() -> u8 { 1 }\n");
+        escribir(dir.path(), "src/b.rs", "pub fn b() -> u8 { 2 }\n");
+        let r = arquitectura_nativa(dir.path(), &[], &[]);
+        assert_eq!(r.valor, Some(1.0), "{:?}", r.motivo);
+        assert_eq!(r.motivo, None);
     }
 
     fn capas() -> Vec<Vec<String>> {

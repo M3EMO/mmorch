@@ -24,6 +24,8 @@ pub const ARCHIVO: &str = "validez.json";
 pub const UMBRAL_RECALL: f32 = 0.8;
 /// Kappa ponderado desde el que una dimensión cumple (decisión 13).
 pub const UMBRAL_KAPPA: f32 = 0.6;
+/// Exactitud de orden desde la que los pares cumplen: todos bien ordenados (desempate 44).
+pub const UMBRAL_ORDEN: f32 = 1.0;
 /// Tolerancia en líneas entre el defecto y el hallazgo (la del gate de evidencia).
 pub const TOLERANCIA_LINEAS: u32 = 3;
 /// Paquetes a ciegas del lote (decisión 13).
@@ -81,7 +83,7 @@ pub struct Kappa {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Validez {
     pub v: u32,
-    /// Fracción de pares de `orden.toml` que Root ordena como el resultado medido. Sin umbral.
+    /// Fracción de pares de `orden.toml` que Root ordena como el resultado medido. Umbral 1,0.
     pub exactitud_orden: Metrica,
     /// Fracción de defectos reales que Root encuentra con `archivo` y `linea` a ±3. Umbral 0,8.
     pub recall: Metrica,
@@ -103,6 +105,21 @@ pub struct Preparado {
     pub paquetes: Vec<String>,
     /// `true` si no hay rúbricas embebidas: el formulario lleva solo la decisión y el orden.
     pub sin_rubricas: bool,
+    /// Rastros de cada paquete: cuántos hay y en qué archivo queda su lista (desempate 45).
+    #[serde(default)]
+    pub rastros: Vec<ResumenRastros>,
+}
+
+/// Resumen de los rastros de un paquete a ciegas. La lista completa está en `casos/ciego/<archivo>`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResumenRastros {
+    pub id: String,
+    /// Nombre de la lista, `rastros-<id>.toml`, dentro de `casos/ciego/`.
+    pub archivo: String,
+    /// Apariciones de `PALABRAS_DE_RASTRO` en los archivos de texto del paquete.
+    pub apariciones: u32,
+    /// Avisos del armado, por ejemplo un `Cargo.toml` que no parsea.
+    pub avisos: u32,
 }
 
 /// Mide la validez de Root con el evaluador de producción (`evaluar_por_nombre`).
@@ -248,12 +265,27 @@ pub fn preparar_ciego_con(
 
     fs::create_dir_all(&ciego).map_err(|e| io_infra("crear casos/ciego", &e))?;
     let mut clave = ArchivoClave::default();
+    let mut resumen = Vec::new();
     let texto_rubricas = texto_formulario_items(rubricas);
     for (id, (fuente, repo)) in ids.iter().zip(&resueltas) {
         let paquete = ciego.join(id);
         fs::create_dir_all(&paquete).map_err(|e| io_infra("crear el paquete", &e))?;
-        copiar_paquete(repo, &paquete.join(CARPETA_REPO))
-            .map_err(|e| io_infra("copiar el repo al paquete", &e))?;
+        let copia = paquete.join(CARPETA_REPO);
+        copiar_paquete(repo, &copia).map_err(|e| io_infra("copiar el repo al paquete", &e))?;
+        let mut rastros = ArchivoRastros::default();
+        revisar_copia(&copia, &copia, &mut rastros)
+            .map_err(|e| io_infra("revisar los rastros del paquete", &e))?;
+        let archivo = format!("rastros-{id}.toml");
+        let texto_rastros = toml::to_string(&rastros)
+            .map_err(|e| ErrorOraculo::Infra(format!("serializar los rastros: {e}")))?;
+        fs::write(ciego.join(&archivo), texto_rastros)
+            .map_err(|e| io_infra("escribir la lista de rastros", &e))?;
+        resumen.push(ResumenRastros {
+            id: id.clone(),
+            archivo,
+            apariciones: rastros.aparicion.len() as u32,
+            avisos: rastros.avisos.len() as u32,
+        });
         let formulario = formulario_texto(id, &texto_rubricas);
         fs::write(paquete.join(ARCHIVO_FORMULARIO), formulario)
             .map_err(|e| io_infra("escribir el formulario", &e))?;
@@ -271,6 +303,7 @@ pub fn preparar_ciego_con(
     Ok(Preparado {
         paquetes: ids,
         sin_rubricas: rubricas.is_empty(),
+        rastros: resumen,
     })
 }
 
@@ -369,12 +402,13 @@ fn posiciones<T: PartialOrd + Copy>(claves: &[T]) -> Vec<f64> {
     salida
 }
 
-/// Cuántas decisiones valen: listo 2, no listo 1, bloqueado 0.
+/// Cuántas decisiones valen: listo 2, no listo 1, bloqueado y sin decisión 0. Sin decisión cuenta como
+/// el peor: un caso sin veredicto cuenta en contra (desempate 41).
 fn rango_decision(decision: Decision) -> u8 {
     match decision {
         Decision::Listo => 2,
         Decision::NoListo => 1,
-        Decision::Bloqueado => 0,
+        Decision::Bloqueado | Decision::SinDecision => 0,
     }
 }
 
@@ -530,7 +564,11 @@ fn medir_orden(
             aciertos += 1;
         }
     }
-    Ok(Metrica::fraccion(aciertos, pares.len() as u32, None))
+    Ok(Metrica::fraccion(
+        aciertos,
+        pares.len() as u32,
+        Some(UMBRAL_ORDEN),
+    ))
 }
 
 fn medir_recall(
@@ -985,6 +1023,144 @@ impl Azar {
     }
 }
 
+/// Palabras que delatan el origen de un paquete: ECC, SDLC y los modelos (desempate 45). Se buscan como
+/// palabra completa y sin distinguir mayúsculas.
+const PALABRAS_DE_RASTRO: [&str; 6] = ["ecc", "sdlc", "claude", "haiku", "sonnet", "opus"];
+
+/// Claves de `[package]` y de `[workspace.package]` que nombran al autor o al repo (desempate 45).
+const CLAVES_DE_AUTOR: [&str; 3] = ["authors", "repository", "homepage"];
+
+/// Lista de rastros de un paquete: `casos/ciego/rastros-<id>.toml`. Vive fuera de la carpeta del paquete.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+struct ArchivoRastros {
+    /// Lo que el armado no pudo revisar del todo, por ejemplo un `Cargo.toml` sin parsear.
+    #[serde(default)]
+    avisos: Vec<String>,
+    #[serde(default)]
+    aparicion: Vec<Aparicion>,
+}
+
+/// Una aparición de una palabra de `PALABRAS_DE_RASTRO` en un archivo copiado.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct Aparicion {
+    /// Ruta relativa a la copia del repo, con `/`.
+    archivo: String,
+    /// Línea 1-based.
+    linea: u32,
+    /// La palabra tal como aparece en el archivo.
+    palabra: String,
+}
+
+/// Revisa `actual` (dentro de la copia `raiz`): limpia los `Cargo.toml` y anota cada rastro de texto.
+/// Los binarios (con bytes nulos o no UTF-8) no se revisan.
+fn revisar_copia(raiz: &Path, actual: &Path, salida: &mut ArchivoRastros) -> io::Result<()> {
+    let mut entradas: Vec<fs::DirEntry> = fs::read_dir(actual)?.collect::<io::Result<_>>()?;
+    entradas.sort_by_key(fs::DirEntry::file_name);
+    for entrada in entradas {
+        let ruta = entrada.path();
+        let tipo = entrada.file_type()?;
+        if tipo.is_dir() {
+            revisar_copia(raiz, &ruta, salida)?;
+            continue;
+        }
+        if !tipo.is_file() {
+            continue;
+        }
+        let relativa = ruta
+            .strip_prefix(raiz)
+            .unwrap_or(&ruta)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let mut bytes = fs::read(&ruta)?;
+        if entrada.file_name() == "Cargo.toml" {
+            match std::str::from_utf8(&bytes).ok().map(limpiar_cargo_toml) {
+                Some(Ok(Some(limpio))) => {
+                    fs::write(&ruta, &limpio)?;
+                    bytes = limpio.into_bytes();
+                }
+                Some(Ok(None)) => {}
+                _ => salida.avisos.push(format!(
+                    "{relativa}: no parsea como TOML; no se borraron authors, repository ni homepage"
+                )),
+            }
+        }
+        if let Some(texto) = texto_de(&bytes) {
+            for (linea, palabra) in buscar_palabras(texto) {
+                salida.aparicion.push(Aparicion {
+                    archivo: relativa.clone(),
+                    linea,
+                    palabra,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// El texto del archivo, o `None` si es binario: tiene bytes nulos o no es UTF-8.
+fn texto_de(bytes: &[u8]) -> Option<&str> {
+    if bytes.contains(&0) {
+        return None;
+    }
+    std::str::from_utf8(bytes).ok()
+}
+
+/// Quita `authors`, `repository` y `homepage` de `[package]` y de `[workspace.package]`. `Ok(None)` si no
+/// quita nada: el archivo queda igual. `Err` si no parsea.
+fn limpiar_cargo_toml(texto: &str) -> Result<Option<String>, String> {
+    let mut tabla: toml::Table = toml::from_str(texto).map_err(|e| e.to_string())?;
+    let mut quito = false;
+    if let Some(paquete) = tabla.get_mut("package").and_then(toml::Value::as_table_mut) {
+        quito |= quitar_claves_de_autor(paquete);
+    }
+    if let Some(paquete) = tabla
+        .get_mut("workspace")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|ws| ws.get_mut("package"))
+        .and_then(toml::Value::as_table_mut)
+    {
+        quito |= quitar_claves_de_autor(paquete);
+    }
+    if !quito {
+        return Ok(None);
+    }
+    toml::to_string(&tabla).map(Some).map_err(|e| e.to_string())
+}
+
+fn quitar_claves_de_autor(tabla: &mut toml::Table) -> bool {
+    let mut quito = false;
+    for clave in CLAVES_DE_AUTOR {
+        quito |= tabla.remove(clave).is_some();
+    }
+    quito
+}
+
+/// Apariciones de `PALABRAS_DE_RASTRO` en `texto`: `(línea 1-based, palabra)`. Una letra o un dígito pegados
+/// a la palabra la descartan: `recclamo` no es `ecc`.
+fn buscar_palabras(texto: &str) -> Vec<(u32, String)> {
+    let mut hallazgos = Vec::new();
+    for (indice, linea) in texto.lines().enumerate() {
+        for (pos, _) in linea.char_indices() {
+            for palabra in PALABRAS_DE_RASTRO {
+                let Some(hallada) = linea.get(pos..pos + palabra.len()) else {
+                    continue;
+                };
+                if !hallada.eq_ignore_ascii_case(palabra) {
+                    continue;
+                }
+                let antes = linea[..pos].chars().next_back();
+                let despues = linea[pos + palabra.len()..].chars().next();
+                if antes.is_none_or(|c| !c.is_alphanumeric())
+                    && despues.is_none_or(|c| !c.is_alphanumeric())
+                {
+                    hallazgos.push((indice as u32 + 1, hallada.to_string()));
+                }
+            }
+        }
+    }
+    hallazgos
+}
+
 /// Ficheros de la copia a ciegas que no se copian: rastros de ECC y de SDLC, git, logs y artefactos de build.
 /// Ver `docs/interfaces.md`, sección "Validez".
 const EXCLUIDOS_PAQUETE: &[&str] = &[
@@ -1342,7 +1518,11 @@ fuente = "fixture: resultado medido"
         assert_eq!(v.exactitud_orden.aciertos, Some(2));
         assert_eq!(v.exactitud_orden.casos, 3);
         assert!(cerca(v.exactitud_orden.valor.expect("medida"), 2.0 / 3.0));
-        assert_eq!(v.exactitud_orden.cumple, None, "el orden no tiene umbral");
+        assert_eq!(
+            v.exactitud_orden.cumple,
+            Some(false),
+            "2 de 3 no llega al umbral 1,0 (desempate 44)"
+        );
     }
 
     #[test]
@@ -1389,6 +1569,57 @@ fuente = "fixture"
             "empate y sin veredicto son fallos"
         );
         assert_eq!(v.exactitud_orden.casos, 3);
+    }
+
+    #[test]
+    fn validez_orden_tres_pares_bien_ordenados_cumplen() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir(
+            &casos.join("orden.toml"),
+            "[[par]]\ntarea = \"memora\"\nmejor = \"a\"\npeor = \"b\"\nfuente = \"fixture\"\n\n\
+             [[par]]\ntarea = \"memora\"\nmejor = \"c\"\npeor = \"d\"\nfuente = \"fixture\"\n\n\
+             [[par]]\ntarea = \"memora\"\nmejor = \"e\"\npeor = \"f\"\nfuente = \"fixture\"\n",
+        );
+        let mapa = falso(vec![
+            clave("a", veredicto(Some(Decision::Listo), None, Some(0.9), &[])),
+            clave(
+                "b",
+                veredicto(Some(Decision::NoListo), None, Some(0.4), &[]),
+            ),
+            clave(
+                "c",
+                veredicto(Some(Decision::NoListo), None, Some(0.7), &[]),
+            ),
+            clave(
+                "d",
+                veredicto(Some(Decision::NoListo), None, Some(0.3), &[]),
+            ),
+            clave("e", veredicto(Some(Decision::Listo), None, Some(0.8), &[])),
+            clave(
+                "f",
+                veredicto(Some(Decision::NoListo), None, Some(0.5), &[]),
+            ),
+        ]);
+        let v = validar_con(casos, &mapa).expect("mide");
+        assert_eq!(v.exactitud_orden.aciertos, Some(3));
+        assert_eq!(v.exactitud_orden.umbral, Some(1.0));
+        assert_eq!(v.exactitud_orden.cumple, Some(true));
+    }
+
+    #[test]
+    fn validez_orden_sin_pares_no_cumple_ni_incumple() {
+        let dir = TempDir::new().expect("temporal");
+        let sin_archivo = validar_con(dir.path(), &falso(Vec::new())).expect("mide");
+        assert_eq!(sin_archivo.exactitud_orden.valor, None);
+        assert_eq!(sin_archivo.exactitud_orden.cumple, None);
+        escribir(&dir.path().join("orden.toml"), "");
+        let vacio = validar_con(dir.path(), &falso(Vec::new())).expect("mide");
+        assert_eq!(vacio.exactitud_orden.valor, None);
+        assert_eq!(
+            vacio.exactitud_orden.cumple, None,
+            "sin pares no hay veredicto"
+        );
     }
 
     #[test]
@@ -1643,6 +1874,197 @@ fuente = "fixture"
             .find(|c| c.origen == "ecc-sonnet")
             .expect("origen ecc");
         assert!(p.paquetes.contains(&ecc.id));
+    }
+
+    /// Repo con un `Cargo.toml` de autor (raíz con `[workspace.package]` y un miembro) y un README con ECC.
+    fn repo_con_cargo_y_readme(ruta: &Path) {
+        escribir(
+            &ruta.join("Cargo.toml"),
+            "[package]\nname = \"memora\"\nversion = \"0.1.0\"\nauthors = [\"Ana <ana@ecc.dev>\"]\n\
+             repository = \"https://github.com/ecc/memora\"\nhomepage = \"https://ecc.dev\"\n\n\
+             [workspace.package]\nauthors = [\"Ana\"]\nlicense = \"MIT\"\n\n[dependencies]\n",
+        );
+        escribir(
+            &ruta.join("crates/uno/Cargo.toml"),
+            "[package]\nname = \"uno\"\nversion = \"0.2.0\"\nauthors = [\"Ana\"]\n",
+        );
+        escribir(&ruta.join("src/lib.rs"), "pub fn f() -> u8 { 1 }\n");
+        escribir(&ruta.join("README.md"), "# Memora\n\nHecho con ECC\n");
+    }
+
+    /// Manifiesto con una sola fuente, `repo` como repo bueno. Devuelve su ruta.
+    fn manifiesto_de_una_fuente(dir: &Path, repo: &Path) -> PathBuf {
+        let ruta = dir.join("fuentes.toml");
+        escribir(
+            &ruta,
+            &format!(
+                "[[fuente]]\ntarea = \"memora\"\norigen = \"ecc-sonnet\"\nrepo = \"{}\"\n",
+                repo.display()
+            ),
+        );
+        ruta
+    }
+
+    /// Lee `rastros-<id>.toml` del armado como tabla TOML.
+    fn rastros_de(casos: &Path, id: &str) -> toml::Table {
+        let ruta = casos.join("ciego").join(format!("rastros-{id}.toml"));
+        let texto = fs::read_to_string(&ruta).expect("el paquete tiene su lista de rastros");
+        toml::from_str(&texto).expect("la lista es TOML")
+    }
+
+    /// Apariciones de una lista de rastros como (archivo, línea, palabra).
+    fn apariciones(tabla: &toml::Table) -> Vec<(String, i64, String)> {
+        let Some(lista) = tabla.get("aparicion").and_then(toml::Value::as_array) else {
+            return Vec::new();
+        };
+        lista
+            .iter()
+            .map(|a| {
+                let t = a.as_table().expect("aparición con campos");
+                (
+                    t["archivo"].as_str().expect("archivo").to_string(),
+                    t["linea"].as_integer().expect("linea"),
+                    t["palabra"].as_str().expect("palabra").to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn validez_rastros_cargo_pierde_authors_repository_y_homepage() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path().join("casos");
+        let repo = dir.path().join("repos").join("memora");
+        repo_con_cargo_y_readme(&repo);
+        let manifiesto = manifiesto_de_una_fuente(dir.path(), &repo);
+        let p = preparar_ciego_con(&casos, &manifiesto, 42, &rubricas()).expect("prepara");
+        let copia = casos.join("ciego").join(&p.paquetes[0]).join("repo");
+
+        let raiz: toml::Table =
+            toml::from_str(&fs::read_to_string(copia.join("Cargo.toml")).expect("raíz"))
+                .expect("TOML");
+        let paquete = raiz["package"].as_table().expect("[package]");
+        for clave in ["authors", "repository", "homepage"] {
+            assert!(!paquete.contains_key(clave), "la raíz no trae {clave}");
+        }
+        assert_eq!(paquete["name"].as_str(), Some("memora"));
+        assert_eq!(paquete["version"].as_str(), Some("0.1.0"));
+        let workspace = raiz["workspace"]["package"]
+            .as_table()
+            .expect("[workspace.package]");
+        assert!(
+            !workspace.contains_key("authors"),
+            "[workspace.package] tampoco"
+        );
+        assert_eq!(workspace["license"].as_str(), Some("MIT"), "lo demás queda");
+
+        let miembro: toml::Table = toml::from_str(
+            &fs::read_to_string(copia.join("crates/uno/Cargo.toml")).expect("miembro"),
+        )
+        .expect("TOML");
+        let paquete = miembro["package"].as_table().expect("[package]");
+        assert!(
+            !paquete.contains_key("authors"),
+            "el miembro tampoco trae authors"
+        );
+        assert_eq!(paquete["name"].as_str(), Some("uno"));
+        assert_eq!(paquete["version"].as_str(), Some("0.2.0"));
+    }
+
+    #[test]
+    fn validez_rastros_readme_con_ecc_sale_con_archivo_y_linea() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path().join("casos");
+        let repo = dir.path().join("repos").join("memora");
+        repo_con_cargo_y_readme(&repo);
+        let manifiesto = manifiesto_de_una_fuente(dir.path(), &repo);
+        let p = preparar_ciego_con(&casos, &manifiesto, 42, &rubricas()).expect("prepara");
+        let apar = apariciones(&rastros_de(&casos, &p.paquetes[0]));
+        assert!(
+            apar.contains(&("README.md".to_string(), 3, "ECC".to_string())),
+            "el README sale con su línea: {apar:?}"
+        );
+        assert!(
+            apar.iter().all(|(archivo, _, _)| archivo != "src/lib.rs"),
+            "un archivo sin palabras no sale: {apar:?}"
+        );
+        assert!(
+            apar.iter().all(|(archivo, _, _)| archivo != "Cargo.toml"),
+            "los autores ya se borraron antes de revisar: {apar:?}"
+        );
+    }
+
+    #[test]
+    fn validez_rastros_recclamo_no_cuenta_como_ecc() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path().join("casos");
+        let repo = dir.path().join("repos").join("fuente");
+        escribir(&repo.join("notas.md"), "recclamo, y ecc.\n");
+        let manifiesto = manifiesto_de_una_fuente(dir.path(), &repo);
+        let p = preparar_ciego_con(&casos, &manifiesto, 42, &rubricas()).expect("prepara");
+        let apar = apariciones(&rastros_de(&casos, &p.paquetes[0]));
+        assert_eq!(
+            apar,
+            vec![("notas.md".to_string(), 1, "ecc".to_string())],
+            "solo la palabra completa"
+        );
+    }
+
+    #[test]
+    fn validez_rastros_cargo_sin_parsear_queda_como_esta_y_se_anota() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path().join("casos");
+        let repo = dir.path().join("repos").join("fuente");
+        let roto = "[package\nname = \"roto\"\n";
+        escribir(&repo.join("Cargo.toml"), roto);
+        let manifiesto = manifiesto_de_una_fuente(dir.path(), &repo);
+        let p = preparar_ciego_con(&casos, &manifiesto, 42, &rubricas()).expect("prepara");
+        let copia = casos.join("ciego").join(&p.paquetes[0]).join("repo");
+        assert_eq!(
+            fs::read_to_string(copia.join("Cargo.toml")).expect("copiado"),
+            roto,
+            "un Cargo.toml que no parsea no se toca"
+        );
+        let tabla = rastros_de(&casos, &p.paquetes[0]);
+        let avisos = tabla
+            .get("avisos")
+            .and_then(toml::Value::as_array)
+            .expect("hay avisos");
+        assert!(
+            avisos
+                .iter()
+                .any(|a| a.as_str().is_some_and(|t| t.contains("Cargo.toml"))),
+            "el aviso nombra el archivo: {avisos:?}"
+        );
+    }
+
+    #[test]
+    fn validez_rastros_binario_no_se_revisa() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path().join("casos");
+        let repo = dir.path().join("repos").join("fuente");
+        fs::create_dir_all(&repo).expect("repo");
+        fs::write(repo.join("datos.bin"), b"\x00ECC\x00").expect("binario con nulos");
+        fs::write(repo.join("latin.txt"), [0xff, b'E', b'C', b'C', b'\n']).expect("no UTF-8");
+        let manifiesto = manifiesto_de_una_fuente(dir.path(), &repo);
+        let p = preparar_ciego_con(&casos, &manifiesto, 42, &rubricas()).expect("prepara");
+        let apar = apariciones(&rastros_de(&casos, &p.paquetes[0]));
+        assert!(apar.is_empty(), "los binarios no se revisan: {apar:?}");
+    }
+
+    #[test]
+    fn validez_rastros_palabra_completa_sin_distinguir_mayusculas() {
+        let texto =
+            "Hecho con ECC; Claude, sonnet-4 y Opus.\nopus2, xopus y recclamo no cuentan.\n";
+        assert_eq!(
+            buscar_palabras(texto),
+            vec![
+                (1, "ECC".to_string()),
+                (1, "Claude".to_string()),
+                (1, "sonnet".to_string()),
+                (1, "Opus".to_string()),
+            ]
+        );
     }
 
     #[test]

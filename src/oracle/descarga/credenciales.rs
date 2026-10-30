@@ -1,8 +1,10 @@
 //! Credenciales de los registros privados (decisión 29). Root lee cada credencial de la variable que
-//! nombra su `[[registro]]` y la pasa solo a los contenedores de descarga de Rust, y solo si el host
-//! del registro del repo es exactamente el host de la `url` del registro. Ningún texto que sale de
-//! Root la muestra: `Credencial` no tiene `Debug` con el valor, y `redactar_secretos` lo oculta.
+//! nombra su `[[registro]]` y la pasa solo a los contenedores de descarga: de Rust, por el entorno de
+//! Cargo; de Python, en un `netrc` de pip. Solo va si el host y el puerto del registro son los del repo.
+//! Ningún texto que sale de Root la muestra: `Credencial` no tiene `Debug` con el valor, `Netrc` tampoco,
+//! y `redactar_secretos` lo oculta.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use serde_json::json;
@@ -133,8 +135,71 @@ pub fn usuario_de_pip(
         .unwrap_or_else(|| "__token__".to_string())
 }
 
-/// Archivo `netrc` de una credencial, para pip. Sin conectar todavía: la descarga de Python no arma
-/// credenciales de pip (`credenciales_cargo` es solo de Cargo). Queda lista para cuando lo haga.
+/// `netrc` de pip de una descarga de Python: su texto y las credenciales que lleva. Sin `Debug` ni
+/// `PartialEq`: el texto tiene la clave.
+pub struct Netrc {
+    /// Una línea `machine ... login ... password ...` por registro que coincide.
+    pub contenido: String,
+    /// Credenciales que el texto lleva. Solo sirven para redactar lo que sale del contenedor.
+    pub credenciales: Vec<Credencial>,
+}
+
+/// `netrc` de pip para los índices que usa el `requirements.txt` (decisión 29, desempate 6). Un registro
+/// entra si su host y su puerto son los de un índice, y si su variable de clave tiene un valor válido. `netrc`
+/// no distingue puertos: un host que aparece con dos orígenes en los índices no recibe credencial. Sin
+/// registro que entre, es `None`.
+pub fn netrc_de_pip(
+    indices: &[String],
+    registros: &[RegistroConfig],
+    leer_env: impl Fn(&str) -> Option<String>,
+) -> Option<Netrc> {
+    let origenes: Vec<(String, u16)> = indices.iter().filter_map(|url| origen_de(url)).collect();
+    let mut contenido = String::new();
+    let mut credenciales: Vec<Credencial> = Vec::new();
+    let mut atendidos: BTreeSet<(String, u16)> = BTreeSet::new();
+    for registro in registros {
+        let Some(origen) = origen_de(&registro.url) else {
+            continue;
+        };
+        if !origenes.contains(&origen) || atendidos.contains(&origen) {
+            continue;
+        }
+        if origenes
+            .iter()
+            .any(|(host, puerto)| *host == origen.0 && *puerto != origen.1)
+        {
+            continue;
+        }
+        let Some(clave) = leer_env(&registro.credencial_env).filter(|v| !v.is_empty()) else {
+            continue;
+        };
+        let usuario = usuario_de_pip(registro, &leer_env);
+        if !valor_de_netrc(&clave) || !valor_de_netrc(&usuario) {
+            continue;
+        }
+        contenido.push_str(&netrc_para(&origen.0, &usuario, &clave));
+        credenciales.push(Credencial {
+            variable: registro.credencial_env.clone(),
+            valor: clave,
+        });
+        atendidos.insert(origen);
+    }
+    (!contenido.is_empty()).then_some(Netrc {
+        contenido,
+        credenciales,
+    })
+}
+
+/// Un valor cabe en una línea del `netrc` solo si no trae blancos, controles ni comillas. Si no, podría
+/// agregar otra entrada `machine` al archivo.
+fn valor_de_netrc(valor: &str) -> bool {
+    !valor.is_empty()
+        && valor
+            .chars()
+            .all(|c| !c.is_whitespace() && !c.is_control() && c != '"' && c != '\\')
+}
+
+/// Archivo `netrc` de una credencial, para pip. Lo arma `netrc_de_pip`.
 pub fn netrc_para(host: &str, usuario: &str, clave: &str) -> String {
     format!("machine {host} login {usuario} password {clave}\n")
 }
@@ -323,5 +388,52 @@ mod tests {
         assert_eq!(texto, r#"{"auths":{"reg.example":{"auth":"dG9rZW4="}}}"#);
         let v: serde_json::Value = serde_json::from_str(&texto).expect("JSON válido");
         assert_eq!(v["auths"]["reg.example"]["auth"], "dG9rZW4=");
+    }
+
+    // --- Tarea 30, parte 3: el netrc de pip sale de los registros que coinciden con un índice ---
+
+    #[test]
+    fn credenciales_netrc_de_pip_sin_registro_que_coincida_es_none() {
+        let regs = vec![registro(
+            "priv",
+            "https://otro.example/simple/",
+            "ROOT_TEST_TOKEN",
+        )];
+        let indices = vec!["https://reg.example:8443/simple/".to_string()];
+        assert!(netrc_de_pip(&indices, &regs, |_| Some("v".into())).is_none());
+    }
+
+    #[test]
+    fn credenciales_netrc_de_pip_valor_con_blancos_o_comillas_no_entra() {
+        // Un valor con un salto de línea podría agregar otra línea `machine` al netrc: no entra.
+        let regs = vec![registro(
+            "priv",
+            "https://reg.example:8443/simple/",
+            "ROOT_TEST_TOKEN",
+        )];
+        let indices = vec!["https://reg.example:8443/simple/".to_string()];
+        for malo in [
+            "clave\nmachine evil.example login a password b",
+            "con espacio",
+            "con\"comilla",
+        ] {
+            let leer = |_: &str| Some(malo.to_string());
+            assert!(netrc_de_pip(&indices, &regs, leer).is_none(), "{malo:?}");
+        }
+    }
+
+    #[test]
+    fn credenciales_netrc_de_pip_mismo_host_con_otro_puerto_no_entra() {
+        // `netrc` no distingue puertos: si el requirements usa otro puerto del mismo host, no se manda la credencial.
+        let regs = vec![registro(
+            "priv",
+            "https://reg.example:8443/simple/",
+            "ROOT_TEST_TOKEN",
+        )];
+        let indices = vec![
+            "https://reg.example:8443/simple/".to_string(),
+            "https://reg.example:9443/simple/".to_string(),
+        ];
+        assert!(netrc_de_pip(&indices, &regs, |_| Some("v-9".into())).is_none());
     }
 }

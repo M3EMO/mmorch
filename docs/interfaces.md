@@ -26,8 +26,8 @@ Ningún hito importa un módulo de `src/`.
 |---|---|---|
 | 2, Graft | Pide el modelo de cada etapa con `r00t route`. Usa las sondas del Oracle como gates. Registra cada etapa con `r00t observa evento`. | `route`, `observa evento` y las sondas están construidos. Los gates de Graft son del hito 2. |
 | 3, REA | Registra cada paso con `r00t observa evento`. Verifica su evidencia con el chequeo `archivo:línea` del juez. | `observa evento` está construido. La verificación de evidencia (`oracle/evidencia.rs`) existe como función, sin subcomando propio. |
-| 4, CAB | Define una tarea con `tarea.toml` y mide cada agente con `r00t corre`. | `tarea.toml` está construido. `r00t corre` es **pendiente** (Tarea 16). |
-| ECC (decisión a) | Recibe sus modelos por rol desde `r00t route`. Sus hooks que filtran datos se apagan por defecto en `r00t corre`. | `route` está construido. `corre` es **pendiente** (Tarea 16). |
+| 4, CAB | Define una tarea con `tarea.toml` y mide cada agente con `r00t corre`. | `tarea.toml` está construido. `r00t corre` está construido con el contenedor del builder (Tarea 26, capa 1). La imagen y la corrida real son de la laptop. |
+| ECC (decisión a) | Recibe sus modelos por rol desde `r00t route`. Sus hooks que filtran datos se apagan por defecto en `r00t corre`. | `route` está construido. `corre` está construido. La imagen del builder y la corrida real son de la laptop. |
 
 ## Códigos de salida
 
@@ -55,10 +55,10 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t route --rol <rol> --tipo <tipo> [--checkeable] [--tokens N]` | Elige la vía y el modelo para un rol y un tipo. | `Eleccion` | construido |
 | `r00t llama --rol <rol> --tipo <tipo> --prompt-file <f> --corrida <id> [--max-tokens N]` | Llama al modelo elegido. Registra el evento. Rechaza la llamada si no hay precio o tope. | `Respuesta` | construido |
 | `r00t oraculo evaluar --tarea <t> --repo <dir>` | Corre las suites de la tarea sobre el repo y da el veredicto, con su informe. | `Veredicto` | construido (Tarea 13b). |
-| `r00t oraculo pendientes --tarea <t> --repo <dir> [--importar <junit> \| --colab]` | Arma el paquete de tests pendientes por entorno para Colab. Con `--importar`, guarda el junit de vuelta. Con `--colab`, corre el paquete en Colab y lo importa. | `{dir, tests}`, o `{importados, ignorados}` | construido (Tarea 7f). `--colab`: Tarea 7j |
+| `r00t oraculo pendientes --tarea <t> --repo <dir> [--importar <junit>... \| --colab]` | Arma el paquete de tests pendientes por entorno para Colab. Con `--importar`, guarda los junit de vuelta, uno por repetición (`pendientes-N.xml`). Con `--colab`, corre el paquete en Colab y lo importa. Solo una corrida por tarea a la vez: la segunda sale con `3` y nombra a la primera (pid y hora). | `{dir, tests}`, o `{importados, ignorados}` | construido (Tarea 7f). `--colab`: Tarea 7j |
 | `r00t oraculo pendientes --liberar` | Libera el runtime de Colab anotado en `$ROOT_HOME/colab/activo.json`, si hay uno, y sale. | sin salida JSON | construido (Tarea 7j) |
 | `r00t oraculo pendientes --vigilar` | Red de seguridad: lee `$ROOT_HOME/colab/activo.json`. Libera el runtime si pasó su tope o si su junit cumple lo pedido. Un runtime vigente no se toca. Sin `--tarea` ni `--repo`. | `{vigilancia, causa}`, con `vigilancia` `sin_runtime`, `vigente` o `liberado` | construido (Tarea 7l) |
-| `r00t oraculo calibrar --tarea <t> --dimension <d> [--n 20] [--semilla 42] [--repo <dir>]` | Calibra una dimensión con defectos inyectados: mitad con defecto, mitad limpia. Mide la sensibilidad, la especificidad y la exactitud balanceada, por dimensión y por ítem, contra una línea base. Agrega una fila a `$ROOT_HOME/calibracion.json` e imprime la fila. Sin `--repo`, usa `[calibracion] repo` de `tarea.toml`; sin ninguno, sale con `2`. | `Fila` | construido (Tarea 12). |
+| `r00t oraculo calibrar --tarea <t> --dimension <d> [--n 20] [--semilla 42] [--repo <dir>] [--tope-usd <n>]` | Calibra una dimensión con defectos inyectados: mitad con defecto, mitad limpia. Mide la sensibilidad, la especificidad y la exactitud balanceada, por dimensión y por ítem, contra una línea base. Agrega una fila a `$ROOT_HOME/calibracion.json` e imprime la fila. Sin `--repo`, usa `[calibracion] repo` de `tarea.toml`; sin ninguno, sale con `2`. Con `--tope-usd <n>`, antes de la línea base y de cada caso compara el gasto de API desde el inicio, más el peor caso del caso, con el tope. Si no entra, registra un `Gate` `calibracion-tope`, guarda la fila de los casos hechos como `incompleta` y sale con `3`. El tope debe ser finito y mayor que 0; si no, sale con `2`. | `Fila` | construido (Tarea 12 y decisión 48). |
 | `r00t oraculo validar --casos <dir> [--json]` | Mide si el juicio de Root coincide con los casos de `<dir>` (orden conocido, defectos reales y el formulario a ciegas). Escribe `<dir>/validez.json`. Una métrica sin datos queda sin medir, nunca 0 ni 1. Sale con `0` aunque una métrica no cumpla. | `Validez` | construido (Tarea 12b). Formatos: sección ## Validez. |
 | `r00t oraculo validar --preparar-ciego --fuentes <manifiesto.toml> --casos <dir> [--semilla N]` | Arma un paquete anónimo por fuente en `<dir>/ciego/`, con su formulario, y la clave `ciego/clave.toml`. | ids de los paquetes | construido (Tarea 12b). |
 | `r00t oraculo informe --tarea <t> --repo <dir> [--md]` | Arma el informe del PM sobre el veredicto: decisión, regla que la disparó, requisitos, bloqueantes, riesgos, próximos pasos y confianza. Sin `--md`, imprime JSON; con `--md`, markdown legible. | `Informe` | construido (Tarea 13b). |
@@ -72,7 +72,7 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t track listar [--tarea t]` | Lista las filas, opcionalmente de una tarea. | lista de `Fila` | construido |
 | `r00t track comparar --a <c1> --b <c2> --tarea <t>` | Compara dos corridas de una tarea. | comparación | construido |
 | `r00t aprende [--replay]` | Recalcula `politica.json`. Con `--replay`, mide la política sin escribirla. | `Politica`, o `Replay` | construido |
-| `r00t corre --tarea <t> --config <c>` | Corre una tarea con una configuración. | `Fila` | pendiente (Tarea 16). Hoy sale con `3`. |
+| `r00t corre --tarea <t> --config <c>` | Corre una tarea con una configuración (con `--json` global, imprime la fila completa): rutea todos los roles, los lanza por el contenedor del builder, registra sus sesiones y lecturas, evalúa y agrega una fila a `runs.jsonl`. Sin GOAL autorizado no arranca. | `Fila` | construido (Tareas 16 y 26, capa 1). Lanza cada rol en el contenedor `root-builder:1`, sin `ROOT_HOME` y con la credencial de Claude en solo lectura. Sin credencial, sale con `3` y no lanza nada. |
 | `r00t goal verificar` | Verifica que `GOAL.md` coincida con `GOAL.hash`. | `{ok, hash}` | construido |
 | `r00t goal autorizar` | Autoriza un cambio al GOAL. Exige una TTY y una confirmación tecleada. | sin salida JSON | construido |
 | `r00t importar-mmorch --desde <metrics.jsonl>` | Copia en solo lectura el log de métricas de mmorch. | resumen de la importación | construido |
@@ -83,7 +83,7 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 
 **Colab (`oraculo pendientes --colab`).** Root pide un runtime T4 de Colab, corre el paquete, importa el junit y libera el runtime. Antes de pedirlo, Root escribe su id en `$ROOT_HOME/colab/activo.json`. Lo borra al liberar el runtime. Si el proceso muere con `SIGKILL`, el archivo queda. La próxima corrida de `--colab` libera ese runtime primero. `--liberar` hace solo esa limpieza. `SIGINT` y `SIGTERM` también liberan el runtime y registran un `Gate`. El login de Colab lo hace la persona antes de correr el comando. Root no lee el token de la CLI.
 
-**Corte temprano.** `correr.sh` corre en segundo plano en el runtime y Root lo sondea cada 60 segundos. Root libera el runtime en cuanto se cumple lo que pedía la corrida: el junit trae cada test pendiente, con tantos resultados como `repeticiones` de `tarea.toml`. Si `correr.sh` termina antes, Root libera el runtime con lo que haya. El `Gate` de liberación lleva la clave `causa`: `requisito cumplido`, `correr.sh terminó`, `tope de duración`, `señal SIGINT`/`señal SIGTERM`, `gpu-no-t4` (la GPU no es una T4), `runtime-no-asignado` (`colab new` no dio el runtime) o `error-en-corrida` (un paso falló a mitad de la corrida). `--vigilar` es la red de seguridad: libera el runtime anotado si pasó su tope o si su junit cumple lo pedido, aunque la corrida ya no esté viva.
+**Corte temprano.** `correr.sh` corre en segundo plano en el runtime y Root lo sondea cada 60 segundos. Root libera el runtime en cuanto se cumple lo que pedía la corrida: los junit por repetición traen cada test pendiente, con tantos resultados como `repeticiones` de `tarea.toml`, sumados entre todos. Un test que pasa en una repetición y falla en otra queda `inestable`, con su tasa. Si `correr.sh` termina antes, Root libera el runtime con lo que haya. El `Gate` de liberación lleva la clave `causa`: `requisito cumplido`, `correr.sh terminó`, `tope de duración`, `señal SIGINT`/`señal SIGTERM`, `gpu-no-t4` (la GPU no es una T4), `runtime-no-asignado` (`colab new` no dio el runtime) o `error-en-corrida` (un paso falló a mitad de la corrida). `--vigilar` es la red de seguridad: libera el runtime anotado si pasó su tope o si su junit cumple lo pedido, aunque la corrida ya no esté viva.
 
 **Tope de duración.** Cada corrida de `--colab` tiene un tope, `[colab].minutos_max` en `root.toml`, con 120 minutos (2 horas) por defecto, con corte temprano. Al llegar al tope, Root libera el runtime, registra un `Gate` con la causa `tope de duración` y sale con código `3`. El `motivo` del `Gate` lleva el tope real, por ejemplo `tope de 120 minutos`. Los tests sin resultado quedan `Pendiente`.
 
@@ -456,6 +456,7 @@ Funciones que usa el código:
 | `observe::resumir(corrida)` | construido | Devuelve `Resumen`. |
 | `oracle::evaluar(repo, tarea, opciones)` | construido | `oracle::evaluar_por_nombre(nombre, repo)` lee la tarea desde `ROOT_HOME`. |
 | `oracle::calibra::calibrar_tarea(home, nombre, dimension, n, semilla, repo, evaluador)` | construido (Tarea 12) | Calibra y agrega la fila a `calibracion.json`. `calibrar_con` recibe la tarea y el repo ya resueltos. |
+| `oracle::calibra::calibrar_tarea_con(home, nombre, dimension, n, semilla, repo, presupuesto, evaluador)` | construido (decisión 48) | Como `calibrar_tarea`, con el tope opcional `Presupuesto`: gasto desde el inicio, peor caso de un caso y tope en USD. Si el tope detiene la calibración, escribe las filas hechas como `incompleta` y sale con `3`. |
 | `oracle::informe::informar(veredicto, tarea, reglas, redactor)` | construido (Tarea 13b) | El redactor es opcional. `informar_con` recibe además las rúbricas. |
 | `oracle::validez::validar(casos)` | construido (Tarea 12b) | `validar_con` recibe el evaluador. `preparar_ciego(casos, fuentes, semilla)` arma los paquetes a ciegas. |
 | `track::agregar(fila)` | construido | |
@@ -478,7 +479,7 @@ Funciones que usa el código:
 
 **Métricas.**
 
-- *Exactitud de orden*: fracción de pares donde Root pone `mejor` por encima de `peor`. Root compara primero la decisión (listo, no listo, bloqueado). A igual decisión compara el `global` si los dos lo tienen; si no, la completitud. Un empate o un par sin veredicto cuenta como fallo. No tiene umbral.
+- *Exactitud de orden*: fracción de pares donde Root pone `mejor` por encima de `peor`. Root compara primero la decisión (listo, no listo, bloqueado). A igual decisión compara el `global` si los dos lo tienen; si no, la completitud. Un empate o un par sin veredicto cuenta como fallo. Umbral 1,0: cumple solo si todos los pares quedan bien ordenados (desempate 44).
 - *Recall de defectos*: fracción de defectos con un hallazgo del veredicto en el mismo `archivo` y a ±3 líneas de `linea`. Umbral 0,8 (decisión 12).
 - *Acuerdo con el usuario*: `acuerdo_decision` cuenta los paquetes cuya decisión de Root coincide con la del formulario; cumple con 5 de 6 (decisión 13). `kappa_dimension` es el kappa de Cohen con pesos cuadráticos sobre los niveles 0 a 3, sumando los ítems de cada dimensión; cumple con 0,6 o más. `kappa_item` lo mide por ítem, sin umbral: un kappa bajo marca un ancla ambigua. `spearman` correlaciona el `orden` del formulario (1 es el mejor) con el orden de Root.
 
@@ -486,7 +487,8 @@ Un par, defecto o paquete que no tiene dato del usuario o de Root queda fuera de
 
 **Paquetes a ciegas.** `r00t oraculo validar --preparar-ciego --fuentes <manifiesto.toml> --casos <dir> [--semilla N]` lee el manifiesto. Su `[[fuente]]` tiene `tarea`, `origen` y `repo` (ruta absoluta o relativa al manifiesto). Por cada fuente arma `<dir>/ciego/<id>/` con:
 
-- `repo/`: copia del repo sin los nombres `AGENTS.md`, `CLAUDE.md`, `sdlc.toml`, `.claude`, `.git`, `logs` y `target` en cualquier nivel; sin archivos `*.log` ni nombres que empiecen con `.ecc`; sin enlaces simbólicos. Estos nombres son los rastros de ECC, de SDLC, de git, de logs y de build.
+- `repo/`: copia del repo sin los nombres `AGENTS.md`, `CLAUDE.md`, `sdlc.toml`, `.claude`, `.git`, `logs` y `target` en cualquier nivel; sin archivos `*.log` ni nombres que empiecen con `.ecc`; sin enlaces simbólicos. Estos nombres son los rastros de ECC, de SDLC, de git, de logs y de build. En cada `Cargo.toml` copiado, el armado borra `authors`, `repository` y `homepage` de `[package]` y de `[workspace.package]`. Un `Cargo.toml` que no parsea queda igual y se anota en la lista.
+- `rastros-<id>.toml`, junto a la carpeta del paquete y fuera de ella: `aparicion` con `archivo`, `linea` y `palabra` de cada `ecc`, `sdlc`, `claude`, `haiku`, `sonnet` u `opus` en los archivos de texto del `repo/`, sin distinguir mayúsculas y como palabra completa (`recclamo` no cuenta). Los binarios no se revisan. `avisos` lista lo que el armado no pudo revisar. El resumen de la CLI dice cuántas apariciones hay por paquete y dónde está la lista. Opus la revisa antes de entregar los paquetes (desempate 45).
 - `formulario.toml`: `decision` (`listo`, `no_listo` o `bloqueado`), `orden` (posición entre los del lote; 1 es el mejor) y un `[[item]]` por ítem de rúbrica, con `nivel` de 0 a 3. Las anclas van como comentario. Sin rúbricas embebidas, el formulario lleva solo la decisión y el orden, y el comando avisa en stderr.
 - El `id` tiene 8 caracteres hexadecimales y sale de un PRNG con la semilla (`--semilla`, o el reloj). Ningún `id` contiene el origen ni la tarea. Si `<dir>/ciego/` ya tiene contenido, el comando sale con `2`.
 
@@ -598,6 +600,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           ],
           "format": "float",
           "default": null
+        },
+        "incompleta": {
+          "description": "`true` si el tope de gasto detuvo la calibración antes de medir todos sus casos (decisión 48). Una\nfila incompleta no calibra la dimensión, aunque su exactitud llegue a `UMBRAL`.",
+          "type": "boolean",
+          "default": false
         },
         "items": {
           "description": "Exactitud balanceada de cada ítem de rúbrica, por ejemplo `seguridad.secretos`.",
@@ -809,11 +816,6 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           }
         }
       }
-    },
-    "umbral_verde": {
-      "type": "number",
-      "format": "double",
-      "default": 0.8
     },
     "umbral_wilson": {
       "description": "Cota inferior de Wilson (90%, unilateral) que un candidato debe alcanzar para entrar a la política.",
@@ -1573,11 +1575,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ]
     },
     "Confianza": {
-      "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos\nsalen del `Veredicto`; `ambiguedades` queda vacío porque el veredicto no trae la ficha.",
+      "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos\nsalen del `Veredicto`.",
       "type": "object",
       "properties": {
         "ambiguedades": {
-          "description": "Ambigüedades abiertas de la ficha. Vacío: el veredicto no las trae.",
+          "description": "Ambigüedades abiertas de la ficha, como `línea <n>: <frase>`. Salen de la revisión guardada del juez.",
           "type": "array",
           "default": [],
           "items": {
@@ -1671,11 +1673,20 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ]
     },
     "Decision": {
-      "type": "string",
-      "enum": [
-        "listo",
-        "no_listo",
-        "bloqueado"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "listo",
+            "no_listo",
+            "bloqueado"
+          ]
+        },
+        {
+          "description": "Una dimensión que bloquea no tiene veredicto: no hay \"listo\" ni \"no listo\" que decir (decisión 48).",
+          "type": "string",
+          "const": "sin_decision"
+        }
       ]
     },
     "Dimension": {
@@ -1974,7 +1985,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "type": "object",
       "properties": {
         "colab": {
-          "description": "Resultado importado de Colab: \"pasa\", \"falla\" u \"omite\". Ausente si no se importó.",
+          "description": "Resultado importado de Colab: \"pasa\", \"falla\", \"omite\" o \"inestable\". Ausente si no se importó.",
           "type": [
             "string",
             "null"
@@ -1983,6 +1994,18 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         },
         "motivo": {
           "type": "string"
+        },
+        "tasa": {
+          "description": "Tasa de aprobación si Colab dejó el test inestable entre repeticiones. Ausente en un test estable.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TasaTest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "test": {
           "description": "Id del test con forma `archivo::nombre`.",
@@ -2114,6 +2137,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "Veredicto": {
       "type": "object",
       "properties": {
+        "ambiguedades": {
+          "description": "Ambigüedades abiertas de la ficha, como `línea <n>: <frase>`. Vacío si no hay revisión guardada\npara el spec. Un veredicto viejo lee vacío.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "avisos": {
           "description": "Problemas que no tumban la evaluación, por ejemplo un `colab.json` ilegible.",
           "type": "array",
@@ -2177,6 +2208,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         },
         "oculto": {
           "$ref": "#/$defs/Conteo"
+        },
+        "ocultos_fallidos": {
+          "description": "Ids ordenados de los tests ocultos que fallan de forma estable. Un requisito que no los prueba da\n`NoListo` (`test_oculto_fuera_de_requisitos`). Un veredicto viejo lee vacío.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
         },
         "pendientes": {
           "description": "Tests de `[[entorno]]`, con su motivo. No entran al conteo. Un veredicto viejo lee vacío.\nCompletitud y el nivel por requisito llegan con la Tarea 9c; por ahora solo se listan.",
@@ -2470,11 +2509,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ]
     },
     "Confianza": {
-      "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos\nsalen del `Veredicto`; `ambiguedades` queda vacío porque el veredicto no trae la ficha.",
+      "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos\nsalen del `Veredicto`.",
       "type": "object",
       "properties": {
         "ambiguedades": {
-          "description": "Ambigüedades abiertas de la ficha. Vacío: el veredicto no las trae.",
+          "description": "Ambigüedades abiertas de la ficha, como `línea <n>: <frase>`. Salen de la revisión guardada del juez.",
           "type": "array",
           "default": [],
           "items": {
@@ -2549,11 +2588,20 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ]
     },
     "Decision": {
-      "type": "string",
-      "enum": [
-        "listo",
-        "no_listo",
-        "bloqueado"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "listo",
+            "no_listo",
+            "bloqueado"
+          ]
+        },
+        {
+          "description": "Una dimensión que bloquea no tiene veredicto: no hay \"listo\" ni \"no listo\" que decir (decisión 48).",
+          "type": "string",
+          "const": "sin_decision"
+        }
       ]
     },
     "Dimension": {
@@ -2636,7 +2684,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "type": "object",
       "properties": {
         "colab": {
-          "description": "Resultado importado de Colab: \"pasa\", \"falla\" u \"omite\". Ausente si no se importó.",
+          "description": "Resultado importado de Colab: \"pasa\", \"falla\", \"omite\" o \"inestable\". Ausente si no se importó.",
           "type": [
             "string",
             "null"
@@ -2645,6 +2693,18 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         },
         "motivo": {
           "type": "string"
+        },
+        "tasa": {
+          "description": "Tasa de aprobación si Colab dejó el test inestable entre repeticiones. Ausente en un test estable.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TasaTest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "test": {
           "description": "Id del test con forma `archivo::nombre`.",
@@ -2816,7 +2876,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
   "type": "object",
   "properties": {
     "colab": {
-      "description": "Resultado importado de Colab: \"pasa\", \"falla\" u \"omite\". Ausente si no se importó.",
+      "description": "Resultado importado de Colab: \"pasa\", \"falla\", \"omite\" o \"inestable\". Ausente si no se importó.",
       "type": [
         "string",
         "null"
@@ -2826,6 +2886,18 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "motivo": {
       "type": "string"
     },
+    "tasa": {
+      "description": "Tasa de aprobación si Colab dejó el test inestable entre repeticiones. Ausente en un test estable.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TasaTest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
     "test": {
       "description": "Id del test con forma `archivo::nombre`.",
       "type": "string"
@@ -2834,7 +2906,34 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
   "required": [
     "test",
     "motivo"
-  ]
+  ],
+  "$defs": {
+    "TasaTest": {
+      "description": "Tasa de aprobación de un test inestable, con la cota inferior de Wilson al 90%.",
+      "type": "object",
+      "properties": {
+        "pasa": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "wilson_inf": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "pasa",
+        "total",
+        "wilson_inf"
+      ]
+    }
+  }
 }
 ```
 
@@ -3738,6 +3837,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "margenes": {
       "$ref": "#/$defs/Margenes"
     },
+    "reservas_viejas": {
+      "description": "Reservas de API abiertas con más de dos veces `timeout_juez_s`. Solo un humano las corrige.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ReservaVieja"
+      }
+    },
     "uso": {
       "$ref": "#/$defs/Uso"
     }
@@ -3811,6 +3918,44 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "nube"
       ]
     },
+    "ReservaVieja": {
+      "description": "Una reserva de API abierta y vieja. `r00t observa uso` la lista para que un humano la corrija.",
+      "type": "object",
+      "properties": {
+        "antiguedad_s": {
+          "description": "Segundos desde que se escribió la reserva, hasta el momento de la consulta.",
+          "type": "number",
+          "format": "double"
+        },
+        "corrida": {
+          "type": "string"
+        },
+        "modelo": {
+          "description": "Modelo de la llamada, si la reserva lo trae.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reserva": {
+          "description": "Id de la reserva. `None` si la reserva no trae id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "usd": {
+          "description": "Costo de peor caso que la reserva apartó.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "corrida",
+        "antiguedad_s",
+        "usd"
+      ]
+    },
     "Uso": {
       "description": "Gasto medido en USD equivalentes de lista. Lo arma `observe::uso`.",
       "type": "object",
@@ -3871,7 +4016,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       }
     },
     "exactitud_orden": {
-      "description": "Fracción de pares de `orden.toml` que Root ordena como el resultado medido. Sin umbral.",
+      "description": "Fracción de pares de `orden.toml` que Root ordena como el resultado medido. Umbral 1,0.",
       "$ref": "#/$defs/Metrica"
     },
     "kappa_dimension": {
@@ -4031,6 +4176,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
   "title": "Veredicto",
   "type": "object",
   "properties": {
+    "ambiguedades": {
+      "description": "Ambigüedades abiertas de la ficha, como `línea <n>: <frase>`. Vacío si no hay revisión guardada\npara el spec. Un veredicto viejo lee vacío.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
     "avisos": {
       "description": "Problemas que no tumban la evaluación, por ejemplo un `colab.json` ilegible.",
       "type": "array",
@@ -4094,6 +4247,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     },
     "oculto": {
       "$ref": "#/$defs/Conteo"
+    },
+    "ocultos_fallidos": {
+      "description": "Ids ordenados de los tests ocultos que fallan de forma estable. Un requisito que no los prueba da\n`NoListo` (`test_oculto_fuera_de_requisitos`). Un veredicto viejo lee vacío.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
     },
     "pendientes": {
       "description": "Tests de `[[entorno]]`, con su motivo. No entran al conteo. Un veredicto viejo lee vacío.\nCompletitud y el nivel por requisito llegan con la Tarea 9c; por ahora solo se listan.",
@@ -4200,11 +4361,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ]
     },
     "Confianza": {
-      "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos\nsalen del `Veredicto`; `ambiguedades` queda vacío porque el veredicto no trae la ficha.",
+      "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos\nsalen del `Veredicto`.",
       "type": "object",
       "properties": {
         "ambiguedades": {
-          "description": "Ambigüedades abiertas de la ficha. Vacío: el veredicto no las trae.",
+          "description": "Ambigüedades abiertas de la ficha, como `línea <n>: <frase>`. Salen de la revisión guardada del juez.",
           "type": "array",
           "default": [],
           "items": {
@@ -4298,11 +4459,20 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ]
     },
     "Decision": {
-      "type": "string",
-      "enum": [
-        "listo",
-        "no_listo",
-        "bloqueado"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "listo",
+            "no_listo",
+            "bloqueado"
+          ]
+        },
+        {
+          "description": "Una dimensión que bloquea no tiene veredicto: no hay \"listo\" ni \"no listo\" que decir (decisión 48).",
+          "type": "string",
+          "const": "sin_decision"
+        }
       ]
     },
     "Dimension": {
@@ -4578,7 +4748,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "type": "object",
       "properties": {
         "colab": {
-          "description": "Resultado importado de Colab: \"pasa\", \"falla\" u \"omite\". Ausente si no se importó.",
+          "description": "Resultado importado de Colab: \"pasa\", \"falla\", \"omite\" o \"inestable\". Ausente si no se importó.",
           "type": [
             "string",
             "null"
@@ -4587,6 +4757,18 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         },
         "motivo": {
           "type": "string"
+        },
+        "tasa": {
+          "description": "Tasa de aprobación si Colab dejó el test inestable entre repeticiones. Ausente en un test estable.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TasaTest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "test": {
           "description": "Id del test con forma `archivo::nombre`.",

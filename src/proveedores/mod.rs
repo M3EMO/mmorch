@@ -22,7 +22,7 @@ use crate::observe::{self, jsonl, uso};
 use crate::tipos::{Eleccion, Evento, Proveedor, Rol, TipoEvento, Via};
 
 /// Intentos totales por llamada: el primero más dos reintentos.
-const INTENTOS_MAX: u32 = 3;
+pub(crate) const INTENTOS_MAX: u32 = 3;
 /// Fallas dentro de la ventana que abren el breaker.
 const FALLAS_PARA_ABRIR: usize = 3;
 const VENTANA_FALLAS: Duration = Duration::from_secs(60);
@@ -367,14 +367,23 @@ pub(crate) fn entero_en(json: &Value, ruta: &str) -> Result<u64, ErrorProveedor>
 
 /// Llama al proveedor de `e` con la configuración de `root_home()/root.toml`. Chequea el tope.
 pub fn llamar(e: &Eleccion, prompt: &Prompt, corrida: &str) -> Result<Respuesta, ErrorProveedor> {
-    let home = root_home();
+    llamar_en(&root_home(), e, prompt, corrida)
+}
+
+/// Como `llamar`, con `root.toml` y `eventos.jsonl` de `home`. Todo `Gate` y evento de la llamada va a `home`.
+pub fn llamar_en(
+    home: &Path,
+    e: &Eleccion,
+    prompt: &Prompt,
+    corrida: &str,
+) -> Result<Respuesta, ErrorProveedor> {
     let cfg = Config::cargar(&home.join(ARCHIVO_CONFIG))
         .map_err(|err| ErrorProveedor::Config(err.to_string()))?;
     let claves = Claves::del_entorno();
     let reloj = Instant::now;
     let ctx = Contexto {
         cfg: &cfg,
-        home: &home,
+        home,
         breaker: breaker_global(),
         claves: &claves,
         reloj: &reloj,

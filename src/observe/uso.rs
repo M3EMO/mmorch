@@ -75,22 +75,92 @@ pub fn calcular_uso(eventos: &[Evento], ahora: f64, offset_s: i32, bloque_horas:
 /// Costo de las reservas de API del mes que ningún evento cerró. Un evento cierra las reservas que
 /// lista en `extra.reservas`. Una reserva sin id, o sin cierre, cuenta como gasto.
 fn reservas_abiertas_usd(eventos: &[&Evento], inicio: f64) -> f64 {
-    let cerradas: HashSet<&str> = eventos
+    let cerradas = reservas_cerradas(eventos);
+    eventos
+        .iter()
+        .filter(|ev| ev.tipo == TipoEvento::Reserva && ev.via == Some(Via::Api) && ev.ts >= inicio)
+        .filter(|ev| reserva_abierta(ev, &cerradas))
+        .fold(0.0, |total, ev| total + ev.cost_usd)
+}
+
+/// Gasto de API desde `inicio` (epoch en segundos): el costo de las llamadas de API con `ts >= inicio`,
+/// más las reservas de API abiertas desde `inicio`. Cuenta todos los eventos, aunque los haya escrito otro
+/// proceso (decisión 48): sobreestima, nunca subestima.
+pub fn gasto_api_desde(eventos: &[Evento], inicio: f64) -> f64 {
+    // Igual que `calcular_uso`: las llamadas de API son los eventos que no son reservas, y las reservas
+    // suman solo mientras ningún evento las cierre.
+    let llamadas = eventos
+        .iter()
+        .filter(|ev| ev.via == Some(Via::Api) && ev.tipo != TipoEvento::Reserva && ev.ts >= inicio)
+        // `fold` evita el -0.0 que `sum` da sin eventos.
+        .fold(0.0, |total, ev| total + ev.cost_usd);
+    let vigentes: Vec<&Evento> = eventos.iter().collect();
+    llamadas + reservas_abiertas_usd(&vigentes, inicio)
+}
+
+/// `gasto_api_desde` sobre el archivo indicado y sus rotados. Un archivo inexistente da 0.
+pub fn gasto_api_desde_en(ruta: &Path, inicio: f64) -> Result<f64, ErrorObserve> {
+    let eventos = leer_eventos(ruta)?;
+    Ok(gasto_api_desde(&eventos, inicio))
+}
+
+/// Ids de las reservas que algún evento cierra: los que listan en `extra.reservas`.
+fn reservas_cerradas<'a>(eventos: &[&'a Evento]) -> HashSet<&'a str> {
+    eventos
         .iter()
         .filter_map(|ev| ev.extra.get("reservas")?.as_array())
         .flatten()
         .filter_map(Value::as_str)
-        .collect();
-    eventos
+        .collect()
+}
+
+/// `true` si ningún evento cerró la reserva. Una reserva sin id no se puede cerrar: queda abierta.
+fn reserva_abierta(ev: &Evento, cerradas: &HashSet<&str>) -> bool {
+    !ev.extra
+        .get("reserva")
+        .and_then(Value::as_str)
+        .is_some_and(|id| cerradas.contains(id))
+}
+
+/// Una reserva de API abierta y vieja. `r00t observa uso` la lista para que un humano la corrija.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ReservaVieja {
+    /// Id de la reserva. `None` si la reserva no trae id.
+    pub reserva: Option<String>,
+    pub corrida: String,
+    /// Modelo de la llamada, si la reserva lo trae.
+    pub modelo: Option<String>,
+    /// Segundos desde que se escribió la reserva, hasta el momento de la consulta.
+    pub antiguedad_s: f64,
+    /// Costo de peor caso que la reserva apartó.
+    pub usd: f64,
+}
+
+/// Reservas de API abiertas con más de `umbral_s` segundos de antigüedad, de los eventos con
+/// `ts <= ahora`. Van de la más vieja a la más nueva. Siguen contando como gasto: solo un humano
+/// las corrige, con `observa costo`.
+pub fn reservas_viejas(eventos: &[Evento], ahora: f64, umbral_s: f64) -> Vec<ReservaVieja> {
+    let vigentes: Vec<&Evento> = eventos.iter().filter(|ev| ev.ts <= ahora).collect();
+    let cerradas = reservas_cerradas(&vigentes);
+    let mut viejas: Vec<ReservaVieja> = vigentes
         .iter()
-        .filter(|ev| ev.tipo == TipoEvento::Reserva && ev.via == Some(Via::Api) && ev.ts >= inicio)
-        .filter(|ev| {
-            !ev.extra
+        .filter(|ev| ev.tipo == TipoEvento::Reserva && ev.via == Some(Via::Api))
+        .filter(|ev| reserva_abierta(ev, &cerradas))
+        .map(|ev| ReservaVieja {
+            reserva: ev
+                .extra
                 .get("reserva")
                 .and_then(Value::as_str)
-                .is_some_and(|id| cerradas.contains(id))
+                .map(String::from),
+            corrida: ev.corrida.clone(),
+            modelo: ev.modelo.clone(),
+            antiguedad_s: ahora - ev.ts,
+            usd: ev.cost_usd,
         })
-        .fold(0.0, |total, ev| total + ev.cost_usd)
+        .filter(|vieja| vieja.antiguedad_s > umbral_s)
+        .collect();
+    viejas.sort_by(|a, b| b.antiguedad_s.total_cmp(&a.antiguedad_s));
+    viejas
 }
 
 /// Gasto e inicio del bloque que contiene `ahora`. `eventos` van ordenados por `ts` y con `ts <= ahora`.
@@ -172,6 +242,9 @@ pub struct UsoMargenes {
     pub uso: Uso,
     pub margenes: Margenes,
     pub aviso: String,
+    /// Reservas de API abiertas con más de dos veces `timeout_juez_s`. Solo un humano las corrige.
+    #[serde(default)]
+    pub reservas_viejas: Vec<ReservaVieja>,
 }
 
 /// Estado de `observa uso` en el momento `ahora`. Registra un `Gate` `tope-lleno` por cada tope
@@ -186,10 +259,12 @@ pub fn estado(ahora: f64) -> Result<UsoMargenes, Error> {
     for tope in topes_sin_gate(&eventos, &margenes, uso.cupo_bloque_inicio, mes) {
         registrar_gate_tope(tope, &margenes)?;
     }
+    let umbral_s = 2.0 * cfg.proveedores.timeout_juez_s as f64;
     Ok(UsoMargenes {
         uso,
         margenes,
         aviso: AVISO_NUBE_NO_REGISTRADA.into(),
+        reservas_viejas: reservas_viejas(&eventos, ahora, umbral_s),
     })
 }
 
@@ -662,6 +737,71 @@ mod tests {
     #[test]
     fn uso_aviso_nube_no_registrada_dice_que_no_suma() {
         assert!(AVISO_NUBE_NO_REGISTRADA.contains("no suma"));
+    }
+
+    /// Umbral de la lista de reservas viejas: dos veces el `timeout_juez_s` por defecto (1200 s).
+    const UMBRAL_VIEJA_S: f64 = 2.0 * 1200.0;
+
+    #[test]
+    fn uso_reserva_abierta_con_tres_timeouts_sale_en_la_lista() {
+        let eventos = [reserva("r1", AHORA - 3.0 * 1200.0, 0.5)];
+        let viejas = reservas_viejas(&eventos, AHORA, UMBRAL_VIEJA_S);
+        assert_eq!(viejas.len(), 1);
+        assert_eq!(viejas[0].reserva.as_deref(), Some("r1"));
+        assert_eq!(viejas[0].antiguedad_s, 3.0 * 1200.0);
+        assert_eq!(viejas[0].usd, 0.5);
+    }
+
+    #[test]
+    fn uso_reserva_abierta_con_un_timeout_no_sale_en_la_lista() {
+        let eventos = [reserva("r1", AHORA - 1200.0, 0.5)];
+        assert!(reservas_viejas(&eventos, AHORA, UMBRAL_VIEJA_S).is_empty());
+    }
+
+    #[test]
+    fn uso_reserva_cerrada_con_tres_timeouts_no_sale_en_la_lista() {
+        let eventos = [
+            reserva("r1", AHORA - 3.0 * 1200.0, 0.5),
+            cierre(AHORA - 1200.0, 0.4, &["r1"]),
+        ];
+        assert!(reservas_viejas(&eventos, AHORA, UMBRAL_VIEJA_S).is_empty());
+    }
+
+    #[test]
+    fn uso_gasto_api_desde_suma_llamadas_y_reservas_abiertas_desde_el_inicio() {
+        let reserva = |id: &str, ts: f64, usd: f64| Evento {
+            ts,
+            via: Some(Via::Api),
+            tipo: TipoEvento::Reserva,
+            cost_usd: usd,
+            corrida: "c1".into(),
+            extra: Map::from_iter([("reserva".to_string(), json!(id))]),
+            ..Evento::default()
+        };
+        let cierre = |ts: f64, usd: f64, ids: Value| Evento {
+            ts,
+            via: Some(Via::Api),
+            tipo: TipoEvento::Llamada,
+            cost_usd: usd,
+            corrida: "c1".into(),
+            extra: Map::from_iter([("reservas".to_string(), ids)]),
+            ..Evento::default()
+        };
+        let eventos = vec![
+            // Antes del inicio: no cuenta.
+            evento(Some(Via::Api), 5.0, 1.0),
+            // Llamada desde el inicio: cuenta su costo real.
+            evento(Some(Via::Api), 10.0, 0.3),
+            // Reserva abierta desde el inicio: cuenta su peor caso.
+            reserva("r1", 12.0, 0.4),
+            // Reserva que la llamada de 14 cierra: no cuenta; la llamada sí.
+            reserva("r2", 13.0, 0.2),
+            cierre(14.0, 0.2, json!(["r2"])),
+            // Cupo: no es API.
+            evento(Some(Via::Cupo), 12.0, 9.0),
+        ];
+        let gasto = gasto_api_desde(&eventos, 10.0);
+        assert!((gasto - 0.9).abs() < 1e-9, "{gasto}");
     }
 }
 

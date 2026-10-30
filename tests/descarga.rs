@@ -16,7 +16,7 @@ use root::oracle::juez::ModeloJuez;
 use root::oracle::tarea::Tarea;
 use root::oracle::{ErrorOraculo, OpcionesOraculo, evaluar};
 use root::proveedores::{Prompt, RespuestaJuez};
-use root::tipos::{Conteo, Dimension, Estado, Hallazgo, Veredicto};
+use root::tipos::{Conteo, Decision, Dimension, Estado, Hallazgo, Veredicto};
 use serde_json::Value;
 
 const IMAGEN: &str = "localhost/root-oraculo-rust:1";
@@ -64,6 +64,7 @@ fn opciones(home: &Path) -> OpcionesOraculo {
     OpcionesOraculo {
         timeout: LIMITE,
         home: Some(home.to_path_buf()),
+        partes: None,
     }
 }
 
@@ -208,8 +209,10 @@ fn evaluar_con(home: &Path, repo: &Path, tarea: &Tarea) -> Veredicto {
     })
 }
 
+/// Pregunta 9 resuelta (desempate 9 de la Tarea 28): la tarea no tiene `[[requisito]]`, así que Completitud
+/// queda sin veredicto. La decisión es `SinDecision` y el estado es `SinVeredicto`, no un rojo.
+/// Necesita podman: con `ROOT_SIN_PODMAN=1` se salta, así que no se ve ni rojo ni verde en la nube.
 #[test]
-#[ignore = "pregunta 9 del informe de la nube 2: Completitud sin veredicto da NoListo, y una tarea sin [[requisito]] da Rojo; esperaba SinVeredicto (expectativa anterior a la 13b). Esperando la decisión del planner/usuario: si se confirma, la aserción pasa a Rojo"]
 fn descarga_dependencia_de_crates_io_compila_en_la_evaluacion_sin_red() {
     root::saltar_sin_podman!();
     let _g = preparar();
@@ -230,6 +233,11 @@ fn descarga_dependencia_de_crates_io_compila_en_la_evaluacion_sin_red() {
     );
     assert_eq!(v.oculto, Conteo { pasa: 1, total: 1 });
     assert_eq!(v.estado, Estado::SinVeredicto);
+    assert_eq!(
+        v.informe.as_ref().map(|i| i.decision),
+        Some(Decision::SinDecision),
+        "completitud sin veredicto deja la decisión en SinDecision"
+    );
     let _ = fs::remove_dir_all(&repo);
 }
 

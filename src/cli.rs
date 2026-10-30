@@ -186,9 +186,9 @@ pub enum OraculoAccion {
         /// Repo. Obligatorio salvo con `--liberar` o `--vigilar`.
         #[arg(long, required_unless_present_any = ["liberar", "vigilar"])]
         repo: Option<PathBuf>,
-        /// Junit que dejó `correr.sh`. Sin este flag se arma el paquete.
-        #[arg(long, conflicts_with_all = ["colab", "vigilar"])]
-        importar: Option<PathBuf>,
+        /// Junit que dejó `correr.sh`: uno por repetición (`pendientes-N.xml`). Sin este flag se arma el paquete.
+        #[arg(long, num_args = 1.., conflicts_with_all = ["colab", "vigilar"])]
+        importar: Vec<PathBuf>,
         /// Corre el paquete en un runtime T4 de Colab, importa el junit y libera el runtime.
         #[arg(long, conflicts_with_all = ["importar", "vigilar"])]
         colab: bool,
@@ -213,6 +213,10 @@ pub enum OraculoAccion {
         /// Repo bueno. Sin él, se usa `[calibracion] repo` de `tarea.toml`.
         #[arg(long)]
         repo: Option<PathBuf>,
+        /// Tope de gasto de API de la calibración, en USD (decisión 48). Debe ser finito y mayor que 0.
+        /// Antes de cada caso, si el gasto más el peor caso del caso no entra, la calibración se detiene.
+        #[arg(long, allow_negative_numbers = true)]
+        tope_usd: Option<f64>,
     },
     /// Mide si el juicio de Root coincide con resultados conocidos (Tarea 12b). Con `--preparar-ciego`,
     /// arma los paquetes a ciegas de `--fuentes` en `casos/ciego/`.

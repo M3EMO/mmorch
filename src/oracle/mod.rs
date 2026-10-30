@@ -35,12 +35,13 @@ use crate::config::{Config, ReglasDecision, root_home};
 use crate::ficha::{self, ErrorFicha};
 use crate::proveedores::{Prompt, RespuestaJuez};
 use crate::tipos::{
-    Conteo, Dimension, Estado, EstadoRequisito, Hallazgo, Puntaje, Rol, TasaTest, VERSION,
-    Veredicto,
+    Conteo, Dimension, Estado, EstadoRequisito, Hallazgo, Pendiente, Puntaje, Rol, TasaTest,
+    VERSION, Veredicto,
 };
 use crate::track::stats::wilson_inferior;
 use calibra::Calibraciones;
 use contenedor::{Ejecucion, Resultado};
+use entrega::{FabricaEscenarios, FabricaReal, Podman, PodmanReal, ResultadoEntrega};
 use informe::{Redactor, RedactorMedido, RedactorProveedor};
 use juez::{EntradaJuez, EstadoJuez, JuezProveedor, ModeloJuez, ResultadoJuez};
 use junit::{Junit, ResultadoTest};
@@ -108,6 +109,12 @@ pub enum ErrorOraculo {
     /// Uso de `oraculo calibrar`: dimensión sin defectos, `n` cero o sin repo bueno. Es error de uso: sale con 2.
     #[error("{0}")]
     Uso(String),
+    /// Otra corrida de `oraculo pendientes` tiene la tarea. No espera: sale con código 3 y nombra al dueño.
+    #[error("{0}")]
+    Ocupado(String),
+    /// `oraculo calibrar --tope-usd`: el tope de gasto detuvo la calibración antes de su último caso. Sale con 3.
+    #[error("{0}")]
+    Tope(String),
 }
 
 impl ErrorOraculo {
@@ -129,6 +136,9 @@ pub struct OpcionesOraculo {
     pub timeout: Duration,
     /// `ROOT_HOME` donde viven los temporales. Sin valor, usa `root_home()`.
     pub home: Option<PathBuf>,
+    /// Partes que corren (Tarea 12). `None`: todas, como en producción. Con partes, las que no corren no
+    /// llaman a su contenedor ni a su juez, y su dimensión queda sin veredicto.
+    pub partes: Option<Partes>,
 }
 
 impl Default for OpcionesOraculo {
@@ -136,8 +146,141 @@ impl Default for OpcionesOraculo {
         OpcionesOraculo {
             timeout: Duration::from_secs(3600),
             home: None,
+            partes: None,
         }
     }
+}
+
+/// Partes de `evaluar` que una calibración puede pedir. Cada una es una llamada a un contenedor, a un
+/// juez o al redactor. `dimension` es la que se calibra: las demás quedan sin veredicto.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Partes {
+    /// Dimensión calibrada. `None` en `todas`: ninguna queda sin veredicto por no correr.
+    pub dimension: Option<Dimension>,
+    /// Descarga: copia de cachés, base de RustSec, inventario de fuentes y imágenes base.
+    pub descarga: bool,
+    /// Juez de la configuración de Cargo. Sus hallazgos van a Entrega.
+    pub juez_config: bool,
+    /// Suite del contrato.
+    pub contrato: bool,
+    /// Suite oculta, con sus repeticiones.
+    pub oculto: bool,
+    /// Entrega: construcción, sonda y escenarios.
+    pub entrega: bool,
+    /// Sondas nativas de Seguridad, Estructura y Arquitectura. No llaman a un contenedor.
+    pub nativas: bool,
+    /// Gitleaks, de Seguridad.
+    pub gitleaks: bool,
+    /// Cargo audit, de Seguridad.
+    pub cargo_audit: bool,
+    /// Clippy, de Estructura.
+    pub clippy: bool,
+    /// Eficiencia: el comando de `[eficiencia]`.
+    pub eficiencia: bool,
+    /// Mutación, de Pruebas: corre el proyecto con cargo mutants.
+    pub mutacion: bool,
+    /// Juez de diseño. Sus hallazgos de rúbrica van a Arquitectura, Estructura o Diseño.
+    pub juez_diseno: bool,
+    /// Redactor del informe. Ninguna dimensión lo necesita, así que `partes_de` lo deja apagado.
+    pub redactor: bool,
+}
+
+impl Partes {
+    /// Todas las partes, sin dimensión calibrada: es lo que corre en producción.
+    pub fn todas() -> Self {
+        Partes {
+            dimension: None,
+            descarga: true,
+            juez_config: true,
+            contrato: true,
+            oculto: true,
+            entrega: true,
+            nativas: true,
+            gitleaks: true,
+            cargo_audit: true,
+            clippy: true,
+            eficiencia: true,
+            mutacion: true,
+            juez_diseno: true,
+            redactor: true,
+        }
+    }
+
+    /// Si `dimension` se mide con estas partes. Sin dimensión calibrada, se miden todas.
+    pub fn mide(&self, dimension: Dimension) -> bool {
+        self.dimension
+            .is_none_or(|calibrada| calibrada == dimension)
+    }
+}
+
+/// Mensaje de la dimensión que una calibración no mide: sin veredicto, no falso.
+const NO_MEDIDA: &str = "no medida en esta calibración";
+
+/// Partes que necesita cada dimensión para dar su puntaje (Tarea 12). Con sus rúbricas, el juez de diseño
+/// entra solo si la dimensión tiene ítems del juez.
+/// - Funciona: descarga, contrato, oculto y Entrega (los escenarios; `partes_de` no ve la tarea).
+/// - Seguridad: descarga, sondas nativas, gitleaks y cargo audit. Sin juez: no tiene ítems del juez.
+/// - Eficiencia: descarga y el comando de `[eficiencia]`.
+/// - Estructura, Arquitectura y Diseño con ítems del juez: todas las sondas y la Entrega, porque el juez
+///   ve los hallazgos de todas. Corre el juez de diseño. Sin ítems del juez, solo sus sondas.
+/// - Completitud: descarga, oculto y Entrega (los escenarios de los requisitos).
+/// - Entrega: descarga, el juez de la configuración (su hallazgo va a Entrega) y la Entrega.
+/// - Pruebas: descarga y la mutación.
+///
+/// El redactor no mide ninguna dimensión: ninguna parte lo pide.
+pub fn partes_de(dimension: Dimension, rubricas: &[Rubrica]) -> Partes {
+    let mut p = Partes {
+        dimension: Some(dimension),
+        descarga: true,
+        ..Partes::default()
+    };
+    let juzga = rubrica_del_juez(rubricas, dimension).is_some();
+    match dimension {
+        Dimension::Funciona => {
+            p.contrato = true;
+            p.oculto = true;
+            p.entrega = true;
+        }
+        Dimension::Seguridad => {
+            p.nativas = true;
+            p.gitleaks = true;
+            p.cargo_audit = true;
+        }
+        Dimension::Eficiencia => p.eficiencia = true,
+        Dimension::Completitud => {
+            p.oculto = true;
+            p.entrega = true;
+        }
+        Dimension::Entrega => {
+            p.juez_config = true;
+            p.entrega = true;
+        }
+        Dimension::Pruebas => p.mutacion = true,
+        Dimension::Estructura | Dimension::Arquitectura | Dimension::Diseno => {
+            if juzga {
+                // El juez ve los hallazgos de todas las sondas y de la Entrega: todas corren.
+                p.juez_diseno = true;
+                p.entrega = true;
+                p.nativas = true;
+                p.gitleaks = true;
+                p.cargo_audit = true;
+                p.clippy = true;
+                p.eficiencia = true;
+                p.mutacion = true;
+            } else {
+                // Sin ítems del juez, cada una mide solo sus sondas. Diseño no tiene sondas: nada más.
+                match dimension {
+                    Dimension::Estructura => {
+                        p.nativas = true;
+                        p.clippy = true;
+                    }
+                    Dimension::Arquitectura => p.nativas = true,
+                    _ => {}
+                }
+            }
+        }
+    }
+    p
 }
 
 /// Lo que cada suite necesita para correr: la copia del repo, la salida, las opciones
@@ -162,6 +305,8 @@ enum Suite {
 
 /// Evalúa `repo` con la tarea: corre el contrato y el oculto sobre una copia del repo, y las sondas.
 pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> {
+    // Todo lo que escribe la evaluación va a `home`: `root.toml`, `eventos.jsonl` y temporales.
+    let home = o.home.clone().unwrap_or_else(root_home);
     // Las sondas no montan el oráculo: los tests ocultos no entran a sus contenedores (A2).
     let herramientas = |p: &Preparada| -> Box<dyn EjecutorHerramienta> {
         Box::new(EjecutorContenedor {
@@ -171,9 +316,9 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
             rustsec: p.rustsec.clone(),
             cache: p.cache.clone(),
             timeout: o.timeout,
+            home: home.clone(),
         })
     };
-    let home = o.home.clone().unwrap_or_else(root_home);
     // Un root.toml que no carga no evalúa: las reglas de decisión tienen que ser las del usuario.
     let cfg = Config::cargar(&home.join("root.toml"))
         .map_err(|e| ErrorOraculo::Configuracion(e.codigo_de_salida(), e.to_string()))?;
@@ -181,16 +326,24 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
         .map_err(|e| ErrorOraculo::Infra(format!("rúbricas embebidas: {e}")))?;
     let calibracion = Calibraciones::cargar(&home)?;
     let mut avisos = Vec::new();
-    let juez_config = juez_config_de_produccion(&cfg, &mut avisos);
+    let partes = o.partes.unwrap_or_else(Partes::todas);
+    // Un juez o el redactor que las partes no piden no se arma: no hay nada que llamar ni gastar.
+    let juez_config = partes
+        .juez_config
+        .then(|| juez_config_de_produccion(&home, &cfg, &mut avisos))
+        .flatten();
     // Sin ítems del juez en las rúbricas, no se arma: no hay nada que llamar ni gastar.
-    let juez = juez::hay_pedidos(&rubricas)
-        .then(|| juez_diseno_de_produccion(&mut avisos))
+    let juez = (partes.juez_diseno && juez::hay_pedidos(&rubricas))
+        .then(|| juez_diseno_de_produccion(&home, &mut avisos))
         .flatten();
     let nombre = juez
         .as_ref()
         .and_then(|j| j.eleccion.modelo.clone())
         .unwrap_or_default();
-    let redactor = redactor_de_produccion(&mut avisos);
+    let redactor = partes
+        .redactor
+        .then(|| redactor_de_produccion(&home, &mut avisos))
+        .flatten();
     let deps = Dependencias {
         correr: &correr_en_podman,
         herramientas: &herramientas,
@@ -202,6 +355,8 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
         reglas: cfg.decision.clone(),
         redactor: redactor.as_ref().map(|r| r as &dyn Redactor),
         avisos,
+        podman: &PodmanReal,
+        escenarios: &FabricaReal,
     };
     evaluar_con(repo, tarea, o, deps)
 }
@@ -211,8 +366,12 @@ const CORRIDA_JUEZ_DISENO: &str = "oraculo-juez-diseno";
 
 /// Juez de la configuración de Cargo de producción. Sin modelo válido, no hay juez y el aviso lo dice.
 /// La descarga sigue y el juicio queda sin veredicto.
-fn juez_config_de_produccion(cfg: &Config, avisos: &mut Vec<String>) -> Option<JuezProveedor> {
-    match descarga::juez_config::juez_config_real(cfg) {
+fn juez_config_de_produccion(
+    home: &Path,
+    cfg: &Config,
+    avisos: &mut Vec<String>,
+) -> Option<JuezProveedor> {
+    match descarga::juez_config::juez_config_real_en(home, cfg) {
         Ok(juez) => Some(juez),
         Err(e) => {
             avisos.push(format!("juez de la configuración sin armar: {e}"));
@@ -223,16 +382,17 @@ fn juez_config_de_produccion(cfg: &Config, avisos: &mut Vec<String>) -> Option<J
 
 /// Juez de diseño de producción: la elección de Route para `juzga`, con su respaldo. Sin presupuesto o
 /// sin elección válida, no hay juez y el aviso lo dice.
-fn juez_diseno_de_produccion(avisos: &mut Vec<String>) -> Option<JuezProveedor> {
+fn juez_diseno_de_produccion(home: &Path, avisos: &mut Vec<String>) -> Option<JuezProveedor> {
     let tokens = juez::LimitesPrompt::default().max_tokens;
-    let eleccion = match crate::route::comando::rutear(Rol::Juzga, "diseno", false, tokens) {
+    let eleccion = match crate::route::comando::rutear_en(home, Rol::Juzga, "diseno", false, tokens)
+    {
         Ok(eleccion) => eleccion,
         Err(e) => {
             avisos.push(format!("juez de diseño sin armar: {e}"));
             return None;
         }
     };
-    match JuezProveedor::nuevo(eleccion, CORRIDA_JUEZ_DISENO.into()) {
+    match JuezProveedor::nuevo_en(home, eleccion, CORRIDA_JUEZ_DISENO.into()) {
         Ok(juez) => Some(juez),
         Err(e) => {
             avisos.push(format!("juez de diseño sin armar: {e}"));
@@ -243,12 +403,18 @@ fn juez_diseno_de_produccion(avisos: &mut Vec<String>) -> Option<JuezProveedor> 
 
 /// Redactor de producción del informe: la elección de Route para `delega`. Sin elección válida, no hay
 /// redactor y el resumen queda determinista; el aviso lo dice.
-fn redactor_de_produccion(avisos: &mut Vec<String>) -> Option<RedactorProveedor> {
-    match crate::route::comando::rutear(Rol::Delega, "informe", false, informe::MAX_TOKENS_REDACTOR)
-    {
+fn redactor_de_produccion(home: &Path, avisos: &mut Vec<String>) -> Option<RedactorProveedor> {
+    match crate::route::comando::rutear_en(
+        home,
+        Rol::Delega,
+        "informe",
+        false,
+        informe::MAX_TOKENS_REDACTOR,
+    ) {
         Ok(eleccion) => Some(RedactorProveedor {
             eleccion,
             corrida: CORRIDA_INFORME.into(),
+            home: home.to_path_buf(),
         }),
         Err(e) => {
             avisos.push(format!("redactor del informe sin armar: {e}"));
@@ -282,6 +448,10 @@ struct Dependencias<'a> {
     redactor: Option<&'a dyn Redactor>,
     /// Avisos que se conocen antes de evaluar, como un juez que no se pudo armar.
     avisos: Vec<String>,
+    /// Podman de la construcción sin red (Tarea 9d2). Producción pasa el real.
+    podman: &'a dyn Podman,
+    /// Arranca los contenedores de escenario de la imagen construida. Producción pasa la real.
+    escenarios: &'a dyn FabricaEscenarios,
 }
 
 /// Lo que la descarga deja listo para las sondas: la copia del repo y las cachés que monta cada contenedor.
@@ -314,7 +484,8 @@ fn evaluar_con(
     o: &OpcionesOraculo,
     deps: Dependencias,
 ) -> Result<Veredicto, ErrorOraculo> {
-    verificar_ficha(tarea)?;
+    let texto_spec = verificar_ficha(tarea)?;
+    let partes = o.partes.unwrap_or_else(Partes::todas);
     let rubricas = rubrica::etiquetas(deps.rubricas);
     let repo = fs::canonicalize(repo)
         .map_err(|e| ErrorOraculo::Infra(format!("no existe el repo {}: {e}", repo.display())))?;
@@ -326,6 +497,10 @@ fn evaluar_con(
     let mut avisos = deps.avisos;
     avisos.extend(avisos_colab);
     avisos.extend(aviso_commit);
+    avisos.extend(pendientes::aviso_de_red(&colab));
+    // Las ambigüedades de la revisión guardada del juez para este spec (Tarea 30, parte 1).
+    let (ambiguedades, aviso_ficha) = ambiguedades_de_la_ficha(&texto_spec, &home);
+    avisos.extend(aviso_ficha);
     let tmp = home.join(CARPETA_TEMPORALES);
     fs::create_dir_all(&tmp).map_err(|e| infra("directorio temporal de ROOT_HOME", e))?;
     limpiar_temporales(&tmp, SystemTime::now());
@@ -334,11 +509,25 @@ fn evaluar_con(
     let repo_copia = copia.path().join("repo");
     copiar_repo(&repo, &repo_copia).map_err(|e| infra("copia del repo", e))?;
     // Cada juez suma el costo de sus llamadas. El de la configuración va antes que las suites.
-    let juez_config = deps.juez_config.map(Medido::nuevo);
+    let juez_config = deps
+        .juez_config
+        .filter(|_| partes.juez_config)
+        .map(Medido::nuevo);
     let juez_config_ref = juez_config.as_ref().map(|m| m as &dyn ModeloJuez);
-    // La descarga va antes de cualquier suite: es la única fase con red (decisión 17).
-    let (preparacion, _, _) =
-        descarga::preparar_con_juez(&repo_copia, tarea, &home, o.timeout, juez_config_ref)?;
+    // La descarga va antes de cualquier suite: es la única fase con red (decisión 17). Sin parte que la
+    // necesite, no corre: no hay cachés, base de RustSec ni imágenes base (Tarea 12).
+    let (preparacion, imagenes) = if partes.descarga {
+        let (preparacion, imagenes, _) =
+            descarga::preparar_con_juez(&repo_copia, tarea, &home, o.timeout, juez_config_ref)?;
+        (preparacion, imagenes)
+    } else {
+        let vacia = descarga::Preparacion::Lista {
+            cache: None,
+            rustsec: None,
+            hallazgos: Vec::new(),
+        };
+        (vacia, Vec::new())
+    };
     let (cache, rustsec, hallazgos) = match preparacion {
         descarga::Preparacion::Lista {
             cache,
@@ -347,7 +536,8 @@ fn evaluar_con(
         } => (cache, rustsec, hallazgos),
         descarga::Preparacion::SinVeredicto(hallazgos) => {
             let motivo = motivo_de_la_descarga(&hallazgos);
-            let v = sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
+            let mut v = sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
+            v.ambiguedades = ambiguedades.clone();
             return Ok(con_costo(v, &juez_config));
         }
     };
@@ -365,22 +555,28 @@ fn evaluar_con(
         rustsec: rustsec.clone(),
         home: &home,
     };
-    // El contrato no tiene exclusiones: solo el oculto las usa.
-    let contrato = match evaluar_suite(
-        &corrida,
-        &tarea.contrato,
-        DIR_CONTRATO,
-        XML_CONTRATO,
-        &BTreeSet::new(),
-        deps.correr,
-    )? {
-        Suite::Clasificada(c) => c,
-        Suite::SinVeredicto(motivo) => {
-            avisos.push(format!("contrato: {motivo}"));
-            let motivo = format!("suite del contrato sin veredicto: {motivo}");
-            let v = sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
-            return Ok(con_costo(v, &juez_config));
+    // El contrato no tiene exclusiones: solo el oculto las usa. Una suite que la parte no pide no corre.
+    let contrato = if partes.contrato {
+        match evaluar_suite(
+            &corrida,
+            &tarea.contrato,
+            DIR_CONTRATO,
+            XML_CONTRATO,
+            &BTreeSet::new(),
+            deps.correr,
+        )? {
+            Suite::Clasificada(c) => c,
+            Suite::SinVeredicto(motivo) => {
+                avisos.push(format!("contrato: {motivo}"));
+                let motivo = format!("suite del contrato sin veredicto: {motivo}");
+                let mut v =
+                    sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
+                v.ambiguedades = ambiguedades.clone();
+                return Ok(con_costo(v, &juez_config));
+            }
         }
+    } else {
+        Clasificacion::default()
     };
     let excluidos: BTreeSet<String> = tarea
         .entorno
@@ -388,21 +584,27 @@ fn evaluar_con(
         .chain(&tarea.oraculo_dudoso)
         .map(|e| e.test.clone())
         .collect();
-    let oculto = match evaluar_suite(
-        &corrida,
-        &tarea.oculto,
-        DIR_OCULTO,
-        XML_OCULTO,
-        &excluidos,
-        deps.correr,
-    )? {
-        Suite::Clasificada(c) => c,
-        Suite::SinVeredicto(motivo) => {
-            avisos.push(format!("oculto: {motivo}"));
-            let motivo = format!("suite oculta sin veredicto: {motivo}");
-            let v = sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
-            return Ok(con_costo(v, &juez_config));
+    let oculto = if partes.oculto {
+        match evaluar_suite(
+            &corrida,
+            &tarea.oculto,
+            DIR_OCULTO,
+            XML_OCULTO,
+            &excluidos,
+            deps.correr,
+        )? {
+            Suite::Clasificada(c) => c,
+            Suite::SinVeredicto(motivo) => {
+                avisos.push(format!("oculto: {motivo}"));
+                let motivo = format!("suite oculta sin veredicto: {motivo}");
+                let mut v =
+                    sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
+                v.ambiguedades = ambiguedades.clone();
+                return Ok(con_costo(v, &juez_config));
+            }
         }
+    } else {
+        Clasificacion::default()
     };
     let preparada = Preparada {
         repo: repo_copia.clone(),
@@ -410,7 +612,23 @@ fn evaluar_con(
         rustsec,
     };
     let ej = (deps.herramientas)(&preparada);
-    let juez_diseno = deps.juez.map(Medido::nuevo);
+    // La Entrega sale de `entregar_con`: construcción, sonda y escenarios en una sola pasada (desempate 7).
+    // Un error de infraestructura deja Entrega sin veredicto con su motivo, como un error del ejecutor.
+    let entrega = if partes.entrega {
+        entrega::entregar_con(
+            ej.as_ref(),
+            &repo_copia,
+            tarea,
+            &home,
+            &imagenes,
+            deps.podman,
+            deps.escenarios,
+        )
+        .unwrap_or_else(|error| entrega::entrega_sin_veredicto(error.to_string()))
+    } else {
+        entrega::entrega_sin_veredicto(NO_MEDIDA.into())
+    };
+    let juez_diseno = deps.juez.filter(|_| partes.juez_diseno).map(Medido::nuevo);
     let juez = JuezDiseno {
         modelo: juez_diseno.as_ref().map(|m| m as &dyn ModeloJuez),
         nombre: deps.modelo_juez,
@@ -424,6 +642,8 @@ fn evaluar_con(
         &oculto,
         &hallazgos,
         &juez,
+        entrega,
+        &partes,
     )?;
     let mut tasas = BTreeMap::new();
     for (id, tasa) in &contrato.tasas {
@@ -435,6 +655,8 @@ fn evaluar_con(
     let mut todos = hallazgos;
     todos.extend(medicion.hallazgos);
     avisos.extend(medicion.avisos);
+    let mut pendientes_del_veredicto = pendientes::desde(tarea, &colab);
+    pendientes_del_veredicto.extend(medicion.pendientes);
     let mut puntajes = medicion.puntajes;
     deps.calibracion.aplicar(&tarea.nombre, &mut puntajes);
     let sin_calibrar = sin_calibrar(&puntajes);
@@ -457,13 +679,18 @@ fn evaluar_con(
         inestables: oculto.inestables.clone(),
         inestables_contrato: contrato.inestables.clone(),
         tasas,
-        pendientes: pendientes::desde(tarea, &colab),
+        pendientes: pendientes_del_veredicto,
         avisos,
         requisitos: medicion.requisitos,
         sin_calibrar,
+        ocultos_fallidos: fallidos_de(&oculto),
+        ambiguedades,
     };
     // La decisión sale de reglas deterministas; el estado sale de la decisión (Tarea 13b).
-    let redactor_medido = deps.redactor.map(RedactorMedido::nuevo);
+    let redactor_medido = deps
+        .redactor
+        .filter(|_| partes.redactor)
+        .map(RedactorMedido::nuevo);
     let informe = informe::informar_con(
         &veredicto,
         tarea,
@@ -475,6 +702,15 @@ fn evaluar_con(
     veredicto.estado = informe::estado_de(Some(&informe));
     veredicto.informe = Some(informe);
     Ok(veredicto)
+}
+
+/// Ids ordenados de los tests de la suite oculta que fallan de forma estable. Los inestables van aparte.
+fn fallidos_de(c: &Clasificacion) -> Vec<String> {
+    c.estables
+        .iter()
+        .filter(|(_, resultado)| **resultado == ResultadoTest::Falla)
+        .map(|(id, _)| id.clone())
+        .collect()
 }
 
 /// Envoltorio que suma el costo de las llamadas de un juez. `evaluar_con` lo lee para `costo_usd`.
@@ -522,6 +758,8 @@ struct Medicion {
     hallazgos: Vec<Hallazgo>,
     requisitos: Vec<EstadoRequisito>,
     avisos: Vec<String>,
+    /// Lo que la construcción de la Entrega no pudo medir (Tarea 9d2). Va al `Veredicto`.
+    pendientes: Vec<Pendiente>,
 }
 
 /// El juez de diseño que `medir` usa: el modelo si se armó, su nombre y las rúbricas de la evaluación.
@@ -541,7 +779,9 @@ struct Juicio {
 }
 
 /// Mide las nueve dimensiones con las sondas, los requisitos y el juez de diseño. `descarga` son los
-/// hallazgos de la descarga: los que tocan una dimensión con sondas entran a su puntaje.
+/// hallazgos de la descarga: los que tocan una dimensión con sondas entran a su puntaje. `partes` dice qué
+/// corre: lo que no corre no llama a su contenedor, y su dimensión no se mide (Tarea 12).
+#[allow(clippy::too_many_arguments)]
 fn medir(
     tarea: &Tarea,
     repo: &Path,
@@ -550,9 +790,10 @@ fn medir(
     oculto: &Clasificacion,
     descarga: &[Hallazgo],
     juez: &JuezDiseno,
+    entrega: ResultadoEntrega,
+    partes: &Partes,
 ) -> Result<Medicion, ErrorOraculo> {
     let resultados = requisitos::desde_clasificacion(oculto);
-    let entrega = entrega::sonda_entrega(ej, repo, tarea);
     let estados = requisitos::evaluar_requisitos(
         &tarea.requisito,
         &resultados,
@@ -561,10 +802,34 @@ fn medir(
         &tarea.oraculo_dudoso,
         &BTreeMap::new(),
     );
-    let mutacion = mutacion::sonda_mutacion(ej, tarea);
-    let mut sondas = vec![entrega.sonda.clone(), mutacion.sonda.clone()];
-    sondas.extend(perfiles::sondas_nativas(repo, tarea));
-    sondas.extend(perfiles::herramientas::sondas_herramientas(ej, tarea, repo));
+    // El orden de las sondas es el de siempre: la Entrega, la mutación, las nativas y las de herramientas.
+    let mut sondas = vec![entrega.sonda.clone()];
+    if partes.mutacion {
+        sondas.push(mutacion::sonda_mutacion(ej, tarea).sonda);
+    }
+    if partes.nativas {
+        sondas.extend(perfiles::sondas_nativas(repo, tarea));
+    }
+    let pedidas: Vec<perfiles::herramientas::Herramienta> = [
+        (
+            partes.gitleaks,
+            perfiles::herramientas::Herramienta::Gitleaks,
+        ),
+        (
+            partes.cargo_audit,
+            perfiles::herramientas::Herramienta::CargoAudit,
+        ),
+        (partes.clippy, perfiles::herramientas::Herramienta::Clippy),
+        (
+            partes.eficiencia,
+            perfiles::herramientas::Herramienta::Eficiencia,
+        ),
+    ]
+    .into_iter()
+    .filter(|(pedida, _)| *pedida)
+    .map(|(_, herramienta)| herramienta)
+    .collect();
+    sondas.extend(perfiles::herramientas::sondas_de(ej, tarea, repo, &pedidas));
     let mut hallazgos: Vec<Hallazgo> = sondas.iter().flat_map(|s| s.hallazgos.clone()).collect();
     // El juez ve los hallazgos de las sondas (el ciclo de módulos topa `diseno.modularidad`).
     let juicio = juzgar_diseno(tarea, juez, repo, &hallazgos)?;
@@ -582,6 +847,8 @@ fn medir(
     let puntajes = DIMENSIONES
         .iter()
         .map(|&dimension| match dimension {
+            // Una dimensión que la calibración no pidió no se mide: sin veredicto, no un puntaje falso.
+            _ if !partes.mide(dimension) => sin_veredicto_puntaje(dimension, NO_MEDIDA.into()),
             Dimension::Funciona => funciona(tarea, contrato, oculto, &entrega.escenarios),
             Dimension::Diseno => puntaje_diseno(juez, resultado.as_ref(), &topes),
             Dimension::Completitud => {
@@ -608,11 +875,14 @@ fn medir(
             }
         })
         .collect();
+    let mut avisos = avisos;
+    avisos.extend(entrega.avisos);
     Ok(Medicion {
         puntajes,
         hallazgos,
         requisitos: estados,
         avisos,
+        pendientes: entrega.pendientes,
     })
 }
 
@@ -702,8 +972,8 @@ fn parte_juez(
     if let EstadoJuez::SinVeredicto(causa) = &resultado.estado {
         return Some(sin_veredicto_puntaje(dimension, causa.clone()));
     }
-    let completo = juez::con_faltantes_en_cero(resultado, &rubrica, juez.nombre);
-    let puntuacion = match juez::puntuar_con_juez(&rubrica, &completo, topes, juez.nombre) {
+    // Un ítem sin respuesta queda en `faltantes` y no entra al promedio: no vale 0 (desempate 3).
+    let puntuacion = match juez::puntuar_con_juez(&rubrica, resultado, topes, juez.nombre) {
         Ok(puntuacion) => puntuacion,
         Err(e) => {
             return Some(sin_veredicto_puntaje(dimension, format!("rúbrica: {e}")));
@@ -932,14 +1202,37 @@ fn filtrar_colab_por_commit(
 }
 
 /// Lee el spec de la tarea y exige una ficha válida. Va antes de copiar o descargar nada.
-fn verificar_ficha(tarea: &Tarea) -> Result<(), ErrorOraculo> {
+/// Aviso del veredicto cuando no hay revisión del juez para el spec. Sin ella, las ambigüedades no se miden.
+const AVISO_SIN_REVISION_JUEZ: &str = "ficha sin revisión del juez: ambigüedades sin medir";
+
+/// Lee el spec y exige una ficha válida. Devuelve el texto, que la revisión guardada usa como clave.
+fn verificar_ficha(tarea: &Tarea) -> Result<String, ErrorOraculo> {
     let ruta = tarea.dir.join(&tarea.spec);
     let texto = fs::read_to_string(&ruta).map_err(|fuente| ErrorFicha::Leer {
         ruta: ruta.display().to_string(),
         fuente,
     })?;
     ficha::extraer(&texto)?;
-    Ok(())
+    Ok(texto)
+}
+
+/// Ambigüedades de la revisión guardada del juez para `spec`, como `línea <n>: <frase>`, y el aviso que
+/// corresponde. Sin revisión, el aviso dice que no se midieron. Una revisión ilegible da aviso, no error.
+fn ambiguedades_de_la_ficha(spec: &str, home: &Path) -> (Vec<String>, Option<String>) {
+    match ficha::ambiguedades_guardadas(home, spec) {
+        Ok(Some(ambiguedades)) => (
+            ambiguedades
+                .iter()
+                .map(|a| format!("línea {}: {}", a.linea, a.frase))
+                .collect(),
+            None,
+        ),
+        Ok(None) => (Vec::new(), Some(AVISO_SIN_REVISION_JUEZ.into())),
+        Err(causa) => (
+            Vec::new(),
+            Some(format!("revisión de la ficha ilegible: {causa}")),
+        ),
+    }
 }
 
 /// Veredicto de una evaluación que no corrió: sin conteos, con sus hallazgos y pendientes. Las nueve
@@ -1119,6 +1412,38 @@ pub struct Clasificacion {
     conteo: Conteo,
 }
 
+/// Resultado de un test a través de sus muestras: estable, con su resultado único, o inestable, con
+/// su tasa de aprobación. Lo usan la evaluación en la laptop y la importación de Colab (desempate 28).
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum Muestreo {
+    Estable(ResultadoTest),
+    Inestable(TasaTest),
+}
+
+/// Clasifica las muestras de un test. Cada muestra es el resultado en una corrida, o `None` si el
+/// test no aparece en esa corrida. Es inestable si falta en alguna muestra o si los resultados se
+/// mezclan (Pasa con Falla, o Omite con otro). La tasa cuenta solo las muestras presentes.
+/// Sin ninguna muestra presente no hay nada que clasificar y da `None`.
+pub(super) fn muestreo_de(muestras: &[Option<ResultadoTest>]) -> Option<Muestreo> {
+    let presentes: Vec<ResultadoTest> = muestras.iter().flatten().copied().collect();
+    let primera = *presentes.first()?;
+    let ausente = muestras.iter().any(Option::is_none);
+    let mezcla = presentes.iter().any(|m| *m != primera);
+    if !ausente && !mezcla {
+        return Some(Muestreo::Estable(primera));
+    }
+    let pasa = presentes
+        .iter()
+        .filter(|m| **m == ResultadoTest::Pasa)
+        .count() as u32;
+    let total = presentes.len() as u32;
+    Some(Muestreo::Inestable(TasaTest {
+        pasa,
+        total,
+        wilson_inf: wilson_inferior(pasa, total),
+    }))
+}
+
 /// Clasifica cada test con sus muestras. Cada corrida completa aporta una muestra por test presente.
 /// Un test ausente en una corrida completa es inestable. Las corridas extra solo suman muestras.
 /// Un test es inestable si tiene resultados mezclados (Pasa con Falla, o Omite con otro).
@@ -1137,39 +1462,27 @@ fn clasificar(
         if excluidos.contains(id) {
             continue;
         }
-        let mut muestras: Vec<ResultadoTest> = Vec::new();
-        let mut ausente = false;
-        for j in completas {
-            match j.tests.get(id) {
-                Some(r) => muestras.push(*r),
-                None => ausente = true,
-            }
-        }
-        muestras.extend(extras.iter().filter_map(|j| j.tests.get(id).copied()));
-        let mezcla = muestras
-            .first()
-            .is_some_and(|primera| muestras.iter().any(|m| m != primera));
-        if ausente || mezcla {
-            let pasa = muestras
+        // Las corridas extra solo suman muestras: una que no trae el test no cuenta como ausencia.
+        let mut muestras: Vec<Option<ResultadoTest>> =
+            completas.iter().map(|j| j.tests.get(id).copied()).collect();
+        muestras.extend(
+            extras
                 .iter()
-                .filter(|m| **m == ResultadoTest::Pasa)
-                .count() as u32;
-            let total = muestras.len() as u32;
-            c.inestables.push(id.to_string());
-            c.tasas.insert(
-                id.to_string(),
-                TasaTest {
-                    pasa,
-                    total,
-                    wilson_inf: wilson_inferior(pasa, total),
-                },
-            );
-        } else if let Some(r) = muestras.first().copied() {
-            if r == ResultadoTest::Omite {
+                .filter_map(|j| j.tests.get(id).copied())
+                .map(Some),
+        );
+        match muestreo_de(&muestras) {
+            Some(Muestreo::Inestable(tasa)) => {
+                c.inestables.push(id.to_string());
+                c.tasas.insert(id.to_string(), tasa);
+            }
+            Some(Muestreo::Estable(ResultadoTest::Omite)) => {
                 c.omitidos.insert(id.to_string());
-            } else {
+            }
+            Some(Muestreo::Estable(r)) => {
                 c.estables.insert(id.to_string(), r);
             }
+            None => {}
         }
     }
     let pasa = c
@@ -1380,6 +1693,7 @@ fn registrar_stderr(c: &Corrida, xml: &str, stderr: &str) -> Option<PathBuf> {
 pub fn redactar_para_mcp(mut v: Veredicto) -> Veredicto {
     let ocultos: BTreeSet<String> = informe::ids_ocultos(&v);
     v.inestables.clear();
+    v.ocultos_fallidos.clear();
     v.tasas.retain(|k, _| !k.starts_with("oculto:"));
     v.pendientes.clear();
     v.hallazgos.retain(|h| {
@@ -1458,7 +1772,7 @@ const VARIABLES_GIT_DE_REPO: &[&str] = &[
 ];
 
 /// Comando `git -C <repo>` sin las variables `GIT_*` de `VARIABLES_GIT_DE_REPO` heredadas del entorno.
-fn comando_git(repo: &Path, args: &[&str]) -> Command {
+pub(crate) fn comando_git(repo: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(repo).args(args);
     for nombre in VARIABLES_GIT_DE_REPO {
@@ -1489,6 +1803,9 @@ pub fn codigo_de_estado(estado: Estado) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oracle::contenedor::SalidaPodman;
+    use crate::oracle::entrega::tests::{PodmanFalso, responde_build, salida_ok, salida_sin_red};
+    use crate::oracle::entrega::{CorredorDeEscenario, FabricaEscenarios, Podman};
 
     #[test]
     fn comando_git_quita_las_variables_que_redirigen_el_repo() {
@@ -1623,6 +1940,40 @@ mod tests {
             .as_ref()
             .expect("con suites completas hay informe");
         assert_eq!(v.estado, informe::estado_de(Some(informe)));
+    }
+
+    #[test]
+    fn muestreo_todas_iguales_es_estable() {
+        let m = muestreo_de(&[Some(ResultadoTest::Pasa), Some(ResultadoTest::Pasa)]);
+        assert_eq!(m, Some(Muestreo::Estable(ResultadoTest::Pasa)));
+    }
+
+    #[test]
+    fn muestreo_pasa_y_falla_mezclados_es_inestable_con_tasa() {
+        let m = muestreo_de(&[Some(ResultadoTest::Pasa), Some(ResultadoTest::Falla)]);
+        let Some(Muestreo::Inestable(tasa)) = m else {
+            panic!("debía ser inestable: {m:?}");
+        };
+        assert_eq!((tasa.pasa, tasa.total), (1, 2));
+        assert!((tasa.wilson_inf - wilson_inferior(1, 2)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn muestreo_omite_mezclado_con_pasa_es_inestable() {
+        let m = muestreo_de(&[Some(ResultadoTest::Omite), Some(ResultadoTest::Pasa)]);
+        assert!(matches!(m, Some(Muestreo::Inestable(t)) if (t.pasa, t.total) == (1, 2)));
+    }
+
+    #[test]
+    fn muestreo_ausente_en_una_muestra_es_inestable() {
+        let m = muestreo_de(&[Some(ResultadoTest::Pasa), None]);
+        assert!(matches!(m, Some(Muestreo::Inestable(t)) if (t.pasa, t.total) == (1, 1)));
+    }
+
+    #[test]
+    fn muestreo_sin_ninguna_muestra_no_da_nada() {
+        assert_eq!(muestreo_de(&[None, None]), None);
+        assert_eq!(muestreo_de(&[]), None);
     }
 
     fn junit_de(filas: &[(&str, ResultadoTest)]) -> Junit {
@@ -2175,6 +2526,7 @@ mod tests {
                 test: "test_b::x".into(),
                 motivo: "gpu".into(),
                 colab: None,
+                tasa: None,
             }],
             avisos: vec!["aviso sin ids".into()],
             ..Veredicto::default()
@@ -2247,6 +2599,8 @@ mod tests {
             junit_sha256: "x".into(),
             ts: 1.0,
             commit: commit.into(),
+            tasa: None,
+            confianza: None,
         };
         let colab = BTreeMap::from([
             ("test_a::uno".to_string(), entrada("abc")),
@@ -2431,6 +2785,7 @@ mod tests {
     fn opciones(home: &Path) -> OpcionesOraculo {
         OpcionesOraculo {
             timeout: Duration::from_secs(60),
+            partes: None,
             home: Some(home.to_path_buf()),
         }
     }
@@ -2485,7 +2840,8 @@ mod tests {
     }
 
     #[test]
-    fn oraculo_con_sondas_sanas_solo_diseno_queda_sin_veredicto() {
+    fn oraculo_con_sondas_sanas_solo_diseno_y_arquitectura_quedan_sin_veredicto() {
+        // El repo de la prueba tiene un solo `src/lib.rs`: sin módulos, Arquitectura no tiene análisis (Tarea 28).
         let base = tempfile::tempdir().expect("base");
         let v = veredicto_sano(base.path());
         let sin: Vec<Dimension> = v
@@ -2494,7 +2850,12 @@ mod tests {
             .filter(|p| p.sin_veredicto.is_some())
             .map(|p| p.dimension)
             .collect();
-        assert_eq!(sin, vec![Dimension::Diseno], "{:?}", v.puntajes);
+        assert_eq!(
+            sin,
+            vec![Dimension::Arquitectura, Dimension::Diseno],
+            "{:?}",
+            v.puntajes
+        );
         assert_eq!(v.global, None);
     }
 
@@ -2680,11 +3041,44 @@ mod tests {
     }
 
     #[test]
-    fn oraculo_veredicto_lleva_las_etiquetas_de_rubrica() {
+    fn oraculo_veredicto_lleva_las_nueve_etiquetas_de_rubrica() {
         let base = tempfile::tempdir().expect("base");
-        let v = veredicto_sano(base.path());
-        let esperadas = rubrica::etiquetas(&rubrica::cargar_embebidas().expect("rúbricas"));
-        assert_eq!(v.rubricas, esperadas);
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let embebidas = rubrica::cargar_embebidas().expect("rúbricas");
+        let fabrica = herramientas(&[]);
+        let deps = Dependencias {
+            rubricas: &embebidas,
+            ..deps_de(&correr, &fabrica)
+        };
+        let v = evaluar_con(&repo, &tarea, &opciones(&home), deps).expect("evalúa");
+        assert_eq!(v.rubricas.len(), 9, "{:?}", v.rubricas);
+        assert_eq!(v.rubricas, rubrica::etiquetas(&embebidas));
+    }
+
+    #[test]
+    fn oraculo_redaccion_mcp_quita_los_ids_de_ocultos_fallidos() {
+        let informe = crate::tipos::Informe {
+            decision: crate::tipos::Decision::NoListo,
+            motivo: "test_oculto_fuera_de_requisitos: test_b::t9".into(),
+            requisitos: Vec::new(),
+            riesgos: Vec::new(),
+            proximos_pasos: Vec::new(),
+            bloqueantes: Vec::new(),
+            resumen: "Resumen sin ids de tests.".into(),
+            confianza: crate::tipos::Confianza::default(),
+        };
+        let v = Veredicto {
+            ocultos_fallidos: vec!["test_b::t9".into()],
+            informe: Some(informe),
+            ..Veredicto::default()
+        };
+        let r = redactar_para_mcp(v);
+        let texto = serde_json::to_string(&r).expect("json");
+        assert!(!texto.contains("test_b::t9"), "{texto}");
+        assert!(r.ocultos_fallidos.is_empty());
     }
 
     #[test]
@@ -2734,6 +3128,8 @@ mod tests {
             reglas: ReglasDecision::default(),
             redactor: None,
             avisos: Vec::new(),
+            podman: &PodmanNoUsado,
+            escenarios: &FabricaSinContenedores,
         }
     }
 
@@ -2876,6 +3272,30 @@ mod tests {
         assert!((diseno.valor - 2.0 / 3.0).abs() < 1e-6, "{}", diseno.valor);
         assert_eq!(juez.llamadas(), 1);
         assert!((v.costo_usd - 0.25).abs() < 1e-9, "{}", v.costo_usd);
+    }
+
+    #[test]
+    fn oraculo_diseno_item_del_juez_sin_respuesta_no_baja_la_dimension() {
+        // El juez responde solo `diseno.modularidad` (peso 3, nivel 2). `diseno.tope` (mixto, peso 1)
+        // queda en `faltantes`: no vale 0. Diseño es 2/3, el valor del ítem respondido.
+        let r = ResultadoJuez {
+            estado: EstadoJuez::Ok,
+            niveles: BTreeMap::from([(MODULARIDAD_ID.to_string(), 2)]),
+            items: Vec::new(),
+            hallazgos: Vec::new(),
+            descartes: Vec::new(),
+            faltantes: vec![TOPE_ID.to_string()],
+        };
+        let rubricas = [rubrica_diseno()];
+        let juez = JuezDiseno {
+            modelo: None,
+            nombre: MODELO_JUEZ,
+            rubricas: &rubricas,
+        };
+        let p = puntaje_diseno(&juez, Some(&r), &BTreeMap::new());
+        assert_eq!(p.sin_veredicto, None, "{p:?}");
+        let valor = p.valor;
+        assert!((valor - 2.0 / 3.0).abs() < 1e-6, "{valor}");
     }
 
     #[test]
@@ -3203,6 +3623,7 @@ mod tests {
             especificidad: Some(0.95),
             exactitud_balanceada: Some(0.95),
             items: BTreeMap::new(),
+            incompleta: false,
         })
         .collect();
         let calibracion = Calibraciones {
@@ -3265,5 +3686,811 @@ mod tests {
         let con_motivo = juntar_partes(Dimension::Estructura, sondas, sin);
         assert_eq!(con_motivo.sin_veredicto.as_deref(), Some("juez no corrido"));
         assert_eq!(con_motivo.valor, 0.0);
+    }
+
+    // ---- Tarea 28, parte 1: la Entrega del veredicto sale de `entregar_con` (desempate 7) ----
+
+    /// Dockerfile de la prueba: `FROM scratch` no baja ninguna imagen, así que la descarga no llama a podman.
+    const DF_RUN_FALSO: &str = "FROM scratch\nRUN false\nUSER app\n";
+
+    /// Podman que no debe usarse. Las pruebas que no construyen lo dejan por defecto.
+    struct PodmanNoUsado;
+
+    impl Podman for PodmanNoUsado {
+        fn correr(&self, args: &[&str], _plazo: Duration) -> Result<SalidaPodman, ErrorOraculo> {
+            Err(ErrorOraculo::Infra(format!(
+                "la prueba no debía llamar a podman: {args:?}"
+            )))
+        }
+    }
+
+    /// Fábrica de escenarios que no arranca nada: el escenario cae al contenedor de evaluación.
+    struct FabricaSinContenedores;
+
+    impl FabricaEscenarios for FabricaSinContenedores {
+        fn iniciar(
+            &self,
+            _imagen: &str,
+            _escenarios: Option<&Path>,
+        ) -> Result<Box<dyn CorredorDeEscenario + '_>, String> {
+            Err("sin contenedor de escenario en esta prueba".into())
+        }
+    }
+
+    /// Salida de un `RUN false` que falla dentro de la imagen, con el paso 2 de 2.
+    fn salida_run_falso() -> SalidaPodman {
+        SalidaPodman {
+            codigo: 1,
+            stdout: "STEP 1/2: FROM scratch\nSTEP 2/2: RUN false\n".into(),
+            stderr: "Error: building at STEP \"RUN false\": exit status 1\n".into(),
+        }
+    }
+
+    /// Dependencias de la tarea de Rust con un podman falso y la fábrica de escenarios sin contenedores.
+    fn deps_con_podman<'a>(
+        correr: Correr<'a>,
+        herramientas: FabricaHerramientas<'a>,
+        podman: &'a dyn Podman,
+    ) -> Dependencias<'a> {
+        Dependencias {
+            podman,
+            ..deps_de(correr, herramientas)
+        }
+    }
+
+    #[test]
+    fn oraculo_hallazgo_de_la_construccion_llega_al_veredicto_en_entrega() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        fs::write(repo.join("Dockerfile"), DF_RUN_FALSO).expect("Dockerfile");
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let fabrica = herramientas(&[]);
+        let podman = PodmanFalso::nuevo(responde_build(salida_run_falso(), salida_ok()));
+        let deps = deps_con_podman(&correr, &fabrica, &podman);
+        let v = evaluar_con_deps(base.path(), &repo, deps);
+        let hallazgo = v.hallazgos.iter().find(|h| {
+            h.dimension == Dimension::Entrega && h.detalle == "la imagen no construye: línea 2"
+        });
+        assert!(hallazgo.is_some(), "{:?}", v.hallazgos);
+        let entrega = puntaje_de_prueba(&v, Dimension::Entrega);
+        assert_eq!(entrega.sin_veredicto, None, "{entrega:?}");
+    }
+
+    #[test]
+    fn oraculo_construccion_sin_veredicto_deja_entrega_sin_veredicto_con_su_motivo() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        // Una variable sin valor: la imagen base no se resuelve y la construcción no da veredicto.
+        fs::write(repo.join("Dockerfile"), "FROM ${NO_DEFINIDA}\nUSER app\n").expect("Dockerfile");
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let fabrica = herramientas(&[]);
+        let podman = PodmanFalso::nuevo(responde_build(salida_ok(), salida_ok()));
+        let deps = deps_con_podman(&correr, &fabrica, &podman);
+        let v = evaluar_con_deps(base.path(), &repo, deps);
+        let entrega = puntaje_de_prueba(&v, Dimension::Entrega);
+        let motivo = entrega
+            .sin_veredicto
+            .as_deref()
+            .expect("entrega sin veredicto");
+        assert!(motivo.contains("imagen base sin resolver"), "{motivo}");
+        assert!(podman.builds().is_empty(), "{:?}", podman.builds());
+    }
+
+    #[test]
+    fn oraculo_sin_dockerfile_no_llama_a_podman_y_entrega_da_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let fabrica = herramientas(&[]);
+        let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), salida_sin_red()));
+        let deps = deps_con_podman(&correr, &fabrica, &podman);
+        let v = evaluar_con_deps(base.path(), &repo, deps);
+        assert_eq!(podman.total(), 0, "{:?}", podman.builds());
+        let entrega = puntaje_de_prueba(&v, Dimension::Entrega);
+        assert_eq!(entrega.sin_veredicto, None, "{entrega:?}");
+    }
+
+    #[test]
+    fn oraculo_pendiente_y_aviso_de_la_construccion_llegan_al_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        fs::write(
+            repo.join("Dockerfile"),
+            "FROM scratch\nRUN apt-get install -y curl\nUSER app\n",
+        )
+        .expect("Dockerfile");
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let fabrica = herramientas(&[]);
+        // Sin red, el `RUN` falla por la resolución de nombres, y con red también: queda pendiente.
+        let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), salida_sin_red()));
+        let deps = deps_con_podman(&correr, &fabrica, &podman);
+        let v = evaluar_con_deps(base.path(), &repo, deps);
+        assert!(
+            v.pendientes
+                .iter()
+                .any(|p| p.test == "dockerfile::build" && p.motivo.contains("línea 2")),
+            "{:?}",
+            v.pendientes
+        );
+        assert!(
+            v.avisos
+                .iter()
+                .any(|a| a.contains("la construcción con red tampoco tuvo red")),
+            "{:?}",
+            v.avisos
+        );
+    }
+
+    // --- Tarea 30, parte 1: las ambigüedades de la ficha llegan al informe ---
+
+    /// Frase de `SPEC` que la revisión guardada cita (línea 38).
+    const FRASE_SPEC: &str = "un lock por fragmento del almacén";
+    const AVISO_SIN_REVISION: &str = "ficha sin revisión del juez: ambigüedades sin medir";
+
+    /// Guarda en `home` la revisión del juez de `spec`, con una ambigüedad de `FRASE_SPEC`.
+    fn revision_del_juez_para(home: &Path, spec: &str) {
+        let revision = ficha::Revision {
+            hallazgos: Vec::new(),
+            ambiguedades: vec![ficha::Ambiguedad {
+                frase: FRASE_SPEC.into(),
+                linea: 38,
+                lectura_a: "lock por fragmento de clave".into(),
+                lectura_b: "lock por fragmento de nodo".into(),
+            }],
+            juez: "ok".into(),
+            descartadas: Vec::new(),
+        };
+        ficha::guardar_revision(home, spec, &revision).expect("guarda la revisión");
+    }
+
+    #[test]
+    fn oraculo_ambiguedad_guardada_llega_a_la_confianza_del_informe() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = base.path().join("home");
+        revision_del_juez_para(&home, SPEC);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(base.path(), &repo, deps_de(&correr, &herramientas(&[])));
+        let esperada = format!("línea 38: {FRASE_SPEC}");
+        assert_eq!(v.ambiguedades, vec![esperada.clone()]);
+        let informe = v.informe.as_ref().expect("hay informe");
+        assert_eq!(informe.confianza.ambiguedades, vec![esperada]);
+        assert!(
+            !v.avisos.iter().any(|a| a == AVISO_SIN_REVISION),
+            "{:?}",
+            v.avisos
+        );
+    }
+
+    #[test]
+    fn oraculo_ambiguedad_de_otro_spec_no_se_muestra_y_avisa_sin_medir() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        // La caché de Rust evita la descarga; la revisión es del spec original.
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        revision_del_juez_para(&home, SPEC);
+        // La tarea trae el spec con un byte más: otro hash, otra revisión.
+        let tarea = tarea_rust(base.path());
+        fs::write(base.path().join("tarea/spec.md"), format!("{SPEC}\n")).expect("spec cambiado");
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let fabrica = herramientas(&[]);
+        let deps = deps_de(&correr, &fabrica);
+        let v = evaluar_con(&repo, &tarea, &opciones(&home), deps).expect("evalúa");
+        assert!(v.ambiguedades.is_empty(), "{:?}", v.ambiguedades);
+        let informe = v.informe.as_ref().expect("hay informe");
+        assert!(informe.confianza.ambiguedades.is_empty());
+        assert!(
+            v.avisos.iter().any(|a| a == AVISO_SIN_REVISION),
+            "{:?}",
+            v.avisos
+        );
+    }
+
+    #[test]
+    fn oraculo_revision_de_ficha_ilegible_da_aviso_y_no_falla() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = base.path().join("home");
+        let carpeta = home.join("fichas");
+        fs::create_dir_all(&carpeta).expect("carpeta");
+        fs::write(
+            carpeta.join(format!("{}.json", ficha::sha_del_spec(SPEC))),
+            "{no es json",
+        )
+        .expect("escribe la revisión rota");
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(base.path(), &repo, deps_de(&correr, &herramientas(&[])));
+        assert!(v.ambiguedades.is_empty());
+        assert!(
+            v.avisos
+                .iter()
+                .any(|a| a.starts_with("revisión de la ficha ilegible")),
+            "{:?}",
+            v.avisos
+        );
+    }
+
+    // --- Tarea 30, parte 2: aviso de corrida de Colab con red en el veredicto ---
+
+    /// Escribe el `colab.json` de la tarea de Rust en `home`. Cada entrada: (test, commit, con marca de red).
+    fn colab_json(home: &Path, entradas: &[(&str, &str, bool)]) {
+        let piezas: Vec<String> = entradas
+            .iter()
+            .map(|(test, commit, con_marca)| {
+                let marca = if *con_marca {
+                    format!(r#","confianza":"{}""#, pendientes::CONFIANZA_CON_RED)
+                } else {
+                    String::new()
+                };
+                format!(
+                    r#""{test}":{{"resultado":"pasa","junit_sha256":"x","ts":1.0,"commit":"{commit}"{marca}}}"#
+                )
+            })
+            .collect();
+        let dir = home.join("evidencia").join("tarea-rust");
+        fs::create_dir_all(&dir).expect("carpeta de evidencia");
+        fs::write(dir.join("colab.json"), format!("{{{}}}", piezas.join(","))).expect("colab.json");
+    }
+
+    fn veredicto_con_colab(base: &Path, entradas: &[(&str, &str, bool)]) -> Veredicto {
+        let repo = repo_rust(base, LOCK_SANO);
+        let home = base.join("home");
+        colab_json(&home, entradas);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        evaluar_con_deps(base, &repo, deps_de(&correr, &herramientas(&[])))
+    }
+
+    #[test]
+    fn oraculo_colab_con_red_deja_el_aviso_en_el_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let commit = commit_de(&repo_rust(base.path(), LOCK_SANO));
+        let v = veredicto_con_colab(base.path(), &[("test_b::t3", &commit, true)]);
+        assert!(
+            v.avisos.iter().any(|a| a == pendientes::CONFIANZA_CON_RED),
+            "{:?}",
+            v.avisos
+        );
+    }
+
+    #[test]
+    fn oraculo_colab_con_red_da_el_aviso_una_sola_vez_aunque_haya_varias_entradas() {
+        let base = tempfile::tempdir().expect("base");
+        let commit = commit_de(&repo_rust(base.path(), LOCK_SANO));
+        let v = veredicto_con_colab(
+            base.path(),
+            &[("test_b::t3", &commit, true), ("test_b::t4", &commit, true)],
+        );
+        let veces = v
+            .avisos
+            .iter()
+            .filter(|a| a.as_str() == pendientes::CONFIANZA_CON_RED)
+            .count();
+        assert_eq!(veces, 1, "{:?}", v.avisos);
+    }
+
+    #[test]
+    fn oraculo_colab_sin_marca_de_red_no_deja_aviso() {
+        let base = tempfile::tempdir().expect("base");
+        let commit = commit_de(&repo_rust(base.path(), LOCK_SANO));
+        let v = veredicto_con_colab(base.path(), &[("test_b::t3", &commit, false)]);
+        assert!(
+            !v.avisos.iter().any(|a| a == pendientes::CONFIANZA_CON_RED),
+            "{:?}",
+            v.avisos
+        );
+    }
+
+    #[test]
+    fn oraculo_colab_de_otro_commit_con_red_no_deja_aviso() {
+        let base = tempfile::tempdir().expect("base");
+        let v = veredicto_con_colab(base.path(), &[("test_b::t3", "otro-commit", true)]);
+        assert!(
+            v.avisos
+                .iter()
+                .any(|a| a.contains("no entran al veredicto")),
+            "el filtro por commit corrió: {:?}",
+            v.avisos
+        );
+        assert!(
+            !v.avisos.iter().any(|a| a == pendientes::CONFIANZA_CON_RED),
+            "{:?}",
+            v.avisos
+        );
+    }
+
+    // ---- Tarea 12, parte técnica 1: cada caso de calibración corre solo sus partes ----
+
+    /// Ejecutor de suites que anota el destino de cada llamada y responde con `dentro`.
+    struct Grabador<'a> {
+        destinos: std::cell::RefCell<Vec<String>>,
+        dentro: Correr<'a>,
+    }
+
+    impl<'a> Grabador<'a> {
+        fn nuevo(dentro: Correr<'a>) -> Self {
+            Grabador {
+                destinos: std::cell::RefCell::new(Vec::new()),
+                dentro,
+            }
+        }
+
+        fn correr(&self, e: &contenedor::Ejecucion) -> Result<contenedor::Resultado, ErrorOraculo> {
+            self.destinos
+                .borrow_mut()
+                .push(e.oraculo_destino.clone().unwrap_or_default());
+            (self.dentro)(e)
+        }
+
+        fn corrio(&self, destino: &str) -> bool {
+            self.destinos.borrow().iter().any(|d| d == destino)
+        }
+    }
+
+    /// Ejecutor de herramientas que anota cada comando y responde como una imagen sana.
+    struct HerramientasGrabadas {
+        cmds: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        sanas: HerramientasSanas,
+    }
+
+    impl EjecutorHerramienta for HerramientasGrabadas {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            self.cmds.borrow_mut().push(cmd.to_string());
+            self.sanas.ejecutar(cmd)
+        }
+
+        fn tiene_rustsec(&self) -> bool {
+            self.sanas.tiene_rustsec()
+        }
+    }
+
+    /// Comandos que anotó una fábrica de herramientas grabadas.
+    type Comandos = std::rc::Rc<std::cell::RefCell<Vec<String>>>;
+
+    /// Fábrica de herramientas que anota los comandos en la lista que devuelve.
+    fn herramientas_grabadas() -> (
+        impl Fn(&Preparada) -> Box<dyn EjecutorHerramienta>,
+        Comandos,
+    ) {
+        let cmds: Comandos = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let copia = cmds.clone();
+        let fabrica = move |_: &Preparada| -> Box<dyn EjecutorHerramienta> {
+            Box::new(HerramientasGrabadas {
+                cmds: copia.clone(),
+                sanas: HerramientasSanas {
+                    faltan: Vec::new(),
+                    fuga: false,
+                },
+            })
+        };
+        (fabrica, cmds)
+    }
+
+    /// Redactor falso: cuenta sus llamadas y responde un resumen fijo.
+    struct RedactorContado {
+        llamadas: Cell<u32>,
+    }
+
+    impl RedactorContado {
+        fn nuevo() -> Self {
+            RedactorContado {
+                llamadas: Cell::new(0),
+            }
+        }
+
+        fn llamadas(&self) -> u32 {
+            self.llamadas.get()
+        }
+    }
+
+    impl Redactor for RedactorContado {
+        fn redactar(
+            &self,
+            _informe: &crate::tipos::Informe,
+        ) -> Result<crate::oracle::informe::Redaccion, ErrorOraculo> {
+            self.llamadas.set(self.llamadas.get() + 1);
+            Ok(crate::oracle::informe::Redaccion {
+                resumen: "resumen falso".into(),
+                riesgos: Vec::new(),
+                proximos_pasos: Vec::new(),
+                costo_usd: 0.1,
+            })
+        }
+    }
+
+    /// Respuesta fija del juez para todos sus ítems en `rubricas`, con evidencia que cita `src/lib.rs`.
+    fn respuesta_para(rubricas: &[Rubrica]) -> String {
+        let items: Vec<Value> = rubricas
+            .iter()
+            .flat_map(|r| r.item.iter())
+            .filter(|i| i.mide != Mide::Sonda && juez::dimension_de(&i.id).is_some())
+            .map(|i| item_juez(&i.id, 2, json!([ev_lib()])))
+            .collect();
+        respuesta_juez(json!(items), json!([]))
+    }
+
+    /// Evaluación de la tarea de Rust con `partes` y las dependencias dadas. Su home lleva la caché lista.
+    fn evaluar_con_partes(
+        base: &Path,
+        repo: &Path,
+        partes: Option<Partes>,
+        deps: Dependencias,
+    ) -> Veredicto {
+        let tarea = tarea_rust(base);
+        let home = home_con_cache(base, LOCK_SANO);
+        let o = OpcionesOraculo {
+            partes,
+            ..opciones(&home)
+        };
+        evaluar_con(repo, &tarea, &o, deps).expect("evalúa")
+    }
+
+    #[test]
+    fn oraculo_partes_seguridad_no_corre_las_suites() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let junit = correr_suites(JUNIT_CONTRATO);
+        let grabador = Grabador::nuevo(&junit);
+        let correr = |e: &contenedor::Ejecucion| grabador.correr(e);
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        evaluar_con_partes(
+            base.path(),
+            &repo,
+            Some(partes_de(Dimension::Seguridad, &rubricas)),
+            deps_de(&correr, &herramientas(&[])),
+        );
+        assert!(!grabador.corrio(DIR_CONTRATO), "{:?}", grabador.destinos);
+        assert!(!grabador.corrio(DIR_OCULTO), "{:?}", grabador.destinos);
+    }
+
+    #[test]
+    fn oraculo_partes_seguridad_no_llama_al_juez_ni_al_redactor() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let juez = JuezFalso::con(&respuesta_para(&rubricas), 0.25);
+        let redactor = RedactorContado::nuevo();
+        let junit = correr_suites(JUNIT_CONTRATO);
+        evaluar_con_partes(
+            base.path(),
+            &repo,
+            Some(partes_de(Dimension::Seguridad, &rubricas)),
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                redactor: Some(&redactor),
+                ..deps_de(&junit, &herramientas(&[]))
+            },
+        );
+        assert_eq!(juez.llamadas(), 0, "Seguridad no tiene ítems del juez");
+        assert_eq!(
+            redactor.llamadas(),
+            0,
+            "el redactor no mide ninguna dimensión"
+        );
+    }
+
+    #[test]
+    fn oraculo_partes_seguridad_no_llama_sondas_de_otras_dimensiones() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let junit = correr_suites(JUNIT_CONTRATO);
+        let (fabrica, cmds) = herramientas_grabadas();
+        evaluar_con_partes(
+            base.path(),
+            &repo,
+            Some(partes_de(Dimension::Seguridad, &rubricas)),
+            deps_de(&junit, &fabrica),
+        );
+        let cmds = cmds.borrow();
+        assert!(
+            cmds.iter().any(|c| c.contains("gitleaks detect")),
+            "{cmds:?}"
+        );
+        assert!(
+            !cmds.iter().any(|c| c.contains("clippy")
+                || c.contains("bench-eficiencia")
+                || c.contains("mutants")),
+            "{cmds:?}"
+        );
+    }
+
+    #[test]
+    fn oraculo_partes_diseno_llama_al_juez_y_no_al_redactor() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let juez = JuezFalso::con(&respuesta_para(&rubricas), 0.25);
+        let redactor = RedactorContado::nuevo();
+        let junit = correr_suites(JUNIT_CONTRATO);
+        evaluar_con_partes(
+            base.path(),
+            &repo,
+            Some(partes_de(Dimension::Diseno, &rubricas)),
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                redactor: Some(&redactor),
+                ..deps_de(&junit, &herramientas(&[]))
+            },
+        );
+        assert_eq!(juez.llamadas(), 1, "Diseño tiene ítems del juez");
+        assert_eq!(
+            redactor.llamadas(),
+            0,
+            "el redactor no mide ninguna dimensión"
+        );
+    }
+
+    #[test]
+    fn oraculo_partes_completitud_corre_la_suite_oculta() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let junit = correr_suites(JUNIT_CONTRATO);
+        let grabador = Grabador::nuevo(&junit);
+        let correr = |e: &contenedor::Ejecucion| grabador.correr(e);
+        evaluar_con_partes(
+            base.path(),
+            &repo,
+            Some(partes_de(Dimension::Completitud, &rubricas)),
+            deps_de(&correr, &herramientas(&[])),
+        );
+        assert!(grabador.corrio(DIR_OCULTO), "{:?}", grabador.destinos);
+        assert!(!grabador.corrio(DIR_CONTRATO), "{:?}", grabador.destinos);
+    }
+
+    #[test]
+    fn oraculo_partes_none_corre_todo_y_el_redactor_corre() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let redactor = RedactorContado::nuevo();
+        let junit = correr_suites(JUNIT_CONTRATO);
+        let grabador = Grabador::nuevo(&junit);
+        let correr = |e: &contenedor::Ejecucion| grabador.correr(e);
+        evaluar_con_partes(
+            base.path(),
+            &repo,
+            None,
+            Dependencias {
+                redactor: Some(&redactor),
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        assert!(grabador.corrio(DIR_CONTRATO), "{:?}", grabador.destinos);
+        assert!(grabador.corrio(DIR_OCULTO), "{:?}", grabador.destinos);
+        assert_eq!(redactor.llamadas(), 1, "sin partes, el redactor corre");
+    }
+
+    /// Nombres de las partes que `p` lleva, en orden alfabético.
+    fn nombres_de(p: &Partes) -> Vec<&'static str> {
+        let marcas = [
+            ("descarga", p.descarga),
+            ("juez_config", p.juez_config),
+            ("contrato", p.contrato),
+            ("oculto", p.oculto),
+            ("entrega", p.entrega),
+            ("nativas", p.nativas),
+            ("gitleaks", p.gitleaks),
+            ("cargo_audit", p.cargo_audit),
+            ("clippy", p.clippy),
+            ("eficiencia", p.eficiencia),
+            ("mutacion", p.mutacion),
+            ("juez_diseno", p.juez_diseno),
+            ("redactor", p.redactor),
+        ];
+        let mut nombres: Vec<&'static str> = marcas
+            .iter()
+            .filter(|(_, marcada)| *marcada)
+            .map(|(nombre, _)| *nombre)
+            .collect();
+        nombres.sort_unstable();
+        nombres
+    }
+
+    #[test]
+    fn partes_de_fija_la_eleccion_de_cada_dimension() {
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        // Las tres dimensiones con ítems del juez comparten el conjunto: el juez ve los hallazgos de todas las sondas.
+        let juzgadas = [
+            "descarga",
+            "entrega",
+            "nativas",
+            "gitleaks",
+            "cargo_audit",
+            "clippy",
+            "eficiencia",
+            "mutacion",
+            "juez_diseno",
+        ];
+        let esperado: [(Dimension, Vec<&str>); 9] = [
+            (
+                Dimension::Funciona,
+                vec!["contrato", "descarga", "entrega", "oculto"],
+            ),
+            (
+                Dimension::Seguridad,
+                vec!["cargo_audit", "descarga", "gitleaks", "nativas"],
+            ),
+            (Dimension::Eficiencia, vec!["descarga", "eficiencia"]),
+            (Dimension::Estructura, juzgadas.to_vec()),
+            (Dimension::Arquitectura, juzgadas.to_vec()),
+            (Dimension::Diseno, juzgadas.to_vec()),
+            (
+                Dimension::Completitud,
+                vec!["descarga", "entrega", "oculto"],
+            ),
+            (
+                Dimension::Entrega,
+                vec!["descarga", "entrega", "juez_config"],
+            ),
+            (Dimension::Pruebas, vec!["descarga", "mutacion"]),
+        ];
+        for (dimension, partes) in esperado {
+            let mut partes = partes;
+            partes.sort_unstable();
+            let elegidas = partes_de(dimension, &rubricas);
+            assert_eq!(nombres_de(&elegidas), partes, "{dimension:?}");
+            assert_eq!(elegidas.dimension, Some(dimension), "{dimension:?}");
+        }
+    }
+
+    #[test]
+    fn partes_de_sin_items_del_juez_pide_solo_sus_sondas() {
+        let esperado = [
+            (Dimension::Estructura, vec!["clippy", "descarga", "nativas"]),
+            (Dimension::Arquitectura, vec!["descarga", "nativas"]),
+            (Dimension::Diseno, vec!["descarga"]),
+        ];
+        for (dimension, partes) in esperado {
+            assert_eq!(
+                nombres_de(&partes_de(dimension, &[])),
+                partes,
+                "{dimension:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn partes_de_toda_parte_con_contenedor_pide_la_descarga() {
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        for dimension in DIMENSIONES {
+            let p = partes_de(dimension, &rubricas);
+            let con_contenedor = p.contrato
+                || p.oculto
+                || p.entrega
+                || p.gitleaks
+                || p.cargo_audit
+                || p.clippy
+                || p.eficiencia
+                || p.mutacion
+                || p.juez_config;
+            assert!(p.descarga || !con_contenedor, "{dimension:?}");
+        }
+    }
+
+    #[test]
+    fn oraculo_partes_dimension_calibrada_da_el_mismo_puntaje_que_con_todas() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let respuesta = respuesta_para(&rubricas);
+        for dimension in DIMENSIONES {
+            let con_todas = evaluar_doble(base.path(), &repo, None, &rubricas, &respuesta);
+            let calibrada = evaluar_doble(
+                base.path(),
+                &repo,
+                Some(partes_de(dimension, &rubricas)),
+                &rubricas,
+                &respuesta,
+            );
+            assert_eq!(
+                puntaje_de_prueba(&calibrada, dimension),
+                puntaje_de_prueba(&con_todas, dimension),
+                "{dimension:?}"
+            );
+        }
+    }
+
+    /// Evaluación con dobles deterministas: suites sanas, herramientas sanas y un juez de respuesta fija.
+    fn evaluar_doble(
+        base: &Path,
+        repo: &Path,
+        partes: Option<Partes>,
+        rubricas: &[Rubrica],
+        respuesta: &str,
+    ) -> Veredicto {
+        let juez = JuezFalso::con(respuesta, 0.0);
+        let junit = correr_suites(JUNIT_CONTRATO);
+        let base_evaluacion = tempfile::tempdir_in(base).expect("base de la evaluación");
+        evaluar_con_partes(
+            base_evaluacion.path(),
+            repo,
+            partes,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas,
+                ..deps_de(&junit, &herramientas(&[]))
+            },
+        )
+    }
+
+    #[test]
+    fn oraculo_partes_dimension_no_calibrada_dice_no_medida() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let v = evaluar_doble(
+            base.path(),
+            &repo,
+            Some(partes_de(Dimension::Seguridad, &rubricas)),
+            &rubricas,
+            &respuesta_para(&rubricas),
+        );
+        assert_eq!(
+            puntaje_de_prueba(&v, Dimension::Seguridad).sin_veredicto,
+            None,
+            "la calibrada se mide"
+        );
+        for dimension in DIMENSIONES
+            .into_iter()
+            .filter(|d| *d != Dimension::Seguridad)
+        {
+            assert_eq!(
+                puntaje_de_prueba(&v, dimension).sin_veredicto.as_deref(),
+                Some("no medida en esta calibración"),
+                "{dimension:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn oraculo_partes_juez_de_config_solo_corre_con_entrega() {
+        let respuesta = json!([{
+            "clave": "build.jobs",
+            "necesidad": "innecesaria",
+            "motivo": "el proyecto no lo usa",
+            "cita": "jobs = 2",
+        }])
+        .to_string();
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_con_config(base.path());
+        let juez = JuezFalso::con(&respuesta, 0.0);
+        let junit = correr_suites(JUNIT_CONTRATO);
+        evaluar_con_partes(
+            base.path(),
+            &repo,
+            Some(partes_de(Dimension::Seguridad, &[])),
+            Dependencias {
+                juez_config: Some(&juez),
+                ..deps_de(&junit, &herramientas(&[]))
+            },
+        );
+        assert_eq!(
+            juez.llamadas(),
+            0,
+            "Seguridad no entra el juez de la configuración"
+        );
+
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_con_config(base.path());
+        let juez = JuezFalso::con(&respuesta, 0.0);
+        evaluar_con_partes(
+            base.path(),
+            &repo,
+            Some(partes_de(Dimension::Entrega, &[])),
+            Dependencias {
+                juez_config: Some(&juez),
+                ..deps_de(&junit, &herramientas(&[]))
+            },
+        );
+        assert_eq!(
+            juez.llamadas(),
+            1,
+            "el juez de la configuración va a Entrega"
+        );
     }
 }

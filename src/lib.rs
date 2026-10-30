@@ -4,6 +4,7 @@ pub mod aprende;
 pub mod borrado;
 pub mod cli;
 pub mod config;
+pub mod corre;
 pub mod entorno;
 pub mod error;
 pub mod esquema;
@@ -23,7 +24,7 @@ pub use error::Error;
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use cli::{
     Comando, FichaAccion, GoalAccion, ObservaAccion, OraculoAccion, ProveedorJuez, TrackAccion,
@@ -53,8 +54,17 @@ pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
                     n,
                     semilla,
                     repo,
+                    tope_usd,
                 },
-        } => oraculo_calibrar(cli.json, tarea, dimension, *n, *semilla, repo.as_deref()),
+        } => oraculo_calibrar(
+            cli.json,
+            tarea,
+            dimension,
+            *n,
+            *semilla,
+            repo.as_deref(),
+            *tope_usd,
+        ),
         Comando::Oraculo {
             accion:
                 OraculoAccion::Validar {
@@ -132,16 +142,36 @@ fn oraculo_calibrar(
     n: u32,
     semilla: u64,
     repo: Option<&Path>,
+    tope_usd: Option<f64>,
 ) -> Result<u8, Error> {
+    if let Some(usd) = tope_usd
+        && (!usd.is_finite() || usd <= 0.0)
+    {
+        return Err(Error::Uso(format!(
+            "--tope-usd debe ser un número finito mayor que 0, no {usd}"
+        )));
+    }
     let home = config::root_home();
-    let fila = oracle::calibra::calibrar_tarea(
+    // El gasto y el peor caso salen de `home`: la calibración no mira otra carpeta (decisión 48).
+    let gasto = |inicio: f64| {
+        observe::uso::gasto_api_desde_en(&observe::ruta_eventos_en(&home), inicio)
+            .map_err(|e| oracle::ErrorOraculo::Infra(format!("leer el gasto de API: {e}")))
+    };
+    let peor = |partes: &oracle::Partes| oracle::calibra::peor_caso_de_home(&home, partes);
+    let presupuesto = tope_usd.map(|usd| oracle::calibra::Presupuesto {
+        usd,
+        peor_caso: &peor,
+        gasto_desde: &gasto,
+    });
+    let fila = oracle::calibra::calibrar_tarea_con(
         &home,
         nombre,
         dimension,
         n,
         semilla,
         repo,
-        &|tarea, ruta| oracle::evaluar(ruta, tarea, &oracle::OpcionesOraculo::default()),
+        presupuesto.as_ref(),
+        &|tarea, ruta, opciones| oracle::evaluar(ruta, tarea, opciones),
     )?;
     if json {
         println!("{}", serde_json::to_string_pretty(&fila)?);
@@ -189,11 +219,21 @@ fn oraculo_validar(
         if json {
             println!("{}", serde_json::to_string_pretty(&preparado)?);
         } else {
+            let ciego = casos.join("ciego");
             println!(
                 "{} paquetes a ciegas en {}",
                 preparado.paquetes.len(),
-                casos.join("ciego").display()
+                ciego.display()
             );
+            for r in &preparado.rastros {
+                println!(
+                    "rastros {}: {} apariciones, {} avisos, en {}",
+                    r.id,
+                    r.apariciones,
+                    r.avisos,
+                    ciego.join(&r.archivo).display()
+                );
+            }
         }
         return Ok(0);
     }
@@ -297,7 +337,8 @@ fn oraculo_colab(
         &oracle::colab::CompiladorPodman,
     )
     .and_then(|resultado| {
-        let resumen = oracle::pendientes::importar(home, tarea, &resultado.junit, &paquete.commit)?;
+        let resumen =
+            oracle::pendientes::importar(home, tarea, &resultado.junits, &paquete.commit)?;
         Ok((resultado, resumen))
     });
     // Con la corrida terminada, el paquete (con los tests ocultos) y el junit bajado se borran (A1, B18).
@@ -389,7 +430,7 @@ fn oraculo_pendientes(
     json: bool,
     nombre: Option<&str>,
     repo: Option<&Path>,
-    importar: Option<&Path>,
+    junits: &[PathBuf],
     colab: bool,
     liberar: bool,
     vigilar: bool,
@@ -409,9 +450,12 @@ fn oraculo_pendientes(
     oracle::pendientes::nombre_de_tarea_valido(nombre).map_err(Error::Uso)?;
     let tarea = Tarea::cargar(nombre)?;
     oracle::pendientes::nombre_de_tarea_valido(&tarea.nombre).map_err(Error::Uso)?;
-    if let Some(junit) = importar {
+    // Un solo `pendientes` por tarea a la vez: el turno se toma antes de tocar el paquete o Colab, y
+    // se suelta al salir de esta función, también ante error. Si otra corrida lo tiene, sale con 3.
+    let _turno = oracle::pendientes::tomar_turno(&home, &tarea.nombre)?;
+    if !junits.is_empty() {
         let commit = oracle::commit_de(repo);
-        let resumen = oracle::pendientes::importar(&home, &tarea, junit, &commit)?;
+        let resumen = oracle::pendientes::importar(&home, &tarea, junits, &commit)?;
         if json {
             println!(
                 "{}",
@@ -474,14 +518,21 @@ fn ficha_accion(json: bool, accion: &FichaAccion) -> Result<u8, Error> {
             let texto = leer_spec(spec)?;
             let ctx = ContextoRevision::default();
             let tope = juez_max_tokens.unwrap_or(crate::proveedores::MAX_TOKENS_JUEZ);
+            let juez = juez_de(*juez_proveedor, juez_modelo.as_deref());
+            // El juez de la ficha razona: un modelo fuera de la lista cerrada sale con 2 antes de llamar.
+            if let Some(juez) = &juez {
+                route::exigir_modelo_que_razona(&juez.eleccion)?;
+            }
             // Con juez, los precios y el tope de API salen de root.toml: un archivo inválido es error de uso.
             if juez_proveedor.is_some() {
                 config::Config::cargar(&config::root_home().join("root.toml"))?;
             }
-            let revision = match juez_de(*juez_proveedor, juez_modelo.as_deref()) {
+            let revision = match juez {
                 Some(juez) => ficha::revisar_con_tope(&texto, &ctx, &juez, tope)?,
                 None => ficha::revisar(&texto, &ctx)?,
             };
+            // Solo con veredicto del juez: la revisión queda en ROOT_HOME/fichas para que `evaluar` la lea.
+            ficha::guardar_si_hay_juicio(&config::root_home(), &texto, &revision)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&revision)?);
             } else {
@@ -590,12 +641,13 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
             cli.json,
             tarea.as_deref(),
             repo.as_deref(),
-            importar.as_deref(),
+            importar,
             *colab,
             *liberar,
             *vigilar,
         ),
         Comando::Observa { accion } => observa(cli.json, accion),
+        Comando::Corre { tarea, config } => corre_accion(cli.json, tarea, config),
         Comando::Track { accion } => track_accion(cli.json, accion),
         Comando::Aprende { replay } => aprende_accion(cli.json, *replay),
         Comando::ImportarExterno { desde } => {
@@ -841,6 +893,57 @@ fn track_accion(json: bool, accion: &TrackAccion) -> Result<(), Error> {
     Ok(())
 }
 
+/// `corre`: arma y corre una tarea con una configuración, con el `ROOT_HOME`, el `$HOME` y el repo del
+/// proceso. Imprime la fila: con `--json`, la fila completa; sin él, un resumen corto.
+fn corre_accion(json: bool, tarea: &str, config: &str) -> Result<(), Error> {
+    let home = config::root_home();
+    let home_usuario = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+        Error::Uso("HOME no está definida: corre la necesita para la carpeta de corridas".into())
+    })?;
+    let repo_root = std::env::current_dir().map_err(|fuente| corre::ErrorCorre::Io {
+        contexto: "leer el directorio actual".into(),
+        fuente,
+    })?;
+    let entorno: Vec<(String, String)> = std::env::vars_os()
+        .filter_map(|(clave, valor)| Some((clave.into_string().ok()?, valor.into_string().ok()?)))
+        .collect();
+    let ejecutor = corre::EjecutorContenedorBuilder {
+        imagen: corre::contenedor::IMAGEN_BUILDER.to_string(),
+        credencial: corre::contenedor::credencial_de(&home_usuario),
+        home: home.clone(),
+        home_usuario: home_usuario.clone(),
+        timeout: corre::contenedor::TIMEOUT_BUILDER,
+    };
+    let deps = corre::DepsCorre {
+        home: &home,
+        home_usuario: &home_usuario,
+        repo_root: &repo_root,
+        ejecutor: &ejecutor,
+        evaluar: &oracle::evaluar,
+        entorno: &entorno,
+    };
+    let fila = corre::correr(&deps, tarea, config)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&fila)?);
+    } else {
+        let invalida = if fila.resumen.invalida {
+            ", corrida inválida: leyó el oráculo"
+        } else {
+            ""
+        };
+        println!(
+            "corrida {}: {} con {}: veredicto {}, {} turnos, {:.4} USD de cupo{invalida}",
+            fila.id,
+            fila.tarea,
+            fila.config,
+            etiqueta_estado(fila.veredicto.estado),
+            fila.resumen.turnos,
+            fila.resumen.usd_cupo,
+        );
+    }
+    Ok(())
+}
+
 /// Subcomandos `observa`: registran eventos y muestran el resumen de una corrida.
 fn observa(json: bool, accion: &ObservaAccion) -> Result<(), Error> {
     match accion {
@@ -859,6 +962,9 @@ fn observa(json: bool, accion: &ObservaAccion) -> Result<(), Error> {
             }
             for ev in &eventos {
                 observe::registrar(ev).map_err(observe::ErrorObserve::from)?;
+            }
+            for gate in observe::claude::gates_de_costo_desconocido(&eventos) {
+                observe::registrar(&gate).map_err(observe::ErrorObserve::from)?;
             }
             if via == Some(Via::Nube) {
                 observe::uso::gate_nube_si_lleno(observe::ahora().0)?;
@@ -936,7 +1042,33 @@ fn imprimir_uso(estado: &observe::uso::UsoMargenes) {
             100.0 * m.fraccion
         );
     }
+    imprimir_reservas_viejas(&estado.reservas_viejas);
     println!("{}", estado.aviso);
+}
+
+/// Una línea por reserva abierta y vieja, con su id, corrida, modelo, antigüedad y monto.
+fn imprimir_reservas_viejas(viejas: &[observe::uso::ReservaVieja]) {
+    if viejas.is_empty() {
+        println!("Reservas abiertas de más de dos veces timeout_juez_s: ninguna.");
+        return;
+    }
+    println!("Reservas abiertas de más de dos veces timeout_juez_s:");
+    for r in viejas {
+        let id = r.reserva.as_deref().unwrap_or("sin id");
+        let modelo = r
+            .modelo
+            .as_deref()
+            .map_or(String::new(), |m| format!(", modelo {m}"));
+        println!(
+            "  {id}: corrida {}{modelo}, antigüedad {:.1} h, {:.2} USD",
+            r.corrida,
+            r.antiguedad_s / 3600.0,
+            r.usd
+        );
+    }
+    println!(
+        "Solo una persona corrige estas reservas con `r00t observa costo`, que solo suma gasto."
+    );
 }
 
 fn imprimir_registrados(json: bool, cuantos: usize) {

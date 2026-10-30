@@ -4,4 +4,4 @@ set -e
 
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test
+"$(git rev-parse --show-toplevel)/tools/test-seguro.sh"

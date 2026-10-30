@@ -63,8 +63,19 @@ pub struct Puntuacion {
     pub faltantes: Vec<String>,
 }
 
-/// Rúbricas que el binario trae. Opus agrega aquí `include_str!("../../rubricas/<id>.toml")` por rúbrica.
-pub const EMBEBIDAS: &[&str] = &[];
+/// Rúbricas que el binario trae: las nueve de `rubricas/`, con `include_str!`. Su contenido está
+/// aprobado (G2). Cambiar un archivo cambia su hash, y `Veredicto.rubricas` lo muestra.
+pub const EMBEBIDAS: &[&str] = &[
+    include_str!("../../rubricas/arquitectura.toml"),
+    include_str!("../../rubricas/completitud.toml"),
+    include_str!("../../rubricas/diseno.toml"),
+    include_str!("../../rubricas/eficiencia.toml"),
+    include_str!("../../rubricas/entrega.toml"),
+    include_str!("../../rubricas/estructura.toml"),
+    include_str!("../../rubricas/funciona.toml"),
+    include_str!("../../rubricas/pruebas.toml"),
+    include_str!("../../rubricas/seguridad.toml"),
+];
 
 impl Rubrica {
     /// Lee una rúbrica desde su TOML y valida sus reglas.
@@ -192,7 +203,7 @@ impl Rubrica {
     }
 }
 
-/// Parsea cada rúbrica de `EMBEBIDAS`. Con la lista vacía devuelve una lista vacía.
+/// Parsea cada rúbrica de `EMBEBIDAS`, en el orden de la lista.
 pub fn cargar_embebidas() -> Result<Vec<Rubrica>, ErrorRubrica> {
     EMBEBIDAS.iter().copied().map(Rubrica::desde_toml).collect()
 }
@@ -399,10 +410,45 @@ mod tests {
         assert!(valida().puntuar(&BTreeMap::new(), &topes).is_err());
     }
 
+    /// Ids de las nueve rúbricas de `rubricas/`, ordenados.
+    const IDS_EMBEBIDAS: [&str; 9] = [
+        "arquitectura",
+        "completitud",
+        "diseno",
+        "eficiencia",
+        "entrega",
+        "estructura",
+        "funciona",
+        "pruebas",
+        "seguridad",
+    ];
+
+    /// La rúbrica que está en `rubricas/<id>.toml`, leída del disco.
+    fn del_disco(id: &str) -> Rubrica {
+        let ruta = format!("{}/rubricas/{id}.toml", env!("CARGO_MANIFEST_DIR"));
+        let texto = std::fs::read_to_string(ruta).expect("lee la rúbrica del disco");
+        Rubrica::desde_toml(&texto).expect("carga")
+    }
+
     #[test]
-    fn rubrica_cargar_embebidas_vacio_devuelve_vacio() {
-        assert!(EMBEBIDAS.is_empty());
-        assert_eq!(cargar_embebidas().expect("carga"), Vec::new());
+    fn rubrica_embebidas_son_las_nueve_de_rubricas() {
+        assert_eq!(EMBEBIDAS.len(), 9);
+        let embebidas = cargar_embebidas().expect("carga");
+        let mut ids: Vec<&str> = embebidas.iter().map(|r| r.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, IDS_EMBEBIDAS);
+    }
+
+    #[test]
+    fn rubrica_hash_de_cada_embebida_coincide_con_su_archivo() {
+        let embebidas = cargar_embebidas().expect("carga");
+        for id in IDS_EMBEBIDAS {
+            let embebida = embebidas
+                .iter()
+                .find(|r| r.id == id)
+                .expect("la rúbrica está embebida");
+            assert_eq!(embebida.hash(), del_disco(id).hash(), "{id}");
+        }
     }
 
     #[test]

@@ -152,6 +152,9 @@ pub struct CalibracionTarea {
     /// Repo bueno. Una ruta relativa se resuelve desde la carpeta de la tarea.
     #[serde(default)]
     pub repo: Option<String>,
+    /// Funciones donde el bucle O(n²) de la calibración puede caer. Vacía: cualquier función de producción.
+    #[serde(default)]
+    pub camino_caliente: Vec<String>,
 }
 
 /// Un flujo real de usuario. `cmd` sale 0 si el flujo funciona.
@@ -727,6 +730,31 @@ cmd = "exit 0"
             Tarea::cargar_de(dir.path()),
             Err(ErrorOraculo::Tarea(_))
         ));
+    }
+
+    #[test]
+    fn calibracion_camino_caliente_se_lee_de_la_tabla() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(
+            dir.path(),
+            &format!("{MINIMO}\n[calibracion]\ncamino_caliente = [\"procesar\"]\n"),
+        );
+        let t = Tarea::cargar_de(dir.path()).expect("parsea");
+        let c = t.calibracion.expect("calibracion");
+        assert_eq!(c.camino_caliente, vec!["procesar".to_string()]);
+    }
+
+    #[test]
+    fn calibracion_tarea_vieja_sin_camino_caliente_carga() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(
+            dir.path(),
+            &format!("{MINIMO}\n[calibracion]\nrepo = \"repo-bueno\"\n"),
+        );
+        let t = Tarea::cargar_de(dir.path()).expect("parsea");
+        let c = t.calibracion.expect("calibracion");
+        assert!(c.camino_caliente.is_empty());
+        assert_eq!(c.repo.as_deref(), Some("repo-bueno"));
     }
 
     #[test]

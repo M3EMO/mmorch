@@ -79,6 +79,7 @@ fn mutacion_contenedor_sin_cargo_mutants_da_sin_veredicto() {
         rustsec: None,
         cache: None,
         timeout: LIMITE,
+        home: carpeta.path().into(),
     };
     let r = sonda_mutacion(&ej, &tarea);
     // Hoy la imagen no trae cargo-mutants. Si algún día la trae, este test debe cambiar:
@@ -118,6 +119,7 @@ fn mutacion_real_sin_mutantes_no_deja_reporte_y_da_sin_veredicto() {
         rustsec: None,
         cache: Some(cache.path().into()),
         timeout: LIMITE,
+        home: carpeta.path().into(),
     };
     let r = sonda_mutacion(&ej, &tarea);
     assert_eq!(r.sonda.valor, None, "{:?}", r.sonda);

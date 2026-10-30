@@ -116,9 +116,12 @@ pub struct Pendiente {
     /// Id del test con forma `archivo::nombre`.
     pub test: String,
     pub motivo: String,
-    /// Resultado importado de Colab: "pasa", "falla" u "omite". Ausente si no se importó.
+    /// Resultado importado de Colab: "pasa", "falla", "omite" o "inestable". Ausente si no se importó.
     #[serde(default)]
     pub colab: Option<String>,
+    /// Tasa de aprobación si Colab dejó el test inestable entre repeticiones. Ausente en un test estable.
+    #[serde(default)]
+    pub tasa: Option<TasaTest>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -127,6 +130,8 @@ pub enum Decision {
     Listo,
     NoListo,
     Bloqueado,
+    /// Una dimensión que bloquea no tiene veredicto: no hay "listo" ni "no listo" que decir (decisión 48).
+    SinDecision,
 }
 
 /// Quién produjo un hallazgo: una sonda determinista o un juez con modelo.
@@ -290,7 +295,7 @@ pub struct ParteSinVeredicto {
 }
 
 /// Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos
-/// salen del `Veredicto`; `ambiguedades` queda vacío porque el veredicto no trae la ficha.
+/// salen del `Veredicto`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Confianza {
     /// Repeticiones del oculto que corrieron.
@@ -305,7 +310,7 @@ pub struct Confianza {
     /// Tests de `[[entorno]]` con su motivo.
     #[serde(default)]
     pub tests_pendientes: Vec<Pendiente>,
-    /// Ambigüedades abiertas de la ficha. Vacío: el veredicto no las trae.
+    /// Ambigüedades abiertas de la ficha, como `línea <n>: <frase>`. Salen de la revisión guardada del juez.
     #[serde(default)]
     pub ambiguedades: Vec<String>,
     /// Dimensiones con veredicto que no están calibradas.
@@ -363,6 +368,14 @@ pub struct Veredicto {
     /// Dimensiones con veredicto que todavía no están calibradas. Un veredicto viejo lee vacío.
     #[serde(default)]
     pub sin_calibrar: Vec<Dimension>,
+    /// Ids ordenados de los tests ocultos que fallan de forma estable. Un requisito que no los prueba da
+    /// `NoListo` (`test_oculto_fuera_de_requisitos`). Un veredicto viejo lee vacío.
+    #[serde(default)]
+    pub ocultos_fallidos: Vec<String>,
+    /// Ambigüedades abiertas de la ficha, como `línea <n>: <frase>`. Vacío si no hay revisión guardada
+    /// para el spec. Un veredicto viejo lee vacío.
+    #[serde(default)]
+    pub ambiguedades: Vec<String>,
 }
 
 impl Default for Veredicto {
@@ -389,6 +402,8 @@ impl Default for Veredicto {
             avisos: Vec::new(),
             requisitos: Vec::new(),
             sin_calibrar: Vec::new(),
+            ocultos_fallidos: Vec::new(),
+            ambiguedades: Vec::new(),
         }
     }
 }
@@ -587,6 +602,8 @@ mod tests {
             avisos: Vec::new(),
             requisitos: Vec::new(),
             sin_calibrar: Vec::new(),
+            ocultos_fallidos: Vec::new(),
+            ambiguedades: Vec::new(),
         }
     }
 
@@ -1001,7 +1018,12 @@ mod tests {
         ] {
             ida_y_vuelta(&x);
         }
-        for x in [Decision::Listo, Decision::NoListo, Decision::Bloqueado] {
+        for x in [
+            Decision::Listo,
+            Decision::NoListo,
+            Decision::Bloqueado,
+            Decision::SinDecision,
+        ] {
             ida_y_vuelta(&x);
         }
     }
@@ -1038,11 +1060,13 @@ mod tests {
             test: "test_f::t_gpu".into(),
             motivo: "lavapipe no emula la GPU".into(),
             colab: None,
+            tasa: None,
         });
         ida_y_vuelta(&Pendiente {
             test: "test_f::t_gpu".into(),
             motivo: "lavapipe no emula la GPU".into(),
             colab: Some("pasa".into()),
+            tasa: None,
         });
     }
 
@@ -1054,6 +1078,7 @@ mod tests {
             test: "test_f::t_gpu".into(),
             motivo: "entorno".into(),
             colab: None,
+            tasa: None,
         });
         ida_y_vuelta(&v);
     }

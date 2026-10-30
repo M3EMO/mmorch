@@ -3,6 +3,7 @@
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use serde::Deserialize;
 
@@ -58,6 +59,8 @@ pub trait Redactor {
 pub struct RedactorProveedor {
     pub eleccion: Eleccion,
     pub corrida: String,
+    /// Carpeta de `root.toml` y `eventos.jsonl`: el `Gate` y el evento de cada llamada van aquí.
+    pub home: PathBuf,
 }
 
 /// Forma JSON que devuelve el redactor.
@@ -81,7 +84,7 @@ impl Redactor for RedactorProveedor {
             max_tokens: MAX_TOKENS_REDACTOR,
             fase: FASE.into(),
         };
-        let respuesta = proveedores::llamar(&self.eleccion, &prompt, &self.corrida)
+        let respuesta = proveedores::llamar_en(&self.home, &self.eleccion, &prompt, &self.corrida)
             .map_err(|e| ErrorOraculo::Infra(e.to_string()))?;
         if respuesta.truncada {
             return Err(ErrorOraculo::Infra(causa_tope_alcanzado(
@@ -127,13 +130,13 @@ impl Redactor for RedactorMedido<'_> {
     }
 }
 
-/// Estado del veredicto según su informe: `Listo` es verde; `NoListo` y `Bloqueado`, rojo; sin informe,
-/// sin veredicto.
+/// Estado del veredicto según su informe: `Listo` es verde; `NoListo` y `Bloqueado`, rojo; `SinDecision`
+/// y sin informe, sin veredicto.
 pub fn estado_de(informe: Option<&Informe>) -> Estado {
     match informe.map(|i| i.decision) {
         Some(Decision::Listo) => Estado::Verde,
         Some(Decision::NoListo | Decision::Bloqueado) => Estado::Rojo,
-        None => Estado::SinVeredicto,
+        Some(Decision::SinDecision) | None => Estado::SinVeredicto,
     }
 }
 
@@ -158,7 +161,7 @@ pub fn informar_con(
     rubricas: &[Rubrica],
     redactor: Option<&dyn Redactor>,
 ) -> Result<Informe, ErrorOraculo> {
-    let decidido = decidir(v, reglas, rubricas);
+    let decidido = decidir(v, tarea, reglas, rubricas);
     let motivo = if decidido.disparos.is_empty() {
         "listo: ninguna regla de bloqueo ni de no listo disparó".to_string()
     } else {
@@ -211,8 +214,20 @@ struct Decidido {
     disparos: Vec<Disparo>,
 }
 
-/// Reglas en orden: `Bloqueado` gana sobre `NoListo`, y `NoListo` sobre `Listo`.
-fn decidir(v: &Veredicto, reglas: &ReglasDecision, rubricas: &[Rubrica]) -> Decidido {
+/// Reglas en orden: `SinDecision` gana sobre todo, `Bloqueado` sobre `NoListo`, y `NoListo` sobre `Listo`.
+fn decidir(
+    v: &Veredicto,
+    tarea: &Tarea,
+    reglas: &ReglasDecision,
+    rubricas: &[Rubrica],
+) -> Decidido {
+    let sin = sin_decision(v, rubricas);
+    if !sin.is_empty() {
+        return Decidido {
+            decision: Decision::SinDecision,
+            disparos: sin,
+        };
+    }
     let bloqueos = bloqueos(v, rubricas);
     if !bloqueos.is_empty() {
         return Decidido {
@@ -220,7 +235,7 @@ fn decidir(v: &Veredicto, reglas: &ReglasDecision, rubricas: &[Rubrica]) -> Deci
             disparos: bloqueos,
         };
     }
-    let faltas = no_listo(v, reglas);
+    let faltas = no_listo(v, tarea, reglas);
     if !faltas.is_empty() {
         return Decidido {
             decision: Decision::NoListo,
@@ -231,6 +246,66 @@ fn decidir(v: &Veredicto, reglas: &ReglasDecision, rubricas: &[Rubrica]) -> Deci
         decision: Decision::Listo,
         disparos: Vec::new(),
     }
+}
+
+/// Dimensiones sin veredicto que dejan la decisión en `SinDecision` (decisión 48 y desempate 9). Una
+/// dimensión cuya rúbrica tiene un ítem `bloquea = true` lo hace. Completitud lo hace siempre, aunque su
+/// rúbrica no bloquee. Una dimensión sin veredicto sin ítems que bloquean no cambia la decisión.
+fn sin_decision(v: &Veredicto, rubricas: &[Rubrica]) -> Vec<Disparo> {
+    let mut salida = Vec::new();
+    for p in &v.puntajes {
+        let Some(motivo) = p.sin_veredicto.as_deref() else {
+            continue;
+        };
+        if bloquea_la_dimension(p.dimension, rubricas) {
+            salida.push(Disparo {
+                regla: format!(
+                    "dimension_que_bloquea_sin_veredicto: {}",
+                    p.dimension.clave()
+                ),
+                frase: format!(
+                    "{} no tiene veredicto y su rúbrica tiene ítems que bloquean: {motivo}.",
+                    nombre_dimension(p.dimension)
+                ),
+                hallazgo: None,
+            });
+        } else if p.dimension == Dimension::Completitud {
+            salida.push(completitud_sin_veredicto(Some(motivo)));
+        }
+    }
+    let hay_completitud = v
+        .puntajes
+        .iter()
+        .any(|p| p.dimension == Dimension::Completitud);
+    if !hay_completitud {
+        salida.push(completitud_sin_veredicto(None));
+    }
+    salida
+}
+
+/// Tests ocultos que fallan y que ningún requisito prueba. Un requisito prueba un test si lo nombra en
+/// `pruebas` o `bordes`, por id exacto o por archivo, como en `riesgos`.
+fn tests_fuera_de_requisitos(v: &Veredicto, tarea: &Tarea) -> Vec<String> {
+    v.ocultos_fallidos
+        .iter()
+        .filter(|test| {
+            !tarea.requisito.iter().any(|r| {
+                r.pruebas.iter().chain(&r.bordes).any(|prueba| {
+                    test.as_str() == prueba || test.starts_with(&format!("{prueba}::"))
+                })
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+/// Verdadero si la rúbrica de `dimension` tiene algún ítem con `bloquea = true`.
+fn bloquea_la_dimension(dimension: Dimension, rubricas: &[Rubrica]) -> bool {
+    rubricas
+        .iter()
+        .filter(|r| r.id == dimension.clave())
+        .flat_map(|r| r.item.iter())
+        .any(|i| i.bloquea)
 }
 
 /// Reglas que bloquean: un requisito de peso 3 en nivel 0, un hallazgo de seguridad de severidad 3, y un
@@ -297,44 +372,48 @@ fn bloqueos(v: &Veredicto, rubricas: &[Rubrica]) -> Vec<Disparo> {
 
 /// Reglas de no listo: la completitud bajo su mínimo (o sin veredicto), y una dimensión calibrada bajo su
 /// mínimo de `[decision.minimo]`.
-fn no_listo(v: &Veredicto, reglas: &ReglasDecision) -> Vec<Disparo> {
+fn no_listo(v: &Veredicto, tarea: &Tarea, reglas: &ReglasDecision) -> Vec<Disparo> {
     let mut salida = Vec::new();
+    for id in tests_fuera_de_requisitos(v, tarea) {
+        salida.push(Disparo {
+            regla: format!("test_oculto_fuera_de_requisitos: {id}"),
+            frase: format!("El test oculto {id} falla y ningún requisito lo prueba."),
+            hallazgo: None,
+        });
+    }
+    // Completitud sin veredicto ya dio `SinDecision` en `sin_decision`: aquí solo se mide el mínimo.
     let completitud = v
         .puntajes
         .iter()
-        .find(|p| p.dimension == Dimension::Completitud);
-    match completitud {
-        Some(p) if p.sin_veredicto.is_none() => {
-            let minima = reglas.completitud_minima as f32;
-            if p.valor < minima {
-                let sin_cumplir: Vec<&str> = v
-                    .requisitos
-                    .iter()
-                    .filter(|e| sin_cumplir(e))
-                    .map(|e| e.id.as_str())
-                    .collect();
-                let cita = if sin_cumplir.is_empty() {
-                    String::new()
-                } else {
-                    format!("; sin cumplir: {}", unir(&sin_cumplir))
-                };
-                salida.push(Disparo {
-                    regla: format!(
-                        "completitud_bajo_minimo: completitud {} < {}",
-                        numero(p.valor),
-                        numero(minima)
-                    ),
-                    frase: format!(
-                        "La completitud es {} y el mínimo es {}{cita}.",
-                        numero(p.valor),
-                        numero(minima)
-                    ),
-                    hallazgo: None,
-                });
-            }
+        .find(|p| p.dimension == Dimension::Completitud && p.sin_veredicto.is_none());
+    if let Some(p) = completitud {
+        let minima = reglas.completitud_minima as f32;
+        if p.valor < minima {
+            let sin_cumplir: Vec<&str> = v
+                .requisitos
+                .iter()
+                .filter(|e| sin_cumplir(e))
+                .map(|e| e.id.as_str())
+                .collect();
+            let cita = if sin_cumplir.is_empty() {
+                String::new()
+            } else {
+                format!("; sin cumplir: {}", unir(&sin_cumplir))
+            };
+            salida.push(Disparo {
+                regla: format!(
+                    "completitud_bajo_minimo: completitud {} < {}",
+                    numero(p.valor),
+                    numero(minima)
+                ),
+                frase: format!(
+                    "La completitud es {} y el mínimo es {}{cita}.",
+                    numero(p.valor),
+                    numero(minima)
+                ),
+                hallazgo: None,
+            });
         }
-        Some(p) => salida.push(completitud_sin_veredicto(p.sin_veredicto.as_deref())),
-        None => salida.push(completitud_sin_veredicto(None)),
     }
     for p in v
         .puntajes
@@ -654,8 +733,7 @@ fn confianza(v: &Veredicto) -> Confianza {
             .map(|e| e.id.clone())
             .collect(),
         tests_pendientes: v.pendientes.clone(),
-        // El veredicto no trae la ficha, así que no hay de dónde sacar las ambigüedades abiertas.
-        ambiguedades: Vec::new(),
+        ambiguedades: v.ambiguedades.clone(),
         sin_calibrar: v.sin_calibrar.clone(),
         sin_veredicto: v
             .puntajes
@@ -674,6 +752,7 @@ fn confianza(v: &Veredicto) -> Confianza {
 /// Ids de tests ocultos que el veredicto menciona: inestables, tasas `oculto:` y pendientes.
 pub fn ids_ocultos(v: &Veredicto) -> BTreeSet<String> {
     let mut ocultos: BTreeSet<String> = v.inestables.iter().cloned().collect();
+    ocultos.extend(v.ocultos_fallidos.iter().cloned());
     ocultos.extend(
         v.tasas
             .keys()
@@ -806,6 +885,7 @@ fn titular(informe: &Informe) -> String {
         Decision::Listo => "Listo",
         Decision::NoListo => "No listo",
         Decision::Bloqueado => "Bloqueado",
+        Decision::SinDecision => "Sin decisión",
     };
     let c = &informe.confianza;
     let mut clausulas = Vec::new();
@@ -1221,15 +1301,106 @@ modulos = ["config"]
     }
 
     #[test]
-    fn informe_completitud_sin_veredicto_da_no_listo_y_lo_anota() {
+    fn informe_completitud_sin_veredicto_da_sin_decision_y_lo_anota() {
+        // Desempate 9: sin veredicto de completitud, la decisión es `SinDecision`, aunque su rúbrica no
+        // tenga ítem con `bloquea`.
         let v = veredicto(Vec::new(), None, Vec::new());
         let i = informe_de(&v);
-        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
+        assert_eq!(i.decision, Decision::SinDecision, "{}", i.motivo);
         assert!(
             i.motivo.contains("completitud_sin_veredicto"),
             "{}",
             i.motivo
         );
+        assert_eq!(estado_de(Some(&i)), Estado::SinVeredicto);
+    }
+
+    #[test]
+    fn informe_seguridad_sin_veredicto_da_sin_decision_y_nombra_la_regla() {
+        // Decisión 48: `seguridad.secretos` tiene `bloquea = true` en las rúbricas embebidas. Sin
+        // veredicto de seguridad, la decisión no es ni `Listo` ni `NoListo`.
+        let mut v = ecc();
+        v.puntajes[1].valor = 0.0;
+        v.puntajes[1].sin_veredicto = Some("juez no corrido".into());
+        let i = informar(&v, &tarea(), &ReglasDecision::default(), None).expect("informa");
+        assert_eq!(i.decision, Decision::SinDecision, "{}", i.motivo);
+        assert!(
+            i.motivo
+                .contains("dimension_que_bloquea_sin_veredicto: seguridad"),
+            "{}",
+            i.motivo
+        );
+        assert_eq!(estado_de(Some(&i)), Estado::SinVeredicto);
+        assert_eq!(crate::oracle::codigo_de_estado(estado_de(Some(&i))), 3);
+        let md = markdown("memora", &i);
+        assert!(md.contains("Sin decisión"), "{md}");
+    }
+
+    #[test]
+    fn informe_eficiencia_sin_veredicto_deja_listo_y_la_lista_en_confianza() {
+        // Eficiencia no tiene ítems con `bloquea`: sin veredicto, la decisión sigue en `Listo`.
+        let mut v = ecc();
+        v.puntajes[2].valor = 0.0;
+        v.puntajes[2].sin_veredicto = Some("sin sondas".into());
+        let i = informar(&v, &tarea(), &ReglasDecision::default(), None).expect("informa");
+        assert_eq!(i.decision, Decision::Listo, "{}", i.motivo);
+        assert_eq!(i.confianza.sin_veredicto.len(), 1, "{:?}", i.confianza);
+        assert_eq!(
+            i.confianza.sin_veredicto[0].dimension,
+            Dimension::Eficiencia
+        );
+        assert_eq!(i.confianza.sin_veredicto[0].motivo, "sin sondas");
+    }
+
+    #[test]
+    fn informe_oculto_que_falla_fuera_de_requisitos_da_no_listo_y_lo_nombra() {
+        // Desempate 11: un test oculto que falla y no prueba ningún requisito es una promesa del producto.
+        // La regla no depende de `completitud_minima`: con el mínimo en cero, sigue en `NoListo`.
+        let mut v = ecc();
+        v.ocultos_fallidos = vec!["tests/extra.py::caso_suelto".into()];
+        let reglas = ReglasDecision {
+            completitud_minima: 0.0,
+            ..ReglasDecision::default()
+        };
+        let i = informar(&v, &tarea(), &reglas, None).expect("informa");
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
+        assert!(
+            i.motivo.contains("test_oculto_fuera_de_requisitos"),
+            "{}",
+            i.motivo
+        );
+        assert!(
+            i.motivo.contains("tests/extra.py::caso_suelto"),
+            "{}",
+            i.motivo
+        );
+    }
+
+    #[test]
+    fn informe_oculto_que_falla_dentro_de_un_requisito_no_dispara_la_regla() {
+        // `tests/t.py::flaky` es la prueba de R1 en la tarea de prueba: el requisito lo cubre.
+        let mut v = ecc();
+        v.ocultos_fallidos = vec!["tests/t.py::flaky".into()];
+        let i = informar(&v, &tarea(), &ReglasDecision::default(), None).expect("informa");
+        assert!(
+            !i.motivo.contains("test_oculto_fuera_de_requisitos"),
+            "{}",
+            i.motivo
+        );
+    }
+
+    #[test]
+    fn informe_sin_decision_gana_sobre_bloqueado() {
+        // Un requisito de peso 3 en nivel 0 bloquea, pero la dimensión sin veredicto que bloquea decide.
+        let mut v = veredicto(
+            vec![req("R1", Cumplimiento::Ausente, Some(0))],
+            Some(0.9),
+            Vec::new(),
+        );
+        v.puntajes[1].sin_veredicto = Some("juez no corrido".into());
+        let i = informar(&v, &tarea(), &ReglasDecision::default(), None).expect("informa");
+        assert_eq!(i.decision, Decision::SinDecision, "{}", i.motivo);
+        assert!(!i.motivo.contains("bloqueo_requisito"), "{}", i.motivo);
     }
 
     #[test]
@@ -1273,11 +1444,26 @@ modulos = ["config"]
     }
 
     #[test]
-    fn informe_sin_rubricas_embebidas_la_regla_de_rubrica_no_dispara() {
-        // `EMBEBIDAS` está vacío: no hay ítems con `bloquea`, así que la regla no puede disparar.
+    fn informe_rubricas_embebidas_bloquean_si_secretos_queda_en_0() {
+        // Con las rúbricas embebidas, `seguridad.secretos` tiene `bloquea = true`: en nivel 0 bloquea.
         let mut v = ecc();
         v.puntajes[1].items.push(NivelItem {
             item: "seguridad.secretos".into(),
+            nivel: 0,
+            evidencia: Vec::new(),
+            fuente: Fuente::Sonda("rubrica".into()),
+        });
+        let i = informar(&v, &tarea(), &ReglasDecision::default(), None).expect("informa");
+        assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
+        assert!(i.motivo.contains("bloqueo_rubrica"), "{}", i.motivo);
+    }
+
+    #[test]
+    fn informe_rubricas_embebidas_item_sin_bloquea_en_0_no_bloquea() {
+        // `eficiencia.tiempo` existe en las embebidas, pero no tiene `bloquea`: en nivel 0 no bloquea.
+        let mut v = ecc();
+        v.puntajes[2].items.push(NivelItem {
+            item: "eficiencia.tiempo".into(),
             nivel: 0,
             evidencia: Vec::new(),
             fuente: Fuente::Sonda("rubrica".into()),
@@ -1452,6 +1638,7 @@ modulos = ["config"]
             test: "tests/x.py::lavapipe".into(),
             motivo: "lavapipe no emula la GPU".into(),
             colab: None,
+            tasa: None,
         }];
         v.sin_calibrar = vec![Dimension::Eficiencia];
         v.puntajes[5].sin_veredicto = Some("juez no corrido".into());
@@ -1465,7 +1652,10 @@ modulos = ["config"]
         assert_eq!(c.sin_veredicto.len(), 1);
         assert_eq!(c.sin_veredicto[0].dimension, Dimension::Diseno);
         assert_eq!(c.sin_veredicto[0].motivo, "juez no corrido");
-        assert!(c.ambiguedades.is_empty(), "el veredicto no trae la ficha");
+        assert!(
+            c.ambiguedades.is_empty(),
+            "sin revisión guardada no hay ambigüedades"
+        );
         assert!(c.avisos.iter().any(|a| a.contains("pudo filtrarse")));
     }
 

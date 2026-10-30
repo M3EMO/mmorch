@@ -3,6 +3,7 @@ use std::io;
 use thiserror::Error as ErrorDerive;
 
 use crate::aprende::ErrorAprende;
+use crate::corre::ErrorCorre;
 use crate::ficha::ErrorFicha;
 use crate::goal::ErrorGoal;
 use crate::importar::ErrorImportar;
@@ -63,6 +64,9 @@ pub enum Error {
     /// Error de E/S de stdin o stdout en `r00t mcp`. Sale con código 3.
     #[error("error de E/S del servidor MCP: {0}")]
     Mcp(io::Error),
+    /// Armado de una corrida del builder. Su código depende de la variante.
+    #[error(transparent)]
+    Corre(#[from] ErrorCorre),
 }
 
 impl Error {
@@ -74,6 +78,7 @@ impl Error {
             Error::Ficha(e) => e.codigo_de_salida(),
             Error::Oraculo(e) => e.codigo_de_salida(),
             Error::ConfigValor(_) => 2,
+            Error::Corre(e) => e.codigo_de_salida(),
             Error::NoImplementado(_)
             | Error::ConfigLeer { .. }
             | Error::ConfigToml(_)

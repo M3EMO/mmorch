@@ -15,6 +15,7 @@
 //! pedido o si pasó su tope. `SIGKILL` no se puede manejar: la próxima corrida, o
 //! `oraculo pendientes --liberar`, libera el runtime anotado.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read};
@@ -30,6 +31,7 @@ use serde_json::{Value, json};
 use signal_hook::consts::{SIGINT, SIGTERM};
 
 use super::junit;
+use super::pendientes::nombre_junit;
 use super::tarea::Tarea;
 use super::{ErrorOraculo, infra};
 use crate::observe;
@@ -77,8 +79,6 @@ const GPU_PEDIDA: &str = "T4";
 const PAQUETE_REMOTO: &str = "root-paquete.tar.gz";
 /// Carpeta donde `prepara.py` descomprime el paquete en el runtime.
 const CARPETA_REMOTA: &str = "root-paquete";
-/// Junit que deja `correr.sh`, dentro de la carpeta remota.
-const XML_PENDIENTES: &str = "pendientes.xml";
 /// Archivo de eventos de Root dentro de `ROOT_HOME`.
 const ARCHIVO_EVENTOS: &str = "eventos.jsonl";
 /// Fase de los eventos `Gate` del runtime.
@@ -492,7 +492,8 @@ impl ColabCli for ColabProceso {
 /// Resultado de una corrida en Colab: el junit y el dato de GPU para el informe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResultadoColab {
-    pub junit: PathBuf,
+    /// Un junit por repetición, en orden. Puede faltar alguno si su repetición no terminó.
+    pub junits: Vec<PathBuf>,
     pub gpu: String,
     pub sesion: String,
 }
@@ -526,23 +527,24 @@ pub enum Vigilancia {
     Liberado { causa: String },
 }
 
-/// Criterio de lo que pedía la corrida. Cumple si el junit parsea, si `ids` no está vacío y si cada
-/// id aparece en el junit con al menos `repeticiones` testcases. Cada testcase cuenta como pasa,
-/// falla, error u omitido, así que un `<skipped/>` también cuenta.
-pub fn cumple_lo_pedido(junit: &str, ids: &[String], repeticiones: u32) -> bool {
+/// Criterio de lo que pedía la corrida. Cumple si cada junit parsea, si `ids` no está vacío y si cada
+/// id aparece con al menos `repeticiones` testcases, sumados entre todos los junit (uno por repetición).
+/// Cada testcase cuenta como pasa, falla, error u omitido, así que un `<skipped/>` también cuenta.
+pub fn cumple_lo_pedido(junits: &[String], ids: &[String], repeticiones: u32) -> bool {
     if ids.is_empty() {
         return false;
     }
-    let Ok(leido) = junit::parsear(junit) else {
-        return false;
-    };
-    let leido = leido.con_ids();
-    ids.iter().all(|id| {
-        leido
-            .testcases
-            .get(id)
-            .is_some_and(|veces| *veces >= repeticiones)
-    })
+    let mut veces: BTreeMap<String, u32> = BTreeMap::new();
+    for texto in junits {
+        let Ok(leido) = junit::parsear(texto) else {
+            return false;
+        };
+        for (id, n) in leido.con_ids().testcases {
+            *veces.entry(id).or_default() += n;
+        }
+    }
+    ids.iter()
+        .all(|id| veces.get(id).is_some_and(|total| *total >= repeticiones))
 }
 
 /// Red de seguridad para el runtime anotado: lee `activo.json` y lo libera si pasó su tope o si su
@@ -575,22 +577,27 @@ pub fn vigilar(
         return Ok(Vigilancia::Vigente);
     };
 
-    // Junit propio del vigía: la corrida que sigue viva es la que lo importa.
+    // Carpeta propia del vigía: la corrida que sigue viva es la que lo importa.
     let carpeta = home.join("tmp").join(format!("vigilar-{}", activo.sesion));
     fs::create_dir_all(&carpeta).map_err(|e| infra("carpeta del vigía", e))?;
-    let junit = carpeta.join(XML_PENDIENTES);
     let sin_senal = Senales::default();
     let lim = Limites {
         cancelar: &sin_senal,
         inicio: Instant::now(),
         tope: TIMEOUT_LLAMADA,
     };
-    let cumple = match bajar_junit(cli, &lim, home, &activo.sesion, &junit)? {
-        Ok(()) => fs::read_to_string(&junit)
-            .is_ok_and(|texto| cumple_lo_pedido(&texto, &activo.ids, repeticiones)),
-        Err(_) => false,
-    };
-    let _ = crate::borrado::borrar_archivo_dentro(home, &junit);
+    let bajada = bajar_junits(
+        cli,
+        &lim,
+        home,
+        &activo.sesion,
+        &carpeta,
+        repeticiones,
+        false,
+    )?;
+    let cumple = leer_junits(&bajada.rutas)
+        .is_some_and(|textos| cumple_lo_pedido(&textos, &activo.ids, repeticiones));
+    borrar_junits(home, &bajada.rutas);
     if cumple {
         return parar_vigilado(cli, home, &activo, CAUSA_REQUISITO, CAUSA_REQUISITO);
     }
@@ -816,7 +823,7 @@ pub fn correr_en_colab(
                 parada,
             ) {
                 Ok(()) => Ok(ResultadoColab {
-                    junit: corte.junit,
+                    junits: corte.junits,
                     gpu: observado.gpu,
                     sesion: nombre_sesion.into(),
                 }),
@@ -1004,9 +1011,9 @@ fn apartar_ilegible(home: &Path) -> Result<(), ErrorOraculo> {
     registrar(home, CORRIDA_ANOTADA, extra)
 }
 
-/// Cómo terminó el sondeo: el junit que se importa y la causa del `Gate` de liberación.
+/// Cómo terminó el sondeo: los junit que se importan y la causa del `Gate` de liberación.
 struct Corte {
-    junit: PathBuf,
+    junits: Vec<PathBuf>,
     causa: &'static str,
 }
 
@@ -1096,57 +1103,134 @@ fn trabajar(
         )));
     }
 
-    // Sondeo: `correr.sh` sigue en el runtime. Corta en el corte 1 si el junit cumple lo pedido, y
+    // Sondeo: `correr.sh` sigue en el runtime. Corta en el corte 1 si los junit cumplen lo pedido, y
     // en el corte 2 si `correr.sh` terminó. El tope y las señales cortan en `esperar_sondeo`.
     // Sin verificar con la CLI real (nube sin colab): si `download` no puede leer durante la
     // corrida, el corte 1 se vuelve el corte 2.
-    let junit = tmp.join(XML_PENDIENTES);
     let guion_estado = escribir(tmp, "estado.py", GUION_ESTADO)?;
     let ids = ids_de(trabajo.tarea);
+    let repeticiones = trabajo.tarea.repeticiones;
     loop {
         if lim.vencido() {
             return Err(ErrorOraculo::Infra("tope de la corrida".into()));
         }
-        // a. Bajada del junit: un fallo significa que todavía no hay junit.
-        // b. Corte 1: el junit cumple lo pedido. Se importa y se libera aunque `correr.sh` siga.
-        if bajar_junit(cli, lim, home, sesion, &junit)?.is_ok()
-            && fs::read_to_string(&junit)
-                .is_ok_and(|texto| cumple_lo_pedido(&texto, &ids, trabajo.tarea.repeticiones))
+        // a. Bajada de los junit: una repetición sin junit todavía no terminó.
+        // b. Corte 1: los junit cumplen lo pedido. Se importan y se libera aunque `correr.sh` siga.
+        let bajada = bajar_junits(cli, lim, home, sesion, tmp, repeticiones, false)?;
+        if leer_junits(&bajada.rutas)
+            .is_some_and(|textos| cumple_lo_pedido(&textos, &ids, repeticiones))
         {
             return Ok(Corte {
-                junit,
+                junits: bajada.rutas,
                 causa: CAUSA_REQUISITO,
             });
         }
-        // c. Estado: `correr.sh` terminó. Corte 2 con el junit que haya; si no hay, error.
+        // c. Estado: `correr.sh` terminó. Corte 2 con los junit que haya; si no hay ninguno, error.
         if estado_terminado(cli, lim, sesion, &guion_estado)? {
-            return match bajar_junit(cli, lim, home, sesion, &junit)? {
-                Ok(()) => Ok(Corte {
-                    junit,
-                    causa: CAUSA_TERMINO,
-                }),
-                Err(causa) => Err(ErrorOraculo::Infra(format!(
-                    "no se pudo bajar {XML_PENDIENTES}: {causa}"
-                ))),
-            };
+            let bajada = bajar_junits(cli, lim, home, sesion, tmp, repeticiones, true)?;
+            if bajada.rutas.is_empty() {
+                let causa = bajada.causa.unwrap_or_else(|| "sin junit".into());
+                return Err(ErrorOraculo::Infra(format!(
+                    "no se pudo bajar {}: {causa}",
+                    nombre_junit(1)
+                )));
+            }
+            return Ok(Corte {
+                junits: bajada.rutas,
+                causa: CAUSA_TERMINO,
+            });
         }
         // d. Sigue corriendo: espera el intervalo, mirando señales y el tope.
         esperar_sondeo(cli, lim)?;
     }
 }
 
-/// Baja `pendientes.xml` a `destino`, sin dejar un junit viejo. `Ok(Ok(()))` si bajó. `Ok(Err(causa))`
-/// si la bajada falló: es que todavía no hay junit. `Err` solo si llegó una señal o se pasó el tope.
+/// Lo que se bajó de los junit por repetición: las rutas de los que están completos, y la causa de la
+/// última bajada que falló, si alguna falló.
+struct Bajada {
+    rutas: Vec<PathBuf>,
+    causa: Option<String>,
+}
+
+/// Baja el junit de cada repetición a `carpeta`. Un junit ya bajado y completo no se vuelve a bajar:
+/// una repetición que terminó no cambia. Con `todas` falso, la bajada para en la primera repetición sin
+/// junit, porque las repeticiones corren en orden. `Err` solo si llegó una señal o se pasó el tope.
+fn bajar_junits(
+    cli: &dyn ColabCli,
+    lim: &Limites,
+    home: &Path,
+    sesion: &str,
+    carpeta: &Path,
+    repeticiones: u32,
+    todas: bool,
+) -> Result<Bajada, ErrorOraculo> {
+    let mut bajada = Bajada {
+        rutas: Vec::new(),
+        causa: None,
+    };
+    for n in 1..=repeticiones {
+        let nombre = nombre_junit(n);
+        let destino = carpeta.join(&nombre);
+        if junit_completo(&destino) {
+            bajada.rutas.push(destino);
+            continue;
+        }
+        let fallo = match bajar_junit(cli, lim, home, sesion, &nombre, &destino)? {
+            Ok(()) if junit_completo(&destino) => {
+                bajada.rutas.push(destino);
+                None
+            }
+            Ok(()) => {
+                // Bajó a medias: se descarta y la próxima vuelta lo vuelve a bajar.
+                let _ = crate::borrado::borrar_archivo_dentro(home, &destino);
+                Some(format!("{nombre} no parsea"))
+            }
+            Err(causa) => Some(causa),
+        };
+        if let Some(causa) = fallo {
+            bajada.causa = Some(causa);
+            if !todas {
+                break;
+            }
+        }
+    }
+    Ok(bajada)
+}
+
+/// `true` si `ruta` existe y su junit parsea: una repetición completa no cambia.
+fn junit_completo(ruta: &Path) -> bool {
+    fs::read_to_string(ruta).is_ok_and(|texto| junit::parsear(&texto).is_ok())
+}
+
+/// Lee los junit bajados. `None` si alguno no se puede leer.
+fn leer_junits(rutas: &[PathBuf]) -> Option<Vec<String>> {
+    rutas
+        .iter()
+        .map(|ruta| fs::read_to_string(ruta).ok())
+        .collect()
+}
+
+/// Borra los junit bajados por la guarda de `borrado`.
+fn borrar_junits(home: &Path, rutas: &[PathBuf]) {
+    for ruta in rutas {
+        let _ = crate::borrado::borrar_archivo_dentro(home, ruta);
+    }
+}
+
+/// Baja el junit `nombre` de la carpeta remota a `destino`, sin dejar un junit viejo. `Ok(Ok(()))` si
+/// bajó. `Ok(Err(causa))` si la bajada falló: es que todavía no hay junit. `Err` solo si llegó una señal
+/// o se pasó el tope.
 fn bajar_junit(
     cli: &dyn ColabCli,
     lim: &Limites,
     home: &Path,
     sesion: &str,
+    nombre: &str,
     destino: &Path,
 ) -> Result<Result<(), String>, ErrorOraculo> {
     // Archivo propio de la corrida: un junit de un sondeo anterior no debe contar como nuevo.
     let _ = crate::borrado::borrar_archivo_dentro(home, destino);
-    let remoto = format!("{CARPETA_REMOTA}/{XML_PENDIENTES}");
+    let remoto = format!("{CARPETA_REMOTA}/{nombre}");
     match paso(
         cli,
         lim,
@@ -2313,7 +2397,7 @@ mod tests {
         .expect("corrida buena");
         assert_eq!(r.gpu, "Tesla T4");
         assert_eq!(r.sesion, "root-memora-1");
-        assert!(r.junit.is_file());
+        assert!(r.junits.iter().all(|j| j.is_file()));
         let gates = eventos_runtime(home.path());
         assert_eq!(gates.len(), 3, "pedir, preparar-rust y liberar: {gates:?}");
         assert_eq!(gates[0]["extra"]["gpu_pedida"], "T4");
@@ -3255,8 +3339,9 @@ mod tests {
             "root-memora-1",
         )
         .expect("corta por requisito cumplido");
+        assert_eq!(resultado.junits.len(), 1, "una repetición, un junit");
         assert!(
-            crate::oracle::junit::leer(&resultado.junit).is_ok(),
+            crate::oracle::junit::leer(&resultado.junits[0]).is_ok(),
             "el junit debe ser importable"
         );
         let lineas = falso.lineas();
@@ -3287,10 +3372,12 @@ mod tests {
         let vueltas_en = Rc::clone(&vueltas);
         let falso = Falso::nuevo(move |args: &[String]| match args[0].as_str() {
             "new" | "stop" | "upload" => salida(0, "", ""),
-            "download" => {
+            // Solo la repetición 1 tiene junit: la 2 todavía no terminó.
+            "download" if args[3].ends_with("pendientes-1.xml") => {
                 fs::write(args.last().expect("destino"), JUNIT).expect("escribe");
                 salida(0, "", "")
             }
+            "download" => salida(1, "", "todavía no hay junit"),
             "exec" => match guion_de(args).as_deref() {
                 Some(g) if g.ends_with("gpu.py") => salida(0, "ROOT_GPU=Tesla T4", ""),
                 Some(g) if g.ends_with("prepara.py") => salida(0, "ROOT_PREPARADO=1", ""),
@@ -3318,7 +3405,7 @@ mod tests {
             "root-memora-1",
         )
         .expect("corta cuando correr.sh termina");
-        assert!(resultado.junit.is_file());
+        assert!(resultado.junits.iter().all(|j| j.is_file()));
         let lineas = falso.lineas();
         let descargas = lineas.iter().filter(|l| l.starts_with("download")).count();
         assert!(descargas >= 3, "hubo {descargas} descargas: {lineas:?}");
@@ -3337,38 +3424,85 @@ mod tests {
     fn colab_cumple_lo_pedido_casos() {
         let ids = vec!["test_o::o2".to_string()];
         let uno = r#"<testsuite><testcase classname="tests.test_o" name="o2"/></testsuite>"#;
-        let dos = r#"<testsuite><testcase classname="tests.test_o" name="o2"/><testcase classname="tests.test_o" name="o2"/></testsuite>"#;
-        let tres = r#"<testsuite><testcase classname="tests.test_o" name="o2"/><testcase classname="tests.test_o" name="o2"/><testcase classname="tests.test_o" name="o2"/></testsuite>"#;
         let omitido = r#"<testsuite><testcase classname="tests.test_o" name="o2"><skipped/></testcase></testsuite>"#;
         let falla = r#"<testsuite><testcase classname="tests.test_o" name="o2"><failure message="x"/></testcase></testsuite>"#;
         let otro = r#"<testsuite><testcase classname="tests.test_x" name="x1"/></testsuite>"#;
+        let junits =
+            |xmls: &[&str]| -> Vec<String> { xmls.iter().map(|x| x.to_string()).collect() };
         assert!(
-            !cumple_lo_pedido("<testsuite><testcase", &ids, 1),
+            !cumple_lo_pedido(&junits(&["<testsuite><testcase"]), &ids, 1),
             "junit roto"
         );
-        assert!(!cumple_lo_pedido(otro, &ids, 1), "no aparece el id");
+        assert!(
+            !cumple_lo_pedido(&junits(&[otro]), &ids, 1),
+            "no aparece el id"
+        );
         assert!(
             !cumple_lo_pedido(
-                uno,
+                &junits(&[uno]),
                 &["test_o::o2".to_string(), "test_o::o3".to_string()],
                 1
             ),
             "falta un id"
         );
-        assert!(!cumple_lo_pedido(dos, &ids, 3), "2 de 3 repeticiones");
-        assert!(cumple_lo_pedido(tres, &ids, 3), "3 de 3 repeticiones");
         assert!(
-            !cumple_lo_pedido(uno, &[], 1),
+            !cumple_lo_pedido(&junits(&[uno, uno]), &ids, 3),
+            "2 de 3 repeticiones"
+        );
+        assert!(
+            cumple_lo_pedido(&junits(&[uno, uno, uno]), &ids, 3),
+            "3 junit de 1 testcase cada uno, con 3 repeticiones"
+        );
+        assert!(
+            !cumple_lo_pedido(&junits(&[uno, "<testsuite>"]), &ids, 2),
+            "un junit roto no cumple"
+        );
+        assert!(
+            !cumple_lo_pedido(&junits(&[uno]), &[], 1),
             "sin ids no hay nada cumplido"
         );
         assert!(
-            cumple_lo_pedido(omitido, &ids, 1),
+            cumple_lo_pedido(&junits(&[omitido]), &ids, 1),
             "un skipped cuenta como resultado"
         );
         assert!(
-            cumple_lo_pedido(falla, &ids, 1),
+            cumple_lo_pedido(&junits(&[falla]), &ids, 1),
             "una falla cuenta como resultado"
         );
+    }
+
+    #[test]
+    fn colab_vigilar_dos_repeticiones_completas_libera() {
+        let home = tempfile::tempdir().expect("home");
+        let ruta = escribir_activo_de_prueba(
+            home.path(),
+            &json!({
+                "v": 1,
+                "sesion": "vieja",
+                "pedido_ts": ahora_s(),
+                "gpu_pedida": "T4",
+                "ids": ["test_o::o2"],
+                "repeticiones": 2,
+            })
+            .to_string(),
+        );
+        let falso = Falso::nuevo(|args: &[String]| match args[0].as_str() {
+            "download"
+                if args[3].ends_with("pendientes-1.xml")
+                    || args[3].ends_with("pendientes-2.xml") =>
+            {
+                fs::write(args.last().expect("destino"), JUNIT).expect("escribe");
+                salida(0, "", "")
+            }
+            "download" => salida(1, "", "todavía no hay junit"),
+            _ => salida(0, "", ""),
+        });
+        let r = vigilar(&falso, home.path(), Duration::from_secs(7200));
+        match r {
+            Ok(Vigilancia::Liberado { causa }) => assert_eq!(causa, "requisito cumplido"),
+            otro => panic!("esperaba Liberado por requisito, llegó {otro:?}"),
+        }
+        assert!(!ruta.exists());
     }
 
     #[test]
