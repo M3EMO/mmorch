@@ -1594,6 +1594,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
             "type": "string"
           }
         },
+        "faltantes": {
+          "description": "Ítems sin sonda para el lenguaje, de todos los puntajes, en el orden de las dimensiones.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ItemFaltante"
+          }
+        },
         "inestables": {
           "description": "Tests inestables con su tasa. Claves `contrato:<id>` u `oculto:<id>`, como `Veredicto.tasas`.",
           "type": "object",
@@ -1887,6 +1895,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": {
             "ambiguedades": [],
             "avisos": [],
+            "faltantes": [],
             "inestables": {},
             "repeticiones": 0,
             "requisitos_pendientes": [],
@@ -1932,6 +1941,22 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "riesgos",
         "proximos_pasos",
         "resumen"
+      ]
+    },
+    "ItemFaltante": {
+      "description": "Un ítem de rúbrica que ninguna sonda mide para el lenguaje de la tarea, con el motivo (Tarea 31).",
+      "type": "object",
+      "properties": {
+        "item": {
+          "type": "string"
+        },
+        "motivo": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "motivo"
       ]
     },
     "NivelItem": {
@@ -2033,6 +2058,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
             "null"
           ],
           "format": "float"
+        },
+        "faltantes": {
+          "description": "Ítems de la dimensión que ninguna sonda mide para el lenguaje de la tarea.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ItemFaltante"
+          }
         },
         "items": {
           "type": "array",
@@ -2435,6 +2468,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "default": {
         "ambiguedades": [],
         "avisos": [],
+        "faltantes": [],
         "inestables": {},
         "repeticiones": 0,
         "requisitos_pendientes": [],
@@ -2526,6 +2560,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": [],
           "items": {
             "type": "string"
+          }
+        },
+        "faltantes": {
+          "description": "Ítems sin sonda para el lenguaje, de todos los puntajes, en el orden de las dimensiones.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ItemFaltante"
           }
         },
         "inestables": {
@@ -2661,6 +2703,22 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "peso",
         "cumplimiento",
         "evidencia"
+      ]
+    },
+    "ItemFaltante": {
+      "description": "Un ítem de rúbrica que ninguna sonda mide para el lenguaje de la tarea, con el motivo (Tarea 31).",
+      "type": "object",
+      "properties": {
+        "item": {
+          "type": "string"
+        },
+        "motivo": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "motivo"
       ]
     },
     "ParteSinVeredicto": {
@@ -3420,6 +3478,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ],
       "format": "float"
     },
+    "faltantes": {
+      "description": "Ítems de la dimensión que ninguna sonda mide para el lenguaje de la tarea.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ItemFaltante"
+      }
+    },
     "items": {
       "type": "array",
       "default": [],
@@ -3495,6 +3561,22 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
             "Juez"
           ]
         }
+      ]
+    },
+    "ItemFaltante": {
+      "description": "Un ítem de rúbrica que ninguna sonda mide para el lenguaje de la tarea, con el motivo (Tarea 31).",
+      "type": "object",
+      "properties": {
+        "item": {
+          "type": "string"
+        },
+        "motivo": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "motivo"
       ]
     },
     "NivelItem": {
@@ -4380,6 +4462,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
             "type": "string"
           }
         },
+        "faltantes": {
+          "description": "Ítems sin sonda para el lenguaje, de todos los puntajes, en el orden de las dimensiones.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ItemFaltante"
+          }
+        },
         "inestables": {
           "description": "Tests inestables con su tasa. Claves `contrato:<id>` u `oculto:<id>`, como `Veredicto.tasas`.",
           "type": "object",
@@ -4650,6 +4740,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": {
             "ambiguedades": [],
             "avisos": [],
+            "faltantes": [],
             "inestables": {},
             "repeticiones": 0,
             "requisitos_pendientes": [],
@@ -4695,6 +4786,22 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "riesgos",
         "proximos_pasos",
         "resumen"
+      ]
+    },
+    "ItemFaltante": {
+      "description": "Un ítem de rúbrica que ninguna sonda mide para el lenguaje de la tarea, con el motivo (Tarea 31).",
+      "type": "object",
+      "properties": {
+        "item": {
+          "type": "string"
+        },
+        "motivo": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "motivo"
       ]
     },
     "NivelItem": {
@@ -4796,6 +4903,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
             "null"
           ],
           "format": "float"
+        },
+        "faltantes": {
+          "description": "Ítems de la dimensión que ninguna sonda mide para el lenguaje de la tarea.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ItemFaltante"
+          }
         },
         "items": {
           "type": "array",

@@ -819,6 +819,7 @@ mod tests {
                     nivel_item("seguridad.panico_en_entrada", 3),
                 ],
                 sin_veredicto: None,
+                faltantes: Vec::new(),
             }],
             ..Veredicto::default()
         }
@@ -1060,6 +1061,7 @@ mod tests {
                 exactitud_balanceada: None,
                 items: vec![],
                 sin_veredicto: None,
+                faltantes: Vec::new(),
             }],
             ..Veredicto::default()
         };
@@ -1087,6 +1089,7 @@ mod tests {
                 exactitud_balanceada: None,
                 items: vec![],
                 sin_veredicto: None,
+                faltantes: Vec::new(),
             }],
             ..Veredicto::default()
         };
@@ -1115,6 +1118,7 @@ mod tests {
                 exactitud_balanceada: None,
                 items: vec![],
                 sin_veredicto: None,
+                faltantes: Vec::new(),
             }],
             ..Veredicto::default()
         };
@@ -1289,6 +1293,7 @@ mod tests {
             exactitud_balanceada: None,
             items: Vec::new(),
             sin_veredicto: None,
+            faltantes: Vec::new(),
         }
     }
 

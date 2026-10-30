@@ -108,19 +108,35 @@ pub fn es_nombre_dockerfile(nombre: &str) -> bool {
         || nombre.ends_with(".Containerfile")
 }
 
-/// Las cuatro sondas de configuración. Valen para cualquier lenguaje.
+/// Las cuatro sondas de configuración. Valen para cualquier lenguaje: son las tres locales y hadolint.
 pub fn sondas_configs(
     repo: &Path,
     ej: &dyn EjecutorHerramienta,
     tarea: &Tarea,
 ) -> Vec<ResultadoSonda> {
+    let mut sondas = sondas_configs_locales(repo, tarea);
+    sondas.push(sonda_hadolint_de(ej, repo, tarea));
+    sondas
+}
+
+/// Las tres sondas de configuración que no llaman a un contenedor: estructura de TOML y YAML, secretos
+/// en esas configs y reglas de los Dockerfile. Valen para cualquier lenguaje (Tarea 31).
+pub fn sondas_configs_locales(repo: &Path, tarea: &Tarea) -> Vec<ResultadoSonda> {
     let reqs = &tarea.requisito;
     vec![
         sonda_estructura_configs(repo, reqs),
         sonda_secretos_configs(repo, reqs),
         sonda_dockerfile_reglas(repo, reqs),
-        sonda_hadolint(ej, repo, reqs),
     ]
+}
+
+/// Hadolint sobre los Dockerfile del repo. Usa el ejecutor: corre en el contenedor de evaluación (Tarea 31).
+pub fn sonda_hadolint_de(
+    ej: &dyn EjecutorHerramienta,
+    repo: &Path,
+    tarea: &Tarea,
+) -> ResultadoSonda {
+    sonda_hadolint(ej, repo, &tarea.requisito)
 }
 
 /// Parsea la salida JSON de hadolint y arma los hallazgos del archivo `archivo`.

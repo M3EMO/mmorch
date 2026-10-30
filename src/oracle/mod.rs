@@ -35,8 +35,8 @@ use crate::config::{Config, ReglasDecision, root_home};
 use crate::ficha::{self, ErrorFicha};
 use crate::proveedores::{Prompt, RespuestaJuez};
 use crate::tipos::{
-    Conteo, Dimension, Estado, EstadoRequisito, Hallazgo, Pendiente, Puntaje, Rol, TasaTest,
-    VERSION, Veredicto,
+    Conteo, Dimension, Estado, EstadoRequisito, Hallazgo, ItemFaltante, Pendiente, Puntaje, Rol,
+    TasaTest, VERSION, Veredicto,
 };
 use crate::track::stats::wilson_inferior;
 use calibra::Calibraciones;
@@ -183,6 +183,10 @@ pub struct Partes {
     pub juez_diseno: bool,
     /// Redactor del informe. Ninguna dimensión lo necesita, así que `partes_de` lo deja apagado.
     pub redactor: bool,
+    /// Sondas de configs que no llaman a un contenedor: secretos, reglas de Dockerfile y estructura (Tarea 31).
+    pub configs: bool,
+    /// Hadolint, de Entrega: corre en el contenedor de evaluación (Tarea 31).
+    pub hadolint: bool,
 }
 
 impl Partes {
@@ -203,6 +207,8 @@ impl Partes {
             mutacion: true,
             juez_diseno: true,
             redactor: true,
+            configs: true,
+            hadolint: true,
         }
     }
 
@@ -219,12 +225,14 @@ const NO_MEDIDA: &str = "no medida en esta calibración";
 /// Partes que necesita cada dimensión para dar su puntaje (Tarea 12). Con sus rúbricas, el juez de diseño
 /// entra solo si la dimensión tiene ítems del juez.
 /// - Funciona: descarga, contrato, oculto y Entrega (los escenarios; `partes_de` no ve la tarea).
-/// - Seguridad: descarga, sondas nativas, gitleaks y cargo audit. Sin juez: no tiene ítems del juez.
+/// - Seguridad: descarga, sondas nativas, gitleaks, cargo audit y las sondas de configs. Sin juez: no tiene
+///   ítems del juez.
 /// - Eficiencia: descarga y el comando de `[eficiencia]`.
-/// - Estructura, Arquitectura y Diseño con ítems del juez: todas las sondas y la Entrega, porque el juez
-///   ve los hallazgos de todas. Corre el juez de diseño. Sin ítems del juez, solo sus sondas.
+/// - Estructura, Arquitectura y Diseño con ítems del juez: todas las sondas, las de configs, hadolint y la
+///   Entrega, porque el juez ve los hallazgos de todas. Corre el juez de diseño. Sin ítems del juez, solo
+///   sus sondas; Estructura también las de configs.
 /// - Completitud: descarga, oculto y Entrega (los escenarios de los requisitos).
-/// - Entrega: descarga, el juez de la configuración (su hallazgo va a Entrega) y la Entrega.
+/// - Entrega: descarga, el juez de la configuración (su hallazgo va a Entrega), la Entrega y hadolint.
 /// - Pruebas: descarga y la mutación.
 ///
 /// El redactor no mide ninguna dimensión: ninguna parte lo pide.
@@ -245,6 +253,7 @@ pub fn partes_de(dimension: Dimension, rubricas: &[Rubrica]) -> Partes {
             p.nativas = true;
             p.gitleaks = true;
             p.cargo_audit = true;
+            p.configs = true;
         }
         Dimension::Eficiencia => p.eficiencia = true,
         Dimension::Completitud => {
@@ -254,6 +263,7 @@ pub fn partes_de(dimension: Dimension, rubricas: &[Rubrica]) -> Partes {
         Dimension::Entrega => {
             p.juez_config = true;
             p.entrega = true;
+            p.hadolint = true;
         }
         Dimension::Pruebas => p.mutacion = true,
         Dimension::Estructura | Dimension::Arquitectura | Dimension::Diseno => {
@@ -267,12 +277,15 @@ pub fn partes_de(dimension: Dimension, rubricas: &[Rubrica]) -> Partes {
                 p.clippy = true;
                 p.eficiencia = true;
                 p.mutacion = true;
+                p.configs = true;
+                p.hadolint = true;
             } else {
                 // Sin ítems del juez, cada una mide solo sus sondas. Diseño no tiene sondas: nada más.
                 match dimension {
                     Dimension::Estructura => {
                         p.nativas = true;
                         p.clippy = true;
+                        p.configs = true;
                     }
                     Dimension::Arquitectura => p.nativas = true,
                     _ => {}
@@ -830,6 +843,14 @@ fn medir(
     .map(|(_, herramienta)| herramienta)
     .collect();
     sondas.extend(perfiles::herramientas::sondas_de(ej, tarea, repo, &pedidas));
+    // Las sondas de configs van después de las de herramientas (Tarea 31). Hadolint es la única que llama
+    // al ejecutor.
+    if partes.configs {
+        sondas.extend(configs::sondas_configs_locales(repo, tarea));
+    }
+    if partes.hadolint {
+        sondas.push(configs::sonda_hadolint_de(ej, repo, tarea));
+    }
     let mut hallazgos: Vec<Hallazgo> = sondas.iter().flat_map(|s| s.hallazgos.clone()).collect();
     // El juez ve los hallazgos de las sondas (el ciclo de módulos topa `diseno.modularidad`).
     let juicio = juzgar_diseno(tarea, juez, repo, &hallazgos)?;
@@ -867,11 +888,22 @@ fn medir(
                     .filter(|h| h.dimension == dimension)
                     .cloned()
                     .collect();
-                let de_sondas = puntaje_de(dimension, de_la_dimension, extra, tarea);
-                match parte_juez(dimension, juez, resultado.as_ref(), &topes) {
+                // Si ninguna sonda de la dimensión mide para el lenguaje, sus hallazgos quedan y su parte de
+                // sondas no tiene veredicto (Tarea 31).
+                let sin_sondas = sin_sonda_todas(dimension, juez.rubricas, &tarea.lenguaje);
+                let de_sondas = if sin_sondas {
+                    sin_veredicto_puntaje(dimension, motivo_sin_sonda(&tarea.lenguaje))
+                } else {
+                    puntaje_de(dimension, de_la_dimension, extra, tarea)
+                };
+                let mut puntaje = match parte_juez(dimension, juez, resultado.as_ref(), &topes) {
+                    // El juez mide sus ítems aunque las sondas no midan: la dimensión conserva su veredicto.
+                    Some(de_juez) if sin_sondas && de_juez.sin_veredicto.is_none() => de_juez,
                     Some(de_juez) => juntar_partes(dimension, de_sondas, de_juez),
                     None => de_sondas,
-                }
+                };
+                puntaje.faltantes = faltantes_de(dimension, &tarea.lenguaje);
+                puntaje
             }
         })
         .collect();
@@ -987,6 +1019,7 @@ fn parte_juez(
             exactitud_balanceada: None,
             items: puntuacion.items,
             sin_veredicto: None,
+            faltantes: Vec::new(),
         },
         None => sin_veredicto_puntaje(dimension, "ningún ítem tiene nivel".into()),
     })
@@ -1025,7 +1058,40 @@ fn juntar_partes(dimension: Dimension, sondas: Puntaje, juez: Puntaje) -> Puntaj
         exactitud_balanceada: None,
         items: juez.items,
         sin_veredicto: None,
+        faltantes: Vec::new(),
     }
+}
+
+/// Motivo de una parte de sondas que no mide ningún ítem para el lenguaje de la tarea (Tarea 31).
+fn motivo_sin_sonda(lenguaje: &str) -> String {
+    format!("sin sonda para {lenguaje}")
+}
+
+/// Verdadero si la dimensión tiene ítems de sonda en sus rúbricas y todos están sin sonda para `lenguaje`.
+/// Sin ítems de sonda no vale: no hay nada que falte (Tarea 31).
+fn sin_sonda_todas(dimension: Dimension, rubricas: &[Rubrica], lenguaje: &str) -> bool {
+    let faltan = perfiles::items_sin_sonda(lenguaje);
+    let de_sonda: Vec<&str> = rubricas
+        .iter()
+        .filter(|r| r.id == dimension.clave())
+        .flat_map(|r| r.item.iter())
+        .filter(|i| i.mide == Mide::Sonda)
+        .map(|i| i.id.as_str())
+        .collect();
+    !de_sonda.is_empty() && de_sonda.iter().all(|id| faltan.contains(id))
+}
+
+/// Ítems de la dimensión que ninguna sonda mide para `lenguaje`, con su motivo (Tarea 31).
+fn faltantes_de(dimension: Dimension, lenguaje: &str) -> Vec<ItemFaltante> {
+    let prefijo = format!("{}.", dimension.clave());
+    perfiles::items_sin_sonda(lenguaje)
+        .iter()
+        .filter(|item| item.starts_with(&prefijo))
+        .map(|item| ItemFaltante {
+            item: item.to_string(),
+            motivo: motivo_sin_sonda(lenguaje),
+        })
+        .collect()
 }
 
 /// Puntaje de una dimensión con sus sondas. Sin sondas no hay veredicto. Una sola sonda sin hallazgos
@@ -1112,6 +1178,7 @@ fn funciona(
         exactitud_balanceada: None,
         items: Vec::new(),
         sin_veredicto: None,
+        faltantes: Vec::new(),
     }
 }
 
@@ -1145,6 +1212,7 @@ fn sin_veredicto_puntaje(dimension: Dimension, motivo: String) -> Puntaje {
         exactitud_balanceada: None,
         items: Vec::new(),
         sin_veredicto: Some(motivo),
+        faltantes: Vec::new(),
     }
 }
 
@@ -2745,6 +2813,9 @@ mod tests {
                     "clippy.json".into(),
                     r#"{"reason":"build-finished","success":true}"#.into(),
                 );
+            } else if cmd.starts_with("hadolint --format json") {
+                // Un Dockerfile sano: hadolint no tiene nada que decir.
+                salida.stdout = "[]".into();
             } else if cmd == "bench-eficiencia" {
                 salida.stdout = r#"{"ops_s": 6000.0}"#.into();
             } else if cmd.contains("cargo mutants") {
@@ -3666,6 +3737,7 @@ mod tests {
             exactitud_balanceada: None,
             items: Vec::new(),
             sin_veredicto: None,
+            faltantes: Vec::new(),
         };
         let juez = Puntaje {
             valor: 0.5,
@@ -4280,6 +4352,8 @@ mod tests {
             ("mutacion", p.mutacion),
             ("juez_diseno", p.juez_diseno),
             ("redactor", p.redactor),
+            ("configs", p.configs),
+            ("hadolint", p.hadolint),
         ];
         let mut nombres: Vec<&'static str> = marcas
             .iter()
@@ -4304,6 +4378,8 @@ mod tests {
             "eficiencia",
             "mutacion",
             "juez_diseno",
+            "configs",
+            "hadolint",
         ];
         let esperado: [(Dimension, Vec<&str>); 9] = [
             (
@@ -4312,7 +4388,7 @@ mod tests {
             ),
             (
                 Dimension::Seguridad,
-                vec!["cargo_audit", "descarga", "gitleaks", "nativas"],
+                vec!["cargo_audit", "configs", "descarga", "gitleaks", "nativas"],
             ),
             (Dimension::Eficiencia, vec!["descarga", "eficiencia"]),
             (Dimension::Estructura, juzgadas.to_vec()),
@@ -4324,7 +4400,7 @@ mod tests {
             ),
             (
                 Dimension::Entrega,
-                vec!["descarga", "entrega", "juez_config"],
+                vec!["descarga", "entrega", "hadolint", "juez_config"],
             ),
             (Dimension::Pruebas, vec!["descarga", "mutacion"]),
         ];
@@ -4340,7 +4416,10 @@ mod tests {
     #[test]
     fn partes_de_sin_items_del_juez_pide_solo_sus_sondas() {
         let esperado = [
-            (Dimension::Estructura, vec!["clippy", "descarga", "nativas"]),
+            (
+                Dimension::Estructura,
+                vec!["clippy", "configs", "descarga", "nativas"],
+            ),
             (Dimension::Arquitectura, vec!["descarga", "nativas"]),
             (Dimension::Diseno, vec!["descarga"]),
         ];
@@ -4491,6 +4570,188 @@ mod tests {
             juez.llamadas(),
             1,
             "el juez de la configuración va a Entrega"
+        );
+    }
+
+    // ---- Tarea 31: sondas de Seguridad y de configs fuera de Rust, y faltantes ----
+
+    /// Tarea de `shell`: la de Rust con otro lenguaje. Sus sondas de Rust no corren.
+    fn tarea_shell(base: &Path) -> Tarea {
+        let dir = base.join("tarea");
+        fs::create_dir_all(&dir).expect("tarea");
+        fs::write(dir.join("spec.md"), SPEC).expect("spec");
+        let texto = "nombre = \"tarea-shell\"\nlenguaje = \"shell\"\nimagen = \"imagen-falsa\"\n\
+            spec = \"spec.md\"\nrepeticiones_inestable = 1\n\
+            [contrato]\ncmd = \"pytest -q --junitxml=/salida/contrato.xml /oraculo/contrato\"\n\
+            [oculto]\ncmd = \"pytest -q --junitxml=/salida/oculto.xml /oraculo/oculto\"\n\
+            [eficiencia]\ncmd = \"bench-eficiencia\"\npiso = 5000.0\n\
+            [[requisito]]\nid = \"R1\"\ntitulo = \"Uno\"\npeso = 3\npruebas = [\"test_b::t3\"]\n\
+            [[requisito]]\nid = \"R2\"\ntitulo = \"Dos\"\npeso = 1\npruebas = [\"test_b::t4\"]\n";
+        fs::write(dir.join("tarea.toml"), texto).expect("tarea.toml");
+        Tarea::cargar_de(&dir).expect("carga la tarea")
+    }
+
+    /// Repo de `shell`: un script y, si `config` no es `None`, un `config.yaml` con ese texto.
+    fn repo_shell(base: &Path, config: Option<&str>) -> PathBuf {
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).expect("repo");
+        fs::write(repo.join("run.sh"), "#!/bin/sh\necho hola\n").expect("run.sh");
+        if let Some(texto) = config {
+            fs::write(repo.join("config.yaml"), texto).expect("config.yaml");
+        }
+        repo
+    }
+
+    /// Evaluación de una tarea de `shell` con las rúbricas embebidas: cada dimensión sabe qué ítems miden
+    /// sus sondas.
+    fn evaluar_shell(
+        repo: &Path,
+        tarea: &Tarea,
+        home: &Path,
+        herramientas: &dyn Fn(&Preparada) -> Box<dyn EjecutorHerramienta>,
+    ) -> Veredicto {
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let deps = Dependencias {
+            rubricas: &rubricas,
+            ..deps_de(&correr, herramientas)
+        };
+        evaluar_con(repo, tarea, &opciones(home), deps).expect("evalúa")
+    }
+
+    /// Verdadero si `puntaje` lleva `item` como faltante, con el motivo de `shell`.
+    fn falta_en_shell(puntaje: &Puntaje, item: &str) -> bool {
+        puntaje
+            .faltantes
+            .iter()
+            .any(|f| f.item == item && f.motivo == "sin sonda para shell")
+    }
+
+    #[test]
+    fn oraculo_shell_secreto_en_yaml_da_hallazgo_de_seguridad_con_su_linea() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_shell(base.path());
+        let repo = repo_shell(
+            base.path(),
+            Some("servicio: pagos\napi_key: \"sk_live_9f8e7d6c5b4a3210\"\n"),
+        );
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let v = evaluar_shell(&repo, &tarea, &home, &herramientas(&[]));
+        let del_yaml: Vec<_> = v
+            .hallazgos
+            .iter()
+            .filter(|h| h.dimension == Dimension::Seguridad && h.archivo == "config.yaml")
+            .collect();
+        assert_eq!(del_yaml.len(), 1, "{:?}", v.hallazgos);
+        assert_eq!(del_yaml[0].linea, 2, "{:?}", del_yaml[0]);
+    }
+
+    #[test]
+    fn oraculo_shell_limpia_da_seguridad_con_veredicto_y_faltantes() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_shell(base.path());
+        let repo = repo_shell(base.path(), None);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let v = evaluar_shell(&repo, &tarea, &home, &herramientas(&[]));
+        let seguridad = puntaje_de_prueba(&v, Dimension::Seguridad);
+        assert_eq!(seguridad.sin_veredicto, None, "{seguridad:?}");
+        assert!(
+            falta_en_shell(seguridad, "seguridad.dependencias"),
+            "{:?}",
+            seguridad.faltantes
+        );
+        let informe = v.informe.as_ref().expect("hay informe");
+        assert!(
+            informe
+                .confianza
+                .faltantes
+                .iter()
+                .any(|f| f.item == "seguridad.dependencias" && f.motivo == "sin sonda para shell"),
+            "{:?}",
+            informe.confianza.faltantes
+        );
+    }
+
+    #[test]
+    fn oraculo_shell_sin_sondas_de_estructura_queda_sin_veredicto_con_faltantes() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_shell(base.path());
+        let repo = repo_shell(base.path(), None);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let v = evaluar_shell(&repo, &tarea, &home, &herramientas(&[]));
+        let estructura = puntaje_de_prueba(&v, Dimension::Estructura);
+        assert!(
+            estructura
+                .sin_veredicto
+                .as_deref()
+                .is_some_and(|m| m.contains("sin sonda para shell")),
+            "{estructura:?}"
+        );
+        assert!(
+            falta_en_shell(estructura, "estructura.tamano"),
+            "{:?}",
+            estructura.faltantes
+        );
+    }
+
+    #[test]
+    fn oraculo_shell_sin_gitleaks_deja_seguridad_sin_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_shell(base.path());
+        let repo = repo_shell(base.path(), None);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let v = evaluar_shell(&repo, &tarea, &home, &herramientas(&["gitleaks"]));
+        let seguridad = puntaje_de_prueba(&v, Dimension::Seguridad);
+        assert!(seguridad.sin_veredicto.is_some(), "{seguridad:?}");
+    }
+
+    #[test]
+    fn oraculo_rust_sana_no_tiene_faltantes_en_ningun_puntaje() {
+        let base = tempfile::tempdir().expect("base");
+        let v = veredicto_sano(base.path());
+        for puntaje in &v.puntajes {
+            assert!(puntaje.faltantes.is_empty(), "{puntaje:?}");
+        }
+        let informe = v.informe.as_ref().expect("hay informe");
+        assert!(
+            informe.confianza.faltantes.is_empty(),
+            "{:?}",
+            informe.confianza.faltantes
+        );
+    }
+
+    #[test]
+    fn oraculo_partes_seguridad_no_corre_hadolint() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        fs::write(repo.join("Dockerfile"), "FROM scratch\nUSER app\n").expect("Dockerfile");
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let junit = correr_suites(JUNIT_CONTRATO);
+        let (fabrica, cmds) = herramientas_grabadas();
+        evaluar_con_partes(
+            base.path(),
+            &repo,
+            Some(partes_de(Dimension::Seguridad, &rubricas)),
+            deps_de(&junit, &fabrica),
+        );
+        let cmds = cmds.borrow();
+        assert!(!cmds.iter().any(|c| c.contains("hadolint")), "{cmds:?}");
+    }
+
+    #[test]
+    fn oraculo_repo_rust_con_dockerfile_corre_hadolint() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        fs::write(repo.join("Dockerfile"), "FROM scratch\nUSER app\n").expect("Dockerfile");
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let (fabrica, cmds) = herramientas_grabadas();
+        let podman = PodmanFalso::nuevo(responde_build(salida_ok(), salida_ok()));
+        let deps = deps_con_podman(&correr, &fabrica, &podman);
+        evaluar_con_deps(base.path(), &repo, deps);
+        let cmds = cmds.borrow();
+        assert!(
+            cmds.iter().any(|c| c.starts_with("hadolint --format json")),
+            "{cmds:?}"
         );
     }
 }

@@ -746,6 +746,11 @@ fn confianza(v: &Veredicto) -> Confianza {
             })
             .collect(),
         avisos: v.avisos.clone(),
+        faltantes: v
+            .puntajes
+            .iter()
+            .flat_map(|p| p.faltantes.clone())
+            .collect(),
     }
 }
 
@@ -1093,6 +1098,7 @@ modulos = ["config"]
                     exactitud_balanceada: None,
                     items: Vec::new(),
                     sin_veredicto: None,
+                    faltantes: Vec::new(),
                 },
                 (Dimension::Completitud, None) => Puntaje {
                     dimension,
@@ -1101,6 +1107,7 @@ modulos = ["config"]
                     exactitud_balanceada: None,
                     items: Vec::new(),
                     sin_veredicto: Some("ningún requisito tiene nivel medido".into()),
+                    faltantes: Vec::new(),
                 },
                 _ => Puntaje {
                     dimension,
@@ -1109,6 +1116,7 @@ modulos = ["config"]
                     exactitud_balanceada: None,
                     items: Vec::new(),
                     sin_veredicto: None,
+                    faltantes: Vec::new(),
                 },
             })
             .collect();

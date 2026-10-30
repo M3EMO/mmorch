@@ -1,5 +1,6 @@
-//! Sondas de herramientas externas del perfil `rust` (Tarea 9-B). Corren dentro del contenedor
-//! de evaluación, con `--network none`. Si la herramienta falta en la imagen, dan `SinVeredicto`.
+//! Sondas de herramientas externas (Tarea 9-B). Corren dentro del contenedor de evaluación, con
+//! `--network none`. Si la herramienta falta en la imagen, dan `SinVeredicto`. Gitleaks corre en todo
+//! lenguaje (Tarea 31). Cargo audit, clippy y eficiencia son de `rust`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -431,7 +432,7 @@ fn linea_de_paquete(cargo_lock: &str, nombre: &str, version: &str) -> u32 {
     primera.map_or(0, |n| n as u32)
 }
 
-/// Seguridad: filtraciones de secretos con gitleaks. Cada una es severidad 3.
+/// Seguridad: filtraciones de secretos con gitleaks. Cada una es severidad 3. Corre en todo lenguaje.
 pub fn gitleaks(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoSonda {
     let d = Dimension::Seguridad;
     if let Some(r) = falta_herramienta(ej, d, "gitleaks") {
@@ -604,7 +605,7 @@ pub fn eficiencia(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoSonda
     }
 }
 
-/// Una de las cuatro sondas de herramientas del perfil `rust`.
+/// Una de las cuatro sondas de herramientas. Solo `Gitleaks` corre fuera de `rust`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Herramienta {
     Gitleaks,
@@ -613,7 +614,7 @@ pub enum Herramienta {
     Eficiencia,
 }
 
-/// Las cuatro sondas de herramientas del perfil `rust`. Otro lenguaje da vector vacío.
+/// Las cuatro sondas de herramientas. Fuera de `rust` solo corre gitleaks.
 pub fn sondas_herramientas(
     ej: &dyn EjecutorHerramienta,
     tarea: &Tarea,
@@ -632,19 +633,19 @@ pub fn sondas_herramientas(
     )
 }
 
-/// Solo las sondas de herramientas que `quienes` pide, en ese orden. Otro lenguaje da vector vacío.
-/// Una calibración pide las suyas (Tarea 12): una sonda que no se pide no llama a su contenedor.
+/// Solo las sondas de herramientas que `quienes` pide, en ese orden. Fuera de `rust` solo corre gitleaks:
+/// las otras tres usan herramientas de Rust. Una calibración pide las suyas (Tarea 12): una sonda que no
+/// se pide no llama a su contenedor.
 pub fn sondas_de(
     ej: &dyn EjecutorHerramienta,
     tarea: &Tarea,
     repo: &Path,
     quienes: &[Herramienta],
 ) -> Vec<ResultadoSonda> {
-    if tarea.lenguaje != "rust" {
-        return Vec::new();
-    }
+    let rust = tarea.lenguaje == "rust";
     quienes
         .iter()
+        .filter(|quien| rust || **quien == Herramienta::Gitleaks)
         .map(|quien| match quien {
             Herramienta::Gitleaks => gitleaks(ej, tarea),
             Herramienta::CargoAudit => cargo_audit(ej, tarea, repo),
@@ -1236,7 +1237,7 @@ mod tests {
     }
 
     #[test]
-    fn sonda_sondas_herramientas_solo_para_rust() {
+    fn sonda_sondas_herramientas_rust_corre_las_cuatro() {
         let repo = tempfile::tempdir().expect("temp dir");
         let ej = con_herramientas(|_| salida(0, ""));
         let dims: Vec<Dimension> = sondas_herramientas(&ej, &tarea_rust(None), repo.path())
@@ -1252,11 +1253,28 @@ mod tests {
                 Dimension::Eficiencia
             ]
         );
+    }
 
-        let ej = con_herramientas(|_| panic!("no debe correr"));
-        let vacio = sondas_herramientas(&ej, &tarea_de("python", None), repo.path());
-        assert!(vacio.is_empty());
-        assert!(ej.cmds().is_empty());
+    #[test]
+    fn sonda_sondas_herramientas_fuera_de_rust_solo_corre_gitleaks() {
+        let repo = tempfile::tempdir().expect("temp dir");
+        let ej = con_herramientas(|_| salida(0, ""));
+        let dims: Vec<Dimension> = sondas_herramientas(&ej, &tarea_de("python", None), repo.path())
+            .iter()
+            .map(|r| r.dimension)
+            .collect();
+        assert_eq!(dims, [Dimension::Seguridad]);
+        let cmds = ej.cmds();
+        assert!(
+            cmds.iter().any(|c| c.contains("gitleaks detect")),
+            "{cmds:?}"
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| c.contains("cargo") || c.contains("bench-eficiencia")),
+            "{cmds:?}"
+        );
     }
 
     #[test]

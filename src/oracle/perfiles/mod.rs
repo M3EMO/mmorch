@@ -31,6 +31,7 @@ impl ResultadoSonda {
             exactitud_balanceada: None,
             items: Vec::new(),
             sin_veredicto: None,
+            faltantes: Vec::new(),
         })
     }
 }
@@ -153,6 +154,26 @@ pub fn sondas_nativas(repo: &Path, tarea: &Tarea) -> Vec<ResultadoSonda> {
     ]
 }
 
+/// Ítems de rúbrica que solo tienen sonda en rust (Tarea 31). Para otro lenguaje, cada uno es un faltante.
+/// `seguridad.secretos` no está: se mide en todo lenguaje, con gitleaks y las sondas de configs.
+pub fn items_sin_sonda(lenguaje: &str) -> &'static [&'static str] {
+    if lenguaje == "rust" {
+        return &[];
+    }
+    &[
+        "seguridad.dependencias",
+        "seguridad.panico_en_entrada",
+        "seguridad.unsafe",
+        "estructura.tamano",
+        "estructura.duplicacion",
+        "estructura.clippy",
+        "arquitectura.dependencias",
+        "eficiencia.tiempo",
+        "eficiencia.capacidad",
+        "eficiencia.escalado",
+    ]
+}
+
 #[cfg(test)]
 pub(crate) fn requisito_de(id: &str, peso: u8, modulos: &[&str]) -> Requisito {
     Requisito {
@@ -183,6 +204,53 @@ mod tests {
         let c = hallazgo_de(1, "a.rs", "otra", &[]);
         let salida = deduplicar_hallazgos(vec![a.clone(), b, c.clone()]);
         assert_eq!(salida, vec![a, c]);
+    }
+
+    #[test]
+    fn perfiles_items_sin_sonda_rust_no_tiene_ninguno() {
+        assert!(items_sin_sonda("rust").is_empty());
+    }
+
+    #[test]
+    fn perfiles_items_sin_sonda_otro_lenguaje_lista_los_de_rust_sin_secretos() {
+        let faltan = items_sin_sonda("shell");
+        assert_eq!(
+            faltan,
+            [
+                "seguridad.dependencias",
+                "seguridad.panico_en_entrada",
+                "seguridad.unsafe",
+                "estructura.tamano",
+                "estructura.duplicacion",
+                "estructura.clippy",
+                "arquitectura.dependencias",
+                "eficiencia.tiempo",
+                "eficiencia.capacidad",
+                "eficiencia.escalado",
+            ]
+        );
+        assert!(!faltan.contains(&"seguridad.secretos"));
+    }
+
+    #[test]
+    fn perfiles_items_sin_sonda_coinciden_con_las_sondas_de_rust_de_las_rubricas() {
+        use crate::oracle::rubrica::{Mide, cargar_embebidas};
+        let rubricas = cargar_embebidas().expect("rúbricas");
+        let dimensiones = ["seguridad", "estructura", "arquitectura", "eficiencia"];
+        let mut de_rust: Vec<String> = rubricas
+            .iter()
+            .filter(|r| dimensiones.contains(&r.id.as_str()))
+            .flat_map(|r| r.item.iter())
+            .filter(|i| i.mide == Mide::Sonda && i.id != "seguridad.secretos")
+            .map(|i| i.id.clone())
+            .collect();
+        de_rust.sort();
+        let mut lista: Vec<String> = items_sin_sonda("shell")
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        lista.sort();
+        assert_eq!(lista, de_rust);
     }
 
     fn tarea_en(dir: &std::path::Path, lenguaje: &str, extra: &str) -> Tarea {

@@ -1334,6 +1334,7 @@ anclas = [
             exactitud_balanceada: None,
             items,
             sin_veredicto: None,
+            faltantes: Vec::new(),
         }
     }
 
