@@ -478,7 +478,7 @@ Funciones que usa el código:
 
 **Métricas.**
 
-- *Exactitud de orden*: fracción de pares donde Root pone `mejor` por encima de `peor`. Root compara primero la decisión (listo, no listo, bloqueado). A igual decisión compara el `global` si los dos lo tienen; si no, la completitud. Un empate o un par sin veredicto cuenta como fallo. No tiene umbral.
+- *Exactitud de orden*: fracción de pares donde Root pone `mejor` por encima de `peor`. Root compara primero la decisión (listo, no listo, bloqueado). A igual decisión compara el `global` si los dos lo tienen; si no, la completitud. Un empate o un par sin veredicto cuenta como fallo. Umbral 1,0: cumple solo si todos los pares quedan bien ordenados (desempate 44).
 - *Recall de defectos*: fracción de defectos con un hallazgo del veredicto en el mismo `archivo` y a ±3 líneas de `linea`. Umbral 0,8 (decisión 12).
 - *Acuerdo con el usuario*: `acuerdo_decision` cuenta los paquetes cuya decisión de Root coincide con la del formulario; cumple con 5 de 6 (decisión 13). `kappa_dimension` es el kappa de Cohen con pesos cuadráticos sobre los niveles 0 a 3, sumando los ítems de cada dimensión; cumple con 0,6 o más. `kappa_item` lo mide por ítem, sin umbral: un kappa bajo marca un ancla ambigua. `spearman` correlaciona el `orden` del formulario (1 es el mejor) con el orden de Root.
 
@@ -486,7 +486,8 @@ Un par, defecto o paquete que no tiene dato del usuario o de Root queda fuera de
 
 **Paquetes a ciegas.** `r00t oraculo validar --preparar-ciego --fuentes <manifiesto.toml> --casos <dir> [--semilla N]` lee el manifiesto. Su `[[fuente]]` tiene `tarea`, `origen` y `repo` (ruta absoluta o relativa al manifiesto). Por cada fuente arma `<dir>/ciego/<id>/` con:
 
-- `repo/`: copia del repo sin los nombres `AGENTS.md`, `CLAUDE.md`, `sdlc.toml`, `.claude`, `.git`, `logs` y `target` en cualquier nivel; sin archivos `*.log` ni nombres que empiecen con `.ecc`; sin enlaces simbólicos. Estos nombres son los rastros de ECC, de SDLC, de git, de logs y de build.
+- `repo/`: copia del repo sin los nombres `AGENTS.md`, `CLAUDE.md`, `sdlc.toml`, `.claude`, `.git`, `logs` y `target` en cualquier nivel; sin archivos `*.log` ni nombres que empiecen con `.ecc`; sin enlaces simbólicos. Estos nombres son los rastros de ECC, de SDLC, de git, de logs y de build. En cada `Cargo.toml` copiado, el armado borra `authors`, `repository` y `homepage` de `[package]` y de `[workspace.package]`. Un `Cargo.toml` que no parsea queda igual y se anota en la lista.
+- `rastros-<id>.toml`, junto a la carpeta del paquete y fuera de ella: `aparicion` con `archivo`, `linea` y `palabra` de cada `ecc`, `sdlc`, `claude`, `haiku`, `sonnet` u `opus` en los archivos de texto del `repo/`, sin distinguir mayúsculas y como palabra completa (`recclamo` no cuenta). Los binarios no se revisan. `avisos` lista lo que el armado no pudo revisar. El resumen de la CLI dice cuántas apariciones hay por paquete y dónde está la lista. Opus la revisa antes de entregar los paquetes (desempate 45).
 - `formulario.toml`: `decision` (`listo`, `no_listo` o `bloqueado`), `orden` (posición entre los del lote; 1 es el mejor) y un `[[item]]` por ítem de rúbrica, con `nivel` de 0 a 3. Las anclas van como comentario. Sin rúbricas embebidas, el formulario lleva solo la decisión y el orden, y el comando avisa en stderr.
 - El `id` tiene 8 caracteres hexadecimales y sale de un PRNG con la semilla (`--semilla`, o el reloj). Ningún `id` contiene el origen ni la tarea. Si `<dir>/ciego/` ya tiene contenido, el comando sale con `2`.
 
@@ -4001,7 +4002,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       }
     },
     "exactitud_orden": {
-      "description": "Fracción de pares de `orden.toml` que Root ordena como el resultado medido. Sin umbral.",
+      "description": "Fracción de pares de `orden.toml` que Root ordena como el resultado medido. Umbral 1,0.",
       "$ref": "#/$defs/Metrica"
     },
     "kappa_dimension": {

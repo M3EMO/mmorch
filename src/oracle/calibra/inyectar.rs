@@ -93,11 +93,24 @@ pub fn inyectar(
     capas: &[Vec<String>],
     semilla: u64,
 ) -> io::Result<Option<Inyeccion>> {
+    inyectar_con(defecto, dir, capas, &[], semilla)
+}
+
+/// Como `inyectar`, con `camino_caliente` (Tarea 12, desempate 42). Con la lista no vacía, el bucle O(n²)
+/// cae solo al inicio de una de esas funciones, elegida con la semilla entre las que existen en la copia.
+/// Si ninguna existe, `Ok(None)`. Los demás defectos no usan la lista.
+pub fn inyectar_con(
+    defecto: Defecto,
+    dir: &Path,
+    capas: &[Vec<String>],
+    camino_caliente: &[String],
+    semilla: u64,
+) -> io::Result<Option<Inyeccion>> {
     let mut rng = Prng::nuevo(semilla);
     let lugar = match defecto {
         Defecto::SecretoEnCodigo => secreto(dir, &mut rng)?,
         Defecto::PanicoEnEntrada => panico(dir, &mut rng)?,
-        Defecto::BucleCuadratico => bucle(dir, &mut rng)?,
+        Defecto::BucleCuadratico => bucle(dir, camino_caliente, &mut rng)?,
         Defecto::CicloEntreCapas => ciclo(dir, capas, &mut rng)?,
         Defecto::ArchivoDios => dios(dir, &mut rng)?,
         Defecto::ModuloBorrado => modulo_borrado(dir, &mut rng)?,
@@ -281,8 +294,26 @@ fn panico(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
 const BUCLE: &str =
     "let _ = (0..2_000u32).map(|i| (0..2_000u32).filter(|j| *j == i).count()).sum::<usize>();";
 
-/// Inserta un bucle cuadrático al inicio de una función de producción.
-fn bucle(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
+/// Nombre de la función que declara `linea` (`pub fn procesar(` da `procesar`). `None` si no declara una.
+fn nombre_de_funcion(linea: &str) -> Option<&str> {
+    let t = linea.trim_start();
+    let resto = ["pub(crate) fn ", "pub fn ", "fn "]
+        .iter()
+        .find_map(|p| t.strip_prefix(p))?;
+    let fin = resto
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(resto.len());
+    let nombre = &resto[..fin];
+    es_identificador(nombre).then_some(nombre)
+}
+
+/// `true` si `linea` puede recibir el bucle: con `camino` vacío, cualquiera; si no, una función de la lista.
+fn en_camino(linea: &str, camino: &[String]) -> bool {
+    camino.is_empty() || nombre_de_funcion(linea).is_some_and(|n| camino.iter().any(|c| c == n))
+}
+
+/// Inserta un bucle cuadrático al inicio de una función de producción. Con `camino`, solo de las listadas.
+fn bucle(dir: &Path, camino: &[String], rng: &mut Prng) -> io::Result<Lugar> {
     let mut candidatos: Vec<(String, usize)> = Vec::new();
     for archivo in rust_en(dir, "src")? {
         let lineas = partir(&leer(dir, &archivo)?);
@@ -292,7 +323,11 @@ fn bucle(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
             let es_funcion = ["pub fn ", "fn ", "pub(crate) fn "]
                 .iter()
                 .any(|p| t.starts_with(p));
-            if es_funcion && linea.trim_end().ends_with('{') && !t.contains("const fn") {
+            if es_funcion
+                && linea.trim_end().ends_with('{')
+                && !t.contains("const fn")
+                && en_camino(linea, camino)
+            {
                 candidatos.push((archivo.clone(), i));
             }
         }
@@ -917,6 +952,153 @@ mod tests {
             let (b, _, despues_b) = aplicar(defecto, 7);
             assert_eq!(a, b, "{defecto:?}");
             assert_eq!(despues_a, despues_b, "{defecto:?}");
+        }
+    }
+
+    /// Repo de prueba con dos funciones de producción: `procesar` y `otra`.
+    fn repo_con_dos_funciones() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("temporal");
+        std::fs::create_dir_all(dir.path().join("src")).expect("src");
+        std::fs::write(
+            dir.path().join("src/lib.rs"),
+            "pub fn procesar(x: u32) -> u32 {\n    x + 1\n}\n\nfn otra(x: u32) -> u32 {\n    x * 2\n}\n",
+        )
+        .expect("lib.rs");
+        dir
+    }
+
+    #[test]
+    fn inyectar_camino_caliente_pone_el_bucle_al_inicio_de_la_funcion_listada() {
+        for semilla in 1..=20u64 {
+            let dir = repo_con_dos_funciones();
+            let lista = vec!["procesar".to_string()];
+            let inyeccion = inyectar_con(
+                Defecto::BucleCuadratico,
+                dir.path(),
+                &capas_fixture(),
+                &lista,
+                semilla,
+            )
+            .expect("no falla la E/S")
+            .expect("procesar existe: el bucle aplica");
+            assert_eq!(inyeccion.archivo, "src/lib.rs");
+            let texto = std::fs::read_to_string(dir.path().join("src/lib.rs")).expect("lib.rs");
+            let lineas: Vec<&str> = texto.lines().collect();
+            let linea = inyeccion.linea as usize;
+            assert!(
+                lineas[linea - 2].contains("fn procesar"),
+                "semilla {semilla}: la línea anterior es el encabezado: {texto}"
+            );
+            assert!(
+                lineas[linea - 1].contains("let _ = (0..2_000u32)"),
+                "semilla {semilla}: el bucle va en la línea {linea}: {texto}"
+            );
+        }
+    }
+
+    #[test]
+    fn inyectar_camino_caliente_elige_entre_las_listadas_y_repite_con_la_semilla() {
+        let lista = vec!["procesar".to_string(), "otra".to_string()];
+        let mut elegidas = BTreeSet::new();
+        for semilla in 1..=20u64 {
+            let a = repo_con_dos_funciones();
+            let b = repo_con_dos_funciones();
+            let ia = inyectar_con(
+                Defecto::BucleCuadratico,
+                a.path(),
+                &capas_fixture(),
+                &lista,
+                semilla,
+            )
+            .expect("E/S");
+            let ib = inyectar_con(
+                Defecto::BucleCuadratico,
+                b.path(),
+                &capas_fixture(),
+                &lista,
+                semilla,
+            )
+            .expect("E/S");
+            assert_eq!(ia, ib, "semilla {semilla}: el mismo lugar");
+            assert_eq!(
+                arbol(a.path()),
+                arbol(b.path()),
+                "semilla {semilla}: el mismo cambio"
+            );
+            let texto = &arbol(a.path())["src/lib.rs"];
+            let encabezado = texto
+                .lines()
+                .nth(ia.expect("aplica").linea as usize - 2)
+                .expect("encabezado");
+            elegidas.insert(encabezado.contains("fn otra"));
+        }
+        assert_eq!(
+            elegidas.len(),
+            2,
+            "con la semilla cae en procesar y en otra"
+        );
+    }
+
+    #[test]
+    fn inyectar_camino_caliente_compara_el_nombre_completo() {
+        let dir = tempfile::tempdir().expect("temporal");
+        std::fs::create_dir_all(dir.path().join("src")).expect("src");
+        std::fs::write(
+            dir.path().join("src/lib.rs"),
+            "pub fn procesar_todo(x: u32) -> u32 {\n    x\n}\n",
+        )
+        .expect("lib.rs");
+        let lista = vec!["procesar".to_string()];
+        let sin = inyectar_con(
+            Defecto::BucleCuadratico,
+            dir.path(),
+            &capas_fixture(),
+            &lista,
+            42,
+        )
+        .expect("E/S");
+        assert_eq!(sin, None, "procesar no es procesar_todo");
+    }
+
+    #[test]
+    fn inyectar_camino_caliente_sin_funciones_existentes_no_inyecta() {
+        let dir = repo_con_dos_funciones();
+        let antes = arbol(dir.path());
+        let lista = vec!["no_existe".to_string()];
+        let inyeccion = inyectar_con(
+            Defecto::BucleCuadratico,
+            dir.path(),
+            &capas_fixture(),
+            &lista,
+            42,
+        )
+        .expect("E/S");
+        assert_eq!(inyeccion, None, "ninguna función de la lista existe");
+        assert_eq!(arbol(dir.path()), antes, "no toca el repo");
+    }
+
+    #[test]
+    fn inyectar_camino_caliente_vacio_da_lo_mismo_que_inyectar() {
+        for semilla in 1..=10u64 {
+            let a = repo_con_dos_funciones();
+            let b = repo_con_dos_funciones();
+            let ia = inyectar(
+                Defecto::BucleCuadratico,
+                a.path(),
+                &capas_fixture(),
+                semilla,
+            )
+            .expect("E/S");
+            let ib = inyectar_con(
+                Defecto::BucleCuadratico,
+                b.path(),
+                &capas_fixture(),
+                &[],
+                semilla,
+            )
+            .expect("E/S");
+            assert_eq!(ia, ib, "semilla {semilla}");
+            assert_eq!(arbol(a.path()), arbol(b.path()), "semilla {semilla}");
         }
     }
 

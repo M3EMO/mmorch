@@ -173,6 +173,10 @@ pub fn calibrar_con(
         .as_ref()
         .map_or(&[], |a| a.capas.as_slice());
 
+    let camino: &[String] = tarea
+        .calibracion
+        .as_ref()
+        .map_or(&[], |c| c.camino_caliente.as_slice());
     let mut casos: Vec<Caso> = Vec::with_capacity(n);
     let mut no_aplicables = 0u32;
     let mut rotacion = 0usize;
@@ -185,7 +189,7 @@ pub fn calibrar_con(
             let defecto = defectos[rotacion % defectos.len()];
             rotacion += 1;
             let semilla_caso = semilla.wrapping_add(i as u64);
-            let aplicado = inyectar::inyectar(defecto, &copia, capas, semilla_caso)
+            let aplicado = inyectar::inyectar_con(defecto, &copia, capas, camino, semilla_caso)
                 .map_err(|e| super::infra("inyectar un defecto", e))?;
             if aplicado.is_none() {
                 no_aplicables += 1;
@@ -738,6 +742,58 @@ mod tests {
         assert_eq!(fila.n, 10);
         assert_eq!(fila.sensibilidad, None);
         assert_eq!(fila.exactitud_balanceada, None);
+    }
+
+    #[test]
+    fn calibra_camino_caliente_sin_funciones_cuenta_no_aplicables() {
+        let dir = copia_fixture();
+        let base = Veredicto {
+            puntajes: vec![Puntaje {
+                dimension: Dimension::Eficiencia,
+                valor: 1.0,
+                calibrada: false,
+                exactitud_balanceada: None,
+                items: vec![],
+                sin_veredicto: None,
+            }],
+            ..Veredicto::default()
+        };
+        let tarea = tarea_en(
+            dir.path(),
+            "\n[calibracion]\ncamino_caliente = [\"no_existe\"]\n",
+        );
+        let ev = falso(dir.path(), &base, |_, _, base| base.clone());
+        let fila = calibrar_con(&tarea, Dimension::Eficiencia, 10, 42, dir.path(), &ev)
+            .expect("sin función del camino igual hay fila");
+        assert_eq!(
+            (fila.defectos, fila.limpios, fila.no_aplicable),
+            (0, 5, 5),
+            "el bucle no tiene dónde caer: cada caso con defecto es no aplicable"
+        );
+    }
+
+    #[test]
+    fn calibra_camino_caliente_con_funcion_existente_aplica_el_bucle() {
+        let dir = copia_fixture();
+        let base = Veredicto {
+            puntajes: vec![Puntaje {
+                dimension: Dimension::Eficiencia,
+                valor: 1.0,
+                calibrada: false,
+                exactitud_balanceada: None,
+                items: vec![],
+                sin_veredicto: None,
+            }],
+            ..Veredicto::default()
+        };
+        let tarea = tarea_en(
+            dir.path(),
+            "\n[calibracion]\ncamino_caliente = [\"ejecutar\"]\n",
+        );
+        let ev = falso(dir.path(), &base, |_, _, base| base.clone());
+        let fila =
+            calibrar_con(&tarea, Dimension::Eficiencia, 10, 42, dir.path(), &ev).expect("hay fila");
+        assert_eq!((fila.defectos, fila.no_aplicable), (5, 0));
     }
 
     #[test]

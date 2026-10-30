@@ -155,3 +155,60 @@ fn validez_cli_casos_inexistentes_es_uso() {
         "mensaje de uso: {stderr}"
     );
 }
+
+#[test]
+fn validez_cli_preparar_ciego_resume_los_rastros_por_paquete() {
+    let home = TempDir::new().expect("home");
+    let dir = TempDir::new().expect("dir");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(repo.join("src")).expect("repo");
+    fs::write(repo.join("src/lib.rs"), "pub fn f() {}\n").expect("lib");
+    fs::write(repo.join("README.md"), "Hecho con ECC\n").expect("readme");
+    let casos = dir.path().join("casos");
+    let manifiesto = dir.path().join("fuentes.toml");
+    fs::write(
+        &manifiesto,
+        format!(
+            "[[fuente]]\ntarea = \"memora\"\norigen = \"ecc-sonnet\"\nrepo = \"{}\"\n",
+            repo.display()
+        ),
+    )
+    .expect("manifiesto");
+
+    let salida = r00t(
+        home.path(),
+        &[
+            "oraculo",
+            "validar",
+            "--preparar-ciego",
+            "--fuentes",
+            manifiesto.to_str().expect("ruta UTF-8"),
+            "--casos",
+            casos.to_str().expect("ruta UTF-8"),
+            "--semilla",
+            "7",
+        ],
+    );
+    assert!(
+        salida.status.success(),
+        "sale con 0: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&salida.stdout);
+    let linea = stdout
+        .lines()
+        .find(|l| l.starts_with("rastros "))
+        .unwrap_or_else(|| panic!("el resumen dice los rastros por paquete: {stdout}"));
+    assert!(
+        linea.contains("1 apariciones"),
+        "cuenta las apariciones: {linea}"
+    );
+    let ruta = linea
+        .rsplit(" en ")
+        .next()
+        .expect("dice dónde está la lista");
+    assert!(
+        std::path::Path::new(ruta).is_file(),
+        "la ruta del resumen existe: {ruta}"
+    );
+}

@@ -189,11 +189,21 @@ fn oraculo_validar(
         if json {
             println!("{}", serde_json::to_string_pretty(&preparado)?);
         } else {
+            let ciego = casos.join("ciego");
             println!(
                 "{} paquetes a ciegas en {}",
                 preparado.paquetes.len(),
-                casos.join("ciego").display()
+                ciego.display()
             );
+            for r in &preparado.rastros {
+                println!(
+                    "rastros {}: {} apariciones, {} avisos, en {}",
+                    r.id,
+                    r.apariciones,
+                    r.avisos,
+                    ciego.join(&r.archivo).display()
+                );
+            }
         }
         return Ok(0);
     }
