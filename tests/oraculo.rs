@@ -254,7 +254,7 @@ fn oraculo_todo_pasa_sin_requisitos_da_conteos_completos_y_sin_veredicto() {
 }
 
 #[test]
-fn oraculo_una_falla_en_oculto_cuenta_y_da_sin_veredicto() {
+fn oraculo_una_falla_en_oculto_da_rojo() {
     root::saltar_sin_podman!();
     let _g = preparar();
     let (_dir, tarea) = tarea_con(
@@ -265,8 +265,9 @@ fn oraculo_una_falla_en_oculto_cuenta_y_da_sin_veredicto() {
     let home = tempfile::tempdir().expect("home");
     let v = evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa");
     assert_eq!(v.oculto, Conteo { pasa: 1, total: 2 });
-    // decisión 48: Seguridad sin sondas para shell y Completitud sin requisitos no tienen veredicto → SinDecision, código 3.
-    assert_eq!(v.estado, Estado::SinVeredicto);
+    // decisión 49: primero la evidencia. Un test oculto que falla y ningún requisito prueba da NoListo,
+    // aunque Seguridad (shell, sin sondas) no tenga veredicto. Estado Rojo, código 1.
+    assert_eq!(v.estado, Estado::Rojo);
 }
 
 #[test]
@@ -357,7 +358,7 @@ fn oraculo_cli_evaluar_json_imprime_veredicto() {
 }
 
 #[test]
-fn oraculo_cli_evaluar_sin_json_imprime_una_linea_y_sale_con_3_sin_decision() {
+fn oraculo_cli_evaluar_sin_json_imprime_una_linea_y_sale_con_1_si_hay_rojo() {
     root::saltar_sin_podman!();
     let _g = preparar();
     let home = tempfile::tempdir().expect("temp dir");
@@ -381,14 +382,13 @@ fn oraculo_cli_evaluar_sin_json_imprime_una_linea_y_sale_con_3_sin_decision() {
             &ruta,
         ],
     );
-    // decisión 48: Seguridad sin sondas para shell y Completitud sin requisitos no tienen veredicto → SinDecision, código 3.
-    assert_eq!(salida.status.code(), Some(3));
+    // decisión 49: primero la evidencia. El test oculto que falla da NoListo (estado rojo) aunque Seguridad
+    // no tenga veredicto. Sale con 1.
+    assert_eq!(salida.status.code(), Some(1));
     let stdout = String::from_utf8_lossy(&salida.stdout);
     assert_eq!(
         stdout.trim_end(),
-        format!(
-            "{ruta}: contrato 2/2, oculto 1/2, estado sin_veredicto, repeticiones 1, inestables 0"
-        )
+        format!("{ruta}: contrato 2/2, oculto 1/2, estado rojo, repeticiones 1, inestables 0")
     );
 }
 

@@ -4870,4 +4870,101 @@ mod tests {
             "{cmds:?}"
         );
     }
+
+    // ---- Tarea 32: la evidencia va antes que la falta de veredicto ----
+
+    /// Oculta sana: `t3` y `t4` pasan.
+    const JUNIT_OCULTO_VERDE: &str = r#"<testsuite><testcase classname="tests.test_b" name="t3"/><testcase classname="tests.test_b" name="t4"/></testsuite>"#;
+
+    /// Tarea de `shell` como `tarea_shell`, con un solo requisito: `test_b::t4` no lo prueba ninguno.
+    fn tarea_shell_r1(base: &Path) -> Tarea {
+        let dir = base.join("tarea");
+        fs::create_dir_all(&dir).expect("tarea");
+        fs::write(dir.join("spec.md"), SPEC).expect("spec");
+        let texto = "nombre = \"tarea-shell\"\nlenguaje = \"shell\"\nimagen = \"imagen-falsa\"\n\
+            spec = \"spec.md\"\nrepeticiones_inestable = 1\n\
+            [contrato]\ncmd = \"pytest -q --junitxml=/salida/contrato.xml /oraculo/contrato\"\n\
+            [oculto]\ncmd = \"pytest -q --junitxml=/salida/oculto.xml /oraculo/oculto\"\n\
+            [eficiencia]\ncmd = \"bench-eficiencia\"\npiso = 5000.0\n\
+            [[requisito]]\nid = \"R1\"\ntitulo = \"Uno\"\npeso = 3\npruebas = [\"test_b::t3\"]\n";
+        fs::write(dir.join("tarea.toml"), texto).expect("tarea.toml");
+        Tarea::cargar_de(&dir).expect("carga la tarea")
+    }
+
+    /// Ejecutor de suites como `correr_suites`, con el junit de la suite oculta dado.
+    fn correr_suites_oculto(
+        junit_oculto: &'static str,
+    ) -> impl Fn(&contenedor::Ejecucion) -> Result<contenedor::Resultado, ErrorOraculo> {
+        move |e: &contenedor::Ejecucion| {
+            let contrato = e.oraculo_destino.as_deref() == Some(DIR_CONTRATO);
+            let (coleccion, junit, xml) = if contrato {
+                (COLECCION_CONTRATO, JUNIT_CONTRATO, XML_CONTRATO)
+            } else {
+                (COLECCION_OCULTO, junit_oculto, XML_OCULTO)
+            };
+            if e.cmd.contains("--collect-only") {
+                fs::write(e.salida.join(ARCHIVO_COLECCION), coleccion).expect("coleccion");
+                return Ok(resultado_falso(0, ""));
+            }
+            fs::write(e.salida.join(xml), junit).expect("junit");
+            let codigo = if junit.contains("<failure") { 1 } else { 0 };
+            Ok(resultado_falso(codigo, ""))
+        }
+    }
+
+    /// Evaluación de `shell` con el ejecutor de suites y de herramientas dados.
+    fn evaluar_shell_con(
+        repo: &Path,
+        tarea: &Tarea,
+        home: &Path,
+        correr: Correr,
+        herramientas: FabricaHerramientas,
+    ) -> Veredicto {
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let deps = Dependencias {
+            rubricas: &rubricas,
+            ..deps_de(correr, herramientas)
+        };
+        evaluar_con(repo, tarea, &opciones(home), deps).expect("evalúa")
+    }
+
+    #[test]
+    fn oraculo_shell_sin_gitleaks_y_oculto_que_falla_da_no_listo_y_sale_con_1() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_shell_r1(base.path());
+        let repo = repo_shell(base.path(), None);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites_oculto(JUNIT_OCULTO);
+        let v = evaluar_shell_con(&repo, &tarea, &home, &correr, &herramientas(&["gitleaks"]));
+        let seguridad = puntaje_de_prueba(&v, Dimension::Seguridad);
+        assert!(seguridad.sin_veredicto.is_some(), "{seguridad:?}");
+        let informe = v.informe.as_ref().expect("hay informe");
+        assert_eq!(informe.decision, Decision::NoListo, "{}", informe.motivo);
+        assert!(
+            informe.motivo.contains("test_oculto_fuera_de_requisitos"),
+            "{}",
+            informe.motivo
+        );
+        assert_eq!(v.estado, Estado::Rojo);
+        assert_eq!(codigo_de_estado(v.estado), 1);
+    }
+
+    #[test]
+    fn oraculo_shell_sin_gitleaks_y_todo_verde_da_sin_decision_y_sale_con_3() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_shell_r1(base.path());
+        let repo = repo_shell(base.path(), None);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites_oculto(JUNIT_OCULTO_VERDE);
+        let v = evaluar_shell_con(&repo, &tarea, &home, &correr, &herramientas(&["gitleaks"]));
+        let informe = v.informe.as_ref().expect("hay informe");
+        assert_eq!(
+            informe.decision,
+            Decision::SinDecision,
+            "{}",
+            informe.motivo
+        );
+        assert_eq!(v.estado, Estado::SinVeredicto);
+        assert_eq!(codigo_de_estado(v.estado), 3);
+    }
 }
