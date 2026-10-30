@@ -304,8 +304,8 @@ pub struct ItemFaltante {
     pub motivo: String,
 }
 
-/// Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos
-/// salen del `Veredicto`.
+/// Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Sus campos salen del
+/// `Veredicto`, salvo `evidencia_visible`, que también lee la tarea.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Confianza {
     /// Repeticiones del oculto que corrieron.
@@ -335,6 +335,10 @@ pub struct Confianza {
     /// Ítems sin sonda para el lenguaje, de todos los puntajes, en el orden de las dimensiones.
     #[serde(default)]
     pub faltantes: Vec<ItemFaltante>,
+    /// Requisitos con evidencia solo del contrato, como `<id>: evidencia visible al builder`. El builder
+    /// ve esos tests (decisión 50). Un informe viejo lee vacío.
+    #[serde(default)]
+    pub evidencia_visible: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

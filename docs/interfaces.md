@@ -1577,7 +1577,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ]
     },
     "Confianza": {
-      "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos\nsalen del `Veredicto`.",
+      "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Sus campos salen del\n`Veredicto`, salvo `evidencia_visible`, que también lee la tarea.",
       "type": "object",
       "properties": {
         "ambiguedades": {
@@ -1590,6 +1590,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         },
         "avisos": {
           "description": "Avisos del veredicto, por ejemplo una corrida de Colab con red.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidencia_visible": {
+          "description": "Requisitos con evidencia solo del contrato, como `<id>: evidencia visible al builder`. El builder\nve esos tests (decisión 50). Un informe viejo lee vacío.",
           "type": "array",
           "default": [],
           "items": {
@@ -1897,6 +1905,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": {
             "ambiguedades": [],
             "avisos": [],
+            "evidencia_visible": [],
             "faltantes": [],
             "inestables": {},
             "repeticiones": 0,
@@ -2478,6 +2487,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "default": {
         "ambiguedades": [],
         "avisos": [],
+        "evidencia_visible": [],
         "faltantes": [],
         "inestables": {},
         "repeticiones": 0,
@@ -2553,7 +2563,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ]
     },
     "Confianza": {
-      "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos\nsalen del `Veredicto`.",
+      "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Sus campos salen del\n`Veredicto`, salvo `evidencia_visible`, que también lee la tarea.",
       "type": "object",
       "properties": {
         "ambiguedades": {
@@ -2566,6 +2576,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         },
         "avisos": {
           "description": "Avisos del veredicto, por ejemplo una corrida de Colab con red.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidencia_visible": {
+          "description": "Requisitos con evidencia solo del contrato, como `<id>: evidencia visible al builder`. El builder\nve esos tests (decisión 50). Un informe viejo lee vacío.",
           "type": "array",
           "default": [],
           "items": {
@@ -4461,7 +4479,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ]
     },
     "Confianza": {
-      "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos\nsalen del `Veredicto`.",
+      "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Sus campos salen del\n`Veredicto`, salvo `evidencia_visible`, que también lee la tarea.",
       "type": "object",
       "properties": {
         "ambiguedades": {
@@ -4474,6 +4492,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         },
         "avisos": {
           "description": "Avisos del veredicto, por ejemplo una corrida de Colab con red.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidencia_visible": {
+          "description": "Requisitos con evidencia solo del contrato, como `<id>: evidencia visible al builder`. El builder\nve esos tests (decisión 50). Un informe viejo lee vacío.",
           "type": "array",
           "default": [],
           "items": {
@@ -4758,6 +4784,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": {
             "ambiguedades": [],
             "avisos": [],
+            "evidencia_visible": [],
             "faltantes": [],
             "inestables": {},
             "repeticiones": 0,

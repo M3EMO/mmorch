@@ -3177,6 +3177,33 @@ mod tests {
     }
 
     #[test]
+    fn oraculo_requisito_con_evidencia_solo_del_contrato_figura_en_la_confianza() {
+        let base = tempfile::tempdir().expect("base");
+        let mut tarea = tarea_rust(base.path());
+        // R1 prueba solo un test del contrato: el builder lo ve (decisión 50).
+        tarea.requisito[0].pruebas = vec!["contrato:test_a::t1".into()];
+        tarea.requisito[0].bordes = Vec::new();
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_falso(&repo, &tarea, &home, &correr, &herramientas(&[])).expect("evalúa");
+        let marca = "R1: evidencia visible al builder".to_string();
+        let informe = v.informe.as_ref().expect("hay informe");
+        assert!(
+            informe.confianza.evidencia_visible.contains(&marca),
+            "{:?}",
+            informe.confianza
+        );
+        let v = redactar_para_mcp(v);
+        let informe = v.informe.as_ref().expect("hay informe");
+        assert!(
+            informe.confianza.evidencia_visible.contains(&marca),
+            "{:?}",
+            informe.confianza
+        );
+    }
+
+    #[test]
     fn oraculo_contrato_fallidos_lista_los_tests_del_contrato_que_fallan() {
         let base = tempfile::tempdir().expect("base");
         let tarea = tarea_rust(base.path());

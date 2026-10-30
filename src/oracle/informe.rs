@@ -186,7 +186,7 @@ pub fn informar_con(
         proximos_pasos: proximos_pasos(v, tarea, &bloqueantes),
         bloqueantes,
         resumen: resumen(v, &decidido.disparos),
-        confianza: confianza(v),
+        confianza: confianza(v, tarea),
     };
     if let Some(redactor) = redactor {
         let mut para_redactor = informe.clone();
@@ -761,8 +761,26 @@ fn conservadas(texto: &str, ids: &BTreeSet<String>) -> Option<String> {
     (!buenas.is_empty()).then(|| buenas.join(" "))
 }
 
+/// Marca de los requisitos cuya evidencia es solo del contrato (decisión 50).
+const MARCA_EVIDENCIA_VISIBLE: &str = "evidencia visible al builder";
+
+/// Requisitos cuyas pruebas y bordes son todos `contrato:`, y no están vacíos. El builder ve esos tests.
+/// Un requisito que mezcla `contrato:` con referencias sin prefijo tiene evidencia oculta: no entra.
+fn evidencia_visible(v: &Veredicto, tarea: &Tarea) -> Vec<String> {
+    tarea
+        .requisito
+        .iter()
+        .filter(|r| v.requisitos.iter().any(|e| e.id == r.id))
+        .filter(|r| {
+            let refs: Vec<&String> = r.pruebas.iter().chain(&r.bordes).collect();
+            !refs.is_empty() && refs.iter().all(|x| x.starts_with(PREFIJO_CONTRATO))
+        })
+        .map(|r| format!("{}: {MARCA_EVIDENCIA_VISIBLE}", r.id))
+        .collect()
+}
+
 /// Datos para decidir: lo que el veredicto no mide del todo.
-fn confianza(v: &Veredicto) -> Confianza {
+fn confianza(v: &Veredicto, tarea: &Tarea) -> Confianza {
     Confianza {
         repeticiones: v.repeticiones,
         inestables: v.tasas.clone(),
@@ -791,6 +809,7 @@ fn confianza(v: &Veredicto) -> Confianza {
             .iter()
             .flat_map(|p| p.faltantes.clone())
             .collect(),
+        evidencia_visible: evidencia_visible(v, tarea),
     }
 }
 
@@ -892,6 +911,9 @@ pub fn markdown(tarea: &str, informe: &Informe) -> String {
             "- Requisitos pendientes por entorno: {}",
             unir(&c.requisitos_pendientes)
         ));
+    }
+    for entrada in &c.evidencia_visible {
+        datos.push(format!("- {entrada}"));
     }
     for p in &c.tests_pendientes {
         datos.push(format!("- Test pendiente {}: {}", p.test, p.motivo));
@@ -1855,6 +1877,94 @@ modulos = ["config"]
         json.as_object_mut().expect("objeto").remove("confianza");
         let i: Informe = serde_json::from_value(json).expect("lee");
         assert_eq!(i.confianza, Confianza::default());
+    }
+
+    /// Informe de `ecc()` con la tarea `t` y sin redactor.
+    fn informe_con_tarea(v: &Veredicto, t: &Tarea) -> Informe {
+        informar_con(v, t, &ReglasDecision::default(), &[], None).expect("informa")
+    }
+
+    #[test]
+    fn informe_confianza_marca_requisito_con_evidencia_solo_del_contrato() {
+        let mut t = tarea();
+        t.requisito[0].pruebas = vec!["contrato:tests/c.py::a".into()];
+        t.requisito[0].bordes = Vec::new();
+        let i = informe_con_tarea(&ecc(), &t);
+        assert_eq!(
+            i.confianza.evidencia_visible,
+            ["R1: evidencia visible al builder"]
+        );
+    }
+
+    #[test]
+    fn informe_confianza_no_marca_requisito_con_evidencia_mezclada() {
+        let mut t = tarea();
+        // R1 mezcla un test del contrato con uno oculto: tiene evidencia oculta.
+        t.requisito[0].pruebas = vec!["contrato:tests/c.py::a".into(), "tests/t.py::flaky".into()];
+        // R2 solo tiene referencias sin prefijo: no es del contrato.
+        t.requisito[1].pruebas = vec!["tests/t.py::otro".into()];
+        let i = informe_con_tarea(&ecc(), &t);
+        assert!(
+            i.confianza.evidencia_visible.is_empty(),
+            "{:?}",
+            i.confianza
+        );
+        // Sin ninguna referencia, el default de `tarea()`, tampoco se marca.
+        let i = informe_de(&ecc());
+        assert!(
+            i.confianza.evidencia_visible.is_empty(),
+            "{:?}",
+            i.confianza
+        );
+    }
+
+    #[test]
+    fn informe_confianza_marca_requisito_con_borde_del_contrato_y_pruebas_del_contrato() {
+        let mut t = tarea();
+        t.requisito[0].pruebas = vec!["contrato:tests/c.py::a".into()];
+        t.requisito[0].bordes = vec!["contrato:tests/c.py::b".into()];
+        let i = informe_con_tarea(&ecc(), &t);
+        assert_eq!(
+            i.confianza.evidencia_visible,
+            ["R1: evidencia visible al builder"]
+        );
+        t.requisito[0].bordes = vec!["tests/t.py::b".into()];
+        let i = informe_con_tarea(&ecc(), &t);
+        assert!(
+            i.confianza.evidencia_visible.is_empty(),
+            "{:?}",
+            i.confianza
+        );
+    }
+
+    #[test]
+    fn informe_markdown_lista_la_evidencia_visible_al_builder() {
+        let mut t = tarea();
+        t.requisito[0].pruebas = vec!["contrato:tests/c.py::a".into()];
+        t.requisito[0].bordes = Vec::new();
+        let md = markdown("memora", &informe_con_tarea(&ecc(), &t));
+        assert!(md.contains("- R1: evidencia visible al builder"), "{md}");
+    }
+
+    #[test]
+    fn informe_viejo_sin_evidencia_visible_lee_vacio() {
+        let mut json = serde_json::to_value(informe_de(&ecc())).expect("serializa");
+        let confianza = json["confianza"].as_object_mut().expect("objeto");
+        assert!(confianza.remove("evidencia_visible").is_some());
+        let i: Informe = serde_json::from_value(json).expect("lee");
+        assert!(i.confianza.evidencia_visible.is_empty());
+    }
+
+    #[test]
+    fn informe_ocultar_tests_conserva_la_evidencia_visible() {
+        let mut i = informe_de(&ecc());
+        i.confianza.evidencia_visible = vec!["R1: evidencia visible al builder".into()];
+        let ocultos = BTreeSet::from(["tests/t.py::flaky".to_string()]);
+        ocultar_tests(&mut i, &ocultos);
+        assert_eq!(
+            i.confianza.evidencia_visible,
+            ["R1: evidencia visible al builder"]
+        );
     }
 
     #[test]
