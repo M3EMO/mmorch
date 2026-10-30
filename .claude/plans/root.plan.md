@@ -73,6 +73,8 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 47 | P55: "P55 a". Un agente busca el precio de Sonnet y Root lo usa sin confirmación del usuario, igual que con Haiku (decisión 44). El orquestador lo buscó en la referencia de la API de Anthropic (skill `claude-api`, tabla cacheada el 2026-10-06). `claude-sonnet-5-5` cuesta 2 USD por millón de tokens de entrada y 10 USD por millón de salida. La tabla no muestra tramos por tamaño de entrada. Ver Tarea 21b. |
 | 48 | P56: "P56 c". Una dimensión sin veredicto que tiene algún ítem `bloquea = true`, como Seguridad o Completitud, da `SinDecision`. Una dimensión sin veredicto sin ítems que bloquean deja `Listo` con aviso en `confianza`. P57: "P57 a". La calibración real corre por separado en memora y en brasa, con `n = 20`, y cada calibración vale solo para su tarea. Ver Tareas 12, 13b y 28. |
 | 49 | P58: "P58 a". Primero la evidencia: `decidir` aplica `Bloqueado` y `NoListo` antes que `SinDecision`. `SinDecision` solo reemplaza a un `Listo` cuando una dimensión con un ítem que bloquea queda sin veredicto. Esta decisión acota la decisión 48: su regla ya no va por encima de las demás. Ver Tarea 32. |
+| 50 | P-req1: "P-req1 a". Root cruza los requisitos también con el junit del contrato, además del oculto. Ver Tarea 34. |
+| 51 | P-req2: "P-req2 a, apruebo la descarga". Se agregan las 5 muestras glTF de Khronos a `oraculos/brasa/oculto/muestras/`. Es la autorización del usuario para esa descarga con red. La hace el orquestador. |
 
 ## Patterns to Mirror
 
@@ -639,7 +641,7 @@ Cada tarea es chica: un builder Haiku la termina en una sesión. Cada tarea escr
   
   El puntaje de `Completitud` es `Σ peso·nivel / (3·Σ peso)`. Los requisitos salen de la spec, y la spec sale de una sesión `/grill-me` con el usuario (decisión 12). En memora y brasa, la spec ya existe en el banco.
 - **Validate con fixtures** (no espera a G1): un requisito con su único test en `[[entorno]]` da `Pendiente`, y la `Completitud` es la misma que sin ese requisito. Este caso viene de la Tarea 7f, que no tenía `[[requisito]]` para probarlo.
-- **Validate**: `r00t oraculo evaluar --tarea memora --repo .../memora-sdlc` marca `Ausente` los módulos que el SDLC no construyó (el SDLC construyó 2 de 9 módulos, según `docs/contexto/mapa.md`). memora-ecc queda con todos `Cumplido`.
+- **Validate** (criterio corregido el 2026-10-30, ficha aprobada en G1): `r00t oraculo evaluar --tarea memora --repo .../memora-sdlc` marca `Ausente` los módulos que el SDLC no construyó (el SDLC construyó 2 de 9 módulos, según `docs/contexto/mapa.md`). memora-ecc queda con todos `Cumplido`, salvo R7, que queda `Parcial` por el defecto FIFO de `BLPOP`: la ficha aprobada exige FIFO (decisión 26).
 
 ### Tarea 9d: Entrega y escenarios de usuario
 - **Action**: `oracle/entrega.rs` clona el repo en un contenedor limpio y corre `[entrega].instalar` y `[entrega].correr`. Verifica `[entrega].archivos`. Construye el `Dockerfile` del proyecto y lo arranca, y verifica que corre sin root. La construcción sigue la Tarea 9d2 (decisión 24). Después corre cada `[[escenario]]` contra el producto levantado. Un escenario es un flujo real de usuario, como conectar un cliente, guardar un valor, reiniciar y leerlo. Es lo que un PM prueba a mano antes de aprobar.
@@ -2280,3 +2282,68 @@ Ninguna de las 14 preguntas toca una decisión del usuario. Cada desempate tiene
 10. **Colab (Tarea 7h).** Necesita la CLI de Colab con login del usuario y una T4 paga, con tope de 2 horas (decisiones 22, 33 y 40).
 11. **Graft (Tareas 16b y 16).** Opus escribe el oráculo de `graft-lector-planes`, y el usuario aprueba G5. Después corre la corrida real de Graft.
 12. **Paquetes a ciegas (Tarea 12b) y G3.** La laptop arma los paquetes reales, y Opus lee `validez/rastros.json`. Después, el usuario califica a ciegas (G3) y decide si memora sigue (G4).
+
+## Validate real de las Tareas 7 y 9c (2026-10-30)
+
+**Cómo se corrió.** El orquestador usó `r00t` release de 53985ce, el `ROOT_HOME` real, podman y ninguna clave de API. Las 8 evaluaciones tardaron 2,7 horas y gastaron 0 USD. Las salidas están en `~/.cache/root-wt/validate7/`. Antes, la sesión de fichas completó los `[[requisito]]` de memora (16) y brasa (14), solo con ids de la suite oculta.
+
+| Repo | Decisión | Completitud | Contrato | Oculto | Motivo |
+|---|---|---|---|---|---|
+| memora-ecc ×3 | listo | 0,957 | 61/61 | 47/48 | ninguna regla disparó |
+| brasa-ecc ×3 | no_listo | 0,852 | 53/53 | 14/15 | completitud_bajo_minimo 0,85 < 0,90 |
+| memora-sdlc | bloqueado | 0,226 | 21/61 | 20/48 | bloqueo_requisito: R1 y R13 en nivel 0 con peso 3 |
+| brasa-sdlc | bloqueado | 0,593 | 34/53 | 10/15 | bloqueo_requisito: R12 en nivel 0 con peso 3 |
+
+**Qué cumple.**
+- La Tarea 7 pide estabilidad: las 3 evaluaciones de cada repo ECC dan los mismos niveles por requisito. Ningún test quedó inestable.
+- El orden conocido se respeta: memora-ecc queda por encima de memora-sdlc, y brasa-ecc por encima de brasa-sdlc.
+- La Tarea 9c marca `Ausente` los requisitos que el SDLC no construyó. Cumple con el criterio corregido: memora-ecc queda `Cumplido` salvo R7.
+
+**Qué no cumple todavía, y por qué.**
+- **memora-ecc, R7 `Parcial`.** `test_blpop_fifo_entre_clientes` falló en las 15 corridas. La ficha aprobada exige FIFO (decisión 26), así que es un defecto del producto.
+- **brasa-ecc, R3 `Parcial`.** `test_spin_despues_de_rotacion` falla: es el defecto del spin en los ejes del padre (decisión 26).
+- **brasa-ecc, R9 `Ausente`.** Los 5 `test_modelo_khronos[...]` se omiten porque faltan las muestras `.glb`. Es un hueco del oráculo, no del producto. La decisión 51 lo cierra. Hasta repetir la evaluación, la decisión `no_listo` de brasa-ecc incluye ese hueco.
+- **Seis requisitos `SinVeredicto`.** memora R2, R4 y R16, y brasa R7, R13 y R14 no tienen tests ocultos. El contrato sí los prueba. La decisión 50 y la Tarea 34 los cubren.
+- **Estructura, Arquitectura y Diseño sin veredicto.** El juez no corrió, porque la evaluación fue sin claves. Es lo esperado en este paso.
+- **Eficiencia sin veredicto.** Las tareas no definen `[eficiencia]`.
+
+**Hallazgo sin diagnóstico: FIFO 9/30 contra 0/15.**
+- `diferencias.md` de memora registraba 9 pases de 30 para `test_blpop_fifo_entre_clientes`, en el host y en el contenedor.
+- Este Validate dio 0 pases de 15 en el contenedor.
+- La causa no está probada. Las candidatas son tres: la imagen cambió de `root-oraculo-rust:1` a `:2`, la carga de la máquina era otra, o el test cambió con la ficha.
+- El paso de la laptop "Diagnóstico de FIFO" lo investiga. Hasta entonces, el hallazgo figura en `diferencias.md` con la causa "sin diagnosticar". El origen sigue siendo "producto", porque falla en las dos mediciones.
+
+## Desempates técnicos 14 (Opus, 2026-10-30): el contrato como evidencia (decisión 50)
+
+1. **Formato de id.** Un id con el prefijo `contrato:` apunta a la suite de contrato, por ejemplo `contrato:test_contrato::test_R6_archivo_de_config`. Un id sin prefijo sigue apuntando a la suite oculta. Así los `tarea.toml` de hoy no cambian.
+2. **Nivel.** La regla de niveles de la Tarea 9c no cambia. Cada id de `pruebas` y `bordes` se busca en su suite. Un test inestable de cualquier suite pone tope 2 al requisito. Un test de `[[entorno]]` sigue fuera del cálculo.
+3. **Peso de la evidencia del contrato.** Cuenta igual que la oculta: el usuario eligió que el contrato pruebe requisitos. Como el builder ve el contrato, `Informe.confianza` lista los requisitos con evidencia solo del contrato, con la marca "evidencia visible al builder".
+4. **Tests fuera de requisitos.** La regla `test_oculto_fuera_de_requisitos` no cambia. Se suma `test_contrato_fuera_de_requisitos`: un test del contrato que falla de forma estable y no pertenece a ningún requisito da `NoListo`. Razón: un test del contrato también es una promesa de la spec.
+5. **Redacción por MCP.** Los ids del contrato no se redactan: el builder ya los ve.
+6. **Decisión 16.** Los tests siguen siendo evidencia y no el veredicto. Los niveles salen de la evidencia, y la decisión sale de las reglas del informe.
+
+### Tarea 34: Requisitos cruzados con el contrato (decisión 50)
+- **Action**: los desempates 1 a 5 de arriba. `medir` pasa a `requisitos` las clasificaciones del contrato y del oculto. `Veredicto` suma `contrato_fallidos`, con los ids del contrato que fallan de forma estable.
+- **Dónde**: todo en la nube.
+- **Validate**: `cargo test`:
+  - Un requisito con `pruebas = ["contrato:t::a"]` y ese test verde llega a nivel 2 o 3, según sus bordes.
+  - El mismo requisito figura en `Informe.confianza` con "evidencia visible al builder".
+  - Un id sin prefijo sigue buscándose en la suite oculta.
+  - Un test del contrato inestable pone tope 2 a su requisito.
+  - Un test del contrato que falla fuera de los requisitos da `NoListo` con `test_contrato_fuera_de_requisitos`.
+  - `contrato:` con un id que no existe deja el requisito `Ausente` en ese test.
+
+## Orden de trabajo (2026-10-30, después del Validate de 7 y 9c)
+
+**Nube, sesión 6.** Hace la Tarea 34 antes del 2026-11-05. Su brief es `docs/builds/brief-nube-6.md`. El commit de partida es la mezcla de la nube 5, que hace el orquestador.
+
+**Laptop, pasos nuevos.** Se suman a los pasos de "Orden de trabajo (2026-10-30, después de la nube 4)". El paso 1 de esa lista ya está hecho.
+- **Probar y mezclar la nube 5.** La laptop corre `tools/test-seguro.sh` con podman sobre `claude/zen-mccarthy-61lrlw` (a54f059). La mezcla espera la orden del usuario.
+- **Muestras de Khronos (decisión 51).** El orquestador baja las 5 muestras a `oraculos/brasa/oculto/muestras/`. Guarda la fuente, la versión y la licencia de cada archivo en `oraculos/brasa/oculto/muestras/FUENTES.md`. Esa carpeta vive en `ROOT_HOME`, nunca en el repo.
+- **Diagnóstico de FIFO.** Necesita podman, sin claves. Corre `test_blpop_fifo_entre_clientes` 30 veces en `root-oraculo-rust:2` y 30 veces en el host, y anota la causa en `diferencias.md`.
+- **Capas en los `tarea.toml`.** Después de la mezcla de la nube 5, Opus copia las capas de cada ficha (paso 6 de la lista anterior).
+- **Ids del contrato.** Después de la mezcla de la nube 6, la sesión de fichas suma los ids `contrato:` a memora R2, R4 y R16, y a brasa R7, R13 y R14.
+- **Validate de 7 y 9c, otra vez.** Después de las capas, las muestras y los ids del contrato, el orquestador repite las 8 evaluaciones sin claves. Tarda unas 3 horas y gasta 0 USD. Una sola corrida cubre los tres cambios.
+- Después siguen los pasos 2 a 5 y 7 a 12 de la lista anterior.
+
+No hay preguntas nuevas para el usuario.
