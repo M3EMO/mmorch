@@ -225,11 +225,24 @@ fn validez_cli_preparar_ciego_resume_los_rastros_por_paquete() {
         "cuenta una aparición de opus2: {texto}"
     );
     let archivo = entradas[0]["archivo"].as_str().expect("archivo");
-    let lista_del_paquete = fs::read_to_string(casos.join("ciego").join(archivo))
-        .expect("la lista del paquete sigue en casos/ciego");
+    let lista_del_paquete = fs::read_to_string(home.path().join("validez").join(archivo))
+        .expect("la lista del paquete está en ROOT_HOME/validez");
     assert!(
         lista_del_paquete.contains("palabra = \"opus\""),
         "la lista dice qué palabra apareció: {lista_del_paquete}"
+    );
+    let en_ciego: Vec<String> = fs::read_dir(casos.join("ciego"))
+        .expect("carpeta de paquetes")
+        .map(|e| {
+            e.expect("entrada")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(
+        en_ciego.iter().all(|n| !n.starts_with("rastros-")),
+        "casos/ciego no tiene listas de rastros: {en_ciego:?}"
     );
 }
 
