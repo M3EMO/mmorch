@@ -811,7 +811,7 @@ fn medir(
     entrega: ResultadoEntrega,
     partes: &Partes,
 ) -> Result<Medicion, ErrorOraculo> {
-    let resultados = requisitos::desde_clasificacion(oculto);
+    let resultados = requisitos::desde_clasificaciones(contrato, oculto);
     let estados = requisitos::evaluar_requisitos(
         &tarea.requisito,
         &resultados,
@@ -3151,6 +3151,27 @@ mod tests {
         assert_eq!(ids, ["R1", "R2"]);
         assert_eq!(v.requisitos[0].cumplimiento, Cumplimiento::Cumplido);
         assert_eq!(v.requisitos[1].cumplimiento, Cumplimiento::Ausente);
+    }
+
+    #[test]
+    fn oraculo_requisito_con_id_del_contrato_toma_nivel_del_junit_del_contrato() {
+        let base = tempfile::tempdir().expect("base");
+        let mut tarea = tarea_rust(base.path());
+        // R1 prueba `test_a::t1`, que pasa en el junit del contrato y no en el oculto.
+        tarea.requisito[0].pruebas = vec!["contrato:test_a::t1".into()];
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_falso(&repo, &tarea, &home, &correr, &herramientas(&[])).expect("evalúa");
+        let r1 = &v.requisitos[0];
+        assert_eq!(r1.id, "R1");
+        assert_eq!(r1.nivel, Some(3), "{:?}", r1.evidencia);
+        assert!(
+            r1.evidencia
+                .contains(&"contrato:test_a::t1: pasa".to_string()),
+            "{:?}",
+            r1.evidencia
+        );
     }
 
     #[test]
