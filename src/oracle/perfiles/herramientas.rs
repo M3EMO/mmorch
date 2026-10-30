@@ -1,6 +1,7 @@
 //! Sondas de herramientas externas (Tarea 9-B). Corren dentro del contenedor de evaluación, con
 //! `--network none`. Si la herramienta falta en la imagen, dan `SinVeredicto`. Gitleaks corre en todo
-//! lenguaje (Tarea 31). Cargo audit, clippy y eficiencia son de `rust`.
+//! lenguaje (Tarea 31). Eficiencia corre en todo lenguaje con `[eficiencia]`. Cargo audit y clippy
+//! son de `rust`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -605,7 +606,8 @@ pub fn eficiencia(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoSonda
     }
 }
 
-/// Una de las cuatro sondas de herramientas. Solo `Gitleaks` corre fuera de `rust`.
+/// Una de las cuatro sondas de herramientas. Fuera de `rust` corren gitleaks y, con `[eficiencia]`,
+/// eficiencia.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Herramienta {
     Gitleaks,
@@ -614,7 +616,8 @@ pub enum Herramienta {
     Eficiencia,
 }
 
-/// Las cuatro sondas de herramientas. Fuera de `rust` solo corre gitleaks.
+/// Las cuatro sondas de herramientas. Fuera de `rust` corren gitleaks y, si hay `[eficiencia]`,
+/// eficiencia.
 pub fn sondas_herramientas(
     ej: &dyn EjecutorHerramienta,
     tarea: &Tarea,
@@ -633,9 +636,9 @@ pub fn sondas_herramientas(
     )
 }
 
-/// Solo las sondas de herramientas que `quienes` pide, en ese orden. Fuera de `rust` solo corre gitleaks:
-/// las otras tres usan herramientas de Rust. Una calibración pide las suyas (Tarea 12): una sonda que no
-/// se pide no llama a su contenedor.
+/// Solo las sondas de herramientas que `quienes` pide, en ese orden. Fuera de `rust` corren gitleaks y, si la
+/// tarea declara `[eficiencia]`, eficiencia: cargo audit y clippy usan herramientas de Rust. Una calibración
+/// pide las suyas (Tarea 12): una sonda que no se pide no llama a su contenedor.
 pub fn sondas_de(
     ej: &dyn EjecutorHerramienta,
     tarea: &Tarea,
@@ -645,7 +648,12 @@ pub fn sondas_de(
     let rust = tarea.lenguaje == "rust";
     quienes
         .iter()
-        .filter(|quien| rust || **quien == Herramienta::Gitleaks)
+        .filter(|quien| match quien {
+            _ if rust => true,
+            Herramienta::Gitleaks => true,
+            Herramienta::Eficiencia => tarea.eficiencia.is_some(),
+            Herramienta::CargoAudit | Herramienta::Clippy => false,
+        })
         .map(|quien| match quien {
             Herramienta::Gitleaks => gitleaks(ej, tarea),
             Herramienta::CargoAudit => cargo_audit(ej, tarea, repo),
@@ -1275,6 +1283,28 @@ mod tests {
                 .any(|c| c.contains("cargo") || c.contains("bench-eficiencia")),
             "{cmds:?}"
         );
+    }
+
+    #[test]
+    fn sondas_de_shell_con_eficiencia_corre_la_sonda_de_eficiencia() {
+        let repo = tempfile::tempdir().expect("temp dir");
+        let ej = con_herramientas(|_| salida(0, "{\"ops_s\": 9000}\n"));
+        let tarea = tarea_de("shell", Some(("bench-eficiencia", 5000.0)));
+        let sondas = sondas_de(&ej, &tarea, repo.path(), &[Herramienta::Eficiencia]);
+        assert_eq!(sondas.len(), 1, "{sondas:?}");
+        assert_eq!(sondas[0].dimension, Dimension::Eficiencia);
+        assert_eq!(sondas[0].valor, Some(1.0));
+        assert_eq!(ej.cmds(), ["bench-eficiencia"]);
+    }
+
+    #[test]
+    fn sondas_de_shell_sin_eficiencia_no_corre_la_sonda() {
+        let repo = tempfile::tempdir().expect("temp dir");
+        let ej = con_herramientas(|_| panic!("no debe correr"));
+        let tarea = tarea_de("shell", None);
+        let sondas = sondas_de(&ej, &tarea, repo.path(), &[Herramienta::Eficiencia]);
+        assert!(sondas.is_empty(), "{sondas:?}");
+        assert!(ej.cmds().is_empty());
     }
 
     #[test]

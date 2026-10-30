@@ -895,7 +895,7 @@ fn medir(
                     .collect();
                 // Si ninguna sonda de la dimensión mide para el lenguaje, sus hallazgos quedan y su parte de
                 // sondas no tiene veredicto (Tarea 31).
-                let sin_sondas = sin_sonda_todas(dimension, juez.rubricas, &tarea.lenguaje);
+                let sin_sondas = sin_sonda_todas(dimension, juez.rubricas, tarea);
                 let de_sondas = if sin_sondas {
                     sin_veredicto_puntaje(dimension, motivo_sin_sonda(&tarea.lenguaje))
                 } else {
@@ -911,7 +911,7 @@ fn medir(
                     Some(de_juez) => juntar_partes(dimension, de_sondas, de_juez),
                     None => de_sondas,
                 };
-                puntaje.faltantes = faltantes_de(dimension, &tarea.lenguaje);
+                puntaje.faltantes = faltantes_de(dimension, tarea);
                 if sin_modulos {
                     sumar_faltante_sin_modulos(&mut puntaje.faltantes);
                 }
@@ -1079,10 +1079,10 @@ fn motivo_sin_sonda(lenguaje: &str) -> String {
     format!("sin sonda para {lenguaje}")
 }
 
-/// Verdadero si la dimensión tiene ítems de sonda en sus rúbricas y todos están sin sonda para `lenguaje`.
+/// Verdadero si la dimensión tiene ítems de sonda en sus rúbricas y todos están sin sonda para la tarea.
 /// Sin ítems de sonda no vale: no hay nada que falte (Tarea 31).
-fn sin_sonda_todas(dimension: Dimension, rubricas: &[Rubrica], lenguaje: &str) -> bool {
-    let faltan = perfiles::items_sin_sonda(lenguaje);
+fn sin_sonda_todas(dimension: Dimension, rubricas: &[Rubrica], tarea: &Tarea) -> bool {
+    let faltan = perfiles::items_sin_sonda(&tarea.lenguaje, tarea.eficiencia.is_some());
     let de_sonda: Vec<&str> = rubricas
         .iter()
         .filter(|r| r.id == dimension.clave())
@@ -1104,15 +1104,15 @@ fn sumar_faltante_sin_modulos(faltantes: &mut Vec<ItemFaltante>) {
     }
 }
 
-/// Ítems de la dimensión que ninguna sonda mide para `lenguaje`, con su motivo (Tarea 31).
-fn faltantes_de(dimension: Dimension, lenguaje: &str) -> Vec<ItemFaltante> {
+/// Ítems de la dimensión que ninguna sonda mide para la tarea, con su motivo (Tarea 31).
+fn faltantes_de(dimension: Dimension, tarea: &Tarea) -> Vec<ItemFaltante> {
     let prefijo = format!("{}.", dimension.clave());
-    perfiles::items_sin_sonda(lenguaje)
-        .iter()
+    perfiles::items_sin_sonda(&tarea.lenguaje, tarea.eficiencia.is_some())
+        .into_iter()
         .filter(|item| item.starts_with(&prefijo))
         .map(|item| ItemFaltante {
             item: item.to_string(),
-            motivo: motivo_sin_sonda(lenguaje),
+            motivo: motivo_sin_sonda(&tarea.lenguaje),
         })
         .collect()
 }
@@ -4847,6 +4847,70 @@ mod tests {
         let v = evaluar_shell(&repo, &tarea, &home, &herramientas(&["gitleaks"]));
         let seguridad = puntaje_de_prueba(&v, Dimension::Seguridad);
         assert!(seguridad.sin_veredicto.is_some(), "{seguridad:?}");
+    }
+
+    #[test]
+    fn oraculo_shell_con_eficiencia_corre_la_sonda_y_no_la_lista_en_faltantes() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_shell(base.path());
+        let repo = repo_shell(base.path(), None);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let v = evaluar_shell(&repo, &tarea, &home, &herramientas(&[]));
+        let eficiencia = puntaje_de_prueba(&v, Dimension::Eficiencia);
+        assert_eq!(eficiencia.sin_veredicto, None, "{eficiencia:?}");
+        assert!(eficiencia.valor > 0.0, "{eficiencia:?}");
+        assert!(
+            eficiencia.faltantes.is_empty(),
+            "{:?}",
+            eficiencia.faltantes
+        );
+    }
+
+    #[test]
+    fn oraculo_shell_estructura_con_juez_que_mide_conserva_el_veredicto_del_juez() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_shell(base.path());
+        let repo = repo_shell(base.path(), None);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let juez = JuezFalso::con(
+            &respuesta_juez(
+                json!([item_juez(
+                    "estructura.legibilidad",
+                    2,
+                    json!([{"archivo": "run.sh", "linea": 2, "cita": "echo hola"}])
+                )]),
+                json!([]),
+            ),
+            0.1,
+        );
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let fabrica = herramientas(&[]);
+        let deps = Dependencias {
+            juez: Some(&juez),
+            modelo_juez: MODELO_JUEZ,
+            rubricas: &rubricas,
+            ..deps_de(&correr, &fabrica)
+        };
+        let v = evaluar_con(&repo, &tarea, &opciones(&home), deps).expect("evalúa");
+        let estructura = puntaje_de_prueba(&v, Dimension::Estructura);
+        assert_eq!(estructura.sin_veredicto, None, "{estructura:?}");
+        assert!(
+            (estructura.valor - 2.0 / 3.0).abs() < 1e-6,
+            "{estructura:?}"
+        );
+        assert_eq!(juez.llamadas(), 1);
+        for item in [
+            "estructura.tamano",
+            "estructura.duplicacion",
+            "estructura.clippy",
+        ] {
+            assert!(
+                falta_en_shell(estructura, item),
+                "{:?}",
+                estructura.faltantes
+            );
+        }
     }
 
     #[test]

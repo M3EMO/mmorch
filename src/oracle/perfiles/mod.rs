@@ -156,11 +156,10 @@ pub fn sondas_nativas(repo: &Path, tarea: &Tarea) -> Vec<ResultadoSonda> {
 
 /// Ítems de rúbrica que solo tienen sonda en rust (Tarea 31). Para otro lenguaje, cada uno es un faltante.
 /// `seguridad.secretos` no está: se mide en todo lenguaje, con gitleaks y las sondas de configs.
-pub fn items_sin_sonda(lenguaje: &str) -> &'static [&'static str] {
-    if lenguaje == "rust" {
-        return &[];
-    }
-    &[
+/// Los `eficiencia.*` dejan de ser faltantes cuando la tarea declara `[eficiencia]`: su comando no depende
+/// del lenguaje (la sonda corre en todo lenguaje).
+pub fn items_sin_sonda(lenguaje: &str, con_eficiencia: bool) -> Vec<&'static str> {
+    const SIN_SONDA: &[&str] = &[
         "seguridad.dependencias",
         "seguridad.panico_en_entrada",
         "seguridad.unsafe",
@@ -171,7 +170,15 @@ pub fn items_sin_sonda(lenguaje: &str) -> &'static [&'static str] {
         "eficiencia.tiempo",
         "eficiencia.capacidad",
         "eficiencia.escalado",
-    ]
+    ];
+    if lenguaje == "rust" {
+        return Vec::new();
+    }
+    SIN_SONDA
+        .iter()
+        .copied()
+        .filter(|item| !(con_eficiencia && item.starts_with("eficiencia.")))
+        .collect()
 }
 
 #[cfg(test)]
@@ -208,12 +215,24 @@ mod tests {
 
     #[test]
     fn perfiles_items_sin_sonda_rust_no_tiene_ninguno() {
-        assert!(items_sin_sonda("rust").is_empty());
+        assert!(items_sin_sonda("rust", false).is_empty());
+        assert!(items_sin_sonda("rust", true).is_empty());
+    }
+
+    #[test]
+    fn perfiles_items_sin_sonda_otro_lenguaje_con_eficiencia_no_lista_los_de_eficiencia() {
+        let faltan = items_sin_sonda("shell", true);
+        assert!(
+            !faltan.iter().any(|i| i.starts_with("eficiencia.")),
+            "{faltan:?}"
+        );
+        assert!(faltan.contains(&"estructura.tamano"), "{faltan:?}");
+        assert_eq!(faltan.len(), 7, "{faltan:?}");
     }
 
     #[test]
     fn perfiles_items_sin_sonda_otro_lenguaje_lista_los_de_rust_sin_secretos() {
-        let faltan = items_sin_sonda("shell");
+        let faltan = items_sin_sonda("shell", false);
         assert_eq!(
             faltan,
             [
@@ -245,7 +264,7 @@ mod tests {
             .map(|i| i.id.clone())
             .collect();
         de_rust.sort();
-        let mut lista: Vec<String> = items_sin_sonda("shell")
+        let mut lista: Vec<String> = items_sin_sonda("shell", false)
             .iter()
             .map(|s| s.to_string())
             .collect();
