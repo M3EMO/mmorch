@@ -298,6 +298,7 @@ La prosa del spec explica. La ficha fija los datos que Root mide. Cada dato tien
 - `r00t ficha tarea` arma un borrador de `tarea.toml`. El borrador deja `pruebas`, `bordes` y `escenarios` vacíos. La persona que aprueba la ficha completa esos campos en `ROOT_HOME`.
 - `r00t ficha revisar` aplica reglas deterministas. Con `--juez-proveedor` y `--juez-modelo`, también corre el juez de ambigüedades.
 - Si el juez llega al tope de salida, su causa es `sin_veredicto: tope de salida alcanzado (N tokens)`. N es el tope pedido. Esa causa no dice «JSON inválido».
+- El juez de la ficha no envía un prompt de más de 256 KiB.
 
 Tablas de la ficha:
 

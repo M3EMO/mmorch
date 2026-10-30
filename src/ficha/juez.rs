@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use super::{Ambiguedad, ContextoRevision, ErrorFicha, Revision, revisar};
 use crate::oracle::evidencia::cita_en_archivo;
+use crate::oracle::juez::exceso_de_entrada;
 use crate::proveedores::{self, Prompt, RespuestaJuez};
 use crate::tipos::Eleccion;
 
@@ -87,6 +88,10 @@ pub fn revisar_con_tope(
 
 /// Pide el juicio y lo parsea. El error es la causa en texto, lista para `juez`.
 fn juicio(juez: &dyn JuezAmbiguedad, prompt: &Prompt) -> Result<Vec<Cruda>, String> {
+    // Un prompt sobre el límite del juez no se envía.
+    if let Some(motivo) = exceso_de_entrada(prompt) {
+        return Err(motivo);
+    }
     let respuesta = juez.consultar(prompt).map_err(|e| e.to_string())?;
     // Antes de parsear: una respuesta cortada por el tope no es JSON roto, es truncada.
     if respuesta.truncada {
