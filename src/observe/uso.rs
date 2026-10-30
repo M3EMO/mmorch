@@ -83,6 +83,27 @@ fn reservas_abiertas_usd(eventos: &[&Evento], inicio: f64) -> f64 {
         .fold(0.0, |total, ev| total + ev.cost_usd)
 }
 
+/// Gasto de API desde `inicio` (epoch en segundos): el costo de las llamadas de API con `ts >= inicio`,
+/// más las reservas de API abiertas desde `inicio`. Cuenta todos los eventos, aunque los haya escrito otro
+/// proceso (decisión 48): sobreestima, nunca subestima.
+pub fn gasto_api_desde(eventos: &[Evento], inicio: f64) -> f64 {
+    // Igual que `calcular_uso`: las llamadas de API son los eventos que no son reservas, y las reservas
+    // suman solo mientras ningún evento las cierre.
+    let llamadas = eventos
+        .iter()
+        .filter(|ev| ev.via == Some(Via::Api) && ev.tipo != TipoEvento::Reserva && ev.ts >= inicio)
+        // `fold` evita el -0.0 que `sum` da sin eventos.
+        .fold(0.0, |total, ev| total + ev.cost_usd);
+    let vigentes: Vec<&Evento> = eventos.iter().collect();
+    llamadas + reservas_abiertas_usd(&vigentes, inicio)
+}
+
+/// `gasto_api_desde` sobre el archivo indicado y sus rotados. Un archivo inexistente da 0.
+pub fn gasto_api_desde_en(ruta: &Path, inicio: f64) -> Result<f64, ErrorObserve> {
+    let eventos = leer_eventos(ruta)?;
+    Ok(gasto_api_desde(&eventos, inicio))
+}
+
 /// Ids de las reservas que algún evento cierra: los que listan en `extra.reservas`.
 fn reservas_cerradas<'a>(eventos: &[&'a Evento]) -> HashSet<&'a str> {
     eventos
@@ -744,6 +765,43 @@ mod tests {
             cierre(AHORA - 1200.0, 0.4, &["r1"]),
         ];
         assert!(reservas_viejas(&eventos, AHORA, UMBRAL_VIEJA_S).is_empty());
+    }
+
+    #[test]
+    fn uso_gasto_api_desde_suma_llamadas_y_reservas_abiertas_desde_el_inicio() {
+        let reserva = |id: &str, ts: f64, usd: f64| Evento {
+            ts,
+            via: Some(Via::Api),
+            tipo: TipoEvento::Reserva,
+            cost_usd: usd,
+            corrida: "c1".into(),
+            extra: Map::from_iter([("reserva".to_string(), json!(id))]),
+            ..Evento::default()
+        };
+        let cierre = |ts: f64, usd: f64, ids: Value| Evento {
+            ts,
+            via: Some(Via::Api),
+            tipo: TipoEvento::Llamada,
+            cost_usd: usd,
+            corrida: "c1".into(),
+            extra: Map::from_iter([("reservas".to_string(), ids)]),
+            ..Evento::default()
+        };
+        let eventos = vec![
+            // Antes del inicio: no cuenta.
+            evento(Some(Via::Api), 5.0, 1.0),
+            // Llamada desde el inicio: cuenta su costo real.
+            evento(Some(Via::Api), 10.0, 0.3),
+            // Reserva abierta desde el inicio: cuenta su peor caso.
+            reserva("r1", 12.0, 0.4),
+            // Reserva que la llamada de 14 cierra: no cuenta; la llamada sí.
+            reserva("r2", 13.0, 0.2),
+            cierre(14.0, 0.2, json!(["r2"])),
+            // Cupo: no es API.
+            evento(Some(Via::Cupo), 12.0, 9.0),
+        ];
+        let gasto = gasto_api_desde(&eventos, 10.0);
+        assert!((gasto - 0.9).abs() < 1e-9, "{gasto}");
     }
 }
 

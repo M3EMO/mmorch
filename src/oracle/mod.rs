@@ -112,6 +112,9 @@ pub enum ErrorOraculo {
     /// Otra corrida de `oraculo pendientes` tiene la tarea. No espera: sale con código 3 y nombra al dueño.
     #[error("{0}")]
     Ocupado(String),
+    /// `oraculo calibrar --tope-usd`: el tope de gasto detuvo la calibración antes de su último caso. Sale con 3.
+    #[error("{0}")]
+    Tope(String),
 }
 
 impl ErrorOraculo {
@@ -3620,6 +3623,7 @@ mod tests {
             especificidad: Some(0.95),
             exactitud_balanceada: Some(0.95),
             items: BTreeMap::new(),
+            incompleta: false,
         })
         .collect();
         let calibracion = Calibraciones {

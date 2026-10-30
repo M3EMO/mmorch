@@ -58,7 +58,7 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t oraculo pendientes --tarea <t> --repo <dir> [--importar <junit>... \| --colab]` | Arma el paquete de tests pendientes por entorno para Colab. Con `--importar`, guarda los junit de vuelta, uno por repetición (`pendientes-N.xml`). Con `--colab`, corre el paquete en Colab y lo importa. Solo una corrida por tarea a la vez: la segunda sale con `3` y nombra a la primera (pid y hora). | `{dir, tests}`, o `{importados, ignorados}` | construido (Tarea 7f). `--colab`: Tarea 7j |
 | `r00t oraculo pendientes --liberar` | Libera el runtime de Colab anotado en `$ROOT_HOME/colab/activo.json`, si hay uno, y sale. | sin salida JSON | construido (Tarea 7j) |
 | `r00t oraculo pendientes --vigilar` | Red de seguridad: lee `$ROOT_HOME/colab/activo.json`. Libera el runtime si pasó su tope o si su junit cumple lo pedido. Un runtime vigente no se toca. Sin `--tarea` ni `--repo`. | `{vigilancia, causa}`, con `vigilancia` `sin_runtime`, `vigente` o `liberado` | construido (Tarea 7l) |
-| `r00t oraculo calibrar --tarea <t> --dimension <d> [--n 20] [--semilla 42] [--repo <dir>]` | Calibra una dimensión con defectos inyectados: mitad con defecto, mitad limpia. Mide la sensibilidad, la especificidad y la exactitud balanceada, por dimensión y por ítem, contra una línea base. Agrega una fila a `$ROOT_HOME/calibracion.json` e imprime la fila. Sin `--repo`, usa `[calibracion] repo` de `tarea.toml`; sin ninguno, sale con `2`. | `Fila` | construido (Tarea 12). |
+| `r00t oraculo calibrar --tarea <t> --dimension <d> [--n 20] [--semilla 42] [--repo <dir>] [--tope-usd <n>]` | Calibra una dimensión con defectos inyectados: mitad con defecto, mitad limpia. Mide la sensibilidad, la especificidad y la exactitud balanceada, por dimensión y por ítem, contra una línea base. Agrega una fila a `$ROOT_HOME/calibracion.json` e imprime la fila. Sin `--repo`, usa `[calibracion] repo` de `tarea.toml`; sin ninguno, sale con `2`. Con `--tope-usd <n>`, antes de la línea base y de cada caso compara el gasto de API desde el inicio, más el peor caso del caso, con el tope. Si no entra, registra un `Gate` `calibracion-tope`, guarda la fila de los casos hechos como `incompleta` y sale con `3`. El tope debe ser finito y mayor que 0; si no, sale con `2`. | `Fila` | construido (Tarea 12 y decisión 48). |
 | `r00t oraculo validar --casos <dir> [--json]` | Mide si el juicio de Root coincide con los casos de `<dir>` (orden conocido, defectos reales y el formulario a ciegas). Escribe `<dir>/validez.json`. Una métrica sin datos queda sin medir, nunca 0 ni 1. Sale con `0` aunque una métrica no cumpla. | `Validez` | construido (Tarea 12b). Formatos: sección ## Validez. |
 | `r00t oraculo validar --preparar-ciego --fuentes <manifiesto.toml> --casos <dir> [--semilla N]` | Arma un paquete anónimo por fuente en `<dir>/ciego/`, con su formulario, y la clave `ciego/clave.toml`. | ids de los paquetes | construido (Tarea 12b). |
 | `r00t oraculo informe --tarea <t> --repo <dir> [--md]` | Arma el informe del PM sobre el veredicto: decisión, regla que la disparó, requisitos, bloqueantes, riesgos, próximos pasos y confianza. Sin `--md`, imprime JSON; con `--md`, markdown legible. | `Informe` | construido (Tarea 13b). |
@@ -456,6 +456,7 @@ Funciones que usa el código:
 | `observe::resumir(corrida)` | construido | Devuelve `Resumen`. |
 | `oracle::evaluar(repo, tarea, opciones)` | construido | `oracle::evaluar_por_nombre(nombre, repo)` lee la tarea desde `ROOT_HOME`. |
 | `oracle::calibra::calibrar_tarea(home, nombre, dimension, n, semilla, repo, evaluador)` | construido (Tarea 12) | Calibra y agrega la fila a `calibracion.json`. `calibrar_con` recibe la tarea y el repo ya resueltos. |
+| `oracle::calibra::calibrar_tarea_con(home, nombre, dimension, n, semilla, repo, presupuesto, evaluador)` | construido (decisión 48) | Como `calibrar_tarea`, con el tope opcional `Presupuesto`: gasto desde el inicio, peor caso de un caso y tope en USD. Si el tope detiene la calibración, escribe las filas hechas como `incompleta` y sale con `3`. |
 | `oracle::informe::informar(veredicto, tarea, reglas, redactor)` | construido (Tarea 13b) | El redactor es opcional. `informar_con` recibe además las rúbricas. |
 | `oracle::validez::validar(casos)` | construido (Tarea 12b) | `validar_con` recibe el evaluador. `preparar_ciego(casos, fuentes, semilla)` arma los paquetes a ciegas. |
 | `track::agregar(fila)` | construido | |
@@ -599,6 +600,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           ],
           "format": "float",
           "default": null
+        },
+        "incompleta": {
+          "description": "`true` si el tope de gasto detuvo la calibración antes de medir todos sus casos (decisión 48). Una\nfila incompleta no calibra la dimensión, aunque su exactitud llegue a `UMBRAL`.",
+          "type": "boolean",
+          "default": false
         },
         "items": {
           "description": "Exactitud balanceada de cada ítem de rúbrica, por ejemplo `seguridad.secretos`.",

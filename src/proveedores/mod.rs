@@ -22,7 +22,7 @@ use crate::observe::{self, jsonl, uso};
 use crate::tipos::{Eleccion, Evento, Proveedor, Rol, TipoEvento, Via};
 
 /// Intentos totales por llamada: el primero más dos reintentos.
-const INTENTOS_MAX: u32 = 3;
+pub(crate) const INTENTOS_MAX: u32 = 3;
 /// Fallas dentro de la ventana que abren el breaker.
 const FALLAS_PARA_ABRIR: usize = 3;
 const VENTANA_FALLAS: Duration = Duration::from_secs(60);

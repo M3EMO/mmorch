@@ -54,8 +54,17 @@ pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
                     n,
                     semilla,
                     repo,
+                    tope_usd,
                 },
-        } => oraculo_calibrar(cli.json, tarea, dimension, *n, *semilla, repo.as_deref()),
+        } => oraculo_calibrar(
+            cli.json,
+            tarea,
+            dimension,
+            *n,
+            *semilla,
+            repo.as_deref(),
+            *tope_usd,
+        ),
         Comando::Oraculo {
             accion:
                 OraculoAccion::Validar {
@@ -133,15 +142,35 @@ fn oraculo_calibrar(
     n: u32,
     semilla: u64,
     repo: Option<&Path>,
+    tope_usd: Option<f64>,
 ) -> Result<u8, Error> {
+    if let Some(usd) = tope_usd
+        && (!usd.is_finite() || usd <= 0.0)
+    {
+        return Err(Error::Uso(format!(
+            "--tope-usd debe ser un número finito mayor que 0, no {usd}"
+        )));
+    }
     let home = config::root_home();
-    let fila = oracle::calibra::calibrar_tarea(
+    // El gasto y el peor caso salen de `home`: la calibración no mira otra carpeta (decisión 48).
+    let gasto = |inicio: f64| {
+        observe::uso::gasto_api_desde_en(&observe::ruta_eventos_en(&home), inicio)
+            .map_err(|e| oracle::ErrorOraculo::Infra(format!("leer el gasto de API: {e}")))
+    };
+    let peor = |partes: &oracle::Partes| oracle::calibra::peor_caso_de_home(&home, partes);
+    let presupuesto = tope_usd.map(|usd| oracle::calibra::Presupuesto {
+        usd,
+        peor_caso: &peor,
+        gasto_desde: &gasto,
+    });
+    let fila = oracle::calibra::calibrar_tarea_con(
         &home,
         nombre,
         dimension,
         n,
         semilla,
         repo,
+        presupuesto.as_ref(),
         &|tarea, ruta, opciones| oracle::evaluar(ruta, tarea, opciones),
     )?;
     if json {
