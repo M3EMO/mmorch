@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -879,7 +879,7 @@ pub(crate) fn entregar_con(
             escenarios.display()
         )));
     }
-    let montaje = escenarios.is_dir().then_some(escenarios);
+    let montaje = montaje_de_escenarios(tarea);
     let Construccion {
         resultado: construccion,
         imagen,
@@ -1065,6 +1065,17 @@ fn quitar(nombre: &str) {
 /// Un escenario usa `/oraculo` si su `cmd` nombra esa ruta: sus scripts viven en `escenarios/`.
 pub fn escenario_usa_oraculo(cmd: &str) -> bool {
     cmd.contains("/oraculo")
+}
+
+/// Carpeta `escenarios/` que el contenedor de escenario monta, o `None` si no monta nada. Solo monta si
+/// algún `cmd` usa `/oraculo` (M15): los comandos en línea no la necesitan, aunque exista.
+fn montaje_de_escenarios(tarea: &Tarea) -> Option<PathBuf> {
+    let escenarios = tarea.dir.join("escenarios");
+    let usa_oraculo = tarea
+        .escenario
+        .iter()
+        .any(|e| escenario_usa_oraculo(&e.cmd));
+    (usa_oraculo && escenarios.is_dir()).then_some(escenarios)
 }
 
 /// Argumentos de `podman run -d` de un escenario: sin red, sin el proxy del host (M4) y con `comando` como
@@ -2028,6 +2039,50 @@ pub(crate) mod tests {
         assert!(!escenario_usa_oraculo("exit 0"));
         assert!(!escenario_usa_oraculo("test -f /hola.txt"));
         assert!(!escenario_usa_oraculo("wget -q http://example.com -O /x"));
+    }
+
+    /// Tarea cargada desde `dir`, que el test conserva. `tarea_de` borra su carpeta al salir.
+    fn tarea_en(dir: &Path, extra: &str) -> Tarea {
+        let texto = format!(
+            "nombre = \"x\"\nlenguaje = \"rust\"\nimagen = \"i\"\nspec = \"s\"\n\
+             [contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n{extra}"
+        );
+        fs::write(dir.join("tarea.toml"), texto).expect("escribe tarea.toml");
+        Tarea::cargar_de(dir).expect("carga la tarea")
+    }
+
+    #[test]
+    fn escenario_montaje_sin_oraculo_es_none_aunque_exista_la_carpeta() {
+        // M15: un `cmd` en línea no monta `escenarios/`, aunque la carpeta exista.
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path().join("escenarios")).expect("crea escenarios/");
+        let tarea = tarea_en(dir.path(), "[[escenario]]\nid = \"ok\"\ncmd = \"exit 0\"\n");
+        assert_eq!(montaje_de_escenarios(&tarea), None);
+    }
+
+    #[test]
+    fn escenario_montaje_con_oraculo_es_la_carpeta_escenarios() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path().join("escenarios")).expect("crea escenarios/");
+        let tarea = tarea_en(
+            dir.path(),
+            "[[escenario]]\nid = \"ok\"\ncmd = \"/oraculo/escenarios/ok.sh\"\n",
+        );
+        assert_eq!(
+            montaje_de_escenarios(&tarea),
+            Some(dir.path().join("escenarios"))
+        );
+    }
+
+    #[test]
+    fn escenario_montaje_con_oraculo_sin_carpeta_es_none() {
+        // `entregar_con` corta antes con error de infraestructura; el montaje no inventa la carpeta.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tarea = tarea_en(
+            dir.path(),
+            "[[escenario]]\nid = \"ok\"\ncmd = \"/oraculo/escenarios/ok.sh\"\n",
+        );
+        assert_eq!(montaje_de_escenarios(&tarea), None);
     }
 
     #[test]
