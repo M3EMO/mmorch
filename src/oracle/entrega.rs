@@ -217,8 +217,8 @@ fn anotar_desenlace(resultado: &mut ResultadoDockerfile, desenlace: Desenlace) {
     }
 }
 
-/// Registra el `Gate` de la repetición con red (Tarea 9d3): la primera `RUN` que falló sin red y todas las
-/// `RUN` del Dockerfile. No dice que todas necesitan red. Va antes del build con red. Si no se puede
+/// Registra el `Gate` de la repetición con red (Tarea 9d3): el primer paso que falló sin red y todos los pasos
+/// del Dockerfile que piden red (`RUN`, y `ADD` o `COPY` con URL). No dice que todos necesitan red. Va antes del build con red. Si no se puede
 /// registrar, no se construye con red.
 fn registrar_repeticion(
     home: &Path,
@@ -237,10 +237,10 @@ fn registrar_repeticion(
     extra.insert("accion".into(), json!("repetir-con-red"));
     extra.insert("dockerfile".into(), json!(ruta));
     extra.insert(
-        "primera_run_sin_red".into(),
+        "primer_paso_sin_red".into(),
         json!({"linea": linea, "cita": cita}),
     );
-    extra.insert("runs_del_dockerfile".into(), json!(run));
+    extra.insert("pasos_del_dockerfile".into(), json!(run));
     let evento = observe::evento_gate(
         &format!("entrega-{}", tarea.nombre),
         FASE_CONSTRUCCION_RED,
@@ -2235,12 +2235,12 @@ pub(crate) mod tests {
         assert_eq!(g["corrida"], "entrega-x");
         assert_eq!(g["extra"]["accion"], "repetir-con-red");
         assert_eq!(g["extra"]["dockerfile"], "Dockerfile");
-        assert_eq!(g["extra"]["primera_run_sin_red"]["linea"], 2);
+        assert_eq!(g["extra"]["primer_paso_sin_red"]["linea"], 2);
         assert_eq!(
-            g["extra"]["primera_run_sin_red"]["cita"],
+            g["extra"]["primer_paso_sin_red"]["cita"],
             "RUN apt-get install -y curl"
         );
-        let run = g["extra"]["runs_del_dockerfile"]
+        let run = g["extra"]["pasos_del_dockerfile"]
             .as_array()
             .expect("lista de RUN");
         assert_eq!(run.len(), 1, "{run:?}");
@@ -2272,12 +2272,12 @@ pub(crate) mod tests {
         assert!(c.resultado.con_red, "{:?}", c.resultado);
         let gates = gates_de_repeticion(home.path());
         let g = &gates[0]["extra"];
-        assert_eq!(g["primera_run_sin_red"]["linea"], 3, "{g}");
+        assert_eq!(g["primer_paso_sin_red"]["linea"], 3, "{g}");
         assert_eq!(
-            g["primera_run_sin_red"]["cita"],
+            g["primer_paso_sin_red"]["cita"],
             "RUN apt-get install -y curl"
         );
-        let runs = g["runs_del_dockerfile"].as_array().expect("lista de RUN");
+        let runs = g["pasos_del_dockerfile"].as_array().expect("lista de RUN");
         let lineas: Vec<u64> = runs.iter().filter_map(|r| r["linea"].as_u64()).collect();
         assert_eq!(lineas, vec![2, 3], "{runs:?}");
         assert!(g.get("fallo_sin_red").is_none(), "{g}");
@@ -2587,7 +2587,7 @@ pub(crate) mod tests {
         assert_eq!(h.severidad, 1);
         assert_eq!(h.detalle, DETALLE_NECESITA_RED);
         let gates = gates_de_repeticion(home.path());
-        let runs = gates[0]["extra"]["runs_del_dockerfile"]
+        let runs = gates[0]["extra"]["pasos_del_dockerfile"]
             .as_array()
             .expect("lista de pasos");
         assert_eq!(runs.len(), 1, "{runs:?}");

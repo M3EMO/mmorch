@@ -15,12 +15,13 @@ use super::inventario::{
     textos_de_requisitos,
 };
 use super::{
-    ARCHIVO_REQUIREMENTS, CARPETA_CACHE, CARPETA_PYTHON, Diagnostico, Paso, Preparacion, Registro,
-    borrar_en_home, corte, diagnosticar, entorno_descarga, error_de, hallazgo, hash_corto,
-    limpiar_parcial, parcial_de, temporal_de,
+    ARCHIVO_REQUIREMENTS, CARPETA_CACHE, CARPETA_PYTHON, Diagnostico, PLAZO_CORTO, Paso,
+    Preparacion, Registro, borrar_en_home, corte, diagnosticar, entorno_descarga, error_de,
+    hallazgo, hash_corto, limpiar_parcial, parcial_de, temporal_de,
 };
 use crate::borrado;
 use crate::oracle::contenedor::{self, Ejecucion};
+use crate::oracle::entrega::{Podman, PodmanReal};
 use crate::oracle::tarea::Tarea;
 use crate::oracle::{ErrorOraculo, infra};
 use crate::tipos::Hallazgo;
@@ -178,12 +179,41 @@ pub fn linea_offline_git(dir: &str, subdir: Option<&str>) -> String {
 }
 
 /// Clave de la caché de Python: requisitos, restricciones e imagen (M8). La imagen decide qué wheels bajan
-/// (`cp38` o `cp312`), así que va en la clave, con su digest si la referencia lo trae.
-pub fn clave_cache_python(requisitos: &str, restricciones: &str, imagen: &str) -> String {
+/// (`cp38` o `cp312`), así que va en la clave. Con el `digest` de podman (desempate 27), un tag reconstruido
+/// no usa wheels de otra imagen. Sin digest, la clave es la de la imagen sola.
+pub fn clave_cache_python(
+    requisitos: &str,
+    restricciones: &str,
+    imagen: &str,
+    digest: Option<&str>,
+) -> String {
+    let digest = digest.map_or(String::new(), |d| format!("digest={d}\n"));
     hash_corto(
-        format!("imagen={imagen}\n--requisitos--\n{requisitos}--restricciones--\n{restricciones}")
-            .as_bytes(),
+        format!(
+            "imagen={imagen}\n{digest}--requisitos--\n{requisitos}--restricciones--\n{restricciones}"
+        )
+        .as_bytes(),
     )
+}
+
+/// Argumentos de `podman image inspect` que leen el digest de `imagen` (desempate 27). Son puros: no corren nada.
+pub fn args_digest_imagen(imagen: &str) -> Vec<String> {
+    ["image", "inspect", "--format", "{{.Digest}}", imagen]
+        .iter()
+        .map(|a| a.to_string())
+        .collect()
+}
+
+/// Digest de `imagen` según `podman`. `None` si el comando falla o no da uno: la descarga sigue sin él.
+pub(crate) fn digest_imagen_con(podman: &dyn Podman, imagen: &str) -> Option<String> {
+    let args = args_digest_imagen(imagen);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let salida = podman.correr(&refs, PLAZO_CORTO).ok()?;
+    if salida.codigo != 0 {
+        return None;
+    }
+    let digest = salida.stdout.trim();
+    (!digest.is_empty()).then(|| digest.to_string())
 }
 
 /// Comando que baja un archivo por HTTPS a `/cache/<archivo>`.
@@ -205,6 +235,38 @@ pub fn sin_wheel(stderr: &str) -> Option<String> {
                 .map(|(_, resto)| resto.trim().to_string())
         })
         .filter(|spec| !spec.is_empty())
+}
+
+/// Corte de un paquete que pip no halló como wheel (M9). `directo` dice si es requisito directo. Un requisito
+/// directo sin versión fijada da `sin-version-fijada`. Una dependencia da `solo-sdist`: solo tiene sdist, y
+/// la descarga no construye sdists (decisión 21). Es un corte sin veredicto, no un rojo del producto.
+fn corte_sin_wheel(spec: &str, directo: bool) -> Fin {
+    if directo {
+        return Fin::Corta(
+            hallazgo(
+                ARCHIVO_REQUIREMENTS,
+                0,
+                "",
+                2,
+                format!("dependencia sin wheel y sin versión fijada: {spec}"),
+            ),
+            "sin-version-fijada",
+        );
+    }
+    let nombre: String = spec
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .collect();
+    Fin::Corta(
+        hallazgo(
+            ARCHIVO_REQUIREMENTS,
+            0,
+            "",
+            2,
+            format!("{nombre} solo tiene sdist y la descarga no construye sdists"),
+        ),
+        "solo-sdist",
+    )
 }
 
 /// Elige el sdist de una versión desde el JSON de `https://pypi.org/pypi/<n>/<v>/json`.
@@ -354,6 +416,17 @@ pub(super) fn preparar_python(
     home: &Path,
     timeout: Duration,
 ) -> Result<Paso, ErrorOraculo> {
+    preparar_python_con(repo, tarea, home, timeout, &PodmanReal)
+}
+
+/// Como `preparar_python`, con el ejecutor de podman para el digest de la imagen. Los tests pasan uno falso.
+fn preparar_python_con(
+    repo: &Path,
+    tarea: &Tarea,
+    home: &Path,
+    timeout: Duration,
+    podman: &dyn Podman,
+) -> Result<Paso, ErrorOraculo> {
     let ruta = repo.join(ARCHIVO_REQUIREMENTS);
     if !ruta.is_file() {
         return Ok((
@@ -367,7 +440,10 @@ pub(super) fn preparar_python(
     }
     // El texto de `requirements.txt` con sus `-r` seguidos, y las `-c` aparte: pip no ve archivos del repo (C1, M6).
     let (texto, restricciones) = textos_de_requisitos(repo);
-    let hash = clave_cache_python(&texto, &restricciones, &tarea.imagen);
+    let digest = digest_imagen_con(podman, &tarea.imagen);
+    let hash = clave_cache_python(&texto, &restricciones, &tarea.imagen, digest.as_deref());
+    // Sin digest, la clave usa la imagen sola. El Gate lo registra; no es hallazgo del producto ni corta (desempate 27).
+    let sin_digest = digest.is_none().then(|| tarea.imagen.clone());
     let req = requisitos_pip(&texto);
     let destino = home.join(CARPETA_CACHE).join(CARPETA_PYTHON).join(&hash);
     if destino.join(ARCHIVO_OFFLINE).is_file() && requisitos_sdist_listos(&destino)? {
@@ -379,6 +455,7 @@ pub(super) fn preparar_python(
             rustsec: None,
             motivo: None,
             imagenes: None,
+            sin_digest,
         };
         // Los hallazgos de build salen de los `pyproject` guardados en la caché: sin ellos, el segundo
         // corrido perdería el aviso del primero.
@@ -437,6 +514,7 @@ pub(super) fn preparar_python(
                 rustsec: None,
                 motivo: None,
                 imagenes: None,
+                sin_digest,
             };
             let preparacion = Preparacion::Lista {
                 cache: Some(destino),
@@ -524,16 +602,7 @@ fn descargar_en(
         let posicion = pendientes.iter().position(|s| nombre_de_spec(s) == nombre);
         let version = posicion.and_then(|i| version_fijada(&pendientes[i]));
         let (Some(pos), Some(version)) = (posicion, version) else {
-            return Ok(Fin::Corta(
-                hallazgo(
-                    ARCHIVO_REQUIREMENTS,
-                    0,
-                    "",
-                    2,
-                    format!("dependencia sin wheel y sin versión fijada: {spec}"),
-                ),
-                "sin-version-fijada",
-            ));
+            return Ok(corte_sin_wheel(&spec, posicion.is_some()));
         };
         if req.indice_propio.is_some() {
             return Ok(Fin::Corta(
@@ -1001,7 +1070,9 @@ fn copiar_requisitos(repo: &Path, destino: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::registrar;
     use super::*;
+    use crate::oracle::contenedor::SalidaPodman;
 
     /// Lista de build que dan los respaldos de PEP 517.
     fn respaldo() -> Vec<String> {
@@ -1208,15 +1279,195 @@ mod tests {
 
     #[test]
     fn descarga_python_clave_de_cache_incluye_la_imagen_y_su_digest() {
-        let a = clave_cache_python("six==1.16.0\n", "", "python:3.8");
-        let b = clave_cache_python("six==1.16.0\n", "", "python:3.12");
-        let c = clave_cache_python("six==1.16.0\n", "", "python:3.8");
+        let a = clave_cache_python("six==1.16.0\n", "", "python:3.8", None);
+        let b = clave_cache_python("six==1.16.0\n", "", "python:3.12", None);
+        let c = clave_cache_python("six==1.16.0\n", "", "python:3.8", None);
         assert_ne!(a, b, "wheels cp38 y cp312 no comparten caché");
         assert_eq!(a, c, "misma imagen y mismo archivo: misma clave");
-        let d = clave_cache_python("six==1.16.0\n", "", "python@sha256:aaaa");
+        let d = clave_cache_python("six==1.16.0\n", "", "python@sha256:aaaa", None);
         assert_ne!(a, d, "otro digest es otra clave");
-        let e = clave_cache_python("six==1.16.0\n", "urllib3<2\n", "python:3.8");
+        let e = clave_cache_python("six==1.16.0\n", "urllib3<2\n", "python:3.8", None);
         assert_ne!(a, e, "una restricción distinta es otra clave");
+    }
+
+    /// Ejecutor de podman falso: responde un código y una salida fijos, y guarda los argumentos.
+    struct PodmanDigest {
+        codigo: i32,
+        stdout: String,
+        llamadas: std::cell::RefCell<Vec<Vec<String>>>,
+    }
+
+    impl PodmanDigest {
+        fn que_responde(codigo: i32, stdout: &str) -> Self {
+            PodmanDigest {
+                codigo,
+                stdout: stdout.into(),
+                llamadas: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Podman for PodmanDigest {
+        fn correr(&self, args: &[&str], _plazo: Duration) -> Result<SalidaPodman, ErrorOraculo> {
+            self.llamadas
+                .borrow_mut()
+                .push(args.iter().map(|a| a.to_string()).collect());
+            Ok(SalidaPodman {
+                codigo: self.codigo,
+                stdout: self.stdout.clone(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn descarga_python_args_del_digest_son_los_del_image_inspect() {
+        assert_eq!(
+            args_digest_imagen("python:3.8"),
+            vec!["image", "inspect", "--format", "{{.Digest}}", "python:3.8"]
+        );
+    }
+
+    #[test]
+    fn descarga_python_mismo_nombre_con_digest_a_o_b_da_claves_distintas() {
+        let req = "six==1.16.0\n";
+        let a = clave_cache_python(req, "", "python:3.8", Some("sha256:aaaa"));
+        let b = clave_cache_python(req, "", "python:3.8", Some("sha256:bbbb"));
+        let sin = clave_cache_python(req, "", "python:3.8", None);
+        assert_ne!(
+            a, b,
+            "un tag reconstruido con otro digest no comparte wheels"
+        );
+        assert_ne!(a, sin, "con digest no es la clave de solo la imagen");
+    }
+
+    #[test]
+    fn descarga_python_digest_del_ejecutor_entra_en_la_clave() {
+        let podman = PodmanDigest::que_responde(0, "sha256:aaaa\n");
+        let digest = digest_imagen_con(&podman, "python:3.8");
+        assert_eq!(digest.as_deref(), Some("sha256:aaaa"));
+        assert_eq!(
+            podman.llamadas.borrow()[0],
+            args_digest_imagen("python:3.8"),
+            "el ejecutor recibe el image inspect"
+        );
+        assert_eq!(
+            clave_cache_python("six==1.16.0\n", "", "python:3.8", digest.as_deref()),
+            clave_cache_python("six==1.16.0\n", "", "python:3.8", Some("sha256:aaaa")),
+            "el digest que devuelve podman es el que entra en la clave"
+        );
+    }
+
+    #[test]
+    fn descarga_python_digest_que_falla_es_none_sin_romper() {
+        let sale_mal = PodmanDigest::que_responde(125, "");
+        assert_eq!(digest_imagen_con(&sale_mal, "python:3.8"), None);
+        let vacio = PodmanDigest::que_responde(0, "\n");
+        assert_eq!(digest_imagen_con(&vacio, "python:3.8"), None);
+    }
+
+    #[test]
+    fn descarga_python_dependencia_sin_wheel_da_pendiente_solo_sdist() {
+        // M9 (desempate 31): pip no halla wheel de B, que es dependencia de A. Root no construye sdists.
+        let stderr = "ERROR: No matching distribution found for B==1.0\n";
+        let pendientes = ["A==2.0".to_string()];
+        let spec = sin_wheel(stderr).expect("pip dice qué paquete falta");
+        let directo = pendientes
+            .iter()
+            .any(|s| nombre_de_spec(s) == nombre_de_spec(&spec));
+        assert!(!directo, "B no es requisito directo");
+        let Fin::Corta(aviso, causa) = corte_sin_wheel(&spec, directo) else {
+            panic!("una dependencia sin wheel corta");
+        };
+        assert_eq!(causa, "solo-sdist");
+        assert_eq!(
+            aviso.detalle,
+            "B solo tiene sdist y la descarga no construye sdists"
+        );
+    }
+
+    #[test]
+    fn descarga_python_requisito_directo_sin_version_sigue_en_sin_version_fijada() {
+        let Fin::Corta(_, causa) = corte_sin_wheel("A", true) else {
+            panic!("un requisito directo sin versión corta");
+        };
+        assert_eq!(causa, "sin-version-fijada");
+    }
+
+    /// Tarea de Python mínima escrita en un directorio temporal.
+    fn tarea_python_de_prueba() -> Tarea {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let texto = "nombre = \"x\"\nlenguaje = \"python\"\nimagen = \"python:3.8\"\nspec = \"s\"\n\
+                     [contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n";
+        fs::write(dir.path().join("tarea.toml"), texto).expect("escribe tarea.toml");
+        Tarea::cargar_de(dir.path()).expect("carga la tarea")
+    }
+
+    #[test]
+    fn descarga_python_sin_digest_no_es_hallazgo_del_producto() {
+        // Desempate del organizador: un digest que no se lee es falla del instrumento, no del producto.
+        // La caché ya está (clave con digest None): la descarga sale por el camino de acierto, sin podman.
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        fs::write(repo.path().join("requirements.txt"), "six==1.16.0\n").expect("escribe");
+        let tarea = tarea_python_de_prueba();
+        let (texto, restricciones) = textos_de_requisitos(repo.path());
+        let clave = clave_cache_python(&texto, &restricciones, "python:3.8", None);
+        let destino = home
+            .path()
+            .join(CARPETA_CACHE)
+            .join(CARPETA_PYTHON)
+            .join(clave);
+        fs::create_dir_all(&destino).expect("caché");
+        fs::write(destino.join(ARCHIVO_OFFLINE), "six==1.16.0\n").expect("offline");
+        let podman = PodmanDigest::que_responde(125, "");
+        let (preparacion, registro) = preparar_python_con(
+            repo.path(),
+            &tarea,
+            home.path(),
+            Duration::from_secs(60),
+            &podman,
+        )
+        .expect("prepara");
+        match preparacion {
+            Preparacion::Lista { hallazgos, .. } => {
+                assert!(
+                    hallazgos.is_empty(),
+                    "el digest no es hallazgo: {hallazgos:?}"
+                );
+            }
+            otro => panic!("debía dar Lista, dio {otro:?}"),
+        }
+        let registro = registro.expect("hay registro de la descarga");
+        assert_eq!(registro.sin_digest.as_deref(), Some("python:3.8"));
+        registrar(home.path(), &tarea, &registro).expect("registra el Gate");
+        let eventos = fs::read_to_string(home.path().join("eventos.jsonl")).expect("eventos");
+        let evento: Value = eventos
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).expect("línea JSON"))
+            .find(|v| v["tipo"] == "gate" && v["fase"] == "descarga")
+            .expect("evento Gate de la descarga");
+        assert_eq!(
+            evento["extra"]["sin_digest"],
+            "no se leyó el digest de python:3.8: la caché de Python usa solo su nombre"
+        );
+    }
+
+    #[test]
+    fn descarga_python_aviso_sin_digest_nombra_la_imagen() {
+        // El aviso va al Gate con el nombre de la imagen, no a los hallazgos del veredicto.
+        let home = tempfile::tempdir().expect("home");
+        let tarea = tarea_python_de_prueba();
+        let mut registro = Registro::sin_paquetes("python");
+        registro.sin_digest = Some("python:3.8".into());
+        registrar(home.path(), &tarea, &registro).expect("registra el Gate");
+        let eventos = fs::read_to_string(home.path().join("eventos.jsonl")).expect("eventos");
+        assert!(
+            eventos.contains(
+                "no se leyó el digest de python:3.8: la caché de Python usa solo su nombre"
+            ),
+            "{eventos}"
+        );
     }
 
     #[test]

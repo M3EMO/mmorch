@@ -1227,7 +1227,7 @@ fn expandir_requisitos(
     let dir = archivo.rsplit_once('/').map_or("", |(dir, _)| dir);
     for (linea, logica) in lineas_logicas(&texto) {
         let resto = contenido(&logica).to_string();
-        if resto.is_empty() || resto.starts_with('#') {
+        if resto.is_empty() || resto.starts_with('#') || opcion_ignorada(&resto) {
             continue;
         }
         let (es_r, es_c) = (
@@ -1456,7 +1456,7 @@ fn inventariar_requirements(repo: &Path, inv: &mut Inventario) -> Result<(), Err
             if resto.starts_with('-')
                 || es_directa(resto)
                 || resto.contains(" @ ")
-                || es_ruta_local(repo, resto)
+                || es_ruta_local(resto)
             {
                 inv.rechazos.push(rechazo(
                     t,
@@ -1485,7 +1485,7 @@ fn inventariar_requirements(repo: &Path, inv: &mut Inventario) -> Result<(), Err
         } else if let Some(valor) = opcion(resto, &["-e", "--editable"]) {
             if es_directa(valor) {
                 directa_requisito(valor, linea, t, inv);
-            } else if es_ruta_local(repo, valor) {
+            } else if es_ruta_local(valor) {
                 inv.rechazos.push(rechazo(
                     t,
                     linea,
@@ -1505,7 +1505,7 @@ fn inventariar_requirements(repo: &Path, inv: &mut Inventario) -> Result<(), Err
             directa_requisito(url.trim(), linea, t, inv);
         } else if es_directa(resto) {
             directa_requisito(resto, linea, t, inv);
-        } else if es_ruta_local(repo, resto) {
+        } else if es_ruta_local(resto) {
             // Una ruta local haría que pip compile el proyecto: el contenedor no la ve y Root la rechaza (C1).
             inv.rechazos.push(rechazo(
                 t,
@@ -1562,14 +1562,25 @@ fn opcion<'a>(linea: &'a str, nombres: &[&str]) -> Option<&'a str> {
     })
 }
 
+/// Opciones que Root acepta y no usa (desempate 23). `--prefer-binary` no abre nada. `--only-binary` con
+/// `:all:` o con nombres solo agrega restricciones de wheel. Con `:none:` pip vuelve a permitir sdists: no entra.
+fn opcion_ignorada(linea: &str) -> bool {
+    if linea == "--prefer-binary" {
+        return true;
+    }
+    opcion(linea, &["--only-binary"])
+        .is_some_and(|valor| !valor.is_empty() && !valor.contains(":none:"))
+}
+
 /// `true` si el texto es una referencia directa: `git+...` o una URL con `://`.
 fn es_directa(texto: &str) -> bool {
     texto.starts_with("git+") || texto.contains("://")
 }
 
-/// `true` si el texto de un requisito es una ruta local: absoluta, `./`, `../`, `file:`, un archivo de paquete
-/// suelto (`.whl`, `.tar.gz`, `.zip`) o un nombre que es una carpeta del repo. Pip compila esas rutas (C1).
-fn es_ruta_local(repo: &Path, texto: &str) -> bool {
+/// `true` si el texto de un requisito es una ruta local: absoluta, `./`, `../`, `file:`, con separador de
+/// carpeta, o un archivo de paquete suelto (`.whl`, `.tar.gz`, `.zip`). Pip compila esas rutas (C1). Un
+/// nombre suelto es un paquete aunque coincida con una carpeta del repo (desempate 22).
+fn es_ruta_local(texto: &str) -> bool {
     let texto = texto.trim();
     let minuscula = texto.to_ascii_lowercase();
     if minuscula.starts_with("file:")
@@ -1591,13 +1602,9 @@ fn es_ruta_local(repo: &Path, texto: &str) -> bool {
         .split(|c: char| c.is_whitespace() || "[;=<>!~@,".contains(c))
         .next()
         .unwrap_or("");
-    if [".whl", ".tar.gz", ".zip"]
+    [".whl", ".tar.gz", ".zip"]
         .iter()
         .any(|f| nombre.ends_with(f))
-    {
-        return true;
-    }
-    !nombre.is_empty() && repo.join(nombre).is_dir()
 }
 
 /// Fuente de un índice (`--index-url`, `--extra-index-url`, `--find-links`).
@@ -1932,6 +1939,20 @@ git+https://github.com/x/y@abc1234#egg=y\nhttps://host/p.tar.gz\n-r otro.txt\n";
     }
 
     #[test]
+    fn descarga_inventario_nombre_de_carpeta_del_repo_no_es_ruta_local() {
+        // Desempate 22: un nombre suelto que coincide con una carpeta del repo es un paquete.
+        let inv = inventario_de(&[
+            ("requirements.txt", "requests\n"),
+            ("requests/__init__.py", ""),
+        ]);
+        assert!(
+            inv.rechazos.is_empty(),
+            "una carpeta `requests/` no vuelve local el requisito `requests`: {:?}",
+            inv.rechazos
+        );
+    }
+
+    #[test]
     fn descarga_inventario_requirements_ruta_local_es_rechazo() {
         for linea in [
             "/repo",
@@ -1946,7 +1967,6 @@ git+https://github.com/x/y@abc1234#egg=y\nhttps://host/p.tar.gz\n-r otro.txt\n";
             "pkg-1.0.whl",
             "pkg-1.0.tar.gz",
             "sub/pkg",
-            "sub",
         ] {
             let texto = format!("requests==2.31.0\n{linea}\n");
             let inv = inventario_de(&[("requirements.txt", &texto), ("sub/x.txt", "")]);
@@ -2758,8 +2778,46 @@ requests\ngit+https://github.com/x/y@abc1234#egg=y\n";
     }
 
     #[test]
-    fn descarga_inventario_e_sin_fuente_y_opcion_no_soportada_son_rechazo() {
-        for linea in ["-e requests", "--prefer-binary", "--only-binary=:all:"] {
+    fn descarga_inventario_e_sin_fuente_es_rechazo() {
+        let inv = inventario_de(&[("requirements.txt", "requests==2.31.0\n-e requests\n")]);
+        assert!(
+            inv.rechazos
+                .iter()
+                .any(|r| r.archivo == "requirements.txt" && r.linea == 2),
+            "debe rechazar `-e requests`: {inv:?}"
+        );
+    }
+
+    #[test]
+    fn descarga_inventario_prefer_binary_y_only_binary_se_aceptan() {
+        // Desempate 23: Root ya fuerza `--only-binary=:all:`. Estas opciones no abren nada y no son requisitos.
+        for linea in [
+            "--prefer-binary",
+            "--only-binary=:all:",
+            "--only-binary :all:",
+            "--only-binary=requests",
+        ] {
+            let texto = format!("requests==2.31.0\n{linea}\n");
+            let inv = inventario_de(&[("requirements.txt", &texto)]);
+            assert!(
+                inv.rechazos.is_empty(),
+                "debe aceptar `{linea}`: {:?}",
+                inv.rechazos
+            );
+            let pip = requisitos_pip(&texto);
+            assert_eq!(
+                pip.especificadores,
+                vec!["requests==2.31.0".to_string()],
+                "`{linea}`"
+            );
+            assert!(pip.directas.is_empty(), "`{linea}`");
+        }
+    }
+
+    #[test]
+    fn descarga_inventario_only_binary_none_es_rechazo() {
+        // `:none:` vuelve a permitir sdists: pip construiría el proyecto. Sigue en rechazo (decisión 21).
+        for linea in ["--only-binary=:none:", "--only-binary=requests,:none:"] {
             let texto = format!("requests==2.31.0\n{linea}\n");
             let inv = inventario_de(&[("requirements.txt", &texto)]);
             assert!(
@@ -2769,6 +2827,51 @@ requests\ngit+https://github.com/x/y@abc1234#egg=y\n";
                 "debe rechazar `{linea}`: {inv:?}"
             );
         }
+    }
+
+    #[test]
+    fn descarga_inventario_c_solo_con_versiones_se_acepta() {
+        let inv = inventario_de(&[
+            (
+                "requirements.txt",
+                "requests==2.31.0\n-c restricciones.txt\n",
+            ),
+            (
+                "restricciones.txt",
+                "# versiones fijadas\n\nrequests==2.31.0\nurllib3>=1.26\n",
+            ),
+        ]);
+        assert!(inv.rechazos.is_empty(), "{:?}", inv.rechazos);
+    }
+
+    #[test]
+    fn descarga_inventario_opciones_que_abren_la_construccion_siguen_en_rechazo() {
+        for linea in [
+            "--trusted-host pypi.org",
+            "--trusted-host=pypi.org",
+            "--no-binary :all:",
+            "--no-binary=:all:",
+        ] {
+            let texto = format!("requests==2.31.0\n{linea}\n");
+            let inv = inventario_de(&[("requirements.txt", &texto)]);
+            assert!(
+                inv.rechazos
+                    .iter()
+                    .any(|r| r.archivo == "requirements.txt" && r.linea == 2),
+                "debe rechazar `{linea}` con su línea: {inv:?}"
+            );
+        }
+        let inv = inventario_de(&[(
+            "requirements.txt",
+            "requests==2.31.0\n--trusted-host pypi.org\n",
+        )]);
+        assert!(
+            inv.rechazos
+                .iter()
+                .any(|r| r.cita.contains("--trusted-host")),
+            "el rechazo cita la línea: {:?}",
+            inv.rechazos
+        );
     }
 }
 

@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 
 use super::configs::{instrucciones, palabra_clave, parsear_from};
 use super::contenedor::{self, Ejecucion, correr_podman};
-use super::entrega::{Eleccion, dockerfiles_del_repo, elegir_dockerfile};
+use super::entrega::{Eleccion, PodmanReal, dockerfiles_del_repo, elegir_dockerfile};
 use super::juez::ModeloJuez;
 use super::tarea::Tarea;
 use super::{CARPETA_TEMPORALES, ErrorOraculo, infra, temporal};
@@ -72,7 +72,7 @@ pub enum Accion {
 pub const PRELUDIO_PYTHON: &str = "mkdir -p /tmp/fuentes && if [ -d /cache/src ]; then cp -r /cache/src/. /tmp/fuentes/; fi && if python3 -m venv --system-site-packages /tmp/venv-eval; then . /tmp/venv-eval/bin/activate && pip install --no-index --find-links /cache --no-input --disable-pip-version-check -r /cache/requirements-offline.txt; else mkdir -p /tmp/pydeps && python3 -m pip install --no-index --find-links /cache --no-input --disable-pip-version-check --target /tmp/pydeps -r /cache/requirements-offline.txt && export PYTHONPATH=/tmp/pydeps PATH=/tmp/pydeps/bin:$PATH; fi && ";
 /// Caché de dependencias que la fase de descarga dejó para el repo (`Cargo.lock` o `requirements.txt`).
 /// `None` si no hay, o si el lenguaje no tiene caché. La mira el paquete de Colab (decisión 40).
-/// `imagen` es la de la tarea: en Python entra en la clave (M8).
+/// `imagen` es la de la tarea: en Python entra en la clave, con su digest si podman lo da (M8, desempate 27).
 pub fn cache_de(home: &Path, lenguaje: &str, repo: &Path, imagen: &str) -> Option<PathBuf> {
     let (destino, marca) = match lenguaje {
         "rust" => {
@@ -88,7 +88,9 @@ pub fn cache_de(home: &Path, lenguaje: &str, repo: &Path, imagen: &str) -> Optio
                 return None;
             }
             let (requisitos, restricciones) = inventario::textos_de_requisitos(repo);
-            let clave = python::clave_cache_python(&requisitos, &restricciones, imagen);
+            let digest = python::digest_imagen_con(&PodmanReal, imagen);
+            let clave =
+                python::clave_cache_python(&requisitos, &restricciones, imagen, digest.as_deref());
             let destino = home.join(CARPETA_CACHE).join(CARPETA_PYTHON).join(clave);
             (destino, "requirements-offline.txt")
         }
@@ -294,6 +296,8 @@ struct Registro {
     motivo: Option<&'static str>,
     /// Imágenes base de los Dockerfile del repo. `None` si el repo no trae Dockerfile.
     imagenes: Option<Vec<ImagenBase>>,
+    /// Imagen cuyo digest no se leyó: la caché de Python usó solo su nombre. Va al Gate, no al veredicto.
+    sin_digest: Option<String>,
 }
 
 impl Registro {
@@ -316,6 +320,7 @@ impl Registro {
             rustsec: None,
             motivo: None,
             imagenes: None,
+            sin_digest: None,
         }
     }
 }
@@ -618,6 +623,7 @@ fn preparar_rust(
         rustsec: Some(estado),
         motivo: None,
         imagenes: None,
+        sin_digest: None,
     };
     let preparacion = Preparacion::Lista {
         cache: Some(destino),
@@ -896,6 +902,14 @@ fn registrar(home: &Path, tarea: &Tarea, registro: &Registro) -> Result<(), Erro
     }
     if let Some(motivo) = registro.motivo {
         evento.extra.insert("motivo".into(), json!(motivo));
+    }
+    if let Some(imagen) = &registro.sin_digest {
+        evento.extra.insert(
+            "sin_digest".into(),
+            json!(format!(
+                "no se leyó el digest de {imagen}: la caché de Python usa solo su nombre"
+            )),
+        );
     }
     if let Some(imagenes) = &registro.imagenes {
         evento.extra.insert("imagenes".into(), json!(imagenes));
@@ -1870,7 +1884,6 @@ location searched: crates.io index";
             "../afuera",
             "file:///tmp/x",
             "-e ./x",
-            "sub",
             "sub/pkg",
             "pkg-1.0.tar.gz",
         ] {
