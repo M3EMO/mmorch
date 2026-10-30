@@ -219,7 +219,7 @@ Ruta: `$ROOT_HOME/oraculos/<tarea>/tarea.toml`. Lo lee `Tarea::cargar_de` (`src/
 | `[oculto]` `reintento` | texto | no | | Igual que en `[contrato]`. |
 | `[[entorno]]` `test`, `motivo` | texto | no | | Test que depende del entorno. El motivo no puede estar vacío. Un test aparece una sola vez. |
 | `[[oraculo_dudoso]]` `test`, `motivo` | texto | no | | Test que depende de una frase ambigua de la spec. Mismas reglas que `[[entorno]]`. |
-| `[[requisito]]` `id`, `titulo`, `seccion`, `peso`, `pruebas`, `bordes`, `escenarios`, `criterios`, `modulos` | varios | no | `seccion` = ""; `peso` = 1 | `peso` debe estar entre 1 y 3. `id` no puede repetirse. `modulos` liga el requisito a los módulos del código. |
+| `[[requisito]]` `id`, `titulo`, `seccion`, `peso`, `pruebas`, `bordes`, `escenarios`, `criterios`, `modulos` | varios | no | `seccion` = ""; `peso` = 1 | `peso` debe estar entre 1 y 3. `id` no puede repetirse. `modulos` liga el requisito a los módulos del código. Un id de `pruebas` o `bordes` con el prefijo `contrato:` apunta a la suite del contrato. Sin prefijo, apunta a la suite oculta. |
 | `[[escenario]]` `id`, `cmd` | texto | no | | Flujo real de usuario. `cmd` sale con 0 si el flujo funciona. `id` solo usa `A-Za-z0-9._-` y no puede repetirse. |
 | `[entrega]` `instalar`, `correr` | texto | no | | Instalación y arranque del producto en un contenedor limpio. Ambos son obligatorios si la tabla existe. |
 | `[entrega]` `archivos` | lista de texto | no | [] | Archivos que el repo debe traer. |
@@ -2193,6 +2193,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         },
         "contrato": {
           "$ref": "#/$defs/Conteo"
+        },
+        "contrato_fallidos": {
+          "description": "Ids ordenados de los tests del contrato que fallan de forma estable, sin prefijo. Un test que ningún\nrequisito prueba con `contrato:` da `NoListo` (`test_contrato_fuera_de_requisitos`). Un veredicto\nviejo lee vacío.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
         },
         "costo_usd": {
           "type": "number",
@@ -4281,6 +4289,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     },
     "contrato": {
       "$ref": "#/$defs/Conteo"
+    },
+    "contrato_fallidos": {
+      "description": "Ids ordenados de los tests del contrato que fallan de forma estable, sin prefijo. Un test que ningún\nrequisito prueba con `contrato:` da `NoListo` (`test_contrato_fuera_de_requisitos`). Un veredicto\nviejo lee vacío.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
     },
     "costo_usd": {
       "type": "number",

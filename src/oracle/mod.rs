@@ -703,6 +703,7 @@ fn evaluar_con(
         sin_calibrar,
         ocultos_fallidos: fallidos_de(&oculto),
         ambiguedades,
+        contrato_fallidos: fallidos_de(&contrato),
     };
     // La decisión sale de reglas deterministas; el estado sale de la decisión (Tarea 13b).
     let redactor_medido = deps
@@ -722,7 +723,8 @@ fn evaluar_con(
     Ok(veredicto)
 }
 
-/// Ids ordenados de los tests de la suite oculta que fallan de forma estable. Los inestables van aparte.
+/// Ids ordenados de los tests que fallan de forma estable. Sirve a la suite oculta y a la del contrato.
+/// Los inestables van aparte.
 fn fallidos_de(c: &Clasificacion) -> Vec<String> {
     c.estables
         .iter()
@@ -3175,6 +3177,52 @@ mod tests {
     }
 
     #[test]
+    fn oraculo_contrato_fallidos_lista_los_tests_del_contrato_que_fallan() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO_CON_FALLA);
+        let v = evaluar_falso(&repo, &tarea, &home, &correr, &herramientas(&[])).expect("evalúa");
+        assert_eq!(
+            v.contrato_fallidos,
+            ["test_a::t1"],
+            "{:?}",
+            v.contrato_fallidos
+        );
+        assert!(
+            v.contrato_fallidos.iter().all(|id| !id.contains("test_b")),
+            "el oculto no entra: {:?}",
+            v.contrato_fallidos
+        );
+        assert_eq!(
+            v.ocultos_fallidos,
+            ["test_b::t4"],
+            "{:?}",
+            v.ocultos_fallidos
+        );
+    }
+
+    #[test]
+    fn oraculo_test_del_contrato_que_falla_fuera_de_requisitos_da_no_listo() {
+        let base = tempfile::tempdir().expect("base");
+        // `tarea_rust` no tiene requisito con `contrato:`: el test `test_a::t1` queda fuera.
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO_CON_FALLA);
+        let v = evaluar_falso(&repo, &tarea, &home, &correr, &herramientas(&[])).expect("evalúa");
+        let informe = v.informe.as_ref().expect("hay informe");
+        assert_eq!(informe.decision, Decision::NoListo, "{}", informe.motivo);
+        assert!(
+            informe.motivo.contains("test_contrato_fuera_de_requisitos"),
+            "{}",
+            informe.motivo
+        );
+        assert!(informe.motivo.contains("test_a::t1"), "{}", informe.motivo);
+    }
+
+    #[test]
     fn oraculo_funciona_con_3_de_4_pasando_y_sin_escenarios_da_075() {
         let base = tempfile::tempdir().expect("base");
         let v = veredicto_sano(base.path());
@@ -3328,6 +3376,17 @@ mod tests {
         let texto = serde_json::to_string(&r).expect("json");
         assert!(!texto.contains("test_b::t9"), "{texto}");
         assert!(r.ocultos_fallidos.is_empty());
+    }
+
+    #[test]
+    fn oraculo_redaccion_mcp_conserva_contrato_fallidos() {
+        // Decisión 50: los ids del contrato son visibles para el constructor; la redacción no los quita.
+        let v = Veredicto {
+            contrato_fallidos: vec!["test_a::t1".into()],
+            ..Veredicto::default()
+        };
+        let r = redactar_para_mcp(v);
+        assert_eq!(r.contrato_fallidos, ["test_a::t1"]);
     }
 
     #[test]
