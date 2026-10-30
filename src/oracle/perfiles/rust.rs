@@ -122,7 +122,9 @@ pub fn estructura_nativa(
 pub const MOTIVO_SIN_MODULOS: &str = "sin módulos";
 
 /// Arquitectura: ciclos entre módulos (severidad 3), usos de una capa anterior (severidad 3) y capas
-/// declaradas que faltan en el repo (severidad 3, con el mapa de módulos como cita).
+/// declaradas enteras que faltan en el repo (severidad 3). Una capa es un grupo de nombres de
+/// implementaciones distintas: está presente si existe al menos uno de sus módulos. La cita es el mapa de
+/// módulos del repo y la capa.
 pub fn arquitectura_nativa(
     repo: &Path,
     capas: &[Vec<String>],
@@ -599,8 +601,9 @@ fn capa_de(capas: &[Vec<String>], modulo: &str) -> Option<usize> {
     capas.iter().position(|c| c.iter().any(|m| m == modulo))
 }
 
-/// Un hallazgo por módulo de `capas` que no está en el repo. La cita es el mapa de módulos del repo y el
-/// módulo que falta.
+/// Un hallazgo por capa de `capas` que no tiene ningún módulo en el repo. Una capa con al menos un módulo
+/// presente no da hallazgo. La cita es el mapa de módulos del repo y la capa entera, así cada capa
+/// ausente tiene su propio id. Una capa vacía no da hallazgo, como antes.
 fn capas_sin_modulo(
     capas: &[Vec<String>],
     modulos: &BTreeSet<String>,
@@ -616,25 +619,23 @@ fn capas_sin_modulo(
             .join(", ")
     };
     let mut hallazgos = Vec::new();
-    for (indice, capa) in capas.iter().enumerate() {
-        for modulo in capa.iter().filter(|m| !modulos.contains(*m)) {
-            // La cita nombra el módulo que falta: así cada capa faltante tiene su propio id.
-            let cita = format!("módulos: {mapa}; falta {modulo}");
-            let detalle = format!(
-                "capa {indice} ({}): falta el módulo {modulo}",
-                capa.join(", ")
-            );
-            hallazgos.push(crear_hallazgo(
-                Dimension::Arquitectura,
-                3,
-                "src",
-                0,
-                &cita,
-                &detalle,
-                SONDA_ARQUITECTURA,
-                requisitos,
-            ));
+    for capa in capas {
+        if capa.is_empty() || capa.iter().any(|m| modulos.contains(m)) {
+            continue;
         }
+        let nombres = capa.join(", ");
+        let cita = format!("módulos: {mapa}; falta la capa [{nombres}]");
+        let detalle = format!("falta la capa [{nombres}]: ninguno de sus módulos está en el repo");
+        hallazgos.push(crear_hallazgo(
+            Dimension::Arquitectura,
+            3,
+            "src",
+            0,
+            &cita,
+            &detalle,
+            SONDA_ARQUITECTURA,
+            requisitos,
+        ));
     }
     hallazgos
 }
@@ -871,7 +872,7 @@ mod tests {
         assert!(
             r.hallazgos
                 .iter()
-                .all(|h| h.cita.starts_with("módulos: ninguno; falta "))
+                .all(|h| h.cita.starts_with("módulos: ninguno; falta la capa ["))
         );
     }
 
@@ -888,7 +889,7 @@ mod tests {
         assert_eq!(h.severidad, 3);
         assert_eq!(h.archivo, "src");
         assert_eq!(h.linea, 0);
-        assert!(h.cita.starts_with("módulos: ninguno; falta "), "{}", h.cita);
+        assert_eq!(h.cita, "módulos: ninguno; falta la capa [protocolo]");
         assert!(h.detalle.contains("capa") && h.detalle.contains("protocolo"));
         assert_eq!(h.fuente, Fuente::Sonda(SONDA_ARQUITECTURA.into()));
     }
@@ -906,6 +907,65 @@ mod tests {
         );
         assert!(r.hallazgos.iter().any(|h| h.detalle.contains("protocolo")));
         assert!(r.hallazgos.iter().any(|h| h.detalle.contains("almacen")));
+        assert!(
+            r.hallazgos
+                .iter()
+                .any(|h| h.cita == "módulos: comandos; falta la capa [protocolo]")
+        );
+        assert!(
+            r.hallazgos
+                .iter()
+                .any(|h| h.cita == "módulos: comandos; falta la capa [almacen]")
+        );
+    }
+
+    #[test]
+    fn sonda_arquitectura_capa_con_un_modulo_presente_no_da_hallazgo() {
+        // Una capa junta nombres de dos implementaciones: basta con que exista uno de sus módulos.
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), "src/main.rs", "fn main() {}\n");
+        escribir(dir.path(), "src/cmd.rs", "pub fn c() {}\n");
+        let capas = [vec![
+            "cmd".to_string(),
+            "cmd_keys".to_string(),
+            "cmd_strings".to_string(),
+        ]];
+        let r = arquitectura_nativa(dir.path(), &capas, &[]);
+        assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+        assert_eq!(r.valor, Some(1.0));
+    }
+
+    #[test]
+    fn sonda_arquitectura_capa_entera_ausente_da_un_hallazgo_que_nombra_sus_modulos() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), "src/main.rs", "fn main() {}\n");
+        let capas = [vec![
+            "cmd".to_string(),
+            "cmd_keys".to_string(),
+            "cmd_strings".to_string(),
+        ]];
+        let r = arquitectura_nativa(dir.path(), &capas, &[]);
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        let h = &r.hallazgos[0];
+        assert_eq!(h.dimension, Dimension::Arquitectura);
+        assert_eq!(h.severidad, 3);
+        assert_eq!(h.archivo, "src");
+        assert_eq!(h.linea, 0);
+        assert_eq!(h.fuente, Fuente::Sonda(SONDA_ARQUITECTURA.into()));
+        assert!(
+            h.cita
+                .contains("falta la capa [cmd, cmd_keys, cmd_strings]"),
+            "{}",
+            h.cita
+        );
+        assert!(
+            h.detalle.contains("cmd")
+                && h.detalle.contains("cmd_keys")
+                && h.detalle.contains("cmd_strings"),
+            "{}",
+            h.detalle
+        );
+        assert!(!h.detalle.contains("capa 0"), "{}", h.detalle);
     }
 
     #[test]

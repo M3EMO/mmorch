@@ -2969,6 +2969,47 @@ mod tests {
         assert_eq!(faltan[0].motivo, "sin módulos");
     }
 
+    /// Tarea de Rust como `tarea_rust`, con `[arquitectura]` que declara una capa de tres módulos.
+    fn tarea_rust_con_capas(base: &Path) -> Tarea {
+        let dir = base.join("tarea");
+        fs::create_dir_all(&dir).expect("tarea");
+        fs::write(dir.join("spec.md"), SPEC).expect("spec");
+        let texto = "nombre = \"tarea-rust\"\nlenguaje = \"rust\"\nimagen = \"imagen-falsa\"\n\
+            spec = \"spec.md\"\nrepeticiones_inestable = 1\n\
+            [contrato]\ncmd = \"pytest -q --junitxml=/salida/contrato.xml /oraculo/contrato\"\n\
+            [oculto]\ncmd = \"pytest -q --junitxml=/salida/oculto.xml /oraculo/oculto\"\n\
+            [eficiencia]\ncmd = \"bench-eficiencia\"\npiso = 5000.0\n\
+            [arquitectura]\ncapas = [[\"cmd\", \"cmd_keys\", \"cmd_strings\"]]\n\
+            [[requisito]]\nid = \"R1\"\ntitulo = \"Uno\"\npeso = 3\npruebas = [\"test_b::t3\"]\n\
+            [[requisito]]\nid = \"R2\"\ntitulo = \"Dos\"\npeso = 1\npruebas = [\"test_b::t4\"]\n";
+        fs::write(dir.join("tarea.toml"), texto).expect("tarea.toml");
+        Tarea::cargar_de(&dir).expect("carga la tarea")
+    }
+
+    #[test]
+    fn medir_con_capas_declaradas_y_repo_sin_esos_modulos_da_hallazgo_de_capa() {
+        // Hueco de la nube 4: capas declaradas y un repo sin sus módulos. La capa entera ausente da un hallazgo.
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust_con_capas(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_falso(&repo, &tarea, &home, &correr, &herramientas(&[])).expect("evalúa");
+        let arq = puntaje_de_prueba(&v, Dimension::Arquitectura);
+        assert!(arq.valor < 1.0, "{arq:?}");
+        let citas: Vec<&str> = v
+            .hallazgos
+            .iter()
+            .filter(|h| h.dimension == Dimension::Arquitectura)
+            .map(|h| h.cita.as_str())
+            .collect();
+        assert_eq!(citas.len(), 1, "{citas:?}");
+        assert!(
+            citas[0].contains("falta la capa [cmd, cmd_keys, cmd_strings]"),
+            "{citas:?}"
+        );
+    }
+
     #[test]
     fn oraculo_diseno_sin_rubricas_embebidas_queda_sin_veredicto() {
         let base = tempfile::tempdir().expect("base");

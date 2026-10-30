@@ -429,7 +429,10 @@ mod tests {
             .expect("hay sonda de arquitectura");
         assert!(r.valor.is_some(), "{:?}", r.motivo);
         assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
-        assert_eq!(r.hallazgos[0].cita, "módulos: ninguno; falta protocolo");
+        assert_eq!(
+            r.hallazgos[0].cita,
+            "módulos: ninguno; falta la capa [protocolo]"
+        );
         assert!(r.hallazgos[0].detalle.contains("protocolo"));
     }
 }
