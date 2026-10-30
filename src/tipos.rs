@@ -116,9 +116,12 @@ pub struct Pendiente {
     /// Id del test con forma `archivo::nombre`.
     pub test: String,
     pub motivo: String,
-    /// Resultado importado de Colab: "pasa", "falla" u "omite". Ausente si no se importó.
+    /// Resultado importado de Colab: "pasa", "falla", "omite" o "inestable". Ausente si no se importó.
     #[serde(default)]
     pub colab: Option<String>,
+    /// Tasa de aprobación si Colab dejó el test inestable entre repeticiones. Ausente en un test estable.
+    #[serde(default)]
+    pub tasa: Option<TasaTest>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1051,11 +1054,13 @@ mod tests {
             test: "test_f::t_gpu".into(),
             motivo: "lavapipe no emula la GPU".into(),
             colab: None,
+            tasa: None,
         });
         ida_y_vuelta(&Pendiente {
             test: "test_f::t_gpu".into(),
             motivo: "lavapipe no emula la GPU".into(),
             colab: Some("pasa".into()),
+            tasa: None,
         });
     }
 
@@ -1067,6 +1072,7 @@ mod tests {
             test: "test_f::t_gpu".into(),
             motivo: "entorno".into(),
             colab: None,
+            tasa: None,
         });
         ida_y_vuelta(&v);
     }

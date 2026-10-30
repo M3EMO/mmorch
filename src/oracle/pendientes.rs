@@ -2,12 +2,13 @@
 //! Root no lanza Colab. El usuario corre `correr.sh` y trae el junit de vuelta.
 //! Todo lo que trae tests ocultos vive en `$ROOT_HOME/oraculos/<tarea>/` (A1, B18).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use fs4::{FileExt, TryLockError};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -16,6 +17,7 @@ use super::descarga;
 use super::junit::{self, ResultadoTest};
 use super::tarea::Tarea;
 use super::{ErrorOraculo, comillas, commit_de, copiar_repo, infra};
+use super::{Muestreo, muestreo_de};
 use crate::borrado;
 use crate::observe;
 use crate::tipos::{Pendiente, TipoEvento};
@@ -30,8 +32,10 @@ const CARPETA_EVIDENCIA: &str = "evidencia";
 const ARCHIVO_COLAB: &str = "colab.json";
 /// Eventos de Root dentro de `ROOT_HOME`.
 const ARCHIVO_EVENTOS: &str = "eventos.jsonl";
-/// Junit que deja `correr.sh` al lado del paquete.
-const XML_PENDIENTES: &str = "pendientes.xml";
+/// Junit que deja `correr.sh` por cada repetición, al lado del paquete: `pendientes-<n>.xml`.
+pub(crate) fn nombre_junit(repeticion: u32) -> String {
+    format!("pendientes-{repeticion}.xml")
+}
 /// Commit del repo del que se armó el paquete (B16).
 pub(crate) const ARCHIVO_COMMIT: &str = "commit.txt";
 /// Copia de la caché de dependencias dentro del paquete.
@@ -55,6 +59,10 @@ pub struct ColabEntrada {
     /// Commit del repo del que salió el paquete. Un resultado de otro commit no entra al veredicto (B16).
     #[serde(default)]
     pub commit: String,
+    /// Tasa de aprobación si el test salió inestable entre repeticiones. Ausente en un test estable
+    /// y en un `colab.json` viejo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tasa: Option<crate::tipos::TasaTest>,
 }
 
 /// Paquete armado para correr los tests pendientes.
@@ -87,6 +95,79 @@ pub fn dir_paquete(home: &Path, tarea: &str) -> PathBuf {
     home.join(CARPETA_ORACULOS)
         .join(tarea)
         .join(CARPETA_PAQUETE)
+}
+
+/// Lock de una tarea, al lado de su paquete: `ROOT_HOME/oraculos/<tarea>/pendientes.lock`.
+fn ruta_turno(home: &Path, tarea: &str) -> PathBuf {
+    let mut ruta = dir_paquete(home, tarea).into_os_string();
+    ruta.push(".lock");
+    PathBuf::from(ruta)
+}
+
+/// Turno de una tarea. Mientras vive, ninguna otra corrida de `oraculo pendientes` de la misma tarea
+/// arma el paquete ni corre Colab. Lo toma `tomar_turno` con un lock exclusivo de `fs4`, y se suelta al
+/// soltarse el valor, también ante error. Si el proceso muere, el sistema operativo suelta el lock.
+#[derive(Debug)]
+pub struct Turno {
+    archivo: fs::File,
+}
+
+impl Drop for Turno {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.archivo);
+    }
+}
+
+/// Toma el turno de la tarea sin esperar. Si otra corrida lo tiene, da `ErrorOraculo::Ocupado` con el
+/// pid y la hora de inicio de esa corrida, y sale con código 3. Si entra, anota su pid y su hora en el
+/// lock para que la próxima corrida lo nombre.
+pub fn tomar_turno(home: &Path, tarea: &str) -> Result<Turno, ErrorOraculo> {
+    nombre_seguro(tarea)?;
+    let ruta = ruta_turno(home, tarea);
+    if let Some(padre) = ruta.parent() {
+        fs::create_dir_all(padre).map_err(|e| infra("carpeta de la tarea", e))?;
+    }
+    let archivo = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&ruta)
+        .map_err(|e| infra(&format!("abrir {}", ruta.display()), e))?;
+    match FileExt::try_lock(&archivo) {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            return Err(ErrorOraculo::Ocupado(format!(
+                "otra corrida de pendientes de la tarea {tarea} ya está en curso ({}). Espera a que termine.",
+                dueno_del_turno(&ruta)
+            )));
+        }
+        Err(TryLockError::Error(e)) => return Err(infra("tomar el turno de pendientes", e)),
+    }
+    let (_, desde) = observe::ahora();
+    let dueno = format!("pid={}\ndesde={desde}\n", std::process::id());
+    archivo
+        .set_len(0)
+        .map_err(|e| infra("anotar el dueño del turno", e))?;
+    (&archivo)
+        .write_all(dueno.as_bytes())
+        .map_err(|e| infra("anotar el dueño del turno", e))?;
+    Ok(Turno { archivo })
+}
+
+/// Lo que el lock dice de su dueño: el pid y la hora de inicio. Si el archivo aún no trae nada, lo dice.
+fn dueno_del_turno(ruta: &Path) -> String {
+    let texto = fs::read_to_string(ruta).unwrap_or_default();
+    let campo = |clave: &str| {
+        texto
+            .lines()
+            .find_map(|linea| linea.strip_prefix(clave))
+            .map(str::to_string)
+    };
+    match (campo("pid="), campo("desde=")) {
+        (Some(pid), Some(desde)) => format!("pid {pid}, desde {desde}"),
+        _ => "dueño desconocido".into(),
+    }
 }
 
 /// Arma el paquete de los tests de `[[entorno]]` dentro de `oraculos/<tarea>/pendientes/`.
@@ -178,58 +259,80 @@ pub fn limpiar_paquete(home: &Path, tarea: &Tarea, paquete: &Path, sesion: &str)
     borrado::borrar_dir_dentro(&tmp, &tmp.join(format!("{PREFIJO_COLAB}{sesion}")))
 }
 
-/// Importa el junit que dejó `correr.sh`. `commit` es el del repo al que se importa. Si el paquete
-/// de la tarea tiene otro commit, el resultado no se importa y el aviso lo dice (B16). Si entra, guarda
-/// el resultado de cada test pendiente en `evidencia/<tarea>/colab.json` y registra un evento `Gate`.
+/// Importa los junit que dejó `correr.sh`, uno por repetición. `commit` es el del repo al que se
+/// importa. Si el paquete de la tarea tiene otro commit, el resultado no se importa y el aviso lo dice
+/// (B16). Si entra, cada test pendiente cuenta una muestra por junit, con el mismo criterio que la
+/// laptop (`muestreo_de`): un test que pasa en una repetición y falla en otra queda `inestable` con su
+/// tasa, nunca `falla` (desempate 28). Guarda el resultado en `evidencia/<tarea>/colab.json` y registra
+/// un evento `Gate`.
 pub fn importar(
     home: &Path,
     tarea: &Tarea,
-    ruta: &Path,
+    rutas: &[PathBuf],
     commit: &str,
 ) -> Result<Importacion, ErrorOraculo> {
-    let texto = fs::read_to_string(ruta)
-        .map_err(|e| ErrorOraculo::Infra(format!("no se pudo leer {}: {e}", ruta.display())))?;
-    let junit = junit::parsear(&texto)?;
+    if rutas.is_empty() {
+        return Err(ErrorOraculo::Uso("falta el junit a importar".into()));
+    }
+    let mut textos = Vec::with_capacity(rutas.len());
+    for ruta in rutas {
+        let texto = fs::read_to_string(ruta)
+            .map_err(|e| ErrorOraculo::Infra(format!("no se pudo leer {}: {e}", ruta.display())))?;
+        textos.push(texto);
+    }
+    let junits = textos
+        .iter()
+        .map(|texto| junit::parsear(texto).map(|j| j.con_ids()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let distintos: BTreeSet<&String> = junits.iter().flat_map(|j| j.tests.keys()).collect();
     if let Some(del_paquete) = commit_del_paquete(home, &tarea.nombre)
         && del_paquete != commit
     {
         return Ok(Importacion {
             importados: 0,
-            ignorados: junit.tests.len(),
+            ignorados: distintos.len(),
             avisos: vec![format!(
                 "el junit es del commit {del_paquete} y el repo está en {commit}: no se importa"
             )],
             confianza: None,
         });
     }
-    let sha = sha256_hex(texto.as_bytes());
+    let sha = sha256_hex(textos.concat().as_bytes());
     let (ts, _) = observe::ahora();
 
-    let junit = junit.con_ids();
     let mut colab = colab_de(home, &tarea.nombre)?;
     let mut resultados = BTreeMap::new();
     for exclusion in &tarea.entorno {
-        if let Some(resultado) = junit.tests.get(&exclusion.test) {
-            let etiqueta = etiqueta(*resultado);
-            colab.insert(
-                exclusion.test.clone(),
-                ColabEntrada {
-                    resultado: etiqueta.into(),
-                    junit_sha256: sha.clone(),
-                    ts,
-                    commit: commit.to_string(),
-                },
-            );
-            resultados.insert(exclusion.test.clone(), etiqueta);
-        }
+        let muestras: Vec<Option<ResultadoTest>> = junits
+            .iter()
+            .map(|j| j.tests.get(&exclusion.test).copied())
+            .collect();
+        let Some(muestreo) = muestreo_de(&muestras) else {
+            continue;
+        };
+        let (resultado, tasa) = match muestreo {
+            Muestreo::Estable(r) => (etiqueta(r), None),
+            Muestreo::Inestable(tasa) => ("inestable", Some(tasa)),
+        };
+        colab.insert(
+            exclusion.test.clone(),
+            ColabEntrada {
+                resultado: resultado.into(),
+                junit_sha256: sha.clone(),
+                ts,
+                commit: commit.to_string(),
+                tasa,
+            },
+        );
+        resultados.insert(exclusion.test.clone(), resultado);
     }
     let importados = resultados.len();
-    let ignorados = junit.tests.len().saturating_sub(importados);
+    let ignorados = distintos.len().saturating_sub(importados);
     guardar_colab(home, &tarea.nombre, &colab)?;
 
     // Decisión 40: si `unshare -rn` no funcionó en Colab, la corrida tuvo red y su confianza lo dice.
-    let confianza =
-        (junit.red.as_deref() == Some("con-red")).then(|| CONFIANZA_CON_RED.to_string());
+    let con_red = junits.iter().any(|j| j.red.as_deref() == Some("con-red"));
+    let confianza = con_red.then(|| CONFIANZA_CON_RED.to_string());
     let mut evento = observe::evento_manual(
         &format!("pendientes-{}", tarea.nombre),
         TipoEvento::Gate,
@@ -239,6 +342,9 @@ pub fn importar(
     evento.extra.insert("origen".into(), json!("colab"));
     evento.extra.insert("tests".into(), json!(resultados));
     evento.extra.insert("junit_sha256".into(), json!(sha));
+    evento
+        .extra
+        .insert("repeticiones".into(), json!(rutas.len()));
     if let Some(texto) = &confianza {
         evento.extra.insert("confianza".into(), json!(texto));
     }
@@ -301,6 +407,7 @@ pub fn desde(tarea: &Tarea, colab: &BTreeMap<String, ColabEntrada>) -> Vec<Pendi
             test: exclusion.test.clone(),
             motivo: exclusion.motivo.clone(),
             colab: colab.get(&exclusion.test).map(|c| c.resultado.clone()),
+            tasa: colab.get(&exclusion.test).and_then(|c| c.tasa.clone()),
         })
         .collect()
 }
@@ -367,26 +474,24 @@ fn localizar(tarea: &Tarea, archivo: &str) -> Result<PathBuf, ErrorOraculo> {
     )))
 }
 
-/// Script que junta los junit de cada repetición (`repeticion-N.xml`) en un solo `pendientes.xml`, con
-/// todos sus testcases. El lector de junit de Root cuenta los testcases repetidos por id. La marca
-/// `red.txt` que deja `correr.sh` va como atributo `root_red` del testsuite (decisión 40).
-const GUION_JUNTAR: &str = r#"import glob
-import os
+/// Marca cada testsuite de un junit con la marca de red de `red.txt` (decisión 40), como atributo
+/// `root_red`. Recibe las rutas de los junit por argumento. Sin `red.txt`, la marca dice `desconocido`.
+const GUION_MARCAR: &str = r#"import os, sys
 import xml.etree.ElementTree as ET
-raiz = ET.Element("testsuites")
-suite = ET.SubElement(raiz, "testsuite", name="pendientes")
-suite.set("root_red", open("red.txt").read().strip() if os.path.exists("red.txt") else "desconocido")
-for ruta in sorted(glob.glob("repeticion-*.xml")):
-    for caso in ET.parse(ruta).getroot().iter("testcase"):
-        suite.append(caso)
-ET.ElementTree(raiz).write("pendientes.xml", encoding="utf-8", xml_declaration=True)
+marca = open("red.txt").read().strip() if os.path.exists("red.txt") else "desconocido"
+for ruta in sys.argv[1:]:
+    arbol = ET.parse(ruta)
+    for suite in arbol.getroot().iter("testsuite"):
+        suite.set("root_red", marca)
+    arbol.write(ruta, encoding="utf-8", xml_declaration=True)
 "#;
 
-/// Script que corre los nodos pendientes `repeticiones` veces y deja `pendientes.xml` al lado.
-/// Los tests corren dentro de `unshare -rn` (sin red, decisión 40). Si Colab no deja crear ese
-/// namespace, la corrida sigue con red y `red.txt` dice `con-red`. `prelude` prepara la caché, si la
-/// hay, y va antes de `pytest` en la misma línea. Si hay una carpeta `bin/` al lado (el `cargo` mínimo
-/// del respaldo de Colab), la pone al frente del `PATH`.
+/// Script que corre los nodos pendientes `repeticiones` veces. Cada repetición deja su junit,
+/// `pendientes-<n>.xml`, y Root lo baja y lo importa como una muestra (desempate 28). Los tests corren
+/// dentro de `unshare -rn` (sin red, decisión 40). Si Colab no deja crear ese namespace, la corrida sigue
+/// con red y `red.txt` dice `con-red`. `prelude` prepara la caché, si la hay, y va antes de `pytest` en
+/// la misma línea. Si hay una carpeta `bin/` al lado (el `cargo` mínimo del respaldo de Colab), la pone
+/// al frente del `PATH`.
 fn guion_correr(nodos: &[String], repeticiones: u32, prelude: &str) -> String {
     guion_con_previo(nodos, repeticiones, "", prelude)
 }
@@ -426,14 +531,16 @@ fn guion_con_previo(nodos: &[String], repeticiones: u32, previo: &str, prelude: 
          echo \"$RED\" > red.txt\n\
          estado=0\n\
          for i in $(seq 1 {repeticiones}); do\n\
-         {prelude}$ORDEN python3 -m pytest -q -p no:cacheprovider --junitxml=repeticion-$i.xml {nodos} || estado=$?\n\
-         done\n\
-         python3 -I - <<'PY'\n\
-         {juntar}\
+         {prelude}$ORDEN python3 -m pytest -q -p no:cacheprovider --junitxml=pendientes-$i.xml {nodos} || estado=$?\n\
+         if [ -f pendientes-$i.xml ]; then\n\
+         python3 -I - pendientes-$i.xml <<'PY' || true\n\
+         {marcar}\
          PY\n\
+         fi\n\
+         done\n\
          exit $estado\n",
         nodos = lista.join(" "),
-        juntar = GUION_JUNTAR,
+        marcar = GUION_MARCAR,
     )
 }
 
@@ -443,8 +550,8 @@ fn leeme(tarea: &str, repo: &Path) -> String {
         "Tests pendientes de la tarea {tarea}, generados por Root.\n\
          1. Instala Rust (cargo) y pytest (pip install pytest).\n\
          2. Corre ./correr.sh desde esta carpeta.\n\
-         3. Lleva pendientes.xml a la máquina donde corre Root.\n\
-         4. Corre: r00t oraculo pendientes --tarea {tarea} --repo {} --importar {XML_PENDIENTES}\n",
+         3. Lleva todos los pendientes-N.xml (uno por repetición) a la máquina donde corre Root.\n\
+         4. Corre: r00t oraculo pendientes --tarea {tarea} --repo {} --importar pendientes-*.xml\n",
         repo.display()
     )
 }
@@ -527,45 +634,58 @@ mod tests {
         assert!(texto.contains("export CARGO_TARGET_DIR=\"$(pwd)/target\""));
         assert!(
             texto.contains(
-                "python3 -m pytest -q -p no:cacheprovider --junitxml=repeticion-$i.xml 'tests/test_x.py::test_rendimiento[gpu-10000-res1]'"
+                "python3 -m pytest -q -p no:cacheprovider --junitxml=pendientes-$i.xml 'tests/test_x.py::test_rendimiento[gpu-10000-res1]'"
             ),
             "{texto}"
         );
     }
 
     #[test]
-    fn pendiente_guion_correr_repite_la_suite_y_junta_los_junit() {
+    fn pendiente_guion_correr_escribe_un_junit_por_repeticion() {
         let nodos = vec!["tests/test_x.py::test_a".to_string()];
         let texto = guion_correr(&nodos, 3, "");
         assert!(texto.contains("for i in $(seq 1 3); do"), "{texto}");
+        assert!(texto.contains("--junitxml=pendientes-$i.xml"), "{texto}");
         assert!(texto.contains("|| estado=$?"), "{texto}");
         assert!(texto.contains("exit $estado"), "{texto}");
-        assert!(texto.contains("python3 -I - <<'PY'"), "{texto}");
-        assert!(texto.contains("pendientes.xml"), "{texto}");
+        assert!(
+            !texto.contains("pendientes.xml"),
+            "el guion no junta los junit en uno: {texto}"
+        );
     }
 
     #[test]
-    fn pendiente_junit_combinado_trae_los_testcases_de_cada_repeticion() {
+    fn pendiente_marca_de_red_entra_en_cada_junit_por_repeticion() {
         let base = tempfile::tempdir().expect("base");
-        let caso = |nombre: &str| {
-            format!(
-                "<testsuites><testsuite name=\"pytest\"><testcase classname=\"tests.test_x\" name=\"{nombre}\"/></testsuite></testsuites>"
-            )
-        };
-        fs::write(base.path().join("repeticion-1.xml"), caso("test_a")).expect("rep 1");
-        fs::write(base.path().join("repeticion-2.xml"), caso("test_a")).expect("rep 2");
-        let juntar = base.path().join("juntar.py");
-        fs::write(&juntar, GUION_JUNTAR).expect("escribe el guion");
+        fs::write(base.path().join("red.txt"), "con-red\n").expect("red");
+        fs::write(
+            base.path().join("pendientes-1.xml"),
+            r#"<testsuites><testsuite name="pytest"><testcase classname="tests.test_a" name="t1"/></testsuite></testsuites>"#,
+        )
+        .expect("rep 1");
+        fs::write(
+            base.path().join("pendientes-2.xml"),
+            r#"<testsuite><testcase classname="tests.test_a" name="t1"/></testsuite>"#,
+        )
+        .expect("rep 2");
+        let marcar = base.path().join("marcar.py");
+        fs::write(&marcar, GUION_MARCAR).expect("guion");
         let estado = Command::new("python3")
             .arg("-I")
-            .arg(&juntar)
+            .arg(&marcar)
+            .arg("pendientes-1.xml")
+            .arg("pendientes-2.xml")
             .current_dir(base.path())
             .status()
             .expect("python3");
         assert!(estado.success(), "{estado:?}");
-        let texto = fs::read_to_string(base.path().join("pendientes.xml")).expect("junit");
-        let leido = crate::oracle::junit::parsear(&texto).expect("parsea");
-        assert_eq!(leido.testcases["tests.test_x::test_a"], 2, "{texto}");
+        for n in [1, 2] {
+            let texto =
+                fs::read_to_string(base.path().join(format!("pendientes-{n}.xml"))).expect("junit");
+            let leido = crate::oracle::junit::parsear(&texto).expect("parsea");
+            assert_eq!(leido.red.as_deref(), Some("con-red"), "repetición {n}");
+            assert_eq!(leido.testcases["tests.test_a::t1"], 1, "repetición {n}");
+        }
     }
 
     #[test]
@@ -637,6 +757,7 @@ mod tests {
                 junit_sha256: "abc".into(),
                 ts: 1.0,
                 commit: String::new(),
+                tasa: None,
             },
         );
         let pendientes = desde(&tarea, &colab);
@@ -644,6 +765,29 @@ mod tests {
         assert_eq!(pendientes[0].colab.as_deref(), Some("pasa"));
         assert_eq!(pendientes[1].colab, None);
         assert_eq!(pendientes[1].motivo, "gpu");
+    }
+
+    #[test]
+    fn pendiente_desde_pasa_la_tasa_de_un_test_inestable() {
+        let tarea = tarea_en_oraculos(Path::new("/nada"), "tarea-x", "shell");
+        let mut colab = BTreeMap::new();
+        colab.insert(
+            "test_a::uno".to_string(),
+            ColabEntrada {
+                resultado: "inestable".into(),
+                junit_sha256: "abc".into(),
+                ts: 1.0,
+                commit: String::new(),
+                tasa: Some(crate::tipos::TasaTest {
+                    pasa: 2,
+                    total: 4,
+                    wilson_inf: 0.1,
+                }),
+            },
+        );
+        let pendientes = desde(&tarea, &colab);
+        assert_eq!(pendientes[0].colab.as_deref(), Some("inestable"));
+        assert_eq!(pendientes[0].tasa.as_ref().map(|t| t.total), Some(4));
     }
     /// Tarea mínima en `home/oraculos/<nombre>`, con un test de `[[entorno]]` y su archivo oculto.
     fn tarea_en_oraculos(home: &Path, nombre: &str, lenguaje: &str) -> Tarea {
@@ -749,7 +893,8 @@ mod tests {
             r#"<testsuite><testcase classname="tests.test_a" name="uno"/></testsuite>"#,
         )
         .expect("junit");
-        let otro = importar(home.path(), &tarea, &junit, "bbb").expect("importa");
+        let otro =
+            importar(home.path(), &tarea, std::slice::from_ref(&junit), "bbb").expect("importa");
         assert_eq!(
             otro.importados, 0,
             "el resultado de otro commit no se importa"
@@ -760,12 +905,128 @@ mod tests {
             otro.avisos
         );
         assert!(colab_de(home.path(), "tarea-x").expect("lee").is_empty());
-        let mismo = importar(home.path(), &tarea, &junit, "aaa").expect("importa");
+        let mismo =
+            importar(home.path(), &tarea, std::slice::from_ref(&junit), "aaa").expect("importa");
         assert_eq!(mismo.importados, 1);
         assert_eq!(
             colab_de(home.path(), "tarea-x").expect("lee")["test_a::uno"].commit,
             "aaa"
         );
+    }
+
+    /// Dos junit por repetición de `t` (`tests.test_a::uno`), con los resultados dados.
+    fn junit_por_repeticion(home: &Path, resultados: &[&str]) -> Vec<PathBuf> {
+        resultados
+            .iter()
+            .enumerate()
+            .map(|(i, resultado)| {
+                let caso = match *resultado {
+                    "falla" => {
+                        r#"<testcase classname="tests.test_a" name="uno"><failure message="x"/></testcase>"#
+                    }
+                    "otro" => r#"<testcase classname="tests.test_a" name="otro"/>"#,
+                    _ => r#"<testcase classname="tests.test_a" name="uno"/>"#,
+                };
+                let ruta = home.join(format!("pendientes-{}.xml", i + 1));
+                fs::write(&ruta, format!("<testsuite>{caso}</testsuite>")).expect("junit");
+                ruta
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pendiente_importar_repeticiones_alternadas_queda_inestable_con_tasa() {
+        let home = tempfile::tempdir().expect("home");
+        let tarea = tarea_en_oraculos(home.path(), "tarea-x", "shell");
+        let junits = junit_por_repeticion(home.path(), &["pasa", "falla"]);
+        let resumen = importar(home.path(), &tarea, &junits, "").expect("importa");
+        assert_eq!(resumen.importados, 1);
+        let entrada = &colab_de(home.path(), "tarea-x").expect("lee")["test_a::uno"];
+        assert_eq!(entrada.resultado, "inestable", "no debe quedar Falla");
+        let tasa = entrada.tasa.as_ref().expect("lleva la tasa");
+        assert_eq!((tasa.pasa, tasa.total), (1, 2));
+    }
+
+    #[test]
+    fn pendiente_importar_repeticiones_que_pasan_en_todas_queda_verde() {
+        let home = tempfile::tempdir().expect("home");
+        let tarea = tarea_en_oraculos(home.path(), "tarea-x", "shell");
+        let junits = junit_por_repeticion(home.path(), &["pasa", "pasa"]);
+        importar(home.path(), &tarea, &junits, "").expect("importa");
+        let entrada = &colab_de(home.path(), "tarea-x").expect("lee")["test_a::uno"];
+        assert_eq!(entrada.resultado, "pasa");
+        assert_eq!(entrada.tasa, None, "un test estable no lleva tasa");
+    }
+
+    #[test]
+    fn pendiente_importar_test_ausente_en_una_repeticion_queda_inestable() {
+        let home = tempfile::tempdir().expect("home");
+        let tarea = tarea_en_oraculos(home.path(), "tarea-x", "shell");
+        let junits = junit_por_repeticion(home.path(), &["pasa", "otro"]);
+        importar(home.path(), &tarea, &junits, "").expect("importa");
+        let entrada = &colab_de(home.path(), "tarea-x").expect("lee")["test_a::uno"];
+        assert_eq!(entrada.resultado, "inestable");
+        assert_eq!(entrada.tasa.as_ref().map(|t| t.total), Some(1));
+    }
+
+    #[test]
+    fn pendiente_importar_sin_junit_da_error_de_uso() {
+        let home = tempfile::tempdir().expect("home");
+        let tarea = tarea_en_oraculos(home.path(), "tarea-x", "shell");
+        let r = importar(home.path(), &tarea, &[], "");
+        assert!(matches!(r, Err(ErrorOraculo::Uso(_))), "{r:?}");
+    }
+
+    #[test]
+    fn pendiente_turno_ocupado_da_error_que_nombra_al_dueno() {
+        let home = tempfile::tempdir().expect("home");
+        tarea_en_oraculos(home.path(), "tarea-x", "shell");
+        let _primero = tomar_turno(home.path(), "tarea-x").expect("el primero toma el turno");
+        let Err(error) = tomar_turno(home.path(), "tarea-x") else {
+            panic!("el segundo no debía tomar el turno");
+        };
+        let texto = error.to_string();
+        assert!(
+            texto.contains(&format!("pid {}", std::process::id())),
+            "el mensaje nombra al dueño: {texto}"
+        );
+        assert!(texto.contains("desde"), "dice desde cuándo: {texto}");
+        assert!(texto.contains("tarea-x"), "{texto}");
+        assert_eq!(error.codigo_de_salida(), 3, "{texto}");
+    }
+
+    #[test]
+    fn pendiente_turno_se_suelta_al_soltarlo() {
+        let home = tempfile::tempdir().expect("home");
+        tarea_en_oraculos(home.path(), "tarea-x", "shell");
+        let primero = tomar_turno(home.path(), "tarea-x").expect("toma el turno");
+        drop(primero);
+        assert!(
+            tomar_turno(home.path(), "tarea-x").is_ok(),
+            "después de soltarlo, otra corrida toma el turno"
+        );
+    }
+
+    #[test]
+    fn pendiente_turno_es_por_tarea() {
+        let home = tempfile::tempdir().expect("home");
+        tarea_en_oraculos(home.path(), "tarea-x", "shell");
+        tarea_en_oraculos(home.path(), "tarea-y", "shell");
+        let _x = tomar_turno(home.path(), "tarea-x").expect("toma el de x");
+        assert!(
+            tomar_turno(home.path(), "tarea-y").is_ok(),
+            "otra tarea no se bloquea"
+        );
+    }
+
+    #[test]
+    fn pendiente_turno_no_acepta_nombre_con_ruta() {
+        let home = tempfile::tempdir().expect("home");
+        let Err(error) = tomar_turno(home.path(), "../fuera") else {
+            panic!("un nombre con ruta no toma turno");
+        };
+        assert!(matches!(error, ErrorOraculo::Tarea(_)), "{error:?}");
+        assert!(!home.path().join("oraculos").exists());
     }
 
     fn python3_real() -> PathBuf {
@@ -833,7 +1094,7 @@ mod tests {
                 .trim(),
             "con-red"
         );
-        let xml = fs::read_to_string(dir.join("pendientes.xml")).expect("junit combinado");
+        let xml = fs::read_to_string(dir.join("pendientes-1.xml")).expect("junit por repetición");
         let leido = junit::parsear(&xml).expect("parsea");
         assert_eq!(leido.red.as_deref(), Some("con-red"));
     }
@@ -850,7 +1111,7 @@ mod tests {
                 .trim(),
             "sin-red"
         );
-        let xml = fs::read_to_string(dir.join("pendientes.xml")).expect("junit");
+        let xml = fs::read_to_string(dir.join("pendientes-1.xml")).expect("junit");
         assert_eq!(
             junit::parsear(&xml).expect("parsea").red.as_deref(),
             Some("sin-red")
@@ -907,31 +1168,6 @@ mod tests {
             sintaxis.status.success(),
             "{}",
             String::from_utf8_lossy(&sintaxis.stderr)
-        );
-    }
-
-    #[test]
-    fn pendiente_junit_combinado_lleva_la_marca_de_red() {
-        let base = tempfile::tempdir().expect("base");
-        fs::write(base.path().join("red.txt"), "con-red\n").expect("red");
-        fs::write(
-            base.path().join("repeticion-1.xml"),
-            r#"<testsuites><testsuite name="pytest"><testcase classname="tests.test_a" name="t1"/></testsuite></testsuites>"#,
-        )
-        .expect("rep");
-        let juntar = base.path().join("juntar.py");
-        fs::write(&juntar, GUION_JUNTAR).expect("guion");
-        let estado = Command::new("python3")
-            .arg("-I")
-            .arg(&juntar)
-            .current_dir(base.path())
-            .status()
-            .expect("py");
-        assert!(estado.success());
-        let texto = fs::read_to_string(base.path().join("pendientes.xml")).expect("xml");
-        assert_eq!(
-            junit::parsear(&texto).expect("parsea").red.as_deref(),
-            Some("con-red")
         );
     }
 }

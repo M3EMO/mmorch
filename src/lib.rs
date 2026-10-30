@@ -23,7 +23,7 @@ pub use error::Error;
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use cli::{
     Comando, FichaAccion, GoalAccion, ObservaAccion, OraculoAccion, ProveedorJuez, TrackAccion,
@@ -297,7 +297,8 @@ fn oraculo_colab(
         &oracle::colab::CompiladorPodman,
     )
     .and_then(|resultado| {
-        let resumen = oracle::pendientes::importar(home, tarea, &resultado.junit, &paquete.commit)?;
+        let resumen =
+            oracle::pendientes::importar(home, tarea, &resultado.junits, &paquete.commit)?;
         Ok((resultado, resumen))
     });
     // Con la corrida terminada, el paquete (con los tests ocultos) y el junit bajado se borran (A1, B18).
@@ -389,7 +390,7 @@ fn oraculo_pendientes(
     json: bool,
     nombre: Option<&str>,
     repo: Option<&Path>,
-    importar: Option<&Path>,
+    junits: &[PathBuf],
     colab: bool,
     liberar: bool,
     vigilar: bool,
@@ -409,9 +410,12 @@ fn oraculo_pendientes(
     oracle::pendientes::nombre_de_tarea_valido(nombre).map_err(Error::Uso)?;
     let tarea = Tarea::cargar(nombre)?;
     oracle::pendientes::nombre_de_tarea_valido(&tarea.nombre).map_err(Error::Uso)?;
-    if let Some(junit) = importar {
+    // Un solo `pendientes` por tarea a la vez: el turno se toma antes de tocar el paquete o Colab, y
+    // se suelta al salir de esta función, también ante error. Si otra corrida lo tiene, sale con 3.
+    let _turno = oracle::pendientes::tomar_turno(&home, &tarea.nombre)?;
+    if !junits.is_empty() {
         let commit = oracle::commit_de(repo);
-        let resumen = oracle::pendientes::importar(&home, &tarea, junit, &commit)?;
+        let resumen = oracle::pendientes::importar(&home, &tarea, junits, &commit)?;
         if json {
             println!(
                 "{}",
@@ -595,7 +599,7 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
             cli.json,
             tarea.as_deref(),
             repo.as_deref(),
-            importar.as_deref(),
+            importar,
             *colab,
             *liberar,
             *vigilar,

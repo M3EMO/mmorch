@@ -1639,6 +1639,7 @@ modulos = ["config"]
             test: "tests/x.py::lavapipe".into(),
             motivo: "lavapipe no emula la GPU".into(),
             colab: None,
+            tasa: None,
         }];
         v.sin_calibrar = vec![Dimension::Eficiencia];
         v.puntajes[5].sin_veredicto = Some("juez no corrido".into());

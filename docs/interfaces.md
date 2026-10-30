@@ -55,7 +55,7 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t route --rol <rol> --tipo <tipo> [--checkeable] [--tokens N]` | Elige la vía y el modelo para un rol y un tipo. | `Eleccion` | construido |
 | `r00t llama --rol <rol> --tipo <tipo> --prompt-file <f> --corrida <id> [--max-tokens N]` | Llama al modelo elegido. Registra el evento. Rechaza la llamada si no hay precio o tope. | `Respuesta` | construido |
 | `r00t oraculo evaluar --tarea <t> --repo <dir>` | Corre las suites de la tarea sobre el repo y da el veredicto, con su informe. | `Veredicto` | construido (Tarea 13b). |
-| `r00t oraculo pendientes --tarea <t> --repo <dir> [--importar <junit> \| --colab]` | Arma el paquete de tests pendientes por entorno para Colab. Con `--importar`, guarda el junit de vuelta. Con `--colab`, corre el paquete en Colab y lo importa. | `{dir, tests}`, o `{importados, ignorados}` | construido (Tarea 7f). `--colab`: Tarea 7j |
+| `r00t oraculo pendientes --tarea <t> --repo <dir> [--importar <junit>... \| --colab]` | Arma el paquete de tests pendientes por entorno para Colab. Con `--importar`, guarda los junit de vuelta, uno por repetición (`pendientes-N.xml`). Con `--colab`, corre el paquete en Colab y lo importa. Solo una corrida por tarea a la vez: la segunda sale con `3` y nombra a la primera (pid y hora). | `{dir, tests}`, o `{importados, ignorados}` | construido (Tarea 7f). `--colab`: Tarea 7j |
 | `r00t oraculo pendientes --liberar` | Libera el runtime de Colab anotado en `$ROOT_HOME/colab/activo.json`, si hay uno, y sale. | sin salida JSON | construido (Tarea 7j) |
 | `r00t oraculo pendientes --vigilar` | Red de seguridad: lee `$ROOT_HOME/colab/activo.json`. Libera el runtime si pasó su tope o si su junit cumple lo pedido. Un runtime vigente no se toca. Sin `--tarea` ni `--repo`. | `{vigilancia, causa}`, con `vigilancia` `sin_runtime`, `vigente` o `liberado` | construido (Tarea 7l) |
 | `r00t oraculo calibrar --tarea <t> --dimension <d> [--n 20] [--semilla 42] [--repo <dir>]` | Calibra una dimensión con defectos inyectados: mitad con defecto, mitad limpia. Mide la sensibilidad, la especificidad y la exactitud balanceada, por dimensión y por ítem, contra una línea base. Agrega una fila a `$ROOT_HOME/calibracion.json` e imprime la fila. Sin `--repo`, usa `[calibracion] repo` de `tarea.toml`; sin ninguno, sale con `2`. | `Fila` | construido (Tarea 12). |
@@ -83,7 +83,7 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 
 **Colab (`oraculo pendientes --colab`).** Root pide un runtime T4 de Colab, corre el paquete, importa el junit y libera el runtime. Antes de pedirlo, Root escribe su id en `$ROOT_HOME/colab/activo.json`. Lo borra al liberar el runtime. Si el proceso muere con `SIGKILL`, el archivo queda. La próxima corrida de `--colab` libera ese runtime primero. `--liberar` hace solo esa limpieza. `SIGINT` y `SIGTERM` también liberan el runtime y registran un `Gate`. El login de Colab lo hace la persona antes de correr el comando. Root no lee el token de la CLI.
 
-**Corte temprano.** `correr.sh` corre en segundo plano en el runtime y Root lo sondea cada 60 segundos. Root libera el runtime en cuanto se cumple lo que pedía la corrida: el junit trae cada test pendiente, con tantos resultados como `repeticiones` de `tarea.toml`. Si `correr.sh` termina antes, Root libera el runtime con lo que haya. El `Gate` de liberación lleva la clave `causa`: `requisito cumplido`, `correr.sh terminó`, `tope de duración`, `señal SIGINT`/`señal SIGTERM`, `gpu-no-t4` (la GPU no es una T4), `runtime-no-asignado` (`colab new` no dio el runtime) o `error-en-corrida` (un paso falló a mitad de la corrida). `--vigilar` es la red de seguridad: libera el runtime anotado si pasó su tope o si su junit cumple lo pedido, aunque la corrida ya no esté viva.
+**Corte temprano.** `correr.sh` corre en segundo plano en el runtime y Root lo sondea cada 60 segundos. Root libera el runtime en cuanto se cumple lo que pedía la corrida: los junit por repetición traen cada test pendiente, con tantos resultados como `repeticiones` de `tarea.toml`, sumados entre todos. Un test que pasa en una repetición y falla en otra queda `inestable`, con su tasa. Si `correr.sh` termina antes, Root libera el runtime con lo que haya. El `Gate` de liberación lleva la clave `causa`: `requisito cumplido`, `correr.sh terminó`, `tope de duración`, `señal SIGINT`/`señal SIGTERM`, `gpu-no-t4` (la GPU no es una T4), `runtime-no-asignado` (`colab new` no dio el runtime) o `error-en-corrida` (un paso falló a mitad de la corrida). `--vigilar` es la red de seguridad: libera el runtime anotado si pasó su tope o si su junit cumple lo pedido, aunque la corrida ya no esté viva.
 
 **Tope de duración.** Cada corrida de `--colab` tiene un tope, `[colab].minutos_max` en `root.toml`, con 120 minutos (2 horas) por defecto, con corte temprano. Al llegar al tope, Root libera el runtime, registra un `Gate` con la causa `tope de duración` y sale con código `3`. El `motivo` del `Gate` lleva el tope real, por ejemplo `tope de 120 minutos`. Los tests sin resultado quedan `Pendiente`.
 
@@ -1978,7 +1978,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "type": "object",
       "properties": {
         "colab": {
-          "description": "Resultado importado de Colab: \"pasa\", \"falla\" u \"omite\". Ausente si no se importó.",
+          "description": "Resultado importado de Colab: \"pasa\", \"falla\", \"omite\" o \"inestable\". Ausente si no se importó.",
           "type": [
             "string",
             "null"
@@ -1987,6 +1987,18 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         },
         "motivo": {
           "type": "string"
+        },
+        "tasa": {
+          "description": "Tasa de aprobación si Colab dejó el test inestable entre repeticiones. Ausente en un test estable.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TasaTest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "test": {
           "description": "Id del test con forma `archivo::nombre`.",
@@ -2657,7 +2669,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "type": "object",
       "properties": {
         "colab": {
-          "description": "Resultado importado de Colab: \"pasa\", \"falla\" u \"omite\". Ausente si no se importó.",
+          "description": "Resultado importado de Colab: \"pasa\", \"falla\", \"omite\" o \"inestable\". Ausente si no se importó.",
           "type": [
             "string",
             "null"
@@ -2666,6 +2678,18 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         },
         "motivo": {
           "type": "string"
+        },
+        "tasa": {
+          "description": "Tasa de aprobación si Colab dejó el test inestable entre repeticiones. Ausente en un test estable.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TasaTest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "test": {
           "description": "Id del test con forma `archivo::nombre`.",
@@ -2837,7 +2861,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
   "type": "object",
   "properties": {
     "colab": {
-      "description": "Resultado importado de Colab: \"pasa\", \"falla\" u \"omite\". Ausente si no se importó.",
+      "description": "Resultado importado de Colab: \"pasa\", \"falla\", \"omite\" o \"inestable\". Ausente si no se importó.",
       "type": [
         "string",
         "null"
@@ -2847,6 +2871,18 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "motivo": {
       "type": "string"
     },
+    "tasa": {
+      "description": "Tasa de aprobación si Colab dejó el test inestable entre repeticiones. Ausente en un test estable.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TasaTest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
     "test": {
       "description": "Id del test con forma `archivo::nombre`.",
       "type": "string"
@@ -2855,7 +2891,34 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
   "required": [
     "test",
     "motivo"
-  ]
+  ],
+  "$defs": {
+    "TasaTest": {
+      "description": "Tasa de aprobación de un test inestable, con la cota inferior de Wilson al 90%.",
+      "type": "object",
+      "properties": {
+        "pasa": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "wilson_inf": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "pasa",
+        "total",
+        "wilson_inf"
+      ]
+    }
+  }
 }
 ```
 
@@ -4662,7 +4725,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "type": "object",
       "properties": {
         "colab": {
-          "description": "Resultado importado de Colab: \"pasa\", \"falla\" u \"omite\". Ausente si no se importó.",
+          "description": "Resultado importado de Colab: \"pasa\", \"falla\", \"omite\" o \"inestable\". Ausente si no se importó.",
           "type": [
             "string",
             "null"
@@ -4671,6 +4734,18 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         },
         "motivo": {
           "type": "string"
+        },
+        "tasa": {
+          "description": "Tasa de aprobación si Colab dejó el test inestable entre repeticiones. Ausente en un test estable.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TasaTest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "test": {
           "description": "Id del test con forma `archivo::nombre`.",

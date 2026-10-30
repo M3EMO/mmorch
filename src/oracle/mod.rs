@@ -109,6 +109,9 @@ pub enum ErrorOraculo {
     /// Uso de `oraculo calibrar`: dimensión sin defectos, `n` cero o sin repo bueno. Es error de uso: sale con 2.
     #[error("{0}")]
     Uso(String),
+    /// Otra corrida de `oraculo pendientes` tiene la tarea. No espera: sale con código 3 y nombra al dueño.
+    #[error("{0}")]
+    Ocupado(String),
 }
 
 impl ErrorOraculo {
@@ -1170,6 +1173,38 @@ pub struct Clasificacion {
     conteo: Conteo,
 }
 
+/// Resultado de un test a través de sus muestras: estable, con su resultado único, o inestable, con
+/// su tasa de aprobación. Lo usan la evaluación en la laptop y la importación de Colab (desempate 28).
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum Muestreo {
+    Estable(ResultadoTest),
+    Inestable(TasaTest),
+}
+
+/// Clasifica las muestras de un test. Cada muestra es el resultado en una corrida, o `None` si el
+/// test no aparece en esa corrida. Es inestable si falta en alguna muestra o si los resultados se
+/// mezclan (Pasa con Falla, o Omite con otro). La tasa cuenta solo las muestras presentes.
+/// Sin ninguna muestra presente no hay nada que clasificar y da `None`.
+pub(super) fn muestreo_de(muestras: &[Option<ResultadoTest>]) -> Option<Muestreo> {
+    let presentes: Vec<ResultadoTest> = muestras.iter().flatten().copied().collect();
+    let primera = *presentes.first()?;
+    let ausente = muestras.iter().any(Option::is_none);
+    let mezcla = presentes.iter().any(|m| *m != primera);
+    if !ausente && !mezcla {
+        return Some(Muestreo::Estable(primera));
+    }
+    let pasa = presentes
+        .iter()
+        .filter(|m| **m == ResultadoTest::Pasa)
+        .count() as u32;
+    let total = presentes.len() as u32;
+    Some(Muestreo::Inestable(TasaTest {
+        pasa,
+        total,
+        wilson_inf: wilson_inferior(pasa, total),
+    }))
+}
+
 /// Clasifica cada test con sus muestras. Cada corrida completa aporta una muestra por test presente.
 /// Un test ausente en una corrida completa es inestable. Las corridas extra solo suman muestras.
 /// Un test es inestable si tiene resultados mezclados (Pasa con Falla, o Omite con otro).
@@ -1188,39 +1223,27 @@ fn clasificar(
         if excluidos.contains(id) {
             continue;
         }
-        let mut muestras: Vec<ResultadoTest> = Vec::new();
-        let mut ausente = false;
-        for j in completas {
-            match j.tests.get(id) {
-                Some(r) => muestras.push(*r),
-                None => ausente = true,
-            }
-        }
-        muestras.extend(extras.iter().filter_map(|j| j.tests.get(id).copied()));
-        let mezcla = muestras
-            .first()
-            .is_some_and(|primera| muestras.iter().any(|m| m != primera));
-        if ausente || mezcla {
-            let pasa = muestras
+        // Las corridas extra solo suman muestras: una que no trae el test no cuenta como ausencia.
+        let mut muestras: Vec<Option<ResultadoTest>> =
+            completas.iter().map(|j| j.tests.get(id).copied()).collect();
+        muestras.extend(
+            extras
                 .iter()
-                .filter(|m| **m == ResultadoTest::Pasa)
-                .count() as u32;
-            let total = muestras.len() as u32;
-            c.inestables.push(id.to_string());
-            c.tasas.insert(
-                id.to_string(),
-                TasaTest {
-                    pasa,
-                    total,
-                    wilson_inf: wilson_inferior(pasa, total),
-                },
-            );
-        } else if let Some(r) = muestras.first().copied() {
-            if r == ResultadoTest::Omite {
+                .filter_map(|j| j.tests.get(id).copied())
+                .map(Some),
+        );
+        match muestreo_de(&muestras) {
+            Some(Muestreo::Inestable(tasa)) => {
+                c.inestables.push(id.to_string());
+                c.tasas.insert(id.to_string(), tasa);
+            }
+            Some(Muestreo::Estable(ResultadoTest::Omite)) => {
                 c.omitidos.insert(id.to_string());
-            } else {
+            }
+            Some(Muestreo::Estable(r)) => {
                 c.estables.insert(id.to_string(), r);
             }
+            None => {}
         }
     }
     let pasa = c
@@ -1678,6 +1701,40 @@ mod tests {
             .as_ref()
             .expect("con suites completas hay informe");
         assert_eq!(v.estado, informe::estado_de(Some(informe)));
+    }
+
+    #[test]
+    fn muestreo_todas_iguales_es_estable() {
+        let m = muestreo_de(&[Some(ResultadoTest::Pasa), Some(ResultadoTest::Pasa)]);
+        assert_eq!(m, Some(Muestreo::Estable(ResultadoTest::Pasa)));
+    }
+
+    #[test]
+    fn muestreo_pasa_y_falla_mezclados_es_inestable_con_tasa() {
+        let m = muestreo_de(&[Some(ResultadoTest::Pasa), Some(ResultadoTest::Falla)]);
+        let Some(Muestreo::Inestable(tasa)) = m else {
+            panic!("debía ser inestable: {m:?}");
+        };
+        assert_eq!((tasa.pasa, tasa.total), (1, 2));
+        assert!((tasa.wilson_inf - wilson_inferior(1, 2)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn muestreo_omite_mezclado_con_pasa_es_inestable() {
+        let m = muestreo_de(&[Some(ResultadoTest::Omite), Some(ResultadoTest::Pasa)]);
+        assert!(matches!(m, Some(Muestreo::Inestable(t)) if (t.pasa, t.total) == (1, 2)));
+    }
+
+    #[test]
+    fn muestreo_ausente_en_una_muestra_es_inestable() {
+        let m = muestreo_de(&[Some(ResultadoTest::Pasa), None]);
+        assert!(matches!(m, Some(Muestreo::Inestable(t)) if (t.pasa, t.total) == (1, 1)));
+    }
+
+    #[test]
+    fn muestreo_sin_ninguna_muestra_no_da_nada() {
+        assert_eq!(muestreo_de(&[None, None]), None);
+        assert_eq!(muestreo_de(&[]), None);
     }
 
     fn junit_de(filas: &[(&str, ResultadoTest)]) -> Junit {
@@ -2230,6 +2287,7 @@ mod tests {
                 test: "test_b::x".into(),
                 motivo: "gpu".into(),
                 colab: None,
+                tasa: None,
             }],
             avisos: vec!["aviso sin ids".into()],
             ..Veredicto::default()
@@ -2302,6 +2360,7 @@ mod tests {
             junit_sha256: "x".into(),
             ts: 1.0,
             commit: commit.into(),
+            tasa: None,
         };
         let colab = BTreeMap::from([
             ("test_a::uno".to_string(), entrada("abc")),

@@ -204,6 +204,7 @@ fn pendiente_de_build(motivo: String) -> Pendiente {
         test: TEST_BUILD.into(),
         motivo,
         colab: None,
+        tasa: None,
     }
 }
 
@@ -920,6 +921,7 @@ pub(crate) fn entregar_con(
                     test: format!("tarea.toml::escenario-{id}"),
                     motivo,
                     colab: None,
+                    tasa: None,
                 }),
             }
             resultado

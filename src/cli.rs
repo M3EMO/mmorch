@@ -186,9 +186,9 @@ pub enum OraculoAccion {
         /// Repo. Obligatorio salvo con `--liberar` o `--vigilar`.
         #[arg(long, required_unless_present_any = ["liberar", "vigilar"])]
         repo: Option<PathBuf>,
-        /// Junit que dejó `correr.sh`. Sin este flag se arma el paquete.
-        #[arg(long, conflicts_with_all = ["colab", "vigilar"])]
-        importar: Option<PathBuf>,
+        /// Junit que dejó `correr.sh`: uno por repetición (`pendientes-N.xml`). Sin este flag se arma el paquete.
+        #[arg(long, num_args = 1.., conflicts_with_all = ["colab", "vigilar"])]
+        importar: Vec<PathBuf>,
         /// Corre el paquete en un runtime T4 de Colab, importa el junit y libera el runtime.
         #[arg(long, conflicts_with_all = ["importar", "vigilar"])]
         colab: bool,

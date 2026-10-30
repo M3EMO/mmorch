@@ -912,6 +912,118 @@ fn pendiente_importar_guarda_colab_y_evento_gate() {
 }
 
 #[test]
+fn pendiente_importar_dos_junit_por_repeticion_deja_inestable() {
+    let home = tempfile::tempdir().expect("home");
+    tarea_con_pendiente(home.path(), ENTORNO_O2);
+    let repo = repo_con_contenido();
+    let ruta = repo.path().to_str().expect("ruta UTF-8").to_string();
+    let uno = home.path().join("pendientes-1.xml");
+    let dos = home.path().join("pendientes-2.xml");
+    fs::write(
+        &uno,
+        r#"<testsuite><testcase classname="tests.test_o" name="o2"/></testsuite>"#,
+    )
+    .expect("escribe");
+    fs::write(
+        &dos,
+        r#"<testsuite><testcase classname="tests.test_o" name="o2"><failure message="x"/></testcase></testsuite>"#,
+    )
+    .expect("escribe");
+    let ruta_uno = uno.to_str().expect("ruta UTF-8").to_string();
+    let ruta_dos = dos.to_str().expect("ruta UTF-8").to_string();
+
+    let salida = root_cli(
+        home.path(),
+        &[
+            "oraculo",
+            "pendientes",
+            "--tarea",
+            "tarea-prueba",
+            "--repo",
+            &ruta,
+            "--importar",
+            &ruta_uno,
+            &ruta_dos,
+        ],
+    );
+    assert_eq!(
+        salida.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let colab: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(home.path().join("evidencia/tarea-prueba/colab.json"))
+            .expect("colab.json"),
+    )
+    .expect("colab.json es JSON");
+    assert_eq!(colab["test_o::o2"]["resultado"], "inestable");
+    assert_eq!(colab["test_o::o2"]["tasa"]["pasa"], 1);
+    assert_eq!(colab["test_o::o2"]["tasa"]["total"], 2);
+}
+
+#[test]
+fn pendiente_con_turno_ocupado_sale_3_y_nombra_al_dueno() {
+    let home = tempfile::tempdir().expect("home");
+    let dir = tarea_con_pendiente(home.path(), ENTORNO_O2);
+    fs::write(dir.join("oculto/test_o.py"), "def test_o2(): pass\n").expect("escribe");
+    let repo = repo_con_contenido();
+    let ruta = repo.path().to_str().expect("ruta UTF-8").to_string();
+    // Otra corrida de la misma tarea tiene el turno: esta sale antes de tocar el paquete.
+    let turno =
+        root::oracle::pendientes::tomar_turno(home.path(), "tarea-prueba").expect("toma el turno");
+
+    let salida = root_cli(
+        home.path(),
+        &[
+            "oraculo",
+            "pendientes",
+            "--tarea",
+            "tarea-prueba",
+            "--repo",
+            &ruta,
+        ],
+    );
+    assert_eq!(salida.status.code(), Some(3));
+    let error = String::from_utf8_lossy(&salida.stderr);
+    assert!(
+        error.contains(&format!("pid {}", std::process::id())),
+        "nombra al dueño: {error}"
+    );
+    assert!(
+        !home
+            .path()
+            .join("oraculos/tarea-prueba/pendientes")
+            .exists(),
+        "no arma el paquete mientras otra corrida lo tiene"
+    );
+
+    drop(turno);
+    let salida = root_cli(
+        home.path(),
+        &[
+            "oraculo",
+            "pendientes",
+            "--tarea",
+            "tarea-prueba",
+            "--repo",
+            &ruta,
+        ],
+    );
+    assert_eq!(
+        salida.status.code(),
+        Some(0),
+        "sin turno ocupado, la corrida sigue: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    assert!(
+        home.path()
+            .join("oraculos/tarea-prueba/pendientes")
+            .is_dir()
+    );
+}
+
+#[test]
 fn pendiente_importar_junit_malformado_o_faltante_sale_3() {
     let home = tempfile::tempdir().expect("home");
     tarea_con_pendiente(home.path(), ENTORNO_O2);
