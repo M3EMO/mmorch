@@ -1,0 +1,28 @@
+# Imagen del builder de `r00t corre` (Tarea 26, decisión 43): Rust, Python y `claude` en una versión fija.
+# Construir con scripts/construir-imagen-builder.sh (el contexto trae solo este archivo).
+# La imagen NO copia credenciales ni archivos de $HOME del host. La credencial entra al correr, en solo lectura.
+FROM docker.io/library/rust:1
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      python3 \
+      ca-certificates \
+      git \
+      nodejs \
+      npm \
+ && rm -rf /var/lib/apt/lists/*
+
+# La versión exacta de Claude Code la fija la laptop. Sin ella, el build falla.
+ARG CLAUDE_CODE_VERSION
+RUN test -n "$CLAUDE_CODE_VERSION"
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+
+# Usuario no root. Con --userns=keep-id, podman corre el contenedor con el uid del host.
+RUN useradd --create-home --home-dir /home/builder --shell /bin/bash builder \
+ && mkdir -p /trabajo \
+ && chown builder /trabajo
+
+ENV HOME=/home/builder
+
+WORKDIR /trabajo
+USER builder

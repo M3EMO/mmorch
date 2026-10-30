@@ -1,5 +1,5 @@
-//! `r00t corre` de punta a punta, con el binario. Ningún test llega a lanzar `claude`: el ejecutor de
-//! contenedor todavía no existe (Tarea 26, capa 1).
+//! `r00t corre` de punta a punta, con el binario. Ningún test llega a lanzar `claude` ni podman: el HOME de
+//! prueba no tiene credencial de Claude, así que el ejecutor de contenedor falla antes.
 
 use std::fs;
 use std::path::PathBuf;
@@ -166,14 +166,17 @@ fn corre_sin_home_del_usuario_sale_con_2() {
 }
 
 #[test]
-fn corre_con_goal_valido_sin_contenedor_sale_con_3_y_no_escribe_fila() {
-    // El ejecutor de contenedor no está armado: la corrida llega al lanzamiento, no lanza `claude`
-    // y sale con 3 sin fila.
+fn corre_con_goal_valido_sin_credencial_sale_con_3_y_no_escribe_fila() {
+    // El HOME de prueba no tiene credencial de Claude: el ejecutor falla antes de buscar o correr
+    // podman. La corrida llega al lanzamiento, no lanza nada y sale con 3 sin fila.
     let e = escenario(true);
     let salida = corre(&e, "ecc-test");
     assert_eq!(codigo(&salida), 3);
     let stderr = String::from_utf8_lossy(&salida.stderr);
-    assert!(stderr.contains("Tarea 26"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("no existe la credencial de Claude"),
+        "stderr: {stderr}"
+    );
     assert!(
         !e.home.join("runs.jsonl").exists(),
         "sin lanzamiento no hay fila"

@@ -878,11 +878,18 @@ fn corre_accion(json: bool, tarea: &str, config: &str) -> Result<(), Error> {
     let entorno: Vec<(String, String)> = std::env::vars_os()
         .filter_map(|(clave, valor)| Some((clave.into_string().ok()?, valor.into_string().ok()?)))
         .collect();
+    let ejecutor = corre::EjecutorContenedorBuilder {
+        imagen: corre::contenedor::IMAGEN_BUILDER.to_string(),
+        credencial: corre::contenedor::credencial_de(&home_usuario),
+        home: home.clone(),
+        home_usuario: home_usuario.clone(),
+        timeout: corre::contenedor::TIMEOUT_BUILDER,
+    };
     let deps = corre::DepsCorre {
         home: &home,
         home_usuario: &home_usuario,
         repo_root: &repo_root,
-        ejecutor: &corre::EjecutorContenedorBuilder,
+        ejecutor: &ejecutor,
         evaluar: &oracle::evaluar,
         entorno: &entorno,
     };

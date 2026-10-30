@@ -5,6 +5,7 @@
 
 pub mod args;
 pub mod config;
+pub mod contenedor;
 pub mod corrida;
 pub mod ejecutor;
 
