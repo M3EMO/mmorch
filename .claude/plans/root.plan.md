@@ -2204,3 +2204,79 @@ El crédito de nube vence el 2026-11-05.
 - La decisión 48 sigue valiendo para `Listo`: Root no dice "listo" sin medir lo que puede bloquear. Su texto "Antes de las reglas de `Bloqueado`, `NoListo` y `Listo`" queda reemplazado: la revisión de dimensiones sin veredicto corre después de `Bloqueado` y `NoListo`.
 - El comentario de `decidir` ("`SinDecision` gana sobre todo") cambia con la Tarea 32.
 - La Tarea 32 entra en la nube 4 sin condición. El brief de la nube 4 ya lo dice.
+
+## Mezcla de la nube 4 (2026-10-30)
+
+**Mezcla.** La build de la nube 4 hizo las Tareas 31 y 32 en la rama `claude/eloquent-heisenberg-5p7zff` (f2d6a39). En la laptop, `tools/test-seguro.sh` con podman sobre f2d6a39 dio 1813 verdes, 0 rojos y 1 ignorado, sin tests salteados. No hizo falta un arreglo de la laptop. El usuario escribió: "Mezclá la nube 4 en claude/root-e7813e. Después pasale al planner las 14 preguntas de la nube 4." La mezcla es 55e7cd2. El informe es `docs/builds/2026-10-30-build-nube-4.md`.
+
+**Lo que la suite con podman ya cubrió.** La corrida de la laptop ejecutó los tests de podman que la nube 4 dejó sin correr: `gitleaks` y hadolint dentro de `evaluar`, `podman image exists` antes de la caché de Python, y los dos tests de `tests/oraculo.rs` que cambiaron de expectativa.
+
+**Lo que sigue sin probar** (va a la laptop):
+- El borrado del `.credentials.json` vacío con un montaje real (desempate 33). Va con la imagen del builder.
+- `rastros.json` con el `ROOT_HOME` real (desempate 18). Va con los paquetes a ciegas reales.
+- Tres huecos de tests que la nube 4 nombró: `medir` de Estructura en `shell` con un juez que mide, `medir` con capas declaradas y un repo sin esos módulos, y el error de borrado de la credencial vacía. Van a la Tarea 33.
+
+**Tareas desbloqueadas.** Con las Tareas 31 y 32 dentro, quedan desbloqueados:
+- El `Validate` real de 13 y 13b, después de la Tarea 33 y de que Opus complete las capas de los `tarea.toml`.
+- La calibración real (12), con la misma condición.
+
+## Hallazgo: las capas de las fichas no llegan a `tarea.toml` (2026-10-30)
+
+- Opus revisó la pregunta 6 de la nube 4. Ni memora ni brasa son workspaces de crates. Las cuatro implementaciones (memora-ecc, memora-sdlc, brasa-ecc y brasa-sdlc) tienen sus módulos bajo `src/`, así que Arquitectura mide su grafo de módulos y no cae por ser workspace.
+- Las fichas de memora y brasa declaran `[arquitectura].capas`, por la respuesta P23 b del usuario: "una capa importa solo capas posteriores. Rige también para los repos del banco."
+- Los `tarea.toml` de `$ROOT_HOME/oraculos/{memora,brasa}/` no traen esas capas. Por eso la regla de capas nunca corre en la evaluación.
+- Las capas de cada ficha juntan los nombres de módulo de las dos implementaciones. Por ejemplo, memora tiene la capa `["cmd", "cmd_keys", "cmd_strings"]`: memora-ecc tiene `cmd`, y memora-sdlc tiene los tres.
+- La Tarea 31 da un hallazgo por cada módulo que falta (cita "falta <módulo>"). Con capas que juntan nombres alternativos, cada repo perdería módulos que nunca debió tener, y Arquitectura caería a 0 sin razón.
+- **Resolución técnica:** una capa está presente si existe al menos uno de sus módulos. El hallazgo sale solo cuando falta la capa entera, y su cita nombra la capa con sus módulos (Tarea 33). Después de la Tarea 33, Opus copia las capas de cada ficha a su `tarea.toml` con `r00t ficha tarea`, y revisa el resultado antes de evaluar.
+
+## Desempates técnicos 13 (Opus, 2026-10-30, después de la mezcla de la nube 4)
+
+Ninguna de las 14 preguntas toca una decisión del usuario. Cada desempate tiene su razón en una línea.
+
+1. **Juez sin sondas.** Se confirma: la dimensión conserva el veredicto de sus ítems medidos, como pide la Tarea 31.
+2. **Estructura en `shell`.** Se confirma: sin ningún ítem medido, la dimensión queda sin veredicto, y no bloquea porque no tiene ítems que bloquean.
+3. **Eficiencia fuera de `rust`.** La sonda corre en todo lenguaje cuando la tarea declara `[eficiencia]`: su comando no depende del lenguaje.
+4. **Hadolint ausente.** Se confirma: Entrega no tiene ítems que bloquean, y `confianza` lo lista.
+5. **Lista de ítems sin sonda.** Se confirma: el test contra las rúbricas embebidas detecta un desvío de la lista.
+6. **Capas en un workspace.** Ni memora ni brasa son workspaces. La regla cambia por el hallazgo de arriba: una capa cuenta como presente si existe uno de sus módulos.
+7. **Severidad de una capa faltante.** Se confirma la severidad 3. El detalle nombra la capa por sus módulos, no por un índice desde 0: una persona lee los nombres, no la posición.
+8. **Partes de Funciona y Completitud.** Se confirma: sin escenarios, la Entrega no aporta a esas dos dimensiones.
+9. **Límite del juez de la ficha.** Sí, el mismo límite de 256 KiB: ese juez también pasa por el chequeo de tope, y su estimación necesita una cota real.
+10. **Imagen local y caché.** Se confirma: la evaluación necesita la imagen igual.
+11. **Aviso de dos puertos.** Se confirma: sin clave no hay credencial que intentar.
+12. **Listas de rastros.** Las listas `rastros-<id>.toml` se mueven a `$ROOT_HOME/validez/`: la carpeta de los paquetes es la que ve el usuario en G3.
+13. **Credencial vacía y corte.** El borrado pasa a un guardia que corre en todo camino de salida, también ante un fallo del ejecutor. Es un cambio chico y deja la regla sin excepción.
+14. **Completitud sin veredicto con evidencia.** Se confirma: es la consecuencia directa de la decisión 49.
+
+### Tarea 33: Capas por grupo y ajustes de la nube 4
+- **Action**:
+  - Una capa de `[arquitectura].capas` está presente si existe al menos uno de sus módulos. El hallazgo de severidad 3 sale solo por una capa entera ausente, y su cita nombra la capa: "falta la capa [cmd, cmd_keys, cmd_strings]".
+  - Los desempates 3, 7, 9, 12 y 13.
+  - Los tres huecos de tests de la nube 4: `medir` de Estructura en `shell` con un juez que mide, `medir` con capas declaradas y un repo sin esos módulos, y el error de borrado de la credencial vacía.
+- **Dónde**: todo en la nube.
+- **Validate**: `cargo test`:
+  - Con la capa `["cmd", "cmd_keys", "cmd_strings"]` y un repo con solo `cmd`, no hay hallazgo de capa.
+  - Con la misma capa y un repo sin ninguno de los tres módulos, hay un hallazgo de severidad 3 que nombra los tres.
+  - Una tarea `shell` con `[eficiencia]` corre la sonda de eficiencia.
+  - Un prompt de 300 KiB para el juez de la ficha no se envía.
+  - Después de `--preparar-ciego`, la carpeta de los paquetes no tiene archivos `rastros-*`.
+  - Un fallo del ejecutor después de montar la credencial no deja el `.credentials.json` vacío.
+
+## Orden de trabajo (2026-10-30, después de la nube 4)
+
+**Nube, sesión 5.** Queda una tarea chica que la nube puede hacer antes del 2026-11-05: la Tarea 33. Arranca desde la punta de `claude/root-e7813e` que trae `docs/builds/brief-nube-5.md` (un commit después de 55e7cd2).
+
+**Laptop, en pasos.** Cada paso corre con `tools/test-seguro.sh` para la suite, y con claves solo si el paso lo dice.
+
+1. **Validate real de las Tareas 7 y 9c. Arranca ya.** Necesita podman y el `ROOT_HOME` real. Corre sin claves de API: los jueces y el redactor quedan sin veredicto, y no hay gasto. Mide los niveles por requisito de memora y brasa en 3 evaluaciones seguidas, con 5 repeticiones, y rehace `diferencias.md`.
+2. **Imagen del builder (Tarea 26, capa 1).** Necesita podman y red para construir `root-builder:1`. Confirma la versión de Node.js, `--userns=keep-id` y que `pasta:--no-map-gw` no alcanza un puerto del host. También confirma que el builder no abre `ROOT_HOME`.
+3. **Credencial de Claude en el contenedor.** Necesita la credencial y gasta un poco de cupo: una sesión corta de `claude -p` dentro del contenedor. Prueba la renovación del login con la credencial en solo lectura y el borrado del `.credentials.json` vacío. Si la renovación falla, Opus pregunta al usuario antes de cambiar el montaje (decisión 43).
+4. **Pruebas con claves, sin gasto o con gasto mínimo.** Necesita las claves de API. Prueba que `tools/test-seguro.sh` quita las claves exportadas. Hace el GET a `/models` de DeepSeek y un stream real de cada proveedor, por unos centavos. Registra el evento de 0,50 USD de la decisión 46.
+5. **`NETRC` con un índice privado de prueba (Tarea 30).** Necesita podman y una imagen de índice local, que se baja con red. No gasta API.
+6. **Capas en los `tarea.toml`.** Espera la mezcla de la nube 5. Opus corre `r00t ficha tarea` para memora y brasa, revisa las capas y las copia a cada `tarea.toml`.
+7. **Validate real de las Tareas 13 y 13b.** Espera el paso 6. Necesita podman, el `ROOT_HOME` real y las claves. El gasto es bajo: el redactor y el juez de diseño por evaluación, sobre cuatro repos.
+8. **Calibración real (Tarea 12).** Espera el paso 6. Necesita podman, el `ROOT_HOME` real y las claves. Gasta hasta 25 USD, con `--tope-usd 25` (decisión 48).
+9. **Corrida real de memora (Tarea 16).** Espera los pasos 2 y 3. Necesita podman, la credencial y cupo: una construcción completa con Haiku (decisión 38).
+10. **Colab (Tarea 7h).** Necesita la CLI de Colab con login del usuario y una T4 paga, con tope de 2 horas (decisiones 22, 33 y 40).
+11. **Graft (Tareas 16b y 16).** Opus escribe el oráculo de `graft-lector-planes`, y el usuario aprueba G5. Después corre la corrida real de Graft.
+12. **Paquetes a ciegas (Tarea 12b) y G3.** La laptop arma los paquetes reales, y Opus lee `validez/rastros.json`. Después, el usuario califica a ciegas (G3) y decide si memora sigue (G4).
