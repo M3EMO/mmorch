@@ -1659,7 +1659,8 @@ fn coleccion_de(
     let ruta = c.salida.join(ARCHIVO_COLECCION);
     borrado::borrar_archivo_dentro(c.salida, &ruta)
         .map_err(|e| infra("borrar la lista de tests de la corrida anterior", e))?;
-    let orden = comando_de_coleccion(&cmd_con_cache(c, cmd));
+    // Los flags se quitan antes del preludio de caché: su `pip` no es el `pytest` de la suite.
+    let orden = cmd_con_cache(c, &comando_de_coleccion(cmd));
     let resultado = correr(&ejecucion_de_suite(c, &orden, dir))?;
     if !ruta.is_file() {
         return Err(sin_junit(c, ARCHIVO_COLECCION, &resultado));
@@ -1681,8 +1682,11 @@ fn coleccion_de(
             nodos.push(linea.to_string());
         }
     }
+    // El archivo existe: pytest no dio node ids. El mensaje de `sin_junit` diría que falta.
     if nodos.is_empty() {
-        return Err(sin_junit(c, ARCHIVO_COLECCION, &resultado));
+        return Err(ErrorOraculo::Infra(
+            "la lista de tests recolectados no trae node ids (archivo::test)".into(),
+        ));
     }
     if nodos.iter().any(|n| junit::clave_de_nodo(n).is_none()) {
         return Ok(Err("la lista de tests recolectados no se pudo leer".into()));
@@ -1698,20 +1702,33 @@ fn claves_de_nodos(nodos: &[String]) -> BTreeSet<String> {
         .collect()
 }
 
-/// Comando que lista lo que pytest recolecta: el de la suite sin su junit, con `--collect-only -q`.
-/// La lista va a `/salida/coleccion.txt`.
+/// Comando que lista lo que pytest recolecta: el de la suite sin su junit ni sus flags de
+/// verbosidad, con `--collect-only -q`. La lista va a `/salida/coleccion.txt`.
+/// Pytest da node ids solo con verbosidad exacta (`-q` una vez). Otra cantidad da conteos o árbol.
 fn comando_de_coleccion(cmd: &str) -> String {
-    let mut sin_junit = cmd.to_string();
-    while let Some(inicio) = sin_junit.find("--junitxml=") {
-        let fin = sin_junit[inicio..]
-            .find(char::is_whitespace)
-            .map_or(sin_junit.len(), |n| inicio + n);
-        sin_junit.replace_range(inicio..fin, "");
-    }
+    let tokens: Vec<&str> = cmd
+        .split(' ')
+        .filter(|t| !es_junit_o_verbosidad(t))
+        .collect();
     format!(
         "{} --collect-only -q > /salida/{ARCHIVO_COLECCION}",
-        sin_junit.trim_end()
+        tokens.join(" ").trim_end()
     )
+}
+
+/// Token completo que el comando de colección quita: `--junitxml=`, `--verbosity=`, `--quiet`,
+/// `--verbose` y los flags cortos de verbosidad (`-q`, `-qq`, `-v`, `-qv`...).
+fn es_junit_o_verbosidad(token: &str) -> bool {
+    if token.starts_with("--junitxml=") || token.starts_with("--verbosity=") {
+        return true;
+    }
+    if matches!(token, "--quiet" | "--verbose") {
+        return true;
+    }
+    token.len() > 1
+        && token.starts_with('-')
+        && !token.starts_with("--")
+        && token[1..].chars().all(|c| c == 'q' || c == 'v')
 }
 
 /// El comando con el preludio de la caché cuando la hay (Tarea 6c-B).
@@ -2504,6 +2521,66 @@ mod tests {
         let correr = ejecutor_con(coleccion_de(1), Some(falso), 0);
         let s = correr_suite_de_prueba(base.path(), &tarea, &correr).expect("sin infra");
         assert!(matches!(s, Suite::SinVeredicto(_)), "{s:?}");
+    }
+
+    #[test]
+    fn coleccion_quita_los_flags_de_verbosidad_y_pide_node_ids() {
+        const FIN: &str = " --collect-only -q > /salida/coleccion.txt";
+        let casos = [
+            ("pytest -q /oraculo/oculto", "pytest /oraculo/oculto"),
+            ("pytest -qq /oraculo/oculto", "pytest /oraculo/oculto"),
+            (
+                "pytest -qqq --quiet /oraculo/oculto",
+                "pytest /oraculo/oculto",
+            ),
+            ("pytest -v /oraculo/oculto", "pytest /oraculo/oculto"),
+            (
+                "pytest -vv --verbose /oraculo/oculto",
+                "pytest /oraculo/oculto",
+            ),
+            ("pytest -qv /oraculo/oculto", "pytest /oraculo/oculto"),
+            (
+                "pytest -vq -p no:cacheprovider /oraculo/oculto",
+                "pytest -p no:cacheprovider /oraculo/oculto",
+            ),
+            (
+                "pytest --verbosity=2 /oraculo/oculto",
+                "pytest /oraculo/oculto",
+            ),
+            // Solo tokens completos: valores, nombres con q o v y paths no se tocan.
+            (
+                "pytest -k quiet /oraculo/quiet-v/tests",
+                "pytest -k quiet /oraculo/quiet-v/tests",
+            ),
+            (
+                "pytest --rootdir=/oraculo/q -p no:cacheprovider /oraculo/oculto",
+                "pytest --rootdir=/oraculo/q -p no:cacheprovider /oraculo/oculto",
+            ),
+            (
+                "ORACULO_REPO=/repo CARGO_TARGET_DIR=/salida/target python3 -m pytest -q -p no:cacheprovider --junitxml=/salida/oculto.xml /oraculo/oculto",
+                "ORACULO_REPO=/repo CARGO_TARGET_DIR=/salida/target python3 -m pytest -p no:cacheprovider /oraculo/oculto",
+            ),
+        ];
+        for (cmd, esperado) in casos {
+            assert_eq!(
+                comando_de_coleccion(cmd),
+                format!("{esperado}{FIN}"),
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn coleccion_con_archivo_sin_node_ids_es_infra_que_no_dice_que_falta() {
+        // Así llegan los conteos de `-q -q`: el archivo existe y no trae `archivo::test`.
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_de_prueba(base.path());
+        let correr = ejecutor_con("test_a.py: 2\n", None, 0);
+        let error = correr_suite_de_prueba(base.path(), &tarea, &correr)
+            .expect_err("sin node ids es error de infraestructura");
+        let texto = error.to_string();
+        assert!(texto.contains("no trae node ids"), "{texto}");
+        assert!(!texto.contains("no produjo"), "{texto}");
     }
 
     #[test]

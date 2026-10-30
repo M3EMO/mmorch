@@ -1135,3 +1135,65 @@ fn pendiente_colab_valido_no_da_aviso() {
     assert_eq!(v.pendientes[0].colab.as_deref(), Some("pasa"));
     assert!(v.avisos.is_empty(), "{:?}", v.avisos);
 }
+
+/// Imagen con pytest instalado (la de la Tarea 23). Los tests de colección de pytest la usan.
+const IMAGEN_PYTHON: &str = "localhost/root-oraculo-rust:2";
+
+/// Suite pytest de fixture: dos tests propios, nunca el oráculo real.
+const PYTEST_DOS: &str = "def test_uno():\n    assert True\n\n\ndef test_dos():\n    assert True\n";
+
+/// Tarea Python con una suite `oculto/` de fixture y el `cmd` de oculto que se le pase.
+fn tarea_pytest(cmd_oculto: &str) -> (tempfile::TempDir, Tarea) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let texto = format!(
+        r#"nombre = "tarea-prueba"
+lenguaje = "python"
+imagen = "{IMAGEN_PYTHON}"
+spec = "docs/SPEC.md"
+
+[contrato]
+{}
+[oculto]
+{}
+"#,
+        bloque(&escribe_xml("contrato.xml", JUNIT_DOS_OK), None),
+        bloque(cmd_oculto, None),
+    );
+    fs::write(dir.path().join("tarea.toml"), texto).expect("escribe tarea.toml");
+    fs::create_dir_all(dir.path().join("docs")).expect("dir docs");
+    fs::write(dir.path().join("docs/SPEC.md"), SPEC_CON_FICHA).expect("escribe SPEC.md");
+    fs::create_dir_all(dir.path().join("oculto")).expect("dir oculto");
+    fs::write(dir.path().join("oculto/test_pequena.py"), PYTEST_DOS).expect("escribe suite");
+    let tarea = Tarea::cargar_de(dir.path()).expect("carga la tarea");
+    (dir, tarea)
+}
+
+/// Evalúa la tarea pytest con `cmd_oculto` y exige que no haya error de infraestructura.
+fn evaluar_pytest(cmd_oculto: &str) -> Veredicto {
+    let (_dir, tarea) = tarea_pytest(cmd_oculto);
+    let repo = repo_con_contenido();
+    let home = tempfile::tempdir().expect("home");
+    evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa sin error de infra")
+}
+
+/// Comando de oculto de la Tarea 23 (memora): trae `-q` y `--junitxml`.
+const OCULTO_CON_Q: &str = "ORACULO_REPO=/repo CARGO_TARGET_DIR=/salida/target python3 -m pytest -q -p no:cacheprovider --junitxml=/salida/oculto.xml /oraculo/oculto";
+
+#[test]
+fn coleccion_pytest_con_q_da_node_ids_y_el_junit_cuadra() {
+    root::saltar_sin_podman!();
+    let _g = SERIE.lock().unwrap_or_else(|e| e.into_inner());
+    let v = evaluar_pytest(OCULTO_CON_Q);
+    assert_eq!(v.oculto, Conteo { pasa: 2, total: 2 });
+}
+
+#[test]
+fn coleccion_pytest_con_qq_y_v_da_node_ids_y_el_junit_cuadra() {
+    root::saltar_sin_podman!();
+    let _g = SERIE.lock().unwrap_or_else(|e| e.into_inner());
+    for flags in ["-qq", "-v", "-qv --verbose"] {
+        let cmd = OCULTO_CON_Q.replace(" -q ", &format!(" {flags} "));
+        let v = evaluar_pytest(&cmd);
+        assert_eq!(v.oculto, Conteo { pasa: 2, total: 2 }, "flags {flags}");
+    }
+}

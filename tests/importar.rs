@@ -103,6 +103,7 @@ fn importar_no_escribe_sobre_su_propia_salida() {
 }
 
 #[test]
+#[ignore = "lee el log vivo de metrics del usuario, que crece: 575 era el conteo del 2026-10 temprano y hoy da 592; fijar el conteo o usar un snapshot es decisión del planificador"]
 fn importar_metrics_reales_da_575_eventos_sin_tocar_el_original() {
     let real = Path::new(METRICS_REALES);
     if !real.exists() {
