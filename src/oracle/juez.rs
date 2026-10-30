@@ -32,6 +32,9 @@ const NIVEL_MAX: i64 = 3;
 const SEVERIDAD_MAX: i64 = 3;
 /// Cuántos archivos grandes del mapa van en los extractos.
 const ARCHIVOS_DESTACADOS: usize = 5;
+/// Entrada máxima de un juez, en bytes UTF-8 del sistema y el usuario del prompt. Es un límite: un prompt
+/// más grande no se envía y su juicio da sin veredicto. Así la estimación de costo nunca queda corta.
+pub const MAX_ENTRADA_JUEZ_BYTES: u64 = 256 * 1024;
 
 /// Prompt fijo del juez. Refuta por default y pide solo un objeto JSON.
 const PROMPT_SISTEMA: &str = "Sos un PM técnico que revisa el diseño y la arquitectura de un repo contra su spec.
@@ -298,6 +301,20 @@ fn numerar(contenido: &str, limite: usize) -> String {
     salida
 }
 
+/// Bytes UTF-8 que el modelo recibe de un prompt: el sistema y el usuario.
+pub fn bytes_de_prompt(prompt: &Prompt) -> u64 {
+    let sistema = prompt.sistema.as_deref().map_or(0, str::len);
+    (sistema + prompt.usuario.len()) as u64
+}
+
+/// Motivo del juicio que no envía un prompt de más de `MAX_ENTRADA_JUEZ_BYTES`. `None` si cabe.
+pub fn exceso_de_entrada(prompt: &Prompt) -> Option<String> {
+    let bytes = bytes_de_prompt(prompt);
+    (bytes > MAX_ENTRADA_JUEZ_BYTES).then(|| {
+        format!("el prompt tiene {bytes} bytes y supera el límite de {MAX_ENTRADA_JUEZ_BYTES} bytes del juez")
+    })
+}
+
 /// Pide el juicio al modelo y aplica el parseo estricto y el gate.
 pub fn juzgar(
     e: &EntradaJuez,
@@ -316,6 +333,9 @@ pub fn juzgar(
         .map(|item| (item.id.clone(), item.mide))
         .collect();
     let prompt = construir_prompt(e, limites);
+    if let Some(motivo) = exceso_de_entrada(&prompt) {
+        return sin_veredicto(motivo, &pedidos);
+    }
     let tope = prompt.max_tokens;
     let salida = match modelo.consultar(&prompt) {
         Ok(salida) => salida,
@@ -1217,6 +1237,36 @@ mod tests {
     }
 
     // Prompt.
+
+    #[test]
+    fn juez_prompt_de_mas_de_256_kib_no_se_envia_y_da_sin_veredicto() {
+        let c = caso();
+        let spec = "x".repeat(300 * 1024);
+        let modelo = Falso::con(respuesta(json!([]), json!([])));
+        let entrada = EntradaJuez {
+            spec: &spec,
+            ..c.entrada()
+        };
+        let r = juzgar(&entrada, &modelo, MODELO, &LimitesPrompt::default());
+        assert_sin_veredicto(&r);
+        assert!(modelo.visto.borrow().is_empty(), "el prompt no se envía");
+        let EstadoJuez::SinVeredicto(causa) = &r.estado else {
+            panic!("{:?}", r.estado);
+        };
+        assert!(causa.contains("262144"), "{causa}");
+    }
+
+    #[test]
+    fn juez_prompt_con_spec_chica_se_envia() {
+        let c = caso();
+        let modelo = Falso::con(respuesta(json!([]), json!([])));
+        let _ = juzgar(&c.entrada(), &modelo, MODELO, &LimitesPrompt::default());
+        assert_eq!(
+            modelo.visto.borrow().len(),
+            1,
+            "un prompt chico sí se envía"
+        );
+    }
 
     #[test]
     fn juez_prompt_tiene_reglas_spec_requisitos_mapa_y_anclas() {

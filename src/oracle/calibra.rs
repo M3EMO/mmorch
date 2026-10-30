@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use serde_json::{Map, json};
 
-use super::juez::LimitesPrompt;
+use super::juez::{LimitesPrompt, MAX_ENTRADA_JUEZ_BYTES};
 use super::tarea::Tarea;
 use super::{ErrorOraculo, OpcionesOraculo, Partes, partes_de};
 use crate::borrado;
@@ -410,10 +410,9 @@ pub struct JuecesCaso<'a> {
     pub config: Option<&'a Eleccion>,
 }
 
-/// Entrada estimada de cada llamada de juez, en bytes UTF-8. Es una cota de diseño, no un límite: el
-/// prompt del juez de diseño tiene límites de mapa y extractos (4 bytes por carácter como máximo), pero
-/// la spec y el `Cargo.toml` no tienen. 256 KiB cubre una spec y un `Cargo.toml` de tamaño normal.
-pub const ENTRADA_JUEZ_BYTES: u64 = 256 * 1024;
+/// Entrada de cada llamada de juez, en bytes UTF-8. Desde el desempate 24 es un límite real: un prompt más
+/// grande no se envía. Se conserva el nombre: es el mismo valor que `juez::MAX_ENTRADA_JUEZ_BYTES`.
+pub const ENTRADA_JUEZ_BYTES: u64 = MAX_ENTRADA_JUEZ_BYTES;
 
 /// Gasto de la calibración con tope: el `Gate` que registra su detención.
 const CORRIDA_CALIBRACION: &str = "oraculo-calibracion";
@@ -451,7 +450,7 @@ pub fn peor_caso_de_caso(cfg: &Config, jueces: &JuecesCaso, partes: &Partes) -> 
             let costo = match precio_de_eleccion(cfg, eleccion) {
                 Some(precio) => {
                     f64::from(INTENTOS_MAX)
-                        * costo_peor_caso(precio, ENTRADA_JUEZ_BYTES, max_tokens)
+                        * costo_peor_caso(precio, MAX_ENTRADA_JUEZ_BYTES, max_tokens)
                 }
                 None => f64::INFINITY,
             };
@@ -536,7 +535,7 @@ pub fn calibrar_tarea_con(
     // La base y cada caso corren las mismas partes: solo la dimensión calibrada se mide.
     let rubricas = super::rubrica::cargar_embebidas()
         .map_err(|e| ErrorOraculo::Infra(format!("rúbricas embebidas: {e}")))?;
-    let partes = partes_de(dim, &rubricas);
+    let partes = partes_de(dim, &rubricas, &tarea);
     let opciones = OpcionesOraculo {
         partes: Some(partes),
         ..OpcionesOraculo::default()
@@ -1471,7 +1470,7 @@ mod tests {
         };
         // Sonnet cuesta 2 USD por millón de entrada y 10 por millón de salida. Cada juez: la entrada
         // estimada más todo `max_tokens`, por cada intento posible.
-        let por_intento = (ENTRADA_JUEZ_BYTES as f64 * 2.0
+        let por_intento = (MAX_ENTRADA_JUEZ_BYTES as f64 * 2.0
             + f64::from(crate::proveedores::MAX_TOKENS_JUEZ) * 10.0)
             / 1_000_000.0;
         let esperado = 2.0 * f64::from(crate::proveedores::INTENTOS_MAX) * por_intento;

@@ -224,30 +224,35 @@ const NO_MEDIDA: &str = "no medida en esta calibración";
 
 /// Partes que necesita cada dimensión para dar su puntaje (Tarea 12). Con sus rúbricas, el juez de diseño
 /// entra solo si la dimensión tiene ítems del juez.
-/// - Funciona: descarga, contrato, oculto y Entrega (los escenarios; `partes_de` no ve la tarea).
+/// - Funciona: descarga, contrato, oculto y Entrega, si la tarea tiene escenarios (desempate 22).
 /// - Seguridad: descarga, sondas nativas, gitleaks, cargo audit y las sondas de configs. Sin juez: no tiene
 ///   ítems del juez.
 /// - Eficiencia: descarga y el comando de `[eficiencia]`.
 /// - Estructura, Arquitectura y Diseño con ítems del juez: todas las sondas, las de configs, hadolint y la
 ///   Entrega, porque el juez ve los hallazgos de todas. Corre el juez de diseño. Sin ítems del juez, solo
 ///   sus sondas; Estructura también las de configs.
-/// - Completitud: descarga, oculto y Entrega (los escenarios de los requisitos).
+/// - Completitud: descarga, oculto y Entrega, si la tarea tiene escenarios (los de los requisitos).
 /// - Entrega: descarga, el juez de la configuración (su hallazgo va a Entrega), la Entrega y hadolint.
 /// - Pruebas: descarga y la mutación.
 ///
+/// La tarea decide solo la Entrega de Funciona y Completitud: sin escenarios, construir la Entrega no aporta
+/// a esas dos dimensiones (desempate 22).
+///
 /// El redactor no mide ninguna dimensión: ninguna parte lo pide.
-pub fn partes_de(dimension: Dimension, rubricas: &[Rubrica]) -> Partes {
+pub fn partes_de(dimension: Dimension, rubricas: &[Rubrica], tarea: &Tarea) -> Partes {
     let mut p = Partes {
         dimension: Some(dimension),
         descarga: true,
         ..Partes::default()
     };
     let juzga = rubrica_del_juez(rubricas, dimension).is_some();
+    let con_escenarios =
+        !tarea.escenario.is_empty() || tarea.requisito.iter().any(|r| !r.escenarios.is_empty());
     match dimension {
         Dimension::Funciona => {
             p.contrato = true;
             p.oculto = true;
-            p.entrega = true;
+            p.entrega = con_escenarios;
         }
         Dimension::Seguridad => {
             p.nativas = true;
@@ -258,7 +263,7 @@ pub fn partes_de(dimension: Dimension, rubricas: &[Rubrica]) -> Partes {
         Dimension::Eficiencia => p.eficiencia = true,
         Dimension::Completitud => {
             p.oculto = true;
-            p.entrega = true;
+            p.entrega = con_escenarios;
         }
         Dimension::Entrega => {
             p.juez_config = true;
@@ -896,6 +901,10 @@ fn medir(
                 } else {
                     puntaje_de(dimension, de_la_dimension, extra, tarea)
                 };
+                // Arquitectura sin capas ni módulos: el ítem de dependencias no tiene qué medir (desempate 6).
+                let sin_modulos = dimension == Dimension::Arquitectura
+                    && de_sondas.sin_veredicto.as_deref()
+                        == Some(perfiles::rust::MOTIVO_SIN_MODULOS);
                 let mut puntaje = match parte_juez(dimension, juez, resultado.as_ref(), &topes) {
                     // El juez mide sus ítems aunque las sondas no midan: la dimensión conserva su veredicto.
                     Some(de_juez) if sin_sondas && de_juez.sin_veredicto.is_none() => de_juez,
@@ -903,6 +912,9 @@ fn medir(
                     None => de_sondas,
                 };
                 puntaje.faltantes = faltantes_de(dimension, &tarea.lenguaje);
+                if sin_modulos {
+                    sumar_faltante_sin_modulos(&mut puntaje.faltantes);
+                }
                 puntaje
             }
         })
@@ -1079,6 +1091,17 @@ fn sin_sonda_todas(dimension: Dimension, rubricas: &[Rubrica], lenguaje: &str) -
         .map(|i| i.id.as_str())
         .collect();
     !de_sonda.is_empty() && de_sonda.iter().all(|id| faltan.contains(id))
+}
+
+/// Suma el ítem de dependencias de Arquitectura con el motivo `sin módulos`, sin repetirlo (desempate 6).
+fn sumar_faltante_sin_modulos(faltantes: &mut Vec<ItemFaltante>) {
+    const ITEM: &str = "arquitectura.dependencias";
+    if !faltantes.iter().any(|f| f.item == ITEM) {
+        faltantes.push(ItemFaltante {
+            item: ITEM.into(),
+            motivo: perfiles::rust::MOTIVO_SIN_MODULOS.into(),
+        });
+    }
 }
 
 /// Ítems de la dimensión que ninguna sonda mide para `lenguaje`, con su motivo (Tarea 31).
@@ -2931,6 +2954,22 @@ mod tests {
     }
 
     #[test]
+    fn oraculo_arquitectura_sin_capas_ni_modulos_suma_el_faltante_sin_modulos() {
+        // Sin capas declaradas y con un solo `src/lib.rs`: la sonda no tiene módulos que medir (desempate 6).
+        let base = tempfile::tempdir().expect("base");
+        let v = veredicto_sano(base.path());
+        let arq = puntaje_de_prueba(&v, Dimension::Arquitectura);
+        assert_eq!(arq.sin_veredicto.as_deref(), Some("sin módulos"), "{arq:?}");
+        let faltan: Vec<_> = arq
+            .faltantes
+            .iter()
+            .filter(|f| f.item == "arquitectura.dependencias")
+            .collect();
+        assert_eq!(faltan.len(), 1, "{:?}", arq.faltantes);
+        assert_eq!(faltan[0].motivo, "sin módulos");
+    }
+
+    #[test]
     fn oraculo_diseno_sin_rubricas_embebidas_queda_sin_veredicto() {
         let base = tempfile::tempdir().expect("base");
         let v = veredicto_sano(base.path());
@@ -4207,7 +4246,11 @@ mod tests {
         evaluar_con_partes(
             base.path(),
             &repo,
-            Some(partes_de(Dimension::Seguridad, &rubricas)),
+            Some(partes_de(
+                Dimension::Seguridad,
+                &rubricas,
+                &tarea_sin_escenarios(),
+            )),
             deps_de(&correr, &herramientas(&[])),
         );
         assert!(!grabador.corrio(DIR_CONTRATO), "{:?}", grabador.destinos);
@@ -4225,7 +4268,11 @@ mod tests {
         evaluar_con_partes(
             base.path(),
             &repo,
-            Some(partes_de(Dimension::Seguridad, &rubricas)),
+            Some(partes_de(
+                Dimension::Seguridad,
+                &rubricas,
+                &tarea_sin_escenarios(),
+            )),
             Dependencias {
                 juez: Some(&juez),
                 modelo_juez: MODELO_JUEZ,
@@ -4252,7 +4299,11 @@ mod tests {
         evaluar_con_partes(
             base.path(),
             &repo,
-            Some(partes_de(Dimension::Seguridad, &rubricas)),
+            Some(partes_de(
+                Dimension::Seguridad,
+                &rubricas,
+                &tarea_sin_escenarios(),
+            )),
             deps_de(&junit, &fabrica),
         );
         let cmds = cmds.borrow();
@@ -4279,7 +4330,11 @@ mod tests {
         evaluar_con_partes(
             base.path(),
             &repo,
-            Some(partes_de(Dimension::Diseno, &rubricas)),
+            Some(partes_de(
+                Dimension::Diseno,
+                &rubricas,
+                &tarea_sin_escenarios(),
+            )),
             Dependencias {
                 juez: Some(&juez),
                 modelo_juez: MODELO_JUEZ,
@@ -4307,7 +4362,11 @@ mod tests {
         evaluar_con_partes(
             base.path(),
             &repo,
-            Some(partes_de(Dimension::Completitud, &rubricas)),
+            Some(partes_de(
+                Dimension::Completitud,
+                &rubricas,
+                &tarea_sin_escenarios(),
+            )),
             deps_de(&correr, &herramientas(&[])),
         );
         assert!(grabador.corrio(DIR_OCULTO), "{:?}", grabador.destinos);
@@ -4364,6 +4423,47 @@ mod tests {
         nombres
     }
 
+    /// Tarea de Rust sin escenarios, para las llamadas a `partes_de` que no miran la tarea.
+    fn tarea_sin_escenarios() -> Tarea {
+        let dir = tempfile::tempdir().expect("base");
+        tarea_rust(dir.path())
+    }
+
+    #[test]
+    fn partes_de_funciona_y_completitud_sin_escenarios_no_piden_la_entrega() {
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let tarea = tarea_sin_escenarios();
+        for dimension in [Dimension::Funciona, Dimension::Completitud] {
+            let p = partes_de(dimension, &rubricas, &tarea);
+            assert!(
+                !p.entrega,
+                "{dimension:?}: sin escenarios no hay Entrega que pedir"
+            );
+        }
+    }
+
+    #[test]
+    fn partes_de_funciona_y_completitud_con_escenarios_piden_la_entrega() {
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let base = tempfile::tempdir().expect("base");
+        let mut con_escenario = tarea_rust(base.path());
+        con_escenario.escenario = vec![Escenario {
+            id: "e2e".into(),
+            cmd: "exit 0".into(),
+        }];
+        let mut con_escenario_de_requisito = tarea_rust(base.path());
+        con_escenario_de_requisito.requisito[0].escenarios = vec!["e2e".into()];
+        for tarea in [&con_escenario, &con_escenario_de_requisito] {
+            for dimension in [Dimension::Funciona, Dimension::Completitud] {
+                let p = partes_de(dimension, &rubricas, tarea);
+                assert!(
+                    p.entrega,
+                    "{dimension:?}: con escenarios se pide la Entrega"
+                );
+            }
+        }
+    }
+
     #[test]
     fn partes_de_fija_la_eleccion_de_cada_dimension() {
         let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
@@ -4382,10 +4482,8 @@ mod tests {
             "hadolint",
         ];
         let esperado: [(Dimension, Vec<&str>); 9] = [
-            (
-                Dimension::Funciona,
-                vec!["contrato", "descarga", "entrega", "oculto"],
-            ),
+            // Sin escenarios en la tarea, Funciona y Completitud no piden la Entrega (desempate 22).
+            (Dimension::Funciona, vec!["contrato", "descarga", "oculto"]),
             (
                 Dimension::Seguridad,
                 vec!["cargo_audit", "configs", "descarga", "gitleaks", "nativas"],
@@ -4394,10 +4492,7 @@ mod tests {
             (Dimension::Estructura, juzgadas.to_vec()),
             (Dimension::Arquitectura, juzgadas.to_vec()),
             (Dimension::Diseno, juzgadas.to_vec()),
-            (
-                Dimension::Completitud,
-                vec!["descarga", "entrega", "oculto"],
-            ),
+            (Dimension::Completitud, vec!["descarga", "oculto"]),
             (
                 Dimension::Entrega,
                 vec!["descarga", "entrega", "hadolint", "juez_config"],
@@ -4407,7 +4502,7 @@ mod tests {
         for (dimension, partes) in esperado {
             let mut partes = partes;
             partes.sort_unstable();
-            let elegidas = partes_de(dimension, &rubricas);
+            let elegidas = partes_de(dimension, &rubricas, &tarea_sin_escenarios());
             assert_eq!(nombres_de(&elegidas), partes, "{dimension:?}");
             assert_eq!(elegidas.dimension, Some(dimension), "{dimension:?}");
         }
@@ -4425,7 +4520,7 @@ mod tests {
         ];
         for (dimension, partes) in esperado {
             assert_eq!(
-                nombres_de(&partes_de(dimension, &[])),
+                nombres_de(&partes_de(dimension, &[], &tarea_sin_escenarios())),
                 partes,
                 "{dimension:?}"
             );
@@ -4436,7 +4531,7 @@ mod tests {
     fn partes_de_toda_parte_con_contenedor_pide_la_descarga() {
         let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
         for dimension in DIMENSIONES {
-            let p = partes_de(dimension, &rubricas);
+            let p = partes_de(dimension, &rubricas, &tarea_sin_escenarios());
             let con_contenedor = p.contrato
                 || p.oculto
                 || p.entrega
@@ -4461,7 +4556,7 @@ mod tests {
             let calibrada = evaluar_doble(
                 base.path(),
                 &repo,
-                Some(partes_de(dimension, &rubricas)),
+                Some(partes_de(dimension, &rubricas, &tarea_sin_escenarios())),
                 &rubricas,
                 &respuesta,
             );
@@ -4505,7 +4600,11 @@ mod tests {
         let v = evaluar_doble(
             base.path(),
             &repo,
-            Some(partes_de(Dimension::Seguridad, &rubricas)),
+            Some(partes_de(
+                Dimension::Seguridad,
+                &rubricas,
+                &tarea_sin_escenarios(),
+            )),
             &rubricas,
             &respuesta_para(&rubricas),
         );
@@ -4542,7 +4641,11 @@ mod tests {
         evaluar_con_partes(
             base.path(),
             &repo,
-            Some(partes_de(Dimension::Seguridad, &[])),
+            Some(partes_de(
+                Dimension::Seguridad,
+                &[],
+                &tarea_sin_escenarios(),
+            )),
             Dependencias {
                 juez_config: Some(&juez),
                 ..deps_de(&junit, &herramientas(&[]))
@@ -4560,7 +4663,7 @@ mod tests {
         evaluar_con_partes(
             base.path(),
             &repo,
-            Some(partes_de(Dimension::Entrega, &[])),
+            Some(partes_de(Dimension::Entrega, &[], &tarea_sin_escenarios())),
             Dependencias {
                 juez_config: Some(&juez),
                 ..deps_de(&junit, &herramientas(&[]))
@@ -4706,15 +4809,24 @@ mod tests {
     }
 
     #[test]
-    fn oraculo_rust_sana_no_tiene_faltantes_en_ningun_puntaje() {
+    fn oraculo_rust_sana_solo_arquitectura_sin_modulos_tiene_faltantes() {
+        // El repo sano tiene solo `src/lib.rs` y la tarea no declara capas: Arquitectura falta por sin módulos.
         let base = tempfile::tempdir().expect("base");
         let v = veredicto_sano(base.path());
         for puntaje in &v.puntajes {
-            assert!(puntaje.faltantes.is_empty(), "{puntaje:?}");
+            if puntaje.dimension == Dimension::Arquitectura {
+                assert_eq!(puntaje.faltantes.len(), 1, "{puntaje:?}");
+                assert_eq!(puntaje.faltantes[0].item, "arquitectura.dependencias");
+                assert_eq!(puntaje.faltantes[0].motivo, "sin módulos");
+            } else {
+                assert!(puntaje.faltantes.is_empty(), "{puntaje:?}");
+            }
         }
+        // La confianza del informe junta los faltantes de los puntajes: sale el mismo ítem.
         let informe = v.informe.as_ref().expect("hay informe");
-        assert!(
-            informe.confianza.faltantes.is_empty(),
+        assert_eq!(
+            informe.confianza.faltantes.len(),
+            1,
             "{:?}",
             informe.confianza.faltantes
         );
@@ -4731,7 +4843,11 @@ mod tests {
         evaluar_con_partes(
             base.path(),
             &repo,
-            Some(partes_de(Dimension::Seguridad, &rubricas)),
+            Some(partes_de(
+                Dimension::Seguridad,
+                &rubricas,
+                &tarea_sin_escenarios(),
+            )),
             deps_de(&junit, &fabrica),
         );
         let cmds = cmds.borrow();

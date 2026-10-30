@@ -117,7 +117,12 @@ pub fn estructura_nativa(
     resultado(Dimension::Estructura, hallazgos, requisitos)
 }
 
-/// Arquitectura: ciclos entre módulos (severidad 3) y usos de una capa anterior (severidad 3).
+/// Motivo de la sonda de arquitectura sin capas declaradas y sin módulos: no hay nada que medir. La
+/// parte de sondas de Arquitectura lo suma a `faltantes` (desempate 6).
+pub const MOTIVO_SIN_MODULOS: &str = "sin módulos";
+
+/// Arquitectura: ciclos entre módulos (severidad 3), usos de una capa anterior (severidad 3) y capas
+/// declaradas que faltan en el repo (severidad 3, con el mapa de módulos como cita).
 pub fn arquitectura_nativa(
     repo: &Path,
     capas: &[Vec<String>],
@@ -128,19 +133,17 @@ pub fn arquitectura_nativa(
         Err(sin) => return sin,
     };
     let modulos: BTreeSet<String> = archivos.iter().filter_map(|a| modulo_de(&a.ruta)).collect();
-    // Un workspace de crates no tiene módulos bajo `src/` de la raíz: sin módulos, no hay análisis.
-    if modulos.is_empty() {
-        return sin_veredicto(
-            Dimension::Arquitectura,
-            "arquitectura: no hay módulos bajo src/ (workspace sin análisis)",
-        );
+    // Sin capas declaradas y sin módulos (un workspace de crates, por ejemplo), no hay nada que medir.
+    if modulos.is_empty() && capas.is_empty() {
+        return sin_veredicto(Dimension::Arquitectura, MOTIVO_SIN_MODULOS);
     }
+    // Una capa prometida que no existe es evidencia. Sin módulos, las demás reglas no encuentran nada.
+    let mut hallazgos = capas_sin_modulo(capas, &modulos, requisitos);
     let aristas = aristas_entre_modulos(&archivos, &modulos);
     let mut adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (origen, destino) in aristas.keys() {
         adj.entry(origen.clone()).or_default().push(destino.clone());
     }
-    let mut hallazgos = Vec::new();
     for modulo in &modulos {
         let Some(camino) = ciclo_de(modulo, &adj) else {
             continue;
@@ -596,10 +599,51 @@ fn capa_de(capas: &[Vec<String>], modulo: &str) -> Option<usize> {
     capas.iter().position(|c| c.iter().any(|m| m == modulo))
 }
 
+/// Un hallazgo por módulo de `capas` que no está en el repo. La cita es el mapa de módulos del repo y el
+/// módulo que falta.
+fn capas_sin_modulo(
+    capas: &[Vec<String>],
+    modulos: &BTreeSet<String>,
+    requisitos: &[Requisito],
+) -> Vec<Hallazgo> {
+    let mapa = if modulos.is_empty() {
+        "ninguno".to_string()
+    } else {
+        modulos
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut hallazgos = Vec::new();
+    for (indice, capa) in capas.iter().enumerate() {
+        for modulo in capa.iter().filter(|m| !modulos.contains(*m)) {
+            // La cita nombra el módulo que falta: así cada capa faltante tiene su propio id.
+            let cita = format!("módulos: {mapa}; falta {modulo}");
+            let detalle = format!(
+                "capa {indice} ({}): falta el módulo {modulo}",
+                capa.join(", ")
+            );
+            hallazgos.push(crear_hallazgo(
+                Dimension::Arquitectura,
+                3,
+                "src",
+                0,
+                &cita,
+                &detalle,
+                SONDA_ARQUITECTURA,
+                requisitos,
+            ));
+        }
+    }
+    hallazgos
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::oracle::perfiles::requisito_de;
+    use crate::tipos::Fuente;
     use std::fs;
     use std::path::Path;
 
@@ -802,13 +846,88 @@ mod tests {
             "crates/a/src/lib.rs",
             "pub fn f() -> u8 { 1 }\n",
         );
-        let r = arquitectura_nativa(dir.path(), &capas(), &[]);
+        let r = arquitectura_nativa(dir.path(), &[], &[]);
         assert_eq!(r.valor, None, "{:?}", r.hallazgos);
         assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
-        assert_eq!(
-            r.motivo.as_deref(),
-            Some("arquitectura: no hay módulos bajo src/ (workspace sin análisis)")
+        assert_eq!(r.motivo.as_deref(), Some("sin módulos"));
+    }
+
+    #[test]
+    fn sonda_arquitectura_capas_declaradas_en_workspace_dan_hallazgo_por_capa() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(
+            dir.path(),
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/a\"]\n",
         );
+        escribir(
+            dir.path(),
+            "crates/a/src/lib.rs",
+            "pub fn f() -> u8 { 1 }\n",
+        );
+        let r = arquitectura_nativa(dir.path(), &capas(), &[]);
+        assert!(r.valor.is_some(), "{:?}", r.motivo);
+        assert_eq!(r.hallazgos.len(), 3, "{:?}", r.hallazgos);
+        assert!(
+            r.hallazgos
+                .iter()
+                .all(|h| h.cita.starts_with("módulos: ninguno; falta "))
+        );
+    }
+
+    #[test]
+    fn sonda_arquitectura_capa_sin_modulo_en_el_repo_da_hallazgo_con_la_cita_del_mapa() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), "src/main.rs", "fn main() {}\n");
+        let capas = [vec!["protocolo".to_string()]];
+        let r = arquitectura_nativa(dir.path(), &capas, &[]);
+        assert!(r.valor.is_some_and(|v| v < 1.0), "{:?}", r.motivo);
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        let h = &r.hallazgos[0];
+        assert_eq!(h.dimension, Dimension::Arquitectura);
+        assert_eq!(h.severidad, 3);
+        assert_eq!(h.archivo, "src");
+        assert_eq!(h.linea, 0);
+        assert!(h.cita.starts_with("módulos: ninguno; falta "), "{}", h.cita);
+        assert!(h.detalle.contains("capa") && h.detalle.contains("protocolo"));
+        assert_eq!(h.fuente, Fuente::Sonda(SONDA_ARQUITECTURA.into()));
+    }
+
+    #[test]
+    fn sonda_arquitectura_capa_sin_su_modulo_nombra_los_modulos_del_mapa() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), "src/comandos/mod.rs", "pub fn c() {}\n");
+        let r = arquitectura_nativa(dir.path(), &capas(), &[]);
+        assert_eq!(r.hallazgos.len(), 2, "{:?}", r.hallazgos);
+        assert!(
+            r.hallazgos
+                .iter()
+                .all(|h| h.cita.starts_with("módulos: comandos"))
+        );
+        assert!(r.hallazgos.iter().any(|h| h.detalle.contains("protocolo")));
+        assert!(r.hallazgos.iter().any(|h| h.detalle.contains("almacen")));
+    }
+
+    #[test]
+    fn sonda_arquitectura_dos_capas_faltantes_sobreviven_a_la_deduplicacion() {
+        // Corrección del organizador: cada capa faltante es un hallazgo propio en el veredicto.
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), "src/comandos/mod.rs", "pub fn c() {}\n");
+        let r = arquitectura_nativa(dir.path(), &capas(), &[]);
+        assert_eq!(r.hallazgos.len(), 2, "{:?}", r.hallazgos);
+        assert_ne!(r.hallazgos[0].id, r.hallazgos[1].id, "{:?}", r.hallazgos);
+        let quedan = crate::oracle::perfiles::deduplicar_hallazgos(r.hallazgos);
+        assert_eq!(quedan.len(), 2, "{quedan:?}");
+    }
+
+    #[test]
+    fn sonda_arquitectura_sin_capas_ni_modulos_da_sin_modulos_y_sin_hallazgos() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), "src/lib.rs", "pub fn f() -> u8 { 1 }\n");
+        let r = arquitectura_nativa(dir.path(), &[], &[]);
+        assert_eq!(r.valor, None, "{:?}", r.hallazgos);
+        assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+        assert_eq!(r.motivo.as_deref(), Some("sin módulos"));
     }
 
     #[test]
@@ -833,6 +952,7 @@ mod tests {
     fn sonda_arquitectura_capa_posterior_que_importa_una_anterior_viola() {
         let dir = tempfile::tempdir().expect("temp dir");
         escribir(dir.path(), "src/protocolo/mod.rs", "pub fn p() {}\n");
+        escribir(dir.path(), "src/comandos/mod.rs", "pub fn c() {}\n");
         escribir(
             dir.path(),
             "src/almacen/mod.rs",
@@ -854,6 +974,7 @@ mod tests {
             "use crate::almacen::x;\n",
         );
         escribir(dir.path(), "src/almacen/mod.rs", "pub fn x() {}\n");
+        escribir(dir.path(), "src/comandos/mod.rs", "pub fn c() {}\n");
         let r = arquitectura_nativa(dir.path(), &capas(), &[]);
         assert!(r.hallazgos.is_empty());
     }

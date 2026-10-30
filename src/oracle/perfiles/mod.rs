@@ -412,4 +412,24 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn sonda_rust_con_capa_prometida_y_solo_main_da_hallazgo_con_cita_del_mapa() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path().join("src")).expect("src");
+        fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").expect("main.rs");
+        let tarea = tarea_en(
+            dir.path(),
+            "rust",
+            "\n[arquitectura]\ncapas = [[\"protocolo\"]]\n",
+        );
+        let r = sondas_nativas(dir.path(), &tarea)
+            .into_iter()
+            .find(|r| r.dimension == Dimension::Arquitectura)
+            .expect("hay sonda de arquitectura");
+        assert!(r.valor.is_some(), "{:?}", r.motivo);
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        assert_eq!(r.hallazgos[0].cita, "módulos: ninguno; falta protocolo");
+        assert!(r.hallazgos[0].detalle.contains("protocolo"));
+    }
 }
