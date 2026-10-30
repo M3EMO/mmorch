@@ -2070,3 +2070,131 @@ El crédito de nube vence el 2026-11-05. La nube va primero.
 El orquestador manda este texto a la sesión de nube 3, que arrancó desde 6ed8be4:
 
 > El usuario respondió P56 con la opción c y P57 con la opción a (decisión 48 del plan). En la Tarea 28, generalizá `SinDecision`: toda dimensión sin veredicto que tenga un ítem `bloquea = true` en su rúbrica da `SinDecision`, con la regla `dimension_que_bloquea_sin_veredicto: <dimensión>`. Una dimensión sin veredicto sin ítems que bloquean deja `Listo`, y `Informe.confianza` la lista. Probalo con Seguridad sin veredicto, que da `SinDecision` y código 3, y con Eficiencia sin veredicto, que deja `Listo`. En la Tarea 12, sumá `--tope-usd <n>` a `r00t oraculo calibrar`. Antes de cada caso, si el peor caso no entra en el resto del tope, la calibración se detiene, registra un `Gate` y marca `incompleta` las filas hechas. Probalo con un proveedor falso. Anotá los dos cambios en el informe de la build.
+
+## Mezcla de la nube 3 (2026-10-30)
+
+**Mezcla.** La build de la nube 3 hizo sus 6 tareas en la rama `claude/festive-hopper-klft3e` (7a612b8). Aplicó la decisión 48 en f59275d y 7f5f196. La laptop corrió `tools/test-seguro.sh` con podman y encontró 13 tests en rojo. El builder los arregló en 3d186f8, en `laptop/nube3-podman`. El usuario escribió: "Mezclá laptop/nube3-podman en claude/root-e7813e. Después pasale al planner las 34 preguntas de la nube 3 y el hallazgo de Seguridad." La mezcla es 0a26553.
+- El arreglo de la laptop:
+  - 10 tests de `tests/oraculo.rs` usan tareas `shell` sin requisitos. Esos tests pasaron de esperar `Rojo` a esperar `SinVeredicto`, por la decisión 48, y 3 cambiaron de nombre.
+  - Un test unitario dejó el home `/nada` y usa una carpeta temporal.
+  - Dos tests de Colab guardan una revisión del juez antes de evaluar.
+  - `tools/test-seguro.sh` quita las variables `GIT_*` heredadas.
+- Con podman, la suite da 1771 verdes, 0 rojos y 1 ignorado. El informe es `docs/builds/2026-10-30-build-nube-3.md`.
+
+**Lo que la nube 3 dejó sin probar** (va a la laptop):
+- 29: la suite con las dos claves exportadas.
+- 28: el digest real, los montajes reales de `escenarios/` y la construcción del Dockerfile dentro de `evaluar`.
+- 30: `NETRC` con un índice privado real.
+- 16: las corridas reales de memora y de `graft-lector-planes`.
+- 26: la imagen `root-builder:1`, `--userns=keep-id`, `pasta:--no-map-gw` contra un puerto del host, la renovación del login con la credencial en solo lectura, y la prueba de que el builder no abre `ROOT_HOME`.
+- 12: la calibración real con `--tope-usd 25`.
+
+**Tareas desbloqueadas.**
+- En la laptop: construir `root-builder:1` y probar la capa 1 de la 26. Después, la corrida real de memora de la Tarea 16.
+- En la laptop: el `Validate` real de 7 y 9c sobre memora y brasa. Esas dos tareas miden requisitos y no dependen de la decisión del informe.
+- En la laptop: el `Validate` real de 13 y 13b, después de la Tarea 31 y de P58.
+- En la laptop: la calibración real (12), después de la Tarea 31. La Tarea 31 conecta las sondas de configs, y la calibración inyecta defectos de Dockerfile y un secreto en YAML (Tarea 9b).
+
+## Hallazgo de Seguridad (2026-10-30)
+
+**Qué pasa.** Solo existe el perfil `rust` (`perfiles::sondas_nativas` devuelve vacío para otro lenguaje). Una tarea que no es `rust` no tiene ninguna sonda de Seguridad. Seguridad queda sin veredicto, y su ítem `seguridad.secretos` tiene `bloquea = true`. La decisión 48 da entonces `SinDecision`. Hoy `decidir` aplica `SinDecision` antes que `Bloqueado` y `NoListo`: así lo escribió Opus en la decisión 48. Resultado:
+- Una tarea que no es `rust` nunca da `Listo`, `NoListo` ni `Bloqueado`.
+- Un test oculto que falla en esa tarea da `SinVeredicto`, aunque la falla sea una evidencia directa.
+- Después del arreglo de la laptop, ningún test prueba que una falla dé `Rojo` fuera de `rust`.
+- La sonda `sondas_configs` (Tarea 9b) no corre en `evaluar`, así que un secreto en un YAML no se detecta en producción (pregunta 1 de la nube 3).
+- En `rust`, la imagen `root-oraculo-rust:2` sí trae `gitleaks` 8.30.1 y `cargo-audit` 0.22.2 (verificado por Opus el 2026-10-30). La pregunta 5 de la nube 3 aplica a tareas con otra imagen, como los fixtures `alpine`.
+
+**¿Contradice lo que pide el usuario?** Sí, en parte. El usuario pidió "un evaluador con criterio, un project manager con datos para decidir". Un PM que ve un test oculto en rojo dice "no está listo", aunque no haya medido la seguridad. La decisión 48 buscaba otra cosa: no decir "listo" sin medir lo que puede bloquear. Su texto en el plan, escrito por Opus, puso `SinDecision` por encima de toda otra regla. Eso calla también la evidencia negativa, y el usuario no lo pidió: su pregunta P56 era sobre `Listo`.
+
+**Cómo se resuelve.** Hay dos partes:
+1. **Medir Seguridad en todo lenguaje** (técnico, Tarea 31). `gitleaks` no depende del lenguaje, y las sondas de configs (TOML, YAML y Dockerfile) tampoco. Las dos corren en `evaluar` para toda tarea. Así `seguridad.secretos`, el único ítem que bloquea, se mide siempre que la imagen trae `gitleaks`. Los ítems sin herramienta para ese lenguaje, como las dependencias con CVE en un proyecto `shell`, van a `faltantes` y a `Informe.confianza`.
+2. **Orden de las reglas** (decisión del usuario, P58). La propuesta es aplicar primero `Bloqueado` y `NoListo`, que se apoyan en evidencia. `SinDecision` solo reemplaza a un `Listo`.
+
+## Desempates técnicos 12 (Opus, 2026-10-30, después de la mezcla de la nube 3)
+
+Cada desempate tiene su razón en una línea. El orden de las reglas del informe va al usuario como P58.
+
+1. **Sondas de configs sin conectar.** La Tarea 31 las conecta en `evaluar` para todo lenguaje, antes de calibrar: la Tarea 9b las pedía en el veredicto, y la calibración las mide.
+2. **`SinDecision` en validez.** Se confirma en 0: sigue el desempate 41, y un caso sin decisión no acierta el orden.
+3. **`Veredicto.ocultos_fallidos`.** Se confirma, sin los inestables: un inestable ya tiene su propio campo.
+4. **`umbral_verde` viejo.** Se confirma la carga con aviso para cualquier tipo: una clave obsoleta no debe romper un `root.toml`.
+5. **Seguridad sin veredicto en la laptop.** Se resuelve con la Tarea 31 y con la imagen correcta: `root-oraculo-rust:2` ya trae las herramientas.
+6. **Arquitectura en un crate de un archivo.** Si la tarea declara `[arquitectura].capas` y el repo no tiene esos módulos, eso es un hallazgo con el mapa como evidencia. Si la tarea no declara capas, Arquitectura va a `faltantes` con el motivo "sin módulos". Razón: una capa prometida que no existe es evidencia; un proyecto chico sin capas no lo es.
+7. **Entrega construye en cada evaluación.** Se acepta el tiempo: la Tarea 9d pide construir, y la construcción ocurre una sola vez por evaluación.
+8. **Reservas viejas sin filtro de mes.** Se confirma, y la lista dice el mes de cada reserva: corregirla es trabajo humano igual.
+9. **`--only-binary=:none:`.** Se confirma el rechazo: reabre la construcción de sdists.
+10. **M9 sin `Pendiente`.** Se confirma la salida "sin veredicto por entorno" con el mensaje del desempate 31: falla cerrado y explica la causa.
+11. **Digest con imagen ausente.** Root confirma que la imagen está local antes de calcular la clave. Sin la imagen, la evaluación no puede correr igual, así que da error de infraestructura.
+12. **Netrc con un host en dos puertos.** Root deja un aviso en el `Registro` de la descarga, no un hallazgo: es un problema del instrumento, no del producto.
+13. **Valor de credencial raro.** Se confirma el salto, con un aviso que nombra el registro y nunca el valor: el salto protege, y el aviso explica la falla posterior de pip.
+14. **Turno de pendientes.** Se confirma: el lock que queda en disco evita carreras y no guarda datos.
+15. **Ausente en una repetición.** Se confirma inestable: es la misma regla que en la laptop.
+16. **Revisión de la ficha por hash del spec.** Se confirma: un spec cambiado necesita otra revisión, y el aviso lo dice.
+17. **`ColabEntrada.confianza`.** Se confirma el campo nuevo con `serde(default)`.
+18. **Rastros a la vista.** `--preparar-ciego` escribe los conteos en `$ROOT_HOME/validez/rastros.json`, no en la salida estándar. Solo Opus lo lee, antes de entregar los paquetes (G3). Razón: el usuario no debe ver qué paquete tiene más rastros.
+19. **Límite de palabra.** La búsqueda pasa a subcadena sin distinguir mayúsculas: "opus2" debe contar. Un falso positivo cuesta poco, porque Opus revisa la lista.
+20. **`Cargo.toml` reescrito.** Se acepta, siempre que el armado reescriba el `Cargo.toml` de los seis paquetes igual: el formato no debe delatar un origen.
+21. **Partes de Estructura, Arquitectura y Diseño.** Se acepta el ahorro menor: el juez necesita esas sondas.
+22. **Partes sin la tarea.** `partes_de` recibe la tarea. Funciona y Completitud construyen la Entrega solo si la tarea tiene escenarios. Razón: sin escenarios, la construcción no aporta a esas dos dimensiones.
+23. **Peor caso con reintentos.** Se confirman los 3 intentos: un 5xx se reintenta, y el tope debe ver ese peor caso.
+24. **Cota de entrada del juez.** La cota pasa a ser un límite real: un prompt de juez de más de 256 KiB da `SinVeredicto` en ese juicio, sin enviarse. Así la estimación nunca queda corta.
+25. **Gasto de la calibración.** Se confirma sumar todo evento de API desde el inicio: sobreestima y nunca subestima.
+26. **Formato de la config de la corrida.** Se confirma `<ROOT_HOME>/configs/<config>.toml`, y `docs/interfaces.md` lo documenta.
+27. **Roles por API en `r00t corre`.** Se confirma el error de uso en el hito 1: el runner lanza sesiones de `claude -p`, que van por cupo.
+28. **Aprobación automática del plan.** Se acepta en las corridas de medición, con `extra.automatica = true` en el evento `PlanAprobado`. Así una aprobación humana y una automática no se confunden.
+29. **Fallo del ejecutor.** Se confirma: sin builder no hay nada que medir.
+30. **Transcript con líneas no JSON.** Se confirma el `Gate`: una línea que el lector salta debilita la detección.
+31. **Imagen y plazo del builder.** Se confirman `root-builder:1` y 2 horas por rol en el hito 1.
+32. **Red del builder.** Se confirma `pasta:--no-map-gw`: el builder necesita la API de Claude y no ve el host.
+33. **Credencial anidada.** Root borra el `.credentials.json` vacío de la carpeta de la corrida al terminar, con `src/borrado.rs`.
+34. **Node.js de Debian.** La laptop confirma la versión al construir `root-builder:1`. Si no alcanza para Claude Code, la imagen usa el binario oficial de Node.js con versión fija y hash verificado, como en la decisión 23.
+- **Tests de `tests/test_seguro.rs` en `/tmp`.** Pasan a crear sus carpetas bajo `TMPDIR`: la regla 2 de la laptop vale también para los tests.
+
+### Tarea 31: Seguridad en todo lenguaje y sondas de configs conectadas
+- **Action**:
+  - `evaluar` corre `gitleaks` y `sondas_configs` para toda tarea, con cualquier `lenguaje`. Sus hallazgos van a Seguridad, Estructura y Entrega, según la Tarea 9b.
+  - Un ítem de rúbrica sin herramienta para el lenguaje de la tarea va a `faltantes` con el motivo "sin sonda para <lenguaje>". La dimensión conserva el veredicto de sus ítems medidos.
+  - Los desempates 6, 11, 12, 13, 18, 19, 20, 22, 24, 28 y 33, y el arreglo de `tests/test_seguro.rs`.
+- **Dónde**: en la nube, con ejecutor falso. La prueba con `gitleaks` real va en la laptop.
+- **Validate**: `cargo test`:
+  - Una tarea `shell` con un secreto en un YAML da un hallazgo de Seguridad con su línea.
+  - Una tarea `shell` limpia, con `gitleaks` falso que no encuentra nada, da Seguridad con veredicto y la dependencia con CVE en `faltantes`.
+  - Una tarea `shell` sin `gitleaks` en la imagen deja Seguridad sin veredicto.
+  - Un prompt de juez de 300 KiB no se envía y deja ese juicio sin veredicto.
+  - `--preparar-ciego` no imprime conteos de rastros, y `validez/rastros.json` cuenta "opus2".
+  - Ningún test de `tests/test_seguro.rs` crea carpetas en `/tmp`.
+
+### Tarea 32: Orden de las reglas del informe (espera P58)
+- **Action, si P58 queda en a)**: `decidir` aplica primero `Bloqueado`, después `NoListo`, y recién después revisa las dimensiones con ítems que bloquean. Si la decisión iba a ser `Listo` y alguna de esas dimensiones queda sin veredicto, la decisión pasa a `SinDecision`.
+- **Validate, si P58 queda en a)**:
+  - Una tarea `shell` sin `gitleaks`, con un test oculto que falla, da `NoListo` y código 1.
+  - La misma tarea con todos los tests verdes da `SinDecision` y código 3.
+  - Los tests de `tests/oraculo.rs` que el arreglo de la laptop pasó a `SinVeredicto` vuelven a su expectativa original cuando tienen evidencia de falla.
+- **Dónde**: en la nube. La prueba con podman de `tests/oraculo.rs` va en la laptop.
+
+## Orden de trabajo (2026-10-30, después de la nube 3)
+
+El crédito de nube vence el 2026-11-05.
+
+**Nube, sesión 4.** Arranca desde la punta de `claude/root-e7813e` que trae `docs/builds/brief-nube-4.md` (un commit después de 0a26553). Orden:
+1. 31: Seguridad en todo lenguaje y sondas de configs conectadas.
+2. 32: orden de las reglas del informe, solo si llega la respuesta de P58 por mensaje del orquestador.
+
+**Laptop.**
+- Siempre: `tools/test-seguro.sh`, o el hook, sin claves y con compilaciones en /home.
+- Podman: la suite completa antes de cada mezcla; el digest, los montajes de `escenarios/` y la construcción dentro de `evaluar` (28); `NETRC` contra un índice privado de prueba local (30); `gitleaks` real en una tarea `shell` (31).
+- Podman y la credencial de Claude: construir `root-builder:1` y confirmar su Node.js (34); `--userns=keep-id`; `pasta:--no-map-gw` contra un puerto del host; la renovación del login con la credencial en solo lectura; la prueba de que el builder no abre `ROOT_HOME`. Después, la corrida real de memora (16).
+- Podman y `ROOT_HOME` real: el `Validate` real de 7 y 9c, ya mismo; el de 13 y 13b, después de 31 y 32.
+- Claves de API: la suite con las claves exportadas, para probar que `test-seguro.sh` las quita (29); el GET a `/models`; un stream real de cada proveedor; el evento de 0,50 USD (decisión 46); la calibración real con `--tope-usd 25`, después de la 31.
+- Colab: la corrida real de la 7h.
+- Opus: el oráculo de `graft-lector-planes` (16b) y G5; la lectura de `validez/rastros.json` antes de G3.
+- Usuario: P58, G3 y G5.
+
+**Preguntas abiertas (sin responder)**
+
+- **P58. Orden de las reglas del informe (cambia la decisión 48).** La decisión 48 dice que una dimensión sin veredicto con un ítem que bloquea da `SinDecision`. Opus la escribió por encima de toda otra regla. Por eso, hoy un test oculto que falla no da `NoListo` si Seguridad no se midió. Tu pregunta P56 era sobre `Listo`, no sobre `NoListo`. ¿Qué elegís?
+
+  - a) Primero la evidencia: `Bloqueado` y `NoListo` se aplican antes. `SinDecision` solo reemplaza a un `Listo`. Un producto con un test en rojo da `NoListo` aunque falte medir Seguridad.
+  - b) Como hoy: sin medir lo que puede bloquear, Root no decide nada, ni siquiera `NoListo`.
+
+  Mi recomendación es a): un PM con datos no espera a medir la seguridad para decir que algo falla. Root sigue sin decir "listo" sin medir lo que bloquea, que era el objetivo de P56 c.
