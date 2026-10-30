@@ -90,6 +90,11 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
 
     // d) Armado de la carpeta de la corrida.
     let corrida = preparar_corrida(deps.home, deps.home_usuario, tarea, config)?;
+    // Desde acá, todo camino de salida quita la credencial vacía que deja el montaje (ver `GuardiaCredencial`).
+    let guardia = GuardiaCredencial {
+        corrida: &corrida,
+        hecho: false,
+    };
     let id = corrida.id.clone();
 
     // e) Lanzamiento por rol, en orden. Cada salida se guarda como transcript.
@@ -169,8 +174,9 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         }
     }
 
-    // i) La credencial vacía que deja el montaje, si quedó. Después, el estado final del repo, si quedó sucio.
-    quitar_credencial_vacia(&corrida)?;
+    // i) La credencial vacía que deja el montaje, si quedó (la guardia la quita y su error llega acá).
+    // Después, el estado final del repo, si quedó sucio.
+    guardia.cerrar()?;
     commit_final(&corrida.repo)?;
 
     // j) Evaluación. Un error no pierde la corrida: la fila lleva el veredicto por defecto.
@@ -307,8 +313,33 @@ fn commit_final(repo: &Path) -> Result<(), ErrorCorre> {
     )
 }
 
+/// Guardia de la credencial vacía de una corrida. `cerrar` la quita en el camino normal y devuelve su
+/// error. Si `correr` sale antes por otro error, el `Drop` la quita igual, con el error descartado.
+struct GuardiaCredencial<'a> {
+    corrida: &'a Corrida,
+    hecho: bool,
+}
+
+impl GuardiaCredencial<'_> {
+    /// Camino normal: quita la credencial vacía y devuelve el error de borrarla, si lo hubo.
+    fn cerrar(mut self) -> Result<(), ErrorCorre> {
+        self.hecho = true;
+        quitar_credencial_vacia(self.corrida)
+    }
+}
+
+impl Drop for GuardiaCredencial<'_> {
+    fn drop(&mut self) {
+        if !self.hecho {
+            // En un camino de error ya hay otro error que devolver: el de borrar se descarta.
+            let _ = quitar_credencial_vacia(self.corrida);
+        }
+    }
+}
+
 /// Borra `.credentials.json` del estado de la corrida si está vacío. El montaje de podman lo crea como
-/// punto de montaje, y no es la credencial. Un archivo con contenido no se toca, ni un enlace.
+/// punto de montaje, y no es la credencial. Un archivo con contenido no se toca, ni un enlace. Lo llama
+/// `GuardiaCredencial`, en todo camino de salida de `correr` desde que se prepara la corrida.
 fn quitar_credencial_vacia(corrida: &Corrida) -> Result<(), ErrorCorre> {
     let Some(estado) = estado_de(&corrida.repo) else {
         return Ok(());
@@ -504,6 +535,11 @@ mod tests {
         no_lanza: bool,
         /// Contenido de `.credentials.json` en el estado de la corrida, como lo deja el montaje de podman.
         credencial: Option<&'static str>,
+        /// El lanzamiento falla después de montar la credencial, como un fallo de podman tras el montaje.
+        falla_tras_montar: bool,
+        /// Carpeta fuera de la corrida. Al lanzar, la carpeta de estado pasa a ser un enlace a ella, con un
+        /// `.credentials.json` vacío dentro.
+        estado_fuera: Option<PathBuf>,
         lanzados: RefCell<Vec<Lanzamiento>>,
     }
 
@@ -523,6 +559,19 @@ mod tests {
                 let estado = estado_de(&l.repo).expect("estado de la corrida");
                 fs::create_dir_all(&estado).expect("carpeta de estado");
                 fs::write(estado.join(".credentials.json"), texto).expect("credencial");
+            }
+            if self.falla_tras_montar {
+                return Err(ErrorCorre::Ejecutor(
+                    "prueba: falla después de montar".into(),
+                ));
+            }
+            if let Some(fuera) = &self.estado_fuera {
+                let corrida = l.repo.parent().expect("carpeta de la corrida");
+                let estado = estado_de(&l.repo).expect("estado de la corrida");
+                borrado::borrar_dir_dentro(corrida, &estado).expect("quitar el estado previo");
+                fs::create_dir_all(fuera).expect("carpeta de afuera");
+                fs::write(fuera.join(".credentials.json"), "").expect("credencial de afuera");
+                std::os::unix::fs::symlink(fuera, &estado).expect("enlace de estado");
             }
             if self.sin_resultado {
                 let texto = String::from_utf8_lossy(&salida.stdout).into_owned();
@@ -893,6 +942,78 @@ mod tests {
             credencial.is_file(),
             "una credencial con contenido no se toca: {}",
             credencial.display()
+        );
+    }
+
+    /// Carpeta de la única corrida que hay bajo `usuario`.
+    fn unica_corrida(usuario: &Path) -> PathBuf {
+        let corridas: Vec<PathBuf> = fs::read_dir(dir_corridas(usuario))
+            .expect("carpeta de corridas")
+            .map(|entrada| entrada.expect("entrada").path())
+            .collect();
+        assert_eq!(corridas.len(), 1, "una sola corrida: {corridas:?}");
+        corridas[0].clone()
+    }
+
+    #[test]
+    fn corre_fallo_del_ejecutor_despues_de_montar_la_credencial_no_deja_la_credencial_vacia() {
+        let e = entorno();
+        let builder = Builder {
+            credencial: Some(""),
+            falla_tras_montar: true,
+            ..Builder::default()
+        };
+        let error = correr_con(&e, &builder, &[], CONFIG).expect_err("falla tras montar");
+        assert!(matches!(error, ErrorCorre::Ejecutor(_)), "{error}");
+        let credencial = estado_de(&unica_corrida(&e.usuario).join("repo"))
+            .expect("estado de la corrida")
+            .join(".credentials.json");
+        assert!(
+            !credencial.exists(),
+            "la credencial vacía no debe quedar tras un fallo: {}",
+            credencial.display()
+        );
+    }
+
+    #[test]
+    fn corre_fallo_del_ejecutor_con_credencial_no_vacia_se_conserva() {
+        let e = entorno();
+        let builder = Builder {
+            credencial: Some("{\"token\":\"de-prueba\"}"),
+            falla_tras_montar: true,
+            ..Builder::default()
+        };
+        let error = correr_con(&e, &builder, &[], CONFIG).expect_err("falla tras montar");
+        assert!(matches!(error, ErrorCorre::Ejecutor(_)), "{error}");
+        let credencial = estado_de(&unica_corrida(&e.usuario).join("repo"))
+            .expect("estado de la corrida")
+            .join(".credentials.json");
+        assert!(
+            credencial.is_file(),
+            "una credencial con contenido no se toca: {}",
+            credencial.display()
+        );
+    }
+
+    #[test]
+    fn corre_error_al_borrar_la_credencial_vacia_es_error_de_io() {
+        let e = entorno();
+        let fuera = e._tmp.path().join("fuera");
+        let builder = Builder {
+            estado_fuera: Some(fuera.clone()),
+            ..Builder::default()
+        };
+        let error = correr_con(&e, &builder, &[], CONFIG).expect_err("no se puede borrar");
+        assert!(
+            matches!(
+                error,
+                ErrorCorre::Io { ref contexto, .. } if contexto.contains("borrar la credencial vacía")
+            ),
+            "{error}"
+        );
+        assert!(
+            fuera.join(".credentials.json").exists(),
+            "Root no borra fuera de la carpeta de la corrida"
         );
     }
 

@@ -111,16 +111,21 @@ pub struct Preparado {
     pub rastros: Vec<ResumenRastros>,
 }
 
-/// Dónde queda `rastros.json` dentro de `home`: `<home>/validez/rastros.json`.
-pub fn ruta_rastros_en(home: &Path) -> PathBuf {
-    home.join("validez").join("rastros.json")
+/// Carpeta de validez dentro de `home`: `<home>/validez/`. Aquí van `rastros.json` y las listas de rastros.
+pub fn carpeta_validez_en(home: &Path) -> PathBuf {
+    home.join("validez")
 }
 
-/// Resumen de los rastros de un paquete a ciegas. La lista completa está en `casos/ciego/<archivo>`.
+/// Dónde queda `rastros.json` dentro de `home`: `<home>/validez/rastros.json`.
+pub fn ruta_rastros_en(home: &Path) -> PathBuf {
+    carpeta_validez_en(home).join("rastros.json")
+}
+
+/// Resumen de los rastros de un paquete a ciegas. La lista completa está en `$ROOT_HOME/validez/<archivo>`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResumenRastros {
     pub id: String,
-    /// Nombre de la lista, `rastros-<id>.toml`, dentro de `casos/ciego/`.
+    /// Nombre de la lista, `rastros-<id>.toml`, dentro de `$ROOT_HOME/validez/`.
     pub archivo: String,
     /// Apariciones de `PALABRAS_DE_RASTRO` en los archivos de texto del paquete.
     pub apariciones: u32,
@@ -188,8 +193,9 @@ pub fn validar_con(
     })
 }
 
-/// Arma los paquetes a ciegas de `fuentes` en `casos/ciego/`, con la semilla `semilla`. Escribe los
-/// rastros de cada paquete en `<home>/validez/rastros.json` (desempate 18).
+/// Arma los paquetes a ciegas de `fuentes` en `casos/ciego/`, con la semilla `semilla`. Las listas
+/// `rastros-<id>.toml` van a `<home>/validez/`, nunca a `casos/ciego/`. Escribe los rastros de cada
+/// paquete en `<home>/validez/rastros.json` (desempate 18).
 pub fn preparar_ciego(
     casos: &Path,
     fuentes: &Path,
@@ -198,7 +204,8 @@ pub fn preparar_ciego(
 ) -> Result<Preparado, ErrorOraculo> {
     let rubricas = rubrica::cargar_embebidas()
         .map_err(|e| ErrorOraculo::Infra(format!("rúbricas embebidas: {e}")))?;
-    let preparado = preparar_ciego_con(casos, fuentes, semilla, &rubricas)?;
+    let validez = carpeta_validez_en(home);
+    let preparado = preparar_ciego_con(casos, fuentes, semilla, &rubricas, &validez)?;
     let ruta = ruta_rastros_en(home);
     if let Some(carpeta) = ruta.parent() {
         fs::create_dir_all(carpeta).map_err(|e| io_infra("crear la carpeta de validez", &e))?;
@@ -209,12 +216,14 @@ pub fn preparar_ciego(
     Ok(preparado)
 }
 
-/// Como `preparar_ciego`, con las rúbricas que recibe. Los tests pasan rúbricas de fixture.
+/// Como `preparar_ciego`, con las rúbricas que recibe y la carpeta `validez` donde van las listas de
+/// rastros. Los tests pasan rúbricas de fixture y una carpeta de validez bajo su temporal.
 pub fn preparar_ciego_con(
     casos: &Path,
     fuentes: &Path,
     semilla: u64,
     rubricas: &[Rubrica],
+    validez: &Path,
 ) -> Result<Preparado, ErrorOraculo> {
     let texto = fs::read_to_string(fuentes).map_err(|e| {
         ErrorOraculo::Uso(format!(
@@ -280,6 +289,7 @@ pub fn preparar_ciego_con(
     }
 
     fs::create_dir_all(&ciego).map_err(|e| io_infra("crear casos/ciego", &e))?;
+    fs::create_dir_all(validez).map_err(|e| io_infra("crear la carpeta de validez", &e))?;
     let mut clave = ArchivoClave::default();
     let mut resumen = Vec::new();
     let texto_rubricas = texto_formulario_items(rubricas);
@@ -294,7 +304,7 @@ pub fn preparar_ciego_con(
         let archivo = format!("rastros-{id}.toml");
         let texto_rastros = toml::to_string(&rastros)
             .map_err(|e| ErrorOraculo::Infra(format!("serializar los rastros: {e}")))?;
-        fs::write(ciego.join(&archivo), texto_rastros)
+        fs::write(validez.join(&archivo), texto_rastros)
             .map_err(|e| io_infra("escribir la lista de rastros", &e))?;
         resumen.push(ResumenRastros {
             id: id.clone(),
@@ -1046,7 +1056,7 @@ const PALABRAS_DE_RASTRO: [&str; 6] = ["ecc", "sdlc", "claude", "haiku", "sonnet
 /// Claves de `[package]` y de `[workspace.package]` que nombran al autor o al repo (desempate 45).
 const CLAVES_DE_AUTOR: [&str; 3] = ["authors", "repository", "homepage"];
 
-/// Lista de rastros de un paquete: `casos/ciego/rastros-<id>.toml`. Vive fuera de la carpeta del paquete.
+/// Lista de rastros de un paquete: `$ROOT_HOME/validez/rastros-<id>.toml`. Fuera de `casos/ciego/`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 struct ArchivoRastros {
     /// Lo que el armado no pudo revisar del todo, por ejemplo un `Cargo.toml` sin parsear.
@@ -1430,7 +1440,9 @@ anclas = [
         }
         let ruta = dir.join("fuentes.toml");
         escribir(&ruta, &manifiesto);
-        let p = preparar_ciego_con(&casos, &ruta, 7, &rubricas()).expect("prepara seis paquetes");
+        let validez = dir.join("validez");
+        let p = preparar_ciego_con(&casos, &ruta, 7, &rubricas(), &validez)
+            .expect("prepara seis paquetes");
         (casos, p.paquetes)
     }
 
@@ -1819,7 +1831,10 @@ fuente = "fixture"
             ),
         );
 
-        let p = preparar_ciego_con(&casos, &manifiesto, 42, &rubricas()).expect("prepara");
+        let validez = dir.path().join("validez");
+
+        let p =
+            preparar_ciego_con(&casos, &manifiesto, 42, &rubricas(), &validez).expect("prepara");
         assert_eq!(p.paquetes.len(), 2);
         assert_ne!(p.paquetes[0], p.paquetes[1], "los ids son distintos");
         assert!(!p.sin_rubricas, "con rúbricas de fixture no hay aviso");
@@ -1909,9 +1924,9 @@ fuente = "fixture"
         ruta
     }
 
-    /// Lee `rastros-<id>.toml` del armado como tabla TOML.
-    fn rastros_de(casos: &Path, id: &str) -> toml::Table {
-        let ruta = casos.join("ciego").join(format!("rastros-{id}.toml"));
+    /// Lee `rastros-<id>.toml` del armado como tabla TOML. Las listas viven en la carpeta de validez.
+    fn rastros_de(validez: &Path, id: &str) -> toml::Table {
+        let ruta = validez.join(format!("rastros-{id}.toml"));
         let texto = fs::read_to_string(&ruta).expect("el paquete tiene su lista de rastros");
         toml::from_str(&texto).expect("la lista es TOML")
     }
@@ -1941,7 +1956,9 @@ fuente = "fixture"
         let repo = dir.path().join("repos").join("memora");
         repo_con_cargo_y_readme(&repo);
         let manifiesto = manifiesto_de_una_fuente(dir.path(), &repo);
-        let p = preparar_ciego_con(&casos, &manifiesto, 42, &rubricas()).expect("prepara");
+        let validez = dir.path().join("validez");
+        let p =
+            preparar_ciego_con(&casos, &manifiesto, 42, &rubricas(), &validez).expect("prepara");
         let copia = casos.join("ciego").join(&p.paquetes[0]).join("repo");
 
         let raiz: toml::Table =
@@ -1982,8 +1999,10 @@ fuente = "fixture"
         let repo = dir.path().join("repos").join("memora");
         repo_con_cargo_y_readme(&repo);
         let manifiesto = manifiesto_de_una_fuente(dir.path(), &repo);
-        let p = preparar_ciego_con(&casos, &manifiesto, 42, &rubricas()).expect("prepara");
-        let apar = apariciones(&rastros_de(&casos, &p.paquetes[0]));
+        let validez = dir.path().join("validez");
+        let p =
+            preparar_ciego_con(&casos, &manifiesto, 42, &rubricas(), &validez).expect("prepara");
+        let apar = apariciones(&rastros_de(&validez, &p.paquetes[0]));
         assert!(
             apar.contains(&("README.md".to_string(), 3, "ECC".to_string())),
             "el README sale con su línea: {apar:?}"
@@ -2005,8 +2024,10 @@ fuente = "fixture"
         let repo = dir.path().join("repos").join("fuente");
         escribir(&repo.join("notas.md"), "recclamo, y ecc.\n");
         let manifiesto = manifiesto_de_una_fuente(dir.path(), &repo);
-        let p = preparar_ciego_con(&casos, &manifiesto, 42, &rubricas()).expect("prepara");
-        let apar = apariciones(&rastros_de(&casos, &p.paquetes[0]));
+        let validez = dir.path().join("validez");
+        let p =
+            preparar_ciego_con(&casos, &manifiesto, 42, &rubricas(), &validez).expect("prepara");
+        let apar = apariciones(&rastros_de(&validez, &p.paquetes[0]));
         assert_eq!(
             apar,
             vec![
@@ -2027,7 +2048,9 @@ fuente = "fixture"
             "# Comentario del autor\n[package]\nname = \"sinautor\"\nversion = \"0.3.0\"\n",
         );
         let manifiesto = manifiesto_de_una_fuente(dir.path(), &repo);
-        let p = preparar_ciego_con(&casos, &manifiesto, 42, &rubricas()).expect("prepara");
+        let validez = dir.path().join("validez");
+        let p =
+            preparar_ciego_con(&casos, &manifiesto, 42, &rubricas(), &validez).expect("prepara");
         let copia = casos.join("ciego").join(&p.paquetes[0]).join("repo");
         let texto = fs::read_to_string(copia.join("Cargo.toml")).expect("copiado");
         assert!(
@@ -2046,14 +2069,16 @@ fuente = "fixture"
         let roto = "[package\nname = \"roto\"\n";
         escribir(&repo.join("Cargo.toml"), roto);
         let manifiesto = manifiesto_de_una_fuente(dir.path(), &repo);
-        let p = preparar_ciego_con(&casos, &manifiesto, 42, &rubricas()).expect("prepara");
+        let validez = dir.path().join("validez");
+        let p =
+            preparar_ciego_con(&casos, &manifiesto, 42, &rubricas(), &validez).expect("prepara");
         let copia = casos.join("ciego").join(&p.paquetes[0]).join("repo");
         assert_eq!(
             fs::read_to_string(copia.join("Cargo.toml")).expect("copiado"),
             roto,
             "un Cargo.toml que no parsea no se toca"
         );
-        let tabla = rastros_de(&casos, &p.paquetes[0]);
+        let tabla = rastros_de(&validez, &p.paquetes[0]);
         let avisos = tabla
             .get("avisos")
             .and_then(toml::Value::as_array)
@@ -2075,8 +2100,10 @@ fuente = "fixture"
         fs::write(repo.join("datos.bin"), b"\x00ECC\x00").expect("binario con nulos");
         fs::write(repo.join("latin.txt"), [0xff, b'E', b'C', b'C', b'\n']).expect("no UTF-8");
         let manifiesto = manifiesto_de_una_fuente(dir.path(), &repo);
-        let p = preparar_ciego_con(&casos, &manifiesto, 42, &rubricas()).expect("prepara");
-        let apar = apariciones(&rastros_de(&casos, &p.paquetes[0]));
+        let validez = dir.path().join("validez");
+        let p =
+            preparar_ciego_con(&casos, &manifiesto, 42, &rubricas(), &validez).expect("prepara");
+        let apar = apariciones(&rastros_de(&validez, &p.paquetes[0]));
         assert!(apar.is_empty(), "los binarios no se revisan: {apar:?}");
     }
 
@@ -2125,7 +2152,63 @@ fuente = "fixture"
                 repo.display()
             ),
         );
-        assert!(preparar_ciego_con(&casos, &manifiesto, 1, &rubricas()).is_err());
+        let validez = dir.path().join("validez");
+        assert!(preparar_ciego_con(&casos, &manifiesto, 1, &rubricas(), &validez).is_err());
+    }
+
+    #[test]
+    fn validez_preparar_ciego_no_deja_listas_de_rastros_en_la_carpeta_de_los_paquetes() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path().join("casos");
+        let home = dir.path().join("home");
+        let repo = dir.path().join("repos").join("fuente");
+        repo_con_rastros(&repo);
+        let manifiesto = manifiesto_de_una_fuente(dir.path(), &repo);
+        let p = preparar_ciego(&casos, &manifiesto, 42, &home).expect("prepara");
+
+        let en_ciego: Vec<String> = fs::read_dir(casos.join("ciego"))
+            .expect("carpeta de paquetes")
+            .map(|e| {
+                e.expect("entrada")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(
+            en_ciego.iter().all(|n| !n.starts_with("rastros-")),
+            "casos/ciego no tiene listas de rastros: {en_ciego:?}"
+        );
+        for id in &p.paquetes {
+            let lista = home.join("validez").join(format!("rastros-{id}.toml"));
+            assert!(
+                lista.is_file(),
+                "la lista va a validez/: {}",
+                lista.display()
+            );
+        }
+    }
+
+    #[test]
+    fn validez_rastros_json_nombra_listas_que_existen_en_validez() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path().join("casos");
+        let home = dir.path().join("home");
+        let repo = dir.path().join("repos").join("fuente");
+        repo_con_rastros(&repo);
+        let manifiesto = manifiesto_de_una_fuente(dir.path(), &repo);
+        preparar_ciego(&casos, &manifiesto, 42, &home).expect("prepara");
+
+        let texto = fs::read_to_string(ruta_rastros_en(&home)).expect("rastros.json");
+        let lista: Vec<ResumenRastros> = serde_json::from_str(&texto).expect("rastros.json válido");
+        assert_eq!(lista.len(), 1, "un paquete, una entrada: {texto}");
+        for resumen in &lista {
+            assert!(
+                home.join("validez").join(&resumen.archivo).is_file(),
+                "{} existe en validez/",
+                resumen.archivo
+            );
+        }
     }
 
     #[test]

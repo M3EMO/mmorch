@@ -1017,6 +1017,41 @@ fn ficha_juez_no_truncado_json_roto_sigue_siendo_json_invalido() {
 }
 
 #[test]
+fn ficha_juez_prompt_de_300_kib_no_se_envia() {
+    // Relleno de prosa al final: `revisar` lo acepta y el prompt supera el límite de 256 KiB.
+    let mut texto = fixture("spec-completa.md");
+    texto.push('\n');
+    while texto.len() < 300 * 1024 {
+        texto.push_str("Relleno de prosa.\n");
+    }
+    let juez = JuezFalso::ok("[]");
+    let revision = revisar_con_juez(&texto, &ctx_vacio(), &juez).expect("revisa");
+    assert!(
+        juez.prompts.borrow().is_empty(),
+        "el juez no debe recibir el prompt"
+    );
+    assert!(
+        revision.juez.starts_with("sin_veredicto"),
+        "{}",
+        revision.juez
+    );
+    assert!(
+        revision.juez.contains("supera el límite"),
+        "{}",
+        revision.juez
+    );
+}
+
+#[test]
+fn ficha_juez_spec_chico_llama_al_juez_una_vez() {
+    // Guarda: un spec dentro del límite llega al juez una sola vez.
+    let texto = fixture("spec-completa.md");
+    let juez = JuezFalso::ok("[]");
+    revisar_con_juez(&texto, &ctx_vacio(), &juez).expect("revisa");
+    assert_eq!(juez.prompts.borrow().len(), 1);
+}
+
+#[test]
 fn ficha_cli_juez_pide_32000_de_tope_por_defecto() {
     let srv = Servidor::arranca(vec![(200, juez_lista_vacia())]);
     let home = tempfile::tempdir().expect("home");
