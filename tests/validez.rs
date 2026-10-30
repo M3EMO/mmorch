@@ -2,7 +2,7 @@
 //! sin casos no hay nada que evaluar, y el armado a ciegas usa las rúbricas embebidas (hoy ninguna).
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use serde_json::Value;
@@ -156,16 +156,13 @@ fn validez_cli_casos_inexistentes_es_uso() {
     );
 }
 
-#[test]
-fn validez_cli_preparar_ciego_resume_los_rastros_por_paquete() {
-    let home = TempDir::new().expect("home");
-    let dir = TempDir::new().expect("dir");
-    let repo = dir.path().join("repo");
+/// Un repo con `README.md` de `readme` y una sola fuente: deja el manifiesto listo. Devuelve su ruta.
+fn manifiesto_de_un_repo(dir: &Path, readme: &str) -> PathBuf {
+    let repo = dir.join("repo");
     fs::create_dir_all(repo.join("src")).expect("repo");
     fs::write(repo.join("src/lib.rs"), "pub fn f() {}\n").expect("lib");
-    fs::write(repo.join("README.md"), "Hecho con ECC\n").expect("readme");
-    let casos = dir.path().join("casos");
-    let manifiesto = dir.path().join("fuentes.toml");
+    fs::write(repo.join("README.md"), readme).expect("readme");
+    let manifiesto = dir.join("fuentes.toml");
     fs::write(
         &manifiesto,
         format!(
@@ -174,6 +171,15 @@ fn validez_cli_preparar_ciego_resume_los_rastros_por_paquete() {
         ),
     )
     .expect("manifiesto");
+    manifiesto
+}
+
+#[test]
+fn validez_cli_preparar_ciego_resume_los_rastros_por_paquete() {
+    let home = TempDir::new().expect("home");
+    let dir = TempDir::new().expect("dir");
+    let manifiesto = manifiesto_de_un_repo(dir.path(), "Hecho con opus2\n");
+    let casos = dir.path().join("casos");
 
     let salida = r00t(
         home.path(),
@@ -195,20 +201,70 @@ fn validez_cli_preparar_ciego_resume_los_rastros_por_paquete() {
         String::from_utf8_lossy(&salida.stderr)
     );
     let stdout = String::from_utf8_lossy(&salida.stdout);
-    let linea = stdout
-        .lines()
-        .find(|l| l.starts_with("rastros "))
-        .unwrap_or_else(|| panic!("el resumen dice los rastros por paquete: {stdout}"));
     assert!(
-        linea.contains("1 apariciones"),
-        "cuenta las apariciones: {linea}"
+        !stdout.contains("apariciones"),
+        "la salida no cuenta rastros: {stdout}"
     );
-    let ruta = linea
-        .rsplit(" en ")
-        .next()
-        .expect("dice dónde está la lista");
     assert!(
-        std::path::Path::new(ruta).is_file(),
-        "la ruta del resumen existe: {ruta}"
+        !stdout.lines().any(|l| l.starts_with("rastros ")),
+        "ningún conteo por paquete en la salida: {stdout}"
+    );
+    assert!(
+        stdout.contains("rastros.json"),
+        "la salida dice dónde quedó la lista: {stdout}"
+    );
+
+    let texto = fs::read_to_string(home.path().join("validez").join("rastros.json"))
+        .expect("rastros.json en ROOT_HOME/validez");
+    let lista: Value = serde_json::from_str(&texto).expect("rastros.json es JSON");
+    let entradas = lista.as_array().expect("una lista de paquetes");
+    assert_eq!(entradas.len(), 1, "un paquete, una entrada: {texto}");
+    assert_eq!(
+        entradas[0]["apariciones"].as_u64(),
+        Some(1),
+        "cuenta una aparición de opus2: {texto}"
+    );
+    let archivo = entradas[0]["archivo"].as_str().expect("archivo");
+    let lista_del_paquete = fs::read_to_string(casos.join("ciego").join(archivo))
+        .expect("la lista del paquete sigue en casos/ciego");
+    assert!(
+        lista_del_paquete.contains("palabra = \"opus\""),
+        "la lista dice qué palabra apareció: {lista_del_paquete}"
+    );
+}
+
+#[test]
+fn validez_cli_json_no_lleva_rastros() {
+    let home = TempDir::new().expect("home");
+    let dir = TempDir::new().expect("dir");
+    let manifiesto = manifiesto_de_un_repo(dir.path(), "Hecho con ECC\n");
+    let casos = dir.path().join("casos");
+
+    let salida = r00t(
+        home.path(),
+        &[
+            "oraculo",
+            "validar",
+            "--json",
+            "--preparar-ciego",
+            "--fuentes",
+            manifiesto.to_str().expect("ruta UTF-8"),
+            "--casos",
+            casos.to_str().expect("ruta UTF-8"),
+            "--semilla",
+            "7",
+        ],
+    );
+    assert!(
+        salida.status.success(),
+        "sale con 0: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let v: Value = serde_json::from_slice(&salida.stdout).expect("--json imprime un objeto");
+    assert_eq!(v["paquetes"].as_array().map(Vec::len), Some(1));
+    assert!(v.get("rastros").is_none(), "--json no lleva rastros: {v}");
+    assert!(
+        home.path().join("validez").join("rastros.json").is_file(),
+        "los rastros igual quedan en ROOT_HOME/validez"
     );
 }

@@ -2,14 +2,17 @@
 //! lanzamiento por rol, sesiones, lecturas del oráculo, evaluación y la fila de `runs.jsonl`.
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
+use crate::borrado;
 use crate::corre::args::{args_claude, env_del_builder};
 use crate::corre::config::ConfigCorrida;
+use crate::corre::contenedor::estado_de;
 use crate::corre::{
-    EjecutorBuilder, ErrorCorre, Lanzamiento, guardar_transcript, preparar_corrida,
+    Corrida, EjecutorBuilder, ErrorCorre, Lanzamiento, guardar_transcript, preparar_corrida,
 };
 use crate::goal::verificar_goal;
 use crate::observe::claude::{gates_de_costo_desconocido, leer_sesion_claude};
@@ -141,7 +144,9 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         .iter()
         .any(|l| l.rol == Rol::Planifica && l.codigo == 0);
     if plan_aprobado {
-        let ev = observe::evento_manual(&id, TipoEvento::PlanAprobado, Some(MOTIVO_PLAN));
+        let mut ev = observe::evento_manual(&id, TipoEvento::PlanAprobado, Some(MOTIVO_PLAN));
+        // Una aprobación humana y una automática no se confunden.
+        ev.extra.insert("automatica".into(), json!(true));
         registrar(&ruta_eventos, &ev)?;
     }
 
@@ -164,7 +169,8 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         }
     }
 
-    // i) Estado final del repo de la corrida, si quedó sucio.
+    // i) La credencial vacía que deja el montaje, si quedó. Después, el estado final del repo, si quedó sucio.
+    quitar_credencial_vacia(&corrida)?;
     commit_final(&corrida.repo)?;
 
     // j) Evaluación. Un error no pierde la corrida: la fila lleva el veredicto por defecto.
@@ -299,6 +305,32 @@ fn commit_final(repo: &Path) -> Result<(), ErrorCorre> {
             MENSAJE_ESTADO_FINAL,
         ],
     )
+}
+
+/// Borra `.credentials.json` del estado de la corrida si está vacío. El montaje de podman lo crea como
+/// punto de montaje, y no es la credencial. Un archivo con contenido no se toca, ni un enlace.
+fn quitar_credencial_vacia(corrida: &Corrida) -> Result<(), ErrorCorre> {
+    let Some(estado) = estado_de(&corrida.repo) else {
+        return Ok(());
+    };
+    let ruta = estado.join(".credentials.json");
+    let meta = match fs::symlink_metadata(&ruta) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(fuente) => {
+            return Err(ErrorCorre::Io {
+                contexto: format!("revisar la credencial de la corrida en {}", ruta.display()),
+                fuente,
+            });
+        }
+    };
+    if !meta.is_file() || meta.len() != 0 {
+        return Ok(());
+    }
+    borrado::borrar_archivo_dentro(&corrida.dir, &ruta).map_err(|fuente| ErrorCorre::Io {
+        contexto: format!("borrar la credencial vacía {}", ruta.display()),
+        fuente,
+    })
 }
 
 /// Commit completo de `HEAD` de `repo`. Vacío si git no lo da.
@@ -470,6 +502,8 @@ mod tests {
         costo_desconocido: bool,
         /// El lanzamiento no arranca.
         no_lanza: bool,
+        /// Contenido de `.credentials.json` en el estado de la corrida, como lo deja el montaje de podman.
+        credencial: Option<&'static str>,
         lanzados: RefCell<Vec<Lanzamiento>>,
     }
 
@@ -484,6 +518,11 @@ mod tests {
             let mut salida = EjecutorFalso.lanzar(&con_extra)?;
             if self.falla == Some(l.rol) {
                 salida.codigo = 1;
+            }
+            if let Some(texto) = self.credencial {
+                let estado = estado_de(&l.repo).expect("estado de la corrida");
+                fs::create_dir_all(&estado).expect("carpeta de estado");
+                fs::write(estado.join(".credentials.json"), texto).expect("credencial");
             }
             if self.sin_resultado {
                 let texto = String::from_utf8_lossy(&salida.stdout).into_owned();
@@ -752,6 +791,22 @@ mod tests {
     }
 
     #[test]
+    fn corre_plan_aprobado_es_automatico() {
+        let e = entorno();
+        let fila = correr_con(&e, &Builder::default(), &[], CONFIG_PLAN).expect("corre");
+        let aprobado = eventos(&e)
+            .into_iter()
+            .find(|x| x.tipo == TipoEvento::PlanAprobado && x.corrida == fila.id)
+            .expect("hay PlanAprobado");
+        assert_eq!(
+            aprobado.extra.get("automatica"),
+            Some(&json!(true)),
+            "la aprobación de r00t corre se marca como automática: {:?}",
+            aprobado.extra
+        );
+    }
+
+    #[test]
     fn corre_sin_planifica_no_hay_plan_aprobado() {
         let e = entorno();
         let fila = correr_con(&e, &Builder::default(), &[], CONFIG_CONSTRUYE).expect("corre");
@@ -799,6 +854,46 @@ mod tests {
         let transcripts = e.home.join("transcripts").join(&fila.id);
         assert!(transcripts.join("1-planifica.jsonl").is_file());
         assert!(transcripts.join("2-construye.jsonl").is_file());
+    }
+
+    /// Ruta de `.credentials.json` en el estado de la corrida `fila_id`, bajo `usuario`.
+    fn credencial_de_corrida(usuario: &Path, fila_id: &str) -> PathBuf {
+        let repo = dir_corridas(usuario).join(fila_id).join("repo");
+        estado_de(&repo)
+            .expect("estado de la corrida")
+            .join(".credentials.json")
+    }
+
+    #[test]
+    fn corre_credencial_vacia_del_montaje_se_borra_al_terminar() {
+        let e = entorno();
+        let builder = Builder {
+            credencial: Some(""),
+            ..Builder::default()
+        };
+        let fila = correr_con(&e, &builder, &[], CONFIG).expect("corre");
+        let credencial = credencial_de_corrida(&e.usuario, &fila.id);
+        assert!(
+            !credencial.exists(),
+            "la credencial vacía debe borrarse: {}",
+            credencial.display()
+        );
+    }
+
+    #[test]
+    fn corre_credencial_no_vacia_se_conserva() {
+        let e = entorno();
+        let builder = Builder {
+            credencial: Some("{\"token\":\"de-prueba\"}"),
+            ..Builder::default()
+        };
+        let fila = correr_con(&e, &builder, &[], CONFIG).expect("corre");
+        let credencial = credencial_de_corrida(&e.usuario, &fila.id);
+        assert!(
+            credencial.is_file(),
+            "una credencial con contenido no se toca: {}",
+            credencial.display()
+        );
     }
 
     #[test]

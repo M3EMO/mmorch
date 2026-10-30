@@ -42,6 +42,12 @@ fn correr(
         .env("ROOT_HOME", dir.join("real"))
         .env("ROOT_TESTS_BASE", dir.join("base"))
         .env("ROOT_TEST_SEGURO_CARGO", &cargo);
+    // Un target fijado en la suite no debe llegar al hijo, salvo que el test lo pida en `extra`.
+    for clave in ["CARGO_TARGET_DIR_SEGURO", "CARGO_TARGET_DIR"] {
+        if !extra.iter().any(|(k, _)| *k == clave) {
+            orden.env_remove(clave);
+        }
+    }
     for (clave, valor) in extra {
         orden.env(clave, valor);
     }
@@ -62,9 +68,36 @@ fn base(dir: &Path) -> PathBuf {
     dir.join("base")
 }
 
+/// Carpeta temporal de un test, bajo `TMPDIR` si está fijado fuera de `/tmp`. Si no, bajo
+/// `~/.cache/root-dbg/tmp`. La regla 2 de la laptop vale también para los tests.
+fn dir_de_prueba() -> tempfile::TempDir {
+    let base = std::env::var_os("TMPDIR")
+        .map(PathBuf::from)
+        .filter(|tmpdir| !tmpdir.starts_with("/tmp"))
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").expect("HOME definido"))
+                .join(".cache/root-dbg/tmp")
+        });
+    fs::create_dir_all(&base).expect("crea la carpeta de pruebas");
+    tempfile::Builder::new()
+        .prefix("test-seguro-")
+        .tempdir_in(&base)
+        .expect("carpeta temporal")
+}
+
+#[test]
+fn dir_de_prueba_no_empieza_con_tmp() {
+    let dir = dir_de_prueba();
+    assert!(
+        !dir.path().starts_with("/tmp"),
+        "la carpeta de prueba cae en /tmp: {}",
+        dir.path().display()
+    );
+}
+
 #[test]
 fn test_seguro_quita_las_claves_del_entorno() {
-    let dir = tempfile::tempdir().expect("temp dir");
+    let dir = dir_de_prueba();
     let (_, entorno, _) = correr(dir.path(), 0, &[], &["algo"]);
     assert!(!entorno.contains_key("DEEPSEEK_API_KEY"), "{entorno:?}");
     assert!(!entorno.contains_key("ANTHROPIC_API_KEY"), "{entorno:?}");
@@ -72,7 +105,7 @@ fn test_seguro_quita_las_claves_del_entorno() {
 
 #[test]
 fn test_seguro_root_home_es_nuevo_bajo_base_y_se_borra_al_salir() {
-    let dir = tempfile::tempdir().expect("temp dir");
+    let dir = dir_de_prueba();
     let (_, entorno, _) = correr(dir.path(), 0, &[], &["algo"]);
     let root_home = PathBuf::from(&entorno["ROOT_HOME"]);
     assert!(root_home.starts_with(base(dir.path())), "{root_home:?}");
@@ -85,7 +118,7 @@ fn test_seguro_root_home_es_nuevo_bajo_base_y_se_borra_al_salir() {
 
 #[test]
 fn test_seguro_temporales_y_target_bajo_base() {
-    let dir = tempfile::tempdir().expect("temp dir");
+    let dir = dir_de_prueba();
     // Un CARGO_TARGET_DIR fijado por el usuario no gana: el script usa el de base.
     let fijado = dir.path().join("fijado");
     let extra = [("CARGO_TARGET_DIR", fijado.display().to_string())];
@@ -99,7 +132,7 @@ fn test_seguro_temporales_y_target_bajo_base() {
 
 #[test]
 fn test_seguro_cargo_target_dir_seguro_gana_sobre_base() {
-    let dir = tempfile::tempdir().expect("temp dir");
+    let dir = dir_de_prueba();
     let propio = dir.path().join("propio-target");
     let extra = [("CARGO_TARGET_DIR_SEGURO", propio.display().to_string())];
     let (_, entorno, _) = correr(dir.path(), 0, &extra, &["algo"]);
@@ -108,7 +141,7 @@ fn test_seguro_cargo_target_dir_seguro_gana_sobre_base() {
 
 #[test]
 fn test_seguro_pasa_los_argumentos_a_cargo_test() {
-    let dir = tempfile::tempdir().expect("temp dir");
+    let dir = dir_de_prueba();
     let (estado, _, argumentos) = correr(dir.path(), 0, &[], &["algo"]);
     assert!(estado.success());
     assert_eq!(argumentos, ["test", "algo"]);
@@ -116,7 +149,7 @@ fn test_seguro_pasa_los_argumentos_a_cargo_test() {
 
 #[test]
 fn test_seguro_sale_con_el_codigo_de_cargo() {
-    let dir = tempfile::tempdir().expect("temp dir");
+    let dir = dir_de_prueba();
     let (estado, _, _) = correr(dir.path(), 7, &[], &["algo"]);
     assert_eq!(estado.code(), Some(7));
 }
@@ -138,7 +171,7 @@ const VARIABLES_GIT_DE_REPO: &[&str] = &[
 #[test]
 fn test_seguro_quita_las_variables_git_de_repo_del_entorno() {
     // Un `git commit` exporta GIT_INDEX_FILE y GIT_DIR al hook. Ninguna debe llegar a cargo.
-    let dir = tempfile::tempdir().expect("temp dir");
+    let dir = dir_de_prueba();
     let extra: Vec<(&str, String)> = VARIABLES_GIT_DE_REPO
         .iter()
         .map(|nombre| (*nombre, format!("/x/{nombre}")))
@@ -154,7 +187,7 @@ fn test_seguro_quita_las_variables_git_de_repo_del_entorno() {
 
 #[test]
 fn test_seguro_root_sin_podman_llega_al_comando() {
-    let dir = tempfile::tempdir().expect("temp dir");
+    let dir = dir_de_prueba();
     let extra = [("ROOT_SIN_PODMAN", "1".to_string())];
     let (_, entorno, _) = correr(dir.path(), 0, &extra, &["algo"]);
     assert_eq!(

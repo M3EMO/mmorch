@@ -67,6 +67,7 @@ fn veredicto_plano() -> Veredicto {
             exactitud_balanceada: None,
             items: vec![],
             sin_veredicto: None,
+            faltantes: vec![],
         }],
         ..Veredicto::default()
     }

@@ -12,7 +12,7 @@ use super::hash_corto;
 use super::inventario::{EntradaConfig, Inventario, redactar};
 use crate::config::{Config, root_home};
 use crate::oracle::ErrorOraculo;
-use crate::oracle::juez::{JuezProveedor, ModeloJuez, desenvuelto};
+use crate::oracle::juez::{JuezProveedor, ModeloJuez, desenvuelto, exceso_de_entrada};
 use crate::oracle::tarea::Tarea;
 use crate::proveedores::{MAX_TOKENS_JUEZ, Prompt, causa_tope_alcanzado};
 use crate::route;
@@ -126,6 +126,9 @@ pub fn juzgar_config(
         };
     }
     let prompt = prompt_config(entradas, cargo_toml, inv, ficha);
+    if let Some(causa) = exceso_de_entrada(&prompt) {
+        return ResultadoJuicio::SinVeredicto { causa };
+    }
     let salida = match juez.consultar(&prompt) {
         Ok(salida) => salida,
         Err(error) => {
@@ -610,6 +613,28 @@ mod tests {
             }
         );
         assert_eq!(juez.llamadas.get(), 0, "sin entradas no hay llamada");
+    }
+
+    #[test]
+    fn juez_config_prompt_de_mas_de_256_kib_no_se_envia_y_da_sin_veredicto() {
+        let inv = inventario_con(vec![entrada("http.proxy", 2, CITA_PROXY)]);
+        let juez = Falso::responde("[]");
+        let cargo_grande = "# relleno\n".repeat(300 * 1024 / 10);
+
+        let r = juzgar_config(
+            &juez,
+            &inv.config_cargo,
+            &textos(CONFIG_PROXY),
+            &cargo_grande,
+            &inv,
+            None,
+        );
+
+        let ResultadoJuicio::SinVeredicto { causa } = &r else {
+            panic!("se esperaba sin veredicto: {r:?}");
+        };
+        assert!(causa.contains("262144"), "{causa}");
+        assert_eq!(juez.llamadas.get(), 0, "el prompt no se envía");
     }
 
     #[test]

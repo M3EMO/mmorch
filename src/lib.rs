@@ -210,7 +210,8 @@ fn oraculo_validar(
         let fuentes =
             fuentes.ok_or_else(|| Error::Uso("--preparar-ciego exige --fuentes".into()))?;
         let semilla = semilla.unwrap_or_else(oracle::validez::semilla_del_reloj);
-        let preparado = oracle::validez::preparar_ciego(casos, fuentes, semilla)?;
+        let home = config::root_home();
+        let preparado = oracle::validez::preparar_ciego(casos, fuentes, semilla, &home)?;
         if preparado.sin_rubricas {
             eprintln!(
                 "aviso: no hay rúbricas embebidas; el formulario lleva solo la decisión y el orden"
@@ -225,15 +226,11 @@ fn oraculo_validar(
                 preparado.paquetes.len(),
                 ciego.display()
             );
-            for r in &preparado.rastros {
-                println!(
-                    "rastros {}: {} apariciones, {} avisos, en {}",
-                    r.id,
-                    r.apariciones,
-                    r.avisos,
-                    ciego.join(&r.archivo).display()
-                );
-            }
+            // Los conteos de rastros no salen aquí: Opus los lee desde este archivo (desempate 18).
+            println!(
+                "revisión de rastros: {}",
+                oracle::validez::ruta_rastros_en(&home).display()
+            );
         }
         return Ok(0);
     }

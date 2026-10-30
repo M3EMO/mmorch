@@ -239,6 +239,9 @@ pub struct Puntaje {
     /// Por qué la dimensión no tiene veredicto. Con `Some`, `valor` vale 0 y ningún lector lo usa.
     #[serde(default)]
     pub sin_veredicto: Option<String>,
+    /// Ítems de la dimensión que ninguna sonda mide para el lenguaje de la tarea.
+    #[serde(default)]
+    pub faltantes: Vec<ItemFaltante>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -294,6 +297,13 @@ pub struct ParteSinVeredicto {
     pub motivo: String,
 }
 
+/// Un ítem de rúbrica que ninguna sonda mide para el lenguaje de la tarea, con el motivo (Tarea 31).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ItemFaltante {
+    pub item: String,
+    pub motivo: String,
+}
+
 /// Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos
 /// salen del `Veredicto`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -322,6 +332,9 @@ pub struct Confianza {
     /// Avisos del veredicto, por ejemplo una corrida de Colab con red.
     #[serde(default)]
     pub avisos: Vec<String>,
+    /// Ítems sin sonda para el lenguaje, de todos los puntajes, en el orden de las dimensiones.
+    #[serde(default)]
+    pub faltantes: Vec<ItemFaltante>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -577,6 +590,7 @@ mod tests {
                 exactitud_balanceada: Some(0.97),
                 items: Vec::new(),
                 sin_veredicto: None,
+                faltantes: Vec::new(),
             }],
             hallazgos: vec![Hallazgo {
                 dimension: Dimension::Seguridad,
@@ -749,6 +763,7 @@ mod tests {
             exactitud_balanceada: None,
             items: Vec::new(),
             sin_veredicto: None,
+            faltantes: Vec::new(),
         });
         ida_y_vuelta(&Hallazgo {
             dimension: Dimension::Arquitectura,
@@ -909,6 +924,7 @@ mod tests {
             exactitud_balanceada: None,
             items: Vec::new(),
             sin_veredicto: Some("juez no corrido".into()),
+            faltantes: Vec::new(),
         });
     }
 

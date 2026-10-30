@@ -148,15 +148,19 @@ pub struct Netrc {
 /// entra si su host y su puerto son los de un índice, y si su variable de clave tiene un valor válido. `netrc`
 /// no distingue puertos: un host que aparece con dos orígenes en los índices no recibe credencial. Sin
 /// registro que entre, es `None`.
+///
+/// Los registros que tienen clave pero no entran dejan un aviso (desempates 12 y 13). El aviso nombra el
+/// registro y el host o la variable, nunca el valor. Sin clave no hay credencial que intentar: no hay aviso.
 pub fn netrc_de_pip(
     indices: &[String],
     registros: &[RegistroConfig],
     leer_env: impl Fn(&str) -> Option<String>,
-) -> Option<Netrc> {
+) -> (Option<Netrc>, Vec<String>) {
     let origenes: Vec<(String, u16)> = indices.iter().filter_map(|url| origen_de(url)).collect();
     let mut contenido = String::new();
     let mut credenciales: Vec<Credencial> = Vec::new();
     let mut atendidos: BTreeSet<(String, u16)> = BTreeSet::new();
+    let mut avisos: Vec<String> = Vec::new();
     for registro in registros {
         let Some(origen) = origen_de(&registro.url) else {
             continue;
@@ -164,17 +168,25 @@ pub fn netrc_de_pip(
         if !origenes.contains(&origen) || atendidos.contains(&origen) {
             continue;
         }
+        let Some(clave) = leer_env(&registro.credencial_env).filter(|v| !v.is_empty()) else {
+            continue;
+        };
         if origenes
             .iter()
             .any(|(host, puerto)| *host == origen.0 && *puerto != origen.1)
         {
+            avisos.push(format!(
+                "el host {} aparece con dos puertos en los índices: el registro {} no recibe credencial",
+                origen.0, registro.nombre
+            ));
             continue;
         }
-        let Some(clave) = leer_env(&registro.credencial_env).filter(|v| !v.is_empty()) else {
-            continue;
-        };
         let usuario = usuario_de_pip(registro, &leer_env);
         if !valor_de_netrc(&clave) || !valor_de_netrc(&usuario) {
+            avisos.push(format!(
+                "el registro {} no entra al netrc: su credencial {} o su usuario tienen blancos, comillas o controles",
+                registro.nombre, registro.credencial_env
+            ));
             continue;
         }
         contenido.push_str(&netrc_para(&origen.0, &usuario, &clave));
@@ -184,10 +196,11 @@ pub fn netrc_de_pip(
         });
         atendidos.insert(origen);
     }
-    (!contenido.is_empty()).then_some(Netrc {
+    let netrc = (!contenido.is_empty()).then_some(Netrc {
         contenido,
         credenciales,
-    })
+    });
+    (netrc, avisos)
 }
 
 /// Un valor cabe en una línea del `netrc` solo si no trae blancos, controles ni comillas. Si no, podría
@@ -400,7 +413,11 @@ mod tests {
             "ROOT_TEST_TOKEN",
         )];
         let indices = vec!["https://reg.example:8443/simple/".to_string()];
-        assert!(netrc_de_pip(&indices, &regs, |_| Some("v".into())).is_none());
+        assert!(
+            netrc_de_pip(&indices, &regs, |_| Some("v".into()))
+                .0
+                .is_none()
+        );
     }
 
     #[test]
@@ -418,7 +435,7 @@ mod tests {
             "con\"comilla",
         ] {
             let leer = |_: &str| Some(malo.to_string());
-            assert!(netrc_de_pip(&indices, &regs, leer).is_none(), "{malo:?}");
+            assert!(netrc_de_pip(&indices, &regs, leer).0.is_none(), "{malo:?}");
         }
     }
 
@@ -434,6 +451,94 @@ mod tests {
             "https://reg.example:8443/simple/".to_string(),
             "https://reg.example:9443/simple/".to_string(),
         ];
-        assert!(netrc_de_pip(&indices, &regs, |_| Some("v-9".into())).is_none());
+        assert!(
+            netrc_de_pip(&indices, &regs, |_| Some("v-9".into()))
+                .0
+                .is_none()
+        );
+    }
+
+    // --- Desempates 12 y 13: los registros que no entran al netrc dejan un aviso, nunca el valor ---
+
+    #[test]
+    fn credenciales_netrc_de_pip_host_con_dos_puertos_deja_aviso_con_host_y_registro() {
+        let regs = vec![registro(
+            "priv",
+            "https://reg.example:8443/simple/",
+            "ROOT_TEST_TOKEN",
+        )];
+        let indices = vec![
+            "https://reg.example:8443/simple/".to_string(),
+            "https://reg.example:9443/simple/".to_string(),
+        ];
+        let (netrc, avisos) = netrc_de_pip(&indices, &regs, |_| Some("v-9".into()));
+        assert!(netrc.is_none(), "sin credencial para el host");
+        assert_eq!(avisos.len(), 1, "{avisos:?}");
+        assert!(avisos[0].contains("reg.example"), "{avisos:?}");
+        assert!(avisos[0].contains("priv"), "{avisos:?}");
+        assert!(
+            !avisos[0].contains("v-9"),
+            "el aviso no lleva el valor: {avisos:?}"
+        );
+    }
+
+    #[test]
+    fn credenciales_netrc_de_pip_valor_raro_deja_aviso_con_nombre_y_variable_sin_el_valor() {
+        let regs = vec![registro(
+            "priv",
+            "https://reg.example:8443/simple/",
+            "ROOT_TEST_TOKEN",
+        )];
+        let indices = vec!["https://reg.example:8443/simple/".to_string()];
+        for malo in [
+            "clave\nmachine evil.example login a password b",
+            "con espacio",
+            "con\"comilla",
+        ] {
+            let (netrc, avisos) = netrc_de_pip(&indices, &regs, |_| Some(malo.to_string()));
+            assert!(netrc.is_none(), "{malo:?}");
+            assert_eq!(avisos.len(), 1, "{malo:?}: {avisos:?}");
+            assert!(avisos[0].contains("priv"), "{avisos:?}");
+            assert!(avisos[0].contains("ROOT_TEST_TOKEN"), "{avisos:?}");
+            assert!(
+                !avisos[0].contains(malo),
+                "el aviso no lleva el valor: {avisos:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn credenciales_netrc_de_pip_usuario_raro_deja_aviso_sin_el_valor() {
+        let mut regs = vec![registro(
+            "priv",
+            "https://reg.example:8443/simple/",
+            "ROOT_TEST_TOKEN",
+        )];
+        regs[0].usuario_env = Some("ROOT_USUARIO_PRIV".into());
+        let indices = vec!["https://reg.example:8443/simple/".to_string()];
+        let leer = |variable: &str| match variable {
+            "ROOT_TEST_TOKEN" => Some("clave-1".to_string()),
+            "ROOT_USUARIO_PRIV" => Some("usuario malo".to_string()),
+            _ => None,
+        };
+        let (netrc, avisos) = netrc_de_pip(&indices, &regs, leer);
+        assert!(netrc.is_none(), "el usuario con blancos no entra");
+        assert_eq!(avisos.len(), 1, "{avisos:?}");
+        assert!(avisos[0].contains("ROOT_TEST_TOKEN"), "{avisos:?}");
+        assert!(!avisos[0].contains("usuario malo"), "{avisos:?}");
+    }
+
+    #[test]
+    fn credenciales_netrc_de_pip_sin_clave_no_deja_aviso() {
+        // Sin variable de clave no hay credencial que intentar: el registro se omite en silencio.
+        let regs = vec![registro(
+            "priv",
+            "https://reg.example:8443/simple/",
+            "ROOT_TEST_TOKEN",
+        )];
+        let indices = vec!["https://reg.example:8443/simple/".to_string()];
+        let (netrc, avisos) = netrc_de_pip(&indices, &regs, |_| None);
+        assert!(netrc.is_none());
+        assert!(avisos.is_empty(), "{avisos:?}");
     }
 }
