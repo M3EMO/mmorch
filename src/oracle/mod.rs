@@ -1564,7 +1564,7 @@ const VARIABLES_GIT_DE_REPO: &[&str] = &[
 ];
 
 /// Comando `git -C <repo>` sin las variables `GIT_*` de `VARIABLES_GIT_DE_REPO` heredadas del entorno.
-fn comando_git(repo: &Path, args: &[&str]) -> Command {
+pub(crate) fn comando_git(repo: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(repo).args(args);
     for nombre in VARIABLES_GIT_DE_REPO {
