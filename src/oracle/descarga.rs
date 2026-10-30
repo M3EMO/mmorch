@@ -298,6 +298,8 @@ struct Registro {
     imagenes: Option<Vec<ImagenBase>>,
     /// Imagen cuyo digest no se leyó: la caché de Python usó solo su nombre. Va al Gate, no al veredicto.
     sin_digest: Option<String>,
+    /// Avisos de la descarga que no son hallazgos (un registro que no entró al `netrc`). Van al Gate.
+    avisos: Vec<String>,
 }
 
 impl Registro {
@@ -321,6 +323,7 @@ impl Registro {
             motivo: None,
             imagenes: None,
             sin_digest: None,
+            avisos: Vec::new(),
         }
     }
 }
@@ -624,6 +627,7 @@ fn preparar_rust(
         motivo: None,
         imagenes: None,
         sin_digest: None,
+        avisos: Vec::new(),
     };
     let preparacion = Preparacion::Lista {
         cache: Some(destino),
@@ -913,6 +917,9 @@ fn registrar(home: &Path, tarea: &Tarea, registro: &Registro) -> Result<(), Erro
     }
     if let Some(imagenes) = &registro.imagenes {
         evento.extra.insert("imagenes".into(), json!(imagenes));
+    }
+    if !registro.avisos.is_empty() {
+        evento.extra.insert("avisos".into(), json!(registro.avisos));
     }
     observe::registrar_en(&home.join(ARCHIVO_EVENTOS), &evento)
         .map_err(|e| infra("registrar el evento de descarga", e))

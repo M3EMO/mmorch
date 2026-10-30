@@ -205,6 +205,34 @@ pub fn clave_cache_python(
     )
 }
 
+/// Argumentos de `podman image exists` para `imagen`. Son puros: no corren nada.
+pub fn args_imagen_existe(imagen: &str) -> Vec<String> {
+    ["image", "exists", imagen]
+        .iter()
+        .map(|a| a.to_string())
+        .collect()
+}
+
+/// Confirma que `imagen` está local antes de calcular la clave (desempate 11). Sin ella, la evaluación no
+/// puede correr: es infraestructura. Un código distinto de cero, o un error al lanzar `podman`, lo es.
+pub(crate) fn comprobar_imagen_local(
+    podman: &dyn Podman,
+    imagen: &str,
+) -> Result<(), ErrorOraculo> {
+    let args = args_imagen_existe(imagen);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let salida = podman.correr(&refs, PLAZO_CORTO).map_err(|e| {
+        ErrorOraculo::Infra(format!("no se pudo consultar la imagen {imagen}: {e}"))
+    })?;
+    if salida.codigo != 0 {
+        return Err(ErrorOraculo::Infra(format!(
+            "la imagen {imagen} no está local: `podman image exists` dio código {}",
+            salida.codigo
+        )));
+    }
+    Ok(())
+}
+
 /// Argumentos de `podman image inspect` que leen el digest de `imagen` (desempate 27). Son puros: no corren nada.
 pub fn args_digest_imagen(imagen: &str) -> Vec<String> {
     ["image", "inspect", "--format", "{{.Digest}}", imagen]
@@ -557,6 +585,7 @@ fn preparar_python_con(
     }
     // El texto de `requirements.txt` con sus `-r` seguidos, y las `-c` aparte: pip no ve archivos del repo (C1, M6).
     let (texto, restricciones) = textos_de_requisitos(repo);
+    comprobar_imagen_local(deps.podman, &tarea.imagen)?;
     let digest = digest_imagen_con(deps.podman, &tarea.imagen);
     let hash = clave_cache_python(&texto, &restricciones, &tarea.imagen, digest.as_deref());
     // Sin digest, la clave usa la imagen sola. El Gate lo registra; no es hallazgo del producto ni corta (desempate 27).
@@ -573,6 +602,7 @@ fn preparar_python_con(
             motivo: None,
             imagenes: None,
             sin_digest,
+            avisos: Vec::new(),
         };
         // Los hallazgos de build salen de los `pyproject` guardados en la caché: sin ellos, el segundo
         // corrido perdería el aviso del primero.
@@ -594,7 +624,7 @@ fn preparar_python_con(
     let trabajo = temporal_de(home)?;
     copiar_requisitos(repo, trabajo.path()).map_err(|e| infra("copiar los requirements", e))?;
     // El `netrc` de pip solo lleva las claves de los registros que coinciden con un índice (decisión 29).
-    let netrc = netrc_de_pip(&indices_de(&req), registros, deps.leer_env);
+    let (netrc, avisos) = netrc_de_pip(&indices_de(&req), registros, deps.leer_env);
     if let Some(netrc) = &netrc {
         escribir_netrc(trabajo.path(), &netrc.contenido)?;
     }
@@ -626,7 +656,11 @@ fn preparar_python_con(
     match fin {
         Fin::Corta(aviso, motivo) => {
             limpiar_parcial(home, &parcial).map_err(|e| infra("borrar la descarga parcial", e))?;
-            Ok(corte(aviso, Registro::corte("python", Some(hash), motivo)))
+            let registro = Registro {
+                avisos,
+                ..Registro::corte("python", Some(hash), motivo)
+            };
+            Ok(corte(aviso, registro))
         }
         Fin::Lista {
             paquetes,
@@ -647,6 +681,7 @@ fn preparar_python_con(
                 motivo: None,
                 imagenes: None,
                 sin_digest,
+                avisos,
             };
             let preparacion = Preparacion::Lista {
                 cache: Some(destino),
@@ -1399,14 +1434,22 @@ mod tests {
     struct PodmanDigest {
         codigo: i32,
         stdout: String,
+        /// Código de `podman image exists`: cero si la imagen está local.
+        existe: i32,
         llamadas: std::cell::RefCell<Vec<Vec<String>>>,
     }
 
     impl PodmanDigest {
+        /// Responde `codigo` y `stdout` al digest, y da 0 a `image exists`: la imagen está local.
         fn que_responde(codigo: i32, stdout: &str) -> Self {
+            PodmanDigest::con_imagen(0, codigo, stdout)
+        }
+
+        fn con_imagen(existe: i32, codigo: i32, stdout: &str) -> Self {
             PodmanDigest {
                 codigo,
                 stdout: stdout.into(),
+                existe,
                 llamadas: std::cell::RefCell::new(Vec::new()),
             }
         }
@@ -1417,11 +1460,25 @@ mod tests {
             self.llamadas
                 .borrow_mut()
                 .push(args.iter().map(|a| a.to_string()).collect());
+            let (codigo, stdout) = if args.starts_with(&["image", "exists"]) {
+                (self.existe, String::new())
+            } else {
+                (self.codigo, self.stdout.clone())
+            };
             Ok(SalidaPodman {
-                codigo: self.codigo,
-                stdout: self.stdout.clone(),
+                codigo,
+                stdout,
                 stderr: String::new(),
             })
+        }
+    }
+
+    /// Podman que no arranca: cada llamada falla antes de correr nada.
+    struct PodmanRoto;
+
+    impl Podman for PodmanRoto {
+        fn correr(&self, _args: &[&str], _plazo: Duration) -> Result<SalidaPodman, ErrorOraculo> {
+            Err(ErrorOraculo::Infra("no arranca podman".into()))
         }
     }
 
@@ -1900,5 +1957,117 @@ mod tests {
             ejecutor.netrc_visto.borrow().is_none(),
             "un valor inválido no entra"
         );
+    }
+
+    // --- Desempate 11: la imagen tiene que estar local antes de calcular la clave ---
+
+    /// Corre `preparar_python_con` de un `requirements.txt` de un paquete, con `podman` y `ejecutor` dados.
+    fn preparar_con_podman(
+        podman: &dyn Podman,
+        ejecutor: &EjecutorFalso,
+    ) -> Result<Paso, ErrorOraculo> {
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        fs::write(repo.path().join("requirements.txt"), "six==1.16.0\n").expect("escribe");
+        let tarea = tarea_python_de_prueba();
+        let deps = DependenciasPython {
+            podman,
+            ejecutor,
+            leer_env: &|_: &str| None,
+        };
+        preparar_python_con(
+            repo.path(),
+            &tarea,
+            home.path(),
+            Duration::from_secs(60),
+            &[],
+            &deps,
+        )
+    }
+
+    #[test]
+    fn descarga_python_imagen_no_local_es_infra_y_no_corre_contenedores() {
+        let podman = PodmanDigest::con_imagen(1, 0, "sha256:aaaa\n");
+        let ejecutor = EjecutorFalso::que_responde(0, "");
+        match preparar_con_podman(&podman, &ejecutor) {
+            Err(ErrorOraculo::Infra(mensaje)) => {
+                assert!(mensaje.contains("python:3.8"), "{mensaje}");
+            }
+            otro => panic!("debía dar Infra, dio {:?}", otro.map(|_| ())),
+        }
+        let llamadas = podman.llamadas.borrow();
+        assert_eq!(llamadas.len(), 1, "solo `image exists`: {llamadas:?}");
+        assert_eq!(llamadas[0], vec!["image", "exists", "python:3.8"]);
+        assert!(
+            ejecutor.ejecuciones.borrow().is_empty(),
+            "ningún contenedor"
+        );
+    }
+
+    #[test]
+    fn descarga_python_podman_que_no_arranca_es_infra() {
+        let ejecutor = EjecutorFalso::que_responde(0, "");
+        match preparar_con_podman(&PodmanRoto, &ejecutor) {
+            Err(ErrorOraculo::Infra(mensaje)) => {
+                assert!(mensaje.contains("python:3.8"), "{mensaje}");
+            }
+            otro => panic!("debía dar Infra, dio {:?}", otro.map(|_| ())),
+        }
+        assert!(ejecutor.ejecuciones.borrow().is_empty());
+    }
+
+    // --- Desempates 12 y 13 en el Gate: el aviso del netrc va en `extra.avisos` ---
+
+    #[test]
+    fn descarga_python_aviso_del_netrc_llega_al_evento_gate() {
+        let ejecutor = EjecutorFalso::que_responde(0, "");
+        let registros = [registro_pip("https://reg.example:8443/simple/", None)];
+        let con_espacio = |nombre: &str| {
+            (nombre == "ROOT_TEST_CLAVE_PIP").then(|| "clave con espacio".to_string())
+        };
+        let (home, resultado) =
+            descarga_python_con(REQ_CON_INDICE, &registros, &ejecutor, &con_espacio);
+        let (_, registro) = resultado.expect("la descarga corre");
+        let registro = registro.expect("hay registro de la descarga");
+        registrar(home.path(), &tarea_python_de_prueba(), &registro).expect("registra el Gate");
+        let eventos = fs::read_to_string(home.path().join("eventos.jsonl")).expect("eventos");
+        let evento: Value = eventos
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).expect("línea JSON"))
+            .find(|v| v["tipo"] == "gate" && v["fase"] == "descarga")
+            .expect("evento Gate de la descarga");
+        assert!(evento["extra"]["avisos"].is_array(), "{evento}");
+        let avisos = evento["extra"]["avisos"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            avisos.iter().any(|a| a
+                .as_str()
+                .is_some_and(|t| t.contains("priv") && t.contains("ROOT_TEST_CLAVE_PIP"))),
+            "{avisos:?}"
+        );
+        assert!(
+            !eventos.contains("clave con espacio"),
+            "el valor no sale: {eventos}"
+        );
+    }
+
+    #[test]
+    fn descarga_python_sin_avisos_no_escribe_la_clave_avisos_en_el_gate() {
+        let home = tempfile::tempdir().expect("home");
+        registrar(
+            home.path(),
+            &tarea_python_de_prueba(),
+            &Registro::sin_paquetes("python"),
+        )
+        .expect("registra el Gate");
+        let eventos = fs::read_to_string(home.path().join("eventos.jsonl")).expect("eventos");
+        let evento: Value = eventos
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).expect("línea JSON"))
+            .find(|v| v["tipo"] == "gate" && v["fase"] == "descarga")
+            .expect("evento Gate de la descarga");
+        assert!(evento["extra"].get("avisos").is_none(), "{evento}");
     }
 }
