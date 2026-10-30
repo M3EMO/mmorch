@@ -40,14 +40,14 @@ Cada tarea está en el plan, con su `Action`, su `Validate` y su parte "Dónde".
 | Orden | Tarea | Sección del plan |
 |---|---|---|
 | 1 | 31 | "Tarea 31: Seguridad en todo lenguaje y sondas de configs conectadas" |
-| 2 | 32 | "Tarea 32: Orden de las reglas del informe (espera P58)" |
+| 2 | 32 | "Tarea 32: Orden de las reglas del informe (decisión 49)" |
 
 Leé también, antes de empezar:
 
 - "Mezcla de la nube 3 (2026-10-30)".
 - "Hallazgo de Seguridad (2026-10-30)".
 - "Desempates técnicos 12".
-- La decisión 48, en la tabla "Decisiones del usuario" y en la sección "Decisión 48 (2026-10-29): P56 c y P57 a".
+- Las decisiones 48 y 49, en la tabla "Decisiones del usuario" y en la sección "Decisión 48 (2026-10-29): P56 c y P57 a".
 
 Notas por tarea:
 
@@ -55,7 +55,10 @@ Notas por tarea:
 - **31**: `gitleaks` y las sondas de configs corren para toda tarea, con cualquier `lenguaje`. En la nube, el ejecutor es falso.
 - **31**: un ítem sin herramienta para el lenguaje va a `faltantes` con el motivo "sin sonda para <lenguaje>". La dimensión conserva el veredicto de sus ítems medidos.
 - **31**: no cambies el orden de las reglas de `decidir`. Ese cambio es de la Tarea 32.
-- **32** espera la respuesta del usuario a la pregunta P58. Hacela solo si el orquestador te manda un mensaje con esa respuesta. Si la respuesta es a), seguí la sección de la Tarea 32. Si es b), no cambies `decidir` y anotalo en el informe. Si no llega ningún mensaje, no hagas la 32 y anotalo en el informe.
+- **32** sigue la decisión 49 del usuario: primero la evidencia. `decidir` aplica `Bloqueado`, después `NoListo`, y recién después revisa las dimensiones con ítems que bloquean.
+- **32**: `SinDecision` solo reemplaza a un `Listo`. Un test oculto que falla da `NoListo` aunque Seguridad no tenga veredicto.
+- **32**: actualizá el comentario de `decidir`, que hoy dice "`SinDecision` gana sobre todo".
+- **32**: los tests de `tests/oraculo.rs` que pasaron a esperar `SinVeredicto` por la decisión 48 vuelven a su expectativa original cuando tienen evidencia de falla. Esos tests corren solo con podman, así que en la nube cambiá su expectativa y anotá la lista en el informe.
 
 ## Reglas
 

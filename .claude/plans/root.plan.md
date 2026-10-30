@@ -72,6 +72,7 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 46 | P54: "P54 c". Opus registra 0,50 USD como peor caso de los 3 intentos cortados del juez de memora, con un evento de costo manual. Ver Tarea 21. |
 | 47 | P55: "P55 a". Un agente busca el precio de Sonnet y Root lo usa sin confirmación del usuario, igual que con Haiku (decisión 44). El orquestador lo buscó en la referencia de la API de Anthropic (skill `claude-api`, tabla cacheada el 2026-10-06). `claude-sonnet-5-5` cuesta 2 USD por millón de tokens de entrada y 10 USD por millón de salida. La tabla no muestra tramos por tamaño de entrada. Ver Tarea 21b. |
 | 48 | P56: "P56 c". Una dimensión sin veredicto que tiene algún ítem `bloquea = true`, como Seguridad o Completitud, da `SinDecision`. Una dimensión sin veredicto sin ítems que bloquean deja `Listo` con aviso en `confianza`. P57: "P57 a". La calibración real corre por separado en memora y en brasa, con `n = 20`, y cada calibración vale solo para su tarea. Ver Tareas 12, 13b y 28. |
+| 49 | P58: "P58 a". Primero la evidencia: `decidir` aplica `Bloqueado` y `NoListo` antes que `SinDecision`. `SinDecision` solo reemplaza a un `Listo` cuando una dimensión con un ítem que bloquea queda sin veredicto. Esta decisión acota la decisión 48: su regla ya no va por encima de las demás. Ver Tarea 32. |
 
 ## Patterns to Mirror
 
@@ -2164,9 +2165,9 @@ Cada desempate tiene su razón en una línea. El orden de las reglas del informe
   - `--preparar-ciego` no imprime conteos de rastros, y `validez/rastros.json` cuenta "opus2".
   - Ningún test de `tests/test_seguro.rs` crea carpetas en `/tmp`.
 
-### Tarea 32: Orden de las reglas del informe (espera P58)
-- **Action, si P58 queda en a)**: `decidir` aplica primero `Bloqueado`, después `NoListo`, y recién después revisa las dimensiones con ítems que bloquean. Si la decisión iba a ser `Listo` y alguna de esas dimensiones queda sin veredicto, la decisión pasa a `SinDecision`.
-- **Validate, si P58 queda en a)**:
+### Tarea 32: Orden de las reglas del informe (decisión 49)
+- **Action**: `decidir` aplica primero `Bloqueado`, después `NoListo`, y recién después revisa las dimensiones con ítems que bloquean. Si la decisión iba a ser `Listo` y alguna de esas dimensiones queda sin veredicto, la decisión pasa a `SinDecision`.
+- **Validate**:
   - Una tarea `shell` sin `gitleaks`, con un test oculto que falla, da `NoListo` y código 1.
   - La misma tarea con todos los tests verdes da `SinDecision` y código 3.
   - Los tests de `tests/oraculo.rs` que el arreglo de la laptop pasó a `SinVeredicto` vuelven a su expectativa original cuando tienen evidencia de falla.
@@ -2178,7 +2179,7 @@ El crédito de nube vence el 2026-11-05.
 
 **Nube, sesión 4.** Arranca desde la punta de `claude/root-e7813e` que trae `docs/builds/brief-nube-4.md` (un commit después de 0a26553). Orden:
 1. 31: Seguridad en todo lenguaje y sondas de configs conectadas.
-2. 32: orden de las reglas del informe, solo si llega la respuesta de P58 por mensaje del orquestador.
+2. 32: orden de las reglas del informe (decisión 49).
 
 **Laptop.**
 - Siempre: `tools/test-seguro.sh`, o el hook, sin claves y con compilaciones en /home.
@@ -2198,3 +2199,8 @@ El crédito de nube vence el 2026-11-05.
   - b) Como hoy: sin medir lo que puede bloquear, Root no decide nada, ni siquiera `NoListo`.
 
   Mi recomendación es a): un PM con datos no espera a medir la seguridad para decir que algo falla. Root sigue sin decir "listo" sin medir lo que bloquea, que era el objetivo de P56 c.
+
+**Respuesta del 2026-10-30:** P58 "P58 a" (decisión 49). P58 queda cerrada.
+- La decisión 48 sigue valiendo para `Listo`: Root no dice "listo" sin medir lo que puede bloquear. Su texto "Antes de las reglas de `Bloqueado`, `NoListo` y `Listo`" queda reemplazado: la revisión de dimensiones sin veredicto corre después de `Bloqueado` y `NoListo`.
+- El comentario de `decidir` ("`SinDecision` gana sobre todo") cambia con la Tarea 32.
+- La Tarea 32 entra en la nube 4 sin condición. El brief de la nube 4 ya lo dice.
