@@ -26,8 +26,8 @@ Ningún hito importa un módulo de `src/`.
 |---|---|---|
 | 2, Graft | Pide el modelo de cada etapa con `r00t route`. Usa las sondas del Oracle como gates. Registra cada etapa con `r00t observa evento`. | `route`, `observa evento` y las sondas están construidos. Los gates de Graft son del hito 2. |
 | 3, REA | Registra cada paso con `r00t observa evento`. Verifica su evidencia con el chequeo `archivo:línea` del juez. | `observa evento` está construido. La verificación de evidencia (`oracle/evidencia.rs`) existe como función, sin subcomando propio. |
-| 4, CAB | Define una tarea con `tarea.toml` y mide cada agente con `r00t corre`. | `tarea.toml` está construido. `r00t corre` es **pendiente** (Tarea 16). |
-| ECC (decisión a) | Recibe sus modelos por rol desde `r00t route`. Sus hooks que filtran datos se apagan por defecto en `r00t corre`. | `route` está construido. `corre` es **pendiente** (Tarea 16). |
+| 4, CAB | Define una tarea con `tarea.toml` y mide cada agente con `r00t corre`. | `tarea.toml` está construido. `r00t corre` es **parcial**: falta el contenedor del builder (Tarea 26, capa 1). |
+| ECC (decisión a) | Recibe sus modelos por rol desde `r00t route`. Sus hooks que filtran datos se apagan por defecto en `r00t corre`. | `route` está construido. `corre` es **parcial**: falta el contenedor del builder (Tarea 26, capa 1). |
 
 ## Códigos de salida
 
@@ -72,7 +72,7 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t track listar [--tarea t]` | Lista las filas, opcionalmente de una tarea. | lista de `Fila` | construido |
 | `r00t track comparar --a <c1> --b <c2> --tarea <t>` | Compara dos corridas de una tarea. | comparación | construido |
 | `r00t aprende [--replay]` | Recalcula `politica.json`. Con `--replay`, mide la política sin escribirla. | `Politica`, o `Replay` | construido |
-| `r00t corre --tarea <t> --config <c>` | Corre una tarea con una configuración. | `Fila` | pendiente (Tarea 16). Hoy sale con `3`. |
+| `r00t corre --tarea <t> --config <c>` | Corre una tarea con una configuración (con `--json` global, imprime la fila completa): rutea todos los roles, los lanza por el contenedor del builder, registra sus sesiones y lecturas, evalúa y agrega una fila a `runs.jsonl`. Sin GOAL autorizado no arranca. | `Fila` | construido (Tarea 16). Falta el contenedor del builder (Tarea 26, capa 1): hasta entonces sale con `3` y no lanza nada. |
 | `r00t goal verificar` | Verifica que `GOAL.md` coincida con `GOAL.hash`. | `{ok, hash}` | construido |
 | `r00t goal autorizar` | Autoriza un cambio al GOAL. Exige una TTY y una confirmación tecleada. | sin salida JSON | construido |
 | `r00t importar-mmorch --desde <metrics.jsonl>` | Copia en solo lectura el log de métricas de mmorch. | resumen de la importación | construido |

@@ -287,7 +287,7 @@ fn imprimir_eleccion(json: bool, e: &Eleccion) -> Result<(), Error> {
     Ok(())
 }
 
-fn etiqueta_via(via: Via) -> &'static str {
+pub(crate) fn etiqueta_via(via: Via) -> &'static str {
     match via {
         Via::Cupo => "cupo",
         Via::Api => "api",

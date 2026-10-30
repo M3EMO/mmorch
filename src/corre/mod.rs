@@ -1,9 +1,11 @@
-//! Corre: arma la corrida de un builder (Tarea 16, parte 1). Arma la carpeta fuera de `ROOT_HOME`,
-//! el repo del bootstrap, los argumentos de `claude -p` por rol y el transcript. La CLI y la
-//! evaluación llegan en la parte 2. El builder se lanza por `EjecutorBuilder`, nunca directo.
+//! Corre: arma y corre la corrida de un builder (Tarea 16). Arma la carpeta fuera de `ROOT_HOME`, el
+//! repo del bootstrap, los argumentos de `claude -p` por rol y el transcript. `correr` rutea, lanza
+//! cada rol, registra las sesiones, evalúa y agrega la fila. El builder se lanza por `EjecutorBuilder`,
+//! nunca directo.
 
 pub mod args;
 pub mod config;
+pub mod corrida;
 pub mod ejecutor;
 
 use std::fs;
@@ -15,6 +17,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error as ErrorDerive;
 
 use crate::borrado;
+use crate::error::Error;
+use crate::goal::ErrorGoal;
 use crate::oracle::pendientes::nombre_de_tarea_valido;
 use crate::oracle::{comando_git, commit_de};
 use crate::route::politica::nombre_rol;
@@ -22,10 +26,11 @@ use crate::tipos::Rol;
 
 pub use args::{args_claude, env_del_builder};
 pub use config::{ClaudeCorrida, ConfigCorrida};
-pub use ejecutor::{EjecutorBuilder, Lanzamiento, SalidaClaude};
+pub use corrida::{DepsCorre, correr};
+pub use ejecutor::{EjecutorBuilder, EjecutorContenedorBuilder, Lanzamiento, SalidaClaude};
 
-/// Errores del armado de una corrida. `Uso` sale con código 2: lo arregla el humano en la config o en la
-/// tarea. Los demás salen con código 3.
+/// Errores de una corrida. `Uso` sale con código 2: lo arregla el humano en la config o en la tarea.
+/// `Goal` y `Ruteo` llevan el código de su error. Los demás salen con código 3.
 #[derive(Debug, ErrorDerive)]
 pub enum ErrorCorre {
     #[error("uso: {0}")]
@@ -40,14 +45,28 @@ pub enum ErrorCorre {
     Git(String),
     #[error("no se pudo lanzar el builder: {0}")]
     Ejecutor(String),
+    /// El GOAL no está autorizado o fue alterado. Sale con el código de `goal verificar`.
+    #[error(transparent)]
+    Goal(#[from] ErrorGoal),
+    /// `route` no eligió la vía de un rol. Sale con el código de ese error.
+    #[error(transparent)]
+    Ruteo(Box<Error>),
+    /// Leer o registrar eventos, o armar las huellas del oráculo. Sale con código 3.
+    #[error("observe: {0}")]
+    Observa(String),
 }
 
 impl ErrorCorre {
-    /// Código de salida: 2 para `Uso`, 3 para el resto.
+    /// Código de salida: 2 para `Uso`, el de su error para `Goal` y `Ruteo`, 3 para el resto.
     pub fn codigo_de_salida(&self) -> u8 {
         match self {
             ErrorCorre::Uso(_) => 2,
-            ErrorCorre::Io { .. } | ErrorCorre::Git(_) | ErrorCorre::Ejecutor(_) => 3,
+            ErrorCorre::Goal(e) => e.codigo_de_salida(),
+            ErrorCorre::Ruteo(e) => e.codigo_de_salida(),
+            ErrorCorre::Io { .. }
+            | ErrorCorre::Git(_)
+            | ErrorCorre::Ejecutor(_)
+            | ErrorCorre::Observa(_) => 3,
         }
     }
 }

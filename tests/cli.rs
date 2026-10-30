@@ -50,11 +50,17 @@ fn help_del_binario_dice_r00t() {
 }
 
 #[test]
-fn subcomando_sin_implementar_sale_con_3() {
-    let salida = root(&["corre", "--tarea", "memora", "--config", "ecc-haiku"]);
+fn corre_sin_goal_en_el_directorio_sale_con_3() {
+    // `corre` ya tiene lógica: sin GOAL autorizado en el directorio, se detiene antes de tocar nada.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let salida = Command::new(env!("CARGO_BIN_EXE_r00t"))
+        .current_dir(dir.path())
+        .args(["corre", "--tarea", "memora", "--config", "ecc-haiku"])
+        .output()
+        .expect("no se pudo ejecutar el binario root");
     assert_eq!(codigo(&salida), 3);
     let stderr = String::from_utf8_lossy(&salida.stderr);
-    assert!(stderr.contains("no implementado"), "stderr: {stderr}");
+    assert!(stderr.contains("GOAL no autorizado"), "stderr: {stderr}");
 }
 
 #[test]

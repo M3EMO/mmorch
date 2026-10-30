@@ -30,6 +30,18 @@ pub trait EjecutorBuilder {
     fn lanzar(&self, l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre>;
 }
 
+/// Ejecutor del contenedor del builder (decisión 43). Lo arma la Tarea 26, capa 1. Hasta entonces no
+/// lanza nada: nunca corre `claude` en el host.
+pub struct EjecutorContenedorBuilder;
+
+impl EjecutorBuilder for EjecutorContenedorBuilder {
+    fn lanzar(&self, _l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre> {
+        Err(ErrorCorre::Ejecutor(
+            "el contenedor del builder (Tarea 26, capa 1) no está armado".into(),
+        ))
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod pruebas {
     use std::path::PathBuf;
@@ -130,6 +142,19 @@ mod tests {
         assert_eq!(transcript.llamadas.len(), 1);
         assert_eq!(transcript.llamadas[0].nombre, "Write");
         assert_eq!(transcript.llamadas[0].salida, "ok");
+    }
+
+    #[test]
+    fn corre_contenedor_del_builder_no_lanza_y_nombra_la_capa_que_falta() {
+        let tmp = TempDir::new().expect("tmp");
+        let repo = tmp.path().join("repo");
+        let error = EjecutorContenedorBuilder
+            .lanzar(&lanzamiento(repo, Vec::new()))
+            .expect_err("sin contenedor no hay lanzamiento");
+        assert!(
+            matches!(error, ErrorCorre::Ejecutor(ref m) if m.contains("Tarea 26")),
+            "{error}"
+        );
     }
 
     #[test]

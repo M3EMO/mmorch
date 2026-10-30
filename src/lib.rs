@@ -618,6 +618,7 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
             *vigilar,
         ),
         Comando::Observa { accion } => observa(cli.json, accion),
+        Comando::Corre { tarea, config } => corre_accion(cli.json, tarea, config),
         Comando::Track { accion } => track_accion(cli.json, accion),
         Comando::Aprende { replay } => aprende_accion(cli.json, *replay),
         Comando::ImportarExterno { desde } => {
@@ -859,6 +860,50 @@ fn track_accion(json: bool, accion: &TrackAccion) -> Result<(), Error> {
             let comparacion = track::comparar(a, b, tarea)?;
             println!("{}", serde_json::to_string_pretty(&comparacion)?);
         }
+    }
+    Ok(())
+}
+
+/// `corre`: arma y corre una tarea con una configuración, con el `ROOT_HOME`, el `$HOME` y el repo del
+/// proceso. Imprime la fila: con `--json`, la fila completa; sin él, un resumen corto.
+fn corre_accion(json: bool, tarea: &str, config: &str) -> Result<(), Error> {
+    let home = config::root_home();
+    let home_usuario = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+        Error::Uso("HOME no está definida: corre la necesita para la carpeta de corridas".into())
+    })?;
+    let repo_root = std::env::current_dir().map_err(|fuente| corre::ErrorCorre::Io {
+        contexto: "leer el directorio actual".into(),
+        fuente,
+    })?;
+    let entorno: Vec<(String, String)> = std::env::vars_os()
+        .filter_map(|(clave, valor)| Some((clave.into_string().ok()?, valor.into_string().ok()?)))
+        .collect();
+    let deps = corre::DepsCorre {
+        home: &home,
+        home_usuario: &home_usuario,
+        repo_root: &repo_root,
+        ejecutor: &corre::EjecutorContenedorBuilder,
+        evaluar: &oracle::evaluar,
+        entorno: &entorno,
+    };
+    let fila = corre::correr(&deps, tarea, config)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&fila)?);
+    } else {
+        let invalida = if fila.resumen.invalida {
+            ", corrida inválida: leyó el oráculo"
+        } else {
+            ""
+        };
+        println!(
+            "corrida {}: {} con {}: veredicto {}, {} turnos, {:.4} USD de cupo{invalida}",
+            fila.id,
+            fila.tarea,
+            fila.config,
+            etiqueta_estado(fila.veredicto.estado),
+            fila.resumen.turnos,
+            fila.resumen.usd_cupo,
+        );
     }
     Ok(())
 }
