@@ -133,6 +133,9 @@ pub struct OpcionesOraculo {
     pub timeout: Duration,
     /// `ROOT_HOME` donde viven los temporales. Sin valor, usa `root_home()`.
     pub home: Option<PathBuf>,
+    /// Partes que corren (Tarea 12). `None`: todas, como en producción. Con partes, las que no corren no
+    /// llaman a su contenedor ni a su juez, y su dimensión queda sin veredicto.
+    pub partes: Option<Partes>,
 }
 
 impl Default for OpcionesOraculo {
@@ -140,8 +143,141 @@ impl Default for OpcionesOraculo {
         OpcionesOraculo {
             timeout: Duration::from_secs(3600),
             home: None,
+            partes: None,
         }
     }
+}
+
+/// Partes de `evaluar` que una calibración puede pedir. Cada una es una llamada a un contenedor, a un
+/// juez o al redactor. `dimension` es la que se calibra: las demás quedan sin veredicto.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Partes {
+    /// Dimensión calibrada. `None` en `todas`: ninguna queda sin veredicto por no correr.
+    pub dimension: Option<Dimension>,
+    /// Descarga: copia de cachés, base de RustSec, inventario de fuentes y imágenes base.
+    pub descarga: bool,
+    /// Juez de la configuración de Cargo. Sus hallazgos van a Entrega.
+    pub juez_config: bool,
+    /// Suite del contrato.
+    pub contrato: bool,
+    /// Suite oculta, con sus repeticiones.
+    pub oculto: bool,
+    /// Entrega: construcción, sonda y escenarios.
+    pub entrega: bool,
+    /// Sondas nativas de Seguridad, Estructura y Arquitectura. No llaman a un contenedor.
+    pub nativas: bool,
+    /// Gitleaks, de Seguridad.
+    pub gitleaks: bool,
+    /// Cargo audit, de Seguridad.
+    pub cargo_audit: bool,
+    /// Clippy, de Estructura.
+    pub clippy: bool,
+    /// Eficiencia: el comando de `[eficiencia]`.
+    pub eficiencia: bool,
+    /// Mutación, de Pruebas: corre el proyecto con cargo mutants.
+    pub mutacion: bool,
+    /// Juez de diseño. Sus hallazgos de rúbrica van a Arquitectura, Estructura o Diseño.
+    pub juez_diseno: bool,
+    /// Redactor del informe. Ninguna dimensión lo necesita, así que `partes_de` lo deja apagado.
+    pub redactor: bool,
+}
+
+impl Partes {
+    /// Todas las partes, sin dimensión calibrada: es lo que corre en producción.
+    pub fn todas() -> Self {
+        Partes {
+            dimension: None,
+            descarga: true,
+            juez_config: true,
+            contrato: true,
+            oculto: true,
+            entrega: true,
+            nativas: true,
+            gitleaks: true,
+            cargo_audit: true,
+            clippy: true,
+            eficiencia: true,
+            mutacion: true,
+            juez_diseno: true,
+            redactor: true,
+        }
+    }
+
+    /// Si `dimension` se mide con estas partes. Sin dimensión calibrada, se miden todas.
+    pub fn mide(&self, dimension: Dimension) -> bool {
+        self.dimension
+            .is_none_or(|calibrada| calibrada == dimension)
+    }
+}
+
+/// Mensaje de la dimensión que una calibración no mide: sin veredicto, no falso.
+const NO_MEDIDA: &str = "no medida en esta calibración";
+
+/// Partes que necesita cada dimensión para dar su puntaje (Tarea 12). Con sus rúbricas, el juez de diseño
+/// entra solo si la dimensión tiene ítems del juez.
+/// - Funciona: descarga, contrato, oculto y Entrega (los escenarios; `partes_de` no ve la tarea).
+/// - Seguridad: descarga, sondas nativas, gitleaks y cargo audit. Sin juez: no tiene ítems del juez.
+/// - Eficiencia: descarga y el comando de `[eficiencia]`.
+/// - Estructura, Arquitectura y Diseño con ítems del juez: todas las sondas y la Entrega, porque el juez
+///   ve los hallazgos de todas. Corre el juez de diseño. Sin ítems del juez, solo sus sondas.
+/// - Completitud: descarga, oculto y Entrega (los escenarios de los requisitos).
+/// - Entrega: descarga, el juez de la configuración (su hallazgo va a Entrega) y la Entrega.
+/// - Pruebas: descarga y la mutación.
+///
+/// El redactor no mide ninguna dimensión: ninguna parte lo pide.
+pub fn partes_de(dimension: Dimension, rubricas: &[Rubrica]) -> Partes {
+    let mut p = Partes {
+        dimension: Some(dimension),
+        descarga: true,
+        ..Partes::default()
+    };
+    let juzga = rubrica_del_juez(rubricas, dimension).is_some();
+    match dimension {
+        Dimension::Funciona => {
+            p.contrato = true;
+            p.oculto = true;
+            p.entrega = true;
+        }
+        Dimension::Seguridad => {
+            p.nativas = true;
+            p.gitleaks = true;
+            p.cargo_audit = true;
+        }
+        Dimension::Eficiencia => p.eficiencia = true,
+        Dimension::Completitud => {
+            p.oculto = true;
+            p.entrega = true;
+        }
+        Dimension::Entrega => {
+            p.juez_config = true;
+            p.entrega = true;
+        }
+        Dimension::Pruebas => p.mutacion = true,
+        Dimension::Estructura | Dimension::Arquitectura | Dimension::Diseno => {
+            if juzga {
+                // El juez ve los hallazgos de todas las sondas y de la Entrega: todas corren.
+                p.juez_diseno = true;
+                p.entrega = true;
+                p.nativas = true;
+                p.gitleaks = true;
+                p.cargo_audit = true;
+                p.clippy = true;
+                p.eficiencia = true;
+                p.mutacion = true;
+            } else {
+                // Sin ítems del juez, cada una mide solo sus sondas. Diseño no tiene sondas: nada más.
+                match dimension {
+                    Dimension::Estructura => {
+                        p.nativas = true;
+                        p.clippy = true;
+                    }
+                    Dimension::Arquitectura => p.nativas = true,
+                    _ => {}
+                }
+            }
+        }
+    }
+    p
 }
 
 /// Lo que cada suite necesita para correr: la copia del repo, la salida, las opciones
@@ -187,16 +323,24 @@ pub fn evaluar(repo: &Path, tarea: &Tarea, o: &OpcionesOraculo) -> Result<Veredi
         .map_err(|e| ErrorOraculo::Infra(format!("rúbricas embebidas: {e}")))?;
     let calibracion = Calibraciones::cargar(&home)?;
     let mut avisos = Vec::new();
-    let juez_config = juez_config_de_produccion(&home, &cfg, &mut avisos);
+    let partes = o.partes.unwrap_or_else(Partes::todas);
+    // Un juez o el redactor que las partes no piden no se arma: no hay nada que llamar ni gastar.
+    let juez_config = partes
+        .juez_config
+        .then(|| juez_config_de_produccion(&home, &cfg, &mut avisos))
+        .flatten();
     // Sin ítems del juez en las rúbricas, no se arma: no hay nada que llamar ni gastar.
-    let juez = juez::hay_pedidos(&rubricas)
+    let juez = (partes.juez_diseno && juez::hay_pedidos(&rubricas))
         .then(|| juez_diseno_de_produccion(&home, &mut avisos))
         .flatten();
     let nombre = juez
         .as_ref()
         .and_then(|j| j.eleccion.modelo.clone())
         .unwrap_or_default();
-    let redactor = redactor_de_produccion(&home, &mut avisos);
+    let redactor = partes
+        .redactor
+        .then(|| redactor_de_produccion(&home, &mut avisos))
+        .flatten();
     let deps = Dependencias {
         correr: &correr_en_podman,
         herramientas: &herramientas,
@@ -338,6 +482,7 @@ fn evaluar_con(
     deps: Dependencias,
 ) -> Result<Veredicto, ErrorOraculo> {
     let texto_spec = verificar_ficha(tarea)?;
+    let partes = o.partes.unwrap_or_else(Partes::todas);
     let rubricas = rubrica::etiquetas(deps.rubricas);
     let repo = fs::canonicalize(repo)
         .map_err(|e| ErrorOraculo::Infra(format!("no existe el repo {}: {e}", repo.display())))?;
@@ -361,11 +506,25 @@ fn evaluar_con(
     let repo_copia = copia.path().join("repo");
     copiar_repo(&repo, &repo_copia).map_err(|e| infra("copia del repo", e))?;
     // Cada juez suma el costo de sus llamadas. El de la configuración va antes que las suites.
-    let juez_config = deps.juez_config.map(Medido::nuevo);
+    let juez_config = deps
+        .juez_config
+        .filter(|_| partes.juez_config)
+        .map(Medido::nuevo);
     let juez_config_ref = juez_config.as_ref().map(|m| m as &dyn ModeloJuez);
-    // La descarga va antes de cualquier suite: es la única fase con red (decisión 17).
-    let (preparacion, imagenes, _) =
-        descarga::preparar_con_juez(&repo_copia, tarea, &home, o.timeout, juez_config_ref)?;
+    // La descarga va antes de cualquier suite: es la única fase con red (decisión 17). Sin parte que la
+    // necesite, no corre: no hay cachés, base de RustSec ni imágenes base (Tarea 12).
+    let (preparacion, imagenes) = if partes.descarga {
+        let (preparacion, imagenes, _) =
+            descarga::preparar_con_juez(&repo_copia, tarea, &home, o.timeout, juez_config_ref)?;
+        (preparacion, imagenes)
+    } else {
+        let vacia = descarga::Preparacion::Lista {
+            cache: None,
+            rustsec: None,
+            hallazgos: Vec::new(),
+        };
+        (vacia, Vec::new())
+    };
     let (cache, rustsec, hallazgos) = match preparacion {
         descarga::Preparacion::Lista {
             cache,
@@ -393,23 +552,28 @@ fn evaluar_con(
         rustsec: rustsec.clone(),
         home: &home,
     };
-    // El contrato no tiene exclusiones: solo el oculto las usa.
-    let contrato = match evaluar_suite(
-        &corrida,
-        &tarea.contrato,
-        DIR_CONTRATO,
-        XML_CONTRATO,
-        &BTreeSet::new(),
-        deps.correr,
-    )? {
-        Suite::Clasificada(c) => c,
-        Suite::SinVeredicto(motivo) => {
-            avisos.push(format!("contrato: {motivo}"));
-            let motivo = format!("suite del contrato sin veredicto: {motivo}");
-            let mut v = sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
-            v.ambiguedades = ambiguedades.clone();
-            return Ok(con_costo(v, &juez_config));
+    // El contrato no tiene exclusiones: solo el oculto las usa. Una suite que la parte no pide no corre.
+    let contrato = if partes.contrato {
+        match evaluar_suite(
+            &corrida,
+            &tarea.contrato,
+            DIR_CONTRATO,
+            XML_CONTRATO,
+            &BTreeSet::new(),
+            deps.correr,
+        )? {
+            Suite::Clasificada(c) => c,
+            Suite::SinVeredicto(motivo) => {
+                avisos.push(format!("contrato: {motivo}"));
+                let motivo = format!("suite del contrato sin veredicto: {motivo}");
+                let mut v =
+                    sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
+                v.ambiguedades = ambiguedades.clone();
+                return Ok(con_costo(v, &juez_config));
+            }
         }
+    } else {
+        Clasificacion::default()
     };
     let excluidos: BTreeSet<String> = tarea
         .entorno
@@ -417,22 +581,27 @@ fn evaluar_con(
         .chain(&tarea.oraculo_dudoso)
         .map(|e| e.test.clone())
         .collect();
-    let oculto = match evaluar_suite(
-        &corrida,
-        &tarea.oculto,
-        DIR_OCULTO,
-        XML_OCULTO,
-        &excluidos,
-        deps.correr,
-    )? {
-        Suite::Clasificada(c) => c,
-        Suite::SinVeredicto(motivo) => {
-            avisos.push(format!("oculto: {motivo}"));
-            let motivo = format!("suite oculta sin veredicto: {motivo}");
-            let mut v = sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
-            v.ambiguedades = ambiguedades.clone();
-            return Ok(con_costo(v, &juez_config));
+    let oculto = if partes.oculto {
+        match evaluar_suite(
+            &corrida,
+            &tarea.oculto,
+            DIR_OCULTO,
+            XML_OCULTO,
+            &excluidos,
+            deps.correr,
+        )? {
+            Suite::Clasificada(c) => c,
+            Suite::SinVeredicto(motivo) => {
+                avisos.push(format!("oculto: {motivo}"));
+                let motivo = format!("suite oculta sin veredicto: {motivo}");
+                let mut v =
+                    sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
+                v.ambiguedades = ambiguedades.clone();
+                return Ok(con_costo(v, &juez_config));
+            }
         }
+    } else {
+        Clasificacion::default()
     };
     let preparada = Preparada {
         repo: repo_copia.clone(),
@@ -442,17 +611,21 @@ fn evaluar_con(
     let ej = (deps.herramientas)(&preparada);
     // La Entrega sale de `entregar_con`: construcción, sonda y escenarios en una sola pasada (desempate 7).
     // Un error de infraestructura deja Entrega sin veredicto con su motivo, como un error del ejecutor.
-    let entrega = entrega::entregar_con(
-        ej.as_ref(),
-        &repo_copia,
-        tarea,
-        &home,
-        &imagenes,
-        deps.podman,
-        deps.escenarios,
-    )
-    .unwrap_or_else(|error| entrega::entrega_sin_veredicto(error.to_string()));
-    let juez_diseno = deps.juez.map(Medido::nuevo);
+    let entrega = if partes.entrega {
+        entrega::entregar_con(
+            ej.as_ref(),
+            &repo_copia,
+            tarea,
+            &home,
+            &imagenes,
+            deps.podman,
+            deps.escenarios,
+        )
+        .unwrap_or_else(|error| entrega::entrega_sin_veredicto(error.to_string()))
+    } else {
+        entrega::entrega_sin_veredicto(NO_MEDIDA.into())
+    };
+    let juez_diseno = deps.juez.filter(|_| partes.juez_diseno).map(Medido::nuevo);
     let juez = JuezDiseno {
         modelo: juez_diseno.as_ref().map(|m| m as &dyn ModeloJuez),
         nombre: deps.modelo_juez,
@@ -467,6 +640,7 @@ fn evaluar_con(
         &hallazgos,
         &juez,
         entrega,
+        &partes,
     )?;
     let mut tasas = BTreeMap::new();
     for (id, tasa) in &contrato.tasas {
@@ -510,7 +684,10 @@ fn evaluar_con(
         ambiguedades,
     };
     // La decisión sale de reglas deterministas; el estado sale de la decisión (Tarea 13b).
-    let redactor_medido = deps.redactor.map(RedactorMedido::nuevo);
+    let redactor_medido = deps
+        .redactor
+        .filter(|_| partes.redactor)
+        .map(RedactorMedido::nuevo);
     let informe = informe::informar_con(
         &veredicto,
         tarea,
@@ -599,7 +776,8 @@ struct Juicio {
 }
 
 /// Mide las nueve dimensiones con las sondas, los requisitos y el juez de diseño. `descarga` son los
-/// hallazgos de la descarga: los que tocan una dimensión con sondas entran a su puntaje.
+/// hallazgos de la descarga: los que tocan una dimensión con sondas entran a su puntaje. `partes` dice qué
+/// corre: lo que no corre no llama a su contenedor, y su dimensión no se mide (Tarea 12).
 #[allow(clippy::too_many_arguments)]
 fn medir(
     tarea: &Tarea,
@@ -610,6 +788,7 @@ fn medir(
     descarga: &[Hallazgo],
     juez: &JuezDiseno,
     entrega: ResultadoEntrega,
+    partes: &Partes,
 ) -> Result<Medicion, ErrorOraculo> {
     let resultados = requisitos::desde_clasificacion(oculto);
     let estados = requisitos::evaluar_requisitos(
@@ -620,10 +799,34 @@ fn medir(
         &tarea.oraculo_dudoso,
         &BTreeMap::new(),
     );
-    let mutacion = mutacion::sonda_mutacion(ej, tarea);
-    let mut sondas = vec![entrega.sonda.clone(), mutacion.sonda.clone()];
-    sondas.extend(perfiles::sondas_nativas(repo, tarea));
-    sondas.extend(perfiles::herramientas::sondas_herramientas(ej, tarea, repo));
+    // El orden de las sondas es el de siempre: la Entrega, la mutación, las nativas y las de herramientas.
+    let mut sondas = vec![entrega.sonda.clone()];
+    if partes.mutacion {
+        sondas.push(mutacion::sonda_mutacion(ej, tarea).sonda);
+    }
+    if partes.nativas {
+        sondas.extend(perfiles::sondas_nativas(repo, tarea));
+    }
+    let pedidas: Vec<perfiles::herramientas::Herramienta> = [
+        (
+            partes.gitleaks,
+            perfiles::herramientas::Herramienta::Gitleaks,
+        ),
+        (
+            partes.cargo_audit,
+            perfiles::herramientas::Herramienta::CargoAudit,
+        ),
+        (partes.clippy, perfiles::herramientas::Herramienta::Clippy),
+        (
+            partes.eficiencia,
+            perfiles::herramientas::Herramienta::Eficiencia,
+        ),
+    ]
+    .into_iter()
+    .filter(|(pedida, _)| *pedida)
+    .map(|(_, herramienta)| herramienta)
+    .collect();
+    sondas.extend(perfiles::herramientas::sondas_de(ej, tarea, repo, &pedidas));
     let mut hallazgos: Vec<Hallazgo> = sondas.iter().flat_map(|s| s.hallazgos.clone()).collect();
     // El juez ve los hallazgos de las sondas (el ciclo de módulos topa `diseno.modularidad`).
     let juicio = juzgar_diseno(tarea, juez, repo, &hallazgos)?;
@@ -641,6 +844,8 @@ fn medir(
     let puntajes = DIMENSIONES
         .iter()
         .map(|&dimension| match dimension {
+            // Una dimensión que la calibración no pidió no se mide: sin veredicto, no un puntaje falso.
+            _ if !partes.mide(dimension) => sin_veredicto_puntaje(dimension, NO_MEDIDA.into()),
             Dimension::Funciona => funciona(tarea, contrato, oculto, &entrega.escenarios),
             Dimension::Diseno => puntaje_diseno(juez, resultado.as_ref(), &topes),
             Dimension::Completitud => {
@@ -2577,6 +2782,7 @@ mod tests {
     fn opciones(home: &Path) -> OpcionesOraculo {
         OpcionesOraculo {
             timeout: Duration::from_secs(60),
+            partes: None,
             home: Some(home.to_path_buf()),
         }
     }
@@ -3785,6 +3991,502 @@ mod tests {
             !v.avisos.iter().any(|a| a == pendientes::CONFIANZA_CON_RED),
             "{:?}",
             v.avisos
+        );
+    }
+
+    // ---- Tarea 12, parte técnica 1: cada caso de calibración corre solo sus partes ----
+
+    /// Ejecutor de suites que anota el destino de cada llamada y responde con `dentro`.
+    struct Grabador<'a> {
+        destinos: std::cell::RefCell<Vec<String>>,
+        dentro: Correr<'a>,
+    }
+
+    impl<'a> Grabador<'a> {
+        fn nuevo(dentro: Correr<'a>) -> Self {
+            Grabador {
+                destinos: std::cell::RefCell::new(Vec::new()),
+                dentro,
+            }
+        }
+
+        fn correr(&self, e: &contenedor::Ejecucion) -> Result<contenedor::Resultado, ErrorOraculo> {
+            self.destinos
+                .borrow_mut()
+                .push(e.oraculo_destino.clone().unwrap_or_default());
+            (self.dentro)(e)
+        }
+
+        fn corrio(&self, destino: &str) -> bool {
+            self.destinos.borrow().iter().any(|d| d == destino)
+        }
+    }
+
+    /// Ejecutor de herramientas que anota cada comando y responde como una imagen sana.
+    struct HerramientasGrabadas {
+        cmds: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        sanas: HerramientasSanas,
+    }
+
+    impl EjecutorHerramienta for HerramientasGrabadas {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            self.cmds.borrow_mut().push(cmd.to_string());
+            self.sanas.ejecutar(cmd)
+        }
+
+        fn tiene_rustsec(&self) -> bool {
+            self.sanas.tiene_rustsec()
+        }
+    }
+
+    /// Comandos que anotó una fábrica de herramientas grabadas.
+    type Comandos = std::rc::Rc<std::cell::RefCell<Vec<String>>>;
+
+    /// Fábrica de herramientas que anota los comandos en la lista que devuelve.
+    fn herramientas_grabadas() -> (
+        impl Fn(&Preparada) -> Box<dyn EjecutorHerramienta>,
+        Comandos,
+    ) {
+        let cmds: Comandos = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let copia = cmds.clone();
+        let fabrica = move |_: &Preparada| -> Box<dyn EjecutorHerramienta> {
+            Box::new(HerramientasGrabadas {
+                cmds: copia.clone(),
+                sanas: HerramientasSanas {
+                    faltan: Vec::new(),
+                    fuga: false,
+                },
+            })
+        };
+        (fabrica, cmds)
+    }
+
+    /// Redactor falso: cuenta sus llamadas y responde un resumen fijo.
+    struct RedactorContado {
+        llamadas: Cell<u32>,
+    }
+
+    impl RedactorContado {
+        fn nuevo() -> Self {
+            RedactorContado {
+                llamadas: Cell::new(0),
+            }
+        }
+
+        fn llamadas(&self) -> u32 {
+            self.llamadas.get()
+        }
+    }
+
+    impl Redactor for RedactorContado {
+        fn redactar(
+            &self,
+            _informe: &crate::tipos::Informe,
+        ) -> Result<crate::oracle::informe::Redaccion, ErrorOraculo> {
+            self.llamadas.set(self.llamadas.get() + 1);
+            Ok(crate::oracle::informe::Redaccion {
+                resumen: "resumen falso".into(),
+                riesgos: Vec::new(),
+                proximos_pasos: Vec::new(),
+                costo_usd: 0.1,
+            })
+        }
+    }
+
+    /// Respuesta fija del juez para todos sus ítems en `rubricas`, con evidencia que cita `src/lib.rs`.
+    fn respuesta_para(rubricas: &[Rubrica]) -> String {
+        let items: Vec<Value> = rubricas
+            .iter()
+            .flat_map(|r| r.item.iter())
+            .filter(|i| i.mide != Mide::Sonda && juez::dimension_de(&i.id).is_some())
+            .map(|i| item_juez(&i.id, 2, json!([ev_lib()])))
+            .collect();
+        respuesta_juez(json!(items), json!([]))
+    }
+
+    /// Evaluación de la tarea de Rust con `partes` y las dependencias dadas. Su home lleva la caché lista.
+    fn evaluar_con_partes(
+        base: &Path,
+        repo: &Path,
+        partes: Option<Partes>,
+        deps: Dependencias,
+    ) -> Veredicto {
+        let tarea = tarea_rust(base);
+        let home = home_con_cache(base, LOCK_SANO);
+        let o = OpcionesOraculo {
+            partes,
+            ..opciones(&home)
+        };
+        evaluar_con(repo, &tarea, &o, deps).expect("evalúa")
+    }
+
+    #[test]
+    fn oraculo_partes_seguridad_no_corre_las_suites() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let junit = correr_suites(JUNIT_CONTRATO);
+        let grabador = Grabador::nuevo(&junit);
+        let correr = |e: &contenedor::Ejecucion| grabador.correr(e);
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        evaluar_con_partes(
+            base.path(),
+            &repo,
+            Some(partes_de(Dimension::Seguridad, &rubricas)),
+            deps_de(&correr, &herramientas(&[])),
+        );
+        assert!(!grabador.corrio(DIR_CONTRATO), "{:?}", grabador.destinos);
+        assert!(!grabador.corrio(DIR_OCULTO), "{:?}", grabador.destinos);
+    }
+
+    #[test]
+    fn oraculo_partes_seguridad_no_llama_al_juez_ni_al_redactor() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let juez = JuezFalso::con(&respuesta_para(&rubricas), 0.25);
+        let redactor = RedactorContado::nuevo();
+        let junit = correr_suites(JUNIT_CONTRATO);
+        evaluar_con_partes(
+            base.path(),
+            &repo,
+            Some(partes_de(Dimension::Seguridad, &rubricas)),
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                redactor: Some(&redactor),
+                ..deps_de(&junit, &herramientas(&[]))
+            },
+        );
+        assert_eq!(juez.llamadas(), 0, "Seguridad no tiene ítems del juez");
+        assert_eq!(
+            redactor.llamadas(),
+            0,
+            "el redactor no mide ninguna dimensión"
+        );
+    }
+
+    #[test]
+    fn oraculo_partes_seguridad_no_llama_sondas_de_otras_dimensiones() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let junit = correr_suites(JUNIT_CONTRATO);
+        let (fabrica, cmds) = herramientas_grabadas();
+        evaluar_con_partes(
+            base.path(),
+            &repo,
+            Some(partes_de(Dimension::Seguridad, &rubricas)),
+            deps_de(&junit, &fabrica),
+        );
+        let cmds = cmds.borrow();
+        assert!(
+            cmds.iter().any(|c| c.contains("gitleaks detect")),
+            "{cmds:?}"
+        );
+        assert!(
+            !cmds.iter().any(|c| c.contains("clippy")
+                || c.contains("bench-eficiencia")
+                || c.contains("mutants")),
+            "{cmds:?}"
+        );
+    }
+
+    #[test]
+    fn oraculo_partes_diseno_llama_al_juez_y_no_al_redactor() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let juez = JuezFalso::con(&respuesta_para(&rubricas), 0.25);
+        let redactor = RedactorContado::nuevo();
+        let junit = correr_suites(JUNIT_CONTRATO);
+        evaluar_con_partes(
+            base.path(),
+            &repo,
+            Some(partes_de(Dimension::Diseno, &rubricas)),
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                redactor: Some(&redactor),
+                ..deps_de(&junit, &herramientas(&[]))
+            },
+        );
+        assert_eq!(juez.llamadas(), 1, "Diseño tiene ítems del juez");
+        assert_eq!(
+            redactor.llamadas(),
+            0,
+            "el redactor no mide ninguna dimensión"
+        );
+    }
+
+    #[test]
+    fn oraculo_partes_completitud_corre_la_suite_oculta() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let junit = correr_suites(JUNIT_CONTRATO);
+        let grabador = Grabador::nuevo(&junit);
+        let correr = |e: &contenedor::Ejecucion| grabador.correr(e);
+        evaluar_con_partes(
+            base.path(),
+            &repo,
+            Some(partes_de(Dimension::Completitud, &rubricas)),
+            deps_de(&correr, &herramientas(&[])),
+        );
+        assert!(grabador.corrio(DIR_OCULTO), "{:?}", grabador.destinos);
+        assert!(!grabador.corrio(DIR_CONTRATO), "{:?}", grabador.destinos);
+    }
+
+    #[test]
+    fn oraculo_partes_none_corre_todo_y_el_redactor_corre() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let redactor = RedactorContado::nuevo();
+        let junit = correr_suites(JUNIT_CONTRATO);
+        let grabador = Grabador::nuevo(&junit);
+        let correr = |e: &contenedor::Ejecucion| grabador.correr(e);
+        evaluar_con_partes(
+            base.path(),
+            &repo,
+            None,
+            Dependencias {
+                redactor: Some(&redactor),
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        assert!(grabador.corrio(DIR_CONTRATO), "{:?}", grabador.destinos);
+        assert!(grabador.corrio(DIR_OCULTO), "{:?}", grabador.destinos);
+        assert_eq!(redactor.llamadas(), 1, "sin partes, el redactor corre");
+    }
+
+    /// Nombres de las partes que `p` lleva, en orden alfabético.
+    fn nombres_de(p: &Partes) -> Vec<&'static str> {
+        let marcas = [
+            ("descarga", p.descarga),
+            ("juez_config", p.juez_config),
+            ("contrato", p.contrato),
+            ("oculto", p.oculto),
+            ("entrega", p.entrega),
+            ("nativas", p.nativas),
+            ("gitleaks", p.gitleaks),
+            ("cargo_audit", p.cargo_audit),
+            ("clippy", p.clippy),
+            ("eficiencia", p.eficiencia),
+            ("mutacion", p.mutacion),
+            ("juez_diseno", p.juez_diseno),
+            ("redactor", p.redactor),
+        ];
+        let mut nombres: Vec<&'static str> = marcas
+            .iter()
+            .filter(|(_, marcada)| *marcada)
+            .map(|(nombre, _)| *nombre)
+            .collect();
+        nombres.sort_unstable();
+        nombres
+    }
+
+    #[test]
+    fn partes_de_fija_la_eleccion_de_cada_dimension() {
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        // Las tres dimensiones con ítems del juez comparten el conjunto: el juez ve los hallazgos de todas las sondas.
+        let juzgadas = [
+            "descarga",
+            "entrega",
+            "nativas",
+            "gitleaks",
+            "cargo_audit",
+            "clippy",
+            "eficiencia",
+            "mutacion",
+            "juez_diseno",
+        ];
+        let esperado: [(Dimension, Vec<&str>); 9] = [
+            (
+                Dimension::Funciona,
+                vec!["contrato", "descarga", "entrega", "oculto"],
+            ),
+            (
+                Dimension::Seguridad,
+                vec!["cargo_audit", "descarga", "gitleaks", "nativas"],
+            ),
+            (Dimension::Eficiencia, vec!["descarga", "eficiencia"]),
+            (Dimension::Estructura, juzgadas.to_vec()),
+            (Dimension::Arquitectura, juzgadas.to_vec()),
+            (Dimension::Diseno, juzgadas.to_vec()),
+            (
+                Dimension::Completitud,
+                vec!["descarga", "entrega", "oculto"],
+            ),
+            (
+                Dimension::Entrega,
+                vec!["descarga", "entrega", "juez_config"],
+            ),
+            (Dimension::Pruebas, vec!["descarga", "mutacion"]),
+        ];
+        for (dimension, partes) in esperado {
+            let mut partes = partes;
+            partes.sort_unstable();
+            let elegidas = partes_de(dimension, &rubricas);
+            assert_eq!(nombres_de(&elegidas), partes, "{dimension:?}");
+            assert_eq!(elegidas.dimension, Some(dimension), "{dimension:?}");
+        }
+    }
+
+    #[test]
+    fn partes_de_sin_items_del_juez_pide_solo_sus_sondas() {
+        let esperado = [
+            (Dimension::Estructura, vec!["clippy", "descarga", "nativas"]),
+            (Dimension::Arquitectura, vec!["descarga", "nativas"]),
+            (Dimension::Diseno, vec!["descarga"]),
+        ];
+        for (dimension, partes) in esperado {
+            assert_eq!(
+                nombres_de(&partes_de(dimension, &[])),
+                partes,
+                "{dimension:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn partes_de_toda_parte_con_contenedor_pide_la_descarga() {
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        for dimension in DIMENSIONES {
+            let p = partes_de(dimension, &rubricas);
+            let con_contenedor = p.contrato
+                || p.oculto
+                || p.entrega
+                || p.gitleaks
+                || p.cargo_audit
+                || p.clippy
+                || p.eficiencia
+                || p.mutacion
+                || p.juez_config;
+            assert!(p.descarga || !con_contenedor, "{dimension:?}");
+        }
+    }
+
+    #[test]
+    fn oraculo_partes_dimension_calibrada_da_el_mismo_puntaje_que_con_todas() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let respuesta = respuesta_para(&rubricas);
+        for dimension in DIMENSIONES {
+            let con_todas = evaluar_doble(base.path(), &repo, None, &rubricas, &respuesta);
+            let calibrada = evaluar_doble(
+                base.path(),
+                &repo,
+                Some(partes_de(dimension, &rubricas)),
+                &rubricas,
+                &respuesta,
+            );
+            assert_eq!(
+                puntaje_de_prueba(&calibrada, dimension),
+                puntaje_de_prueba(&con_todas, dimension),
+                "{dimension:?}"
+            );
+        }
+    }
+
+    /// Evaluación con dobles deterministas: suites sanas, herramientas sanas y un juez de respuesta fija.
+    fn evaluar_doble(
+        base: &Path,
+        repo: &Path,
+        partes: Option<Partes>,
+        rubricas: &[Rubrica],
+        respuesta: &str,
+    ) -> Veredicto {
+        let juez = JuezFalso::con(respuesta, 0.0);
+        let junit = correr_suites(JUNIT_CONTRATO);
+        let base_evaluacion = tempfile::tempdir_in(base).expect("base de la evaluación");
+        evaluar_con_partes(
+            base_evaluacion.path(),
+            repo,
+            partes,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas,
+                ..deps_de(&junit, &herramientas(&[]))
+            },
+        )
+    }
+
+    #[test]
+    fn oraculo_partes_dimension_no_calibrada_dice_no_medida() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let v = evaluar_doble(
+            base.path(),
+            &repo,
+            Some(partes_de(Dimension::Seguridad, &rubricas)),
+            &rubricas,
+            &respuesta_para(&rubricas),
+        );
+        assert_eq!(
+            puntaje_de_prueba(&v, Dimension::Seguridad).sin_veredicto,
+            None,
+            "la calibrada se mide"
+        );
+        for dimension in DIMENSIONES
+            .into_iter()
+            .filter(|d| *d != Dimension::Seguridad)
+        {
+            assert_eq!(
+                puntaje_de_prueba(&v, dimension).sin_veredicto.as_deref(),
+                Some("no medida en esta calibración"),
+                "{dimension:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn oraculo_partes_juez_de_config_solo_corre_con_entrega() {
+        let respuesta = json!([{
+            "clave": "build.jobs",
+            "necesidad": "innecesaria",
+            "motivo": "el proyecto no lo usa",
+            "cita": "jobs = 2",
+        }])
+        .to_string();
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_con_config(base.path());
+        let juez = JuezFalso::con(&respuesta, 0.0);
+        let junit = correr_suites(JUNIT_CONTRATO);
+        evaluar_con_partes(
+            base.path(),
+            &repo,
+            Some(partes_de(Dimension::Seguridad, &[])),
+            Dependencias {
+                juez_config: Some(&juez),
+                ..deps_de(&junit, &herramientas(&[]))
+            },
+        );
+        assert_eq!(
+            juez.llamadas(),
+            0,
+            "Seguridad no entra el juez de la configuración"
+        );
+
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_con_config(base.path());
+        let juez = JuezFalso::con(&respuesta, 0.0);
+        evaluar_con_partes(
+            base.path(),
+            &repo,
+            Some(partes_de(Dimension::Entrega, &[])),
+            Dependencias {
+                juez_config: Some(&juez),
+                ..deps_de(&junit, &herramientas(&[]))
+            },
+        );
+        assert_eq!(
+            juez.llamadas(),
+            1,
+            "el juez de la configuración va a Entrega"
         );
     }
 }

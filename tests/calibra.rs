@@ -6,6 +6,7 @@ use std::process::{Command, Output};
 
 use root::oracle::calibra::{ARCHIVO, Calibraciones, calibrar_tarea};
 use root::oracle::tarea::Tarea;
+use root::oracle::{OpcionesOraculo, Partes};
 use root::tipos::Dimension;
 use root::tipos::{Puntaje, Veredicto};
 
@@ -160,7 +161,7 @@ fn calibra_cli_tarea_inexistente_sale_con_3() {
 #[test]
 fn calibra_tarea_dos_corridas_agregan_filas_y_no_borran_las_anteriores() {
     let home = home_con_tarea("");
-    let evaluador = |_: &Tarea, _: &Path| Ok(veredicto_plano());
+    let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| Ok(veredicto_plano());
     let mut rutas = Vec::<PathBuf>::new();
     for semilla in [42, 43] {
         calibrar_tarea(
@@ -180,4 +181,35 @@ fn calibra_tarea_dos_corridas_agregan_filas_y_no_borran_las_anteriores() {
     assert_eq!(leido.filas[0].semilla, 42, "la primera fila sigue ahí");
     assert_eq!(leido.filas[1].semilla, 43);
     assert_eq!(leido.filas[0].dimension, Dimension::Seguridad);
+}
+
+#[test]
+fn calibra_tarea_evalua_la_base_y_cada_caso_con_las_partes_de_su_dimension() {
+    let home = home_con_tarea("");
+    let vistas = std::cell::RefCell::new(Vec::<Option<Partes>>::new());
+    let evaluador = |_: &Tarea, _: &Path, o: &OpcionesOraculo| {
+        vistas.borrow_mut().push(o.partes);
+        Ok(veredicto_plano())
+    };
+    calibrar_tarea(
+        home.path(),
+        "calibra-fixture",
+        "seguridad",
+        4,
+        42,
+        Some(Path::new(FIXTURE)),
+        &evaluador,
+    )
+    .expect("calibra");
+    let vistas = vistas.borrow();
+    // Línea base más cuatro casos: todos con las partes de Seguridad.
+    assert_eq!(vistas.len(), 5, "{vistas:?}");
+    for partes in vistas.iter() {
+        let partes = partes.expect("la calibración pasa partes");
+        assert_eq!(partes.dimension, Some(Dimension::Seguridad));
+        assert!(partes.mide(Dimension::Seguridad));
+        assert!(!partes.mide(Dimension::Diseno));
+        assert!(!partes.oculto, "Seguridad no corre la suite oculta");
+        assert!(!partes.redactor, "la calibración no llama al redactor");
+    }
 }

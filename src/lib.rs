@@ -142,7 +142,7 @@ fn oraculo_calibrar(
         n,
         semilla,
         repo,
-        &|tarea, ruta| oracle::evaluar(ruta, tarea, &oracle::OpcionesOraculo::default()),
+        &|tarea, ruta, opciones| oracle::evaluar(ruta, tarea, opciones),
     )?;
     if json {
         println!("{}", serde_json::to_string_pretty(&fila)?);

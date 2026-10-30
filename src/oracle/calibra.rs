@@ -12,8 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::ErrorOraculo;
 use super::tarea::Tarea;
+use super::{ErrorOraculo, OpcionesOraculo, partes_de};
 use crate::borrado;
 use crate::tipos::{Dimension, Puntaje, Veredicto};
 
@@ -269,14 +269,21 @@ pub fn calibrar_tarea(
     n: u32,
     semilla: u64,
     repo_cli: Option<&Path>,
-    evaluador: &dyn Fn(&Tarea, &Path) -> Result<Veredicto, ErrorOraculo>,
+    evaluador: &dyn Fn(&Tarea, &Path, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo>,
 ) -> Result<Fila, ErrorOraculo> {
     let dim = Dimension::desde_clave(dimension)
         .ok_or_else(|| ErrorOraculo::Uso(format!("dimensión desconocida: {dimension}")))?;
     let tarea = super::tarea::cargar_en(home, nombre)?;
     let repo = repo_de(&tarea, repo_cli)?;
+    // La base y cada caso corren las mismas partes: solo la dimensión calibrada se mide.
+    let rubricas = super::rubrica::cargar_embebidas()
+        .map_err(|e| ErrorOraculo::Infra(format!("rúbricas embebidas: {e}")))?;
+    let opciones = OpcionesOraculo {
+        partes: Some(partes_de(dim, &rubricas)),
+        ..OpcionesOraculo::default()
+    };
     let fila = calibrar_con(&tarea, dim, n as usize, semilla, &repo, &|ruta| {
-        evaluador(&tarea, ruta)
+        evaluador(&tarea, ruta, &opciones)
     })?;
     agregar(home, &fila)?;
     Ok(fila)
@@ -838,7 +845,7 @@ mod tests {
         super::inyectar::pruebas::copiar(Path::new(FIXTURE), &repo);
         let _ = tarea_en(&carpeta, "\n[calibracion]\nrepo = \"repo-bueno\"\n");
         let vistos = RefCell::new(Vec::<PathBuf>::new());
-        let evaluador = |_: &Tarea, ruta: &Path| {
+        let evaluador = |_: &Tarea, ruta: &Path, _: &OpcionesOraculo| {
             vistos.borrow_mut().push(ruta.to_path_buf());
             Ok(veredicto_base())
         };
@@ -861,7 +868,7 @@ mod tests {
         let carpeta = home.path().join("oraculos").join("calibra-fixture");
         std::fs::create_dir_all(&carpeta).expect("carpeta");
         let _ = tarea_en(&carpeta, "");
-        let evaluador = |_: &Tarea, _: &Path| Ok(veredicto_base());
+        let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| Ok(veredicto_base());
         let error = calibrar_tarea(
             home.path(),
             "calibra-fixture",
@@ -914,7 +921,7 @@ mod tests {
         let carpeta = home.path().join("oraculos").join("calibra-fixture");
         std::fs::create_dir_all(&carpeta).expect("carpeta");
         let _ = tarea_en(&carpeta, "");
-        let evaluador = |_: &Tarea, _: &Path| Ok(veredicto_base());
+        let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| Ok(veredicto_base());
         for _ in 0..2 {
             calibrar_tarea(
                 home.path(),
@@ -935,7 +942,7 @@ mod tests {
     #[test]
     fn calibra_tarea_dimension_desconocida_es_uso() {
         let home = tempfile::tempdir().expect("home");
-        let evaluador = |_: &Tarea, _: &Path| Ok(veredicto_base());
+        let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| Ok(veredicto_base());
         let error = calibrar_tarea(
             home.path(),
             "calibra-fixture",

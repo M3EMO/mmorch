@@ -104,6 +104,7 @@ fn oraculo_home_evaluar_y_llamadas_escriben_solo_en_su_home() {
     let opciones = OpcionesOraculo {
         timeout: Duration::from_secs(60),
         home: Some(b.path().to_path_buf()),
+        partes: None,
     };
     let _ = evaluar(repo.path(), &tarea, &opciones);
     let despues = gates(b.path());

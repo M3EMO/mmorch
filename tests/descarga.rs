@@ -64,6 +64,7 @@ fn opciones(home: &Path) -> OpcionesOraculo {
     OpcionesOraculo {
         timeout: LIMITE,
         home: Some(home.to_path_buf()),
+        partes: None,
     }
 }
 

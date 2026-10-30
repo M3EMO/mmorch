@@ -604,21 +604,54 @@ pub fn eficiencia(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoSonda
     }
 }
 
+/// Una de las cuatro sondas de herramientas del perfil `rust`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Herramienta {
+    Gitleaks,
+    CargoAudit,
+    Clippy,
+    Eficiencia,
+}
+
 /// Las cuatro sondas de herramientas del perfil `rust`. Otro lenguaje da vector vacío.
 pub fn sondas_herramientas(
     ej: &dyn EjecutorHerramienta,
     tarea: &Tarea,
     repo: &Path,
 ) -> Vec<ResultadoSonda> {
+    sondas_de(
+        ej,
+        tarea,
+        repo,
+        &[
+            Herramienta::Gitleaks,
+            Herramienta::CargoAudit,
+            Herramienta::Clippy,
+            Herramienta::Eficiencia,
+        ],
+    )
+}
+
+/// Solo las sondas de herramientas que `quienes` pide, en ese orden. Otro lenguaje da vector vacío.
+/// Una calibración pide las suyas (Tarea 12): una sonda que no se pide no llama a su contenedor.
+pub fn sondas_de(
+    ej: &dyn EjecutorHerramienta,
+    tarea: &Tarea,
+    repo: &Path,
+    quienes: &[Herramienta],
+) -> Vec<ResultadoSonda> {
     if tarea.lenguaje != "rust" {
         return Vec::new();
     }
-    vec![
-        gitleaks(ej, tarea),
-        cargo_audit(ej, tarea, repo),
-        clippy(ej, tarea),
-        eficiencia(ej, tarea),
-    ]
+    quienes
+        .iter()
+        .map(|quien| match quien {
+            Herramienta::Gitleaks => gitleaks(ej, tarea),
+            Herramienta::CargoAudit => cargo_audit(ej, tarea, repo),
+            Herramienta::Clippy => clippy(ej, tarea),
+            Herramienta::Eficiencia => eficiencia(ej, tarea),
+        })
+        .collect()
 }
 
 #[cfg(test)]
