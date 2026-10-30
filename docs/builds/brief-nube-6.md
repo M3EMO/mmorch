@@ -10,7 +10,7 @@ El contrato del proyecto vive en `GOAL.md`. Sus invariantes mandan sobre todo lo
 
 ## Base y rama
 
-- Commit de partida: lo pone el orquestador. Es la mezcla de la nube 5 en `claude/root-e7813e`.
+- Commit de partida: la punta de `claude/root-e7813e`. Esa punta trae la mezcla de la nube 5 (6ee7c1d) y este brief.
 - Trabajá en tu propia rama de sesión. Al terminar, hacé push de esa rama.
 - Las builds de la nube 1 a 5 ya entraron a la base. Leé el informe de la nube 5 antes de empezar. Está en `docs/builds/`, con un nombre que termina en `build-nube-5.md`.
 
