@@ -105,9 +105,15 @@ pub struct Preparado {
     pub paquetes: Vec<String>,
     /// `true` si no hay rúbricas embebidas: el formulario lleva solo la decisión y el orden.
     pub sin_rubricas: bool,
-    /// Rastros de cada paquete: cuántos hay y en qué archivo queda su lista (desempate 45).
-    #[serde(default)]
+    /// Rastros de cada paquete. Van a `validez/rastros.json` (ver `ruta_rastros_en`), no a la salida
+    /// (desempate 18): por eso no se serializan.
+    #[serde(default, skip_serializing)]
     pub rastros: Vec<ResumenRastros>,
+}
+
+/// Dónde queda `rastros.json` dentro de `home`: `<home>/validez/rastros.json`.
+pub fn ruta_rastros_en(home: &Path) -> PathBuf {
+    home.join("validez").join("rastros.json")
 }
 
 /// Resumen de los rastros de un paquete a ciegas. La lista completa está en `casos/ciego/<archivo>`.
@@ -182,15 +188,25 @@ pub fn validar_con(
     })
 }
 
-/// Arma los paquetes a ciegas de `fuentes` en `casos/ciego/`, con la semilla `semilla`.
+/// Arma los paquetes a ciegas de `fuentes` en `casos/ciego/`, con la semilla `semilla`. Escribe los
+/// rastros de cada paquete en `<home>/validez/rastros.json` (desempate 18).
 pub fn preparar_ciego(
     casos: &Path,
     fuentes: &Path,
     semilla: u64,
+    home: &Path,
 ) -> Result<Preparado, ErrorOraculo> {
     let rubricas = rubrica::cargar_embebidas()
         .map_err(|e| ErrorOraculo::Infra(format!("rúbricas embebidas: {e}")))?;
-    preparar_ciego_con(casos, fuentes, semilla, &rubricas)
+    let preparado = preparar_ciego_con(casos, fuentes, semilla, &rubricas)?;
+    let ruta = ruta_rastros_en(home);
+    if let Some(carpeta) = ruta.parent() {
+        fs::create_dir_all(carpeta).map_err(|e| io_infra("crear la carpeta de validez", &e))?;
+    }
+    let texto = serde_json::to_string_pretty(&preparado.rastros)
+        .map_err(|e| ErrorOraculo::Infra(format!("serializar los rastros: {e}")))?;
+    fs::write(&ruta, format!("{texto}\n")).map_err(|e| io_infra("escribir rastros.json", &e))?;
+    Ok(preparado)
 }
 
 /// Como `preparar_ciego`, con las rúbricas que recibe. Los tests pasan rúbricas de fixture.
@@ -1024,7 +1040,7 @@ impl Azar {
 }
 
 /// Palabras que delatan el origen de un paquete: ECC, SDLC y los modelos (desempate 45). Se buscan como
-/// palabra completa y sin distinguir mayúsculas.
+/// subcadena y sin distinguir mayúsculas: `opus2` cuenta (desempate 19).
 const PALABRAS_DE_RASTRO: [&str; 6] = ["ecc", "sdlc", "claude", "haiku", "sonnet", "opus"];
 
 /// Claves de `[package]` y de `[workspace.package]` que nombran al autor o al repo (desempate 45).
@@ -1074,11 +1090,10 @@ fn revisar_copia(raiz: &Path, actual: &Path, salida: &mut ArchivoRastros) -> io:
         let mut bytes = fs::read(&ruta)?;
         if entrada.file_name() == "Cargo.toml" {
             match std::str::from_utf8(&bytes).ok().map(limpiar_cargo_toml) {
-                Some(Ok(Some(limpio))) => {
+                Some(Ok(limpio)) => {
                     fs::write(&ruta, &limpio)?;
                     bytes = limpio.into_bytes();
                 }
-                Some(Ok(None)) => {}
                 _ => salida.avisos.push(format!(
                     "{relativa}: no parsea como TOML; no se borraron authors, repository ni homepage"
                 )),
@@ -1105,13 +1120,13 @@ fn texto_de(bytes: &[u8]) -> Option<&str> {
     std::str::from_utf8(bytes).ok()
 }
 
-/// Quita `authors`, `repository` y `homepage` de `[package]` y de `[workspace.package]`. `Ok(None)` si no
-/// quita nada: el archivo queda igual. `Err` si no parsea.
-fn limpiar_cargo_toml(texto: &str) -> Result<Option<String>, String> {
+/// Reescribe `texto` sin `authors`, `repository` y `homepage` de `[package]` y de `[workspace.package]`.
+/// Siempre reescribe, aunque no quite nada: el formato no delata el origen (desempate 20). `Err` si no
+/// parsea.
+fn limpiar_cargo_toml(texto: &str) -> Result<String, String> {
     let mut tabla: toml::Table = toml::from_str(texto).map_err(|e| e.to_string())?;
-    let mut quito = false;
     if let Some(paquete) = tabla.get_mut("package").and_then(toml::Value::as_table_mut) {
-        quito |= quitar_claves_de_autor(paquete);
+        quitar_claves_de_autor(paquete);
     }
     if let Some(paquete) = tabla
         .get_mut("workspace")
@@ -1119,24 +1134,19 @@ fn limpiar_cargo_toml(texto: &str) -> Result<Option<String>, String> {
         .and_then(|ws| ws.get_mut("package"))
         .and_then(toml::Value::as_table_mut)
     {
-        quito |= quitar_claves_de_autor(paquete);
+        quitar_claves_de_autor(paquete);
     }
-    if !quito {
-        return Ok(None);
-    }
-    toml::to_string(&tabla).map(Some).map_err(|e| e.to_string())
+    toml::to_string(&tabla).map_err(|e| e.to_string())
 }
 
-fn quitar_claves_de_autor(tabla: &mut toml::Table) -> bool {
-    let mut quito = false;
+fn quitar_claves_de_autor(tabla: &mut toml::Table) {
     for clave in CLAVES_DE_AUTOR {
-        quito |= tabla.remove(clave).is_some();
+        tabla.remove(clave);
     }
-    quito
 }
 
-/// Apariciones de `PALABRAS_DE_RASTRO` en `texto`: `(línea 1-based, palabra)`. Una letra o un dígito pegados
-/// a la palabra la descartan: `recclamo` no es `ecc`.
+/// Apariciones de `PALABRAS_DE_RASTRO` en `texto`: `(línea 1-based, palabra)`, en orden de aparición. Cuenta
+/// la subcadena, sin distinguir mayúsculas: `opus2` y `recclamo` cuentan (desempate 19).
 fn buscar_palabras(texto: &str) -> Vec<(u32, String)> {
     let mut hallazgos = Vec::new();
     for (indice, linea) in texto.lines().enumerate() {
@@ -1145,14 +1155,7 @@ fn buscar_palabras(texto: &str) -> Vec<(u32, String)> {
                 let Some(hallada) = linea.get(pos..pos + palabra.len()) else {
                     continue;
                 };
-                if !hallada.eq_ignore_ascii_case(palabra) {
-                    continue;
-                }
-                let antes = linea[..pos].chars().next_back();
-                let despues = linea[pos + palabra.len()..].chars().next();
-                if antes.is_none_or(|c| !c.is_alphanumeric())
-                    && despues.is_none_or(|c| !c.is_alphanumeric())
-                {
+                if hallada.eq_ignore_ascii_case(palabra) {
                     hallazgos.push((indice as u32 + 1, hallada.to_string()));
                 }
             }
@@ -1996,7 +1999,7 @@ fuente = "fixture"
     }
 
     #[test]
-    fn validez_rastros_recclamo_no_cuenta_como_ecc() {
+    fn validez_rastros_recclamo_cuenta_como_ecc() {
         let dir = TempDir::new().expect("temporal");
         let casos = dir.path().join("casos");
         let repo = dir.path().join("repos").join("fuente");
@@ -2006,9 +2009,33 @@ fuente = "fixture"
         let apar = apariciones(&rastros_de(&casos, &p.paquetes[0]));
         assert_eq!(
             apar,
-            vec![("notas.md".to_string(), 1, "ecc".to_string())],
-            "solo la palabra completa"
+            vec![
+                ("notas.md".to_string(), 1, "ecc".to_string()),
+                ("notas.md".to_string(), 1, "ecc".to_string()),
+            ],
+            "la subcadena cuenta: recclamo y el ecc suelto"
         );
+    }
+
+    #[test]
+    fn validez_rastros_cargo_sin_claves_de_autor_se_reescribe_sin_comentarios() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path().join("casos");
+        let repo = dir.path().join("repos").join("fuente");
+        escribir(
+            &repo.join("Cargo.toml"),
+            "# Comentario del autor\n[package]\nname = \"sinautor\"\nversion = \"0.3.0\"\n",
+        );
+        let manifiesto = manifiesto_de_una_fuente(dir.path(), &repo);
+        let p = preparar_ciego_con(&casos, &manifiesto, 42, &rubricas()).expect("prepara");
+        let copia = casos.join("ciego").join(&p.paquetes[0]).join("repo");
+        let texto = fs::read_to_string(copia.join("Cargo.toml")).expect("copiado");
+        assert!(
+            !texto.contains("Comentario"),
+            "sin authors también se reescribe y pierde el comentario: {texto}"
+        );
+        let tabla: toml::Table = toml::from_str(&texto).expect("sigue siendo TOML");
+        assert_eq!(tabla["package"]["name"].as_str(), Some("sinautor"));
     }
 
     #[test]
@@ -2054,9 +2081,8 @@ fuente = "fixture"
     }
 
     #[test]
-    fn validez_rastros_palabra_completa_sin_distinguir_mayusculas() {
-        let texto =
-            "Hecho con ECC; Claude, sonnet-4 y Opus.\nopus2, xopus y recclamo no cuentan.\n";
+    fn validez_rastros_subcadena_sin_distinguir_mayusculas() {
+        let texto = "Hecho con ECC; Claude, sonnet-4 y Opus.\nopus2, xopus y recclamo cuentan.\n";
         assert_eq!(
             buscar_palabras(texto),
             vec![
@@ -2064,7 +2090,23 @@ fuente = "fixture"
                 (1, "Claude".to_string()),
                 (1, "sonnet".to_string()),
                 (1, "Opus".to_string()),
+                (2, "opus".to_string()),
+                (2, "opus".to_string()),
+                (2, "ecc".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn validez_rastros_buscar_palabras_encuentra_opus_pegado_y_sdlc_con_guion_bajo() {
+        let hallazgos = buscar_palabras("modelo opus2 y SDLC_v1");
+        assert!(
+            hallazgos.contains(&(1, "opus".to_string())),
+            "opus pegado a un dígito cuenta: {hallazgos:?}"
+        );
+        assert!(
+            hallazgos.contains(&(1, "SDLC".to_string())),
+            "SDLC seguido de _ cuenta: {hallazgos:?}"
         );
     }
 
