@@ -784,7 +784,8 @@ mod tests {
 
     #[test]
     fn pendiente_desde_pasa_la_tasa_de_un_test_inestable() {
-        let tarea = tarea_en_oraculos(Path::new("/nada"), "tarea-x", "shell");
+        let home = tempfile::tempdir().expect("home");
+        let tarea = tarea_en_oraculos(home.path(), "tarea-x", "shell");
         let mut colab = BTreeMap::new();
         colab.insert(
             "test_a::uno".to_string(),

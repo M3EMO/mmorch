@@ -6,6 +6,11 @@ set -euo pipefail
 # Sin claves: con ellas, la suite con podman gasta API real.
 unset DEEPSEEK_API_KEY ANTHROPIC_API_KEY
 
+# Sin variables GIT_* de repo: un `git commit` las exporta al hook y los tests las heredarían.
+# Espejo de VARIABLES_GIT_DE_REPO en src/oracle/mod.rs.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+    GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM
+
 base="${ROOT_TESTS_BASE:-$HOME/.cache/root-tests}"
 mkdir -p "$base"
 

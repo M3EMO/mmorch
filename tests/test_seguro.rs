@@ -121,6 +121,37 @@ fn test_seguro_sale_con_el_codigo_de_cargo() {
     assert_eq!(estado.code(), Some(7));
 }
 
+/// Las variables `GIT_*` que apuntan a un repo. Espejo de `VARIABLES_GIT_DE_REPO` en `src/oracle/mod.rs`.
+const VARIABLES_GIT_DE_REPO: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+];
+
+#[test]
+fn test_seguro_quita_las_variables_git_de_repo_del_entorno() {
+    // Un `git commit` exporta GIT_INDEX_FILE y GIT_DIR al hook. Ninguna debe llegar a cargo.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let extra: Vec<(&str, String)> = VARIABLES_GIT_DE_REPO
+        .iter()
+        .map(|nombre| (*nombre, format!("/x/{nombre}")))
+        .collect();
+    let (_, entorno, _) = correr(dir.path(), 0, &extra, &["algo"]);
+    for nombre in VARIABLES_GIT_DE_REPO {
+        assert!(
+            !entorno.contains_key(*nombre),
+            "{nombre} llegó a cargo: {entorno:?}"
+        );
+    }
+}
+
 #[test]
 fn test_seguro_root_sin_podman_llega_al_comando() {
     let dir = tempfile::tempdir().expect("temp dir");
