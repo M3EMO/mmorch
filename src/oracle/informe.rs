@@ -733,8 +733,7 @@ fn confianza(v: &Veredicto) -> Confianza {
             .map(|e| e.id.clone())
             .collect(),
         tests_pendientes: v.pendientes.clone(),
-        // El veredicto no trae la ficha, así que no hay de dónde sacar las ambigüedades abiertas.
-        ambiguedades: Vec::new(),
+        ambiguedades: v.ambiguedades.clone(),
         sin_calibrar: v.sin_calibrar.clone(),
         sin_veredicto: v
             .puntajes
@@ -1653,7 +1652,10 @@ modulos = ["config"]
         assert_eq!(c.sin_veredicto.len(), 1);
         assert_eq!(c.sin_veredicto[0].dimension, Dimension::Diseno);
         assert_eq!(c.sin_veredicto[0].motivo, "juez no corrido");
-        assert!(c.ambiguedades.is_empty(), "el veredicto no trae la ficha");
+        assert!(
+            c.ambiguedades.is_empty(),
+            "sin revisión guardada no hay ambigüedades"
+        );
         assert!(c.avisos.iter().any(|a| a.contains("pudo filtrarse")));
     }
 

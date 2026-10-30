@@ -410,7 +410,7 @@ pub fn preparar_con_juez(
     }
     let (preparacion, registro) = match tarea.lenguaje.as_str() {
         "rust" => preparar_rust(repo, tarea, home, timeout, &inv, &credenciales)?,
-        "python" => python::preparar_python(repo, tarea, home, timeout)?,
+        "python" => python::preparar_python(repo, tarea, home, timeout, &config.registros)?,
         _ => (
             Preparacion::Lista {
                 cache: None,

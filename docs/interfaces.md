@@ -1569,11 +1569,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ]
     },
     "Confianza": {
-      "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos\nsalen del `Veredicto`; `ambiguedades` queda vacío porque el veredicto no trae la ficha.",
+      "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos\nsalen del `Veredicto`.",
       "type": "object",
       "properties": {
         "ambiguedades": {
-          "description": "Ambigüedades abiertas de la ficha. Vacío: el veredicto no las trae.",
+          "description": "Ambigüedades abiertas de la ficha, como `línea <n>: <frase>`. Salen de la revisión guardada del juez.",
           "type": "array",
           "default": [],
           "items": {
@@ -2131,6 +2131,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "Veredicto": {
       "type": "object",
       "properties": {
+        "ambiguedades": {
+          "description": "Ambigüedades abiertas de la ficha, como `línea <n>: <frase>`. Vacío si no hay revisión guardada\npara el spec. Un veredicto viejo lee vacío.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "avisos": {
           "description": "Problemas que no tumban la evaluación, por ejemplo un `colab.json` ilegible.",
           "type": "array",
@@ -2495,11 +2503,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ]
     },
     "Confianza": {
-      "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos\nsalen del `Veredicto`; `ambiguedades` queda vacío porque el veredicto no trae la ficha.",
+      "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos\nsalen del `Veredicto`.",
       "type": "object",
       "properties": {
         "ambiguedades": {
-          "description": "Ambigüedades abiertas de la ficha. Vacío: el veredicto no las trae.",
+          "description": "Ambigüedades abiertas de la ficha, como `línea <n>: <frase>`. Salen de la revisión guardada del juez.",
           "type": "array",
           "default": [],
           "items": {
@@ -4162,6 +4170,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
   "title": "Veredicto",
   "type": "object",
   "properties": {
+    "ambiguedades": {
+      "description": "Ambigüedades abiertas de la ficha, como `línea <n>: <frase>`. Vacío si no hay revisión guardada\npara el spec. Un veredicto viejo lee vacío.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
     "avisos": {
       "description": "Problemas que no tumban la evaluación, por ejemplo un `colab.json` ilegible.",
       "type": "array",
@@ -4339,11 +4355,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ]
     },
     "Confianza": {
-      "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos\nsalen del `Veredicto`; `ambiguedades` queda vacío porque el veredicto no trae la ficha.",
+      "description": "Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos\nsalen del `Veredicto`.",
       "type": "object",
       "properties": {
         "ambiguedades": {
-          "description": "Ambigüedades abiertas de la ficha. Vacío: el veredicto no las trae.",
+          "description": "Ambigüedades abiertas de la ficha, como `línea <n>: <frase>`. Salen de la revisión guardada del juez.",
           "type": "array",
           "default": [],
           "items": {

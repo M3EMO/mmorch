@@ -24,6 +24,14 @@ struct JuezFalso {
 }
 
 impl JuezFalso {
+    /// El proveedor del juez falla: no hay veredicto.
+    fn con_error(causa: &str) -> JuezFalso {
+        JuezFalso {
+            respuesta: Err(causa.to_string()),
+            prompts: RefCell::new(Vec::new()),
+        }
+    }
+
     fn ok(texto: &str) -> JuezFalso {
         JuezFalso {
             respuesta: Ok(RespuestaJuez {
@@ -1210,4 +1218,221 @@ fn ficha_cli_juez_con_root_toml_invalido_sale_2_sin_pedidos() {
         String::from_utf8_lossy(&salida.stderr)
     );
     assert_eq!(srv.peticiones(), 0);
+}
+
+// --- Tarea 30, parte 1: la revisión del juez se guarda en ROOT_HOME/fichas ---
+
+/// Sha256 en hexadecimal de un texto, calculado aparte de `ficha` para comparar.
+fn sha_aparte(texto: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(texto.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Revisión con una ambigüedad de la frase real (línea 38 de `spec-completa.md`), como la deja el juez.
+fn revision_con_ambiguedad() -> ficha::Revision {
+    ficha::Revision {
+        hallazgos: Vec::new(),
+        ambiguedades: vec![ficha::Ambiguedad {
+            frase: FRASE_REAL.into(),
+            linea: 38,
+            lectura_a: "lock por fragmento de clave".into(),
+            lectura_b: "lock por fragmento de nodo".into(),
+        }],
+        juez: "ok".into(),
+        descartadas: Vec::new(),
+    }
+}
+
+#[test]
+fn ficha_guardar_revision_escribe_el_json_en_home_fichas_con_el_sha_del_spec() {
+    let home = tempfile::tempdir().expect("home");
+    let spec = fixture("spec-completa.md");
+    let revision = revision_con_ambiguedad();
+
+    let ruta = ficha::guardar_revision(home.path(), &spec, &revision).expect("guarda");
+
+    let esperada = home
+        .path()
+        .join("fichas")
+        .join(format!("{}.json", sha_aparte(&spec)));
+    assert_eq!(ruta, esperada);
+    let leida: ficha::Revision =
+        serde_json::from_str(&fs::read_to_string(&ruta).expect("lee")).expect("JSON de Revision");
+    assert_eq!(leida, revision);
+    let entradas = fs::read_dir(home.path().join("fichas"))
+        .expect("carpeta fichas")
+        .count();
+    assert_eq!(entradas, 1, "solo el JSON, sin temporales");
+}
+
+#[test]
+fn ficha_guardar_revision_no_escribe_en_la_carpeta_del_spec() {
+    let home = tempfile::tempdir().expect("home");
+    let repo = tempfile::tempdir().expect("repo");
+    let spec = fixture("spec-completa.md");
+    fs::write(repo.path().join("spec.md"), &spec).expect("spec en el repo");
+
+    ficha::guardar_revision(home.path(), &spec, &revision_con_ambiguedad()).expect("guarda");
+
+    let en_repo: Vec<String> = fs::read_dir(repo.path())
+        .expect("repo")
+        .map(|e| {
+            e.expect("entrada")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        en_repo,
+        vec!["spec.md".to_string()],
+        "nada nuevo en el repo"
+    );
+}
+
+#[test]
+fn ficha_guardar_si_hay_juicio_sin_juez_no_guarda_nada() {
+    let home = tempfile::tempdir().expect("home");
+    let spec = fixture("spec-completa.md");
+    let revision = ficha::revisar(&spec, &ctx_vacio()).expect("revisa sin juez");
+
+    let guardada = ficha::guardar_si_hay_juicio(home.path(), &spec, &revision).expect("no falla");
+
+    assert_eq!(guardada, None);
+    assert!(
+        !home.path().join("fichas").exists(),
+        "no se crea la carpeta"
+    );
+}
+
+#[test]
+fn ficha_guardar_si_hay_juicio_con_juez_sin_veredicto_no_guarda_nada() {
+    let home = tempfile::tempdir().expect("home");
+    let spec = fixture("spec-completa.md");
+    let juez = JuezFalso::con_error("el proveedor no responde");
+    let revision = revisar_con_juez(&spec, &ctx_vacio(), &juez).expect("revisa");
+    assert!(
+        revision.juez.starts_with("sin_veredicto"),
+        "{}",
+        revision.juez
+    );
+
+    let guardada = ficha::guardar_si_hay_juicio(home.path(), &spec, &revision).expect("no falla");
+
+    assert_eq!(guardada, None);
+    assert!(!home.path().join("fichas").exists());
+}
+
+#[test]
+fn ficha_guardar_si_hay_juicio_con_veredicto_guarda_la_revision() {
+    let home = tempfile::tempdir().expect("home");
+    let spec = fixture("spec-completa.md");
+    let juez = JuezFalso::ok(&ambiguedad_real());
+    let revision = revisar_con_juez(&spec, &ctx_vacio(), &juez).expect("revisa");
+
+    let guardada = ficha::guardar_si_hay_juicio(home.path(), &spec, &revision).expect("guarda");
+
+    let ruta = guardada.expect("con veredicto se guarda");
+    assert!(ruta.is_file(), "{}", ruta.display());
+}
+
+#[test]
+fn ficha_ambiguedades_guardadas_sin_archivo_es_none() {
+    let home = tempfile::tempdir().expect("home");
+    let spec = fixture("spec-completa.md");
+    assert_eq!(
+        ficha::ambiguedades_guardadas(home.path(), &spec).expect("no es error"),
+        None
+    );
+}
+
+#[test]
+fn ficha_ambiguedades_guardadas_devuelve_las_de_la_revision_del_mismo_spec() {
+    let home = tempfile::tempdir().expect("home");
+    let spec = fixture("spec-completa.md");
+    ficha::guardar_revision(home.path(), &spec, &revision_con_ambiguedad()).expect("guarda");
+
+    let leidas = ficha::ambiguedades_guardadas(home.path(), &spec)
+        .expect("lee")
+        .expect("hay revisión");
+
+    assert_eq!(leidas.len(), 1);
+    assert_eq!(leidas[0].frase, FRASE_REAL);
+    assert_eq!(leidas[0].linea, 38);
+}
+
+#[test]
+fn ficha_ambiguedades_guardadas_con_spec_cambiado_es_none() {
+    let home = tempfile::tempdir().expect("home");
+    let spec = fixture("spec-completa.md");
+    ficha::guardar_revision(home.path(), &spec, &revision_con_ambiguedad()).expect("guarda");
+    let cambiado = format!("{spec}\n");
+
+    let leidas = ficha::ambiguedades_guardadas(home.path(), &cambiado).expect("no es error");
+
+    assert_eq!(leidas, None, "otro texto, otro hash: no hay revisión");
+}
+
+#[test]
+fn ficha_ambiguedades_guardadas_json_roto_es_error_con_causa() {
+    let home = tempfile::tempdir().expect("home");
+    let spec = fixture("spec-completa.md");
+    let carpeta = home.path().join("fichas");
+    fs::create_dir_all(&carpeta).expect("carpeta");
+    fs::write(
+        carpeta.join(format!("{}.json", sha_aparte(&spec))),
+        "{no es json",
+    )
+    .expect("escribe");
+
+    let causa = ficha::ambiguedades_guardadas(home.path(), &spec).expect_err("JSON roto");
+
+    assert!(!causa.is_empty());
+}
+
+#[test]
+fn ficha_cli_juez_con_veredicto_guarda_la_revision_en_root_home() {
+    let srv = Servidor::arranca(vec![(200, deepseek_juez_vacio())]);
+    let home = home_juez(&srv.url, "usd_entrada = 1.0\nusd_salida = 2.0");
+
+    let salida = revisar_con_juez_cli(home.path());
+
+    assert_eq!(
+        codigo(&salida),
+        0,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let ruta = home
+        .path()
+        .join("fichas")
+        .join(format!("{}.json", sha_aparte(&fixture("spec-completa.md"))));
+    assert!(ruta.is_file(), "{}", ruta.display());
+}
+
+#[test]
+fn ficha_cli_sin_juez_no_guarda_revision() {
+    let home = tempfile::tempdir().expect("home");
+
+    let salida = Command::new(env!("CARGO_BIN_EXE_r00t"))
+        .env("ROOT_HOME", home.path())
+        .args([
+            "ficha",
+            "revisar",
+            "--spec",
+            &ruta_fixture("spec-completa.md"),
+        ])
+        .output()
+        .expect("no se pudo ejecutar el binario root");
+
+    assert_eq!(
+        codigo(&salida),
+        3,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    assert!(!home.path().join("fichas").exists());
 }

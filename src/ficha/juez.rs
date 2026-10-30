@@ -11,7 +11,7 @@ use crate::tipos::Eleccion;
 
 /// Fase del flujo que va al `Evento` de la llamada.
 const FASE: &str = "ficha";
-const JUEZ_OK: &str = "ok";
+pub(super) const JUEZ_OK: &str = "ok";
 pub(super) const SIN_VEREDICTO: &str = "sin_veredicto";
 
 /// Prompt fijo del juez. Pide un arreglo JSON y refuta por default.

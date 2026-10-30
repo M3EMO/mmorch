@@ -295,7 +295,7 @@ pub struct ParteSinVeredicto {
 }
 
 /// Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos
-/// salen del `Veredicto`; `ambiguedades` queda vacío porque el veredicto no trae la ficha.
+/// salen del `Veredicto`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Confianza {
     /// Repeticiones del oculto que corrieron.
@@ -310,7 +310,7 @@ pub struct Confianza {
     /// Tests de `[[entorno]]` con su motivo.
     #[serde(default)]
     pub tests_pendientes: Vec<Pendiente>,
-    /// Ambigüedades abiertas de la ficha. Vacío: el veredicto no las trae.
+    /// Ambigüedades abiertas de la ficha, como `línea <n>: <frase>`. Salen de la revisión guardada del juez.
     #[serde(default)]
     pub ambiguedades: Vec<String>,
     /// Dimensiones con veredicto que no están calibradas.
@@ -372,6 +372,10 @@ pub struct Veredicto {
     /// `NoListo` (`test_oculto_fuera_de_requisitos`). Un veredicto viejo lee vacío.
     #[serde(default)]
     pub ocultos_fallidos: Vec<String>,
+    /// Ambigüedades abiertas de la ficha, como `línea <n>: <frase>`. Vacío si no hay revisión guardada
+    /// para el spec. Un veredicto viejo lee vacío.
+    #[serde(default)]
+    pub ambiguedades: Vec<String>,
 }
 
 impl Default for Veredicto {
@@ -399,6 +403,7 @@ impl Default for Veredicto {
             requisitos: Vec::new(),
             sin_calibrar: Vec::new(),
             ocultos_fallidos: Vec::new(),
+            ambiguedades: Vec::new(),
         }
     }
 }
@@ -598,6 +603,7 @@ mod tests {
             requisitos: Vec::new(),
             sin_calibrar: Vec::new(),
             ocultos_fallidos: Vec::new(),
+            ambiguedades: Vec::new(),
         }
     }
 

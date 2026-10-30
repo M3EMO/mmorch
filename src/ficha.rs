@@ -4,12 +4,16 @@
 pub mod juez;
 
 use std::collections::BTreeSet;
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error as ErrorDerive;
 
-use juez::SIN_VEREDICTO;
+use juez::{JUEZ_OK, SIN_VEREDICTO};
 pub use juez::{JuezAmbiguedad, JuezProveedor, revisar_con_juez, revisar_con_tope};
 
 /// Errores de la ficha. Salen con código 2: sin ficha válida no hay evaluación.
@@ -34,13 +38,19 @@ pub enum ErrorFicha {
     },
     #[error("el juez falló: {0}")]
     Juez(String),
+    #[error("no se pudo guardar la revisión en {ruta}")]
+    Guardar {
+        ruta: String,
+        #[source]
+        fuente: std::io::Error,
+    },
 }
 
 impl ErrorFicha {
-    /// Código de salida del proceso: 2 por error de uso, 3 por fallo del juez.
+    /// Código de salida del proceso: 2 por error de uso, 3 por fallo del juez o de escritura.
     pub fn codigo_de_salida(&self) -> u8 {
         match self {
-            ErrorFicha::Juez(_) => 3,
+            ErrorFicha::Juez(_) | ErrorFicha::Guardar { .. } => 3,
             _ => 2,
         }
     }
@@ -176,6 +186,73 @@ impl Revision {
             0
         }
     }
+}
+
+/// Carpeta de las revisiones guardadas del juez, dentro de `ROOT_HOME`. Nunca va al repo.
+const CARPETA_FICHAS: &str = "fichas";
+
+/// Sha256 en hexadecimal del texto del spec. Su revisión guardada se llama `<sha>.json`.
+pub fn sha_del_spec(spec: &str) -> String {
+    Sha256::digest(spec.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Ruta de la revisión guardada de `spec` dentro de `home`.
+fn ruta_revision(home: &Path, spec: &str) -> PathBuf {
+    home.join(CARPETA_FICHAS)
+        .join(format!("{}.json", sha_del_spec(spec)))
+}
+
+/// Guarda la revisión del juez de `spec` en `<home>/fichas/<sha>.json`. La escritura es atómica:
+/// un temporal en la misma carpeta y un `rename`. `home` va explícito; nunca se usa el repo.
+pub fn guardar_revision(
+    home: &Path,
+    spec: &str,
+    revision: &Revision,
+) -> Result<PathBuf, ErrorFicha> {
+    let ruta = ruta_revision(home, spec);
+    let error = |fuente: io::Error| ErrorFicha::Guardar {
+        ruta: ruta.display().to_string(),
+        fuente,
+    };
+    let carpeta = ruta.parent().unwrap_or(home);
+    fs::create_dir_all(carpeta).map_err(error)?;
+    let texto = serde_json::to_string_pretty(revision).map_err(|e| error(io::Error::other(e)))?;
+    let mut temporal = tempfile::NamedTempFile::new_in(carpeta).map_err(error)?;
+    temporal.write_all(texto.as_bytes()).map_err(error)?;
+    temporal.as_file().sync_all().map_err(error)?;
+    temporal.persist(&ruta).map_err(|e| error(e.error))?;
+    Ok(ruta)
+}
+
+/// Guarda la revisión solo si el juez dio veredicto. Sin juez, o con un juez sin veredicto, no escribe
+/// nada y da `None`.
+pub fn guardar_si_hay_juicio(
+    home: &Path,
+    spec: &str,
+    revision: &Revision,
+) -> Result<Option<PathBuf>, ErrorFicha> {
+    if revision.juez != JUEZ_OK {
+        return Ok(None);
+    }
+    guardar_revision(home, spec, revision).map(Some)
+}
+
+/// Ambigüedades de la revisión guardada de `spec`. `Ok(None)` si no hay revisión para ese texto, así que
+/// un spec cambiado no hereda las de otro. `Err` con la causa si el archivo no se lee o no parsea: la
+/// evaluación lo convierte en aviso.
+pub fn ambiguedades_guardadas(home: &Path, spec: &str) -> Result<Option<Vec<Ambiguedad>>, String> {
+    let ruta = ruta_revision(home, spec);
+    let texto = match fs::read_to_string(&ruta) {
+        Ok(texto) => texto,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    serde_json::from_str::<Revision>(&texto)
+        .map(|revision| Some(revision.ambiguedades))
+        .map_err(|e| e.to_string())
 }
 
 /// Datos del repo que algunas reglas comparan. `None` apaga la regla.

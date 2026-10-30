@@ -501,6 +501,8 @@ fn ficha_accion(json: bool, accion: &FichaAccion) -> Result<u8, Error> {
                 Some(juez) => ficha::revisar_con_tope(&texto, &ctx, &juez, tope)?,
                 None => ficha::revisar(&texto, &ctx)?,
             };
+            // Solo con veredicto del juez: la revisión queda en ROOT_HOME/fichas para que `evaluar` la lea.
+            ficha::guardar_si_hay_juicio(&config::root_home(), &texto, &revision)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&revision)?);
             } else {

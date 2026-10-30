@@ -3,13 +3,16 @@
 //! Dentro de cada contenedor, `/cache` es la carpeta `<hash>.parcial` del requirements.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use super::credenciales::{Credencial, netrc_de_pip, redactar_secretos};
 use super::inventario::{
     PartesGit, RequisitosPip, motivo_git, partes_git, redactar, requisitos_pip,
     textos_de_requisitos,
@@ -20,7 +23,8 @@ use super::{
     hallazgo, hash_corto, limpiar_parcial, parcial_de, temporal_de,
 };
 use crate::borrado;
-use crate::oracle::contenedor::{self, Ejecucion};
+use crate::config::RegistroConfig;
+use crate::oracle::contenedor::{self, Ejecucion, Resultado};
 use crate::oracle::entrega::{Podman, PodmanReal};
 use crate::oracle::tarea::Tarea;
 use crate::oracle::{ErrorOraculo, infra};
@@ -45,6 +49,11 @@ const ARCHIVO_BUILD: &str = "build-requires.txt";
 /// Requisitos de build sin `pyproject.toml`: el respaldo de PEP 517.
 const REQUISITOS_BUILD_RESPALDO: [&str; 2] = ["setuptools", "wheel"];
 const ARCHIVO_PYPROJECT: &str = "pyproject.toml";
+/// `netrc` de pip dentro de la carpeta de trabajo de la descarga. Lleva las claves de los registros que
+/// coinciden con un índice; se borra al terminar la descarga.
+const ARCHIVO_NETRC: &str = "pip.netrc";
+/// Ruta de `ARCHIVO_NETRC` dentro del contenedor, donde `trabajo` está montada en solo lectura.
+const RUTA_NETRC_CONTENEDOR: &str = "/trabajo/pip.netrc";
 /// Requisitos de build de cada sdist de la caché: nombre del archivo → `[build-system].requires` o `null`.
 /// Lo escribe el contenedor de descarga; el host no abre ningún sdist.
 pub const ARCHIVO_REQUISITOS_SDIST: &str = "requisitos-sdist.json";
@@ -375,23 +384,121 @@ struct Salida {
     stderr: String,
 }
 
+/// Corre contenedores de la descarga de Python. Producción usa `contenedor::ejecutar`; los tests pasan uno
+/// falso que guarda cada ejecución.
+trait EjecutorDeDescarga {
+    fn ejecutar(&self, ejecucion: &Ejecucion) -> Result<Resultado, ErrorOraculo>;
+}
+
+/// Ejecutor real: lanza el contenedor con podman.
+struct ContenedorReal;
+
+impl EjecutorDeDescarga for ContenedorReal {
+    fn ejecutar(&self, ejecucion: &Ejecucion) -> Result<Resultado, ErrorOraculo> {
+        contenedor::ejecutar(ejecucion)
+    }
+}
+
+/// Lo que la descarga de Python toma de fuera: el podman del digest, el ejecutor de contenedores y las
+/// variables de Root. Producción pasa las reales; los tests, dobles.
+struct DependenciasPython<'a> {
+    podman: &'a dyn Podman,
+    ejecutor: &'a dyn EjecutorDeDescarga,
+    leer_env: &'a dyn Fn(&str) -> Option<String>,
+}
+
+/// Cómo corre sus contenedores una descarga de Python: ejecutor, tope de tiempo y `netrc` de pip.
+struct Corrida<'a> {
+    home: &'a Path,
+    tarea: &'a Tarea,
+    timeout: Duration,
+    ejecutor: &'a dyn EjecutorDeDescarga,
+    /// Hay un `netrc` de pip en `trabajo`: los contenedores de pip lo leen con `NETRC`.
+    netrc: bool,
+    /// Credenciales del `netrc`. Solo sirven para redactar lo que sale de los contenedores.
+    credenciales: &'a [Credencial],
+}
+
 /// Corre un comando de red con `parcial` montada en `/cache`, rw. El contenedor no monta `/repo`:
-/// ve solo `trabajo`, la copia de los `requirements*.txt` (C1).
+/// ve solo `trabajo`, la copia de los `requirements*.txt` (C1). No recibe el `netrc` de pip.
 fn correr(
-    home: &Path,
-    tarea: &Tarea,
+    corrida: &Corrida,
     trabajo: &Path,
     parcial: &Path,
     cmd: String,
-    timeout: Duration,
 ) -> Result<Salida, ErrorOraculo> {
-    let salida = temporal_de(home)?;
-    let ejecucion = ejecucion_python(&tarea.imagen, trabajo, parcial, salida.path(), cmd, timeout);
-    let resultado = contenedor::ejecutar(&ejecucion)?;
+    ejecutar_en_contenedor(corrida, trabajo, parcial, cmd, false)
+}
+
+/// Como `correr`, para `pip download`: si hay `netrc` de pip, el contenedor lo lee con `NETRC`.
+fn correr_pip(
+    corrida: &Corrida,
+    trabajo: &Path,
+    parcial: &Path,
+    cmd: String,
+) -> Result<Salida, ErrorOraculo> {
+    ejecutar_en_contenedor(corrida, trabajo, parcial, cmd, corrida.netrc)
+}
+
+fn ejecutar_en_contenedor(
+    corrida: &Corrida,
+    trabajo: &Path,
+    parcial: &Path,
+    cmd: String,
+    con_netrc: bool,
+) -> Result<Salida, ErrorOraculo> {
+    let salida = temporal_de(corrida.home)?;
+    let mut ejecucion = ejecucion_python(
+        &corrida.tarea.imagen,
+        trabajo,
+        parcial,
+        salida.path(),
+        cmd,
+        corrida.timeout,
+    );
+    if con_netrc {
+        ejecucion
+            .env
+            .push(("NETRC".into(), RUTA_NETRC_CONTENEDOR.into()));
+    }
+    // Ningún texto que sale del contenedor lleva una clave del `netrc`, ni siquiera en un error de podman.
+    let resultado = corrida
+        .ejecutor
+        .ejecutar(&ejecucion)
+        .map_err(|error| match error {
+            ErrorOraculo::Infra(texto) => {
+                ErrorOraculo::Infra(redactar_secretos(&texto, corrida.credenciales))
+            }
+            otro => otro,
+        })?;
     Ok(Salida {
         codigo: resultado.codigo,
-        stderr: resultado.stderr,
+        stderr: redactar_secretos(&resultado.stderr, corrida.credenciales),
     })
+}
+
+/// Escribe el `netrc` de pip en `trabajo` con permisos 0600. `create_new` no pisa ni sigue un archivo previo.
+fn escribir_netrc(trabajo: &Path, contenido: &str) -> Result<(), ErrorOraculo> {
+    let mut archivo = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(trabajo.join(ARCHIVO_NETRC))
+        .map_err(|e| infra("escribir el netrc de pip", e))?;
+    archivo
+        .write_all(contenido.as_bytes())
+        .map_err(|e| infra("escribir el netrc de pip", e))
+}
+
+/// Índices que usa `pip download`: el `--index-url`, o PyPI si no hay, y los `--extra-index-url`.
+fn indices_de(req: &RequisitosPip) -> Vec<String> {
+    let mut indices = vec![
+        req.indice_propio
+            .clone()
+            .unwrap_or_else(|| INDICE_PYPI.to_string()),
+    ];
+    indices.extend(req.indices_extra.iter().cloned());
+    indices
 }
 
 /// Sha256 de un archivo de la caché.
@@ -410,22 +517,32 @@ enum Fin {
 }
 
 /// Descarga de Python para `requirements.txt`. Cache por hash del archivo (`<hash>.parcial` y luego el nombre final).
+/// `registros` son los `[[registro]]` de `root.toml`: los que coinciden con un índice del requirements
+/// reciben su credencial en un `netrc` de pip (decisión 29).
 pub(super) fn preparar_python(
     repo: &Path,
     tarea: &Tarea,
     home: &Path,
     timeout: Duration,
+    registros: &[RegistroConfig],
 ) -> Result<Paso, ErrorOraculo> {
-    preparar_python_con(repo, tarea, home, timeout, &PodmanReal)
+    let leer_env = |nombre: &str| std::env::var(nombre).ok();
+    let deps = DependenciasPython {
+        podman: &PodmanReal,
+        ejecutor: &ContenedorReal,
+        leer_env: &leer_env,
+    };
+    preparar_python_con(repo, tarea, home, timeout, registros, &deps)
 }
 
-/// Como `preparar_python`, con el ejecutor de podman para el digest de la imagen. Los tests pasan uno falso.
+/// Como `preparar_python`, con las dependencias que se le pasen. Los tests pasan dobles.
 fn preparar_python_con(
     repo: &Path,
     tarea: &Tarea,
     home: &Path,
     timeout: Duration,
-    podman: &dyn Podman,
+    registros: &[RegistroConfig],
+    deps: &DependenciasPython,
 ) -> Result<Paso, ErrorOraculo> {
     let ruta = repo.join(ARCHIVO_REQUIREMENTS);
     if !ruta.is_file() {
@@ -440,7 +557,7 @@ fn preparar_python_con(
     }
     // El texto de `requirements.txt` con sus `-r` seguidos, y las `-c` aparte: pip no ve archivos del repo (C1, M6).
     let (texto, restricciones) = textos_de_requisitos(repo);
-    let digest = digest_imagen_con(podman, &tarea.imagen);
+    let digest = digest_imagen_con(deps.podman, &tarea.imagen);
     let hash = clave_cache_python(&texto, &restricciones, &tarea.imagen, digest.as_deref());
     // Sin digest, la clave usa la imagen sola. El Gate lo registra; no es hallazgo del producto ni corta (desempate 27).
     let sin_digest = digest.is_none().then(|| tarea.imagen.clone());
@@ -476,15 +593,30 @@ fn preparar_python_con(
     // Copia de los requirements para el contenedor: el repo no entra (C1).
     let trabajo = temporal_de(home)?;
     copiar_requisitos(repo, trabajo.path()).map_err(|e| infra("copiar los requirements", e))?;
-    let fin = match descargar_en(
+    // El `netrc` de pip solo lleva las claves de los registros que coinciden con un índice (decisión 29).
+    let netrc = netrc_de_pip(&indices_de(&req), registros, deps.leer_env);
+    if let Some(netrc) = &netrc {
+        escribir_netrc(trabajo.path(), &netrc.contenido)?;
+    }
+    let credenciales: &[Credencial] = match &netrc {
+        Some(netrc) => &netrc.credenciales,
+        None => &[],
+    };
+    let corrida = Corrida {
         home,
         tarea,
-        trabajo.path(),
-        &parcial,
-        &req,
-        &restricciones,
         timeout,
-    ) {
+        ejecutor: deps.ejecutor,
+        netrc: netrc.is_some(),
+        credenciales,
+    };
+    let fin = descargar_en(&corrida, trabajo.path(), &parcial, &req, &restricciones);
+    // El `netrc` sale de la carpeta de trabajo al terminar, también si la descarga falló.
+    if netrc.is_some() {
+        borrado::borrar_archivo_dentro(trabajo.path(), &trabajo.path().join(ARCHIVO_NETRC))
+            .map_err(|e| infra("borrar el netrc de pip", e))?;
+    }
+    let fin = match fin {
         Ok(fin) => fin,
         Err(error) => {
             limpiar_parcial(home, &parcial).map_err(|e| infra("borrar la descarga parcial", e))?;
@@ -550,13 +682,11 @@ fn hallazgo_no_instala_python(linea: &str) -> Hallazgo {
 
 /// Baja wheels, sdists, fuentes git y URLs dentro de `parcial`. Escribe el archivo offline.
 fn descargar_en(
-    home: &Path,
-    tarea: &Tarea,
+    corrida: &Corrida,
     trabajo: &Path,
     parcial: &Path,
     req: &RequisitosPip,
     restricciones: &str,
-    timeout: Duration,
 ) -> Result<Fin, ErrorOraculo> {
     // Una referencia git sin commit fijo, o con otro formato, corta antes de cualquier red (B2, M7).
     for (linea, raw) in &req.directas {
@@ -586,7 +716,7 @@ fn descargar_en(
         )
         .map_err(|e| infra("escribir el índice de pip", e))?;
         let cmd = comando_wheels(&format!("/cache/{ARCHIVO_INDICE}"), req);
-        let salida = correr(home, tarea, trabajo, parcial, cmd, timeout)?;
+        let salida = correr_pip(corrida, trabajo, parcial, cmd)?;
         if salida.codigo == 0 {
             break;
         }
@@ -616,11 +746,10 @@ fn descargar_en(
                 "indice-propio-sdist",
             ));
         }
-        let sdist =
-            match bajar_sdist_pypi(home, tarea, trabajo, parcial, timeout, &nombre, &version)? {
-                Ok(sdist) => sdist,
-                Err(corte) => return Ok(corte),
-            };
+        let sdist = match bajar_sdist_pypi(corrida, trabajo, parcial, &nombre, &version)? {
+            Ok(sdist) => sdist,
+            Err(corte) => return Ok(corte),
+        };
         paquetes
             .push(json!({"nombre": sdist.archivo, "fuente": "sdist-pypi", "sha256": sdist.sha256}));
         pendientes.remove(pos);
@@ -640,16 +769,7 @@ fn descargar_en(
     }
     lineas.extend(req.especificadores.clone());
     for (linea, raw) in &req.directas {
-        match fuente_directa(
-            home,
-            tarea,
-            trabajo,
-            parcial,
-            timeout,
-            *linea,
-            raw,
-            &mut paquetes,
-        )? {
+        match fuente_directa(corrida, trabajo, parcial, *linea, raw, &mut paquetes)? {
             Ok(ruta_local) => lineas.push(ruta_local),
             Err(corte) => return Ok(corte),
         }
@@ -657,14 +777,7 @@ fn descargar_en(
     // Build de los sdists y clones git: sus requisitos se bajan como wheels, sin ejecutar nada del proyecto.
     // Los `pyproject` de los sdists los lee el contenedor; el host solo lee el JSON que deja en la caché.
     if !nombres_sdist(parcial)?.is_empty() {
-        let salida = correr(
-            home,
-            tarea,
-            trabajo,
-            parcial,
-            comando_requisitos_sdist(),
-            timeout,
-        )?;
+        let salida = correr(corrida, trabajo, parcial, comando_requisitos_sdist())?;
         if salida.codigo != 0 {
             let motivo: String = salida.stderr.trim().chars().take(300).collect();
             return Err(ErrorOraculo::Infra(format!(
@@ -685,7 +798,7 @@ fn descargar_en(
         )
         .map_err(|e| infra("escribir los requisitos de build", e))?;
         let cmd = comando_wheels(&format!("/cache/{ARCHIVO_BUILD}"), req);
-        let salida = correr(home, tarea, trabajo, parcial, cmd, timeout)?;
+        let salida = correr_pip(corrida, trabajo, parcial, cmd)?;
         if salida.codigo != 0 {
             return match diagnosticar(&salida.stderr) {
                 Diagnostico::Producto(linea) => {
@@ -717,17 +830,15 @@ fn descargar_en(
 /// Baja el sdist de PyPI con `curl`, dentro del contenedor. Verifica el sha256 en el host. Un nombre o una
 /// versión que PyPI no tiene da un corte con su hallazgo de "no instala".
 fn bajar_sdist_pypi(
-    home: &Path,
-    tarea: &Tarea,
+    corrida: &Corrida,
     trabajo: &Path,
     parcial: &Path,
-    timeout: Duration,
     nombre: &str,
     version: &str,
 ) -> Result<Result<Sdist, Fin>, ErrorOraculo> {
     let pedir = |url: &str, archivo: &str| -> Result<(), String> {
         let cmd = comando_curl(url, archivo);
-        match correr(home, tarea, trabajo, parcial, cmd, timeout) {
+        match correr(corrida, trabajo, parcial, cmd) {
             Ok(salida) if salida.codigo == 0 => Ok(()),
             Ok(salida) => Err(salida.stderr.trim().chars().take(300).collect()),
             Err(error) => Err(error.to_string()),
@@ -747,13 +858,10 @@ fn bajar_sdist_pypi(
 
 /// Una fuente git o URL del requirements. `Ok(ruta)` es la línea local que va al archivo offline.
 /// `Err(fin)` corta la evaluación con su hallazgo.
-#[allow(clippy::too_many_arguments)]
 fn fuente_directa(
-    home: &Path,
-    tarea: &Tarea,
+    corrida: &Corrida,
     trabajo: &Path,
     parcial: &Path,
-    timeout: Duration,
     linea: u32,
     raw: &str,
     paquetes: &mut Vec<Value>,
@@ -784,7 +892,7 @@ fn fuente_directa(
         // Un clon por repo y commit: dos líneas con distinto `#subdirectory=` comparten el árbol (B3).
         if !parcial.join("src").join(&dir).is_dir() {
             let cmd = comando_clon(&partes.base, &dir, &partes.commit);
-            let salida = correr(home, tarea, trabajo, parcial, cmd, timeout)?;
+            let salida = correr(corrida, trabajo, parcial, cmd)?;
             if salida.codigo != 0 {
                 return match diagnosticar(&salida.stderr) {
                     Diagnostico::Producto(l) => Ok(Err(Fin::Corta(
@@ -826,14 +934,7 @@ fn fuente_directa(
             "url-no-soportada",
         )));
     }
-    let salida = correr(
-        home,
-        tarea,
-        trabajo,
-        parcial,
-        comando_curl(&url, &archivo),
-        timeout,
-    )?;
+    let salida = correr(corrida, trabajo, parcial, comando_curl(&url, &archivo))?;
     if salida.codigo != 0 {
         return Err(ErrorOraculo::Infra(format!(
             "infraestructura: descarga de {archivo}: {}",
@@ -1072,7 +1173,11 @@ fn copiar_requisitos(repo: &Path, destino: &Path) -> std::io::Result<()> {
 mod tests {
     use super::super::registrar;
     use super::*;
-    use crate::oracle::contenedor::SalidaPodman;
+    use crate::config::RegistroConfig;
+    use crate::oracle::contenedor::{Resultado, SalidaPodman};
+    use std::cell::RefCell;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
 
     /// Lista de build que dan los respaldos de PEP 517.
     fn respaldo() -> Vec<String> {
@@ -1421,12 +1526,18 @@ mod tests {
         fs::create_dir_all(&destino).expect("caché");
         fs::write(destino.join(ARCHIVO_OFFLINE), "six==1.16.0\n").expect("offline");
         let podman = PodmanDigest::que_responde(125, "");
+        let deps = DependenciasPython {
+            podman: &podman,
+            ejecutor: &EjecutorFalso::que_responde(0, ""),
+            leer_env: &|_: &str| None,
+        };
         let (preparacion, registro) = preparar_python_con(
             repo.path(),
             &tarea,
             home.path(),
             Duration::from_secs(60),
-            &podman,
+            &[],
+            &deps,
         )
         .expect("prepara");
         match preparacion {
@@ -1519,5 +1630,275 @@ mod tests {
             "{requisitos:?}"
         );
         assert!(hallazgos.is_empty());
+    }
+
+    // --- Tarea 30, parte 3: netrc de pip para los registros de root.toml (decisión 29) ---
+
+    /// Clave falsa del registro de prueba. Ningún texto de Root, ni argumento ni evento, debe mostrarla.
+    const CLAVE_FALSA: &str = "clave-falsa-7";
+
+    /// Ejecutor de contenedores falso: guarda cada ejecución, y lo que el primer contenedor ve en `/trabajo`
+    /// (el `netrc` de pip, con su contenido y sus permisos). Responde `codigo` y `stderr` fijos.
+    struct EjecutorFalso {
+        codigo: i32,
+        stderr: String,
+        ejecuciones: RefCell<Vec<Ejecucion>>,
+        netrc_visto: RefCell<Option<(PathBuf, String, u32)>>,
+    }
+
+    impl EjecutorFalso {
+        fn que_responde(codigo: i32, stderr: &str) -> Self {
+            EjecutorFalso {
+                codigo,
+                stderr: stderr.into(),
+                ejecuciones: RefCell::new(Vec::new()),
+                netrc_visto: RefCell::new(None),
+            }
+        }
+    }
+
+    impl EjecutorDeDescarga for EjecutorFalso {
+        fn ejecutar(&self, ejecucion: &Ejecucion) -> Result<Resultado, ErrorOraculo> {
+            self.ejecuciones.borrow_mut().push(ejecucion.clone());
+            // Un curl "baja" el wheel de la URL directa del test, para que la descarga siga.
+            if ejecucion.cmd.contains("curl")
+                && let Some(cache) = &ejecucion.cache
+            {
+                fs::write(cache.join("x-1.0-py3-none-any.whl"), b"rueda").expect("wheel falso");
+            }
+            if let Some(trabajo) = &ejecucion.trabajo {
+                let ruta = trabajo.join(ARCHIVO_NETRC);
+                if self.netrc_visto.borrow().is_none() && ruta.is_file() {
+                    let texto = fs::read_to_string(&ruta).expect("lee el netrc");
+                    let modo = fs::metadata(&ruta).expect("metadatos").permissions().mode() & 0o777;
+                    *self.netrc_visto.borrow_mut() = Some((ruta, texto, modo));
+                }
+            }
+            Ok(Resultado {
+                codigo: self.codigo,
+                stdout: String::new(),
+                stderr: self.stderr.clone(),
+                segundos: 0.0,
+            })
+        }
+    }
+
+    /// Registro privado de prueba con su clave en `ROOT_TEST_CLAVE_PIP`.
+    fn registro_pip(url: &str, usuario_env: Option<&str>) -> RegistroConfig {
+        RegistroConfig {
+            nombre: "priv".into(),
+            url: url.into(),
+            credencial_env: "ROOT_TEST_CLAVE_PIP".into(),
+            usuario_env: usuario_env.map(String::from),
+        }
+    }
+
+    /// Variables de Root de prueba: la clave del registro y su usuario.
+    fn entorno_de_prueba(nombre: &str) -> Option<String> {
+        match nombre {
+            "ROOT_TEST_CLAVE_PIP" => Some(CLAVE_FALSA.into()),
+            "ROOT_TEST_USR_PIP" => Some("usuario-falso".into()),
+            _ => None,
+        }
+    }
+
+    /// Corre la descarga de Python de un `requirements.txt` con `texto_req`, contra `ejecutor` y `leer`.
+    /// Devuelve también el `home`, para leer sus eventos.
+    fn descarga_python_con(
+        texto_req: &str,
+        registros: &[RegistroConfig],
+        ejecutor: &EjecutorFalso,
+        leer: &dyn Fn(&str) -> Option<String>,
+    ) -> (tempfile::TempDir, Result<Paso, ErrorOraculo>) {
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        fs::write(repo.path().join("requirements.txt"), texto_req).expect("requirements");
+        let tarea = tarea_python_de_prueba();
+        let podman = PodmanDigest::que_responde(125, "");
+        let deps = DependenciasPython {
+            podman: &podman,
+            ejecutor,
+            leer_env: leer,
+        };
+        let resultado = preparar_python_con(
+            repo.path(),
+            &tarea,
+            home.path(),
+            Duration::from_secs(60),
+            registros,
+            &deps,
+        );
+        (home, resultado)
+    }
+
+    const REQ_CON_INDICE: &str = "--index-url https://reg.example:8443/simple/\nsix==1.16.0\n";
+
+    #[test]
+    fn descarga_python_netrc_lleva_el_usuario_env_y_la_clave_del_registro() {
+        let ejecutor = EjecutorFalso::que_responde(0, "");
+        let registros = [registro_pip(
+            "https://reg.example:8443/simple/",
+            Some("ROOT_TEST_USR_PIP"),
+        )];
+        let (_home, resultado) =
+            descarga_python_con(REQ_CON_INDICE, &registros, &ejecutor, &entorno_de_prueba);
+        resultado.expect("la descarga corre");
+        let (ruta, texto, modo) = ejecutor
+            .netrc_visto
+            .borrow()
+            .clone()
+            .expect("el contenedor vio el netrc");
+        assert_eq!(
+            texto,
+            format!("machine reg.example login usuario-falso password {CLAVE_FALSA}\n")
+        );
+        assert_eq!(modo, 0o600, "permisos del netrc");
+        for e in ejecutor.ejecuciones.borrow().iter() {
+            assert!(
+                e.env
+                    .contains(&("NETRC".to_string(), "/trabajo/pip.netrc".to_string())),
+                "{:?}",
+                e.env
+            );
+        }
+        assert!(!ruta.exists(), "el netrc se borra al terminar");
+    }
+
+    #[test]
+    fn descarga_python_netrc_sin_usuario_env_usa_token() {
+        let ejecutor = EjecutorFalso::que_responde(0, "");
+        let registros = [registro_pip("https://reg.example:8443/simple/", None)];
+        let (_home, resultado) =
+            descarga_python_con(REQ_CON_INDICE, &registros, &ejecutor, &entorno_de_prueba);
+        resultado.expect("la descarga corre");
+        let (_, texto, _) = ejecutor.netrc_visto.borrow().clone().expect("hay netrc");
+        assert_eq!(
+            texto,
+            format!("machine reg.example login __token__ password {CLAVE_FALSA}\n")
+        );
+    }
+
+    #[test]
+    fn descarga_python_la_clave_no_llega_a_argumentos_ni_a_eventos() {
+        let ejecutor = EjecutorFalso::que_responde(0, "");
+        let registros = [registro_pip(
+            "https://reg.example:8443/simple/",
+            Some("ROOT_TEST_USR_PIP"),
+        )];
+        let (home, resultado) =
+            descarga_python_con(REQ_CON_INDICE, &registros, &ejecutor, &entorno_de_prueba);
+        let (preparacion, registro) = resultado.expect("la descarga corre");
+        for e in ejecutor.ejecuciones.borrow().iter() {
+            let args = contenedor::argumentos(e, "n").join(" ");
+            assert!(!args.contains(CLAVE_FALSA), "en los argumentos: {args}");
+            assert!(!format!("{e:?}").contains(CLAVE_FALSA), "en el Debug");
+        }
+        let registro = registro.expect("hay registro de la descarga");
+        registrar(home.path(), &tarea_python_de_prueba(), &registro).expect("registra el Gate");
+        let eventos = fs::read_to_string(home.path().join("eventos.jsonl")).expect("eventos");
+        assert!(
+            !eventos.contains(CLAVE_FALSA),
+            "en eventos.jsonl: {eventos}"
+        );
+        assert!(
+            !format!("{preparacion:?}").contains(CLAVE_FALSA),
+            "en la preparación"
+        );
+    }
+
+    #[test]
+    fn descarga_python_stderr_con_la_clave_se_redacta_en_el_resultado() {
+        // Pip falla y su texto trae la clave: lo que sale de la descarga no la muestra.
+        let ejecutor = EjecutorFalso::que_responde(1, &format!("pip: 401 con {CLAVE_FALSA}"));
+        let registros = [registro_pip(
+            "https://reg.example:8443/simple/",
+            Some("ROOT_TEST_USR_PIP"),
+        )];
+        let (_home, resultado) =
+            descarga_python_con(REQ_CON_INDICE, &registros, &ejecutor, &entorno_de_prueba);
+        let texto = match &resultado {
+            Ok((preparacion, _)) => format!("{preparacion:?}"),
+            Err(error) => error.to_string(),
+        };
+        assert!(!texto.contains(CLAVE_FALSA), "la clave no sale: {texto}");
+    }
+
+    #[test]
+    fn descarga_python_netrc_solo_llega_a_los_contenedores_de_pip() {
+        // Con una URL directa, un curl corre además de pip: ese contenedor no recibe el netrc.
+        let ejecutor = EjecutorFalso::que_responde(0, "");
+        let registros = [registro_pip(
+            "https://reg.example:8443/simple/",
+            Some("ROOT_TEST_USR_PIP"),
+        )];
+        let texto = format!("{REQ_CON_INDICE}https://files.example/x-1.0-py3-none-any.whl\n");
+        let (_home, resultado) =
+            descarga_python_con(&texto, &registros, &ejecutor, &entorno_de_prueba);
+        resultado.expect("la descarga corre");
+        let ejecuciones = ejecutor.ejecuciones.borrow();
+        let con_netrc = |e: &Ejecucion| e.env.iter().any(|(n, _)| n == "NETRC");
+        assert!(
+            ejecuciones.iter().any(|e| e.cmd.contains("curl")),
+            "hay un curl"
+        );
+        assert!(
+            ejecuciones
+                .iter()
+                .any(|e| e.cmd.contains("pip download") && con_netrc(e))
+        );
+        for e in ejecuciones.iter().filter(|e| e.cmd.contains("curl")) {
+            assert!(!con_netrc(e), "el curl no recibe el netrc: {}", e.cmd);
+        }
+    }
+
+    #[test]
+    fn descarga_python_registro_de_otro_host_no_recibe_el_netrc() {
+        let ejecutor = EjecutorFalso::que_responde(0, "");
+        let registros = [registro_pip(
+            "https://otro.example/simple/",
+            Some("ROOT_TEST_USR_PIP"),
+        )];
+        let (_home, resultado) =
+            descarga_python_con(REQ_CON_INDICE, &registros, &ejecutor, &entorno_de_prueba);
+        resultado.expect("la descarga corre");
+        assert!(ejecutor.netrc_visto.borrow().is_none(), "no hay netrc");
+        for e in ejecutor.ejecuciones.borrow().iter() {
+            assert!(!e.env.iter().any(|(n, _)| n == "NETRC"), "{:?}", e.env);
+        }
+    }
+
+    #[test]
+    fn descarga_python_host_con_otro_puerto_en_el_requirements_no_recibe_el_netrc() {
+        let ejecutor = EjecutorFalso::que_responde(0, "");
+        let registros = [registro_pip(
+            "https://reg.example:8443/simple/",
+            Some("ROOT_TEST_USR_PIP"),
+        )];
+        let texto = "--index-url https://reg.example:8443/simple/\n\
+                     --extra-index-url https://reg.example:9443/simple/\nsix==1.16.0\n";
+        let (_home, resultado) =
+            descarga_python_con(texto, &registros, &ejecutor, &entorno_de_prueba);
+        resultado.expect("la descarga corre");
+        assert!(
+            ejecutor.netrc_visto.borrow().is_none(),
+            "netrc no distingue puertos"
+        );
+    }
+
+    #[test]
+    fn descarga_python_valor_de_clave_con_salto_de_linea_no_arma_netrc() {
+        let ejecutor = EjecutorFalso::que_responde(0, "");
+        let registros = [registro_pip("https://reg.example:8443/simple/", None)];
+        let malicioso = |nombre: &str| {
+            (nombre == "ROOT_TEST_CLAVE_PIP")
+                .then(|| "x\nmachine evil.example login a password b".to_string())
+        };
+        let (_home, resultado) =
+            descarga_python_con(REQ_CON_INDICE, &registros, &ejecutor, &malicioso);
+        resultado.expect("la descarga corre");
+        assert!(
+            ejecutor.netrc_visto.borrow().is_none(),
+            "un valor inválido no entra"
+        );
     }
 }

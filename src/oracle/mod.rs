@@ -337,7 +337,7 @@ fn evaluar_con(
     o: &OpcionesOraculo,
     deps: Dependencias,
 ) -> Result<Veredicto, ErrorOraculo> {
-    verificar_ficha(tarea)?;
+    let texto_spec = verificar_ficha(tarea)?;
     let rubricas = rubrica::etiquetas(deps.rubricas);
     let repo = fs::canonicalize(repo)
         .map_err(|e| ErrorOraculo::Infra(format!("no existe el repo {}: {e}", repo.display())))?;
@@ -349,6 +349,10 @@ fn evaluar_con(
     let mut avisos = deps.avisos;
     avisos.extend(avisos_colab);
     avisos.extend(aviso_commit);
+    avisos.extend(pendientes::aviso_de_red(&colab));
+    // Las ambigüedades de la revisión guardada del juez para este spec (Tarea 30, parte 1).
+    let (ambiguedades, aviso_ficha) = ambiguedades_de_la_ficha(&texto_spec, &home);
+    avisos.extend(aviso_ficha);
     let tmp = home.join(CARPETA_TEMPORALES);
     fs::create_dir_all(&tmp).map_err(|e| infra("directorio temporal de ROOT_HOME", e))?;
     limpiar_temporales(&tmp, SystemTime::now());
@@ -370,7 +374,8 @@ fn evaluar_con(
         } => (cache, rustsec, hallazgos),
         descarga::Preparacion::SinVeredicto(hallazgos) => {
             let motivo = motivo_de_la_descarga(&hallazgos);
-            let v = sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
+            let mut v = sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
+            v.ambiguedades = ambiguedades.clone();
             return Ok(con_costo(v, &juez_config));
         }
     };
@@ -401,7 +406,8 @@ fn evaluar_con(
         Suite::SinVeredicto(motivo) => {
             avisos.push(format!("contrato: {motivo}"));
             let motivo = format!("suite del contrato sin veredicto: {motivo}");
-            let v = sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
+            let mut v = sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
+            v.ambiguedades = ambiguedades.clone();
             return Ok(con_costo(v, &juez_config));
         }
     };
@@ -423,7 +429,8 @@ fn evaluar_con(
         Suite::SinVeredicto(motivo) => {
             avisos.push(format!("oculto: {motivo}"));
             let motivo = format!("suite oculta sin veredicto: {motivo}");
-            let v = sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
+            let mut v = sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
+            v.ambiguedades = ambiguedades.clone();
             return Ok(con_costo(v, &juez_config));
         }
     };
@@ -500,6 +507,7 @@ fn evaluar_con(
         requisitos: medicion.requisitos,
         sin_calibrar,
         ocultos_fallidos: fallidos_de(&oculto),
+        ambiguedades,
     };
     // La decisión sale de reglas deterministas; el estado sale de la decisión (Tarea 13b).
     let redactor_medido = deps.redactor.map(RedactorMedido::nuevo);
@@ -986,14 +994,37 @@ fn filtrar_colab_por_commit(
 }
 
 /// Lee el spec de la tarea y exige una ficha válida. Va antes de copiar o descargar nada.
-fn verificar_ficha(tarea: &Tarea) -> Result<(), ErrorOraculo> {
+/// Aviso del veredicto cuando no hay revisión del juez para el spec. Sin ella, las ambigüedades no se miden.
+const AVISO_SIN_REVISION_JUEZ: &str = "ficha sin revisión del juez: ambigüedades sin medir";
+
+/// Lee el spec y exige una ficha válida. Devuelve el texto, que la revisión guardada usa como clave.
+fn verificar_ficha(tarea: &Tarea) -> Result<String, ErrorOraculo> {
     let ruta = tarea.dir.join(&tarea.spec);
     let texto = fs::read_to_string(&ruta).map_err(|fuente| ErrorFicha::Leer {
         ruta: ruta.display().to_string(),
         fuente,
     })?;
     ficha::extraer(&texto)?;
-    Ok(())
+    Ok(texto)
+}
+
+/// Ambigüedades de la revisión guardada del juez para `spec`, como `línea <n>: <frase>`, y el aviso que
+/// corresponde. Sin revisión, el aviso dice que no se midieron. Una revisión ilegible da aviso, no error.
+fn ambiguedades_de_la_ficha(spec: &str, home: &Path) -> (Vec<String>, Option<String>) {
+    match ficha::ambiguedades_guardadas(home, spec) {
+        Ok(Some(ambiguedades)) => (
+            ambiguedades
+                .iter()
+                .map(|a| format!("línea {}: {}", a.linea, a.frase))
+                .collect(),
+            None,
+        ),
+        Ok(None) => (Vec::new(), Some(AVISO_SIN_REVISION_JUEZ.into())),
+        Err(causa) => (
+            Vec::new(),
+            Some(format!("revisión de la ficha ilegible: {causa}")),
+        ),
+    }
 }
 
 /// Veredicto de una evaluación que no corrió: sin conteos, con sus hallazgos y pendientes. Las nueve
@@ -2361,6 +2392,7 @@ mod tests {
             ts: 1.0,
             commit: commit.into(),
             tasa: None,
+            confianza: None,
         };
         let colab = BTreeMap::from([
             ("test_a::uno".to_string(), entrada("abc")),
@@ -3574,6 +3606,183 @@ mod tests {
             v.avisos
                 .iter()
                 .any(|a| a.contains("la construcción con red tampoco tuvo red")),
+            "{:?}",
+            v.avisos
+        );
+    }
+
+    // --- Tarea 30, parte 1: las ambigüedades de la ficha llegan al informe ---
+
+    /// Frase de `SPEC` que la revisión guardada cita (línea 38).
+    const FRASE_SPEC: &str = "un lock por fragmento del almacén";
+    const AVISO_SIN_REVISION: &str = "ficha sin revisión del juez: ambigüedades sin medir";
+
+    /// Guarda en `home` la revisión del juez de `spec`, con una ambigüedad de `FRASE_SPEC`.
+    fn revision_del_juez_para(home: &Path, spec: &str) {
+        let revision = ficha::Revision {
+            hallazgos: Vec::new(),
+            ambiguedades: vec![ficha::Ambiguedad {
+                frase: FRASE_SPEC.into(),
+                linea: 38,
+                lectura_a: "lock por fragmento de clave".into(),
+                lectura_b: "lock por fragmento de nodo".into(),
+            }],
+            juez: "ok".into(),
+            descartadas: Vec::new(),
+        };
+        ficha::guardar_revision(home, spec, &revision).expect("guarda la revisión");
+    }
+
+    #[test]
+    fn oraculo_ambiguedad_guardada_llega_a_la_confianza_del_informe() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = base.path().join("home");
+        revision_del_juez_para(&home, SPEC);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(base.path(), &repo, deps_de(&correr, &herramientas(&[])));
+        let esperada = format!("línea 38: {FRASE_SPEC}");
+        assert_eq!(v.ambiguedades, vec![esperada.clone()]);
+        let informe = v.informe.as_ref().expect("hay informe");
+        assert_eq!(informe.confianza.ambiguedades, vec![esperada]);
+        assert!(
+            !v.avisos.iter().any(|a| a == AVISO_SIN_REVISION),
+            "{:?}",
+            v.avisos
+        );
+    }
+
+    #[test]
+    fn oraculo_ambiguedad_de_otro_spec_no_se_muestra_y_avisa_sin_medir() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        // La caché de Rust evita la descarga; la revisión es del spec original.
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        revision_del_juez_para(&home, SPEC);
+        // La tarea trae el spec con un byte más: otro hash, otra revisión.
+        let tarea = tarea_rust(base.path());
+        fs::write(base.path().join("tarea/spec.md"), format!("{SPEC}\n")).expect("spec cambiado");
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let fabrica = herramientas(&[]);
+        let deps = deps_de(&correr, &fabrica);
+        let v = evaluar_con(&repo, &tarea, &opciones(&home), deps).expect("evalúa");
+        assert!(v.ambiguedades.is_empty(), "{:?}", v.ambiguedades);
+        let informe = v.informe.as_ref().expect("hay informe");
+        assert!(informe.confianza.ambiguedades.is_empty());
+        assert!(
+            v.avisos.iter().any(|a| a == AVISO_SIN_REVISION),
+            "{:?}",
+            v.avisos
+        );
+    }
+
+    #[test]
+    fn oraculo_revision_de_ficha_ilegible_da_aviso_y_no_falla() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = base.path().join("home");
+        let carpeta = home.join("fichas");
+        fs::create_dir_all(&carpeta).expect("carpeta");
+        fs::write(
+            carpeta.join(format!("{}.json", ficha::sha_del_spec(SPEC))),
+            "{no es json",
+        )
+        .expect("escribe la revisión rota");
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(base.path(), &repo, deps_de(&correr, &herramientas(&[])));
+        assert!(v.ambiguedades.is_empty());
+        assert!(
+            v.avisos
+                .iter()
+                .any(|a| a.starts_with("revisión de la ficha ilegible")),
+            "{:?}",
+            v.avisos
+        );
+    }
+
+    // --- Tarea 30, parte 2: aviso de corrida de Colab con red en el veredicto ---
+
+    /// Escribe el `colab.json` de la tarea de Rust en `home`. Cada entrada: (test, commit, con marca de red).
+    fn colab_json(home: &Path, entradas: &[(&str, &str, bool)]) {
+        let piezas: Vec<String> = entradas
+            .iter()
+            .map(|(test, commit, con_marca)| {
+                let marca = if *con_marca {
+                    format!(r#","confianza":"{}""#, pendientes::CONFIANZA_CON_RED)
+                } else {
+                    String::new()
+                };
+                format!(
+                    r#""{test}":{{"resultado":"pasa","junit_sha256":"x","ts":1.0,"commit":"{commit}"{marca}}}"#
+                )
+            })
+            .collect();
+        let dir = home.join("evidencia").join("tarea-rust");
+        fs::create_dir_all(&dir).expect("carpeta de evidencia");
+        fs::write(dir.join("colab.json"), format!("{{{}}}", piezas.join(","))).expect("colab.json");
+    }
+
+    fn veredicto_con_colab(base: &Path, entradas: &[(&str, &str, bool)]) -> Veredicto {
+        let repo = repo_rust(base, LOCK_SANO);
+        let home = base.join("home");
+        colab_json(&home, entradas);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        evaluar_con_deps(base, &repo, deps_de(&correr, &herramientas(&[])))
+    }
+
+    #[test]
+    fn oraculo_colab_con_red_deja_el_aviso_en_el_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let commit = commit_de(&repo_rust(base.path(), LOCK_SANO));
+        let v = veredicto_con_colab(base.path(), &[("test_b::t3", &commit, true)]);
+        assert!(
+            v.avisos.iter().any(|a| a == pendientes::CONFIANZA_CON_RED),
+            "{:?}",
+            v.avisos
+        );
+    }
+
+    #[test]
+    fn oraculo_colab_con_red_da_el_aviso_una_sola_vez_aunque_haya_varias_entradas() {
+        let base = tempfile::tempdir().expect("base");
+        let commit = commit_de(&repo_rust(base.path(), LOCK_SANO));
+        let v = veredicto_con_colab(
+            base.path(),
+            &[("test_b::t3", &commit, true), ("test_b::t4", &commit, true)],
+        );
+        let veces = v
+            .avisos
+            .iter()
+            .filter(|a| a.as_str() == pendientes::CONFIANZA_CON_RED)
+            .count();
+        assert_eq!(veces, 1, "{:?}", v.avisos);
+    }
+
+    #[test]
+    fn oraculo_colab_sin_marca_de_red_no_deja_aviso() {
+        let base = tempfile::tempdir().expect("base");
+        let commit = commit_de(&repo_rust(base.path(), LOCK_SANO));
+        let v = veredicto_con_colab(base.path(), &[("test_b::t3", &commit, false)]);
+        assert!(
+            !v.avisos.iter().any(|a| a == pendientes::CONFIANZA_CON_RED),
+            "{:?}",
+            v.avisos
+        );
+    }
+
+    #[test]
+    fn oraculo_colab_de_otro_commit_con_red_no_deja_aviso() {
+        let base = tempfile::tempdir().expect("base");
+        let v = veredicto_con_colab(base.path(), &[("test_b::t3", "otro-commit", true)]);
+        assert!(
+            v.avisos
+                .iter()
+                .any(|a| a.contains("no entran al veredicto")),
+            "el filtro por commit corrió: {:?}",
+            v.avisos
+        );
+        assert!(
+            !v.avisos.iter().any(|a| a == pendientes::CONFIANZA_CON_RED),
             "{:?}",
             v.avisos
         );

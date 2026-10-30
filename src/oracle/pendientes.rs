@@ -63,6 +63,10 @@ pub struct ColabEntrada {
     /// y en un `colab.json` viejo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tasa: Option<crate::tipos::TasaTest>,
+    /// `CONFIANZA_CON_RED` si la corrida de esta entrada tuvo red (decisión 40). Ausente si no, y en un
+    /// `colab.json` viejo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confianza: Option<String>,
 }
 
 /// Paquete armado para correr los tests pendientes.
@@ -299,6 +303,9 @@ pub fn importar(
     }
     let sha = sha256_hex(textos.concat().as_bytes());
     let (ts, _) = observe::ahora();
+    // Decisión 40: si `unshare -rn` no funcionó en Colab, la corrida tuvo red y su confianza lo dice.
+    let con_red = junits.iter().any(|j| j.red.as_deref() == Some("con-red"));
+    let confianza = con_red.then(|| CONFIANZA_CON_RED.to_string());
 
     let mut colab = colab_de(home, &tarea.nombre)?;
     let mut resultados = BTreeMap::new();
@@ -322,6 +329,7 @@ pub fn importar(
                 ts,
                 commit: commit.to_string(),
                 tasa,
+                confianza: confianza.clone(),
             },
         );
         resultados.insert(exclusion.test.clone(), resultado);
@@ -330,9 +338,6 @@ pub fn importar(
     let ignorados = distintos.len().saturating_sub(importados);
     guardar_colab(home, &tarea.nombre, &colab)?;
 
-    // Decisión 40: si `unshare -rn` no funcionó en Colab, la corrida tuvo red y su confianza lo dice.
-    let con_red = junits.iter().any(|j| j.red.as_deref() == Some("con-red"));
-    let confianza = con_red.then(|| CONFIANZA_CON_RED.to_string());
     let mut evento = observe::evento_manual(
         &format!("pendientes-{}", tarea.nombre),
         TipoEvento::Gate,
@@ -356,6 +361,15 @@ pub fn importar(
         avisos: Vec::new(),
         confianza,
     })
+}
+
+/// Aviso del veredicto si alguna entrada de Colab trae la marca de red (decisión 40). Da uno solo, aunque
+/// haya varias entradas marcadas.
+pub fn aviso_de_red(colab: &BTreeMap<String, ColabEntrada>) -> Option<String> {
+    colab
+        .values()
+        .any(|entrada| entrada.confianza.is_some())
+        .then(|| CONFIANZA_CON_RED.to_string())
 }
 
 /// Commit con el que se armó el paquete de la tarea. `None` si no hay paquete.
@@ -758,6 +772,7 @@ mod tests {
                 ts: 1.0,
                 commit: String::new(),
                 tasa: None,
+                confianza: None,
             },
         );
         let pendientes = desde(&tarea, &colab);
@@ -783,6 +798,7 @@ mod tests {
                     total: 4,
                     wilson_inf: 0.1,
                 }),
+                confianza: None,
             },
         );
         let pendientes = desde(&tarea, &colab);
@@ -1169,5 +1185,66 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&sintaxis.stderr)
         );
+    }
+
+    // --- Tarea 30, parte 2: la marca de red de Colab llega a cada entrada y al aviso ---
+
+    #[test]
+    fn pendiente_importar_con_red_marca_cada_entrada_importada() {
+        let home = tempfile::tempdir().expect("home");
+        let tarea = tarea_en_oraculos(home.path(), "tarea-x", "shell");
+        let junit = home.path().join("con-red.xml");
+        fs::write(
+            &junit,
+            r#"<testsuite name="pendientes" root_red="con-red"><testcase classname="tests.test_a" name="uno"/></testsuite>"#,
+        )
+        .expect("junit");
+        importar(home.path(), &tarea, &[junit], "").expect("importa");
+        let entrada = &colab_de(home.path(), "tarea-x").expect("lee")["test_a::uno"];
+        assert_eq!(entrada.confianza.as_deref(), Some(CONFIANZA_CON_RED));
+    }
+
+    #[test]
+    fn pendiente_importar_sin_red_no_marca_entradas() {
+        let home = tempfile::tempdir().expect("home");
+        let tarea = tarea_en_oraculos(home.path(), "tarea-x", "shell");
+        let junits = junit_por_repeticion(home.path(), &["pasa"]);
+        importar(home.path(), &tarea, &junits, "").expect("importa");
+        let entrada = &colab_de(home.path(), "tarea-x").expect("lee")["test_a::uno"];
+        assert_eq!(entrada.confianza, None);
+    }
+
+    #[test]
+    fn pendiente_aviso_de_red_con_una_entrada_marcada_da_el_aviso_una_vez() {
+        let entrada = |confianza: Option<&str>| ColabEntrada {
+            resultado: "pasa".into(),
+            junit_sha256: "x".into(),
+            ts: 1.0,
+            commit: String::new(),
+            tasa: None,
+            confianza: confianza.map(String::from),
+        };
+        let colab = BTreeMap::from([
+            ("test_a::uno".to_string(), entrada(Some(CONFIANZA_CON_RED))),
+            ("test_a::dos".to_string(), entrada(Some(CONFIANZA_CON_RED))),
+        ]);
+        assert_eq!(aviso_de_red(&colab).as_deref(), Some(CONFIANZA_CON_RED));
+    }
+
+    #[test]
+    fn pendiente_aviso_de_red_sin_marca_es_none() {
+        let colab = BTreeMap::from([(
+            "test_a::uno".to_string(),
+            ColabEntrada {
+                resultado: "pasa".into(),
+                junit_sha256: "x".into(),
+                ts: 1.0,
+                commit: String::new(),
+                tasa: None,
+                confianza: None,
+            },
+        )]);
+        assert_eq!(aviso_de_red(&colab), None);
+        assert_eq!(aviso_de_red(&BTreeMap::new()), None);
     }
 }
