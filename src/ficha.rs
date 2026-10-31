@@ -163,7 +163,8 @@ pub struct Ambiguedad {
 }
 
 /// Resultado de revisar un spec. `ambiguedades` queda vacía hasta que corra el juez.
-/// `juez` es `"ok"` (el JSON parseó) o `"sin_veredicto: <causa>"`. Sin juez, la causa es `juez no corrido`.
+/// `juez` es `"ok"` (el JSON parseó), `"sin_veredicto: <causa>"` o `"no pedido"` (con `--solo-deterministas`).
+/// Sin juez, la causa es `juez no corrido`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Revision {
     pub hallazgos: Vec<HallazgoFicha>,
@@ -267,6 +268,9 @@ pub struct ContextoRevision {
 const ENCABEZADO: &str = "## Ficha";
 /// Causa del juez cuando no corrió. Sin juez no hay veredicto, así que `codigo_de_salida` da 3 sin hallazgos.
 const JUEZ_NO_CORRIDO: &str = "sin_veredicto: juez no corrido";
+/// Valor de `Revision.juez` cuando la revisión se pide con `--solo-deterministas`: el juez no se pidió,
+/// así que no hay veredicto que guardar y el código sale de los hallazgos.
+pub const JUEZ_NO_PEDIDO: &str = "no pedido";
 const MARCAS_VAGAS: &[&str] = &["TBD", "etc.", "..."];
 const PALABRAS_VAGAS: &[&str] = &[
     "rápido",
@@ -300,6 +304,16 @@ pub fn revisar(spec: &str, ctx: &ContextoRevision) -> Result<Revision, ErrorFich
         juez: JUEZ_NO_CORRIDO.into(),
         descartadas: Vec::new(),
     })
+}
+
+/// Como `revisar`, pero el juez no se pidió (`--solo-deterministas`): `juez` vale `JUEZ_NO_PEDIDO`.
+pub fn revisar_solo_deterministas(
+    spec: &str,
+    ctx: &ContextoRevision,
+) -> Result<Revision, ErrorFicha> {
+    let mut revision = revisar(spec, ctx)?;
+    revision.juez = JUEZ_NO_PEDIDO.into();
+    Ok(revision)
 }
 
 /// Aplica las reglas deterministas y devuelve los hallazgos ordenados por línea.
@@ -748,5 +762,32 @@ fn regla_sin_pruebas(bloque: &BloqueFicha, r: &mut Revisor) {
                 format!("la ficha no nombra tests ocultos: `{clave}` en {id}"),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LIMPIA: &str = include_str!("../tests/fixtures/fichas/spec-completa.md");
+    const VAGA: &str = include_str!("../tests/fixtures/fichas/spec-vaga.md");
+
+    #[test]
+    fn revision_juez_no_pedido_sin_hallazgos_sale_0() {
+        let revision =
+            revisar_solo_deterministas(LIMPIA, &ContextoRevision::default()).expect("revisa");
+        assert_eq!(revision.juez, JUEZ_NO_PEDIDO);
+        assert!(revision.hallazgos.is_empty());
+        assert!(revision.ambiguedades.is_empty());
+        assert_eq!(revision.codigo_de_salida(), 0);
+    }
+
+    #[test]
+    fn revision_juez_no_pedido_con_hallazgos_sale_1() {
+        let revision =
+            revisar_solo_deterministas(VAGA, &ContextoRevision::default()).expect("revisa");
+        assert_eq!(revision.juez, JUEZ_NO_PEDIDO);
+        assert!(!revision.hallazgos.is_empty());
+        assert_eq!(revision.codigo_de_salida(), 1);
     }
 }

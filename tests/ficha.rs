@@ -1472,3 +1472,95 @@ fn ficha_cli_sin_juez_no_guarda_revision() {
     );
     assert!(!home.path().join("fichas").exists());
 }
+
+/// `ficha revisar --solo-deterministas` con `ROOT_HOME` en `home`, sin claves de juez.
+fn revisar_solo_deterministas_cli(home: &Path, spec: &str, extra: &[&str]) -> Output {
+    let mut args = vec!["ficha", "revisar", "--spec", spec, "--solo-deterministas"];
+    args.extend_from_slice(extra);
+    Command::new(env!("CARGO_BIN_EXE_r00t"))
+        .env("ROOT_HOME", home)
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .args(&args)
+        .output()
+        .expect("no se pudo ejecutar el binario r00t")
+}
+
+#[test]
+fn ficha_revisar_solo_deterministas_ficha_limpia_sale_0_y_dice_juez_no_pedido() {
+    let home = tempfile::tempdir().expect("home");
+    let salida =
+        revisar_solo_deterministas_cli(home.path(), &ruta_fixture("spec-completa.md"), &[]);
+    assert_eq!(
+        codigo(&salida),
+        0,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let texto = String::from_utf8_lossy(&salida.stdout);
+    assert!(texto.lines().any(|l| l == "juez: no pedido"), "{texto}");
+    assert!(!home.path().join("fichas").exists());
+}
+
+#[test]
+fn ficha_revisar_solo_deterministas_json_trae_juez_no_pedido() {
+    let home = tempfile::tempdir().expect("home");
+    let salida =
+        revisar_solo_deterministas_cli(home.path(), &ruta_fixture("spec-completa.md"), &["--json"]);
+    assert_eq!(codigo(&salida), 0);
+    let json: serde_json::Value = serde_json::from_slice(&salida.stdout).expect("stdout es JSON");
+    assert_eq!(json["juez"], "no pedido", "{json}");
+}
+
+#[test]
+fn ficha_revisar_solo_deterministas_con_hallazgos_sale_1_y_no_guarda() {
+    let home = tempfile::tempdir().expect("home");
+    let salida = revisar_solo_deterministas_cli(home.path(), &ruta_fixture("spec-vaga.md"), &[]);
+    assert_eq!(codigo(&salida), 1);
+    let texto = String::from_utf8_lossy(&salida.stdout);
+    assert!(texto.lines().any(|l| l == "juez: no pedido"), "{texto}");
+    assert!(!home.path().join("fichas").exists());
+}
+
+#[test]
+fn ficha_revisar_solo_deterministas_con_juez_es_error_de_uso() {
+    let home = tempfile::tempdir().expect("home");
+    let spec = ruta_fixture("spec-completa.md");
+    let combinaciones: [&[&str]; 3] = [
+        &[
+            "--juez-proveedor",
+            "deepseek",
+            "--juez-modelo",
+            "deepseek-flash",
+        ],
+        &[
+            "--juez-modelo",
+            "deepseek-flash",
+            "--juez-max-tokens",
+            "8000",
+        ],
+        &[
+            "--juez-proveedor",
+            "deepseek",
+            "--juez-modelo",
+            "deepseek-flash",
+            "--juez-max-tokens",
+            "8000",
+        ],
+    ];
+    for extra in combinaciones {
+        let salida = revisar_solo_deterministas_cli(home.path(), &spec, extra);
+        assert_eq!(codigo(&salida), 2, "combinación {extra:?}");
+    }
+    assert!(!home.path().join("fichas").exists());
+}
+
+#[test]
+fn ficha_guardar_si_hay_juicio_no_pedido_no_guarda_nada() {
+    let home = tempfile::tempdir().expect("home");
+    let spec = fixture("spec-completa.md");
+    let revision = ficha::revisar_solo_deterministas(&spec, &ctx_vacio()).expect("revisa");
+    let guardada = ficha::guardar_si_hay_juicio(home.path(), &spec, &revision).expect("guarda");
+    assert!(guardada.is_none());
+    assert!(!home.path().join("fichas").exists());
+}

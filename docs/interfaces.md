@@ -36,7 +36,7 @@ Con `--json`, cada subcomando construido imprime un solo objeto JSON en stdout.
 
 | Código | Significado | Dónde sale hoy |
 |---|---|---|
-| `0` | ok o verde | `route`, `llama`, `observa`, `track`, `aprende`, `goal`, `importar-mmorch`, `ficha tarea`, `ficha revisar` sin hallazgos y con el juez en `ok` (con `--juez-proveedor` y `--juez-modelo`). `oraculo evaluar` e `oraculo informe` con decisión `Listo` (ver abajo). |
+| `0` | ok o verde | `route`, `llama`, `observa`, `track`, `aprende`, `goal`, `importar-mmorch`, `ficha tarea`, `ficha revisar` sin hallazgos y con el juez en `ok` (con `--juez-proveedor` y `--juez-modelo`), o sin hallazgos con `--solo-deterministas`. `oraculo evaluar` e `oraculo informe` con decisión `Listo` (ver abajo). |
 | `1` | rojo | `oraculo evaluar` e `oraculo informe` con decisión `NoListo` o `Bloqueado`. `ficha revisar` con hallazgos o ambigüedades, aunque el juez haya fallado. |
 | `2` | error de uso | Argumentos inválidos (clap). `root.toml` con un valor fuera de rango. Un spec sin `## Ficha` o con una ficha inválida. Un tipo desconocido en `esquema`. |
 | `3` | error de infraestructura, o sin veredicto | Un tope que impide la elección o la llamada (`route`, `llama`). Un error de proveedor, de Observe o de Track. `oraculo evaluar` sin veredicto (descarga o suite sin veredicto). `ficha revisar` sin hallazgos y sin veredicto del juez: sin `--juez-*` el juez queda `sin_veredicto: juez no corrido` y el código es 3, nunca 0. Los subcomandos **pendientes** salen con `3` porque aún no tienen lógica. |
@@ -77,7 +77,7 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t goal autorizar` | Autoriza un cambio al GOAL. Exige una TTY y una confirmación tecleada. | sin salida JSON | construido |
 | `r00t importar-mmorch --desde <metrics.jsonl>` | Copia en solo lectura el log de métricas de mmorch. | resumen de la importación | construido |
 | `r00t esquema <tipo>` | Imprime el JSON Schema de un tipo. Ver `## Esquemas`. | JSON Schema | construido |
-| `r00t ficha revisar --spec <SPEC.md> [--juez-proveedor p --juez-modelo m [--juez-max-tokens n]]` | Revisa la ficha y las ambigüedades. Con los dos flags de juez, también corre el juez. Sin ellos, el juez queda `sin_veredicto: juez no corrido`: sin hallazgos, sale 3. `--juez-max-tokens` fija el tope de salida del juez: 32 000 por defecto, al menos 1, y exige `--juez-modelo`. | `Revision` | construido |
+| `r00t ficha revisar --spec <SPEC.md> [--juez-proveedor p --juez-modelo m [--juez-max-tokens n] \| --solo-deterministas]` | Revisa la ficha y las ambigüedades. Con los dos flags de juez, también corre el juez. Sin ellos, el juez queda `sin_veredicto: juez no corrido`: sin hallazgos, sale 3. `--juez-max-tokens` fija el tope de salida del juez: 32 000 por defecto, al menos 1, y exige `--juez-modelo`. `--solo-deterministas` no corre el juez: el juez queda `no pedido`, la salida de texto imprime `juez: no pedido`, y sin hallazgos sale 0. No guarda la revisión en `ROOT_HOME/fichas`. Excluye los flags `--juez-*`: juntos son error de uso (`2`). | `Revision` | construido |
 | `r00t ficha tarea --spec <SPEC.md> --nombre <t>` | Arma el borrador de `tarea.toml` desde la ficha. | `{toml}` | construido |
 | `r00t mcp` | Inicia el servidor MCP por stdio. | JSON-RPC 2.0 | construido |
 
@@ -296,7 +296,7 @@ La prosa del spec explica. La ficha fija los datos que Root mide. Cada dato tien
 - La ficha es obligatoria. Un spec sin `## Ficha`, o con un bloque que no parsea, sale con código `2` y sin veredicto.
 - El builder ve el spec y su ficha. La ficha nunca nombra tests ocultos. La relación requisito→test vive en `tarea.toml`.
 - `r00t ficha tarea` arma un borrador de `tarea.toml`. El borrador deja `pruebas`, `bordes` y `escenarios` vacíos. La persona que aprueba la ficha completa esos campos en `ROOT_HOME`.
-- `r00t ficha revisar` aplica reglas deterministas. Con `--juez-proveedor` y `--juez-modelo`, también corre el juez de ambigüedades.
+- `r00t ficha revisar` aplica reglas deterministas. Con `--juez-proveedor` y `--juez-modelo`, también corre el juez de ambigüedades. Con `--solo-deterministas`, solo las reglas: su revisión no cuenta como veredicto y no se guarda.
 - Si el juez llega al tope de salida, su causa es `sin_veredicto: tope de salida alcanzado (N tokens)`. N es el tope pedido. Esa causa no dice «JSON inválido».
 - El juez de la ficha no envía un prompt de más de 256 KiB.
 
@@ -3777,7 +3777,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Revision",
-  "description": "Resultado de revisar un spec. `ambiguedades` queda vacía hasta que corra el juez.\n`juez` es `\"ok\"` (el JSON parseó) o `\"sin_veredicto: <causa>\"`. Sin juez, la causa es `juez no corrido`.",
+  "description": "Resultado de revisar un spec. `ambiguedades` queda vacía hasta que corra el juez.\n`juez` es `\"ok\"` (el JSON parseó), `\"sin_veredicto: <causa>\"` o `\"no pedido\"` (con `--solo-deterministas`).\nSin juez, la causa es `juez no corrido`.",
   "type": "object",
   "properties": {
     "ambiguedades": {

@@ -511,6 +511,7 @@ fn ficha_accion(json: bool, accion: &FichaAccion) -> Result<u8, Error> {
             juez_proveedor,
             juez_modelo,
             juez_max_tokens,
+            solo_deterministas,
         } => {
             let texto = leer_spec(spec)?;
             let ctx = ContextoRevision::default();
@@ -526,6 +527,7 @@ fn ficha_accion(json: bool, accion: &FichaAccion) -> Result<u8, Error> {
             }
             let revision = match juez {
                 Some(juez) => ficha::revisar_con_tope(&texto, &ctx, &juez, tope)?,
+                None if *solo_deterministas => ficha::revisar_solo_deterministas(&texto, &ctx)?,
                 None => ficha::revisar(&texto, &ctx)?,
             };
             // Solo con veredicto del juez: la revisión queda en ROOT_HOME/fichas para que `evaluar` la lea.
@@ -582,7 +584,7 @@ fn imprimir_revision(revision: &Revision) {
     for a in &revision.ambiguedades {
         println!("{}: ambigüedad: {}", a.linea, a.frase);
     }
-    if revision.juez.starts_with("sin_veredicto") {
+    if revision.juez.starts_with("sin_veredicto") || revision.juez == ficha::JUEZ_NO_PEDIDO {
         println!("juez: {}", revision.juez);
     }
     if revision.hallazgos.is_empty() && revision.ambiguedades.is_empty() {
