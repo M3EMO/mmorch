@@ -350,7 +350,7 @@ fn herramientas() -> Value {
         },
         {
             "name": "root_evaluar",
-            "description": "Evalúa un repositorio con una tarea del Oracle. Devuelve el veredicto sin ids de tests ocultos: conteos, estado y avisos. `r00t --json oraculo evaluar` trae el veredicto completo.",
+            "description": "Evalúa un repositorio con una tarea del Oracle. Devuelve el veredicto sin ids de tests ocultos: conteos, estado, avisos y pendientes del contrato. `r00t --json oraculo evaluar` trae el veredicto completo.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

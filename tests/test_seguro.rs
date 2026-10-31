@@ -7,12 +7,39 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tools/test-seguro.sh");
 const PRE_COMMIT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/.githooks/pre-commit");
+
+/// Contador para que cada temporal de `escribir_ejecutable` tenga un nombre propio.
+static CONTADOR_TEMPORAL: AtomicU64 = AtomicU64::new(0);
+
+/// Escribe `texto` en `ruta` como ejecutable. Escribe un temporal único en la misma carpeta, le pone
+/// los permisos, lo cierra y recién después lo renombra a `ruta`. Así el archivo no queda abierto
+/// para escritura cuando se lo lanza (evita `ETXTBSY`).
+fn escribir_ejecutable(ruta: &Path, texto: &str) {
+    let nombre = ruta
+        .file_name()
+        .expect("la ruta tiene nombre")
+        .to_string_lossy();
+    let n = CONTADOR_TEMPORAL.fetch_add(1, Ordering::Relaxed);
+    let temporal = ruta.with_file_name(format!(".{nombre}.tmp-{}-{n}", std::process::id()));
+    {
+        let mut archivo = fs::File::create(&temporal).expect("crea el temporal del ejecutable");
+        archivo
+            .write_all(texto.as_bytes())
+            .expect("escribe el ejecutable");
+        archivo
+            .set_permissions(fs::Permissions::from_mode(0o755))
+            .expect("permisos del ejecutable");
+    }
+    fs::rename(&temporal, ruta).expect("renombra el ejecutable a su nombre final");
+}
 
 /// Un `cargo` falso: vuelca su entorno en `env.txt` y sus argumentos en `args.txt`, y sale con `codigo`.
 fn falso(dir: &Path, codigo: u8) -> PathBuf {
@@ -21,8 +48,7 @@ fn falso(dir: &Path, codigo: u8) -> PathBuf {
         "#!/usr/bin/env bash\nenv > '{d}/env.txt'\nprintf '%s\\n' \"$@\" > '{d}/args.txt'\nexit {codigo}\n",
         d = dir.display()
     );
-    fs::write(&ruta, texto).expect("escribe el cargo falso");
-    fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos del falso");
+    escribir_ejecutable(&ruta, &texto);
     ruta
 }
 
@@ -248,8 +274,8 @@ fn copia_del_script(dir: &Path, repo: &str) -> PathBuf {
     let tools = dir.join(repo).join("tools");
     fs::create_dir_all(&tools).expect("crea tools/ del worktree");
     let ruta = tools.join("test-seguro.sh");
-    fs::copy(SCRIPT, &ruta).expect("copia el script");
-    fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos del script");
+    let texto = fs::read_to_string(SCRIPT).expect("lee el script");
+    escribir_ejecutable(&ruta, &texto);
     ruta
 }
 
@@ -313,8 +339,7 @@ fn falso_de_lock(dir: &Path) -> PathBuf {
         "#!/usr/bin/env bash\necho inicio >> '{d}/log.txt'\nsleep 2\necho fin >> '{d}/log.txt'\n",
         d = dir.display()
     );
-    fs::write(&ruta, texto).expect("escribe el cargo falso de lock");
-    fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos del falso");
+    escribir_ejecutable(&ruta, &texto);
     ruta
 }
 
@@ -400,5 +425,29 @@ fn test_seguro_lock_vive_en_base() {
     assert!(
         !base(sin_lock.path()).join("podman.lock").exists(),
         "con ROOT_SIN_PODMAN=1 no se crea el lock"
+    );
+}
+
+#[test]
+fn escribir_ejecutable_deja_solo_el_final_y_ejecutable() {
+    // Guarda: el temporal se renombra al nombre final y no queda ningún otro archivo en la carpeta.
+    let dir = dir_de_prueba();
+    let ruta = dir.path().join("ejecutable.sh");
+    escribir_ejecutable(&ruta, "#!/usr/bin/env bash\necho hola\n");
+    let entradas: Vec<String> = fs::read_dir(dir.path())
+        .expect("lee la carpeta")
+        .map(|e| {
+            e.expect("entrada")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(entradas, ["ejecutable.sh"], "{entradas:?}");
+    let modo = fs::metadata(&ruta).expect("metadatos").permissions().mode();
+    assert_eq!(modo & 0o777, 0o755);
+    assert_eq!(
+        fs::read_to_string(&ruta).expect("lee el ejecutable"),
+        "#!/usr/bin/env bash\necho hola\n"
     );
 }

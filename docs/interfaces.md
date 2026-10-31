@@ -36,7 +36,7 @@ Con `--json`, cada subcomando construido imprime un solo objeto JSON en stdout.
 
 | Código | Significado | Dónde sale hoy |
 |---|---|---|
-| `0` | ok o verde | `route`, `llama`, `observa`, `track`, `aprende`, `goal`, `importar-mmorch`, `ficha tarea`, `ficha revisar` sin hallazgos y con el juez en `ok` (con `--juez-proveedor` y `--juez-modelo`). `oraculo evaluar` e `oraculo informe` con decisión `Listo` (ver abajo). |
+| `0` | ok o verde | `route`, `llama`, `observa`, `track`, `aprende`, `goal`, `importar-mmorch`, `ficha tarea`, `ficha revisar` sin hallazgos y con el juez en `ok` (con `--juez-proveedor` y `--juez-modelo`), o sin hallazgos con `--solo-deterministas`. `oraculo evaluar` e `oraculo informe` con decisión `Listo` (ver abajo). |
 | `1` | rojo | `oraculo evaluar` e `oraculo informe` con decisión `NoListo` o `Bloqueado`. `ficha revisar` con hallazgos o ambigüedades, aunque el juez haya fallado. |
 | `2` | error de uso | Argumentos inválidos (clap). `root.toml` con un valor fuera de rango. Un spec sin `## Ficha` o con una ficha inválida. Un tipo desconocido en `esquema`. |
 | `3` | error de infraestructura, o sin veredicto | Un tope que impide la elección o la llamada (`route`, `llama`). Un error de proveedor, de Observe o de Track. `oraculo evaluar` sin veredicto (descarga o suite sin veredicto). `ficha revisar` sin hallazgos y sin veredicto del juez: sin `--juez-*` el juez queda `sin_veredicto: juez no corrido` y el código es 3, nunca 0. Los subcomandos **pendientes** salen con `3` porque aún no tienen lógica. |
@@ -77,7 +77,7 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t goal autorizar` | Autoriza un cambio al GOAL. Exige una TTY y una confirmación tecleada. | sin salida JSON | construido |
 | `r00t importar-mmorch --desde <metrics.jsonl>` | Copia en solo lectura el log de métricas de mmorch. | resumen de la importación | construido |
 | `r00t esquema <tipo>` | Imprime el JSON Schema de un tipo. Ver `## Esquemas`. | JSON Schema | construido |
-| `r00t ficha revisar --spec <SPEC.md> [--juez-proveedor p --juez-modelo m [--juez-max-tokens n]]` | Revisa la ficha y las ambigüedades. Con los dos flags de juez, también corre el juez. Sin ellos, el juez queda `sin_veredicto: juez no corrido`: sin hallazgos, sale 3. `--juez-max-tokens` fija el tope de salida del juez: 32 000 por defecto, al menos 1, y exige `--juez-modelo`. | `Revision` | construido |
+| `r00t ficha revisar --spec <SPEC.md> [--juez-proveedor p --juez-modelo m [--juez-max-tokens n] \| --solo-deterministas]` | Revisa la ficha y las ambigüedades. Con los dos flags de juez, también corre el juez. Sin ellos, el juez queda `sin_veredicto: juez no corrido`: sin hallazgos, sale 3. `--juez-max-tokens` fija el tope de salida del juez: 32 000 por defecto, al menos 1, y exige `--juez-modelo`. `--solo-deterministas` no corre el juez: el juez queda `no pedido`, la salida de texto imprime `juez: no pedido`, y sin hallazgos sale 0. No guarda la revisión en `ROOT_HOME/fichas`. Excluye los flags `--juez-*`: juntos son error de uso (`2`). | `Revision` | construido |
 | `r00t ficha tarea --spec <SPEC.md> --nombre <t>` | Arma el borrador de `tarea.toml` desde la ficha. | `{toml}` | construido |
 | `r00t mcp` | Inicia el servidor MCP por stdio. | JSON-RPC 2.0 | construido |
 
@@ -184,6 +184,7 @@ $ROOT_HOME/
     rustsec/
   tmp/                    # temporales del Oracle (evaluar-*, colab-*); se limpian por antigüedad
   evidencia/<tarea>/colab.json   # resultados importados de Colab, con el commit del repo (Tarea 7f, B16)
+  evidencia/<tarea>/<hash>/historial.jsonl   # resultado de cada test por corrida, por versión del repo (Tarea 39)
   colab/activo.json       # runtime de Colab pedido y no liberado; lo borra Root al liberarlo (Tarea 7j)
   oraculos/<tarea>/       # tests ocultos: el builder no puede leer esta carpeta (Tarea 23)
     pendientes/           # paquete de tests pendientes por entorno; lo borra Root al terminar Colab
@@ -196,6 +197,9 @@ $ROOT_HOME/
 
 Toda línea JSONL lleva `"v": 1`. Un cambio de formato sube `v`, y los lectores aceptan las versiones anteriores.
 `oraculos/<tarea>/diferencias.md` no lo crea ningún subcomando. Lo escribe la persona que compara con el banco.
+El historial de evidencia vive en `evidencia/`, fuera de `oraculos/`. Guarda una línea por corrida de suite. Cada línea tiene `"v": 1`, `"suite"` (`contrato` u `oculto`), `"ts"` y `"tests"`. `tests` lleva el id de cada test y su resultado (`pasa`, `falla` u `omite`). Nunca guarda el contenido de un test.
+El `<hash>` sale del contenido de la copia del repo. Entran los archivos regulares, en orden por ruta relativa. Cada uno entra con su ruta, su largo y su contenido. No entran los enlaces simbólicos ni `target/` y `.git/` de la raíz. Otra versión arranca con un historial vacío.
+Las corridas del historial suman muestras a los tests inestables. No cuentan como ausencia. `Veredicto.corridas_acumuladas` y `Confianza.corridas_acumuladas` dan esas muestras. Una línea ilegible se ignora y deja un aviso en `Veredicto.avisos`.
 Las subcarpetas `contrato/`, `oculto/` y `bootstrap/` son convención. Cada suite del contenedor monta solo su carpeta (`contrato/` o `oculto/`), y los escenarios montan solo `escenarios/`. El Oracle lee solo `tarea.toml` y los comandos que ese archivo declara.
 
 ## tarea.toml
@@ -218,7 +222,7 @@ Ruta: `$ROOT_HOME/oraculos/<tarea>/tarea.toml`. Lo lee `Tarea::cargar_de` (`src/
 | `[oculto]` `cmd` | texto | sí | | Suite oculta. |
 | `[oculto]` `reintento` | texto | no | | Igual que en `[contrato]`. |
 | `[[entorno]]` `test`, `motivo` | texto | no | | Test que depende del entorno. El motivo no puede estar vacío. Un test aparece una sola vez. Un id con `contrato:` excluye un test del contrato. Un id sin prefijo excluye solo el test oculto. |
-| `[[oraculo_dudoso]]` `test`, `motivo` | texto | no | | Test que depende de una frase ambigua de la spec. Mismas reglas que `[[entorno]]`. |
+| `[[oraculo_dudoso]]` `test`, `motivo` | texto | no | | Test que depende de una frase ambigua de la spec. Mismas reglas que `[[entorno]]`: un id con `contrato:` excluye un test del contrato; un id sin prefijo excluye solo el test oculto. |
 | `[[requisito]]` `id`, `titulo`, `seccion`, `peso`, `pruebas`, `bordes`, `escenarios`, `criterios`, `modulos` | varios | no | `seccion` = ""; `peso` = 1 | `peso` debe estar entre 1 y 3. `id` no puede repetirse. `modulos` liga el requisito a los módulos del código. Un id de `pruebas` o `bordes` con el prefijo `contrato:` apunta a la suite del contrato. Sin prefijo, apunta a la suite oculta. |
 | `[[escenario]]` `id`, `cmd` | texto | no | | Flujo real de usuario. `cmd` sale con 0 si el flujo funciona. `id` solo usa `A-Za-z0-9._-` y no puede repetirse. |
 | `[entrega]` `instalar`, `correr` | texto | no | | Instalación y arranque del producto en un contenedor limpio. Ambos son obligatorios si la tabla existe. |
@@ -296,7 +300,7 @@ La prosa del spec explica. La ficha fija los datos que Root mide. Cada dato tien
 - La ficha es obligatoria. Un spec sin `## Ficha`, o con un bloque que no parsea, sale con código `2` y sin veredicto.
 - El builder ve el spec y su ficha. La ficha nunca nombra tests ocultos. La relación requisito→test vive en `tarea.toml`.
 - `r00t ficha tarea` arma un borrador de `tarea.toml`. El borrador deja `pruebas`, `bordes` y `escenarios` vacíos. La persona que aprueba la ficha completa esos campos en `ROOT_HOME`.
-- `r00t ficha revisar` aplica reglas deterministas. Con `--juez-proveedor` y `--juez-modelo`, también corre el juez de ambigüedades.
+- `r00t ficha revisar` aplica reglas deterministas. Con `--juez-proveedor` y `--juez-modelo`, también corre el juez de ambigüedades. Con `--solo-deterministas`, solo las reglas: su revisión no cuenta como veredicto y no se guarda.
 - Si el juez llega al tope de salida, su causa es `sin_veredicto: tope de salida alcanzado (N tokens)`. N es el tope pedido. Esa causa no dice «JSON inválido».
 - El juez de la ficha no envía un prompt de más de 256 KiB.
 
@@ -1596,8 +1600,18 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
             "type": "string"
           }
         },
+        "corridas_acumuladas": {
+          "description": "Corridas acumuladas de cada test inestable, con las mismas claves que `inestables`: sus muestras\nde esta evaluación y del historial de la versión (Tarea 39). Un informe viejo lee vacío.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "default": {}
+        },
         "evidencia_visible": {
-          "description": "Requisitos cuya evidencia medida es solo del contrato, como `<id>: evidencia visible al builder`.\nUn requisito entra si tiene una referencia `contrato:` y ningún test oculto suyo tiene resultado\nmedido (pasa, falla o inestable). El builder ve esos tests (decisión 50). Un informe viejo lee vacío.",
+          "description": "Requisitos cuya evidencia medida es solo del contrato, como `<id>: evidencia visible al builder`.\nUn requisito entra si una referencia `contrato:` aporta un resultado medido (pasa, falla o inestable)\ny ningún test oculto suyo lo aporta. Un test del contrato `ausente`, `omite`, `pendiente` o `excluido`\nno cuenta. El builder ve esos tests (decisión 50). Un informe viejo lee vacío.",
           "type": "array",
           "default": [],
           "items": {
@@ -1905,6 +1919,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": {
             "ambiguedades": [],
             "avisos": [],
+            "corridas_acumuladas": {},
             "evidencia_visible": [],
             "faltantes": [],
             "inestables": {},
@@ -2211,6 +2226,16 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
             "type": "string"
           }
         },
+        "corridas_acumuladas": {
+          "description": "Corridas acumuladas de cada test inestable: sus muestras, de esta evaluación y del historial de la\nversión (Tarea 39). Mismas claves que `tasas`. Un veredicto viejo lee vacío.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "default": {}
+        },
         "costo_usd": {
           "type": "number",
           "format": "double"
@@ -2487,6 +2512,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "default": {
         "ambiguedades": [],
         "avisos": [],
+        "corridas_acumuladas": {},
         "evidencia_visible": [],
         "faltantes": [],
         "inestables": {},
@@ -2582,8 +2608,18 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
             "type": "string"
           }
         },
+        "corridas_acumuladas": {
+          "description": "Corridas acumuladas de cada test inestable, con las mismas claves que `inestables`: sus muestras\nde esta evaluación y del historial de la versión (Tarea 39). Un informe viejo lee vacío.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "default": {}
+        },
         "evidencia_visible": {
-          "description": "Requisitos cuya evidencia medida es solo del contrato, como `<id>: evidencia visible al builder`.\nUn requisito entra si tiene una referencia `contrato:` y ningún test oculto suyo tiene resultado\nmedido (pasa, falla o inestable). El builder ve esos tests (decisión 50). Un informe viejo lee vacío.",
+          "description": "Requisitos cuya evidencia medida es solo del contrato, como `<id>: evidencia visible al builder`.\nUn requisito entra si una referencia `contrato:` aporta un resultado medido (pasa, falla o inestable)\ny ningún test oculto suyo lo aporta. Un test del contrato `ausente`, `omite`, `pendiente` o `excluido`\nno cuenta. El builder ve esos tests (decisión 50). Un informe viejo lee vacío.",
           "type": "array",
           "default": [],
           "items": {
@@ -3777,7 +3813,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Revision",
-  "description": "Resultado de revisar un spec. `ambiguedades` queda vacía hasta que corra el juez.\n`juez` es `\"ok\"` (el JSON parseó) o `\"sin_veredicto: <causa>\"`. Sin juez, la causa es `juez no corrido`.",
+  "description": "Resultado de revisar un spec. `ambiguedades` queda vacía hasta que corra el juez.\n`juez` es `\"ok\"` (el JSON parseó), `\"sin_veredicto: <causa>\"` o `\"no pedido\"` (con `--solo-deterministas`).\nSin juez, la causa es `juez no corrido`.",
   "type": "object",
   "properties": {
     "ambiguedades": {
@@ -4316,6 +4352,16 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "type": "string"
       }
     },
+    "corridas_acumuladas": {
+      "description": "Corridas acumuladas de cada test inestable: sus muestras, de esta evaluación y del historial de la\nversión (Tarea 39). Mismas claves que `tasas`. Un veredicto viejo lee vacío.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "format": "uint32",
+        "minimum": 0
+      },
+      "default": {}
+    },
     "costo_usd": {
       "type": "number",
       "format": "double"
@@ -4498,8 +4544,18 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
             "type": "string"
           }
         },
+        "corridas_acumuladas": {
+          "description": "Corridas acumuladas de cada test inestable, con las mismas claves que `inestables`: sus muestras\nde esta evaluación y del historial de la versión (Tarea 39). Un informe viejo lee vacío.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "default": {}
+        },
         "evidencia_visible": {
-          "description": "Requisitos cuya evidencia medida es solo del contrato, como `<id>: evidencia visible al builder`.\nUn requisito entra si tiene una referencia `contrato:` y ningún test oculto suyo tiene resultado\nmedido (pasa, falla o inestable). El builder ve esos tests (decisión 50). Un informe viejo lee vacío.",
+          "description": "Requisitos cuya evidencia medida es solo del contrato, como `<id>: evidencia visible al builder`.\nUn requisito entra si una referencia `contrato:` aporta un resultado medido (pasa, falla o inestable)\ny ningún test oculto suyo lo aporta. Un test del contrato `ausente`, `omite`, `pendiente` o `excluido`\nno cuenta. El builder ve esos tests (decisión 50). Un informe viejo lee vacío.",
           "type": "array",
           "default": [],
           "items": {
@@ -4784,6 +4840,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": {
             "ambiguedades": [],
             "avisos": [],
+            "corridas_acumuladas": {},
             "evidencia_visible": [],
             "faltantes": [],
             "inestables": {},

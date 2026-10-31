@@ -132,6 +132,12 @@ pub enum FichaAccion {
         /// Tope de tokens de salida del juez. Exige `--juez-modelo`. Por defecto, 32 000.
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..), requires = "juez_modelo")]
         juez_max_tokens: Option<u32>,
+        /// Solo reglas deterministas: no corre el juez y la revisión no se guarda. Excluye `--juez-*`.
+        #[arg(
+            long,
+            conflicts_with_all = ["juez_proveedor", "juez_modelo", "juez_max_tokens"]
+        )]
+        solo_deterministas: bool,
     },
     /// Arma el borrador de `tarea.toml` desde la ficha.
     Tarea {

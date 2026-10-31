@@ -47,6 +47,16 @@ pub fn modulo_de(archivo: &str) -> Option<String> {
     (!matches!(nombre, "main" | "lib")).then(|| nombre.to_string())
 }
 
+/// Como `modulo_de`, pero `src/main.rs` da `main` y `src/lib.rs` da `lib`. Solo la regla de capas de
+/// Arquitectura lo usa: ahí la raíz del crate es una capa posible. Los demás usos siguen con `modulo_de`.
+pub fn modulo_de_capa(archivo: &str) -> Option<String> {
+    modulo_de(archivo).or_else(|| match archivo {
+        "src/main.rs" => Some("main".into()),
+        "src/lib.rs" => Some("lib".into()),
+        _ => None,
+    })
+}
+
 /// Crea un hallazgo de sonda. `id` sale de dimensión, archivo y cita; `impacto` del módulo.
 #[allow(clippy::too_many_arguments)]
 pub fn crear_hallazgo(
@@ -202,6 +212,18 @@ mod tests {
     use crate::oracle::tarea::Tarea;
     use crate::tipos::{Dimension, Fuente};
     use std::fs;
+
+    #[test]
+    fn perfiles_modulo_de_capa_da_la_raiz_y_modulo_de_no_cambia() {
+        assert_eq!(modulo_de_capa("src/main.rs").as_deref(), Some("main"));
+        assert_eq!(modulo_de_capa("src/lib.rs").as_deref(), Some("lib"));
+        assert_eq!(modulo_de_capa("src/x/mod.rs").as_deref(), Some("x"));
+        assert_eq!(modulo_de_capa("src/x.rs").as_deref(), Some("x"));
+        assert_eq!(modulo_de_capa("README.md"), None);
+        // Guarda: `modulo_de` sigue sin dar módulo a la raíz.
+        assert_eq!(modulo_de("src/main.rs"), None);
+        assert_eq!(modulo_de("src/lib.rs"), None);
+    }
 
     #[test]
     fn perfiles_deduplicar_quita_repetidos_y_conserva_el_primero_en_orden() {
