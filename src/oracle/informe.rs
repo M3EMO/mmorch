@@ -873,10 +873,12 @@ pub fn ocultar_tests(informe: &mut Informe, ocultos: &BTreeSet<String>) {
         .confianza
         .inestables
         .retain(|clave, _| !cita(clave.as_str()));
+    // Un pendiente del contrato (`contrato:`) sigue el informe, salvo que su `test` o su `motivo` cite un
+    // oculto. Los que no llevan prefijo son ocultos y `ids_ocultos` ya los nombra: salen por `cita`.
     informe
         .confianza
         .tests_pendientes
-        .retain(|p| !ocultos.contains(&p.test));
+        .retain(|p| !cita(&p.test) && !cita(&p.motivo));
 }
 
 /// Markdown legible: la decisión con su confianza, por qué, qué falta, qué arreglar primero y riesgos.

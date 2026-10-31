@@ -1820,10 +1820,12 @@ fn registrar_stderr(c: &Corrida, xml: &str, stderr: &str) -> Option<PathBuf> {
 }
 
 /// Veredicto para la herramienta MCP: solo conteos y niveles, sin ids de tests ocultos (A2). La CLI
-/// para el humano conserva todo. Campo por campo: `inestables`, `tasas` (`oculto:`) y `pendientes` se
-/// vacían; un hallazgo que cita un test oculto se quita; de la evidencia de requisitos (de `v` y del
-/// informe) solo queda la del contrato (desempate 2), sin las entradas que citan un test oculto; los
-/// ítems de puntaje se vacían. El resto (conteos, estado, `avisos`, hallazgos sin ids) se conserva.
+/// para el humano conserva todo. Campo por campo: `inestables`, `tasas` (`oculto:`) se vacían; `pendientes`
+/// conserva solo los del contrato (`contrato:`, desempate técnico 16) y quita un pendiente que cita un test
+/// oculto en su `test` o su `motivo`; en el informe, `confianza.tests_pendientes` sigue la misma regla
+/// (`informe::ocultar_tests`). Un hallazgo que cita un test oculto se quita; de la evidencia de requisitos
+/// (de `v` y del informe) solo queda la del contrato (desempate 2), sin las entradas que citan un test
+/// oculto; los ítems de puntaje se vacían. El resto (conteos, estado, `avisos`, hallazgos sin ids) se conserva.
 pub fn redactar_para_mcp(mut v: Veredicto) -> Veredicto {
     let ocultos: BTreeSet<String> = informe::ids_ocultos(&v);
     // Una entrada del contrato es `contrato:<id>`, o un pendiente o excluido de `contrato:<id>`.
@@ -1836,7 +1838,12 @@ pub fn redactar_para_mcp(mut v: Veredicto) -> Veredicto {
     v.inestables.clear();
     v.ocultos_fallidos.clear();
     v.tasas.retain(|k, _| !k.starts_with("oculto:"));
-    v.pendientes.clear();
+    v.pendientes.retain(|p| {
+        p.test.starts_with(requisitos::PREFIJO_CONTRATO)
+            && !ocultos
+                .iter()
+                .any(|id| p.test.contains(id.as_str()) || p.motivo.contains(id.as_str()))
+    });
     v.hallazgos.retain(|h| {
         !ocultos
             .iter()
@@ -3656,6 +3663,91 @@ mod tests {
         assert_eq!(informe.requisitos[0].evidencia, esperada);
         let texto = serde_json::to_string(&r).expect("json");
         assert!(!texto.contains("test_b::t3"), "{texto}");
+    }
+
+    fn pendiente_de(test: &str, motivo: &str) -> crate::tipos::Pendiente {
+        crate::tipos::Pendiente {
+            test: test.into(),
+            motivo: motivo.into(),
+            colab: None,
+            tasa: None,
+        }
+    }
+
+    #[test]
+    fn oraculo_redaccion_mcp_conserva_el_pendiente_del_contrato_y_quita_el_oculto() {
+        // Desempate técnico 16, punto 4: el pendiente `contrato:` sale al MCP; el de un test oculto, no.
+        let v = Veredicto {
+            pendientes: vec![
+                pendiente_de("contrato:t::a", "gpu"),
+                pendiente_de("t::b", "gpu"),
+            ],
+            ..Veredicto::default()
+        };
+        let r = redactar_para_mcp(v);
+        let ids: Vec<&str> = r.pendientes.iter().map(|p| p.test.as_str()).collect();
+        assert_eq!(ids, ["contrato:t::a"]);
+    }
+
+    #[test]
+    fn oraculo_redaccion_mcp_quita_el_pendiente_del_contrato_que_cita_un_oculto() {
+        // Misma regla de subcadena que la evidencia: un motivo que nombra un test oculto sale.
+        let v = Veredicto {
+            pendientes: vec![
+                pendiente_de("t::b", "gpu"),
+                pendiente_de("contrato:t::a", "ver t::b en Colab"),
+                pendiente_de("contrato:t::c", "gpu"),
+            ],
+            ..Veredicto::default()
+        };
+        let r = redactar_para_mcp(v);
+        let ids: Vec<&str> = r.pendientes.iter().map(|p| p.test.as_str()).collect();
+        assert_eq!(ids, ["contrato:t::c"]);
+    }
+
+    #[test]
+    fn oraculo_redaccion_mcp_redacta_los_pendientes_del_informe() {
+        // El informe ya quitaba los ocultos sin prefijo; el `contrato:` con un id oculto en el motivo se
+        // filtraba: esa es la fuga que este test fija.
+        let informe = Informe {
+            decision: Decision::NoListo,
+            motivo: String::new(),
+            requisitos: Vec::new(),
+            bloqueantes: Vec::new(),
+            riesgos: Vec::new(),
+            proximos_pasos: Vec::new(),
+            resumen: String::new(),
+            confianza: Confianza {
+                tests_pendientes: vec![
+                    pendiente_de("contrato:t::a", "gpu"),
+                    pendiente_de("contrato:t::c", "ver t::b en Colab"),
+                    pendiente_de("t::b", "gpu"),
+                ],
+                ..Confianza::default()
+            },
+        };
+        let v = Veredicto {
+            pendientes: vec![
+                pendiente_de("contrato:t::a", "gpu"),
+                pendiente_de("contrato:t::c", "ver t::b en Colab"),
+                pendiente_de("t::b", "gpu"),
+            ],
+            informe: Some(informe),
+            ..Veredicto::default()
+        };
+        let r = redactar_para_mcp(v);
+        let ids: Vec<&str> = r
+            .informe
+            .as_ref()
+            .expect("hay informe")
+            .confianza
+            .tests_pendientes
+            .iter()
+            .map(|p| p.test.as_str())
+            .collect();
+        assert_eq!(ids, ["contrato:t::a"]);
+        let texto = serde_json::to_string(&r).expect("json");
+        assert!(!texto.contains("t::b"), "{texto}");
     }
 
     /// Tabla de calibración con la misma exactitud en todas las dimensiones de `tarea-rust`.
