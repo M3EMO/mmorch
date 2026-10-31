@@ -4,3 +4,4 @@
 # Con ROOT_SIN_PODMAN=1, los tests que necesitan podman se saltean y lo avisan en stderr.
 # Sin la variable, todos corren: en la laptop nunca hay un salteo silencioso.
 # El hook `pre-commit` corre la suite con `tools/test-seguro.sh`: sin claves y con un `ROOT_HOME` de prueba.
+# El script usa una carpeta por worktree, `~/.cache/root-tests/<hash>/` (target, tmp, `ROOT_HOME`), y un lock de podman compartido, `~/.cache/root-tests/podman.lock`, que espera sin `ROOT_SIN_PODMAN=1`.
