@@ -1034,4 +1034,27 @@ mod tests {
             BTreeSet::from(["contrato:t::mix".to_string()])
         );
     }
+
+    #[test]
+    fn requisitos_entorno_con_prefijo_contrato_excluye_el_test_del_contrato() {
+        // Desempate 1: `contrato:t::a` en `[[entorno]]` saca el test del contrato, aunque esté verde.
+        let r = desde_clasificaciones(&suite(&["t::a"], &[], &[]), &suite(&[], &[], &[]));
+        let reqs = [req("R1", 1, &["contrato:t::a"], &[], &[])];
+        let entorno = [excl("contrato:t::a", "gpu")];
+        let estados = evaluar_requisitos(&reqs, &r, &BTreeMap::new(), &entorno, &[], &sin_cita());
+        assert_eq!(estados[0].cumplimiento, Cumplimiento::Pendiente);
+        assert_eq!(estados[0].nivel, None);
+        assert_eq!(estados[0].evidencia, ["pendiente: contrato:t::a (gpu)"]);
+    }
+
+    #[test]
+    fn requisitos_entorno_sin_prefijo_no_excluye_el_test_del_contrato() {
+        // Desempate 1: `t::a` sin prefijo excluye solo el test oculto. El del contrato sigue contando.
+        let r = desde_clasificaciones(&suite(&["t::a"], &[], &[]), &suite(&[], &[], &[]));
+        let reqs = [req("R1", 1, &["contrato:t::a"], &[], &[])];
+        let entorno = [excl("t::a", "gpu")];
+        let estados = evaluar_requisitos(&reqs, &r, &BTreeMap::new(), &entorno, &[], &sin_cita());
+        assert_eq!(estados[0].nivel, Some(3));
+        assert_eq!(estados[0].cumplimiento, Cumplimiento::Cumplido);
+    }
 }
