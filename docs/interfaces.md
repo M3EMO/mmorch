@@ -184,6 +184,7 @@ $ROOT_HOME/
     rustsec/
   tmp/                    # temporales del Oracle (evaluar-*, colab-*); se limpian por antigüedad
   evidencia/<tarea>/colab.json   # resultados importados de Colab, con el commit del repo (Tarea 7f, B16)
+  evidencia/<tarea>/<hash>/historial.jsonl   # resultado de cada test por corrida, por versión del repo (Tarea 39)
   colab/activo.json       # runtime de Colab pedido y no liberado; lo borra Root al liberarlo (Tarea 7j)
   oraculos/<tarea>/       # tests ocultos: el builder no puede leer esta carpeta (Tarea 23)
     pendientes/           # paquete de tests pendientes por entorno; lo borra Root al terminar Colab
@@ -196,6 +197,9 @@ $ROOT_HOME/
 
 Toda línea JSONL lleva `"v": 1`. Un cambio de formato sube `v`, y los lectores aceptan las versiones anteriores.
 `oraculos/<tarea>/diferencias.md` no lo crea ningún subcomando. Lo escribe la persona que compara con el banco.
+El historial de evidencia vive en `evidencia/`, fuera de `oraculos/`. Guarda una línea por corrida de suite. Cada línea tiene `"v": 1`, `"suite"` (`contrato` u `oculto`), `"ts"` y `"tests"`. `tests` lleva el id de cada test y su resultado (`pasa`, `falla` u `omite`). Nunca guarda el contenido de un test.
+El `<hash>` sale del contenido de la copia del repo. Entran los archivos regulares, en orden por ruta relativa. Cada uno entra con su ruta, su largo y su contenido. No entran los enlaces simbólicos ni `target/` y `.git/` de la raíz. Otra versión arranca con un historial vacío.
+Las corridas del historial suman muestras a los tests inestables. No cuentan como ausencia. `Veredicto.corridas_acumuladas` y `Confianza.corridas_acumuladas` dan esas muestras. Una línea ilegible se ignora y deja un aviso en `Veredicto.avisos`.
 Las subcarpetas `contrato/`, `oculto/` y `bootstrap/` son convención. Cada suite del contenedor monta solo su carpeta (`contrato/` o `oculto/`), y los escenarios montan solo `escenarios/`. El Oracle lee solo `tarea.toml` y los comandos que ese archivo declara.
 
 ## tarea.toml
@@ -1596,6 +1600,16 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
             "type": "string"
           }
         },
+        "corridas_acumuladas": {
+          "description": "Corridas acumuladas de cada test inestable, con las mismas claves que `inestables`: sus muestras\nde esta evaluación y del historial de la versión (Tarea 39). Un informe viejo lee vacío.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "default": {}
+        },
         "evidencia_visible": {
           "description": "Requisitos cuya evidencia medida es solo del contrato, como `<id>: evidencia visible al builder`.\nUn requisito entra si una referencia `contrato:` aporta un resultado medido (pasa, falla o inestable)\ny ningún test oculto suyo lo aporta. Un test del contrato `ausente`, `omite`, `pendiente` o `excluido`\nno cuenta. El builder ve esos tests (decisión 50). Un informe viejo lee vacío.",
           "type": "array",
@@ -1905,6 +1919,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": {
             "ambiguedades": [],
             "avisos": [],
+            "corridas_acumuladas": {},
             "evidencia_visible": [],
             "faltantes": [],
             "inestables": {},
@@ -2211,6 +2226,16 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
             "type": "string"
           }
         },
+        "corridas_acumuladas": {
+          "description": "Corridas acumuladas de cada test inestable: sus muestras, de esta evaluación y del historial de la\nversión (Tarea 39). Mismas claves que `tasas`. Un veredicto viejo lee vacío.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "default": {}
+        },
         "costo_usd": {
           "type": "number",
           "format": "double"
@@ -2487,6 +2512,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "default": {
         "ambiguedades": [],
         "avisos": [],
+        "corridas_acumuladas": {},
         "evidencia_visible": [],
         "faltantes": [],
         "inestables": {},
@@ -2581,6 +2607,16 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "items": {
             "type": "string"
           }
+        },
+        "corridas_acumuladas": {
+          "description": "Corridas acumuladas de cada test inestable, con las mismas claves que `inestables`: sus muestras\nde esta evaluación y del historial de la versión (Tarea 39). Un informe viejo lee vacío.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "default": {}
         },
         "evidencia_visible": {
           "description": "Requisitos cuya evidencia medida es solo del contrato, como `<id>: evidencia visible al builder`.\nUn requisito entra si una referencia `contrato:` aporta un resultado medido (pasa, falla o inestable)\ny ningún test oculto suyo lo aporta. Un test del contrato `ausente`, `omite`, `pendiente` o `excluido`\nno cuenta. El builder ve esos tests (decisión 50). Un informe viejo lee vacío.",
@@ -4316,6 +4352,16 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "type": "string"
       }
     },
+    "corridas_acumuladas": {
+      "description": "Corridas acumuladas de cada test inestable: sus muestras, de esta evaluación y del historial de la\nversión (Tarea 39). Mismas claves que `tasas`. Un veredicto viejo lee vacío.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "format": "uint32",
+        "minimum": 0
+      },
+      "default": {}
+    },
     "costo_usd": {
       "type": "number",
       "format": "double"
@@ -4497,6 +4543,16 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "items": {
             "type": "string"
           }
+        },
+        "corridas_acumuladas": {
+          "description": "Corridas acumuladas de cada test inestable, con las mismas claves que `inestables`: sus muestras\nde esta evaluación y del historial de la versión (Tarea 39). Un informe viejo lee vacío.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "default": {}
         },
         "evidencia_visible": {
           "description": "Requisitos cuya evidencia medida es solo del contrato, como `<id>: evidencia visible al builder`.\nUn requisito entra si una referencia `contrato:` aporta un resultado medido (pasa, falla o inestable)\ny ningún test oculto suyo lo aporta. Un test del contrato `ausente`, `omite`, `pendiente` o `excluido`\nno cuenta. El builder ve esos tests (decisión 50). Un informe viejo lee vacío.",
@@ -4784,6 +4840,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": {
             "ambiguedades": [],
             "avisos": [],
+            "corridas_acumuladas": {},
             "evidencia_visible": [],
             "faltantes": [],
             "inestables": {},

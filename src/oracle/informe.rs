@@ -819,6 +819,7 @@ fn confianza(v: &Veredicto, tarea: &Tarea) -> Confianza {
     Confianza {
         repeticiones: v.repeticiones,
         inestables: v.tasas.clone(),
+        corridas_acumuladas: v.corridas_acumuladas.clone(),
         requisitos_pendientes: v
             .requisitos
             .iter()
@@ -886,6 +887,10 @@ pub fn ocultar_tests(informe: &mut Informe, ocultos: &BTreeSet<String>) {
         .confianza
         .inestables
         .retain(|clave, _| !cita(clave.as_str()));
+    informe
+        .confianza
+        .corridas_acumuladas
+        .retain(|clave, _| !cita(clave.as_str()));
     // Un pendiente del contrato (`contrato:`) sigue el informe, salvo que su `test` o su `motivo` cite un
     // oculto. Los que no llevan prefijo son ocultos y `ids_ocultos` ya los nombra: salen por `cita`.
     informe
@@ -942,12 +947,16 @@ pub fn markdown(tarea: &str, informe: &Informe) -> String {
     let c = &informe.confianza;
     let mut datos: Vec<String> = Vec::new();
     for (clave, tasa) in &c.inestables {
-        datos.push(format!(
+        let mut linea = format!(
             "- Inestable {clave}: pasa {} de {} (cota de Wilson {})",
             tasa.pasa,
             tasa.total,
             numero(tasa.wilson_inf as f32)
-        ));
+        );
+        if let Some(corridas) = c.corridas_acumuladas.get(clave) {
+            linea.push_str(&format!("; {corridas} corridas acumuladas"));
+        }
+        datos.push(linea);
     }
     if !c.requisitos_pendientes.is_empty() {
         datos.push(format!(
@@ -1874,6 +1883,28 @@ modulos = ["config"]
         );
         assert_eq!(estado_de(Some(&informe_de(&bloqueado))), Estado::Rojo);
         assert_eq!(estado_de(None), Estado::SinVeredicto);
+    }
+
+    #[test]
+    fn informe_confianza_muestra_las_corridas_acumuladas_de_un_inestable() {
+        let mut v = ecc();
+        v.tasas.insert(
+            "oculto:tests/t.py::otro".into(),
+            TasaTest {
+                pasa: 4,
+                total: 7,
+                wilson_inf: 0.2,
+            },
+        );
+        v.corridas_acumuladas
+            .insert("oculto:tests/t.py::otro".into(), 7);
+        let i = informe_de(&v);
+        assert_eq!(
+            i.confianza.corridas_acumuladas["oculto:tests/t.py::otro"],
+            7
+        );
+        let md = markdown("memora", &i);
+        assert!(md.contains("7 corridas acumuladas"), "{md}");
     }
 
     #[test]

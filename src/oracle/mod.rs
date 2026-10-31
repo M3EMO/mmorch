@@ -7,6 +7,7 @@ pub mod contenedor;
 pub mod descarga;
 pub mod entrega;
 pub mod evidencia;
+pub mod historial;
 pub mod informe;
 pub mod juez;
 pub mod junit;
@@ -312,6 +313,8 @@ struct Corrida<'a> {
     rustsec: Option<PathBuf>,
     /// `ROOT_HOME`: donde van los registros de stderr, dentro de `oraculos/<tarea>/`.
     home: &'a Path,
+    /// Historial de evidencia de la versión del repo (Tarea 39): `evidencia/<tarea>/<hash>/historial.jsonl`.
+    historial: &'a Path,
 }
 
 /// Resultado de una suite: su clasificación, o el motivo por el que no tiene veredicto (A5).
@@ -526,6 +529,10 @@ fn evaluar_con(
     let copia = temporal(&tmp).map_err(|e| infra("directorio temporal", e))?;
     let repo_copia = copia.path().join("repo");
     copiar_repo(&repo, &repo_copia).map_err(|e| infra("copia del repo", e))?;
+    // El historial de evidencia es de esta versión del repo (Tarea 39): el hash sale de la copia.
+    let version = historial::hash_de_version(&repo_copia)
+        .map_err(|e| infra("hash de la versión del repo", e))?;
+    let ruta_historial = historial::ruta(&home, &tarea.nombre, &version)?;
     // Cada juez suma el costo de sus llamadas. El de la configuración va antes que las suites.
     let juez_config = deps
         .juez_config
@@ -572,6 +579,7 @@ fn evaluar_con(
         cache: cache.clone(),
         rustsec: rustsec.clone(),
         home: &home,
+        historial: &ruta_historial,
     };
     // Una suite que la parte no pide no corre. Cada suite recibe sus exclusiones (desempate 1).
     let contrato = if partes.contrato {
@@ -580,6 +588,7 @@ fn evaluar_con(
             &tarea.contrato,
             DIR_CONTRATO,
             XML_CONTRATO,
+            "contrato",
             &excluidos_del_contrato(tarea),
             deps.correr,
         )? {
@@ -610,6 +619,7 @@ fn evaluar_con(
             &tarea.oculto,
             DIR_OCULTO,
             XML_OCULTO,
+            "oculto",
             &excluidos,
             deps.correr,
         )? {
@@ -672,6 +682,14 @@ fn evaluar_con(
     for (id, tasa) in &oculto.tasas {
         tasas.insert(format!("oculto:{id}"), tasa.clone());
     }
+    // Muestras de cada inestable, con el historial de su versión (Tarea 39).
+    let corridas_acumuladas = tasas
+        .iter()
+        .map(|(clave, tasa)| (clave.clone(), tasa.total))
+        .collect();
+    // Los avisos del historial de cada suite (líneas ilegibles) llegan al veredicto.
+    avisos.extend(contrato.avisos.iter().cloned());
+    avisos.extend(oculto.avisos.iter().cloned());
     let mut todos = hallazgos;
     todos.extend(medicion.hallazgos);
     avisos.extend(medicion.avisos);
@@ -699,6 +717,7 @@ fn evaluar_con(
         inestables: oculto.inestables.clone(),
         inestables_contrato: contrato.inestables.clone(),
         tasas,
+        corridas_acumuladas,
         pendientes: pendientes_del_veredicto,
         avisos,
         requisitos: medicion.requisitos,
@@ -1427,6 +1446,7 @@ fn evaluar_suite(
     comando: &Comando,
     dir: &str,
     xml: &str,
+    suite: &str,
     excluidos: &BTreeSet<String>,
     correr: Correr,
 ) -> Result<Suite, ErrorOraculo> {
@@ -1466,9 +1486,16 @@ fn evaluar_suite(
             }
         }
     }
-    Ok(Suite::Clasificada(clasificar(
-        &completas, &extras, excluidos,
-    )))
+    // Las corridas del historial de esta versión suman muestras, como las extra: no cuentan como ausencia.
+    let (del_historial, avisos) = historial::leer(c.historial, suite)?;
+    let mut con_historial = del_historial;
+    con_historial.extend(extras.iter().cloned());
+    let mut clasificacion = clasificar(&completas, &con_historial, excluidos);
+    clasificacion.avisos = avisos;
+    // Lo que corrió esta vez queda en el historial. Solo si la suite tiene veredicto.
+    let nuevas: Vec<Junit> = completas.iter().chain(&extras).cloned().collect();
+    historial::agregar(c.historial, suite, &nuevas)?;
+    Ok(Suite::Clasificada(clasificacion))
 }
 
 /// Si el comando corre pytest. Solo entonces hay lista de recolección y código que cotejar (A5).
@@ -1526,6 +1553,8 @@ pub struct Clasificacion {
     tasas: BTreeMap<String, TasaTest>,
     /// Conteo de la suite. Un inestable no pasa, pero sí cuenta en el total.
     conteo: Conteo,
+    /// Avisos de leer el historial de evidencia de la suite (líneas ilegibles). Van al veredicto.
+    avisos: Vec<String>,
 }
 
 /// Resultado de un test a través de sus muestras: estable, con su resultado único, o inestable, con
@@ -1838,6 +1867,8 @@ pub fn redactar_para_mcp(mut v: Veredicto) -> Veredicto {
     v.inestables.clear();
     v.ocultos_fallidos.clear();
     v.tasas.retain(|k, _| !k.starts_with("oculto:"));
+    v.corridas_acumuladas
+        .retain(|k, _| !k.starts_with("oculto:"));
     v.pendientes.retain(|p| {
         p.test.starts_with(requisitos::PREFIJO_CONTRATO)
             && !ocultos
@@ -2478,6 +2509,7 @@ mod tests {
         fs::create_dir_all(&salida).expect("salida");
         fs::create_dir_all(&home).expect("home");
         let o = OpcionesOraculo::default();
+        let historial = home.join("historial.jsonl");
         let c = Corrida {
             repo: &repo,
             tarea,
@@ -2486,12 +2518,14 @@ mod tests {
             cache: None,
             rustsec: None,
             home: &home,
+            historial: &historial,
         };
         evaluar_suite(
             &c,
             &tarea.oculto,
             DIR_OCULTO,
             XML_OCULTO,
+            "oculto",
             &BTreeSet::new(),
             correr,
         )
@@ -2700,6 +2734,7 @@ mod tests {
             cache: None,
             rustsec: None,
             home: base.path(),
+            historial: &base.path().join("historial.jsonl"),
         };
         let e = ejecucion_de_suite(&c, &tarea.contrato.cmd, DIR_CONTRATO);
         let args = contenedor::argumentos(&e, "n");
@@ -5561,5 +5596,154 @@ mod tests {
         );
         assert_eq!(v.estado, Estado::SinVeredicto);
         assert_eq!(codigo_de_estado(v.estado), 3);
+    }
+
+    // --- Tarea 39: historial de evidencia por versión del repo ---
+
+    /// Oculto con `t3` fallando y `t4` pasando: una corrida que deja `t3` en la falla del historial.
+    const JUNIT_OCULTO_T3_FALLA: &str = r#"<testsuite><testcase classname="tests.test_b" name="t3"><failure message="x"/></testcase><testcase classname="tests.test_b" name="t4"/></testsuite>"#;
+
+    /// Ruta del historial de la versión actual de `repo` para `tarea-rust`.
+    fn historial_de(home: &Path, repo: &Path) -> PathBuf {
+        let version = historial::hash_de_version(repo).expect("hash de la versión");
+        historial::ruta(home, "tarea-rust", &version).expect("ruta del historial")
+    }
+
+    #[test]
+    fn oraculo_historial_falla_previa_de_la_misma_version_deja_el_test_inestable() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        // Primera evaluación: `t3` falla. Es estable y su corrida queda en el historial de la versión.
+        let primera = evaluar_falso(
+            &repo,
+            &tarea,
+            &home,
+            &correr_suites_oculto(JUNIT_OCULTO_T3_FALLA),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        assert!(primera.inestables.is_empty(), "{:?}", primera.inestables);
+        // Segunda evaluación, misma versión: `t3` pasa. Con la falla del historial, es inestable.
+        let segunda = evaluar_falso(
+            &repo,
+            &tarea,
+            &home,
+            &correr_suites_oculto(JUNIT_OCULTO_VERDE),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        assert_eq!(segunda.inestables, vec!["test_b::t3".to_string()]);
+        assert_eq!(segunda.tasas["oculto:test_b::t3"].pasa, 1);
+        assert_eq!(segunda.tasas["oculto:test_b::t3"].total, 2);
+        assert_eq!(segunda.corridas_acumuladas["oculto:test_b::t3"], 2);
+    }
+
+    #[test]
+    fn oraculo_historial_repo_con_un_archivo_cambiado_arranca_vacio() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        evaluar_falso(
+            &repo,
+            &tarea,
+            &home,
+            &correr_suites_oculto(JUNIT_OCULTO_T3_FALLA),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        // Otra versión del repo: la falla de la versión anterior no cuenta.
+        fs::write(repo.join("src/lib.rs"), "pub fn f() -> u8 { 2 }\n").expect("cambia un archivo");
+        let v = evaluar_falso(
+            &repo,
+            &tarea,
+            &home,
+            &correr_suites_oculto(JUNIT_OCULTO_VERDE),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        assert!(v.inestables.is_empty(), "{:?}", v.inestables);
+        assert!(!v.tasas.contains_key("oculto:test_b::t3"));
+        assert!(!v.corridas_acumuladas.contains_key("oculto:test_b::t3"));
+    }
+
+    #[test]
+    fn oraculo_historial_no_guarda_el_contenido_de_los_tests_ocultos() {
+        const MARCADOR: &str = "MARCADOR_OCULTO_39_NO_DEBE_SALIR";
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let oculto = base.path().join("tarea").join("oculto");
+        fs::create_dir_all(&oculto).expect("carpeta oculta");
+        fs::write(
+            oculto.join("test_b.py"),
+            format!("# {MARCADOR}\ndef test_t3():\n    assert False\n"),
+        )
+        .expect("test oculto");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        evaluar_falso(
+            &repo,
+            &tarea,
+            &home,
+            &correr_suites_oculto(JUNIT_OCULTO_T3_FALLA),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        let ruta = historial_de(&home, &repo);
+        assert!(ruta.is_file(), "falta {}", ruta.display());
+        assert!(
+            ruta.starts_with(home.join("evidencia")),
+            "{}",
+            ruta.display()
+        );
+        assert!(
+            !ruta.starts_with(home.join("oraculos")),
+            "{}",
+            ruta.display()
+        );
+        let texto = fs::read_to_string(&ruta).expect("lee el historial");
+        assert!(!texto.contains(MARCADOR), "{texto}");
+        assert!(texto.contains("test_b::t3"), "{texto}");
+    }
+
+    #[test]
+    fn oraculo_redaccion_mcp_quita_las_corridas_acumuladas_ocultas() {
+        let mut v = Veredicto {
+            inestables: vec!["test_a::t1".into()],
+            ..Veredicto::default()
+        };
+        v.corridas_acumuladas.insert("oculto:test_a::t1".into(), 7);
+        v.corridas_acumuladas
+            .insert("contrato:test_c::t9".into(), 3);
+        v.informe = Some(Informe {
+            decision: Decision::NoListo,
+            motivo: "motivo".into(),
+            requisitos: Vec::new(),
+            bloqueantes: Vec::new(),
+            riesgos: Vec::new(),
+            proximos_pasos: Vec::new(),
+            resumen: "resumen".into(),
+            confianza: Confianza {
+                corridas_acumuladas: BTreeMap::from([
+                    ("oculto:test_a::t1".to_string(), 7),
+                    ("contrato:test_c::t9".to_string(), 3),
+                ]),
+                ..Confianza::default()
+            },
+        });
+        let r = redactar_para_mcp(v);
+        assert!(!r.corridas_acumuladas.contains_key("oculto:test_a::t1"));
+        assert_eq!(r.corridas_acumuladas["contrato:test_c::t9"], 3);
+        let confianza = &r.informe.as_ref().expect("hay informe").confianza;
+        assert!(
+            !confianza
+                .corridas_acumuladas
+                .contains_key("oculto:test_a::t1")
+        );
+        assert_eq!(confianza.corridas_acumuladas["contrato:test_c::t9"], 3);
+        let texto = serde_json::to_string(&r).expect("json");
+        assert!(!texto.contains("test_a::t1"), "{texto}");
     }
 }

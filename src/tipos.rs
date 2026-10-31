@@ -341,6 +341,10 @@ pub struct Confianza {
     /// no cuenta. El builder ve esos tests (decisión 50). Un informe viejo lee vacío.
     #[serde(default)]
     pub evidencia_visible: Vec<String>,
+    /// Corridas acumuladas de cada test inestable, con las mismas claves que `inestables`: sus muestras
+    /// de esta evaluación y del historial de la versión (Tarea 39). Un informe viejo lee vacío.
+    #[serde(default)]
+    pub corridas_acumuladas: BTreeMap<String, u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -374,6 +378,10 @@ pub struct Veredicto {
     /// Tasa de cada test inestable. Claves `contrato:<id>` u `oculto:<id>`. Un veredicto viejo lee vacío.
     #[serde(default)]
     pub tasas: BTreeMap<String, TasaTest>,
+    /// Corridas acumuladas de cada test inestable: sus muestras, de esta evaluación y del historial de la
+    /// versión (Tarea 39). Mismas claves que `tasas`. Un veredicto viejo lee vacío.
+    #[serde(default)]
+    pub corridas_acumuladas: BTreeMap<String, u32>,
     /// Tests de `[[entorno]]`, con su motivo. No entran al conteo. Un veredicto viejo lee vacío.
     /// Completitud y el nivel por requisito llegan con la Tarea 9c; por ahora solo se listan.
     #[serde(default)]
@@ -422,6 +430,7 @@ impl Default for Veredicto {
             inestables: Vec::new(),
             inestables_contrato: Vec::new(),
             tasas: BTreeMap::new(),
+            corridas_acumuladas: BTreeMap::new(),
             pendientes: Vec::new(),
             avisos: Vec::new(),
             requisitos: Vec::new(),
@@ -624,6 +633,7 @@ mod tests {
             inestables: vec!["test_f::t_flaky".into()],
             inestables_contrato: Vec::new(),
             tasas: BTreeMap::new(),
+            corridas_acumuladas: BTreeMap::new(),
             pendientes: Vec::new(),
             avisos: Vec::new(),
             requisitos: Vec::new(),
