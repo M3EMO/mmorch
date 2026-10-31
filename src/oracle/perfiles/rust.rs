@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use super::herramientas::sin_veredicto;
-use super::{ResultadoSonda, crear_hallazgo, modulo_de, puntuar_hallazgos};
+use super::{ResultadoSonda, crear_hallazgo, modulo_de, modulo_de_capa, puntuar_hallazgos};
 use crate::goal::calcular_hash;
 use crate::oracle::tarea::Requisito;
 use crate::tipos::{Dimension, Hallazgo};
@@ -140,10 +140,16 @@ pub fn arquitectura_nativa(
         return sin_veredicto(Dimension::Arquitectura, MOTIVO_SIN_MODULOS);
     }
     // Una capa prometida que no existe es evidencia. Sin módulos, las demás reglas no encuentran nada.
-    let mut hallazgos = capas_sin_modulo(capas, &modulos, requisitos);
-    let aristas = aristas_entre_modulos(&archivos, &modulos);
+    // La raíz (`main`, `lib`) está presente si existe su archivo: una capa `["main"]` no falta con `src/main.rs`.
+    let presentes: BTreeSet<String> = archivos
+        .iter()
+        .filter_map(|a| modulo_de_capa(&a.ruta))
+        .collect();
+    let mut hallazgos = capas_sin_modulo(capas, &modulos, &presentes, requisitos);
+    let aristas = aristas_de_capas(&archivos, &modulos);
+    // Los ciclos no cuentan las aristas hacia la raíz: usar un ítem de la raíz que declara el módulo es Rust normal.
     let mut adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (origen, destino) in aristas.keys() {
+    for (origen, destino) in aristas.keys().filter(|(_, d)| modulos.contains(d)) {
         adj.entry(origen.clone()).or_default().push(destino.clone());
     }
     for modulo in &modulos {
@@ -499,14 +505,48 @@ pub(crate) fn aristas_entre_modulos(
     archivos: &[Archivo],
     modulos: &BTreeSet<String>,
 ) -> BTreeMap<(String, String), Uso> {
+    aristas_de(archivos, modulos, false)
+}
+
+/// Aristas de la regla de capas: como `aristas_entre_modulos`, pero la raíz (`main`, `lib`) también es origen,
+/// y un `crate::X` con X que no es módulo es una arista hacia la raíz que declara el módulo de origen.
+fn aristas_de_capas(
+    archivos: &[Archivo],
+    modulos: &BTreeSet<String>,
+) -> BTreeMap<(String, String), Uso> {
+    aristas_de(archivos, modulos, true)
+}
+
+fn aristas_de(
+    archivos: &[Archivo],
+    modulos: &BTreeSet<String>,
+    con_raiz: bool,
+) -> BTreeMap<(String, String), Uso> {
     let mut aristas = BTreeMap::new();
     for archivo in archivos {
-        let Some(origen) = modulo_de(&archivo.ruta) else {
+        let origen = if con_raiz {
+            modulo_de_capa(&archivo.ruta)
+        } else {
+            modulo_de(&archivo.ruta)
+        };
+        let Some(origen) = origen else {
             continue;
         };
+        // Un archivo de la raíz no tiene raíz que lo declare: sus `crate::X` solo cuentan si X es módulo.
+        let es_modulo = modulo_de(&archivo.ruta).is_some();
         for linea in analizar(&archivo.lineas).iter().filter(|l| !l.de_test) {
-            for destino in usos_de_crate(&linea.limpia) {
-                if destino != origen && modulos.contains(&destino) {
+            for nombre in usos_de_crate(&linea.limpia) {
+                let destino = if modulos.contains(&nombre) {
+                    nombre
+                } else if con_raiz && es_modulo {
+                    match raiz_de_modulo(&origen, archivos) {
+                        Some(raiz) => raiz.to_string(),
+                        None => continue,
+                    }
+                } else {
+                    continue;
+                };
+                if destino != origen {
                     aristas
                         .entry((origen.clone(), destino))
                         .or_insert_with(|| Uso {
@@ -519,6 +559,31 @@ pub(crate) fn aristas_entre_modulos(
         }
     }
     aristas
+}
+
+/// Raíz del crate que declara `modulo`: `lib` si `src/lib.rs` lo declara con `mod`; si no, `main` si existe
+/// `src/main.rs`; si no, `lib` si existe `src/lib.rs`. Sin raíz, `None`.
+fn raiz_de_modulo(modulo: &str, archivos: &[Archivo]) -> Option<&'static str> {
+    let lib = archivos.iter().find(|a| a.ruta == "src/lib.rs");
+    if lib.is_some_and(|a| declara_modulo(a, modulo)) {
+        return Some("lib");
+    }
+    if archivos.iter().any(|a| a.ruta == "src/main.rs") {
+        return Some("main");
+    }
+    lib.map(|_| "lib")
+}
+
+/// Verdadero si el archivo declara `mod <modulo>;`, con `pub` o `pub(crate)`, fuera de tests.
+fn declara_modulo(archivo: &Archivo, modulo: &str) -> bool {
+    let formas = [
+        format!("mod {modulo};"),
+        format!("pub mod {modulo};"),
+        format!("pub(crate) mod {modulo};"),
+    ];
+    analizar(&archivo.lineas)
+        .iter()
+        .any(|l| !l.de_test && formas.iter().any(|f| l.limpia.trim() == f))
 }
 
 /// Nombres X de cada `crate::X` en la línea.
@@ -601,12 +666,14 @@ fn capa_de(capas: &[Vec<String>], modulo: &str) -> Option<usize> {
     capas.iter().position(|c| c.iter().any(|m| m == modulo))
 }
 
-/// Un hallazgo por capa de `capas` que no tiene ningún módulo en el repo. Una capa con al menos un módulo
-/// presente no da hallazgo. La cita es el mapa de módulos del repo y la capa entera, así cada capa
-/// ausente tiene su propio id. Una capa vacía no da hallazgo, como antes.
+/// Un hallazgo por capa de `capas` que no tiene ningún módulo en el repo. `presentes` son los módulos más la
+/// raíz (`main`, `lib`) si existe su archivo. Una capa con al menos uno presente no da hallazgo. La cita es el
+/// mapa de módulos del repo (sin la raíz) y la capa entera, así cada capa ausente tiene su propio id. Una capa
+/// vacía no da hallazgo, como antes.
 fn capas_sin_modulo(
     capas: &[Vec<String>],
     modulos: &BTreeSet<String>,
+    presentes: &BTreeSet<String>,
     requisitos: &[Requisito],
 ) -> Vec<Hallazgo> {
     let mapa = if modulos.is_empty() {
@@ -620,7 +687,7 @@ fn capas_sin_modulo(
     };
     let mut hallazgos = Vec::new();
     for capa in capas {
-        if capa.is_empty() || capa.iter().any(|m| modulos.contains(m)) {
+        if capa.is_empty() || capa.iter().any(|m| presentes.contains(m)) {
             continue;
         }
         let nombres = capa.join(", ");
@@ -1108,5 +1175,132 @@ mod tests {
         assert_eq!(e.valor, None);
         let a = arquitectura_nativa(dir.path(), &capas(), &[]);
         assert_eq!(a.valor, None);
+    }
+
+    #[test]
+    fn sonda_arquitectura_capa_main_con_src_main_rs_no_da_capa_faltante() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), "src/main.rs", "mod server;\nfn main() {}\n");
+        escribir(dir.path(), "src/server.rs", "pub fn run() {}\n");
+        let capas = [vec!["main".to_string()], vec!["server".to_string()]];
+        let r = arquitectura_nativa(dir.path(), &capas, &[]);
+        assert!(
+            r.hallazgos
+                .iter()
+                .all(|h| !h.detalle.contains("falta la capa")),
+            "{:?}",
+            r.hallazgos
+        );
+    }
+
+    #[test]
+    fn sonda_arquitectura_capa_main_lib_con_src_lib_rs_no_da_capa_faltante() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), "src/lib.rs", "pub mod app;\n");
+        escribir(dir.path(), "src/app.rs", "pub fn a() {}\n");
+        let capas = [
+            vec!["main".to_string(), "lib".to_string()],
+            vec!["app".to_string()],
+        ];
+        let r = arquitectura_nativa(dir.path(), &capas, &[]);
+        assert!(
+            r.hallazgos
+                .iter()
+                .all(|h| !h.detalle.contains("falta la capa")),
+            "{:?}",
+            r.hallazgos
+        );
+    }
+
+    #[test]
+    fn sonda_arquitectura_modulo_que_importa_de_main_da_hallazgo_de_orden() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(
+            dir.path(),
+            "src/main.rs",
+            "mod server;\npub struct Config;\nfn main() {}\n",
+        );
+        escribir(
+            dir.path(),
+            "src/server.rs",
+            "use crate::Config;\npub fn run() {}\n",
+        );
+        let capas = [vec!["main".to_string()], vec!["server".to_string()]];
+        let r = arquitectura_nativa(dir.path(), &capas, &[]);
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        let h = &r.hallazgos[0];
+        assert_eq!(h.detalle, "server (capa 1) importa main (capa 0)");
+        assert_eq!((h.archivo.as_str(), h.linea), ("src/server.rs", 1));
+        assert!(!h.detalle.starts_with(REGLA_CICLO), "{}", h.detalle);
+    }
+
+    #[test]
+    fn sonda_arquitectura_main_que_importa_un_modulo_no_da_hallazgo() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(
+            dir.path(),
+            "src/main.rs",
+            "mod server;\nuse crate::server::run;\nfn main() { run(); }\n",
+        );
+        escribir(dir.path(), "src/server.rs", "pub fn run() {}\n");
+        let capas = [vec!["main".to_string()], vec!["server".to_string()]];
+        let r = arquitectura_nativa(dir.path(), &capas, &[]);
+        assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+        assert_eq!(r.valor, Some(1.0));
+    }
+
+    #[test]
+    fn sonda_arquitectura_modulo_de_lib_que_importa_un_item_de_lib_da_hallazgo_de_orden() {
+        // `app` la declara `lib.rs`: la raíz es `lib`, aunque también exista `main.rs`.
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(
+            dir.path(),
+            "src/lib.rs",
+            "pub mod app;\npub struct Config;\n",
+        );
+        escribir(dir.path(), "src/main.rs", "fn main() {}\n");
+        escribir(
+            dir.path(),
+            "src/app.rs",
+            "use crate::Config;\npub fn a() {}\n",
+        );
+        let capas = [vec!["lib".to_string()], vec!["app".to_string()]];
+        let r = arquitectura_nativa(dir.path(), &capas, &[]);
+        assert_eq!(r.hallazgos.len(), 1, "{:?}", r.hallazgos);
+        assert_eq!(r.hallazgos[0].detalle, "app (capa 1) importa lib (capa 0)");
+    }
+
+    #[test]
+    fn sonda_arquitectura_uso_de_un_item_de_la_raiz_no_forma_ciclo() {
+        // Guarda: `server` usa `Config` de `main.rs` y `main.rs` usa `server`. Eso es Rust normal, no ciclo.
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(
+            dir.path(),
+            "src/main.rs",
+            "mod server;\nuse crate::server::run;\npub struct Config;\nfn main() { run(); }\n",
+        );
+        escribir(
+            dir.path(),
+            "src/server.rs",
+            "use crate::Config;\npub fn run() {}\n",
+        );
+        let r = arquitectura_nativa(dir.path(), &[], &[]);
+        assert!(
+            r.hallazgos.iter().all(|h| !h.detalle.contains(REGLA_CICLO)),
+            "{:?}",
+            r.hallazgos
+        );
+        assert_eq!(r.valor, Some(1.0));
+    }
+
+    #[test]
+    fn sonda_arquitectura_solo_main_rs_sin_capas_da_sin_modulos() {
+        // Guarda: `main.rs` no es módulo para el criterio "sin módulos".
+        let dir = tempfile::tempdir().expect("temp dir");
+        escribir(dir.path(), "src/main.rs", "fn main() {}\n");
+        let r = arquitectura_nativa(dir.path(), &[], &[]);
+        assert_eq!(r.valor, None, "{:?}", r.hallazgos);
+        assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+        assert_eq!(r.motivo.as_deref(), Some(MOTIVO_SIN_MODULOS));
     }
 }
