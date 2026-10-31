@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Corre `cargo test` sin claves, con un ROOT_HOME de prueba nuevo y con temporales y target en $HOME.
-# Los argumentos pasan a `cargo test`. Sale con el código de cargo.
+# Corre `cargo test` sin claves, con un ROOT_HOME de prueba nuevo y con temporales y target en
+# ~/.cache/root-tests/<hash>/, una carpeta por worktree. Los argumentos pasan a `cargo test`.
+# Sale con el código de cargo.
 set -euo pipefail
 
 # Sin claves: con ellas, la suite con podman gasta API real.
@@ -14,16 +15,35 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OB
 base="${ROOT_TESTS_BASE:-$HOME/.cache/root-tests}"
 mkdir -p "$base"
 
+# Carpeta por worktree: el hash sale de la ruta del repo, la carpeta padre de tools/.
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+hash="$(printf '%s' "$repo" | sha256sum | cut -c1-12)"
+carpeta="$base/$hash"
+mkdir -p "$carpeta"
+
+# Lock de podman: una corrida a la vez en toda la máquina. Con ROOT_SIN_PODMAN=1 no hay lock.
+# Mismo criterio que src/entorno.rs::debe_saltear: solo vale exactamente "1".
+if [ "${ROOT_SIN_PODMAN:-}" != "1" ]; then
+    lock="$base/podman.lock"
+    exec 9>"$lock"
+    # Si el lock está tomado, avisa antes de esperar su turno.
+    if ! flock -n 9; then
+        echo "test-seguro: espera el lock de podman ($lock)" >&2
+        flock 9
+    fi
+fi
+
 # ROOT_HOME nuevo y vacío para esta corrida. Se borra al salir.
-ROOT_HOME="$(mktemp -d "$base/home.XXXXXX")"
+ROOT_HOME="$(mktemp -d "$carpeta/home.XXXXXX")"
 export ROOT_HOME
 trap 'rm -rf -- "$ROOT_HOME"' EXIT
 
-# Temporales y target fuera de /tmp. CARGO_TARGET_DIR_SEGURO gana sobre el CARGO_TARGET_DIR del usuario.
-mkdir -p "$base/tmp"
-export TMPDIR="$base/tmp"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR_SEGURO:-$base/target}"
+# Temporales y target fuera de /tmp. CARGO_TARGET_DIR_SEGURO gana sobre la carpeta del worktree.
+mkdir -p "$carpeta/tmp"
+export TMPDIR="$carpeta/tmp"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR_SEGURO:-$carpeta/target}"
 mkdir -p "$CARGO_TARGET_DIR"
 
 # ROOT_SIN_PODMAN no se toca: si viene exportada, llega a cargo tal cual.
-"${ROOT_TEST_SEGURO_CARGO:-cargo}" test "$@"
+# El descriptor 9 se cierra para cargo: un hijo que sobreviva no retiene el lock.
+"${ROOT_TEST_SEGURO_CARGO:-cargo}" test "$@" 9>&-

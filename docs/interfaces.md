@@ -217,7 +217,7 @@ Ruta: `$ROOT_HOME/oraculos/<tarea>/tarea.toml`. Lo lee `Tarea::cargar_de` (`src/
 | `[contrato]` `reintento` | texto | no | | Comando de las corridas extra de un test inestable. `{tests}` se reemplaza por los node ids. |
 | `[oculto]` `cmd` | texto | sí | | Suite oculta. |
 | `[oculto]` `reintento` | texto | no | | Igual que en `[contrato]`. |
-| `[[entorno]]` `test`, `motivo` | texto | no | | Test que depende del entorno. El motivo no puede estar vacío. Un test aparece una sola vez. |
+| `[[entorno]]` `test`, `motivo` | texto | no | | Test que depende del entorno. El motivo no puede estar vacío. Un test aparece una sola vez. Un id con `contrato:` excluye un test del contrato. Un id sin prefijo excluye solo el test oculto. |
 | `[[oraculo_dudoso]]` `test`, `motivo` | texto | no | | Test que depende de una frase ambigua de la spec. Mismas reglas que `[[entorno]]`. |
 | `[[requisito]]` `id`, `titulo`, `seccion`, `peso`, `pruebas`, `bordes`, `escenarios`, `criterios`, `modulos` | varios | no | `seccion` = ""; `peso` = 1 | `peso` debe estar entre 1 y 3. `id` no puede repetirse. `modulos` liga el requisito a los módulos del código. Un id de `pruebas` o `bordes` con el prefijo `contrato:` apunta a la suite del contrato. Sin prefijo, apunta a la suite oculta. |
 | `[[escenario]]` `id`, `cmd` | texto | no | | Flujo real de usuario. `cmd` sale con 0 si el flujo funciona. `id` solo usa `A-Za-z0-9._-` y no puede repetirse. |
@@ -1597,7 +1597,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           }
         },
         "evidencia_visible": {
-          "description": "Requisitos con evidencia solo del contrato, como `<id>: evidencia visible al builder`. El builder\nve esos tests (decisión 50). Un informe viejo lee vacío.",
+          "description": "Requisitos cuya evidencia medida es solo del contrato, como `<id>: evidencia visible al builder`.\nUn requisito entra si tiene una referencia `contrato:` y ningún test oculto suyo tiene resultado\nmedido (pasa, falla o inestable). El builder ve esos tests (decisión 50). Un informe viejo lee vacío.",
           "type": "array",
           "default": [],
           "items": {
@@ -2583,7 +2583,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           }
         },
         "evidencia_visible": {
-          "description": "Requisitos con evidencia solo del contrato, como `<id>: evidencia visible al builder`. El builder\nve esos tests (decisión 50). Un informe viejo lee vacío.",
+          "description": "Requisitos cuya evidencia medida es solo del contrato, como `<id>: evidencia visible al builder`.\nUn requisito entra si tiene una referencia `contrato:` y ningún test oculto suyo tiene resultado\nmedido (pasa, falla o inestable). El builder ve esos tests (decisión 50). Un informe viejo lee vacío.",
           "type": "array",
           "default": [],
           "items": {
@@ -4499,7 +4499,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           }
         },
         "evidencia_visible": {
-          "description": "Requisitos con evidencia solo del contrato, como `<id>: evidencia visible al builder`. El builder\nve esos tests (decisión 50). Un informe viejo lee vacío.",
+          "description": "Requisitos cuya evidencia medida es solo del contrato, como `<id>: evidencia visible al builder`.\nUn requisito entra si tiene una referencia `contrato:` y ningún test oculto suyo tiene resultado\nmedido (pasa, falla o inestable). El builder ve esos tests (decisión 50). Un informe viejo lee vacío.",
           "type": "array",
           "default": [],
           "items": {

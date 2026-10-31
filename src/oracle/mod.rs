@@ -573,14 +573,14 @@ fn evaluar_con(
         rustsec: rustsec.clone(),
         home: &home,
     };
-    // El contrato no tiene exclusiones: solo el oculto las usa. Una suite que la parte no pide no corre.
+    // Una suite que la parte no pide no corre. Cada suite recibe sus exclusiones (desempate 1).
     let contrato = if partes.contrato {
         match evaluar_suite(
             &corrida,
             &tarea.contrato,
             DIR_CONTRATO,
             XML_CONTRATO,
-            &BTreeSet::new(),
+            &excluidos_del_contrato(tarea),
             deps.correr,
         )? {
             Suite::Clasificada(c) => c,
@@ -596,10 +596,12 @@ fn evaluar_con(
     } else {
         Clasificacion::default()
     };
+    // La oculta excluye sus entradas sin prefijo de `[[entorno]]` y de `[[oraculo_dudoso]]`.
     let excluidos: BTreeSet<String> = tarea
         .entorno
         .iter()
         .chain(&tarea.oraculo_dudoso)
+        .filter(|e| !e.test.starts_with(requisitos::PREFIJO_CONTRATO))
         .map(|e| e.test.clone())
         .collect();
     let oculto = if partes.oculto {
@@ -1160,8 +1162,21 @@ fn puntaje_de(
     }
 }
 
+/// Exclusiones de la suite del contrato: las entradas `contrato:` de `[[entorno]]`, sin el prefijo. Así
+/// coinciden con los ids que mide la suite (desempate 1).
+fn excluidos_del_contrato(tarea: &Tarea) -> BTreeSet<String> {
+    tarea
+        .entorno
+        .iter()
+        .filter_map(|e| e.test.strip_prefix(requisitos::PREFIJO_CONTRATO))
+        .map(String::from)
+        .collect()
+}
+
 /// Funciona: la fracción de tests que pasan (contrato y oculto, sin los de `[[entorno]]`) y, si la tarea
 /// tiene escenarios, la de escenarios verdes. Una parte sin veredicto deja la dimensión sin veredicto.
+/// Cada suite saca sus propias entradas de `[[entorno]]`: la del contrato las `contrato:`, la oculta las
+/// que no lo tienen.
 fn funciona(
     tarea: &Tarea,
     contrato: &Clasificacion,
@@ -1169,9 +1184,15 @@ fn funciona(
     escenarios: &BTreeMap<String, bool>,
 ) -> Puntaje {
     const DIMENSION: Dimension = Dimension::Funciona;
-    let entorno: BTreeSet<&str> = tarea.entorno.iter().map(|e| e.test.as_str()).collect();
-    let (pasa_contrato, total_contrato) = fraccion_pasa(contrato, &entorno);
-    let (pasa_oculto, total_oculto) = fraccion_pasa(oculto, &entorno);
+    let del_contrato = excluidos_del_contrato(tarea);
+    let del_oculto: BTreeSet<String> = tarea
+        .entorno
+        .iter()
+        .filter(|e| !e.test.starts_with(requisitos::PREFIJO_CONTRATO))
+        .map(|e| e.test.clone())
+        .collect();
+    let (pasa_contrato, total_contrato) = fraccion_pasa(contrato, &del_contrato);
+    let (pasa_oculto, total_oculto) = fraccion_pasa(oculto, &del_oculto);
     let total = total_contrato + total_oculto;
     if total == 0 {
         return sin_veredicto_puntaje(DIMENSION, "no hay tests que medir".into());
@@ -1207,12 +1228,13 @@ fn funciona(
     }
 }
 
-/// Tests que pasan y tests medidos de una suite, sin los de `[[entorno]]`. Los omitidos no cuentan.
-fn fraccion_pasa(c: &Clasificacion, entorno: &BTreeSet<&str>) -> (u32, u32) {
+/// Tests que pasan y tests medidos de una suite, sin los de `entorno` (ids sin prefijo de esa suite).
+/// Los omitidos no cuentan.
+fn fraccion_pasa(c: &Clasificacion, entorno: &BTreeSet<String>) -> (u32, u32) {
     let mut pasa: u32 = 0;
     let mut total: u32 = 0;
     for (id, resultado) in &c.estables {
-        if entorno.contains(id.as_str()) {
+        if entorno.contains(id) {
             continue;
         }
         total += 1;
@@ -1223,7 +1245,7 @@ fn fraccion_pasa(c: &Clasificacion, entorno: &BTreeSet<&str>) -> (u32, u32) {
     total += c
         .inestables
         .iter()
-        .filter(|id| !entorno.contains(id.as_str()))
+        .filter(|id| !entorno.contains(*id))
         .count() as u32;
     (pasa, total)
 }
@@ -1797,11 +1819,19 @@ fn registrar_stderr(c: &Corrida, xml: &str, stderr: &str) -> Option<PathBuf> {
 }
 
 /// Veredicto para la herramienta MCP: solo conteos y niveles, sin ids de tests ocultos (A2). La CLI
-/// para el humano conserva todo. Campo por campo: `inestables`, `tasas` (`oculto:`), `pendientes` y las
-/// evidencias de requisitos y de ítems de puntaje se vacían; un hallazgo que cita un test oculto se
-/// quita; el resto (conteos, estado, `avisos`, hallazgos sin ids) se conserva.
+/// para el humano conserva todo. Campo por campo: `inestables`, `tasas` (`oculto:`) y `pendientes` se
+/// vacían; un hallazgo que cita un test oculto se quita; de la evidencia de requisitos (de `v` y del
+/// informe) solo queda la del contrato (desempate 2), sin las entradas que citan un test oculto; los
+/// ítems de puntaje se vacían. El resto (conteos, estado, `avisos`, hallazgos sin ids) se conserva.
 pub fn redactar_para_mcp(mut v: Veredicto) -> Veredicto {
     let ocultos: BTreeSet<String> = informe::ids_ocultos(&v);
+    // Una entrada del contrato es `contrato:<id>`, o un pendiente o excluido de `contrato:<id>`.
+    let del_contrato = |x: &str| {
+        ["contrato:", "pendiente: contrato:", "excluido: contrato:"]
+            .iter()
+            .any(|prefijo| x.starts_with(prefijo))
+    };
+    let conservar = |x: &str| del_contrato(x) && !ocultos.iter().any(|id| x.contains(id.as_str()));
     v.inestables.clear();
     v.ocultos_fallidos.clear();
     v.tasas.retain(|k, _| !k.starts_with("oculto:"));
@@ -1822,11 +1852,11 @@ pub fn redactar_para_mcp(mut v: Veredicto) -> Veredicto {
         }
     }
     for requisito in &mut v.requisitos {
-        requisito.evidencia.clear();
+        requisito.evidencia.retain(|x| conservar(x));
     }
     if let Some(informe) = &mut v.informe {
         for requisito in &mut informe.requisitos {
-            requisito.evidencia.clear();
+            requisito.evidencia.retain(|x| conservar(x));
         }
         informe::ocultar_tests(informe, &ocultos);
     }
@@ -1932,7 +1962,8 @@ mod tests {
     use crate::oracle::perfiles::herramientas::{EjecutorHerramienta, SalidaHerramienta};
     use crate::oracle::tarea::{Escenario, Exclusion};
     use crate::tipos::{
-        Cumplimiento, Decision, Dimension, EstadoRequisito, Fuente, NivelItem, Puntaje,
+        Confianza, Cumplimiento, Decision, Dimension, EstadoRequisito, Fuente, Informe, NivelItem,
+        Puntaje,
     };
     use filetime::{FileTime, set_symlink_file_times};
     use serde_json::{Value, json};
@@ -3231,6 +3262,47 @@ mod tests {
     }
 
     #[test]
+    fn oraculo_entorno_con_prefijo_saca_el_test_del_contrato_de_fallidos() {
+        // Desempate 1: `contrato:<id>` en `[[entorno]]` excluye el test del contrato que falla.
+        let base = tempfile::tempdir().expect("base");
+        let mut tarea = tarea_rust(base.path());
+        tarea.entorno = vec![Exclusion {
+            test: "contrato:test_a::t1".into(),
+            motivo: "gpu".into(),
+        }];
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO_CON_FALLA);
+        let v = evaluar_falso(&repo, &tarea, &home, &correr, &herramientas(&[])).expect("evalúa");
+        assert!(
+            v.contrato_fallidos.is_empty(),
+            "el excluido no es un fallo: {:?}",
+            v.contrato_fallidos
+        );
+    }
+
+    #[test]
+    fn oraculo_entorno_sin_prefijo_deja_el_test_del_contrato_en_fallidos() {
+        // Desempate 1: `test_a::t1` sin prefijo excluye solo el oculto. El del contrato sigue fallando.
+        let base = tempfile::tempdir().expect("base");
+        let mut tarea = tarea_rust(base.path());
+        tarea.entorno = vec![Exclusion {
+            test: "test_a::t1".into(),
+            motivo: "gpu".into(),
+        }];
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO_CON_FALLA);
+        let v = evaluar_falso(&repo, &tarea, &home, &correr, &herramientas(&[])).expect("evalúa");
+        assert_eq!(
+            v.contrato_fallidos,
+            ["test_a::t1"],
+            "{:?}",
+            v.contrato_fallidos
+        );
+    }
+
+    #[test]
     fn oraculo_test_del_contrato_que_falla_fuera_de_requisitos_da_no_listo() {
         let base = tempfile::tempdir().expect("base");
         // `tarea_rust` no tiene requisito con `contrato:`: el test `test_a::t1` queda fuera.
@@ -3267,7 +3339,7 @@ mod tests {
         let base = tempfile::tempdir().expect("base");
         let mut tarea = tarea_de_prueba(base.path());
         tarea.entorno = vec![Exclusion {
-            test: "test_a::t2".into(),
+            test: "contrato:test_a::t2".into(),
             motivo: "gpu".into(),
         }];
         let contrato = Clasificacion {
@@ -3285,6 +3357,39 @@ mod tests {
         assert!(
             (p.valor - 1.0).abs() < 1e-6,
             "sin el de entorno quedan 2 de 2: {}",
+            p.valor
+        );
+    }
+
+    #[test]
+    fn oraculo_funciona_entorno_sin_prefijo_no_saca_el_test_del_contrato() {
+        // Desempate 1: `test_a::t2` sin prefijo excluye solo el test oculto. El del contrato cuenta.
+        let base = tempfile::tempdir().expect("base");
+        let mut tarea = tarea_de_prueba(base.path());
+        tarea.entorno = vec![Exclusion {
+            test: "test_a::t2".into(),
+            motivo: "gpu".into(),
+        }];
+        let contrato = Clasificacion {
+            estables: BTreeMap::from([
+                ("test_a::t1".to_string(), ResultadoTest::Pasa),
+                ("test_a::t2".to_string(), ResultadoTest::Falla),
+            ]),
+            ..Clasificacion::default()
+        };
+        let oculto = Clasificacion {
+            estables: BTreeMap::from([("test_b::t3".to_string(), ResultadoTest::Pasa)]),
+            ..Clasificacion::default()
+        };
+        let p = funciona(&tarea, &contrato, &oculto, &BTreeMap::new());
+        assert!(
+            p.valor < 1.0 - 1e-6,
+            "el test del contrato sigue contando: {}",
+            p.valor
+        );
+        assert!(
+            (p.valor - 2.0 / 3.0).abs() < 1e-6,
+            "quedan 2 de 3: {}",
             p.valor
         );
     }
@@ -3442,6 +3547,45 @@ mod tests {
             texto.contains("no instala"),
             "un motivo sin ids queda: {texto}"
         );
+    }
+
+    #[test]
+    fn oraculo_redaccion_mcp_conserva_la_evidencia_del_contrato_y_quita_la_oculta() {
+        // Desempate 2: la evidencia `contrato:` sale al MCP; la de un test oculto, no.
+        let evidencia = vec![
+            "contrato:test_a::t1: pasa".to_string(),
+            "test_b::t3: pasa".to_string(),
+        ];
+        let requisito = EstadoRequisito {
+            id: "R1".into(),
+            titulo: "Uno".into(),
+            peso: 3,
+            cumplimiento: Cumplimiento::Parcial,
+            evidencia: evidencia.clone(),
+            nivel: Some(1),
+        };
+        let informe = Informe {
+            decision: Decision::NoListo,
+            motivo: String::new(),
+            requisitos: vec![requisito.clone()],
+            bloqueantes: Vec::new(),
+            riesgos: Vec::new(),
+            proximos_pasos: Vec::new(),
+            resumen: String::new(),
+            confianza: Confianza::default(),
+        };
+        let v = Veredicto {
+            requisitos: vec![requisito],
+            informe: Some(informe),
+            ..Veredicto::default()
+        };
+        let r = redactar_para_mcp(v);
+        let esperada = ["contrato:test_a::t1: pasa"];
+        assert_eq!(r.requisitos[0].evidencia, esperada);
+        let informe = r.informe.as_ref().expect("hay informe");
+        assert_eq!(informe.requisitos[0].evidencia, esperada);
+        let texto = serde_json::to_string(&r).expect("json");
+        assert!(!texto.contains("test_b::t3"), "{texto}");
     }
 
     /// Tabla de calibración con la misma exactitud en todas las dimensiones de `tarea-rust`.

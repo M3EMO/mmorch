@@ -15,7 +15,8 @@ use sha2::{Digest, Sha256};
 
 use super::descarga;
 use super::junit::{self, ResultadoTest};
-use super::tarea::Tarea;
+use super::requisitos::PREFIJO_CONTRATO;
+use super::tarea::{Exclusion, Tarea};
 use super::{ErrorOraculo, comillas, commit_de, copiar_repo, infra};
 use super::{Muestreo, muestreo_de};
 use crate::borrado;
@@ -174,6 +175,15 @@ fn dueno_del_turno(ruta: &Path) -> String {
     }
 }
 
+/// Las entradas de `[[entorno]]` que Colab corre: las que no llevan el prefijo `contrato:` (desempate 1).
+/// Un `contrato:` es un test del contrato, que no va al paquete.
+pub fn entorno_de_colab(tarea: &Tarea) -> impl Iterator<Item = &Exclusion> {
+    tarea
+        .entorno
+        .iter()
+        .filter(|e| !e.test.starts_with(PREFIJO_CONTRATO))
+}
+
 /// Arma el paquete de los tests de `[[entorno]]` dentro de `oraculos/<tarea>/pendientes/`.
 /// `cache` es la caché de dependencias de la fase de descarga, si ya existe: el paquete la lleva y
 /// `correr.sh` la usa sin red. Sin tests pendientes no crea nada y da `None`.
@@ -185,7 +195,7 @@ pub fn crear(
     cache: Option<&Path>,
 ) -> Result<Option<Paquete>, ErrorOraculo> {
     nombre_de_tarea_valido(&tarea.nombre).map_err(ErrorOraculo::Tarea)?;
-    if tarea.entorno.is_empty() {
+    if entorno_de_colab(tarea).next().is_none() {
         return Ok(None);
     }
     let repo = fs::canonicalize(repo)
@@ -193,7 +203,7 @@ pub fn crear(
     let mut archivos: BTreeMap<String, PathBuf> = BTreeMap::new();
     let mut nodos = Vec::new();
     let mut tests = Vec::new();
-    for exclusion in &tarea.entorno {
+    for exclusion in entorno_de_colab(tarea) {
         let (archivo, _) = dividir(&exclusion.test)?;
         if !archivos.contains_key(archivo) {
             archivos.insert(archivo.to_string(), localizar(tarea, archivo)?);
@@ -309,7 +319,7 @@ pub fn importar(
 
     let mut colab = colab_de(home, &tarea.nombre)?;
     let mut resultados = BTreeMap::new();
-    for exclusion in &tarea.entorno {
+    for exclusion in entorno_de_colab(tarea) {
         let muestras: Vec<Option<ResultadoTest>> = junits
             .iter()
             .map(|j| j.tests.get(&exclusion.test).copied())
@@ -630,6 +640,23 @@ mod tests {
         let r = crear(home.path(), &tarea, repo.path(), None);
         let motivo = r.err().map(|e| e.to_string()).unwrap_or_default();
         assert!(motivo.contains("nombre inválido"), "{motivo}");
+        assert!(!home.path().join("oraculos").exists());
+    }
+
+    #[test]
+    fn pendiente_crear_con_solo_entradas_del_contrato_no_arma_paquete() {
+        // Desempate 1: `contrato:` no se corre en Colab. Sin otra entrada, no hay paquete ni error.
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        let tarea_dir = tempfile::tempdir().expect("tarea");
+        let texto = "nombre = \"tarea-prueba\"\nlenguaje = \"rust\"\nimagen = \"i\"\nspec = \"s\"\n\
+                     [contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n\
+                     [[entorno]]\ntest = \"contrato:a.py::t\"\nmotivo = \"m\"\n";
+        std::fs::write(tarea_dir.path().join("tarea.toml"), texto).expect("escribe");
+        let tarea = Tarea::cargar_de(tarea_dir.path()).expect("carga la tarea");
+        let r = crear(home.path(), &tarea, repo.path(), None);
+        let error = r.as_ref().err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(matches!(r, Ok(None)), "{error}");
         assert!(!home.path().join("oraculos").exists());
     }
 

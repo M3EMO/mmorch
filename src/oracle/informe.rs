@@ -764,19 +764,41 @@ fn conservadas(texto: &str, ids: &BTreeSet<String>) -> Option<String> {
 /// Marca de los requisitos cuya evidencia es solo del contrato (decisión 50).
 const MARCA_EVIDENCIA_VISIBLE: &str = "evidencia visible al builder";
 
-/// Requisitos cuyas pruebas y bordes son todos `contrato:`, y no están vacíos. El builder ve esos tests.
-/// Un requisito que mezcla `contrato:` con referencias sin prefijo tiene evidencia oculta: no entra.
+/// Requisitos con evidencia medida solo del contrato. Entra si `pruebas` o `bordes` tienen alguna
+/// referencia `contrato:`, y ninguna referencia sin prefijo aporta un resultado medido (`pasa`, `falla` o
+/// `inestable`). Así el builder ve lo que se midió del contrato, y un test oculto medido lo sigue ocultando.
 fn evidencia_visible(v: &Veredicto, tarea: &Tarea) -> Vec<String> {
     tarea
         .requisito
         .iter()
-        .filter(|r| v.requisitos.iter().any(|e| e.id == r.id))
-        .filter(|r| {
+        .filter_map(|r| {
+            let estado = v.requisitos.iter().find(|e| e.id == r.id)?;
             let refs: Vec<&String> = r.pruebas.iter().chain(&r.bordes).collect();
-            !refs.is_empty() && refs.iter().all(|x| x.starts_with(PREFIJO_CONTRATO))
+            let hay_contrato = refs.iter().any(|x| x.starts_with(PREFIJO_CONTRATO));
+            let oculto_medido = refs
+                .iter()
+                .filter(|x| !x.starts_with(PREFIJO_CONTRATO))
+                .any(|x| aporta_medida(estado, x));
+            (hay_contrato && !oculto_medido).then(|| format!("{}: {MARCA_EVIDENCIA_VISIBLE}", r.id))
         })
-        .map(|r| format!("{}: {MARCA_EVIDENCIA_VISIBLE}", r.id))
         .collect()
+}
+
+/// Si la referencia sin prefijo `prueba` aporta un resultado medido a `estado`: una entrada `<clave>: <estado>`
+/// con `estado` en `pasa`, `falla` o `inestable`, `clave` sin prefijo `contrato:` y cubierta por `prueba`.
+/// Las entradas `pendiente: `, `excluido: `, `omite` y `ausente` no son resultados medidos.
+fn aporta_medida(estado: &EstadoRequisito, prueba: &str) -> bool {
+    estado.evidencia.iter().any(|linea| {
+        if linea.starts_with("pendiente: ") || linea.starts_with("excluido: ") {
+            return false;
+        }
+        let Some((clave, resultado)) = linea.rsplit_once(": ") else {
+            return false;
+        };
+        matches!(resultado, "pasa" | "falla" | "inestable")
+            && !clave.starts_with(PREFIJO_CONTRATO)
+            && cubre(prueba, clave)
+    })
 }
 
 /// Datos para decidir: lo que el veredicto no mide del todo.
@@ -813,7 +835,8 @@ fn confianza(v: &Veredicto, tarea: &Tarea) -> Confianza {
     }
 }
 
-/// Ids de tests ocultos que el veredicto menciona: inestables, tasas `oculto:` y pendientes.
+/// Ids de tests ocultos que el veredicto menciona: inestables, tasas `oculto:` y pendientes sin prefijo
+/// `contrato:` (un pendiente del contrato no es oculto).
 pub fn ids_ocultos(v: &Veredicto) -> BTreeSet<String> {
     let mut ocultos: BTreeSet<String> = v.inestables.iter().cloned().collect();
     ocultos.extend(v.ocultos_fallidos.iter().cloned());
@@ -822,7 +845,12 @@ pub fn ids_ocultos(v: &Veredicto) -> BTreeSet<String> {
             .keys()
             .filter_map(|k| k.strip_prefix("oculto:").map(String::from)),
     );
-    ocultos.extend(v.pendientes.iter().map(|p| p.test.clone()));
+    ocultos.extend(
+        v.pendientes
+            .iter()
+            .filter(|p| !p.test.starts_with(PREFIJO_CONTRATO))
+            .map(|p| p.test.clone()),
+    );
     ocultos
 }
 
@@ -1036,7 +1064,7 @@ mod tests {
     use crate::oracle::tarea::Tarea;
     use crate::tipos::{
         Cumplimiento, Decision, Dimension, Estado, EstadoRequisito, Fuente, Hallazgo, Informe,
-        NivelItem, Puntaje, TasaTest, Veredicto,
+        NivelItem, Pendiente, Puntaje, TasaTest, Veredicto,
     };
     use std::cell::RefCell;
     use std::fs;
@@ -1899,11 +1927,13 @@ modulos = ["config"]
     #[test]
     fn informe_confianza_no_marca_requisito_con_evidencia_mezclada() {
         let mut t = tarea();
-        // R1 mezcla un test del contrato con uno oculto: tiene evidencia oculta.
+        // R1 mezcla un test del contrato con uno oculto que se midió: tiene evidencia oculta.
         t.requisito[0].pruebas = vec!["contrato:tests/c.py::a".into(), "tests/t.py::flaky".into()];
+        let v =
+            ecc_con_evidencia_de_r1(&["contrato:tests/c.py::a: pasa", "tests/t.py::flaky: falla"]);
         // R2 solo tiene referencias sin prefijo: no es del contrato.
         t.requisito[1].pruebas = vec!["tests/t.py::otro".into()];
-        let i = informe_con_tarea(&ecc(), &t);
+        let i = informe_con_tarea(&v, &t);
         assert!(
             i.confianza.evidencia_visible.is_empty(),
             "{:?}",
@@ -1928,13 +1958,97 @@ modulos = ["config"]
             i.confianza.evidencia_visible,
             ["R1: evidencia visible al builder"]
         );
+        // Un borde sin prefijo que se midió: el requisito tiene evidencia oculta.
         t.requisito[0].bordes = vec!["tests/t.py::b".into()];
-        let i = informe_con_tarea(&ecc(), &t);
+        let v = ecc_con_evidencia_de_r1(&["contrato:tests/c.py::a: pasa", "tests/t.py::b: falla"]);
+        let i = informe_con_tarea(&v, &t);
         assert!(
             i.confianza.evidencia_visible.is_empty(),
             "{:?}",
             i.confianza
         );
+    }
+
+    /// `ecc()` con la evidencia de R1 cambiada por `evidencia`.
+    fn ecc_con_evidencia_de_r1(evidencia: &[&str]) -> Veredicto {
+        let mut v = ecc();
+        v.requisitos[0].evidencia = evidencia.iter().map(|e| e.to_string()).collect();
+        v
+    }
+
+    #[test]
+    fn informe_confianza_marca_requisito_con_contrato_verde_y_oculto_ausente() {
+        // Desempate 5: un oculto sin resultado medido no quita la evidencia visible del contrato.
+        let mut t = tarea();
+        t.requisito[0].pruebas = vec!["contrato:tests/c.py::a".into(), "tests/t.py::b".into()];
+        t.requisito[0].bordes = Vec::new();
+        let v =
+            ecc_con_evidencia_de_r1(&["contrato:tests/c.py::a: pasa", "tests/t.py::b: ausente"]);
+        let i = informe_con_tarea(&v, &t);
+        assert_eq!(
+            i.confianza.evidencia_visible,
+            ["R1: evidencia visible al builder"]
+        );
+        // Un pendiente de entorno tampoco es un resultado medido.
+        let v = ecc_con_evidencia_de_r1(&[
+            "contrato:tests/c.py::a: pasa",
+            "pendiente: tests/t.py::b (gpu)",
+        ]);
+        let i = informe_con_tarea(&v, &t);
+        assert_eq!(
+            i.confianza.evidencia_visible,
+            ["R1: evidencia visible al builder"]
+        );
+    }
+
+    #[test]
+    fn informe_confianza_no_marca_requisito_con_oculto_medido() {
+        let mut t = tarea();
+        t.requisito[0].pruebas = vec!["contrato:tests/c.py::a".into(), "tests/t.py::b".into()];
+        t.requisito[0].bordes = Vec::new();
+        for medido in ["falla", "inestable", "pasa"] {
+            let oculto = format!("tests/t.py::b: {medido}");
+            let v = ecc_con_evidencia_de_r1(&["contrato:tests/c.py::a: pasa", oculto.as_str()]);
+            let i = informe_con_tarea(&v, &t);
+            assert!(
+                i.confianza.evidencia_visible.is_empty(),
+                "{medido}: {:?}",
+                i.confianza
+            );
+        }
+    }
+
+    #[test]
+    fn informe_confianza_no_marca_requisito_solo_con_referencias_sin_prefijo() {
+        let mut t = tarea();
+        t.requisito[0].pruebas = vec!["tests/t.py::b".into()];
+        t.requisito[0].bordes = Vec::new();
+        let i = informe_con_tarea(&ecc_con_evidencia_de_r1(&[]), &t);
+        assert!(
+            i.confianza.evidencia_visible.is_empty(),
+            "{:?}",
+            i.confianza
+        );
+    }
+
+    #[test]
+    fn informe_ids_ocultos_no_incluye_pendientes_del_contrato() {
+        // Desempate 1: un pendiente `contrato:` es del contrato, no un test oculto.
+        let mut v = ecc();
+        v.pendientes = vec![Pendiente {
+            test: "contrato:tests/c.py::gpu".into(),
+            motivo: "gpu".into(),
+            colab: None,
+            tasa: None,
+        }];
+        assert!(!ids_ocultos(&v).contains("contrato:tests/c.py::gpu"));
+        v.pendientes.push(Pendiente {
+            test: "tests/t.py::gpu".into(),
+            motivo: "gpu".into(),
+            colab: None,
+            tasa: None,
+        });
+        assert!(ids_ocultos(&v).contains("tests/t.py::gpu"));
     }
 
     #[test]

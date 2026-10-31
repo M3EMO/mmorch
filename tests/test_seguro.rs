@@ -1,13 +1,15 @@
 //! `tools/test-seguro.sh`: la suite corre sin claves, con un `ROOT_HOME` de prueba nuevo y con los
-//! temporales y el target bajo `ROOT_TESTS_BASE`. Un `cargo` falso, que vuelca el entorno y los
-//! argumentos, reemplaza a cargo por `ROOT_TEST_SEGURO_CARGO`. Así no se paga una compilación anidada.
+//! temporales y el target en una carpeta por worktree, `ROOT_TESTS_BASE/<hash>/`. Un lock de podman
+//! (`ROOT_TESTS_BASE/podman.lock`) hace esperar a las corridas que no tienen `ROOT_SIN_PODMAN=1`.
+//! Un `cargo` falso, que vuelca el entorno y los argumentos, reemplaza a cargo por
+//! `ROOT_TEST_SEGURO_CARGO`. Así no se paga una compilación anidada.
 //! Cada test arma el entorno del hijo con `Command::env`: nada cambia el entorno del proceso.
 
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
 
 const SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tools/test-seguro.sh");
 const PRE_COMMIT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/.githooks/pre-commit");
@@ -24,16 +26,17 @@ fn falso(dir: &Path, codigo: u8) -> PathBuf {
     ruta
 }
 
-/// Corre el script con `args`, el `cargo` falso `falso` y `extra` en el entorno del hijo.
-/// Devuelve el estado y el entorno que vio el falso.
-fn correr(
+/// Arma la orden que corre `script` con `args` y el `cargo` falso `cargo`. La base es `dir/base`.
+/// `extra` se agrega al entorno del hijo y `quitar` se saca del entorno heredado.
+fn orden(
+    script: &Path,
     dir: &Path,
-    codigo: u8,
+    cargo: &Path,
     extra: &[(&str, String)],
+    quitar: &[&str],
     args: &[&str],
-) -> (ExitStatus, HashMap<String, String>, Vec<String>) {
-    let cargo = falso(dir, codigo);
-    let mut orden = Command::new(SCRIPT);
+) -> Command {
+    let mut orden = Command::new(script);
     orden
         .args(args)
         .env("DEEPSEEK_API_KEY", "x")
@@ -41,17 +44,46 @@ fn correr(
         .env("HOME", dir)
         .env("ROOT_HOME", dir.join("real"))
         .env("ROOT_TESTS_BASE", dir.join("base"))
-        .env("ROOT_TEST_SEGURO_CARGO", &cargo);
+        .env("ROOT_TEST_SEGURO_CARGO", cargo);
     // Un target fijado en la suite no debe llegar al hijo, salvo que el test lo pida en `extra`.
     for clave in ["CARGO_TARGET_DIR_SEGURO", "CARGO_TARGET_DIR"] {
         if !extra.iter().any(|(k, _)| *k == clave) {
             orden.env_remove(clave);
         }
     }
+    for clave in quitar {
+        orden.env_remove(clave);
+    }
     for (clave, valor) in extra {
         orden.env(clave, valor);
     }
-    let estado = orden.status().expect("corre tools/test-seguro.sh");
+    orden
+}
+
+/// Corre `script` con `args`, el `cargo` falso de `dir` y `extra` en el entorno del hijo, sin `quitar`.
+/// Devuelve el estado y el entorno que vio el falso.
+fn correr(
+    dir: &Path,
+    codigo: u8,
+    extra: &[(&str, String)],
+    args: &[&str],
+) -> (ExitStatus, HashMap<String, String>, Vec<String>) {
+    correr_con(Path::new(SCRIPT), dir, codigo, extra, &[], args)
+}
+
+/// Como `correr`, pero con otro `script` y con variables que el hijo no hereda (`quitar`).
+fn correr_con(
+    script: &Path,
+    dir: &Path,
+    codigo: u8,
+    extra: &[(&str, String)],
+    quitar: &[&str],
+    args: &[&str],
+) -> (ExitStatus, HashMap<String, String>, Vec<String>) {
+    let cargo = falso(dir, codigo);
+    let estado = orden(script, dir, &cargo, extra, quitar, args)
+        .status()
+        .expect("corre tools/test-seguro.sh");
     let env_texto = fs::read_to_string(dir.join("env.txt")).expect("el falso dejó su entorno");
     let entorno = env_texto
         .lines()
@@ -208,5 +240,165 @@ fn test_seguro_pre_commit_usa_el_script_sin_cargo_test_suelto() {
     assert!(
         texto.contains("cargo clippy --all-targets -- -D warnings"),
         "{texto}"
+    );
+}
+
+/// Copia el script a `dir/<repo>/tools/test-seguro.sh`, como si fuera el script de otro worktree.
+fn copia_del_script(dir: &Path, repo: &str) -> PathBuf {
+    let tools = dir.join(repo).join("tools");
+    fs::create_dir_all(&tools).expect("crea tools/ del worktree");
+    let ruta = tools.join("test-seguro.sh");
+    fs::copy(SCRIPT, &ruta).expect("copia el script");
+    fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos del script");
+    ruta
+}
+
+/// Devuelve el `<hash>` de una ruta `base/<hash>/...`. Falla si no está bajo `base` o si el hash
+/// no tiene 12 caracteres hexadecimales.
+fn hash_bajo_base(ruta: &Path, base: &Path) -> String {
+    let resto = ruta
+        .strip_prefix(base)
+        .unwrap_or_else(|_| panic!("{ruta:?} no está bajo {base:?}"));
+    let primero = resto.components().next().expect("hay un componente");
+    let hash = primero.as_os_str().to_string_lossy().into_owned();
+    assert!(
+        hash.len() == 12 && hash.chars().all(|c| c.is_ascii_hexdigit()),
+        "el hash no tiene 12 hex: {hash}"
+    );
+    hash
+}
+
+#[test]
+fn test_seguro_misma_ruta_da_la_misma_carpeta() {
+    let dir = dir_de_prueba();
+    let copia = copia_del_script(dir.path(), "repo-a");
+    let (_, primera, _) = correr_con(&copia, dir.path(), 0, &[], &[], &["algo"]);
+    let (_, segunda, _) = correr_con(&copia, dir.path(), 0, &[], &[], &["algo"]);
+    assert_eq!(
+        primera["CARGO_TARGET_DIR"], segunda["CARGO_TARGET_DIR"],
+        "la misma ruta de repo debe dar la misma carpeta"
+    );
+}
+
+#[test]
+fn test_seguro_dos_rutas_dan_dos_carpetas() {
+    let dir = dir_de_prueba();
+    let a = copia_del_script(dir.path(), "repo-a");
+    let b = copia_del_script(dir.path(), "repo-b");
+    let (_, entorno_a, _) = correr_con(&a, dir.path(), 0, &[], &[], &["algo"]);
+    let (_, entorno_b, _) = correr_con(&b, dir.path(), 0, &[], &[], &["algo"]);
+    assert_ne!(
+        entorno_a["CARGO_TARGET_DIR"], entorno_b["CARGO_TARGET_DIR"],
+        "dos worktrees no deben compartir target"
+    );
+}
+
+#[test]
+fn test_seguro_target_tmpdir_y_root_home_van_bajo_la_carpeta_del_worktree() {
+    let dir = dir_de_prueba();
+    let (_, entorno, _) = correr(dir.path(), 0, &[], &["algo"]);
+    let target = PathBuf::from(&entorno["CARGO_TARGET_DIR"]);
+    let hash = hash_bajo_base(&target, &base(dir.path()));
+    let carpeta = base(dir.path()).join(&hash);
+    assert_eq!(target, carpeta.join("target"));
+    assert_eq!(PathBuf::from(&entorno["TMPDIR"]), carpeta.join("tmp"));
+    let root_home = PathBuf::from(&entorno["ROOT_HOME"]);
+    assert_eq!(root_home.parent(), Some(carpeta.as_path()), "{root_home:?}");
+}
+
+/// Un `cargo` falso para las pruebas del lock: anota `inicio` y `fin` en `log.txt` y duerme 2 segundos.
+fn falso_de_lock(dir: &Path) -> PathBuf {
+    let ruta = dir.join("cargo-lock.sh");
+    let texto = format!(
+        "#!/usr/bin/env bash\necho inicio >> '{d}/log.txt'\nsleep 2\necho fin >> '{d}/log.txt'\n",
+        d = dir.display()
+    );
+    fs::write(&ruta, texto).expect("escribe el cargo falso de lock");
+    fs::set_permissions(&ruta, fs::Permissions::from_mode(0o755)).expect("permisos del falso");
+    ruta
+}
+
+/// Lanza dos corridas del script casi a la vez, con la misma base, y espera las dos.
+/// Devuelve el log del falso y el stderr de cada corrida.
+fn dos_corridas(
+    dir: &Path,
+    extra: &[(&str, String)],
+    quitar: &[&str],
+) -> (Vec<String>, Vec<String>) {
+    let cargo = falso_de_lock(dir);
+    let hijos: Vec<_> = (0..2)
+        .map(|_| {
+            orden(Path::new(SCRIPT), dir, &cargo, extra, quitar, &["algo"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("lanza tools/test-seguro.sh")
+        })
+        .collect();
+    let salidas: Vec<_> = hijos
+        .into_iter()
+        .map(|h| h.wait_with_output().expect("espera la corrida"))
+        .collect();
+    for salida in &salidas {
+        let errores = String::from_utf8_lossy(&salida.stderr);
+        assert!(salida.status.success(), "{errores}");
+    }
+    let log = fs::read_to_string(dir.join("log.txt")).expect("el falso dejó su log");
+    let errores = salidas
+        .iter()
+        .map(|s| String::from_utf8_lossy(&s.stderr).into_owned())
+        .collect();
+    (log.lines().map(str::to_string).collect(), errores)
+}
+
+#[test]
+fn test_seguro_sin_root_sin_podman_dos_corridas_no_se_pisan() {
+    let dir = dir_de_prueba();
+    let (log, _) = dos_corridas(dir.path(), &[], &["ROOT_SIN_PODMAN"]);
+    assert_eq!(log, ["inicio", "fin", "inicio", "fin"]);
+}
+
+#[test]
+fn test_seguro_con_root_sin_podman_dos_corridas_no_esperan() {
+    let dir = dir_de_prueba();
+    let extra = [("ROOT_SIN_PODMAN", "1".to_string())];
+    let (log, _) = dos_corridas(dir.path(), &extra, &[]);
+    assert_eq!(log, ["inicio", "inicio", "fin", "fin"]);
+}
+
+#[test]
+fn test_seguro_avisa_en_stderr_que_espera_el_lock() {
+    let dir = dir_de_prueba();
+    let (_, errores) = dos_corridas(dir.path(), &[], &["ROOT_SIN_PODMAN"]);
+    let avisos: Vec<&String> = errores
+        .iter()
+        .filter(|e| e.contains("test-seguro: espera el lock de podman"))
+        .collect();
+    assert_eq!(avisos.len(), 1, "{errores:?}");
+    assert!(avisos[0].contains("podman.lock"), "{}", avisos[0]);
+}
+
+#[test]
+fn test_seguro_lock_vive_en_base() {
+    let con_lock = dir_de_prueba();
+    correr_con(
+        Path::new(SCRIPT),
+        con_lock.path(),
+        0,
+        &[],
+        &["ROOT_SIN_PODMAN"],
+        &["algo"],
+    );
+    assert!(
+        base(con_lock.path()).join("podman.lock").is_file(),
+        "sin ROOT_SIN_PODMAN, el lock queda en la base"
+    );
+
+    let sin_lock = dir_de_prueba();
+    let extra = [("ROOT_SIN_PODMAN", "1".to_string())];
+    correr(sin_lock.path(), 0, &extra, &["algo"]);
+    assert!(
+        !base(sin_lock.path()).join("podman.lock").exists(),
+        "con ROOT_SIN_PODMAN=1 no se crea el lock"
     );
 }
