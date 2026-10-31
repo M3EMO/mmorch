@@ -1162,21 +1162,22 @@ fn puntaje_de(
     }
 }
 
-/// Exclusiones de la suite del contrato: las entradas `contrato:` de `[[entorno]]`, sin el prefijo. Así
-/// coinciden con los ids que mide la suite (desempate 1).
+/// Exclusiones de la suite del contrato: las entradas `contrato:` de `[[entorno]]` y de
+/// `[[oraculo_dudoso]]`, sin el prefijo. Así coinciden con los ids que mide la suite (desempates 1 y 16).
 fn excluidos_del_contrato(tarea: &Tarea) -> BTreeSet<String> {
     tarea
         .entorno
         .iter()
+        .chain(&tarea.oraculo_dudoso)
         .filter_map(|e| e.test.strip_prefix(requisitos::PREFIJO_CONTRATO))
         .map(String::from)
         .collect()
 }
 
-/// Funciona: la fracción de tests que pasan (contrato y oculto, sin los de `[[entorno]]`) y, si la tarea
+/// Funciona: la fracción de tests que pasan (contrato y oculto, sin los excluidos) y, si la tarea
 /// tiene escenarios, la de escenarios verdes. Una parte sin veredicto deja la dimensión sin veredicto.
-/// Cada suite saca sus propias entradas de `[[entorno]]`: la del contrato las `contrato:`, la oculta las
-/// que no lo tienen.
+/// Cada suite saca sus propias entradas: la del contrato las `contrato:` de `[[entorno]]` y de
+/// `[[oraculo_dudoso]]`; la oculta las de `[[entorno]]` que no lo tienen.
 fn funciona(
     tarea: &Tarea,
     contrato: &Clasificacion,
@@ -3299,6 +3300,75 @@ mod tests {
             ["test_a::t1"],
             "{:?}",
             v.contrato_fallidos
+        );
+    }
+
+    #[test]
+    fn oraculo_dudoso_con_prefijo_saca_el_test_del_contrato_de_fallidos() {
+        // Desempate 16, punto 3: `contrato:<id>` en `[[oraculo_dudoso]]` excluye el test del contrato.
+        let base = tempfile::tempdir().expect("base");
+        let mut tarea = tarea_rust(base.path());
+        tarea.oraculo_dudoso = vec![Exclusion {
+            test: "contrato:test_a::t1".into(),
+            motivo: "frase ambigua".into(),
+        }];
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO_CON_FALLA);
+        let v = evaluar_falso(&repo, &tarea, &home, &correr, &herramientas(&[])).expect("evalúa");
+        assert!(
+            v.contrato_fallidos.is_empty(),
+            "el excluido por oraculo_dudoso no es un fallo: {:?}",
+            v.contrato_fallidos
+        );
+    }
+
+    #[test]
+    fn oraculo_dudoso_sin_prefijo_deja_el_test_del_contrato_en_fallidos() {
+        // Desempate 16, punto 3: `test_a::t1` sin prefijo en `[[oraculo_dudoso]]` excluye solo el oculto.
+        let base = tempfile::tempdir().expect("base");
+        let mut tarea = tarea_rust(base.path());
+        tarea.oraculo_dudoso = vec![Exclusion {
+            test: "test_a::t1".into(),
+            motivo: "frase ambigua".into(),
+        }];
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO_CON_FALLA);
+        let v = evaluar_falso(&repo, &tarea, &home, &correr, &herramientas(&[])).expect("evalúa");
+        assert_eq!(
+            v.contrato_fallidos,
+            ["test_a::t1"],
+            "{:?}",
+            v.contrato_fallidos
+        );
+    }
+
+    #[test]
+    fn oraculo_funciona_dudoso_con_prefijo_no_cuenta_el_test_del_contrato() {
+        // Desempate 16, punto 3: `funciona` saca el test del contrato excluido por `oraculo_dudoso`.
+        let base = tempfile::tempdir().expect("base");
+        let mut tarea = tarea_de_prueba(base.path());
+        tarea.oraculo_dudoso = vec![Exclusion {
+            test: "contrato:test_a::t2".into(),
+            motivo: "frase ambigua".into(),
+        }];
+        let contrato = Clasificacion {
+            estables: BTreeMap::from([
+                ("test_a::t1".to_string(), ResultadoTest::Pasa),
+                ("test_a::t2".to_string(), ResultadoTest::Falla),
+            ]),
+            ..Clasificacion::default()
+        };
+        let oculto = Clasificacion {
+            estables: BTreeMap::from([("test_b::t3".to_string(), ResultadoTest::Pasa)]),
+            ..Clasificacion::default()
+        };
+        let p = funciona(&tarea, &contrato, &oculto, &BTreeMap::new());
+        assert!(
+            (p.valor - 1.0).abs() < 1e-6,
+            "sin el excluido quedan 2 de 2: {}",
+            p.valor
         );
     }
 
