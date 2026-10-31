@@ -1597,7 +1597,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           }
         },
         "evidencia_visible": {
-          "description": "Requisitos cuya evidencia medida es solo del contrato, como `<id>: evidencia visible al builder`.\nUn requisito entra si tiene una referencia `contrato:` y ningún test oculto suyo tiene resultado\nmedido (pasa, falla o inestable). El builder ve esos tests (decisión 50). Un informe viejo lee vacío.",
+          "description": "Requisitos cuya evidencia medida es solo del contrato, como `<id>: evidencia visible al builder`.\nUn requisito entra si una referencia `contrato:` aporta un resultado medido (pasa, falla o inestable)\ny ningún test oculto suyo lo aporta. Un test del contrato `ausente`, `omite`, `pendiente` o `excluido`\nno cuenta. El builder ve esos tests (decisión 50). Un informe viejo lee vacío.",
           "type": "array",
           "default": [],
           "items": {
@@ -2583,7 +2583,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           }
         },
         "evidencia_visible": {
-          "description": "Requisitos cuya evidencia medida es solo del contrato, como `<id>: evidencia visible al builder`.\nUn requisito entra si tiene una referencia `contrato:` y ningún test oculto suyo tiene resultado\nmedido (pasa, falla o inestable). El builder ve esos tests (decisión 50). Un informe viejo lee vacío.",
+          "description": "Requisitos cuya evidencia medida es solo del contrato, como `<id>: evidencia visible al builder`.\nUn requisito entra si una referencia `contrato:` aporta un resultado medido (pasa, falla o inestable)\ny ningún test oculto suyo lo aporta. Un test del contrato `ausente`, `omite`, `pendiente` o `excluido`\nno cuenta. El builder ve esos tests (decisión 50). Un informe viejo lee vacío.",
           "type": "array",
           "default": [],
           "items": {
@@ -4499,7 +4499,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           }
         },
         "evidencia_visible": {
-          "description": "Requisitos cuya evidencia medida es solo del contrato, como `<id>: evidencia visible al builder`.\nUn requisito entra si tiene una referencia `contrato:` y ningún test oculto suyo tiene resultado\nmedido (pasa, falla o inestable). El builder ve esos tests (decisión 50). Un informe viejo lee vacío.",
+          "description": "Requisitos cuya evidencia medida es solo del contrato, como `<id>: evidencia visible al builder`.\nUn requisito entra si una referencia `contrato:` aporta un resultado medido (pasa, falla o inestable)\ny ningún test oculto suyo lo aporta. Un test del contrato `ausente`, `omite`, `pendiente` o `excluido`\nno cuenta. El builder ve esos tests (decisión 50). Un informe viejo lee vacío.",
           "type": "array",
           "default": [],
           "items": {

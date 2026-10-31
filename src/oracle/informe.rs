@@ -764,9 +764,11 @@ fn conservadas(texto: &str, ids: &BTreeSet<String>) -> Option<String> {
 /// Marca de los requisitos cuya evidencia es solo del contrato (decisión 50).
 const MARCA_EVIDENCIA_VISIBLE: &str = "evidencia visible al builder";
 
-/// Requisitos con evidencia medida solo del contrato. Entra si `pruebas` o `bordes` tienen alguna
-/// referencia `contrato:`, y ninguna referencia sin prefijo aporta un resultado medido (`pasa`, `falla` o
-/// `inestable`). Así el builder ve lo que se midió del contrato, y un test oculto medido lo sigue ocultando.
+/// Requisitos con evidencia medida solo del contrato. Entra si alguna referencia `contrato:` de `pruebas` o
+/// `bordes` aporta un resultado medido (`pasa`, `falla` o `inestable`) a la evidencia del requisito, y ninguna
+/// referencia sin prefijo lo aporta. Un requisito cuyo único test `contrato:` está `ausente`, `omite`,
+/// `pendiente` o `excluido` no entra. Así el builder ve lo que se midió del contrato, y un test oculto medido
+/// lo sigue ocultando.
 fn evidencia_visible(v: &Veredicto, tarea: &Tarea) -> Vec<String> {
     tarea
         .requisito
@@ -774,20 +776,29 @@ fn evidencia_visible(v: &Veredicto, tarea: &Tarea) -> Vec<String> {
         .filter_map(|r| {
             let estado = v.requisitos.iter().find(|e| e.id == r.id)?;
             let refs: Vec<&String> = r.pruebas.iter().chain(&r.bordes).collect();
-            let hay_contrato = refs.iter().any(|x| x.starts_with(PREFIJO_CONTRATO));
+            let contrato_medido = refs
+                .iter()
+                .filter(|x| x.starts_with(PREFIJO_CONTRATO))
+                .any(|x| aporta_medida(estado, x));
             let oculto_medido = refs
                 .iter()
                 .filter(|x| !x.starts_with(PREFIJO_CONTRATO))
                 .any(|x| aporta_medida(estado, x));
-            (hay_contrato && !oculto_medido).then(|| format!("{}: {MARCA_EVIDENCIA_VISIBLE}", r.id))
+            (contrato_medido && !oculto_medido)
+                .then(|| format!("{}: {MARCA_EVIDENCIA_VISIBLE}", r.id))
         })
         .collect()
 }
 
-/// Si la referencia sin prefijo `prueba` aporta un resultado medido a `estado`: una entrada `<clave>: <estado>`
-/// con `estado` en `pasa`, `falla` o `inestable`, `clave` sin prefijo `contrato:` y cubierta por `prueba`.
-/// Las entradas `pendiente: `, `excluido: `, `omite` y `ausente` no son resultados medidos.
-fn aporta_medida(estado: &EstadoRequisito, prueba: &str) -> bool {
+/// Si la referencia `referencia` aporta un resultado medido a `estado`: una entrada `<clave>: <estado>` con
+/// `estado` en `pasa`, `falla` o `inestable`, cuya `clave` tiene el mismo prefijo `contrato:` que la referencia
+/// y queda cubierta por ella. Las entradas `pendiente: `, `excluido: `, `omite` y `ausente` no son resultados
+/// medidos.
+fn aporta_medida(estado: &EstadoRequisito, referencia: &str) -> bool {
+    let del_contrato = referencia.starts_with(PREFIJO_CONTRATO);
+    let prueba = referencia
+        .strip_prefix(PREFIJO_CONTRATO)
+        .unwrap_or(referencia);
     estado.evidencia.iter().any(|linea| {
         if linea.starts_with("pendiente: ") || linea.starts_with("excluido: ") {
             return false;
@@ -795,9 +806,11 @@ fn aporta_medida(estado: &EstadoRequisito, prueba: &str) -> bool {
         let Some((clave, resultado)) = linea.rsplit_once(": ") else {
             return false;
         };
+        let clave_del_contrato = clave.starts_with(PREFIJO_CONTRATO);
+        let clave_sin_prefijo = clave.strip_prefix(PREFIJO_CONTRATO).unwrap_or(clave);
         matches!(resultado, "pasa" | "falla" | "inestable")
-            && !clave.starts_with(PREFIJO_CONTRATO)
-            && cubre(prueba, clave)
+            && clave_del_contrato == del_contrato
+            && cubre(prueba, clave_sin_prefijo)
     })
 }
 
@@ -1919,7 +1932,9 @@ modulos = ["config"]
         let mut t = tarea();
         t.requisito[0].pruebas = vec!["contrato:tests/c.py::a".into()];
         t.requisito[0].bordes = Vec::new();
-        let i = informe_con_tarea(&ecc(), &t);
+        // Desempate 6: el test del contrato tiene que haber dado un resultado medido.
+        let v = ecc_con_evidencia_de_r1(&["contrato:tests/c.py::a: pasa"]);
+        let i = informe_con_tarea(&v, &t);
         assert_eq!(
             i.confianza.evidencia_visible,
             ["R1: evidencia visible al builder"]
@@ -1955,7 +1970,12 @@ modulos = ["config"]
         let mut t = tarea();
         t.requisito[0].pruebas = vec!["contrato:tests/c.py::a".into()];
         t.requisito[0].bordes = vec!["contrato:tests/c.py::b".into()];
-        let i = informe_con_tarea(&ecc(), &t);
+        // Desempate 6: los dos tests del contrato tienen que haber dado un resultado medido.
+        let v = ecc_con_evidencia_de_r1(&[
+            "contrato:tests/c.py::a: pasa",
+            "contrato:tests/c.py::b: pasa",
+        ]);
+        let i = informe_con_tarea(&v, &t);
         assert_eq!(
             i.confianza.evidencia_visible,
             ["R1: evidencia visible al builder"]
@@ -2000,6 +2020,42 @@ modulos = ["config"]
         assert_eq!(
             i.confianza.evidencia_visible,
             ["R1: evidencia visible al builder"]
+        );
+    }
+
+    #[test]
+    fn informe_confianza_no_marca_requisito_con_su_unico_contrato_ausente() {
+        // Desempate 6: un único test del contrato sin resultado medido no entra en la evidencia visible.
+        let mut t = tarea();
+        t.requisito[0].pruebas = vec!["contrato:tests/c.py::a".into()];
+        t.requisito[0].bordes = Vec::new();
+        for linea in [
+            "contrato:tests/c.py::a: ausente",
+            "contrato:tests/c.py::a: omite",
+            "excluido: contrato:tests/c.py::a (motivo)",
+        ] {
+            let v = ecc_con_evidencia_de_r1(&[linea]);
+            let i = informe_con_tarea(&v, &t);
+            assert!(
+                i.confianza.evidencia_visible.is_empty(),
+                "{linea}: {:?}",
+                i.confianza
+            );
+        }
+    }
+
+    #[test]
+    fn informe_confianza_no_marca_requisito_con_su_unico_contrato_pendiente() {
+        // Desempate 6: un pendiente de entorno del contrato no es un resultado medido.
+        let mut t = tarea();
+        t.requisito[0].pruebas = vec!["contrato:tests/c.py::a".into()];
+        t.requisito[0].bordes = Vec::new();
+        let v = ecc_con_evidencia_de_r1(&["pendiente: contrato:tests/c.py::a (gpu)"]);
+        let i = informe_con_tarea(&v, &t);
+        assert!(
+            i.confianza.evidencia_visible.is_empty(),
+            "{:?}",
+            i.confianza
         );
     }
 
@@ -2058,7 +2114,8 @@ modulos = ["config"]
         let mut t = tarea();
         t.requisito[0].pruebas = vec!["contrato:tests/c.py::a".into()];
         t.requisito[0].bordes = Vec::new();
-        let md = markdown("memora", &informe_con_tarea(&ecc(), &t));
+        let v = ecc_con_evidencia_de_r1(&["contrato:tests/c.py::a: pasa"]);
+        let md = markdown("memora", &informe_con_tarea(&v, &t));
         assert!(md.contains("- R1: evidencia visible al builder"), "{md}");
     }
 

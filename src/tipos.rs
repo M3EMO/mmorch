@@ -336,8 +336,9 @@ pub struct Confianza {
     #[serde(default)]
     pub faltantes: Vec<ItemFaltante>,
     /// Requisitos cuya evidencia medida es solo del contrato, como `<id>: evidencia visible al builder`.
-    /// Un requisito entra si tiene una referencia `contrato:` y ningún test oculto suyo tiene resultado
-    /// medido (pasa, falla o inestable). El builder ve esos tests (decisión 50). Un informe viejo lee vacío.
+    /// Un requisito entra si una referencia `contrato:` aporta un resultado medido (pasa, falla o inestable)
+    /// y ningún test oculto suyo lo aporta. Un test del contrato `ausente`, `omite`, `pendiente` o `excluido`
+    /// no cuenta. El builder ve esos tests (decisión 50). Un informe viejo lee vacío.
     #[serde(default)]
     pub evidencia_visible: Vec<String>,
 }
