@@ -2347,3 +2347,65 @@ Ninguna de las 14 preguntas toca una decisión del usuario. Cada desempate tiene
 - Después siguen los pasos 2 a 5 y 7 a 12 de la lista anterior.
 
 No hay preguntas nuevas para el usuario.
+
+## Estado (2026-10-31): nube 5 mezclada, nube 6 en prueba
+
+- **Commit del planner.** El hook rechazó el commit del plan dos veces. El orquestador hizo `cargo clean -p root` en `~/.cache/root-tests/target` y commiteó en 8ddc677. El hook dio 1816 verdes y 2 ignorados. El diagnóstico del planner era correcto: la suite de la nube 5 dejó un binario viejo de `importar` en la carpeta `target` compartida.
+- **Imágenes temporales.** Con una carpeta `target` propia y sin otra suite en paralelo, `tests/entrega.rs` de la nube 5 dio 47 verdes en 3 de 3 corridas. Las fallas "queda una imagen temporal" venían de dos suites con podman a la vez.
+- **Nube 5.** El usuario ordenó la mezcla, y entró en 6ee7c1d. El brief de la nube 6 recibió su commit de partida en d26c138. El hook dio 1831 verdes con podman.
+- **Nube 6.** Hizo la Tarea 34 en `claude/wizardly-hypatia-bzwf59` (bea5975). Su informe es `docs/builds/2026-10-30-build-nube-6.md`, en esa rama. Sin podman dio 1856 verdes, 0 rojos y 2 ignorados. El orquestador la prueba con podman en la laptop. La mezcla espera la orden del usuario.
+- **En paralelo.** La sesión de fichas copia las capas de cada ficha a su `tarea.toml` y suma los ids `contrato:` a los seis requisitos sin tests ocultos.
+
+## Regla 4 de la laptop (2026-10-31): una carpeta de compilación por worktree, y una suite con podman a la vez
+
+- **Qué pasó.** Dos fallas del hook vinieron del entorno, no del código:
+  - `importar_metrics_reales_da_575_eventos_sin_tocar_el_original` corrió aunque en 53985ce lleva `#[ignore]`. La suite de la nube 5 lo había compilado sin `#[ignore]` en la misma carpeta `target`, y cargo reusó ese binario.
+  - Tres tests de `tests/entrega.rs` fallaron con "queda una imagen temporal", porque otra suite creaba imágenes `root-entrega-*` al mismo tiempo.
+- **Regla.**
+  - `tools/test-seguro.sh` usa una carpeta de compilación por worktree: `$HOME/.cache/root-tests/<hash corto de la ruta del repo>/target`. El `ROOT_HOME` y el `TMPDIR` de prueba también van por worktree.
+  - Una sola suite con podman corre a la vez en la laptop. El script toma un lock con `flock` sobre `$HOME/.cache/root-tests/podman.lock` y espera su turno. Con `ROOT_SIN_PODMAN=1`, el script no toma el lock.
+  - Mientras la regla no esté en el script, el orquestador no corre dos suites con podman a la vez.
+- **Dónde.** Es la Tarea 35, y va a la nube 7. El script y sus tests no necesitan podman: el lock se prueba con dos corridas del script sobre un comando falso. La laptop solo confirma el lock con dos suites reales.
+
+### Tarea 35: Suite por worktree y un lock de podman (regla 4)
+- **Action**: la regla de arriba en `tools/test-seguro.sh`.
+- **Dónde**: en la nube. La confirmación con dos suites reales va en la laptop.
+- **Validate**:
+  - Dos rutas de repo distintas dan dos carpetas `target` distintas. La misma ruta da siempre la misma carpeta.
+  - Dos corridas en paralelo del script, sin `ROOT_SIN_PODMAN`, con un comando falso que tarda 2 segundos, no se pisan: la segunda empieza cuando termina la primera.
+  - Con `ROOT_SIN_PODMAN=1`, dos corridas en paralelo no esperan el lock.
+  - Ningún test crea carpetas en `/tmp`.
+
+## Desempates técnicos 15 (Opus, 2026-10-31): preguntas de la nube 6
+
+Ninguna de las 7 preguntas toca una decisión del usuario. Cada desempate tiene su razón en una línea.
+
+1. **`[[entorno]]` y el contrato.** Una exclusión acepta el prefijo `contrato:` en forma explícita. Un id sin prefijo excluye solo el test oculto. Razón: el mismo nombre en dos suites son dos tests distintos, y el formato de id del desempate 1 de "Desempates técnicos 14" ya lo fija.
+2. **Evidencia por MCP.** `redactar_para_mcp` conserva las entradas `contrato:` de la evidencia de los requisitos, y quita solo las ocultas. Razón: el builder ya ve el contrato, y el desempate 5 de "Desempates técnicos 14" dice que esos ids no se redactan.
+3. **Redacción por subcadena.** Se acepta en el hito 1: un texto de más que se quita deja la salida más cerrada, no más abierta.
+4. **Hallazgos de inestables del contrato.** Se confirma: un inestable se liga a un riesgo solo con el id de su suite, por el formato de id.
+5. **Requisito mezclado.** Un requisito entra en `evidencia_visible` si ninguno de sus ids ocultos aporta un resultado medido: pasa, falla o inestable. Razón: `confianza` debe decir de dónde salió la evidencia que de verdad se midió, no la que se declaró.
+6. **Doble cuenta del contrato.** Se acepta: Funciona mide si los tests pasan, y Completitud mide qué requisitos quedan cubiertos. Los tests ocultos ya cuentan en las dos dimensiones de la misma forma.
+7. **Efecto antes de los ids de las fichas.** Se confirma: ningún resultado de los cuatro repos cambia, y la sesión de fichas suma los ids en paralelo.
+
+### Tarea 36: Desempates de la nube 6
+- **Action**: los desempates 1, 2 y 5 de arriba.
+- **Dónde**: en la nube.
+- **Validate**: `cargo test`:
+  - `[[entorno]]` con `contrato:t::a` excluye ese test del contrato, y `t::a` no lo excluye.
+  - `root_evaluar` conserva la evidencia `contrato:` de un requisito y quita la oculta.
+  - Un requisito con un id `contrato:` verde y un id oculto ausente entra en `evidencia_visible`.
+
+## Orden de trabajo (2026-10-31)
+
+**Nube, sesión 7.** Hace las Tareas 36 y 35, en ese orden, antes del 2026-11-05. Su brief es `docs/builds/brief-nube-7.md`. El commit de partida lo pone el orquestador: es la mezcla de la nube 6.
+
+**Laptop, en pasos.**
+1. **Probar y mezclar la nube 6.** El orquestador corre la suite con podman sobre bea5975. La mezcla espera la orden del usuario. Mientras tanto, nadie corre otra suite con podman.
+2. **Capas e ids del contrato.** La sesión de fichas termina de copiar las capas y de sumar los ids `contrato:`. Corre en paralelo, sin suite.
+3. **Muestras de Khronos y diagnóstico de FIFO.** Necesitan podman y red para la descarga (decisión 51). Corren después del paso 1, de a una suite por vez.
+4. **Validate de 7 y 9c, otra vez.** Espera los pasos 1 a 3. Necesita podman y el `ROOT_HOME` real, sin claves. Tarda unas 3 horas y gasta 0 USD.
+5. **Pasos siguientes.** Siguen los pasos 2 a 5 y 7 a 12 de "Orden de trabajo (2026-10-30, después de la nube 4)": la imagen del builder, la credencial, las pruebas con claves, `NETRC`, el Validate de 13 y 13b, la calibración, la corrida de memora, Colab, Graft y G3.
+6. **Mezcla de la nube 7.** La laptop confirma el lock con dos suites reales.
+
+No hay preguntas nuevas para el usuario.
