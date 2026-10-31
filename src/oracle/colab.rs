@@ -31,7 +31,7 @@ use serde_json::{Value, json};
 use signal_hook::consts::{SIGINT, SIGTERM};
 
 use super::junit;
-use super::pendientes::{entorno_de_colab, nombre_junit};
+use super::pendientes::{entorno_de_colab, id_de_junit, nombre_junit};
 use super::tarea::Tarea;
 use super::{ErrorOraculo, infra};
 use crate::observe;
@@ -1018,10 +1018,10 @@ struct Corte {
 }
 
 /// Ids `archivo::nombre` que el junit debe traer: los tests de `[[entorno]]` que corre Colab, igual que el
-/// paquete (sin los `contrato:`).
+/// paquete. Un `contrato:` va sin el prefijo, porque así lo trae el junit (desempate 16).
 fn ids_de(tarea: &Tarea) -> Vec<String> {
     entorno_de_colab(tarea)
-        .map(|exclusion| exclusion.test.clone())
+        .map(|exclusion| id_de_junit(&exclusion.test).to_string())
         .collect()
 }
 
@@ -2055,8 +2055,8 @@ mod tests {
     }
 
     #[test]
-    fn colab_ids_de_ignora_las_entradas_del_contrato() {
-        // Desempate 1: el paquete de Colab solo corre los tests sin prefijo `contrato:`.
+    fn colab_ids_de_incluye_las_entradas_del_contrato() {
+        // Desempate 16: el paquete de Colab corre también los `contrato:`. El junit los trae sin el prefijo.
         let mut t = tarea();
         t.entorno.insert(
             0,
@@ -2065,7 +2065,7 @@ mod tests {
                 motivo: "gpu".into(),
             },
         );
-        assert_eq!(ids_de(&t), ["test_o::o2"]);
+        assert_eq!(ids_de(&t), ["test_o::o1", "test_o::o2"]);
     }
 
     #[test]

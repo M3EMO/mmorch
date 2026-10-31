@@ -27,6 +27,8 @@ use crate::tipos::{Pendiente, TipoEvento};
 const CARPETA_ORACULOS: &str = "oraculos";
 /// Paquete de los tests pendientes, dentro de la carpeta de la tarea.
 const CARPETA_PAQUETE: &str = "pendientes";
+/// Carpeta de los tests del contrato: dentro de la tarea (`contrato/`) y dentro de `tests/` del paquete.
+const CARPETA_CONTRATO: &str = "contrato";
 /// Carpeta de los resultados importados dentro de `ROOT_HOME`.
 const CARPETA_EVIDENCIA: &str = "evidencia";
 /// Resultados de Colab de una tarea, dentro de su carpeta de evidencia.
@@ -74,7 +76,7 @@ pub struct ColabEntrada {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Paquete {
     pub dir: PathBuf,
-    /// Ids `archivo::nombre` de los tests del paquete.
+    /// Ids de `[[entorno]]` de los tests del paquete: `archivo::nombre`, o `contrato:archivo::nombre`.
     pub tests: Vec<String>,
     /// Commit del repo del que se armó (vacío si no es git).
     pub commit: String,
@@ -175,16 +177,57 @@ fn dueno_del_turno(ruta: &Path) -> String {
     }
 }
 
-/// Las entradas de `[[entorno]]` que Colab corre: las que no llevan el prefijo `contrato:` (desempate 1).
-/// Un `contrato:` es un test del contrato, que no va al paquete.
+/// Las entradas de `[[entorno]]` que entran al paquete de Colab. Corren también las `contrato:` (desempate
+/// 16). Sale el id sin prefijo que solo existe en `contrato/`: `crear` lo omite y avisa.
 pub fn entorno_de_colab(tarea: &Tarea) -> impl Iterator<Item = &Exclusion> {
     tarea
         .entorno
         .iter()
-        .filter(|e| !e.test.starts_with(PREFIJO_CONTRATO))
+        .filter(|e| !solo_en_contrato(tarea, &e.test))
 }
 
-/// Arma el paquete de los tests de `[[entorno]]` dentro de `oraculos/<tarea>/pendientes/`.
+/// Id que el junit trae para una entrada de `[[entorno]]`: sin el prefijo `contrato:`. Es la clave que
+/// `Junit::con_ids` da a ese test. `colab.json` guarda la entrada con su prefijo.
+pub fn id_de_junit(entrada: &str) -> &str {
+    entrada.strip_prefix(PREFIJO_CONTRATO).unwrap_or(entrada)
+}
+
+/// Un id sin prefijo cuyo archivo existe solo en `contrato/`. Ese test no entra al paquete (desempate 16,
+/// punto 2). Un id sin la forma `archivo::nombre` o sin archivo en ninguna suite da `false`: `crear` lo
+/// rechaza como error de tarea.
+fn solo_en_contrato(tarea: &Tarea, id: &str) -> bool {
+    if id.starts_with(PREFIJO_CONTRATO) {
+        return false;
+    }
+    let Ok((archivo, _)) = dividir(id) else {
+        return false;
+    };
+    if nombre_seguro(archivo).is_err() {
+        return false;
+    }
+    let py = format!("{archivo}.py");
+    !tarea.dir.join("oculto").join(&py).is_file()
+        && tarea.dir.join(CARPETA_CONTRATO).join(&py).is_file()
+}
+
+/// Un aviso por cada id sin prefijo que solo existe en `contrato/`: el paquete no lo lleva.
+fn avisos_de_contrato(tarea: &Tarea) -> Vec<String> {
+    tarea
+        .entorno
+        .iter()
+        .filter(|e| solo_en_contrato(tarea, &e.test))
+        .map(|e| {
+            format!(
+                "el test {} sin prefijo existe solo en {CARPETA_CONTRATO}/: no entra al paquete; usá {PREFIJO_CONTRATO}{}",
+                e.test, e.test
+            )
+        })
+        .collect()
+}
+
+/// Arma el paquete de los tests de `[[entorno]]` dentro de `oraculos/<tarea>/pendientes/`. Corren los
+/// ocultos (`tests/<archivo>.py`) y los `contrato:` (`tests/contrato/<archivo>.py`). Un id sin prefijo que
+/// solo existe en `contrato/` no entra y da un aviso (desempate 16).
 /// `cache` es la caché de dependencias de la fase de descarga, si ya existe: el paquete la lleva y
 /// `correr.sh` la usa sin red. Sin tests pendientes no crea nada y da `None`.
 /// Todo se valida antes de crear el directorio.
@@ -200,17 +243,38 @@ pub fn crear(
     }
     let repo = fs::canonicalize(repo)
         .map_err(|e| ErrorOraculo::Infra(format!("no existe el repo {}: {e}", repo.display())))?;
-    let mut archivos: BTreeMap<String, PathBuf> = BTreeMap::new();
+    // Destino dentro de `tests/` -> archivo de origen.
+    let mut archivos: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
+    // Archivo del módulo -> si es del contrato. Un mismo archivo en las dos suites no cabe: pytest y el
+    // junit identifican el test solo por el módulo, sin la carpeta.
+    let mut suite_de: BTreeMap<String, bool> = BTreeMap::new();
     let mut nodos = Vec::new();
     let mut tests = Vec::new();
     for exclusion in entorno_de_colab(tarea) {
-        let (archivo, _) = dividir(&exclusion.test)?;
-        if !archivos.contains_key(archivo) {
-            archivos.insert(archivo.to_string(), localizar(tarea, archivo)?);
+        let del_contrato = exclusion.test.starts_with(PREFIJO_CONTRATO);
+        let (archivo, _) = dividir(id_de_junit(&exclusion.test))?;
+        match suite_de.get(archivo) {
+            Some(previo) if *previo != del_contrato => {
+                return Err(ErrorOraculo::Tarea(format!(
+                    "{archivo}.py está en oculto/ y en contrato/ a la vez: el junit solo trae el módulo y sus tests se confunden. Renombrá uno de los dos archivos"
+                )));
+            }
+            Some(_) => {}
+            None => {
+                suite_de.insert(archivo.to_string(), del_contrato);
+                let destino = if del_contrato {
+                    Path::new(CARPETA_CONTRATO).join(format!("{archivo}.py"))
+                } else {
+                    PathBuf::from(format!("{archivo}.py"))
+                };
+                archivos.insert(destino, localizar(tarea, archivo, del_contrato)?);
+            }
         }
         nodos.push(nodo(&exclusion.test)?);
         tests.push(exclusion.test.clone());
     }
+    let hay_contrato = suite_de.values().any(|del_contrato| *del_contrato);
+    let mut avisos = avisos_de_contrato(tarea);
 
     // Un paquete viejo de esta tarea (de una corrida que no llegó a limpiarse) se borra antes.
     let dir = dir_paquete(home, &tarea.nombre);
@@ -223,18 +287,29 @@ pub fn crear(
     copiar_repo(&repo, &dir.join("repo")).map_err(|e| infra("copia del repo", e))?;
     let tests_dir = dir.join("tests");
     fs::create_dir(&tests_dir).map_err(|e| infra("carpeta tests", e))?;
-    for (archivo, origen) in &archivos {
-        fs::copy(origen, tests_dir.join(format!("{archivo}.py")))
-            .map_err(|e| infra(&format!("copiar {}", origen.display()), e))?;
+    for (destino, origen) in &archivos {
+        let ruta = tests_dir.join(destino);
+        if let Some(padre) = ruta.parent() {
+            fs::create_dir_all(padre).map_err(|e| infra("carpeta del contrato", e))?;
+        }
+        fs::copy(origen, &ruta).map_err(|e| infra(&format!("copiar {}", origen.display()), e))?;
     }
     let conftest = tarea.dir.join("oculto").join("conftest.py");
     if conftest.is_file() {
         fs::copy(&conftest, tests_dir.join("conftest.py"))
             .map_err(|e| infra("copiar conftest", e))?;
     }
+    // La carpeta `tests/contrato/` ya existe si hay un test del contrato en el paquete.
+    let conftest_contrato = tarea.dir.join(CARPETA_CONTRATO).join("conftest.py");
+    if hay_contrato && conftest_contrato.is_file() {
+        fs::copy(
+            &conftest_contrato,
+            tests_dir.join(CARPETA_CONTRATO).join("conftest.py"),
+        )
+        .map_err(|e| infra("copiar conftest del contrato", e))?;
+    }
     let commit = commit_de(&repo);
     escribir(&dir.join(ARCHIVO_COMMIT), &commit, false)?;
-    let mut avisos = Vec::new();
     let con_cache = match cache {
         Some(origen) => {
             copiar_repo(origen, &dir.join(CARPETA_CACHE_PAQUETE))
@@ -277,8 +352,9 @@ pub fn limpiar_paquete(home: &Path, tarea: &Tarea, paquete: &Path, sesion: &str)
 /// importa. Si el paquete de la tarea tiene otro commit, el resultado no se importa y el aviso lo dice
 /// (B16). Si entra, cada test pendiente cuenta una muestra por junit, con el mismo criterio que la
 /// laptop (`muestreo_de`): un test que pasa en una repetición y falla en otra queda `inestable` con su
-/// tasa, nunca `falla` (desempate 28). Guarda el resultado en `evidencia/<tarea>/colab.json` y registra
-/// un evento `Gate`.
+/// tasa, nunca `falla` (desempate 28). Un `contrato:` se busca en el junit sin el prefijo, y su resultado
+/// se guarda con él (desempate 16). Guarda el resultado en `evidencia/<tarea>/colab.json` y registra un
+/// evento `Gate`.
 pub fn importar(
     home: &Path,
     tarea: &Tarea,
@@ -322,7 +398,7 @@ pub fn importar(
     for exclusion in entorno_de_colab(tarea) {
         let muestras: Vec<Option<ResultadoTest>> = junits
             .iter()
-            .map(|j| j.tests.get(&exclusion.test).copied())
+            .map(|j| j.tests.get(id_de_junit(&exclusion.test)).copied())
             .collect();
         let Some(muestreo) = muestreo_de(&muestras) else {
             continue;
@@ -422,7 +498,8 @@ pub fn colab_para_veredicto(
     }
 }
 
-/// Los tests de `[[entorno]]` con su motivo y, si hay, su resultado de Colab.
+/// Los tests de `[[entorno]]` con su motivo y, si hay, su resultado de Colab. El resultado se busca con la
+/// entrada completa, prefijo `contrato:` incluido, igual que se guardó en `importar`.
 pub fn desde(tarea: &Tarea, colab: &BTreeMap<String, ColabEntrada>) -> Vec<Pendiente> {
     tarea
         .entorno
@@ -477,24 +554,34 @@ fn dividir(id: &str) -> Result<(&str, &str), ErrorOraculo> {
     })
 }
 
-/// Node id de pytest dentro de la carpeta `tests/` del paquete.
+/// Node id de pytest dentro de la carpeta `tests/` del paquete: `tests/<archivo>.py::<nombre>`. Con el
+/// prefijo `contrato:`, va en `tests/contrato/` (desempate 16).
 fn nodo(id: &str) -> Result<String, ErrorOraculo> {
-    let (archivo, nombre) = dividir(id)?;
+    let (archivo, nombre) = dividir(id_de_junit(id))?;
     nombre_seguro(archivo)?;
-    Ok(format!("tests/{archivo}.py::{nombre}"))
+    let carpeta = if id.starts_with(PREFIJO_CONTRATO) {
+        format!("{CARPETA_CONTRATO}/")
+    } else {
+        String::new()
+    };
+    Ok(format!("tests/{carpeta}{archivo}.py::{nombre}"))
 }
 
-/// Busca el archivo del módulo en `oculto/` y, si no está, en `contrato/`.
-fn localizar(tarea: &Tarea, archivo: &str) -> Result<PathBuf, ErrorOraculo> {
+/// Busca el archivo del módulo: en `contrato/` si el id lleva `contrato:`, y en `oculto/` si no. Un id sin
+/// prefijo llega aquí solo si su archivo no está en `contrato/` (si estuviera, la entrada se omitió).
+fn localizar(tarea: &Tarea, archivo: &str, del_contrato: bool) -> Result<PathBuf, ErrorOraculo> {
     nombre_seguro(archivo)?;
-    for suite in ["oculto", "contrato"] {
-        let ruta = tarea.dir.join(suite).join(format!("{archivo}.py"));
-        if ruta.is_file() {
-            return Ok(ruta);
-        }
+    let (suite, donde) = if del_contrato {
+        (CARPETA_CONTRATO, "contrato/")
+    } else {
+        ("oculto", "oculto/ ni en contrato/")
+    };
+    let ruta = tarea.dir.join(suite).join(format!("{archivo}.py"));
+    if ruta.is_file() {
+        return Ok(ruta);
     }
     Err(ErrorOraculo::Tarea(format!(
-        "no existe {archivo}.py en oculto/ ni en contrato/"
+        "no existe {archivo}.py en {donde}"
     )))
 }
 
@@ -644,20 +731,104 @@ mod tests {
     }
 
     #[test]
-    fn pendiente_crear_con_solo_entradas_del_contrato_no_arma_paquete() {
-        // Desempate 1: `contrato:` no se corre en Colab. Sin otra entrada, no hay paquete ni error.
+    fn pendiente_crear_suma_al_paquete_una_entrada_del_contrato() {
+        // Desempate 16: el paquete de Colab corre también los `contrato:` de `[[entorno]]`.
         let home = tempfile::tempdir().expect("home");
         let repo = tempfile::tempdir().expect("repo");
-        let tarea_dir = tempfile::tempdir().expect("tarea");
-        let texto = "nombre = \"tarea-prueba\"\nlenguaje = \"rust\"\nimagen = \"i\"\nspec = \"s\"\n\
-                     [contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n\
-                     [[entorno]]\ntest = \"contrato:a.py::t\"\nmotivo = \"m\"\n";
-        std::fs::write(tarea_dir.path().join("tarea.toml"), texto).expect("escribe");
-        let tarea = Tarea::cargar_de(tarea_dir.path()).expect("carga la tarea");
+        fs::write(repo.path().join("a.txt"), "x").expect("repo");
+        let tarea = tarea_con_entorno(
+            home.path(),
+            "tarea-x",
+            &["contrato:test_c::t"],
+            &[("contrato", "test_c")],
+        );
+        let paquete = crear(home.path(), &tarea, repo.path(), None)
+            .expect("crea")
+            .expect("hay paquete");
+        assert_eq!(paquete.tests, ["contrato:test_c::t"]);
+        assert!(
+            paquete.dir.join("tests/contrato/test_c.py").is_file(),
+            "el archivo del contrato va a tests/contrato/"
+        );
+        assert!(!paquete.dir.join("tests/test_c.py").exists());
+        let sh = fs::read_to_string(paquete.dir.join("correr.sh")).expect("correr.sh");
+        assert!(sh.contains("'tests/contrato/test_c.py::t'"), "{sh}");
+    }
+
+    #[test]
+    fn pendiente_id_sin_prefijo_solo_en_contrato_no_entra_y_avisa() {
+        // Desempate 16, punto 2: `test_c::t` sin prefijo busca solo en oculto/. Si está en contrato/,
+        // no entra al paquete y el aviso lo nombra.
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        fs::write(repo.path().join("a.txt"), "x").expect("repo");
+        let tarea = tarea_con_entorno(
+            home.path(),
+            "tarea-x",
+            &["test_c::t", "test_a::uno"],
+            &[("contrato", "test_c"), ("oculto", "test_a")],
+        );
+        let paquete = crear(home.path(), &tarea, repo.path(), None)
+            .expect("crea")
+            .expect("hay paquete");
+        assert_eq!(paquete.tests, ["test_a::uno"]);
+        assert!(
+            paquete
+                .avisos
+                .iter()
+                .any(|a| a.contains("test_c::t") && a.contains("contrato:test_c::t")),
+            "{:?}",
+            paquete.avisos
+        );
+        assert!(!paquete.dir.join("tests/contrato").exists());
+        assert!(!paquete.dir.join("tests/test_c.py").exists());
+    }
+
+    #[test]
+    fn pendiente_mismo_archivo_en_las_dos_suites_es_error_de_tarea() {
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        fs::write(repo.path().join("a.txt"), "x").expect("repo");
+        let tarea = tarea_con_entorno(
+            home.path(),
+            "tarea-x",
+            &["test_a::uno", "contrato:test_a::t"],
+            &[("oculto", "test_a"), ("contrato", "test_a")],
+        );
         let r = crear(home.path(), &tarea, repo.path(), None);
-        let error = r.as_ref().err().map(|e| e.to_string()).unwrap_or_default();
-        assert!(matches!(r, Ok(None)), "{error}");
-        assert!(!home.path().join("oraculos").exists());
+        let motivo = r.as_ref().err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(matches!(r, Err(ErrorOraculo::Tarea(_))), "{motivo}");
+        assert!(motivo.contains("test_a"), "{motivo}");
+        assert!(
+            !dir_paquete(home.path(), "tarea-x").exists(),
+            "no crea nada antes del error"
+        );
+    }
+
+    #[test]
+    fn pendiente_importar_guarda_el_resultado_del_contrato_con_su_prefijo() {
+        let home = tempfile::tempdir().expect("home");
+        let tarea = tarea_con_entorno(
+            home.path(),
+            "tarea-x",
+            &["contrato:test_c::t"],
+            &[("contrato", "test_c")],
+        );
+        let junit = home.path().join("pendientes-1.xml");
+        fs::write(
+            &junit,
+            r#"<testsuite><testcase classname="tests.contrato.test_c" name="t"/></testsuite>"#,
+        )
+        .expect("junit");
+        let resumen = importar(home.path(), &tarea, &[junit], "").expect("importa");
+        assert_eq!(resumen.importados, 1);
+        let colab = colab_de(home.path(), "tarea-x").expect("lee");
+        assert_eq!(colab["contrato:test_c::t"].resultado, "pasa");
+        assert!(
+            !colab.contains_key("test_c::t"),
+            "la clave lleva el prefijo: {:?}",
+            colab.keys()
+        );
     }
 
     #[test]
@@ -847,6 +1018,33 @@ mod tests {
              [contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n\
              [[entorno]]\ntest = \"test_a::uno\"\nmotivo = \"gpu\"\n"
         );
+        fs::write(dir.join("tarea.toml"), texto).expect("tarea.toml");
+        Tarea::cargar_de(&dir).expect("carga")
+    }
+
+    /// Tarea mínima en `home/oraculos/<nombre>` con el `[[entorno]]` dado. `archivos` son los `(suite,
+    /// archivo)` que existen bajo `<suite>/` de la tarea, con un test cada uno.
+    fn tarea_con_entorno(
+        home: &Path,
+        nombre: &str,
+        entorno: &[&str],
+        archivos: &[(&str, &str)],
+    ) -> Tarea {
+        let dir = home.join("oraculos").join(nombre);
+        for (suite, archivo) in archivos {
+            let ruta = dir.join(suite).join(format!("{archivo}.py"));
+            fs::create_dir_all(ruta.parent().expect("carpeta de la suite")).expect("suite");
+            fs::write(&ruta, "def test_t(): pass\n").expect("escribe");
+        }
+        let mut texto = format!(
+            "nombre = \"{nombre}\"\nlenguaje = \"shell\"\nimagen = \"i\"\nspec = \"s\"\n\
+             [contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n"
+        );
+        for test in entorno {
+            texto.push_str(&format!(
+                "[[entorno]]\ntest = \"{test}\"\nmotivo = \"gpu\"\n"
+            ));
+        }
         fs::write(dir.join("tarea.toml"), texto).expect("tarea.toml");
         Tarea::cargar_de(&dir).expect("carga")
     }
