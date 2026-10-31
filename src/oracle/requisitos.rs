@@ -1,5 +1,6 @@
-//! Completitud por requisito (Tarea 9c): cruza cada `[[requisito]]` con el junit oculto y los
-//! escenarios. El nivel sale solo de pruebas, sin LLM.
+//! Completitud por requisito (Tarea 9c): cruza cada `[[requisito]]` con el junit del contrato, el
+//! junit oculto y los escenarios. Un id con `PREFIJO_CONTRATO` busca en el contrato; sin prefijo, en el
+//! oculto. El nivel sale solo de pruebas, sin LLM.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -11,12 +12,19 @@ use crate::tipos::{
     Cumplimiento, Dimension, EstadoRequisito, Fuente, Hallazgo, NivelItem, Puntaje,
 };
 
-/// Resultados de la suite oculta ya clasificados. Los inestables no están en `tests`.
+/// Prefijo de un id de `[[requisito]]` que apunta a la suite del contrato. Sin él, el id apunta a la
+/// suite oculta.
+pub const PREFIJO_CONTRATO: &str = "contrato:";
+
+/// Resultados de las suites ya clasificadas. Las claves sin prefijo son de la oculta; las del contrato
+/// llevan `PREFIJO_CONTRATO`. Los inestables no están en `tests`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResultadosTests {
-    /// Clave `archivo::nombre`, con resultado `Pasa` o `Falla` (u `Omite`).
+    /// Clave `archivo::nombre` (con `PREFIJO_CONTRATO` si es del contrato), con resultado `Pasa` o
+    /// `Falla` (u `Omite`).
     pub tests: BTreeMap<String, ResultadoTest>,
-    /// Tests con resultados mezclados entre corridas. Nunca cuentan como verdes.
+    /// Tests con resultados mezclados entre corridas, con la misma clave que `tests`. Nunca cuentan como
+    /// verdes.
     pub inestables: BTreeSet<String>,
 }
 
@@ -35,6 +43,26 @@ pub fn desde_clasificacion(c: &Clasificacion) -> ResultadosTests {
         tests,
         inestables: c.inestables.iter().cloned().collect(),
     }
+}
+
+/// Junta las dos suites en un solo `ResultadosTests`. La parte oculta va como en `desde_clasificacion`;
+/// la del contrato lleva `PREFIJO_CONTRATO` en cada clave.
+pub fn desde_clasificaciones(contrato: &Clasificacion, oculto: &Clasificacion) -> ResultadosTests {
+    let mut r = desde_clasificacion(oculto);
+    let del_contrato = desde_clasificacion(contrato);
+    r.tests.extend(
+        del_contrato
+            .tests
+            .into_iter()
+            .map(|(id, resultado)| (format!("{PREFIJO_CONTRATO}{id}"), resultado)),
+    );
+    r.inestables.extend(
+        del_contrato
+            .inestables
+            .into_iter()
+            .map(|id| format!("{PREFIJO_CONTRATO}{id}")),
+    );
+    r
 }
 
 /// Nivel de cada requisito, en el mismo orden que `reqs`.
@@ -859,6 +887,151 @@ mod tests {
             estados[0].evidencia,
             vec!["a::t2: omite".to_string()],
             "{estados:?}"
+        );
+    }
+
+    /// Clasifica una suite con dos corridas iguales: sus tests quedan estables.
+    fn suite(pasa: &[&str], falla: &[&str], omite: &[&str]) -> Clasificacion {
+        let mut j = Junit::default();
+        for t in pasa {
+            j.tests.insert(t.to_string(), ResultadoTest::Pasa);
+        }
+        for t in falla {
+            j.tests.insert(t.to_string(), ResultadoTest::Falla);
+        }
+        for t in omite {
+            j.tests.insert(t.to_string(), ResultadoTest::Omite);
+        }
+        clasificar(&[j.clone(), j], &[], &BTreeSet::new())
+    }
+
+    /// Clasifica una suite donde `inestable` pasa en una corrida y falla en la otra.
+    fn suite_inestable(pasa: &[&str], inestable: &str) -> Clasificacion {
+        let mut j1 = Junit::default();
+        let mut j2 = Junit::default();
+        for t in pasa {
+            j1.tests.insert(t.to_string(), ResultadoTest::Pasa);
+            j2.tests.insert(t.to_string(), ResultadoTest::Pasa);
+        }
+        j1.tests.insert(inestable.into(), ResultadoTest::Pasa);
+        j2.tests.insert(inestable.into(), ResultadoTest::Falla);
+        clasificar(&[j1, j2], &[], &BTreeSet::new())
+    }
+
+    #[test]
+    fn requisitos_contrato_verde_sin_bordes_da_nivel_3() {
+        let r = desde_clasificaciones(&suite(&["t::a"], &[], &[]), &suite(&[], &[], &[]));
+        let reqs = [req("R1", 1, &["contrato:t::a"], &[], &[])];
+        let estados = evalua(&reqs, &r);
+        assert_eq!(estados[0].nivel, Some(3));
+        assert_eq!(estados[0].cumplimiento, Cumplimiento::Cumplido);
+    }
+
+    #[test]
+    fn requisitos_contrato_verde_con_borde_que_falla_da_nivel_2() {
+        let contrato = suite(&["t::a"], &["t::b"], &[]);
+        let r = desde_clasificaciones(&contrato, &suite(&[], &[], &[]));
+        let reqs = [req("R1", 1, &["contrato:t::a"], &["contrato:t::b"], &[])];
+        let estados = evalua(&reqs, &r);
+        assert_eq!(estados[0].nivel, Some(2));
+        assert_eq!(estados[0].cumplimiento, Cumplimiento::Parcial);
+        assert!(
+            estados[0]
+                .evidencia
+                .contains(&"contrato:t::b: falla".to_string())
+        );
+    }
+
+    #[test]
+    fn requisitos_id_sin_prefijo_no_busca_en_el_contrato() {
+        let contrato = suite(&["t::a"], &[], &[]);
+        let reqs = [req("R1", 1, &["t::a"], &[], &[])];
+        let solo_contrato = desde_clasificaciones(&contrato, &suite(&[], &[], &[]));
+        let estados = evalua(&reqs, &solo_contrato);
+        assert_eq!(estados[0].nivel, Some(0));
+        assert_eq!(estados[0].cumplimiento, Cumplimiento::Ausente);
+        assert!(estados[0].evidencia.contains(&"t::a: ausente".to_string()));
+        // Un archivo sin prefijo tampoco expande a los tests del contrato.
+        let por_archivo = [req("R2", 1, &["t"], &[], &[])];
+        let estados = evalua(&por_archivo, &solo_contrato);
+        assert_eq!(estados[0].nivel, Some(0));
+        assert!(estados[0].evidencia.contains(&"t: ausente".to_string()));
+
+        // Con el mismo id pasando en la suite oculta, el requisito sí llega a nivel 3.
+        let con_oculto = desde_clasificaciones(&contrato, &suite(&["t::a"], &[], &[]));
+        let estados = evalua(&reqs, &con_oculto);
+        assert_eq!(estados[0].nivel, Some(3));
+    }
+
+    #[test]
+    fn requisitos_contrato_inestable_pone_tope_2_y_lista_hallazgo() {
+        let contrato = suite_inestable(&["t::a"], "t::b");
+        let r = desde_clasificaciones(&contrato, &suite(&[], &[], &[]));
+        let reqs = [req("R1", 1, &["contrato:t::a"], &["contrato:t::b"], &[])];
+        let estados = evalua(&reqs, &r);
+        assert_eq!(estados[0].nivel, Some(2));
+        assert_eq!(estados[0].cumplimiento, Cumplimiento::Parcial);
+        assert!(
+            estados[0]
+                .evidencia
+                .contains(&"contrato:t::b: inestable".to_string())
+        );
+
+        let hallazgos = hallazgos_inestables(&reqs, &r);
+        assert_eq!(hallazgos.len(), 1);
+        assert_eq!(hallazgos[0].cita, "contrato:t::b");
+        assert_eq!(hallazgos[0].impacto, ["R1"]);
+    }
+
+    #[test]
+    fn requisitos_contrato_id_inexistente_queda_ausente() {
+        let r = desde_clasificaciones(&suite(&["t::a"], &[], &[]), &suite(&[], &[], &[]));
+        let reqs = [req("R1", 1, &["contrato:t::no"], &[], &[])];
+        let estados = evalua(&reqs, &r);
+        assert_eq!(estados[0].nivel, Some(0));
+        assert_eq!(estados[0].cumplimiento, Cumplimiento::Ausente);
+        assert!(
+            estados[0]
+                .evidencia
+                .contains(&"contrato:t::no: ausente".to_string())
+        );
+    }
+
+    #[test]
+    fn requisitos_contrato_por_archivo_expande_solo_sus_tests() {
+        let contrato = suite(&["t::a", "t::b"], &[], &[]);
+        let oculto = suite(&[], &["t::c"], &[]);
+        let r = desde_clasificaciones(&contrato, &oculto);
+        let reqs = [req("R1", 1, &["contrato:t"], &[], &[])];
+        let estados = evalua(&reqs, &r);
+        assert_eq!(estados[0].nivel, Some(3));
+        assert_eq!(
+            estados[0].evidencia,
+            ["contrato:t::a: pasa", "contrato:t::b: pasa"]
+        );
+    }
+
+    #[test]
+    fn requisitos_desde_clasificaciones_pone_prefijo_al_contrato() {
+        let mut j1 = Junit::default();
+        j1.tests.insert("t::est".into(), ResultadoTest::Pasa);
+        j1.tests.insert("t::mix".into(), ResultadoTest::Pasa);
+        j1.tests.insert("t::om".into(), ResultadoTest::Omite);
+        let mut j2 = j1.clone();
+        j2.tests.insert("t::mix".into(), ResultadoTest::Falla);
+        let contrato = clasificar(&[j1, j2], &[], &BTreeSet::new());
+        let r = desde_clasificaciones(&contrato, &suite(&["o::x"], &[], &[]));
+        assert_eq!(
+            r.tests,
+            BTreeMap::from([
+                ("contrato:t::est".to_string(), ResultadoTest::Pasa),
+                ("contrato:t::om".to_string(), ResultadoTest::Omite),
+                ("o::x".to_string(), ResultadoTest::Pasa),
+            ])
+        );
+        assert_eq!(
+            r.inestables,
+            BTreeSet::from(["contrato:t::mix".to_string()])
         );
     }
 }

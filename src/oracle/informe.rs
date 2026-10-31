@@ -10,6 +10,7 @@ use serde::Deserialize;
 use super::ErrorOraculo;
 use super::evidencia::oraciones_con_id;
 use super::juez::desenvuelto;
+use super::requisitos::PREFIJO_CONTRATO;
 use super::rubrica::Rubrica;
 use super::tarea::Tarea;
 use crate::config::ReglasDecision;
@@ -185,7 +186,7 @@ pub fn informar_con(
         proximos_pasos: proximos_pasos(v, tarea, &bloqueantes),
         bloqueantes,
         resumen: resumen(v, &decidido.disparos),
-        confianza: confianza(v),
+        confianza: confianza(v, tarea),
     };
     if let Some(redactor) = redactor {
         let mut para_redactor = informe.clone();
@@ -286,15 +287,42 @@ fn sin_decision(v: &Veredicto, rubricas: &[Rubrica]) -> Vec<Disparo> {
     salida
 }
 
+/// Verdadero si la referencia `prueba` cubre el test `test`: el mismo id, o un id dentro de ese archivo.
+/// Es el mismo criterio para `pruebas`, `bordes` y `riesgos`.
+fn cubre(prueba: &str, test: &str) -> bool {
+    test == prueba || test.starts_with(&format!("{prueba}::"))
+}
+
 /// Tests ocultos que fallan y que ningún requisito prueba. Un requisito prueba un test si lo nombra en
-/// `pruebas` o `bordes`, por id exacto o por archivo, como en `riesgos`.
+/// `pruebas` o `bordes`, por id exacto o por archivo. Una referencia `contrato:` apunta al contrato y no
+/// cubre un test oculto.
 fn tests_fuera_de_requisitos(v: &Veredicto, tarea: &Tarea) -> Vec<String> {
     v.ocultos_fallidos
         .iter()
         .filter(|test| {
             !tarea.requisito.iter().any(|r| {
+                r.pruebas
+                    .iter()
+                    .chain(&r.bordes)
+                    .any(|prueba| cubre(prueba, test))
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+/// Tests del contrato que fallan y que ningún requisito prueba. Un requisito lo prueba si nombra el test con
+/// `contrato:` en `pruebas` o `bordes`, por id exacto o por archivo. Una referencia sin prefijo apunta a la
+/// suite oculta y no lo cubre.
+fn tests_contrato_fuera_de_requisitos(v: &Veredicto, tarea: &Tarea) -> Vec<String> {
+    v.contrato_fallidos
+        .iter()
+        .filter(|test| {
+            !tarea.requisito.iter().any(|r| {
                 r.pruebas.iter().chain(&r.bordes).any(|prueba| {
-                    test.as_str() == prueba || test.starts_with(&format!("{prueba}::"))
+                    prueba
+                        .strip_prefix(PREFIJO_CONTRATO)
+                        .is_some_and(|referencia| cubre(referencia, test))
                 })
             })
         })
@@ -373,15 +401,22 @@ fn bloqueos(v: &Veredicto, rubricas: &[Rubrica]) -> Vec<Disparo> {
     salida
 }
 
-/// Reglas de no listo: un test oculto que falla y ningún requisito prueba, la completitud con veredicto bajo
-/// su mínimo, y una dimensión calibrada bajo su mínimo de `[decision.minimo]`. Una completitud sin veredicto
-/// no dispara aquí: `sin_decision` la cubre si no hay evidencia.
+/// Reglas de no listo: un test oculto o del contrato que falla y ningún requisito prueba, la completitud con
+/// veredicto bajo su mínimo, y una dimensión calibrada bajo su mínimo de `[decision.minimo]`. Una completitud
+/// sin veredicto no dispara aquí: `sin_decision` la cubre si no hay evidencia.
 fn no_listo(v: &Veredicto, tarea: &Tarea, reglas: &ReglasDecision) -> Vec<Disparo> {
     let mut salida = Vec::new();
     for id in tests_fuera_de_requisitos(v, tarea) {
         salida.push(Disparo {
             regla: format!("test_oculto_fuera_de_requisitos: {id}"),
             frase: format!("El test oculto {id} falla y ningún requisito lo prueba."),
+            hallazgo: None,
+        });
+    }
+    for id in tests_contrato_fuera_de_requisitos(v, tarea) {
+        salida.push(Disparo {
+            regla: format!("test_contrato_fuera_de_requisitos: {id}"),
+            frase: format!("El test del contrato {id} falla y ningún requisito lo prueba."),
             hallazgo: None,
         });
     }
@@ -534,7 +569,7 @@ fn impacto_real(v: &Veredicto, impacto: &[String]) -> Vec<String> {
 }
 
 /// Riesgos: hallazgos de severidad 2 o más, y tests inestables que ningún hallazgo nombra y que un
-/// requisito prueba. Cada uno cita sus ids reales.
+/// requisito prueba. Un test del contrato se nombra con `contrato:`. Cada uno cita sus ids reales.
 fn riesgos(v: &Veredicto, tarea: &Tarea) -> Vec<Accion> {
     let mut candidatos = Vec::new();
     for h in v
@@ -569,11 +604,12 @@ fn riesgos(v: &Veredicto, tarea: &Tarea) -> Vec<Accion> {
         });
     }
     for (clave, tasa) in &v.tasas {
-        let Some(test) = clave
-            .strip_prefix("oculto:")
-            .or_else(|| clave.strip_prefix("contrato:"))
-        else {
-            continue;
+        // Un test oculto se nombra sin prefijo, como en las referencias. Uno del contrato se nombra con
+        // `contrato:`, también en las referencias y en la cita de sus hallazgos.
+        let test = match clave.strip_prefix("oculto:") {
+            Some(id) => id,
+            None if clave.starts_with(PREFIJO_CONTRATO) => clave.as_str(),
+            None => continue,
         };
         if v.hallazgos.iter().any(|h| h.cita == test) {
             continue;
@@ -585,7 +621,7 @@ fn riesgos(v: &Veredicto, tarea: &Tarea) -> Vec<Accion> {
                 r.pruebas
                     .iter()
                     .chain(&r.bordes)
-                    .any(|prueba| test == prueba || test.starts_with(&format!("{prueba}::")))
+                    .any(|prueba| cubre(prueba, test))
             })
             .map(|r| r.id.clone())
             .filter(|id| v.requisitos.iter().any(|e| &e.id == id))
@@ -725,8 +761,26 @@ fn conservadas(texto: &str, ids: &BTreeSet<String>) -> Option<String> {
     (!buenas.is_empty()).then(|| buenas.join(" "))
 }
 
+/// Marca de los requisitos cuya evidencia es solo del contrato (decisión 50).
+const MARCA_EVIDENCIA_VISIBLE: &str = "evidencia visible al builder";
+
+/// Requisitos cuyas pruebas y bordes son todos `contrato:`, y no están vacíos. El builder ve esos tests.
+/// Un requisito que mezcla `contrato:` con referencias sin prefijo tiene evidencia oculta: no entra.
+fn evidencia_visible(v: &Veredicto, tarea: &Tarea) -> Vec<String> {
+    tarea
+        .requisito
+        .iter()
+        .filter(|r| v.requisitos.iter().any(|e| e.id == r.id))
+        .filter(|r| {
+            let refs: Vec<&String> = r.pruebas.iter().chain(&r.bordes).collect();
+            !refs.is_empty() && refs.iter().all(|x| x.starts_with(PREFIJO_CONTRATO))
+        })
+        .map(|r| format!("{}: {MARCA_EVIDENCIA_VISIBLE}", r.id))
+        .collect()
+}
+
 /// Datos para decidir: lo que el veredicto no mide del todo.
-fn confianza(v: &Veredicto) -> Confianza {
+fn confianza(v: &Veredicto, tarea: &Tarea) -> Confianza {
     Confianza {
         repeticiones: v.repeticiones,
         inestables: v.tasas.clone(),
@@ -755,6 +809,7 @@ fn confianza(v: &Veredicto) -> Confianza {
             .iter()
             .flat_map(|p| p.faltantes.clone())
             .collect(),
+        evidencia_visible: evidencia_visible(v, tarea),
     }
 }
 
@@ -856,6 +911,9 @@ pub fn markdown(tarea: &str, informe: &Informe) -> String {
             "- Requisitos pendientes por entorno: {}",
             unir(&c.requisitos_pendientes)
         ));
+    }
+    for entrada in &c.evidencia_visible {
+        datos.push(format!("- {entrada}"));
     }
     for p in &c.tests_pendientes {
         datos.push(format!("- Test pendiente {}: {}", p.test, p.motivo));
@@ -1402,6 +1460,96 @@ modulos = ["config"]
     }
 
     #[test]
+    fn informe_test_del_contrato_que_falla_fuera_de_requisitos_da_no_listo() {
+        // Decisión 50: un test del contrato que falla y que ningún requisito prueba con `contrato:` da `NoListo`.
+        let mut v = ecc();
+        v.contrato_fallidos = vec!["tests/contrato.py::suelto".into()];
+        let i = informar(&v, &tarea(), &ReglasDecision::default(), None).expect("informa");
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
+        assert!(
+            i.motivo.contains("test_contrato_fuera_de_requisitos"),
+            "{}",
+            i.motivo
+        );
+        assert!(
+            i.motivo.contains("tests/contrato.py::suelto"),
+            "{}",
+            i.motivo
+        );
+        // La regla no depende de `completitud_minima`.
+        let reglas = ReglasDecision {
+            completitud_minima: 0.0,
+            ..ReglasDecision::default()
+        };
+        let i = informar(&v, &tarea(), &reglas, None).expect("informa");
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
+        assert!(
+            i.motivo.contains("test_contrato_fuera_de_requisitos"),
+            "{}",
+            i.motivo
+        );
+    }
+
+    #[test]
+    fn informe_test_del_contrato_que_falla_dentro_de_un_requisito_no_dispara_la_regla() {
+        // Decisión 50: una referencia `contrato:` cubre el test del contrato, por id exacto o por archivo.
+        let mut t = tarea();
+        t.requisito[0]
+            .pruebas
+            .push("contrato:tests/contrato.py::caso".into());
+        let mut v = ecc();
+        v.contrato_fallidos = vec!["tests/contrato.py::caso".into()];
+        let i = informar(&v, &t, &ReglasDecision::default(), None).expect("informa");
+        assert!(
+            !i.motivo.contains("test_contrato_fuera_de_requisitos"),
+            "{}",
+            i.motivo
+        );
+
+        let mut t = tarea();
+        t.requisito[0]
+            .pruebas
+            .push("contrato:tests/contrato.py".into());
+        let mut v = ecc();
+        v.contrato_fallidos = vec!["tests/contrato.py::otro".into()];
+        let i = informar(&v, &t, &ReglasDecision::default(), None).expect("informa");
+        assert!(
+            !i.motivo.contains("test_contrato_fuera_de_requisitos"),
+            "{}",
+            i.motivo
+        );
+    }
+
+    #[test]
+    fn informe_id_sin_prefijo_no_cubre_un_test_del_contrato() {
+        // Decisión 50: sin prefijo, el id apunta a la suite oculta. `tests/t.py::flaky` no cubre el contrato.
+        let mut v = ecc();
+        v.contrato_fallidos = vec!["tests/t.py::flaky".into()];
+        let i = informar(&v, &tarea(), &ReglasDecision::default(), None).expect("informa");
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
+        assert!(
+            i.motivo.contains("test_contrato_fuera_de_requisitos"),
+            "{}",
+            i.motivo
+        );
+    }
+
+    #[test]
+    fn informe_id_del_contrato_no_cubre_un_test_oculto() {
+        // Decisión 50, lado simétrico: `contrato:` apunta a la suite del contrato, no cubre un test oculto.
+        let mut t = tarea();
+        t.requisito[0].pruebas = vec!["contrato:tests/extra.py::caso_suelto".into()];
+        let mut v = ecc();
+        v.ocultos_fallidos = vec!["tests/extra.py::caso_suelto".into()];
+        let i = informar(&v, &t, &ReglasDecision::default(), None).expect("informa");
+        assert!(
+            i.motivo.contains("test_oculto_fuera_de_requisitos"),
+            "{}",
+            i.motivo
+        );
+    }
+
+    #[test]
     fn informe_bloqueado_gana_sobre_sin_decision() {
         // Tarea 32: la evidencia primero. Un requisito de peso 3 en nivel 0 bloquea aunque la dimensión que
         // bloquea no tenga veredicto.
@@ -1731,6 +1879,94 @@ modulos = ["config"]
         assert_eq!(i.confianza, Confianza::default());
     }
 
+    /// Informe de `ecc()` con la tarea `t` y sin redactor.
+    fn informe_con_tarea(v: &Veredicto, t: &Tarea) -> Informe {
+        informar_con(v, t, &ReglasDecision::default(), &[], None).expect("informa")
+    }
+
+    #[test]
+    fn informe_confianza_marca_requisito_con_evidencia_solo_del_contrato() {
+        let mut t = tarea();
+        t.requisito[0].pruebas = vec!["contrato:tests/c.py::a".into()];
+        t.requisito[0].bordes = Vec::new();
+        let i = informe_con_tarea(&ecc(), &t);
+        assert_eq!(
+            i.confianza.evidencia_visible,
+            ["R1: evidencia visible al builder"]
+        );
+    }
+
+    #[test]
+    fn informe_confianza_no_marca_requisito_con_evidencia_mezclada() {
+        let mut t = tarea();
+        // R1 mezcla un test del contrato con uno oculto: tiene evidencia oculta.
+        t.requisito[0].pruebas = vec!["contrato:tests/c.py::a".into(), "tests/t.py::flaky".into()];
+        // R2 solo tiene referencias sin prefijo: no es del contrato.
+        t.requisito[1].pruebas = vec!["tests/t.py::otro".into()];
+        let i = informe_con_tarea(&ecc(), &t);
+        assert!(
+            i.confianza.evidencia_visible.is_empty(),
+            "{:?}",
+            i.confianza
+        );
+        // Sin ninguna referencia, el default de `tarea()`, tampoco se marca.
+        let i = informe_de(&ecc());
+        assert!(
+            i.confianza.evidencia_visible.is_empty(),
+            "{:?}",
+            i.confianza
+        );
+    }
+
+    #[test]
+    fn informe_confianza_marca_requisito_con_borde_del_contrato_y_pruebas_del_contrato() {
+        let mut t = tarea();
+        t.requisito[0].pruebas = vec!["contrato:tests/c.py::a".into()];
+        t.requisito[0].bordes = vec!["contrato:tests/c.py::b".into()];
+        let i = informe_con_tarea(&ecc(), &t);
+        assert_eq!(
+            i.confianza.evidencia_visible,
+            ["R1: evidencia visible al builder"]
+        );
+        t.requisito[0].bordes = vec!["tests/t.py::b".into()];
+        let i = informe_con_tarea(&ecc(), &t);
+        assert!(
+            i.confianza.evidencia_visible.is_empty(),
+            "{:?}",
+            i.confianza
+        );
+    }
+
+    #[test]
+    fn informe_markdown_lista_la_evidencia_visible_al_builder() {
+        let mut t = tarea();
+        t.requisito[0].pruebas = vec!["contrato:tests/c.py::a".into()];
+        t.requisito[0].bordes = Vec::new();
+        let md = markdown("memora", &informe_con_tarea(&ecc(), &t));
+        assert!(md.contains("- R1: evidencia visible al builder"), "{md}");
+    }
+
+    #[test]
+    fn informe_viejo_sin_evidencia_visible_lee_vacio() {
+        let mut json = serde_json::to_value(informe_de(&ecc())).expect("serializa");
+        let confianza = json["confianza"].as_object_mut().expect("objeto");
+        assert!(confianza.remove("evidencia_visible").is_some());
+        let i: Informe = serde_json::from_value(json).expect("lee");
+        assert!(i.confianza.evidencia_visible.is_empty());
+    }
+
+    #[test]
+    fn informe_ocultar_tests_conserva_la_evidencia_visible() {
+        let mut i = informe_de(&ecc());
+        i.confianza.evidencia_visible = vec!["R1: evidencia visible al builder".into()];
+        let ocultos = BTreeSet::from(["tests/t.py::flaky".to_string()]);
+        ocultar_tests(&mut i, &ocultos);
+        assert_eq!(
+            i.confianza.evidencia_visible,
+            ["R1: evidencia visible al builder"]
+        );
+    }
+
     #[test]
     fn informe_redactor_no_recibe_nombres_de_tests_ocultos() {
         let mut v = sdlc();
@@ -1785,6 +2021,50 @@ modulos = ["config"]
             i.proximos_pasos
         );
         assert!(i.confianza.inestables.is_empty());
+    }
+
+    #[test]
+    fn informe_riesgo_de_test_del_contrato_inestable_cita_su_requisito_con_prefijo() {
+        // Decisión 50: un test del contrato inestable se nombra con `contrato:` y lo cita su requisito.
+        let mut t = tarea();
+        t.requisito[0].bordes = vec!["contrato:tests/c.py::flaky".into()];
+        let mut v = ecc();
+        v.tasas.insert(
+            "contrato:tests/c.py::flaky".into(),
+            TasaTest {
+                pasa: 2,
+                total: 5,
+                wilson_inf: 0.1,
+            },
+        );
+        let i = informar(&v, &t, &ReglasDecision::default(), None).expect("informa");
+        let accion = i
+            .riesgos
+            .iter()
+            .find(|a| a.texto.contains("contrato:tests/c.py::flaky"))
+            .unwrap_or_else(|| panic!("sin riesgo del test: {:?}", i.riesgos));
+        assert!(accion.refs.contains(&"R1".to_string()), "{accion:?}");
+
+        // Un hallazgo que cita el test con su prefijo evita la acción de tasa.
+        let mut h = hallazgo("h-flaky", Dimension::Pruebas, 1, &[]);
+        h.cita = "contrato:tests/c.py::flaky".into();
+        v.hallazgos.push(h);
+        let i = informar(&v, &t, &ReglasDecision::default(), None).expect("informa");
+        assert!(
+            !i.riesgos.iter().any(|a| a.texto.contains("es inestable")),
+            "{:?}",
+            i.riesgos
+        );
+    }
+
+    #[test]
+    fn informe_ids_ocultos_no_incluye_ids_del_contrato() {
+        // Los ids del contrato no cuentan como ocultos: la redacción no los quita.
+        let mut v = ecc();
+        v.contrato_fallidos = vec!["tests/contrato.py::caso".into()];
+        v.inestables_contrato = vec!["tests/contrato.py::flaky".into()];
+        assert!(!ids_ocultos(&v).contains("tests/contrato.py::caso"));
+        assert!(!ids_ocultos(&v).contains("tests/contrato.py::flaky"));
     }
 
     #[test]

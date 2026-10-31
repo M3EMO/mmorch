@@ -304,8 +304,8 @@ pub struct ItemFaltante {
     pub motivo: String,
 }
 
-/// Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Todos sus campos
-/// salen del `Veredicto`.
+/// Lo que el veredicto no mide del todo: cuánto pesa la decisión (decisión 16). Sus campos salen del
+/// `Veredicto`, salvo `evidencia_visible`, que también lee la tarea.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Confianza {
     /// Repeticiones del oculto que corrieron.
@@ -335,6 +335,10 @@ pub struct Confianza {
     /// Ítems sin sonda para el lenguaje, de todos los puntajes, en el orden de las dimensiones.
     #[serde(default)]
     pub faltantes: Vec<ItemFaltante>,
+    /// Requisitos con evidencia solo del contrato, como `<id>: evidencia visible al builder`. El builder
+    /// ve esos tests (decisión 50). Un informe viejo lee vacío.
+    #[serde(default)]
+    pub evidencia_visible: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -389,6 +393,11 @@ pub struct Veredicto {
     /// para el spec. Un veredicto viejo lee vacío.
     #[serde(default)]
     pub ambiguedades: Vec<String>,
+    /// Ids ordenados de los tests del contrato que fallan de forma estable, sin prefijo. Un test que ningún
+    /// requisito prueba con `contrato:` da `NoListo` (`test_contrato_fuera_de_requisitos`). Un veredicto
+    /// viejo lee vacío.
+    #[serde(default)]
+    pub contrato_fallidos: Vec<String>,
 }
 
 impl Default for Veredicto {
@@ -417,6 +426,7 @@ impl Default for Veredicto {
             sin_calibrar: Vec::new(),
             ocultos_fallidos: Vec::new(),
             ambiguedades: Vec::new(),
+            contrato_fallidos: Vec::new(),
         }
     }
 }
@@ -618,6 +628,7 @@ mod tests {
             sin_calibrar: Vec::new(),
             ocultos_fallidos: Vec::new(),
             ambiguedades: Vec::new(),
+            contrato_fallidos: Vec::new(),
         }
     }
 
@@ -962,6 +973,22 @@ mod tests {
         );
         v.inestables_contrato = vec!["test_c::t".into()];
         ida_y_vuelta(&v);
+    }
+
+    #[test]
+    fn veredicto_viejo_sin_contrato_fallidos_lee_vacio() {
+        // Decisión 50: un veredicto anterior al campo lo lee sin ids de tests del contrato que fallan.
+        let v = Veredicto {
+            contrato_fallidos: vec!["test_c::t".into()],
+            ..Veredicto::default()
+        };
+        ida_y_vuelta(&v);
+        let mut json = serde_json::to_value(&v).expect("serializa");
+        json.as_object_mut()
+            .expect("objeto")
+            .remove("contrato_fallidos");
+        let viejo: Veredicto = serde_json::from_value(json).expect("lee");
+        assert!(viejo.contrato_fallidos.is_empty());
     }
 
     #[test]
