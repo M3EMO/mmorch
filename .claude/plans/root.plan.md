@@ -75,6 +75,9 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 49 | P58: "P58 a". Primero la evidencia: `decidir` aplica `Bloqueado` y `NoListo` antes que `SinDecision`. `SinDecision` solo reemplaza a un `Listo` cuando una dimensión con un ítem que bloquea queda sin veredicto. Esta decisión acota la decisión 48: su regla ya no va por encima de las demás. Ver Tarea 32. |
 | 50 | P-req1: "P-req1 a". Root cruza los requisitos también con el junit del contrato, además del oculto. Ver Tarea 34. |
 | 51 | P-req2: "P-req2 a, apruebo la descarga". Se agregan las 5 muestras glTF de Khronos a `oraculos/brasa/oculto/muestras/`. Es la autorización del usuario para esa descarga con red. La hace el orquestador. |
+| 52 | P-req3: "P-req3 a". La ficha de brasa pide un `LICENSE` en la raíz para R14, en la prosa y en la aceptación. |
+| 53 | P-req4: "P-req4 a". La sesión de fichas suma 20 tests ocultos a memora (R2: los 10 flags y el flag que pisa al archivo; R4: `CLIENT` y `HELLO`) y 1 a brasa (R13: `brasa info`). |
+| 54 | P-test1: "P-test1 b", P-test2: "P-test2 a", P-test3: "P-test3 a". La ficha de brasa fija los nombres de wgpu de `brasa info`. Los sufijos de `--maxmemory` y la diferencia de `--appendfsync` quedan sin fijar. |
 
 ## Patterns to Mirror
 
@@ -2407,5 +2410,72 @@ Ninguna de las 7 preguntas toca una decisión del usuario. Cada desempate tiene 
 4. **Validate de 7 y 9c, otra vez.** Espera los pasos 1 a 3. Necesita podman y el `ROOT_HOME` real, sin claves. Tarda unas 3 horas y gasta 0 USD.
 5. **Pasos siguientes.** Siguen los pasos 2 a 5 y 7 a 12 de "Orden de trabajo (2026-10-30, después de la nube 4)": la imagen del builder, la credencial, las pruebas con claves, `NETRC`, el Validate de 13 y 13b, la calibración, la corrida de memora, Colab, Graft y G3.
 6. **Mezcla de la nube 7.** La laptop confirma el lock con dos suites reales.
+
+No hay preguntas nuevas para el usuario.
+
+## Estado (2026-10-31): nube 6 y nube 7 mezcladas
+
+- **Nube 6.** El orquestador la mezcló en cde8ac5 y commiteó la vuelta del planner en 6519c09. El hook dio 1856 verdes con podman.
+- **Nube 7.** Hizo las Tareas 36 y 35 en `claude/awesome-maxwell-sf7z43` (acb2548). Su informe es `docs/builds/2026-10-31-build-nube-7.md`. Con podman, la laptop dio 1875 verdes, 0 rojos y 2 ignorados. El usuario escribió: "Mezclá la nube 7 en claude/root-e7813e y pasale al planner sus 8 preguntas." La mezcla es acda9e6, con el árbol igual a acb2548.
+- **Lock de podman confirmado.** Dos suites reales corrieron a la vez. La segunda avisó "test-seguro: espera el lock de podman" y corrió después de la primera. Las dos dieron 1875 verdes. La regla 4 de la laptop queda cumplida en el script.
+- **Carpetas viejas.** `~/.cache/root-tests/target`, `target-nube5`, `target-nube6` y `tmp` quedan en disco, sin uso. Son cachés de compilación de la suite.
+
+**Fichas y oráculos en el `ROOT_HOME` real** (sesión de fichas, decisiones 52 a 54):
+- Los dos `tarea.toml` tienen las capas de sus fichas aprobadas.
+- memora R2, R4 y R16, y brasa R7, R13 y R14 tienen ids `contrato:`.
+- La ficha de brasa pide un `LICENSE` en la raíz para R14 (decisión 52).
+- memora suma 20 tests ocultos y brasa suma 1 (decisión 53). Los repos ECC los pasan en 3 de 3 corridas. Los repos SDLC fallan por faltantes del producto.
+- La ficha de brasa fija los nombres de wgpu de `brasa info` (decisión 54).
+- memora tiene 68 tests ocultos y brasa 22. Todos pertenecen a un requisito.
+
+**Diagnóstico de FIFO (cerrado).**
+- `test_blpop_fifo_entre_clientes` aislado sobre memora-ecc pasa 6 de 30 en `root-oraculo-rust:2` y 4 de 30 en el host. La imagen no explica el cambio.
+- Con las mediciones anteriores (9 de 30 en el banco, 0 de 15 en el Validate), la tasa de pase queda cerca de 1 de 6. El 0 de 15 es azar de muestra: con esa tasa, 15 fallas seguidas pasan cerca de 6 veces cada 100.
+- Con 5 repeticiones, un test que pasa 1 de cada 6 veces falla las 5 corridas cerca de 4 veces cada 10. Por eso Root lo clasificó como falla estable. Es un límite estadístico conocido de 5 repeticiones, no un defecto de Root.
+- El origen es "producto": la ficha exige FIFO, y el producto lo viola en la mayoría de las corridas. R7 de memora-ecc queda `Parcial` con las dos lecturas.
+- El resultado está en `diferencias.md` de memora.
+
+**Muestras de Khronos (decisión 51).** La herramienta de permisos rechazó la descarga del orquestador. El usuario tiene el comando y todavía no lo corrió. Las muestras siguen faltando.
+
+## Desempates técnicos 16 (Opus, 2026-10-31): preguntas de la nube 7 y `ficha revisar`
+
+Ninguna pregunta toca una decisión del usuario. Cada desempate tiene su razón en una línea.
+
+1. **Colab y el contrato.** El paquete de Colab también corre las entradas `contrato:` de `[[entorno]]`: un test del contrato que necesita GPU tampoco tiene resultado en la laptop, y el contrato no es secreto.
+2. **Colab sin prefijo.** `pendientes::localizar` busca un id sin prefijo solo en `oculto/`, por el formato de id. El único `[[entorno]]` real (brasa, `test_rendimiento[gpu-10000-res1]`) vive en `oculto/`, así que ninguna tarea depende de la búsqueda en `contrato/`.
+3. **`[[oraculo_dudoso]]` y el contrato.** Acepta el prefijo `contrato:` igual que `[[entorno]]`, y la suite del contrato saca esos tests: las dos exclusiones siguen la misma regla de id.
+4. **Pendientes del contrato por MCP.** `Veredicto.pendientes` conserva las entradas `contrato:` en `root_evaluar`, como la evidencia del desempate 2 de "Desempates técnicos 15".
+5. **Evidencia por subcadena.** Se confirma, por el desempate 3 de "Desempates técnicos 15".
+6. **Evidencia visible sin medida.** Un requisito entra en `evidencia_visible` solo si al menos un test `contrato:` aporta un resultado medido y ningún test oculto lo aporta. Un requisito sin ningún resultado medido no tiene evidencia que mostrar.
+7. **Lock con `ROOT_TESTS_BASE`.** Se confirma: los tests usan su propia base y nunca tocan el lock real.
+8. **`sha256sum` y `flock`.** Se confirman: la laptop corre Fedora Linux, y la nube también corre en Linux.
+9. **`ficha revisar` sin juez.** El código 3 es lo esperado: lo fijó el desempate B15 de la Tarea 25, porque la salida 0 exige las dos capas limpias. Para revisar solo la capa determinista, `ficha revisar` suma `--solo-deterministas`. Con ese flag, la salida es 0 o 1 según las reglas deterministas, y el texto dice "juez: no pedido". Razón: una revisión sin juez es útil, pero tiene que pedirse en forma explícita.
+10. **Test inestable de la Tarea 35.** El hook del planner falló una vez en `test_seguro_dos_rutas_dan_dos_carpetas` con `ETXTBSY` ("Text file busy"). Un test escribe un ejecutable falso y lo lanza mientras otro hilo de la suite todavía tiene ese archivo abierto para escritura. Es una carrera de Linux con tests en paralelo. Los tests de `tests/test_seguro.rs` escriben cada ejecutable en un archivo temporal, lo cierran y recién después lo renombran a su nombre final. Razón: un `rename` no deja abierto el archivo final para escritura en ningún proceso.
+
+### Tarea 37: Desempates de la nube 7
+- **Action**: los desempates 1, 2, 3, 4, 6, 9 y 10 de arriba.
+- **Dónde**: en la nube. La prueba del paquete de Colab con un test `contrato:` real va en la laptop.
+- **Validate**: `cargo test`:
+  - Un `[[entorno]]` con `contrato:t::a` suma ese test al paquete de Colab.
+  - Un id sin prefijo que solo existe en `contrato/` no entra al paquete, y deja un aviso.
+  - `[[oraculo_dudoso]]` con `contrato:t::a` saca ese test de la suite del contrato.
+  - `root_evaluar` conserva un pendiente `contrato:` y quita uno oculto.
+  - Un requisito con su único test `contrato:` ausente no entra en `evidencia_visible`.
+  - `ficha revisar --solo-deterministas` sobre una ficha limpia sale con 0 y dice "juez: no pedido".
+  - `tests/test_seguro.rs` pasa 20 veces seguidas con `cargo test --test test_seguro`, sin `ETXTBSY`.
+
+## Orden de trabajo (2026-10-31, después de la nube 7)
+
+**Nube, sesión 8.** Hace la Tarea 37 antes del 2026-11-05. Su brief es `docs/builds/brief-nube-8.md`. El commit de partida lo pone el orquestador. Después de la nube 8 no queda trabajo de código que la nube pueda hacer sin podman, `ROOT_HOME`, claves o Colab.
+
+**Validate de 7 y 9c: memora ya, brasa con las muestras.** memora no depende de las muestras de Khronos. Sus cambios (20 tests ocultos, ids `contrato:` y capas) se miden ya. brasa espera las muestras: sin ellas, R9 queda `Ausente` por un hueco del oráculo, y esa corrida habría que repetirla igual.
+
+**Laptop, en pasos.**
+1. **Validate de memora. Arranca ya.** Corre memora-ecc tres veces y memora-sdlc una vez. Necesita podman y el `ROOT_HOME` real, sin claves. Gasta 0 USD.
+2. **Muestras de Khronos.** El usuario corre el comando de descarga que tiene el orquestador (decisión 51).
+3. **Validate de brasa.** Espera el paso 2. Corre brasa-ecc tres veces y brasa-sdlc una vez, sin claves.
+4. **Carpetas viejas.** El orquestador borra `~/.cache/root-tests/target`, `target-nube5`, `target-nube6` y `tmp` cuando no corre ninguna suite. Son cachés de la suite, y la Tarea 35 ya no las usa.
+5. **Mezcla de la nube 8.** La laptop corre la suite con podman, y la mezcla espera la orden del usuario.
+6. **Pasos siguientes.** Siguen los pasos 2 a 5 y 7 a 12 de "Orden de trabajo (2026-10-30, después de la nube 4)": la imagen del builder, la credencial, las pruebas con claves, `NETRC`, el Validate de 13 y 13b, la calibración, la corrida de memora, Colab, Graft y G3.
 
 No hay preguntas nuevas para el usuario.
