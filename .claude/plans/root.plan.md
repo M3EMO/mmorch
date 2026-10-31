@@ -2479,3 +2479,62 @@ Ninguna pregunta toca una decisión del usuario. Cada desempate tiene su razón 
 6. **Pasos siguientes.** Siguen los pasos 2 a 5 y 7 a 12 de "Orden de trabajo (2026-10-30, después de la nube 4)": la imagen del builder, la credencial, las pruebas con claves, `NETRC`, el Validate de 13 y 13b, la calibración, la corrida de memora, Colab, Graft y G3.
 
 No hay preguntas nuevas para el usuario.
+
+## Validate de memora (2026-10-31, sobre 18ec96a)
+
+El usuario escribió: "Sí, pasale al planner los dos hallazgos del Validate de memora." El orquestador corrió `r00t` release de 18ec96a, con el `ROOT_HOME` real y sin claves. brasa no corrió, porque faltan las muestras de Khronos. Las salidas están en `~/.cache/root-wt/validate7/memora-*.json` y en `~/.cache/root-wt/validate7/intento2/`.
+
+| Repo | Decisión | Completitud | Ocultos | Detalle |
+|---|---|---|---|---|
+| memora-ecc #1 | listo | 1,000 | 68 de 68 | R7 en nivel 3: FIFO pasó las 5 repeticiones |
+| memora-ecc #2 | listo | 0,964 | 67 de 68 | R7 en nivel 1: FIFO inestable, pasa 7 de 10 |
+| memora-ecc #3 | listo | 0,964 | 67 de 68 | R7 en nivel 1: FIFO inestable, pasa 6 de 10 |
+| memora-sdlc #1 | bloqueado | 0,225 | 24 de 68 | R1 y R13 en nivel 0 |
+
+- **Qué cumple.** La decisión de memora-ecc es la misma en las 3 corridas, como pide la decisión 16. El orden conocido se respeta: memora-ecc queda por encima de memora-sdlc. Los 20 tests ocultos nuevos y los ids `contrato:` entraron sin errores.
+- **Qué no cumple.** El nivel de R7 cambia entre corridas (hallazgo 1). Las 4 evaluaciones traen un riesgo falso de Arquitectura (hallazgo 2).
+- **Riesgos de Arquitectura reales.** Con las capas de la ficha (P23 b), memora-ecc tiene un ciclo `cmd -> persist -> cmd`, `persist` importa `cmd`, y `store` importa `persist`. Una capa importa solo capas posteriores, así que esos tres riesgos son defectos del producto.
+
+## Desempates técnicos 17 (Opus, 2026-10-31): hallazgos del Validate de memora
+
+**Hallazgo 1: R7 cambia de nivel entre corridas.**
+- **Causa.** Dentro de la evaluación, `test_blpop_fifo_entre_clientes` pasa cerca del 65 % de las veces. Con 5 repeticiones, ese test pasa las 5 en cerca de 12 corridas de cada 100, y Root no lo ve inestable. Con 10 repeticiones, la chance baja a 1 de cada 100, pero cada evaluación duplica su tiempo.
+- **Cuál criterio falla.** La decisión 16 del usuario pide que la decisión del PM sea estable, y lo es. El criterio "mismos niveles por requisito en 3 evaluaciones" lo agregó Opus en la Tarea 7. Un instrumento con muestras chicas no puede cumplirlo frente a un test con 65 % de pase.
+- **Desempate.** Root acumula evidencia por versión del repo. Guarda el resultado de cada test por corrida en `$ROOT_HOME/evidencia/<tarea>/<hash del contenido del repo>/historial.jsonl`. La clasificación de estable o inestable usa todas las corridas acumuladas de esa misma versión. Razón: un PM con datos no olvida una falla que ya vio, y más evidencia del mismo producto da un juicio más firme sin repetir más la suite.
+  - El hash sale del contenido de la copia del repo, sin `target/` ni `.git/`. Así un cambio sin commit no mezcla evidencia de dos versiones.
+  - Un repo con otro contenido arranca un historial vacío.
+  - `Informe.confianza` dice cuántas corridas acumula cada test inestable.
+- **Criterio de la Tarea 7, corregido.** La decisión es la misma en 3 evaluaciones seguidas. Desde la segunda evaluación de la misma versión, los niveles por requisito no cambian.
+- **R7.** Con el historial, R7 de memora-ecc queda en nivel 1 de forma estable. Es el defecto FIFO que exige la ficha (decisión 26).
+
+**Hallazgo 2: "falta la capa [main]" es un falso positivo.**
+- **Causa.** `perfiles::modulo_de` excluye `src/main.rs` y `src/lib.rs`, y `mapa.rs` los llama `(raiz)`. La capa `["main"]` de memora nunca aparece, aunque el repo tenga `src/main.rs`.
+- **brasa.** Tiene el mismo problema: su primera capa es `["main", "lib"]`, y los dos archivos existen en brasa-ecc y en brasa-sdlc.
+- **Desempate.** Para la regla de capas, `src/main.rs` cuenta como el módulo `main` y `src/lib.rs` como el módulo `lib`, con sus importaciones. Razón: las fichas aprobadas nombran esas capas, y la raíz del crate es la que importa a las demás.
+- **Lo que no cambia.** Para el criterio "sin módulos" del desempate 6 de "Desempates técnicos 12", la raíz del crate no cuenta. Un crate de un archivo sigue sin módulos, y no recibe un puntaje de Arquitectura sin análisis.
+- **Fichas y `tarea.toml`.** No cambian: las capas de la ficha son correctas, y el defecto está en el código de Root.
+
+### Tarea 38: Raíz del crate en las capas (hallazgo 2)
+- **Action**: el desempate del hallazgo 2. El test del perfil que fija "un repo con solo `src/main.rs` da módulos: ninguno" sigue valiendo para el criterio "sin módulos", y se suma un test para la regla de capas.
+- **Dónde**: en la nube.
+- **Validate**: `cargo test`:
+  - Con `capas = [["main"], ["server"]]` y un repo con `src/main.rs` y `src/server.rs`, no hay hallazgo de capa faltante.
+  - Con `capas = [["main", "lib"], ["app"]]` y un repo con `src/lib.rs` y `src/app.rs`, no hay hallazgo de capa faltante.
+  - Si `src/server.rs` importa algo de `main`, hay un hallazgo de orden de capas.
+  - Un repo con solo `src/main.rs` sigue dando Arquitectura en `faltantes` con el motivo "sin módulos".
+
+### Tarea 39: Historial de evidencia por versión del repo (hallazgo 1)
+- **Action**: el desempate del hallazgo 1.
+- **Dónde**: en la nube. La prueba con memora-ecc real va en la laptop.
+- **Validate**: `cargo test`:
+  - Un test que pasa en las 5 corridas de una evaluación, y falla en una corrida de la evaluación anterior de la misma versión, queda inestable.
+  - Un repo con un archivo cambiado arranca un historial vacío.
+  - `target/` y `.git/` no cambian el hash de la versión.
+  - `Informe.confianza` muestra las corridas acumuladas de cada test inestable.
+  - El historial vive en `$ROOT_HOME/evidencia/`, fuera de `oraculos/`, y no guarda el contenido de los tests ocultos, solo sus ids y resultados.
+
+**Orden de la nube 8 (actualizado).** 37, 38 y 39, en ese orden. El brief de la nube 8 ya lo dice. La laptop repite después el Validate de memora, y el de brasa cuando estén las muestras.
+
+**Pedido para la sesión de fichas.** No hay: ningún `tarea.toml` ni ficha cambia por estos hallazgos.
+
+No hay preguntas nuevas para el usuario.

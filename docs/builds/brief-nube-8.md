@@ -33,18 +33,21 @@ Primeros pasos, en este orden:
 
 Si la suite falla en la base por algo que no es el entorno, detenete y escribilo en el informe.
 
-## Tarea
+## Tareas, en orden
 
 | Orden | Tarea | Sección del plan |
 |---|---|---|
 | 1 | 37 | "Tarea 37: Desempates de la nube 7" y "Desempates técnicos 16" |
+| 2 | 38 | "Tarea 38: Raíz del crate en las capas (hallazgo 2)" |
+| 3 | 39 | "Tarea 39: Historial de evidencia por versión del repo (hallazgo 1)" |
 
 Leé también, antes de empezar:
 
 - "Estado (2026-10-31): nube 6 y nube 7 mezcladas".
 - "Desempates técnicos 14" y "Desempates técnicos 15", con el formato de id `contrato:`.
+- "Validate de memora (2026-10-31, sobre 18ec96a)" y "Desempates técnicos 17".
 
-Notas de la tarea:
+Notas de la Tarea 37:
 
 - **Formato de id.** Un id con el prefijo `contrato:` apunta a la suite de contrato. Un id sin prefijo apunta a la suite oculta. Las seis partes de la tarea siguen esa regla.
 - **Colab.** El paquete de Colab corre también las entradas `contrato:` de `[[entorno]]`. Un id sin prefijo se busca solo en `oculto/`. Si ese id existe solo en `contrato/`, no entra al paquete y deja un aviso.
@@ -53,6 +56,20 @@ Notas de la tarea:
 - **Evidencia visible.** Un requisito entra en `evidencia_visible` solo si al menos un test `contrato:` aporta un resultado medido y ningún test oculto lo aporta.
 - **`ficha revisar`.** Sin los flags del juez, la salida sigue en 3. Sumá `--solo-deterministas`: con ese flag, la salida es 0 o 1 según las reglas deterministas, y el texto dice "juez: no pedido". Regenerá `docs/interfaces.md` si cambia la ayuda de la CLI.
 - **Test inestable.** `test_seguro_dos_rutas_dan_dos_carpetas` falló una vez con `ETXTBSY` ("Text file busy"). Un test escribe un ejecutable falso y lo lanza mientras otro hilo todavía tiene ese archivo abierto para escritura. Cada ejecutable de `tests/test_seguro.rs` se escribe en un archivo temporal, se cierra y recién después se renombra a su nombre final. Probalo con 20 corridas seguidas de `cargo test --test test_seguro`.
+
+Notas de la Tarea 38:
+
+- **Por qué.** `perfiles::modulo_de` excluye `src/main.rs` y `src/lib.rs`. Por eso las capas `["main"]` de memora y `["main", "lib"]` de brasa nunca aparecen, y Root da el riesgo falso "falta la capa [main]".
+- **Regla de capas.** `src/main.rs` cuenta como el módulo `main` y `src/lib.rs` como el módulo `lib`, con sus importaciones.
+- **Lo que no cambia.** Para el criterio "sin módulos", la raíz del crate sigue sin contar. Un crate de un archivo sigue sin puntaje de Arquitectura.
+
+Notas de la Tarea 39:
+
+- **Por qué.** Un test que pasa cerca del 65 % de las veces pasa las 5 repeticiones en cerca de 12 evaluaciones de cada 100. Entonces Root no lo ve inestable, y el nivel de su requisito cambia entre evaluaciones.
+- **Historial.** Root guarda el resultado de cada test por corrida en `$ROOT_HOME/evidencia/<tarea>/<hash del contenido del repo>/historial.jsonl`. La clasificación usa todas las corridas acumuladas de esa versión.
+- **Hash.** Sale del contenido de la copia del repo, sin `target/` ni `.git/`. Otro contenido arranca un historial vacío.
+- **Secreto.** El historial guarda solo ids y resultados, nunca el contenido de un test oculto.
+- **Confianza.** `Informe.confianza` muestra cuántas corridas acumula cada test inestable.
 
 ## Reglas
 
