@@ -449,6 +449,21 @@ mod tests {
     }
 
     #[test]
+    fn junit_con_ids_quita_las_carpetas_oculto_y_contrato() {
+        // El paquete separa las suites en `tests/oculto/` y `tests/contrato/`. El id no cambia: la carpeta
+        // no sale en la clase. La guarda del `contrato:` va en pendientes
+        // (`pendiente_importar_guarda_el_resultado_del_contrato_con_su_prefijo`).
+        let xml = r#"<testsuite>
+  <testcase classname="tests.oculto.test_a" name="uno"/>
+  <testcase classname="tests.contrato.test_b" name="t"/>
+</testsuite>"#;
+        let j = parsear(xml).expect("parsea").con_ids();
+        assert_eq!(j.tests.len(), 2);
+        assert_eq!(j.tests["test_a::uno"], ResultadoTest::Pasa);
+        assert_eq!(j.tests["test_b::t"], ResultadoTest::Pasa);
+    }
+
+    #[test]
     fn junit_testsuite_lee_la_marca_de_red_de_correr_sh() {
         let xml = r#"<testsuite name="pendientes" root_red="con-red">
   <testcase classname="tests.test_a" name="t1"/>

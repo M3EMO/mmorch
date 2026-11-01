@@ -27,6 +27,8 @@ use crate::tipos::{Pendiente, TipoEvento};
 const CARPETA_ORACULOS: &str = "oraculos";
 /// Paquete de los tests pendientes, dentro de la carpeta de la tarea.
 const CARPETA_PAQUETE: &str = "pendientes";
+/// Carpeta de los tests ocultos: dentro de la tarea (`oculto/`) y dentro de `tests/` del paquete.
+const CARPETA_OCULTO: &str = "oculto";
 /// Carpeta de los tests del contrato: dentro de la tarea (`contrato/`) y dentro de `tests/` del paquete.
 const CARPETA_CONTRATO: &str = "contrato";
 /// Carpeta de los resultados importados dentro de `ROOT_HOME`.
@@ -206,7 +208,7 @@ fn solo_en_contrato(tarea: &Tarea, id: &str) -> bool {
         return false;
     }
     let py = format!("{archivo}.py");
-    !tarea.dir.join("oculto").join(&py).is_file()
+    !tarea.dir.join(CARPETA_OCULTO).join(&py).is_file()
         && tarea.dir.join(CARPETA_CONTRATO).join(&py).is_file()
 }
 
@@ -236,8 +238,9 @@ pub fn avisos_de_omision_total(tarea: &Tarea) -> Vec<String> {
 }
 
 /// Arma el paquete de los tests de `[[entorno]]` dentro de `oraculos/<tarea>/pendientes/`. Corren los
-/// ocultos (`tests/<archivo>.py`) y los `contrato:` (`tests/contrato/<archivo>.py`). Un id sin prefijo que
-/// solo existe en `contrato/` no entra y da un aviso (desempate 16).
+/// ocultos (`tests/oculto/<archivo>.py`) y los `contrato:` (`tests/contrato/<archivo>.py`). Cada suite lleva
+/// su `conftest.py` en su carpeta, y `tests/` no lleva ninguno. Un id sin prefijo que solo existe en
+/// `contrato/` no entra y da un aviso (desempate 16).
 /// `cache` es la caché de dependencias de la fase de descarga, si ya existe: el paquete la lleva y
 /// `correr.sh` la usa sin red. Sin tests pendientes no crea nada y da `None`.
 /// Todo se valida antes de crear el directorio.
@@ -272,11 +275,12 @@ pub fn crear(
             Some(_) => {}
             None => {
                 suite_de.insert(archivo.to_string(), del_contrato);
-                let destino = if del_contrato {
-                    Path::new(CARPETA_CONTRATO).join(format!("{archivo}.py"))
+                let carpeta = if del_contrato {
+                    CARPETA_CONTRATO
                 } else {
-                    PathBuf::from(format!("{archivo}.py"))
+                    CARPETA_OCULTO
                 };
+                let destino = Path::new(carpeta).join(format!("{archivo}.py"));
                 archivos.insert(destino, localizar(tarea, archivo, del_contrato)?);
             }
         }
@@ -284,6 +288,7 @@ pub fn crear(
         tests.push(exclusion.test.clone());
     }
     let hay_contrato = suite_de.values().any(|del_contrato| *del_contrato);
+    let hay_oculto = suite_de.values().any(|del_contrato| !*del_contrato);
     let mut avisos = avisos_de_contrato(tarea);
 
     // Un paquete viejo de esta tarea (de una corrida que no llegó a limpiarse) se borra antes.
@@ -300,24 +305,14 @@ pub fn crear(
     for (destino, origen) in &archivos {
         let ruta = tests_dir.join(destino);
         if let Some(padre) = ruta.parent() {
-            fs::create_dir_all(padre).map_err(|e| infra("carpeta del contrato", e))?;
+            fs::create_dir_all(padre).map_err(|e| infra("carpeta de la suite", e))?;
         }
         fs::copy(origen, &ruta).map_err(|e| infra(&format!("copiar {}", origen.display()), e))?;
     }
-    let conftest = tarea.dir.join("oculto").join("conftest.py");
-    if conftest.is_file() {
-        fs::copy(&conftest, tests_dir.join("conftest.py"))
-            .map_err(|e| infra("copiar conftest", e))?;
-    }
-    // La carpeta `tests/contrato/` ya existe si hay un test del contrato en el paquete.
-    let conftest_contrato = tarea.dir.join(CARPETA_CONTRATO).join("conftest.py");
-    if hay_contrato && conftest_contrato.is_file() {
-        fs::copy(
-            &conftest_contrato,
-            tests_dir.join(CARPETA_CONTRATO).join("conftest.py"),
-        )
-        .map_err(|e| infra("copiar conftest del contrato", e))?;
-    }
+    // Cada suite lleva su conftest. pytest aplica un conftest a sus subcarpetas, así que cada uno queda en
+    // la carpeta de su suite. Se copia solo si la suite tiene un test en el paquete.
+    copiar_conftest(tarea, &tests_dir, CARPETA_OCULTO, hay_oculto)?;
+    copiar_conftest(tarea, &tests_dir, CARPETA_CONTRATO, hay_contrato)?;
     let commit = commit_de(&repo);
     escribir(&dir.join(ARCHIVO_COMMIT), &commit, false)?;
     let con_cache = match cache {
@@ -347,6 +342,25 @@ pub fn crear(
         commit,
         avisos,
     }))
+}
+
+/// Copia el `conftest.py` de la suite `carpeta` de la tarea a `tests/<carpeta>/`. Entra solo si la suite
+/// tiene tests en el paquete (`entra`) y si la tarea trae el archivo.
+fn copiar_conftest(
+    tarea: &Tarea,
+    tests_dir: &Path,
+    carpeta: &str,
+    entra: bool,
+) -> Result<(), ErrorOraculo> {
+    let origen = tarea.dir.join(carpeta).join("conftest.py");
+    if !entra || !origen.is_file() {
+        return Ok(());
+    }
+    let destino = tests_dir.join(carpeta);
+    fs::create_dir_all(&destino).map_err(|e| infra(&format!("carpeta de {carpeta}"), e))?;
+    fs::copy(&origen, destino.join("conftest.py"))
+        .map_err(|e| infra(&format!("copiar conftest de {carpeta}"), e))?;
+    Ok(())
 }
 
 /// Borra lo que Colab dejó de una corrida: el paquete con los tests ocultos y `tmp/colab-<sesion>`
@@ -564,17 +578,17 @@ fn dividir(id: &str) -> Result<(&str, &str), ErrorOraculo> {
     })
 }
 
-/// Node id de pytest dentro de la carpeta `tests/` del paquete: `tests/<archivo>.py::<nombre>`. Con el
-/// prefijo `contrato:`, va en `tests/contrato/` (desempate 16).
+/// Node id de pytest dentro de la carpeta `tests/` del paquete: `tests/oculto/<archivo>.py::<nombre>`. Con
+/// el prefijo `contrato:`, va en `tests/contrato/<archivo>.py::<nombre>` (desempate 16).
 fn nodo(id: &str) -> Result<String, ErrorOraculo> {
     let (archivo, nombre) = dividir(id_de_junit(id))?;
     nombre_seguro(archivo)?;
     let carpeta = if id.starts_with(PREFIJO_CONTRATO) {
-        format!("{CARPETA_CONTRATO}/")
+        CARPETA_CONTRATO
     } else {
-        String::new()
+        CARPETA_OCULTO
     };
-    Ok(format!("tests/{carpeta}{archivo}.py::{nombre}"))
+    Ok(format!("tests/{carpeta}/{archivo}.py::{nombre}"))
 }
 
 /// Busca el archivo del módulo: en `contrato/` si el id lleva `contrato:`, y en `oculto/` si no. Un id sin
@@ -584,7 +598,7 @@ fn localizar(tarea: &Tarea, archivo: &str, del_contrato: bool) -> Result<PathBuf
     let (suite, donde) = if del_contrato {
         (CARPETA_CONTRATO, "contrato/")
     } else {
-        ("oculto", "oculto/ ni en contrato/")
+        (CARPETA_OCULTO, "oculto/ ni en contrato/")
     };
     let ruta = tarea.dir.join(suite).join(format!("{archivo}.py"));
     if ruta.is_file() {
@@ -720,7 +734,7 @@ mod tests {
         let nodo_pytest = nodo(id).expect("id válido");
         assert_eq!(
             comillas(&nodo_pytest),
-            "'tests/test_x.py::test_rendimiento[gpu-10000-res1]'"
+            "'tests/oculto/test_x.py::test_rendimiento[gpu-10000-res1]'"
         );
     }
 
@@ -763,6 +777,105 @@ mod tests {
         assert!(!paquete.dir.join("tests/test_c.py").exists());
         let sh = fs::read_to_string(paquete.dir.join("correr.sh")).expect("correr.sh");
         assert!(sh.contains("'tests/contrato/test_c.py::t'"), "{sh}");
+    }
+
+    #[test]
+    fn pendiente_paquete_separa_los_conftest_de_cada_suite() {
+        // Cada suite lleva su conftest. pytest aplica un conftest a sus subcarpetas: el de `oculto/` no
+        // puede caer sobre `contrato/`, ni al revés.
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        fs::write(repo.path().join("a.txt"), "x").expect("repo");
+        let tarea = tarea_con_entorno(
+            home.path(),
+            "tarea-x",
+            &["test_a::uno", "contrato:test_b::t"],
+            &[("oculto", "test_a"), ("contrato", "test_b")],
+        );
+        let dir = home.path().join("oraculos/tarea-x");
+        fs::write(dir.join("oculto/conftest.py"), "# oculto\n").expect("conftest oculto");
+        fs::write(dir.join("contrato/conftest.py"), "# contrato\n").expect("conftest contrato");
+        let paquete = crear(home.path(), &tarea, repo.path(), None)
+            .expect("crea")
+            .expect("hay paquete");
+        let tests = paquete.dir.join("tests");
+        assert!(
+            tests.join("oculto/test_a.py").is_file(),
+            "el oculto va a tests/oculto/"
+        );
+        assert!(
+            tests.join("contrato/test_b.py").is_file(),
+            "el contrato va a tests/contrato/"
+        );
+        assert_eq!(
+            fs::read_to_string(tests.join("oculto/conftest.py")).expect("conftest en oculto/"),
+            "# oculto\n"
+        );
+        assert_eq!(
+            fs::read_to_string(tests.join("contrato/conftest.py")).expect("conftest en contrato/"),
+            "# contrato\n"
+        );
+        assert!(
+            !tests.join("conftest.py").exists(),
+            "no queda conftest.py en tests/"
+        );
+    }
+
+    #[test]
+    fn pendiente_nodo_oculto_va_bajo_tests_oculto() {
+        assert_eq!(
+            nodo("test_a::uno").expect("id válido"),
+            "tests/oculto/test_a.py::uno"
+        );
+        assert_eq!(
+            nodo("contrato:test_c::t").expect("id válido"),
+            "tests/contrato/test_c.py::t"
+        );
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        fs::write(repo.path().join("a.txt"), "x").expect("repo");
+        let tarea = tarea_con_entorno(
+            home.path(),
+            "tarea-x",
+            &["test_a::uno"],
+            &[("oculto", "test_a")],
+        );
+        let paquete = crear(home.path(), &tarea, repo.path(), None)
+            .expect("crea")
+            .expect("hay paquete");
+        let sh = fs::read_to_string(paquete.dir.join("correr.sh")).expect("correr.sh");
+        assert!(sh.contains("'tests/oculto/test_a.py::uno'"), "{sh}");
+    }
+
+    #[test]
+    fn pendiente_paquete_solo_contrato_no_copia_el_conftest_oculto() {
+        // Sin tests ocultos en el paquete, `oculto/conftest.py` no entra: no hay `tests/oculto/` ni
+        // `tests/conftest.py`. El de `contrato/` sí entra.
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        fs::write(repo.path().join("a.txt"), "x").expect("repo");
+        let tarea = tarea_con_entorno(
+            home.path(),
+            "tarea-x",
+            &["contrato:test_b::t"],
+            &[("contrato", "test_b")],
+        );
+        let dir = home.path().join("oraculos/tarea-x");
+        fs::create_dir_all(dir.join("oculto")).expect("oculto");
+        fs::write(dir.join("oculto/conftest.py"), "# oculto\n").expect("conftest oculto");
+        fs::write(dir.join("contrato/conftest.py"), "# contrato\n").expect("conftest contrato");
+        let paquete = crear(home.path(), &tarea, repo.path(), None)
+            .expect("crea")
+            .expect("hay paquete");
+        assert!(
+            !paquete.dir.join("tests/oculto").exists(),
+            "sin tests ocultos no hay tests/oculto/"
+        );
+        assert!(
+            !paquete.dir.join("tests/conftest.py").exists(),
+            "no se copia el conftest de oculto/"
+        );
+        assert!(paquete.dir.join("tests/contrato/conftest.py").is_file());
     }
 
     #[test]
@@ -1146,7 +1259,7 @@ mod tests {
             "no se usa la carpeta vieja pendientes/ de ROOT_HOME"
         );
         assert!(
-            paquete.dir.join("tests/test_a.py").is_file(),
+            paquete.dir.join("tests/oculto/test_a.py").is_file(),
             "el paquete trae el oculto"
         );
     }

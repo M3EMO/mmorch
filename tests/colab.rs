@@ -242,7 +242,12 @@ fn colab_t4_importa_y_registra_pedir_y_liberar() {
     );
 
     let subida = fs::read_to_string(e.falso.path().join("subida.txt")).expect("subida.txt");
-    for esperado in ["correr.sh", "LEEME.txt", "tests/test_o.py", "repo/a.txt"] {
+    for esperado in [
+        "correr.sh",
+        "LEEME.txt",
+        "tests/oculto/test_o.py",
+        "repo/a.txt",
+    ] {
         assert!(subida.contains(esperado), "falta {esperado} en {subida}");
     }
     assert!(!subida.contains(".env"), "el paquete trae .env: {subida}");

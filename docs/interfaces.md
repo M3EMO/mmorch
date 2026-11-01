@@ -201,6 +201,7 @@ El historial de evidencia vive en `evidencia/`, fuera de `oraculos/`. Guarda una
 El `<hash>` sale del contenido de la copia del repo. Entran los archivos regulares, en orden por ruta relativa. Cada uno entra con su ruta, su largo y su contenido. No entran los enlaces simbólicos ni `target/` y `.git/` de la raíz. Otra versión arranca con un historial vacío.
 Las corridas del historial suman muestras a los tests inestables. No cuentan como ausencia. `Veredicto.corridas_acumuladas` y `Confianza.corridas_acumuladas` dan esas muestras. Una línea ilegible se ignora y deja un aviso en `Veredicto.avisos`.
 Las subcarpetas `contrato/`, `oculto/` y `bootstrap/` son convención. Cada suite del contenedor monta solo su carpeta (`contrato/` o `oculto/`), y los escenarios montan solo `escenarios/`. El Oracle lee solo `tarea.toml` y los comandos que ese archivo declara.
+El paquete `pendientes/` guarda cada suite en su carpeta: `tests/oculto/` y `tests/contrato/`. Cada carpeta lleva su `conftest.py`, si la tarea lo tiene y la suite tiene tests en el paquete. `tests/` no lleva `conftest.py`.
 
 ## tarea.toml
 

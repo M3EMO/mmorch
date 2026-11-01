@@ -803,10 +803,14 @@ fn pendiente_paquete_crea_repo_tests_correr_y_leeme() {
     assert!(paquete.join("repo/src/lib.rs").is_file());
     assert!(!paquete.join("repo/target").exists(), "sin target/");
     assert!(!paquete.join("repo/.git").exists(), "sin .git/");
-    assert!(paquete.join("tests/test_x.py").is_file());
-    assert!(paquete.join("tests/conftest.py").is_file());
+    assert!(paquete.join("tests/oculto/test_x.py").is_file());
+    assert!(paquete.join("tests/oculto/conftest.py").is_file());
+    assert!(
+        !paquete.join("tests/conftest.py").exists(),
+        "sin conftest en tests/"
+    );
     let correr = fs::read_to_string(paquete.join("correr.sh")).expect("correr.sh");
-    assert!(correr.contains("'tests/test_x.py::test_rendimiento[gpu-10000-res1]'"));
+    assert!(correr.contains("'tests/oculto/test_x.py::test_rendimiento[gpu-10000-res1]'"));
     let modo = fs::metadata(paquete.join("correr.sh"))
         .expect("meta")
         .permissions();

@@ -2032,9 +2032,9 @@ mod tests {
     fn paquete(base: &Path) -> PathBuf {
         let dir = base.join("paquete");
         fs::create_dir_all(dir.join("repo")).expect("dir");
-        fs::create_dir_all(dir.join("tests")).expect("dir");
+        fs::create_dir_all(dir.join("tests/oculto")).expect("dir");
         fs::write(dir.join("repo/a.txt"), "x").expect("escribe");
-        fs::write(dir.join("tests/test_o.py"), "x").expect("escribe");
+        fs::write(dir.join("tests/oculto/test_o.py"), "x").expect("escribe");
         fs::write(dir.join("correr.sh"), "#!/usr/bin/env bash\n").expect("escribe");
         fs::write(dir.join("LEEME.txt"), "pasos\n").expect("escribe");
         fs::write(
