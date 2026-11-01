@@ -2538,3 +2538,97 @@ El usuario escribió: "Sí, pasale al planner los dos hallazgos del Validate de 
 **Pedido para la sesión de fichas.** No hay: ningún `tarea.toml` ni ficha cambia por estos hallazgos.
 
 No hay preguntas nuevas para el usuario.
+
+## Mezcla de la nube 8 y Validate de 7 y 9c, intento 4 (2026-10-31)
+
+**Mezcla.** El usuario escribió: "Mezclá la nube 8 en claude/root-e7813e." La mezcla es 92d8b18, con las Tareas 37, 38 y 39. Con podman, la suite dio 1919 verdes, 0 rojos y 2 ignorados. El informe es `docs/builds/2026-10-31-build-nube-8.md`.
+
+**Cambio de fichas.** La sesión de fichas arregló `test_modelo_khronos` del oculto de brasa, con la aprobación del usuario: "P2 a: pasale el arreglo del test de R9 a la sesión de fichas." El test saca la escala y el centro de cada modelo de su caja en mundo, que incluye las matrices de los nodos. También falla si el modelo toca el borde del cuadro.
+
+**Validate, intento 4.** El orquestador usó `r00t` release de 92d8b18, el `ROOT_HOME` real y ninguna clave. Tardó 213 minutos. Las salidas están en `~/.cache/root-wt/validate7/intento4/`.
+
+| Repo | Decisión | Completitud | Ocultos | Detalle |
+|---|---|---|---|---|
+| memora-ecc #1 | listo | 0,964 | 67 de 68 | R7 en nivel 1: FIFO pasa 5 de 10 |
+| memora-ecc #2 | listo | 0,928 | 66 de 68 | R7 en 1 (9 de 20); R4 en 1: `test_client_id` pasa 13 de 15 |
+| memora-ecc #3 | listo | 0,928 | 66 de 68 | R7 en 1 (13 de 30); R4 en 1 (18 de 20) |
+| memora-sdlc #1 | bloqueado | 0,225 | 24 de 68 | R1 y R13 en nivel 0 |
+| brasa-ecc #1, #2 y #3 | listo | 0,938 | 20 de 21 | R9 sube a nivel 3; R3 sigue en nivel 1 |
+| brasa-sdlc #1 | bloqueado | 0,562 | 10 de 21 | R12 en nivel 0; R8, R9, R10, R13 y R14 en 0 |
+
+**Qué comprobó el orquestador.**
+- Tarea 38: "falta la capa [main]" y "falta la capa [main, lib]" desaparecen en las 8 evaluaciones. Las aristas `crate::X` hacia la raíz no suman riesgos nuevos.
+- Tarea 38: quedan riesgos de capas que parecen reales: el ciclo `gltf_load -> scene -> gltf_load` de brasa-ecc, las capas `[shadow, pbr]` y `[camera, light, transform]` que brasa-ecc no tiene, y `[gltf_load]` y `[limits]` que brasa-sdlc no tiene.
+- Tarea 39: R7 de memora-ecc queda en nivel 1 en las 3 evaluaciones. El historial guarda solo ids y resultados: 45 líneas, 15 por evaluación.
+- R9: brasa-ecc sube de no_listo a listo, y su completitud pasa de 0,896 a 0,938.
+- La salida no trae claves.
+
+**Estado de los criterios de las Tareas 7 y 9c.**
+- **Tarea 7: cumple.** La decisión es la misma en las 3 evaluaciones de cada repo ECC. Desde la segunda evaluación de cada versión, los niveles por requisito no cambian. Cada diferencia con el banco tiene una causa en `diferencias.md`.
+- **Tarea 9c: cumple.** memora-sdlc y brasa-sdlc marcan `Ausente` los requisitos que el SDLC no construyó. memora-ecc queda `Cumplido` salvo R7 (FIFO) y R4 (`test_client_id` inestable). brasa-ecc queda `Cumplido` salvo R3 (spin).
+- El orden conocido se respeta en memora y en brasa: ECC queda por encima de SDLC.
+- Los niveles de los requisitos con un test inestable cambian con el desempate 1 de abajo, después de P59.
+
+## Desempates técnicos 18 (Opus, 2026-10-31): nube 8, hallazgo 3 y redondeo
+
+**Hallazgo 3: un test inestable de 90 % baja su requisito igual que uno de 43 %.**
+- **Desvío del código.** La Tarea 9c dice: "un requisito con un test `inestable` no supera el nivel 2". El código hace otra cosa: `verde()` cuenta solo `Pasa`, así que un inestable cuenta como "no verde". Por eso R7 y R4 de memora-ecc quedan en nivel 1, no en 2.
+- **Desempate técnico.** El código vuelve a la regla de la Tarea 9c: el nivel se calcula con el test inestable como verde, y después queda con tope 2. Con esa regla, R7 (43 %) y R4 (90 %) quedan los dos en nivel 2.
+- **Parte de producto.** Si un test que pasa 43 % de las veces debe valer lo mismo que uno de 90 % cambia lo que el evaluador promete. Va al usuario como P59.
+
+**Defecto del redondeo.**
+- En el intento 3, brasa-ecc dio el motivo "completitud 0,90 < 0,90", con un valor real de 0,896. El texto redondeaba a dos decimales.
+- **Desempate.** `numero` muestra tres decimales en las reglas que comparan contra un umbral. Si los dos números siguen iguales con tres decimales, muestra cuatro. Razón: un motivo que compara dos números iguales no explica nada.
+
+**Preguntas de la nube 8.** Cada desempate tiene su razón en una línea.
+1. **Colab sin tests.** El aviso de la omisión llega a `Veredicto.avisos`: un aviso que se pierde no informa a nadie.
+2. **Conftest de Colab.** El paquete separa las suites: `tests/oculto/` y `tests/contrato/`, cada una con su conftest, y ninguno en `tests/`. Razón: en la laptop, cada suite corre con su propio conftest, y Colab debe dar el mismo resultado.
+3. **Mismo archivo en dos suites.** Se confirma el error de tarea: el junit no distingue la carpeta, y un error claro es mejor que un resultado mezclado.
+4. **Pendientes del contrato por MCP.** Se confirma, por el desempate 3 de "Desempates técnicos 15".
+5. **Revisión guardada.** Se confirma: `--solo-deterministas` no borra una revisión del juez, porque esa revisión sigue valiendo para el mismo spec.
+6. **ETXTBSY.** Se confirma el arreglo actual. Si la falla vuelve, los tests lanzan cada ejecutable falso con `sh <ruta>` en lugar de ejecutarlo directo: `sh` no ejecuta el archivo, solo lo lee, y no da `ETXTBSY`.
+7. **Aristas hacia la raíz.** Se confirma: con la regla de capas del usuario (P23 b), usar un tipo de la raíz desde una capa posterior es importar una capa anterior.
+8. **Elección de la raíz.** Se confirma: `lib` si `src/lib.rs` declara el módulo, `main` si no. Es la regla de Rust para la raíz de cada árbol de módulos.
+9. **Nombre `main` repetido.** No hace falta cubrirlo en el hito 1: Rust no compila un crate con `src/main/` y `src/main.rs` como dos módulos `main`.
+10. **Errores del historial.** Se confirma: un error de lectura o escritura es infraestructura, como en los demás escritores del Oracle.
+11. **Colab y el historial.** Se confirma que queda fuera: Colab corre en otro entorno, y mezclar sus corridas con las de la laptop mezclaría dos entornos.
+12. **Tamaño del historial.** La calibración no escribe historial: cada caso es una versión distinta y se evalúa una vez. `evaluar` borra, por `src/borrado.rs`, los historiales de versiones sin uso en 30 días.
+13. **Número repetido.** El texto deja solo "pasa X de N": N ya es la cantidad de corridas acumuladas.
+
+### Tarea 40: Desempates de la nube 8, tope 2 de inestables y redondeo
+- **Action**: el desempate técnico del hallazgo 3, el del redondeo, y los desempates 1, 2, 12 y 13 de las preguntas de la nube 8. Si el usuario responde P59 antes de la build, se suma su regla.
+- **Dónde**: en la nube. La prueba con memora-ecc real va en la laptop.
+- **Validate**: `cargo test`:
+  - Un requisito con dos pruebas, una verde y una inestable, queda en nivel 2.
+  - El mismo requisito sin el test inestable, y con sus bordes y escenarios verdes, llega a nivel 3.
+  - Un motivo con completitud 0,896 y mínimo 0,90 dice "0,896 < 0,900".
+  - Si todas las entradas de `[[entorno]]` se omiten, `Veredicto.avisos` trae el aviso.
+  - El paquete de Colab tiene `tests/oculto/conftest.py` y `tests/contrato/conftest.py`, y no tiene `tests/conftest.py`.
+  - Una calibración no escribe historial.
+  - Un historial de una versión sin uso en 31 días se borra al evaluar otra versión.
+  - El texto de un inestable dice "pasa X de N" una sola vez.
+
+## Orden de trabajo (2026-10-31, después de la nube 8)
+
+**Nube, sesión 9.** Hace la Tarea 40 antes del 2026-11-05. Su brief es `docs/builds/brief-nube-9.md`. El commit de partida lo pone el orquestador.
+
+**Laptop: qué sigue.** Las Tareas 7 y 9c cumplen sus criterios. El paso siguiente es probar los proveedores reales, porque el Validate de 13 y 13b y la calibración gastan API y dependen de ellos.
+1. **Pruebas con claves. Arranca ya.** Necesita las claves de API y gasta centavos. Prueba que `tools/test-seguro.sh` quita las claves exportadas. Hace el GET a `/models` de DeepSeek y un stream real de cada proveedor, con razonamiento. Registra el evento de 0,50 USD de la decisión 46.
+2. **Validate de 13 y 13b.** Espera el paso 1. Necesita podman, el `ROOT_HOME` real y las claves. Gasto bajo: el redactor y los jueces sobre los cuatro repos.
+3. **Calibración real.** Espera el paso 2. Gasta hasta 25 USD, con `--tope-usd 25` (decisión 48).
+4. **Imagen del builder y credencial de Claude.** Corre en paralelo con los pasos 1 a 3, porque no gasta API. Necesita podman, red y la credencial. Gasta un poco de cupo.
+5. **`NETRC` con un índice privado de prueba.** Necesita podman y red. No gasta API.
+6. **Corrida real de memora (Tarea 16).** Espera el paso 4. Necesita la credencial y cupo.
+7. **Colab (7h), Graft con G5 y paquetes a ciegas con G3.** Siguen después, como en la lista anterior.
+
+**Pedido para la sesión de fichas.** No hay: ningún `tarea.toml` ni ficha cambia por esta vuelta.
+
+**Preguntas abiertas (sin responder)**
+
+- **P59. ¿Un test inestable vale lo mismo con 43 % que con 90 % de pase?** Hoy los dos dejan su requisito en el mismo nivel. La Tarea 40 corrige un desvío del código: los dos pasan del nivel 1 al nivel 2, como dice la Tarea 9c. Queda la pregunta de producto. ¿Qué elegís?
+
+  - a) La regla de la Tarea 9c: todo test inestable pone tope 2, sin importar su tasa de pase. FIFO (43 %) y `test_client_id` (90 %) quedan en nivel 2.
+  - b) Por tasa: un test inestable cuya cota inferior de Wilson al 90 % es al menos 0,5 pone tope 2. Uno con una cota menor cuenta como falla. Con los datos de hoy, `test_client_id` (18 de 20, cota 0,78) queda en nivel 2, y FIFO (13 de 30, cota 0,32) cuenta como falla.
+  - c) Como hoy: todo test inestable cuenta como falla. Los dos requisitos quedan en nivel 1.
+
+  Mi recomendación es b): un PM distingue una función que falla de vez en cuando de una que falla casi siempre. La cota de Wilson ya es la medida que Root usa en Track y en Route.
