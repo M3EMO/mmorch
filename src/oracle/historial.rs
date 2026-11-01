@@ -10,13 +10,14 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::junit::{Junit, ResultadoTest};
 use super::{EXCLUIDOS, ErrorOraculo};
+use crate::borrado;
 use crate::oracle::pendientes::nombre_de_tarea_valido;
 
 /// Carpeta de los historiales dentro de `ROOT_HOME`. Es hermana de `oraculos/`: nunca vive dentro.
@@ -25,6 +26,8 @@ pub const CARPETA_EVIDENCIA: &str = "evidencia";
 pub const ARCHIVO_HISTORIAL: &str = "historial.jsonl";
 /// Versión del formato de cada línea.
 const VERSION_LINEA: u32 = 1;
+/// Días sin uso a partir de los cuales `evaluar` borra el historial de una versión.
+const CADUCIDAD_HISTORIAL: Duration = Duration::from_secs(30 * 24 * 3600);
 
 /// Resultado de un test en una línea del historial: `pasa`, `falla` u `omite`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,6 +229,60 @@ pub fn agregar(ruta: &Path, suite: &str, corridas: &[Junit]) -> Result<(), Error
         .map_err(|e| ErrorOraculo::Infra(format!("escribir el historial: {e}")))
 }
 
+/// Borra los historiales de las versiones de `tarea` sin uso en 30 días.
+///
+/// Una versión sin uso tiene su `historial.jsonl` con más de 30 días de antigüedad, respecto de `ahora`.
+/// Solo revisa las carpetas con nombre de hash: 64 caracteres hexadecimales en minúsculas. Nunca borra la
+/// carpeta de `actual`. No sigue ni borra los enlaces simbólicos. No toca una carpeta sin `historial.jsonl`.
+/// Tampoco toca `colab.json` ni los archivos sueltos.
+///
+/// Ignora los fallos de lectura y de borrado, como `limpiar_temporales`. Un historial viejo que no se
+/// borra no impide evaluar.
+pub fn borrar_viejos(home: &Path, tarea: &str, actual: &str, ahora: SystemTime) {
+    if nombre_de_tarea_valido(tarea).is_err() {
+        return;
+    }
+    let carpeta_tarea = home.join(CARPETA_EVIDENCIA).join(tarea);
+    let Ok(entradas) = fs::read_dir(&carpeta_tarea) else {
+        return;
+    };
+    for entrada in entradas.flatten() {
+        // `file_type` no sigue los enlaces: un enlace simbólico no es una versión.
+        if !entrada.file_type().is_ok_and(|tipo| tipo.is_dir()) {
+            continue;
+        }
+        let nombre = entrada.file_name();
+        if nombre.to_str().is_none_or(|n| n == actual || !es_hash(n)) {
+            continue;
+        }
+        let carpeta = entrada.path();
+        // `symlink_metadata` no sigue el archivo: un historial que es enlace no cuenta como uso.
+        let Ok(meta) = fs::symlink_metadata(carpeta.join(ARCHIVO_HISTORIAL)) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let Ok(modificado) = meta.modified() else {
+            continue;
+        };
+        let sin_uso = ahora
+            .duration_since(modificado)
+            .is_ok_and(|edad| edad > CADUCIDAD_HISTORIAL);
+        if sin_uso {
+            let _ = borrado::borrar_dir_dentro(&carpeta_tarea, &carpeta);
+        }
+    }
+}
+
+/// Nombre de carpeta con forma de hash de versión: 64 caracteres hexadecimales en minúsculas.
+fn es_hash(nombre: &str) -> bool {
+    nombre.len() == 64
+        && nombre
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -415,5 +472,166 @@ mod tests {
         assert_eq!(linea["suite"], "oculto");
         assert_eq!(linea["tests"]["test_b::t3"], "pasa");
         assert_eq!(linea["tests"]["test_b::t4"], "falla");
+    }
+
+    /// Hash de 64 caracteres hexadecimales en minúsculas, con la forma de `hash_de_version`.
+    fn hash_de(letra: char) -> String {
+        letra.to_string().repeat(64)
+    }
+
+    /// Fija la fecha de modificación de `ruta` a `dias` días antes de `ahora`.
+    fn poner_antiguedad(ruta: &Path, dias: u64, ahora: SystemTime) {
+        let cuando = ahora - Duration::from_secs(dias * 24 * 3600);
+        filetime::set_file_mtime(ruta, filetime::FileTime::from_system_time(cuando))
+            .expect("fija la fecha");
+    }
+
+    /// Crea el historial de la versión `version` de `tarea` en `home`, con `dias` días de antigüedad.
+    fn historial_hace_dias(
+        home: &Path,
+        tarea: &str,
+        version: &str,
+        dias: u64,
+        ahora: SystemTime,
+    ) -> PathBuf {
+        let ruta = home
+            .join(CARPETA_EVIDENCIA)
+            .join(tarea)
+            .join(version)
+            .join(ARCHIVO_HISTORIAL);
+        fs::create_dir_all(ruta.parent().expect("padre")).expect("carpeta de la versión");
+        fs::write(
+            &ruta,
+            "{\"v\":1,\"suite\":\"oculto\",\"ts\":1.0,\"tests\":{}}\n",
+        )
+        .expect("historial");
+        poner_antiguedad(&ruta, dias, ahora);
+        ruta
+    }
+
+    #[test]
+    fn historial_version_sin_uso_en_31_dias_se_borra() {
+        let base = tempfile::tempdir().expect("base");
+        let ahora = SystemTime::now();
+        let ruta = historial_hace_dias(base.path(), "tarea", &hash_de('a'), 31, ahora);
+        let carpeta = ruta.parent().expect("carpeta").to_path_buf();
+        borrar_viejos(base.path(), "tarea", &hash_de('b'), ahora);
+        assert!(
+            !carpeta.exists(),
+            "sigue la versión sin uso: {}",
+            carpeta.display()
+        );
+    }
+
+    #[test]
+    fn historial_version_usada_hace_29_dias_queda() {
+        let base = tempfile::tempdir().expect("base");
+        let ahora = SystemTime::now();
+        let ruta = historial_hace_dias(base.path(), "tarea", &hash_de('a'), 29, ahora);
+        borrar_viejos(base.path(), "tarea", &hash_de('b'), ahora);
+        assert!(ruta.is_file(), "se borró: {}", ruta.display());
+    }
+
+    #[test]
+    fn historial_version_actual_no_se_borra_aunque_sea_vieja() {
+        let base = tempfile::tempdir().expect("base");
+        let ahora = SystemTime::now();
+        let actual = hash_de('a');
+        let ruta = historial_hace_dias(base.path(), "tarea", &actual, 60, ahora);
+        borrar_viejos(base.path(), "tarea", &actual, ahora);
+        assert!(
+            ruta.is_file(),
+            "se borró la versión actual: {}",
+            ruta.display()
+        );
+    }
+
+    #[test]
+    fn historial_borrar_viejos_no_toca_colab_json_ni_carpetas_sin_hash() {
+        let base = tempfile::tempdir().expect("base");
+        let ahora = SystemTime::now();
+        let carpeta_tarea = base.path().join(CARPETA_EVIDENCIA).join("tarea");
+        // colab.json viejo: es un archivo, no una versión.
+        let colab = carpeta_tarea.join("colab.json");
+        fs::create_dir_all(&carpeta_tarea).expect("carpeta de la tarea");
+        fs::write(&colab, "{}").expect("colab.json");
+        poner_antiguedad(&colab, 60, ahora);
+        // Carpeta sin hash, con un historial viejo: su nombre no es un hash de 64 caracteres.
+        let otra = historial_hace_dias(base.path(), "tarea", "otra", 60, ahora);
+        // Control: una versión vieja con hash sí se borra.
+        let vieja = historial_hace_dias(base.path(), "tarea", &hash_de('a'), 60, ahora);
+        borrar_viejos(base.path(), "tarea", &hash_de('b'), ahora);
+        assert!(colab.is_file(), "se borró colab.json");
+        assert!(otra.is_file(), "se borró una carpeta sin hash");
+        assert!(
+            !vieja.parent().expect("carpeta").exists(),
+            "el control con hash no se borró"
+        );
+    }
+
+    #[test]
+    fn historial_carpeta_sin_historial_no_se_toca() {
+        let base = tempfile::tempdir().expect("base");
+        let ahora = SystemTime::now();
+        let carpeta = base
+            .path()
+            .join(CARPETA_EVIDENCIA)
+            .join("tarea")
+            .join(hash_de('a'));
+        fs::create_dir_all(&carpeta).expect("carpeta sin historial");
+        fs::write(carpeta.join("otro.txt"), "x").expect("otro archivo");
+        poner_antiguedad(&carpeta, 60, ahora);
+        borrar_viejos(base.path(), "tarea", &hash_de('b'), ahora);
+        assert!(
+            carpeta.join("otro.txt").is_file(),
+            "se borró una carpeta sin historial: {}",
+            carpeta.display()
+        );
+    }
+
+    #[test]
+    fn historial_enlace_simbolico_de_version_vieja_no_se_sigue_ni_se_borra() {
+        let base = tempfile::tempdir().expect("base");
+        let ahora = SystemTime::now();
+        let home = base.path().join("home");
+        // Destino fuera de `evidencia/`, con un historial viejo.
+        let destino = base.path().join("fuera");
+        fs::create_dir_all(&destino).expect("destino");
+        let historial_destino = destino.join(ARCHIVO_HISTORIAL);
+        fs::write(&historial_destino, "x").expect("historial del destino");
+        poner_antiguedad(&historial_destino, 60, ahora);
+        let enlace = home
+            .join(CARPETA_EVIDENCIA)
+            .join("tarea")
+            .join(hash_de('a'));
+        fs::create_dir_all(enlace.parent().expect("padre")).expect("carpeta de la tarea");
+        std::os::unix::fs::symlink(&destino, &enlace).expect("enlace");
+        borrar_viejos(&home, "tarea", &hash_de('b'), ahora);
+        assert!(
+            fs::symlink_metadata(&enlace).is_ok(),
+            "se borró el enlace simbólico"
+        );
+        assert!(
+            historial_destino.is_file(),
+            "se borró el destino del enlace"
+        );
+    }
+
+    #[test]
+    fn historial_borrar_viejos_con_tarea_con_ruta_no_toca_nada() {
+        let base = tempfile::tempdir().expect("base");
+        let ahora = SystemTime::now();
+        let home = base.path().join("home");
+        // Con `../../otra`, la carpeta caería en `base/otra/`, fuera de `evidencia/`.
+        let fuera = base.path().join("otra").join(hash_de('a'));
+        fs::create_dir_all(&fuera).expect("carpeta de afuera");
+        let historial_fuera = fuera.join(ARCHIVO_HISTORIAL);
+        fs::write(&historial_fuera, "x").expect("historial de afuera");
+        poner_antiguedad(&historial_fuera, 60, ahora);
+        borrar_viejos(&home, "../../otra", &hash_de('b'), ahora);
+        assert!(
+            historial_fuera.is_file(),
+            "un nombre de tarea con ruta borró algo fuera de evidencia/"
+        );
     }
 }

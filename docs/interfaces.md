@@ -198,7 +198,7 @@ $ROOT_HOME/
 Toda línea JSONL lleva `"v": 1`. Un cambio de formato sube `v`, y los lectores aceptan las versiones anteriores.
 `oraculos/<tarea>/diferencias.md` no lo crea ningún subcomando. Lo escribe la persona que compara con el banco.
 El historial de evidencia vive en `evidencia/`, fuera de `oraculos/`. Guarda una línea por corrida de suite. Cada línea tiene `"v": 1`, `"suite"` (`contrato` u `oculto`), `"ts"` y `"tests"`. `tests` lleva el id de cada test y su resultado (`pasa`, `falla` u `omite`). Nunca guarda el contenido de un test.
-El `<hash>` sale del contenido de la copia del repo. Entran los archivos regulares, en orden por ruta relativa. Cada uno entra con su ruta, su largo y su contenido. No entran los enlaces simbólicos ni `target/` y `.git/` de la raíz. Otra versión arranca con un historial vacío.
+El `<hash>` sale del contenido de la copia del repo. Entran los archivos regulares, en orden por ruta relativa. Cada uno entra con su ruta, su largo y su contenido. No entran los enlaces simbólicos ni `target/` y `.git/` de la raíz. Otra versión arranca con un historial vacío. `evaluar` borra los historiales de versiones sin uso en 30 días.
 Las corridas del historial suman muestras a los tests inestables. No cuentan como ausencia. `Veredicto.corridas_acumuladas` y `Confianza.corridas_acumuladas` dan esas muestras. Una línea ilegible se ignora y deja un aviso en `Veredicto.avisos`.
 La calibración no lee ni escribe el historial.
 Las subcarpetas `contrato/`, `oculto/` y `bootstrap/` son convención. Cada suite del contenedor monta solo su carpeta (`contrato/` o `oculto/`), y los escenarios montan solo `escenarios/`. El Oracle lee solo `tarea.toml` y los comandos que ese archivo declara.

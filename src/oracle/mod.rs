@@ -539,11 +539,14 @@ fn evaluar_con(
     let repo_copia = copia.path().join("repo");
     copiar_repo(&repo, &repo_copia).map_err(|e| infra("copia del repo", e))?;
     // El historial de evidencia es de esta versión del repo (Tarea 39): el hash sale de la copia.
-    // Sin historial (calibración), no hay versión que calcular ni archivo que leer o escribir.
+    // Sin historial (calibración), no hay versión que calcular ni archivo que leer o escribir, y no se borra.
     let ruta_historial = if o.historial {
         let version = historial::hash_de_version(&repo_copia)
             .map_err(|e| infra("hash de la versión del repo", e))?;
-        Some(historial::ruta(&home, &tarea.nombre, &version)?)
+        let ruta = historial::ruta(&home, &tarea.nombre, &version)?;
+        // Las versiones sin uso en 30 días pierden su historial. La versión actual no se borra.
+        historial::borrar_viejos(&home, &tarea.nombre, &version, SystemTime::now());
+        Some(ruta)
     } else {
         None
     };
@@ -5829,6 +5832,93 @@ mod tests {
         assert!(v.inestables.is_empty(), "{:?}", v.inestables);
         assert!(!v.corridas_acumuladas.contains_key("oculto:test_b::t3"));
         assert_eq!(fs::read(&ruta).expect("lee el historial"), antes);
+    }
+
+    /// Fija la fecha de modificación de `ruta` a `dias` días atrás, para simular una versión sin uso.
+    fn historial_viejo(ruta: &Path, dias: u64) {
+        let cuando = SystemTime::now() - Duration::from_secs(dias * 24 * 3600);
+        filetime::set_file_mtime(ruta, FileTime::from_system_time(cuando)).expect("fija la fecha");
+    }
+
+    #[test]
+    fn oraculo_historial_de_version_sin_uso_en_31_dias_se_borra_al_evaluar_otra() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        // Primera versión: su falla queda en el historial.
+        evaluar_falso(
+            &repo,
+            &tarea,
+            &home,
+            &correr_suites_oculto(JUNIT_OCULTO_T3_FALLA),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        let vieja = historial_de(&home, &repo);
+        let carpeta_vieja = vieja.parent().expect("carpeta de la versión").to_path_buf();
+        // La versión vieja no se usó hace 31 días.
+        historial_viejo(&vieja, 31);
+        // Otra versión del repo: al evaluarla, la versión sin uso se borra.
+        fs::write(repo.join("src/lib.rs"), "pub fn f() -> u8 { 2 }\n").expect("cambia un archivo");
+        evaluar_falso(
+            &repo,
+            &tarea,
+            &home,
+            &correr_suites_oculto(JUNIT_OCULTO_VERDE),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        assert!(
+            !carpeta_vieja.exists(),
+            "sigue la versión sin uso en 31 días: {}",
+            carpeta_vieja.display()
+        );
+        let nueva = historial_de(&home, &repo);
+        assert!(
+            nueva.is_file(),
+            "falta el historial de la versión nueva: {}",
+            nueva.display()
+        );
+    }
+
+    /// Una calibración no borra historiales viejos: con `historial: false`, la versión sin uso queda.
+    #[test]
+    fn oraculo_sin_historial_no_borra_historiales_viejos() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        evaluar_falso(
+            &repo,
+            &tarea,
+            &home,
+            &correr_suites_oculto(JUNIT_OCULTO_T3_FALLA),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        let vieja = historial_de(&home, &repo);
+        let carpeta_vieja = vieja.parent().expect("carpeta de la versión").to_path_buf();
+        historial_viejo(&vieja, 31);
+        fs::write(repo.join("src/lib.rs"), "pub fn f() -> u8 { 2 }\n").expect("cambia un archivo");
+        let sin_historial = OpcionesOraculo {
+            historial: false,
+            ..opciones(&home)
+        };
+        evaluar_falso_con(
+            &repo,
+            &tarea,
+            &sin_historial,
+            &correr_suites_oculto(JUNIT_OCULTO_VERDE),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        assert!(
+            carpeta_vieja.is_dir(),
+            "la calibración borró la versión vieja: {}",
+            carpeta_vieja.display()
+        );
+        assert!(vieja.is_file(), "{}", vieja.display());
     }
 
     #[test]
