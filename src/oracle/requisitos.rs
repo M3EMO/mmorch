@@ -1,6 +1,7 @@
 //! Completitud por requisito (Tarea 9c): cruza cada `[[requisito]]` con el junit del contrato, el
 //! junit oculto y los escenarios. Un id con `PREFIJO_CONTRATO` busca en el contrato; sin prefijo, en el
-//! oculto. El nivel sale solo de pruebas, sin LLM.
+//! oculto. El nivel sale solo de pruebas, sin LLM. Un test inestable cuenta como verde si su cota de
+//! Wilson llega a `COTA_MINIMA_INESTABLE` (P59 b), y entonces el nivel del requisito tiene tope 2.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -9,12 +10,16 @@ use crate::oracle::junit::ResultadoTest;
 use crate::oracle::perfiles::crear_hallazgo;
 use crate::oracle::tarea::{Exclusion, Requisito};
 use crate::tipos::{
-    Cumplimiento, Dimension, EstadoRequisito, Fuente, Hallazgo, NivelItem, Puntaje,
+    Cumplimiento, Dimension, EstadoRequisito, Fuente, Hallazgo, NivelItem, Puntaje, TasaTest,
 };
 
 /// Prefijo de un id de `[[requisito]]` que apunta a la suite del contrato. Sin él, el id apunta a la
 /// suite oculta.
 pub const PREFIJO_CONTRATO: &str = "contrato:";
+
+/// Cota de Wilson al 90 % desde la que un test inestable cuenta como verde, con tope de nivel 2 (regla
+/// P59 b). Por debajo, o sin tasa conocida, cuenta como falla.
+pub const COTA_MINIMA_INESTABLE: f64 = 0.5;
 
 /// Resultados de las suites ya clasificadas. Las claves sin prefijo son de la oculta; las del contrato
 /// llevan `PREFIJO_CONTRATO`. Los inestables no están en `tests`.
@@ -23,9 +28,11 @@ pub struct ResultadosTests {
     /// Clave `archivo::nombre` (con `PREFIJO_CONTRATO` si es del contrato), con resultado `Pasa` o
     /// `Falla` (u `Omite`).
     pub tests: BTreeMap<String, ResultadoTest>,
-    /// Tests con resultados mezclados entre corridas, con la misma clave que `tests`. Nunca cuentan como
-    /// verdes.
+    /// Tests con resultados mezclados entre corridas, con la misma clave que `tests`. Cuentan como verdes
+    /// solo si su cota de Wilson llega a `COTA_MINIMA_INESTABLE` (con tope de nivel 2); si no, como falla.
     pub inestables: BTreeSet<String>,
+    /// Tasa de cada inestable, con la misma clave que `inestables`.
+    pub tasas: BTreeMap<String, TasaTest>,
 }
 
 /// Texto del hallazgo de un test inestable.
@@ -42,6 +49,7 @@ pub fn desde_clasificacion(c: &Clasificacion) -> ResultadosTests {
     ResultadosTests {
         tests,
         inestables: c.inestables.iter().cloned().collect(),
+        tasas: c.tasas.clone(),
     }
 }
 
@@ -61,6 +69,12 @@ pub fn desde_clasificaciones(contrato: &Clasificacion, oculto: &Clasificacion) -
             .inestables
             .into_iter()
             .map(|id| format!("{PREFIJO_CONTRATO}{id}")),
+    );
+    r.tasas.extend(
+        del_contrato
+            .tasas
+            .into_iter()
+            .map(|(id, tasa)| (format!("{PREFIJO_CONTRATO}{id}"), tasa)),
     );
     r
 }
@@ -162,7 +176,10 @@ enum Resultado {
     Pasa,
     Falla,
     Omite,
-    Inestable,
+    /// Test inestable. `verde` si su cota de Wilson llega a `COTA_MINIMA_INESTABLE` (P59 b).
+    Inestable {
+        verde: bool,
+    },
     Ausente,
     /// Test de `entorno` u `oraculo_dudoso`. No entra al cálculo.
     Excluido {
@@ -179,7 +196,12 @@ struct Medida {
 
 impl Medida {
     fn verde(&self) -> bool {
-        self.resultado == Resultado::Pasa
+        self.resultado == Resultado::Pasa || self.inestable_verde()
+    }
+
+    /// Un inestable que cuenta como verde. Su requisito tiene tope de nivel 2.
+    fn inestable_verde(&self) -> bool {
+        matches!(self.resultado, Resultado::Inestable { verde: true })
     }
 
     fn excluida(&self) -> bool {
@@ -207,7 +229,7 @@ impl Medida {
             Resultado::Pasa => "pasa",
             Resultado::Falla => "falla",
             Resultado::Omite => "omite",
-            Resultado::Inestable => "inestable",
+            Resultado::Inestable { .. } => "inestable",
             Resultado::Ausente => "ausente",
             Resultado::Excluido { .. } => "excluido",
         };
@@ -300,7 +322,13 @@ impl<'a> Medidor<'a> {
             };
         }
         if self.resultados.inestables.contains(clave) {
-            return Resultado::Inestable;
+            // Sin tasa conocida cuenta como falla (conservador).
+            let verde = self
+                .resultados
+                .tasas
+                .get(clave)
+                .is_some_and(|tasa| tasa.wilson_inf >= COTA_MINIMA_INESTABLE);
+            return Resultado::Inestable { verde };
         }
         match self.resultados.tests.get(clave) {
             Some(ResultadoTest::Pasa) => Resultado::Pasa,
@@ -388,7 +416,7 @@ fn evaluar_uno(
     }
 
     let verdes = quedan_pruebas.iter().filter(|m| m.verde()).count();
-    let nivel: u8 = if verdes == 0 {
+    let mut nivel: u8 = if verdes == 0 {
         0
     } else if verdes < quedan_pruebas.len() {
         1
@@ -397,6 +425,10 @@ fn evaluar_uno(
     } else {
         2
     };
+    // P59 b): un inestable verde cuenta para el nivel, pero el requisito no pasa de 2.
+    if todas.iter().any(|m| !m.excluida() && m.inestable_verde()) {
+        nivel = nivel.min(2);
+    }
     let cumplimiento = match nivel {
         3 => Cumplimiento::Cumplido,
         0 => Cumplimiento::Ausente,
@@ -410,6 +442,7 @@ mod tests {
     use super::*;
     use crate::oracle::clasificar;
     use crate::oracle::junit::Junit;
+    use crate::track::stats::wilson_inferior;
 
     fn strs(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -446,7 +479,26 @@ mod tests {
         ResultadosTests {
             tests,
             inestables: inestables.iter().map(|t| t.to_string()).collect(),
+            tasas: BTreeMap::new(),
         }
+    }
+
+    /// Resultados con inestables que tienen tasa: `(id, pasan, corridas)`. La cota sale de
+    /// `wilson_inferior`, como en Track.
+    fn con_tasas(pasa: &[&str], inestables: &[(&str, u32, u32)]) -> ResultadosTests {
+        let ids: Vec<&str> = inestables.iter().map(|(id, _, _)| *id).collect();
+        let mut r = resultados(pasa, &[], &ids);
+        for (id, exitos, total) in inestables {
+            r.tasas.insert(
+                id.to_string(),
+                TasaTest {
+                    pasa: *exitos,
+                    total: *total,
+                    wilson_inf: wilson_inferior(*exitos, *total),
+                },
+            );
+        }
+        r
     }
 
     fn excl(test: &str, motivo: &str) -> Exclusion {
@@ -609,11 +661,86 @@ mod tests {
     }
 
     #[test]
-    fn requisitos_inestable_en_pruebas_no_pasa_de_nivel_1() {
-        let reqs = [req("R1", 1, &["a::t1", "a::t3"], &[], &[])];
-        let r = resultados(&["a::t3"], &[], &["a::t1"]);
+    fn requisitos_inestable_con_cota_alta_en_pruebas_queda_en_nivel_2() {
+        // P59 b): 18 de 20 tiene cota ~0,78, así que cuenta como verde. El tope del nivel es 2.
+        let reqs = [req("R1", 1, &["a::t1", "a::t2"], &[], &[])];
+        let r = con_tasas(&["a::t1"], &[("a::t2", 18, 20)]);
+        let estados = evalua(&reqs, &r);
+        assert_eq!(estados[0].nivel, Some(2));
+        assert_eq!(estados[0].cumplimiento, Cumplimiento::Parcial);
+        assert!(
+            estados[0]
+                .evidencia
+                .contains(&"a::t2: inestable".to_string())
+        );
+    }
+
+    #[test]
+    fn requisitos_mismo_requisito_sin_el_inestable_llega_a_nivel_3() {
+        let reqs = [req("R1", 1, &["a::t1"], &["a::t2"], &["e1"])];
+        let r = resultados(&["a::t1", "a::t2"], &[], &[]);
+        let estados = evaluar_requisitos(
+            &reqs,
+            &r,
+            &escenarios(&[("e1", true)]),
+            &[],
+            &[],
+            &sin_cita(),
+        );
+        assert_eq!(estados[0].nivel, Some(3));
+        assert_eq!(estados[0].cumplimiento, Cumplimiento::Cumplido);
+    }
+
+    #[test]
+    fn requisitos_inestable_con_cota_baja_cuenta_como_falla() {
+        // 13 de 30 tiene cota ~0,32, menor que 0,5: no es verde, así que queda en nivel 1.
+        let reqs = [req("R1", 1, &["a::t1", "a::t2"], &[], &[])];
+        let r = con_tasas(&["a::t1"], &[("a::t2", 13, 30)]);
         let estados = evalua(&reqs, &r);
         assert_eq!(estados[0].nivel, Some(1));
+        assert_eq!(estados[0].cumplimiento, Cumplimiento::Parcial);
+    }
+
+    #[test]
+    fn requisitos_inestable_sin_tasa_cuenta_como_falla() {
+        let reqs = [req("R1", 1, &["a::t1", "a::t2"], &[], &[])];
+        let r = resultados(&["a::t1"], &[], &["a::t2"]);
+        let estados = evalua(&reqs, &r);
+        assert_eq!(estados[0].nivel, Some(1));
+        assert_eq!(estados[0].cumplimiento, Cumplimiento::Parcial);
+    }
+
+    #[test]
+    fn requisitos_inestable_con_cota_alta_en_borde_deja_tope_2() {
+        let reqs = [req("R1", 1, &["a::t1"], &["a::t2"], &["e1"])];
+        let r = con_tasas(&["a::t1"], &[("a::t2", 18, 20)]);
+        let estados = evaluar_requisitos(
+            &reqs,
+            &r,
+            &escenarios(&[("e1", true)]),
+            &[],
+            &[],
+            &sin_cita(),
+        );
+        assert_eq!(estados[0].nivel, Some(2));
+        assert_eq!(estados[0].cumplimiento, Cumplimiento::Parcial);
+    }
+
+    #[test]
+    fn requisitos_cota_exacta_0_5_pone_tope_2() {
+        // La cota exactamente 0,5 cuenta como verde (>= 0,5), y el tope 2 se aplica.
+        let reqs = [req("R1", 1, &["a::t1", "a::t2"], &[], &[])];
+        let mut r = resultados(&["a::t1"], &[], &["a::t2"]);
+        r.tasas.insert(
+            "a::t2".into(),
+            TasaTest {
+                pasa: 1,
+                total: 2,
+                wilson_inf: 0.5,
+            },
+        );
+        let estados = evalua(&reqs, &r);
+        assert_eq!(estados[0].nivel, Some(2));
         assert_eq!(estados[0].cumplimiento, Cumplimiento::Parcial);
     }
 
@@ -1033,6 +1160,20 @@ mod tests {
             r.inestables,
             BTreeSet::from(["contrato:t::mix".to_string()])
         );
+    }
+
+    #[test]
+    fn requisitos_desde_clasificaciones_lleva_las_tasas_con_prefijo() {
+        let r = desde_clasificaciones(
+            &suite_inestable(&["t::a"], "t::b"),
+            &suite_inestable(&["o::x"], "o::y"),
+        );
+        // La tasa del contrato lleva el prefijo; la de la oculta, no.
+        assert_eq!(r.tasas.len(), 2, "{:?}", r.tasas);
+        let del_contrato = &r.tasas["contrato:t::b"];
+        assert_eq!((del_contrato.pasa, del_contrato.total), (1, 2));
+        assert!((del_contrato.wilson_inf - wilson_inferior(1, 2)).abs() < 1e-12);
+        assert_eq!(r.tasas["o::y"].total, 2);
     }
 
     #[test]

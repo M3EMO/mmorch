@@ -198,6 +198,7 @@ fn entrega_escenario_fallido_deja_requisito_en_parcial() {
     let resultados = ResultadosTests {
         tests,
         inestables: Default::default(),
+        tasas: Default::default(),
     };
     let estados = evaluar_requisitos(
         &tarea.requisito,
