@@ -140,6 +140,10 @@ pub struct OpcionesOraculo {
     /// Partes que corren (Tarea 12). `None`: todas, como en producción. Con partes, las que no corren no
     /// llaman a su contenedor ni a su juez, y su dimensión queda sin veredicto.
     pub partes: Option<Partes>,
+    /// Historial de evidencia (Tarea 39). `true`: la evaluación lee y guarda el historial de la versión del
+    /// repo. `false`: no calcula la versión, no lee ni guarda nada. La calibración usa `false`, porque cada
+    /// caso es una versión distinta y se evalúa una vez.
+    pub historial: bool,
 }
 
 impl Default for OpcionesOraculo {
@@ -148,6 +152,7 @@ impl Default for OpcionesOraculo {
             timeout: Duration::from_secs(3600),
             home: None,
             partes: None,
+            historial: true,
         }
     }
 }
@@ -314,7 +319,8 @@ struct Corrida<'a> {
     /// `ROOT_HOME`: donde van los registros de stderr, dentro de `oraculos/<tarea>/`.
     home: &'a Path,
     /// Historial de evidencia de la versión del repo (Tarea 39): `evidencia/<tarea>/<hash>/historial.jsonl`.
-    historial: &'a Path,
+    /// `None` con `historial: false`: la suite no lee ni agrega nada.
+    historial: Option<&'a Path>,
 }
 
 /// Resultado de una suite: su clasificación, o el motivo por el que no tiene veredicto (A5).
@@ -533,9 +539,14 @@ fn evaluar_con(
     let repo_copia = copia.path().join("repo");
     copiar_repo(&repo, &repo_copia).map_err(|e| infra("copia del repo", e))?;
     // El historial de evidencia es de esta versión del repo (Tarea 39): el hash sale de la copia.
-    let version = historial::hash_de_version(&repo_copia)
-        .map_err(|e| infra("hash de la versión del repo", e))?;
-    let ruta_historial = historial::ruta(&home, &tarea.nombre, &version)?;
+    // Sin historial (calibración), no hay versión que calcular ni archivo que leer o escribir.
+    let ruta_historial = if o.historial {
+        let version = historial::hash_de_version(&repo_copia)
+            .map_err(|e| infra("hash de la versión del repo", e))?;
+        Some(historial::ruta(&home, &tarea.nombre, &version)?)
+    } else {
+        None
+    };
     // Cada juez suma el costo de sus llamadas. El de la configuración va antes que las suites.
     let juez_config = deps
         .juez_config
@@ -582,7 +593,7 @@ fn evaluar_con(
         cache: cache.clone(),
         rustsec: rustsec.clone(),
         home: &home,
-        historial: &ruta_historial,
+        historial: ruta_historial.as_deref(),
     };
     // Una suite que la parte no pide no corre. Cada suite recibe sus exclusiones (desempate 1).
     let contrato = if partes.contrato {
@@ -1490,14 +1501,19 @@ fn evaluar_suite(
         }
     }
     // Las corridas del historial de esta versión suman muestras, como las extra: no cuentan como ausencia.
-    let (del_historial, avisos) = historial::leer(c.historial, suite)?;
+    let (del_historial, avisos) = match c.historial {
+        Some(ruta) => historial::leer(ruta, suite)?,
+        None => (Vec::new(), Vec::new()),
+    };
     let mut con_historial = del_historial;
     con_historial.extend(extras.iter().cloned());
     let mut clasificacion = clasificar(&completas, &con_historial, excluidos);
     clasificacion.avisos = avisos;
     // Lo que corrió esta vez queda en el historial. Solo si la suite tiene veredicto.
     let nuevas: Vec<Junit> = completas.iter().chain(&extras).cloned().collect();
-    historial::agregar(c.historial, suite, &nuevas)?;
+    if let Some(ruta) = c.historial {
+        historial::agregar(ruta, suite, &nuevas)?;
+    }
     Ok(Suite::Clasificada(clasificacion))
 }
 
@@ -2521,7 +2537,7 @@ mod tests {
             cache: None,
             rustsec: None,
             home: &home,
-            historial: &historial,
+            historial: Some(&historial),
         };
         evaluar_suite(
             &c,
@@ -2729,6 +2745,7 @@ mod tests {
         fs::create_dir_all(&repo).expect("repo");
         fs::create_dir_all(&salida).expect("salida");
         let o = OpcionesOraculo::default();
+        let historial = base.path().join("historial.jsonl");
         let c = Corrida {
             repo: &repo,
             tarea: &tarea,
@@ -2737,7 +2754,7 @@ mod tests {
             cache: None,
             rustsec: None,
             home: base.path(),
-            historial: &base.path().join("historial.jsonl"),
+            historial: Some(&historial),
         };
         let e = ejecucion_de_suite(&c, &tarea.contrato.cmd, DIR_CONTRATO);
         let args = contenedor::argumentos(&e, "n");
@@ -3037,6 +3054,7 @@ mod tests {
             timeout: Duration::from_secs(60),
             partes: None,
             home: Some(home.to_path_buf()),
+            historial: true,
         }
     }
 
@@ -3048,7 +3066,18 @@ mod tests {
         correr: &dyn Fn(&contenedor::Ejecucion) -> Result<contenedor::Resultado, ErrorOraculo>,
         herramientas: &dyn Fn(&Preparada) -> Box<dyn EjecutorHerramienta>,
     ) -> Result<Veredicto, ErrorOraculo> {
-        evaluar_con(repo, tarea, &opciones(home), deps_de(correr, herramientas))
+        evaluar_falso_con(repo, tarea, &opciones(home), correr, herramientas)
+    }
+
+    /// Como `evaluar_falso`, con las opciones que se le pasen.
+    fn evaluar_falso_con(
+        repo: &Path,
+        tarea: &Tarea,
+        o: &OpcionesOraculo,
+        correr: &dyn Fn(&contenedor::Ejecucion) -> Result<contenedor::Resultado, ErrorOraculo>,
+        herramientas: &dyn Fn(&Preparada) -> Box<dyn EjecutorHerramienta>,
+    ) -> Result<Veredicto, ErrorOraculo> {
+        evaluar_con(repo, tarea, o, deps_de(correr, herramientas))
     }
 
     /// Veredicto de la tarea de Rust con todas las sondas sanas y la suite del contrato completa.
@@ -5749,6 +5778,57 @@ mod tests {
         let texto = fs::read_to_string(&ruta).expect("lee el historial");
         assert!(!texto.contains(MARCADOR), "{texto}");
         assert!(texto.contains("test_b::t3"), "{texto}");
+    }
+
+    /// Una calibración no escribe historial: con `historial: false`, la evaluación no crea
+    /// `evidencia/` y no lee la falla que una evaluación normal dejó en la misma versión.
+    #[test]
+    fn oraculo_sin_historial_no_escribe_ni_lee_el_historial() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let sin_historial = OpcionesOraculo {
+            historial: false,
+            ..opciones(&home)
+        };
+        evaluar_falso_con(
+            &repo,
+            &tarea,
+            &sin_historial,
+            &correr_suites_oculto(JUNIT_OCULTO_T3_FALLA),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        assert!(
+            !home.join("evidencia").exists(),
+            "no debe existir evidencia/"
+        );
+
+        // Una evaluación normal deja la falla de `t3` en el historial de la versión.
+        evaluar_falso(
+            &repo,
+            &tarea,
+            &home,
+            &correr_suites_oculto(JUNIT_OCULTO_T3_FALLA),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        let ruta = historial_de(&home, &repo);
+        let antes = fs::read(&ruta).expect("lee el historial");
+
+        // Sin historial, esa falla no vuelve `t3` inestable, y el historial no cambia.
+        let v = evaluar_falso_con(
+            &repo,
+            &tarea,
+            &sin_historial,
+            &correr_suites_oculto(JUNIT_OCULTO_VERDE),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        assert!(v.inestables.is_empty(), "{:?}", v.inestables);
+        assert!(!v.corridas_acumuladas.contains_key("oculto:test_b::t3"));
+        assert_eq!(fs::read(&ruta).expect("lee el historial"), antes);
     }
 
     #[test]
