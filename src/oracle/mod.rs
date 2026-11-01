@@ -519,6 +519,9 @@ fn evaluar_con(
     avisos.extend(avisos_colab);
     avisos.extend(aviso_commit);
     avisos.extend(pendientes::aviso_de_red(&colab));
+    // Si todas las entradas de `[[entorno]]` son solo del contrato, `crear` no da paquete y su aviso se
+    // perdería: el veredicto lo lleva (Desempates técnicos 18, pregunta 1).
+    avisos.extend(pendientes::avisos_de_omision_total(tarea));
     // Las ambigüedades de la revisión guardada del juez para este spec (Tarea 30, parte 1).
     let (ambiguedades, aviso_ficha) = ambiguedades_de_la_ficha(&texto_spec, &home);
     avisos.extend(aviso_ficha);
@@ -5596,6 +5599,46 @@ mod tests {
         );
         assert_eq!(v.estado, Estado::SinVeredicto);
         assert_eq!(codigo_de_estado(v.estado), 3);
+    }
+
+    #[test]
+    fn oraculo_omision_total_de_entorno_llega_a_veredicto_avisos() {
+        // El único `[[entorno]]` es un id sin prefijo cuyo archivo está solo en `contrato/`: `crear` da `None`
+        // y el aviso tiene que llegar al veredicto igual.
+        let base = tempfile::tempdir().expect("base");
+        // `tarea_rust` escribe el spec y el `tarea.toml` base; abajo se le agrega el `[[entorno]]`.
+        tarea_rust(base.path());
+        let dir = base.path().join("tarea");
+        fs::create_dir_all(dir.join("contrato")).expect("carpeta del contrato");
+        fs::write(
+            dir.join("contrato").join("test_c.py"),
+            "def test_t(): pass\n",
+        )
+        .expect("test del contrato");
+        let texto = fs::read_to_string(dir.join("tarea.toml")).expect("tarea.toml");
+        fs::write(
+            dir.join("tarea.toml"),
+            format!("{texto}[[entorno]]\ntest = \"test_c::t\"\nmotivo = \"gpu\"\n"),
+        )
+        .expect("tarea.toml con entorno");
+        let tarea = Tarea::cargar_de(&dir).expect("carga la tarea");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let v = evaluar_falso(
+            &repo,
+            &tarea,
+            &home,
+            &correr_suites_oculto(JUNIT_OCULTO_VERDE),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        assert!(
+            v.avisos
+                .iter()
+                .any(|a| a.contains("test_c::t") && a.contains("existe solo en contrato/")),
+            "{:?}",
+            v.avisos
+        );
     }
 
     // --- Tarea 39: historial de evidencia por versión del repo ---

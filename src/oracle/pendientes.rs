@@ -225,6 +225,16 @@ fn avisos_de_contrato(tarea: &Tarea) -> Vec<String> {
         .collect()
 }
 
+/// Avisos de la omisión total de `[[entorno]]`: todas sus entradas son solo del contrato. Entonces `crear`
+/// da `None` y el aviso se perdería, así que el veredicto lo lleva. Vacío si alguna entrada entra al
+/// paquete: ahí el aviso ya va en `Paquete.avisos`.
+pub fn avisos_de_omision_total(tarea: &Tarea) -> Vec<String> {
+    if tarea.entorno.is_empty() || entorno_de_colab(tarea).next().is_some() {
+        return Vec::new();
+    }
+    avisos_de_contrato(tarea)
+}
+
 /// Arma el paquete de los tests de `[[entorno]]` dentro de `oraculos/<tarea>/pendientes/`. Corren los
 /// ocultos (`tests/<archivo>.py`) y los `contrato:` (`tests/contrato/<archivo>.py`). Un id sin prefijo que
 /// solo existe en `contrato/` no entra y da un aviso (desempate 16).
@@ -782,6 +792,53 @@ mod tests {
         );
         assert!(!paquete.dir.join("tests/contrato").exists());
         assert!(!paquete.dir.join("tests/test_c.py").exists());
+    }
+
+    #[test]
+    fn pendiente_omision_total_da_el_aviso() {
+        // Única entrada sin prefijo, solo en `contrato/`: `crear` da `None` y perdería el aviso. Por eso
+        // `avisos_de_omision_total` lo da, y el veredicto lo lleva.
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        fs::write(repo.path().join("a.txt"), "x").expect("repo");
+        let tarea = tarea_con_entorno(
+            home.path(),
+            "tarea-x",
+            &["test_c::t"],
+            &[("contrato", "test_c")],
+        );
+        let paquete = crear(home.path(), &tarea, repo.path(), None).expect("crea");
+        assert!(paquete.is_none(), "sin entradas no hay paquete");
+        let avisos = avisos_de_omision_total(&tarea);
+        assert_eq!(avisos.len(), 1, "{avisos:?}");
+        assert!(
+            avisos[0].contains("test_c::t") && avisos[0].contains("contrato:test_c::t"),
+            "{avisos:?}"
+        );
+    }
+
+    #[test]
+    fn pendiente_omision_parcial_no_da_aviso_de_omision_total() {
+        // Una entrada entra al paquete: el aviso de la omitida sigue en `Paquete.avisos`, y el de omisión
+        // total no aparece.
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        fs::write(repo.path().join("a.txt"), "x").expect("repo");
+        let tarea = tarea_con_entorno(
+            home.path(),
+            "tarea-x",
+            &["test_c::t", "test_a::uno"],
+            &[("contrato", "test_c"), ("oculto", "test_a")],
+        );
+        assert!(avisos_de_omision_total(&tarea).is_empty());
+        let paquete = crear(home.path(), &tarea, repo.path(), None)
+            .expect("crea")
+            .expect("hay paquete");
+        assert!(
+            paquete.avisos.iter().any(|a| a.contains("test_c::t")),
+            "{:?}",
+            paquete.avisos
+        );
     }
 
     #[test]
