@@ -937,16 +937,13 @@ pub fn markdown(tarea: &str, informe: &Informe) -> String {
     let c = &informe.confianza;
     let mut datos: Vec<String> = Vec::new();
     for (clave, tasa) in &c.inestables {
-        let mut linea = format!(
+        // N ya es la cantidad de corridas acumuladas: no se repite en la línea.
+        datos.push(format!(
             "- Inestable {clave}: pasa {} de {} (cota de Wilson {})",
             tasa.pasa,
             tasa.total,
             numero(tasa.wilson_inf as f32)
-        );
-        if let Some(corridas) = c.corridas_acumuladas.get(clave) {
-            linea.push_str(&format!("; {corridas} corridas acumuladas"));
-        }
-        datos.push(linea);
+        ));
     }
     if !c.requisitos_pendientes.is_empty() {
         datos.push(format!(
@@ -1966,7 +1963,7 @@ modulos = ["config"]
     }
 
     #[test]
-    fn informe_confianza_muestra_las_corridas_acumuladas_de_un_inestable() {
+    fn informe_confianza_describe_un_inestable_con_pasa_x_de_n_una_sola_vez() {
         let mut v = ecc();
         v.tasas.insert(
             "oculto:tests/t.py::otro".into(),
@@ -1979,12 +1976,19 @@ modulos = ["config"]
         v.corridas_acumuladas
             .insert("oculto:tests/t.py::otro".into(), 7);
         let i = informe_de(&v);
+        // El campo sigue en el modelo: solo cambia el texto del markdown.
         assert_eq!(
             i.confianza.corridas_acumuladas["oculto:tests/t.py::otro"],
             7
         );
         let md = markdown("memora", &i);
-        assert!(md.contains("7 corridas acumuladas"), "{md}");
+        assert_eq!(md.matches("pasa 4 de 7").count(), 1, "{md}");
+        let linea = md
+            .lines()
+            .find(|l| l.starts_with("- Inestable oculto:tests/t.py::otro"))
+            .unwrap_or_else(|| panic!("falta la línea del inestable: {md}"));
+        assert!(!linea.contains("corridas acumuladas"), "{linea}");
+        assert_eq!(linea.matches('7').count(), 1, "{linea}");
     }
 
     #[test]
