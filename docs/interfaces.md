@@ -381,6 +381,14 @@ Campos de la rúbrica (`src/oracle/rubrica.rs`):
 - `anclas`: cuatro textos, uno por nivel.
 
 Valor de una dimensión: `Σ peso·nivel / (3·Σ peso)`, sobre los ítems con nivel. Un ítem sin nivel no entra al cálculo.
+
+Una dimensión con sondas y juez combina sus dos partes por peso (desempate B): `valor = (Ws·vs + Wj·vj) / (Ws + Wj)`.
+
+- `Ws` suma los pesos de los ítems de sonda que miden para el lenguaje. Sin pesos de sonda en la rúbrica, `Ws` vale 1.
+- `Wj` suma los pesos de los ítems del juez con nivel.
+- Una parte sin veredicto pesa 0. Si ninguna parte pesa, la dimensión no tiene veredicto.
+- Un ítem del juez sin nivel va a `faltantes`, con su motivo. Si el gate de evidencia lo descartó, el motivo lo dice. El informe lo lista en Confianza como `Sin medir <ítem>: <motivo>`.
+
 Dos veredictos con hashes de rúbrica distintos no se comparan.
 
 Estado de las rúbricas reales: **pendiente**. Ninguna rúbrica viene embebida hoy. `EMBEBIDAS` en `src/oracle/rubrica.rs` está vacío. Las rúbricas de la Tarea 8b esperan la aprobación del usuario.

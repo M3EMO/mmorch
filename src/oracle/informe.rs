@@ -972,6 +972,9 @@ pub fn markdown(tarea: &str, informe: &Informe) -> String {
             parte.motivo
         ));
     }
+    for falta in &c.faltantes {
+        datos.push(format!("- Sin medir {}: {}", falta.item, falta.motivo));
+    }
     if c.ambiguedades.is_empty() {
         datos.push("- Ambigüedades abiertas: sin datos, el veredicto no trae la ficha.".into());
     }
@@ -1091,7 +1094,7 @@ mod tests {
     use crate::oracle::tarea::Tarea;
     use crate::tipos::{
         Cumplimiento, Decision, Dimension, Estado, EstadoRequisito, Fuente, Hallazgo, Informe,
-        NivelItem, Pendiente, Puntaje, TasaTest, Veredicto,
+        ItemFaltante, NivelItem, Pendiente, Puntaje, TasaTest, Veredicto,
     };
     use std::cell::RefCell;
     use std::fs;
@@ -1533,6 +1536,35 @@ modulos = ["config"]
         assert_eq!(crate::oracle::codigo_de_estado(estado_de(Some(&i))), 3);
         let md = markdown("memora", &i);
         assert!(md.contains("Sin decisión"), "{md}");
+    }
+
+    #[test]
+    fn informe_confianza_lista_los_items_sin_medir() {
+        // Un faltante de un puntaje sale en la confianza del informe y en el markdown, con su motivo.
+        let mut v = ecc();
+        let estructura = v
+            .puntajes
+            .iter_mut()
+            .find(|p| p.dimension == Dimension::Estructura)
+            .expect("hay estructura");
+        estructura.faltantes = vec![ItemFaltante {
+            item: "estructura.legibilidad".into(),
+            motivo: "el juez no dio nivel".into(),
+        }];
+        let i = informe_de(&v);
+        assert!(
+            i.confianza
+                .faltantes
+                .iter()
+                .any(|f| f.item == "estructura.legibilidad" && f.motivo == "el juez no dio nivel"),
+            "{:?}",
+            i.confianza.faltantes
+        );
+        let md = markdown("memora", &i);
+        assert!(
+            md.contains("- Sin medir estructura.legibilidad: el juez no dio nivel"),
+            "{md}"
+        );
     }
 
     #[test]
