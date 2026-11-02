@@ -45,5 +45,11 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR_SEGURO:-$carpeta/target}"
 mkdir -p "$CARGO_TARGET_DIR"
 
 # ROOT_SIN_PODMAN no se toca: si viene exportada, llega a cargo tal cual.
+# ROOT_TEST_SEGURO_CARGO, si no está vacía, es un script de shell que reemplaza a cargo.
+# Se corre con `sh`, que solo lee el archivo: no necesita bit de ejecución (evita ETXTBSY).
 # El descriptor 9 se cierra para cargo: un hijo que sobreviva no retiene el lock.
-"${ROOT_TEST_SEGURO_CARGO:-cargo}" test "$@" 9>&-
+if [ -n "${ROOT_TEST_SEGURO_CARGO:-}" ]; then
+    sh "$ROOT_TEST_SEGURO_CARGO" test "$@" 9>&-
+else
+    cargo test "$@" 9>&-
+fi
