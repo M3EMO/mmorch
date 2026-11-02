@@ -2,7 +2,7 @@
 //! temporales y el target en una carpeta por worktree, `ROOT_TESTS_BASE/<hash>/`. Un lock de podman
 //! (`ROOT_TESTS_BASE/podman.lock`) hace esperar a las corridas que no tienen `ROOT_SIN_PODMAN=1`.
 //! Un `cargo` falso, que vuelca el entorno y los argumentos, reemplaza a cargo por
-//! `ROOT_TEST_SEGURO_CARGO`. Es un script de shell que se lanza con `sh`, nunca directo.
+//! `ROOT_TEST_SEGURO_CARGO`. Es un script de bash que se lanza con `bash`, nunca directo.
 //! Así no se paga una compilación anidada.
 //! Cada test arma el entorno del hijo con `Command::env`: nada cambia el entorno del proceso.
 
@@ -63,8 +63,8 @@ fn orden(
     quitar: &[&str],
     args: &[&str],
 ) -> Command {
-    // `sh` lee el script en vez de ejecutarlo: no necesita el bit de ejecución (evita `ETXTBSY`).
-    let mut orden = Command::new("sh");
+    // `bash` lee el script en vez de ejecutarlo: no necesita el bit de ejecución (evita `ETXTBSY`).
+    let mut orden = Command::new("bash");
     orden
         .arg(script)
         .args(args)
@@ -455,20 +455,62 @@ fn escribir_ejecutable_deja_solo_el_final_y_ejecutable() {
     );
 }
 
-/// Quita el bit de ejecución. El script y el falso deben correr igual: los lanza `sh`, que solo lee.
+/// Quita el bit de ejecución. El script y el falso deben correr igual: bash lee el script y sh lee el falso.
 fn sin_bit_de_ejecucion(ruta: &Path) {
     fs::set_permissions(ruta, fs::Permissions::from_mode(0o644))
         .expect("quita el bit de ejecución");
 }
 
 #[test]
-fn test_seguro_lanza_el_script_con_sh_sin_bit_de_ejecucion() {
+fn test_seguro_lanza_el_script_con_bash_sin_bit_de_ejecucion() {
     let dir = dir_de_prueba();
     let copia = copia_del_script(dir.path(), "repo-a");
     sin_bit_de_ejecucion(&copia);
     let (estado, _, argumentos) = correr_con(&copia, dir.path(), 0, &[], &[], &["algo"]);
     assert!(estado.success(), "{estado:?}");
     assert_eq!(argumentos, ["test", "algo"]);
+}
+
+#[test]
+fn test_seguro_lanza_el_script_con_bash_y_los_falsos_con_sh() {
+    // Un `sh` de prueba va primero en PATH. Anota su primer argumento y ejecuta el archivo con bash.
+    // Así se ve qué archivo lanza `sh`: el script no, y el cargo falso sí.
+    let dir = dir_de_prueba();
+    let shim = dir.path().join("shim");
+    fs::create_dir_all(&shim).expect("crea la carpeta del sh de prueba");
+    let texto = format!(
+        "#!/usr/bin/env bash\necho \"$1\" >> '{d}/sh-calls.txt'\nexec bash \"$@\"\n",
+        d = dir.path().display()
+    );
+    escribir_ejecutable(&shim.join("sh"), &texto);
+    let path = format!(
+        "{}:{}",
+        shim.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let cargo = falso(dir.path(), 0);
+    let extra = [("PATH", path)];
+    let estado = orden(
+        Path::new(SCRIPT),
+        dir.path(),
+        &cargo,
+        &extra,
+        &[],
+        &["algo"],
+    )
+    .status()
+    .expect("corre tools/test-seguro.sh");
+    assert!(estado.success(), "{estado:?}");
+    let llamadas: Vec<String> = fs::read_to_string(dir.path().join("sh-calls.txt"))
+        .expect("el sh de prueba anotó sus llamadas")
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let esperadas = [cargo.display().to_string()];
+    assert_eq!(
+        llamadas, esperadas,
+        "el script se lanza con bash; sh solo corre el cargo falso"
+    );
 }
 
 #[test]
