@@ -80,6 +80,7 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 54 | P-test1: "P-test1 b", P-test2: "P-test2 a", P-test3: "P-test3 a". La ficha de brasa fija los nombres de wgpu de `brasa info`. Los sufijos de `--maxmemory` y la diferencia de `--appendfsync` quedan sin fijar. |
 | 55 | P59: "B". Un test inestable con una cota inferior de Wilson al 90 % menor que 0,5 cuenta como falla. Uno con una cota de al menos 0,5 pone tope 2 a su requisito. La nube 9 lo construye en la Tarea 40. |
 | 56 | P-mod1: "P-mod1 a". El informe filtra la lista `modulos` de un requisito sin cumplir contra los módulos del repo evaluado. Para los que existen escribe "revisar". Si no queda ninguno, escribe "falta" con la lista entera. Ver Tarea 42. |
+| 57 | Contrato del juez: "Sí, al planner", sobre la propuesta del orquestador. El usuario había preguntado: "El juez tiene un contrato de toml? quizas necesita una rubrica y contrato para ser mas robusto". El juez responde todos los ítems pedidos, y Root reintenta una vez los que falten o no pasen el gate. Entra antes de la calibración real. Ver Tarea 44. |
 
 ## Patterns to Mirror
 
@@ -2889,5 +2890,91 @@ No hay preguntas nuevas para el usuario.
 2. **Tarea 43 con el builder local.** En paralelo con el paso 1. Corre la suite con `ROOT_SIN_PODMAN=1`, así no choca con el Validate.
 3. **Calibración real (Tarea 12).** Espera el paso 1. Con `--tope-usd 25` (decisión 48). Después, la comparación de `global` de la Tarea 13.
 4. Siguen la imagen del builder, la credencial, `NETRC`, la corrida de memora, Colab, Graft con G5 y los paquetes a ciegas con G3.
+
+No hay preguntas nuevas para el usuario.
+
+## Vuelta del 2026-11-02: Tarea 43, Validate de memora y contrato del juez
+
+**Tarea 43.** El usuario escribió: "43 primero". El builder local la construyó en `laptop/tarea-43`, de 983bb08 a d084fbc, por 0,77 USD. El informe es `docs/builds/2026-11-02-build-local-43.md`, en esa rama.
+- La suite dio 1991 verdes, 0 fallas y 2 ignorados, sin podman y con podman.
+- La parte 1 borró `inactividad_de` y sus 4 tests. La parte 2 sumó `tiene_perfil` en `src/oracle/perfiles/mod.rs`. La parte 3 lanza `test-seguro.sh` con `bash`, y su test corrió 10 veces sin fallar.
+- La rama no está mezclada. La mezcla espera la orden del usuario.
+
+**Validate de 7 y 13, memora.** El orquestador usó `r00t` release de 3ea49f1, las claves y el `ROOT_HOME` real, con el oráculo FIFO arreglado y los `modulos` nuevos. memora gastó 0,35 USD. Las salidas están en `~/.cache/root-wt/validate14/`.
+
+| Corrida | Decisión | Contrato | Oculto | Estructura | Arquitectura | Diseño | Inestable | Duración |
+|---|---|---|---|---|---|---|---|---|
+| ecc 1 | listo | 61/61 | 67/68 | 0,333 | sin veredicto (cobertura 5 de 10) | sin veredicto (7 de 13) | ninguno | 70 min |
+| ecc 2 | listo | 61/61 | 66/68 | 0,333 | 0,381 | sin veredicto (6 de 13) | `test_client_id` | 25 min |
+| ecc 3 | listo | 61/61 | 66/68 | 0,524 | 0,467 | 0,200 | `test_client_id` | 25 min |
+| sdlc 1 | bloqueado (R1 y R13) | 21/61 | 24/68 | 0,000 | sin veredicto (3 de 10) | sin veredicto (8 de 13) | ninguno | 14 min |
+
+- FIFO: R7 queda en nivel 1 en las 3 corridas de memora-ecc, y `test_blpop_fifo_entre_clientes` falla por el producto.
+- Causa B: Estructura tiene valor en los 4 repos. Causa B': `Informe.confianza` lista cada ítem faltante con su motivo. Causa C: una dimensión sin cobertura queda sin veredicto y nombra "cobertura M de T". Causa D: los pasos nombran módulos, por ejemplo "revisar los módulos cmd, server y store (R7)".
+- Funciona da 0,992, 0,984 y 0,984. Completitud da 0,964, 0,946 y 0,946. `global` sigue vacío, porque nada está calibrado.
+- La corrida ecc 1 duró 70 minutos. La causa no está medida.
+
+**Variación del juez.** Con el mismo commit, Arquitectura dio sin veredicto, 0,381 y 0,467, y Diseño dio sin veredicto o 0,200. El orquestador contó 10 ítems del juez en total: 6 de Diseño, 3 de Arquitectura y 1 de Estructura.
+
+| Corrida | Ítems sin nivel, de 10 | Motivo |
+|---|---|---|
+| memora-ecc 1 | 6 | el juez no dio nivel |
+| memora-ecc 2 | 5 | el juez no dio nivel |
+| memora-ecc 3 | 1 | el juez no dio nivel |
+| memora-sdlc 1 | 6 | 3 sin nivel y 3 "la evidencia no pasó el gate" |
+
+- La causa está en `PROMPT_SISTEMA` de `src/oracle/juez.rs`: "Sin evidencia para un ítem, no lo incluyas en items." Omitir un ítem no le cuesta nada al juez, y cada corrida omite ítems distintos.
+- El usuario preguntó: "El juez tiene un contrato de toml? quizas necesita una rubrica y contrato para ser mas robusto". El orquestador propuso ítems obligatorios y un reintento. El usuario eligió: "Sí, al planner" (decisión 57).
+
+## Desempates técnicos 22 (Opus, 2026-11-02)
+
+**Preguntas de la Tarea 43.**
+1. **Dónde vive `tiene_perfil`.** Se confirma `src/oracle/perfiles/mod.rs`: el conocimiento de qué lenguaje tiene perfil vive con los perfiles.
+2. **Informes fechados que citan `inactividad_de`.** Se confirma no corregirlos: un informe fechado registra lo que pasó en su fecha.
+
+**Decisión 56 en R13 de memora-sdlc.**
+- R13 lista `persist`, `store` y `db`. memora-sdlc tiene solo `db`, así que el paso dice "revisar el módulo db".
+- **Desempate: no cambia.** La lista junta los módulos de las dos implementaciones. `persist` y `store` son nombres de memora-ecc, y memora-sdlc guarda su persistencia en `db`. Decir "faltan persist y store" en memora-sdlc nombraría módulos de otra implementación, que es lo que la decisión 56 quiso evitar.
+- La capa faltante sí aparece por otro camino: el hallazgo de Arquitectura `c4835ab8c31a177e` la nombra, y entra en los riesgos del informe.
+
+**Contrato del juez (decisión 57).**
+- **Ítems obligatorios.** Root pasa al juez la lista exacta de ids que debe responder, en orden fijo. El juez responde cada id, una sola vez. Cada respuesta trae un nivel de 0 a 3 con su evidencia, o `"nivel": null` con `"motivo": "sin_evidencia"`.
+- **Qué hace Root con "sin evidencia".** El ítem va a `faltantes` con el motivo "el juez no encontró evidencia". No vale 0. Razón: las anclas de nivel 0 piden una cita, y un 0 sin cita es un rojo falso (desempate 3 de "Desempates técnicos 4"). "Refuta por default" sigue valiendo: el nivel parte en 0 y solo sube con evidencia, pero un 0 también necesita la suya.
+- **Respuesta que rompe el contrato.** Un id pedido que falta, repetido o sin nivel ni `sin_evidencia` rompe el contrato. Un id que no se pidió se ignora y deja un aviso.
+- **Reintento.** Root hace un solo reintento, solo con los ids que faltaron y los que no pasaron el gate de evidencia. El prompt del reintento nombra, para cada id del gate, la cita que no se encontró y su `archivo:línea`.
+  - Si el reintento tampoco responde un id, ese id va a `faltantes` con el motivo "el juez no respondió tras un reintento".
+  - Razón de uno solo: el primer reintento ataca la causa medida (ítems omitidos). Más reintentos suben el costo sin una medición que los justifique. La calibración dirá si hace falta más.
+- **Tope de costo.** El reintento pasa por el chequeo previo de tope de la Tarea 21, como toda llamada. Su `max_tokens` es el mismo del juez. El peor caso de una evaluación sube de una llamada por juicio a dos. Con `deepseek-v4-pro`, el peor caso del reintento es cerca de 0,11 USD. El tope de 25 USD de la calibración sigue rigiendo.
+- **Tres muestras con mediana.** Quedan afuera. La calibración mide si la variación sigue después de este contrato.
+
+### Tarea 44: Contrato del juez con ítems obligatorios y un reintento (decisión 57)
+- **Action**: el diseño de "Contrato del juez" de arriba, en `src/oracle/juez.rs`. Cambia `PROMPT_SISTEMA`, el parser de la respuesta y el armado de `faltantes`.
+- **Dónde**: en la laptop, con el builder local. Brief: `docs/builds/brief-local-44.md`. No usa podman ni claves.
+- **Validate**: `cargo test`:
+  - El prompt nombra la lista exacta de ids, en orden.
+  - Una respuesta con un id en `"nivel": null` y `"motivo": "sin_evidencia"` deja ese id en `faltantes` con "el juez no encontró evidencia", y no hace reintento por él.
+  - Una respuesta que omite un id hace un reintento solo con ese id. Si el reintento lo responde, el id tiene nivel.
+  - Una evidencia que no pasa el gate hace un reintento con la cita y el `archivo:línea` que fallaron.
+  - Si el reintento tampoco responde, el id queda en `faltantes` con "el juez no respondió tras un reintento".
+  - Nunca hay más de un reintento por juicio.
+  - Un id que no se pidió se ignora y deja un aviso.
+  - El reintento pasa por el chequeo de tope: con el tope de API lleno, no se envía.
+
+## Estado de los criterios (2026-11-02, memora)
+
+- **Tarea 7, memora: cumple.** La decisión es la misma en las 3 corridas. Las corridas 2 y 3 dan los mismos niveles. Cada diferencia tiene su causa en `diferencias.md`.
+- **Tarea 9c, memora: cumple.**
+- **Tarea 13, memora: cumple en parte.** Las nueve dimensiones salen, y la decisión y las citas son correctas. Falta comparar `global`, que espera la calibración. Arquitectura y Diseño varían entre corridas por el juez: la Tarea 44 ataca esa causa.
+- **Tarea 13b, memora: cumple.** La decisión nombra su regla, los pasos citan ids reales y nombran módulos.
+- **Falta medir:** la parte de brasa; la variación del juez después de la Tarea 44, con dos corridas de memora-ecc; y la comparación de `global` después de la calibración.
+
+## Orden de trabajo (2026-11-02, después de la Tarea 43)
+
+1. **Parte de brasa del Validate de 7 y 13.** Ya corre.
+2. **Tarea 44 con el builder local.** En paralelo con el paso 1, con `ROOT_SIN_PODMAN=1`. Brief: `docs/builds/brief-local-44.md`.
+3. **Mezcla de las Tareas 43 y 44.** Espera la orden del usuario.
+4. **Dos corridas de memora-ecc con el juez nuevo.** Gasto cerca de 0,2 USD. Miden si la variación de Arquitectura y Diseño baja.
+5. **Calibración real (Tarea 12).** Con `--tope-usd 25`. Después, la comparación de `global` de la Tarea 13.
+6. Siguen la imagen del builder, la credencial, `NETRC`, la corrida de memora, Colab, Graft con G5 y los paquetes a ciegas con G3.
 
 No hay preguntas nuevas para el usuario.
