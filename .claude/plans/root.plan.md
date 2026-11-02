@@ -2734,3 +2734,56 @@ El orquestador manda este texto a la sesión de nube 9, que arrancó desde dcd43
 8. Siguen la imagen del builder, la credencial, `NETRC`, la corrida de memora, Colab, Graft con G5 y los paquetes a ciegas con G3.
 
 No hay preguntas nuevas para el usuario.
+
+## Vuelta del 2026-11-02: brasa del Validate de 13, FIFO en Root y nube 9
+
+**Validate de 13 y 13b, brasa.** El orquestador corrió `r00t --json oraculo evaluar` con las claves y el `ROOT_HOME` real, con `r00t` release de dcd43fb, antes de la Tarea 41. brasa gastó 0,27 USD, con el informe md de memora-sdlc incluido. Las salidas están en `~/.cache/root-wt/validate13/`.
+
+| Repo | Decisión | Contrato | Oculto | Funciona | Completitud | Estructura | Arquitectura | Diseño | Pruebas | Global |
+|---|---|---|---|---|---|---|---|---|---|---|
+| brasa-ecc | listo | 53/53 | 20/21 | 0,986 | 0,938 | sin veredicto | sin veredicto | 0,333 | 0,233 | vacío |
+| brasa-sdlc | bloqueado (R12, peso 3) | 34/53 | 10/21 | 0,595 | 0,563 | 0,426 | 0,417 | 0,000 | 0,000 | vacío |
+
+- Cumple: brasa-ecc da 20/21 en el oculto, igual que el diagnóstico de Sonnet. Su único paso es R3, por el fallo de spin del producto.
+- Cumple: brasa-sdlc da bloqueado y nombra su regla. Sus pasos citan R12, R3, R8, R9 y R10.
+- Cumple: el test de GPU queda pendiente por entorno, fuera del denominador. La salida no trae claves.
+- No cumple: las mismas causas A a D de memora. Estructura y Arquitectura de brasa-ecc quedan sin veredicto con "ningún ítem tiene nivel": es la causa B, que la Tarea 41 corrige.
+
+**FIFO en la copia de Root.** El orquestador aplicó el hunk del banco a `oraculos/memora/oculto/test_oculto_memora.py`, con respaldo `.bak2`. El hunk suma `_esperar_bloqueados` y reemplaza `time.sleep(0.1)` del bucle. Nadie lo corrió todavía en Root.
+
+**Nube 9.** Entregó las Tareas 40 y 41 en `claude/sleepy-darwin-paheql`. Su informe es `docs/builds/2026-11-01-build-nube-9.md`, en el commit 9934827. La laptop corrió `tools/test-seguro.sh --no-fail-fast` con podman en un worktree descartable: 1974 verdes, 0 fallas y 2 ignorados. El usuario escribió: "Si mezcla." La mezcla es f23829e, sin conflictos.
+
+**En paralelo.** El usuario escribió: "Si ambos". La sesión de fichas suma `modulos` a los requisitos de memora y brasa.
+
+## Desempates técnicos 20 (Opus, 2026-11-02): preguntas 11 a 16 de la nube 9
+
+Cada desempate tiene su razón en una línea.
+
+11. **Peso de las sondas sin ítems.** Se confirma: la parte de sondas pesa 1 en el valor y no cuenta en la cobertura. La cobertura mide qué parte de la rúbrica midió el juez, y las sondas sin ítems no son parte de la rúbrica.
+12. **Fórmula ponderada.** Se confirma `(Ws·vs + Wj·vj) / (Ws + Wj)`: es el promedio de los ítems medidos que pide la causa B de "Desempates técnicos 19". Reemplaza la media simple del desempate 4 de "Desempates técnicos 11".
+13. **Orden de los motivos.** Se confirma: la cobertura va primero, porque explica por qué la dimensión no tiene valor.
+14. **Estructura en `shell` sin veredicto por cobertura.** Se confirma. La regla de cobertura de la causa C de "Desempates técnicos 19" reemplaza el desempate 1 de "Desempates técnicos 13" para las dimensiones con ítems del juez. Un juez que mide 2 de 7 ítems no da un valor comparable.
+15. **`oculto` o `contrato` como archivo.** Pasa de infraestructura a error de tarea, con código 2. Una carpeta mal definida en la tarea es un error de definición, no una falla del entorno. Va en la Tarea 42.
+16. **Plazos del test de DeepSeek.** Se confirman 300 ms de silencio contra 120 ms de inactividad: el plazo es inyectable, y el test prueba la misma regla sin esperar dos minutos.
+
+**Hueco de Arquitectura en Rust sin módulos.** Con la Tarea 41, Arquitectura en un repo Rust sin módulos puede tomar valor del juez. Ningún test lo cubre con las rúbricas embebidas. No hace falta antes del Validate: memora y brasa tienen módulos, así que este caso no los toca. El test va en la Tarea 42.
+
+### Tarea 42: Error de tarea por carpeta inválida y test de Arquitectura sin módulos
+- **Action**: el desempate 15 y el test del hueco de Arquitectura. Con las rúbricas embebidas, un repo Rust sin módulos y un juez que mide sus ítems de Arquitectura con cobertura suficiente da un valor. Con cobertura insuficiente, queda sin veredicto, con sus `faltantes`.
+- **Dónde**: en la laptop, con el builder local (Sonnet organiza, Haiku construye). Es chica y no necesita podman ni claves.
+- **Validate**: `cargo test`:
+  - Una tarea con `oculto` como archivo sale con código 2 y un error de tarea.
+  - Los dos casos de Arquitectura en Rust sin módulos dan lo que dice la Action.
+
+## Orden de trabajo (2026-11-02)
+
+1. **Ids de módulos.** La sesión de fichas suma `modulos` a memora y brasa. Ya corre.
+2. **Prueba de Haiku con más de 24 000 tokens de razonamiento.** Gasta centavos y no usa podman. Confirma el hallazgo 4 antes de usar el respaldo Haiku en la calibración.
+3. **Validate de 7 y 13, otra vez.** Espera el paso 1. Corre con `r00t` release de f23829e o posterior, con las claves y el `ROOT_HOME` real. El gasto estimado es de 1 USD o menos.
+   - memora-ecc corre 3 veces y memora-sdlc una. memora repite el Validate de 7, porque su test FIFO cambió y su historial arranca de cero.
+   - brasa-ecc y brasa-sdlc corren una vez cada uno. brasa no repite el Validate de 7: su oráculo no cambió, y no tiene tests inestables. Sí repite el de 13, para confirmar las causas B, B', C y D.
+4. **Tarea 42.** En paralelo con el paso 3, con el builder local. No usa podman.
+5. **Calibración real (Tarea 12).** Espera el paso 3. Con `--tope-usd 25` (decisión 48). Después, la comparación de `global` de la Tarea 13.
+6. Siguen la imagen del builder, la credencial, `NETRC`, la corrida de memora, Colab, Graft con G5 y los paquetes a ciegas con G3.
+
+No hay preguntas nuevas para el usuario.
