@@ -147,10 +147,16 @@ pub fn combinar(
     })
 }
 
+/// Indica si Root tiene perfil para el lenguaje. Hoy solo existe `rust`.
+/// Sin perfil, Root no conoce los módulos del repo.
+pub fn tiene_perfil(lenguaje: &str) -> bool {
+    lenguaje == "rust"
+}
+
 /// Sondas del perfil del lenguaje de la tarea. Hoy solo existe el perfil `rust`.
 /// Python entra después (Tarea 9): ahí va su rama, sin tocar la de Rust.
 pub fn sondas_nativas(repo: &Path, tarea: &Tarea) -> Vec<ResultadoSonda> {
-    if tarea.lenguaje != "rust" {
+    if !tiene_perfil(&tarea.lenguaje) {
         return Vec::new();
     }
     let capas: &[Vec<String>] = tarea
@@ -233,6 +239,14 @@ mod tests {
         let c = hallazgo_de(1, "a.rs", "otra", &[]);
         let salida = deduplicar_hallazgos(vec![a.clone(), b, c.clone()]);
         assert_eq!(salida, vec![a, c]);
+    }
+
+    #[test]
+    fn perfiles_tiene_perfil_solo_rust_y_no_los_demas() {
+        assert!(tiene_perfil("rust"));
+        assert!(!tiene_perfil("shell"));
+        assert!(!tiene_perfil("python"));
+        assert!(!tiene_perfil(""));
     }
 
     #[test]

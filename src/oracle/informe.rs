@@ -10,6 +10,7 @@ use serde::Deserialize;
 use super::ErrorOraculo;
 use super::evidencia::oraciones_con_id;
 use super::juez::desenvuelto;
+use super::perfiles::tiene_perfil;
 use super::requisitos::PREFIJO_CONTRATO;
 use super::rubrica::Rubrica;
 use super::tarea::Tarea;
@@ -674,11 +675,13 @@ fn proximos_pasos(
     for e in v.requisitos.iter().filter(|e| sin_cumplir(e)) {
         let ausente = e.cumplimiento == Cumplimiento::Ausente;
         let estado = if ausente { "ausente" } else { "parcial" };
-        let falta = faltante(
-            e,
-            modulos.get(e.id.as_str()).copied().unwrap_or(&[]),
-            presentes,
-        );
+        // Sin perfil, Root no conoce los módulos del repo: nombra los tests que no pasan (decisión 56).
+        let del_requisito: &[String] = if tiene_perfil(&tarea.lenguaje) {
+            modulos.get(e.id.as_str()).copied().unwrap_or(&[])
+        } else {
+            &[]
+        };
+        let falta = faltante(e, del_requisito, presentes);
         candidatos.push(Candidato {
             peso: e.peso,
             severidad: if ausente { 2 } else { 1 },
@@ -694,6 +697,7 @@ fn proximos_pasos(
 
 /// Lo que falta de un requisito sin cumplir. Sin módulos, sus pruebas que no pasan. Con módulos, los que
 /// existen en el repo para revisar; si ninguno existe, la lista entera, que falta.
+/// `proximos_pasos` pasa `modulos` vacía si la tarea no tiene perfil: Root no conoce sus módulos.
 fn faltante(e: &EstadoRequisito, modulos: &[String], presentes: &BTreeSet<String>) -> String {
     if modulos.is_empty() {
         let sin_pasar: Vec<&str> = e
@@ -1379,9 +1383,14 @@ modulos = ["config"]
 
     /// Tarea con un requisito R2 cuyos módulos son `modulos` (lista TOML entre corchetes, sin ellos).
     fn tarea_con_modulos(modulos: &str) -> Tarea {
+        tarea_con_modulos_en("rust", modulos)
+    }
+
+    /// Como `tarea_con_modulos`, pero con el lenguaje `lenguaje` de la tarea.
+    fn tarea_con_modulos_en(lenguaje: &str, modulos: &str) -> Tarea {
         let dir = tempfile::tempdir().expect("dir");
         let toml = format!(
-            "nombre = \"memora\"\nlenguaje = \"rust\"\nimagen = \"imagen-falsa\"\nspec = \"spec.md\"\n[contrato]\ncmd = \"true\"\n[oculto]\ncmd = \"true\"\n[[requisito]]\nid = \"R2\"\ntitulo = \"Comandos\"\npeso = 2\nmodulos = [{modulos}]\n"
+            "nombre = \"memora\"\nlenguaje = \"{lenguaje}\"\nimagen = \"imagen-falsa\"\nspec = \"spec.md\"\n[contrato]\ncmd = \"true\"\n[oculto]\ncmd = \"true\"\n[[requisito]]\nid = \"R2\"\ntitulo = \"Comandos\"\npeso = 2\nmodulos = [{modulos}]\n"
         );
         fs::write(dir.path().join("tarea.toml"), toml).expect("escribe");
         Tarea::cargar_de(dir.path()).expect("carga la tarea")
@@ -1482,6 +1491,38 @@ modulos = ["config"]
             texto,
             "R2 Comandos: parcial; sin cumplir: test_R2::t: falla"
         );
+    }
+
+    #[test]
+    fn faltante_con_modulos_sobre_un_repo_shell_nombra_los_tests_que_no_pasan() {
+        let v = veredicto(
+            vec![req("R2", Cumplimiento::Parcial, Some(1))],
+            Some(0.5),
+            vec![],
+        );
+        let tarea = tarea_con_modulos_en("shell", r#""cmd", "cmd_keys""#);
+        let texto = paso_de_r2(&v, &tarea, &BTreeSet::new());
+        assert_eq!(
+            texto,
+            "R2 Comandos: parcial; sin cumplir: test_R2::t: falla"
+        );
+    }
+
+    #[test]
+    fn faltante_con_modulos_sobre_un_repo_shell_y_requisito_ausente_no_dice_falta_el_modulo() {
+        let v = veredicto(
+            vec![req("R2", Cumplimiento::Ausente, Some(0))],
+            Some(0.5),
+            vec![],
+        );
+        let tarea = tarea_con_modulos_en("shell", r#""cmd", "cmd_keys""#);
+        let texto = paso_de_r2(&v, &tarea, &BTreeSet::new());
+        assert_eq!(
+            texto,
+            "R2 Comandos: ausente; sin cumplir: test_R2::t: falla"
+        );
+        assert!(!texto.contains("falta el módulo"), "{texto}");
+        assert!(!texto.contains("faltan los módulos"), "{texto}");
     }
 
     #[test]
