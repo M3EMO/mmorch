@@ -81,6 +81,7 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 55 | P59: "B". Un test inestable con una cota inferior de Wilson al 90 % menor que 0,5 cuenta como falla. Uno con una cota de al menos 0,5 pone tope 2 a su requisito. La nube 9 lo construye en la Tarea 40. |
 | 56 | P-mod1: "P-mod1 a". El informe filtra la lista `modulos` de un requisito sin cumplir contra los módulos del repo evaluado. Para los que existen escribe "revisar". Si no queda ninguno, escribe "falta" con la lista entera. Ver Tarea 42. |
 | 57 | Contrato del juez: "Sí, al planner", sobre la propuesta del orquestador. El usuario había preguntado: "El juez tiene un contrato de toml? quizas necesita una rubrica y contrato para ser mas robusto". El juez responde todos los ítems pedidos, y Root reintenta una vez los que falten o no pasen el gate. Entra antes de la calibración real. Ver Tarea 44. |
+| 58 | P60: "P60 c". El usuario había preguntado: "Que le falta a root? terminemos". El cierre del hito 1 es corto, con validez automática: la Tarea 12b mide el orden conocido y los defectos reales, sin el juicio humano de G3. G3, G4, Colab (Tarea 7h) y Graft (Tareas 16b y la corrida de Graft de la 16, con G5) pasan al hito 1b. Acota las decisiones 12, 13, 36 y 38. |
 
 ## Patterns to Mirror
 
@@ -2978,3 +2979,139 @@ No hay preguntas nuevas para el usuario.
 6. Siguen la imagen del builder, la credencial, `NETRC`, la corrida de memora, Colab, Graft con G5 y los paquetes a ciegas con G3.
 
 No hay preguntas nuevas para el usuario.
+
+## Vuelta del 2026-11-02: brasa del Validate, Tarea 44 y su mezcla
+
+**Validate de 7 y 13, brasa.** El orquestador la corrió sola, con `r00t` release de 3ea49f1, las claves y el `ROOT_HOME` real. El Validate entero duró de 15:03 a 18:27 y gastó 0,53 USD: memora 0,35 y brasa 0,18. Las salidas están en `~/.cache/root-wt/validate14/`.
+
+| Repo | Decisión | Contrato | Oculto | Funciona | Completitud | Estructura | Arquitectura | Diseño | Ítems del juez sin nivel |
+|---|---|---|---|---|---|---|---|---|---|
+| brasa-ecc | listo | 53/53 | 20/21 | 0,986 | 0,938 | 0,190 | 0,567 | 0,333 | 0 |
+| brasa-sdlc | bloqueado (R12) | 34/53 | 10/21 | 0,595 | 0,562 | 0,603 | 0,500 | 0,795 | 0 |
+
+- Cumple: brasa-ecc da 20/21, y su único paso es "R3 ... revisar el módulo scene". Los pasos de brasa-sdlc nombran módulos, por ejemplo "R9 ... falta el módulo gltf_load".
+- Cumple: el juez dio nivel a los 10 ítems en los dos repos, y ninguna dimensión quedó sin veredicto por cobertura.
+- No cumple: el juez sale al revés en Estructura (0,190 contra 0,603) y en Diseño (0,333 contra 0,795).
+
+**Tarea 44.** El usuario escribió: "Sí, mezclá". El builder local la construyó en `laptop/tarea-44`, de f782efc a cb8cd10, por 1,54 USD. El informe es `docs/builds/2026-11-02-build-local-44.md`.
+
+| Parte | Commit |
+|---|---|
+| 1. Ids obligatorios en el prompt del juez | f782efc |
+| 2. Lectura de la respuesta | 4befa9e |
+| 3. Un reintento por juicio | 9289de5 |
+| Informe | cb8cd10 |
+
+- La suite dio 2011 verdes, 0 fallas y 2 ignorados, sin podman y con podman.
+- No se escribió el test de integración del tope lleno con `JuezProveedor`. Un test del trait con un modelo falso cubre el caso.
+- Si el reintento falla, Root deja solo "el juez no respondió tras un reintento", sin la causa.
+- El builder ajustó 9 tests viejos: una respuesta que omite ítems ahora pide un segundo envío.
+
+**Mezcla y medición.** El usuario escribió: "Sí, las dos cosas". La mezcla es 25084f1, sin conflictos, con el árbol igual a cb8cd10. Dos evaluaciones de memora-ecc corren con `r00t` release de 25084f1, en `~/.cache/root-wt/validate15/`.
+
+## Desempates técnicos 23 (Opus, 2026-11-02): preguntas de la Tarea 44
+
+1. **Gate que falla dos veces.** El motivo conserva la causa: "la evidencia no pasó el gate tras un reintento". Lo mismo vale para las otras causas: "el juez no dio un nivel válido tras un reintento" y "el juez no respondió tras un reintento". Razón: `confianza` debe decir por qué falta cada ítem, y la calibración necesita separar las causas.
+2. **Nivel inválido.** Rompe el contrato y va al reintento. Un nivel mal tipado o fuera de 0 a 3 no es un nivel ni un `sin_evidencia`, y el contrato pide uno de los dos.
+3. **Id repetido.** Se confirma: la repetición rompe el contrato, como dice la Tarea 44.
+4. **Nivel y `sin_evidencia` juntos.** Se confirma que gana el nivel: su evidencia pasa por el gate igual, así que un nivel sin evidencia válida no sobrevive.
+5. **Hallazgos del reintento.** Se confirma que se ignoran: el reintento pide solo ítems.
+6. **Costo.** Se confirma. Para que la calibración pueda contar los reintentos, el evento de la llamada de reintento lleva `extra.reintento_juez = true`.
+7. **Sección REINTENTO antes de EXTRACTOS.** Se confirma: queda junto a la lista de ids que el juez debe responder.
+8. **Test del tope con clave falsa.** Se acepta y se escribe. El test usa un `ROOT_HOME` de prueba, una clave falsa y un servidor HTTP falso en `127.0.0.1`. Nunca llega a una API real, y cubre el camino de `JuezProveedor` con el tope lleno.
+
+### Tarea 45: Motivos del reintento, nivel inválido y marca de reintento
+- **Action**: los desempates 1, 2, 6 y 8 de arriba.
+- **Dónde**: en la laptop, con el builder local. Brief: `docs/builds/brief-local-45.md`. Va antes de la calibración, porque cambia qué ítems del juez se reintentan.
+- **Validate**: `cargo test`:
+  - Una evidencia que falla el gate dos veces deja "la evidencia no pasó el gate tras un reintento".
+  - Un nivel "alto" o 5 dispara el reintento. Si vuelve inválido, deja "el juez no dio un nivel válido tras un reintento".
+  - La llamada de reintento registra `extra.reintento_juez = true` en su evento.
+  - `JuezProveedor` con el tope de API lleno no envía el reintento. El test usa una clave falsa y un servidor falso en `127.0.0.1`.
+
+## Criterio de la Tarea 44 y la inversión del juez
+
+**Criterio de la Tarea 44.** Antes del contrato, memora-ecc dejó 6, 5 y 1 de 10 ítems del juez sin nivel. La Tarea 44 cumple si, en cada una de las dos evaluaciones de memora-ecc con 25084f1:
+- quedan como máximo 2 de 10 ítems sin nivel, por cualquier motivo, `sin_evidencia` incluido; y
+- Arquitectura y Diseño tienen veredicto en las dos evaluaciones.
+
+Razón: con 2 ítems de 10 sin nivel, las dos dimensiones conservan la cobertura de dos tercios, y su valor deja de saltar entre "sin veredicto" y un número. Si no cumple, el planner revisa los motivos de cada faltante antes de la calibración.
+
+**Inversión de Estructura y Diseño en brasa.**
+- brasa-sdlc tiene menos código y recibe más puntaje del juez que brasa-ecc. El juez puntúa la calidad del código que ve, no lo que falta. Lo que falta lo mide Completitud.
+- **Desempate: no se cambia antes de la calibración.** La calibración mide si el juez detecta defectos inyectados. La Tarea 12b mide si Root ordena bien los pares conocidos. Si el juez falla esas mediciones, sus dimensiones no entran a `global`, que es la defensa del GOAL para este caso.
+- Las salidas de brasa del Validate 14 quedan como caso de referencia para la Tarea 12b.
+
+## Orden de trabajo (2026-11-02, después de la Tarea 44)
+
+1. **Dos evaluaciones de memora-ecc con 25084f1.** Ya corren. Dan el criterio de la Tarea 44.
+2. **Tarea 45 con el builder local.** En paralelo con el paso 1, con `ROOT_SIN_PODMAN=1`, sin commits hasta que terminen las evaluaciones.
+3. **Mezcla de la Tarea 45.** Espera la orden del usuario.
+4. **Calibración real (Tarea 12).** Con `--tope-usd 25`, sobre la mezcla de la 45. Después, la comparación de `global` de la Tarea 13.
+5. Siguen la imagen del builder, la credencial, `NETRC`, la corrida de memora, Colab, Graft con G5 y los paquetes a ciegas con G3.
+
+No hay preguntas nuevas para el usuario.
+
+## Decisión 58 (2026-11-02): alcance del cierre del hito 1
+
+El usuario preguntó: "Que le falta a root? terminemos". El orquestador listó 10 pasos y propuso tres alcances. El usuario respondió: "P60 c". El orquestador había avisado que la opción c cambia las decisiones 12, 36 y 38.
+
+**Primera evaluación del juez nuevo.** memora-ecc #1 con `r00t` release de 25084f1 tardó 24 minutos y gastó 0,107 USD. Dio `listo`, contrato 61/61 y oculto 66/68. Quedaron 0 de 10 ítems del juez sin nivel. Arquitectura dio 0,567, Diseño 0,179 y Estructura 0,429. Solo Eficiencia quedó sin veredicto: "la tarea no define [eficiencia]". La segunda evaluación sigue corriendo.
+
+**Decisiones que la 58 acota.** Las decisiones originales quedan en la tabla. Su parte humana pasa al hito 1b:
+- **Decisión 12 (P2).** La calificación a ciegas del usuario (G3) pasa al hito 1b. P1, P3 y P4 siguen en el hito 1: rúbricas, requisitos aprobados y recall de 0,8 o más.
+- **Decisión 13 (P5).** El kappa ponderado de 0,6 o más por dimensión y la misma decisión en 5 de 6 paquetes pasan al hito 1b, porque los mide G3.
+- **Decisión 36 (P39 c y P44 c).** memora y brasa siguen calibrando el evaluador en el hito 1. G4 (si memora sigue después de G3) pasa al hito 1b. La corrida de `graft-lector-planes` de la Tarea 16 pasa al hito 1b.
+- **Decisión 38 (P49 b).** En el hito 1, la Tarea 16 corre solo memora. La corrida de Graft pasa al hito 1b.
+
+**Tarea 12b en el hito 1 (validez automática).**
+- Mide dos fuentes externas a Root: el orden conocido y los defectos reales conocidos.
+- `--preparar-ciego` sigue existiendo, pero no se usa en el hito 1.
+- En `validez.json` queda **sin medir** la métrica de acuerdo con el usuario: el kappa ponderado por ítem, el acuerdo en la decisión y el Spearman del orden de los 6 paquetes. La Tarea 12b ya pide "sin medir" para una fuente que falta, nunca 0 ni 1.
+- La exactitud de orden y el recall de defectos reales se miden en el hito 1.
+
+**Criterios de aceptación que pasan al hito 1b.**
+- "`validez.json` informa el acuerdo con la calificación a ciegas del usuario. Kappa ponderado ≥ 0,6 por dimensión y la misma decisión en 5 de los 6 paquetes (decisión 13)."
+- La corrida real de Colab de la Tarea 7h. En el hito 1, el test de GPU de brasa sigue `Pendiente` con su motivo, y el criterio "cada test `Pendiente` por entorno figura en el informe con su motivo" ya se cumple.
+- La corrida de `graft-lector-planes` con G5.
+
+## Hito 1b (después del cierre del hito 1)
+
+- **G3.** La laptop arma los 6 paquetes a ciegas con `--preparar-ciego`. Opus lee `validez/rastros.json` antes de entregarlos. El usuario califica. `validez.json` suma la métrica de acuerdo.
+- **G4.** Después de G3, el usuario decide si memora sigue como banco (P44 c).
+- **Colab (Tarea 7h).** La corrida real sobre `test_rendimiento[gpu-10000-res1]`, con T4, `unshare -rn` y tope de 2 horas.
+- **Graft (Tareas 16b y 16).** Opus escribe el oráculo de `graft-lector-planes`. El usuario aprueba G5. Después corre `r00t corre --tarea graft-lector-planes`.
+
+## Orden de trabajo final del hito 1 (2026-11-02)
+
+1. **Segunda evaluación de memora-ecc con 25084f1.** Ya corre. Con la primera, decide el criterio de la Tarea 44 de "Criterio de la Tarea 44 y la inversión del juez". La corre el orquestador. No es una tarea nueva.
+2. **Tarea 45.** La construye el builder local, con el brief `docs/builds/brief-local-45.md`. Después la mezcla, con la orden del usuario.
+3. **Calibración real (Tarea 12).** La corre el orquestador en la laptop, con `--tope-usd 25`, sobre memora y brasa, con `n = 20` (decisiones 48 y 57). Después compara `global` de memora-ecc contra memora-sdlc, y de brasa-ecc contra brasa-sdlc: es la segunda parte del criterio de la Tarea 13. No necesita brief. Si la calibración deja preguntas, vuelven al planner.
+4. **Imagen del builder, credencial y `NETRC`.** El orquestador construye `root-builder:1`, prueba la credencial de Claude en solo lectura y corre `NETRC` con un índice privado de prueba (Tareas 26 y 30). No es una tarea nueva. Si aparece un defecto, el planner escribe una tarea chica para el builder local, con su brief.
+5. **Corrida real de memora (Tarea 16).** Espera el paso 4. El orquestador corre `r00t corre --tarea memora --config ecc-haiku`. Gasta cupo: una construcción completa con Haiku (decisión 38, acotada por la 58). La fila de `runs.jsonl` debe traer el veredicto de nueve dimensiones, el `Informe` y el resumen.
+6. **Casos de validez (Tarea 46, nueva).** Opus arma `$ROOT_HOME/validez/` con dos fuentes:
+   - orden conocido: memora-ecc sobre memora-sdlc, brasa-ecc sobre brasa-sdlc, y commits viejos contra commits nuevos del mismo repo;
+   - defectos reales: los 4 de la revisión de Opus y los 3 del code-review de ECC en F1 (`docs/contexto/veredicto-ecc-f1.md`), más los defectos registrados en los logs del banco, cada uno con su `archivo:línea`.
+   La hace Opus en una sesión propia, porque elegir los casos es juicio. No necesita brief de builder: los casos viven en `ROOT_HOME`, fuera del repo.
+7. **Validez automática.** El orquestador corre `r00t oraculo validar --casos $ROOT_HOME/validez/`. Gasta API: una evaluación por caso. `validez.json` debe dar la exactitud de orden y el recall, con el acuerdo con el usuario "sin medir". El criterio es la exactitud de orden de 1,0 (desempate 44 de "Desempates técnicos 11") y un recall de 0,8 o más (decisión 12).
+8. **Cierre (Tarea 47, nueva).**
+   - El orquestador corre `/ecc:code-review` sobre la rama `claude/root-e7813e`, contra el commit base del hito.
+   - Opus verifica cada hallazgo crítico y alto en el código, como hizo con la revisión de nube. Los confirmados van a una tarea del builder local, con su brief.
+   - El orquestador corre los comandos de la sección "Validation" del plan. `r00t aprende --replay` tiene una sola fila real, así que su métrica queda "sin datos suficientes".
+   - Opus escribe la nota final en `docs/cierre-hito-1.md`: cada criterio de "Acceptance" con su estado, su evidencia y su commit, y la lista del hito 1b.
+   - El usuario aprueba el cierre.
+
+**Tareas nuevas.**
+- **Tarea 46: casos de validez.** La corre Opus. No necesita brief: es trabajo de juicio sobre datos del banco, y su resultado vive en `ROOT_HOME`.
+- **Tarea 47: cierre.** La corren el orquestador (code review y comandos) y Opus (verificación y nota final). Los arreglos que salgan del code review van al builder local, con un brief por tarea.
+
+**PRD.** "Delivery Milestones" no necesita un cambio para cerrar el hito 1. El "Outcome" del hito 1 sigue siendo verdad: "Route, Oracle, Observe y Track corren desde el bootstrap del banco". Sumar una fila para el hito 1b cambiaría un documento que el usuario revisa a mano, así que va como P61.
+
+**Preguntas abiertas (sin responder)**
+
+- **P61. ¿El hito 1b entra al PRD?** El hito 1b junta G3, G4, Colab y Graft temprano. Hoy vive solo en el plan.
+
+  - a) Sumar una fila "1b" en "Delivery Milestones" del PRD, con su outcome: "El juicio de Root coincide con el del usuario, y Graft corre su primera tarea medida".
+  - b) No tocar el PRD. El hito 1b vive en el plan del hito 1 y en la nota de cierre.
+
+  Mi recomendación es b): el hito 1b completa el hito 1 y no es un resultado de negocio nuevo. El PRD queda como lo dejaste en P36.
