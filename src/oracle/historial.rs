@@ -1,7 +1,8 @@
 //! Historial de evidencia por versión del repo (Tarea 39).
 //!
 //! Root guarda el resultado de cada test por corrida de suite en
-//! `ROOT_HOME/evidencia/<tarea>/<hash>/historial.jsonl`. El hash sale del contenido de la copia del repo.
+//! `ROOT_HOME/evidencia/<tarea>/<hash>/historial.jsonl`. El hash sale del contenido de la copia del repo y de
+//! las carpetas `oculto/` y `contrato/` de la tarea.
 //! Una versión nueva arranca con un historial vacío. Solo guarda ids y resultados, nunca el contenido de un
 //! test, y vive fuera de `oraculos/`.
 
@@ -28,6 +29,10 @@ pub const ARCHIVO_HISTORIAL: &str = "historial.jsonl";
 const VERSION_LINEA: u32 = 1;
 /// Días sin uso a partir de los cuales `evaluar` borra el historial de una versión.
 const CADUCIDAD_HISTORIAL: Duration = Duration::from_secs(30 * 24 * 3600);
+/// Carpetas de suite de la tarea que entran en la clave de la versión, en ese orden.
+const SUITES_DEL_ORACULO: [&str; 2] = ["oculto", "contrato"];
+/// Marca fija de una carpeta de suite que no existe en la tarea.
+const AUSENTE: &str = "ausente";
 
 /// Resultado de un test en una línea del historial: `pasa`, `falla` u `omite`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,11 +88,42 @@ pub fn hash_de_version(repo: &Path) -> io::Result<String> {
         digest.update([0]);
         digest.update(&contenido);
     }
-    Ok(digest
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+    Ok(hexadecimal(&digest.finalize()))
+}
+
+/// Clave del historial de una versión: el hash del repo y el de las carpetas `oculto/` y `contrato/` de la
+/// tarea (Desempates técnicos 19). Un oráculo cambiado da otra clave, y arranca con un historial vacío.
+/// Una carpeta de suite que no existe entra como `AUSENTE`, sin error.
+pub fn clave_de_version(repo: &Path, tarea_dir: &Path) -> io::Result<String> {
+    let mut digest = Sha256::new();
+    digest.update(hash_de_version(repo)?.as_bytes());
+    digest.update([0]);
+    for suite in SUITES_DEL_ORACULO {
+        digest.update(suite.as_bytes());
+        digest.update([0]);
+        digest.update(hash_de_suite(&tarea_dir.join(suite))?.as_bytes());
+        digest.update([0]);
+    }
+    Ok(hexadecimal(&digest.finalize()))
+}
+
+/// Hash de una carpeta de suite, con el mismo recorrido que `hash_de_version`. Una carpeta que no existe da
+/// `AUSENTE`. Un archivo en su lugar es un error: la tarea no tiene esa carpeta.
+fn hash_de_suite(carpeta: &Path) -> io::Result<String> {
+    match fs::metadata(carpeta) {
+        Ok(meta) if meta.is_dir() => hash_de_version(carpeta),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} no es una carpeta", carpeta.display()),
+        )),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(AUSENTE.to_string()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Hexadecimal en minúsculas de `bytes`.
+fn hexadecimal(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Junta los archivos regulares de `dir` con su ruta relativa a `raiz`, en bytes con `/`.
@@ -632,6 +668,73 @@ mod tests {
         assert!(
             historial_fuera.is_file(),
             "un nombre de tarea con ruta borró algo fuera de evidencia/"
+        );
+    }
+
+    /// Repo y carpeta de tarea base para las claves: la tarea tiene `oculto/` y `contrato/`, ambas vacías.
+    fn repo_y_tarea(base: &Path) -> (PathBuf, PathBuf) {
+        let repo = repo_base(base);
+        let tarea = base.join("tarea");
+        fs::create_dir_all(tarea.join("oculto")).expect("oculto");
+        fs::create_dir_all(tarea.join("contrato")).expect("contrato");
+        (repo, tarea)
+    }
+
+    #[test]
+    fn historial_clave_cambia_si_cambia_un_archivo_de_oculto() {
+        let base = tempfile::tempdir().expect("base");
+        let (repo, tarea) = repo_y_tarea(base.path());
+        escribir(&tarea, "oculto/test_b.py", b"def t3():\n    pass\n");
+        let antes = clave_de_version(&repo, &tarea).expect("clave");
+        escribir(&tarea, "oculto/test_b.py", b"def t3():\n    assert False\n");
+        assert_ne!(clave_de_version(&repo, &tarea).expect("clave"), antes);
+    }
+
+    #[test]
+    fn historial_clave_cambia_si_cambia_un_archivo_de_contrato() {
+        let base = tempfile::tempdir().expect("base");
+        let (repo, tarea) = repo_y_tarea(base.path());
+        escribir(&tarea, "contrato/test_a.py", b"def t1():\n    pass\n");
+        let antes = clave_de_version(&repo, &tarea).expect("clave");
+        escribir(
+            &tarea,
+            "contrato/test_a.py",
+            b"def t1():\n    assert False\n",
+        );
+        assert_ne!(clave_de_version(&repo, &tarea).expect("clave"), antes);
+    }
+
+    #[test]
+    fn historial_clave_es_la_misma_con_el_mismo_repo_y_el_mismo_oraculo() {
+        let base = tempfile::tempdir().expect("base");
+        let (repo, tarea) = repo_y_tarea(base.path());
+        escribir(&tarea, "oculto/test_b.py", b"def t3():\n    pass\n");
+        let primera = clave_de_version(&repo, &tarea).expect("clave");
+        assert_eq!(clave_de_version(&repo, &tarea).expect("clave"), primera);
+    }
+
+    #[test]
+    fn historial_clave_sin_carpetas_de_suites_no_es_error() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_base(base.path());
+        // La tarea no existe: ni `oculto/` ni `contrato/`.
+        let tarea = base.path().join("sin-tarea");
+        let clave = clave_de_version(&repo, &tarea).expect("sin carpetas, no es error");
+        assert_eq!(clave.len(), 64, "{clave}");
+        assert!(es_hash(&clave), "{clave}");
+    }
+
+    #[test]
+    fn historial_clave_no_se_confunde_entre_oculto_y_contrato() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_base(base.path());
+        let en_oculto = base.path().join("en-oculto");
+        escribir(&en_oculto, "oculto/test_b.py", b"def t3():\n    pass\n");
+        let en_contrato = base.path().join("en-contrato");
+        escribir(&en_contrato, "contrato/test_b.py", b"def t3():\n    pass\n");
+        assert_ne!(
+            clave_de_version(&repo, &en_oculto).expect("clave"),
+            clave_de_version(&repo, &en_contrato).expect("clave"),
         );
     }
 }

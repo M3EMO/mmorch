@@ -538,11 +538,12 @@ fn evaluar_con(
     let copia = temporal(&tmp).map_err(|e| infra("directorio temporal", e))?;
     let repo_copia = copia.path().join("repo");
     copiar_repo(&repo, &repo_copia).map_err(|e| infra("copia del repo", e))?;
-    // El historial de evidencia es de esta versión del repo (Tarea 39): el hash sale de la copia.
-    // Sin historial (calibración), no hay versión que calcular ni archivo que leer o escribir, y no se borra.
+    // El historial de evidencia es de esta versión del repo y de este oráculo (Tarea 39, Desempates técnicos
+    // 19): la clave sale de la copia y de las suites de la tarea. Sin historial (calibración), no hay versión
+    // que calcular ni archivo que leer o escribir, y no se borra.
     let ruta_historial = if o.historial {
-        let version = historial::hash_de_version(&repo_copia)
-            .map_err(|e| infra("hash de la versión del repo", e))?;
+        let version = historial::clave_de_version(&repo_copia, &tarea.dir)
+            .map_err(|e| infra("clave de la versión del repo", e))?;
         let ruta = historial::ruta(&home, &tarea.nombre, &version)?;
         // Las versiones sin uso en 30 días pierden su historial. La versión actual no se borra.
         historial::borrar_viejos(&home, &tarea.nombre, &version, SystemTime::now());
@@ -6292,10 +6293,10 @@ mod tests {
     /// Oculto con `t3` fallando y `t4` pasando: una corrida que deja `t3` en la falla del historial.
     const JUNIT_OCULTO_T3_FALLA: &str = r#"<testsuite><testcase classname="tests.test_b" name="t3"><failure message="x"/></testcase><testcase classname="tests.test_b" name="t4"/></testsuite>"#;
 
-    /// Ruta del historial de la versión actual de `repo` para `tarea-rust`.
-    fn historial_de(home: &Path, repo: &Path) -> PathBuf {
-        let version = historial::hash_de_version(repo).expect("hash de la versión");
-        historial::ruta(home, "tarea-rust", &version).expect("ruta del historial")
+    /// Ruta del historial de la versión actual de `repo` y del oráculo de `tarea`, en `home`.
+    fn historial_de(home: &Path, tarea: &Tarea, repo: &Path) -> PathBuf {
+        let version = historial::clave_de_version(repo, &tarea.dir).expect("clave de la versión");
+        historial::ruta(home, &tarea.nombre, &version).expect("ruta del historial")
     }
 
     #[test]
@@ -6359,6 +6360,43 @@ mod tests {
     }
 
     #[test]
+    fn oraculo_historial_con_un_archivo_de_oculto_cambiado_arranca_vacio() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let oculto = tarea.dir.join("oculto");
+        fs::create_dir_all(&oculto).expect("carpeta oculta");
+        fs::write(
+            oculto.join("test_b.py"),
+            "def test_t3():\n    assert False\n",
+        )
+        .expect("test oculto");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        // Primera evaluación: `t3` falla y su corrida queda en el historial del oráculo actual.
+        evaluar_falso(
+            &repo,
+            &tarea,
+            &home,
+            &correr_suites_oculto(JUNIT_OCULTO_T3_FALLA),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        // El oráculo cambia: se arregla el test `t3` en `oculto/`. El repo no cambia.
+        fs::write(oculto.join("test_b.py"), "def test_t3():\n    pass\n").expect("arregla el test");
+        let v = evaluar_falso(
+            &repo,
+            &tarea,
+            &home,
+            &correr_suites_oculto(JUNIT_OCULTO_VERDE),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        assert!(v.inestables.is_empty(), "{:?}", v.inestables);
+        assert!(!v.tasas.contains_key("oculto:test_b::t3"));
+        assert!(!v.corridas_acumuladas.contains_key("oculto:test_b::t3"));
+    }
+
+    #[test]
     fn oraculo_historial_no_guarda_el_contenido_de_los_tests_ocultos() {
         const MARCADOR: &str = "MARCADOR_OCULTO_39_NO_DEBE_SALIR";
         let base = tempfile::tempdir().expect("base");
@@ -6380,7 +6418,7 @@ mod tests {
             &herramientas(&[]),
         )
         .expect("evalúa");
-        let ruta = historial_de(&home, &repo);
+        let ruta = historial_de(&home, &tarea, &repo);
         assert!(ruta.is_file(), "falta {}", ruta.display());
         assert!(
             ruta.starts_with(home.join("evidencia")),
@@ -6431,7 +6469,7 @@ mod tests {
             &herramientas(&[]),
         )
         .expect("evalúa");
-        let ruta = historial_de(&home, &repo);
+        let ruta = historial_de(&home, &tarea, &repo);
         let antes = fs::read(&ruta).expect("lee el historial");
 
         // Sin historial, esa falla no vuelve `t3` inestable, y el historial no cambia.
@@ -6469,7 +6507,7 @@ mod tests {
             &herramientas(&[]),
         )
         .expect("evalúa");
-        let vieja = historial_de(&home, &repo);
+        let vieja = historial_de(&home, &tarea, &repo);
         let carpeta_vieja = vieja.parent().expect("carpeta de la versión").to_path_buf();
         // La versión vieja no se usó hace 31 días.
         historial_viejo(&vieja, 31);
@@ -6488,7 +6526,7 @@ mod tests {
             "sigue la versión sin uso en 31 días: {}",
             carpeta_vieja.display()
         );
-        let nueva = historial_de(&home, &repo);
+        let nueva = historial_de(&home, &tarea, &repo);
         assert!(
             nueva.is_file(),
             "falta el historial de la versión nueva: {}",
@@ -6511,7 +6549,7 @@ mod tests {
             &herramientas(&[]),
         )
         .expect("evalúa");
-        let vieja = historial_de(&home, &repo);
+        let vieja = historial_de(&home, &tarea, &repo);
         let carpeta_vieja = vieja.parent().expect("carpeta de la versión").to_path_buf();
         historial_viejo(&vieja, 31);
         fs::write(repo.join("src/lib.rs"), "pub fn f() -> u8 { 2 }\n").expect("cambia un archivo");
