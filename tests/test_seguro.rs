@@ -2,7 +2,8 @@
 //! temporales y el target en una carpeta por worktree, `ROOT_TESTS_BASE/<hash>/`. Un lock de podman
 //! (`ROOT_TESTS_BASE/podman.lock`) hace esperar a las corridas que no tienen `ROOT_SIN_PODMAN=1`.
 //! Un `cargo` falso, que vuelca el entorno y los argumentos, reemplaza a cargo por
-//! `ROOT_TEST_SEGURO_CARGO`. Así no se paga una compilación anidada.
+//! `ROOT_TEST_SEGURO_CARGO`. Es un script de shell que se lanza con `sh`, nunca directo.
+//! Así no se paga una compilación anidada.
 //! Cada test arma el entorno del hijo con `Command::env`: nada cambia el entorno del proceso.
 
 use std::collections::HashMap;
@@ -62,8 +63,10 @@ fn orden(
     quitar: &[&str],
     args: &[&str],
 ) -> Command {
-    let mut orden = Command::new(script);
+    // `sh` lee el script en vez de ejecutarlo: no necesita el bit de ejecución (evita `ETXTBSY`).
+    let mut orden = Command::new("sh");
     orden
+        .arg(script)
         .args(args)
         .env("DEEPSEEK_API_KEY", "x")
         .env("ANTHROPIC_API_KEY", "y")
@@ -450,4 +453,34 @@ fn escribir_ejecutable_deja_solo_el_final_y_ejecutable() {
         fs::read_to_string(&ruta).expect("lee el ejecutable"),
         "#!/usr/bin/env bash\necho hola\n"
     );
+}
+
+/// Quita el bit de ejecución. El script y el falso deben correr igual: los lanza `sh`, que solo lee.
+fn sin_bit_de_ejecucion(ruta: &Path) {
+    fs::set_permissions(ruta, fs::Permissions::from_mode(0o644))
+        .expect("quita el bit de ejecución");
+}
+
+#[test]
+fn test_seguro_lanza_el_script_con_sh_sin_bit_de_ejecucion() {
+    let dir = dir_de_prueba();
+    let copia = copia_del_script(dir.path(), "repo-a");
+    sin_bit_de_ejecucion(&copia);
+    let (estado, _, argumentos) = correr_con(&copia, dir.path(), 0, &[], &[], &["algo"]);
+    assert!(estado.success(), "{estado:?}");
+    assert_eq!(argumentos, ["test", "algo"]);
+}
+
+#[test]
+fn test_seguro_lanza_el_cargo_falso_con_sh_sin_bit_de_ejecucion() {
+    let dir = dir_de_prueba();
+    let cargo = falso(dir.path(), 0);
+    sin_bit_de_ejecucion(&cargo);
+    let estado = orden(Path::new(SCRIPT), dir.path(), &cargo, &[], &[], &["algo"])
+        .status()
+        .expect("corre tools/test-seguro.sh");
+    assert!(estado.success(), "{estado:?}");
+    let args =
+        fs::read_to_string(dir.path().join("args.txt")).expect("el falso dejó sus argumentos");
+    assert_eq!(args.lines().collect::<Vec<_>>(), ["test", "algo"]);
 }

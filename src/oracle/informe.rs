@@ -146,11 +146,12 @@ pub fn informar(
     v: &Veredicto,
     tarea: &Tarea,
     reglas: &ReglasDecision,
+    presentes: &BTreeSet<String>,
     redactor: Option<&dyn Redactor>,
 ) -> Result<Informe, ErrorOraculo> {
     let rubricas = super::rubrica::cargar_embebidas()
         .map_err(|e| ErrorOraculo::Infra(format!("rúbricas embebidas: {e}")))?;
-    informar_con(v, tarea, reglas, &rubricas, redactor)
+    informar_con(v, tarea, reglas, &rubricas, presentes, redactor)
 }
 
 /// Arma el informe: decisión, requisitos, bloqueantes, riesgos, próximos pasos, resumen y confianza.
@@ -160,6 +161,7 @@ pub fn informar_con(
     tarea: &Tarea,
     reglas: &ReglasDecision,
     rubricas: &[Rubrica],
+    presentes: &BTreeSet<String>,
     redactor: Option<&dyn Redactor>,
 ) -> Result<Informe, ErrorOraculo> {
     let decidido = decidir(v, tarea, reglas, rubricas);
@@ -183,7 +185,7 @@ pub fn informar_con(
         motivo,
         requisitos: v.requisitos.clone(),
         riesgos: riesgos(v, tarea),
-        proximos_pasos: proximos_pasos(v, tarea, &bloqueantes),
+        proximos_pasos: proximos_pasos(v, tarea, &bloqueantes, presentes),
         bloqueantes,
         resumen: resumen(v, &decidido.disparos),
         confianza: confianza(v, tarea),
@@ -639,7 +641,12 @@ fn riesgos(v: &Veredicto, tarea: &Tarea) -> Vec<Accion> {
 
 /// Próximos pasos: los bloqueantes primero, luego los requisitos ausentes o parciales. Cada uno cita
 /// su requisito o su hallazgo.
-fn proximos_pasos(v: &Veredicto, tarea: &Tarea, bloqueantes: &[String]) -> Vec<Accion> {
+fn proximos_pasos(
+    v: &Veredicto,
+    tarea: &Tarea,
+    bloqueantes: &[String],
+    presentes: &BTreeSet<String>,
+) -> Vec<Accion> {
     let mut candidatos = Vec::new();
     for h in v
         .hallazgos
@@ -670,7 +677,7 @@ fn proximos_pasos(v: &Veredicto, tarea: &Tarea, bloqueantes: &[String]) -> Vec<A
         let falta = faltante(
             e,
             modulos.get(e.id.as_str()).copied().unwrap_or(&[]),
-            ausente,
+            presentes,
         );
         candidatos.push(Candidato {
             peso: e.peso,
@@ -685,27 +692,33 @@ fn proximos_pasos(v: &Veredicto, tarea: &Tarea, bloqueantes: &[String]) -> Vec<A
     ordenar(candidatos)
 }
 
-/// Lo que falta de un requisito sin cumplir: sus módulos, o sus pruebas que no pasan.
-fn faltante(e: &EstadoRequisito, modulos: &[String], ausente: bool) -> String {
-    match (modulos, ausente) {
-        ([], _) => {
-            let sin_pasar: Vec<&str> = e
-                .evidencia
-                .iter()
-                .filter(|x| !x.ends_with(": pasa"))
-                .map(String::as_str)
-                .take(3)
-                .collect();
-            if sin_pasar.is_empty() {
-                "; revisar sus pruebas".to_string()
-            } else {
-                format!("; sin cumplir: {}", unir(&sin_pasar))
-            }
-        }
-        ([uno], true) => format!("; falta el módulo {uno}"),
-        (varios, true) => format!("; faltan los módulos {}", unir(varios)),
-        ([uno], false) => format!("; revisar el módulo {uno}"),
-        (varios, false) => format!("; revisar los módulos {}", unir(varios)),
+/// Lo que falta de un requisito sin cumplir. Sin módulos, sus pruebas que no pasan. Con módulos, los que
+/// existen en el repo para revisar; si ninguno existe, la lista entera, que falta.
+fn faltante(e: &EstadoRequisito, modulos: &[String], presentes: &BTreeSet<String>) -> String {
+    if modulos.is_empty() {
+        let sin_pasar: Vec<&str> = e
+            .evidencia
+            .iter()
+            .filter(|x| !x.ends_with(": pasa"))
+            .map(String::as_str)
+            .take(3)
+            .collect();
+        return if sin_pasar.is_empty() {
+            "; revisar sus pruebas".to_string()
+        } else {
+            format!("; sin cumplir: {}", unir(&sin_pasar))
+        };
+    }
+    let existen: Vec<&str> = modulos
+        .iter()
+        .map(String::as_str)
+        .filter(|m| presentes.contains(*m))
+        .collect();
+    match existen.as_slice() {
+        [] if modulos.len() == 1 => format!("; falta el módulo {}", modulos[0]),
+        [] => format!("; faltan los módulos {}", unir(modulos)),
+        [uno] => format!("; revisar el módulo {uno}"),
+        varios => format!("; revisar los módulos {}", unir(varios)),
     }
 }
 
@@ -1289,7 +1302,15 @@ modulos = ["config"]
     }
 
     fn informe_de(v: &Veredicto) -> Informe {
-        informar_con(v, &tarea(), &ReglasDecision::default(), &[], None).expect("informa")
+        informar_con(
+            v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &[],
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa")
     }
 
     /// Redactor falso que devuelve textos fijos y cuenta sus llamadas.
@@ -1356,6 +1377,113 @@ modulos = ["config"]
         assert!(r4.texto.contains("replica y red"), "{}", r4.texto);
     }
 
+    /// Tarea con un requisito R2 cuyos módulos son `modulos` (lista TOML entre corchetes, sin ellos).
+    fn tarea_con_modulos(modulos: &str) -> Tarea {
+        let dir = tempfile::tempdir().expect("dir");
+        let toml = format!(
+            "nombre = \"memora\"\nlenguaje = \"rust\"\nimagen = \"imagen-falsa\"\nspec = \"spec.md\"\n[contrato]\ncmd = \"true\"\n[oculto]\ncmd = \"true\"\n[[requisito]]\nid = \"R2\"\ntitulo = \"Comandos\"\npeso = 2\nmodulos = [{modulos}]\n"
+        );
+        fs::write(dir.path().join("tarea.toml"), toml).expect("escribe");
+        Tarea::cargar_de(dir.path()).expect("carga la tarea")
+    }
+
+    /// Texto del próximo paso de R2 en el informe de `v` con los módulos `presentes`.
+    fn paso_de_r2(v: &Veredicto, t: &Tarea, presentes: &BTreeSet<String>) -> String {
+        let i =
+            informar_con(v, t, &ReglasDecision::default(), &[], presentes, None).expect("informa");
+        i.proximos_pasos
+            .iter()
+            .find(|a| a.refs == ["R2".to_string()])
+            .expect("R2 va en los próximos pasos")
+            .texto
+            .clone()
+    }
+
+    #[test]
+    fn faltante_parcial_con_un_modulo_presente_nombra_solo_ese_para_revisar() {
+        let presentes = BTreeSet::from(["cmd".to_string()]);
+        let v = veredicto(
+            vec![req("R2", Cumplimiento::Parcial, Some(1))],
+            Some(0.5),
+            vec![],
+        );
+        let texto = paso_de_r2(&v, &tarea_con_modulos(r#""cmd", "cmd_keys""#), &presentes);
+        assert_eq!(texto, "R2 Comandos: parcial; revisar el módulo cmd");
+        assert!(!texto.contains("cmd_keys"), "{texto}");
+    }
+
+    #[test]
+    fn faltante_ausente_con_un_modulo_presente_dice_revisar_y_no_falta() {
+        let presentes = BTreeSet::from(["cmd".to_string()]);
+        let v = veredicto(
+            vec![req("R2", Cumplimiento::Ausente, Some(0))],
+            Some(0.5),
+            vec![],
+        );
+        let texto = paso_de_r2(&v, &tarea_con_modulos(r#""cmd""#), &presentes);
+        assert_eq!(texto, "R2 Comandos: ausente; revisar el módulo cmd");
+    }
+
+    #[test]
+    fn faltante_ausente_sin_ningun_modulo_presente_dice_falta_con_la_lista_entera() {
+        let presentes = BTreeSet::from(["otro".to_string()]);
+        let v = veredicto(
+            vec![req("R2", Cumplimiento::Ausente, Some(0))],
+            Some(0.5),
+            vec![],
+        );
+        let texto = paso_de_r2(&v, &tarea_con_modulos(r#""persist", "store""#), &presentes);
+        assert_eq!(
+            texto,
+            "R2 Comandos: ausente; faltan los módulos persist y store"
+        );
+    }
+
+    #[test]
+    fn faltante_parcial_sin_ningun_modulo_presente_dice_falta_con_la_lista_entera() {
+        let presentes = BTreeSet::new();
+        let v = veredicto(
+            vec![req("R2", Cumplimiento::Parcial, Some(1))],
+            Some(0.5),
+            vec![],
+        );
+        let texto = paso_de_r2(&v, &tarea_con_modulos(r#""persist", "store""#), &presentes);
+        assert_eq!(
+            texto,
+            "R2 Comandos: parcial; faltan los módulos persist y store"
+        );
+    }
+
+    #[test]
+    fn faltante_modulo_main_con_src_main_rs_dice_revisar_main() {
+        let dir = tempfile::tempdir().expect("dir");
+        fs::create_dir_all(dir.path().join("src")).expect("crea src");
+        fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").expect("escribe main");
+        let archivos = crate::oracle::perfiles::rust::archivos_rs(dir.path()).expect("lee");
+        let presentes = crate::oracle::perfiles::rust::modulos_presentes(&archivos);
+        let v = veredicto(
+            vec![req("R2", Cumplimiento::Parcial, Some(1))],
+            Some(0.5),
+            vec![],
+        );
+        let texto = paso_de_r2(&v, &tarea_con_modulos(r#""main""#), &presentes);
+        assert_eq!(texto, "R2 Comandos: parcial; revisar el módulo main");
+    }
+
+    #[test]
+    fn faltante_sin_modulos_sigue_nombrando_los_tests_que_no_pasan() {
+        let v = veredicto(
+            vec![req("R2", Cumplimiento::Parcial, Some(1))],
+            Some(0.5),
+            vec![],
+        );
+        let texto = paso_de_r2(&v, &tarea_con_modulos(""), &BTreeSet::new());
+        assert_eq!(
+            texto,
+            "R2 Comandos: parcial; sin cumplir: test_R2::t: falla"
+        );
+    }
+
     #[test]
     fn informe_memora_ecc_todo_cumplido_no_inventa_faltantes_y_cita_ids_reales() {
         let v = ecc();
@@ -1413,7 +1541,7 @@ modulos = ["config"]
             minimo: BTreeMap::from([("seguridad".to_string(), 0.8)]),
             ..ReglasDecision::default()
         };
-        let i = informar_con(&v, &tarea(), &reglas, &[], None).expect("informa");
+        let i = informar_con(&v, &tarea(), &reglas, &[], &BTreeSet::new(), None).expect("informa");
         assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
         assert!(i.motivo.contains("minimo_de_dimension"), "{}", i.motivo);
         assert!(i.motivo.contains("Seguridad"), "{}", i.motivo);
@@ -1424,7 +1552,7 @@ modulos = ["config"]
             .find(|p| p.dimension == Dimension::Seguridad)
             .expect("seguridad");
         seguridad.calibrada = false;
-        let i = informar_con(&v, &tarea(), &reglas, &[], None).expect("informa");
+        let i = informar_con(&v, &tarea(), &reglas, &[], &BTreeSet::new(), None).expect("informa");
         assert_eq!(i.decision, Decision::Listo, "{}", i.motivo);
     }
 
@@ -1443,7 +1571,7 @@ modulos = ["config"]
             completitud_minima: 0.90,
             ..ReglasDecision::default()
         };
-        let i = informar_con(&v, &tarea(), &reglas, &[], None).expect("informa");
+        let i = informar_con(&v, &tarea(), &reglas, &[], &BTreeSet::new(), None).expect("informa");
         assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
         assert!(i.motivo.contains("0,896 < 0,900"), "{}", i.motivo);
         assert!(
@@ -1462,7 +1590,7 @@ modulos = ["config"]
             completitud_minima: 0.90,
             ..ReglasDecision::default()
         };
-        let i = informar_con(&v, &tarea(), &reglas, &[], None).expect("informa");
+        let i = informar_con(&v, &tarea(), &reglas, &[], &BTreeSet::new(), None).expect("informa");
         assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
         assert!(i.motivo.contains("0,8996 < 0,9000"), "{}", i.motivo);
         assert!(
@@ -1487,7 +1615,7 @@ modulos = ["config"]
             minimo: BTreeMap::from([("seguridad".to_string(), 0.8)]),
             ..ReglasDecision::default()
         };
-        let i = informar_con(&v, &tarea(), &reglas, &[], None).expect("informa");
+        let i = informar_con(&v, &tarea(), &reglas, &[], &BTreeSet::new(), None).expect("informa");
         assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
         assert!(
             i.motivo.contains("calibrada en 0,600 < mínimo 0,800"),
@@ -1524,7 +1652,14 @@ modulos = ["config"]
         let mut v = ecc();
         v.puntajes[1].valor = 0.0;
         v.puntajes[1].sin_veredicto = Some("juez no corrido".into());
-        let i = informar(&v, &tarea(), &ReglasDecision::default(), None).expect("informa");
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
         assert_eq!(i.decision, Decision::SinDecision, "{}", i.motivo);
         assert!(
             i.motivo
@@ -1573,7 +1708,14 @@ modulos = ["config"]
         let mut v = ecc();
         v.puntajes[2].valor = 0.0;
         v.puntajes[2].sin_veredicto = Some("sin sondas".into());
-        let i = informar(&v, &tarea(), &ReglasDecision::default(), None).expect("informa");
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
         assert_eq!(i.decision, Decision::Listo, "{}", i.motivo);
         assert_eq!(i.confianza.sin_veredicto.len(), 1, "{:?}", i.confianza);
         assert_eq!(
@@ -1593,7 +1735,7 @@ modulos = ["config"]
             completitud_minima: 0.0,
             ..ReglasDecision::default()
         };
-        let i = informar(&v, &tarea(), &reglas, None).expect("informa");
+        let i = informar(&v, &tarea(), &reglas, &BTreeSet::new(), None).expect("informa");
         assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
         assert!(
             i.motivo.contains("test_oculto_fuera_de_requisitos"),
@@ -1612,7 +1754,14 @@ modulos = ["config"]
         // `tests/t.py::flaky` es la prueba de R1 en la tarea de prueba: el requisito lo cubre.
         let mut v = ecc();
         v.ocultos_fallidos = vec!["tests/t.py::flaky".into()];
-        let i = informar(&v, &tarea(), &ReglasDecision::default(), None).expect("informa");
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
         assert!(
             !i.motivo.contains("test_oculto_fuera_de_requisitos"),
             "{}",
@@ -1625,7 +1774,14 @@ modulos = ["config"]
         // Decisión 50: un test del contrato que falla y que ningún requisito prueba con `contrato:` da `NoListo`.
         let mut v = ecc();
         v.contrato_fallidos = vec!["tests/contrato.py::suelto".into()];
-        let i = informar(&v, &tarea(), &ReglasDecision::default(), None).expect("informa");
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
         assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
         assert!(
             i.motivo.contains("test_contrato_fuera_de_requisitos"),
@@ -1642,7 +1798,7 @@ modulos = ["config"]
             completitud_minima: 0.0,
             ..ReglasDecision::default()
         };
-        let i = informar(&v, &tarea(), &reglas, None).expect("informa");
+        let i = informar(&v, &tarea(), &reglas, &BTreeSet::new(), None).expect("informa");
         assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
         assert!(
             i.motivo.contains("test_contrato_fuera_de_requisitos"),
@@ -1660,7 +1816,8 @@ modulos = ["config"]
             .push("contrato:tests/contrato.py::caso".into());
         let mut v = ecc();
         v.contrato_fallidos = vec!["tests/contrato.py::caso".into()];
-        let i = informar(&v, &t, &ReglasDecision::default(), None).expect("informa");
+        let i =
+            informar(&v, &t, &ReglasDecision::default(), &BTreeSet::new(), None).expect("informa");
         assert!(
             !i.motivo.contains("test_contrato_fuera_de_requisitos"),
             "{}",
@@ -1673,7 +1830,8 @@ modulos = ["config"]
             .push("contrato:tests/contrato.py".into());
         let mut v = ecc();
         v.contrato_fallidos = vec!["tests/contrato.py::otro".into()];
-        let i = informar(&v, &t, &ReglasDecision::default(), None).expect("informa");
+        let i =
+            informar(&v, &t, &ReglasDecision::default(), &BTreeSet::new(), None).expect("informa");
         assert!(
             !i.motivo.contains("test_contrato_fuera_de_requisitos"),
             "{}",
@@ -1686,7 +1844,14 @@ modulos = ["config"]
         // Decisión 50: sin prefijo, el id apunta a la suite oculta. `tests/t.py::flaky` no cubre el contrato.
         let mut v = ecc();
         v.contrato_fallidos = vec!["tests/t.py::flaky".into()];
-        let i = informar(&v, &tarea(), &ReglasDecision::default(), None).expect("informa");
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
         assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
         assert!(
             i.motivo.contains("test_contrato_fuera_de_requisitos"),
@@ -1702,7 +1867,8 @@ modulos = ["config"]
         t.requisito[0].pruebas = vec!["contrato:tests/extra.py::caso_suelto".into()];
         let mut v = ecc();
         v.ocultos_fallidos = vec!["tests/extra.py::caso_suelto".into()];
-        let i = informar(&v, &t, &ReglasDecision::default(), None).expect("informa");
+        let i =
+            informar(&v, &t, &ReglasDecision::default(), &BTreeSet::new(), None).expect("informa");
         assert!(
             i.motivo.contains("test_oculto_fuera_de_requisitos"),
             "{}",
@@ -1720,7 +1886,14 @@ modulos = ["config"]
             Vec::new(),
         );
         v.puntajes[1].sin_veredicto = Some("juez no corrido".into());
-        let i = informar(&v, &tarea(), &ReglasDecision::default(), None).expect("informa");
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
         assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
         assert!(i.motivo.contains("bloqueo_requisito"), "{}", i.motivo);
         assert!(
@@ -1743,7 +1916,14 @@ modulos = ["config"]
             .expect("seguridad");
         seguridad.valor = 0.0;
         seguridad.sin_veredicto = Some("juez no corrido".into());
-        let i = informar(&v, &tarea(), &ReglasDecision::default(), None).expect("informa");
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
         assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
         assert_eq!(i.bloqueantes, vec!["h-seguridad-3".to_string()]);
         assert!(i.motivo.contains("bloqueo_seguridad"), "{}", i.motivo);
@@ -1761,7 +1941,14 @@ modulos = ["config"]
             .expect("seguridad");
         seguridad.valor = 0.0;
         seguridad.sin_veredicto = Some("juez no corrido".into());
-        let i = informar(&v, &tarea(), &ReglasDecision::default(), None).expect("informa");
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
         assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
         assert!(
             i.motivo.contains("test_oculto_fuera_de_requisitos"),
@@ -1809,8 +1996,15 @@ modulos = ["config"]
                 anclas: vec!["0".into(), "1".into(), "2".into(), "3".into()],
             }],
         }];
-        let i = informar_con(&v, &tarea(), &ReglasDecision::default(), &rubricas, None)
-            .expect("informa");
+        let i = informar_con(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &rubricas,
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
         assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
         assert!(i.motivo.contains("bloqueo_rubrica"), "{}", i.motivo);
         assert!(i.motivo.contains("seguridad.secretos"), "{}", i.motivo);
@@ -1826,7 +2020,14 @@ modulos = ["config"]
             evidencia: Vec::new(),
             fuente: Fuente::Sonda("rubrica".into()),
         });
-        let i = informar(&v, &tarea(), &ReglasDecision::default(), None).expect("informa");
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
         assert_eq!(i.decision, Decision::Bloqueado, "{}", i.motivo);
         assert!(i.motivo.contains("bloqueo_rubrica"), "{}", i.motivo);
     }
@@ -1841,7 +2042,14 @@ modulos = ["config"]
             evidencia: Vec::new(),
             fuente: Fuente::Sonda("rubrica".into()),
         });
-        let i = informar(&v, &tarea(), &ReglasDecision::default(), None).expect("informa");
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa");
         assert_eq!(i.decision, Decision::Listo, "{}", i.motivo);
     }
 
@@ -1854,8 +2062,14 @@ modulos = ["config"]
                 ..Redaccion::default()
             },
         };
-        let i =
-            informar(&v, &tarea(), &ReglasDecision::default(), Some(&redactor)).expect("informa");
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            Some(&redactor),
+        )
+        .expect("informa");
         assert_eq!(i.resumen, "R3 falta el almacén.");
     }
 
@@ -1877,6 +2091,7 @@ modulos = ["config"]
             &v,
             &tarea(),
             &ReglasDecision::default(),
+            &BTreeSet::new(),
             Some(&RedactorCaido),
         )
         .expect("informa");
@@ -1904,8 +2119,14 @@ modulos = ["config"]
                 ..Redaccion::default()
             },
         };
-        let con =
-            informar(&v, &tarea(), &ReglasDecision::default(), Some(&redactor)).expect("informa");
+        let con = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            Some(&redactor),
+        )
+        .expect("informa");
         assert_eq!(con.proximos_pasos, sin.proximos_pasos);
         assert_eq!(con.resumen, sin.resumen);
     }
@@ -1919,8 +2140,14 @@ modulos = ["config"]
                 ..Redaccion::default()
             },
         };
-        let con =
-            informar(&v, &tarea(), &ReglasDecision::default(), Some(&redactor)).expect("informa");
+        let con = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            Some(&redactor),
+        )
+        .expect("informa");
         assert_eq!(
             con.proximos_pasos[0].texto,
             "Persistencia (R3) falta: armar el almacén."
@@ -2087,7 +2314,15 @@ modulos = ["config"]
 
     /// Informe de `ecc()` con la tarea `t` y sin redactor.
     fn informe_con_tarea(v: &Veredicto, t: &Tarea) -> Informe {
-        informar_con(v, t, &ReglasDecision::default(), &[], None).expect("informa")
+        informar_con(
+            v,
+            t,
+            &ReglasDecision::default(),
+            &[],
+            &BTreeSet::new(),
+            None,
+        )
+        .expect("informa")
     }
 
     #[test]
@@ -2318,8 +2553,14 @@ modulos = ["config"]
         let espia = RedactorEspia {
             visto: RefCell::new(None),
         };
-        let con =
-            informar(&v, &tarea(), &ReglasDecision::default(), Some(&espia)).expect("informa");
+        let con = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            Some(&espia),
+        )
+        .expect("informa");
         let visto = espia
             .visto
             .borrow()
@@ -2373,7 +2614,8 @@ modulos = ["config"]
                 wilson_inf: 0.1,
             },
         );
-        let i = informar(&v, &t, &ReglasDecision::default(), None).expect("informa");
+        let i =
+            informar(&v, &t, &ReglasDecision::default(), &BTreeSet::new(), None).expect("informa");
         let accion = i
             .riesgos
             .iter()
@@ -2385,7 +2627,8 @@ modulos = ["config"]
         let mut h = hallazgo("h-flaky", Dimension::Pruebas, 1, &[]);
         h.cita = "contrato:tests/c.py::flaky".into();
         v.hallazgos.push(h);
-        let i = informar(&v, &t, &ReglasDecision::default(), None).expect("informa");
+        let i =
+            informar(&v, &t, &ReglasDecision::default(), &BTreeSet::new(), None).expect("informa");
         assert!(
             !i.riesgos.iter().any(|a| a.texto.contains("es inestable")),
             "{:?}",

@@ -140,11 +140,7 @@ pub fn arquitectura_nativa(
         return sin_veredicto(Dimension::Arquitectura, MOTIVO_SIN_MODULOS);
     }
     // Una capa prometida que no existe es evidencia. Sin módulos, las demás reglas no encuentran nada.
-    // La raíz (`main`, `lib`) está presente si existe su archivo: una capa `["main"]` no falta con `src/main.rs`.
-    let presentes: BTreeSet<String> = archivos
-        .iter()
-        .filter_map(|a| modulo_de_capa(&a.ruta))
-        .collect();
+    let presentes = modulos_presentes(&archivos);
     let mut hallazgos = capas_sin_modulo(capas, &modulos, &presentes, requisitos);
     let aristas = aristas_de_capas(&archivos, &modulos);
     // Los ciclos no cuentan las aristas hacia la raíz: usar un ítem de la raíz que declara el módulo es Rust normal.
@@ -205,6 +201,15 @@ pub(crate) fn archivos_rs(repo: &Path) -> Result<Vec<Archivo>, String> {
     recorrer(repo, repo, &mut salida)?;
     salida.sort_by(|a, b| a.ruta.cmp(&b.ruta));
     Ok(salida)
+}
+
+/// Módulos presentes en el repo: los de `modulo_de` más `main` y `lib` si existe su archivo. La regla de
+/// capas de Arquitectura y el informe (qué falta de un requisito) usan este mismo conjunto.
+pub(crate) fn modulos_presentes(archivos: &[Archivo]) -> BTreeSet<String> {
+    archivos
+        .iter()
+        .filter_map(|a| modulo_de_capa(&a.ruta))
+        .collect()
 }
 
 /// Los fuentes que una sonda necesita. Un error de lectura o un repo sin `.rs` no da veredicto (A9).
@@ -719,6 +724,26 @@ mod tests {
         let p = repo.join(ruta);
         fs::create_dir_all(p.parent().expect("con padre")).expect("crea carpeta");
         fs::write(p, texto).expect("escribe el fuente");
+    }
+
+    #[test]
+    fn modulos_presentes_junta_los_modulos_y_la_raiz_si_existe_su_archivo() {
+        let archivos = [
+            "src/main.rs",
+            "src/comandos/mod.rs",
+            "src/cmd.rs",
+            "src/lib.rs",
+        ]
+        .map(|ruta| Archivo {
+            ruta: ruta.into(),
+            lineas: Vec::new(),
+        });
+        let presentes = modulos_presentes(&archivos);
+        let esperados: BTreeSet<String> = ["cmd", "comandos", "lib", "main"]
+            .map(String::from)
+            .into_iter()
+            .collect();
+        assert_eq!(presentes, esperados);
     }
 
     #[test]

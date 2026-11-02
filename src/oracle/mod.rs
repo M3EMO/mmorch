@@ -95,6 +95,9 @@ pub enum ErrorOraculo {
     /// La tarea no existe, no se lee o su `tarea.toml` es inválido.
     #[error("tarea inválida: {0}")]
     Tarea(String),
+    /// Definición de tarea inválida que da código 2: una suite que es archivo y no carpeta.
+    #[error("tarea inválida: {0}")]
+    TareaDefinicion(String),
     /// Elección de juez inválida: sin razonamiento, sin vía API o sin modelo. Es configuración.
     #[error("elección inválida: {0}")]
     Eleccion(String),
@@ -123,7 +126,9 @@ impl ErrorOraculo {
     pub fn codigo_de_salida(&self) -> u8 {
         match self {
             ErrorOraculo::Ficha(e) => e.codigo_de_salida(),
-            ErrorOraculo::Eleccion(_) | ErrorOraculo::Uso(_) => 2,
+            ErrorOraculo::Eleccion(_) | ErrorOraculo::Uso(_) | ErrorOraculo::TareaDefinicion(_) => {
+                2
+            }
             ErrorOraculo::Configuracion(codigo, _) => *codigo,
             _ => 3,
         }
@@ -512,6 +517,8 @@ fn evaluar_con(
     deps: Dependencias,
 ) -> Result<Veredicto, ErrorOraculo> {
     let texto_spec = verificar_ficha(tarea)?;
+    // Sin importar el historial: una suite que es archivo es error de la tarea, no de infraestructura.
+    verificar_suites_son_carpetas(tarea)?;
     let partes = o.partes.unwrap_or_else(Partes::todas);
     let rubricas = rubrica::etiquetas(deps.rubricas);
     let repo = fs::canonicalize(repo)
@@ -749,11 +756,17 @@ fn evaluar_con(
         .redactor
         .filter(|_| partes.redactor)
         .map(RedactorMedido::nuevo);
+    // Los módulos presentes del repo evaluado: un requisito dice qué módulo falta o cuál revisar (decisión 56).
+    let presentes = match perfiles::rust::archivos_rs(&repo_copia) {
+        Ok(archivos) => perfiles::rust::modulos_presentes(&archivos),
+        Err(_) => BTreeSet::new(),
+    };
     let informe = informe::informar_con(
         &veredicto,
         tarea,
         &deps.reglas,
         deps.rubricas,
+        &presentes,
         redactor_medido.as_ref().map(|r| r as &dyn Redactor),
     )?;
     veredicto.costo_usd += redactor_medido.as_ref().map_or(0.0, RedactorMedido::costo);
@@ -1589,6 +1602,20 @@ fn verificar_ficha(tarea: &Tarea) -> Result<String, ErrorOraculo> {
     })?;
     ficha::extraer(&texto)?;
     Ok(texto)
+}
+
+/// Exige que cada carpeta de suite de la tarea sea carpeta, si existe. Un archivo en su lugar es error de tarea.
+fn verificar_suites_son_carpetas(tarea: &Tarea) -> Result<(), ErrorOraculo> {
+    for suite in historial::SUITES_DEL_ORACULO {
+        let ruta = tarea.dir.join(suite);
+        if ruta.exists() && !ruta.is_dir() {
+            return Err(ErrorOraculo::TareaDefinicion(format!(
+                "{} no es una carpeta",
+                ruta.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Ambigüedades de la revisión guardada del juez para `spec`, como `línea <n>: <frase>`, y el aviso que
@@ -4177,6 +4204,61 @@ mod tests {
         evaluar_con(repo, &tarea, &opciones(&home), deps).expect("evalúa")
     }
 
+    /// Error de evaluar una tarea de Rust cuya suite `suite` es un archivo. Ninguna sonda debe correr.
+    fn error_de_suite_archivo(base: &Path, suite: &str, historial: bool) -> ErrorOraculo {
+        let tarea = tarea_rust(base);
+        fs::write(tarea.dir.join(suite), "no es carpeta\n").expect("archivo en lugar de carpeta");
+        let repo = repo_rust(base, LOCK_SANO);
+        let home = home_con_cache(base, LOCK_SANO);
+        let o = OpcionesOraculo {
+            historial,
+            ..opciones(&home)
+        };
+        let correr = |_: &contenedor::Ejecucion| -> Result<contenedor::Resultado, ErrorOraculo> {
+            panic!("una tarea inválida no debe correr suites")
+        };
+        let herramientas = |_: &Preparada| -> Box<dyn EjecutorHerramienta> {
+            panic!("una tarea inválida no debe armar herramientas")
+        };
+        evaluar_falso_con(&repo, &tarea, &o, &correr, &herramientas)
+            .expect_err("una suite que es archivo debe fallar")
+    }
+
+    #[test]
+    fn oculto_archivo_es_error_de_tarea_con_historial() {
+        let base = tempfile::tempdir().expect("base");
+        let error = error_de_suite_archivo(base.path(), "oculto", true);
+        assert!(matches!(error, ErrorOraculo::TareaDefinicion(_)), "{error}");
+    }
+
+    #[test]
+    fn oculto_archivo_es_error_de_tarea_sin_historial() {
+        let base = tempfile::tempdir().expect("base");
+        let error = error_de_suite_archivo(base.path(), "oculto", false);
+        assert!(matches!(error, ErrorOraculo::TareaDefinicion(_)), "{error}");
+    }
+
+    #[test]
+    fn contrato_archivo_es_error_de_tarea_con_historial() {
+        let base = tempfile::tempdir().expect("base");
+        let error = error_de_suite_archivo(base.path(), "contrato", true);
+        assert!(matches!(error, ErrorOraculo::TareaDefinicion(_)), "{error}");
+    }
+
+    #[test]
+    fn contrato_archivo_es_error_de_tarea_sin_historial() {
+        let base = tempfile::tempdir().expect("base");
+        let error = error_de_suite_archivo(base.path(), "contrato", false);
+        assert!(matches!(error, ErrorOraculo::TareaDefinicion(_)), "{error}");
+    }
+
+    #[test]
+    fn suite_archivo_sale_con_codigo_de_tarea() {
+        let base = tempfile::tempdir().expect("base");
+        let error = error_de_suite_archivo(base.path(), "oculto", true);
+        assert_eq!(error.codigo_de_salida(), 2, "{error}");
+    }
+
     #[test]
     fn oraculo_diseno_con_juez_que_cita_tiene_valor_y_no_queda_sin_veredicto() {
         let base = tempfile::tempdir().expect("base");
@@ -4999,6 +5081,104 @@ mod tests {
                 arq.faltantes
             );
         }
+    }
+
+    #[test]
+    fn oraculo_arquitectura_juez_con_cobertura_suficiente_tiene_valor_sin_modulos() {
+        // Repo sin módulos: la sonda de dependencias no tiene veredicto y pesa 0.
+        // El juez mide sus 3 ítems: adecuación 3 (peso 3), extensibilidad 2 (peso 2), interfaces 3 (peso 2).
+        // Cobertura: 7 de 10 de peso. 3·7 = 21 ≥ 2·10 = 20, así que llega a dos tercios.
+        // Valor: (3·3 + 2·2 + 2·3) / (3·7) = 19 / 21.
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let juez = JuezFalso::con(
+            &respuesta_juez(
+                json!([
+                    item_juez("arquitectura.adecuacion", 3, json!([ev_lib()])),
+                    item_juez("arquitectura.extensibilidad", 2, json!([ev_lib()])),
+                    item_juez("arquitectura.interfaces", 3, json!([ev_lib()])),
+                ]),
+                json!([]),
+            ),
+            0.0,
+        );
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        let arq = puntaje_de_prueba(&v, Dimension::Arquitectura);
+        assert_eq!(arq.sin_veredicto, None, "{arq:?}");
+        assert!((arq.valor - 19.0 / 21.0).abs() < 1e-6, "{}", arq.valor);
+        // La sonda sigue sin módulos: su ítem queda en faltantes con ese motivo.
+        let dependencias = arq
+            .faltantes
+            .iter()
+            .find(|f| f.item == "arquitectura.dependencias")
+            .expect("la sonda sin módulos queda en faltantes");
+        assert_eq!(dependencias.motivo, "sin módulos");
+    }
+
+    #[test]
+    fn oraculo_arquitectura_juez_con_cobertura_insuficiente_queda_sin_veredicto_con_faltantes() {
+        // Repo sin módulos. El juez mide solo `arquitectura.adecuacion` (peso 3, nivel 3).
+        // Cobertura: 3 de 10 de peso. 3·3 = 9 < 20, así que no llega a dos tercios.
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let juez = JuezFalso::con(
+            &respuesta_juez(
+                json!([item_juez("arquitectura.adecuacion", 3, json!([ev_lib()]))]),
+                json!([]),
+            ),
+            0.0,
+        );
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        let arq = puntaje_de_prueba(&v, Dimension::Arquitectura);
+        assert_eq!(
+            arq.sin_veredicto.as_deref(),
+            Some("cobertura 3 de 10 de peso, menor que dos tercios"),
+            "{arq:?}"
+        );
+        // Los ítems sin medir del juez y la sonda sin módulos van a faltantes.
+        for item in ["arquitectura.extensibilidad", "arquitectura.interfaces"] {
+            assert!(
+                arq.faltantes.iter().any(|f| f.item == item),
+                "{:?}",
+                arq.faltantes
+            );
+        }
+        let dependencias = arq
+            .faltantes
+            .iter()
+            .find(|f| f.item == "arquitectura.dependencias")
+            .expect("la sonda sin módulos queda en faltantes");
+        assert_eq!(dependencias.motivo, "sin módulos");
+        // El ítem medido no va a faltantes.
+        assert!(
+            !arq.faltantes
+                .iter()
+                .any(|f| f.item == "arquitectura.adecuacion"),
+            "{:?}",
+            arq.faltantes
+        );
     }
 
     #[test]

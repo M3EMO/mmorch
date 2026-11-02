@@ -30,7 +30,7 @@ const VERSION_LINEA: u32 = 1;
 /// Días sin uso a partir de los cuales `evaluar` borra el historial de una versión.
 const CADUCIDAD_HISTORIAL: Duration = Duration::from_secs(30 * 24 * 3600);
 /// Carpetas de suite de la tarea que entran en la clave de la versión, en ese orden.
-const SUITES_DEL_ORACULO: [&str; 2] = ["oculto", "contrato"];
+pub(super) const SUITES_DEL_ORACULO: [&str; 2] = ["oculto", "contrato"];
 /// Marca fija de una carpeta de suite que no existe en la tarea.
 const AUSENTE: &str = "ausente";
 
