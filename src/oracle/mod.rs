@@ -5078,6 +5078,104 @@ mod tests {
     }
 
     #[test]
+    fn oraculo_arquitectura_juez_con_cobertura_suficiente_tiene_valor_sin_modulos() {
+        // Repo sin módulos: la sonda de dependencias no tiene veredicto y pesa 0.
+        // El juez mide sus 3 ítems: adecuación 3 (peso 3), extensibilidad 2 (peso 2), interfaces 3 (peso 2).
+        // Cobertura: 7 de 10 de peso. 3·7 = 21 ≥ 2·10 = 20, así que llega a dos tercios.
+        // Valor: (3·3 + 2·2 + 2·3) / (3·7) = 19 / 21.
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let juez = JuezFalso::con(
+            &respuesta_juez(
+                json!([
+                    item_juez("arquitectura.adecuacion", 3, json!([ev_lib()])),
+                    item_juez("arquitectura.extensibilidad", 2, json!([ev_lib()])),
+                    item_juez("arquitectura.interfaces", 3, json!([ev_lib()])),
+                ]),
+                json!([]),
+            ),
+            0.0,
+        );
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        let arq = puntaje_de_prueba(&v, Dimension::Arquitectura);
+        assert_eq!(arq.sin_veredicto, None, "{arq:?}");
+        assert!((arq.valor - 19.0 / 21.0).abs() < 1e-6, "{}", arq.valor);
+        // La sonda sigue sin módulos: su ítem queda en faltantes con ese motivo.
+        let dependencias = arq
+            .faltantes
+            .iter()
+            .find(|f| f.item == "arquitectura.dependencias")
+            .expect("la sonda sin módulos queda en faltantes");
+        assert_eq!(dependencias.motivo, "sin módulos");
+    }
+
+    #[test]
+    fn oraculo_arquitectura_juez_con_cobertura_insuficiente_queda_sin_veredicto_con_faltantes() {
+        // Repo sin módulos. El juez mide solo `arquitectura.adecuacion` (peso 3, nivel 3).
+        // Cobertura: 3 de 10 de peso. 3·3 = 9 < 20, así que no llega a dos tercios.
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let juez = JuezFalso::con(
+            &respuesta_juez(
+                json!([item_juez("arquitectura.adecuacion", 3, json!([ev_lib()]))]),
+                json!([]),
+            ),
+            0.0,
+        );
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        let arq = puntaje_de_prueba(&v, Dimension::Arquitectura);
+        assert_eq!(
+            arq.sin_veredicto.as_deref(),
+            Some("cobertura 3 de 10 de peso, menor que dos tercios"),
+            "{arq:?}"
+        );
+        // Los ítems sin medir del juez y la sonda sin módulos van a faltantes.
+        for item in ["arquitectura.extensibilidad", "arquitectura.interfaces"] {
+            assert!(
+                arq.faltantes.iter().any(|f| f.item == item),
+                "{:?}",
+                arq.faltantes
+            );
+        }
+        let dependencias = arq
+            .faltantes
+            .iter()
+            .find(|f| f.item == "arquitectura.dependencias")
+            .expect("la sonda sin módulos queda en faltantes");
+        assert_eq!(dependencias.motivo, "sin módulos");
+        // El ítem medido no va a faltantes.
+        assert!(
+            !arq.faltantes
+                .iter()
+                .any(|f| f.item == "arquitectura.adecuacion"),
+            "{:?}",
+            arq.faltantes
+        );
+    }
+
+    #[test]
     fn oraculo_estructura_sin_juez_cubre_con_sus_sondas() {
         // Estructura pesa 7 con juez y sus sondas suman 5: 3·5 = 15 ≥ 14, así que cubre sin juez.
         let base = tempfile::tempdir().expect("base");
