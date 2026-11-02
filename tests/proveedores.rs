@@ -1244,6 +1244,43 @@ fn cierre_deepseek(in_tokens: u64, out_tokens: u64) -> String {
         + "data: [DONE]\n\n"
 }
 
+/// Primer trozo de un stream de Anthropic con razonamiento: arranca el bloque y manda un delta.
+fn primer_trozo_de_razonamiento() -> String {
+    evento_anthropic(
+        "message_start",
+        json!({"type": "message_start", "message": {"usage": {"input_tokens": 7, "output_tokens": 1}}}),
+    ) + &evento_anthropic(
+        "content_block_start",
+        json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}}),
+    ) + &evento_anthropic(
+        "content_block_delta",
+        json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "pensé"}}),
+    )
+}
+
+/// Resto de un stream de Anthropic con razonamiento: cierra el bloque, responde "ok" y termina.
+fn resto_de_razonamiento() -> String {
+    evento_anthropic(
+        "content_block_delta",
+        json!({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "firma"}}),
+    ) + &evento_anthropic(
+        "content_block_stop",
+        json!({"type": "content_block_stop", "index": 0}),
+    ) + &evento_anthropic(
+        "content_block_start",
+        json!({"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}}),
+    ) + &evento_anthropic(
+        "content_block_delta",
+        json!({"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "ok"}}),
+    ) + &evento_anthropic(
+        "content_block_stop",
+        json!({"type": "content_block_stop", "index": 1}),
+    ) + &evento_anthropic(
+        "message_delta",
+        json!({"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": null}, "usage": {"output_tokens": 3}}),
+    ) + &evento_anthropic("message_stop", json!({"type": "message_stop"}))
+}
+
 #[test]
 fn proveedores_deepseek_length_con_contenido_vacio_es_exito_truncado() {
     let srv = Servidor::arranca(vec![(200, deepseek_length_vacio())]);
@@ -1880,54 +1917,58 @@ fn proveedores_stream_que_se_calla_mas_que_la_inactividad_corta_y_cobra_peor_cas
 }
 
 #[test]
-fn proveedores_stream_de_anthropic_con_razonamiento_que_calla_200_no_corta_antes_del_total() {
-    // Escala los 200 s de silencio que deja el razonamiento `adaptive`: 200 ms de silencio con
-    // inactividad de 120 ms. Con razonamiento, el plazo que vale es el total de 3 s.
+fn proveedores_stream_de_anthropic_con_razonamiento_que_calla_mas_que_la_inactividad_se_corta() {
+    // Calla 300 ms con inactividad de 120 ms. Con razonamiento, Anthropic usa el mismo corte que
+    // DeepSeek: el silencio sin bytes se corta antes del total de 3 s.
     let srv = Servidor::arranca_guion(Box::new(|s| {
         cabeceras_sse(s);
-        // Primer trozo: arranca el bloque de razonamiento y manda un delta.
-        let primero = evento_anthropic(
-            "message_start",
-            json!({"type": "message_start", "message": {"usage": {"input_tokens": 7, "output_tokens": 1}}}),
-        ) + &evento_anthropic(
-            "content_block_start",
-            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}}),
-        ) + &evento_anthropic(
-            "content_block_delta",
-            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "pensé"}}),
-        );
-        if !escribe(s, &primero) {
+        if !escribe(s, &primer_trozo_de_razonamiento()) {
             return;
         }
-        thread::sleep(Duration::from_millis(200));
-        // Resto del stream: cierra el razonamiento, responde el texto y termina con su uso.
-        let resto = evento_anthropic(
-            "content_block_delta",
-            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "firma"}}),
-        ) + &evento_anthropic(
-            "content_block_stop",
-            json!({"type": "content_block_stop", "index": 0}),
-        ) + &evento_anthropic(
-            "content_block_start",
-            json!({"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}}),
-        ) + &evento_anthropic(
-            "content_block_delta",
-            json!({"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "ok"}}),
-        ) + &evento_anthropic(
-            "content_block_stop",
-            json!({"type": "content_block_stop", "index": 1}),
-        ) + &evento_anthropic(
-            "message_delta",
-            json!({"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": null}, "usage": {"output_tokens": 3}}),
-        ) + &evento_anthropic("message_stop", json!({"type": "message_stop"}));
-        escribe(s, &resto);
+        thread::sleep(Duration::from_millis(300));
+        escribe(s, &resto_de_razonamiento());
     }));
     let cfg = config(&srv.url, &srv.url);
     let e = eleccion_con_razonamiento(Proveedor::Anthropic, "claude-haiku-5-5");
     let inicio = Instant::now();
     let (res, home) = llamada_con_plazos_de(&cfg, plazos_de_prueba(), &e, "s6");
 
-    let r = res.expect("el silencio del razonamiento no corta antes del total");
+    let err = res.expect_err("Anthropic se corta por inactividad aunque razone");
+    assert!(matches!(err, ErrorProveedor::Timeout(_)), "llegó {err:?}");
+    assert!(
+        inicio.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        inicio.elapsed()
+    );
+    assert_eq!(srv.peticiones(), 1, "repetir el pedido repite el costo");
+    let evs = eventos(home.path());
+    assert_eq!(evs.len(), 1);
+    assert_eq!(evs[0]["extra"]["error"], "timeout");
+}
+
+#[test]
+fn proveedores_stream_de_anthropic_con_ping_cada_30_no_corta() {
+    // Escala los pings de 30 s a 60 ms. Cada hueco es menor que la inactividad de 120 ms.
+    // El stream calla 480 ms en total, más que la inactividad, y sigue vivo por los pings.
+    let srv = Servidor::arranca_guion(Box::new(|s| {
+        cabeceras_sse(s);
+        if !escribe(s, &primer_trozo_de_razonamiento()) {
+            return;
+        }
+        for _ in 0..8 {
+            thread::sleep(Duration::from_millis(60));
+            if !escribe(s, &evento_anthropic("ping", json!({"type": "ping"}))) {
+                return;
+            }
+        }
+        escribe(s, &resto_de_razonamiento());
+    }));
+    let cfg = config(&srv.url, &srv.url);
+    let e = eleccion_con_razonamiento(Proveedor::Anthropic, "claude-haiku-5-5");
+    let inicio = Instant::now();
+    let (res, home) = llamada_con_plazos_de(&cfg, plazos_de_prueba(), &e, "s8");
+
+    let r = res.expect("los pings mantienen viva la conexión");
     assert!(
         inicio.elapsed() < Duration::from_secs(3),
         "{:?}",

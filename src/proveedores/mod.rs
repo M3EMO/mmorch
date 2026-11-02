@@ -401,7 +401,7 @@ struct Llamada<'a> {
     corrida: &'a str,
     /// `true` si la elección pide razonamiento. Va al cuerpo de cada intento.
     razonamiento: bool,
-    /// Corte por inactividad de cada intento: sin bytes durante este tiempo. Ver `inactividad_de`.
+    /// Corte por inactividad de cada intento: sin bytes durante este tiempo. Vale para todo proveedor.
     inactividad: Duration,
     /// Plazo total de cada intento, cuerpo incluido: el timeout de la llamada.
     total: Duration,
@@ -439,7 +439,7 @@ pub fn llamar_con(
         prompt,
         corrida,
         razonamiento: e.razonamiento,
-        inactividad: inactividad_de(proveedor, e.razonamiento, ctx.plazos.inactividad, total),
+        inactividad: ctx.plazos.inactividad,
         total,
         peor_caso: costo_peor_caso(&precio, tokens_entrada_estimados(prompt), prompt.max_tokens),
         precio,
@@ -682,25 +682,6 @@ fn timeout_para(cfg: &ConfigProveedores, rol: Option<Rol>) -> u64 {
     match rol {
         Some(Rol::Verifica | Rol::Juzga) => cfg.timeout_juez_s,
         _ => cfg.timeout_s,
-    }
-}
-
-/// Plazo de inactividad de un intento. Anthropic con razonamiento usa el plazo total.
-/// Su silencio es parte de su protocolo, no una conexión muerta.
-/// Con razonamiento `adaptive`, el silencio puede pasar los 120 segundos.
-/// Un corte de inactividad cortaría una llamada sana.
-/// DeepSeek manda `reasoning_content` todo el tiempo y conserva su corte.
-/// Anthropic sin razonamiento y DeepSeek usan `inactividad`.
-/// Desempates técnicos 19, hallazgo 4.
-fn inactividad_de(
-    proveedor: Proveedor,
-    razonamiento: bool,
-    inactividad: Duration,
-    total: Duration,
-) -> Duration {
-    match (proveedor, razonamiento) {
-        (Proveedor::Anthropic, true) => total,
-        _ => inactividad,
     }
 }
 
@@ -948,46 +929,6 @@ mod tests {
     use super::*;
 
     const MIN: Duration = Duration::from_secs(60);
-
-    #[test]
-    fn proveedores_inactividad_anthropic_con_razonamiento_es_el_total() {
-        let inactividad = Duration::from_secs(120);
-        let total = Duration::from_secs(600);
-        assert_eq!(
-            inactividad_de(Proveedor::Anthropic, true, inactividad, total),
-            total
-        );
-    }
-
-    #[test]
-    fn proveedores_inactividad_anthropic_sin_razonamiento_es_la_inactividad() {
-        let inactividad = Duration::from_secs(120);
-        let total = Duration::from_secs(600);
-        assert_eq!(
-            inactividad_de(Proveedor::Anthropic, false, inactividad, total),
-            inactividad
-        );
-    }
-
-    #[test]
-    fn proveedores_inactividad_deepseek_con_razonamiento_es_la_inactividad() {
-        let inactividad = Duration::from_secs(120);
-        let total = Duration::from_secs(600);
-        assert_eq!(
-            inactividad_de(Proveedor::Deepseek, true, inactividad, total),
-            inactividad
-        );
-    }
-
-    #[test]
-    fn proveedores_inactividad_deepseek_sin_razonamiento_es_la_inactividad() {
-        let inactividad = Duration::from_secs(120);
-        let total = Duration::from_secs(600);
-        assert_eq!(
-            inactividad_de(Proveedor::Deepseek, false, inactividad, total),
-            inactividad
-        );
-    }
 
     #[test]
     fn proveedores_breaker_dos_fallas_no_abren() {
