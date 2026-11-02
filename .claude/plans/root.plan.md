@@ -79,6 +79,7 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 53 | P-req4: "P-req4 a". La sesión de fichas suma 20 tests ocultos a memora (R2: los 10 flags y el flag que pisa al archivo; R4: `CLIENT` y `HELLO`) y 1 a brasa (R13: `brasa info`). |
 | 54 | P-test1: "P-test1 b", P-test2: "P-test2 a", P-test3: "P-test3 a". La ficha de brasa fija los nombres de wgpu de `brasa info`. Los sufijos de `--maxmemory` y la diferencia de `--appendfsync` quedan sin fijar. |
 | 55 | P59: "B". Un test inestable con una cota inferior de Wilson al 90 % menor que 0,5 cuenta como falla. Uno con una cota de al menos 0,5 pone tope 2 a su requisito. La nube 9 lo construye en la Tarea 40. |
+| 56 | P-mod1: "P-mod1 a". El informe filtra la lista `modulos` de un requisito sin cumplir contra los módulos del repo evaluado. Para los que existen escribe "revisar". Si no queda ninguno, escribe "falta" con la lista entera. Ver Tarea 42. |
 
 ## Patterns to Mirror
 
@@ -2768,12 +2769,25 @@ Cada desempate tiene su razón en una línea.
 
 **Hueco de Arquitectura en Rust sin módulos.** Con la Tarea 41, Arquitectura en un repo Rust sin módulos puede tomar valor del juez. Ningún test lo cubre con las rúbricas embebidas. No hace falta antes del Validate: memora y brasa tienen módulos, así que este caso no los toca. El test va en la Tarea 42.
 
-### Tarea 42: Error de tarea por carpeta inválida y test de Arquitectura sin módulos
+### Tarea 42: Error de tarea por carpeta inválida, test de Arquitectura sin módulos y módulos de los pasos
 - **Action**: el desempate 15 y el test del hueco de Arquitectura. Con las rúbricas embebidas, un repo Rust sin módulos y un juez que mide sus ítems de Arquitectura con cobertura suficiente da un valor. Con cobertura insuficiente, queda sin veredicto, con sus `faltantes`.
+- **Action, P-mod1 a (decisión 56)**: `faltante` (`src/oracle/informe.rs`) filtra la lista `modulos` del requisito contra los módulos del repo evaluado.
+  - La fuente es el mismo conjunto `presentes` que usa la regla de capas de la Tarea 38 (`capas_sin_modulo` en `src/oracle/perfiles/rust.rs`): los módulos del mapa más `main` y `lib` si existe su archivo. Ese conjunto sale de una sola función compartida, así el informe y la regla de capas nunca difieren.
+  - Si quedan módulos que existen, el paso dice "revisar" con esos módulos.
+  - Si no queda ninguno, el paso dice "falta" con la lista entera del requisito.
+  - Vale igual para un requisito ausente y para uno parcial. Sin lista `modulos`, `faltante` sigue como hoy y nombra los tests que no pasan.
+  - Hoy `faltante` escribe "falta" si el requisito está ausente y "revisar" si está parcial, sin mirar el repo. Ese texto cambia.
+- **Action, ETXTBSY otra vez**: el 2026-11-02, el hook del planner falló en `test_seguro_misma_ruta_da_la_misma_carpeta` con `ETXTBSY`. Se aplica el desempate 6 de "Desempates técnicos 18": los tests de `tests/test_seguro.rs` lanzan cada ejecutable falso con `sh <ruta>`, nunca directo.
 - **Dónde**: en la laptop, con el builder local (Sonnet organiza, Haiku construye). Es chica y no necesita podman ni claves.
 - **Validate**: `cargo test`:
   - Una tarea con `oculto` como archivo sale con código 2 y un error de tarea.
   - Los dos casos de Arquitectura en Rust sin módulos dan lo que dice la Action.
+  - Un requisito con `modulos = ["cmd", "cmd_keys"]` sobre un repo que tiene solo `cmd` dice "revisar" con `cmd`, y no nombra `cmd_keys`.
+  - Un requisito con `modulos = ["persist", "store"]` sobre un repo sin ninguno de los dos dice "falta" con `persist` y `store`.
+  - Un requisito con `modulos = ["main"]` sobre un repo con `src/main.rs` dice "revisar" con `main`.
+  - Un requisito sin `modulos` sigue nombrando los tests que no pasan.
+  - La regla de capas y `faltante` usan la misma función para los módulos presentes.
+  - `tests/test_seguro.rs` pasa 50 veces seguidas con `cargo test --test test_seguro`, sin `ETXTBSY`.
 
 ## Orden de trabajo (2026-11-02)
 
@@ -2785,5 +2799,29 @@ Cada desempate tiene su razón en una línea.
 4. **Tarea 42.** En paralelo con el paso 3, con el builder local. No usa podman.
 5. **Calibración real (Tarea 12).** Espera el paso 3. Con `--tope-usd 25` (decisión 48). Después, la comparación de `global` de la Tarea 13.
 6. Siguen la imagen del builder, la credencial, `NETRC`, la corrida de memora, Colab, Graft con G5 y los paquetes a ciegas con G3.
+
+No hay preguntas nuevas para el usuario.
+
+## Vuelta del 2026-11-02: `modulos` en las fichas y P-mod1 a
+
+**Resultado de la sesión de fichas.**
+- La sesión sumó `modulos` a los 30 requisitos: 16 de memora y 14 de brasa. Guardó `tarea.toml.bak6` en las dos tareas.
+- El orquestador comprobó que los dos `tarea.toml` parsean, y que el diff solo suma líneas `modulos`.
+- Cada nombre sale de `[arquitectura] capas`. Cada lista junta los módulos de ECC y de SDLC.
+- Los repos del banco están en `~/Proyectos/bench-ecc-sdlc/`.
+- Faltan estos módulos: memora-ecc no tiene `cli`, `cmd_keys` ni `cmd_strings`; memora-sdlc no tiene `config`, `persist` ni `store`; brasa-ecc no tiene `camera`, `cli`, `light`, `pbr`, `renderer`, `shadow` ni `transform`; brasa-sdlc no tiene `app`, `gltf_load` ni `render`.
+- La sesión corrigió el pedido del planner: `faltante` nunca mira qué módulos existen en el repo. Por eso nombrar la lista entera mezclaría módulos de las dos implementaciones.
+
+**P-mod1 (decisión 56).** El usuario respondió "P-mod1 a". El cambio de código entra en la Tarea 42.
+
+**El Validate espera a la Tarea 42.** La causa D del Validate de 13 se mide con el texto de los pasos, y ese texto cambia con la Tarea 42. Correr el Validate antes obligaría a repetirlo. La Tarea 42 es chica y la hace el builder local. Mientras tanto corre la prueba de Haiku, que no depende de la 42.
+
+## Orden de trabajo (2026-11-02, después de `modulos`)
+
+1. **Tarea 42 con el builder local.** Brief: `docs/builds/brief-local-42.md`. No usa podman.
+2. **Prueba de Haiku con más de 24 000 tokens de razonamiento.** En paralelo con el paso 1. Gasta centavos.
+3. **Validate de 7 y 13, otra vez.** Espera el paso 1. Igual que en "Orden de trabajo (2026-11-02)": memora corre 3 veces más una, y brasa una vez por repo. Gasto estimado: 1 USD o menos.
+4. **Calibración real (Tarea 12).** Con `--tope-usd 25`. Después, la comparación de `global` de la Tarea 13.
+5. Siguen la imagen del builder, la credencial, `NETRC`, la corrida de memora, Colab, Graft con G5 y los paquetes a ciegas con G3.
 
 No hay preguntas nuevas para el usuario.
