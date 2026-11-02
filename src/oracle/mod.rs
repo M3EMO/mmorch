@@ -95,6 +95,9 @@ pub enum ErrorOraculo {
     /// La tarea no existe, no se lee o su `tarea.toml` es inválido.
     #[error("tarea inválida: {0}")]
     Tarea(String),
+    /// Definición de tarea inválida que da código 2: una suite que es archivo y no carpeta.
+    #[error("tarea inválida: {0}")]
+    TareaDefinicion(String),
     /// Elección de juez inválida: sin razonamiento, sin vía API o sin modelo. Es configuración.
     #[error("elección inválida: {0}")]
     Eleccion(String),
@@ -123,7 +126,9 @@ impl ErrorOraculo {
     pub fn codigo_de_salida(&self) -> u8 {
         match self {
             ErrorOraculo::Ficha(e) => e.codigo_de_salida(),
-            ErrorOraculo::Eleccion(_) | ErrorOraculo::Uso(_) => 2,
+            ErrorOraculo::Eleccion(_) | ErrorOraculo::Uso(_) | ErrorOraculo::TareaDefinicion(_) => {
+                2
+            }
             ErrorOraculo::Configuracion(codigo, _) => *codigo,
             _ => 3,
         }
@@ -512,6 +517,8 @@ fn evaluar_con(
     deps: Dependencias,
 ) -> Result<Veredicto, ErrorOraculo> {
     let texto_spec = verificar_ficha(tarea)?;
+    // Sin importar el historial: una suite que es archivo es error de la tarea, no de infraestructura.
+    verificar_suites_son_carpetas(tarea)?;
     let partes = o.partes.unwrap_or_else(Partes::todas);
     let rubricas = rubrica::etiquetas(deps.rubricas);
     let repo = fs::canonicalize(repo)
@@ -1589,6 +1596,20 @@ fn verificar_ficha(tarea: &Tarea) -> Result<String, ErrorOraculo> {
     })?;
     ficha::extraer(&texto)?;
     Ok(texto)
+}
+
+/// Exige que cada carpeta de suite de la tarea sea carpeta, si existe. Un archivo en su lugar es error de tarea.
+fn verificar_suites_son_carpetas(tarea: &Tarea) -> Result<(), ErrorOraculo> {
+    for suite in historial::SUITES_DEL_ORACULO {
+        let ruta = tarea.dir.join(suite);
+        if ruta.exists() && !ruta.is_dir() {
+            return Err(ErrorOraculo::TareaDefinicion(format!(
+                "{} no es una carpeta",
+                ruta.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Ambigüedades de la revisión guardada del juez para `spec`, como `línea <n>: <frase>`, y el aviso que
@@ -4175,6 +4196,61 @@ mod tests {
         let tarea = tarea_rust(base);
         let home = home_con_cache(base, LOCK_SANO);
         evaluar_con(repo, &tarea, &opciones(&home), deps).expect("evalúa")
+    }
+
+    /// Error de evaluar una tarea de Rust cuya suite `suite` es un archivo. Ninguna sonda debe correr.
+    fn error_de_suite_archivo(base: &Path, suite: &str, historial: bool) -> ErrorOraculo {
+        let tarea = tarea_rust(base);
+        fs::write(tarea.dir.join(suite), "no es carpeta\n").expect("archivo en lugar de carpeta");
+        let repo = repo_rust(base, LOCK_SANO);
+        let home = home_con_cache(base, LOCK_SANO);
+        let o = OpcionesOraculo {
+            historial,
+            ..opciones(&home)
+        };
+        let correr = |_: &contenedor::Ejecucion| -> Result<contenedor::Resultado, ErrorOraculo> {
+            panic!("una tarea inválida no debe correr suites")
+        };
+        let herramientas = |_: &Preparada| -> Box<dyn EjecutorHerramienta> {
+            panic!("una tarea inválida no debe armar herramientas")
+        };
+        evaluar_falso_con(&repo, &tarea, &o, &correr, &herramientas)
+            .expect_err("una suite que es archivo debe fallar")
+    }
+
+    #[test]
+    fn oculto_archivo_es_error_de_tarea_con_historial() {
+        let base = tempfile::tempdir().expect("base");
+        let error = error_de_suite_archivo(base.path(), "oculto", true);
+        assert!(matches!(error, ErrorOraculo::TareaDefinicion(_)), "{error}");
+    }
+
+    #[test]
+    fn oculto_archivo_es_error_de_tarea_sin_historial() {
+        let base = tempfile::tempdir().expect("base");
+        let error = error_de_suite_archivo(base.path(), "oculto", false);
+        assert!(matches!(error, ErrorOraculo::TareaDefinicion(_)), "{error}");
+    }
+
+    #[test]
+    fn contrato_archivo_es_error_de_tarea_con_historial() {
+        let base = tempfile::tempdir().expect("base");
+        let error = error_de_suite_archivo(base.path(), "contrato", true);
+        assert!(matches!(error, ErrorOraculo::TareaDefinicion(_)), "{error}");
+    }
+
+    #[test]
+    fn contrato_archivo_es_error_de_tarea_sin_historial() {
+        let base = tempfile::tempdir().expect("base");
+        let error = error_de_suite_archivo(base.path(), "contrato", false);
+        assert!(matches!(error, ErrorOraculo::TareaDefinicion(_)), "{error}");
+    }
+
+    #[test]
+    fn suite_archivo_sale_con_codigo_de_tarea() {
+        let base = tempfile::tempdir().expect("base");
+        let error = error_de_suite_archivo(base.path(), "oculto", true);
+        assert_eq!(error.codigo_de_salida(), 2, "{error}");
     }
 
     #[test]
