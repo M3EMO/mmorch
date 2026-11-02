@@ -1169,8 +1169,14 @@ fn motivo_sin_nivel(resultado: &ResultadoJuez, id: &str) -> &'static str {
         .descartes
         .iter()
         .any(|d| d.que == que && d.motivo.contains("gate"));
+    let sin_evidencia = resultado
+        .descartes
+        .iter()
+        .any(|d| d.que == que && d.motivo.contains("sin_evidencia"));
     if por_gate {
         MOTIVO_GATE_EVIDENCIA
+    } else if sin_evidencia {
+        MOTIVO_JUEZ_SIN_EVIDENCIA
     } else {
         MOTIVO_JUEZ_SIN_NIVEL
     }
@@ -1209,6 +1215,8 @@ fn puntaje_diseno(
 pub const MOTIVO_GATE_EVIDENCIA: &str = "la evidencia no pasó el gate";
 /// Motivo de un ítem del juez que no tiene nivel y no pasó por el gate de evidencia (desempate B').
 pub const MOTIVO_JUEZ_SIN_NIVEL: &str = "el juez no dio nivel";
+/// Motivo de un ítem del juez que respondió `sin_evidencia`: no es ruptura de contrato (Tarea 44).
+pub const MOTIVO_JUEZ_SIN_EVIDENCIA: &str = "el juez no encontró evidencia";
 
 /// Una parte de una dimensión, sondas o juez, con su peso: la suma de los pesos de sus ítems medidos.
 struct Parte {
@@ -4911,6 +4919,24 @@ mod tests {
             .find(|f| f.item == "estructura.legibilidad")
             .expect("el ítem descartado queda en faltantes");
         assert_eq!(legibilidad.motivo, MOTIVO_GATE_EVIDENCIA);
+    }
+
+    #[test]
+    fn motivo_sin_nivel_distingue_sin_evidencia() {
+        let mut con_descarte = resultado_con_niveles(&[]);
+        con_descarte.descartes.push(juez::Descarte {
+            que: "ítem estructura.legibilidad".into(),
+            motivo: "sin_evidencia: el juez no encontró evidencia".into(),
+        });
+        assert_eq!(
+            motivo_sin_nivel(&con_descarte, "estructura.legibilidad"),
+            MOTIVO_JUEZ_SIN_EVIDENCIA
+        );
+        let sin_descarte = resultado_con_niveles(&[]);
+        assert_eq!(
+            motivo_sin_nivel(&sin_descarte, "estructura.legibilidad"),
+            MOTIVO_JUEZ_SIN_NIVEL
+        );
     }
 
     #[test]

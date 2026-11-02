@@ -2,7 +2,7 @@
 //! Refuta por default: un nivel solo sube con evidencia que pasa el gate. Su JSON es estricto.
 //! Las sondas fijan los ítems `sonda`. Una sonda puede poner un tope a un ítem `mixto`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -223,6 +223,20 @@ pub fn construir_prompt(e: &EntradaJuez, limites: &LimitesPrompt) -> Prompt {
     }
 }
 
+/// Ítems pedidos con su dimensión, y todos los ítems de las rúbricas con su modo de medida.
+fn mapas_de(rubricas: &[Rubrica]) -> (BTreeMap<String, Dimension>, BTreeMap<String, Mide>) {
+    let pedidos = pedidos_de(rubricas)
+        .into_iter()
+        .map(|(item, dimension)| (item.id.clone(), dimension))
+        .collect();
+    let catalogo = rubricas
+        .iter()
+        .flat_map(|r| r.item.iter())
+        .map(|item| (item.id.clone(), item.mide))
+        .collect();
+    (pedidos, catalogo)
+}
+
 /// Hay ítems que el juez puntúa. Sin ellos no hace falta llamarlo.
 pub fn hay_pedidos(rubricas: &[Rubrica]) -> bool {
     !pedidos_de(rubricas).is_empty()
@@ -330,16 +344,7 @@ pub fn juzgar(
     nombre_modelo: &str,
     limites: &LimitesPrompt,
 ) -> ResultadoJuez {
-    let pedidos: BTreeMap<String, Dimension> = pedidos_de(e.rubricas)
-        .into_iter()
-        .map(|(item, dimension)| (item.id.clone(), dimension))
-        .collect();
-    let catalogo: BTreeMap<String, Mide> = e
-        .rubricas
-        .iter()
-        .flat_map(|r| r.item.iter())
-        .map(|item| (item.id.clone(), item.mide))
-        .collect();
+    let (pedidos, catalogo) = mapas_de(e.rubricas);
     let prompt = construir_prompt(e, limites);
     if let Some(motivo) = exceso_de_entrada(&prompt) {
         return sin_veredicto(motivo, &pedidos);
@@ -364,40 +369,25 @@ pub fn juzgar(
         catalogo: &catalogo,
         modelo: nombre_modelo,
     };
-    let mut niveles = BTreeMap::new();
-    let mut items = Vec::new();
+    let mut lectura = leer_items(respuesta.items, &cx);
     let mut hallazgos = Vec::new();
-    let mut descartes = Vec::new();
-    for valor in respuesta.items {
-        match procesar_item(valor, &cx) {
-            Ok(nivel) if niveles.contains_key(&nivel.item) => descartes.push(descarte(
-                format!("ítem {}", nivel.item),
-                "ítem repetido; vale la primera respuesta",
-            )),
-            Ok(nivel) => {
-                niveles.insert(nivel.item.clone(), nivel.nivel);
-                items.push(nivel);
-            }
-            Err(d) => descartes.push(d),
-        }
-    }
     for valor in respuesta.hallazgos {
         match procesar_hallazgo(valor, &cx) {
             Ok(hallazgo) => hallazgos.push(hallazgo),
-            Err(d) => descartes.push(d),
+            Err(d) => lectura.descartes.push(d),
         }
     }
     let faltantes = pedidos
         .keys()
-        .filter(|id| !niveles.contains_key(*id))
+        .filter(|id| !lectura.niveles.contains_key(*id))
         .cloned()
         .collect();
     ResultadoJuez {
         estado: EstadoJuez::Ok,
-        niveles,
-        items,
+        niveles: lectura.niveles,
+        items: lectura.items,
         hallazgos,
-        descartes,
+        descartes: lectura.descartes,
         faltantes,
     }
 }
@@ -424,16 +414,18 @@ struct Contexto<'a> {
 }
 
 impl Contexto<'_> {
-    /// Dimensión de un ítem que el juez puede puntuar. Un ítem de sonda o inexistente da el motivo.
+    /// Dimensión de un ítem pedido. Un id que no se pidió se ignora, y el motivo lo dice.
     fn dimension(&self, id: &str) -> Result<Dimension, String> {
         match self.catalogo.get(id) {
-            None => Err(format!("el ítem {id} no existe en las rúbricas pedidas")),
-            Some(Mide::Sonda) => Err("el juez no puntúa ítems de sonda".into()),
-            Some(_) => self
-                .pedidos
-                .get(id)
-                .copied()
-                .ok_or_else(|| format!("el ítem {id} no tiene dimensión conocida")),
+            None => Err(format!(
+                "no se pidió; se ignora: el ítem {id} no existe en las rúbricas pedidas"
+            )),
+            Some(Mide::Sonda) => {
+                Err("no se pidió; se ignora: el juez no puntúa ítems de sonda".into())
+            }
+            Some(_) => self.pedidos.get(id).copied().ok_or_else(|| {
+                format!("no se pidió; se ignora: el ítem {id} no tiene dimensión conocida")
+            }),
         }
     }
 
@@ -442,6 +434,80 @@ impl Contexto<'_> {
             modelo: self.modelo.into(),
         }
     }
+}
+
+/// Valor de `motivo` con el que el juez dice que no halló evidencia para un ítem.
+const SIN_EVIDENCIA_DEL_JUEZ: &str = "sin_evidencia";
+
+/// Lo que dice el juez de un ítem pedido, ya validado.
+enum Dicho {
+    Nivel(NivelItem),
+    /// El juez no halló evidencia. No rompe el contrato.
+    SinEvidencia(String),
+}
+
+/// Lectura de los ítems de la respuesta: niveles, descartes y los ids que rompen el contrato.
+#[derive(Debug, Default)]
+struct Lectura {
+    niveles: BTreeMap<String, u8>,
+    items: Vec<NivelItem>,
+    descartes: Vec<Descarte>,
+    /// Ids pedidos que rompen el contrato: omitidos, repetidos, o sin nivel ni `sin_evidencia`.
+    #[allow(dead_code)] // lo usa el reintento (parte 3).
+    rotos: BTreeSet<String>,
+}
+
+/// Lee los ítems de la respuesta. Un id pedido repetido no cuenta: ninguna de sus copias sirve.
+fn leer_items(valores: Vec<Value>, cx: &Contexto) -> Lectura {
+    let mut apariciones: BTreeMap<String, usize> = BTreeMap::new();
+    for id in valores.iter().filter_map(id_de) {
+        *apariciones.entry(id).or_default() += 1;
+    }
+    let mut lectura = Lectura::default();
+    for valor in valores {
+        if let Some(id) = id_de(&valor).filter(|id| cx.pedidos.contains_key(id)) {
+            if apariciones[&id] > 1 {
+                lectura.descartes.push(descarte(
+                    format!("ítem {id}"),
+                    "ítem repetido; rompe el contrato",
+                ));
+                lectura.rotos.insert(id);
+                continue;
+            }
+            if sin_nivel_ni_evidencia(&valor) {
+                lectura.rotos.insert(id);
+            }
+        }
+        match procesar_item(valor, cx) {
+            Ok(Dicho::Nivel(nivel)) => {
+                lectura.niveles.insert(nivel.item.clone(), nivel.nivel);
+                lectura.items.push(nivel);
+            }
+            Ok(Dicho::SinEvidencia(id)) => lectura.descartes.push(descarte(
+                format!("ítem {id}"),
+                "sin_evidencia: el juez no encontró evidencia",
+            )),
+            Err(d) => lectura.descartes.push(d),
+        }
+    }
+    for id in cx.pedidos.keys() {
+        if !apariciones.contains_key(id) {
+            lectura.rotos.insert(id.clone());
+        }
+    }
+    lectura
+}
+
+/// Id de un ítem crudo, si trae uno de texto.
+fn id_de(valor: &Value) -> Option<String> {
+    valor.get("item")?.as_str().map(str::to_string)
+}
+
+/// Un ítem sin nivel y sin `sin_evidencia`. Rompe el contrato.
+fn sin_nivel_ni_evidencia(valor: &Value) -> bool {
+    let sin_nivel = valor.get("nivel").is_none_or(Value::is_null);
+    let sin_evidencia = valor.get("motivo").and_then(Value::as_str) == Some(SIN_EVIDENCIA_DEL_JUEZ);
+    sin_nivel && !sin_evidencia
 }
 
 fn descarte(que: impl Into<String>, motivo: impl Into<String>) -> Descarte {
@@ -502,6 +568,8 @@ struct ItemCrudo {
     #[serde(default)]
     nivel: Option<i64>,
     #[serde(default)]
+    motivo: Option<String>,
+    #[serde(default)]
     evidencia: Vec<Value>,
 }
 
@@ -534,12 +602,15 @@ struct HallazgoCrudo {
 }
 
 /// Valida un ítem. El nivel se conserva solo si una evidencia pasa el gate.
-fn procesar_item(valor: Value, cx: &Contexto) -> Result<NivelItem, Descarte> {
+fn procesar_item(valor: Value, cx: &Contexto) -> Result<Dicho, Descarte> {
     let cruda: ItemCrudo =
         serde_json::from_value(valor).map_err(|e| descarte("ítem", format!("mal formado: {e}")))?;
     let que = format!("ítem {}", cruda.item);
     let dimension = cx.dimension(&cruda.item).map_err(|m| descarte(&que, m))?;
     let Some(nivel) = cruda.nivel else {
+        if cruda.motivo.as_deref() == Some(SIN_EVIDENCIA_DEL_JUEZ) {
+            return Ok(Dicho::SinEvidencia(cruda.item));
+        }
         return Err(descarte(&que, "sin nivel"));
     };
     if !(0..=NIVEL_MAX).contains(&nivel) {
@@ -554,12 +625,12 @@ fn procesar_item(valor: Value, cx: &Contexto) -> Result<NivelItem, Descarte> {
     if validas.is_empty() {
         return Err(descarte(&que, "sin evidencia que pase el gate"));
     }
-    Ok(NivelItem {
+    Ok(Dicho::Nivel(NivelItem {
         item: cruda.item,
         nivel: nivel as u8,
         evidencia: validas,
         fuente: cx.fuente(),
-    })
+    }))
 }
 
 /// Devuelve `archivo:linea` si la evidencia pasa el gate de evidencia.
@@ -840,6 +911,26 @@ mod tests {
         )
     }
 
+    /// Lectura de `items` con el caso `c`, con los mapas de pedidos y catálogo que arma `juzgar`.
+    fn leer(c: &Caso, items: Value) -> Lectura {
+        let Value::Array(lista) = items else {
+            panic!("se esperaba un arreglo");
+        };
+        let (pedidos, catalogo) = mapas_de(&c.rubricas);
+        let cx = Contexto {
+            repo: c.repo.path(),
+            requisitos: &c.requisitos,
+            pedidos: &pedidos,
+            catalogo: &catalogo,
+            modelo: MODELO,
+        };
+        leer_items(lista, &cx)
+    }
+
+    fn sin_evidencia_json(id: &str) -> Value {
+        json!({"item": id, "nivel": null, "motivo": "sin_evidencia", "evidencia": []})
+    }
+
     fn respuesta(items: Value, hallazgos: Value) -> String {
         json!({"items": items, "hallazgos": hallazgos}).to_string()
     }
@@ -1112,6 +1203,105 @@ mod tests {
         let r = juzgar_con(&c, respuesta(json!([]), json!([])));
         assert_eq!(r.estado, EstadoJuez::Ok);
         assert_eq!(r.faltantes, vec![MODULARIDAD.to_string(), TOPE.to_string()]);
+    }
+
+    #[test]
+    fn juez_sin_evidencia_va_a_faltantes_con_su_descarte() {
+        let c = caso();
+        let texto = respuesta(
+            json!([
+                item_nivel(MODULARIDAD, 2, json!([real()])),
+                sin_evidencia_json(TOPE),
+            ]),
+            json!([]),
+        );
+        let r = juzgar_con(&c, texto);
+        assert_eq!(r.estado, EstadoJuez::Ok);
+        assert!(!r.niveles.contains_key(TOPE));
+        assert_eq!(r.faltantes, vec![TOPE.to_string()]);
+        assert!(
+            r.descartes
+                .iter()
+                .any(|d| d.que == "ítem diseno.tope" && d.motivo.contains("sin_evidencia")),
+            "{:?}",
+            r.descartes
+        );
+    }
+
+    #[test]
+    fn juez_id_repetido_no_cuenta_ninguna_copia() {
+        let c = caso();
+        let items = json!([
+            item_nivel(MODULARIDAD, 2, json!([real()])),
+            item_nivel(MODULARIDAD, 3, json!([real()])),
+            item_nivel(TOPE, 1, json!([real()])),
+        ]);
+        let r = juzgar_con(&c, respuesta(items.clone(), json!([])));
+        assert!(!r.niveles.contains_key(MODULARIDAD), "{:?}", r.niveles);
+        assert!(r.faltantes.contains(&MODULARIDAD.to_string()));
+        let repetidos = r
+            .descartes
+            .iter()
+            .filter(|d| d.que == "ítem diseno.modularidad" && d.motivo.contains("repetido"))
+            .count();
+        assert_eq!(repetidos, 2, "{:?}", r.descartes);
+        assert!(leer(&c, items).rotos.contains(MODULARIDAD));
+    }
+
+    #[test]
+    fn juez_id_omitido_queda_en_rotos() {
+        let c = caso();
+        let l = leer(&c, json!([item_nivel(MODULARIDAD, 2, json!([real()]))]));
+        assert_eq!(l.rotos, BTreeSet::from([TOPE.to_string()]));
+    }
+
+    #[test]
+    fn juez_item_sin_nivel_ni_motivo_queda_en_rotos() {
+        let c = caso();
+        let l = leer(
+            &c,
+            json!([{"item": MODULARIDAD}, item_nivel(TOPE, 1, json!([real()]))]),
+        );
+        assert_eq!(l.rotos, BTreeSet::from([MODULARIDAD.to_string()]));
+        assert!(!l.niveles.contains_key(MODULARIDAD));
+    }
+
+    #[test]
+    fn juez_sin_evidencia_no_esta_en_rotos() {
+        let c = caso();
+        let l = leer(
+            &c,
+            json!([
+                sin_evidencia_json(MODULARIDAD),
+                item_nivel(TOPE, 1, json!([real()])),
+            ]),
+        );
+        assert!(l.rotos.is_empty(), "{:?}", l.rotos);
+    }
+
+    #[test]
+    fn juez_id_no_pedido_se_ignora_con_aviso() {
+        let c = caso();
+        let items = json!([
+            item_nivel("diseno.inventado", 2, json!([real()])),
+            item_nivel(CICLOS, 2, json!([real()])),
+            item_nivel(MODULARIDAD, 2, json!([real()])),
+            item_nivel(TOPE, 1, json!([real()])),
+        ]);
+        let r = juzgar_con(&c, respuesta(items.clone(), json!([])));
+        for id in ["diseno.inventado", CICLOS] {
+            assert!(!r.niveles.contains_key(id), "{id}");
+            assert!(!r.faltantes.contains(&id.to_string()), "{id}");
+            assert!(
+                r.descartes.iter().any(|d| d.que == format!("ítem {id}")
+                    && d.motivo.contains("no se pidió")
+                    && d.motivo.contains("se ignora")),
+                "{id}: {:?}",
+                r.descartes
+            );
+        }
+        let l = leer(&c, items);
+        assert!(l.rotos.is_empty(), "{:?}", l.rotos);
     }
 
     // Hallazgos: impacto, cita, severidad y gate.
