@@ -45,11 +45,14 @@ Respondé estas tres preguntas con evidencia:
 - ¿Qué decisión de diseño es un riesgo para producción, como un estado global, un bloqueo o un error que se traga?
 - ¿Qué falta para operar el producto: logs, configuración, manejo de errores?
 Cada evidencia tiene archivo, linea y cita. La cita es texto textual del archivo, con los mismos caracteres.
-Cada ítem trae evidencia que cumple el ancla de su nivel. Sin evidencia para un ítem, no lo incluyas en items.
+El juez responde CADA id de la lista IDS OBLIGATORIOS una sola vez, en ese orden.
+Cada ítem trae evidencia que cumple el ancla de su nivel.
+Sin evidencia para un ítem, responde \"nivel\":null, \"motivo\":\"sin_evidencia\" y \"evidencia\":[].
+Un id sin respuesta, repetido, o sin nivel ni sin_evidencia rompe el contrato.
 Un hallazgo exige impacto con ids de requisitos reales. Sin requisito afectado, no reportes el hallazgo.
 Respondé SOLO un objeto JSON con esta forma exacta:
-{\"items\":[{\"item\":\"<id>\",\"nivel\":0-3,\"evidencia\":[{\"archivo\":\"...\",\"linea\":N,\"cita\":\"<texto textual del archivo>\"}]}],\"hallazgos\":[{\"item\":\"<id>\",\"severidad\":1-3,\"archivo\":\"...\",\"linea\":N,\"cita\":\"...\",\"detalle\":\"...\",\"impacto\":[\"R1\"]}]}
-Sin hallazgos: \"hallazgos\":[]. Sin ítems con evidencia: \"items\":[].";
+{\"items\":[{\"item\":\"<id>\",\"nivel\":0-3,\"evidencia\":[{\"archivo\":\"...\",\"linea\":N,\"cita\":\"<texto textual del archivo>\"}]},{\"item\":\"<id>\",\"nivel\":null,\"motivo\":\"sin_evidencia\",\"evidencia\":[]}],\"hallazgos\":[{\"item\":\"<id>\",\"severidad\":1-3,\"archivo\":\"...\",\"linea\":N,\"cita\":\"...\",\"detalle\":\"...\",\"impacto\":[\"R1\"]}]}
+Sin hallazgos: \"hallazgos\":[].";
 
 /// Un modelo que responde al prompt del juez.
 pub trait ModeloJuez {
@@ -190,6 +193,11 @@ pub fn construir_prompt(e: &EntradaJuez, limites: &LimitesPrompt) -> Prompt {
             "- {} | {:?} | {}:{}: {}\n",
             h.id, h.dimension, h.archivo, h.linea, h.detalle
         ));
+    }
+    // Ids que el juez debe responder, uno por línea y en orden. Sin ellos no hay contrato.
+    usuario.push_str("\nIDS OBLIGATORIOS:\n");
+    for (item, _) in pedidos_de(e.rubricas) {
+        usuario.push_str(&format!("- {}\n", item.id));
     }
     usuario.push_str("\nÍTEMS A PUNTUAR:\n");
     for (item, _) in pedidos_de(e.rubricas) {
@@ -1303,6 +1311,28 @@ mod tests {
         let p = construir_prompt(&c.entrada(), &LimitesPrompt::default());
         assert!(p.usuario.contains(MODULARIDAD));
         assert!(!p.usuario.contains(CICLOS));
+    }
+
+    #[test]
+    fn juez_prompt_nombra_ids_obligatorios_en_orden() {
+        let c = caso();
+        let p = construir_prompt(&c.entrada(), &LimitesPrompt::default());
+        let esperado = format!("IDS OBLIGATORIOS:\n- {MODULARIDAD}\n- {TOPE}\n");
+        let inicio = p
+            .usuario
+            .find(&esperado)
+            .expect("bloque de ids obligatorios");
+        let fin = p.usuario.find("ÍTEMS A PUNTUAR:").expect("bloque de ítems");
+        assert!(inicio < fin, "los ids van antes de ÍTEMS A PUNTUAR");
+    }
+
+    #[test]
+    fn juez_prompt_sistema_exige_cada_id_y_acepta_sin_evidencia() {
+        let c = caso();
+        let p = construir_prompt(&c.entrada(), &LimitesPrompt::default());
+        let sistema = p.sistema.expect("tiene sistema");
+        assert!(sistema.contains("sin_evidencia"), "{sistema}");
+        assert!(!sistema.contains("no lo incluyas en items"), "{sistema}");
     }
 
     #[test]
