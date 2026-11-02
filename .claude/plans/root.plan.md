@@ -78,6 +78,7 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 52 | P-req3: "P-req3 a". La ficha de brasa pide un `LICENSE` en la raíz para R14, en la prosa y en la aceptación. |
 | 53 | P-req4: "P-req4 a". La sesión de fichas suma 20 tests ocultos a memora (R2: los 10 flags y el flag que pisa al archivo; R4: `CLIENT` y `HELLO`) y 1 a brasa (R13: `brasa info`). |
 | 54 | P-test1: "P-test1 b", P-test2: "P-test2 a", P-test3: "P-test3 a". La ficha de brasa fija los nombres de wgpu de `brasa info`. Los sufijos de `--maxmemory` y la diferencia de `--appendfsync` quedan sin fijar. |
+| 55 | P59: "B". Un test inestable con una cota inferior de Wilson al 90 % menor que 0,5 cuenta como falla. Uno con una cota de al menos 0,5 pone tope 2 a su requisito. La nube 9 lo construye en la Tarea 40. |
 
 ## Patterns to Mirror
 
@@ -2632,3 +2633,104 @@ No hay preguntas nuevas para el usuario.
   - c) Como hoy: todo test inestable cuenta como falla. Los dos requisitos quedan en nivel 1.
 
   Mi recomendación es b): un PM distingue una función que falla de vez en cuando de una que falla casi siempre. La cota de Wilson ya es la medida que Root usa en Track y en Route.
+
+## Vuelta del 2026-11-01: P59 b, pruebas con claves, Tarea 7 y Validate de 13 (memora)
+
+**P59 b (decisión 55).** El usuario respondió "B". El orquestador arrancó la nube 9 desde dcd43fb con esa regla, por orden del usuario: "Arrancá la nube 9 con P59 b." La nube 9 todavía no entregó su rama.
+
+**Pruebas con claves (paso 1).** El usuario las ordenó: "a".
+- Tarea 29: la suite con podman corrió con las dos claves exportadas, falsas. Dio 1919 verdes, 0 rojos y 2 ignorados. Ningún test dio un 401, y el `eventos.jsonl` real no recibió líneas de la suite.
+- 21b: `GET /models` de DeepSeek responde 200 y lista `deepseek-flash` y `deepseek-v4-pro`.
+- 21c, DeepSeek: el stream manda `reasoning_content` durante todo el razonamiento. El hueco más largo entre bytes fue 1,6 s.
+- 21c, Anthropic: `claude-haiku-5-5` con `thinking: {"type": "adaptive"}` manda el razonamiento en un solo `thinking_delta`, al final del bloque. El hueco fue 3,2 s con 661 tokens y 5,0 s con 996. Solo llegó un `ping`, al principio.
+- `r00t llama` real: `verifica` con `deepseek-v4-pro`, `delega` con `deepseek-flash` y el respaldo Haiku sin la clave de DeepSeek funcionan. `verifica` llegó al tope de 3000 tokens en 26,5 s, y Root la marcó truncada.
+- Decisión 46: el evento de 0,50 USD quedó registrado con `--fecha 2026-10-29`. El orquestador registró además 0,0065 USD de streams corridos fuera de Root.
+
+**Criterio de la Tarea 7 y diagnóstico de brasa.** El usuario escribió: "Mantené el criterio exacto. Arreglá el test del oráculo para que espere a los 3 clientes bloqueados en vez de dormir 0,1 s, y que Sonnet diagnostique cada diferencia de brasa."
+- FIFO: la sesión principal arregló `test_blpop_fifo_entre_clientes` en el oráculo del banco. Ahora espera `blocked_clients:N` de `INFO clients` en vez de dormir 0,1 s. Con esa espera, memora-ecc falla en 17 de 20 corridas.
+- FIFO: la causa está en el producto. `block_loop` de `src/server.rs` despierta a todos con un `Notify` y no guarda una cola FIFO. Antes, el sueño de 0,1 s mezclaba una carrera del test con el defecto.
+- FIFO: el orquestador aplica el mismo cambio en la copia de Root (`oraculos/memora/oculto/test_oculto_memora.py`) después del Validate de 13 y 13b.
+- brasa: un subagente Sonnet diagnosticó brasa-ecc solo con lecturas. El contrato es idéntico byte a byte, y el banco y Root dan 53/53. `test_spin_despues_de_rotacion` falla en los dos por el producto: `scene.rs:271` aplica `Rs·Re`, y la ficha pide `T·Re·Rs(t)·S`.
+- brasa: el 15/16 del banco y el 20/21 de Root miden suites distintas. Root suma los 5 tests de Khronos y `test_info_lista_adaptador_con_backend_y_tipo`, y deja el test de GPU pendiente por entorno. En los tests comunes, Root da lo mismo que el banco.
+
+**Validate de 13 y 13b, memora.** El orquestador corrió `r00t --json oraculo evaluar` con las claves y el `ROOT_HOME` real, con `r00t` release de dcd43fb. memora gastó 0,16 USD. Las salidas están en `~/.cache/root-wt/validate13/`.
+
+| Repo | Decisión | Completitud | Funciona | Seguridad | Estructura | Arquitectura | Diseño | Pruebas | Global |
+|---|---|---|---|---|---|---|---|---|---|
+| memora-ecc | listo | 0,928 | 0,984 | 0,926 | sin veredicto | 0,667 | 0,083 | 0,433 | vacío |
+| memora-sdlc | bloqueado (R1 y R13) | 0,225 | 0,349 | 1,000 | sin veredicto | 0,644 | 0,750 | 0,000 | vacío |
+
+- Cumple: los dos repos listan las 9 dimensiones; memora-sdlc da bloqueado y nombra su regla; los pasos de memora-ecc citan ids reales (R4 y R7); la salida no trae claves.
+- No cumple: las causas A a D de abajo.
+
+**brasa del Validate de 13.** Se cortó dos veces por reinicios, a las 22:16 y a las 23:57. El orquestador la relanza después de esta vuelta. El reinicio también borró el registro de costos del orquestador, que vivía en `/tmp`. Por la regla 2 de la laptop, ese registro también va en /home.
+
+## Desempates técnicos 19 (Opus, 2026-11-01)
+
+**Hallazgo 4: inactividad de Anthropic con razonamiento.**
+- Con `adaptive`, Anthropic manda el razonamiento al final del bloque. A unos 200 tokens por segundo, el silencio pasa los 120 s de inactividad cerca de los 24 000 tokens, y los jueces piden hasta 32 000.
+- **Desempate.** El plazo de inactividad depende del proveedor. DeepSeek sigue con 120 s: el stream medido nunca calló más de 1,6 s. Anthropic con razonamiento usa como inactividad el mismo plazo total de la llamada (`timeout_juez_s`), sin un corte propio. Razón: el silencio de Anthropic es parte de su protocolo, no una conexión muerta.
+- La laptop confirma después, con una llamada de Haiku de más de 24 000 tokens de razonamiento, si Anthropic manda `ping` en esa espera. El costo es de centavos.
+
+**Causa A: `global` vacío antes de calibrar.**
+- `global` usa solo dimensiones calibradas (Tarea 13), y la calibración real es el paso siguiente. El criterio "memora-sdlc obtiene un `global` menor que memora-ecc" no se puede medir antes.
+- **Desempate.** El orden de los pasos no cambia: la calibración necesita la Tarea 13 funcionando. El criterio de la Tarea 13 se parte en dos. Las nueve dimensiones, la decisión y las citas se validan ahora. La comparación de `global` se valida después de la calibración real.
+
+**Causa B: Estructura sin veredicto por un ítem del juez.**
+- `juntar_partes` deja sin veredicto la dimensión entera si la parte del juez no tiene veredicto, y descarta los 3 ítems medidos por las sondas.
+- **Desempate.** El valor de una dimensión sale de sus ítems medidos, de sonda o de juez. Un ítem sin nivel válido va a `faltantes`. La dimensión queda sin veredicto solo si no midió ningún ítem, o si no cumple la cobertura de la causa C. Esto reemplaza el desempate 4 de "Desempates técnicos 11" y unifica la regla con el desempate 1 de "Desempates técnicos 13". Razón: tirar tres mediciones por una que falta pierde datos sin ganar nada.
+
+**Causa B': faltantes perdidos.**
+- `juntar_partes` y `sin_veredicto_puntaje` arman el `Puntaje` con `faltantes` vacío.
+- **Desempate.** Los dos llevan los ítems que faltaron, con su motivo: "el juez no dio nivel" o "la evidencia no pasó el gate". `Informe.confianza` los lista. Razón: el informe debe decir qué no midió.
+
+**Causa C: Diseño al revés.**
+- memora-ecc recibió 4 ítems del juez y memora-sdlc 2. Los dos promedios usan ítems distintos, así que no se comparan. El juez además puntúa el código que existe, no lo que falta.
+- **Desempate.** Una dimensión con ítems del juez necesita cobertura: los ítems medidos deben sumar al menos dos tercios del peso de su rúbrica. Con menos, queda sin veredicto y con sus `faltantes`. Razón: un promedio sobre una parte chica y distinta de los ítems no compara dos repos.
+- Que el juez acierte lo miden la calibración (Tarea 12) y la validez (Tarea 12b). Hasta entonces, Diseño no entra a `global`.
+
+**Causa D: los pasos no nombran módulos.**
+- `faltante` nombra módulos solo si el requisito declara `modulos`, y ningún requisito de memora ni de brasa lo declara.
+- **Desempate.** No cambia el código: el mapa entre requisitos y módulos es conocimiento de la tarea. La sesión de fichas suma `modulos` a cada requisito (pedido de abajo).
+
+**Historial y oráculo cambiado.**
+- La Tarea 39 indexa el historial solo por el contenido del repo. Con el test FIFO cambiado en el oráculo, las corridas viejas y las nuevas del mismo repo se mezclarían.
+- **Desempate.** La clave del historial suma el hash de las carpetas `oculto/` y `contrato/` de la tarea. Un oráculo cambiado arranca un historial vacío.
+
+**Valores de referencia de la Tarea 7.** El criterio no cambia, como pidió el usuario. Los números del banco tampoco cambian: son la medición histórica. La causa de cada diferencia queda en `diferencias.md`:
+- memora-ecc: con el test FIFO arreglado, R7 falla por el producto (sin cola FIFO en `block_loop`).
+- brasa-ecc: 20/21 en Root contra 15/16 en el banco, por suites distintas. En los tests comunes, los dos dan lo mismo.
+
+### Tarea 41: Mediciones parciales, inactividad de Anthropic y clave del historial
+- **Action**: los desempates del hallazgo 4, B, B', C y la clave del historial.
+- **Dónde**: en la nube 9, por mensaje del orquestador. La prueba de Haiku con más de 24 000 tokens va en la laptop.
+- **Validate**: `cargo test`:
+  - Estructura con 3 ítems de sonda medidos y el ítem del juez sin nivel da un valor, y lista ese ítem en `faltantes`.
+  - Diseño con ítems medidos que suman menos de dos tercios del peso queda sin veredicto, con sus `faltantes`.
+  - `sin_veredicto_puntaje` conserva sus `faltantes`, y `Informe.confianza` los muestra.
+  - Un stream falso de Anthropic con razonamiento que calla 200 segundos no se corta antes del plazo total.
+  - Un stream falso de DeepSeek que calla 121 segundos se corta.
+  - Cambiar un archivo de `oculto/` arranca un historial vacío para el mismo repo.
+
+### Mensaje para la nube 9
+
+El orquestador manda este texto a la sesión de nube 9, que arrancó desde dcd43fb:
+
+> El planner suma la Tarea 41 a esta build, después de la Tarea 40. Está en `.claude/plans/root.plan.md`, en "Desempates técnicos 19" y "Tarea 41", en el commit que te pasa el orquestador. Primero: el valor de una dimensión sale de sus ítems medidos, y un ítem del juez sin nivel va a `faltantes`, sin borrar las sondas. Segundo: `juntar_partes` y `sin_veredicto_puntaje` conservan sus `faltantes`, y `Informe.confianza` los muestra. Tercero: una dimensión con ítems del juez necesita que los ítems medidos sumen dos tercios del peso de su rúbrica; si no, queda sin veredicto. Cuarto: Anthropic con razonamiento no tiene corte de inactividad propio, solo el plazo total; DeepSeek sigue con 120 s. Quinto: la clave del historial suma el hash de `oculto/` y `contrato/` de la tarea. Anotá la Tarea 41 en el informe de la build.
+
+### Pedido para la sesión de fichas
+
+> Sumá el campo `modulos` a cada `[[requisito]]` de `oraculos/memora/tarea.toml` y `oraculos/brasa/tarea.toml`. Cada lista nombra los módulos que implementan ese requisito en las dos implementaciones, con los nombres de las capas de la ficha. Por ejemplo, el requisito de persistencia de memora nombra `persist` y `db`. Un requisito que no vive en un módulo propio lleva la lista vacía. Root usa ese campo para nombrar los módulos que faltan en los próximos pasos del informe (causa D del Validate de 13).
+
+## Orden de trabajo (2026-11-01)
+
+1. **brasa del Validate de 13 y 13b.** El orquestador la relanza con las claves. Gasto bajo. Va sola, sin otra suite con podman.
+2. **Arreglo de FIFO en la copia de Root.** Después del paso 1. Cambia el oráculo de memora, y con la Tarea 41 el historial arranca de cero.
+3. **Mezcla de la nube 9.** Con las Tareas 40 y 41. Espera la orden del usuario.
+4. **Ids de módulos.** La sesión de fichas suma `modulos` (pedido de arriba). Corre en paralelo.
+5. **Validate de 7 y 13 sobre memora, otra vez.** Después de los pasos 2 a 4. Mide R7 con el test arreglado, la regla P59 b y las mediciones parciales.
+6. **Calibración real (Tarea 12).** Con `--tope-usd 25` (decisión 48). Después, la comparación de `global` de la Tarea 13.
+7. **Prueba de Haiku con más de 24 000 tokens de razonamiento.** Gasto de centavos. Confirma el hallazgo 4.
+8. Siguen la imagen del builder, la credencial, `NETRC`, la corrida de memora, Colab, Graft con G5 y los paquetes a ciegas con G3.
+
+No hay preguntas nuevas para el usuario.
