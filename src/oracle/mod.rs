@@ -756,11 +756,17 @@ fn evaluar_con(
         .redactor
         .filter(|_| partes.redactor)
         .map(RedactorMedido::nuevo);
+    // Los módulos presentes del repo evaluado: un requisito dice qué módulo falta o cuál revisar (decisión 56).
+    let presentes = match perfiles::rust::archivos_rs(&repo_copia) {
+        Ok(archivos) => perfiles::rust::modulos_presentes(&archivos),
+        Err(_) => BTreeSet::new(),
+    };
     let informe = informe::informar_con(
         &veredicto,
         tarea,
         &deps.reglas,
         deps.rubricas,
+        &presentes,
         redactor_medido.as_ref().map(|r| r as &dyn Redactor),
     )?;
     veredicto.costo_usd += redactor_medido.as_ref().map_or(0.0, RedactorMedido::costo);
