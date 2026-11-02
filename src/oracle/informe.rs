@@ -428,6 +428,7 @@ fn no_listo(v: &Veredicto, tarea: &Tarea, reglas: &ReglasDecision) -> Vec<Dispar
     if let Some(p) = completitud {
         let minima = reglas.completitud_minima as f32;
         if p.valor < minima {
+            let (valor_txt, minima_txt) = numeros_contra_umbral(p.valor, minima);
             let sin_cumplir: Vec<&str> = v
                 .requisitos
                 .iter()
@@ -440,16 +441,8 @@ fn no_listo(v: &Veredicto, tarea: &Tarea, reglas: &ReglasDecision) -> Vec<Dispar
                 format!("; sin cumplir: {}", unir(&sin_cumplir))
             };
             salida.push(Disparo {
-                regla: format!(
-                    "completitud_bajo_minimo: completitud {} < {}",
-                    numero(p.valor),
-                    numero(minima)
-                ),
-                frase: format!(
-                    "La completitud es {} y el mínimo es {}{cita}.",
-                    numero(p.valor),
-                    numero(minima)
-                ),
+                regla: format!("completitud_bajo_minimo: completitud {valor_txt} < {minima_txt}"),
+                frase: format!("La completitud es {valor_txt} y el mínimo es {minima_txt}{cita}."),
                 hallazgo: None,
             });
         }
@@ -475,16 +468,13 @@ fn no_listo(v: &Veredicto, tarea: &Tarea, reglas: &ReglasDecision) -> Vec<Dispar
             } else {
                 format!("; hallazgos: {}", unir(&hallazgos))
             };
+            let (valor_txt, minimo_txt) = numeros_contra_umbral(p.valor, minimo as f32);
             salida.push(Disparo {
                 regla: format!(
-                    "minimo_de_dimension: {nombre} calibrada en {} < mínimo {}",
-                    numero(p.valor),
-                    numero(minimo as f32)
+                    "minimo_de_dimension: {nombre} calibrada en {valor_txt} < mínimo {minimo_txt}"
                 ),
                 frase: format!(
-                    "{nombre} calibrada queda en {} y su mínimo es {}{cita}.",
-                    numero(p.valor),
-                    numero(minimo as f32)
+                    "{nombre} calibrada queda en {valor_txt} y su mínimo es {minimo_txt}{cita}."
                 ),
                 hallazgo: None,
             });
@@ -947,16 +937,13 @@ pub fn markdown(tarea: &str, informe: &Informe) -> String {
     let c = &informe.confianza;
     let mut datos: Vec<String> = Vec::new();
     for (clave, tasa) in &c.inestables {
-        let mut linea = format!(
+        // N ya es la cantidad de corridas acumuladas: no se repite en la línea.
+        datos.push(format!(
             "- Inestable {clave}: pasa {} de {} (cota de Wilson {})",
             tasa.pasa,
             tasa.total,
             numero(tasa.wilson_inf as f32)
-        );
-        if let Some(corridas) = c.corridas_acumuladas.get(clave) {
-            linea.push_str(&format!("; {corridas} corridas acumuladas"));
-        }
-        datos.push(linea);
+        ));
     }
     if !c.requisitos_pendientes.is_empty() {
         datos.push(format!(
@@ -984,6 +971,9 @@ pub fn markdown(tarea: &str, informe: &Informe) -> String {
             nombre_dimension(parte.dimension),
             parte.motivo
         ));
+    }
+    for falta in &c.faltantes {
+        datos.push(format!("- Sin medir {}: {}", falta.item, falta.motivo));
     }
     if c.ambiguedades.is_empty() {
         datos.push("- Ambigüedades abiertas: sin datos, el veredicto no trae la ficha.".into());
@@ -1068,6 +1058,22 @@ fn numero(valor: f32) -> String {
     format!("{valor:.2}").replace('.', ",")
 }
 
+/// Valor y umbral de una regla que compara contra un umbral. Usa tres decimales y coma.
+/// Si quedan iguales con tres decimales, usa cuatro. Así el motivo no compara dos números iguales.
+fn numeros_contra_umbral(valor: f32, umbral: f32) -> (String, String) {
+    let con = |n: usize| {
+        (
+            format!("{:.*}", n, valor).replace('.', ","),
+            format!("{:.*}", n, umbral).replace('.', ","),
+        )
+    };
+    let (valor_3, umbral_3) = con(3);
+    if valor_3 != umbral_3 {
+        return (valor_3, umbral_3);
+    }
+    con(4)
+}
+
 /// Une los textos: "a, b y c".
 fn unir<S: AsRef<str>>(items: &[S]) -> String {
     match items {
@@ -1088,7 +1094,7 @@ mod tests {
     use crate::oracle::tarea::Tarea;
     use crate::tipos::{
         Cumplimiento, Decision, Dimension, Estado, EstadoRequisito, Fuente, Hallazgo, Informe,
-        NivelItem, Pendiente, Puntaje, TasaTest, Veredicto,
+        ItemFaltante, NivelItem, Pendiente, Puntaje, TasaTest, Veredicto,
     };
     use std::cell::RefCell;
     use std::fs;
@@ -1423,6 +1429,80 @@ modulos = ["config"]
     }
 
     #[test]
+    fn informe_numeros_contra_umbral_aplica_la_regla_de_los_decimales() {
+        let par = |a: &str, b: &str| (a.to_string(), b.to_string());
+        assert_eq!(numeros_contra_umbral(0.896, 0.90), par("0,896", "0,900"));
+        assert_eq!(numeros_contra_umbral(0.8996, 0.90), par("0,8996", "0,9000"));
+        assert_eq!(numeros_contra_umbral(0.6, 0.8), par("0,600", "0,800"));
+    }
+
+    #[test]
+    fn informe_motivo_de_completitud_0_896_contra_0_90_muestra_tres_decimales() {
+        let v = veredicto(Vec::new(), Some(0.896), Vec::new());
+        let reglas = ReglasDecision {
+            completitud_minima: 0.90,
+            ..ReglasDecision::default()
+        };
+        let i = informar_con(&v, &tarea(), &reglas, &[], None).expect("informa");
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
+        assert!(i.motivo.contains("0,896 < 0,900"), "{}", i.motivo);
+        assert!(
+            i.resumen
+                .contains("La completitud es 0,896 y el mínimo es 0,900"),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_motivo_iguales_con_tres_decimales_muestra_cuatro() {
+        // 0,8996 y 0,90 son iguales con tres decimales (0,900): la regla sube a cuatro.
+        let v = veredicto(Vec::new(), Some(0.8996), Vec::new());
+        let reglas = ReglasDecision {
+            completitud_minima: 0.90,
+            ..ReglasDecision::default()
+        };
+        let i = informar_con(&v, &tarea(), &reglas, &[], None).expect("informa");
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
+        assert!(i.motivo.contains("0,8996 < 0,9000"), "{}", i.motivo);
+        assert!(
+            i.resumen
+                .contains("La completitud es 0,8996 y el mínimo es 0,9000"),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
+    fn informe_motivo_de_dimension_calibrada_muestra_tres_decimales() {
+        let mut v = ecc();
+        let seguridad = v
+            .puntajes
+            .iter_mut()
+            .find(|p| p.dimension == Dimension::Seguridad)
+            .expect("seguridad");
+        seguridad.valor = 0.6;
+        seguridad.calibrada = true;
+        let reglas = ReglasDecision {
+            minimo: BTreeMap::from([("seguridad".to_string(), 0.8)]),
+            ..ReglasDecision::default()
+        };
+        let i = informar_con(&v, &tarea(), &reglas, &[], None).expect("informa");
+        assert_eq!(i.decision, Decision::NoListo, "{}", i.motivo);
+        assert!(
+            i.motivo.contains("calibrada en 0,600 < mínimo 0,800"),
+            "{}",
+            i.motivo
+        );
+        assert!(
+            i.resumen
+                .contains("Seguridad calibrada queda en 0,600 y su mínimo es 0,800"),
+            "{}",
+            i.resumen
+        );
+    }
+
+    #[test]
     fn informe_completitud_sin_veredicto_da_sin_decision_y_lo_anota() {
         // Desempate 9: sin veredicto de completitud, la decisión es `SinDecision`, aunque su rúbrica no
         // tenga ítem con `bloquea`.
@@ -1456,6 +1536,35 @@ modulos = ["config"]
         assert_eq!(crate::oracle::codigo_de_estado(estado_de(Some(&i))), 3);
         let md = markdown("memora", &i);
         assert!(md.contains("Sin decisión"), "{md}");
+    }
+
+    #[test]
+    fn informe_confianza_lista_los_items_sin_medir() {
+        // Un faltante de un puntaje sale en la confianza del informe y en el markdown, con su motivo.
+        let mut v = ecc();
+        let estructura = v
+            .puntajes
+            .iter_mut()
+            .find(|p| p.dimension == Dimension::Estructura)
+            .expect("hay estructura");
+        estructura.faltantes = vec![ItemFaltante {
+            item: "estructura.legibilidad".into(),
+            motivo: "el juez no dio nivel".into(),
+        }];
+        let i = informe_de(&v);
+        assert!(
+            i.confianza
+                .faltantes
+                .iter()
+                .any(|f| f.item == "estructura.legibilidad" && f.motivo == "el juez no dio nivel"),
+            "{:?}",
+            i.confianza.faltantes
+        );
+        let md = markdown("memora", &i);
+        assert!(
+            md.contains("- Sin medir estructura.legibilidad: el juez no dio nivel"),
+            "{md}"
+        );
     }
 
     #[test]
@@ -1886,7 +1995,7 @@ modulos = ["config"]
     }
 
     #[test]
-    fn informe_confianza_muestra_las_corridas_acumuladas_de_un_inestable() {
+    fn informe_confianza_describe_un_inestable_con_pasa_x_de_n_una_sola_vez() {
         let mut v = ecc();
         v.tasas.insert(
             "oculto:tests/t.py::otro".into(),
@@ -1899,12 +2008,35 @@ modulos = ["config"]
         v.corridas_acumuladas
             .insert("oculto:tests/t.py::otro".into(), 7);
         let i = informe_de(&v);
+        // El campo sigue en el modelo: solo cambia el texto del markdown.
         assert_eq!(
             i.confianza.corridas_acumuladas["oculto:tests/t.py::otro"],
             7
         );
         let md = markdown("memora", &i);
-        assert!(md.contains("7 corridas acumuladas"), "{md}");
+        assert_eq!(md.matches("pasa 4 de 7").count(), 1, "{md}");
+        let linea = md
+            .lines()
+            .find(|l| l.starts_with("- Inestable oculto:tests/t.py::otro"))
+            .unwrap_or_else(|| panic!("falta la línea del inestable: {md}"));
+        assert!(!linea.contains("corridas acumuladas"), "{linea}");
+        assert_eq!(linea.matches('7').count(), 1, "{linea}");
+    }
+
+    #[test]
+    fn informe_cota_de_wilson_sigue_con_dos_decimales() {
+        // Guarda: `numero` no cambia para la cota de Wilson, que sigue con dos decimales.
+        let mut v = ecc();
+        v.tasas.insert(
+            "oculto:tests/t.py::otro".into(),
+            TasaTest {
+                pasa: 4,
+                total: 7,
+                wilson_inf: 0.2,
+            },
+        );
+        let md = markdown("memora", &informe_de(&v));
+        assert!(md.contains("(cota de Wilson 0,20)"), "{md}");
     }
 
     #[test]

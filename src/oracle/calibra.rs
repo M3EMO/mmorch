@@ -536,8 +536,10 @@ pub fn calibrar_tarea_con(
     let rubricas = super::rubrica::cargar_embebidas()
         .map_err(|e| ErrorOraculo::Infra(format!("rúbricas embebidas: {e}")))?;
     let partes = partes_de(dim, &rubricas, &tarea);
+    // Una calibración no escribe historial: cada caso es una versión distinta y se evalúa una vez.
     let opciones = OpcionesOraculo {
         partes: Some(partes),
+        historial: false,
         ..OpcionesOraculo::default()
     };
     // El tope se resuelve antes de la base: un peor caso sin precio no deja arrancar.
@@ -1188,6 +1190,33 @@ mod tests {
         )
         .expect("calibra con el repo de la tarea");
         assert_eq!(vistos.borrow()[0], repo);
+    }
+
+    /// Una calibración no escribe historial: cada caso es una versión distinta y se evalúa una vez.
+    #[test]
+    fn calibra_evalua_sin_historial() {
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = home.path().join("oraculos").join("calibra-fixture");
+        std::fs::create_dir_all(&carpeta).expect("carpeta");
+        let _ = tarea_en(&carpeta, "");
+        let historiales = RefCell::new(Vec::<bool>::new());
+        let evaluador = |_: &Tarea, _: &Path, o: &OpcionesOraculo| {
+            historiales.borrow_mut().push(o.historial);
+            Ok(veredicto_base())
+        };
+        calibrar_tarea(
+            home.path(),
+            "calibra-fixture",
+            "seguridad",
+            2,
+            42,
+            Some(Path::new(FIXTURE)),
+            &evaluador,
+        )
+        .expect("calibra");
+        let vistos = historiales.borrow();
+        assert!(!vistos.is_empty(), "el evaluador no recibió llamadas");
+        assert!(vistos.iter().all(|h| !h), "{vistos:?}");
     }
 
     #[test]

@@ -140,6 +140,10 @@ pub struct OpcionesOraculo {
     /// Partes que corren (Tarea 12). `None`: todas, como en producción. Con partes, las que no corren no
     /// llaman a su contenedor ni a su juez, y su dimensión queda sin veredicto.
     pub partes: Option<Partes>,
+    /// Historial de evidencia (Tarea 39). `true`: la evaluación lee y guarda el historial de la versión del
+    /// repo. `false`: no calcula la versión, no lee ni guarda nada. La calibración usa `false`, porque cada
+    /// caso es una versión distinta y se evalúa una vez.
+    pub historial: bool,
 }
 
 impl Default for OpcionesOraculo {
@@ -148,6 +152,7 @@ impl Default for OpcionesOraculo {
             timeout: Duration::from_secs(3600),
             home: None,
             partes: None,
+            historial: true,
         }
     }
 }
@@ -314,7 +319,8 @@ struct Corrida<'a> {
     /// `ROOT_HOME`: donde van los registros de stderr, dentro de `oraculos/<tarea>/`.
     home: &'a Path,
     /// Historial de evidencia de la versión del repo (Tarea 39): `evidencia/<tarea>/<hash>/historial.jsonl`.
-    historial: &'a Path,
+    /// `None` con `historial: false`: la suite no lee ni agrega nada.
+    historial: Option<&'a Path>,
 }
 
 /// Resultado de una suite: su clasificación, o el motivo por el que no tiene veredicto (A5).
@@ -519,6 +525,9 @@ fn evaluar_con(
     avisos.extend(avisos_colab);
     avisos.extend(aviso_commit);
     avisos.extend(pendientes::aviso_de_red(&colab));
+    // Si todas las entradas de `[[entorno]]` son solo del contrato, `crear` no da paquete y su aviso se
+    // perdería: el veredicto lo lleva (Desempates técnicos 18, pregunta 1).
+    avisos.extend(pendientes::avisos_de_omision_total(tarea));
     // Las ambigüedades de la revisión guardada del juez para este spec (Tarea 30, parte 1).
     let (ambiguedades, aviso_ficha) = ambiguedades_de_la_ficha(&texto_spec, &home);
     avisos.extend(aviso_ficha);
@@ -529,10 +538,19 @@ fn evaluar_con(
     let copia = temporal(&tmp).map_err(|e| infra("directorio temporal", e))?;
     let repo_copia = copia.path().join("repo");
     copiar_repo(&repo, &repo_copia).map_err(|e| infra("copia del repo", e))?;
-    // El historial de evidencia es de esta versión del repo (Tarea 39): el hash sale de la copia.
-    let version = historial::hash_de_version(&repo_copia)
-        .map_err(|e| infra("hash de la versión del repo", e))?;
-    let ruta_historial = historial::ruta(&home, &tarea.nombre, &version)?;
+    // El historial de evidencia es de esta versión del repo y de este oráculo (Tarea 39, Desempates técnicos
+    // 19): la clave sale de la copia y de las suites de la tarea. Sin historial (calibración), no hay versión
+    // que calcular ni archivo que leer o escribir, y no se borra.
+    let ruta_historial = if o.historial {
+        let version = historial::clave_de_version(&repo_copia, &tarea.dir)
+            .map_err(|e| infra("clave de la versión del repo", e))?;
+        let ruta = historial::ruta(&home, &tarea.nombre, &version)?;
+        // Las versiones sin uso en 30 días pierden su historial. La versión actual no se borra.
+        historial::borrar_viejos(&home, &tarea.nombre, &version, SystemTime::now());
+        Some(ruta)
+    } else {
+        None
+    };
     // Cada juez suma el costo de sus llamadas. El de la configuración va antes que las suites.
     let juez_config = deps
         .juez_config
@@ -579,7 +597,7 @@ fn evaluar_con(
         cache: cache.clone(),
         rustsec: rustsec.clone(),
         home: &home,
-        historial: &ruta_historial,
+        historial: ruta_historial.as_deref(),
     };
     // Una suite que la parte no pide no corre. Cada suite recibe sus exclusiones (desempate 1).
     let contrato = if partes.contrato {
@@ -919,7 +937,7 @@ fn medir(
                 // Si ninguna sonda de la dimensión mide para el lenguaje, sus hallazgos quedan y su parte de
                 // sondas no tiene veredicto (Tarea 31).
                 let sin_sondas = sin_sonda_todas(dimension, juez.rubricas, tarea);
-                let de_sondas = if sin_sondas {
+                let mut de_sondas = if sin_sondas {
                     sin_veredicto_puntaje(dimension, motivo_sin_sonda(&tarea.lenguaje))
                 } else {
                     puntaje_de(dimension, de_la_dimension, extra, tarea)
@@ -928,17 +946,31 @@ fn medir(
                 let sin_modulos = dimension == Dimension::Arquitectura
                     && de_sondas.sin_veredicto.as_deref()
                         == Some(perfiles::rust::MOTIVO_SIN_MODULOS);
-                let mut puntaje = match parte_juez(dimension, juez, resultado.as_ref(), &topes) {
-                    // El juez mide sus ítems aunque las sondas no midan: la dimensión conserva su veredicto.
-                    Some(de_juez) if sin_sondas && de_juez.sin_veredicto.is_none() => de_juez,
-                    Some(de_juez) => juntar_partes(dimension, de_sondas, de_juez),
-                    None => de_sondas,
+                // Sin veredicto de sondas, sus ítems de sonda van a faltantes con el motivo de la parte (B').
+                if let Some(motivo) = de_sondas.sin_veredicto.clone() {
+                    sumar_faltantes(
+                        &mut de_sondas.faltantes,
+                        items_de_sonda(dimension, juez.rubricas)
+                            .into_iter()
+                            .map(|i| ItemFaltante {
+                                item: i.id.clone(),
+                                motivo: motivo.clone(),
+                            }),
+                    );
+                }
+                let sondas = Parte {
+                    peso: peso_sondas(dimension, juez.rubricas, tarea),
+                    puntaje: de_sondas,
                 };
-                puntaje.faltantes = faltantes_de(dimension, tarea);
+                let juez_parte = parte_juez(dimension, juez, resultado.as_ref(), &topes);
+                // El peso medido de la cobertura usa el Ws real, sin el mínimo de 1 (desempate C).
+                let medido = peso_medido(&sondas) + juez_parte.as_ref().map_or(0, peso_medido);
+                let mut puntaje = juntar_partes(dimension, sondas, juez_parte);
+                sumar_faltantes(&mut puntaje.faltantes, faltantes_de(dimension, tarea));
                 if sin_modulos {
                     sumar_faltante_sin_modulos(&mut puntaje.faltantes);
                 }
-                puntaje
+                aplicar_cobertura(dimension, juez.rubricas, medido, puntaje)
             }
         })
         .collect();
@@ -1024,40 +1056,120 @@ fn rubrica_del_juez(rubricas: &[Rubrica], dimension: Dimension) -> Option<Rubric
     })
 }
 
-/// Parte del juez de una dimensión. `None` si sus rúbricas no tienen ítems del juez. Sin juez, sin juicio
-/// o con `SinVeredicto`, la parte no tiene veredicto y lleva la causa.
+/// Parte del juez de una dimensión, con su peso Wj. `None` si sus rúbricas no tienen ítems del juez.
+/// Sin juicio, con `SinVeredicto` o sin ítems con nivel, la parte no tiene veredicto y todos sus ítems van
+/// a `faltantes` (desempate B'). Un ítem sin nivel va a `faltantes` con el motivo de su descarte.
 fn parte_juez(
     dimension: Dimension,
     juez: &JuezDiseno,
     resultado: Option<&ResultadoJuez>,
     topes: &BTreeMap<String, u8>,
-) -> Option<Puntaje> {
+) -> Option<Parte> {
     let rubrica = rubrica_del_juez(juez.rubricas, dimension)?;
     let Some(resultado) = resultado else {
-        return Some(sin_veredicto_puntaje(dimension, "juez no corrido".into()));
+        return Some(parte_juez_sin_veredicto(
+            dimension,
+            &rubrica,
+            "juez no corrido".into(),
+            None,
+        ));
     };
     if let EstadoJuez::SinVeredicto(causa) = &resultado.estado {
-        return Some(sin_veredicto_puntaje(dimension, causa.clone()));
+        return Some(parte_juez_sin_veredicto(
+            dimension,
+            &rubrica,
+            causa.clone(),
+            Some(resultado),
+        ));
     }
     // Un ítem sin respuesta queda en `faltantes` y no entra al promedio: no vale 0 (desempate 3).
     let puntuacion = match juez::puntuar_con_juez(&rubrica, resultado, topes, juez.nombre) {
         Ok(puntuacion) => puntuacion,
         Err(e) => {
-            return Some(sin_veredicto_puntaje(dimension, format!("rúbrica: {e}")));
+            return Some(parte_juez_sin_veredicto(
+                dimension,
+                &rubrica,
+                format!("rúbrica: {e}"),
+                Some(resultado),
+            ));
         }
     };
-    Some(match puntuacion.valor {
-        Some(valor) => Puntaje {
+    let Some(valor) = puntuacion.valor else {
+        return Some(parte_juez_sin_veredicto(
+            dimension,
+            &rubrica,
+            "ningún ítem tiene nivel".into(),
+            Some(resultado),
+        ));
+    };
+    let peso = peso_de_items(&rubrica, &puntuacion.items);
+    let faltantes = puntuacion
+        .faltantes
+        .iter()
+        .map(|id| ItemFaltante {
+            item: id.clone(),
+            motivo: motivo_sin_nivel(resultado, id).into(),
+        })
+        .collect();
+    Some(Parte {
+        puntaje: Puntaje {
             dimension,
             valor,
             calibrada: false,
             exactitud_balanceada: None,
             items: puntuacion.items,
             sin_veredicto: None,
-            faltantes: Vec::new(),
+            faltantes,
         },
-        None => sin_veredicto_puntaje(dimension, "ningún ítem tiene nivel".into()),
+        peso,
     })
+}
+
+/// Parte del juez sin veredicto: sus ítems van a `faltantes`. Cada uno lleva el motivo de su nivel
+/// faltante: el gate si su descarte lo nombra, si no, el de falta de nivel (desempate B').
+fn parte_juez_sin_veredicto(
+    dimension: Dimension,
+    rubrica: &Rubrica,
+    motivo: String,
+    resultado: Option<&ResultadoJuez>,
+) -> Parte {
+    let faltantes = rubrica
+        .item
+        .iter()
+        .map(|i| ItemFaltante {
+            item: i.id.clone(),
+            motivo: resultado
+                .map_or(MOTIVO_JUEZ_SIN_NIVEL, |r| motivo_sin_nivel(r, &i.id))
+                .into(),
+        })
+        .collect();
+    Parte {
+        puntaje: sin_veredicto_con_faltantes(dimension, motivo, faltantes),
+        peso: 0,
+    }
+}
+
+/// Motivo de un ítem del juez sin nivel: el gate de evidencia si su descarte lo nombra (desempate B').
+fn motivo_sin_nivel(resultado: &ResultadoJuez, id: &str) -> &'static str {
+    let que = format!("ítem {id}");
+    let por_gate = resultado
+        .descartes
+        .iter()
+        .any(|d| d.que == que && d.motivo.contains("gate"));
+    if por_gate {
+        MOTIVO_GATE_EVIDENCIA
+    } else {
+        MOTIVO_JUEZ_SIN_NIVEL
+    }
+}
+
+/// Suma de los pesos de los ítems de la rúbrica que tienen nivel: el Wj del juez (desempate B).
+fn peso_de_items(rubrica: &Rubrica, items: &[crate::tipos::NivelItem]) -> u32 {
+    items
+        .iter()
+        .filter_map(|n| rubrica.item.iter().find(|i| i.id == n.item))
+        .map(|i| u32::from(i.peso))
+        .sum()
 }
 
 /// Diseño toma su valor solo del juez. Sin ítems de diseño en las rúbricas, o sin juez, no hay veredicto.
@@ -1066,34 +1178,162 @@ fn puntaje_diseno(
     resultado: Option<&ResultadoJuez>,
     topes: &BTreeMap<String, u8>,
 ) -> Puntaje {
-    parte_juez(Dimension::Diseno, juez, resultado, topes).unwrap_or_else(|| {
+    let parte = parte_juez(Dimension::Diseno, juez, resultado, topes);
+    // Diseño no tiene sondas: su peso medido es el del juez (desempate C).
+    let medido = parte.as_ref().map_or(0, peso_medido);
+    let puntaje = parte.map(|parte| parte.puntaje).unwrap_or_else(|| {
         let motivo = if juez.rubricas.is_empty() {
             "sin rúbricas embebidas"
         } else {
             "sin ítems de diseño en las rúbricas"
         };
         sin_veredicto_puntaje(Dimension::Diseno, motivo.into())
-    })
+    });
+    aplicar_cobertura(Dimension::Diseno, juez.rubricas, medido, puntaje)
 }
 
-/// Junta las partes de una dimensión: sondas y juez. Si una parte no tiene veredicto, la dimensión lo
-/// lleva con los motivos. Si tienen, promedio simple de los valores, con los ítems del juez.
-fn juntar_partes(dimension: Dimension, sondas: Puntaje, juez: Puntaje) -> Puntaje {
-    let motivos: Vec<String> = [sondas.sin_veredicto.clone(), juez.sin_veredicto.clone()]
-        .into_iter()
-        .flatten()
-        .collect();
-    if !motivos.is_empty() {
-        return sin_veredicto_puntaje(dimension, motivos.join("; "));
+/// Motivo de un ítem del juez sin nivel cuyo descarte nombra el gate de evidencia (desempate B').
+pub const MOTIVO_GATE_EVIDENCIA: &str = "la evidencia no pasó el gate";
+/// Motivo de un ítem del juez que no tiene nivel y no pasó por el gate de evidencia (desempate B').
+pub const MOTIVO_JUEZ_SIN_NIVEL: &str = "el juez no dio nivel";
+
+/// Una parte de una dimensión, sondas o juez, con su peso: la suma de los pesos de sus ítems medidos.
+struct Parte {
+    puntaje: Puntaje,
+    peso: u32,
+}
+
+/// Junta las partes de una dimensión con su valor ponderado por peso (desempate B):
+/// `valor = (Ws·vs + Wj·vj) / (Ws + Wj)`. Una parte sin veredicto pesa 0, y una de sondas con veredicto pesa
+/// al menos 1. Sin peso en ninguna parte,
+/// la dimensión queda sin veredicto con los motivos de sus partes. Los ítems son los del juez.
+/// Los faltantes de las dos partes pasan a la dimensión sin repetir un ítem.
+fn juntar_partes(dimension: Dimension, sondas: Parte, juez: Option<Parte>) -> Puntaje {
+    let motivos: Vec<String> = [
+        sondas.puntaje.sin_veredicto.clone(),
+        juez.as_ref().and_then(|j| j.puntaje.sin_veredicto.clone()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let mut faltantes = Vec::new();
+    sumar_faltantes(&mut faltantes, sondas.puntaje.faltantes.clone());
+    // Una parte de sondas con veredicto pesa al menos 1: sin pesos en la rúbrica, su valor sigue (B).
+    let ws = if sondas.puntaje.sin_veredicto.is_some() {
+        0
+    } else {
+        sondas.peso.max(1)
+    };
+    let (vj, wj) = match &juez {
+        Some(j) => {
+            sumar_faltantes(&mut faltantes, j.puntaje.faltantes.clone());
+            (j.puntaje.valor, peso_medido(j))
+        }
+        None => (0.0, 0),
+    };
+    if ws + wj == 0 {
+        return sin_veredicto_con_faltantes(dimension, motivos.join("; "), faltantes);
     }
+    let valor = (ws as f32 * sondas.puntaje.valor + wj as f32 * vj) / (ws + wj) as f32;
     Puntaje {
         dimension,
-        valor: (sondas.valor + juez.valor) / 2.0,
+        valor,
         calibrada: false,
         exactitud_balanceada: None,
-        items: juez.items,
+        items: juez.map(|j| j.puntaje.items).unwrap_or_default(),
         sin_veredicto: None,
-        faltantes: Vec::new(),
+        faltantes,
+    }
+}
+
+/// Peso con el que una parte entra al valor: su suma de pesos si tiene veredicto, 0 si no (desempate B).
+fn peso_medido(parte: &Parte) -> u32 {
+    if parte.puntaje.sin_veredicto.is_some() {
+        0
+    } else {
+        parte.peso
+    }
+}
+
+/// Suma faltantes sin repetir un ítem: el primero que llega conserva su motivo (desempate B').
+fn sumar_faltantes(
+    destino: &mut Vec<ItemFaltante>,
+    nuevos: impl IntoIterator<Item = ItemFaltante>,
+) {
+    for f in nuevos {
+        if !destino.iter().any(|d| d.item == f.item) {
+            destino.push(f);
+        }
+    }
+}
+
+/// Ítems de sonda de la dimensión en sus rúbricas, sin filtrar por lenguaje (desempate B).
+fn items_de_sonda(dimension: Dimension, rubricas: &[Rubrica]) -> Vec<&rubrica::ItemRubrica> {
+    rubricas
+        .iter()
+        .filter(|r| r.id == dimension.clave())
+        .flat_map(|r| r.item.iter())
+        .filter(|i| i.mide == Mide::Sonda)
+        .collect()
+}
+
+/// Ws: la suma de los pesos de los ítems de sonda que miden para el lenguaje de la tarea (desempate B).
+fn peso_sondas(dimension: Dimension, rubricas: &[Rubrica], tarea: &Tarea) -> u32 {
+    let faltan = perfiles::items_sin_sonda(&tarea.lenguaje, tarea.eficiencia.is_some());
+    items_de_sonda(dimension, rubricas)
+        .into_iter()
+        .filter(|i| !faltan.contains(&i.id.as_str()))
+        .map(|i| u32::from(i.peso))
+        .sum()
+}
+
+/// Peso total de la rúbrica de una dimensión: sonda, juez y mixto, sin filtrar por lenguaje (desempate C).
+fn peso_total(dimension: Dimension, rubricas: &[Rubrica]) -> u32 {
+    rubricas
+        .iter()
+        .filter(|r| r.id == dimension.clave())
+        .flat_map(|r| r.item.iter())
+        .map(|i| u32::from(i.peso))
+        .sum()
+}
+
+/// Dos tercios de cobertura: `medido` llega a dos tercios de `total`, con enteros (desempate C).
+fn cubre_dos_tercios(medido: u32, total: u32) -> bool {
+    3 * medido >= 2 * total
+}
+
+/// Cobertura de una dimensión con ítems del juez (desempate C). Si `medido` no llega a dos tercios del peso
+/// total de su rúbrica, la dimensión queda sin veredicto con sus faltantes. Los motivos previos van después.
+fn aplicar_cobertura(
+    dimension: Dimension,
+    rubricas: &[Rubrica],
+    medido: u32,
+    puntaje: Puntaje,
+) -> Puntaje {
+    if rubrica_del_juez(rubricas, dimension).is_none() {
+        return puntaje;
+    }
+    let total = peso_total(dimension, rubricas);
+    if cubre_dos_tercios(medido, total) {
+        return puntaje;
+    }
+    let motivo = format!("cobertura {medido} de {total} de peso, menor que dos tercios");
+    let motivo = match puntaje.sin_veredicto {
+        Some(previo) => format!("{motivo}; {previo}"),
+        None => motivo,
+    };
+    sin_veredicto_con_faltantes(dimension, motivo, puntaje.faltantes)
+}
+
+/// Puntaje de una dimensión sin veredicto que lleva sus faltantes.
+fn sin_veredicto_con_faltantes(
+    dimension: Dimension,
+    motivo: String,
+    faltantes: Vec<ItemFaltante>,
+) -> Puntaje {
+    Puntaje {
+        faltantes,
+        ..sin_veredicto_puntaje(dimension, motivo)
     }
 }
 
@@ -1487,14 +1727,19 @@ fn evaluar_suite(
         }
     }
     // Las corridas del historial de esta versión suman muestras, como las extra: no cuentan como ausencia.
-    let (del_historial, avisos) = historial::leer(c.historial, suite)?;
+    let (del_historial, avisos) = match c.historial {
+        Some(ruta) => historial::leer(ruta, suite)?,
+        None => (Vec::new(), Vec::new()),
+    };
     let mut con_historial = del_historial;
     con_historial.extend(extras.iter().cloned());
     let mut clasificacion = clasificar(&completas, &con_historial, excluidos);
     clasificacion.avisos = avisos;
     // Lo que corrió esta vez queda en el historial. Solo si la suite tiene veredicto.
     let nuevas: Vec<Junit> = completas.iter().chain(&extras).cloned().collect();
-    historial::agregar(c.historial, suite, &nuevas)?;
+    if let Some(ruta) = c.historial {
+        historial::agregar(ruta, suite, &nuevas)?;
+    }
     Ok(Suite::Clasificada(clasificacion))
 }
 
@@ -2518,7 +2763,7 @@ mod tests {
             cache: None,
             rustsec: None,
             home: &home,
-            historial: &historial,
+            historial: Some(&historial),
         };
         evaluar_suite(
             &c,
@@ -2726,6 +2971,7 @@ mod tests {
         fs::create_dir_all(&repo).expect("repo");
         fs::create_dir_all(&salida).expect("salida");
         let o = OpcionesOraculo::default();
+        let historial = base.path().join("historial.jsonl");
         let c = Corrida {
             repo: &repo,
             tarea: &tarea,
@@ -2734,7 +2980,7 @@ mod tests {
             cache: None,
             rustsec: None,
             home: base.path(),
-            historial: &base.path().join("historial.jsonl"),
+            historial: Some(&historial),
         };
         let e = ejecucion_de_suite(&c, &tarea.contrato.cmd, DIR_CONTRATO);
         let args = contenedor::argumentos(&e, "n");
@@ -3034,6 +3280,7 @@ mod tests {
             timeout: Duration::from_secs(60),
             partes: None,
             home: Some(home.to_path_buf()),
+            historial: true,
         }
     }
 
@@ -3045,7 +3292,18 @@ mod tests {
         correr: &dyn Fn(&contenedor::Ejecucion) -> Result<contenedor::Resultado, ErrorOraculo>,
         herramientas: &dyn Fn(&Preparada) -> Box<dyn EjecutorHerramienta>,
     ) -> Result<Veredicto, ErrorOraculo> {
-        evaluar_con(repo, tarea, &opciones(home), deps_de(correr, herramientas))
+        evaluar_falso_con(repo, tarea, &opciones(home), correr, herramientas)
+    }
+
+    /// Como `evaluar_falso`, con las opciones que se le pasen.
+    fn evaluar_falso_con(
+        repo: &Path,
+        tarea: &Tarea,
+        o: &OpcionesOraculo,
+        correr: &dyn Fn(&contenedor::Ejecucion) -> Result<contenedor::Resultado, ErrorOraculo>,
+        herramientas: &dyn Fn(&Preparada) -> Box<dyn EjecutorHerramienta>,
+    ) -> Result<Veredicto, ErrorOraculo> {
+        evaluar_con(repo, tarea, o, deps_de(correr, herramientas))
     }
 
     /// Veredicto de la tarea de Rust con todas las sondas sanas y la suite del contrato completa.
@@ -3194,7 +3452,10 @@ mod tests {
         )
         .expect("evalúa");
         let diseno = puntaje_de_prueba(&v, Dimension::Diseno);
-        assert_eq!(diseno.sin_veredicto.as_deref(), Some("juez no corrido"));
+        assert_eq!(
+            diseno.sin_veredicto.as_deref(),
+            Some("cobertura 0 de 6 de peso, menor que dos tercios; juez no corrido")
+        );
     }
 
     #[test]
@@ -3951,9 +4212,9 @@ mod tests {
     }
 
     #[test]
-    fn oraculo_diseno_item_del_juez_sin_respuesta_no_baja_la_dimension() {
+    fn oraculo_diseno_item_del_juez_sin_respuesta_no_cuenta_para_la_cobertura() {
         // El juez responde solo `diseno.modularidad` (peso 3, nivel 2). `diseno.tope` (mixto, peso 1)
-        // queda en `faltantes`: no vale 0. Diseño es 2/3, el valor del ítem respondido.
+        // queda en `faltantes`, no vale 0. Con 3 de 6 de peso no hay dos tercios: Diseño no tiene veredicto.
         let r = ResultadoJuez {
             estado: EstadoJuez::Ok,
             niveles: BTreeMap::from([(MODULARIDAD_ID.to_string(), 2)]),
@@ -3969,9 +4230,18 @@ mod tests {
             rubricas: &rubricas,
         };
         let p = puntaje_diseno(&juez, Some(&r), &BTreeMap::new());
-        assert_eq!(p.sin_veredicto, None, "{p:?}");
-        let valor = p.valor;
-        assert!((valor - 2.0 / 3.0).abs() < 1e-6, "{valor}");
+        assert_eq!(
+            p.sin_veredicto.as_deref(),
+            Some("cobertura 3 de 6 de peso, menor que dos tercios"),
+            "{p:?}"
+        );
+        assert!(
+            p.faltantes
+                .iter()
+                .any(|f| f.item == TOPE_ID && f.motivo == MOTIVO_JUEZ_SIN_NIVEL),
+            "{:?}",
+            p.faltantes
+        );
     }
 
     #[test]
@@ -4126,9 +4396,13 @@ mod tests {
         )
         .expect("calibración");
         let calibracion = Calibraciones::cargar(&home).expect("carga");
+        // El juez mide modularidad (3) y el tope (1): 4 de 6 de peso, dos tercios (desempate C).
         let juez = JuezFalso::con(
             &respuesta_juez(
-                json!([item_juez(MODULARIDAD_ID, 2, json!([ev_lib()]))]),
+                json!([
+                    item_juez(MODULARIDAD_ID, 2, json!([ev_lib()])),
+                    item_juez(TOPE_ID, 2, json!([ev_lib()])),
+                ]),
                 json!([]),
             ),
             0.0,
@@ -4333,36 +4607,409 @@ mod tests {
         );
     }
 
+    /// Parte de Estructura con `valor` y `peso`, sin veredicto ni faltantes.
+    fn parte_de(valor: f32, peso: u32) -> Parte {
+        Parte {
+            puntaje: Puntaje {
+                dimension: Dimension::Estructura,
+                valor,
+                calibrada: false,
+                exactitud_balanceada: None,
+                items: Vec::new(),
+                sin_veredicto: None,
+                faltantes: Vec::new(),
+            },
+            peso,
+        }
+    }
+
     #[test]
-    fn oraculo_juntar_partes_promedia_y_lleva_el_motivo() {
-        let sondas = Puntaje {
-            dimension: Dimension::Estructura,
-            valor: 1.0,
-            calibrada: false,
-            exactitud_balanceada: None,
-            items: Vec::new(),
-            sin_veredicto: None,
-            faltantes: Vec::new(),
-        };
-        let juez = Puntaje {
-            valor: 0.5,
-            items: vec![NivelItem {
-                item: "estructura.capas".into(),
-                nivel: 1,
-                evidencia: Vec::new(),
-                fuente: Fuente::Juez {
-                    modelo: MODELO_JUEZ.into(),
-                },
-            }],
-            ..sondas.clone()
-        };
-        let junta = juntar_partes(Dimension::Estructura, sondas.clone(), juez);
-        assert!((junta.valor - 0.75).abs() < 1e-6, "{}", junta.valor);
+    fn oraculo_juntar_partes_pondera_y_el_juez_sin_veredicto_no_baja_las_sondas() {
+        // Sondas 1,0 con peso 3; juez 0,5 con peso 1: (3·1 + 1·0,5) / 4 = 0,875. Antes era la media 0,75.
+        let mut juez = parte_de(0.5, 1);
+        juez.puntaje.items = vec![NivelItem {
+            item: "estructura.legibilidad".into(),
+            nivel: 1,
+            evidencia: Vec::new(),
+            fuente: Fuente::Juez {
+                modelo: MODELO_JUEZ.into(),
+            },
+        }];
+        let junta = juntar_partes(Dimension::Estructura, parte_de(1.0, 3), Some(juez));
+        assert!((junta.valor - 0.875).abs() < 1e-6, "{}", junta.valor);
         assert_eq!(junta.items.len(), 1);
-        let sin = sin_veredicto_puntaje(Dimension::Estructura, "juez no corrido".into());
-        let con_motivo = juntar_partes(Dimension::Estructura, sondas, sin);
-        assert_eq!(con_motivo.sin_veredicto.as_deref(), Some("juez no corrido"));
-        assert_eq!(con_motivo.valor, 0.0);
+        // Juez sin veredicto: la dimensión sale con el valor de las sondas y sin motivo.
+        let mut sin = parte_de(0.0, 0);
+        sin.puntaje.sin_veredicto = Some("juez no corrido".into());
+        let solo_sondas = juntar_partes(Dimension::Estructura, parte_de(1.0, 3), Some(sin));
+        assert_eq!(solo_sondas.sin_veredicto, None, "{solo_sondas:?}");
+        assert!(
+            (solo_sondas.valor - 1.0).abs() < 1e-6,
+            "{}",
+            solo_sondas.valor
+        );
+        // Sin juez en la dimensión: el valor es el de las sondas.
+        let sin_juez = juntar_partes(Dimension::Estructura, parte_de(1.0, 3), None);
+        assert!((sin_juez.valor - 1.0).abs() < 1e-6, "{}", sin_juez.valor);
+    }
+
+    #[test]
+    fn oraculo_juntar_partes_pondera_por_peso() {
+        // Sondas con valor 1,0 y Ws = 5; juez con valor 0,0 y Wj = 2: (5·1 + 2·0) / 7 = 5/7.
+        let junta = juntar_partes(
+            Dimension::Estructura,
+            parte_de(1.0, 5),
+            Some(parte_de(0.0, 2)),
+        );
+        assert!((junta.valor - 5.0 / 7.0).abs() < 1e-6, "{}", junta.valor);
+        assert_eq!(junta.sin_veredicto, None);
+    }
+
+    #[test]
+    fn oraculo_juntar_partes_sin_veredicto_suma_los_faltantes_de_las_dos_partes() {
+        // Sin veredicto de sondas, su peso no cuenta (Ws = 0). Ambas partes sin veredicto: la dimensión
+        // lleva los motivos unidos y los faltantes de las dos, sin repetir.
+        let mut sondas = parte_de(0.0, 5);
+        sondas.puntaje.sin_veredicto = Some("sin sonda para shell".into());
+        sondas.puntaje.faltantes = vec![ItemFaltante {
+            item: "estructura.tamano".into(),
+            motivo: "sin sonda para shell".into(),
+        }];
+        let mut juez = parte_de(0.0, 2);
+        juez.puntaje.sin_veredicto = Some("juez no corrido".into());
+        juez.puntaje.faltantes = vec![ItemFaltante {
+            item: "estructura.legibilidad".into(),
+            motivo: MOTIVO_JUEZ_SIN_NIVEL.into(),
+        }];
+        let junta = juntar_partes(Dimension::Estructura, sondas, Some(juez));
+        assert_eq!(
+            junta.sin_veredicto.as_deref(),
+            Some("sin sonda para shell; juez no corrido")
+        );
+        let items: Vec<&str> = junta.faltantes.iter().map(|f| f.item.as_str()).collect();
+        assert_eq!(items, vec!["estructura.tamano", "estructura.legibilidad"]);
+    }
+
+    /// Resultado del juez con nivel `nivel` en los ítems `niveles`, sin descartes.
+    fn resultado_con_niveles(niveles: &[(&str, u8)]) -> ResultadoJuez {
+        ResultadoJuez {
+            estado: EstadoJuez::Ok,
+            niveles: niveles
+                .iter()
+                .map(|(item, nivel)| (item.to_string(), *nivel))
+                .collect(),
+            items: Vec::new(),
+            hallazgos: Vec::new(),
+            descartes: Vec::new(),
+            faltantes: Vec::new(),
+        }
+    }
+
+    /// Evaluación de la tarea de Rust con `rubricas` y el juez `juez` (o sin él), en su propia carpeta de `base`.
+    fn evaluar_rust_con(
+        base: &Path,
+        rubricas: &[Rubrica],
+        juez: Option<&dyn ModeloJuez>,
+    ) -> Veredicto {
+        let repo = repo_rust(base, LOCK_SANO);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        evaluar_con_deps(
+            base,
+            &repo,
+            Dependencias {
+                juez,
+                modelo_juez: MODELO_JUEZ,
+                rubricas,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        )
+    }
+
+    #[test]
+    fn oraculo_estructura_con_sondas_medidas_y_juez_sin_nivel_da_valor_y_lista_el_faltante() {
+        let base = tempfile::tempdir().expect("base");
+        // Sin rúbricas, Estructura es solo sus sondas: ese valor es la referencia.
+        let solo = evaluar_rust_con(&base.path().join("solo"), &[], None);
+        let referencia = puntaje_de_prueba(&solo, Dimension::Estructura).valor;
+        assert!(referencia > 0.0, "{referencia}");
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let juez = JuezFalso::con(&respuesta_juez(json!([]), json!([])), 0.0);
+        let v = evaluar_rust_con(&base.path().join("juez"), &rubricas, Some(&juez));
+        let estructura = puntaje_de_prueba(&v, Dimension::Estructura);
+        assert_eq!(estructura.sin_veredicto, None, "{estructura:?}");
+        assert!(
+            (estructura.valor - referencia).abs() < 1e-6,
+            "{} vs {referencia}",
+            estructura.valor
+        );
+        assert_eq!(juez.llamadas(), 1);
+        let legibilidad = estructura
+            .faltantes
+            .iter()
+            .find(|f| f.item == "estructura.legibilidad")
+            .expect("el juez sin nivel queda en faltantes");
+        assert_eq!(legibilidad.motivo, MOTIVO_JUEZ_SIN_NIVEL);
+    }
+
+    #[test]
+    fn oraculo_estructura_con_juez_no_corrido_conserva_las_sondas() {
+        let base = tempfile::tempdir().expect("base");
+        let solo = evaluar_rust_con(&base.path().join("solo"), &[], None);
+        let referencia = puntaje_de_prueba(&solo, Dimension::Estructura).valor;
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let v = evaluar_rust_con(&base.path().join("sin-juez"), &rubricas, None);
+        let estructura = puntaje_de_prueba(&v, Dimension::Estructura);
+        assert_eq!(estructura.sin_veredicto, None, "{estructura:?}");
+        assert!(
+            (estructura.valor - referencia).abs() < 1e-6,
+            "{} vs {referencia}",
+            estructura.valor
+        );
+        let legibilidad = estructura
+            .faltantes
+            .iter()
+            .find(|f| f.item == "estructura.legibilidad")
+            .expect("sin juez, el ítem del juez queda en faltantes");
+        assert_eq!(legibilidad.motivo, MOTIVO_JUEZ_SIN_NIVEL);
+    }
+
+    #[test]
+    fn oraculo_estructura_pondera_sondas_y_juez_por_peso() {
+        // Rust: las sondas de Estructura pesan 2 + 1 + 2 = 5 y el juez pesa 2. Con el juez en nivel 0,
+        // el valor es 5/7 del de las sondas.
+        let base = tempfile::tempdir().expect("base");
+        let solo = evaluar_rust_con(&base.path().join("solo"), &[], None);
+        let referencia = puntaje_de_prueba(&solo, Dimension::Estructura).valor;
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let juez = JuezFalso::con(
+            &respuesta_juez(
+                json!([item_juez("estructura.legibilidad", 0, json!([ev_lib()]))]),
+                json!([]),
+            ),
+            0.0,
+        );
+        let v = evaluar_rust_con(&base.path().join("juez"), &rubricas, Some(&juez));
+        let estructura = puntaje_de_prueba(&v, Dimension::Estructura);
+        assert_eq!(estructura.sin_veredicto, None, "{estructura:?}");
+        assert!(
+            (estructura.valor - 5.0 / 7.0 * referencia).abs() < 1e-6,
+            "{} vs {}",
+            estructura.valor,
+            5.0 / 7.0 * referencia
+        );
+    }
+
+    #[test]
+    fn oraculo_item_del_juez_descartado_por_el_gate_tiene_su_motivo() {
+        // El juez da nivel 2 con una cita inventada: el gate descarta el ítem y su faltante lo dice.
+        let base = tempfile::tempdir().expect("base");
+        let solo = evaluar_rust_con(&base.path().join("solo"), &[], None);
+        let referencia = puntaje_de_prueba(&solo, Dimension::Estructura).valor;
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let juez = JuezFalso::con(
+            &respuesta_juez(
+                json!([item_juez(
+                    "estructura.legibilidad",
+                    2,
+                    json!([{"archivo": "src/inventado.rs", "linea": 1, "cita": "fn inventada() {}"}])
+                )]),
+                json!([]),
+            ),
+            0.0,
+        );
+        let v = evaluar_rust_con(&base.path().join("juez"), &rubricas, Some(&juez));
+        let estructura = puntaje_de_prueba(&v, Dimension::Estructura);
+        assert!(
+            (estructura.valor - referencia).abs() < 1e-6,
+            "{estructura:?}"
+        );
+        let legibilidad = estructura
+            .faltantes
+            .iter()
+            .find(|f| f.item == "estructura.legibilidad")
+            .expect("el ítem descartado queda en faltantes");
+        assert_eq!(legibilidad.motivo, MOTIVO_GATE_EVIDENCIA);
+    }
+
+    #[test]
+    fn oraculo_diseno_sin_veredicto_conserva_sus_faltantes() {
+        // Sin juez corrido, Diseño no tiene veredicto y lista sus ítems del juez con el motivo del juez.
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let juez = JuezDiseno {
+            modelo: None,
+            nombre: MODELO_JUEZ,
+            rubricas: &rubricas,
+        };
+        let p = puntaje_diseno(&juez, None, &BTreeMap::new());
+        assert_eq!(
+            p.sin_veredicto.as_deref(),
+            Some("cobertura 0 de 13 de peso, menor que dos tercios; juez no corrido"),
+            "{p:?}"
+        );
+        assert_eq!(p.valor, 0.0);
+        let robustez = p
+            .faltantes
+            .iter()
+            .find(|f| f.item == "diseno.robustez")
+            .expect("el ítem del juez queda en faltantes");
+        assert_eq!(robustez.motivo, MOTIVO_JUEZ_SIN_NIVEL);
+    }
+
+    #[test]
+    fn oraculo_faltantes_de_no_pisa_los_del_juez() {
+        // Shell no mide Estructura con sondas: sus faltantes de sonda se suman a los del juez, no los pisan.
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_shell(base.path());
+        let repo = repo_shell(base.path(), None);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let juez = JuezFalso::con(&respuesta_juez(json!([]), json!([])), 0.0);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let fabrica = herramientas(&[]);
+        let deps = Dependencias {
+            juez: Some(&juez),
+            modelo_juez: MODELO_JUEZ,
+            rubricas: &rubricas,
+            ..deps_de(&correr, &fabrica)
+        };
+        let v = evaluar_con(&repo, &tarea, &opciones(&home), deps).expect("evalúa");
+        let estructura = puntaje_de_prueba(&v, Dimension::Estructura);
+        let motivo_de = |item: &str| {
+            estructura
+                .faltantes
+                .iter()
+                .find(|f| f.item == item)
+                .map(|f| f.motivo.as_str())
+        };
+        assert_eq!(
+            motivo_de("estructura.legibilidad"),
+            Some(MOTIVO_JUEZ_SIN_NIVEL),
+            "{:?}",
+            estructura.faltantes
+        );
+        assert_eq!(
+            motivo_de("estructura.tamano"),
+            Some("sin sonda para shell"),
+            "{:?}",
+            estructura.faltantes
+        );
+    }
+
+    #[test]
+    fn oraculo_cobertura_de_dos_tercios_en_los_bordes() {
+        // Dos tercios de 13 son 8,67: 8 no llega (3·8 = 24 < 26) y 9 sí (3·9 = 27 ≥ 26).
+        assert!(!cubre_dos_tercios(8, 13));
+        assert!(cubre_dos_tercios(9, 13));
+        assert!(cubre_dos_tercios(0, 0));
+    }
+
+    #[test]
+    fn oraculo_diseno_con_items_medidos_bajo_dos_tercios_queda_sin_veredicto_con_faltantes() {
+        // Diseño mide modularidad 3, robustez 3 y errores 2: 8 de 13 de peso. Sin dos tercios, sin veredicto.
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let juez = JuezDiseno {
+            modelo: None,
+            nombre: MODELO_JUEZ,
+            rubricas: &rubricas,
+        };
+        let r = resultado_con_niveles(&[
+            ("diseno.modularidad", 2),
+            ("diseno.robustez", 2),
+            ("diseno.errores", 2),
+        ]);
+        let p = puntaje_diseno(&juez, Some(&r), &BTreeMap::new());
+        assert_eq!(
+            p.sin_veredicto.as_deref(),
+            Some("cobertura 8 de 13 de peso, menor que dos tercios"),
+            "{p:?}"
+        );
+        let faltan: Vec<&str> = p.faltantes.iter().map(|f| f.item.as_str()).collect();
+        assert_eq!(
+            faltan,
+            vec![
+                "diseno.estado",
+                "diseno.operabilidad",
+                "diseno.documentacion"
+            ],
+            "{p:?}"
+        );
+    }
+
+    #[test]
+    fn oraculo_diseno_con_dos_tercios_de_peso_tiene_valor() {
+        // Con documentación (peso 1) son 9 de 13: cubre, y el valor es 2/3 con todos los niveles en 2.
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let juez = JuezDiseno {
+            modelo: None,
+            nombre: MODELO_JUEZ,
+            rubricas: &rubricas,
+        };
+        let r = resultado_con_niveles(&[
+            ("diseno.modularidad", 2),
+            ("diseno.robustez", 2),
+            ("diseno.errores", 2),
+            ("diseno.documentacion", 2),
+        ]);
+        let p = puntaje_diseno(&juez, Some(&r), &BTreeMap::new());
+        assert_eq!(p.sin_veredicto, None, "{p:?}");
+        assert!((p.valor - 2.0 / 3.0).abs() < 1e-6, "{}", p.valor);
+    }
+
+    #[test]
+    fn oraculo_arquitectura_sin_juez_queda_sin_veredicto_por_cobertura() {
+        // La sonda mide `arquitectura.dependencias` (peso 3) con dos módulos. Sin el juez, 3 de 10 no llega.
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_con(
+            base.path().join("repo"),
+            LOCK_SANO,
+            &[
+                ("src/lib.rs", "pub fn f() -> u8 { 1 }\n"),
+                ("src/a.rs", "use crate::b::algo;\npub fn f() {}\n"),
+                ("src/b.rs", "pub fn algo() {}\nuse crate::a::f;\n"),
+            ],
+        );
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let juez = JuezFalso::con(&respuesta_juez(json!([]), json!([])), 0.0);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        let arq = puntaje_de_prueba(&v, Dimension::Arquitectura);
+        assert!(
+            arq.sin_veredicto
+                .as_deref()
+                .is_some_and(|m| m.contains("cobertura 3 de 10 de peso")),
+            "{arq:?}"
+        );
+        for item in [
+            "arquitectura.adecuacion",
+            "arquitectura.extensibilidad",
+            "arquitectura.interfaces",
+        ] {
+            assert!(
+                arq.faltantes.iter().any(|f| f.item == item),
+                "{:?}",
+                arq.faltantes
+            );
+        }
+    }
+
+    #[test]
+    fn oraculo_estructura_sin_juez_cubre_con_sus_sondas() {
+        // Estructura pesa 7 con juez y sus sondas suman 5: 3·5 = 15 ≥ 14, así que cubre sin juez.
+        let base = tempfile::tempdir().expect("base");
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let v = evaluar_rust_con(base.path(), &rubricas, None);
+        let estructura = puntaje_de_prueba(&v, Dimension::Estructura);
+        assert_eq!(estructura.sin_veredicto, None, "{estructura:?}");
+        assert!(estructura.valor > 0.0, "{estructura:?}");
     }
 
     // ---- Tarea 28, parte 1: la Entrega del veredicto sale de `entregar_con` (desempate 7) ----
@@ -5392,7 +6039,7 @@ mod tests {
     }
 
     #[test]
-    fn oraculo_shell_estructura_con_juez_que_mide_conserva_el_veredicto_del_juez() {
+    fn oraculo_shell_estructura_con_juez_que_mide_poco_queda_sin_veredicto_por_cobertura() {
         let base = tempfile::tempdir().expect("base");
         let tarea = tarea_shell(base.path());
         let repo = repo_shell(base.path(), None);
@@ -5418,10 +6065,13 @@ mod tests {
             ..deps_de(&correr, &fabrica)
         };
         let v = evaluar_con(&repo, &tarea, &opciones(&home), deps).expect("evalúa");
+        // Shell no tiene sondas de Estructura: el juez mide 2 de 7 de peso, menos de dos tercios (C).
         let estructura = puntaje_de_prueba(&v, Dimension::Estructura);
-        assert_eq!(estructura.sin_veredicto, None, "{estructura:?}");
         assert!(
-            (estructura.valor - 2.0 / 3.0).abs() < 1e-6,
+            estructura
+                .sin_veredicto
+                .as_deref()
+                .is_some_and(|m| m.starts_with("cobertura 2 de 7 de peso")),
             "{estructura:?}"
         );
         assert_eq!(juez.llamadas(), 1);
@@ -5598,15 +6248,55 @@ mod tests {
         assert_eq!(codigo_de_estado(v.estado), 3);
     }
 
+    #[test]
+    fn oraculo_omision_total_de_entorno_llega_a_veredicto_avisos() {
+        // El único `[[entorno]]` es un id sin prefijo cuyo archivo está solo en `contrato/`: `crear` da `None`
+        // y el aviso tiene que llegar al veredicto igual.
+        let base = tempfile::tempdir().expect("base");
+        // `tarea_rust` escribe el spec y el `tarea.toml` base; abajo se le agrega el `[[entorno]]`.
+        tarea_rust(base.path());
+        let dir = base.path().join("tarea");
+        fs::create_dir_all(dir.join("contrato")).expect("carpeta del contrato");
+        fs::write(
+            dir.join("contrato").join("test_c.py"),
+            "def test_t(): pass\n",
+        )
+        .expect("test del contrato");
+        let texto = fs::read_to_string(dir.join("tarea.toml")).expect("tarea.toml");
+        fs::write(
+            dir.join("tarea.toml"),
+            format!("{texto}[[entorno]]\ntest = \"test_c::t\"\nmotivo = \"gpu\"\n"),
+        )
+        .expect("tarea.toml con entorno");
+        let tarea = Tarea::cargar_de(&dir).expect("carga la tarea");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let v = evaluar_falso(
+            &repo,
+            &tarea,
+            &home,
+            &correr_suites_oculto(JUNIT_OCULTO_VERDE),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        assert!(
+            v.avisos
+                .iter()
+                .any(|a| a.contains("test_c::t") && a.contains("existe solo en contrato/")),
+            "{:?}",
+            v.avisos
+        );
+    }
+
     // --- Tarea 39: historial de evidencia por versión del repo ---
 
     /// Oculto con `t3` fallando y `t4` pasando: una corrida que deja `t3` en la falla del historial.
     const JUNIT_OCULTO_T3_FALLA: &str = r#"<testsuite><testcase classname="tests.test_b" name="t3"><failure message="x"/></testcase><testcase classname="tests.test_b" name="t4"/></testsuite>"#;
 
-    /// Ruta del historial de la versión actual de `repo` para `tarea-rust`.
-    fn historial_de(home: &Path, repo: &Path) -> PathBuf {
-        let version = historial::hash_de_version(repo).expect("hash de la versión");
-        historial::ruta(home, "tarea-rust", &version).expect("ruta del historial")
+    /// Ruta del historial de la versión actual de `repo` y del oráculo de `tarea`, en `home`.
+    fn historial_de(home: &Path, tarea: &Tarea, repo: &Path) -> PathBuf {
+        let version = historial::clave_de_version(repo, &tarea.dir).expect("clave de la versión");
+        historial::ruta(home, &tarea.nombre, &version).expect("ruta del historial")
     }
 
     #[test]
@@ -5670,6 +6360,43 @@ mod tests {
     }
 
     #[test]
+    fn oraculo_historial_con_un_archivo_de_oculto_cambiado_arranca_vacio() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let oculto = tarea.dir.join("oculto");
+        fs::create_dir_all(&oculto).expect("carpeta oculta");
+        fs::write(
+            oculto.join("test_b.py"),
+            "def test_t3():\n    assert False\n",
+        )
+        .expect("test oculto");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        // Primera evaluación: `t3` falla y su corrida queda en el historial del oráculo actual.
+        evaluar_falso(
+            &repo,
+            &tarea,
+            &home,
+            &correr_suites_oculto(JUNIT_OCULTO_T3_FALLA),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        // El oráculo cambia: se arregla el test `t3` en `oculto/`. El repo no cambia.
+        fs::write(oculto.join("test_b.py"), "def test_t3():\n    pass\n").expect("arregla el test");
+        let v = evaluar_falso(
+            &repo,
+            &tarea,
+            &home,
+            &correr_suites_oculto(JUNIT_OCULTO_VERDE),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        assert!(v.inestables.is_empty(), "{:?}", v.inestables);
+        assert!(!v.tasas.contains_key("oculto:test_b::t3"));
+        assert!(!v.corridas_acumuladas.contains_key("oculto:test_b::t3"));
+    }
+
+    #[test]
     fn oraculo_historial_no_guarda_el_contenido_de_los_tests_ocultos() {
         const MARCADOR: &str = "MARCADOR_OCULTO_39_NO_DEBE_SALIR";
         let base = tempfile::tempdir().expect("base");
@@ -5691,7 +6418,7 @@ mod tests {
             &herramientas(&[]),
         )
         .expect("evalúa");
-        let ruta = historial_de(&home, &repo);
+        let ruta = historial_de(&home, &tarea, &repo);
         assert!(ruta.is_file(), "falta {}", ruta.display());
         assert!(
             ruta.starts_with(home.join("evidencia")),
@@ -5706,6 +6433,144 @@ mod tests {
         let texto = fs::read_to_string(&ruta).expect("lee el historial");
         assert!(!texto.contains(MARCADOR), "{texto}");
         assert!(texto.contains("test_b::t3"), "{texto}");
+    }
+
+    /// Una calibración no escribe historial: con `historial: false`, la evaluación no crea
+    /// `evidencia/` y no lee la falla que una evaluación normal dejó en la misma versión.
+    #[test]
+    fn oraculo_sin_historial_no_escribe_ni_lee_el_historial() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let sin_historial = OpcionesOraculo {
+            historial: false,
+            ..opciones(&home)
+        };
+        evaluar_falso_con(
+            &repo,
+            &tarea,
+            &sin_historial,
+            &correr_suites_oculto(JUNIT_OCULTO_T3_FALLA),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        assert!(
+            !home.join("evidencia").exists(),
+            "no debe existir evidencia/"
+        );
+
+        // Una evaluación normal deja la falla de `t3` en el historial de la versión.
+        evaluar_falso(
+            &repo,
+            &tarea,
+            &home,
+            &correr_suites_oculto(JUNIT_OCULTO_T3_FALLA),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        let ruta = historial_de(&home, &tarea, &repo);
+        let antes = fs::read(&ruta).expect("lee el historial");
+
+        // Sin historial, esa falla no vuelve `t3` inestable, y el historial no cambia.
+        let v = evaluar_falso_con(
+            &repo,
+            &tarea,
+            &sin_historial,
+            &correr_suites_oculto(JUNIT_OCULTO_VERDE),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        assert!(v.inestables.is_empty(), "{:?}", v.inestables);
+        assert!(!v.corridas_acumuladas.contains_key("oculto:test_b::t3"));
+        assert_eq!(fs::read(&ruta).expect("lee el historial"), antes);
+    }
+
+    /// Fija la fecha de modificación de `ruta` a `dias` días atrás, para simular una versión sin uso.
+    fn historial_viejo(ruta: &Path, dias: u64) {
+        let cuando = SystemTime::now() - Duration::from_secs(dias * 24 * 3600);
+        filetime::set_file_mtime(ruta, FileTime::from_system_time(cuando)).expect("fija la fecha");
+    }
+
+    #[test]
+    fn oraculo_historial_de_version_sin_uso_en_31_dias_se_borra_al_evaluar_otra() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        // Primera versión: su falla queda en el historial.
+        evaluar_falso(
+            &repo,
+            &tarea,
+            &home,
+            &correr_suites_oculto(JUNIT_OCULTO_T3_FALLA),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        let vieja = historial_de(&home, &tarea, &repo);
+        let carpeta_vieja = vieja.parent().expect("carpeta de la versión").to_path_buf();
+        // La versión vieja no se usó hace 31 días.
+        historial_viejo(&vieja, 31);
+        // Otra versión del repo: al evaluarla, la versión sin uso se borra.
+        fs::write(repo.join("src/lib.rs"), "pub fn f() -> u8 { 2 }\n").expect("cambia un archivo");
+        evaluar_falso(
+            &repo,
+            &tarea,
+            &home,
+            &correr_suites_oculto(JUNIT_OCULTO_VERDE),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        assert!(
+            !carpeta_vieja.exists(),
+            "sigue la versión sin uso en 31 días: {}",
+            carpeta_vieja.display()
+        );
+        let nueva = historial_de(&home, &tarea, &repo);
+        assert!(
+            nueva.is_file(),
+            "falta el historial de la versión nueva: {}",
+            nueva.display()
+        );
+    }
+
+    /// Una calibración no borra historiales viejos: con `historial: false`, la versión sin uso queda.
+    #[test]
+    fn oraculo_sin_historial_no_borra_historiales_viejos() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        evaluar_falso(
+            &repo,
+            &tarea,
+            &home,
+            &correr_suites_oculto(JUNIT_OCULTO_T3_FALLA),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        let vieja = historial_de(&home, &tarea, &repo);
+        let carpeta_vieja = vieja.parent().expect("carpeta de la versión").to_path_buf();
+        historial_viejo(&vieja, 31);
+        fs::write(repo.join("src/lib.rs"), "pub fn f() -> u8 { 2 }\n").expect("cambia un archivo");
+        let sin_historial = OpcionesOraculo {
+            historial: false,
+            ..opciones(&home)
+        };
+        evaluar_falso_con(
+            &repo,
+            &tarea,
+            &sin_historial,
+            &correr_suites_oculto(JUNIT_OCULTO_VERDE),
+            &herramientas(&[]),
+        )
+        .expect("evalúa");
+        assert!(
+            carpeta_vieja.is_dir(),
+            "la calibración borró la versión vieja: {}",
+            carpeta_vieja.display()
+        );
+        assert!(vieja.is_file(), "{}", vieja.display());
     }
 
     #[test]

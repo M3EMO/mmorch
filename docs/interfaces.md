@@ -81,7 +81,7 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t ficha tarea --spec <SPEC.md> --nombre <t>` | Arma el borrador de `tarea.toml` desde la ficha. | `{toml}` | construido |
 | `r00t mcp` | Inicia el servidor MCP por stdio. | JSON-RPC 2.0 | construido |
 
-**Colab (`oraculo pendientes --colab`).** Root pide un runtime T4 de Colab, corre el paquete, importa el junit y libera el runtime. Antes de pedirlo, Root escribe su id en `$ROOT_HOME/colab/activo.json`. Lo borra al liberar el runtime. Si el proceso muere con `SIGKILL`, el archivo queda. La próxima corrida de `--colab` libera ese runtime primero. `--liberar` hace solo esa limpieza. `SIGINT` y `SIGTERM` también liberan el runtime y registran un `Gate`. El login de Colab lo hace la persona antes de correr el comando. Root no lee el token de la CLI.
+**Colab (`oraculo pendientes --colab`).** Root pide un runtime T4 de Colab, corre el paquete, importa el junit y libera el runtime. Antes de pedirlo, Root escribe su id en `$ROOT_HOME/colab/activo.json`. Lo borra al liberar el runtime. Si el proceso muere con `SIGKILL`, el archivo queda. La próxima corrida de `--colab` libera ese runtime primero. `--liberar` hace solo esa limpieza. `SIGINT` y `SIGTERM` también liberan el runtime y registran un `Gate`. El login de Colab lo hace la persona antes de correr el comando. Root no lee el token de la CLI. Un id de `[[entorno]]` sin prefijo que solo existe en `contrato/` no entra al paquete. Si todas las entradas son así, su aviso llega a `Veredicto.avisos`.
 
 **Corte temprano.** `correr.sh` corre en segundo plano en el runtime y Root lo sondea cada 60 segundos. Root libera el runtime en cuanto se cumple lo que pedía la corrida: los junit por repetición traen cada test pendiente, con tantos resultados como `repeticiones` de `tarea.toml`, sumados entre todos. Un test que pasa en una repetición y falla en otra queda `inestable`, con su tasa. Si `correr.sh` termina antes, Root libera el runtime con lo que haya. El `Gate` de liberación lleva la clave `causa`: `requisito cumplido`, `correr.sh terminó`, `tope de duración`, `señal SIGINT`/`señal SIGTERM`, `gpu-no-t4` (la GPU no es una T4), `runtime-no-asignado` (`colab new` no dio el runtime) o `error-en-corrida` (un paso falló a mitad de la corrida). `--vigilar` es la red de seguridad: libera el runtime anotado si pasó su tope o si su junit cumple lo pedido, aunque la corrida ya no esté viva.
 
@@ -198,9 +198,11 @@ $ROOT_HOME/
 Toda línea JSONL lleva `"v": 1`. Un cambio de formato sube `v`, y los lectores aceptan las versiones anteriores.
 `oraculos/<tarea>/diferencias.md` no lo crea ningún subcomando. Lo escribe la persona que compara con el banco.
 El historial de evidencia vive en `evidencia/`, fuera de `oraculos/`. Guarda una línea por corrida de suite. Cada línea tiene `"v": 1`, `"suite"` (`contrato` u `oculto`), `"ts"` y `"tests"`. `tests` lleva el id de cada test y su resultado (`pasa`, `falla` u `omite`). Nunca guarda el contenido de un test.
-El `<hash>` sale del contenido de la copia del repo. Entran los archivos regulares, en orden por ruta relativa. Cada uno entra con su ruta, su largo y su contenido. No entran los enlaces simbólicos ni `target/` y `.git/` de la raíz. Otra versión arranca con un historial vacío.
+El `<hash>` sale del contenido de la copia del repo y de las carpetas `oculto/` y `contrato/` de la tarea. Cada parte se hashea igual: entran los archivos regulares, en orden por ruta relativa. Cada uno entra con su ruta, su largo y su contenido. No entran los enlaces simbólicos ni `target/` y `.git/` de la raíz de cada parte. Una carpeta de suite que no existe cuenta como `ausente`, sin error. Un oráculo cambiado arranca con un historial vacío. Otra versión arranca con un historial vacío. `evaluar` borra los historiales de versiones sin uso en 30 días.
 Las corridas del historial suman muestras a los tests inestables. No cuentan como ausencia. `Veredicto.corridas_acumuladas` y `Confianza.corridas_acumuladas` dan esas muestras. Una línea ilegible se ignora y deja un aviso en `Veredicto.avisos`.
+La calibración no lee ni escribe el historial.
 Las subcarpetas `contrato/`, `oculto/` y `bootstrap/` son convención. Cada suite del contenedor monta solo su carpeta (`contrato/` o `oculto/`), y los escenarios montan solo `escenarios/`. El Oracle lee solo `tarea.toml` y los comandos que ese archivo declara.
+El paquete `pendientes/` guarda cada suite en su carpeta: `tests/oculto/` y `tests/contrato/`. Cada carpeta lleva su `conftest.py`, si la tarea lo tiene y la suite tiene tests en el paquete. `tests/` no lleva `conftest.py`.
 
 ## tarea.toml
 
@@ -379,6 +381,15 @@ Campos de la rúbrica (`src/oracle/rubrica.rs`):
 - `anclas`: cuatro textos, uno por nivel.
 
 Valor de una dimensión: `Σ peso·nivel / (3·Σ peso)`, sobre los ítems con nivel. Un ítem sin nivel no entra al cálculo.
+
+Una dimensión con sondas y juez combina sus dos partes por peso (desempate B): `valor = (Ws·vs + Wj·vj) / (Ws + Wj)`.
+
+- `Ws` suma los pesos de los ítems de sonda que miden para el lenguaje. Para el valor, una parte de sondas con veredicto pesa al menos 1.
+- `Wj` suma los pesos de los ítems del juez con nivel.
+- Una parte sin veredicto pesa 0. Si ninguna parte pesa, la dimensión no tiene veredicto.
+- Una dimensión con ítems del juez necesita dos tercios del peso total de su rúbrica medido con `Ws + Wj`, sin el mínimo de 1 (desempate C). Si no llega, no tiene veredicto y su motivo dice `cobertura <medido> de <total> de peso, menor que dos tercios`.
+- Un ítem del juez sin nivel va a `faltantes`, con su motivo. Si el gate de evidencia lo descartó, el motivo lo dice. El informe lo lista en Confianza como `Sin medir <ítem>: <motivo>`.
+
 Dos veredictos con hashes de rúbrica distintos no se comparan.
 
 Estado de las rúbricas reales: **pendiente**. Ninguna rúbrica viene embebida hoy. `EMBEBIDAS` en `src/oracle/rubrica.rs` está vacío. Las rúbricas de la Tarea 8b esperan la aprobación del usuario.
