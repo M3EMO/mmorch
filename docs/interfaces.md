@@ -384,9 +384,10 @@ Valor de una dimensión: `Σ peso·nivel / (3·Σ peso)`, sobre los ítems con n
 
 Una dimensión con sondas y juez combina sus dos partes por peso (desempate B): `valor = (Ws·vs + Wj·vj) / (Ws + Wj)`.
 
-- `Ws` suma los pesos de los ítems de sonda que miden para el lenguaje. Sin pesos de sonda en la rúbrica, `Ws` vale 1.
+- `Ws` suma los pesos de los ítems de sonda que miden para el lenguaje. Para el valor, una parte de sondas con veredicto pesa al menos 1.
 - `Wj` suma los pesos de los ítems del juez con nivel.
 - Una parte sin veredicto pesa 0. Si ninguna parte pesa, la dimensión no tiene veredicto.
+- Una dimensión con ítems del juez necesita dos tercios del peso total de su rúbrica medido con `Ws + Wj`, sin el mínimo de 1 (desempate C). Si no llega, no tiene veredicto y su motivo dice `cobertura <medido> de <total> de peso, menor que dos tercios`.
 - Un ítem del juez sin nivel va a `faltantes`, con su motivo. Si el gate de evidencia lo descartó, el motivo lo dice. El informe lo lista en Confianza como `Sin medir <ítem>: <motivo>`.
 
 Dos veredictos con hashes de rúbrica distintos no se comparan.

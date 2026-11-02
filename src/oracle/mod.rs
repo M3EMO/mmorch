@@ -962,12 +962,14 @@ fn medir(
                     puntaje: de_sondas,
                 };
                 let juez_parte = parte_juez(dimension, juez, resultado.as_ref(), &topes);
+                // El peso medido de la cobertura usa el Ws real, sin el mínimo de 1 (desempate C).
+                let medido = peso_medido(&sondas) + juez_parte.as_ref().map_or(0, peso_medido);
                 let mut puntaje = juntar_partes(dimension, sondas, juez_parte);
                 sumar_faltantes(&mut puntaje.faltantes, faltantes_de(dimension, tarea));
                 if sin_modulos {
                     sumar_faltante_sin_modulos(&mut puntaje.faltantes);
                 }
-                puntaje
+                aplicar_cobertura(dimension, juez.rubricas, medido, puntaje)
             }
         })
         .collect();
@@ -1175,16 +1177,18 @@ fn puntaje_diseno(
     resultado: Option<&ResultadoJuez>,
     topes: &BTreeMap<String, u8>,
 ) -> Puntaje {
-    parte_juez(Dimension::Diseno, juez, resultado, topes)
-        .map(|parte| parte.puntaje)
-        .unwrap_or_else(|| {
-            let motivo = if juez.rubricas.is_empty() {
-                "sin rúbricas embebidas"
-            } else {
-                "sin ítems de diseño en las rúbricas"
-            };
-            sin_veredicto_puntaje(Dimension::Diseno, motivo.into())
-        })
+    let parte = parte_juez(Dimension::Diseno, juez, resultado, topes);
+    // Diseño no tiene sondas: su peso medido es el del juez (desempate C).
+    let medido = parte.as_ref().map_or(0, peso_medido);
+    let puntaje = parte.map(|parte| parte.puntaje).unwrap_or_else(|| {
+        let motivo = if juez.rubricas.is_empty() {
+            "sin rúbricas embebidas"
+        } else {
+            "sin ítems de diseño en las rúbricas"
+        };
+        sin_veredicto_puntaje(Dimension::Diseno, motivo.into())
+    });
+    aplicar_cobertura(Dimension::Diseno, juez.rubricas, medido, puntaje)
 }
 
 /// Motivo de un ítem del juez sin nivel cuyo descarte nombra el gate de evidencia (desempate B').
@@ -1199,7 +1203,8 @@ struct Parte {
 }
 
 /// Junta las partes de una dimensión con su valor ponderado por peso (desempate B):
-/// `valor = (Ws·vs + Wj·vj) / (Ws + Wj)`. Una parte sin veredicto pesa 0. Sin peso en ninguna parte,
+/// `valor = (Ws·vs + Wj·vj) / (Ws + Wj)`. Una parte sin veredicto pesa 0, y una de sondas con veredicto pesa
+/// al menos 1. Sin peso en ninguna parte,
 /// la dimensión queda sin veredicto con los motivos de sus partes. Los ítems son los del juez.
 /// Los faltantes de las dos partes pasan a la dimensión sin repetir un ítem.
 fn juntar_partes(dimension: Dimension, sondas: Parte, juez: Option<Parte>) -> Puntaje {
@@ -1212,7 +1217,12 @@ fn juntar_partes(dimension: Dimension, sondas: Parte, juez: Option<Parte>) -> Pu
     .collect();
     let mut faltantes = Vec::new();
     sumar_faltantes(&mut faltantes, sondas.puntaje.faltantes.clone());
-    let ws = peso_medido(&sondas);
+    // Una parte de sondas con veredicto pesa al menos 1: sin pesos en la rúbrica, su valor sigue (B).
+    let ws = if sondas.puntaje.sin_veredicto.is_some() {
+        0
+    } else {
+        sondas.peso.max(1)
+    };
     let (vj, wj) = match &juez {
         Some(j) => {
             sumar_faltantes(&mut faltantes, j.puntaje.faltantes.clone());
@@ -1267,15 +1277,51 @@ fn items_de_sonda(dimension: Dimension, rubricas: &[Rubrica]) -> Vec<&rubrica::I
 }
 
 /// Ws: la suma de los pesos de los ítems de sonda que miden para el lenguaje de la tarea (desempate B).
-/// Sin pesos de sonda en las rúbricas, pesa 1: la parte de sondas conserva su valor, como sin juez.
 fn peso_sondas(dimension: Dimension, rubricas: &[Rubrica], tarea: &Tarea) -> u32 {
     let faltan = perfiles::items_sin_sonda(&tarea.lenguaje, tarea.eficiencia.is_some());
-    let suma: u32 = items_de_sonda(dimension, rubricas)
+    items_de_sonda(dimension, rubricas)
         .into_iter()
         .filter(|i| !faltan.contains(&i.id.as_str()))
         .map(|i| u32::from(i.peso))
-        .sum();
-    suma.max(1)
+        .sum()
+}
+
+/// Peso total de la rúbrica de una dimensión: sonda, juez y mixto, sin filtrar por lenguaje (desempate C).
+fn peso_total(dimension: Dimension, rubricas: &[Rubrica]) -> u32 {
+    rubricas
+        .iter()
+        .filter(|r| r.id == dimension.clave())
+        .flat_map(|r| r.item.iter())
+        .map(|i| u32::from(i.peso))
+        .sum()
+}
+
+/// Dos tercios de cobertura: `medido` llega a dos tercios de `total`, con enteros (desempate C).
+fn cubre_dos_tercios(medido: u32, total: u32) -> bool {
+    3 * medido >= 2 * total
+}
+
+/// Cobertura de una dimensión con ítems del juez (desempate C). Si `medido` no llega a dos tercios del peso
+/// total de su rúbrica, la dimensión queda sin veredicto con sus faltantes. Los motivos previos van después.
+fn aplicar_cobertura(
+    dimension: Dimension,
+    rubricas: &[Rubrica],
+    medido: u32,
+    puntaje: Puntaje,
+) -> Puntaje {
+    if rubrica_del_juez(rubricas, dimension).is_none() {
+        return puntaje;
+    }
+    let total = peso_total(dimension, rubricas);
+    if cubre_dos_tercios(medido, total) {
+        return puntaje;
+    }
+    let motivo = format!("cobertura {medido} de {total} de peso, menor que dos tercios");
+    let motivo = match puntaje.sin_veredicto {
+        Some(previo) => format!("{motivo}; {previo}"),
+        None => motivo,
+    };
+    sin_veredicto_con_faltantes(dimension, motivo, puntaje.faltantes)
 }
 
 /// Puntaje de una dimensión sin veredicto que lleva sus faltantes.
@@ -3405,7 +3451,10 @@ mod tests {
         )
         .expect("evalúa");
         let diseno = puntaje_de_prueba(&v, Dimension::Diseno);
-        assert_eq!(diseno.sin_veredicto.as_deref(), Some("juez no corrido"));
+        assert_eq!(
+            diseno.sin_veredicto.as_deref(),
+            Some("cobertura 0 de 6 de peso, menor que dos tercios; juez no corrido")
+        );
     }
 
     #[test]
@@ -4162,9 +4211,9 @@ mod tests {
     }
 
     #[test]
-    fn oraculo_diseno_item_del_juez_sin_respuesta_no_baja_la_dimension() {
+    fn oraculo_diseno_item_del_juez_sin_respuesta_no_cuenta_para_la_cobertura() {
         // El juez responde solo `diseno.modularidad` (peso 3, nivel 2). `diseno.tope` (mixto, peso 1)
-        // queda en `faltantes`: no vale 0. Diseño es 2/3, el valor del ítem respondido.
+        // queda en `faltantes`, no vale 0. Con 3 de 6 de peso no hay dos tercios: Diseño no tiene veredicto.
         let r = ResultadoJuez {
             estado: EstadoJuez::Ok,
             niveles: BTreeMap::from([(MODULARIDAD_ID.to_string(), 2)]),
@@ -4180,9 +4229,18 @@ mod tests {
             rubricas: &rubricas,
         };
         let p = puntaje_diseno(&juez, Some(&r), &BTreeMap::new());
-        assert_eq!(p.sin_veredicto, None, "{p:?}");
-        let valor = p.valor;
-        assert!((valor - 2.0 / 3.0).abs() < 1e-6, "{valor}");
+        assert_eq!(
+            p.sin_veredicto.as_deref(),
+            Some("cobertura 3 de 6 de peso, menor que dos tercios"),
+            "{p:?}"
+        );
+        assert!(
+            p.faltantes
+                .iter()
+                .any(|f| f.item == TOPE_ID && f.motivo == MOTIVO_JUEZ_SIN_NIVEL),
+            "{:?}",
+            p.faltantes
+        );
     }
 
     #[test]
@@ -4337,9 +4395,13 @@ mod tests {
         )
         .expect("calibración");
         let calibracion = Calibraciones::cargar(&home).expect("carga");
+        // El juez mide modularidad (3) y el tope (1): 4 de 6 de peso, dos tercios (desempate C).
         let juez = JuezFalso::con(
             &respuesta_juez(
-                json!([item_juez(MODULARIDAD_ID, 2, json!([ev_lib()]))]),
+                json!([
+                    item_juez(MODULARIDAD_ID, 2, json!([ev_lib()])),
+                    item_juez(TOPE_ID, 2, json!([ev_lib()])),
+                ]),
                 json!([]),
             ),
             0.0,
@@ -4627,6 +4689,21 @@ mod tests {
         assert_eq!(items, vec!["estructura.tamano", "estructura.legibilidad"]);
     }
 
+    /// Resultado del juez con nivel `nivel` en los ítems `niveles`, sin descartes.
+    fn resultado_con_niveles(niveles: &[(&str, u8)]) -> ResultadoJuez {
+        ResultadoJuez {
+            estado: EstadoJuez::Ok,
+            niveles: niveles
+                .iter()
+                .map(|(item, nivel)| (item.to_string(), *nivel))
+                .collect(),
+            items: Vec::new(),
+            hallazgos: Vec::new(),
+            descartes: Vec::new(),
+            faltantes: Vec::new(),
+        }
+    }
+
     /// Evaluación de la tarea de Rust con `rubricas` y el juez `juez` (o sin él), en su propia carpeta de `base`.
     fn evaluar_rust_con(
         base: &Path,
@@ -4763,7 +4840,11 @@ mod tests {
             rubricas: &rubricas,
         };
         let p = puntaje_diseno(&juez, None, &BTreeMap::new());
-        assert_eq!(p.sin_veredicto.as_deref(), Some("juez no corrido"), "{p:?}");
+        assert_eq!(
+            p.sin_veredicto.as_deref(),
+            Some("cobertura 0 de 13 de peso, menor que dos tercios; juez no corrido"),
+            "{p:?}"
+        );
         assert_eq!(p.valor, 0.0);
         let robustez = p
             .faltantes
@@ -4811,6 +4892,123 @@ mod tests {
             "{:?}",
             estructura.faltantes
         );
+    }
+
+    #[test]
+    fn oraculo_cobertura_de_dos_tercios_en_los_bordes() {
+        // Dos tercios de 13 son 8,67: 8 no llega (3·8 = 24 < 26) y 9 sí (3·9 = 27 ≥ 26).
+        assert!(!cubre_dos_tercios(8, 13));
+        assert!(cubre_dos_tercios(9, 13));
+        assert!(cubre_dos_tercios(0, 0));
+    }
+
+    #[test]
+    fn oraculo_diseno_con_items_medidos_bajo_dos_tercios_queda_sin_veredicto_con_faltantes() {
+        // Diseño mide modularidad 3, robustez 3 y errores 2: 8 de 13 de peso. Sin dos tercios, sin veredicto.
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let juez = JuezDiseno {
+            modelo: None,
+            nombre: MODELO_JUEZ,
+            rubricas: &rubricas,
+        };
+        let r = resultado_con_niveles(&[
+            ("diseno.modularidad", 2),
+            ("diseno.robustez", 2),
+            ("diseno.errores", 2),
+        ]);
+        let p = puntaje_diseno(&juez, Some(&r), &BTreeMap::new());
+        assert_eq!(
+            p.sin_veredicto.as_deref(),
+            Some("cobertura 8 de 13 de peso, menor que dos tercios"),
+            "{p:?}"
+        );
+        let faltan: Vec<&str> = p.faltantes.iter().map(|f| f.item.as_str()).collect();
+        assert_eq!(
+            faltan,
+            vec![
+                "diseno.estado",
+                "diseno.operabilidad",
+                "diseno.documentacion"
+            ],
+            "{p:?}"
+        );
+    }
+
+    #[test]
+    fn oraculo_diseno_con_dos_tercios_de_peso_tiene_valor() {
+        // Con documentación (peso 1) son 9 de 13: cubre, y el valor es 2/3 con todos los niveles en 2.
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let juez = JuezDiseno {
+            modelo: None,
+            nombre: MODELO_JUEZ,
+            rubricas: &rubricas,
+        };
+        let r = resultado_con_niveles(&[
+            ("diseno.modularidad", 2),
+            ("diseno.robustez", 2),
+            ("diseno.errores", 2),
+            ("diseno.documentacion", 2),
+        ]);
+        let p = puntaje_diseno(&juez, Some(&r), &BTreeMap::new());
+        assert_eq!(p.sin_veredicto, None, "{p:?}");
+        assert!((p.valor - 2.0 / 3.0).abs() < 1e-6, "{}", p.valor);
+    }
+
+    #[test]
+    fn oraculo_arquitectura_sin_juez_queda_sin_veredicto_por_cobertura() {
+        // La sonda mide `arquitectura.dependencias` (peso 3) con dos módulos. Sin el juez, 3 de 10 no llega.
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_con(
+            base.path().join("repo"),
+            LOCK_SANO,
+            &[
+                ("src/lib.rs", "pub fn f() -> u8 { 1 }\n"),
+                ("src/a.rs", "use crate::b::algo;\npub fn f() {}\n"),
+                ("src/b.rs", "pub fn algo() {}\nuse crate::a::f;\n"),
+            ],
+        );
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let juez = JuezFalso::con(&respuesta_juez(json!([]), json!([])), 0.0);
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        let arq = puntaje_de_prueba(&v, Dimension::Arquitectura);
+        assert!(
+            arq.sin_veredicto
+                .as_deref()
+                .is_some_and(|m| m.contains("cobertura 3 de 10 de peso")),
+            "{arq:?}"
+        );
+        for item in [
+            "arquitectura.adecuacion",
+            "arquitectura.extensibilidad",
+            "arquitectura.interfaces",
+        ] {
+            assert!(
+                arq.faltantes.iter().any(|f| f.item == item),
+                "{:?}",
+                arq.faltantes
+            );
+        }
+    }
+
+    #[test]
+    fn oraculo_estructura_sin_juez_cubre_con_sus_sondas() {
+        // Estructura pesa 7 con juez y sus sondas suman 5: 3·5 = 15 ≥ 14, así que cubre sin juez.
+        let base = tempfile::tempdir().expect("base");
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let v = evaluar_rust_con(base.path(), &rubricas, None);
+        let estructura = puntaje_de_prueba(&v, Dimension::Estructura);
+        assert_eq!(estructura.sin_veredicto, None, "{estructura:?}");
+        assert!(estructura.valor > 0.0, "{estructura:?}");
     }
 
     // ---- Tarea 28, parte 1: la Entrega del veredicto sale de `entregar_con` (desempate 7) ----
@@ -5840,7 +6038,7 @@ mod tests {
     }
 
     #[test]
-    fn oraculo_shell_estructura_con_juez_que_mide_conserva_el_veredicto_del_juez() {
+    fn oraculo_shell_estructura_con_juez_que_mide_poco_queda_sin_veredicto_por_cobertura() {
         let base = tempfile::tempdir().expect("base");
         let tarea = tarea_shell(base.path());
         let repo = repo_shell(base.path(), None);
@@ -5866,10 +6064,13 @@ mod tests {
             ..deps_de(&correr, &fabrica)
         };
         let v = evaluar_con(&repo, &tarea, &opciones(&home), deps).expect("evalúa");
+        // Shell no tiene sondas de Estructura: el juez mide 2 de 7 de peso, menos de dos tercios (C).
         let estructura = puntaje_de_prueba(&v, Dimension::Estructura);
-        assert_eq!(estructura.sin_veredicto, None, "{estructura:?}");
         assert!(
-            (estructura.valor - 2.0 / 3.0).abs() < 1e-6,
+            estructura
+                .sin_veredicto
+                .as_deref()
+                .is_some_and(|m| m.starts_with("cobertura 2 de 7 de peso")),
             "{estructura:?}"
         );
         assert_eq!(juez.llamadas(), 1);
