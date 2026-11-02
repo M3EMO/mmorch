@@ -2825,3 +2825,69 @@ No hay preguntas nuevas para el usuario.
 5. Siguen la imagen del builder, la credencial, `NETRC`, la corrida de memora, Colab, Graft con G5 y los paquetes a ciegas con G3.
 
 No hay preguntas nuevas para el usuario.
+
+## Vuelta del 2026-11-02: prueba de Haiku, Tarea 42 y su mezcla
+
+**Prueba de Haiku con razonamiento largo.** El usuario la ordenó: "Sí, las dos". El orquestador corrió 3 streams directos de `claude-haiku-5-5` con `thinking: {"type": "adaptive"}`, fuera de Root. Gastó 0,033 USD, registrados con `r00t observa costo`. El script es `~/.cache/root-wt/orquestador/haiku-largo.py`.
+
+| Corrida | Esfuerzo | Tokens de razonamiento | Duración | Hueco máximo | Pings |
+|---|---|---|---|---|---|
+| 1 | por defecto (medium) | 412 | 3,1 s | 2,0 s | 1 |
+| 2 | por defecto (medium) | 405 | 5,2 s | 1,9 s | 1 |
+| 3 | `output_config: {"effort": "max"}` | 64 000 (tope) | 259 s | 30,1 s | 9 |
+
+- En la corrida 3, Anthropic mandó un `ping` cada 30 s. El razonamiento llegó en un solo `thinking_delta` al final, a unos 247 tokens por segundo.
+- Root corta la inactividad por bytes, y un `ping` trae bytes. El corte de 120 s nunca salta con Anthropic.
+- El hallazgo 4 de "Desempates técnicos 19" suponía silencio total. La prueba lo refuta: las pruebas cortas de 21c vieron un solo `ping` porque duraron menos de 30 s.
+- Con el esfuerzo por defecto, Haiku razonó unos 400 tokens. Root no manda `output_config`, así que sus llamadas usan `medium`.
+
+**Tarea 42.** El usuario la ordenó: "Sí, las dos". Sonnet organizó y Haiku construyó, por 1,18 USD. La rama es `laptop/tarea-42`, y el informe es `docs/builds/2026-11-02-build-local-42.md`.
+
+| Parte | Commit |
+|---|---|
+| 1. `oculto` o `contrato` como archivo da error de tarea con código 2 | 176e887 |
+| 2. Tests de Arquitectura en Rust sin módulos | 672ef1a |
+| 3. Módulos de los pasos (decisión 56) | 90c6ab6 |
+| 4. ETXTBSY: los falsos se lanzan con `sh` | 6042ad8 |
+| Informe | 4667511 |
+
+- La suite con podman dio 1990 verdes, 0 fallas y 2 ignorados.
+- La parte 2 no cambió código: sus dos tests quedaron como guardas.
+- ETXTBSY no se reprodujo en 50 corridas seguidas, ni antes ni después del cambio.
+- Ningún test recorre `evaluar_con` completo con `modulos`.
+
+**Mezcla.** El usuario escribió: "Sí, mezclá". La mezcla es 64479c4, sin conflictos, con el árbol igual a 4667511.
+
+## Desempates técnicos 21 (Opus, 2026-11-02)
+
+**Inactividad de Anthropic: se revierte la excepción de la Tarea 41.**
+- Anthropic manda un `ping` cada 30 s durante el razonamiento, y Root corta por bytes. Con 120 s, Anthropic nunca se corta por error.
+- La excepción de la Tarea 41 (b790507) dejaba a Anthropic sin detección de una conexión muerta durante todo `timeout_juez_s`.
+- **Desempate.** Anthropic vuelve al mismo plazo de inactividad de 120 s que DeepSeek. Razón: la medición refutó la causa de la excepción, y la excepción tenía un costo real.
+- Va en la Tarea 43, con el builder local.
+
+**Preguntas del informe de la Tarea 42.**
+1. **Código 2 solo para la carpeta inválida.** Se confirma la variante `ErrorOraculo::TareaDefinicion` con código 2. Cambiar todos los `Tarea` a 2 toca 37 usos y un contrato fijado por tests. Queda como deuda: un error de definición de tarea debería salir siempre con 2.
+2. **Repo que no es Rust.** Se corrige. Sin un perfil de lenguaje, Root no conoce los módulos del repo. Decir "falta" con la lista entera afirma algo que Root no midió. Sin perfil, `faltante` vuelve al texto de antes y nombra los tests que no pasan.
+3. **Requisito ausente con un módulo presente.** Se confirma: es lo que pide la decisión 56. El módulo existe, así que el paso apunta a revisarlo.
+4. **Módulo con otro nombre.** Se confirma el nombre exacto: los nombres salen de las capas de la ficha aprobada.
+5. **`ROOT_TEST_SEGURO_CARGO`.** Se confirma: solo la usan los tests.
+6. **`sh` contra `bash`.** Se corrige. `tools/test-seguro.sh` usa `BASH_SOURCE`, así que es un script de bash. Los tests lo lanzan con `bash <ruta>`. Los ejecutables falsos, que son POSIX, siguen con `sh`. Razón: en Fedora `sh` es bash, pero en otras imágenes de Linux, como muchas de nube, `sh` es `dash`, y la suite fallaría.
+
+### Tarea 43: Inactividad de Anthropic, módulos sin perfil y `bash` en los tests
+- **Action**: los desempates de inactividad, 2 y 6 de "Desempates técnicos 21".
+- **Dónde**: en la laptop, con el builder local. Brief: `docs/builds/brief-local-43.md`.
+- **Validate**: `cargo test`:
+  - Un stream falso de Anthropic con razonamiento que calla 121 segundos se corta, con el plazo inyectado.
+  - Un stream falso de Anthropic que manda un `ping` cada 30 segundos durante 200 segundos no se corta.
+  - Un requisito con `modulos` sobre un repo `shell` nombra los tests que no pasan, no los módulos.
+  - `tests/test_seguro.rs` lanza `tools/test-seguro.sh` con `bash`, y los falsos con `sh`.
+
+## Orden de trabajo (2026-11-02, después de la Tarea 42)
+
+1. **Validate de 7 y 13. Arranca ya.** Con `r00t` release de 64479c4, las claves y el `ROOT_HOME` real. memora corre 3 veces más una, y brasa una vez por repo. Gasto estimado: 1 USD o menos. La Tarea 43 no cambia sus resultados: el Validate usa DeepSeek, y memora y brasa son Rust.
+2. **Tarea 43 con el builder local.** En paralelo con el paso 1. Corre la suite con `ROOT_SIN_PODMAN=1`, así no choca con el Validate.
+3. **Calibración real (Tarea 12).** Espera el paso 1. Con `--tope-usd 25` (decisión 48). Después, la comparación de `global` de la Tarea 13.
+4. Siguen la imagen del builder, la credencial, `NETRC`, la corrida de memora, Colab, Graft con G5 y los paquetes a ciegas con G3.
+
+No hay preguntas nuevas para el usuario.
