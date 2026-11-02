@@ -1162,21 +1162,23 @@ fn parte_juez_sin_veredicto(
     }
 }
 
-/// Motivo de un ítem del juez sin nivel: el gate de evidencia si su descarte lo nombra (desempate B').
+/// Motivo de un ítem del juez sin nivel. Los descartes del reintento mandan sobre los del primer envío,
+/// así que va primero el "no respondió tras un reintento" y luego el `sin_evidencia`. Después el gate
+/// de evidencia (desempate B').
 fn motivo_sin_nivel(resultado: &ResultadoJuez, id: &str) -> &'static str {
     let que = format!("ítem {id}");
-    let por_gate = resultado
+    let motivos: Vec<&str> = resultado
         .descartes
         .iter()
-        .any(|d| d.que == que && d.motivo.contains("gate"));
-    let sin_evidencia = resultado
-        .descartes
-        .iter()
-        .any(|d| d.que == que && d.motivo.contains("sin_evidencia"));
-    if por_gate {
-        MOTIVO_GATE_EVIDENCIA
-    } else if sin_evidencia {
+        .filter(|d| d.que == que)
+        .map(|d| d.motivo.as_str())
+        .collect();
+    if motivos.contains(&MOTIVO_JUEZ_SIN_REINTENTO) {
+        MOTIVO_JUEZ_SIN_REINTENTO
+    } else if motivos.iter().any(|m| m.contains("sin_evidencia")) {
         MOTIVO_JUEZ_SIN_EVIDENCIA
+    } else if motivos.iter().any(|m| m.contains("gate")) {
+        MOTIVO_GATE_EVIDENCIA
     } else {
         MOTIVO_JUEZ_SIN_NIVEL
     }
@@ -1217,6 +1219,8 @@ pub const MOTIVO_GATE_EVIDENCIA: &str = "la evidencia no pasó el gate";
 pub const MOTIVO_JUEZ_SIN_NIVEL: &str = "el juez no dio nivel";
 /// Motivo de un ítem del juez que respondió `sin_evidencia`: no es ruptura de contrato (Tarea 44).
 pub const MOTIVO_JUEZ_SIN_EVIDENCIA: &str = "el juez no encontró evidencia";
+/// Motivo de un ítem del juez que no dio nivel ni `sin_evidencia` ni tras su reintento (Tarea 44, parte 3).
+pub const MOTIVO_JUEZ_SIN_REINTENTO: &str = "el juez no respondió tras un reintento";
 
 /// Una parte de una dimensión, sondas o juez, con su peso: la suma de los pesos de sus ítems medidos.
 struct Parte {
@@ -4607,7 +4611,8 @@ mod tests {
                 ..deps_de(&correr, &herramientas(&[]))
             },
         );
-        assert!((v.costo_usd - 0.35).abs() < 1e-9, "{}", v.costo_usd);
+        // 0,1 del juez de configuración y 0,25 por cada una de las dos llamadas del juez de diseño (reintento).
+        assert!((v.costo_usd - 0.6).abs() < 1e-9, "{}", v.costo_usd);
     }
 
     #[test]
@@ -4832,13 +4837,15 @@ mod tests {
             "{} vs {referencia}",
             estructura.valor
         );
-        assert_eq!(juez.llamadas(), 1);
+        // Sin ítems, el juez pide un reintento: dos llamadas.
+        assert_eq!(juez.llamadas(), 2);
         let legibilidad = estructura
             .faltantes
             .iter()
             .find(|f| f.item == "estructura.legibilidad")
             .expect("el juez sin nivel queda en faltantes");
-        assert_eq!(legibilidad.motivo, MOTIVO_JUEZ_SIN_NIVEL);
+        // El reintento tampoco da nivel: el faltante dice que no respondió tras el reintento.
+        assert_eq!(legibilidad.motivo, MOTIVO_JUEZ_SIN_REINTENTO);
     }
 
     #[test]
@@ -4891,7 +4898,8 @@ mod tests {
 
     #[test]
     fn oraculo_item_del_juez_descartado_por_el_gate_tiene_su_motivo() {
-        // El juez da nivel 2 con una cita inventada: el gate descarta el ítem y su faltante lo dice.
+        // El juez da nivel 2 con una cita inventada: el gate descarta el ítem. El reintento, con la misma
+        // respuesta, vuelve a fallar, y el faltante dice que el juez no respondió tras el reintento.
         let base = tempfile::tempdir().expect("base");
         let solo = evaluar_rust_con(&base.path().join("solo"), &[], None);
         let referencia = puntaje_de_prueba(&solo, Dimension::Estructura).valor;
@@ -4918,7 +4926,7 @@ mod tests {
             .iter()
             .find(|f| f.item == "estructura.legibilidad")
             .expect("el ítem descartado queda en faltantes");
-        assert_eq!(legibilidad.motivo, MOTIVO_GATE_EVIDENCIA);
+        assert_eq!(legibilidad.motivo, MOTIVO_JUEZ_SIN_REINTENTO);
     }
 
     #[test]
@@ -4936,6 +4944,33 @@ mod tests {
         assert_eq!(
             motivo_sin_nivel(&sin_descarte, "estructura.legibilidad"),
             MOTIVO_JUEZ_SIN_NIVEL
+        );
+    }
+
+    #[test]
+    fn motivo_sin_nivel_distingue_sin_reintento() {
+        let descarte = |motivo: &str| juez::Descarte {
+            que: "ítem estructura.legibilidad".into(),
+            motivo: motivo.into(),
+        };
+        // El reintento que no respondió gana sobre el descarte de gate del primer envío.
+        let mut sin_respuesta = resultado_con_niveles(&[]);
+        sin_respuesta.descartes = vec![
+            descarte("sin evidencia que pase el gate"),
+            descarte(MOTIVO_JUEZ_SIN_REINTENTO),
+        ];
+        assert_eq!(
+            motivo_sin_nivel(&sin_respuesta, "estructura.legibilidad"),
+            MOTIVO_JUEZ_SIN_REINTENTO
+        );
+        let solo_gate = {
+            let mut r = resultado_con_niveles(&[]);
+            r.descartes = vec![descarte("sin evidencia que pase el gate")];
+            r
+        };
+        assert_eq!(
+            motivo_sin_nivel(&solo_gate, "estructura.legibilidad"),
+            MOTIVO_GATE_EVIDENCIA
         );
     }
 
@@ -4989,9 +5024,10 @@ mod tests {
                 .find(|f| f.item == item)
                 .map(|f| f.motivo.as_str())
         };
+        // El reintento tampoco responde el ítem del juez: su motivo es el de no respondió tras el reintento.
         assert_eq!(
             motivo_de("estructura.legibilidad"),
-            Some(MOTIVO_JUEZ_SIN_NIVEL),
+            Some(MOTIVO_JUEZ_SIN_REINTENTO),
             "{:?}",
             estructura.faltantes
         );
@@ -6280,7 +6316,8 @@ mod tests {
                 .is_some_and(|m| m.starts_with("cobertura 2 de 7 de peso")),
             "{estructura:?}"
         );
-        assert_eq!(juez.llamadas(), 1);
+        // Dos llamadas: la primera deja ítems sin respuesta y el reintento los pide de nuevo.
+        assert_eq!(juez.llamadas(), 2);
         for item in [
             "estructura.tamano",
             "estructura.duplicacion",

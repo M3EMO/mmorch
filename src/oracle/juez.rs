@@ -9,13 +9,13 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::ErrorOraculo;
 use super::evidencia::{Verificacion, verificar_hallazgo};
 use super::mapa::Mapa;
 use super::perfiles::crear_hallazgo;
 use super::perfiles::rust::REGLA_CICLO;
 use super::rubrica::{ErrorRubrica, ItemRubrica, Mide, Puntuacion, Rubrica};
 use super::tarea::Requisito;
+use super::{ErrorOraculo, MOTIVO_JUEZ_SIN_REINTENTO};
 use crate::config::root_home;
 use crate::proveedores::{self, Prompt, RespuestaJuez};
 use crate::tipos::{Dimension, Eleccion, Fuente, Hallazgo, NivelItem, Via};
@@ -175,6 +175,21 @@ pub struct ResultadoJuez {
 
 /// Arma el prompt del juez. Es determinista: la misma entrada da el mismo prompt.
 pub fn construir_prompt(e: &EntradaJuez, limites: &LimitesPrompt) -> Prompt {
+    construir_prompt_con(e, limites, None, None)
+}
+
+/// Como `construir_prompt`. Con `ids`, solo pide esos ítems. Con `reintento`, agrega su sección `REINTENTO:`.
+fn construir_prompt_con(
+    e: &EntradaJuez,
+    limites: &LimitesPrompt,
+    ids: Option<&BTreeSet<String>>,
+    reintento: Option<&str>,
+) -> Prompt {
+    let pedidos: Vec<&ItemRubrica> = pedidos_de(e.rubricas)
+        .into_iter()
+        .map(|(item, _)| item)
+        .filter(|item| ids.is_none_or(|s| s.contains(&item.id)))
+        .collect();
     let mut usuario = String::new();
     usuario.push_str("SPEC:\n");
     usuario.push_str(e.spec);
@@ -196,11 +211,11 @@ pub fn construir_prompt(e: &EntradaJuez, limites: &LimitesPrompt) -> Prompt {
     }
     // Ids que el juez debe responder, uno por línea y en orden. Sin ellos no hay contrato.
     usuario.push_str("\nIDS OBLIGATORIOS:\n");
-    for (item, _) in pedidos_de(e.rubricas) {
+    for item in &pedidos {
         usuario.push_str(&format!("- {}\n", item.id));
     }
     usuario.push_str("\nÍTEMS A PUNTUAR:\n");
-    for (item, _) in pedidos_de(e.rubricas) {
+    for item in &pedidos {
         usuario.push_str(&format!(
             "- {} | fuente: {} | mide: {}\n",
             item.id,
@@ -210,6 +225,10 @@ pub fn construir_prompt(e: &EntradaJuez, limites: &LimitesPrompt) -> Prompt {
         for ancla in &item.anclas {
             usuario.push_str(&format!("  {ancla}\n"));
         }
+    }
+    if let Some(texto) = reintento {
+        usuario.push_str("\nREINTENTO:\n");
+        usuario.push_str(texto);
     }
     usuario.push_str("\nEXTRACTOS:\n");
     for (archivo, texto) in extractos(e, limites) {
@@ -337,7 +356,19 @@ pub fn exceso_de_entrada(prompt: &Prompt) -> Option<String> {
     })
 }
 
-/// Pide el juicio al modelo y aplica el parseo estricto y el gate.
+/// Pide el juicio al modelo y aplica el parseo estricto. Un fallo da su causa en el `Err`.
+fn pedir(modelo: &dyn ModeloJuez, prompt: &Prompt) -> Result<Respuesta, String> {
+    let salida = modelo
+        .consultar(prompt)
+        .map_err(|err| format!("el modelo falló: {err}"))?;
+    // Antes de parsear: una respuesta cortada por el tope no es JSON roto, es truncada.
+    if salida.truncada {
+        return Err(proveedores::causa_tope_alcanzado(prompt.max_tokens));
+    }
+    parsear(&salida.texto)
+}
+
+/// Pide el juicio al modelo y aplica el parseo estricto y el gate. Hace como mucho un reintento.
 pub fn juzgar(
     e: &EntradaJuez,
     modelo: &dyn ModeloJuez,
@@ -349,16 +380,7 @@ pub fn juzgar(
     if let Some(motivo) = exceso_de_entrada(&prompt) {
         return sin_veredicto(motivo, &pedidos);
     }
-    let tope = prompt.max_tokens;
-    let salida = match modelo.consultar(&prompt) {
-        Ok(salida) => salida,
-        Err(err) => return sin_veredicto(format!("el modelo falló: {err}"), &pedidos),
-    };
-    // Antes de parsear: una respuesta cortada por el tope no es JSON roto, es truncada.
-    if salida.truncada {
-        return sin_veredicto(proveedores::causa_tope_alcanzado(tope), &pedidos);
-    }
-    let respuesta = match parsear(&salida.texto) {
+    let respuesta = match pedir(modelo, &prompt) {
         Ok(respuesta) => respuesta,
         Err(causa) => return sin_veredicto(causa, &pedidos),
     };
@@ -377,6 +399,32 @@ pub fn juzgar(
             Err(d) => lectura.descartes.push(d),
         }
     }
+    // Un solo reintento: los ids que rompieron el contrato o no pasaron el gate.
+    let reintento: BTreeSet<String> = lectura
+        .rotos
+        .iter()
+        .chain(lectura.gate.keys())
+        .cloned()
+        .collect();
+    if !reintento.is_empty() {
+        let otra = reintentar(e, modelo, limites, &cx, &reintento, &lectura);
+        for nivel in otra.items {
+            lectura.niveles.insert(nivel.item.clone(), nivel.nivel);
+            lectura.items.push(nivel);
+        }
+        lectura.descartes.extend(otra.descartes);
+        // Sin nivel tras el reintento, y sin `sin_evidencia` en él: el juez no respondió.
+        let sin_respuesta: Vec<String> = reintento
+            .iter()
+            .filter(|id| !lectura.niveles.contains_key(*id) && !otra.sin_evidencia.contains(*id))
+            .cloned()
+            .collect();
+        for id in sin_respuesta {
+            lectura
+                .descartes
+                .push(descarte(format!("ítem {id}"), MOTIVO_JUEZ_SIN_REINTENTO));
+        }
+    }
     let faltantes = pedidos
         .keys()
         .filter(|id| !lectura.niveles.contains_key(*id))
@@ -390,6 +438,63 @@ pub fn juzgar(
         descartes: lectura.descartes,
         faltantes,
     }
+}
+
+/// Reintento de `ids`: el mismo prompt, con solo esos ítems y su sección `REINTENTO:`. De su respuesta
+/// toma niveles, `sin_evidencia` y descartes. Sin respuesta usable, la lectura queda vacía.
+fn reintentar(
+    e: &EntradaJuez,
+    modelo: &dyn ModeloJuez,
+    limites: &LimitesPrompt,
+    cx: &Contexto,
+    ids: &BTreeSet<String>,
+    lectura: &Lectura,
+) -> Lectura {
+    let texto = texto_reintento(&lectura.gate, &lectura.rotos);
+    let prompt = construir_prompt_con(e, limites, Some(ids), Some(&texto));
+    if exceso_de_entrada(&prompt).is_some() {
+        return Lectura::default();
+    }
+    let Ok(respuesta) = pedir(modelo, &prompt) else {
+        return Lectura::default();
+    };
+    // Un id fuera del reintento no se pidió de nuevo: `leer_items` lo descarta con aviso.
+    let pedidos: BTreeMap<String, Dimension> = cx
+        .pedidos
+        .iter()
+        .filter(|(id, _)| ids.contains(*id))
+        .map(|(id, dimension)| (id.clone(), *dimension))
+        .collect();
+    let cx_reintento = Contexto {
+        repo: cx.repo,
+        requisitos: cx.requisitos,
+        pedidos: &pedidos,
+        catalogo: cx.catalogo,
+        modelo: cx.modelo,
+    };
+    leer_items(respuesta.items, &cx_reintento)
+}
+
+/// Texto de la sección `REINTENTO:`: una línea por cita que no pasó el gate, y una por id roto.
+fn texto_reintento(gate: &BTreeMap<String, Vec<CitaFallida>>, rotos: &BTreeSet<String>) -> String {
+    let mut texto = String::new();
+    for (id, citas) in gate {
+        if citas.is_empty() {
+            texto.push_str(&format!(
+                "- {id}: ninguna evidencia trae archivo, línea y cita válidos\n"
+            ));
+        }
+        for c in citas {
+            texto.push_str(&format!(
+                "- {id}: la cita \"{}\" no se encontró en {}:{}\n",
+                c.cita, c.archivo, c.linea
+            ));
+        }
+    }
+    for id in rotos {
+        texto.push_str(&format!("- {id}: no respondió o rompió el contrato\n"));
+    }
+    texto
 }
 
 /// Resultado sin veredicto: sin niveles ni hallazgos, y todo lo pedido queda como faltante.
@@ -424,7 +529,7 @@ impl Contexto<'_> {
                 Err("no se pidió; se ignora: el juez no puntúa ítems de sonda".into())
             }
             Some(_) => self.pedidos.get(id).copied().ok_or_else(|| {
-                format!("no se pidió; se ignora: el ítem {id} no tiene dimensión conocida")
+                format!("no se pidió; se ignora: el ítem {id} no está entre los pedidos")
             }),
         }
     }
@@ -444,6 +549,11 @@ enum Dicho {
     Nivel(NivelItem),
     /// El juez no halló evidencia. No rompe el contrato.
     SinEvidencia(String),
+    /// Hay nivel, pero ninguna evidencia pasa el gate. Lleva las citas que fallaron.
+    SinGate {
+        id: String,
+        citas: Vec<CitaFallida>,
+    },
 }
 
 /// Lectura de los ítems de la respuesta: niveles, descartes y los ids que rompen el contrato.
@@ -453,8 +563,19 @@ struct Lectura {
     items: Vec<NivelItem>,
     descartes: Vec<Descarte>,
     /// Ids pedidos que rompen el contrato: omitidos, repetidos, o sin nivel ni `sin_evidencia`.
-    #[allow(dead_code)] // lo usa el reintento (parte 3).
     rotos: BTreeSet<String>,
+    /// Ids con nivel que no pasaron el gate, con las citas que fallaron.
+    gate: BTreeMap<String, Vec<CitaFallida>>,
+    /// Ids que el juez dio por `sin_evidencia`.
+    sin_evidencia: BTreeSet<String>,
+}
+
+/// Evidencia que no pasó el gate: archivo, línea y cita tal como la dijo el juez.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CitaFallida {
+    archivo: String,
+    linea: u32,
+    cita: String,
 }
 
 /// Lee los ítems de la respuesta. Un id pedido repetido no cuenta: ninguna de sus copias sirve.
@@ -483,10 +604,20 @@ fn leer_items(valores: Vec<Value>, cx: &Contexto) -> Lectura {
                 lectura.niveles.insert(nivel.item.clone(), nivel.nivel);
                 lectura.items.push(nivel);
             }
-            Ok(Dicho::SinEvidencia(id)) => lectura.descartes.push(descarte(
-                format!("ítem {id}"),
-                "sin_evidencia: el juez no encontró evidencia",
-            )),
+            Ok(Dicho::SinEvidencia(id)) => {
+                lectura.descartes.push(descarte(
+                    format!("ítem {id}"),
+                    "sin_evidencia: el juez no encontró evidencia",
+                ));
+                lectura.sin_evidencia.insert(id);
+            }
+            Ok(Dicho::SinGate { id, citas }) => {
+                lectura.descartes.push(descarte(
+                    format!("ítem {id}"),
+                    "sin evidencia que pase el gate",
+                ));
+                lectura.gate.insert(id, citas);
+            }
             Err(d) => lectura.descartes.push(d),
         }
     }
@@ -616,14 +747,23 @@ fn procesar_item(valor: Value, cx: &Contexto) -> Result<Dicho, Descarte> {
     if !(0..=NIVEL_MAX).contains(&nivel) {
         return Err(descarte(&que, format!("nivel {nivel} fuera de 0..=3")));
     }
-    let validas: Vec<String> = cruda
+    let mut validas = Vec::new();
+    let mut fallidas = Vec::new();
+    for ev in cruda
         .evidencia
         .into_iter()
         .filter_map(|v| serde_json::from_value::<EvidenciaCruda>(v).ok())
-        .filter_map(|ev| evidencia_valida(ev, dimension, cx))
-        .collect();
+    {
+        match evidencia_valida(ev, dimension, cx) {
+            Ok(valida) => validas.push(valida),
+            Err(fallida) => fallidas.push(fallida),
+        }
+    }
     if validas.is_empty() {
-        return Err(descarte(&que, "sin evidencia que pase el gate"));
+        return Ok(Dicho::SinGate {
+            id: cruda.item,
+            citas: fallidas,
+        });
     }
     Ok(Dicho::Nivel(NivelItem {
         item: cruda.item,
@@ -633,8 +773,12 @@ fn procesar_item(valor: Value, cx: &Contexto) -> Result<Dicho, Descarte> {
     }))
 }
 
-/// Devuelve `archivo:linea` si la evidencia pasa el gate de evidencia.
-fn evidencia_valida(ev: EvidenciaCruda, dimension: Dimension, cx: &Contexto) -> Option<String> {
+/// Devuelve `archivo:linea` si la evidencia pasa el gate de evidencia. Si no, la cita que falló.
+fn evidencia_valida(
+    ev: EvidenciaCruda,
+    dimension: Dimension,
+    cx: &Contexto,
+) -> Result<String, CitaFallida> {
     let h = Hallazgo {
         dimension,
         severidad: 1,
@@ -646,8 +790,15 @@ fn evidencia_valida(ev: EvidenciaCruda, dimension: Dimension, cx: &Contexto) -> 
         id: String::new(),
         impacto: Vec::new(),
     };
-    let valida = matches!(verificar_hallazgo(cx.repo, &h), Verificacion::Valido);
-    valida.then(|| format!("{}:{}", h.archivo, h.linea))
+    if matches!(verificar_hallazgo(cx.repo, &h), Verificacion::Valido) {
+        Ok(format!("{}:{}", h.archivo, h.linea))
+    } else {
+        Err(CitaFallida {
+            archivo: h.archivo,
+            linea: h.linea,
+            cita: h.cita,
+        })
+    }
 }
 
 /// Valida un hallazgo: requisito real, severidad 1 a 3, cita en el repo.
@@ -763,6 +914,7 @@ mod tests {
     use crate::tipos::Rol;
     use serde_json::json;
     use std::cell::RefCell;
+    use std::collections::VecDeque;
     use std::fs;
     use tempfile::TempDir;
 
@@ -1236,7 +1388,12 @@ mod tests {
             item_nivel(MODULARIDAD, 3, json!([real()])),
             item_nivel(TOPE, 1, json!([real()])),
         ]);
-        let r = juzgar_con(&c, respuesta(items.clone(), json!([])));
+        // El reintento de MODULARIDAD no responde: así los descartes "repetido" son solo los del primer envío.
+        let modelo = FalsoSecuencia::nueva(vec![
+            Ok(respuesta(items.clone(), json!([]))),
+            Ok(respuesta(json!([]), json!([]))),
+        ]);
+        let r = juzgar_secuencia(&c, &modelo);
         assert!(!r.niveles.contains_key(MODULARIDAD), "{:?}", r.niveles);
         assert!(r.faltantes.contains(&MODULARIDAD.to_string()));
         let repetidos = r
@@ -1459,9 +1616,8 @@ mod tests {
         let c = caso();
         let modelo = Falso::con(respuesta(json!([]), json!([])));
         let _ = juzgar(&c.entrada(), &modelo, MODELO, &LimitesPrompt::default());
-        assert_eq!(
-            modelo.visto.borrow().len(),
-            1,
+        assert!(
+            !modelo.visto.borrow().is_empty(),
             "un prompt chico sí se envía"
         );
     }
@@ -1601,9 +1757,299 @@ mod tests {
         let limites = LimitesPrompt::default();
         let modelo = Falso::con(respuesta(json!([]), json!([])));
         juzgar(&c.entrada(), &modelo, MODELO, &limites);
+        // La respuesta sin ítems pide un reintento: el primer prompt es el construido.
         let visto = modelo.visto.borrow();
-        assert_eq!(visto.len(), 1);
+        assert_eq!(visto.len(), 2);
         assert_eq!(visto[0], construir_prompt(&c.entrada(), &limites));
+    }
+
+    // Reintento: un solo por juicio, solo para los ids rotos o sin gate.
+
+    /// Modelo falso con una respuesta por llamada, en orden. Una respuesta puede ser error.
+    struct FalsoSecuencia {
+        respuestas: RefCell<VecDeque<Result<RespuestaJuez, String>>>,
+        visto: RefCell<Vec<Prompt>>,
+    }
+
+    impl FalsoSecuencia {
+        fn nueva(respuestas: Vec<Result<String, String>>) -> Self {
+            let respuestas = respuestas
+                .into_iter()
+                .map(|r| {
+                    r.map(|texto| RespuestaJuez {
+                        texto,
+                        truncada: false,
+                        costo_usd: 0.0,
+                    })
+                })
+                .collect();
+            Self {
+                respuestas: RefCell::new(respuestas),
+                visto: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ModeloJuez for FalsoSecuencia {
+        fn consultar(&self, prompt: &Prompt) -> Result<RespuestaJuez, ErrorOraculo> {
+            self.visto.borrow_mut().push(prompt.clone());
+            let siguiente = self
+                .respuestas
+                .borrow_mut()
+                .pop_front()
+                .expect("el modelo recibió más llamadas de las programadas");
+            siguiente.map_err(ErrorOraculo::Infra)
+        }
+    }
+
+    fn juzgar_secuencia(c: &Caso, modelo: &FalsoSecuencia) -> ResultadoJuez {
+        juzgar(&c.entrada(), modelo, MODELO, &LimitesPrompt::default())
+    }
+
+    /// Sección de ids e ítems del prompt: de `IDS OBLIGATORIOS:` a `EXTRACTOS:`.
+    fn seccion_ids(usuario: &str) -> &str {
+        let inicio = usuario
+            .find("IDS OBLIGATORIOS:")
+            .expect("hay ids obligatorios");
+        let fin = usuario.find("EXTRACTOS:").expect("hay extractos");
+        &usuario[inicio..fin]
+    }
+
+    /// Sección `REINTENTO:` del prompt, de su rótulo a `EXTRACTOS:`.
+    fn seccion_reintento(usuario: &str) -> &str {
+        let inicio = usuario
+            .find("REINTENTO:")
+            .expect("hay sección de reintento");
+        let fin = usuario.find("EXTRACTOS:").expect("hay extractos");
+        &usuario[inicio..fin]
+    }
+
+    fn descarte_de(r: &ResultadoJuez, id: &str, motivo: &str) -> bool {
+        r.descartes
+            .iter()
+            .any(|d| d.que == format!("ítem {id}") && d.motivo.contains(motivo))
+    }
+
+    #[test]
+    fn juez_sin_evidencia_no_hace_reintento() {
+        let c = caso();
+        let texto = respuesta(
+            json!([
+                item_nivel(MODULARIDAD, 1, json!([real()])),
+                sin_evidencia_json(TOPE),
+            ]),
+            json!([]),
+        );
+        let modelo = FalsoSecuencia::nueva(vec![Ok(texto)]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert_eq!(
+            modelo.visto.borrow().len(),
+            1,
+            "sin_evidencia no pide reintento"
+        );
+        assert_eq!(r.faltantes, vec![TOPE.to_string()]);
+    }
+
+    #[test]
+    fn juez_id_omitido_hace_un_reintento_solo_con_ese_id() {
+        let c = caso();
+        let primera = respuesta(
+            json!([item_nivel(MODULARIDAD, 2, json!([real()]))]),
+            json!([]),
+        );
+        let segunda = respuesta(json!([item_nivel(TOPE, 1, json!([real()]))]), json!([]));
+        let modelo = FalsoSecuencia::nueva(vec![Ok(primera), Ok(segunda)]);
+        let r = juzgar_secuencia(&c, &modelo);
+        let visto = modelo.visto.borrow();
+        assert_eq!(visto.len(), 2, "exactamente un reintento");
+        let ids = seccion_ids(&visto[1].usuario);
+        assert!(ids.contains(TOPE), "{ids}");
+        assert!(!ids.contains(MODULARIDAD), "{ids}");
+        assert_eq!(r.niveles.get(TOPE), Some(&1));
+        assert_eq!(r.niveles.get(MODULARIDAD), Some(&2));
+        assert!(r.faltantes.is_empty(), "{:?}", r.faltantes);
+    }
+
+    #[test]
+    fn juez_evidencia_que_no_pasa_el_gate_reintenta_con_la_cita_y_su_linea() {
+        let c = caso();
+        let inventada = evidencia("src/almacen.rs", 4, "pub fn borrar(&self) {}");
+        let primera = respuesta(
+            json!([
+                item_nivel(MODULARIDAD, 2, json!([real()])),
+                item_nivel(TOPE, 3, json!([inventada])),
+            ]),
+            json!([]),
+        );
+        let segunda = respuesta(json!([item_nivel(TOPE, 3, json!([real()]))]), json!([]));
+        let modelo = FalsoSecuencia::nueva(vec![Ok(primera), Ok(segunda)]);
+        let r = juzgar_secuencia(&c, &modelo);
+        let visto = modelo.visto.borrow();
+        assert_eq!(visto.len(), 2, "exactamente un reintento");
+        let reintento = seccion_reintento(&visto[1].usuario);
+        assert!(reintento.contains("pub fn borrar(&self) {}"), "{reintento}");
+        assert!(reintento.contains("src/almacen.rs:4"), "{reintento}");
+        assert_eq!(r.niveles.get(TOPE), Some(&3));
+        assert!(r.faltantes.is_empty(), "{:?}", r.faltantes);
+    }
+
+    #[test]
+    fn juez_reintento_sin_respuesta_deja_faltante_con_su_motivo() {
+        let c = caso();
+        let primera = respuesta(
+            json!([item_nivel(MODULARIDAD, 2, json!([real()]))]),
+            json!([]),
+        );
+        let segunda = respuesta(json!([]), json!([]));
+        let modelo = FalsoSecuencia::nueva(vec![Ok(primera), Ok(segunda)]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert_eq!(r.estado, EstadoJuez::Ok);
+        assert_eq!(r.faltantes, vec![TOPE.to_string()]);
+        assert!(
+            descarte_de(&r, TOPE, "tras un reintento"),
+            "{:?}",
+            r.descartes
+        );
+    }
+
+    #[test]
+    fn juez_nunca_hay_mas_de_un_reintento() {
+        let c = caso();
+        let vacia = respuesta(json!([]), json!([]));
+        let completa = respuesta(
+            json!([
+                item_nivel(MODULARIDAD, 2, json!([real()])),
+                item_nivel(TOPE, 1, json!([real()])),
+            ]),
+            json!([]),
+        );
+        let modelo = FalsoSecuencia::nueva(vec![Ok(vacia.clone()), Ok(vacia), Ok(completa)]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert_eq!(modelo.visto.borrow().len(), 2, "el tercer envío no ocurre");
+        assert_eq!(r.faltantes, vec![MODULARIDAD.to_string(), TOPE.to_string()]);
+    }
+
+    #[test]
+    fn juez_reintento_con_error_del_modelo_deja_faltante() {
+        let c = caso();
+        let primera = respuesta(
+            json!([item_nivel(MODULARIDAD, 2, json!([real()]))]),
+            json!([]),
+        );
+        let modelo = FalsoSecuencia::nueva(vec![Ok(primera), Err("tope".into())]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert_eq!(modelo.visto.borrow().len(), 2);
+        assert_eq!(r.estado, EstadoJuez::Ok);
+        assert_eq!(
+            r.niveles.get(MODULARIDAD),
+            Some(&2),
+            "la 1ª respuesta se conserva"
+        );
+        assert_eq!(r.faltantes, vec![TOPE.to_string()]);
+        assert!(
+            descarte_de(&r, TOPE, "tras un reintento"),
+            "{:?}",
+            r.descartes
+        );
+    }
+
+    #[test]
+    fn juez_reintento_usa_el_mismo_max_tokens() {
+        let c = caso();
+        let limites = LimitesPrompt {
+            max_tokens: 8000,
+            ..LimitesPrompt::default()
+        };
+        let primera = respuesta(
+            json!([item_nivel(MODULARIDAD, 2, json!([real()]))]),
+            json!([]),
+        );
+        let segunda = respuesta(json!([item_nivel(TOPE, 1, json!([real()]))]), json!([]));
+        let modelo = FalsoSecuencia::nueva(vec![Ok(primera), Ok(segunda)]);
+        juzgar(&c.entrada(), &modelo, MODELO, &limites);
+        let visto = modelo.visto.borrow();
+        assert_eq!(visto.len(), 2);
+        assert_eq!(visto[0].max_tokens, 8000);
+        assert_eq!(visto[1].max_tokens, 8000);
+        assert_eq!(visto[1].sistema, visto[0].sistema);
+        assert_eq!(visto[1].fase, visto[0].fase);
+    }
+
+    #[test]
+    fn juez_reintento_ignora_id_no_pedido_con_aviso() {
+        let c = caso();
+        let primera = respuesta(
+            json!([item_nivel(MODULARIDAD, 2, json!([real()]))]),
+            json!([]),
+        );
+        let segunda = respuesta(
+            json!([
+                item_nivel("diseno.inventado", 2, json!([real()])),
+                item_nivel(MODULARIDAD, 3, json!([real()])),
+                item_nivel(TOPE, 1, json!([real()])),
+            ]),
+            json!([]),
+        );
+        let modelo = FalsoSecuencia::nueva(vec![Ok(primera), Ok(segunda)]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert!(!r.niveles.contains_key("diseno.inventado"));
+        assert_eq!(
+            r.niveles.get(MODULARIDAD),
+            Some(&2),
+            "el reintento no reescribe un ítem ya puntuado"
+        );
+        assert_eq!(r.niveles.get(TOPE), Some(&1));
+        assert!(
+            descarte_de(&r, "diseno.inventado", "no se pidió"),
+            "{:?}",
+            r.descartes
+        );
+        assert!(r.faltantes.is_empty(), "{:?}", r.faltantes);
+    }
+
+    #[test]
+    fn juez_reintento_sin_evidencia_no_queda_como_sin_reintento() {
+        let c = caso();
+        let inventada = evidencia("src/almacen.rs", 4, "pub fn borrar(&self) {}");
+        let primera = respuesta(
+            json!([
+                item_nivel(MODULARIDAD, 2, json!([real()])),
+                item_nivel(TOPE, 3, json!([inventada])),
+            ]),
+            json!([]),
+        );
+        let segunda = respuesta(json!([sin_evidencia_json(TOPE)]), json!([]));
+        let modelo = FalsoSecuencia::nueva(vec![Ok(primera), Ok(segunda)]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert_eq!(r.faltantes, vec![TOPE.to_string()]);
+        assert!(descarte_de(&r, TOPE, "sin_evidencia"), "{:?}", r.descartes);
+        assert!(
+            !descarte_de(&r, TOPE, "tras un reintento"),
+            "{:?}",
+            r.descartes
+        );
+    }
+
+    #[test]
+    fn juez_gate_guarda_las_citas_que_fallaron() {
+        let c = caso();
+        let inventada = evidencia("src/almacen.rs", 4, "pub fn borrar(&self) {}");
+        let l = leer(
+            &c,
+            json!([
+                item_nivel(TOPE, 3, json!([inventada])),
+                item_nivel(MODULARIDAD, 2, json!([inventada, real()])),
+            ]),
+        );
+        assert_eq!(
+            l.gate.get(TOPE),
+            Some(&vec![CitaFallida {
+                archivo: "src/almacen.rs".into(),
+                linea: 4,
+                cita: "pub fn borrar(&self) {}".into(),
+            }])
+        );
+        assert!(!l.gate.contains_key(MODULARIDAD));
     }
 
     // Topes de las sondas y puntaje.
