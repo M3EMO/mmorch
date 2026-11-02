@@ -1176,6 +1176,16 @@ fn llamada_con_plazos(
     modelo: &str,
     corrida: &str,
 ) -> (Result<Respuesta, ErrorProveedor>, tempfile::TempDir) {
+    llamada_con_plazos_de(cfg, plazos, &eleccion(proveedor, modelo), corrida)
+}
+
+/// Como `llamada_con_plazos`, con la elección completa. Sirve para pedir razonamiento.
+fn llamada_con_plazos_de(
+    cfg: &Config,
+    plazos: Plazos,
+    e: &Eleccion,
+    corrida: &str,
+) -> (Result<Respuesta, ErrorProveedor>, tempfile::TempDir) {
     let home = tempfile::tempdir().expect("home");
     let breaker = Breaker::new();
     let claves = claves_de_prueba();
@@ -1189,8 +1199,13 @@ fn llamada_con_plazos(
         reloj: &reloj,
         plazos,
     };
-    let res = llamar_con(&ctx, &eleccion(proveedor, modelo), &prompt(), corrida);
+    let res = llamar_con(&ctx, e, &prompt(), corrida);
     (res, home)
+}
+
+/// Un evento SSE de Anthropic: la línea `event:` con su nombre y el `data:` en JSON.
+fn evento_anthropic(nombre: &str, valor: Value) -> String {
+    format!("event: {nombre}\n{}", common::sse_evento(valor))
 }
 
 /// Plazos de los tests de streaming: inactividad de 120 ms y total de 3 s. Escalan los 120 s y el
@@ -1862,6 +1877,93 @@ fn proveedores_stream_que_se_calla_mas_que_la_inactividad_corta_y_cobra_peor_cas
     let precio = &cfg.precios["deepseek-chat"];
     let peor = costo_peor_caso(precio, tokens_entrada_estimados(&prompt()), 64);
     assert!((evs[0]["cost_usd"].as_f64().expect("costo") - peor).abs() < 1e-12);
+}
+
+#[test]
+fn proveedores_stream_de_anthropic_con_razonamiento_que_calla_200_no_corta_antes_del_total() {
+    // Escala los 200 s de silencio que deja el razonamiento `adaptive`: 200 ms de silencio con
+    // inactividad de 120 ms. Con razonamiento, el plazo que vale es el total de 3 s.
+    let srv = Servidor::arranca_guion(Box::new(|s| {
+        cabeceras_sse(s);
+        // Primer trozo: arranca el bloque de razonamiento y manda un delta.
+        let primero = evento_anthropic(
+            "message_start",
+            json!({"type": "message_start", "message": {"usage": {"input_tokens": 7, "output_tokens": 1}}}),
+        ) + &evento_anthropic(
+            "content_block_start",
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}}),
+        ) + &evento_anthropic(
+            "content_block_delta",
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "pensé"}}),
+        );
+        if !escribe(s, &primero) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(200));
+        // Resto del stream: cierra el razonamiento, responde el texto y termina con su uso.
+        let resto = evento_anthropic(
+            "content_block_delta",
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "firma"}}),
+        ) + &evento_anthropic(
+            "content_block_stop",
+            json!({"type": "content_block_stop", "index": 0}),
+        ) + &evento_anthropic(
+            "content_block_start",
+            json!({"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}}),
+        ) + &evento_anthropic(
+            "content_block_delta",
+            json!({"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "ok"}}),
+        ) + &evento_anthropic(
+            "content_block_stop",
+            json!({"type": "content_block_stop", "index": 1}),
+        ) + &evento_anthropic(
+            "message_delta",
+            json!({"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": null}, "usage": {"output_tokens": 3}}),
+        ) + &evento_anthropic("message_stop", json!({"type": "message_stop"}));
+        escribe(s, &resto);
+    }));
+    let cfg = config(&srv.url, &srv.url);
+    let e = eleccion_con_razonamiento(Proveedor::Anthropic, "claude-haiku-5-5");
+    let inicio = Instant::now();
+    let (res, home) = llamada_con_plazos_de(&cfg, plazos_de_prueba(), &e, "s6");
+
+    let r = res.expect("el silencio del razonamiento no corta antes del total");
+    assert!(
+        inicio.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        inicio.elapsed()
+    );
+    assert_eq!(r.texto, "ok");
+    assert_eq!(srv.peticiones(), 1);
+    assert!(eventos(home.path())[0]["extra"].get("error").is_none());
+}
+
+#[test]
+fn proveedores_stream_de_deepseek_que_calla_mas_que_la_inactividad_se_corta() {
+    // El plan pide 121 s de silencio. El test calla 300 ms, en la escala de 120 ms de inactividad.
+    // Con 121 ms, el margen es de 1 ms y el test no es estable.
+    // Usa razonamiento: DeepSeek conserva el corte de inactividad aunque razone.
+    let srv = Servidor::arranca_guion(Box::new(|s| {
+        cabeceras_sse(s);
+        escribe(s, &trozo_deepseek("a"));
+        thread::sleep(Duration::from_millis(300));
+        escribe(s, &cierre_deepseek(7, 3));
+    }));
+    let cfg = config(&srv.url, &srv.url);
+    let e = eleccion_con_razonamiento(Proveedor::Deepseek, "deepseek-chat");
+    let inicio = Instant::now();
+    let (res, home) = llamada_con_plazos_de(&cfg, plazos_de_prueba(), &e, "s7");
+
+    let err = res.expect_err("DeepSeek se corta por inactividad aunque razone");
+    assert!(matches!(err, ErrorProveedor::Timeout(_)), "llegó {err:?}");
+    assert!(
+        inicio.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        inicio.elapsed()
+    );
+    assert_eq!(srv.peticiones(), 1);
+    let evs = eventos(home.path());
+    assert_eq!(evs[0]["extra"]["error"], "timeout");
 }
 
 #[test]
