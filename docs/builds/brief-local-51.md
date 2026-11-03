@@ -47,7 +47,8 @@ Hacé un commit por hallazgo, o por grupo chico de hallazgos de la misma funció
 4. **L10, redactar antes de truncar.** Root redacta los secretos de un texto antes de cortarlo a 300 caracteres. Test: un token que cae en el corte no aparece.
 5. **L13, versión con comodín.** `==1.*` se trata como un comodín de versión, no como la versión `1.`. Test: no da un falso "no instala".
 6. **L14, error de lectura.** Un error al leer un archivo de requisitos da un error de infraestructura, no una lista vacía.
-7. **C2, solo si el orquestador te pasa la respuesta del usuario a P62.** Seguí la opción que elija el usuario, tal como la describe P62 en el plan. Sin esa respuesta, no hagas C2 y anotalo en el informe.
+7. **Acotar `correr_podman` de la descarga** (pregunta 2 del informe 52). La salida que lee la descarga conserva solo los últimos `COLA` bytes, como hace `leer_en_hilo` del contenedor del oráculo.
+8. **C2, solo si el orquestador te pasa la respuesta del usuario a P62.** Seguí la opción que elija el usuario, tal como la describe P62 en el plan. Sin esa respuesta, no hagas C2 y anotalo en el informe.
 
 ## Reglas
 

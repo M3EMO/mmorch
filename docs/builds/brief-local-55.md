@@ -31,7 +31,7 @@ El contrato del proyecto vive en `GOAL.md`. Sus invariantes mandan sobre todo lo
 
 Un `/ecc:code-review` del hito encontró 2 hallazgos críticos, 5 altos y 22 medios. Opus verificó los críticos y los altos en el código. El informe es `~/.cache/root-wt/orquestador/review-47-informe.md`. Leé las filas de tus hallazgos, con su ubicación, su evidencia y su escenario de falla.
 
-Leé en el plan, antes de empezar:
+Leé en el plan, antes de empezar, también "Desempates técnicos 28 (Opus, 2026-11-03): informes de las Tareas 48, 50, 52 y 53". Y además:
 
 - "Code review del hito (Tarea 47, adelantado, 2026-11-03)", con su tabla de verificación.
 - "Desempates técnicos 27 (Opus, 2026-11-03)".
@@ -44,7 +44,10 @@ Hacé un commit por hallazgo, o por grupo chico de hallazgos de la misma funció
 1. **C1, git del host sobre un repo limpio.** Al terminar cada rol, Root copia el árbol de trabajo del builder, sin `.git` ni enlaces, a un repo nuevo del host. Hace el commit ahí. El host nunca corre git sobre el `.git` que escribió el builder.
 2. **C1, git endurecido.** Todo git sobre un repo que vino del builder corre con `-c core.fsmonitor=false -c core.hooksPath=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null` y sin filtros. Vale para `comando_git` y `commit_de`. Test: un repo con `core.fsmonitor` que escribe un archivo marca no lo escribe al pasar por Root.
 3. **M2, fallos del runner.** Los códigos 126, 127 y 137 de podman, un token vencido y un rol sin `result` exitoso dan sin veredicto, sin evaluar y sin fila roja.
-4. **M1, endurecer el contenedor del builder.** El `podman run` del builder suma `--cap-drop=all`, `--security-opt=no-new-privileges`, `--pids-limit` y `--memory`. Medí con la imagen real que `claude` todavía corre. Si una opción rompe `claude`, anotala y dejala afuera.
+4. **Subagentes que no mueren** (hallazgos 2 y 3). `env_del_builder` fija `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` igual al plazo del rol en milisegundos, no 0. Test: el entorno del builder trae ese valor.
+5. **Costo de un rol cortado** (hallazgo 4). Si el runner corta un rol por tiempo, suma el `usage` de los mensajes del transcript `stream-json` y registra ese costo con `extra.costo_estimado = true`. Test: un transcript cortado de fixture deja un evento con costo mayor que 0.
+6. **`registrar_sesion` sin duplicar** (pregunta 3 del informe 53). Registrar dos veces la misma sesión no duplica el costo. La clave es el `session_id`.
+7. **M1, endurecer el contenedor del builder.** El `podman run` del builder suma `--cap-drop=all`, `--security-opt=no-new-privileges`, `--pids-limit` y `--memory`. Medí con la imagen real que `claude` todavía corre. Si una opción rompe `claude`, anotala y dejala afuera.
 
 ## Reglas
 

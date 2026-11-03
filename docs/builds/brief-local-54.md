@@ -10,7 +10,7 @@ El contrato del proyecto vive en `GOAL.md`. Sus invariantes mandan sobre todo lo
 
 ## Base, rama y roles
 
-- Arrancá desde la punta de `claude/root-e7813e` **después de la mezcla de las Tareas 48 y 49**. El orquestador te dice el commit. No arranques antes: la 48 y la 49 cambian estos mismos archivos.
+- Arrancá desde la punta de `claude/root-e7813e` **después de la mezcla de las Tareas 48 y 49, 52 y 53**. El orquestador te dice el commit. No arranques antes: esas tareas cambian estos mismos archivos.
 - Trabajá en tu propio worktree, en una rama nueva: `laptop/tarea-54`. La mezcla espera la orden del usuario.
 - Sonnet organiza y revisa. Haiku construye cada parte. Una corrección empieza con un test en rojo.
 - El builder no decide producto. Una duda de producto va a "Preguntas para el planner" del informe.
@@ -49,6 +49,13 @@ Hacé un commit por hallazgo, o por grupo chico de hallazgos de la misma funció
 6. **M8, cita mínima.** El gate de evidencia exige al menos 8 caracteres alfanuméricos en la cita. Test: una cita `}` no pasa.
 7. **M18, nombre de la tarea.** `Tarea.nombre` del TOML debe coincidir con su carpeta. Si no coincide, es un error de tarea con código 2.
 8. **L7, prompt del juez.** El prompt dice que el juez no juzga estilo, salvo lo que pide el ancla de un ítem. No cambies las rúbricas.
+9. **Tope en cada reemplazo** (pregunta 8 del informe 48). La calibración revisa el tope antes de cada reemplazo de un caso, no solo antes del caso.
+10. **Reservas contadas una vez** (pregunta 15 del informe 48). El coordinador de casos en paralelo no suma su propio peor caso si la reserva de ese caso ya está en `eventos.jsonl`. Test: con 4 casos en vuelo, el gasto contado es la suma de 4 reservas, no de 8.
+11. **Lock de la carpeta temporal** (pregunta 17 del informe 48). Cada evaluación toma un lock sobre su carpeta `evaluar-*`, y `limpiar_temporales` salta las carpetas con lock. Test: una carpeta con lock de más de 24 horas no se borra.
+12. **Memo por tarea** (pregunta 18 del informe 48). `MemoSondas` filtra por tarea.
+13. **Archivo de casos en el error del tope** (pregunta 20 del informe 48). El mensaje nombra el archivo `.casos.jsonl`.
+
+Leé también "Desempates técnicos 28 (Opus, 2026-11-03): informes de las Tareas 48, 50, 52 y 53". El turno global de contenedor ya vive en `correr_podman` de `src/oracle/contenedor.rs`: no lo muevas.
 
 ## Reglas
 

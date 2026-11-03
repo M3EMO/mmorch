@@ -15,6 +15,7 @@ No escribas código del producto.
 organiza = """
 Construí el producto siguiendo docs/plan.md.
 Organizá el trabajo: cada tarea la construye un subagente, y vos revisás cada entrega.
+Lanzá cada subagente en primer plano y esperá su resultado antes de seguir. No termines tu turno con subagentes corriendo.
 Corré los tests de tests/ hasta que todos pasen.
 Commiteá cada tarea terminada con git.
 """

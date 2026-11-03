@@ -3414,3 +3414,97 @@ Cada tarea corre en su propio worktree. Ninguna toca los archivos de otra que co
   - c) Como hoy. Riesgo: un repo puede sacar tu token.
 
   Mi recomendación es a): cambia la decisión 30 solo cuando hay una clave tuya en juego. Hoy ninguna tarea usa un registro privado, así que no frena nada.
+
+## Vuelta del 2026-11-03 (noche): Tareas 48 a 53 terminadas
+
+**Estado de las ramas.**
+- La Tarea 50 está mezclada en 517580e. El usuario escribió: "Sí, mezclar la 50".
+- Las Tareas 52 (`laptop/tarea-52`) y 53 (`laptop/tarea-53`) están terminadas. Juntas sobre 517580e dan 2109 verdes, 0 fallas y 3 ignorados con podman. Su mezcla espera la orden del usuario.
+- Las Tareas 48 y 49 (`laptop/tarea-48`) están terminadas. Su informe es `docs/builds/2026-11-03-build-local-48.md`, en esa rama.
+- La 48 choca con la 52 en `src/oracle/contenedor.rs`. El orquestador lo resolvió: el turno global queda en `correr_podman`, y `correr_comando` no lo toma, porque `terminar` lo llama dentro de `ejecutar` y el `Mutex` no es reentrante.
+- La suite con podman de 53, 52 y 48 juntas sobre 517580e corre ahora.
+
+**Hallazgos del orquestador** (`~/.cache/root-wt/orquestador/hallazgos-para-planner.md`):
+1. `proveedores_stream_con_un_trozo_cada_60_s_no_corta_por_inactividad` falló en un hook con carga 22: manda un trozo cada 60 ms con 120 ms de inactividad.
+2. y 3. Con `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`, los subagentes en segundo plano mueren cuando termina el turno de `claude -p`. Les pasó a los builders 48 y 53. La Tarea 50 fija ese mismo valor en `env_del_builder`.
+4. Un builder cortado por el tope de tiempo no deja el JSON con el costo.
+5. Las Tareas 48, 50 y 52 llegaron al tope de 90 minutos del script del orquestador. El orquestador lo sube a 4 horas.
+6. Con H4 de la 52, un paso fallido de `podman build` da `Pendiente`, y Entrega queda en 1,0 si no hay otros hallazgos.
+7. El choque de `contenedor.rs`, resuelto como dice arriba.
+8. El builder 48 costó 13,81 USD en su reanudación: Sonnet 6,93 y Haiku 6,88. Las Tareas 48 y 49 pasan de 19,9 USD en total.
+9. El turno de contenedor es un `Mutex` del proceso, así que no excluye a `src/corre/ejecutor.rs` ni a otro proceso.
+
+## Desempates técnicos 28 (Opus, 2026-11-03): informes de las Tareas 48, 50, 52 y 53
+
+Cada respuesta dice si la decisión del organizador queda, cambia o pasa a una tarea.
+
+**Informe de las Tareas 48 y 49.**
+1. **9 o 10 defectos.** Queda: son 9. El plan contó mal en la Tarea 48.
+2. **`repetido_por_entorno`.** Queda en `false`. La calibración real ahora corre una tarea por vez, así que la carga de otra calibración ya no existe.
+3. **Alfabeto de secretos.** Queda el alfabeto `A-Z2-7`. Seguridad se recalibra, como todas las dimensiones (desempates técnicos 25).
+4. **Límites de Estructura.** Queda `LimitesEstructura::default()`: ninguna tarea fija límites propios.
+5. **`AssertBorrado` sin mutante muerto.** Queda como no aplicable: volver al azar repetiría el error.
+6. **Tests que cubren un mutante.** Queda.
+7. **Inyección inválida.** Queda.
+8. **Tope en cada reemplazo.** Cambia, en la Tarea 54: el tope se revisa antes de cada reemplazo. Un reemplazo puede gastar otra llamada del juez, y el tope debe frenar antes de gastar.
+9. **Eficiencia sin `[eficiencia]`.** Queda: si la tarea perdió `[eficiencia]`, la fila real anterior ya no describe la tarea.
+10. **Línea de `DockerfileRoot`.** Queda la línea del `FROM`, que es la que cita la sonda.
+11. **Línea de `ArchivoDios`.** Queda.
+12. **Muestra de mutación.** Queda: la evaluación y la calibración usan la misma muestra.
+13. **Reuso del listado.** Queda.
+14. **Defectos de Diseño y sondas deterministas.** Queda la regla del desempate 1 de "Desempates técnicos 25": el juez lee esas sondas.
+15. **Reservas contadas dos veces.** Cambia, en la Tarea 54: el coordinador cuenta cada reserva una sola vez. Con el juez de config en Sonnet, contar dos veces frenaría la calibración mucho antes del tope.
+16. **Turno y `src/corre/ejecutor.rs`.** Queda sin código. Regla de la laptop: una calibración real y un `r00t corre` real no corren a la vez. El turno es un `Mutex` del proceso y no puede excluir a otro proceso.
+17. **Limpieza de 24 horas.** Cambia, en la Tarea 54: cada evaluación toma un lock sobre su carpeta temporal, y `limpiar_temporales` salta las carpetas con lock. Una calibración ya duró 15 horas.
+18. **Memo de una sola tarea.** Cambia, en la Tarea 54: `MemoSondas` filtra por tarea. Es una línea y evita un error silencioso.
+19. **Plazo de 300 s del test del turno.** Queda.
+20. **Archivo de casos.** Cambia, en la Tarea 54: el error del tope nombra el archivo de casos. Sin política de retención: los archivos son chicos.
+
+**Informe de la Tarea 50.**
+1. **Plugin con `ro,z`.** Queda: la carpeta del banco se borra con memora y brasa (decisión 61).
+2. **Vigencia de 4 horas.** Queda: es el peor caso de dos roles.
+3. **`verificar_antes` en el trait.** Queda.
+4. **Borrado de la credencial copiada.** Queda.
+5. **Plugin de un rol que no está en `roles`.** Queda.
+
+**Informe de la Tarea 52.**
+1. **H4 deja Entrega en 1,0 (y hallazgo 6).** Cambia, en la Tarea 56. Una construcción `Pendiente`, o una imagen base que no se descargó, deja su ítem de Entrega en `faltantes` con su motivo. Entrega toma su valor de los ítems medidos. Si no midió ninguno, queda sin veredicto. Razón: un 1,0 sobre algo que no se midió es un verde falso.
+2. **Acotar `correr_podman` de la descarga.** Pasa a la Tarea 51, que es dueña de `src/oracle/descarga*`.
+3. **Python sin caché.** Queda. Ninguna tarea del hito 1 es Python: memora, brasa y Graft son Rust.
+4. **Dos `RUN` iguales en etapas distintas.** Queda: sin veredicto es lo seguro.
+5. **Un commit para M7, M1 y L2.** Queda.
+
+**Informe de la Tarea 53.**
+1. **`TopeMes` estricto y los demás no.** Cambia, en la Tarea 56: `Ruteo`, `ModeloApi`, `Modelos` y `ConfigProveedores` también llevan `deny_unknown_fields`. Un typo ahí cambia el modelo de un rol sin aviso.
+2. **Test cambiado.** Queda.
+3. **`registrar_sesion` del builder.** Pasa a la Tarea 55, que es dueña de `src/corre/`.
+4. **Log corrupto en `observa claude`.** Queda: falla cerrado.
+5. **Más validación de `[balance]`.** Cambia, en la Tarea 56: `tope_usd` finito y no negativo, `prefiere_api_sobre` entre 0 y 1, y `bloque_horas` mayor que 0.
+
+**Hallazgos del orquestador.**
+1. **Test de tiempo frágil.** Tarea 56: el test usa un reloj inyectado, sin plazos reales.
+2. y 3. **Subagentes cortados.** Tarea 55: `env_del_builder` fija `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` igual al plazo del rol, no 0. Razón: el runner debe medir lo que el organizador construye, no cortar su trabajo. La config `docs/builds/config-ecc-haiku.toml` además pide subagentes en primer plano.
+4. **Costo de un builder cortado.** Tarea 55: si el runner corta un rol por tiempo, suma el `usage` de los mensajes del transcript `stream-json` y registra ese costo con `extra.costo_estimado = true`.
+5. **Builders lentos.** Sin código de Root: es una regla del orquestador, que ya subió su tope a 4 horas.
+6. Ver la pregunta 1 de la Tarea 52.
+7. **Choque de `contenedor.rs`.** Queda la resolución del orquestador.
+8. **Costo de los builders.** Queda anotado como dato: una sola reanudación no alcanza para cambiar la decisión del usuario sobre los roles.
+9. Ver la pregunta 16 de la Tarea 48.
+
+### Tarea 56: Entrega sin verde falso, config estricta y test de stream con reloj
+- **Action**: pregunta 1 de la Tarea 52, preguntas 1 y 5 de la Tarea 53, y hallazgo 1.
+- **Archivos**: `src/oracle/entrega.rs`, `src/config.rs`, `tests/proveedores.rs` y, si hace falta inyectar el reloj, el stream de `src/proveedores/`.
+- **Arranca**: después de la mezcla de las Tareas 52 y 53. Corre en paralelo con la 51 y la 54.
+- **Brief**: `docs/builds/brief-local-56.md`.
+
+## Orden final del hito 1 (2026-11-03, noche)
+
+1. **Mezclas de 53, 52 y 48.** Una por vez, cuando termine su suite conjunta y con la orden del usuario.
+2. **En paralelo, después de esas mezclas:** la Tarea 51 (descarga, sin la parte C2), la 54 (núcleo del Oracle y calibración) y la 56 (Entrega, config y stream). No comparten archivos.
+3. **Tarea 55** (runner y git seguro). Arranca después de la mezcla de la 54, porque toca `comando_git` y `commit_de` de `src/oracle/mod.rs`. Puede correr en paralelo con la 51 y la 56 si todavía corren.
+4. **Calibración real otra vez.** Espera a la 54 y a la 56, porque las dos cambian lo que mide: la 54 cambia la calibración y el juez, y la 56 cambia Entrega.
+5. **Corrida real de memora (Tarea 16).** Espera a la 55. No corre a la vez que la calibración real (pregunta 16 de la Tarea 48).
+6. Comparación de `global`, validez automática y cierre (Tarea 47).
+7. Borrado de memora y brasa (decisión 61).
+
+P62 sigue abierta, y la parte C2 de la Tarea 51 la espera. No hay preguntas nuevas para el usuario.
