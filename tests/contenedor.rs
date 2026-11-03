@@ -152,3 +152,19 @@ fn contenedor_codigo_de_salida_del_comando_llega_intacto() {
     let r = correr(&ejecucion(repo.path(), salida.path(), "exit 7"));
     assert_eq!(r.codigo, 7);
 }
+
+#[test]
+fn contenedor_salida_enorme_llega_como_cola_de_4000_caracteres() {
+    root::saltar_sin_podman!();
+    let _guarda = preparar();
+    let repo = tempfile::tempdir().expect("temp dir");
+    let salida = tempfile::tempdir().expect("temp dir");
+    let r = correr(&ejecucion(
+        repo.path(),
+        salida.path(),
+        "head -c 20000000 /dev/zero | tr '\\0' a; printf FIN",
+    ));
+    assert_eq!(r.codigo, 0);
+    assert_eq!(r.stdout.chars().count(), 4000);
+    assert!(r.stdout.ends_with("FIN"));
+}
