@@ -58,7 +58,7 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t oraculo pendientes --tarea <t> --repo <dir> [--importar <junit>... \| --colab]` | Arma el paquete de tests pendientes por entorno para Colab. Con `--importar`, guarda los junit de vuelta, uno por repetición (`pendientes-N.xml`). Con `--colab`, corre el paquete en Colab y lo importa. Solo una corrida por tarea a la vez: la segunda sale con `3` y nombra a la primera (pid y hora). | `{dir, tests}`, o `{importados, ignorados}` | construido (Tarea 7f). `--colab`: Tarea 7j |
 | `r00t oraculo pendientes --liberar` | Libera el runtime de Colab anotado en `$ROOT_HOME/colab/activo.json`, si hay uno, y sale. | sin salida JSON | construido (Tarea 7j) |
 | `r00t oraculo pendientes --vigilar` | Red de seguridad: lee `$ROOT_HOME/colab/activo.json`. Libera el runtime si pasó su tope o si su junit cumple lo pedido. Un runtime vigente no se toca. Sin `--tarea` ni `--repo`. | `{vigilancia, causa}`, con `vigilancia` `sin_runtime`, `vigente` o `liberado` | construido (Tarea 7l) |
-| `r00t oraculo calibrar --tarea <t> --dimension <d> [--n 20] [--semilla 42] [--repo <dir>] [--tope-usd <n>]` | Calibra una dimensión con defectos inyectados: mitad con defecto, mitad limpia. Mide la sensibilidad, la especificidad y la exactitud balanceada, por dimensión y por ítem, contra una línea base. Agrega una fila a `$ROOT_HOME/calibracion.json` e imprime la fila. Sin `--repo`, usa `[calibracion] repo` de `tarea.toml`; sin ninguno, sale con `2`. Con `--tope-usd <n>`, antes de la línea base y de cada caso compara el gasto de API desde el inicio, más el peor caso del caso, con el tope. Si no entra, registra un `Gate` `calibracion-tope`, guarda la fila de los casos hechos como `incompleta` y sale con `3`. El tope debe ser finito y mayor que 0; si no, sale con `2`. | `Fila` | construido (Tarea 12 y decisión 48). |
+| `r00t oraculo calibrar --tarea <t> --dimension <d> [--n 20] [--semilla 42] [--repo <dir>] [--tope-usd <n>]` | Calibra una dimensión con defectos inyectados: mitad con defecto, mitad limpia. Mide la sensibilidad, la especificidad y la exactitud balanceada, por dimensión y por ítem, contra una línea base. Agrega una fila a `$ROOT_HOME/calibracion.json` e imprime la fila. Sin `--repo`, usa `[calibracion] repo` de `tarea.toml`; sin ninguno, sale con `2`. Con `--tope-usd <n>`, antes de la línea base y de cada caso compara el gasto de API desde el inicio, más el peor caso del caso, con el tope. Si no entra, registra un `Gate` `calibracion-tope`, guarda la fila de los casos hechos como `incompleta` y sale con `3`. El tope debe ser finito y mayor que 0; si no, sale con `2`. Eficiencia sin `[eficiencia]` en `tarea.toml` no aplica: sale con `0`, no corre la base ni los casos y agrega una fila con `no_aplica`. | `Fila` | construido (Tarea 12 y decisión 48). |
 | `r00t oraculo validar --casos <dir> [--json]` | Mide si el juicio de Root coincide con los casos de `<dir>` (orden conocido, defectos reales y el formulario a ciegas). Escribe `<dir>/validez.json`. Una métrica sin datos queda sin medir, nunca 0 ni 1. Sale con `0` aunque una métrica no cumpla. | `Validez` | construido (Tarea 12b). Formatos: sección ## Validez. |
 | `r00t oraculo validar --preparar-ciego --fuentes <manifiesto.toml> --casos <dir> [--semilla N]` | Arma un paquete anónimo por fuente en `<dir>/ciego/`, con su formulario, y la clave `ciego/clave.toml`. Las listas de rastros van a `$ROOT_HOME/validez/`, nunca a `ciego/`. Los conteos van a `$ROOT_HOME/validez/rastros.json`, no a la salida. | ids de los paquetes | construido (Tarea 12b). |
 | `r00t oraculo informe --tarea <t> --repo <dir> [--md]` | Arma el informe del PM sobre el veredicto: decisión, regla que la disparó, requisitos, bloqueantes, riesgos, próximos pasos y confianza. Sin `--md`, imprime JSON; con `--md`, markdown legible. | `Informe` | construido (Tarea 13b). |
@@ -644,6 +644,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "type": "integer",
           "format": "uint32",
           "minimum": 0
+        },
+        "no_aplica": {
+          "description": "Motivo por el que la dimensión no se midió: la tarea no la aplica. Una fila así no tiene casos ni\nmétricas, y no calibra la dimensión. `None` en una medición real.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "no_aplicable": {
           "description": "Casos que no se pudieron aplicar al repo, por ejemplo sin Dockerfile. No entran a las métricas.",

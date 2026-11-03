@@ -63,6 +63,10 @@ pub struct Fila {
     /// fila incompleta no calibra la dimensión, aunque su exactitud llegue a `UMBRAL`.
     #[serde(default)]
     pub incompleta: bool,
+    /// Motivo por el que la dimensión no se midió: la tarea no la aplica. Una fila así no tiene casos ni
+    /// métricas, y no calibra la dimensión. `None` en una medición real.
+    #[serde(default)]
+    pub no_aplica: Option<String>,
 }
 
 /// Contenido de `calibracion.json`. Sin archivo, no hay filas: nada está calibrado.
@@ -424,6 +428,7 @@ fn fila_de(
         exactitud_balanceada: exactitud_de(sensibilidad, especificidad),
         items: items_medidos,
         incompleta,
+        no_aplica: None,
     }
 }
 
@@ -585,6 +590,13 @@ pub fn calibrar_tarea_con(
     let dim = Dimension::desde_clave(dimension)
         .ok_or_else(|| ErrorOraculo::Uso(format!("dimensión desconocida: {dimension}")))?;
     let tarea = super::tarea::cargar_en(home, nombre)?;
+    // Eficiencia sin `[eficiencia]`: la tarea no la aplica. Ni la base ni los casos corren, y la fila lleva
+    // solo el motivo. Es el mismo criterio que la sonda usa para no medir.
+    if dim == Dimension::Eficiencia && tarea.eficiencia.is_none() {
+        let fila = fila_no_aplica(&tarea, dim, semilla);
+        agregar(home, &fila)?;
+        return Ok(Calibrada { fila, casos: None });
+    }
     let repo = repo_de(&tarea, repo_cli)?;
     // La base y cada caso corren las mismas partes: solo la dimensión calibrada se mide.
     let rubricas = super::rubrica::cargar_embebidas()
@@ -658,6 +670,29 @@ pub fn calibrar_tarea_con(
         .ok_or_else(|| ErrorOraculo::Infra("la calibración no dejó ninguna fila".into()))?;
     agregar(home, &fila)?;
     Ok(Calibrada { fila, casos })
+}
+
+/// Motivo de la fila de Eficiencia en una tarea sin `[eficiencia]`.
+const MOTIVO_NO_APLICA_EFICIENCIA: &str = "no aplica: la tarea no define [eficiencia]";
+
+/// Fila de una dimensión que la tarea no aplica: sin casos ni métricas, con el motivo en `no_aplica`.
+fn fila_no_aplica(tarea: &Tarea, dimension: Dimension, semilla: u64) -> Fila {
+    Fila {
+        tarea: tarea.nombre.clone(),
+        dimension,
+        n: 0,
+        defectos: 0,
+        limpios: 0,
+        no_aplicable: 0,
+        semilla,
+        ts: ahora(),
+        sensibilidad: None,
+        especificidad: None,
+        exactitud_balanceada: None,
+        items: BTreeMap::new(),
+        incompleta: false,
+        no_aplica: Some(MOTIVO_NO_APLICA_EFICIENCIA.into()),
+    }
 }
 
 /// `Gate` de una calibración detenida por su tope: tarea, dimensión, tope, gasto, peor caso y casos hechos.
@@ -971,6 +1006,7 @@ mod tests {
             exactitud_balanceada: exactitud,
             items: BTreeMap::new(),
             incompleta: false,
+            no_aplica: None,
         }
     }
 

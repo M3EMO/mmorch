@@ -9,8 +9,8 @@ use std::cell::RefCell;
 use root::config::Config;
 use root::observe;
 use root::oracle::calibra::{
-    ARCHIVO, Calibraciones, CasoGuardado, JuecesCaso, Presupuesto, calibrar_tarea,
-    calibrar_tarea_con, peor_caso_con_jueces,
+    ARCHIVO, Calibraciones, CasoGuardado, Fila, JuecesCaso, Presupuesto, agregar, calibrar_tarea,
+    calibrar_tarea_con, global_de, peor_caso_con_jueces,
 };
 use root::oracle::tarea::Tarea;
 use root::oracle::{ErrorOraculo, OpcionesOraculo, Partes};
@@ -813,4 +813,290 @@ fn calibra_casos_dos_calibraciones_no_se_pisan() {
     for ruta in &rutas {
         assert_eq!(renglones(ruta).len(), 4, "cada archivo conserva sus casos");
     }
+}
+
+/// Motivo de la fila de una dimensión que la tarea no aplica.
+const MOTIVO_NO_APLICA: &str = "no aplica: la tarea no define [eficiencia]";
+
+/// Tarea con `[eficiencia]`: su comando nunca corre en estos tests, solo define que la dimensión aplica.
+const EFICIENCIA: &str = "\n[eficiencia]\ncmd = \"bench-eficiencia\"\npiso = 5000.0\n";
+
+/// Evaluador que cuenta sus llamadas y devuelve un veredicto sin hallazgos.
+fn evaluador_contador(
+    llamadas: &RefCell<u32>,
+) -> impl Fn(&Tarea, &Path, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> + '_ {
+    move |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
+        *llamadas.borrow_mut() += 1;
+        Ok(veredicto_plano())
+    }
+}
+
+#[test]
+fn eficiencia_sin_bloque_no_aplica_y_no_llama_al_evaluador() {
+    let home = home_con_tarea("");
+    let llamadas = RefCell::new(0u32);
+    let evaluador = evaluador_contador(&llamadas);
+    let calibrada = calibrar_tarea_con(
+        home.path(),
+        "calibra-fixture",
+        "eficiencia",
+        4,
+        42,
+        Some(Path::new(FIXTURE)),
+        None,
+        &evaluador,
+    )
+    .expect("una dimensión que no aplica no es error");
+    assert_eq!(*llamadas.borrow(), 0, "no corre la base ni los casos");
+    let fila = &calibrada.fila;
+    assert_eq!(fila.no_aplica.as_deref(), Some(MOTIVO_NO_APLICA));
+    assert_eq!((fila.n, fila.defectos, fila.limpios), (0, 0, 0));
+    assert_eq!(fila.sensibilidad, None);
+    assert_eq!(fila.especificidad, None);
+    assert_eq!(fila.exactitud_balanceada, None);
+    assert!(fila.items.is_empty());
+    assert!(!fila.incompleta);
+    assert!(calibrada.casos.is_none(), "sin casos no hay .casos.jsonl");
+    assert!(
+        !home.path().join("calibracion").exists(),
+        "no crea la carpeta de casos"
+    );
+}
+
+#[test]
+fn eficiencia_no_aplicable_queda_en_calibracion_json() {
+    let home = home_con_tarea("");
+    let llamadas = RefCell::new(0u32);
+    let evaluador = evaluador_contador(&llamadas);
+    calibrar_tarea_con(
+        home.path(),
+        "calibra-fixture",
+        "eficiencia",
+        4,
+        42,
+        Some(Path::new(FIXTURE)),
+        None,
+        &evaluador,
+    )
+    .expect("calibra");
+    let leido = Calibraciones::cargar(home.path()).expect("carga calibracion.json");
+    assert_eq!(leido.filas.len(), 1, "agrega una fila");
+    assert_eq!(leido.filas[0].no_aplica.as_deref(), Some(MOTIVO_NO_APLICA));
+}
+
+#[test]
+fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
+    let home = home_con_tarea("");
+    let llamadas = RefCell::new(0u32);
+    let evaluador = evaluador_contador(&llamadas);
+    calibrar_tarea_con(
+        home.path(),
+        "calibra-fixture",
+        "eficiencia",
+        4,
+        42,
+        Some(Path::new(FIXTURE)),
+        None,
+        &evaluador,
+    )
+    .expect("calibra");
+    // Seguridad calibrada en la misma tarea: `global` la cuenta y Eficiencia no.
+    let seguridad = Fila {
+        tarea: "calibra-fixture".into(),
+        dimension: Dimension::Seguridad,
+        n: 20,
+        defectos: 10,
+        limpios: 10,
+        no_aplicable: 0,
+        semilla: 42,
+        ts: 1.0,
+        sensibilidad: Some(1.0),
+        especificidad: Some(1.0),
+        exactitud_balanceada: Some(0.95),
+        items: Default::default(),
+        incompleta: false,
+        no_aplica: None,
+    };
+    agregar(home.path(), &seguridad).expect("agrega seguridad");
+    let cal = Calibraciones::cargar(home.path()).expect("carga");
+    let mut puntajes = vec![
+        Puntaje {
+            dimension: Dimension::Eficiencia,
+            valor: 0.5,
+            calibrada: true,
+            exactitud_balanceada: None,
+            items: vec![],
+            sin_veredicto: None,
+            faltantes: vec![],
+        },
+        Puntaje {
+            dimension: Dimension::Seguridad,
+            valor: 0.8,
+            calibrada: false,
+            exactitud_balanceada: None,
+            items: vec![],
+            sin_veredicto: None,
+            faltantes: vec![],
+        },
+    ];
+    cal.aplicar("calibra-fixture", &mut puntajes);
+    assert!(!puntajes[0].calibrada, "eficiencia no aplicable no calibra");
+    assert!(puntajes[1].calibrada, "seguridad sí calibra");
+    assert_eq!(
+        global_de(&puntajes),
+        Some(0.8),
+        "global solo cuenta seguridad"
+    );
+    puntajes.remove(1);
+    assert_eq!(global_de(&puntajes), None, "sin calibradas no hay global");
+}
+
+#[test]
+fn eficiencia_no_aplicable_cli_sale_con_0_e_imprime_el_motivo() {
+    let home = home_con_tarea("");
+    let salida = r00t(
+        home.path(),
+        &[
+            "oraculo",
+            "calibrar",
+            "--tarea",
+            "calibra-fixture",
+            "--dimension",
+            "eficiencia",
+            "--repo",
+            FIXTURE,
+        ],
+    );
+    assert_eq!(
+        codigo(&salida),
+        0,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let texto = String::from_utf8_lossy(&salida.stdout);
+    assert!(
+        texto.contains("calibra-fixture/eficiencia: no aplica: la tarea no define [eficiencia]"),
+        "{texto}"
+    );
+}
+
+#[test]
+fn eficiencia_no_aplicable_cli_json_imprime_la_fila_con_no_aplica() {
+    let home = home_con_tarea("");
+    let salida = r00t(
+        home.path(),
+        &[
+            "--json",
+            "oraculo",
+            "calibrar",
+            "--tarea",
+            "calibra-fixture",
+            "--dimension",
+            "eficiencia",
+            "--repo",
+            FIXTURE,
+        ],
+    );
+    assert_eq!(
+        codigo(&salida),
+        0,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let fila: serde_json::Value =
+        serde_json::from_slice(&salida.stdout).expect("la salida es la fila en JSON");
+    assert_eq!(fila["no_aplica"], json!(MOTIVO_NO_APLICA));
+}
+
+#[test]
+fn eficiencia_con_bloque_mantiene_la_medicion_previa() {
+    // Con `[eficiencia]` la dimensión aplica: la base corre. El evaluador de prueba no da veredicto de
+    // Eficiencia, así que la calibración falla como antes, sin fila.
+    let home = home_con_tarea(EFICIENCIA);
+    let llamadas = RefCell::new(0u32);
+    let evaluador = evaluador_contador(&llamadas);
+    let error = calibrar_tarea_con(
+        home.path(),
+        "calibra-fixture",
+        "eficiencia",
+        4,
+        42,
+        Some(Path::new(FIXTURE)),
+        None,
+        &evaluador,
+    )
+    .expect_err("sin veredicto de la base no hay fila");
+    assert!(*llamadas.borrow() >= 1, "la base sí corre");
+    let ErrorOraculo::Infra(mensaje) = &error else {
+        panic!("error de infraestructura esperado: {error:?}");
+    };
+    assert!(
+        mensaje.contains("la línea base no tiene veredicto de eficiencia"),
+        "{mensaje}"
+    );
+    assert!(!home.path().join(ARCHIVO).exists(), "no escribe fila");
+}
+
+#[test]
+fn fila_vieja_sin_no_aplica_se_lee() {
+    let fila = Fila {
+        tarea: "calibra-fixture".into(),
+        dimension: Dimension::Seguridad,
+        n: 20,
+        defectos: 10,
+        limpios: 10,
+        no_aplicable: 0,
+        semilla: 42,
+        ts: 1.0,
+        sensibilidad: Some(1.0),
+        especificidad: Some(1.0),
+        exactitud_balanceada: Some(0.95),
+        items: Default::default(),
+        incompleta: false,
+        no_aplica: None,
+    };
+    let mut vieja = serde_json::to_value(&fila).expect("serializa");
+    vieja.as_object_mut().expect("objeto").remove("no_aplica");
+    let leida: Fila = serde_json::from_value(vieja).expect("un JSON viejo sin no_aplica parsea");
+    assert_eq!(leida.no_aplica, None);
+    assert_eq!(leida, fila);
+}
+
+#[test]
+fn eficiencia_no_aplicable_no_borra_las_filas_anteriores() {
+    // Una fila `no_aplica` nueva se agrega al final: las filas anteriores quedan como estaban.
+    let home = home_con_tarea("");
+    let antes = Fila {
+        tarea: "calibra-fixture".into(),
+        dimension: Dimension::Eficiencia,
+        n: 20,
+        defectos: 10,
+        limpios: 10,
+        no_aplicable: 0,
+        semilla: 1,
+        ts: 1.0,
+        sensibilidad: Some(1.0),
+        especificidad: Some(1.0),
+        exactitud_balanceada: Some(0.95),
+        items: Default::default(),
+        incompleta: false,
+        no_aplica: None,
+    };
+    agregar(home.path(), &antes).expect("agrega");
+    let llamadas = RefCell::new(0u32);
+    let evaluador = evaluador_contador(&llamadas);
+    calibrar_tarea_con(
+        home.path(),
+        "calibra-fixture",
+        "eficiencia",
+        4,
+        42,
+        Some(Path::new(FIXTURE)),
+        None,
+        &evaluador,
+    )
+    .expect("calibra");
+    let leido = Calibraciones::cargar(home.path()).expect("carga");
+    assert_eq!(leido.filas.len(), 2, "la fila anterior sigue");
+    assert_eq!(leido.filas[0], antes);
 }

@@ -176,6 +176,8 @@ fn oraculo_calibrar(
     let fila = calibrada.fila;
     if json {
         println!("{}", serde_json::to_string_pretty(&fila)?);
+    } else if let Some(motivo) = &fila.no_aplica {
+        println!("{}/{}: {motivo}", fila.tarea, fila.dimension.clave());
     } else {
         println!(
             "{}/{}: sensibilidad {}, especificidad {}, exactitud {}, casos {} (defectos {}, limpios {}, no aplicables {})",

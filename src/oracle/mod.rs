@@ -4677,6 +4677,7 @@ mod tests {
             exactitud_balanceada: Some(0.95),
             items: BTreeMap::new(),
             incompleta: false,
+            no_aplica: None,
         })
         .collect();
         let calibracion = Calibraciones {
