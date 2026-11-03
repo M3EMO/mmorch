@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, json};
 
 use super::juez::{LimitesPrompt, MAX_ENTRADA_JUEZ_BYTES};
+use super::mutacion::MutanteMuerto;
 use super::tarea::Tarea;
 use super::{ErrorOraculo, OpcionesOraculo, Partes, partes_de};
 use crate::borrado;
@@ -167,9 +168,19 @@ pub fn calibrar_con(
     repo_bueno: &Path,
     evaluador: &dyn Fn(&Path) -> Result<Veredicto, ErrorOraculo>,
 ) -> Result<Fila, ErrorOraculo> {
-    calibrar_medida(tarea, dimension, n, semilla, repo_bueno, evaluador, None)?
-        .fila
-        .ok_or_else(|| ErrorOraculo::Infra("la calibración no dejó ninguna fila".into()))
+    // Sin home no hay corrida de mutación grabada: no hay muertos que dirigir `AssertBorrado`.
+    calibrar_medida(
+        tarea,
+        dimension,
+        n,
+        semilla,
+        repo_bueno,
+        evaluador,
+        None,
+        &Vec::new,
+    )?
+    .fila
+    .ok_or_else(|| ErrorOraculo::Infra("la calibración no dejó ninguna fila".into()))
 }
 
 /// Un renglón de `calibracion/<tarea>-<dimension>-<ts>.casos.jsonl`: un caso medido, en orden.
@@ -258,7 +269,9 @@ fn detencion_si_no_entra(
 
 /// La medición de `calibrar_con` y de `calibrar_tarea_con`. Antes de la línea base y de cada caso, si hay
 /// tope, compara el gasto más el peor caso con él. Si no entra, para: la fila queda con los casos hechos y
-/// marcada `incompleta`. Sin casos hechos, no hay fila.
+/// marcada `incompleta`. Sin casos hechos, no hay fila. `muertos_de_la_base` se llama una vez, después de la
+/// base, y solo si la dimensión tiene `AssertBorrado`: sus muertos son los de todos los casos.
+#[allow(clippy::too_many_arguments)]
 fn calibrar_medida(
     tarea: &Tarea,
     dimension: Dimension,
@@ -267,6 +280,7 @@ fn calibrar_medida(
     repo_bueno: &Path,
     evaluador: &dyn Fn(&Path) -> Result<Veredicto, ErrorOraculo>,
     tope: Option<&Tope>,
+    muertos_de_la_base: &dyn Fn() -> Vec<MutanteMuerto>,
 ) -> Result<Medida, ErrorOraculo> {
     let defectos = inyectar::de_dimension(dimension);
     if defectos.is_empty() {
@@ -296,6 +310,11 @@ fn calibrar_medida(
             dimension.clave()
         )));
     }
+    let muertos = if defectos.contains(&Defecto::AssertBorrado) {
+        muertos_de_la_base()
+    } else {
+        Vec::new()
+    };
     let items: BTreeSet<&'static str> = defectos.iter().map(|d| d.item()).collect();
     let items: Vec<&'static str> = items.into_iter().collect();
     let tmp = tempfile::tempdir().map_err(|e| super::infra("carpeta temporal", e))?;
@@ -330,6 +349,7 @@ fn calibrar_medida(
                 capas,
                 camino_caliente: camino,
                 limites: &limites,
+                muertos: &muertos,
             };
             // Un defecto que rompe la construcción se reemplaza por el siguiente candidato, hasta
             // `MAX_REEMPLAZOS` veces. Cada intento inválido suma a `invalidos`, también el del caso
@@ -645,6 +665,16 @@ pub fn calibrar_tarea_con(
         historial: false,
         ..OpcionesOraculo::default()
     };
+    // La base graba las salidas de sus sondas en `memo`; los casos no graban. Solo la base tiene `repo`.
+    let memo = std::sync::Arc::new(super::memo::MemoSondas::nuevo());
+    let evaluar_ruta = |ruta: &Path| {
+        let memo_de_ruta = (ruta == repo.as_path()).then(|| memo.clone());
+        let opciones_de_ruta = OpcionesOraculo {
+            memo: memo_de_ruta,
+            ..opciones.clone()
+        };
+        evaluador(&tarea, ruta, &opciones_de_ruta)
+    };
     // El tope se resuelve antes de la base: un peor caso sin precio no deja arrancar.
     let inicio = ahora();
     let tope = match presupuesto {
@@ -677,8 +707,9 @@ pub fn calibrar_tarea_con(
         n as usize,
         semilla,
         &repo,
-        &|ruta| evaluador(&tarea, ruta, &opciones),
+        &evaluar_ruta,
         tope.as_ref(),
+        &|| memo.mutantes_muertos(&tarea),
     )?;
     // Los casos se escriben antes de `agregar`, también si el tope detuvo la calibración.
     let casos = match &medida.fila {
@@ -1476,6 +1507,86 @@ mod tests {
         )
         .expect("calibra con el repo de la tarea");
         assert_eq!(vistos.borrow()[0], repo);
+    }
+
+    /// `tests/protocolo.rs` de la calibración de Pruebas: un test de `leer_numero` con dos asserts.
+    const TEST_DE_LEER_NUMERO: &str = "use calibra_fixture::protocolo::leer_numero;\n\n#[test]\nfn leer_numero_lee_el_numero() {\n    assert!(leer_numero(\"42\").is_ok());\n    assert_eq!(leer_numero(\"7\").unwrap(), 7);\n}\n";
+
+    /// Veredicto de Pruebas sano: valor 1 y el ítem de mutación en nivel 3.
+    fn veredicto_de_pruebas() -> Veredicto {
+        Veredicto {
+            puntajes: vec![Puntaje {
+                dimension: Dimension::Pruebas,
+                valor: 1.0,
+                calibrada: false,
+                exactitud_balanceada: None,
+                items: vec![nivel_item("pruebas.mutacion", 3)],
+                sin_veredicto: None,
+                faltantes: Vec::new(),
+            }],
+            ..Veredicto::default()
+        }
+    }
+
+    /// Los muertos de la base llegan al inyector de AssertBorrado: el memo se pasa solo a la base.
+    #[test]
+    fn calibra_pruebas_los_muertos_de_la_base_llegan_al_inyector() {
+        use crate::oracle::mutacion::{ARCHIVO_OUTCOMES, construir_comando};
+        use crate::oracle::perfiles::herramientas::SalidaHerramienta;
+        const OUTCOMES: &str = r#"{"total_mutants":1,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)","file":"src/protocolo.rs","span":{"start":{"line":2,"column":1}}}},"summary":"CaughtMutant"}]}"#;
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = home.path().join("oraculos").join("calibra-fixture");
+        std::fs::create_dir_all(&carpeta).expect("carpeta");
+        let repo = carpeta.join("repo-bueno");
+        std::fs::create_dir_all(&repo).expect("repo");
+        super::inyectar::pruebas::copiar(Path::new(FIXTURE), &repo);
+        std::fs::write(repo.join("tests/protocolo.rs"), TEST_DE_LEER_NUMERO).expect("test");
+        let _ = tarea_en(&carpeta, "\n[calibracion]\nrepo = \"repo-bueno\"\n");
+        let con_memo = RefCell::new(Vec::<bool>::new());
+        let evaluador = |tarea: &Tarea, _: &Path, o: &OpcionesOraculo| {
+            con_memo.borrow_mut().push(o.memo.is_some());
+            if let Some(memo) = o.memo.as_deref() {
+                let mut salida = SalidaHerramienta {
+                    codigo: 0,
+                    stdout: "salida".into(),
+                    ..Default::default()
+                };
+                salida
+                    .archivos
+                    .insert(ARCHIVO_OUTCOMES.into(), OUTCOMES.into());
+                memo.anotar(&construir_comando(tarea), &salida);
+            }
+            Ok(veredicto_de_pruebas())
+        };
+        let calibrada = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "pruebas",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+        )
+        .expect("calibra");
+        let vistos = con_memo.borrow();
+        assert!(vistos[0], "la base lleva el memo");
+        assert!(
+            vistos[1..].iter().all(|m| !m),
+            "los casos no graban: {vistos:?}"
+        );
+        let ruta = calibrada.casos.expect("hay casos guardados");
+        let texto = fs::read_to_string(&ruta).expect("lee los casos");
+        let casos: Vec<CasoGuardado> = texto
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("un caso por línea"))
+            .collect();
+        let con_defecto = casos
+            .iter()
+            .find(|c| c.defecto.as_deref() == Some("assert_borrado"))
+            .expect("un caso con AssertBorrado aplicado");
+        assert_eq!(con_defecto.archivo.as_deref(), Some("tests/protocolo.rs"));
+        assert_eq!(con_defecto.linea, Some(5), "el primer assert del test");
     }
 
     /// Una calibración no escribe historial: cada caso es una versión distinta y se evalúa una vez.

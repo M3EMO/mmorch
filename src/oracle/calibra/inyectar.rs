@@ -8,6 +8,7 @@ use std::io;
 use std::path::Path;
 
 use crate::borrado;
+use crate::oracle::mutacion::MutanteMuerto;
 use crate::oracle::perfiles::rust::LimitesEstructura;
 use crate::tipos::Dimension;
 
@@ -94,6 +95,8 @@ pub struct Contexto<'a> {
     pub camino_caliente: &'a [String],
     /// Límites de la sonda de estructura. El defecto `ArchivoDios` los usa para pasar la sonda.
     pub limites: &'a LimitesEstructura,
+    /// Mutantes muertos de la base: `AssertBorrado` elige uno y borra los asserts de sus tests. Vacía: no aplica.
+    pub muertos: &'a [MutanteMuerto],
 }
 
 /// Aplica `defecto` a la copia de repo Rust en `dir`. `capas` son las de `[arquitectura]` de la tarea.
@@ -110,6 +113,7 @@ pub fn inyectar(
         capas,
         camino_caliente: &[],
         limites: &limites,
+        muertos: &[],
     };
     inyectar_con(defecto, dir, &contexto, semilla)
 }
@@ -132,7 +136,7 @@ pub fn inyectar_con(
         Defecto::ArchivoDios => dios(dir, contexto.limites, &mut rng)?,
         Defecto::ModuloBorrado => modulo_borrado(dir, &mut rng)?,
         Defecto::ErrorTragado => error_tragado(dir, &mut rng)?,
-        Defecto::AssertBorrado => assert_borrado(dir, &mut rng)?,
+        Defecto::AssertBorrado => assert_borrado(dir, contexto.muertos, &mut rng)?,
         Defecto::DockerfileRoot => dockerfile(dir)?,
     };
     Ok(lugar.map(|(archivo, linea)| Inyeccion {
@@ -580,32 +584,155 @@ fn es_assert(linea: &str) -> bool {
         && t.ends_with(");")
 }
 
-/// Borra una línea de assert de un test: en `tests/` o en la parte de tests de `src/`.
-fn assert_borrado(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
-    let mut candidatos: Vec<(String, usize)> = Vec::new();
-    for archivo in rust_en(dir, "tests")? {
-        for (i, linea) in partir(&leer(dir, &archivo)?).iter().enumerate() {
-            if es_assert(linea) {
-                candidatos.push((archivo.clone(), i));
-            }
+/// Borra los asserts de los tests que cubren un mutante muerto de `muertos`. La semilla elige el mutante por
+/// su posición. Si su función no tiene tests con asserts, prueba el siguiente de la lista, en orden. Sin
+/// muertos, o sin ninguno con test, no aplica: no hay borrado al azar.
+fn assert_borrado(dir: &Path, muertos: &[MutanteMuerto], rng: &mut Prng) -> io::Result<Lugar> {
+    if muertos.is_empty() {
+        return Ok(None);
+    }
+    let inicio = rng.indice(muertos.len());
+    for k in 0..muertos.len() {
+        let mutante = &muertos[(inicio + k) % muertos.len()];
+        let Some(funcion) = funcion_de_mutante(dir, mutante)? else {
+            continue;
+        };
+        let cubiertos = asserts_de_tests_que_llaman(dir, &funcion)?;
+        let Some((archivo, indices)) = cubiertos.first() else {
+            continue;
+        };
+        let lugar = (archivo.clone(), indices[0] as u32 + 1);
+        for (archivo, indices) in &cubiertos {
+            quitar_lineas(dir, archivo, indices)?;
         }
+        return Ok(Some(lugar));
+    }
+    Ok(None)
+}
+
+/// Función afectada por un mutante: la del nombre (`... replace <fn> -> <Tipo> with <valor>`) o, si el nombre
+/// no la tiene, la que contiene su línea. `None` si no hay ninguna.
+fn funcion_de_mutante(dir: &Path, mutante: &MutanteMuerto) -> io::Result<Option<String>> {
+    if let Some(funcion) = funcion_del_nombre(&mutante.nombre) {
+        return Ok(Some(funcion));
+    }
+    if !dir.join(&mutante.archivo).is_file() {
+        return Ok(None);
+    }
+    let lineas = partir(&leer(dir, &mutante.archivo)?);
+    let hasta = (mutante.linea as usize).min(lineas.len());
+    Ok(lineas[..hasta]
+        .iter()
+        .rev()
+        .find_map(|linea| nombre_de_funcion(linea).map(str::to_string)))
+}
+
+/// Función de un nombre de mutante `... replace <fn> -> <Tipo> with <valor>`. `None` si la parte antes de
+/// `->` o de `with` no es una ruta de identificadores, como en `replace a + b with a - b`.
+fn funcion_del_nombre(nombre: &str) -> Option<String> {
+    let (_, resto) = nombre.split_once("replace ")?;
+    let cabeza = resto.split(" -> ").next()?.split(" with ").next()?.trim();
+    let ultimo = cabeza.rsplit("::").next()?;
+    es_identificador(ultimo).then(|| ultimo.to_string())
+}
+
+/// Por archivo de tests con asserts que cubren `funcion`, en orden (primero `tests/`, luego `src/`): los índices
+/// de sus líneas de assert. Solo entran los archivos con al menos una línea que borrar.
+fn asserts_de_tests_que_llaman(dir: &Path, funcion: &str) -> io::Result<Vec<(String, Vec<usize>)>> {
+    let mut origenes: Vec<(String, bool)> = Vec::new();
+    for archivo in rust_en(dir, "tests")? {
+        origenes.push((archivo, false));
     }
     for archivo in rust_en(dir, "src")? {
+        origenes.push((archivo, true));
+    }
+    let mut salida = Vec::new();
+    for (archivo, solo_tests_de_src) in origenes {
         let lineas = partir(&leer(dir, &archivo)?);
-        let limite = limite_de_produccion(&lineas);
-        for (i, linea) in lineas.iter().enumerate().skip(limite) {
-            if es_assert(linea) {
-                candidatos.push((archivo.clone(), i));
+        let desde = if solo_tests_de_src {
+            limite_de_produccion(&lineas)
+        } else {
+            0
+        };
+        let mut indices = Vec::new();
+        for (fn_linea, cierre) in cuerpos_de_tests(&lineas, desde) {
+            let cuerpo = fn_linea + 1..=cierre;
+            if cuerpo.clone().any(|j| llama_a(&lineas[j], funcion)) {
+                indices.extend(cuerpo.filter(|&j| es_assert(&lineas[j])));
             }
         }
+        if !indices.is_empty() {
+            salida.push((archivo, indices));
+        }
     }
-    let Some((archivo, i)) = rng.elegir(&candidatos).cloned() else {
-        return Ok(None);
-    };
-    let mut lineas = partir(&leer(dir, &archivo)?);
-    lineas.remove(i);
-    escribir(dir, &archivo, &unir(&lineas))?;
-    Ok(Some((archivo, i as u32 + 1)))
+    Ok(salida)
+}
+
+/// Rangos `(línea de fn, línea de cierre)` de los tests de `lineas` desde `desde`. Un test empieza con
+/// `#[test]`, y su `fn` es la primera línea que no es atributo después.
+fn cuerpos_de_tests(lineas: &[String], desde: usize) -> Vec<(usize, usize)> {
+    let mut salida = Vec::new();
+    let mut i = desde;
+    while i < lineas.len() {
+        if lineas[i].trim() == "#[test]" {
+            let fn_linea =
+                (i + 1..lineas.len()).find(|&j| !lineas[j].trim_start().starts_with("#["));
+            if let Some(f) = fn_linea.filter(|&f| lineas[f].trim_start().starts_with("fn "))
+                && let Some(cierre) = fin_de_bloque(lineas, f)
+            {
+                salida.push((f, cierre));
+                i = cierre + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    salida
+}
+
+/// Línea donde cierra el bloque que abre `inicio`: la que vuelve la profundidad de `{` a cero. `None` si no cierra.
+fn fin_de_bloque(lineas: &[String], inicio: usize) -> Option<usize> {
+    let mut profundidad = 0i32;
+    let mut abrio = false;
+    for (j, linea) in lineas.iter().enumerate().skip(inicio) {
+        for c in linea.chars() {
+            match c {
+                '{' => {
+                    profundidad += 1;
+                    abrio = true;
+                }
+                '}' => profundidad -= 1,
+                _ => {}
+            }
+        }
+        if abrio && profundidad == 0 {
+            return Some(j);
+        }
+    }
+    None
+}
+
+/// `true` si `linea` llama a `funcion`: `funcion(` precedido de algo que no es identificador (`.`, `::`, espacio).
+fn llama_a(linea: &str, funcion: &str) -> bool {
+    let patron = format!("{funcion}(");
+    linea.match_indices(&patron).any(|(p, _)| {
+        linea[..p]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'))
+    })
+}
+
+/// Quita de `archivo` las líneas de `indices` (0-based, en orden). El resto del texto no cambia.
+fn quitar_lineas(dir: &Path, archivo: &str, indices: &[usize]) -> io::Result<()> {
+    let lineas = partir(&leer(dir, archivo)?);
+    let nuevas: Vec<String> = lineas
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !indices.contains(i))
+        .map(|(_, linea)| linea)
+        .collect();
+    escribir(dir, archivo, &unir(&nuevas))
 }
 
 /// `USER` de un usuario que no es root.
@@ -1064,6 +1191,7 @@ mod tests {
                 capas: &capas,
                 camino_caliente: &[],
                 limites: &limites,
+                muertos: &[],
             };
             let inyeccion = inyectar_con(Defecto::ArchivoDios, dir.path(), &contexto, 42)
                 .expect("E/S")
@@ -1123,26 +1251,152 @@ mod tests {
         assert_eq!(inyeccion.expect("aplica").linea, 6);
     }
 
+    /// Test que cubre `leer_numero` (`src/protocolo.rs`, con dos asserts), y otro test sin relación con un assert.
+    const TEST_QUE_CUBRE: &str = "use calibra_fixture::protocolo::leer_numero;\n\n#[test]\nfn leer_numero_lee_el_numero() {\n    assert!(leer_numero(\"42\").is_ok());\n    assert_eq!(leer_numero(\"7\").unwrap(), 7);\n}\n\n#[test]\nfn otro_test_sin_relacion() {\n    assert_eq!(1 + 1, 2);\n}\n";
+
+    /// Cuántas líneas de `t` son asserts.
+    fn asserts_en(t: &str) -> usize {
+        t.lines()
+            .filter(|l| l.trim_start().starts_with("assert"))
+            .count()
+    }
+
+    /// Copia del fixture con `tests/protocolo.rs`, que cubre `leer_numero`.
+    fn copia_con_test_de_leer_numero() -> tempfile::TempDir {
+        let dir = copia_fixture();
+        std::fs::write(dir.path().join("tests/protocolo.rs"), TEST_QUE_CUBRE).expect("escribe");
+        dir
+    }
+
+    /// Mutante muerto de `leer_numero`, con el nombre que da cargo-mutants.
+    fn muerto_de_leer_numero() -> MutanteMuerto {
+        MutanteMuerto {
+            archivo: "src/protocolo.rs".into(),
+            linea: 2,
+            nombre:
+                "src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)"
+                    .into(),
+        }
+    }
+
+    /// Mutante muerto de una función que ningún test llama.
+    fn muerto_sin_test() -> MutanteMuerto {
+        MutanteMuerto {
+            archivo: "src/lib.rs".into(),
+            linea: 1,
+            nombre: "src/lib.rs:1:1: replace nadie_lo_llama -> u32 with 0".into(),
+        }
+    }
+
+    /// `inyectar_con` de `AssertBorrado` en `dir`, con `muertos` y la semilla dada.
+    fn borrar_con(
+        dir: &Path,
+        muertos: &[MutanteMuerto],
+        semilla: u64,
+    ) -> io::Result<Option<Inyeccion>> {
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        let contexto = Contexto {
+            capas: &capas,
+            camino_caliente: &[],
+            limites: &limites,
+            muertos,
+        };
+        inyectar_con(Defecto::AssertBorrado, dir, &contexto, semilla)
+    }
+
     #[test]
-    fn inyectar_assert_borrado_quita_una_linea_de_test() {
-        let (_, antes, despues) = aplicar(Defecto::AssertBorrado, 42);
+    fn inyectar_assert_borrado_quita_solo_los_asserts_del_test_que_cubre_el_mutante() {
+        let dir = copia_con_test_de_leer_numero();
+        let antes = arbol(dir.path());
+        let inyeccion = borrar_con(dir.path(), &[muerto_de_leer_numero()], 42)
+            .expect("E/S")
+            .expect("hay un test que cubre leer_numero");
+        let despues = arbol(dir.path());
         assert_eq!(
             cambiados(&antes, &despues),
-            vec!["tests/basico.rs".to_string()]
+            vec!["tests/protocolo.rs".to_string()]
         );
-        let asserts = |t: &str| {
-            t.lines()
-                .filter(|l| l.trim_start().starts_with("assert"))
-                .count()
+        assert_eq!(inyeccion.defecto, Defecto::AssertBorrado);
+        assert_eq!(inyeccion.archivo, "tests/protocolo.rs");
+        assert_eq!(inyeccion.linea, 5, "la línea del primer assert borrado");
+        let nuevo = &despues["tests/protocolo.rs"];
+        assert_eq!(asserts_en(&antes["tests/protocolo.rs"]), 3);
+        assert_eq!(
+            asserts_en(nuevo),
+            1,
+            "borra los dos asserts del test que cubre"
+        );
+        assert!(nuevo.contains("assert_eq!(1 + 1, 2);"), "{nuevo}");
+        assert!(nuevo.contains("fn leer_numero_lee_el_numero()"), "{nuevo}");
+    }
+
+    #[test]
+    fn inyectar_assert_borrado_sin_nombre_de_funcion_usa_la_funcion_de_la_linea() {
+        let dir = copia_con_test_de_leer_numero();
+        let muerto = MutanteMuerto {
+            archivo: "src/protocolo.rs".into(),
+            linea: 3,
+            nombre: "src/protocolo.rs:3:5: replace a + b with a - b".into(),
         };
-        assert_eq!(
-            asserts(&antes["tests/basico.rs"]) - 1,
-            asserts(&despues["tests/basico.rs"])
-        );
-        assert_eq!(
-            despues["tests/basico.rs"].lines().count() + 1,
-            antes["tests/basico.rs"].lines().count()
-        );
+        let inyeccion = borrar_con(dir.path(), &[muerto], 42)
+            .expect("E/S")
+            .expect("la línea 3 está dentro de leer_numero");
+        assert_eq!(inyeccion.archivo, "tests/protocolo.rs");
+        assert_eq!(inyeccion.linea, 5);
+        assert_eq!(asserts_en(&arbol(dir.path())["tests/protocolo.rs"]), 1);
+    }
+
+    #[test]
+    fn inyectar_assert_borrado_sin_muertos_no_es_aplicable() {
+        let dir = copia_con_test_de_leer_numero();
+        let antes = arbol(dir.path());
+        let sin_muertos = borrar_con(dir.path(), &[], 42).expect("E/S");
+        assert_eq!(sin_muertos, None, "sin muertos no hay al azar");
+        let capas = capas_fixture();
+        let por_la_api = inyectar(Defecto::AssertBorrado, dir.path(), &capas, 42).expect("E/S");
+        assert_eq!(por_la_api, None, "inyectar pasa una lista vacía");
+        assert_eq!(arbol(dir.path()), antes, "no toca el repo");
+    }
+
+    #[test]
+    fn inyectar_assert_borrado_muerto_sin_test_que_lo_cubra_no_es_aplicable() {
+        let dir = copia_fixture();
+        let antes = arbol(dir.path());
+        let sin_test = borrar_con(dir.path(), &[muerto_de_leer_numero()], 42).expect("E/S");
+        assert_eq!(sin_test, None, "basico.rs no llama a leer_numero");
+        assert_eq!(arbol(dir.path()), antes, "no toca el repo");
+    }
+
+    #[test]
+    fn inyectar_assert_borrado_salta_el_muerto_sin_test_y_usa_el_que_tiene() {
+        let muertos = [muerto_sin_test(), muerto_de_leer_numero()];
+        for semilla in 1..=10u64 {
+            let dir = copia_con_test_de_leer_numero();
+            let antes = arbol(dir.path());
+            let inyeccion = borrar_con(dir.path(), &muertos, semilla)
+                .expect("E/S")
+                .expect("siempre hay un muerto con test");
+            assert_eq!(inyeccion.archivo, "tests/protocolo.rs", "semilla {semilla}");
+            assert_eq!(
+                cambiados(&antes, &arbol(dir.path())),
+                vec!["tests/protocolo.rs".to_string()],
+                "semilla {semilla}"
+            );
+        }
+    }
+
+    #[test]
+    fn inyectar_assert_borrado_misma_semilla_mismo_resultado() {
+        let muertos = [muerto_sin_test(), muerto_de_leer_numero()];
+        for semilla in 1..=5u64 {
+            let a = copia_con_test_de_leer_numero();
+            let b = copia_con_test_de_leer_numero();
+            let ia = borrar_con(a.path(), &muertos, semilla).expect("E/S");
+            let ib = borrar_con(b.path(), &muertos, semilla).expect("E/S");
+            assert_eq!(ia, ib, "semilla {semilla}");
+            assert_eq!(arbol(a.path()), arbol(b.path()), "semilla {semilla}");
+        }
     }
 
     #[test]
@@ -1196,6 +1450,7 @@ mod tests {
             capas: &capas,
             camino_caliente: camino,
             limites: &limites,
+            muertos: &[],
         };
         inyectar_con(defecto, dir, &contexto, semilla)
     }

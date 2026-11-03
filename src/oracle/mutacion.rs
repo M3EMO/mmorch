@@ -16,7 +16,7 @@ use crate::tipos::Dimension;
 const DIMENSION: Dimension = Dimension::Pruebas;
 const SONDA: &str = "cargo-mutants";
 /// Reporte que deja el comando dentro de `/salida`. Ver `construir_comando`.
-const ARCHIVO_OUTCOMES: &str = "outcomes.json";
+pub(crate) const ARCHIVO_OUTCOMES: &str = "outcomes.json";
 const DETALLE_VIVO: &str = "este cambio de comportamiento no lo detecta ningún test";
 const SEVERIDAD_VIVO: u8 = 2;
 
@@ -30,6 +30,14 @@ pub struct ResultadoMutacion {
     /// Mutantes viables del repo, si la muestra quedó corta.
     pub total_conocido: Option<u32>,
     pub truncado: bool,
+}
+
+/// Mutante muerto de la muestra: un cambio de comportamiento que algún test detecta.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutanteMuerto {
+    pub archivo: String,
+    pub linea: u32,
+    pub nombre: String,
 }
 
 /// Reporte `outcomes.json` de cargo-mutants. Solo se leen los campos que Root usa.
@@ -78,31 +86,40 @@ struct Posicion {
     line: u32,
 }
 
-/// Lee el reporte de mutantes. Mide los primeros `mutantes_max` viables, en el orden del archivo.
-pub fn parsear_outcomes(
-    json: &str,
-    mutantes_max: u32,
-    requisitos: &[Requisito],
-) -> Result<ResultadoMutacion, ErrorOraculo> {
-    if mutantes_max == 0 {
-        return Err(ErrorOraculo::Infra("mutantes_max debe ser 1 o más".into()));
-    }
+/// Mutante viable del reporte: su ubicación y si lo detectó algún test.
+struct Viable {
+    archivo: String,
+    linea: u32,
+    nombre: String,
+    muerto: bool,
+}
+
+/// Lectura del reporte: los viables en orden del archivo, o el motivo por el que no hay muestra.
+enum Lectura {
+    Sin(String),
+    Medible(Vec<Viable>),
+}
+
+/// Valida el reporte y lista sus viables. `Unviable` no compila: no cuenta. Es la base de la muestra
+/// que miden `parsear_outcomes` y `mutantes_muertos`.
+fn leer_viables(json: &str) -> Result<Lectura, ErrorOraculo> {
     if json.trim().is_empty() {
-        return Ok(desde_sonda(sin_veredicto(
-            DIMENSION,
-            "no dejó reporte: el archivo outcomes.json está vacío",
-        )));
+        return Ok(Lectura::Sin(
+            "no dejó reporte: el archivo outcomes.json está vacío".into(),
+        ));
     }
     let informe: Informe = serde_json::from_str(json)
         .map_err(|e| ErrorOraculo::Infra(format!("outcomes.json: {}", motivo_json(&e))))?;
     let Some(resultados) = informe.outcomes else {
-        return Ok(desde_sonda(sin_veredicto(
-            DIMENSION,
-            "sin marca de fin: falta outcomes",
-        )));
+        return Ok(Lectura::Sin("sin marca de fin: falta outcomes".into()));
     };
-    // Cada viable: el mutante y si lo detectó algún test. `Unviable` no compila: no cuenta.
-    let mut viables: Vec<(&Mutante, bool)> = Vec::new();
+    let de = |m: &Mutante, muerto: bool| Viable {
+        archivo: m.file.clone(),
+        linea: m.span.start.line,
+        nombre: m.name.clone(),
+        muerto,
+    };
+    let mut viables: Vec<Viable> = Vec::new();
     // `Baseline` es la marca de fin: sin él, la lista no prueba que la corrida terminó.
     let mut hay_baseline = false;
     for resultado in &resultados {
@@ -110,10 +127,9 @@ pub fn parsear_outcomes(
             Escenario::Baseline => match resultado.summary.as_str() {
                 "Success" => hay_baseline = true,
                 "Failure" => {
-                    return Ok(desde_sonda(sin_veredicto(
-                        DIMENSION,
-                        "los tests del proyecto fallan sin mutaciones",
-                    )));
+                    return Ok(Lectura::Sin(
+                        "los tests del proyecto fallan sin mutaciones".into(),
+                    ));
                 }
                 otro => {
                     return Err(ErrorOraculo::Infra(format!(
@@ -123,8 +139,8 @@ pub fn parsear_outcomes(
             },
             Escenario::Mutant(mutante) => match resultado.summary.as_str() {
                 "Unviable" => {}
-                "CaughtMutant" | "Timeout" => viables.push((mutante, true)),
-                "MissedMutant" => viables.push((mutante, false)),
+                "CaughtMutant" | "Timeout" => viables.push(de(mutante, true)),
+                "MissedMutant" => viables.push(de(mutante, false)),
                 otro => {
                     return Err(ErrorOraculo::Infra(format!(
                         "resumen de mutante desconocido: {otro}"
@@ -134,10 +150,9 @@ pub fn parsear_outcomes(
         }
     }
     if !hay_baseline {
-        return Ok(desde_sonda(sin_veredicto(
-            DIMENSION,
-            "sin marca de fin: falta el escenario Baseline",
-        )));
+        return Ok(Lectura::Sin(
+            "sin marca de fin: falta el escenario Baseline".into(),
+        ));
     }
     // Un reporte vale solo si trae un resultado por cada mutante que cargo-mutants encontró (M13).
     let mutantes_en_reporte = resultados
@@ -145,14 +160,32 @@ pub fn parsear_outcomes(
         .filter(|r| matches!(r.scenario, Escenario::Mutant(_)))
         .count();
     if mutantes_en_reporte != informe.total_mutants as usize {
-        return Ok(desde_sonda(sin_veredicto(
-            DIMENSION,
-            format!(
-                "reporte truncado: trae {mutantes_en_reporte} de {} mutantes",
-                informe.total_mutants
-            ),
+        return Ok(Lectura::Sin(format!(
+            "reporte truncado: trae {mutantes_en_reporte} de {} mutantes",
+            informe.total_mutants
         )));
     }
+    Ok(Lectura::Medible(viables))
+}
+
+/// Primeros `mutantes_max` viables, en el orden del archivo. Es la muestra que mide la sonda.
+fn muestra(viables: &[Viable], mutantes_max: u32) -> &[Viable] {
+    &viables[..viables.len().min(mutantes_max as usize)]
+}
+
+/// Lee el reporte de mutantes. Mide los primeros `mutantes_max` viables, en el orden del archivo.
+pub fn parsear_outcomes(
+    json: &str,
+    mutantes_max: u32,
+    requisitos: &[Requisito],
+) -> Result<ResultadoMutacion, ErrorOraculo> {
+    if mutantes_max == 0 {
+        return Err(ErrorOraculo::Infra("mutantes_max debe ser 1 o más".into()));
+    }
+    let viables = match leer_viables(json)? {
+        Lectura::Sin(motivo) => return Ok(desde_sonda(sin_veredicto(DIMENSION, motivo))),
+        Lectura::Medible(viables) => viables,
+    };
     if viables.is_empty() {
         return Ok(desde_sonda(ResultadoSonda {
             dimension: DIMENSION,
@@ -163,19 +196,19 @@ pub fn parsear_outcomes(
     }
     let total = u32::try_from(viables.len())
         .map_err(|_| ErrorOraculo::Infra("demasiados mutantes".into()))?;
-    let muestra = &viables[..viables.len().min(mutantes_max as usize)];
-    let muertos = muestra.iter().filter(|(_, muerto)| *muerto).count() as u32;
+    let muestra = muestra(&viables, mutantes_max);
+    let muertos = muestra.iter().filter(|v| v.muerto).count() as u32;
     let vivos = muestra.len() as u32 - muertos;
     let hallazgos = muestra
         .iter()
-        .filter(|(_, muerto)| !muerto)
-        .map(|(m, _)| {
+        .filter(|v| !v.muerto)
+        .map(|v| {
             crear_hallazgo(
                 DIMENSION,
                 SEVERIDAD_VIVO,
-                &m.file,
-                m.span.start.line,
-                &m.name,
+                &v.archivo,
+                v.linea,
+                &v.nombre,
                 DETALLE_VIVO,
                 SONDA,
                 requisitos,
@@ -198,6 +231,26 @@ pub fn parsear_outcomes(
     })
 }
 
+/// Mutantes muertos de la muestra que mide `parsear_outcomes`, en el orden del archivo. Un reporte sin
+/// veredicto, ilegible o vacío no tiene muestra: da una lista vacía.
+pub fn mutantes_muertos(json: &str, mutantes_max: u32) -> Vec<MutanteMuerto> {
+    if mutantes_max == 0 {
+        return Vec::new();
+    }
+    let Ok(Lectura::Medible(viables)) = leer_viables(json) else {
+        return Vec::new();
+    };
+    muestra(&viables, mutantes_max)
+        .iter()
+        .filter(|v| v.muerto)
+        .map(|v| MutanteMuerto {
+            archivo: v.archivo.clone(),
+            linea: v.linea,
+            nombre: v.nombre.clone(),
+        })
+        .collect()
+}
+
 /// Comando de la corrida completa. Corre sobre una copia de `/repo` y deja `outcomes.json` en
 /// `/salida`, porque el ejecutor solo lee archivos sueltos de esa carpeta.
 pub fn construir_comando(tarea: &Tarea) -> String {
@@ -215,7 +268,7 @@ pub fn construir_comando(tarea: &Tarea) -> String {
 }
 
 /// Mutantes máximos de la muestra: los de `[pruebas]`, o el default.
-fn mutantes_max(tarea: &Tarea) -> u32 {
+pub(crate) fn mutantes_max(tarea: &Tarea) -> u32 {
     tarea
         .pruebas
         .as_ref()
@@ -628,5 +681,65 @@ mod tests {
         let (valor, motivo) = motivo_de(json);
         assert_eq!(valor, None);
         assert!(motivo.contains("reporte truncado"), "{motivo}");
+    }
+
+    /// Cinco mutantes viables y uno `Unviable`, con dos muertos (uno `Timeout`) y dos vivos.
+    const MUERTOS_MIXTOS: &str = r#"{"total_mutants":5,"outcomes":[
+        {"scenario":"Baseline","summary":"Success"},
+        {"scenario":{"Mutant":{"name":"a1","file":"src/a.rs","span":{"start":{"line":1}}}},"summary":"CaughtMutant"},
+        {"scenario":{"Mutant":{"name":"a2","file":"src/a.rs","span":{"start":{"line":2}}}},"summary":"Unviable"},
+        {"scenario":{"Mutant":{"name":"b3","file":"src/b.rs","span":{"start":{"line":3}}}},"summary":"MissedMutant"},
+        {"scenario":{"Mutant":{"name":"b4","file":"src/b.rs","span":{"start":{"line":4}}}},"summary":"Timeout"},
+        {"scenario":{"Mutant":{"name":"c5","file":"src/c.rs","span":{"start":{"line":5}}}},"summary":"CaughtMutant"}]}"#;
+
+    fn muerto(archivo: &str, linea: u32, nombre: &str) -> MutanteMuerto {
+        MutanteMuerto {
+            archivo: archivo.into(),
+            linea,
+            nombre: nombre.into(),
+        }
+    }
+
+    #[test]
+    fn mutantes_muertos_devuelve_los_muertos_de_la_muestra_en_orden() {
+        let muertos = mutantes_muertos(MUERTOS_MIXTOS, 60);
+        assert_eq!(
+            muertos,
+            vec![
+                muerto("src/a.rs", 1, "a1"),
+                muerto("src/b.rs", 4, "b4"),
+                muerto("src/c.rs", 5, "c5"),
+            ]
+        );
+    }
+
+    #[test]
+    fn mutantes_muertos_recorta_a_la_muestra_de_mutantes_max() {
+        // Los viables en orden: a1 (muerto), b3 (vivo), b4 (muerto), c5 (muerto).
+        assert_eq!(
+            mutantes_muertos(MUERTOS_MIXTOS, 1),
+            vec![muerto("src/a.rs", 1, "a1")]
+        );
+        assert_eq!(
+            mutantes_muertos(MUERTOS_MIXTOS, 3),
+            vec![muerto("src/a.rs", 1, "a1"), muerto("src/b.rs", 4, "b4")]
+        );
+    }
+
+    #[test]
+    fn mutantes_muertos_coincide_con_los_muertos_de_parsear_outcomes() {
+        let muertos = mutantes_muertos(SIN_ASSERTS, 60);
+        let r = parsear_outcomes(SIN_ASSERTS, 60, &[]).expect("parsea");
+        assert_eq!(muertos.len(), r.muertos as usize);
+        assert!(muertos.iter().all(|m| m.archivo == "src/calc.rs"));
+    }
+
+    #[test]
+    fn mutantes_muertos_json_ilegible_vacio_o_sin_veredicto_es_vacio() {
+        assert!(mutantes_muertos("", 60).is_empty());
+        assert!(mutantes_muertos("{no es json", 60).is_empty());
+        let sin_baseline = r#"{"outcomes":[{"scenario":{"Mutant":{"name":"m","file":"src/a.rs"}},"summary":"CaughtMutant"}]}"#;
+        assert!(mutantes_muertos(sin_baseline, 60).is_empty());
+        assert!(mutantes_muertos(MUERTOS_MIXTOS, 0).is_empty());
     }
 }

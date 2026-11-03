@@ -12,6 +12,7 @@ pub mod informe;
 pub mod juez;
 pub mod junit;
 pub mod mapa;
+pub mod memo;
 pub mod mutacion;
 pub mod pendientes;
 pub mod perfiles;
@@ -149,6 +150,9 @@ pub struct OpcionesOraculo {
     /// repo. `false`: no calcula la versión, no lee ni guarda nada. La calibración usa `false`, porque cada
     /// caso es una versión distinta y se evalúa una vez.
     pub historial: bool,
+    /// Memo de las sondas (calibración). `Some`: el ejecutor de herramientas graba cada salida OK aquí. `None`
+    /// (producción): no graba nada.
+    pub memo: Option<std::sync::Arc<memo::MemoSondas>>,
 }
 
 impl Default for OpcionesOraculo {
@@ -158,6 +162,7 @@ impl Default for OpcionesOraculo {
             home: None,
             partes: None,
             historial: true,
+            memo: None,
         }
     }
 }
@@ -666,7 +671,15 @@ fn evaluar_con(
         cache,
         rustsec,
     };
-    let ej = (deps.herramientas)(&preparada);
+    let ej_real = (deps.herramientas)(&preparada);
+    // Con memo (calibración), el ejecutor graba cada salida OK. Sin memo, es el ejecutor de siempre.
+    let ej: Box<dyn EjecutorHerramienta + '_> = match o.memo.as_deref() {
+        Some(memo) => Box::new(memo::EjecutorGrabador {
+            real: ej_real.as_ref(),
+            memo,
+        }),
+        None => ej_real,
+    };
     // La Entrega sale de `entregar_con`: construcción, sonda y escenarios en una sola pasada (desempate 7).
     // Un error de infraestructura deja Entrega sin veredicto con su motivo, como un error del ejecutor.
     let entrega = if partes.entrega {
@@ -3328,6 +3341,7 @@ mod tests {
             partes: None,
             home: Some(home.to_path_buf()),
             historial: true,
+            memo: None,
         }
     }
 
@@ -5721,6 +5735,69 @@ mod tests {
             ..opciones(&home)
         };
         evaluar_con(repo, &tarea, &o, deps).expect("evalúa")
+    }
+
+    #[test]
+    fn oraculo_memo_graba_la_salida_de_la_mutacion() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let tarea = tarea_rust(base.path());
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let memo = std::sync::Arc::new(memo::MemoSondas::nuevo());
+        let o = OpcionesOraculo {
+            partes: Some(partes_de(Dimension::Pruebas, &[], &tarea)),
+            memo: Some(memo.clone()),
+            ..opciones(&home)
+        };
+        evaluar_con(&repo, &tarea, &o, deps_de(&sin_suites, &herramientas(&[]))).expect("evalúa");
+        let cmd = mutacion::construir_comando(&tarea);
+        assert!(
+            memo.salida_de(&cmd).is_some(),
+            "la corrida de mutación no quedó grabada"
+        );
+        assert_eq!(
+            memo.mutantes_muertos(&tarea),
+            vec![mutacion::MutanteMuerto {
+                archivo: "src/lib.rs".into(),
+                linea: 1,
+                nombre: "m".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn oraculo_sin_memo_da_el_mismo_veredicto_que_con_memo() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let tarea = tarea_rust(base.path());
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let partes = Some(partes_de(Dimension::Pruebas, &[], &tarea));
+        let sin = OpcionesOraculo {
+            partes,
+            ..opciones(&home)
+        };
+        let v_sin = evaluar_con(
+            &repo,
+            &tarea,
+            &sin,
+            deps_de(&sin_suites, &herramientas(&[])),
+        )
+        .expect("evalúa");
+        let memo = std::sync::Arc::new(memo::MemoSondas::nuevo());
+        let con = OpcionesOraculo {
+            partes,
+            memo: Some(memo.clone()),
+            ..opciones(&home)
+        };
+        let v_con = evaluar_con(
+            &repo,
+            &tarea,
+            &con,
+            deps_de(&sin_suites, &herramientas(&[])),
+        )
+        .expect("evalúa");
+        assert_eq!(v_sin, v_con);
+        assert_eq!(memo.mutantes_muertos(&tarea).len(), 1);
     }
 
     #[test]
