@@ -33,6 +33,21 @@ pub struct ClaudeCorrida {
     /// Valor de `ECC_DISABLED_HOOKS` para el builder. Ausente si la config no lo trae.
     #[serde(default)]
     pub ecc_disabled_hooks: Option<String>,
+    /// Modo de permisos de `claude -p`. Ausente si la config no lo trae.
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+}
+
+/// Modo de permisos de `claude -p` si la config no fija otro.
+const MODO_PREDETERMINADO: &str = "auto";
+
+impl ClaudeCorrida {
+    /// Modo de permisos de `claude -p`. Vale `auto` si la config no lo fija.
+    pub fn modo_permisos(&self) -> &str {
+        self.permission_mode
+            .as_deref()
+            .unwrap_or(MODO_PREDETERMINADO)
+    }
 }
 
 impl ConfigCorrida {
@@ -112,6 +127,23 @@ ecc_disabled_hooks = "a,b"
         assert_eq!(config.prompt[&Rol::Planifica], "texto de planifica");
         assert_eq!(config.prompt[&Rol::Construye], "texto de construye");
         assert_eq!(config.claude.ecc_disabled_hooks.as_deref(), Some("a,b"));
+    }
+
+    #[test]
+    fn corre_config_carga_modo_de_permisos() {
+        let texto = format!("{VALIDA}permission_mode = \"acceptEdits\"\n");
+        let config = ConfigCorrida::desde_texto(&texto).expect("valida");
+        assert_eq!(
+            config.claude.permission_mode.as_deref(),
+            Some("acceptEdits")
+        );
+        assert_eq!(config.claude.modo_permisos(), "acceptEdits");
+    }
+
+    #[test]
+    fn corre_config_sin_modo_de_permisos_es_auto() {
+        let config = ConfigCorrida::desde_texto(VALIDA).expect("valida");
+        assert_eq!(config.claude.modo_permisos(), "auto");
     }
 
     #[test]

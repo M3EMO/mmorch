@@ -12,8 +12,8 @@ const VARIABLES_DEL_PROCESO: &[&str] = &["PATH", "LANG"];
 const VARIABLE_HOOKS: &str = "ECC_DISABLED_HOOKS";
 
 /// Argumentos de `claude -p` para un rol. Piden `stream-json`, el modelo, solo el proyecto como fuente de
-/// configuración, ningún MCP y la negación de `oraculos/` bajo `home`.
-pub fn args_claude(prompt: &str, modelo: &str, home: &Path) -> Vec<String> {
+/// configuración, ningún MCP, el modo de permisos de la config y la negación de `oraculos/` bajo `home`.
+pub fn args_claude(prompt: &str, modelo: &str, home: &Path, claude: &ClaudeCorrida) -> Vec<String> {
     let oraculos = ruta_oraculos(home);
     let mut rutas = vec![oraculos.clone()];
     let tal_cual = home.join("oraculos");
@@ -43,6 +43,8 @@ pub fn args_claude(prompt: &str, modelo: &str, home: &Path) -> Vec<String> {
         "project".to_string(),
         "--strict-mcp-config".to_string(),
     ];
+    args.push("--permission-mode".to_string());
+    args.push(claude.modo_permisos().to_string());
     args.push("--disallowedTools".to_string());
     args.extend(negadas);
     args
@@ -80,12 +82,68 @@ mod tests {
         (clave.to_string(), valor.to_string())
     }
 
+    /// Valor que sigue a `bandera`. Vacío si la bandera no está.
+    fn valor_de(args: &[String], bandera: &str) -> String {
+        args.iter()
+            .position(|a| a == bandera)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn corre_args_sin_modo_en_config_pasa_auto() {
+        let tmp = TempDir::new().expect("tmp");
+        let home = tmp.path().join("root");
+        fs::create_dir_all(home.join("oraculos")).expect("oraculos");
+        let args = args_claude("p", "m", &home, &ClaudeCorrida::default());
+        assert_eq!(valor_de(&args, "--permission-mode"), "auto", "{args:?}");
+    }
+
+    #[test]
+    fn corre_args_con_modo_de_config_pasa_ese_modo() {
+        let tmp = TempDir::new().expect("tmp");
+        let home = tmp.path().join("root");
+        fs::create_dir_all(home.join("oraculos")).expect("oraculos");
+        let claude = ClaudeCorrida {
+            permission_mode: Some("plan".into()),
+            ..Default::default()
+        };
+        let args = args_claude("p", "m", &home, &claude);
+        assert_eq!(valor_de(&args, "--permission-mode"), "plan", "{args:?}");
+    }
+
+    #[test]
+    fn corre_args_modo_va_antes_de_disallowed_tools() {
+        let tmp = TempDir::new().expect("tmp");
+        let home = tmp.path().join("root");
+        fs::create_dir_all(home.join("oraculos")).expect("oraculos");
+        let args = args_claude("p", "m", &home, &ClaudeCorrida::default());
+
+        let modo = args.iter().position(|a| a == "--permission-mode");
+        let negar = args.iter().position(|a| a == "--disallowedTools");
+        assert!(modo.is_some(), "falta --permission-mode en {args:?}");
+        assert!(negar.is_some(), "falta --disallowedTools en {args:?}");
+        let (modo, negar) = (modo.unwrap(), negar.unwrap());
+        assert!(modo < negar, "--permission-mode debe ir antes: {args:?}");
+        assert!(
+            args[negar + 1..].iter().all(|a| a.contains('(')),
+            "solo reglas después de --disallowedTools: {args:?}"
+        );
+        assert!(args[negar + 1].starts_with("Read("), "{args:?}");
+    }
+
     #[test]
     fn corre_args_traen_cada_pieza() {
         let tmp = TempDir::new().expect("tmp");
         let home = tmp.path().join("root");
         fs::create_dir_all(home.join("oraculos")).expect("oraculos");
-        let args = args_claude("haz el plan", "claude-haiku-5-5", &home);
+        let args = args_claude(
+            "haz el plan",
+            "claude-haiku-5-5",
+            &home,
+            &ClaudeCorrida::default(),
+        );
 
         let posicion = |bandera: &str| {
             args.iter()
@@ -120,7 +178,7 @@ mod tests {
         fs::create_dir_all(real.join("oraculos")).expect("oraculos");
         let enlace = tmp.path().join("enlace");
         std::os::unix::fs::symlink(&real, &enlace).expect("enlace");
-        let args = args_claude("p", "m", &enlace);
+        let args = args_claude("p", "m", &enlace, &ClaudeCorrida::default());
         let canonica = fs::canonicalize(real.join("oraculos")).expect("canonica");
         assert!(
             args.contains(&format!("Read({}/**)", canonica.display())),
@@ -140,6 +198,7 @@ mod tests {
         ];
         let claude = ClaudeCorrida {
             ecc_disabled_hooks: Some("a,b".into()),
+            ..Default::default()
         };
         let env = env_del_builder(&claude, &entorno);
         for prohibida in ["DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY", "ROOT_HOME", "HOME"] {

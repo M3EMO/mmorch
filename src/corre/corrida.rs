@@ -104,7 +104,7 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         let modelo = eleccion.modelo.clone().unwrap_or_default();
         let lanzamiento = Lanzamiento {
             rol: *rol,
-            args: args_claude(&prompt, &modelo, deps.home),
+            args: args_claude(&prompt, &modelo, deps.home, &config_cargada.claude),
             env: env_del_builder(&config_cargada.claude, deps.entorno),
             repo: corrida.repo.clone(),
         };
