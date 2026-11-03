@@ -1020,7 +1020,8 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": 120,
           "minimum": 0
         }
-      }
+      },
+      "additionalProperties": false
     },
     "Jueces": {
       "description": "Sección `[jueces]`: el modelo del juez de la configuración de Cargo (decisión 47). Vía API.\nEl proveedor sale del nombre: `claude-*` es Anthropic y `deepseek-*` es DeepSeek.",
@@ -1053,6 +1054,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           ]
         }
       },
+      "additionalProperties": false,
       "required": [
         "proveedor",
         "modelo"
@@ -1073,7 +1075,8 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "type": "string",
           "default": "opus"
         }
-      }
+      },
+      "additionalProperties": false
     },
     "Precio": {
       "description": "Precio de un modelo, en USD por millón de tokens. Sus dos claves son obligatorias. El tramo alto\n(`umbral_entrada`, `usd_entrada_alto`, `usd_salida_alto`) es opcional, pero va completo o no va.",
@@ -1235,7 +1238,8 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
             }
           }
         }
-      }
+      },
+      "additionalProperties": false
     },
     "TopeBloque": {
       "description": "Tope de cupo por bloque de horas, imitando la ventana del plan.\nLa tabla tiene defaults: si falta una clave, vale el default de esta sección.",

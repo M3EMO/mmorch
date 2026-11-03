@@ -137,7 +137,7 @@ pub struct Jueces {
 
 /// Sección `[proveedores]`: URLs de las APIs, espera base de reintentos y timeout por intento.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ConfigProveedores {
     pub deepseek_url: String,
     pub anthropic_url: String,
@@ -151,7 +151,7 @@ pub struct ConfigProveedores {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Modelos {
     pub planifica: String,
     pub organiza: String,
@@ -225,7 +225,7 @@ pub struct TopeMes {
 
 /// Sección `[ruteo]`: modelo por rol cuando la vía es API, y equivalente de API de cada alias de cupo.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Ruteo {
     pub delega: ModeloApi,
     pub verifica: ModeloApi,
@@ -235,6 +235,7 @@ pub struct Ruteo {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ModeloApi {
     pub proveedor: Proveedor,
     pub modelo: String,
@@ -1072,6 +1073,40 @@ tope_usd = 200.0
         assert_eq!(c.balance.cupo.bloque_horas, 5);
         assert_eq!(c.balance.api.tope_usd, 100.0);
         assert_eq!(c.balance.nube.tope_usd, 250.0);
+    }
+
+    #[test]
+    fn config_clave_desconocida_en_proveedores_da_codigo_2() {
+        let error = Config::desde_texto("[proveedores]\ntimeout_juz_s = 10\n")
+            .expect_err("una clave de [proveedores] mal escrita debe fallar");
+        assert_eq!(error.codigo_de_salida(), 2);
+        assert!(error.to_string().contains("timeout_juz_s"), "{error}");
+    }
+
+    #[test]
+    fn config_clave_desconocida_en_modelos_da_codigo_2() {
+        let error = Config::desde_texto("[modelos]\norganzia = \"opus\"\n")
+            .expect_err("una clave de [modelos] mal escrita debe fallar");
+        assert_eq!(error.codigo_de_salida(), 2);
+        assert!(error.to_string().contains("organzia"), "{error}");
+    }
+
+    #[test]
+    fn config_clave_desconocida_en_ruteo_da_codigo_2() {
+        let error = Config::desde_texto("[ruteo]\ndelegaa = 1\n")
+            .expect_err("una clave de [ruteo] mal escrita debe fallar");
+        assert_eq!(error.codigo_de_salida(), 2);
+        assert!(error.to_string().contains("delegaa"), "{error}");
+    }
+
+    #[test]
+    fn config_clave_desconocida_en_modelo_api_da_codigo_2() {
+        let texto =
+            "[ruteo.delega]\nproveedor = \"deepseek\"\nmodelo = \"deepseek-v4-pro\"\nextra = 1\n";
+        let error =
+            Config::desde_texto(texto).expect_err("una clave extra en ModeloApi debe fallar");
+        assert_eq!(error.codigo_de_salida(), 2);
+        assert!(error.to_string().contains("extra"), "{error}");
     }
 
     #[test]
