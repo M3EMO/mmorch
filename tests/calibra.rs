@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use std::cell::RefCell;
+use std::sync::Mutex;
 
 use root::config::Config;
 use root::observe;
@@ -195,9 +195,9 @@ fn calibra_tarea_dos_corridas_agregan_filas_y_no_borran_las_anteriores() {
 #[test]
 fn calibra_tarea_evalua_la_base_y_cada_caso_con_las_partes_de_su_dimension() {
     let home = home_con_tarea("");
-    let vistas = std::cell::RefCell::new(Vec::<Option<Partes>>::new());
+    let vistas = std::sync::Mutex::new(Vec::<Option<Partes>>::new());
     let evaluador = |_: &Tarea, _: &Path, o: &OpcionesOraculo| {
-        vistas.borrow_mut().push(o.partes);
+        vistas.lock().expect("lock").push(o.partes);
         Ok(veredicto_plano())
     };
     calibrar_tarea(
@@ -210,7 +210,7 @@ fn calibra_tarea_evalua_la_base_y_cada_caso_con_las_partes_de_su_dimension() {
         &evaluador,
     )
     .expect("calibra");
-    let vistas = vistas.borrow();
+    let vistas = vistas.lock().expect("lock");
     // Línea base más cuatro casos: todos con las partes de Seguridad.
     assert_eq!(vistas.len(), 5, "{vistas:?}");
     for partes in vistas.iter() {
@@ -264,9 +264,9 @@ fn calibra_tope_detiene_antes_del_caso_que_no_entra() {
         peor_caso: &peor,
         gasto_desde: &gasto,
     };
-    let llamadas = RefCell::new(0u32);
+    let llamadas = Mutex::new(0u32);
     let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
-        *llamadas.borrow_mut() += 1;
+        *llamadas.lock().expect("lock") += 1;
         gasta(home.path(), 0.30);
         Ok(veredicto_plano())
     };
@@ -285,7 +285,7 @@ fn calibra_tope_detiene_antes_del_caso_que_no_entra() {
     let texto = error.to_string();
     assert!(texto.contains("1.00"), "nombra el tope: {texto}");
     assert!(texto.contains("0.90"), "nombra el gasto: {texto}");
-    assert_eq!(*llamadas.borrow(), 3, "la base y dos casos");
+    assert_eq!(*llamadas.lock().expect("lock"), 3, "la base y dos casos");
 
     let leido = Calibraciones::cargar(home.path()).expect("carga calibracion.json");
     assert_eq!(leido.filas.len(), 1, "las filas hechas quedan");
@@ -343,9 +343,9 @@ fn calibra_tope_antes_de_la_base_no_evalua_ni_escribe_fila() {
         peor_caso: &peor,
         gasto_desde: &gasto,
     };
-    let llamadas = RefCell::new(0u32);
+    let llamadas = Mutex::new(0u32);
     let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
-        *llamadas.borrow_mut() += 1;
+        *llamadas.lock().expect("lock") += 1;
         Ok(veredicto_plano())
     };
     let error = calibrar_tarea_con(
@@ -360,7 +360,7 @@ fn calibra_tope_antes_de_la_base_no_evalua_ni_escribe_fila() {
     )
     .expect_err("la base no entra");
     assert_eq!(error.codigo_de_salida(), 3);
-    assert_eq!(*llamadas.borrow(), 0, "no evalúa nada");
+    assert_eq!(*llamadas.lock().expect("lock"), 0, "no evalúa nada");
     assert!(!home.path().join(ARCHIVO).exists(), "sin casos, sin fila");
     assert_eq!(gates_de_tope(home.path()).len(), 1);
 }
@@ -376,9 +376,9 @@ fn calibra_tope_tras_la_base_sin_casos_no_escribe_fila() {
         peor_caso: &peor,
         gasto_desde: &gasto,
     };
-    let llamadas = RefCell::new(0u32);
+    let llamadas = Mutex::new(0u32);
     let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
-        *llamadas.borrow_mut() += 1;
+        *llamadas.lock().expect("lock") += 1;
         gasta(home.path(), 0.30);
         Ok(veredicto_plano())
     };
@@ -394,7 +394,7 @@ fn calibra_tope_tras_la_base_sin_casos_no_escribe_fila() {
     )
     .expect_err("el tope detiene tras la base");
     assert_eq!(error.codigo_de_salida(), 3);
-    assert_eq!(*llamadas.borrow(), 1, "solo la base");
+    assert_eq!(*llamadas.lock().expect("lock"), 1, "solo la base");
     assert!(
         !home.path().join(ARCHIVO).exists(),
         "sin casos medidos, sin fila"
@@ -428,9 +428,9 @@ fn calibra_tope_sin_precio_del_juez_no_arranca_ni_escribe_fila() {
         peor_caso: &peor,
         gasto_desde: &gasto,
     };
-    let llamadas = RefCell::new(0u32);
+    let llamadas = Mutex::new(0u32);
     let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
-        *llamadas.borrow_mut() += 1;
+        *llamadas.lock().expect("lock") += 1;
         Ok(veredicto_plano())
     };
     // Diseño pide su juez, que no tiene precio: la calibración con tope no arranca.
@@ -447,7 +447,7 @@ fn calibra_tope_sin_precio_del_juez_no_arranca_ni_escribe_fila() {
     .expect_err("sin precio, la calibración con tope no arranca");
     assert_eq!(error.codigo_de_salida(), 2);
     assert!(error.to_string().contains(MODELO_JUEZ), "{error}");
-    assert_eq!(*llamadas.borrow(), 0, "no evalúa nada");
+    assert_eq!(*llamadas.lock().expect("lock"), 0, "no evalúa nada");
     assert!(!home.path().join(ARCHIVO).exists(), "sin fila");
 }
 
@@ -823,10 +823,10 @@ const EFICIENCIA: &str = "\n[eficiencia]\ncmd = \"bench-eficiencia\"\npiso = 500
 
 /// Evaluador que cuenta sus llamadas y devuelve un veredicto sin hallazgos.
 fn evaluador_contador(
-    llamadas: &RefCell<u32>,
+    llamadas: &Mutex<u32>,
 ) -> impl Fn(&Tarea, &Path, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> + '_ {
     move |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
-        *llamadas.borrow_mut() += 1;
+        *llamadas.lock().expect("lock") += 1;
         Ok(veredicto_plano())
     }
 }
@@ -834,7 +834,7 @@ fn evaluador_contador(
 #[test]
 fn eficiencia_sin_bloque_no_aplica_y_no_llama_al_evaluador() {
     let home = home_con_tarea("");
-    let llamadas = RefCell::new(0u32);
+    let llamadas = Mutex::new(0u32);
     let evaluador = evaluador_contador(&llamadas);
     let calibrada = calibrar_tarea_con(
         home.path(),
@@ -847,7 +847,11 @@ fn eficiencia_sin_bloque_no_aplica_y_no_llama_al_evaluador() {
         &evaluador,
     )
     .expect("una dimensión que no aplica no es error");
-    assert_eq!(*llamadas.borrow(), 0, "no corre la base ni los casos");
+    assert_eq!(
+        *llamadas.lock().expect("lock"),
+        0,
+        "no corre la base ni los casos"
+    );
     let fila = &calibrada.fila;
     assert_eq!(fila.no_aplica.as_deref(), Some(MOTIVO_NO_APLICA));
     assert_eq!((fila.n, fila.defectos, fila.limpios), (0, 0, 0));
@@ -866,7 +870,7 @@ fn eficiencia_sin_bloque_no_aplica_y_no_llama_al_evaluador() {
 #[test]
 fn eficiencia_no_aplicable_queda_en_calibracion_json() {
     let home = home_con_tarea("");
-    let llamadas = RefCell::new(0u32);
+    let llamadas = Mutex::new(0u32);
     let evaluador = evaluador_contador(&llamadas);
     calibrar_tarea_con(
         home.path(),
@@ -887,7 +891,7 @@ fn eficiencia_no_aplicable_queda_en_calibracion_json() {
 #[test]
 fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
     let home = home_con_tarea("");
-    let llamadas = RefCell::new(0u32);
+    let llamadas = Mutex::new(0u32);
     let evaluador = evaluador_contador(&llamadas);
     calibrar_tarea_con(
         home.path(),
@@ -1014,7 +1018,7 @@ fn eficiencia_con_bloque_mantiene_la_medicion_previa() {
     // Con `[eficiencia]` la dimensión aplica: la base corre. El evaluador de prueba no da veredicto de
     // Eficiencia, así que la calibración falla como antes, sin fila.
     let home = home_con_tarea(EFICIENCIA);
-    let llamadas = RefCell::new(0u32);
+    let llamadas = Mutex::new(0u32);
     let evaluador = evaluador_contador(&llamadas);
     let error = calibrar_tarea_con(
         home.path(),
@@ -1027,7 +1031,7 @@ fn eficiencia_con_bloque_mantiene_la_medicion_previa() {
         &evaluador,
     )
     .expect_err("sin veredicto de la base no hay fila");
-    assert!(*llamadas.borrow() >= 1, "la base sí corre");
+    assert!(*llamadas.lock().expect("lock") >= 1, "la base sí corre");
     let ErrorOraculo::Infra(mensaje) = &error else {
         panic!("error de infraestructura esperado: {error:?}");
     };
@@ -1086,7 +1090,7 @@ fn eficiencia_no_aplicable_no_borra_las_filas_anteriores() {
         reemplazos: 0,
     };
     agregar(home.path(), &antes).expect("agrega");
-    let llamadas = RefCell::new(0u32);
+    let llamadas = Mutex::new(0u32);
     let evaluador = evaluador_contador(&llamadas);
     calibrar_tarea_con(
         home.path(),
@@ -1123,12 +1127,12 @@ fn veredicto_con(dimension: Dimension, valor: f32, sin: Option<&str>) -> Veredic
 #[test]
 fn calibra_casos_inyeccion_invalida_reemplazada_queda_en_el_renglon() {
     let home = home_con_tarea("");
-    let primera = RefCell::new(true);
+    let primera = Mutex::new(true);
     let evaluador =
         |_: &Tarea, ruta: &Path, _: &OpcionesOraculo| -> Result<Veredicto, ErrorOraculo> {
             Ok(if es_limpia(ruta) {
                 veredicto_con(Dimension::Estructura, 1.0, None)
-            } else if primera.replace(false) {
+            } else if std::mem::replace(&mut *primera.lock().expect("lock"), false) {
                 let motivo = "el código no compila: error[E0432]: unresolved import";
                 veredicto_con(Dimension::Estructura, 1.0, Some(motivo))
             } else {
