@@ -4,9 +4,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -49,6 +49,8 @@ const ARCHIVO_BUILD: &str = "build-requires.txt";
 /// Requisitos de build sin `pyproject.toml`: el respaldo de PEP 517.
 const REQUISITOS_BUILD_RESPALDO: [&str; 2] = ["setuptools", "wheel"];
 const ARCHIVO_PYPROJECT: &str = "pyproject.toml";
+/// Tope de tamaño del `pyproject.toml` de un clon. Un archivo más grande no se lee.
+const TOPE_PYPROJECT_CLON: u64 = 256 * 1024;
 /// `netrc` de pip dentro de la carpeta de trabajo de la descarga. Lleva las claves de los registros que
 /// coinciden con un índice; se borra al terminar la descarga.
 const ARCHIVO_NETRC: &str = "pip.netrc";
@@ -140,11 +142,15 @@ fn nombre_de_spec(spec: &str) -> String {
         .replace(['_', '.'], "-")
 }
 
-/// Versión de un especificador con `==` exacto. `None` si no hay versión fijada.
+/// Versión de un especificador con `==` exacto. `None` si no hay versión fijada. Un comodín como `==1.*`
+/// no fija versión: no se usa su parte fija como versión.
 fn version_fijada(spec: &str) -> Option<String> {
     let (_, resto) = spec.split_once("==")?;
+    let resto = resto.trim();
+    if resto.contains('*') {
+        return None;
+    }
     let version: String = resto
-        .trim()
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '!' | '-'))
         .collect();
@@ -1156,14 +1162,42 @@ fn indice_de_build_de(
     } else {
         requisitos_de_sdists(carpeta, &sdists)?
     };
-    listas.extend(rutas_clon.iter().map(|ruta| {
-        requisitos_de_build(
-            fs::read_to_string(carpeta.join("src").join(ruta).join(ARCHIVO_PYPROJECT))
-                .ok()
-                .as_deref(),
-        )
-    }));
+    listas.extend(
+        rutas_clon
+            .iter()
+            .map(|ruta| requisitos_de_build(pyproject_de_clon(carpeta, ruta).as_deref())),
+    );
     Ok(Some(indice_de_build(&listas)))
+}
+
+/// Texto del `pyproject.toml` de un clon bajo `carpeta/src/<ruta>`. No sigue enlaces: cada componente de la
+/// ruta debe ser carpeta real, y el archivo debe ser regular. Pasa el tope de tamaño, no se lee. Si no cumple,
+/// da `None`, como si no existiera.
+fn pyproject_de_clon(carpeta: &Path, ruta: &str) -> Option<String> {
+    let mut base = carpeta.to_path_buf();
+    for componente in Path::new("src").join(ruta).components() {
+        let Component::Normal(nombre) = componente else {
+            return None;
+        };
+        base.push(nombre);
+        if !fs::symlink_metadata(&base).ok()?.is_dir() {
+            return None;
+        }
+    }
+    let archivo = base.join(ARCHIVO_PYPROJECT);
+    if !fs::symlink_metadata(&archivo).ok()?.is_file() {
+        return None;
+    }
+    let mut texto = Vec::new();
+    fs::File::open(&archivo)
+        .ok()?
+        .take(TOPE_PYPROJECT_CLON + 1)
+        .read_to_end(&mut texto)
+        .ok()?;
+    if texto.len() as u64 > TOPE_PYPROJECT_CLON {
+        return None;
+    }
+    String::from_utf8(texto).ok()
 }
 
 /// Ejecución del contenedor de descarga de Python: sin `/repo`, con las copias de los requisitos en `/trabajo`.
@@ -1390,6 +1424,79 @@ mod tests {
         assert!(!h.detalle.contains("clave"), "{}", h.detalle);
     }
 
+    /// Clon temporal con `src/clon/` vacío. Devuelve la carpeta y la carpeta de afuera del clon.
+    fn clon_de_prueba() -> (tempfile::TempDir, tempfile::TempDir) {
+        let carpeta = tempfile::tempdir().expect("carpeta");
+        let afuera = tempfile::tempdir().expect("afuera");
+        fs::create_dir_all(carpeta.path().join("src").join("clon")).expect("crea el clon");
+        (carpeta, afuera)
+    }
+
+    #[test]
+    fn descarga_pyproject_de_clon_symlink_fuera_del_clon_no_sale() {
+        let (carpeta, afuera) = clon_de_prueba();
+        fs::write(
+            afuera.path().join("pyproject.toml"),
+            "[build-system]\nrequires = [\"pkg-de-afuera\"]\n",
+        )
+        .expect("escribe el archivo de afuera");
+        std::os::unix::fs::symlink(
+            afuera.path().join("pyproject.toml"),
+            carpeta.path().join("src/clon/pyproject.toml"),
+        )
+        .expect("enlace");
+        let (requisitos, _) = indice_de_build_de(carpeta.path(), &["clon".to_string()])
+            .expect("indice")
+            .expect("hay build");
+        assert_eq!(requisitos, respaldo());
+    }
+
+    #[test]
+    fn descarga_pyproject_de_clon_componente_intermedio_symlink_no_se_sigue() {
+        let (carpeta, afuera) = clon_de_prueba();
+        fs::write(
+            afuera.path().join("pyproject.toml"),
+            "[build-system]\nrequires = [\"pkg-de-afuera\"]\n",
+        )
+        .expect("escribe el archivo de afuera");
+        let clon = carpeta.path().join("src/clon");
+        fs::remove_dir(&clon).expect("quita el clon");
+        std::os::unix::fs::symlink(afuera.path(), &clon).expect("enlace al directorio");
+        let (requisitos, _) = indice_de_build_de(carpeta.path(), &["clon".to_string()])
+            .expect("indice")
+            .expect("hay build");
+        assert_eq!(requisitos, respaldo());
+    }
+
+    #[test]
+    fn descarga_pyproject_de_clon_sobre_el_tope_no_se_lee() {
+        let (carpeta, _afuera) = clon_de_prueba();
+        let relleno = "#".repeat(300 * 1024);
+        fs::write(
+            carpeta.path().join("src/clon/pyproject.toml"),
+            format!("{relleno}\n[build-system]\nrequires = [\"hatchling\"]\n"),
+        )
+        .expect("escribe el pyproject grande");
+        let (requisitos, _) = indice_de_build_de(carpeta.path(), &["clon".to_string()])
+            .expect("indice")
+            .expect("hay build");
+        assert_eq!(requisitos, respaldo());
+    }
+
+    #[test]
+    fn descarga_pyproject_de_clon_regular_normal_se_lee() {
+        let (carpeta, _afuera) = clon_de_prueba();
+        fs::write(
+            carpeta.path().join("src/clon/pyproject.toml"),
+            "[build-system]\nrequires = [\"hatchling\"]\n",
+        )
+        .expect("escribe el pyproject");
+        let (requisitos, _) = indice_de_build_de(carpeta.path(), &["clon".to_string()])
+            .expect("indice")
+            .expect("hay build");
+        assert_eq!(requisitos, ["hatchling"]);
+    }
+
     #[test]
     fn descarga_python_contenedor_no_monta_repo_y_recibe_la_copia_de_requisitos() {
         let e = ejecucion_python(
@@ -1585,6 +1692,18 @@ mod tests {
             panic!("un requisito directo sin versión corta");
         };
         assert_eq!(causa, "sin-version-fijada");
+    }
+
+    #[test]
+    fn descarga_version_fijada_comodin_no_es_version_fijada() {
+        assert_eq!(version_fijada("foo==1.*"), None);
+        assert_eq!(version_fijada("foo==1.2.*"), None);
+    }
+
+    #[test]
+    fn descarga_version_fijada_exacta_y_sin_fijar() {
+        assert_eq!(version_fijada("foo==1.2.3"), Some("1.2.3".to_string()));
+        assert_eq!(version_fijada("foo>=1"), None);
     }
 
     /// Tarea de Python mínima escrita en un directorio temporal.
