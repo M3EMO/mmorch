@@ -7,6 +7,7 @@ pub mod args;
 pub mod config;
 pub mod contenedor;
 pub mod corrida;
+mod credencial;
 pub mod ejecutor;
 
 use std::fs;
@@ -28,6 +29,7 @@ use crate::tipos::Rol;
 pub use args::{args_claude, env_del_builder};
 pub use config::{ClaudeCorrida, ConfigCorrida};
 pub use corrida::{DepsCorre, correr};
+pub use credencial::{copiar_sin_mcp, vencimiento_ms, verificar_vigencia};
 pub use ejecutor::{EjecutorBuilder, EjecutorContenedorBuilder, Lanzamiento, SalidaClaude};
 
 /// Errores de una corrida. `Uso` sale con código 2: lo arregla el humano en la config o en la tarea.
