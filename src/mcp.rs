@@ -247,7 +247,13 @@ fn root_registrar(a: &Args) -> Result<Value, Fallo> {
         }
     };
     let detalle = texto_opt(a, "detalle")?;
-    observe::registrar_manual(&corrida, tipo, detalle.as_deref()).map_err(herramienta)?;
+    // `registrar_manual` no recibe `extra`: se arma el evento igual y se marca aquí.
+    let mut ev = observe::evento_manual(&corrida, tipo, detalle.as_deref());
+    if tipo == TipoEvento::PlanAprobado {
+        // Sin esta marca, el evento parece una aprobación tecleada por una persona.
+        ev.extra.insert("origen".into(), json!("mcp"));
+    }
+    observe::registrar(&ev).map_err(|e| herramienta(observe::ErrorObserve::from(e)))?;
     Ok(json!({"registrado": true, "corrida": corrida, "tipo": tipo_texto}))
 }
 
@@ -471,5 +477,34 @@ mod tests {
         ));
         assert_eq!(r[0]["id"], "req-7");
         assert_eq!(r[0]["result"], json!({}));
+    }
+
+    /// Lee el último evento de `corrida` en `eventos.jsonl` de `ROOT_HOME`.
+    fn ultimo_evento_de(corrida: &str) -> Value {
+        let ruta = observe::ruta_eventos();
+        let texto = std::fs::read_to_string(&ruta).expect("lee eventos.jsonl");
+        texto
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .rfind(|v| v["corrida"] == corrida)
+            .expect("hay un evento de la corrida")
+    }
+
+    #[test]
+    fn mcp_unit_plan_aprobado_por_mcp_lleva_origen_mcp() {
+        // Escribe en ROOT_HOME: el test exige que lo fije tools/test-seguro.sh.
+        assert!(
+            std::env::var_os("ROOT_HOME").is_some(),
+            "corre con tools/test-seguro.sh: sin ROOT_HOME fijado no se escribe eventos"
+        );
+        let corrida = format!("mcp-origen-{}", std::process::id());
+        let a: Args = Map::from_iter([
+            ("corrida".to_string(), json!(corrida)),
+            ("tipo".to_string(), json!("plan-aprobado")),
+        ]);
+        assert!(root_registrar(&a).is_ok(), "root_registrar debe registrar");
+        let ev = ultimo_evento_de(&corrida);
+        assert_eq!(ev["tipo"], "plan_aprobado");
+        assert_eq!(ev["extra"]["origen"], "mcp");
     }
 }

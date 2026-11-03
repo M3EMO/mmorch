@@ -7,8 +7,8 @@
 //! test, y vive fuera de `oraculos/`.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use super::junit::{Junit, ResultadoTest};
 use super::{EXCLUIDOS, ErrorOraculo};
 use crate::borrado;
+use crate::observe::jsonl::con_lock_exclusivo;
 use crate::oracle::pendientes::nombre_de_tarea_valido;
 
 /// Carpeta de los historiales dentro de `ROOT_HOME`. Es hermana de `oraculos/`: nunca vive dentro.
@@ -238,7 +239,7 @@ pub fn agregar(ruta: &Path, suite: &str, corridas: &[Junit]) -> Result<(), Error
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0.0, |d| d.as_secs_f64());
-    let mut texto = String::new();
+    let mut lineas = Vec::with_capacity(corridas.len());
     for corrida in corridas {
         let linea = Linea {
             v: VERSION_LINEA,
@@ -252,17 +253,16 @@ pub fn agregar(ruta: &Path, suite: &str, corridas: &[Junit]) -> Result<(), Error
         };
         let json = serde_json::to_string(&linea)
             .map_err(|e| ErrorOraculo::Infra(format!("serializar el historial: {e}")))?;
-        texto.push_str(&json);
-        texto.push('\n');
+        lineas.push(json);
     }
-    let mut archivo: File = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(ruta)
-        .map_err(|e| ErrorOraculo::Infra(format!("abrir el historial {}: {e}", ruta.display())))?;
-    archivo
-        .write_all(texto.as_bytes())
-        .map_err(|e| ErrorOraculo::Infra(format!("escribir el historial: {e}")))
+    // Lock exclusivo: dos procesos que agregan al mismo historial no se pisan.
+    // Umbral `u64::MAX`: el historial nunca rota.
+    con_lock_exclusivo::<(), io::Error>(ruta, |log| {
+        lineas
+            .iter()
+            .try_for_each(|linea| log.agregar(linea, u64::MAX))
+    })
+    .map_err(|e| ErrorOraculo::Infra(format!("escribir el historial {}: {e}", ruta.display())))
 }
 
 /// Borra los historiales de las versiones de `tarea` sin uso en 30 días.
@@ -321,7 +321,7 @@ fn es_hash(nombre: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::fs::{self, OpenOptions};
     use std::path::{Path, PathBuf};
 
     use super::*;
@@ -736,5 +736,72 @@ mod tests {
             clave_de_version(&repo, &en_oculto).expect("clave"),
             clave_de_version(&repo, &en_contrato).expect("clave"),
         );
+    }
+
+    #[test]
+    fn historial_agregar_espera_el_lock_exclusivo() {
+        use fs4::FileExt;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let base = tempfile::tempdir().expect("base");
+        let ruta = base.path().join(ARCHIVO_HISTORIAL);
+        // Otro descriptor toma el lock hermano: `agregar` debe esperar a que se suelte.
+        let candado = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(base.path().join(format!("{ARCHIVO_HISTORIAL}.lock")))
+            .expect("candado");
+        FileExt::lock(&candado).expect("toma el lock");
+        let (tx, rx) = mpsc::channel();
+        let ruta_hilo = ruta.clone();
+        let hilo = std::thread::spawn(move || {
+            let junit = junit_de(&[("test_b::t3", ResultadoTest::Pasa)]);
+            let res = agregar(&ruta_hilo, "oculto", &[junit]);
+            let _ = tx.send(());
+            res
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "agregar no debe correr con el lock tomado por otro"
+        );
+        drop(candado);
+        rx.recv().expect("agregar termina al soltar el lock");
+        hilo.join().expect("hilo").expect("agrega");
+        let (corridas, avisos) = leer(&ruta, "oculto").expect("lee");
+        assert!(avisos.is_empty(), "{avisos:?}");
+        assert_eq!(corridas.len(), 1);
+    }
+
+    #[test]
+    fn historial_agregar_concurrente_no_pierde_ni_mezcla_lineas() {
+        let base = tempfile::tempdir().expect("base");
+        let ruta = base.path().join(ARCHIVO_HISTORIAL);
+        // Id largo: cada línea pesa más de 2 KB, así un append mal hecho se nota.
+        let relleno = "x".repeat(2048);
+        let hilos: Vec<_> = (0..8)
+            .map(|h| {
+                let ruta = ruta.clone();
+                let relleno = relleno.clone();
+                std::thread::spawn(move || {
+                    for ronda in 0..40 {
+                        let corridas: Vec<Junit> = (0..3)
+                            .map(|k| {
+                                let id = format!("test_h{h}_r{ronda}_k{k}_{relleno}");
+                                junit_de(&[(id.as_str(), ResultadoTest::Pasa)])
+                            })
+                            .collect();
+                        agregar(&ruta, "oculto", &corridas).expect("agrega");
+                    }
+                })
+            })
+            .collect();
+        for hilo in hilos {
+            hilo.join().expect("hilo");
+        }
+        let (corridas, avisos) = leer(&ruta, "oculto").expect("lee");
+        assert!(avisos.is_empty(), "líneas mezcladas: {avisos:?}");
+        assert_eq!(corridas.len(), 8 * 40 * 3);
     }
 }

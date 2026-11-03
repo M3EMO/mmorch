@@ -50,7 +50,7 @@ fn resolver_root_home(root_home: Option<PathBuf>, home: Option<PathBuf>) -> Path
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub modelos: Modelos,
     /// Precio por modelo, en USD por millón de tokens.
@@ -195,7 +195,7 @@ impl Precio {
 
 /// Sección `[balance]`: topes duros de gasto. Route los lee; nunca los sube.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Balance {
     /// Fracción del tope de cupo (en (0, 1]) a partir de la cual se prefiere la API.
     pub prefiere_api_sobre: f64,
@@ -207,7 +207,7 @@ pub struct Balance {
 /// Tope de cupo por bloque de horas, imitando la ventana del plan.
 /// La tabla tiene defaults: si falta una clave, vale el default de esta sección.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct TopeBloque {
     /// USD equivalentes de lista por bloque.
     pub tope_usd: f64,
@@ -217,6 +217,7 @@ pub struct TopeBloque {
 /// Tope mensual. Sin defaults por campo: `api` y `nube` tienen topes distintos,
 /// así que un `[balance.nube]` sin `tope_usd` debe fallar en vez de tomar el de la API.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TopeMes {
     /// USD por mes calendario.
     pub tope_usd: f64,
@@ -595,6 +596,16 @@ fn url_de_registro_valida(texto: &str) -> bool {
         && url.password().is_none()
 }
 
+/// Una clave desconocida es un valor mal escrito en `root.toml`: código 2. Lo demás es un TOML
+/// que no se deserializa a `Config`, con el código 3 de siempre.
+fn error_de_config(error: toml::de::Error) -> Error {
+    if error.message().starts_with("unknown field") {
+        Error::ConfigValor(error.message().to_string())
+    } else {
+        Error::ConfigToml(error)
+    }
+}
+
 /// Claves de la raíz de `root.toml` que ya no leen las reglas. Se aceptan con un aviso.
 const CLAVES_RETIRADAS: &[&str] = &["umbral_verde"];
 
@@ -603,7 +614,16 @@ impl Config {
     pub fn desde_texto(texto: &str) -> Result<Config, Error> {
         exigir_topes_declarados(texto)?;
         exigir_precios_declarados(texto)?;
-        let mut config: Config = toml::from_str(texto)?;
+        let mut tabla: toml::Table = toml::from_str(texto)?;
+        // Claves que ya no se usan: un root.toml viejo carga, con un aviso. Se quitan antes de
+        // deserializar, porque `Config` no admite claves desconocidas.
+        let mut retiradas = Vec::new();
+        for clave in CLAVES_RETIRADAS {
+            if tabla.remove(*clave).is_some() {
+                retiradas.push(format!("{clave} ya no se usa; Root lo ignora."));
+            }
+        }
+        let mut config: Config = tabla.try_into().map_err(error_de_config)?;
         // Las entradas del usuario suman a los equivalentes de los defaults; no los reemplazan.
         for (alias, modelo) in Ruteo::default().api_equivalente {
             config.ruteo.api_equivalente.entry(alias).or_insert(modelo);
@@ -617,13 +637,7 @@ impl Config {
             config.precios.entry(modelo).or_insert(precio);
         }
         let mut avisos = traducir_modelos_viejos(&mut config.ruteo);
-        // Claves que ya no se usan: un root.toml viejo carga, con un aviso.
-        let tabla: toml::Table = toml::from_str(texto)?;
-        for clave in CLAVES_RETIRADAS {
-            if tabla.contains_key(*clave) {
-                avisos.push(format!("{clave} ya no se usa; Root lo ignora."));
-            }
-        }
+        avisos.extend(retiradas);
         config.avisos = avisos;
         config.validar()?;
         Ok(config)
@@ -631,7 +645,7 @@ impl Config {
 
     /// Rechaza topes en cero o negativos, `bloque_horas` en cero, `prefiere_api_sobre` fuera de (0, 1],
     /// un precio que no sea finito o sea negativo, y un alias de cupo en `[modelos]` sin
-    /// `api_equivalente` en `[ruteo]`.
+    /// `api_equivalente` en `[ruteo]`, y un `umbral_wilson` que no esté en [0, 1].
     fn validar(&self) -> Result<(), Error> {
         for alias in [
             &self.modelos.planifica,
@@ -725,6 +739,12 @@ impl Config {
                     )));
                 }
             }
+        }
+        let wilson = self.umbral_wilson;
+        if !(wilson.is_finite() && (0.0..=1.0).contains(&wilson)) {
+            return Err(Error::ConfigValor(format!(
+                "umbral_wilson debe estar en [0, 1]: {wilson}"
+            )));
         }
         validar_decision(&self.decision)?;
         validar_registros(&self.registros)
@@ -1055,10 +1075,71 @@ tope_usd = 200.0
     }
 
     #[test]
-    fn route_root_toml_viejo_con_tope_cupo_usd_no_falla() {
-        let c = Config::desde_texto("[balance]\ntope_cupo_usd = 50.0\n")
-            .expect("una clave desconocida no rompe el parseo");
-        assert_eq!(c.balance.cupo.tope_usd, 35.0);
+    fn route_tope_cupo_usd_viejo_da_codigo_2() {
+        // Una clave desconocida en `[balance]` es un tope mal escrito: falla en vez de ignorarse.
+        let error = Config::desde_texto("[balance]\ntope_cupo_usd = 50.0\n")
+            .expect_err("una clave desconocida debe fallar");
+        assert_eq!(error.codigo_de_salida(), 2);
+        assert!(error.to_string().contains("tope_cupo_usd"), "{error}");
+    }
+
+    #[test]
+    fn config_tope_usdd_mal_escrito_en_balance_api_da_codigo_2() {
+        let error = Config::desde_texto("[balance.api]\ntope_usdd = 5\n")
+            .expect_err("un tope mal escrito debe fallar");
+        assert_eq!(error.codigo_de_salida(), 2);
+    }
+
+    #[test]
+    fn config_tope_con_clave_extra_en_balance_api_da_codigo_2_y_nombra_la_clave() {
+        let error = Config::desde_texto("[balance.api]\ntope_usd = 5\nextra = 1\n")
+            .expect_err("una clave extra debe fallar");
+        assert_eq!(error.codigo_de_salida(), 2);
+        assert!(error.to_string().contains("extra"), "{error}");
+    }
+
+    #[test]
+    fn config_clave_desconocida_en_raiz_da_codigo_2() {
+        let error = Config::desde_texto("umbral_wilsn = 0.6\n")
+            .expect_err("una clave de raíz mal escrita debe fallar");
+        assert_eq!(error.codigo_de_salida(), 2);
+        assert!(error.to_string().contains("umbral_wilsn"), "{error}");
+    }
+
+    #[test]
+    fn config_clave_desconocida_en_cupo_da_codigo_2() {
+        let error = Config::desde_texto("[balance.cupo]\ntope_usd = 20.0\nbloque_hora = 4\n")
+            .expect_err("una clave de cupo mal escrita debe fallar");
+        assert_eq!(error.codigo_de_salida(), 2);
+    }
+
+    #[test]
+    fn config_umbral_wilson_fuera_de_0_1_o_no_finito_da_codigo_2() {
+        for texto in [
+            "umbral_wilson = -0.1",
+            "umbral_wilson = 1.5",
+            "umbral_wilson = inf",
+            "umbral_wilson = nan",
+        ] {
+            let error = Config::desde_texto(texto).expect_err(texto);
+            assert_eq!(error.codigo_de_salida(), 2, "{texto}");
+            assert!(error.to_string().contains("umbral_wilson"), "{error}");
+        }
+    }
+
+    #[test]
+    fn config_umbral_wilson_en_los_bordes_carga() {
+        for (texto, valor) in [("umbral_wilson = 0.0", 0.0), ("umbral_wilson = 1.0", 1.0)] {
+            let c = Config::desde_texto(texto).expect("el borde 0 o 1 es válido");
+            assert_eq!(c.umbral_wilson, valor);
+        }
+    }
+
+    #[test]
+    fn config_umbral_verde_retirado_sigue_cargando_aunque_sea_invalido() {
+        // La clave retirada no entra en la validación de tipo: un root.toml viejo carga con aviso.
+        let c = Config::desde_texto("umbral_verde = 7.0\n").expect("una clave retirada carga");
+        assert!(c.avisos.iter().any(|a| a.contains("umbral_verde")));
     }
 
     #[test]

@@ -5,7 +5,7 @@
 
 use std::borrow::Cow;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use fs4::FileExt;
@@ -69,14 +69,37 @@ impl Escritura<'_> {
     }
 
     /// Agrega `linea` y un `\n` al vigente. Si supera `umbral` bytes, lo rota antes de escribir.
+    /// Si el vigente quedó con una línea cortada, sin `\n` final, agrega antes un `\n` propio.
     pub fn agregar(&self, linea: &str, umbral: u64) -> io::Result<()> {
         rotar_si_supera(self.ruta, umbral)?;
+        let salto = if termina_sin_salto(self.ruta)? {
+            "\n"
+        } else {
+            ""
+        };
         let mut archivo = OpenOptions::new()
             .create(true)
             .append(true)
             .open(self.ruta)?;
-        archivo.write_all(format!("{linea}\n").as_bytes())
+        archivo.write_all(format!("{salto}{linea}\n").as_bytes())
     }
+}
+
+/// Dice si el archivo tiene bytes y su último byte no es `\n`. Inexistente o vacío da `false`.
+/// Debe llamarse con el lock tomado.
+fn termina_sin_salto(ruta: &Path) -> io::Result<bool> {
+    let mut archivo = match File::open(ruta) {
+        Ok(archivo) => archivo,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    if archivo.metadata()?.len() == 0 {
+        return Ok(false);
+    }
+    archivo.seek(SeekFrom::End(-1))?;
+    let mut ultimo = [0u8; 1];
+    archivo.read_exact(&mut ultimo)?;
+    Ok(ultimo[0] != b'\n')
 }
 
 /// Líneas no vacías de los archivos de `ruta`, rotados y vigente. Debe llamarse con el lock tomado.
@@ -213,6 +236,28 @@ mod tests {
         agregar(&ruta, r#"{"a":2}"#, UMBRAL_POR_DEFECTO).expect("segunda escritura");
         let texto = fs::read_to_string(&ruta).expect("lee el archivo");
         assert_eq!(texto, "{\"a\":1}\n{\"a\":2}\n");
+    }
+
+    #[test]
+    fn observe_agregar_pone_salto_antes_si_el_vigente_quedo_sin_salto_final() {
+        let dir = TempDir::new().expect("temp dir");
+        let ruta = dir.path().join("eventos.jsonl");
+        fs::write(&ruta, "uno\n{\"cortad").expect("línea cortada");
+        agregar(&ruta, "dos", UMBRAL_POR_DEFECTO).expect("primera");
+        agregar(&ruta, "tres", UMBRAL_POR_DEFECTO).expect("segunda");
+        assert_eq!(
+            leer_lineas(&ruta).expect("lee"),
+            vec!["uno", "{\"cortad", "dos", "tres"]
+        );
+    }
+
+    #[test]
+    fn observe_agregar_a_archivo_vacio_no_pone_salto_extra() {
+        let dir = TempDir::new().expect("temp dir");
+        let ruta = dir.path().join("eventos.jsonl");
+        fs::write(&ruta, "").expect("vacío");
+        agregar(&ruta, "uno", UMBRAL_POR_DEFECTO).expect("escribe");
+        assert_eq!(fs::read_to_string(&ruta).expect("lee"), "uno\n");
     }
 
     #[test]

@@ -951,24 +951,23 @@ fn observa(json: bool, accion: &ObservaAccion) -> Result<(), Error> {
             corrida,
             via,
         } => {
-            let mut eventos = observe::claude::leer_sesion_claude(archivo, corrida)?;
             let via = via.map(|v| match v {
                 ViaRegistro::Cupo => Via::Cupo,
                 ViaRegistro::Nube => Via::Nube,
             });
-            if let Some(via) = via {
-                eventos = observe::uso::con_via(eventos, via);
-            }
-            for ev in &eventos {
-                observe::registrar(ev).map_err(observe::ErrorObserve::from)?;
-            }
-            for gate in observe::claude::gates_de_costo_desconocido(&eventos) {
-                observe::registrar(&gate).map_err(observe::ErrorObserve::from)?;
+            let registro = observe::claude::registrar_sesion_claude(
+                archivo,
+                corrida,
+                via,
+                &observe::ruta_eventos(),
+            )?;
+            for id in &registro.ya_registradas {
+                eprintln!("aviso: la sesión {id} ya está en el log; no se cuenta de nuevo");
             }
             if via == Some(Via::Nube) {
                 observe::uso::gate_nube_si_lleno(observe::ahora().0)?;
             }
-            imprimir_claude(json, eventos.len(), via);
+            imprimir_claude(json, registro.eventos, via);
         }
         ObservaAccion::Costo { usd, motivo, fecha } => {
             let ahora = observe::ahora().0;
