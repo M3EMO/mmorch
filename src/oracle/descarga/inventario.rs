@@ -1295,10 +1295,9 @@ fn lineas_requisitos(repo: &Path) -> Result<Expansion, ErrorOraculo> {
 
 /// Textos que pip necesita: los requisitos y las restricciones (`-c`), ya expandidos. Sin red.
 /// Sin rechazos: el inventario ya los dio. Un repo con rechazos no llega a la descarga.
-pub fn textos_de_requisitos(repo: &Path) -> (String, String) {
-    let Ok(salida) = lineas_requisitos(repo) else {
-        return (String::new(), String::new());
-    };
+/// Un archivo que no se lee es infraestructura: no se devuelve una lista vacía (L14).
+pub fn textos_de_requisitos(repo: &Path) -> Result<(String, String), ErrorOraculo> {
+    let salida = lineas_requisitos(repo)?;
     let unir = |restriccion: bool| -> String {
         let lineas: Vec<&str> = salida
             .lineas
@@ -1312,7 +1311,7 @@ pub fn textos_de_requisitos(repo: &Path) -> (String, String) {
             format!("{}\n", lineas.join("\n"))
         }
     };
-    (unir(false), unir(true))
+    Ok((unir(false), unir(true)))
 }
 
 /// Referencia git que se acepta: `git+…@commit`, con el commit fijo de 7 a 40 hexadecimales (B2, M7).

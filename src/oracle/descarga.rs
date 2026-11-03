@@ -72,13 +72,29 @@ pub enum Accion {
 /// donde pip puede construir (`/cache` es de solo lectura). Si `venv` no funciona (Debian sin `python3-venv`),
 /// instala con `--target` en `/tmp/pydeps` y lo pone en el `PATH` (M10, M12).
 pub const PRELUDIO_PYTHON: &str = "mkdir -p /tmp/fuentes && if [ -d /cache/src ]; then cp -r /cache/src/. /tmp/fuentes/; fi && if python3 -m venv --system-site-packages /tmp/venv-eval; then . /tmp/venv-eval/bin/activate && pip install --no-index --find-links /cache --no-input --disable-pip-version-check -r /cache/requirements-offline.txt; else mkdir -p /tmp/pydeps && python3 -m pip install --no-index --find-links /cache --no-input --disable-pip-version-check --target /tmp/pydeps -r /cache/requirements-offline.txt && export PYTHONPATH=/tmp/pydeps PATH=/tmp/pydeps/bin:$PATH; fi && ";
+/// Como `cache_de_con_error`, y un error de lectura da `None`. Lo usa `src/lib.rs`, que está fuera de la Tarea 51.
+pub fn cache_de(home: &Path, lenguaje: &str, repo: &Path, imagen: &str) -> Option<PathBuf> {
+    cache_de_con_error(home, lenguaje, repo, imagen)
+        .ok()
+        .flatten()
+}
+
 /// Caché de dependencias que la fase de descarga dejó para el repo (`Cargo.lock` o `requirements.txt`).
 /// `None` si no hay, o si el lenguaje no tiene caché. La mira el paquete de Colab (decisión 40).
 /// `imagen` es la de la tarea: en Python entra en la clave, con su digest si podman lo da (M8, desempate 27).
-pub fn cache_de(home: &Path, lenguaje: &str, repo: &Path, imagen: &str) -> Option<PathBuf> {
+///
+/// Esta versión da el error de lectura. `cache_de` lo oculta hasta que `src/lib.rs` use esta (ver informe, L14).
+pub fn cache_de_con_error(
+    home: &Path,
+    lenguaje: &str,
+    repo: &Path,
+    imagen: &str,
+) -> Result<Option<PathBuf>, ErrorOraculo> {
     let (destino, marca) = match lenguaje {
         "rust" => {
-            let bytes = fs::read(repo.join("Cargo.lock")).ok()?;
+            let Ok(bytes) = fs::read(repo.join("Cargo.lock")) else {
+                return Ok(None);
+            };
             let destino = home
                 .join(CARPETA_CACHE)
                 .join(CARPETA_RUST)
@@ -87,18 +103,18 @@ pub fn cache_de(home: &Path, lenguaje: &str, repo: &Path, imagen: &str) -> Optio
         }
         "python" => {
             if !repo.join(ARCHIVO_REQUIREMENTS).is_file() {
-                return None;
+                return Ok(None);
             }
-            let (requisitos, restricciones) = inventario::textos_de_requisitos(repo);
+            let (requisitos, restricciones) = inventario::textos_de_requisitos(repo)?;
             let digest = python::digest_imagen_con(&PodmanReal, imagen);
             let clave =
                 python::clave_cache_python(&requisitos, &restricciones, imagen, digest.as_deref());
             let destino = home.join(CARPETA_CACHE).join(CARPETA_PYTHON).join(clave);
             (destino, "requirements-offline.txt")
         }
-        _ => return None,
+        _ => return Ok(None),
     };
-    destino.join(marca).is_file().then_some(destino)
+    Ok(destino.join(marca).is_file().then_some(destino))
 }
 
 /// Prefijo de cada suite: deja la caché de dependencias visible para cargo, sin escribir en ella.

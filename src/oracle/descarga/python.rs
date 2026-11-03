@@ -590,7 +590,7 @@ fn preparar_python_con(
         ));
     }
     // El texto de `requirements.txt` con sus `-r` seguidos, y las `-c` aparte: pip no ve archivos del repo (C1, M6).
-    let (texto, restricciones) = textos_de_requisitos(repo);
+    let (texto, restricciones) = textos_de_requisitos(repo)?;
     comprobar_imagen_local(deps.podman, &tarea.imagen)?;
     let digest = digest_imagen_con(deps.podman, &tarea.imagen);
     let hash = clave_cache_python(&texto, &restricciones, &tarea.imagen, digest.as_deref());
@@ -1723,7 +1723,8 @@ mod tests {
         let repo = tempfile::tempdir().expect("repo");
         fs::write(repo.path().join("requirements.txt"), "six==1.16.0\n").expect("escribe");
         let tarea = tarea_python_de_prueba();
-        let (texto, restricciones) = textos_de_requisitos(repo.path());
+        let (texto, restricciones) =
+            textos_de_requisitos(repo.path()).expect("textos de requisitos");
         let clave = clave_cache_python(&texto, &restricciones, "python:3.8", None);
         let destino = home
             .path()
