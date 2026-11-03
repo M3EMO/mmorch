@@ -107,9 +107,10 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         let modelo = eleccion.modelo.clone().unwrap_or_default();
         let lanzamiento = Lanzamiento {
             rol: *rol,
-            args: args_claude(&prompt, &modelo, deps.home, &config_cargada.claude),
-            env: env_del_builder(&config_cargada.claude, deps.entorno),
+            args: args_claude(&prompt, &modelo, deps.home, &config_cargada.claude, *rol),
+            env: env_del_builder(&config_cargada.claude, *rol, deps.entorno),
             repo: corrida.repo.clone(),
+            plugin: config_cargada.claude.plugin_de(*rol).map(Path::to_path_buf),
         };
         let salida = match deps.ejecutor.lanzar(&lanzamiento) {
             Ok(salida) => salida,
@@ -903,6 +904,43 @@ mod tests {
             "ningún rol debe salir con código distinto de 0"
         );
         assert_eq!(fila.forma.roles.len(), 2);
+    }
+
+    #[test]
+    fn corre_cada_rol_lleva_su_plugin() {
+        let e = entorno();
+        let plugin_planifica = e.usuario.join("ecc-planifica");
+        let plugin_construye = e.usuario.join("ecc-construye");
+        let texto = format!(
+            "roles = [\"planifica\", \"construye\"]\n[prompt]\nplanifica = \"haz el plan\"\nconstruye = \"haz hecho\"\n[claude.rol.planifica]\nplugin_dir = \"{}\"\n[claude.rol.construye]\nplugin_dir = \"{}\"\n",
+            plugin_planifica.display(),
+            plugin_construye.display()
+        );
+        fs::write(e.home.join("configs").join("ecc-plugin.toml"), texto).expect("config");
+        let builder = Builder::default();
+        correr_con(&e, &builder, &[], "ecc-plugin").expect("corre");
+        let lanzados = builder.lanzados.borrow();
+        assert_eq!(lanzados.len(), 2, "cada rol corre");
+        assert_eq!(
+            lanzados[0].plugin,
+            Some(plugin_planifica),
+            "{:?}",
+            lanzados[0]
+        );
+        assert_eq!(
+            lanzados[1].plugin,
+            Some(plugin_construye),
+            "{:?}",
+            lanzados[1]
+        );
+        assert!(
+            lanzados[1]
+                .args
+                .windows(2)
+                .any(|p| p[0] == "--plugin-dir" && p[1] == "/opt/plugin"),
+            "{:?}",
+            lanzados[1].args
+        );
     }
 
     #[test]

@@ -36,6 +36,21 @@ pub struct ClaudeCorrida {
     /// Modo de permisos de `claude -p`. Ausente si la config no lo trae.
     #[serde(default)]
     pub permission_mode: Option<String>,
+    /// ECC por rol: `[claude.rol.<rol>]`. Ausente si la config no la trae.
+    #[serde(default)]
+    pub rol: BTreeMap<Rol, ClaudeRol>,
+}
+
+/// Config de ECC para un rol: su plugin y el modelo de sus subagentes.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaudeRol {
+    /// Carpeta del plugin de ECC del rol. Debe ser ruta absoluta.
+    #[serde(default)]
+    pub plugin_dir: Option<String>,
+    /// Modelo de los subagentes del rol (`CLAUDE_CODE_SUBAGENT_MODEL`). Ausente si el rol no lo fija.
+    #[serde(default)]
+    pub subagent_model: Option<String>,
 }
 
 /// Modo de permisos de `claude -p` si la config no fija otro.
@@ -47,6 +62,21 @@ impl ClaudeCorrida {
         self.permission_mode
             .as_deref()
             .unwrap_or(MODO_PREDETERMINADO)
+    }
+
+    /// Carpeta del plugin de ECC del rol, si la config la fija.
+    pub fn plugin_de(&self, rol: Rol) -> Option<&Path> {
+        self.rol
+            .get(&rol)
+            .and_then(|config| config.plugin_dir.as_deref())
+            .map(Path::new)
+    }
+
+    /// Modelo de los subagentes del rol, si la config lo fija.
+    pub fn subagent_de(&self, rol: Rol) -> Option<&str> {
+        self.rol
+            .get(&rol)
+            .and_then(|config| config.subagent_model.as_deref())
     }
 }
 
@@ -76,6 +106,24 @@ impl ConfigCorrida {
             }
             if !config.prompt.contains_key(rol) {
                 return Err(format!("falta el prompt de {}", nombre_rol(*rol)));
+            }
+        }
+        for (rol, de_rol) in &config.claude.rol {
+            if !config.roles.contains(rol) {
+                return Err(format!(
+                    "[claude.rol.{}] no está en roles",
+                    nombre_rol(*rol)
+                ));
+            }
+            let relativo = de_rol
+                .plugin_dir
+                .as_deref()
+                .filter(|plugin| !Path::new(plugin).is_absolute());
+            if let Some(plugin) = relativo {
+                return Err(format!(
+                    "el plugin de {} debe ser una ruta absoluta: {plugin}",
+                    nombre_rol(*rol)
+                ));
             }
         }
         Ok(config)
@@ -233,5 +281,90 @@ verifica = "y"
         let forma = con_verificador.forma("ecc-deepseek");
         assert!(forma.verificador);
         assert_eq!(forma.roles, vec![Rol::Construye, Rol::Verifica]);
+    }
+
+    const CONFIG_ECC_HAIKU: &str = include_str!("../../docs/builds/config-ecc-haiku.toml");
+
+    #[test]
+    fn corre_config_carga_claude_rol() {
+        let texto = format!(
+            "{VALIDA}\n[claude.rol.planifica]\nplugin_dir = \"/opt/ecc-plan\"\n\n[claude.rol.construye]\nplugin_dir = \"/opt/ecc-build\"\nsubagent_model = \"haiku\"\n"
+        );
+        let config = ConfigCorrida::desde_texto(&texto).expect("valida");
+        assert_eq!(
+            config.claude.plugin_de(Rol::Planifica),
+            Some(Path::new("/opt/ecc-plan"))
+        );
+        assert_eq!(
+            config.claude.plugin_de(Rol::Construye),
+            Some(Path::new("/opt/ecc-build"))
+        );
+        assert_eq!(config.claude.subagent_de(Rol::Construye), Some("haiku"));
+        assert_eq!(config.claude.subagent_de(Rol::Planifica), None);
+        assert_eq!(config.claude.ecc_disabled_hooks.as_deref(), Some("a,b"));
+    }
+
+    #[test]
+    fn corre_config_sin_claude_rol_no_tiene_plugin_ni_subagentes() {
+        let config = ConfigCorrida::desde_texto(VALIDA).expect("valida");
+        assert_eq!(config.claude.plugin_de(Rol::Planifica), None);
+        assert_eq!(config.claude.subagent_de(Rol::Construye), None);
+    }
+
+    #[test]
+    fn corre_config_docs_ecc_haiku_carga_y_fija_plugins_y_subagentes() {
+        let config = ConfigCorrida::desde_texto(CONFIG_ECC_HAIKU).expect("carga la config");
+        assert_eq!(
+            config.claude.plugin_de(Rol::Planifica),
+            Some(Path::new(
+                "/home/mpera/Proyectos/bench-ecc-sdlc/.ecc-plugin"
+            ))
+        );
+        assert_eq!(
+            config.claude.plugin_de(Rol::Organiza),
+            Some(Path::new(
+                "/home/mpera/Proyectos/bench-ecc-sdlc/.ecc-plugin-haiku"
+            ))
+        );
+        assert_eq!(config.claude.subagent_de(Rol::Organiza), Some("haiku"));
+        assert_eq!(config.claude.subagent_de(Rol::Planifica), None);
+    }
+
+    #[test]
+    fn corre_config_rol_fuera_de_roles_es_error() {
+        let texto = r#"
+roles = ["planifica"]
+[prompt]
+planifica = "x"
+[claude.rol.organiza]
+plugin_dir = "/opt/ecc"
+"#;
+        let error = ConfigCorrida::desde_texto(texto).expect_err("organiza no está en roles");
+        assert!(error.contains("organiza"), "{error}");
+    }
+
+    #[test]
+    fn corre_config_plugin_relativo_es_error() {
+        let texto = r#"
+roles = ["planifica"]
+[prompt]
+planifica = "x"
+[claude.rol.planifica]
+plugin_dir = "relativo/ecc"
+"#;
+        let error = ConfigCorrida::desde_texto(texto).expect_err("plugin relativo");
+        assert!(error.contains("relativo/ecc"), "{error}");
+    }
+
+    #[test]
+    fn corre_config_campo_desconocido_en_rol_es_error() {
+        let texto = r#"
+roles = ["planifica"]
+[prompt]
+planifica = "x"
+[claude.rol.planifica]
+otra = "x"
+"#;
+        assert!(ConfigCorrida::desde_texto(texto).is_err());
     }
 }

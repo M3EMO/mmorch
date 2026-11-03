@@ -19,13 +19,15 @@ use crate::tipos::Rol;
 /// Nombre de la copia de la credencial dentro del estado de `claude`. Es el que ve el builder.
 const CREDENCIAL_COPIA: &str = ".credentials.json";
 
-/// Un `claude -p` de un rol: sus argumentos, su entorno y el repo donde corre.
+/// Un `claude -p` de un rol: sus argumentos, su entorno, el repo donde corre y el plugin de ECC del rol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lanzamiento {
     pub rol: Rol,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
     pub repo: PathBuf,
+    /// Plugin de ECC del rol, en el host. Ausente si el rol no lo trae.
+    pub plugin: Option<PathBuf>,
 }
 
 /// Salida de un lanzamiento. Un código distinto de 0 no es error del ejecutor: lo decide el llamador.
@@ -82,6 +84,9 @@ impl EjecutorBuilder for EjecutorContenedorBuilder {
     fn lanzar(&self, l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre> {
         // La credencial va primero: sin ella no se valida, no se crea nada y no se busca podman.
         revisar_credencial(&self.credencial)?;
+        if let Some(plugin) = &l.plugin {
+            revisar_plugin(plugin)?;
+        }
 
         // El estado de claude va al lado del repo. Todo montaje se valida antes de crear nada.
         let estado = estado_de(&l.repo).ok_or_else(|| {
@@ -90,15 +95,15 @@ impl EjecutorBuilder for EjecutorContenedorBuilder {
                 l.repo.display()
             ))
         })?;
-        validar_montajes(
-            &self.home,
-            &self.home_usuario,
-            &[
-                ("repo", &l.repo),
-                ("estado", &estado),
-                ("credencial", &self.credencial),
-            ],
-        )?;
+        let mut montajes: Vec<(&str, &Path)> = vec![
+            ("repo", l.repo.as_path()),
+            ("estado", estado.as_path()),
+            ("credencial", self.credencial.as_path()),
+        ];
+        if let Some(plugin) = &l.plugin {
+            montajes.push(("plugin", plugin.as_path()));
+        }
+        validar_montajes(&self.home, &self.home_usuario, &montajes)?;
         fs::create_dir_all(&estado).map_err(|fuente| ErrorCorre::Io {
             contexto: format!("crear el estado de claude en {}", estado.display()),
             fuente,
@@ -109,6 +114,11 @@ impl EjecutorBuilder for EjecutorContenedorBuilder {
         // Los montajes van por ruta física: lo que se validó es lo que se monta.
         let mut real = l.clone();
         real.repo = fisica(&l.repo, "el repo")?;
+        real.plugin = l
+            .plugin
+            .as_deref()
+            .map(|plugin| fisica(plugin, "el plugin"))
+            .transpose()?;
         let estado = fisica(&estado, "el estado")?;
         let credencial = fisica(&copia, "la copia de la credencial")?;
         let nombre = nombre_unico();
@@ -164,6 +174,25 @@ fn revisar_credencial(credencial: &Path) -> Result<(), ErrorCorre> {
         Err(_) => Err(ErrorCorre::Ejecutor(format!(
             "no se pudo leer la credencial de Claude en {}",
             credencial.display()
+        ))),
+    }
+}
+
+/// Revisa que el plugin de ECC del rol sea una carpeta. El mensaje nombra solo la ruta.
+fn revisar_plugin(plugin: &Path) -> Result<(), ErrorCorre> {
+    match fs::metadata(plugin) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(ErrorCorre::Ejecutor(format!(
+            "el plugin de ECC no es una carpeta: {}",
+            plugin.display()
+        ))),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(ErrorCorre::Ejecutor(format!(
+            "no existe el plugin de ECC en {}",
+            plugin.display()
+        ))),
+        Err(_) => Err(ErrorCorre::Ejecutor(format!(
+            "no se pudo leer el plugin de ECC en {}",
+            plugin.display()
         ))),
     }
 }
@@ -279,6 +308,7 @@ mod tests {
                 .collect(),
             env,
             repo,
+            plugin: None,
         }
     }
 
@@ -376,6 +406,65 @@ mod tests {
         assert!(
             !tmp.path().join("root").join("corrida").exists(),
             "no debe crear la carpeta del repo dentro de ROOT_HOME"
+        );
+    }
+
+    /// Lanzamiento del rol con `plugin`. El repo va bajo `tmp`, en una corrida.
+    fn con_plugin(tmp: &TempDir, plugin: PathBuf) -> Lanzamiento {
+        let repo = tmp.path().join("usuario/.cache/root/corridas/corre-1/repo");
+        let mut l = lanzamiento(repo, Vec::new());
+        l.plugin = Some(plugin);
+        l
+    }
+
+    #[test]
+    fn corre_contenedor_plugin_inexistente_es_error_que_nombra_la_ruta() {
+        let tmp = TempDir::new().expect("tmp");
+        let (ejecutor, _) = ejecutor_real(&tmp, true);
+        let plugin = tmp.path().join("no-existe-ecc");
+        let error = ejecutor
+            .lanzar(&con_plugin(&tmp, plugin.clone()))
+            .expect_err("sin plugin no hay lanzamiento");
+        assert!(
+            matches!(error, ErrorCorre::Ejecutor(ref m) if m.contains(&plugin.display().to_string())),
+            "{error}"
+        );
+        let estado = tmp
+            .path()
+            .join("usuario/.cache/root/corridas/corre-1/claude-estado");
+        assert!(
+            !estado.exists(),
+            "no debe crear el estado antes de revisar el plugin"
+        );
+    }
+
+    #[test]
+    fn corre_contenedor_plugin_que_es_archivo_es_error() {
+        let tmp = TempDir::new().expect("tmp");
+        let (ejecutor, _) = ejecutor_real(&tmp, true);
+        let plugin = tmp.path().join("plugin-archivo");
+        fs::write(&plugin, "no es carpeta").expect("archivo");
+        let error = ejecutor
+            .lanzar(&con_plugin(&tmp, plugin.clone()))
+            .expect_err("un plugin debe ser carpeta");
+        assert!(
+            matches!(error, ErrorCorre::Ejecutor(ref m) if m.contains(&plugin.display().to_string())),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn corre_contenedor_plugin_dentro_de_root_home_no_lanza() {
+        let tmp = TempDir::new().expect("tmp");
+        let (ejecutor, _) = ejecutor_real(&tmp, true);
+        let plugin = tmp.path().join("root").join("ecc-plugin");
+        fs::create_dir_all(&plugin).expect("plugin");
+        let error = ejecutor
+            .lanzar(&con_plugin(&tmp, plugin))
+            .expect_err("un plugin dentro de ROOT_HOME no se lanza");
+        assert!(
+            matches!(error, ErrorCorre::Ejecutor(ref m) if m.contains("plugin") && m.contains("toca ROOT_HOME")),
+            "{error}"
         );
     }
 

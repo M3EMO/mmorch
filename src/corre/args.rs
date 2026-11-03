@@ -5,15 +5,31 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::config::ClaudeCorrida;
+use super::contenedor::ECC_DATOS_EN_CONTENEDOR;
+use crate::tipos::Rol;
 
 /// Única variable del proceso que pasa al builder, además de la config. Lo demás no pasa.
 const VARIABLES_DEL_PROCESO: &[&str] = &["PATH", "LANG"];
 /// Variable de ECC que la config puede fijar.
 const VARIABLE_HOOKS: &str = "ECC_DISABLED_HOOKS";
+/// Carpeta del plugin de ECC dentro del contenedor. `args_podman_builder` la monta en solo lectura.
+pub(super) const PLUGIN_EN_CONTENEDOR: &str = "/opt/plugin";
+/// Variable que fija cuánto espera `claude -p` a sus procesos en segundo plano. Siempre `0`.
+const VARIABLE_ESPERA: &str = "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS";
+/// Variable que fija el modelo de los subagentes. Solo la trae el rol que la define.
+const VARIABLE_SUBAGENTES: &str = "CLAUDE_CODE_SUBAGENT_MODEL";
+/// Variable que dice a ECC dónde guarda sus datos. Apunta a la carpeta de estado montada.
+const VARIABLE_DATOS_ECC: &str = "ECC_AGENT_DATA_HOME";
 
 /// Argumentos de `claude -p` para un rol. Piden `stream-json`, el modelo, solo el proyecto como fuente de
 /// configuración, ningún MCP, el modo de permisos de la config y la negación de `oraculos/` bajo `home`.
-pub fn args_claude(prompt: &str, modelo: &str, home: &Path, claude: &ClaudeCorrida) -> Vec<String> {
+pub fn args_claude(
+    prompt: &str,
+    modelo: &str,
+    home: &Path,
+    claude: &ClaudeCorrida,
+    rol: Rol,
+) -> Vec<String> {
     let oraculos = ruta_oraculos(home);
     let mut rutas = vec![oraculos.clone()];
     let tal_cual = home.join("oraculos");
@@ -43,6 +59,10 @@ pub fn args_claude(prompt: &str, modelo: &str, home: &Path, claude: &ClaudeCorri
         "project".to_string(),
         "--strict-mcp-config".to_string(),
     ];
+    if claude.plugin_de(rol).is_some() {
+        args.push("--plugin-dir".to_string());
+        args.push(PLUGIN_EN_CONTENEDOR.to_string());
+    }
     args.push("--permission-mode".to_string());
     args.push(claude.modo_permisos().to_string());
     args.push("--disallowedTools".to_string());
@@ -50,10 +70,13 @@ pub fn args_claude(prompt: &str, modelo: &str, home: &Path, claude: &ClaudeCorri
     args
 }
 
-/// Entorno del lanzamiento del builder. De `entorno_del_proceso` solo pasan `PATH` y `LANG`. Si la config
-/// trae `ecc_disabled_hooks`, agrega `ECC_DISABLED_HOOKS`. Nunca pasa claves de API ni `ROOT_HOME`.
+/// Entorno del lanzamiento del builder. De `entorno_del_proceso` solo pasan `PATH` y `LANG`. Siempre fija la
+/// espera de `claude` en `0` y la carpeta de datos de ECC. Si el rol fija `subagent_model`, agrega
+/// `CLAUDE_CODE_SUBAGENT_MODEL`. Si la config trae `ecc_disabled_hooks`, agrega `ECC_DISABLED_HOOKS`.
+/// Nunca pasa claves de API ni `ROOT_HOME`.
 pub fn env_del_builder(
     claude: &ClaudeCorrida,
+    rol: Rol,
     entorno_del_proceso: &[(String, String)],
 ) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = entorno_del_proceso
@@ -61,6 +84,14 @@ pub fn env_del_builder(
         .filter(|(clave, _)| VARIABLES_DEL_PROCESO.contains(&clave.as_str()))
         .cloned()
         .collect();
+    env.push((VARIABLE_ESPERA.to_string(), "0".to_string()));
+    env.push((
+        VARIABLE_DATOS_ECC.to_string(),
+        ECC_DATOS_EN_CONTENEDOR.to_string(),
+    ));
+    if let Some(modelo) = claude.subagent_de(rol) {
+        env.push((VARIABLE_SUBAGENTES.to_string(), modelo.to_string()));
+    }
     if let Some(hooks) = &claude.ecc_disabled_hooks {
         env.push((VARIABLE_HOOKS.to_string(), hooks.clone()));
     }
@@ -76,6 +107,8 @@ fn ruta_oraculos(home: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::corre::config::ClaudeRol;
+    use std::collections::BTreeMap;
     use tempfile::TempDir;
 
     fn par(clave: &str, valor: &str) -> (String, String) {
@@ -91,12 +124,28 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// Config de `claude` con un solo rol: su plugin y su modelo de subagentes.
+    fn con_rol(rol: Rol, plugin: Option<&str>, subagente: Option<&str>) -> ClaudeCorrida {
+        let mut roles = BTreeMap::new();
+        roles.insert(
+            rol,
+            ClaudeRol {
+                plugin_dir: plugin.map(String::from),
+                subagent_model: subagente.map(String::from),
+            },
+        );
+        ClaudeCorrida {
+            rol: roles,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn corre_args_sin_modo_en_config_pasa_auto() {
         let tmp = TempDir::new().expect("tmp");
         let home = tmp.path().join("root");
         fs::create_dir_all(home.join("oraculos")).expect("oraculos");
-        let args = args_claude("p", "m", &home, &ClaudeCorrida::default());
+        let args = args_claude("p", "m", &home, &ClaudeCorrida::default(), Rol::Construye);
         assert_eq!(valor_de(&args, "--permission-mode"), "auto", "{args:?}");
     }
 
@@ -109,7 +158,7 @@ mod tests {
             permission_mode: Some("plan".into()),
             ..Default::default()
         };
-        let args = args_claude("p", "m", &home, &claude);
+        let args = args_claude("p", "m", &home, &claude, Rol::Construye);
         assert_eq!(valor_de(&args, "--permission-mode"), "plan", "{args:?}");
     }
 
@@ -118,7 +167,7 @@ mod tests {
         let tmp = TempDir::new().expect("tmp");
         let home = tmp.path().join("root");
         fs::create_dir_all(home.join("oraculos")).expect("oraculos");
-        let args = args_claude("p", "m", &home, &ClaudeCorrida::default());
+        let args = args_claude("p", "m", &home, &ClaudeCorrida::default(), Rol::Construye);
 
         let modo = args.iter().position(|a| a == "--permission-mode");
         let negar = args.iter().position(|a| a == "--disallowedTools");
@@ -143,6 +192,7 @@ mod tests {
             "claude-haiku-5-5",
             &home,
             &ClaudeCorrida::default(),
+            Rol::Construye,
         );
 
         let posicion = |bandera: &str| {
@@ -178,12 +228,75 @@ mod tests {
         fs::create_dir_all(real.join("oraculos")).expect("oraculos");
         let enlace = tmp.path().join("enlace");
         std::os::unix::fs::symlink(&real, &enlace).expect("enlace");
-        let args = args_claude("p", "m", &enlace, &ClaudeCorrida::default());
+        let args = args_claude("p", "m", &enlace, &ClaudeCorrida::default(), Rol::Construye);
         let canonica = fs::canonicalize(real.join("oraculos")).expect("canonica");
         assert!(
             args.contains(&format!("Read({}/**)", canonica.display())),
             "{args:?}"
         );
+    }
+
+    #[test]
+    fn corre_args_sin_plugin_no_traen_plugin_dir() {
+        let tmp = TempDir::new().expect("tmp");
+        let home = tmp.path().join("root");
+        fs::create_dir_all(home.join("oraculos")).expect("oraculos");
+        let args = args_claude("p", "m", &home, &ClaudeCorrida::default(), Rol::Planifica);
+        assert!(!args.contains(&"--plugin-dir".to_string()), "{args:?}");
+    }
+
+    #[test]
+    fn corre_args_con_plugin_traen_plugin_en_contenedor_antes_de_permisos() {
+        let tmp = TempDir::new().expect("tmp");
+        let home = tmp.path().join("root");
+        fs::create_dir_all(home.join("oraculos")).expect("oraculos");
+        let claude = con_rol(Rol::Planifica, Some("/home/mpera/ecc-plan"), None);
+        let args = args_claude("p", "m", &home, &claude, Rol::Planifica);
+
+        assert_eq!(valor_de(&args, "--plugin-dir"), "/opt/plugin", "{args:?}");
+        let plugin = args.iter().position(|a| a == "--plugin-dir");
+        let modo = args.iter().position(|a| a == "--permission-mode");
+        let negar = args.iter().position(|a| a == "--disallowedTools");
+        let (plugin, modo, negar) = (plugin.unwrap(), modo.unwrap(), negar.unwrap());
+        assert!(
+            plugin < modo,
+            "--plugin-dir debe ir antes de --permission-mode: {args:?}"
+        );
+        assert!(modo < negar, "--disallowedTools va al final: {args:?}");
+        assert!(
+            args[negar + 1..].iter().all(|a| a.contains('(')),
+            "solo reglas después de --disallowedTools: {args:?}"
+        );
+        assert!(
+            args.iter().all(|a| !a.contains("ecc-plan")),
+            "la ruta del host no va a claude: {args:?}"
+        );
+    }
+
+    #[test]
+    fn corre_args_plugin_de_otro_rol_no_se_pasa() {
+        let tmp = TempDir::new().expect("tmp");
+        let home = tmp.path().join("root");
+        fs::create_dir_all(home.join("oraculos")).expect("oraculos");
+        let claude = con_rol(Rol::Planifica, Some("/home/mpera/ecc-plan"), None);
+        let args = args_claude("p", "m", &home, &claude, Rol::Organiza);
+        assert!(!args.contains(&"--plugin-dir".to_string()), "{args:?}");
+    }
+
+    #[test]
+    fn corre_args_traen_cada_pieza_con_plugin() {
+        let tmp = TempDir::new().expect("tmp");
+        let home = tmp.path().join("root");
+        fs::create_dir_all(home.join("oraculos")).expect("oraculos");
+        let claude = con_rol(Rol::Organiza, Some("/home/mpera/ecc-haiku"), Some("haiku"));
+        let args = args_claude("haz", "m", &home, &claude, Rol::Organiza);
+        assert!(
+            args.contains(&"--strict-mcp-config".to_string()),
+            "{args:?}"
+        );
+        assert!(args.contains(&"--verbose".to_string()), "{args:?}");
+        assert_eq!(valor_de(&args, "--setting-sources"), "project", "{args:?}");
+        assert!(args.contains(&"Bash(*oraculos*)".to_string()), "{args:?}");
     }
 
     #[test]
@@ -200,7 +313,7 @@ mod tests {
             ecc_disabled_hooks: Some("a,b".into()),
             ..Default::default()
         };
-        let env = env_del_builder(&claude, &entorno);
+        let env = env_del_builder(&claude, Rol::Construye, &entorno);
         for prohibida in ["DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY", "ROOT_HOME", "HOME"] {
             assert!(
                 env.iter().all(|(k, _)| k != prohibida),
@@ -224,10 +337,62 @@ mod tests {
             par("PATH", "/usr/bin"),
             par("ECC_DISABLED_HOOKS", "del-proceso"),
         ];
-        let env = env_del_builder(&ClaudeCorrida::default(), &entorno);
+        let env = env_del_builder(&ClaudeCorrida::default(), Rol::Construye, &entorno);
         assert!(
             env.iter().all(|(k, _)| k != "ECC_DISABLED_HOOKS"),
             "{env:?}"
         );
+    }
+
+    #[test]
+    fn corre_env_siempre_trae_espera_cero_y_datos_de_ecc() {
+        let entorno = vec![par("PATH", "/usr/bin")];
+        let env = env_del_builder(&ClaudeCorrida::default(), Rol::Planifica, &entorno);
+        assert!(
+            env.contains(&par("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", "0")),
+            "{env:?}"
+        );
+        assert!(
+            env.contains(&par(
+                "ECC_AGENT_DATA_HOME",
+                "/home/builder/.claude/ecc-datos"
+            )),
+            "{env:?}"
+        );
+    }
+
+    #[test]
+    fn corre_env_subagent_model_solo_si_el_rol_lo_define_y_cambia_por_rol() {
+        let mut roles = BTreeMap::new();
+        roles.insert(
+            Rol::Organiza,
+            ClaudeRol {
+                plugin_dir: None,
+                subagent_model: Some("haiku".into()),
+            },
+        );
+        roles.insert(
+            Rol::Planifica,
+            ClaudeRol {
+                plugin_dir: None,
+                subagent_model: Some("sonnet".into()),
+            },
+        );
+        roles.insert(Rol::Construye, ClaudeRol::default());
+        let claude = ClaudeCorrida {
+            rol: roles,
+            ..Default::default()
+        };
+        let entorno = vec![par("PATH", "/usr/bin")];
+        let subagente = |rol: Rol| {
+            env_del_builder(&claude, rol, &entorno)
+                .into_iter()
+                .find(|(k, _)| k == "CLAUDE_CODE_SUBAGENT_MODEL")
+                .map(|(_, v)| v)
+        };
+        assert_eq!(subagente(Rol::Organiza), Some("haiku".to_string()));
+        assert_eq!(subagente(Rol::Planifica), Some("sonnet".to_string()));
+        assert_eq!(subagente(Rol::Construye), None);
+        assert_eq!(subagente(Rol::Verifica), None);
     }
 }

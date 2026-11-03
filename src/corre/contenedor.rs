@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::ErrorCorre;
+use super::args::PLUGIN_EN_CONTENEDOR;
 use super::ejecutor::Lanzamiento;
 use crate::oracle::contenedor::PROXY_FUERA;
 
@@ -20,6 +21,8 @@ pub const TIMEOUT_BUILDER: Duration = Duration::from_secs(2 * 60 * 60);
 const CARPETA_ESTADO: &str = "claude-estado";
 /// Destino del estado de `claude` dentro del contenedor: el HOME del builder.
 const ESTADO_EN_CONTENEDOR: &str = "/home/builder/.claude";
+/// Carpeta de datos de ECC del builder. Vive dentro del estado montado: cada corrida tiene la suya.
+pub(super) const ECC_DATOS_EN_CONTENEDOR: &str = "/home/builder/.claude/ecc-datos";
 /// Destino de la credencial dentro del contenedor.
 const CREDENCIAL_EN_CONTENEDOR: &str = "/home/builder/.claude/.credentials.json";
 /// Variables que no pasan al contenedor, aunque el lanzamiento las traiga. Es la segunda defensa: la
@@ -69,6 +72,10 @@ pub fn args_podman_builder(
     montaje(&mut args, &l.repo, "/trabajo", "rw,Z");
     montaje(&mut args, estado, ESTADO_EN_CONTENEDOR, "rw,Z");
     montaje(&mut args, credencial, CREDENCIAL_EN_CONTENEDOR, "ro,Z");
+    if let Some(plugin) = &l.plugin {
+        // Minúscula `z`: el plugin es compartido entre corridas, así que su etiqueta no se cambia.
+        montaje(&mut args, plugin, PLUGIN_EN_CONTENEDOR, "ro,z");
+    }
     for (clave, valor) in &l.env {
         if VARIABLES_PROHIBIDAS.contains(&clave.as_str()) {
             continue;
@@ -143,6 +150,7 @@ mod tests {
                 .collect(),
             env,
             repo,
+            plugin: None,
         }
     }
 
@@ -333,6 +341,55 @@ mod tests {
             args.iter().all(|a| !a.contains(&root)),
             "ROOT_HOME {root} aparece en {args:?}"
         );
+    }
+
+    #[test]
+    fn corre_builder_args_montan_el_plugin_en_solo_lectura_en_opt_plugin() {
+        let d = disposicion();
+        let mut l = lanzamiento(d.repo.clone(), Vec::new());
+        let plugin = d.usuario.join("ecc-plugin");
+        fs::create_dir_all(&plugin).expect("plugin");
+        l.plugin = Some(plugin.clone());
+        let args = argumentos(&d, &l);
+        let montaje_plugin = format!("{}:/opt/plugin:ro,z", plugin.display());
+        assert!(args.contains(&montaje_plugin), "{args:?}");
+        let pos_credencial = args
+            .iter()
+            .position(|a| a.ends_with(":/home/builder/.claude/.credentials.json:ro,Z"))
+            .expect("credencial");
+        let pos_plugin = args
+            .iter()
+            .position(|a| *a == montaje_plugin)
+            .expect("plugin");
+        assert!(
+            pos_credencial < pos_plugin,
+            "el plugin va después de la credencial: {args:?}"
+        );
+    }
+
+    #[test]
+    fn corre_builder_args_sin_plugin_no_montan_opt_plugin() {
+        let d = disposicion();
+        let args = argumentos(&d, &lanzamiento(d.repo.clone(), Vec::new()));
+        assert!(args.iter().all(|a| !a.contains(":/opt/plugin")), "{args:?}");
+    }
+
+    #[test]
+    fn corre_builder_montajes_con_plugin_no_tocan_root_home() {
+        let d = disposicion();
+        let mut l = lanzamiento(d.repo.clone(), Vec::new());
+        l.plugin = Some(d.usuario.join("ecc-plugin"));
+        let args = argumentos(&d, &l);
+        assert_eq!(origenes_de(&args).len(), 4, "{args:?}");
+        for origen in origenes_de(&args) {
+            let origen = PathBuf::from(&origen);
+            assert!(
+                origen != d.root && !origen.starts_with(&d.root) && !d.root.starts_with(&origen),
+                "el montaje {} toca ROOT_HOME {}",
+                origen.display(),
+                d.root.display()
+            );
+        }
     }
 
     #[test]
