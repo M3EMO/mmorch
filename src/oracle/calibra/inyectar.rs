@@ -8,6 +8,7 @@ use std::io;
 use std::path::Path;
 
 use crate::borrado;
+use crate::oracle::perfiles::rust::LimitesEstructura;
 use crate::tipos::Dimension;
 
 /// Defecto que se inyecta en una copia. Cada uno apunta a una dimensión y a un ítem de rúbrica.
@@ -85,34 +86,50 @@ pub struct Inyeccion {
     pub linea: u32,
 }
 
+/// Lo que `inyectar_con` necesita además de la copia y la semilla.
+pub struct Contexto<'a> {
+    /// Capas de `[arquitectura]` de la tarea.
+    pub capas: &'a [Vec<String>],
+    /// Funciones del camino caliente (Tarea 12). Vacía: el bucle cae en cualquier función.
+    pub camino_caliente: &'a [String],
+    /// Límites de la sonda de estructura. El defecto `ArchivoDios` los usa para pasar la sonda.
+    pub limites: &'a LimitesEstructura,
+}
+
 /// Aplica `defecto` a la copia de repo Rust en `dir`. `capas` son las de `[arquitectura]` de la tarea.
 /// `Ok(None)` si el defecto no se puede aplicar a ese repo: no hay Dockerfile, no hay tests, etc.
+/// Usa los límites por defecto de la sonda de estructura.
 pub fn inyectar(
     defecto: Defecto,
     dir: &Path,
     capas: &[Vec<String>],
     semilla: u64,
 ) -> io::Result<Option<Inyeccion>> {
-    inyectar_con(defecto, dir, capas, &[], semilla)
+    let limites = LimitesEstructura::default();
+    let contexto = Contexto {
+        capas,
+        camino_caliente: &[],
+        limites: &limites,
+    };
+    inyectar_con(defecto, dir, &contexto, semilla)
 }
 
-/// Como `inyectar`, con `camino_caliente` (Tarea 12, desempate 42). Con la lista no vacía, el bucle O(n²)
-/// cae solo al inicio de una de esas funciones, elegida con la semilla entre las que existen en la copia.
-/// Si ninguna existe, `Ok(None)`. Los demás defectos no usan la lista.
+/// Como `inyectar`, con el `Contexto` completo. Con `camino_caliente` no vacía (Tarea 12, desempate 42), el
+/// bucle O(n²) cae solo al inicio de una de esas funciones, elegida con la semilla entre las que existen en
+/// la copia. Si ninguna existe, `Ok(None)`. Los demás defectos no usan la lista.
 pub fn inyectar_con(
     defecto: Defecto,
     dir: &Path,
-    capas: &[Vec<String>],
-    camino_caliente: &[String],
+    contexto: &Contexto,
     semilla: u64,
 ) -> io::Result<Option<Inyeccion>> {
     let mut rng = Prng::nuevo(semilla);
     let lugar = match defecto {
         Defecto::SecretoEnCodigo => secreto(dir, &mut rng)?,
         Defecto::PanicoEnEntrada => panico(dir, &mut rng)?,
-        Defecto::BucleCuadratico => bucle(dir, camino_caliente, &mut rng)?,
-        Defecto::CicloEntreCapas => ciclo(dir, capas, &mut rng)?,
-        Defecto::ArchivoDios => dios(dir, &mut rng)?,
+        Defecto::BucleCuadratico => bucle(dir, contexto.camino_caliente, &mut rng)?,
+        Defecto::CicloEntreCapas => ciclo(dir, contexto.capas, &mut rng)?,
+        Defecto::ArchivoDios => dios(dir, contexto.limites, &mut rng)?,
         Defecto::ModuloBorrado => modulo_borrado(dir, &mut rng)?,
         Defecto::ErrorTragado => error_tragado(dir, &mut rng)?,
         Defecto::AssertBorrado => assert_borrado(dir, &mut rng)?,
@@ -384,41 +401,87 @@ fn ciclo(dir: &Path, capas: &[Vec<String>], rng: &mut Prng) -> io::Result<Lugar>
     Ok(Some((archivo, linea_de(&texto, &uso))))
 }
 
-/// Concatena los otros módulos de primer nivel dentro de un archivo de `src/`, como módulos en línea.
-/// Los archivos originales quedan en la copia: lo que crece es el archivo destino.
-fn dios(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
-    // (ruta, nombre del módulo, contenido) de cada archivo de primer nivel que puede entrar o recibir.
-    let mut modulos: Vec<(String, String, String)> = Vec::new();
+/// Agrega funciones de relleno a un módulo de primer nivel de `src/`, hasta que el archivo pasa el límite de
+/// archivo y una función pasa el de función. Los demás archivos no cambian. Cada función de relleno es válida,
+/// no tiene dependencias y no tiene uso. Devuelve el archivo y la línea de su primera función.
+fn dios(dir: &Path, limites: &LimitesEstructura, rng: &mut Prng) -> io::Result<Lugar> {
+    let mut destinos: Vec<String> = Vec::new();
     for archivo in rust_en(dir, "src")? {
         let nombre = archivo.trim_start_matches("src/");
         if nombre.contains('/') || nombre == "lib.rs" || nombre == "main.rs" {
             continue;
         }
         let stem = nombre.trim_end_matches(".rs");
-        if !es_identificador(stem) {
-            continue;
+        if es_identificador(stem) {
+            destinos.push(archivo);
         }
-        let texto = leer(dir, &archivo)?;
-        modulos.push((archivo.clone(), stem.to_string(), texto));
     }
-    let Some(destino) = rng.elegir(&modulos).map(|m| m.0.clone()) else {
+    let Some(destino) = rng.elegir(&destinos).cloned() else {
         return Ok(None);
     };
-    // Un módulo con `mod x;` apunta a archivos hijos: no se pasa a línea.
-    let fuentes: Vec<&(String, String, String)> = modulos
-        .iter()
-        .filter(|m| m.0 != destino)
-        .filter(|m| !m.2.lines().any(|l| nombre_de_declaracion(l).is_some()))
-        .collect();
-    if fuentes.is_empty() {
-        return Ok(None);
-    }
     let mut texto = leer(dir, &destino)?;
-    for (_, stem, contenido) in fuentes {
-        texto.push_str(&format!("\npub mod concat_{stem} {{\n{contenido}\n}}\n"));
+    // Una función de `funcion_lineas + 1` líneas de cuerpo pasa el límite. Cada una agrega líneas al archivo.
+    let largo = limites.funcion_lineas.saturating_add(1);
+    let mut numero = 1;
+    let mut primera = None;
+    while primera.is_none() || texto.lines().count() <= limites.archivo_lineas {
+        while texto.contains(&format!("fn relleno_calibracion_{numero}(")) {
+            numero += 1;
+        }
+        texto = insertar_antes_de_tests(&texto, &relleno(numero, largo));
+        if primera.is_none() {
+            primera = Some(numero);
+        }
+        numero += 1;
     }
+    let primera = primera.unwrap_or(1);
     escribir(dir, &destino, &texto)?;
-    Ok(Some((destino, linea_de(&texto, "pub mod concat_"))))
+    Ok(Some((
+        destino,
+        linea_de(&texto, &format!("pub fn relleno_calibracion_{primera}(")),
+    )))
+}
+
+/// Función de relleno `relleno_calibracion_<numero>` con `largo` líneas de cuerpo. Cada línea del cuerpo
+/// tiene constantes propias, así que ningún bloque de líneas se repite en el archivo.
+fn relleno(numero: usize, largo: usize) -> Vec<String> {
+    let mut bloque = vec![
+        "#[allow(dead_code)]".to_string(),
+        format!("pub fn relleno_calibracion_{numero}(entrada: u32) -> u32 {{"),
+        "    let mut acumulado = entrada;".to_string(),
+    ];
+    for i in 0..largo {
+        let k = numero * 100_000 + i;
+        bloque.push(format!(
+            "    acumulado = acumulado.wrapping_mul({}).wrapping_add({});",
+            2 * k + 1,
+            7 * k + 3
+        ));
+    }
+    bloque.push("    acumulado".to_string());
+    bloque.push("}".to_string());
+    bloque
+}
+
+/// Inserta `bloque` antes de `#[cfg(test)]`, o al final si no hay tests. Va con una línea en blanco antes.
+fn insertar_antes_de_tests(texto: &str, bloque: &[String]) -> String {
+    let mut lineas = partir(texto);
+    let limite = limite_de_produccion(&lineas);
+    let mut entrada = vec![String::new()];
+    entrada.extend(bloque.iter().cloned());
+    if limite < lineas.len() {
+        entrada.push(String::new());
+        lineas.splice(limite..limite, entrada);
+    } else {
+        // Sin tests: el último elemento es lo que sigue al salto final, si el texto termina en `\n`.
+        let fin = if lineas.last().is_some_and(String::is_empty) {
+            lineas.len() - 1
+        } else {
+            lineas.len()
+        };
+        lineas.splice(fin..fin, entrada);
+    }
+    unir(&lineas)
 }
 
 /// Nombre de `mod x;` o `pub mod x;` (con `pub(crate)` también). `None` si la línea no declara un archivo.
@@ -846,19 +909,184 @@ mod tests {
         assert_eq!(sola, None, "con una sola capa no hay capa posterior");
     }
 
+    /// Sonda real de estructura sobre `dir`, con los límites por defecto y sin requisitos.
+    fn sonda_estructura(dir: &Path) -> crate::oracle::perfiles::ResultadoSonda {
+        crate::oracle::perfiles::rust::estructura_nativa(dir, &[], &LimitesEstructura::default())
+    }
+
     #[test]
-    fn inyectar_dios_concatena_los_otros_modulos_en_un_archivo() {
+    fn inyectar_dios_agrega_funciones_largas_y_no_toca_los_otros_modulos() {
         let (inyeccion, antes, despues) = aplicar(Defecto::ArchivoDios, 42);
-        let archivo = inyeccion.expect("hay módulos top-level").archivo;
+        let inyeccion = inyeccion.expect("hay módulos de primer nivel");
+        let archivo = inyeccion.archivo.clone();
         assert_ne!(archivo, "src/lib.rs");
         assert_eq!(cambiados(&antes, &despues), vec![archivo.clone()]);
         let nuevo = &despues[&archivo];
-        assert_eq!(
-            nuevo.matches("pub mod concat_").count(),
-            2,
-            "entran los otros dos módulos"
+        assert!(
+            nuevo.starts_with(&antes[&archivo]),
+            "el contenido original queda como prefijo"
         );
-        assert!(nuevo.len() > antes[&archivo].len() * 2, "el archivo crece");
+        let limites = LimitesEstructura::default();
+        assert!(
+            nuevo.lines().count() > limites.archivo_lineas,
+            "el archivo pasa el límite de archivo: {}",
+            nuevo.lines().count()
+        );
+        let primera = linea_de(nuevo, "pub fn relleno_calibracion_");
+        assert_eq!(
+            inyeccion.linea, primera,
+            "la línea es la de la primera función"
+        );
+        assert!(
+            nuevo.contains("fn relleno_calibracion_"),
+            "agrega funciones de relleno"
+        );
+        assert!(!nuevo.contains("concat_"), "ya no copia otros módulos");
+    }
+
+    #[test]
+    fn inyectar_dios_la_sonda_real_ve_archivo_grande_y_funcion_larga_sin_bloques_duplicados() {
+        let dir = copia_fixture();
+        let inyeccion = inyectar(Defecto::ArchivoDios, dir.path(), &capas_fixture(), 42)
+            .expect("E/S")
+            .expect("aplica");
+        let resultado = sonda_estructura(dir.path());
+        let de_archivo: Vec<_> = resultado
+            .hallazgos
+            .iter()
+            .filter(|h| h.archivo == inyeccion.archivo)
+            .collect();
+        assert!(
+            de_archivo
+                .iter()
+                .any(|h| h.severidad == 2 && h.detalle.starts_with("archivo grande")),
+            "hallazgo de archivo grande: {:?}",
+            resultado.hallazgos
+        );
+        assert!(
+            de_archivo
+                .iter()
+                .any(|h| h.severidad == 2 && h.detalle.starts_with("función de")),
+            "hallazgo de función larga: {:?}",
+            resultado.hallazgos
+        );
+        assert!(
+            !resultado
+                .hallazgos
+                .iter()
+                .any(|h| h.detalle.contains("repetido en")),
+            "sin bloques duplicados: {:?}",
+            resultado.hallazgos
+        );
+    }
+
+    /// `cargo check --offline` sobre `dir`, con el target en `objetivo`. Devuelve el stderr si falla.
+    fn cargo_check(dir: &Path, objetivo: &Path) -> Result<(), String> {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+        let salida = std::process::Command::new(cargo)
+            .arg("check")
+            .arg("--offline")
+            .current_dir(dir)
+            .env("CARGO_TARGET_DIR", objetivo)
+            .output()
+            .expect("lanza cargo check");
+        if salida.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&salida.stderr).into_owned())
+        }
+    }
+
+    /// Repo donde `dos` nombra `super::uno`: con `dos` concatenado dentro de `uno`, esa ruta ya no existe.
+    fn repo_con_super() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("temporal");
+        std::fs::create_dir_all(dir.path().join("src")).expect("src");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"super-repo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .expect("Cargo.toml");
+        std::fs::write(
+            dir.path().join("src/lib.rs"),
+            "pub mod uno;\npub mod dos;\n",
+        )
+        .expect("lib.rs");
+        std::fs::write(
+            dir.path().join("src/uno.rs"),
+            "pub fn base() -> u32 {\n    1\n}\n",
+        )
+        .expect("uno.rs");
+        std::fs::write(
+            dir.path().join("src/dos.rs"),
+            "use super::uno::base;\n\npub fn usa() -> u32 {\n    base() + 1\n}\n",
+        )
+        .expect("dos.rs");
+        dir
+    }
+
+    #[test]
+    fn inyectar_dios_la_copia_compila_con_rutas_super() {
+        let objetivo = tempfile::tempdir().expect("temporal");
+        for semilla in 1..=6u64 {
+            let dir = repo_con_super();
+            inyectar(Defecto::ArchivoDios, dir.path(), &[], semilla)
+                .expect("E/S")
+                .expect("aplica");
+            if let Err(stderr) = cargo_check(dir.path(), objetivo.path()) {
+                panic!("semilla {semilla}: la copia no compila:\n{stderr}");
+            }
+        }
+    }
+
+    #[test]
+    fn inyectar_dios_la_copia_del_fixture_compila() {
+        let dir = copia_fixture();
+        inyectar(Defecto::ArchivoDios, dir.path(), &capas_fixture(), 42)
+            .expect("E/S")
+            .expect("aplica");
+        let objetivo = tempfile::tempdir().expect("temporal");
+        if let Err(stderr) = cargo_check(dir.path(), objetivo.path()) {
+            panic!("la copia del fixture no compila:\n{stderr}");
+        }
+    }
+
+    #[test]
+    fn inyectar_dios_con_limites_chicos_agrega_menos_relleno() {
+        let lineas_con = |archivo_lineas: usize| {
+            let dir = copia_fixture();
+            let capas = capas_fixture();
+            let limites = LimitesEstructura {
+                archivo_lineas,
+                funcion_lineas: 80,
+                bloque_lineas: 10,
+            };
+            let contexto = Contexto {
+                capas: &capas,
+                camino_caliente: &[],
+                limites: &limites,
+            };
+            let inyeccion = inyectar_con(Defecto::ArchivoDios, dir.path(), &contexto, 42)
+                .expect("E/S")
+                .expect("aplica");
+            arbol(dir.path())[&inyeccion.archivo].lines().count()
+        };
+        assert!(
+            lineas_con(60) < lineas_con(500),
+            "con archivo_lineas 60 hay menos relleno que con 500"
+        );
+    }
+
+    #[test]
+    fn inyectar_dios_sin_modulos_de_primer_nivel_no_aplica() {
+        let dir = tempfile::tempdir().expect("temporal");
+        std::fs::create_dir_all(dir.path().join("src")).expect("src");
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn uno() -> u32 { 1 }\n")
+            .expect("lib.rs");
+        let antes = arbol(dir.path());
+        let inyeccion =
+            inyectar(Defecto::ArchivoDios, dir.path(), &capas_fixture(), 42).expect("E/S");
+        assert_eq!(inyeccion, None);
+        assert_eq!(arbol(dir.path()), antes, "no toca el repo");
     }
 
     #[test]
@@ -955,6 +1183,23 @@ mod tests {
         }
     }
 
+    /// `inyectar_con` con las capas del fixture, los límites por defecto y el camino caliente `camino`.
+    fn con_camino(
+        defecto: Defecto,
+        dir: &Path,
+        camino: &[String],
+        semilla: u64,
+    ) -> io::Result<Option<Inyeccion>> {
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        let contexto = Contexto {
+            capas: &capas,
+            camino_caliente: camino,
+            limites: &limites,
+        };
+        inyectar_con(defecto, dir, &contexto, semilla)
+    }
+
     /// Repo de prueba con dos funciones de producción: `procesar` y `otra`.
     fn repo_con_dos_funciones() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("temporal");
@@ -972,15 +1217,9 @@ mod tests {
         for semilla in 1..=20u64 {
             let dir = repo_con_dos_funciones();
             let lista = vec!["procesar".to_string()];
-            let inyeccion = inyectar_con(
-                Defecto::BucleCuadratico,
-                dir.path(),
-                &capas_fixture(),
-                &lista,
-                semilla,
-            )
-            .expect("no falla la E/S")
-            .expect("procesar existe: el bucle aplica");
+            let inyeccion = con_camino(Defecto::BucleCuadratico, dir.path(), &lista, semilla)
+                .expect("no falla la E/S")
+                .expect("procesar existe: el bucle aplica");
             assert_eq!(inyeccion.archivo, "src/lib.rs");
             let texto = std::fs::read_to_string(dir.path().join("src/lib.rs")).expect("lib.rs");
             let lineas: Vec<&str> = texto.lines().collect();
@@ -1003,22 +1242,8 @@ mod tests {
         for semilla in 1..=20u64 {
             let a = repo_con_dos_funciones();
             let b = repo_con_dos_funciones();
-            let ia = inyectar_con(
-                Defecto::BucleCuadratico,
-                a.path(),
-                &capas_fixture(),
-                &lista,
-                semilla,
-            )
-            .expect("E/S");
-            let ib = inyectar_con(
-                Defecto::BucleCuadratico,
-                b.path(),
-                &capas_fixture(),
-                &lista,
-                semilla,
-            )
-            .expect("E/S");
+            let ia = con_camino(Defecto::BucleCuadratico, a.path(), &lista, semilla).expect("E/S");
+            let ib = con_camino(Defecto::BucleCuadratico, b.path(), &lista, semilla).expect("E/S");
             assert_eq!(ia, ib, "semilla {semilla}: el mismo lugar");
             assert_eq!(
                 arbol(a.path()),
@@ -1049,14 +1274,7 @@ mod tests {
         )
         .expect("lib.rs");
         let lista = vec!["procesar".to_string()];
-        let sin = inyectar_con(
-            Defecto::BucleCuadratico,
-            dir.path(),
-            &capas_fixture(),
-            &lista,
-            42,
-        )
-        .expect("E/S");
+        let sin = con_camino(Defecto::BucleCuadratico, dir.path(), &lista, 42).expect("E/S");
         assert_eq!(sin, None, "procesar no es procesar_todo");
     }
 
@@ -1065,14 +1283,7 @@ mod tests {
         let dir = repo_con_dos_funciones();
         let antes = arbol(dir.path());
         let lista = vec!["no_existe".to_string()];
-        let inyeccion = inyectar_con(
-            Defecto::BucleCuadratico,
-            dir.path(),
-            &capas_fixture(),
-            &lista,
-            42,
-        )
-        .expect("E/S");
+        let inyeccion = con_camino(Defecto::BucleCuadratico, dir.path(), &lista, 42).expect("E/S");
         assert_eq!(inyeccion, None, "ninguna función de la lista existe");
         assert_eq!(arbol(dir.path()), antes, "no toca el repo");
     }
@@ -1089,14 +1300,7 @@ mod tests {
                 semilla,
             )
             .expect("E/S");
-            let ib = inyectar_con(
-                Defecto::BucleCuadratico,
-                b.path(),
-                &capas_fixture(),
-                &[],
-                semilla,
-            )
-            .expect("E/S");
+            let ib = con_camino(Defecto::BucleCuadratico, b.path(), &[], semilla).expect("E/S");
             assert_eq!(ia, ib, "semilla {semilla}");
             assert_eq!(arbol(a.path()), arbol(b.path()), "semilla {semilla}");
         }

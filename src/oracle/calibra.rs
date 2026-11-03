@@ -275,7 +275,14 @@ fn calibrar_medida(
             let defecto = defectos[rotacion % defectos.len()];
             rotacion += 1;
             let semilla_caso = semilla.wrapping_add(i as u64);
-            let aplicado = inyectar::inyectar_con(defecto, &copia, capas, camino, semilla_caso)
+            // La tarea no declara límites de estructura: se usan los de la sonda (`sondas_nativas`).
+            let limites = crate::oracle::perfiles::rust::LimitesEstructura::default();
+            let contexto = inyectar::Contexto {
+                capas,
+                camino_caliente: camino,
+                limites: &limites,
+            };
+            let aplicado = inyectar::inyectar_con(defecto, &copia, &contexto, semilla_caso)
                 .map_err(|e| super::infra("inyectar un defecto", e))?;
             if aplicado.is_none() {
                 no_aplicables += 1;
