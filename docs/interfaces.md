@@ -687,6 +687,84 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
 }
 ```
 
+### casocalibracion
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CasoGuardado",
+  "description": "Un renglón de `calibracion/<tarea>-<dimension>-<ts>.casos.jsonl`: un caso medido, en orden.",
+  "type": "object",
+  "properties": {
+    "archivo": {
+      "description": "Ruta del archivo donde quedó el defecto, relativa a la copia. `None` en un caso limpio.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "caso": {
+      "description": "Índice `i` del bucle de la calibración. Los casos sin defecto aplicable no entran, así que puede haber huecos.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "defecto": {
+      "description": "Nombre en snake_case del defecto inyectado. `None` en un caso limpio.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "detectado": {
+      "description": "Si la dimensión calibrada bajó frente a la base en este caso.",
+      "type": "boolean"
+    },
+    "es_defecto": {
+      "type": "boolean"
+    },
+    "item": {
+      "description": "Ítem de rúbrica que el defecto debe hacer caer. `None` en un caso limpio.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "linea": {
+      "description": "Línea 1-based del defecto; 0 significa el archivo entero. `None` en un caso limpio.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "default": null,
+      "minimum": 0
+    },
+    "repetido_por_entorno": {
+      "description": "Si el entorno repitió este caso. Hoy ningún mecanismo repite casos: siempre `false`.",
+      "type": "boolean",
+      "default": false
+    },
+    "sin_veredicto": {
+      "description": "Motivo por el que la dimensión calibrada quedó sin veredicto en este caso.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "caso",
+    "es_defecto",
+    "detectado"
+  ]
+}
+```
+
 ### config
 
 ```json

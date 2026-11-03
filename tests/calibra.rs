@@ -9,8 +9,8 @@ use std::cell::RefCell;
 use root::config::Config;
 use root::observe;
 use root::oracle::calibra::{
-    ARCHIVO, Calibraciones, JuecesCaso, Presupuesto, calibrar_tarea, calibrar_tarea_con,
-    peor_caso_con_jueces,
+    ARCHIVO, Calibraciones, CasoGuardado, JuecesCaso, Presupuesto, calibrar_tarea,
+    calibrar_tarea_con, peor_caso_con_jueces,
 };
 use root::oracle::tarea::Tarea;
 use root::oracle::{ErrorOraculo, OpcionesOraculo, Partes};
@@ -324,7 +324,8 @@ fn calibra_tope_suficiente_da_fila_completa_y_sin_gate() {
         Some(&presupuesto),
         &evaluador,
     )
-    .expect("con tope suficiente, la calibración termina");
+    .expect("con tope suficiente, la calibración termina")
+    .fila;
     assert!(!fila.incompleta);
     assert_eq!(fila.n, 4);
     assert!(gates_de_tope(home.path()).is_empty(), "sin Gate");
@@ -548,4 +549,268 @@ fn calibra_peor_caso_de_home_sin_juez_no_lee_nada_y_con_juez_de_diseno_es_finito
     let peor = root::oracle::calibra::peor_caso_de_home(home.path(), &diseno)
         .expect("el juez de diseño se rutea con el home");
     assert!(peor.is_finite() && peor > 0.0, "{peor}");
+}
+
+/// Árbol de `ruta`: ruta relativa y contenido de cada archivo. Sirve para saber si una copia es igual al repo bueno.
+fn arbol(ruta: &Path) -> std::collections::BTreeMap<String, String> {
+    fn recoger(raiz: &Path, dir: &Path, mapa: &mut std::collections::BTreeMap<String, String>) {
+        for entrada in std::fs::read_dir(dir).expect("lee carpeta") {
+            let ruta = entrada.expect("entrada").path();
+            if ruta.is_dir() {
+                recoger(raiz, &ruta, mapa);
+            } else {
+                let rel = ruta
+                    .strip_prefix(raiz)
+                    .expect("dentro de la raíz")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                mapa.insert(rel, std::fs::read_to_string(&ruta).unwrap_or_default());
+            }
+        }
+    }
+    let mut mapa = std::collections::BTreeMap::new();
+    recoger(ruta, ruta, &mut mapa);
+    mapa
+}
+
+/// Si `ruta` es igual al repo bueno del fixture: la copia limpia, o el propio repo.
+fn es_limpia(ruta: &Path) -> bool {
+    arbol(ruta) == arbol(Path::new(FIXTURE))
+}
+
+/// Veredicto de Seguridad con `valor` y, si `sin` es `Some`, sin veredicto con ese motivo.
+fn veredicto_seguridad(valor: f32, sin: Option<&str>) -> Veredicto {
+    Veredicto {
+        puntajes: vec![Puntaje {
+            dimension: Dimension::Seguridad,
+            valor,
+            calibrada: false,
+            exactitud_balanceada: None,
+            items: vec![],
+            sin_veredicto: sin.map(str::to_string),
+            faltantes: vec![],
+        }],
+        ..Veredicto::default()
+    }
+}
+
+/// Evaluador falso de Seguridad: la base y las copias limpias valen 1. Una copia con defecto vale 0; con `sin`,
+/// no tiene veredicto de Seguridad y deja ese motivo.
+fn evaluador_con_defectos(
+    sin: Option<&'static str>,
+) -> impl Fn(&Tarea, &Path, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> {
+    move |_: &Tarea, ruta: &Path, _: &OpcionesOraculo| {
+        Ok(if es_limpia(ruta) {
+            veredicto_seguridad(1.0, None)
+        } else {
+            match sin {
+                Some(motivo) => veredicto_seguridad(1.0, Some(motivo)),
+                None => veredicto_seguridad(0.0, None),
+            }
+        })
+    }
+}
+
+/// Archivos `.casos.jsonl` de `home/calibracion`, ordenados. Vacío si no hay carpeta.
+fn archivos_de_casos(home: &Path) -> Vec<PathBuf> {
+    let Ok(entradas) = std::fs::read_dir(home.join("calibracion")) else {
+        return Vec::new();
+    };
+    let mut rutas: Vec<PathBuf> = entradas
+        .map(|e| e.expect("entrada").path())
+        .filter(|p| p.to_string_lossy().ends_with(".casos.jsonl"))
+        .collect();
+    rutas.sort();
+    rutas
+}
+
+/// Renglones de un `.casos.jsonl`, cada uno parseado como `CasoGuardado`.
+fn renglones(ruta: &Path) -> Vec<CasoGuardado> {
+    std::fs::read_to_string(ruta)
+        .expect("lee los casos")
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("renglón inválido {l}: {e}")))
+        .collect()
+}
+
+#[test]
+fn calibra_casos_guarda_un_renglon_por_caso_medido_en_orden() {
+    let home = home_con_tarea("");
+    let evaluador = evaluador_con_defectos(None);
+    let calibrada = calibrar_tarea_con(
+        home.path(),
+        "calibra-fixture",
+        "seguridad",
+        4,
+        42,
+        Some(Path::new(FIXTURE)),
+        None,
+        &evaluador,
+    )
+    .expect("calibra");
+    let ruta = calibrada.casos.clone().expect("hay casos guardados");
+    assert_eq!(
+        ruta.parent().expect("carpeta"),
+        home.path().join("calibracion")
+    );
+    let ts = calibrada.fila.ts as u64;
+    assert_eq!(
+        ruta.file_name().expect("nombre").to_string_lossy(),
+        format!("calibra-fixture-seguridad-{ts}.casos.jsonl")
+    );
+    let casos = renglones(&ruta);
+    assert_eq!(
+        casos.len(),
+        calibrada.fila.n as usize,
+        "un renglón por caso"
+    );
+    for (i, caso) in casos.iter().enumerate() {
+        assert_eq!(caso.caso, i as u32, "índice del bucle");
+        assert!(!caso.repetido_por_entorno);
+        if i % 2 == 0 {
+            assert!(caso.es_defecto, "los pares llevan defecto");
+            assert!(
+                matches!(
+                    caso.defecto.as_deref(),
+                    Some("secreto_en_codigo" | "panico_en_entrada")
+                ),
+                "{:?}",
+                caso.defecto
+            );
+            assert!(
+                caso.item
+                    .as_deref()
+                    .is_some_and(|i| i.starts_with("seguridad."))
+            );
+            assert!(caso.archivo.is_some(), "dice el archivo");
+            assert!(caso.linea.is_some(), "dice la línea");
+            assert!(caso.detectado, "el valor bajó: se detecta");
+            assert_eq!(caso.sin_veredicto, None);
+        } else {
+            assert!(!caso.es_defecto, "los impares son limpios");
+            assert_eq!(caso.defecto, None);
+            assert_eq!(caso.item, None);
+            assert_eq!(caso.archivo, None);
+            assert_eq!(caso.linea, None);
+            assert!(!caso.detectado);
+        }
+    }
+}
+
+#[test]
+fn calibra_casos_defecto_sin_veredicto_guarda_el_motivo_y_no_detecta() {
+    let home = home_con_tarea("");
+    let evaluador = evaluador_con_defectos(Some("sin sonda"));
+    calibrar_tarea_con(
+        home.path(),
+        "calibra-fixture",
+        "seguridad",
+        4,
+        42,
+        Some(Path::new(FIXTURE)),
+        None,
+        &evaluador,
+    )
+    .expect("calibra");
+    let archivos = archivos_de_casos(home.path());
+    assert_eq!(archivos.len(), 1);
+    let casos = renglones(&archivos[0]);
+    for caso in &casos {
+        if caso.es_defecto {
+            assert_eq!(caso.sin_veredicto.as_deref(), Some("sin sonda"));
+            assert!(!caso.detectado, "sin veredicto no es detección");
+        } else {
+            assert_eq!(caso.sin_veredicto, None);
+        }
+    }
+}
+
+#[test]
+fn calibra_casos_detencion_por_tope_guarda_los_casos_hechos() {
+    // Como `calibra_tope_detiene_antes_del_caso_que_no_entra`: base y dos casos entran; el tercero no.
+    let home = home_con_tarea("");
+    let peor = |_: &Partes| Ok::<f64, ErrorOraculo>(0.40);
+    let gasto = medidor(home.path());
+    let presupuesto = Presupuesto {
+        usd: 1.0,
+        peor_caso: &peor,
+        gasto_desde: &gasto,
+    };
+    let evaluador = |tarea: &Tarea, ruta: &Path, opciones: &OpcionesOraculo| {
+        gasta(home.path(), 0.30);
+        evaluador_con_defectos(None)(tarea, ruta, opciones)
+    };
+    let error = calibrar_tarea_con(
+        home.path(),
+        "calibra-fixture",
+        "seguridad",
+        4,
+        42,
+        Some(Path::new(FIXTURE)),
+        Some(&presupuesto),
+        &evaluador,
+    )
+    .expect_err("el tope detiene la calibración");
+    assert_eq!(error.codigo_de_salida(), 3);
+    let archivos = archivos_de_casos(home.path());
+    assert_eq!(archivos.len(), 1, "los casos hechos quedan");
+    let casos = renglones(&archivos[0]);
+    assert_eq!(casos.len(), 2, "dos casos medidos");
+    assert!(casos[0].es_defecto);
+    assert!(!casos[1].es_defecto);
+}
+
+#[test]
+fn calibra_casos_sin_casos_medidos_no_escribe_archivo() {
+    // El peor caso (2,00) no entra en el tope (1,00): se detiene antes de la base, sin casos.
+    let home = home_con_tarea("");
+    let peor = |_: &Partes| Ok::<f64, ErrorOraculo>(2.00);
+    let gasto = medidor(home.path());
+    let presupuesto = Presupuesto {
+        usd: 1.0,
+        peor_caso: &peor,
+        gasto_desde: &gasto,
+    };
+    let evaluador = evaluador_con_defectos(None);
+    calibrar_tarea_con(
+        home.path(),
+        "calibra-fixture",
+        "seguridad",
+        4,
+        42,
+        Some(Path::new(FIXTURE)),
+        Some(&presupuesto),
+        &evaluador,
+    )
+    .expect_err("el tope detiene la calibración");
+    assert!(
+        archivos_de_casos(home.path()).is_empty(),
+        "sin casos, sin archivo"
+    );
+}
+
+#[test]
+fn calibra_casos_dos_calibraciones_no_se_pisan() {
+    let home = home_con_tarea("");
+    let evaluador = evaluador_con_defectos(None);
+    let mut rutas = Vec::<PathBuf>::new();
+    for semilla in [42, 43] {
+        let calibrada = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "seguridad",
+            4,
+            semilla,
+            Some(Path::new(FIXTURE)),
+            None,
+            &evaluador,
+        )
+        .expect("calibra");
+        rutas.push(calibrada.casos.expect("hay casos guardados"));
+    }
+    assert_ne!(rutas[0], rutas[1], "cada calibración tiene su archivo");
+    assert_eq!(archivos_de_casos(home.path()).len(), 2);
+    for ruta in &rutas {
+        assert_eq!(renglones(ruta).len(), 4, "cada archivo conserva sus casos");
+    }
 }

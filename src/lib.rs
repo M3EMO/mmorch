@@ -163,7 +163,7 @@ fn oraculo_calibrar(
         peor_caso: &peor,
         gasto_desde: &gasto,
     });
-    let fila = oracle::calibra::calibrar_tarea_con(
+    let calibrada = oracle::calibra::calibrar_tarea_con(
         &home,
         nombre,
         dimension,
@@ -173,6 +173,7 @@ fn oraculo_calibrar(
         presupuesto.as_ref(),
         &|tarea, ruta, opciones| oracle::evaluar(ruta, tarea, opciones),
     )?;
+    let fila = calibrada.fila;
     if json {
         println!("{}", serde_json::to_string_pretty(&fila)?);
     } else {
@@ -188,6 +189,9 @@ fn oraculo_calibrar(
             fila.limpios,
             fila.no_aplicable
         );
+        if let Some(ruta) = &calibrada.casos {
+            println!("casos: {}", ruta.display());
+        }
     }
     Ok(0)
 }

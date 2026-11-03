@@ -142,10 +142,12 @@ pub fn global_de(puntajes: &[Puntaje]) -> Option<f32> {
 
 pub mod inyectar;
 
-use inyectar::Defecto;
+use inyectar::{Defecto, Inyeccion};
 
 /// Archivo de candado de `calibracion.json`. Una escritura lo toma en exclusiva.
 const CANDADO: &str = "calibracion.lock";
+/// Carpeta de `ROOT_HOME` con un `.casos.jsonl` por calibración con casos medidos.
+const CARPETA_CASOS: &str = "calibracion";
 
 /// Calibra `dimension` de `tarea` con `n` casos y la semilla `semilla`, sobre el repo bueno `repo_bueno`.
 /// `evaluador` corre el Oracle sobre una ruta. Sin defectos para la dimensión, `n` cero o una base sin
@@ -163,11 +165,48 @@ pub fn calibrar_con(
         .ok_or_else(|| ErrorOraculo::Infra("la calibración no dejó ninguna fila".into()))
 }
 
+/// Un renglón de `calibracion/<tarea>-<dimension>-<ts>.casos.jsonl`: un caso medido, en orden.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CasoGuardado {
+    /// Índice `i` del bucle de la calibración. Los casos sin defecto aplicable no entran, así que puede haber huecos.
+    pub caso: u32,
+    /// Nombre en snake_case del defecto inyectado. `None` en un caso limpio.
+    #[serde(default)]
+    pub defecto: Option<String>,
+    /// Ítem de rúbrica que el defecto debe hacer caer. `None` en un caso limpio.
+    #[serde(default)]
+    pub item: Option<String>,
+    /// Ruta del archivo donde quedó el defecto, relativa a la copia. `None` en un caso limpio.
+    #[serde(default)]
+    pub archivo: Option<String>,
+    /// Línea 1-based del defecto; 0 significa el archivo entero. `None` en un caso limpio.
+    #[serde(default)]
+    pub linea: Option<u32>,
+    pub es_defecto: bool,
+    /// Si la dimensión calibrada bajó frente a la base en este caso.
+    pub detectado: bool,
+    /// Motivo por el que la dimensión calibrada quedó sin veredicto en este caso.
+    #[serde(default)]
+    pub sin_veredicto: Option<String>,
+    /// Si el entorno repitió este caso. Hoy ningún mecanismo repite casos: siempre `false`.
+    #[serde(default)]
+    pub repetido_por_entorno: bool,
+}
+
+/// Resultado de `calibrar_tarea_con`: la fila y la ruta de los casos guardados, si hubo casos medidos.
+#[derive(Debug, Clone)]
+pub struct Calibrada {
+    pub fila: Fila,
+    pub casos: Option<PathBuf>,
+}
+
 /// Resultado de una medición: la fila (completa, o la de los casos hechos si el tope la detuvo) y, si el
 /// tope la detuvo, su motivo. Sin casos medidos, la fila no existe.
 struct Medida {
     fila: Option<Fila>,
     detencion: Option<Detencion>,
+    /// Los casos medidos, en orden. Vacío si el tope detuvo la calibración antes del primero.
+    casos: Vec<Caso>,
 }
 
 /// Por qué el tope detuvo una calibración: el tope, el gasto medido, el peor caso que no entró y los
@@ -236,6 +275,7 @@ fn calibrar_medida(
         return Ok(Medida {
             fila: None,
             detencion: Some(detencion),
+            casos: Vec::new(),
         });
     }
     // Una línea base sin veredicto no mide nada: los defectos no tienen contra qué compararse.
@@ -271,7 +311,7 @@ fn calibrar_medida(
         let es_defecto = i % 2 == 0;
         let copia = tmp.path().join(format!("caso-{i}"));
         super::copiar_repo(repo_bueno, &copia).map_err(|e| super::infra("copia del repo", e))?;
-        let defecto = if es_defecto {
+        let inyeccion = if es_defecto {
             let defecto = defectos[rotacion % defectos.len()];
             rotacion += 1;
             let semilla_caso = semilla.wrapping_add(i as u64);
@@ -284,20 +324,22 @@ fn calibrar_medida(
             };
             let aplicado = inyectar::inyectar_con(defecto, &copia, &contexto, semilla_caso)
                 .map_err(|e| super::infra("inyectar un defecto", e))?;
-            if aplicado.is_none() {
+            let Some(inyeccion) = aplicado else {
                 no_aplicables += 1;
                 borrado::borrar_dir_dentro(tmp.path(), &copia)
                     .map_err(|e| super::infra("borrar una copia", e))?;
                 continue;
-            }
-            Some(defecto)
+            };
+            Some(inyeccion)
         } else {
             None
         };
         let veredicto = evaluador(&copia)?;
         borrado::borrar_dir_dentro(tmp.path(), &copia)
             .map_err(|e| super::infra("borrar una copia", e))?;
-        casos.push(Caso::nuevo(defecto, &base, &veredicto, dimension, &items));
+        casos.push(Caso::nuevo(
+            i as u32, inyeccion, &base, &veredicto, dimension, &items,
+        ));
     }
 
     let incompleta = detencion.is_some();
@@ -314,7 +356,11 @@ fn calibrar_medida(
             incompleta,
         ))
     };
-    Ok(Medida { fila, detencion })
+    Ok(Medida {
+        fila,
+        detencion,
+        casos,
+    })
 }
 
 /// La fila de los casos medidos: sensibilidad, especificidad y exactitud por dimensión y por ítem.
@@ -395,6 +441,7 @@ pub fn calibrar_tarea(
     calibrar_tarea_con(
         home, nombre, dimension, n, semilla, repo_cli, None, evaluador,
     )
+    .map(|calibrada| calibrada.fila)
 }
 
 /// Tope de gasto de una calibración (decisión 48). Antes de la línea base y de cada caso, se detiene si el
@@ -534,7 +581,7 @@ pub fn calibrar_tarea_con(
     repo_cli: Option<&Path>,
     presupuesto: Option<&Presupuesto>,
     evaluador: &dyn Fn(&Tarea, &Path, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo>,
-) -> Result<Fila, ErrorOraculo> {
+) -> Result<Calibrada, ErrorOraculo> {
     let dim = Dimension::desde_clave(dimension)
         .ok_or_else(|| ErrorOraculo::Uso(format!("dimensión desconocida: {dimension}")))?;
     let tarea = super::tarea::cargar_en(home, nombre)?;
@@ -584,6 +631,11 @@ pub fn calibrar_tarea_con(
         &|ruta| evaluador(&tarea, ruta, &opciones),
         tope.as_ref(),
     )?;
+    // Los casos se escriben antes de `agregar`, también si el tope detuvo la calibración.
+    let casos = match &medida.fila {
+        Some(fila) => escribir_casos(home, &tarea.nombre, dim, fila, &medida.casos)?,
+        None => None,
+    };
     if let Some(detencion) = medida.detencion {
         let gate = gate_de_tope(&tarea.nombre, dim, &detencion);
         observe::registrar_en(&observe::ruta_eventos_en(home), &gate)
@@ -605,7 +657,7 @@ pub fn calibrar_tarea_con(
         .fila
         .ok_or_else(|| ErrorOraculo::Infra("la calibración no dejó ninguna fila".into()))?;
     agregar(home, &fila)?;
-    Ok(fila)
+    Ok(Calibrada { fila, casos })
 }
 
 /// `Gate` de una calibración detenida por su tope: tarea, dimensión, tope, gasto, peor caso y casos hechos.
@@ -667,28 +719,60 @@ pub fn agregar(home: &Path, fila: &Fila) -> Result<(), ErrorOraculo> {
     Ok(())
 }
 
+/// Reserva el primer nombre libre `<base>.casos.jsonl`, `<base>-2.casos.jsonl`, ... en `dir`. Crea el archivo
+/// vacío con `create_new`: dos calibraciones no pueden elegir el mismo nombre.
+fn reservar_destino(dir: &Path, base: &str) -> io::Result<(PathBuf, fs::File)> {
+    let mut n = 1u32;
+    loop {
+        let nombre = if n == 1 {
+            format!("{base}.casos.jsonl")
+        } else {
+            format!("{base}-{n}.casos.jsonl")
+        };
+        let ruta = dir.join(nombre);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&ruta)
+        {
+            Ok(archivo) => return Ok((ruta, archivo)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => n += 1,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// Un caso medido: si era un defecto (y cuál ítem apuntaba), si la dimensión lo detectó y, por ítem,
 /// si cada ítem bajó (`None` si la base no mide ese ítem).
 struct Caso {
+    /// Índice `i` del bucle de la calibración.
+    indice: u32,
+    /// El defecto aplicado, completo (archivo y línea). `None` en un caso limpio.
+    inyeccion: Option<Inyeccion>,
     es_defecto: bool,
     item_defecto: Option<&'static str>,
     detectado: bool,
+    /// Motivo por el que la dimensión calibrada quedó sin veredicto en este caso.
+    sin_veredicto: Option<String>,
     items: BTreeMap<&'static str, Option<bool>>,
 }
 
 impl Caso {
     fn nuevo(
-        defecto: Option<Defecto>,
+        indice: u32,
+        inyeccion: Option<Inyeccion>,
         base: &Veredicto,
         veredicto: &Veredicto,
         dimension: Dimension,
         items: &[&'static str],
     ) -> Caso {
-        let es_defecto = defecto.is_some();
+        let es_defecto = inyeccion.is_some();
         Caso {
+            indice,
             es_defecto,
-            item_defecto: defecto.map(Defecto::item),
+            item_defecto: inyeccion.as_ref().map(|i| i.defecto.item()),
             detectado: detecta_dimension(base, veredicto, dimension, es_defecto),
+            sin_veredicto: motivo_sin_veredicto(veredicto, dimension),
             items: items
                 .iter()
                 .map(|item| {
@@ -698,12 +782,88 @@ impl Caso {
                     )
                 })
                 .collect(),
+            inyeccion,
         }
     }
 
     fn detecta_en(&self, item: &str) -> Option<bool> {
         self.items.get(item).copied().flatten()
     }
+}
+
+impl CasoGuardado {
+    fn de(caso: &Caso) -> CasoGuardado {
+        CasoGuardado {
+            caso: caso.indice,
+            defecto: caso.inyeccion.as_ref().map(|i| nombre_defecto(i.defecto)),
+            item: caso.item_defecto.map(str::to_string),
+            archivo: caso.inyeccion.as_ref().map(|i| i.archivo.clone()),
+            linea: caso.inyeccion.as_ref().map(|i| i.linea),
+            es_defecto: caso.es_defecto,
+            detectado: caso.detectado,
+            sin_veredicto: caso.sin_veredicto.clone(),
+            // Ningún mecanismo repite casos hoy: el campo queda en `false` hasta que alguno lo haga.
+            repetido_por_entorno: false,
+        }
+    }
+}
+
+/// Nombre en snake_case de un defecto, a partir de su `{:?}`: `SecretoEnCodigo` da `secreto_en_codigo`.
+fn nombre_defecto(defecto: Defecto) -> String {
+    let mut nombre = String::new();
+    for (i, c) in format!("{defecto:?}").chars().enumerate() {
+        if c.is_uppercase() {
+            if i > 0 {
+                nombre.push('_');
+            }
+            nombre.extend(c.to_lowercase());
+        } else {
+            nombre.push(c);
+        }
+    }
+    nombre
+}
+
+/// Motivo por el que `dimension` quedó sin veredicto en `veredicto`. Sin puntaje de la dimensión, un motivo fijo.
+fn motivo_sin_veredicto(veredicto: &Veredicto, dimension: Dimension) -> Option<String> {
+    match puntaje_de(veredicto, dimension) {
+        Some(puntaje) => puntaje.sin_veredicto.clone(),
+        None => Some("sin puntaje de la dimensión".into()),
+    }
+}
+
+/// Escribe los casos medidos en `home/calibracion/<tarea>-<dimension>-<ts>.casos.jsonl`: un renglón JSON por
+/// caso, en orden. Escritura atómica: un temporal junto al destino y un `rename`. Sin casos, no escribe y da `None`.
+fn escribir_casos(
+    home: &Path,
+    tarea: &str,
+    dimension: Dimension,
+    fila: &Fila,
+    casos: &[Caso],
+) -> Result<Option<PathBuf>, ErrorOraculo> {
+    if casos.is_empty() {
+        return Ok(None);
+    }
+    let carpeta = home.join(CARPETA_CASOS);
+    fs::create_dir_all(&carpeta).map_err(|e| super::infra("crear la carpeta de casos", e))?;
+    let base = format!("{tarea}-{}-{}", dimension.clave(), fila.ts as u64);
+    let (destino, _) = reservar_destino(&carpeta, &base)
+        .map_err(|e| super::infra("reservar el archivo de casos", e))?;
+    let mut texto = String::new();
+    for caso in casos {
+        let renglon = serde_json::to_string(&CasoGuardado::de(caso))
+            .map_err(|e| ErrorOraculo::Infra(format!("serializar un caso: {e}")))?;
+        texto.push_str(&renglon);
+        texto.push('\n');
+    }
+    let temporal = PathBuf::from(format!("{}.tmp", destino.display()));
+    if let Err(e) = fs::write(&temporal, texto).and_then(|()| fs::rename(&temporal, &destino)) {
+        // Limpieza dentro de la carpeta de casos: el temporal y la reserva vacía.
+        let _ = borrado::borrar_archivo_dentro(&carpeta, &temporal);
+        let _ = borrado::borrar_archivo_dentro(&carpeta, &destino);
+        return Err(super::infra("escribir los casos", e));
+    }
+    Ok(Some(destino))
 }
 
 /// La dimensión empeora frente a la base si aparece un hallazgo con id nuevo, baja su `valor` o baja el
@@ -1593,5 +1753,21 @@ mod tests {
             c.de("memora", Dimension::Seguridad)
                 .is_some_and(|f| !f.incompleta)
         );
+    }
+
+    #[test]
+    fn calibra_casos_reserva_el_nombre_base_si_esta_libre() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (ruta, _) = reservar_destino(dir.path(), "x").expect("reserva");
+        assert_eq!(ruta.file_name().expect("nombre"), "x.casos.jsonl");
+    }
+
+    #[test]
+    fn calibra_casos_reserva_el_sufijo_si_el_nombre_ya_existe() {
+        let dir = tempfile::tempdir().expect("dir");
+        fs::write(dir.path().join("x.casos.jsonl"), "").expect("escribe");
+        fs::write(dir.path().join("x-2.casos.jsonl"), "").expect("escribe");
+        let (ruta, _) = reservar_destino(dir.path(), "x").expect("reserva");
+        assert_eq!(ruta.file_name().expect("nombre"), "x-3.casos.jsonl");
     }
 }

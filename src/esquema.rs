@@ -7,7 +7,7 @@ use crate::config::Config;
 use crate::error::Error;
 use crate::ficha::Revision;
 use crate::observe::uso::UsoMargenes;
-use crate::oracle::calibra::Calibraciones;
+use crate::oracle::calibra::{Calibraciones, CasoGuardado};
 use crate::oracle::validez::Validez;
 use crate::route::Politica;
 use crate::route::politica::Propuesta;
@@ -42,6 +42,7 @@ const TIPOS: &[&str] = &[
     "replay",
     "calibracion",
     "validez",
+    "casocalibracion",
 ];
 
 /// JSON Schema (formato pretty) del tipo indicado por su nombre en minúsculas.
@@ -70,6 +71,7 @@ pub fn json(tipo: &str) -> Result<String, Error> {
         "usomargenes" => imprimir::<UsoMargenes>(),
         "replay" => imprimir::<Replay>(),
         "calibracion" => imprimir::<Calibraciones>(),
+        "casocalibracion" => imprimir::<CasoGuardado>(),
         "validez" => imprimir::<Validez>(),
         otro => Err(Error::Uso(format!(
             "tipo desconocido '{otro}'. Tipos: {}",
