@@ -82,6 +82,11 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 56 | P-mod1: "P-mod1 a". El informe filtra la lista `modulos` de un requisito sin cumplir contra los módulos del repo evaluado. Para los que existen escribe "revisar". Si no queda ninguno, escribe "falta" con la lista entera. Ver Tarea 42. |
 | 57 | Contrato del juez: "Sí, al planner", sobre la propuesta del orquestador. El usuario había preguntado: "El juez tiene un contrato de toml? quizas necesita una rubrica y contrato para ser mas robusto". El juez responde todos los ítems pedidos, y Root reintenta una vez los que falten o no pasen el gate. Entra antes de la calibración real. Ver Tarea 44. |
 | 58 | P60: "P60 c". El usuario había preguntado: "Que le falta a root? terminemos". El cierre del hito 1 es corto, con validez automática: la Tarea 12b mide el orden conocido y los defectos reales, sin el juicio humano de G3. G3, G4, Colab (Tarea 7h) y Graft (Tareas 16b y la corrida de Graft de la 16, con G5) pasan al hito 1b. Acota las decisiones 12, 13, 36 y 38. |
+| 59 | P-val1: "P-val1 a". El recall de la Tarea 12b usa los 8 defectos reales de memora y brasa. La nota de cierre anota que faltan los 7 de F1, cuyos repos se borraron. |
+| 60 | P-val2: "P-val2 a". No hay séptimo par: la validez queda con 6 pares de orden conocido. |
+| 61 | G4: el usuario escribió "brasa y memora estan solo de medicion y seran eliminados". memora y brasa no siguen como banco después del hito 1. G4 queda respondido y sale del hito 1b. |
+| 62 | Tarea 16: "a) Correr en memora". La corrida real de `r00t corre` usa memora para probar el runner de punta a punta, y después se borra. |
+| 63 | Calibración: el usuario preguntó "No se puede hacer mas rapida? eficiente? o en paralelo? El diseño de por si digo", y eligió "a) Cortar y mejorar". Ver Tareas 48 y 49. |
 
 ## Patterns to Mirror
 
@@ -3159,5 +3164,108 @@ Los desempates 2 y 4 cambian código. Esperan al cierre: van en el lote de arreg
 - `calibracion.json` marca cada caso repetido con `repetido_por_entorno = true`, y el informe de la calibración dice cuántos fueron.
 - Razón: la calibración mide al evaluador, no a la laptop. Repetir solo los casos que fallaron por entorno separa las dos causas sin repetir toda la corrida.
 - Si la repetición necesita código, es una tarea chica para el builder local. Si alcanza con correr `r00t oraculo calibrar` con menos casos, la hace el orquestador.
+
+No hay preguntas nuevas para el usuario.
+
+## Vuelta del 2026-11-03: validez, calibración cortada y su rediseño
+
+**Respuestas del usuario (decisiones 59 a 63).** P-val1 a, P-val2 a, G4 respondido, Tarea 16 sobre memora y calibración rediseñada. G4 sale del hito 1b: memora y brasa se borran después del hito 1.
+
+**Tarea 46.** La sesión de fichas armó `$ROOT_HOME/validez/` por 9,69 USD: 6 pares de orden, 8 defectos reales y 9 clones. Los dos TOML parsean. Los 7 defectos de F1 quedaron afuera, porque sus repos se borraron. Con 8 defectos, el recall de 0,8 exige encontrar al menos 7.
+
+**Calibración real, cortada.** Corrió de las 22:55 a las 13:54, en paralelo, con 4070f99. Gastó 4,19 USD del tope de 25. Los JSON están en `~/.cache/root-wt/calibra1/`, y las filas en `$ROOT_HOME/calibracion.json`.
+
+| Dimensión | memora | brasa |
+|---|---|---|
+| Completitud | 0,85 | 1,0 |
+| Entrega | 1,0 | sin valor (n = 10) |
+| Pruebas | 0,5 (sensibilidad 0, especificidad 1) | 0,5 (sensibilidad 0, especificidad 1) |
+| Seguridad | 0,8 | 0,8 |
+| Estructura | 0,5 (sensibilidad 0, especificidad 1, `items` vacío) | cortada |
+| Eficiencia | error: "la línea base no tiene veredicto de eficiencia" | sin correr |
+| Arquitectura y Diseño | sin correr | sin correr |
+
+- El JSON no guarda los casos, así que no se ve por qué un defecto no se detectó.
+- Pruebas tardó más de 6 horas por tarea, y Estructura de memora 6,6 horas.
+- El orquestador encontró cuatro causas de lentitud: cada caso corre todas las sondas, también la mutación; la mutación corre hasta 20 minutos y Root mide solo 60 mutantes; los casos limpios repiten todas sus sondas; y los casos corren en serie aunque el juez espera a la red.
+
+## Diagnóstico de la calibración (Opus, 2026-11-03, sobre el código de 4070f99)
+
+**Estructura, sensibilidad 0: el defecto rompe la compilación.**
+- `dios` (`src/oracle/calibra/inyectar.rs`) copia el contenido de otros módulos dentro de `pub mod concat_<x> { ... }`, en otro archivo. No borra los originales.
+- Dentro del módulo nuevo, las rutas `super::` y `crate::` del contenido copiado cambian de sentido. El repo deja de compilar.
+- clippy da `SinVeredicto` ante una construcción fallida (desempate M14). Sin la parte de clippy, Estructura queda sin veredicto.
+- `detecta_dimension` cuenta un defecto sin veredicto como falso negativo. Por eso todos los defectos dieron falso negativo. Los casos limpios sí compilan, y por eso la especificidad es 1.
+- Es la causa más probable. Sin los casos guardados no se puede confirmar caso por caso. La Tarea 48 guarda los casos.
+
+**Pruebas, sensibilidad 0: el defecto casi nunca toca la muestra.**
+- `assert_borrado` borra un assert al azar de `tests/` o de un módulo de tests.
+- `cargo-mutants` mide solo los primeros 60 mutantes (`mutantes_max`). Un assert al azar casi nunca es el único que mata un mutante de esa muestra.
+- Entonces la proporción de mutantes muertos no cambia, y el defecto no se detecta.
+
+**Eficiencia de memora: no es un error, es un "no aplica".**
+- Los `tarea.toml` de memora y brasa no definen `[eficiencia]`. La línea base no puede medir Eficiencia, y ningún defecto tiene contra qué compararse.
+- memora y brasa se borran después del hito 1 (decisión 61). No se suma un `[eficiencia]` para ellas.
+- La calibración debe escribir una fila "no aplica: la tarea no define [eficiencia]", no un error. Eficiencia queda fuera de `global`.
+
+**brasa, Entrega sin valor con n = 10.** Lo más probable es que ningún defecto de Entrega aplique a brasa. Con los casos guardados, la Tarea 48 lo confirma.
+
+## Desempates técnicos 25 (Opus, 2026-11-03): mejoras de la calibración
+
+La regla para elegir: una mejora entra solo si el caso sigue midiendo lo mismo que una evaluación real.
+
+1. **Sondas ajenas desde la base: entra en parte.** Un caso de Estructura, Arquitectura, Diseño, Seguridad, Completitud o Entrega toma de la base solo la mutación. Las demás sondas corren otra vez. Razón: la mutación es el costo mayor, y el defecto de esas dimensiones no cambia la muestra de mutantes. Las sondas estáticas son baratas, y el juez las lee: correrlas otra vez mantiene su entrada igual a la de una evaluación real.
+2. **Casos limpios livianos: entra.** Un caso limpio es una copia idéntica de la base. Toma de la base las salidas de las sondas deterministas: estáticas, clippy, gitleaks, audit, hadolint y mutación. Corre otra vez lo no determinista: el juez y los tests. Razón: una sonda determinista con la misma entrada da la misma salida, y correrla otra vez no mide nada. La especificidad mide los falsos positivos de lo que sí varía.
+3. **Juez en paralelo: entra, con límite.** Las llamadas al juez de varios casos corren de a 4 a la vez. Los contenedores siguen en serie. Razón: el juez espera a la red y no carga la CPU. La reserva con lock de la Tarea 21 ya protege el tope ante llamadas paralelas.
+4. **Mutación acotada: entra.** `cargo-mutants` corre solo la muestra que Root mide, en la evaluación real y en la calibración. Razón: hoy corre hasta 20 minutos y Root descarta lo que pasa de 60 mutantes. La medición no cambia.
+5. **`AssertBorrado` dirigido: entra.** El defecto elige un mutante de la muestra que la base mata, y borra los asserts del test que lo cubre. Razón: así el defecto toca lo que Pruebas mide, como un PM borraría un test que importa.
+6. **Calibración por versión del oráculo: no entra.** El usuario eligió que una calibración vale solo para su tarea (decisión 48, P57 a). Las filas viejas quedan en `calibracion.json` como historia y no se borran.
+
+**Arreglos que pide el diagnóstico.**
+7. **`ArchivoDios` compilable.** El defecto agranda un módulo sin romper la compilación: le suma funciones nuevas y largas, válidas y sin uso, hasta pasar el límite de tamaño de archivo y de función. Razón: el defecto debe medir Estructura, no la compilación.
+8. **Inyección inválida.** Si un defecto de una dimensión que no es Completitud ni Funciona rompe la compilación, el caso es una "inyección inválida". Root lo reemplaza por el siguiente candidato del mismo defecto, y la fila cuenta los reemplazos. Razón: un defecto que no compila mide otra cosa.
+9. **Casos guardados.** Cada calibración escribe sus casos en `$ROOT_HOME/calibracion/<tarea>-<dimensión>-<ts>.casos.jsonl`: defecto, archivo y línea, detectado, motivo si quedó sin veredicto, y si se repitió por entorno. Razón: sin los casos no se puede diagnosticar una sensibilidad baja.
+10. **Eficiencia sin `[eficiencia]`.** La calibración escribe una fila "no aplica", sin error.
+
+**Qué se vuelve a calibrar.** Todas las dimensiones, con el diseño nuevo y una sola versión del código. Razones:
+- Pruebas y Estructura cambian de inyector.
+- Completitud de memora (0,85) y Seguridad (0,8) quedaron bajo 0,9. Sin los casos guardados no se sabe por qué, y la nueva corrida los guarda.
+- Una sola versión del código para todas las filas hace comparables las dimensiones de `global`.
+- El gasto estimado es de 6 a 8 USD, dentro de los 20,81 USD que quedan del tope de 25. La estimación sale del peor caso del juez y no está medida.
+
+### Tarea 48: Calibración que mide bien (diagnóstico)
+- **Action**: los desempates 5, 7, 8, 9 y 10.
+- **Dónde**: en la laptop, con el builder local. Brief: `docs/builds/brief-local-48.md`.
+- **Validate**: `cargo test`:
+  - Un test por defecto sobre un fixture chico: cada uno de los 10 defectos se inyecta y su dimensión lo detecta. Los defectos estáticos usan las sondas reales. Los que necesitan una herramienta usan su salida real con podman, o un falso que refleja el defecto si la herramienta no está en la imagen.
+  - `ArchivoDios` sobre un fixture que compila deja un repo que compila, y da un hallazgo de archivo grande.
+  - `AssertBorrado` dirigido sobre un fixture con mutantes deja vivo un mutante que la base mataba.
+  - Un defecto que rompe la compilación en Estructura se reemplaza, y la fila cuenta el reemplazo.
+  - La calibración escribe su archivo `.casos.jsonl` con un renglón por caso.
+  - Eficiencia sobre una tarea sin `[eficiencia]` escribe una fila "no aplica" y sale con 0.
+
+### Tarea 49: Calibración más rápida
+- **Action**: los desempates 1, 2, 3 y 4.
+- **Dónde**: en la laptop, con el builder local, después de la Tarea 48. El mismo brief la cubre, como parte 2.
+- **Validate**: `cargo test`:
+  - Un caso de Diseño toma la mutación de la base y corre otra vez las sondas estáticas y el juez.
+  - Un caso limpio toma de la base las sondas deterministas y corre otra vez el juez y los tests.
+  - Con 8 casos de Diseño, nunca hay más de 4 llamadas al juez a la vez, y el tope no se pasa con 4 llamadas en paralelo.
+  - `cargo-mutants` recibe solo la muestra de `mutantes_max`, en la evaluación y en la calibración.
+  - Una evaluación real da el mismo veredicto de Pruebas antes y después del cambio, sobre un fixture con podman.
+
+## Orden final del hito 1 (2026-11-03)
+
+1. **Tareas 48 y 49 con el builder local.** Brief: `docs/builds/brief-local-48.md`. La 48 va primero. Podman está libre, porque la calibración se cortó.
+2. **Mezcla de las Tareas 48 y 49.** Espera la orden del usuario.
+3. **Calibración real, otra vez.** Las 8 dimensiones de memora y brasa, con `n = 20`, semilla 42, `--repo` y `--tope-usd` igual al saldo del tope de 25 USD. Corre una tarea por vez, para que la carga no ensucie la medición.
+4. **Comparación de `global`.** Segunda parte del criterio de la Tarea 13.
+5. **Imagen del builder, credencial y `NETRC`** (Tareas 26 y 30).
+6. **Corrida real de memora** (Tarea 16, decisión 62).
+7. **Validez automática** (Tarea 12b) sobre `$ROOT_HOME/validez/`: exactitud de orden de 1,0 y recall de 0,8 o más, con 8 defectos (decisión 59) y 6 pares (decisión 60).
+8. **Cierre** (Tarea 47): `/ecc:code-review`, verificación de Opus, arreglos con el builder local (incluye los desempates 2 y 4 de "Desempates técnicos 24"), comandos de "Validation", nota final en `docs/cierre-hito-1.md` y aprobación del usuario.
+9. **Después del cierre:** memora y brasa se borran (decisión 61).
+
+**Hito 1b (actualizado).** G3, Colab (Tarea 7h) y Graft (Tareas 16b y 16 con G5). G4 sale del hito 1b, porque la decisión 61 lo respondió.
 
 No hay preguntas nuevas para el usuario.
