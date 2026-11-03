@@ -180,7 +180,8 @@ pub fn diagnosticar(stderr: &str) -> Diagnostico {
     Diagnostico::Desconocido(linea_util(stderr))
 }
 
-/// Primera línea de error del texto. Sin una, la primera línea no vacía.
+/// Primera línea de error del texto. Sin una, la primera línea no vacía. No la corta:
+/// el corte va después de redactar (ver `truncar_linea`).
 fn linea_util(texto: &str) -> String {
     let lineas: Vec<&str> = texto
         .lines()
@@ -191,9 +192,12 @@ fn linea_util(texto: &str) -> String {
         .iter()
         .find(|l| l.to_lowercase().contains("error"))
         .or(lineas.first())
-        .map_or("sin salida de error".to_string(), |l| {
-            l.chars().take(LARGO_LINEA_UTIL).collect()
-        })
+        .map_or("sin salida de error".to_string(), |l| l.to_string())
+}
+
+/// Corta el texto al largo máximo de una línea útil. Llamarla solo después de redactar.
+pub(super) fn truncar_linea(texto: &str) -> String {
+    texto.chars().take(LARGO_LINEA_UTIL).collect()
 }
 
 /// Comando de `pip download` contra PyPI. El destino es `/cache`.
@@ -670,9 +674,10 @@ fn ejecutar_descarga(
     resultado.map_err(|diagnostico| redactar_diagnostico(diagnostico, credenciales))
 }
 
-/// Quita de un diagnóstico cualquier valor de credencial (decisión 29).
+/// Quita de un diagnóstico cualquier valor de credencial (decisión 29). Redacta el texto
+/// completo y recién después lo corta: así ningún trozo de un secreto queda sin redactar.
 fn redactar_diagnostico(diagnostico: Diagnostico, credenciales: &[Credencial]) -> Diagnostico {
-    let quitar = |texto: String| redactar_secretos(&texto, credenciales);
+    let quitar = |texto: String| truncar_linea(&redactar_secretos(&texto, credenciales));
     match diagnostico {
         Diagnostico::Infra(m) => Diagnostico::Infra(quitar(m)),
         Diagnostico::Producto(m) => Diagnostico::Producto(quitar(m)),
@@ -691,9 +696,11 @@ fn secretos_de(credenciales: &[Credencial]) -> Vec<(String, String)> {
 /// Error de la evaluación para un fallo de descarga que no es del producto.
 fn error_de(diagnostico: Diagnostico) -> ErrorOraculo {
     match diagnostico {
-        Diagnostico::Infra(m) => ErrorOraculo::Infra(format!("infraestructura: {m}")),
+        Diagnostico::Infra(m) => {
+            ErrorOraculo::Infra(format!("infraestructura: {}", truncar_linea(&m)))
+        }
         Diagnostico::Producto(m) | Diagnostico::Desconocido(m) => {
-            ErrorOraculo::Infra(format!("la descarga falló: {m}"))
+            ErrorOraculo::Infra(format!("la descarga falló: {}", truncar_linea(&m)))
         }
     }
 }
@@ -1131,7 +1138,7 @@ pub fn clasificar_error_pull(salida: &str) -> Problema {
     {
         return Problema::ImagenInaccesible;
     }
-    Problema::Infraestructura(linea_util(salida))
+    Problema::Infraestructura(truncar_linea(&linea_util(salida)))
 }
 
 /// Verdadero si el repo trae al menos un Dockerfile o Containerfile.
@@ -1858,6 +1865,33 @@ location searched: crates.io index";
             let texto = format!("{:?}", redactar_diagnostico(diagnostico, &creds));
             assert!(!texto.contains("valor-secreto-9"), "{texto}");
             assert!(texto.contains("***"), "{texto}");
+        }
+    }
+
+    /// Línea de error donde el secreto empieza en el carácter 290 y termina después del 300.
+    fn linea_con_secreto_en_el_corte(secreto: &str) -> String {
+        let prefijo = "error: ";
+        let relleno = "a".repeat(290 - prefijo.len());
+        format!("{prefijo}{relleno}{secreto} fin")
+    }
+
+    #[test]
+    fn descarga_secreto_a_caballo_del_corte_de_300_no_sale_a_medias() {
+        let creds = credencial_de_prueba();
+        let stderr = linea_con_secreto_en_el_corte("valor-secreto-9");
+        let texto = format!("{:?}", redactar_diagnostico(diagnosticar(&stderr), &creds));
+        assert!(!texto.contains("valor-secreto-9"), "{texto}");
+        assert!(!texto.contains("valor-se"), "{texto}");
+        assert!(texto.contains("***"), "{texto}");
+    }
+
+    #[test]
+    fn descarga_linea_larga_sin_secreto_sigue_truncandose_a_300() {
+        let creds = credencial_de_prueba();
+        let stderr = format!("error: {}", "b".repeat(500));
+        match redactar_diagnostico(diagnosticar(&stderr), &creds) {
+            Diagnostico::Desconocido(linea) => assert_eq!(linea.chars().count(), 300),
+            otro => panic!("{otro:?}"),
         }
     }
 
