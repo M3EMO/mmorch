@@ -13,7 +13,7 @@ use time::{OffsetDateTime, UtcOffset};
 
 use crate::config::{Balance, Config, root_home};
 use crate::error::Error;
-use crate::observe::{self, ErrorObserve, jsonl, ruta_eventos};
+use crate::observe::{self, ErrorObserve, jsonl, ruta_eventos, ruta_eventos_en};
 use crate::route::{inicio_mes, proximo_mes};
 use crate::tipos::{Evento, TipoEvento, Uso, Via};
 
@@ -250,22 +250,29 @@ pub struct UsoMargenes {
 /// Estado de `observa uso` en el momento `ahora`. Registra un `Gate` `tope-lleno` por cada tope
 /// lleno que todavía no tiene uno en su período: el bloque (cupo) o el mes (API y nube).
 pub fn estado(ahora: f64) -> Result<UsoMargenes, Error> {
-    let cfg = Config::cargar(&root_home().join("root.toml"))?;
+    estado_en(&root_home(), ahora)
+}
+
+/// `estado` con la carpeta `home` de `ROOT_HOME` dada (`root.toml` y `eventos.jsonl` dentro).
+pub fn estado_en(home: &Path, ahora: f64) -> Result<UsoMargenes, Error> {
+    let cfg = Config::cargar(&home.join("root.toml"))?;
     let offset = offset_local();
-    let eventos = leer_eventos(&ruta_eventos())?;
-    let uso = calcular_uso(&eventos, ahora, offset, cfg.balance.cupo.bloque_horas);
-    let margenes = margenes(&uso, &cfg.balance, ahora, offset);
     let mes = inicio_mes(ahora, offset);
-    for tope in topes_sin_gate(&eventos, &margenes, uso.cupo_bloque_inicio, mes) {
-        registrar_gate_tope(tope, &margenes)?;
-    }
     let umbral_s = 2.0 * cfg.proveedores.timeout_juez_s as f64;
-    Ok(UsoMargenes {
-        uso,
-        margenes,
-        aviso: AVISO_NUBE_NO_REGISTRADA.into(),
-        reservas_viejas: reservas_viejas(&eventos, ahora, umbral_s),
-    })
+    let estado = con_eventos_bloqueados(&ruta_eventos_en(home), |eventos, log| {
+        let uso = calcular_uso(eventos, ahora, offset, cfg.balance.cupo.bloque_horas);
+        let margenes = margenes(&uso, &cfg.balance, ahora, offset);
+        for tope in topes_sin_gate(eventos, &margenes, uso.cupo_bloque_inicio, mes) {
+            escribir_gate_tope(log, tope, &margenes)?;
+        }
+        Ok(UsoMargenes {
+            uso,
+            margenes,
+            aviso: AVISO_NUBE_NO_REGISTRADA.into(),
+            reservas_viejas: reservas_viejas(eventos, ahora, umbral_s),
+        })
+    })?;
+    Ok(estado)
 }
 
 /// Tras registrar sesiones en la nube: si el tope de nube del mes está lleno y no tiene `Gate`
@@ -273,18 +280,25 @@ pub fn estado(ahora: f64) -> Result<UsoMargenes, Error> {
 pub fn gate_nube_si_lleno(ahora: f64) -> Result<(), Error> {
     let cfg = Config::cargar(&root_home().join("root.toml"))?;
     let offset = offset_local();
-    let eventos = leer_eventos(&ruta_eventos())?;
-    let uso = calcular_uso(&eventos, ahora, offset, cfg.balance.cupo.bloque_horas);
-    let margenes = margenes(&uso, &cfg.balance, ahora, offset);
     let mes = inicio_mes(ahora, offset);
-    if topes_sin_gate(&eventos, &margenes, uso.cupo_bloque_inicio, mes).contains(&"nube") {
-        registrar_gate_tope("nube", &margenes)?;
-    }
+    con_eventos_bloqueados(&ruta_eventos(), |eventos, log| {
+        let uso = calcular_uso(eventos, ahora, offset, cfg.balance.cupo.bloque_horas);
+        let margenes = margenes(&uso, &cfg.balance, ahora, offset);
+        if topes_sin_gate(eventos, &margenes, uso.cupo_bloque_inicio, mes).contains(&"nube") {
+            escribir_gate_tope(log, "nube", &margenes)?;
+        }
+        Ok(())
+    })?;
     Ok(())
 }
 
-/// Registra el `Gate` `tope-lleno` de un tope, con su gasto y su límite.
-fn registrar_gate_tope(tope: &str, margenes: &Margenes) -> Result<(), Error> {
+/// Escribe el `Gate` `tope-lleno` de un tope, con su gasto y su límite. Va con el lock ya tomado:
+/// escribe con `log.agregar` y no con `observe::registrar`, que volvería a tomar el lock.
+fn escribir_gate_tope(
+    log: &jsonl::Escritura<'_>,
+    tope: &str,
+    margenes: &Margenes,
+) -> Result<(), ErrorObserve> {
     let m = match tope {
         "cupo" => &margenes.cupo,
         "api" => &margenes.api,
@@ -295,8 +309,8 @@ fn registrar_gate_tope(tope: &str, margenes: &Margenes) -> Result<(), Error> {
         ("usado".to_string(), json!(m.usado_usd)),
         ("tope_usd".to_string(), json!(m.tope_usd)),
     ]);
-    observe::registrar(&observe::evento_gate("uso", "tope-lleno", extra))
-        .map_err(ErrorObserve::from)?;
+    let linea = serde_json::to_string(&observe::evento_gate("uso", "tope-lleno", extra))?;
+    log.agregar(&linea, jsonl::UMBRAL_POR_DEFECTO)?;
     Ok(())
 }
 
@@ -479,6 +493,48 @@ mod tests {
         drop(escritor);
         let eventos = lector.join().expect("hilo").expect("lee");
         assert_eq!(eventos.len(), 2, "el evento rotado no debe perderse");
+    }
+
+    #[test]
+    fn uso_estado_concurrente_registra_un_solo_gate_tope_lleno() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let linea = |ev: &Evento| serde_json::to_string(ev).expect("serializa");
+        // Veinte rondas: la carrera entre leer y registrar no es determinista.
+        for ronda in 0..20 {
+            let dir = TempDir::new().expect("temp dir");
+            // 120 USD de API contra el tope de 100 USD del default: el tope de API queda lleno.
+            let contenido = format!(
+                "{}\n{}\n",
+                linea(&api(AHORA - HORA, 60.0)),
+                linea(&api(AHORA - 2.0 * HORA, 60.0))
+            );
+            fs::write(dir.path().join("eventos.jsonl"), contenido).expect("eventos");
+            let barrera = Arc::new(Barrier::new(2));
+            let hilos: Vec<_> = (0..2)
+                .map(|_| {
+                    let barrera = Arc::clone(&barrera);
+                    let home = dir.path().to_path_buf();
+                    thread::spawn(move || {
+                        barrera.wait();
+                        estado_en(&home, AHORA)
+                    })
+                })
+                .collect();
+            for hilo in hilos {
+                hilo.join().expect("hilo").expect("estado");
+            }
+            let eventos = leer_eventos(&dir.path().join("eventos.jsonl")).expect("lee");
+            let gates = eventos
+                .iter()
+                .filter(|ev| ev.tipo == TipoEvento::Gate && ev.fase == "tope-lleno")
+                .count();
+            assert_eq!(
+                gates, 1,
+                "ronda {ronda}: dos estado concurrentes registraron {gates} gates"
+            );
+        }
     }
 
     #[test]
