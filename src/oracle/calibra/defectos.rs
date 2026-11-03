@@ -116,6 +116,7 @@ fn evaluar_copia(
         partes: Some(partes),
         historial: false,
         memo,
+        reuso: None,
     };
     evaluar_con(repo, tarea, &opciones, deps).expect("la evaluación da veredicto")
 }

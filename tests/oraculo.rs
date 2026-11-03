@@ -173,6 +173,7 @@ fn opciones(home: &Path) -> OpcionesOraculo {
         partes: None,
         historial: true,
         memo: None,
+        reuso: None,
     }
 }
 

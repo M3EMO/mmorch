@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, json};
 
 use super::juez::{LimitesPrompt, MAX_ENTRADA_JUEZ_BYTES};
+use super::memo::{Alcance, MemoSondas, ReusoSondas};
 use super::mutacion::MutanteMuerto;
 use super::tarea::Tarea;
 use super::{ErrorOraculo, OpcionesOraculo, Partes, partes_de};
@@ -169,13 +170,15 @@ pub fn calibrar_con(
     evaluador: &dyn Fn(&Path) -> Result<Veredicto, ErrorOraculo>,
 ) -> Result<Fila, ErrorOraculo> {
     // Sin home no hay corrida de mutación grabada: no hay muertos que dirigir `AssertBorrado`.
+    // Sin memo ni reuso, el tipo de caso no cambia nada: el evaluador de la API de tests lo ignora.
+    let sin_tipo = |ruta: &Path, _: TipoCaso| evaluador(ruta);
     calibrar_medida(
         tarea,
         dimension,
         n,
         semilla,
         repo_bueno,
-        evaluador,
+        &sin_tipo,
         None,
         &Vec::new,
     )?
@@ -267,6 +270,38 @@ fn detencion_si_no_entra(
     Ok(None)
 }
 
+/// Qué caso evalúa el evaluador de `calibrar_medida`. Un caso con defecto lleva la dimensión calibrada: de
+/// ella sale qué sondas reusa de la base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TipoCaso {
+    Base,
+    Defecto(Dimension),
+    Limpio,
+}
+
+/// Las sondas que un caso reusa del memo de la base. Un defecto de Estructura, Arquitectura, Diseño,
+/// Seguridad, Completitud o Entrega no cambia la muestra de mutantes: el caso toma la mutación de la base.
+/// Pruebas mide la mutación, y Eficiencia no la usa en su muestra: esos casos corren todo. Los limpios
+/// tampoco reusan en este paso.
+fn reuso_de(tipo: TipoCaso, memo: &std::sync::Arc<MemoSondas>) -> Option<ReusoSondas> {
+    let TipoCaso::Defecto(dimension) = tipo else {
+        return None;
+    };
+    let reusa = matches!(
+        dimension,
+        Dimension::Estructura
+            | Dimension::Arquitectura
+            | Dimension::Diseno
+            | Dimension::Seguridad
+            | Dimension::Completitud
+            | Dimension::Entrega
+    );
+    reusa.then(|| ReusoSondas {
+        memo: memo.clone(),
+        alcance: Alcance::SoloMutacion,
+    })
+}
+
 /// La medición de `calibrar_con` y de `calibrar_tarea_con`. Antes de la línea base y de cada caso, si hay
 /// tope, compara el gasto más el peor caso con él. Si no entra, para: la fila queda con los casos hechos y
 /// marcada `incompleta`. Sin casos hechos, no hay fila. `muertos_de_la_base` se llama una vez, después de la
@@ -278,7 +313,7 @@ fn calibrar_medida(
     n: usize,
     semilla: u64,
     repo_bueno: &Path,
-    evaluador: &dyn Fn(&Path) -> Result<Veredicto, ErrorOraculo>,
+    evaluador: &dyn Fn(&Path, TipoCaso) -> Result<Veredicto, ErrorOraculo>,
     tope: Option<&Tope>,
     muertos_de_la_base: &dyn Fn() -> Vec<MutanteMuerto>,
 ) -> Result<Medida, ErrorOraculo> {
@@ -303,7 +338,7 @@ fn calibrar_medida(
         });
     }
     // Una línea base sin veredicto no mide nada: los defectos no tienen contra qué compararse.
-    let base = evaluador(repo_bueno)?;
+    let base = evaluador(repo_bueno, TipoCaso::Base)?;
     if puntaje_de(&base, dimension).is_none_or(|p| p.sin_veredicto.is_some()) {
         return Err(ErrorOraculo::Infra(format!(
             "la línea base no tiene veredicto de {}",
@@ -368,7 +403,7 @@ fn calibrar_medida(
                         .map_err(|e| super::infra("borrar una copia", e))?;
                     break;
                 };
-                let veredicto = evaluador(&copia)?;
+                let veredicto = evaluador(&copia, TipoCaso::Defecto(dimension))?;
                 borrado::borrar_dir_dentro(tmp.path(), &copia)
                     .map_err(|e| super::infra("borrar una copia", e))?;
                 if rompe_la_compilacion(&base, &veredicto, dimension) {
@@ -388,7 +423,7 @@ fn calibrar_medida(
             let copia = tmp.path().join(format!("caso-{i}"));
             super::copiar_repo(repo_bueno, &copia)
                 .map_err(|e| super::infra("copia del repo", e))?;
-            let veredicto = evaluador(&copia)?;
+            let veredicto = evaluador(&copia, TipoCaso::Limpio)?;
             borrado::borrar_dir_dentro(tmp.path(), &copia)
                 .map_err(|e| super::infra("borrar una copia", e))?;
             (None, veredicto, 0)
@@ -665,15 +700,16 @@ pub fn calibrar_tarea_con(
         historial: false,
         ..OpcionesOraculo::default()
     };
-    // La base graba las salidas de sus sondas en `memo`; los casos no graban. Solo la base tiene `repo`.
+    // La base graba las salidas de sus sondas en `memo`; los casos no graban. Un caso con defecto reusa de
+    // `memo` lo que `reuso_de` dice (la mutación, en las dimensiones que no la cambian).
     let memo = std::sync::Arc::new(super::memo::MemoSondas::nuevo());
-    let evaluar_ruta = |ruta: &Path| {
-        let memo_de_ruta = (ruta == repo.as_path()).then(|| memo.clone());
-        let opciones_de_ruta = OpcionesOraculo {
-            memo: memo_de_ruta,
+    let evaluar_caso = |ruta: &Path, tipo: TipoCaso| {
+        let opciones_de_caso = OpcionesOraculo {
+            memo: (tipo == TipoCaso::Base).then(|| memo.clone()),
+            reuso: reuso_de(tipo, &memo),
             ..opciones.clone()
         };
-        evaluador(&tarea, ruta, &opciones_de_ruta)
+        evaluador(&tarea, ruta, &opciones_de_caso)
     };
     // El tope se resuelve antes de la base: un peor caso sin precio no deja arrancar.
     let inicio = ahora();
@@ -707,7 +743,7 @@ pub fn calibrar_tarea_con(
         n as usize,
         semilla,
         &repo,
-        &evaluar_ruta,
+        &evaluar_caso,
         tope.as_ref(),
         &|| memo.mutantes_muertos(&tarea),
     )?;
@@ -1103,6 +1139,8 @@ mod defectos;
 mod tests {
     use super::inyectar::pruebas::{FIXTURE, arbol, copia_fixture, tarea_en};
     use super::*;
+    use crate::oracle::mutacion::{ARCHIVO_OUTCOMES, construir_comando};
+    use crate::oracle::perfiles::herramientas::{EjecutorHerramienta, SalidaHerramienta};
     use crate::tipos::{Fuente, Hallazgo, ItemFaltante, NivelItem};
     use std::cell::RefCell;
     use tempfile::TempDir;
@@ -1590,6 +1628,171 @@ mod tests {
             .expect("un caso con AssertBorrado aplicado");
         assert_eq!(con_defecto.archivo.as_deref(), Some("tests/protocolo.rs"));
         assert_eq!(con_defecto.linea, Some(5), "el primer assert del test");
+    }
+
+    /// Una llamada del evaluador de prueba: si era la base (lleva memo), si traía reuso y los comandos que corrió.
+    struct Llamada {
+        base: bool,
+        reuso: bool,
+        cmds: Vec<String>,
+    }
+
+    /// Ejecutor de prueba: anota cada comando. La mutación responde un mutante muerto, para `AssertBorrado`.
+    struct Anota<'a> {
+        cmds: &'a RefCell<Vec<String>>,
+    }
+
+    impl EjecutorHerramienta for Anota<'_> {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            self.cmds.borrow_mut().push(cmd.to_string());
+            let mut salida = SalidaHerramienta::default();
+            if cmd.contains("cargo mutants") {
+                salida
+                    .archivos
+                    .insert(ARCHIVO_OUTCOMES.into(), OUTCOMES_CON_MUERTO.into());
+            }
+            Ok(salida)
+        }
+
+        fn tiene_rustsec(&self) -> bool {
+            false
+        }
+    }
+
+    const OUTCOMES_CON_MUERTO: &str = r#"{"total_mutants":1,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)","file":"src/protocolo.rs","span":{"start":{"line":2,"column":1}}}},"summary":"CaughtMutant"}]}"#;
+
+    /// Carpeta `calibra-fixture` de `home` con `repo-bueno` (copia del fixture) y la tarea que la usa.
+    fn carpeta_con_repo_bueno(home: &Path) -> PathBuf {
+        let carpeta = home.join("oraculos").join("calibra-fixture");
+        std::fs::create_dir_all(&carpeta).expect("carpeta");
+        let repo = carpeta.join("repo-bueno");
+        std::fs::create_dir_all(&repo).expect("repo");
+        super::inyectar::pruebas::copiar(Path::new(FIXTURE), &repo);
+        tarea_en(&carpeta, "\n[calibracion]\nrepo = \"repo-bueno\"\n");
+        carpeta
+    }
+
+    /// Evaluador de prueba que compone el ejecutor como `evaluar_con`: reuso, y el memo de la base. Corre una
+    /// sonda estática y la mutación, y registra lo que corrió en cada llamada.
+    fn evaluador_con_registro(
+        llamadas: &RefCell<Vec<Llamada>>,
+        veredicto: fn() -> Veredicto,
+    ) -> impl Fn(&Tarea, &Path, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> + '_ {
+        move |tarea: &Tarea, _: &Path, o: &OpcionesOraculo| {
+            let cmds = RefCell::new(Vec::<String>::new());
+            let real = Anota { cmds: &cmds };
+            let ejecutar = |cmd: &str| match o.reuso.as_ref() {
+                Some(reuso) => {
+                    crate::oracle::memo::EjecutorReusador { real: &real, reuso }.ejecutar(cmd)
+                }
+                None => real.ejecutar(cmd),
+            };
+            ejecutar("cargo clippy --version").expect("sonda estática");
+            let mutacion = construir_comando(tarea);
+            let salida = ejecutar(&mutacion).expect("mutación");
+            if let Some(memo) = o.memo.as_deref() {
+                memo.anotar(&mutacion, &salida);
+            }
+            llamadas.borrow_mut().push(Llamada {
+                base: o.memo.is_some(),
+                reuso: o.reuso.is_some(),
+                cmds: cmds.borrow().clone(),
+            });
+            Ok(veredicto())
+        }
+    }
+
+    fn cuenta_mutaciones(llamada: &Llamada) -> usize {
+        llamada
+            .cmds
+            .iter()
+            .filter(|c| c.contains("cargo mutants"))
+            .count()
+    }
+
+    /// Un caso de Diseño toma la mutación de la base y corre otra vez las sondas estáticas y el juez.
+    #[test]
+    fn calibra_un_caso_de_diseno_toma_la_mutacion_de_la_base() {
+        let home = tempfile::tempdir().expect("home");
+        carpeta_con_repo_bueno(home.path());
+        let llamadas = RefCell::new(Vec::<Llamada>::new());
+        let evaluador =
+            evaluador_con_registro(&llamadas, || veredicto_de(Dimension::Diseno, 1.0, None));
+        let calibrada = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "diseno",
+            4,
+            42,
+            None,
+            None,
+            &evaluador,
+        )
+        .expect("calibra");
+        let llamadas = llamadas.borrow();
+        let casos = calibrada.casos.expect("hay casos guardados");
+        let medidos = fs::read_to_string(&casos)
+            .expect("lee los casos")
+            .lines()
+            .count();
+        assert_eq!(
+            llamadas.len(),
+            medidos + 1,
+            "la base y cada caso llaman al evaluador"
+        );
+        assert!(llamadas[0].base, "la primera llamada es la base");
+        assert_eq!(
+            cuenta_mutaciones(&llamadas[0]),
+            1,
+            "la base corre la mutación"
+        );
+        assert!(
+            llamadas
+                .iter()
+                .all(|l| l.cmds.iter().any(|c| c == "cargo clippy --version")),
+            "las sondas estáticas corren en cada llamada"
+        );
+        let con_defecto: Vec<&Llamada> = llamadas[1..].iter().filter(|l| l.reuso).collect();
+        assert!(!con_defecto.is_empty(), "hay un caso con defecto de Diseño");
+        for l in con_defecto {
+            assert_eq!(
+                cuenta_mutaciones(l),
+                0,
+                "el defecto de Diseño reusa la mutación de la base"
+            );
+        }
+        for l in llamadas[1..].iter().filter(|l| !l.reuso) {
+            assert_eq!(cuenta_mutaciones(l), 1, "un caso limpio corre la mutación");
+        }
+    }
+
+    /// Un caso con defecto de Pruebas corre la mutación: Pruebas la mide, así que no la reusa.
+    #[test]
+    fn calibra_un_caso_de_pruebas_corre_la_mutacion() {
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = carpeta_con_repo_bueno(home.path());
+        let repo = carpeta.join("repo-bueno");
+        std::fs::write(repo.join("tests/protocolo.rs"), TEST_DE_LEER_NUMERO).expect("test");
+        let llamadas = RefCell::new(Vec::<Llamada>::new());
+        let evaluador = evaluador_con_registro(&llamadas, veredicto_de_pruebas);
+        calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "pruebas",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+        )
+        .expect("calibra");
+        let llamadas = llamadas.borrow();
+        assert!(llamadas.len() >= 2, "la base y un caso con defecto");
+        assert!(llamadas.iter().all(|l| !l.reuso), "Pruebas no reusa");
+        assert!(
+            llamadas.iter().all(|l| cuenta_mutaciones(l) == 1),
+            "cada evaluación corre la mutación"
+        );
     }
 
     /// Una calibración no escribe historial: cada caso es una versión distinta y se evalúa una vez.

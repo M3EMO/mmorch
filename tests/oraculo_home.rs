@@ -108,6 +108,7 @@ fn oraculo_home_evaluar_y_llamadas_escriben_solo_en_su_home() {
         partes: None,
         historial: true,
         memo: None,
+        reuso: None,
     };
     let _ = evaluar(repo.path(), &tarea, &opciones);
     let despues = gates(b.path());

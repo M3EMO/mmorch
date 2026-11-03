@@ -153,6 +153,9 @@ pub struct OpcionesOraculo {
     /// Memo de las sondas (calibración). `Some`: el ejecutor de herramientas graba cada salida OK aquí. `None`
     /// (producción): no graba nada.
     pub memo: Option<std::sync::Arc<memo::MemoSondas>>,
+    /// Reuso de sondas (calibración). `Some`: el ejecutor devuelve la salida grabada en el memo de la base de
+    /// lo que el alcance toma, sin correrlo. `None` (producción): corre todo.
+    pub reuso: Option<memo::ReusoSondas>,
 }
 
 impl Default for OpcionesOraculo {
@@ -163,6 +166,7 @@ impl Default for OpcionesOraculo {
             partes: None,
             historial: true,
             memo: None,
+            reuso: None,
         }
     }
 }
@@ -672,13 +676,21 @@ fn evaluar_con(
         rustsec,
     };
     let ej_real = (deps.herramientas)(&preparada);
-    // Con memo (calibración), el ejecutor graba cada salida OK. Sin memo, es el ejecutor de siempre.
-    let ej: Box<dyn EjecutorHerramienta + '_> = match o.memo.as_deref() {
-        Some(memo) => Box::new(memo::EjecutorGrabador {
+    // Con reuso (calibración), las sondas del alcance salen del memo de la base. Sin reuso, es el de siempre.
+    let ej_reusado: Box<dyn EjecutorHerramienta + '_> = match o.reuso.as_ref() {
+        Some(reuso) => Box::new(memo::EjecutorReusador {
             real: ej_real.as_ref(),
-            memo,
+            reuso,
         }),
         None => ej_real,
+    };
+    // Con memo (calibración), el ejecutor graba cada salida OK. Sin memo, no graba nada.
+    let ej: Box<dyn EjecutorHerramienta + '_> = match o.memo.as_deref() {
+        Some(memo) => Box::new(memo::EjecutorGrabador {
+            real: ej_reusado.as_ref(),
+            memo,
+        }),
+        None => ej_reusado,
     };
     // La Entrega sale de `entregar_con`: construcción, sonda y escenarios en una sola pasada (desempate 7).
     // Un error de infraestructura deja Entrega sin veredicto con su motivo, como un error del ejecutor.
@@ -3342,6 +3354,7 @@ mod tests {
             home: Some(home.to_path_buf()),
             historial: true,
             memo: None,
+            reuso: None,
         }
     }
 
@@ -5798,6 +5811,68 @@ mod tests {
         .expect("evalúa");
         assert_eq!(v_sin, v_con);
         assert_eq!(memo.mutantes_muertos(&tarea).len(), 1);
+    }
+
+    /// Con reuso, Diseño toma la mutación del memo de la base: no la corre. Las demás sondas sí corren, y el
+    /// veredicto es el mismo que sin reuso.
+    #[test]
+    fn oraculo_reuso_de_mutacion_no_la_corre_y_da_el_mismo_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let tarea = tarea_rust(base.path());
+        // Con ítems del juez, Diseño pide la mutación: sin rúbricas no la pide.
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let memo = std::sync::Arc::new(memo::MemoSondas::nuevo());
+        let o_base = OpcionesOraculo {
+            partes: Some(partes_de(Dimension::Pruebas, &[], &tarea)),
+            memo: Some(memo.clone()),
+            ..opciones(&home)
+        };
+        let (fabrica_base, _) = herramientas_grabadas();
+        evaluar_con(&repo, &tarea, &o_base, deps_de(&sin_suites, &fabrica_base))
+            .expect("la base evalúa");
+        let reuso = memo::ReusoSondas {
+            memo: memo.clone(),
+            alcance: memo::Alcance::SoloMutacion,
+        };
+        let o_reuso = OpcionesOraculo {
+            partes: Some(partes_de(Dimension::Diseno, &rubricas, &tarea)),
+            reuso: Some(reuso),
+            ..opciones(&home)
+        };
+        let (fabrica_reuso, cmds_reuso) = herramientas_grabadas();
+        let v_reuso = evaluar_con(
+            &repo,
+            &tarea,
+            &o_reuso,
+            deps_de(&sin_suites, &fabrica_reuso),
+        )
+        .expect("evalúa con reuso");
+        let o_sin = OpcionesOraculo {
+            partes: Some(partes_de(Dimension::Diseno, &rubricas, &tarea)),
+            ..opciones(&home)
+        };
+        let (fabrica_sin, cmds_sin) = herramientas_grabadas();
+        let v_sin = evaluar_con(&repo, &tarea, &o_sin, deps_de(&sin_suites, &fabrica_sin))
+            .expect("evalúa sin reuso");
+        let mutaciones = |c: &Comandos| {
+            c.borrow()
+                .iter()
+                .filter(|c| c.contains("cargo mutants"))
+                .count()
+        };
+        assert!(mutaciones(&cmds_sin) >= 1, "sin reuso la mutación corre");
+        assert_eq!(mutaciones(&cmds_reuso), 0, "con reuso no corre");
+        assert!(
+            cmds_reuso
+                .borrow()
+                .iter()
+                .any(|c| !c.contains("cargo mutants")),
+            "las demás sondas corren: {:?}",
+            cmds_reuso.borrow()
+        );
+        assert_eq!(v_reuso, v_sin);
     }
 
     #[test]
