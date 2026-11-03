@@ -12,7 +12,7 @@ use thiserror::Error as ErrorDerive;
 
 use crate::config::root_home;
 use crate::observe::jsonl;
-use crate::tipos::{Estado, Fila, Rol};
+use crate::tipos::{Decision, Estado, Fila, Rol};
 
 /// Errores de Track. Salen con código 3.
 #[derive(Debug, ErrorDerive)]
@@ -48,6 +48,9 @@ pub struct StatModelo {
     pub exitos: u32,
     pub wilson_inf: f64,
     pub usd_medio: f64,
+    /// Filas válidas sin veredicto (infraestructura). No cuentan en `n` ni en `exitos`.
+    #[serde(default)]
+    pub sin_veredicto: u32,
 }
 
 /// Resultado de comparar dos configuraciones en una tarea.
@@ -57,6 +60,16 @@ pub struct Comparacion {
     pub a: StatModelo,
     pub b: StatModelo,
     pub mejor: Option<String>,
+}
+
+/// Fila sin veredicto: infraestructura, no fracaso del modelo. Es `SinVeredicto` o tiene `SinDecision`.
+pub fn es_sin_veredicto(fila: &Fila) -> bool {
+    fila.veredicto.estado == Estado::SinVeredicto
+        || fila
+            .veredicto
+            .informe
+            .as_ref()
+            .is_some_and(|informe| informe.decision == Decision::SinDecision)
 }
 
 impl Filtro {
@@ -89,24 +102,30 @@ pub fn filas(filtro: &Filtro) -> Result<Vec<Fila>, ErrorTrack> {
 
 /// Filas del archivo indicado que pasan el filtro. Un archivo inexistente da una lista vacía.
 pub fn filas_de(ruta: &Path, filtro: &Filtro) -> Result<Vec<Fila>, ErrorTrack> {
-    let mut filas = Vec::new();
-    for archivo in jsonl::archivos_en_orden(ruta)? {
-        // El número de línea cuenta también las líneas en blanco, que se omiten. Es el de cada archivo.
-        for (indice, linea) in jsonl::leer_texto(&archivo)?.lines().enumerate() {
-            if linea.trim().is_empty() {
-                continue;
-            }
-            let fila: Fila = serde_json::from_str(linea).map_err(|fuente| ErrorTrack::Linea {
-                archivo: archivo.display().to_string(),
-                linea: indice + 1,
-                fuente,
-            })?;
-            if filtro.admite(&fila) {
-                filas.push(fila);
+    // Lista y lee con un solo lock compartido: una rotación no deja afuera un archivo.
+    // Lee con `read_to_string` y no con `leer_texto`, que tomaría el lock otra vez.
+    jsonl::con_lock_compartido(ruta, |_| -> Result<Vec<Fila>, ErrorTrack> {
+        let mut filas = Vec::new();
+        for archivo in jsonl::archivos_en_orden(ruta)? {
+            let texto = std::fs::read_to_string(&archivo)?;
+            // El número de línea cuenta también las líneas en blanco, que se omiten. Es el de cada archivo.
+            for (indice, linea) in texto.lines().enumerate() {
+                if linea.trim().is_empty() {
+                    continue;
+                }
+                let fila: Fila =
+                    serde_json::from_str(linea).map_err(|fuente| ErrorTrack::Linea {
+                        archivo: archivo.display().to_string(),
+                        linea: indice + 1,
+                        fuente,
+                    })?;
+                if filtro.admite(&fila) {
+                    filas.push(fila);
+                }
             }
         }
-    }
-    Ok(filas)
+        Ok(filas)
+    })
 }
 
 /// Estadística por modelo del rol de las filas de `tipo`.
@@ -136,21 +155,24 @@ pub fn estadisticas_de(filas: &[Fila], rol: Rol) -> Vec<StatModelo> {
 }
 
 /// Estadística de una configuración. Las filas invalidadas no cuentan.
+/// Las filas sin veredicto tampoco cuentan en `n`, en éxitos ni en costo: se cuentan aparte.
 fn stat_de(etiqueta: &str, filas: &[&Fila]) -> StatModelo {
     let validas: Vec<&Fila> = filas
         .iter()
         .copied()
         .filter(|fila| !fila.resumen.invalida)
         .collect();
-    let n = u32::try_from(validas.len()).unwrap_or(u32::MAX);
+    let (sin_veredicto, medibles): (Vec<&Fila>, Vec<&Fila>) =
+        validas.into_iter().partition(|fila| es_sin_veredicto(fila));
+    let n = u32::try_from(medibles.len()).unwrap_or(u32::MAX);
     let exitos = u32::try_from(
-        validas
+        medibles
             .iter()
             .filter(|fila| fila.veredicto.estado == Estado::Verde)
             .count(),
     )
     .unwrap_or(u32::MAX);
-    let usd_total: f64 = validas
+    let usd_total: f64 = medibles
         .iter()
         .map(|fila| fila.resumen.usd_api + fila.resumen.usd_cupo)
         .sum();
@@ -165,6 +187,7 @@ fn stat_de(etiqueta: &str, filas: &[&Fila]) -> StatModelo {
         exitos,
         wilson_inf: stats::wilson_inferior(exitos, n),
         usd_medio,
+        sin_veredicto: u32::try_from(sin_veredicto.len()).unwrap_or(u32::MAX),
     }
 }
 
@@ -222,7 +245,7 @@ pub fn comparar_en(ruta: &Path, a: &str, b: &str, tarea: &str) -> Result<Compara
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tipos::{Resumen, Rol, Veredicto};
+    use crate::tipos::{Informe, Resumen, Rol, Veredicto};
     use tempfile::TempDir;
 
     fn fila(tarea: &str, config: &str, estado: Estado) -> Fila {
@@ -235,6 +258,11 @@ mod tests {
             },
             ..Fila::default()
         }
+    }
+
+    fn con_id(mut f: Fila, id: &str) -> Fila {
+        f.id = id.into();
+        f
     }
 
     fn invalida(mut f: Fila) -> Fila {
@@ -281,6 +309,37 @@ mod tests {
             .map(|f| f.id)
             .collect();
         assert_eq!(ids, vec!["f-1", "f-2", "f-3"]);
+    }
+
+    #[test]
+    fn track_filas_de_no_pierde_filas_si_rota_mientras_lista() {
+        let dir = TempDir::new().expect("temp dir");
+        let ruta = dir.path().join("runs.jsonl");
+        agregar_en(&ruta, &con_id(fila("memora", "haiku", Estado::Verde), "a")).expect("agrega");
+        let (tx, rx) = std::sync::mpsc::channel();
+        jsonl::con_lock_exclusivo(&ruta, |_| -> io::Result<()> {
+            let ruta_hilo = ruta.clone();
+            std::thread::spawn(move || {
+                let ids: Result<Vec<String>, String> = filas_de(&ruta_hilo, &Filtro::default())
+                    .map(|filas| filas.into_iter().map(|f| f.id).collect())
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(ids);
+            });
+            // Un lector sin lock lista antes de esperar: ve solo `runs.jsonl`. Se le da tiempo a listar.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            // Rotación a mano, bajo el lock exclusivo: `runs.jsonl` pasa a `.1` y nace uno nuevo con "b".
+            std::fs::rename(&ruta, dir.path().join("runs.jsonl.1"))?;
+            let linea = serde_json::to_string(&con_id(fila("memora", "haiku", Estado::Verde), "b"))
+                .expect("serializa");
+            std::fs::write(&ruta, format!("{linea}\n"))?;
+            Ok(())
+        })
+        .expect("lock exclusivo");
+        let ids = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("respuesta tras soltar el lock")
+            .expect("lee");
+        assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]
@@ -492,5 +551,42 @@ mod tests {
         assert_eq!(cmp.b.n, 0);
         assert_eq!(cmp.b.wilson_inf, 0.0);
         assert_eq!(cmp.mejor.as_deref(), Some("p"));
+    }
+
+    /// Fila sin veredicto de infraestructura: `estado` `SinVeredicto` o informe con `SinDecision`.
+    fn sin_veredicto(config: &str) -> Fila {
+        fila("memora", config, Estado::SinVeredicto)
+    }
+
+    fn sin_decision(config: &str) -> Fila {
+        let mut f = fila("memora", config, Estado::Verde);
+        f.veredicto.informe = Some(Informe {
+            decision: Decision::SinDecision,
+            motivo: String::new(),
+            requisitos: Vec::new(),
+            bloqueantes: Vec::new(),
+            riesgos: Vec::new(),
+            proximos_pasos: Vec::new(),
+            resumen: String::new(),
+            confianza: Default::default(),
+        });
+        f
+    }
+
+    #[test]
+    fn track_fila_sin_veredicto_no_baja_la_cota_wilson() {
+        let base = vec![
+            fila("memora", "haiku", Estado::Verde),
+            fila("memora", "haiku", Estado::Rojo),
+        ];
+        let antes = estadisticas_de(&base, Rol::Construye);
+        for extra in [sin_veredicto("haiku"), sin_decision("haiku")] {
+            let mut con = base.clone();
+            con.push(extra);
+            let despues = estadisticas_de(&con, Rol::Construye);
+            assert_eq!(despues[0].wilson_inf, antes[0].wilson_inf);
+            assert_eq!(despues[0].n, 2);
+            assert_eq!(despues[0].exitos, 1);
+        }
     }
 }

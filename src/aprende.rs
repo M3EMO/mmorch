@@ -18,6 +18,7 @@ use crate::route::politica::{
 };
 use crate::route::{Candidato, Politica};
 use crate::tipos::{Decision, Estado, Evento, Fila, Forma, Proveedor, Rol, TipoEvento, Via};
+use crate::track::es_sin_veredicto;
 use crate::track::stats::wilson_inferior;
 
 /// Nombre del archivo de política dentro de `ROOT_HOME`.
@@ -83,11 +84,17 @@ pub struct Replay {
 }
 
 /// Éxito de una fila. Con informe, éxito es `Decision::Listo`. Sin informe, éxito es `estado` verde.
+/// Las filas sin veredicto no llegan aquí: `contable` las descarta antes.
 pub fn exito_de_fila(fila: &Fila) -> bool {
     match &fila.veredicto.informe {
         Some(informe) => informe.decision == Decision::Listo,
         None => fila.veredicto.estado == Estado::Verde,
     }
+}
+
+/// Fila que cuenta en n y en éxitos. Descarta las inválidas y las sin veredicto (infraestructura).
+fn contable(fila: &Fila) -> bool {
+    !fila.resumen.invalida && !es_sin_veredicto(fila)
 }
 
 /// Orden de preferencia: menor costo, luego mayor Wilson, luego nombre.
@@ -263,7 +270,7 @@ fn orden_propuesta(a: &EvidenciaModelo, b: &EvidenciaModelo) -> std::cmp::Orderi
 // Las propuestas de forma (P18b, decisión 28) viven en `propuestas_forma_de`.
 fn propuestas_de(filas: &[&Fila], actuales: &RolesActuales) -> Vec<Propuesta> {
     let mut acum: BTreeMap<(Rol, String), BTreeMap<String, AcumEvidencia>> = BTreeMap::new();
-    for fila in filas.iter().filter(|f| !f.resumen.invalida) {
+    for fila in filas.iter().filter(|f| contable(f)) {
         for rol in ROLES_FILA {
             let Some(modelo) = fila.modelos.get(&rol) else {
                 continue;
@@ -338,7 +345,7 @@ fn orden_propuesta_forma(a: &EvidenciaForma, b: &EvidenciaForma) -> std::cmp::Or
 fn propuestas_forma_de(filas: &[&Fila], actuales: &RolesActuales) -> Vec<PropuestaForma> {
     let mut ultima: BTreeMap<&str, &Fila> = BTreeMap::new();
     let mut acum: BTreeMap<&str, BTreeMap<Forma, AcumEvidencia>> = BTreeMap::new();
-    for &fila in filas.iter().filter(|f| !f.resumen.invalida) {
+    for &fila in filas.iter().filter(|f| contable(f)) {
         let tarea = fila.tarea.as_str();
         // Forma actual: la de la última fila de la tarea (decisión del organizador; pregunta abierta al planner).
         let reciente = ultima.get(tarea).is_none_or(|previa| {
@@ -444,7 +451,7 @@ fn sumar(
 
 fn politica_de(filas: &[&Fila], eventos: &[Evento]) -> Politica {
     let mut grupos = Grupos::new();
-    for fila in filas.iter().filter(|f| !f.resumen.invalida) {
+    for fila in filas.iter().filter(|f| contable(f)) {
         for rol in ROLES_FILA {
             let Some(modelo) = fila.modelos.get(&rol) else {
                 continue;
@@ -629,7 +636,7 @@ fn modelo_de_rol(cfg: &Config, rol: Rol) -> &str {
 
 /// Replay: entrena con el primer 70% de las filas y mide el resto. Función pura.
 pub fn replay(filas: &[Fila], cfg: &Config) -> Replay {
-    let mut orden_temporal: Vec<&Fila> = filas.iter().collect();
+    let mut orden_temporal: Vec<&Fila> = filas.iter().filter(|f| !es_sin_veredicto(f)).collect();
     orden_temporal.sort_by(|a, b| a.ts.total_cmp(&b.ts).then_with(|| a.id.cmp(&b.id)));
     let total = orden_temporal.len();
     let corte = (0.7 * total as f64).floor() as usize;
@@ -922,6 +929,31 @@ mod tests {
         mala.resumen.invalida = true;
         let pol = recalcular(&[mala], &[], &RolesActuales::default());
         assert!(pol.estadisticas.is_empty());
+    }
+
+    #[test]
+    fn aprende_fila_sin_veredicto_no_baja_la_cota_wilson() {
+        let base = vec![
+            con_ts(fila_construye("haiku", 0.5, true), 1.0, "a"),
+            con_ts(fila_construye("haiku", 0.5, false), 2.0, "b"),
+        ];
+        let mut sin_veredicto = fila_construye("haiku", 0.5, false);
+        sin_veredicto.veredicto.estado = Estado::SinVeredicto;
+        let mut con = base.clone();
+        con.push(con_ts(sin_veredicto, 3.0, "c"));
+
+        let antes = candidato_de(
+            &recalcular(&base, &[], &RolesActuales::default()),
+            "construye:memora",
+            "haiku",
+        );
+        let despues = candidato_de(
+            &recalcular(&con, &[], &RolesActuales::default()),
+            "construye:memora",
+            "haiku",
+        );
+        assert_eq!(despues.wilson_inf, antes.wilson_inf);
+        assert_eq!((despues.n, despues.exitos), (2, 1));
     }
 
     #[test]
