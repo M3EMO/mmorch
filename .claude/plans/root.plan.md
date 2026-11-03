@@ -3115,3 +3115,49 @@ El usuario preguntó: "Que le falta a root? terminemos". El orquestador listó 1
   - b) No tocar el PRD. El hito 1b vive en el plan del hito 1 y en la nota de cierre.
 
   Mi recomendación es b): el hito 1b completa el hito 1 y no es un resultado de negocio nuevo. El PRD queda como lo dejaste en P36.
+
+## Vuelta del 2026-11-02 (noche): P61, Tarea 45, juez nuevo y calibración
+
+**P61.** El usuario respondió: "P61 b". El PRD no cambia. El hito 1b vive en el plan y en la nota de cierre.
+
+**Tarea 45.** El builder local la construyó en `laptop/tarea-45`, de fb18062 a e51d488, por 1,30 USD. El informe es `docs/builds/2026-11-02-build-local-45.md`. La suite dio 2020 verdes, 0 fallas y 2 ignorados, sin podman y con podman. El usuario escribió: "Sí, las dos". La mezcla es 4070f99.
+
+**Criterio de la Tarea 44: cumple.**
+
+| Evaluación | Oculto | Ítems del juez sin nivel | Estructura | Arquitectura | Diseño |
+|---|---|---|---|---|---|
+| memora-ecc 1 | 66/68 | 0 de 10 | 0,429 | 0,567 | 0,179 |
+| memora-ecc 2 | 66/68 | 0 de 10 | 0,429 | 0,467 | 0,385 |
+
+- Las dos evaluaciones dejan 0 ítems sin nivel, y Arquitectura y Diseño tienen veredicto. Gastaron 0,22 USD.
+- Los niveles del juez todavía varían entre corridas. La calibración mide si esa variación le quita exactitud a la dimensión.
+
+**Calibración real, en curso.**
+- Arrancó a las 22:55 con `r00t` release de 4070f99: 8 dimensiones por tarea, `n = 20`, semilla 42 y repo bueno `*-ecc`.
+- `[calibracion] repo` no existe en ningún `tarea.toml`, así que el orquestador pasa `--repo`.
+- El usuario preguntó: "No podemos acelerar estos procesos?". Eligió las dos opciones del orquestador: "También brasa ya / Y lo seguro". memora y brasa calibran en paralelo.
+- El tope de 25 USD vale para las dos. Cada comando recibe la mitad del saldo, medido en `eventos.jsonl`.
+- La Tarea 46 corre en paralelo en la sesión de fichas, sin podman ni API.
+
+## Desempates técnicos 24 (Opus, 2026-11-02)
+
+**Preguntas de la Tarea 45.**
+1. **Nivel inválido y después omisión.** Se confirma: el motivo describe el último intento, porque ese intento decide que el ítem quedó sin nivel.
+2. **Nivel float.** Un `2.0` vale como 2. Un `2.5` sigue siendo inválido. El contrato pide un nivel entero de 0 a 3, y `2.0` es ese valor con otro tipo de JSON. Rechazarlo cuesta un reintento sin ganar nada.
+3. **Precedencia de motivos.** Se confirma el orden gate, nivel inválido, sin respuesta. Hoy un ítem tiene un solo motivo.
+4. **Tope que frena el reintento.** Se suma el motivo "reintento no enviado por el tope de API". Razón: separa un límite del presupuesto de una falla del modelo, y la calibración debe poder distinguirlos.
+5. **Regla del tope.** Se confirma el peor caso de la Tarea 21: el tope debe frenar antes de gastar, y el costo real recién se sabe después.
+6. **Evento `Gate` del tope.** Se confirma leer la causa en `fase = "tope"`.
+
+Los desempates 2 y 4 cambian código. Esperan al cierre: van en el lote de arreglos de la Tarea 47, junto con los hallazgos del code review. Ninguno cambia la medición en curso: el 2 solo ahorra reintentos, y el 4 solo cambia un texto.
+
+**Calibración con carga de CPU.**
+- memora y brasa calibran en paralelo. La carga puede hacer fallar un test de tiempo, cortar a `cargo-mutants` por su plazo o dar un error de infraestructura. Esas fallas no vienen del defecto inyectado.
+- **Qué dimensiones toca.** Seguridad, Estructura, Arquitectura, Diseño y Entrega salen de sondas estáticas y del juez: la carga no cambia su resultado. Funciona, Completitud y Pruebas corren tests o mutantes: la carga sí puede cambiarlos.
+- **Desempate.** Al terminar, el orquestador lista los casos de esas tres dimensiones que dieron `SinVeredicto`, un error de infraestructura, un timeout de test o un reporte de mutantes truncado. Cada uno se repite una vez, solo, sin la otra calibración en paralelo. La fila final usa el resultado de la repetición.
+- Si la repetición vuelve a dar sin veredicto, el caso cuenta en contra, como dice el desempate 41 de "Desempates técnicos 11".
+- `calibracion.json` marca cada caso repetido con `repetido_por_entorno = true`, y el informe de la calibración dice cuántos fueron.
+- Razón: la calibración mide al evaluador, no a la laptop. Repetir solo los casos que fallaron por entorno separa las dos causas sin repetir toda la corrida.
+- Si la repetición necesita código, es una tarea chica para el builder local. Si alcanza con correr `r00t oraculo calibrar` con menos casos, la hace el orquestador.
+
+No hay preguntas nuevas para el usuario.
