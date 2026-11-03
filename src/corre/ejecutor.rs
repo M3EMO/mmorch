@@ -8,13 +8,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::ErrorCorre;
 use super::contenedor::{args_podman_builder, estado_de, fisica, validar_montajes};
+use super::{ErrorCorre, copiar_sin_mcp, verificar_vigencia};
 use crate::oracle::ErrorOraculo;
 use crate::oracle::contenedor::{esperar, leer_en_hilo};
 use crate::tipos::Rol;
+
+/// Nombre de la copia de la credencial dentro del estado de `claude`. Es el que ve el builder.
+const CREDENCIAL_COPIA: &str = ".credentials.json";
 
 /// Un `claude -p` de un rol: sus argumentos, su entorno y el repo donde corre.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +40,11 @@ pub struct SalidaClaude {
 pub trait EjecutorBuilder {
     /// Corre el builder con `l` y devuelve su salida. Sale por `Err` solo si no pudo lanzarlo.
     fn lanzar(&self, l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre>;
+
+    /// Revisa antes de armar nada que el login alcance para `plazo`. Por defecto no revisa nada.
+    fn verificar_antes(&self, _plazo: Duration) -> Result<(), ErrorCorre> {
+        Ok(())
+    }
 }
 
 /// Ejecutor del contenedor del builder (decisión 43). Corre `claude` en un contenedor de podman. Nunca lo
@@ -59,6 +67,16 @@ const CODIGO_ERROR_PODMAN: i32 = 125;
 
 /// Contador de nombres de contenedor dentro del proceso. Con el pid, el nombre no choca con otra corrida.
 static CONTADOR: AtomicU64 = AtomicU64::new(0);
+
+impl EjecutorContenedorBuilder {
+    /// Copia la credencial del host a `estado/.credentials.json` sin `mcpOAuth`, con 0600.
+    /// Devuelve la ruta de la copia. Es lo único que el contenedor ve como credencial.
+    pub fn preparar_credencial(&self, estado: &Path) -> Result<PathBuf, ErrorCorre> {
+        let copia = estado.join(CREDENCIAL_COPIA);
+        copiar_sin_mcp(&self.credencial, &copia)?;
+        Ok(copia)
+    }
+}
 
 impl EjecutorBuilder for EjecutorContenedorBuilder {
     fn lanzar(&self, l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre> {
@@ -85,12 +103,14 @@ impl EjecutorBuilder for EjecutorContenedorBuilder {
             contexto: format!("crear el estado de claude en {}", estado.display()),
             fuente,
         })?;
+        // El builder no ve la credencial del usuario: monta una copia sin `mcpOAuth`.
+        let copia = self.preparar_credencial(&estado)?;
 
         // Los montajes van por ruta física: lo que se validó es lo que se monta.
         let mut real = l.clone();
         real.repo = fisica(&l.repo, "el repo")?;
         let estado = fisica(&estado, "el estado")?;
-        let credencial = fisica(&self.credencial, "la credencial")?;
+        let credencial = fisica(&copia, "la copia de la credencial")?;
         let nombre = nombre_unico();
         let args = args_podman_builder(&real, &self.imagen, &credencial, &estado, &nombre);
 
@@ -114,6 +134,19 @@ impl EjecutorBuilder for EjecutorContenedorBuilder {
             }
         }
     }
+
+    fn verificar_antes(&self, plazo: Duration) -> Result<(), ErrorCorre> {
+        // Mismo chequeo de existencia que `lanzar`: la falta de credencial tiene un solo mensaje.
+        revisar_credencial(&self.credencial)?;
+        verificar_vigencia(&self.credencial, ahora_ms(), plazo)
+    }
+}
+
+/// Milisegundos desde la época. Reloj anterior a 1970 cuenta como 0.
+fn ahora_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Revisa que la credencial de Claude sea un archivo. El mensaje nombra solo la ruta, nunca el contenido.
@@ -384,6 +417,74 @@ mod tests {
             matches!(error, ErrorCorre::Ejecutor(ref m) if m.contains("no se pudo lanzar")),
             "{error}"
         );
+    }
+
+    /// Credencial de prueba con `claudeAiOauth` y `mcpOAuth`. Ningún token es real.
+    fn credencial_con_mcp(vence_ms: u64) -> String {
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"TOKEN_ACCESO_EJ","expiresAt":{vence_ms}}},"mcpOAuth":{{"servidor":{{"accessToken":"TOKEN_MCP_EJ"}}}}}}"#
+        )
+    }
+
+    /// Vencimiento lejano del login de prueba: año 2100, en milisegundos.
+    const VENCE_LEJOS_MS: u64 = 4_102_444_800_000;
+
+    /// Escribe la credencial del usuario con `texto`, creando su carpeta.
+    fn escribir_credencial(credencial: &Path, texto: &str) {
+        fs::create_dir_all(credencial.parent().expect("padre")).expect("claude");
+        fs::write(credencial, texto).expect("credencial");
+    }
+
+    #[test]
+    fn corre_contenedor_prepara_copia_sin_mcp_oauth_con_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().expect("tmp");
+        let (ejecutor, credencial) = ejecutor_real(&tmp, false);
+        escribir_credencial(&credencial, &credencial_con_mcp(VENCE_LEJOS_MS));
+        let estado = tmp.path().join("corrida").join("claude-estado");
+        fs::create_dir_all(&estado).expect("estado");
+        let copia = ejecutor
+            .preparar_credencial(&estado)
+            .expect("prepara la copia");
+        assert!(copia.is_file(), "no existe la copia: {}", copia.display());
+        assert_eq!(copia, estado.join(".credentials.json"));
+        let texto = fs::read_to_string(&copia).expect("lee la copia");
+        assert!(texto.contains("claudeAiOauth"), "{texto}");
+        assert!(
+            !texto.contains("mcpOAuth"),
+            "la copia trae mcpOAuth: {texto}"
+        );
+        assert!(
+            !texto.contains("TOKEN_MCP_EJ"),
+            "la copia trae el token MCP"
+        );
+        let modo = fs::metadata(&copia).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(modo, 0o600);
+    }
+
+    #[test]
+    fn corre_contenedor_verificar_antes_con_login_vencido_es_error_de_ejecutor() {
+        let tmp = TempDir::new().expect("tmp");
+        let (ejecutor, credencial) = ejecutor_real(&tmp, false);
+        escribir_credencial(&credencial, &credencial_con_mcp(1_000));
+        let error = ejecutor
+            .verificar_antes(Duration::from_secs(60))
+            .expect_err("el login vence antes del plazo");
+        assert!(matches!(error, ErrorCorre::Ejecutor(_)), "{error}");
+        assert!(
+            !error.to_string().contains("TOKEN_ACCESO_EJ"),
+            "el mensaje no lleva tokens: {error}"
+        );
+    }
+
+    #[test]
+    fn corre_contenedor_verificar_antes_con_login_lejano_da_ok() {
+        let tmp = TempDir::new().expect("tmp");
+        let (ejecutor, credencial) = ejecutor_real(&tmp, false);
+        escribir_credencial(&credencial, &credencial_con_mcp(VENCE_LEJOS_MS));
+        ejecutor
+            .verificar_antes(Duration::from_secs(60))
+            .expect("el login alcanza");
     }
 
     #[test]

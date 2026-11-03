@@ -2,7 +2,6 @@
 //! lanzamiento por rol, sesiones, lecturas del oráculo, evaluación y la fila de `runs.jsonl`.
 
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
@@ -10,7 +9,7 @@ use serde_json::{Map, Value, json};
 use crate::borrado;
 use crate::corre::args::{args_claude, env_del_builder};
 use crate::corre::config::ConfigCorrida;
-use crate::corre::contenedor::estado_de;
+use crate::corre::contenedor::{TIMEOUT_BUILDER, estado_de};
 use crate::corre::{
     Corrida, EjecutorBuilder, ErrorCorre, Lanzamiento, guardar_transcript, preparar_corrida,
 };
@@ -87,10 +86,14 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         exigir_cupo(*rol, &eleccion)?;
         elecciones.push((*rol, eleccion));
     }
+    // Vigencia del login: debe alcanzar para el tope de cada rol. Si no, no se arma ni se lanza nada.
+    let roles = u32::try_from(elecciones.len()).unwrap_or(u32::MAX);
+    deps.ejecutor
+        .verificar_antes(TIMEOUT_BUILDER.saturating_mul(roles))?;
 
     // d) Armado de la carpeta de la corrida.
     let corrida = preparar_corrida(deps.home, deps.home_usuario, tarea, config)?;
-    // Desde acá, todo camino de salida quita la credencial vacía que deja el montaje (ver `GuardiaCredencial`).
+    // Desde acá, todo camino de salida quita la copia de la credencial (ver `GuardiaCredencial`).
     let guardia = GuardiaCredencial {
         corrida: &corrida,
         hecho: false,
@@ -174,7 +177,7 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         }
     }
 
-    // i) La credencial vacía que deja el montaje, si quedó (la guardia la quita y su error llega acá).
+    // i) Se quita la copia de la credencial (la guardia lo hace y su error llega acá).
     // Después, el estado final del repo, si quedó sucio.
     guardia.cerrar()?;
     commit_final(&corrida.repo)?;
@@ -313,18 +316,19 @@ fn commit_final(repo: &Path) -> Result<(), ErrorCorre> {
     )
 }
 
-/// Guardia de la credencial vacía de una corrida. `cerrar` la quita en el camino normal y devuelve su
-/// error. Si `correr` sale antes por otro error, el `Drop` la quita igual, con el error descartado.
+/// Guardia de la copia de la credencial de una corrida. La copia es de Root y se borra siempre al
+/// terminar. `cerrar` la quita en el camino normal y devuelve su error. Si `correr` sale antes por otro
+/// error, el `Drop` la quita igual, con el error descartado.
 struct GuardiaCredencial<'a> {
     corrida: &'a Corrida,
     hecho: bool,
 }
 
 impl GuardiaCredencial<'_> {
-    /// Camino normal: quita la credencial vacía y devuelve el error de borrarla, si lo hubo.
+    /// Camino normal: quita la copia de la credencial y devuelve el error de borrarla, si lo hubo.
     fn cerrar(mut self) -> Result<(), ErrorCorre> {
         self.hecho = true;
-        quitar_credencial_vacia(self.corrida)
+        quitar_credencial(self.corrida)
     }
 }
 
@@ -332,34 +336,21 @@ impl Drop for GuardiaCredencial<'_> {
     fn drop(&mut self) {
         if !self.hecho {
             // En un camino de error ya hay otro error que devolver: el de borrar se descarta.
-            let _ = quitar_credencial_vacia(self.corrida);
+            let _ = quitar_credencial(self.corrida);
         }
     }
 }
 
-/// Borra `.credentials.json` del estado de la corrida si está vacío. El montaje de podman lo crea como
-/// punto de montaje, y no es la credencial. Un archivo con contenido no se toca, ni un enlace. Lo llama
-/// `GuardiaCredencial`, en todo camino de salida de `correr` desde que se prepara la corrida.
-fn quitar_credencial_vacia(corrida: &Corrida) -> Result<(), ErrorCorre> {
+/// Borra la copia `.credentials.json` del estado de la corrida, si existe. La copia la arma Root sin
+/// `mcpOAuth`. Un enlace se borra como enlace, sin seguir su destino. Lo llama `GuardiaCredencial`, en todo
+/// camino de salida de `correr` desde que se prepara la corrida.
+fn quitar_credencial(corrida: &Corrida) -> Result<(), ErrorCorre> {
     let Some(estado) = estado_de(&corrida.repo) else {
         return Ok(());
     };
     let ruta = estado.join(".credentials.json");
-    let meta = match fs::symlink_metadata(&ruta) {
-        Ok(meta) => meta,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(fuente) => {
-            return Err(ErrorCorre::Io {
-                contexto: format!("revisar la credencial de la corrida en {}", ruta.display()),
-                fuente,
-            });
-        }
-    };
-    if !meta.is_file() || meta.len() != 0 {
-        return Ok(());
-    }
     borrado::borrar_archivo_dentro(&corrida.dir, &ruta).map_err(|fuente| ErrorCorre::Io {
-        contexto: format!("borrar la credencial vacía {}", ruta.display()),
+        contexto: format!("borrar la copia de la credencial {}", ruta.display()),
         fuente,
     })
 }
@@ -414,6 +405,8 @@ mod tests {
     use std::cell::RefCell;
     use std::fs;
     use std::path::PathBuf;
+
+    use std::time::Duration;
 
     use serde_json::Value;
     use tempfile::TempDir;
@@ -540,10 +533,24 @@ mod tests {
         /// Carpeta fuera de la corrida. Al lanzar, la carpeta de estado pasa a ser un enlace a ella, con un
         /// `.credentials.json` vacío dentro.
         estado_fuera: Option<PathBuf>,
+        /// Enlace `.credentials.json` del estado de la corrida que apunta a este archivo.
+        credencial_enlace: Option<PathBuf>,
+        /// La revisión de vigencia falla, como un login que vence antes del plazo.
+        vigencia_falla: bool,
+        /// Plazo que `correr` pidió en `verificar_antes`.
+        plazo_verificado: RefCell<Option<Duration>>,
         lanzados: RefCell<Vec<Lanzamiento>>,
     }
 
     impl EjecutorBuilder for Builder {
+        fn verificar_antes(&self, plazo: Duration) -> Result<(), ErrorCorre> {
+            *self.plazo_verificado.borrow_mut() = Some(plazo);
+            if self.vigencia_falla {
+                return Err(ErrorCorre::Ejecutor("prueba: el login vence".into()));
+            }
+            Ok(())
+        }
+
         fn lanzar(&self, l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre> {
             self.lanzados.borrow_mut().push(l.clone());
             if self.no_lanza {
@@ -559,6 +566,14 @@ mod tests {
                 let estado = estado_de(&l.repo).expect("estado de la corrida");
                 fs::create_dir_all(&estado).expect("carpeta de estado");
                 fs::write(estado.join(".credentials.json"), texto).expect("credencial");
+            }
+            if let Some(destino) = &self.credencial_enlace {
+                let estado = estado_de(&l.repo).expect("estado de la corrida");
+                let ruta = estado.join(".credentials.json");
+                fs::create_dir_all(&estado).expect("carpeta de estado");
+                // Cada rol lanza otra vez: el enlace del rol anterior se quita antes de crear el nuevo.
+                let _ = fs::remove_file(&ruta);
+                std::os::unix::fs::symlink(destino, &ruta).expect("enlace de credencial");
             }
             if self.falla_tras_montar {
                 return Err(ErrorCorre::Ejecutor(
@@ -930,7 +945,7 @@ mod tests {
     }
 
     #[test]
-    fn corre_credencial_no_vacia_se_conserva() {
+    fn corre_credencial_no_vacia_se_borra_al_terminar() {
         let e = entorno();
         let builder = Builder {
             credencial: Some("{\"token\":\"de-prueba\"}"),
@@ -939,9 +954,62 @@ mod tests {
         let fila = correr_con(&e, &builder, &[], CONFIG).expect("corre");
         let credencial = credencial_de_corrida(&e.usuario, &fila.id);
         assert!(
-            credencial.is_file(),
-            "una credencial con contenido no se toca: {}",
+            !credencial.exists(),
+            "la copia de la credencial es de Root y se borra al terminar: {}",
             credencial.display()
+        );
+    }
+
+    #[test]
+    fn corre_enlace_de_credencial_se_borra_sin_seguir_su_destino() {
+        let e = entorno();
+        let destino = e._tmp.path().join("destino.json");
+        fs::write(&destino, "{\"token\":\"ajeno\"}").expect("destino");
+        let builder = Builder {
+            credencial_enlace: Some(destino.clone()),
+            ..Builder::default()
+        };
+        let fila = correr_con(&e, &builder, &[], CONFIG).expect("corre");
+        let credencial = credencial_de_corrida(&e.usuario, &fila.id);
+        assert!(
+            fs::symlink_metadata(&credencial).is_err(),
+            "el enlace debe borrarse: {}",
+            credencial.display()
+        );
+        assert_eq!(
+            fs::read_to_string(&destino).expect("destino"),
+            "{\"token\":\"ajeno\"}",
+            "el destino del enlace no se toca"
+        );
+    }
+
+    #[test]
+    fn corre_vigencia_vencida_sale_antes_de_lanzar_y_no_crea_nada() {
+        let e = entorno();
+        let builder = Builder {
+            vigencia_falla: true,
+            ..Builder::default()
+        };
+        let error = correr_con(&e, &builder, &[], CONFIG).expect_err("el login vence");
+        assert!(matches!(error, ErrorCorre::Ejecutor(_)), "{error}");
+        assert_eq!(error.codigo_de_salida(), 3);
+        assert!(builder.lanzados.borrow().is_empty(), "no debe lanzar nada");
+        assert!(
+            !dir_corridas(&e.usuario).exists(),
+            "no debe crear la carpeta de la corrida"
+        );
+        assert!(!e.home.join("runs.jsonl").exists(), "sin fila");
+    }
+
+    #[test]
+    fn corre_vigencia_pide_el_plazo_de_todos_los_roles() {
+        let e = entorno();
+        let builder = Builder::default();
+        correr_con(&e, &builder, &[], CONFIG).expect("corre");
+        assert_eq!(
+            *builder.plazo_verificado.borrow(),
+            Some(TIMEOUT_BUILDER * 2),
+            "dos roles, un tope por rol"
         );
     }
 
@@ -976,7 +1044,7 @@ mod tests {
     }
 
     #[test]
-    fn corre_fallo_del_ejecutor_con_credencial_no_vacia_se_conserva() {
+    fn corre_fallo_del_ejecutor_con_credencial_no_vacia_se_borra_al_terminar() {
         let e = entorno();
         let builder = Builder {
             credencial: Some("{\"token\":\"de-prueba\"}"),
@@ -989,14 +1057,14 @@ mod tests {
             .expect("estado de la corrida")
             .join(".credentials.json");
         assert!(
-            credencial.is_file(),
-            "una credencial con contenido no se toca: {}",
+            !credencial.exists(),
+            "la copia de Root no debe quedar tras un fallo: {}",
             credencial.display()
         );
     }
 
     #[test]
-    fn corre_error_al_borrar_la_credencial_vacia_es_error_de_io() {
+    fn corre_error_al_borrar_la_copia_de_la_credencial_es_error_de_io() {
         let e = entorno();
         let fuera = e._tmp.path().join("fuera");
         let builder = Builder {
@@ -1007,7 +1075,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                ErrorCorre::Io { ref contexto, .. } if contexto.contains("borrar la credencial vacía")
+                ErrorCorre::Io { ref contexto, .. } if contexto.contains("borrar la copia de la credencial")
             ),
             "{error}"
         );
