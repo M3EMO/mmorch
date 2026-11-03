@@ -180,7 +180,7 @@ fn oraculo_calibrar(
         println!("{}/{}: {motivo}", fila.tarea, fila.dimension.clave());
     } else {
         println!(
-            "{}/{}: sensibilidad {}, especificidad {}, exactitud {}, casos {} (defectos {}, limpios {}, no aplicables {})",
+            "{}/{}: sensibilidad {}, especificidad {}, exactitud {}, casos {} (defectos {}, limpios {}, no aplicables {}, reemplazos {})",
             fila.tarea,
             fila.dimension.clave(),
             medida(fila.sensibilidad),
@@ -189,7 +189,8 @@ fn oraculo_calibrar(
             fila.n,
             fila.defectos,
             fila.limpios,
-            fila.no_aplicable
+            fila.no_aplicable,
+            fila.reemplazos
         );
         if let Some(ruta) = &calibrada.casos {
             println!("casos: {}", ruta.display());

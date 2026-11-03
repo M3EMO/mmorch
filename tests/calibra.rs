@@ -916,6 +916,7 @@ fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
         items: Default::default(),
         incompleta: false,
         no_aplica: None,
+        reemplazos: 0,
     };
     agregar(home.path(), &seguridad).expect("agrega seguridad");
     let cal = Calibraciones::cargar(home.path()).expect("carga");
@@ -1054,6 +1055,7 @@ fn fila_vieja_sin_no_aplica_se_lee() {
         items: Default::default(),
         incompleta: false,
         no_aplica: None,
+        reemplazos: 0,
     };
     let mut vieja = serde_json::to_value(&fila).expect("serializa");
     vieja.as_object_mut().expect("objeto").remove("no_aplica");
@@ -1081,6 +1083,7 @@ fn eficiencia_no_aplicable_no_borra_las_filas_anteriores() {
         items: Default::default(),
         incompleta: false,
         no_aplica: None,
+        reemplazos: 0,
     };
     agregar(home.path(), &antes).expect("agrega");
     let llamadas = RefCell::new(0u32);
@@ -1099,4 +1102,52 @@ fn eficiencia_no_aplicable_no_borra_las_filas_anteriores() {
     let leido = Calibraciones::cargar(home.path()).expect("carga");
     assert_eq!(leido.filas.len(), 2, "la fila anterior sigue");
     assert_eq!(leido.filas[0], antes);
+}
+
+/// Veredicto de `dimension` con `valor` y, si `sin` es `Some`, sin veredicto con ese motivo.
+fn veredicto_con(dimension: Dimension, valor: f32, sin: Option<&str>) -> Veredicto {
+    Veredicto {
+        puntajes: vec![Puntaje {
+            dimension,
+            valor,
+            calibrada: false,
+            exactitud_balanceada: None,
+            items: vec![],
+            sin_veredicto: sin.map(str::to_string),
+            faltantes: vec![],
+        }],
+        ..Veredicto::default()
+    }
+}
+
+#[test]
+fn calibra_casos_inyeccion_invalida_reemplazada_queda_en_el_renglon() {
+    let home = home_con_tarea("");
+    let primera = RefCell::new(true);
+    let evaluador =
+        |_: &Tarea, ruta: &Path, _: &OpcionesOraculo| -> Result<Veredicto, ErrorOraculo> {
+            Ok(if es_limpia(ruta) {
+                veredicto_con(Dimension::Estructura, 1.0, None)
+            } else if primera.replace(false) {
+                let motivo = "el código no compila: error[E0432]: unresolved import";
+                veredicto_con(Dimension::Estructura, 1.0, Some(motivo))
+            } else {
+                veredicto_con(Dimension::Estructura, 0.0, None)
+            })
+        };
+    let calibrada = calibrar_tarea_con(
+        home.path(),
+        "calibra-fixture",
+        "estructura",
+        2,
+        42,
+        Some(Path::new(FIXTURE)),
+        None,
+        &evaluador,
+    )
+    .expect("calibra");
+    assert_eq!(calibrada.fila.reemplazos, 1);
+    let ruta = calibrada.casos.expect("hay casos guardados");
+    let reemplazos: Vec<u32> = renglones(&ruta).iter().map(|c| c.reemplazos).collect();
+    assert_eq!(reemplazos, vec![1, 0], "el reemplazo cae en el caso 0");
 }

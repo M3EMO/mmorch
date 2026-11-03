@@ -4678,6 +4678,7 @@ mod tests {
             items: BTreeMap::new(),
             incompleta: false,
             no_aplica: None,
+            reemplazos: 0,
         })
         .collect();
         let calibracion = Calibraciones {

@@ -67,6 +67,9 @@ pub struct Fila {
     /// métricas, y no calibra la dimensión. `None` en una medición real.
     #[serde(default)]
     pub no_aplica: Option<String>,
+    /// Inyecciones inválidas reemplazadas en la calibración, incluidas las del caso agotado.
+    #[serde(default)]
+    pub reemplazos: u32,
 }
 
 /// Contenido de `calibracion.json`. Sin archivo, no hay filas: nada está calibrado.
@@ -192,6 +195,9 @@ pub struct CasoGuardado {
     /// Motivo por el que la dimensión calibrada quedó sin veredicto en este caso.
     #[serde(default)]
     pub sin_veredicto: Option<String>,
+    /// Inyecciones inválidas reemplazadas antes de este caso. `0` si no hubo ninguna.
+    #[serde(default)]
+    pub reemplazos: u32,
     /// Si el entorno repitió este caso. Hoy ningún mecanismo repite casos: siempre `false`.
     #[serde(default)]
     pub repetido_por_entorno: bool,
@@ -304,6 +310,7 @@ fn calibrar_medida(
         .map_or(&[], |c| c.camino_caliente.as_slice());
     let mut casos: Vec<Caso> = Vec::with_capacity(n);
     let mut no_aplicables = 0u32;
+    let mut reemplazos = 0u32;
     let mut rotacion = 0usize;
     let mut detencion = None;
     for i in 0..n {
@@ -313,9 +320,7 @@ fn calibrar_medida(
         }
         // Casos pares con defecto; impares limpios. Con n impar sobra un defecto.
         let es_defecto = i % 2 == 0;
-        let copia = tmp.path().join(format!("caso-{i}"));
-        super::copiar_repo(repo_bueno, &copia).map_err(|e| super::infra("copia del repo", e))?;
-        let inyeccion = if es_defecto {
+        let (inyeccion, veredicto, invalidos) = if es_defecto {
             let defecto = defectos[rotacion % defectos.len()];
             rotacion += 1;
             let semilla_caso = semilla.wrapping_add(i as u64);
@@ -326,39 +331,70 @@ fn calibrar_medida(
                 camino_caliente: camino,
                 limites: &limites,
             };
-            let aplicado = inyectar::inyectar_con(defecto, &copia, &contexto, semilla_caso)
-                .map_err(|e| super::infra("inyectar un defecto", e))?;
-            let Some(inyeccion) = aplicado else {
-                no_aplicables += 1;
+            // Un defecto que rompe la construcción se reemplaza por el siguiente candidato, hasta
+            // `MAX_REEMPLAZOS` veces. Cada intento inválido suma a `invalidos`, también el del caso
+            // agotado: un caso agotado suma `MAX_REEMPLAZOS + 1`. Sin candidato medible, no entra.
+            let mut invalidos = 0u32;
+            let mut medido = None;
+            for k in 0..=MAX_REEMPLAZOS {
+                let semilla_k = semilla_caso.wrapping_add(u64::from(k) * 1_000_003);
+                let copia = tmp.path().join(format!("caso-{i}"));
+                super::copiar_repo(repo_bueno, &copia)
+                    .map_err(|e| super::infra("copia del repo", e))?;
+                let aplicado = inyectar::inyectar_con(defecto, &copia, &contexto, semilla_k)
+                    .map_err(|e| super::infra("inyectar un defecto", e))?;
+                let Some(inyeccion) = aplicado else {
+                    borrado::borrar_dir_dentro(tmp.path(), &copia)
+                        .map_err(|e| super::infra("borrar una copia", e))?;
+                    break;
+                };
+                let veredicto = evaluador(&copia)?;
                 borrado::borrar_dir_dentro(tmp.path(), &copia)
                     .map_err(|e| super::infra("borrar una copia", e))?;
+                if rompe_la_compilacion(&base, &veredicto, dimension) {
+                    invalidos += 1;
+                    continue;
+                }
+                medido = Some((inyeccion, veredicto));
+                break;
+            }
+            reemplazos += invalidos;
+            let Some((inyeccion, veredicto)) = medido else {
+                no_aplicables += 1;
                 continue;
             };
-            Some(inyeccion)
+            (Some(inyeccion), veredicto, invalidos)
         } else {
-            None
+            let copia = tmp.path().join(format!("caso-{i}"));
+            super::copiar_repo(repo_bueno, &copia)
+                .map_err(|e| super::infra("copia del repo", e))?;
+            let veredicto = evaluador(&copia)?;
+            borrado::borrar_dir_dentro(tmp.path(), &copia)
+                .map_err(|e| super::infra("borrar una copia", e))?;
+            (None, veredicto, 0)
         };
-        let veredicto = evaluador(&copia)?;
-        borrado::borrar_dir_dentro(tmp.path(), &copia)
-            .map_err(|e| super::infra("borrar una copia", e))?;
-        casos.push(Caso::nuevo(
-            i as u32, inyeccion, &base, &veredicto, dimension, &items,
-        ));
+        casos.push(Caso {
+            reemplazos: invalidos,
+            ..Caso::nuevo(i as u32, inyeccion, &base, &veredicto, dimension, &items)
+        });
     }
 
     let incompleta = detencion.is_some();
     let fila = if incompleta && casos.is_empty() {
         None
     } else {
-        Some(fila_de(
-            tarea,
-            dimension,
-            semilla,
-            &casos,
-            &items,
-            no_aplicables,
-            incompleta,
-        ))
+        Some(Fila {
+            reemplazos,
+            ..fila_de(
+                tarea,
+                dimension,
+                semilla,
+                &casos,
+                &items,
+                no_aplicables,
+                incompleta,
+            )
+        })
     };
     Ok(Medida {
         fila,
@@ -429,6 +465,7 @@ fn fila_de(
         items: items_medidos,
         incompleta,
         no_aplica: None,
+        reemplazos: 0,
     }
 }
 
@@ -692,6 +729,7 @@ fn fila_no_aplica(tarea: &Tarea, dimension: Dimension, semilla: u64) -> Fila {
         items: BTreeMap::new(),
         incompleta: false,
         no_aplica: Some(MOTIVO_NO_APLICA_EFICIENCIA.into()),
+        reemplazos: 0,
     }
 }
 
@@ -790,6 +828,8 @@ struct Caso {
     /// Motivo por el que la dimensión calibrada quedó sin veredicto en este caso.
     sin_veredicto: Option<String>,
     items: BTreeMap<&'static str, Option<bool>>,
+    /// Inyecciones inválidas reemplazadas antes de este caso.
+    reemplazos: u32,
 }
 
 impl Caso {
@@ -818,6 +858,7 @@ impl Caso {
                 })
                 .collect(),
             inyeccion,
+            reemplazos: 0,
         }
     }
 
@@ -837,6 +878,7 @@ impl CasoGuardado {
             es_defecto: caso.es_defecto,
             detectado: caso.detectado,
             sin_veredicto: caso.sin_veredicto.clone(),
+            reemplazos: caso.reemplazos,
             // Ningún mecanismo repite casos hoy: el campo queda en `false` hasta que alguno lo haga.
             repetido_por_entorno: false,
         }
@@ -865,6 +907,46 @@ fn motivo_sin_veredicto(veredicto: &Veredicto, dimension: Dimension) -> Option<S
         Some(puntaje) => puntaje.sin_veredicto.clone(),
         None => Some("sin puntaje de la dimensión".into()),
     }
+}
+
+/// Reemplazos máximos por caso con defecto. El primer candidato no cuenta: un caso prueba hasta
+/// `MAX_REEMPLAZOS + 1` inyecciones. Si todas rompen la construcción, el caso es no aplicable.
+pub const MAX_REEMPLAZOS: u32 = 5;
+
+/// Marcadores de construcción fallida. Un veredicto con uno de ellos no mide su dimensión: el
+/// texto es el de `perfiles/herramientas.rs` (sonda de clippy) y `mutacion.rs` (sonda de mutación).
+const MOTIVOS_DE_CONSTRUCCION: [&str; 2] = ["no compila", "fallan sin mutaciones"];
+
+/// Si el defecto rompe la construcción: `dimension` queda sin veredicto, o con ítems faltantes, por un
+/// motivo de construcción fallida que la base no tiene. Completitud y Funciona nunca cuentan.
+fn rompe_la_compilacion(base: &Veredicto, veredicto: &Veredicto, dimension: Dimension) -> bool {
+    if matches!(dimension, Dimension::Completitud | Dimension::Funciona) {
+        return false;
+    }
+    let en_base = motivos_de_construccion(base, dimension);
+    motivos_de_construccion(veredicto, dimension)
+        .iter()
+        .any(|motivo| !en_base.contains(motivo))
+}
+
+/// Los marcadores de construcción fallida de `dimension` en `veredicto`: el de `sin_veredicto` y los de
+/// `faltantes`. Se comparan marcadores, no textos: el error de rustc cambia de copia a copia.
+fn motivos_de_construccion(veredicto: &Veredicto, dimension: Dimension) -> BTreeSet<&'static str> {
+    let Some(puntaje) = puntaje_de(veredicto, dimension) else {
+        return BTreeSet::new();
+    };
+    let textos = puntaje
+        .sin_veredicto
+        .iter()
+        .map(String::as_str)
+        .chain(puntaje.faltantes.iter().map(|f| f.motivo.as_str()));
+    textos
+        .flat_map(|texto| {
+            MOTIVOS_DE_CONSTRUCCION
+                .into_iter()
+                .filter(move |marcador| texto.contains(*marcador))
+        })
+        .collect()
 }
 
 /// Escribe los casos medidos en `home/calibracion/<tarea>-<dimension>-<ts>.casos.jsonl`: un renglón JSON por
@@ -987,7 +1069,7 @@ fn ahora() -> f64 {
 mod tests {
     use super::inyectar::pruebas::{FIXTURE, arbol, copia_fixture, tarea_en};
     use super::*;
-    use crate::tipos::{Fuente, Hallazgo, NivelItem};
+    use crate::tipos::{Fuente, Hallazgo, ItemFaltante, NivelItem};
     use std::cell::RefCell;
     use tempfile::TempDir;
 
@@ -1007,6 +1089,7 @@ mod tests {
             items: BTreeMap::new(),
             incompleta: false,
             no_aplica: None,
+            reemplazos: 0,
         }
     }
 
@@ -1805,5 +1888,221 @@ mod tests {
         fs::write(dir.path().join("x-2.casos.jsonl"), "").expect("escribe");
         let (ruta, _) = reservar_destino(dir.path(), "x").expect("reserva");
         assert_eq!(ruta.file_name().expect("nombre"), "x-3.casos.jsonl");
+    }
+
+    /// Motivo que emite la sonda de clippy cuando el código no compila.
+    const NO_COMPILA: &str = "el código no compila: error[E0432]: unresolved import";
+
+    /// Veredicto de `dimension` con `valor` y, si `sin` es `Some`, sin veredicto con ese motivo.
+    fn veredicto_de(dimension: Dimension, valor: f32, sin: Option<&str>) -> Veredicto {
+        Veredicto {
+            puntajes: vec![Puntaje {
+                sin_veredicto: sin.map(str::to_string),
+                ..puntaje(dimension, valor)
+            }],
+            ..Veredicto::default()
+        }
+    }
+
+    /// La copia de `base` con su dimensión sin veredicto por `motivo`.
+    fn con_motivo(base: &Veredicto, motivo: &str) -> Veredicto {
+        let mut v = base.clone();
+        v.puntajes[0].sin_veredicto = Some(motivo.into());
+        v
+    }
+
+    /// La copia de `base` con su dimensión en cero: un defecto que la dimensión detecta.
+    fn bajada(base: &Veredicto) -> Veredicto {
+        let mut v = base.clone();
+        v.puntajes[0].valor = 0.0;
+        v
+    }
+
+    fn faltante(motivo: &str) -> ItemFaltante {
+        ItemFaltante {
+            item: "pruebas.mutacion".into(),
+            motivo: motivo.into(),
+        }
+    }
+
+    #[test]
+    fn rompe_la_compilacion_no_compila_nuevo_en_estructura_es_verdadero() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let veredicto = con_motivo(&base, NO_COMPILA);
+        assert!(rompe_la_compilacion(
+            &base,
+            &veredicto,
+            Dimension::Estructura
+        ));
+    }
+
+    #[test]
+    fn rompe_la_compilacion_motivo_que_la_base_ya_tiene_es_falso() {
+        let base = con_motivo(&veredicto_de(Dimension::Estructura, 1.0, None), NO_COMPILA);
+        let veredicto = con_motivo(&base, NO_COMPILA);
+        assert!(!rompe_la_compilacion(
+            &base,
+            &veredicto,
+            Dimension::Estructura
+        ));
+    }
+
+    #[test]
+    fn rompe_la_compilacion_reconoce_fallan_sin_mutaciones_en_faltantes() {
+        let base = veredicto_de(Dimension::Pruebas, 1.0, None);
+        let mut veredicto = base.clone();
+        veredicto.puntajes[0].faltantes =
+            vec![faltante("los tests del proyecto fallan sin mutaciones")];
+        assert!(rompe_la_compilacion(&base, &veredicto, Dimension::Pruebas));
+    }
+
+    #[test]
+    fn rompe_la_compilacion_faltante_que_la_base_ya_tiene_es_falso() {
+        let mut base = veredicto_de(Dimension::Pruebas, 1.0, None);
+        base.puntajes[0].faltantes = vec![faltante("los tests del proyecto fallan sin mutaciones")];
+        let veredicto = base.clone();
+        assert!(!rompe_la_compilacion(&base, &veredicto, Dimension::Pruebas));
+    }
+
+    #[test]
+    fn rompe_la_compilacion_completitud_y_funciona_son_falsas() {
+        for dimension in [Dimension::Completitud, Dimension::Funciona] {
+            let base = veredicto_de(dimension, 1.0, None);
+            let veredicto = con_motivo(&base, NO_COMPILA);
+            assert!(!rompe_la_compilacion(&base, &veredicto, dimension));
+        }
+    }
+
+    #[test]
+    fn rompe_la_compilacion_otro_motivo_es_falso() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let veredicto = con_motivo(&base, "sin sonda");
+        assert!(!rompe_la_compilacion(
+            &base,
+            &veredicto,
+            Dimension::Estructura
+        ));
+    }
+
+    #[test]
+    fn calibra_inyeccion_invalida_se_reemplaza_por_el_siguiente_candidato() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let primera = RefCell::new(true);
+        let (_t, tarea) = tarea_prueba();
+        let ev = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
+            if limpia {
+                base.clone()
+            } else if primera.replace(false) {
+                con_motivo(base, NO_COMPILA)
+            } else {
+                bajada(base)
+            }
+        });
+        let fila = calibrar_con(
+            &tarea,
+            Dimension::Estructura,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &ev,
+        )
+        .expect("calibra");
+        assert_eq!(
+            (
+                fila.n,
+                fila.defectos,
+                fila.limpios,
+                fila.no_aplicable,
+                fila.reemplazos
+            ),
+            (2, 1, 1, 0, 1)
+        );
+        assert_eq!(fila.sensibilidad, Some(1.0));
+        assert_eq!(fila.especificidad, Some(1.0));
+    }
+
+    #[test]
+    fn calibra_inyeccion_invalida_agotada_es_no_aplicable_y_no_mide() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let (_t, tarea) = tarea_prueba();
+        let ev = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
+            if limpia {
+                base.clone()
+            } else {
+                con_motivo(base, NO_COMPILA)
+            }
+        });
+        let fila = calibrar_con(
+            &tarea,
+            Dimension::Estructura,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &ev,
+        )
+        .expect("hay fila: queda el caso limpio");
+        assert_eq!(
+            (fila.n, fila.defectos, fila.limpios, fila.no_aplicable),
+            (1, 0, 1, 1)
+        );
+        assert_eq!(fila.sensibilidad, None);
+        // La inyección inicial más los MAX_REEMPLAZOS reemplazos, todos inválidos: cada intento suma 1.
+        assert_eq!(fila.reemplazos, MAX_REEMPLAZOS + 1);
+    }
+
+    #[test]
+    fn calibra_completitud_con_no_compila_mide_y_no_reemplaza() {
+        let base = veredicto_de(Dimension::Completitud, 1.0, None);
+        let (_t, tarea) = tarea_prueba();
+        let ev = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
+            if limpia {
+                base.clone()
+            } else {
+                con_motivo(base, NO_COMPILA)
+            }
+        });
+        let fila = calibrar_con(
+            &tarea,
+            Dimension::Completitud,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &ev,
+        )
+        .expect("calibra");
+        assert_eq!((fila.defectos, fila.limpios, fila.reemplazos), (1, 1, 0));
+        assert_eq!(
+            fila.sensibilidad,
+            Some(0.0),
+            "sin veredicto cuenta como falso negativo"
+        );
+    }
+
+    #[test]
+    fn calibra_limpio_con_no_compila_no_se_reemplaza() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let (_t, tarea) = tarea_prueba();
+        let ev = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
+            if limpia {
+                con_motivo(base, NO_COMPILA)
+            } else {
+                bajada(base)
+            }
+        });
+        let fila = calibrar_con(
+            &tarea,
+            Dimension::Estructura,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &ev,
+        )
+        .expect("calibra");
+        assert_eq!((fila.defectos, fila.limpios, fila.reemplazos), (1, 1, 0));
+        assert_eq!(
+            fila.especificidad,
+            Some(0.0),
+            "un limpio sin veredicto es falso positivo"
+        );
     }
 }

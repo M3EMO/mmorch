@@ -660,6 +660,13 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": 0,
           "minimum": 0
         },
+        "reemplazos": {
+          "description": "Inyecciones inválidas reemplazadas en la calibración, incluidas las del caso agotado.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
         "semilla": {
           "description": "Semilla de la muestra: con la misma semilla, la medición se repite igual.",
           "type": "integer",
@@ -749,6 +756,13 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ],
       "format": "uint32",
       "default": null,
+      "minimum": 0
+    },
+    "reemplazos": {
+      "description": "Inyecciones inválidas reemplazadas antes de este caso. `0` si no hubo ninguna.",
+      "type": "integer",
+      "format": "uint32",
+      "default": 0,
       "minimum": 0
     },
     "repetido_por_entorno": {
