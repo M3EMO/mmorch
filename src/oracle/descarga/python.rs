@@ -4,9 +4,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -14,13 +14,13 @@ use sha2::{Digest, Sha256};
 
 use super::credenciales::{Credencial, netrc_de_pip, redactar_secretos};
 use super::inventario::{
-    PartesGit, RequisitosPip, motivo_git, partes_git, redactar, requisitos_pip,
-    textos_de_requisitos,
+    PartesGit, RequisitosPip, especificador_pep508_estricto, motivo_git, partes_git, redactar,
+    requisitos_pip, textos_de_requisitos,
 };
 use super::{
     ARCHIVO_REQUIREMENTS, CARPETA_CACHE, CARPETA_PYTHON, Diagnostico, PLAZO_CORTO, Paso,
     Preparacion, Registro, borrar_en_home, corte, diagnosticar, entorno_descarga, error_de,
-    hallazgo, hash_corto, limpiar_parcial, parcial_de, temporal_de,
+    hallazgo, hash_corto, limpiar_parcial, parcial_de, temporal_de, truncar_linea,
 };
 use crate::borrado;
 use crate::config::RegistroConfig;
@@ -49,6 +49,8 @@ const ARCHIVO_BUILD: &str = "build-requires.txt";
 /// Requisitos de build sin `pyproject.toml`: el respaldo de PEP 517.
 const REQUISITOS_BUILD_RESPALDO: [&str; 2] = ["setuptools", "wheel"];
 const ARCHIVO_PYPROJECT: &str = "pyproject.toml";
+/// Tope de tamaño del `pyproject.toml` de un clon. Un archivo más grande no se lee.
+const TOPE_PYPROJECT_CLON: u64 = 256 * 1024;
 /// `netrc` de pip dentro de la carpeta de trabajo de la descarga. Lleva las claves de los registros que
 /// coinciden con un índice; se borra al terminar la descarga.
 const ARCHIVO_NETRC: &str = "pip.netrc";
@@ -57,6 +59,9 @@ const RUTA_NETRC_CONTENEDOR: &str = "/trabajo/pip.netrc";
 /// Requisitos de build de cada sdist de la caché: nombre del archivo → `[build-system].requires` o `null`.
 /// Lo escribe el contenedor de descarga; el host no abre ningún sdist.
 pub const ARCHIVO_REQUISITOS_SDIST: &str = "requisitos-sdist.json";
+/// Dependencias de runtime de cada sdist de la caché: nombre del archivo → `Requires-Dist` o `null`.
+/// Lo escribe el mismo contenedor, junto a `ARCHIVO_REQUISITOS_SDIST`.
+pub const ARCHIVO_DEPENDENCIAS_SDIST: &str = "dependencias-sdist.json";
 /// Script del contenedor de descarga: lee `[build-system].requires` de cada sdist de `/cache` con
 /// `tarfile` o `zipfile`, sin extraer nada, y deja el JSON en `/cache`. Sin `tomllib` (Python < 3.11) sale
 /// con código 3: el host falla cerrado.
@@ -66,25 +71,25 @@ try:
 except ImportError:
     sys.exit(3)
 
-def primer_nivel(nombre):
+def primer_nivel(nombre, archivo):
     partes = nombre.split("/")
-    return len(partes) == 2 and partes[1] == "pyproject.toml" and partes[0] not in ("", ".", "..") and not partes[0].startswith("-")
+    return len(partes) == 2 and partes[1] == archivo and partes[0] not in ("", ".", "..") and not partes[0].startswith("-")
 
-def pyproject_de(ruta):
+def archivo_de(ruta, archivo):
     if ruta.endswith(".zip"):
         with zipfile.ZipFile(ruta) as z:
-            nombres = [n for n in z.namelist() if primer_nivel(n)]
+            nombres = [n for n in z.namelist() if primer_nivel(n, archivo)]
             return z.read(nombres[0]) if nombres else None
     with tarfile.open(ruta, "r:*") as t:
         for m in t.getmembers():
-            if m.isfile() and primer_nivel(m.name):
+            if m.isfile() and primer_nivel(m.name, archivo):
                 f = t.extractfile(m)
                 return f.read() if f else None
     return None
 
 def requires(ruta):
     try:
-        texto = pyproject_de(ruta)
+        texto = archivo_de(ruta, "pyproject.toml")
         if texto is None:
             return None
         lista = tomllib.loads(texto.decode("utf-8")).get("build-system", {}).get("requires")
@@ -94,11 +99,41 @@ def requires(ruta):
     except Exception:
         return None
 
-resultado = {}
+def opcional(valor):
+    marcador = valor.partition(";")[2]
+    return "extra==" in marcador.replace(" ", "")
+
+def dependencias(ruta):
+    try:
+        texto = archivo_de(ruta, "PKG-INFO")
+        if texto is None:
+            return None
+        deps = []
+        for linea in texto.decode("utf-8", "replace").split("\n"):
+            linea = linea.rstrip("\r")
+            if linea == "":
+                break
+            clave, _, valor = linea.partition(":")
+            clave = clave.strip()
+            valor = valor.strip()
+            if clave == "Dynamic" and valor == "Requires-Dist":
+                return None
+            if clave == "Requires-Dist" and valor and not opcional(valor):
+                deps.append(valor)
+        return deps
+    except Exception:
+        return None
+
+requisitos = {}
+dependencias_de_cada = {}
 for ruta in sorted(glob.glob("/cache/*.tar.gz") + glob.glob("/cache/*.zip")):
-    resultado[os.path.basename(ruta)] = requires(ruta)
+    nombre = os.path.basename(ruta)
+    requisitos[nombre] = requires(ruta)
+    dependencias_de_cada[nombre] = dependencias(ruta)
 with open("/cache/requisitos-sdist.json", "w", encoding="utf-8") as f:
-    json.dump(resultado, f)
+    json.dump(requisitos, f)
+with open("/cache/dependencias-sdist.json", "w", encoding="utf-8") as f:
+    json.dump(dependencias_de_cada, f)
 "#;
 
 /// Sdist elegido desde PyPI: su URL, su nombre de archivo y su sha256 esperado.
@@ -140,11 +175,15 @@ fn nombre_de_spec(spec: &str) -> String {
         .replace(['_', '.'], "-")
 }
 
-/// Versión de un especificador con `==` exacto. `None` si no hay versión fijada.
+/// Versión de un especificador con `==` exacto. `None` si no hay versión fijada. Un comodín como `==1.*`
+/// no fija versión: no se usa su parte fija como versión.
 fn version_fijada(spec: &str) -> Option<String> {
     let (_, resto) = spec.split_once("==")?;
+    let resto = resto.trim();
+    if resto.contains('*') {
+        return None;
+    }
     let version: String = resto
-        .trim()
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '!' | '-'))
         .collect();
@@ -584,7 +623,7 @@ fn preparar_python_con(
         ));
     }
     // El texto de `requirements.txt` con sus `-r` seguidos, y las `-c` aparte: pip no ve archivos del repo (C1, M6).
-    let (texto, restricciones) = textos_de_requisitos(repo);
+    let (texto, restricciones) = textos_de_requisitos(repo)?;
     comprobar_imagen_local(deps.podman, &tarea.imagen)?;
     let digest = digest_imagen_con(deps.podman, &tarea.imagen);
     let hash = clave_cache_python(&texto, &restricciones, &tarea.imagen, digest.as_deref());
@@ -705,7 +744,7 @@ fn contenido_indice(pendientes: &[String], con_restricciones: bool) -> String {
 
 /// Hallazgo de un paquete que no instala desde PyPI o desde una fuente de Python. Su archivo es el requirements.
 fn hallazgo_no_instala_python(linea: &str) -> Hallazgo {
-    let linea = redactar(linea);
+    let linea = truncar_linea(&redactar(linea));
     hallazgo(
         ARCHIVO_REQUIREMENTS,
         0,
@@ -819,6 +858,19 @@ fn descargar_en(
                 "infraestructura: requisitos de build de los sdists: {motivo}"
             )));
         }
+    }
+    // Sin lista estática de dependencias de runtime no hay qué bajar: corte sin veredicto, antes de pip.
+    if let Some(nombre) = fuentes_dinamicas(parcial, req)?.first() {
+        return Ok(Fin::Corta(
+            hallazgo(
+                ARCHIVO_REQUIREMENTS,
+                0,
+                "",
+                2,
+                format!("dependencias de runtime no declaradas en forma estática: {nombre}"),
+            ),
+            "dependencias-dinamicas",
+        ));
     }
     let (requisitos, hallazgos) =
         indice_de_build_de(parcial, &rutas_clon(req))?.unwrap_or_default();
@@ -1027,9 +1079,49 @@ fn respaldo_de_build() -> Vec<String> {
         .collect()
 }
 
-/// `true` si el requisito se baja como wheel del índice: sin URL, sin `@` y sin opciones (`-e`, `-r`).
+/// Dependencias de runtime de un `pyproject.toml` de clon, sin ejecutar nada: `[project].dependencies`.
+/// Sin texto, o sin `[project]` (un `setup.py` legado), no declara ninguna: `Some(vec![])`. `None` si
+/// `dependencies` es dinámico, si no es lista de strings o si el TOML no parsea. Sin `dependencies` ni
+/// `dynamic`, tampoco declara ninguna.
+fn dependencias_de_clon(pyproject: Option<&str>) -> Option<Vec<String>> {
+    let Some(texto) = pyproject else {
+        return Some(Vec::new());
+    };
+    let tabla = toml::from_str::<toml::Table>(texto).ok()?;
+    let Some(proyecto) = tabla.get("project") else {
+        return Some(Vec::new());
+    };
+    let proyecto = proyecto.as_table()?;
+    if let Some(dinamico) = proyecto.get("dynamic") {
+        let dinamicos = dinamico.as_array()?;
+        if dinamicos.iter().any(|d| d.as_str() == Some("dependencies")) {
+            return None;
+        }
+    }
+    let Some(valor) = proyecto.get("dependencies") else {
+        return Some(Vec::new());
+    };
+    let textos: Option<Vec<String>> = valor
+        .as_array()?
+        .iter()
+        .map(|item| item.as_str().map(str::to_string))
+        .collect();
+    Some(limpios(&textos?))
+}
+
+/// Recorta cada texto de una lista y descarta los vacíos.
+fn limpios(lista: &[String]) -> Vec<String> {
+    lista
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// `true` si el requisito se baja como wheel del índice: pasa la gramática PEP 508 estricta. Sin URL,
+/// sin `@` y sin opciones pegadas (`--no-binary`, `-e`).
 pub fn requisito_de_build_aceptable(spec: &str) -> bool {
-    !(spec.contains("://") || spec.contains('@') || spec.starts_with('-'))
+    especificador_pep508_estricto(spec)
 }
 
 /// Requisitos de build que se bajan como wheels, y los hallazgos de los que no se pueden bajar.
@@ -1053,15 +1145,17 @@ pub fn indice_de_build(listas: &[Vec<String>]) -> IndiceBuild {
         if requisito_de_build_aceptable(&spec) {
             aceptables.push(spec);
         } else {
+            let motivo = if spec.contains("://") || spec.contains('@') {
+                "requisito de build con referencia directa"
+            } else {
+                "requisito de build no soportado"
+            };
             hallazgos.push(hallazgo(
                 ARCHIVO_PYPROJECT,
                 0,
                 "",
                 1,
-                format!(
-                    "requisito de build con referencia directa: {}",
-                    redactar(&spec)
-                ),
+                format!("{motivo}: {}", redactar(&spec)),
             ));
         }
     }
@@ -1088,10 +1182,24 @@ fn nombres_sdist(carpeta: &Path) -> Result<Vec<String>, ErrorOraculo> {
     Ok(sdists)
 }
 
-/// `true` si una caché con sdists trae `requisitos-sdist.json`. Una caché anterior, sin ese archivo, no
-/// sirve de acierto: se descarga de nuevo.
+/// `true` si una caché con sdists trae `requisitos-sdist.json` y `dependencias-sdist.json`. Una caché anterior,
+/// sin esos archivos, no sirve de acierto: se descarga de nuevo.
 fn requisitos_sdist_listos(carpeta: &Path) -> Result<bool, ErrorOraculo> {
-    Ok(nombres_sdist(carpeta)?.is_empty() || carpeta.join(ARCHIVO_REQUISITOS_SDIST).is_file())
+    Ok(nombres_sdist(carpeta)?.is_empty()
+        || (carpeta.join(ARCHIVO_REQUISITOS_SDIST).is_file()
+            && carpeta.join(ARCHIVO_DEPENDENCIAS_SDIST).is_file()))
+}
+
+/// Lee el JSON `archivo` del contenedor de sdists: nombre del archivo → lista o `null`. Sin el archivo, o si no
+/// parsea, es infraestructura.
+fn leer_mapa_sdist(
+    carpeta: &Path,
+    archivo: &str,
+) -> Result<BTreeMap<String, Option<Vec<String>>>, ErrorOraculo> {
+    let texto = fs::read_to_string(carpeta.join(archivo))
+        .map_err(|e| infra("leer el JSON de los sdists", e))?;
+    serde_json::from_str(&texto)
+        .map_err(|e| ErrorOraculo::Infra(format!("JSON de los sdists ilegible ({archivo}): {e}")))
 }
 
 /// Requisitos de build de cada sdist, en el orden de `nombres`, según el JSON del contenedor. Un sdist sin
@@ -1100,46 +1208,55 @@ fn requisitos_de_sdists(
     carpeta: &Path,
     nombres: &[String],
 ) -> Result<Vec<Vec<String>>, ErrorOraculo> {
-    let ruta = carpeta.join(ARCHIVO_REQUISITOS_SDIST);
-    let texto = fs::read_to_string(&ruta)
-        .map_err(|e| infra("leer los requisitos de build de los sdists", e))?;
-    let mapa: BTreeMap<String, Option<Vec<String>>> =
-        serde_json::from_str(&texto).map_err(|e| {
-            ErrorOraculo::Infra(format!("requisitos de build de los sdists ilegibles: {e}"))
-        })?;
+    let mapa = leer_mapa_sdist(carpeta, ARCHIVO_REQUISITOS_SDIST)?;
     Ok(nombres
         .iter()
         .map(|nombre| match mapa.get(nombre) {
-            Some(Some(lista)) => lista
-                .iter()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect(),
+            Some(Some(lista)) => limpios(lista),
             _ => respaldo_de_build(),
         })
         .collect())
 }
 
-/// Rutas de los clones git de `req` bajo `src/`: `<clave>` o `<clave>/<subdirectory>`, sin repetidos.
+/// Dependencias de runtime de cada sdist, en el orden de `nombres`. `None` si el sdist no las declara en forma
+/// estática, o si el JSON no lo trae.
+fn dependencias_de_sdists(
+    carpeta: &Path,
+    nombres: &[String],
+) -> Result<Vec<Option<Vec<String>>>, ErrorOraculo> {
+    let mapa = leer_mapa_sdist(carpeta, ARCHIVO_DEPENDENCIAS_SDIST)?;
+    Ok(nombres
+        .iter()
+        .map(|nombre| match mapa.get(nombre) {
+            Some(Some(lista)) => Some(limpios(lista)),
+            _ => None,
+        })
+        .collect())
+}
+
+/// Ruta de un clon bajo `src/`: `<clave>` o `<clave>/<subdirectory>`.
+fn ruta_de_clon(partes: &PartesGit) -> String {
+    let dir = clave_clon(partes);
+    match &partes.subdir {
+        Some(subdir) => format!("{dir}/{subdir}"),
+        None => dir,
+    }
+}
+
+/// Rutas de los clones git de `req` bajo `src/`, sin repetidos.
 fn rutas_clon(req: &RequisitosPip) -> Vec<String> {
     let rutas: BTreeSet<String> = req
         .directas
         .iter()
         .filter_map(|(_, raw)| partes_git(raw).ok())
-        .map(|partes| {
-            let dir = clave_clon(&partes);
-            match partes.subdir {
-                Some(subdir) => format!("{dir}/{subdir}"),
-                None => dir,
-            }
-        })
+        .map(|partes| ruta_de_clon(&partes))
         .collect();
     rutas.into_iter().collect()
 }
 
-/// Índice de build de las fuentes que necesitan build en `carpeta`: los sdists (con los requisitos que dejó
-/// el contenedor) y los clones en `rutas_clon` (con el `pyproject` de cada uno o de su subdirectorio). `None`
-/// si no hay ninguno, porque los wheels no necesitan build.
+/// Índice de build de las fuentes que necesitan build en `carpeta`: los sdists (con sus requisitos de build y sus
+/// dependencias de runtime, que deja el contenedor) y los clones en `rutas_clon` (con el `pyproject` de cada uno
+/// o de su subdirectorio). `None` si no hay ninguno, porque los wheels no necesitan build.
 fn indice_de_build_de(
     carpeta: &Path,
     rutas_clon: &[String],
@@ -1148,19 +1265,78 @@ fn indice_de_build_de(
     if sdists.is_empty() && rutas_clon.is_empty() {
         return Ok(None);
     }
-    let mut listas = if sdists.is_empty() {
-        Vec::new()
-    } else {
-        requisitos_de_sdists(carpeta, &sdists)?
-    };
-    listas.extend(rutas_clon.iter().map(|ruta| {
-        requisitos_de_build(
-            fs::read_to_string(carpeta.join("src").join(ruta).join(ARCHIVO_PYPROJECT))
-                .ok()
-                .as_deref(),
-        )
-    }));
+    let mut listas = Vec::new();
+    if !sdists.is_empty() {
+        listas.extend(requisitos_de_sdists(carpeta, &sdists)?);
+        // Un sdist sin lista estática ya cortó la descarga (`fuentes_dinamicas`): aquí solo suma sus listas.
+        listas.extend(
+            dependencias_de_sdists(carpeta, &sdists)?
+                .into_iter()
+                .map(Option::unwrap_or_default),
+        );
+    }
+    for ruta in rutas_clon {
+        let pyproject = pyproject_de_clon(carpeta, ruta);
+        listas.push(requisitos_de_build(pyproject.as_deref()));
+        listas.push(dependencias_de_clon(pyproject.as_deref()).unwrap_or_default());
+    }
     Ok(Some(indice_de_build(&listas)))
+}
+
+/// Nombres de las fuentes de build cuyas dependencias de runtime no se declaran en forma estática: un sdist sin
+/// lista en `dependencias-sdist.json`, o un clon con `[project].dependencies` dinámico o mal formado. Un clon sin
+/// `pyproject.toml` legible no corta. Sin nombres, la descarga sigue.
+fn fuentes_dinamicas(carpeta: &Path, req: &RequisitosPip) -> Result<Vec<String>, ErrorOraculo> {
+    let sdists = nombres_sdist(carpeta)?;
+    let mut dinamicas = Vec::new();
+    if !sdists.is_empty() {
+        let dependencias = dependencias_de_sdists(carpeta, &sdists)?;
+        for (nombre, deps) in sdists.iter().zip(dependencias) {
+            if deps.is_none() {
+                dinamicas.push(nombre.clone());
+            }
+        }
+    }
+    for (_, raw) in &req.directas {
+        let Ok(partes) = partes_git(raw) else {
+            continue;
+        };
+        let pyproject = pyproject_de_clon(carpeta, &ruta_de_clon(&partes));
+        if dependencias_de_clon(pyproject.as_deref()).is_none() {
+            dinamicas.push(redactar(&partes.base));
+        }
+    }
+    Ok(dinamicas)
+}
+
+/// Texto del `pyproject.toml` de un clon bajo `carpeta/src/<ruta>`. No sigue enlaces: cada componente de la
+/// ruta debe ser carpeta real, y el archivo debe ser regular. Pasa el tope de tamaño, no se lee. Si no cumple,
+/// da `None`, como si no existiera.
+fn pyproject_de_clon(carpeta: &Path, ruta: &str) -> Option<String> {
+    let mut base = carpeta.to_path_buf();
+    for componente in Path::new("src").join(ruta).components() {
+        let Component::Normal(nombre) = componente else {
+            return None;
+        };
+        base.push(nombre);
+        if !fs::symlink_metadata(&base).ok()?.is_dir() {
+            return None;
+        }
+    }
+    let archivo = base.join(ARCHIVO_PYPROJECT);
+    if !fs::symlink_metadata(&archivo).ok()?.is_file() {
+        return None;
+    }
+    let mut texto = Vec::new();
+    fs::File::open(&archivo)
+        .ok()?
+        .take(TOPE_PYPROJECT_CLON + 1)
+        .read_to_end(&mut texto)
+        .ok()?;
+    if texto.len() as u64 > TOPE_PYPROJECT_CLON {
+        return None;
+    }
+    String::from_utf8(texto).ok()
 }
 
 /// Ejecución del contenedor de descarga de Python: sin `/repo`, con las copias de los requisitos en `/trabajo`.
@@ -1213,6 +1389,7 @@ mod tests {
     use std::cell::RefCell;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+    use std::process::Command;
 
     /// Lista de build que dan los respaldos de PEP 517.
     fn respaldo() -> Vec<String> {
@@ -1267,6 +1444,34 @@ mod tests {
     }
 
     #[test]
+    fn descarga_requisito_de_build_aceptable_rechaza_opciones_pegadas() {
+        for spec in [
+            "foo==1.0 --no-binary :all:",
+            "foo==1.0\n--no-binary :all:",
+            "foo==1.0\r-e .",
+            "foo\t-r otro.txt",
+        ] {
+            assert!(!requisito_de_build_aceptable(spec), "{spec:?}");
+        }
+        assert!(requisito_de_build_aceptable("requests>=2"));
+        assert!(requisito_de_build_aceptable("foo[extra]==1.0"));
+        assert!(requisito_de_build_aceptable(
+            "numpy>=1.20,<2; python_version>='3.8'"
+        ));
+    }
+
+    #[test]
+    fn descarga_indice_de_build_opcion_pegada_no_se_baja() {
+        let listas = vec![vec![
+            "foo==1.0 --no-binary :all:".to_string(),
+            "wheel".to_string(),
+        ]];
+        let (requisitos, hallazgos) = indice_de_build(&listas);
+        assert_eq!(requisitos, ["wheel"]);
+        assert_eq!(hallazgos.len(), 1, "{hallazgos:?}");
+    }
+
+    #[test]
     fn descarga_requisitos_sdist_se_leen_en_el_contenedor_con_tarfile_y_zipfile() {
         let cmd = comando_requisitos_sdist();
         assert!(cmd.starts_with("python3 -I -c "), "{cmd}");
@@ -1275,6 +1480,7 @@ mod tests {
             "zipfile",
             "tomllib",
             "/cache/requisitos-sdist.json",
+            "/cache/dependencias-sdist.json",
         ] {
             assert!(cmd.contains(esperado), "falta {esperado}: {cmd}");
         }
@@ -1322,6 +1528,11 @@ mod tests {
             "un sdist sin json viene de una caché anterior"
         );
         fs::write(dir.path().join(ARCHIVO_REQUISITOS_SDIST), "{}").expect("json");
+        assert!(
+            !requisitos_sdist_listos(dir.path()).expect("lee"),
+            "sin dependencias de runtime, la caché es anterior"
+        );
+        fs::write(dir.path().join(ARCHIVO_DEPENDENCIAS_SDIST), "{}").expect("json");
         assert!(requisitos_sdist_listos(dir.path()).expect("lee"));
     }
 
@@ -1357,6 +1568,79 @@ mod tests {
             h.detalle
         );
         assert!(!h.detalle.contains("clave"), "{}", h.detalle);
+    }
+
+    /// Clon temporal con `src/clon/` vacío. Devuelve la carpeta y la carpeta de afuera del clon.
+    fn clon_de_prueba() -> (tempfile::TempDir, tempfile::TempDir) {
+        let carpeta = tempfile::tempdir().expect("carpeta");
+        let afuera = tempfile::tempdir().expect("afuera");
+        fs::create_dir_all(carpeta.path().join("src").join("clon")).expect("crea el clon");
+        (carpeta, afuera)
+    }
+
+    #[test]
+    fn descarga_pyproject_de_clon_symlink_fuera_del_clon_no_sale() {
+        let (carpeta, afuera) = clon_de_prueba();
+        fs::write(
+            afuera.path().join("pyproject.toml"),
+            "[build-system]\nrequires = [\"pkg-de-afuera\"]\n",
+        )
+        .expect("escribe el archivo de afuera");
+        std::os::unix::fs::symlink(
+            afuera.path().join("pyproject.toml"),
+            carpeta.path().join("src/clon/pyproject.toml"),
+        )
+        .expect("enlace");
+        let (requisitos, _) = indice_de_build_de(carpeta.path(), &["clon".to_string()])
+            .expect("indice")
+            .expect("hay build");
+        assert_eq!(requisitos, respaldo());
+    }
+
+    #[test]
+    fn descarga_pyproject_de_clon_componente_intermedio_symlink_no_se_sigue() {
+        let (carpeta, afuera) = clon_de_prueba();
+        fs::write(
+            afuera.path().join("pyproject.toml"),
+            "[build-system]\nrequires = [\"pkg-de-afuera\"]\n",
+        )
+        .expect("escribe el archivo de afuera");
+        let clon = carpeta.path().join("src/clon");
+        fs::remove_dir(&clon).expect("quita el clon");
+        std::os::unix::fs::symlink(afuera.path(), &clon).expect("enlace al directorio");
+        let (requisitos, _) = indice_de_build_de(carpeta.path(), &["clon".to_string()])
+            .expect("indice")
+            .expect("hay build");
+        assert_eq!(requisitos, respaldo());
+    }
+
+    #[test]
+    fn descarga_pyproject_de_clon_sobre_el_tope_no_se_lee() {
+        let (carpeta, _afuera) = clon_de_prueba();
+        let relleno = "#".repeat(300 * 1024);
+        fs::write(
+            carpeta.path().join("src/clon/pyproject.toml"),
+            format!("{relleno}\n[build-system]\nrequires = [\"hatchling\"]\n"),
+        )
+        .expect("escribe el pyproject grande");
+        let (requisitos, _) = indice_de_build_de(carpeta.path(), &["clon".to_string()])
+            .expect("indice")
+            .expect("hay build");
+        assert_eq!(requisitos, respaldo());
+    }
+
+    #[test]
+    fn descarga_pyproject_de_clon_regular_normal_se_lee() {
+        let (carpeta, _afuera) = clon_de_prueba();
+        fs::write(
+            carpeta.path().join("src/clon/pyproject.toml"),
+            "[build-system]\nrequires = [\"hatchling\"]\n",
+        )
+        .expect("escribe el pyproject");
+        let (requisitos, _) = indice_de_build_de(carpeta.path(), &["clon".to_string()])
+            .expect("indice")
+            .expect("hay build");
+        assert_eq!(requisitos, ["hatchling"]);
     }
 
     #[test]
@@ -1556,6 +1840,18 @@ mod tests {
         assert_eq!(causa, "sin-version-fijada");
     }
 
+    #[test]
+    fn descarga_version_fijada_comodin_no_es_version_fijada() {
+        assert_eq!(version_fijada("foo==1.*"), None);
+        assert_eq!(version_fijada("foo==1.2.*"), None);
+    }
+
+    #[test]
+    fn descarga_version_fijada_exacta_y_sin_fijar() {
+        assert_eq!(version_fijada("foo==1.2.3"), Some("1.2.3".to_string()));
+        assert_eq!(version_fijada("foo>=1"), None);
+    }
+
     /// Tarea de Python mínima escrita en un directorio temporal.
     fn tarea_python_de_prueba() -> Tarea {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -1573,7 +1869,8 @@ mod tests {
         let repo = tempfile::tempdir().expect("repo");
         fs::write(repo.path().join("requirements.txt"), "six==1.16.0\n").expect("escribe");
         let tarea = tarea_python_de_prueba();
-        let (texto, restricciones) = textos_de_requisitos(repo.path());
+        let (texto, restricciones) =
+            textos_de_requisitos(repo.path()).expect("textos de requisitos");
         let clave = clave_cache_python(&texto, &restricciones, "python:3.8", None);
         let destino = home
             .path()
@@ -2069,5 +2366,423 @@ mod tests {
             .find(|v| v["tipo"] == "gate" && v["fase"] == "descarga")
             .expect("evento Gate de la descarga");
         assert!(evento["extra"].get("avisos").is_none(), "{evento}");
+    }
+
+    // --- H5: dependencias de runtime de sdists y clones git ---
+
+    /// Respuesta de un contenedor falso: código y error.
+    fn respuesta(codigo: i32, stderr: &str) -> Resultado {
+        Resultado {
+            codigo,
+            stdout: String::new(),
+            stderr: stderr.into(),
+            segundos: 0.0,
+        }
+    }
+
+    /// Ejecutor que simula red, disco y el script del contenedor. `simular` responde cada ejecución y escribe
+    /// en `cache`, la caché parcial. Guarda cada ejecución.
+    struct EjecutorSimulado<'f> {
+        simular: &'f dyn Fn(&Ejecucion, &Path) -> Resultado,
+        ejecuciones: RefCell<Vec<Ejecucion>>,
+    }
+
+    impl EjecutorDeDescarga for EjecutorSimulado<'_> {
+        fn ejecutar(&self, ejecucion: &Ejecucion) -> Result<Resultado, ErrorOraculo> {
+            self.ejecuciones.borrow_mut().push(ejecucion.clone());
+            let cache = ejecucion
+                .cache
+                .as_deref()
+                .expect("la descarga monta la caché");
+            Ok((self.simular)(ejecucion, cache))
+        }
+    }
+
+    /// Corre la descarga de Python de `texto_req` contra `ejecutor`. Devuelve el `home`, para leer lo que deja.
+    fn descarga_simulada(
+        texto_req: &str,
+        ejecutor: &dyn EjecutorDeDescarga,
+    ) -> (tempfile::TempDir, Result<Paso, ErrorOraculo>) {
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        fs::write(repo.path().join("requirements.txt"), texto_req).expect("requirements");
+        let tarea = tarea_python_de_prueba();
+        let podman = PodmanDigest::que_responde(125, "");
+        let deps = DependenciasPython {
+            podman: &podman,
+            ejecutor,
+            leer_env: &|_: &str| None,
+        };
+        let resultado = preparar_python_con(
+            repo.path(),
+            &tarea,
+            home.path(),
+            Duration::from_secs(60),
+            &[],
+            &deps,
+        );
+        (home, resultado)
+    }
+
+    /// Bytes del sdist falso `foo-1.0.tar.gz`. El script simulado no los lee: solo cuenta su sha256.
+    const SDIST_FALSO: &[u8] = b"sdist falso";
+
+    /// Mundo con un solo sdist, `foo==1.0`. PyPI lo ofrece, pip no lo baja como wheel sin él, y el script
+    /// del contenedor deja `dependencias` en `dependencias-sdist.json`. Guarda en `indice` el build de pip.
+    fn mundo_de_sdist<'a>(
+        dependencias: &'a str,
+        indice: &'a RefCell<Option<String>>,
+    ) -> impl Fn(&Ejecucion, &Path) -> Resultado + 'a {
+        let json_pypi = format!(
+            r#"{{"urls": [{{"packagetype": "sdist", "url": "https://files.pythonhosted.org/packages/foo-1.0.tar.gz", "filename": "foo-1.0.tar.gz", "digests": {{"sha256": "{}"}}}}]}}"#,
+            sha256_hex(SDIST_FALSO)
+        );
+        move |ejecucion: &Ejecucion, cache: &Path| {
+            let cmd = ejecucion.cmd.as_str();
+            if cmd.contains("-o /cache/pypi-meta.json") {
+                fs::write(cache.join(ARCHIVO_JSON), &json_pypi).expect("json de PyPI");
+            } else if cmd.contains("-o /cache/foo-1.0.tar.gz") {
+                fs::write(cache.join("foo-1.0.tar.gz"), SDIST_FALSO).expect("sdist");
+            } else if cmd.starts_with("python3 -I -c") {
+                fs::write(
+                    cache.join(ARCHIVO_REQUISITOS_SDIST),
+                    r#"{"foo-1.0.tar.gz": ["hatchling"]}"#,
+                )
+                .expect("requisitos");
+                fs::write(cache.join(ARCHIVO_DEPENDENCIAS_SDIST), dependencias)
+                    .expect("dependencias");
+            } else if cmd.contains("pip download") && cmd.contains(ARCHIVO_INDICE) {
+                // Sin el sdist en la caché, pip no halla `foo==1.0` como wheel.
+                if !cache.join("foo-1.0.tar.gz").is_file() {
+                    return respuesta(1, "ERROR: No matching distribution found for foo==1.0");
+                }
+            } else if cmd.contains("pip download") && cmd.contains(ARCHIVO_BUILD) {
+                *indice.borrow_mut() = fs::read_to_string(cache.join(ARCHIVO_BUILD)).ok();
+            }
+            respuesta(0, "")
+        }
+    }
+
+    /// Mundo con un clon. `git clone` deja `pyproject` en `src/<dir>` y su commit. Guarda en `indice` el build.
+    fn mundo_de_clon<'a>(
+        dir: &'a str,
+        pyproject: &'a str,
+        indice: &'a RefCell<Option<String>>,
+    ) -> impl Fn(&Ejecucion, &Path) -> Resultado + 'a {
+        move |ejecucion: &Ejecucion, cache: &Path| {
+            let cmd = ejecucion.cmd.as_str();
+            if cmd.contains(" clone ") {
+                let src = cache.join("src");
+                fs::create_dir_all(src.join(dir)).expect("clon");
+                fs::write(src.join(dir).join(ARCHIVO_PYPROJECT), pyproject).expect("pyproject");
+                fs::write(
+                    src.join(format!("{dir}.commit")),
+                    "c8e394065cd541a16c040515dc0afb85cf22a7c3\n",
+                )
+                .expect("commit");
+            } else if cmd.contains("pip download") && cmd.contains(ARCHIVO_BUILD) {
+                *indice.borrow_mut() = fs::read_to_string(cache.join(ARCHIVO_BUILD)).ok();
+            }
+            respuesta(0, "")
+        }
+    }
+
+    #[test]
+    fn descarga_sdist_dependencia_de_runtime_llega_al_indice_de_wheels() {
+        let indice = RefCell::new(None);
+        let mundo = mundo_de_sdist(r#"{"foo-1.0.tar.gz": ["requests>=2"]}"#, &indice);
+        let ejecutor = EjecutorSimulado {
+            simular: &mundo,
+            ejecuciones: RefCell::new(Vec::new()),
+        };
+        let (_home, resultado) = descarga_simulada("foo==1.0\n", &ejecutor);
+        let (preparacion, _) = resultado.expect("la descarga corre");
+        assert!(
+            matches!(preparacion, Preparacion::Lista { .. }),
+            "{preparacion:?}"
+        );
+        let build = indice
+            .borrow()
+            .clone()
+            .expect("pip bajó los requisitos de build");
+        assert!(build.lines().any(|l| l == "requests>=2"), "{build}");
+    }
+
+    #[test]
+    fn descarga_sdist_sin_dependencias_de_runtime_no_agrega_ni_corta() {
+        let indice = RefCell::new(None);
+        let mundo = mundo_de_sdist(r#"{"foo-1.0.tar.gz": []}"#, &indice);
+        let ejecutor = EjecutorSimulado {
+            simular: &mundo,
+            ejecuciones: RefCell::new(Vec::new()),
+        };
+        let (_home, resultado) = descarga_simulada("foo==1.0\n", &ejecutor);
+        let (preparacion, _) = resultado.expect("la descarga corre");
+        assert!(
+            matches!(preparacion, Preparacion::Lista { .. }),
+            "{preparacion:?}"
+        );
+        let build = indice.borrow().clone().expect("hay requisitos de build");
+        assert_eq!(build.trim(), "hatchling");
+    }
+
+    #[test]
+    fn descarga_sdist_con_dependencias_dinamicas_da_corte_sin_veredicto() {
+        let indice = RefCell::new(None);
+        let mundo = mundo_de_sdist(r#"{"foo-1.0.tar.gz": null}"#, &indice);
+        let ejecutor = EjecutorSimulado {
+            simular: &mundo,
+            ejecuciones: RefCell::new(Vec::new()),
+        };
+        let (_home, resultado) = descarga_simulada("foo==1.0\n", &ejecutor);
+        let (preparacion, registro) = resultado.expect("la descarga corre");
+        let Preparacion::SinVeredicto(hallazgos) = &preparacion else {
+            panic!("debía dar corte sin veredicto: {preparacion:?}");
+        };
+        let [hallazgo] = hallazgos.as_slice() else {
+            panic!("un solo hallazgo: {hallazgos:?}");
+        };
+        assert_eq!(hallazgo.severidad, 2);
+        assert_eq!(
+            hallazgo.detalle,
+            "dependencias de runtime no declaradas en forma estática: foo-1.0.tar.gz"
+        );
+        let registro = registro.expect("hay registro de la descarga");
+        assert_eq!(registro.motivo, Some("dependencias-dinamicas"));
+        assert!(indice.borrow().is_none(), "el corte va antes de pip");
+    }
+
+    #[test]
+    fn descarga_clon_dependencias_de_runtime_llegan_al_indice_de_wheels() {
+        let raw = "git+https://github.com/x/y@c8e394065cd541a16c040515dc0afb85cf22a7c3#egg=y";
+        let dir = clave_clon(&partes_git(raw).expect("parsea"));
+        let indice = RefCell::new(None);
+        let pyproject =
+            "[project]\nname = \"y\"\nversion = \"1.0\"\ndependencies = [\"requests>=2\"]\n";
+        let mundo = mundo_de_clon(&dir, pyproject, &indice);
+        let ejecutor = EjecutorSimulado {
+            simular: &mundo,
+            ejecuciones: RefCell::new(Vec::new()),
+        };
+        let (_home, resultado) = descarga_simulada(&format!("{raw}\n"), &ejecutor);
+        let (preparacion, _) = resultado.expect("la descarga corre");
+        assert!(
+            matches!(preparacion, Preparacion::Lista { .. }),
+            "{preparacion:?}"
+        );
+        let build = indice.borrow().clone().expect("hay requisitos de build");
+        assert!(build.lines().any(|l| l == "requests>=2"), "{build}");
+    }
+
+    #[test]
+    fn descarga_clon_dependencias_dinamicas_da_corte_sin_veredicto() {
+        let raw = "git+https://github.com/x/y@c8e394065cd541a16c040515dc0afb85cf22a7c3#egg=y";
+        let dir = clave_clon(&partes_git(raw).expect("parsea"));
+        let indice = RefCell::new(None);
+        let pyproject = "[project]\nname = \"y\"\ndynamic = [\"dependencies\"]\n";
+        let mundo = mundo_de_clon(&dir, pyproject, &indice);
+        let ejecutor = EjecutorSimulado {
+            simular: &mundo,
+            ejecuciones: RefCell::new(Vec::new()),
+        };
+        let (_home, resultado) = descarga_simulada(&format!("{raw}\n"), &ejecutor);
+        let (preparacion, registro) = resultado.expect("la descarga corre");
+        let Preparacion::SinVeredicto(hallazgos) = &preparacion else {
+            panic!("debía dar corte sin veredicto: {preparacion:?}");
+        };
+        let [hallazgo] = hallazgos.as_slice() else {
+            panic!("un solo hallazgo: {hallazgos:?}");
+        };
+        assert_eq!(hallazgo.severidad, 2);
+        assert!(
+            hallazgo
+                .detalle
+                .starts_with("dependencias de runtime no declaradas en forma estática: "),
+            "{}",
+            hallazgo.detalle
+        );
+        assert!(
+            hallazgo.detalle.contains("github.com/x/y"),
+            "{}",
+            hallazgo.detalle
+        );
+        let registro = registro.expect("hay registro de la descarga");
+        assert_eq!(registro.motivo, Some("dependencias-dinamicas"));
+    }
+
+    #[test]
+    fn descarga_dependencias_de_clon_estaticas_se_leen() {
+        assert_eq!(
+            dependencias_de_clon(Some(
+                "[project]\ndependencies = [\"requests>=2\", \" six \", \"  \"]\n"
+            )),
+            Some(vec!["requests>=2".to_string(), "six".to_string()])
+        );
+        assert_eq!(
+            dependencias_de_clon(Some("[project]\nname = \"x\"\n")),
+            Some(Vec::new()),
+            "sin `dependencies` y sin `dynamic`: no declara ninguna"
+        );
+    }
+
+    #[test]
+    fn descarga_dependencias_de_clon_sin_pyproject_o_sin_project_son_vacias() {
+        assert_eq!(dependencias_de_clon(None), Some(Vec::new()));
+        assert_eq!(
+            dependencias_de_clon(Some("[build-system]\nrequires = [\"setuptools\"]\n")),
+            Some(Vec::new()),
+            "setup.py legado: no declara ninguna"
+        );
+    }
+
+    #[test]
+    fn descarga_dependencias_de_clon_dinamicas_o_ilegibles_son_none() {
+        for texto in [
+            Some("[project]\nname = \"x\"\ndynamic = [\"dependencies\"]\n"),
+            Some("[project]\ndependencies = \"requests\"\n"),
+            Some("[project]\ndependencies = [1]\n"),
+            Some("no es toml [[["),
+        ] {
+            assert_eq!(dependencias_de_clon(texto), None, "{texto:?}");
+        }
+    }
+
+    /// Fuentes dinámicas de un clon sin o con ese `pyproject.toml` en `src/<clave>`.
+    fn fuentes_de_clon(pyproject: Option<&str>) -> Vec<String> {
+        let raw = "git+https://github.com/x/y@c8e394065cd541a16c040515dc0afb85cf22a7c3#egg=y";
+        let dir = clave_clon(&partes_git(raw).expect("parsea"));
+        let carpeta = tempfile::tempdir().expect("carpeta");
+        let clon = carpeta.path().join("src").join(&dir);
+        fs::create_dir_all(&clon).expect("clon");
+        if let Some(texto) = pyproject {
+            fs::write(clon.join(ARCHIVO_PYPROJECT), texto).expect("pyproject");
+        }
+        let req = RequisitosPip {
+            directas: vec![(1, raw.to_string())],
+            ..Default::default()
+        };
+        fuentes_dinamicas(carpeta.path(), &req).expect("fuentes")
+    }
+
+    #[test]
+    fn descarga_clon_sin_pyproject_no_corta() {
+        assert!(fuentes_de_clon(None).is_empty());
+    }
+
+    #[test]
+    fn descarga_clon_pyproject_sin_project_no_corta() {
+        assert!(fuentes_de_clon(Some("[build-system]\nrequires = [\"setuptools\"]\n")).is_empty());
+    }
+
+    #[test]
+    fn descarga_indice_de_build_de_sdist_incluye_sus_dependencias_de_runtime() {
+        // Camino de acierto de caché: el índice sale de los JSON guardados, sin correr el contenedor.
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::write(dir.path().join("a-1.0.tar.gz"), "x").expect("sdist");
+        fs::write(
+            dir.path().join(ARCHIVO_REQUISITOS_SDIST),
+            r#"{"a-1.0.tar.gz": ["hatchling"]}"#,
+        )
+        .expect("json");
+        fs::write(
+            dir.path().join(ARCHIVO_DEPENDENCIAS_SDIST),
+            r#"{"a-1.0.tar.gz": ["requests>=2"]}"#,
+        )
+        .expect("json");
+        let (requisitos, hallazgos) = indice_de_build_de(dir.path(), &[])
+            .expect("indice")
+            .expect("hay build");
+        assert_eq!(requisitos, ["hatchling", "requests>=2"]);
+        assert!(hallazgos.is_empty());
+    }
+
+    #[test]
+    fn descarga_script_de_sdists_escribe_dependencias_de_runtime() {
+        // Corre el script real sobre sdists `.tar.gz` armados en temporales. Sin `python3` con `tomllib`, no corre.
+        let corre = Command::new("python3")
+            .args(["-I", "-c", "import tomllib"])
+            .output()
+            .is_ok_and(|s| s.status.success());
+        if !corre {
+            eprintln!("sin python3 con tomllib: el script no se prueba");
+            return;
+        }
+        let cache = tempfile::tempdir().expect("cache");
+        let obra = tempfile::tempdir().expect("obra");
+        let fuentes: [(&str, Option<&str>); 4] = [
+            (
+                "pkg-1.0",
+                Some(
+                    "Metadata-Version: 2.1\nName: pkg\nVersion: 1.0\n\
+                     Requires-Dist: requests>=2\n\
+                     Requires-Dist: pytest; python_version >= \"3.8\"\n\
+                     Requires-Dist: sphinx; extra == \"docs\"\n\
+                     Requires-Dist: otro; extra==\"dev\"\n\
+                     Provides-Extra: docs\n\n\
+                     Requires-Dist: no-cuenta\n",
+                ),
+            ),
+            (
+                "dinamico-1.0",
+                Some("Metadata-Version: 2.2\nName: dinamico\nDynamic: Requires-Dist\n"),
+            ),
+            (
+                "vacio-1.0",
+                Some("Metadata-Version: 2.1\nName: vacio\nVersion: 1.0\n"),
+            ),
+            ("sin-info-1.0", None),
+        ];
+        for (dir, info) in fuentes {
+            let raiz = obra.path().join(dir);
+            fs::create_dir_all(&raiz).expect("carpeta del sdist");
+            if let Some(texto) = info {
+                fs::write(raiz.join("PKG-INFO"), texto).expect("PKG-INFO");
+            }
+            fs::write(
+                raiz.join(ARCHIVO_PYPROJECT),
+                "[build-system]\nrequires = [\"hatchling\"]\n",
+            )
+            .expect("pyproject");
+            let estado = Command::new("tar")
+                .arg("-czf")
+                .arg(cache.path().join(format!("{dir}.tar.gz")))
+                .arg("-C")
+                .arg(obra.path())
+                .arg(dir)
+                .status()
+                .expect("tar");
+            assert!(estado.success(), "tar de {dir}");
+        }
+        // El script escribe en `/cache`: la prueba cambia esa ruta por la carpeta temporal.
+        let guion = GUION_REQUISITOS_SDIST.replace("/cache", &cache.path().to_string_lossy());
+        let salida = Command::new("python3")
+            .args(["-I", "-c", &guion])
+            .output()
+            .expect("corre python3");
+        assert!(
+            salida.status.success(),
+            "el script falló: {}",
+            String::from_utf8_lossy(&salida.stderr)
+        );
+        let texto = fs::read_to_string(cache.path().join(ARCHIVO_DEPENDENCIAS_SDIST))
+            .expect("escribe las dependencias");
+        let mapa: BTreeMap<String, Option<Vec<String>>> =
+            serde_json::from_str(&texto).expect("JSON de dependencias");
+        let esperado: BTreeMap<String, Option<Vec<String>>> = [
+            (
+                "pkg-1.0.tar.gz",
+                Some(vec![
+                    "requests>=2".to_string(),
+                    "pytest; python_version >= \"3.8\"".to_string(),
+                ]),
+            ),
+            ("dinamico-1.0.tar.gz", None),
+            ("vacio-1.0.tar.gz", Some(Vec::new())),
+            ("sin-info-1.0.tar.gz", None),
+        ]
+        .into_iter()
+        .map(|(nombre, deps)| (nombre.to_string(), deps))
+        .collect();
+        assert_eq!(mapa, esperado);
     }
 }

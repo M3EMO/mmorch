@@ -1295,10 +1295,9 @@ fn lineas_requisitos(repo: &Path) -> Result<Expansion, ErrorOraculo> {
 
 /// Textos que pip necesita: los requisitos y las restricciones (`-c`), ya expandidos. Sin red.
 /// Sin rechazos: el inventario ya los dio. Un repo con rechazos no llega a la descarga.
-pub fn textos_de_requisitos(repo: &Path) -> (String, String) {
-    let Ok(salida) = lineas_requisitos(repo) else {
-        return (String::new(), String::new());
-    };
+/// Un archivo que no se lee es infraestructura: no se devuelve una lista vacía (L14).
+pub fn textos_de_requisitos(repo: &Path) -> Result<(String, String), ErrorOraculo> {
+    let salida = lineas_requisitos(repo)?;
     let unir = |restriccion: bool| -> String {
         let lineas: Vec<&str> = salida
             .lineas
@@ -1312,7 +1311,7 @@ pub fn textos_de_requisitos(repo: &Path) -> (String, String) {
             format!("{}\n", lineas.join("\n"))
         }
     };
-    (unir(false), unir(true))
+    Ok((unir(false), unir(true)))
 }
 
 /// Referencia git que se acepta: `git+…@commit`, con el commit fijo de 7 a 40 hexadecimales (B2, M7).
@@ -1457,6 +1456,7 @@ fn inventariar_requirements(repo: &Path, inv: &mut Inventario) -> Result<(), Err
                 || es_directa(resto)
                 || resto.contains(" @ ")
                 || es_ruta_local(resto)
+                || !especificador_pep508_estricto(resto)
             {
                 inv.rechazos.push(rechazo(
                     t,
@@ -1495,7 +1495,7 @@ fn inventariar_requirements(repo: &Path, inv: &mut Inventario) -> Result<(), Err
                 inv.rechazos
                     .push(rechazo(t, linea, format!("editable no soportado: {valor}")));
             }
-        } else if resto.starts_with('-') {
+        } else if resto.starts_with('-') || opcion_pegada(resto) {
             inv.rechazos.push(rechazo(
                 t,
                 linea,
@@ -1511,6 +1511,12 @@ fn inventariar_requirements(repo: &Path, inv: &mut Inventario) -> Result<(), Err
                 t,
                 linea,
                 format!("ruta local no soportada: {resto}"),
+            ));
+        } else if !especificador_pep508_estricto(resto) {
+            inv.rechazos.push(rechazo(
+                t,
+                linea,
+                format!("requisito no soportado: {}", redactar(resto)),
             ));
         }
         // Un nombre de paquete no agrega fuente: lo sirve el índice ya listado.
@@ -1570,6 +1576,121 @@ fn opcion_ignorada(linea: &str) -> bool {
     }
     opcion(linea, &["--only-binary"])
         .is_some_and(|valor| !valor.is_empty() && !valor.contains(":none:"))
+}
+
+/// `true` si el texto trae una opción de pip pegada: un carácter de control, o un espacio seguido de `-`.
+fn opcion_pegada(texto: &str) -> bool {
+    texto.chars().any(char::is_control) || texto.contains(" -")
+}
+
+/// Gramática PEP 508 estricta de un especificador de paquete: nombre, extras, versiones y marcador (tras `;`).
+/// Rechaza las opciones pegadas, los saltos y los caracteres de control. Sin red.
+pub fn especificador_pep508_estricto(spec: &str) -> bool {
+    if opcion_pegada(spec) {
+        return false;
+    }
+    match spec.split_once(';') {
+        Some((antes, marcador)) => especificador_sin_marcador(antes) && marcador_valido(marcador),
+        None => especificador_sin_marcador(spec),
+    }
+}
+
+/// Nombre PEP 508: letras y dígitos, con `.`, `_` y `-` dentro. Devuelve el resto tras el nombre.
+fn tramo_nombre(texto: &str) -> Option<&str> {
+    let fin = texto
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
+        .unwrap_or(texto.len());
+    let nombre = texto[..fin].trim_end_matches(['.', '_', '-']);
+    nombre
+        .starts_with(|c: char| c.is_ascii_alphanumeric())
+        .then(|| &texto[nombre.len()..])
+}
+
+/// `true` si el texto es solo un nombre PEP 508.
+fn es_nombre(texto: &str) -> bool {
+    tramo_nombre(texto) == Some("")
+}
+
+/// Extras `[a,b]` al inicio. Devuelve el resto tras `]`.
+fn tramo_extras(texto: &str) -> Option<&str> {
+    let (dentro, resto) = texto.strip_prefix('[')?.split_once(']')?;
+    let valido = dentro.trim_matches(' ').is_empty()
+        || dentro.split(',').all(|e| es_nombre(e.trim_matches(' ')));
+    valido.then_some(resto)
+}
+
+/// Un comparador con su versión: `==1.0`, `>=2`, `==1.*`, `===texto`. El comodín `.*` solo va con `==` y `!=`.
+fn comparador_valido(texto: &str) -> bool {
+    const OPERADORES: [&str; 8] = ["===", "==", "~=", "!=", "<=", ">=", "<", ">"];
+    let Some(op) = OPERADORES.iter().copied().find(|op| texto.starts_with(*op)) else {
+        return false;
+    };
+    let version = texto[op.len()..].trim_matches(' ');
+    let (base, comodin) = match version.strip_suffix(".*") {
+        Some(base) => (base, true),
+        None => (version, false),
+    };
+    (!comodin || matches!(op, "==" | "!="))
+        && base.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && base.ends_with(|c: char| c.is_ascii_alphanumeric())
+        && base
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '!'))
+}
+
+/// Lista de comparadores separados por comas, con o sin paréntesis. Vacía es válida (solo nombre).
+fn versiones_validas(texto: &str) -> bool {
+    let texto = texto.trim_matches(' ');
+    if texto.is_empty() {
+        return true;
+    }
+    let lista = match texto.strip_prefix('(') {
+        Some(dentro) => {
+            let Some(lista) = dentro.strip_suffix(')') else {
+                return false;
+            };
+            lista
+        }
+        None => texto,
+    };
+    lista
+        .split(',')
+        .all(|c| comparador_valido(c.trim_matches(' ')))
+}
+
+/// Nombre, extras y versiones, sin marcador. Sin espacios de los extremos.
+fn especificador_sin_marcador(texto: &str) -> bool {
+    let Some(resto) = tramo_nombre(texto.trim_matches(' ')) else {
+        return false;
+    };
+    let resto = resto.trim_start_matches(' ');
+    let resto = if resto.starts_with('[') {
+        let Some(tras) = tramo_extras(resto) else {
+            return false;
+        };
+        tras.trim_start_matches(' ')
+    } else {
+        resto
+    };
+    versiones_validas(resto)
+}
+
+/// Marcador tras `;`: nombres, operadores, paréntesis y cadenas entre comillas. Sin `-` fuera de comillas.
+fn marcador_valido(texto: &str) -> bool {
+    if texto.trim_matches(' ').is_empty() {
+        return false;
+    }
+    let mut comilla: Option<char> = None;
+    for c in texto.chars() {
+        comilla = match comilla {
+            Some(q) if c == q => None,
+            Some(q) => Some(q),
+            None if c == '"' || c == '\'' => Some(c),
+            None if c.is_ascii_alphanumeric() || " ._()<>=!~,*+".contains(c) => None,
+            None => return false,
+        };
+    }
+    comilla.is_none()
 }
 
 /// `true` si el texto es una referencia directa: `git+...` o una URL con `://`.
@@ -2825,6 +2946,86 @@ requests\ngit+https://github.com/x/y@abc1234#egg=y\n";
                     .iter()
                     .any(|r| r.archivo == "requirements.txt" && r.linea == 2),
                 "debe rechazar `{linea}`: {inv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn descarga_inventario_requirements_opcion_pegada_es_rechazo_con_su_linea() {
+        // Pip aplica `--no-binary` y anula `--only-binary`: la opción pegada no llega al índice.
+        for linea in [
+            "foo==1.0 --no-binary :all:",
+            "foo==1.0 --no-binary=:all:",
+            "foo>=1 -i https://evil.example/simple",
+            "foo==1.0\r--no-binary :all:",
+        ] {
+            let texto = format!("requests==2.31.0\n{linea}\n");
+            let inv = inventario_de(&[("requirements.txt", &texto)]);
+            assert!(
+                inv.rechazos
+                    .iter()
+                    .any(|r| r.archivo == "requirements.txt" && r.linea == 2),
+                "debe rechazar `{linea:?}` con su línea: {inv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn descarga_inventario_restriccion_con_opcion_pegada_es_rechazo() {
+        let inv = inventario_de(&[
+            (
+                "requirements.txt",
+                "requests==2.31.0\n-c restricciones.txt\n",
+            ),
+            ("restricciones.txt", "urllib3>=1.26 --no-binary :all:\n"),
+        ]);
+        assert!(
+            inv.rechazos
+                .iter()
+                .any(|r| r.archivo == "restricciones.txt" && r.linea == 1),
+            "debe rechazar la restricción con su línea: {inv:?}"
+        );
+    }
+
+    #[test]
+    fn descarga_inventario_requirements_especificadores_pep508_siguen_aceptados() {
+        let texto = "requests>=2\nfoo[extra]==1.0\nnumpy>=1.20,<2; python_version>='3.8'\n";
+        let inv = inventario_de(&[("requirements.txt", texto)]);
+        assert!(inv.rechazos.is_empty(), "{:?}", inv.rechazos);
+    }
+
+    #[test]
+    fn descarga_especificador_pep508_estricto_separa_nombres_de_opciones() {
+        for spec in [
+            "requests",
+            "requests>=2",
+            "foo[extra]==1.0",
+            "foo[a, b] (>=1.0,<2)",
+            "numpy>=1.20,<2; python_version>='3.8'",
+            "pkg==2.*",
+            "pkg===1.0+local",
+            "pkg; sys_platform == \"win32\" and platform_machine != 'x86_64'",
+        ] {
+            assert!(especificador_pep508_estricto(spec), "debe aceptar `{spec}`");
+        }
+        for spec in [
+            "foo==1.0 --no-binary :all:",
+            "foo==1.0\n--no-binary :all:",
+            "foo==1.0\r-e .",
+            "foo\t-r otro.txt",
+            "foo bar",
+            "foo>=1,",
+            "foo>=1.*",
+            "foo @ https://x/y.tar.gz",
+            "git+https://x/y.git",
+            "-e .",
+            "foo; python_version == 'x' -r",
+            "foo[]x",
+            "foo==1.0 ; ",
+        ] {
+            assert!(
+                !especificador_pep508_estricto(spec),
+                "debe rechazar `{spec:?}`"
             );
         }
     }

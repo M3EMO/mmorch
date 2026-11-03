@@ -1010,10 +1010,32 @@ fn descarga_python_r_del_repo_llega_aplanado_y_c_solo_como_restriccion() {
     .expect("requirements");
     fs::write(repo.path().join("requirements/base.txt"), "six==1.16.0\n").expect("base");
     fs::write(repo.path().join("restricciones.txt"), "urllib3<2\n").expect("restricciones");
-    let (requisitos, restricciones) = textos_de_requisitos(repo.path());
+    let (requisitos, restricciones) = textos_de_requisitos(repo.path()).expect("textos");
     assert!(requisitos.contains("six==1.16.0"), "{requisitos}");
     assert!(!requisitos.contains("urllib3"), "{requisitos}");
     assert!(restricciones.contains("urllib3<2"), "{restricciones}");
+}
+
+#[test]
+fn descarga_requirements_ilegible_no_da_lista_vacia() {
+    // L14: un `requirements.txt` que no se lee (bytes que no son UTF-8) es infraestructura, no lista vacía.
+    let repo = repo_propio("repo-py-ilegible-");
+    fs::write(repo.path().join("requirements.txt"), [0xff_u8, 0xfe, 0x00]).expect("requirements");
+    let r = textos_de_requisitos(repo.path());
+    assert!(
+        matches!(r, Err(ErrorOraculo::Infra(_))),
+        "debe dar Infra: {r:?}"
+    );
+}
+
+#[test]
+fn descarga_requirements_legible_da_sus_textos() {
+    // Guarda: un `requirements.txt` normal sigue dando sus textos, sin error.
+    let repo = repo_propio("repo-py-legible-");
+    fs::write(repo.path().join("requirements.txt"), "six==1.16.0\n").expect("requirements");
+    let (requisitos, restricciones) = textos_de_requisitos(repo.path()).expect("textos");
+    assert_eq!(requisitos, "six==1.16.0\n");
+    assert_eq!(restricciones, "");
 }
 
 #[test]

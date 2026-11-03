@@ -10,8 +10,10 @@ pub mod python;
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -19,7 +21,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::configs::{instrucciones, palabra_clave, parsear_from};
-use super::contenedor::{self, Ejecucion, correr_podman};
+use super::contenedor::{self, Ejecucion, SalidaPodman};
 use super::entrega::{Eleccion, PodmanReal, dockerfiles_del_repo, elegir_dockerfile};
 use super::juez::ModeloJuez;
 use super::tarea::Tarea;
@@ -70,13 +72,29 @@ pub enum Accion {
 /// donde pip puede construir (`/cache` es de solo lectura). Si `venv` no funciona (Debian sin `python3-venv`),
 /// instala con `--target` en `/tmp/pydeps` y lo pone en el `PATH` (M10, M12).
 pub const PRELUDIO_PYTHON: &str = "mkdir -p /tmp/fuentes && if [ -d /cache/src ]; then cp -r /cache/src/. /tmp/fuentes/; fi && if python3 -m venv --system-site-packages /tmp/venv-eval; then . /tmp/venv-eval/bin/activate && pip install --no-index --find-links /cache --no-input --disable-pip-version-check -r /cache/requirements-offline.txt; else mkdir -p /tmp/pydeps && python3 -m pip install --no-index --find-links /cache --no-input --disable-pip-version-check --target /tmp/pydeps -r /cache/requirements-offline.txt && export PYTHONPATH=/tmp/pydeps PATH=/tmp/pydeps/bin:$PATH; fi && ";
+/// Como `cache_de_con_error`, y un error de lectura da `None`. Lo usa `src/lib.rs`, que está fuera de la Tarea 51.
+pub fn cache_de(home: &Path, lenguaje: &str, repo: &Path, imagen: &str) -> Option<PathBuf> {
+    cache_de_con_error(home, lenguaje, repo, imagen)
+        .ok()
+        .flatten()
+}
+
 /// Caché de dependencias que la fase de descarga dejó para el repo (`Cargo.lock` o `requirements.txt`).
 /// `None` si no hay, o si el lenguaje no tiene caché. La mira el paquete de Colab (decisión 40).
 /// `imagen` es la de la tarea: en Python entra en la clave, con su digest si podman lo da (M8, desempate 27).
-pub fn cache_de(home: &Path, lenguaje: &str, repo: &Path, imagen: &str) -> Option<PathBuf> {
+///
+/// Esta versión da el error de lectura. `cache_de` lo oculta hasta que `src/lib.rs` use esta (ver informe, L14).
+pub fn cache_de_con_error(
+    home: &Path,
+    lenguaje: &str,
+    repo: &Path,
+    imagen: &str,
+) -> Result<Option<PathBuf>, ErrorOraculo> {
     let (destino, marca) = match lenguaje {
         "rust" => {
-            let bytes = fs::read(repo.join("Cargo.lock")).ok()?;
+            let Ok(bytes) = fs::read(repo.join("Cargo.lock")) else {
+                return Ok(None);
+            };
             let destino = home
                 .join(CARPETA_CACHE)
                 .join(CARPETA_RUST)
@@ -85,18 +103,18 @@ pub fn cache_de(home: &Path, lenguaje: &str, repo: &Path, imagen: &str) -> Optio
         }
         "python" => {
             if !repo.join(ARCHIVO_REQUIREMENTS).is_file() {
-                return None;
+                return Ok(None);
             }
-            let (requisitos, restricciones) = inventario::textos_de_requisitos(repo);
+            let (requisitos, restricciones) = inventario::textos_de_requisitos(repo)?;
             let digest = python::digest_imagen_con(&PodmanReal, imagen);
             let clave =
                 python::clave_cache_python(&requisitos, &restricciones, imagen, digest.as_deref());
             let destino = home.join(CARPETA_CACHE).join(CARPETA_PYTHON).join(clave);
             (destino, "requirements-offline.txt")
         }
-        _ => return None,
+        _ => return Ok(None),
     };
-    destino.join(marca).is_file().then_some(destino)
+    Ok(destino.join(marca).is_file().then_some(destino))
 }
 
 /// Prefijo de cada suite: deja la caché de dependencias visible para cargo, sin escribir en ella.
@@ -180,7 +198,8 @@ pub fn diagnosticar(stderr: &str) -> Diagnostico {
     Diagnostico::Desconocido(linea_util(stderr))
 }
 
-/// Primera línea de error del texto. Sin una, la primera línea no vacía.
+/// Primera línea de error del texto. Sin una, la primera línea no vacía. No la corta:
+/// el corte va después de redactar (ver `truncar_linea`).
 fn linea_util(texto: &str) -> String {
     let lineas: Vec<&str> = texto
         .lines()
@@ -191,9 +210,12 @@ fn linea_util(texto: &str) -> String {
         .iter()
         .find(|l| l.to_lowercase().contains("error"))
         .or(lineas.first())
-        .map_or("sin salida de error".to_string(), |l| {
-            l.chars().take(LARGO_LINEA_UTIL).collect()
-        })
+        .map_or("sin salida de error".to_string(), |l| l.to_string())
+}
+
+/// Corta el texto al largo máximo de una línea útil. Llamarla solo después de redactar.
+pub(super) fn truncar_linea(texto: &str) -> String {
+    texto.chars().take(LARGO_LINEA_UTIL).collect()
 }
 
 /// Comando de `pip download` contra PyPI. El destino es `/cache`.
@@ -670,9 +692,10 @@ fn ejecutar_descarga(
     resultado.map_err(|diagnostico| redactar_diagnostico(diagnostico, credenciales))
 }
 
-/// Quita de un diagnóstico cualquier valor de credencial (decisión 29).
+/// Quita de un diagnóstico cualquier valor de credencial (decisión 29). Redacta el texto
+/// completo y recién después lo corta: así ningún trozo de un secreto queda sin redactar.
 fn redactar_diagnostico(diagnostico: Diagnostico, credenciales: &[Credencial]) -> Diagnostico {
-    let quitar = |texto: String| redactar_secretos(&texto, credenciales);
+    let quitar = |texto: String| truncar_linea(&redactar_secretos(&texto, credenciales));
     match diagnostico {
         Diagnostico::Infra(m) => Diagnostico::Infra(quitar(m)),
         Diagnostico::Producto(m) => Diagnostico::Producto(quitar(m)),
@@ -691,9 +714,11 @@ fn secretos_de(credenciales: &[Credencial]) -> Vec<(String, String)> {
 /// Error de la evaluación para un fallo de descarga que no es del producto.
 fn error_de(diagnostico: Diagnostico) -> ErrorOraculo {
     match diagnostico {
-        Diagnostico::Infra(m) => ErrorOraculo::Infra(format!("infraestructura: {m}")),
+        Diagnostico::Infra(m) => {
+            ErrorOraculo::Infra(format!("infraestructura: {}", truncar_linea(&m)))
+        }
         Diagnostico::Producto(m) | Diagnostico::Desconocido(m) => {
-            ErrorOraculo::Infra(format!("la descarga falló: {m}"))
+            ErrorOraculo::Infra(format!("la descarga falló: {}", truncar_linea(&m)))
         }
     }
 }
@@ -1131,7 +1156,7 @@ pub fn clasificar_error_pull(salida: &str) -> Problema {
     {
         return Problema::ImagenInaccesible;
     }
-    Problema::Infraestructura(linea_util(salida))
+    Problema::Infraestructura(truncar_linea(&linea_util(salida)))
 }
 
 /// Verdadero si el repo trae al menos un Dockerfile o Containerfile.
@@ -1148,13 +1173,82 @@ enum Bajada {
     Problema(Problema),
 }
 
+/// Tope en bytes de la salida de `podman` que guarda la descarga, por flujo.
+const COLA_DESCARGA: usize = 4000;
+
+/// Lee un flujo en otro hilo y guarda solo sus últimos `COLA_DESCARGA` bytes.
+/// El buffer se recorta al pasar de `2 * COLA_DESCARGA`. Al final queda el tope exacto.
+/// Si hubo recorte, quita los bytes de continuación del inicio. Así no parte un carácter UTF-8.
+pub(crate) fn leer_cola<R: Read + Send + 'static>(mut flujo: R) -> JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut cola: Vec<u8> = Vec::new();
+        let mut buf = [0u8; 8192];
+        let mut recortado = false;
+        loop {
+            match flujo.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    cola.extend_from_slice(&buf[..n]);
+                    if cola.len() > 2 * COLA_DESCARGA {
+                        let sobra = cola.len() - COLA_DESCARGA;
+                        cola.drain(..sobra);
+                        recortado = true;
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        if cola.len() > COLA_DESCARGA {
+            let sobra = cola.len() - COLA_DESCARGA;
+            cola.drain(..sobra);
+            recortado = true;
+        }
+        if recortado {
+            let continuacion = cola.iter().take_while(|b| **b & 0xC0 == 0x80).count();
+            cola.drain(..continuacion);
+        }
+        cola
+    })
+}
+
+/// Corre `podman` con `args` y espera hasta `plazo`. Guarda solo la cola de cada salida.
+/// Si vence, mata el proceso y da `Infra`. Si lo mata una señal, también da `Infra`.
+fn correr_podman_acotado(args: &[&str], plazo: Duration) -> Result<SalidaPodman, ErrorOraculo> {
+    let mut hijo = Command::new("podman")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| ErrorOraculo::Infra(format!("no se pudo lanzar podman: {err}")))?;
+    let salida = hijo.stdout.take().map(leer_cola);
+    let error = hijo.stderr.take().map(leer_cola);
+    let Some(estado) = contenedor::esperar(&mut hijo, plazo)? else {
+        let _ = hijo.kill();
+        let _ = hijo.wait();
+        return Err(ErrorOraculo::Infra(format!(
+            "podman {} superó {} s",
+            args.first().unwrap_or(&""),
+            plazo.as_secs()
+        )));
+    };
+    let Some(codigo) = estado.code() else {
+        return Err(ErrorOraculo::Infra("podman terminó por una señal".into()));
+    };
+    Ok(SalidaPodman {
+        codigo,
+        stdout: contenedor::recoger(salida),
+        stderr: contenedor::recoger(error),
+    })
+}
+
 /// Corre `podman pull` de la imagen con un `authfile` vacío. Un fallo de red o de registro caído es
 /// `Problema::Infraestructura`.
 fn bajar_imagen(imagen: &str, home: &Path) -> Result<Bajada, ErrorOraculo> {
     let authfile = authfile_vacio(home).map_err(|e| infra("authfile de podman pull", e))?;
     let args = args_pull(imagen, authfile.path());
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let pull = match correr_podman(&refs, PLAZO_PULL) {
+    let pull = match correr_podman_acotado(&refs, PLAZO_PULL) {
         Ok(pull) => pull,
         Err(ErrorOraculo::Infra(motivo)) => {
             return Ok(Bajada::Problema(Problema::Infraestructura(format!(
@@ -1184,7 +1278,7 @@ fn traer(imagen: &str, home: &Path) -> Result<Bajada, ErrorOraculo> {
         Some((nombre, digest)) => (nombre, Some(digest)),
         None => (imagen, None),
     };
-    let existe = correr_podman(&["image", "exists", nombre], PLAZO_CORTO)?.codigo == 0;
+    let existe = correr_podman_acotado(&["image", "exists", nombre], PLAZO_CORTO)?.codigo == 0;
     let digest_local = if existe { digest_de(nombre)? } else { None };
     if !necesita_pull(existe, fijado, digest_local.as_deref()) {
         return Ok(Bajada::Lista {
@@ -1197,7 +1291,7 @@ fn traer(imagen: &str, home: &Path) -> Result<Bajada, ErrorOraculo> {
 
 /// Digest de una imagen ya bajada. `None` si podman no lo informa.
 fn digest_de(imagen: &str) -> Result<Option<String>, ErrorOraculo> {
-    let salida = correr_podman(
+    let salida = correr_podman_acotado(
         &["image", "inspect", "--format", "{{.Digest}}", imagen],
         PLAZO_CORTO,
     )?;
@@ -1861,6 +1955,33 @@ location searched: crates.io index";
         }
     }
 
+    /// Línea de error donde el secreto empieza en el carácter 290 y termina después del 300.
+    fn linea_con_secreto_en_el_corte(secreto: &str) -> String {
+        let prefijo = "error: ";
+        let relleno = "a".repeat(290 - prefijo.len());
+        format!("{prefijo}{relleno}{secreto} fin")
+    }
+
+    #[test]
+    fn descarga_secreto_a_caballo_del_corte_de_300_no_sale_a_medias() {
+        let creds = credencial_de_prueba();
+        let stderr = linea_con_secreto_en_el_corte("valor-secreto-9");
+        let texto = format!("{:?}", redactar_diagnostico(diagnosticar(&stderr), &creds));
+        assert!(!texto.contains("valor-secreto-9"), "{texto}");
+        assert!(!texto.contains("valor-se"), "{texto}");
+        assert!(texto.contains("***"), "{texto}");
+    }
+
+    #[test]
+    fn descarga_linea_larga_sin_secreto_sigue_truncandose_a_300() {
+        let creds = credencial_de_prueba();
+        let stderr = format!("error: {}", "b".repeat(500));
+        match redactar_diagnostico(diagnosticar(&stderr), &creds) {
+            Diagnostico::Desconocido(linea) => assert_eq!(linea.chars().count(), 300),
+            otro => panic!("{otro:?}"),
+        }
+    }
+
     /// Tarea de Rust mínima, cargada desde un `tarea.toml` temporal.
     fn tarea_rust_minima() -> Tarea {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -1999,5 +2120,39 @@ source = \"git+http://host/x?rev=1#abc1234\"\n";
             !texto.contains("alias.b"),
             "una entrada sin red no entra al Gate: {texto}"
         );
+    }
+
+    #[test]
+    fn descarga_leer_cola_conserva_solo_los_ultimos_bytes() {
+        // Un millón de líneas numeradas: unos 11 MB, muy por encima del tope.
+        let texto: Vec<u8> = (0..1_000_000u64)
+            .flat_map(|n| format!("{n:010}\n").into_bytes())
+            .collect();
+        let cola = leer_cola(io::Cursor::new(texto.clone()))
+            .join()
+            .expect("el hilo lector termina");
+        assert_eq!(cola.len(), COLA_DESCARGA, "debe quedar el tope exacto");
+        assert_eq!(cola, texto[texto.len() - COLA_DESCARGA..]);
+    }
+
+    #[test]
+    fn descarga_leer_cola_flujo_corto_sale_completo() {
+        let cola = leer_cola(io::Cursor::new(b"error: x\n".to_vec()))
+            .join()
+            .expect("el hilo lector termina");
+        assert_eq!(cola, b"error: x\n");
+    }
+
+    #[test]
+    fn descarga_leer_cola_no_parte_caracteres_utf8() {
+        // "ñ" ocupa dos bytes. El corte cae dentro de un carácter en este caso.
+        let mut texto = "ñ".repeat(5000).into_bytes();
+        texto.extend_from_slice(b"fin");
+        let cola = leer_cola(io::Cursor::new(texto))
+            .join()
+            .expect("el hilo lector termina");
+        let txt = String::from_utf8(cola).expect("la cola es UTF-8 válido");
+        assert!(txt.ends_with("fin"), "{txt:?}");
+        assert!(!txt.contains('\u{FFFD}'), "{txt:?}");
     }
 }
