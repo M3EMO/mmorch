@@ -14,13 +14,13 @@ use sha2::{Digest, Sha256};
 
 use super::credenciales::{Credencial, netrc_de_pip, redactar_secretos};
 use super::inventario::{
-    PartesGit, RequisitosPip, motivo_git, partes_git, redactar, requisitos_pip,
-    textos_de_requisitos,
+    PartesGit, RequisitosPip, especificador_pep508_estricto, motivo_git, partes_git, redactar,
+    requisitos_pip, textos_de_requisitos,
 };
 use super::{
     ARCHIVO_REQUIREMENTS, CARPETA_CACHE, CARPETA_PYTHON, Diagnostico, PLAZO_CORTO, Paso,
     Preparacion, Registro, borrar_en_home, corte, diagnosticar, entorno_descarga, error_de,
-    hallazgo, hash_corto, limpiar_parcial, parcial_de, temporal_de,
+    hallazgo, hash_corto, limpiar_parcial, parcial_de, temporal_de, truncar_linea,
 };
 use crate::borrado;
 use crate::config::RegistroConfig;
@@ -705,7 +705,7 @@ fn contenido_indice(pendientes: &[String], con_restricciones: bool) -> String {
 
 /// Hallazgo de un paquete que no instala desde PyPI o desde una fuente de Python. Su archivo es el requirements.
 fn hallazgo_no_instala_python(linea: &str) -> Hallazgo {
-    let linea = redactar(linea);
+    let linea = truncar_linea(&redactar(linea));
     hallazgo(
         ARCHIVO_REQUIREMENTS,
         0,
@@ -1027,9 +1027,10 @@ fn respaldo_de_build() -> Vec<String> {
         .collect()
 }
 
-/// `true` si el requisito se baja como wheel del índice: sin URL, sin `@` y sin opciones (`-e`, `-r`).
+/// `true` si el requisito se baja como wheel del índice: pasa la gramática PEP 508 estricta. Sin URL,
+/// sin `@` y sin opciones pegadas (`--no-binary`, `-e`).
 pub fn requisito_de_build_aceptable(spec: &str) -> bool {
-    !(spec.contains("://") || spec.contains('@') || spec.starts_with('-'))
+    especificador_pep508_estricto(spec)
 }
 
 /// Requisitos de build que se bajan como wheels, y los hallazgos de los que no se pueden bajar.
@@ -1053,15 +1054,17 @@ pub fn indice_de_build(listas: &[Vec<String>]) -> IndiceBuild {
         if requisito_de_build_aceptable(&spec) {
             aceptables.push(spec);
         } else {
+            let motivo = if spec.contains("://") || spec.contains('@') {
+                "requisito de build con referencia directa"
+            } else {
+                "requisito de build no soportado"
+            };
             hallazgos.push(hallazgo(
                 ARCHIVO_PYPROJECT,
                 0,
                 "",
                 1,
-                format!(
-                    "requisito de build con referencia directa: {}",
-                    redactar(&spec)
-                ),
+                format!("{motivo}: {}", redactar(&spec)),
             ));
         }
     }
@@ -1264,6 +1267,34 @@ mod tests {
         assert!(!requisito_de_build_aceptable("foo @ x"));
         assert!(!requisito_de_build_aceptable("git+https://x/y.git"));
         assert!(!requisito_de_build_aceptable("-e ."));
+    }
+
+    #[test]
+    fn descarga_requisito_de_build_aceptable_rechaza_opciones_pegadas() {
+        for spec in [
+            "foo==1.0 --no-binary :all:",
+            "foo==1.0\n--no-binary :all:",
+            "foo==1.0\r-e .",
+            "foo\t-r otro.txt",
+        ] {
+            assert!(!requisito_de_build_aceptable(spec), "{spec:?}");
+        }
+        assert!(requisito_de_build_aceptable("requests>=2"));
+        assert!(requisito_de_build_aceptable("foo[extra]==1.0"));
+        assert!(requisito_de_build_aceptable(
+            "numpy>=1.20,<2; python_version>='3.8'"
+        ));
+    }
+
+    #[test]
+    fn descarga_indice_de_build_opcion_pegada_no_se_baja() {
+        let listas = vec![vec![
+            "foo==1.0 --no-binary :all:".to_string(),
+            "wheel".to_string(),
+        ]];
+        let (requisitos, hallazgos) = indice_de_build(&listas);
+        assert_eq!(requisitos, ["wheel"]);
+        assert_eq!(hallazgos.len(), 1, "{hallazgos:?}");
     }
 
     #[test]
