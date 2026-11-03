@@ -106,6 +106,7 @@ pub fn prompt_config(
         usuario,
         max_tokens: MAX_TOKENS_JUEZ,
         fase: FASE.into(),
+        reintento_juez: false,
     }
 }
 

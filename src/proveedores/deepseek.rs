@@ -110,6 +110,7 @@ mod tests {
             usuario: "hola".into(),
             max_tokens: 64,
             fase: "prueba".into(),
+            reintento_juez: false,
         }
     }
 

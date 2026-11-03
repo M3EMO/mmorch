@@ -241,6 +241,7 @@ fn construir_prompt_con(
         usuario,
         max_tokens: limites.max_tokens,
         fase: FASE.into(),
+        reintento_juez: reintento.is_some(),
     }
 }
 
@@ -1795,6 +1796,25 @@ mod tests {
         let visto = modelo.visto.borrow();
         assert_eq!(visto.len(), 2);
         assert_eq!(visto[0], construir_prompt(&c.entrada(), &limites));
+    }
+
+    #[test]
+    fn juez_marca_solo_el_prompt_del_reintento() {
+        let c = caso();
+        let vacia = respuesta(json!([]), json!([]));
+        let completa = respuesta(
+            json!([
+                item_nivel(MODULARIDAD, 2, json!([real()])),
+                item_nivel(TOPE, 1, json!([real()])),
+            ]),
+            json!([]),
+        );
+        let modelo = FalsoSecuencia::nueva(vec![Ok(vacia), Ok(completa)]);
+        juzgar_secuencia(&c, &modelo);
+        let visto = modelo.visto.borrow();
+        assert_eq!(visto.len(), 2);
+        assert!(!visto[0].reintento_juez, "la 1ª llamada no es reintento");
+        assert!(visto[1].reintento_juez, "la 2ª llamada es el reintento");
     }
 
     // Reintento: un solo por juicio, solo para los ids rotos o sin gate.

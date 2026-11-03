@@ -85,6 +85,7 @@ impl Redactor for RedactorProveedor {
             usuario,
             max_tokens: MAX_TOKENS_REDACTOR,
             fase: FASE.into(),
+            reintento_juez: false,
         };
         let respuesta = proveedores::llamar_en(&self.home, &self.eleccion, &prompt, &self.corrida)
             .map_err(|e| ErrorOraculo::Infra(e.to_string()))?;

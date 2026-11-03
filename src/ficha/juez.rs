@@ -73,6 +73,7 @@ pub fn revisar_con_tope(
         usuario: spec.into(),
         max_tokens,
         fase: FASE.into(),
+        reintento_juez: false,
     };
     match juicio(juez, &prompt) {
         Ok(crudas) => {

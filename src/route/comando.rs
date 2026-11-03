@@ -142,6 +142,7 @@ pub fn llamar_con_chequeo(
         usuario,
         max_tokens,
         fase: "llama".into(),
+        reintento_juez: false,
     };
     proveedores::llamar_en(&home, &eleccion, &prompt, corrida).map_err(de_proveedor)
 }
