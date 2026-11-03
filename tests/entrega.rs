@@ -165,8 +165,11 @@ impl EjecutorHerramienta for Falso {
     }
 }
 
+/// Salida de un script que arrancó: lleva el marcador de arranque (M20) además de `archivos`.
 fn salida_con(archivos: &[(&str, &str)]) -> SalidaHerramienta {
     let mut s = SalidaHerramienta::default();
+    s.archivos
+        .insert("entrega-arranque.ok".into(), "ok\n".into());
     for (nombre, texto) in archivos {
         s.archivos.insert((*nombre).into(), (*texto).into());
     }
@@ -454,6 +457,59 @@ fn entrega_build_run_apk_sin_red_se_repite_con_red_o_queda_pendiente() {
     let home = home_9d2();
     let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &[]).expect("construye");
     afirma_repeticion_con_red(&r, 2, "apk");
+    assert!(
+        imagenes_temporales().is_empty(),
+        "queda una imagen temporal"
+    );
+}
+
+/// Un `RUN` de red que falla en la 2ª etapa queda pendiente en su línea. La 1ª etapa tiene pasos
+/// previos (`WORKDIR`, `RUN`) que antes se mapeaban por índice al paso 3/3 y daban un hallazgo.
+#[test]
+fn entrega_build_run_de_red_en_segunda_etapa_queda_pendiente_en_su_linea() {
+    root::saltar_sin_podman!();
+    asegurar_imagen(ALPINE);
+    let _serie = serie();
+    let repo = dockerfile_9d2(
+        "FROM docker.io/library/alpine:3.20 AS base\nWORKDIR /app\nRUN echo listo > /app/x\n\
+         FROM docker.io/library/alpine:3.20\nWORKDIR /srv\nRUN wget -q http://example.invalid\n",
+    );
+    let home = home_9d2();
+    let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &[]).expect("construye");
+    assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+    assert!(!r.construida, "{r:?}");
+    assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
+    let motivo = &r.pendientes[0].motivo;
+    assert!(
+        motivo.contains("línea 6") && motivo.contains("wget"),
+        "{motivo}"
+    );
+    assert!(
+        imagenes_temporales().is_empty(),
+        "queda una imagen temporal"
+    );
+}
+
+/// Un `ARG` antes del primer `FROM` no corre el índice: buildah no lo cuenta como paso.
+#[test]
+fn entrega_build_arg_antes_del_from_ubica_el_run_de_red() {
+    root::saltar_sin_podman!();
+    asegurar_imagen(ALPINE);
+    let _serie = serie();
+    let repo = dockerfile_9d2(
+        "ARG VERSION=3.20\nFROM docker.io/library/alpine:3.20\nRUN echo listo > /x\n\
+         RUN wget -q http://example.invalid\n",
+    );
+    let home = home_9d2();
+    let r = construir_dockerfile(repo.path(), home.path(), &tarea_con(""), &[]).expect("construye");
+    assert!(r.hallazgos.is_empty(), "{:?}", r.hallazgos);
+    assert!(!r.construida, "{r:?}");
+    assert_eq!(r.pendientes.len(), 1, "{:?}", r.pendientes);
+    let motivo = &r.pendientes[0].motivo;
+    assert!(
+        motivo.contains("línea 4") && motivo.contains("wget"),
+        "{motivo}"
+    );
     assert!(
         imagenes_temporales().is_empty(),
         "queda una imagen temporal"

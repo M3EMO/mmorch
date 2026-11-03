@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use crate::observe;
 use crate::oracle::ErrorOraculo;
-use crate::oracle::configs::{self, instrucciones, palabra_clave};
+use crate::oracle::configs::{self, Instruccion, instrucciones, palabra_clave};
 use crate::oracle::contenedor::{PROXY_FUERA, SUFIJO_SELINUX, SalidaPodman, correr_podman};
 use crate::oracle::descarga::{self, ImagenBase, PRELUDIO, Problema};
 use crate::oracle::perfiles::herramientas::EjecutorHerramienta;
@@ -35,6 +35,10 @@ const LINEAS_LOG: usize = 40;
 const LINEAS_ESCENARIO: usize = 20;
 /// Log completo de `correr`. Vive en `/tmp` del contenedor: nunca llega a `/salida`.
 const LOG_CORRER_COMPLETO: &str = "/tmp/entrega-correr.full.log";
+/// Primer archivo que escribe el script. Sin él, el contenedor no ejecutó el script (M20).
+const ARCHIVO_ARRANQUE: &str = "entrega-arranque.ok";
+/// Código del preludio de Python. Distinto de cero, o ausente, es infraestructura (M21).
+const ARCHIVO_PRELUDIO: &str = "entrega-preludio.rc";
 /// Límite de cada escenario, en segundos.
 const TIMEOUT_ESCENARIO: u32 = 120;
 /// Plazo del host para cada escenario dentro de la imagen. El `timeout` interno corta antes.
@@ -50,22 +54,19 @@ const PLAZO_BUILD: Duration = Duration::from_secs(20 * 60);
 const PLAZO_CORTO: Duration = Duration::from_secs(60);
 /// Nombre de la sonda y etiqueta del cuerpo del archivo de pendientes (Tarea 9d2).
 const TEST_BUILD: &str = "dockerfile::build";
-/// Fragmentos (en minúscula) de la salida de un `RUN` que delatan falta de red. Solo cuentan
-/// dentro de un `RUN`. "unable to locate package" no suma: sin "temporary failure" o "could not
-/// resolve" ya cuenta por los patrones de abajo.
-const PATRONES_RED: [&str; 13] = [
+/// Fragmentos (en minúscula) de la salida de un `RUN` que delatan falta de DNS o de ruta. Solo
+/// cuentan dentro de un `RUN`. Sin patrones de conexión: "connection refused" o "failed to
+/// connect" también salen cuando un servicio local no arranca, y eso es falla del producto.
+/// "unable to locate package" no suma: los patrones de DNS de abajo ya cubren la falta de red.
+const PATRONES_RED: [&str; 8] = [
     "could not resolve host",
     "temporary failure in name resolution",
     "network is unreachable",
     "name or service not known",
-    "connection refused",
-    "connection timed out",
-    "failed to connect",
-    "could not connect",
-    "unable to connect",
+    "no route to host",
     "dns: transient error",
+    // Lo que imprime `apk` ante un fallo de DNS. No sale cuando un servicio local no arranca.
     "temporary error (try again later)",
-    "failed to fetch",
     "bad address",
 ];
 /// Fragmentos (en minúscula) de un `FROM` cuya imagen no está local (`--pull=never`).
@@ -621,7 +622,8 @@ enum Desenlace {
 }
 
 /// Separa un fallo de build en falta de red, imagen base ausente, o producto que no construye.
-/// Sin ningún `STEP` en la salida, podman no empezó: es infraestructura.
+/// Sin ningún `STEP` en la salida, podman no empezó: es infraestructura. Si el texto del paso que
+/// falló no está en una sola instrucción del Dockerfile, la construcción queda sin veredicto.
 fn clasificar_fallo(
     build: &SalidaPodman,
     archivo: &str,
@@ -629,7 +631,7 @@ fn clasificar_fallo(
     reqs: &[Requisito],
 ) -> Result<Desenlace, ErrorOraculo> {
     let salida = format!("{}\n{}", build.stdout, build.stderr);
-    let Some(paso) = paso_fallido(&salida) else {
+    let Some(paso) = texto_paso_fallido(&salida) else {
         let ultima = build.stderr.lines().rev().find(|l| !l.trim().is_empty());
         return Err(ErrorOraculo::Infra(format!(
             "podman no empezó la construcción: {}",
@@ -637,21 +639,18 @@ fn clasificar_fallo(
         )));
     };
     let instrucciones_df = instrucciones(texto);
-    let (linea, cita, kw, red_paso) = match instrucciones_df.get(paso.saturating_sub(1)) {
-        Some(i) => (
-            i.linea,
-            i.cita.clone(),
-            palabra_clave(&i.logico).0,
-            paso_que_necesita_red(&i.logico),
-        ),
-        None => match instrucciones_df
-            .iter()
-            .find(|i| palabra_clave(&i.logico).0 == "RUN")
-        {
-            Some(i) => (i.linea, i.cita.clone(), "RUN".to_string(), true),
-            None => (0, String::new(), String::new(), false),
-        },
+    let Some(indice) = indice_del_paso(&instrucciones_df, &paso) else {
+        return Ok(Desenlace::Pendiente(format!(
+            "sin veredicto: no se ubica en el Dockerfile el paso que falló: {paso}"
+        )));
     };
+    let i = &instrucciones_df[indice];
+    let (linea, cita, kw, red_paso) = (
+        i.linea,
+        i.cita.clone(),
+        palabra_clave(&i.logico).0,
+        paso_que_necesita_red(&i.logico),
+    );
     let minuscula = salida.to_lowercase();
     if kw == "FROM" {
         if PATRONES_AUSENTE.iter().any(|p| minuscula.contains(p)) {
@@ -683,12 +682,38 @@ fn clasificar_fallo(
     )))
 }
 
-/// Número de paso (1-based) del último `STEP k/n` de la salida de `podman build`.
-fn paso_fallido(salida: &str) -> Option<usize> {
+/// Texto del paso que falló: el de la última línea `STEP k/n: <texto>` de la salida de `podman build`,
+/// con los espacios normalizados. Con varias etapas, buildah antepone `[k/m] `.
+fn texto_paso_fallido(salida: &str) -> Option<String> {
     salida.lines().rev().find_map(|linea| {
-        let resto = linea.split("STEP ").nth(1)?;
-        resto.split('/').next()?.trim().parse::<usize>().ok()
+        let limpia = linea.trim_start();
+        let limpia = match limpia.strip_prefix('[') {
+            Some(resto) => resto.split_once("] ")?.1,
+            None => limpia,
+        };
+        let resto = limpia.strip_prefix("STEP ")?;
+        let (numeros, texto) = resto.split_once(": ")?;
+        let (paso, total) = numeros.split_once('/')?;
+        paso.trim().parse::<usize>().ok()?;
+        total.trim().parse::<usize>().ok()?;
+        Some(normalizar_texto(texto))
     })
+}
+
+/// Texto con los espacios en blanco colapsados a uno. Así se compara lo que imprime buildah con el Dockerfile.
+fn normalizar_texto(texto: &str) -> String {
+    texto.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Índice de la única instrucción cuyo texto lógico normalizado es `paso`. Si ninguna o varias coinciden, `None`.
+fn indice_del_paso(instrucciones_df: &[Instruccion], paso: &str) -> Option<usize> {
+    let mut hallados = instrucciones_df
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| normalizar_texto(&i.logico) == paso)
+        .map(|(k, _)| k);
+    let primero = hallados.next()?;
+    hallados.next().is_none().then_some(primero)
 }
 
 /// Primera línea de la salida que dice que podman no pudo armar la red del build (`slirp4netns`, `pasta`
@@ -1144,14 +1169,46 @@ pub fn construir_script(tarea: &Tarea) -> String {
     construir_script_con(tarea, true)
 }
 
+/// Verdadero si el script lleva el preludio de Python: la tarea es de Python (M21).
+fn aplica_preludio_python(tarea: &Tarea) -> bool {
+    tarea.lenguaje == "python"
+}
+
+/// Motivo de infraestructura si el script no llegó a correr del todo. Sin marcador, el contenedor no
+/// arrancó el script. Con preludio de Python sin código 0, el preludio no se aplicó (M21). Con entrega y
+/// sin `.rc` de instalar, `instalar` nunca corrió (M20). Ninguno de estos es un "no instala" del producto.
+fn fallo_de_infraestructura(archivos: &BTreeMap<String, String>, tarea: &Tarea) -> Option<String> {
+    if !archivos.contains_key(ARCHIVO_ARRANQUE) {
+        return Some("el contenedor no arrancó el script de entrega".into());
+    }
+    if aplica_preludio_python(tarea) && codigo(archivos, ARCHIVO_PRELUDIO) != Some(0) {
+        return Some("el preludio de Python no pudo aplicarse".into());
+    }
+    if tarea.entrega.is_some() && codigo(archivos, "entrega-instalar.rc").is_none() {
+        return Some("instalar nunca corrió: falló la copia de /repo o el script se cortó".into());
+    }
+    None
+}
+
 /// Script del contenedor de evaluación. Con `escenarios` en falso no corre ninguno: van a la imagen.
 fn construir_script_con(tarea: &Tarea, escenarios: bool) -> String {
     let eval: &[Escenario] = if escenarios { &tarea.escenario } else { &[] };
-    let mut s = String::new();
+    // Primera acción: si no escribe el marcador, el contenedor no arrancó el script (M20).
+    let mut s = format!("echo ok > {SALIDA}/{ARCHIVO_ARRANQUE} || exit 1\n");
     if tarea.lenguaje == "rust" {
         // El preludio termina en `&& `: su `true` aísla un fallo de caché del resto del script.
         s.push_str(PRELUDIO);
         s.push_str("true\n");
+    }
+    if aplica_preludio_python(tarea) {
+        // Corre en el shell principal: el venv que activa queda vigente para el resto del script (M21).
+        // El código sale a `ARCHIVO_PRELUDIO`. Si falla, el script termina sin copiar ni instalar.
+        let rc = format!("{SALIDA}/{ARCHIVO_PRELUDIO}");
+        s.push_str(&format!(
+            "{}echo 0 > {rc} || echo 1 > {rc}\n\
+             if [ \"$(cat {rc})\" != 0 ]; then exit 0; fi\n",
+            descarga::PRELUDIO_PYTHON
+        ));
     }
     let work = format!("{SALIDA}/work");
     if let Some(entrega) = &tarea.entrega {
@@ -1277,13 +1334,17 @@ fn sonda_entrega_con(
     let mut escenarios = BTreeMap::new();
     if tarea.entrega.is_some() || !eval.is_empty() {
         match ej.ejecutar(&construir_script_con(tarea, escenarios_eval)) {
-            Ok(salida) => revisar_salida(
-                &salida.archivos,
-                tarea,
-                eval,
-                &mut hallazgos,
-                &mut escenarios,
-            ),
+            // Una falla de arranque es infraestructura: sin veredicto, sin hallazgos de producto.
+            Ok(salida) => match fallo_de_infraestructura(&salida.archivos, tarea) {
+                Some(motivo) => motivos.push(motivo),
+                None => revisar_salida(
+                    &salida.archivos,
+                    tarea,
+                    eval,
+                    &mut hallazgos,
+                    &mut escenarios,
+                ),
+            },
             Err(e) => motivos.push(e.to_string()),
         }
     }
@@ -1410,7 +1471,15 @@ pub(crate) mod tests {
     }
 
     impl Falso {
+        /// Ejecutor que dice que el script arrancó: agrega el marcador de arranque (M20) a `archivos`.
         fn con(archivos: &[(&str, &str)]) -> Self {
+            let mut todos = vec![(ARCHIVO_ARRANQUE, "ok\n")];
+            todos.extend_from_slice(archivos);
+            Falso::sin_marcador(&todos)
+        }
+
+        /// Ejecutor con `archivos` tal cual, sin marcador de arranque.
+        fn sin_marcador(archivos: &[(&str, &str)]) -> Self {
             let mut s = SalidaHerramienta::default();
             for (nombre, texto) in archivos {
                 s.archivos.insert((*nombre).into(), (*texto).into());
@@ -1516,6 +1585,139 @@ pub(crate) mod tests {
         assert!(s.contains("/salida/entrega-instalar.rc"));
         assert!(s.contains("sleep 5"), "espera por defecto de 5 s");
         assert!(s.contains("/salida/entrega-correr.rc"));
+    }
+
+    #[test]
+    fn entrega_script_empieza_con_el_marcador_de_arranque() {
+        for lenguaje in ["shell", "rust", "python"] {
+            let s = construir_script(&tarea_de(lenguaje, ENTREGA));
+            assert!(
+                s.starts_with("echo ok > /salida/entrega-arranque.ok || exit 1\n"),
+                "{lenguaje}: el marcador es la primera acción"
+            );
+        }
+    }
+
+    #[test]
+    fn entrega_sin_marcador_de_arranque_da_sin_veredicto_y_ningun_hallazgo() {
+        let repo = repo_completo();
+        let ej = Falso::sin_marcador(&[
+            ("entrega-instalar.rc", "0\n"),
+            ("entrega-correr.rc", "0\n"),
+            ("entrega-escenario-a.rc", "1\n"),
+        ]);
+        let t = tarea_de("shell", &format!("{ENTREGA}\n{ESCENARIOS}\n{REQUISITOS}"));
+        let r = sonda_entrega(&ej, repo.path(), &t);
+        assert_eq!(r.sonda.valor, None);
+        assert!(
+            r.sonda
+                .motivo
+                .as_deref()
+                .unwrap_or_default()
+                .contains("arranc"),
+            "el motivo nombra el arranque"
+        );
+        assert!(sin_hallazgos_de_entrega(&r), "sin no instala ni escenarios");
+        assert!(r.escenarios.is_empty(), "no inventa escenarios");
+    }
+
+    #[test]
+    fn entrega_marcador_sin_instalar_rc_da_sin_veredicto_y_no_no_instala() {
+        let repo = repo_completo();
+        let ej = Falso::con(&[("entrega-correr.rc", "0\n")]);
+        let r = sonda_entrega(&ej, repo.path(), &tarea_de("shell", ENTREGA));
+        assert_eq!(r.sonda.valor, None);
+        assert!(
+            r.sonda
+                .motivo
+                .as_deref()
+                .unwrap_or_default()
+                .contains("instalar nunca corrió"),
+            "el motivo dice que instalar no corrió"
+        );
+        assert!(
+            sin_hallazgos_de_entrega(&r),
+            "instalar que nunca corrió no es rojo"
+        );
+    }
+
+    #[test]
+    fn entrega_marcador_e_instalar_fallido_sigue_siendo_no_instala() {
+        let repo = repo_completo();
+        let ej = Falso::con(&[("entrega-instalar.rc", "1\n")]);
+        let r = sonda_entrega(&ej, repo.path(), &tarea_de("shell", ENTREGA));
+        assert_eq!(r.sonda.motivo, None, "con código de salida hay veredicto");
+        assert!(r.sonda.valor.is_some());
+        assert!(
+            r.sonda
+                .hallazgos
+                .iter()
+                .any(|h| h.detalle.contains("no instala")),
+            "instalar con código != 0 sigue siendo rojo"
+        );
+    }
+
+    #[test]
+    fn entrega_python_script_aplica_el_preludio_de_python_antes_del_cp() {
+        let s = construir_script(&tarea_de("python", ENTREGA));
+        let pos_preludio = s
+            .find(descarga::PRELUDIO_PYTHON)
+            .expect("el script lleva el preludio de Python");
+        let pos_cp = s.find("cp -a /repo").expect("hay copia");
+        assert!(pos_preludio < pos_cp, "el preludio corre antes de la copia");
+        assert!(!s.contains(PRELUDIO), "no aplica el preludio de Rust");
+        let shell = construir_script(&tarea_de("shell", ENTREGA));
+        assert!(!shell.contains(descarga::PRELUDIO_PYTHON));
+        let rust = construir_script(&tarea_de("rust", ENTREGA));
+        assert!(!rust.contains(descarga::PRELUDIO_PYTHON));
+        assert!(rust.contains(PRELUDIO));
+    }
+
+    #[test]
+    fn entrega_python_preludio_con_codigo_1_da_sin_veredicto_sin_hallazgos() {
+        let repo = repo_completo();
+        let ej = Falso::con(&[("entrega-preludio.rc", "1\n")]);
+        let r = sonda_entrega(&ej, repo.path(), &tarea_de("python", ENTREGA));
+        assert_eq!(r.sonda.valor, None);
+        assert!(
+            r.sonda
+                .motivo
+                .as_deref()
+                .unwrap_or_default()
+                .contains("preludio de Python"),
+            "el motivo nombra el preludio"
+        );
+        assert!(sin_hallazgos_de_entrega(&r), "no es un rojo falso");
+        assert!(r.escenarios.is_empty());
+    }
+
+    #[test]
+    fn entrega_python_sin_preludio_rc_da_sin_veredicto() {
+        let repo = repo_completo();
+        let ej = Falso::con(&[("entrega-instalar.rc", "0\n"), ("entrega-correr.rc", "0\n")]);
+        let r = sonda_entrega(&ej, repo.path(), &tarea_de("python", ENTREGA));
+        assert_eq!(r.sonda.valor, None);
+        assert!(
+            r.sonda
+                .motivo
+                .as_deref()
+                .unwrap_or_default()
+                .contains("preludio de Python")
+        );
+        assert!(sin_hallazgos_de_entrega(&r));
+    }
+
+    #[test]
+    fn entrega_python_con_preludio_ok_sigue_el_flujo_normal() {
+        let repo = repo_completo();
+        let ej = Falso::con(&[
+            ("entrega-preludio.rc", "0\n"),
+            ("entrega-instalar.rc", "0\n"),
+            ("entrega-correr.rc", "0\n"),
+        ]);
+        let r = sonda_entrega(&ej, repo.path(), &tarea_de("python", ENTREGA));
+        assert_eq!(r.sonda.valor, Some(1.0));
+        assert_eq!(r.sonda.motivo, None);
     }
 
     #[test]
@@ -1723,19 +1925,188 @@ pub(crate) mod tests {
 
     #[test]
     fn entrega_ultimo_paso_sale_del_ultimo_step_de_la_salida() {
-        let salida = "STEP 1/3: FROM x\nSTEP 2/3: RUN a\nSTEP 3/3: RUN b\n\
+        let salida = "STEP 1/3: FROM x\nSTEP 2/3: RUN a\nSTEP 3/3: RUN  b\n\
             Error: building at STEP \"RUN b\": while running runtime: exit status 1";
-        assert_eq!(paso_fallido(salida), Some(3));
+        assert_eq!(texto_paso_fallido(salida).as_deref(), Some("RUN b"));
         assert_eq!(
-            paso_fallido("Error: creating build container: x: image not known"),
+            texto_paso_fallido("Error: creating build container: x: image not known"),
             None
         );
     }
 
     #[test]
+    fn entrega_ultimo_paso_quita_el_prefijo_de_etapa() {
+        let salida =
+            "[1/2] STEP 1/2: FROM x\n[2/2] STEP 2/3: WORKDIR /srv\n[2/2] STEP 3/3: RUN wget y";
+        assert_eq!(texto_paso_fallido(salida).as_deref(), Some("RUN wget y"));
+    }
+
+    /// Salida sintética de `podman build` (formato real de buildah): un `STEP k/n: <texto>` por paso,
+    /// y el error que nombra el último paso. `causa` es la línea de error de la herramienta del paso.
+    fn build_fallido(pasos: &[&str], causa: &str) -> SalidaPodman {
+        let n = pasos.len();
+        let stdout: String = pasos
+            .iter()
+            .enumerate()
+            .map(|(k, paso)| format!("STEP {}/{n}: {paso}\n", k + 1))
+            .collect();
+        let fallido = pasos.last().copied().unwrap_or("");
+        SalidaPodman {
+            codigo: 1,
+            stdout,
+            stderr: format!(
+                "{causa}\nError: building at STEP \"{fallido}\": while running runtime: exit status 1\n"
+            ),
+        }
+    }
+
+    fn clasifica(salida: &SalidaPodman, texto: &str) -> Desenlace {
+        clasificar_fallo(salida, "Dockerfile", texto, &[]).expect("clasifica el fallo")
+    }
+
+    #[test]
+    fn entrega_paso_cuyo_texto_no_esta_en_el_dockerfile_da_sin_veredicto() {
+        let texto = "FROM alpine:3.20\nRUN echo hola\n";
+        let salida = build_fallido(
+            &["FROM alpine:3.20", "RUN wget -q http://example.invalid"],
+            "wget: bad address 'example.invalid'",
+        );
+        match clasifica(&salida, texto) {
+            Desenlace::Pendiente(motivo) => {
+                assert!(motivo.starts_with("sin veredicto"), "{motivo}")
+            }
+            otro => panic!("debía quedar sin veredicto, no {}", nombre(&otro)),
+        }
+    }
+
+    #[test]
+    fn entrega_multietapa_ubica_el_paso_de_la_segunda_etapa_por_su_texto() {
+        // Buildah numera cada etapa desde 1: el `RUN` de la 2ª etapa es el paso 3/3, no el 3º del archivo.
+        let texto = "FROM alpine:3.20 AS base\nWORKDIR /app\nRUN echo listo > /app/x\n\
+            FROM alpine:3.20\nWORKDIR /srv\nRUN false\n";
+        let salida = build_fallido(&["FROM alpine:3.20", "WORKDIR /srv", "RUN false"], "");
+        match clasifica(&salida, texto) {
+            Desenlace::Hallazgo(h) => {
+                assert_eq!((h.severidad, h.linea), (3, 6), "{h:?}");
+                assert_eq!(h.cita, "RUN false");
+            }
+            otro => panic!("debía ser hallazgo, no {}", nombre(&otro)),
+        }
+    }
+
+    #[test]
+    fn entrega_multietapa_run_de_red_en_la_segunda_etapa_se_ubica_por_texto() {
+        let texto = "FROM alpine:3.20 AS base\nWORKDIR /app\nRUN echo listo > /app/x\n\
+            FROM alpine:3.20\nWORKDIR /srv\nRUN wget -q http://example.invalid\n";
+        let salida = build_fallido(
+            &[
+                "FROM alpine:3.20",
+                "WORKDIR /srv",
+                "RUN wget -q http://example.invalid",
+            ],
+            "wget: bad address 'example.invalid'",
+        );
+        match clasifica(&salida, texto) {
+            Desenlace::PendienteRed { linea, cita, .. } => {
+                assert_eq!(linea, 6);
+                assert_eq!(cita, "RUN wget -q http://example.invalid");
+            }
+            otro => panic!("debía pedir red en la línea 6, no {}", nombre(&otro)),
+        }
+    }
+
+    #[test]
+    fn entrega_arg_antes_del_from_no_corre_el_indice() {
+        // Buildah no cuenta el `ARG` previo al primer `FROM`: el paso 3/3 es el `RUN` de red, línea 4.
+        let texto = "ARG VERSION=3.20\nFROM alpine:3.20\nRUN echo hola\n\
+            RUN wget -q http://example.invalid\n";
+        let salida = build_fallido(
+            &[
+                "FROM alpine:3.20",
+                "RUN echo hola",
+                "RUN wget -q http://example.invalid",
+            ],
+            "wget: bad address 'example.invalid'",
+        );
+        match clasifica(&salida, texto) {
+            Desenlace::PendienteRed { linea, .. } => assert_eq!(linea, 4),
+            otro => panic!("debía pedir red en la línea 4, no {}", nombre(&otro)),
+        }
+    }
+
+    #[test]
+    fn entrega_texto_repetido_en_dos_etapas_da_sin_veredicto() {
+        let texto = "FROM alpine:3.20 AS base\nRUN apt-get update\n\
+            FROM alpine:3.20\nRUN apt-get update\n";
+        let salida = build_fallido(
+            &["FROM alpine:3.20", "RUN apt-get update"],
+            "bad address 'deb.example.invalid'",
+        );
+        match clasifica(&salida, texto) {
+            Desenlace::Pendiente(motivo) => {
+                assert!(motivo.starts_with("sin veredicto"), "{motivo}")
+            }
+            otro => panic!("debía quedar sin veredicto, no {}", nombre(&otro)),
+        }
+    }
+
+    #[test]
+    fn entrega_texto_con_continuacion_se_compara_con_espacios_normalizados() {
+        // Guarda: buildah quita la `\` y deja los espacios de la línea siguiente. Debe seguir ubicándose.
+        let texto = "FROM alpine:3.20\nRUN echo hola && \\\n    wget -q http://example.invalid\n";
+        let salida = build_fallido(
+            &[
+                "FROM alpine:3.20",
+                "RUN echo hola &&     wget -q http://example.invalid",
+            ],
+            "wget: bad address 'example.invalid'",
+        );
+        match clasifica(&salida, texto) {
+            Desenlace::PendienteRed { linea, .. } => assert_eq!(linea, 2),
+            otro => panic!("debía pedir red en la línea 2, no {}", nombre(&otro)),
+        }
+    }
+
+    #[test]
+    fn entrega_sin_step_en_la_salida_es_infraestructura() {
+        let salida = SalidaPodman {
+            codigo: 125,
+            stdout: String::new(),
+            stderr: "Error: creating build container: x: image not known\n".into(),
+        };
+        assert!(clasificar_fallo(&salida, "Dockerfile", "FROM x\n", &[]).is_err());
+    }
+
+    fn nombre(d: &Desenlace) -> &'static str {
+        match d {
+            Desenlace::Pendiente(_) => "Pendiente",
+            Desenlace::PendienteRed { .. } => "PendienteRed",
+            Desenlace::Hallazgo(_) => "Hallazgo",
+        }
+    }
+
+    #[test]
+    fn entrega_pide_red_no_confunde_un_servicio_caido_con_falta_de_red() {
+        // Un producto que no arranca da "connection refused": falla del producto, no de la red.
+        assert!(!pide_red(
+            "Error: dial tcp 127.0.0.1:8080: connect: connection refused"
+        ));
+        assert!(!pide_red(
+            "curl: (7) Failed to connect to localhost port 80"
+        ));
+        // Los de DNS y de ruta siguen contando como falta de red.
+        assert!(pide_red("curl: (6) Could not resolve host: example.com"));
+        assert!(pide_red("ping: no route to host"));
+    }
+
+    #[test]
     fn entrega_pide_red_reconoce_los_errores_de_apk_y_wget() {
         assert!(pide_red(
-            "WARNING: fetching x: temporary error (try again later)"
+            "WARNING: fetching x: DNS: transient error (try again later)"
+        ));
+        // Salida real de `apk add` sin red.
+        assert!(pide_red(
+            "WARNING: fetching https://dl-cdn.alpinelinux.org/x: temporary error (try again later)"
         ));
         assert!(pide_red("wget: bad address 'example.com'"));
         assert!(pide_red("curl: (6) Could not resolve host: example.com"));

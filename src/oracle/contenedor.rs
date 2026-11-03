@@ -1,6 +1,6 @@
 //! Corre un comando en un contenedor de podman sin red y con un único directorio escribible.
 
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,6 +13,15 @@ use super::ErrorOraculo;
 
 /// Caracteres de la cola de stdout y stderr que se guardan.
 const COLA: usize = 4000;
+/// Bytes que `leer_cola_en_hilo` conserva al final. Un carácter UTF-8 ocupa hasta 4 bytes; el margen de
+/// 4 cubre el carácter cortado al inicio de la ventana. Así quedan siempre `COLA` caracteres completos.
+const COLA_BYTES: usize = COLA * 4 + 4;
+/// Tope de procesos e hilos del contenedor. Acota una fork bomb dentro de la imagen.
+const PIDS_LIMITE: u32 = 512;
+/// Memoria máxima del contenedor. Sube si una suite legítima llega al tope (ver el informe de medición).
+const MEMORIA: &str = "2g";
+/// Plazo de `podman rm -f` al limpiar un contenedor. Si podman no responde, la limpieza no bloquea a Root.
+const PLAZO_LIMPIEZA: Duration = Duration::from_secs(30);
 /// Código con que podman sale ante un error propio (imagen inexistente, opción inválida).
 const CODIGO_ERROR_PODMAN: i32 = 125;
 /// Pausa entre consultas al proceso mientras se espera su fin.
@@ -89,6 +98,12 @@ pub struct Resultado {
 /// Argumentos de `podman run`, sin el binario `podman`.
 pub fn argumentos(e: &Ejecucion, nombre: &str) -> Vec<String> {
     let mut args: Vec<String> = ["run", "--rm", "--name", nombre].map(String::from).into();
+    // Sin capacidades de Linux ni ganancia de privilegios por setuid.
+    args.extend(["--cap-drop=all", "--security-opt=no-new-privileges"].map(String::from));
+    args.push(format!("--pids-limit={PIDS_LIMITE}"));
+    args.push(format!("--memory={MEMORIA}"));
+    // La imagen debe estar local. `run` no baja nada en silencio.
+    args.push("--pull=never".into());
     args.push(PROXY_FUERA.into());
     if !e.red {
         args.extend(["--network", "none"].map(String::from));
@@ -151,14 +166,22 @@ pub fn ejecutar(e: &Ejecucion) -> Result<Resultado, ErrorOraculo> {
     let nombre = nombre_unico();
     let inicio = Instant::now();
     let mut hijo = lanzar(e, &nombre)?;
-    let salida = hijo.stdout.take().map(leer_en_hilo);
-    let error = hijo.stderr.take().map(leer_en_hilo);
-    let Some(estado) = esperar(&mut hijo, e.timeout)? else {
-        terminar(&mut hijo, &nombre);
-        return Err(ErrorOraculo::Infra(format!(
-            "timeout tras {} s; contenedor {nombre} eliminado",
-            e.timeout.as_secs_f64()
-        )));
+    let salida = hijo.stdout.take().map(leer_cola_en_hilo);
+    let error = hijo.stderr.take().map(leer_cola_en_hilo);
+    let estado = match esperar(&mut hijo, e.timeout) {
+        Ok(Some(estado)) => estado,
+        Ok(None) => {
+            terminar(&mut hijo, &nombre);
+            return Err(ErrorOraculo::Infra(format!(
+                "timeout tras {} s; contenedor {nombre} eliminado",
+                e.timeout.as_secs_f64()
+            )));
+        }
+        // Sin esto, un fallo al consultar el proceso dejaría el contenedor corriendo.
+        Err(err) => {
+            terminar(&mut hijo, &nombre);
+            return Err(err);
+        }
     };
     let stdout = recoger(salida);
     let stderr = recoger(error);
@@ -190,22 +213,37 @@ pub(crate) struct SalidaPodman {
 
 /// Corre `podman` con `args` y espera hasta `plazo`. Si vence, mata el proceso y da `Infra`.
 pub(crate) fn correr_podman(args: &[&str], plazo: Duration) -> Result<SalidaPodman, ErrorOraculo> {
-    let mut hijo = Command::new("podman")
-        .args(args)
+    let mut comando = Command::new("podman");
+    comando.args(args);
+    correr_comando(comando, args.first().unwrap_or(&""), plazo)
+}
+
+/// Corre `comando` con salida capturada y espera hasta `plazo`. Si vence o falla la espera, mata el proceso.
+fn correr_comando(
+    mut comando: Command,
+    etiqueta: &str,
+    plazo: Duration,
+) -> Result<SalidaPodman, ErrorOraculo> {
+    let mut hijo = comando
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| ErrorOraculo::Infra(format!("no se pudo lanzar podman: {err}")))?;
     let salida = hijo.stdout.take().map(leer_en_hilo);
     let error = hijo.stderr.take().map(leer_en_hilo);
-    let Some(estado) = esperar(&mut hijo, plazo)? else {
-        let _ = hijo.kill();
-        let _ = hijo.wait();
-        return Err(ErrorOraculo::Infra(format!(
-            "podman {} superó {} s",
-            args.first().unwrap_or(&""),
-            plazo.as_secs()
-        )));
+    let estado = match esperar(&mut hijo, plazo) {
+        Ok(Some(estado)) => estado,
+        Ok(None) => {
+            matar(&mut hijo);
+            return Err(ErrorOraculo::Infra(format!(
+                "podman {etiqueta} superó {} s",
+                plazo.as_secs()
+            )));
+        }
+        Err(err) => {
+            matar(&mut hijo);
+            return Err(err);
+        }
     };
     let Some(codigo) = estado.code() else {
         return Err(ErrorOraculo::Infra("podman terminó por una señal".into()));
@@ -215,6 +253,12 @@ pub(crate) fn correr_podman(args: &[&str], plazo: Duration) -> Result<SalidaPodm
         stdout: recoger(salida),
         stderr: recoger(error),
     })
+}
+
+/// Mata el proceso y espera su fin. Los errores se ignoran: el llamador ya reporta el fallo.
+fn matar(hijo: &mut Child) {
+    let _ = hijo.kill();
+    let _ = hijo.wait();
 }
 
 /// Falla antes de lanzar podman si falta alguna ruta montada.
@@ -259,6 +303,32 @@ pub(crate) fn leer_en_hilo<R: Read + Send + 'static>(mut flujo: R) -> JoinHandle
     })
 }
 
+/// Lee un flujo en otro hilo y conserva solo los últimos `COLA_BYTES` bytes. La memoria no crece con la salida.
+pub(crate) fn leer_cola_en_hilo<R: Read + Send + 'static>(mut flujo: R) -> JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut cola = Vec::new();
+        let mut trozo = [0u8; 8192];
+        loop {
+            match flujo.read(&mut trozo) {
+                Ok(0) => break,
+                Ok(n) => {
+                    cola.extend_from_slice(&trozo[..n]);
+                    // Se recorta al pasar el doble: el recorte cuesta lo mismo que la entrada leída.
+                    if cola.len() > 2 * COLA_BYTES {
+                        cola.drain(..cola.len() - COLA_BYTES);
+                    }
+                }
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        if cola.len() > COLA_BYTES {
+            cola.drain(..cola.len() - COLA_BYTES);
+        }
+        cola
+    })
+}
+
 pub(crate) fn recoger(hilo: Option<JoinHandle<Vec<u8>>>) -> String {
     let bytes = hilo.and_then(|h| h.join().ok()).unwrap_or_default();
     String::from_utf8_lossy(&bytes).into_owned()
@@ -287,11 +357,15 @@ pub(crate) fn esperar(
 /// Borra el contenedor por nombre sin esperar la parada, y mata el proceso de podman.
 /// Los errores se ignoran: ya hay un fallo que reportar.
 fn terminar(hijo: &mut Child, nombre: &str) {
-    let _ = Command::new("podman")
-        .args(["rm", "-f", "-t", "0", nombre])
-        .output();
-    let _ = hijo.kill();
-    let _ = hijo.wait();
+    let mut rm = Command::new("podman");
+    rm.args(["rm", "-f", "-t", "0", nombre]);
+    terminar_con(rm, hijo, PLAZO_LIMPIEZA);
+}
+
+/// Corre el comando de limpieza con plazo y luego mata el hijo. Sin plazo, un podman colgado bloquearía a Root.
+fn terminar_con(comando: Command, hijo: &mut Child, plazo: Duration) {
+    let _ = correr_comando(comando, "rm", plazo);
+    matar(hijo);
 }
 
 /// Últimos `COLA` caracteres de un texto.
@@ -302,6 +376,8 @@ fn cola(texto: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use super::*;
 
     fn ejecucion() -> Ejecucion {
@@ -449,5 +525,99 @@ mod tests {
         let c = cola(&texto);
         assert_eq!(c.chars().count(), 4000);
         assert!(c.ends_with("FIN"));
+    }
+
+    /// Flujo de `pendiente` bytes `a` seguidos de `fin`. Entrega por trozos y no guarda el total.
+    struct Sintetico {
+        pendiente: usize,
+        fin: &'static [u8],
+    }
+
+    impl io::Read for Sintetico {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.pendiente > 0 {
+                let n = buf.len().min(self.pendiente);
+                buf[..n].fill(b'a');
+                self.pendiente -= n;
+                return Ok(n);
+            }
+            let n = buf.len().min(self.fin.len());
+            buf[..n].copy_from_slice(&self.fin[..n]);
+            self.fin = &self.fin[n..];
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn contenedor_cola_de_100_mb_guarda_solo_los_ultimos_bytes() {
+        let flujo = Sintetico {
+            pendiente: 100 * 1024 * 1024,
+            fin: b"FIN",
+        };
+        let bytes = leer_cola_en_hilo(flujo).join().expect("hilo");
+        assert!(
+            bytes.len() <= COLA_BYTES,
+            "quedaron {} bytes de 100 MB",
+            bytes.len()
+        );
+        assert!(bytes.ends_with(b"FIN"));
+        let texto = recoger(Some(leer_cola_en_hilo(Sintetico {
+            pendiente: 100 * 1024 * 1024,
+            fin: b"FIN",
+        })));
+        assert_eq!(cola(&texto).chars().count(), COLA);
+        assert!(cola(&texto).ends_with("FIN"));
+    }
+
+    #[test]
+    fn contenedor_cola_no_corta_utf8_a_medias() {
+        let texto = format!("{}FIN", "€".repeat(20_000));
+        let flujo = io::Cursor::new(texto.into_bytes());
+        let leido = recoger(Some(leer_cola_en_hilo(flujo)));
+        assert_eq!(cola(&leido), format!("{}FIN", "€".repeat(COLA - 3)));
+    }
+
+    #[test]
+    fn contenedor_limpieza_con_plazo_no_cuelga_si_podman_no_responde() {
+        let mut hijo = Command::new("sleep").arg("20").spawn().expect("sleep");
+        let inicio = Instant::now();
+        let mut podman_falso = Command::new("sh");
+        podman_falso.args(["-c", "exec sleep 20"]);
+        terminar_con(podman_falso, &mut hijo, Duration::from_millis(300));
+        assert!(
+            inicio.elapsed() < Duration::from_secs(10),
+            "la limpieza tardó {:?}",
+            inicio.elapsed()
+        );
+        assert!(
+            hijo.try_wait().expect("try_wait").is_some(),
+            "el hijo quedó vivo"
+        );
+    }
+
+    #[test]
+    fn contenedor_argumentos_limitan_privilegios_recursos_y_pull() {
+        for red in [false, true] {
+            let mut e = ejecucion();
+            e.red = red;
+            let args = argumentos(&e, "n");
+            let imagen = args
+                .iter()
+                .position(|a| a == "docker.io/library/alpine:3.20")
+                .expect("imagen");
+            for opcion in [
+                "--cap-drop=all",
+                "--security-opt=no-new-privileges",
+                "--pids-limit=512",
+                "--memory=2g",
+                "--pull=never",
+            ] {
+                let pos = args.iter().position(|a| a == opcion);
+                assert!(
+                    pos.is_some_and(|p| p < imagen),
+                    "red={red}: falta {opcion} antes de la imagen: {args:?}"
+                );
+            }
+        }
     }
 }
