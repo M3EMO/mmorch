@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use crate::observe;
 use crate::oracle::ErrorOraculo;
-use crate::oracle::configs::{self, instrucciones, palabra_clave};
+use crate::oracle::configs::{self, Instruccion, instrucciones, palabra_clave};
 use crate::oracle::contenedor::{PROXY_FUERA, SUFIJO_SELINUX, SalidaPodman, correr_podman};
 use crate::oracle::descarga::{self, ImagenBase, PRELUDIO, Problema};
 use crate::oracle::perfiles::herramientas::EjecutorHerramienta;
@@ -621,7 +621,8 @@ enum Desenlace {
 }
 
 /// Separa un fallo de build en falta de red, imagen base ausente, o producto que no construye.
-/// Sin ningún `STEP` en la salida, podman no empezó: es infraestructura.
+/// Sin ningún `STEP` en la salida, podman no empezó: es infraestructura. Si el texto del paso que
+/// falló no está en una sola instrucción del Dockerfile, la construcción queda sin veredicto.
 fn clasificar_fallo(
     build: &SalidaPodman,
     archivo: &str,
@@ -629,7 +630,7 @@ fn clasificar_fallo(
     reqs: &[Requisito],
 ) -> Result<Desenlace, ErrorOraculo> {
     let salida = format!("{}\n{}", build.stdout, build.stderr);
-    let Some(paso) = paso_fallido(&salida) else {
+    let Some(paso) = texto_paso_fallido(&salida) else {
         let ultima = build.stderr.lines().rev().find(|l| !l.trim().is_empty());
         return Err(ErrorOraculo::Infra(format!(
             "podman no empezó la construcción: {}",
@@ -637,21 +638,18 @@ fn clasificar_fallo(
         )));
     };
     let instrucciones_df = instrucciones(texto);
-    let (linea, cita, kw, red_paso) = match instrucciones_df.get(paso.saturating_sub(1)) {
-        Some(i) => (
-            i.linea,
-            i.cita.clone(),
-            palabra_clave(&i.logico).0,
-            paso_que_necesita_red(&i.logico),
-        ),
-        None => match instrucciones_df
-            .iter()
-            .find(|i| palabra_clave(&i.logico).0 == "RUN")
-        {
-            Some(i) => (i.linea, i.cita.clone(), "RUN".to_string(), true),
-            None => (0, String::new(), String::new(), false),
-        },
+    let Some(indice) = indice_del_paso(&instrucciones_df, &paso) else {
+        return Ok(Desenlace::Pendiente(format!(
+            "sin veredicto: no se ubica en el Dockerfile el paso que falló: {paso}"
+        )));
     };
+    let i = &instrucciones_df[indice];
+    let (linea, cita, kw, red_paso) = (
+        i.linea,
+        i.cita.clone(),
+        palabra_clave(&i.logico).0,
+        paso_que_necesita_red(&i.logico),
+    );
     let minuscula = salida.to_lowercase();
     if kw == "FROM" {
         if PATRONES_AUSENTE.iter().any(|p| minuscula.contains(p)) {
@@ -683,12 +681,38 @@ fn clasificar_fallo(
     )))
 }
 
-/// Número de paso (1-based) del último `STEP k/n` de la salida de `podman build`.
-fn paso_fallido(salida: &str) -> Option<usize> {
+/// Texto del paso que falló: el de la última línea `STEP k/n: <texto>` de la salida de `podman build`,
+/// con los espacios normalizados. Con varias etapas, buildah antepone `[k/m] `.
+fn texto_paso_fallido(salida: &str) -> Option<String> {
     salida.lines().rev().find_map(|linea| {
-        let resto = linea.split("STEP ").nth(1)?;
-        resto.split('/').next()?.trim().parse::<usize>().ok()
+        let limpia = linea.trim_start();
+        let limpia = match limpia.strip_prefix('[') {
+            Some(resto) => resto.split_once("] ")?.1,
+            None => limpia,
+        };
+        let resto = limpia.strip_prefix("STEP ")?;
+        let (numeros, texto) = resto.split_once(": ")?;
+        let (paso, total) = numeros.split_once('/')?;
+        paso.trim().parse::<usize>().ok()?;
+        total.trim().parse::<usize>().ok()?;
+        Some(normalizar_texto(texto))
     })
+}
+
+/// Texto con los espacios en blanco colapsados a uno. Así se compara lo que imprime buildah con el Dockerfile.
+fn normalizar_texto(texto: &str) -> String {
+    texto.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Índice de la única instrucción cuyo texto lógico normalizado es `paso`. Si ninguna o varias coinciden, `None`.
+fn indice_del_paso(instrucciones_df: &[Instruccion], paso: &str) -> Option<usize> {
+    let mut hallados = instrucciones_df
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| normalizar_texto(&i.logico) == paso)
+        .map(|(k, _)| k);
+    let primero = hallados.next()?;
+    hallados.next().is_none().then_some(primero)
 }
 
 /// Primera línea de la salida que dice que podman no pudo armar la red del build (`slirp4netns`, `pasta`
@@ -1723,13 +1747,164 @@ pub(crate) mod tests {
 
     #[test]
     fn entrega_ultimo_paso_sale_del_ultimo_step_de_la_salida() {
-        let salida = "STEP 1/3: FROM x\nSTEP 2/3: RUN a\nSTEP 3/3: RUN b\n\
+        let salida = "STEP 1/3: FROM x\nSTEP 2/3: RUN a\nSTEP 3/3: RUN  b\n\
             Error: building at STEP \"RUN b\": while running runtime: exit status 1";
-        assert_eq!(paso_fallido(salida), Some(3));
+        assert_eq!(texto_paso_fallido(salida).as_deref(), Some("RUN b"));
         assert_eq!(
-            paso_fallido("Error: creating build container: x: image not known"),
+            texto_paso_fallido("Error: creating build container: x: image not known"),
             None
         );
+    }
+
+    #[test]
+    fn entrega_ultimo_paso_quita_el_prefijo_de_etapa() {
+        let salida =
+            "[1/2] STEP 1/2: FROM x\n[2/2] STEP 2/3: WORKDIR /srv\n[2/2] STEP 3/3: RUN wget y";
+        assert_eq!(texto_paso_fallido(salida).as_deref(), Some("RUN wget y"));
+    }
+
+    /// Salida sintética de `podman build` (formato real de buildah): un `STEP k/n: <texto>` por paso,
+    /// y el error que nombra el último paso. `causa` es la línea de error de la herramienta del paso.
+    fn build_fallido(pasos: &[&str], causa: &str) -> SalidaPodman {
+        let n = pasos.len();
+        let stdout: String = pasos
+            .iter()
+            .enumerate()
+            .map(|(k, paso)| format!("STEP {}/{n}: {paso}\n", k + 1))
+            .collect();
+        let fallido = pasos.last().copied().unwrap_or("");
+        SalidaPodman {
+            codigo: 1,
+            stdout,
+            stderr: format!(
+                "{causa}\nError: building at STEP \"{fallido}\": while running runtime: exit status 1\n"
+            ),
+        }
+    }
+
+    fn clasifica(salida: &SalidaPodman, texto: &str) -> Desenlace {
+        clasificar_fallo(salida, "Dockerfile", texto, &[]).expect("clasifica el fallo")
+    }
+
+    #[test]
+    fn entrega_paso_cuyo_texto_no_esta_en_el_dockerfile_da_sin_veredicto() {
+        let texto = "FROM alpine:3.20\nRUN echo hola\n";
+        let salida = build_fallido(
+            &["FROM alpine:3.20", "RUN wget -q http://example.invalid"],
+            "wget: bad address 'example.invalid'",
+        );
+        match clasifica(&salida, texto) {
+            Desenlace::Pendiente(motivo) => {
+                assert!(motivo.starts_with("sin veredicto"), "{motivo}")
+            }
+            otro => panic!("debía quedar sin veredicto, no {}", nombre(&otro)),
+        }
+    }
+
+    #[test]
+    fn entrega_multietapa_ubica_el_paso_de_la_segunda_etapa_por_su_texto() {
+        // Buildah numera cada etapa desde 1: el `RUN` de la 2ª etapa es el paso 3/3, no el 3º del archivo.
+        let texto = "FROM alpine:3.20 AS base\nWORKDIR /app\nRUN echo listo > /app/x\n\
+            FROM alpine:3.20\nWORKDIR /srv\nRUN false\n";
+        let salida = build_fallido(&["FROM alpine:3.20", "WORKDIR /srv", "RUN false"], "");
+        match clasifica(&salida, texto) {
+            Desenlace::Hallazgo(h) => {
+                assert_eq!((h.severidad, h.linea), (3, 6), "{h:?}");
+                assert_eq!(h.cita, "RUN false");
+            }
+            otro => panic!("debía ser hallazgo, no {}", nombre(&otro)),
+        }
+    }
+
+    #[test]
+    fn entrega_multietapa_run_de_red_en_la_segunda_etapa_se_ubica_por_texto() {
+        let texto = "FROM alpine:3.20 AS base\nWORKDIR /app\nRUN echo listo > /app/x\n\
+            FROM alpine:3.20\nWORKDIR /srv\nRUN wget -q http://example.invalid\n";
+        let salida = build_fallido(
+            &[
+                "FROM alpine:3.20",
+                "WORKDIR /srv",
+                "RUN wget -q http://example.invalid",
+            ],
+            "wget: bad address 'example.invalid'",
+        );
+        match clasifica(&salida, texto) {
+            Desenlace::PendienteRed { linea, cita, .. } => {
+                assert_eq!(linea, 6);
+                assert_eq!(cita, "RUN wget -q http://example.invalid");
+            }
+            otro => panic!("debía pedir red en la línea 6, no {}", nombre(&otro)),
+        }
+    }
+
+    #[test]
+    fn entrega_arg_antes_del_from_no_corre_el_indice() {
+        // Buildah no cuenta el `ARG` previo al primer `FROM`: el paso 3/3 es el `RUN` de red, línea 4.
+        let texto = "ARG VERSION=3.20\nFROM alpine:3.20\nRUN echo hola\n\
+            RUN wget -q http://example.invalid\n";
+        let salida = build_fallido(
+            &[
+                "FROM alpine:3.20",
+                "RUN echo hola",
+                "RUN wget -q http://example.invalid",
+            ],
+            "wget: bad address 'example.invalid'",
+        );
+        match clasifica(&salida, texto) {
+            Desenlace::PendienteRed { linea, .. } => assert_eq!(linea, 4),
+            otro => panic!("debía pedir red en la línea 4, no {}", nombre(&otro)),
+        }
+    }
+
+    #[test]
+    fn entrega_texto_repetido_en_dos_etapas_da_sin_veredicto() {
+        let texto = "FROM alpine:3.20 AS base\nRUN apt-get update\n\
+            FROM alpine:3.20\nRUN apt-get update\n";
+        let salida = build_fallido(
+            &["FROM alpine:3.20", "RUN apt-get update"],
+            "bad address 'deb.example.invalid'",
+        );
+        match clasifica(&salida, texto) {
+            Desenlace::Pendiente(motivo) => {
+                assert!(motivo.starts_with("sin veredicto"), "{motivo}")
+            }
+            otro => panic!("debía quedar sin veredicto, no {}", nombre(&otro)),
+        }
+    }
+
+    #[test]
+    fn entrega_texto_con_continuacion_se_compara_con_espacios_normalizados() {
+        // Guarda: buildah quita la `\` y deja los espacios de la línea siguiente. Debe seguir ubicándose.
+        let texto = "FROM alpine:3.20\nRUN echo hola && \\\n    wget -q http://example.invalid\n";
+        let salida = build_fallido(
+            &[
+                "FROM alpine:3.20",
+                "RUN echo hola &&     wget -q http://example.invalid",
+            ],
+            "wget: bad address 'example.invalid'",
+        );
+        match clasifica(&salida, texto) {
+            Desenlace::PendienteRed { linea, .. } => assert_eq!(linea, 2),
+            otro => panic!("debía pedir red en la línea 2, no {}", nombre(&otro)),
+        }
+    }
+
+    #[test]
+    fn entrega_sin_step_en_la_salida_es_infraestructura() {
+        let salida = SalidaPodman {
+            codigo: 125,
+            stdout: String::new(),
+            stderr: "Error: creating build container: x: image not known\n".into(),
+        };
+        assert!(clasificar_fallo(&salida, "Dockerfile", "FROM x\n", &[]).is_err());
+    }
+
+    fn nombre(d: &Desenlace) -> &'static str {
+        match d {
+            Desenlace::Pendiente(_) => "Pendiente",
+            Desenlace::PendienteRed { .. } => "PendienteRed",
+            Desenlace::Hallazgo(_) => "Hallazgo",
+        }
     }
 
     #[test]
