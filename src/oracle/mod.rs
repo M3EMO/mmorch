@@ -5875,6 +5875,137 @@ mod tests {
         assert_eq!(v_reuso, v_sin);
     }
 
+    /// Con reuso `Deterministas`, las sondas deterministas salen del memo de la base y no corren. El juez y
+    /// los tests sí corren. El veredicto es el mismo que sin reuso.
+    #[test]
+    fn oraculo_reuso_deterministas_no_corre_las_sondas_y_da_el_mismo_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        fs::write(repo.join("Dockerfile"), "FROM scratch\n").expect("Dockerfile");
+        let tarea = tarea_rust(base.path());
+        let rubricas = [rubrica_diseno()];
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let partes = || Partes {
+            contrato: true,
+            oculto: true,
+            gitleaks: true,
+            cargo_audit: true,
+            clippy: true,
+            hadolint: true,
+            mutacion: true,
+            ..partes_de(Dimension::Diseno, &rubricas, &tarea)
+        };
+        let texto_juez = respuesta_juez(
+            json!([
+                item_juez(MODULARIDAD_ID, 2, json!([ev_lib()])),
+                item_juez(TOPE_ID, 2, json!([ev_lib()])),
+            ]),
+            json!([]),
+        );
+        let memo = std::sync::Arc::new(memo::MemoSondas::nuevo());
+        let junit_base = correr_suites(JUNIT_CONTRATO);
+        let grab_base = Grabador::nuevo(&junit_base);
+        let correr_base = |e: &contenedor::Ejecucion| grab_base.correr(e);
+        let juez_base = JuezFalso::con(&texto_juez, 0.0);
+        let (fab_base, _) = herramientas_grabadas();
+        let o_base = OpcionesOraculo {
+            partes: Some(partes()),
+            memo: Some(memo.clone()),
+            ..opciones(&home)
+        };
+        evaluar_con(
+            &repo,
+            &tarea,
+            &o_base,
+            Dependencias {
+                juez: Some(&juez_base),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                ..deps_de(&correr_base, &fab_base)
+            },
+        )
+        .expect("la base evalúa");
+
+        let junit_reuso = correr_suites(JUNIT_CONTRATO);
+        let grab_reuso = Grabador::nuevo(&junit_reuso);
+        let correr_reuso = |e: &contenedor::Ejecucion| grab_reuso.correr(e);
+        let juez_reuso = JuezFalso::con(&texto_juez, 0.0);
+        let (fab_reuso, cmds_reuso) = herramientas_grabadas();
+        let o_reuso = OpcionesOraculo {
+            partes: Some(partes()),
+            reuso: Some(memo::ReusoSondas {
+                memo: memo.clone(),
+                alcance: memo::Alcance::Deterministas,
+            }),
+            ..opciones(&home)
+        };
+        let v_reuso = evaluar_con(
+            &repo,
+            &tarea,
+            &o_reuso,
+            Dependencias {
+                juez: Some(&juez_reuso),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                ..deps_de(&correr_reuso, &fab_reuso)
+            },
+        )
+        .expect("evalúa con reuso");
+
+        let junit_sin = correr_suites(JUNIT_CONTRATO);
+        let grab_sin = Grabador::nuevo(&junit_sin);
+        let correr_sin = |e: &contenedor::Ejecucion| grab_sin.correr(e);
+        let juez_sin = JuezFalso::con(&texto_juez, 0.0);
+        let (fab_sin, cmds_sin) = herramientas_grabadas();
+        let o_sin = OpcionesOraculo {
+            partes: Some(partes()),
+            ..opciones(&home)
+        };
+        let v_sin = evaluar_con(
+            &repo,
+            &tarea,
+            &o_sin,
+            Dependencias {
+                juez: Some(&juez_sin),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                ..deps_de(&correr_sin, &fab_sin)
+            },
+        )
+        .expect("evalúa sin reuso");
+
+        let determinista = |c: &str| {
+            c.contains("gitleaks detect")
+                || c.contains("cargo audit")
+                || c.contains("--message-format=json")
+                || c.starts_with("hadolint")
+                || c.contains("cargo mutants")
+                || c.starts_with("command -v")
+                || c.contains("cargo clippy --version")
+        };
+        let cmds_sin = cmds_sin.borrow();
+        assert!(
+            cmds_sin.iter().any(|c| c.contains("gitleaks detect")),
+            "sin reuso gitleaks corre: {cmds_sin:?}"
+        );
+        assert!(
+            cmds_sin.iter().any(|c| c.contains("cargo mutants")),
+            "sin reuso la mutación corre: {cmds_sin:?}"
+        );
+        let cmds_reuso = cmds_reuso.borrow();
+        assert!(
+            cmds_reuso.iter().all(|c| !determinista(c)),
+            "con reuso no corre ninguna sonda determinista: {cmds_reuso:?}"
+        );
+        assert_eq!(juez_reuso.llamadas(), 1, "el juez corre con reuso");
+        assert!(
+            grab_reuso.corrio(DIR_CONTRATO) && grab_reuso.corrio(DIR_OCULTO),
+            "los tests corren con reuso: {:?}",
+            grab_reuso.destinos
+        );
+        assert_eq!(v_reuso, v_sin);
+    }
+
     #[test]
     fn oraculo_partes_seguridad_no_corre_las_suites() {
         let base = tempfile::tempdir().expect("base");

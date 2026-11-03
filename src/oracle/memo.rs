@@ -6,8 +6,9 @@ use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::oracle::ErrorOraculo;
+use crate::oracle::configs;
 use crate::oracle::mutacion::{self, MutanteMuerto};
-use crate::oracle::perfiles::herramientas::{EjecutorHerramienta, SalidaHerramienta};
+use crate::oracle::perfiles::herramientas::{self, EjecutorHerramienta, SalidaHerramienta};
 use crate::oracle::tarea::Tarea;
 
 /// Salidas grabadas, por comando exacto. Un comando solo guarda su última salida OK.
@@ -86,6 +87,9 @@ impl EjecutorHerramienta for EjecutorGrabador<'_> {
 pub enum Alcance {
     /// Solo la corrida de mutación: su salida sale del memo, sin correrla.
     SoloMutacion,
+    /// La mutación y las sondas deterministas (gitleaks, cargo audit, clippy, hadolint y la verificación de
+    /// sus herramientas). Nunca la Entrega ni la Eficiencia.
+    Deterministas,
 }
 
 /// Reuso de sondas: el memo de la base y el alcance de lo que toma del memo en vez de correrlo.
@@ -107,6 +111,11 @@ impl EjecutorReusador<'_> {
     fn toma(&self, cmd: &str) -> bool {
         match self.reuso.alcance {
             Alcance::SoloMutacion => es_de_mutacion(cmd),
+            Alcance::Deterministas => {
+                es_de_mutacion(cmd)
+                    || herramientas::es_comando_determinista(cmd)
+                    || configs::es_comando_determinista(cmd)
+            }
         }
     }
 }
@@ -336,5 +345,124 @@ mod tests {
             reuso: &reuso,
         };
         assert!(reusador.tiene_rustsec());
+    }
+
+    fn reuso_de_deterministas(memo: &Arc<MemoSondas>) -> ReusoSondas {
+        ReusoSondas {
+            memo: memo.clone(),
+            alcance: Alcance::Deterministas,
+        }
+    }
+
+    #[test]
+    fn reusador_deterministas_devuelve_del_memo_las_sondas_deterministas_y_la_mutacion() {
+        use crate::oracle::configs::comando_hadolint;
+        use crate::oracle::perfiles::herramientas::{
+            COMANDO_CARGO_AUDIT, COMANDO_GITLEAKS, comando_clippy, comando_de_herramienta,
+        };
+        let tarea = tarea_rust();
+        let cmds = [
+            COMANDO_GITLEAKS.to_string(),
+            COMANDO_CARGO_AUDIT.to_string(),
+            comando_clippy(),
+            comando_hadolint("Dockerfile"),
+            comando_de_herramienta("gitleaks"),
+            comando_de_herramienta("cargo-audit"),
+            comando_de_herramienta("clippy"),
+            comando_de_herramienta("hadolint"),
+            comando_de_herramienta("cargo-mutants"),
+            crate::oracle::mutacion::construir_comando(&tarea),
+        ];
+        let grabada = con_outcomes("{\"grabada\":true}");
+        let memo = Arc::new(MemoSondas::nuevo());
+        for cmd in &cmds {
+            memo.anotar(cmd, &grabada);
+        }
+        let real = falso(con_outcomes("{\"real\":true}"), false);
+        let reuso = reuso_de_deterministas(&memo);
+        let reusador = EjecutorReusador {
+            real: &real,
+            reuso: &reuso,
+        };
+        for cmd in &cmds {
+            assert_eq!(reusador.ejecutar(cmd).expect("reusa"), grabada, "{cmd}");
+        }
+        assert!(
+            real.cmds.borrow().is_empty(),
+            "no debe correr: {:?}",
+            real.cmds
+        );
+    }
+
+    #[test]
+    fn reusador_deterministas_entrega_y_eficiencia_llaman_al_real_aunque_haya_salida() {
+        use crate::oracle::entrega::construir_script_con;
+        let tarea = tarea_rust();
+        let cmds = [
+            construir_script_con(&tarea, true),
+            construir_script_con(&tarea, false),
+            "./bench --ops".to_string(),
+        ];
+        let memo = Arc::new(MemoSondas::nuevo());
+        for cmd in &cmds {
+            memo.anotar(cmd, &con_outcomes("{\"grabada\":true}"));
+        }
+        let real_salida = SalidaHerramienta {
+            codigo: 0,
+            stdout: "real".into(),
+            ..Default::default()
+        };
+        let real = falso(real_salida.clone(), false);
+        let reuso = reuso_de_deterministas(&memo);
+        let reusador = EjecutorReusador {
+            real: &real,
+            reuso: &reuso,
+        };
+        for cmd in &cmds {
+            assert_eq!(
+                reusador.ejecutar(cmd).expect("delega"),
+                real_salida,
+                "{cmd}"
+            );
+        }
+        assert_eq!(
+            real.cmds.borrow().as_slice(),
+            cmds.map(String::from).as_slice()
+        );
+    }
+
+    #[test]
+    fn reusador_deterministas_sin_salida_grabada_llama_al_real() {
+        use crate::oracle::perfiles::herramientas::COMANDO_GITLEAKS;
+        let memo = Arc::new(MemoSondas::nuevo());
+        let real = falso(con_outcomes("{}"), false);
+        let reuso = reuso_de_deterministas(&memo);
+        let reusador = EjecutorReusador {
+            real: &real,
+            reuso: &reuso,
+        };
+        reusador.ejecutar(COMANDO_GITLEAKS).expect("delega");
+        assert_eq!(real.cmds.borrow().as_slice(), [COMANDO_GITLEAKS]);
+    }
+
+    #[test]
+    fn reusador_solo_mutacion_no_reusa_clippy_ni_gitleaks() {
+        use crate::oracle::perfiles::herramientas::{COMANDO_GITLEAKS, comando_clippy};
+        let memo = Arc::new(MemoSondas::nuevo());
+        let clippy = comando_clippy();
+        memo.anotar(&clippy, &con_outcomes("{}"));
+        memo.anotar(COMANDO_GITLEAKS, &con_outcomes("{}"));
+        let real = falso(con_outcomes("{\"real\":true}"), false);
+        let reuso = reuso_de_mutacion(&memo);
+        let reusador = EjecutorReusador {
+            real: &real,
+            reuso: &reuso,
+        };
+        reusador.ejecutar(&clippy).expect("delega");
+        reusador.ejecutar(COMANDO_GITLEAKS).expect("delega");
+        assert_eq!(
+            real.cmds.borrow().as_slice(),
+            [clippy, COMANDO_GITLEAKS.to_string()]
+        );
     }
 }

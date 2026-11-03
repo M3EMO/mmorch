@@ -279,26 +279,33 @@ enum TipoCaso {
     Limpio,
 }
 
-/// Las sondas que un caso reusa del memo de la base. Un defecto de Estructura, Arquitectura, Diseño,
-/// Seguridad, Completitud o Entrega no cambia la muestra de mutantes: el caso toma la mutación de la base.
-/// Pruebas mide la mutación, y Eficiencia no la usa en su muestra: esos casos corren todo. Los limpios
-/// tampoco reusan en este paso.
+/// Las sondas que un caso reusa del memo de la base. Un caso limpio es una copia idéntica: reusa las sondas
+/// deterministas, incluida la mutación. Un defecto de Estructura, Arquitectura, Diseño, Seguridad,
+/// Completitud o Entrega no cambia la muestra de mutantes: reusa solo la mutación. Pruebas mide la mutación,
+/// y Eficiencia no la usa en su muestra: esos defectos corren todo. Entrega y Eficiencia nunca se reusan.
 fn reuso_de(tipo: TipoCaso, memo: &std::sync::Arc<MemoSondas>) -> Option<ReusoSondas> {
-    let TipoCaso::Defecto(dimension) = tipo else {
-        return None;
+    let alcance = match tipo {
+        TipoCaso::Base => return None,
+        TipoCaso::Limpio => Alcance::Deterministas,
+        TipoCaso::Defecto(dimension) => {
+            let reusa_mutacion = matches!(
+                dimension,
+                Dimension::Estructura
+                    | Dimension::Arquitectura
+                    | Dimension::Diseno
+                    | Dimension::Seguridad
+                    | Dimension::Completitud
+                    | Dimension::Entrega
+            );
+            if !reusa_mutacion {
+                return None;
+            }
+            Alcance::SoloMutacion
+        }
     };
-    let reusa = matches!(
-        dimension,
-        Dimension::Estructura
-            | Dimension::Arquitectura
-            | Dimension::Diseno
-            | Dimension::Seguridad
-            | Dimension::Completitud
-            | Dimension::Entrega
-    );
-    reusa.then(|| ReusoSondas {
+    Some(ReusoSondas {
         memo: memo.clone(),
-        alcance: Alcance::SoloMutacion,
+        alcance,
     })
 }
 
@@ -1140,7 +1147,10 @@ mod tests {
     use super::inyectar::pruebas::{FIXTURE, arbol, copia_fixture, tarea_en};
     use super::*;
     use crate::oracle::mutacion::{ARCHIVO_OUTCOMES, construir_comando};
-    use crate::oracle::perfiles::herramientas::{EjecutorHerramienta, SalidaHerramienta};
+    use crate::oracle::perfiles::herramientas::{
+        COMANDO_CARGO_AUDIT, COMANDO_GITLEAKS, EjecutorHerramienta, SalidaHerramienta,
+        comando_clippy,
+    };
     use crate::tipos::{Fuente, Hallazgo, ItemFaltante, NivelItem};
     use std::cell::RefCell;
     use tempfile::TempDir;
@@ -1630,11 +1640,15 @@ mod tests {
         assert_eq!(con_defecto.linea, Some(5), "el primer assert del test");
     }
 
-    /// Una llamada del evaluador de prueba: si era la base (lleva memo), si traía reuso y los comandos que corrió.
+    /// Una llamada del evaluador de prueba: si era la base (lleva memo), su alcance de reuso y los comandos que corrió.
     struct Llamada {
         base: bool,
-        reuso: bool,
+        /// Alcance del reuso de la llamada: `None` sin reuso (la base y los casos con defecto fuera de él).
+        alcance: Option<Alcance>,
         cmds: Vec<String>,
+        /// Cuántas veces corrió el juez y los tests en la llamada. Ni uno ni otro pasan por el ejecutor.
+        juez: u32,
+        tests: u32,
     }
 
     /// Ejecutor de prueba: anota cada comando. La mutación responde un mutante muerto, para `AssertBorrado`.
@@ -1695,8 +1709,60 @@ mod tests {
             }
             llamadas.borrow_mut().push(Llamada {
                 base: o.memo.is_some(),
-                reuso: o.reuso.is_some(),
+                alcance: o.reuso.as_ref().map(|r| r.alcance),
                 cmds: cmds.borrow().clone(),
+                juez: 0,
+                tests: 0,
+            });
+            Ok(veredicto())
+        }
+    }
+
+    /// Evaluador de prueba con sondas deterministas, juez y tests. Corre gitleaks, cargo audit, clippy,
+    /// hadolint y la mutación. El juez y los tests los cuenta el fake: no pasan por el ejecutor. Con
+    /// `usar_reuso` falso ignora `o.reuso` y corre todo: es la evaluación sin reuso.
+    fn evaluador_con_juez_y_tests(
+        llamadas: &RefCell<Vec<Llamada>>,
+        veredicto: fn() -> Veredicto,
+        usar_reuso: bool,
+    ) -> impl Fn(&Tarea, &Path, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> + '_ {
+        move |tarea: &Tarea, _: &Path, o: &OpcionesOraculo| {
+            let cmds = RefCell::new(Vec::<String>::new());
+            let real = Anota { cmds: &cmds };
+            let reuso = o.reuso.as_ref().filter(|_| usar_reuso);
+            // Como `evaluar_con`: el reuso va dentro, y la base graba cada salida OK en el memo.
+            let ejecutar = |cmd: &str| -> Result<SalidaHerramienta, ErrorOraculo> {
+                let con_reuso = match reuso {
+                    Some(reuso) => {
+                        crate::oracle::memo::EjecutorReusador { real: &real, reuso }.ejecutar(cmd)
+                    }
+                    None => real.ejecutar(cmd),
+                };
+                match o.memo.as_deref() {
+                    Some(memo) => {
+                        let salida = con_reuso?;
+                        memo.anotar(cmd, &salida);
+                        Ok(salida)
+                    }
+                    None => con_reuso,
+                }
+            };
+            let sondas = [
+                COMANDO_GITLEAKS.to_string(),
+                COMANDO_CARGO_AUDIT.to_string(),
+                comando_clippy(),
+                crate::oracle::configs::comando_hadolint("Dockerfile"),
+            ];
+            for cmd in &sondas {
+                ejecutar(cmd).expect("sonda determinista");
+            }
+            ejecutar(&construir_comando(tarea)).expect("mutación");
+            llamadas.borrow_mut().push(Llamada {
+                base: o.memo.is_some(),
+                alcance: reuso.map(|r| r.alcance),
+                cmds: cmds.borrow().clone(),
+                juez: 1,
+                tests: 1,
             });
             Ok(veredicto())
         }
@@ -1747,12 +1813,16 @@ mod tests {
             "la base corre la mutación"
         );
         assert!(
-            llamadas
+            llamadas[0]
+                .cmds
                 .iter()
-                .all(|l| l.cmds.iter().any(|c| c == "cargo clippy --version")),
-            "las sondas estáticas corren en cada llamada"
+                .any(|c| c == "cargo clippy --version"),
+            "la base corre las sondas estáticas"
         );
-        let con_defecto: Vec<&Llamada> = llamadas[1..].iter().filter(|l| l.reuso).collect();
+        let con_defecto: Vec<&Llamada> = llamadas[1..]
+            .iter()
+            .filter(|l| l.alcance == Some(Alcance::SoloMutacion))
+            .collect();
         assert!(!con_defecto.is_empty(), "hay un caso con defecto de Diseño");
         for l in con_defecto {
             assert_eq!(
@@ -1760,13 +1830,24 @@ mod tests {
                 0,
                 "el defecto de Diseño reusa la mutación de la base"
             );
+            assert!(
+                l.cmds.iter().any(|c| c == "cargo clippy --version"),
+                "el defecto de Diseño corre sus sondas: {:?}",
+                l.cmds
+            );
         }
-        for l in llamadas[1..].iter().filter(|l| !l.reuso) {
-            assert_eq!(cuenta_mutaciones(l), 1, "un caso limpio corre la mutación");
+        let limpios: Vec<&Llamada> = llamadas[1..]
+            .iter()
+            .filter(|l| l.alcance == Some(Alcance::Deterministas))
+            .collect();
+        assert!(!limpios.is_empty(), "hay un caso limpio");
+        for l in limpios {
+            assert_eq!(cuenta_mutaciones(l), 0, "un caso limpio toma la mutación");
         }
     }
 
-    /// Un caso con defecto de Pruebas corre la mutación: Pruebas la mide, así que no la reusa.
+    /// Un caso con defecto de Pruebas corre la mutación: Pruebas la mide, así que no la reusa. Un caso limpio
+    /// sí la toma de la base: la copia es idéntica.
     #[test]
     fn calibra_un_caso_de_pruebas_corre_la_mutacion() {
         let home = tempfile::tempdir().expect("home");
@@ -1788,11 +1869,157 @@ mod tests {
         .expect("calibra");
         let llamadas = llamadas.borrow();
         assert!(llamadas.len() >= 2, "la base y un caso con defecto");
-        assert!(llamadas.iter().all(|l| !l.reuso), "Pruebas no reusa");
-        assert!(
-            llamadas.iter().all(|l| cuenta_mutaciones(l) == 1),
-            "cada evaluación corre la mutación"
+        assert_eq!(
+            cuenta_mutaciones(&llamadas[0]),
+            1,
+            "la base corre la mutación"
         );
+        let con_defecto: Vec<&Llamada> = llamadas[1..]
+            .iter()
+            .filter(|l| l.alcance.is_none())
+            .collect();
+        assert!(
+            !con_defecto.is_empty(),
+            "hay un caso con defecto de Pruebas"
+        );
+        for l in con_defecto {
+            assert_eq!(cuenta_mutaciones(l), 1, "Pruebas no reusa la mutación");
+        }
+        let limpios: Vec<&Llamada> = llamadas[1..]
+            .iter()
+            .filter(|l| l.alcance == Some(Alcance::Deterministas))
+            .collect();
+        assert!(!limpios.is_empty(), "hay un caso limpio");
+        for l in limpios {
+            assert_eq!(cuenta_mutaciones(l), 0, "un caso limpio toma la mutación");
+        }
+    }
+
+    fn cuenta_comando(llamada: &Llamada, cmd: &str) -> usize {
+        llamada.cmds.iter().filter(|c| c.as_str() == cmd).count()
+    }
+
+    /// Un caso limpio toma de la base las sondas deterministas y corre otra vez el juez y los tests. Un caso
+    /// con defecto de Diseño solo toma la mutación: sus sondas deterministas corren otra vez.
+    #[test]
+    fn calibra_un_caso_limpio_toma_de_la_base_las_sondas_deterministas_y_corre_el_juez_y_los_tests()
+    {
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = carpeta_con_repo_bueno(home.path());
+        std::fs::write(
+            carpeta.join("repo-bueno").join("Dockerfile"),
+            "FROM scratch\n",
+        )
+        .expect("Dockerfile");
+        let llamadas = RefCell::new(Vec::<Llamada>::new());
+        let evaluador = evaluador_con_juez_y_tests(
+            &llamadas,
+            || veredicto_de(Dimension::Diseno, 1.0, None),
+            true,
+        );
+        let calibrada = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "diseno",
+            4,
+            42,
+            None,
+            None,
+            &evaluador,
+        )
+        .expect("calibra");
+        let llamadas = llamadas.borrow();
+        let casos = calibrada.casos.expect("hay casos guardados");
+        let medidos = fs::read_to_string(&casos)
+            .expect("lee los casos")
+            .lines()
+            .count();
+        assert_eq!(
+            llamadas.len(),
+            medidos + 1,
+            "la base y cada caso llaman al evaluador"
+        );
+        assert!(
+            llamadas.iter().all(|l| l.juez == 1),
+            "el juez corre en la base y en cada caso"
+        );
+        assert!(
+            llamadas.iter().all(|l| l.tests == 1),
+            "los tests corren en la base y en cada caso"
+        );
+        let deterministas = [
+            COMANDO_GITLEAKS.to_string(),
+            COMANDO_CARGO_AUDIT.to_string(),
+            comando_clippy(),
+            crate::oracle::configs::comando_hadolint("Dockerfile"),
+        ];
+        assert!(llamadas[0].base, "la primera llamada es la base");
+        for cmd in &deterministas {
+            assert_eq!(cuenta_comando(&llamadas[0], cmd), 1, "la base corre {cmd}");
+        }
+        assert_eq!(
+            cuenta_mutaciones(&llamadas[0]),
+            1,
+            "la base corre la mutación"
+        );
+        let limpios: Vec<&Llamada> = llamadas[1..]
+            .iter()
+            .filter(|l| l.alcance == Some(Alcance::Deterministas))
+            .collect();
+        assert!(!limpios.is_empty(), "hay casos limpios");
+        for l in limpios {
+            assert!(
+                l.cmds.is_empty(),
+                "un caso limpio no corre sondas: {:?}",
+                l.cmds
+            );
+        }
+        for l in llamadas[1..]
+            .iter()
+            .filter(|l| l.alcance == Some(Alcance::SoloMutacion))
+        {
+            assert_eq!(
+                cuenta_mutaciones(l),
+                0,
+                "el defecto de Diseño reusa la mutación"
+            );
+            for cmd in &deterministas {
+                assert_eq!(cuenta_comando(l, cmd), 1, "el defecto corre {cmd}");
+            }
+        }
+    }
+
+    /// Un caso limpio da la misma especificidad con y sin reuso: el veredicto del fake es el mismo.
+    #[test]
+    fn calibra_un_caso_limpio_da_la_misma_especificidad_con_y_sin_reuso() {
+        let calibrar = |usar_reuso: bool| {
+            let home = tempfile::tempdir().expect("home");
+            carpeta_con_repo_bueno(home.path());
+            let llamadas = RefCell::new(Vec::<Llamada>::new());
+            let evaluador = evaluador_con_juez_y_tests(
+                &llamadas,
+                || veredicto_de(Dimension::Diseno, 1.0, None),
+                usar_reuso,
+            );
+            calibrar_tarea_con(
+                home.path(),
+                "calibra-fixture",
+                "diseno",
+                4,
+                42,
+                None,
+                None,
+                &evaluador,
+            )
+            .expect("calibra")
+            .fila
+        };
+        let con = calibrar(true);
+        let sin = calibrar(false);
+        assert!(con.limpios > 0, "hay casos limpios");
+        assert_eq!(con.limpios, sin.limpios);
+        assert_eq!(con.defectos, sin.defectos);
+        assert_eq!(con.especificidad, sin.especificidad);
     }
 
     /// Una calibración no escribe historial: cada caso es una versión distinta y se evalúa una vez.

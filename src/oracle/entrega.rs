@@ -1145,7 +1145,7 @@ pub fn construir_script(tarea: &Tarea) -> String {
 }
 
 /// Script del contenedor de evaluación. Con `escenarios` en falso no corre ninguno: van a la imagen.
-fn construir_script_con(tarea: &Tarea, escenarios: bool) -> String {
+pub(crate) fn construir_script_con(tarea: &Tarea, escenarios: bool) -> String {
     let eval: &[Escenario] = if escenarios { &tarea.escenario } else { &[] };
     let mut s = String::new();
     if tarea.lenguaje == "rust" {
