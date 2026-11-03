@@ -841,6 +841,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "default": 0.6
     }
   },
+  "additionalProperties": false,
   "$defs": {
     "Balance": {
       "description": "Sección `[balance]`: topes duros de gasto. Route los lee; nunca los sube.",
@@ -871,7 +872,8 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "format": "double",
           "default": 0.9
         }
-      }
+      },
+      "additionalProperties": false
     },
     "ConfigColab": {
       "description": "Sección `[colab]`: tope de duración de una corrida en Colab.",
@@ -1151,7 +1153,8 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "format": "double",
           "default": 35.0
         }
-      }
+      },
+      "additionalProperties": false
     },
     "TopeMes": {
       "description": "Tope mensual. Sin defaults por campo: `api` y `nube` tienen topes distintos,\nasí que un `[balance.nube]` sin `tope_usd` debe fallar en vez de tomar el de la API.",
@@ -1163,6 +1166,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "format": "double"
         }
       },
+      "additionalProperties": false,
       "required": [
         "tope_usd"
       ]
