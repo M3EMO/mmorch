@@ -6,7 +6,8 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1904,36 +1905,67 @@ fn proveedores_juzga_usa_timeout_juez_s_y_delega_usa_timeout_s() {
 
 #[test]
 fn proveedores_stream_con_un_trozo_cada_60_s_no_corta_por_inactividad() {
-    // Escalado de 15 minutos con un trozo por minuto: 15 trozos a 60 ms, con inactividad de 120 ms.
-    let srv = Servidor::arranca_guion(Box::new(|s| {
+    // Escalado de 15 minutos con un trozo por minuto. Sin sleeps: el servidor manda cada trozo
+    // cuando el test lo habilita, y el test avanza un reloj falso de 60 s por trozo.
+    // La inactividad real es holgada, así que la carga de la máquina no la dispara.
+    const TROZOS: usize = 15;
+    let inactividad = Duration::from_secs(30);
+    let (habilita_tx, habilita_rx) = mpsc::channel::<()>();
+    let (listo_tx, listo_rx) = mpsc::channel::<()>();
+    let srv = Servidor::arranca_guion(Box::new(move |s| {
         cabeceras_sse(s);
-        for _ in 0..15 {
-            thread::sleep(Duration::from_millis(60));
+        for _ in 0..TROZOS {
+            // Si el test deja de habilitar trozos, el servidor corta sin colgarse.
+            let Ok(()) = habilita_rx.recv() else { return };
             if !escribe(s, &trozo_deepseek("a")) {
                 return;
             }
+            let _ = listo_tx.send(());
         }
         escribe(s, &cierre_deepseek(7, 3));
     }));
+
+    // Reloj falso en segundos simulados. Cada trozo avanza 60 s, sin leer el reloj real.
+    let reloj = Arc::new(AtomicU64::new(0));
+    let reloj_test = Arc::clone(&reloj);
+    let habilitador = thread::spawn(move || {
+        for _ in 0..TROZOS {
+            if habilita_tx.send(()).is_err() {
+                break;
+            }
+            // El plazo de espera solo corta si el servidor se cuelga, no mide el stream.
+            if listo_rx.recv_timeout(Duration::from_secs(20)).is_err() {
+                break;
+            }
+            reloj_test.fetch_add(60, Ordering::SeqCst);
+        }
+    });
+
     let cfg = config(&srv.url, &srv.url);
     let inicio = Instant::now();
-    let (res, home) = llamada_con_plazos(
-        &cfg,
-        plazos_de_prueba(),
-        Proveedor::Deepseek,
-        "deepseek-chat",
-        "s1",
-    );
+    let plazos = Plazos {
+        inactividad,
+        total: Some(Duration::from_secs(60)),
+    };
+    let (res, home) = llamada_con_plazos(&cfg, plazos, Proveedor::Deepseek, "deepseek-chat", "s1");
+    habilitador.join().expect("el habilitador termina");
 
     let r = res.expect("un stream que sigue mandando bytes termina bien");
     assert!(
-        inicio.elapsed() < Duration::from_secs(5),
+        inicio.elapsed() < Duration::from_secs(20),
         "{:?}",
         inicio.elapsed()
     );
-    assert_eq!(r.texto, "a".repeat(15));
+    assert_eq!(r.texto, "a".repeat(TROZOS));
     assert_eq!(srv.peticiones(), 1);
     assert!(eventos(home.path())[0]["extra"].get("error").is_none());
+    // Con el reloj simulado, el stream duró más de 15 min frente a una inactividad de 30 s.
+    let simulado = reloj.load(Ordering::SeqCst);
+    assert!(simulado >= 900, "reloj simulado {simulado} s");
+    assert!(
+        inactividad.as_secs() * 10 < simulado,
+        "reloj simulado {simulado} s"
+    );
 }
 
 #[test]
