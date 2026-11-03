@@ -332,6 +332,50 @@ pub(crate) fn con_veredicto(
     }
 }
 
+/// Comando de gitleaks en el contenedor de evaluación.
+pub(crate) const COMANDO_GITLEAKS: &str = "gitleaks detect --no-git --source /repo --report-format json \
+    --report-path /salida/gitleaks.json --exit-code 0 --no-banner";
+
+/// Comando de cargo audit en el contenedor de evaluación. Lee el `Cargo.lock` de `/repo`.
+pub(crate) const COMANDO_CARGO_AUDIT: &str =
+    "cd /repo && cargo audit --no-fetch --db /rustsec --json > /salida/audit.json";
+
+/// Comando de clippy en el contenedor de evaluación.
+pub(crate) fn comando_clippy() -> String {
+    [
+        PRELUDIO,
+        "cd /repo && CARGO_TARGET_DIR=/salida/target cargo clippy --message-format=json \
+         -- -A clippy::all -W clippy::correctness -W clippy::suspicious -W clippy::perf \
+         > /salida/clippy.json 2>/dev/null",
+    ]
+    .concat()
+}
+
+/// Comando que verifica que `nombre` está en la imagen: `cargo clippy --version` para clippy.
+pub(crate) fn comando_de_herramienta(nombre: &str) -> String {
+    if nombre == "clippy" {
+        "cargo clippy --version".to_string()
+    } else {
+        format!("command -v {nombre}")
+    }
+}
+
+/// Herramientas cuya verificación de presencia es determinista: la imagen es la misma en la base y en
+/// cada caso. `cargo-mutants` va porque su corrida (la mutación) también se reusa.
+const HERRAMIENTAS_DETERMINISTAS: [&str; 4] =
+    ["gitleaks", "cargo-audit", "clippy", "cargo-mutants"];
+
+/// Si `cmd` es un comando de gitleaks, cargo audit, clippy o de la verificación de sus herramientas: su
+/// salida con la misma copia del repo es la misma. Usado por el reuso de sondas (calibración).
+pub(crate) fn es_comando_determinista(cmd: &str) -> bool {
+    cmd == COMANDO_GITLEAKS
+        || cmd == COMANDO_CARGO_AUDIT
+        || cmd == comando_clippy()
+        || HERRAMIENTAS_DETERMINISTAS
+            .iter()
+            .any(|nombre| cmd == comando_de_herramienta(nombre))
+}
+
 /// Si la herramienta no está en la imagen, o no se puede consultar, la sonda no tiene veredicto.
 /// Así no corre el comando real.
 pub(crate) fn falta_herramienta(
@@ -339,11 +383,7 @@ pub(crate) fn falta_herramienta(
     dimension: Dimension,
     nombre: &str,
 ) -> Option<ResultadoSonda> {
-    let cmd = if nombre == "clippy" {
-        "cargo clippy --version".to_string()
-    } else {
-        format!("command -v {nombre}")
-    };
+    let cmd = comando_de_herramienta(nombre);
     match ej.ejecutar(&cmd) {
         Ok(s) if s.codigo == 0 => None,
         Ok(_) => Some(sin_veredicto(
@@ -439,9 +479,7 @@ pub fn gitleaks(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoSonda {
     if let Some(r) = falta_herramienta(ej, d, "gitleaks") {
         return r;
     }
-    let cmd = "gitleaks detect --no-git --source /repo --report-format json \
-        --report-path /salida/gitleaks.json --exit-code 0 --no-banner";
-    let salida = match ej.ejecutar(cmd) {
+    let salida = match ej.ejecutar(COMANDO_GITLEAKS) {
         Ok(s) => s,
         Err(e) => return sin_veredicto(d, e.to_string()),
     };
@@ -485,8 +523,7 @@ pub fn cargo_audit(ej: &dyn EjecutorHerramienta, tarea: &Tarea, repo: &Path) -> 
         return r;
     }
     // cargo audit sale con 1 si hay vulnerabilidades: el veredicto sale del reporte, no del código.
-    let cmd = "cd /repo && cargo audit --no-fetch --db /rustsec --json > /salida/audit.json";
-    let salida = match ej.ejecutar(cmd) {
+    let salida = match ej.ejecutar(COMANDO_CARGO_AUDIT) {
         Ok(s) => s,
         Err(e) => return sin_veredicto(d, e.to_string()),
     };
@@ -514,14 +551,7 @@ pub fn clippy(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoSonda {
     if let Some(r) = falta_herramienta(ej, d, "clippy") {
         return r;
     }
-    let cmd = [
-        PRELUDIO,
-        "cd /repo && CARGO_TARGET_DIR=/salida/target cargo clippy --message-format=json \
-         -- -A clippy::all -W clippy::correctness -W clippy::suspicious -W clippy::perf \
-         > /salida/clippy.json 2>/dev/null",
-    ]
-    .concat();
-    let salida = match ej.ejecutar(&cmd) {
+    let salida = match ej.ejecutar(&comando_clippy()) {
         Ok(s) => s,
         Err(e) => return sin_veredicto(d, e.to_string()),
     };

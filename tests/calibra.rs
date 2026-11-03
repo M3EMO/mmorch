@@ -4,13 +4,13 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use std::cell::RefCell;
+use std::sync::Mutex;
 
 use root::config::Config;
 use root::observe;
 use root::oracle::calibra::{
-    ARCHIVO, Calibraciones, JuecesCaso, Presupuesto, calibrar_tarea, calibrar_tarea_con,
-    peor_caso_con_jueces,
+    ARCHIVO, Calibraciones, CasoGuardado, Fila, JuecesCaso, Presupuesto, agregar, calibrar_tarea,
+    calibrar_tarea_con, global_de, peor_caso_con_jueces,
 };
 use root::oracle::tarea::Tarea;
 use root::oracle::{ErrorOraculo, OpcionesOraculo, Partes};
@@ -195,9 +195,9 @@ fn calibra_tarea_dos_corridas_agregan_filas_y_no_borran_las_anteriores() {
 #[test]
 fn calibra_tarea_evalua_la_base_y_cada_caso_con_las_partes_de_su_dimension() {
     let home = home_con_tarea("");
-    let vistas = std::cell::RefCell::new(Vec::<Option<Partes>>::new());
+    let vistas = std::sync::Mutex::new(Vec::<Option<Partes>>::new());
     let evaluador = |_: &Tarea, _: &Path, o: &OpcionesOraculo| {
-        vistas.borrow_mut().push(o.partes);
+        vistas.lock().expect("lock").push(o.partes);
         Ok(veredicto_plano())
     };
     calibrar_tarea(
@@ -210,7 +210,7 @@ fn calibra_tarea_evalua_la_base_y_cada_caso_con_las_partes_de_su_dimension() {
         &evaluador,
     )
     .expect("calibra");
-    let vistas = vistas.borrow();
+    let vistas = vistas.lock().expect("lock");
     // Línea base más cuatro casos: todos con las partes de Seguridad.
     assert_eq!(vistas.len(), 5, "{vistas:?}");
     for partes in vistas.iter() {
@@ -264,9 +264,9 @@ fn calibra_tope_detiene_antes_del_caso_que_no_entra() {
         peor_caso: &peor,
         gasto_desde: &gasto,
     };
-    let llamadas = RefCell::new(0u32);
+    let llamadas = Mutex::new(0u32);
     let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
-        *llamadas.borrow_mut() += 1;
+        *llamadas.lock().expect("lock") += 1;
         gasta(home.path(), 0.30);
         Ok(veredicto_plano())
     };
@@ -285,7 +285,7 @@ fn calibra_tope_detiene_antes_del_caso_que_no_entra() {
     let texto = error.to_string();
     assert!(texto.contains("1.00"), "nombra el tope: {texto}");
     assert!(texto.contains("0.90"), "nombra el gasto: {texto}");
-    assert_eq!(*llamadas.borrow(), 3, "la base y dos casos");
+    assert_eq!(*llamadas.lock().expect("lock"), 3, "la base y dos casos");
 
     let leido = Calibraciones::cargar(home.path()).expect("carga calibracion.json");
     assert_eq!(leido.filas.len(), 1, "las filas hechas quedan");
@@ -324,7 +324,8 @@ fn calibra_tope_suficiente_da_fila_completa_y_sin_gate() {
         Some(&presupuesto),
         &evaluador,
     )
-    .expect("con tope suficiente, la calibración termina");
+    .expect("con tope suficiente, la calibración termina")
+    .fila;
     assert!(!fila.incompleta);
     assert_eq!(fila.n, 4);
     assert!(gates_de_tope(home.path()).is_empty(), "sin Gate");
@@ -342,9 +343,9 @@ fn calibra_tope_antes_de_la_base_no_evalua_ni_escribe_fila() {
         peor_caso: &peor,
         gasto_desde: &gasto,
     };
-    let llamadas = RefCell::new(0u32);
+    let llamadas = Mutex::new(0u32);
     let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
-        *llamadas.borrow_mut() += 1;
+        *llamadas.lock().expect("lock") += 1;
         Ok(veredicto_plano())
     };
     let error = calibrar_tarea_con(
@@ -359,7 +360,7 @@ fn calibra_tope_antes_de_la_base_no_evalua_ni_escribe_fila() {
     )
     .expect_err("la base no entra");
     assert_eq!(error.codigo_de_salida(), 3);
-    assert_eq!(*llamadas.borrow(), 0, "no evalúa nada");
+    assert_eq!(*llamadas.lock().expect("lock"), 0, "no evalúa nada");
     assert!(!home.path().join(ARCHIVO).exists(), "sin casos, sin fila");
     assert_eq!(gates_de_tope(home.path()).len(), 1);
 }
@@ -375,9 +376,9 @@ fn calibra_tope_tras_la_base_sin_casos_no_escribe_fila() {
         peor_caso: &peor,
         gasto_desde: &gasto,
     };
-    let llamadas = RefCell::new(0u32);
+    let llamadas = Mutex::new(0u32);
     let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
-        *llamadas.borrow_mut() += 1;
+        *llamadas.lock().expect("lock") += 1;
         gasta(home.path(), 0.30);
         Ok(veredicto_plano())
     };
@@ -393,7 +394,7 @@ fn calibra_tope_tras_la_base_sin_casos_no_escribe_fila() {
     )
     .expect_err("el tope detiene tras la base");
     assert_eq!(error.codigo_de_salida(), 3);
-    assert_eq!(*llamadas.borrow(), 1, "solo la base");
+    assert_eq!(*llamadas.lock().expect("lock"), 1, "solo la base");
     assert!(
         !home.path().join(ARCHIVO).exists(),
         "sin casos medidos, sin fila"
@@ -427,9 +428,9 @@ fn calibra_tope_sin_precio_del_juez_no_arranca_ni_escribe_fila() {
         peor_caso: &peor,
         gasto_desde: &gasto,
     };
-    let llamadas = RefCell::new(0u32);
+    let llamadas = Mutex::new(0u32);
     let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
-        *llamadas.borrow_mut() += 1;
+        *llamadas.lock().expect("lock") += 1;
         Ok(veredicto_plano())
     };
     // Diseño pide su juez, que no tiene precio: la calibración con tope no arranca.
@@ -446,7 +447,7 @@ fn calibra_tope_sin_precio_del_juez_no_arranca_ni_escribe_fila() {
     .expect_err("sin precio, la calibración con tope no arranca");
     assert_eq!(error.codigo_de_salida(), 2);
     assert!(error.to_string().contains(MODELO_JUEZ), "{error}");
-    assert_eq!(*llamadas.borrow(), 0, "no evalúa nada");
+    assert_eq!(*llamadas.lock().expect("lock"), 0, "no evalúa nada");
     assert!(!home.path().join(ARCHIVO).exists(), "sin fila");
 }
 
@@ -548,4 +549,609 @@ fn calibra_peor_caso_de_home_sin_juez_no_lee_nada_y_con_juez_de_diseno_es_finito
     let peor = root::oracle::calibra::peor_caso_de_home(home.path(), &diseno)
         .expect("el juez de diseño se rutea con el home");
     assert!(peor.is_finite() && peor > 0.0, "{peor}");
+}
+
+/// Árbol de `ruta`: ruta relativa y contenido de cada archivo. Sirve para saber si una copia es igual al repo bueno.
+fn arbol(ruta: &Path) -> std::collections::BTreeMap<String, String> {
+    fn recoger(raiz: &Path, dir: &Path, mapa: &mut std::collections::BTreeMap<String, String>) {
+        for entrada in std::fs::read_dir(dir).expect("lee carpeta") {
+            let ruta = entrada.expect("entrada").path();
+            if ruta.is_dir() {
+                recoger(raiz, &ruta, mapa);
+            } else {
+                let rel = ruta
+                    .strip_prefix(raiz)
+                    .expect("dentro de la raíz")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                mapa.insert(rel, std::fs::read_to_string(&ruta).unwrap_or_default());
+            }
+        }
+    }
+    let mut mapa = std::collections::BTreeMap::new();
+    recoger(ruta, ruta, &mut mapa);
+    mapa
+}
+
+/// Si `ruta` es igual al repo bueno del fixture: la copia limpia, o el propio repo.
+fn es_limpia(ruta: &Path) -> bool {
+    arbol(ruta) == arbol(Path::new(FIXTURE))
+}
+
+/// Veredicto de Seguridad con `valor` y, si `sin` es `Some`, sin veredicto con ese motivo.
+fn veredicto_seguridad(valor: f32, sin: Option<&str>) -> Veredicto {
+    Veredicto {
+        puntajes: vec![Puntaje {
+            dimension: Dimension::Seguridad,
+            valor,
+            calibrada: false,
+            exactitud_balanceada: None,
+            items: vec![],
+            sin_veredicto: sin.map(str::to_string),
+            faltantes: vec![],
+        }],
+        ..Veredicto::default()
+    }
+}
+
+/// Evaluador falso de Seguridad: la base y las copias limpias valen 1. Una copia con defecto vale 0; con `sin`,
+/// no tiene veredicto de Seguridad y deja ese motivo.
+fn evaluador_con_defectos(
+    sin: Option<&'static str>,
+) -> impl Fn(&Tarea, &Path, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> {
+    move |_: &Tarea, ruta: &Path, _: &OpcionesOraculo| {
+        Ok(if es_limpia(ruta) {
+            veredicto_seguridad(1.0, None)
+        } else {
+            match sin {
+                Some(motivo) => veredicto_seguridad(1.0, Some(motivo)),
+                None => veredicto_seguridad(0.0, None),
+            }
+        })
+    }
+}
+
+/// Archivos `.casos.jsonl` de `home/calibracion`, ordenados. Vacío si no hay carpeta.
+fn archivos_de_casos(home: &Path) -> Vec<PathBuf> {
+    let Ok(entradas) = std::fs::read_dir(home.join("calibracion")) else {
+        return Vec::new();
+    };
+    let mut rutas: Vec<PathBuf> = entradas
+        .map(|e| e.expect("entrada").path())
+        .filter(|p| p.to_string_lossy().ends_with(".casos.jsonl"))
+        .collect();
+    rutas.sort();
+    rutas
+}
+
+/// Renglones de un `.casos.jsonl`, cada uno parseado como `CasoGuardado`.
+fn renglones(ruta: &Path) -> Vec<CasoGuardado> {
+    std::fs::read_to_string(ruta)
+        .expect("lee los casos")
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("renglón inválido {l}: {e}")))
+        .collect()
+}
+
+#[test]
+fn calibra_casos_guarda_un_renglon_por_caso_medido_en_orden() {
+    let home = home_con_tarea("");
+    let evaluador = evaluador_con_defectos(None);
+    let calibrada = calibrar_tarea_con(
+        home.path(),
+        "calibra-fixture",
+        "seguridad",
+        4,
+        42,
+        Some(Path::new(FIXTURE)),
+        None,
+        &evaluador,
+    )
+    .expect("calibra");
+    let ruta = calibrada.casos.clone().expect("hay casos guardados");
+    assert_eq!(
+        ruta.parent().expect("carpeta"),
+        home.path().join("calibracion")
+    );
+    let ts = calibrada.fila.ts as u64;
+    assert_eq!(
+        ruta.file_name().expect("nombre").to_string_lossy(),
+        format!("calibra-fixture-seguridad-{ts}.casos.jsonl")
+    );
+    let casos = renglones(&ruta);
+    assert_eq!(
+        casos.len(),
+        calibrada.fila.n as usize,
+        "un renglón por caso"
+    );
+    for (i, caso) in casos.iter().enumerate() {
+        assert_eq!(caso.caso, i as u32, "índice del bucle");
+        assert!(!caso.repetido_por_entorno);
+        if i % 2 == 0 {
+            assert!(caso.es_defecto, "los pares llevan defecto");
+            assert!(
+                matches!(
+                    caso.defecto.as_deref(),
+                    Some("secreto_en_codigo" | "panico_en_entrada")
+                ),
+                "{:?}",
+                caso.defecto
+            );
+            assert!(
+                caso.item
+                    .as_deref()
+                    .is_some_and(|i| i.starts_with("seguridad."))
+            );
+            assert!(caso.archivo.is_some(), "dice el archivo");
+            assert!(caso.linea.is_some(), "dice la línea");
+            assert!(caso.detectado, "el valor bajó: se detecta");
+            assert_eq!(caso.sin_veredicto, None);
+        } else {
+            assert!(!caso.es_defecto, "los impares son limpios");
+            assert_eq!(caso.defecto, None);
+            assert_eq!(caso.item, None);
+            assert_eq!(caso.archivo, None);
+            assert_eq!(caso.linea, None);
+            assert!(!caso.detectado);
+        }
+    }
+}
+
+#[test]
+fn calibra_casos_defecto_sin_veredicto_guarda_el_motivo_y_no_detecta() {
+    let home = home_con_tarea("");
+    let evaluador = evaluador_con_defectos(Some("sin sonda"));
+    calibrar_tarea_con(
+        home.path(),
+        "calibra-fixture",
+        "seguridad",
+        4,
+        42,
+        Some(Path::new(FIXTURE)),
+        None,
+        &evaluador,
+    )
+    .expect("calibra");
+    let archivos = archivos_de_casos(home.path());
+    assert_eq!(archivos.len(), 1);
+    let casos = renglones(&archivos[0]);
+    for caso in &casos {
+        if caso.es_defecto {
+            assert_eq!(caso.sin_veredicto.as_deref(), Some("sin sonda"));
+            assert!(!caso.detectado, "sin veredicto no es detección");
+        } else {
+            assert_eq!(caso.sin_veredicto, None);
+        }
+    }
+}
+
+#[test]
+fn calibra_casos_detencion_por_tope_guarda_los_casos_hechos() {
+    // Como `calibra_tope_detiene_antes_del_caso_que_no_entra`: base y dos casos entran; el tercero no.
+    let home = home_con_tarea("");
+    let peor = |_: &Partes| Ok::<f64, ErrorOraculo>(0.40);
+    let gasto = medidor(home.path());
+    let presupuesto = Presupuesto {
+        usd: 1.0,
+        peor_caso: &peor,
+        gasto_desde: &gasto,
+    };
+    let evaluador = |tarea: &Tarea, ruta: &Path, opciones: &OpcionesOraculo| {
+        gasta(home.path(), 0.30);
+        evaluador_con_defectos(None)(tarea, ruta, opciones)
+    };
+    let error = calibrar_tarea_con(
+        home.path(),
+        "calibra-fixture",
+        "seguridad",
+        4,
+        42,
+        Some(Path::new(FIXTURE)),
+        Some(&presupuesto),
+        &evaluador,
+    )
+    .expect_err("el tope detiene la calibración");
+    assert_eq!(error.codigo_de_salida(), 3);
+    let archivos = archivos_de_casos(home.path());
+    assert_eq!(archivos.len(), 1, "los casos hechos quedan");
+    let casos = renglones(&archivos[0]);
+    assert_eq!(casos.len(), 2, "dos casos medidos");
+    assert!(casos[0].es_defecto);
+    assert!(!casos[1].es_defecto);
+}
+
+#[test]
+fn calibra_casos_sin_casos_medidos_no_escribe_archivo() {
+    // El peor caso (2,00) no entra en el tope (1,00): se detiene antes de la base, sin casos.
+    let home = home_con_tarea("");
+    let peor = |_: &Partes| Ok::<f64, ErrorOraculo>(2.00);
+    let gasto = medidor(home.path());
+    let presupuesto = Presupuesto {
+        usd: 1.0,
+        peor_caso: &peor,
+        gasto_desde: &gasto,
+    };
+    let evaluador = evaluador_con_defectos(None);
+    calibrar_tarea_con(
+        home.path(),
+        "calibra-fixture",
+        "seguridad",
+        4,
+        42,
+        Some(Path::new(FIXTURE)),
+        Some(&presupuesto),
+        &evaluador,
+    )
+    .expect_err("el tope detiene la calibración");
+    assert!(
+        archivos_de_casos(home.path()).is_empty(),
+        "sin casos, sin archivo"
+    );
+}
+
+#[test]
+fn calibra_casos_dos_calibraciones_no_se_pisan() {
+    let home = home_con_tarea("");
+    let evaluador = evaluador_con_defectos(None);
+    let mut rutas = Vec::<PathBuf>::new();
+    for semilla in [42, 43] {
+        let calibrada = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "seguridad",
+            4,
+            semilla,
+            Some(Path::new(FIXTURE)),
+            None,
+            &evaluador,
+        )
+        .expect("calibra");
+        rutas.push(calibrada.casos.expect("hay casos guardados"));
+    }
+    assert_ne!(rutas[0], rutas[1], "cada calibración tiene su archivo");
+    assert_eq!(archivos_de_casos(home.path()).len(), 2);
+    for ruta in &rutas {
+        assert_eq!(renglones(ruta).len(), 4, "cada archivo conserva sus casos");
+    }
+}
+
+/// Motivo de la fila de una dimensión que la tarea no aplica.
+const MOTIVO_NO_APLICA: &str = "no aplica: la tarea no define [eficiencia]";
+
+/// Tarea con `[eficiencia]`: su comando nunca corre en estos tests, solo define que la dimensión aplica.
+const EFICIENCIA: &str = "\n[eficiencia]\ncmd = \"bench-eficiencia\"\npiso = 5000.0\n";
+
+/// Evaluador que cuenta sus llamadas y devuelve un veredicto sin hallazgos.
+fn evaluador_contador(
+    llamadas: &Mutex<u32>,
+) -> impl Fn(&Tarea, &Path, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> + '_ {
+    move |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
+        *llamadas.lock().expect("lock") += 1;
+        Ok(veredicto_plano())
+    }
+}
+
+#[test]
+fn eficiencia_sin_bloque_no_aplica_y_no_llama_al_evaluador() {
+    let home = home_con_tarea("");
+    let llamadas = Mutex::new(0u32);
+    let evaluador = evaluador_contador(&llamadas);
+    let calibrada = calibrar_tarea_con(
+        home.path(),
+        "calibra-fixture",
+        "eficiencia",
+        4,
+        42,
+        Some(Path::new(FIXTURE)),
+        None,
+        &evaluador,
+    )
+    .expect("una dimensión que no aplica no es error");
+    assert_eq!(
+        *llamadas.lock().expect("lock"),
+        0,
+        "no corre la base ni los casos"
+    );
+    let fila = &calibrada.fila;
+    assert_eq!(fila.no_aplica.as_deref(), Some(MOTIVO_NO_APLICA));
+    assert_eq!((fila.n, fila.defectos, fila.limpios), (0, 0, 0));
+    assert_eq!(fila.sensibilidad, None);
+    assert_eq!(fila.especificidad, None);
+    assert_eq!(fila.exactitud_balanceada, None);
+    assert!(fila.items.is_empty());
+    assert!(!fila.incompleta);
+    assert!(calibrada.casos.is_none(), "sin casos no hay .casos.jsonl");
+    assert!(
+        !home.path().join("calibracion").exists(),
+        "no crea la carpeta de casos"
+    );
+}
+
+#[test]
+fn eficiencia_no_aplicable_queda_en_calibracion_json() {
+    let home = home_con_tarea("");
+    let llamadas = Mutex::new(0u32);
+    let evaluador = evaluador_contador(&llamadas);
+    calibrar_tarea_con(
+        home.path(),
+        "calibra-fixture",
+        "eficiencia",
+        4,
+        42,
+        Some(Path::new(FIXTURE)),
+        None,
+        &evaluador,
+    )
+    .expect("calibra");
+    let leido = Calibraciones::cargar(home.path()).expect("carga calibracion.json");
+    assert_eq!(leido.filas.len(), 1, "agrega una fila");
+    assert_eq!(leido.filas[0].no_aplica.as_deref(), Some(MOTIVO_NO_APLICA));
+}
+
+#[test]
+fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
+    let home = home_con_tarea("");
+    let llamadas = Mutex::new(0u32);
+    let evaluador = evaluador_contador(&llamadas);
+    calibrar_tarea_con(
+        home.path(),
+        "calibra-fixture",
+        "eficiencia",
+        4,
+        42,
+        Some(Path::new(FIXTURE)),
+        None,
+        &evaluador,
+    )
+    .expect("calibra");
+    // Seguridad calibrada en la misma tarea: `global` la cuenta y Eficiencia no.
+    let seguridad = Fila {
+        tarea: "calibra-fixture".into(),
+        dimension: Dimension::Seguridad,
+        n: 20,
+        defectos: 10,
+        limpios: 10,
+        no_aplicable: 0,
+        semilla: 42,
+        ts: 1.0,
+        sensibilidad: Some(1.0),
+        especificidad: Some(1.0),
+        exactitud_balanceada: Some(0.95),
+        items: Default::default(),
+        incompleta: false,
+        no_aplica: None,
+        reemplazos: 0,
+    };
+    agregar(home.path(), &seguridad).expect("agrega seguridad");
+    let cal = Calibraciones::cargar(home.path()).expect("carga");
+    let mut puntajes = vec![
+        Puntaje {
+            dimension: Dimension::Eficiencia,
+            valor: 0.5,
+            calibrada: true,
+            exactitud_balanceada: None,
+            items: vec![],
+            sin_veredicto: None,
+            faltantes: vec![],
+        },
+        Puntaje {
+            dimension: Dimension::Seguridad,
+            valor: 0.8,
+            calibrada: false,
+            exactitud_balanceada: None,
+            items: vec![],
+            sin_veredicto: None,
+            faltantes: vec![],
+        },
+    ];
+    cal.aplicar("calibra-fixture", &mut puntajes);
+    assert!(!puntajes[0].calibrada, "eficiencia no aplicable no calibra");
+    assert!(puntajes[1].calibrada, "seguridad sí calibra");
+    assert_eq!(
+        global_de(&puntajes),
+        Some(0.8),
+        "global solo cuenta seguridad"
+    );
+    puntajes.remove(1);
+    assert_eq!(global_de(&puntajes), None, "sin calibradas no hay global");
+}
+
+#[test]
+fn eficiencia_no_aplicable_cli_sale_con_0_e_imprime_el_motivo() {
+    let home = home_con_tarea("");
+    let salida = r00t(
+        home.path(),
+        &[
+            "oraculo",
+            "calibrar",
+            "--tarea",
+            "calibra-fixture",
+            "--dimension",
+            "eficiencia",
+            "--repo",
+            FIXTURE,
+        ],
+    );
+    assert_eq!(
+        codigo(&salida),
+        0,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let texto = String::from_utf8_lossy(&salida.stdout);
+    assert!(
+        texto.contains("calibra-fixture/eficiencia: no aplica: la tarea no define [eficiencia]"),
+        "{texto}"
+    );
+}
+
+#[test]
+fn eficiencia_no_aplicable_cli_json_imprime_la_fila_con_no_aplica() {
+    let home = home_con_tarea("");
+    let salida = r00t(
+        home.path(),
+        &[
+            "--json",
+            "oraculo",
+            "calibrar",
+            "--tarea",
+            "calibra-fixture",
+            "--dimension",
+            "eficiencia",
+            "--repo",
+            FIXTURE,
+        ],
+    );
+    assert_eq!(
+        codigo(&salida),
+        0,
+        "{}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+    let fila: serde_json::Value =
+        serde_json::from_slice(&salida.stdout).expect("la salida es la fila en JSON");
+    assert_eq!(fila["no_aplica"], json!(MOTIVO_NO_APLICA));
+}
+
+#[test]
+fn eficiencia_con_bloque_mantiene_la_medicion_previa() {
+    // Con `[eficiencia]` la dimensión aplica: la base corre. El evaluador de prueba no da veredicto de
+    // Eficiencia, así que la calibración falla como antes, sin fila.
+    let home = home_con_tarea(EFICIENCIA);
+    let llamadas = Mutex::new(0u32);
+    let evaluador = evaluador_contador(&llamadas);
+    let error = calibrar_tarea_con(
+        home.path(),
+        "calibra-fixture",
+        "eficiencia",
+        4,
+        42,
+        Some(Path::new(FIXTURE)),
+        None,
+        &evaluador,
+    )
+    .expect_err("sin veredicto de la base no hay fila");
+    assert!(*llamadas.lock().expect("lock") >= 1, "la base sí corre");
+    let ErrorOraculo::Infra(mensaje) = &error else {
+        panic!("error de infraestructura esperado: {error:?}");
+    };
+    assert!(
+        mensaje.contains("la línea base no tiene veredicto de eficiencia"),
+        "{mensaje}"
+    );
+    assert!(!home.path().join(ARCHIVO).exists(), "no escribe fila");
+}
+
+#[test]
+fn fila_vieja_sin_no_aplica_se_lee() {
+    let fila = Fila {
+        tarea: "calibra-fixture".into(),
+        dimension: Dimension::Seguridad,
+        n: 20,
+        defectos: 10,
+        limpios: 10,
+        no_aplicable: 0,
+        semilla: 42,
+        ts: 1.0,
+        sensibilidad: Some(1.0),
+        especificidad: Some(1.0),
+        exactitud_balanceada: Some(0.95),
+        items: Default::default(),
+        incompleta: false,
+        no_aplica: None,
+        reemplazos: 0,
+    };
+    let mut vieja = serde_json::to_value(&fila).expect("serializa");
+    vieja.as_object_mut().expect("objeto").remove("no_aplica");
+    let leida: Fila = serde_json::from_value(vieja).expect("un JSON viejo sin no_aplica parsea");
+    assert_eq!(leida.no_aplica, None);
+    assert_eq!(leida, fila);
+}
+
+#[test]
+fn eficiencia_no_aplicable_no_borra_las_filas_anteriores() {
+    // Una fila `no_aplica` nueva se agrega al final: las filas anteriores quedan como estaban.
+    let home = home_con_tarea("");
+    let antes = Fila {
+        tarea: "calibra-fixture".into(),
+        dimension: Dimension::Eficiencia,
+        n: 20,
+        defectos: 10,
+        limpios: 10,
+        no_aplicable: 0,
+        semilla: 1,
+        ts: 1.0,
+        sensibilidad: Some(1.0),
+        especificidad: Some(1.0),
+        exactitud_balanceada: Some(0.95),
+        items: Default::default(),
+        incompleta: false,
+        no_aplica: None,
+        reemplazos: 0,
+    };
+    agregar(home.path(), &antes).expect("agrega");
+    let llamadas = Mutex::new(0u32);
+    let evaluador = evaluador_contador(&llamadas);
+    calibrar_tarea_con(
+        home.path(),
+        "calibra-fixture",
+        "eficiencia",
+        4,
+        42,
+        Some(Path::new(FIXTURE)),
+        None,
+        &evaluador,
+    )
+    .expect("calibra");
+    let leido = Calibraciones::cargar(home.path()).expect("carga");
+    assert_eq!(leido.filas.len(), 2, "la fila anterior sigue");
+    assert_eq!(leido.filas[0], antes);
+}
+
+/// Veredicto de `dimension` con `valor` y, si `sin` es `Some`, sin veredicto con ese motivo.
+fn veredicto_con(dimension: Dimension, valor: f32, sin: Option<&str>) -> Veredicto {
+    Veredicto {
+        puntajes: vec![Puntaje {
+            dimension,
+            valor,
+            calibrada: false,
+            exactitud_balanceada: None,
+            items: vec![],
+            sin_veredicto: sin.map(str::to_string),
+            faltantes: vec![],
+        }],
+        ..Veredicto::default()
+    }
+}
+
+#[test]
+fn calibra_casos_inyeccion_invalida_reemplazada_queda_en_el_renglon() {
+    let home = home_con_tarea("");
+    let primera = Mutex::new(true);
+    let evaluador =
+        |_: &Tarea, ruta: &Path, _: &OpcionesOraculo| -> Result<Veredicto, ErrorOraculo> {
+            Ok(if es_limpia(ruta) {
+                veredicto_con(Dimension::Estructura, 1.0, None)
+            } else if std::mem::replace(&mut *primera.lock().expect("lock"), false) {
+                let motivo = "el código no compila: error[E0432]: unresolved import";
+                veredicto_con(Dimension::Estructura, 1.0, Some(motivo))
+            } else {
+                veredicto_con(Dimension::Estructura, 0.0, None)
+            })
+        };
+    let calibrada = calibrar_tarea_con(
+        home.path(),
+        "calibra-fixture",
+        "estructura",
+        2,
+        42,
+        Some(Path::new(FIXTURE)),
+        None,
+        &evaluador,
+    )
+    .expect("calibra");
+    assert_eq!(calibrada.fila.reemplazos, 1);
+    let ruta = calibrada.casos.expect("hay casos guardados");
+    let reemplazos: Vec<u32> = renglones(&ruta).iter().map(|c| c.reemplazos).collect();
+    assert_eq!(reemplazos, vec![1, 0], "el reemplazo cae en el caso 0");
 }

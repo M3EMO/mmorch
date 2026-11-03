@@ -7,8 +7,8 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::oracle::perfiles::herramientas::{
-    EjecutorHerramienta, JSON_TRUNCADO, con_cola, con_veredicto, falta_herramienta, motivo_json,
-    sin_veredicto,
+    self, EjecutorHerramienta, JSON_TRUNCADO, con_cola, con_veredicto, falta_herramienta,
+    motivo_json, sin_veredicto,
 };
 use crate::oracle::perfiles::{ResultadoSonda, crear_hallazgo};
 use crate::oracle::tarea::{Requisito, Tarea};
@@ -717,10 +717,7 @@ fn sonda_hadolint(
     }
     let mut hallazgos = Vec::new();
     for archivo in &dockerfiles {
-        let cmd = format!(
-            "hadolint --format json {}",
-            ruta_en_contenedor(&archivo.ruta_relativa)
-        );
+        let cmd = comando_hadolint(&archivo.ruta_relativa);
         let salida = match ej.ejecutar(&cmd) {
             Ok(s) => s,
             Err(e) => return sin_veredicto(d, e.to_string()),
@@ -763,6 +760,20 @@ fn ruta_en_contenedor(ruta: &str) -> String {
     } else {
         format!("'{}'", destino.replace('\'', "'\\''"))
     }
+}
+
+/// Prefijo del comando de hadolint: lo que sigue es la ruta del Dockerfile en el contenedor.
+const PREFIJO_HADOLINT: &str = "hadolint --format json ";
+
+/// Comando de hadolint para el Dockerfile `archivo_relativo` del repo.
+pub(crate) fn comando_hadolint(archivo_relativo: &str) -> String {
+    format!("{PREFIJO_HADOLINT}{}", ruta_en_contenedor(archivo_relativo))
+}
+
+/// Si `cmd` es un comando de hadolint o su verificación de presencia: con la misma copia, su salida es la
+/// misma. Usado por el reuso de sondas (calibración).
+pub(crate) fn es_comando_determinista(cmd: &str) -> bool {
+    cmd.starts_with(PREFIJO_HADOLINT) || cmd == herramientas::comando_de_herramienta("hadolint")
 }
 
 #[cfg(test)]

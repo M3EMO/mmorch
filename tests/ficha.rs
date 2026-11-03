@@ -726,6 +726,8 @@ fn ficha_evaluar_sin_ficha_da_error_de_ficha_antes_de_contenedores() {
         home: Some(home.path().to_path_buf()),
         partes: None,
         historial: true,
+        memo: None,
+        reuso: None,
     };
     let res = evaluar(repo.path(), &tarea, &opciones);
     assert!(

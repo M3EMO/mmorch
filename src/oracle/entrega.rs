@@ -1191,7 +1191,7 @@ fn fallo_de_infraestructura(archivos: &BTreeMap<String, String>, tarea: &Tarea) 
 }
 
 /// Script del contenedor de evaluación. Con `escenarios` en falso no corre ninguno: van a la imagen.
-fn construir_script_con(tarea: &Tarea, escenarios: bool) -> String {
+pub(crate) fn construir_script_con(tarea: &Tarea, escenarios: bool) -> String {
     let eval: &[Escenario] = if escenarios { &tarea.escenario } else { &[] };
     // Primera acción: si no escribe el marcador, el contenedor no arrancó el script (M20).
     let mut s = format!("echo ok > {SALIDA}/{ARCHIVO_ARRANQUE} || exit 1\n");

@@ -4,6 +4,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -163,6 +164,7 @@ fn montaje(args: &mut Vec<String>, origen: &Path, destino: &str, opciones: &str)
 /// Corre el comando en un contenedor nuevo y devuelve su resultado.
 pub fn ejecutar(e: &Ejecucion) -> Result<Resultado, ErrorOraculo> {
     validar_rutas(e)?;
+    let _turno = turno_de_contenedor();
     let nombre = nombre_unico();
     let inicio = Instant::now();
     let mut hijo = lanzar(e, &nombre)?;
@@ -211,14 +213,26 @@ pub(crate) struct SalidaPodman {
     pub(crate) stderr: String,
 }
 
+/// Turno de los contenedores (Tarea 48, parte 2): un solo `podman` corre trabajo a la vez. Lo toma cada
+/// ejecución de podman. Una llamada a juez no lo toma: un hilo que espera a la red no lo retiene.
+static TURNO: Mutex<()> = Mutex::new(());
+
+/// Toma el turno de los contenedores. Mientras el guard vive, ningún otro hilo corre podman. El `Mutex` no es
+/// reentrante: quien ya lo tiene no lo puede tomar otra vez, así que solo lo toman las funciones hoja.
+pub(crate) fn turno_de_contenedor() -> MutexGuard<'static, ()> {
+    TURNO.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Corre `podman` con `args` y espera hasta `plazo`. Si vence, mata el proceso y da `Infra`.
 pub(crate) fn correr_podman(args: &[&str], plazo: Duration) -> Result<SalidaPodman, ErrorOraculo> {
+    let _turno = turno_de_contenedor();
     let mut comando = Command::new("podman");
     comando.args(args);
     correr_comando(comando, args.first().unwrap_or(&""), plazo)
 }
 
 /// Corre `comando` con salida capturada y espera hasta `plazo`. Si vence o falla la espera, mata el proceso.
+/// No toma el turno: `terminar` la llama dentro de `ejecutar`, que ya lo tiene, y el `Mutex` no es reentrante.
 fn correr_comando(
     mut comando: Command,
     etiqueta: &str,
@@ -379,6 +393,56 @@ mod tests {
     use std::io;
 
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
+
+    #[test]
+    fn turno_de_contenedor_nunca_deja_dos_ejecuciones_a_la_vez() {
+        let dentro = AtomicUsize::new(0);
+        let maximo = AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    for _ in 0..5 {
+                        let _turno = turno_de_contenedor();
+                        let ahora = dentro.fetch_add(1, Ordering::SeqCst) + 1;
+                        maximo.fetch_max(ahora, Ordering::SeqCst);
+                        thread::sleep(Duration::from_millis(5));
+                        dentro.fetch_sub(1, Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+        assert_eq!(maximo.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn turno_de_contenedor_no_lo_retiene_quien_espera_al_juez() {
+        // El turno es global del proceso: otros tests con podman real lo retienen durante su corrida. El plazo
+        // cubre esa espera; no mide nada.
+        let plazo = Duration::from_secs(300);
+        let (listo_tx, listo_rx) = mpsc::channel::<()>();
+        let (juez_tx, juez_rx) = mpsc::channel::<()>();
+        let (turno_tx, turno_rx) = mpsc::channel::<()>();
+        // Hilo del caso: corre su parte de podman, suelta el turno y espera la respuesta del juez.
+        thread::spawn(move || {
+            drop(turno_de_contenedor());
+            listo_tx.send(()).expect("avisa");
+            juez_rx.recv_timeout(plazo).expect("el juez responde");
+        });
+        listo_rx
+            .recv_timeout(plazo)
+            .expect("el caso suelta el turno");
+        // Otro caso toma el turno mientras el primero espera al juez.
+        thread::spawn(move || {
+            let _turno = turno_de_contenedor();
+            turno_tx.send(()).expect("avisa");
+        });
+        turno_rx
+            .recv_timeout(plazo)
+            .expect("el turno queda libre mientras un caso espera al juez");
+        juez_tx.send(()).expect("responde");
+    }
 
     fn ejecucion() -> Ejecucion {
         Ejecucion {

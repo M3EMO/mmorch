@@ -66,6 +66,8 @@ fn opciones(home: &Path) -> OpcionesOraculo {
         home: Some(home.to_path_buf()),
         partes: None,
         historial: true,
+        memo: None,
+        reuso: None,
     }
 }
 

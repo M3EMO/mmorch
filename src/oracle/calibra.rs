@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use schemars::JsonSchema;
@@ -15,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, json};
 
 use super::juez::{LimitesPrompt, MAX_ENTRADA_JUEZ_BYTES};
+use super::memo::{Alcance, MemoSondas, ReusoSondas};
+use super::mutacion::MutanteMuerto;
 use super::tarea::Tarea;
 use super::{ErrorOraculo, OpcionesOraculo, Partes, partes_de};
 use crate::borrado;
@@ -63,6 +66,13 @@ pub struct Fila {
     /// fila incompleta no calibra la dimensión, aunque su exactitud llegue a `UMBRAL`.
     #[serde(default)]
     pub incompleta: bool,
+    /// Motivo por el que la dimensión no se midió: la tarea no la aplica. Una fila así no tiene casos ni
+    /// métricas, y no calibra la dimensión. `None` en una medición real.
+    #[serde(default)]
+    pub no_aplica: Option<String>,
+    /// Inyecciones inválidas reemplazadas en la calibración, incluidas las del caso agotado.
+    #[serde(default)]
+    pub reemplazos: u32,
 }
 
 /// Contenido de `calibracion.json`. Sin archivo, no hay filas: nada está calibrado.
@@ -142,25 +152,77 @@ pub fn global_de(puntajes: &[Puntaje]) -> Option<f32> {
 
 pub mod inyectar;
 
-use inyectar::Defecto;
+use inyectar::{Defecto, Inyeccion};
 
 /// Archivo de candado de `calibracion.json`. Una escritura lo toma en exclusiva.
 const CANDADO: &str = "calibracion.lock";
+/// Carpeta de `ROOT_HOME` con un `.casos.jsonl` por calibración con casos medidos.
+const CARPETA_CASOS: &str = "calibracion";
 
 /// Calibra `dimension` de `tarea` con `n` casos y la semilla `semilla`, sobre el repo bueno `repo_bueno`.
-/// `evaluador` corre el Oracle sobre una ruta. Sin defectos para la dimensión, `n` cero o una base sin
-/// veredicto, no hay fila.
+/// `evaluador` corre el Oracle sobre una ruta. Es `Sync`: los casos corren de a `CASOS_EN_PARALELO` hilos.
+/// Sin defectos para la dimensión, `n` cero o una base sin veredicto, no hay fila.
 pub fn calibrar_con(
     tarea: &Tarea,
     dimension: Dimension,
     n: usize,
     semilla: u64,
     repo_bueno: &Path,
-    evaluador: &dyn Fn(&Path) -> Result<Veredicto, ErrorOraculo>,
+    evaluador: &(dyn Fn(&Path) -> Result<Veredicto, ErrorOraculo> + Sync),
 ) -> Result<Fila, ErrorOraculo> {
-    calibrar_medida(tarea, dimension, n, semilla, repo_bueno, evaluador, None)?
-        .fila
-        .ok_or_else(|| ErrorOraculo::Infra("la calibración no dejó ninguna fila".into()))
+    // Sin home no hay corrida de mutación grabada: no hay muertos que dirigir `AssertBorrado`.
+    // Sin memo ni reuso, el tipo de caso no cambia nada: el evaluador de la API de tests lo ignora.
+    let sin_tipo = |ruta: &Path, _: TipoCaso| evaluador(ruta);
+    calibrar_medida(
+        tarea,
+        dimension,
+        n,
+        semilla,
+        repo_bueno,
+        &sin_tipo,
+        None,
+        &Vec::new,
+    )?
+    .fila
+    .ok_or_else(|| ErrorOraculo::Infra("la calibración no dejó ninguna fila".into()))
+}
+
+/// Un renglón de `calibracion/<tarea>-<dimension>-<ts>.casos.jsonl`: un caso medido, en orden.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CasoGuardado {
+    /// Índice `i` del bucle de la calibración. Los casos sin defecto aplicable no entran, así que puede haber huecos.
+    pub caso: u32,
+    /// Nombre en snake_case del defecto inyectado. `None` en un caso limpio.
+    #[serde(default)]
+    pub defecto: Option<String>,
+    /// Ítem de rúbrica que el defecto debe hacer caer. `None` en un caso limpio.
+    #[serde(default)]
+    pub item: Option<String>,
+    /// Ruta del archivo donde quedó el defecto, relativa a la copia. `None` en un caso limpio.
+    #[serde(default)]
+    pub archivo: Option<String>,
+    /// Línea 1-based del defecto; 0 significa el archivo entero. `None` en un caso limpio.
+    #[serde(default)]
+    pub linea: Option<u32>,
+    pub es_defecto: bool,
+    /// Si la dimensión calibrada bajó frente a la base en este caso.
+    pub detectado: bool,
+    /// Motivo por el que la dimensión calibrada quedó sin veredicto en este caso.
+    #[serde(default)]
+    pub sin_veredicto: Option<String>,
+    /// Inyecciones inválidas reemplazadas antes de este caso. `0` si no hubo ninguna.
+    #[serde(default)]
+    pub reemplazos: u32,
+    /// Si el entorno repitió este caso. Hoy ningún mecanismo repite casos: siempre `false`.
+    #[serde(default)]
+    pub repetido_por_entorno: bool,
+}
+
+/// Resultado de `calibrar_tarea_con`: la fila y la ruta de los casos guardados, si hubo casos medidos.
+#[derive(Debug, Clone)]
+pub struct Calibrada {
+    pub fila: Fila,
+    pub casos: Option<PathBuf>,
 }
 
 /// Resultado de una medición: la fila (completa, o la de los casos hechos si el tope la detuvo) y, si el
@@ -168,6 +230,8 @@ pub fn calibrar_con(
 struct Medida {
     fila: Option<Fila>,
     detencion: Option<Detencion>,
+    /// Los casos medidos, en orden. Vacío si el tope detuvo la calibración antes del primero.
+    casos: Vec<Caso>,
 }
 
 /// Por qué el tope detuvo una calibración: el tope, el gasto medido, el peor caso que no entró y los
@@ -207,17 +271,189 @@ fn detencion_si_no_entra(
     Ok(None)
 }
 
+/// Qué caso evalúa el evaluador de `calibrar_medida`. Un caso con defecto lleva la dimensión calibrada: de
+/// ella sale qué sondas reusa de la base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TipoCaso {
+    Base,
+    Defecto(Dimension),
+    Limpio,
+}
+
+/// Las sondas que un caso reusa del memo de la base. Un caso limpio es una copia idéntica: reusa las sondas
+/// deterministas, incluida la mutación. Un defecto de Estructura, Arquitectura, Diseño, Seguridad,
+/// Completitud o Entrega no cambia la muestra de mutantes: reusa solo la mutación. Pruebas mide la mutación,
+/// y Eficiencia no la usa en su muestra: esos defectos corren todo. Entrega y Eficiencia nunca se reusan.
+fn reuso_de(tipo: TipoCaso, memo: &std::sync::Arc<MemoSondas>) -> Option<ReusoSondas> {
+    let alcance = match tipo {
+        TipoCaso::Base => return None,
+        TipoCaso::Limpio => Alcance::Deterministas,
+        TipoCaso::Defecto(dimension) => {
+            let reusa_mutacion = matches!(
+                dimension,
+                Dimension::Estructura
+                    | Dimension::Arquitectura
+                    | Dimension::Diseno
+                    | Dimension::Seguridad
+                    | Dimension::Completitud
+                    | Dimension::Entrega
+            );
+            if !reusa_mutacion {
+                return None;
+            }
+            Alcance::SoloMutacion
+        }
+    };
+    Some(ReusoSondas {
+        memo: memo.clone(),
+        alcance,
+    })
+}
+
+/// Casos que corren a la vez con el juez (Tarea 48, parte 2). Los contenedores siguen en serie: cada
+/// `podman` toma el turno de `contenedor::turno_de_contenedor`.
+pub const CASOS_EN_PARALELO: usize = 4;
+
 /// La medición de `calibrar_con` y de `calibrar_tarea_con`. Antes de la línea base y de cada caso, si hay
 /// tope, compara el gasto más el peor caso con él. Si no entra, para: la fila queda con los casos hechos y
-/// marcada `incompleta`. Sin casos hechos, no hay fila.
+/// marcada `incompleta`. Sin casos hechos, no hay fila. `muertos_de_la_base` se llama una vez, después de la
+/// base, y solo si la dimensión tiene `AssertBorrado`: sus muertos son los de todos los casos. Los casos
+/// corren de a `CASOS_EN_PARALELO` hilos.
+#[allow(clippy::too_many_arguments)]
 fn calibrar_medida(
     tarea: &Tarea,
     dimension: Dimension,
     n: usize,
     semilla: u64,
     repo_bueno: &Path,
-    evaluador: &dyn Fn(&Path) -> Result<Veredicto, ErrorOraculo>,
+    evaluador: &(dyn Fn(&Path, TipoCaso) -> Result<Veredicto, ErrorOraculo> + Sync),
     tope: Option<&Tope>,
+    muertos_de_la_base: &dyn Fn() -> Vec<MutanteMuerto>,
+) -> Result<Medida, ErrorOraculo> {
+    calibrar_medida_con_hilos(
+        tarea,
+        dimension,
+        n,
+        semilla,
+        repo_bueno,
+        evaluador,
+        tope,
+        muertos_de_la_base,
+        CASOS_EN_PARALELO,
+    )
+}
+
+/// Lo que comparten los casos de una medición. Solo se lee: los casos corren en hilos distintos.
+struct Ronda<'a> {
+    semilla: u64,
+    dimension: Dimension,
+    defectos: &'a [Defecto],
+    repo_bueno: &'a Path,
+    /// Carpeta temporal de la medición. Cada caso usa `caso-{i}` dentro.
+    tmp: &'a Path,
+    capas: &'a [Vec<String>],
+    camino: &'a [String],
+    muertos: &'a [MutanteMuerto],
+    base: &'a Veredicto,
+    items: &'a [&'static str],
+    evaluador: &'a (dyn Fn(&Path, TipoCaso) -> Result<Veredicto, ErrorOraculo> + Sync),
+}
+
+/// Lo que midió un caso: los reemplazos de sus inyecciones inválidas y el caso (`None`: no aplicable).
+struct Medido {
+    reemplazos: u32,
+    caso: Option<Caso>,
+}
+
+/// Mide el caso `i`. Los pares llevan un defecto: el de `defectos[(i / 2) % len]`, la misma rotación de los
+/// casos en serie. Los impares son limpios. Un defecto sin candidato medible da un caso no aplicable.
+fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
+    if i % 2 == 1 {
+        let copia = r.tmp.join(format!("caso-{i}"));
+        super::copiar_repo(r.repo_bueno, &copia).map_err(|e| super::infra("copia del repo", e))?;
+        let veredicto = (r.evaluador)(&copia, TipoCaso::Limpio)?;
+        borrado::borrar_dir_dentro(r.tmp, &copia)
+            .map_err(|e| super::infra("borrar una copia", e))?;
+        let caso = Caso::nuevo(i as u32, None, r.base, &veredicto, r.dimension, r.items);
+        return Ok(Medido {
+            reemplazos: 0,
+            caso: Some(caso),
+        });
+    }
+    let defecto = r.defectos[(i / 2) % r.defectos.len()];
+    let semilla_caso = r.semilla.wrapping_add(i as u64);
+    // La tarea no declara límites de estructura: se usan los de la sonda (`sondas_nativas`).
+    let limites = crate::oracle::perfiles::rust::LimitesEstructura::default();
+    let contexto = inyectar::Contexto {
+        capas: r.capas,
+        camino_caliente: r.camino,
+        limites: &limites,
+        muertos: r.muertos,
+    };
+    // Un defecto que rompe la construcción se reemplaza por el siguiente candidato, hasta
+    // `MAX_REEMPLAZOS` veces. Cada intento inválido suma a `invalidos`, también el del caso agotado.
+    let mut invalidos = 0u32;
+    let mut medido = None;
+    for k in 0..=MAX_REEMPLAZOS {
+        let semilla_k = semilla_caso.wrapping_add(u64::from(k) * 1_000_003);
+        let copia = r.tmp.join(format!("caso-{i}"));
+        super::copiar_repo(r.repo_bueno, &copia).map_err(|e| super::infra("copia del repo", e))?;
+        let aplicado = inyectar::inyectar_con(defecto, &copia, &contexto, semilla_k)
+            .map_err(|e| super::infra("inyectar un defecto", e))?;
+        let Some(inyeccion) = aplicado else {
+            borrado::borrar_dir_dentro(r.tmp, &copia)
+                .map_err(|e| super::infra("borrar una copia", e))?;
+            break;
+        };
+        let veredicto = (r.evaluador)(&copia, TipoCaso::Defecto(r.dimension))?;
+        borrado::borrar_dir_dentro(r.tmp, &copia)
+            .map_err(|e| super::infra("borrar una copia", e))?;
+        if rompe_la_compilacion(r.base, &veredicto, r.dimension) {
+            invalidos += 1;
+            continue;
+        }
+        medido = Some((inyeccion, veredicto));
+        break;
+    }
+    let Some((inyeccion, veredicto)) = medido else {
+        return Ok(Medido {
+            reemplazos: invalidos,
+            caso: None,
+        });
+    };
+    let caso = Caso {
+        reemplazos: invalidos,
+        ..Caso::nuevo(
+            i as u32,
+            Some(inyeccion),
+            r.base,
+            &veredicto,
+            r.dimension,
+            r.items,
+        )
+    };
+    Ok(Medido {
+        reemplazos: invalidos,
+        caso: Some(caso),
+    })
+}
+
+/// Como `calibrar_medida`, con `hilos` casos a la vez (1 corre en serie). Un coordinador lanza los casos en
+/// orden. Antes de cada lanzamiento compara `gasto + (en_vuelo + 1) * peor_caso` con el tope: si no entra y
+/// hay casos en vuelo, espera a uno; si no entra y no hay ninguno, para. Un error de caso deja de lanzar y
+/// espera a los que están en vuelo; devuelve el error del índice más bajo. Los casos se ordenan por índice
+/// antes de armar la fila, así el resultado no depende del orden de término.
+#[allow(clippy::too_many_arguments)]
+fn calibrar_medida_con_hilos(
+    tarea: &Tarea,
+    dimension: Dimension,
+    n: usize,
+    semilla: u64,
+    repo_bueno: &Path,
+    evaluador: &(dyn Fn(&Path, TipoCaso) -> Result<Veredicto, ErrorOraculo> + Sync),
+    tope: Option<&Tope>,
+    muertos_de_la_base: &dyn Fn() -> Vec<MutanteMuerto>,
+    hilos: usize,
 ) -> Result<Medida, ErrorOraculo> {
     let defectos = inyectar::de_dimension(dimension);
     if defectos.is_empty() {
@@ -236,16 +472,22 @@ fn calibrar_medida(
         return Ok(Medida {
             fila: None,
             detencion: Some(detencion),
+            casos: Vec::new(),
         });
     }
     // Una línea base sin veredicto no mide nada: los defectos no tienen contra qué compararse.
-    let base = evaluador(repo_bueno)?;
+    let base = evaluador(repo_bueno, TipoCaso::Base)?;
     if puntaje_de(&base, dimension).is_none_or(|p| p.sin_veredicto.is_some()) {
         return Err(ErrorOraculo::Infra(format!(
             "la línea base no tiene veredicto de {}",
             dimension.clave()
         )));
     }
+    let muertos = if defectos.contains(&Defecto::AssertBorrado) {
+        muertos_de_la_base()
+    } else {
+        Vec::new()
+    };
     let items: BTreeSet<&'static str> = defectos.iter().map(|d| d.item()).collect();
     let items: Vec<&'static str> = items.into_iter().collect();
     let tmp = tempfile::tempdir().map_err(|e| super::infra("carpeta temporal", e))?;
@@ -253,61 +495,120 @@ fn calibrar_medida(
         .arquitectura
         .as_ref()
         .map_or(&[], |a| a.capas.as_slice());
-
     let camino: &[String] = tarea
         .calibracion
         .as_ref()
         .map_or(&[], |c| c.camino_caliente.as_slice());
-    let mut casos: Vec<Caso> = Vec::with_capacity(n);
-    let mut no_aplicables = 0u32;
-    let mut rotacion = 0usize;
+    let ronda = Ronda {
+        semilla,
+        dimension,
+        defectos: &defectos,
+        repo_bueno,
+        tmp: tmp.path(),
+        capas,
+        camino,
+        muertos: &muertos,
+        base: &base,
+        items: &items,
+        evaluador,
+    };
+    let hilos = hilos.max(1);
+    let (tx, rx) = mpsc::channel::<(usize, Result<Medido, ErrorOraculo>)>();
+    // El coordinador suelta su envío cuando ya no lanza: si un hilo muere sin enviar, `recv` falla en vez de
+    // esperar para siempre.
+    let mut tx_abierto = Some(tx);
+    let mut resultados: BTreeMap<usize, Medido> = BTreeMap::new();
+    let mut error: Option<(usize, ErrorOraculo)> = None;
     let mut detencion = None;
-    for i in 0..n {
-        if let Some(d) = detencion_si_no_entra(tope, casos.len())? {
-            detencion = Some(d);
-            break;
-        }
-        // Casos pares con defecto; impares limpios. Con n impar sobra un defecto.
-        let es_defecto = i % 2 == 0;
-        let copia = tmp.path().join(format!("caso-{i}"));
-        super::copiar_repo(repo_bueno, &copia).map_err(|e| super::infra("copia del repo", e))?;
-        let defecto = if es_defecto {
-            let defecto = defectos[rotacion % defectos.len()];
-            rotacion += 1;
-            let semilla_caso = semilla.wrapping_add(i as u64);
-            let aplicado = inyectar::inyectar_con(defecto, &copia, capas, camino, semilla_caso)
-                .map_err(|e| super::infra("inyectar un defecto", e))?;
-            if aplicado.is_none() {
-                no_aplicables += 1;
-                borrado::borrar_dir_dentro(tmp.path(), &copia)
-                    .map_err(|e| super::infra("borrar una copia", e))?;
-                continue;
+    let mut siguiente = 0usize;
+    let mut en_vuelo = 0usize;
+    std::thread::scope(|s| -> Result<(), ErrorOraculo> {
+        let ronda = &ronda;
+        loop {
+            while error.is_none() && siguiente < n && en_vuelo < hilos {
+                if let Some(t) = tope {
+                    let gasto = (t.gasto_desde)(t.inicio)?;
+                    if gasto + (en_vuelo as f64 + 1.0) * t.peor_caso > t.usd {
+                        if en_vuelo == 0 {
+                            detencion = Some(Detencion {
+                                tope_usd: t.usd,
+                                gasto_usd: gasto,
+                                peor_caso_usd: t.peor_caso,
+                                casos: resultados.values().filter(|m| m.caso.is_some()).count()
+                                    as u32,
+                            });
+                        }
+                        break;
+                    }
+                }
+                let i = siguiente;
+                siguiente += 1;
+                en_vuelo += 1;
+                let envio = tx_abierto
+                    .clone()
+                    .expect("hay canal mientras se lanzan casos");
+                s.spawn(move || {
+                    let _ = envio.send((i, medir_caso(ronda, i)));
+                });
             }
-            Some(defecto)
-        } else {
-            None
-        };
-        let veredicto = evaluador(&copia)?;
-        borrado::borrar_dir_dentro(tmp.path(), &copia)
-            .map_err(|e| super::infra("borrar una copia", e))?;
-        casos.push(Caso::nuevo(defecto, &base, &veredicto, dimension, &items));
+            if siguiente == n || error.is_some() {
+                tx_abierto = None;
+            }
+            if en_vuelo == 0 {
+                break;
+            }
+            let (i, resultado) = rx.recv().map_err(|_| {
+                ErrorOraculo::Infra("un caso de calibración terminó sin resultado".into())
+            })?;
+            en_vuelo -= 1;
+            match resultado {
+                Ok(medido) => {
+                    resultados.insert(i, medido);
+                }
+                Err(e) => {
+                    if error.as_ref().is_none_or(|(j, _)| i < *j) {
+                        error = Some((i, e));
+                    }
+                }
+            }
+        }
+        Ok(())
+    })?;
+    if let Some((_, e)) = error {
+        return Err(e);
     }
-
+    let mut reemplazos = 0u32;
+    let mut no_aplicables = 0u32;
+    let mut casos = Vec::with_capacity(resultados.len());
+    for medido in resultados.into_values() {
+        reemplazos += medido.reemplazos;
+        match medido.caso {
+            Some(caso) => casos.push(caso),
+            None => no_aplicables += 1,
+        }
+    }
     let incompleta = detencion.is_some();
     let fila = if incompleta && casos.is_empty() {
         None
     } else {
-        Some(fila_de(
-            tarea,
-            dimension,
-            semilla,
-            &casos,
-            &items,
-            no_aplicables,
-            incompleta,
-        ))
+        Some(Fila {
+            reemplazos,
+            ..fila_de(
+                tarea,
+                dimension,
+                semilla,
+                &casos,
+                &items,
+                no_aplicables,
+                incompleta,
+            )
+        })
     };
-    Ok(Medida { fila, detencion })
+    Ok(Medida {
+        fila,
+        detencion,
+        casos,
+    })
 }
 
 /// La fila de los casos medidos: sensibilidad, especificidad y exactitud por dimensión y por ítem.
@@ -371,6 +672,8 @@ fn fila_de(
         exactitud_balanceada: exactitud_de(sensibilidad, especificidad),
         items: items_medidos,
         incompleta,
+        no_aplica: None,
+        reemplazos: 0,
     }
 }
 
@@ -383,11 +686,12 @@ pub fn calibrar_tarea(
     n: u32,
     semilla: u64,
     repo_cli: Option<&Path>,
-    evaluador: &dyn Fn(&Tarea, &Path, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo>,
+    evaluador: &(dyn Fn(&Tarea, &Path, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> + Sync),
 ) -> Result<Fila, ErrorOraculo> {
     calibrar_tarea_con(
         home, nombre, dimension, n, semilla, repo_cli, None, evaluador,
     )
+    .map(|calibrada| calibrada.fila)
 }
 
 /// Tope de gasto de una calibración (decisión 48). Antes de la línea base y de cada caso, se detiene si el
@@ -516,7 +820,8 @@ pub fn peor_caso_de_home(home: &Path, partes: &Partes) -> Result<f64, ErrorOracu
 /// `oraculo calibrar` con tope opcional (decisión 48): como `calibrar_tarea`, con las dependencias
 /// inyectables. Con `presupuesto`, antes de la línea base y de cada caso compara el gasto más el peor caso
 /// con el tope. Si no entra, registra un `Gate` `calibracion-tope`, agrega la fila de los casos hechos
-/// marcada `incompleta` (si hubo alguno) y sale con código 3.
+/// marcada `incompleta` (si hubo alguno) y sale con código 3. `evaluador` es `Sync` (Tarea 48, parte 2): los
+/// casos corren de a `CASOS_EN_PARALELO` hilos.
 #[allow(clippy::too_many_arguments)]
 pub fn calibrar_tarea_con(
     home: &Path,
@@ -526,11 +831,18 @@ pub fn calibrar_tarea_con(
     semilla: u64,
     repo_cli: Option<&Path>,
     presupuesto: Option<&Presupuesto>,
-    evaluador: &dyn Fn(&Tarea, &Path, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo>,
-) -> Result<Fila, ErrorOraculo> {
+    evaluador: &(dyn Fn(&Tarea, &Path, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> + Sync),
+) -> Result<Calibrada, ErrorOraculo> {
     let dim = Dimension::desde_clave(dimension)
         .ok_or_else(|| ErrorOraculo::Uso(format!("dimensión desconocida: {dimension}")))?;
     let tarea = super::tarea::cargar_en(home, nombre)?;
+    // Eficiencia sin `[eficiencia]`: la tarea no la aplica. Ni la base ni los casos corren, y la fila lleva
+    // solo el motivo. Es el mismo criterio que la sonda usa para no medir.
+    if dim == Dimension::Eficiencia && tarea.eficiencia.is_none() {
+        let fila = fila_no_aplica(&tarea, dim, semilla);
+        agregar(home, &fila)?;
+        return Ok(Calibrada { fila, casos: None });
+    }
     let repo = repo_de(&tarea, repo_cli)?;
     // La base y cada caso corren las mismas partes: solo la dimensión calibrada se mide.
     let rubricas = super::rubrica::cargar_embebidas()
@@ -541,6 +853,17 @@ pub fn calibrar_tarea_con(
         partes: Some(partes),
         historial: false,
         ..OpcionesOraculo::default()
+    };
+    // La base graba las salidas de sus sondas en `memo`; los casos no graban. Un caso con defecto reusa de
+    // `memo` lo que `reuso_de` dice (la mutación, en las dimensiones que no la cambian).
+    let memo = std::sync::Arc::new(super::memo::MemoSondas::nuevo());
+    let evaluar_caso = |ruta: &Path, tipo: TipoCaso| {
+        let opciones_de_caso = OpcionesOraculo {
+            memo: (tipo == TipoCaso::Base).then(|| memo.clone()),
+            reuso: reuso_de(tipo, &memo),
+            ..opciones.clone()
+        };
+        evaluador(&tarea, ruta, &opciones_de_caso)
     };
     // El tope se resuelve antes de la base: un peor caso sin precio no deja arrancar.
     let inicio = ahora();
@@ -574,9 +897,15 @@ pub fn calibrar_tarea_con(
         n as usize,
         semilla,
         &repo,
-        &|ruta| evaluador(&tarea, ruta, &opciones),
+        &evaluar_caso,
         tope.as_ref(),
+        &|| memo.mutantes_muertos(&tarea),
     )?;
+    // Los casos se escriben antes de `agregar`, también si el tope detuvo la calibración.
+    let casos = match &medida.fila {
+        Some(fila) => escribir_casos(home, &tarea.nombre, dim, fila, &medida.casos)?,
+        None => None,
+    };
     if let Some(detencion) = medida.detencion {
         let gate = gate_de_tope(&tarea.nombre, dim, &detencion);
         observe::registrar_en(&observe::ruta_eventos_en(home), &gate)
@@ -598,7 +927,31 @@ pub fn calibrar_tarea_con(
         .fila
         .ok_or_else(|| ErrorOraculo::Infra("la calibración no dejó ninguna fila".into()))?;
     agregar(home, &fila)?;
-    Ok(fila)
+    Ok(Calibrada { fila, casos })
+}
+
+/// Motivo de la fila de Eficiencia en una tarea sin `[eficiencia]`.
+const MOTIVO_NO_APLICA_EFICIENCIA: &str = "no aplica: la tarea no define [eficiencia]";
+
+/// Fila de una dimensión que la tarea no aplica: sin casos ni métricas, con el motivo en `no_aplica`.
+fn fila_no_aplica(tarea: &Tarea, dimension: Dimension, semilla: u64) -> Fila {
+    Fila {
+        tarea: tarea.nombre.clone(),
+        dimension,
+        n: 0,
+        defectos: 0,
+        limpios: 0,
+        no_aplicable: 0,
+        semilla,
+        ts: ahora(),
+        sensibilidad: None,
+        especificidad: None,
+        exactitud_balanceada: None,
+        items: BTreeMap::new(),
+        incompleta: false,
+        no_aplica: Some(MOTIVO_NO_APLICA_EFICIENCIA.into()),
+        reemplazos: 0,
+    }
 }
 
 /// `Gate` de una calibración detenida por su tope: tarea, dimensión, tope, gasto, peor caso y casos hechos.
@@ -660,28 +1013,62 @@ pub fn agregar(home: &Path, fila: &Fila) -> Result<(), ErrorOraculo> {
     Ok(())
 }
 
+/// Reserva el primer nombre libre `<base>.casos.jsonl`, `<base>-2.casos.jsonl`, ... en `dir`. Crea el archivo
+/// vacío con `create_new`: dos calibraciones no pueden elegir el mismo nombre.
+fn reservar_destino(dir: &Path, base: &str) -> io::Result<(PathBuf, fs::File)> {
+    let mut n = 1u32;
+    loop {
+        let nombre = if n == 1 {
+            format!("{base}.casos.jsonl")
+        } else {
+            format!("{base}-{n}.casos.jsonl")
+        };
+        let ruta = dir.join(nombre);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&ruta)
+        {
+            Ok(archivo) => return Ok((ruta, archivo)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => n += 1,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// Un caso medido: si era un defecto (y cuál ítem apuntaba), si la dimensión lo detectó y, por ítem,
 /// si cada ítem bajó (`None` si la base no mide ese ítem).
 struct Caso {
+    /// Índice `i` del bucle de la calibración.
+    indice: u32,
+    /// El defecto aplicado, completo (archivo y línea). `None` en un caso limpio.
+    inyeccion: Option<Inyeccion>,
     es_defecto: bool,
     item_defecto: Option<&'static str>,
     detectado: bool,
+    /// Motivo por el que la dimensión calibrada quedó sin veredicto en este caso.
+    sin_veredicto: Option<String>,
     items: BTreeMap<&'static str, Option<bool>>,
+    /// Inyecciones inválidas reemplazadas antes de este caso.
+    reemplazos: u32,
 }
 
 impl Caso {
     fn nuevo(
-        defecto: Option<Defecto>,
+        indice: u32,
+        inyeccion: Option<Inyeccion>,
         base: &Veredicto,
         veredicto: &Veredicto,
         dimension: Dimension,
         items: &[&'static str],
     ) -> Caso {
-        let es_defecto = defecto.is_some();
+        let es_defecto = inyeccion.is_some();
         Caso {
+            indice,
             es_defecto,
-            item_defecto: defecto.map(Defecto::item),
+            item_defecto: inyeccion.as_ref().map(|i| i.defecto.item()),
             detectado: detecta_dimension(base, veredicto, dimension, es_defecto),
+            sin_veredicto: motivo_sin_veredicto(veredicto, dimension),
             items: items
                 .iter()
                 .map(|item| {
@@ -691,12 +1078,130 @@ impl Caso {
                     )
                 })
                 .collect(),
+            inyeccion,
+            reemplazos: 0,
         }
     }
 
     fn detecta_en(&self, item: &str) -> Option<bool> {
         self.items.get(item).copied().flatten()
     }
+}
+
+impl CasoGuardado {
+    fn de(caso: &Caso) -> CasoGuardado {
+        CasoGuardado {
+            caso: caso.indice,
+            defecto: caso.inyeccion.as_ref().map(|i| nombre_defecto(i.defecto)),
+            item: caso.item_defecto.map(str::to_string),
+            archivo: caso.inyeccion.as_ref().map(|i| i.archivo.clone()),
+            linea: caso.inyeccion.as_ref().map(|i| i.linea),
+            es_defecto: caso.es_defecto,
+            detectado: caso.detectado,
+            sin_veredicto: caso.sin_veredicto.clone(),
+            reemplazos: caso.reemplazos,
+            // Ningún mecanismo repite casos hoy: el campo queda en `false` hasta que alguno lo haga.
+            repetido_por_entorno: false,
+        }
+    }
+}
+
+/// Nombre en snake_case de un defecto, a partir de su `{:?}`: `SecretoEnCodigo` da `secreto_en_codigo`.
+fn nombre_defecto(defecto: Defecto) -> String {
+    let mut nombre = String::new();
+    for (i, c) in format!("{defecto:?}").chars().enumerate() {
+        if c.is_uppercase() {
+            if i > 0 {
+                nombre.push('_');
+            }
+            nombre.extend(c.to_lowercase());
+        } else {
+            nombre.push(c);
+        }
+    }
+    nombre
+}
+
+/// Motivo por el que `dimension` quedó sin veredicto en `veredicto`. Sin puntaje de la dimensión, un motivo fijo.
+fn motivo_sin_veredicto(veredicto: &Veredicto, dimension: Dimension) -> Option<String> {
+    match puntaje_de(veredicto, dimension) {
+        Some(puntaje) => puntaje.sin_veredicto.clone(),
+        None => Some("sin puntaje de la dimensión".into()),
+    }
+}
+
+/// Reemplazos máximos por caso con defecto. El primer candidato no cuenta: un caso prueba hasta
+/// `MAX_REEMPLAZOS + 1` inyecciones. Si todas rompen la construcción, el caso es no aplicable.
+pub const MAX_REEMPLAZOS: u32 = 5;
+
+/// Marcadores de construcción fallida. Un veredicto con uno de ellos no mide su dimensión: el
+/// texto es el de `perfiles/herramientas.rs` (sonda de clippy) y `mutacion.rs` (sonda de mutación).
+const MOTIVOS_DE_CONSTRUCCION: [&str; 2] = ["no compila", "fallan sin mutaciones"];
+
+/// Si el defecto rompe la construcción: `dimension` queda sin veredicto, o con ítems faltantes, por un
+/// motivo de construcción fallida que la base no tiene. Completitud y Funciona nunca cuentan.
+fn rompe_la_compilacion(base: &Veredicto, veredicto: &Veredicto, dimension: Dimension) -> bool {
+    if matches!(dimension, Dimension::Completitud | Dimension::Funciona) {
+        return false;
+    }
+    let en_base = motivos_de_construccion(base, dimension);
+    motivos_de_construccion(veredicto, dimension)
+        .iter()
+        .any(|motivo| !en_base.contains(motivo))
+}
+
+/// Los marcadores de construcción fallida de `dimension` en `veredicto`: el de `sin_veredicto` y los de
+/// `faltantes`. Se comparan marcadores, no textos: el error de rustc cambia de copia a copia.
+fn motivos_de_construccion(veredicto: &Veredicto, dimension: Dimension) -> BTreeSet<&'static str> {
+    let Some(puntaje) = puntaje_de(veredicto, dimension) else {
+        return BTreeSet::new();
+    };
+    let textos = puntaje
+        .sin_veredicto
+        .iter()
+        .map(String::as_str)
+        .chain(puntaje.faltantes.iter().map(|f| f.motivo.as_str()));
+    textos
+        .flat_map(|texto| {
+            MOTIVOS_DE_CONSTRUCCION
+                .into_iter()
+                .filter(move |marcador| texto.contains(*marcador))
+        })
+        .collect()
+}
+
+/// Escribe los casos medidos en `home/calibracion/<tarea>-<dimension>-<ts>.casos.jsonl`: un renglón JSON por
+/// caso, en orden. Escritura atómica: un temporal junto al destino y un `rename`. Sin casos, no escribe y da `None`.
+fn escribir_casos(
+    home: &Path,
+    tarea: &str,
+    dimension: Dimension,
+    fila: &Fila,
+    casos: &[Caso],
+) -> Result<Option<PathBuf>, ErrorOraculo> {
+    if casos.is_empty() {
+        return Ok(None);
+    }
+    let carpeta = home.join(CARPETA_CASOS);
+    fs::create_dir_all(&carpeta).map_err(|e| super::infra("crear la carpeta de casos", e))?;
+    let base = format!("{tarea}-{}-{}", dimension.clave(), fila.ts as u64);
+    let (destino, _) = reservar_destino(&carpeta, &base)
+        .map_err(|e| super::infra("reservar el archivo de casos", e))?;
+    let mut texto = String::new();
+    for caso in casos {
+        let renglon = serde_json::to_string(&CasoGuardado::de(caso))
+            .map_err(|e| ErrorOraculo::Infra(format!("serializar un caso: {e}")))?;
+        texto.push_str(&renglon);
+        texto.push('\n');
+    }
+    let temporal = PathBuf::from(format!("{}.tmp", destino.display()));
+    if let Err(e) = fs::write(&temporal, texto).and_then(|()| fs::rename(&temporal, &destino)) {
+        // Limpieza dentro de la carpeta de casos: el temporal y la reserva vacía.
+        let _ = borrado::borrar_archivo_dentro(&carpeta, &temporal);
+        let _ = borrado::borrar_archivo_dentro(&carpeta, &destino);
+        return Err(super::infra("escribir los casos", e));
+    }
+    Ok(Some(destino))
 }
 
 /// La dimensión empeora frente a la base si aparece un hallazgo con id nuevo, baja su `valor` o baja el
@@ -782,11 +1287,21 @@ fn ahora() -> f64 {
 }
 
 #[cfg(test)]
+mod defectos;
+
+#[cfg(test)]
 mod tests {
     use super::inyectar::pruebas::{FIXTURE, arbol, copia_fixture, tarea_en};
     use super::*;
-    use crate::tipos::{Fuente, Hallazgo, NivelItem};
-    use std::cell::RefCell;
+    use crate::oracle::mutacion::{ARCHIVO_OUTCOMES, construir_comando};
+    use crate::oracle::perfiles::herramientas::{
+        COMANDO_CARGO_AUDIT, COMANDO_GITLEAKS, EjecutorHerramienta, SalidaHerramienta,
+        comando_clippy,
+    };
+    use crate::tipos::{Fuente, Hallazgo, ItemFaltante, NivelItem};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn fila(tarea: &str, dimension: Dimension, ts: f64, exactitud: Option<f32>) -> Fila {
@@ -804,6 +1319,8 @@ mod tests {
             exactitud_balanceada: exactitud,
             items: BTreeMap::new(),
             incompleta: false,
+            no_aplica: None,
+            reemplazos: 0,
         }
     }
 
@@ -872,8 +1389,8 @@ mod tests {
     fn falso<'a>(
         base_dir: &'a Path,
         base: &'a Veredicto,
-        regla: impl Fn(bool, &BTreeMap<String, String>, &Veredicto) -> Veredicto + 'a,
-    ) -> impl Fn(&Path) -> Result<Veredicto, ErrorOraculo> + 'a {
+        regla: impl Fn(bool, &BTreeMap<String, String>, &Veredicto) -> Veredicto + Sync + 'a,
+    ) -> impl Fn(&Path) -> Result<Veredicto, ErrorOraculo> + Sync + 'a {
         let arbol_base = arbol(base_dir);
         move |ruta: &Path| {
             if ruta == base_dir {
@@ -895,7 +1412,7 @@ mod tests {
     fn calibrar(
         base_dir: &Path,
         base: &Veredicto,
-        regla: impl Fn(bool, &BTreeMap<String, String>, &Veredicto) -> Veredicto,
+        regla: impl Fn(bool, &BTreeMap<String, String>, &Veredicto) -> Veredicto + Sync,
         n: usize,
     ) -> Fila {
         let (_t, tarea) = tarea_prueba();
@@ -1174,9 +1691,9 @@ mod tests {
         std::fs::create_dir_all(&repo).expect("repo");
         super::inyectar::pruebas::copiar(Path::new(FIXTURE), &repo);
         let _ = tarea_en(&carpeta, "\n[calibracion]\nrepo = \"repo-bueno\"\n");
-        let vistos = RefCell::new(Vec::<PathBuf>::new());
+        let vistos = Mutex::new(Vec::<PathBuf>::new());
         let evaluador = |_: &Tarea, ruta: &Path, _: &OpcionesOraculo| {
-            vistos.borrow_mut().push(ruta.to_path_buf());
+            vistos.lock().expect("lock").push(ruta.to_path_buf());
             Ok(veredicto_base())
         };
         calibrar_tarea(
@@ -1189,7 +1706,477 @@ mod tests {
             &evaluador,
         )
         .expect("calibra con el repo de la tarea");
-        assert_eq!(vistos.borrow()[0], repo);
+        assert_eq!(vistos.lock().expect("lock")[0], repo);
+    }
+
+    /// `tests/protocolo.rs` de la calibración de Pruebas: un test de `leer_numero` con dos asserts.
+    const TEST_DE_LEER_NUMERO: &str = "use calibra_fixture::protocolo::leer_numero;\n\n#[test]\nfn leer_numero_lee_el_numero() {\n    assert!(leer_numero(\"42\").is_ok());\n    assert_eq!(leer_numero(\"7\").unwrap(), 7);\n}\n";
+
+    /// Veredicto de Pruebas sano: valor 1 y el ítem de mutación en nivel 3.
+    fn veredicto_de_pruebas() -> Veredicto {
+        Veredicto {
+            puntajes: vec![Puntaje {
+                dimension: Dimension::Pruebas,
+                valor: 1.0,
+                calibrada: false,
+                exactitud_balanceada: None,
+                items: vec![nivel_item("pruebas.mutacion", 3)],
+                sin_veredicto: None,
+                faltantes: Vec::new(),
+            }],
+            ..Veredicto::default()
+        }
+    }
+
+    /// Los muertos de la base llegan al inyector de AssertBorrado: el memo se pasa solo a la base.
+    #[test]
+    fn calibra_pruebas_los_muertos_de_la_base_llegan_al_inyector() {
+        use crate::oracle::mutacion::{ARCHIVO_OUTCOMES, construir_comando};
+        use crate::oracle::perfiles::herramientas::SalidaHerramienta;
+        const OUTCOMES: &str = r#"{"total_mutants":1,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)","file":"src/protocolo.rs","span":{"start":{"line":2,"column":1}}}},"summary":"CaughtMutant"}]}"#;
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = home.path().join("oraculos").join("calibra-fixture");
+        std::fs::create_dir_all(&carpeta).expect("carpeta");
+        let repo = carpeta.join("repo-bueno");
+        std::fs::create_dir_all(&repo).expect("repo");
+        super::inyectar::pruebas::copiar(Path::new(FIXTURE), &repo);
+        std::fs::write(repo.join("tests/protocolo.rs"), TEST_DE_LEER_NUMERO).expect("test");
+        let _ = tarea_en(&carpeta, "\n[calibracion]\nrepo = \"repo-bueno\"\n");
+        let con_memo = Mutex::new(Vec::<bool>::new());
+        let evaluador = |tarea: &Tarea, _: &Path, o: &OpcionesOraculo| {
+            con_memo.lock().expect("lock").push(o.memo.is_some());
+            if let Some(memo) = o.memo.as_deref() {
+                let mut salida = SalidaHerramienta {
+                    codigo: 0,
+                    stdout: "salida".into(),
+                    ..Default::default()
+                };
+                salida
+                    .archivos
+                    .insert(ARCHIVO_OUTCOMES.into(), OUTCOMES.into());
+                memo.anotar(&construir_comando(tarea), &salida);
+            }
+            Ok(veredicto_de_pruebas())
+        };
+        let calibrada = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "pruebas",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+        )
+        .expect("calibra");
+        let vistos = con_memo.lock().expect("lock");
+        assert!(vistos[0], "la base lleva el memo");
+        assert!(
+            vistos[1..].iter().all(|m| !m),
+            "los casos no graban: {vistos:?}"
+        );
+        let ruta = calibrada.casos.expect("hay casos guardados");
+        let texto = fs::read_to_string(&ruta).expect("lee los casos");
+        let casos: Vec<CasoGuardado> = texto
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("un caso por línea"))
+            .collect();
+        let con_defecto = casos
+            .iter()
+            .find(|c| c.defecto.as_deref() == Some("assert_borrado"))
+            .expect("un caso con AssertBorrado aplicado");
+        assert_eq!(con_defecto.archivo.as_deref(), Some("tests/protocolo.rs"));
+        assert_eq!(con_defecto.linea, Some(5), "el primer assert del test");
+    }
+
+    /// Una llamada del evaluador de prueba: si era la base (lleva memo), su alcance de reuso y los comandos que corrió.
+    struct Llamada {
+        base: bool,
+        /// Alcance del reuso de la llamada: `None` sin reuso (la base y los casos con defecto fuera de él).
+        alcance: Option<Alcance>,
+        cmds: Vec<String>,
+        /// Cuántas veces corrió el juez y los tests en la llamada. Ni uno ni otro pasan por el ejecutor.
+        juez: u32,
+        tests: u32,
+    }
+
+    /// Ejecutor de prueba: anota cada comando. La mutación responde un mutante muerto, para `AssertBorrado`.
+    struct Anota<'a> {
+        cmds: &'a Mutex<Vec<String>>,
+    }
+
+    impl EjecutorHerramienta for Anota<'_> {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            self.cmds.lock().expect("lock").push(cmd.to_string());
+            let mut salida = SalidaHerramienta::default();
+            if cmd.contains("cargo mutants") && cmd.contains("--list") {
+                // Un solo mutante en el listado: la corrida lo filtra con `-F` y el fake la responde igual.
+                salida.archivos.insert(
+                    "listado.json".into(),
+                    r#"[{"name":"src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)"}]"#
+                        .into(),
+                );
+            } else if cmd.contains("cargo mutants") {
+                salida
+                    .archivos
+                    .insert(ARCHIVO_OUTCOMES.into(), OUTCOMES_CON_MUERTO.into());
+            }
+            Ok(salida)
+        }
+
+        fn tiene_rustsec(&self) -> bool {
+            false
+        }
+    }
+
+    const OUTCOMES_CON_MUERTO: &str = r#"{"total_mutants":1,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)","file":"src/protocolo.rs","span":{"start":{"line":2,"column":1}}}},"summary":"CaughtMutant"}]}"#;
+
+    /// Carpeta `calibra-fixture` de `home` con `repo-bueno` (copia del fixture) y la tarea que la usa.
+    fn carpeta_con_repo_bueno(home: &Path) -> PathBuf {
+        let carpeta = home.join("oraculos").join("calibra-fixture");
+        std::fs::create_dir_all(&carpeta).expect("carpeta");
+        let repo = carpeta.join("repo-bueno");
+        std::fs::create_dir_all(&repo).expect("repo");
+        super::inyectar::pruebas::copiar(Path::new(FIXTURE), &repo);
+        tarea_en(&carpeta, "\n[calibracion]\nrepo = \"repo-bueno\"\n");
+        carpeta
+    }
+
+    /// Evaluador de prueba que compone el ejecutor como `evaluar_con`: reuso, y el memo de la base. Corre una
+    /// sonda estática y la mutación, y registra lo que corrió en cada llamada.
+    fn evaluador_con_registro(
+        llamadas: &Mutex<Vec<Llamada>>,
+        veredicto: fn() -> Veredicto,
+    ) -> impl Fn(&Tarea, &Path, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> + '_ {
+        move |tarea: &Tarea, _: &Path, o: &OpcionesOraculo| {
+            let cmds = Mutex::new(Vec::<String>::new());
+            let real = Anota { cmds: &cmds };
+            let ejecutar = |cmd: &str| match o.reuso.as_ref() {
+                Some(reuso) => {
+                    crate::oracle::memo::EjecutorReusador { real: &real, reuso }.ejecutar(cmd)
+                }
+                None => real.ejecutar(cmd),
+            };
+            ejecutar("cargo clippy --version").expect("sonda estática");
+            let mutacion = construir_comando(tarea);
+            let salida = ejecutar(&mutacion).expect("mutación");
+            if let Some(memo) = o.memo.as_deref() {
+                memo.anotar(&mutacion, &salida);
+            }
+            llamadas.lock().expect("lock").push(Llamada {
+                base: o.memo.is_some(),
+                alcance: o.reuso.as_ref().map(|r| r.alcance),
+                cmds: cmds.lock().expect("lock").clone(),
+                juez: 0,
+                tests: 0,
+            });
+            Ok(veredicto())
+        }
+    }
+
+    /// Evaluador de prueba con sondas deterministas, juez y tests. Corre gitleaks, cargo audit, clippy,
+    /// hadolint y la mutación. El juez y los tests los cuenta el fake: no pasan por el ejecutor. Con
+    /// `usar_reuso` falso ignora `o.reuso` y corre todo: es la evaluación sin reuso.
+    fn evaluador_con_juez_y_tests(
+        llamadas: &Mutex<Vec<Llamada>>,
+        veredicto: fn() -> Veredicto,
+        usar_reuso: bool,
+    ) -> impl Fn(&Tarea, &Path, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> + '_ {
+        move |tarea: &Tarea, _: &Path, o: &OpcionesOraculo| {
+            let cmds = Mutex::new(Vec::<String>::new());
+            let real = Anota { cmds: &cmds };
+            let reuso = o.reuso.as_ref().filter(|_| usar_reuso);
+            // Como `evaluar_con`: el reuso va dentro, y la base graba cada salida OK en el memo.
+            let ejecutar = |cmd: &str| -> Result<SalidaHerramienta, ErrorOraculo> {
+                let con_reuso = match reuso {
+                    Some(reuso) => {
+                        crate::oracle::memo::EjecutorReusador { real: &real, reuso }.ejecutar(cmd)
+                    }
+                    None => real.ejecutar(cmd),
+                };
+                match o.memo.as_deref() {
+                    Some(memo) => {
+                        let salida = con_reuso?;
+                        memo.anotar(cmd, &salida);
+                        Ok(salida)
+                    }
+                    None => con_reuso,
+                }
+            };
+            let sondas = [
+                COMANDO_GITLEAKS.to_string(),
+                COMANDO_CARGO_AUDIT.to_string(),
+                comando_clippy(),
+                crate::oracle::configs::comando_hadolint("Dockerfile"),
+            ];
+            for cmd in &sondas {
+                ejecutar(cmd).expect("sonda determinista");
+            }
+            ejecutar(&construir_comando(tarea)).expect("mutación");
+            llamadas.lock().expect("lock").push(Llamada {
+                base: o.memo.is_some(),
+                alcance: reuso.map(|r| r.alcance),
+                cmds: cmds.lock().expect("lock").clone(),
+                juez: 1,
+                tests: 1,
+            });
+            Ok(veredicto())
+        }
+    }
+
+    /// Cuenta las corridas de mutación. El listado no cuenta: es otro comando de `cargo mutants`.
+    fn cuenta_mutaciones(llamada: &Llamada) -> usize {
+        llamada
+            .cmds
+            .iter()
+            .filter(|c| c.contains("--output /salida/mutants"))
+            .count()
+    }
+
+    /// Un caso de Diseño toma la mutación de la base y corre otra vez las sondas estáticas y el juez.
+    #[test]
+    fn calibra_un_caso_de_diseno_toma_la_mutacion_de_la_base() {
+        let home = tempfile::tempdir().expect("home");
+        carpeta_con_repo_bueno(home.path());
+        let llamadas = Mutex::new(Vec::<Llamada>::new());
+        let evaluador =
+            evaluador_con_registro(&llamadas, || veredicto_de(Dimension::Diseno, 1.0, None));
+        let calibrada = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "diseno",
+            4,
+            42,
+            None,
+            None,
+            &evaluador,
+        )
+        .expect("calibra");
+        let llamadas = llamadas.lock().expect("lock");
+        let casos = calibrada.casos.expect("hay casos guardados");
+        let medidos = fs::read_to_string(&casos)
+            .expect("lee los casos")
+            .lines()
+            .count();
+        assert_eq!(
+            llamadas.len(),
+            medidos + 1,
+            "la base y cada caso llaman al evaluador"
+        );
+        assert!(llamadas[0].base, "la primera llamada es la base");
+        assert_eq!(
+            cuenta_mutaciones(&llamadas[0]),
+            1,
+            "la base corre la mutación"
+        );
+        assert!(
+            llamadas[0]
+                .cmds
+                .iter()
+                .any(|c| c == "cargo clippy --version"),
+            "la base corre las sondas estáticas"
+        );
+        let con_defecto: Vec<&Llamada> = llamadas[1..]
+            .iter()
+            .filter(|l| l.alcance == Some(Alcance::SoloMutacion))
+            .collect();
+        assert!(!con_defecto.is_empty(), "hay un caso con defecto de Diseño");
+        for l in con_defecto {
+            assert_eq!(
+                cuenta_mutaciones(l),
+                0,
+                "el defecto de Diseño reusa la mutación de la base"
+            );
+            assert!(
+                l.cmds.iter().any(|c| c == "cargo clippy --version"),
+                "el defecto de Diseño corre sus sondas: {:?}",
+                l.cmds
+            );
+        }
+        let limpios: Vec<&Llamada> = llamadas[1..]
+            .iter()
+            .filter(|l| l.alcance == Some(Alcance::Deterministas))
+            .collect();
+        assert!(!limpios.is_empty(), "hay un caso limpio");
+        for l in limpios {
+            assert_eq!(cuenta_mutaciones(l), 0, "un caso limpio toma la mutación");
+        }
+    }
+
+    /// Un caso con defecto de Pruebas corre la mutación: Pruebas la mide, así que no la reusa. Un caso limpio
+    /// sí la toma de la base: la copia es idéntica.
+    #[test]
+    fn calibra_un_caso_de_pruebas_corre_la_mutacion() {
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = carpeta_con_repo_bueno(home.path());
+        let repo = carpeta.join("repo-bueno");
+        std::fs::write(repo.join("tests/protocolo.rs"), TEST_DE_LEER_NUMERO).expect("test");
+        let llamadas = Mutex::new(Vec::<Llamada>::new());
+        let evaluador = evaluador_con_registro(&llamadas, veredicto_de_pruebas);
+        calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "pruebas",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+        )
+        .expect("calibra");
+        let llamadas = llamadas.lock().expect("lock");
+        assert!(llamadas.len() >= 2, "la base y un caso con defecto");
+        assert_eq!(
+            cuenta_mutaciones(&llamadas[0]),
+            1,
+            "la base corre la mutación"
+        );
+        let con_defecto: Vec<&Llamada> = llamadas[1..]
+            .iter()
+            .filter(|l| l.alcance.is_none())
+            .collect();
+        assert!(
+            !con_defecto.is_empty(),
+            "hay un caso con defecto de Pruebas"
+        );
+        for l in con_defecto {
+            assert_eq!(cuenta_mutaciones(l), 1, "Pruebas no reusa la mutación");
+        }
+        let limpios: Vec<&Llamada> = llamadas[1..]
+            .iter()
+            .filter(|l| l.alcance == Some(Alcance::Deterministas))
+            .collect();
+        assert!(!limpios.is_empty(), "hay un caso limpio");
+        for l in limpios {
+            assert_eq!(cuenta_mutaciones(l), 0, "un caso limpio toma la mutación");
+        }
+    }
+
+    fn cuenta_comando(llamada: &Llamada, cmd: &str) -> usize {
+        llamada.cmds.iter().filter(|c| c.as_str() == cmd).count()
+    }
+
+    /// Un caso limpio toma de la base las sondas deterministas y corre otra vez el juez y los tests. Un caso
+    /// con defecto de Diseño solo toma la mutación: sus sondas deterministas corren otra vez.
+    #[test]
+    fn calibra_un_caso_limpio_toma_de_la_base_las_sondas_deterministas_y_corre_el_juez_y_los_tests()
+    {
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = carpeta_con_repo_bueno(home.path());
+        std::fs::write(
+            carpeta.join("repo-bueno").join("Dockerfile"),
+            "FROM scratch\n",
+        )
+        .expect("Dockerfile");
+        let llamadas = Mutex::new(Vec::<Llamada>::new());
+        let evaluador = evaluador_con_juez_y_tests(
+            &llamadas,
+            || veredicto_de(Dimension::Diseno, 1.0, None),
+            true,
+        );
+        let calibrada = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "diseno",
+            4,
+            42,
+            None,
+            None,
+            &evaluador,
+        )
+        .expect("calibra");
+        let llamadas = llamadas.lock().expect("lock");
+        let casos = calibrada.casos.expect("hay casos guardados");
+        let medidos = fs::read_to_string(&casos)
+            .expect("lee los casos")
+            .lines()
+            .count();
+        assert_eq!(
+            llamadas.len(),
+            medidos + 1,
+            "la base y cada caso llaman al evaluador"
+        );
+        assert!(
+            llamadas.iter().all(|l| l.juez == 1),
+            "el juez corre en la base y en cada caso"
+        );
+        assert!(
+            llamadas.iter().all(|l| l.tests == 1),
+            "los tests corren en la base y en cada caso"
+        );
+        let deterministas = [
+            COMANDO_GITLEAKS.to_string(),
+            COMANDO_CARGO_AUDIT.to_string(),
+            comando_clippy(),
+            crate::oracle::configs::comando_hadolint("Dockerfile"),
+        ];
+        assert!(llamadas[0].base, "la primera llamada es la base");
+        for cmd in &deterministas {
+            assert_eq!(cuenta_comando(&llamadas[0], cmd), 1, "la base corre {cmd}");
+        }
+        assert_eq!(
+            cuenta_mutaciones(&llamadas[0]),
+            1,
+            "la base corre la mutación"
+        );
+        let limpios: Vec<&Llamada> = llamadas[1..]
+            .iter()
+            .filter(|l| l.alcance == Some(Alcance::Deterministas))
+            .collect();
+        assert!(!limpios.is_empty(), "hay casos limpios");
+        for l in limpios {
+            assert!(
+                l.cmds.is_empty(),
+                "un caso limpio no corre sondas: {:?}",
+                l.cmds
+            );
+        }
+        for l in llamadas[1..]
+            .iter()
+            .filter(|l| l.alcance == Some(Alcance::SoloMutacion))
+        {
+            assert_eq!(
+                cuenta_mutaciones(l),
+                0,
+                "el defecto de Diseño reusa la mutación"
+            );
+            for cmd in &deterministas {
+                assert_eq!(cuenta_comando(l, cmd), 1, "el defecto corre {cmd}");
+            }
+        }
+    }
+
+    /// Un caso limpio da la misma especificidad con y sin reuso: el veredicto del fake es el mismo.
+    #[test]
+    fn calibra_un_caso_limpio_da_la_misma_especificidad_con_y_sin_reuso() {
+        let calibrar = |usar_reuso: bool| {
+            let home = tempfile::tempdir().expect("home");
+            carpeta_con_repo_bueno(home.path());
+            let llamadas = Mutex::new(Vec::<Llamada>::new());
+            let evaluador = evaluador_con_juez_y_tests(
+                &llamadas,
+                || veredicto_de(Dimension::Diseno, 1.0, None),
+                usar_reuso,
+            );
+            calibrar_tarea_con(
+                home.path(),
+                "calibra-fixture",
+                "diseno",
+                4,
+                42,
+                None,
+                None,
+                &evaluador,
+            )
+            .expect("calibra")
+            .fila
+        };
+        let con = calibrar(true);
+        let sin = calibrar(false);
+        assert!(con.limpios > 0, "hay casos limpios");
+        assert_eq!(con.limpios, sin.limpios);
+        assert_eq!(con.defectos, sin.defectos);
+        assert_eq!(con.especificidad, sin.especificidad);
     }
 
     /// Una calibración no escribe historial: cada caso es una versión distinta y se evalúa una vez.
@@ -1199,9 +2186,9 @@ mod tests {
         let carpeta = home.path().join("oraculos").join("calibra-fixture");
         std::fs::create_dir_all(&carpeta).expect("carpeta");
         let _ = tarea_en(&carpeta, "");
-        let historiales = RefCell::new(Vec::<bool>::new());
+        let historiales = Mutex::new(Vec::<bool>::new());
         let evaluador = |_: &Tarea, _: &Path, o: &OpcionesOraculo| {
-            historiales.borrow_mut().push(o.historial);
+            historiales.lock().expect("lock").push(o.historial);
             Ok(veredicto_base())
         };
         calibrar_tarea(
@@ -1214,7 +2201,7 @@ mod tests {
             &evaluador,
         )
         .expect("calibra");
-        let vistos = historiales.borrow();
+        let vistos = historiales.lock().expect("lock");
         assert!(!vistos.is_empty(), "el evaluador no recibió llamadas");
         assert!(vistos.iter().all(|h| !h), "{vistos:?}");
     }
@@ -1585,6 +2572,427 @@ mod tests {
         assert!(
             c.de("memora", Dimension::Seguridad)
                 .is_some_and(|f| !f.incompleta)
+        );
+    }
+
+    #[test]
+    fn calibra_casos_reserva_el_nombre_base_si_esta_libre() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (ruta, _) = reservar_destino(dir.path(), "x").expect("reserva");
+        assert_eq!(ruta.file_name().expect("nombre"), "x.casos.jsonl");
+    }
+
+    #[test]
+    fn calibra_casos_reserva_el_sufijo_si_el_nombre_ya_existe() {
+        let dir = tempfile::tempdir().expect("dir");
+        fs::write(dir.path().join("x.casos.jsonl"), "").expect("escribe");
+        fs::write(dir.path().join("x-2.casos.jsonl"), "").expect("escribe");
+        let (ruta, _) = reservar_destino(dir.path(), "x").expect("reserva");
+        assert_eq!(ruta.file_name().expect("nombre"), "x-3.casos.jsonl");
+    }
+
+    /// Motivo que emite la sonda de clippy cuando el código no compila.
+    const NO_COMPILA: &str = "el código no compila: error[E0432]: unresolved import";
+
+    /// Veredicto de `dimension` con `valor` y, si `sin` es `Some`, sin veredicto con ese motivo.
+    fn veredicto_de(dimension: Dimension, valor: f32, sin: Option<&str>) -> Veredicto {
+        Veredicto {
+            puntajes: vec![Puntaje {
+                sin_veredicto: sin.map(str::to_string),
+                ..puntaje(dimension, valor)
+            }],
+            ..Veredicto::default()
+        }
+    }
+
+    /// La copia de `base` con su dimensión sin veredicto por `motivo`.
+    fn con_motivo(base: &Veredicto, motivo: &str) -> Veredicto {
+        let mut v = base.clone();
+        v.puntajes[0].sin_veredicto = Some(motivo.into());
+        v
+    }
+
+    /// La copia de `base` con su dimensión en cero: un defecto que la dimensión detecta.
+    fn bajada(base: &Veredicto) -> Veredicto {
+        let mut v = base.clone();
+        v.puntajes[0].valor = 0.0;
+        v
+    }
+
+    fn faltante(motivo: &str) -> ItemFaltante {
+        ItemFaltante {
+            item: "pruebas.mutacion".into(),
+            motivo: motivo.into(),
+        }
+    }
+
+    #[test]
+    fn rompe_la_compilacion_no_compila_nuevo_en_estructura_es_verdadero() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let veredicto = con_motivo(&base, NO_COMPILA);
+        assert!(rompe_la_compilacion(
+            &base,
+            &veredicto,
+            Dimension::Estructura
+        ));
+    }
+
+    #[test]
+    fn rompe_la_compilacion_motivo_que_la_base_ya_tiene_es_falso() {
+        let base = con_motivo(&veredicto_de(Dimension::Estructura, 1.0, None), NO_COMPILA);
+        let veredicto = con_motivo(&base, NO_COMPILA);
+        assert!(!rompe_la_compilacion(
+            &base,
+            &veredicto,
+            Dimension::Estructura
+        ));
+    }
+
+    #[test]
+    fn rompe_la_compilacion_reconoce_fallan_sin_mutaciones_en_faltantes() {
+        let base = veredicto_de(Dimension::Pruebas, 1.0, None);
+        let mut veredicto = base.clone();
+        veredicto.puntajes[0].faltantes =
+            vec![faltante("los tests del proyecto fallan sin mutaciones")];
+        assert!(rompe_la_compilacion(&base, &veredicto, Dimension::Pruebas));
+    }
+
+    #[test]
+    fn rompe_la_compilacion_faltante_que_la_base_ya_tiene_es_falso() {
+        let mut base = veredicto_de(Dimension::Pruebas, 1.0, None);
+        base.puntajes[0].faltantes = vec![faltante("los tests del proyecto fallan sin mutaciones")];
+        let veredicto = base.clone();
+        assert!(!rompe_la_compilacion(&base, &veredicto, Dimension::Pruebas));
+    }
+
+    #[test]
+    fn rompe_la_compilacion_completitud_y_funciona_son_falsas() {
+        for dimension in [Dimension::Completitud, Dimension::Funciona] {
+            let base = veredicto_de(dimension, 1.0, None);
+            let veredicto = con_motivo(&base, NO_COMPILA);
+            assert!(!rompe_la_compilacion(&base, &veredicto, dimension));
+        }
+    }
+
+    #[test]
+    fn rompe_la_compilacion_otro_motivo_es_falso() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let veredicto = con_motivo(&base, "sin sonda");
+        assert!(!rompe_la_compilacion(
+            &base,
+            &veredicto,
+            Dimension::Estructura
+        ));
+    }
+
+    #[test]
+    fn calibra_inyeccion_invalida_se_reemplaza_por_el_siguiente_candidato() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let primera = Mutex::new(true);
+        let (_t, tarea) = tarea_prueba();
+        let ev = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
+            if limpia {
+                base.clone()
+            } else if std::mem::replace(&mut *primera.lock().expect("lock"), false) {
+                con_motivo(base, NO_COMPILA)
+            } else {
+                bajada(base)
+            }
+        });
+        let fila = calibrar_con(
+            &tarea,
+            Dimension::Estructura,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &ev,
+        )
+        .expect("calibra");
+        assert_eq!(
+            (
+                fila.n,
+                fila.defectos,
+                fila.limpios,
+                fila.no_aplicable,
+                fila.reemplazos
+            ),
+            (2, 1, 1, 0, 1)
+        );
+        assert_eq!(fila.sensibilidad, Some(1.0));
+        assert_eq!(fila.especificidad, Some(1.0));
+    }
+
+    #[test]
+    fn calibra_inyeccion_invalida_agotada_es_no_aplicable_y_no_mide() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let (_t, tarea) = tarea_prueba();
+        let ev = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
+            if limpia {
+                base.clone()
+            } else {
+                con_motivo(base, NO_COMPILA)
+            }
+        });
+        let fila = calibrar_con(
+            &tarea,
+            Dimension::Estructura,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &ev,
+        )
+        .expect("hay fila: queda el caso limpio");
+        assert_eq!(
+            (fila.n, fila.defectos, fila.limpios, fila.no_aplicable),
+            (1, 0, 1, 1)
+        );
+        assert_eq!(fila.sensibilidad, None);
+        // La inyección inicial más los MAX_REEMPLAZOS reemplazos, todos inválidos: cada intento suma 1.
+        assert_eq!(fila.reemplazos, MAX_REEMPLAZOS + 1);
+    }
+
+    #[test]
+    fn calibra_completitud_con_no_compila_mide_y_no_reemplaza() {
+        let base = veredicto_de(Dimension::Completitud, 1.0, None);
+        let (_t, tarea) = tarea_prueba();
+        let ev = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
+            if limpia {
+                base.clone()
+            } else {
+                con_motivo(base, NO_COMPILA)
+            }
+        });
+        let fila = calibrar_con(
+            &tarea,
+            Dimension::Completitud,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &ev,
+        )
+        .expect("calibra");
+        assert_eq!((fila.defectos, fila.limpios, fila.reemplazos), (1, 1, 0));
+        assert_eq!(
+            fila.sensibilidad,
+            Some(0.0),
+            "sin veredicto cuenta como falso negativo"
+        );
+    }
+
+    #[test]
+    fn calibra_limpio_con_no_compila_no_se_reemplaza() {
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let (_t, tarea) = tarea_prueba();
+        let ev = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
+            if limpia {
+                con_motivo(base, NO_COMPILA)
+            } else {
+                bajada(base)
+            }
+        });
+        let fila = calibrar_con(
+            &tarea,
+            Dimension::Estructura,
+            2,
+            42,
+            Path::new(FIXTURE),
+            &ev,
+        )
+        .expect("calibra");
+        assert_eq!((fila.defectos, fila.limpios, fila.reemplazos), (1, 1, 0));
+        assert_eq!(
+            fila.especificidad,
+            Some(0.0),
+            "un limpio sin veredicto es falso positivo"
+        );
+    }
+
+    // ---- Tarea 48, parte 2, punto 3: el juez en paralelo, de a 4 ----
+
+    /// Un caso que llama al juez: cuenta cuántos corren a la vez y espera 50 ms, como una llamada de red.
+    fn llamada_de_juez(en_vuelo: &AtomicUsize, maximo: &AtomicUsize) {
+        let dentro = en_vuelo.fetch_add(1, Ordering::SeqCst) + 1;
+        maximo.fetch_max(dentro, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(50));
+        en_vuelo.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn calibra_con_ocho_casos_de_diseno_nunca_hay_mas_de_cuatro_jueces_a_la_vez() {
+        let base = veredicto_de(Dimension::Diseno, 1.0, None);
+        let (_t, tarea) = tarea_prueba();
+        let falso_de_diseno = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
+            if limpia { base.clone() } else { bajada(base) }
+        });
+        let (en_vuelo, maximo) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let juez = |ruta: &Path| {
+            if ruta != Path::new(FIXTURE) {
+                llamada_de_juez(&en_vuelo, &maximo);
+            }
+            falso_de_diseno(ruta)
+        };
+        calibrar_con(&tarea, Dimension::Diseno, 16, 42, Path::new(FIXTURE), &juez)
+            .expect("calibra");
+        let pico = maximo.load(Ordering::SeqCst);
+        assert!(
+            pico <= CASOS_EN_PARALELO,
+            "más de 4 jueces a la vez: {pico}"
+        );
+        assert!(pico >= 2, "sin paralelismo real: {pico}");
+    }
+
+    #[test]
+    fn calibra_el_tope_no_se_pasa_con_cuatro_llamadas_en_paralelo() {
+        let base = veredicto_base();
+        let (_t, tarea) = tarea_prueba();
+        let falso_de_seguridad = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
+            if limpia { base.clone() } else { hundido(base) }
+        });
+        let peor = 1.0;
+        let gastado = Mutex::new(0.0f64);
+        let (en_vuelo, maximo) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        // Cada caso cobra un peor caso al terminar. La línea base no cobra.
+        let evaluar = |ruta: &Path, tipo: TipoCaso| {
+            if tipo != TipoCaso::Base {
+                llamada_de_juez(&en_vuelo, &maximo);
+                *gastado.lock().expect("gasto") += peor;
+            }
+            falso_de_seguridad(ruta)
+        };
+        let gasto = |_: f64| -> Result<f64, ErrorOraculo> { Ok(*gastado.lock().expect("gasto")) };
+        let tope = Tope {
+            usd: 2.5 * peor,
+            peor_caso: peor,
+            inicio: 0.0,
+            gasto_desde: &gasto,
+        };
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Seguridad,
+            8,
+            42,
+            Path::new(FIXTURE),
+            &evaluar,
+            Some(&tope),
+            &Vec::new,
+            CASOS_EN_PARALELO,
+        )
+        .expect("calibra");
+        assert!(
+            maximo.load(Ordering::SeqCst) <= 2,
+            "más de 2 casos en vuelo"
+        );
+        let gastado = *gastado.lock().expect("gasto");
+        assert!(gastado <= 2.5 * peor, "el gasto {gastado} pasó el tope");
+        assert!(medida.detencion.is_some(), "el tope debe detener la medida");
+        let fila = medida.fila.expect("hay casos terminados");
+        assert!(fila.incompleta, "la fila queda incompleta");
+        assert_eq!(fila.n as usize, medida.casos.len());
+        assert_eq!(
+            medida.casos.len(),
+            2,
+            "se detiene tras los 2 casos que entraron"
+        );
+    }
+
+    #[test]
+    fn calibra_un_hilo_y_cuatro_dan_la_misma_fila_y_el_mismo_archivo_de_casos() {
+        let base = veredicto_base();
+        let falso_de_seguridad = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
+            if limpia { base.clone() } else { hundido(base) }
+        });
+        let (_t, tarea) = tarea_prueba();
+        let medir = |hilos: usize| {
+            calibrar_medida_con_hilos(
+                &tarea,
+                Dimension::Seguridad,
+                20,
+                42,
+                Path::new(FIXTURE),
+                &|ruta: &Path, _: TipoCaso| falso_de_seguridad(ruta),
+                None,
+                &Vec::new,
+                hilos,
+            )
+            .expect("calibra")
+        };
+        let (uno, cuatro) = (medir(1), medir(CASOS_EN_PARALELO));
+        let fila_uno = Fila {
+            ts: 0.0,
+            ..uno.fila.clone().expect("fila")
+        };
+        let fila_cuatro = Fila {
+            ts: 0.0,
+            ..cuatro.fila.clone().expect("fila")
+        };
+        assert_eq!(fila_uno, fila_cuatro);
+        let guardados = |m: &Medida| m.casos.iter().map(CasoGuardado::de).collect::<Vec<_>>();
+        assert_eq!(guardados(&uno), guardados(&cuatro));
+        let home_uno = tempfile::tempdir().expect("home");
+        let home_cuatro = tempfile::tempdir().expect("home");
+        let ruta_uno = escribir_casos(
+            home_uno.path(),
+            &tarea.nombre,
+            Dimension::Seguridad,
+            &fila_uno,
+            &uno.casos,
+        )
+        .expect("escribe")
+        .expect("hay casos");
+        let ruta_cuatro = escribir_casos(
+            home_cuatro.path(),
+            &tarea.nombre,
+            Dimension::Seguridad,
+            &fila_cuatro,
+            &cuatro.casos,
+        )
+        .expect("escribe")
+        .expect("hay casos");
+        assert_eq!(
+            fs::read_to_string(ruta_uno).expect("lee"),
+            fs::read_to_string(ruta_cuatro).expect("lee")
+        );
+    }
+
+    #[test]
+    fn calibra_un_caso_con_error_corta_y_se_propaga_el_primero() {
+        let base = veredicto_base();
+        let falso_de_seguridad = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
+            if limpia { base.clone() } else { hundido(base) }
+        });
+        let llamadas = AtomicUsize::new(0);
+        let evaluar = |ruta: &Path, tipo: TipoCaso| {
+            if tipo != TipoCaso::Base {
+                llamadas.fetch_add(1, Ordering::SeqCst);
+            }
+            if ruta.ends_with("caso-2") {
+                return Err(ErrorOraculo::Infra("falla del caso dos".into()));
+            }
+            std::thread::sleep(Duration::from_millis(30));
+            falso_de_seguridad(ruta)
+        };
+        let (_t, tarea) = tarea_prueba();
+        let error = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Seguridad,
+            20,
+            42,
+            Path::new(FIXTURE),
+            &evaluar,
+            None,
+            &Vec::new,
+            CASOS_EN_PARALELO,
+        )
+        .err()
+        .expect("el error de un caso corta la calibración");
+        assert!(
+            matches!(&error, ErrorOraculo::Infra(m) if m == "falla del caso dos"),
+            "{error:?}"
+        );
+        assert_eq!(
+            llamadas.load(Ordering::SeqCst),
+            CASOS_EN_PARALELO,
+            "tras el error no se lanza ningún caso nuevo"
         );
     }
 }
