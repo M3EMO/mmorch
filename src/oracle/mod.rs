@@ -1163,7 +1163,7 @@ fn parte_juez_sin_veredicto(
 }
 
 /// Motivo de un ítem del juez sin nivel. Los descartes del reintento mandan sobre los del primer envío,
-/// así que va primero el "no respondió tras un reintento" y luego el `sin_evidencia`. Después el gate
+/// así que van primero los tres motivos de reintento. Después el `sin_evidencia` y el gate
 /// de evidencia (desempate B').
 fn motivo_sin_nivel(resultado: &ResultadoJuez, id: &str) -> &'static str {
     let que = format!("ítem {id}");
@@ -1175,6 +1175,10 @@ fn motivo_sin_nivel(resultado: &ResultadoJuez, id: &str) -> &'static str {
         .collect();
     if motivos.contains(&MOTIVO_JUEZ_SIN_REINTENTO) {
         MOTIVO_JUEZ_SIN_REINTENTO
+    } else if motivos.contains(&MOTIVO_GATE_REINTENTO) {
+        MOTIVO_GATE_REINTENTO
+    } else if motivos.contains(&MOTIVO_JUEZ_NIVEL_INVALIDO) {
+        MOTIVO_JUEZ_NIVEL_INVALIDO
     } else if motivos.iter().any(|m| m.contains("sin_evidencia")) {
         MOTIVO_JUEZ_SIN_EVIDENCIA
     } else if motivos.iter().any(|m| m.contains("gate")) {
@@ -1221,6 +1225,10 @@ pub const MOTIVO_JUEZ_SIN_NIVEL: &str = "el juez no dio nivel";
 pub const MOTIVO_JUEZ_SIN_EVIDENCIA: &str = "el juez no encontró evidencia";
 /// Motivo de un ítem del juez que no dio nivel ni `sin_evidencia` ni tras su reintento (Tarea 44, parte 3).
 pub const MOTIVO_JUEZ_SIN_REINTENTO: &str = "el juez no respondió tras un reintento";
+/// Motivo de un ítem del juez cuya evidencia no pasó el gate también en el reintento.
+pub const MOTIVO_GATE_REINTENTO: &str = "la evidencia no pasó el gate tras un reintento";
+/// Motivo de un ítem del juez que no dio un nivel válido tras el reintento (Tarea 45, parte 2).
+pub const MOTIVO_JUEZ_NIVEL_INVALIDO: &str = "el juez no dio un nivel válido tras un reintento";
 
 /// Una parte de una dimensión, sondas o juez, con su peso: la suma de los pesos de sus ítems medidos.
 struct Parte {
@@ -4899,7 +4907,7 @@ mod tests {
     #[test]
     fn oraculo_item_del_juez_descartado_por_el_gate_tiene_su_motivo() {
         // El juez da nivel 2 con una cita inventada: el gate descarta el ítem. El reintento, con la misma
-        // respuesta, vuelve a fallar, y el faltante dice que el juez no respondió tras el reintento.
+        // respuesta, vuelve a fallar, y el faltante dice que la evidencia no pasó el gate tras el reintento.
         let base = tempfile::tempdir().expect("base");
         let solo = evaluar_rust_con(&base.path().join("solo"), &[], None);
         let referencia = puntaje_de_prueba(&solo, Dimension::Estructura).valor;
@@ -4926,7 +4934,7 @@ mod tests {
             .iter()
             .find(|f| f.item == "estructura.legibilidad")
             .expect("el ítem descartado queda en faltantes");
-        assert_eq!(legibilidad.motivo, MOTIVO_JUEZ_SIN_REINTENTO);
+        assert_eq!(legibilidad.motivo, MOTIVO_GATE_REINTENTO);
     }
 
     #[test]
@@ -4944,6 +4952,29 @@ mod tests {
         assert_eq!(
             motivo_sin_nivel(&sin_descarte, "estructura.legibilidad"),
             MOTIVO_JUEZ_SIN_NIVEL
+        );
+    }
+
+    #[test]
+    fn motivo_sin_nivel_reconoce_motivos_de_reintento() {
+        let con_motivo = |motivo: &str| {
+            let mut r = resultado_con_niveles(&[]);
+            r.descartes = vec![juez::Descarte {
+                que: "ítem estructura.legibilidad".into(),
+                motivo: motivo.into(),
+            }];
+            r
+        };
+        assert_eq!(
+            motivo_sin_nivel(&con_motivo(MOTIVO_GATE_REINTENTO), "estructura.legibilidad"),
+            MOTIVO_GATE_REINTENTO
+        );
+        assert_eq!(
+            motivo_sin_nivel(
+                &con_motivo(MOTIVO_JUEZ_NIVEL_INVALIDO),
+                "estructura.legibilidad"
+            ),
+            MOTIVO_JUEZ_NIVEL_INVALIDO
         );
     }
 

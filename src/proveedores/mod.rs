@@ -44,6 +44,9 @@ pub struct Prompt {
     pub max_tokens: u32,
     /// Fase del flujo que hace la llamada. Va al `Evento`.
     pub fase: String,
+    /// `true` si la llamada es el reintento del juez. Va al `Evento` como `extra.reintento_juez`.
+    #[serde(default)]
+    pub reintento_juez: bool,
 }
 
 /// Lo que devuelve un modelo, con su costo medido.
@@ -879,6 +882,10 @@ fn evento(corrida: &str, prompt: &Prompt, e: &Eleccion, familia: &str, latency_s
     ev.latency_s = latency_s;
     ev.extra
         .insert("razonamiento".into(), json!(e.razonamiento));
+    // Solo el reintento del juez lleva la marca. La primera llamada no tiene la clave.
+    if prompt.reintento_juez {
+        ev.extra.insert("reintento_juez".into(), json!(true));
+    }
     ev
 }
 

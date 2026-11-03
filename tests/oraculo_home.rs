@@ -84,6 +84,7 @@ fn oraculo_home_evaluar_y_llamadas_escriben_solo_en_su_home() {
         usuario: "hola".into(),
         max_tokens: 10,
         fase: "prueba".into(),
+        reintento_juez: false,
     };
     let error = proveedores::llamar_en(b.path(), &eleccion, &prompt, "prueba-home")
         .expect_err("sin precio: no se envía");

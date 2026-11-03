@@ -204,6 +204,7 @@ fn prompt() -> Prompt {
         usuario: "hola".into(),
         max_tokens: 64,
         fase: "fase-prueba".into(),
+        reintento_juez: false,
     }
 }
 
@@ -335,6 +336,59 @@ fn proveedores_deepseek_200_da_texto_costo_y_evento() {
     assert_eq!(evs[0]["extra"]["razonamiento"], false);
     assert_eq!(evs[0]["in_tokens"], 100);
     assert!(evs[0]["cost_usd"].as_f64().expect("costo") > 0.0);
+}
+
+/// Llama una vez a DeepSeek con `pedido` y devuelve el `eventos.jsonl` de esa llamada.
+fn evento_de_llamada_con_prompt(pedido: &Prompt) -> Vec<Value> {
+    let srv = Servidor::arranca(vec![(200, deepseek_ok())]);
+    let cfg = config(&srv.url, &srv.url);
+    let home = tempfile::tempdir().expect("home");
+    let breaker = Breaker::new();
+    let claves = claves_de_prueba();
+    let base = Instant::now();
+    let reloj = || base;
+    let ctx = Contexto {
+        cfg: &cfg,
+        home: home.path(),
+        breaker: &breaker,
+        claves: &claves,
+        reloj: &reloj,
+        plazos: Plazos::default(),
+    };
+    llamar_con(
+        &ctx,
+        &eleccion(Proveedor::Deepseek, "deepseek-chat"),
+        pedido,
+        "c-reintento",
+    )
+    .expect("200 da respuesta");
+    eventos(home.path())
+}
+
+#[test]
+fn proveedores_reintento_juez_marca_el_evento_llamada() {
+    let pedido = Prompt {
+        reintento_juez: true,
+        ..prompt()
+    };
+    let evs = evento_de_llamada_con_prompt(&pedido);
+    assert_eq!(evs.len(), 1);
+    assert_eq!(evs[0]["extra"]["reintento_juez"], true);
+}
+
+#[test]
+fn proveedores_primera_llamada_del_juez_no_lleva_la_marca() {
+    let pedido = Prompt {
+        reintento_juez: false,
+        ..prompt()
+    };
+    let evs = evento_de_llamada_con_prompt(&pedido);
+    assert_eq!(evs.len(), 1);
+    assert!(
+        evs[0]["extra"].get("reintento_juez").is_none(),
+        "{}",
+        evs[0]["extra"]
+    );
 }
 
 #[test]
@@ -1489,6 +1543,7 @@ fn proveedores_tokens_de_entrada_cuentan_bytes_utf8() {
         usuario: "€".repeat(1000),
         max_tokens: 1,
         fase: "f".into(),
+        reintento_juez: false,
     };
     assert!(tokens_entrada_estimados(&prompt) >= 3000);
 }
@@ -1500,6 +1555,7 @@ fn proveedores_tokens_de_entrada_suman_sistema_y_usuario() {
         usuario: "de".into(),
         max_tokens: 1,
         fase: "f".into(),
+        reintento_juez: false,
     };
     assert_eq!(tokens_entrada_estimados(&prompt), 5);
 }

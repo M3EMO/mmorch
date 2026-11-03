@@ -15,7 +15,9 @@ use super::perfiles::crear_hallazgo;
 use super::perfiles::rust::REGLA_CICLO;
 use super::rubrica::{ErrorRubrica, ItemRubrica, Mide, Puntuacion, Rubrica};
 use super::tarea::Requisito;
-use super::{ErrorOraculo, MOTIVO_JUEZ_SIN_REINTENTO};
+use super::{
+    ErrorOraculo, MOTIVO_GATE_REINTENTO, MOTIVO_JUEZ_NIVEL_INVALIDO, MOTIVO_JUEZ_SIN_REINTENTO,
+};
 use crate::config::root_home;
 use crate::proveedores::{self, Prompt, RespuestaJuez};
 use crate::tipos::{Dimension, Eleccion, Fuente, Hallazgo, NivelItem, Via};
@@ -239,6 +241,7 @@ fn construir_prompt_con(
         usuario,
         max_tokens: limites.max_tokens,
         fase: FASE.into(),
+        reintento_juez: reintento.is_some(),
     }
 }
 
@@ -414,15 +417,23 @@ pub fn juzgar(
         }
         lectura.descartes.extend(otra.descartes);
         // Sin nivel tras el reintento, y sin `sin_evidencia` en él: el juez no respondió.
-        let sin_respuesta: Vec<String> = reintento
+        // Si la evidencia del reintento no pasó el gate, el motivo es el gate, no la falta de respuesta.
+        let sin_nivel: Vec<String> = reintento
             .iter()
             .filter(|id| !lectura.niveles.contains_key(*id) && !otra.sin_evidencia.contains(*id))
             .cloned()
             .collect();
-        for id in sin_respuesta {
+        for id in sin_nivel {
+            let motivo = if otra.gate.contains_key(&id) {
+                MOTIVO_GATE_REINTENTO
+            } else if otra.invalidos.contains(&id) {
+                MOTIVO_JUEZ_NIVEL_INVALIDO
+            } else {
+                MOTIVO_JUEZ_SIN_REINTENTO
+            };
             lectura
                 .descartes
-                .push(descarte(format!("ítem {id}"), MOTIVO_JUEZ_SIN_REINTENTO));
+                .push(descarte(format!("ítem {id}"), motivo));
         }
     }
     let faltantes = pedidos
@@ -450,7 +461,7 @@ fn reintentar(
     ids: &BTreeSet<String>,
     lectura: &Lectura,
 ) -> Lectura {
-    let texto = texto_reintento(&lectura.gate, &lectura.rotos);
+    let texto = texto_reintento(&lectura.gate, &lectura.rotos, &lectura.invalidos);
     let prompt = construir_prompt_con(e, limites, Some(ids), Some(&texto));
     if exceso_de_entrada(&prompt).is_some() {
         return Lectura::default();
@@ -476,7 +487,12 @@ fn reintentar(
 }
 
 /// Texto de la sección `REINTENTO:`: una línea por cita que no pasó el gate, y una por id roto.
-fn texto_reintento(gate: &BTreeMap<String, Vec<CitaFallida>>, rotos: &BTreeSet<String>) -> String {
+/// Un id con nivel inválido recibe una línea que dice qué nivel se espera.
+fn texto_reintento(
+    gate: &BTreeMap<String, Vec<CitaFallida>>,
+    rotos: &BTreeSet<String>,
+    invalidos: &BTreeSet<String>,
+) -> String {
     let mut texto = String::new();
     for (id, citas) in gate {
         if citas.is_empty() {
@@ -492,7 +508,13 @@ fn texto_reintento(gate: &BTreeMap<String, Vec<CitaFallida>>, rotos: &BTreeSet<S
         }
     }
     for id in rotos {
-        texto.push_str(&format!("- {id}: no respondió o rompió el contrato\n"));
+        if invalidos.contains(id) {
+            texto.push_str(&format!(
+                "- {id}: el nivel debe ser un entero de 0 a 3 o null con sin_evidencia\n"
+            ));
+        } else {
+            texto.push_str(&format!("- {id}: no respondió o rompió el contrato\n"));
+        }
     }
     texto
 }
@@ -564,6 +586,8 @@ struct Lectura {
     descartes: Vec<Descarte>,
     /// Ids pedidos que rompen el contrato: omitidos, repetidos, o sin nivel ni `sin_evidencia`.
     rotos: BTreeSet<String>,
+    /// Ids con un nivel presente que no es un entero de 0 a 3. Subconjunto de `rotos`.
+    invalidos: BTreeSet<String>,
     /// Ids con nivel que no pasaron el gate, con las citas que fallaron.
     gate: BTreeMap<String, Vec<CitaFallida>>,
     /// Ids que el juez dio por `sin_evidencia`.
@@ -595,7 +619,10 @@ fn leer_items(valores: Vec<Value>, cx: &Contexto) -> Lectura {
                 lectura.rotos.insert(id);
                 continue;
             }
-            if sin_nivel_ni_evidencia(&valor) {
+            if nivel_invalido(&valor) {
+                lectura.rotos.insert(id.clone());
+                lectura.invalidos.insert(id);
+            } else if sin_nivel_ni_evidencia(&valor) {
                 lectura.rotos.insert(id);
             }
         }
@@ -632,6 +659,14 @@ fn leer_items(valores: Vec<Value>, cx: &Contexto) -> Lectura {
 /// Id de un ítem crudo, si trae uno de texto.
 fn id_de(valor: &Value) -> Option<String> {
     valor.get("item")?.as_str().map(str::to_string)
+}
+
+/// Un nivel presente, no null, que no es un entero de 0 a 3. Rompe el contrato.
+fn nivel_invalido(valor: &Value) -> bool {
+    match valor.get("nivel") {
+        None | Some(Value::Null) => false,
+        Some(nivel) => !nivel.as_i64().is_some_and(|n| (0..=NIVEL_MAX).contains(&n)),
+    }
 }
 
 /// Un ítem sin nivel y sin `sin_evidencia`. Rompe el contrato.
@@ -1763,6 +1798,25 @@ mod tests {
         assert_eq!(visto[0], construir_prompt(&c.entrada(), &limites));
     }
 
+    #[test]
+    fn juez_marca_solo_el_prompt_del_reintento() {
+        let c = caso();
+        let vacia = respuesta(json!([]), json!([]));
+        let completa = respuesta(
+            json!([
+                item_nivel(MODULARIDAD, 2, json!([real()])),
+                item_nivel(TOPE, 1, json!([real()])),
+            ]),
+            json!([]),
+        );
+        let modelo = FalsoSecuencia::nueva(vec![Ok(vacia), Ok(completa)]);
+        juzgar_secuencia(&c, &modelo);
+        let visto = modelo.visto.borrow();
+        assert_eq!(visto.len(), 2);
+        assert!(!visto[0].reintento_juez, "la 1ª llamada no es reintento");
+        assert!(visto[1].reintento_juez, "la 2ª llamada es el reintento");
+    }
+
     // Reintento: un solo por juicio, solo para los ids rotos o sin gate.
 
     /// Modelo falso con una respuesta por llamada, en orden. Una respuesta puede ser error.
@@ -1907,6 +1961,101 @@ mod tests {
         assert_eq!(r.faltantes, vec![TOPE.to_string()]);
         assert!(
             descarte_de(&r, TOPE, "tras un reintento"),
+            "{:?}",
+            r.descartes
+        );
+    }
+
+    #[test]
+    fn juez_gate_tambien_en_el_reintento_deja_motivo_de_gate() {
+        let c = caso();
+        let inventada = evidencia("src/almacen.rs", 4, "pub fn borrar(&self) {}");
+        let primera = respuesta(
+            json!([
+                item_nivel(MODULARIDAD, 2, json!([real()])),
+                item_nivel(TOPE, 3, json!([inventada.clone()])),
+            ]),
+            json!([]),
+        );
+        let segunda = respuesta(json!([item_nivel(TOPE, 3, json!([inventada]))]), json!([]));
+        let modelo = FalsoSecuencia::nueva(vec![Ok(primera), Ok(segunda)]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert_eq!(modelo.visto.borrow().len(), 2, "exactamente un reintento");
+        assert_eq!(r.faltantes, vec![TOPE.to_string()]);
+        assert!(
+            descarte_de(&r, TOPE, MOTIVO_GATE_REINTENTO),
+            "{:?}",
+            r.descartes
+        );
+        assert!(
+            !descarte_de(&r, TOPE, MOTIVO_JUEZ_SIN_REINTENTO),
+            "{:?}",
+            r.descartes
+        );
+    }
+
+    #[test]
+    fn juez_nivel_texto_dispara_reintento_y_el_reintento_valido_gana() {
+        let c = caso();
+        let primera = respuesta(
+            json!([
+                item_nivel(MODULARIDAD, 2, json!([real()])),
+                {"item": TOPE, "nivel": "alto", "evidencia": [real()]},
+            ]),
+            json!([]),
+        );
+        let segunda = respuesta(json!([item_nivel(TOPE, 1, json!([real()]))]), json!([]));
+        let modelo = FalsoSecuencia::nueva(vec![Ok(primera), Ok(segunda)]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert_eq!(modelo.visto.borrow().len(), 2, "exactamente un reintento");
+        assert_eq!(r.niveles.get(TOPE), Some(&1));
+        assert!(r.faltantes.is_empty(), "{:?}", r.faltantes);
+    }
+
+    #[test]
+    fn juez_nivel_cinco_en_reintento_deja_motivo_de_nivel_invalido() {
+        let c = caso();
+        let primera = respuesta(
+            json!([
+                item_nivel(MODULARIDAD, 2, json!([real()])),
+                item_nivel(TOPE, 5, json!([real()])),
+            ]),
+            json!([]),
+        );
+        let segunda = respuesta(json!([item_nivel(TOPE, 5, json!([real()]))]), json!([]));
+        let modelo = FalsoSecuencia::nueva(vec![Ok(primera), Ok(segunda)]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert_eq!(modelo.visto.borrow().len(), 2, "exactamente un reintento");
+        assert_eq!(r.faltantes, vec![TOPE.to_string()]);
+        assert!(
+            descarte_de(&r, TOPE, MOTIVO_JUEZ_NIVEL_INVALIDO),
+            "{:?}",
+            r.descartes
+        );
+        assert!(
+            !descarte_de(&r, TOPE, MOTIVO_JUEZ_SIN_REINTENTO),
+            "{:?}",
+            r.descartes
+        );
+    }
+
+    #[test]
+    fn juez_nivel_texto_en_reintento_deja_motivo_de_nivel_invalido() {
+        let c = caso();
+        let primera = respuesta(
+            json!([item_nivel(MODULARIDAD, 2, json!([real()]))]),
+            json!([]),
+        );
+        let segunda = respuesta(
+            json!([{"item": TOPE, "nivel": "alto", "evidencia": [real()]}]),
+            json!([]),
+        );
+        let modelo = FalsoSecuencia::nueva(vec![Ok(primera), Ok(segunda)]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert_eq!(modelo.visto.borrow().len(), 2, "exactamente un reintento");
+        assert_eq!(r.faltantes, vec![TOPE.to_string()]);
+        assert!(
+            descarte_de(&r, TOPE, MOTIVO_JUEZ_NIVEL_INVALIDO),
             "{:?}",
             r.descartes
         );
