@@ -15,8 +15,10 @@ use crate::tipos::Dimension;
 
 const DIMENSION: Dimension = Dimension::Pruebas;
 const SONDA: &str = "cargo-mutants";
-/// Reporte que deja el comando dentro de `/salida`. Ver `construir_comando`.
+/// Reporte que deja el comando dentro de `/salida`. Ver `comando_de_corrida`.
 pub(crate) const ARCHIVO_OUTCOMES: &str = "outcomes.json";
+/// Listado JSON de los mutantes que deja `comando_de_listado` dentro de `/salida`.
+const ARCHIVO_LISTADO: &str = "listado.json";
 const DETALLE_VIVO: &str = "este cambio de comportamiento no lo detecta ningún test";
 const SEVERIDAD_VIVO: u8 = 2;
 
@@ -27,7 +29,7 @@ pub struct ResultadoMutacion {
     pub muertos: u32,
     pub vivos: u32,
     pub muestra: u32,
-    /// Mutantes viables del repo, si la muestra quedó corta.
+    /// Mutantes del listado (viables o no), si la muestra quedó corta.
     pub total_conocido: Option<u32>,
     pub truncado: bool,
 }
@@ -251,9 +253,41 @@ pub fn mutantes_muertos(json: &str, mutantes_max: u32) -> Vec<MutanteMuerto> {
         .collect()
 }
 
-/// Comando de la corrida completa. Corre sobre una copia de `/repo` y deja `outcomes.json` en
-/// `/salida`, porque el ejecutor solo lee archivos sueltos de esa carpeta.
-pub fn construir_comando(tarea: &Tarea) -> String {
+/// Mutantes del listado, en orden de ejecución. Cada entrada trae el `name` que muestra `--list`.
+#[derive(Deserialize)]
+struct ItemListado {
+    name: String,
+}
+
+/// Nombres de los mutantes del listado JSON de `cargo mutants --list --json`, en orden.
+fn leer_listado(stdout: &str) -> Result<Vec<String>, String> {
+    let items: Vec<ItemListado> = serde_json::from_str(stdout)
+        .map_err(|e| format!("listado ilegible: {}", motivo_json(&e)))?;
+    Ok(items.into_iter().map(|i| i.name).collect())
+}
+
+/// Comando que lista los mutantes en orden de ejecución, sobre una copia de `/repo`. Escribe el
+/// listado en `/salida`: el stdout del ejecutor se corta a sus últimos caracteres.
+pub(crate) fn comando_de_listado() -> String {
+    format!(
+        "{PRELUDIO}cp -a /repo /salida/work && cd /salida/work && \
+         cargo mutants --list --json --no-shuffle > /salida/{ARCHIVO_LISTADO}"
+    )
+}
+
+/// Filtro `-F` que deja solo los mutantes de `nombres`: su alternación exacta, escapada.
+fn filtro_de(nombres: &[String]) -> String {
+    let alternos: Vec<String> = nombres.iter().map(|n| escapar_regex(n)).collect();
+    format!(
+        " -F {}",
+        comilla_shell(&format!("^(?:{})$", alternos.join("|")))
+    )
+}
+
+/// Comando de la corrida de mutación. Corre sobre una copia de `/repo` y deja `outcomes.json` en
+/// `/salida`, porque el ejecutor solo lee archivos sueltos de esa carpeta. `filtro` es `""` (todos
+/// los mutantes) o el `-F` de `filtro_de`.
+fn comando_de_corrida(tarea: &Tarea, filtro: &str) -> String {
     let minutos = tarea
         .pruebas
         .as_ref()
@@ -262,9 +296,45 @@ pub fn construir_comando(tarea: &Tarea) -> String {
     format!(
         "{PRELUDIO}cp -a /repo /salida/work && cd /salida/work && \
          CARGO_TARGET_DIR=/salida/target timeout {segundos} cargo mutants --no-shuffle --jobs 1 \
-         --output /salida/mutants -- --offline; \
+         --output /salida/mutants{filtro} -- --offline; \
          cp /salida/mutants/mutants.out/outcomes.json /salida/{ARCHIVO_OUTCOMES} 2>/dev/null"
     )
+}
+
+/// Comando de la corrida completa, sin filtro. Solo lo usan tests de otros módulos como clave del
+/// memo. La sonda corre `comando_de_corrida` con la muestra.
+#[cfg(test)]
+pub fn construir_comando(tarea: &Tarea) -> String {
+    comando_de_corrida(tarea, "")
+}
+
+/// Escapa los metacaracteres de regex de `texto`, para que `-F` lo busque tal cual.
+fn escapar_regex(texto: &str) -> String {
+    let mut escapado = String::with_capacity(texto.len());
+    for c in texto.chars() {
+        if "\\.+*?()|[]{}^$".contains(c) {
+            escapado.push('\\');
+        }
+        escapado.push(c);
+    }
+    escapado
+}
+
+/// Entrecomilla `texto` para `sh -c`: entre comillas simples, con cada `'` escapada.
+fn comilla_shell(texto: &str) -> String {
+    format!("'{}'", texto.replace('\'', "'\\''"))
+}
+
+/// Verdadero si `cmd` es la corrida de mutación de la sonda, no el listado. El memo la busca así.
+pub(crate) fn es_comando_de_mutacion(cmd: &str) -> bool {
+    cmd.contains("cargo mutants ")
+        && cmd.contains("--output /salida/mutants")
+        && !cmd.contains("--list")
+}
+
+/// Verdadero si `cmd` es el listado de mutantes que arma `comando_de_listado`.
+pub(crate) fn es_comando_de_listado(cmd: &str) -> bool {
+    cmd.contains("cargo mutants ") && cmd.contains("--list")
 }
 
 /// Mutantes máximos de la muestra: los de `[pruebas]`, o el default.
@@ -298,7 +368,38 @@ pub fn sonda_mutacion(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoM
     if let Some(r) = falta_herramienta(ej, DIMENSION, SONDA) {
         return desde_sonda(r);
     }
-    let salida = match ej.ejecutar(&construir_comando(tarea)) {
+    // Primero el listado: da los nombres en orden. La corrida mide solo los primeros `mutantes_max`.
+    let listado = match ej.ejecutar(&comando_de_listado()) {
+        Ok(s) => s,
+        Err(e) => return desde_sonda(sin_veredicto(DIMENSION, e.to_string())),
+    };
+    if listado.codigo != 0 {
+        let base = format!(
+            "no dejó listado de mutantes (cargo-mutants código {})",
+            listado.codigo
+        );
+        return desde_sonda(sin_veredicto(DIMENSION, con_cola(base, &listado.stderr)));
+    }
+    let Some(json) = listado.archivos.get(ARCHIVO_LISTADO) else {
+        let base = "no dejó listado de mutantes (falta listado.json)".to_string();
+        return desde_sonda(sin_veredicto(DIMENSION, base));
+    };
+    let nombres = match leer_listado(json) {
+        Ok(nombres) => nombres,
+        Err(motivo) => return desde_sonda(sin_veredicto(DIMENSION, motivo)),
+    };
+    if nombres.is_empty() {
+        return desde_sonda(ResultadoSonda {
+            dimension: DIMENSION,
+            valor: None,
+            motivo: Some("sin mutantes para medir: el listado no trae mutantes".into()),
+            hallazgos: Vec::new(),
+        });
+    }
+    let max = mutantes_max(tarea);
+    let total = nombres.len() as u32;
+    let muestra = &nombres[..nombres.len().min(max as usize)];
+    let salida = match ej.ejecutar(&comando_de_corrida(tarea, &filtro_de(muestra))) {
         Ok(s) => s,
         Err(e) => return desde_sonda(sin_veredicto(DIMENSION, e.to_string())),
     };
@@ -306,8 +407,14 @@ pub fn sonda_mutacion(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoM
         let base = format!("no dejó reporte (cargo-mutants código {})", salida.codigo);
         return desde_sonda(sin_veredicto(DIMENSION, con_cola(base, &salida.stderr)));
     };
-    parsear_outcomes(json, mutantes_max(tarea), &tarea.requisito)
-        .unwrap_or_else(|e| desde_sonda(sin_veredicto(DIMENSION, e.to_string())))
+    let mut resultado = parsear_outcomes(json, max, &tarea.requisito)
+        .unwrap_or_else(|e| desde_sonda(sin_veredicto(DIMENSION, e.to_string())));
+    // El reporte solo trae la muestra: el total real sale del listado.
+    if resultado.sonda.valor.is_some() && total > max {
+        resultado.truncado = true;
+        resultado.total_conocido = Some(total);
+    }
+    resultado
 }
 
 #[cfg(test)]
@@ -362,16 +469,227 @@ mod tests {
         }
     }
 
-    /// Responde "presente" a `command -v cargo-mutants` y `json` a la corrida.
+    /// Listado en JSON, como `cargo mutants --list --json`, con estos nombres en orden.
+    fn listado_json(nombres: &[&str]) -> String {
+        let items: Vec<serde_json::Value> = nombres
+            .iter()
+            .map(|n| serde_json::json!({ "name": n }))
+            .collect();
+        serde_json::Value::Array(items).to_string()
+    }
+
+    /// Nombres de los mutantes del reporte, en orden. Un reporte que no se lee da un solo nombre.
+    fn nombres_del_reporte(json: &str) -> Vec<String> {
+        let valor: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
+        let nombres: Vec<String> = valor["outcomes"]
+            .as_array()
+            .map(|outs| {
+                outs.iter()
+                    .filter_map(|o| o["scenario"]["Mutant"]["name"].as_str())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if nombres.is_empty() {
+            vec!["m".into()]
+        } else {
+            nombres
+        }
+    }
+
+    /// Salida del listado: el JSON va en `listado.json`, como lo deja `comando_de_listado`.
+    fn salida_listado(json: String) -> SalidaHerramienta {
+        let mut s = SalidaHerramienta::default();
+        s.archivos.insert(ARCHIVO_LISTADO.into(), json);
+        s
+    }
+
+    /// Responde "presente" a `command -v cargo-mutants`, da los mutantes del reporte al listado y
+    /// `json` a la corrida.
     fn con_reporte(json: &'static str) -> Falso {
         Falso::nuevo(move |cmd| {
             if cmd.starts_with("command -v") {
                 return Ok(SalidaHerramienta::default());
             }
+            if cmd.contains("--list") {
+                let nombres = nombres_del_reporte(json);
+                let refs: Vec<&str> = nombres.iter().map(String::as_str).collect();
+                return Ok(salida_listado(listado_json(&refs)));
+            }
             let mut s = SalidaHerramienta::default();
             s.archivos.insert(ARCHIVO_OUTCOMES.into(), json.into());
             Ok(s)
         })
+    }
+
+    /// Listado de un mutante y una corrida que deja código 2 y ningún `outcomes.json`.
+    fn sin_reporte() -> Falso {
+        Falso::nuevo(|cmd| {
+            if cmd.starts_with("command -v") {
+                return Ok(SalidaHerramienta::default());
+            }
+            if cmd.contains("--list") {
+                return Ok(salida_listado(listado_json(&["m"])));
+            }
+            Ok(SalidaHerramienta {
+                codigo: 2,
+                ..Default::default()
+            })
+        })
+    }
+
+    /// Nombres de la muestra de prueba. `->`, `+`, `(` y `.` son metacaracteres o flechas.
+    const NOMBRES: [&str; 5] = [
+        "src/a.rs:1:5: replace a -> u8 with 0",
+        "src/a.rs:2:9: replace b + c with b - c",
+        "src/a.rs:3:3: replace c(x) with d.e",
+        "src/b.rs:4:1: replace d -> Vec<u8> with vec![]",
+        "src/b.rs:5:1: replace e -> u8 with 7",
+    ];
+
+    /// Corrida con un mutante cazado por cada nombre.
+    fn corrida_de(nombres: &[&str]) -> String {
+        let mut outs = vec![serde_json::json!({"scenario": "Baseline", "summary": "Success"})];
+        for (i, n) in nombres.iter().enumerate() {
+            outs.push(serde_json::json!({
+                "scenario": {"Mutant": {"name": n, "file": "src/a.rs",
+                    "span": {"start": {"line": i + 1}}}},
+                "summary": "CaughtMutant"
+            }));
+        }
+        serde_json::json!({"total_mutants": nombres.len(), "outcomes": outs}).to_string()
+    }
+
+    /// Ejecutor que responde `listado` al listado y `corrida` a la corrida de mutación.
+    fn con_listado_y_corrida(listado: String, corrida: String) -> Falso {
+        Falso::nuevo(move |cmd| {
+            if cmd.starts_with("command -v") {
+                return Ok(SalidaHerramienta::default());
+            }
+            if cmd.contains("--list") {
+                return Ok(salida_listado(listado.clone()));
+            }
+            let mut s = SalidaHerramienta::default();
+            s.archivos.insert(ARCHIVO_OUTCOMES.into(), corrida.clone());
+            Ok(s)
+        })
+    }
+
+    /// Comandos registrados que son la corrida de mutación.
+    fn corridas(ej: &Falso) -> Vec<String> {
+        ej.cmds
+            .borrow()
+            .iter()
+            .filter(|c| c.contains("--output /salida/mutants"))
+            .cloned()
+            .collect()
+    }
+
+    /// Tarea de Rust con `[pruebas]` de `mutantes_max`.
+    fn tarea_pruebas(mutantes_max: u32) -> Tarea {
+        tarea_con(
+            "rust",
+            &format!("\n[pruebas]\nmutantes_max = {mutantes_max}\nminutos_max = 20\n"),
+        )
+    }
+
+    #[test]
+    fn mutacion_escapa_metacaracteres_de_regex() {
+        assert_eq!(
+            escapar_regex("a+b(c).d->e<f|g[h]{i}^j$k*l?m\\n"),
+            "a\\+b\\(c\\)\\.d->e<f\\|g\\[h\\]\\{i\\}\\^j\\$k\\*l\\?m\\\\n"
+        );
+    }
+
+    #[test]
+    fn mutacion_comilla_simple_no_rompe_el_shell() {
+        let regex = format!("^(?:{})$", escapar_regex("src/a.rs: it's $HOME `x`"));
+        let q = comilla_shell(&regex);
+        let salida = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("printf %s {q}"))
+            .output()
+            .expect("corre sh");
+        assert_eq!(String::from_utf8_lossy(&salida.stdout), regex);
+    }
+
+    #[test]
+    fn mutacion_corre_solo_los_primeros_mutantes_max_del_listado() {
+        let t = tarea_pruebas(3);
+        let ej = con_listado_y_corrida(listado_json(&NOMBRES), corrida_de(&NOMBRES[..3]));
+        let r = sonda_mutacion(&ej, &t);
+        assert_eq!(r.muestra, 3);
+        assert!(r.truncado);
+        assert_eq!(r.total_conocido, Some(5));
+        let cmds = corridas(&ej);
+        assert_eq!(cmds.len(), 1, "una sola corrida: {cmds:?}");
+        let esperado = "-F '^(?:src/a\\.rs:1:5: replace a -> u8 with 0|\
+            src/a\\.rs:2:9: replace b \\+ c with b - c|\
+            src/a\\.rs:3:3: replace c\\(x\\) with d\\.e)$'";
+        assert!(cmds[0].contains(esperado), "{}", cmds[0]);
+        assert!(
+            !cmds[0].contains("src/b\\.rs"),
+            "no debe pedir los otros dos"
+        );
+    }
+
+    #[test]
+    fn mutacion_listado_fallido_da_sin_veredicto_con_motivo() {
+        let t = tarea_pruebas(3);
+        let ej = Falso::nuevo(|cmd| {
+            Ok(SalidaHerramienta {
+                codigo: if cmd.starts_with("command -v") { 0 } else { 2 },
+                ..Default::default()
+            })
+        });
+        let r = sonda_mutacion(&ej, &t);
+        assert_eq!(r.sonda.valor, None);
+        let motivo = r.sonda.motivo.unwrap_or_default();
+        assert!(motivo.starts_with("no dejó listado"), "{motivo}");
+        assert!(corridas(&ej).is_empty(), "sin listado no corre la muestra");
+    }
+
+    #[test]
+    fn mutacion_listado_ilegible_da_sin_veredicto_con_motivo() {
+        let t = tarea_pruebas(3);
+        let ej = con_listado_y_corrida("{no es json".into(), corrida_de(&NOMBRES[..1]));
+        let r = sonda_mutacion(&ej, &t);
+        assert_eq!(r.sonda.valor, None);
+        let motivo = r.sonda.motivo.unwrap_or_default();
+        assert!(motivo.contains("listado ilegible"), "{motivo}");
+        assert!(corridas(&ej).is_empty());
+    }
+
+    #[test]
+    fn mutacion_listado_vacio_es_sin_mutantes_para_medir() {
+        let t = tarea_pruebas(3);
+        let ej = con_listado_y_corrida("[]".into(), corrida_de(&NOMBRES[..1]));
+        let r = sonda_mutacion(&ej, &t);
+        assert_eq!(r.sonda.valor, None);
+        let motivo = r.sonda.motivo.unwrap_or_default();
+        assert!(motivo.starts_with("sin mutantes para medir"), "{motivo}");
+        assert!(corridas(&ej).is_empty());
+    }
+
+    #[test]
+    fn mutacion_es_comando_de_mutacion_acepta_la_corrida_y_rechaza_el_resto() {
+        let t = tarea_pruebas(3);
+        let ej = con_listado_y_corrida(listado_json(&NOMBRES), corrida_de(&NOMBRES[..3]));
+        let _ = sonda_mutacion(&ej, &t);
+        let cmds = ej.cmds.borrow();
+        let corrida = cmds
+            .iter()
+            .find(|c| c.contains("--output /salida/mutants"))
+            .expect("hay corrida");
+        let listado = cmds
+            .iter()
+            .find(|c| c.contains("--list"))
+            .expect("hay listado");
+        assert!(es_comando_de_mutacion(corrida), "{corrida}");
+        assert!(!es_comando_de_mutacion(listado), "{listado}");
+        assert!(!es_comando_de_mutacion("command -v cargo-mutants"));
+        assert!(!es_comando_de_mutacion("echo hola"));
+        assert!(es_comando_de_mutacion(&construir_comando(&t)));
     }
 
     fn falta_la_herramienta() -> Falso {
@@ -482,13 +800,7 @@ mod tests {
     #[test]
     fn mutacion_sin_reporte_motivo_empieza_con_no_dejo_reporte() {
         let t = tarea_con("rust", "");
-        let ej = Falso::nuevo(|cmd| {
-            Ok(SalidaHerramienta {
-                codigo: if cmd.starts_with("command -v") { 0 } else { 2 },
-                ..Default::default()
-            })
-        });
-        let r = sonda_mutacion(&ej, &t);
+        let r = sonda_mutacion(&sin_reporte(), &t);
         let motivo = r.sonda.motivo.unwrap_or_default();
         assert!(motivo.starts_with("no dejó reporte"), "{motivo}");
     }
@@ -496,13 +808,7 @@ mod tests {
     #[test]
     fn mutacion_los_dos_motivos_de_cero_mutantes_son_distintos() {
         let t = tarea_con("rust", "");
-        let sin_reporte = Falso::nuevo(|cmd| {
-            Ok(SalidaHerramienta {
-                codigo: if cmd.starts_with("command -v") { 0 } else { 2 },
-                ..Default::default()
-            })
-        });
-        let motivo_sin_reporte = sonda_mutacion(&sin_reporte, &t)
+        let motivo_sin_reporte = sonda_mutacion(&sin_reporte(), &t)
             .sonda
             .motivo
             .unwrap_or_default();
@@ -592,13 +898,7 @@ mod tests {
     #[test]
     fn mutacion_sin_reporte_da_sin_veredicto() {
         let t = tarea_con("rust", "");
-        let ej = Falso::nuevo(|cmd| {
-            Ok(SalidaHerramienta {
-                codigo: if cmd.starts_with("command -v") { 0 } else { 2 },
-                ..Default::default()
-            })
-        });
-        let r = sonda_mutacion(&ej, &t);
+        let r = sonda_mutacion(&sin_reporte(), &t);
         assert_eq!(r.sonda.valor, None);
         assert!(
             r.sonda

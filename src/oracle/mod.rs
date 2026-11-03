@@ -3312,6 +3312,11 @@ mod tests {
                 salida.stdout = "[]".into();
             } else if cmd == "bench-eficiencia" {
                 salida.stdout = r#"{"ops_s": 6000.0}"#.into();
+            } else if cmd.contains("cargo mutants") && cmd.contains("--list") {
+                // El listado da un solo mutante: la corrida de la sonda lo filtra con `-F` y el fake lo ignora.
+                salida
+                    .archivos
+                    .insert("listado.json".into(), r#"[{"name":"m"}]"#.into());
             } else if cmd.contains("cargo mutants") {
                 salida
                     .archivos
@@ -5763,11 +5768,7 @@ mod tests {
             ..opciones(&home)
         };
         evaluar_con(&repo, &tarea, &o, deps_de(&sin_suites, &herramientas(&[]))).expect("evalúa");
-        let cmd = mutacion::construir_comando(&tarea);
-        assert!(
-            memo.salida_de(&cmd).is_some(),
-            "la corrida de mutación no quedó grabada"
-        );
+        // La corrida quedó grabada si el memo le saca los mutantes muertos.
         assert_eq!(
             memo.mutantes_muertos(&tarea),
             vec![mutacion::MutanteMuerto {
@@ -5856,10 +5857,11 @@ mod tests {
         let (fabrica_sin, cmds_sin) = herramientas_grabadas();
         let v_sin = evaluar_con(&repo, &tarea, &o_sin, deps_de(&sin_suites, &fabrica_sin))
             .expect("evalúa sin reuso");
+        // Cuenta solo la corrida de mutación: el listado sigue corriendo aunque la corrida venga del memo.
         let mutaciones = |c: &Comandos| {
             c.borrow()
                 .iter()
-                .filter(|c| c.contains("cargo mutants"))
+                .filter(|c| c.contains("--output /salida/mutants"))
                 .count()
         };
         assert!(mutaciones(&cmds_sin) >= 1, "sin reuso la mutación corre");

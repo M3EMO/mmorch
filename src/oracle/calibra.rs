@@ -1809,7 +1809,14 @@ mod tests {
         fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
             self.cmds.lock().expect("lock").push(cmd.to_string());
             let mut salida = SalidaHerramienta::default();
-            if cmd.contains("cargo mutants") {
+            if cmd.contains("cargo mutants") && cmd.contains("--list") {
+                // Un solo mutante en el listado: la corrida lo filtra con `-F` y el fake la responde igual.
+                salida.archivos.insert(
+                    "listado.json".into(),
+                    r#"[{"name":"src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)"}]"#
+                        .into(),
+                );
+            } else if cmd.contains("cargo mutants") {
                 salida
                     .archivos
                     .insert(ARCHIVO_OUTCOMES.into(), OUTCOMES_CON_MUERTO.into());
@@ -1917,11 +1924,12 @@ mod tests {
         }
     }
 
+    /// Cuenta las corridas de mutación. El listado no cuenta: es otro comando de `cargo mutants`.
     fn cuenta_mutaciones(llamada: &Llamada) -> usize {
         llamada
             .cmds
             .iter()
-            .filter(|c| c.contains("cargo mutants"))
+            .filter(|c| c.contains("--output /salida/mutants"))
             .count()
     }
 

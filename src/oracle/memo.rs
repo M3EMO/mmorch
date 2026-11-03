@@ -41,14 +41,25 @@ impl MemoSondas {
     }
 
     /// Mutantes muertos de la muestra de la corrida de mutación de `tarea`, si está grabada.
+    /// La corrida lleva su muestra en el comando, así que la salida se busca por predicado.
     pub fn mutantes_muertos(&self, tarea: &Tarea) -> Vec<MutanteMuerto> {
-        let Some(salida) = self.salida_de(&mutacion::construir_comando(tarea)) else {
+        let Some(salida) = self.salida_de_mutacion() else {
             return Vec::new();
         };
         let Some(json) = salida.archivos.get(mutacion::ARCHIVO_OUTCOMES) else {
             return Vec::new();
         };
         mutacion::mutantes_muertos(json, mutacion::mutantes_max(tarea))
+    }
+
+    /// Salida grabada de la primera corrida de mutación, si hay una.
+    fn salida_de_mutacion(&self) -> Option<SalidaHerramienta> {
+        self.salidas
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|(cmd, _)| mutacion::es_comando_de_mutacion(cmd))
+            .map(|(_, salida)| salida.clone())
     }
 }
 
@@ -85,10 +96,11 @@ impl EjecutorHerramienta for EjecutorGrabador<'_> {
 /// Qué sondas toma el reuso. Un alcance nuevo suma una variante y un brazo en `EjecutorReusador::toma`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Alcance {
-    /// Solo la corrida de mutación: su salida sale del memo, sin correrla.
+    /// Solo la corrida de mutación: su salida sale del memo, sin correrla. El listado de mutantes
+    /// sigue corriendo: es barato y define el filtro `-F` que arma la clave de la corrida.
     SoloMutacion,
-    /// La mutación y las sondas deterministas (gitleaks, cargo audit, clippy, hadolint y la verificación de
-    /// sus herramientas). Nunca la Entrega ni la Eficiencia.
+    /// La mutación (corrida y listado) y las sondas deterministas (gitleaks, cargo audit, clippy, hadolint
+    /// y la verificación de sus herramientas). Nunca la Entrega ni la Eficiencia.
     Deterministas,
 }
 
@@ -110,9 +122,10 @@ impl EjecutorReusador<'_> {
     /// Si el alcance toma `cmd`.
     fn toma(&self, cmd: &str) -> bool {
         match self.reuso.alcance {
-            Alcance::SoloMutacion => es_de_mutacion(cmd),
+            Alcance::SoloMutacion => mutacion::es_comando_de_mutacion(cmd),
             Alcance::Deterministas => {
-                es_de_mutacion(cmd)
+                mutacion::es_comando_de_mutacion(cmd)
+                    || mutacion::es_comando_de_listado(cmd)
                     || herramientas::es_comando_determinista(cmd)
                     || configs::es_comando_determinista(cmd)
             }
@@ -133,12 +146,6 @@ impl EjecutorHerramienta for EjecutorReusador<'_> {
     fn tiene_rustsec(&self) -> bool {
         self.real.tiene_rustsec()
     }
-}
-
-// unificar con mutacion::es_comando_de_mutacion
-/// Si `cmd` es la corrida de mutación: `construir_comando` la arma con `cargo mutants` y deja el reporte.
-fn es_de_mutacion(cmd: &str) -> bool {
-    cmd.contains("cargo mutants") && cmd.contains(mutacion::ARCHIVO_OUTCOMES)
 }
 
 #[cfg(test)]
@@ -464,5 +471,42 @@ mod tests {
             real.cmds.borrow().as_slice(),
             [clippy, COMANDO_GITLEAKS.to_string()]
         );
+    }
+
+    #[test]
+    fn reusador_deterministas_reusa_el_listado_de_mutantes() {
+        use crate::oracle::mutacion::comando_de_listado;
+        let cmd = comando_de_listado();
+        let grabada = con_outcomes("{\"listado\":true}");
+        let memo = Arc::new(MemoSondas::nuevo());
+        memo.anotar(&cmd, &grabada);
+        let real = falso(con_outcomes("{\"real\":true}"), false);
+        let reuso = reuso_de_deterministas(&memo);
+        let reusador = EjecutorReusador {
+            real: &real,
+            reuso: &reuso,
+        };
+        assert_eq!(reusador.ejecutar(&cmd).expect("reusa"), grabada);
+        assert!(
+            real.cmds.borrow().is_empty(),
+            "no debe correr: {:?}",
+            real.cmds
+        );
+    }
+
+    #[test]
+    fn reusador_solo_mutacion_no_reusa_el_listado() {
+        use crate::oracle::mutacion::comando_de_listado;
+        let cmd = comando_de_listado();
+        let memo = Arc::new(MemoSondas::nuevo());
+        memo.anotar(&cmd, &con_outcomes("{}"));
+        let real = falso(con_outcomes("{\"real\":true}"), false);
+        let reuso = reuso_de_mutacion(&memo);
+        let reusador = EjecutorReusador {
+            real: &real,
+            reuso: &reuso,
+        };
+        reusador.ejecutar(&cmd).expect("delega");
+        assert_eq!(real.cmds.borrow().as_slice(), [cmd]);
     }
 }

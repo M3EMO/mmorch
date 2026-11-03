@@ -1,13 +1,18 @@
 //! Sonda de mutación (Tarea 9e). Los fixtures validan el puntaje; la prueba de contenedor corre
 //! `sonda_mutacion` contra podman real, sin red. La imagen debe existir localmente.
 
+use std::cell::RefCell;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
+use root::oracle::ErrorOraculo;
+use root::oracle::descarga::PRELUDIO;
 use root::oracle::mutacion::{parsear_outcomes, sonda_mutacion};
-use root::oracle::perfiles::herramientas::EjecutorContenedor;
+use root::oracle::perfiles::herramientas::{
+    EjecutorContenedor, EjecutorHerramienta, SalidaHerramienta,
+};
 use root::oracle::tarea::Tarea;
 
 /// Imagen de evaluación de Rust. Hoy no trae `cargo-mutants`.
@@ -95,10 +100,10 @@ fn mutacion_contenedor_sin_cargo_mutants_da_sin_veredicto() {
 const RUST_CON_MUTANTS: &str = "localhost/root-oraculo-rust:2";
 
 #[test]
-fn mutacion_real_sin_mutantes_no_deja_reporte_y_da_sin_veredicto() {
+fn mutacion_real_sin_mutantes_da_sin_mutantes_para_medir() {
     root::saltar_sin_podman!();
     asegurar_imagen(RUST_CON_MUTANTS);
-    // Un repo sin funciones ni expresiones que mutar: cargo-mutants no escribe outcomes.json.
+    // Un repo sin funciones ni expresiones que mutar: el listado llega vacío.
     let repo = tempfile::tempdir().expect("temp dir");
     fs::create_dir_all(repo.path().join("src")).expect("crea src");
     fs::write(repo.path().join("src/lib.rs"), "pub struct S;\n").expect("escribe");
@@ -124,5 +129,153 @@ fn mutacion_real_sin_mutantes_no_deja_reporte_y_da_sin_veredicto() {
     let r = sonda_mutacion(&ej, &tarea);
     assert_eq!(r.sonda.valor, None, "{:?}", r.sonda);
     let motivo = r.sonda.motivo.unwrap_or_default();
-    assert!(motivo.contains("no dejó reporte"), "{motivo}");
+    assert!(motivo.starts_with("sin mutantes para medir"), "{motivo}");
+}
+
+/// Repo con más mutantes que `mutantes_max` en los casos de prueba (16 o más). Algunos cazados.
+const LIB_CON_TESTS: &str = "pub fn suma(a: u32, b: u32) -> u32 { a + b }\n\
+pub fn doble(a: u32) -> u32 { a * 2 }\n\
+pub fn es_par(a: u32) -> bool { a % 2 == 0 }\n\
+pub fn cero() -> u32 { 0 }\n\
+pub fn uno(a: u32) -> u32 { a / 1 }\n\
+pub fn tres(a: u32) -> u32 { a - 0 }\n\
+#[cfg(test)]\n\
+mod tests {\n    #[test]\n    fn t() { assert_eq!(super::suma(1, 2), 3); assert!(super::es_par(2)); }\n}\n";
+
+fn repo_de_mutantes() -> tempfile::TempDir {
+    let repo = tempfile::tempdir().expect("temp dir");
+    fs::create_dir_all(repo.path().join("src")).expect("crea src");
+    fs::write(repo.path().join("src/lib.rs"), LIB_CON_TESTS).expect("escribe lib.rs");
+    fs::write(
+        repo.path().join("Cargo.toml"),
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("escribe Cargo.toml");
+    repo
+}
+
+/// Tarea de Rust con `[pruebas]`: `mutantes_max` y 20 minutos.
+fn tarea_con_pruebas(dir: &Path, mutantes_max: u32) -> Tarea {
+    fs::write(
+        dir.join("tarea.toml"),
+        format!(
+            "nombre = \"x\"\nlenguaje = \"rust\"\nimagen = \"i\"\nspec = \"s\"\n\
+             [contrato]\ncmd = \"c\"\n[oculto]\ncmd = \"o\"\n\
+             [pruebas]\nmutantes_max = {mutantes_max}\nminutos_max = 20\n"
+        ),
+    )
+    .expect("escribe tarea.toml");
+    Tarea::cargar_de(dir).expect("carga la tarea")
+}
+
+/// Ejecutor real que anota cada comando y cuántos mutantes trae el reporte de cada corrida.
+struct Espia {
+    dentro: EjecutorContenedor,
+    cmds: RefCell<Vec<String>>,
+    mutantes_del_reporte: RefCell<Vec<usize>>,
+}
+
+impl EjecutorHerramienta for Espia {
+    fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+        self.cmds.borrow_mut().push(cmd.to_string());
+        let salida = self.dentro.ejecutar(cmd)?;
+        if let Some(json) = salida.archivos.get("outcomes.json") {
+            let valor: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
+            let n = valor["outcomes"].as_array().map_or(0, |outs| {
+                outs.iter()
+                    .filter(|o| o["scenario"]["Mutant"].is_object())
+                    .count()
+            });
+            self.mutantes_del_reporte.borrow_mut().push(n);
+        }
+        Ok(salida)
+    }
+
+    fn tiene_rustsec(&self) -> bool {
+        self.dentro.tiene_rustsec()
+    }
+}
+
+/// Ejecutor real sobre `repo`, con el `config.toml` de `cache` y la salida en `home`.
+fn ejecutor_real(repo: &Path, cache: &Path, home: &Path) -> EjecutorContenedor {
+    EjecutorContenedor {
+        imagen: RUST_CON_MUTANTS.into(),
+        repo: repo.into(),
+        oraculo: None,
+        rustsec: None,
+        cache: Some(cache.into()),
+        timeout: LIMITE,
+        home: home.into(),
+    }
+}
+
+/// Carpeta de caché con un `config.toml` vacío, que el preludio copia.
+fn cache_vacia() -> tempfile::TempDir {
+    let cache = tempfile::tempdir().expect("temp dir");
+    fs::write(cache.path().join("config.toml"), "").expect("escribe config.toml");
+    cache
+}
+
+#[test]
+fn mutacion_real_corre_solo_la_muestra_de_mutantes_max() {
+    root::saltar_sin_podman!();
+    asegurar_imagen(RUST_CON_MUTANTS);
+    let repo = repo_de_mutantes();
+    let cache = cache_vacia();
+    let carpeta = tempfile::tempdir().expect("temp dir");
+    let tarea = tarea_con_pruebas(carpeta.path(), 3);
+    let ej = Espia {
+        dentro: ejecutor_real(repo.path(), cache.path(), carpeta.path()),
+        cmds: RefCell::new(Vec::new()),
+        mutantes_del_reporte: RefCell::new(Vec::new()),
+    };
+    let r = sonda_mutacion(&ej, &tarea);
+    assert!(r.sonda.valor.is_some(), "{:?}", r.sonda);
+    assert!(r.muestra >= 1 && r.muestra <= 3, "muestra {}", r.muestra);
+    assert!(r.truncado, "hay más mutantes que la muestra");
+    assert!(r.total_conocido.unwrap_or(0) > 3, "{:?}", r.total_conocido);
+    let cmds = ej.cmds.borrow();
+    let corridas = cmds
+        .iter()
+        .filter(|c| c.contains("--output /salida/mutants"))
+        .count();
+    let listados = cmds.iter().filter(|c| c.contains("--list")).count();
+    assert_eq!((listados, corridas), (1, 1), "{cmds:?}");
+    drop(cmds);
+    let reporte = ej.mutantes_del_reporte.borrow();
+    assert_eq!(reporte.len(), 1, "un solo reporte: {reporte:?}");
+    assert!(
+        (1..=3).contains(&reporte[0]),
+        "cargo-mutants recibió más que la muestra: {reporte:?}"
+    );
+}
+
+#[test]
+fn mutacion_real_muestra_igual_que_el_comando_completo_viejo() {
+    root::saltar_sin_podman!();
+    asegurar_imagen(RUST_CON_MUTANTS);
+    // Con menos mutantes que `mutantes_max`, la muestra nueva es la corrida completa de antes.
+    let repo = repo_de_mutantes();
+    let cache = cache_vacia();
+    let carpeta = tempfile::tempdir().expect("temp dir");
+    let tarea = tarea_con_pruebas(carpeta.path(), 60);
+    let ej = ejecutor_real(repo.path(), cache.path(), carpeta.path());
+    // Comando de la corrida completa antes del cambio: `git show HEAD:src/oracle/mutacion.rs`.
+    let viejo = format!(
+        "{PRELUDIO}cp -a /repo /salida/work && cd /salida/work && \
+         CARGO_TARGET_DIR=/salida/target timeout 1200 cargo mutants --no-shuffle --jobs 1 \
+         --output /salida/mutants -- --offline; \
+         cp /salida/mutants/mutants.out/outcomes.json /salida/outcomes.json 2>/dev/null"
+    );
+    let salida = ej.ejecutar(&viejo).expect("corre el comando viejo");
+    let json = salida.archivos.get("outcomes.json").expect("reporte viejo");
+    let antes = parsear_outcomes(json, 60, &[]).expect("parsea el reporte viejo");
+    let despues = sonda_mutacion(&ej, &tarea);
+    assert!(despues.muestra > 0, "{:?}", despues.sonda);
+    assert_eq!(despues.sonda.valor, antes.sonda.valor);
+    assert_eq!(despues.muertos, antes.muertos);
+    assert_eq!(despues.vivos, antes.vivos);
+    assert_eq!(despues.muestra, antes.muestra);
+    assert_eq!(despues.truncado, antes.truncado);
+    assert_eq!(despues.sonda.hallazgos.len(), antes.sonda.hallazgos.len());
 }
