@@ -10,8 +10,10 @@ pub mod python;
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -19,7 +21,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::configs::{instrucciones, palabra_clave, parsear_from};
-use super::contenedor::{self, Ejecucion, correr_podman};
+use super::contenedor::{self, Ejecucion, SalidaPodman};
 use super::entrega::{Eleccion, PodmanReal, dockerfiles_del_repo, elegir_dockerfile};
 use super::juez::ModeloJuez;
 use super::tarea::Tarea;
@@ -1155,13 +1157,82 @@ enum Bajada {
     Problema(Problema),
 }
 
+/// Tope en bytes de la salida de `podman` que guarda la descarga, por flujo.
+const COLA_DESCARGA: usize = 4000;
+
+/// Lee un flujo en otro hilo y guarda solo sus últimos `COLA_DESCARGA` bytes.
+/// El buffer se recorta al pasar de `2 * COLA_DESCARGA`. Al final queda el tope exacto.
+/// Si hubo recorte, quita los bytes de continuación del inicio. Así no parte un carácter UTF-8.
+pub(crate) fn leer_cola<R: Read + Send + 'static>(mut flujo: R) -> JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut cola: Vec<u8> = Vec::new();
+        let mut buf = [0u8; 8192];
+        let mut recortado = false;
+        loop {
+            match flujo.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    cola.extend_from_slice(&buf[..n]);
+                    if cola.len() > 2 * COLA_DESCARGA {
+                        let sobra = cola.len() - COLA_DESCARGA;
+                        cola.drain(..sobra);
+                        recortado = true;
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        if cola.len() > COLA_DESCARGA {
+            let sobra = cola.len() - COLA_DESCARGA;
+            cola.drain(..sobra);
+            recortado = true;
+        }
+        if recortado {
+            let continuacion = cola.iter().take_while(|b| **b & 0xC0 == 0x80).count();
+            cola.drain(..continuacion);
+        }
+        cola
+    })
+}
+
+/// Corre `podman` con `args` y espera hasta `plazo`. Guarda solo la cola de cada salida.
+/// Si vence, mata el proceso y da `Infra`. Si lo mata una señal, también da `Infra`.
+fn correr_podman_acotado(args: &[&str], plazo: Duration) -> Result<SalidaPodman, ErrorOraculo> {
+    let mut hijo = Command::new("podman")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| ErrorOraculo::Infra(format!("no se pudo lanzar podman: {err}")))?;
+    let salida = hijo.stdout.take().map(leer_cola);
+    let error = hijo.stderr.take().map(leer_cola);
+    let Some(estado) = contenedor::esperar(&mut hijo, plazo)? else {
+        let _ = hijo.kill();
+        let _ = hijo.wait();
+        return Err(ErrorOraculo::Infra(format!(
+            "podman {} superó {} s",
+            args.first().unwrap_or(&""),
+            plazo.as_secs()
+        )));
+    };
+    let Some(codigo) = estado.code() else {
+        return Err(ErrorOraculo::Infra("podman terminó por una señal".into()));
+    };
+    Ok(SalidaPodman {
+        codigo,
+        stdout: contenedor::recoger(salida),
+        stderr: contenedor::recoger(error),
+    })
+}
+
 /// Corre `podman pull` de la imagen con un `authfile` vacío. Un fallo de red o de registro caído es
 /// `Problema::Infraestructura`.
 fn bajar_imagen(imagen: &str, home: &Path) -> Result<Bajada, ErrorOraculo> {
     let authfile = authfile_vacio(home).map_err(|e| infra("authfile de podman pull", e))?;
     let args = args_pull(imagen, authfile.path());
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let pull = match correr_podman(&refs, PLAZO_PULL) {
+    let pull = match correr_podman_acotado(&refs, PLAZO_PULL) {
         Ok(pull) => pull,
         Err(ErrorOraculo::Infra(motivo)) => {
             return Ok(Bajada::Problema(Problema::Infraestructura(format!(
@@ -1191,7 +1262,7 @@ fn traer(imagen: &str, home: &Path) -> Result<Bajada, ErrorOraculo> {
         Some((nombre, digest)) => (nombre, Some(digest)),
         None => (imagen, None),
     };
-    let existe = correr_podman(&["image", "exists", nombre], PLAZO_CORTO)?.codigo == 0;
+    let existe = correr_podman_acotado(&["image", "exists", nombre], PLAZO_CORTO)?.codigo == 0;
     let digest_local = if existe { digest_de(nombre)? } else { None };
     if !necesita_pull(existe, fijado, digest_local.as_deref()) {
         return Ok(Bajada::Lista {
@@ -1204,7 +1275,7 @@ fn traer(imagen: &str, home: &Path) -> Result<Bajada, ErrorOraculo> {
 
 /// Digest de una imagen ya bajada. `None` si podman no lo informa.
 fn digest_de(imagen: &str) -> Result<Option<String>, ErrorOraculo> {
-    let salida = correr_podman(
+    let salida = correr_podman_acotado(
         &["image", "inspect", "--format", "{{.Digest}}", imagen],
         PLAZO_CORTO,
     )?;
@@ -2033,5 +2104,39 @@ source = \"git+http://host/x?rev=1#abc1234\"\n";
             !texto.contains("alias.b"),
             "una entrada sin red no entra al Gate: {texto}"
         );
+    }
+
+    #[test]
+    fn descarga_leer_cola_conserva_solo_los_ultimos_bytes() {
+        // Un millón de líneas numeradas: unos 11 MB, muy por encima del tope.
+        let texto: Vec<u8> = (0..1_000_000u64)
+            .flat_map(|n| format!("{n:010}\n").into_bytes())
+            .collect();
+        let cola = leer_cola(io::Cursor::new(texto.clone()))
+            .join()
+            .expect("el hilo lector termina");
+        assert_eq!(cola.len(), COLA_DESCARGA, "debe quedar el tope exacto");
+        assert_eq!(cola, texto[texto.len() - COLA_DESCARGA..]);
+    }
+
+    #[test]
+    fn descarga_leer_cola_flujo_corto_sale_completo() {
+        let cola = leer_cola(io::Cursor::new(b"error: x\n".to_vec()))
+            .join()
+            .expect("el hilo lector termina");
+        assert_eq!(cola, b"error: x\n");
+    }
+
+    #[test]
+    fn descarga_leer_cola_no_parte_caracteres_utf8() {
+        // "ñ" ocupa dos bytes. El corte cae dentro de un carácter en este caso.
+        let mut texto = "ñ".repeat(5000).into_bytes();
+        texto.extend_from_slice(b"fin");
+        let cola = leer_cola(io::Cursor::new(texto))
+            .join()
+            .expect("el hilo lector termina");
+        let txt = String::from_utf8(cola).expect("la cola es UTF-8 válido");
+        assert!(txt.ends_with("fin"), "{txt:?}");
+        assert!(!txt.contains('\u{FFFD}'), "{txt:?}");
     }
 }
