@@ -35,6 +35,10 @@ const LINEAS_LOG: usize = 40;
 const LINEAS_ESCENARIO: usize = 20;
 /// Log completo de `correr`. Vive en `/tmp` del contenedor: nunca llega a `/salida`.
 const LOG_CORRER_COMPLETO: &str = "/tmp/entrega-correr.full.log";
+/// Primer archivo que escribe el script. Sin él, el contenedor no ejecutó el script (M20).
+const ARCHIVO_ARRANQUE: &str = "entrega-arranque.ok";
+/// Código del preludio de Python. Distinto de cero, o ausente, es infraestructura (M21).
+const ARCHIVO_PRELUDIO: &str = "entrega-preludio.rc";
 /// Límite de cada escenario, en segundos.
 const TIMEOUT_ESCENARIO: u32 = 120;
 /// Plazo del host para cada escenario dentro de la imagen. El `timeout` interno corta antes.
@@ -1165,14 +1169,46 @@ pub fn construir_script(tarea: &Tarea) -> String {
     construir_script_con(tarea, true)
 }
 
+/// Verdadero si el script lleva el preludio de Python: la tarea es de Python (M21).
+fn aplica_preludio_python(tarea: &Tarea) -> bool {
+    tarea.lenguaje == "python"
+}
+
+/// Motivo de infraestructura si el script no llegó a correr del todo. Sin marcador, el contenedor no
+/// arrancó el script. Con preludio de Python sin código 0, el preludio no se aplicó (M21). Con entrega y
+/// sin `.rc` de instalar, `instalar` nunca corrió (M20). Ninguno de estos es un "no instala" del producto.
+fn fallo_de_infraestructura(archivos: &BTreeMap<String, String>, tarea: &Tarea) -> Option<String> {
+    if !archivos.contains_key(ARCHIVO_ARRANQUE) {
+        return Some("el contenedor no arrancó el script de entrega".into());
+    }
+    if aplica_preludio_python(tarea) && codigo(archivos, ARCHIVO_PRELUDIO) != Some(0) {
+        return Some("el preludio de Python no pudo aplicarse".into());
+    }
+    if tarea.entrega.is_some() && codigo(archivos, "entrega-instalar.rc").is_none() {
+        return Some("instalar nunca corrió: falló la copia de /repo o el script se cortó".into());
+    }
+    None
+}
+
 /// Script del contenedor de evaluación. Con `escenarios` en falso no corre ninguno: van a la imagen.
 fn construir_script_con(tarea: &Tarea, escenarios: bool) -> String {
     let eval: &[Escenario] = if escenarios { &tarea.escenario } else { &[] };
-    let mut s = String::new();
+    // Primera acción: si no escribe el marcador, el contenedor no arrancó el script (M20).
+    let mut s = format!("echo ok > {SALIDA}/{ARCHIVO_ARRANQUE} || exit 1\n");
     if tarea.lenguaje == "rust" {
         // El preludio termina en `&& `: su `true` aísla un fallo de caché del resto del script.
         s.push_str(PRELUDIO);
         s.push_str("true\n");
+    }
+    if aplica_preludio_python(tarea) {
+        // Corre en el shell principal: el venv que activa queda vigente para el resto del script (M21).
+        // El código sale a `ARCHIVO_PRELUDIO`. Si falla, el script termina sin copiar ni instalar.
+        let rc = format!("{SALIDA}/{ARCHIVO_PRELUDIO}");
+        s.push_str(&format!(
+            "{}echo 0 > {rc} || echo 1 > {rc}\n\
+             if [ \"$(cat {rc})\" != 0 ]; then exit 0; fi\n",
+            descarga::PRELUDIO_PYTHON
+        ));
     }
     let work = format!("{SALIDA}/work");
     if let Some(entrega) = &tarea.entrega {
@@ -1298,13 +1334,17 @@ fn sonda_entrega_con(
     let mut escenarios = BTreeMap::new();
     if tarea.entrega.is_some() || !eval.is_empty() {
         match ej.ejecutar(&construir_script_con(tarea, escenarios_eval)) {
-            Ok(salida) => revisar_salida(
-                &salida.archivos,
-                tarea,
-                eval,
-                &mut hallazgos,
-                &mut escenarios,
-            ),
+            // Una falla de arranque es infraestructura: sin veredicto, sin hallazgos de producto.
+            Ok(salida) => match fallo_de_infraestructura(&salida.archivos, tarea) {
+                Some(motivo) => motivos.push(motivo),
+                None => revisar_salida(
+                    &salida.archivos,
+                    tarea,
+                    eval,
+                    &mut hallazgos,
+                    &mut escenarios,
+                ),
+            },
             Err(e) => motivos.push(e.to_string()),
         }
     }
@@ -1431,7 +1471,15 @@ pub(crate) mod tests {
     }
 
     impl Falso {
+        /// Ejecutor que dice que el script arrancó: agrega el marcador de arranque (M20) a `archivos`.
         fn con(archivos: &[(&str, &str)]) -> Self {
+            let mut todos = vec![(ARCHIVO_ARRANQUE, "ok\n")];
+            todos.extend_from_slice(archivos);
+            Falso::sin_marcador(&todos)
+        }
+
+        /// Ejecutor con `archivos` tal cual, sin marcador de arranque.
+        fn sin_marcador(archivos: &[(&str, &str)]) -> Self {
             let mut s = SalidaHerramienta::default();
             for (nombre, texto) in archivos {
                 s.archivos.insert((*nombre).into(), (*texto).into());
@@ -1537,6 +1585,139 @@ pub(crate) mod tests {
         assert!(s.contains("/salida/entrega-instalar.rc"));
         assert!(s.contains("sleep 5"), "espera por defecto de 5 s");
         assert!(s.contains("/salida/entrega-correr.rc"));
+    }
+
+    #[test]
+    fn entrega_script_empieza_con_el_marcador_de_arranque() {
+        for lenguaje in ["shell", "rust", "python"] {
+            let s = construir_script(&tarea_de(lenguaje, ENTREGA));
+            assert!(
+                s.starts_with("echo ok > /salida/entrega-arranque.ok || exit 1\n"),
+                "{lenguaje}: el marcador es la primera acción"
+            );
+        }
+    }
+
+    #[test]
+    fn entrega_sin_marcador_de_arranque_da_sin_veredicto_y_ningun_hallazgo() {
+        let repo = repo_completo();
+        let ej = Falso::sin_marcador(&[
+            ("entrega-instalar.rc", "0\n"),
+            ("entrega-correr.rc", "0\n"),
+            ("entrega-escenario-a.rc", "1\n"),
+        ]);
+        let t = tarea_de("shell", &format!("{ENTREGA}\n{ESCENARIOS}\n{REQUISITOS}"));
+        let r = sonda_entrega(&ej, repo.path(), &t);
+        assert_eq!(r.sonda.valor, None);
+        assert!(
+            r.sonda
+                .motivo
+                .as_deref()
+                .unwrap_or_default()
+                .contains("arranc"),
+            "el motivo nombra el arranque"
+        );
+        assert!(sin_hallazgos_de_entrega(&r), "sin no instala ni escenarios");
+        assert!(r.escenarios.is_empty(), "no inventa escenarios");
+    }
+
+    #[test]
+    fn entrega_marcador_sin_instalar_rc_da_sin_veredicto_y_no_no_instala() {
+        let repo = repo_completo();
+        let ej = Falso::con(&[("entrega-correr.rc", "0\n")]);
+        let r = sonda_entrega(&ej, repo.path(), &tarea_de("shell", ENTREGA));
+        assert_eq!(r.sonda.valor, None);
+        assert!(
+            r.sonda
+                .motivo
+                .as_deref()
+                .unwrap_or_default()
+                .contains("instalar nunca corrió"),
+            "el motivo dice que instalar no corrió"
+        );
+        assert!(
+            sin_hallazgos_de_entrega(&r),
+            "instalar que nunca corrió no es rojo"
+        );
+    }
+
+    #[test]
+    fn entrega_marcador_e_instalar_fallido_sigue_siendo_no_instala() {
+        let repo = repo_completo();
+        let ej = Falso::con(&[("entrega-instalar.rc", "1\n")]);
+        let r = sonda_entrega(&ej, repo.path(), &tarea_de("shell", ENTREGA));
+        assert_eq!(r.sonda.motivo, None, "con código de salida hay veredicto");
+        assert!(r.sonda.valor.is_some());
+        assert!(
+            r.sonda
+                .hallazgos
+                .iter()
+                .any(|h| h.detalle.contains("no instala")),
+            "instalar con código != 0 sigue siendo rojo"
+        );
+    }
+
+    #[test]
+    fn entrega_python_script_aplica_el_preludio_de_python_antes_del_cp() {
+        let s = construir_script(&tarea_de("python", ENTREGA));
+        let pos_preludio = s
+            .find(descarga::PRELUDIO_PYTHON)
+            .expect("el script lleva el preludio de Python");
+        let pos_cp = s.find("cp -a /repo").expect("hay copia");
+        assert!(pos_preludio < pos_cp, "el preludio corre antes de la copia");
+        assert!(!s.contains(PRELUDIO), "no aplica el preludio de Rust");
+        let shell = construir_script(&tarea_de("shell", ENTREGA));
+        assert!(!shell.contains(descarga::PRELUDIO_PYTHON));
+        let rust = construir_script(&tarea_de("rust", ENTREGA));
+        assert!(!rust.contains(descarga::PRELUDIO_PYTHON));
+        assert!(rust.contains(PRELUDIO));
+    }
+
+    #[test]
+    fn entrega_python_preludio_con_codigo_1_da_sin_veredicto_sin_hallazgos() {
+        let repo = repo_completo();
+        let ej = Falso::con(&[("entrega-preludio.rc", "1\n")]);
+        let r = sonda_entrega(&ej, repo.path(), &tarea_de("python", ENTREGA));
+        assert_eq!(r.sonda.valor, None);
+        assert!(
+            r.sonda
+                .motivo
+                .as_deref()
+                .unwrap_or_default()
+                .contains("preludio de Python"),
+            "el motivo nombra el preludio"
+        );
+        assert!(sin_hallazgos_de_entrega(&r), "no es un rojo falso");
+        assert!(r.escenarios.is_empty());
+    }
+
+    #[test]
+    fn entrega_python_sin_preludio_rc_da_sin_veredicto() {
+        let repo = repo_completo();
+        let ej = Falso::con(&[("entrega-instalar.rc", "0\n"), ("entrega-correr.rc", "0\n")]);
+        let r = sonda_entrega(&ej, repo.path(), &tarea_de("python", ENTREGA));
+        assert_eq!(r.sonda.valor, None);
+        assert!(
+            r.sonda
+                .motivo
+                .as_deref()
+                .unwrap_or_default()
+                .contains("preludio de Python")
+        );
+        assert!(sin_hallazgos_de_entrega(&r));
+    }
+
+    #[test]
+    fn entrega_python_con_preludio_ok_sigue_el_flujo_normal() {
+        let repo = repo_completo();
+        let ej = Falso::con(&[
+            ("entrega-preludio.rc", "0\n"),
+            ("entrega-instalar.rc", "0\n"),
+            ("entrega-correr.rc", "0\n"),
+        ]);
+        let r = sonda_entrega(&ej, repo.path(), &tarea_de("python", ENTREGA));
+        assert_eq!(r.sonda.valor, Some(1.0));
+        assert_eq!(r.sonda.motivo, None);
     }
 
     #[test]

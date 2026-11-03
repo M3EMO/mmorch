@@ -165,8 +165,11 @@ impl EjecutorHerramienta for Falso {
     }
 }
 
+/// Salida de un script que arrancó: lleva el marcador de arranque (M20) además de `archivos`.
 fn salida_con(archivos: &[(&str, &str)]) -> SalidaHerramienta {
     let mut s = SalidaHerramienta::default();
+    s.archivos
+        .insert("entrega-arranque.ok".into(), "ok\n".into());
     for (nombre, texto) in archivos {
         s.archivos.insert((*nombre).into(), (*texto).into());
     }
