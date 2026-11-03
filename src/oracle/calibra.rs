@@ -1097,6 +1097,9 @@ fn ahora() -> f64 {
 }
 
 #[cfg(test)]
+mod defectos;
+
+#[cfg(test)]
 mod tests {
     use super::inyectar::pruebas::{FIXTURE, arbol, copia_fixture, tarea_en};
     use super::*;

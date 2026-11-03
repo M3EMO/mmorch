@@ -246,9 +246,10 @@ fn es_identificador(texto: &str) -> bool {
         && texto.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Clave con forma de AWS (`AKIA` y 16 caracteres) sacada de la semilla. No es una credencial.
+/// Clave con forma de AWS (`AKIA` y 16 caracteres de A-Z y 2-7, como las ids reales) sacada de la semilla.
+/// No es una credencial.
 fn clave_sintetica(rng: &mut Prng) -> String {
-    const ALFABETO: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    const ALFABETO: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
     let resto: String = (0..16)
         .map(|_| ALFABETO[rng.indice(ALFABETO.len())] as char)
         .collect();
@@ -1558,6 +1559,28 @@ mod tests {
             let ib = con_camino(Defecto::BucleCuadratico, b.path(), &[], semilla).expect("E/S");
             assert_eq!(ia, ib, "semilla {semilla}");
             assert_eq!(arbol(a.path()), arbol(b.path()), "semilla {semilla}");
+        }
+    }
+
+    #[test]
+    fn inyectar_secreto_clave_tiene_la_forma_que_gitleaks_reconoce() {
+        // La regla `aws-access-token` de gitleaks solo casa `AKIA` seguido de 16 caracteres de A-Z y 2-7.
+        // Con dígitos 0, 1, 8 o 9 la clave pasa sin hallazgo.
+        for semilla in 1..=30u64 {
+            let (inyeccion, _, despues) = aplicar(Defecto::SecretoEnCodigo, semilla);
+            let inyeccion = inyeccion.expect("el secreto siempre se aplica al fixture");
+            let nuevo = &despues[&inyeccion.archivo];
+            let clave = nuevo
+                .split("\"AKIA")
+                .nth(1)
+                .and_then(|resto| resto.split('"').next())
+                .expect("hay una clave AKIA");
+            assert!(
+                clave
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || ('2'..='7').contains(&c)),
+                "semilla {semilla}: la clave sale de A-Z y 2-7: {clave}"
+            );
         }
     }
 
