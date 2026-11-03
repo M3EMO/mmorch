@@ -87,6 +87,7 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 61 | G4: el usuario escribió "brasa y memora estan solo de medicion y seran eliminados". memora y brasa no siguen como banco después del hito 1. G4 queda respondido y sale del hito 1b. |
 | 62 | Tarea 16: "a) Correr en memora". La corrida real de `r00t corre` usa memora para probar el runner de punta a punta, y después se borra. |
 | 63 | Calibración: el usuario preguntó "No se puede hacer mas rapida? eficiente? o en paralelo? El diseño de por si digo", y eligió "a) Cortar y mejorar". Ver Tareas 48 y 49. |
+| 64 | Objetivo: "terminar root. Calibrarlo a la perfeccion, no terminar con la primer version completa, seguir hasta terminar". Y: "Acelerar los procesos para que no sea todo secuencial, un recurso que hay que aprovechar es el tiempo." El hito 1 cierra con la calibración completa, y el trabajo independiente corre en paralelo. |
 
 ## Patterns to Mirror
 
@@ -3269,3 +3270,147 @@ La regla para elegir: una mejora entra solo si el caso sigue midiendo lo mismo q
 **Hito 1b (actualizado).** G3, Colab (Tarea 7h) y Graft (Tareas 16b y 16 con G5). G4 sale del hito 1b, porque la decisión 61 lo respondió.
 
 No hay preguntas nuevas para el usuario.
+
+## Vuelta del 2026-11-03 (tarde): objetivo del usuario, imagen del builder y huecos de la Tarea 16
+
+**Objetivo (decisión 64).** El usuario escribió: "terminar root. Calibrarlo a la perfeccion, no terminar con la primer version completa, seguir hasta terminar". Después sumó: "Acelerar los procesos para que no sea todo secuencial, un recurso que hay que aprovechar es el tiempo." El orquestador corre ahora en paralelo cuatro trabajos: el builder de las Tareas 48 y 49, el `/ecc:code-review` del hito, la prueba de `NETRC` y la imagen del builder.
+
+**Imagen del builder (Tarea 26, capa 1): hecha.**
+- `scripts/construir-imagen-builder.sh` construyó `root-builder:1` con `CLAUDE_CODE_VERSION=2.1.317`. La imagen trae Node.js 20.19.2 y Claude Code 2.1.317.
+- Con `--userns=keep-id`, el usuario es `builder`, con uid 1000.
+- El builder no ve `ROOT_HOME`: `ls <ROOT_HOME>/oraculos` da "No such file or directory".
+- Con `pasta:--no-map-gw`, el builder no alcanza un puerto de 127.0.0.1 del host ni `host.containers.internal`. Sí sale a internet.
+
+**Credencial en solo lectura: hecha en parte.**
+- `claude -p` con Haiku corrió dentro de la imagen, con los montajes de `args_podman_builder`. Respondió "listo" por 0,0021 USD de cupo.
+- El montaje deja un `.credentials.json` vacío en el estado, con uid 524288.
+- La renovación del login no se probó: el token vencía en 283 minutos.
+- **Hallazgo:** el archivo montado trae también `mcpOAuth`, con los tokens de MCP del usuario.
+
+**Defecto que bloquea la Tarea 16.**
+- `args_claude` (`src/corre/args.rs`) no pasa `--permission-mode`, y el bootstrap de memora no trae `.claude/settings.json`.
+- El orquestador lo probó con la imagen real y los mismos argumentos: Haiku no pudo crear `hola.txt`. Hubo 2 denegaciones, de `Bash` y de `Write`.
+- Una corrida real no construiría nada. El test mecánico de la Tarea 16 no lo ve, porque usa un proveedor falso.
+
+**Otros huecos de la Tarea 16.**
+- `$ROOT_HOME/configs/ecc-haiku.toml` no existe, así que `r00t corre --config ecc-haiku` falla por uso.
+- La imagen no trae el plugin de ECC, y `args_claude` no pasa `--plugin-dir`. El nombre `ecc-haiku` promete ECC.
+- El banco construyó memora-ecc con `~/Proyectos/bench-ecc-sdlc/correr-ecc-rol.sh`. Ese script usa `.ecc-plugin` para Opus y Sonnet, y `.ecc-plugin-haiku` para la sesión que organiza. También fija `CLAUDE_CODE_SUBAGENT_MODEL=haiku`, `ECC_AGENT_DATA_HOME`, `ECC_DISABLED_HOOKS`, `--permission-mode auto` y un plazo de 5400 segundos.
+
+## Desempates técnicos 26 (Opus, 2026-11-03): el builder dentro del contenedor
+
+**Modo de permisos: `auto`, con las reglas de negación de siempre.**
+- `args_claude` pasa `--permission-mode` con el valor de la config, `auto` por defecto.
+- Razón: es el modo con que el banco construyó memora-ecc, así que la corrida mide en las mismas condiciones. Un modo que salta todo control sería una diferencia más contra el banco.
+- `--disallowedTools` sigue con sus reglas sobre `oraculos/`: las reglas de negación valen en todo modo de permisos. La primera defensa sigue siendo el contenedor, que no monta `ROOT_HOME` (decisión 43).
+
+**ECC entra como en el banco: plugin montado por rol.**
+- La config de la corrida suma, por rol, el plugin de ECC y el modelo de los subagentes. El runner monta cada plugin en solo lectura en `/opt/plugin` y pasa `--plugin-dir /opt/plugin`.
+- El runner fija `ECC_AGENT_DATA_HOME` en la carpeta de estado de la corrida, no en la del banco, y `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`.
+- El nombre `ecc-haiku` queda: la config cumple lo que su nombre promete.
+- Razón: la decisión 38 pide medir memora con ECC y Haiku, como el banco. Cambiar de nombre y correr sin ECC mediría otra cosa.
+
+**`mcpOAuth` no entra al contenedor.**
+- El runner no monta el archivo de credenciales del usuario. Arma, para cada corrida, una copia que trae solo `claudeAiOauth`, con permisos 0600, en la carpeta de estado. La monta en solo lectura y la borra al terminar, por `src/borrado.rs`.
+- Razón: el builder corre código con red, y los tokens de MCP del usuario no le hacen falta. Las claves son zona roja.
+- **Vencimiento.** Antes de lanzar, el runner lee el vencimiento de `claudeAiOauth`. Si el token vence antes del plazo total de la corrida, sale con código 3 y pide renovar el login en el host. Razón: la copia es de solo lectura, así que el contenedor nunca renueva ni rota el token del usuario.
+
+### Tarea 50: Builder que construye dentro del contenedor
+- **Action**: los tres desempates de arriba, en `src/corre/`. No toca `src/oracle/`, así que corre en paralelo con las Tareas 48 y 49.
+- **Dónde**: en la laptop, con el builder local, en otro worktree. Brief: `docs/builds/brief-local-50.md`. La config: `docs/builds/config-ecc-haiku.toml`, que el orquestador copia a `$ROOT_HOME/configs/ecc-haiku.toml`.
+- **Validate**: `cargo test`:
+  - `args_claude` pasa `--permission-mode auto` por defecto, y el valor de la config si la config lo trae.
+  - Con plugin en la config, los argumentos montan el plugin en solo lectura y pasan `--plugin-dir /opt/plugin`.
+  - El entorno del builder trae `CLAUDE_CODE_SUBAGENT_MODEL`, `ECC_DISABLED_HOOKS` y `ECC_AGENT_DATA_HOME` dentro de la carpeta de estado.
+  - La credencial montada no trae `mcpOAuth`. La copia tiene permisos 0600 y se borra al terminar.
+  - Un token que vence antes del plazo de la corrida da código 3 sin lanzar nada.
+  - `docs/builds/config-ecc-haiku.toml` carga con `ConfigCorrida::desde_texto`.
+  - **Con podman y la imagen real, sin `claude`:** un comando de shell dentro del contenedor, con los argumentos de la corrida, escribe un archivo en el repo de la corrida y no puede listar `<ROOT_HOME>/oraculos`.
+  - **Con podman, la imagen real y `claude`:** un test con `#[ignore]` lanza `claude -p` con Haiku y le pide crear `hola.txt` y leer un archivo de `oraculos/`. `hola.txt` existe y la lectura falla. Solo corre con `ROOT_TEST_BUILDER_REAL=1`, porque gasta cupo. Lo corre el orquestador.
+
+## Orden de trabajo (2026-11-03, en paralelo)
+
+En paralelo ahora, en worktrees distintos:
+- **A. Tareas 48 y 49.** El builder local, en `laptop/tarea-48`.
+- **B. Tarea 50.** El builder local, en otro worktree, con `docs/builds/brief-local-50.md`.
+- **C. `/ecc:code-review` del hito.** El orquestador. Sus hallazgos esperan la verificación de Opus.
+- **D. `NETRC` con un índice privado de prueba.** El orquestador.
+
+En serie, después:
+1. Mezcla de A y B, con la orden del usuario. Cada mezcla corre la suite con podman, una por vez.
+2. Calibración real otra vez, una tarea por vez (necesita A).
+3. Corrida real de memora (Tarea 16, decisión 62). Necesita B, la config copiada a `ROOT_HOME` y el test real de B en verde.
+4. Comparación de `global`, validez automática y cierre (Tarea 47), como en "Orden final del hito 1 (2026-11-03)".
+
+No hay preguntas nuevas para el usuario.
+
+## Code review del hito (Tarea 47, adelantado, 2026-11-03)
+
+El orquestador adelantó el `/ecc:code-review` para aprovechar el tiempo (decisión 64). Corrió con Opus en `~/.cache/root-wt/review47`: la base 1862c1e con el código de fedcf0b. Costó 7,18 USD. Ocho revisores Sonnet leyeron por grupos, y nadie corrió cargo, tests, podman ni APIs. El informe es `~/.cache/root-wt/orquestador/review-47-informe.md`. Conteo: 2 CRITICAL, 5 HIGH, 22 MEDIUM y 14 LOW. Ese worktree no tenía `tests/`, `GOAL.md` ni `.gitignore`: esos faltantes son del worktree de revisión, no del repo.
+
+**Verificación de Opus (sobre 7c1f48b, por función).**
+
+| Id | Veredicto | Dónde y por qué |
+|---|---|---|
+| C1 | Real | `commit_final` (`src/corre/corrida.rs`) corre `git status --porcelain` y `git add -A` sobre el repo que el builder escribió en `/trabajo` con `.git/` incluido (`src/corre/contenedor.rs`, montaje `rw,Z`). Solo el `commit` lleva `core.hooksPath=/dev/null`. Un `core.fsmonitor` o un filtro en `.git/config` corre en el host con el usuario real. |
+| C2 | Real en el código de Root | `clasificar_config` (`src/oracle/descarga/inventario.rs`) registra `credential-provider` solo como hallazgo. `cargo vendor` (`COMANDO_VENDOR`, `src/oracle/descarga.rs`) corre con red y con `secretos_de(credenciales)` en el entorno. Que cargo ejecute ese proveedor sale de su documentación, sin prueba. |
+| H1 | Real | En la suite oculta, el producto corre en el mismo contenedor que `/oraculo` (solo lectura) y `/salida` (escritura). Un producto puede leer los tests ocultos mientras corre. Un producto que corre dentro del proceso de pytest puede además reescribir el junit después de pytest. |
+| H2 | Real | `commit_de` (`src/oracle/mod.rs`) da `git rev-parse --short HEAD`, o vacío sin git. `pendientes.rs` usa ese valor como identidad de versión, así que un cambio sin commit no cambia la identidad. |
+| H3 | Real en el código de Root | `requisito_de_build_aceptable` (`src/oracle/descarga/python.rs`) rechaza solo `://`, `@` y un `-` inicial. Una línea `foo==1.0 --no-binary :all:` pasa. |
+| H4 | Real en el código de Root | `entrega.rs` mapea el `STEP k/n` de buildah con `instrucciones_df.get(paso.saturating_sub(1))`, sobre la lista global del Dockerfile. En un Dockerfile multietapa, el índice apunta a otra etapa. |
+| H5 | Real en el código de Root | Después de bajar un sdist, `pendientes.remove(pos)` lo saca del índice de pip, y nadie baja sus dependencias de runtime. El install sin red falla, y el producto queda en rojo por un límite de Root. |
+
+**Medios y bajos que entran al hito 1.** El criterio: entra lo que cambia lo que mide el evaluador, lo que deja ver un gasto o una clave, y lo que es barato y está en una zona que ya se toca.
+- **Cambian la medición:** M2 (un fallo de podman o un token vencido da una fila roja), M3 (`SinVeredicto` cuenta como fracaso en Wilson), M4 y M5 (calibración), M6 (suite no-pytest con junit vacío), M8 (el gate acepta una cita como `}`), M18 (una tarea copiada pisa a otra), M19 y M20 (rojos falsos en Entrega), y L7 (el prompt del juez prohíbe juzgar nombres, y `estructura.legibilidad` los mide).
+- **Gasto, topes y claves:** M9 (una línea truncada deja ciego al tope), M10, M11 y L5 (topes mal escritos se ignoran), L4 (`observa claude` duplica el costo), L6, L10 (un token cortado sale sin redactar) y L1 (un `plan-aprobado` sin marca).
+- **Robustez barata en zonas que se tocan:** M1, M7, M15, M21, M22, L2, L12, L13 y L14.
+- **Pasan al hito 1b, con Colab y los paquetes a ciegas:** M12, M13, M14, M16, M17, L9 y L11. Tocan solo Colab o `--preparar-ciego`, que corren en el hito 1b.
+- **Sin cambio:** L3 (el aviso de symlinks omitidos no cambia la medida) y L8 (la redacción ya pasa por el gate de evidencia). Las dos notas sin severidad quedan anotadas: el hash de 64 bits del GOAL sigue la decisión b2, y `evaluar` no verifica el GOAL porque solo `corre` actúa.
+
+**Desempates técnicos 27 (Opus, 2026-11-03).**
+- **C1.** Root no corre git del host sobre un `.git` del builder. Al terminar cada rol, Root copia el árbol de trabajo sin `.git` ni enlaces a un repo nuevo del host, y hace el commit ahí. Todo git sobre un repo que vino del builder corre además con `-c core.fsmonitor=false -c core.hooksPath=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null` y sin filtros. Razón: el sandbox termina donde el host lee algo que el builder escribió.
+- **C2.** El arreglo cambia la decisión 30, que pide respetar el config del repo entero. Va al usuario como P62. Hasta la respuesta, ninguna tarea de hito 1 usa un registro privado, así que el riesgo no está activo.
+- **H1.** Root corre la suite oculta con un plugin propio de pytest. Después de la colección, el plugin borra los `*.py` de la copia de los tests ocultos, antes de correr el primer test. Los datos que los tests leen, como `oculto/muestras/`, quedan. El junit se escribe con un nombre aleatorio por corrida. Razón: un producto que corre como subproceso, como memora, brasa y Graft, ya no puede leer los tests. **Límite que queda:** un producto que corre dentro del proceso de pytest puede todavía reescribir el junit. Root lo documenta en `docs/interfaces.md`, y ninguna tarea del hito 1 tiene un producto así.
+- **H2.** La identidad de versión de Colab es `historial::clave_de_version`, que hashea el contenido. Razón: es la misma identidad que ya usa el historial.
+- **H3.** Cada especificador de pip pasa por una gramática PEP 508 estricta. Un espacio seguido de `-`, un `\n` o un `\r` lo rechazan. Vale para `requirements.txt` y para `[build-system].requires` de un sdist.
+- **H4.** Root ubica la instrucción que falló por el texto del paso que imprime buildah, no por su número. Si no la encuentra, el caso queda sin veredicto, no rojo.
+- **H5.** Root lee `Requires-Dist` del `PKG-INFO` de cada sdist y `[project].dependencies` de cada clon, sin ejecutar nada, y baja esos wheels. Si los metadatos son dinámicos, la descarga da sin veredicto explícito: "dependencias de runtime no declaradas en forma estática".
+- **M4 y M5.** Van en una tarea aparte, después de la mezcla de la 48. El builder de la 48 ya corre y no recibe mensajes. M5 exige al menos 5 defectos aplicables y 5 limpios para que una dimensión quede calibrada.
+- **L7.** El prompt del juez dice que no juzga estilo, salvo lo que pide el ancla de un ítem. Las rúbricas están aprobadas (G2) y no cambian.
+
+### Tareas 51 a 55: arreglos del code review, por zona de archivos
+
+| Tarea | Hallazgos | Archivos | Arranca | Brief |
+|---|---|---|---|---|
+| 51 | C2 (según P62), H3, H5, M15, M22, L10, L13, L14 | `src/oracle/descarga.rs`, `src/oracle/descarga/` | Ya, en paralelo. La parte C2 espera P62 | `docs/builds/brief-local-51.md` |
+| 52 | H4, M1 (oráculo), M7, M19, M20, M21, L2 | `src/oracle/entrega.rs`, `src/oracle/contenedor.rs` | Ya, en paralelo | `docs/builds/brief-local-52.md` |
+| 53 | M3, M9, M10, M11, L1, L4, L5, L6, L12 (historial) | `src/observe/`, `src/track/`, `src/aprende.rs`, `src/config.rs`, `src/mcp.rs`, `src/lib.rs`, `src/oracle/historial.rs` | Ya, en paralelo | `docs/builds/brief-local-53.md` |
+| 54 | H1, H2, M4, M5, M6, M8, M18, L7 | `src/oracle/mod.rs`, `src/oracle/calibra*`, `src/oracle/evidencia.rs`, `src/oracle/juez.rs`, `src/oracle/tarea.rs`, `src/oracle/pendientes.rs` | Después de la mezcla de las Tareas 48 y 49 | `docs/builds/brief-local-54.md` |
+| 55 | C1, M2, M1 (runner) | `src/corre/`, y `comando_git` y `commit_de` de `src/oracle/mod.rs` | Después de la mezcla de la 50 y de la 54 | `docs/builds/brief-local-55.md` |
+
+Cada tarea corre en su propio worktree. Ninguna toca los archivos de otra que corra al mismo tiempo.
+
+## Orden final del hito 1 (2026-11-03, después del code review)
+
+**En paralelo ahora:** las Tareas 48 y 49, la 50, la 51 (sin la parte C2), la 52 y la 53.
+
+**En serie después:**
+1. Mezcla de 48 y 49, de 50, de 51, de 52 y de 53, una por vez, cada una con su suite con podman.
+2. Tarea 54. Después, su mezcla.
+3. Tarea 55. Después, su mezcla.
+4. **Calibración real otra vez.** Espera a la 54, porque M4, M5, M8 y L7 cambian lo que mide la calibración.
+5. **Corrida real de memora (Tarea 16).** Espera a la 50 y a la 55, porque C1 deja correr código en el host.
+6. Comparación de `global`, validez automática (Tarea 12b) y cierre (Tarea 47): verificación de los hallazgos que queden, comandos de "Validation", nota final y aprobación del usuario.
+7. Borrado de memora y brasa (decisión 61).
+
+**Hito 1b (actualizado).** Suma M12, M13, M14, M16, M17, L9 y L11, que tocan solo Colab o los paquetes a ciegas.
+
+**Preguntas abiertas (sin responder)**
+
+- **P62. Credenciales y config de cargo del repo (C2).** Pediste respetar el `.cargo/config.toml` del repo entero (decisión 30) y pasar las credenciales de los registros de `root.toml` (decisión 29). Juntas, permiten que un repo declare un `credential-provider` que cargo ejecuta con red y con tu token. ¿Qué elegís?
+
+  - a) Si Root pasa una credencial, rechaza en el config del repo las claves que ejecutan comandos o cambian el TLS: `credential-provider`, `credential-alias`, `registry.global-credential-providers`, `http.cainfo`, `http.proxy` y `net.git-fetch-with-cli`. Sin credenciales, el config se respeta entero, como hoy.
+  - b) Si el config del repo trae alguna de esas claves, Root no pasa la credencial. El config se respeta entero, y la descarga de ese registro puede fallar.
+  - c) Como hoy. Riesgo: un repo puede sacar tu token.
+
+  Mi recomendación es a): cambia la decisión 30 solo cuando hay una clave tuya en juego. Hoy ninguna tarea usa un registro privado, así que no frena nada.

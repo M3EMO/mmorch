@@ -1,0 +1,31 @@
+# Config de la corrida "ecc-haiku" (Tarea 16, decisiones 38, 62 y 64; desempates técnicos 26).
+# Copia del orquestador: $ROOT_HOME/configs/ecc-haiku.toml.
+# Mide memora como la construyó el banco (~/Proyectos/bench-ecc-sdlc/correr-ecc-rol.sh):
+# Opus planea con ECC, y Sonnet organiza con ECC y subagentes Haiku que construyen.
+# Los campos `permission_mode` y `[claude.rol.*]` los agrega la Tarea 50. Hasta entonces, esta config no carga.
+
+roles = ["planifica", "organiza"]
+
+[prompt]
+planifica = """
+Leé docs/SPEC.md, con su sección ## Ficha, y los tests de tests/.
+Escribí el plan de implementación en docs/plan.md: tareas chicas, en orden, cada una con su comando de verificación.
+No escribas código del producto.
+"""
+organiza = """
+Construí el producto siguiendo docs/plan.md.
+Organizá el trabajo: cada tarea la construye un subagente, y vos revisás cada entrega.
+Corré los tests de tests/ hasta que todos pasen.
+Commiteá cada tarea terminada con git.
+"""
+
+[claude]
+permission_mode = "auto"
+ecc_disabled_hooks = "post:bash:command-log-audit,post:bash:command-log-cost"
+
+[claude.rol.planifica]
+plugin_dir = "/home/mpera/Proyectos/bench-ecc-sdlc/.ecc-plugin"
+
+[claude.rol.organiza]
+plugin_dir = "/home/mpera/Proyectos/bench-ecc-sdlc/.ecc-plugin-haiku"
+subagent_model = "haiku"
