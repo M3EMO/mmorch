@@ -50,22 +50,19 @@ const PLAZO_BUILD: Duration = Duration::from_secs(20 * 60);
 const PLAZO_CORTO: Duration = Duration::from_secs(60);
 /// Nombre de la sonda y etiqueta del cuerpo del archivo de pendientes (Tarea 9d2).
 const TEST_BUILD: &str = "dockerfile::build";
-/// Fragmentos (en minúscula) de la salida de un `RUN` que delatan falta de red. Solo cuentan
-/// dentro de un `RUN`. "unable to locate package" no suma: sin "temporary failure" o "could not
-/// resolve" ya cuenta por los patrones de abajo.
-const PATRONES_RED: [&str; 13] = [
+/// Fragmentos (en minúscula) de la salida de un `RUN` que delatan falta de DNS o de ruta. Solo
+/// cuentan dentro de un `RUN`. Sin patrones de conexión: "connection refused" o "failed to
+/// connect" también salen cuando un servicio local no arranca, y eso es falla del producto.
+/// "unable to locate package" no suma: los patrones de DNS de abajo ya cubren la falta de red.
+const PATRONES_RED: [&str; 8] = [
     "could not resolve host",
     "temporary failure in name resolution",
     "network is unreachable",
     "name or service not known",
-    "connection refused",
-    "connection timed out",
-    "failed to connect",
-    "could not connect",
-    "unable to connect",
+    "no route to host",
     "dns: transient error",
+    // Lo que imprime `apk` ante un fallo de DNS. No sale cuando un servicio local no arranca.
     "temporary error (try again later)",
-    "failed to fetch",
     "bad address",
 ];
 /// Fragmentos (en minúscula) de un `FROM` cuya imagen no está local (`--pull=never`).
@@ -1908,9 +1905,27 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn entrega_pide_red_no_confunde_un_servicio_caido_con_falta_de_red() {
+        // Un producto que no arranca da "connection refused": falla del producto, no de la red.
+        assert!(!pide_red(
+            "Error: dial tcp 127.0.0.1:8080: connect: connection refused"
+        ));
+        assert!(!pide_red(
+            "curl: (7) Failed to connect to localhost port 80"
+        ));
+        // Los de DNS y de ruta siguen contando como falta de red.
+        assert!(pide_red("curl: (6) Could not resolve host: example.com"));
+        assert!(pide_red("ping: no route to host"));
+    }
+
+    #[test]
     fn entrega_pide_red_reconoce_los_errores_de_apk_y_wget() {
         assert!(pide_red(
-            "WARNING: fetching x: temporary error (try again later)"
+            "WARNING: fetching x: DNS: transient error (try again later)"
+        ));
+        // Salida real de `apk add` sin red.
+        assert!(pide_red(
+            "WARNING: fetching https://dl-cdn.alpinelinux.org/x: temporary error (try again later)"
         ));
         assert!(pide_red("wget: bad address 'example.com'"));
         assert!(pide_red("curl: (6) Could not resolve host: example.com"));
