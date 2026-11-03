@@ -15,7 +15,7 @@ use super::perfiles::crear_hallazgo;
 use super::perfiles::rust::REGLA_CICLO;
 use super::rubrica::{ErrorRubrica, ItemRubrica, Mide, Puntuacion, Rubrica};
 use super::tarea::Requisito;
-use super::{ErrorOraculo, MOTIVO_JUEZ_SIN_REINTENTO};
+use super::{ErrorOraculo, MOTIVO_GATE_REINTENTO, MOTIVO_JUEZ_SIN_REINTENTO};
 use crate::config::root_home;
 use crate::proveedores::{self, Prompt, RespuestaJuez};
 use crate::tipos::{Dimension, Eleccion, Fuente, Hallazgo, NivelItem, Via};
@@ -414,15 +414,21 @@ pub fn juzgar(
         }
         lectura.descartes.extend(otra.descartes);
         // Sin nivel tras el reintento, y sin `sin_evidencia` en él: el juez no respondió.
-        let sin_respuesta: Vec<String> = reintento
+        // Si la evidencia del reintento no pasó el gate, el motivo es el gate, no la falta de respuesta.
+        let sin_nivel: Vec<String> = reintento
             .iter()
             .filter(|id| !lectura.niveles.contains_key(*id) && !otra.sin_evidencia.contains(*id))
             .cloned()
             .collect();
-        for id in sin_respuesta {
+        for id in sin_nivel {
+            let motivo = if otra.gate.contains_key(&id) {
+                MOTIVO_GATE_REINTENTO
+            } else {
+                MOTIVO_JUEZ_SIN_REINTENTO
+            };
             lectura
                 .descartes
-                .push(descarte(format!("ítem {id}"), MOTIVO_JUEZ_SIN_REINTENTO));
+                .push(descarte(format!("ítem {id}"), motivo));
         }
     }
     let faltantes = pedidos
@@ -1907,6 +1913,34 @@ mod tests {
         assert_eq!(r.faltantes, vec![TOPE.to_string()]);
         assert!(
             descarte_de(&r, TOPE, "tras un reintento"),
+            "{:?}",
+            r.descartes
+        );
+    }
+
+    #[test]
+    fn juez_gate_tambien_en_el_reintento_deja_motivo_de_gate() {
+        let c = caso();
+        let inventada = evidencia("src/almacen.rs", 4, "pub fn borrar(&self) {}");
+        let primera = respuesta(
+            json!([
+                item_nivel(MODULARIDAD, 2, json!([real()])),
+                item_nivel(TOPE, 3, json!([inventada.clone()])),
+            ]),
+            json!([]),
+        );
+        let segunda = respuesta(json!([item_nivel(TOPE, 3, json!([inventada]))]), json!([]));
+        let modelo = FalsoSecuencia::nueva(vec![Ok(primera), Ok(segunda)]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert_eq!(modelo.visto.borrow().len(), 2, "exactamente un reintento");
+        assert_eq!(r.faltantes, vec![TOPE.to_string()]);
+        assert!(
+            descarte_de(&r, TOPE, MOTIVO_GATE_REINTENTO),
+            "{:?}",
+            r.descartes
+        );
+        assert!(
+            !descarte_de(&r, TOPE, MOTIVO_JUEZ_SIN_REINTENTO),
             "{:?}",
             r.descartes
         );
