@@ -4,7 +4,8 @@
 //! Refuta por default y su JSON es estricto. Un juicio que no cita el config o el `Cargo.toml` se descarta.
 
 use std::fs;
-use std::path::Path;
+use std::io::Read;
+use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +25,8 @@ const FASE: &str = "descarga-juez-config";
 const MODELO_JUEZ_CONFIG: &str = "juez-config";
 const ARCHIVO_CARGO: &str = "Cargo.toml";
 const CAUSA_JSON: &str = "JSON inválido del juez";
+/// Tope de tamaño de cada archivo que se lee para el juez. Un archivo más grande se omite.
+const TOPE_ARCHIVO_BYTES: u64 = 256 * 1024;
 
 /// Prompt fijo del juez. Refuta por default y pide solo un arreglo JSON.
 const PROMPT_SISTEMA: &str = "Sos un revisor de la configuración de Cargo de un repo Rust. Decidís si cada entrada de .cargo/config.toml o de config hace falta para bajar y compilar las dependencias del proyecto.
@@ -195,7 +198,7 @@ pub(super) fn juzgar_repo(
     )
 }
 
-/// Archivos del config de la entrada y el `Cargo.toml`, con su contenido. Los que no existen se omiten.
+/// Archivos del config de la entrada y el `Cargo.toml`, con su contenido. Los que no se pueden leer se omiten.
 fn textos_de(repo: &Path, inv: &Inventario) -> Vec<(String, String)> {
     let mut archivos: Vec<String> = inv.config_cargo.iter().map(|e| e.archivo.clone()).collect();
     archivos.push(ARCHIVO_CARGO.into());
@@ -204,10 +207,43 @@ fn textos_de(repo: &Path, inv: &Inventario) -> Vec<(String, String)> {
     archivos
         .into_iter()
         .filter_map(|archivo| {
-            let texto = fs::read_to_string(repo.join(&archivo)).ok()?;
+            let texto = leer_regular_dentro(repo, &archivo)?;
             Some((archivo, texto))
         })
         .collect()
+}
+
+/// Lee `archivo` del repo solo si es un archivo regular dentro del repo, sin enlaces en el camino,
+/// y no pasa `TOPE_ARCHIVO_BYTES`. Cualquier otro caso da `None`.
+fn leer_regular_dentro(repo: &Path, archivo: &str) -> Option<String> {
+    let raiz = fs::canonicalize(repo).ok()?;
+    // Cada componente tiene que ser un nombre normal. Un `..` o una raíz salen del repo.
+    let mut ruta = repo.to_path_buf();
+    for componente in Path::new(archivo).components() {
+        let Component::Normal(nombre) = componente else {
+            return None;
+        };
+        ruta.push(nombre);
+        // Se mira cada prefijo sin seguirlo: un enlace en el camino corta la lectura.
+        if fs::symlink_metadata(&ruta).ok()?.file_type().is_symlink() {
+            return None;
+        }
+    }
+    let meta = fs::symlink_metadata(&ruta).ok()?;
+    if !meta.is_file() || meta.len() > TOPE_ARCHIVO_BYTES {
+        return None;
+    }
+    if !fs::canonicalize(&ruta).ok()?.starts_with(&raiz) {
+        return None;
+    }
+    // Se lee con tope: si el archivo crece entre la revisión y la lectura, no pasa el tope.
+    let mut texto = String::new();
+    fs::File::open(&ruta)
+        .ok()?
+        .take(TOPE_ARCHIVO_BYTES + 1)
+        .read_to_string(&mut texto)
+        .ok()?;
+    (texto.len() as u64 <= TOPE_ARCHIVO_BYTES).then_some(texto)
 }
 
 /// Ficha del spec de la tarea, si el spec la tiene. Sin ficha, el juez no ve ninguna.
@@ -760,6 +796,104 @@ mod tests {
             Fuente::Juez {
                 modelo: "juez-config".into()
             }
+        );
+    }
+
+    /// Texto que existe solo fuera del repo. Ningún resultado de `textos_de` lo puede llevar.
+    const SECRETO_DE_AFUERA: &str = "secreto-de-afuera-no-debe-salir";
+
+    #[cfg(unix)]
+    #[test]
+    fn descarga_textos_de_enlace_que_sale_del_repo_no_se_lee() {
+        let fuera = tempfile::tempdir().expect("fuera del repo");
+        fs::write(
+            fuera.path().join("externo.toml"),
+            format!("# {SECRETO_DE_AFUERA}\n"),
+        )
+        .expect("escribe");
+        let repo = tempfile::tempdir().expect("repo");
+        fs::create_dir(repo.path().join(".cargo")).expect("carpeta .cargo");
+        std::os::unix::fs::symlink(
+            fuera.path().join("externo.toml"),
+            repo.path().join("Cargo.toml"),
+        )
+        .expect("enlace Cargo.toml");
+        std::os::unix::fs::symlink(
+            fuera.path().join("externo.toml"),
+            repo.path().join(".cargo").join("config.toml"),
+        )
+        .expect("enlace config");
+        let inv = inventario_con(vec![entrada("http.proxy", 2, CITA_PROXY)]);
+
+        let textos = textos_de(repo.path(), &inv);
+
+        assert!(
+            !textos.iter().any(|(_, t)| t.contains(SECRETO_DE_AFUERA)),
+            "el contenido de afuera no debe salir: {textos:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descarga_textos_de_componente_intermedio_enlace_no_se_lee() {
+        let fuera = tempfile::tempdir().expect("fuera del repo");
+        fs::write(
+            fuera.path().join("config.toml"),
+            format!("# {SECRETO_DE_AFUERA}\n"),
+        )
+        .expect("escribe");
+        let repo = tempfile::tempdir().expect("repo");
+        std::os::unix::fs::symlink(fuera.path(), repo.path().join(".cargo"))
+            .expect("enlace de carpeta");
+        let inv = inventario_con(vec![entrada("http.proxy", 2, CITA_PROXY)]);
+
+        let textos = textos_de(repo.path(), &inv);
+
+        assert!(
+            !textos.iter().any(|(_, t)| t.contains(SECRETO_DE_AFUERA)),
+            "una carpeta enlace no debe dar lectura: {textos:?}"
+        );
+    }
+
+    #[test]
+    fn descarga_textos_de_archivo_regular_se_lee() {
+        let repo = tempfile::tempdir().expect("repo");
+        fs::create_dir(repo.path().join(".cargo")).expect("carpeta .cargo");
+        fs::write(repo.path().join(".cargo").join("config.toml"), CONFIG_PROXY).expect("config");
+        fs::write(repo.path().join("Cargo.toml"), CARGO_TOML).expect("Cargo.toml");
+        let inv = inventario_con(vec![entrada("http.proxy", 2, CITA_PROXY)]);
+
+        let textos = textos_de(repo.path(), &inv);
+
+        assert_eq!(
+            textos,
+            vec![
+                (".cargo/config.toml".to_string(), CONFIG_PROXY.to_string()),
+                ("Cargo.toml".to_string(), CARGO_TOML.to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn descarga_textos_de_archivo_sobre_el_tope_no_se_lee() {
+        let repo = tempfile::tempdir().expect("repo");
+        fs::create_dir(repo.path().join(".cargo")).expect("carpeta .cargo");
+        fs::write(repo.path().join(".cargo").join("config.toml"), CONFIG_PROXY).expect("config");
+        let grande = "x".repeat(TOPE_ARCHIVO_BYTES as usize + 1);
+        fs::write(repo.path().join("Cargo.toml"), grande).expect("Cargo.toml grande");
+        let inv = inventario_con(vec![entrada("http.proxy", 2, CITA_PROXY)]);
+
+        let textos = textos_de(repo.path(), &inv);
+
+        assert!(
+            !textos.iter().any(|(archivo, _)| archivo == ARCHIVO_CARGO),
+            "el Cargo.toml sobre el tope no se lee: {textos:?}"
+        );
+        assert!(
+            textos
+                .iter()
+                .any(|(archivo, _)| archivo == ".cargo/config.toml"),
+            "el config chico sí se lee: {textos:?}"
         );
     }
 }
