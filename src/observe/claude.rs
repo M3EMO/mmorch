@@ -1,12 +1,14 @@
 //! Convierte la salida de `claude -p --output-format json` en eventos `Sesion`.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
 use serde_json::{Map, Value, json};
 
-use crate::observe::uso::iso;
+use crate::observe::jsonl;
+use crate::observe::uso::{self, iso};
 use crate::observe::{ErrorObserve, evento_gate};
 use crate::tipos::{Evento, TipoEvento, Via};
 
@@ -63,6 +65,87 @@ pub fn gates_de_costo_desconocido(eventos: &[Evento]) -> Vec<Evento> {
             evento_gate(&ev.corrida, FASE_COSTO_DESCONOCIDO, extra)
         })
         .collect()
+}
+
+/// Lo que `registrar_sesion_claude` dejó en el log.
+#[derive(Debug, PartialEq)]
+pub struct Registro {
+    /// Eventos `Llamada` y `Sesion` agregados al log.
+    pub eventos: usize,
+    /// `session_id` de las sesiones que el log ya tenía. No se registraron de nuevo.
+    pub ya_registradas: Vec<String>,
+}
+
+/// Registra en `ruta_log` la salida de `claude -p` de `archivo`: eventos y gates de costo.
+/// Una sesión cuyo `session_id` ya está en el log no se registra de nuevo. Leer, decidir y
+/// escribir pasan bajo un solo lock, así dos corridas a la vez no la cuentan dos veces.
+pub fn registrar_sesion_claude(
+    archivo: &Path,
+    corrida: &str,
+    via: Option<Via>,
+    ruta_log: &Path,
+) -> Result<Registro, ErrorObserve> {
+    let eventos = leer_sesion_claude(archivo, corrida)?;
+    let eventos = match via {
+        Some(via) => uso::con_via(eventos, via),
+        None => eventos,
+    };
+    uso::con_eventos_bloqueados(ruta_log, |registrados, log| {
+        let ya = ids_registrados(registrados);
+        let (nuevos, ya_registradas) = sin_sesiones_ya_registradas(eventos, &ya);
+        let gates = gates_de_costo_desconocido(&nuevos);
+        for ev in nuevos.iter().chain(&gates) {
+            let linea = serde_json::to_string(ev)?;
+            log.agregar(&linea, jsonl::UMBRAL_POR_DEFECTO)?;
+        }
+        Ok(Registro {
+            eventos: nuevos.len(),
+            ya_registradas,
+        })
+    })
+}
+
+/// `session_id` que ya tiene el log: el de cada `Sesion` registrado.
+fn ids_registrados(registrados: &[Evento]) -> HashSet<String> {
+    registrados
+        .iter()
+        .filter(|ev| ev.tipo == TipoEvento::Sesion)
+        .filter_map(id_de_sesion)
+        .map(str::to_string)
+        .collect()
+}
+
+/// `session_id` de un evento `Sesion`, si lo trae.
+fn id_de_sesion(ev: &Evento) -> Option<&str> {
+    ev.extra.get("session_id").and_then(Value::as_str)
+}
+
+/// Quita los grupos de `eventos` cuyo `session_id` está en `ya`. Un grupo son los eventos de un
+/// objeto JSON: sus `Llamada` y, al final, su `Sesion`. Da los grupos nuevos y los ids saltados.
+fn sin_sesiones_ya_registradas(
+    eventos: Vec<Evento>,
+    ya: &HashSet<String>,
+) -> (Vec<Evento>, Vec<String>) {
+    let mut nuevos = Vec::new();
+    let mut saltadas = Vec::new();
+    let mut grupo = Vec::new();
+    for ev in eventos {
+        let cierra = ev.tipo == TipoEvento::Sesion;
+        let id = id_de_sesion(&ev).map(str::to_string);
+        grupo.push(ev);
+        if !cierra {
+            continue;
+        }
+        match id {
+            Some(id) if ya.contains(&id) => {
+                saltadas.push(id);
+                grupo.clear();
+            }
+            _ => nuevos.append(&mut grupo),
+        }
+    }
+    nuevos.append(&mut grupo);
+    (nuevos, saltadas)
 }
 
 /// Hora en que terminó la sesión: el mtime del archivo, en epoch segundos.
@@ -294,6 +377,50 @@ mod tests {
             let (_dir, ruta) = sesion_con_mtime(contenido, MTIME_OCTUBRE);
             assert!(leer_sesion_claude(&ruta, "c1").is_err(), "{contenido}");
         }
+    }
+
+    #[test]
+    fn observe_registrar_dos_veces_la_misma_salida_no_duplica_el_costo() {
+        let log = TempDir::new().expect("temp dir");
+        let ruta_log = crate::observe::ruta_eventos_en(log.path());
+        let (_dir, archivo) = sesion_con_mtime(
+            r#"{"total_cost_usd": 0.7, "session_id": "s-1", "modelUsage": {"a": {"costUSD": 0.5}, "b": {"costUSD": 0.2}}}"#,
+            MTIME_OCTUBRE,
+        );
+        let primera = registrar_sesion_claude(&archivo, "c1", None, &ruta_log).expect("primera");
+        let segunda = registrar_sesion_claude(&archivo, "c1", None, &ruta_log).expect("segunda");
+        assert_eq!(primera.eventos, 3, "dos Llamada y un Sesion");
+        assert_eq!(segunda.eventos, 0, "la sesión ya estaba en el log");
+        assert_eq!(segunda.ya_registradas, vec!["s-1".to_string()]);
+        let registrados = uso::leer_eventos(&ruta_log).expect("lee el log");
+        assert_eq!(registrados.len(), 3);
+        let total: f64 = registrados.iter().map(|ev| ev.cost_usd).sum();
+        assert!((total - 0.7).abs() < 1e-12, "total {total}");
+    }
+
+    #[test]
+    fn observe_sesion_ya_registrada_se_salta_y_la_nueva_entra() {
+        let log = TempDir::new().expect("temp dir");
+        let ruta_log = crate::observe::ruta_eventos_en(log.path());
+        let (_d1, primera) = sesion_con_mtime(
+            r#"{"session_id": "s-1", "modelUsage": {"a": {"costUSD": 0.5}}}"#,
+            MTIME_OCTUBRE,
+        );
+        registrar_sesion_claude(&primera, "c1", None, &ruta_log).expect("primera");
+        // Un archivo con dos sesiones: s-1 ya está, s-2 es nueva.
+        let (_d2, mezcla) = sesion_con_mtime(
+            "{\"session_id\": \"s-1\", \"modelUsage\": {\"a\": {\"costUSD\": 0.5}}}\n{\"session_id\": \"s-2\", \"modelUsage\": {\"a\": {\"costUSD\": 0.2}}}\n",
+            MTIME_OCTUBRE,
+        );
+        let segunda = registrar_sesion_claude(&mezcla, "c1", None, &ruta_log).expect("segunda");
+        assert_eq!(segunda.eventos, 2, "solo la Llamada y el Sesion de s-2");
+        assert_eq!(segunda.ya_registradas, vec!["s-1".to_string()]);
+        let total: f64 = uso::leer_eventos(&ruta_log)
+            .expect("lee el log")
+            .iter()
+            .map(|ev| ev.cost_usd)
+            .sum();
+        assert!((total - 0.7).abs() < 1e-12, "total {total}");
     }
 
     #[test]
