@@ -954,27 +954,62 @@ pub(crate) fn entregar_con(
                 .insert(id, LugarEscenario::Imagen);
         }
     }
+    let construida = construccion.construida;
+    let causas_build: Vec<String> = construccion
+        .pendientes
+        .iter()
+        .map(|p| p.motivo.clone())
+        .collect();
     resultado.pendientes.extend(construccion.pendientes);
     resultado.sonda.hallazgos.extend(construccion.hallazgos);
     resultado.sin_veredicto = construccion.sin_veredicto;
     resultado.avisos = avisos;
     // Sin construcción, la entrega no da verde: el resto de la evaluación sigue con su veredicto.
-    if !resultado.sin_veredicto.is_empty() {
-        let causas: Vec<&str> = resultado
-            .sin_veredicto
-            .iter()
-            .map(|m| m.causa.as_str())
-            .collect();
-        let causas = causas.join("; ");
-        resultado.sonda.valor = None;
-        resultado.sonda.motivo = Some(match resultado.sonda.motivo.take() {
-            Some(previo) => format!("{previo}; {causas}"),
-            None => causas,
-        });
+    // Un build pendiente sin hallazgos deja la sonda sin veredicto. Con hallazgos medidos, puntúan.
+    let causas: Vec<String> = resultado
+        .sin_veredicto
+        .iter()
+        .map(|m| m.causa.clone())
+        .collect();
+    if !causas.is_empty() {
+        sin_veredicto_sonda(&mut resultado.sonda, &causas.join("; "));
+    } else if !causas_build.is_empty() && resultado.sonda.hallazgos.is_empty() {
+        sin_veredicto_sonda(&mut resultado.sonda, &causas_build.join("; "));
     } else if resultado.sonda.motivo.is_none() {
-        resultado.sonda.valor = Some(puntuar_hallazgos(&resultado.sonda.hallazgos, reqs));
+        if medido_algo(tarea, &resultado, construida) {
+            resultado.sonda.valor = Some(puntuar_hallazgos(&resultado.sonda.hallazgos, reqs));
+        } else {
+            sin_veredicto_sonda(&mut resultado.sonda, MOTIVO_SIN_ITEMS);
+        }
     }
     Ok(resultado)
+}
+
+/// Motivo de la sonda cuando la entrega no midió ningún ítem.
+const MOTIVO_SIN_ITEMS: &str = "entrega sin ítems medidos";
+
+/// Deja la sonda sin veredicto. El motivo nuevo va después del previo, si lo hay.
+fn sin_veredicto_sonda(sonda: &mut ResultadoSonda, causas: &str) {
+    sonda.valor = None;
+    sonda.motivo = Some(match sonda.motivo.take() {
+        Some(previo) => format!("{previo}; {causas}"),
+        None => causas.to_string(),
+    });
+}
+
+/// Verdadero si la entrega midió algo. Cuenta: archivos de `[entrega]`, escenarios con salida, un
+/// Dockerfile construido o evaluado (con hallazgos), o requisitos de la tarea. Los requisitos cuentan
+/// como medido por dilema: sin ellos, el test de mod.rs sin Dockerfile pierde su veredicto (ver reporte).
+fn medido_algo(tarea: &Tarea, resultado: &ResultadoEntrega, construida: bool) -> bool {
+    let hay_archivos = tarea
+        .entrega
+        .as_ref()
+        .is_some_and(|e| !e.archivos.is_empty());
+    hay_archivos
+        || !resultado.escenarios.is_empty()
+        || construida
+        || !resultado.sonda.hallazgos.is_empty()
+        || !tarea.requisito.is_empty()
 }
 
 /// Resultado de un escenario corrido dentro de la imagen.
@@ -3130,5 +3165,167 @@ pub(crate) mod tests {
             "el escenario corre una sola vez, en la imagen"
         );
         assert!(r.sin_veredicto.is_empty(), "{:?}", r.sin_veredicto);
+    }
+
+    /// Fábrica que cuenta los contenedores de escenario que se abren.
+    fn fabrica_vacia() -> FabricaFalsa {
+        FabricaFalsa {
+            imagenes: RefCell::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn entrega_dockerfile_con_paso_fallido_por_red_sin_otros_hallazgos_no_da_valor() {
+        let repo = repo_con_archivos(&[("Dockerfile", DF_RED)]);
+        let home = tempfile::tempdir().expect("home");
+        let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), salida_sin_red()));
+        let fabrica = fabrica_vacia();
+        let r = entregar_con(
+            &Falso::sano(),
+            repo.path(),
+            &tarea_de("shell", ""),
+            home.path(),
+            &[],
+            &podman,
+            &fabrica,
+        )
+        .expect("entrega");
+        assert!(r.sin_veredicto.is_empty(), "{:?}", r.sin_veredicto);
+        assert!(
+            r.pendientes.iter().any(|p| p.test == "dockerfile::build"),
+            "{:?}",
+            r.pendientes
+        );
+        assert_eq!(r.sonda.valor, None, "{:?}", r.sonda);
+        assert!(
+            r.sonda.motivo.as_deref().is_some_and(|m| !m.is_empty()),
+            "{:?}",
+            r.sonda
+        );
+    }
+
+    #[test]
+    fn entrega_sin_ningun_item_medido_da_sin_veredicto() {
+        let repo = tempfile::tempdir().expect("repo");
+        let home = tempfile::tempdir().expect("home");
+        let podman = PodmanFalso::nuevo(responde_build(salida_ok(), salida_ok()));
+        let fabrica = fabrica_vacia();
+        let r = entregar_con(
+            &Falso::sano(),
+            repo.path(),
+            &tarea_de("shell", ""),
+            home.path(),
+            &[],
+            &podman,
+            &fabrica,
+        )
+        .expect("entrega");
+        assert_eq!(r.sonda.valor, None, "{:?}", r.sonda);
+        assert_eq!(
+            r.sonda.motivo.as_deref(),
+            Some("entrega sin ítems medidos"),
+            "{:?}",
+            r.sonda
+        );
+    }
+
+    #[test]
+    fn entrega_imagen_base_sin_descargar_da_sin_veredicto_en_la_sonda() {
+        let repo = repo_con_archivos(&[("Dockerfile", "FROM 127.0.0.1:1/x:1\nUSER 1000\n")]);
+        let home = tempfile::tempdir().expect("home");
+        let imagenes = [ImagenBase {
+            archivo: "Dockerfile".into(),
+            linea: 1,
+            cita: "FROM 127.0.0.1:1/x:1".into(),
+            imagen: "127.0.0.1:1/x:1".into(),
+            resuelta: Some("127.0.0.1:1/x:1".into()),
+            digest: None,
+            descargada: false,
+            sin_resolver: None,
+            problema: Some(Problema::PideCredenciales),
+        }];
+        let podman = PodmanFalso::nuevo(responde_build(salida_ok(), salida_ok()));
+        let fabrica = fabrica_vacia();
+        let r = entregar_con(
+            &Falso::sano(),
+            repo.path(),
+            &tarea_de("shell", ""),
+            home.path(),
+            &imagenes,
+            &podman,
+            &fabrica,
+        )
+        .expect("entrega");
+        assert_eq!(podman.total(), 0, "{:?}", podman.builds());
+        assert_eq!(r.sonda.valor, None, "{:?}", r.sonda);
+        assert!(
+            r.sonda
+                .motivo
+                .as_deref()
+                .is_some_and(|m| m.contains("pide credenciales")),
+            "{:?}",
+            r.sonda
+        );
+    }
+
+    #[test]
+    fn entrega_dockerfile_que_construye_sin_hallazgos_sigue_con_valor() {
+        let repo = repo_con_archivos(&[("Dockerfile", "FROM scratch\nUSER app\n")]);
+        let home = tempfile::tempdir().expect("home");
+        let podman = PodmanFalso::nuevo(responde_build(salida_ok(), salida_ok()));
+        let fabrica = fabrica_vacia();
+        let r = entregar_con(
+            &Falso::sano(),
+            repo.path(),
+            &tarea_de("shell", ""),
+            home.path(),
+            &[],
+            &podman,
+            &fabrica,
+        )
+        .expect("entrega");
+        assert!(r.pendientes.is_empty(), "{:?}", r.pendientes);
+        assert!(r.sonda.hallazgos.is_empty(), "{:?}", r.sonda.hallazgos);
+        assert_eq!(r.sonda.valor, Some(1.0), "{:?}", r.sonda);
+        assert_eq!(r.sonda.motivo, None);
+    }
+
+    #[test]
+    fn entrega_build_pendiente_con_hallazgo_de_root_baja_el_valor() {
+        // Sin `USER`, el Dockerfile corre como root: la sonda estática lo mide aunque el build quede pendiente.
+        let repo = repo_con_archivos(&[(
+            "Dockerfile",
+            "FROM debian:12\nRUN apt-get install -y curl\n",
+        )]);
+        let home = tempfile::tempdir().expect("home");
+        let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), salida_sin_red()));
+        let fabrica = fabrica_vacia();
+        let r = entregar_con(
+            &Falso::sano(),
+            repo.path(),
+            &tarea_de("shell", ""),
+            home.path(),
+            &[],
+            &podman,
+            &fabrica,
+        )
+        .expect("entrega");
+        assert!(r.sin_veredicto.is_empty(), "{:?}", r.sin_veredicto);
+        assert!(
+            r.pendientes.iter().any(|p| p.test == "dockerfile::build"),
+            "{:?}",
+            r.pendientes
+        );
+        assert!(
+            r.sonda
+                .hallazgos
+                .iter()
+                .any(|h| h.cita == "FROM debian:12" && h.archivo == "Dockerfile"),
+            "{:?}",
+            r.sonda.hallazgos
+        );
+        let valor = r.sonda.valor.expect("valor");
+        assert!(valor < 1.0, "{:?}", r.sonda);
+        assert_eq!(r.sonda.motivo, None);
     }
 }
