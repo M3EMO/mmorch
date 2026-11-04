@@ -23,8 +23,10 @@ const PIDS_LIMITE: u32 = 512;
 const MEMORIA: &str = "2g";
 /// Plazo de `podman rm -f` al limpiar un contenedor. Si podman no responde, la limpieza no bloquea a Root.
 const PLAZO_LIMPIEZA: Duration = Duration::from_secs(30);
-/// Código con que podman sale ante un error propio (imagen inexistente, opción inválida).
-const CODIGO_ERROR_PODMAN: i32 = 125;
+/// Códigos de salida que indican fallo del entorno, no del comando evaluado. 125: error propio de podman
+/// (imagen inexistente, opción inválida). 126: comando no ejecutable. 127: comando no encontrado.
+/// 137: proceso muerto por SIGKILL, por ejemplo por falta de memoria (OOM).
+const CODIGOS_DE_INFRA: [i32; 4] = [125, 126, 127, 137];
 /// Pausa entre consultas al proceso mientras se espera su fin.
 const SONDEO: Duration = Duration::from_millis(20);
 
@@ -191,11 +193,8 @@ pub fn ejecutar(e: &Ejecucion) -> Result<Resultado, ErrorOraculo> {
     let Some(codigo) = estado.code() else {
         return Err(ErrorOraculo::Infra("podman terminó por una señal".into()));
     };
-    if codigo == CODIGO_ERROR_PODMAN {
-        return Err(ErrorOraculo::Infra(format!(
-            "podman falló (125): {}",
-            cola(&stderr)
-        )));
+    if let Some(error) = error_de_infra(codigo, &stderr) {
+        return Err(error);
     }
     Ok(Resultado {
         codigo,
@@ -388,6 +387,17 @@ fn cola(texto: &str) -> String {
     texto.chars().skip(total.saturating_sub(COLA)).collect()
 }
 
+/// Da `Infra` si el código de salida indica un fallo del entorno y no del comando evaluado.
+fn error_de_infra(codigo: i32, stderr: &str) -> Option<ErrorOraculo> {
+    if CODIGOS_DE_INFRA.contains(&codigo) {
+        return Some(ErrorOraculo::Infra(format!(
+            "podman falló ({codigo}): {}",
+            cola(stderr)
+        )));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use std::io;
@@ -395,6 +405,37 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc;
+
+    /// Mensaje de `Infra` para un código, o `None` si el código no es de infraestructura.
+    fn infra_de(codigo: i32) -> Option<String> {
+        match error_de_infra(codigo, "detalle") {
+            Some(ErrorOraculo::Infra(mensaje)) => Some(mensaje),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn error_de_infra_marca_137_como_infra() {
+        let mensaje = infra_de(137).expect("137 es infraestructura");
+        assert!(mensaje.contains("137"), "{mensaje}");
+        assert!(mensaje.contains("detalle"), "{mensaje}");
+    }
+
+    #[test]
+    fn error_de_infra_marca_125_126_127_como_infra() {
+        for codigo in [125, 126, 127] {
+            let mensaje = infra_de(codigo).expect("código de infraestructura");
+            assert!(mensaje.contains(&codigo.to_string()), "{mensaje}");
+            assert!(mensaje.starts_with("podman falló ("), "{mensaje}");
+        }
+    }
+
+    #[test]
+    fn error_de_infra_deja_pasar_0_1_y_2() {
+        for codigo in [0, 1, 2] {
+            assert!(infra_de(codigo).is_none(), "código {codigo}");
+        }
+    }
 
     #[test]
     fn turno_de_contenedor_nunca_deja_dos_ejecuciones_a_la_vez() {

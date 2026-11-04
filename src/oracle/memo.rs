@@ -316,7 +316,10 @@ mod tests {
             real: &real,
             reuso: &reuso,
         };
-        let cmds = ["cargo clippy --all-targets", "command -v gitleaks"];
+        let cmds = [
+            "cargo clippy --all-targets",
+            "command -v gitleaks || exit 1",
+        ];
         for cmd in cmds {
             memo.anotar(cmd, &con_outcomes("{}"));
             assert_eq!(reusador.ejecutar(cmd).expect("delega"), real_salida);

@@ -637,6 +637,12 @@ fn evaluar_con(
             return Ok(con_costo(v, &juez_config));
         }
     };
+    // Los hallazgos siguen en su sitio: el aviso es una copia para el veredicto, sin duplicar.
+    for aviso in avisos_de_dependencias(&hallazgos) {
+        if !avisos.contains(&aviso) {
+            avisos.push(aviso);
+        }
+    }
     let salida = temporal(&tmp).map_err(|e| infra("directorio de salida", e))?;
     // Podman rootless: si el contenedor corre con otro uid, la salida debe ser escribible por todos.
     fs::set_permissions(salida.path(), fs::Permissions::from_mode(0o777))
@@ -732,7 +738,7 @@ fn evaluar_con(
     if let Target::Guardar(destino) = &o.target {
         let origen = salida.path().join("target");
         if origen.is_dir()
-            && let Err(motivo) = copiar_target(&origen, destino)
+            && let Err(motivo) = guardar_target(&origen, destino)
         {
             avisos.push(format!("{AVISO_TARGET_FRIO} {motivo}"));
         }
@@ -1670,6 +1676,22 @@ fn sin_calibrar(puntajes: &[Puntaje]) -> Vec<Dimension> {
         .collect()
 }
 
+/// Texto fijo del aviso de dependencias no verificadas. Repite `AVISO_NO_VERIFICADAS` de `descarga/python.rs`.
+/// Si cambia allá, cambia acá también.
+const AVISO_DEPENDENCIAS_NO_VERIFICADAS: &str = "dependencias de runtime no verificadas";
+
+/// Avisos de dependencias no verificadas que traen los hallazgos de la descarga, sin repetidos y en orden.
+fn avisos_de_dependencias(hallazgos: &[Hallazgo]) -> Vec<String> {
+    let mut avisos: Vec<String> = Vec::new();
+    for h in hallazgos {
+        let es_aviso = h.detalle.contains(AVISO_DEPENDENCIAS_NO_VERIFICADAS);
+        if es_aviso && !avisos.contains(&h.detalle) {
+            avisos.push(h.detalle.clone());
+        }
+    }
+    avisos
+}
+
 /// Motivo de una descarga sin veredicto: el detalle de su primer hallazgo, si lo hay.
 fn motivo_de_la_descarga(hallazgos: &[Hallazgo]) -> String {
     match hallazgos.first() {
@@ -1794,6 +1816,34 @@ fn copiar_target(origen: &Path, destino: &Path) -> io::Result<()> {
         salida.status,
         String::from_utf8_lossy(&salida.stderr).trim()
     )))
+}
+
+/// Guarda el `target` de `origen` en `destino` sin dejar un `destino` parcial. Copia a `<destino>.parcial`,
+/// hermano de `destino`, y lo renombra al terminar. Si `destino` ya existe, falla sin tocarlo.
+/// Si la copia o el renombre fallan, borra el parcial y devuelve el error original.
+fn guardar_target(origen: &Path, destino: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(destino).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("el destino ya existe: {}", destino.display()),
+        ));
+    }
+    let (Some(padre), Some(nombre)) = (destino.parent(), destino.file_name()) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("destino sin carpeta o nombre: {}", destino.display()),
+        ));
+    };
+    let parcial = padre.join(format!("{}.parcial", nombre.to_string_lossy()));
+    // Un parcial viejo de otra corrida estorbaría la copia: se borra antes.
+    borrado::borrar_dir_dentro(padre, &parcial)?;
+    let resultado = copiar_target(origen, &parcial).and_then(|()| fs::rename(&parcial, destino));
+    if let Err(error) = resultado {
+        // La limpieza es de mejor esfuerzo: el error de la copia es el que importa.
+        let _ = borrado::borrar_dir_dentro(padre, &parcial);
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Carpeta temporal dentro de `tmp`, con el prefijo de `evaluar`.
@@ -3882,7 +3932,10 @@ mod tests {
     impl EjecutorHerramienta for HerramientasSanas {
         fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
             let mut salida = SalidaHerramienta::default();
-            if let Some(nombre) = cmd.strip_prefix("command -v ") {
+            if let Some(nombre) = cmd
+                .strip_prefix("command -v ")
+                .and_then(|resto| resto.strip_suffix(" || exit 1"))
+            {
                 salida.codigo = i32::from(self.faltan.contains(&nombre));
             } else if cmd == "cargo clippy --version" {
                 salida.codigo = i32::from(self.faltan.contains(&"clippy"));
@@ -4116,6 +4169,48 @@ mod tests {
             &fs::metadata(destino.join("huella")).expect("metadatos"),
         );
         assert_eq!(mtime, viejo, "cp -a conserva el mtime");
+    }
+
+    #[test]
+    fn oraculo_guardar_target_que_falla_a_mitad_no_deja_destino() {
+        let base = tempfile::tempdir().expect("base");
+        let origen = base.path().join("origen");
+        fs::create_dir_all(&origen).expect("origen");
+        fs::write(origen.join("bueno"), "x").expect("bueno");
+        let malo = origen.join("malo");
+        fs::write(&malo, "secreto").expect("malo");
+        fs::set_permissions(&malo, fs::Permissions::from_mode(0o000)).expect("sin lectura");
+        assert!(
+            fs::File::open(&malo).is_err(),
+            "el test necesita un usuario sin privilegios que no lea el archivo"
+        );
+        let destino = base.path().join("destino");
+        let resultado = guardar_target(&origen, &destino);
+        fs::set_permissions(&malo, fs::Permissions::from_mode(0o644)).expect("restaura permisos");
+        assert!(resultado.is_err(), "la copia falla a mitad");
+        assert!(!destino.exists(), "no queda destino");
+        assert!(
+            !base.path().join("destino.parcial").exists(),
+            "no queda parcial"
+        );
+    }
+
+    #[test]
+    fn oraculo_guardar_target_completo_llega_al_destino_sin_parcial() {
+        let base = tempfile::tempdir().expect("base");
+        let origen = base.path().join("origen");
+        fs::create_dir_all(origen.join("sub")).expect("origen");
+        fs::write(origen.join("sub").join("artefacto"), "compilado").expect("artefacto");
+        let destino = base.path().join("destino");
+        guardar_target(&origen, &destino).expect("guarda");
+        assert_eq!(
+            fs::read_to_string(destino.join("sub").join("artefacto")).expect("lee"),
+            "compilado"
+        );
+        assert!(
+            !base.path().join("destino.parcial").exists(),
+            "no queda parcial"
+        );
     }
 
     #[test]
@@ -7981,5 +8076,54 @@ mod tests {
         assert_eq!(confianza.corridas_acumuladas["contrato:test_c::t9"], 3);
         let texto = serde_json::to_string(&r).expect("json");
         assert!(!texto.contains("test_a::t1"), "{texto}");
+    }
+
+    // --- Avisos de dependencias no verificadas: de los hallazgos de la descarga a `avisos` ---
+
+    /// Hallazgo de la descarga con `detalle` dado. Solo importa el `detalle` para `avisos_de_dependencias`.
+    fn hallazgo_con_detalle(detalle: &str) -> Hallazgo {
+        Hallazgo {
+            dimension: crate::tipos::Dimension::Seguridad,
+            severidad: 1,
+            archivo: "pyproject.toml".into(),
+            linea: 1,
+            cita: String::new(),
+            detalle: detalle.into(),
+            fuente: crate::tipos::Fuente::Sonda("descarga".into()),
+            id: String::new(),
+            impacto: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn avisos_de_dependencias_dan_los_dos_avisos_en_orden() {
+        let sdist = format!(
+            "sdist con metadatos anteriores a 2.1: {AVISO_DEPENDENCIAS_NO_VERIFICADAS}: foo-1.0.tar.gz"
+        );
+        let clon = format!(
+            "clon sin metadatos estáticos: {AVISO_DEPENDENCIAS_NO_VERIFICADAS}: git+https://x/y"
+        );
+        let hallazgos = vec![
+            hallazgo_con_detalle(&sdist),
+            hallazgo_con_detalle("unwrap sin control"),
+            hallazgo_con_detalle(&clon),
+        ];
+        assert_eq!(avisos_de_dependencias(&hallazgos), vec![sdist, clon]);
+    }
+
+    #[test]
+    fn avisos_de_dependencias_repetidos_dan_uno() {
+        let aviso = format!(
+            "clon sin metadatos estáticos: {AVISO_DEPENDENCIAS_NO_VERIFICADAS}: git+https://x/y"
+        );
+        let hallazgos = vec![hallazgo_con_detalle(&aviso), hallazgo_con_detalle(&aviso)];
+        assert_eq!(avisos_de_dependencias(&hallazgos), vec![aviso]);
+    }
+
+    #[test]
+    fn avisos_de_dependencias_sin_ese_tipo_da_vacio() {
+        let hallazgos = vec![hallazgo_con_detalle("unwrap sin control")];
+        assert!(avisos_de_dependencias(&hallazgos).is_empty());
+        assert!(avisos_de_dependencias(&[]).is_empty());
     }
 }

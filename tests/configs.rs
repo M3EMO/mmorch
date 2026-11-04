@@ -119,7 +119,7 @@ fn configs_hadolint_con_dockerfile_y_herramienta_ausente_es_sin_veredicto() {
             .unwrap_or_default()
             .contains("hadolint")
     );
-    assert_eq!(ej.cmds(), ["command -v hadolint"]);
+    assert_eq!(ej.cmds(), ["command -v hadolint || exit 1"]);
 }
 
 #[test]

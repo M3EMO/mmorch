@@ -352,11 +352,12 @@ pub(crate) fn comando_clippy() -> String {
 }
 
 /// Comando que verifica que `nombre` está en la imagen: `cargo clippy --version` para clippy.
+/// Con dash, `command -v` sale con 127 si falta la herramienta. El `|| exit 1` lo deja en 1, que no es infraestructura.
 pub(crate) fn comando_de_herramienta(nombre: &str) -> String {
     if nombre == "clippy" {
         "cargo clippy --version".to_string()
     } else {
-        format!("command -v {nombre}")
+        format!("command -v {nombre} || exit 1")
     }
 }
 
@@ -702,6 +703,16 @@ mod tests {
     use crate::tipos::Fuente;
     use std::cell::RefCell;
 
+    #[test]
+    fn comando_de_herramienta_inexistente_sale_con_1_en_un_sh_local() {
+        let cmd = comando_de_herramienta("herramienta-que-no-existe-61");
+        let salida = std::process::Command::new("sh")
+            .args(["-c", &cmd])
+            .output()
+            .expect("lanza sh");
+        assert_eq!(salida.status.code(), Some(1), "{cmd}");
+    }
+
     const GITLEAKS: &str = include_str!("../../../tests/fixtures/sondas/gitleaks.json");
     const GITLEAKS_VACIO: &str = include_str!("../../../tests/fixtures/sondas/gitleaks-vacio.json");
     const GITLEAKS_NULL: &str = include_str!("../../../tests/fixtures/sondas/gitleaks-null.json");
@@ -967,7 +978,7 @@ mod tests {
             r.motivo.as_deref(),
             Some("gitleaks no está en la imagen de evaluación")
         );
-        assert_eq!(ej.cmds(), ["command -v gitleaks"]);
+        assert_eq!(ej.cmds(), ["command -v gitleaks || exit 1"]);
 
         let ej = EjecutorFalso::nuevo(|_| Ok(salida(1, "")));
         let r = clippy(&ej, &tarea);
@@ -1101,7 +1112,7 @@ mod tests {
         let r = cargo_audit(&ej, &tarea_rust(None), repo.path());
         assert_eq!(r.motivo, None);
         assert_eq!(r.hallazgos.len(), 2);
-        assert_eq!(ej.cmds()[0], "command -v cargo-audit");
+        assert_eq!(ej.cmds()[0], "command -v cargo-audit || exit 1");
         assert!(
             ej.cmds()[1].starts_with("cd /repo && cargo audit --no-fetch --db /rustsec --json")
         );

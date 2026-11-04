@@ -11,7 +11,9 @@ use crate::config::Config;
 use crate::corre::args::{args_claude, env_del_builder};
 use crate::corre::config::ConfigCorrida;
 use crate::corre::contenedor::{TIMEOUT_BUILDER, estado_de};
-use crate::corre::costo_cortado::{costo_de_uso, evento_de_corte, uso_de_transcript};
+use crate::corre::costo_cortado::{
+    costo_de_uso, evento_de_corte, precio_de_rol, uso_de_transcript,
+};
 use crate::corre::git_seguro;
 use crate::corre::{
     Corrida, EjecutorBuilder, ErrorCorre, Lanzamiento, guardar_transcript, preparar_corrida,
@@ -255,7 +257,7 @@ fn registrar_corte(
     let config =
         Config::cargar(&home.join("root.toml")).map_err(|e| ErrorCorre::Uso(e.to_string()))?;
     let uso = uso_de_transcript(stdout);
-    let costo = costo_de_uso(&uso, config.precios.get(modelo));
+    let costo = costo_de_uso(&uso, precio_de_rol(&config, modelo));
     registrar(ruta_eventos, &evento_de_corte(id, modelo, &uso, &costo))
 }
 
@@ -352,7 +354,7 @@ fn registrar_sesion(
     fs::write(&ruta, format!("{linea}\n"))
         .map_err(super::infra("guardar el resultado de la sesión"))?;
     if let Err(error) = registrar_sesion_claude(&ruta, id, None, ruta_eventos) {
-        let motivo = format!("sesión no leída: {error}");
+        let motivo = format!("sesión no registrada: {error}");
         return gate(ruta_eventos, id, FASE_SESION, motivo, Some(lanzado.rol));
     }
     Ok(())
@@ -1384,7 +1386,8 @@ mod tests {
         registrar_sesion(&e.home, id, &lanzado, linea, &ruta_eventos).expect("no corta");
         let motivos = gates(&e, FASE_SESION);
         assert_eq!(motivos.len(), 1, "un Gate de la sesión");
-        assert!(motivos[0].contains("sesión no leída"), "{motivos:?}");
+        assert!(motivos[0].contains("sesión no registrada"), "{motivos:?}");
+        assert!(!motivos[0].contains("sesión no leída"), "{motivos:?}");
         assert!(eventos(&e).iter().all(|ev| ev.tipo != TipoEvento::Sesion));
     }
 
@@ -1536,11 +1539,13 @@ mod tests {
         assert_eq!(ev.via, Some(Via::Cupo));
         assert_eq!(ev.modelo.as_deref(), Some("haiku"));
         assert_eq!((ev.in_tokens, ev.out_tokens), (3500, 130));
-        // Sin precio para "haiku" en el fixture: rige el pesimista (15 y 75 USD por millón).
-        let esperado = 3500.0 * 15.0 / 1e6 + 130.0 * 75.0 / 1e6;
+        // "haiku" se traduce a "claude-haiku-5-5": rige el precio de ese id, no el pesimista.
+        let precio = Config::default().precios["claude-haiku-5-5"].clone();
+        let (usd_entrada, usd_salida) = precio.tarifa_para(3500);
+        let esperado = 3500.0 * usd_entrada / 1e6 + 130.0 * usd_salida / 1e6;
         assert!((ev.cost_usd - esperado).abs() < 1e-9, "{}", ev.cost_usd);
         assert_eq!(ev.extra["costo_estimado"], Value::Bool(true));
-        assert_eq!(ev.extra["precio_supuesto"], Value::Bool(true));
+        assert!(!ev.extra.contains_key("precio_supuesto"));
 
         let lanzamientos = gates(&e, FASE_LANZAMIENTO);
         assert_eq!(lanzamientos.len(), 1, "el Gate de lanzamiento se mantiene");
@@ -1549,6 +1554,37 @@ mod tests {
             gates(&e, FASE_EVALUACION).is_empty(),
             "no hay evaluación de la corrida cortada"
         );
+    }
+
+    #[test]
+    fn corre_rol_cortado_sin_precio_del_modelo_usa_el_pesimista_marcado() {
+        let e = entorno();
+        // "opus" no tiene precio por defecto: rige el pesimista (15 y 75 USD por millón) y se marca.
+        fs::write(
+            e.home.join("root.toml"),
+            "[modelos]\nplanifica = \"opus\"\nconstruye = \"opus\"\n",
+        )
+        .expect("root.toml");
+        let stdout = include_bytes!("../../tests/fixtures/transcripts/cortado.jsonl").to_vec();
+        let builder = Cortado { stdout };
+        let _ = correr_con_eval(
+            &e,
+            &builder,
+            &[],
+            CONFIG_CONSTRUYE,
+            &evaluador_no_debe_correr,
+        );
+
+        let costos: Vec<Evento> = eventos(&e)
+            .into_iter()
+            .filter(|ev| ev.tipo == TipoEvento::Llamada && ev.cost_usd > 0.0)
+            .collect();
+        assert_eq!(costos.len(), 1, "un evento de costo para el rol cortado");
+        let ev = &costos[0];
+        assert_eq!(ev.modelo.as_deref(), Some("opus"));
+        let esperado = 3500.0 * 15.0 / 1e6 + 130.0 * 75.0 / 1e6;
+        assert!((ev.cost_usd - esperado).abs() < 1e-9, "{}", ev.cost_usd);
+        assert_eq!(ev.extra["precio_supuesto"], Value::Bool(true));
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use serde_json::{Value, json};
 
-use crate::config::Precio;
+use crate::config::{Config, Precio};
 use crate::observe;
 use crate::tipos::{Evento, TipoEvento, Via};
 
@@ -70,6 +70,17 @@ pub fn uso_de_transcript(stdout: &[u8]) -> Uso {
 /// Número entero de `usage` por `clave`. Ausente vale 0.
 fn campo(usage: &Value, clave: &str) -> u64 {
     usage.get(clave).and_then(Value::as_u64).unwrap_or(0)
+}
+
+/// Precio del rol cortado. Un alias de cupo se traduce a su id de API con `ruteo.api_equivalente`.
+/// Sin traducción, busca el nombre tal cual en `precios`.
+pub fn precio_de_rol<'a>(config: &'a Config, modelo: &str) -> Option<&'a Precio> {
+    let id = config
+        .ruteo
+        .api_equivalente
+        .get(modelo)
+        .map_or(modelo, |api| api.modelo.as_str());
+    config.precios.get(id)
 }
 
 /// Costo de `uso` al precio del modelo. Sin precio, usa `PRECIO_PESIMISTA` y marca `precio_supuesto`.
