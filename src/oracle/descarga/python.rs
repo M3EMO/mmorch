@@ -890,6 +890,13 @@ fn descargar_en(
         let cmd = comando_wheels(&format!("/cache/{ARCHIVO_BUILD}"), req);
         let salida = correr_pip(corrida, trabajo, parcial, cmd)?;
         if salida.codigo != 0 {
+            // Una dependencia de runtime sin wheel es un límite de Root, no un defecto del producto.
+            let de_runtime = nombres_de_runtime(parcial, req)?;
+            if let Some(spec) =
+                sin_wheel(&salida.stderr).filter(|s| de_runtime.contains(&nombre_de_spec(s)))
+            {
+                return Ok(corte_sin_wheel(&spec, false));
+            }
             return match diagnosticar(&salida.stderr) {
                 Diagnostico::Producto(linea) => {
                     Ok(Fin::Corta(hallazgo_no_instala_python(&linea), "no-instala"))
@@ -1255,6 +1262,29 @@ fn rutas_clon(req: &RequisitosPip) -> Vec<String> {
         .map(|partes| ruta_de_clon(&partes))
         .collect();
     rutas.into_iter().collect()
+}
+
+/// Nombres normalizados de las dependencias de runtime de los sdists y clones de `carpeta`. Las leen los
+/// mismos JSON y `pyproject` que el índice de build. Sin dependencias estáticas, da un conjunto vacío.
+fn nombres_de_runtime(
+    carpeta: &Path,
+    req: &RequisitosPip,
+) -> Result<BTreeSet<String>, ErrorOraculo> {
+    let mut specs: Vec<String> = Vec::new();
+    let sdists = nombres_sdist(carpeta)?;
+    if !sdists.is_empty() {
+        for deps in dependencias_de_sdists(carpeta, &sdists)?
+            .into_iter()
+            .flatten()
+        {
+            specs.extend(deps);
+        }
+    }
+    for ruta in rutas_clon(req) {
+        let pyproject = pyproject_de_clon(carpeta, &ruta);
+        specs.extend(dependencias_de_clon(pyproject.as_deref()).unwrap_or_default());
+    }
+    Ok(specs.iter().map(|spec| nombre_de_spec(spec)).collect())
 }
 
 /// Índice de build de las fuentes que necesitan build en `carpeta`: los sdists (con sus requisitos de build y sus
@@ -2682,6 +2712,117 @@ mod tests {
         );
         let registro = registro.expect("hay registro de la descarga");
         assert_eq!(registro.motivo, Some("dependencias-dinamicas"));
+    }
+
+    /// Responde `stderr` con código 1 al `pip download` de los requisitos de build. Lo demás lo responde `mundo`.
+    fn build_que_falla<'a>(
+        mundo: &'a impl Fn(&Ejecucion, &Path) -> Resultado,
+        stderr: &'a str,
+    ) -> impl Fn(&Ejecucion, &Path) -> Resultado + 'a {
+        move |ejecucion: &Ejecucion, cache: &Path| {
+            if ejecucion.cmd.contains("pip download") && ejecucion.cmd.contains(ARCHIVO_BUILD) {
+                return respuesta(1, stderr);
+            }
+            mundo(ejecucion, cache)
+        }
+    }
+
+    #[test]
+    fn descarga_python_solo_sdist_de_runtime_en_el_build_da_corte_sin_veredicto() {
+        // Una dependencia de runtime de un sdist sin wheel no es `no-instala`: es `solo-sdist`.
+        let indice = RefCell::new(None);
+        let mundo = mundo_de_sdist(r#"{"foo-1.0.tar.gz": ["dep-solo-sdist==1.0"]}"#, &indice);
+        let falla = build_que_falla(
+            &mundo,
+            "ERROR: No matching distribution found for dep-solo-sdist==1.0\n",
+        );
+        let ejecutor = EjecutorSimulado {
+            simular: &falla,
+            ejecuciones: RefCell::new(Vec::new()),
+        };
+        let (_home, resultado) = descarga_simulada("foo==1.0\n", &ejecutor);
+        let (preparacion, registro) = resultado.expect("la descarga corre");
+        let Preparacion::SinVeredicto(hallazgos) = &preparacion else {
+            panic!("debía dar corte sin veredicto: {preparacion:?}");
+        };
+        let [hallazgo] = hallazgos.as_slice() else {
+            panic!("un solo hallazgo: {hallazgos:?}");
+        };
+        assert_eq!(hallazgo.severidad, 2);
+        assert_eq!(
+            hallazgo.detalle,
+            "dep-solo-sdist solo tiene sdist y la descarga no construye sdists"
+        );
+        let registro = registro.expect("hay registro de la descarga");
+        assert_eq!(registro.motivo, Some("solo-sdist"));
+    }
+
+    #[test]
+    fn descarga_python_solo_sdist_de_runtime_de_clon_da_corte_sin_veredicto() {
+        let raw = "git+https://github.com/x/y@c8e394065cd541a16c040515dc0afb85cf22a7c3#egg=y";
+        let dir = clave_clon(&partes_git(raw).expect("parsea"));
+        let indice = RefCell::new(None);
+        let pyproject = "[project]\nname = \"y\"\nversion = \"1.0\"\ndependencies = [\"dep-solo-sdist==1.0\"]\n";
+        let mundo = mundo_de_clon(&dir, pyproject, &indice);
+        let falla = build_que_falla(
+            &mundo,
+            "ERROR: No matching distribution found for dep-solo-sdist==1.0\n",
+        );
+        let ejecutor = EjecutorSimulado {
+            simular: &falla,
+            ejecuciones: RefCell::new(Vec::new()),
+        };
+        let (_home, resultado) = descarga_simulada(&format!("{raw}\n"), &ejecutor);
+        let (preparacion, registro) = resultado.expect("la descarga corre");
+        let Preparacion::SinVeredicto(hallazgos) = &preparacion else {
+            panic!("debía dar corte sin veredicto: {preparacion:?}");
+        };
+        let [hallazgo] = hallazgos.as_slice() else {
+            panic!("un solo hallazgo: {hallazgos:?}");
+        };
+        assert_eq!(hallazgo.severidad, 2);
+        assert_eq!(
+            hallazgo.detalle,
+            "dep-solo-sdist solo tiene sdist y la descarga no construye sdists"
+        );
+        let registro = registro.expect("hay registro de la descarga");
+        assert_eq!(registro.motivo, Some("solo-sdist"));
+    }
+
+    #[test]
+    fn descarga_python_requisito_de_build_sin_wheel_sigue_en_no_instala() {
+        // Guarda: `hatchling` es requisito de build, no de runtime. Su falta sigue siendo `no-instala`.
+        let indice = RefCell::new(None);
+        let mundo = mundo_de_sdist(r#"{"foo-1.0.tar.gz": []}"#, &indice);
+        let falla = build_que_falla(
+            &mundo,
+            "ERROR: No matching distribution found for hatchling==9.9\n",
+        );
+        let ejecutor = EjecutorSimulado {
+            simular: &falla,
+            ejecuciones: RefCell::new(Vec::new()),
+        };
+        let (_home, resultado) = descarga_simulada("foo==1.0\n", &ejecutor);
+        let (_preparacion, registro) = resultado.expect("la descarga corre");
+        let registro = registro.expect("hay registro de la descarga");
+        assert_eq!(registro.motivo, Some("no-instala"));
+    }
+
+    #[test]
+    fn descarga_python_error_de_build_sin_patron_no_es_solo_sdist() {
+        // Guarda: un error de compilación del producto no cae en `solo-sdist`. Sin patrón conocido, es infra.
+        let indice = RefCell::new(None);
+        let mundo = mundo_de_sdist(r#"{"foo-1.0.tar.gz": ["dep-solo-sdist==1.0"]}"#, &indice);
+        let falla = build_que_falla(&mundo, "error: command 'gcc' failed with exit status 1\n");
+        let ejecutor = EjecutorSimulado {
+            simular: &falla,
+            ejecuciones: RefCell::new(Vec::new()),
+        };
+        let (_home, resultado) = descarga_simulada("foo==1.0\n", &ejecutor);
+        assert!(
+            matches!(resultado, Err(ErrorOraculo::Infra(_))),
+            "un error sin patrón conocido debía ser infra"
+        );
     }
 
     #[test]
