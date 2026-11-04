@@ -3682,3 +3682,89 @@ No hay preguntas nuevas para el usuario.
 9. **Borrado de memora y brasa** (decisión 61).
 
 No hay preguntas nuevas para el usuario.
+
+## Vuelta del 2026-11-04 (tarde): 55, 57 y 59 mezcladas, corrida real de memora en curso
+
+**Estado.** `claude/root-e7813e` está en 10ad8d3, con las Tareas 55, 57 y 59. El usuario ordenó cada mezcla: "Sí, mezclar la 55", "Sí, mezclar la 57" y "Sí, mezclar la 59". Las pruebas con podman dieron 2318, 2342 y 2379 verdes, sin fallas. La 57 chocó con la 54 en `tests/oraculo.rs`, y el orquestador conservó los dos bloques. La corrida real de memora (`r00t corre --tarea memora --config ecc-haiku`, release de 50df9c4) arrancó a las 13:01 y va por su segundo rol. La Tarea 58 corre desde 10ad8d3 con `ROOT_SIN_PODMAN=1`. La calibración espera a que termine la corrida real.
+
+**Hallazgos del orquestador 10 a 13.**
+- **10.** El usuario respondió "Sí, al hito 1b" a la propuesta del oráculo de industria. Ver el hito 1b abajo.
+- **11.** Dos tests de `tests/colab.rs` fallaron con la máquina cargada: `colab_tope_minutos_001_deja_gate_tope_de_duracion` y `colab_sigterm_durante_la_corrida_libera_y_sale_3`, este con "PID numérico: ParseIntError { kind: Empty }".
+- **12.** Los subagentes de la 59 con `isolation: "worktree"` cayeron en `~/.claude/orchestration/.claude/worktrees/agent-*`, del repo de mmorch. No trabajaron, y `mmorch/auto` no cambió.
+- **13.** La 59 reusa el `target` solo en las suites. Clippy y la mutación siguen compilando en frío.
+
+**Regla del orquestador (hallazgo 12).** Ningún pedido a un builder usa `isolation: "worktree"`. Cada builder trabaja en el worktree que le arma el orquestador.
+
+## Desempates técnicos 31 (Opus, 2026-11-04)
+
+**Informe 55.**
+1. **Precio pesimista sin precio.** Queda: un tope debe sobreestimar.
+2. **Alias de modelos.** Cambia: en producción, `eleccion.modelo` de un rol por cupo es un alias como `haiku`, y su precio no existe con esa clave. El costo de un rol cortado traduce el alias con `ruteo.api_equivalente` antes de buscar el precio. Opus no tiene precio por defecto, así que sigue con el pesimista. Tarea 61.
+3. **Código distinto de 0 con `result` exitoso.** Queda: el `result` es la evidencia del rol.
+4. **`FASE_ROL` unificada.** Queda.
+5. **Mensaje de un fallo de escritura.** Cambia: un fallo de escritura del log dice "sesión no registrada", no "sesión no leída". Tarea 61.
+6. **Códigos 125 a 137 en el oráculo.** Cambia: `src/oracle/contenedor.rs` trata 125, 126, 127 y 137 como infraestructura, igual que el runner. Tarea 61.
+7. **Historial del builder.** Queda descartado: leer el `.git` del builder reabre C1.
+8. **Session id del fixture.** Queda.
+
+**Informe 57.**
+1. **Aviso en `Confianza.avisos`.** Cambia: el aviso de dependencias no verificadas llega a `Confianza.avisos`, como pide el desempate 2 del informe 51 en "Desempates técnicos 29". Toca `src/oracle/mod.rs`, así que va en la Tarea 61, después de la 58.
+2. y 3. Quedan.
+4. **Error de compilación de una dependencia.** Queda como infraestructura: es un límite del entorno, no del producto.
+5. y 6. Quedan.
+
+**Informe 59.**
+1. **Estable que pasa a inestable.** Queda: el defecto puede crear una carrera.
+2. **Menos tests en el caso.** Queda.
+3. **Filas viejas.** Queda: la calibración se repite entera.
+4. Ver el hallazgo 13.
+5. a 10. Quedan. Sobre el 8: el disco de la laptop es btrfs, y otro sistema de archivos no está en el hito 1.
+11. **`Guardar` parcial.** Cambia: la copia va a una carpeta temporal y se renombra al final. Un `target` parcial nunca se reusa. Tarea 61.
+12. **Escenarios en la regla de estables.** Queda: un escenario es un flujo de punta a punta, y la Tarea 58 revisa Entrega.
+
+**Hallazgo 11: tests de tiempo de Colab.** Los dos tests usan plazos inyectados, sin esperas reales. El de SIGTERM espera a que el falso escriba su PID antes de leerlo. Tarea 60, ya, en paralelo con la 58: toca solo `tests/colab.rs` y, si hace falta, `src/oracle/colab.rs`.
+
+**Hallazgo 13: clippy y mutación en frío.** Pruebas y Estructura se calibran como están. Razón: la Tarea 49 ya acotó la mutación a su muestra, y reusar el `target` en clippy y en `cargo-mutants` ahorra cerca de una hora de una calibración de más de 30. Una tarea nueva tocaría el núcleo de `src/oracle/` mientras corre la 58, y la calibración esperaría más de lo que ahorra.
+
+### Tarea 60: Tests de tiempo de Colab
+- **Action**: el hallazgo 11.
+- **Archivos**: `tests/colab.rs` y `src/oracle/colab.rs`.
+- **Arranca**: ya, en paralelo con la 58 y con la calibración, con `ROOT_SIN_PODMAN=1`.
+- **Brief**: `docs/builds/brief-local-60.md`.
+
+### Tarea 61: Ajustes de los informes 55, 57 y 59
+- **Action**: respuestas 2, 5 y 6 del informe 55, respuesta 1 del informe 57 y respuesta 11 del informe 59.
+- **Archivos**: `src/corre/`, `src/oracle/contenedor.rs`, `src/oracle/mod.rs` (solo el aviso en `Confianza.avisos`) y `src/oracle/calibra.rs` (solo `Guardar`).
+- **Arranca**: después de la mezcla de la 58, que toca `mod.rs` y `calibra.rs`. Ninguno de sus cambios altera lo que mide la calibración.
+- **Brief**: `docs/builds/brief-local-61.md`.
+
+## Calibración: qué arranca y cuándo
+
+Apenas termina la corrida real de memora, arrancan todas las dimensiones salvo Entrega, en 3 procesos. memora primero y brasa después:
+- **Proceso A:** Completitud y Funciona.
+- **Proceso B:** Seguridad, Pruebas y Estructura.
+- **Proceso C:** Arquitectura, Diseño y Eficiencia.
+
+Entrega se calibra después de la mezcla de la 58. Si la calibración de memora ya terminó, Entrega de memora corre sola, y la de brasa se suma al proceso que termine primero.
+
+## Hito 1b (actualizado)
+
+Suma el **oráculo de industria** (hallazgo 10). El usuario respondió: "Sí, al hito 1b". Una capa compara el producto con productos reales en cuatro ejes: compatibilidad, rendimiento, robustez y durabilidad. Cada eje tiene un comando y no usa juez. Las tres recomendaciones del orquestador quedan como diseño de partida:
+1. Un archivo `industria.toml` por tarea, aparte de `tarea.toml`.
+2. La población de productos la elige el planner, con productos de alcance parecido.
+3. Corre en podman, con la CPU fija para que el rendimiento se compare.
+
+La propuesta completa está en `/home/mpera/.config/Claude/side-session-notes/local_c0426133-6733-48e8-851f-10d539c72f11/2026-11-04-propuesta-root-oraculo-industria.md`.
+
+## Orden final del hito 1 (2026-11-04, tarde)
+
+1. **Ahora:** la corrida real de memora, la Tarea 58 y la Tarea 60.
+2. **Al terminar la corrida real:** la calibración de memora en 3 procesos, sin Entrega. Después, la de brasa.
+3. **Mezclas de la 58 y la 60**, en una pausa de la calibración, con la orden del usuario.
+4. **Tarea 61** después de la mezcla de la 58, con `ROOT_SIN_PODMAN=1` si la calibración sigue.
+5. **Calibración de Entrega** de memora y brasa, después de la mezcla de la 58.
+6. **Comparación de `global`.**
+7. **Validez automática** y **cierre** (Tarea 47).
+8. **Borrado de memora y brasa** (decisión 61).
+
+No hay preguntas nuevas para el usuario.
