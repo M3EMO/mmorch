@@ -3391,6 +3391,8 @@ mod tests {
 
     #[test]
     fn calibra_un_caso_con_error_corta_y_se_propaga_el_primero() {
+        // Los primeros casos en vuelo fallan todos. Ninguno termina bien, así no se lanza nada nuevo.
+        // El caso de índice menor es el más lento: el orden de llegada no decide el error.
         let base = veredicto_base();
         let falso_de_seguridad = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
             if limpia { base.clone() } else { hundido(base) }
@@ -3400,10 +3402,11 @@ mod tests {
             if tipo != TipoCaso::Base {
                 llamadas.fetch_add(1, Ordering::SeqCst);
             }
-            if ruta.ends_with("caso-2") {
-                return Err(ErrorOraculo::Infra("falla del caso dos".into()));
+            let indice = (0..CASOS_EN_PARALELO).find(|i| ruta.ends_with(format!("caso-{i}")));
+            if let Some(i) = indice {
+                std::thread::sleep(Duration::from_millis(40 * (CASOS_EN_PARALELO - i) as u64));
+                return Err(ErrorOraculo::Infra(format!("falla del caso {i}")));
             }
-            std::thread::sleep(Duration::from_millis(30));
             falso_de_seguridad(ruta)
         };
         let (_t, tarea) = tarea_prueba();
@@ -3422,7 +3425,7 @@ mod tests {
         .err()
         .expect("el error de un caso corta la calibración");
         assert!(
-            matches!(&error, ErrorOraculo::Infra(m) if m == "falla del caso dos"),
+            matches!(&error, ErrorOraculo::Infra(m) if m == "falla del caso 0"),
             "{error:?}"
         );
         assert_eq!(
