@@ -19,7 +19,7 @@ use super::juez::{LimitesPrompt, MAX_ENTRADA_JUEZ_BYTES};
 use super::memo::{Alcance, MemoSondas, ReusoSondas};
 use super::mutacion::MutanteMuerto;
 use super::tarea::Tarea;
-use super::{ErrorOraculo, OpcionesOraculo, Partes, partes_de};
+use super::{AVISO_TARGET_FRIO, ErrorOraculo, OpcionesOraculo, Partes, Target, partes_de};
 use crate::borrado;
 use crate::config::{Config, Precio};
 use crate::observe;
@@ -162,6 +162,12 @@ pub mod inyectar;
 use inyectar::{Defecto, Inyeccion};
 
 mod estables;
+mod target;
+#[cfg(test)]
+mod target_podman;
+
+/// Carpeta dentro de la temporal de la calibración donde la base deja su `target` (Tarea 59).
+const NOMBRE_TARGET_BASE: &str = "target-base";
 
 /// Archivo de candado de `calibracion.json`. Una escritura lo toma en exclusiva.
 const CANDADO: &str = "calibracion.lock";
@@ -181,7 +187,7 @@ pub fn calibrar_con(
 ) -> Result<Fila, ErrorOraculo> {
     // Sin home no hay corrida de mutación grabada: no hay muertos que dirigir `AssertBorrado`.
     // Sin memo ni reuso, el tipo de caso no cambia nada: el evaluador de la API de tests lo ignora.
-    let sin_tipo = |ruta: &Path, _: TipoCaso| evaluador(ruta);
+    let sin_tipo = |ruta: &Path, _: TipoCaso, _: Target| evaluador(ruta);
     calibrar_medida(
         tarea,
         dimension,
@@ -191,6 +197,7 @@ pub fn calibrar_con(
         &sin_tipo,
         None,
         &Vec::new,
+        &|| None,
     )?
     .fila
     .ok_or_else(|| ErrorOraculo::Infra("la calibración no dejó ninguna fila".into()))
@@ -225,6 +232,10 @@ pub struct CasoGuardado {
     /// Si el entorno repitió este caso. Hoy ningún mecanismo repite casos: siempre `false`.
     #[serde(default)]
     pub repetido_por_entorno: bool,
+    /// `Some(true)`: el caso reusó el `target` de la base. `Some(false)`: compiló en frío. `None`: renglón de antes
+    /// de que la calibración midiera el `target` (Tarea 59).
+    #[serde(default)]
+    pub target_reusado: Option<bool>,
 }
 
 /// Resultado de `calibrar_tarea_con`: la fila y la ruta de los casos guardados, si hubo casos medidos.
@@ -337,9 +348,10 @@ fn calibrar_medida(
     n: usize,
     semilla: u64,
     repo_bueno: &Path,
-    evaluador: &(dyn Fn(&Path, TipoCaso) -> Result<Veredicto, ErrorOraculo> + Sync),
+    evaluador: &(dyn Fn(&Path, TipoCaso, Target) -> Result<Veredicto, ErrorOraculo> + Sync),
     tope: Option<&Tope>,
     muertos_de_la_base: &dyn Fn() -> Vec<MutanteMuerto>,
+    leer_digest: &(dyn Fn() -> Option<String> + Sync),
 ) -> Result<Medida, ErrorOraculo> {
     calibrar_medida_con_hilos(
         tarea,
@@ -350,6 +362,7 @@ fn calibrar_medida(
         evaluador,
         tope,
         muertos_de_la_base,
+        leer_digest,
         CASOS_EN_PARALELO,
     )
 }
@@ -367,9 +380,15 @@ struct Ronda<'a> {
     muertos: &'a [MutanteMuerto],
     base: &'a Veredicto,
     items: &'a [&'static str],
-    evaluador: &'a (dyn Fn(&Path, TipoCaso) -> Result<Veredicto, ErrorOraculo> + Sync),
+    evaluador: &'a (dyn Fn(&Path, TipoCaso, Target) -> Result<Veredicto, ErrorOraculo> + Sync),
     /// Tope de la medición. Cada reemplazo lo revisa antes de correr.
     tope: Option<&'a Tope<'a>>,
+    /// `target` de la base (Tarea 59): `Some` solo si la base dejó una carpeta. Los casos solo la leen.
+    target_base: Option<PathBuf>,
+    /// Digest de la imagen tras la base. Un caso que lo cambia compila en frío.
+    digest_base: Option<String>,
+    /// Digest de la imagen antes de cada evaluación de un caso.
+    leer_digest: &'a (dyn Fn() -> Option<String> + Sync),
 }
 
 /// Lo que midió un caso: los reemplazos de sus inyecciones inválidas y el caso (`None`: no aplicable).
@@ -380,16 +399,46 @@ struct Medido {
     detencion: Option<Detencion>,
 }
 
+/// Evalúa la copia `copia` como `tipo`. Reusa el `target` de la base si `puede_reusar` lo permite. Devuelve el
+/// veredicto y si el caso reusó: un aviso de `target` frío cuenta como compilación en frío.
+fn evaluar_copia(
+    r: &Ronda,
+    copia: &Path,
+    tipo: TipoCaso,
+) -> Result<(Veredicto, bool), ErrorOraculo> {
+    let digest_ahora = (r.leer_digest)();
+    let reusa = target::puede_reusar(
+        r.repo_bueno,
+        copia,
+        r.target_base.as_deref(),
+        r.digest_base.as_deref(),
+        digest_ahora.as_deref(),
+    );
+    let target = match &r.target_base {
+        Some(origen) if reusa => Target::Inicial(origen.clone()),
+        _ => Target::Ninguno,
+    };
+    let veredicto = (r.evaluador)(copia, tipo, target)?;
+    let frio = veredicto
+        .avisos
+        .iter()
+        .any(|aviso| aviso.starts_with(AVISO_TARGET_FRIO));
+    Ok((veredicto, reusa && !frio))
+}
+
 /// Mide el caso `i`. Los pares llevan un defecto: el de `defectos[(i / 2) % len]`, la misma rotación de los
 /// casos en serie. Los impares son limpios. Un defecto sin candidato medible da un caso no aplicable.
 fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
     if i % 2 == 1 {
         let copia = r.tmp.join(format!("caso-{i}"));
         super::copiar_repo(r.repo_bueno, &copia).map_err(|e| super::infra("copia del repo", e))?;
-        let veredicto = (r.evaluador)(&copia, TipoCaso::Limpio)?;
+        let (veredicto, reusado) = evaluar_copia(r, &copia, TipoCaso::Limpio)?;
         borrado::borrar_dir_dentro(r.tmp, &copia)
             .map_err(|e| super::infra("borrar una copia", e))?;
-        let caso = Caso::nuevo(i as u32, None, r.base, &veredicto, r.dimension, r.items);
+        let caso = Caso {
+            target_reusado: reusado,
+            ..Caso::nuevo(i as u32, None, r.base, &veredicto, r.dimension, r.items)
+        };
         return Ok(Medido {
             reemplazos: 0,
             caso: Some(caso),
@@ -431,17 +480,17 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
                 .map_err(|e| super::infra("borrar una copia", e))?;
             break;
         };
-        let veredicto = (r.evaluador)(&copia, TipoCaso::Defecto(r.dimension))?;
+        let (veredicto, reusado) = evaluar_copia(r, &copia, TipoCaso::Defecto(r.dimension))?;
         borrado::borrar_dir_dentro(r.tmp, &copia)
             .map_err(|e| super::infra("borrar una copia", e))?;
         if rompe_la_compilacion(r.base, &veredicto, r.dimension) {
             invalidos += 1;
             continue;
         }
-        medido = Some((inyeccion, veredicto));
+        medido = Some((inyeccion, veredicto, reusado));
         break;
     }
-    let Some((inyeccion, veredicto)) = medido else {
+    let Some((inyeccion, veredicto, reusado)) = medido else {
         return Ok(Medido {
             reemplazos: invalidos,
             caso: None,
@@ -450,6 +499,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
     };
     let caso = Caso {
         reemplazos: invalidos,
+        target_reusado: reusado,
         ..Caso::nuevo(
             i as u32,
             Some(inyeccion),
@@ -479,9 +529,10 @@ fn calibrar_medida_con_hilos(
     n: usize,
     semilla: u64,
     repo_bueno: &Path,
-    evaluador: &(dyn Fn(&Path, TipoCaso) -> Result<Veredicto, ErrorOraculo> + Sync),
+    evaluador: &(dyn Fn(&Path, TipoCaso, Target) -> Result<Veredicto, ErrorOraculo> + Sync),
     tope: Option<&Tope>,
     muertos_de_la_base: &dyn Fn() -> Vec<MutanteMuerto>,
+    leer_digest: &(dyn Fn() -> Option<String> + Sync),
     hilos: usize,
 ) -> Result<Medida, ErrorOraculo> {
     let defectos = inyectar::de_dimension(dimension);
@@ -504,14 +555,24 @@ fn calibrar_medida_con_hilos(
             casos: Vec::new(),
         });
     }
+    // La carpeta temporal va antes de la base: la base deja ahí su `target` (Tarea 59).
+    let tmp = tempfile::tempdir().map_err(|e| super::infra("carpeta temporal", e))?;
+    let destino_target = tmp.path().join(NOMBRE_TARGET_BASE);
     // Una línea base sin veredicto no mide nada: los defectos no tienen contra qué compararse.
-    let base = evaluador(repo_bueno, TipoCaso::Base)?;
+    let base = evaluador(
+        repo_bueno,
+        TipoCaso::Base,
+        Target::Guardar(destino_target.clone()),
+    )?;
     if puntaje_de(&base, dimension).is_none_or(|p| p.sin_veredicto.is_some()) {
         return Err(ErrorOraculo::Infra(format!(
             "la línea base no tiene veredicto de {}",
             dimension.clave()
         )));
     }
+    // Sin carpeta, la base no dejó `target`: ningún caso reusa nada.
+    let target_base = destino_target.is_dir().then_some(destino_target);
+    let digest_base = leer_digest();
     let muertos = if defectos.contains(&Defecto::AssertBorrado) {
         muertos_de_la_base()
     } else {
@@ -519,7 +580,6 @@ fn calibrar_medida_con_hilos(
     };
     let items: BTreeSet<&'static str> = defectos.iter().map(|d| d.item()).collect();
     let items: Vec<&'static str> = items.into_iter().collect();
-    let tmp = tempfile::tempdir().map_err(|e| super::infra("carpeta temporal", e))?;
     let capas: &[Vec<String>] = tarea
         .arquitectura
         .as_ref()
@@ -541,6 +601,9 @@ fn calibrar_medida_con_hilos(
         items: &items,
         evaluador,
         tope,
+        target_base,
+        digest_base,
+        leer_digest,
     };
     let hilos = hilos.max(1);
     let (tx, rx) = mpsc::channel::<(usize, Result<Medido, ErrorOraculo>)>();
@@ -897,10 +960,11 @@ pub fn calibrar_tarea_con(
     // La base graba las salidas de sus sondas en `memo`; los casos no graban. Un caso con defecto reusa de
     // `memo` lo que `reuso_de` dice (la mutación, en las dimensiones que no la cambian).
     let memo = std::sync::Arc::new(super::memo::MemoSondas::nuevo());
-    let evaluar_caso = |ruta: &Path, tipo: TipoCaso| {
+    let evaluar_caso = |ruta: &Path, tipo: TipoCaso, target: Target| {
         let opciones_de_caso = OpcionesOraculo {
             memo: (tipo == TipoCaso::Base).then(|| memo.clone()),
             reuso: reuso_de(tipo, &memo),
+            target,
             ..opciones.clone()
         };
         evaluador(&tarea, ruta, &opciones_de_caso)
@@ -940,6 +1004,7 @@ pub fn calibrar_tarea_con(
         &evaluar_caso,
         tope.as_ref(),
         &|| memo.mutantes_muertos(&tarea),
+        &|| target::digest_de_imagen(&tarea.imagen),
     )?;
     // Los casos se escriben antes de `agregar`, también si el tope detuvo la calibración.
     let casos = match &medida.fila {
@@ -1094,6 +1159,8 @@ struct Caso {
     items: BTreeMap<&'static str, Option<bool>>,
     /// Inyecciones inválidas reemplazadas antes de este caso.
     reemplazos: u32,
+    /// Si el caso compiló sobre el `target` de la base.
+    target_reusado: bool,
 }
 
 impl Caso {
@@ -1123,6 +1190,7 @@ impl Caso {
                 .collect(),
             inyeccion,
             reemplazos: 0,
+            target_reusado: false,
         }
     }
 
@@ -1145,6 +1213,7 @@ impl CasoGuardado {
             reemplazos: caso.reemplazos,
             // Ningún mecanismo repite casos hoy: el campo queda en `false` hasta que alguno lo haga.
             repetido_por_entorno: false,
+            target_reusado: Some(caso.target_reusado),
         }
     }
 }
@@ -2880,7 +2949,7 @@ mod tests {
         });
         let gastado = Mutex::new(0.0f64);
         let llamadas = AtomicUsize::new(0);
-        let evaluar = |ruta: &Path, tipo: TipoCaso| {
+        let evaluar = |ruta: &Path, tipo: TipoCaso, _: Target| {
             llamadas.fetch_add(1, Ordering::SeqCst);
             if tipo != TipoCaso::Base {
                 *gastado.lock().expect("gasto") += 1.0;
@@ -2904,6 +2973,7 @@ mod tests {
             &evaluar,
             Some(&tope),
             &Vec::new,
+            &|| None,
             1,
         )
         .expect("calibra");
@@ -3021,7 +3091,7 @@ mod tests {
         let gastado = Mutex::new(0.0f64);
         let (en_vuelo, maximo) = (AtomicUsize::new(0), AtomicUsize::new(0));
         // Cada caso cobra un peor caso al terminar. La línea base no cobra.
-        let evaluar = |ruta: &Path, tipo: TipoCaso| {
+        let evaluar = |ruta: &Path, tipo: TipoCaso, _: Target| {
             if tipo != TipoCaso::Base {
                 llamada_de_juez(&en_vuelo, &maximo);
                 *gastado.lock().expect("gasto") += peor;
@@ -3044,6 +3114,7 @@ mod tests {
             &evaluar,
             Some(&tope),
             &Vec::new,
+            &|| None,
             CASOS_EN_PARALELO,
         )
         .expect("calibra");
@@ -3130,9 +3201,10 @@ mod tests {
                 20,
                 42,
                 Path::new(FIXTURE),
-                &|ruta: &Path, _: TipoCaso| falso_de_seguridad(ruta),
+                &|ruta: &Path, _: TipoCaso, _: Target| falso_de_seguridad(ruta),
                 None,
                 &Vec::new,
+                &|| None,
                 hilos,
             )
             .expect("calibra")
@@ -3182,7 +3254,7 @@ mod tests {
             if limpia { base.clone() } else { hundido(base) }
         });
         let llamadas = AtomicUsize::new(0);
-        let evaluar = |ruta: &Path, tipo: TipoCaso| {
+        let evaluar = |ruta: &Path, tipo: TipoCaso, _: Target| {
             if tipo != TipoCaso::Base {
                 llamadas.fetch_add(1, Ordering::SeqCst);
             }
@@ -3202,6 +3274,7 @@ mod tests {
             &evaluar,
             None,
             &Vec::new,
+            &|| None,
             CASOS_EN_PARALELO,
         )
         .err()
@@ -3215,5 +3288,211 @@ mod tests {
             CASOS_EN_PARALELO,
             "tras el error no se lanza ningún caso nuevo"
         );
+    }
+
+    /// Lo que el evaluador de `target_` recibe en cada llamada: el tipo de caso y el `target` que trae.
+    type Registro = Mutex<Vec<(TipoCaso, Target)>>;
+
+    /// Corre `calibrar_medida_con_hilos` con `n` casos sobre una copia del fixture y un hilo.
+    fn medir_con_target(
+        evaluador: &(dyn Fn(&Path, TipoCaso, Target) -> Result<Veredicto, ErrorOraculo> + Sync),
+        leer_digest: &(dyn Fn() -> Option<String> + Sync),
+        n: usize,
+    ) -> Medida {
+        let (_t, tarea) = tarea_prueba();
+        let repo = copia_fixture();
+        calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Seguridad,
+            n,
+            42,
+            repo.path(),
+            evaluador,
+            None,
+            &Vec::new,
+            leer_digest,
+            1,
+        )
+        .expect("calibra")
+    }
+
+    /// Target que el evaluador de prueba recibe para el primer caso limpio.
+    fn target_del_limpio(registro: &Registro) -> Target {
+        let registro = registro.lock().expect("lock");
+        registro
+            .iter()
+            .find(|(tipo, _)| *tipo == TipoCaso::Limpio)
+            .map(|(_, target)| target.clone())
+            .expect("hay un caso limpio")
+    }
+
+    /// Evaluador de `target_`: la base deja `artefacto` en el `target` que recibe. Los casos devuelven `base`.
+    fn evaluador_que_guarda_el_target<'a>(
+        base: &'a Veredicto,
+        registro: &'a Registro,
+        aviso_en_limpio: Option<&'a str>,
+    ) -> impl Fn(&Path, TipoCaso, Target) -> Result<Veredicto, ErrorOraculo> + Sync + 'a {
+        move |_: &Path, tipo: TipoCaso, target: Target| {
+            registro.lock().expect("lock").push((tipo, target.clone()));
+            if let Target::Guardar(destino) = &target {
+                fs::create_dir_all(destino).expect("carpeta del target de la base");
+                fs::write(destino.join("artefacto"), "compilado").expect("artefacto");
+            }
+            // La carpeta de la base solo existe durante la medición: se mira aquí, dentro del caso.
+            if let Target::Inicial(origen) = &target {
+                assert!(
+                    origen.join("artefacto").is_file(),
+                    "el origen de Inicial tiene el artefacto de la base"
+                );
+            }
+            let mut veredicto = base.clone();
+            if let (TipoCaso::Limpio, Some(aviso)) = (tipo, aviso_en_limpio) {
+                veredicto.avisos.push(aviso.to_string());
+            }
+            Ok(veredicto)
+        }
+    }
+
+    #[test]
+    fn target_la_base_guarda_y_el_limpio_recibe_el_target_y_reusa() {
+        let base = veredicto_base();
+        let registro = Registro::new(Vec::new());
+        let ev = evaluador_que_guarda_el_target(&base, &registro, None);
+        let medida = medir_con_target(&ev, &|| Some("sha:a".to_string()), 2);
+        let primero = registro.lock().expect("lock")[0].1.clone();
+        assert!(
+            matches!(&primero, Target::Guardar(_)),
+            "la base recibe Guardar: {primero:?}"
+        );
+        assert!(
+            matches!(target_del_limpio(&registro), Target::Inicial(_)),
+            "el limpio recibe Inicial"
+        );
+        let guardados: Vec<CasoGuardado> = medida.casos.iter().map(CasoGuardado::de).collect();
+        let limpio = guardados.iter().find(|c| !c.es_defecto).expect("un limpio");
+        assert_eq!(limpio.target_reusado, Some(true));
+    }
+
+    #[test]
+    fn target_base_sin_target_hace_que_todos_los_casos_compilen_en_frio() {
+        let base = veredicto_base();
+        let registro = Registro::new(Vec::new());
+        // La base no deja nada: el evaluador no crea la carpeta.
+        let ev = |_: &Path, tipo: TipoCaso, target: Target| {
+            registro.lock().expect("lock").push((tipo, target));
+            Ok(base.clone())
+        };
+        let medida = medir_con_target(&ev, &|| None, 4);
+        let primero = registro.lock().expect("lock")[0].1.clone();
+        assert!(
+            matches!(&primero, Target::Guardar(_)),
+            "la base recibe Guardar: {primero:?}"
+        );
+        assert_eq!(target_del_limpio(&registro), Target::Ninguno);
+        let guardados: Vec<CasoGuardado> = medida.casos.iter().map(CasoGuardado::de).collect();
+        assert!(!guardados.is_empty());
+        assert!(
+            guardados.iter().all(|c| c.target_reusado == Some(false)),
+            "{guardados:?}"
+        );
+    }
+
+    #[test]
+    fn target_digest_que_cambia_despues_de_la_base_hace_compilar_en_frio() {
+        let base = veredicto_base();
+        let registro = Registro::new(Vec::new());
+        let ev = evaluador_que_guarda_el_target(&base, &registro, None);
+        // La primera lectura es la de la base; cada caso lee otro digest.
+        let lecturas = AtomicUsize::new(0);
+        let leer = || {
+            let n = lecturas.fetch_add(1, Ordering::SeqCst);
+            Some(if n == 0 { "sha:a" } else { "sha:b" }.to_string())
+        };
+        let medida = medir_con_target(&ev, &leer, 2);
+        let primero = registro.lock().expect("lock")[0].1.clone();
+        assert!(
+            matches!(&primero, Target::Guardar(_)),
+            "la base recibe Guardar: {primero:?}"
+        );
+        assert_eq!(target_del_limpio(&registro), Target::Ninguno);
+        let guardados: Vec<CasoGuardado> = medida.casos.iter().map(CasoGuardado::de).collect();
+        assert!(
+            guardados.iter().all(|c| c.target_reusado == Some(false)),
+            "{guardados:?}"
+        );
+    }
+
+    #[test]
+    fn target_caso_que_cambia_cargo_lock_compila_en_frio() {
+        let base = veredicto_base();
+        let registro = Registro::new(Vec::new());
+        let ev = evaluador_que_guarda_el_target(&base, &registro, None);
+        let (_t, tarea) = tarea_prueba();
+        let repo = copia_fixture();
+        let lock = repo.path().join("Cargo.lock");
+        fs::write(&lock, "version = 3\n").expect("lock de la base");
+        // La copia del caso ya existe cuando se lee el digest: ahí cambia el lock del repo bueno, y la
+        // copia queda con otro `Cargo.lock`. La primera lectura es la de la base y no toca nada.
+        let lecturas = AtomicUsize::new(0);
+        let leer = || {
+            let n = lecturas.fetch_add(1, Ordering::SeqCst);
+            if n > 0 {
+                fs::write(&lock, format!("version = 3\n# cambio {n}\n")).expect("lock cambiado");
+            }
+            Some("sha:a".to_string())
+        };
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Seguridad,
+            2,
+            42,
+            repo.path(),
+            &ev,
+            None,
+            &Vec::new,
+            &leer,
+            1,
+        )
+        .expect("calibra");
+        assert_eq!(target_del_limpio(&registro), Target::Ninguno);
+        let guardados: Vec<CasoGuardado> = medida.casos.iter().map(CasoGuardado::de).collect();
+        let limpio = guardados.iter().find(|c| !c.es_defecto).expect("un limpio");
+        assert_eq!(limpio.target_reusado, Some(false));
+    }
+
+    #[test]
+    fn target_aviso_de_target_frio_en_el_caso_cuenta_como_frio() {
+        let base = veredicto_base();
+        let registro = Registro::new(Vec::new());
+        let aviso = format!("{AVISO_TARGET_FRIO} no se pudo copiar");
+        let ev = evaluador_que_guarda_el_target(&base, &registro, Some(&aviso));
+        let medida = medir_con_target(&ev, &|| Some("sha:a".to_string()), 2);
+        let primero = registro.lock().expect("lock")[0].1.clone();
+        assert!(
+            matches!(&primero, Target::Guardar(_)),
+            "la base recibe Guardar: {primero:?}"
+        );
+        assert!(
+            matches!(target_del_limpio(&registro), Target::Inicial(_)),
+            "el limpio recibe Inicial aunque el aviso llegue después"
+        );
+        let guardados: Vec<CasoGuardado> = medida.casos.iter().map(CasoGuardado::de).collect();
+        let limpio = guardados.iter().find(|c| !c.es_defecto).expect("un limpio");
+        assert_eq!(limpio.target_reusado, Some(false));
+    }
+
+    #[test]
+    fn target_renglon_sin_el_campo_se_lee_como_none_y_el_campo_hace_ida_y_vuelta() {
+        let viejo = r#"{"caso":0,"es_defecto":false,"detectado":false}"#;
+        let caso: CasoGuardado =
+            serde_json::from_str(viejo).expect("renglón de antes de la Tarea 59");
+        assert_eq!(caso.target_reusado, None);
+        let nuevo = CasoGuardado {
+            target_reusado: Some(true),
+            ..caso
+        };
+        let texto = serde_json::to_string(&nuevo).expect("serializa");
+        let ida: CasoGuardado = serde_json::from_str(&texto).expect("lee");
+        assert_eq!(ida.target_reusado, Some(true));
     }
 }
