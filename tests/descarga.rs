@@ -294,10 +294,9 @@ source = \"git+ssh://git@github.com/x/ext?rev=1#1\"\n";
         !home.path().join("cache/rustsec").exists(),
         "no se clonó RustSec"
     );
-    assert!(
-        gates(home.path()).is_empty(),
-        "sin rechazo no hay Gate de descarga"
-    );
+    let cortes = gates(home.path());
+    assert_eq!(cortes.len(), 1, "un Gate de corte: {cortes:?}");
+    assert_eq!(cortes[0]["motivo"], "fuente-no-aceptada");
     assert_eq!(
         gates_inventario(home.path()).len(),
         1,
@@ -549,7 +548,7 @@ fn descarga_rechazos_no_usan_red_ni_contenedor_y_no_filtran_credenciales() {
     let cargo = manifiesto_con(
         "uno = { git = \"ssh://git@github.com/x/y\" }\n\
 dos = { path = \"../afuera\" }\n\
-tres = { git = \"https://usuario:clave@host/x.git\" }\n",
+tres = { git = \"https://usuario:secreto-de-prueba-7f3a@host/x.git\" }\n",
     );
     repo_con_main(&repo, &cargo, MAIN_HUMANTIME, None);
     let tarea = tarea_con(home.path(), &contrato_junit_ok(), &oculto_junit_ok());
@@ -579,13 +578,12 @@ tres = { git = \"https://usuario:clave@host/x.git\" }\n",
         !home.path().join("cache").exists(),
         "ningún contenedor de descarga corrió"
     );
-    assert!(
-        gates(home.path()).is_empty(),
-        "sin descarga no hay Gate de descarga"
-    );
+    let cortes = gates(home.path());
+    assert_eq!(cortes.len(), 1, "un Gate de corte: {cortes:?}");
+    assert_eq!(cortes[0]["motivo"], "fuente-no-aceptada");
     let crudos = eventos_crudos(home.path());
     assert!(
-        !crudos.contains("clave"),
+        !crudos.contains("secreto-de-prueba-7f3a"),
         "la credencial no aparece en eventos"
     );
     assert!(
@@ -593,7 +591,10 @@ tres = { git = \"https://usuario:clave@host/x.git\" }\n",
         "la credencial no aparece en eventos"
     );
     let veredicto = serde_json::to_string(&v).expect("serializa");
-    assert!(!veredicto.contains("clave"), "ni en el veredicto");
+    assert!(
+        !veredicto.contains("secreto-de-prueba-7f3a"),
+        "ni en el veredicto"
+    );
     let _ = fs::remove_dir_all(&repo);
 }
 
@@ -1451,4 +1452,111 @@ fn descarga_juez_config_json_roto_deja_gate_sin_veredicto_y_sigue() {
     let juicio_gate = gates_de(home.path(), "juez-config");
     assert_eq!(juicio_gate.len(), 1, "{juicio_gate:?}");
     assert_eq!(juicio_gate[0]["extra"]["causa"], "JSON inválido del juez");
+}
+
+// ---- Tarea 51, C2-P4: cada corte de la descarga deja su Gate con los rechazos, sin valores ----
+
+/// Gates de corte de la descarga de la tarea de prueba, con ese motivo.
+fn gates_de_corte(home: &Path, motivo: &str) -> Vec<Value> {
+    gates(home)
+        .into_iter()
+        .filter(|g| g["extra"]["motivo"] == motivo)
+        .collect()
+}
+
+#[test]
+fn descarga_corte_por_fuente_no_aceptada_deja_gate_con_rechazos_sin_valores() {
+    // Un git sin commit fijo es rechazo del inventario: corta antes de cualquier red.
+    let home = home_de_prueba();
+    let repo = repo_propio("repo-corte-fuente-");
+    fs::write(
+        repo.path().join("requirements.txt"),
+        "git+https://github.com/benjaminp/six#egg=six\n",
+    )
+    .expect("requirements");
+    let tarea = tarea_en_lenguaje(
+        home.path(),
+        "python",
+        IMAGEN,
+        &contrato_junit_ok(),
+        &oculto_junit_ok(),
+    );
+
+    let preparacion = descarga::preparar(repo.path(), &tarea, home.path(), LIMITE)
+        .expect("el rechazo no usa la red");
+
+    assert!(
+        matches!(preparacion, Preparacion::SinVeredicto(_)),
+        "{preparacion:?}"
+    );
+    let corte = gates_de_corte(home.path(), "fuente-no-aceptada");
+    assert_eq!(corte.len(), 1, "{}", eventos_crudos(home.path()));
+    let rechazos = corte[0]["extra"]["rechazos"]
+        .as_array()
+        .expect("el Gate de corte lista los rechazos");
+    assert_eq!(rechazos.len(), 1, "{rechazos:?}");
+    assert_eq!(rechazos[0]["archivo"], "requirements.txt");
+    assert_eq!(rechazos[0]["linea"], 1);
+    let claves: Vec<&str> = rechazos[0]
+        .as_object()
+        .expect("un objeto por rechazo")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        claves.len(),
+        2,
+        "solo archivo y línea, sin cita: {claves:?}"
+    );
+}
+
+#[test]
+fn descarga_corte_por_config_con_credencial_deja_gate_sin_el_valor() {
+    // El config que ejecuta comandos, con una credencial de Root para su registro: corta antes de la red.
+    let home = home_de_prueba();
+    fs::write(
+        home.path().join("root.toml"),
+        "[[registro]]\nnombre = \"priv\"\nurl = \"https://reg.example/index/\"\ncredencial_env = \"ROOT_TOKEN_PRUEBA_51\"\n",
+    )
+    .expect("root.toml");
+    // La variable vive solo en este proceso de prueba. Se borra al terminar el test.
+    unsafe { std::env::set_var("ROOT_TOKEN_PRUEBA_51", "token-de-prueba-51") };
+    let repo = repo_propio("repo-corte-config-");
+    fs::write(
+        repo.path().join("Cargo.toml"),
+        "[package]\nname = \"corte\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nsecreto = { version = \"1\", registry = \"priv\" }\n",
+    )
+    .expect("Cargo.toml");
+    escribir_config(
+        repo.path(),
+        "[registries.priv]\nindex = \"sparse+https://reg.example/index/\"\ncredential-provider = \"secreto-de-prueba-7f3a\"\n",
+    );
+    let tarea = tarea_con(home.path(), &contrato_junit_ok(), &oculto_junit_ok());
+
+    let preparacion = descarga::preparar(repo.path(), &tarea, home.path(), LIMITE);
+    unsafe { std::env::remove_var("ROOT_TOKEN_PRUEBA_51") };
+    let preparacion = preparacion.expect("el corte no usa la red");
+
+    assert!(
+        matches!(preparacion, Preparacion::SinVeredicto(_)),
+        "{preparacion:?}"
+    );
+    let corte = gates_de_corte(home.path(), "config-que-ejecuta-con-credencial");
+    assert_eq!(corte.len(), 1, "{}", eventos_crudos(home.path()));
+    let rechazos = corte[0]["extra"]["rechazos"]
+        .as_array()
+        .expect("el Gate de corte lista los rechazos");
+    assert_eq!(rechazos.len(), 1, "{rechazos:?}");
+    assert_eq!(rechazos[0]["archivo"], ".cargo/config.toml");
+    assert_eq!(rechazos[0]["linea"], 3);
+    assert_eq!(rechazos[0]["clave"], "registries.priv.credential-provider");
+    let crudos = eventos_crudos(home.path());
+    assert!(
+        !crudos.contains("secreto-de-prueba-7f3a"),
+        "el valor del config no va al evento: {crudos}"
+    );
+    assert!(
+        !crudos.contains("token-de-prueba-51"),
+        "la credencial no va al evento: {crudos}"
+    );
 }

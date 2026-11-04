@@ -673,6 +673,7 @@ fn preparar_python_con(
             imagenes: None,
             sin_digest,
             avisos: Vec::new(),
+            rechazos: Vec::new(),
         };
         // Los hallazgos de build salen de los `pyproject` guardados en la caché: sin ellos, el segundo
         // corrido perdería el aviso del primero.
@@ -759,6 +760,7 @@ fn preparar_python_con(
                 imagenes: None,
                 sin_digest,
                 avisos,
+                rechazos: Vec::new(),
             };
             let registro = con_avisos_de(registro, &no_verificadas);
             let preparacion = Preparacion::Lista {
