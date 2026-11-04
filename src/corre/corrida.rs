@@ -354,7 +354,7 @@ fn registrar_sesion(
     fs::write(&ruta, format!("{linea}\n"))
         .map_err(super::infra("guardar el resultado de la sesión"))?;
     if let Err(error) = registrar_sesion_claude(&ruta, id, None, ruta_eventos) {
-        let motivo = format!("sesión no leída: {error}");
+        let motivo = format!("sesión no registrada: {error}");
         return gate(ruta_eventos, id, FASE_SESION, motivo, Some(lanzado.rol));
     }
     Ok(())
@@ -1386,7 +1386,8 @@ mod tests {
         registrar_sesion(&e.home, id, &lanzado, linea, &ruta_eventos).expect("no corta");
         let motivos = gates(&e, FASE_SESION);
         assert_eq!(motivos.len(), 1, "un Gate de la sesión");
-        assert!(motivos[0].contains("sesión no leída"), "{motivos:?}");
+        assert!(motivos[0].contains("sesión no registrada"), "{motivos:?}");
+        assert!(!motivos[0].contains("sesión no leída"), "{motivos:?}");
         assert!(eventos(&e).iter().all(|ev| ev.tipo != TipoEvento::Sesion));
     }
 
