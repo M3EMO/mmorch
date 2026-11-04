@@ -1974,7 +1974,8 @@ fn borrar_xml(salida: &Path, xml: &str) -> Result<(), ErrorOraculo> {
 /// Una corrida de la suite en un contenedor nuevo. `Ok(Err(motivo))` si el junit no vale (A5).
 /// `Err` solo si la infraestructura falla o si no hay junit (A2: ahí el stderr va a `registros/`).
 /// Con `pytest`, el código de salida debe cuadrar con las fallas, y con `esperados` (si hay) el junit
-/// trae exactamente esas claves.
+/// trae exactamente esas claves. Fuera de pytest, el junit no puede estar vacío y el código debe
+/// cuadrar con las fallas: código 0 sin fallas, o código distinto de 0 con alguna falla.
 fn correr_una(
     c: &Corrida,
     cmd: &str,
@@ -2004,18 +2005,31 @@ fn correr_una(
                 esperados.len()
             )));
         }
-        let hay_falla = crudo.tests.values().any(|r| *r == ResultadoTest::Falla);
-        let cuadra = match resultado.codigo {
-            0 => !hay_falla,
-            1 => hay_falla,
-            _ => false,
+    } else if crudo.tests.is_empty() {
+        // Un comando que no corrió ningún test no da veredicto: pasaría sin aviso.
+        return Ok(Err(
+            "el junit no trae ningún test: la suite no corrió nada".into()
+        ));
+    }
+    let hay_falla = crudo.tests.values().any(|r| *r == ResultadoTest::Falla);
+    let cuadra = match (resultado.codigo, pytest) {
+        (0, true) => !hay_falla,
+        (1, true) => hay_falla,
+        (_, true) => false,
+        // Fuera de pytest, el comando escribe su propio junit: solo un código distinto de 0 con un junit
+        // verde no cuadra (M6). Un código 0 con fallas en el junit sigue siendo un veredicto.
+        (codigo, false) => codigo == 0 || hay_falla,
+    };
+    if !cuadra {
+        let motivo = if pytest {
+            "el código de pytest"
+        } else {
+            "el código del comando"
         };
-        if !cuadra {
-            return Ok(Err(format!(
-                "el código de pytest ({}) no coincide con las fallas del junit",
-                resultado.codigo
-            )));
-        }
+        return Ok(Err(format!(
+            "{motivo} ({}) no coincide con las fallas del junit",
+            resultado.codigo
+        )));
     }
     Ok(Ok(crudo.con_ids()))
 }
@@ -2922,6 +2936,71 @@ mod tests {
         let correr = ejecutor_con(coleccion_de(1), Some(falso), 0);
         let s = correr_suite_de_prueba(base.path(), &tarea, &correr).expect("sin infra");
         assert!(matches!(s, Suite::SinVeredicto(_)), "{s:?}");
+    }
+
+    /// Tarea cuya suite oculta no es pytest: el junit lo escribe el propio comando.
+    fn tarea_no_pytest(base: &Path) -> Tarea {
+        let mut tarea = tarea_de_prueba(base);
+        tarea.oculto.cmd = "cargo test --workspace -- --format json > /salida/oculto.xml".into();
+        tarea
+    }
+
+    const JUNIT_DOS_VERDES: &str = r#"<testsuite>
+  <testcase classname="tests.test_a" name="t1"/>
+  <testcase classname="tests.test_a" name="t2"/>
+</testsuite>"#;
+
+    #[test]
+    fn oraculo_no_pytest_junit_de_0_tests_es_sin_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_no_pytest(base.path());
+        let vacio = "<testsuite></testsuite>";
+        let correr = ejecutor_con("", Some(vacio), 0);
+        let s = correr_suite_de_prueba(base.path(), &tarea, &correr).expect("sin infra");
+        assert!(matches!(s, Suite::SinVeredicto(_)), "{s:?}");
+    }
+
+    #[test]
+    fn oraculo_no_pytest_codigo_1_con_junit_verde_es_sin_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_no_pytest(base.path());
+        let correr = ejecutor_con("", Some(JUNIT_DOS_VERDES), 1);
+        let s = correr_suite_de_prueba(base.path(), &tarea, &correr).expect("sin infra");
+        assert!(matches!(s, Suite::SinVeredicto(_)), "{s:?}");
+    }
+
+    #[test]
+    fn oraculo_no_pytest_dos_verdes_y_codigo_0_es_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_no_pytest(base.path());
+        let correr = ejecutor_con("", Some(JUNIT_DOS_VERDES), 0);
+        let s = correr_suite_de_prueba(base.path(), &tarea, &correr).expect("sin infra");
+        assert!(matches!(s, Suite::Clasificada(_)), "{s:?}");
+    }
+
+    #[test]
+    fn oraculo_no_pytest_falla_en_junit_con_codigo_1_es_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_no_pytest(base.path());
+        let con_falla = r#"<testsuite>
+  <testcase classname="tests.test_a" name="t1"><failure message="x"/></testcase>
+  <testcase classname="tests.test_a" name="t2"/>
+</testsuite>"#;
+        let correr = ejecutor_con("", Some(con_falla), 1);
+        let s = correr_suite_de_prueba(base.path(), &tarea, &correr).expect("sin infra");
+        assert!(matches!(s, Suite::Clasificada(_)), "{s:?}");
+    }
+
+    #[test]
+    fn oraculo_no_pytest_codigo_0_con_falla_en_junit_es_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_no_pytest(base.path());
+        let con_falla = r#"<testsuite>
+  <testcase classname="tests.test_a" name="t1"><failure message="x"/></testcase>
+</testsuite>"#;
+        let correr = ejecutor_con("", Some(con_falla), 0);
+        let s = correr_suite_de_prueba(base.path(), &tarea, &correr).expect("sin infra");
+        assert!(matches!(s, Suite::Clasificada(_)), "{s:?}");
     }
 
     #[test]
