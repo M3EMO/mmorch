@@ -155,19 +155,23 @@ impl EjecutorBuilder for EjecutorContenedorBuilder {
         let args = args_podman_builder(&real, &self.imagen, &credencial, &estado, &nombre);
 
         match correr_proceso("podman", &args, self.timeout)? {
-            Some(salida) => match fallo_de_podman(&salida) {
+            Fin::Termino(salida) => match fallo_de_podman(&salida) {
                 Some(error) => Err(error),
                 None => Ok(salida),
             },
-            None => {
+            Fin::Vencio { stdout, .. } => {
                 // Venció: se pide borrar el contenedor por nombre. Un fallo al borrar no tapa el aviso.
                 let _ = Command::new("podman")
                     .args(["rm", "-f", "-t", "0", &nombre])
                     .output();
-                Err(ErrorCorre::Ejecutor(format!(
-                    "timeout tras {} s; se pidió borrar el contenedor {nombre}",
-                    self.timeout.as_secs()
-                )))
+                // Lo que alcanzó a dar el builder sigue en `stdout`: quien llama lo guarda y lo cuenta.
+                Err(ErrorCorre::Cortado {
+                    mensaje: format!(
+                        "timeout tras {} s; se pidió borrar el contenedor {nombre}",
+                        self.timeout.as_secs()
+                    ),
+                    stdout,
+                })
             }
         }
     }
@@ -230,13 +234,23 @@ fn nombre_unico() -> String {
     format!("root-builder-{}-{n}", std::process::id())
 }
 
-/// Corre `programa` con `args` y espera hasta `plazo`. Da `None` si venció el plazo: el proceso ya murió.
-/// Un fallo al lanzar o al esperar es `Ejecutor`. El código de salida lo decide el llamador.
-fn correr_proceso(
-    programa: &str,
-    args: &[String],
-    plazo: Duration,
-) -> Result<Option<SalidaClaude>, ErrorCorre> {
+/// Fin de un proceso: terminó solo, o venció el plazo y se mató.
+#[derive(Debug, PartialEq, Eq)]
+enum Fin {
+    Termino(SalidaClaude),
+    /// Lo leído de `stdout` y `stderr` hasta el corte. Puede faltar si un nieto retiene la pipe.
+    Vencio {
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    },
+}
+
+/// Cuánto espera la lectura de una pipe después de matar el proceso. Pasado ese plazo, se deja de leer.
+const GRACIA_LECTURA: Duration = Duration::from_secs(2);
+
+/// Corre `programa` con `args` y espera hasta `plazo`. Si vence, mata el proceso y recoge lo leído hasta
+/// ahí. Un fallo al lanzar o al esperar es `Ejecutor`. El código de salida lo decide el llamador.
+fn correr_proceso(programa: &str, args: &[String], plazo: Duration) -> Result<Fin, ErrorCorre> {
     let mut hijo = Command::new(programa)
         .args(args)
         .stdin(Stdio::null())
@@ -259,14 +273,17 @@ fn correr_proceso(
     let Some(estado) = estado else {
         let _ = hijo.kill();
         let _ = hijo.wait();
-        return Ok(None);
+        return Ok(Fin::Vencio {
+            stdout: bytes_tras_corte(salida),
+            stderr: bytes_tras_corte(error),
+        });
     };
     let Some(codigo) = estado.code() else {
         return Err(ErrorCorre::Ejecutor(format!(
             "{programa} terminó por una señal"
         )));
     };
-    Ok(Some(SalidaClaude {
+    Ok(Fin::Termino(SalidaClaude {
         codigo,
         stdout: bytes_de(salida),
         stderr: bytes_de(error),
@@ -276,6 +293,22 @@ fn correr_proceso(
 /// Bytes de un flujo leído en otro hilo. Sin flujo o con un hilo caído, vacío.
 fn bytes_de(hilo: Option<JoinHandle<Vec<u8>>>) -> Vec<u8> {
     hilo.and_then(|h| h.join().ok()).unwrap_or_default()
+}
+
+/// Bytes de un flujo después de matar el proceso. Espera la lectura hasta `GRACIA_LECTURA` y no más: un
+/// nieto que retiene la pipe no debe colgar la corrida. Si vence la espera, el hilo se suelta y da vacío.
+fn bytes_tras_corte(hilo: Option<JoinHandle<Vec<u8>>>) -> Vec<u8> {
+    let Some(hilo) = hilo else {
+        return Vec::new();
+    };
+    let limite = std::time::Instant::now() + GRACIA_LECTURA;
+    while !hilo.is_finished() {
+        if std::time::Instant::now() >= limite {
+            return Vec::new();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    hilo.join().unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -558,24 +591,37 @@ mod tests {
             "-c".to_string(),
             "echo hola; echo mal >&2; exit 4".to_string(),
         ];
-        let salida = correr_proceso("sh", &args, Duration::from_secs(20))
-            .expect("corre")
-            .expect("no venció");
+        let Fin::Termino(salida) =
+            correr_proceso("sh", &args, Duration::from_secs(20)).expect("corre")
+        else {
+            panic!("no debe vencer");
+        };
         assert_eq!(salida.codigo, 4);
         assert_eq!(salida.stdout, b"hola\n".to_vec());
         assert_eq!(salida.stderr, b"mal\n".to_vec());
     }
 
     #[test]
-    fn corre_proceso_vence_el_plazo_y_da_none() {
+    fn corre_proceso_vence_el_plazo_y_no_espera_el_fin() {
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         let inicio = std::time::Instant::now();
-        let salida = correr_proceso("sh", &args, Duration::from_millis(100)).expect("corre");
-        assert!(salida.is_none(), "debe vencer");
+        let fin = correr_proceso("sh", &args, Duration::from_millis(100)).expect("corre");
+        assert!(matches!(fin, Fin::Vencio { .. }), "debe vencer: {fin:?}");
         assert!(
             inicio.elapsed() < Duration::from_secs(4),
             "no espera el fin del proceso"
         );
+    }
+
+    #[test]
+    fn corre_proceso_vencido_conserva_lo_que_alcanzo_a_dar() {
+        // `exec` hace que el `sleep` sea el proceso que se mata: nadie más retiene la pipe.
+        let args = vec!["-c".to_string(), "echo parcial; exec sleep 5".to_string()];
+        let fin = correr_proceso("sh", &args, Duration::from_secs(1)).expect("corre");
+        match fin {
+            Fin::Vencio { stdout, .. } => assert_eq!(stdout, b"parcial\n".to_vec()),
+            otro => panic!("debe venir vencido: {otro:?}"),
+        }
     }
 
     #[test]

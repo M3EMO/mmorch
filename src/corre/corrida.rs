@@ -7,9 +7,11 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value, json};
 
 use crate::borrado;
+use crate::config::Config;
 use crate::corre::args::{args_claude, env_del_builder};
 use crate::corre::config::ConfigCorrida;
 use crate::corre::contenedor::{TIMEOUT_BUILDER, estado_de};
+use crate::corre::costo_cortado::{costo_de_uso, evento_de_corte, uso_de_transcript};
 use crate::corre::git_seguro;
 use crate::corre::{
     Corrida, EjecutorBuilder, ErrorCorre, Lanzamiento, guardar_transcript, preparar_corrida,
@@ -68,7 +70,8 @@ struct Lanzado {
 /// Un código distinto de 0 de un rol corta la corrida: los roles siguientes no corren, pero la
 /// evaluación sí, y el informe dice lo que falta. Un fallo al lanzar aborta sin evaluar: sin builder
 /// no hay nada que evaluar, y la evaluación puede gastar API. Un rol sin `result` exitoso también
-/// aborta sin evaluar ni escribir fila: deja un `Gate` con el motivo.
+/// aborta sin evaluar ni escribir fila: deja un `Gate` con el motivo. Un rol cortado por tiempo
+/// además guarda su transcript parcial y registra su costo estimado (ver `registrar_corte`).
 pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, ErrorCorre> {
     // a) GOAL: sin autorización no arranca y no se crea nada.
     verificar_goal(deps.repo_root)?;
@@ -114,15 +117,19 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
             repo: corrida.repo.clone(),
             plugin: config_cargada.claude.plugin_de(*rol).map(Path::to_path_buf),
         };
+        let n = u32::try_from(indice + 1).unwrap_or(u32::MAX);
         let salida = match deps.ejecutor.lanzar(&lanzamiento) {
             Ok(salida) => salida,
             Err(error) => {
                 let motivo = format!("rol {} no arrancó: {error}", nombre_rol(*rol));
+                // Un rol cortado por tiempo deja su transcript parcial y el costo de lo que gastó.
+                if let ErrorCorre::Cortado { stdout, .. } = &error {
+                    registrar_corte(deps.home, &ruta_eventos, &id, *rol, n, &modelo, stdout)?;
+                }
                 gate(&ruta_eventos, &id, FASE_LANZAMIENTO, motivo, Some(*rol))?;
                 return Err(error);
             }
         };
-        let n = u32::try_from(indice + 1).unwrap_or(u32::MAX);
         let ruta = guardar_transcript(deps.home, &id, n, *rol, &salida.stdout)?;
         // Sin `result` exitoso el rol no evalúa: no hay resultado que evaluar.
         let linea = match resultado_exitoso(&salida.stdout) {
@@ -231,6 +238,25 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         fuente,
     })?;
     Ok(fila)
+}
+
+/// Un rol cortado por tiempo: guarda su transcript parcial y registra el costo estimado de lo que gastó.
+/// Su `Gate` y su error los pone quien llama. El costo sale de `usage` y del precio del modelo.
+fn registrar_corte(
+    home: &Path,
+    ruta_eventos: &Path,
+    id: &str,
+    rol: Rol,
+    n: u32,
+    modelo: &str,
+    stdout: &[u8],
+) -> Result<(), ErrorCorre> {
+    guardar_transcript(home, id, n, rol, stdout)?;
+    let config =
+        Config::cargar(&home.join("root.toml")).map_err(|e| ErrorCorre::Uso(e.to_string()))?;
+    let uso = uso_de_transcript(stdout);
+    let costo = costo_de_uso(&uso, config.precios.get(modelo));
+    registrar(ruta_eventos, &evento_de_corte(id, modelo, &uso, &costo))
 }
 
 /// Un rol va por cupo con modelo, o `r00t corre` no lo lanza.
@@ -431,7 +457,7 @@ mod tests {
     use crate::corre::{Lanzamiento, SalidaClaude, dir_corridas};
     use crate::goal::{ErrorGoal, calcular_hash};
     use crate::oracle::ErrorOraculo;
-    use crate::tipos::{Confianza, Decision, Estado, Evento, Forma, Informe, Rol, TipoEvento};
+    use crate::tipos::{Confianza, Decision, Estado, Evento, Forma, Informe, Rol, TipoEvento, Via};
     use crate::track::{self, Filtro};
 
     const GOAL: &str = "# GOAL de prueba\n\nContenido de fixture.\n";
@@ -1456,5 +1482,95 @@ mod tests {
             .map(str::to_string)
             .collect();
         assert_eq!(mensajes, vec![MENSAJE_ESTADO_FINAL.to_string()]);
+    }
+
+    /// Builder que corta el rol por tiempo: `lanzar` devuelve el error de corte con el `stdout` dado.
+    struct Cortado {
+        stdout: Vec<u8>,
+    }
+
+    impl EjecutorBuilder for Cortado {
+        fn lanzar(&self, _l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre> {
+            Err(ErrorCorre::Cortado {
+                mensaje: "timeout tras 7200 s; se pidió borrar el contenedor prueba".into(),
+                stdout: self.stdout.clone(),
+            })
+        }
+    }
+
+    /// Evaluador que no debe correr: un rol cortado no se evalúa.
+    fn evaluador_no_debe_correr(
+        _repo: &Path,
+        _tarea: &Tarea,
+        _o: &OpcionesOraculo,
+    ) -> Result<Veredicto, ErrorOraculo> {
+        panic!("un rol cortado no se evalúa");
+    }
+
+    #[test]
+    fn corre_rol_cortado_registra_costo_estimado_sin_fila_ni_evaluacion() {
+        let e = entorno();
+        let stdout = include_bytes!("../../tests/fixtures/transcripts/cortado.jsonl").to_vec();
+        let builder = Cortado { stdout };
+        let error = correr_con_eval(
+            &e,
+            &builder,
+            &[],
+            CONFIG_CONSTRUYE,
+            &evaluador_no_debe_correr,
+        )
+        .expect_err("un rol cortado sale con error");
+        assert!(matches!(error, ErrorCorre::Cortado { .. }), "{error}");
+        assert_eq!(error.codigo_de_salida(), 3);
+        assert!(
+            !e.home.join("runs.jsonl").exists(),
+            "un corte no escribe fila"
+        );
+
+        let costos: Vec<Evento> = eventos(&e)
+            .into_iter()
+            .filter(|ev| ev.tipo == TipoEvento::Llamada && ev.cost_usd > 0.0)
+            .collect();
+        assert_eq!(costos.len(), 1, "un evento de costo para el rol cortado");
+        let ev = &costos[0];
+        assert_eq!(ev.via, Some(Via::Cupo));
+        assert_eq!(ev.modelo.as_deref(), Some("haiku"));
+        assert_eq!((ev.in_tokens, ev.out_tokens), (3500, 130));
+        // Sin precio para "haiku" en el fixture: rige el pesimista (15 y 75 USD por millón).
+        let esperado = 3500.0 * 15.0 / 1e6 + 130.0 * 75.0 / 1e6;
+        assert!((ev.cost_usd - esperado).abs() < 1e-9, "{}", ev.cost_usd);
+        assert_eq!(ev.extra["costo_estimado"], Value::Bool(true));
+        assert_eq!(ev.extra["precio_supuesto"], Value::Bool(true));
+
+        let lanzamientos = gates(&e, FASE_LANZAMIENTO);
+        assert_eq!(lanzamientos.len(), 1, "el Gate de lanzamiento se mantiene");
+        assert!(lanzamientos[0].contains("rol construye no arrancó"));
+        assert!(
+            gates(&e, FASE_EVALUACION).is_empty(),
+            "no hay evaluación de la corrida cortada"
+        );
+    }
+
+    #[test]
+    fn corre_rol_cortado_guarda_su_transcript_parcial() {
+        let e = entorno();
+        let stdout = include_bytes!("../../tests/fixtures/transcripts/cortado.jsonl").to_vec();
+        let builder = Cortado {
+            stdout: stdout.clone(),
+        };
+        let _ = correr_con_eval(
+            &e,
+            &builder,
+            &[],
+            CONFIG_CONSTRUYE,
+            &evaluador_no_debe_correr,
+        );
+        let carpetas: Vec<PathBuf> = fs::read_dir(e.home.join("transcripts"))
+            .expect("carpeta de transcripts")
+            .map(|entrada| entrada.expect("entrada").path())
+            .collect();
+        assert_eq!(carpetas.len(), 1, "una carpeta por corrida");
+        let guardado = carpetas[0].join("1-construye.jsonl");
+        assert_eq!(fs::read(&guardado).expect("transcript"), stdout);
     }
 }
