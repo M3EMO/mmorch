@@ -1560,3 +1560,77 @@ fn descarga_corte_por_config_con_credencial_deja_gate_sin_el_valor() {
         "la credencial no va al evento: {crudos}"
     );
 }
+
+#[test]
+fn descarga_c2_de_punta_a_punta_el_proveedor_de_credenciales_no_se_ejecuta() {
+    // C2 de punta a punta, con podman real. Si la regla no cortara, la descarga correría la imagen.
+    root::saltar_sin_podman!();
+    let _g = preparar();
+    let home = home_de_prueba();
+    // La variable vive solo en este proceso. El guarda la borra al salir, aunque el test falle.
+    struct BorrarVariable(&'static str);
+    impl Drop for BorrarVariable {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var(self.0) };
+        }
+    }
+    const VARIABLE: &str = "ROOT_TOKEN_PRUEBA_C2";
+    unsafe { std::env::set_var(VARIABLE, "secreto-de-prueba-7f3a") };
+    let _borrar = BorrarVariable(VARIABLE);
+    fs::write(
+        home.path().join("root.toml"),
+        format!(
+            "[[registro]]\nnombre = \"priv\"\nurl = \"https://reg.example/index/\"\ncredencial_env = \"{VARIABLE}\"\n"
+        ),
+    )
+    .expect("root.toml");
+    // Carpeta de marca en el host. El proveedor la toca si corre, así que no debe existir.
+    let marcas = repo_propio("marca-host-c2-");
+    let marca_host = marcas.path().join("marca");
+    let repo = repo_propio("repo-c2-");
+    fs::write(
+        repo.path().join("Cargo.toml"),
+        "[package]\nname = \"corte\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nsecreto = { version = \"1\", registry = \"priv\" }\n",
+    )
+    .expect("Cargo.toml");
+    // El proveedor es una lista de comandos. Crea la marca dentro del repo y en el host.
+    escribir_config(
+        repo.path(),
+        &format!(
+            "[registries.priv]\nindex = \"sparse+https://reg.example/index/\"\ncredential-provider = [\"sh\", \"-c\", \"touch /repo/marca-ejecutada /salida/marca-ejecutada {}\"]\n",
+            marca_host.display()
+        ),
+    );
+    let tarea = tarea_con(home.path(), &contrato_junit_ok(), &oculto_junit_ok());
+
+    let preparacion = descarga::preparar(repo.path(), &tarea, home.path(), LIMITE)
+        .expect("el corte no usa la red");
+
+    assert!(
+        matches!(preparacion, Preparacion::SinVeredicto(_)),
+        "{preparacion:?}"
+    );
+    assert!(!marca_host.exists(), "el proveedor corrió en el host");
+    assert!(
+        !repo.path().join("marca-ejecutada").exists(),
+        "el proveedor corrió dentro del repo"
+    );
+    assert!(
+        !home.path().join("cache").exists(),
+        "no corrió ningún contenedor de descarga"
+    );
+    let corte = gates_de_corte(home.path(), "config-que-ejecuta-con-credencial");
+    assert_eq!(corte.len(), 1, "{}", eventos_crudos(home.path()));
+    let rechazos = corte[0]["extra"]["rechazos"]
+        .as_array()
+        .expect("el Gate de corte lista los rechazos");
+    assert_eq!(rechazos.len(), 1, "{rechazos:?}");
+    assert_eq!(rechazos[0]["archivo"], ".cargo/config.toml");
+    assert_eq!(rechazos[0]["linea"], 3);
+    assert_eq!(rechazos[0]["clave"], "registries.priv.credential-provider");
+    let crudos = eventos_crudos(home.path());
+    assert!(
+        !crudos.contains("secreto-de-prueba-7f3a"),
+        "el valor de la credencial no va al evento: {crudos}"
+    );
+}
