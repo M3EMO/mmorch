@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use root::observe;
 use root::oracle::tarea::Tarea;
-use root::oracle::{OpcionesOraculo, evaluar};
+use root::oracle::{OpcionesOraculo, Target, evaluar};
 use root::proveedores::{self, Prompt};
 use root::route::comando::rutear_en;
 use root::tipos::{Eleccion, Proveedor, Rol, TipoEvento, Via};
@@ -109,6 +109,7 @@ fn oraculo_home_evaluar_y_llamadas_escriben_solo_en_su_home() {
         historial: true,
         memo: None,
         reuso: None,
+        target: Target::Ninguno,
     };
     let _ = evaluar(repo.path(), &tarea, &opciones);
     let despues = gates(b.path());

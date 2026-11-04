@@ -5,7 +5,7 @@ use std::sync::{Mutex, MutexGuard, Once};
 use std::time::{Duration, SystemTime};
 
 use root::oracle::tarea::Tarea;
-use root::oracle::{ErrorOraculo, OpcionesOraculo, evaluar};
+use root::oracle::{ErrorOraculo, OpcionesOraculo, Target, evaluar};
 use root::tipos::{Conteo, Estado, Veredicto};
 use root::track::stats::wilson_inferior;
 
@@ -174,6 +174,7 @@ fn opciones(home: &Path) -> OpcionesOraculo {
         historial: true,
         memo: None,
         reuso: None,
+        target: Target::Ninguno,
     }
 }
 

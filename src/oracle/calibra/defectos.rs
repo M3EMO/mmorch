@@ -30,7 +30,9 @@ use crate::oracle::memo::MemoSondas;
 use crate::oracle::perfiles::herramientas::{EjecutorContenedor, EjecutorHerramienta};
 use crate::oracle::perfiles::rust::LimitesEstructura;
 use crate::oracle::rubrica;
-use crate::oracle::{Dependencias, OpcionesOraculo, Preparada, correr_en_podman, evaluar_con};
+use crate::oracle::{
+    Dependencias, OpcionesOraculo, Preparada, Target, correr_en_podman, evaluar_con,
+};
 use crate::proveedores::{Prompt, RespuestaJuez};
 
 /// Semilla de todos los tests. Con ella, cada defecto cae en un lugar fijo de la copia.
@@ -117,6 +119,7 @@ fn evaluar_copia(
         historial: false,
         memo,
         reuso: None,
+        target: Target::Ninguno,
     };
     evaluar_con(repo, tarea, &opciones, deps).expect("la evaluación da veredicto")
 }
