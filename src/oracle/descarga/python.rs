@@ -226,6 +226,9 @@ pub fn linea_offline_git(dir: &str, subdir: Option<&str>) -> String {
     }
 }
 
+/// Versión del formato de la clave de Python. Subirla invalida las cachés hechas con la fórmula anterior.
+const VERSION_CLAVE_PYTHON: u32 = 2;
+
 /// Clave de la caché de Python: requisitos, restricciones e imagen (M8). La imagen decide qué wheels bajan
 /// (`cp38` o `cp312`), así que va en la clave. Con el `digest` de podman (desempate 27), un tag reconstruido
 /// no usa wheels de otra imagen. Sin digest, la clave es la de la imagen sola.
@@ -238,7 +241,7 @@ pub fn clave_cache_python(
     let digest = digest.map_or(String::new(), |d| format!("digest={d}\n"));
     hash_corto(
         format!(
-            "imagen={imagen}\n{digest}--requisitos--\n{requisitos}--restricciones--\n{restricciones}"
+            "formato={VERSION_CLAVE_PYTHON}\nimagen={imagen}\n{digest}--requisitos--\n{requisitos}--restricciones--\n{restricciones}"
         )
         .as_bytes(),
     )
@@ -1712,6 +1715,77 @@ mod tests {
         assert_ne!(a, d, "otro digest es otra clave");
         let e = clave_cache_python("six==1.16.0\n", "urllib3<2\n", "python:3.8", None);
         assert_ne!(a, e, "una restricción distinta es otra clave");
+    }
+
+    /// Fórmula de la clave antes de H5: sin versión de formato.
+    fn clave_vieja(
+        requisitos: &str,
+        restricciones: &str,
+        imagen: &str,
+        digest: Option<&str>,
+    ) -> String {
+        let digest = digest.map_or(String::new(), |d| format!("digest={d}\n"));
+        hash_corto(
+            format!(
+                "imagen={imagen}\n{digest}--requisitos--\n{requisitos}--restricciones--\n{restricciones}"
+            )
+            .as_bytes(),
+        )
+    }
+
+    #[test]
+    fn descarga_python_cache_con_clave_vieja_no_es_acierto() {
+        // H5 cambió la clave. Una caché guardada con la fórmula vieja no debe usarse.
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        fs::write(repo.path().join("requirements.txt"), "six==1.16.0\n").expect("escribe");
+        let (texto, restricciones) =
+            textos_de_requisitos(repo.path()).expect("textos de requisitos");
+        let vieja = clave_vieja(&texto, &restricciones, "python:3.8", None);
+        let destino = home
+            .path()
+            .join(CARPETA_CACHE)
+            .join(CARPETA_PYTHON)
+            .join(vieja);
+        fs::create_dir_all(&destino).expect("caché vieja");
+        fs::write(destino.join(ARCHIVO_OFFLINE), "six==1.16.0\n").expect("offline");
+        let tarea = tarea_python_de_prueba();
+        let podman = PodmanDigest::que_responde(125, "");
+        let deps = DependenciasPython {
+            podman: &podman,
+            ejecutor: &EjecutorFalso::que_responde(0, ""),
+            leer_env: &|_: &str| None,
+        };
+        let (_, registro) = preparar_python_con(
+            repo.path(),
+            &tarea,
+            home.path(),
+            Duration::from_secs(60),
+            &[],
+            &deps,
+        )
+        .expect("prepara");
+        let registro = registro.expect("hay registro de la descarga");
+        assert!(
+            !registro.cache_hit,
+            "una caché con la clave vieja no es acierto"
+        );
+    }
+
+    #[test]
+    fn descarga_python_clave_de_cache_es_estable_y_distinta_de_la_vieja() {
+        let req = "six==1.16.0\n";
+        let nueva = clave_cache_python(req, "", "python:3.8", None);
+        assert_eq!(
+            nueva,
+            clave_cache_python(req, "", "python:3.8", None),
+            "mismas entradas: misma clave"
+        );
+        assert_ne!(
+            nueva,
+            clave_vieja(req, "", "python:3.8", None),
+            "la versión de formato cambia la clave"
+        );
     }
 
     /// Ejecutor de podman falso: responde un código y una salida fijos, y guarda los argumentos.
