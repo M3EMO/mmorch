@@ -243,6 +243,7 @@ struct Medida {
 
 /// Por qué el tope detuvo una calibración: el tope, el gasto medido, el peor caso que no entró y los
 /// casos medidos (decisión 48).
+#[derive(Clone)]
 struct Detencion {
     tope_usd: f64,
     gasto_usd: f64,
@@ -251,11 +252,12 @@ struct Detencion {
 }
 
 /// Tope ya resuelto para una medición: el peor caso de un caso, el inicio de la calibración y el medidor.
+/// El medidor es `Sync`: los reemplazos lo miran desde los hilos de los casos.
 struct Tope<'a> {
     usd: f64,
     peor_caso: f64,
     inicio: f64,
-    gasto_desde: &'a dyn Fn(f64) -> Result<f64, ErrorOraculo>,
+    gasto_desde: &'a (dyn Fn(f64) -> Result<f64, ErrorOraculo> + Sync),
 }
 
 /// Si el gasto desde el inicio más el peor caso de un caso pasa el tope, la detención. Sin tope, nunca.
@@ -364,12 +366,16 @@ struct Ronda<'a> {
     base: &'a Veredicto,
     items: &'a [&'static str],
     evaluador: &'a (dyn Fn(&Path, TipoCaso) -> Result<Veredicto, ErrorOraculo> + Sync),
+    /// Tope de la medición. Cada reemplazo lo revisa antes de correr.
+    tope: Option<&'a Tope<'a>>,
 }
 
 /// Lo que midió un caso: los reemplazos de sus inyecciones inválidas y el caso (`None`: no aplicable).
+/// Si el tope se alcanzó antes de un reemplazo, `caso` es `None` y `detencion` dice por qué.
 struct Medido {
     reemplazos: u32,
     caso: Option<Caso>,
+    detencion: Option<Detencion>,
 }
 
 /// Mide el caso `i`. Los pares llevan un defecto: el de `defectos[(i / 2) % len]`, la misma rotación de los
@@ -385,6 +391,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         return Ok(Medido {
             reemplazos: 0,
             caso: Some(caso),
+            detencion: None,
         });
     }
     let defecto = r.defectos[(i / 2) % r.defectos.len()];
@@ -402,6 +409,16 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
     let mut invalidos = 0u32;
     let mut medido = None;
     for k in 0..=MAX_REEMPLAZOS {
+        // Antes de cada reemplazo (no antes de la primera inyección) se mira el tope. Si no entra, no se gasta.
+        if k > 0
+            && let Some(detencion) = detencion_si_no_entra(r.tope, 0)?
+        {
+            return Ok(Medido {
+                reemplazos: invalidos,
+                caso: None,
+                detencion: Some(detencion),
+            });
+        }
         let semilla_k = semilla_caso.wrapping_add(u64::from(k) * 1_000_003);
         let copia = r.tmp.join(format!("caso-{i}"));
         super::copiar_repo(r.repo_bueno, &copia).map_err(|e| super::infra("copia del repo", e))?;
@@ -426,6 +443,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         return Ok(Medido {
             reemplazos: invalidos,
             caso: None,
+            detencion: None,
         });
     };
     let caso = Caso {
@@ -442,12 +460,14 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
     Ok(Medido {
         reemplazos: invalidos,
         caso: Some(caso),
+        detencion: None,
     })
 }
 
 /// Como `calibrar_medida`, con `hilos` casos a la vez (1 corre en serie). Un coordinador lanza los casos en
 /// orden. Antes de cada lanzamiento compara `gasto + (en_vuelo + 1) * peor_caso` con el tope: si no entra y
-/// hay casos en vuelo, espera a uno; si no entra y no hay ninguno, para. Un error de caso deja de lanzar y
+/// hay casos en vuelo, espera a uno; si no entra y no hay ninguno, para. Antes de cada reemplazo de una
+/// inyección inválida, un caso revisa el tope y, si no entra, la medición se detiene. Un error de caso deja de lanzar y
 /// espera a los que están en vuelo; devuelve el error del índice más bajo. Los casos se ordenan por índice
 /// antes de armar la fila, así el resultado no depende del orden de término.
 #[allow(clippy::too_many_arguments)]
@@ -518,6 +538,7 @@ fn calibrar_medida_con_hilos(
         base: &base,
         items: &items,
         evaluador,
+        tope,
     };
     let hilos = hilos.max(1);
     let (tx, rx) = mpsc::channel::<(usize, Result<Medido, ErrorOraculo>)>();
@@ -532,17 +553,17 @@ fn calibrar_medida_con_hilos(
     std::thread::scope(|s| -> Result<(), ErrorOraculo> {
         let ronda = &ronda;
         loop {
-            while error.is_none() && siguiente < n && en_vuelo < hilos {
+            while error.is_none() && siguiente < n && en_vuelo < hilos && detencion.is_none() {
                 if let Some(t) = tope {
                     let gasto = (t.gasto_desde)(t.inicio)?;
                     if gasto + (en_vuelo as f64 + 1.0) * t.peor_caso > t.usd {
                         if en_vuelo == 0 {
+                            // El conteo de casos medidos lo pone el final, cuando todos terminaron.
                             detencion = Some(Detencion {
                                 tope_usd: t.usd,
                                 gasto_usd: gasto,
                                 peor_caso_usd: t.peor_caso,
-                                casos: resultados.values().filter(|m| m.caso.is_some()).count()
-                                    as u32,
+                                casos: 0,
                             });
                         }
                         break;
@@ -558,7 +579,7 @@ fn calibrar_medida_con_hilos(
                     let _ = envio.send((i, medir_caso(ronda, i)));
                 });
             }
-            if siguiente == n || error.is_some() {
+            if siguiente == n || error.is_some() || detencion.is_some() {
                 tx_abierto = None;
             }
             if en_vuelo == 0 {
@@ -570,6 +591,10 @@ fn calibrar_medida_con_hilos(
             en_vuelo -= 1;
             match resultado {
                 Ok(medido) => {
+                    // Un reemplazo que no entró en el tope detiene los lanzamientos. Los casos en vuelo terminan.
+                    if detencion.is_none() {
+                        detencion = medido.detencion.clone();
+                    }
                     resultados.insert(i, medido);
                 }
                 Err(e) => {
@@ -591,8 +616,13 @@ fn calibrar_medida_con_hilos(
         reemplazos += medido.reemplazos;
         match medido.caso {
             Some(caso) => casos.push(caso),
+            // Un caso que el tope detuvo no es no aplicable: no se midió.
+            None if medido.detencion.is_some() => {}
             None => no_aplicables += 1,
         }
+    }
+    if let Some(d) = detencion.as_mut() {
+        d.casos = casos.len() as u32;
     }
     let incompleta = detencion.is_some();
     let fila = if incompleta && casos.is_empty() {
@@ -708,8 +738,9 @@ pub struct Presupuesto<'a> {
     pub usd: f64,
     /// Peor caso en USD de un caso con estas partes. Un modelo sin precio da un error.
     pub peor_caso: &'a dyn Fn(&Partes) -> Result<f64, ErrorOraculo>,
-    /// Gasto de API desde un instante (epoch en segundos): llamadas y reservas abiertas.
-    pub gasto_desde: &'a dyn Fn(f64) -> Result<f64, ErrorOraculo>,
+    /// Gasto de API desde un instante (epoch en segundos): llamadas y reservas abiertas. Es `Sync`: los
+    /// reemplazos lo miran desde los hilos de los casos.
+    pub gasto_desde: &'a (dyn Fn(f64) -> Result<f64, ErrorOraculo> + Sync),
 }
 
 /// Elecciones de los jueces que un caso puede llamar. `None`: el juez no se arma y no llama.
@@ -2824,6 +2855,63 @@ mod tests {
         assert_eq!(fila.sensibilidad, None);
         // La inyección inicial más los MAX_REEMPLAZOS reemplazos, todos inválidos: cada intento suma 1.
         assert_eq!(fila.reemplazos, MAX_REEMPLAZOS + 1);
+    }
+
+    #[test]
+    fn calibra_el_tope_se_revisa_antes_de_cada_reemplazo() {
+        // La base no cuesta. La primera inyección cuesta 1 y es inválida. Con tope 1,5 y peor caso 1, el
+        // reemplazo no entra: la calibración se detiene sin gastarlo.
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let primera = Mutex::new(true);
+        let ev = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
+            if limpia {
+                base.clone()
+            } else if std::mem::replace(&mut *primera.lock().expect("lock"), false) {
+                con_motivo(base, NO_COMPILA)
+            } else {
+                bajada(base)
+            }
+        });
+        let gastado = Mutex::new(0.0f64);
+        let llamadas = AtomicUsize::new(0);
+        let evaluar = |ruta: &Path, tipo: TipoCaso| {
+            llamadas.fetch_add(1, Ordering::SeqCst);
+            if tipo != TipoCaso::Base {
+                *gastado.lock().expect("gasto") += 1.0;
+            }
+            ev(ruta)
+        };
+        let gasto = |_: f64| -> Result<f64, ErrorOraculo> { Ok(*gastado.lock().expect("gasto")) };
+        let tope = Tope {
+            usd: 1.5,
+            peor_caso: 1.0,
+            inicio: 0.0,
+            gasto_desde: &gasto,
+        };
+        let (_t, tarea) = tarea_prueba();
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Estructura,
+            1,
+            42,
+            Path::new(FIXTURE),
+            &evaluar,
+            Some(&tope),
+            &Vec::new,
+            1,
+        )
+        .expect("calibra");
+        assert!(
+            medida.detencion.is_some(),
+            "el tope detiene antes del reemplazo"
+        );
+        assert_eq!(
+            llamadas.load(Ordering::SeqCst),
+            2,
+            "la base y la inyección inválida; el reemplazo no corre"
+        );
+        assert!(medida.casos.is_empty(), "ningún caso medido");
+        assert!(medida.fila.is_none(), "sin casos no hay fila");
     }
 
     #[test]
