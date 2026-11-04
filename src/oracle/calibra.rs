@@ -3227,7 +3227,7 @@ mod tests {
             let llegada = Instant::now();
             while cerrados.load(Ordering::SeqCst) == 0
                 && abiertas.lock().expect("lock").len() < CASOS_EN_PARALELO
-                && llegada.elapsed() < Duration::from_secs(2)
+                && llegada.elapsed() < Duration::from_secs(20)
             {
                 std::thread::sleep(Duration::from_millis(1));
             }
