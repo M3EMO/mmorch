@@ -637,6 +637,12 @@ fn evaluar_con(
             return Ok(con_costo(v, &juez_config));
         }
     };
+    // Los hallazgos siguen en su sitio: el aviso es una copia para el veredicto, sin duplicar.
+    for aviso in avisos_de_dependencias(&hallazgos) {
+        if !avisos.contains(&aviso) {
+            avisos.push(aviso);
+        }
+    }
     let salida = temporal(&tmp).map_err(|e| infra("directorio de salida", e))?;
     // Podman rootless: si el contenedor corre con otro uid, la salida debe ser escribible por todos.
     fs::set_permissions(salida.path(), fs::Permissions::from_mode(0o777))
@@ -1668,6 +1674,22 @@ fn sin_calibrar(puntajes: &[Puntaje]) -> Vec<Dimension> {
         .filter(|p| p.sin_veredicto.is_none() && !p.calibrada)
         .map(|p| p.dimension)
         .collect()
+}
+
+/// Texto fijo del aviso de dependencias no verificadas. Repite `AVISO_NO_VERIFICADAS` de `descarga/python.rs`.
+/// Si cambia allá, cambia acá también.
+const AVISO_DEPENDENCIAS_NO_VERIFICADAS: &str = "dependencias de runtime no verificadas";
+
+/// Avisos de dependencias no verificadas que traen los hallazgos de la descarga, sin repetidos y en orden.
+fn avisos_de_dependencias(hallazgos: &[Hallazgo]) -> Vec<String> {
+    let mut avisos: Vec<String> = Vec::new();
+    for h in hallazgos {
+        let es_aviso = h.detalle.contains(AVISO_DEPENDENCIAS_NO_VERIFICADAS);
+        if es_aviso && !avisos.contains(&h.detalle) {
+            avisos.push(h.detalle.clone());
+        }
+    }
+    avisos
 }
 
 /// Motivo de una descarga sin veredicto: el detalle de su primer hallazgo, si lo hay.
@@ -7981,5 +8003,54 @@ mod tests {
         assert_eq!(confianza.corridas_acumuladas["contrato:test_c::t9"], 3);
         let texto = serde_json::to_string(&r).expect("json");
         assert!(!texto.contains("test_a::t1"), "{texto}");
+    }
+
+    // --- Avisos de dependencias no verificadas: de los hallazgos de la descarga a `avisos` ---
+
+    /// Hallazgo de la descarga con `detalle` dado. Solo importa el `detalle` para `avisos_de_dependencias`.
+    fn hallazgo_con_detalle(detalle: &str) -> Hallazgo {
+        Hallazgo {
+            dimension: crate::tipos::Dimension::Seguridad,
+            severidad: 1,
+            archivo: "pyproject.toml".into(),
+            linea: 1,
+            cita: String::new(),
+            detalle: detalle.into(),
+            fuente: crate::tipos::Fuente::Sonda("descarga".into()),
+            id: String::new(),
+            impacto: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn avisos_de_dependencias_dan_los_dos_avisos_en_orden() {
+        let sdist = format!(
+            "sdist con metadatos anteriores a 2.1: {AVISO_DEPENDENCIAS_NO_VERIFICADAS}: foo-1.0.tar.gz"
+        );
+        let clon = format!(
+            "clon sin metadatos estáticos: {AVISO_DEPENDENCIAS_NO_VERIFICADAS}: git+https://x/y"
+        );
+        let hallazgos = vec![
+            hallazgo_con_detalle(&sdist),
+            hallazgo_con_detalle("unwrap sin control"),
+            hallazgo_con_detalle(&clon),
+        ];
+        assert_eq!(avisos_de_dependencias(&hallazgos), vec![sdist, clon]);
+    }
+
+    #[test]
+    fn avisos_de_dependencias_repetidos_dan_uno() {
+        let aviso = format!(
+            "clon sin metadatos estáticos: {AVISO_DEPENDENCIAS_NO_VERIFICADAS}: git+https://x/y"
+        );
+        let hallazgos = vec![hallazgo_con_detalle(&aviso), hallazgo_con_detalle(&aviso)];
+        assert_eq!(avisos_de_dependencias(&hallazgos), vec![aviso]);
+    }
+
+    #[test]
+    fn avisos_de_dependencias_sin_ese_tipo_da_vacio() {
+        let hallazgos = vec![hallazgo_con_detalle("unwrap sin control")];
+        assert!(avisos_de_dependencias(&hallazgos).is_empty());
+        assert!(avisos_de_dependencias(&[]).is_empty());
     }
 }
