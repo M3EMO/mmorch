@@ -31,6 +31,17 @@ const SECRETO_REAL: &str = "SECRETO_BUILDER_REAL_9c1e";
 /// Credencial falsa: tiene `claudeAiOauth` y `mcpOAuth`. La copia no debe traer `mcpOAuth`.
 const CREDENCIAL_FALSA: &str = r#"{"claudeAiOauth":{"accessToken":"TOKEN_FALSO_1","refreshToken":"REFRESCO_FALSO_1","expiresAt":4102444800000},"mcpOAuth":{"servidor":{"accessToken":"MCP_FALSO_1"}}}"#;
 
+/// Falla si `claudeAiOauth` de la copia trae la clave `refreshToken`. Mira la clave y no el texto:
+/// `refreshTokenExpiresAt` es una fecha, sin secreto, y la copia la conserva.
+fn assert_sin_clave_refresh_token(copia: &str) {
+    let json: serde_json::Value = serde_json::from_str(copia).expect("la copia es JSON");
+    let login = json["claudeAiOauth"].as_object().expect("objeto de login");
+    assert!(
+        !login.contains_key("refreshToken"),
+        "la copia trae el token de refresco"
+    );
+}
+
 /// Escribe un aviso de salteo en stderr. No usa `eprintln!`: `cargo test` lo oculta en tests que pasan.
 fn aviso(texto: &str) {
     let _ = writeln!(std::io::stderr(), "{texto}");
@@ -164,7 +175,7 @@ fn builder_real_shell_escribe_en_el_repo_y_no_ve_oraculos() {
         "falta el login en la copia: {cred}"
     );
     assert!(!cred.contains("mcpOAuth"), "la copia trae mcpOAuth");
-    assert!(!cred.contains("refreshToken"), "la copia trae el refresco");
+    assert_sin_clave_refresh_token(&cred);
     assert!(
         !cred.contains("REFRESCO_FALSO_1"),
         "la copia trae el refresco"
@@ -210,10 +221,7 @@ fn builder_real_claude_crea_hola_y_no_lee_oraculos() {
         copia.contains("claudeAiOauth"),
         "falta el login en la copia"
     );
-    assert!(
-        !copia.contains("refreshToken"),
-        "la copia trae el token de refresco"
-    );
+    assert_sin_clave_refresh_token(&copia);
     assert!(!copia.contains("mcpOAuth"), "la copia trae mcpOAuth");
 
     assert!(repo.join("hola.txt").is_file(), "falta hola.txt en el repo");
