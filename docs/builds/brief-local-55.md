@@ -23,6 +23,8 @@ El contrato del proyecto vive en `GOAL.md`. Sus invariantes mandan sobre todo lo
 
 ## Entorno
 
+- Si la calibración real corre al mismo tiempo, exportá `ROOT_SIN_PODMAN=1`. Así tus tests y tu hook no cargan la CPU con podman. La suite con podman corre al mezclar.
+
 - La tarea no necesita claves de API reales, Colab ni el `ROOT_HOME` real.
 - Corré la suite con `tools/test-seguro.sh`. Toma el lock de podman, así que espera su turno si otro builder la corre.
 - No exportes `DEEPSEEK_API_KEY` ni `ANTHROPIC_API_KEY`.
@@ -31,7 +33,7 @@ El contrato del proyecto vive en `GOAL.md`. Sus invariantes mandan sobre todo lo
 
 Un `/ecc:code-review` del hito encontró 2 hallazgos críticos, 5 altos y 22 medios. Opus verificó los críticos y los altos en el código. El informe es `~/.cache/root-wt/orquestador/review-47-informe.md`. Leé las filas de tus hallazgos, con su ubicación, su evidencia y su escenario de falla.
 
-Leé en el plan, antes de empezar, también "Desempates técnicos 28 (Opus, 2026-11-03): informes de las Tareas 48, 50, 52 y 53". Y además:
+Leé en el plan, antes de empezar, también "Desempates técnicos 29 (Opus, 2026-11-04)" y "Desempates técnicos 28 (Opus, 2026-11-03): informes de las Tareas 48, 50, 52 y 53". Y además:
 
 - "Code review del hito (Tarea 47, adelantado, 2026-11-03)", con su tabla de verificación.
 - "Desempates técnicos 27 (Opus, 2026-11-03)".

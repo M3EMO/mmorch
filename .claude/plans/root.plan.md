@@ -88,6 +88,7 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 62 | Tarea 16: "a) Correr en memora". La corrida real de `r00t corre` usa memora para probar el runner de punta a punta, y después se borra. |
 | 63 | Calibración: el usuario preguntó "No se puede hacer mas rapida? eficiente? o en paralelo? El diseño de por si digo", y eligió "a) Cortar y mejorar". Ver Tareas 48 y 49. |
 | 64 | Objetivo: "terminar root. Calibrarlo a la perfeccion, no terminar con la primer version completa, seguir hasta terminar". Y: "Acelerar los procesos para que no sea todo secuencial, un recurso que hay que aprovechar es el tiempo." El hito 1 cierra con la calibración completa, y el trabajo independiente corre en paralelo. |
+| 65 | P62: "a) Rechazar claves". Si Root pasa una credencial, rechaza en el config de cargo del repo las claves que ejecutan comandos o cambian el TLS. Sin credenciales, el config se respeta entero. Acota la decisión 30. Construida en la Tarea 51 (C2). |
 
 ## Patterns to Mirror
 
@@ -3508,3 +3509,105 @@ Cada respuesta dice si la decisión del organizador queda, cambia o pasa a una t
 7. Borrado de memora y brasa (decisión 61).
 
 P62 sigue abierta, y la parte C2 de la Tarea 51 la espera. No hay preguntas nuevas para el usuario.
+
+## Vuelta del 2026-11-04: mezclas hasta 8b417db y Tarea 54 terminada
+
+**Estado.** `claude/root-e7813e` está en 8b417db, con las Tareas 48, 49, 50, 51 (con C2), 52, 53 y 56. El usuario ordenó cada mezcla: "Sí, avanzar" para la 53, la 52, la 48 y la 51, y "Sí, mezclar ambas" para la 56 y la C2. El código de 8b417db es igual al árbol probado con podman: 2258 verdes, 0 fallas y 3 ignorados. La Tarea 54 (`laptop/tarea-54`) terminó 11 de 13 puntos, y su prueba con podman corre ahora. Costos de la tanda: 51 = 1,85 USD, C2 = 0,68 USD, 56 = 1,43 USD y 54 = 6,09 USD.
+
+**Hallazgos del orquestador.**
+1. La 54 no hizo los puntos 10 (reservas contadas una vez) ni 12 (memo por tarea): exigían archivos fuera de su lista.
+2. La 54 tocó una línea de `src/lib.rs` para H2.
+3. La 51 dejó L14 a medias: falta cambiar el llamador de `src/lib.rs` a `cache_de_con_error(...)?`.
+4. La 51 deja como acierto una caché de Python anterior a H5.
+5. La C2 debilitó tres guardas de secretos: buscan `clave@` en vez del valor.
+6. La C2 no tiene un test de punta a punta con podman.
+7. La 56 no hizo `faltantes` por ítem en Entrega.
+8. `calibra_un_caso_con_error_corta_y_se_propaga_el_primero` falló una vez bajo carga.
+9. El builder 54 vio 2 fallas en un worktree auxiliar, que el orquestador no reproduce.
+10. H1 de la 54 corre la suite oculta desde `/salida/.oculto`. Los `tarea.toml` reales de memora y brasa llaman a pytest con la ruta literal `/oraculo/oculto` y con `--junitxml=/salida/oculto.xml`.
+
+## Desempates técnicos 29 (Opus, 2026-11-04)
+
+**Informe 51.**
+1. P62: respondida (decisión 65).
+2. **Clon con `setup.py` legado.** Queda sin cortar, y suma un aviso en `confianza`: "clon sin metadatos estáticos: dependencias de runtime no verificadas". Razón: cortar rompía un caso real, y el aviso dice lo que Root no midió. Tarea 57.
+3. **`[project]` sin `dependencies`.** Queda en cero dependencias.
+4. **Clave de caché de Python.** Cambia: la clave suma una versión de formato, así las cachés anteriores a H5 dejan de ser acierto. Tarea 57.
+5. **`src/lib.rs` y L14.** Cambia: el llamador pasa a `cache_de_con_error(...)?`. Tarea 57.
+- **Dependencia de runtime que solo tiene sdist.** Cambia: da sin veredicto, no `no-instala`. Es un límite de Root, como fija el desempate 31 de "Desempates técnicos 11". Tarea 57.
+- **`PKG-INFO` anterior a Metadata 2.1.** Cambia: suma el mismo aviso de dependencias no verificadas. Tarea 57.
+
+**Informe 51-C2.**
+1. **`credential-provider` en cualquier sección.** Queda.
+2. **`[credential-alias]` como tabla.** Queda.
+3. **`http.proxy` con usuario y clave.** Queda.
+4. **Rechazo sin registro.** Cambia: un rechazo del inventario registra un evento `Gate` con la clave rechazada y su línea, sin valores. Vale también para el corte por `inv.rechazos` que ya existía. Razón: el invariante de observabilidad. Tarea 57.
+
+**Informe 56.**
+1. **Un requisito cuenta como medido en Entrega.** Cambia: Entrega toma su valor solo de sus propios ítems. Los requisitos son de Completitud. Los dos tests de `src/oracle/mod.rs` que fijan el caso se ajustan. Tarea 58.
+2. **`faltantes` por ítem en Entrega.** Cambia: `ResultadoEntrega` suma `faltantes`, y el ítem de construcción pendiente aparece en `Puntaje.faltantes`. Tarea 58.
+3. **Reloj simulado.** Queda: inyectar un reloj real exige cambiar el transporte de `ureq`.
+4. **Build pendiente sin hallazgos.** Queda sin veredicto.
+
+**Informe 54.**
+1. **Reservas contadas una vez.** Cambia: cada reserva lleva el id del caso, y el coordinador no suma el peor caso de un caso que ya tiene reserva. Toca `src/proveedores/` y `src/observe/` solo para la etiqueta. Tarea 58.
+2. **Memo por tarea.** Cambia: se autoriza `src/oracle/memo.rs`. Tarea 58.
+3. **La línea de `src/lib.rs` para H2.** Queda.
+4. **`colab.json` viejos descartados.** Queda: Colab es del hito 1b.
+5. **M18 en `cargar_en`.** Queda.
+6. **M6 y `ModuloBorrado`.** Queda: las suites ocultas de memora y brasa son pytest, así que M6 no las toca.
+7. **Regla exacta de M6.** Queda.
+8. **Filas viejas sin muestra.** Queda: la calibración se repite entera.
+9. **Un umbral para la ficha y el juez.** Queda: una frase de spec con menos de 8 caracteres alfanuméricos no es una cita útil.
+10. **Otros prompts.** Queda sin cambio: el juez de la ficha y el de la config no puntúan ítems de rúbrica.
+11. a 13. Quedan.
+14. **Lock de Colab.** Pasa al hito 1b, con Colab.
+15. **Ruta de la suite oculta.** Se verifica con una evaluación de humo antes de calibrar (ver abajo). Si la ruta literal rompe memora o brasa, el arreglo va a la Tarea 58.
+16. **`PYTHONPATH` previo.** Queda.
+17. **Base en otro worktree.** La mezcla de la 54 corre la suite con podman dos veces seguidas. Una falla que no se repite se registra como inestable, con su nombre.
+
+**Hallazgos del orquestador.**
+- 1, 2 y 7: ver arriba.
+- 3 y 4: Tarea 57.
+- 5. **Guardas de secretos.** Cambia: cada guarda busca el valor del secreto de prueba, no el nombre del campo. Tarea 57.
+- 6. **C2 de punta a punta.** Tarea 57 suma un test con podman: un repo con `credential-provider` y una credencial de prueba no ejecuta el proveedor, y deja el `Gate` del rechazo.
+- 8. **Test frágil.** Tarea 58: el coordinador propaga el error del caso con el índice más bajo, no el primero en el tiempo.
+- 9. Ver la respuesta 17 del informe 54.
+- 10. Ver la respuesta 15 del informe 54.
+
+## ¿Cuándo arranca la calibración real?
+
+Arranca después de la mezcla de la 54, con dos condiciones:
+1. **Evaluación de humo.** El orquestador corre una evaluación de memora-ecc y una de brasa-ecc, sin claves y con 0 USD. El oculto debe dar lo mismo que el Validate 14: 66/68 y 20/21. Si cambia, la calibración espera el arreglo de la Tarea 58.
+2. **Margen de tope.** Hasta que entre la Tarea 58, una reserva puede no verse por hasta 3 casos en vuelo. La calibración corre con `--tope-usd` igual al saldo menos 1 USD. Con `deepseek-v4-pro`, 3 casos en vuelo cuestan como mucho 0,33 USD, así que el tope del usuario no se pasa (decisión 15).
+
+No hace falta esperar a la 55, la 57 ni la 58: ninguna cambia lo que mide la calibración de memora y brasa.
+
+**Calibración y builders a la vez.** Mientras corre la calibración, los builders exportan `ROOT_SIN_PODMAN=1`. Así sus tests y sus hooks no cargan la CPU con podman. Sus suites con podman corren al mezclar, cuando la calibración termina o entre memora y brasa.
+
+### Tarea 57: Descarga y guardas de secretos
+- **Action**: respuestas 2, 4 y 5 y los dos puntos sueltos del informe 51; respuesta 4 del informe C2; hallazgos 5 y 6; y el tope de salida en `contenedor::ejecutar`.
+- **Archivos**: `src/oracle/descarga.rs`, `src/oracle/descarga/`, `src/oracle/contenedor.rs` (solo `ejecutar`), y una línea de `src/lib.rs` (el llamador de `cache_de`).
+- **Arranca**: ya, desde 8b417db. Corre en paralelo con la 55 y la 58.
+- **Brief**: `docs/builds/brief-local-57.md`.
+
+### Tarea 58: Núcleo del Oracle después de la 54
+- **Action**: respuestas 1 y 2 del informe 56; respuestas 1 y 2 del informe 54; hallazgo 8; el tope de salida de `entrega.rs`; y el arreglo de la ruta de la suite oculta, si la evaluación de humo falla.
+- **Archivos**: `src/oracle/mod.rs` (salvo `comando_git` y `commit_de`), `src/oracle/calibra.rs`, `src/oracle/calibra/`, `src/oracle/memo.rs`, `src/oracle/entrega.rs`, y en `src/proveedores/` y `src/observe/` solo la etiqueta del caso en la reserva.
+- **Arranca**: después de la mezcla de la 54. Corre en paralelo con la 55 y la 57.
+- **Brief**: `docs/builds/brief-local-58.md`.
+
+## Orden final del hito 1 (2026-11-04)
+
+1. **Mezcla de la 54.** Con la orden del usuario, y con la suite con podman dos veces.
+2. **Evaluación de humo** de memora-ecc y brasa-ecc, sin claves.
+3. **En paralelo después:**
+   - la calibración real, memora primero y brasa después, con el margen de tope;
+   - las Tareas 55, 57 y 58, con `ROOT_SIN_PODMAN=1` mientras corre la calibración.
+4. **Mezclas de 55, 57 y 58.** Una por vez, cada una con su suite con podman, sin la calibración corriendo.
+5. **Comparación de `global`.**
+6. **Corrida real de memora (Tarea 16).** Espera a la 55. No corre a la vez que la calibración.
+7. **Validez automática (Tarea 12b)** y **cierre (Tarea 47)**.
+8. **Borrado de memora y brasa** (decisión 61).
+
+No hay preguntas nuevas para el usuario.
