@@ -1,7 +1,7 @@
 //! Calibración del Oracle. La Tarea 12 escribe `$ROOT_HOME/calibracion.json` con la sensibilidad, la
 //! especificidad y la exactitud balanceada de cada dimensión, medidas con defectos conocidos. La Tarea 13
 //! lo lee: una dimensión queda `calibrada` si su exactitud balanceada llega a 0,9, y solo esas entran a
-//! `global`.
+//! `global`. Además exige muestra mínima: 5 defectos aplicados y 5 casos limpios.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -32,6 +32,10 @@ pub const ARCHIVO: &str = "calibracion.json";
 pub const VERSION: u32 = 1;
 /// Exactitud balanceada desde la que una dimensión queda calibrada.
 pub const UMBRAL: f32 = 0.9;
+/// Defectos aplicados mínimos para calibrar una dimensión. Con menos, la medida no calibra.
+const MIN_DEFECTOS_APLICABLES: u32 = 5;
+/// Casos limpios mínimos para calibrar una dimensión. Con menos, la medida no calibra.
+const MIN_LIMPIOS: u32 = 5;
 
 /// Una medición de una dimensión de una tarea, con su muestra.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -127,10 +131,13 @@ impl Calibraciones {
     }
 
     /// Marca cada puntaje con su calibración: `calibrada` si la exactitud balanceada llega a `UMBRAL`.
-    /// Sin fila, el puntaje queda sin calibrar.
+    /// Sin fila, o con muestra insuficiente, el puntaje queda sin calibrar.
     pub fn aplicar(&self, tarea: &str, puntajes: &mut [Puntaje]) {
         for puntaje in puntajes {
-            let fila = self.de(tarea, puntaje.dimension);
+            // Una fila con muestra corta cuenta como si no existiera.
+            let fila = self
+                .de(tarea, puntaje.dimension)
+                .filter(|f| muestra_suficiente(f));
             puntaje.exactitud_balanceada = fila.and_then(|f| f.exactitud_balanceada);
             // Una fila incompleta no calibra: el tope detuvo la medición antes de su último caso.
             let incompleta = fila.is_some_and(|f| f.incompleta);
@@ -1273,6 +1280,11 @@ fn proporcion(aciertos: u32, total: u32) -> Option<f32> {
     (total > 0).then(|| aciertos as f32 / total as f32)
 }
 
+/// Una fila calibra solo con muestra mínima: defectos y limpios por encima de sus mínimos.
+fn muestra_suficiente(fila: &Fila) -> bool {
+    fila.defectos >= MIN_DEFECTOS_APLICABLES && fila.limpios >= MIN_LIMPIOS
+}
+
 /// Media de sensibilidad y especificidad. `None` si cualquiera de las dos no tiene casos.
 fn exactitud_de(sensibilidad: Option<f32>, especificidad: Option<f32>) -> Option<f32> {
     let (s, e) = (sensibilidad?, especificidad?);
@@ -2406,6 +2418,69 @@ mod tests {
         let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.9)];
         Calibraciones::default().aplicar("memora", &mut puntajes);
         assert_eq!(global_de(&puntajes), None);
+    }
+
+    #[test]
+    fn calibra_n_dos_con_un_defecto_y_un_limpio_acertados_no_califica() {
+        let base = veredicto_base();
+        let fila = calibrar(
+            Path::new(FIXTURE),
+            &base,
+            |limpia, _, base| if limpia { base.clone() } else { hundido(base) },
+            2,
+        );
+        assert_eq!((fila.defectos, fila.limpios), (1, 1));
+        assert_eq!(fila.exactitud_balanceada, Some(1.0));
+        let tarea = fila.tarea.clone();
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![fila],
+        };
+        let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.0)];
+        c.aplicar(&tarea, &mut puntajes);
+        assert!(
+            !puntajes[0].calibrada,
+            "1 defecto y 1 limpio no son muestra"
+        );
+        assert_eq!(puntajes[0].exactitud_balanceada, None);
+    }
+
+    #[test]
+    fn calibra_cinco_defectos_y_cinco_limpios_acertados_si_califica() {
+        let base = veredicto_base();
+        let fila = calibrar(
+            Path::new(FIXTURE),
+            &base,
+            |limpia, _, base| if limpia { base.clone() } else { hundido(base) },
+            10,
+        );
+        assert_eq!((fila.defectos, fila.limpios), (5, 5));
+        let tarea = fila.tarea.clone();
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![fila],
+        };
+        let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.0)];
+        c.aplicar(&tarea, &mut puntajes);
+        assert!(puntajes[0].calibrada);
+        assert_eq!(puntajes[0].exactitud_balanceada, Some(1.0));
+    }
+
+    #[test]
+    fn calibra_cuatro_defectos_o_cuatro_limpios_no_alcanzan_el_minimo() {
+        let mut pocos_defectos = fila("memora", Dimension::Seguridad, 1.0, Some(1.0));
+        pocos_defectos.defectos = 4;
+        let mut pocos_limpios = fila("memora", Dimension::Seguridad, 1.0, Some(1.0));
+        pocos_limpios.limpios = 4;
+        for f in [pocos_defectos, pocos_limpios] {
+            let c = Calibraciones {
+                v: VERSION,
+                filas: vec![f],
+            };
+            let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.8)];
+            c.aplicar("memora", &mut puntajes);
+            assert!(!puntajes[0].calibrada);
+        }
     }
 
     #[test]
