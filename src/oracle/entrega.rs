@@ -17,13 +17,15 @@ use serde_json::{Value, json};
 use crate::observe;
 use crate::oracle::ErrorOraculo;
 use crate::oracle::configs::{self, Instruccion, instrucciones, palabra_clave};
-use crate::oracle::contenedor::{PROXY_FUERA, SUFIJO_SELINUX, SalidaPodman, correr_podman};
+use crate::oracle::contenedor::{
+    PROXY_FUERA, SUFIJO_SELINUX, SalidaPodman, correr_podman as correr_podman_crudo,
+};
 use crate::oracle::descarga::{self, ImagenBase, PRELUDIO, Problema};
 use crate::oracle::perfiles::herramientas::EjecutorHerramienta;
 use crate::oracle::perfiles::{ResultadoSonda, crear_hallazgo, puntuar_hallazgos};
 use crate::oracle::tarea::{Escenario, Requisito, Tarea};
 use crate::oracle::{CARPETA_TEMPORALES, copiar_repo, infra, temporal};
-use crate::tipos::{Dimension, Hallazgo, Pendiente};
+use crate::tipos::{Dimension, Hallazgo, ItemFaltante, Pendiente};
 
 const SONDA: &str = "entrega";
 const DIMENSION: Dimension = Dimension::Entrega;
@@ -54,6 +56,8 @@ const PLAZO_BUILD: Duration = Duration::from_secs(20 * 60);
 const PLAZO_CORTO: Duration = Duration::from_secs(60);
 /// Nombre de la sonda y etiqueta del cuerpo del archivo de pendientes (Tarea 9d2).
 const TEST_BUILD: &str = "dockerfile::build";
+/// Ítem de la rúbrica que mide la construcción. Su ancla 3 pide que construya sin red.
+const ITEM_CONSTRUCCION: &str = "entrega.contenedor";
 /// Fragmentos (en minúscula) de la salida de un `RUN` que delatan falta de DNS o de ruta. Solo
 /// cuentan dentro de un `RUN`. Sin patrones de conexión: "connection refused" o "failed to
 /// connect" también salen cuando un servicio local no arranca, y eso es falla del producto.
@@ -860,6 +864,8 @@ pub struct ResultadoEntrega {
     pub sin_veredicto: Vec<MotivoSinVeredicto>,
     /// Avisos de ejecución, p. ej. una imagen sin `sh` que obligó a usar el contenedor de evaluación.
     pub avisos: Vec<String>,
+    /// Ítems de Entrega que no se midieron, con su motivo. Un build pendiente va aquí como `entrega.contenedor`.
+    pub faltantes: Vec<ItemFaltante>,
 }
 
 /// Construye los Dockerfile, corre la sonda de entrega y los escenarios. Una sola construcción.
@@ -960,6 +966,14 @@ pub(crate) fn entregar_con(
         .iter()
         .map(|p| p.motivo.clone())
         .collect();
+    resultado.faltantes = construccion
+        .pendientes
+        .iter()
+        .map(|p| ItemFaltante {
+            item: ITEM_CONSTRUCCION.into(),
+            motivo: p.motivo.clone(),
+        })
+        .collect();
     resultado.pendientes.extend(construccion.pendientes);
     resultado.sonda.hallazgos.extend(construccion.hallazgos);
     resultado.sin_veredicto = construccion.sin_veredicto;
@@ -997,9 +1011,8 @@ fn sin_veredicto_sonda(sonda: &mut ResultadoSonda, causas: &str) {
     });
 }
 
-/// Verdadero si la entrega midió algo. Cuenta: archivos de `[entrega]`, escenarios con salida, un
-/// Dockerfile construido o evaluado (con hallazgos), o requisitos de la tarea. Los requisitos cuentan
-/// como medido por dilema: sin ellos, el test de mod.rs sin Dockerfile pierde su veredicto (ver reporte).
+/// Verdadero si la entrega midió algo propio. Cuenta: archivos de `[entrega]`, escenarios con salida,
+/// un Dockerfile construido o evaluado (con hallazgos). Los requisitos son de Completitud: no cuentan.
 fn medido_algo(tarea: &Tarea, resultado: &ResultadoEntrega, construida: bool) -> bool {
     let hay_archivos = tarea
         .entrega
@@ -1009,7 +1022,6 @@ fn medido_algo(tarea: &Tarea, resultado: &ResultadoEntrega, construida: bool) ->
         || !resultado.escenarios.is_empty()
         || construida
         || !resultado.sonda.hallazgos.is_empty()
-        || !tarea.requisito.is_empty()
 }
 
 /// Resultado de un escenario corrido dentro de la imagen.
@@ -1021,6 +1033,35 @@ pub(crate) enum Prueba {
     },
     /// No se puede medir sin red: el contenedor corre con `--network none`.
     Pendiente(String),
+}
+
+/// Bytes de salida de un proceso que conserva la entrega: solo la cola. Mismo valor que `descarga`.
+const COLA: usize = 4000;
+
+/// Corre `podman` y deja solo la cola de su stdout y su stderr. Toda llamada de este archivo pasa aquí.
+fn correr_podman(args: &[&str], plazo: Duration) -> Result<SalidaPodman, ErrorOraculo> {
+    correr_podman_crudo(args, plazo).map(recortar_salida)
+}
+
+/// Deja los últimos `COLA` bytes de `texto`. Si el corte cae dentro de un carácter, avanza al siguiente.
+fn recortar_cola(mut texto: String) -> String {
+    if texto.len() > COLA {
+        let mut inicio = texto.len() - COLA;
+        while !texto.is_char_boundary(inicio) {
+            inicio += 1;
+        }
+        texto.drain(..inicio);
+    }
+    texto
+}
+
+/// Recorta stdout y stderr de una salida de podman a su cola.
+fn recortar_salida(salida: SalidaPodman) -> SalidaPodman {
+    SalidaPodman {
+        codigo: salida.codigo,
+        stdout: recortar_cola(salida.stdout),
+        stderr: recortar_cola(salida.stderr),
+    }
 }
 
 /// Contenedor vivo de la imagen construida, donde los escenarios corren con `podman exec`.
@@ -1325,6 +1366,7 @@ pub(crate) fn entrega_sin_veredicto(motivo: String) -> ResultadoEntrega {
         pendientes: Vec::new(),
         sin_veredicto: Vec::new(),
         avisos: Vec::new(),
+        faltantes: Vec::new(),
     }
 }
 
@@ -1370,16 +1412,20 @@ fn sonda_entrega_con(
     if tarea.entrega.is_some() || !eval.is_empty() {
         match ej.ejecutar(&construir_script_con(tarea, escenarios_eval)) {
             // Una falla de arranque es infraestructura: sin veredicto, sin hallazgos de producto.
-            Ok(salida) => match fallo_de_infraestructura(&salida.archivos, tarea) {
-                Some(motivo) => motivos.push(motivo),
-                None => revisar_salida(
-                    &salida.archivos,
-                    tarea,
-                    eval,
-                    &mut hallazgos,
-                    &mut escenarios,
-                ),
-            },
+            Ok(salida) => {
+                // Cada archivo de la salida se lee solo por su cola, como el resto de la salida de procesos.
+                let archivos_cola: BTreeMap<String, String> = salida
+                    .archivos
+                    .into_iter()
+                    .map(|(nombre, texto)| (nombre, recortar_cola(texto)))
+                    .collect();
+                match fallo_de_infraestructura(&archivos_cola, tarea) {
+                    Some(motivo) => motivos.push(motivo),
+                    None => {
+                        revisar_salida(&archivos_cola, tarea, eval, &mut hallazgos, &mut escenarios)
+                    }
+                }
+            }
             Err(e) => motivos.push(e.to_string()),
         }
     }
@@ -1405,6 +1451,7 @@ fn sonda_entrega_con(
         pendientes: Vec::new(),
         sin_veredicto: Vec::new(),
         avisos: Vec::new(),
+        faltantes: Vec::new(),
     }
 }
 
@@ -3291,6 +3338,57 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn entrega_build_pendiente_lleva_su_item_a_faltantes_con_su_motivo() {
+        let repo =
+            repo_con_archivos(&[("Dockerfile", "FROM scratch\nRUN apt-get install -y curl\n")]);
+        let home = tempfile::tempdir().expect("home");
+        let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), salida_sin_red()));
+        let fabrica = fabrica_vacia();
+        let r = entregar_con(
+            &Falso::sano(),
+            repo.path(),
+            &tarea_de("shell", ""),
+            home.path(),
+            &[],
+            &podman,
+            &fabrica,
+        )
+        .expect("entrega");
+        assert_eq!(r.faltantes.len(), 1, "{:?}", r.faltantes);
+        assert_eq!(r.faltantes[0].item, "entrega.contenedor");
+        assert!(
+            r.faltantes[0].motivo.contains("línea 2"),
+            "{:?}",
+            r.faltantes
+        );
+    }
+
+    #[test]
+    fn entrega_build_pendiente_sin_hallazgos_sigue_sin_veredicto_con_su_item() {
+        let repo = repo_con_archivos(&[(
+            "Dockerfile",
+            "FROM scratch\nUSER app\nRUN apt-get install -y curl\n",
+        )]);
+        let home = tempfile::tempdir().expect("home");
+        let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), salida_sin_red()));
+        let fabrica = fabrica_vacia();
+        let r = entregar_con(
+            &Falso::sano(),
+            repo.path(),
+            &tarea_de("shell", ""),
+            home.path(),
+            &[],
+            &podman,
+            &fabrica,
+        )
+        .expect("entrega");
+        assert!(r.sonda.hallazgos.is_empty(), "{:?}", r.sonda.hallazgos);
+        assert_eq!(r.sonda.valor, None, "{:?}", r.sonda);
+        assert_eq!(r.faltantes.len(), 1, "{:?}", r.faltantes);
+        assert_eq!(r.faltantes[0].item, "entrega.contenedor");
+    }
+
+    #[test]
     fn entrega_build_pendiente_con_hallazgo_de_root_baja_el_valor() {
         // Sin `USER`, el Dockerfile corre como root: la sonda estática lo mide aunque el build quede pendiente.
         let repo = repo_con_archivos(&[(
@@ -3327,5 +3425,38 @@ pub(crate) mod tests {
         let valor = r.sonda.valor.expect("valor");
         assert!(valor < 1.0, "{:?}", r.sonda);
         assert_eq!(r.sonda.motivo, None);
+    }
+
+    #[test]
+    fn entrega_salida_mayor_que_la_cola_conserva_solo_los_ultimos_bytes() {
+        let cola = recortar_cola(format!("{}FIN", "a".repeat(3 * COLA)));
+        assert_eq!(cola.len(), COLA, "{}", cola.len());
+        assert!(cola.ends_with("FIN"));
+    }
+
+    #[test]
+    fn entrega_cola_no_parte_un_caracter_utf8() {
+        // Cada 'é' ocupa dos bytes: el corte natural cae dentro de uno.
+        let cola = recortar_cola(format!("{}FIN", "é".repeat(3 * COLA)));
+        assert!(cola.len() <= COLA, "{}", cola.len());
+        assert!(cola.ends_with("FIN"));
+        assert!(
+            cola.chars()
+                .all(|c| c == 'é' || c == 'F' || c == 'I' || c == 'N')
+        );
+    }
+
+    #[test]
+    fn entrega_salida_de_podman_recorta_stdout_y_stderr() {
+        let salida = recortar_salida(SalidaPodman {
+            codigo: 1,
+            stdout: format!("{}FIN", "o".repeat(2 * COLA)),
+            stderr: format!("{}ERR", "e".repeat(2 * COLA)),
+        });
+        assert_eq!(salida.codigo, 1);
+        assert_eq!(salida.stdout.len(), COLA);
+        assert!(salida.stdout.ends_with("FIN"));
+        assert_eq!(salida.stderr.len(), COLA);
+        assert!(salida.stderr.ends_with("ERR"));
     }
 }
