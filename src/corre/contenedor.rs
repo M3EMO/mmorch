@@ -16,6 +16,16 @@ use crate::oracle::contenedor::PROXY_FUERA;
 pub const IMAGEN_BUILDER: &str = "root-builder:1";
 /// Tope de cada lanzamiento del builder. Si vence, el contenedor se borra.
 pub const TIMEOUT_BUILDER: Duration = Duration::from_secs(2 * 60 * 60);
+/// Quita todas las capacidades de Linux al builder. Él no necesita ninguna.
+const QUITAR_CAPACIDADES: &str = "--cap-drop=all";
+/// Opción de seguridad. Impide ganar privilegios nuevos al ejecutar binarios.
+const OPCION_SEGURIDAD: &str = "--security-opt";
+/// Valor de `OPCION_SEGURIDAD`. Un proceso no gana privilegios con `setuid` ni `setgid`.
+const SIN_NUEVOS_PRIVILEGIOS: &str = "no-new-privileges";
+/// Tope de procesos del contenedor. Frena una bomba de procesos.
+const LIMITE_PROCESOS: &str = "--pids-limit=4096";
+/// Tope de memoria del contenedor. Un builder que la supera se detiene.
+const LIMITE_MEMORIA: &str = "--memory=8g";
 
 /// Carpeta del estado de `claude`, dentro de la carpeta de la corrida (fuera de `repo/`).
 const CARPETA_ESTADO: &str = "claude-estado";
@@ -63,6 +73,11 @@ pub fn args_podman_builder(
         "--network",
         "pasta:--no-map-gw",
         "--userns=keep-id",
+        QUITAR_CAPACIDADES,
+        OPCION_SEGURIDAD,
+        SIN_NUEVOS_PRIVILEGIOS,
+        LIMITE_PROCESOS,
+        LIMITE_MEMORIA,
         PROXY_FUERA,
         "-w",
         "/trabajo",
@@ -266,6 +281,56 @@ mod tests {
         let proxy = args.iter().position(|a| a == "--http-proxy=false");
         let imagen = args.iter().position(|a| a == "root-builder:1");
         assert!(proxy.is_some() && proxy < imagen, "{args:?}");
+    }
+
+    /// Posición de `opcion` en `args`. Falla si no está.
+    fn posicion_de(args: &[String], opcion: &str) -> usize {
+        args.iter()
+            .position(|a| a == opcion)
+            .unwrap_or_else(|| panic!("falta {opcion}: {args:?}"))
+    }
+
+    #[test]
+    fn builder_args_traen_cap_drop_all() {
+        let d = disposicion();
+        let args = argumentos(&d, &lanzamiento(d.repo.clone(), Vec::new()));
+        assert!(args.contains(&"--cap-drop=all".to_string()), "{args:?}");
+    }
+
+    #[test]
+    fn builder_args_traen_no_new_privileges() {
+        let d = disposicion();
+        let args = argumentos(&d, &lanzamiento(d.repo.clone(), Vec::new()));
+        assert!(
+            contiene_par(&args, "--security-opt", "no-new-privileges"),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn builder_args_traen_pids_limit_y_memoria() {
+        let d = disposicion();
+        let args = argumentos(&d, &lanzamiento(d.repo.clone(), Vec::new()));
+        assert!(args.contains(&"--pids-limit=4096".to_string()), "{args:?}");
+        assert!(args.contains(&"--memory=8g".to_string()), "{args:?}");
+    }
+
+    #[test]
+    fn builder_args_endurecimiento_va_antes_de_trabajo_e_imagen() {
+        let d = disposicion();
+        let args = argumentos(&d, &lanzamiento(d.repo.clone(), Vec::new()));
+        let imagen = posicion_de(&args, "root-builder:1");
+        let trabajo = posicion_de(&args, "-w");
+        for opcion in [
+            "--cap-drop=all",
+            "--security-opt",
+            "--pids-limit=4096",
+            "--memory=8g",
+        ] {
+            let pos = posicion_de(&args, opcion);
+            assert!(pos < trabajo, "{opcion} va después de -w: {args:?}");
+            assert!(pos < imagen, "{opcion} va después de la imagen: {args:?}");
+        }
     }
 
     #[test]
