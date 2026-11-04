@@ -323,6 +323,8 @@ struct Registro {
     sin_digest: Option<String>,
     /// Avisos de la descarga que no son hallazgos (un registro que no entró al `netrc`). Van al Gate.
     avisos: Vec<String>,
+    /// Rechazos del corte: archivo, línea y clave. Nunca la cita ni un valor. Van al Gate si hay.
+    rechazos: Vec<Value>,
 }
 
 impl Registro {
@@ -347,6 +349,7 @@ impl Registro {
             imagenes: None,
             sin_digest: None,
             avisos: Vec::new(),
+            rechazos: Vec::new(),
         }
     }
 }
@@ -404,6 +407,12 @@ pub fn preparar_con_juez(
         ));
     }
     if !inv.rechazos.is_empty() {
+        registrar_corte(
+            home,
+            tarea,
+            "fuente-no-aceptada",
+            rechazos_de_fuentes(&inv.rechazos),
+        )?;
         let mut hallazgos = hallazgos_de_rechazos(&inv.rechazos);
         hallazgos.extend(extra);
         return Ok((Preparacion::SinVeredicto(hallazgos), Vec::new(), juicio));
@@ -418,6 +427,9 @@ pub fn preparar_con_juez(
     if let Some(hallazgos) =
         hallazgos_si_config_ejecuta_con_credenciales(&inv, &credenciales, &extra)
     {
+        // Los rechazos son todas las claves de ejecución: el hallazgo sale solo con ellas.
+        let claves = rechazos_de_claves(&inv.claves_de_ejecucion);
+        registrar_corte(home, tarea, "config-que-ejecuta-con-credencial", claves)?;
         return Ok((Preparacion::SinVeredicto(hallazgos), Vec::new(), juicio));
     }
     // Las imágenes base van antes de las dependencias: sin ellas el Dockerfile no construye (Tarea 9d2).
@@ -566,6 +578,23 @@ fn sumar_hallazgos(preparacion: Preparacion, extra: Vec<Hallazgo>) -> Preparacio
     }
 }
 
+/// Rechazos de fuentes para el Gate de corte: archivo y línea. Sin cita y sin motivo, porque el motivo
+/// puede llevar un valor del repo (una URL o una ruta).
+fn rechazos_de_fuentes(rechazos: &[Rechazo]) -> Vec<Value> {
+    rechazos
+        .iter()
+        .map(|r| json!({"archivo": r.archivo, "linea": r.linea}))
+        .collect()
+}
+
+/// Rechazos de claves de ejecución para el Gate de corte: archivo, línea y clave. Nunca la cita.
+fn rechazos_de_claves(claves: &[EntradaConfig]) -> Vec<Value> {
+    claves
+        .iter()
+        .map(|e| json!({"archivo": e.archivo, "linea": e.linea, "clave": e.clave}))
+        .collect()
+}
+
 /// Un hallazgo de entrega por cada rechazo del inventario. La cita ya viene redactada.
 fn hallazgos_de_rechazos(rechazos: &[Rechazo]) -> Vec<Hallazgo> {
     rechazos
@@ -673,6 +702,7 @@ fn preparar_rust(
         imagenes: None,
         sin_digest: None,
         avisos: Vec::new(),
+        rechazos: Vec::new(),
     };
     let preparacion = Preparacion::Lista {
         cache: Some(destino),
@@ -931,6 +961,18 @@ fn paquetes_json(paquetes: &[PaqueteLock]) -> Vec<Value> {
         .collect()
 }
 
+/// Registra el `Gate` de un corte de la descarga, con sus rechazos. Lo llama cada corte del inventario.
+fn registrar_corte(
+    home: &Path,
+    tarea: &Tarea,
+    motivo: &'static str,
+    rechazos: Vec<Value>,
+) -> Result<(), ErrorOraculo> {
+    let mut registro = Registro::corte(&tarea.lenguaje, None, motivo);
+    registro.rechazos = rechazos;
+    registrar(home, tarea, &registro)
+}
+
 /// Registra el evento `Gate` de la descarga en `eventos.jsonl` de `home`.
 fn registrar(home: &Path, tarea: &Tarea, registro: &Registro) -> Result<(), ErrorOraculo> {
     let mut evento = observe::evento_manual(
@@ -968,6 +1010,11 @@ fn registrar(home: &Path, tarea: &Tarea, registro: &Registro) -> Result<(), Erro
     }
     if !registro.avisos.is_empty() {
         evento.extra.insert("avisos".into(), json!(registro.avisos));
+    }
+    if !registro.rechazos.is_empty() {
+        evento
+            .extra
+            .insert("rechazos".into(), Value::Array(registro.rechazos.clone()));
     }
     observe::registrar_en(&home.join(ARCHIVO_EVENTOS), &evento)
         .map_err(|e| infra("registrar el evento de descarga", e))

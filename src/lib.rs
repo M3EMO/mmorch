@@ -485,7 +485,7 @@ fn oraculo_pendientes(
         }
         return Ok(());
     }
-    let cache = oracle::descarga::cache_de(&home, &tarea.lenguaje, repo, &tarea.imagen);
+    let cache = oracle::descarga::cache_de_con_error(&home, &tarea.lenguaje, repo, &tarea.imagen)?;
     let paquete = oracle::pendientes::crear(&home, &tarea, repo, cache.as_deref())?;
     if colab {
         return oraculo_colab(json, &tarea, &home, paquete);
