@@ -3932,7 +3932,10 @@ mod tests {
     impl EjecutorHerramienta for HerramientasSanas {
         fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
             let mut salida = SalidaHerramienta::default();
-            if let Some(nombre) = cmd.strip_prefix("command -v ") {
+            if let Some(nombre) = cmd
+                .strip_prefix("command -v ")
+                .and_then(|resto| resto.strip_suffix(" || exit 1"))
+            {
                 salida.codigo = i32::from(self.faltan.contains(&nombre));
             } else if cmd == "cargo clippy --version" {
                 salida.codigo = i32::from(self.faltan.contains(&"clippy"));
