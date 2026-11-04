@@ -44,6 +44,7 @@ use crate::tipos::{
 use crate::track::stats::wilson_inferior;
 use calibra::Calibraciones;
 use contenedor::{Ejecucion, Resultado};
+use descarga::python::AVISO_NO_VERIFICADAS;
 use entrega::{FabricaEscenarios, FabricaReal, Podman, PodmanReal, ResultadoEntrega};
 use informe::{Redactor, RedactorMedido, RedactorProveedor};
 use juez::{EntradaJuez, EstadoJuez, JuezProveedor, ModeloJuez, ResultadoJuez};
@@ -1676,15 +1677,11 @@ fn sin_calibrar(puntajes: &[Puntaje]) -> Vec<Dimension> {
         .collect()
 }
 
-/// Texto fijo del aviso de dependencias no verificadas. Repite `AVISO_NO_VERIFICADAS` de `descarga/python.rs`.
-/// Si cambia allá, cambia acá también.
-const AVISO_DEPENDENCIAS_NO_VERIFICADAS: &str = "dependencias de runtime no verificadas";
-
 /// Avisos de dependencias no verificadas que traen los hallazgos de la descarga, sin repetidos y en orden.
 fn avisos_de_dependencias(hallazgos: &[Hallazgo]) -> Vec<String> {
     let mut avisos: Vec<String> = Vec::new();
     for h in hallazgos {
-        let es_aviso = h.detalle.contains(AVISO_DEPENDENCIAS_NO_VERIFICADAS);
+        let es_aviso = h.detalle.contains(AVISO_NO_VERIFICADAS);
         if es_aviso && !avisos.contains(&h.detalle) {
             avisos.push(h.detalle.clone());
         }
@@ -4236,7 +4233,7 @@ mod tests {
     }
 
     #[test]
-    fn oraculo_con_sondas_sanas_solo_diseno_y_arquitectura_quedan_sin_veredicto() {
+    fn oraculo_con_sondas_sanas_dejan_sin_veredicto_arquitectura_diseno_y_entrega() {
         // El repo de la prueba tiene un solo `src/lib.rs`: sin módulos, Arquitectura no tiene análisis (Tarea 28).
         let base = tempfile::tempdir().expect("base");
         let v = veredicto_sano(base.path());
@@ -6225,7 +6222,7 @@ mod tests {
     }
 
     #[test]
-    fn oraculo_sin_dockerfile_no_llama_a_podman_y_entrega_da_veredicto() {
+    fn oraculo_sin_dockerfile_no_llama_a_podman_y_entrega_queda_sin_veredicto() {
         let base = tempfile::tempdir().expect("base");
         let repo = repo_rust(base.path(), LOCK_SANO);
         let correr = correr_suites(JUNIT_CONTRATO);
@@ -8097,12 +8094,9 @@ mod tests {
 
     #[test]
     fn avisos_de_dependencias_dan_los_dos_avisos_en_orden() {
-        let sdist = format!(
-            "sdist con metadatos anteriores a 2.1: {AVISO_DEPENDENCIAS_NO_VERIFICADAS}: foo-1.0.tar.gz"
-        );
-        let clon = format!(
-            "clon sin metadatos estáticos: {AVISO_DEPENDENCIAS_NO_VERIFICADAS}: git+https://x/y"
-        );
+        let sdist =
+            format!("sdist con metadatos anteriores a 2.1: {AVISO_NO_VERIFICADAS}: foo-1.0.tar.gz");
+        let clon = format!("clon sin metadatos estáticos: {AVISO_NO_VERIFICADAS}: git+https://x/y");
         let hallazgos = vec![
             hallazgo_con_detalle(&sdist),
             hallazgo_con_detalle("unwrap sin control"),
@@ -8113,9 +8107,8 @@ mod tests {
 
     #[test]
     fn avisos_de_dependencias_repetidos_dan_uno() {
-        let aviso = format!(
-            "clon sin metadatos estáticos: {AVISO_DEPENDENCIAS_NO_VERIFICADAS}: git+https://x/y"
-        );
+        let aviso =
+            format!("clon sin metadatos estáticos: {AVISO_NO_VERIFICADAS}: git+https://x/y");
         let hallazgos = vec![hallazgo_con_detalle(&aviso), hallazgo_con_detalle(&aviso)];
         assert_eq!(avisos_de_dependencias(&hallazgos), vec![aviso]);
     }
