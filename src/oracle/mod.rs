@@ -535,8 +535,8 @@ fn evaluar_con(
     // Los temporales van a ROOT_HOME, nunca a TMPDIR ni a /tmp (desempate 6).
     let home = o.home.clone().unwrap_or_else(root_home);
     let (colab, avisos_colab) = pendientes::colab_para_veredicto(&home, &tarea.nombre)?;
-    let commit = commit_de(&repo);
-    let (colab, aviso_commit) = filtrar_colab_por_commit(colab, &commit);
+    let identidad = identidad_de(&repo, tarea)?;
+    let (colab, aviso_commit) = filtrar_colab_por_commit(colab, &identidad);
     let mut avisos = deps.avisos;
     avisos.extend(avisos_colab);
     avisos.extend(aviso_commit);
@@ -597,6 +597,7 @@ fn evaluar_con(
             let motivo = motivo_de_la_descarga(&hallazgos);
             let mut v = sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
             v.ambiguedades = ambiguedades.clone();
+            v.commit = identidad.clone();
             return Ok(con_costo(v, &juez_config));
         }
     };
@@ -633,6 +634,7 @@ fn evaluar_con(
                 let mut v =
                     sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
                 v.ambiguedades = ambiguedades.clone();
+                v.commit = identidad.clone();
                 return Ok(con_costo(v, &juez_config));
             }
         }
@@ -664,6 +666,7 @@ fn evaluar_con(
                 let mut v =
                     sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
                 v.ambiguedades = ambiguedades.clone();
+                v.commit = identidad.clone();
                 return Ok(con_costo(v, &juez_config));
             }
         }
@@ -753,7 +756,7 @@ fn evaluar_con(
         v: VERSION,
         tarea: tarea.nombre.clone(),
         repo: nombre_de(&repo),
-        commit,
+        commit: identidad,
         contrato: contrato.conteo.clone(),
         oculto: oculto.conteo.clone(),
         puntajes,
@@ -1696,7 +1699,6 @@ fn sin_veredicto(
     Veredicto {
         tarea: tarea.nombre.clone(),
         repo: nombre_de(repo),
-        commit: commit_de(repo),
         repeticiones: tarea.repeticiones,
         hallazgos,
         pendientes: pendientes::desde(tarea, colab),
@@ -2285,6 +2287,13 @@ pub(crate) fn commit_de(repo: &Path) -> String {
         .filter(|salida| salida.status.success())
         .map(|salida| String::from_utf8_lossy(&salida.stdout).trim().to_string())
         .unwrap_or_default()
+}
+
+/// Identidad de la versión del repo para Colab y el veredicto: el hash del contenido del repo y de las
+/// suites de la tarea. Un cambio sin commit cambia la identidad, y sin git también (Tarea 54, H2).
+pub(crate) fn identidad_de(repo: &Path, tarea: &Tarea) -> Result<String, ErrorOraculo> {
+    historial::clave_de_version(repo, &tarea.dir)
+        .map_err(|e| infra("identidad de la versión del repo", e))
 }
 
 /// Código de salida de un estado: 0 verde, 1 rojo, 3 sin veredicto.
@@ -4521,10 +4530,10 @@ mod tests {
         fs::write(
             home.join(calibra::ARCHIVO),
             json!({"v": 1, "filas": [
-                {"tarea": "tarea-rust", "dimension": "seguridad", "n": 20, "semilla": 42,
-                 "ts": 1.0, "exactitud_balanceada": 0.95},
-                {"tarea": "tarea-rust", "dimension": "diseno", "n": 20, "semilla": 42,
-                 "ts": 1.0, "exactitud_balanceada": 0.7},
+                {"tarea": "tarea-rust", "dimension": "seguridad", "n": 20, "defectos": 10,
+                 "limpios": 10, "semilla": 42, "ts": 1.0, "exactitud_balanceada": 0.95},
+                {"tarea": "tarea-rust", "dimension": "diseno", "n": 20, "defectos": 10,
+                 "limpios": 10, "semilla": 42, "ts": 1.0, "exactitud_balanceada": 0.7},
             ]})
             .to_string(),
         )
@@ -5543,6 +5552,58 @@ mod tests {
 
     // --- Tarea 30, parte 2: aviso de corrida de Colab con red en el veredicto ---
 
+    /// `git init` y un commit de todo lo que hay en `repo`.
+    fn repo_git_con_commit(repo: &Path) {
+        let pasos: [&[&str]; 3] = [
+            &["init", "-q"],
+            &["add", "-A"],
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "base",
+            ],
+        ];
+        for args in pasos {
+            let estado = comando_git(repo, args).status().expect("git");
+            assert!(estado.success(), "git {args:?}");
+        }
+    }
+
+    #[test]
+    fn oraculo_colab_de_version_vieja_se_descarta_tras_cambio_sin_commit() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        repo_git_con_commit(&repo);
+        let tarea = tarea_rust(base.path());
+        let vieja = identidad_de(&repo, &tarea).expect("identidad");
+        colab_json(&base.path().join("home"), &[("test_b::t3", &vieja, false)]);
+        fs::write(repo.join("src/lib.rs"), "pub fn f() -> u8 { 2 }\n").expect("cambio sin commit");
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(base.path(), &repo, deps_de(&correr, &herramientas(&[])));
+        assert!(
+            v.avisos.iter().any(|a| a.contains("de otro commit")),
+            "el resultado de la versión vieja debe descartarse: {:?}",
+            v.avisos
+        );
+        assert_eq!(v.commit, identidad_de(&repo, &tarea).expect("identidad"));
+    }
+
+    #[test]
+    fn identidad_sin_git_no_es_vacia_y_cambia_con_el_contenido() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let tarea = tarea_rust(base.path());
+        let antes = identidad_de(&repo, &tarea).expect("identidad");
+        assert!(!antes.is_empty(), "sin git la identidad no puede ser vacía");
+        fs::write(repo.join("src/lib.rs"), "pub fn f() -> u8 { 2 }\n").expect("cambio");
+        let despues = identidad_de(&repo, &tarea).expect("identidad");
+        assert_ne!(antes, despues, "sin git, el contenido define la versión");
+    }
+
     /// Escribe el `colab.json` de la tarea de Rust en `home`. Cada entrada: (test, commit, con marca de red).
     fn colab_json(home: &Path, entradas: &[(&str, &str, bool)]) {
         let piezas: Vec<String> = entradas
@@ -5574,7 +5635,8 @@ mod tests {
     #[test]
     fn oraculo_colab_con_red_deja_el_aviso_en_el_veredicto() {
         let base = tempfile::tempdir().expect("base");
-        let commit = commit_de(&repo_rust(base.path(), LOCK_SANO));
+        let commit = identidad_de(&repo_rust(base.path(), LOCK_SANO), &tarea_rust(base.path()))
+            .expect("identidad");
         let v = veredicto_con_colab(base.path(), &[("test_b::t3", &commit, true)]);
         assert!(
             v.avisos.iter().any(|a| a == pendientes::CONFIANZA_CON_RED),
@@ -5586,7 +5648,8 @@ mod tests {
     #[test]
     fn oraculo_colab_con_red_da_el_aviso_una_sola_vez_aunque_haya_varias_entradas() {
         let base = tempfile::tempdir().expect("base");
-        let commit = commit_de(&repo_rust(base.path(), LOCK_SANO));
+        let commit = identidad_de(&repo_rust(base.path(), LOCK_SANO), &tarea_rust(base.path()))
+            .expect("identidad");
         let v = veredicto_con_colab(
             base.path(),
             &[("test_b::t3", &commit, true), ("test_b::t4", &commit, true)],
@@ -5602,7 +5665,8 @@ mod tests {
     #[test]
     fn oraculo_colab_sin_marca_de_red_no_deja_aviso() {
         let base = tempfile::tempdir().expect("base");
-        let commit = commit_de(&repo_rust(base.path(), LOCK_SANO));
+        let commit = identidad_de(&repo_rust(base.path(), LOCK_SANO), &tarea_rust(base.path()))
+            .expect("identidad");
         let v = veredicto_con_colab(base.path(), &[("test_b::t3", &commit, false)]);
         assert!(
             !v.avisos.iter().any(|a| a == pendientes::CONFIANZA_CON_RED),

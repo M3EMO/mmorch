@@ -458,8 +458,9 @@ fn oraculo_pendientes(
     // se suelta al salir de esta función, también ante error. Si otra corrida lo tiene, sale con 3.
     let _turno = oracle::pendientes::tomar_turno(&home, &tarea.nombre)?;
     if !junits.is_empty() {
-        let commit = oracle::commit_de(repo);
-        let resumen = oracle::pendientes::importar(&home, &tarea, junits, &commit)?;
+        // La identidad de la versión es el hash del contenido, no el HEAD de git (Tarea 54, H2).
+        let identidad = oracle::identidad_de(repo, &tarea)?;
+        let resumen = oracle::pendientes::importar(&home, &tarea, junits, &identidad)?;
         if json {
             println!(
                 "{}",

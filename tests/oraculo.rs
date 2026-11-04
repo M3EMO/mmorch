@@ -1136,7 +1136,12 @@ fn pendiente_colab_valido_no_da_aviso() {
     guardar_revision_del_juez(home.path());
     let carpeta = home.path().join("evidencia").join("tarea-prueba");
     fs::create_dir_all(&carpeta).expect("carpeta de evidencia");
-    let valido = r#"{"test_o::o2": {"resultado": "pasa", "junit_sha256": "abc", "ts": 1.0}}"#;
+    // El resultado lleva la identidad de esta versión del repo (Tarea 54, H2).
+    let identidad = root::oracle::historial::clave_de_version(repo.path(), &tarea.dir)
+        .expect("identidad de la versión");
+    let valido = format!(
+        r#"{{"test_o::o2": {{"resultado": "pasa", "junit_sha256": "abc", "ts": 1.0, "commit": "{identidad}"}}}}"#
+    );
     fs::write(carpeta.join("colab.json"), valido).expect("colab.json");
     let v = evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa");
     assert_eq!(v.pendientes[0].colab.as_deref(), Some("pasa"));

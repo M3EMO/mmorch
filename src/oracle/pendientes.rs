@@ -17,7 +17,7 @@ use super::descarga;
 use super::junit::{self, ResultadoTest};
 use super::requisitos::PREFIJO_CONTRATO;
 use super::tarea::{Exclusion, Tarea};
-use super::{ErrorOraculo, comillas, commit_de, copiar_repo, infra};
+use super::{ErrorOraculo, comillas, copiar_repo, identidad_de, infra};
 use super::{Muestreo, muestreo_de};
 use crate::borrado;
 use crate::observe;
@@ -61,7 +61,7 @@ pub struct ColabEntrada {
     pub junit_sha256: String,
     /// Momento de la importación, en segundos desde la época.
     pub ts: f64,
-    /// Commit del repo del que salió el paquete. Un resultado de otro commit no entra al veredicto (B16).
+    /// Identidad de la versión del repo del que salió el paquete. Otra versión no entra al veredicto (B16).
     #[serde(default)]
     pub commit: String,
     /// Tasa de aprobación si el test salió inestable entre repeticiones. Ausente en un test estable
@@ -80,7 +80,7 @@ pub struct Paquete {
     pub dir: PathBuf,
     /// Ids de `[[entorno]]` de los tests del paquete: `archivo::nombre`, o `contrato:archivo::nombre`.
     pub tests: Vec<String>,
-    /// Commit del repo del que se armó (vacío si no es git).
+    /// Identidad de la versión del repo del que se armó (`identidad_de`). Sin git, la define el contenido.
     pub commit: String,
     /// Avisos de armado: por ejemplo, que no hay caché de dependencias.
     pub avisos: Vec<String>,
@@ -313,7 +313,8 @@ pub fn crear(
     // la carpeta de su suite. Se copia solo si la suite tiene un test en el paquete.
     copiar_conftest(tarea, &tests_dir, CARPETA_OCULTO, hay_oculto)?;
     copiar_conftest(tarea, &tests_dir, CARPETA_CONTRATO, hay_contrato)?;
-    let commit = commit_de(&repo);
+    // La identidad es la de la versión (contenido), no el commit: un cambio sin commit cambia el paquete.
+    let commit = identidad_de(&repo, tarea)?;
     escribir(&dir.join(ARCHIVO_COMMIT), &commit, false)?;
     let con_cache = match cache {
         Some(origen) => {
@@ -372,8 +373,8 @@ pub fn limpiar_paquete(home: &Path, tarea: &Tarea, paquete: &Path, sesion: &str)
     borrado::borrar_dir_dentro(&tmp, &tmp.join(format!("{PREFIJO_COLAB}{sesion}")))
 }
 
-/// Importa los junit que dejó `correr.sh`, uno por repetición. `commit` es el del repo al que se
-/// importa. Si el paquete de la tarea tiene otro commit, el resultado no se importa y el aviso lo dice
+/// Importa los junit que dejó `correr.sh`, uno por repetición. `commit` es la identidad de la versión
+/// del repo al que se importa (`identidad_de`). Si el paquete de la tarea tiene otro commit, el resultado no se importa y el aviso lo dice
 /// (B16). Si entra, cada test pendiente cuenta una muestra por junit, con el mismo criterio que la
 /// laptop (`muestreo_de`): un test que pasa en una repetición y falla en otra queda `inestable` con su
 /// tasa, nunca `falla` (desempate 28). Un `contrato:` se busca en el junit sin el prefijo, y su resultado
@@ -719,7 +720,71 @@ fn etiqueta(resultado: ResultadoTest) -> &'static str {
 mod tests {
     use super::*;
     use crate::oracle::tarea::{Comando, Exclusion};
+    use crate::oracle::{comando_git, identidad_de};
     use std::process::Command;
+
+    /// Repo git con un commit de todo lo que hay en `dir`.
+    fn repo_git_con_commit(dir: &Path) {
+        let pasos: [&[&str]; 3] = [
+            &["init", "-q"],
+            &["add", "-A"],
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "base",
+            ],
+        ];
+        for args in pasos {
+            let estado = comando_git(dir, args).status().expect("git");
+            assert!(estado.success(), "git {args:?}");
+        }
+    }
+
+    #[test]
+    fn pendiente_identidad_cambia_con_un_cambio_sin_commit() {
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        fs::write(repo.path().join("a.txt"), "uno").expect("a.txt");
+        repo_git_con_commit(repo.path());
+        let tarea = tarea_en_oraculos(home.path(), "tarea-x", "shell");
+        let antes = crear(home.path(), &tarea, repo.path(), None)
+            .expect("crea")
+            .expect("paquete")
+            .commit;
+        fs::write(repo.path().join("a.txt"), "dos").expect("cambio sin commit");
+        let despues = crear(home.path(), &tarea, repo.path(), None)
+            .expect("crea")
+            .expect("paquete")
+            .commit;
+        assert_ne!(antes, despues, "un cambio sin commit cambia la versión");
+        assert_eq!(
+            despues,
+            identidad_de(repo.path(), &tarea).expect("identidad")
+        );
+    }
+
+    #[test]
+    fn pendiente_identidad_sin_git_no_es_vacia_y_cambia_con_el_contenido() {
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        fs::write(repo.path().join("a.txt"), "uno").expect("a.txt");
+        let tarea = tarea_en_oraculos(home.path(), "tarea-x", "shell");
+        let antes = crear(home.path(), &tarea, repo.path(), None)
+            .expect("crea")
+            .expect("paquete")
+            .commit;
+        assert!(!antes.is_empty(), "sin git la identidad no puede ser vacía");
+        fs::write(repo.path().join("a.txt"), "dos").expect("cambio");
+        let despues = crear(home.path(), &tarea, repo.path(), None)
+            .expect("crea")
+            .expect("paquete")
+            .commit;
+        assert_ne!(antes, despues, "sin git, el contenido define la versión");
+    }
 
     #[test]
     fn pendiente_etiqueta_de_resultado_en_minusculas() {
@@ -1570,7 +1635,10 @@ mod tests {
             !sh.contains("cp /cache/"),
             "la caché del paquete no apunta a /cache: {sh}"
         );
-        assert_eq!(paquete.commit, "", "el repo de prueba no es git");
+        assert!(
+            !paquete.commit.is_empty(),
+            "sin git, la identidad no es vacía"
+        );
         let sintaxis = Command::new("bash")
             .arg("-n")
             .arg(paquete.dir.join("correr.sh"))
