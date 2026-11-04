@@ -10,11 +10,12 @@ use crate::borrado;
 use crate::corre::args::{args_claude, env_del_builder};
 use crate::corre::config::ConfigCorrida;
 use crate::corre::contenedor::{TIMEOUT_BUILDER, estado_de};
+use crate::corre::git_seguro;
 use crate::corre::{
     Corrida, EjecutorBuilder, ErrorCorre, Lanzamiento, guardar_transcript, preparar_corrida,
 };
 use crate::goal::verificar_goal;
-use crate::observe::claude::{gates_de_costo_desconocido, leer_sesion_claude};
+use crate::observe::claude::registrar_sesion_claude;
 use crate::observe::transcript::{HuellasOraculo, registrar_lecturas};
 use crate::observe::{self, ErrorObserve};
 use crate::oracle::tarea::{Tarea, cargar_en};
@@ -178,17 +179,19 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         }
     }
 
-    // i) Se quita la copia de la credencial (la guardia lo hace y su error llega acá).
-    // Después, el estado final del repo, si quedó sucio.
+    // i) Se quita la copia de la credencial. La guardia lo hace y su error llega acá.
+    // Después se arma el estado final en un repo nuevo.
     guardia.cerrar()?;
-    commit_final(&corrida.repo)?;
+    // El host no corre git sobre el `.git` del builder: copia el árbol a un repo nuevo y lo evalúa ahí.
+    let repo_final = corrida.dir.join("final");
+    git_seguro::repo_limpio_desde(&corrida.repo, &repo_final, MENSAJE_ESTADO_FINAL)?;
 
     // j) Evaluación. Un error no pierde la corrida: la fila lleva el veredicto por defecto.
     let opciones = OpcionesOraculo {
         home: Some(deps.home.to_path_buf()),
         ..OpcionesOraculo::default()
     };
-    let veredicto = match (deps.evaluar)(&corrida.repo, &tarea_cargada, &opciones) {
+    let veredicto = match (deps.evaluar)(&repo_final, &tarea_cargada, &opciones) {
         Ok(veredicto) => veredicto,
         Err(error) => {
             let motivo = format!("la evaluación falló: {error}");
@@ -261,9 +264,10 @@ fn linea_result(stdout: &[u8]) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Registra la sesión de un rol. Su línea `result` se guarda como `<n>-<rol>.resultado.json` en la carpeta
-/// de transcripts, y `leer_sesion_claude` la lee como un JSON de `--output-format json`. Una sesión que no
-/// se puede leer deja un `Gate` y no corta la corrida.
+/// Registra la sesión de un rol. Guarda su línea `result` como `<n>-<rol>.resultado.json` en transcripts.
+/// `registrar_sesion_claude` la registra una sola vez por `session_id`.
+/// Un error de `ErrorObserve` deja un `Gate` y no corta la corrida.
+/// Si el log no se puede escribir, el `Gate` también falla y corta la corrida.
 fn registrar_sesion(
     home: &Path,
     id: &str,
@@ -278,43 +282,11 @@ fn registrar_sesion(
     ));
     fs::write(&ruta, format!("{linea}\n"))
         .map_err(super::infra("guardar el resultado de la sesión"))?;
-    let eventos = match leer_sesion_claude(&ruta, id) {
-        Ok(eventos) => eventos,
-        Err(error) => {
-            let motivo = format!("sesión no leída: {error}");
-            return gate(ruta_eventos, id, FASE_SESION, motivo, Some(lanzado.rol));
-        }
-    };
-    for ev in &eventos {
-        registrar(ruta_eventos, ev)?;
-    }
-    for gate_ev in gates_de_costo_desconocido(&eventos) {
-        registrar(ruta_eventos, &gate_ev)?;
+    if let Err(error) = registrar_sesion_claude(&ruta, id, None, ruta_eventos) {
+        let motivo = format!("sesión no leída: {error}");
+        return gate(ruta_eventos, id, FASE_SESION, motivo, Some(lanzado.rol));
     }
     Ok(())
-}
-
-/// Commit del estado final del repo de la corrida, si quedó algo sin commitear. Sin `GIT_*` heredadas.
-fn commit_final(repo: &Path) -> Result<(), ErrorCorre> {
-    let salida = comando_git(repo, &["status", "--porcelain"])
-        .output()
-        .map_err(|e| ErrorCorre::Git(format!("no se pudo correr git status: {e}")))?;
-    if String::from_utf8_lossy(&salida.stdout).trim().is_empty() {
-        return Ok(());
-    }
-    super::git(repo, &["add", "-A"])?;
-    super::git(
-        repo,
-        &[
-            "-c",
-            "core.hooksPath=/dev/null",
-            "commit",
-            "-q",
-            "--no-verify",
-            "-m",
-            MENSAJE_ESTADO_FINAL,
-        ],
-    )
 }
 
 /// Guardia de la copia de la credencial de una corrida. La copia es de Root y se borra siempre al
@@ -541,6 +513,8 @@ mod tests {
         /// Plazo que `correr` pidió en `verificar_antes`.
         plazo_verificado: RefCell<Option<Duration>>,
         lanzados: RefCell<Vec<Lanzamiento>>,
+        /// Al lanzar, deja en `.git/config` un `fsmonitor` que escribe esta marca, y un archivo sin commit.
+        fsmonitor_marca: Option<PathBuf>,
     }
 
     impl EjecutorBuilder for Builder {
@@ -556,6 +530,21 @@ mod tests {
             self.lanzados.borrow_mut().push(l.clone());
             if self.no_lanza {
                 return Err(ErrorCorre::Ejecutor("prueba: no arranca".into()));
+            }
+            if let Some(marca) = &self.fsmonitor_marca {
+                use std::io::Write;
+                // El builder escribe su propio `.git/config` con un fsmonitor, y deja un archivo sin commit.
+                let mut config = fs::OpenOptions::new()
+                    .append(true)
+                    .open(l.repo.join(".git").join("config"))
+                    .expect("config del repo");
+                writeln!(
+                    config,
+                    "[core]\n\tfsmonitor = \"touch {}\"",
+                    marca.display()
+                )
+                .expect("escribe la config");
+                fs::write(l.repo.join("sucio.txt"), "sin commit\n").expect("archivo sin commit");
             }
             let mut con_extra = l.clone();
             con_extra.env.extend(self.extra.iter().cloned());
@@ -601,6 +590,14 @@ mod tests {
                 let sin_costo = "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":1000,\"num_turns\":2,\"modelUsage\":{\"opus\":{\"inputTokens\":10}},\"session_id\":\"s1\"}\n";
                 salida.stdout = sin_costo.as_bytes().to_vec();
             }
+            // Cada sesión real tiene su `session_id`. El falso repite `s1`, y el dedupe lo tomaría por
+            // la misma sesión. Por eso cada lanzamiento lleva un id propio, con su número.
+            let n = self.lanzados.borrow().len();
+            let texto = String::from_utf8_lossy(&salida.stdout).replace(
+                "\"session_id\":\"s1\"",
+                &format!("\"session_id\":\"s1-{n}\""),
+            );
+            salida.stdout = texto.into_bytes();
             Ok(salida)
         }
     }
@@ -1195,6 +1192,55 @@ mod tests {
         assert!(gateados.iter().all(|ev| ev.corrida == fila.id));
     }
 
+    /// Registrar dos veces la misma sesión deja una sola `Sesion` y no suma el costo otra vez.
+    #[test]
+    fn corre_registrar_la_misma_sesion_dos_veces_no_duplica_el_costo() {
+        let e = entorno();
+        let id = "c-dup";
+        fs::create_dir_all(e.home.join("transcripts").join(id)).expect("transcripts");
+        let lanzado = Lanzado {
+            n: 1,
+            rol: Rol::Planifica,
+            codigo: 0,
+            ruta: PathBuf::new(),
+            stdout: Vec::new(),
+        };
+        let linea = r#"{"type":"result","total_cost_usd":0.7,"session_id":"s-dup","modelUsage":{"a":{"costUSD":0.5},"b":{"costUSD":0.2}}}"#;
+        let ruta_eventos = observe::ruta_eventos_en(&e.home);
+        registrar_sesion(&e.home, id, &lanzado, linea, &ruta_eventos).expect("primera");
+        registrar_sesion(&e.home, id, &lanzado, linea, &ruta_eventos).expect("segunda");
+        let log = eventos(&e);
+        let sesiones = log
+            .iter()
+            .filter(|ev| ev.tipo == TipoEvento::Sesion)
+            .count();
+        assert_eq!(sesiones, 1, "una sola Sesion en el log");
+        let total: f64 = log.iter().map(|ev| ev.cost_usd).sum();
+        assert!((total - 0.7).abs() < 1e-12, "costo sumado {total}");
+    }
+
+    /// Una sesión con costo negativo deja un Gate de `FASE_SESION` y no corta la corrida.
+    #[test]
+    fn corre_sesion_con_costo_negativo_deja_gate_y_no_corta() {
+        let e = entorno();
+        let id = "c-neg";
+        fs::create_dir_all(e.home.join("transcripts").join(id)).expect("transcripts");
+        let lanzado = Lanzado {
+            n: 1,
+            rol: Rol::Planifica,
+            codigo: 0,
+            ruta: PathBuf::new(),
+            stdout: Vec::new(),
+        };
+        let linea = r#"{"type":"result","total_cost_usd":-1.0,"session_id":"s-neg"}"#;
+        let ruta_eventos = observe::ruta_eventos_en(&e.home);
+        registrar_sesion(&e.home, id, &lanzado, linea, &ruta_eventos).expect("no corta");
+        let motivos = gates(&e, FASE_SESION);
+        assert_eq!(motivos.len(), 1, "un Gate de la sesión");
+        assert!(motivos[0].contains("sesión no leída"), "{motivos:?}");
+        assert!(eventos(&e).iter().all(|ev| ev.tipo != TipoEvento::Sesion));
+    }
+
     #[test]
     fn corre_fallo_del_ejecutor_corta_sin_evaluar_ni_escribir_fila() {
         let e = entorno();
@@ -1230,5 +1276,64 @@ mod tests {
         .expect_err("tarea inexistente");
         assert_eq!(error.codigo_de_salida(), 2, "{error}");
         assert!(!dir_corridas(&e.usuario).exists());
+    }
+
+    /// C1: el `fsmonitor` del `.git` del builder no se ejecuta en el host al cerrar la corrida.
+    #[test]
+    fn corre_fsmonitor_del_builder_no_se_ejecuta_en_el_host() {
+        let e = entorno();
+        let marca = e._tmp.path().join("marca");
+        let builder = Builder {
+            fsmonitor_marca: Some(marca.clone()),
+            ..Builder::default()
+        };
+        correr_con(&e, &builder, &[], CONFIG).expect("corre");
+        assert!(!marca.exists(), "el fsmonitor del builder se ejecutó");
+    }
+
+    /// C1: el evaluador recibe un repo nuevo, sin el `.git` del builder y con un solo commit final.
+    #[test]
+    fn corre_evaluador_recibe_repo_final_sin_git_del_builder() {
+        let e = entorno();
+        let builder = Builder {
+            fsmonitor_marca: Some(e._tmp.path().join("marca")),
+            ..Builder::default()
+        };
+        let recibido: RefCell<Option<PathBuf>> = RefCell::new(None);
+        let evaluar =
+            |repo: &Path, tarea: &Tarea, _o: &OpcionesOraculo| -> Result<Veredicto, ErrorOraculo> {
+                *recibido.borrow_mut() = Some(repo.to_path_buf());
+                Ok(Veredicto {
+                    tarea: tarea.nombre.clone(),
+                    estado: Estado::Verde,
+                    informe: Some(informe()),
+                    ..Veredicto::default()
+                })
+            };
+        let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar).expect("corre");
+        let repo = recibido
+            .borrow()
+            .clone()
+            .expect("el evaluador recibió un repo");
+        assert_eq!(
+            repo,
+            dir_corridas(&e.usuario).join(&fila.id).join("final"),
+            "el evaluador debe recibir la carpeta final"
+        );
+        let config = fs::read_to_string(repo.join(".git").join("config")).expect("config");
+        assert!(
+            !config.contains("fsmonitor"),
+            "config del builder: {config}"
+        );
+        assert!(repo.join("hecho.txt").is_file(), "falta hecho.txt");
+        let salida = comando_git(&repo, &["log", "--format=%s"])
+            .output()
+            .expect("git log");
+        assert!(salida.status.success(), "git log falló");
+        let mensajes: Vec<String> = String::from_utf8_lossy(&salida.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(mensajes, vec![MENSAJE_ESTADO_FINAL.to_string()]);
     }
 }

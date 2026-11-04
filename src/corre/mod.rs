@@ -9,6 +9,7 @@ pub mod contenedor;
 pub mod corrida;
 mod credencial;
 pub mod ejecutor;
+mod git_seguro;
 
 use std::fs;
 use std::io::{self, Write};
