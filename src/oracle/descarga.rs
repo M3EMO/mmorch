@@ -33,6 +33,7 @@ use crate::tipos::{Dimension, Fuente, Hallazgo, TipoEvento};
 use credenciales::{Credencial, credenciales_cargo, redactar_secretos};
 use inventario::{
     EntradaConfig, HallazgoInventario, Inventario, Origen, PaqueteLock, Rechazo, analizar_lock,
+    rechazos_de_config_con_credenciales,
 };
 use juez_config::ResultadoJuicio;
 
@@ -413,6 +414,12 @@ pub fn preparar_con_juez(
         .map_err(|e| ErrorOraculo::Infra(format!("configuración de registros: {e}")))?;
     let credenciales =
         credenciales_cargo(&inv, &config.registros, |nombre| std::env::var(nombre).ok());
+    // Con credenciales, el config que ejecuta comandos o cambia el TLS se rechaza antes de `cargo vendor`.
+    if let Some(hallazgos) =
+        hallazgos_si_config_ejecuta_con_credenciales(&inv, &credenciales, &extra)
+    {
+        return Ok((Preparacion::SinVeredicto(hallazgos), Vec::new(), juicio));
+    }
     // Las imágenes base van antes de las dependencias: sin ellas el Dockerfile no construye (Tarea 9d2).
     // Un pull que falla no corta la fase: queda en el Gate y la construcción da sin veredicto (Tarea 7i).
     let imagenes = if hay_dockerfile(repo) {
@@ -573,6 +580,22 @@ fn hallazgos_de_rechazos(rechazos: &[Rechazo]) -> Vec<Hallazgo> {
             )
         })
         .collect()
+}
+
+/// Con credenciales, un hallazgo de entrega por clave de ejecución del config, y después `extra`.
+/// Sin credenciales o sin esas claves, `None`.
+fn hallazgos_si_config_ejecuta_con_credenciales(
+    inv: &Inventario,
+    credenciales: &[Credencial],
+    extra: &[Hallazgo],
+) -> Option<Vec<Hallazgo>> {
+    let rechazos = rechazos_de_config_con_credenciales(inv, credenciales);
+    if rechazos.is_empty() {
+        return None;
+    }
+    let mut hallazgos = hallazgos_de_rechazos(&rechazos);
+    hallazgos.extend_from_slice(extra);
+    Some(hallazgos)
 }
 
 type Paso = (Preparacion, Option<Registro>);
@@ -1953,6 +1976,59 @@ location searched: crates.io index";
             assert!(!texto.contains("valor-secreto-9"), "{texto}");
             assert!(texto.contains("***"), "{texto}");
         }
+    }
+
+    /// Inventario con `http.cainfo` en `.cargo/config.toml`, línea 2, y sin dependencias.
+    fn inventario_con_cainfo() -> Inventario {
+        Inventario {
+            claves_de_ejecucion: vec![EntradaConfig {
+                archivo: ".cargo/config.toml".into(),
+                linea: 2,
+                seccion: "http".into(),
+                clave: "http.cainfo".into(),
+                red: false,
+                cita: "http.cainfo = \"/etc/ca.pem\"".into(),
+            }],
+            ..Inventario::default()
+        }
+    }
+
+    #[test]
+    fn descarga_config_que_ejecuta_con_credencial_da_hallazgos_antes_de_vendor() {
+        let extra = vec![hallazgo("Cargo.toml", 3, "x", 1, "aviso".into())];
+        let hallazgos = hallazgos_si_config_ejecuta_con_credenciales(
+            &inventario_con_cainfo(),
+            &credencial_de_prueba(),
+            &extra,
+        )
+        .expect("con credencial y cainfo hay rechazo");
+        assert_eq!(hallazgos.len(), 2, "{hallazgos:?}");
+        assert_eq!(hallazgos[0].severidad, 3, "{hallazgos:?}");
+        assert_eq!(hallazgos[0].archivo, ".cargo/config.toml");
+        assert!(
+            hallazgos[0].detalle.contains("http.cainfo"),
+            "{hallazgos:?}"
+        );
+        assert_eq!(hallazgos[1].severidad, 1, "el extra va después");
+        let texto = format!("{hallazgos:?}");
+        assert!(!texto.contains("valor-secreto-9"), "{texto}");
+    }
+
+    #[test]
+    fn descarga_config_que_ejecuta_sin_credencial_se_respeta() {
+        let hallazgos =
+            hallazgos_si_config_ejecuta_con_credenciales(&inventario_con_cainfo(), &[], &[]);
+        assert!(hallazgos.is_none(), "{hallazgos:?}");
+    }
+
+    #[test]
+    fn descarga_credencial_sin_claves_de_ejecucion_no_rechaza() {
+        let hallazgos = hallazgos_si_config_ejecuta_con_credenciales(
+            &Inventario::default(),
+            &credencial_de_prueba(),
+            &[],
+        );
+        assert!(hallazgos.is_none(), "{hallazgos:?}");
     }
 
     /// Línea de error donde el secreto empieza en el carácter 290 y termina después del 300.
