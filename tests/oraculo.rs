@@ -1204,3 +1204,47 @@ fn coleccion_pytest_con_qq_y_v_da_node_ids_y_el_junit_cuadra() {
         assert_eq!(v.oculto, Conteo { pasa: 2, total: 2 }, "flags {flags}");
     }
 }
+
+// ---- Tarea 51, punto 5 (L14): requisitos ilegibles dan infra, no una lista vacía ----
+
+#[test]
+fn oraculo_pendientes_requisitos_ilegibles_da_infra_sin_paquete() {
+    let home = tempfile::tempdir().expect("home");
+    let dir = home.path().join("oraculos").join("tarea-prueba");
+    fs::create_dir_all(dir.join("docs")).expect("dir docs");
+    let texto = format!(
+        "nombre = \"tarea-prueba\"\nlenguaje = \"python\"\nimagen = \"{IMAGEN}\"\nspec = \"docs/SPEC.md\"\n\n[contrato]\n{}\n[oculto]\n{}\n",
+        bloque(&escribe_xml("contrato.xml", JUNIT_DOS_OK), None),
+        bloque("true", None),
+    );
+    fs::write(dir.join("tarea.toml"), texto).expect("escribe tarea.toml");
+    fs::write(dir.join("docs/SPEC.md"), SPEC_CON_FICHA).expect("escribe SPEC.md");
+
+    let repo = tempfile::tempdir().expect("repo");
+    // Bytes que no son UTF-8: la lectura del archivo falla.
+    fs::write(repo.path().join("requirements.txt"), b"requests\xff\xfe\n").expect("escribe");
+    let ruta = repo.path().to_str().expect("ruta UTF-8").to_string();
+    let salida = root_cli(
+        home.path(),
+        &[
+            "oraculo",
+            "pendientes",
+            "--tarea",
+            "tarea-prueba",
+            "--repo",
+            &ruta,
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&salida.stderr);
+    assert_eq!(
+        salida.status.code(),
+        Some(3),
+        "requisitos ilegibles: error de infra\nstdout: {}\nstderr: {stderr}",
+        String::from_utf8_lossy(&salida.stdout)
+    );
+    assert!(stderr.contains("requirements.txt"), "stderr: {stderr}");
+    assert!(
+        !home.path().join("pendientes").exists(),
+        "no deja un paquete"
+    );
+}
