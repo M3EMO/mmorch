@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use toml::{Table, Value};
 use url::Host;
 
+use super::credenciales::Credencial;
 use crate::oracle::ErrorOraculo;
 use crate::oracle::configs::{fuentes_remotas, instrucciones};
 use crate::tipos::Dimension;
@@ -119,6 +120,9 @@ pub struct Inventario {
     /// Entradas de `.cargo/config.toml` y `config` del repo, todas. Las de `red = true` van al `Gate`.
     #[serde(default)]
     pub config_cargo: Vec<EntradaConfig>,
+    /// Claves del config que ejecutan comandos o cambian el TLS o la red. Con credenciales, Root las rechaza.
+    #[serde(default)]
+    pub claves_de_ejecucion: Vec<EntradaConfig>,
 }
 
 /// Un registro que el repo usa por nombre. `direccion` es la de su índice (`[registries.<nombre>]`),
@@ -556,6 +560,23 @@ impl Texto {
             .unwrap_or(0)
     }
 
+    /// Línea de la clave `clave` en `seccion`. Si no aparece, la del encabezado `[ruta]` o la de la raíz.
+    fn linea_de_ruta(&self, seccion: &str, clave: &str, ruta: &str) -> u32 {
+        let linea = self.linea(seccion, clave);
+        if linea != 0 {
+            return linea;
+        }
+        let buscada = norma(ruta);
+        let encabezado = self.lineas.iter().position(|l| {
+            let t = l.trim();
+            t.starts_with('[') && norma(t.trim_start_matches('[').trim_end_matches(']')) == buscada
+        });
+        if let Some(i) = encabezado {
+            return u32::try_from(i + 1).unwrap_or(u32::MAX);
+        }
+        self.linea("", ruta.split('.').next().unwrap_or(ruta))
+    }
+
     /// Texto de la línea `linea`, redactado. Vacío si no hay línea.
     fn cita(&self, linea: u32) -> String {
         match linea
@@ -880,6 +901,67 @@ fn clasificar_config(config: &Manifiesto, inv: &mut Inventario) {
             }),
         }
     }
+    claves_de_ejecucion_en(texto, "", &config.tabla, inv);
+}
+
+/// Busca las claves de ejecución en cada nivel de la tabla. Un nodo que cumple la regla no baja a sus
+/// hijos: una tabla como `[credential-alias]` da un solo rechazo.
+fn claves_de_ejecucion_en(texto: &Texto, prefijo: &str, tabla: &Table, inv: &mut Inventario) {
+    for (clave, valor) in tabla {
+        let ruta = if prefijo.is_empty() {
+            clave.clone()
+        } else {
+            format!("{prefijo}.{clave}")
+        };
+        if es_clave_de_ejecucion(&ruta) {
+            inv.claves_de_ejecucion.push(EntradaConfig {
+                archivo: texto.ruta.clone(),
+                linea: texto.linea_de_ruta(prefijo, clave, &ruta),
+                seccion: prefijo.into(),
+                clave: ruta.clone(),
+                red: matches!(ruta.as_str(), "http.proxy" | "net.git-fetch-with-cli"),
+                cita: format!("{ruta} = ..."),
+            });
+        } else if let Some(sub) = valor.as_table() {
+            claves_de_ejecucion_en(texto, &ruta, sub, inv);
+        }
+    }
+}
+
+/// `true` si la ruta con puntos ejecuta comandos o cambia el TLS o la red. Cualquier sección cuenta.
+fn es_clave_de_ejecucion(ruta: &str) -> bool {
+    ruta.starts_with("credential-alias")
+        || ruta.rsplit('.').next() == Some("credential-provider")
+        || matches!(
+            ruta,
+            "registry.global-credential-providers"
+                | "http.cainfo"
+                | "http.proxy"
+                | "net.git-fetch-with-cli"
+        )
+}
+
+/// Rechazos de las claves de ejecución del config, cuando Root pasa credenciales. Sin credenciales,
+/// el config se respeta entero. La cita nunca lleva el valor de la clave.
+pub fn rechazos_de_config_con_credenciales(
+    inv: &Inventario,
+    credenciales: &[Credencial],
+) -> Vec<Rechazo> {
+    if credenciales.is_empty() {
+        return Vec::new();
+    }
+    inv.claves_de_ejecucion
+        .iter()
+        .map(|e| Rechazo {
+            motivo: format!(
+                "{}: no se acepta; Root pasa una credencial y la clave ejecuta comandos o cambia el TLS o la red",
+                e.clave
+            ),
+            archivo: e.archivo.clone(),
+            linea: e.linea,
+            cita: e.cita.clone(),
+        })
+        .collect()
 }
 
 /// Cita de una clave del config sin su secreto: en un texto, lo que va antes del último `@` se oculta.
@@ -1790,6 +1872,8 @@ fn directa(url: &str, linea: u32, t: &Texto, inv: &mut Inventario) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RegistroConfig;
+    use crate::oracle::descarga::credenciales::credenciales_cargo;
 
     fn repo_con(archivos: &[(&str, &str)]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -2151,10 +2235,11 @@ git+https://github.com/x/y@abc1234#egg=y\nhttps://host/p.tar.gz\n-r otro.txt\n";
         let inv = inventario_cargo("foo = { git = \"https://usuario:clave@host/x.git\" }\n");
         assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
         let json = serde_json::to_string(&inv).expect("serializa");
-        assert!(!json.contains("clave"), "{json}");
+        // El guarda busca `clave@`: el nombre del campo `claves_de_ejecucion` contiene `clave`.
+        assert!(!json.contains("clave@"), "{json}");
         assert!(!json.contains("usuario:"), "{json}");
         assert!(json.contains("https://***@host/x.git"), "{json}");
-        assert!(!format!("{inv:?}").contains("clave"));
+        assert!(!format!("{inv:?}").contains("clave@"));
     }
 
     #[test]
@@ -2407,7 +2492,7 @@ source = \"git+https://u:p@host/x?rev=1#aaaa\"\n";
         assert_eq!(inv.rechazos[0].cita, "--index-url https://***@host/simple");
         assert!(inv.fuentes.is_empty(), "{inv:?}");
         let json = serde_json::to_string(&inv).expect("serializa");
-        assert!(!json.contains("clave"), "{json}");
+        assert!(!json.contains("clave@"), "{json}");
         assert!(!json.contains("u:clave@"), "{json}");
     }
 
@@ -2649,7 +2734,7 @@ requests\ngit+https://github.com/x/y@abc1234#egg=y\n";
         let inv = inventario_cargo("foo = { git = \"https://usuario:clave@ho st/x\" }\n");
         assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
         let json = serde_json::to_string(&inv).expect("serializa");
-        assert!(!json.contains("clave"), "{json}");
+        assert!(!json.contains("clave@"), "{json}");
         assert!(!json.contains("usuario:"), "{json}");
     }
 
@@ -2730,6 +2815,126 @@ requests\ngit+https://github.com/x/y@abc1234#egg=y\n";
         assert_eq!(registro.cita, "[registries.privado]");
         assert!(entrada(&inv, "source.privado").red);
         assert!(!entrada(&inv, "target.x86_64-unknown-linux-gnu").red);
+    }
+
+    /// Credencial de prueba, la que `credenciales_cargo` arma para el registro `priv`.
+    fn credencial_de_prueba() -> Vec<Credencial> {
+        let inv = Inventario {
+            registros_nombrados: vec![RegistroNombrado {
+                nombre: "priv".into(),
+                direccion: "https://reg.example/index/".into(),
+            }],
+            ..Inventario::default()
+        };
+        let registros = vec![RegistroConfig {
+            nombre: "priv".into(),
+            url: "https://reg.example/index/".into(),
+            credencial_env: "ROOT_TOKEN_PRIV".into(),
+            usuario_env: None,
+        }];
+        credenciales_cargo(&inv, &registros, |_| Some("valor-secreto-9".into()))
+    }
+
+    fn clave_de_ejecucion<'a>(inv: &'a Inventario, clave: &str) -> &'a EntradaConfig {
+        inv.claves_de_ejecucion
+            .iter()
+            .find(|e| e.clave == clave)
+            .unwrap_or_else(|| {
+                panic!(
+                    "falta la clave de ejecución {clave}: {:?}",
+                    inv.claves_de_ejecucion
+                )
+            })
+    }
+
+    #[test]
+    fn inventario_credential_provider_de_registro_es_clave_de_ejecucion() {
+        let inv = config_de("[registries.x]\ncredential-provider = [\"cmd\"]\n");
+        let e = clave_de_ejecucion(&inv, "registries.x.credential-provider");
+        assert_eq!(e.linea, 2, "{e:?}");
+        assert_eq!(e.archivo, ".cargo/config.toml");
+    }
+
+    #[test]
+    fn inventario_credential_provider_de_raiz_registry_es_clave_de_ejecucion() {
+        let inv = config_de("[registry]\ncredential-provider = [\"cmd\"]\n");
+        assert_eq!(
+            clave_de_ejecucion(&inv, "registry.credential-provider").linea,
+            2
+        );
+    }
+
+    #[test]
+    fn inventario_global_credential_providers_es_clave_de_ejecucion() {
+        let inv = config_de("[registry]\nglobal-credential-providers = [\"cmd\"]\n");
+        assert_eq!(
+            clave_de_ejecucion(&inv, "registry.global-credential-providers").linea,
+            2
+        );
+    }
+
+    #[test]
+    fn inventario_credential_alias_es_clave_de_ejecucion_con_la_linea_del_encabezado() {
+        let inv = config_de("[credential-alias]\nfoo = \"bar\"\n");
+        let e = clave_de_ejecucion(&inv, "credential-alias");
+        assert_eq!(e.linea, 1, "{e:?}");
+    }
+
+    #[test]
+    fn inventario_http_cainfo_y_proxy_son_claves_de_ejecucion() {
+        let inv = config_de("[http]\ncainfo = \"x\"\nproxy = \"http://127.0.0.1:9\"\n");
+        assert_eq!(clave_de_ejecucion(&inv, "http.cainfo").linea, 2);
+        assert_eq!(clave_de_ejecucion(&inv, "http.proxy").linea, 3);
+    }
+
+    #[test]
+    fn inventario_net_git_fetch_with_cli_es_clave_de_ejecucion() {
+        let inv = config_de("[net]\ngit-fetch-with-cli = true\n");
+        assert_eq!(clave_de_ejecucion(&inv, "net.git-fetch-with-cli").linea, 2);
+    }
+
+    #[test]
+    fn inventario_claves_comunes_no_son_claves_de_ejecucion() {
+        let inv = config_de("[build]\njobs = 2\n[http]\ntimeout = 5\n");
+        assert!(inv.claves_de_ejecucion.is_empty(), "{inv:?}");
+    }
+
+    #[test]
+    fn rechazos_sin_credenciales_respetan_el_config_entero() {
+        let inv = config_de("[http]\ncainfo = \"x\"\n");
+        assert!(rechazos_de_config_con_credenciales(&inv, &[]).is_empty());
+    }
+
+    #[test]
+    fn rechazos_con_credenciales_dan_un_rechazo_por_clave() {
+        let inv = config_de(
+            "[http]\ncainfo = \"x\"\n[registry]\nglobal-credential-providers = [\"cmd\"]\n",
+        );
+        let rechazos = rechazos_de_config_con_credenciales(&inv, &credencial_de_prueba());
+        assert_eq!(rechazos.len(), 2, "{rechazos:?}");
+        for (r, clave, linea) in [
+            (&rechazos[0], "http.cainfo", 2),
+            (&rechazos[1], "registry.global-credential-providers", 4),
+        ] {
+            assert!(r.motivo.contains(clave), "{r:?}");
+            assert!(r.motivo.contains("Root pasa una credencial"), "{r:?}");
+            assert_eq!(r.archivo, ".cargo/config.toml");
+            assert_eq!(r.linea, linea, "{r:?}");
+            assert!(r.cita.contains(clave), "{r:?}");
+        }
+    }
+
+    #[test]
+    fn rechazo_de_proxy_con_secreto_no_filtra_usuario_ni_clave() {
+        let inv = config_de("[http]\nproxy = \"http://usuario:clave-secreta@proxy:3128\"\n");
+        let credenciales = credencial_de_prueba();
+        let rechazos = rechazos_de_config_con_credenciales(&inv, &credenciales);
+        assert_eq!(rechazos.len(), 1, "{rechazos:?}");
+        assert!(rechazos[0].motivo.contains("http.proxy"), "{rechazos:?}");
+        let json = serde_json::to_string(&rechazos).expect("serializa");
+        for secreto in ["usuario", "clave-secreta", "valor-secreto-9"] {
+            assert!(!json.contains(secreto), "{json}");
+        }
     }
 
     #[test]
