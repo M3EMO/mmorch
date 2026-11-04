@@ -164,6 +164,11 @@ fn builder_real_shell_escribe_en_el_repo_y_no_ve_oraculos() {
         "falta el login en la copia: {cred}"
     );
     assert!(!cred.contains("mcpOAuth"), "la copia trae mcpOAuth");
+    assert!(!cred.contains("refreshToken"), "la copia trae el refresco");
+    assert!(
+        !cred.contains("REFRESCO_FALSO_1"),
+        "la copia trae el refresco"
+    );
 }
 
 #[test]
@@ -174,7 +179,7 @@ fn builder_real_claude_crea_hola_y_no_lee_oraculos() {
     }
     root::saltar_sin_podman!();
     let tmp = TempDir::new().expect("tmp");
-    let (home, repo, _estado) = armar(tmp.path(), SECRETO_REAL);
+    let (home, repo, estado) = armar(tmp.path(), SECRETO_REAL);
     let home_usuario = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
 
     // Credencial REAL del usuario: el ejecutor la copia sin `mcpOAuth` antes de montarla.
@@ -198,6 +203,18 @@ fn builder_real_claude_crea_hola_y_no_lee_oraculos() {
         "claude salió con error: {}",
         String::from_utf8_lossy(&salida.stderr)
     );
+
+    // `claude` corrió bien (código 0) con la copia que el contenedor vio: sin `refreshToken` ni `mcpOAuth`.
+    let copia = fs::read_to_string(estado.join(".credentials.json")).expect("copia montada");
+    assert!(
+        copia.contains("claudeAiOauth"),
+        "falta el login en la copia"
+    );
+    assert!(
+        !copia.contains("refreshToken"),
+        "la copia trae el token de refresco"
+    );
+    assert!(!copia.contains("mcpOAuth"), "la copia trae mcpOAuth");
 
     assert!(repo.join("hola.txt").is_file(), "falta hola.txt en el repo");
     let stdout = String::from_utf8_lossy(&salida.stdout);
