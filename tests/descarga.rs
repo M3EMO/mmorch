@@ -1258,9 +1258,16 @@ fn descarga_python_git_se_clona_al_commit_sin_pip_con_red() {
     let descarga::Preparacion::Lista { hallazgos, .. } = prep else {
         panic!("la descarga de git no corta la evaluación");
     };
+    // six es un clon con `setup.py` legado: sin hallazgo de commit, y con el aviso de dependencias no verificadas.
+    let [aviso] = hallazgos.as_slice() else {
+        panic!("con commit fijo solo queda el aviso de metadatos: {hallazgos:?}");
+    };
+    assert_eq!(aviso.severidad, 1);
     assert!(
-        hallazgos.is_empty(),
-        "con commit fijo no hay hallazgo: {hallazgos:?}"
+        aviso
+            .detalle
+            .contains("dependencias de runtime no verificadas"),
+        "{aviso:?}"
     );
     let gates = gates(home.path());
     let paquetes = gates[0]["extra"]["paquetes"].as_array().expect("paquetes");

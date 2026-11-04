@@ -62,8 +62,12 @@ pub const ARCHIVO_REQUISITOS_SDIST: &str = "requisitos-sdist.json";
 /// Dependencias de runtime de cada sdist de la caché: nombre del archivo → `Requires-Dist` o `null`.
 /// Lo escribe el mismo contenedor, junto a `ARCHIVO_REQUISITOS_SDIST`.
 pub const ARCHIVO_DEPENDENCIAS_SDIST: &str = "dependencias-sdist.json";
+/// Nombres de los sdists con metadatos anteriores a 2.1 (`Metadata-Version`). Esas versiones no traen
+/// `Requires-Dist`, así que sus dependencias no se verifican. Lo escribe el mismo contenedor.
+pub const ARCHIVO_METADATA_VIEJA_SDIST: &str = "metadata-vieja-sdist.json";
 /// Script del contenedor de descarga: lee `[build-system].requires` de cada sdist de `/cache` con
-/// `tarfile` o `zipfile`, sin extraer nada, y deja el JSON en `/cache`. Sin `tomllib` (Python < 3.11) sale
+/// `tarfile` o `zipfile`, sin extraer nada, y deja sus JSON en `/cache`: requisitos, dependencias y metadata
+/// vieja. Sin `tomllib` (Python < 3.11) sale
 /// con código 3: el host falla cerrado.
 const GUION_REQUISITOS_SDIST: &str = r#"import glob, json, os, sys, tarfile, zipfile
 try:
@@ -124,16 +128,40 @@ def dependencias(ruta):
     except Exception:
         return None
 
+def metadata_vieja(ruta):
+    try:
+        texto = archivo_de(ruta, "PKG-INFO")
+        if texto is None:
+            return False
+        for linea in texto.decode("utf-8", "replace").split("\n"):
+            linea = linea.rstrip("\r")
+            if linea == "":
+                break
+            clave, _, valor = linea.partition(":")
+            if clave.strip() == "Metadata-Version":
+                mayor, _, menor = valor.strip().partition(".")
+                if not (mayor.isdecimal() and menor.isdecimal()):
+                    return False
+                return (int(mayor), int(menor)) < (2, 1)
+        return False
+    except Exception:
+        return False
+
 requisitos = {}
 dependencias_de_cada = {}
+viejas = []
 for ruta in sorted(glob.glob("/cache/*.tar.gz") + glob.glob("/cache/*.zip")):
     nombre = os.path.basename(ruta)
     requisitos[nombre] = requires(ruta)
     dependencias_de_cada[nombre] = dependencias(ruta)
+    if metadata_vieja(ruta):
+        viejas.append(nombre)
 with open("/cache/requisitos-sdist.json", "w", encoding="utf-8") as f:
     json.dump(requisitos, f)
 with open("/cache/dependencias-sdist.json", "w", encoding="utf-8") as f:
     json.dump(dependencias_de_cada, f)
+with open("/cache/metadata-vieja-sdist.json", "w", encoding="utf-8") as f:
+    json.dump(viejas, f)
 "#;
 
 /// Sdist elegido desde PyPI: su URL, su nombre de archivo y su sha256 esperado.
@@ -652,6 +680,10 @@ fn preparar_python_con(
         if let Some((_, de_build)) = indice_de_build_de(&destino, &rutas_clon(&req))? {
             hallazgos.extend(de_build);
         }
+        // El aviso de dependencias no verificadas también sale del acierto: lo leen los mismos archivos.
+        let no_verificadas = hallazgos_de_dependencias_no_verificadas(&destino, &req)?;
+        let registro = con_avisos_de(registro, &no_verificadas);
+        hallazgos.extend(no_verificadas);
         let preparacion = Preparacion::Lista {
             cache: Some(destino),
             rustsec: None,
@@ -708,7 +740,10 @@ fn preparar_python_con(
             paquetes,
             hallazgos: de_build,
         } => {
-            let hallazgos = de_build;
+            // Se calcula antes de mover `parcial` a su nombre final: lee los mismos archivos que el acierto.
+            let no_verificadas = hallazgos_de_dependencias_no_verificadas(&parcial, &req)?;
+            let mut hallazgos = de_build;
+            hallazgos.extend(no_verificadas.iter().cloned());
             if destino.exists() {
                 borrar_en_home(home, &destino)
                     .map_err(|e| infra("borrar la caché previa de Python", e))?;
@@ -725,6 +760,7 @@ fn preparar_python_con(
                 sin_digest,
                 avisos,
             };
+            let registro = con_avisos_de(registro, &no_verificadas);
             let preparacion = Preparacion::Lista {
                 cache: Some(destino),
                 rustsec: None,
@@ -1192,12 +1228,26 @@ fn nombres_sdist(carpeta: &Path) -> Result<Vec<String>, ErrorOraculo> {
     Ok(sdists)
 }
 
-/// `true` si una caché con sdists trae `requisitos-sdist.json` y `dependencias-sdist.json`. Una caché anterior,
-/// sin esos archivos, no sirve de acierto: se descarga de nuevo.
+/// `true` si una caché con sdists trae sus tres JSON: requisitos, dependencias y metadata vieja. Una caché anterior,
+/// sin alguno, no sirve de acierto: se descarga de nuevo.
 fn requisitos_sdist_listos(carpeta: &Path) -> Result<bool, ErrorOraculo> {
     Ok(nombres_sdist(carpeta)?.is_empty()
         || (carpeta.join(ARCHIVO_REQUISITOS_SDIST).is_file()
-            && carpeta.join(ARCHIVO_DEPENDENCIAS_SDIST).is_file()))
+            && carpeta.join(ARCHIVO_DEPENDENCIAS_SDIST).is_file()
+            && carpeta.join(ARCHIVO_METADATA_VIEJA_SDIST).is_file()))
+}
+
+/// Nombres de los sdists con metadata anterior a 2.1, según el JSON del contenedor. Sin el archivo, o si no
+/// parsea, es infraestructura.
+fn metadata_vieja_de_sdists(carpeta: &Path) -> Result<BTreeSet<String>, ErrorOraculo> {
+    let texto = fs::read_to_string(carpeta.join(ARCHIVO_METADATA_VIEJA_SDIST))
+        .map_err(|e| infra("leer la lista de metadata vieja de los sdists", e))?;
+    let nombres: Vec<String> = serde_json::from_str(&texto).map_err(|e| {
+        ErrorOraculo::Infra(format!(
+            "JSON de metadata vieja ilegible ({ARCHIVO_METADATA_VIEJA_SDIST}): {e}"
+        ))
+    })?;
+    Ok(nombres.into_iter().collect())
 }
 
 /// Lee el JSON `archivo` del contenedor de sdists: nombre del archivo → lista o `null`. Sin el archivo, o si no
@@ -1340,6 +1390,69 @@ fn fuentes_dinamicas(carpeta: &Path, req: &RequisitosPip) -> Result<Vec<String>,
         }
     }
     Ok(dinamicas)
+}
+
+/// Texto fijo de los avisos de dependencias no verificadas. No corta la descarga: es severidad 1.
+const AVISO_NO_VERIFICADAS: &str = "dependencias de runtime no verificadas";
+
+/// `true` si un clon no declara dependencias en un `pyproject.toml` con `[project]`. Sin el archivo, o con un
+/// TOML sin `[project]` (un `setup.py` legado), es legado. Un TOML roto no cuenta: `dependencias_de_clon` lo corta.
+fn clon_sin_metadatos_estaticos(pyproject: Option<&str>) -> bool {
+    match pyproject {
+        None => true,
+        Some(texto) => {
+            toml::from_str::<toml::Table>(texto).is_ok_and(|tabla| !tabla.contains_key("project"))
+        }
+    }
+}
+
+/// Hallazgos de dependencias no verificadas: sdists con metadata anterior a 2.1 y clones sin metadatos estáticos.
+/// Leen los archivos de `carpeta`, así que sirven igual en una descarga nueva y en un acierto de caché.
+fn hallazgos_de_dependencias_no_verificadas(
+    carpeta: &Path,
+    req: &RequisitosPip,
+) -> Result<Vec<Hallazgo>, ErrorOraculo> {
+    let mut hallazgos = Vec::new();
+    let sdists = nombres_sdist(carpeta)?;
+    if !sdists.is_empty() {
+        let viejas = metadata_vieja_de_sdists(carpeta)?;
+        for nombre in sdists.iter().filter(|n| viejas.contains(*n)) {
+            hallazgos.push(hallazgo(
+                ARCHIVO_REQUIREMENTS,
+                0,
+                nombre,
+                1,
+                format!("sdist con metadatos anteriores a 2.1: {AVISO_NO_VERIFICADAS}: {nombre}"),
+            ));
+        }
+    }
+    for (linea, raw) in &req.directas {
+        let Ok(partes) = partes_git(raw) else {
+            continue;
+        };
+        let pyproject = pyproject_de_clon(carpeta, &ruta_de_clon(&partes));
+        if clon_sin_metadatos_estaticos(pyproject.as_deref()) {
+            hallazgos.push(hallazgo(
+                ARCHIVO_REQUIREMENTS,
+                *linea,
+                &redactar(raw),
+                1,
+                format!(
+                    "clon sin metadatos estáticos: {AVISO_NO_VERIFICADAS}: {}",
+                    redactar(&partes.base)
+                ),
+            ));
+        }
+    }
+    Ok(hallazgos)
+}
+
+/// Suma al Gate el texto de cada hallazgo de dependencias no verificadas.
+fn con_avisos_de(mut registro: Registro, hallazgos: &[Hallazgo]) -> Registro {
+    registro
+        .avisos
+        .extend(hallazgos.iter().map(|h| h.detalle.clone()));
+    registro
 }
 
 /// Texto del `pyproject.toml` de un clon bajo `carpeta/src/<ruta>`. No sigue enlaces: cada componente de la
@@ -1566,6 +1679,11 @@ mod tests {
             "sin dependencias de runtime, la caché es anterior"
         );
         fs::write(dir.path().join(ARCHIVO_DEPENDENCIAS_SDIST), "{}").expect("json");
+        assert!(
+            !requisitos_sdist_listos(dir.path()).expect("lee"),
+            "sin la metadata vieja, la caché es anterior: no daría el aviso"
+        );
+        fs::write(dir.path().join(ARCHIVO_METADATA_VIEJA_SDIST), "[]").expect("json");
         assert!(requisitos_sdist_listos(dir.path()).expect("lee"));
     }
 
@@ -2537,6 +2655,15 @@ mod tests {
         dependencias: &'a str,
         indice: &'a RefCell<Option<String>>,
     ) -> impl Fn(&Ejecucion, &Path) -> Resultado + 'a {
+        mundo_de_sdist_con(dependencias, "[]", indice)
+    }
+
+    /// Como `mundo_de_sdist`, con la lista de `viejas`: el JSON de sdists con metadatos anteriores a 2.1.
+    fn mundo_de_sdist_con<'a>(
+        dependencias: &'a str,
+        viejas: &'a str,
+        indice: &'a RefCell<Option<String>>,
+    ) -> impl Fn(&Ejecucion, &Path) -> Resultado + 'a {
         let json_pypi = format!(
             r#"{{"urls": [{{"packagetype": "sdist", "url": "https://files.pythonhosted.org/packages/foo-1.0.tar.gz", "filename": "foo-1.0.tar.gz", "digests": {{"sha256": "{}"}}}}]}}"#,
             sha256_hex(SDIST_FALSO)
@@ -2555,6 +2682,8 @@ mod tests {
                 .expect("requisitos");
                 fs::write(cache.join(ARCHIVO_DEPENDENCIAS_SDIST), dependencias)
                     .expect("dependencias");
+                fs::write(cache.join(ARCHIVO_METADATA_VIEJA_SDIST), viejas)
+                    .expect("metadata vieja");
             } else if cmd.contains("pip download") && cmd.contains(ARCHIVO_INDICE) {
                 // Sin el sdist en la caché, pip no halla `foo==1.0` como wheel.
                 if !cache.join("foo-1.0.tar.gz").is_file() {
@@ -2573,12 +2702,30 @@ mod tests {
         pyproject: &'a str,
         indice: &'a RefCell<Option<String>>,
     ) -> impl Fn(&Ejecucion, &Path) -> Resultado + 'a {
+        mundo_de_clon_con(dir, Some(pyproject), indice)
+    }
+
+    /// Como `mundo_de_clon`. Con `pyproject` en `None`, el clon trae solo un `setup.py` legado.
+    fn mundo_de_clon_con<'a>(
+        dir: &'a str,
+        pyproject: Option<&'a str>,
+        indice: &'a RefCell<Option<String>>,
+    ) -> impl Fn(&Ejecucion, &Path) -> Resultado + 'a {
         move |ejecucion: &Ejecucion, cache: &Path| {
             let cmd = ejecucion.cmd.as_str();
             if cmd.contains(" clone ") {
                 let src = cache.join("src");
                 fs::create_dir_all(src.join(dir)).expect("clon");
-                fs::write(src.join(dir).join(ARCHIVO_PYPROJECT), pyproject).expect("pyproject");
+                match pyproject {
+                    Some(texto) => {
+                        fs::write(src.join(dir).join(ARCHIVO_PYPROJECT), texto).expect("pyproject")
+                    }
+                    None => fs::write(
+                        src.join(dir).join("setup.py"),
+                        "from setuptools import setup\nsetup()\n",
+                    )
+                    .expect("setup.py"),
+                }
                 fs::write(
                     src.join(format!("{dir}.commit")),
                     "c8e394065cd541a16c040515dc0afb85cf22a7c3\n",
@@ -2999,5 +3146,356 @@ mod tests {
         .map(|(nombre, deps)| (nombre.to_string(), deps))
         .collect();
         assert_eq!(mapa, esperado);
+    }
+
+    // --- Dependencias de runtime no verificadas: sdists con metadata vieja y clones sin metadatos estáticos ---
+
+    /// Texto fijo del aviso. Va a los hallazgos de la descarga y a los avisos del Gate.
+    const AVISO_NO_VERIFICADAS: &str = "dependencias de runtime no verificadas";
+    /// Clon de prueba: un repo y un commit fijos. Cada test decide qué archivos trae el clon.
+    const RAW_CLON: &str =
+        "git+https://github.com/x/y@c8e394065cd541a16c040515dc0afb85cf22a7c3#egg=y";
+
+    /// Aviso esperado de un clon de `RAW_CLON` sin metadatos estáticos.
+    fn aviso_de_clon() -> String {
+        let base = partes_git(RAW_CLON).expect("parsea").base;
+        format!(
+            "clon sin metadatos estáticos: {AVISO_NO_VERIFICADAS}: {}",
+            redactar(&base)
+        )
+    }
+
+    /// Hallazgos y avisos del Gate que dicen `AVISO_NO_VERIFICADAS` en un paso de descarga que da Lista.
+    fn no_verificadas_en(paso: &Paso) -> (Vec<&Hallazgo>, Vec<String>) {
+        let (preparacion, registro) = paso;
+        let Preparacion::Lista { hallazgos, .. } = preparacion else {
+            panic!("debía dar Lista: {preparacion:?}");
+        };
+        let en_hallazgos: Vec<&Hallazgo> = hallazgos
+            .iter()
+            .filter(|h| h.detalle.contains(AVISO_NO_VERIFICADAS))
+            .collect();
+        let en_gate: Vec<String> = registro
+            .as_ref()
+            .map(|r| r.avisos.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| t.contains(AVISO_NO_VERIFICADAS))
+            .collect();
+        (en_hallazgos, en_gate)
+    }
+
+    /// Corre la descarga de `RAW_CLON` con `mundo`, que hace de `git clone`. Devuelve el paso.
+    fn paso_de_clon_con_mundo(mundo: &dyn Fn(&Ejecucion, &Path) -> Resultado) -> Paso {
+        let ejecutor = EjecutorSimulado {
+            simular: mundo,
+            ejecuciones: RefCell::new(Vec::new()),
+        };
+        let (_home, resultado) = descarga_simulada(&format!("{RAW_CLON}\n"), &ejecutor);
+        resultado.expect("la descarga corre")
+    }
+
+    /// Paso de la descarga de `RAW_CLON` con su `pyproject` (o sin él, con un `setup.py` legado).
+    fn paso_de_clon(pyproject: Option<&str>) -> Paso {
+        let dir = clave_clon(&partes_git(RAW_CLON).expect("parsea"));
+        let indice = RefCell::new(None);
+        let mundo = mundo_de_clon_con(&dir, pyproject, &indice);
+        paso_de_clon_con_mundo(&mundo)
+    }
+
+    #[test]
+    fn descarga_python_clon_con_setup_py_sin_pyproject_avisa_y_lista() {
+        let paso = paso_de_clon(None);
+        assert!(matches!(paso.0, Preparacion::Lista { .. }), "{:?}", paso.0);
+        let (en_hallazgos, en_gate) = no_verificadas_en(&paso);
+        let esperado = aviso_de_clon();
+        assert_eq!(en_hallazgos.len(), 1, "{en_hallazgos:?}");
+        assert_eq!(en_hallazgos[0].severidad, 1);
+        assert_eq!(en_hallazgos[0].detalle, esperado);
+        assert_eq!(en_gate, [esperado]);
+    }
+
+    #[test]
+    fn descarga_python_clon_con_pyproject_sin_project_avisa() {
+        let paso = paso_de_clon(Some("[build-system]\nrequires = [\"setuptools\"]\n"));
+        let (en_hallazgos, en_gate) = no_verificadas_en(&paso);
+        assert_eq!(en_hallazgos.len(), 1, "{en_hallazgos:?}");
+        assert_eq!(en_hallazgos[0].severidad, 1);
+        assert_eq!(en_hallazgos[0].detalle, aviso_de_clon());
+        assert_eq!(en_gate, [aviso_de_clon()]);
+    }
+
+    #[test]
+    fn descarga_python_clon_con_pyproject_symlink_avisa() {
+        // Un `pyproject` que es enlace no cuenta como archivo: el clon es legado.
+        let afuera = tempfile::tempdir().expect("afuera");
+        let real = afuera.path().join("pyproject.toml");
+        fs::write(
+            &real,
+            "[project]\nname = \"y\"\ndependencies = [\"requests\"]\n",
+        )
+        .expect("afuera");
+        let dir = clave_clon(&partes_git(RAW_CLON).expect("parsea"));
+        let mundo = |ejecucion: &Ejecucion, cache: &Path| {
+            if ejecucion.cmd.contains(" clone ") {
+                let clon = cache.join("src").join(&dir);
+                fs::create_dir_all(&clon).expect("clon");
+                std::os::unix::fs::symlink(&real, clon.join(ARCHIVO_PYPROJECT)).expect("enlace");
+                fs::write(
+                    cache.join("src").join(format!("{dir}.commit")),
+                    "c8e394065cd541a16c040515dc0afb85cf22a7c3\n",
+                )
+                .expect("commit");
+            }
+            respuesta(0, "")
+        };
+        let paso = paso_de_clon_con_mundo(&mundo);
+        let (en_hallazgos, en_gate) = no_verificadas_en(&paso);
+        assert_eq!(en_hallazgos.len(), 1, "{en_hallazgos:?}");
+        assert_eq!(en_gate, [aviso_de_clon()]);
+    }
+
+    #[test]
+    fn descarga_python_clon_con_pyproject_ilegible_avisa() {
+        // Bytes que no son UTF-8: el `pyproject` no se lee, y el clon es legado.
+        let dir = clave_clon(&partes_git(RAW_CLON).expect("parsea"));
+        let mundo = |ejecucion: &Ejecucion, cache: &Path| {
+            if ejecucion.cmd.contains(" clone ") {
+                let clon = cache.join("src").join(&dir);
+                fs::create_dir_all(&clon).expect("clon");
+                fs::write(clon.join(ARCHIVO_PYPROJECT), [0xff_u8, 0xfe, 0x00]).expect("bytes");
+                fs::write(
+                    cache.join("src").join(format!("{dir}.commit")),
+                    "c8e394065cd541a16c040515dc0afb85cf22a7c3\n",
+                )
+                .expect("commit");
+            }
+            respuesta(0, "")
+        };
+        let paso = paso_de_clon_con_mundo(&mundo);
+        let (en_hallazgos, en_gate) = no_verificadas_en(&paso);
+        assert_eq!(en_hallazgos.len(), 1, "{en_hallazgos:?}");
+        assert_eq!(en_gate, [aviso_de_clon()]);
+    }
+
+    #[test]
+    fn descarga_python_clon_con_project_sin_dependencies_no_avisa() {
+        // `[project]` sin `dependencies` declara cero dependencias: no es legado, no hay aviso.
+        let paso = paso_de_clon(Some("[project]\nname = \"y\"\nversion = \"1.0\"\n"));
+        let (en_hallazgos, en_gate) = no_verificadas_en(&paso);
+        assert!(en_hallazgos.is_empty(), "{en_hallazgos:?}");
+        assert!(en_gate.is_empty(), "{en_gate:?}");
+    }
+
+    /// Dos corridas de la descarga de `texto_req` en el mismo `home`: la segunda es acierto de caché. Da cada
+    /// paso y cuántos contenedores corrieron hasta él.
+    fn dos_corridas(
+        texto_req: &str,
+        simular: &dyn Fn(&Ejecucion, &Path) -> Resultado,
+    ) -> (Paso, usize, Paso, usize) {
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        fs::write(repo.path().join("requirements.txt"), texto_req).expect("requirements");
+        let tarea = tarea_python_de_prueba();
+        let podman = PodmanDigest::que_responde(125, "");
+        let ejecutor = EjecutorSimulado {
+            simular,
+            ejecuciones: RefCell::new(Vec::new()),
+        };
+        let deps = DependenciasPython {
+            podman: &podman,
+            ejecutor: &ejecutor,
+            leer_env: &|_: &str| None,
+        };
+        let correr = || {
+            preparar_python_con(
+                repo.path(),
+                &tarea,
+                home.path(),
+                Duration::from_secs(60),
+                &[],
+                &deps,
+            )
+            .expect("prepara")
+        };
+        let primera = correr();
+        let n_primera = ejecutor.ejecuciones.borrow().len();
+        let segunda = correr();
+        let n_segunda = ejecutor.ejecuciones.borrow().len();
+        (primera, n_primera, segunda, n_segunda)
+    }
+
+    #[test]
+    fn descarga_python_acierto_de_cache_repite_el_aviso_del_clon_legado() {
+        let dir = clave_clon(&partes_git(RAW_CLON).expect("parsea"));
+        let indice = RefCell::new(None);
+        let mundo = mundo_de_clon_con(&dir, None, &indice);
+        let (primera, n_primera, segunda, n_segunda) =
+            dos_corridas(&format!("{RAW_CLON}\n"), &mundo);
+        assert!(n_primera > 0, "la primera corrida baja el clon");
+        assert_eq!(
+            n_primera, n_segunda,
+            "la segunda corrida es acierto: no corre nada"
+        );
+        let (_, gate_primera) = no_verificadas_en(&primera);
+        assert_eq!(gate_primera, [aviso_de_clon()]);
+        let (en_hallazgos, gate_segunda) = no_verificadas_en(&segunda);
+        assert_eq!(en_hallazgos.len(), 1, "{en_hallazgos:?}");
+        assert_eq!(en_hallazgos[0].detalle, aviso_de_clon());
+        assert_eq!(gate_segunda, [aviso_de_clon()]);
+    }
+
+    #[test]
+    fn descarga_python_sdist_de_metadata_vieja_avisa_con_su_nombre() {
+        let indice = RefCell::new(None);
+        let mundo = mundo_de_sdist_con(
+            r#"{"foo-1.0.tar.gz": []}"#,
+            r#"["foo-1.0.tar.gz"]"#,
+            &indice,
+        );
+        let ejecutor = EjecutorSimulado {
+            simular: &mundo,
+            ejecuciones: RefCell::new(Vec::new()),
+        };
+        let (_home, resultado) = descarga_simulada("foo==1.0\n", &ejecutor);
+        let paso = resultado.expect("la descarga corre");
+        let esperado = "sdist con metadatos anteriores a 2.1: dependencias de runtime no verificadas: foo-1.0.tar.gz";
+        let (en_hallazgos, en_gate) = no_verificadas_en(&paso);
+        assert_eq!(en_hallazgos.len(), 1, "{en_hallazgos:?}");
+        assert_eq!(en_hallazgos[0].severidad, 1);
+        assert_eq!(en_hallazgos[0].detalle, esperado);
+        assert_eq!(en_gate, [esperado]);
+    }
+
+    #[test]
+    fn descarga_python_sdist_2_1_sin_requires_dist_no_avisa() {
+        // Metadata 2.1 o superior sin `Requires-Dist` es cero dependencias, sin aviso.
+        let indice = RefCell::new(None);
+        let mundo = mundo_de_sdist(r#"{"foo-1.0.tar.gz": []}"#, &indice);
+        let ejecutor = EjecutorSimulado {
+            simular: &mundo,
+            ejecuciones: RefCell::new(Vec::new()),
+        };
+        let (_home, resultado) = descarga_simulada("foo==1.0\n", &ejecutor);
+        let paso = resultado.expect("la descarga corre");
+        let (en_hallazgos, en_gate) = no_verificadas_en(&paso);
+        assert!(en_hallazgos.is_empty(), "{en_hallazgos:?}");
+        assert!(en_gate.is_empty(), "{en_gate:?}");
+    }
+
+    #[test]
+    fn descarga_python_acierto_de_cache_repite_el_aviso_del_sdist_viejo() {
+        let indice = RefCell::new(None);
+        let mundo = mundo_de_sdist_con(
+            r#"{"foo-1.0.tar.gz": []}"#,
+            r#"["foo-1.0.tar.gz"]"#,
+            &indice,
+        );
+        let (primera, n_primera, segunda, n_segunda) = dos_corridas("foo==1.0\n", &mundo);
+        assert!(n_primera > 0, "la primera corrida baja el sdist");
+        assert_eq!(
+            n_primera, n_segunda,
+            "la segunda corrida es acierto: no corre nada"
+        );
+        let esperado = "sdist con metadatos anteriores a 2.1: dependencias de runtime no verificadas: foo-1.0.tar.gz";
+        let (_, gate_primera) = no_verificadas_en(&primera);
+        assert_eq!(gate_primera, [esperado]);
+        let (en_hallazgos, gate_segunda) = no_verificadas_en(&segunda);
+        assert_eq!(en_hallazgos.len(), 1, "{en_hallazgos:?}");
+        assert_eq!(gate_segunda, [esperado]);
+    }
+
+    /// `true` si hay `python3` con `tomllib`. Sin él, los tests del script real no corren.
+    fn python_con_tomllib() -> bool {
+        Command::new("python3")
+            .args(["-I", "-c", "import tomllib"])
+            .output()
+            .is_ok_and(|s| s.status.success())
+    }
+
+    /// Arma un sdist `.tar.gz` por cada `(carpeta, PKG-INFO)`, sin `PKG-INFO` si es `None`. Corre el script real
+    /// sobre ellos y devuelve la caché donde deja sus JSON.
+    fn script_sobre_sdists(fuentes: &[(&str, Option<&str>)]) -> tempfile::TempDir {
+        let cache = tempfile::tempdir().expect("cache");
+        let obra = tempfile::tempdir().expect("obra");
+        for &(dir, info) in fuentes {
+            let raiz = obra.path().join(dir);
+            fs::create_dir_all(&raiz).expect("carpeta del sdist");
+            if let Some(texto) = info {
+                fs::write(raiz.join("PKG-INFO"), texto).expect("PKG-INFO");
+            }
+            fs::write(
+                raiz.join(ARCHIVO_PYPROJECT),
+                "[build-system]\nrequires = [\"hatchling\"]\n",
+            )
+            .expect("pyproject");
+            let estado = Command::new("tar")
+                .arg("-czf")
+                .arg(cache.path().join(format!("{dir}.tar.gz")))
+                .arg("-C")
+                .arg(obra.path())
+                .arg(dir)
+                .status()
+                .expect("tar");
+            assert!(estado.success(), "tar de {dir}");
+        }
+        // El script escribe en `/cache`: la prueba cambia esa ruta por la carpeta temporal.
+        let guion = GUION_REQUISITOS_SDIST.replace("/cache", &cache.path().to_string_lossy());
+        let salida = Command::new("python3")
+            .args(["-I", "-c", &guion])
+            .output()
+            .expect("corre python3");
+        assert!(
+            salida.status.success(),
+            "el script falló: {}",
+            String::from_utf8_lossy(&salida.stderr)
+        );
+        cache
+    }
+
+    #[test]
+    fn descarga_script_de_sdists_marca_metadata_anterior_a_2_1() {
+        // Solo 1.0, 1.2 y 2.0 son anteriores a 2.1. Un 2.1 sin `Requires-Dist`, o sin cabecera, no cuenta.
+        if !python_con_tomllib() {
+            eprintln!("sin python3 con tomllib: el script no se prueba");
+            return;
+        }
+        let cache = script_sobre_sdists(&[
+            (
+                "vieja10-1.0",
+                Some("Metadata-Version: 1.0\nName: vieja10\nVersion: 1.0\n"),
+            ),
+            (
+                "vieja12-1.0",
+                Some("Metadata-Version: 1.2\nName: vieja12\nVersion: 1.0\n"),
+            ),
+            (
+                "dos0-2.0",
+                Some("Metadata-Version: 2.0\nName: dos0\nVersion: 1.0\n"),
+            ),
+            (
+                "nueva-2.1",
+                Some("Metadata-Version: 2.1\nName: nueva\nVersion: 1.0\n"),
+            ),
+            ("sincabecera-1.0", Some("Name: sincabecera\nVersion: 1.0\n")),
+        ]);
+        let texto = fs::read_to_string(cache.path().join(ARCHIVO_METADATA_VIEJA_SDIST))
+            .expect("escribe la lista de metadata vieja");
+        let mut viejas: Vec<String> = serde_json::from_str(&texto).expect("JSON de la lista");
+        viejas.sort();
+        assert_eq!(
+            viejas,
+            [
+                "dos0-2.0.tar.gz",
+                "vieja10-1.0.tar.gz",
+                "vieja12-1.0.tar.gz"
+            ]
+        );
+        let texto = fs::read_to_string(cache.path().join(ARCHIVO_DEPENDENCIAS_SDIST))
+            .expect("escribe las dependencias");
+        let mapa: BTreeMap<String, Option<Vec<String>>> =
+            serde_json::from_str(&texto).expect("JSON de dependencias");
+        assert_eq!(mapa["nueva-2.1.tar.gz"], Some(Vec::new()));
+        assert_eq!(mapa["sincabecera-1.0.tar.gz"], Some(Vec::new()));
     }
 }
