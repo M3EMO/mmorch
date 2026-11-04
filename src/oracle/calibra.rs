@@ -951,14 +951,17 @@ pub fn calibrar_tarea_con(
         if let Some(fila) = &medida.fila {
             agregar(home, fila)?;
         }
+        let archivo =
+            casos.map_or_else(|| "ninguno".to_string(), |ruta| ruta.display().to_string());
         return Err(ErrorOraculo::Tope(format!(
-            "calibración de {}/{} detenida por el tope de {:.2} USD: gasto de API {:.2} USD y el peor caso de un caso es {:.2} USD. Casos medidos: {}.",
+            "calibración de {}/{} detenida por el tope de {:.2} USD: gasto de API {:.2} USD y el peor caso de un caso es {:.2} USD. Casos medidos: {}. Archivo de casos: {}.",
             tarea.nombre,
             dim.clave(),
             detencion.tope_usd,
             detencion.gasto_usd,
             detencion.peor_caso_usd,
-            detencion.casos
+            detencion.casos,
+            archivo
         )));
     }
     let fila = medida
@@ -3055,6 +3058,58 @@ mod tests {
             medida.casos.len(),
             2,
             "se detiene tras los 2 casos que entraron"
+        );
+    }
+
+    #[test]
+    fn calibra_tope_nombra_el_archivo_de_casos_en_el_error() {
+        // Base y casos cuestan 0,25. El peor caso es 0,5 y el tope 1,0: se miden dos casos y se detiene.
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = home.path().join("oraculos").join("calibra-fixture");
+        fs::create_dir_all(&carpeta).expect("carpeta");
+        let repo = carpeta.join("repo-bueno");
+        fs::create_dir_all(&repo).expect("repo");
+        super::inyectar::pruebas::copiar(Path::new(FIXTURE), &repo);
+        let _ = tarea_en(&carpeta, "\n[calibracion]\nrepo = \"repo-bueno\"\n");
+        let gastado = Mutex::new(0.0f64);
+        let peor = |_: &Partes| Ok::<f64, ErrorOraculo>(0.5);
+        let gasto = |_: f64| -> Result<f64, ErrorOraculo> { Ok(*gastado.lock().expect("gasto")) };
+        let presupuesto = Presupuesto {
+            usd: 1.0,
+            peor_caso: &peor,
+            gasto_desde: &gasto,
+        };
+        let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
+            *gastado.lock().expect("gasto") += 0.25;
+            Ok(veredicto_base())
+        };
+        let error = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "seguridad",
+            8,
+            42,
+            None,
+            Some(&presupuesto),
+            &evaluador,
+        )
+        .expect_err("el tope detiene la calibración");
+        let texto = error.to_string();
+        let archivos: Vec<String> = fs::read_dir(home.path().join(CARPETA_CASOS))
+            .expect("carpeta de casos")
+            .map(|e| {
+                e.expect("entrada")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|n| n.ends_with(".casos.jsonl"))
+            .collect();
+        assert_eq!(archivos.len(), 1, "un archivo de casos de la corrida");
+        assert!(
+            texto.contains(&archivos[0]),
+            "el error nombra {}: {texto}",
+            archivos[0]
         );
     }
 
