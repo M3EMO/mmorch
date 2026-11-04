@@ -78,7 +78,7 @@ echo "$*" >> "$DIR/llamadas.log"
 env >> "$DIR/entorno.txt"
 case "$1" in
 new)
-  if [ "$AUTH" = cuelga ]; then echo $$ > "$DIR/pid.txt"; sleep 300; exit 0; fi
+  if [ "$AUTH" = cuelga ]; then echo $$ > "$DIR/pid.tmp" && mv "$DIR/pid.tmp" "$DIR/pid.txt"; sleep 300; exit 0; fi
   if [ "$AUTH" = falta ]; then echo "Not logged in: authenticate with OAuth first" >&2; exit 1; fi
   exit 0 ;;
 exec)
@@ -390,11 +390,7 @@ fn colab_primer_paso_sin_respuesta_sale_3_en_menos_de_5_s() {
             .any(|l| l.starts_with("upload") || l.starts_with("exec")),
         "{lineas:?}"
     );
-    let pid: i32 = fs::read_to_string(e.falso.path().join("pid.txt"))
-        .expect("pid.txt")
-        .trim()
-        .parse()
-        .expect("PID numérico");
+    let pid = esperar_pid(&e.falso.path().join("pid.txt"), 5);
     assert!(!proceso_vivo(pid), "la CLI falsa quedó colgada");
 }
 
@@ -440,12 +436,18 @@ fn falso_a_medida(dir: &Path, estado: &str, stop_codigo: i32) -> PathBuf {
 
 /// Como `falso_a_medida`, pero el caso `stop` es el cuerpo de shell `stop_cuerpo`.
 fn falso_a_medida_stop(dir: &Path, estado: &str, stop_cuerpo: &str) -> PathBuf {
+    falso_a_medida_con(dir, estado, "exit 0", stop_cuerpo)
+}
+
+/// Como `falso_a_medida_stop`, pero el caso `new` es el cuerpo de shell `new_cuerpo`.
+fn falso_a_medida_con(dir: &Path, estado: &str, new_cuerpo: &str, stop_cuerpo: &str) -> PathBuf {
     let guion = format!(
         r#"#!/bin/sh
 DIR='{dir}'
 echo "$*" >> "$DIR/llamadas.log"
 case "$1" in
-new|upload|download) exit 0 ;;
+new) {new_cuerpo} ;;
+upload|download) exit 0 ;;
 stop) {stop_cuerpo} ;;
 exec)
   f=""; prev=""
@@ -455,13 +457,14 @@ exec)
     */prepara.py) echo "ROOT_PREPARADO=1" ;;
     */prepara-rust.py) echo "ROOT_RUST=rustup" ;;
     */corre.py) echo "ROOT_LANZADO=1" ;;
-    */estado.py) echo $$ > "$DIR/pid.txt"; {estado} ;;
+    */estado.py) echo $$ > "$DIR/pid.tmp" && mv "$DIR/pid.tmp" "$DIR/pid.txt"; {estado} ;;
   esac
   exit 0 ;;
 *) exit 2 ;;
 esac
 "#,
         dir = dir.display(),
+        new_cuerpo = new_cuerpo,
         stop_cuerpo = stop_cuerpo,
         estado = estado,
     );
@@ -495,6 +498,44 @@ fn esperar_salida(hijo: &mut Child, segundos: u64) -> Option<ExitStatus> {
     None
 }
 
+/// Espera a que `ruta` contenga un PID numérico y lo devuelve. Sondea cada 20 ms.
+/// Tolera un archivo vacío o incompleto. Panic si vence `segundos`.
+fn esperar_pid(ruta: &Path, segundos: u64) -> i32 {
+    let limite = Instant::now() + Duration::from_secs(segundos);
+    loop {
+        let pid = fs::read_to_string(ruta)
+            .ok()
+            .and_then(|texto| texto.trim().parse::<i32>().ok());
+        if let Some(pid) = pid {
+            return pid;
+        }
+        if Instant::now() >= limite {
+            panic!(
+                "no apareció un PID numérico en {} tras {segundos} s",
+                ruta.display()
+            );
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn leer_pid_espera_a_que_el_archivo_este_completo() {
+    let dir = tempfile::tempdir().expect("dir");
+    let ruta = dir.path().join("pid.txt");
+    fs::write(&ruta, "").expect("crea vacío");
+    let escritor = {
+        let ruta = ruta.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            fs::write(&ruta, "12345").expect("escribe");
+        })
+    };
+    let pid = esperar_pid(&ruta, 5);
+    escritor.join().expect("hilo");
+    assert_eq!(pid, 12345);
+}
+
 /// Envía una señal con el comando `kill`, sin shell.
 fn enviar_senal(pid: u32, senal: &str) {
     let estado = Command::new("kill")
@@ -517,6 +558,7 @@ fn senal_durante_la_corrida(senal: &str, nombre_senal: &str) {
         .spawn()
         .expect("no se pudo lanzar r00t");
     esperar_en_log(&e, "estado.py", 30);
+    let pid_falso = esperar_pid(&e.falso.path().join("pid.txt"), 30);
     enviar_senal(hijo.id(), senal);
     let estado = esperar_salida(&mut hijo, 10).expect("Root debe salir en menos de 10 s");
     let stderr = fs::read_to_string(e.home.path().join("stderr.txt")).unwrap_or_default();
@@ -547,12 +589,7 @@ fn senal_durante_la_corrida(senal: &str, nombre_senal: &str) {
         !e.home.path().join("colab").join("activo.json").exists(),
         "activo.json debe borrarse tras liberar"
     );
-    let pid: i32 = fs::read_to_string(e.falso.path().join("pid.txt"))
-        .expect("pid.txt")
-        .trim()
-        .parse()
-        .expect("PID numérico");
-    assert!(!proceso_vivo(pid), "la CLI falsa quedó viva");
+    assert!(!proceso_vivo(pid_falso), "la CLI falsa quedó viva");
 }
 
 #[test]
@@ -727,12 +764,15 @@ fn colab_stop_con_salida_desconocida_conserva_activo() {
     assert_eq!(ultimo["extra"]["confirmada"], false, "{gates:?}");
 }
 
+// El tope corre sobre tiempo real desde el inicio de la corrida.
+// Con la máquina cargada, los pasos previos tardan más de 600 ms.
+// Por eso el tope es de 6 s. La prueba fina del tope vive en los tests unitarios de src/oracle/colab.rs.
 #[test]
 fn colab_tope_minutos_001_deja_gate_tope_de_duracion() {
     let e = Escenario::nuevo(ENTORNO_O2);
     fs::write(
         e.home.path().join("root.toml"),
-        "[colab]\nminutos_max = 0.01\n",
+        "[colab]\nminutos_max = 0.1\n",
     )
     .expect("root.toml");
     let falso = falso_a_medida(e.falso.path(), CORRIENDO, 0);
@@ -741,12 +781,12 @@ fn colab_tope_minutos_001_deja_gate_tope_de_duracion() {
     let duracion = inicio.elapsed();
     let stderr = String::from_utf8_lossy(&salida.stderr);
     assert!(
-        duracion < Duration::from_secs(5),
+        duracion < Duration::from_secs(30),
         "tardó {duracion:?}: {stderr}"
     );
     assert_eq!(salida.status.code(), Some(3), "stderr: {stderr}");
     assert!(
-        stderr.contains("Colab superó el tope de 600 ms: se liberó el runtime"),
+        stderr.contains("Colab superó el tope de 6 segundos: se liberó el runtime"),
         "{stderr}"
     );
     let lineas = e.llamadas();
@@ -770,6 +810,47 @@ fn colab_tope_minutos_001_deja_gate_tope_de_duracion() {
     assert!(
         !e.colab_json().exists(),
         "sin resultados: los tests quedan Pendiente"
+    );
+}
+
+// El tope corre sobre tiempo real desde el inicio de la corrida.
+// Un `new` lento consume el tope antes de sondear. Por eso el tope es de 6 s.
+// La prueba fina del tope vive en los tests unitarios de src/oracle/colab.rs.
+#[test]
+fn colab_tope_con_pasos_previos_lentos_llega_a_sondear() {
+    let e = Escenario::nuevo(ENTORNO_O2);
+    fs::write(
+        e.home.path().join("root.toml"),
+        "[colab]\nminutos_max = 0.1\n",
+    )
+    .expect("root.toml");
+    let falso = falso_a_medida_con(e.falso.path(), CORRIENDO, "sleep 1; exit 0", "exit 0");
+    let inicio = Instant::now();
+    let salida = correr(&e, &falso, &["--colab"]);
+    let duracion = inicio.elapsed();
+    let stderr = String::from_utf8_lossy(&salida.stderr);
+    assert!(
+        duracion < Duration::from_secs(30),
+        "tardó {duracion:?}: {stderr}"
+    );
+    assert_eq!(salida.status.code(), Some(3), "stderr: {stderr}");
+    let lineas = e.llamadas();
+    assert!(
+        lineas.iter().any(|l| l.contains("corre.py")),
+        "la corrida no llegó a corre.py: {lineas:?}"
+    );
+    assert!(
+        lineas.iter().any(|l| l.contains("estado.py")),
+        "la corrida debía estar sondeando: {lineas:?}"
+    );
+    let ultima = lineas.last().cloned().unwrap_or_default();
+    assert!(ultima.starts_with("stop -s"), "última llamada: {ultima}");
+    let gates = e.eventos_runtime();
+    assert!(
+        gates
+            .iter()
+            .any(|g| g["extra"]["accion"] == "liberar" && g["extra"]["causa"] == "tope de duración"),
+        "{gates:?}"
     );
 }
 
