@@ -2473,13 +2473,27 @@ const VARIABLES_GIT_DE_REPO: &[&str] = &[
     "GIT_DISCOVERY_ACROSS_FILESYSTEM",
 ];
 
-/// Comando `git -C <repo>` sin las variables `GIT_*` de `VARIABLES_GIT_DE_REPO` heredadas del entorno.
+/// Comando `git -C <repo>` endurecido para leer el repo sin ejecutar su código.
+/// Desactiva fsmonitor, hooks y atributos del repo con `-c`, antes de los args.
+/// Quita las variables `GIT_*` de `VARIABLES_GIT_DE_REPO` heredadas del entorno.
+/// Ignora la configuración del sistema y la global del usuario.
 pub(crate) fn comando_git(repo: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(repo).args(args);
+    cmd.arg("-C").arg(repo).args([
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.attributesFile=/dev/null",
+    ]);
+    cmd.args(args);
     for nombre in VARIABLES_GIT_DE_REPO {
         cmd.env_remove(nombre);
     }
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_ATTR_NOSYSTEM", "1");
     cmd
 }
 
@@ -2528,6 +2542,82 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn comando_git_no_ejecuta_el_fsmonitor_del_repo() {
+        // Un repo del builder puede traer `core.fsmonitor` en .git/config: un `git status` lo ejecutaría.
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repo = dir.path();
+        let marca = repo.join("marca");
+        let git_de_prueba = |args: &[&str]| {
+            let salida = Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(salida.status.success(), "git {args:?} falló");
+        };
+        git_de_prueba(&["init", "-q"]);
+        git_de_prueba(&["config", "user.email", "prueba@ejemplo.test"]);
+        git_de_prueba(&["config", "user.name", "prueba"]);
+        git_de_prueba(&["commit", "-q", "--allow-empty", "-m", "base"]);
+        let mut config = fs::OpenOptions::new()
+            .append(true)
+            .open(repo.join(".git").join("config"))
+            .expect("abre .git/config");
+        writeln!(
+            config,
+            "[core]\n\tfsmonitor = \"touch '{}'\"",
+            marca.display()
+        )
+        .expect("escribe .git/config");
+
+        assert!(!commit_de(repo).is_empty(), "commit_de no lee el HEAD");
+        comando_git(repo, &["status", "--porcelain"])
+            .output()
+            .expect("git status");
+        assert!(!marca.exists(), "git ejecutó core.fsmonitor del repo");
+    }
+
+    #[test]
+    fn comando_git_endurece_args_y_entorno() {
+        // Los `-c` van después de `-C repo` y antes de los args del llamador.
+        let cmd = comando_git(Path::new("/x"), &["status", "--porcelain"]);
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let esperado = [
+            "-C",
+            "/x",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.attributesFile=/dev/null",
+            "status",
+            "--porcelain",
+        ];
+        assert_eq!(args, esperado);
+
+        let variables = [
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("GIT_ATTR_NOSYSTEM", "1"),
+        ];
+        for (clave, valor) in variables {
+            assert!(
+                cmd.get_envs().any(|(k, v)| {
+                    k == std::ffi::OsStr::new(clave) && v == Some(std::ffi::OsStr::new(valor))
+                }),
+                "falta {clave}={valor} en el entorno del subproceso"
+            );
+        }
+    }
+
     use crate::oracle::perfiles::herramientas::{EjecutorHerramienta, SalidaHerramienta};
     use crate::oracle::tarea::{Escenario, Exclusion};
     use crate::tipos::{
