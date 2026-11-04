@@ -41,7 +41,7 @@ pub const MAX_ENTRADA_JUEZ_BYTES: u64 = 256 * 1024;
 /// Prompt fijo del juez. Refuta por default y pide solo un objeto JSON.
 const PROMPT_SISTEMA: &str = "Sos un PM técnico que revisa el diseño y la arquitectura de un repo contra su spec.
 REFUTA POR DEFAULT: el nivel de cada ítem parte en 0 y solo sube con evidencia citada textual.
-No revisás estilo, nombres ni formato. Solo revisás si el diseño sirve a la spec.
+No juzgás estilo, nombres ni formato, salvo lo que pide el ancla de un ítem. Solo revisás si el diseño sirve a la spec.
 Respondé estas tres preguntas con evidencia:
 - ¿Qué requisito queda difícil de extender o de mantener con esta estructura?
 - ¿Qué decisión de diseño es un riesgo para producción, como un estado global, un bloqueo o un error que se traga?
@@ -1714,6 +1714,21 @@ mod tests {
         let sistema = p.sistema.expect("tiene sistema");
         assert!(sistema.contains("sin_evidencia"), "{sistema}");
         assert!(!sistema.contains("no lo incluyas en items"), "{sistema}");
+    }
+
+    #[test]
+    fn juez_prompt_no_veta_nombres_si_el_ancla_los_pide() {
+        let c = caso();
+        let p = construir_prompt(&c.entrada(), &LimitesPrompt::default());
+        let sistema = p.sistema.expect("tiene sistema");
+        assert!(
+            sistema.contains("salvo lo que pide el ancla de un ítem"),
+            "{sistema}"
+        );
+        assert!(
+            !sistema.contains("No revisás estilo, nombres ni formato. Solo revisás"),
+            "{sistema}"
+        );
     }
 
     #[test]

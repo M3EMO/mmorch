@@ -390,7 +390,10 @@ from xml.sax.saxutils import quoteattr
 
 binario = "lib"
 casos = []
+compila = True
 for linea in sys.stdin:
+    if re.match(r"error(\[E\d+\])?:", linea):
+        compila = False
     m = re.match(r"\s*Running (\S+)", linea)
     if m:
         ruta = m.group(1)
@@ -399,6 +402,10 @@ for linea in sys.stdin:
     m = re.match(r"test (\S+) \.\.\. (ok|FAILED|ignored)", linea)
     if m:
         casos.append((binario, m.group(1), m.group(2)))
+
+# Un error de compilación no deja ningún `test ...`: la suite lo dice con un test fallido, no con un junit vacío.
+if not casos and not compila:
+    casos.append(("build", "compila", "FAILED"))
 
 print("<testsuite>")
 for binario, nombre, estado in casos:

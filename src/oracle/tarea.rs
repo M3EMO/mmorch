@@ -288,7 +288,15 @@ pub fn cargar_en(home: &Path, nombre: &str) -> Result<Tarea, ErrorOraculo> {
             "nombre de tarea inválido: {nombre:?}"
         )));
     }
-    Tarea::cargar_de(&home.join("oraculos").join(nombre))
+    let tarea = Tarea::cargar_de(&home.join("oraculos").join(nombre))?;
+    // Una carpeta copiada con el `nombre` de otra tarea pisaría sus pendientes y su evidencia (M18).
+    if tarea.nombre != nombre {
+        return Err(ErrorOraculo::TareaDefinicion(format!(
+            "la carpeta {nombre:?} declara nombre = {:?} en tarea.toml: los dos deben coincidir",
+            tarea.nombre
+        )));
+    }
+    Ok(tarea)
 }
 
 #[cfg(test)]
@@ -510,6 +518,17 @@ capas = [["protocolo"], ["comandos"]]
         escribir(&dir, MINIMO);
         let t = cargar_en(home.path(), "memora").expect("carga desde ROOT_HOME");
         assert_eq!(t.dir, dir);
+    }
+
+    #[test]
+    fn tarea_nombre_distinto_de_la_carpeta_es_error_con_codigo_2() {
+        let home = tempfile::tempdir().expect("temp dir");
+        let dir = home.path().join("oraculos").join("copia");
+        fs::create_dir_all(&dir).expect("crea la carpeta");
+        escribir(&dir, MINIMO);
+        let error = cargar_en(home.path(), "copia").expect_err("el nombre no coincide");
+        assert!(matches!(error, ErrorOraculo::TareaDefinicion(_)), "{error}");
+        assert_eq!(error.codigo_de_salida(), 2);
     }
 
     #[test]

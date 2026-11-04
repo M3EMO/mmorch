@@ -1,7 +1,7 @@
 //! Calibración del Oracle. La Tarea 12 escribe `$ROOT_HOME/calibracion.json` con la sensibilidad, la
 //! especificidad y la exactitud balanceada de cada dimensión, medidas con defectos conocidos. La Tarea 13
 //! lo lee: una dimensión queda `calibrada` si su exactitud balanceada llega a 0,9, y solo esas entran a
-//! `global`.
+//! `global`. Además exige muestra mínima: 5 defectos aplicados y 5 casos limpios.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -32,6 +32,10 @@ pub const ARCHIVO: &str = "calibracion.json";
 pub const VERSION: u32 = 1;
 /// Exactitud balanceada desde la que una dimensión queda calibrada.
 pub const UMBRAL: f32 = 0.9;
+/// Defectos aplicados mínimos para calibrar una dimensión. Con menos, la medida no calibra.
+const MIN_DEFECTOS_APLICABLES: u32 = 5;
+/// Casos limpios mínimos para calibrar una dimensión. Con menos, la medida no calibra.
+const MIN_LIMPIOS: u32 = 5;
 
 /// Una medición de una dimensión de una tarea, con su muestra.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -127,10 +131,13 @@ impl Calibraciones {
     }
 
     /// Marca cada puntaje con su calibración: `calibrada` si la exactitud balanceada llega a `UMBRAL`.
-    /// Sin fila, el puntaje queda sin calibrar.
+    /// Sin fila, o con muestra insuficiente, el puntaje queda sin calibrar.
     pub fn aplicar(&self, tarea: &str, puntajes: &mut [Puntaje]) {
         for puntaje in puntajes {
-            let fila = self.de(tarea, puntaje.dimension);
+            // Una fila con muestra corta cuenta como si no existiera.
+            let fila = self
+                .de(tarea, puntaje.dimension)
+                .filter(|f| muestra_suficiente(f));
             puntaje.exactitud_balanceada = fila.and_then(|f| f.exactitud_balanceada);
             // Una fila incompleta no calibra: el tope detuvo la medición antes de su último caso.
             let incompleta = fila.is_some_and(|f| f.incompleta);
@@ -236,6 +243,7 @@ struct Medida {
 
 /// Por qué el tope detuvo una calibración: el tope, el gasto medido, el peor caso que no entró y los
 /// casos medidos (decisión 48).
+#[derive(Clone)]
 struct Detencion {
     tope_usd: f64,
     gasto_usd: f64,
@@ -244,11 +252,12 @@ struct Detencion {
 }
 
 /// Tope ya resuelto para una medición: el peor caso de un caso, el inicio de la calibración y el medidor.
+/// El medidor es `Sync`: los reemplazos lo miran desde los hilos de los casos.
 struct Tope<'a> {
     usd: f64,
     peor_caso: f64,
     inicio: f64,
-    gasto_desde: &'a dyn Fn(f64) -> Result<f64, ErrorOraculo>,
+    gasto_desde: &'a (dyn Fn(f64) -> Result<f64, ErrorOraculo> + Sync),
 }
 
 /// Si el gasto desde el inicio más el peor caso de un caso pasa el tope, la detención. Sin tope, nunca.
@@ -357,12 +366,16 @@ struct Ronda<'a> {
     base: &'a Veredicto,
     items: &'a [&'static str],
     evaluador: &'a (dyn Fn(&Path, TipoCaso) -> Result<Veredicto, ErrorOraculo> + Sync),
+    /// Tope de la medición. Cada reemplazo lo revisa antes de correr.
+    tope: Option<&'a Tope<'a>>,
 }
 
 /// Lo que midió un caso: los reemplazos de sus inyecciones inválidas y el caso (`None`: no aplicable).
+/// Si el tope se alcanzó antes de un reemplazo, `caso` es `None` y `detencion` dice por qué.
 struct Medido {
     reemplazos: u32,
     caso: Option<Caso>,
+    detencion: Option<Detencion>,
 }
 
 /// Mide el caso `i`. Los pares llevan un defecto: el de `defectos[(i / 2) % len]`, la misma rotación de los
@@ -378,6 +391,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         return Ok(Medido {
             reemplazos: 0,
             caso: Some(caso),
+            detencion: None,
         });
     }
     let defecto = r.defectos[(i / 2) % r.defectos.len()];
@@ -395,6 +409,16 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
     let mut invalidos = 0u32;
     let mut medido = None;
     for k in 0..=MAX_REEMPLAZOS {
+        // Antes de cada reemplazo (no antes de la primera inyección) se mira el tope. Si no entra, no se gasta.
+        if k > 0
+            && let Some(detencion) = detencion_si_no_entra(r.tope, 0)?
+        {
+            return Ok(Medido {
+                reemplazos: invalidos,
+                caso: None,
+                detencion: Some(detencion),
+            });
+        }
         let semilla_k = semilla_caso.wrapping_add(u64::from(k) * 1_000_003);
         let copia = r.tmp.join(format!("caso-{i}"));
         super::copiar_repo(r.repo_bueno, &copia).map_err(|e| super::infra("copia del repo", e))?;
@@ -419,6 +443,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         return Ok(Medido {
             reemplazos: invalidos,
             caso: None,
+            detencion: None,
         });
     };
     let caso = Caso {
@@ -435,12 +460,14 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
     Ok(Medido {
         reemplazos: invalidos,
         caso: Some(caso),
+        detencion: None,
     })
 }
 
 /// Como `calibrar_medida`, con `hilos` casos a la vez (1 corre en serie). Un coordinador lanza los casos en
 /// orden. Antes de cada lanzamiento compara `gasto + (en_vuelo + 1) * peor_caso` con el tope: si no entra y
-/// hay casos en vuelo, espera a uno; si no entra y no hay ninguno, para. Un error de caso deja de lanzar y
+/// hay casos en vuelo, espera a uno; si no entra y no hay ninguno, para. Antes de cada reemplazo de una
+/// inyección inválida, un caso revisa el tope y, si no entra, la medición se detiene. Un error de caso deja de lanzar y
 /// espera a los que están en vuelo; devuelve el error del índice más bajo. Los casos se ordenan por índice
 /// antes de armar la fila, así el resultado no depende del orden de término.
 #[allow(clippy::too_many_arguments)]
@@ -511,6 +538,7 @@ fn calibrar_medida_con_hilos(
         base: &base,
         items: &items,
         evaluador,
+        tope,
     };
     let hilos = hilos.max(1);
     let (tx, rx) = mpsc::channel::<(usize, Result<Medido, ErrorOraculo>)>();
@@ -525,17 +553,17 @@ fn calibrar_medida_con_hilos(
     std::thread::scope(|s| -> Result<(), ErrorOraculo> {
         let ronda = &ronda;
         loop {
-            while error.is_none() && siguiente < n && en_vuelo < hilos {
+            while error.is_none() && siguiente < n && en_vuelo < hilos && detencion.is_none() {
                 if let Some(t) = tope {
                     let gasto = (t.gasto_desde)(t.inicio)?;
                     if gasto + (en_vuelo as f64 + 1.0) * t.peor_caso > t.usd {
                         if en_vuelo == 0 {
+                            // El conteo de casos medidos lo pone el final, cuando todos terminaron.
                             detencion = Some(Detencion {
                                 tope_usd: t.usd,
                                 gasto_usd: gasto,
                                 peor_caso_usd: t.peor_caso,
-                                casos: resultados.values().filter(|m| m.caso.is_some()).count()
-                                    as u32,
+                                casos: 0,
                             });
                         }
                         break;
@@ -551,7 +579,7 @@ fn calibrar_medida_con_hilos(
                     let _ = envio.send((i, medir_caso(ronda, i)));
                 });
             }
-            if siguiente == n || error.is_some() {
+            if siguiente == n || error.is_some() || detencion.is_some() {
                 tx_abierto = None;
             }
             if en_vuelo == 0 {
@@ -563,6 +591,10 @@ fn calibrar_medida_con_hilos(
             en_vuelo -= 1;
             match resultado {
                 Ok(medido) => {
+                    // Un reemplazo que no entró en el tope detiene los lanzamientos. Los casos en vuelo terminan.
+                    if detencion.is_none() {
+                        detencion = medido.detencion.clone();
+                    }
                     resultados.insert(i, medido);
                 }
                 Err(e) => {
@@ -584,8 +616,13 @@ fn calibrar_medida_con_hilos(
         reemplazos += medido.reemplazos;
         match medido.caso {
             Some(caso) => casos.push(caso),
+            // Un caso que el tope detuvo no es no aplicable: no se midió.
+            None if medido.detencion.is_some() => {}
             None => no_aplicables += 1,
         }
+    }
+    if let Some(d) = detencion.as_mut() {
+        d.casos = casos.len() as u32;
     }
     let incompleta = detencion.is_some();
     let fila = if incompleta && casos.is_empty() {
@@ -701,8 +738,9 @@ pub struct Presupuesto<'a> {
     pub usd: f64,
     /// Peor caso en USD de un caso con estas partes. Un modelo sin precio da un error.
     pub peor_caso: &'a dyn Fn(&Partes) -> Result<f64, ErrorOraculo>,
-    /// Gasto de API desde un instante (epoch en segundos): llamadas y reservas abiertas.
-    pub gasto_desde: &'a dyn Fn(f64) -> Result<f64, ErrorOraculo>,
+    /// Gasto de API desde un instante (epoch en segundos): llamadas y reservas abiertas. Es `Sync`: los
+    /// reemplazos lo miran desde los hilos de los casos.
+    pub gasto_desde: &'a (dyn Fn(f64) -> Result<f64, ErrorOraculo> + Sync),
 }
 
 /// Elecciones de los jueces que un caso puede llamar. `None`: el juez no se arma y no llama.
@@ -913,14 +951,17 @@ pub fn calibrar_tarea_con(
         if let Some(fila) = &medida.fila {
             agregar(home, fila)?;
         }
+        let archivo =
+            casos.map_or_else(|| "ninguno".to_string(), |ruta| ruta.display().to_string());
         return Err(ErrorOraculo::Tope(format!(
-            "calibración de {}/{} detenida por el tope de {:.2} USD: gasto de API {:.2} USD y el peor caso de un caso es {:.2} USD. Casos medidos: {}.",
+            "calibración de {}/{} detenida por el tope de {:.2} USD: gasto de API {:.2} USD y el peor caso de un caso es {:.2} USD. Casos medidos: {}. Archivo de casos: {}.",
             tarea.nombre,
             dim.clave(),
             detencion.tope_usd,
             detencion.gasto_usd,
             detencion.peor_caso_usd,
-            detencion.casos
+            detencion.casos,
+            archivo
         )));
     }
     let fila = medida
@@ -1271,6 +1312,11 @@ fn nivel_de(puntaje: &Puntaje, item: &str) -> Option<u8> {
 /// `aciertos / total`. `None` sin casos: una métrica sin clase no es 0 ni 1.
 fn proporcion(aciertos: u32, total: u32) -> Option<f32> {
     (total > 0).then(|| aciertos as f32 / total as f32)
+}
+
+/// Una fila calibra solo con muestra mínima: defectos y limpios por encima de sus mínimos.
+fn muestra_suficiente(fila: &Fila) -> bool {
+    fila.defectos >= MIN_DEFECTOS_APLICABLES && fila.limpios >= MIN_LIMPIOS
 }
 
 /// Media de sensibilidad y especificidad. `None` si cualquiera de las dos no tiene casos.
@@ -2409,6 +2455,69 @@ mod tests {
     }
 
     #[test]
+    fn calibra_n_dos_con_un_defecto_y_un_limpio_acertados_no_califica() {
+        let base = veredicto_base();
+        let fila = calibrar(
+            Path::new(FIXTURE),
+            &base,
+            |limpia, _, base| if limpia { base.clone() } else { hundido(base) },
+            2,
+        );
+        assert_eq!((fila.defectos, fila.limpios), (1, 1));
+        assert_eq!(fila.exactitud_balanceada, Some(1.0));
+        let tarea = fila.tarea.clone();
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![fila],
+        };
+        let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.0)];
+        c.aplicar(&tarea, &mut puntajes);
+        assert!(
+            !puntajes[0].calibrada,
+            "1 defecto y 1 limpio no son muestra"
+        );
+        assert_eq!(puntajes[0].exactitud_balanceada, None);
+    }
+
+    #[test]
+    fn calibra_cinco_defectos_y_cinco_limpios_acertados_si_califica() {
+        let base = veredicto_base();
+        let fila = calibrar(
+            Path::new(FIXTURE),
+            &base,
+            |limpia, _, base| if limpia { base.clone() } else { hundido(base) },
+            10,
+        );
+        assert_eq!((fila.defectos, fila.limpios), (5, 5));
+        let tarea = fila.tarea.clone();
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![fila],
+        };
+        let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.0)];
+        c.aplicar(&tarea, &mut puntajes);
+        assert!(puntajes[0].calibrada);
+        assert_eq!(puntajes[0].exactitud_balanceada, Some(1.0));
+    }
+
+    #[test]
+    fn calibra_cuatro_defectos_o_cuatro_limpios_no_alcanzan_el_minimo() {
+        let mut pocos_defectos = fila("memora", Dimension::Seguridad, 1.0, Some(1.0));
+        pocos_defectos.defectos = 4;
+        let mut pocos_limpios = fila("memora", Dimension::Seguridad, 1.0, Some(1.0));
+        pocos_limpios.limpios = 4;
+        for f in [pocos_defectos, pocos_limpios] {
+            let c = Calibraciones {
+                v: VERSION,
+                filas: vec![f],
+            };
+            let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.8)];
+            c.aplicar("memora", &mut puntajes);
+            assert!(!puntajes[0].calibrada);
+        }
+    }
+
+    #[test]
     fn calibra_ida_y_vuelta_del_archivo() {
         let c = Calibraciones {
             v: VERSION,
@@ -2752,6 +2861,63 @@ mod tests {
     }
 
     #[test]
+    fn calibra_el_tope_se_revisa_antes_de_cada_reemplazo() {
+        // La base no cuesta. La primera inyección cuesta 1 y es inválida. Con tope 1,5 y peor caso 1, el
+        // reemplazo no entra: la calibración se detiene sin gastarlo.
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let primera = Mutex::new(true);
+        let ev = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
+            if limpia {
+                base.clone()
+            } else if std::mem::replace(&mut *primera.lock().expect("lock"), false) {
+                con_motivo(base, NO_COMPILA)
+            } else {
+                bajada(base)
+            }
+        });
+        let gastado = Mutex::new(0.0f64);
+        let llamadas = AtomicUsize::new(0);
+        let evaluar = |ruta: &Path, tipo: TipoCaso| {
+            llamadas.fetch_add(1, Ordering::SeqCst);
+            if tipo != TipoCaso::Base {
+                *gastado.lock().expect("gasto") += 1.0;
+            }
+            ev(ruta)
+        };
+        let gasto = |_: f64| -> Result<f64, ErrorOraculo> { Ok(*gastado.lock().expect("gasto")) };
+        let tope = Tope {
+            usd: 1.5,
+            peor_caso: 1.0,
+            inicio: 0.0,
+            gasto_desde: &gasto,
+        };
+        let (_t, tarea) = tarea_prueba();
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Estructura,
+            1,
+            42,
+            Path::new(FIXTURE),
+            &evaluar,
+            Some(&tope),
+            &Vec::new,
+            1,
+        )
+        .expect("calibra");
+        assert!(
+            medida.detencion.is_some(),
+            "el tope detiene antes del reemplazo"
+        );
+        assert_eq!(
+            llamadas.load(Ordering::SeqCst),
+            2,
+            "la base y la inyección inválida; el reemplazo no corre"
+        );
+        assert!(medida.casos.is_empty(), "ningún caso medido");
+        assert!(medida.fila.is_none(), "sin casos no hay fila");
+    }
+
+    #[test]
     fn calibra_completitud_con_no_compila_mide_y_no_reemplaza() {
         let base = veredicto_de(Dimension::Completitud, 1.0, None);
         let (_t, tarea) = tarea_prueba();
@@ -2892,6 +3058,58 @@ mod tests {
             medida.casos.len(),
             2,
             "se detiene tras los 2 casos que entraron"
+        );
+    }
+
+    #[test]
+    fn calibra_tope_nombra_el_archivo_de_casos_en_el_error() {
+        // Base y casos cuestan 0,25. El peor caso es 0,5 y el tope 1,0: se miden dos casos y se detiene.
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = home.path().join("oraculos").join("calibra-fixture");
+        fs::create_dir_all(&carpeta).expect("carpeta");
+        let repo = carpeta.join("repo-bueno");
+        fs::create_dir_all(&repo).expect("repo");
+        super::inyectar::pruebas::copiar(Path::new(FIXTURE), &repo);
+        let _ = tarea_en(&carpeta, "\n[calibracion]\nrepo = \"repo-bueno\"\n");
+        let gastado = Mutex::new(0.0f64);
+        let peor = |_: &Partes| Ok::<f64, ErrorOraculo>(0.5);
+        let gasto = |_: f64| -> Result<f64, ErrorOraculo> { Ok(*gastado.lock().expect("gasto")) };
+        let presupuesto = Presupuesto {
+            usd: 1.0,
+            peor_caso: &peor,
+            gasto_desde: &gasto,
+        };
+        let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
+            *gastado.lock().expect("gasto") += 0.25;
+            Ok(veredicto_base())
+        };
+        let error = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "seguridad",
+            8,
+            42,
+            None,
+            Some(&presupuesto),
+            &evaluador,
+        )
+        .expect_err("el tope detiene la calibración");
+        let texto = error.to_string();
+        let archivos: Vec<String> = fs::read_dir(home.path().join(CARPETA_CASOS))
+            .expect("carpeta de casos")
+            .map(|e| {
+                e.expect("entrada")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|n| n.ends_with(".casos.jsonl"))
+            .collect();
+        assert_eq!(archivos.len(), 1, "un archivo de casos de la corrida");
+        assert!(
+            texto.contains(&archivos[0]),
+            "el error nombra {}: {texto}",
+            archivos[0]
         );
     }
 

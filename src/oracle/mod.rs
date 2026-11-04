@@ -30,6 +30,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
+use fs4::{FileExt, TryLockError};
 use thiserror::Error as ErrorDerive;
 
 use crate::borrado;
@@ -62,6 +63,8 @@ const XML_OCULTO: &str = "oculto.xml";
 const CARPETA_TEMPORALES: &str = "tmp";
 /// Prefijo de las carpetas temporales de `evaluar`.
 const PREFIJO_TEMPORAL: &str = "evaluar-";
+/// Archivo de lock dentro de cada carpeta `evaluar-*`. Su `flock` dura lo que dura la evaluación (M11).
+const ARCHIVO_LOCK_TEMPORAL: &str = ".lock";
 /// Prefijo de las carpetas de Colab dentro de `tmp`: el junit bajado de cada corrida (B18).
 const PREFIJO_COLAB_TEMPORAL: &str = "colab-";
 /// Lista de tests que pytest recolecta, dentro de `/salida`. Se compara con el junit (A5).
@@ -76,6 +79,16 @@ const CADUCIDAD: Duration = Duration::from_secs(24 * 3600);
 /// solo su carpeta, nunca la tarea entera (A2).
 const DIR_CONTRATO: &str = "/oraculo/contrato";
 const DIR_OCULTO: &str = "/oraculo/oculto";
+/// Carpeta de la copia de la suite oculta de pytest dentro de `/salida`. Root la borra tras cada corrida (H1).
+const CARPETA_COPIA_OCULTO: &str = ".oculto";
+/// Ruta de la copia dentro del contenedor. Reemplaza a `DIR_OCULTO` en el comando de pytest (H1).
+const DIR_COPIA_OCULTO: &str = "/salida/.oculto";
+/// Carpeta del plugin dentro de `/salida`. El comando la pone en `PYTHONPATH` (H1).
+const CARPETA_PLUGIN: &str = ".root";
+/// Módulo del plugin. Pytest lo carga con `-p root_oculto` (H1).
+const MODULO_PLUGIN: &str = "root_oculto";
+/// Código del plugin. Borra los `.py` de la copia después de la colección (H1).
+const PLUGIN_OCULTO: &str = include_str!("pytest_oculto.py");
 
 /// Ejecutor de un contenedor. En producción es `contenedor::ejecutar`; los tests le dan uno falso.
 type Correr<'a> = &'a dyn Fn(&Ejecucion) -> Result<Resultado, ErrorOraculo>;
@@ -535,8 +548,8 @@ fn evaluar_con(
     // Los temporales van a ROOT_HOME, nunca a TMPDIR ni a /tmp (desempate 6).
     let home = o.home.clone().unwrap_or_else(root_home);
     let (colab, avisos_colab) = pendientes::colab_para_veredicto(&home, &tarea.nombre)?;
-    let commit = commit_de(&repo);
-    let (colab, aviso_commit) = filtrar_colab_por_commit(colab, &commit);
+    let identidad = identidad_de(&repo, tarea)?;
+    let (colab, aviso_commit) = filtrar_colab_por_commit(colab, &identidad);
     let mut avisos = deps.avisos;
     avisos.extend(avisos_colab);
     avisos.extend(aviso_commit);
@@ -552,6 +565,10 @@ fn evaluar_con(
     limpiar_temporales(&tmp, SystemTime::now());
     // La copia aísla el repo: un artefacto del builder no altera el original.
     let copia = temporal(&tmp).map_err(|e| infra("directorio temporal", e))?;
+    // El lock dura lo que la evaluación: otra corrida no borra esta carpeta mientras vive. Se declara
+    // después de `copia`, así se suelta antes de borrarla.
+    let _vivo =
+        tomar_lock_temporal(copia.path()).map_err(|e| infra("lock del directorio temporal", e))?;
     let repo_copia = copia.path().join("repo");
     copiar_repo(&repo, &repo_copia).map_err(|e| infra("copia del repo", e))?;
     // El historial de evidencia es de esta versión del repo y de este oráculo (Tarea 39, Desempates técnicos
@@ -597,6 +614,7 @@ fn evaluar_con(
             let motivo = motivo_de_la_descarga(&hallazgos);
             let mut v = sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
             v.ambiguedades = ambiguedades.clone();
+            v.commit = identidad.clone();
             return Ok(con_costo(v, &juez_config));
         }
     };
@@ -633,6 +651,7 @@ fn evaluar_con(
                 let mut v =
                     sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
                 v.ambiguedades = ambiguedades.clone();
+                v.commit = identidad.clone();
                 return Ok(con_costo(v, &juez_config));
             }
         }
@@ -664,6 +683,7 @@ fn evaluar_con(
                 let mut v =
                     sin_veredicto(&repo, tarea, &colab, hallazgos, avisos, rubricas, &motivo);
                 v.ambiguedades = ambiguedades.clone();
+                v.commit = identidad.clone();
                 return Ok(con_costo(v, &juez_config));
             }
         }
@@ -753,7 +773,7 @@ fn evaluar_con(
         v: VERSION,
         tarea: tarea.nombre.clone(),
         repo: nombre_de(&repo),
-        commit,
+        commit: identidad,
         contrato: contrato.conteo.clone(),
         oculto: oculto.conteo.clone(),
         puntajes,
@@ -1696,7 +1716,6 @@ fn sin_veredicto(
     Veredicto {
         tarea: tarea.nombre.clone(),
         repo: nombre_de(repo),
-        commit: commit_de(repo),
         repeticiones: tarea.repeticiones,
         hallazgos,
         pendientes: pendientes::desde(tarea, colab),
@@ -1714,8 +1733,25 @@ fn temporal(tmp: &Path) -> io::Result<tempfile::TempDir> {
         .tempdir_in(tmp)
 }
 
-/// Borra las carpetas `evaluar-*` y `colab-*` de `tmp` con más de 24 horas (B18). Los fallos se
-/// ignoran: un temporal viejo que no se borra no impide evaluar.
+/// Toma el lock exclusivo de la carpeta temporal `dir` sin esperar. Lo tiene mientras viva el archivo
+/// devuelto. Con otro dueño da `WouldBlock`.
+fn tomar_lock_temporal(dir: &Path) -> io::Result<fs::File> {
+    let archivo = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(dir.join(ARCHIVO_LOCK_TEMPORAL))?;
+    match FileExt::try_lock(&archivo) {
+        Ok(()) => Ok(archivo),
+        Err(TryLockError::WouldBlock) => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+        Err(TryLockError::Error(e)) => Err(e),
+    }
+}
+
+/// Borra las carpetas `evaluar-*` y `colab-*` de `tmp` con más de 24 horas (B18). Una carpeta con el
+/// lock tomado por otra evaluación se salta, aunque sea vieja (M11). Los fallos se ignoran: un temporal
+/// viejo que no se borra no impide evaluar.
 fn limpiar_temporales(tmp: &Path, ahora: SystemTime) {
     let Ok(entradas) = fs::read_dir(tmp) else {
         return;
@@ -1738,6 +1774,16 @@ fn limpiar_temporales(tmp: &Path, ahora: SystemTime) {
         {
             continue;
         }
+        // El lock se toma antes de borrar: sin él, una evaluación viva perdería su carpeta.
+        // Lo que no sea carpeta no lleva lock.
+        let _lock = if meta.is_dir() {
+            match tomar_lock_temporal(&ruta) {
+                Ok(archivo) => Some(archivo),
+                Err(_) => continue,
+            }
+        } else {
+            None
+        };
         // Un enlace se borra como enlace: su destino puede estar fuera de `tmp` y no se toca.
         let _ = if meta.is_symlink() {
             borrado::borrar_archivo_dentro(tmp, &ruta)
@@ -1972,7 +2018,8 @@ fn borrar_xml(salida: &Path, xml: &str) -> Result<(), ErrorOraculo> {
 /// Una corrida de la suite en un contenedor nuevo. `Ok(Err(motivo))` si el junit no vale (A5).
 /// `Err` solo si la infraestructura falla o si no hay junit (A2: ahí el stderr va a `registros/`).
 /// Con `pytest`, el código de salida debe cuadrar con las fallas, y con `esperados` (si hay) el junit
-/// trae exactamente esas claves.
+/// trae exactamente esas claves. Fuera de pytest, el junit no puede estar vacío y el código debe
+/// cuadrar con las fallas: código 0 sin fallas, o código distinto de 0 con alguna falla.
 fn correr_una(
     c: &Corrida,
     cmd: &str,
@@ -1982,11 +2029,34 @@ fn correr_una(
     esperados: Option<&BTreeSet<String>>,
     correr: Correr,
 ) -> Result<Result<Junit, String>, ErrorOraculo> {
-    borrar_xml(c.salida, xml)?;
-    let resultado = correr(&ejecucion_de_suite(c, &cmd_con_cache(c, cmd), dir))?;
+    // La suite oculta de pytest escribe su junit con un nombre nuevo en cada corrida (H1).
+    let oculta = es_oculto_pytest(c, cmd, dir);
+    let xml_corrida = if oculta {
+        xml_aleatorio()
+    } else {
+        xml.to_string()
+    };
+    borrar_xml(c.salida, &xml_corrida)?;
+    let juicio = correr_suite(c, cmd, dir, &xml_corrida, correr)
+        .and_then(|resultado| juzgar_junit(c, &xml_corrida, &resultado, pytest, esperados));
+    if oculta {
+        borrar_xml(c.salida, &xml_corrida)?;
+    }
+    juicio
+}
+
+/// Lee el junit `xml` de la corrida y dice si vale. `Ok(Err(motivo))` si no vale (A5).
+/// `Err` solo si no hay junit (A2: ahí el stderr va a `registros/`) o si la infraestructura falla.
+fn juzgar_junit(
+    c: &Corrida,
+    xml: &str,
+    resultado: &Resultado,
+    pytest: bool,
+    esperados: Option<&BTreeSet<String>>,
+) -> Result<Result<Junit, String>, ErrorOraculo> {
     let ruta = c.salida.join(xml);
     if !ruta.is_file() {
-        return Err(sin_junit(c, xml, &resultado));
+        return Err(sin_junit(c, xml, resultado));
     }
     let Ok(crudo) = junit::leer(&ruta) else {
         return Ok(Err("el junit no se pudo leer".into()));
@@ -2002,18 +2072,31 @@ fn correr_una(
                 esperados.len()
             )));
         }
-        let hay_falla = crudo.tests.values().any(|r| *r == ResultadoTest::Falla);
-        let cuadra = match resultado.codigo {
-            0 => !hay_falla,
-            1 => hay_falla,
-            _ => false,
+    } else if crudo.tests.is_empty() {
+        // Un comando que no corrió ningún test no da veredicto: pasaría sin aviso.
+        return Ok(Err(
+            "el junit no trae ningún test: la suite no corrió nada".into()
+        ));
+    }
+    let hay_falla = crudo.tests.values().any(|r| *r == ResultadoTest::Falla);
+    let cuadra = match (resultado.codigo, pytest) {
+        (0, true) => !hay_falla,
+        (1, true) => hay_falla,
+        (_, true) => false,
+        // Fuera de pytest, el comando escribe su propio junit: solo un código distinto de 0 con un junit
+        // verde no cuadra (M6). Un código 0 con fallas en el junit sigue siendo un veredicto.
+        (codigo, false) => codigo == 0 || hay_falla,
+    };
+    if !cuadra {
+        let motivo = if pytest {
+            "el código de pytest"
+        } else {
+            "el código del comando"
         };
-        if !cuadra {
-            return Ok(Err(format!(
-                "el código de pytest ({}) no coincide con las fallas del junit",
-                resultado.codigo
-            )));
-        }
+        return Ok(Err(format!(
+            "{motivo} ({}) no coincide con las fallas del junit",
+            resultado.codigo
+        )));
     }
     Ok(Ok(crudo.con_ids()))
 }
@@ -2031,8 +2114,8 @@ fn coleccion_de(
     borrado::borrar_archivo_dentro(c.salida, &ruta)
         .map_err(|e| infra("borrar la lista de tests de la corrida anterior", e))?;
     // Los flags se quitan antes del preludio de caché: su `pip` no es el `pytest` de la suite.
-    let orden = cmd_con_cache(c, &comando_de_coleccion(cmd));
-    let resultado = correr(&ejecucion_de_suite(c, &orden, dir))?;
+    // La colección no escribe junit: el nombre `XML_OCULTO` no se usa aquí.
+    let resultado = correr_suite(c, &comando_de_coleccion(cmd), dir, XML_OCULTO, correr)?;
     if !ruta.is_file() {
         return Err(sin_junit(c, ARCHIVO_COLECCION, &resultado));
     }
@@ -2112,16 +2195,139 @@ fn cmd_con_cache(c: &Corrida, cmd: &str) -> String {
     }
 }
 
+/// Adapta el comando de la suite oculta de pytest a su copia (H1). Cambia la carpeta a `/salida/.oculto`
+/// y el junit a `xml_aleatorio`. Carga el plugin justo después de `pytest` y fija el entorno.
+fn adaptar_oculto(cmd: &str, xml_aleatorio: &str) -> String {
+    let cambiado = cmd.replace(DIR_OCULTO, DIR_COPIA_OCULTO).replace(
+        &format!("--junitxml=/salida/{XML_OCULTO}"),
+        &format!("--junitxml=/salida/{xml_aleatorio}"),
+    );
+    let con_plugin = match fin_de_palabra_pytest(&cambiado) {
+        Some(fin) => format!(
+            "{} -p {MODULO_PLUGIN}{}",
+            &cambiado[..fin],
+            &cambiado[fin..]
+        ),
+        None => cambiado,
+    };
+    format!(
+        "export PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/salida/{CARPETA_PLUGIN}:${{PYTHONPATH:-}} ROOT_OCULTO_DIR={DIR_COPIA_OCULTO}; {con_plugin}"
+    )
+}
+
+/// Posición justo después de la primera `pytest` que es una palabra entera del comando (H1).
+fn fin_de_palabra_pytest(cmd: &str) -> Option<usize> {
+    const PALABRA: &str = "pytest";
+    let es_parte = |c: char| c.is_alphanumeric() || c == '_';
+    let mut desde = 0;
+    while let Some(i) = cmd[desde..].find(PALABRA) {
+        let ini = desde + i;
+        let fin = ini + PALABRA.len();
+        let antes = cmd[..ini].chars().next_back().is_some_and(es_parte);
+        let despues = cmd[fin..].chars().next().is_some_and(es_parte);
+        if !antes && !despues {
+            return Some(fin);
+        }
+        desde = fin;
+    }
+    None
+}
+
+/// Si la corrida es la suite oculta de pytest y la carpeta `oculto/` existe en el host. Solo entonces
+/// corre desde la copia (H1). Sin carpeta en el host, sigue el camino de siempre.
+fn es_oculto_pytest(c: &Corrida, cmd: &str, dir: &str) -> bool {
+    dir == DIR_OCULTO && fin_de_palabra_pytest(cmd).is_some() && c.tarea.dir.join("oculto").is_dir()
+}
+
+/// Deja lista la copia de la suite oculta en `/salida/.oculto`, con el plugin en `/salida/.root` (H1).
+/// Borra antes la copia anterior.
+fn preparar_copia_oculto(c: &Corrida) -> Result<(), ErrorOraculo> {
+    let copia = c.salida.join(CARPETA_COPIA_OCULTO);
+    borrado::borrar_dir_dentro(c.salida, &copia)
+        .map_err(|e| infra("borrar la copia oculta anterior", e))?;
+    copiar_arbol(&c.tarea.dir.join("oculto"), &copia)
+        .map_err(|e| infra("copiar la suite oculta", e))?;
+    // La carpeta del plugin se borra entera: un producto pudo dejar en ella un `sitecustomize.py` (H1).
+    let carpeta = c.salida.join(CARPETA_PLUGIN);
+    borrado::borrar_dir_dentro(c.salida, &carpeta)
+        .map_err(|e| infra("borrar la carpeta del plugin anterior", e))?;
+    fs::create_dir_all(&carpeta).map_err(|e| infra("crear la carpeta del plugin", e))?;
+    fs::write(carpeta.join(format!("{MODULO_PLUGIN}.py")), PLUGIN_OCULTO)
+        .map_err(|e| infra("escribir el plugin de pytest", e))
+}
+
+/// Copia archivos y carpetas de `origen` a `destino`. Un enlace o un tipo raro es error: la copia no los trae.
+fn copiar_arbol(origen: &Path, destino: &Path) -> io::Result<()> {
+    fs::create_dir_all(destino)?;
+    for entrada in fs::read_dir(origen)? {
+        let entrada = entrada?;
+        let tipo = entrada.file_type()?;
+        let (desde, hasta) = (entrada.path(), destino.join(entrada.file_name()));
+        if tipo.is_dir() {
+            copiar_arbol(&desde, &hasta)?;
+        } else if tipo.is_file() {
+            fs::copy(&desde, &hasta)?;
+        } else {
+            let motivo = format!("{} no es archivo ni carpeta", desde.display());
+            return Err(io::Error::new(io::ErrorKind::InvalidData, motivo));
+        }
+    }
+    Ok(())
+}
+
+/// Borra la copia de la suite oculta de `/salida`.
+fn limpiar_copia_oculto(c: &Corrida) -> Result<(), ErrorOraculo> {
+    borrado::borrar_dir_dentro(c.salida, &c.salida.join(CARPETA_COPIA_OCULTO))
+        .map_err(|e| infra("borrar la copia oculta", e))
+}
+
+/// Nombre del junit de una corrida de la suite oculta: `oculto-<16 hex>.xml` (H1). El azar sale de
+/// `RandomState`, sin dependencias nuevas.
+fn xml_aleatorio() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    hasher.write_u128(nanos);
+    hasher.write_u32(std::process::id());
+    format!("oculto-{:016x}.xml", hasher.finish())
+}
+
+/// Una corrida de contenedor de la suite `dir` con `cmd`. `xml` es el junit que escribe el comando.
+/// La suite oculta de pytest corre desde la copia: la prepara antes y la borra después, pase lo que pase (H1).
+fn correr_suite(
+    c: &Corrida,
+    cmd: &str,
+    dir: &str,
+    xml: &str,
+    correr: Correr,
+) -> Result<Resultado, ErrorOraculo> {
+    if !es_oculto_pytest(c, cmd, dir) {
+        return correr(&ejecucion_de_suite(c, &cmd_con_cache(c, cmd), dir));
+    }
+    let resultado = preparar_copia_oculto(c).and_then(|()| {
+        let adaptado = adaptar_oculto(cmd, xml);
+        correr(&ejecucion_de_suite(c, &cmd_con_cache(c, &adaptado), dir))
+    });
+    let limpieza = limpiar_copia_oculto(c);
+    let resultado = resultado?;
+    limpieza?;
+    Ok(resultado)
+}
+
 /// Lo que un contenedor de suite necesita: su carpeta (solo esa, no la tarea) y la salida.
 /// `dir` es la carpeta dentro del contenedor, y es el último argumento del comando.
 fn ejecucion_de_suite(c: &Corrida, cmd: &str, dir: &str) -> Ejecucion {
     let nombre = dir.rsplit('/').next().unwrap_or_default();
+    // La suite oculta de pytest corre desde su copia en `/salida`: no monta nada en `/oraculo` (H1).
+    let copia = es_oculto_pytest(c, cmd, dir);
     Ejecucion {
         imagen: c.tarea.imagen.clone(),
         repo: Some(c.repo.to_path_buf()),
         // Sin carpeta de suite, nada se monta: el comando falla con su propio error (A2).
-        oraculo: Some(c.tarea.dir.join(nombre)).filter(|ruta| ruta.is_dir()),
-        oraculo_destino: Some(dir.to_string()),
+        oraculo: Some(c.tarea.dir.join(nombre)).filter(|ruta| ruta.is_dir() && !copia),
+        oraculo_destino: (!copia).then(|| dir.to_string()),
         salida: c.salida.to_path_buf(),
         cmd: cmd.to_string(),
         env: Vec::new(),
@@ -2285,6 +2491,13 @@ pub(crate) fn commit_de(repo: &Path) -> String {
         .filter(|salida| salida.status.success())
         .map(|salida| String::from_utf8_lossy(&salida.stdout).trim().to_string())
         .unwrap_or_default()
+}
+
+/// Identidad de la versión del repo para Colab y el veredicto: el hash del contenido del repo y de las
+/// suites de la tarea. Un cambio sin commit cambia la identidad, y sin git también (Tarea 54, H2).
+pub(crate) fn identidad_de(repo: &Path, tarea: &Tarea) -> Result<String, ErrorOraculo> {
+    historial::clave_de_version(repo, &tarea.dir)
+        .map_err(|e| infra("identidad de la versión del repo", e))
 }
 
 /// Código de salida de un estado: 0 verde, 1 rojo, 3 sin veredicto.
@@ -2661,6 +2874,45 @@ mod tests {
     }
 
     #[test]
+    fn temporales_carpeta_vieja_con_lock_tomado_no_se_borra() {
+        let home = tempfile::tempdir().expect("temp dir");
+        let tmp = home.path().join("tmp");
+        let viejo = tmp.join("evaluar-x");
+        fs::create_dir_all(&viejo).expect("dir");
+        fs::write(viejo.join("resto"), "x").expect("escribe");
+        // El lock se crea antes de fijar el mtime: crear el archivo cambia el mtime de la carpeta.
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(viejo.join(".lock"))
+            .expect("crea el lock");
+        fs4::FileExt::try_lock(&lock).expect("otra evaluación toma el lock");
+        let ahora = SystemTime::now();
+        poner_mtime(&viejo, ahora - Duration::from_secs(25 * 3600));
+
+        limpiar_temporales(&tmp, ahora);
+
+        assert!(viejo.exists(), "una evaluación viva conserva su carpeta");
+        assert!(viejo.join("resto").exists(), "sus archivos quedan intactos");
+    }
+
+    #[test]
+    fn temporales_carpeta_vieja_sin_lock_se_borra() {
+        let home = tempfile::tempdir().expect("temp dir");
+        let tmp = home.path().join("tmp");
+        let viejo = tmp.join("evaluar-x");
+        fs::create_dir_all(&viejo).expect("dir");
+        fs::write(viejo.join("resto"), "x").expect("escribe");
+        let ahora = SystemTime::now();
+        poner_mtime(&viejo, ahora - Duration::from_secs(25 * 3600));
+
+        limpiar_temporales(&tmp, ahora);
+
+        assert!(!viejo.exists(), "sin lock, la carpeta vieja se borra");
+    }
+
+    #[test]
     fn temporales_enlace_viejo_se_borra_como_enlace_y_su_destino_queda() {
         let home = tempfile::tempdir().expect("temp dir");
         let tmp = home.path().join("tmp");
@@ -2795,6 +3047,15 @@ mod tests {
         }
     }
 
+    /// Nombre del junit que pide `cmd`: lo que sigue a `--junitxml=/salida/`. Con la copia de la suite
+    /// oculta es un nombre aleatorio por corrida (H1). Sin esa bandera, el comando escribe `oculto.xml`.
+    fn xml_de_cmd(cmd: &str) -> String {
+        match cmd.split_once("--junitxml=/salida/") {
+            Some((_, resto)) => resto.split(' ').next().unwrap_or_default().to_string(),
+            None => XML_OCULTO.to_string(),
+        }
+    }
+
     /// Un ejecutor que responde la recolección con `coleccion` y, si no es recolección, deja `xml`
     /// como junit y devuelve `codigo`.
     fn ejecutor_con(
@@ -2808,7 +3069,7 @@ mod tests {
                 return Ok(resultado_falso(0, ""));
             }
             if let Some(texto) = xml {
-                fs::write(e.salida.join(XML_OCULTO), texto).expect("junit");
+                fs::write(e.salida.join(xml_de_cmd(&e.cmd)), texto).expect("junit");
             }
             Ok(resultado_falso(codigo, ""))
         }
@@ -2913,6 +3174,184 @@ mod tests {
         let correr = ejecutor_con(coleccion_de(1), Some(falso), 0);
         let s = correr_suite_de_prueba(base.path(), &tarea, &correr).expect("sin infra");
         assert!(matches!(s, Suite::SinVeredicto(_)), "{s:?}");
+    }
+
+    /// Tarea cuya suite oculta no es pytest: el junit lo escribe el propio comando.
+    fn tarea_no_pytest(base: &Path) -> Tarea {
+        let mut tarea = tarea_de_prueba(base);
+        tarea.oculto.cmd = "cargo test --workspace -- --format json > /salida/oculto.xml".into();
+        tarea
+    }
+
+    const JUNIT_DOS_VERDES: &str = r#"<testsuite>
+  <testcase classname="tests.test_a" name="t1"/>
+  <testcase classname="tests.test_a" name="t2"/>
+</testsuite>"#;
+
+    #[test]
+    fn oraculo_no_pytest_junit_de_0_tests_es_sin_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_no_pytest(base.path());
+        let vacio = "<testsuite></testsuite>";
+        let correr = ejecutor_con("", Some(vacio), 0);
+        let s = correr_suite_de_prueba(base.path(), &tarea, &correr).expect("sin infra");
+        assert!(matches!(s, Suite::SinVeredicto(_)), "{s:?}");
+    }
+
+    #[test]
+    fn oraculo_no_pytest_codigo_1_con_junit_verde_es_sin_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_no_pytest(base.path());
+        let correr = ejecutor_con("", Some(JUNIT_DOS_VERDES), 1);
+        let s = correr_suite_de_prueba(base.path(), &tarea, &correr).expect("sin infra");
+        assert!(matches!(s, Suite::SinVeredicto(_)), "{s:?}");
+    }
+
+    #[test]
+    fn oraculo_no_pytest_dos_verdes_y_codigo_0_es_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_no_pytest(base.path());
+        let correr = ejecutor_con("", Some(JUNIT_DOS_VERDES), 0);
+        let s = correr_suite_de_prueba(base.path(), &tarea, &correr).expect("sin infra");
+        assert!(matches!(s, Suite::Clasificada(_)), "{s:?}");
+    }
+
+    #[test]
+    fn oraculo_no_pytest_falla_en_junit_con_codigo_1_es_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_no_pytest(base.path());
+        let con_falla = r#"<testsuite>
+  <testcase classname="tests.test_a" name="t1"><failure message="x"/></testcase>
+  <testcase classname="tests.test_a" name="t2"/>
+</testsuite>"#;
+        let correr = ejecutor_con("", Some(con_falla), 1);
+        let s = correr_suite_de_prueba(base.path(), &tarea, &correr).expect("sin infra");
+        assert!(matches!(s, Suite::Clasificada(_)), "{s:?}");
+    }
+
+    #[test]
+    fn oraculo_no_pytest_codigo_0_con_falla_en_junit_es_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_no_pytest(base.path());
+        let con_falla = r#"<testsuite>
+  <testcase classname="tests.test_a" name="t1"><failure message="x"/></testcase>
+</testsuite>"#;
+        let correr = ejecutor_con("", Some(con_falla), 0);
+        let s = correr_suite_de_prueba(base.path(), &tarea, &correr).expect("sin infra");
+        assert!(matches!(s, Suite::Clasificada(_)), "{s:?}");
+    }
+
+    #[test]
+    fn adaptar_oculto_cambia_ruta_junit_y_plugin() {
+        const PREFIJO: &str = "export PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/salida/.root:${PYTHONPATH:-} ROOT_OCULTO_DIR=/salida/.oculto; ";
+        let xml = "oculto-0123456789abcdef.xml";
+        let cmd = "ORACULO_REPO=/repo python3 -m pytest -q -p no:cacheprovider --junitxml=/salida/oculto.xml /oraculo/oculto";
+        assert_eq!(
+            adaptar_oculto(cmd, xml),
+            format!(
+                "{PREFIJO}ORACULO_REPO=/repo python3 -m pytest -p root_oculto -q -p no:cacheprovider --junitxml=/salida/{xml} /salida/.oculto"
+            )
+        );
+        assert_eq!(
+            adaptar_oculto("pytest -q /oraculo/oculto", xml),
+            format!("{PREFIJO}pytest -p root_oculto -q /salida/.oculto")
+        );
+    }
+
+    #[test]
+    fn plugin_oculto_borra_el_codigo_y_deja_los_datos() {
+        if Command::new("python3").arg("--version").output().is_err() {
+            eprintln!("sin python3 en el host: se salta el test del plugin");
+            return;
+        }
+        let base = tempfile::tempdir().expect("base");
+        let carpeta = base.path();
+        fs::write(carpeta.join("test_a.py"), "def test_a():\n    pass\n").expect("test_a");
+        fs::write(carpeta.join("conftest.py"), "").expect("conftest");
+        fs::create_dir_all(carpeta.join("datos")).expect("datos");
+        fs::write(carpeta.join("datos/x.txt"), "dato").expect("dato");
+        fs::create_dir_all(carpeta.join("__pycache__")).expect("pycache");
+        fs::write(carpeta.join("__pycache__/a.pyc"), "").expect("pyc");
+        let plugin = concat!(env!("CARGO_MANIFEST_DIR"), "/src/oracle/pytest_oculto.py");
+        let codigo = "import importlib.util, sys\n\
+            s = importlib.util.spec_from_file_location('root_oculto', sys.argv[1])\n\
+            m = importlib.util.module_from_spec(s)\n\
+            s.loader.exec_module(m)\n\
+            m.pytest_collection_finish(None)\n";
+        let salida = Command::new("python3")
+            .args(["-c", codigo, plugin])
+            .env("ROOT_OCULTO_DIR", carpeta)
+            .output()
+            .expect("python3");
+        assert!(
+            salida.status.success(),
+            "{}",
+            String::from_utf8_lossy(&salida.stderr)
+        );
+        assert!(!carpeta.join("test_a.py").exists());
+        assert!(!carpeta.join("conftest.py").exists());
+        assert!(!carpeta.join("__pycache__/a.pyc").exists());
+        assert!(!carpeta.join("__pycache__").exists());
+        let dato = fs::read_to_string(carpeta.join("datos/x.txt")).expect("dato");
+        assert_eq!(dato, "dato");
+    }
+
+    #[test]
+    fn oraculo_oculto_pytest_borra_el_plugin_de_la_corrida_anterior() {
+        // Un producto pudo dejar `sitecustomize.py` en `/salida/.root`: Python lo carga al arrancar la siguiente corrida.
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_de_prueba(base.path());
+        let repo = base.path().join("repo");
+        let salida = base.path().join("salida");
+        let home = base.path().join("home");
+        for carpeta in [&repo, &salida, &home] {
+            fs::create_dir_all(carpeta).expect("carpeta");
+        }
+        let o = OpcionesOraculo::default();
+        let historial = home.join("historial.jsonl");
+        let c = Corrida {
+            repo: &repo,
+            tarea: &tarea,
+            salida: &salida,
+            o: &o,
+            cache: None,
+            rustsec: None,
+            home: &home,
+            historial: Some(&historial),
+        };
+        fs::create_dir_all(salida.join(".root")).expect("plugin");
+        fs::write(salida.join(".root/sitecustomize.py"), "x").expect("planta");
+        preparar_copia_oculto(&c).expect("prepara la copia");
+        assert!(!salida.join(".root/sitecustomize.py").exists());
+        assert!(salida.join(".root/root_oculto.py").is_file());
+    }
+
+    #[test]
+    fn oraculo_oculto_pytest_pide_un_junit_con_nombre_nuevo_por_corrida() {
+        let base = tempfile::tempdir().expect("base");
+        let mut tarea = tarea_de_prueba(base.path());
+        tarea.repeticiones = 2;
+        let pedidos = std::cell::RefCell::new(Vec::new());
+        let correr = |e: &contenedor::Ejecucion| -> Result<contenedor::Resultado, ErrorOraculo> {
+            if e.cmd.contains("--collect-only") {
+                fs::write(e.salida.join(ARCHIVO_COLECCION), coleccion_de(1)).expect("coleccion");
+                return Ok(resultado_falso(0, ""));
+            }
+            let xml = xml_de_cmd(&e.cmd);
+            pedidos.borrow_mut().push(xml.clone());
+            let sin_falla =
+                r#"<testsuite><testcase classname="tests.test_a" name="t1"/></testsuite>"#;
+            fs::write(e.salida.join(&xml), sin_falla).expect("junit");
+            Ok(resultado_falso(0, ""))
+        };
+        let s = correr_suite_de_prueba(base.path(), &tarea, &correr).expect("sin infra");
+        assert!(matches!(s, Suite::Clasificada(_)), "{s:?}");
+        let pedidos = pedidos.borrow();
+        assert_eq!(pedidos.len(), 2, "{pedidos:?}");
+        assert_ne!(pedidos[0], pedidos[1], "{pedidos:?}");
+        for xml in pedidos.iter() {
+            assert!(xml.starts_with("oculto-") && xml.ends_with(".xml"), "{xml}");
+        }
     }
 
     #[test]
@@ -3253,16 +3692,16 @@ mod tests {
     ) -> impl Fn(&contenedor::Ejecucion) -> Result<contenedor::Resultado, ErrorOraculo> {
         move |e: &contenedor::Ejecucion| {
             let contrato = e.oraculo_destino.as_deref() == Some(DIR_CONTRATO);
-            let (coleccion, junit, xml) = if contrato {
-                (COLECCION_CONTRATO, junit_contrato, XML_CONTRATO)
+            let (coleccion, junit) = if contrato {
+                (COLECCION_CONTRATO, junit_contrato)
             } else {
-                (COLECCION_OCULTO, JUNIT_OCULTO, XML_OCULTO)
+                (COLECCION_OCULTO, JUNIT_OCULTO)
             };
             if e.cmd.contains("--collect-only") {
                 fs::write(e.salida.join(ARCHIVO_COLECCION), coleccion).expect("coleccion");
                 return Ok(resultado_falso(0, ""));
             }
-            fs::write(e.salida.join(xml), junit).expect("junit");
+            fs::write(e.salida.join(xml_de_cmd(&e.cmd)), junit).expect("junit");
             let codigo = if junit.contains("<failure") { 1 } else { 0 };
             Ok(resultado_falso(codigo, ""))
         }
@@ -4521,10 +4960,10 @@ mod tests {
         fs::write(
             home.join(calibra::ARCHIVO),
             json!({"v": 1, "filas": [
-                {"tarea": "tarea-rust", "dimension": "seguridad", "n": 20, "semilla": 42,
-                 "ts": 1.0, "exactitud_balanceada": 0.95},
-                {"tarea": "tarea-rust", "dimension": "diseno", "n": 20, "semilla": 42,
-                 "ts": 1.0, "exactitud_balanceada": 0.7},
+                {"tarea": "tarea-rust", "dimension": "seguridad", "n": 20, "defectos": 10,
+                 "limpios": 10, "semilla": 42, "ts": 1.0, "exactitud_balanceada": 0.95},
+                {"tarea": "tarea-rust", "dimension": "diseno", "n": 20, "defectos": 10,
+                 "limpios": 10, "semilla": 42, "ts": 1.0, "exactitud_balanceada": 0.7},
             ]})
             .to_string(),
         )
@@ -5543,6 +5982,58 @@ mod tests {
 
     // --- Tarea 30, parte 2: aviso de corrida de Colab con red en el veredicto ---
 
+    /// `git init` y un commit de todo lo que hay en `repo`.
+    fn repo_git_con_commit(repo: &Path) {
+        let pasos: [&[&str]; 3] = [
+            &["init", "-q"],
+            &["add", "-A"],
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "base",
+            ],
+        ];
+        for args in pasos {
+            let estado = comando_git(repo, args).status().expect("git");
+            assert!(estado.success(), "git {args:?}");
+        }
+    }
+
+    #[test]
+    fn oraculo_colab_de_version_vieja_se_descarta_tras_cambio_sin_commit() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        repo_git_con_commit(&repo);
+        let tarea = tarea_rust(base.path());
+        let vieja = identidad_de(&repo, &tarea).expect("identidad");
+        colab_json(&base.path().join("home"), &[("test_b::t3", &vieja, false)]);
+        fs::write(repo.join("src/lib.rs"), "pub fn f() -> u8 { 2 }\n").expect("cambio sin commit");
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(base.path(), &repo, deps_de(&correr, &herramientas(&[])));
+        assert!(
+            v.avisos.iter().any(|a| a.contains("de otro commit")),
+            "el resultado de la versión vieja debe descartarse: {:?}",
+            v.avisos
+        );
+        assert_eq!(v.commit, identidad_de(&repo, &tarea).expect("identidad"));
+    }
+
+    #[test]
+    fn identidad_sin_git_no_es_vacia_y_cambia_con_el_contenido() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let tarea = tarea_rust(base.path());
+        let antes = identidad_de(&repo, &tarea).expect("identidad");
+        assert!(!antes.is_empty(), "sin git la identidad no puede ser vacía");
+        fs::write(repo.join("src/lib.rs"), "pub fn f() -> u8 { 2 }\n").expect("cambio");
+        let despues = identidad_de(&repo, &tarea).expect("identidad");
+        assert_ne!(antes, despues, "sin git, el contenido define la versión");
+    }
+
     /// Escribe el `colab.json` de la tarea de Rust en `home`. Cada entrada: (test, commit, con marca de red).
     fn colab_json(home: &Path, entradas: &[(&str, &str, bool)]) {
         let piezas: Vec<String> = entradas
@@ -5574,7 +6065,8 @@ mod tests {
     #[test]
     fn oraculo_colab_con_red_deja_el_aviso_en_el_veredicto() {
         let base = tempfile::tempdir().expect("base");
-        let commit = commit_de(&repo_rust(base.path(), LOCK_SANO));
+        let commit = identidad_de(&repo_rust(base.path(), LOCK_SANO), &tarea_rust(base.path()))
+            .expect("identidad");
         let v = veredicto_con_colab(base.path(), &[("test_b::t3", &commit, true)]);
         assert!(
             v.avisos.iter().any(|a| a == pendientes::CONFIANZA_CON_RED),
@@ -5586,7 +6078,8 @@ mod tests {
     #[test]
     fn oraculo_colab_con_red_da_el_aviso_una_sola_vez_aunque_haya_varias_entradas() {
         let base = tempfile::tempdir().expect("base");
-        let commit = commit_de(&repo_rust(base.path(), LOCK_SANO));
+        let commit = identidad_de(&repo_rust(base.path(), LOCK_SANO), &tarea_rust(base.path()))
+            .expect("identidad");
         let v = veredicto_con_colab(
             base.path(),
             &[("test_b::t3", &commit, true), ("test_b::t4", &commit, true)],
@@ -5602,7 +6095,8 @@ mod tests {
     #[test]
     fn oraculo_colab_sin_marca_de_red_no_deja_aviso() {
         let base = tempfile::tempdir().expect("base");
-        let commit = commit_de(&repo_rust(base.path(), LOCK_SANO));
+        let commit = identidad_de(&repo_rust(base.path(), LOCK_SANO), &tarea_rust(base.path()))
+            .expect("identidad");
         let v = veredicto_con_colab(base.path(), &[("test_b::t3", &commit, false)]);
         assert!(
             !v.avisos.iter().any(|a| a == pendientes::CONFIANZA_CON_RED),
@@ -5646,9 +6140,12 @@ mod tests {
         }
 
         fn correr(&self, e: &contenedor::Ejecucion) -> Result<contenedor::Resultado, ErrorOraculo> {
-            self.destinos
-                .borrow_mut()
-                .push(e.oraculo_destino.clone().unwrap_or_default());
+            // Sin destino, la suite corre desde su copia en `/salida` (H1).
+            self.destinos.borrow_mut().push(
+                e.oraculo_destino
+                    .clone()
+                    .unwrap_or_else(|| DIR_COPIA_OCULTO.to_string()),
+            );
             (self.dentro)(e)
         }
 
@@ -6738,16 +7235,16 @@ mod tests {
     ) -> impl Fn(&contenedor::Ejecucion) -> Result<contenedor::Resultado, ErrorOraculo> {
         move |e: &contenedor::Ejecucion| {
             let contrato = e.oraculo_destino.as_deref() == Some(DIR_CONTRATO);
-            let (coleccion, junit, xml) = if contrato {
-                (COLECCION_CONTRATO, JUNIT_CONTRATO, XML_CONTRATO)
+            let (coleccion, junit) = if contrato {
+                (COLECCION_CONTRATO, JUNIT_CONTRATO)
             } else {
-                (COLECCION_OCULTO, junit_oculto, XML_OCULTO)
+                (COLECCION_OCULTO, junit_oculto)
             };
             if e.cmd.contains("--collect-only") {
                 fs::write(e.salida.join(ARCHIVO_COLECCION), coleccion).expect("coleccion");
                 return Ok(resultado_falso(0, ""));
             }
-            fs::write(e.salida.join(xml), junit).expect("junit");
+            fs::write(e.salida.join(xml_de_cmd(&e.cmd)), junit).expect("junit");
             let codigo = if junit.contains("<failure") { 1 } else { 0 };
             Ok(resultado_falso(codigo, ""))
         }

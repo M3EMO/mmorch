@@ -539,6 +539,7 @@ fn modulo_borrado(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
 }
 
 /// Sentencia `expr?;` sin `let`, `return` ni asignación: el `?` pasa a `let _ = expr;`.
+/// La línea debe tener paréntesis balanceados. Así `)?;` de una llamada multilínea no cuenta.
 fn es_sentencia_con_try(linea: &str) -> bool {
     let t = linea.trim();
     t.ends_with("?;")
@@ -547,6 +548,43 @@ fn es_sentencia_con_try(linea: &str) -> bool {
         && !t.starts_with("//")
         && !t.starts_with('}')
         && !t.contains('=')
+        && equilibrada(t)
+}
+
+/// `true` si cada `(`, `[` y `{` se cierra con su par, en orden.
+fn equilibrada(texto: &str) -> bool {
+    let mut pila = Vec::new();
+    for c in texto.chars() {
+        match c {
+            '(' | '[' | '{' => pila.push(c),
+            ')' | ']' | '}' => {
+                let abre = match c {
+                    ')' => '(',
+                    ']' => '[',
+                    _ => '{',
+                };
+                if pila.pop() != Some(abre) {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    pila.is_empty()
+}
+
+/// `true` si la línea anterior no vacía cierra una sentencia o un bloque. Sin anterior, también.
+/// Así `b()?;` tras `let total = a +` no cuenta: continúa el `let`.
+fn empieza_sentencia(lineas: &[String], i: usize) -> bool {
+    let anterior = lineas[..i]
+        .iter()
+        .rev()
+        .map(|l| l.trim())
+        .find(|t| !t.is_empty() && !t.starts_with("//"));
+    match anterior {
+        None => true,
+        Some(t) => t.ends_with(';') || t.ends_with('{') || t.ends_with('}'),
+    }
 }
 
 /// Cambia una sentencia `expr?;` por `let _ = expr;`: el error se traga.
@@ -556,7 +594,7 @@ fn error_tragado(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
         let lineas = partir(&leer(dir, &archivo)?);
         let limite = limite_de_produccion(&lineas);
         for (i, linea) in lineas[..limite].iter().enumerate() {
-            if es_sentencia_con_try(linea) {
+            if es_sentencia_con_try(linea) && empieza_sentencia(&lineas, i) {
                 candidatos.push((archivo.clone(), i));
             }
         }
@@ -1250,6 +1288,54 @@ mod tests {
         assert!(nuevo.contains("    let _ = registrar(valor);"), "{nuevo}");
         assert!(!nuevo.contains("registrar(valor)?;"));
         assert_eq!(inyeccion.expect("aplica").linea, 6);
+    }
+
+    /// Repo mínimo con `src/lib.rs` = `texto`. Sin `tarea.toml`: `error_tragado` solo lee `src/`.
+    fn repo_con_lib(texto: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("temporal");
+        std::fs::create_dir_all(dir.path().join("src")).expect("src");
+        escribir(dir.path(), "src/lib.rs", texto).expect("lib.rs");
+        dir
+    }
+
+    #[test]
+    fn inyectar_error_tragado_no_elige_linea_de_continuacion() {
+        // La única línea `?;` es el cierre de una llamada multilínea. Reescribirla rompe el código.
+        let original = "pub fn guardar(a: u32) -> Result<(), String> {\n    registrar(\n        a,\n        a,\n    )?;\n    Ok(())\n}\n\nfn registrar(a: u32, b: u32) -> Result<(), String> {\n    if a == b { Ok(()) } else { Err(String::new()) }\n}\n";
+        let dir = repo_con_lib(original);
+        for semilla in 1..=20u64 {
+            let inyeccion = inyectar(Defecto::ErrorTragado, dir.path(), &capas_fixture(), semilla)
+                .expect("no falla la E/S");
+            assert!(
+                inyeccion.is_none(),
+                "semilla {semilla}: no hay sentencia completa: {inyeccion:?}"
+            );
+            assert_eq!(
+                leer(dir.path(), "src/lib.rs").expect("lee"),
+                original,
+                "semilla {semilla}"
+            );
+        }
+    }
+
+    #[test]
+    fn inyectar_error_tragado_no_elige_continuacion_de_let() {
+        // `registrar(a)?;` continúa el `let` de arriba: no es una sentencia propia.
+        let original = "pub fn total(a: u32) -> Result<u32, String> {\n    let total = a +\n        registrar(a)?;\n    Ok(total)\n}\n\nfn registrar(a: u32) -> Result<u32, String> {\n    Ok(a)\n}\n";
+        let dir = repo_con_lib(original);
+        for semilla in 1..=20u64 {
+            let inyeccion = inyectar(Defecto::ErrorTragado, dir.path(), &capas_fixture(), semilla)
+                .expect("no falla la E/S");
+            assert!(
+                inyeccion.is_none(),
+                "semilla {semilla}: es continuación de let: {inyeccion:?}"
+            );
+            assert_eq!(
+                leer(dir.path(), "src/lib.rs").expect("lee"),
+                original,
+                "semilla {semilla}"
+            );
+        }
     }
 
     /// Test que cubre `leer_numero` (`src/protocolo.rs`, con dos asserts), y otro test sin relación con un assert.

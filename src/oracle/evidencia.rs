@@ -39,6 +39,10 @@ pub fn cita_en_archivo(contenido: &str, linea: u32, cita: &str) -> bool {
     if aguja.is_empty() || linea == 0 {
         return false;
     }
+    // Una cita corta, como `}`, aparece en casi todo archivo. No prueba nada.
+    if aguja.chars().filter(|c| c.is_alphanumeric()).count() < MIN_ALFANUMERICOS_CITA {
+        return false;
+    }
     let lineas: Vec<&str> = contenido.lines().collect();
     let centro = linea as usize;
     if centro > lineas.len() {
@@ -107,6 +111,9 @@ pub fn oraciones_con_id(texto: &str, ids: &BTreeSet<String>) -> (Vec<String>, Ve
 
 /// Líneas de contexto a cada lado de la línea citada.
 const VENTANA: usize = 3;
+
+/// Mínimo de caracteres alfanuméricos que debe tener una cita, sin espacios.
+const MIN_ALFANUMERICOS_CITA: usize = 8;
 
 /// Quita todo carácter de espacio en blanco.
 fn sin_blancos(texto: &str) -> String {
@@ -229,10 +236,10 @@ mod tests {
         }
     }
 
-    /// Archivo de diez líneas. Cada línea tiene una marca única `LINEA<n>`.
+    /// Archivo de diez líneas. Cada línea tiene una marca única `MARCA<n>UNICA`.
     fn diez_lineas() -> String {
         (1..=10)
-            .map(|n| format!("linea {n} LINEA{n}"))
+            .map(|n| format!("linea {n} MARCA{n}UNICA"))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -252,33 +259,33 @@ mod tests {
     #[test]
     fn evidencia_cita_en_mas_tres_se_acepta_y_en_mas_cuatro_se_descarta() {
         let contenido = diez_lineas();
-        // La marca LINEA5 está en la línea 5.
-        assert!(cita_en_archivo(&contenido, 2, "LINEA5"));
-        assert!(!cita_en_archivo(&contenido, 1, "LINEA5"));
+        // La marca MARCA5UNICA está en la línea 5.
+        assert!(cita_en_archivo(&contenido, 2, "MARCA5UNICA"));
+        assert!(!cita_en_archivo(&contenido, 1, "MARCA5UNICA"));
     }
 
     #[test]
     fn evidencia_cita_en_menos_tres_se_acepta_y_en_menos_cuatro_se_descarta() {
         let contenido = diez_lineas();
-        // La marca LINEA2 está en la línea 2.
-        assert!(cita_en_archivo(&contenido, 5, "LINEA2"));
-        assert!(!cita_en_archivo(&contenido, 6, "LINEA2"));
+        // La marca MARCA2UNICA está en la línea 2.
+        assert!(cita_en_archivo(&contenido, 5, "MARCA2UNICA"));
+        assert!(!cita_en_archivo(&contenido, 6, "MARCA2UNICA"));
     }
 
     #[test]
     fn evidencia_ventana_recortada_en_la_primera_linea() {
         let contenido = diez_lineas();
-        assert!(cita_en_archivo(&contenido, 1, "LINEA1"));
+        assert!(cita_en_archivo(&contenido, 1, "MARCA1UNICA"));
         // Línea 1 con ventana hasta la línea 4.
-        assert!(cita_en_archivo(&contenido, 1, "LINEA4"));
-        assert!(!cita_en_archivo(&contenido, 1, "LINEA5"));
+        assert!(cita_en_archivo(&contenido, 1, "MARCA4UNICA"));
+        assert!(!cita_en_archivo(&contenido, 1, "MARCA5UNICA"));
     }
 
     #[test]
     fn evidencia_archivo_de_una_sola_linea() {
-        let contenido = "x = 1";
-        assert!(cita_en_archivo(contenido, 1, "x=1"));
-        assert!(!cita_en_archivo(contenido, 2, "x=1"));
+        let contenido = "let valor = 4242;";
+        assert!(cita_en_archivo(contenido, 1, "let valor = 4242;"));
+        assert!(!cita_en_archivo(contenido, 2, "let valor = 4242;"));
     }
 
     #[test]
@@ -289,24 +296,44 @@ mod tests {
     }
 
     #[test]
+    fn evidencia_cita_trivial_de_llave_se_descarta() {
+        // Una `}` sola aparece en casi todo archivo: no prueba nada.
+        let contenido = "let a = 1;\n}\n";
+        assert!(!cita_en_archivo(contenido, 2, "}"));
+    }
+
+    #[test]
+    fn evidencia_minimo_de_alfanumericos_en_la_cita() {
+        let contenido = "fn f() {\n    let valor = 4242;\n}\n";
+        // 8 alfanuméricos (valor424): pasa.
+        assert!(cita_en_archivo(contenido, 2, "valor=424"));
+        // 7 alfanuméricos (valor42): no pasa, aunque esté en el archivo.
+        assert!(!cita_en_archivo(contenido, 2, "valor=42"));
+    }
+
+    #[test]
     fn evidencia_linea_cero_es_falsa() {
         let contenido = diez_lineas();
-        assert!(!cita_en_archivo(&contenido, 0, "LINEA1"));
+        assert!(!cita_en_archivo(&contenido, 0, "MARCA1UNICA"));
     }
 
     #[test]
     fn evidencia_linea_fuera_de_rango_es_falsa() {
         let contenido = diez_lineas();
-        assert!(!cita_en_archivo(&contenido, 11, "LINEA10"));
-        assert!(!cita_en_archivo(&contenido, 99, "LINEA1"));
-        assert!(!cita_en_archivo("", 1, "algo"));
+        assert!(!cita_en_archivo(&contenido, 11, "MARCA10UNICA"));
+        assert!(!cita_en_archivo(&contenido, 99, "MARCA1UNICA"));
+        assert!(!cita_en_archivo("", 1, "algo distinto aqui"));
     }
 
     #[test]
     fn evidencia_cita_multilinea_se_busca_en_la_ventana_unida() {
-        let contenido = "a = [\n    1,\n    2,\n];\n";
-        assert!(cita_en_archivo(contenido, 1, "a = [\n    1,\n    2,\n];"));
-        assert!(!cita_en_archivo(contenido, 1, "a = [3];"));
+        let contenido = "lista = [\n    1234,\n    5678,\n];\n";
+        assert!(cita_en_archivo(
+            contenido,
+            1,
+            "lista = [\n    1234,\n    5678,\n];"
+        ));
+        assert!(!cita_en_archivo(contenido, 1, "lista = [9999];"));
     }
 
     #[test]
@@ -323,8 +350,8 @@ mod tests {
     fn evidencia_ruta_absoluta_se_descarta() {
         let raiz = tempfile::tempdir().expect("tempdir");
         let abs = raiz.path().join("a.rs");
-        fs::write(&abs, "x").expect("escribe");
-        let h = hallazgo_juez(abs.to_str().expect("utf8"), 1, "x");
+        fs::write(&abs, "let valor = 4242;").expect("escribe");
+        let h = hallazgo_juez(abs.to_str().expect("utf8"), 1, "let valor = 4242;");
         assert_eq!(
             verificar_hallazgo(raiz.path(), &h),
             Verificacion::Descartado(Motivo::ArchivoFueraDeRaiz)
@@ -336,8 +363,8 @@ mod tests {
         let padre = tempfile::tempdir().expect("tempdir");
         let raiz = padre.path().join("repo");
         fs::create_dir(&raiz).expect("crea raiz");
-        fs::write(padre.path().join("fuera.txt"), "secreto").expect("escribe");
-        let h = hallazgo_juez("../fuera.txt", 1, "secreto");
+        fs::write(padre.path().join("fuera.txt"), "clave secreta de afuera").expect("escribe");
+        let h = hallazgo_juez("../fuera.txt", 1, "clave secreta de afuera");
         assert_eq!(
             verificar_hallazgo(&raiz, &h),
             Verificacion::Descartado(Motivo::ArchivoFueraDeRaiz)
@@ -351,9 +378,9 @@ mod tests {
         let raiz = padre.path().join("repo");
         fs::create_dir(&raiz).expect("crea raiz");
         let objetivo = padre.path().join("objetivo.txt");
-        fs::write(&objetivo, "secreto").expect("escribe");
+        fs::write(&objetivo, "clave secreta de afuera").expect("escribe");
         std::os::unix::fs::symlink(&objetivo, raiz.join("enlace.txt")).expect("symlink");
-        let h = hallazgo_juez("enlace.txt", 1, "secreto");
+        let h = hallazgo_juez("enlace.txt", 1, "clave secreta de afuera");
         assert_eq!(
             verificar_hallazgo(&raiz, &h),
             Verificacion::Descartado(Motivo::ArchivoFueraDeRaiz)
@@ -363,15 +390,15 @@ mod tests {
     #[test]
     fn evidencia_hallazgo_con_cita_real_es_valido() {
         let raiz = tempfile::tempdir().expect("tempdir");
-        fs::write(raiz.path().join("a.rs"), "fn f() {}\nlet y = 2;\n").expect("escribe");
-        let h = hallazgo_juez("a.rs", 2, "let y = 2;");
+        fs::write(raiz.path().join("a.rs"), "fn f() {}\nlet contador = 2;\n").expect("escribe");
+        let h = hallazgo_juez("a.rs", 2, "let contador = 2;");
         assert_eq!(verificar_hallazgo(raiz.path(), &h), Verificacion::Valido);
     }
 
     #[test]
     fn evidencia_cita_vacia_en_hallazgo_da_sin_cita() {
         let raiz = tempfile::tempdir().expect("tempdir");
-        fs::write(raiz.path().join("a.rs"), "x\n").expect("escribe");
+        fs::write(raiz.path().join("a.rs"), "let valor = 4242;\n").expect("escribe");
         let h = hallazgo_juez("a.rs", 1, "  ");
         assert_eq!(
             verificar_hallazgo(raiz.path(), &h),
@@ -382,9 +409,13 @@ mod tests {
     #[test]
     fn evidencia_filtrar_separa_juez_inventado_y_sonda_en_orden() {
         let raiz = tempfile::tempdir().expect("tempdir");
-        fs::write(raiz.path().join("a.rs"), "let x = 1;\nlet y = 2;\n").expect("escribe");
-        let valido = hallazgo_juez("a.rs", 1, "let x = 1;");
-        let inventado = hallazgo_juez("a.rs", 1, "let z = 9;");
+        fs::write(
+            raiz.path().join("a.rs"),
+            "let contador = 1;\nlet total = 2;\n",
+        )
+        .expect("escribe");
+        let valido = hallazgo_juez("a.rs", 1, "let contador = 1;");
+        let inventado = hallazgo_juez("a.rs", 1, "let zeta = 9999;");
         let mut sonda = hallazgo_juez("a.rs", 2, "cita que no existe");
         sonda.fuente = Fuente::Sonda("bandit".to_string());
 
