@@ -161,6 +161,8 @@ pub mod inyectar;
 
 use inyectar::{Defecto, Inyeccion};
 
+mod estables;
+
 /// Archivo de candado de `calibracion.json`. Una escritura lo toma en exclusiva.
 const CANDADO: &str = "calibracion.lock";
 /// Carpeta de `ROOT_HOME` con un `.casos.jsonl` por calibración con casos medidos.
@@ -1272,7 +1274,8 @@ fn detecta_dimension(
         .items
         .iter()
         .any(|ib| nivel_de(pv, &ib.item).is_some_and(|nivel| nivel < ib.nivel));
-    hallazgo_nuevo || pv.valor < pb.valor || item_bajo
+    (hallazgo_nuevo || pv.valor < pb.valor || item_bajo)
+        && estables::permite(base, veredicto, dimension)
 }
 
 /// Si el ítem `item` de la dimensión baja frente a la base. `None` si la base no mide el ítem: no entra a
@@ -1292,7 +1295,7 @@ fn detecta_item(
         return Some(!es_defecto);
     }
     Some(match nivel_de(pv, item) {
-        Some(nivel) => nivel < nivel_base,
+        Some(nivel) => nivel < nivel_base && estables::permite(base, veredicto, dimension),
         None => !es_defecto,
     })
 }
@@ -1389,7 +1392,7 @@ mod tests {
         }
     }
 
-    fn nivel_item(item: &str, nivel: u8) -> NivelItem {
+    pub(super) fn nivel_item(item: &str, nivel: u8) -> NivelItem {
         NivelItem {
             item: item.into(),
             nivel,
@@ -2346,7 +2349,7 @@ mod tests {
         assert_eq!(error.codigo_de_salida(), 2);
     }
 
-    fn puntaje(dimension: Dimension, valor: f32) -> Puntaje {
+    pub(super) fn puntaje(dimension: Dimension, valor: f32) -> Puntaje {
         Puntaje {
             dimension,
             valor,
