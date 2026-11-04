@@ -14,7 +14,7 @@ use root::oracle::descarga::Preparacion;
 use root::oracle::descarga::juez_config::ResultadoJuicio;
 use root::oracle::juez::ModeloJuez;
 use root::oracle::tarea::Tarea;
-use root::oracle::{ErrorOraculo, OpcionesOraculo, evaluar};
+use root::oracle::{ErrorOraculo, OpcionesOraculo, Target, evaluar};
 use root::proveedores::{Prompt, RespuestaJuez};
 use root::tipos::{Conteo, Decision, Dimension, Estado, Hallazgo, Veredicto};
 use serde_json::Value;
@@ -68,6 +68,7 @@ fn opciones(home: &Path) -> OpcionesOraculo {
         historial: true,
         memo: None,
         reuso: None,
+        target: Target::Ninguno,
     }
 }
 

@@ -778,6 +778,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "null"
       ],
       "default": null
+    },
+    "target_reusado": {
+      "description": "`Some(true)`: el caso reusó el `target` de la base. `Some(false)`: compiló en frío. `None`: renglón de antes\nde que la calibración midiera el `target` (Tarea 59).",
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "default": null
     }
   },
   "required": [

@@ -169,6 +169,9 @@ pub struct OpcionesOraculo {
     /// Reuso de sondas (calibración). `Some`: el ejecutor devuelve la salida grabada en el memo de la base de
     /// lo que el alcance toma, sin correrlo. `None` (producción): corre todo.
     pub reuso: Option<memo::ReusoSondas>,
+    /// `target` de las suites (Tarea 59). Solo la calibración lo usa: `Ninguno` en producción no guarda
+    /// ni recibe ningún `target`.
+    pub target: Target,
 }
 
 impl Default for OpcionesOraculo {
@@ -180,9 +183,25 @@ impl Default for OpcionesOraculo {
             historial: true,
             memo: None,
             reuso: None,
+            target: Target::Ninguno,
         }
     }
 }
+
+/// Qué hace la evaluación con el `/salida/target` de sus suites (Tarea 59). Solo la calibración lo usa.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Target {
+    /// Producción: la evaluación no guarda ni recibe ningún `target`.
+    #[default]
+    Ninguno,
+    /// Tras correr las suites, copia `salida/target` a esta ruta (no debe existir; su carpeta padre sí).
+    Guardar(PathBuf),
+    /// Antes de correr las suites, copia esta carpeta a `salida/target`.
+    Inicial(PathBuf),
+}
+
+/// Prefijo del aviso cuando la copia del `target` falla y la evaluación sigue con un `target` vacío.
+pub const AVISO_TARGET_FRIO: &str = "target frío:";
 
 /// Partes de `evaluar` que una calibración puede pedir. Cada una es una llamada a un contenedor, a un
 /// juez o al redactor. `dimension` es la que se calibra: las demás quedan sin veredicto.
@@ -622,6 +641,24 @@ fn evaluar_con(
     // Podman rootless: si el contenedor corre con otro uid, la salida debe ser escribible por todos.
     fs::set_permissions(salida.path(), fs::Permissions::from_mode(0o777))
         .map_err(|e| infra("permisos de la salida", e))?;
+    // Con `Target::Inicial` (calibración), la salida arranca con el `target` de la base. Si no se puede,
+    // el caso sigue con un `target` vacío y lo avisa (Tarea 59).
+    if let Target::Inicial(origen) = &o.target {
+        let destino = salida.path().join("target");
+        let copia = if origen.is_dir() {
+            copiar_target(origen, &destino)
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no es carpeta: {}", origen.display()),
+            ))
+        };
+        if let Err(motivo) = copia {
+            avisos.push(format!("{AVISO_TARGET_FRIO} {motivo}"));
+            borrado::borrar_dir_dentro(salida.path(), &destino)
+                .map_err(|e| infra("limpieza del target frío", e))?;
+        }
+    }
 
     let corrida = Corrida {
         repo: &repo_copia,
@@ -690,6 +727,16 @@ fn evaluar_con(
     } else {
         Clasificacion::default()
     };
+    // Con `Target::Guardar` (calibración), el `target` que dejaron las suites va al destino. Si no se
+    // puede, el caso sigue y lo avisa (Tarea 59).
+    if let Target::Guardar(destino) = &o.target {
+        let origen = salida.path().join("target");
+        if origen.is_dir()
+            && let Err(motivo) = copiar_target(&origen, destino)
+        {
+            avisos.push(format!("{AVISO_TARGET_FRIO} {motivo}"));
+        }
+    }
     let preparada = Preparada {
         repo: repo_copia.clone(),
         cache,
@@ -1726,6 +1773,25 @@ fn sin_veredicto(
     }
 }
 
+/// Copia `origen` a `destino` con `cp -a --reflink=auto`. Falla si `cp` no sale con 0. `-a` conserva los
+/// mtimes, que cargo usa en sus huellas.
+fn copiar_target(origen: &Path, destino: &Path) -> io::Result<()> {
+    let salida = Command::new("cp")
+        .arg("-a")
+        .arg("--reflink=auto")
+        .arg(origen)
+        .arg(destino)
+        .output()?;
+    if salida.status.success() {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "cp salió con {}: {}",
+        salida.status,
+        String::from_utf8_lossy(&salida.stderr).trim()
+    )))
+}
+
 /// Carpeta temporal dentro de `tmp`, con el prefijo de `evaluar`.
 fn temporal(tmp: &Path) -> io::Result<tempfile::TempDir> {
     tempfile::Builder::new()
@@ -2624,7 +2690,7 @@ mod tests {
         Confianza, Cumplimiento, Decision, Dimension, EstadoRequisito, Fuente, Informe, NivelItem,
         Puntaje,
     };
-    use filetime::{FileTime, set_symlink_file_times};
+    use filetime::{FileTime, set_file_mtime, set_symlink_file_times};
     use serde_json::{Value, json};
     use std::fs;
     use std::path::PathBuf;
@@ -3889,6 +3955,7 @@ mod tests {
             historial: true,
             memo: None,
             reuso: None,
+            target: Target::Ninguno,
         }
     }
 
@@ -3928,6 +3995,123 @@ mod tests {
             .iter()
             .find(|p| p.dimension == dimension)
             .expect("la dimensión está")
+    }
+
+    // --- Tarea 59: `target` de la calibración ---
+
+    #[test]
+    fn oraculo_target_inicial_copia_el_target_antes_de_las_suites() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let origen = base.path().join("target_de_la_base");
+        fs::create_dir_all(&origen).expect("origen");
+        fs::write(origen.join("centinela"), "de la base").expect("centinela");
+        let mut o = opciones(&home);
+        o.target = Target::Inicial(origen);
+        let suites = correr_suites(JUNIT_CONTRATO);
+        let llamadas = Cell::new(0u32);
+        let faltas = Cell::new(0u32);
+        let correr = |e: &contenedor::Ejecucion| {
+            llamadas.set(llamadas.get() + 1);
+            let centinela = fs::read_to_string(e.salida.join("target/centinela"));
+            if centinela.ok().as_deref() != Some("de la base") {
+                faltas.set(faltas.get() + 1);
+            }
+            suites(e)
+        };
+        evaluar_con(&repo, &tarea, &o, deps_de(&correr, &herramientas(&[]))).expect("evalúa");
+        assert!(llamadas.get() > 0, "corrió alguna suite");
+        assert_eq!(faltas.get(), 0, "cada suite vio el centinela del origen");
+    }
+
+    #[test]
+    fn oraculo_target_guardar_copia_el_target_tras_las_suites() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let destino = base.path().join("target_guardado");
+        let mut o = opciones(&home);
+        o.target = Target::Guardar(destino.clone());
+        let suites = correr_suites(JUNIT_CONTRATO);
+        let correr = |e: &contenedor::Ejecucion| {
+            fs::create_dir_all(e.salida.join("target")).expect("target");
+            fs::write(e.salida.join("target/artefacto"), "compilado").expect("artefacto");
+            suites(e)
+        };
+        evaluar_con(&repo, &tarea, &o, deps_de(&correr, &herramientas(&[]))).expect("evalúa");
+        assert!(
+            destino.join("artefacto").exists(),
+            "el target llega al destino"
+        );
+        assert_eq!(
+            fs::read_to_string(destino.join("artefacto")).expect("lee"),
+            "compilado"
+        );
+    }
+
+    #[test]
+    fn oraculo_target_ninguno_no_crea_target_en_la_salida() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let o = opciones(&home);
+        let suites = correr_suites(JUNIT_CONTRATO);
+        let hubo_target = Cell::new(false);
+        let correr = |e: &contenedor::Ejecucion| {
+            if e.salida.join("target").exists() {
+                hubo_target.set(true);
+            }
+            suites(e)
+        };
+        evaluar_con(&repo, &tarea, &o, deps_de(&correr, &herramientas(&[]))).expect("evalúa");
+        assert!(!hubo_target.get(), "producción no crea target/");
+    }
+
+    #[test]
+    fn oraculo_target_inicial_sin_origen_avisa_y_arranca_frio() {
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_rust(base.path());
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let home = home_con_cache(base.path(), LOCK_SANO);
+        let mut o = opciones(&home);
+        o.target = Target::Inicial(base.path().join("no_existe"));
+        let suites = correr_suites(JUNIT_CONTRATO);
+        let hubo_target = Cell::new(false);
+        let correr = |e: &contenedor::Ejecucion| {
+            if e.salida.join("target").exists() {
+                hubo_target.set(true);
+            }
+            suites(e)
+        };
+        let v = evaluar_con(&repo, &tarea, &o, deps_de(&correr, &herramientas(&[])))
+            .expect("evalúa sin origen");
+        assert!(
+            v.avisos.iter().any(|a| a.starts_with(AVISO_TARGET_FRIO)),
+            "{:?}",
+            v.avisos
+        );
+        assert!(!hubo_target.get(), "sin origen no queda target/");
+    }
+
+    #[test]
+    fn oraculo_target_copiar_conserva_el_mtime() {
+        let base = tempfile::tempdir().expect("base");
+        let origen = base.path().join("origen");
+        fs::create_dir_all(&origen).expect("origen");
+        fs::write(origen.join("huella"), "x").expect("huella");
+        let viejo = FileTime::from_unix_time(1_000_000_000, 0);
+        set_file_mtime(origen.join("huella"), viejo).expect("mtime viejo");
+        let destino = base.path().join("destino");
+        copiar_target(&origen, &destino).expect("copia");
+        assert!(destino.join("huella").exists(), "la copia trae el archivo");
+        let mtime = FileTime::from_last_modification_time(
+            &fs::metadata(destino.join("huella")).expect("metadatos"),
+        );
+        assert_eq!(mtime, viejo, "cp -a conserva el mtime");
     }
 
     #[test]

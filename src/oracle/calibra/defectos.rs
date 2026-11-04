@@ -30,7 +30,9 @@ use crate::oracle::memo::MemoSondas;
 use crate::oracle::perfiles::herramientas::{EjecutorContenedor, EjecutorHerramienta};
 use crate::oracle::perfiles::rust::LimitesEstructura;
 use crate::oracle::rubrica;
-use crate::oracle::{Dependencias, OpcionesOraculo, Preparada, correr_en_podman, evaluar_con};
+use crate::oracle::{
+    Dependencias, OpcionesOraculo, Preparada, Target, correr_en_podman, evaluar_con,
+};
 use crate::proveedores::{Prompt, RespuestaJuez};
 
 /// Semilla de todos los tests. Con ella, cada defecto cae en un lugar fijo de la copia.
@@ -38,7 +40,7 @@ const SEMILLA: u64 = 42;
 /// Límite de cada corrida de contenedor en estos tests.
 const TIMEOUT: Duration = Duration::from_secs(900);
 /// Imagen con las herramientas de las sondas: gitleaks, hadolint, cargo-audit, clippy y cargo-mutants.
-const IMAGEN_HERRAMIENTAS: &str = "localhost/root-oraculo-rust:2";
+pub(super) const IMAGEN_HERRAMIENTAS: &str = "localhost/root-oraculo-rust:2";
 /// Nombre del juez falso de Diseño. Va a la fuente de cada nivel y de cada hallazgo.
 const NOMBRE_JUEZ: &str = "juez-falso";
 /// Ficha de la tarea de prueba: la de `tests/fixtures/fichas/spec-con-pruebas.md`. Solo debe parsear.
@@ -48,7 +50,7 @@ const REQUISITO: &str = "[[requisito]]\nid = \"R1\"\ntitulo = \"Lee y guarda val
 
 /// Escribe `tarea.toml` en `dir`: `TAREA_BASE` con la imagen, el comando del oculto y `extra`. Escribe la
 /// ficha de prueba y carga la tarea.
-fn tarea_en(dir: &Path, imagen: &str, oculto: &str, extra: &str) -> Tarea {
+pub(super) fn tarea_en(dir: &Path, imagen: &str, oculto: &str, extra: &str) -> Tarea {
     let base = TAREA_BASE
         .replace(
             "imagen = \"root-oraculo-rust:1\"",
@@ -82,6 +84,19 @@ fn evaluar_copia(
     partes: Partes,
     juez: Option<&dyn ModeloJuez>,
     memo: Option<Arc<MemoSondas>>,
+) -> Veredicto {
+    evaluar_copia_con(repo, tarea, home, partes, juez, memo, Target::Ninguno)
+}
+
+/// Como `evaluar_copia`, con el `target` que pide la calibración (Tarea 59). Lo usa `target_podman`.
+pub(super) fn evaluar_copia_con(
+    repo: &Path,
+    tarea: &Tarea,
+    home: &Path,
+    partes: Partes,
+    juez: Option<&dyn ModeloJuez>,
+    memo: Option<Arc<MemoSondas>>,
+    target: Target,
 ) -> Veredicto {
     let rubricas = rubrica::cargar_embebidas().expect("rúbricas embebidas");
     let calibracion = Calibraciones::cargar(home).expect("calibración vacía");
@@ -117,6 +132,7 @@ fn evaluar_copia(
         historial: false,
         memo,
         reuso: None,
+        target,
     };
     evaluar_con(repo, tarea, &opciones, deps).expect("la evaluación da veredicto")
 }
@@ -385,7 +401,7 @@ const COMANDO_OCULTO: &str = "cp -r /repo /tmp/ws && cd /tmp/ws && cargo test --
 
 /// Conversor de la salida de `cargo test` a junit: un `testcase` por línea `test <nombre> ... <estado>`.
 /// La clase es `tests.test_<binario>`, con el nombre del archivo de la corrida (`tests/comandos.rs` da `comandos`).
-const JUNIT_PY: &str = r#"import re, sys
+pub(super) const JUNIT_PY: &str = r#"import re, sys
 from xml.sax.saxutils import quoteattr
 
 binario = "lib"

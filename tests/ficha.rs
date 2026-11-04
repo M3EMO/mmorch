@@ -10,7 +10,7 @@ use root::ficha::{
 };
 use root::observe;
 use root::oracle::tarea::Tarea;
-use root::oracle::{ErrorOraculo, OpcionesOraculo, evaluar};
+use root::oracle::{ErrorOraculo, OpcionesOraculo, Target, evaluar};
 use root::proveedores::{Prompt, RespuestaJuez};
 use root::tipos::{Evento, TipoEvento, Via};
 
@@ -728,6 +728,7 @@ fn ficha_evaluar_sin_ficha_da_error_de_ficha_antes_de_contenedores() {
         historial: true,
         memo: None,
         reuso: None,
+        target: Target::Ninguno,
     };
     let res = evaluar(repo.path(), &tarea, &opciones);
     assert!(
