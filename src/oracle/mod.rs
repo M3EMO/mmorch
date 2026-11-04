@@ -30,6 +30,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
+use fs4::{FileExt, TryLockError};
 use thiserror::Error as ErrorDerive;
 
 use crate::borrado;
@@ -62,6 +63,8 @@ const XML_OCULTO: &str = "oculto.xml";
 const CARPETA_TEMPORALES: &str = "tmp";
 /// Prefijo de las carpetas temporales de `evaluar`.
 const PREFIJO_TEMPORAL: &str = "evaluar-";
+/// Archivo de lock dentro de cada carpeta `evaluar-*`. Su `flock` dura lo que dura la evaluación (M11).
+const ARCHIVO_LOCK_TEMPORAL: &str = ".lock";
 /// Prefijo de las carpetas de Colab dentro de `tmp`: el junit bajado de cada corrida (B18).
 const PREFIJO_COLAB_TEMPORAL: &str = "colab-";
 /// Lista de tests que pytest recolecta, dentro de `/salida`. Se compara con el junit (A5).
@@ -552,6 +555,10 @@ fn evaluar_con(
     limpiar_temporales(&tmp, SystemTime::now());
     // La copia aísla el repo: un artefacto del builder no altera el original.
     let copia = temporal(&tmp).map_err(|e| infra("directorio temporal", e))?;
+    // El lock dura lo que la evaluación: otra corrida no borra esta carpeta mientras vive. Se declara
+    // después de `copia`, así se suelta antes de borrarla.
+    let _vivo =
+        tomar_lock_temporal(copia.path()).map_err(|e| infra("lock del directorio temporal", e))?;
     let repo_copia = copia.path().join("repo");
     copiar_repo(&repo, &repo_copia).map_err(|e| infra("copia del repo", e))?;
     // El historial de evidencia es de esta versión del repo y de este oráculo (Tarea 39, Desempates técnicos
@@ -1716,8 +1723,25 @@ fn temporal(tmp: &Path) -> io::Result<tempfile::TempDir> {
         .tempdir_in(tmp)
 }
 
-/// Borra las carpetas `evaluar-*` y `colab-*` de `tmp` con más de 24 horas (B18). Los fallos se
-/// ignoran: un temporal viejo que no se borra no impide evaluar.
+/// Toma el lock exclusivo de la carpeta temporal `dir` sin esperar. Lo tiene mientras viva el archivo
+/// devuelto. Con otro dueño da `WouldBlock`.
+fn tomar_lock_temporal(dir: &Path) -> io::Result<fs::File> {
+    let archivo = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(dir.join(ARCHIVO_LOCK_TEMPORAL))?;
+    match FileExt::try_lock(&archivo) {
+        Ok(()) => Ok(archivo),
+        Err(TryLockError::WouldBlock) => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+        Err(TryLockError::Error(e)) => Err(e),
+    }
+}
+
+/// Borra las carpetas `evaluar-*` y `colab-*` de `tmp` con más de 24 horas (B18). Una carpeta con el
+/// lock tomado por otra evaluación se salta, aunque sea vieja (M11). Los fallos se ignoran: un temporal
+/// viejo que no se borra no impide evaluar.
 fn limpiar_temporales(tmp: &Path, ahora: SystemTime) {
     let Ok(entradas) = fs::read_dir(tmp) else {
         return;
@@ -1740,6 +1764,16 @@ fn limpiar_temporales(tmp: &Path, ahora: SystemTime) {
         {
             continue;
         }
+        // El lock se toma antes de borrar: sin él, una evaluación viva perdería su carpeta.
+        // Lo que no sea carpeta no lleva lock.
+        let _lock = if meta.is_dir() {
+            match tomar_lock_temporal(&ruta) {
+                Ok(archivo) => Some(archivo),
+                Err(_) => continue,
+            }
+        } else {
+            None
+        };
         // Un enlace se borra como enlace: su destino puede estar fuera de `tmp` y no se toca.
         let _ = if meta.is_symlink() {
             borrado::borrar_archivo_dentro(tmp, &ruta)
@@ -2681,6 +2715,45 @@ mod tests {
         assert!(reciente.exists(), "la carpeta reciente se conserva");
         assert!(otra.exists(), "sin el prefijo no se toca");
         assert!(ajeno.exists(), "un archivo ajeno no se toca");
+    }
+
+    #[test]
+    fn temporales_carpeta_vieja_con_lock_tomado_no_se_borra() {
+        let home = tempfile::tempdir().expect("temp dir");
+        let tmp = home.path().join("tmp");
+        let viejo = tmp.join("evaluar-x");
+        fs::create_dir_all(&viejo).expect("dir");
+        fs::write(viejo.join("resto"), "x").expect("escribe");
+        // El lock se crea antes de fijar el mtime: crear el archivo cambia el mtime de la carpeta.
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(viejo.join(".lock"))
+            .expect("crea el lock");
+        fs4::FileExt::try_lock(&lock).expect("otra evaluación toma el lock");
+        let ahora = SystemTime::now();
+        poner_mtime(&viejo, ahora - Duration::from_secs(25 * 3600));
+
+        limpiar_temporales(&tmp, ahora);
+
+        assert!(viejo.exists(), "una evaluación viva conserva su carpeta");
+        assert!(viejo.join("resto").exists(), "sus archivos quedan intactos");
+    }
+
+    #[test]
+    fn temporales_carpeta_vieja_sin_lock_se_borra() {
+        let home = tempfile::tempdir().expect("temp dir");
+        let tmp = home.path().join("tmp");
+        let viejo = tmp.join("evaluar-x");
+        fs::create_dir_all(&viejo).expect("dir");
+        fs::write(viejo.join("resto"), "x").expect("escribe");
+        let ahora = SystemTime::now();
+        poner_mtime(&viejo, ahora - Duration::from_secs(25 * 3600));
+
+        limpiar_temporales(&tmp, ahora);
+
+        assert!(!viejo.exists(), "sin lock, la carpeta vieja se borra");
     }
 
     #[test]
