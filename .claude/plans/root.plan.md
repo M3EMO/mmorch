@@ -89,6 +89,7 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 63 | Calibración: el usuario preguntó "No se puede hacer mas rapida? eficiente? o en paralelo? El diseño de por si digo", y eligió "a) Cortar y mejorar". Ver Tareas 48 y 49. |
 | 64 | Objetivo: "terminar root. Calibrarlo a la perfeccion, no terminar con la primer version completa, seguir hasta terminar". Y: "Acelerar los procesos para que no sea todo secuencial, un recurso que hay que aprovechar es el tiempo." El hito 1 cierra con la calibración completa, y el trabajo independiente corre en paralelo. |
 | 65 | P62: "a) Rechazar claves". Si Root pasa una credencial, rechaza en el config de cargo del repo las claves que ejecutan comandos o cambian el TLS. Sin credenciales, el config se respeta entero. Acota la decisión 30. Construida en la Tarea 51 (C2). |
+| 66 | Calibración: el orquestador propuso reusar el `target` de la base en cada caso. El usuario respondió "Sí, esperar". La calibración real espera la Tarea 59. |
 
 ## Patterns to Mirror
 
@@ -3609,5 +3610,75 @@ No hace falta esperar a la 55, la 57 ni la 58: ninguna cambia lo que mide la cal
 6. **Corrida real de memora (Tarea 16).** Espera a la 55. No corre a la vez que la calibración.
 7. **Validez automática (Tarea 12b)** y **cierre (Tarea 47)**.
 8. **Borrado de memora y brasa** (decisión 61).
+
+No hay preguntas nuevas para el usuario.
+
+## Vuelta del 2026-11-04 (madrugada): Tarea 54 mezclada, humo y compilación
+
+**Estado.** `claude/root-e7813e` está en 367b0b4, con la Tarea 54. El usuario escribió: "Sí, mezclar la 54". La máquina se reinició cerca de las 00:04, y el orquestador retomó la humo y los builders de las Tareas 55 y 57. La Tarea 58 no arrancó.
+
+**Evaluación de humo** (release de 367b0b4, sin claves, 0 USD).
+- memora-ecc: contrato 61/61 y oculto 65/68, en 653 s. Las 3 fallas son inestables medidos: `test_blpop_fifo_entre_clientes` 4/40, `test_bgsave_no_bloquea` 32/40 y `test_client_id` 42/50. El Validate 14 dio 66/68 con los mismos inestables.
+- brasa-ecc: contrato 53/53 y oculto 20/21, en 2423 s. Falla `test_spin_despues_de_rotacion`, como en el Validate 14.
+- La ruta nueva de la suite oculta (`/salida/.oculto`) no rompe memora ni brasa. El punto 7 de la Tarea 58 no hace falta.
+
+**Medición de la compilación** (memora-ecc en `root-oraculo-rust:2`, con carga 30).
+
+| Comando | En frío | Con el `target` de la base, tras tocar `src/config.rs` |
+|---|---|---|
+| `cargo test --no-run` | 80 s | 4,7 s |
+| `cargo build --release` | 67 s | 28,7 s |
+
+- Hoy cada caso compila desde cero en su propio `/salida/target`: la suite oculta, la de contrato y clippy fijan `CARGO_TARGET_DIR=/salida/target`.
+- El disco es btrfs, así que `cp --reflink=auto` copia un `target` casi sin costo.
+- La cuenta gruesa del orquestador: unos 2 minutos por caso, unos 320 casos, unas 10 horas de CPU.
+
+**Otros datos.**
+- Colab Pro+ no sirve para el oráculo: la red de podman falla, `--network none` no levanta la interfaz y los cgroups están en solo lectura.
+- El orquestador mantiene podman: arrancar un contenedor cuesta unos 0,3 s, y un caso compila durante minutos.
+- El orquestador planea 3 procesos de `r00t` en paralelo. La laptop tiene 8 núcleos y 15 GB, y cada contenedor usa hasta 2 GB.
+
+## Desempates técnicos 30 (Opus, 2026-11-04): reuso del `target` y reparto de la calibración
+
+**Reuso del `target` (decisión 66).**
+- Cada caso de calibración arranca con una copia del `target` de la base de su misma calibración, hecha con `cp --reflink=auto`. La copia va al mismo `/salida/target` del contenedor, así que las rutas que cargo guarda no cambian.
+- **Por qué mide lo mismo.** Cargo decide qué recompilar por sus huellas. El caso cambia archivos del repo, y cargo recompila ese crate. Las dependencias de `/cache/vendor` no cambian, y su compilación se reusa. El resultado de los tests y de clippy es el mismo que con un `target` vacío: solo cambia el tiempo.
+- **Cuándo no se reusa.** Si el caso cambia `Cargo.toml` o `Cargo.lock`, si cambia el digest de la imagen, o si la base no dejó `target`, el caso compila en frío y lo registra en su renglón de `.casos.jsonl`.
+- **La evaluación real no reusa `target` de otra evaluación.** Dentro de una evaluación, las repeticiones ya comparten su `/salida/target`. Reusar entre evaluaciones de repos distintos dejaría que el `build.rs` de un producto plante artefactos para otro. En la calibración, la base y sus casos salen del mismo producto, así que esa vía no existe.
+- **Prueba.** Sobre un fixture, un caso con el `target` reusado y el mismo caso en frío dan el mismo veredicto.
+
+**Tests inestables en la calibración.**
+- La humo de memora-ecc tiene 3 inestables con tasas de 10 %, 80 % y 84 %. En un caso limpio, esos tests pueden cambiar de clase y bajar un nivel sin ningún defecto. Eso es un falso positivo que no dice nada del evaluador.
+- **Desempate.** En Completitud y Funciona, un caso detecta un defecto solo por tests que la base clasificó como estables. Los inestables de la base no cuentan para detectar, ni en un caso con defecto ni en uno limpio. Razón: la evaluación real ya informa los inestables aparte, y la calibración mide si el evaluador ve el defecto inyectado, no el ruido conocido.
+- Va en la Tarea 59, porque toca la misma regla de detección.
+
+**Reparto en 3 procesos.**
+- 3 procesos entran en 15 GB: cada proceso corre un contenedor por vez, así que son unos 6 GB en contenedores, más el host.
+- Los procesos se reparten por dimensión, para que cada uno tenga una carga parecida. Primero memora, y después brasa:
+  - proceso A: Completitud y Funciona, que corren la suite oculta y son los más lentos;
+  - proceso B: Pruebas, Seguridad y Estructura;
+  - proceso C: Arquitectura, Diseño y Eficiencia (que da "no aplica").
+- Entrega se calibra después de la mezcla de la Tarea 58, porque la 58 cambia cómo mide Entrega (respuestas 1 y 2 del informe 56). Esto corrige lo que dijo el plan en la vuelta anterior: la 58 sí cambia una dimensión de la calibración.
+- **Tiempo de brasa.** Una evaluación de brasa tardó 2423 s. Un caso de Completitud o Funciona de brasa tarda casi lo mismo, porque el reuso del `target` solo ahorra la compilación. Con 21 casos por dimensión, el proceso A de brasa puede tardar unas 28 horas. Es una estimación, y la calibración real la mide.
+
+**Tarea 58 y Tarea 59.** Corren una después de la otra: las dos tocan `src/oracle/mod.rs` y `src/oracle/calibra*`. La 59 va primero, porque la calibración la espera. La 58 arranca después de la mezcla de la 59, y corre mientras calibran los procesos A, B y C, con `ROOT_SIN_PODMAN=1`.
+
+### Tarea 59: Reuso del `target` de la base y detección sin inestables
+- **Action**: el reuso del `target` y la regla de los tests inestables, de "Desempates técnicos 30".
+- **Archivos**: `src/oracle/calibra.rs`, `src/oracle/calibra/`, y en `src/oracle/mod.rs` solo lo necesario para recibir un `target` inicial en la evaluación de un caso.
+- **Arranca**: ya, desde 367b0b4. Corre en paralelo con la 55 y la 57, que no tocan esos archivos.
+- **Brief**: `docs/builds/brief-local-59.md`.
+
+## Orden final del hito 1 (2026-11-04, madrugada)
+
+1. **Tarea 59** con el builder local. En paralelo siguen la 55 y la 57.
+2. **Mezcla de la 59**, con la orden del usuario.
+3. **Calibración real de memora**, en 3 procesos (A, B y C), con `--tope-usd` igual al saldo menos 1 USD. Después, la de brasa.
+4. **En paralelo con la calibración:** la Tarea 58, con `ROOT_SIN_PODMAN=1`. Las mezclas de la 55, la 57 y la 58 esperan una pausa de la calibración, entre memora y brasa o al final.
+5. **Calibración de Entrega** de memora y brasa, después de la mezcla de la 58.
+6. **Comparación de `global`.**
+7. **Corrida real de memora (Tarea 16).** Espera a la 55, y no corre a la vez que la calibración.
+8. **Validez automática** y **cierre** (Tarea 47).
+9. **Borrado de memora y brasa** (decisión 61).
 
 No hay preguntas nuevas para el usuario.
