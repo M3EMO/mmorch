@@ -440,12 +440,18 @@ fn falso_a_medida(dir: &Path, estado: &str, stop_codigo: i32) -> PathBuf {
 
 /// Como `falso_a_medida`, pero el caso `stop` es el cuerpo de shell `stop_cuerpo`.
 fn falso_a_medida_stop(dir: &Path, estado: &str, stop_cuerpo: &str) -> PathBuf {
+    falso_a_medida_con(dir, estado, "exit 0", stop_cuerpo)
+}
+
+/// Como `falso_a_medida_stop`, pero el caso `new` es el cuerpo de shell `new_cuerpo`.
+fn falso_a_medida_con(dir: &Path, estado: &str, new_cuerpo: &str, stop_cuerpo: &str) -> PathBuf {
     let guion = format!(
         r#"#!/bin/sh
 DIR='{dir}'
 echo "$*" >> "$DIR/llamadas.log"
 case "$1" in
-new|upload|download) exit 0 ;;
+new) {new_cuerpo} ;;
+upload|download) exit 0 ;;
 stop) {stop_cuerpo} ;;
 exec)
   f=""; prev=""
@@ -462,6 +468,7 @@ exec)
 esac
 "#,
         dir = dir.display(),
+        new_cuerpo = new_cuerpo,
         stop_cuerpo = stop_cuerpo,
         estado = estado,
     );
@@ -727,12 +734,15 @@ fn colab_stop_con_salida_desconocida_conserva_activo() {
     assert_eq!(ultimo["extra"]["confirmada"], false, "{gates:?}");
 }
 
+// El tope corre sobre tiempo real desde el inicio de la corrida.
+// Con la máquina cargada, los pasos previos tardan más de 600 ms.
+// Por eso el tope es de 6 s. La prueba fina del tope vive en los tests unitarios de src/oracle/colab.rs.
 #[test]
 fn colab_tope_minutos_001_deja_gate_tope_de_duracion() {
     let e = Escenario::nuevo(ENTORNO_O2);
     fs::write(
         e.home.path().join("root.toml"),
-        "[colab]\nminutos_max = 0.01\n",
+        "[colab]\nminutos_max = 0.1\n",
     )
     .expect("root.toml");
     let falso = falso_a_medida(e.falso.path(), CORRIENDO, 0);
@@ -741,12 +751,12 @@ fn colab_tope_minutos_001_deja_gate_tope_de_duracion() {
     let duracion = inicio.elapsed();
     let stderr = String::from_utf8_lossy(&salida.stderr);
     assert!(
-        duracion < Duration::from_secs(5),
+        duracion < Duration::from_secs(30),
         "tardó {duracion:?}: {stderr}"
     );
     assert_eq!(salida.status.code(), Some(3), "stderr: {stderr}");
     assert!(
-        stderr.contains("Colab superó el tope de 600 ms: se liberó el runtime"),
+        stderr.contains("Colab superó el tope de 6 segundos: se liberó el runtime"),
         "{stderr}"
     );
     let lineas = e.llamadas();
@@ -770,6 +780,47 @@ fn colab_tope_minutos_001_deja_gate_tope_de_duracion() {
     assert!(
         !e.colab_json().exists(),
         "sin resultados: los tests quedan Pendiente"
+    );
+}
+
+// El tope corre sobre tiempo real desde el inicio de la corrida.
+// Un `new` lento consume el tope antes de sondear. Por eso el tope es de 6 s.
+// La prueba fina del tope vive en los tests unitarios de src/oracle/colab.rs.
+#[test]
+fn colab_tope_con_pasos_previos_lentos_llega_a_sondear() {
+    let e = Escenario::nuevo(ENTORNO_O2);
+    fs::write(
+        e.home.path().join("root.toml"),
+        "[colab]\nminutos_max = 0.1\n",
+    )
+    .expect("root.toml");
+    let falso = falso_a_medida_con(e.falso.path(), CORRIENDO, "sleep 1; exit 0", "exit 0");
+    let inicio = Instant::now();
+    let salida = correr(&e, &falso, &["--colab"]);
+    let duracion = inicio.elapsed();
+    let stderr = String::from_utf8_lossy(&salida.stderr);
+    assert!(
+        duracion < Duration::from_secs(30),
+        "tardó {duracion:?}: {stderr}"
+    );
+    assert_eq!(salida.status.code(), Some(3), "stderr: {stderr}");
+    let lineas = e.llamadas();
+    assert!(
+        lineas.iter().any(|l| l.contains("corre.py")),
+        "la corrida no llegó a corre.py: {lineas:?}"
+    );
+    assert!(
+        lineas.iter().any(|l| l.contains("estado.py")),
+        "la corrida debía estar sondeando: {lineas:?}"
+    );
+    let ultima = lineas.last().cloned().unwrap_or_default();
+    assert!(ultima.starts_with("stop -s"), "última llamada: {ultima}");
+    let gates = e.eventos_runtime();
+    assert!(
+        gates
+            .iter()
+            .any(|g| g["extra"]["accion"] == "liberar" && g["extra"]["causa"] == "tope de duración"),
+        "{gates:?}"
     );
 }
 
