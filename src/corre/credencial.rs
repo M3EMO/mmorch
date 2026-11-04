@@ -17,13 +17,17 @@ const CLAVE_LOGIN: &str = "claudeAiOauth";
 /// Mensaje cuando el login vence antes del plazo. No lleva tokens.
 const MENSAJE_VENCE: &str = "el login de Claude vence antes del plazo de la corrida; renová el login en el host con `claude` y reintentá";
 
-/// Copia `origen` a `destino` con solo la clave `claudeAiOauth`, con permisos 0600.
+/// Copia `origen` a `destino` con solo la clave `claudeAiOauth`, sin `refreshToken`, con permisos 0600.
 /// El destino previo se borra antes. Así el archivo nuevo nace con 0600.
 pub fn copiar_sin_mcp(origen: &Path, destino: &Path) -> Result<(), ErrorCorre> {
     let json = leer_json(origen)?;
-    let login = login_de(&json, origen)?;
+    let mut login = login_de(&json, origen)?.clone();
+    // Sin refresco, un `claude` dentro del contenedor no puede rotar el login del host.
+    if let Some(objeto) = login.as_object_mut() {
+        objeto.remove("refreshToken");
+    }
     let mut solo_login = Map::new();
-    solo_login.insert(CLAVE_LOGIN.to_string(), login.clone());
+    solo_login.insert(CLAVE_LOGIN.to_string(), login);
     let texto = serde_json::to_string_pretty(&Value::Object(solo_login)).map_err(|e| {
         ErrorCorre::Ejecutor(format!(
             "no se pudo armar la copia de {}: {e}",
@@ -152,6 +156,20 @@ mod tests {
         assert!(!copia.contains(TOKEN_MCP), "la copia trae el token MCP");
         let json: serde_json::Value = serde_json::from_str(&copia).expect("JSON válido");
         assert_eq!(json["claudeAiOauth"]["accessToken"], TOKEN_ACCESO);
+    }
+
+    #[test]
+    fn corre_credencial_copia_sin_refresh_token() {
+        let tmp = TempDir::new().expect("tmp");
+        let origen = escribir(&tmp, "origen.json", &credenciales_completas());
+        let destino = tmp.path().join("copia.json");
+        copiar_sin_mcp(&origen, &destino).expect("copia");
+        let copia = fs::read_to_string(&destino).expect("lee la copia");
+        assert!(!copia.contains("refreshToken"), "{copia}");
+        assert!(!copia.contains(TOKEN_REFRESCO), "la copia trae el refresco");
+        let json: serde_json::Value = serde_json::from_str(&copia).expect("JSON válido");
+        assert_eq!(json["claudeAiOauth"]["accessToken"], TOKEN_ACCESO);
+        assert_eq!(json["claudeAiOauth"]["expiresAt"], VENCE_MS);
     }
 
     #[test]
