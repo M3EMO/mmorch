@@ -1875,6 +1875,14 @@ mod tests {
     use crate::config::RegistroConfig;
     use crate::oracle::descarga::credenciales::credenciales_cargo;
 
+    /// Valor único del secreto de prueba. Las guardas buscan este valor, no un nombre de campo.
+    const SECRETO_DE_PRUEBA: &str = "secreto-de-prueba-7f3a";
+
+    /// Falla si `texto` contiene el secreto de prueba.
+    fn sin_secreto(texto: &str) {
+        assert!(!texto.contains(SECRETO_DE_PRUEBA), "{texto}");
+    }
+
     fn repo_con(archivos: &[(&str, &str)]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("temp dir");
         for (ruta, texto) in archivos {
@@ -2232,14 +2240,21 @@ git+https://github.com/x/y@abc1234#egg=y\nhttps://host/p.tar.gz\n-r otro.txt\n";
 
     #[test]
     fn descarga_inventario_credencial_en_url_es_rechazo_y_no_se_filtra() {
-        let inv = inventario_cargo("foo = { git = \"https://usuario:clave@host/x.git\" }\n");
+        let inv = inventario_cargo(
+            "foo = { git = \"https://usuario:secreto-de-prueba-7f3a@host/x.git\" }\n",
+        );
         assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
         let json = serde_json::to_string(&inv).expect("serializa");
-        // El guarda busca `clave@`: el nombre del campo `claves_de_ejecucion` contiene `clave`.
-        assert!(!json.contains("clave@"), "{json}");
+        sin_secreto(&json);
         assert!(!json.contains("usuario:"), "{json}");
         assert!(json.contains("https://***@host/x.git"), "{json}");
-        assert!(!format!("{inv:?}").contains("clave@"));
+        sin_secreto(&format!("{inv:?}"));
+    }
+
+    #[test]
+    #[should_panic(expected = "secreto-de-prueba-7f3a")]
+    fn guarda_sin_secreto_falla_si_la_url_filtra_el_valor() {
+        sin_secreto("{\"cita\":\"https://usuario:secreto-de-prueba-7f3a@host/x.git\"}");
     }
 
     #[test]
@@ -2492,8 +2507,14 @@ source = \"git+https://u:p@host/x?rev=1#aaaa\"\n";
         assert_eq!(inv.rechazos[0].cita, "--index-url https://***@host/simple");
         assert!(inv.fuentes.is_empty(), "{inv:?}");
         let json = serde_json::to_string(&inv).expect("serializa");
-        assert!(!json.contains("clave@"), "{json}");
-        assert!(!json.contains("u:clave@"), "{json}");
+        sin_secreto(&json);
+        assert!(!json.contains("u:"), "{json}");
+    }
+
+    #[test]
+    #[should_panic(expected = "secreto-de-prueba-7f3a")]
+    fn guarda_index_url_falla_si_el_secreto_sale() {
+        sin_secreto("--index-url https://u:secreto-de-prueba-7f3a@host/simple");
     }
 
     #[test]
@@ -2731,11 +2752,19 @@ requests\ngit+https://github.com/x/y@abc1234#egg=y\n";
 
     #[test]
     fn descarga_inventario_cita_no_muestra_credencial_si_la_url_no_parsea() {
-        let inv = inventario_cargo("foo = { git = \"https://usuario:clave@ho st/x\" }\n");
+        let inv = inventario_cargo(
+            "foo = { git = \"https://usuario:secreto-de-prueba-7f3a@ho st/x\" }\n",
+        );
         assert_eq!(inv.rechazos.len(), 1, "{inv:?}");
         let json = serde_json::to_string(&inv).expect("serializa");
-        assert!(!json.contains("clave@"), "{json}");
+        sin_secreto(&json);
         assert!(!json.contains("usuario:"), "{json}");
+    }
+
+    #[test]
+    #[should_panic(expected = "secreto-de-prueba-7f3a")]
+    fn guarda_cita_falla_si_el_secreto_sale() {
+        sin_secreto("foo = https://usuario:secreto-de-prueba-7f3a@ho st/x");
     }
 
     fn config_de(texto: &str) -> Inventario {
@@ -2762,7 +2791,7 @@ requests\ngit+https://github.com/x/y@abc1234#egg=y\n";
 
     #[test]
     fn inventario_proxy_con_usuario_y_clave_es_hallazgo_de_seguridad_sin_filtrar() {
-        let inv = config_de("[http]\nproxy = \"http://u:clave@proxy:3128\"\n");
+        let inv = config_de("[http]\nproxy = \"http://u:secreto-de-prueba-7f3a@proxy:3128\"\n");
         let h = inv
             .hallazgos
             .iter()
@@ -2772,17 +2801,19 @@ requests\ngit+https://github.com/x/y@abc1234#egg=y\n";
         assert_eq!(h.archivo, ".cargo/config.toml");
         assert_eq!(h.linea, 2);
         assert!(entrada(&inv, "http.proxy").red);
-        // El campo `clave` del JSON se llama igual que la contraseña: se busca el secreto con su contexto.
-        assert!(
-            !h.cita.contains("clave") && !h.detalle.contains("clave"),
-            "{h:?}"
-        );
+        sin_secreto(&h.cita);
+        sin_secreto(&h.detalle);
         let json = serde_json::to_string(&inv).expect("serializa");
         for texto in [json, format!("{inv:?}")] {
-            assert!(!texto.contains("u:clave"), "{texto}");
-            assert!(!texto.contains("clave@"), "{texto}");
+            sin_secreto(&texto);
             assert!(!texto.contains("u:"), "{texto}");
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "secreto-de-prueba-7f3a")]
+    fn guarda_hallazgo_falla_si_el_secreto_sale() {
+        sin_secreto("detalle: http://u:secreto-de-prueba-7f3a@proxy:3128");
     }
 
     #[test]
