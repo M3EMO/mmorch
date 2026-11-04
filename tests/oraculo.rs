@@ -1209,3 +1209,39 @@ fn coleccion_pytest_con_qq_y_v_da_node_ids_y_el_junit_cuadra() {
         assert_eq!(v.oculto, Conteo { pasa: 2, total: 2 }, "flags {flags}");
     }
 }
+
+/// Producto de fixture: `ve_oculto` lista los `.py` de la suite oculta que alcanza a ver (H1).
+const PRODUCTO_VE_OCULTO: &str = r#"import glob
+def ve_oculto():
+    rutas = glob.glob('/oraculo/**/*.py', recursive=True) + glob.glob('/salida/.oculto/**/*.py', recursive=True)
+    return [r for r in rutas if r.endswith('test_ve_el_oculto.py')]
+"#;
+
+/// Test oculto que pregunta al producto si ve su propio código. Importa el producto a mano desde `/repo`.
+const TEST_VE_OCULTO: &str = r#"import sys
+sys.path.insert(0, '/repo')
+import producto
+
+
+def test_ve_el_oculto():
+    assert producto.ve_oculto() == []
+"#;
+
+#[test]
+fn pytest_oculto_el_producto_no_ve_oculto() {
+    root::saltar_sin_podman!();
+    let _g = SERIE.lock().unwrap_or_else(|e| e.into_inner());
+    let (dir, tarea) = tarea_pytest(OCULTO_CON_Q);
+    fs::remove_file(dir.path().join("oculto/test_pequena.py")).expect("quita la suite de fixture");
+    fs::write(
+        dir.path().join("oculto/test_ve_el_oculto.py"),
+        TEST_VE_OCULTO,
+    )
+    .expect("test");
+    let repo = repo_con_contenido();
+    fs::write(repo.path().join("producto.py"), PRODUCTO_VE_OCULTO).expect("producto");
+    let home = tempfile::tempdir().expect("home");
+    let v =
+        evaluar(repo.path(), &tarea, &opciones(home.path())).expect("evalúa sin error de infra");
+    assert_eq!(v.oculto, Conteo { pasa: 1, total: 1 }, "{:?}", v.avisos);
+}
