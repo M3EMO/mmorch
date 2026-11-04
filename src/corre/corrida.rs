@@ -39,6 +39,8 @@ const FASE_LANZAMIENTO: &str = "lanzamiento";
 const FASE_SESION: &str = "sesion";
 const FASE_EVALUACION: &str = "evaluacion";
 const FASE_TRANSCRIPT: &str = "transcript";
+/// Fase del `Gate` que queda cuando el login no alcanza para un rol que va después del primero.
+const FASE_VIGENCIA: &str = "vigencia";
 /// Mensaje de commit del estado final del repo de la corrida.
 const MENSAJE_ESTADO_FINAL: &str = "r00t corre: estado final";
 
@@ -74,6 +76,7 @@ struct Lanzado {
 /// no hay nada que evaluar, y la evaluación puede gastar API. Un rol sin `result` exitoso también
 /// aborta sin evaluar ni escribir fila: deja un `Gate` con el motivo. Un rol cortado por tiempo
 /// además guarda su transcript parcial y registra su costo estimado (ver `registrar_corte`).
+/// Desde el segundo rol, la vigencia del login se espera antes de cada lanzamiento (ver `esperar_vigencia_del_rol`).
 pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, ErrorCorre> {
     // a) GOAL: sin autorización no arranca y no se crea nada.
     verificar_goal(deps.repo_root)?;
@@ -93,10 +96,8 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         exigir_cupo(*rol, &eleccion)?;
         elecciones.push((*rol, eleccion));
     }
-    // Vigencia del login: debe alcanzar para el tope de cada rol. Si no, no se arma ni se lanza nada.
-    let roles = u32::try_from(elecciones.len()).unwrap_or(u32::MAX);
-    deps.ejecutor
-        .verificar_antes(TIMEOUT_BUILDER.saturating_mul(roles))?;
+    // Vigencia del login: debe alcanzar para el plazo de un rol. Si no, no se arma ni se lanza nada.
+    deps.ejecutor.verificar_antes(TIMEOUT_BUILDER)?;
 
     // d) Armado de la carpeta de la corrida.
     let corrida = preparar_corrida(deps.home, deps.home_usuario, tarea, config)?;
@@ -110,6 +111,10 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
     // e) Lanzamiento por rol, en orden. Cada salida se guarda como transcript.
     let mut lanzados: Vec<Lanzado> = Vec::new();
     for (indice, (rol, eleccion)) in elecciones.iter().enumerate() {
+        // Desde el segundo rol, cada lanzamiento vuelve a leer la credencial: se revisa su vigencia antes.
+        if indice > 0 {
+            esperar_vigencia_del_rol(deps.ejecutor, &ruta_eventos, &id, *rol)?;
+        }
         let prompt = config_cargada.prompt.get(rol).cloned().unwrap_or_default();
         let modelo = eleccion.modelo.clone().unwrap_or_default();
         let lanzamiento = Lanzamiento {
@@ -240,6 +245,33 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         fuente,
     })?;
     Ok(fila)
+}
+
+/// Espera a que el login alcance para el plazo de un rol. Si no alcanza, deja un `Gate` y revisa cada
+/// `intervalo`, como mucho `reintentos()` veces. Si nunca alcanza, devuelve el último error.
+fn esperar_vigencia_del_rol(
+    ejecutor: &dyn EjecutorBuilder,
+    ruta_eventos: &Path,
+    id: &str,
+    rol: Rol,
+) -> Result<(), ErrorCorre> {
+    let Err(mut ultimo) = ejecutor.verificar_antes(TIMEOUT_BUILDER) else {
+        return Ok(());
+    };
+    let motivo = format!(
+        "el login no alcanza para el rol {}: r00t espera su renovación",
+        nombre_rol(rol)
+    );
+    gate(ruta_eventos, id, FASE_VIGENCIA, motivo, Some(rol))?;
+    let espera = ejecutor.espera_vigencia();
+    for _ in 0..espera.reintentos() {
+        std::thread::sleep(espera.intervalo);
+        match ejecutor.verificar_antes(TIMEOUT_BUILDER) {
+            Ok(()) => return Ok(()),
+            Err(error) => ultimo = error,
+        }
+    }
+    Err(ultimo)
 }
 
 /// Un rol cortado por tiempo: guarda su transcript parcial y registra el costo estimado de lo que gastó.
@@ -446,7 +478,7 @@ fn de_observe(contexto: &str, error: ErrorObserve) -> ErrorCorre {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::fs;
     use std::path::PathBuf;
 
@@ -456,7 +488,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::corre::ejecutor::pruebas::EjecutorFalso;
-    use crate::corre::{Lanzamiento, SalidaClaude, dir_corridas};
+    use crate::corre::{EsperaVigencia, Lanzamiento, SalidaClaude, dir_corridas};
     use crate::goal::{ErrorGoal, calcular_hash};
     use crate::oracle::ErrorOraculo;
     use crate::tipos::{Confianza, Decision, Estado, Evento, Forma, Informe, Rol, TipoEvento, Via};
@@ -583,6 +615,12 @@ mod tests {
         credencial_enlace: Option<PathBuf>,
         /// La revisión de vigencia falla, como un login que vence antes del plazo.
         vigencia_falla: bool,
+        /// Desde esta llamada (base 1) a `verificar_antes` la revisión falla.
+        vigencia_desde: Option<u32>,
+        /// Cuántas llamadas fallan desde `vigencia_desde`. Sin valor, fallan todas las que siguen.
+        vigencia_recupera_tras: Option<u32>,
+        /// Llamadas hechas a `verificar_antes`.
+        vigencia_llamadas: Cell<u32>,
         /// Plazo que `correr` pidió en `verificar_antes`.
         plazo_verificado: RefCell<Option<Duration>>,
         lanzados: RefCell<Vec<Lanzamiento>>,
@@ -593,10 +631,25 @@ mod tests {
     impl EjecutorBuilder for Builder {
         fn verificar_antes(&self, plazo: Duration) -> Result<(), ErrorCorre> {
             *self.plazo_verificado.borrow_mut() = Some(plazo);
-            if self.vigencia_falla {
+            let llamada = self.vigencia_llamadas.get() + 1;
+            self.vigencia_llamadas.set(llamada);
+            let en_racha = self.vigencia_desde.is_some_and(|desde| {
+                llamada >= desde
+                    && self
+                        .vigencia_recupera_tras
+                        .is_none_or(|m| llamada < desde + m)
+            });
+            if self.vigencia_falla || en_racha {
                 return Err(ErrorCorre::Ejecutor("prueba: el login vence".into()));
             }
             Ok(())
+        }
+
+        fn espera_vigencia(&self) -> EsperaVigencia {
+            EsperaVigencia {
+                intervalo: Duration::from_millis(1),
+                tope: Duration::from_millis(5),
+            }
         }
 
         fn lanzar(&self, l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre> {
@@ -1114,15 +1167,92 @@ mod tests {
     }
 
     #[test]
-    fn corre_vigencia_pide_el_plazo_de_todos_los_roles() {
+    fn corre_vigencia_pide_el_plazo_de_un_rol() {
         let e = entorno();
         let builder = Builder::default();
         correr_con(&e, &builder, &[], CONFIG).expect("corre");
         assert_eq!(
             *builder.plazo_verificado.borrow(),
-            Some(TIMEOUT_BUILDER * 2),
-            "dos roles, un tope por rol"
+            Some(TIMEOUT_BUILDER),
+            "el plazo es el de un rol, no el de todos"
         );
+    }
+
+    /// Reintentos de la espera de prueba: su tope de 5 ms entre intervalos de 1 ms.
+    const REINTENTOS_DE_PRUEBA: u32 = 5;
+
+    #[test]
+    fn corre_vigencia_falla_antes_del_primer_rol_sale_sin_lanzar_ni_esperar() {
+        let e = entorno();
+        let builder = Builder {
+            vigencia_falla: true,
+            ..Builder::default()
+        };
+        let error = correr_con(&e, &builder, &[], CONFIG).expect_err("el login vence");
+        assert!(matches!(error, ErrorCorre::Ejecutor(_)), "{error}");
+        assert_eq!(error.codigo_de_salida(), 3);
+        assert!(
+            builder.lanzados.borrow().is_empty(),
+            "ningún rol debe lanzarse"
+        );
+        assert_eq!(
+            builder.vigencia_llamadas.get(),
+            1,
+            "sin espera: una sola revisión"
+        );
+        assert_eq!(*builder.plazo_verificado.borrow(), Some(TIMEOUT_BUILDER));
+        assert!(
+            gates(&e, "vigencia").is_empty(),
+            "antes del primer rol no hay espera"
+        );
+    }
+
+    #[test]
+    fn corre_vigencia_se_recupera_entre_roles_y_sigue() {
+        let e = entorno();
+        let builder = Builder {
+            vigencia_desde: Some(2),
+            vigencia_recupera_tras: Some(2),
+            ..Builder::default()
+        };
+        correr_con(&e, &builder, &[], CONFIG).expect("la corrida termina bien");
+        let roles: Vec<Rol> = builder.lanzados.borrow().iter().map(|l| l.rol).collect();
+        assert_eq!(roles, vec![Rol::Planifica, Rol::Construye]);
+        assert_eq!(
+            builder.vigencia_llamadas.get(),
+            4,
+            "una de planifica, dos fallidas y una buena de construye"
+        );
+        let avisos: Vec<Evento> = eventos(&e)
+            .into_iter()
+            .filter(|ev| ev.tipo == TipoEvento::Gate && ev.fase == "vigencia")
+            .collect();
+        assert_eq!(avisos.len(), 1, "un Gate al fallar, no uno por reintento");
+        assert_eq!(
+            avisos[0].extra.get("rol").and_then(Value::as_str),
+            Some("construye")
+        );
+    }
+
+    #[test]
+    fn corre_vigencia_no_se_recupera_entre_roles_sale_con_3() {
+        let e = entorno();
+        let builder = Builder {
+            vigencia_desde: Some(2),
+            ..Builder::default()
+        };
+        let error = correr_con(&e, &builder, &[], CONFIG).expect_err("el login no se recupera");
+        assert!(matches!(error, ErrorCorre::Ejecutor(_)), "{error}");
+        assert_eq!(error.codigo_de_salida(), 3);
+        let roles: Vec<Rol> = builder.lanzados.borrow().iter().map(|l| l.rol).collect();
+        assert_eq!(roles, vec![Rol::Planifica], "construye no debe lanzarse");
+        assert_eq!(gates(&e, "vigencia").len(), 1, "un Gate de vigencia");
+        assert_eq!(
+            builder.vigencia_llamadas.get(),
+            2 + REINTENTOS_DE_PRUEBA,
+            "una de planifica, una de construye y ceil(tope/intervalo) reintentos"
+        );
+        assert!(!e.home.join("runs.jsonl").exists(), "sin fila");
     }
 
     /// Carpeta de la única corrida que hay bajo `usuario`.
