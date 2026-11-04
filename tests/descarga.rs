@@ -296,7 +296,7 @@ source = \"git+ssh://git@github.com/x/ext?rev=1#1\"\n";
     );
     let cortes = gates(home.path());
     assert_eq!(cortes.len(), 1, "un Gate de corte: {cortes:?}");
-    assert_eq!(cortes[0]["motivo"], "fuente-no-aceptada");
+    assert_eq!(cortes[0]["extra"]["motivo"], "fuente-no-aceptada");
     assert_eq!(
         gates_inventario(home.path()).len(),
         1,
@@ -580,7 +580,7 @@ tres = { git = \"https://usuario:secreto-de-prueba-7f3a@host/x.git\" }\n",
     );
     let cortes = gates(home.path());
     assert_eq!(cortes.len(), 1, "un Gate de corte: {cortes:?}");
-    assert_eq!(cortes[0]["motivo"], "fuente-no-aceptada");
+    assert_eq!(cortes[0]["extra"]["motivo"], "fuente-no-aceptada");
     let crudos = eventos_crudos(home.path());
     assert!(
         !crudos.contains("secreto-de-prueba-7f3a"),
