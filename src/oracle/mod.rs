@@ -1047,6 +1047,10 @@ fn medir(
                 } else {
                     puntaje_de(dimension, de_la_dimension, extra, tarea)
                 };
+                // El build pendiente es un ítem de Entrega: va antes que los faltantes de sonda sin veredicto.
+                if dimension == Dimension::Entrega {
+                    sumar_faltantes(&mut de_sondas.faltantes, entrega.faltantes.clone());
+                }
                 // Arquitectura sin capas ni módulos: el ítem de dependencias no tiene qué medir (desempate 6).
                 let sin_modulos = dimension == Dimension::Arquitectura
                     && de_sondas.sin_veredicto.as_deref()
@@ -4147,9 +4151,14 @@ mod tests {
             .filter(|p| p.sin_veredicto.is_some())
             .map(|p| p.dimension)
             .collect();
+        // Entrega no tiene ítems propios medidos: sus requisitos no cuentan (son de Completitud).
         assert_eq!(
             sin,
-            vec![Dimension::Arquitectura, Dimension::Diseno],
+            vec![
+                Dimension::Arquitectura,
+                Dimension::Diseno,
+                Dimension::Entrega
+            ],
             "{:?}",
             v.puntajes
         );
@@ -6130,8 +6139,38 @@ mod tests {
         let deps = deps_con_podman(&correr, &fabrica, &podman);
         let v = evaluar_con_deps(base.path(), &repo, deps);
         assert_eq!(podman.total(), 0, "{:?}", podman.builds());
+        // Los requisitos son de Completitud: sin ítem propio medido, Entrega no da veredicto.
+        let entrega = puntaje_de_prueba(&v, Dimension::Entrega);
+        let motivo = entrega
+            .sin_veredicto
+            .as_deref()
+            .expect("entrega sin veredicto");
+        assert!(motivo.contains("sin ítems medidos"), "{motivo}");
+    }
+
+    #[test]
+    fn oraculo_build_pendiente_con_hallazgo_lleva_entrega_contenedor_a_faltantes() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        // Sin `USER` hay un hallazgo de root que se mide; el build queda pendiente por red.
+        fs::write(
+            repo.join("Dockerfile"),
+            "FROM scratch\nRUN apt-get install -y curl\n",
+        )
+        .expect("Dockerfile");
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let fabrica = herramientas(&[]);
+        let podman = PodmanFalso::nuevo(responde_build(salida_sin_red(), salida_sin_red()));
+        let deps = deps_con_podman(&correr, &fabrica, &podman);
+        let v = evaluar_con_deps(base.path(), &repo, deps);
         let entrega = puntaje_de_prueba(&v, Dimension::Entrega);
         assert_eq!(entrega.sin_veredicto, None, "{entrega:?}");
+        let faltante = entrega
+            .faltantes
+            .iter()
+            .find(|f| f.item == "entrega.contenedor")
+            .unwrap_or_else(|| panic!("falta el ítem de construcción: {:?}", entrega.faltantes));
+        assert!(faltante.motivo.contains("línea 2"), "{faltante:?}");
     }
 
     #[test]
