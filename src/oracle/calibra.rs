@@ -3,7 +3,7 @@
 //! lo lee: una dimensión queda `calibrada` si su exactitud balanceada llega a 0,9, y solo esas entran a
 //! `global`. Además exige muestra mínima: 5 defectos aplicados y 5 casos limpios.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -23,7 +23,7 @@ use super::{AVISO_TARGET_FRIO, ErrorOraculo, OpcionesOraculo, Partes, Target, pa
 use crate::borrado;
 use crate::config::{Config, Precio};
 use crate::observe;
-use crate::proveedores::{INTENTOS_MAX, MAX_TOKENS_JUEZ, costo_peor_caso};
+use crate::proveedores::{INTENTOS_MAX, MAX_TOKENS_JUEZ, con_caso, costo_peor_caso};
 use crate::tipos::{Dimension, Eleccion, Evento, Puntaje, Veredicto};
 
 /// Nombre del archivo de calibración dentro de `ROOT_HOME`.
@@ -271,6 +271,14 @@ struct Tope<'a> {
     peor_caso: f64,
     inicio: f64,
     gasto_desde: &'a (dyn Fn(f64) -> Result<f64, ErrorOraculo> + Sync),
+    /// Ids de los casos con reserva de API abierta desde el inicio. Un caso en vuelo con reserva ya cuenta en `gasto_desde`.
+    casos_con_reserva: &'a (dyn Fn(f64) -> Result<HashSet<String>, ErrorOraculo> + Sync),
+}
+
+/// Gasto comprometido: el gasto medido más el peor caso de cada caso en vuelo sin reserva escrita.
+/// Un caso con reserva ya cuenta en `gasto`, así que no suma su peor caso otra vez.
+fn gasto_comprometido(gasto: f64, peor_caso: f64, en_vuelo: usize, con_reserva: usize) -> f64 {
+    gasto + en_vuelo.saturating_sub(con_reserva) as f64 * peor_caso
 }
 
 /// Si el gasto desde el inicio más el peor caso de un caso pasa el tope, la detención. Sin tope, nunca.
@@ -389,6 +397,15 @@ struct Ronda<'a> {
     digest_base: Option<String>,
     /// Digest de la imagen antes de cada evaluación de un caso.
     leer_digest: &'a (dyn Fn() -> Option<String> + Sync),
+    /// Prefijo del id de cada caso: `calibra-{pid}-{inicio_ms}`. El caso `i` usa `{prefijo}-{i}`.
+    prefijo: String,
+}
+
+impl Ronda<'_> {
+    /// Id del caso `i`. Cada reserva que escribe el caso lo lleva en `extra.caso`.
+    fn id_de(&self, i: usize) -> String {
+        format!("{}-{i}", self.prefijo)
+    }
 }
 
 /// Lo que midió un caso: los reemplazos de sus inyecciones inválidas y el caso (`None`: no aplicable).
@@ -399,12 +416,14 @@ struct Medido {
     detencion: Option<Detencion>,
 }
 
-/// Evalúa la copia `copia` como `tipo`. Reusa el `target` de la base si `puede_reusar` lo permite. Devuelve el
-/// veredicto y si el caso reusó: un aviso de `target` frío cuenta como compilación en frío.
+/// Evalúa la copia `copia` del caso `i` como `tipo`. Reusa el `target` de la base si `puede_reusar` lo permite.
+/// Devuelve el veredicto y si el caso reusó: un aviso de `target` frío cuenta como compilación en frío.
+/// La llamada corre con el id del caso fijado, para que sus reservas lo lleven.
 fn evaluar_copia(
     r: &Ronda,
     copia: &Path,
     tipo: TipoCaso,
+    i: usize,
 ) -> Result<(Veredicto, bool), ErrorOraculo> {
     let digest_ahora = (r.leer_digest)();
     let reusa = target::puede_reusar(
@@ -418,7 +437,8 @@ fn evaluar_copia(
         Some(origen) if reusa => Target::Inicial(origen.clone()),
         _ => Target::Ninguno,
     };
-    let veredicto = (r.evaluador)(copia, tipo, target)?;
+    let id = r.id_de(i);
+    let veredicto = con_caso(&id, || (r.evaluador)(copia, tipo, target))?;
     let frio = veredicto
         .avisos
         .iter()
@@ -432,7 +452,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
     if i % 2 == 1 {
         let copia = r.tmp.join(format!("caso-{i}"));
         super::copiar_repo(r.repo_bueno, &copia).map_err(|e| super::infra("copia del repo", e))?;
-        let (veredicto, reusado) = evaluar_copia(r, &copia, TipoCaso::Limpio)?;
+        let (veredicto, reusado) = evaluar_copia(r, &copia, TipoCaso::Limpio, i)?;
         borrado::borrar_dir_dentro(r.tmp, &copia)
             .map_err(|e| super::infra("borrar una copia", e))?;
         let caso = Caso {
@@ -480,7 +500,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
                 .map_err(|e| super::infra("borrar una copia", e))?;
             break;
         };
-        let (veredicto, reusado) = evaluar_copia(r, &copia, TipoCaso::Defecto(r.dimension))?;
+        let (veredicto, reusado) = evaluar_copia(r, &copia, TipoCaso::Defecto(r.dimension), i)?;
         borrado::borrar_dir_dentro(r.tmp, &copia)
             .map_err(|e| super::infra("borrar una copia", e))?;
         if rompe_la_compilacion(r.base, &veredicto, r.dimension) {
@@ -517,7 +537,8 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
 }
 
 /// Como `calibrar_medida`, con `hilos` casos a la vez (1 corre en serie). Un coordinador lanza los casos en
-/// orden. Antes de cada lanzamiento compara `gasto + (en_vuelo + 1) * peor_caso` con el tope: si no entra y
+/// orden. Antes de cada lanzamiento compara el gasto comprometido más un peor caso con el tope, sin contar dos veces
+/// los casos con reserva escrita: si no entra y
 /// hay casos en vuelo, espera a uno; si no entra y no hay ninguno, para. Antes de cada reemplazo de una
 /// inyección inválida, un caso revisa el tope y, si no entra, la medición se detiene. Un error de caso deja de lanzar y
 /// espera a los que están en vuelo; devuelve el error del índice más bajo. Los casos se ordenan por índice
@@ -604,6 +625,11 @@ fn calibrar_medida_con_hilos(
         target_base,
         digest_base,
         leer_digest,
+        prefijo: format!(
+            "calibra-{}-{}",
+            std::process::id(),
+            (ahora() * 1000.0) as u64
+        ),
     };
     let hilos = hilos.max(1);
     let (tx, rx) = mpsc::channel::<(usize, Result<Medido, ErrorOraculo>)>();
@@ -615,13 +641,24 @@ fn calibrar_medida_con_hilos(
     let mut detencion = None;
     let mut siguiente = 0usize;
     let mut en_vuelo = 0usize;
+    // Índices de los casos en vuelo. Con sus ids, cuentan cuáles ya tienen reserva escrita.
+    let mut vuelo: BTreeSet<usize> = BTreeSet::new();
     std::thread::scope(|s| -> Result<(), ErrorOraculo> {
         let ronda = &ronda;
         loop {
             while error.is_none() && siguiente < n && en_vuelo < hilos && detencion.is_none() {
                 if let Some(t) = tope {
+                    // Primero los ids con reserva, luego el gasto. Una reserva nueva entre las dos lecturas
+                    // cuenta dos veces: sobra, nunca falta.
+                    let con_reserva = (t.casos_con_reserva)(t.inicio)?;
                     let gasto = (t.gasto_desde)(t.inicio)?;
-                    if gasto + (en_vuelo as f64 + 1.0) * t.peor_caso > t.usd {
+                    let vuelo_con_reserva = vuelo
+                        .iter()
+                        .filter(|j| con_reserva.contains(&ronda.id_de(**j)))
+                        .count();
+                    let comprometido =
+                        gasto_comprometido(gasto, t.peor_caso, en_vuelo, vuelo_con_reserva);
+                    if comprometido + t.peor_caso > t.usd {
                         if en_vuelo == 0 {
                             // El conteo de casos medidos lo pone el final, cuando todos terminaron.
                             detencion = Some(Detencion {
@@ -637,6 +674,7 @@ fn calibrar_medida_con_hilos(
                 let i = siguiente;
                 siguiente += 1;
                 en_vuelo += 1;
+                vuelo.insert(i);
                 let envio = tx_abierto
                     .clone()
                     .expect("hay canal mientras se lanzan casos");
@@ -654,6 +692,7 @@ fn calibrar_medida_con_hilos(
                 ErrorOraculo::Infra("un caso de calibración terminó sin resultado".into())
             })?;
             en_vuelo -= 1;
+            vuelo.remove(&i);
             match resultado {
                 Ok(medido) => {
                     // Un reemplazo que no entró en el tope detiene los lanzamientos. Los casos en vuelo terminan.
@@ -971,6 +1010,10 @@ pub fn calibrar_tarea_con(
     };
     // El tope se resuelve antes de la base: un peor caso sin precio no deja arrancar.
     let inicio = ahora();
+    let casos_con_reserva = |desde: f64| {
+        observe::uso::casos_con_reserva_abierta_en(&observe::ruta_eventos_en(home), desde)
+            .map_err(|e| ErrorOraculo::Infra(format!("leer las reservas de la calibración: {e}")))
+    };
     let tope = match presupuesto {
         Some(p) => {
             if !p.usd.is_finite() || p.usd <= 0.0 {
@@ -991,6 +1034,7 @@ pub fn calibrar_tarea_con(
                 peor_caso,
                 inicio,
                 gasto_desde: p.gasto_desde,
+                casos_con_reserva: &casos_con_reserva,
             })
         }
         None => None,
@@ -1417,9 +1461,10 @@ mod tests {
         comando_clippy,
     };
     use crate::tipos::{Fuente, Hallazgo, ItemFaltante, NivelItem};
+    use std::collections::HashSet;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
     fn fila(tarea: &str, dimension: Dimension, ts: f64, exactitud: Option<f32>) -> Fila {
@@ -2962,6 +3007,7 @@ mod tests {
             peor_caso: 1.0,
             inicio: 0.0,
             gasto_desde: &gasto,
+            casos_con_reserva: &sin_reservas,
         };
         let (_t, tarea) = tarea_prueba();
         let medida = calibrar_medida_con_hilos(
@@ -3048,6 +3094,11 @@ mod tests {
 
     // ---- Tarea 48, parte 2, punto 3: el juez en paralelo, de a 4 ----
 
+    /// Medidor de reservas para los tests que no las usan: ningún caso tiene reserva abierta.
+    fn sin_reservas(_: f64) -> Result<HashSet<String>, ErrorOraculo> {
+        Ok(HashSet::new())
+    }
+
     /// Un caso que llama al juez: cuenta cuántos corren a la vez y espera 50 ms, como una llamada de red.
     fn llamada_de_juez(en_vuelo: &AtomicUsize, maximo: &AtomicUsize) {
         let dentro = en_vuelo.fetch_add(1, Ordering::SeqCst) + 1;
@@ -3104,6 +3155,7 @@ mod tests {
             peor_caso: peor,
             inicio: 0.0,
             gasto_desde: &gasto,
+            casos_con_reserva: &sin_reservas,
         };
         let medida = calibrar_medida_con_hilos(
             &tarea,
@@ -3133,6 +3185,96 @@ mod tests {
             2,
             "se detiene tras los 2 casos que entraron"
         );
+    }
+
+    #[test]
+    fn calibra_gasto_comprometido_cuatro_reservas_de_cuatro_casos_cuentan_cuatro() {
+        assert_eq!(gasto_comprometido(4.0, 1.0, 4, 4), 4.0);
+    }
+
+    #[test]
+    fn calibra_gasto_comprometido_dos_reservas_de_cuatro_casos_suma_dos_peores() {
+        assert_eq!(gasto_comprometido(2.0, 1.0, 4, 2), 2.0 + 2.0 * 1.0);
+    }
+
+    /// Cuatro casos en vuelo, cada uno con su reserva escrita: el coordinador no cuenta dos veces su
+    /// peor caso. Cada reserva abierta cobra 1,0 y cada caso que termina cobra 1,0 como costo real.
+    #[test]
+    fn calibra_cuatro_hilos_los_casos_con_reserva_no_suman_dos_veces() {
+        let base = veredicto_base();
+        let falso_de_seguridad = falso(Path::new(FIXTURE), &base, |limpia, _, base| {
+            if limpia { base.clone() } else { hundido(base) }
+        });
+        // Ids de los casos con reserva abierta. Un caso la abre al empezar y la cierra al terminar.
+        let abiertas: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+        let cerrados = AtomicUsize::new(0);
+        let pico_gasto = Mutex::new(0.0f64);
+        let (en_vuelo, maximo) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let evaluar = |ruta: &Path, tipo: TipoCaso, _: Target| {
+            if tipo == TipoCaso::Base {
+                return falso_de_seguridad(ruta);
+            }
+            let id = crate::proveedores::caso_actual().expect("cada caso corre con su id");
+            let dentro = en_vuelo.fetch_add(1, Ordering::SeqCst) + 1;
+            maximo.fetch_max(dentro, Ordering::SeqCst);
+            abiertas.lock().expect("lock").insert(id.clone());
+            {
+                let mut pico = pico_gasto.lock().expect("pico");
+                let gasto = abiertas.lock().expect("lock").len() + cerrados.load(Ordering::SeqCst);
+                *pico = pico.max(gasto as f64);
+            }
+            // Solo el primer lote espera a sus hermanos. Si el conteo viejo frena, espera el plazo.
+            let llegada = Instant::now();
+            while cerrados.load(Ordering::SeqCst) == 0
+                && abiertas.lock().expect("lock").len() < CASOS_EN_PARALELO
+                && llegada.elapsed() < Duration::from_secs(2)
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let resultado = falso_de_seguridad(ruta);
+            abiertas.lock().expect("lock").remove(&id);
+            cerrados.fetch_add(1, Ordering::SeqCst);
+            en_vuelo.fetch_sub(1, Ordering::SeqCst);
+            resultado
+        };
+        let gasto = |_: f64| -> Result<f64, ErrorOraculo> {
+            // Da tiempo a que los casos recién lanzados escriban su reserva antes de la siguiente decisión.
+            std::thread::sleep(Duration::from_millis(50));
+            let abiertas = abiertas.lock().expect("lock").len();
+            Ok((abiertas + cerrados.load(Ordering::SeqCst)) as f64)
+        };
+        let con_reserva = |_: f64| -> Result<HashSet<String>, ErrorOraculo> {
+            Ok(abiertas.lock().expect("lock").clone())
+        };
+        let tope = Tope {
+            usd: 5.5,
+            peor_caso: 1.0,
+            inicio: 0.0,
+            gasto_desde: &gasto,
+            casos_con_reserva: &con_reserva,
+        };
+        let (_t, tarea) = tarea_prueba();
+        let medida = calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Seguridad,
+            8,
+            42,
+            Path::new(FIXTURE),
+            &evaluar,
+            Some(&tope),
+            &Vec::new,
+            &|| None,
+            CASOS_EN_PARALELO,
+        )
+        .expect("calibra");
+        assert_eq!(
+            maximo.load(Ordering::SeqCst),
+            CASOS_EN_PARALELO,
+            "con cuatro reservas escritas, llegan cuatro casos a la vez"
+        );
+        let pico = *pico_gasto.lock().expect("pico");
+        assert!(pico <= 5.5, "el gasto {pico} pasó el tope");
+        assert!(medida.detencion.is_some(), "el tope detiene la medida");
     }
 
     #[test]

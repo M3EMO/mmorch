@@ -473,7 +473,7 @@ Funciones que usa el código:
 | `observe::resumir(corrida)` | construido | Devuelve `Resumen`. |
 | `oracle::evaluar(repo, tarea, opciones)` | construido | `oracle::evaluar_por_nombre(nombre, repo)` lee la tarea desde `ROOT_HOME`. |
 | `oracle::calibra::calibrar_tarea(home, nombre, dimension, n, semilla, repo, evaluador)` | construido (Tarea 12) | Calibra y agrega la fila a `calibracion.json`. `calibrar_con` recibe la tarea y el repo ya resueltos. |
-| `oracle::calibra::calibrar_tarea_con(home, nombre, dimension, n, semilla, repo, presupuesto, evaluador)` | construido (decisión 48) | Como `calibrar_tarea`, con el tope opcional `Presupuesto`: gasto desde el inicio, peor caso de un caso y tope en USD. Si el tope detiene la calibración, escribe las filas hechas como `incompleta` y sale con `3`. |
+| `oracle::calibra::calibrar_tarea_con(home, nombre, dimension, n, semilla, repo, presupuesto, evaluador)` | construido (decisión 48) | Como `calibrar_tarea`, con el tope opcional `Presupuesto`: gasto desde el inicio, peor caso de un caso y tope en USD. Cada caso en vuelo con reserva abierta cuenta una vez: su reserva ya está en el gasto. Las reservas llevan `extra.caso`. Si el tope detiene la calibración, escribe las filas hechas como `incompleta` y sale con `3`. |
 | `oracle::informe::informar(veredicto, tarea, reglas, redactor)` | construido (Tarea 13b) | El redactor es opcional. `informar_con` recibe además las rúbricas. |
 | `oracle::validez::validar(casos)` | construido (Tarea 12b) | `validar_con` recibe el evaluador. `preparar_ciego(casos, fuentes, semilla, home)` arma los paquetes a ciegas. Escribe las listas de rastros y `home/validez/rastros.json` en `home/validez/`. |
 | `track::agregar(fila)` | construido | |

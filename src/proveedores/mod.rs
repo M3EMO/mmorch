@@ -4,6 +4,7 @@ pub mod anthropic;
 pub mod deepseek;
 mod sse;
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -597,7 +598,33 @@ fn nueva_reserva_id(corrida: &str) -> String {
     format!("{corrida}-{}-{nanos}-{n}", std::process::id())
 }
 
+thread_local! {
+    /// Caso del Oracle que corre en este hilo. Las reservas que escribe lo llevan.
+    static CASO_ACTUAL: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Corre `f` con `id` como caso de este hilo. Al salir, también si `f` entra en pánico, vuelve el anterior.
+pub fn con_caso<R>(id: &str, f: impl FnOnce() -> R) -> R {
+    /// Devuelve el caso anterior al salir del ámbito.
+    struct Restaura(Option<String>);
+    impl Drop for Restaura {
+        fn drop(&mut self) {
+            let anterior = self.0.take();
+            CASO_ACTUAL.with(|caso| *caso.borrow_mut() = anterior);
+        }
+    }
+    let anterior = CASO_ACTUAL.with(|caso| caso.replace(Some(id.to_string())));
+    let _restaura = Restaura(anterior);
+    f()
+}
+
+/// Id del caso que `con_caso` fijó en este hilo, si hay uno.
+pub(crate) fn caso_actual() -> Option<String> {
+    CASO_ACTUAL.with(|caso| caso.borrow().clone())
+}
+
 /// Evento `Reserva` de un intento. Su peor caso cuenta como gasto hasta que la llamada lo cierre.
+/// Si hay un caso fijado con `con_caso`, lo lleva en `extra.caso`.
 fn evento_reserva(llamada: &Llamada, id: &str) -> Evento {
     let mut ev = observe::evento_manual(llamada.corrida, TipoEvento::Reserva, None);
     ev.fase = llamada.prompt.fase.clone();
@@ -606,6 +633,9 @@ fn evento_reserva(llamada: &Llamada, id: &str) -> Evento {
     ev.familia = Some(familia(llamada.proveedor).into());
     ev.cost_usd = llamada.peor_caso;
     ev.extra.insert("reserva".into(), json!(id));
+    if let Some(caso) = caso_actual() {
+        ev.extra.insert("caso".into(), json!(caso));
+    }
     ev
 }
 
@@ -1064,5 +1094,96 @@ mod tests {
         ] {
             assert_eq!(timeout_para(&cfg, rol), 120, "rol {rol:?}");
         }
+    }
+
+    /// Corre `reservar` de una llamada de prueba en `home` y devuelve las reservas del log.
+    fn reservar_en(home: &Path) -> Vec<Evento> {
+        let cfg = Config::default();
+        let breaker = Breaker::new();
+        let claves = Claves {
+            deepseek: None,
+            anthropic: None,
+        };
+        let reloj = Instant::now;
+        let ctx = Contexto {
+            cfg: &cfg,
+            home,
+            breaker: &breaker,
+            claves: &claves,
+            reloj: &reloj,
+            plazos: Plazos::default(),
+        };
+        let prompt = Prompt {
+            sistema: None,
+            usuario: "hola".into(),
+            max_tokens: 8,
+            fase: "fase-prueba".into(),
+            reintento_juez: false,
+        };
+        let mut llamada = Llamada {
+            proveedor: Proveedor::Deepseek,
+            modelo: "deepseek-chat",
+            prompt: &prompt,
+            corrida: "c-caso",
+            razonamiento: false,
+            inactividad: INACTIVIDAD,
+            total: Duration::from_secs(60),
+            precio: Precio {
+                usd_entrada: 1.0,
+                usd_salida: 2.0,
+                umbral_entrada: None,
+                usd_entrada_alto: None,
+                usd_salida_alto: None,
+            },
+            peor_caso: 0.01,
+            intentos: 0,
+            reservas: Vec::new(),
+            cost_usd: 0.0,
+            costo_estimado: false,
+        };
+        reservar(&ctx, &mut llamada).expect("la reserva entra");
+        uso::leer_eventos(&home.join(ARCHIVO_EVENTOS))
+            .expect("lee el log")
+            .into_iter()
+            .filter(|ev| ev.tipo == TipoEvento::Reserva)
+            .collect()
+    }
+
+    #[test]
+    fn proveedores_reserva_lleva_el_caso_si_corre_dentro_de_con_caso() {
+        let home = tempfile::tempdir().expect("home");
+        let reservas = con_caso("calibra-1-2-3", || reservar_en(home.path()));
+        assert_eq!(reservas.len(), 1);
+        assert_eq!(reservas[0].extra["caso"], "calibra-1-2-3");
+    }
+
+    #[test]
+    fn proveedores_reserva_sin_con_caso_no_lleva_la_clave() {
+        let home = tempfile::tempdir().expect("home");
+        let reservas = reservar_en(home.path());
+        assert_eq!(reservas.len(), 1);
+        assert!(!reservas[0].extra.contains_key("caso"));
+    }
+
+    #[test]
+    fn proveedores_con_caso_anidado_restaura_el_valor_anterior() {
+        assert_eq!(caso_actual(), None);
+        con_caso("a", || {
+            con_caso("b", || assert_eq!(caso_actual().as_deref(), Some("b")));
+            assert_eq!(caso_actual().as_deref(), Some("a"));
+        });
+        assert_eq!(caso_actual(), None);
+    }
+
+    #[test]
+    fn proveedores_con_caso_tras_panic_restaura_el_valor_anterior() {
+        con_caso("externo", || {
+            let panico = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                con_caso("interno", || panic!("falla a propósito"));
+            }));
+            assert!(panico.is_err());
+            assert_eq!(caso_actual().as_deref(), Some("externo"));
+        });
+        assert_eq!(caso_actual(), None);
     }
 }
