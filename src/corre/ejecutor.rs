@@ -64,8 +64,38 @@ pub struct EjecutorContenedorBuilder {
     pub timeout: Duration,
 }
 
-/// Código con que podman sale ante un error propio (imagen inexistente, opción inválida).
-const CODIGO_ERROR_PODMAN: i32 = 125;
+/// Códigos con que podman sale por un fallo de infraestructura. Ninguno es un resultado del builder.
+const CODIGOS_PODMAN_INFRA: [(i32, &str); 4] = [
+    (
+        125,
+        "error propio de podman: imagen inexistente u opción inválida",
+    ),
+    (126, "el comando no es ejecutable"),
+    (127, "el comando no se encontró"),
+    (
+        137,
+        "el contenedor fue matado por SIGKILL, a menudo por falta de memoria",
+    ),
+];
+
+/// Significado del código de podman si es fallo de infraestructura. `None` si no lo es.
+fn significado_codigo_podman(codigo: i32) -> Option<&'static str> {
+    CODIGOS_PODMAN_INFRA
+        .iter()
+        .find(|(c, _)| *c == codigo)
+        .map(|(_, significado)| *significado)
+}
+
+/// Error del ejecutor si podman falló por infraestructura. `None` si la salida es de claude.
+/// Nombra el código y su significado. El `stderr` de podman va al final.
+fn fallo_de_podman(salida: &SalidaClaude) -> Option<ErrorCorre> {
+    let significado = significado_codigo_podman(salida.codigo)?;
+    Some(ErrorCorre::Ejecutor(format!(
+        "podman falló ({}, {significado}): {}",
+        salida.codigo,
+        String::from_utf8_lossy(&salida.stderr).trim()
+    )))
+}
 
 /// Contador de nombres de contenedor dentro del proceso. Con el pid, el nombre no choca con otra corrida.
 static CONTADOR: AtomicU64 = AtomicU64::new(0);
@@ -125,13 +155,10 @@ impl EjecutorBuilder for EjecutorContenedorBuilder {
         let args = args_podman_builder(&real, &self.imagen, &credencial, &estado, &nombre);
 
         match correr_proceso("podman", &args, self.timeout)? {
-            Some(salida) if salida.codigo == CODIGO_ERROR_PODMAN => {
-                Err(ErrorCorre::Ejecutor(format!(
-                    "podman falló (125): {}",
-                    String::from_utf8_lossy(&salida.stderr).trim()
-                )))
-            }
-            Some(salida) => Ok(salida),
+            Some(salida) => match fallo_de_podman(&salida) {
+                Some(error) => Err(error),
+                None => Ok(salida),
+            },
             None => {
                 // Venció: se pide borrar el contenedor por nombre. Un fallo al borrar no tapa el aviso.
                 let _ = Command::new("podman")
@@ -249,6 +276,63 @@ fn correr_proceso(
 /// Bytes de un flujo leído en otro hilo. Sin flujo o con un hilo caído, vacío.
 fn bytes_de(hilo: Option<JoinHandle<Vec<u8>>>) -> Vec<u8> {
     hilo.and_then(|h| h.join().ok()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod codigos_podman {
+    use super::*;
+
+    #[test]
+    fn codigos_de_infra_de_podman_tienen_significado() {
+        for codigo in [125, 126, 127, 137] {
+            assert!(
+                significado_codigo_podman(codigo).is_some(),
+                "falta el significado de {codigo}"
+            );
+        }
+    }
+
+    #[test]
+    fn codigos_de_claude_no_son_fallo_de_podman() {
+        for codigo in [0, 1, 2, 9, 124, 128, 130] {
+            assert!(
+                significado_codigo_podman(codigo).is_none(),
+                "{codigo} no es de podman"
+            );
+        }
+    }
+
+    #[test]
+    fn fallo_de_podman_nombra_el_codigo_y_su_significado() {
+        for (codigo, esperado) in [
+            (126, "no es ejecutable"),
+            (127, "no se encontró"),
+            (137, "SIGKILL"),
+        ] {
+            let salida = SalidaClaude {
+                codigo,
+                stdout: Vec::new(),
+                stderr: b"detalle\n".to_vec(),
+            };
+            let error = fallo_de_podman(&salida).expect("es fallo de podman");
+            let texto = error.to_string();
+            assert!(matches!(error, ErrorCorre::Ejecutor(_)), "{texto}");
+            assert!(
+                texto.contains(&codigo.to_string()) && texto.contains(esperado),
+                "{texto}"
+            );
+        }
+    }
+
+    #[test]
+    fn fallo_de_podman_con_codigo_de_claude_es_none() {
+        let salida = SalidaClaude {
+            codigo: 1,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        assert!(fallo_de_podman(&salida).is_none());
+    }
 }
 
 #[cfg(test)]

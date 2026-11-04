@@ -54,20 +54,21 @@ pub struct DepsCorre<'a> {
     pub entorno: &'a [(String, String)],
 }
 
-/// Un rol que ya corrió: su número de paso, su transcript, su código de salida y su stdout.
+/// Un rol que ya corrió: su número de paso, su transcript, su código de salida y su línea `result`.
 struct Lanzado {
     n: u32,
     rol: Rol,
     codigo: i32,
     ruta: PathBuf,
-    stdout: Vec<u8>,
+    linea: String,
 }
 
 /// Corre la tarea con la configuración y devuelve la fila que se agregó a `runs.jsonl`.
 ///
 /// Un código distinto de 0 de un rol corta la corrida: los roles siguientes no corren, pero la
 /// evaluación sí, y el informe dice lo que falta. Un fallo al lanzar aborta sin evaluar: sin builder
-/// no hay nada que evaluar, y la evaluación puede gastar API.
+/// no hay nada que evaluar, y la evaluación puede gastar API. Un rol sin `result` exitoso también
+/// aborta sin evaluar ni escribir fila: deja un `Gate` con el motivo.
 pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, ErrorCorre> {
     // a) GOAL: sin autorización no arranca y no se crea nada.
     verificar_goal(deps.repo_root)?;
@@ -123,13 +124,22 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         };
         let n = u32::try_from(indice + 1).unwrap_or(u32::MAX);
         let ruta = guardar_transcript(deps.home, &id, n, *rol, &salida.stdout)?;
+        // Sin `result` exitoso el rol no evalúa: no hay resultado que evaluar.
+        let linea = match resultado_exitoso(&salida.stdout) {
+            Ok(linea) => linea,
+            Err(causa) => {
+                let motivo = format!("rol {} sin resultado exitoso: {causa}", nombre_rol(*rol));
+                gate(&ruta_eventos, &id, FASE_ROL, motivo.clone(), Some(*rol))?;
+                return Err(ErrorCorre::Ejecutor(motivo));
+            }
+        };
         let codigo = salida.codigo;
         lanzados.push(Lanzado {
             n,
             rol: *rol,
             codigo,
             ruta,
-            stdout: salida.stdout,
+            linea,
         });
         if codigo != 0 {
             let motivo = format!("rol {} salió con {codigo}", nombre_rol(*rol));
@@ -138,15 +148,9 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         }
     }
 
-    // f) La sesión de cada rol sale de su línea `result`.
+    // f) La sesión de cada rol sale de su línea `result`, ya validada al lanzar.
     for lanzado in &lanzados {
-        match linea_result(&lanzado.stdout) {
-            Some(linea) => registrar_sesion(deps.home, &id, lanzado, &linea, &ruta_eventos)?,
-            None => {
-                let motivo = "sesión sin resultado: el builder no dejó la línea result".to_string();
-                gate(&ruta_eventos, &id, FASE_SESION, motivo, Some(lanzado.rol))?;
-            }
-        }
+        registrar_sesion(deps.home, &id, lanzado, &lanzado.linea, &ruta_eventos)?;
     }
 
     // g) Después de planifica, la aprobación automática del plan. Solo si planifica salió bien.
@@ -241,6 +245,45 @@ fn exigir_cupo(rol: Rol, eleccion: &Eleccion) -> Result<(), ErrorCorre> {
             "el rol {nombre} va por {}: r00t corre solo lanza claude -p por cupo",
             etiqueta_via(via)
         ))),
+    }
+}
+
+/// Textos de `result` que dicen que el login venció o no es válido. Se comparan en minúsculas.
+const TEXTOS_LOGIN_VENCIDO: [&str; 4] = [
+    "authentication",
+    "authenticate",
+    "oauth token has expired",
+    "invalid api key",
+];
+
+/// Línea `result` del rol si terminó bien. Si no, el motivo que va al `Gate`.
+fn resultado_exitoso(stdout: &[u8]) -> Result<String, String> {
+    let linea = linea_result(stdout).ok_or("sin línea result: el builder no dejó su resultado")?;
+    let valor: Value = serde_json::from_str(&linea).unwrap_or(Value::Null);
+    if valor.get("is_error").and_then(Value::as_bool) == Some(true) {
+        return Err(motivo_de_error(&valor));
+    }
+    match valor.get("subtype").and_then(Value::as_str) {
+        Some("success") => Ok(linea),
+        Some(otro) => Err(format!("terminó con subtype {otro}")),
+        None => Err("la línea result no trae subtype".into()),
+    }
+}
+
+/// Motivo de un `result` con `is_error` true. Si el token venció, lo dice.
+/// No copia el texto del `result`: puede traer datos de la cuenta.
+fn motivo_de_error(valor: &Value) -> String {
+    let estado = valor.get("api_error_status").and_then(Value::as_u64);
+    let texto = valor
+        .get("result")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_lowercase();
+    let login = TEXTOS_LOGIN_VENCIDO.iter().any(|t| texto.contains(t));
+    if estado == Some(401) || login {
+        "el login de Claude venció o no es válido".into()
+    } else {
+        "terminó con is_error".into()
     }
 }
 
@@ -497,6 +540,8 @@ mod tests {
         sin_resultado: bool,
         /// Cambia el `result` por uno sin costo.
         costo_desconocido: bool,
+        /// Cambia el `result` por uno con `is_error` true, como un login vencido.
+        token_vencido: bool,
         /// El lanzamiento no arranca.
         no_lanza: bool,
         /// Contenido de `.credentials.json` en el estado de la corrida, como lo deja el montaje de podman.
@@ -585,6 +630,10 @@ mod tests {
                     .filter(|linea| !linea.contains("\"type\":\"result\""))
                     .collect();
                 salida.stdout = format!("{}\n", sin.join("\n")).into_bytes();
+            }
+            if self.token_vencido {
+                let vencido = "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":401,\"result\":\"Failed to authenticate. API Error: 401 OAuth token has expired\"}\n";
+                salida.stdout = vencido.as_bytes().to_vec();
             }
             if self.costo_desconocido {
                 let sin_costo = "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":1000,\"num_turns\":2,\"modelUsage\":{\"opus\":{\"inputTokens\":10}},\"session_id\":\"s1\"}\n";
@@ -1159,20 +1208,92 @@ mod tests {
         );
     }
 
+    /// Corre con un evaluador que cuenta sus llamadas. Devuelve el error y la cuenta.
+    fn correr_contando_evaluaciones(e: &Entorno, builder: &Builder) -> (ErrorCorre, usize) {
+        let evaluaciones = std::cell::Cell::new(0);
+        let evaluar = |r: &Path, t: &Tarea, o: &OpcionesOraculo| {
+            evaluaciones.set(evaluaciones.get() + 1);
+            evaluador_falso(r, t, o)
+        };
+        let error = correr_con_eval(e, builder, &[], CONFIG, &evaluar)
+            .expect_err("un rol sin resultado exitoso no deja fila");
+        (error, evaluaciones.get())
+    }
+
     #[test]
-    fn corre_sesion_sin_resultado_deja_gate() {
+    fn corre_rol_sin_resultado_no_evalua_ni_escribe_fila() {
         let e = entorno();
         let builder = Builder {
             sin_resultado: true,
             ..Builder::default()
         };
-        let fila = correr_con(&e, &builder, &[], CONFIG).expect("corre");
-        assert_eq!(fila.resumen.turnos, 0, "sin result no hay turnos");
-        assert_eq!(gates(&e, "sesion").len(), 2, "un Gate por rol");
+        let (error, evaluadas) = correr_contando_evaluaciones(&e, &builder);
+        assert!(matches!(error, ErrorCorre::Ejecutor(_)), "{error}");
+        assert_eq!(evaluadas, 0, "no debe evaluar");
+        assert!(!e.home.join("runs.jsonl").exists(), "sin fila");
+        assert_eq!(
+            builder.lanzados.borrow().len(),
+            1,
+            "corta antes de construye"
+        );
+        let motivos = gates(&e, FASE_ROL);
+        assert_eq!(motivos.len(), 1, "un Gate del rol");
         assert!(
-            gates(&e, "sesion")
-                .iter()
-                .all(|m| m.contains("sesión sin resultado"))
+            motivos[0].contains("planifica") && motivos[0].contains("sin línea result"),
+            "{motivos:?}"
+        );
+    }
+
+    #[test]
+    fn corre_rol_con_token_vencido_no_evalua_y_nombra_el_login() {
+        let e = entorno();
+        let builder = Builder {
+            token_vencido: true,
+            ..Builder::default()
+        };
+        let (error, evaluadas) = correr_contando_evaluaciones(&e, &builder);
+        assert!(matches!(error, ErrorCorre::Ejecutor(_)), "{error}");
+        assert_eq!(evaluadas, 0, "no debe evaluar");
+        assert!(!e.home.join("runs.jsonl").exists(), "sin fila");
+        let motivos = gates(&e, FASE_ROL);
+        assert_eq!(motivos.len(), 1, "un Gate del rol");
+        assert!(motivos[0].contains("login de Claude venció"), "{motivos:?}");
+    }
+
+    #[test]
+    fn resultado_exitoso_acepta_success_sin_error() {
+        let salida = b"{\"type\":\"system\"}\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}\n";
+        let linea = resultado_exitoso(salida).expect("resultado exitoso");
+        assert!(linea.contains("\"subtype\":\"success\""), "{linea}");
+    }
+
+    #[test]
+    fn resultado_exitoso_rechaza_salida_sin_result() {
+        let motivo = resultado_exitoso(b"{\"type\":\"system\"}\n").expect_err("sin result");
+        assert!(motivo.contains("sin línea result"), "{motivo}");
+    }
+
+    #[test]
+    fn resultado_exitoso_rechaza_subtype_distinto_de_success() {
+        let salida = b"{\"type\":\"result\",\"subtype\":\"error_max_turns\",\"is_error\":false}\n";
+        let motivo = resultado_exitoso(salida).expect_err("subtype de error");
+        assert!(motivo.contains("error_max_turns"), "{motivo}");
+    }
+
+    #[test]
+    fn resultado_exitoso_rechaza_is_error_true() {
+        let salida = b"{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true}\n";
+        resultado_exitoso(salida).expect_err("is_error true no es exitoso");
+    }
+
+    #[test]
+    fn resultado_exitoso_con_token_vencido_dice_que_el_login_vencio() {
+        let salida = b"{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":401,\"result\":\"Invalid API key\"}\n";
+        let motivo = resultado_exitoso(salida).expect_err("login vencido");
+        assert!(motivo.contains("login de Claude venció"), "{motivo}");
+        assert!(
+            !motivo.contains("Invalid API key"),
+            "no copia el texto: {motivo}"
         );
     }
 
@@ -1203,7 +1324,7 @@ mod tests {
             rol: Rol::Planifica,
             codigo: 0,
             ruta: PathBuf::new(),
-            stdout: Vec::new(),
+            linea: String::new(),
         };
         let linea = r#"{"type":"result","total_cost_usd":0.7,"session_id":"s-dup","modelUsage":{"a":{"costUSD":0.5},"b":{"costUSD":0.2}}}"#;
         let ruta_eventos = observe::ruta_eventos_en(&e.home);
@@ -1230,7 +1351,7 @@ mod tests {
             rol: Rol::Planifica,
             codigo: 0,
             ruta: PathBuf::new(),
-            stdout: Vec::new(),
+            linea: String::new(),
         };
         let linea = r#"{"type":"result","total_cost_usd":-1.0,"session_id":"s-neg"}"#;
         let ruta_eventos = observe::ruta_eventos_en(&e.home);
