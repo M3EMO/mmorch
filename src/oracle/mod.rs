@@ -738,7 +738,7 @@ fn evaluar_con(
     if let Target::Guardar(destino) = &o.target {
         let origen = salida.path().join("target");
         if origen.is_dir()
-            && let Err(motivo) = copiar_target(&origen, destino)
+            && let Err(motivo) = guardar_target(&origen, destino)
         {
             avisos.push(format!("{AVISO_TARGET_FRIO} {motivo}"));
         }
@@ -1816,6 +1816,34 @@ fn copiar_target(origen: &Path, destino: &Path) -> io::Result<()> {
         salida.status,
         String::from_utf8_lossy(&salida.stderr).trim()
     )))
+}
+
+/// Guarda el `target` de `origen` en `destino` sin dejar un `destino` parcial. Copia a `<destino>.parcial`,
+/// hermano de `destino`, y lo renombra al terminar. Si `destino` ya existe, falla sin tocarlo.
+/// Si la copia o el renombre fallan, borra el parcial y devuelve el error original.
+fn guardar_target(origen: &Path, destino: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(destino).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("el destino ya existe: {}", destino.display()),
+        ));
+    }
+    let (Some(padre), Some(nombre)) = (destino.parent(), destino.file_name()) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("destino sin carpeta o nombre: {}", destino.display()),
+        ));
+    };
+    let parcial = padre.join(format!("{}.parcial", nombre.to_string_lossy()));
+    // Un parcial viejo de otra corrida estorbaría la copia: se borra antes.
+    borrado::borrar_dir_dentro(padre, &parcial)?;
+    let resultado = copiar_target(origen, &parcial).and_then(|()| fs::rename(&parcial, destino));
+    if let Err(error) = resultado {
+        // La limpieza es de mejor esfuerzo: el error de la copia es el que importa.
+        let _ = borrado::borrar_dir_dentro(padre, &parcial);
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Carpeta temporal dentro de `tmp`, con el prefijo de `evaluar`.
@@ -4138,6 +4166,48 @@ mod tests {
             &fs::metadata(destino.join("huella")).expect("metadatos"),
         );
         assert_eq!(mtime, viejo, "cp -a conserva el mtime");
+    }
+
+    #[test]
+    fn oraculo_guardar_target_que_falla_a_mitad_no_deja_destino() {
+        let base = tempfile::tempdir().expect("base");
+        let origen = base.path().join("origen");
+        fs::create_dir_all(&origen).expect("origen");
+        fs::write(origen.join("bueno"), "x").expect("bueno");
+        let malo = origen.join("malo");
+        fs::write(&malo, "secreto").expect("malo");
+        fs::set_permissions(&malo, fs::Permissions::from_mode(0o000)).expect("sin lectura");
+        assert!(
+            fs::File::open(&malo).is_err(),
+            "el test necesita un usuario sin privilegios que no lea el archivo"
+        );
+        let destino = base.path().join("destino");
+        let resultado = guardar_target(&origen, &destino);
+        fs::set_permissions(&malo, fs::Permissions::from_mode(0o644)).expect("restaura permisos");
+        assert!(resultado.is_err(), "la copia falla a mitad");
+        assert!(!destino.exists(), "no queda destino");
+        assert!(
+            !base.path().join("destino.parcial").exists(),
+            "no queda parcial"
+        );
+    }
+
+    #[test]
+    fn oraculo_guardar_target_completo_llega_al_destino_sin_parcial() {
+        let base = tempfile::tempdir().expect("base");
+        let origen = base.path().join("origen");
+        fs::create_dir_all(origen.join("sub")).expect("origen");
+        fs::write(origen.join("sub").join("artefacto"), "compilado").expect("artefacto");
+        let destino = base.path().join("destino");
+        guardar_target(&origen, &destino).expect("guarda");
+        assert_eq!(
+            fs::read_to_string(destino.join("sub").join("artefacto")).expect("lee"),
+            "compilado"
+        );
+        assert!(
+            !base.path().join("destino.parcial").exists(),
+            "no queda parcial"
+        );
     }
 
     #[test]
