@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::config::ClaudeCorrida;
-use super::contenedor::ECC_DATOS_EN_CONTENEDOR;
+use super::contenedor::{ECC_DATOS_EN_CONTENEDOR, TIMEOUT_BUILDER};
 use crate::tipos::Rol;
 
 /// Única variable del proceso que pasa al builder, además de la config. Lo demás no pasa.
@@ -14,7 +14,7 @@ const VARIABLES_DEL_PROCESO: &[&str] = &["PATH", "LANG"];
 const VARIABLE_HOOKS: &str = "ECC_DISABLED_HOOKS";
 /// Carpeta del plugin de ECC dentro del contenedor. `args_podman_builder` la monta en solo lectura.
 pub(super) const PLUGIN_EN_CONTENEDOR: &str = "/opt/plugin";
-/// Variable que fija cuánto espera `claude -p` a sus procesos en segundo plano. Siempre `0`.
+/// Variable que fija cuánto espera `claude -p` a sus procesos en segundo plano. Igual a `TIMEOUT_BUILDER`.
 const VARIABLE_ESPERA: &str = "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS";
 /// Variable que fija el modelo de los subagentes. Solo la trae el rol que la define.
 const VARIABLE_SUBAGENTES: &str = "CLAUDE_CODE_SUBAGENT_MODEL";
@@ -71,7 +71,7 @@ pub fn args_claude(
 }
 
 /// Entorno del lanzamiento del builder. De `entorno_del_proceso` solo pasan `PATH` y `LANG`. Siempre fija la
-/// espera de `claude` en `0` y la carpeta de datos de ECC. Si el rol fija `subagent_model`, agrega
+/// espera de `claude` igual al plazo del builder y la carpeta de datos de ECC. Si el rol fija `subagent_model`, agrega
 /// `CLAUDE_CODE_SUBAGENT_MODEL`. Si la config trae `ecc_disabled_hooks`, agrega `ECC_DISABLED_HOOKS`.
 /// Nunca pasa claves de API ni `ROOT_HOME`.
 pub fn env_del_builder(
@@ -84,7 +84,10 @@ pub fn env_del_builder(
         .filter(|(clave, _)| VARIABLES_DEL_PROCESO.contains(&clave.as_str()))
         .cloned()
         .collect();
-    env.push((VARIABLE_ESPERA.to_string(), "0".to_string()));
+    env.push((
+        VARIABLE_ESPERA.to_string(),
+        TIMEOUT_BUILDER.as_millis().to_string(),
+    ));
     env.push((
         VARIABLE_DATOS_ECC.to_string(),
         ECC_DATOS_EN_CONTENEDOR.to_string(),
@@ -108,6 +111,7 @@ fn ruta_oraculos(home: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use crate::corre::config::ClaudeRol;
+    use crate::corre::contenedor::TIMEOUT_BUILDER;
     use std::collections::BTreeMap;
     use tempfile::TempDir;
 
@@ -345,12 +349,19 @@ mod tests {
     }
 
     #[test]
-    fn corre_env_siempre_trae_espera_cero_y_datos_de_ecc() {
+    fn corre_env_siempre_trae_espera_del_plazo_y_datos_de_ecc() {
         let entorno = vec![par("PATH", "/usr/bin")];
         let env = env_del_builder(&ClaudeCorrida::default(), Rol::Planifica, &entorno);
+        let plazo = TIMEOUT_BUILDER.as_millis().to_string();
+        assert_eq!(plazo, "7200000");
         assert!(
-            env.contains(&par("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", "0")),
+            env.contains(&par("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", &plazo)),
             "{env:?}"
+        );
+        assert!(
+            env.iter()
+                .all(|(k, v)| k != "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS" || v != "0"),
+            "la espera no debe ser 0: {env:?}"
         );
         assert!(
             env.contains(&par(

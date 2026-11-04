@@ -7,14 +7,17 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value, json};
 
 use crate::borrado;
+use crate::config::Config;
 use crate::corre::args::{args_claude, env_del_builder};
 use crate::corre::config::ConfigCorrida;
 use crate::corre::contenedor::{TIMEOUT_BUILDER, estado_de};
+use crate::corre::costo_cortado::{costo_de_uso, evento_de_corte, uso_de_transcript};
+use crate::corre::git_seguro;
 use crate::corre::{
     Corrida, EjecutorBuilder, ErrorCorre, Lanzamiento, guardar_transcript, preparar_corrida,
 };
 use crate::goal::verificar_goal;
-use crate::observe::claude::{gates_de_costo_desconocido, leer_sesion_claude};
+use crate::observe::claude::registrar_sesion_claude;
 use crate::observe::transcript::{HuellasOraculo, registrar_lecturas};
 use crate::observe::{self, ErrorObserve};
 use crate::oracle::tarea::{Tarea, cargar_en};
@@ -53,20 +56,22 @@ pub struct DepsCorre<'a> {
     pub entorno: &'a [(String, String)],
 }
 
-/// Un rol que ya corrió: su número de paso, su transcript, su código de salida y su stdout.
+/// Un rol que ya corrió: su número de paso, su transcript, su código de salida y su línea `result`.
 struct Lanzado {
     n: u32,
     rol: Rol,
     codigo: i32,
     ruta: PathBuf,
-    stdout: Vec<u8>,
+    linea: String,
 }
 
 /// Corre la tarea con la configuración y devuelve la fila que se agregó a `runs.jsonl`.
 ///
 /// Un código distinto de 0 de un rol corta la corrida: los roles siguientes no corren, pero la
 /// evaluación sí, y el informe dice lo que falta. Un fallo al lanzar aborta sin evaluar: sin builder
-/// no hay nada que evaluar, y la evaluación puede gastar API.
+/// no hay nada que evaluar, y la evaluación puede gastar API. Un rol sin `result` exitoso también
+/// aborta sin evaluar ni escribir fila: deja un `Gate` con el motivo. Un rol cortado por tiempo
+/// además guarda su transcript parcial y registra su costo estimado (ver `registrar_corte`).
 pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, ErrorCorre> {
     // a) GOAL: sin autorización no arranca y no se crea nada.
     verificar_goal(deps.repo_root)?;
@@ -112,23 +117,36 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
             repo: corrida.repo.clone(),
             plugin: config_cargada.claude.plugin_de(*rol).map(Path::to_path_buf),
         };
+        let n = u32::try_from(indice + 1).unwrap_or(u32::MAX);
         let salida = match deps.ejecutor.lanzar(&lanzamiento) {
             Ok(salida) => salida,
             Err(error) => {
                 let motivo = format!("rol {} no arrancó: {error}", nombre_rol(*rol));
+                // Un rol cortado por tiempo deja su transcript parcial y el costo de lo que gastó.
+                if let ErrorCorre::Cortado { stdout, .. } = &error {
+                    registrar_corte(deps.home, &ruta_eventos, &id, *rol, n, &modelo, stdout)?;
+                }
                 gate(&ruta_eventos, &id, FASE_LANZAMIENTO, motivo, Some(*rol))?;
                 return Err(error);
             }
         };
-        let n = u32::try_from(indice + 1).unwrap_or(u32::MAX);
         let ruta = guardar_transcript(deps.home, &id, n, *rol, &salida.stdout)?;
+        // Sin `result` exitoso el rol no evalúa: no hay resultado que evaluar.
+        let linea = match resultado_exitoso(&salida.stdout) {
+            Ok(linea) => linea,
+            Err(causa) => {
+                let motivo = format!("rol {} sin resultado exitoso: {causa}", nombre_rol(*rol));
+                gate(&ruta_eventos, &id, FASE_ROL, motivo.clone(), Some(*rol))?;
+                return Err(ErrorCorre::Ejecutor(motivo));
+            }
+        };
         let codigo = salida.codigo;
         lanzados.push(Lanzado {
             n,
             rol: *rol,
             codigo,
             ruta,
-            stdout: salida.stdout,
+            linea,
         });
         if codigo != 0 {
             let motivo = format!("rol {} salió con {codigo}", nombre_rol(*rol));
@@ -137,15 +155,9 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         }
     }
 
-    // f) La sesión de cada rol sale de su línea `result`.
+    // f) La sesión de cada rol sale de su línea `result`, ya validada al lanzar.
     for lanzado in &lanzados {
-        match linea_result(&lanzado.stdout) {
-            Some(linea) => registrar_sesion(deps.home, &id, lanzado, &linea, &ruta_eventos)?,
-            None => {
-                let motivo = "sesión sin resultado: el builder no dejó la línea result".to_string();
-                gate(&ruta_eventos, &id, FASE_SESION, motivo, Some(lanzado.rol))?;
-            }
-        }
+        registrar_sesion(deps.home, &id, lanzado, &lanzado.linea, &ruta_eventos)?;
     }
 
     // g) Después de planifica, la aprobación automática del plan. Solo si planifica salió bien.
@@ -178,17 +190,19 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         }
     }
 
-    // i) Se quita la copia de la credencial (la guardia lo hace y su error llega acá).
-    // Después, el estado final del repo, si quedó sucio.
+    // i) Se quita la copia de la credencial. La guardia lo hace y su error llega acá.
+    // Después se arma el estado final en un repo nuevo.
     guardia.cerrar()?;
-    commit_final(&corrida.repo)?;
+    // El host no corre git sobre el `.git` del builder: copia el árbol a un repo nuevo y lo evalúa ahí.
+    let repo_final = corrida.dir.join("final");
+    git_seguro::repo_limpio_desde(&corrida.repo, &repo_final, MENSAJE_ESTADO_FINAL)?;
 
     // j) Evaluación. Un error no pierde la corrida: la fila lleva el veredicto por defecto.
     let opciones = OpcionesOraculo {
         home: Some(deps.home.to_path_buf()),
         ..OpcionesOraculo::default()
     };
-    let veredicto = match (deps.evaluar)(&corrida.repo, &tarea_cargada, &opciones) {
+    let veredicto = match (deps.evaluar)(&repo_final, &tarea_cargada, &opciones) {
         Ok(veredicto) => veredicto,
         Err(error) => {
             let motivo = format!("la evaluación falló: {error}");
@@ -226,6 +240,25 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
     Ok(fila)
 }
 
+/// Un rol cortado por tiempo: guarda su transcript parcial y registra el costo estimado de lo que gastó.
+/// Su `Gate` y su error los pone quien llama. El costo sale de `usage` y del precio del modelo.
+fn registrar_corte(
+    home: &Path,
+    ruta_eventos: &Path,
+    id: &str,
+    rol: Rol,
+    n: u32,
+    modelo: &str,
+    stdout: &[u8],
+) -> Result<(), ErrorCorre> {
+    guardar_transcript(home, id, n, rol, stdout)?;
+    let config =
+        Config::cargar(&home.join("root.toml")).map_err(|e| ErrorCorre::Uso(e.to_string()))?;
+    let uso = uso_de_transcript(stdout);
+    let costo = costo_de_uso(&uso, config.precios.get(modelo));
+    registrar(ruta_eventos, &evento_de_corte(id, modelo, &uso, &costo))
+}
+
 /// Un rol va por cupo con modelo, o `r00t corre` no lo lanza.
 fn exigir_cupo(rol: Rol, eleccion: &Eleccion) -> Result<(), ErrorCorre> {
     let nombre = nombre_rol(rol);
@@ -238,6 +271,45 @@ fn exigir_cupo(rol: Rol, eleccion: &Eleccion) -> Result<(), ErrorCorre> {
             "el rol {nombre} va por {}: r00t corre solo lanza claude -p por cupo",
             etiqueta_via(via)
         ))),
+    }
+}
+
+/// Textos de `result` que dicen que el login venció o no es válido. Se comparan en minúsculas.
+const TEXTOS_LOGIN_VENCIDO: [&str; 4] = [
+    "authentication",
+    "authenticate",
+    "oauth token has expired",
+    "invalid api key",
+];
+
+/// Línea `result` del rol si terminó bien. Si no, el motivo que va al `Gate`.
+fn resultado_exitoso(stdout: &[u8]) -> Result<String, String> {
+    let linea = linea_result(stdout).ok_or("sin línea result: el builder no dejó su resultado")?;
+    let valor: Value = serde_json::from_str(&linea).unwrap_or(Value::Null);
+    if valor.get("is_error").and_then(Value::as_bool) == Some(true) {
+        return Err(motivo_de_error(&valor));
+    }
+    match valor.get("subtype").and_then(Value::as_str) {
+        Some("success") => Ok(linea),
+        Some(otro) => Err(format!("terminó con subtype {otro}")),
+        None => Err("la línea result no trae subtype".into()),
+    }
+}
+
+/// Motivo de un `result` con `is_error` true. Si el token venció, lo dice.
+/// No copia el texto del `result`: puede traer datos de la cuenta.
+fn motivo_de_error(valor: &Value) -> String {
+    let estado = valor.get("api_error_status").and_then(Value::as_u64);
+    let texto = valor
+        .get("result")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_lowercase();
+    let login = TEXTOS_LOGIN_VENCIDO.iter().any(|t| texto.contains(t));
+    if estado == Some(401) || login {
+        "el login de Claude venció o no es válido".into()
+    } else {
+        "terminó con is_error".into()
     }
 }
 
@@ -261,9 +333,10 @@ fn linea_result(stdout: &[u8]) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Registra la sesión de un rol. Su línea `result` se guarda como `<n>-<rol>.resultado.json` en la carpeta
-/// de transcripts, y `leer_sesion_claude` la lee como un JSON de `--output-format json`. Una sesión que no
-/// se puede leer deja un `Gate` y no corta la corrida.
+/// Registra la sesión de un rol. Guarda su línea `result` como `<n>-<rol>.resultado.json` en transcripts.
+/// `registrar_sesion_claude` la registra una sola vez por `session_id`.
+/// Un error de `ErrorObserve` deja un `Gate` y no corta la corrida.
+/// Si el log no se puede escribir, el `Gate` también falla y corta la corrida.
 fn registrar_sesion(
     home: &Path,
     id: &str,
@@ -278,43 +351,11 @@ fn registrar_sesion(
     ));
     fs::write(&ruta, format!("{linea}\n"))
         .map_err(super::infra("guardar el resultado de la sesión"))?;
-    let eventos = match leer_sesion_claude(&ruta, id) {
-        Ok(eventos) => eventos,
-        Err(error) => {
-            let motivo = format!("sesión no leída: {error}");
-            return gate(ruta_eventos, id, FASE_SESION, motivo, Some(lanzado.rol));
-        }
-    };
-    for ev in &eventos {
-        registrar(ruta_eventos, ev)?;
-    }
-    for gate_ev in gates_de_costo_desconocido(&eventos) {
-        registrar(ruta_eventos, &gate_ev)?;
+    if let Err(error) = registrar_sesion_claude(&ruta, id, None, ruta_eventos) {
+        let motivo = format!("sesión no leída: {error}");
+        return gate(ruta_eventos, id, FASE_SESION, motivo, Some(lanzado.rol));
     }
     Ok(())
-}
-
-/// Commit del estado final del repo de la corrida, si quedó algo sin commitear. Sin `GIT_*` heredadas.
-fn commit_final(repo: &Path) -> Result<(), ErrorCorre> {
-    let salida = comando_git(repo, &["status", "--porcelain"])
-        .output()
-        .map_err(|e| ErrorCorre::Git(format!("no se pudo correr git status: {e}")))?;
-    if String::from_utf8_lossy(&salida.stdout).trim().is_empty() {
-        return Ok(());
-    }
-    super::git(repo, &["add", "-A"])?;
-    super::git(
-        repo,
-        &[
-            "-c",
-            "core.hooksPath=/dev/null",
-            "commit",
-            "-q",
-            "--no-verify",
-            "-m",
-            MENSAJE_ESTADO_FINAL,
-        ],
-    )
 }
 
 /// Guardia de la copia de la credencial de una corrida. La copia es de Root y se borra siempre al
@@ -416,7 +457,7 @@ mod tests {
     use crate::corre::{Lanzamiento, SalidaClaude, dir_corridas};
     use crate::goal::{ErrorGoal, calcular_hash};
     use crate::oracle::ErrorOraculo;
-    use crate::tipos::{Confianza, Decision, Estado, Evento, Forma, Informe, Rol, TipoEvento};
+    use crate::tipos::{Confianza, Decision, Estado, Evento, Forma, Informe, Rol, TipoEvento, Via};
     use crate::track::{self, Filtro};
 
     const GOAL: &str = "# GOAL de prueba\n\nContenido de fixture.\n";
@@ -525,6 +566,8 @@ mod tests {
         sin_resultado: bool,
         /// Cambia el `result` por uno sin costo.
         costo_desconocido: bool,
+        /// Cambia el `result` por uno con `is_error` true, como un login vencido.
+        token_vencido: bool,
         /// El lanzamiento no arranca.
         no_lanza: bool,
         /// Contenido de `.credentials.json` en el estado de la corrida, como lo deja el montaje de podman.
@@ -541,6 +584,8 @@ mod tests {
         /// Plazo que `correr` pidió en `verificar_antes`.
         plazo_verificado: RefCell<Option<Duration>>,
         lanzados: RefCell<Vec<Lanzamiento>>,
+        /// Al lanzar, deja en `.git/config` un `fsmonitor` que escribe esta marca, y un archivo sin commit.
+        fsmonitor_marca: Option<PathBuf>,
     }
 
     impl EjecutorBuilder for Builder {
@@ -556,6 +601,21 @@ mod tests {
             self.lanzados.borrow_mut().push(l.clone());
             if self.no_lanza {
                 return Err(ErrorCorre::Ejecutor("prueba: no arranca".into()));
+            }
+            if let Some(marca) = &self.fsmonitor_marca {
+                use std::io::Write;
+                // El builder escribe su propio `.git/config` con un fsmonitor, y deja un archivo sin commit.
+                let mut config = fs::OpenOptions::new()
+                    .append(true)
+                    .open(l.repo.join(".git").join("config"))
+                    .expect("config del repo");
+                writeln!(
+                    config,
+                    "[core]\n\tfsmonitor = \"touch {}\"",
+                    marca.display()
+                )
+                .expect("escribe la config");
+                fs::write(l.repo.join("sucio.txt"), "sin commit\n").expect("archivo sin commit");
             }
             let mut con_extra = l.clone();
             con_extra.env.extend(self.extra.iter().cloned());
@@ -597,10 +657,22 @@ mod tests {
                     .collect();
                 salida.stdout = format!("{}\n", sin.join("\n")).into_bytes();
             }
+            if self.token_vencido {
+                let vencido = "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":401,\"result\":\"Failed to authenticate. API Error: 401 OAuth token has expired\"}\n";
+                salida.stdout = vencido.as_bytes().to_vec();
+            }
             if self.costo_desconocido {
                 let sin_costo = "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":1000,\"num_turns\":2,\"modelUsage\":{\"opus\":{\"inputTokens\":10}},\"session_id\":\"s1\"}\n";
                 salida.stdout = sin_costo.as_bytes().to_vec();
             }
+            // Cada sesión real tiene su `session_id`. El falso repite `s1`, y el dedupe lo tomaría por
+            // la misma sesión. Por eso cada lanzamiento lleva un id propio, con su número.
+            let n = self.lanzados.borrow().len();
+            let texto = String::from_utf8_lossy(&salida.stdout).replace(
+                "\"session_id\":\"s1\"",
+                &format!("\"session_id\":\"s1-{n}\""),
+            );
+            salida.stdout = texto.into_bytes();
             Ok(salida)
         }
     }
@@ -1162,20 +1234,92 @@ mod tests {
         );
     }
 
+    /// Corre con un evaluador que cuenta sus llamadas. Devuelve el error y la cuenta.
+    fn correr_contando_evaluaciones(e: &Entorno, builder: &Builder) -> (ErrorCorre, usize) {
+        let evaluaciones = std::cell::Cell::new(0);
+        let evaluar = |r: &Path, t: &Tarea, o: &OpcionesOraculo| {
+            evaluaciones.set(evaluaciones.get() + 1);
+            evaluador_falso(r, t, o)
+        };
+        let error = correr_con_eval(e, builder, &[], CONFIG, &evaluar)
+            .expect_err("un rol sin resultado exitoso no deja fila");
+        (error, evaluaciones.get())
+    }
+
     #[test]
-    fn corre_sesion_sin_resultado_deja_gate() {
+    fn corre_rol_sin_resultado_no_evalua_ni_escribe_fila() {
         let e = entorno();
         let builder = Builder {
             sin_resultado: true,
             ..Builder::default()
         };
-        let fila = correr_con(&e, &builder, &[], CONFIG).expect("corre");
-        assert_eq!(fila.resumen.turnos, 0, "sin result no hay turnos");
-        assert_eq!(gates(&e, "sesion").len(), 2, "un Gate por rol");
+        let (error, evaluadas) = correr_contando_evaluaciones(&e, &builder);
+        assert!(matches!(error, ErrorCorre::Ejecutor(_)), "{error}");
+        assert_eq!(evaluadas, 0, "no debe evaluar");
+        assert!(!e.home.join("runs.jsonl").exists(), "sin fila");
+        assert_eq!(
+            builder.lanzados.borrow().len(),
+            1,
+            "corta antes de construye"
+        );
+        let motivos = gates(&e, FASE_ROL);
+        assert_eq!(motivos.len(), 1, "un Gate del rol");
         assert!(
-            gates(&e, "sesion")
-                .iter()
-                .all(|m| m.contains("sesión sin resultado"))
+            motivos[0].contains("planifica") && motivos[0].contains("sin línea result"),
+            "{motivos:?}"
+        );
+    }
+
+    #[test]
+    fn corre_rol_con_token_vencido_no_evalua_y_nombra_el_login() {
+        let e = entorno();
+        let builder = Builder {
+            token_vencido: true,
+            ..Builder::default()
+        };
+        let (error, evaluadas) = correr_contando_evaluaciones(&e, &builder);
+        assert!(matches!(error, ErrorCorre::Ejecutor(_)), "{error}");
+        assert_eq!(evaluadas, 0, "no debe evaluar");
+        assert!(!e.home.join("runs.jsonl").exists(), "sin fila");
+        let motivos = gates(&e, FASE_ROL);
+        assert_eq!(motivos.len(), 1, "un Gate del rol");
+        assert!(motivos[0].contains("login de Claude venció"), "{motivos:?}");
+    }
+
+    #[test]
+    fn resultado_exitoso_acepta_success_sin_error() {
+        let salida = b"{\"type\":\"system\"}\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}\n";
+        let linea = resultado_exitoso(salida).expect("resultado exitoso");
+        assert!(linea.contains("\"subtype\":\"success\""), "{linea}");
+    }
+
+    #[test]
+    fn resultado_exitoso_rechaza_salida_sin_result() {
+        let motivo = resultado_exitoso(b"{\"type\":\"system\"}\n").expect_err("sin result");
+        assert!(motivo.contains("sin línea result"), "{motivo}");
+    }
+
+    #[test]
+    fn resultado_exitoso_rechaza_subtype_distinto_de_success() {
+        let salida = b"{\"type\":\"result\",\"subtype\":\"error_max_turns\",\"is_error\":false}\n";
+        let motivo = resultado_exitoso(salida).expect_err("subtype de error");
+        assert!(motivo.contains("error_max_turns"), "{motivo}");
+    }
+
+    #[test]
+    fn resultado_exitoso_rechaza_is_error_true() {
+        let salida = b"{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true}\n";
+        resultado_exitoso(salida).expect_err("is_error true no es exitoso");
+    }
+
+    #[test]
+    fn resultado_exitoso_con_token_vencido_dice_que_el_login_vencio() {
+        let salida = b"{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":401,\"result\":\"Invalid API key\"}\n";
+        let motivo = resultado_exitoso(salida).expect_err("login vencido");
+        assert!(motivo.contains("login de Claude venció"), "{motivo}");
+        assert!(
+            !motivo.contains("Invalid API key"),
+            "no copia el texto: {motivo}"
         );
     }
 
@@ -1193,6 +1337,55 @@ mod tests {
             .collect();
         assert_eq!(gateados.len(), 2, "un Gate por sesión sin costo");
         assert!(gateados.iter().all(|ev| ev.corrida == fila.id));
+    }
+
+    /// Registrar dos veces la misma sesión deja una sola `Sesion` y no suma el costo otra vez.
+    #[test]
+    fn corre_registrar_la_misma_sesion_dos_veces_no_duplica_el_costo() {
+        let e = entorno();
+        let id = "c-dup";
+        fs::create_dir_all(e.home.join("transcripts").join(id)).expect("transcripts");
+        let lanzado = Lanzado {
+            n: 1,
+            rol: Rol::Planifica,
+            codigo: 0,
+            ruta: PathBuf::new(),
+            linea: String::new(),
+        };
+        let linea = r#"{"type":"result","total_cost_usd":0.7,"session_id":"s-dup","modelUsage":{"a":{"costUSD":0.5},"b":{"costUSD":0.2}}}"#;
+        let ruta_eventos = observe::ruta_eventos_en(&e.home);
+        registrar_sesion(&e.home, id, &lanzado, linea, &ruta_eventos).expect("primera");
+        registrar_sesion(&e.home, id, &lanzado, linea, &ruta_eventos).expect("segunda");
+        let log = eventos(&e);
+        let sesiones = log
+            .iter()
+            .filter(|ev| ev.tipo == TipoEvento::Sesion)
+            .count();
+        assert_eq!(sesiones, 1, "una sola Sesion en el log");
+        let total: f64 = log.iter().map(|ev| ev.cost_usd).sum();
+        assert!((total - 0.7).abs() < 1e-12, "costo sumado {total}");
+    }
+
+    /// Una sesión con costo negativo deja un Gate de `FASE_SESION` y no corta la corrida.
+    #[test]
+    fn corre_sesion_con_costo_negativo_deja_gate_y_no_corta() {
+        let e = entorno();
+        let id = "c-neg";
+        fs::create_dir_all(e.home.join("transcripts").join(id)).expect("transcripts");
+        let lanzado = Lanzado {
+            n: 1,
+            rol: Rol::Planifica,
+            codigo: 0,
+            ruta: PathBuf::new(),
+            linea: String::new(),
+        };
+        let linea = r#"{"type":"result","total_cost_usd":-1.0,"session_id":"s-neg"}"#;
+        let ruta_eventos = observe::ruta_eventos_en(&e.home);
+        registrar_sesion(&e.home, id, &lanzado, linea, &ruta_eventos).expect("no corta");
+        let motivos = gates(&e, FASE_SESION);
+        assert_eq!(motivos.len(), 1, "un Gate de la sesión");
+        assert!(motivos[0].contains("sesión no leída"), "{motivos:?}");
+        assert!(eventos(&e).iter().all(|ev| ev.tipo != TipoEvento::Sesion));
     }
 
     #[test]
@@ -1230,5 +1423,154 @@ mod tests {
         .expect_err("tarea inexistente");
         assert_eq!(error.codigo_de_salida(), 2, "{error}");
         assert!(!dir_corridas(&e.usuario).exists());
+    }
+
+    /// C1: el `fsmonitor` del `.git` del builder no se ejecuta en el host al cerrar la corrida.
+    #[test]
+    fn corre_fsmonitor_del_builder_no_se_ejecuta_en_el_host() {
+        let e = entorno();
+        let marca = e._tmp.path().join("marca");
+        let builder = Builder {
+            fsmonitor_marca: Some(marca.clone()),
+            ..Builder::default()
+        };
+        correr_con(&e, &builder, &[], CONFIG).expect("corre");
+        assert!(!marca.exists(), "el fsmonitor del builder se ejecutó");
+    }
+
+    /// C1: el evaluador recibe un repo nuevo, sin el `.git` del builder y con un solo commit final.
+    #[test]
+    fn corre_evaluador_recibe_repo_final_sin_git_del_builder() {
+        let e = entorno();
+        let builder = Builder {
+            fsmonitor_marca: Some(e._tmp.path().join("marca")),
+            ..Builder::default()
+        };
+        let recibido: RefCell<Option<PathBuf>> = RefCell::new(None);
+        let evaluar =
+            |repo: &Path, tarea: &Tarea, _o: &OpcionesOraculo| -> Result<Veredicto, ErrorOraculo> {
+                *recibido.borrow_mut() = Some(repo.to_path_buf());
+                Ok(Veredicto {
+                    tarea: tarea.nombre.clone(),
+                    estado: Estado::Verde,
+                    informe: Some(informe()),
+                    ..Veredicto::default()
+                })
+            };
+        let fila = correr_con_eval(&e, &builder, &[], CONFIG, &evaluar).expect("corre");
+        let repo = recibido
+            .borrow()
+            .clone()
+            .expect("el evaluador recibió un repo");
+        assert_eq!(
+            repo,
+            dir_corridas(&e.usuario).join(&fila.id).join("final"),
+            "el evaluador debe recibir la carpeta final"
+        );
+        let config = fs::read_to_string(repo.join(".git").join("config")).expect("config");
+        assert!(
+            !config.contains("fsmonitor"),
+            "config del builder: {config}"
+        );
+        assert!(repo.join("hecho.txt").is_file(), "falta hecho.txt");
+        let salida = comando_git(&repo, &["log", "--format=%s"])
+            .output()
+            .expect("git log");
+        assert!(salida.status.success(), "git log falló");
+        let mensajes: Vec<String> = String::from_utf8_lossy(&salida.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(mensajes, vec![MENSAJE_ESTADO_FINAL.to_string()]);
+    }
+
+    /// Builder que corta el rol por tiempo: `lanzar` devuelve el error de corte con el `stdout` dado.
+    struct Cortado {
+        stdout: Vec<u8>,
+    }
+
+    impl EjecutorBuilder for Cortado {
+        fn lanzar(&self, _l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre> {
+            Err(ErrorCorre::Cortado {
+                mensaje: "timeout tras 7200 s; se pidió borrar el contenedor prueba".into(),
+                stdout: self.stdout.clone(),
+            })
+        }
+    }
+
+    /// Evaluador que no debe correr: un rol cortado no se evalúa.
+    fn evaluador_no_debe_correr(
+        _repo: &Path,
+        _tarea: &Tarea,
+        _o: &OpcionesOraculo,
+    ) -> Result<Veredicto, ErrorOraculo> {
+        panic!("un rol cortado no se evalúa");
+    }
+
+    #[test]
+    fn corre_rol_cortado_registra_costo_estimado_sin_fila_ni_evaluacion() {
+        let e = entorno();
+        let stdout = include_bytes!("../../tests/fixtures/transcripts/cortado.jsonl").to_vec();
+        let builder = Cortado { stdout };
+        let error = correr_con_eval(
+            &e,
+            &builder,
+            &[],
+            CONFIG_CONSTRUYE,
+            &evaluador_no_debe_correr,
+        )
+        .expect_err("un rol cortado sale con error");
+        assert!(matches!(error, ErrorCorre::Cortado { .. }), "{error}");
+        assert_eq!(error.codigo_de_salida(), 3);
+        assert!(
+            !e.home.join("runs.jsonl").exists(),
+            "un corte no escribe fila"
+        );
+
+        let costos: Vec<Evento> = eventos(&e)
+            .into_iter()
+            .filter(|ev| ev.tipo == TipoEvento::Llamada && ev.cost_usd > 0.0)
+            .collect();
+        assert_eq!(costos.len(), 1, "un evento de costo para el rol cortado");
+        let ev = &costos[0];
+        assert_eq!(ev.via, Some(Via::Cupo));
+        assert_eq!(ev.modelo.as_deref(), Some("haiku"));
+        assert_eq!((ev.in_tokens, ev.out_tokens), (3500, 130));
+        // Sin precio para "haiku" en el fixture: rige el pesimista (15 y 75 USD por millón).
+        let esperado = 3500.0 * 15.0 / 1e6 + 130.0 * 75.0 / 1e6;
+        assert!((ev.cost_usd - esperado).abs() < 1e-9, "{}", ev.cost_usd);
+        assert_eq!(ev.extra["costo_estimado"], Value::Bool(true));
+        assert_eq!(ev.extra["precio_supuesto"], Value::Bool(true));
+
+        let lanzamientos = gates(&e, FASE_LANZAMIENTO);
+        assert_eq!(lanzamientos.len(), 1, "el Gate de lanzamiento se mantiene");
+        assert!(lanzamientos[0].contains("rol construye no arrancó"));
+        assert!(
+            gates(&e, FASE_EVALUACION).is_empty(),
+            "no hay evaluación de la corrida cortada"
+        );
+    }
+
+    #[test]
+    fn corre_rol_cortado_guarda_su_transcript_parcial() {
+        let e = entorno();
+        let stdout = include_bytes!("../../tests/fixtures/transcripts/cortado.jsonl").to_vec();
+        let builder = Cortado {
+            stdout: stdout.clone(),
+        };
+        let _ = correr_con_eval(
+            &e,
+            &builder,
+            &[],
+            CONFIG_CONSTRUYE,
+            &evaluador_no_debe_correr,
+        );
+        let carpetas: Vec<PathBuf> = fs::read_dir(e.home.join("transcripts"))
+            .expect("carpeta de transcripts")
+            .map(|entrada| entrada.expect("entrada").path())
+            .collect();
+        assert_eq!(carpetas.len(), 1, "una carpeta por corrida");
+        let guardado = carpetas[0].join("1-construye.jsonl");
+        assert_eq!(fs::read(&guardado).expect("transcript"), stdout);
     }
 }

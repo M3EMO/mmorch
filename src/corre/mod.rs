@@ -7,8 +7,10 @@ pub mod args;
 pub mod config;
 pub mod contenedor;
 pub mod corrida;
+mod costo_cortado;
 mod credencial;
 pub mod ejecutor;
+mod git_seguro;
 
 use std::fs;
 use std::io::{self, Write};
@@ -33,7 +35,7 @@ pub use credencial::{copiar_sin_mcp, vencimiento_ms, verificar_vigencia};
 pub use ejecutor::{EjecutorBuilder, EjecutorContenedorBuilder, Lanzamiento, SalidaClaude};
 
 /// Errores de una corrida. `Uso` sale con código 2: lo arregla el humano en la config o en la tarea.
-/// `Goal` y `Ruteo` llevan el código de su error. Los demás salen con código 3.
+/// `Goal` y `Ruteo` llevan el código de su error. Los demás salen con código 3, `Cortado` incluido.
 #[derive(Debug, ErrorDerive)]
 pub enum ErrorCorre {
     #[error("uso: {0}")]
@@ -48,6 +50,9 @@ pub enum ErrorCorre {
     Git(String),
     #[error("no se pudo lanzar el builder: {0}")]
     Ejecutor(String),
+    /// El builder se cortó por tiempo. Lleva el `stdout` que alcanzó a dar: su transcript parcial.
+    #[error("no se pudo lanzar el builder: {mensaje}")]
+    Cortado { mensaje: String, stdout: Vec<u8> },
     /// El GOAL no está autorizado o fue alterado. Sale con el código de `goal verificar`.
     #[error(transparent)]
     Goal(#[from] ErrorGoal),
@@ -69,6 +74,7 @@ impl ErrorCorre {
             ErrorCorre::Io { .. }
             | ErrorCorre::Git(_)
             | ErrorCorre::Ejecutor(_)
+            | ErrorCorre::Cortado { .. }
             | ErrorCorre::Observa(_) => 3,
         }
     }

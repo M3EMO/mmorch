@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","cwd":"/corrida/repo","session_id":"s-cortado","model":"haiku"}
+{"type":"assistant","message":{"id":"msg_cortado_1","model":"haiku","content":[{"type":"text","text":"Voy a escribir el archivo."}],"usage":{"input_tokens":1000,"cache_creation_input_tokens":200,"cache_read_input_tokens":300,"output_tokens":50}}}
+{"type":"assistant","message":{"id":"msg_cortado_2","model":"haiku","content":[{"type":"tool_use","id":"t1","name":"Write","input":{"file_path":"hecho.txt","content":"hecho\n"}}],"usage":{"input_tokens":1500,"cache_creation_input_tokens":0,"cache_read_input_tokens":500,"output_tokens":80}}}
