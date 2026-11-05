@@ -860,6 +860,24 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "items": {
         "type": "string"
       }
+    },
+    "valor": {
+      "description": "Valor de la dimensión calibrada en este caso. `None` si el caso no tiene puntaje de la dimensión.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "float",
+      "default": null
+    },
+    "valor_base": {
+      "description": "Valor de la dimensión calibrada en la base. `None` si la base no tiene puntaje de la dimensión.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "float",
+      "default": null
     }
   },
   "required": [

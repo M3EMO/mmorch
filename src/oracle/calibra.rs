@@ -272,6 +272,12 @@ pub struct CasoGuardado {
     /// Nivel de cada ítem de la dimensión calibrada en este caso. Vacío si no hay puntaje.
     #[serde(default)]
     pub niveles: BTreeMap<String, u8>,
+    /// Valor de la dimensión calibrada en la base. `None` si la base no tiene puntaje de la dimensión.
+    #[serde(default)]
+    pub valor_base: Option<f32>,
+    /// Valor de la dimensión calibrada en este caso. `None` si el caso no tiene puntaje de la dimensión.
+    #[serde(default)]
+    pub valor: Option<f32>,
     /// Motivo por el que el caso no aplica. Solo en el renglón de un caso no aplicable.
     #[serde(default)]
     pub no_aplicable: Option<String>,
@@ -1386,6 +1392,10 @@ struct Caso {
     niveles_base: BTreeMap<String, u8>,
     /// Nivel de cada ítem de la dimensión calibrada en este caso.
     niveles: BTreeMap<String, u8>,
+    /// Valor de la dimensión calibrada en la base. `None` si la base no tiene puntaje de la dimensión.
+    valor_base: Option<f32>,
+    /// Valor de la dimensión calibrada en este caso. `None` si el caso no tiene puntaje de la dimensión.
+    valor: Option<f32>,
 }
 
 impl Caso {
@@ -1404,6 +1414,8 @@ impl Caso {
             items: BTreeMap::new(),
             niveles_base: BTreeMap::new(),
             niveles: BTreeMap::new(),
+            valor_base: None,
+            valor: None,
             reemplazos: 0,
             target_reusado: false,
             limpio_reusado: false,
@@ -1434,6 +1446,8 @@ impl CasoGuardado {
             motivo: caso.motivo.clone(),
             niveles_base: caso.niveles_base.clone(),
             niveles: caso.niveles.clone(),
+            valor_base: caso.valor_base,
+            valor: caso.valor,
             no_aplicable: None,
             mutante: caso.inyeccion.as_ref().and_then(|i| i.mutante.clone()),
             tests_apagados: caso
@@ -1462,6 +1476,8 @@ impl CasoGuardado {
             motivo: None,
             niveles_base: BTreeMap::new(),
             niveles: BTreeMap::new(),
+            valor_base: None,
+            valor: None,
             no_aplicable: Some(no.motivo.clone()),
             mutante: None,
             tests_apagados: Vec::new(),
@@ -1677,6 +1693,8 @@ fn finalizar_casos(
         caso.sin_veredicto = motivo_sin_veredicto(&caso.veredicto, dimension);
         caso.niveles_base = niveles_de(puntaje_de(base, dimension));
         caso.niveles = niveles_de(puntaje_de(&caso.veredicto, dimension));
+        caso.valor_base = puntaje_de(base, dimension).map(|p| p.valor);
+        caso.valor = puntaje_de(&caso.veredicto, dimension).map(|p| p.valor);
         caso.items = items
             .iter()
             .map(|item| {
@@ -3310,6 +3328,43 @@ mod tests {
             .lines()
             .map(|l| serde_json::from_str::<CasoGuardado>(l).expect("caso"))
             .collect()
+    }
+
+    /// Punto 2: cada caso medido guarda el `valor` de la dimensión calibrada y el de la base, como en el veredicto.
+    #[test]
+    fn calibra_el_caso_guardado_dice_su_valor_y_el_de_la_base() {
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = carpeta_con_repo_bueno(home.path());
+        let repo = carpeta.join("repo-bueno");
+        let base = veredicto_de(Dimension::Seguridad, 0.9, None);
+        let ev = falso(&repo, &base, |limpia, _, _| {
+            veredicto_de(Dimension::Seguridad, if limpia { 0.8 } else { 0.2 }, None)
+        });
+        let evaluador = |_: &Tarea, ruta: &Path, _: &OpcionesOraculo| ev(ruta);
+        let calibrada = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "seguridad",
+            4,
+            42,
+            None,
+            None,
+            &evaluador,
+        )
+        .expect("calibra seguridad");
+        let guardados = renglones_guardados(&calibrada);
+        assert!(guardados.iter().any(|c| c.es_defecto), "hay defectos");
+        assert!(guardados.iter().any(|c| !c.es_defecto), "hay limpios");
+        for caso in &guardados {
+            let esperado = if caso.es_defecto { 0.2 } else { 0.8 };
+            assert_eq!(caso.valor, Some(esperado), "caso {}: valor", caso.caso);
+            assert_eq!(
+                caso.valor_base,
+                Some(0.9),
+                "caso {}: valor de la base",
+                caso.caso
+            );
+        }
     }
 
     #[test]
@@ -5952,6 +6007,15 @@ mod tests {
         let caso: CasoGuardado = serde_json::from_str(viejo).expect("renglón de antes del mutante");
         assert_eq!(caso.mutante, None);
         assert!(caso.tests_apagados.is_empty());
+    }
+
+    /// Punto 2: un renglón de antes de `valor` y `valor_base` se lee con los dos en `None`.
+    #[test]
+    fn calibra_renglon_viejo_sin_valor_se_lee_con_none() {
+        let viejo = r#"{"caso":0,"es_defecto":true,"detectado":false,"defecto":"assert_borrado"}"#;
+        let caso: CasoGuardado = serde_json::from_str(viejo).expect("renglón sin valor");
+        assert_eq!(caso.valor, None);
+        assert_eq!(caso.valor_base, None);
     }
 
     #[test]
