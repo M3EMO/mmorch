@@ -2651,9 +2651,10 @@ mod tests {
         );
     }
 
-    /// Con un mutante muerto que ningún test llama, el AssertBorrado no aplicable dice que ningún muerto tiene test.
+    /// Con un mutante muerto que ningún test llama, el AssertBorrado no aplicable dice que ningún mutante muerto tiene tests fallidos ubicables.
     #[test]
-    fn calibra_pruebas_assert_borrado_sin_test_de_muerto_dice_que_ninguno_tiene_test() {
+    fn calibra_pruebas_assert_borrado_sin_tests_ubicables_de_muerto_dice_que_ninguno_tiene_tests_ubicables()
+     {
         const MUERTO_SIN_TEST: &str = r#"{"total_mutants":1,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"src/protocolo.rs:9:1: replace escribir_numero -> Result<u32, ParseIntError> with Ok(0)","file":"src/protocolo.rs","span":{"start":{"line":9,"column":1}}}},"summary":"CaughtMutant"}]}"#;
         let casos = casos_de_pruebas_con(MUERTO_SIN_TEST);
         let motivos: Vec<&str> = casos
