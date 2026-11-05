@@ -640,6 +640,13 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": 0,
           "minimum": 0
         },
+        "limpios_sin_veredicto": {
+          "description": "Casos limpios medidos con `sin_veredicto`: la dimensión no emitió veredicto en la copia. No detectan, así\nque entran a `especificidad` como no detectados. No son falsas alarmas. Una fila sin el campo vale 0.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
         "n": {
           "description": "Casos medidos: los defectos aplicados más los limpios. No cuenta los `no_aplicable`.",
           "type": "integer",
@@ -667,6 +674,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "format": "uint32",
           "default": 0,
           "minimum": 0
+        },
+        "ruidosos": {
+          "description": "Tests ruidosos de la calibración, en orden: los que cambiaron de estado entre la base y los limpios. Sus\nhallazgos no detectan (Tarea 63). Una fila sin el campo vale vacía.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
         },
         "semilla": {
           "description": "Semilla de la muestra: con la misma semilla, la medición se repite igual.",
@@ -749,6 +764,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ],
       "default": null
     },
+    "limpio_reusado": {
+      "description": "`true`: el limpio salió del caché de las otras dimensiones con juez, sin evaluarse. `false` en los demás.",
+      "type": "boolean",
+      "default": false
+    },
     "linea": {
       "description": "Línea 1-based del defecto; 0 significa el archivo entero. `None` en un caso limpio.",
       "type": [
@@ -758,6 +778,52 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "format": "uint32",
       "default": null,
       "minimum": 0
+    },
+    "motivo": {
+      "description": "Por qué `detectado` es true. Estructura, Arquitectura y Diseño: `hallazgo_sonda`, `item_sonda:<item>`,\n`cita_juez` o `item_baja_2:<item>`. Las demás: `hallazgo_nuevo:<cita>`, `test_malo_nuevo:<clave>`,\n`valor_menor` o `item_bajo:<item>`. `<cita>` es la del hallazgo nuevo que disparó. `<clave>` es\n`oculto:<id>` o `contrato:<id>` del test malo nuevo, y solo aparece en Completitud y Funciona.\n`None` si no detectó. Un caso sin veredicto de la dimensión no detecta: su motivo está en `sin_veredicto`.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "mutante": {
+      "description": "Nombre del mutante muerto que eligió `AssertBorrado`. `None` en los demás defectos.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "niveles": {
+      "description": "Nivel de cada ítem de la dimensión calibrada en este caso. Vacío si no hay puntaje.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "format": "uint8",
+        "maximum": 255,
+        "minimum": 0
+      },
+      "default": {}
+    },
+    "niveles_base": {
+      "description": "Nivel de cada ítem de la dimensión calibrada en la base. Vacío si la base no tiene puntaje.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "format": "uint8",
+        "maximum": 255,
+        "minimum": 0
+      },
+      "default": {}
+    },
+    "no_aplicable": {
+      "description": "Motivo por el que el caso no aplica. Solo en el renglón de un caso no aplicable.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
     },
     "reemplazos": {
       "description": "Inyecciones inválidas reemplazadas antes de este caso. `0` si no hubo ninguna.",
@@ -785,6 +851,32 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "boolean",
         "null"
       ],
+      "default": null
+    },
+    "tests_apagados": {
+      "description": "Nombres completos de los tests que `AssertBorrado` apagó. Vacío en los demás defectos.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "valor": {
+      "description": "Valor de la dimensión calibrada en este caso. `None` si el caso no tiene puntaje de la dimensión.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "float",
+      "default": null
+    },
+    "valor_base": {
+      "description": "Valor de la dimensión calibrada en la base. `None` si la base no tiene puntaje de la dimensión.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "float",
       "default": null
     }
   },

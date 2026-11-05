@@ -1,0 +1,4 @@
+log/src__lib.rs_line_1_col_25.log:test t::ok ... FAILED
+log/src__lib.rs_line_9_col_5.log:test t::ok ... FAILED
+log/src__db.rs_line_4_col_9.log:test db::tests::zset ... FAILED
+log/src__db.rs_line_4_col_9.log:test db::tests::zset_vacio ... FAILED

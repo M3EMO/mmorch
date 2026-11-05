@@ -56,6 +56,12 @@ Respondé SOLO un objeto JSON con esta forma exacta:
 {\"items\":[{\"item\":\"<id>\",\"nivel\":0-3,\"evidencia\":[{\"archivo\":\"...\",\"linea\":N,\"cita\":\"<texto textual del archivo>\"}]},{\"item\":\"<id>\",\"nivel\":null,\"motivo\":\"sin_evidencia\",\"evidencia\":[]}],\"hallazgos\":[{\"item\":\"<id>\",\"severidad\":1-3,\"archivo\":\"...\",\"linea\":N,\"cita\":\"...\",\"detalle\":\"...\",\"impacto\":[\"R1\"]}]}
 Sin hallazgos: \"hallazgos\":[].";
 
+/// Huella de los textos fijos del prompt del juez. Cambiar uno cambia la huella: los limpios guardados con el
+/// prompt viejo ya no se reusan.
+pub fn huella_del_prompt() -> String {
+    crate::goal::calcular_hash(format!("{PROMPT_SISTEMA}\n{MARCA_RECORTE}").as_bytes())
+}
+
 /// Un modelo que responde al prompt del juez.
 pub trait ModeloJuez {
     fn consultar(&self, prompt: &Prompt) -> Result<RespuestaJuez, ErrorOraculo>;

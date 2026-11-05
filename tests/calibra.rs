@@ -815,6 +815,81 @@ fn calibra_casos_dos_calibraciones_no_se_pisan() {
     }
 }
 
+/// `[eficiencia]` con `camino_caliente` que no existe: ningún defecto de Eficiencia tiene dónde caer.
+fn eficiencia_sin_camino() -> String {
+    format!("{EFICIENCIA}\n[calibracion]\ncamino_caliente = [\"no_existe\"]\n")
+}
+
+#[test]
+fn calibra_casos_defecto_no_aplicable_deja_renglon_y_no_suma_a_n() {
+    let home = home_con_tarea(&eficiencia_sin_camino());
+    let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
+        Ok::<Veredicto, ErrorOraculo>(veredicto_con(Dimension::Eficiencia, 1.0, None))
+    };
+    let calibrada = calibrar_tarea_con(
+        home.path(),
+        "calibra-fixture",
+        "eficiencia",
+        2,
+        42,
+        Some(Path::new(FIXTURE)),
+        None,
+        &evaluador,
+    )
+    .expect("calibra");
+    assert_eq!(
+        (calibrada.fila.n, calibrada.fila.no_aplicable),
+        (1, 1),
+        "el defecto no suma a n"
+    );
+    let ruta = calibrada.casos.expect("hay casos guardados");
+    let casos = renglones(&ruta);
+    assert_eq!(casos.len(), 2, "el no aplicable y el limpio tienen renglón");
+    let no = &casos[0];
+    assert_eq!(no.caso, 0);
+    assert!(no.es_defecto);
+    assert!(!no.detectado);
+    assert!(no.defecto.is_some(), "dice el defecto");
+    assert!(no.item.is_some(), "dice el ítem");
+    assert_eq!(no.archivo, None, "no hubo copia que dijera archivo");
+    assert_eq!(
+        no.no_aplicable.as_deref(),
+        Some("sin candidato para inyectar")
+    );
+    assert_eq!(casos[1].caso, 1);
+    assert_eq!(casos[1].no_aplicable, None);
+}
+
+#[test]
+fn calibra_casos_todos_no_aplicables_escriben_el_archivo_con_sus_renglones() {
+    // Un caso, con defecto y sin candidato: no hay caso medido, pero el renglón igual se escribe.
+    let home = home_con_tarea(&eficiencia_sin_camino());
+    let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
+        Ok::<Veredicto, ErrorOraculo>(veredicto_con(Dimension::Eficiencia, 1.0, None))
+    };
+    let calibrada = calibrar_tarea_con(
+        home.path(),
+        "calibra-fixture",
+        "eficiencia",
+        1,
+        42,
+        Some(Path::new(FIXTURE)),
+        None,
+        &evaluador,
+    )
+    .expect("calibra");
+    assert_eq!((calibrada.fila.n, calibrada.fila.no_aplicable), (0, 1));
+    let ruta = calibrada
+        .casos
+        .expect("el archivo existe aunque no haya casos medidos");
+    let casos = renglones(&ruta);
+    assert_eq!(casos.len(), 1);
+    assert_eq!(
+        casos[0].no_aplicable.as_deref(),
+        Some("sin candidato para inyectar")
+    );
+}
+
 /// Motivo de la fila de una dimensión que la tarea no aplica.
 const MOTIVO_NO_APLICA: &str = "no aplica: la tarea no define [eficiencia]";
 
@@ -911,6 +986,7 @@ fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
         n: 20,
         defectos: 10,
         limpios: 10,
+        limpios_sin_veredicto: 0,
         no_aplicable: 0,
         semilla: 42,
         ts: 1.0,
@@ -921,6 +997,7 @@ fn eficiencia_no_aplicable_no_calibra_ni_entra_a_global() {
         incompleta: false,
         no_aplica: None,
         reemplazos: 0,
+        ruidosos: Vec::new(),
     };
     agregar(home.path(), &seguridad).expect("agrega seguridad");
     let cal = Calibraciones::cargar(home.path()).expect("carga");
@@ -1050,6 +1127,7 @@ fn fila_vieja_sin_no_aplica_se_lee() {
         n: 20,
         defectos: 10,
         limpios: 10,
+        limpios_sin_veredicto: 0,
         no_aplicable: 0,
         semilla: 42,
         ts: 1.0,
@@ -1060,6 +1138,7 @@ fn fila_vieja_sin_no_aplica_se_lee() {
         incompleta: false,
         no_aplica: None,
         reemplazos: 0,
+        ruidosos: Vec::new(),
     };
     let mut vieja = serde_json::to_value(&fila).expect("serializa");
     vieja.as_object_mut().expect("objeto").remove("no_aplica");
@@ -1078,6 +1157,7 @@ fn eficiencia_no_aplicable_no_borra_las_filas_anteriores() {
         n: 20,
         defectos: 10,
         limpios: 10,
+        limpios_sin_veredicto: 0,
         no_aplicable: 0,
         semilla: 1,
         ts: 1.0,
@@ -1088,6 +1168,7 @@ fn eficiencia_no_aplicable_no_borra_las_filas_anteriores() {
         incompleta: false,
         no_aplica: None,
         reemplazos: 0,
+        ruidosos: Vec::new(),
     };
     agregar(home.path(), &antes).expect("agrega");
     let llamadas = Mutex::new(0u32);

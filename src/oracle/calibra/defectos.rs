@@ -142,6 +142,7 @@ struct Ensayo {
     base: Veredicto,
     con_defecto: Veredicto,
     inyeccion: Inyeccion,
+    muertos: Vec<crate::oracle::mutacion::MutanteMuerto>,
 }
 
 /// Prepara la copia del fixture (con `preparar`), evalúa la base, inyecta `defecto` con la semilla fija y
@@ -202,7 +203,25 @@ fn ensayar_con_home(
         base,
         con_defecto,
         inyeccion,
+        muertos,
     }
+}
+
+/// Si el defecto de `e` baja su dimensión, por el mismo camino de la calibración: `finalizar_casos` sobre el caso.
+fn detecta_defecto(e: &Ensayo) -> bool {
+    let mut casos = vec![Caso::nuevo(
+        0,
+        Some(e.inyeccion.clone()),
+        e.con_defecto.clone(),
+    )];
+    finalizar_casos(
+        &e.base,
+        e.inyeccion.defecto.dimension(),
+        &[],
+        &e.muertos,
+        &mut casos,
+    );
+    casos[0].detectado
 }
 
 /// Afirma lo que pide el test. La inyección es válida y la dimensión baja. Si `en_linea`, un hallazgo nuevo
@@ -217,7 +236,7 @@ fn afirma_detectado(e: &Ensayo, defecto: Defecto, en_linea: bool) {
         e.inyeccion
     );
     assert!(
-        detecta_dimension(&e.base, &e.con_defecto, dimension, true),
+        detecta_defecto(e),
         "{dimension:?} no baja con {:?}",
         e.inyeccion
     );
@@ -235,7 +254,14 @@ fn afirma_detectado(e: &Ensayo, defecto: Defecto, en_linea: bool) {
             e.inyeccion.archivo, e.inyeccion.linea, e.con_defecto.hallazgos
         );
     }
-    if let Some(bajo) = detecta_item(&e.base, &e.con_defecto, dimension, defecto.item(), true) {
+    if let Some(bajo) = detecta_item(
+        &e.base,
+        &e.con_defecto,
+        dimension,
+        defecto.item(),
+        true,
+        &BTreeSet::new(),
+    ) {
         assert!(
             bajo,
             "el ítem {} no baja con {:?}",

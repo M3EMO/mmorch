@@ -266,9 +266,18 @@ impl Partes {
     }
 
     /// Si `dimension` se mide con estas partes. Sin dimensión calibrada, se miden todas.
+    /// Con el juez de diseño, Estructura, Arquitectura y Diseño se miden juntas: el juez da las tres
+    /// con una sola llamada. Las demás dimensiones solo se miden si son la calibrada.
     pub fn mide(&self, dimension: Dimension) -> bool {
-        self.dimension
-            .is_none_or(|calibrada| calibrada == dimension)
+        let trio = |d: Dimension| {
+            matches!(
+                d,
+                Dimension::Estructura | Dimension::Arquitectura | Dimension::Diseno
+            )
+        };
+        self.dimension.is_none_or(|calibrada| {
+            calibrada == dimension || (self.juez_diseno && trio(calibrada) && trio(dimension))
+        })
     }
 }
 
@@ -5515,6 +5524,7 @@ mod tests {
             n: 20,
             defectos: 10,
             limpios: 10,
+            limpios_sin_veredicto: 0,
             no_aplicable: 0,
             semilla: 42,
             ts: 1.0,
@@ -5525,6 +5535,7 @@ mod tests {
             incompleta: false,
             no_aplica: None,
             reemplazos: 0,
+            ruidosos: Vec::new(),
         })
         .collect();
         let calibracion = Calibraciones {
@@ -6677,6 +6688,7 @@ mod tests {
                 archivo: "src/lib.rs".into(),
                 linea: 1,
                 nombre: "m".into(),
+                tests: vec![],
             }]
         );
     }
@@ -6908,6 +6920,84 @@ mod tests {
             grab_reuso.destinos
         );
         assert_eq!(v_reuso, v_sin);
+    }
+
+    /// Calibrar Arquitectura con el juez de diseño: Estructura y Diseño también se miden, con una sola llamada.
+    #[test]
+    fn oraculo_partes_arquitectura_con_juez_mide_estructura_y_diseno() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let rubricas = rubrica::cargar_embebidas().expect("rúbricas");
+        let juez = JuezFalso::con(&respuesta_para(&rubricas), 0.25);
+        let junit = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_partes(
+            base.path(),
+            &repo,
+            Some(partes_de(
+                Dimension::Arquitectura,
+                &rubricas,
+                &tarea_sin_escenarios(),
+            )),
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                ..deps_de(&junit, &herramientas(&[]))
+            },
+        );
+        for dimension in [Dimension::Estructura, Dimension::Diseno] {
+            assert_ne!(
+                puntaje_de_prueba(&v, dimension).sin_veredicto.as_deref(),
+                Some(NO_MEDIDA),
+                "{dimension:?}"
+            );
+        }
+        assert_eq!(juez.llamadas(), 1, "una sola llamada al juez de diseño");
+    }
+
+    #[test]
+    fn partes_mide_con_juez_de_diseno_el_trio_de_la_calibrada() {
+        let p = Partes {
+            dimension: Some(Dimension::Arquitectura),
+            juez_diseno: true,
+            ..Partes::default()
+        };
+        assert!(p.mide(Dimension::Estructura));
+        assert!(p.mide(Dimension::Arquitectura));
+        assert!(p.mide(Dimension::Diseno));
+        assert!(!p.mide(Dimension::Seguridad));
+    }
+
+    #[test]
+    fn partes_mide_sin_juez_de_diseno_solo_la_calibrada() {
+        let p = Partes {
+            dimension: Some(Dimension::Arquitectura),
+            juez_diseno: false,
+            ..Partes::default()
+        };
+        assert!(p.mide(Dimension::Arquitectura));
+        assert!(!p.mide(Dimension::Estructura));
+        assert!(!p.mide(Dimension::Diseno));
+    }
+
+    #[test]
+    fn partes_mide_pruebas_no_mide_el_trio_aunque_haya_juez() {
+        let p = Partes {
+            dimension: Some(Dimension::Pruebas),
+            juez_diseno: true,
+            ..Partes::default()
+        };
+        assert!(p.mide(Dimension::Pruebas));
+        assert!(!p.mide(Dimension::Estructura));
+        assert!(!p.mide(Dimension::Arquitectura));
+        assert!(!p.mide(Dimension::Diseno));
+    }
+
+    #[test]
+    fn partes_todas_mide_todas_las_dimensiones() {
+        for dimension in DIMENSIONES {
+            assert!(Partes::todas().mide(dimension), "{dimension:?}");
+        }
     }
 
     #[test]
