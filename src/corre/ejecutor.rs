@@ -38,14 +38,46 @@ pub struct SalidaClaude {
     pub stderr: Vec<u8>,
 }
 
+/// Cómo espera `correr` a que el login alcance para un rol. Revisa cada `intervalo`, hasta `tope`.
+#[derive(Debug, Clone, Copy)]
+pub struct EsperaVigencia {
+    pub intervalo: Duration,
+    pub tope: Duration,
+}
+
+impl Default for EsperaVigencia {
+    fn default() -> Self {
+        Self {
+            intervalo: Duration::from_secs(60),
+            tope: Duration::from_secs(30 * 60),
+        }
+    }
+}
+
+impl EsperaVigencia {
+    /// Reintentos máximos: `ceil(tope / intervalo)`. Con intervalo cero no hay reintentos.
+    pub fn reintentos(&self) -> u32 {
+        if self.intervalo.is_zero() {
+            return 0;
+        }
+        let veces = self.tope.as_nanos().div_ceil(self.intervalo.as_nanos());
+        u32::try_from(veces).unwrap_or(u32::MAX)
+    }
+}
+
 /// Corre el builder de un rol. Es el único punto por donde se lanza `claude`.
 pub trait EjecutorBuilder {
     /// Corre el builder con `l` y devuelve su salida. Sale por `Err` solo si no pudo lanzarlo.
     fn lanzar(&self, l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre>;
 
-    /// Revisa antes de armar nada que el login alcance para `plazo`. Por defecto no revisa nada.
+    /// Revisa que el login alcance para el plazo de un rol. Por defecto no revisa nada.
     fn verificar_antes(&self, _plazo: Duration) -> Result<(), ErrorCorre> {
         Ok(())
+    }
+
+    /// Cuánto espera `correr` a que el login alcance para un rol. Por defecto, `EsperaVigencia::default()`.
+    fn espera_vigencia(&self) -> EsperaVigencia {
+        EsperaVigencia::default()
     }
 }
 
@@ -704,6 +736,26 @@ mod tests {
         ejecutor
             .verificar_antes(Duration::from_secs(60))
             .expect("el login alcanza");
+    }
+
+    /// Guarda de vigencia por rol: un login de 3 horas alcanza para el plazo de un rol de 2 horas.
+    /// Un login de 1 hora no alcanza. Este test pasa desde el inicio: cubre la regla, no un cambio.
+    #[test]
+    fn corre_ejecutor_token_de_3_horas_deja_arrancar_dos_roles() {
+        const HORA_MS: u64 = 3_600_000;
+        let tmp = TempDir::new().expect("tmp");
+        let (ejecutor, credencial) = ejecutor_real(&tmp, false);
+        let tres_horas = ahora_ms() + 3 * HORA_MS;
+        escribir_credencial(&credencial, &credencial_con_mcp(tres_horas));
+        ejecutor
+            .verificar_antes(crate::corre::contenedor::TIMEOUT_BUILDER)
+            .expect("3 horas alcanzan para un rol");
+        let una_hora = ahora_ms() + HORA_MS;
+        escribir_credencial(&credencial, &credencial_con_mcp(una_hora));
+        let error = ejecutor
+            .verificar_antes(crate::corre::contenedor::TIMEOUT_BUILDER)
+            .expect_err("1 hora no alcanza para un rol de 2 horas");
+        assert!(matches!(error, ErrorCorre::Ejecutor(_)), "{error}");
     }
 
     #[test]

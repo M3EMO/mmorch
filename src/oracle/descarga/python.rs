@@ -1395,7 +1395,7 @@ fn fuentes_dinamicas(carpeta: &Path, req: &RequisitosPip) -> Result<Vec<String>,
 }
 
 /// Texto fijo de los avisos de dependencias no verificadas. No corta la descarga: es severidad 1.
-const AVISO_NO_VERIFICADAS: &str = "dependencias de runtime no verificadas";
+pub(crate) const AVISO_NO_VERIFICADAS: &str = "dependencias de runtime no verificadas";
 
 /// `true` si un clon no declara dependencias en un `pyproject.toml` con `[project]`. Sin el archivo, o con un
 /// TOML sin `[project]` (un `setup.py` legado), es legado. Un TOML roto no cuenta: `dependencias_de_clon` lo corta.
@@ -3152,8 +3152,6 @@ mod tests {
 
     // --- Dependencias de runtime no verificadas: sdists con metadata vieja y clones sin metadatos estáticos ---
 
-    /// Texto fijo del aviso. Va a los hallazgos de la descarga y a los avisos del Gate.
-    const AVISO_NO_VERIFICADAS: &str = "dependencias de runtime no verificadas";
     /// Clon de prueba: un repo y un commit fijos. Cada test decide qué archivos trae el clon.
     const RAW_CLON: &str =
         "git+https://github.com/x/y@c8e394065cd541a16c040515dc0afb85cf22a7c3#egg=y";

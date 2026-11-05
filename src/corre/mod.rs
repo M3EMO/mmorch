@@ -32,7 +32,9 @@ pub use args::{args_claude, env_del_builder};
 pub use config::{ClaudeCorrida, ConfigCorrida};
 pub use corrida::{DepsCorre, correr};
 pub use credencial::{copiar_sin_mcp, vencimiento_ms, verificar_vigencia};
-pub use ejecutor::{EjecutorBuilder, EjecutorContenedorBuilder, Lanzamiento, SalidaClaude};
+pub use ejecutor::{
+    EjecutorBuilder, EjecutorContenedorBuilder, EsperaVigencia, Lanzamiento, SalidaClaude,
+};
 
 /// Errores de una corrida. `Uso` sale con código 2: lo arregla el humano en la config o en la tarea.
 /// `Goal` y `Ruteo` llevan el código de su error. Los demás salen con código 3, `Cortado` incluido.
