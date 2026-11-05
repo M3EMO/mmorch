@@ -236,6 +236,19 @@ pub struct CasoGuardado {
     /// de que la calibración midiera el `target` (Tarea 59).
     #[serde(default)]
     pub target_reusado: Option<bool>,
+    /// Por qué `detectado` es true: `sin_veredicto`, `hallazgo_nuevo`, `valor_menor` o `item_bajo:<item>`.
+    /// `None` si no detectó.
+    #[serde(default)]
+    pub motivo: Option<String>,
+    /// Nivel de cada ítem de la dimensión calibrada en la base. Vacío si la base no tiene puntaje.
+    #[serde(default)]
+    pub niveles_base: BTreeMap<String, u8>,
+    /// Nivel de cada ítem de la dimensión calibrada en este caso. Vacío si no hay puntaje.
+    #[serde(default)]
+    pub niveles: BTreeMap<String, u8>,
+    /// Motivo por el que el caso no aplica. Solo en el renglón de un caso no aplicable.
+    #[serde(default)]
+    pub no_aplicable: Option<String>,
 }
 
 /// Resultado de `calibrar_tarea_con`: la fila y la ruta de los casos guardados, si hubo casos medidos.
@@ -252,6 +265,16 @@ struct Medida {
     detencion: Option<Detencion>,
     /// Los casos medidos, en orden. Vacío si el tope detuvo la calibración antes del primero.
     casos: Vec<Caso>,
+    /// Los casos con defecto que no se pudieron aplicar, en orden. No entran en `casos`.
+    no_aplicables: Vec<NoAplicable>,
+}
+
+/// Un caso con defecto que no se pudo aplicar. No mide nada: su renglón en `.casos.jsonl` solo dice por qué.
+#[derive(Debug, Clone, PartialEq)]
+struct NoAplicable {
+    indice: u32,
+    defecto: Defecto,
+    motivo: String,
 }
 
 /// Por qué el tope detuvo una calibración: el tope, el gasto medido, el peor caso que no entró y los
@@ -414,6 +437,8 @@ struct Medido {
     reemplazos: u32,
     caso: Option<Caso>,
     detencion: Option<Detencion>,
+    /// Lo que impide medir el caso: `Some` solo si no hay caso y el tope no lo detuvo.
+    no_aplicable: Option<NoAplicable>,
 }
 
 /// Evalúa la copia `copia` del caso `i` como `tipo`. Reusa el `target` de la base si `puede_reusar` lo permite.
@@ -463,6 +488,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
             reemplazos: 0,
             caso: Some(caso),
             detencion: None,
+            no_aplicable: None,
         });
     }
     let defecto = r.defectos[(i / 2) % r.defectos.len()];
@@ -479,6 +505,8 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
     // `MAX_REEMPLAZOS` veces. Cada intento inválido suma a `invalidos`, también el del caso agotado.
     let mut invalidos = 0u32;
     let mut medido = None;
+    // Si el bucle termina sin medido, el motivo es el último que se cumplió: sin candidato, o agotadas.
+    let mut motivo_sin_caso = MOTIVO_AGOTADAS;
     for k in 0..=MAX_REEMPLAZOS {
         // Antes de cada reemplazo (no antes de la primera inyección) se mira el tope. Si no entra, no se gasta.
         if k > 0
@@ -488,6 +516,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
                 reemplazos: invalidos,
                 caso: None,
                 detencion: Some(detencion),
+                no_aplicable: None,
             });
         }
         let semilla_k = semilla_caso.wrapping_add(u64::from(k) * 1_000_003);
@@ -498,6 +527,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         let Some(inyeccion) = aplicado else {
             borrado::borrar_dir_dentro(r.tmp, &copia)
                 .map_err(|e| super::infra("borrar una copia", e))?;
+            motivo_sin_caso = MOTIVO_SIN_CANDIDATO;
             break;
         };
         let (veredicto, reusado) = evaluar_copia(r, &copia, TipoCaso::Defecto(r.dimension), i)?;
@@ -515,6 +545,11 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
             reemplazos: invalidos,
             caso: None,
             detencion: None,
+            no_aplicable: Some(NoAplicable {
+                indice: i as u32,
+                defecto,
+                motivo: motivo_sin_caso.to_string(),
+            }),
         });
     };
     let caso = Caso {
@@ -533,6 +568,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         reemplazos: invalidos,
         caso: Some(caso),
         detencion: None,
+        no_aplicable: None,
     })
 }
 
@@ -574,6 +610,7 @@ fn calibrar_medida_con_hilos(
             fila: None,
             detencion: Some(detencion),
             casos: Vec::new(),
+            no_aplicables: Vec::new(),
         });
     }
     // La carpeta temporal va antes de la base: la base deja ahí su `target` (Tarea 59).
@@ -714,15 +751,15 @@ fn calibrar_medida_con_hilos(
         return Err(e);
     }
     let mut reemplazos = 0u32;
-    let mut no_aplicables = 0u32;
+    let mut no_aplicables = Vec::new();
     let mut casos = Vec::with_capacity(resultados.len());
     for medido in resultados.into_values() {
         reemplazos += medido.reemplazos;
-        match medido.caso {
-            Some(caso) => casos.push(caso),
+        match (medido.caso, medido.no_aplicable) {
+            (Some(caso), _) => casos.push(caso),
+            (None, Some(no)) => no_aplicables.push(no),
             // Un caso que el tope detuvo no es no aplicable: no se midió.
-            None if medido.detencion.is_some() => {}
-            None => no_aplicables += 1,
+            (None, None) => {}
         }
     }
     if let Some(d) = detencion.as_mut() {
@@ -740,7 +777,7 @@ fn calibrar_medida_con_hilos(
                 semilla,
                 &casos,
                 &items,
-                no_aplicables,
+                no_aplicables.len() as u32,
                 incompleta,
             )
         })
@@ -749,6 +786,7 @@ fn calibrar_medida_con_hilos(
         fila,
         detencion,
         casos,
+        no_aplicables,
     })
 }
 
@@ -1052,7 +1090,14 @@ pub fn calibrar_tarea_con(
     )?;
     // Los casos se escriben antes de `agregar`, también si el tope detuvo la calibración.
     let casos = match &medida.fila {
-        Some(fila) => escribir_casos(home, &tarea.nombre, dim, fila, &medida.casos)?,
+        Some(fila) => escribir_casos(
+            home,
+            &tarea.nombre,
+            dim,
+            fila,
+            &medida.casos,
+            &medida.no_aplicables,
+        )?,
         None => None,
     };
     if let Some(detencion) = medida.detencion {
@@ -1205,6 +1250,12 @@ struct Caso {
     reemplazos: u32,
     /// Si el caso compiló sobre el `target` de la base.
     target_reusado: bool,
+    /// Por qué `detectado` es true. `None` si no detectó.
+    motivo: Option<String>,
+    /// Nivel de cada ítem de la dimensión calibrada en la base.
+    niveles_base: BTreeMap<String, u8>,
+    /// Nivel de cada ítem de la dimensión calibrada en este caso.
+    niveles: BTreeMap<String, u8>,
 }
 
 impl Caso {
@@ -1217,11 +1268,15 @@ impl Caso {
         items: &[&'static str],
     ) -> Caso {
         let es_defecto = inyeccion.is_some();
+        // `detectado` sale de `detecta_dimension`, que es `motivo_de_deteccion(..).is_some()`.
         Caso {
             indice,
             es_defecto,
             item_defecto: inyeccion.as_ref().map(|i| i.defecto.item()),
             detectado: detecta_dimension(base, veredicto, dimension, es_defecto),
+            motivo: motivo_de_deteccion(base, veredicto, dimension, es_defecto),
+            niveles_base: niveles_de(puntaje_de(base, dimension)),
+            niveles: niveles_de(puntaje_de(veredicto, dimension)),
             sin_veredicto: motivo_sin_veredicto(veredicto, dimension),
             items: items
                 .iter()
@@ -1258,6 +1313,31 @@ impl CasoGuardado {
             // Ningún mecanismo repite casos hoy: el campo queda en `false` hasta que alguno lo haga.
             repetido_por_entorno: false,
             target_reusado: Some(caso.target_reusado),
+            motivo: caso.motivo.clone(),
+            niveles_base: caso.niveles_base.clone(),
+            niveles: caso.niveles.clone(),
+            no_aplicable: None,
+        }
+    }
+
+    /// Renglón de un caso con defecto que no se pudo aplicar: no mide, solo dice por qué.
+    fn de_no_aplicable(no: &NoAplicable) -> CasoGuardado {
+        CasoGuardado {
+            caso: no.indice,
+            defecto: Some(nombre_defecto(no.defecto)),
+            item: Some(no.defecto.item().to_string()),
+            archivo: None,
+            linea: None,
+            es_defecto: true,
+            detectado: false,
+            sin_veredicto: None,
+            reemplazos: 0,
+            repetido_por_entorno: false,
+            target_reusado: None,
+            motivo: None,
+            niveles_base: BTreeMap::new(),
+            niveles: BTreeMap::new(),
+            no_aplicable: Some(no.motivo.clone()),
         }
     }
 }
@@ -1289,6 +1369,12 @@ fn motivo_sin_veredicto(veredicto: &Veredicto, dimension: Dimension) -> Option<S
 /// Reemplazos máximos por caso con defecto. El primer candidato no cuenta: un caso prueba hasta
 /// `MAX_REEMPLAZOS + 1` inyecciones. Si todas rompen la construcción, el caso es no aplicable.
 pub const MAX_REEMPLAZOS: u32 = 5;
+
+/// Motivo de un caso no aplicable: la inyección no dio ningún candidato.
+const MOTIVO_SIN_CANDIDATO: &str = "sin candidato para inyectar";
+
+/// Motivo de un caso no aplicable: todos los reemplazos rompieron la construcción.
+const MOTIVO_AGOTADAS: &str = "inyecciones inválidas agotadas";
 
 /// Marcadores de construcción fallida. Un veredicto con uno de ellos no mide su dimensión: el
 /// texto es el de `perfiles/herramientas.rs` (sonda de clippy) y `mutacion.rs` (sonda de mutación).
@@ -1326,26 +1412,38 @@ fn motivos_de_construccion(veredicto: &Veredicto, dimension: Dimension) -> BTree
         .collect()
 }
 
-/// Escribe los casos medidos en `home/calibracion/<tarea>-<dimension>-<ts>.casos.jsonl`: un renglón JSON por
-/// caso, en orden. Escritura atómica: un temporal junto al destino y un `rename`. Sin casos, no escribe y da `None`.
+/// Escribe los casos medidos y los no aplicables en `home/calibracion/<tarea>-<dimension>-<ts>.casos.jsonl`: un
+/// renglón JSON por caso, en orden de índice. Escritura atómica: un temporal junto al destino y un `rename`. Sin
+/// renglones, no escribe y da `None`.
 fn escribir_casos(
     home: &Path,
     tarea: &str,
     dimension: Dimension,
     fila: &Fila,
     casos: &[Caso],
+    no_aplicables: &[NoAplicable],
 ) -> Result<Option<PathBuf>, ErrorOraculo> {
-    if casos.is_empty() {
+    let mut renglones: Vec<(u32, CasoGuardado)> = casos
+        .iter()
+        .map(|c| (c.indice, CasoGuardado::de(c)))
+        .chain(
+            no_aplicables
+                .iter()
+                .map(|n| (n.indice, CasoGuardado::de_no_aplicable(n))),
+        )
+        .collect();
+    if renglones.is_empty() {
         return Ok(None);
     }
+    renglones.sort_by_key(|(indice, _)| *indice);
     let carpeta = home.join(CARPETA_CASOS);
     fs::create_dir_all(&carpeta).map_err(|e| super::infra("crear la carpeta de casos", e))?;
     let base = format!("{tarea}-{}-{}", dimension.clave(), fila.ts as u64);
     let (destino, _) = reservar_destino(&carpeta, &base)
         .map_err(|e| super::infra("reservar el archivo de casos", e))?;
     let mut texto = String::new();
-    for caso in casos {
-        let renglon = serde_json::to_string(&CasoGuardado::de(caso))
+    for (_, guardado) in &renglones {
+        let renglon = serde_json::to_string(guardado)
             .map_err(|e| ErrorOraculo::Infra(format!("serializar un caso: {e}")))?;
         texto.push_str(&renglon);
         texto.push('\n');
@@ -1369,26 +1467,50 @@ fn detecta_dimension(
     dimension: Dimension,
     es_defecto: bool,
 ) -> bool {
+    motivo_de_deteccion(base, veredicto, dimension, es_defecto).is_some()
+}
+
+/// Por qué la dimensión detecta el caso, o `None` si no lo detecta. Si dos reglas disparan, gana la primera en
+/// este orden: `sin_veredicto` (un limpio sin veredicto), `hallazgo_nuevo`, `valor_menor`, `item_bajo:<item>`
+/// (el primer ítem de la base que baja). Las reglas de hallazgo, valor e ítem pasan por `estables::permite`.
+fn motivo_de_deteccion(
+    base: &Veredicto,
+    veredicto: &Veredicto,
+    dimension: Dimension,
+    es_defecto: bool,
+) -> Option<String> {
+    let sin_veredicto = || (!es_defecto).then(|| "sin_veredicto".to_string());
     let Some(pv) = puntaje_de(veredicto, dimension) else {
-        return !es_defecto;
+        return sin_veredicto();
     };
     if pv.sin_veredicto.is_some() {
-        return !es_defecto;
+        return sin_veredicto();
     }
-    let Some(pb) = puntaje_de(base, dimension) else {
-        return false;
-    };
+    let pb = puntaje_de(base, dimension)?;
     let ids_base: BTreeSet<&str> = base.hallazgos.iter().map(|h| h.id.as_str()).collect();
     let hallazgo_nuevo = veredicto
         .hallazgos
         .iter()
         .any(|h| h.dimension == dimension && !ids_base.contains(h.id.as_str()));
-    let item_bajo = pb
-        .items
-        .iter()
-        .any(|ib| nivel_de(pv, &ib.item).is_some_and(|nivel| nivel < ib.nivel));
-    (hallazgo_nuevo || pv.valor < pb.valor || item_bajo)
-        && estables::permite(base, veredicto, dimension)
+    let motivo = if hallazgo_nuevo {
+        "hallazgo_nuevo".to_string()
+    } else if pv.valor < pb.valor {
+        "valor_menor".to_string()
+    } else {
+        let bajo = pb
+            .items
+            .iter()
+            .find(|ib| nivel_de(pv, &ib.item).is_some_and(|nivel| nivel < ib.nivel))?;
+        format!("item_bajo:{}", bajo.item)
+    };
+    estables::permite(base, veredicto, dimension).then_some(motivo)
+}
+
+/// Niveles de los ítems de un puntaje, por nombre. Vacío sin puntaje.
+fn niveles_de(puntaje: Option<&Puntaje>) -> BTreeMap<String, u8> {
+    puntaje.map_or_else(BTreeMap::new, |p| {
+        p.items.iter().map(|i| (i.item.clone(), i.nivel)).collect()
+    })
 }
 
 /// Si el ítem `item` de la dimensión baja frente a la base. `None` si la base no mide el ítem: no entra a
@@ -2977,6 +3099,140 @@ mod tests {
         assert_eq!(fila.reemplazos, MAX_REEMPLAZOS + 1);
     }
 
+    /// Mide `n` casos de `dimension` con el evaluador falso `regla` (la base es `base_dir`, como en `falso`).
+    /// Un hilo: los casos salen en orden de índice.
+    fn medir(
+        tarea: &Tarea,
+        dimension: Dimension,
+        base_dir: &Path,
+        base: &Veredicto,
+        regla: impl Fn(bool, &BTreeMap<String, String>, &Veredicto) -> Veredicto + Sync,
+        n: usize,
+    ) -> Medida {
+        let ev = falso(base_dir, base, regla);
+        let evaluador = |ruta: &Path, _: TipoCaso, _: Target| ev(ruta);
+        calibrar_medida_con_hilos(
+            tarea,
+            dimension,
+            n,
+            42,
+            base_dir,
+            &evaluador,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+        )
+        .expect("mide")
+    }
+
+    #[test]
+    fn calibra_caso_limpio_detectado_guarda_motivo_y_niveles() {
+        let (_t, tarea) = tarea_prueba();
+        let base = veredicto_base();
+        // Las copias limpias ganan un hallazgo con id nuevo: el limpio cuenta como detectado por ese motivo.
+        let medida = medir(
+            &tarea,
+            Dimension::Seguridad,
+            Path::new(FIXTURE),
+            &base,
+            |limpia, _, base| {
+                let mut v = base.clone();
+                if limpia {
+                    v.hallazgos.push(hallazgo("nuevo"));
+                }
+                v
+            },
+            2,
+        );
+        let guardados: Vec<CasoGuardado> = medida.casos.iter().map(CasoGuardado::de).collect();
+        let limpio = guardados.iter().find(|c| !c.es_defecto).expect("un limpio");
+        assert!(limpio.detectado);
+        assert_eq!(limpio.motivo.as_deref(), Some("hallazgo_nuevo"));
+        let niveles = BTreeMap::from([
+            ("seguridad.panico_en_entrada".to_string(), 3u8),
+            ("seguridad.secretos".to_string(), 3u8),
+        ]);
+        assert_eq!(limpio.niveles_base, niveles);
+        assert_eq!(limpio.niveles, niveles);
+    }
+
+    #[test]
+    fn calibra_defecto_detectado_por_item_guarda_el_item_que_bajo() {
+        let (_t, tarea) = tarea_prueba();
+        let base = veredicto_base();
+        // Solo el secreto baja su ítem: el valor de la dimensión no cambia.
+        let medida = medir(
+            &tarea,
+            Dimension::Seguridad,
+            Path::new(FIXTURE),
+            &base,
+            |_, copia, base| {
+                let mut v = base.clone();
+                if copia.values().any(|t| t.contains("AKIA")) {
+                    for item in &mut v.puntajes[0].items {
+                        if item.item == "seguridad.secretos" {
+                            item.nivel = 0;
+                        }
+                    }
+                }
+                v
+            },
+            20,
+        );
+        let guardados: Vec<CasoGuardado> = medida.casos.iter().map(CasoGuardado::de).collect();
+        let secretos: Vec<&CasoGuardado> = guardados
+            .iter()
+            .filter(|c| c.es_defecto && c.item.as_deref() == Some("seguridad.secretos"))
+            .collect();
+        assert!(!secretos.is_empty(), "hay defectos de secretos");
+        for caso in &secretos {
+            assert_eq!(
+                caso.motivo.as_deref(),
+                Some("item_bajo:seguridad.secretos"),
+                "caso {}",
+                caso.caso
+            );
+            assert_eq!(caso.niveles["seguridad.secretos"], 0);
+            assert_eq!(caso.niveles_base["seguridad.secretos"], 3);
+        }
+        let panicos: Vec<&CasoGuardado> = guardados
+            .iter()
+            .filter(|c| c.es_defecto && c.item.as_deref() == Some("seguridad.panico_en_entrada"))
+            .collect();
+        assert!(!panicos.is_empty(), "hay defectos de pánico");
+        for caso in &panicos {
+            assert_eq!(caso.motivo, None, "caso {}: no bajó nada", caso.caso);
+            assert!(!caso.detectado);
+        }
+    }
+
+    #[test]
+    fn calibra_inyeccion_invalida_agotada_guarda_el_motivo_del_no_aplicable() {
+        let (_t, tarea) = tarea_prueba();
+        let base = veredicto_de(Dimension::Estructura, 1.0, None);
+        let medida = medir(
+            &tarea,
+            Dimension::Estructura,
+            Path::new(FIXTURE),
+            &base,
+            |limpia, _, base| {
+                if limpia {
+                    base.clone()
+                } else {
+                    con_motivo(base, NO_COMPILA)
+                }
+            },
+            2,
+        );
+        assert_eq!(medida.no_aplicables.len(), 1);
+        assert_eq!(medida.no_aplicables[0].indice, 0);
+        assert_eq!(
+            medida.no_aplicables[0].motivo,
+            "inyecciones inválidas agotadas"
+        );
+    }
+
     #[test]
     fn calibra_el_tope_se_revisa_antes_de_cada_reemplazo() {
         // La base no cuesta. La primera inyección cuesta 1 y es inválida. Con tope 1,5 y peor caso 1, el
@@ -3371,6 +3627,7 @@ mod tests {
             Dimension::Seguridad,
             &fila_uno,
             &uno.casos,
+            &uno.no_aplicables,
         )
         .expect("escribe")
         .expect("hay casos");
@@ -3380,6 +3637,7 @@ mod tests {
             Dimension::Seguridad,
             &fila_cuatro,
             &cuatro.casos,
+            &cuatro.no_aplicables,
         )
         .expect("escribe")
         .expect("hay casos");

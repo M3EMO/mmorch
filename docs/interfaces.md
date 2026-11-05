@@ -759,6 +759,44 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "default": null,
       "minimum": 0
     },
+    "motivo": {
+      "description": "Por qué `detectado` es true: `sin_veredicto`, `hallazgo_nuevo`, `valor_menor` o `item_bajo:<item>`.\n`None` si no detectó.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "niveles": {
+      "description": "Nivel de cada ítem de la dimensión calibrada en este caso. Vacío si no hay puntaje.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "format": "uint8",
+        "maximum": 255,
+        "minimum": 0
+      },
+      "default": {}
+    },
+    "niveles_base": {
+      "description": "Nivel de cada ítem de la dimensión calibrada en la base. Vacío si la base no tiene puntaje.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "format": "uint8",
+        "maximum": 255,
+        "minimum": 0
+      },
+      "default": {}
+    },
+    "no_aplicable": {
+      "description": "Motivo por el que el caso no aplica. Solo en el renglón de un caso no aplicable.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
     "reemplazos": {
       "description": "Inyecciones inválidas reemplazadas antes de este caso. `0` si no hubo ninguna.",
       "type": "integer",
