@@ -52,8 +52,8 @@ pub enum ErrorCorre {
     Git(String),
     #[error("no se pudo lanzar el builder: {0}")]
     Ejecutor(String),
-    /// El builder se cortó por tiempo. Lleva el `stdout` que alcanzó a dar: su transcript parcial.
-    #[error("no se pudo lanzar el builder: {mensaje}")]
+    /// El builder se cortó por plazo. Lleva el `stdout` que alcanzó a dar: su transcript parcial.
+    #[error("el builder se cortó por plazo: {mensaje}")]
     Cortado { mensaje: String, stdout: Vec<u8> },
     /// El GOAL no está autorizado o fue alterado. Sale con el código de `goal verificar`.
     #[error(transparent)]
@@ -620,5 +620,16 @@ mod tests {
         assert_eq!(ErrorCorre::Ejecutor("x".into()).codigo_de_salida(), 3);
         let error = Error::from(ErrorCorre::Uso("x".into()));
         assert_eq!(error.codigo_de_salida(), 2);
+    }
+
+    #[test]
+    fn corre_error_cortado_dice_que_se_corto_por_plazo() {
+        let texto = ErrorCorre::Cortado {
+            mensaje: "x".into(),
+            stdout: vec![],
+        }
+        .to_string();
+        assert!(texto.contains("el builder se cortó por plazo"), "{texto}");
+        assert!(!texto.contains("no se pudo lanzar"), "{texto}");
     }
 }

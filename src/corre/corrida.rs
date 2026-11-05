@@ -74,7 +74,7 @@ struct Lanzado {
 /// Un código distinto de 0 de un rol corta la corrida: los roles siguientes no corren, pero la
 /// evaluación sí, y el informe dice lo que falta. Un fallo al lanzar aborta sin evaluar: sin builder
 /// no hay nada que evaluar, y la evaluación puede gastar API. Un rol sin `result` exitoso también
-/// aborta sin evaluar ni escribir fila: deja un `Gate` con el motivo. Un rol cortado por tiempo
+/// aborta sin evaluar ni escribir fila: deja un `Gate` con el motivo. Un rol cortado por plazo
 /// además guarda su transcript parcial y registra su costo estimado (ver `registrar_corte`).
 /// Desde el segundo rol, la vigencia del login se espera antes de cada lanzamiento (ver `esperar_vigencia_del_rol`).
 pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, ErrorCorre> {
@@ -128,11 +128,14 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         let salida = match deps.ejecutor.lanzar(&lanzamiento) {
             Ok(salida) => salida,
             Err(error) => {
-                let motivo = format!("rol {} no arrancó: {error}", nombre_rol(*rol));
-                // Un rol cortado por tiempo deja su transcript parcial y el costo de lo que gastó.
-                if let ErrorCorre::Cortado { stdout, .. } = &error {
-                    registrar_corte(deps.home, &ruta_eventos, &id, *rol, n, &modelo, stdout)?;
-                }
+                // Un rol cortado por plazo deja su transcript parcial y el costo de lo que gastó.
+                let motivo = match &error {
+                    ErrorCorre::Cortado { mensaje, stdout } => {
+                        registrar_corte(deps.home, &ruta_eventos, &id, *rol, n, &modelo, stdout)?;
+                        format!("rol {} cortado por plazo: {mensaje}", nombre_rol(*rol))
+                    }
+                    _ => format!("rol {} no arrancó: {error}", nombre_rol(*rol)),
+                };
                 gate(&ruta_eventos, &id, FASE_LANZAMIENTO, motivo, Some(*rol))?;
                 return Err(error);
             }
@@ -1681,7 +1684,8 @@ mod tests {
 
         let lanzamientos = gates(&e, FASE_LANZAMIENTO);
         assert_eq!(lanzamientos.len(), 1, "el Gate de lanzamiento se mantiene");
-        assert!(lanzamientos[0].contains("rol construye no arrancó"));
+        assert!(lanzamientos[0].contains("rol construye cortado por plazo"));
+        assert!(!lanzamientos[0].contains("no arrancó"));
         assert!(
             gates(&e, FASE_EVALUACION).is_empty(),
             "no hay evaluación de la corrida cortada"
