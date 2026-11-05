@@ -71,12 +71,18 @@ struct Lanzado {
 
 /// Corre la tarea con la configuración y devuelve la fila que se agregó a `runs.jsonl`.
 ///
-/// Un código distinto de 0 de un rol corta la corrida: los roles siguientes no corren, pero la
-/// evaluación sí, y el informe dice lo que falta. Un fallo al lanzar aborta sin evaluar: sin builder
-/// no hay nada que evaluar, y la evaluación puede gastar API. Un rol sin `result` exitoso también
-/// aborta sin evaluar ni escribir fila: deja un `Gate` con el motivo. Un rol cortado por plazo
-/// además guarda su transcript parcial y registra su costo estimado (ver `registrar_corte`).
-/// Desde el segundo rol, la vigencia del login se espera antes de cada lanzamiento (ver `esperar_vigencia_del_rol`).
+/// Cada rol registra su sesión al terminar, antes de lanzar el siguiente.
+/// Así su costo queda aunque un rol posterior aborte.
+///
+/// Un código distinto de 0 de un rol corta la corrida: los roles siguientes no corren,
+/// pero la evaluación sí, y el informe dice lo que falta.
+/// Un fallo al lanzar aborta sin evaluar: sin builder no hay nada que evaluar,
+/// y la evaluación puede gastar API.
+/// Un rol sin `result` exitoso también aborta sin evaluar ni escribir fila: deja un `Gate` con el motivo.
+/// Un rol cortado por plazo además guarda su transcript parcial y registra su costo estimado
+/// (ver `registrar_corte`).
+/// Desde el segundo rol, la vigencia del login se espera antes de cada lanzamiento
+/// (ver `esperar_vigencia_del_rol`).
 pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, ErrorCorre> {
     // a) GOAL: sin autorización no arranca y no se crea nada.
     verificar_goal(deps.repo_root)?;
@@ -151,13 +157,16 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
             }
         };
         let codigo = salida.codigo;
-        lanzados.push(Lanzado {
+        let lanzado = Lanzado {
             n,
             rol: *rol,
             codigo,
             ruta,
             linea,
-        });
+        };
+        // La sesión se registra al terminar el rol: si un rol siguiente aborta, su costo ya queda.
+        registrar_sesion(deps.home, &id, &lanzado, &lanzado.linea, &ruta_eventos)?;
+        lanzados.push(lanzado);
         if codigo != 0 {
             let motivo = format!("rol {} salió con {codigo}", nombre_rol(*rol));
             gate(&ruta_eventos, &id, FASE_ROL, motivo, Some(*rol))?;
@@ -165,12 +174,7 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         }
     }
 
-    // f) La sesión de cada rol sale de su línea `result`, ya validada al lanzar.
-    for lanzado in &lanzados {
-        registrar_sesion(deps.home, &id, lanzado, &lanzado.linea, &ruta_eventos)?;
-    }
-
-    // g) Después de planifica, la aprobación automática del plan. Solo si planifica salió bien.
+    // f) Después de planifica, la aprobación automática del plan. Solo si planifica salió bien.
     let plan_aprobado = lanzados
         .iter()
         .any(|l| l.rol == Rol::Planifica && l.codigo == 0);
@@ -181,7 +185,7 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         registrar(&ruta_eventos, &ev)?;
     }
 
-    // h) Lecturas del oráculo en cada transcript. Las líneas que no son JSON también se anotan.
+    // g) Lecturas del oráculo en cada transcript. Las líneas que no son JSON también se anotan.
     for lanzado in &lanzados {
         let revision = registrar_lecturas(&lanzado.ruta, &id, &huellas, &ruta_eventos)
             .map_err(|e| de_observe("revisar el transcript", e))?;
@@ -200,14 +204,14 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         }
     }
 
-    // i) Se quita la copia de la credencial. La guardia lo hace y su error llega acá.
+    // h) Se quita la copia de la credencial. La guardia lo hace y su error llega acá.
     // Después se arma el estado final en un repo nuevo.
     guardia.cerrar()?;
     // El host no corre git sobre el `.git` del builder: copia el árbol a un repo nuevo y lo evalúa ahí.
     let repo_final = corrida.dir.join("final");
     git_seguro::repo_limpio_desde(&corrida.repo, &repo_final, MENSAJE_ESTADO_FINAL)?;
 
-    // j) Evaluación. Un error no pierde la corrida: la fila lleva el veredicto por defecto.
+    // i) Evaluación. Un error no pierde la corrida: la fila lleva el veredicto por defecto.
     let opciones = OpcionesOraculo {
         home: Some(deps.home.to_path_buf()),
         ..OpcionesOraculo::default()
@@ -224,7 +228,7 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         }
     };
 
-    // k) La fila. El resumen sale de los eventos de esta corrida.
+    // j) La fila. El resumen sale de los eventos de esta corrida.
     let resumen =
         observe::resumir_en(&ruta_eventos, &id).map_err(|e| de_observe("resumir la corrida", e))?;
     let modelos = elecciones
@@ -502,6 +506,7 @@ mod tests {
     const CONFIG: &str = "ecc-test";
     const CONFIG_PLAN: &str = "solo-plan";
     const CONFIG_CONSTRUYE: &str = "solo-construye";
+    const CONFIG_PLAN_ORGANIZA: &str = "plan-organiza";
     const CONFIG_API: &str = "por-api";
     const PLAN_APROBADO: &str = "aprobación automática de r00t corre";
 
@@ -525,7 +530,7 @@ mod tests {
 
         fs::write(
             home.join("root.toml"),
-            "[modelos]\nplanifica = \"opus\"\nconstruye = \"haiku\"\n",
+            "[modelos]\nplanifica = \"opus\"\norganiza = \"sonnet\"\nconstruye = \"haiku\"\n",
         )
         .expect("root.toml");
         let configs = home.join("configs");
@@ -546,6 +551,11 @@ mod tests {
             format!("roles = [\"construye\"]\n{prompt}"),
         )
         .expect("config construye");
+        fs::write(
+            configs.join(format!("{CONFIG_PLAN_ORGANIZA}.toml")),
+            "roles = [\"planifica\", \"organiza\"]\n[prompt]\nplanifica = \"haz el plan\"\norganiza = \"organiza\"\n",
+        )
+        .expect("config plan organiza");
         fs::write(
             configs.join(format!("{CONFIG_API}.toml")),
             format!("roles = [\"planifica\", \"delega\"]\n{prompt}delega = \"delega\"\n"),
@@ -601,6 +611,8 @@ mod tests {
         extra: Vec<(String, String)>,
         /// Quita la línea `result` de la salida.
         sin_resultado: bool,
+        /// Quita la línea `result` solo al lanzamiento de este rol.
+        sin_resultado_en: Option<Rol>,
         /// Cambia el `result` por uno sin costo.
         costo_desconocido: bool,
         /// Cambia el `result` por uno con `is_error` true, como un login vencido.
@@ -707,7 +719,7 @@ mod tests {
                 fs::write(fuera.join(".credentials.json"), "").expect("credencial de afuera");
                 std::os::unix::fs::symlink(fuera, &estado).expect("enlace de estado");
             }
-            if self.sin_resultado {
+            if self.sin_resultado || self.sin_resultado_en == Some(l.rol) {
                 let texto = String::from_utf8_lossy(&salida.stdout).into_owned();
                 let sin: Vec<&str> = texto
                     .lines()
@@ -1419,6 +1431,33 @@ mod tests {
         let motivos = gates(&e, FASE_ROL);
         assert_eq!(motivos.len(), 1, "un Gate del rol");
         assert!(motivos[0].contains("login de Claude venció"), "{motivos:?}");
+    }
+
+    /// La sesión de un rol bueno queda registrada aunque el rol siguiente aborte la corrida.
+    #[test]
+    fn corre_sesion_del_rol_bueno_queda_aunque_el_siguiente_aborte() {
+        let e = entorno();
+        let builder = Builder {
+            sin_resultado_en: Some(Rol::Organiza),
+            ..Builder::default()
+        };
+        let error = correr_con(&e, &builder, &[], CONFIG_PLAN_ORGANIZA)
+            .expect_err("organiza sin result aborta");
+        assert!(matches!(error, ErrorCorre::Ejecutor(_)), "{error}");
+        let log = eventos(&e);
+        let llamadas: Vec<&Evento> = log
+            .iter()
+            .filter(|ev| ev.tipo == TipoEvento::Llamada)
+            .collect();
+        assert!(!llamadas.is_empty(), "planifica deja su Llamada");
+        let costo: f64 = llamadas.iter().map(|ev| ev.cost_usd).sum();
+        assert!(costo > 0.0, "la Llamada lleva costo: {costo}");
+        let sesion_de_planifica = log.iter().any(|ev| {
+            ev.tipo == TipoEvento::Sesion
+                && ev.extra.get("session_id").and_then(Value::as_str) == Some("s1-1")
+        });
+        assert!(sesion_de_planifica, "queda la Sesion de planifica");
+        assert_eq!(gates(&e, FASE_ROL).len(), 1, "un Gate de organiza");
     }
 
     #[test]
