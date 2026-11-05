@@ -718,9 +718,13 @@ fn calibrar_medida_con_hilos(
         TipoCaso::Base,
         Target::Guardar(destino_target.clone()),
     )?;
-    if puntaje_de(&base, dimension).is_none_or(|p| p.sin_veredicto.is_some()) {
+    let motivo_de_la_base = match puntaje_de(&base, dimension) {
+        Some(puntaje) => puntaje.sin_veredicto.clone(),
+        None => Some("la dimensión no figura en el veredicto de la base".into()),
+    };
+    if let Some(motivo) = motivo_de_la_base {
         return Err(ErrorOraculo::Infra(format!(
-            "la línea base no tiene veredicto de {}",
+            "la línea base no tiene veredicto de {}: {motivo}",
             dimension.clave()
         )));
     }
@@ -2331,6 +2335,50 @@ mod tests {
         .expect_err("sin base no hay medición");
         assert!(matches!(error, ErrorOraculo::Infra(_)), "{error:?}");
         assert_eq!(error.codigo_de_salida(), 3);
+    }
+
+    /// Punto 3: el error de la base sin veredicto dice el motivo del puntaje. Sin puntaje, dice que no figura.
+    #[test]
+    fn calibra_base_sin_veredicto_dice_el_motivo() {
+        let (_t, tarea) = tarea_prueba();
+        let con_motivo_base = con_motivo(&veredicto_base(), "falta la sonda de seguridad");
+        let ev = falso(Path::new(FIXTURE), &con_motivo_base, |_, _, base| {
+            base.clone()
+        });
+        let error = calibrar_con(
+            &tarea,
+            Dimension::Seguridad,
+            20,
+            42,
+            Path::new(FIXTURE),
+            &ev,
+        )
+        .expect_err("sin base no hay medición");
+        let texto = match error {
+            ErrorOraculo::Infra(texto) => texto,
+            otro => panic!("{otro:?}"),
+        };
+        assert!(texto.contains(": falta la sonda de seguridad"), "{texto}");
+
+        let sin_puntaje = Veredicto::default();
+        let ev = falso(Path::new(FIXTURE), &sin_puntaje, |_, _, base| base.clone());
+        let error = calibrar_con(
+            &tarea,
+            Dimension::Seguridad,
+            20,
+            42,
+            Path::new(FIXTURE),
+            &ev,
+        )
+        .expect_err("sin base no hay medición");
+        let texto = match error {
+            ErrorOraculo::Infra(texto) => texto,
+            otro => panic!("{otro:?}"),
+        };
+        assert!(
+            texto.contains(": la dimensión no figura en el veredicto de la base"),
+            "{texto}"
+        );
     }
 
     #[test]
