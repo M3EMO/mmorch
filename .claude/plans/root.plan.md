@@ -3939,3 +3939,104 @@ Falta brasa: estructura, arquitectura, diseno, eficiencia y entrega.
 7. **Borrado de memora y brasa** (decisión 61).
 
 No hay preguntas nuevas para el usuario.
+
+## Vuelta del 2026-11-05 (tarde): Tarea 63 construida y revisada
+
+**Estado.**
+- La Tarea 62 pasó con podman en 758091b: 2413 verdes y 0 fallas. Su mezcla espera la orden del usuario.
+- La Tarea 63 terminó por 3,35 USD en `laptop/tarea-63` (96f2207), sobre 8cc1a62. Sin podman da 2465 verdes.
+- El punto 5 quedó en `laptop/tarea-63-p5` (e575fd0). Sin podman da 2469 verdes.
+- La calibración no corre. Quedan 12,6123 USD de los 25 del usuario.
+
+## Revisión del código de la Tarea 63 (Opus, sobre e575fd0)
+
+**Cumple lo pedido.**
+- Desempate 1: `src/oracle/calibra/regla.rs:46-49`.
+- Desempate 2: `src/oracle/calibra.rs:1497-1524`.
+- Desempate 3: `src/oracle/calibra/estables.rs:53-68` y `src/oracle/calibra.rs:1537-1544`.
+- Desempate 4: `src/oracle/calibra.rs:838-841` y `src/oracle/calibra.rs:150-153`.
+- Desempate 5: `src/oracle/calibra.rs:1348-1350` y `src/oracle/calibra.rs:1356-1373`.
+- Desempate 7: `src/oracle/calibra/inyectar.rs:855-876`.
+
+**Falla 1, los limpios compartidos no sirven con el evaluador real (bloquea medir).**
+- `Partes::mide` solo acepta la dimensión calibrada (`src/oracle/mod.rs:268-271`).
+- Las otras dimensiones salen con `sin_veredicto` "no medida en esta calibración" (`src/oracle/mod.rs:1029`).
+- `Compartidos::leer` solo pide que el puntaje exista (`src/oracle/calibra/compartidos.rs:48-50`). Ese puntaje existe, sin veredicto.
+- Efecto: Diseño y Estructura reusan 10 limpios sin veredicto, sin evaluar. Su especificidad sale 1,0 falsa.
+- La compuerta del 20 % las deja sin calibrar. Los 20 casos con defecto de esas dos dimensiones gastarían cerca de 2 USD en filas inútiles.
+- El test no lo ve, porque su evaluador falso devuelve puntajes de las dos dimensiones (`src/oracle/calibra.rs:2760-2768`).
+
+**Falla 2, `AssertBorrado` acotado compara poblaciones distintas (bloquea medir Pruebas).**
+- Este error nació en mi desempate, no en el builder. Dije que acotar daba lo mismo, y me equivoqué.
+- La base mide los primeros `mutantes_max` del repo. El caso mide solo un archivo (`src/oracle/mutacion.rs`, `acotado_de_archivo`).
+- `motivo_de_deteccion` compara `valor` y ids nuevos (`src/oracle/calibra.rs:1607-1621`).
+- Un archivo con menos mutantes muertos que el repo da `valor_menor` sin defecto real.
+- Un mutante vivo que la muestra de la base no incluía da un id nuevo. Ambos inflan la sensibilidad.
+- Lo correcto: detecta solo un mutante que la base mató y que el caso deja vivo.
+
+**Diferencias menores.**
+- La clave no cubre modelo, prompt ni `tarea.toml` (`src/oracle/calibra/compartidos.rs:40`).
+- `detecta_item` sigue la regla vieja (`src/oracle/calibra.rs:1650-1655`). Ninguna decisión lee esa métrica, pero `calibracion.json` la muestra.
+- `regla.rs:105` amplía la cita al archivo entero con línea 0. Hoy solo `ModuloBorrado` usa línea 0, y es de Completitud, sin juez. No afecta.
+
+**Corrección a mi costo anterior.** Cada dimensión evalúa su propia base (`src/oracle/calibra.rs:651`). Son 3 bases por tarea, no 1. Una tarea cuesta 43 evaluaciones, cerca de 4,7 USD a 0,11 USD.
+
+## Desempates técnicos 34 (Opus, 2026-11-05)
+
+**Preguntas del informe 63.**
+1. **Mezclar `laptop/tarea-63-p5`:** sí. La línea de `src/oracle/mod.rs` es un literal de test que el esquema nuevo exige. Autorizo esa excepción.
+2. **Modelo en la clave:** sí, más el hash del prompt y el de `tarea.toml`. Un cache de otro juez mediría a otro evaluador.
+3. **Reuso en una segunda calibración:** solo con la misma semilla. La semilla entra en la clave.
+4. **Limpio sin defecto anterior aplicable:** queda como lo decidió el organizador. La fila ya cuenta `no_aplicable`, y el mínimo de 5 defectos protege la medición.
+5. **Definición de ruidoso:** queda. Más de un estado entre la base y los limpios.
+6. **Doc de `motivo`:** queda.
+
+**Límites de la sección 3.**
+- **Clave sin modelo ni prompt:** se corrige en la Tarea 64.
+- **Hilo local de `con_archivo_acotado`:** queda. Revisé con grep, y ni `evaluar` ni las sondas abren hilos. La Tarea 64 suma una prueba por `evaluar` real, que se pone roja si eso cambia.
+- **`--file` sin `cargo-mutants` real:** no pide un test nuevo. Pruebas de memora tarda minutos y no gasta API, así que es la prueba real. Si `--file` falla, el caso sale sin veredicto y se ve.
+- **`detecta_item`:** se corrige en la Tarea 64, para que la fila no muestre un número viejo.
+- **`ComportamientoRoto` sin repo real:** no pide un test nuevo. Calibrar Funciona no gasta API. memora-ecc tiene 69 líneas con ` == ` en `src/`, sin filtrar.
+
+**Varianza con limpios cacheados.**
+- Dentro de una corrida no se pierde nada: los 10 limpios son 10 muestras independientes del juez.
+- Cada dimensión evalúa además su propia base, que es otra muestra.
+- Las tres dimensiones comparten esas 10 muestras. Sus errores quedan correlacionados, pero cada una mide sus propios ítems. La fila de cada una sigue valiendo.
+- Sí se pierde la repetición entre corridas: la misma semilla devuelve los mismos limpios, y un acuerdo entre corridas no probaría nada.
+- Importa para la validez solo si alguien cita esa estabilidad. La Tarea 12b deja "acuerdo" como "sin medir", así que hoy no cambia ningún criterio.
+- Para medirla basta otra semilla, que no reusa nada. Cuesta cerca de 1 USD por tarea en limpios. No entra en esta vuelta.
+- Cada renglón suma `limpio_reusado`, para que el dato quede visible.
+
+**Orden entre dimensiones.** Arquitectura corre primero en cada tarea, y Estructura y Diseño después. Razón: dos procesos a la vez no comparten limpios, y el costo sube cerca de 2 USD.
+
+**Tope.** `--tope-usd` cuenta el gasto desde el inicio de cada invocación (`src/oracle/calibra.rs:1088` y `src/oracle/calibra.rs:722`). Por eso cada invocación usa el saldo de ese momento menos 1 USD, no un número fijo.
+
+**Costo otra vez.** Son dos tareas, a cerca de 4,7 USD cada una: cerca de 9,4 USD sobre 12,6123 USD. Quedan cerca de 3,2 USD. La regla de frenar si memora pasa de 5,5 USD sigue.
+
+### Tarea 64: Limpios compartidos reales y Pruebas comparable
+- **Action**: las correcciones de la revisión de la Tarea 63.
+- **Archivos**: `src/oracle/calibra.rs`, `src/oracle/calibra/`, `src/oracle/mod.rs` (solo `Partes::mide` y sus tests), `src/oracle/juez.rs` (solo la huella del prompt).
+- **Arranca**: ya, desde `laptop/tarea-63-p5` (e575fd0), con `ROOT_SIN_PODMAN=1`. No espera la mezcla de la 62.
+- **Razón para no esperar**: los cambios de la 62 en `src/oracle/mod.rs` caen en las líneas 44 y 1677, y en tests. La 64 toca la línea 268.
+- **Brief**: `docs/builds/brief-local-64.md`.
+
+## Orden final del hito 1 (2026-11-05, tarde)
+
+1. **Tarea 64**, ahora, en paralelo con los pasos 2 y 3.
+2. **Prueba con podman de 63, p5 y 62**: sigue, porque detecta choques entre ellas. No habilita mezclar la 63.
+3. **Mezcla de la 62**, con la orden del usuario. Después, la **corrida real de memora (Tarea 16)**.
+4. **Prueba con podman de 63, p5 y 64 sobre la 62.** Después, la mezcla, con la orden del usuario.
+5. **Calibración**, cuando la corrida real termine. Nunca al mismo tiempo. El orden es:
+   - memora: Pruebas, Funciona, Completitud, Seguridad y Entrega, sin API;
+   - memora: Arquitectura, después Estructura y Diseño;
+   - brasa: Funciona, Completitud, Seguridad y Entrega, sin API;
+   - brasa: Arquitectura, después Estructura y Diseño, si memora no pasó de 5,5 USD.
+6. **Comparación de `global`.**
+7. **Validez automática** (Tarea 12b) y **cierre** (Tarea 47).
+8. **Borrado de memora y brasa** (decisión 61).
+
+## Pregunta para el usuario (2026-11-05, tarde)
+
+**P63: ¿Mezclar la Tarea 62 ahora?** La Tarea 62 pasó con podman y destraba la corrida real de memora.
+- **a)** Mezclarla ahora. La corrida real arranca mientras se construye la 64. Recomendada.
+- **b)** Esperar a la prueba conjunta de 63, p5 y 62. La corrida real se demora lo que tarde esa prueba.
