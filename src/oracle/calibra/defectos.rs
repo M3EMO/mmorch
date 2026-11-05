@@ -142,6 +142,7 @@ struct Ensayo {
     base: Veredicto,
     con_defecto: Veredicto,
     inyeccion: Inyeccion,
+    muertos: Vec<crate::oracle::mutacion::MutanteMuerto>,
 }
 
 /// Prepara la copia del fixture (con `preparar`), evalúa la base, inyecta `defecto` con la semilla fija y
@@ -202,6 +203,7 @@ fn ensayar_con_home(
         base,
         con_defecto,
         inyeccion,
+        muertos,
     }
 }
 
@@ -212,7 +214,13 @@ fn detecta_defecto(e: &Ensayo) -> bool {
         Some(e.inyeccion.clone()),
         e.con_defecto.clone(),
     )];
-    finalizar_casos(&e.base, e.inyeccion.defecto.dimension(), &[], &mut casos);
+    finalizar_casos(
+        &e.base,
+        e.inyeccion.defecto.dimension(),
+        &[],
+        &e.muertos,
+        &mut casos,
+    );
     casos[0].detectado
 }
 

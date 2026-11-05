@@ -24,7 +24,7 @@ use crate::borrado;
 use crate::config::{Config, Precio};
 use crate::observe;
 use crate::proveedores::{INTENTOS_MAX, MAX_TOKENS_JUEZ, con_caso, costo_peor_caso};
-use crate::tipos::{Dimension, Eleccion, Evento, Puntaje, Veredicto};
+use crate::tipos::{Dimension, Eleccion, Evento, Hallazgo, Puntaje, Veredicto};
 
 /// Nombre del archivo de calibración dentro de `ROOT_HOME`.
 pub const ARCHIVO: &str = "calibracion.json";
@@ -794,7 +794,7 @@ fn calibrar_medida_con_hilos(
         }
     }
     // La detección se decide después de medir todos los casos, en orden de índice (Tarea 63, puntos 2 a 4).
-    finalizar_casos(&base, dimension, &items, &mut casos);
+    finalizar_casos(&base, dimension, &items, &muertos, &mut casos);
     if let Some(d) = detencion.as_mut() {
         d.casos = casos.len() as u32;
     }
@@ -1527,12 +1527,14 @@ fn item_y_lugar_de(
 }
 
 /// Calcula la detección de cada caso, en orden de índice, contra la base. Estructura, Arquitectura y Diseño usan
-/// `regla::detecta_con_juez`, con el ítem y el lugar de `item_y_lugar_de`. Las demás dimensiones usan
-/// `motivo_de_deteccion`. También calcula los niveles, el `sin_veredicto` y los `items` de cada caso.
+/// `regla::detecta_con_juez`, con el ítem y el lugar de `item_y_lugar_de`. Pruebas con `AssertBorrado` usa
+/// `motivo_de_mutante_vivo`, con `muertos` de la base. Las demás dimensiones usan `motivo_de_deteccion`.
+/// También calcula los niveles, el `sin_veredicto` y los `items` de cada caso.
 fn finalizar_casos(
     base: &Veredicto,
     dimension: Dimension,
     items: &[&'static str],
+    muertos: &[MutanteMuerto],
     casos: &mut [Caso],
 ) {
     let contexto = item_y_lugar_de(dimension, casos);
@@ -1546,8 +1548,14 @@ fn finalizar_casos(
         estables::ruidosos(base, &limpios)
     };
     for (caso, (item, lugar)) in casos.iter_mut().zip(contexto) {
+        let es_assert_borrado = caso
+            .inyeccion
+            .as_ref()
+            .is_some_and(|i| i.defecto == Defecto::AssertBorrado);
         let motivo = if regla::es_con_juez(dimension) {
             motivo_con_juez(base, caso, dimension, item, lugar.as_ref())
+        } else if dimension == Dimension::Pruebas && es_assert_borrado {
+            motivo_de_mutante_vivo(base, &caso.veredicto, dimension, muertos, &ruidosos)
         } else {
             motivo_de_deteccion(base, &caso.veredicto, dimension, &ruidosos)
         };
@@ -1623,6 +1631,43 @@ fn motivo_de_deteccion(
         format!("item_bajo:{}", bajo.item)
     };
     estables::permite(base, veredicto, dimension, ruidosos).then_some(motivo)
+}
+
+/// Motivo de un caso con `AssertBorrado` en Pruebas: `mutante_vivo:<nombre>` si un mutante que la base mató
+/// vive en el caso. Un hallazgo de Pruebas coincide con un muerto si tienen el mismo archivo y su `cita` es el
+/// `nombre` del mutante. No compara `valor`, ids ni ítems. Gana el primer muerto de la base en su orden.
+fn motivo_de_mutante_vivo(
+    base: &Veredicto,
+    veredicto: &Veredicto,
+    dimension: Dimension,
+    muertos: &[MutanteMuerto],
+    ruidosos: &BTreeSet<String>,
+) -> Option<String> {
+    let pv = puntaje_de(veredicto, dimension)?;
+    if pv.sin_veredicto.is_some() {
+        return None;
+    }
+    let vivos: Vec<&Hallazgo> = veredicto
+        .hallazgos
+        .iter()
+        .filter(|h| h.dimension == dimension)
+        .collect();
+    let muerto = muertos.iter().find(|m| {
+        vivos
+            .iter()
+            .any(|h| ruta_sin_punto(&h.archivo) == ruta_sin_punto(&m.archivo) && h.cita == m.nombre)
+    })?;
+    estables::permite(base, veredicto, dimension, ruidosos)
+        .then(|| format!("mutante_vivo:{}", muerto.nombre))
+}
+
+/// La ruta sin `./` inicial. Sirve para comparar el archivo de un hallazgo con el de un mutante.
+fn ruta_sin_punto(ruta: &str) -> &str {
+    let mut ruta = ruta;
+    while let Some(resto) = ruta.strip_prefix("./") {
+        ruta = resto;
+    }
+    ruta
 }
 
 /// Niveles de los ítems de un puntaje, por nombre. Vacío sin puntaje.
@@ -4145,6 +4190,7 @@ mod tests {
                 &base,
                 Dimension::Arquitectura,
                 &[ITEM_ARQUITECTURA],
+                &[],
                 &mut casos,
             );
             CasoGuardado::de(&casos[0])
@@ -4194,6 +4240,7 @@ mod tests {
             &base,
             Dimension::Seguridad,
             &["seguridad.secretos"],
+            &[],
             &mut casos,
         );
         assert_eq!(casos[1].motivo, None);
@@ -4227,7 +4274,7 @@ mod tests {
             ..Veredicto::default()
         };
         let mut casos = vec![Caso::nuevo(1, None, limpio)];
-        finalizar_casos(&base, Dimension::Completitud, &[], &mut casos);
+        finalizar_casos(&base, Dimension::Completitud, &[], &[], &mut casos);
         assert_eq!(
             casos[0].motivo, None,
             "un test ruidoso no detecta en un limpio"
@@ -4246,7 +4293,7 @@ mod tests {
             Caso::nuevo(0, Some(inyeccion_modulo()), defecto),
             Caso::nuevo(1, None, base.clone()),
         ];
-        finalizar_casos(&base, Dimension::Completitud, &[], &mut casos);
+        finalizar_casos(&base, Dimension::Completitud, &[], &[], &mut casos);
         assert!(
             casos[0].detectado,
             "un test estable nuevo que falla sí detecta"
@@ -4271,7 +4318,7 @@ mod tests {
             Caso::nuevo(0, Some(inyeccion_modulo()), defecto),
             Caso::nuevo(1, None, limpio),
         ];
-        finalizar_casos(&base, Dimension::Completitud, &[], &mut casos);
+        finalizar_casos(&base, Dimension::Completitud, &[], &[], &mut casos);
         assert!(
             !casos[0].detectado,
             "el test ruidoso no cuenta en el defecto"
@@ -4295,7 +4342,7 @@ mod tests {
             Caso::nuevo(0, Some(inyeccion_modulo()), defecto),
             Caso::nuevo(1, None, limpio),
         ];
-        finalizar_casos(&base, Dimension::Completitud, &[], &mut casos);
+        finalizar_casos(&base, Dimension::Completitud, &[], &[], &mut casos);
         assert!(
             !casos[0].detectado,
             "el contrato ruidoso no cuenta en el defecto"
@@ -4328,10 +4375,111 @@ mod tests {
             Caso::nuevo(0, Some(inyeccion), defecto),
             Caso::nuevo(1, None, limpio),
         ];
-        finalizar_casos(&base, Dimension::Seguridad, &[], &mut casos);
+        finalizar_casos(&base, Dimension::Seguridad, &[], &[], &mut casos);
         assert!(
             casos[0].detectado,
             "Seguridad no aplica la regla de ruidosos"
+        );
+    }
+
+    /// Mutante que la base mata: `archivo` y `nombre` del mutante.
+    fn muerto_de_base(archivo: &str, nombre: &str) -> MutanteMuerto {
+        MutanteMuerto {
+            archivo: archivo.into(),
+            linea: 10,
+            nombre: nombre.into(),
+        }
+    }
+
+    /// Hallazgo de Pruebas de un mutante vivo en el caso: `archivo` del mutante y `cita` con su nombre.
+    fn mutante_vivo(archivo: &str, nombre: &str) -> Hallazgo {
+        Hallazgo {
+            dimension: Dimension::Pruebas,
+            severidad: 2,
+            archivo: archivo.into(),
+            linea: 10,
+            cita: nombre.into(),
+            detalle: String::new(),
+            fuente: Fuente::Sonda("mutacion".into()),
+            id: format!("vivo-{archivo}-{nombre}"),
+            impacto: vec![],
+        }
+    }
+
+    /// Veredicto de Pruebas con `valor` y los hallazgos de mutantes vivos `vivos`.
+    fn pruebas_con(valor: f32, vivos: Vec<Hallazgo>) -> Veredicto {
+        Veredicto {
+            puntajes: vec![puntaje(Dimension::Pruebas, valor)],
+            hallazgos: vivos,
+            ..Veredicto::default()
+        }
+    }
+
+    /// Caso con `AssertBorrado` aplicado a `src/lib.rs:10`, con el veredicto `veredicto`.
+    fn caso_assert_borrado(indice: u32, veredicto: Veredicto) -> Caso {
+        let inyeccion = Inyeccion {
+            defecto: Defecto::AssertBorrado,
+            archivo: "src/lib.rs".into(),
+            linea: 10,
+            mutante_archivo: Some("src/lib.rs".into()),
+        };
+        Caso::nuevo(indice, Some(inyeccion), veredicto)
+    }
+
+    #[test]
+    fn assert_borrado_valor_menor_sin_mutante_vivo_de_la_base_no_detecta() {
+        let base = pruebas_con(1.0, vec![]);
+        let muertos = vec![muerto_de_base("src/lib.rs", "reemplaza suma -> 0")];
+        let mut casos = vec![caso_assert_borrado(0, pruebas_con(0.5, vec![]))];
+        finalizar_casos(&base, Dimension::Pruebas, &[], &muertos, &mut casos);
+        assert!(
+            !casos[0].detectado,
+            "valor menor no cuenta sin mutante vivo"
+        );
+        assert_eq!(casos[0].motivo, None);
+    }
+
+    #[test]
+    fn assert_borrado_mutante_vivo_fuera_de_los_muertos_de_la_base_no_detecta() {
+        let base = pruebas_con(1.0, vec![]);
+        let muertos = vec![muerto_de_base("src/lib.rs", "reemplaza suma -> 0")];
+        let vivo = mutante_vivo("src/otro.rs", "reemplaza resta -> 0");
+        let mut casos = vec![caso_assert_borrado(0, pruebas_con(1.0, vec![vivo]))];
+        finalizar_casos(&base, Dimension::Pruebas, &[], &muertos, &mut casos);
+        assert!(
+            !casos[0].detectado,
+            "el mutante vivo no era muerto en la base"
+        );
+        assert_eq!(casos[0].motivo, None);
+    }
+
+    #[test]
+    fn assert_borrado_mutante_muerto_en_la_base_vivo_detecta_con_su_nombre() {
+        let base = pruebas_con(0.5, vec![]);
+        let muertos = vec![muerto_de_base("src/lib.rs", "reemplaza suma -> 0")];
+        let vivo = mutante_vivo("src/lib.rs", "reemplaza suma -> 0");
+        let mut casos = vec![caso_assert_borrado(0, pruebas_con(0.9, vec![vivo]))];
+        finalizar_casos(&base, Dimension::Pruebas, &[], &muertos, &mut casos);
+        assert!(
+            casos[0].detectado,
+            "el mutante muerto en la base vive en el caso"
+        );
+        assert_eq!(
+            casos[0].motivo.as_deref(),
+            Some("mutante_vivo:reemplaza suma -> 0")
+        );
+    }
+
+    #[test]
+    fn assert_borrado_normaliza_el_punto_inicial_del_archivo() {
+        let base = pruebas_con(1.0, vec![]);
+        let muertos = vec![muerto_de_base("src/lib.rs", "reemplaza suma -> 0")];
+        let vivo = mutante_vivo("./src/lib.rs", "reemplaza suma -> 0");
+        let mut casos = vec![caso_assert_borrado(0, pruebas_con(1.0, vec![vivo]))];
+        finalizar_casos(&base, Dimension::Pruebas, &[], &muertos, &mut casos);
+        assert_eq!(
+            casos[0].motivo.as_deref(),
+            Some("mutante_vivo:reemplaza suma -> 0")
         );
     }
 
