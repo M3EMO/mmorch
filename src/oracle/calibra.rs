@@ -1488,11 +1488,20 @@ fn finalizar_casos(
     casos: &mut [Caso],
 ) {
     let contexto = item_y_lugar_de(dimension, casos);
+    // Tests que variaron entre la base y los limpios: no cuentan para detectar (Tarea 63, punto 4).
+    let ruidosos = {
+        let limpios: Vec<&Veredicto> = casos
+            .iter()
+            .filter(|c| !c.es_defecto)
+            .map(|c| &c.veredicto)
+            .collect();
+        estables::ruidosos(base, &limpios)
+    };
     for (caso, (item, lugar)) in casos.iter_mut().zip(contexto) {
         let motivo = if regla::es_con_juez(dimension) {
             motivo_con_juez(base, caso, dimension, item, lugar.as_ref())
         } else {
-            motivo_de_deteccion(base, &caso.veredicto, dimension, caso.es_defecto)
+            motivo_de_deteccion(base, &caso.veredicto, dimension, caso.es_defecto, &ruidosos)
         };
         caso.detectado = motivo.is_some();
         caso.motivo = motivo;
@@ -1504,7 +1513,14 @@ fn finalizar_casos(
             .map(|item| {
                 (
                     *item,
-                    detecta_item(base, &caso.veredicto, dimension, item, caso.es_defecto),
+                    detecta_item(
+                        base,
+                        &caso.veredicto,
+                        dimension,
+                        item,
+                        caso.es_defecto,
+                        &ruidosos,
+                    ),
                 )
             })
             .collect();
@@ -1536,6 +1552,7 @@ fn motivo_de_deteccion(
     veredicto: &Veredicto,
     dimension: Dimension,
     es_defecto: bool,
+    ruidosos: &BTreeSet<String>,
 ) -> Option<String> {
     let sin_veredicto = || (!es_defecto).then(|| "sin_veredicto".to_string());
     let Some(pv) = puntaje_de(veredicto, dimension) else {
@@ -1561,7 +1578,7 @@ fn motivo_de_deteccion(
             .find(|ib| nivel_de(pv, &ib.item).is_some_and(|nivel| nivel < ib.nivel))?;
         format!("item_bajo:{}", bajo.item)
     };
-    estables::permite(base, veredicto, dimension).then_some(motivo)
+    estables::permite(base, veredicto, dimension, ruidosos).then_some(motivo)
 }
 
 /// Niveles de los ítems de un puntaje, por nombre. Vacío sin puntaje.
@@ -1579,6 +1596,7 @@ fn detecta_item(
     dimension: Dimension,
     item: &str,
     es_defecto: bool,
+    ruidosos: &BTreeSet<String>,
 ) -> Option<bool> {
     let nivel_base = nivel_de(puntaje_de(base, dimension)?, item)?;
     let Some(pv) = puntaje_de(veredicto, dimension) else {
@@ -1588,7 +1606,9 @@ fn detecta_item(
         return Some(!es_defecto);
     }
     Some(match nivel_de(pv, item) {
-        Some(nivel) => nivel < nivel_base && estables::permite(base, veredicto, dimension),
+        Some(nivel) => {
+            nivel < nivel_base && estables::permite(base, veredicto, dimension, ruidosos)
+        }
         None => !es_defecto,
     })
 }
@@ -3655,6 +3675,186 @@ mod tests {
         );
         assert_eq!(casos[1].motivo, None);
         assert!(!casos[1].detectado);
+    }
+
+    /// Base de Completitud en 1, sin tests malos.
+    fn base_completitud() -> Veredicto {
+        Veredicto {
+            puntajes: vec![puntaje(Dimension::Completitud, 1.0)],
+            ..Veredicto::default()
+        }
+    }
+
+    /// Inyección de `ModuloBorrado` (Completitud) en `src/lib.rs:5`.
+    fn inyeccion_modulo() -> Inyeccion {
+        Inyeccion {
+            defecto: Defecto::ModuloBorrado,
+            archivo: "src/lib.rs".into(),
+            linea: 5,
+            mutante_archivo: None,
+        }
+    }
+
+    #[test]
+    fn calibra_completitud_test_estable_que_se_mezcla_en_un_limpio_no_detecta() {
+        let base = base_completitud();
+        let limpio = Veredicto {
+            puntajes: vec![puntaje(Dimension::Completitud, 0.5)],
+            inestables: vec!["t_mix".into()],
+            ..Veredicto::default()
+        };
+        let mut casos = vec![Caso::nuevo(1, None, limpio)];
+        finalizar_casos(&base, Dimension::Completitud, &[], &mut casos);
+        assert_eq!(
+            casos[0].motivo, None,
+            "un test ruidoso no detecta en un limpio"
+        );
+    }
+
+    #[test]
+    fn calibra_completitud_test_estable_que_falla_solo_en_el_defecto_detecta() {
+        let base = base_completitud();
+        let defecto = Veredicto {
+            puntajes: vec![puntaje(Dimension::Completitud, 0.5)],
+            ocultos_fallidos: vec!["t_real".into()],
+            ..Veredicto::default()
+        };
+        let mut casos = vec![
+            Caso::nuevo(0, Some(inyeccion_modulo()), defecto),
+            Caso::nuevo(1, None, base.clone()),
+        ];
+        finalizar_casos(&base, Dimension::Completitud, &[], &mut casos);
+        assert!(
+            casos[0].detectado,
+            "un test estable nuevo que falla sí detecta"
+        );
+        assert!(!casos[1].detectado, "el limpio sigue sin detectar");
+    }
+
+    #[test]
+    fn calibra_completitud_test_ruidoso_que_falla_en_el_defecto_no_detecta_por_ese_test() {
+        let base = base_completitud();
+        let limpio = Veredicto {
+            puntajes: vec![puntaje(Dimension::Completitud, 1.0)],
+            inestables: vec!["t_mix".into()],
+            ..Veredicto::default()
+        };
+        let defecto = Veredicto {
+            puntajes: vec![puntaje(Dimension::Completitud, 0.5)],
+            ocultos_fallidos: vec!["t_mix".into()],
+            ..Veredicto::default()
+        };
+        let mut casos = vec![
+            Caso::nuevo(0, Some(inyeccion_modulo()), defecto),
+            Caso::nuevo(1, None, limpio),
+        ];
+        finalizar_casos(&base, Dimension::Completitud, &[], &mut casos);
+        assert!(
+            !casos[0].detectado,
+            "el test ruidoso no cuenta en el defecto"
+        );
+    }
+
+    #[test]
+    fn calibra_completitud_contrato_ruidoso_que_falla_en_el_defecto_no_detecta_por_ese_test() {
+        let base = base_completitud();
+        let limpio = Veredicto {
+            puntajes: vec![puntaje(Dimension::Completitud, 1.0)],
+            inestables_contrato: vec!["t_mix".into()],
+            ..Veredicto::default()
+        };
+        let defecto = Veredicto {
+            puntajes: vec![puntaje(Dimension::Completitud, 0.5)],
+            contrato_fallidos: vec!["t_mix".into()],
+            ..Veredicto::default()
+        };
+        let mut casos = vec![
+            Caso::nuevo(0, Some(inyeccion_modulo()), defecto),
+            Caso::nuevo(1, None, limpio),
+        ];
+        finalizar_casos(&base, Dimension::Completitud, &[], &mut casos);
+        assert!(
+            !casos[0].detectado,
+            "el contrato ruidoso no cuenta en el defecto"
+        );
+    }
+
+    #[test]
+    fn calibra_seguridad_test_ruidoso_sigue_contando() {
+        let base = Veredicto {
+            puntajes: vec![puntaje(Dimension::Seguridad, 1.0)],
+            ..Veredicto::default()
+        };
+        let limpio = Veredicto {
+            puntajes: vec![puntaje(Dimension::Seguridad, 1.0)],
+            inestables: vec!["t_mix".into()],
+            ..Veredicto::default()
+        };
+        let defecto = Veredicto {
+            puntajes: vec![puntaje(Dimension::Seguridad, 0.5)],
+            ocultos_fallidos: vec!["t_mix".into()],
+            ..Veredicto::default()
+        };
+        let inyeccion = Inyeccion {
+            defecto: Defecto::SecretoEnCodigo,
+            archivo: "src/lib.rs".into(),
+            linea: 5,
+            mutante_archivo: None,
+        };
+        let mut casos = vec![
+            Caso::nuevo(0, Some(inyeccion), defecto),
+            Caso::nuevo(1, None, limpio),
+        ];
+        finalizar_casos(&base, Dimension::Seguridad, &[], &mut casos);
+        assert!(
+            casos[0].detectado,
+            "Seguridad no aplica la regla de ruidosos"
+        );
+    }
+
+    #[test]
+    fn calibra_completitud_test_que_se_mezcla_en_un_limpio_no_detecta_limpios() {
+        let (_t, tarea) = tarea_prueba();
+        let base = base_completitud();
+        // Un hilo: los limpios salen en orden de índice. El primero se mezcla; los demás quedan como la base.
+        let limpios_vistos = AtomicUsize::new(0);
+        let medida = medir(
+            &tarea,
+            Dimension::Completitud,
+            Path::new(FIXTURE),
+            &base,
+            |limpia, _, base| {
+                if !limpia {
+                    return Veredicto {
+                        puntajes: vec![puntaje(Dimension::Completitud, 0.5)],
+                        ocultos_fallidos: vec!["t_real".into()],
+                        ..Veredicto::default()
+                    };
+                }
+                if limpios_vistos.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Veredicto {
+                        puntajes: vec![puntaje(Dimension::Completitud, 0.5)],
+                        inestables: vec!["t_mix".into()],
+                        ..Veredicto::default()
+                    };
+                }
+                base.clone()
+            },
+            4,
+        );
+        let limpios = limpios_guardados(&medida);
+        assert!(!limpios.is_empty(), "hay casos limpios");
+        for caso in &limpios {
+            assert!(
+                !caso.detectado,
+                "caso {}: un test ruidoso no detecta",
+                caso.caso
+            );
+        }
+        assert!(
+            medida.casos.iter().any(|c| c.es_defecto && c.detectado),
+            "un defecto que falla un test distinto sí detecta"
+        );
     }
 
     #[test]

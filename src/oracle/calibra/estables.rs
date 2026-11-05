@@ -1,5 +1,6 @@
 //! Qué tests cuentan para detectar un defecto en Completitud y Funciona (Tarea 59). Un test inestable de la
-//! base no cuenta, ni en un caso con defecto ni en uno limpio. Las otras dimensiones no cambian.
+//! base no cuenta, ni en un caso con defecto ni en uno limpio. Tampoco cuenta un test ruidoso (Tarea 63): uno
+//! que varió entre la base y los limpios. Las otras dimensiones no cambian.
 
 use std::collections::BTreeSet;
 
@@ -7,13 +8,63 @@ use crate::tipos::{Dimension, Veredicto};
 
 /// Si la dimensión del caso puede detectar un defecto. Completitud y Funciona lo pueden solo con un
 /// test malo nuevo, un total menor o un hallazgo nuevo. Las demás dimensiones siempre pueden.
-pub(super) fn permite(base: &Veredicto, veredicto: &Veredicto, dimension: Dimension) -> bool {
+pub(super) fn permite(
+    base: &Veredicto,
+    veredicto: &Veredicto,
+    dimension: Dimension,
+    ruidosos: &BTreeSet<String>,
+) -> bool {
     if !matches!(dimension, Dimension::Completitud | Dimension::Funciona) {
         return true;
     }
-    hay_test_malo_nuevo(base, veredicto)
+    hay_test_malo_nuevo(base, veredicto, ruidosos)
         || total_bajo(base, veredicto)
         || hallazgo_nuevo(base, veredicto, dimension)
+}
+
+/// Estado de un test en un veredicto.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Estado {
+    Ok,
+    Fallido,
+    Inestable,
+}
+
+/// Estado por clave (`oculto:<id>` o `contrato:<id>`) de los tests que aparecen en alguna lista de `v`.
+fn estados(v: &Veredicto) -> std::collections::BTreeMap<String, Estado> {
+    let mut mapa = std::collections::BTreeMap::new();
+    let listas: [(&str, &Vec<String>, Estado); 4] = [
+        ("oculto", &v.ocultos_fallidos, Estado::Fallido),
+        ("oculto", &v.inestables, Estado::Inestable),
+        ("contrato", &v.contrato_fallidos, Estado::Fallido),
+        ("contrato", &v.inestables_contrato, Estado::Inestable),
+    ];
+    for (lado, lista, estado) in listas {
+        for id in lista {
+            mapa.insert(format!("{lado}:{id}"), estado);
+        }
+    }
+    mapa
+}
+
+/// Tests ruidosos (Tarea 63): los que aparecen con más de un estado entre la base y los casos limpios. Un
+/// test sin lista cuenta como `Ok`. La tasa real de un test no se conoce con pocas repeticiones de la base:
+/// los limpios ya pagaron esa medición. Los ruidosos no cuentan para detectar.
+pub(super) fn ruidosos(base: &Veredicto, limpios: &[&Veredicto]) -> BTreeSet<String> {
+    let mut vistos: Vec<std::collections::BTreeMap<String, Estado>> = vec![estados(base)];
+    vistos.extend(limpios.iter().map(|v| estados(v)));
+    let claves: BTreeSet<&String> = vistos.iter().flat_map(|m| m.keys()).collect();
+    claves
+        .into_iter()
+        .filter(|clave| {
+            let distintos: BTreeSet<Estado> = vistos
+                .iter()
+                .map(|m| m.get(*clave).copied().unwrap_or(Estado::Ok))
+                .collect();
+            distintos.len() > 1
+        })
+        .cloned()
+        .collect()
 }
 
 /// Tests malos del oculto: los fallidos estables y los inestables.
@@ -37,15 +88,19 @@ fn malos_contrato(veredicto: &Veredicto) -> BTreeSet<&str> {
 }
 
 /// Hay un test malo en el caso que no era malo en la base. Cada lado se compara por separado.
-fn hay_test_malo_nuevo(base: &Veredicto, veredicto: &Veredicto) -> bool {
+fn hay_test_malo_nuevo(
+    base: &Veredicto,
+    veredicto: &Veredicto,
+    ruidosos: &BTreeSet<String>,
+) -> bool {
     let ocultos_base = malos_ocultos(base);
     let contrato_base = malos_contrato(base);
     malos_ocultos(veredicto)
         .iter()
-        .any(|id| !ocultos_base.contains(id))
+        .any(|id| !ocultos_base.contains(id) && !ruidosos.contains(&format!("oculto:{id}")))
         || malos_contrato(veredicto)
             .iter()
-            .any(|id| !contrato_base.contains(id))
+            .any(|id| !contrato_base.contains(id) && !ruidosos.contains(&format!("contrato:{id}")))
 }
 
 /// El total del oculto o del contrato bajó frente a la base.
@@ -69,6 +124,7 @@ mod tests {
     use super::super::tests::{nivel_item, puntaje};
     use super::permite;
     use crate::tipos::{Conteo, Dimension, Veredicto};
+    use std::collections::BTreeSet;
 
     /// Si la dimensión detecta el caso: `motivo_de_deteccion` con motivo.
     fn detecta_dimension(
@@ -77,7 +133,7 @@ mod tests {
         dimension: Dimension,
         es_defecto: bool,
     ) -> bool {
-        motivo_de_deteccion(base, veredicto, dimension, es_defecto).is_some()
+        motivo_de_deteccion(base, veredicto, dimension, es_defecto, &BTreeSet::new()).is_some()
     }
 
     fn ids(v: &[&str]) -> Vec<String> {
@@ -244,7 +300,7 @@ mod tests {
             ..Veredicto::default()
         };
         assert!(
-            permite(&base, &caso, Dimension::Pruebas),
+            permite(&base, &caso, Dimension::Pruebas, &BTreeSet::new()),
             "la regla no aplica a Pruebas"
         );
         assert!(
@@ -271,7 +327,8 @@ mod tests {
                 &caso,
                 Dimension::Completitud,
                 "completitud.requisitos",
-                true
+                true,
+                &BTreeSet::new()
             ),
             Some(false),
             "el ítem baja por un test inestable de la base: no cuenta"
@@ -295,7 +352,8 @@ mod tests {
                 &caso,
                 Dimension::Completitud,
                 "completitud.requisitos",
-                true
+                true,
+                &BTreeSet::new()
             ),
             Some(true),
             "el ítem baja por un test estable nuevo: cuenta"
@@ -308,5 +366,31 @@ mod tests {
             items: vec![nivel_item("completitud.requisitos", nivel)],
             ..puntaje(dimension, valor)
         }
+    }
+
+    #[test]
+    fn estables_ruidosos_con_base_y_limpios_identicos_es_vacio() {
+        let base = base_con_flaky(Dimension::Completitud);
+        let limpio = base.clone();
+        assert!(super::ruidosos(&base, &[&limpio, &limpio]).is_empty());
+    }
+
+    #[test]
+    fn estables_ruidosos_nombra_el_test_que_cambia_de_estado_y_separa_oculto_de_contrato() {
+        let base = Veredicto::default();
+        let l1 = Veredicto {
+            inestables: ids(&["t_mezcla"]),
+            contrato_fallidos: ids(&["t_fijo"]),
+            ..Veredicto::default()
+        };
+        let l2 = Veredicto {
+            contrato_fallidos: ids(&["t_fijo"]),
+            ..Veredicto::default()
+        };
+        let r = super::ruidosos(&base, &[&l1, &l2]);
+        assert!(r.contains("oculto:t_mezcla"), "{r:?}");
+        // `t_fijo` falla en los dos limpios pero no en la base: también cambió de estado.
+        assert!(r.contains("contrato:t_fijo"), "{r:?}");
+        assert_eq!(r.len(), 2);
     }
 }

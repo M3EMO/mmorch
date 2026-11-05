@@ -246,7 +246,14 @@ fn afirma_detectado(e: &Ensayo, defecto: Defecto, en_linea: bool) {
             e.inyeccion.archivo, e.inyeccion.linea, e.con_defecto.hallazgos
         );
     }
-    if let Some(bajo) = detecta_item(&e.base, &e.con_defecto, dimension, defecto.item(), true) {
+    if let Some(bajo) = detecta_item(
+        &e.base,
+        &e.con_defecto,
+        dimension,
+        defecto.item(),
+        true,
+        &BTreeSet::new(),
+    ) {
         assert!(
             bajo,
             "el ítem {} no baja con {:?}",
