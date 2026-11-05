@@ -2414,6 +2414,10 @@ mod tests {
 
     /// `tests/protocolo.rs` de la calibración de Pruebas: un test de `leer_numero` con dos asserts.
     const TEST_DE_LEER_NUMERO: &str = "use calibra_fixture::protocolo::leer_numero;\n\n#[test]\nfn leer_numero_lee_el_numero() {\n    assert!(leer_numero(\"42\").is_ok());\n    assert_eq!(leer_numero(\"7\").unwrap(), 7);\n}\n";
+    /// Log del mutante de `leer_numero` en las salidas de prueba, y el `tests-fallidos.txt` que lo cita.
+    const LOG_DE_PROTOCOLO: &str = "log/src__protocolo.rs_line_2_col_1.log";
+    const TESTS_FALLIDOS_DE_PROTOCOLO: &str =
+        "log/src__protocolo.rs_line_2_col_1.log:test leer_numero_lee_el_numero ... FAILED\n";
 
     /// Veredicto de Pruebas sano: valor 1 y el ítem de mutación en nivel 3.
     fn veredicto_de_pruebas() -> Veredicto {
@@ -2436,7 +2440,7 @@ mod tests {
     fn calibra_pruebas_los_muertos_de_la_base_llegan_al_inyector() {
         use crate::oracle::mutacion::{ARCHIVO_OUTCOMES, construir_comando};
         use crate::oracle::perfiles::herramientas::SalidaHerramienta;
-        const OUTCOMES: &str = r#"{"total_mutants":1,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)","file":"src/protocolo.rs","span":{"start":{"line":2,"column":1}}}},"summary":"CaughtMutant"}]}"#;
+        const OUTCOMES: &str = r#"{"total_mutants":1,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)","file":"src/protocolo.rs","span":{"start":{"line":2,"column":1}}}},"summary":"CaughtMutant","log_path":"log/src__protocolo.rs_line_2_col_1.log"}]}"#;
         let home = tempfile::tempdir().expect("home");
         let carpeta = home.path().join("oraculos").join("calibra-fixture");
         std::fs::create_dir_all(&carpeta).expect("carpeta");
@@ -2457,6 +2461,10 @@ mod tests {
                 salida
                     .archivos
                     .insert(ARCHIVO_OUTCOMES.into(), OUTCOMES.into());
+                salida.archivos.insert(
+                    crate::oracle::mutacion::ARCHIVO_TESTS_FALLIDOS.into(),
+                    TESTS_FALLIDOS_DE_PROTOCOLO.into(),
+                );
                 memo.anotar(&construir_comando(tarea), &salida);
             }
             Ok(veredicto_de_pruebas())
@@ -2489,7 +2497,11 @@ mod tests {
             .find(|c| c.defecto.as_deref() == Some("assert_borrado"))
             .expect("un caso con AssertBorrado aplicado");
         assert_eq!(con_defecto.archivo.as_deref(), Some("tests/protocolo.rs"));
-        assert_eq!(con_defecto.linea, Some(5), "el primer assert del test");
+        assert_eq!(
+            con_defecto.linea,
+            Some(4),
+            "la línea del #[ignore] del test"
+        );
     }
 
     /// Calibra Pruebas de `calibra-fixture` con `outcomes` como salida grabada de la base. Devuelve los casos guardados.
@@ -2582,7 +2594,7 @@ mod tests {
     fn calibra_pruebas_el_caso_con_assert_borrado_corre_acotado_al_mutante() {
         use crate::oracle::mutacion::{ARCHIVO_OUTCOMES, archivo_acotado, construir_comando};
         use crate::oracle::perfiles::herramientas::SalidaHerramienta;
-        const OUTCOMES: &str = r#"{"total_mutants":1,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)","file":"src/protocolo.rs","span":{"start":{"line":2,"column":1}}}},"summary":"CaughtMutant"}]}"#;
+        const OUTCOMES: &str = r#"{"total_mutants":1,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)","file":"src/protocolo.rs","span":{"start":{"line":2,"column":1}}}},"summary":"CaughtMutant","log_path":"log/src__protocolo.rs_line_2_col_1.log"}]}"#;
         let home = tempfile::tempdir().expect("home");
         let carpeta = home.path().join("oraculos").join("calibra-fixture");
         std::fs::create_dir_all(&carpeta).expect("carpeta");
@@ -2599,6 +2611,10 @@ mod tests {
                 salida
                     .archivos
                     .insert(ARCHIVO_OUTCOMES.into(), OUTCOMES.into());
+                salida.archivos.insert(
+                    crate::oracle::mutacion::ARCHIVO_TESTS_FALLIDOS.into(),
+                    TESTS_FALLIDOS_DE_PROTOCOLO.into(),
+                );
                 memo.anotar(&construir_comando(tarea), &salida);
             }
             Ok(veredicto_de_pruebas())
@@ -2662,6 +2678,10 @@ mod tests {
                 salida
                     .archivos
                     .insert(ARCHIVO_OUTCOMES.into(), OUTCOMES_CON_MUERTO.into());
+                salida.archivos.insert(
+                    crate::oracle::mutacion::ARCHIVO_TESTS_FALLIDOS.into(),
+                    TESTS_FALLIDOS_DE_PROTOCOLO.into(),
+                );
             }
             Ok(salida)
         }
@@ -2671,7 +2691,7 @@ mod tests {
         }
     }
 
-    const OUTCOMES_CON_MUERTO: &str = r#"{"total_mutants":1,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)","file":"src/protocolo.rs","span":{"start":{"line":2,"column":1}}}},"summary":"CaughtMutant"}]}"#;
+    const OUTCOMES_CON_MUERTO: &str = r#"{"total_mutants":1,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)","file":"src/protocolo.rs","span":{"start":{"line":2,"column":1}}}},"summary":"CaughtMutant","log_path":"log/src__protocolo.rs_line_2_col_1.log"}]}"#;
 
     /// Carpeta `calibra-fixture` de `home` con `repo-bueno` (copia del fixture) y la tarea que la usa.
     fn carpeta_con_repo_bueno(home: &Path) -> PathBuf {
@@ -4801,6 +4821,8 @@ mod tests {
             archivo: "src/lib.rs".into(),
             linea: 5,
             mutante_archivo: None,
+            mutante: None,
+            tests_apagados: vec![],
         };
         let mut casos = vec![
             Caso::nuevo(0, Some(inyeccion), base.clone()),
@@ -4832,6 +4854,8 @@ mod tests {
             archivo: "src/lib.rs".into(),
             linea: 5,
             mutante_archivo: None,
+            mutante: None,
+            tests_apagados: vec![],
         }
     }
 
@@ -4940,6 +4964,8 @@ mod tests {
             archivo: "src/lib.rs".into(),
             linea: 5,
             mutante_archivo: None,
+            mutante: None,
+            tests_apagados: vec![],
         };
         let mut casos = vec![
             Caso::nuevo(0, Some(inyeccion), defecto),
@@ -4993,6 +5019,8 @@ mod tests {
             archivo: "src/lib.rs".into(),
             linea: 10,
             mutante_archivo: Some("src/lib.rs".into()),
+            mutante: None,
+            tests_apagados: vec![],
         };
         Caso::nuevo(indice, Some(inyeccion), veredicto)
     }
@@ -5039,6 +5067,22 @@ mod tests {
             casos[0].motivo.as_deref(),
             Some("mutante_vivo:reemplaza suma -> 0")
         );
+    }
+
+    /// Guarda: el mutante tiene un test unitario y uno de socket, y el caso no lo cita vivo. Sigue muerto, no detecta.
+    #[test]
+    fn assert_borrado_mutante_que_sigue_muerto_con_dos_tests_no_detecta() {
+        let base = pruebas_con(1.0, vec![]);
+        let muertos = vec![MutanteMuerto {
+            archivo: "src/db.rs".into(),
+            linea: 10,
+            nombre: "reemplaza zset -> 0".into(),
+            tests: vec!["db::tests::zset".into(), "red::zset".into()],
+        }];
+        let mut casos = vec![caso_assert_borrado(0, pruebas_con(0.5, vec![]))];
+        finalizar_casos(&base, Dimension::Pruebas, &[], &muertos, &mut casos);
+        assert!(!casos[0].detectado, "el mutante sigue muerto: no cuenta");
+        assert_eq!(casos[0].motivo, None);
     }
 
     #[test]
@@ -5868,6 +5912,10 @@ mod tests {
                 salida
                     .archivos
                     .insert(ARCHIVO_OUTCOMES.into(), OUTCOMES_CON_MUERTO.into());
+                salida.archivos.insert(
+                    crate::oracle::mutacion::ARCHIVO_TESTS_FALLIDOS.into(),
+                    TESTS_FALLIDOS_DE_PROTOCOLO.into(),
+                );
             }
             Ok(salida)
         }
@@ -6250,12 +6298,14 @@ mod tests {
             .filter_map(Result::ok)
             .any(|e| {
                 let texto = fs::read_to_string(e.path()).unwrap_or_default();
-                texto.contains("leer_numero") && texto.contains("assert")
+                texto.contains("leer_numero")
+                    && texto.contains("assert")
+                    && !texto.contains("#[ignore]")
             })
     }
 
     /// Ejecutor falso de `cargo mutants` que responde según el `-F` que recibe, como la herramienta real.
-    /// Un mutante de `src/protocolo.rs` muere solo si su test aún tiene asserts en la copia.
+    /// Un mutante de `src/protocolo.rs` muere solo si su test aún tiene asserts y no está apagado con `#[ignore]`.
     struct MutantesSegunFiltro {
         repo: PathBuf,
         pedidos: std::sync::Arc<Mutex<Vec<Vec<String>>>>,
@@ -6291,12 +6341,20 @@ mod tests {
                         "file": archivo,
                         "span": {"start": {"line": linea, "column": 1}},
                     });
-                    outcomes.push(json!({"scenario": {"Mutant": mutante}, "summary": estado}));
+                    let mut resultado = json!({"scenario": {"Mutant": mutante}, "summary": estado});
+                    if archivo == "src/protocolo.rs" {
+                        resultado["log_path"] = json!(LOG_DE_PROTOCOLO);
+                    }
+                    outcomes.push(resultado);
                 }
                 let reporte = json!({"total_mutants": pedidos.len(), "outcomes": outcomes});
                 salida.archivos.insert(
                     crate::oracle::mutacion::ARCHIVO_OUTCOMES.into(),
                     reporte.to_string(),
+                );
+                salida.archivos.insert(
+                    crate::oracle::mutacion::ARCHIVO_TESTS_FALLIDOS.into(),
+                    TESTS_FALLIDOS_DE_PROTOCOLO.into(),
                 );
                 return Ok(salida);
             }

@@ -2,7 +2,7 @@
 //! semilla, y aplica UN defecto por construcción. La semilla elige el archivo, la función o la línea con un
 //! PRNG propio (splitmix64). Con la misma copia y la misma semilla, el cambio es el mismo.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -91,6 +91,10 @@ pub struct Inyeccion {
     pub linea: u32,
     /// Archivo del mutante muerto que eligió `AssertBorrado`. `None` en los demás defectos.
     pub mutante_archivo: Option<String>,
+    /// Nombre del mutante muerto que eligió `AssertBorrado`. `None` en los demás defectos.
+    pub mutante: Option<String>,
+    /// Nombres completos de los tests que `AssertBorrado` apagó con `#[ignore]`. Vacía en los demás defectos.
+    pub tests_apagados: Vec<String>,
 }
 
 /// Lo que `inyectar_con` necesita además de la copia y la semilla.
@@ -101,7 +105,7 @@ pub struct Contexto<'a> {
     pub camino_caliente: &'a [String],
     /// Límites de la sonda de estructura. El defecto `ArchivoDios` los usa para pasar la sonda.
     pub limites: &'a LimitesEstructura,
-    /// Mutantes muertos de la base: `AssertBorrado` elige uno y borra los asserts de sus tests. Vacía: no aplica.
+    /// Mutantes muertos de la base: `AssertBorrado` elige uno y apaga con `#[ignore]` sus tests. Vacía: no aplica.
     pub muertos: &'a [MutanteMuerto],
 }
 
@@ -134,7 +138,7 @@ pub fn inyectar_con(
     semilla: u64,
 ) -> io::Result<Option<Inyeccion>> {
     let mut rng = Prng::nuevo(semilla);
-    let mut mutante_archivo = None;
+    let mut apagado = None;
     let lugar = match defecto {
         Defecto::SecretoEnCodigo => secreto(dir, &mut rng)?,
         Defecto::PanicoEnEntrada => panico(dir, &mut rng)?,
@@ -143,21 +147,30 @@ pub fn inyectar_con(
         Defecto::ArchivoDios => dios(dir, contexto.limites, &mut rng)?,
         Defecto::ModuloBorrado => modulo_borrado(dir, &mut rng)?,
         Defecto::ErrorTragado => error_tragado(dir, &mut rng)?,
-        Defecto::AssertBorrado => match assert_borrado(dir, contexto.muertos, &mut rng)? {
-            Some((archivo, linea, del_mutante)) => {
-                mutante_archivo = Some(del_mutante);
-                Some((archivo, linea))
-            }
-            None => None,
-        },
+        Defecto::AssertBorrado => {
+            apagado = assert_borrado(dir, contexto.muertos, &mut rng)?;
+            apagado.as_ref().map(|a| (a.archivo.clone(), a.linea))
+        }
         Defecto::DockerfileRoot => dockerfile(dir)?,
         Defecto::ComportamientoRoto => comportamiento(dir, &mut rng)?,
     };
-    Ok(lugar.map(|(archivo, linea)| Inyeccion {
-        defecto,
-        archivo,
-        linea,
-        mutante_archivo,
+    Ok(lugar.map(|(archivo, linea)| match apagado {
+        Some(a) => Inyeccion {
+            defecto,
+            archivo,
+            linea,
+            mutante_archivo: Some(a.mutante_archivo),
+            mutante: Some(a.mutante),
+            tests_apagados: a.tests,
+        },
+        None => Inyeccion {
+            defecto,
+            archivo,
+            linea,
+            mutante_archivo: None,
+            mutante: None,
+            tests_apagados: Vec::new(),
+        },
     }))
 }
 
@@ -629,103 +642,106 @@ fn error_tragado(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
     Ok(Some((archivo, i as u32 + 1)))
 }
 
-/// Una línea de `assert!`, `assert_eq!` o `assert_ne!` completa en una línea.
-fn es_assert(linea: &str) -> bool {
-    let t = linea.trim();
-    ["assert!(", "assert_eq!(", "assert_ne!("]
-        .iter()
-        .any(|p| t.starts_with(p))
-        && t.ends_with(");")
+/// Lo que `AssertBorrado` apagó: el lugar del primer `#[ignore]` y el mutante elegido.
+struct Apagado {
+    archivo: String,
+    linea: u32,
+    mutante_archivo: String,
+    mutante: String,
+    tests: Vec<String>,
 }
 
-/// Borra los asserts de los tests que cubren un mutante muerto de `muertos`. La semilla elige el mutante por
-/// su posición. Si su función no tiene tests con asserts, prueba el siguiente de la lista, en orden. Sin
-/// muertos, o sin ninguno con test, no aplica: no hay borrado al azar.
-/// Archivo y línea del primer assert borrado, y el archivo del mutante elegido. `None` si no hay mutante con test.
+/// Apaga con `#[ignore]` los tests de un mutante muerto de `muertos`. La semilla elige el mutante por su
+/// posición. Si ese mutante no sirve, prueba el siguiente, en orden. Sin muertos que sirvan, no aplica: no hay
+/// apagado al azar.
 fn assert_borrado(
     dir: &Path,
     muertos: &[MutanteMuerto],
     rng: &mut Prng,
-) -> io::Result<Option<(String, u32, String)>> {
+) -> io::Result<Option<Apagado>> {
     if muertos.is_empty() {
         return Ok(None);
     }
     let inicio = rng.indice(muertos.len());
     for k in 0..muertos.len() {
         let mutante = &muertos[(inicio + k) % muertos.len()];
-        let Some(funcion) = funcion_de_mutante(dir, mutante)? else {
-            continue;
-        };
-        let cubiertos = asserts_de_tests_que_llaman(dir, &funcion)?;
-        let Some((archivo, indices)) = cubiertos.first() else {
-            continue;
-        };
-        let linea = indices[0] as u32 + 1;
-        let archivo = archivo.clone();
-        for (archivo, indices) in &cubiertos {
-            quitar_lineas(dir, archivo, indices)?;
+        if let Some(apagado) = apagar_tests(dir, mutante)? {
+            return Ok(Some(apagado));
         }
-        return Ok(Some((archivo, linea, mutante.archivo.clone())));
     }
     Ok(None)
 }
 
-/// Función afectada por un mutante: la del nombre (`... replace <fn> -> <Tipo> with <valor>`) o, si el nombre
-/// no la tiene, la que contiene su línea. `None` si no hay ninguna.
-fn funcion_de_mutante(dir: &Path, mutante: &MutanteMuerto) -> io::Result<Option<String>> {
-    if let Some(funcion) = funcion_del_nombre(&mutante.nombre) {
-        return Ok(Some(funcion));
-    }
-    if !dir.join(&mutante.archivo).is_file() {
+/// Un archivo `.rs` con sus líneas, y la línea desde la que empiezan sus tests (0 en `tests/`).
+type Fuente = (String, Vec<String>, usize);
+
+/// Agrega `#[ignore]` antes de la `fn` de cada test de `mutante.tests`. Busca todos antes de escribir: si uno no
+/// aparece, `None` y el repo no cambia. El nombre se compara por su último segmento (`db::tests::zset` da `zset`).
+fn apagar_tests(dir: &Path, mutante: &MutanteMuerto) -> io::Result<Option<Apagado>> {
+    if mutante.tests.is_empty() {
         return Ok(None);
     }
-    let lineas = partir(&leer(dir, &mutante.archivo)?);
-    let hasta = (mutante.linea as usize).min(lineas.len());
-    Ok(lineas[..hasta]
-        .iter()
-        .rev()
-        .find_map(|linea| nombre_de_funcion(linea).map(str::to_string)))
-}
-
-/// Función de un nombre de mutante `... replace <fn> -> <Tipo> with <valor>`. `None` si la parte antes de
-/// `->` o de `with` no es una ruta de identificadores, como en `replace a + b with a - b`.
-fn funcion_del_nombre(nombre: &str) -> Option<String> {
-    let (_, resto) = nombre.split_once("replace ")?;
-    let cabeza = resto.split(" -> ").next()?.split(" with ").next()?.trim();
-    let ultimo = cabeza.rsplit("::").next()?;
-    es_identificador(ultimo).then(|| ultimo.to_string())
-}
-
-/// Por archivo de tests con asserts que cubren `funcion`, en orden (primero `tests/`, luego `src/`): los índices
-/// de sus líneas de assert. Solo entran los archivos con al menos una línea que borrar.
-fn asserts_de_tests_que_llaman(dir: &Path, funcion: &str) -> io::Result<Vec<(String, Vec<usize>)>> {
-    let mut origenes: Vec<(String, bool)> = Vec::new();
+    let mut fuentes: Vec<Fuente> = Vec::new();
     for archivo in rust_en(dir, "tests")? {
-        origenes.push((archivo, false));
+        let lineas = partir(&leer(dir, &archivo)?);
+        fuentes.push((archivo, lineas, 0));
     }
     for archivo in rust_en(dir, "src")? {
-        origenes.push((archivo, true));
-    }
-    let mut salida = Vec::new();
-    for (archivo, solo_tests_de_src) in origenes {
         let lineas = partir(&leer(dir, &archivo)?);
-        let desde = if solo_tests_de_src {
-            limite_de_produccion(&lineas)
-        } else {
-            0
-        };
-        let mut indices = Vec::new();
-        for (fn_linea, cierre) in cuerpos_de_tests(&lineas, desde) {
-            let cuerpo = fn_linea + 1..=cierre;
-            if cuerpo.clone().any(|j| llama_a(&lineas[j], funcion)) {
-                indices.extend(cuerpo.filter(|&j| es_assert(&lineas[j])));
+        let desde = limite_de_produccion(&lineas);
+        fuentes.push((archivo, lineas, desde));
+    }
+    // (índice de la fuente, línea de la `fn`) de cada test que coincide, y el primero de la lista.
+    let mut marcas: BTreeSet<(usize, usize)> = BTreeSet::new();
+    let mut primera: Option<(usize, usize)> = None;
+    for nombre in &mutante.tests {
+        let ultimo = nombre.rsplit("::").next().unwrap_or(nombre.as_str());
+        let mut hallados = Vec::new();
+        for (k, (_, lineas, desde)) in fuentes.iter().enumerate() {
+            for (f, _) in cuerpos_de_tests(lineas, *desde) {
+                if nombre_de_funcion(&lineas[f]) == Some(ultimo) {
+                    hallados.push((k, f));
+                }
             }
         }
-        if !indices.is_empty() {
-            salida.push((archivo, indices));
-        }
+        let Some(&primero) = hallados.first() else {
+            return Ok(None);
+        };
+        primera.get_or_insert(primero);
+        marcas.extend(hallados);
     }
-    Ok(salida)
+    let Some((k_primera, f_primera)) = primera else {
+        return Ok(None);
+    };
+    // Línea 1-based del `#[ignore]` de cada test apagado, en el archivo ya escrito.
+    let mut linea_del_ignore: BTreeMap<(usize, usize), u32> = BTreeMap::new();
+    for (k, (archivo, lineas, _)) in fuentes.iter().enumerate() {
+        let filas: Vec<usize> = marcas
+            .iter()
+            .filter(|(kk, _)| *kk == k)
+            .map(|(_, f)| *f)
+            .collect();
+        if filas.is_empty() {
+            continue;
+        }
+        let mut nuevas: Vec<String> = Vec::with_capacity(lineas.len() + filas.len());
+        for (i, linea) in lineas.iter().enumerate() {
+            if filas.contains(&i) {
+                let sangria: String = linea.chars().take_while(|c| c.is_whitespace()).collect();
+                nuevas.push(format!("{sangria}#[ignore]"));
+                linea_del_ignore.insert((k, i), nuevas.len() as u32);
+            }
+            nuevas.push(linea.clone());
+        }
+        escribir(dir, archivo, &unir(&nuevas))?;
+    }
+    Ok(Some(Apagado {
+        archivo: fuentes[k_primera].0.clone(),
+        linea: linea_del_ignore[&(k_primera, f_primera)],
+        mutante_archivo: mutante.archivo.clone(),
+        mutante: mutante.nombre.clone(),
+        tests: mutante.tests.clone(),
+    }))
 }
 
 /// Rangos `(línea de fn, línea de cierre)` de los tests de `lineas` desde `desde`. Un test empieza con
@@ -770,29 +786,6 @@ fn fin_de_bloque(lineas: &[String], inicio: usize) -> Option<usize> {
         }
     }
     None
-}
-
-/// `true` si `linea` llama a `funcion`: `funcion(` precedido de algo que no es identificador (`.`, `::`, espacio).
-fn llama_a(linea: &str, funcion: &str) -> bool {
-    let patron = format!("{funcion}(");
-    linea.match_indices(&patron).any(|(p, _)| {
-        linea[..p]
-            .chars()
-            .next_back()
-            .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'))
-    })
-}
-
-/// Quita de `archivo` las líneas de `indices` (0-based, en orden). El resto del texto no cambia.
-fn quitar_lineas(dir: &Path, archivo: &str, indices: &[usize]) -> io::Result<()> {
-    let lineas = partir(&leer(dir, archivo)?);
-    let nuevas: Vec<String> = lineas
-        .into_iter()
-        .enumerate()
-        .filter(|(i, _)| !indices.contains(i))
-        .map(|(_, linea)| linea)
-        .collect();
-    escribir(dir, archivo, &unir(&nuevas))
 }
 
 /// `USER` de un usuario que no es root.
@@ -1438,7 +1431,7 @@ mod tests {
             nombre:
                 "src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)"
                     .into(),
-            tests: vec![],
+            tests: vec!["protocolo::leer_numero_lee_el_numero".into()],
         }
     }
 
@@ -1470,7 +1463,7 @@ mod tests {
     }
 
     #[test]
-    fn inyectar_assert_borrado_quita_solo_los_asserts_del_test_que_cubre_el_mutante() {
+    fn inyectar_assert_borrado_apaga_solo_el_test_que_cubre_el_mutante() {
         let dir = copia_con_test_de_leer_numero();
         let antes = arbol(dir.path());
         let inyeccion = borrar_con(dir.path(), &[muerto_de_leer_numero()], 42)
@@ -1483,16 +1476,26 @@ mod tests {
         );
         assert_eq!(inyeccion.defecto, Defecto::AssertBorrado);
         assert_eq!(inyeccion.archivo, "tests/protocolo.rs");
-        assert_eq!(inyeccion.linea, 5, "la línea del primer assert borrado");
+        assert_eq!(inyeccion.linea, 4, "la línea del #[ignore] del test");
+        assert_eq!(
+            inyeccion.tests_apagados,
+            vec!["protocolo::leer_numero_lee_el_numero".to_string()]
+        );
+        assert_eq!(inyeccion.mutante, Some(muerto_de_leer_numero().nombre));
         let nuevo = &despues["tests/protocolo.rs"];
-        assert_eq!(asserts_en(&antes["tests/protocolo.rs"]), 3);
+        assert!(
+            nuevo.contains("#[test]\n#[ignore]\nfn leer_numero_lee_el_numero()"),
+            "{nuevo}"
+        );
+        assert!(
+            nuevo.contains("fn otro_test_sin_relacion()") && !nuevo.contains("#[ignore]\nfn otro"),
+            "{nuevo}"
+        );
         assert_eq!(
             asserts_en(nuevo),
-            1,
-            "borra los dos asserts del test que cubre"
+            asserts_en(&antes["tests/protocolo.rs"]),
+            "no borra asserts"
         );
-        assert!(nuevo.contains("assert_eq!(1 + 1, 2);"), "{nuevo}");
-        assert!(nuevo.contains("fn leer_numero_lee_el_numero()"), "{nuevo}");
     }
 
     #[test]
@@ -1522,23 +1525,8 @@ mod tests {
             .expect("E/S")
             .expect("aplica");
         assert_eq!(inyeccion.mutante_archivo, None);
-    }
-
-    #[test]
-    fn inyectar_assert_borrado_sin_nombre_de_funcion_usa_la_funcion_de_la_linea() {
-        let dir = copia_con_test_de_leer_numero();
-        let muerto = MutanteMuerto {
-            archivo: "src/protocolo.rs".into(),
-            linea: 3,
-            nombre: "src/protocolo.rs:3:5: replace a + b with a - b".into(),
-            tests: vec![],
-        };
-        let inyeccion = borrar_con(dir.path(), &[muerto], 42)
-            .expect("E/S")
-            .expect("la línea 3 está dentro de leer_numero");
-        assert_eq!(inyeccion.archivo, "tests/protocolo.rs");
-        assert_eq!(inyeccion.linea, 5);
-        assert_eq!(asserts_en(&arbol(dir.path())["tests/protocolo.rs"]), 1);
+        assert_eq!(inyeccion.mutante, None);
+        assert!(inyeccion.tests_apagados.is_empty());
     }
 
     #[test]
@@ -1558,7 +1546,7 @@ mod tests {
         let dir = copia_fixture();
         let antes = arbol(dir.path());
         let sin_test = borrar_con(dir.path(), &[muerto_de_leer_numero()], 42).expect("E/S");
-        assert_eq!(sin_test, None, "basico.rs no llama a leer_numero");
+        assert_eq!(sin_test, None, "basico.rs no tiene el test del mutante");
         assert_eq!(arbol(dir.path()), antes, "no toca el repo");
     }
 
@@ -1591,6 +1579,219 @@ mod tests {
             assert_eq!(ia, ib, "semilla {semilla}");
             assert_eq!(arbol(a.path()), arbol(b.path()), "semilla {semilla}");
         }
+    }
+
+    /// Lib con `parsear` y su único test, que la llama con `.unwrap()` y un assert que no depende del valor.
+    const LIB_CON_UNWRAP: &str = "pub fn dividir(a: i32, b: i32) -> i32 {\n    a / b\n}\n\npub fn parsear(texto: &str) -> Result<i32, std::num::ParseIntError> {\n    texto.parse()\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn ese_test() {\n        let _n = parsear(\"7\").unwrap();\n        assert!(true);\n    }\n}\n";
+
+    /// Test que llama a `leer_numero` por medio de `envoltorio`: el nombre de la función no aparece en su cuerpo.
+    const TEST_POR_ENVOLTORIO: &str = "use calibra_fixture::protocolo::leer_numero;\n\nfn envoltorio(texto: &str) -> Result<u32, std::num::ParseIntError> {\n    leer_numero(texto)\n}\n\n#[test]\nfn lee_por_envoltorio() {\n    assert_eq!(envoltorio(\"7\").unwrap(), 7);\n}\n";
+
+    /// `cargo test --offline` sobre `dir`, con el target en `objetivo`. `Err` con la salida si falla.
+    fn cargo_test(dir: &Path, objetivo: &Path) -> Result<(), String> {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+        let salida = std::process::Command::new(cargo)
+            .arg("test")
+            .arg("--offline")
+            .current_dir(dir)
+            .env("CARGO_TARGET_DIR", objetivo)
+            .output()
+            .expect("lanza cargo test");
+        if salida.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{}{}",
+                String::from_utf8_lossy(&salida.stdout),
+                String::from_utf8_lossy(&salida.stderr)
+            ))
+        }
+    }
+
+    #[test]
+    fn assert_borrado_apagado_el_test_del_unwrap_deja_vivo_al_mutante() {
+        let dir = repo_de(&[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"minimo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            ("src/lib.rs", LIB_CON_UNWRAP),
+        ]);
+        let muerto = MutanteMuerto {
+            archivo: "src/lib.rs".into(),
+            linea: 5,
+            nombre: "src/lib.rs:5:5: replace parsear -> Result<i32, ParseIntError> with Err(..)"
+                .into(),
+            tests: vec!["tests::ese_test".into()],
+        };
+        let inyeccion = borrar_con(dir.path(), &[muerto], 42)
+            .expect("E/S")
+            .expect("el test del mutante aplica");
+        let ruta = dir.path().join("src/lib.rs");
+        let texto = std::fs::read_to_string(&ruta).expect("lee");
+        assert!(
+            texto.contains("    #[ignore]\n    fn ese_test()"),
+            "{texto}"
+        );
+        assert_eq!(
+            inyeccion.tests_apagados,
+            vec!["tests::ese_test".to_string()]
+        );
+        // El mutante, a mano: `parsear` siempre devuelve un error.
+        std::fs::write(
+            &ruta,
+            texto.replace("    texto.parse()\n", "    \"x\".parse()\n"),
+        )
+        .expect("escribe");
+        let objetivo = tempfile::tempdir().expect("temporal");
+        let resultado = cargo_test(dir.path(), objetivo.path());
+        assert!(
+            resultado.is_ok(),
+            "con el test apagado el mutante vive: {resultado:?}"
+        );
+    }
+
+    #[test]
+    fn assert_borrado_apaga_el_test_que_llega_a_la_funcion_por_un_envoltorio() {
+        let dir = copia_fixture();
+        std::fs::write(dir.path().join("tests/envoltorio.rs"), TEST_POR_ENVOLTORIO)
+            .expect("escribe");
+        let muerto = MutanteMuerto {
+            archivo: "src/protocolo.rs".into(),
+            linea: 2,
+            nombre:
+                "src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)"
+                    .into(),
+            tests: vec!["envoltorio::lee_por_envoltorio".into()],
+        };
+        let inyeccion = borrar_con(dir.path(), &[muerto], 42)
+            .expect("E/S")
+            .expect("el test del mutante aplica aunque no nombre la función");
+        assert_eq!(inyeccion.archivo, "tests/envoltorio.rs");
+        assert_eq!(
+            inyeccion.tests_apagados,
+            vec!["envoltorio::lee_por_envoltorio".to_string()]
+        );
+        let texto = std::fs::read_to_string(dir.path().join("tests/envoltorio.rs")).expect("lee");
+        assert_eq!(
+            texto.lines().nth(inyeccion.linea as usize - 1),
+            Some("#[ignore]"),
+            "{texto}"
+        );
+        assert!(
+            texto.contains("#[ignore]\nfn lee_por_envoltorio()"),
+            "{texto}"
+        );
+    }
+
+    #[test]
+    fn assert_borrado_apaga_los_dos_tests_del_mutante_unitario_y_de_socket() {
+        let dir = repo_de(&[
+            ("src/lib.rs", "pub mod db;\n"),
+            (
+                "src/db.rs",
+                "pub fn guardar() -> u32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn zset() {\n        assert_eq!(guardar(), 1);\n    }\n}\n",
+            ),
+            (
+                "tests/red.rs",
+                "#[test]\nfn zset() {\n    assert_eq!(1 + 1, 2);\n}\n",
+            ),
+        ]);
+        let muerto = MutanteMuerto {
+            archivo: "src/db.rs".into(),
+            linea: 2,
+            nombre: "src/db.rs:2:5: replace guardar -> u32 with 0".into(),
+            tests: vec!["db::tests::zset".into(), "red::zset".into()],
+        };
+        let inyeccion = borrar_con(dir.path(), &[muerto], 42)
+            .expect("E/S")
+            .expect("aplica");
+        let db = std::fs::read_to_string(dir.path().join("src/db.rs")).expect("lee");
+        let red = std::fs::read_to_string(dir.path().join("tests/red.rs")).expect("lee");
+        assert!(db.contains("    #[ignore]\n    fn zset()"), "{db}");
+        assert!(red.contains("#[ignore]\nfn zset()"), "{red}");
+        assert_eq!(
+            inyeccion.tests_apagados,
+            vec!["db::tests::zset".to_string(), "red::zset".to_string()]
+        );
+        // Con el mismo último segmento, `tests/` se busca antes que `src/`: el lugar cae en `tests/red.rs`.
+        assert_eq!(
+            inyeccion.archivo, "tests/red.rs",
+            "el lugar es el primer apagado, tests/ antes que src/"
+        );
+        assert_eq!(inyeccion.linea, 2);
+    }
+
+    #[test]
+    fn assert_borrado_lugar_es_el_primer_test_de_la_lista_no_el_primero_del_archivo() {
+        let dir = copia_con_test_de_leer_numero();
+        let muerto = MutanteMuerto {
+            archivo: "src/protocolo.rs".into(),
+            linea: 2,
+            nombre:
+                "src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)"
+                    .into(),
+            tests: vec![
+                "protocolo::otro_test_sin_relacion".into(),
+                "protocolo::leer_numero_lee_el_numero".into(),
+            ],
+        };
+        let inyeccion = borrar_con(dir.path(), &[muerto], 42)
+            .expect("E/S")
+            .expect("aplica");
+        assert_eq!(
+            inyeccion.linea, 11,
+            "la línea del #[ignore] de otro_test_sin_relacion"
+        );
+        let texto = std::fs::read_to_string(dir.path().join("tests/protocolo.rs")).expect("lee");
+        assert_eq!(texto.lines().nth(10), Some("#[ignore]"), "{texto}");
+        assert_eq!(inyeccion.tests_apagados.len(), 2);
+    }
+
+    #[test]
+    fn assert_borrado_un_test_que_no_aparece_descarta_el_mutante_sin_cambios_parciales() {
+        let dir = copia_con_test_de_leer_numero();
+        let antes = arbol(dir.path());
+        let mixto = MutanteMuerto {
+            archivo: "src/protocolo.rs".into(),
+            linea: 2,
+            nombre:
+                "src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)"
+                    .into(),
+            tests: vec![
+                "protocolo::leer_numero_lee_el_numero".into(),
+                "protocolo::no_existe".into(),
+            ],
+        };
+        let sin_aplicar = borrar_con(dir.path(), &[mixto], 42).expect("E/S");
+        assert_eq!(sin_aplicar, None, "un test de la lista no existe");
+        assert_eq!(arbol(dir.path()), antes, "no escribe nada a medias");
+    }
+
+    #[test]
+    fn assert_borrado_mutante_sin_tests_y_mutante_con_test_ausente_no_aplican() {
+        let dir = copia_con_test_de_leer_numero();
+        let antes = arbol(dir.path());
+        let mixto = MutanteMuerto {
+            archivo: "src/protocolo.rs".into(),
+            linea: 2,
+            nombre:
+                "src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)"
+                    .into(),
+            tests: vec![
+                "protocolo::leer_numero_lee_el_numero".into(),
+                "protocolo::no_existe".into(),
+            ],
+        };
+        for semilla in 1..=5u64 {
+            let muertos = [muerto_sin_test(), mixto.clone()];
+            assert_eq!(
+                borrar_con(dir.path(), &muertos, semilla).expect("E/S"),
+                None,
+                "semilla {semilla}"
+            );
+        }
+        assert_eq!(arbol(dir.path()), antes, "no toca el repo");
     }
 
     #[test]
