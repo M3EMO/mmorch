@@ -36,6 +36,8 @@ pub const UMBRAL: f32 = 0.9;
 const MIN_DEFECTOS_APLICABLES: u32 = 5;
 /// Casos limpios mínimos para calibrar una dimensión. Con menos, la medida no calibra.
 const MIN_LIMPIOS: u32 = 5;
+/// Porcentaje máximo de casos limpios sin veredicto para calibrar una dimensión. Más que esto, la medida no calibra.
+const MAX_LIMPIOS_SIN_VEREDICTO_PCT: u32 = 20;
 
 /// Una medición de una dimensión de una tarea, con su muestra.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -50,6 +52,10 @@ pub struct Fila {
     /// Copias sin alterar medidas. La especificidad sale de ellas.
     #[serde(default)]
     pub limpios: u32,
+    /// Casos limpios medidos con `sin_veredicto`: la dimensión no emitió veredicto en la copia. No detectan, así
+    /// que entran a `especificidad` como no detectados. No son falsas alarmas. Una fila sin el campo vale 0.
+    #[serde(default)]
+    pub limpios_sin_veredicto: u32,
     /// Casos que no se pudieron aplicar al repo, por ejemplo sin Dockerfile. No entran a las métricas.
     #[serde(default)]
     pub no_aplicable: u32,
@@ -139,10 +145,14 @@ impl Calibraciones {
                 .de(tarea, puntaje.dimension)
                 .filter(|f| muestra_suficiente(f));
             puntaje.exactitud_balanceada = fila.and_then(|f| f.exactitud_balanceada);
-            // Una fila incompleta no calibra: el tope detuvo la medición antes de su último caso.
-            let incompleta = fila.is_some_and(|f| f.incompleta);
+            // Una fila incompleta no calibra: el tope detuvo la medición antes de su último caso. Tampoco una con
+            // más limpios sin veredicto que `MAX_LIMPIOS_SIN_VEREDICTO_PCT`: la dimensión no mide bien esos casos.
+            let calibrable = fila.is_some_and(|f| {
+                !f.incompleta
+                    && f.limpios_sin_veredicto * 100 <= f.limpios * MAX_LIMPIOS_SIN_VEREDICTO_PCT
+            });
             puntaje.calibrada =
-                !incompleta && puntaje.exactitud_balanceada.is_some_and(|e| e >= UMBRAL);
+                calibrable && puntaje.exactitud_balanceada.is_some_and(|e| e >= UMBRAL);
         }
     }
 }
@@ -241,9 +251,9 @@ pub struct CasoGuardado {
     /// de que la calibración midiera el `target` (Tarea 59).
     #[serde(default)]
     pub target_reusado: Option<bool>,
-    /// Por qué `detectado` es true. Estructura, Arquitectura y Diseño: `sin_veredicto`, `hallazgo_sonda`,
-    /// `item_sonda:<item>`, `cita_juez` o `item_baja_2:<item>`. Las demás: `sin_veredicto`, `hallazgo_nuevo`,
-    /// `valor_menor` o `item_bajo:<item>`. `None` si no detectó.
+    /// Por qué `detectado` es true. Estructura, Arquitectura y Diseño: `hallazgo_sonda`, `item_sonda:<item>`,
+    /// `cita_juez` o `item_baja_2:<item>`. Las demás: `hallazgo_nuevo`, `valor_menor` o `item_bajo:<item>`.
+    /// `None` si no detectó. Un caso sin veredicto de la dimensión no detecta: su motivo está en `sin_veredicto`.
     #[serde(default)]
     pub motivo: Option<String>,
     /// Nivel de cada ítem de la dimensión calibrada en la base. Vacío si la base no tiene puntaje.
@@ -825,6 +835,10 @@ fn fila_de(
 ) -> Fila {
     let defectos_medidos = casos.iter().filter(|c| c.es_defecto).count() as u32;
     let limpios = casos.len() as u32 - defectos_medidos;
+    let limpios_sin_veredicto = casos
+        .iter()
+        .filter(|c| !c.es_defecto && c.sin_veredicto.is_some())
+        .count() as u32;
     let sensibilidad = proporcion(
         casos.iter().filter(|c| c.es_defecto && c.detectado).count() as u32,
         defectos_medidos,
@@ -866,6 +880,7 @@ fn fila_de(
         n: casos.len() as u32,
         defectos: defectos_medidos,
         limpios,
+        limpios_sin_veredicto,
         no_aplicable: no_aplicables,
         semilla,
         ts: ahora(),
@@ -1166,6 +1181,7 @@ fn fila_no_aplica(tarea: &Tarea, dimension: Dimension, semilla: u64) -> Fila {
         n: 0,
         defectos: 0,
         limpios: 0,
+        limpios_sin_veredicto: 0,
         no_aplicable: 0,
         semilla,
         ts: ahora(),
@@ -1530,7 +1546,7 @@ fn finalizar_casos(
         let motivo = if regla::es_con_juez(dimension) {
             motivo_con_juez(base, caso, dimension, item, lugar.as_ref())
         } else {
-            motivo_de_deteccion(base, &caso.veredicto, dimension, caso.es_defecto, &ruidosos)
+            motivo_de_deteccion(base, &caso.veredicto, dimension, &ruidosos)
         };
         caso.detectado = motivo.is_some();
         caso.motivo = motivo;
@@ -1556,8 +1572,8 @@ fn finalizar_casos(
     }
 }
 
-/// Motivo de un caso en Estructura, Arquitectura o Diseño. Sin veredicto de la dimensión, lo de siempre: el
-/// defecto es un falso negativo y el limpio un falso positivo. `item` y `lugar` son los del caso, según
+/// Motivo de un caso en Estructura, Arquitectura o Diseño. Sin veredicto de la dimensión, no detecta: el defecto
+/// es un falso negativo y el limpio no es falsa alarma. `item` y `lugar` son los del caso, según
 /// `item_y_lugar_de`.
 fn motivo_con_juez(
     base: &Veredicto,
@@ -1567,28 +1583,24 @@ fn motivo_con_juez(
     lugar: Option<&regla::Lugar>,
 ) -> Option<String> {
     if puntaje_de(&caso.veredicto, dimension).is_none_or(|p| p.sin_veredicto.is_some()) {
-        return (!caso.es_defecto).then(|| "sin_veredicto".to_string());
+        return None;
     }
     regla::detecta_con_juez(base, &caso.veredicto, dimension, item, lugar)
 }
 
-/// Por qué la dimensión detecta el caso, o `None` si no lo detecta. Si dos reglas disparan, gana la primera en
-/// este orden: `sin_veredicto` (un limpio sin veredicto), `hallazgo_nuevo`, `valor_menor`, `item_bajo:<item>`
+/// Por qué la dimensión detecta el caso, o `None` si no lo detecta. Sin veredicto de la dimensión, no detecta.
+/// Si dos reglas disparan, gana la primera en este orden: `hallazgo_nuevo`, `valor_menor`, `item_bajo:<item>`
 /// (el primer ítem de la base que baja). Las reglas de hallazgo, valor e ítem pasan por `estables::permite`.
 /// Solo para las dimensiones sin juez: Estructura, Arquitectura y Diseño usan `regla::detecta_con_juez`.
 fn motivo_de_deteccion(
     base: &Veredicto,
     veredicto: &Veredicto,
     dimension: Dimension,
-    es_defecto: bool,
     ruidosos: &BTreeSet<String>,
 ) -> Option<String> {
-    let sin_veredicto = || (!es_defecto).then(|| "sin_veredicto".to_string());
-    let Some(pv) = puntaje_de(veredicto, dimension) else {
-        return sin_veredicto();
-    };
+    let pv = puntaje_de(veredicto, dimension)?;
     if pv.sin_veredicto.is_some() {
-        return sin_veredicto();
+        return None;
     }
     let pb = puntaje_de(base, dimension)?;
     let ids_base: BTreeSet<&str> = base.hallazgos.iter().map(|h| h.id.as_str()).collect();
@@ -1618,7 +1630,8 @@ fn niveles_de(puntaje: Option<&Puntaje>) -> BTreeMap<String, u8> {
 }
 
 /// Si el ítem `item` de la dimensión baja frente a la base. `None` si la base no mide el ítem: no entra a
-/// la métrica. Sin veredicto de la dimensión, o sin nivel del ítem, cuenta como en `motivo_de_deteccion`.
+/// la métrica. Sin veredicto de la dimensión, no baja (`Some(false)`), sea limpio o defecto. Sin nivel del ítem,
+/// cuenta como falso positivo si el caso es limpio, y como no detectado si es defecto.
 fn detecta_item(
     base: &Veredicto,
     veredicto: &Veredicto,
@@ -1629,10 +1642,10 @@ fn detecta_item(
 ) -> Option<bool> {
     let nivel_base = nivel_de(puntaje_de(base, dimension)?, item)?;
     let Some(pv) = puntaje_de(veredicto, dimension) else {
-        return Some(!es_defecto);
+        return Some(false);
     };
     if pv.sin_veredicto.is_some() {
-        return Some(!es_defecto);
+        return Some(false);
     }
     Some(match nivel_de(pv, item) {
         Some(nivel) => {
@@ -1703,6 +1716,7 @@ mod tests {
             n: 20,
             defectos: 10,
             limpios: 10,
+            limpios_sin_veredicto: 0,
             no_aplicable: 0,
             semilla: 42,
             ts,
@@ -1842,7 +1856,7 @@ mod tests {
     }
 
     #[test]
-    fn calibra_limpio_sin_veredicto_cuenta_como_falso_positivo() {
+    fn calibra_limpio_sin_veredicto_no_es_falso_positivo() {
         let base = veredicto_base();
         let fila = calibrar(
             Path::new(FIXTURE),
@@ -1853,10 +1867,11 @@ mod tests {
         assert_eq!(fila.sensibilidad, Some(1.0));
         assert_eq!(
             fila.especificidad,
-            Some(0.0),
-            "todo limpio sin veredicto es FP"
+            Some(1.0),
+            "todo limpio sin veredicto no detecta: no es FP"
         );
-        assert_eq!(fila.exactitud_balanceada, Some(0.5));
+        assert_eq!(fila.limpios_sin_veredicto, fila.limpios);
+        assert_eq!(fila.exactitud_balanceada, Some(1.0));
     }
 
     #[test]
@@ -1875,6 +1890,72 @@ mod tests {
         );
         assert_eq!(fila.especificidad, Some(1.0));
         assert_eq!(fila.exactitud_balanceada, Some(0.5));
+    }
+
+    #[test]
+    fn calibra_limpio_sin_veredicto_no_cuenta_como_detectado() {
+        let (_t, tarea) = tarea_prueba();
+        let base = veredicto_base();
+        let medida = medir(
+            &tarea,
+            Dimension::Seguridad,
+            Path::new(FIXTURE),
+            &base,
+            |limpia, _, base| {
+                if limpia {
+                    con_motivo(base, "sin sonda")
+                } else {
+                    hundido(base)
+                }
+            },
+            20,
+        );
+        let limpios: Vec<&Caso> = medida.casos.iter().filter(|c| !c.es_defecto).collect();
+        assert!(!limpios.is_empty(), "hay limpios medidos");
+        for caso in &limpios {
+            assert!(
+                !caso.detectado,
+                "el limpio {} sin veredicto detecta",
+                caso.indice
+            );
+            assert_eq!(
+                caso.motivo, None,
+                "el limpio {} sin veredicto tiene motivo",
+                caso.indice
+            );
+        }
+        let fila = medida.fila.expect("fila");
+        assert_eq!(fila.limpios_sin_veredicto, fila.limpios);
+        assert_eq!(fila.especificidad, Some(1.0));
+    }
+
+    #[test]
+    fn calibra_defecto_sin_veredicto_no_suma_a_limpios_sin_veredicto() {
+        let (_t, tarea) = tarea_prueba();
+        let base = veredicto_base();
+        let medida = medir(
+            &tarea,
+            Dimension::Seguridad,
+            Path::new(FIXTURE),
+            &base,
+            |limpia, _, base| {
+                if limpia {
+                    base.clone()
+                } else {
+                    con_motivo(base, "sin sonda")
+                }
+            },
+            20,
+        );
+        let defectos: Vec<&Caso> = medida.casos.iter().filter(|c| c.es_defecto).collect();
+        assert!(!defectos.is_empty(), "hay defectos medidos");
+        assert!(
+            defectos.iter().all(|c| !c.detectado),
+            "un defecto sin veredicto es FN"
+        );
+        let fila = medida.fila.expect("fila");
+        assert_eq!(fila.sensibilidad, Some(0.0));
+        assert_eq!(fila.limpios_sin_veredicto, 0);
     }
 
     #[test]
@@ -2739,7 +2820,7 @@ mod tests {
             .collect()
     }
 
-    /// Un limpio de Diseño sin veredicto del juez. Con esto, la detección sale de `sin_veredicto`.
+    /// Un limpio de Diseño sin veredicto del juez. Con esto, el limpio no detecta: su motivo queda en `sin_veredicto`.
     fn veredicto_limpio_sin_juez(es_limpio: bool) -> Veredicto {
         let mut v = veredicto_arq_dis(1.0);
         if es_limpio {
@@ -3000,14 +3081,49 @@ mod tests {
         };
         assert!(!sin_cache.is_empty(), "hay limpios medidos");
         assert!(
-            sin_cache.iter().all(|(_, detectado, _)| *detectado),
-            "el limpio sin juez se detecta: {sin_cache:?}"
+            sin_cache
+                .iter()
+                .all(|(_, detectado, motivo)| !*detectado && motivo.is_none()),
+            "el limpio sin juez no detecta: {sin_cache:?}"
         );
         assert_eq!(con_cache, sin_cache);
     }
 
     fn fila_de_prueba(tarea: &str, ts: f64) -> Fila {
         fila(tarea, Dimension::Seguridad, ts, Some(0.95))
+    }
+
+    #[test]
+    fn calibra_limpios_sin_veredicto_hasta_el_20_por_ciento_calibra() {
+        let dentro = Fila {
+            limpios_sin_veredicto: 2,
+            ..fila("memora", Dimension::Seguridad, 1.0, Some(1.0))
+        };
+        let fuera = Fila {
+            limpios_sin_veredicto: 3,
+            ..dentro.clone()
+        };
+        for (fila, calibrada) in [(dentro, true), (fuera, false)] {
+            let c = Calibraciones {
+                v: VERSION,
+                filas: vec![fila],
+            };
+            let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.8)];
+            c.aplicar("memora", &mut puntajes);
+            assert_eq!(puntajes[0].calibrada, calibrada);
+        }
+    }
+
+    #[test]
+    fn fila_sin_limpios_sin_veredicto_carga_con_cero() {
+        let fila = fila("memora", Dimension::Seguridad, 1.0, Some(0.95));
+        let mut vieja = serde_json::to_value(&fila).expect("serializa");
+        vieja
+            .as_object_mut()
+            .expect("objeto")
+            .remove("limpios_sin_veredicto");
+        let leida: Fila = serde_json::from_value(vieja).expect("un JSON viejo parsea");
+        assert_eq!(leida.limpios_sin_veredicto, 0);
     }
 
     #[test]
@@ -4355,9 +4471,10 @@ mod tests {
         assert_eq!((fila.defectos, fila.limpios, fila.reemplazos), (1, 1, 0));
         assert_eq!(
             fila.especificidad,
-            Some(0.0),
-            "un limpio sin veredicto es falso positivo"
+            Some(1.0),
+            "un limpio sin veredicto no es falso positivo"
         );
+        assert_eq!(fila.limpios_sin_veredicto, 1);
     }
 
     // ---- Tarea 48, parte 2, punto 3: el juez en paralelo, de a 4 ----

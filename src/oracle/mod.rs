@@ -5518,6 +5518,7 @@ mod tests {
             n: 20,
             defectos: 10,
             limpios: 10,
+            limpios_sin_veredicto: 0,
             no_aplicable: 0,
             semilla: 42,
             ts: 1.0,

@@ -127,13 +127,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     /// Si la dimensión detecta el caso: `motivo_de_deteccion` con motivo.
-    fn detecta_dimension(
-        base: &Veredicto,
-        veredicto: &Veredicto,
-        dimension: Dimension,
-        es_defecto: bool,
-    ) -> bool {
-        motivo_de_deteccion(base, veredicto, dimension, es_defecto, &BTreeSet::new()).is_some()
+    fn detecta_dimension(base: &Veredicto, veredicto: &Veredicto, dimension: Dimension) -> bool {
+        motivo_de_deteccion(base, veredicto, dimension, &BTreeSet::new()).is_some()
     }
 
     fn ids(v: &[&str]) -> Vec<String> {
@@ -181,7 +176,7 @@ mod tests {
         let base = base_con_flaky(Dimension::Completitud);
         let caso = caso_oculto(Dimension::Completitud, 0.5, &["t_flaky"]);
         assert!(
-            !detecta_dimension(&base, &caso, Dimension::Completitud, false),
+            !detecta_dimension(&base, &caso, Dimension::Completitud),
             "un test inestable de la base no cuenta en un caso limpio"
         );
     }
@@ -191,7 +186,7 @@ mod tests {
         let base = base_con_flaky(Dimension::Funciona);
         let caso = caso_oculto(Dimension::Funciona, 0.5, &["t_flaky"]);
         assert!(
-            !detecta_dimension(&base, &caso, Dimension::Funciona, false),
+            !detecta_dimension(&base, &caso, Dimension::Funciona),
             "la regla también aplica a Funciona"
         );
     }
@@ -201,7 +196,7 @@ mod tests {
         let base = base_con_flaky(Dimension::Completitud);
         let caso = caso_oculto(Dimension::Completitud, 0.5, &["t_flaky", "t_real"]);
         assert!(
-            detecta_dimension(&base, &caso, Dimension::Completitud, true),
+            detecta_dimension(&base, &caso, Dimension::Completitud),
             "un test estable nuevo que falla sí detecta"
         );
     }
@@ -211,7 +206,7 @@ mod tests {
         let base = base_con_flaky(Dimension::Completitud);
         let caso = caso_oculto(Dimension::Completitud, 0.5, &["t_flaky"]);
         assert!(
-            !detecta_dimension(&base, &caso, Dimension::Completitud, true),
+            !detecta_dimension(&base, &caso, Dimension::Completitud),
             "un defecto que solo hace fallar el test inestable no detecta"
         );
     }
@@ -221,7 +216,7 @@ mod tests {
         let base = base_contrato_con_flaky();
         let caso = caso_contrato(0.5, &["t_flaky"]);
         assert!(
-            !detecta_dimension(&base, &caso, Dimension::Completitud, false),
+            !detecta_dimension(&base, &caso, Dimension::Completitud),
             "un test inestable del contrato de la base no cuenta en un caso limpio"
         );
     }
@@ -231,7 +226,7 @@ mod tests {
         let base = base_contrato_con_flaky();
         let caso = caso_contrato(0.5, &["t_flaky", "t_real"]);
         assert!(
-            detecta_dimension(&base, &caso, Dimension::Completitud, true),
+            detecta_dimension(&base, &caso, Dimension::Completitud),
             "un test del contrato estable y nuevo que falla sí detecta"
         );
     }
@@ -241,7 +236,7 @@ mod tests {
         let base = base_contrato_con_flaky();
         let caso = caso_contrato(0.5, &["t_flaky"]);
         assert!(
-            !detecta_dimension(&base, &caso, Dimension::Completitud, true),
+            !detecta_dimension(&base, &caso, Dimension::Completitud),
             "un defecto que solo hace fallar el test inestable del contrato no detecta"
         );
     }
@@ -252,7 +247,7 @@ mod tests {
         let base = base_con_flaky(Dimension::Completitud);
         let caso = caso_contrato(0.5, &["t_flaky"]);
         assert!(
-            detecta_dimension(&base, &caso, Dimension::Completitud, true),
+            detecta_dimension(&base, &caso, Dimension::Completitud),
             "el contrato compara sus propios tests malos, no los del oculto"
         );
     }
@@ -269,7 +264,7 @@ mod tests {
             ..Veredicto::default()
         };
         assert!(
-            detecta_dimension(&base, &caso, Dimension::Completitud, true),
+            detecta_dimension(&base, &caso, Dimension::Completitud),
             "un test que era estable en la base y ahora es inestable es un test malo nuevo"
         );
     }
@@ -287,7 +282,7 @@ mod tests {
             ..Veredicto::default()
         };
         assert!(
-            detecta_dimension(&base, &caso, Dimension::Completitud, true),
+            detecta_dimension(&base, &caso, Dimension::Completitud),
             "un total menor del oculto cuenta como cambio de tests"
         );
     }
@@ -304,7 +299,7 @@ mod tests {
             "la regla no aplica a Pruebas"
         );
         assert!(
-            detecta_dimension(&base, &caso, Dimension::Pruebas, true),
+            detecta_dimension(&base, &caso, Dimension::Pruebas),
             "Pruebas detecta por valor, como antes"
         );
     }

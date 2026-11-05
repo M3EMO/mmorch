@@ -640,6 +640,13 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": 0,
           "minimum": 0
         },
+        "limpios_sin_veredicto": {
+          "description": "Casos limpios medidos con `sin_veredicto`: la dimensión no emitió veredicto en la copia. No detectan, así\nque entran a `especificidad` como no detectados. No son falsas alarmas. Una fila sin el campo vale 0.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
         "n": {
           "description": "Casos medidos: los defectos aplicados más los limpios. No cuenta los `no_aplicable`.",
           "type": "integer",
@@ -760,7 +767,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "minimum": 0
     },
     "motivo": {
-      "description": "Por qué `detectado` es true. Estructura, Arquitectura y Diseño: `sin_veredicto`, `hallazgo_sonda`,\n`item_sonda:<item>`, `cita_juez` o `item_baja_2:<item>`. Las demás: `sin_veredicto`, `hallazgo_nuevo`,\n`valor_menor` o `item_bajo:<item>`. `None` si no detectó.",
+      "description": "Por qué `detectado` es true. Estructura, Arquitectura y Diseño: `hallazgo_sonda`, `item_sonda:<item>`,\n`cita_juez` o `item_baja_2:<item>`. Las demás: `hallazgo_nuevo`, `valor_menor` o `item_bajo:<item>`.\n`None` si no detectó. Un caso sin veredicto de la dimensión no detecta: su motivo está en `sin_veredicto`.",
       "type": [
         "string",
         "null"
