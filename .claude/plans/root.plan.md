@@ -4462,3 +4462,119 @@ wait
 **P65: ¿Memora Diseño queda sin calibrar?** El juez no da veredicto en 3 de cada 10 evaluaciones limpias, y el límite es 2. Queda fuera de `global` en memora.
 - **a)** Aceptar. El contrato del juez se revisa en el hito 1b. Recomendada.
 - **b)** Probar otra semilla: cerca de 2,2 USD, con 38 % como mucho de pasar la compuerta.
+
+## Vuelta del 2026-11-05 (noche 3): Grupo 2b y filas sin API
+
+**Error del orquestador, ya corregido.** Dividió `$TOPE` entre los procesos del Grupo 2b, aunque `gasto_desde` ya ve el gasto de todos. El primer intento se detuvo con un tope de 2,71 USD y gastó 1,19 USD.
+
+**Resultados.**
+
+| Tarea | Dimensión | Sens. / espec. | Segundos | Binario |
+|---|---|---|---|---|
+| memora | estructura | 1.0 / 1.0 | 3011 | 8a5391f |
+| brasa | estructura | 1.0 / 1.0 | 12986 | 8a5391f |
+| brasa | diseño | exit 3: "la línea base no tiene veredicto de diseno" | 1577 | 8a5391f |
+| memora | completitud | 1.0 / 1.0, 3 ruidosos | 1646 | 8a5391f |
+| memora | funciona | 0.8 / 1.0, 3 ruidosos | 6265 | 8a5391f |
+| brasa | funciona | 0.78 / 1.0, 10 reemplazos, 9 defectos | 12074 | 8a5391f |
+| brasa | entrega | no aplica | 0 | 8a5391f |
+| memora | pruebas | 0.6 / 1.0 | 413 | ca8c6a4 |
+
+El gasto medido es 19,8665 USD, y el límite útil es 24 USD. La Tarea 67 está en `laptop/tarea-67` (c1b2fa8), y el orquestador la prueba con podman en ca8c6a4.
+
+## Diagnóstico de los no detectados (Opus, 2026-11-05)
+
+### Memora pruebas: 4 casos, un solo mutante
+
+- **Hecho.** Los 4 eligen `src/persist.rs:284:5`, `put_bytes -> Ok(())`, y apagan solo `snapshot_ida_y_vuelta`. Los otros 6 eligen 4 mutantes distintos, y detectan.
+- **Hecho.** `cargo test` corta en el primer binario que falla, así que el registro de la base no muestra los tests de `tests/server.rs` para ese mutante.
+- **Hipótesis fuerte, por lectura.** `sigterm_guarda_snapshot_y_sale_con_cero` guarda un snapshot y lo vuelve a leer (`tests/server.rs:140-148`). Con `put_bytes` roto, esa lectura falla, y el mutante sigue muerto.
+- **Clasificación: propiedad real del repo.** La suite detecta ese cambio por dos caminos. Es el falso negativo honesto que el Desempate 38 anunció antes de medir. La muestra efectiva es de 5 mutantes, no de 10.
+
+### Memora funciona
+
+- **`src/cmd/server.rs:222`: propiedad real.** Solo evita repetir una clave de WATCH. Invertirlo casi no cambia la conducta visible. Es hipótesis por lectura.
+- **`src/util.rs:122`: límite del instrumento, y es una falla de Root.**
+  - **Hecho, por lectura.** Invertir ese `==` hace que `h[ae]llo` coincida con `hxllo` y no con `hello`. `test_keys_patrones` pide `hallo` y `hello`, y pasa en la base (`historial.jsonl`). Debería fallar.
+  - **Hecho, por código.** `motivo_de_deteccion` solo detecta por hallazgo nuevo, `valor` menor o ítem menor (`src/oracle/calibra.rs`). `estables::permite` filtra después. Un test nuevo que falla no detecta por sí solo, aunque `permite` lo vea.
+  - **Hecho.** memora tiene 3 tests ruidosos. Cambian `valor` entre corridas.
+  - **Hipótesis.** La base tuvo un test ruidoso fallando, el caso lo tuvo pasando, y `test_keys_patrones` falló. El `valor` no bajó, y la regla no detectó. Falta el dato: el caso no guarda ni `valor` ni los tests. La Tarea 68 lo guarda.
+
+### Brasa funciona
+
+- **`src/render.rs:538`: propiedad real.** La función corre, y reusar los targets no cambia la imagen. Parece un mutante equivalente, por lectura.
+- **`src/gltf_load.rs:225`: sin causa probada.** Hipótesis: la suite compara glTF con tolerancia, y calcular las normales no la rompe. Sería una ceguera real del oráculo.
+- **Caso 10: límite del instrumento.** Agotó `MAX_REEMPLAZOS` (5), sin hallar una función ejecutada. Por eso la fila mide 9 defectos.
+- **Esta fila no tiene el problema de `valor`:** brasa no tiene tests ruidosos (`ruidosos` vacío).
+
+## Desempates técnicos 39 (Opus, 2026-11-05)
+
+**Tamaño de muestra.** Con 9 o 10 defectos, un caso mueve la sensibilidad 10 u 11 puntos. La cota inferior de Wilson al 90 % da 0,57 para 7/9, 0,60 para 8/10 y 0,40 para 6/10. Ninguna fila distingue 0,889 de 0,9. El umbral es grueso, y debe decirse. No se ajusta.
+
+**Decisión por fila.**
+- **`brasa funciona` (0,889): no calibrada, y se queda así.** No toco el umbral, ni `MAX_REEMPLAZOS`, ni la semilla. Cualquiera de los tres sería elegir después de ver el dato.
+- **`memora pruebas` (0,80): no calibrada, y se queda así.** No saco del denominador los mutantes que siguen muertos. El Desempate 38 los declaró falsos negativos antes de medir.
+- **`memora funciona` (0,90): se repite con la Tarea 68.** La corrección sale de leer el código y tiene su test en rojo. Reconozco que la encontré mirando un no detectado. Por eso la regla se prueba con un caso armado, sin depender del resultado de memora. Si la fila nueva baja de 0,9, queda sin calibrar.
+
+**Informe 67.**
+1. **Último segmento:** queda.
+2. **Homónimos:** quedan. Apagar de más refuerza el defecto, no lo debilita.
+3. **Doctests:** quedan fuera.
+4. **Nombre del test viejo:** se corrige en la Tarea 68.
+
+**Brasa pruebas: lanzala cuando termine la suite.** La Tarea 68 no toca el defecto ni la regla de `AssertBorrado`, así que no la invalida. `brasa diseño` tampoco se invalida: usa `regla.rs`. Sus reintentos siguen, con ca8c6a4.
+
+**Filas que invalida la Tarea 68.** Solo `memora funciona`, sin API, cerca de 105 minutos. `memora completitud` y `brasa completitud` ya detectan todo y sus limpios no cambian. `brasa funciona` no tiene ruidosos, y una falla nueva baja su `valor`.
+
+**Qué falta para declarar calibrado el hito 1.** Propongo este criterio. No exige 0,9 en todo, porque eso sería cambiar la promesa:
+- Cada dimensión de memora y brasa tiene una fila del protocolo fijo (`n = 20`, semilla 42), o una fila "no aplica", o una razón escrita.
+- Solo las filas con exactitud de 0,9 o más entran a `global`.
+- Las que quedan fuera se listan con su causa en `docs/cierre-hito-1.md`.
+
+Con ese criterio faltan: `brasa diseño`, `brasa pruebas`, `memora funciona` y la respuesta a P65.
+
+| Dimensión | memora | brasa |
+|---|---|---|
+| seguridad | calibrada | calibrada |
+| entrega | calibrada | no aplica |
+| completitud | calibrada | calibrada |
+| estructura | calibrada | calibrada |
+| arquitectura | calibrada | calibrada |
+| eficiencia | no aplica | no aplica |
+| funciona | pendiente (0,90) | fuera (0,889) |
+| pruebas | fuera (0,80) | pendiente con la 67 |
+| diseño | fuera, P65 | pendiente |
+
+**Qué falta para la corrida real.** La mezcla (P63 y P64), con la prueba con podman en verde. Los pendientes de arriba no la bloquean técnicamente, pero no corren a la vez que ella.
+
+**Saldo de API.**
+- Quedan 24 − 19,8665 = 4,13 USD.
+- `brasa diseño` reserva cerca de 1,4 USD: 10 casos, 1 base y hasta 2 bases repetidas.
+- Quedan cerca de 2,7 USD para la corrida real. Alcanzan para unas 25 evaluaciones con juez. Los builders usan el cupo de Claude, no la API, según la config `ecc-haiku`.
+- P65 opción b dejaría cerca de 0,5 USD. Por eso sigo recomendando la a.
+
+### Tarea 68: Un test nuevo que falla detecta por sí solo
+- **Action**: los cuatro puntos del brief.
+- **Archivos**: `src/oracle/calibra.rs`, `src/oracle/calibra/`.
+- **Arranca**: ya, desde `laptop/tarea-67` (c1b2fa8), con `ROOT_SIN_PODMAN=1`.
+- **Brief**: `docs/builds/brief-local-68.md`.
+
+## Orden final del hito 1 (2026-11-05, noche 3)
+
+1. **Prueba con podman de ca8c6a4**, en curso. **Tarea 68** en paralelo.
+2. **`brasa pruebas` y `brasa diseño`** con ca8c6a4, cuando la suite termine.
+3. **Prueba con podman de la 68 sobre todo lo anterior**, sin calibración en curso.
+4. **`memora funciona`** con el binario de la 68.
+5. **Mezcla de 62, 63, p5, 64, 65, 66, 67 y 68**, con la orden del usuario.
+6. **Corrida real de memora (Tarea 16)**.
+7. **Comparación de `global`.**
+8. **Validez automática** (Tarea 12b) y **cierre** (Tarea 47).
+9. **Borrado de memora y brasa** (decisión 61).
+
+## Preguntas para el usuario (2026-11-05, noche 3)
+
+**P66: ¿Alcanza este criterio para declarar calibrado el hito 1?** Hoy quedan fuera de `global` `brasa funciona` (0,889), `memora pruebas` (0,80) y probablemente `memora diseño`.
+- **a)** Sí. Cada dimensión tiene fila o razón escrita, y solo entran las de 0,9 o más. Recomendada: memora y brasa se borran después.
+- **b)** No. Repetir `brasa funciona` y `memora pruebas` con una sola corrida más grande, `n = 40` y semilla 43, sin API. El resultado se acepta sea cual sea. Tarda cerca de 7 horas más.
+
+P63, P64 y P65 siguen abiertas. P64 ahora cubre también la 68.
