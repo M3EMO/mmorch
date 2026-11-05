@@ -172,12 +172,12 @@ fn leer_viables(json: &str) -> Result<Lectura, ErrorOraculo> {
     Ok(Lectura::Medible(viables))
 }
 
-/// Primeros `mutantes_max` viables, en el orden del archivo. Es la muestra que mide la sonda.
+/// Primeros `mutantes_max` viables, en el orden del archivo. El `-F` ya filtra la muestra de la sonda.
 fn muestra(viables: &[Viable], mutantes_max: u32) -> &[Viable] {
     &viables[..viables.len().min(mutantes_max as usize)]
 }
 
-/// Lee el reporte de mutantes. Mide los primeros `mutantes_max` viables, en el orden del archivo.
+/// Lee el reporte de mutantes. Cuenta los primeros `mutantes_max` viables, en el orden del archivo.
 pub fn parsear_outcomes(
     json: &str,
     mutantes_max: u32,
@@ -320,6 +320,21 @@ fn filtro_de(nombres: &[String]) -> String {
     )
 }
 
+/// Muestra repartida de `nombres`: `max` índices `i * total / max`, en orden. Si hay menos, toma todos.
+/// Multiplica en u128 para que el producto no desborde.
+fn muestra_repartida(nombres: &[String], max: usize) -> Vec<String> {
+    let total = nombres.len();
+    if total <= max {
+        return nombres.to_vec();
+    }
+    (0..max)
+        .map(|i| {
+            let indice = (i as u128 * total as u128 / max as u128) as usize;
+            nombres[indice].clone()
+        })
+        .collect()
+}
+
 /// Comando de la corrida de mutación. Corre sobre una copia de `/repo` y deja `outcomes.json` en
 /// `/salida`, porque el ejecutor solo lee archivos sueltos de esa carpeta. `filtro` es `""` (todos
 /// los mutantes) o el `-F` de `filtro_de`.
@@ -405,7 +420,7 @@ pub fn sonda_mutacion(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoM
     if let Some(r) = falta_herramienta(ej, DIMENSION, SONDA) {
         return desde_sonda(r);
     }
-    // Primero el listado: da los nombres en orden. La corrida mide solo los primeros `mutantes_max`.
+    // Primero el listado: da los nombres en orden. La corrida mide solo una muestra de `mutantes_max`.
     let listado = match ej.ejecutar(&comando_de_listado()) {
         Ok(s) => s,
         Err(e) => return desde_sonda(sin_veredicto(DIMENSION, e.to_string())),
@@ -435,8 +450,8 @@ pub fn sonda_mutacion(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoM
     }
     let max = mutantes_max(tarea);
     let total = nombres.len() as u32;
-    let muestra = &nombres[..nombres.len().min(max as usize)];
-    let salida = match ej.ejecutar(&comando_de_corrida(tarea, &filtro_de(muestra))) {
+    let muestra = muestra_repartida(&nombres, max as usize);
+    let salida = match ej.ejecutar(&comando_de_corrida(tarea, &filtro_de(&muestra))) {
         Ok(s) => s,
         Err(e) => return desde_sonda(sin_veredicto(DIMENSION, e.to_string())),
     };
@@ -650,10 +665,26 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&salida.stdout), regex);
     }
 
+    /// Cien mutantes en tres archivos, 34/33/33, con nombres únicos.
+    fn cien_mutantes() -> Vec<String> {
+        (0..100)
+            .map(|i| {
+                let archivo = match i {
+                    0..34 => "a",
+                    34..67 => "b",
+                    _ => "c",
+                };
+                format!("src/{archivo}.rs:{i}:1: replace f{i} -> u8 with 0")
+            })
+            .collect()
+    }
+
     #[test]
-    fn mutacion_corre_solo_los_primeros_mutantes_max_del_listado() {
+    fn mutacion_corre_una_muestra_repartida_del_listado() {
         let t = tarea_pruebas(3);
-        let ej = con_listado_y_corrida(listado_json(&NOMBRES), corrida_de(&NOMBRES[..3]));
+        // Con 5 nombres y max 3, los índices son 0, 5/3=1 y 10/3=3.
+        let elegidos = [NOMBRES[0], NOMBRES[1], NOMBRES[3]];
+        let ej = con_listado_y_corrida(listado_json(&NOMBRES), corrida_de(&elegidos));
         let r = sonda_mutacion(&ej, &t);
         assert_eq!(r.muestra, 3);
         assert!(r.truncado);
@@ -662,12 +693,52 @@ mod tests {
         assert_eq!(cmds.len(), 1, "una sola corrida: {cmds:?}");
         let esperado = "-F '^(?:src/a\\.rs:1:5: replace a -> u8 with 0|\
             src/a\\.rs:2:9: replace b \\+ c with b - c|\
-            src/a\\.rs:3:3: replace c\\(x\\) with d\\.e)$'";
+            src/b\\.rs:4:1: replace d -> Vec<u8> with vec!\\[\\])$'";
         assert!(cmds[0].contains(esperado), "{}", cmds[0]);
         assert!(
-            !cmds[0].contains("src/b\\.rs"),
-            "no debe pedir los otros dos"
+            !cmds[0].contains("c\\(x\\)"),
+            "no debe pedir el índice 2: {}",
+            cmds[0]
         );
+    }
+
+    #[test]
+    fn mutacion_muestra_de_cien_mutantes_cubre_los_tres_archivos() {
+        let nombres = cien_mutantes();
+        let refs: Vec<&str> = nombres.iter().map(String::as_str).collect();
+        let t = tarea_pruebas(10);
+        // Índices 0, 10, ..., 90: caen en a.rs, b.rs y c.rs.
+        let elegidos: Vec<&str> = (0..10).map(|i| refs[i * 10]).collect();
+        let ej = con_listado_y_corrida(listado_json(&refs), corrida_de(&elegidos));
+        let _ = sonda_mutacion(&ej, &t);
+        let cmds = corridas(&ej);
+        assert_eq!(cmds.len(), 1, "una sola corrida: {cmds:?}");
+        for archivo in ["src/a\\.rs", "src/b\\.rs", "src/c\\.rs"] {
+            assert!(cmds[0].contains(archivo), "falta {archivo}: {}", cmds[0]);
+        }
+        assert!(
+            !cmds[0].contains("src/a\\.rs:1:1:"),
+            "la muestra no toma los primeros: {}",
+            cmds[0]
+        );
+    }
+
+    #[test]
+    fn mutacion_muestra_repartida_toma_indices_i_por_total_sobre_max() {
+        let nombres = cien_mutantes();
+        let muestra = muestra_repartida(&nombres, 10);
+        let esperada: Vec<String> = (0..10).map(|i| nombres[i * 10].clone()).collect();
+        assert_eq!(muestra, esperada);
+        // Total 5 y max 3: índices 0, 1 y 3.
+        let cinco: Vec<String> = (0..5).map(|i| format!("m{i}")).collect();
+        assert_eq!(muestra_repartida(&cinco, 3), ["m0", "m1", "m3"]);
+    }
+
+    #[test]
+    fn mutacion_muestra_repartida_con_menos_mutantes_que_el_maximo_toma_todos() {
+        let nombres: Vec<String> = (0..4).map(|i| format!("m{i}")).collect();
+        assert_eq!(muestra_repartida(&nombres, 10), nombres);
+        assert_eq!(muestra_repartida(&nombres, 4), nombres);
     }
 
     #[test]
