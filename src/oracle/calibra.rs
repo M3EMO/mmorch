@@ -1958,14 +1958,16 @@ mod tests {
     }
 
     #[test]
-    fn calibra_dimension_sin_defectos_o_n_cero_es_uso() {
+    fn calibra_funciona_tiene_defecto_y_n_cero_es_uso() {
         let base = veredicto_base();
         let (_t, tarea) = tarea_prueba();
         let ev = falso(Path::new(FIXTURE), &base, |_, _, base| base.clone());
-        let sin_defectos =
-            calibrar_con(&tarea, Dimension::Funciona, 20, 42, Path::new(FIXTURE), &ev)
-                .expect_err("funciona no tiene defectos");
-        assert_eq!(sin_defectos.codigo_de_salida(), 2);
+        // Desde la Tarea 63 toda dimensión tiene al menos un defecto: Funciona tiene `ComportamientoRoto`.
+        let funciona = calibrar_con(&tarea, Dimension::Funciona, 2, 42, Path::new(FIXTURE), &ev);
+        assert!(
+            !matches!(&funciona, Err(e) if e.codigo_de_salida() == 2),
+            "Funciona ya no sale con 2 por falta de defectos"
+        );
         let n_cero = calibrar_con(&tarea, Dimension::Seguridad, 0, 42, Path::new(FIXTURE), &ev)
             .expect_err("n cero");
         assert_eq!(n_cero.codigo_de_salida(), 2);

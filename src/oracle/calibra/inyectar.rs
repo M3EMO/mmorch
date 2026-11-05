@@ -24,10 +24,11 @@ pub enum Defecto {
     ErrorTragado,
     AssertBorrado,
     DockerfileRoot,
+    ComportamientoRoto,
 }
 
 /// Todos los defectos, en el orden de `Defecto`.
-pub const TODOS: [Defecto; 9] = [
+pub const TODOS: [Defecto; 10] = [
     Defecto::SecretoEnCodigo,
     Defecto::PanicoEnEntrada,
     Defecto::BucleCuadratico,
@@ -37,6 +38,7 @@ pub const TODOS: [Defecto; 9] = [
     Defecto::ErrorTragado,
     Defecto::AssertBorrado,
     Defecto::DockerfileRoot,
+    Defecto::ComportamientoRoto,
 ];
 
 impl Defecto {
@@ -51,6 +53,7 @@ impl Defecto {
             Defecto::ErrorTragado => Dimension::Diseno,
             Defecto::AssertBorrado => Dimension::Pruebas,
             Defecto::DockerfileRoot => Dimension::Entrega,
+            Defecto::ComportamientoRoto => Dimension::Funciona,
         }
     }
 
@@ -66,6 +69,7 @@ impl Defecto {
             Defecto::ErrorTragado => "diseno.errores",
             Defecto::AssertBorrado => "pruebas.mutacion",
             Defecto::DockerfileRoot => "entrega.contenedor",
+            Defecto::ComportamientoRoto => "funciona.correccion",
         }
     }
 }
@@ -147,6 +151,7 @@ pub fn inyectar_con(
             None => None,
         },
         Defecto::DockerfileRoot => dockerfile(dir)?,
+        Defecto::ComportamientoRoto => comportamiento(dir, &mut rng)?,
     };
     Ok(lugar.map(|(archivo, linea)| Inyeccion {
         defecto,
@@ -821,6 +826,55 @@ fn dockerfile(dir: &Path) -> io::Result<Lugar> {
     Ok(Some(("Dockerfile".to_string(), linea as u32)))
 }
 
+/// Posición del primer ` == ` de `linea` si es una comparación de código real. Descarta comentarios, textos (un
+/// `"` antes del `==`), líneas con `=>`, `>=` o `<=`, y los ` == ` sin expresión a un lado.
+fn posicion_de_igualdad(linea: &str) -> Option<usize> {
+    let t = linea.trim_start();
+    if t.starts_with("//") || t.starts_with("/*") || t.starts_with("* ") {
+        return None;
+    }
+    if ["=>", ">=", "<="]
+        .iter()
+        .any(|flecha| linea.contains(flecha))
+    {
+        return None;
+    }
+    let p = linea.find(" == ")?;
+    let antes = &linea[..p];
+    let despues = &linea[p + 4..];
+    let real = !antes.contains('"')
+        && !antes.contains("//")
+        && !antes.contains("/*")
+        && !antes.trim().is_empty()
+        && !despues.trim().is_empty();
+    real.then_some(p)
+}
+
+/// Cambia el primer ` == ` de una línea de producción de `src/` por ` != `: la comparación sale invertida.
+/// Usa solo las líneas de antes de `#[cfg(test)]`. `Ok(None)` si no hay ninguna comparación de ese tipo.
+fn comportamiento(dir: &Path, rng: &mut Prng) -> io::Result<Lugar> {
+    let mut candidatos: Vec<(String, usize)> = Vec::new();
+    for archivo in rust_en(dir, "src")? {
+        let lineas = partir(&leer(dir, &archivo)?);
+        let limite = limite_de_produccion(&lineas);
+        for (i, linea) in lineas[..limite].iter().enumerate() {
+            if posicion_de_igualdad(linea).is_some() {
+                candidatos.push((archivo.clone(), i));
+            }
+        }
+    }
+    let Some((archivo, i)) = rng.elegir(&candidatos).cloned() else {
+        return Ok(None);
+    };
+    let mut lineas = partir(&leer(dir, &archivo)?);
+    let Some(p) = posicion_de_igualdad(&lineas[i]) else {
+        return Ok(None);
+    };
+    lineas[i].replace_range(p..p + 4, " != ");
+    escribir(dir, &archivo, &unir(&lineas))?;
+    Ok(Some((archivo, i as u32 + 1)))
+}
+
 #[cfg(test)]
 pub(crate) mod pruebas {
     use std::collections::BTreeMap;
@@ -919,7 +973,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
 
-    use super::pruebas::{arbol, capas_fixture, copia_fixture};
+    use super::pruebas::{arbol, capas_fixture, copia_fixture, copiar};
     use super::*;
 
     /// Aplica `defecto` a una copia nueva del fixture. Devuelve el resultado y los árboles antes y después.
@@ -971,15 +1025,20 @@ mod tests {
         assert_eq!(Defecto::ErrorTragado.item(), "diseno.errores");
         assert_eq!(Defecto::AssertBorrado.item(), "pruebas.mutacion");
         assert_eq!(Defecto::DockerfileRoot.item(), "entrega.contenedor");
+        assert_eq!(Defecto::ComportamientoRoto.dimension(), Dimension::Funciona);
+        assert_eq!(Defecto::ComportamientoRoto.item(), "funciona.correccion");
     }
 
     #[test]
-    fn inyectar_de_dimension_lista_sus_defectos_y_funciona_no_tiene() {
+    fn inyectar_de_dimension_lista_sus_defectos_y_funciona_tiene_el_suyo() {
         assert_eq!(
             de_dimension(Dimension::Seguridad),
             vec![Defecto::SecretoEnCodigo, Defecto::PanicoEnEntrada]
         );
-        assert!(de_dimension(Dimension::Funciona).is_empty());
+        assert_eq!(
+            de_dimension(Dimension::Funciona),
+            vec![Defecto::ComportamientoRoto]
+        );
     }
 
     #[test]
@@ -1725,5 +1784,179 @@ mod tests {
             lugares.len() >= 2,
             "las semillas deben elegir lugares distintos: {lugares:?}"
         );
+    }
+
+    /// Copia del fixture con una comparación de producción: `Almacen::cuenta_es`, en `src/almacen.rs`.
+    /// El fixture no tiene ningún ` == `, así que el defecto necesita esta línea.
+    fn copia_con_comparacion() -> tempfile::TempDir {
+        let dir = copia_fixture();
+        let ruta = dir.path().join("src/almacen.rs");
+        let mut texto = std::fs::read_to_string(&ruta).expect("almacen.rs");
+        texto.push_str(
+            "\nimpl Almacen {\n    pub fn cuenta_es(&self, n: usize) -> bool {\n        self.datos.len() == n\n    }\n}\n",
+        );
+        std::fs::write(&ruta, texto).expect("escribe almacen.rs");
+        dir
+    }
+
+    /// Repo mínimo con `archivos` (ruta relativa y contenido). Sin `Cargo.toml`: solo lo que lee el inyector.
+    fn repo_de(archivos: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("temporal");
+        for (ruta, texto) in archivos {
+            let ruta = dir.path().join(ruta);
+            std::fs::create_dir_all(ruta.parent().expect("carpeta")).expect("carpeta");
+            std::fs::write(ruta, texto).expect("escribe");
+        }
+        dir
+    }
+
+    #[test]
+    fn inyectar_comportamiento_roto_cambia_un_igual_por_distinto_en_una_linea_de_produccion() {
+        let dir = copia_con_comparacion();
+        let antes = arbol(dir.path());
+        let inyeccion = inyectar(
+            Defecto::ComportamientoRoto,
+            dir.path(),
+            &capas_fixture(),
+            42,
+        )
+        .expect("no falla la E/S")
+        .expect("aplica");
+        let despues = arbol(dir.path());
+        assert_eq!(inyeccion.defecto, Defecto::ComportamientoRoto);
+        assert_eq!(inyeccion.archivo, "src/almacen.rs");
+        assert_eq!(cambiados(&antes, &despues), vec![inyeccion.archivo.clone()]);
+        let lineas_antes: Vec<&str> = antes[&inyeccion.archivo].lines().collect();
+        let lineas_despues: Vec<&str> = despues[&inyeccion.archivo].lines().collect();
+        assert_eq!(
+            lineas_antes.len(),
+            lineas_despues.len(),
+            "no agrega ni quita líneas"
+        );
+        let cambiadas: Vec<usize> = (0..lineas_antes.len())
+            .filter(|&i| lineas_antes[i] != lineas_despues[i])
+            .collect();
+        assert_eq!(
+            cambiadas,
+            vec![inyeccion.linea as usize - 1],
+            "solo cambia la línea del defecto"
+        );
+        let i = cambiadas[0];
+        assert!(lineas_antes[i].contains(" == "), "{}", lineas_antes[i]);
+        assert_eq!(
+            lineas_despues[i],
+            lineas_antes[i].replacen(" == ", " != ", 1)
+        );
+    }
+
+    #[test]
+    fn inyectar_comportamiento_roto_misma_semilla_mismo_lugar() {
+        let repo = repo_de(&[
+            ("src/lib.rs", "pub mod a;\npub mod b;\n"),
+            (
+                "src/a.rs",
+                "pub fn uno(x: u32) -> bool {\n    x == 1\n}\n\npub fn dos(x: u32) -> bool {\n    x == 2\n}\n",
+            ),
+            ("src/b.rs", "pub fn tres(x: u32) -> bool {\n    x == 3\n}\n"),
+        ]);
+        let mut lugares = BTreeSet::new();
+        for semilla in 1..=20u64 {
+            let a = tempfile::tempdir().expect("temporal");
+            let b = tempfile::tempdir().expect("temporal");
+            copiar(repo.path(), a.path());
+            copiar(repo.path(), b.path());
+            let ia = inyectar(Defecto::ComportamientoRoto, a.path(), &[], semilla).expect("E/S");
+            let ib = inyectar(Defecto::ComportamientoRoto, b.path(), &[], semilla).expect("E/S");
+            assert_eq!(ia, ib, "semilla {semilla}");
+            assert_eq!(arbol(a.path()), arbol(b.path()), "semilla {semilla}");
+            lugares.extend(ia.map(|i| (i.archivo, i.linea)));
+        }
+        assert!(
+            lugares.len() >= 2,
+            "la semilla elige entre las líneas candidatas: {lugares:?}"
+        );
+    }
+
+    #[test]
+    fn inyectar_comportamiento_roto_sin_igualdad_de_produccion_no_es_aplicable() {
+        let repo = repo_de(&[
+            ("src/lib.rs", "pub fn uno() -> u32 {\n    1\n}\n"),
+            (
+                "src/otra.rs",
+                "pub fn dos(x: u32) -> bool {\n    x > 0\n}\n",
+            ),
+        ]);
+        for semilla in 1..=5u64 {
+            let inyeccion =
+                inyectar(Defecto::ComportamientoRoto, repo.path(), &[], semilla).expect("E/S");
+            assert_eq!(inyeccion, None, "semilla {semilla}");
+        }
+    }
+
+    #[test]
+    fn inyectar_comportamiento_roto_no_elige_igualdad_de_cfg_test() {
+        let repo = repo_de(&[(
+            "src/lib.rs",
+            "pub fn uno() -> u32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn igual() {\n        assert!(1 == 1);\n    }\n}\n",
+        )]);
+        for semilla in 1..=5u64 {
+            let inyeccion =
+                inyectar(Defecto::ComportamientoRoto, repo.path(), &[], semilla).expect("E/S");
+            assert_eq!(inyeccion, None, "semilla {semilla}");
+        }
+    }
+
+    #[test]
+    fn inyectar_comportamiento_roto_descarta_comentarios_textos_y_flechas() {
+        let codigo = r#"// a == b
+/// c == d
+pub fn uno(x: u32) -> &'static str {
+    let texto = "x == y";
+    match x {
+        1 => "uno",
+        _ if x >= 2 == true => "mayor",
+        _ => texto,
+    }
+}
+pub fn dos(x: u32) -> bool {
+    let y = 1; // x == 2
+    if x == 3 { y == 1 } else { false } // comentario
+}
+"#;
+        let repo = repo_de(&[("src/lib.rs", codigo)]);
+        for semilla in 1..=5u64 {
+            let dir = tempfile::tempdir().expect("temporal");
+            copiar(repo.path(), dir.path());
+            let inyeccion = inyectar(Defecto::ComportamientoRoto, dir.path(), &[], semilla)
+                .expect("E/S")
+                .expect("aplica");
+            assert_eq!(inyeccion.archivo, "src/lib.rs", "semilla {semilla}");
+            let nuevo = std::fs::read_to_string(dir.path().join("src/lib.rs")).expect("lib.rs");
+            let linea = nuevo
+                .lines()
+                .nth(inyeccion.linea as usize - 1)
+                .expect("línea");
+            assert_eq!(
+                linea, "    if x != 3 { y == 1 } else { false } // comentario",
+                "semilla {semilla}"
+            );
+        }
+    }
+
+    #[test]
+    fn inyectar_comportamiento_roto_la_copia_del_fixture_compila() {
+        let dir = copia_con_comparacion();
+        inyectar(
+            Defecto::ComportamientoRoto,
+            dir.path(),
+            &capas_fixture(),
+            42,
+        )
+        .expect("E/S")
+        .expect("aplica");
+        let objetivo = tempfile::tempdir().expect("temporal");
+        if let Err(stderr) = cargo_check(dir.path(), objetivo.path()) {
+            panic!("la copia con el defecto no compila:\n{stderr}");
+        }
     }
 }
