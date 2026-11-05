@@ -84,12 +84,16 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 58 | P60: "P60 c". El usuario había preguntado: "Que le falta a root? terminemos". El cierre del hito 1 es corto, con validez automática: la Tarea 12b mide el orden conocido y los defectos reales, sin el juicio humano de G3. G3, G4, Colab (Tarea 7h) y Graft (Tareas 16b y la corrida de Graft de la 16, con G5) pasan al hito 1b. Acota las decisiones 12, 13, 36 y 38. |
 | 59 | P-val1: "P-val1 a". El recall de la Tarea 12b usa los 8 defectos reales de memora y brasa. La nota de cierre anota que faltan los 7 de F1, cuyos repos se borraron. |
 | 60 | P-val2: "P-val2 a". No hay séptimo par: la validez queda con 6 pares de orden conocido. |
-| 61 | G4: el usuario escribió "brasa y memora estan solo de medicion y seran eliminados". memora y brasa no siguen como banco después del hito 1. G4 queda respondido y sale del hito 1b. |
+| 61 | G4: el usuario escribió "brasa y memora estan solo de medicion y seran eliminados". memora y brasa no siguen como banco después del hito 1. G4 queda respondido y sale del hito 1b. Corregida por la decisión 70: se borran cuando el dataset calibre. |
 | 62 | Tarea 16: "a) Correr en memora". La corrida real de `r00t corre` usa memora para probar el runner de punta a punta, y después se borra. |
 | 63 | Calibración: el usuario preguntó "No se puede hacer mas rapida? eficiente? o en paralelo? El diseño de por si digo", y eligió "a) Cortar y mejorar". Ver Tareas 48 y 49. |
 | 64 | Objetivo: "terminar root. Calibrarlo a la perfeccion, no terminar con la primer version completa, seguir hasta terminar". Y: "Acelerar los procesos para que no sea todo secuencial, un recurso que hay que aprovechar es el tiempo." El hito 1 cierra con la calibración completa, y el trabajo independiente corre en paralelo. |
 | 65 | P62: "a) Rechazar claves". Si Root pasa una credencial, rechaza en el config de cargo del repo las claves que ejecutan comandos o cambian el TLS. Sin credenciales, el config se respeta entero. Acota la decisión 30. Construida en la Tarea 51 (C2). |
 | 66 | Calibración: el orquestador propuso reusar el `target` de la base en cada caso. El usuario respondió "Sí, esperar". La calibración real espera la Tarea 59. |
+| 67 | P63: "a", P64: "a". El orquestador mezcló 62, 63, p5 y 64 a 68 en e665a5f, con podman en 2557 verdes, 0 fallas y 3 ignorados. |
+| 68 | P65: "a", P66: "a". Diseño queda fuera de `global` en las dos tareas, y su lectura se amplía en el hito 1b. Solo entran a `global` las filas de 0,9 o más. |
+| 69 | Dataset, relatado por la sesión de Graft: piloto solo Rust; "Presupuesto 50 de api, si hace falta mas agregaremos"; "Usar api claude, el key esta en env"; el acceso a la nube no sigue después de hoy, "cambiarlo a api". "prioricemos tener el dataset y que sea fiable y construyamos ambos graft y root sobre ella". El dataset va después de cerrar el hito 1. |
+| 70 | Borrado de memora y brasa: "Cuando el dataset calibre". Corrige la decisión 61: el borrado sale del cierre del hito 1. |
 
 ## Patterns to Mirror
 
@@ -4680,3 +4684,104 @@ P63, P64 y P65 siguen abiertas. P64 ahora cubre también la 68.
 - **b)** No. Repetir `brasa funciona` y `memora pruebas` una sola vez, con `n = 40` y semilla 43, sin API. El resultado se acepta sea cual sea. Tarda cerca de 7 horas más.
 
 P63 y P64 siguen abiertas. P64 cubre hasta la 68.
+
+## Vuelta del 2026-11-05 (noche 5): corrida real cortada y mezcla
+
+**Corrida real de memora (Tarea 16), binario `r00t-e665a5f`.**
+- Inicio 17:59, fin 20:11, exit 3, 7927 s. Error: "no se pudo lanzar el builder: timeout tras 7200 s; se pidió borrar el contenedor root-builder-689208-1".
+- La clave no llegó al contenedor. Gasto de API: 0 USD. El juez final no corrió.
+- `planifica` terminó en 12 minutos. `organiza` hizo 25 de 57 tareas en 117 minutos. Las 32 restantes incluyen persistencia y concurrencia.
+- Cupo al final: `five_hour` 0,15 y `seven_day` 0,04.
+- El repo sigue en `~/.cache/root/corridas/corre-memora-ecc-haiku-1793912349-689208-0/repo`, con `src/cmd/sets.rs` a medias.
+- El primer intento (13:01 a 14:51) murió por un reinicio de la app a los 110 minutos. Ya van dos corridas sin juez final.
+
+**Mezcla.** El tip es `e665a5f`, y `git diff 0508008 HEAD` da vacío en `src`, `tests`, `Cargo.toml`, `Cargo.lock` y `tools`. Filas finales: memora funciona 0.9/1, brasa pruebas 1/1, memora pruebas 0.6/1 fuera, brasa funciona 0.78/1 fuera, brasa diseño 0.5/0.9 fuera, memora diseño fuera sin correr.
+
+## Verificación de los hechos de la corrida (Opus, sobre e665a5f)
+
+**Corrección: el plazo de 2 horas no es una decisión del usuario.** La decisión 31 de la tabla trata de Colab. La decisión 33 fija 2 horas para Colab. El plazo del builder es el punto 31 de "Desempates técnicos 12", y es un desempate mío. Igual lo paso al usuario, porque elegir la salida cambia horas de corrida.
+
+**Hechos.**
+- `TIMEOUT_BUILDER` vale 2 horas (`src/corre/contenedor.rs:18`). También fija la espera de segundo plano (`src/corre/args.rs:89`).
+- La vida del login medida es de 8,0 horas: `expiresAt` menos la fecha del archivo, en una sola muestra. Hoy le quedan 1,76 horas.
+- `verificar_antes` exige que el login dure todo el plazo (`src/corre/corrida.rs:100`). La espera dura como mucho 30 minutos (`src/corre/ejecutor.rs:52`).
+- Con 6 horas de plazo, una corrida solo arranca en las 2 horas siguientes a una renovación.
+- Hoy un login con menos de 2 horas hace fallar el rol, salvo que se renueve en esos 30 minutos.
+- El banco ya usaba vueltas: `timeout 5400 claude -p --resume <sid>` (`correr-ecc-rol.sh:10`).
+- La sesión de `organiza` existe en `claude-estado/projects/`, y su id está en el transcript parcial (`6ae73968`).
+
+**Defecto nuevo, el más urgente: el costo estimado frena a Root.**
+- El corte registró 115,13 USD con `via = cupo` (`src/corre/costo_cortado.rs:53-55`, entrada más caché a precio completo).
+- `estado_cupo` da `lleno` si el bloque suma 35 USD o más (`src/route/mod.rs:295`). Esa fila es la única del bloque, que empezó a las 20:11.
+- Por lectura, `r00t corre` no arranca antes de las 01:11: `route` lo manda a la API, y `exigir_cupo` lo rechaza.
+- El cupo real está en 0,15. Con precios de caché (0,1 de entrada al leer y 1,25 al escribir), la misma corrida estima cerca de 18 USD.
+
+**Defectos del punto 3.**
+
+| Defecto | Hecho | Dónde va |
+|---|---|---|
+| "rol organiza no arrancó" y "no se pudo lanzar" para un corte | `src/corre/corrida.rs:131` y `src/corre/mod.rs:56` | Tarea 69 |
+| `planifica` sin fila de costo | Las sesiones se registran después del bucle (`src/corre/corrida.rs`, paso f). Un corte sale antes. | Tarea 69 |
+| Costo de 115,13 USD | Arriba. Además bloquea la corrida. | Tarea 69 |
+| Sin `runs.jsonl` | La fila va en `$ROOT_HOME/runs.jsonl`, solo en el paso k. Un corte no deja fila, y los tests lo piden (`src/corre/corrida.rs:1166`). | Tarea 69 para el corte. Hito 1b para los otros abortos. |
+
+**Hipótesis.** Una sesión matada por tiempo se puede retomar con `--resume`. Las vueltas del banco no terminaban así siempre, y no lo medí. La Tarea 69 suma un test real.
+
+## Cómo llegar al juez final (Opus, 2026-11-05)
+
+| Opción | Código | Minutos de corrida | Cupo | Riesgo |
+|---|---|---|---|---|
+| **c) Subir el plazo a 6 horas** | Una constante | 300 a 360, desde cero | Cerca de 0,4 a 0,5 de varios bloques | Solo arranca en 2 de cada 8 horas de login. Un reinicio de la app pierde todo otra vez. |
+| **b) Vueltas de 2 horas sobre el mismo repo** | Tarea 69, sin `--reanuda` | 300 a 360, desde cero | Igual | Tira 25 tareas. Sobrevive al plazo, no a un reinicio. |
+| **a) Vueltas, y `--reanuda` de esta corrida** | Tarea 69 completa | 150 o más: hipótesis | Cerca de 0,2 a 0,3 | Usa una sesión matada. Si `--resume` falla, sale sin resultado y la corrida se puede retomar. |
+
+**Recomiendo a.** Las tres esperan el bloque de cupo hasta las 01:11, salvo que el usuario quiera otra cosa.
+
+**Cómo retoma el builder.** Con `--resume <sesión>` y un prompt de continuación: revisar `git status` y `git log`, terminar o descartar lo que quedó sin commit, y seguir la misma instrucción. Razón: conserva el contexto, como el banco. Sin id de sesión, usa el mismo prompt sin `--resume`.
+
+**Vigencia.** Cada vuelta dura el menor de 2 horas y la vida restante del login menos 5 minutos. Con menos de 20 minutos de login, Root espera la renovación, como ya hace. La renovación necesita Claude Code activo en el host. Sin ella, la corrida sale con error y se puede retomar. El contenedor sigue sin `refreshToken`.
+
+**Tope de vueltas: 4.** Si se agotan, Root evalúa el repo parcial y escribe la fila. Eso garantiza juez final y fila, aunque el producto quede incompleto.
+
+**¿Invalida la medición?** No para lo que promete la Tarea 16. La decisión 62 dice: "La corrida real de `r00t corre` usa memora para probar el runner de punta a punta". El repo saldría de dos lanzamientos y varias vueltas. El tiempo y el costo no son comparables con una corrida entera. La fila suma `reanudada` y `vueltas`, para que nadie los compare sin saberlo. La calibración y la validez usan otros repos, así que no cambian.
+
+**¿Una corrida de 5 a 6 horas mide lo mismo?**
+- Mide el proceso de la config: Opus planea, Sonnet organiza y Haiku construye.
+- El comentario de la config dice "Mide memora como la construyó el banco", y eso solo vale para el proceso. El banco tardó 37 minutos con 3 commits.
+- El plan de 57 tareas sale del prompt: "tareas chicas", y "cada tarea la construye un subagente". No es una falla de la config, pero hace el tiempo incomparable. Cambiarlo ahora tiraría la corrida, y no hace falta para probar el runner.
+- Para el dataset, conviene medir tiempo por tarea y fijar el tamaño del plan, en el hito 1b.
+
+### Tarea 69: Vueltas del builder, `--reanuda` y costo del corte
+- **Action**: los siete puntos del brief.
+- **Archivos**: `src/corre/`, `Fila` en `src/tipos.rs`, y en `src/cli.rs` y `src/lib.rs` solo el flag.
+- **Arranca**: ya, desde `e665a5f`, con `ROOT_SIN_PODMAN=1`.
+- **Brief**: `docs/builds/brief-local-69.md`.
+
+**Sumado al hito 1b:** la fila de los abortos que no son cortes, y el tamaño del plan.
+
+## Orden final del hito 1 (2026-11-05, noche 5)
+
+**Ahora, en paralelo:**
+- **Tarea 69**, sin podman.
+- **`/ecc:code-review`** sobre `e665a5f`: solo lee. Lo que encuentre en `src/corre/` va a la 69 antes de su prueba con podman.
+- **Validez automática (Tarea 12b)** con el binario de `e665a5f`. No depende de la corrida, y la 69 no toca `evaluar`. Son como mucho 20 evaluaciones, cerca de 2,1 USD. Quedan 2,91 USD, y la corrida necesita cerca de 0,11 USD. Usa podman.
+
+**Después:**
+1. **Prueba con podman de la 69**, cuando la validez termine, con `ROOT_TEST_BUILDER_REAL=1`.
+2. **Mezcla de la 69**, con la orden del usuario.
+3. **`r00t corre --reanuda`**, desde las 01:11, sin validez ni otra prueba con podman en curso.
+4. **Comparación de `global`.**
+5. **Cierre (Tarea 47).** Su borrador puede avanzar en paralelo. Su firma espera la corrida, la validez y la revisión.
+6. **Dataset**, plan común con Graft (decisión 69).
+7. **Borrado de memora y brasa**, cuando el dataset calibre (decisión 70).
+
+## Preguntas para el usuario (2026-11-05, noche 5)
+
+**P67: ¿Cómo llegamos al juez final de memora?** La corrida se cortó a las 2 horas, con 25 de 57 tareas hechas. Root no arranca otra antes de las 01:11, por un error propio de costo que la Tarea 69 corrige.
+- **a)** Retomar esta corrida en vueltas de 2 horas, y no tirar las 25 tareas. Cerca de 150 minutos o más. Recomendada: la Tarea 16 prueba el runner, y la fila queda marcada como reanudada.
+- **b)** Empezar de cero, en vueltas de 2 horas. Cerca de 5 a 6 horas, con un repo de una sola corrida.
+- **c)** Subir el plazo a 6 horas, en un solo lanzamiento. Cambio mínimo, pero solo arranca recién renovado el login, y un reinicio de la app pierde todo.
+
+**P68: ¿Mezclar la Tarea 69 cuando la prueba con podman dé verde?**
+- **a)** Sí, sin volver a preguntar. Recomendada.
+- **b)** No, el orquestador trae el resultado y espera otra orden.
