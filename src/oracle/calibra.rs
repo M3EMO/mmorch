@@ -5881,4 +5881,206 @@ mod tests {
             assert!(!cmd.contains("--file"), "{cmd}");
         }
     }
+
+    // Punto 4: Pruebas calibra con `evaluar_con` real. La muestra repartida llega a mutantes con test.
+
+    /// Listado de la prueba: 60 mutantes de `src/otro.rs` que ningún test llama, y luego 20 de `leer_numero`.
+    fn listado_de_prueba() -> Vec<String> {
+        let otros =
+            (1..=60).map(|i| format!("src/otro.rs:{i}:1: replace funcion_{i} -> u32 with 0"));
+        let protocolo = (0..20).map(|k| {
+            format!("src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok({k})")
+        });
+        otros.chain(protocolo).collect()
+    }
+
+    /// Escapa como `escapar_regex` de `mutacion.rs`. El `-F` de la sonda usa esta misma regla.
+    fn escapar_como_f(texto: &str) -> String {
+        let mut escapado = String::new();
+        for c in texto.chars() {
+            if "\\.+*?()|[]{}^$".contains(c) {
+                escapado.push('\\');
+            }
+            escapado.push(c);
+        }
+        escapado
+    }
+
+    /// Nombres que pide una corrida: los de su `-F` `^(?:a|b)$`, comparados escapados. Sin `-F`, todos.
+    fn nombres_pedidos(cmd: &str, listado: &[String]) -> Vec<String> {
+        let Some(inicio) = cmd.find(" -F '") else {
+            return listado.to_vec();
+        };
+        let resto = &cmd[inicio + " -F '".len()..];
+        let regex = &resto[..resto.find('\'').expect("cierra el -F")];
+        let cuerpo = regex
+            .strip_prefix("^(?:")
+            .and_then(|r| r.strip_suffix(")$"))
+            .expect("forma ^(?:...)$");
+        // Ningún nombre del listado tiene `|`. Partir por `|` da las alternativas.
+        let alternativas: Vec<&str> = cuerpo.split('|').collect();
+        listado
+            .iter()
+            .filter(|n| alternativas.contains(&escapar_como_f(n).as_str()))
+            .cloned()
+            .collect()
+    }
+
+    /// Verdadero si un test que llama a `leer_numero` aún tiene asserts en la copia.
+    fn test_de_leer_numero_con_asserts(repo: &Path) -> bool {
+        fs::read_dir(repo.join("tests"))
+            .expect("carpeta tests de la copia")
+            .filter_map(Result::ok)
+            .any(|e| {
+                let texto = fs::read_to_string(e.path()).unwrap_or_default();
+                texto.contains("leer_numero") && texto.contains("assert")
+            })
+    }
+
+    /// Ejecutor falso de `cargo mutants` que responde según el `-F` que recibe, como la herramienta real.
+    /// Un mutante de `src/protocolo.rs` muere solo si su test aún tiene asserts en la copia.
+    struct MutantesSegunFiltro {
+        repo: PathBuf,
+        pedidos: std::sync::Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    impl EjecutorHerramienta for MutantesSegunFiltro {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            let mut salida = SalidaHerramienta::default();
+            let listado = listado_de_prueba();
+            if crate::oracle::mutacion::es_comando_de_listado(cmd) {
+                let items: Vec<serde_json::Value> =
+                    listado.iter().map(|n| json!({"name": n})).collect();
+                let texto = serde_json::Value::Array(items).to_string();
+                salida.archivos.insert("listado.json".into(), texto);
+                return Ok(salida);
+            }
+            if crate::oracle::mutacion::es_comando_de_mutacion(cmd) {
+                let pedidos = nombres_pedidos(cmd, &listado);
+                self.pedidos.lock().expect("lock").push(pedidos.clone());
+                let con_asserts = test_de_leer_numero_con_asserts(&self.repo);
+                let mut outcomes = vec![json!({"scenario": "Baseline", "summary": "Success"})];
+                for nombre in &pedidos {
+                    let archivo = nombre.split(':').next().unwrap_or_default();
+                    let linea: u32 = nombre
+                        .split(':')
+                        .nth(1)
+                        .and_then(|l| l.parse().ok())
+                        .expect("línea del nombre");
+                    let vivo = archivo == "src/protocolo.rs" && !con_asserts;
+                    let estado = if vivo { "MissedMutant" } else { "CaughtMutant" };
+                    let mutante = json!({
+                        "name": nombre,
+                        "file": archivo,
+                        "span": {"start": {"line": linea, "column": 1}},
+                    });
+                    outcomes.push(json!({"scenario": {"Mutant": mutante}, "summary": estado}));
+                }
+                let reporte = json!({"total_mutants": pedidos.len(), "outcomes": outcomes});
+                salida.archivos.insert(
+                    crate::oracle::mutacion::ARCHIVO_OUTCOMES.into(),
+                    reporte.to_string(),
+                );
+                return Ok(salida);
+            }
+            HerramientasSanas.ejecutar(cmd)
+        }
+    }
+
+    /// Punto 4: Pruebas con `evaluar_con` real. La base muestra un mutante de `protocolo.rs` y su AssertBorrado aplica.
+    #[test]
+    fn calibra_pruebas_con_evaluar_con_real_aplica_el_defecto_en_la_muestra_repartida() {
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = carpeta_sin_red(home.path());
+        fs::write(
+            carpeta.join("repo-bueno/tests/protocolo.rs"),
+            TEST_DE_LEER_NUMERO,
+        )
+        .expect("test de leer_numero");
+        // Cuatro mutantes de muestra, repartidos sobre los 80 del listado.
+        tarea_en(
+            &carpeta,
+            "\n[calibracion]\nrepo = \"repo-bueno\"\n\n[pruebas]\nmutantes_max = 4\nminutos_max = 20\n",
+        );
+        let log_pedidos = std::sync::Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let fabrica = |p: &crate::oracle::Preparada| -> Box<dyn EjecutorHerramienta> {
+            Box::new(MutantesSegunFiltro {
+                repo: p.repo.clone(),
+                pedidos: log_pedidos.clone(),
+            })
+        };
+        let rubricas = crate::oracle::rubrica::cargar_embebidas().expect("rúbricas");
+        let calibracion = Calibraciones::cargar(home.path()).expect("calibración");
+        let evaluador = |tarea: &Tarea, repo: &Path, o: &OpcionesOraculo| {
+            let deps = crate::oracle::Dependencias {
+                correr: &correr_sin_contenedores,
+                herramientas: &fabrica,
+                juez: None,
+                modelo_juez: "",
+                juez_config: None,
+                calibracion: &calibracion,
+                rubricas: &rubricas,
+                reglas: crate::config::ReglasDecision::default(),
+                redactor: None,
+                avisos: Vec::new(),
+                podman: &PodmanSinUso,
+                escenarios: &FabricaSinContenedoresCal,
+            };
+            let con_home = OpcionesOraculo {
+                home: Some(home.path().to_path_buf()),
+                ..o.clone()
+            };
+            crate::oracle::evaluar_con(repo, tarea, &con_home, deps)
+        };
+        let calibrada = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "pruebas",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+        )
+        .expect("calibra Pruebas");
+        let casos = renglones_guardados(&calibrada);
+        let con_defecto: Vec<&CasoGuardado> = casos
+            .iter()
+            .filter(|c| c.defecto.as_deref() == Some("assert_borrado"))
+            .collect();
+        assert!(!con_defecto.is_empty(), "hay un AssertBorrado: {casos:?}");
+        // El defecto aplica: ningún caso queda no aplicable.
+        let no_aplicables: Vec<&str> = con_defecto
+            .iter()
+            .filter_map(|c| c.no_aplicable.as_deref())
+            .collect();
+        assert!(
+            no_aplicables.is_empty(),
+            "el AssertBorrado no debe quedar no aplicable: {no_aplicables:?}"
+        );
+        // Cada caso aplicado detecta el mutante que vive sin asserts.
+        for caso in &con_defecto {
+            assert!(
+                caso.detectado,
+                "caso {} sin detectar: {:?}",
+                caso.caso, caso.motivo
+            );
+            assert!(
+                caso.motivo
+                    .as_deref()
+                    .is_some_and(|m| m.starts_with("mutante_vivo:src/protocolo.rs:")),
+                "motivo del caso {}: {:?}",
+                caso.caso,
+                caso.motivo
+            );
+        }
+        // La muestra repartida de la base incluye un mutante de `protocolo.rs`.
+        let pedidos = log_pedidos.lock().expect("lock");
+        assert!(
+            pedidos
+                .first()
+                .is_some_and(|p| p.iter().any(|n| n.starts_with("src/protocolo.rs:"))),
+            "la muestra de la base: {pedidos:?}"
+        );
+    }
 }
