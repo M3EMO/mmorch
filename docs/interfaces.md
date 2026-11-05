@@ -787,6 +787,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ],
       "default": null
     },
+    "mutante": {
+      "description": "Nombre del mutante muerto que eligió `AssertBorrado`. `None` en los demás defectos.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
     "niveles": {
       "description": "Nivel de cada ítem de la dimensión calibrada en este caso. Vacío si no hay puntaje.",
       "type": "object",
@@ -844,6 +852,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "null"
       ],
       "default": null
+    },
+    "tests_apagados": {
+      "description": "Nombres completos de los tests que `AssertBorrado` apagó. Vacío en los demás defectos.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
     }
   },
   "required": [

@@ -274,6 +274,12 @@ pub struct CasoGuardado {
     /// Motivo por el que el caso no aplica. Solo en el renglón de un caso no aplicable.
     #[serde(default)]
     pub no_aplicable: Option<String>,
+    /// Nombre del mutante muerto que eligió `AssertBorrado`. `None` en los demás defectos.
+    #[serde(default)]
+    pub mutante: Option<String>,
+    /// Nombres completos de los tests que `AssertBorrado` apagó. Vacío en los demás defectos.
+    #[serde(default)]
+    pub tests_apagados: Vec<String>,
 }
 
 /// Resultado de `calibrar_tarea_con`: la fila y la ruta de los casos guardados, si hubo casos medidos.
@@ -1428,6 +1434,12 @@ impl CasoGuardado {
             niveles_base: caso.niveles_base.clone(),
             niveles: caso.niveles.clone(),
             no_aplicable: None,
+            mutante: caso.inyeccion.as_ref().and_then(|i| i.mutante.clone()),
+            tests_apagados: caso
+                .inyeccion
+                .as_ref()
+                .map(|i| i.tests_apagados.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -1450,6 +1462,8 @@ impl CasoGuardado {
             niveles_base: BTreeMap::new(),
             niveles: BTreeMap::new(),
             no_aplicable: Some(no.motivo.clone()),
+            mutante: None,
+            tests_apagados: Vec::new(),
         }
     }
 }
@@ -1488,9 +1502,8 @@ const MOTIVO_SIN_CANDIDATO: &str = "sin candidato para inyectar";
 /// Motivo de un `AssertBorrado` no aplicable: la base no dejó mutantes muertos.
 const MOTIVO_SIN_MUERTOS: &str = "la base no dio mutantes muertos";
 
-/// Motivo de un `AssertBorrado` no aplicable: hay mutantes muertos, pero ninguno tiene test con asserts.
-const MOTIVO_SIN_TEST_DE_MUERTO: &str =
-    "ningún mutante muerto tiene un test con asserts que lo llame";
+/// Motivo de un `AssertBorrado` no aplicable: hay mutantes muertos, pero ninguno tiene un test fallido ubicable.
+const MOTIVO_SIN_TEST_DE_MUERTO: &str = "ningún mutante muerto tiene tests fallidos ubicables";
 
 /// Motivo de un caso sin inyección. `AssertBorrado` separa si la base no dio muertos de si ninguno tiene test.
 /// Los demás defectos usan el motivo común.
@@ -2584,7 +2597,7 @@ mod tests {
         assert!(
             motivos
                 .iter()
-                .all(|m| *m == "ningún mutante muerto tiene un test con asserts que lo llame"),
+                .all(|m| *m == "ningún mutante muerto tiene tests fallidos ubicables"),
             "motivo con muertos sin test: {motivos:?}"
         );
     }
@@ -2644,6 +2657,88 @@ mod tests {
         assert!(
             sin_archivo >= 2,
             "la base y el caso limpio no van acotados: {vistos:?}"
+        );
+    }
+
+    /// Punto 3: el renglón del caso AssertBorrado en `.casos.jsonl` guarda el mutante y los tests que apagó.
+    #[test]
+    fn calibra_pruebas_el_renglon_de_assert_borrado_guarda_mutante_y_tests() {
+        use crate::oracle::mutacion::{ARCHIVO_OUTCOMES, construir_comando};
+        use crate::oracle::perfiles::herramientas::SalidaHerramienta;
+        const OUTCOMES: &str = r#"{"total_mutants":1,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)","file":"src/protocolo.rs","span":{"start":{"line":2,"column":1}}}},"summary":"CaughtMutant","log_path":"log/src__protocolo.rs_line_2_col_1.log"}]}"#;
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = home.path().join("oraculos").join("calibra-fixture");
+        std::fs::create_dir_all(&carpeta).expect("carpeta");
+        let repo = carpeta.join("repo-bueno");
+        std::fs::create_dir_all(&repo).expect("repo");
+        super::inyectar::pruebas::copiar(Path::new(FIXTURE), &repo);
+        std::fs::write(repo.join("tests/protocolo.rs"), TEST_DE_LEER_NUMERO).expect("test");
+        let _ = tarea_en(&carpeta, "\n[calibracion]\nrepo = \"repo-bueno\"\n");
+        let evaluador = |tarea: &Tarea, _: &Path, o: &OpcionesOraculo| {
+            if let Some(memo) = o.memo.as_deref() {
+                let mut salida = SalidaHerramienta::default();
+                salida
+                    .archivos
+                    .insert(ARCHIVO_OUTCOMES.into(), OUTCOMES.into());
+                salida.archivos.insert(
+                    crate::oracle::mutacion::ARCHIVO_TESTS_FALLIDOS.into(),
+                    TESTS_FALLIDOS_DE_PROTOCOLO.into(),
+                );
+                memo.anotar(&construir_comando(tarea), &salida);
+            }
+            Ok(veredicto_de_pruebas())
+        };
+        let calibrada = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "pruebas",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+        )
+        .expect("calibra");
+        let ruta = calibrada.casos.expect("hay casos guardados");
+        let texto = fs::read_to_string(&ruta).expect("lee los casos");
+        let renglones: Vec<serde_json::Value> = texto
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("un caso por línea"))
+            .collect();
+        let con_mutante: Vec<&serde_json::Value> = renglones
+            .iter()
+            .filter(|r| r["defecto"] == "assert_borrado" && r["mutante"].is_string())
+            .collect();
+        assert!(
+            !con_mutante.is_empty(),
+            "un renglón de AssertBorrado trae mutante: {renglones:?}"
+        );
+        let renglon = con_mutante[0];
+        assert!(
+            renglon["mutante"]
+                .as_str()
+                .is_some_and(|m| m.contains("leer_numero")),
+            "el mutante elegido: {renglon}"
+        );
+        let apagados: Vec<&str> = renglon["tests_apagados"]
+            .as_array()
+            .expect("tests_apagados es una lista")
+            .iter()
+            .filter_map(|t| t.as_str())
+            .collect();
+        assert!(
+            apagados
+                .iter()
+                .any(|t| t.contains("leer_numero_lee_el_numero")),
+            "los tests apagados: {apagados:?}"
+        );
+        let limpios: Vec<&serde_json::Value> = renglones
+            .iter()
+            .filter(|r| r["es_defecto"] == false)
+            .collect();
+        assert!(
+            limpios.iter().all(|r| r["mutante"].is_null()),
+            "un limpio no trae mutante: {limpios:?}"
         );
     }
 
@@ -5826,6 +5921,15 @@ mod tests {
         let guardados: Vec<CasoGuardado> = medida.casos.iter().map(CasoGuardado::de).collect();
         let limpio = guardados.iter().find(|c| !c.es_defecto).expect("un limpio");
         assert_eq!(limpio.target_reusado, Some(false));
+    }
+
+    /// Punto 3: un renglón de antes de `mutante` y `tests_apagados` se lee con los dos campos vacíos.
+    #[test]
+    fn calibra_renglon_viejo_sin_mutante_se_lee_con_campos_vacios() {
+        let viejo = r#"{"caso":0,"es_defecto":true,"detectado":false,"defecto":"assert_borrado"}"#;
+        let caso: CasoGuardado = serde_json::from_str(viejo).expect("renglón de antes del mutante");
+        assert_eq!(caso.mutante, None);
+        assert!(caso.tests_apagados.is_empty());
     }
 
     #[test]
