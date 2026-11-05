@@ -4204,3 +4204,63 @@ wait
 **P64: ¿Mezclar 63, p5 y 64 cuando la prueba con podman dé verde?**
 - **a)** Sí, sin volver a preguntar, junto con la 62. Recomendada: es el árbol que se prueba.
 - **b)** No. El orquestador trae el resultado y espera otra orden.
+
+## Vuelta del 2026-11-05 (mañana): Grupo 0 de la calibración
+
+**Resultado, con el binario 34dd370, sin claves y con 0 USD.**
+- `memora funciona` dio 0,9 / 1,0 en 5094 s. Los 9 detectados tienen motivo `valor_menor`. El falso negativo es el caso 16, `src/cmd/server.rs:222`. `ComportamientoRoto` quedó probado con el repo real.
+- `memora pruebas` sigue sin sensibilidad, en 110 s. Los 10 casos con defecto dicen "sin candidato para inyectar". La especificidad es 1,0 con 10 limpios.
+- La compuerta del Grupo 0 no pasó: no hay ningún caso con `mutante_vivo:`, y `--file` sigue sin probarse con la herramienta real.
+
+## Diagnóstico de `assert_borrado` en memora (Opus, 2026-11-05)
+
+**Hechos medidos, sin correr contenedores.**
+- memora-ecc tiene 34 tests con 113 asserts de una línea, y ninguno de varias líneas. La forma de los asserts no es el problema: mi hipótesis anterior era falsa.
+- El listado completo de memora trae 2263 mutantes en 16 archivos (`sondas-sniVzY`, 2026-10-30, mismo commit del repo).
+- La muestra toma los primeros 60 (`src/oracle/mutacion.rs:438`). La corrida del 2026-11-03 (`sondas-Jq04pk`) midió 58 mutantes: 48 de `src/cmd/mod.rs` y 10 de `src/main.rs`. Son 2 archivos de 16.
+- Esa corrida mató 23 mutantes. Porté `asserts_de_tests_que_llaman` a Python y lo corrí sobre los 23: ninguno tiene candidato.
+- Sus funciones son `run`, `main`, `db`, `table`, `lookup`, `arity_ok`, `run_command` y `replay`. Solo las ejercita `tests/server.rs`, que habla por socket con el binario. Ningún test las llama por nombre.
+- Los archivos siguientes sí tienen candidatos. En la corrida entera del 2026-10-30, tienen candidato 42 muertos de `src/util.rs`, 38 de `src/db.rs`, 24 de `src/persist.rs`, 14 de `src/config.rs` y 7 de `src/resp.rs`.
+- Simulé 60 mutantes repartidos por todo el listado: tocan los 16 archivos. Solo 20 tienen resultado conocido, porque aquella corrida no llegó a los demás. De ellos, 9 son muertos, y 4 tienen candidato (`src/config.rs`, `src/db.rs`, `src/persist.rs` y `src/resp.rs`).
+
+**Hipótesis, sin medir.**
+- La corrida de hoy dio los mismos muertos que la del 2026-11-03. Hoy no se puede ver: la memoria de la base no queda en disco.
+- Los 110 s de hoy contra 20 minutos del 2026-11-03 no prueban una falla. Aquella corrida tuvo una compilación de 385 s, y la mediana por mutante fue de 2 s de build y 2,5 s de test. La Tarea 65 deja el motivo visible.
+
+**Causa.** El inyector no falla. Falla la muestra: mide el 2,6 % de los mutantes, en los 2 primeros archivos del orden de `cargo-mutants`. Esto es un defecto del evaluador real, no solo de la calibración. Hoy Pruebas de memora no dice nada de 14 archivos. brasa dio 1,0 porque sus primeros mutantes sí tienen tests que los llaman.
+
+**El falso negativo de Funciona no pide cambios.** El `==` de `src/cmd/server.rs:222` solo evita repetir una clave en la lista de WATCH. Invertirlo casi no cambia la conducta visible, hipótesis por lectura. 0,9 / 1,0 da exactitud 0,95, y la dimensión llega al umbral.
+
+## Desempates técnicos 36 (Opus, 2026-11-05)
+
+1. **Pruebas no queda fuera de `global`, y el inyector no cambia.** Se arregla la muestra: los `mutantes_max` se reparten en forma pareja por el listado. Razón: dejarla fuera esconde un instrumento sesgado, y arreglar solo el inyector mide los mismos 2 archivos. El número de mutantes y el costo no cambian.
+2. **Borrar asserts de `tests/server.rs`: descartado.** Daría 10 casos con la misma inyección, y la muestra seguiría sesgada.
+3. **`--file` sale.** Un archivo con más mutantes que el máximo queda cortado, y el mutante elegido puede no entrar: `src/cmd/mod.rs` tiene 157. Un caso acotado corre el mismo listado y la misma muestra, filtrados por archivo con `-F`. `-F` ya corrió con la herramienta real el 2026-11-03.
+4. **Esto corrige mi desempate del acotado una segunda vez.** La comparación ahora es exacta: el caso mide un subconjunto de la muestra de la base.
+5. **Cómo se prueba con la herramienta real.** Un test con `cargo-mutants` real, en la suite con podman, y después Pruebas de memora, sin API. brasa no sirve: tarda horas por corrida, y su fila es del binario viejo.
+6. **`--file` no bloquea nada,** porque ya no se usa.
+
+**Qué pasa con cada grupo.**
+- **Grupo 1 sigue ya con 34dd370.** Completitud, Funciona, Seguridad, Entrega y Eficiencia no corren la mutación (`partes_de`). La Tarea 65 no cambia sus filas. La fila de `memora funciona` también vale.
+- **Grupos 2a y 2b esperan la Tarea 65.** El trío corre la mutación, y el juez lee sus hallazgos. Con la muestra vieja se calibraría otra entrada del juez, y el saldo no alcanza para repetir: 12,6123 USD contra cerca de 8,4 USD por pasada.
+- **`brasa pruebas` se repite** con la muestra nueva, sin API. Esto revierte "brasa pruebas no se repite". Como cada caso mide pocos mutantes, debería tardar mucho menos que las 7,9 horas, hipótesis sin medir.
+
+### Tarea 65: Muestra repartida de la mutación
+- **Action**: la muestra pareja, el acotado por `-F`, los motivos separados y el test con la herramienta real.
+- **Archivos**: `src/oracle/mutacion.rs`, `src/oracle/calibra.rs`, `src/oracle/calibra/`.
+- **Arranca**: ya, desde `laptop/tarea-64` (8c4d382), con `ROOT_SIN_PODMAN=1`, en paralelo con el Grupo 1.
+- **Brief**: `docs/builds/brief-local-65.md`.
+
+## Orden final del hito 1 (2026-11-05, mañana)
+
+1. **Grupo 1** con 34dd370, y **Tarea 65** en paralelo.
+2. **Prueba con podman de 65, 64, 63, p5 y 62**, cuando el Grupo 1 termine.
+3. **Pruebas de memora** con el binario nuevo. Se sigue si hay casos con `mutante_vivo:`.
+4. **Grupo 2a**, con `brasa pruebas` en paralelo. Después, las dos compuertas, y el **Grupo 2b**. Los comandos son los de "Comandos de la calibración", con el binario nuevo.
+5. **Mezcla**, con la orden del usuario (P63 y P64).
+6. **Corrida real de memora (Tarea 16)**.
+7. **Comparación de `global`.**
+8. **Validez automática** (Tarea 12b) y **cierre** (Tarea 47).
+9. **Borrado de memora y brasa** (decisión 61).
+
+**P64 cambia de alcance.** Ahora cubre 63, p5, 64 y 65.
