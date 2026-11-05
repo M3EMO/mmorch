@@ -1776,7 +1776,7 @@ mod tests {
     use crate::tipos::{Fuente, Hallazgo, ItemFaltante, NivelItem};
     use std::collections::HashSet;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
@@ -4285,6 +4285,7 @@ mod tests {
                 &base,
                 Dimension::Arquitectura,
                 &[ITEM_ARQUITECTURA],
+                &[],
                 &mut casos,
             );
             casos[0].detecta_en(ITEM_ARQUITECTURA)
@@ -4307,6 +4308,7 @@ mod tests {
             &base,
             Dimension::Arquitectura,
             &[ITEM_ARQUITECTURA],
+            &[],
             &mut casos,
         );
         assert_eq!(casos[0].detecta_en(ITEM_ARQUITECTURA), Some(false));
@@ -4323,6 +4325,7 @@ mod tests {
             &base,
             Dimension::Seguridad,
             &["seguridad.secretos"],
+            &[],
             &mut casos,
         );
         assert_eq!(casos[0].detecta_en("seguridad.secretos"), Some(true));
@@ -5375,5 +5378,300 @@ mod tests {
         let texto = serde_json::to_string(&nuevo).expect("serializa");
         let ida: CasoGuardado = serde_json::from_str(&texto).expect("lee");
         assert_eq!(ida.target_reusado, Some(true));
+    }
+
+    // Punto 3: calibración de punta a punta con el evaluador real (`evaluar_con`), sin podman ni contenedores.
+
+    /// Juez falso `Sync`: responde `texto` y cuenta sus llamadas.
+    struct JuezSync {
+        texto: String,
+        llamadas: AtomicU32,
+    }
+
+    impl crate::oracle::juez::ModeloJuez for JuezSync {
+        fn consultar(
+            &self,
+            _prompt: &crate::proveedores::Prompt,
+        ) -> Result<crate::proveedores::RespuestaJuez, ErrorOraculo> {
+            self.llamadas.fetch_add(1, Ordering::SeqCst);
+            Ok(crate::proveedores::RespuestaJuez {
+                texto: self.texto.clone(),
+                truncada: false,
+                costo_usd: 0.0,
+            })
+        }
+    }
+
+    /// Respuesta del juez para todos sus ítems en `rubricas`, con evidencia que cita `src/lib.rs`.
+    fn texto_juez(rubricas: &[crate::oracle::rubrica::Rubrica]) -> String {
+        let items: Vec<serde_json::Value> = rubricas
+            .iter()
+            .flat_map(|r| r.item.iter())
+            .filter(|i| {
+                i.mide != crate::oracle::rubrica::Mide::Sonda
+                    && crate::oracle::juez::dimension_de(&i.id).is_some()
+            })
+            .map(|i| {
+                json!({
+                    "item": i.id,
+                    "nivel": 2,
+                    "evidencia": [{"archivo": "src/lib.rs", "linea": 2, "cita": "pub mod protocolo;"}],
+                })
+            })
+            .collect();
+        json!({"items": items, "hallazgos": []}).to_string()
+    }
+
+    /// Ejecutor de herramientas falso de una imagen sana. Responde las sondas y la mutación que muere.
+    struct HerramientasSanas;
+
+    impl EjecutorHerramienta for HerramientasSanas {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            let mut salida = SalidaHerramienta::default();
+            if cmd.contains("gitleaks detect") {
+                salida.archivos.insert("gitleaks.json".into(), "[]".into());
+                salida.stderr = "no leaks found".into();
+            } else if cmd.contains("cargo audit") {
+                salida.archivos.insert(
+                    "audit.json".into(),
+                    r#"{"vulnerabilities":{"found":false,"list":[]}}"#.into(),
+                );
+            } else if cmd.contains("--message-format=json") {
+                salida.archivos.insert(
+                    "clippy.json".into(),
+                    r#"{"reason":"build-finished","success":true}"#.into(),
+                );
+            } else if cmd.contains("cargo mutants") && cmd.contains("--list") {
+                salida
+                    .archivos
+                    .insert("listado.json".into(), r#"[{"name":"m"}]"#.into());
+            } else if cmd.contains("cargo mutants") {
+                salida
+                    .archivos
+                    .insert(ARCHIVO_OUTCOMES.into(), OUTCOMES_CON_MUERTO.into());
+            }
+            Ok(salida)
+        }
+
+        fn tiene_rustsec(&self) -> bool {
+            true
+        }
+    }
+
+    /// Podman que no debe usarse: el repo de la prueba no tiene Dockerfile, así que no se construye imagen.
+    struct PodmanSinUso;
+
+    impl crate::oracle::entrega::Podman for PodmanSinUso {
+        fn correr(
+            &self,
+            args: &[&str],
+            _plazo: Duration,
+        ) -> Result<crate::oracle::contenedor::SalidaPodman, ErrorOraculo> {
+            panic!("la calibración no debía llamar a podman: {args:?}");
+        }
+    }
+
+    /// Fábrica de escenarios que no arranca nada.
+    struct FabricaSinContenedoresCal;
+
+    impl crate::oracle::entrega::FabricaEscenarios for FabricaSinContenedoresCal {
+        fn iniciar(
+            &self,
+            _imagen: &str,
+            _escenarios: Option<&Path>,
+        ) -> Result<Box<dyn crate::oracle::entrega::CorredorDeEscenario + '_>, String> {
+            Err("sin contenedor de escenario en esta prueba".into())
+        }
+    }
+
+    /// Suites: esta prueba no las pide (Arquitectura y Diseño no corren contrato ni oculta). Si corren, falla.
+    fn correr_sin_contenedores(
+        e: &crate::oracle::contenedor::Ejecucion,
+    ) -> Result<crate::oracle::contenedor::Resultado, ErrorOraculo> {
+        Err(ErrorOraculo::Infra(format!(
+            "la calibración no debía correr suites: {}",
+            e.cmd
+        )))
+    }
+
+    /// Cuentas de una evaluación por tipo de caso: evaluaciones del evaluador y llamadas al juez.
+    #[derive(Default)]
+    struct Cuenta {
+        evaluaciones: AtomicU32,
+        juez: AtomicU32,
+    }
+
+    /// Cuentas de la calibración: la base, los limpios (alcance `Deterministas`) y los defectos (`SoloMutacion`).
+    #[derive(Default)]
+    struct Cuentas {
+        base: Cuenta,
+        limpios: Cuenta,
+        defectos: Cuenta,
+    }
+
+    /// Evaluador real: `evaluar_con` con juez falso y dependencias sin podman. Cuenta por tipo de caso.
+    fn evaluador_real<'a>(
+        home: &'a Path,
+        cuentas: &'a Cuentas,
+    ) -> impl Fn(&Tarea, &Path, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> + Sync + 'a
+    {
+        move |tarea: &Tarea, repo: &Path, o: &OpcionesOraculo| -> Result<Veredicto, ErrorOraculo> {
+            let rubricas = crate::oracle::rubrica::cargar_embebidas()
+                .map_err(|e| ErrorOraculo::Infra(format!("rúbricas embebidas: {e}")))?;
+            let calibracion = crate::oracle::calibra::Calibraciones::cargar(home)?;
+            let juez = JuezSync {
+                texto: texto_juez(&rubricas),
+                llamadas: AtomicU32::new(0),
+            };
+            let herramientas = |_: &crate::oracle::Preparada| -> Box<dyn EjecutorHerramienta> {
+                Box::new(HerramientasSanas)
+            };
+            let deps = crate::oracle::Dependencias {
+                correr: &correr_sin_contenedores,
+                herramientas: &herramientas,
+                juez: Some(&juez),
+                modelo_juez: "juez-falso",
+                juez_config: None,
+                calibracion: &calibracion,
+                rubricas: &rubricas,
+                reglas: crate::config::ReglasDecision::default(),
+                redactor: None,
+                avisos: Vec::new(),
+                podman: &PodmanSinUso,
+                escenarios: &FabricaSinContenedoresCal,
+            };
+            let con_home = OpcionesOraculo {
+                home: Some(home.to_path_buf()),
+                ..o.clone()
+            };
+            let veredicto = crate::oracle::evaluar_con(repo, tarea, &con_home, deps)?;
+            let limpio = o
+                .reuso
+                .as_ref()
+                .is_some_and(|r| r.alcance == Alcance::Deterministas);
+            let cuenta = if limpio {
+                &cuentas.limpios
+            } else if o.memo.is_some() {
+                &cuentas.base
+            } else {
+                &cuentas.defectos
+            };
+            cuenta.evaluaciones.fetch_add(1, Ordering::SeqCst);
+            cuenta
+                .juez
+                .fetch_add(juez.llamadas.load(Ordering::SeqCst), Ordering::SeqCst);
+            Ok(veredicto)
+        }
+    }
+
+    /// Lock de la fixture: su paquete es `calibra-fixture`, como el `Cargo.toml` de la copia.
+    const LOCK_CALIBRA: &str =
+        "version = 4\n\n[[package]]\nname = \"calibra-fixture\"\nversion = \"0.1.0\"\n";
+
+    /// Carpeta de la calibración sin Dockerfile y con `Cargo.lock`, y la caché de la descarga en `home`.
+    /// Así la descarga no baja nada y Entrega no construye imagen.
+    fn carpeta_sin_red(home: &Path) -> PathBuf {
+        let carpeta = carpeta_con_repo_bueno(home);
+        let repo = carpeta.join("repo-bueno");
+        fs::remove_file(repo.join("Dockerfile")).expect("quita el Dockerfile");
+        fs::write(repo.join("Cargo.lock"), LOCK_CALIBRA).expect("Cargo.lock");
+        let cache = home
+            .join("cache/rust")
+            .join(crate::oracle::descarga::hash_corto(LOCK_CALIBRA.as_bytes()));
+        fs::create_dir_all(&cache).expect("caché de Rust");
+        fs::write(cache.join("config.toml"), "").expect("config.toml");
+        fs::create_dir_all(home.join("cache/rustsec")).expect("base de RustSec");
+        // La tarea de la fixture declara `bootstrap/docs/SPEC.md`: la evaluación real lo lee.
+        let spec = carpeta.join("bootstrap/docs");
+        fs::create_dir_all(&spec).expect("carpeta del spec");
+        fs::write(
+            spec.join("SPEC.md"),
+            include_str!("../../tests/fixtures/fichas/spec-completa.md"),
+        )
+        .expect("SPEC.md");
+        carpeta
+    }
+
+    #[test]
+    fn calibra_diseno_tras_arquitectura_con_evaluador_real_no_llama_al_juez_en_limpios() {
+        // Punto 3, de punta a punta: Arquitectura y luego Diseño, con la misma semilla y n, y `evaluar_con` real.
+        let home = tempfile::tempdir().expect("home");
+        carpeta_sin_red(home.path());
+        let de_arquitectura = Cuentas::default();
+        calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "arquitectura",
+            4,
+            42,
+            None,
+            None,
+            &evaluador_real(home.path(), &de_arquitectura),
+        )
+        .expect("calibra arquitectura");
+        // Guarda: Arquitectura sí llama al juez en sus limpios. Sin esto, el cero de Diseño no probaría nada.
+        assert!(
+            de_arquitectura.limpios.evaluaciones.load(Ordering::SeqCst) > 0,
+            "Arquitectura evalúa limpios"
+        );
+        assert!(
+            de_arquitectura.limpios.juez.load(Ordering::SeqCst) > 0,
+            "Arquitectura llama al juez en sus limpios"
+        );
+        let de_diseno = Cuentas::default();
+        let segunda = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "diseno",
+            4,
+            42,
+            None,
+            None,
+            &evaluador_real(home.path(), &de_diseno),
+        )
+        .expect("calibra diseño");
+        let renglones = renglones_guardados(&segunda);
+        let con_defecto = renglones.iter().filter(|c| c.es_defecto).count();
+        assert!(
+            renglones.iter().any(|c| !c.es_defecto),
+            "hay limpios de Diseño"
+        );
+        // (i) Los limpios de Diseño salen del caché: ni se evalúan ni llaman al juez.
+        assert_eq!(
+            de_diseno.limpios.evaluaciones.load(Ordering::SeqCst),
+            0,
+            "los limpios no pasan por el evaluador"
+        );
+        assert_eq!(
+            de_diseno.limpios.juez.load(Ordering::SeqCst),
+            0,
+            "los limpios no llaman al juez"
+        );
+        // La base corre una vez y cada caso con defecto corre una vez. Solo esos llaman al juez.
+        assert_eq!(
+            de_diseno.base.evaluaciones.load(Ordering::SeqCst),
+            1,
+            "una base"
+        );
+        assert_eq!(
+            de_diseno.defectos.evaluaciones.load(Ordering::SeqCst) as usize,
+            con_defecto,
+            "un caso con defecto por renglón"
+        );
+        assert!(
+            de_diseno.defectos.juez.load(Ordering::SeqCst) as usize >= con_defecto,
+            "cada caso con defecto llama al juez"
+        );
+        // (ii) La fila de Diseño no cuenta limpios sin veredicto.
+        assert_eq!(segunda.fila.limpios_sin_veredicto, 0, "fila de Diseño");
+        // (iii) Cada limpio de Diseño tiene veredicto.
+        for caso in renglones.iter().filter(|c| !c.es_defecto) {
+            assert!(
+                caso.sin_veredicto.is_none(),
+                "caso {} sin veredicto: {:?}",
+                caso.caso,
+                caso.sin_veredicto
+            );
+        }
     }
 }
