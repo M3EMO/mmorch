@@ -756,6 +756,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       ],
       "default": null
     },
+    "limpio_reusado": {
+      "description": "`true`: el limpio salió del caché de las otras dimensiones con juez, sin evaluarse. `false` en los demás.",
+      "type": "boolean",
+      "default": false
+    },
     "linea": {
       "description": "Línea 1-based del defecto; 0 significa el archivo entero. `None` en un caso limpio.",
       "type": [

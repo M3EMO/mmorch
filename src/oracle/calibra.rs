@@ -251,6 +251,9 @@ pub struct CasoGuardado {
     /// de que la calibración midiera el `target` (Tarea 59).
     #[serde(default)]
     pub target_reusado: Option<bool>,
+    /// `true`: el limpio salió del caché de las otras dimensiones con juez, sin evaluarse. `false` en los demás.
+    #[serde(default)]
+    pub limpio_reusado: bool,
     /// Por qué `detectado` es true. Estructura, Arquitectura y Diseño: `hallazgo_sonda`, `item_sonda:<item>`,
     /// `cita_juez` o `item_baja_2:<item>`. Las demás: `hallazgo_nuevo`, `valor_menor` o `item_bajo:<item>`.
     /// `None` si no detectó. Un caso sin veredicto de la dimensión no detecta: su motivo está en `sin_veredicto`.
@@ -498,9 +501,13 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         // dimensión con juez ya lo juzgó, se reusa su veredicto y no se copia ni se evalúa (Tarea 63, punto 6).
         let compartido = r.compartidos.filter(|_| regla::es_con_juez(r.dimension));
         if let Some(veredicto) = compartido.and_then(|c| c.leer(i as u32, r.dimension)) {
+            let caso = Caso {
+                limpio_reusado: true,
+                ..Caso::nuevo(i as u32, None, veredicto)
+            };
             return Ok(Medido {
                 reemplazos: 0,
-                caso: Some(Caso::nuevo(i as u32, None, veredicto)),
+                caso: Some(caso),
                 detencion: None,
                 no_aplicable: None,
             });
@@ -1299,6 +1306,8 @@ struct Caso {
     reemplazos: u32,
     /// Si el caso compiló sobre el `target` de la base.
     target_reusado: bool,
+    /// Si el limpio salió del caché `Compartidos`, sin evaluarse. Siempre `false` en un caso con defecto.
+    limpio_reusado: bool,
     /// Por qué `detectado` es true. `None` si no detectó.
     motivo: Option<String>,
     /// Nivel de cada ítem de la dimensión calibrada en la base.
@@ -1325,6 +1334,7 @@ impl Caso {
             niveles: BTreeMap::new(),
             reemplazos: 0,
             target_reusado: false,
+            limpio_reusado: false,
         }
     }
 
@@ -1348,6 +1358,7 @@ impl CasoGuardado {
             // Ningún mecanismo repite casos hoy: el campo queda en `false` hasta que alguno lo haga.
             repetido_por_entorno: false,
             target_reusado: Some(caso.target_reusado),
+            limpio_reusado: caso.limpio_reusado,
             motivo: caso.motivo.clone(),
             niveles_base: caso.niveles_base.clone(),
             niveles: caso.niveles.clone(),
@@ -1369,6 +1380,7 @@ impl CasoGuardado {
             reemplazos: 0,
             repetido_por_entorno: false,
             target_reusado: None,
+            limpio_reusado: false,
             motivo: None,
             niveles_base: BTreeMap::new(),
             niveles: BTreeMap::new(),
@@ -1677,9 +1689,15 @@ fn niveles_de(puntaje: Option<&Puntaje>) -> BTreeMap<String, u8> {
     })
 }
 
+/// Niveles que un ítem debe bajar para contar en Estructura, Arquitectura y Diseño. Copia de
+/// `regla::BAJA_ITEM_FUERTE`, que es privada allí: si cambia uno, cambia el otro.
+const BAJA_ITEM_CON_JUEZ: u8 = 2;
+
 /// Si el ítem `item` de la dimensión baja frente a la base. `None` si la base no mide el ítem: no entra a
-/// la métrica. Sin veredicto de la dimensión, no baja (`Some(false)`), sea limpio o defecto. Sin nivel del ítem,
-/// cuenta como falso positivo si el caso es limpio, y como no detectado si es defecto.
+/// la métrica. Sin veredicto de la dimensión, no baja (`Some(false)`), sea limpio o defecto.
+/// En Estructura, Arquitectura y Diseño, baja solo si pierde `BAJA_ITEM_CON_JUEZ` niveles o más. Sin nivel
+/// del ítem, no cuenta: ni como detección ni como falsa alarma. En las demás, baja con cualquier nivel menos.
+/// Sin nivel del ítem, cuenta como falso positivo si el caso es limpio, y como no detectado si es defecto.
 fn detecta_item(
     base: &Veredicto,
     veredicto: &Veredicto,
@@ -1695,11 +1713,16 @@ fn detecta_item(
     if pv.sin_veredicto.is_some() {
         return Some(false);
     }
+    let con_juez = regla::es_con_juez(dimension);
     Some(match nivel_de(pv, item) {
+        Some(nivel) if con_juez => {
+            nivel_base.saturating_sub(nivel) >= BAJA_ITEM_CON_JUEZ
+                && estables::permite(base, veredicto, dimension, ruidosos)
+        }
         Some(nivel) => {
             nivel < nivel_base && estables::permite(base, veredicto, dimension, ruidosos)
         }
-        None => !es_defecto,
+        None => !con_juez && !es_defecto,
     })
 }
 
@@ -2915,6 +2938,79 @@ mod tests {
             0,
             "los limpios de Diseño salen del cache de Arquitectura"
         );
+    }
+
+    /// Renglones de `.casos.jsonl` de una calibración. Falla si no hay casos guardados.
+    fn renglones_guardados(calibrada: &Calibrada) -> Vec<CasoGuardado> {
+        let ruta = calibrada.casos.as_ref().expect("hay casos guardados");
+        fs::read_to_string(ruta)
+            .expect("lee los casos")
+            .lines()
+            .map(|l| serde_json::from_str::<CasoGuardado>(l).expect("caso"))
+            .collect()
+    }
+
+    #[test]
+    fn calibra_diseno_marca_limpio_reusado_solo_en_los_limpios_del_cache() {
+        // Punto 5: los limpios que Diseño reusa de Arquitectura dicen `limpio_reusado`. Los de Arquitectura no.
+        // Los casos con defecto siempre dicen `false`.
+        let home = tempfile::tempdir().expect("home");
+        carpeta_con_repo_bueno(home.path());
+        let arquitectura = AtomicUsize::new(0);
+        let primera = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "arquitectura",
+            4,
+            42,
+            None,
+            None,
+            &evaluador_con_limpios(&arquitectura, |_| veredicto_arq_dis(1.0)),
+        )
+        .expect("calibra arquitectura");
+        let diseno = AtomicUsize::new(0);
+        let segunda = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "diseno",
+            4,
+            42,
+            None,
+            None,
+            &evaluador_con_limpios(&diseno, |_| veredicto_arq_dis(1.0)),
+        )
+        .expect("calibra diseño");
+        let de_arquitectura = renglones_guardados(&primera);
+        let de_diseno = renglones_guardados(&segunda);
+        assert!(
+            de_diseno.iter().any(|c| !c.es_defecto),
+            "hay limpios de Diseño"
+        );
+        for caso in de_diseno.iter().filter(|c| !c.es_defecto) {
+            assert!(caso.limpio_reusado, "caso {}: sale del caché", caso.caso);
+        }
+        for caso in de_arquitectura.iter().filter(|c| !c.es_defecto) {
+            assert!(
+                !caso.limpio_reusado,
+                "caso {}: Arquitectura evalúa",
+                caso.caso
+            );
+        }
+        for caso in de_arquitectura
+            .iter()
+            .chain(&de_diseno)
+            .filter(|c| c.es_defecto)
+        {
+            assert!(!caso.limpio_reusado, "caso {}: con defecto", caso.caso);
+        }
+    }
+
+    #[test]
+    fn calibra_renglon_sin_limpio_reusado_se_lee_como_false() {
+        // Guarda: un renglón de antes del caché carga sin el campo y queda en `false`.
+        let viejo = r#"{"caso":1,"es_defecto":false,"detectado":false}"#;
+        let caso: CasoGuardado = serde_json::from_str(viejo).expect("renglón sin el campo");
+        assert!(!caso.limpio_reusado);
     }
 
     /// Veredicto de Arquitectura medida y de Diseño no medida (`NO_MEDIDA`), como el evaluador real cuando
@@ -4177,6 +4273,59 @@ mod tests {
             assert!(!caso.detectado, "caso {}: bajó 1 nivel", caso.caso);
             assert_eq!(caso.motivo, None, "caso {}", caso.caso);
         }
+    }
+
+    #[test]
+    fn detecta_item_con_juez_cuenta_solo_la_baja_de_dos_niveles() {
+        // Punto 7: en Arquitectura, una baja de 1 nivel no cuenta. Una baja de 2 sí. Sin baja, no.
+        let base = arquitectura_con_item(3);
+        let item_de = |veredicto: Veredicto| -> Option<bool> {
+            let mut casos = vec![Caso::nuevo(1, None, veredicto)];
+            finalizar_casos(
+                &base,
+                Dimension::Arquitectura,
+                &[ITEM_ARQUITECTURA],
+                &mut casos,
+            );
+            casos[0].detecta_en(ITEM_ARQUITECTURA)
+        };
+        assert_eq!(item_de(arquitectura_con_item(2)), Some(false), "baja 1");
+        assert_eq!(item_de(arquitectura_con_item(1)), Some(true), "baja 2");
+        assert_eq!(item_de(arquitectura_con_item(3)), Some(false), "sin baja");
+    }
+
+    #[test]
+    fn detecta_item_con_juez_limpio_sin_nivel_del_item_no_es_falsa_alarma() {
+        // Punto 7: un limpio sin nivel del ítem en Arquitectura no cuenta como falsa alarma.
+        let base = arquitectura_con_item(3);
+        let sin_item = Veredicto {
+            puntajes: vec![puntaje(Dimension::Arquitectura, 1.0)],
+            ..Veredicto::default()
+        };
+        let mut casos = vec![Caso::nuevo(1, None, sin_item)];
+        finalizar_casos(
+            &base,
+            Dimension::Arquitectura,
+            &[ITEM_ARQUITECTURA],
+            &mut casos,
+        );
+        assert_eq!(casos[0].detecta_en(ITEM_ARQUITECTURA), Some(false));
+    }
+
+    #[test]
+    fn detecta_item_sin_juez_baja_de_un_nivel_sigue_contando() {
+        // Control: Seguridad no usa la regla con juez. Una baja de 1 nivel cuenta.
+        let base = veredicto_base();
+        let mut baja = base.clone();
+        baja.puntajes[0].items[0].nivel = 2;
+        let mut casos = vec![Caso::nuevo(1, None, baja)];
+        finalizar_casos(
+            &base,
+            Dimension::Seguridad,
+            &["seguridad.secretos"],
+            &mut casos,
+        );
+        assert_eq!(casos[0].detecta_en("seguridad.secretos"), Some(true));
     }
 
     #[test]
