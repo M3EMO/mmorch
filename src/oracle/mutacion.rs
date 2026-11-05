@@ -2,6 +2,8 @@
 //! del repo y mide qué cambios de comportamiento detectan los tests. El puntaje es la proporción
 //! de mutantes muertos. Si la herramienta falta en la imagen, no hay veredicto (fail-closed).
 
+use std::cell::RefCell;
+
 use serde::{Deserialize, Serialize};
 
 use crate::oracle::ErrorOraculo;
@@ -266,12 +268,46 @@ fn leer_listado(stdout: &str) -> Result<Vec<String>, String> {
     Ok(items.into_iter().map(|i| i.name).collect())
 }
 
+thread_local! {
+    /// Archivo al que se acota la corrida de mutación de este hilo. `None`: todo el repo.
+    static ARCHIVO_ACOTADO: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Corre `f` con la mutación acotada a `archivo` (`None`: sin acotar). Al salir, también si `f` entra en
+/// pánico, vuelve el valor anterior.
+pub fn con_archivo_acotado<T>(archivo: Option<&str>, f: impl FnOnce() -> T) -> T {
+    /// Devuelve el valor anterior al salir del ámbito.
+    struct Restaura(Option<String>);
+    impl Drop for Restaura {
+        fn drop(&mut self) {
+            let anterior = self.0.take();
+            ARCHIVO_ACOTADO.with(|a| *a.borrow_mut() = anterior);
+        }
+    }
+    let anterior = ARCHIVO_ACOTADO.with(|a| a.replace(archivo.map(str::to_string)));
+    let _restaura = Restaura(anterior);
+    f()
+}
+
+/// Archivo al que está acotada la mutación de este hilo, si hay uno.
+pub(crate) fn archivo_acotado() -> Option<String> {
+    ARCHIVO_ACOTADO.with(|a| a.borrow().clone())
+}
+
+/// Fragmento ` --file '<ruta>'` si la mutación está acotada; `""` si no.
+fn acotado_de_archivo() -> String {
+    archivo_acotado()
+        .map(|archivo| format!(" --file {}", comilla_shell(&archivo)))
+        .unwrap_or_default()
+}
+
 /// Comando que lista los mutantes en orden de ejecución, sobre una copia de `/repo`. Escribe el
 /// listado en `/salida`: el stdout del ejecutor se corta a sus últimos caracteres.
 pub(crate) fn comando_de_listado() -> String {
+    let acotado = acotado_de_archivo();
     format!(
         "{PRELUDIO}cp -a /repo /salida/work && cd /salida/work && \
-         cargo mutants --list --json --no-shuffle > /salida/{ARCHIVO_LISTADO}"
+         cargo mutants --list --json --no-shuffle{acotado} > /salida/{ARCHIVO_LISTADO}"
     )
 }
 
@@ -293,10 +329,11 @@ fn comando_de_corrida(tarea: &Tarea, filtro: &str) -> String {
         .as_ref()
         .map_or(MINUTOS_MAX_DEFECTO, |p| p.minutos_max);
     let segundos = u64::from(minutos) * 60;
+    let acotado = acotado_de_archivo();
     format!(
         "{PRELUDIO}cp -a /repo /salida/work && cd /salida/work && \
          CARGO_TARGET_DIR=/salida/target timeout {segundos} cargo mutants --no-shuffle --jobs 1 \
-         --output /salida/mutants{filtro} -- --offline; \
+         --output /salida/mutants{filtro}{acotado} -- --offline; \
          cp /salida/mutants/mutants.out/outcomes.json /salida/{ARCHIVO_OUTCOMES} 2>/dev/null"
     )
 }
@@ -856,6 +893,78 @@ mod tests {
             cmd.contains(&format!("timeout {}", MINUTOS_MAX_DEFECTO * 60)),
             "{cmd}"
         );
+    }
+
+    #[test]
+    fn mutacion_acotada_agrega_file_al_listado_y_a_la_corrida() {
+        con_archivo_acotado(Some("src/a.rs"), || {
+            let listado = comando_de_listado();
+            assert!(listado.contains("--file 'src/a.rs'"), "{listado}");
+            assert!(es_comando_de_listado(&listado), "{listado}");
+            let corrida = comando_de_corrida(&tarea_pruebas(5), "");
+            assert!(corrida.contains("--file 'src/a.rs'"), "{corrida}");
+            assert!(es_comando_de_mutacion(&corrida), "{corrida}");
+        });
+    }
+
+    #[test]
+    fn mutacion_sin_acotar_los_comandos_son_iguales_a_hoy() {
+        assert_eq!(archivo_acotado(), None);
+        let listado = comando_de_listado();
+        assert_eq!(
+            listado,
+            format!(
+                "{PRELUDIO}cp -a /repo /salida/work && cd /salida/work && \
+                 cargo mutants --list --json --no-shuffle > /salida/listado.json"
+            )
+        );
+        let corrida = comando_de_corrida(&tarea_pruebas(5), "");
+        assert!(!corrida.contains("--file"), "{corrida}");
+        assert!(
+            corrida.contains("--output /salida/mutants -- --offline"),
+            "{corrida}"
+        );
+    }
+
+    #[test]
+    fn mutacion_con_archivo_acotado_restaura_tras_f_y_tras_un_panico() {
+        assert_eq!(archivo_acotado(), None);
+        con_archivo_acotado(Some("src/a.rs"), || {
+            assert_eq!(archivo_acotado().as_deref(), Some("src/a.rs"));
+            con_archivo_acotado(Some("src/b.rs"), || {
+                assert_eq!(archivo_acotado().as_deref(), Some("src/b.rs"));
+            });
+            assert_eq!(archivo_acotado().as_deref(), Some("src/a.rs"));
+        });
+        assert_eq!(archivo_acotado(), None, "tras f vuelve el anterior");
+        let panico = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            con_archivo_acotado(Some("src/c.rs"), || panic!("a propósito"));
+        }));
+        assert!(panico.is_err());
+        assert_eq!(archivo_acotado(), None, "tras un pánico también vuelve");
+    }
+
+    #[test]
+    fn mutacion_acotada_no_nombra_otro_archivo_en_ningun_comando() {
+        let nombres = [
+            "src/a.rs:1:5: replace a -> u8 with 0",
+            "src/a.rs:2:9: replace b + c with b - c",
+        ];
+        let ej = con_listado_y_corrida(listado_json(&nombres), corrida_de(&nombres));
+        let r = con_archivo_acotado(Some("src/a.rs"), || sonda_mutacion(&ej, &tarea_pruebas(5)));
+        assert!(r.sonda.valor.is_some(), "{:?}", r.sonda.motivo);
+        let cmds = ej.cmds.borrow();
+        let de_mutantes: Vec<&String> = cmds
+            .iter()
+            .filter(|c| c.contains("cargo mutants"))
+            .collect();
+        assert_eq!(de_mutantes.len(), 2, "listado y corrida: {cmds:?}");
+        for cmd in cmds.iter() {
+            assert!(!cmd.contains("src/b.rs"), "nombra otro archivo: {cmd}");
+        }
+        for cmd in de_mutantes {
+            assert!(cmd.contains("--file 'src/a.rs'"), "{cmd}");
+        }
     }
 
     #[test]

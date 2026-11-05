@@ -530,7 +530,11 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
             motivo_sin_caso = MOTIVO_SIN_CANDIDATO;
             break;
         };
-        let (veredicto, reusado) = evaluar_copia(r, &copia, TipoCaso::Defecto(r.dimension), i)?;
+        // `AssertBorrado` acota la mutación al archivo de su mutante: solo ese archivo se vuelve a medir.
+        let acotado = inyeccion.mutante_archivo.as_deref();
+        let (veredicto, reusado) = super::mutacion::con_archivo_acotado(acotado, || {
+            evaluar_copia(r, &copia, TipoCaso::Defecto(r.dimension), i)
+        })?;
         borrado::borrar_dir_dentro(r.tmp, &copia)
             .map_err(|e| super::infra("borrar una copia", e))?;
         if rompe_la_compilacion(r.base, &veredicto, r.dimension) {
@@ -2072,6 +2076,60 @@ mod tests {
             .expect("un caso con AssertBorrado aplicado");
         assert_eq!(con_defecto.archivo.as_deref(), Some("tests/protocolo.rs"));
         assert_eq!(con_defecto.linea, Some(5), "el primer assert del test");
+    }
+
+    /// Un caso con AssertBorrado corre el evaluador acotado al archivo de su mutante. La base y el caso limpio no.
+    #[test]
+    fn calibra_pruebas_el_caso_con_assert_borrado_corre_acotado_al_mutante() {
+        use crate::oracle::mutacion::{ARCHIVO_OUTCOMES, archivo_acotado, construir_comando};
+        use crate::oracle::perfiles::herramientas::SalidaHerramienta;
+        const OUTCOMES: &str = r#"{"total_mutants":1,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)","file":"src/protocolo.rs","span":{"start":{"line":2,"column":1}}}},"summary":"CaughtMutant"}]}"#;
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = home.path().join("oraculos").join("calibra-fixture");
+        std::fs::create_dir_all(&carpeta).expect("carpeta");
+        let repo = carpeta.join("repo-bueno");
+        std::fs::create_dir_all(&repo).expect("repo");
+        super::inyectar::pruebas::copiar(Path::new(FIXTURE), &repo);
+        std::fs::write(repo.join("tests/protocolo.rs"), TEST_DE_LEER_NUMERO).expect("test");
+        let _ = tarea_en(&carpeta, "\n[calibracion]\nrepo = \"repo-bueno\"\n");
+        let acotados = Mutex::new(Vec::<Option<String>>::new());
+        let evaluador = |tarea: &Tarea, _: &Path, o: &OpcionesOraculo| {
+            acotados.lock().expect("lock").push(archivo_acotado());
+            if let Some(memo) = o.memo.as_deref() {
+                let mut salida = SalidaHerramienta::default();
+                salida
+                    .archivos
+                    .insert(ARCHIVO_OUTCOMES.into(), OUTCOMES.into());
+                memo.anotar(&construir_comando(tarea), &salida);
+            }
+            Ok(veredicto_de_pruebas())
+        };
+        calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "pruebas",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+        )
+        .expect("calibra");
+        let vistos = acotados.lock().expect("lock");
+        let con_archivo: Vec<&String> = vistos.iter().flatten().collect();
+        assert!(
+            !con_archivo.is_empty(),
+            "el caso con AssertBorrado va acotado: {vistos:?}"
+        );
+        assert!(
+            con_archivo.iter().all(|a| a.as_str() == "src/protocolo.rs"),
+            "solo el mutante elegido: {vistos:?}"
+        );
+        let sin_archivo = vistos.iter().filter(|a| a.is_none()).count();
+        assert!(
+            sin_archivo >= 2,
+            "la base y el caso limpio no van acotados: {vistos:?}"
+        );
     }
 
     /// Una llamada del evaluador de prueba: si era la base (lleva memo), su alcance de reuso y los comandos que corrió.

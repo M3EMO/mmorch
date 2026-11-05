@@ -85,6 +85,8 @@ pub struct Inyeccion {
     /// Ruta relativa a la raíz de la copia, con `/`.
     pub archivo: String,
     pub linea: u32,
+    /// Archivo del mutante muerto que eligió `AssertBorrado`. `None` en los demás defectos.
+    pub mutante_archivo: Option<String>,
 }
 
 /// Lo que `inyectar_con` necesita además de la copia y la semilla.
@@ -128,6 +130,7 @@ pub fn inyectar_con(
     semilla: u64,
 ) -> io::Result<Option<Inyeccion>> {
     let mut rng = Prng::nuevo(semilla);
+    let mut mutante_archivo = None;
     let lugar = match defecto {
         Defecto::SecretoEnCodigo => secreto(dir, &mut rng)?,
         Defecto::PanicoEnEntrada => panico(dir, &mut rng)?,
@@ -136,13 +139,20 @@ pub fn inyectar_con(
         Defecto::ArchivoDios => dios(dir, contexto.limites, &mut rng)?,
         Defecto::ModuloBorrado => modulo_borrado(dir, &mut rng)?,
         Defecto::ErrorTragado => error_tragado(dir, &mut rng)?,
-        Defecto::AssertBorrado => assert_borrado(dir, contexto.muertos, &mut rng)?,
+        Defecto::AssertBorrado => match assert_borrado(dir, contexto.muertos, &mut rng)? {
+            Some((archivo, linea, del_mutante)) => {
+                mutante_archivo = Some(del_mutante);
+                Some((archivo, linea))
+            }
+            None => None,
+        },
         Defecto::DockerfileRoot => dockerfile(dir)?,
     };
     Ok(lugar.map(|(archivo, linea)| Inyeccion {
         defecto,
         archivo,
         linea,
+        mutante_archivo,
     }))
 }
 
@@ -626,7 +636,12 @@ fn es_assert(linea: &str) -> bool {
 /// Borra los asserts de los tests que cubren un mutante muerto de `muertos`. La semilla elige el mutante por
 /// su posición. Si su función no tiene tests con asserts, prueba el siguiente de la lista, en orden. Sin
 /// muertos, o sin ninguno con test, no aplica: no hay borrado al azar.
-fn assert_borrado(dir: &Path, muertos: &[MutanteMuerto], rng: &mut Prng) -> io::Result<Lugar> {
+/// Archivo y línea del primer assert borrado, y el archivo del mutante elegido. `None` si no hay mutante con test.
+fn assert_borrado(
+    dir: &Path,
+    muertos: &[MutanteMuerto],
+    rng: &mut Prng,
+) -> io::Result<Option<(String, u32, String)>> {
     if muertos.is_empty() {
         return Ok(None);
     }
@@ -640,11 +655,12 @@ fn assert_borrado(dir: &Path, muertos: &[MutanteMuerto], rng: &mut Prng) -> io::
         let Some((archivo, indices)) = cubiertos.first() else {
             continue;
         };
-        let lugar = (archivo.clone(), indices[0] as u32 + 1);
+        let linea = indices[0] as u32 + 1;
+        let archivo = archivo.clone();
         for (archivo, indices) in &cubiertos {
             quitar_lineas(dir, archivo, indices)?;
         }
-        return Ok(Some(lugar));
+        return Ok(Some((archivo, linea, mutante.archivo.clone())));
     }
     Ok(None)
 }
@@ -1416,6 +1432,35 @@ mod tests {
         );
         assert!(nuevo.contains("assert_eq!(1 + 1, 2);"), "{nuevo}");
         assert!(nuevo.contains("fn leer_numero_lee_el_numero()"), "{nuevo}");
+    }
+
+    #[test]
+    fn inyectar_assert_borrado_guarda_el_archivo_del_mutante_elegido() {
+        let dir = copia_con_test_de_leer_numero();
+        let inyeccion = borrar_con(dir.path(), &[muerto_de_leer_numero()], 42)
+            .expect("E/S")
+            .expect("hay un test que cubre leer_numero");
+        assert_eq!(
+            inyeccion.mutante_archivo.as_deref(),
+            Some("src/protocolo.rs")
+        );
+    }
+
+    #[test]
+    fn inyectar_otros_defectos_no_guardan_mutante_archivo() {
+        let dir = copia_fixture();
+        let capas = capas_fixture();
+        let limites = LimitesEstructura::default();
+        let contexto = Contexto {
+            capas: &capas,
+            camino_caliente: &[],
+            limites: &limites,
+            muertos: &[muerto_de_leer_numero()],
+        };
+        let inyeccion = inyectar_con(Defecto::SecretoEnCodigo, dir.path(), &contexto, 42)
+            .expect("E/S")
+            .expect("aplica");
+        assert_eq!(inyeccion.mutante_archivo, None);
     }
 
     #[test]
