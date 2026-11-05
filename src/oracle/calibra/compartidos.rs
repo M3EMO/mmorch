@@ -4,8 +4,8 @@
 //!
 //! La clave junta la tarea, la versión del repo bueno, las rúbricas, el modelo del juez de diseño, el prompt
 //! del juez, el `tarea.toml` y la semilla. Cambiar cualquiera cambia la clave, y entonces nada se reusa.
-//! Un puntaje no medido en su calibración (`NO_MEDIDA`) no se reusa. Un archivo ilegible o corrupto cuenta
-//! como ausente. No se borra nada.
+//! Un puntaje no medido en su calibración (`NO_MEDIDA`) no se reusa. Tampoco se reusa una falla del modelo.
+//! Un archivo ilegible o corrupto cuenta como ausente. No se borra nada.
 
 use std::fs;
 use std::io::Write;
@@ -24,6 +24,8 @@ const CARPETA: &str = "limpios";
 const SIN_JUEZ: &str = "sin_juez";
 /// Carpetas del repo que no entran en la versión: el `target` de Cargo y el `.git`.
 const SALTADAS: [&str; 2] = ["target", ".git"];
+/// Inicio del motivo que pone `juez.rs` cuando el modelo falla. Es la red caída, no un límite del caso.
+const FALLA_DEL_MODELO: &str = "el modelo falló: ";
 
 /// Veredictos de los limpios de una tarea, con su clave. Cada caso va en `<clave>-<caso>.json`.
 pub(super) struct Compartidos {
@@ -78,12 +80,17 @@ impl Compartidos {
 
     /// El veredicto guardado del caso `caso`. `Some` solo si parsea, trae un puntaje de `dimension` y ese
     /// puntaje se midió. Un puntaje `NO_MEDIDA` (otra dimensión lo calibró) no sirve: esta dimensión evalúa.
+    /// Una falla del modelo tampoco sirve: el modelo no respondió, así que el limpio no tiene veredicto real.
     pub(super) fn leer(&self, caso: u32, dimension: Dimension) -> Option<Veredicto> {
         let texto = fs::read_to_string(self.ruta(caso)).ok()?;
         let veredicto: Veredicto = serde_json::from_str(&texto).ok()?;
         let puntaje = super::puntaje_de(&veredicto, dimension)?;
         let medido = puntaje.sin_veredicto.as_deref() != Some(NO_MEDIDA);
-        medido.then_some(veredicto)
+        let fallo = puntaje
+            .sin_veredicto
+            .as_deref()
+            .is_some_and(|motivo| motivo.starts_with(FALLA_DEL_MODELO));
+        (medido && !fallo).then_some(veredicto)
     }
 
     /// Guarda el veredicto del caso `caso`. Escribe a un temporal de la misma carpeta y lo renombra: un lector
@@ -271,11 +278,30 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         let repo = repo_de_prueba();
         let a = clave_base(home.path(), repo.path());
-        a.guardar(1, &veredicto_con_diseno(Some("juez caído")))
-            .expect("guarda");
+        a.guardar(
+            1,
+            &veredicto_con_diseno(Some("cobertura 8 de 13 de peso, menor que dos tercios")),
+        )
+        .expect("guarda");
         assert!(
             a.leer(1, Dimension::Diseno).is_some(),
             "un sin veredicto por cobertura sí se reusa"
+        );
+    }
+
+    #[test]
+    fn leer_rechaza_un_limpio_con_sin_veredicto_por_falla_del_modelo() {
+        let home = tempfile::tempdir().expect("home");
+        let repo = repo_de_prueba();
+        let a = clave_base(home.path(), repo.path());
+        a.guardar(
+            1,
+            &veredicto_con_diseno(Some("el modelo falló: conexión caída")),
+        )
+        .expect("guarda");
+        assert!(
+            a.leer(1, Dimension::Diseno).is_none(),
+            "un sin veredicto por falla del modelo no se reusa"
         );
     }
 
