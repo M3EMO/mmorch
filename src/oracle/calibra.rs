@@ -3847,6 +3847,23 @@ mod tests {
         assert_eq!(global_de(&puntajes), None);
     }
 
+    /// Guarda: una fila "no aplica" tiene 0 defectos y 0 limpios. Aunque su exactitud valga 1.0, no calibra.
+    #[test]
+    fn calibra_fila_no_aplica_no_calibra_aunque_tenga_exactitud() {
+        let mut no_aplica = fila("memora", Dimension::Seguridad, 1.0, Some(1.0));
+        no_aplica.defectos = 0;
+        no_aplica.limpios = 0;
+        no_aplica.no_aplica = Some("no aplica: la tarea no define [entrega]".into());
+        let c = Calibraciones {
+            v: VERSION,
+            filas: vec![no_aplica],
+        };
+        let mut puntajes = vec![puntaje(Dimension::Seguridad, 0.9)];
+        c.aplicar("memora", &mut puntajes);
+        assert!(!puntajes[0].calibrada, "una fila no aplica no calibra");
+        assert_eq!(puntajes[0].exactitud_balanceada, None);
+    }
+
     #[test]
     fn calibra_n_dos_con_un_defecto_y_un_limpio_acertados_no_califica() {
         let base = veredicto_base();
