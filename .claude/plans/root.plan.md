@@ -4264,3 +4264,111 @@ wait
 9. **Borrado de memora y brasa** (decisión 61).
 
 **P64 cambia de alcance.** Ahora cubre 63, p5, 64 y 65.
+
+## Vuelta del 2026-11-05 (tarde 2): Grupo 1 y Tarea 65
+
+**Grupo 1, binario 34dd370, 0 USD.**
+
+| Tarea | Dimensión | Sens. / espec. | Segundos |
+|---|---|---|---|
+| memora | seguridad | 1.0 / 1.0 | 54 |
+| memora | entrega | 1.0 / 1.0 | 179 |
+| memora | completitud | 1.0 / 0.3 | 1465 |
+| brasa | seguridad | 1.0 / 1.0 | 66 |
+| brasa | completitud | 1.0 / 1.0 | 1939 |
+| brasa | funciona | 0.3 / 1.0 | 4406 |
+| brasa | eficiencia | no aplica | 0 |
+| brasa | entrega | exit 3: "la línea base no tiene veredicto de entrega" | 1 |
+
+**Tarea 65.** Terminó por 1,11 USD en `laptop/tarea-65` (9699f70), con 2505 verdes sin podman. El orquestador la prueba con podman en d4b9679, junto con 64, 63, p5 y 62.
+
+## Diagnóstico del Grupo 1 (Opus, 2026-11-05)
+
+### Memora completitud 0,3
+
+**Hechos, por código y datos.**
+- Un test inestable crea un hallazgo de Completitud, con su id como `cita` (`src/oracle/requisitos.rs:112-146`). En `src/oracle/` no hay otra fuente de hallazgos de Completitud fuera de tests.
+- `motivo_de_deteccion` mira ese hallazgo primero (`src/oracle/calibra.rs`, `hallazgo_nuevo`).
+- `estables::permite` tiene tres salidas. La tercera es `hallazgo_nuevo` (`src/oracle/calibra/estables.rs:22` y `:112-118`), y no consulta `ruidosos`.
+- Entonces, un test nuevo inestable en un limpio pasa el filtro por esa puerta. El punto 4 de la 63 tapó solo la puerta de los tests.
+- El limpio 7 tiene los mismos niveles que la base, y aun así detecta. El limpio 19 tiene los mismos niveles, y no detecta. La diferencia no está en los niveles.
+- Los limpios detectados cambiaron entre corridas: `[3,5,7,11,13,15,19]` antes y `[1,3,5,7,9,11,13]` ahora. Ambas dan 7 de 10, y el orden no se repite.
+
+**Corrección mía.** El test de la 63 usó un veredicto falso sin ese hallazgo, y mi revisión no lo vio. Yo busqué fuentes de hallazgos, y mi búsqueda no miró `requisitos.rs`.
+
+**Hipótesis, sin medir.** El test es `test_client_id` (84 % de pase, R4). R4 ya vale 1 en la base, así que su inestabilidad no cambia el nivel. Con 5 repeticiones, sale inestable cerca de 6 veces de cada 10.
+
+**Cómo se confirma sin API.** La Tarea 66 guarda `hallazgo_nuevo:<cita>`, y Completitud de memora corre otra vez en cerca de 25 minutos.
+
+### Brasa funciona 0,3
+
+**Hechos, por lectura de los inyectados.**
+
+| Línea | Casos | Qué hace el `==` |
+|---|---|---|
+| `src/app.rs:395` y `:396` | 4 | Eventos de ratón de la ventana. |
+| `src/render.rs:538` | 1 | Decide si reusa los targets. Invertirlo rehace los targets, y la imagen no cambia. |
+| `src/limits.rs:62` | 1 | Decodifica `%` en una URI. |
+| `src/gltf_load.rs:225` | 1 | Usa las normales del archivo si el tamaño coincide. |
+
+- Los 3 detectados están en validaciones y en el bucle de mipmaps: `src/render.rs:701`, `src/scene.rs:538` y `src/render.rs:1097`.
+
+**Hipótesis, sin medir.** La suite corre sin ventana, así que no ejercita `src/app.rs:395-396`. Eso explicaría 4 de los 7 fallos. `src/render.rs:538` parece equivalente. `src/limits.rs:62` y `src/gltf_load.rs:225` quedan sin explicar.
+
+**Decisión: 0,3 mezcla dos cosas, y se separan.**
+- Un defecto en código que ningún test ejecuta no prueba que Funciona sea ciega en lo que promete. Funciona mide lo que la suite especifica.
+- Un defecto en código ejecutado que pasa los tests sí mide algo real, y debe contar en contra.
+- El inyector debe elegir código ejecutado por la suite. No hace falta instalar una herramienta de cobertura.
+- `src/render.rs:538` seguirá contando como fallo. Es honesto: esos mutantes equivalentes existen.
+
+### Brasa entrega
+
+**Hechos.**
+- `tarea.toml` de brasa no tiene `[entrega]`, y el repo no tiene Dockerfile.
+- `elegir_dockerfile` da `SinDockerfile`, y la construcción termina sin medir ningún ítem (`src/oracle/entrega.rs:359-365`).
+- Entonces la base queda sin veredicto, y `calibrar` sale con 3 (`src/oracle/calibra.rs:656-661`).
+
+**Corrección mía.** Dije que brasa no construye imagen, y era cierto. No vi que eso deja la base sin veredicto.
+
+**Decisión.** Es el mismo caso que Eficiencia sin `[eficiencia]`: la tarea no aplica la dimensión. La calibración escribe una fila "no aplica" y sale con 0. La evaluación real no cambia. Los ítems de Entrega no bloquean, así que no deciden `Listo` (decisión 48).
+
+## Desempates técnicos 37 (Opus, 2026-11-05)
+
+**Informe 65.**
+1. **Prefijo `<archivo>:`:** queda. La guarda con la herramienta real lo comprueba.
+2. **Muestra sin nombres del archivo:** sigue sin veredicto, y el caso con defecto cuenta como falso negativo. Solo pasa si el borrado corre el listado, y debe verse. Si Pruebas de memora muestra ese motivo, vuelve al planner.
+3. **Texto de los motivos:** queda.
+
+**Límite nuevo, se informa.** El conjunto `ruidosos` sale de los limpios, así que en Completitud y Funciona la especificidad casi no puede bajar por tests. Una fila con 1,0 no prueba estabilidad. La Tarea 66 guarda la lista de `ruidosos` en la fila, para que se vea cuántos tests quedaron fuera.
+
+**Grupos 2a y 2b: pueden seguir.**
+- Siguen con el binario de d4b9679, si la prueba con podman da verde y Pruebas de memora pasa su compuerta.
+- Las partes del trío no incluyen `oculto` ni `contrato` (`src/oracle/mod.rs`, `partes_de`). El juez no lee las filas de la calibración.
+- La Tarea 66 no toca `regla.rs`, y `estables::permite` da `true` en el trío (`src/oracle/calibra/estables.rs:17`). Sus filas siguen valiendo después de mezclar la 66.
+
+**Filas que la Tarea 66 invalida, todas sin API.**
+- `memora completitud`, por la regla. Cerca de 25 minutos.
+- `memora funciona` y `brasa funciona`, por la selección de líneas. Cerca de 85 y 75 minutos, más las sondas nuevas.
+- `brasa entrega`, que hoy no tiene fila.
+- `brasa completitud` queda: su especificidad ya es 1,0 y no tiene inestables nuevos.
+
+### Tarea 66: Hallazgos de tests con ruido, líneas ejercitadas y Entrega no aplicable
+- **Action**: los cuatro puntos del brief.
+- **Archivos**: `src/oracle/calibra.rs`, `src/oracle/calibra/`.
+- **Arranca**: ya, desde `laptop/tarea-65` (9699f70), con `ROOT_SIN_PODMAN=1`.
+- **Brief**: `docs/builds/brief-local-66.md`.
+
+## Orden final del hito 1 (2026-11-05, tarde 2)
+
+1. **Tarea 66**, ahora, en paralelo con todo lo que sigue.
+2. **Prueba con podman de d4b9679.** Después, **Pruebas de memora**. Se sigue con `mutante_vivo:`.
+3. **Grupo 2a** con `brasa pruebas` en paralelo. Después, las dos compuertas y el **Grupo 2b**.
+4. **Prueba con podman de 66 sobre todo lo anterior**, cuando no corra la calibración.
+5. **Filas sin API con el binario de la 66:** `memora completitud`, `memora funciona`, `brasa funciona` y `brasa entrega`.
+6. **Mezcla**, con la orden del usuario (P63 y P64).
+7. **Corrida real de memora (Tarea 16)**.
+8. **Comparación de `global`.**
+9. **Validez automática** (Tarea 12b) y **cierre** (Tarea 47).
+10. **Borrado de memora y brasa** (decisión 61).
+
+**P64 cambia de alcance otra vez.** Ahora cubre 63, p5, 64, 65 y 66.
