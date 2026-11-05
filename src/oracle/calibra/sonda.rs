@@ -6,7 +6,6 @@ const SENTENCIA_SONDA: &str = "panic!(\"root-sonda\");";
 
 /// Devuelve `fuente` con la sonda al inicio del cuerpo de la fn que contiene `linea`.
 /// `linea` es 1-indexada. `None` si la línea no está en una fn con cuerpo.
-#[allow(dead_code)]
 pub(super) fn con_panic_en_funcion(fuente: &str, linea: usize) -> Option<String> {
     let chars: Vec<char> = fuente.chars().collect();
     let codigo = enmascarar(&chars);

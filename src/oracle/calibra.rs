@@ -547,12 +547,13 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         limites: &limites,
         muertos: r.muertos,
     };
-    // Un defecto que rompe la construcción se reemplaza por el siguiente candidato, hasta
-    // `MAX_REEMPLAZOS` veces. Cada intento inválido suma a `invalidos`, también el del caso agotado.
+    // Un defecto que rompe la construcción, o que la suite no ejecuta, se reemplaza por el siguiente
+    // candidato, hasta `MAX_REEMPLAZOS` veces. Cada intento inválido suma a `invalidos`, también el del caso agotado.
     let mut invalidos = 0u32;
     let mut medido = None;
-    // Si el bucle termina sin medido, el motivo es el último que se cumplió: sin candidato, o agotadas.
+    // Si el bucle termina sin medido, el motivo es el del último descarte: sin candidato, agotadas o sin ejecutar.
     let mut motivo_sin_caso = MOTIVO_AGOTADAS;
+    let mut ultimo_descarte_sonda = false;
     for k in 0..=MAX_REEMPLAZOS {
         // Antes de cada reemplazo (no antes de la primera inyección) se mira el tope. Si no entra, no se gasta.
         if k > 0
@@ -573,7 +574,11 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         let Some(inyeccion) = aplicado else {
             borrado::borrar_dir_dentro(r.tmp, &copia)
                 .map_err(|e| super::infra("borrar una copia", e))?;
-            motivo_sin_caso = motivo_sin_inyeccion(defecto, r.muertos.is_empty());
+            motivo_sin_caso = if ultimo_descarte_sonda {
+                MOTIVO_SIN_EJECUTAR
+            } else {
+                motivo_sin_inyeccion(defecto, r.muertos.is_empty())
+            };
             break;
         };
         // `AssertBorrado` acota la mutación al archivo de su mutante: solo ese archivo se vuelve a medir.
@@ -585,6 +590,17 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
             .map_err(|e| super::infra("borrar una copia", e))?;
         if rompe_la_compilacion(r.base, &veredicto, r.dimension) {
             invalidos += 1;
+            motivo_sin_caso = MOTIVO_AGOTADAS;
+            ultimo_descarte_sonda = false;
+            continue;
+        }
+        // Un comportamiento roto que no cambia nada frente a la base puede caer fuera de lo que la suite ejecuta.
+        let sin_cambio = defecto == Defecto::ComportamientoRoto
+            && motivo_de_deteccion(r.base, &veredicto, r.dimension, &BTreeSet::new()).is_none();
+        if sin_cambio && la_suite_no_la_ejecuta(r, i, &inyeccion)? {
+            invalidos += 1;
+            motivo_sin_caso = MOTIVO_SIN_EJECUTAR;
+            ultimo_descarte_sonda = true;
             continue;
         }
         medido = Some((inyeccion, veredicto, reusado));
@@ -613,6 +629,29 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         detencion: None,
         no_aplicable: None,
     })
+}
+
+/// Si la suite no ejecuta la línea de `inyeccion` (Tarea 66, punto 4). Copia el repo bueno, inserta la sonda al
+/// inicio de la fn que contiene la línea y evalúa esa copia. `true` si la sonda no cambia nada frente a la base.
+/// `false` si la línea no está en una fn (no se puede probar) o si la sonda sí cambia el veredicto.
+fn la_suite_no_la_ejecuta(
+    r: &Ronda,
+    i: usize,
+    inyeccion: &Inyeccion,
+) -> Result<bool, ErrorOraculo> {
+    let copia = r.tmp.join(format!("caso-{i}-sonda"));
+    super::copiar_repo(r.repo_bueno, &copia).map_err(|e| super::infra("copia del repo", e))?;
+    let ruta = copia.join(&inyeccion.archivo);
+    let fuente = fs::read_to_string(&ruta).map_err(|e| super::infra("leer una copia", e))?;
+    let Some(sondada) = sonda::con_panic_en_funcion(&fuente, inyeccion.linea as usize) else {
+        borrado::borrar_dir_dentro(r.tmp, &copia)
+            .map_err(|e| super::infra("borrar una copia", e))?;
+        return Ok(false);
+    };
+    fs::write(&ruta, sondada).map_err(|e| super::infra("escribir la sonda", e))?;
+    let (veredicto, _) = evaluar_copia(r, &copia, TipoCaso::Defecto(r.dimension), i)?;
+    borrado::borrar_dir_dentro(r.tmp, &copia).map_err(|e| super::infra("borrar una copia", e))?;
+    Ok(motivo_de_deteccion(r.base, &veredicto, r.dimension, &BTreeSet::new()).is_none())
 }
 
 /// Como `calibrar_medida`, con `hilos` casos a la vez (1 corre en serie). Un coordinador lanza los casos en
@@ -1072,11 +1111,24 @@ pub fn calibrar_tarea_con(
     // Eficiencia sin `[eficiencia]`: la tarea no la aplica. Ni la base ni los casos corren, y la fila lleva
     // solo el motivo. Es el mismo criterio que la sonda usa para no medir.
     if dim == Dimension::Eficiencia && tarea.eficiencia.is_none() {
-        let fila = fila_no_aplica(&tarea, dim, semilla);
+        let fila = fila_no_aplica(&tarea, dim, semilla, MOTIVO_NO_APLICA_EFICIENCIA);
         agregar(home, &fila)?;
         return Ok(Calibrada { fila, casos: None });
     }
     let repo = repo_de(&tarea, repo_cli)?;
+    // Entrega sin `[entrega]` y sin Dockerfile que elegir: no hay nada que instalar ni levantar. Mismo
+    // `containerfile` que usa la evaluación real.
+    let sin_entrega = dim == Dimension::Entrega && tarea.entrega.is_none();
+    if sin_entrega
+        && matches!(
+            super::entrega::elegir_dockerfile(&repo, tarea.containerfile.as_deref()),
+            super::entrega::Eleccion::SinDockerfile
+        )
+    {
+        let fila = fila_no_aplica(&tarea, dim, semilla, MOTIVO_NO_APLICA_ENTREGA);
+        agregar(home, &fila)?;
+        return Ok(Calibrada { fila, casos: None });
+    }
     // La base y cada caso corren las mismas partes: solo la dimensión calibrada se mide.
     let rubricas = super::rubrica::cargar_embebidas()
         .map_err(|e| ErrorOraculo::Infra(format!("rúbricas embebidas: {e}")))?;
@@ -1191,8 +1243,12 @@ pub fn calibrar_tarea_con(
 /// Motivo de la fila de Eficiencia en una tarea sin `[eficiencia]`.
 const MOTIVO_NO_APLICA_EFICIENCIA: &str = "no aplica: la tarea no define [eficiencia]";
 
-/// Fila de una dimensión que la tarea no aplica: sin casos ni métricas, con el motivo en `no_aplica`.
-fn fila_no_aplica(tarea: &Tarea, dimension: Dimension, semilla: u64) -> Fila {
+/// Motivo de la fila de Entrega en una tarea sin `[entrega]` y con un repo sin Dockerfile.
+const MOTIVO_NO_APLICA_ENTREGA: &str =
+    "no aplica: la tarea no define [entrega] y el repo no tiene Dockerfile";
+
+/// Fila de una dimensión que la tarea no aplica: sin casos ni métricas, con `motivo` en `no_aplica`.
+fn fila_no_aplica(tarea: &Tarea, dimension: Dimension, semilla: u64, motivo: &str) -> Fila {
     Fila {
         tarea: tarea.nombre.clone(),
         dimension,
@@ -1208,7 +1264,7 @@ fn fila_no_aplica(tarea: &Tarea, dimension: Dimension, semilla: u64) -> Fila {
         exactitud_balanceada: None,
         items: BTreeMap::new(),
         incompleta: false,
-        no_aplica: Some(MOTIVO_NO_APLICA_EFICIENCIA.into()),
+        no_aplica: Some(motivo.into()),
         reemplazos: 0,
         ruidosos: Vec::new(),
     }
@@ -1448,6 +1504,10 @@ fn motivo_sin_inyeccion(defecto: Defecto, sin_muertos: bool) -> &'static str {
 
 /// Motivo de un caso no aplicable: todos los reemplazos rompieron la construcción.
 const MOTIVO_AGOTADAS: &str = "inyecciones inválidas agotadas";
+
+/// Motivo de un caso no aplicable: la sonda vio que ningún candidato cae en una función que la suite ejecuta.
+const MOTIVO_SIN_EJECUTAR: &str =
+    "ninguna línea candidata está en una función que la suite ejecute";
 
 /// Marcadores de construcción fallida. Un veredicto con uno de ellos no mide su dimensión: el
 /// texto es el de `perfiles/herramientas.rs` (sonda de clippy) y `mutacion.rs` (sonda de mutación).
@@ -2278,6 +2338,78 @@ mod tests {
         )
         .expect("calibra con el repo de la tarea");
         assert_eq!(vistos.lock().expect("lock")[0], repo);
+    }
+
+    /// Entrega sin `[entrega]` y con un repo sin Dockerfile: la fila es no aplicable. Ni la base ni los casos corren.
+    #[test]
+    fn calibra_entrega_sin_entrega_ni_dockerfile_es_no_aplica() {
+        let home = tempfile::tempdir().expect("home");
+        // El fixture trae un Dockerfile en la raíz: se quita de la copia del repo bueno.
+        let carpeta = carpeta_con_repo_bueno(home.path());
+        std::fs::remove_file(carpeta.join("repo-bueno").join("Dockerfile"))
+            .expect("sin Dockerfile");
+        let llamadas = AtomicUsize::new(0);
+        let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
+            llamadas.fetch_add(1, Ordering::SeqCst);
+            Ok(Veredicto::default())
+        };
+        let calibrada = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "entrega",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+        )
+        .expect("una entrega no aplicable sale con Ok");
+        assert_eq!(llamadas.load(Ordering::SeqCst), 0, "el evaluador no corre");
+        assert_eq!(
+            calibrada.fila.no_aplica.as_deref(),
+            Some("no aplica: la tarea no define [entrega] y el repo no tiene Dockerfile")
+        );
+        assert!(calibrada.casos.is_none(), "sin casos");
+        let guardadas = Calibraciones::cargar(home.path()).expect("carga");
+        assert_eq!(guardadas.filas.len(), 1, "la fila se guarda");
+        assert_eq!(guardadas.filas[0], calibrada.fila);
+    }
+
+    /// Entrega sin `[entrega]` pero con Dockerfile en la raíz del repo: no es no aplicable. El evaluador corre.
+    #[test]
+    fn calibra_entrega_sin_entrega_con_dockerfile_mide_como_siempre() {
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = carpeta_con_repo_bueno(home.path());
+        std::fs::write(
+            carpeta.join("repo-bueno").join("Dockerfile"),
+            "FROM scratch\n",
+        )
+        .expect("dockerfile");
+        let llamadas = AtomicUsize::new(0);
+        let evaluador = |_: &Tarea, _: &Path, _: &OpcionesOraculo| {
+            llamadas.fetch_add(1, Ordering::SeqCst);
+            Ok(Veredicto::default())
+        };
+        let resultado = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "entrega",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+        );
+        assert!(
+            llamadas.load(Ordering::SeqCst) > 0,
+            "con Dockerfile el evaluador corre"
+        );
+        if let Ok(calibrada) = &resultado {
+            assert_eq!(
+                calibrada.fila.no_aplica, None,
+                "con Dockerfile no hay no aplica"
+            );
+        }
     }
 
     /// `tests/protocolo.rs` de la calibración de Pruebas: un test de `leer_numero` con dos asserts.
@@ -4014,6 +4146,182 @@ mod tests {
         assert_eq!(fila.sensibilidad, None);
         // La inyección inicial más los MAX_REEMPLAZOS reemplazos, todos inválidos: cada intento suma 1.
         assert_eq!(fila.reemplazos, MAX_REEMPLAZOS + 1);
+    }
+
+    const MUERTA: &str = "pub fn sin_uso(a: i32) -> bool {\n    a == 1\n}\n";
+    /// La firma ocupa varias líneas: la sonda tiene que caer en el cuerpo (Tarea 66, punto 4).
+    const VIVA: &str = "pub fn usada(\n    a: i32,\n) -> bool {\n    a == 2\n}\n";
+    const FUERA_DE_FN: &str = "pub const EN_CONSTANTE: bool = 1 == 1;\n";
+    const MOTIVO_EXACTO: &str = "ninguna línea candidata está en una función que la suite ejecute";
+
+    /// Copia del fixture con los archivos `archivos` en `src/`. Cada uno tiene un `==` candidato.
+    fn copia_con_sondas(archivos: &[(&str, &str)]) -> TempDir {
+        let dir = copia_fixture();
+        // La tarea va antes que cualquier `arbol` de la base: la base y las copias la tienen igual.
+        tarea_en(dir.path(), "");
+        for (ruta, texto) in archivos {
+            fs::write(dir.path().join(ruta), texto).expect("escribe el archivo de prueba");
+        }
+        dir
+    }
+
+    /// Evaluador de sondas (Tarea 66, punto 4). Una copia con `root-sonda` cambia el veredicto solo si la
+    /// sonda cae en `ejecutada`. Una inyección sin sonda detecta solo si `detecta`. Cuenta las copias con sonda.
+    fn evaluador_de_sondas<'a>(
+        base_dir: &'a Path,
+        base: &'a Veredicto,
+        ejecutada: &'a str,
+        detecta: bool,
+        sondas: &'a AtomicUsize,
+    ) -> impl Fn(&Path, TipoCaso, Target) -> Result<Veredicto, ErrorOraculo> + Sync + 'a {
+        let arbol_base = arbol(base_dir);
+        move |ruta: &Path, _: TipoCaso, _: Target| {
+            let copia = arbol(ruta);
+            if copia == arbol_base {
+                return Ok(base.clone());
+            }
+            let archivos_con_sonda: Vec<&String> = copia
+                .iter()
+                .filter(|(_, texto)| texto.contains("root-sonda"))
+                .map(|(archivo, _)| archivo)
+                .collect();
+            if archivos_con_sonda.is_empty() {
+                let detectada = detecta.then(|| con_hallazgo_de_sonda(base, Dimension::Funciona));
+                return Ok(detectada.unwrap_or_else(|| base.clone()));
+            }
+            sondas.fetch_add(1, Ordering::SeqCst);
+            let cambia = archivos_con_sonda.iter().any(|a| a.as_str() == ejecutada);
+            Ok(if cambia {
+                con_hallazgo_de_sonda(base, Dimension::Funciona)
+            } else {
+                base.clone()
+            })
+        }
+    }
+
+    /// Mide `n` casos de Funciona en `dir` con `ev`. La semilla fija la línea que se elige primero.
+    fn medir_con_sondas(
+        dir: &Path,
+        n: usize,
+        semilla: u64,
+        ev: &(dyn Fn(&Path, TipoCaso, Target) -> Result<Veredicto, ErrorOraculo> + Sync),
+    ) -> Medida {
+        let tarea = tarea_en(dir, "");
+        calibrar_medida_con_hilos(
+            &tarea,
+            Dimension::Funciona,
+            n,
+            semilla,
+            dir,
+            ev,
+            None,
+            &Vec::new,
+            &|| None,
+            1,
+            None,
+        )
+        .expect("mide")
+    }
+
+    /// El caso con defecto de una medición de Funciona.
+    fn caso_con_defecto(medida: &Medida) -> &Caso {
+        medida
+            .casos
+            .iter()
+            .find(|c| c.inyeccion.is_some())
+            .expect("un caso con defecto")
+    }
+
+    #[test]
+    fn sonda_linea_no_ejecutada_se_reemplaza_y_mide_la_siguiente() {
+        let dir = copia_con_sondas(&[("src/muerta.rs", MUERTA), ("src/viva.rs", VIVA)]);
+        let base = veredicto_de(Dimension::Funciona, 1.0, None);
+        let sondas = AtomicUsize::new(0);
+        let ev = evaluador_de_sondas(dir.path(), &base, "src/viva.rs", false, &sondas);
+        // Con la semilla 2 la primera elección es muerta.rs: se descarta una vez y se mide viva.rs.
+        let medida = medir_con_sondas(dir.path(), 2, 2, &ev);
+        let fila = medida.fila.as_ref().expect("fila");
+        assert!(
+            fila.reemplazos >= 1,
+            "la línea de muerta.rs se descarta: {}",
+            fila.reemplazos
+        );
+        let defecto = caso_con_defecto(&medida);
+        assert_eq!(
+            defecto.inyeccion.as_ref().map(|i| i.archivo.as_str()),
+            Some("src/viva.rs"),
+            "el caso mide la línea que sí ejecuta la suite"
+        );
+        assert!(!defecto.detectado);
+    }
+
+    #[test]
+    fn sonda_linea_ejecutada_que_no_cambia_nada_es_falso_negativo_medido() {
+        let dir = copia_con_sondas(&[("src/viva.rs", VIVA)]);
+        let base = veredicto_de(Dimension::Funciona, 1.0, None);
+        let sondas = AtomicUsize::new(0);
+        let ev = evaluador_de_sondas(dir.path(), &base, "src/viva.rs", false, &sondas);
+        let medida = medir_con_sondas(dir.path(), 2, 42, &ev);
+        assert_eq!(sondas.load(Ordering::SeqCst), 1, "la sonda corre una vez");
+        let defecto = caso_con_defecto(&medida);
+        assert!(
+            !defecto.detectado,
+            "la inyección no detecta y la sonda sí cambia: medido"
+        );
+        assert_eq!(medida.fila.as_ref().expect("fila").reemplazos, 0);
+    }
+
+    #[test]
+    fn sonda_caso_detectado_no_corre_la_sonda() {
+        let dir = copia_con_sondas(&[("src/viva.rs", VIVA)]);
+        let base = veredicto_de(Dimension::Funciona, 1.0, None);
+        let sondas = AtomicUsize::new(0);
+        let ev = evaluador_de_sondas(dir.path(), &base, "src/viva.rs", true, &sondas);
+        let medida = medir_con_sondas(dir.path(), 2, 42, &ev);
+        assert_eq!(
+            sondas.load(Ordering::SeqCst),
+            0,
+            "un caso detectado no corre la sonda"
+        );
+        assert!(caso_con_defecto(&medida).detectado);
+    }
+
+    #[test]
+    fn sonda_sin_fn_que_contenga_la_linea_mide_sin_sonda() {
+        let dir = copia_con_sondas(&[("src/fuera.rs", FUERA_DE_FN)]);
+        let base = veredicto_de(Dimension::Funciona, 1.0, None);
+        let sondas = AtomicUsize::new(0);
+        let ev = evaluador_de_sondas(dir.path(), &base, "src/fuera.rs", false, &sondas);
+        let medida = medir_con_sondas(dir.path(), 2, 42, &ev);
+        assert_eq!(
+            sondas.load(Ordering::SeqCst),
+            0,
+            "sin fn no hay sonda: se mide igual"
+        );
+        let defecto = caso_con_defecto(&medida);
+        assert_eq!(
+            defecto.inyeccion.as_ref().map(|i| i.archivo.as_str()),
+            Some("src/fuera.rs")
+        );
+        assert!(!defecto.detectado);
+    }
+
+    #[test]
+    fn sonda_sin_candidatos_ejecutados_es_no_aplicable_con_motivo_de_sonda() {
+        let dir = copia_con_sondas(&[("src/muerta.rs", MUERTA)]);
+        let base = veredicto_de(Dimension::Funciona, 1.0, None);
+        let sondas = AtomicUsize::new(0);
+        let ev = evaluador_de_sondas(dir.path(), &base, "src/viva.rs", false, &sondas);
+        let medida = medir_con_sondas(dir.path(), 2, 42, &ev);
+        let fila = medida
+            .fila
+            .as_ref()
+            .expect("hay fila: queda el caso limpio");
+        assert_eq!(fila.no_aplicable, 1);
+        assert_eq!(fila.reemplazos, MAX_REEMPLAZOS + 1);
+        assert_eq!(sondas.load(Ordering::SeqCst), (MAX_REEMPLAZOS + 1) as usize);
+        assert_eq!(medida.no_aplicables.len(), 1);
+        assert_eq!(medida.no_aplicables[0].motivo, MOTIVO_EXACTO);
     }
 
     /// Mide `n` casos de `dimension` con el evaluador falso `regla` (la base es `base_dir`, como en `falso`).
