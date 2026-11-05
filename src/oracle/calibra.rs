@@ -5674,4 +5674,93 @@ mod tests {
             );
         }
     }
+
+    // Punto 8: la mutación acotada llega a los comandos cuando la evaluación real corre dentro del ámbito.
+
+    /// Ejecutor de herramientas que anota cada comando y responde como `HerramientasSanas`.
+    struct Anotador {
+        cmds: std::sync::Arc<Mutex<Vec<String>>>,
+    }
+
+    impl EjecutorHerramienta for Anotador {
+        fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+            self.cmds.lock().expect("lock").push(cmd.to_string());
+            HerramientasSanas.ejecutar(cmd)
+        }
+
+        fn tiene_rustsec(&self) -> bool {
+            true
+        }
+    }
+
+    /// Corre `evaluar_con` real con la parte de Pruebas (mutación) y devuelve todos los comandos que corrieron.
+    fn comandos_de_pruebas(home: &Path) -> Vec<String> {
+        let carpeta = carpeta_sin_red(home);
+        let tarea = Tarea::cargar_de(&carpeta).expect("tarea");
+        let repo = carpeta.join("repo-bueno");
+        let rubricas = crate::oracle::rubrica::cargar_embebidas().expect("rúbricas");
+        let partes = partes_de(Dimension::Pruebas, &rubricas, &tarea);
+        let cmds = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let del_hilo = cmds.clone();
+        let fabrica = move |_: &crate::oracle::Preparada| -> Box<dyn EjecutorHerramienta> {
+            Box::new(Anotador {
+                cmds: del_hilo.clone(),
+            })
+        };
+        let calibracion = Calibraciones::cargar(home).expect("calibración");
+        let deps = crate::oracle::Dependencias {
+            correr: &correr_sin_contenedores,
+            herramientas: &fabrica,
+            juez: None,
+            modelo_juez: "",
+            juez_config: None,
+            calibracion: &calibracion,
+            rubricas: &rubricas,
+            reglas: crate::config::ReglasDecision::default(),
+            redactor: None,
+            avisos: Vec::new(),
+            podman: &PodmanSinUso,
+            escenarios: &FabricaSinContenedoresCal,
+        };
+        let o = OpcionesOraculo {
+            partes: Some(partes),
+            home: Some(home.to_path_buf()),
+            historial: false,
+            ..OpcionesOraculo::default()
+        };
+        crate::oracle::evaluar_con(&repo, &tarea, &o, deps).expect("evalúa");
+        cmds.lock().expect("lock").clone()
+    }
+
+    #[test]
+    fn mutacion_acotada_lleva_file_en_los_comandos_de_evaluar_con_real() {
+        // Guarda: con el archivo acotado, listado y corrida de mutación nombran `--file` con ese archivo.
+        let home = tempfile::tempdir().expect("home");
+        let cmds = crate::oracle::mutacion::con_archivo_acotado(Some("src/x.rs"), || {
+            comandos_de_pruebas(home.path())
+        });
+        let de_mutacion: Vec<&String> = cmds
+            .iter()
+            .filter(|c| c.contains("cargo mutants"))
+            .collect();
+        assert!(de_mutacion.len() >= 2, "listado y corrida: {cmds:?}");
+        for cmd in &de_mutacion {
+            assert!(cmd.contains("--file 'src/x.rs'"), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn mutacion_sin_archivo_acotado_no_lleva_file() {
+        // Control: sin el ámbito, los mismos comandos salen sin `--file`.
+        let home = tempfile::tempdir().expect("home");
+        let cmds = comandos_de_pruebas(home.path());
+        let de_mutacion: Vec<&String> = cmds
+            .iter()
+            .filter(|c| c.contains("cargo mutants"))
+            .collect();
+        assert!(de_mutacion.len() >= 2, "listado y corrida: {cmds:?}");
+        for cmd in &de_mutacion {
+            assert!(!cmd.contains("--file"), "{cmd}");
+        }
+    }
 }
