@@ -760,7 +760,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "minimum": 0
     },
     "motivo": {
-      "description": "Por qué `detectado` es true: `sin_veredicto`, `hallazgo_nuevo`, `valor_menor` o `item_bajo:<item>`.\n`None` si no detectó.",
+      "description": "Por qué `detectado` es true. Estructura, Arquitectura y Diseño: `sin_veredicto`, `hallazgo_sonda`,\n`item_sonda:<item>`, `cita_juez` o `item_baja_2:<item>`. Las demás: `sin_veredicto`, `hallazgo_nuevo`,\n`valor_menor` o `item_bajo:<item>`. `None` si no detectó.",
       "type": [
         "string",
         "null"

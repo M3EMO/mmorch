@@ -205,6 +205,17 @@ fn ensayar_con_home(
     }
 }
 
+/// Si el defecto de `e` baja su dimensión, por el mismo camino de la calibración: `finalizar_casos` sobre el caso.
+fn detecta_defecto(e: &Ensayo) -> bool {
+    let mut casos = vec![Caso::nuevo(
+        0,
+        Some(e.inyeccion.clone()),
+        e.con_defecto.clone(),
+    )];
+    finalizar_casos(&e.base, e.inyeccion.defecto.dimension(), &[], &mut casos);
+    casos[0].detectado
+}
+
 /// Afirma lo que pide el test. La inyección es válida y la dimensión baja. Si `en_linea`, un hallazgo nuevo
 /// de la dimensión cae en la línea que el inyector tocó. Si la base mide el ítem de rúbrica como ítem (juez o
 /// mixto), ese ítem baja. Las sondas no llenan `items`: para ellas, el hallazgo en la línea es la prueba.
@@ -217,7 +228,7 @@ fn afirma_detectado(e: &Ensayo, defecto: Defecto, en_linea: bool) {
         e.inyeccion
     );
     assert!(
-        detecta_dimension(&e.base, &e.con_defecto, dimension, true),
+        detecta_defecto(e),
         "{dimension:?} no baja con {:?}",
         e.inyeccion
     );

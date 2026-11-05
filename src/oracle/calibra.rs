@@ -162,6 +162,7 @@ pub mod inyectar;
 use inyectar::{Defecto, Inyeccion};
 
 mod estables;
+mod regla;
 mod target;
 #[cfg(test)]
 mod target_podman;
@@ -236,8 +237,9 @@ pub struct CasoGuardado {
     /// de que la calibración midiera el `target` (Tarea 59).
     #[serde(default)]
     pub target_reusado: Option<bool>,
-    /// Por qué `detectado` es true: `sin_veredicto`, `hallazgo_nuevo`, `valor_menor` o `item_bajo:<item>`.
-    /// `None` si no detectó.
+    /// Por qué `detectado` es true. Estructura, Arquitectura y Diseño: `sin_veredicto`, `hallazgo_sonda`,
+    /// `item_sonda:<item>`, `cita_juez` o `item_baja_2:<item>`. Las demás: `sin_veredicto`, `hallazgo_nuevo`,
+    /// `valor_menor` o `item_bajo:<item>`. `None` si no detectó.
     #[serde(default)]
     pub motivo: Option<String>,
     /// Nivel de cada ítem de la dimensión calibrada en la base. Vacío si la base no tiene puntaje.
@@ -410,7 +412,6 @@ struct Ronda<'a> {
     camino: &'a [String],
     muertos: &'a [MutanteMuerto],
     base: &'a Veredicto,
-    items: &'a [&'static str],
     evaluador: &'a (dyn Fn(&Path, TipoCaso, Target) -> Result<Veredicto, ErrorOraculo> + Sync),
     /// Tope de la medición. Cada reemplazo lo revisa antes de correr.
     tope: Option<&'a Tope<'a>>,
@@ -482,7 +483,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
             .map_err(|e| super::infra("borrar una copia", e))?;
         let caso = Caso {
             target_reusado: reusado,
-            ..Caso::nuevo(i as u32, None, r.base, &veredicto, r.dimension, r.items)
+            ..Caso::nuevo(i as u32, None, veredicto)
         };
         return Ok(Medido {
             reemplazos: 0,
@@ -559,14 +560,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
     let caso = Caso {
         reemplazos: invalidos,
         target_reusado: reusado,
-        ..Caso::nuevo(
-            i as u32,
-            Some(inyeccion),
-            r.base,
-            &veredicto,
-            r.dimension,
-            r.items,
-        )
+        ..Caso::nuevo(i as u32, Some(inyeccion), veredicto)
     };
     Ok(Medido {
         reemplazos: invalidos,
@@ -660,7 +654,6 @@ fn calibrar_medida_con_hilos(
         camino,
         muertos: &muertos,
         base: &base,
-        items: &items,
         evaluador,
         tope,
         target_base,
@@ -766,6 +759,8 @@ fn calibrar_medida_con_hilos(
             (None, None) => {}
         }
     }
+    // La detección se decide después de medir todos los casos, en orden de índice (Tarea 63, puntos 2 a 4).
+    finalizar_casos(&base, dimension, &items, &mut casos);
     if let Some(d) = detencion.as_mut() {
         d.casos = casos.len() as u32;
     }
@@ -1244,6 +1239,8 @@ struct Caso {
     indice: u32,
     /// El defecto aplicado, completo (archivo y línea). `None` en un caso limpio.
     inyeccion: Option<Inyeccion>,
+    /// El veredicto de la copia medida. `finalizar_casos` lo compara con la base.
+    veredicto: Veredicto,
     es_defecto: bool,
     item_defecto: Option<&'static str>,
     detectado: bool,
@@ -1263,35 +1260,21 @@ struct Caso {
 }
 
 impl Caso {
-    fn nuevo(
-        indice: u32,
-        inyeccion: Option<Inyeccion>,
-        base: &Veredicto,
-        veredicto: &Veredicto,
-        dimension: Dimension,
-        items: &[&'static str],
-    ) -> Caso {
-        let es_defecto = inyeccion.is_some();
-        // `detectado` sale de `detecta_dimension`, que es `motivo_de_deteccion(..).is_some()`.
+    /// Un caso medido con su veredicto. Lo derivado (`detectado`, `motivo`, niveles, `items`) lo calcula
+    /// `finalizar_casos` sobre todos los casos. Aquí queda en su valor neutro.
+    fn nuevo(indice: u32, inyeccion: Option<Inyeccion>, veredicto: Veredicto) -> Caso {
         Caso {
             indice,
-            es_defecto,
+            es_defecto: inyeccion.is_some(),
             item_defecto: inyeccion.as_ref().map(|i| i.defecto.item()),
-            detectado: detecta_dimension(base, veredicto, dimension, es_defecto),
-            motivo: motivo_de_deteccion(base, veredicto, dimension, es_defecto),
-            niveles_base: niveles_de(puntaje_de(base, dimension)),
-            niveles: niveles_de(puntaje_de(veredicto, dimension)),
-            sin_veredicto: motivo_sin_veredicto(veredicto, dimension),
-            items: items
-                .iter()
-                .map(|item| {
-                    (
-                        *item,
-                        detecta_item(base, veredicto, dimension, item, es_defecto),
-                    )
-                })
-                .collect(),
             inyeccion,
+            veredicto,
+            detectado: false,
+            motivo: None,
+            sin_veredicto: None,
+            items: BTreeMap::new(),
+            niveles_base: BTreeMap::new(),
+            niveles: BTreeMap::new(),
             reemplazos: 0,
             target_reusado: false,
         }
@@ -1462,21 +1445,62 @@ fn escribir_casos(
     Ok(Some(destino))
 }
 
-/// La dimensión empeora frente a la base si aparece un hallazgo con id nuevo, baja su `valor` o baja el
-/// nivel de algún ítem. Sin veredicto de la dimensión, el defecto es un falso negativo y el limpio un
-/// falso positivo: lo más conservador.
-fn detecta_dimension(
+/// Calcula la detección de cada caso, en orden de índice, contra la base. Estructura, Arquitectura y Diseño usan
+/// `regla::detecta_con_juez`. Las demás dimensiones usan `motivo_de_deteccion`. También calcula los niveles, el
+/// `sin_veredicto` y los `items` de cada caso.
+fn finalizar_casos(
     base: &Veredicto,
-    veredicto: &Veredicto,
     dimension: Dimension,
-    es_defecto: bool,
-) -> bool {
-    motivo_de_deteccion(base, veredicto, dimension, es_defecto).is_some()
+    items: &[&'static str],
+    casos: &mut [Caso],
+) {
+    for caso in casos.iter_mut() {
+        // Un caso limpio no tiene lugar ni ítem del defecto. Tarea 63, punto 3: tomará los del defecto
+        // anterior, en este mismo orden de índice.
+        let lugar = caso.inyeccion.as_ref().map(|i| regla::Lugar {
+            archivo: i.archivo.clone(),
+            linea: i.linea,
+        });
+        let motivo = if regla::es_con_juez(dimension) {
+            motivo_con_juez(base, caso, dimension, lugar.as_ref())
+        } else {
+            motivo_de_deteccion(base, &caso.veredicto, dimension, caso.es_defecto)
+        };
+        caso.detectado = motivo.is_some();
+        caso.motivo = motivo;
+        caso.sin_veredicto = motivo_sin_veredicto(&caso.veredicto, dimension);
+        caso.niveles_base = niveles_de(puntaje_de(base, dimension));
+        caso.niveles = niveles_de(puntaje_de(&caso.veredicto, dimension));
+        caso.items = items
+            .iter()
+            .map(|item| {
+                (
+                    *item,
+                    detecta_item(base, &caso.veredicto, dimension, item, caso.es_defecto),
+                )
+            })
+            .collect();
+    }
+}
+
+/// Motivo de un caso en Estructura, Arquitectura o Diseño. Sin veredicto de la dimensión, lo de siempre: el
+/// defecto es un falso negativo y el limpio un falso positivo.
+fn motivo_con_juez(
+    base: &Veredicto,
+    caso: &Caso,
+    dimension: Dimension,
+    lugar: Option<&regla::Lugar>,
+) -> Option<String> {
+    if puntaje_de(&caso.veredicto, dimension).is_none_or(|p| p.sin_veredicto.is_some()) {
+        return (!caso.es_defecto).then(|| "sin_veredicto".to_string());
+    }
+    regla::detecta_con_juez(base, &caso.veredicto, dimension, caso.item_defecto, lugar)
 }
 
 /// Por qué la dimensión detecta el caso, o `None` si no lo detecta. Si dos reglas disparan, gana la primera en
 /// este orden: `sin_veredicto` (un limpio sin veredicto), `hallazgo_nuevo`, `valor_menor`, `item_bajo:<item>`
 /// (el primer ítem de la base que baja). Las reglas de hallazgo, valor e ítem pasan por `estables::permite`.
+/// Solo para las dimensiones sin juez: Estructura, Arquitectura y Diseño usan `regla::detecta_con_juez`.
 fn motivo_de_deteccion(
     base: &Veredicto,
     veredicto: &Veredicto,
@@ -1518,7 +1542,7 @@ fn niveles_de(puntaje: Option<&Puntaje>) -> BTreeMap<String, u8> {
 }
 
 /// Si el ítem `item` de la dimensión baja frente a la base. `None` si la base no mide el ítem: no entra a
-/// la métrica. Sin veredicto de la dimensión, o sin nivel del ítem, cuenta como en `detecta_dimension`.
+/// la métrica. Sin veredicto de la dimensión, o sin nivel del ítem, cuenta como en `motivo_de_deteccion`.
 fn detecta_item(
     base: &Veredicto,
     veredicto: &Veredicto,
@@ -3027,6 +3051,15 @@ mod tests {
         v
     }
 
+    /// La copia de `base` con un hallazgo de sonda nuevo en `dimension`: un defecto que la regla con juez detecta.
+    fn con_hallazgo_de_sonda(base: &Veredicto, dimension: Dimension) -> Veredicto {
+        let mut v = base.clone();
+        let mut nuevo = hallazgo("nuevo-sonda");
+        nuevo.dimension = dimension;
+        v.hallazgos.push(nuevo);
+        v
+    }
+
     fn faltante(motivo: &str) -> ItemFaltante {
         ItemFaltante {
             item: "pruebas.mutacion".into(),
@@ -3104,7 +3137,8 @@ mod tests {
             } else if std::mem::replace(&mut *primera.lock().expect("lock"), false) {
                 con_motivo(base, NO_COMPILA)
             } else {
-                bajada(base)
+                // Estructura detecta por sondas o por el juez (Tarea 63): una baja de `valor` ya no cuenta.
+                con_hallazgo_de_sonda(base, Dimension::Estructura)
             }
         });
         let fila = calibrar_con(
@@ -3264,6 +3298,100 @@ mod tests {
         for caso in &panicos {
             assert_eq!(caso.motivo, None, "caso {}: no bajó nada", caso.caso);
             assert!(!caso.detectado);
+        }
+    }
+
+    /// Hallazgo de `dimension` que emite el juez, con `id`, en `archivo:linea`.
+    fn hallazgo_del_juez(dimension: Dimension, id: &str, archivo: &str, linea: u32) -> Hallazgo {
+        Hallazgo {
+            dimension,
+            severidad: 2,
+            archivo: archivo.into(),
+            linea,
+            cita: "x".into(),
+            detalle: String::new(),
+            fuente: Fuente::Juez {
+                modelo: "deepseek-reasoner".into(),
+            },
+            id: id.into(),
+            impacto: vec![],
+        }
+    }
+
+    #[test]
+    fn calibra_seguridad_item_que_baja_uno_sigue_detectando() {
+        // Guarda: Seguridad no entra en la regla con juez. Un ítem de la sonda que baja 1 nivel detecta.
+        let (_t, tarea) = tarea_prueba();
+        let base = veredicto_base();
+        let medida = medir(
+            &tarea,
+            Dimension::Seguridad,
+            Path::new(FIXTURE),
+            &base,
+            |_, copia, base| {
+                let mut v = base.clone();
+                if copia.values().any(|t| t.contains("AKIA")) {
+                    for item in &mut v.puntajes[0].items {
+                        if item.item == "seguridad.secretos" {
+                            item.nivel = 2;
+                        }
+                    }
+                }
+                v
+            },
+            20,
+        );
+        let guardados: Vec<CasoGuardado> = medida.casos.iter().map(CasoGuardado::de).collect();
+        let secretos: Vec<&CasoGuardado> = guardados
+            .iter()
+            .filter(|c| c.es_defecto && c.item.as_deref() == Some("seguridad.secretos"))
+            .collect();
+        assert!(!secretos.is_empty(), "hay defectos de secretos");
+        for caso in &secretos {
+            assert!(caso.detectado, "caso {}: bajó 1 nivel", caso.caso);
+            assert_eq!(
+                caso.motivo.as_deref(),
+                Some("item_bajo:seguridad.secretos"),
+                "caso {}",
+                caso.caso
+            );
+        }
+    }
+
+    #[test]
+    fn calibra_arquitectura_hallazgo_del_juez_nuevo_en_un_limpio_no_detecta() {
+        // Punto 2: un hallazgo del juez con id nuevo, en un caso limpio, ya no detecta en Arquitectura.
+        let (_t, tarea) = tarea_prueba();
+        let base = veredicto_de(Dimension::Arquitectura, 1.0, None);
+        let medida = medir(
+            &tarea,
+            Dimension::Arquitectura,
+            Path::new(FIXTURE),
+            &base,
+            |limpia, _, base| {
+                let mut v = base.clone();
+                if limpia {
+                    v.hallazgos.push(hallazgo_del_juez(
+                        Dimension::Arquitectura,
+                        "nuevo",
+                        "src/lib.rs",
+                        1,
+                    ));
+                }
+                v
+            },
+            4,
+        );
+        let limpios: Vec<CasoGuardado> = medida
+            .casos
+            .iter()
+            .filter(|c| !c.es_defecto)
+            .map(CasoGuardado::de)
+            .collect();
+        assert!(!limpios.is_empty(), "hay casos limpios");
+        for caso in &limpios {
+            assert!(!caso.detectado, "caso {}: no detecta", caso.caso);
+            assert_eq!(caso.motivo, None, "caso {}", caso.caso);
         }
     }
 

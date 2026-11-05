@@ -64,11 +64,21 @@ fn hallazgo_nuevo(base: &Veredicto, veredicto: &Veredicto, dimension: Dimension)
 
 #[cfg(test)]
 mod tests {
-    use super::super::detecta_dimension;
     use super::super::detecta_item;
+    use super::super::motivo_de_deteccion;
     use super::super::tests::{nivel_item, puntaje};
     use super::permite;
     use crate::tipos::{Conteo, Dimension, Veredicto};
+
+    /// Si la dimensión detecta el caso: `motivo_de_deteccion` con motivo.
+    fn detecta_dimension(
+        base: &Veredicto,
+        veredicto: &Veredicto,
+        dimension: Dimension,
+        es_defecto: bool,
+    ) -> bool {
+        motivo_de_deteccion(base, veredicto, dimension, es_defecto).is_some()
+    }
 
     fn ids(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
