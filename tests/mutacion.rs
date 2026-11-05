@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use root::oracle::ErrorOraculo;
 use root::oracle::descarga::PRELUDIO;
-use root::oracle::mutacion::{parsear_outcomes, sonda_mutacion};
+use root::oracle::mutacion::{con_archivo_acotado, parsear_outcomes, sonda_mutacion};
 use root::oracle::perfiles::herramientas::{
     EjecutorContenedor, EjecutorHerramienta, SalidaHerramienta,
 };
@@ -278,4 +278,59 @@ fn mutacion_real_muestra_igual_que_el_comando_completo_viejo() {
     assert_eq!(despues.muestra, antes.muestra);
     assert_eq!(despues.truncado, antes.truncado);
     assert_eq!(despues.sonda.hallazgos.len(), antes.sonda.hallazgos.len());
+}
+
+/// Ejecutor real que anota el archivo de cada mutante del reporte de la corrida.
+struct Vigia {
+    dentro: EjecutorContenedor,
+    archivos_mutados: RefCell<Vec<String>>,
+}
+
+impl EjecutorHerramienta for Vigia {
+    fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
+        let salida = self.dentro.ejecutar(cmd)?;
+        if let Some(json) = salida.archivos.get("outcomes.json") {
+            let valor: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
+            for outcome in valor["outcomes"].as_array().into_iter().flatten() {
+                if let Some(archivo) = outcome["scenario"]["Mutant"]["file"].as_str() {
+                    self.archivos_mutados.borrow_mut().push(archivo.to_string());
+                }
+            }
+        }
+        Ok(salida)
+    }
+
+    fn tiene_rustsec(&self) -> bool {
+        self.dentro.tiene_rustsec()
+    }
+}
+
+/// GUARDA: la corre el orquestador con podman, no el builder.
+/// Acotada a `src/uno.rs`, la corrida no mide ningún mutante de `src/dos.rs`.
+#[test]
+fn mutacion_acotada_a_un_archivo_no_mide_el_otro() {
+    root::saltar_sin_podman!();
+    asegurar_imagen(RUST_CON_MUTANTS);
+    // El fixture se monta en solo lectura. Su copia de trabajo la hace el comando.
+    let repo =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mutacion/repo-dos-archivos");
+    let cache = cache_vacia();
+    let carpeta = tempfile::tempdir().expect("temp dir");
+    // Con 60 de máximo, la muestra cubre todos los mutantes del fixture.
+    let tarea = tarea_con_pruebas(carpeta.path(), 60);
+    let vigia = Vigia {
+        dentro: ejecutor_real(&repo, cache.path(), carpeta.path()),
+        archivos_mutados: RefCell::new(Vec::new()),
+    };
+    let r = con_archivo_acotado(Some("src/uno.rs"), || sonda_mutacion(&vigia, &tarea));
+    assert!(r.sonda.valor.is_some(), "{:?}", r.sonda);
+    assert!(r.muestra > 0, "{:?}", r.sonda);
+    let mutados = vigia.archivos_mutados.borrow();
+    assert!(!mutados.is_empty(), "el reporte no trae mutantes");
+    assert!(mutados.iter().all(|a| a == "src/uno.rs"), "{mutados:?}");
+    // `doble` no tiene prueba: al menos un hallazgo vivo sale de `src/uno.rs`.
+    assert!(!r.sonda.hallazgos.is_empty(), "{:?}", r.sonda);
+    for h in &r.sonda.hallazgos {
+        assert_eq!(h.archivo, "src/uno.rs", "{h:?}");
+    }
 }
