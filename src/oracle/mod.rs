@@ -5538,6 +5538,7 @@ mod tests {
             incompleta: false,
             no_aplica: None,
             reemplazos: 0,
+            ruidosos: Vec::new(),
         })
         .collect();
         let calibracion = Calibraciones {

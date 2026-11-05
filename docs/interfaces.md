@@ -675,6 +675,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": 0,
           "minimum": 0
         },
+        "ruidosos": {
+          "description": "Tests ruidosos de la calibración, en orden: los que cambiaron de estado entre la base y los limpios. Sus\nhallazgos no detectan (Tarea 63). Una fila sin el campo vale vacía.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "semilla": {
           "description": "Semilla de la muestra: con la misma semilla, la medición se repite igual.",
           "type": "integer",
@@ -772,7 +780,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "minimum": 0
     },
     "motivo": {
-      "description": "Por qué `detectado` es true. Estructura, Arquitectura y Diseño: `hallazgo_sonda`, `item_sonda:<item>`,\n`cita_juez` o `item_baja_2:<item>`. Las demás: `hallazgo_nuevo`, `valor_menor` o `item_bajo:<item>`.\n`None` si no detectó. Un caso sin veredicto de la dimensión no detecta: su motivo está en `sin_veredicto`.",
+      "description": "Por qué `detectado` es true. Estructura, Arquitectura y Diseño: `hallazgo_sonda`, `item_sonda:<item>`,\n`cita_juez` o `item_baja_2:<item>`. Las demás: `hallazgo_nuevo:<cita>`, `valor_menor` o `item_bajo:<item>`.\n`<cita>` es la del hallazgo nuevo que disparó.\n`None` si no detectó. Un caso sin veredicto de la dimensión no detecta: su motivo está en `sin_veredicto`.",
       "type": [
         "string",
         "null"

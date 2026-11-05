@@ -4,7 +4,8 @@
 
 use std::collections::BTreeSet;
 
-use crate::tipos::{Dimension, Veredicto};
+use crate::oracle::requisitos::PREFIJO_CONTRATO;
+use crate::tipos::{Dimension, Hallazgo, Veredicto};
 
 /// Si la dimensión del caso puede detectar un defecto. Completitud y Funciona lo pueden solo con un
 /// test malo nuevo, un total menor o un hallazgo nuevo. Las demás dimensiones siempre pueden.
@@ -19,7 +20,7 @@ pub(super) fn permite(
     }
     hay_test_malo_nuevo(base, veredicto, ruidosos)
         || total_bajo(base, veredicto)
-        || hallazgo_nuevo(base, veredicto, dimension)
+        || hallazgo_nuevo(base, veredicto, dimension, ruidosos).is_some()
 }
 
 /// Estado de un test en un veredicto.
@@ -108,13 +109,29 @@ fn total_bajo(base: &Veredicto, veredicto: &Veredicto) -> bool {
     veredicto.oculto.total < base.oculto.total || veredicto.contrato.total < base.contrato.total
 }
 
-/// Hay un hallazgo de `dimension` con un id que la base no tiene.
-fn hallazgo_nuevo(base: &Veredicto, veredicto: &Veredicto, dimension: Dimension) -> bool {
+/// Clave de `ruidosos` de la cita de un hallazgo. Una cita `contrato:...` queda igual. Otra pasa a `oculto:<cita>`.
+fn clave_de_cita(cita: &str) -> String {
+    if cita.starts_with(PREFIJO_CONTRATO) {
+        cita.to_string()
+    } else {
+        format!("oculto:{cita}")
+    }
+}
+
+/// Primer hallazgo de `dimension` con un id que la base no tiene, y cuya cita no es un test ruidoso. Gana el
+/// primero en el orden del veredicto. Lo usan `motivo_de_deteccion` y `permite`: un solo criterio.
+pub(super) fn hallazgo_nuevo<'v>(
+    base: &Veredicto,
+    veredicto: &'v Veredicto,
+    dimension: Dimension,
+    ruidosos: &BTreeSet<String>,
+) -> Option<&'v Hallazgo> {
     let ids_base: BTreeSet<&str> = base.hallazgos.iter().map(|h| h.id.as_str()).collect();
-    veredicto
-        .hallazgos
-        .iter()
-        .any(|h| h.dimension == dimension && !ids_base.contains(h.id.as_str()))
+    veredicto.hallazgos.iter().find(|h| {
+        h.dimension == dimension
+            && !ids_base.contains(h.id.as_str())
+            && !ruidosos.contains(&clave_de_cita(&h.cita))
+    })
 }
 
 #[cfg(test)]

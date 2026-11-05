@@ -72,6 +72,10 @@ pub struct Fila {
     /// Exactitud balanceada de cada ítem de rúbrica, por ejemplo `seguridad.secretos`.
     #[serde(default)]
     pub items: BTreeMap<String, f32>,
+    /// Tests ruidosos de la calibración, en orden: los que cambiaron de estado entre la base y los limpios. Sus
+    /// hallazgos no detectan (Tarea 63). Una fila sin el campo vale vacía.
+    #[serde(default)]
+    pub ruidosos: Vec<String>,
     /// `true` si el tope de gasto detuvo la calibración antes de medir todos sus casos (decisión 48). Una
     /// fila incompleta no calibra la dimensión, aunque su exactitud llegue a `UMBRAL`.
     #[serde(default)]
@@ -174,6 +178,7 @@ use inyectar::{Defecto, Inyeccion};
 mod compartidos;
 mod estables;
 mod regla;
+mod sonda;
 mod target;
 
 use compartidos::Compartidos;
@@ -255,7 +260,8 @@ pub struct CasoGuardado {
     #[serde(default)]
     pub limpio_reusado: bool,
     /// Por qué `detectado` es true. Estructura, Arquitectura y Diseño: `hallazgo_sonda`, `item_sonda:<item>`,
-    /// `cita_juez` o `item_baja_2:<item>`. Las demás: `hallazgo_nuevo`, `valor_menor` o `item_bajo:<item>`.
+    /// `cita_juez` o `item_baja_2:<item>`. Las demás: `hallazgo_nuevo:<cita>`, `valor_menor` o `item_bajo:<item>`.
+    /// `<cita>` es la del hallazgo nuevo que disparó.
     /// `None` si no detectó. Un caso sin veredicto de la dimensión no detecta: su motivo está en `sin_veredicto`.
     #[serde(default)]
     pub motivo: Option<String>,
@@ -801,7 +807,7 @@ fn calibrar_medida_con_hilos(
         }
     }
     // La detección se decide después de medir todos los casos, en orden de índice (Tarea 63, puntos 2 a 4).
-    finalizar_casos(&base, dimension, &items, &muertos, &mut casos);
+    let ruidosos = finalizar_casos(&base, dimension, &items, &muertos, &mut casos);
     if let Some(d) = detencion.as_mut() {
         d.casos = casos.len() as u32;
     }
@@ -811,6 +817,7 @@ fn calibrar_medida_con_hilos(
     } else {
         Some(Fila {
             reemplazos,
+            ruidosos: ruidosos.into_iter().collect(),
             ..fila_de(
                 tarea,
                 dimension,
@@ -898,6 +905,7 @@ fn fila_de(
         incompleta,
         no_aplica: None,
         reemplazos: 0,
+        ruidosos: Vec::new(),
     }
 }
 
@@ -1202,6 +1210,7 @@ fn fila_no_aplica(tarea: &Tarea, dimension: Dimension, semilla: u64) -> Fila {
         incompleta: false,
         no_aplica: Some(MOTIVO_NO_APLICA_EFICIENCIA.into()),
         reemplazos: 0,
+        ruidosos: Vec::new(),
     }
 }
 
@@ -1558,14 +1567,15 @@ fn item_y_lugar_de(
 /// Calcula la detección de cada caso, en orden de índice, contra la base. Estructura, Arquitectura y Diseño usan
 /// `regla::detecta_con_juez`, con el ítem y el lugar de `item_y_lugar_de`. Pruebas con `AssertBorrado` usa
 /// `motivo_de_mutante_vivo`, con `muertos` de la base. Las demás dimensiones usan `motivo_de_deteccion`.
-/// También calcula los niveles, el `sin_veredicto` y los `items` de cada caso.
+/// También calcula los niveles, el `sin_veredicto` y los `items` de cada caso. Devuelve los tests ruidosos,
+/// para que la fila los guarde.
 fn finalizar_casos(
     base: &Veredicto,
     dimension: Dimension,
     items: &[&'static str],
     muertos: &[MutanteMuerto],
     casos: &mut [Caso],
-) {
+) -> BTreeSet<String> {
     let contexto = item_y_lugar_de(dimension, casos);
     // Tests que variaron entre la base y los limpios: no cuentan para detectar (Tarea 63, punto 4).
     let ruidosos = {
@@ -1610,6 +1620,7 @@ fn finalizar_casos(
             })
             .collect();
     }
+    ruidosos
 }
 
 /// Motivo de un caso en Estructura, Arquitectura o Diseño. Sin veredicto de la dimensión, no detecta: el defecto
@@ -1629,7 +1640,7 @@ fn motivo_con_juez(
 }
 
 /// Por qué la dimensión detecta el caso, o `None` si no lo detecta. Sin veredicto de la dimensión, no detecta.
-/// Si dos reglas disparan, gana la primera en este orden: `hallazgo_nuevo`, `valor_menor`, `item_bajo:<item>`
+/// Si dos reglas disparan, gana la primera en este orden: `hallazgo_nuevo:<cita>`, `valor_menor`, `item_bajo:<item>`
 /// (el primer ítem de la base que baja). Las reglas de hallazgo, valor e ítem pasan por `estables::permite`.
 /// Solo para las dimensiones sin juez: Estructura, Arquitectura y Diseño usan `regla::detecta_con_juez`.
 fn motivo_de_deteccion(
@@ -1643,22 +1654,18 @@ fn motivo_de_deteccion(
         return None;
     }
     let pb = puntaje_de(base, dimension)?;
-    let ids_base: BTreeSet<&str> = base.hallazgos.iter().map(|h| h.id.as_str()).collect();
-    let hallazgo_nuevo = veredicto
-        .hallazgos
-        .iter()
-        .any(|h| h.dimension == dimension && !ids_base.contains(h.id.as_str()));
-    let motivo = if hallazgo_nuevo {
-        "hallazgo_nuevo".to_string()
-    } else if pv.valor < pb.valor {
-        "valor_menor".to_string()
-    } else {
-        let bajo = pb
-            .items
-            .iter()
-            .find(|ib| nivel_de(pv, &ib.item).is_some_and(|nivel| nivel < ib.nivel))?;
-        format!("item_bajo:{}", bajo.item)
-    };
+    let motivo =
+        if let Some(hallazgo) = estables::hallazgo_nuevo(base, veredicto, dimension, ruidosos) {
+            format!("hallazgo_nuevo:{}", hallazgo.cita)
+        } else if pv.valor < pb.valor {
+            "valor_menor".to_string()
+        } else {
+            let bajo = pb
+                .items
+                .iter()
+                .find(|ib| nivel_de(pv, &ib.item).is_some_and(|nivel| nivel < ib.nivel))?;
+            format!("item_bajo:{}", bajo.item)
+        };
     estables::permite(base, veredicto, dimension, ruidosos).then_some(motivo)
 }
 
@@ -1815,6 +1822,7 @@ mod tests {
             incompleta: false,
             no_aplica: None,
             reemplazos: 0,
+            ruidosos: Vec::new(),
         }
     }
 
@@ -4058,7 +4066,7 @@ mod tests {
         let guardados: Vec<CasoGuardado> = medida.casos.iter().map(CasoGuardado::de).collect();
         let limpio = guardados.iter().find(|c| !c.es_defecto).expect("un limpio");
         assert!(limpio.detectado);
-        assert_eq!(limpio.motivo.as_deref(), Some("hallazgo_nuevo"));
+        assert_eq!(limpio.motivo.as_deref(), Some("hallazgo_nuevo:x"));
         let niveles = BTreeMap::from([
             ("seguridad.panico_en_entrada".to_string(), 3u8),
             ("seguridad.secretos".to_string(), 3u8),
@@ -6081,6 +6089,141 @@ mod tests {
                 .first()
                 .is_some_and(|p| p.iter().any(|n| n.starts_with("src/protocolo.rs:"))),
             "la muestra de la base: {pedidos:?}"
+        );
+    }
+
+    /// Requisito con `prueba` como única prueba.
+    fn requisito_con_prueba(id: &str, prueba: &str) -> crate::oracle::tarea::Requisito {
+        crate::oracle::tarea::Requisito {
+            id: id.into(),
+            titulo: format!("Título de {id}"),
+            seccion: String::new(),
+            peso: 1,
+            pruebas: vec![prueba.into()],
+            bordes: Vec::new(),
+            escenarios: Vec::new(),
+            criterios: Vec::new(),
+            modulos: Vec::new(),
+        }
+    }
+
+    /// Resultados de las suites: `pasa` pasa y `inestables` varía entre corridas.
+    fn resultados_con_inestables(
+        pasa: &[&str],
+        inestables: &[&str],
+    ) -> crate::oracle::requisitos::ResultadosTests {
+        crate::oracle::requisitos::ResultadosTests {
+            tests: pasa
+                .iter()
+                .map(|t| (t.to_string(), crate::oracle::junit::ResultadoTest::Pasa))
+                .collect(),
+            inestables: inestables.iter().map(|t| t.to_string()).collect(),
+            tasas: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn hallazgo_de_test_ruidoso_no_detecta_en_completitud() {
+        // `t::a` pasa en la base y es inestable en el limpio: es ruidoso. Su hallazgo no cuenta.
+        let reqs = [requisito_con_prueba("R1", "t::a")];
+        let r = resultados_con_inestables(&[], &["t::a"]);
+        let base = Veredicto {
+            puntajes: vec![puntaje(Dimension::Completitud, 1.0)],
+            ..Veredicto::default()
+        };
+        let limpio = Veredicto {
+            puntajes: vec![puntaje(Dimension::Completitud, 1.0)],
+            inestables: vec!["t::a".into()],
+            hallazgos: crate::oracle::requisitos::hallazgos_inestables(&reqs, &r),
+            ..Veredicto::default()
+        };
+        let mut casos = vec![Caso::nuevo(1, None, limpio)];
+        finalizar_casos(&base, Dimension::Completitud, &[], &[], &mut casos);
+        assert!(
+            !casos[0].detectado,
+            "el hallazgo de un test ruidoso no cuenta: {:?}",
+            casos[0].motivo
+        );
+    }
+
+    #[test]
+    fn hallazgo_de_test_que_no_es_ruidoso_detecta_en_completitud() {
+        // `t::c` no cambia de estado entre la base y el limpio: no es ruidoso. Su hallazgo nuevo cuenta.
+        let base = Veredicto {
+            puntajes: vec![puntaje(Dimension::Completitud, 1.0)],
+            ..Veredicto::default()
+        };
+        let limpio = Veredicto {
+            puntajes: vec![puntaje(Dimension::Completitud, 1.0)],
+            hallazgos: vec![hallazgo_de_completitud("h-t-c", "t::c")],
+            ..Veredicto::default()
+        };
+        let mut casos = vec![Caso::nuevo(1, None, limpio)];
+        finalizar_casos(&base, Dimension::Completitud, &[], &[], &mut casos);
+        assert!(casos[0].detectado, "un hallazgo nuevo sin ruido sí cuenta");
+    }
+
+    #[test]
+    fn calibra_fila_guarda_la_lista_de_ruidosos() {
+        // `t_var` falla solo en los limpios: varía entre la base y los limpios, así que es ruidoso.
+        let base = veredicto_base();
+        let fila = calibrar(
+            Path::new(FIXTURE),
+            &base,
+            |limpia, _, base| {
+                let mut v = if limpia { base.clone() } else { hundido(base) };
+                if limpia {
+                    v.inestables = vec!["t_var".into()];
+                }
+                v
+            },
+            20,
+        );
+        assert!(
+            fila.ruidosos.contains(&"oculto:t_var".to_string()),
+            "{:?}",
+            fila.ruidosos
+        );
+    }
+
+    #[test]
+    fn fila_sin_ruidosos_carga_con_lista_vacia() {
+        let fila = fila("memora", Dimension::Seguridad, 1.0, Some(0.95));
+        let mut vieja = serde_json::to_value(&fila).expect("serializa");
+        vieja.as_object_mut().expect("objeto").remove("ruidosos");
+        let leida: Fila = serde_json::from_value(vieja).expect("un JSON viejo parsea");
+        assert!(leida.ruidosos.is_empty());
+    }
+
+    /// Hallazgo de Completitud con `id` y `cita`.
+    fn hallazgo_de_completitud(id: &str, cita: &str) -> Hallazgo {
+        Hallazgo {
+            dimension: Dimension::Completitud,
+            severidad: 2,
+            archivo: String::new(),
+            linea: 0,
+            cita: cita.into(),
+            detalle: String::new(),
+            fuente: Fuente::Sonda("test".into()),
+            id: id.into(),
+            impacto: vec![],
+        }
+    }
+
+    #[test]
+    fn motivo_hallazgo_nuevo_nombra_la_cita_que_disparo() {
+        let base = Veredicto {
+            puntajes: vec![puntaje(Dimension::Completitud, 1.0)],
+            ..Veredicto::default()
+        };
+        let mut veredicto = base.clone();
+        veredicto
+            .hallazgos
+            .push(hallazgo_de_completitud("h-nuevo", "t::nuevo"));
+        assert_eq!(
+            motivo_de_deteccion(&base, &veredicto, Dimension::Completitud, &BTreeSet::new())
+                .as_deref(),
+            Some("hallazgo_nuevo:t::nuevo"),
         );
     }
 }
