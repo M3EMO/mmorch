@@ -161,9 +161,12 @@ pub mod inyectar;
 
 use inyectar::{Defecto, Inyeccion};
 
+mod compartidos;
 mod estables;
 mod regla;
 mod target;
+
+use compartidos::Compartidos;
 #[cfg(test)]
 mod target_podman;
 
@@ -199,6 +202,7 @@ pub fn calibrar_con(
         None,
         &Vec::new,
         &|| None,
+        None,
     )?
     .fila
     .ok_or_else(|| ErrorOraculo::Infra("la calibración no dejó ninguna fila".into()))
@@ -385,6 +389,7 @@ fn calibrar_medida(
     tope: Option<&Tope>,
     muertos_de_la_base: &dyn Fn() -> Vec<MutanteMuerto>,
     leer_digest: &(dyn Fn() -> Option<String> + Sync),
+    compartidos: Option<&Compartidos>,
 ) -> Result<Medida, ErrorOraculo> {
     calibrar_medida_con_hilos(
         tarea,
@@ -397,6 +402,7 @@ fn calibrar_medida(
         muertos_de_la_base,
         leer_digest,
         CASOS_EN_PARALELO,
+        compartidos,
     )
 }
 
@@ -423,6 +429,8 @@ struct Ronda<'a> {
     leer_digest: &'a (dyn Fn() -> Option<String> + Sync),
     /// Prefijo del id de cada caso: `calibra-{pid}-{inicio_ms}`. El caso `i` usa `{prefijo}-{i}`.
     prefijo: String,
+    /// Veredictos de los limpios compartidos con las otras dimensiones con juez. `None` si la dimensión no comparte.
+    compartidos: Option<&'a Compartidos>,
 }
 
 impl Ronda<'_> {
@@ -476,11 +484,25 @@ fn evaluar_copia(
 /// casos en serie. Los impares son limpios. Un defecto sin candidato medible da un caso no aplicable.
 fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
     if i % 2 == 1 {
+        // Un limpio es la copia del repo bueno: la misma para Estructura, Arquitectura y Diseño. Si otra
+        // dimensión con juez ya lo juzgó, se reusa su veredicto y no se copia ni se evalúa (Tarea 63, punto 6).
+        let compartido = r.compartidos.filter(|_| regla::es_con_juez(r.dimension));
+        if let Some(veredicto) = compartido.and_then(|c| c.leer(i as u32, r.dimension)) {
+            return Ok(Medido {
+                reemplazos: 0,
+                caso: Some(Caso::nuevo(i as u32, None, veredicto)),
+                detencion: None,
+                no_aplicable: None,
+            });
+        }
         let copia = r.tmp.join(format!("caso-{i}"));
         super::copiar_repo(r.repo_bueno, &copia).map_err(|e| super::infra("copia del repo", e))?;
         let (veredicto, reusado) = evaluar_copia(r, &copia, TipoCaso::Limpio, i)?;
         borrado::borrar_dir_dentro(r.tmp, &copia)
             .map_err(|e| super::infra("borrar una copia", e))?;
+        if let Some(c) = compartido {
+            c.guardar(i as u32, &veredicto)?;
+        }
         let caso = Caso {
             target_reusado: reusado,
             ..Caso::nuevo(i as u32, None, veredicto)
@@ -589,6 +611,7 @@ fn calibrar_medida_con_hilos(
     muertos_de_la_base: &dyn Fn() -> Vec<MutanteMuerto>,
     leer_digest: &(dyn Fn() -> Option<String> + Sync),
     hilos: usize,
+    compartidos: Option<&Compartidos>,
 ) -> Result<Medida, ErrorOraculo> {
     let defectos = inyectar::de_dimension(dimension);
     if defectos.is_empty() {
@@ -664,6 +687,7 @@ fn calibrar_medida_con_hilos(
             std::process::id(),
             (ahora() * 1000.0) as u64
         ),
+        compartidos,
     };
     let hilos = hilos.max(1);
     let (tx, rx) = mpsc::channel::<(usize, Result<Medido, ErrorOraculo>)>();
@@ -1076,6 +1100,10 @@ pub fn calibrar_tarea_con(
         }
         None => None,
     };
+    // Los limpios de Estructura, Arquitectura y Diseño son la misma copia: sus veredictos se comparten entre las tres.
+    let compartidos = regla::es_con_juez(dim)
+        .then(|| Compartidos::nuevo(home, &tarea, &repo))
+        .transpose()?;
     let medida = calibrar_medida(
         &tarea,
         dim,
@@ -1086,6 +1114,7 @@ pub fn calibrar_tarea_con(
         tope.as_ref(),
         &|| memo.mutantes_muertos(&tarea),
         &|| target::digest_de_imagen(&tarea.imagen),
+        compartidos.as_ref(),
     )?;
     // Los casos se escriben antes de `agregar`, también si el tope detuvo la calibración.
     let casos = match &medida.fila {
@@ -2646,6 +2675,337 @@ mod tests {
         assert!(!home.path().join(ARCHIVO).exists(), "no escribe nada");
     }
 
+    /// Veredicto con Arquitectura y Diseño, las dos con juez, con el mismo `valor`.
+    fn veredicto_arq_dis(valor: f32) -> Veredicto {
+        Veredicto {
+            puntajes: vec![
+                puntaje(Dimension::Arquitectura, valor),
+                puntaje(Dimension::Diseno, valor),
+            ],
+            ..Veredicto::default()
+        }
+    }
+
+    /// Evaluador de prueba. Cuenta las llamadas de los casos limpios (reuso `Deterministas`) y devuelve
+    /// `veredicto(es_limpio)`.
+    fn evaluador_con_limpios<'a>(
+        limpios: &'a AtomicUsize,
+        veredicto: fn(bool) -> Veredicto,
+    ) -> impl Fn(&Tarea, &Path, &OpcionesOraculo) -> Result<Veredicto, ErrorOraculo> + 'a {
+        move |_: &Tarea, _: &Path, o: &OpcionesOraculo| {
+            let es_limpio = o
+                .reuso
+                .as_ref()
+                .is_some_and(|r| r.alcance == Alcance::Deterministas);
+            if es_limpio {
+                limpios.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(veredicto(es_limpio))
+        }
+    }
+
+    /// Archivos de `home/calibracion/limpios/`. Falla si la carpeta no existe.
+    fn archivos_limpios(home: &Path) -> Vec<PathBuf> {
+        let carpeta = home.join(CARPETA_CASOS).join("limpios");
+        let mut archivos: Vec<PathBuf> = fs::read_dir(&carpeta)
+            .expect("hay carpeta de limpios")
+            .map(|e| e.expect("entrada").path())
+            .collect();
+        archivos.sort();
+        assert!(!archivos.is_empty(), "hay limpios guardados");
+        archivos
+    }
+
+    /// Veredictos guardados de los limpios. Falla si alguno no parsea.
+    fn veredictos_limpios(home: &Path) -> Vec<Veredicto> {
+        archivos_limpios(home)
+            .iter()
+            .map(|ruta| {
+                let texto = fs::read_to_string(ruta).expect("lee un limpio");
+                serde_json::from_str(&texto).expect("veredicto de un limpio")
+            })
+            .collect()
+    }
+
+    /// Por caso limpio de la calibración: índice, `detectado` y `motivo`, en orden.
+    fn limpios_medidos(calibrada: &Calibrada) -> Vec<(u32, bool, Option<String>)> {
+        let ruta = calibrada.casos.as_ref().expect("hay casos guardados");
+        fs::read_to_string(ruta)
+            .expect("lee los casos")
+            .lines()
+            .map(|l| serde_json::from_str::<CasoGuardado>(l).expect("caso"))
+            .filter(|c| !c.es_defecto)
+            .map(|c| (c.caso, c.detectado, c.motivo))
+            .collect()
+    }
+
+    /// Un limpio de Diseño sin veredicto del juez. Con esto, la detección sale de `sin_veredicto`.
+    fn veredicto_limpio_sin_juez(es_limpio: bool) -> Veredicto {
+        let mut v = veredicto_arq_dis(1.0);
+        if es_limpio {
+            v.puntajes[1].sin_veredicto = Some("juez caído".into());
+        }
+        v
+    }
+
+    #[test]
+    fn calibra_diseno_reusa_los_limpios_que_arquitectura_ya_juzgo() {
+        let home = tempfile::tempdir().expect("home");
+        carpeta_con_repo_bueno(home.path());
+        let arquitectura = AtomicUsize::new(0);
+        calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "arquitectura",
+            4,
+            42,
+            None,
+            None,
+            &evaluador_con_limpios(&arquitectura, |_| veredicto_arq_dis(1.0)),
+        )
+        .expect("calibra arquitectura");
+        assert_eq!(
+            arquitectura.load(Ordering::SeqCst),
+            2,
+            "dos limpios con n 4"
+        );
+        let diseno = AtomicUsize::new(0);
+        calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "diseno",
+            4,
+            42,
+            None,
+            None,
+            &evaluador_con_limpios(&diseno, |_| veredicto_arq_dis(1.0)),
+        )
+        .expect("calibra diseño");
+        assert_eq!(
+            diseno.load(Ordering::SeqCst),
+            0,
+            "los limpios de Diseño salen del cache de Arquitectura"
+        );
+    }
+
+    #[test]
+    fn calibra_diseno_no_reusa_un_cache_sin_su_puntaje_y_lo_sobrescribe() {
+        let home = tempfile::tempdir().expect("home");
+        carpeta_con_repo_bueno(home.path());
+        let arquitectura = AtomicUsize::new(0);
+        calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "arquitectura",
+            4,
+            42,
+            None,
+            None,
+            &evaluador_con_limpios(&arquitectura, |_| {
+                veredicto_de(Dimension::Arquitectura, 1.0, None)
+            }),
+        )
+        .expect("calibra arquitectura");
+        let sin_diseno = veredictos_limpios(home.path());
+        assert!(
+            sin_diseno
+                .iter()
+                .all(|v| puntaje_de(v, Dimension::Diseno).is_none()),
+            "el cache de Arquitectura no trae Diseño"
+        );
+        let diseno = AtomicUsize::new(0);
+        calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "diseno",
+            4,
+            42,
+            None,
+            None,
+            &evaluador_con_limpios(&diseno, |_| veredicto_arq_dis(1.0)),
+        )
+        .expect("calibra diseño");
+        assert_eq!(
+            diseno.load(Ordering::SeqCst),
+            2,
+            "sin el puntaje de Diseño, los limpios se evalúan de nuevo"
+        );
+        assert!(
+            veredictos_limpios(home.path())
+                .iter()
+                .all(|v| puntaje_de(v, Dimension::Diseno).is_some()),
+            "el cache queda con el puntaje de Diseño"
+        );
+    }
+
+    #[test]
+    fn calibra_diseno_con_otra_version_del_repo_no_reusa_nada() {
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = carpeta_con_repo_bueno(home.path());
+        let primera = AtomicUsize::new(0);
+        calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "diseno",
+            4,
+            42,
+            None,
+            None,
+            &evaluador_con_limpios(&primera, |_| veredicto_arq_dis(1.0)),
+        )
+        .expect("calibra");
+        std::fs::write(carpeta.join("repo-bueno").join("NOTA.txt"), "otra versión")
+            .expect("cambia el repo");
+        let segunda = AtomicUsize::new(0);
+        calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "diseno",
+            4,
+            42,
+            None,
+            None,
+            &evaluador_con_limpios(&segunda, |_| veredicto_arq_dis(1.0)),
+        )
+        .expect("calibra con el repo cambiado");
+        assert_eq!(
+            segunda.load(Ordering::SeqCst),
+            2,
+            "otra versión del repo no reusa el cache"
+        );
+    }
+
+    #[test]
+    fn calibra_diseno_con_cache_corrupto_reevalua() {
+        let home = tempfile::tempdir().expect("home");
+        carpeta_con_repo_bueno(home.path());
+        let primera = AtomicUsize::new(0);
+        calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "diseno",
+            4,
+            42,
+            None,
+            None,
+            &evaluador_con_limpios(&primera, |_| veredicto_arq_dis(1.0)),
+        )
+        .expect("calibra");
+        for ruta in archivos_limpios(home.path()) {
+            std::fs::write(&ruta, "{ no es json").expect("corrompe el cache");
+        }
+        let segunda = AtomicUsize::new(0);
+        calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "diseno",
+            4,
+            42,
+            None,
+            None,
+            &evaluador_con_limpios(&segunda, |_| veredicto_arq_dis(1.0)),
+        )
+        .expect("calibra con cache corrupto");
+        assert_eq!(
+            segunda.load(Ordering::SeqCst),
+            2,
+            "un cache corrupto no cuenta"
+        );
+        assert!(
+            veredictos_limpios(home.path())
+                .iter()
+                .all(|v| puntaje_de(v, Dimension::Diseno).is_some()),
+            "la reevaluación sobrescribe el cache corrupto"
+        );
+    }
+
+    #[test]
+    fn calibra_seguridad_no_escribe_ni_lee_la_carpeta_de_limpios() {
+        let home = tempfile::tempdir().expect("home");
+        carpeta_con_repo_bueno(home.path());
+        let seguridad = AtomicUsize::new(0);
+        calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "seguridad",
+            4,
+            42,
+            None,
+            None,
+            &evaluador_con_limpios(&seguridad, |_| {
+                veredicto_de(Dimension::Seguridad, 1.0, None)
+            }),
+        )
+        .expect("calibra seguridad");
+        assert_eq!(
+            seguridad.load(Ordering::SeqCst),
+            2,
+            "los limpios se evalúan"
+        );
+        assert!(
+            !home.path().join(CARPETA_CASOS).join("limpios").exists(),
+            "Seguridad no escribe cache de limpios"
+        );
+    }
+
+    #[test]
+    fn calibra_limpios_reusados_dan_los_mismos_casos_que_sin_cache() {
+        let sin_cache = {
+            let home = tempfile::tempdir().expect("home");
+            carpeta_con_repo_bueno(home.path());
+            let llamadas = AtomicUsize::new(0);
+            limpios_medidos(
+                &calibrar_tarea_con(
+                    home.path(),
+                    "calibra-fixture",
+                    "diseno",
+                    4,
+                    42,
+                    None,
+                    None,
+                    &evaluador_con_limpios(&llamadas, veredicto_limpio_sin_juez),
+                )
+                .expect("calibra sin cache"),
+            )
+        };
+        let con_cache = {
+            let home = tempfile::tempdir().expect("home");
+            carpeta_con_repo_bueno(home.path());
+            let llamadas = AtomicUsize::new(0);
+            calibrar_tarea_con(
+                home.path(),
+                "calibra-fixture",
+                "arquitectura",
+                4,
+                42,
+                None,
+                None,
+                &evaluador_con_limpios(&llamadas, veredicto_limpio_sin_juez),
+            )
+            .expect("calibra arquitectura");
+            let segunda = AtomicUsize::new(0);
+            let calibrada = calibrar_tarea_con(
+                home.path(),
+                "calibra-fixture",
+                "diseno",
+                4,
+                42,
+                None,
+                None,
+                &evaluador_con_limpios(&segunda, veredicto_limpio_sin_juez),
+            )
+            .expect("calibra diseño");
+            assert_eq!(segunda.load(Ordering::SeqCst), 0, "usa el cache");
+            limpios_medidos(&calibrada)
+        };
+        assert!(!sin_cache.is_empty(), "hay limpios medidos");
+        assert!(
+            sin_cache.iter().all(|(_, detectado, _)| *detectado),
+            "el limpio sin juez se detecta: {sin_cache:?}"
+        );
+        assert_eq!(con_cache, sin_cache);
+    }
+
     fn fila_de_prueba(tarea: &str, ts: f64) -> Fila {
         fila(tarea, Dimension::Seguridad, ts, Some(0.95))
     }
@@ -3266,6 +3626,7 @@ mod tests {
             &Vec::new,
             &|| None,
             1,
+            None,
         )
         .expect("mide")
     }
@@ -3927,6 +4288,7 @@ mod tests {
             &Vec::new,
             &|| None,
             1,
+            None,
         )
         .expect("calibra");
         assert!(
@@ -4074,6 +4436,7 @@ mod tests {
             &Vec::new,
             &|| None,
             CASOS_EN_PARALELO,
+            None,
         )
         .expect("calibra");
         assert!(
@@ -4171,6 +4534,7 @@ mod tests {
             &Vec::new,
             &|| None,
             CASOS_EN_PARALELO,
+            None,
         )
         .expect("calibra");
         assert_eq!(
@@ -4254,6 +4618,7 @@ mod tests {
                 &Vec::new,
                 &|| None,
                 hilos,
+                None,
             )
             .expect("calibra")
         };
@@ -4329,6 +4694,7 @@ mod tests {
             &Vec::new,
             &|| None,
             CASOS_EN_PARALELO,
+            None,
         )
         .err()
         .expect("el error de un caso corta la calibración");
@@ -4365,6 +4731,7 @@ mod tests {
             &Vec::new,
             leer_digest,
             1,
+            None,
         )
         .expect("calibra")
     }
@@ -4505,6 +4872,7 @@ mod tests {
             &Vec::new,
             &leer,
             1,
+            None,
         )
         .expect("calibra");
         assert_eq!(target_del_limpio(&registro), Target::Ninguno);
