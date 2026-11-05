@@ -5784,9 +5784,19 @@ mod tests {
         cmds: std::sync::Arc<Mutex<Vec<String>>>,
     }
 
+    /// Listado de mutantes con un mutante de `src/protocolo.rs`, para que la muestra acotada no quede vacía.
+    const LISTADO_DE_PROTOCOLO: &str = r#"[{"name":"src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)"}]"#;
+
     impl EjecutorHerramienta for Anotador {
         fn ejecutar(&self, cmd: &str) -> Result<SalidaHerramienta, ErrorOraculo> {
             self.cmds.lock().expect("lock").push(cmd.to_string());
+            if cmd.contains("cargo mutants") && cmd.contains("--list") {
+                let mut salida = SalidaHerramienta::default();
+                salida
+                    .archivos
+                    .insert("listado.json".into(), LISTADO_DE_PROTOCOLO.into());
+                return Ok(salida);
+            }
             HerramientasSanas.ejecutar(cmd)
         }
 
@@ -5835,10 +5845,10 @@ mod tests {
     }
 
     #[test]
-    fn mutacion_acotada_lleva_file_en_los_comandos_de_evaluar_con_real() {
-        // Guarda: con el archivo acotado, listado y corrida de mutación nombran `--file` con ese archivo.
+    fn mutacion_acotada_filtra_con_f_en_evaluar_con_real() {
+        // Guarda: con el archivo acotado, la corrida lleva `-F` con su mutante y ningún comando lleva `--file`.
         let home = tempfile::tempdir().expect("home");
-        let cmds = crate::oracle::mutacion::con_archivo_acotado(Some("src/x.rs"), || {
+        let cmds = crate::oracle::mutacion::con_archivo_acotado(Some("src/protocolo.rs"), || {
             comandos_de_pruebas(home.path())
         });
         let de_mutacion: Vec<&String> = cmds
@@ -5846,9 +5856,15 @@ mod tests {
             .filter(|c| c.contains("cargo mutants"))
             .collect();
         assert!(de_mutacion.len() >= 2, "listado y corrida: {cmds:?}");
-        for cmd in &de_mutacion {
-            assert!(cmd.contains("--file 'src/x.rs'"), "{cmd}");
+        for cmd in &cmds {
+            assert!(!cmd.contains("--file"), "{cmd}");
         }
+        let corrida = de_mutacion
+            .iter()
+            .find(|c| c.contains("--output /salida/mutants"))
+            .expect("hay una corrida");
+        assert!(corrida.contains(" -F "), "{corrida}");
+        assert!(corrida.contains("src/protocolo\\.rs:2:1:"), "{corrida}");
     }
 
     #[test]

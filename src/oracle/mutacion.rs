@@ -294,20 +294,12 @@ pub(crate) fn archivo_acotado() -> Option<String> {
     ARCHIVO_ACOTADO.with(|a| a.borrow().clone())
 }
 
-/// Fragmento ` --file '<ruta>'` si la mutación está acotada; `""` si no.
-fn acotado_de_archivo() -> String {
-    archivo_acotado()
-        .map(|archivo| format!(" --file {}", comilla_shell(&archivo)))
-        .unwrap_or_default()
-}
-
 /// Comando que lista los mutantes en orden de ejecución, sobre una copia de `/repo`. Escribe el
 /// listado en `/salida`: el stdout del ejecutor se corta a sus últimos caracteres.
 pub(crate) fn comando_de_listado() -> String {
-    let acotado = acotado_de_archivo();
     format!(
         "{PRELUDIO}cp -a /repo /salida/work && cd /salida/work && \
-         cargo mutants --list --json --no-shuffle{acotado} > /salida/{ARCHIVO_LISTADO}"
+         cargo mutants --list --json --no-shuffle > /salida/{ARCHIVO_LISTADO}"
     )
 }
 
@@ -344,11 +336,10 @@ fn comando_de_corrida(tarea: &Tarea, filtro: &str) -> String {
         .as_ref()
         .map_or(MINUTOS_MAX_DEFECTO, |p| p.minutos_max);
     let segundos = u64::from(minutos) * 60;
-    let acotado = acotado_de_archivo();
     format!(
         "{PRELUDIO}cp -a /repo /salida/work && cd /salida/work && \
          CARGO_TARGET_DIR=/salida/target timeout {segundos} cargo mutants --no-shuffle --jobs 1 \
-         --output /salida/mutants{filtro}{acotado} -- --offline; \
+         --output /salida/mutants{filtro} -- --offline; \
          cp /salida/mutants/mutants.out/outcomes.json /salida/{ARCHIVO_OUTCOMES} 2>/dev/null"
     )
 }
@@ -451,6 +442,23 @@ pub fn sonda_mutacion(ej: &dyn EjecutorHerramienta, tarea: &Tarea) -> ResultadoM
     let max = mutantes_max(tarea);
     let total = nombres.len() as u32;
     let muestra = muestra_repartida(&nombres, max as usize);
+    // Acotada a un archivo: la muestra se queda con sus mutantes. El total sigue siendo el del listado.
+    let muestra = match archivo_acotado() {
+        Some(archivo) => {
+            let prefijo = format!("{archivo}:");
+            let del_archivo: Vec<String> = muestra
+                .into_iter()
+                .filter(|n| n.starts_with(&prefijo))
+                .collect();
+            if del_archivo.is_empty() {
+                let motivo =
+                    format!("ningún mutante de la muestra es de {archivo}: no hay nada que medir");
+                return desde_sonda(sin_veredicto(DIMENSION, motivo));
+            }
+            del_archivo
+        }
+        None => muestra,
+    };
     let salida = match ej.ejecutar(&comando_de_corrida(tarea, &filtro_de(&muestra))) {
         Ok(s) => s,
         Err(e) => return desde_sonda(sin_veredicto(DIMENSION, e.to_string())),
@@ -967,13 +975,13 @@ mod tests {
     }
 
     #[test]
-    fn mutacion_acotada_agrega_file_al_listado_y_a_la_corrida() {
+    fn mutacion_acotada_no_lleva_file_en_listado_ni_corrida() {
         con_archivo_acotado(Some("src/a.rs"), || {
             let listado = comando_de_listado();
-            assert!(listado.contains("--file 'src/a.rs'"), "{listado}");
+            assert!(!listado.contains("--file"), "{listado}");
             assert!(es_comando_de_listado(&listado), "{listado}");
             let corrida = comando_de_corrida(&tarea_pruebas(5), "");
-            assert!(corrida.contains("--file 'src/a.rs'"), "{corrida}");
+            assert!(!corrida.contains("--file"), "{corrida}");
             assert!(es_comando_de_mutacion(&corrida), "{corrida}");
         });
     }
@@ -1032,10 +1040,68 @@ mod tests {
         assert_eq!(de_mutantes.len(), 2, "listado y corrida: {cmds:?}");
         for cmd in cmds.iter() {
             assert!(!cmd.contains("src/b.rs"), "nombra otro archivo: {cmd}");
+            assert!(!cmd.contains("--file"), "{cmd}");
         }
-        for cmd in de_mutantes {
-            assert!(cmd.contains("--file 'src/a.rs'"), "{cmd}");
+        assert!(de_mutantes[1].contains("-F "), "{}", de_mutantes[1]);
+    }
+
+    #[test]
+    fn mutacion_acotada_corre_solo_la_muestra_de_su_archivo() {
+        let nombres = cien_mutantes();
+        let refs: Vec<&str> = nombres.iter().map(String::as_str).collect();
+        let t = tarea_pruebas(10);
+        // Muestra de la base: índices 0, 10, ..., 90. De b.rs (índices 34..67) caen 40, 50 y 60.
+        // El 60 queda lejos del inicio: el filtro debe mirar toda la muestra.
+        // La corrida real solo trae los mutantes que pide `-F`: los tres de b.rs.
+        let de_b = [refs[40], refs[50], refs[60]];
+        let ej = con_listado_y_corrida(listado_json(&refs), corrida_de(&de_b));
+        let r = con_archivo_acotado(Some("src/b.rs"), || sonda_mutacion(&ej, &t));
+        assert!(r.sonda.valor.is_some(), "{:?}", r.sonda.motivo);
+        assert_eq!(r.muestra, 3, "la muestra acotada tiene 3 mutantes");
+        assert_eq!(
+            r.total_conocido,
+            Some(100),
+            "el total sale del listado entero"
+        );
+        let cmds = corridas(&ej);
+        assert_eq!(cmds.len(), 1, "una sola corrida: {cmds:?}");
+        let pedidos = de_b.map(escapar_regex);
+        let esperado = format!(
+            " -F {}",
+            comilla_shell(&format!("^(?:{})$", pedidos.join("|")))
+        );
+        assert!(cmds[0].contains(&esperado), "{esperado}\n{}", cmds[0]);
+    }
+
+    #[test]
+    fn mutacion_ningun_comando_lleva_file_con_ni_sin_acotado() {
+        let nombres = cien_mutantes();
+        let refs: Vec<&str> = nombres.iter().map(String::as_str).collect();
+        let base: Vec<&str> = (0..10).map(|i| refs[i * 10]).collect();
+        for acotado in [None, Some("src/b.rs")] {
+            let ej = con_listado_y_corrida(listado_json(&refs), corrida_de(&base));
+            let _ = con_archivo_acotado(acotado, || sonda_mutacion(&ej, &tarea_pruebas(10)));
+            let cmds = ej.cmds.borrow();
+            assert_eq!(cmds.len(), 3, "sonda, listado y corrida: {cmds:?}");
+            for cmd in cmds.iter() {
+                assert!(!cmd.contains("--file"), "{acotado:?}: {cmd}");
+            }
         }
+    }
+
+    #[test]
+    fn mutacion_acotada_sin_mutantes_del_archivo_da_sin_veredicto() {
+        let nombres = cien_mutantes();
+        let refs: Vec<&str> = nombres.iter().map(String::as_str).collect();
+        let ej = con_listado_y_corrida(listado_json(&refs), corrida_de(&refs[..1]));
+        let r = con_archivo_acotado(Some("src/z.rs"), || sonda_mutacion(&ej, &tarea_pruebas(10)));
+        assert_eq!(r.sonda.valor, None);
+        let motivo = r.sonda.motivo.unwrap_or_default();
+        assert!(motivo.contains("src/z.rs"), "{motivo}");
+        assert!(
+            corridas(&ej).is_empty(),
+            "sin mutantes del archivo no corre la muestra"
+        );
     }
 
     #[test]
