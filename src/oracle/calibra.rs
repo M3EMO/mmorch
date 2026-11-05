@@ -260,8 +260,9 @@ pub struct CasoGuardado {
     #[serde(default)]
     pub limpio_reusado: bool,
     /// Por qué `detectado` es true. Estructura, Arquitectura y Diseño: `hallazgo_sonda`, `item_sonda:<item>`,
-    /// `cita_juez` o `item_baja_2:<item>`. Las demás: `hallazgo_nuevo:<cita>`, `valor_menor` o `item_bajo:<item>`.
-    /// `<cita>` es la del hallazgo nuevo que disparó.
+    /// `cita_juez` o `item_baja_2:<item>`. Las demás: `hallazgo_nuevo:<cita>`, `test_malo_nuevo:<clave>`,
+    /// `valor_menor` o `item_bajo:<item>`. `<cita>` es la del hallazgo nuevo que disparó. `<clave>` es
+    /// `oculto:<id>` o `contrato:<id>` del test malo nuevo, y solo aparece en Completitud y Funciona.
     /// `None` si no detectó. Un caso sin veredicto de la dimensión no detecta: su motivo está en `sin_veredicto`.
     #[serde(default)]
     pub motivo: Option<String>,
@@ -1713,8 +1714,9 @@ fn motivo_con_juez(
 }
 
 /// Por qué la dimensión detecta el caso, o `None` si no lo detecta. Sin veredicto de la dimensión, no detecta.
-/// Si dos reglas disparan, gana la primera en este orden: `hallazgo_nuevo:<cita>`, `valor_menor`, `item_bajo:<item>`
-/// (el primer ítem de la base que baja). Las reglas de hallazgo, valor e ítem pasan por `estables::permite`.
+/// Si dos reglas disparan, gana la primera en este orden: `hallazgo_nuevo:<cita>`, `test_malo_nuevo:<clave>`,
+/// `valor_menor`, `item_bajo:<item>` (el primer ítem de la base que baja). Las reglas de hallazgo, test malo,
+/// valor e ítem pasan por `estables::permite`. `test_malo_nuevo` solo aplica en Completitud y Funciona.
 /// Solo para las dimensiones sin juez: Estructura, Arquitectura y Diseño usan `regla::detecta_con_juez`.
 fn motivo_de_deteccion(
     base: &Veredicto,
@@ -1727,18 +1729,21 @@ fn motivo_de_deteccion(
         return None;
     }
     let pb = puntaje_de(base, dimension)?;
-    let motivo =
-        if let Some(hallazgo) = estables::hallazgo_nuevo(base, veredicto, dimension, ruidosos) {
-            format!("hallazgo_nuevo:{}", hallazgo.cita)
-        } else if pv.valor < pb.valor {
-            "valor_menor".to_string()
-        } else {
-            let bajo = pb
-                .items
-                .iter()
-                .find(|ib| nivel_de(pv, &ib.item).is_some_and(|nivel| nivel < ib.nivel))?;
-            format!("item_bajo:{}", bajo.item)
-        };
+    let motivo = if let Some(hallazgo) =
+        estables::hallazgo_nuevo(base, veredicto, dimension, ruidosos)
+    {
+        format!("hallazgo_nuevo:{}", hallazgo.cita)
+    } else if let Some(clave) = estables::test_malo_nuevo(base, veredicto, dimension, ruidosos) {
+        format!("test_malo_nuevo:{clave}")
+    } else if pv.valor < pb.valor {
+        "valor_menor".to_string()
+    } else {
+        let bajo = pb
+            .items
+            .iter()
+            .find(|ib| nivel_de(pv, &ib.item).is_some_and(|nivel| nivel < ib.nivel))?;
+        format!("item_bajo:{}", bajo.item)
+    };
     estables::permite(base, veredicto, dimension, ruidosos).then_some(motivo)
 }
 

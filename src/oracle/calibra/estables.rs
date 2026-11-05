@@ -18,7 +18,7 @@ pub(super) fn permite(
     if !matches!(dimension, Dimension::Completitud | Dimension::Funciona) {
         return true;
     }
-    hay_test_malo_nuevo(base, veredicto, ruidosos)
+    hay_test_malo_nuevo(base, veredicto, dimension, ruidosos)
         || total_bajo(base, veredicto)
         || hallazgo_nuevo(base, veredicto, dimension, ruidosos).is_some()
 }
@@ -88,20 +88,42 @@ fn malos_contrato(veredicto: &Veredicto) -> BTreeSet<&str> {
         .collect()
 }
 
-/// Hay un test malo en el caso que no era malo en la base. Cada lado se compara por separado.
-fn hay_test_malo_nuevo(
+/// Clave (`oculto:<id>` o `contrato:<id>`) del primer test malo nuevo del caso. Solo Completitud y Funciona lo
+/// usan; las otras dimensiones dan `None`. Cada lado se compara por separado. Va primero el oculto, en orden del
+/// `BTreeSet`. Un test ruidoso no cuenta. Lo usan `motivo_de_deteccion` y `permite`: un solo criterio.
+pub(super) fn test_malo_nuevo(
     base: &Veredicto,
     veredicto: &Veredicto,
+    dimension: Dimension,
     ruidosos: &BTreeSet<String>,
-) -> bool {
+) -> Option<String> {
+    if !matches!(dimension, Dimension::Completitud | Dimension::Funciona) {
+        return None;
+    }
     let ocultos_base = malos_ocultos(base);
     let contrato_base = malos_contrato(base);
     malos_ocultos(veredicto)
-        .iter()
-        .any(|id| !ocultos_base.contains(id) && !ruidosos.contains(&format!("oculto:{id}")))
-        || malos_contrato(veredicto)
-            .iter()
-            .any(|id| !contrato_base.contains(id) && !ruidosos.contains(&format!("contrato:{id}")))
+        .into_iter()
+        .find(|id| !ocultos_base.contains(id) && !ruidosos.contains(&format!("oculto:{id}")))
+        .map(|id| format!("oculto:{id}"))
+        .or_else(|| {
+            malos_contrato(veredicto)
+                .into_iter()
+                .find(|id| {
+                    !contrato_base.contains(id) && !ruidosos.contains(&format!("contrato:{id}"))
+                })
+                .map(|id| format!("contrato:{id}"))
+        })
+}
+
+/// Hay un test malo nuevo en el caso. Es `test_malo_nuevo` sin la clave.
+fn hay_test_malo_nuevo(
+    base: &Veredicto,
+    veredicto: &Veredicto,
+    dimension: Dimension,
+    ruidosos: &BTreeSet<String>,
+) -> bool {
+    test_malo_nuevo(base, veredicto, dimension, ruidosos).is_some()
 }
 
 /// El total del oculto o del contrato bajó frente a la base.
@@ -404,5 +426,82 @@ mod tests {
         // `t_fijo` falla en los dos limpios pero no en la base: también cambió de estado.
         assert!(r.contains("contrato:t_fijo"), "{r:?}");
         assert_eq!(r.len(), 2);
+    }
+
+    #[test]
+    fn estables_test_malo_nuevo_detecta_aunque_valor_no_baje() {
+        let ruidosos = BTreeSet::from(["oculto:t_ruidoso".to_string()]);
+        for dimension in [Dimension::Completitud, Dimension::Funciona] {
+            let base = caso_oculto(dimension, 1.0, &["t_ruidoso"]);
+            let caso = caso_oculto(dimension, 1.0, &["t_nuevo"]);
+            assert_eq!(
+                motivo_de_deteccion(&base, &caso, dimension, &ruidosos).as_deref(),
+                Some("test_malo_nuevo:oculto:t_nuevo"),
+                "{dimension:?}: un test malo nuevo detecta aunque el valor no baje"
+            );
+        }
+    }
+
+    #[test]
+    fn estables_test_malo_nuevo_del_contrato_detecta_aunque_valor_no_baje() {
+        let ruidosos = BTreeSet::from(["contrato:t_ruidoso".to_string()]);
+        let base = caso_contrato(1.0, &["t_ruidoso"]);
+        let caso = caso_contrato(1.0, &["t_nuevo"]);
+        assert_eq!(
+            motivo_de_deteccion(&base, &caso, Dimension::Completitud, &ruidosos).as_deref(),
+            Some("test_malo_nuevo:contrato:t_nuevo"),
+        );
+    }
+
+    #[test]
+    fn estables_solo_cambian_ruidosos_con_valor_igual_no_detecta() {
+        let ruidosos = BTreeSet::from(["oculto:t_ruidoso".to_string()]);
+        for dimension in [Dimension::Completitud, Dimension::Funciona] {
+            let base = caso_oculto(dimension, 1.0, &[]);
+            let caso = caso_oculto(dimension, 1.0, &["t_ruidoso"]);
+            assert_eq!(
+                motivo_de_deteccion(&base, &caso, dimension, &ruidosos),
+                None,
+                "{dimension:?}: un test ruidoso que cambia no detecta"
+            );
+        }
+    }
+
+    #[test]
+    fn estables_valor_menor_sin_test_malo_nuevo_no_detecta() {
+        for dimension in [Dimension::Completitud, Dimension::Funciona] {
+            let base = caso_oculto(dimension, 1.0, &[]);
+            let caso = caso_oculto(dimension, 0.5, &[]);
+            assert_eq!(
+                motivo_de_deteccion(&base, &caso, dimension, &BTreeSet::new()),
+                None,
+                "{dimension:?}: valor menor sin cambio de tests no detecta"
+            );
+        }
+    }
+
+    #[test]
+    fn estables_otras_dimensiones_no_cambian_con_test_malo_nuevo() {
+        let otras = [
+            Dimension::Seguridad,
+            Dimension::Entrega,
+            Dimension::Estructura,
+            Dimension::Eficiencia,
+        ];
+        for dimension in otras {
+            let base = caso_oculto(dimension, 1.0, &[]);
+            let igual = caso_oculto(dimension, 1.0, &["t_nuevo"]);
+            assert_eq!(
+                motivo_de_deteccion(&base, &igual, dimension, &BTreeSet::new()),
+                None,
+                "{dimension:?}: un test nuevo con valor igual no detecta"
+            );
+            let menor = caso_oculto(dimension, 0.5, &["t_nuevo"]);
+            assert_eq!(
+                motivo_de_deteccion(&base, &menor, dimension, &BTreeSet::new()).as_deref(),
+                Some("valor_menor"),
+                "{dimension:?}: el valor menor sigue detectando"
+            );
+        }
     }
 }

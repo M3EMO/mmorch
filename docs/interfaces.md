@@ -780,7 +780,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "minimum": 0
     },
     "motivo": {
-      "description": "Por qué `detectado` es true. Estructura, Arquitectura y Diseño: `hallazgo_sonda`, `item_sonda:<item>`,\n`cita_juez` o `item_baja_2:<item>`. Las demás: `hallazgo_nuevo:<cita>`, `valor_menor` o `item_bajo:<item>`.\n`<cita>` es la del hallazgo nuevo que disparó.\n`None` si no detectó. Un caso sin veredicto de la dimensión no detecta: su motivo está en `sin_veredicto`.",
+      "description": "Por qué `detectado` es true. Estructura, Arquitectura y Diseño: `hallazgo_sonda`, `item_sonda:<item>`,\n`cita_juez` o `item_baja_2:<item>`. Las demás: `hallazgo_nuevo:<cita>`, `test_malo_nuevo:<clave>`,\n`valor_menor` o `item_bajo:<item>`. `<cita>` es la del hallazgo nuevo que disparó. `<clave>` es\n`oculto:<id>` o `contrato:<id>` del test malo nuevo, y solo aparece en Completitud y Funciona.\n`None` si no detectó. Un caso sin veredicto de la dimensión no detecta: su motivo está en `sin_veredicto`.",
       "type": [
         "string",
         "null"
