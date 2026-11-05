@@ -567,7 +567,7 @@ fn medir_caso(r: &Ronda, i: usize) -> Result<Medido, ErrorOraculo> {
         let Some(inyeccion) = aplicado else {
             borrado::borrar_dir_dentro(r.tmp, &copia)
                 .map_err(|e| super::infra("borrar una copia", e))?;
-            motivo_sin_caso = MOTIVO_SIN_CANDIDATO;
+            motivo_sin_caso = motivo_sin_inyeccion(defecto, r.muertos.is_empty());
             break;
         };
         // `AssertBorrado` acota la mutación al archivo de su mutante: solo ese archivo se vuelve a medir.
@@ -1419,6 +1419,23 @@ pub const MAX_REEMPLAZOS: u32 = 5;
 
 /// Motivo de un caso no aplicable: la inyección no dio ningún candidato.
 const MOTIVO_SIN_CANDIDATO: &str = "sin candidato para inyectar";
+
+/// Motivo de un `AssertBorrado` no aplicable: la base no dejó mutantes muertos.
+const MOTIVO_SIN_MUERTOS: &str = "la base no dio mutantes muertos";
+
+/// Motivo de un `AssertBorrado` no aplicable: hay mutantes muertos, pero ninguno tiene test con asserts.
+const MOTIVO_SIN_TEST_DE_MUERTO: &str =
+    "ningún mutante muerto tiene un test con asserts que lo llame";
+
+/// Motivo de un caso sin inyección. `AssertBorrado` separa si la base no dio muertos de si ninguno tiene test.
+/// Los demás defectos usan el motivo común.
+fn motivo_sin_inyeccion(defecto: Defecto, sin_muertos: bool) -> &'static str {
+    match (defecto, sin_muertos) {
+        (Defecto::AssertBorrado, true) => MOTIVO_SIN_MUERTOS,
+        (Defecto::AssertBorrado, false) => MOTIVO_SIN_TEST_DE_MUERTO,
+        _ => MOTIVO_SIN_CANDIDATO,
+    }
+}
 
 /// Motivo de un caso no aplicable: todos los reemplazos rompieron la construcción.
 const MOTIVO_AGOTADAS: &str = "inyecciones inválidas agotadas";
@@ -2333,6 +2350,91 @@ mod tests {
             .expect("un caso con AssertBorrado aplicado");
         assert_eq!(con_defecto.archivo.as_deref(), Some("tests/protocolo.rs"));
         assert_eq!(con_defecto.linea, Some(5), "el primer assert del test");
+    }
+
+    /// Calibra Pruebas de `calibra-fixture` con `outcomes` como salida grabada de la base. Devuelve los casos guardados.
+    fn casos_de_pruebas_con(outcomes: &'static str) -> Vec<CasoGuardado> {
+        use crate::oracle::mutacion::{ARCHIVO_OUTCOMES, construir_comando};
+        use crate::oracle::perfiles::herramientas::SalidaHerramienta;
+        let home = tempfile::tempdir().expect("home");
+        let carpeta = home.path().join("oraculos").join("calibra-fixture");
+        std::fs::create_dir_all(&carpeta).expect("carpeta");
+        let repo = carpeta.join("repo-bueno");
+        std::fs::create_dir_all(&repo).expect("repo");
+        super::inyectar::pruebas::copiar(Path::new(FIXTURE), &repo);
+        std::fs::write(repo.join("tests/protocolo.rs"), TEST_DE_LEER_NUMERO).expect("test");
+        let _ = tarea_en(&carpeta, "\n[calibracion]\nrepo = \"repo-bueno\"\n");
+        let evaluador = |tarea: &Tarea, _: &Path, o: &OpcionesOraculo| {
+            if let Some(memo) = o.memo.as_deref() {
+                let mut salida = SalidaHerramienta::default();
+                salida
+                    .archivos
+                    .insert(ARCHIVO_OUTCOMES.into(), outcomes.into());
+                memo.anotar(&construir_comando(tarea), &salida);
+            }
+            Ok(veredicto_de_pruebas())
+        };
+        let calibrada = calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "pruebas",
+            2,
+            42,
+            None,
+            None,
+            &evaluador,
+        )
+        .expect("calibra");
+        let ruta = calibrada.casos.expect("hay casos guardados");
+        let texto = fs::read_to_string(&ruta).expect("lee los casos");
+        texto
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("un caso por línea"))
+            .collect()
+    }
+
+    /// Sin mutantes muertos en la base, el AssertBorrado no aplicable dice que la base no dio muertos.
+    #[test]
+    fn calibra_pruebas_assert_borrado_sin_muertos_dice_que_la_base_no_dio_muertos() {
+        const SIN_MUERTOS: &str = r#"{"total_mutants":1,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)","file":"src/protocolo.rs","span":{"start":{"line":2,"column":1}}}},"summary":"MissedMutant"}]}"#;
+        let casos = casos_de_pruebas_con(SIN_MUERTOS);
+        let motivos: Vec<&str> = casos
+            .iter()
+            .filter(|c| c.defecto.as_deref() == Some("assert_borrado"))
+            .filter_map(|c| c.no_aplicable.as_deref())
+            .collect();
+        assert!(
+            !motivos.is_empty(),
+            "hay un AssertBorrado no aplicable: {casos:?}"
+        );
+        assert!(
+            motivos
+                .iter()
+                .all(|m| *m == "la base no dio mutantes muertos"),
+            "motivo de la base sin muertos: {motivos:?}"
+        );
+    }
+
+    /// Con un mutante muerto que ningún test llama, el AssertBorrado no aplicable dice que ningún muerto tiene test.
+    #[test]
+    fn calibra_pruebas_assert_borrado_sin_test_de_muerto_dice_que_ninguno_tiene_test() {
+        const MUERTO_SIN_TEST: &str = r#"{"total_mutants":1,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"src/protocolo.rs:9:1: replace escribir_numero -> Result<u32, ParseIntError> with Ok(0)","file":"src/protocolo.rs","span":{"start":{"line":9,"column":1}}}},"summary":"CaughtMutant"}]}"#;
+        let casos = casos_de_pruebas_con(MUERTO_SIN_TEST);
+        let motivos: Vec<&str> = casos
+            .iter()
+            .filter(|c| c.defecto.as_deref() == Some("assert_borrado"))
+            .filter_map(|c| c.no_aplicable.as_deref())
+            .collect();
+        assert!(
+            !motivos.is_empty(),
+            "hay un AssertBorrado no aplicable: {casos:?}"
+        );
+        assert!(
+            motivos
+                .iter()
+                .all(|m| *m == "ningún mutante muerto tiene un test con asserts que lo llame"),
+            "motivo con muertos sin test: {motivos:?}"
+        );
     }
 
     /// Un caso con AssertBorrado corre el evaluador acotado al archivo de su mutante. La base y el caso limpio no.
