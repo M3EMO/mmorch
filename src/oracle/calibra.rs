@@ -1117,7 +1117,10 @@ pub fn calibrar_tarea_con(
     };
     // Los limpios de Estructura, Arquitectura y Diseño son la misma copia: sus veredictos se comparten entre las tres.
     let compartidos = regla::es_con_juez(dim)
-        .then(|| Compartidos::nuevo(home, &tarea, &repo))
+        .then(|| {
+            let modelo = compartidos::modelo_del_juez_diseno(home);
+            Compartidos::nuevo(home, &tarea, &repo, &modelo, semilla)
+        })
         .transpose()?;
     let medida = calibrar_medida(
         &tarea,
@@ -2866,6 +2869,49 @@ mod tests {
             diseno.load(Ordering::SeqCst),
             0,
             "los limpios de Diseño salen del cache de Arquitectura"
+        );
+    }
+
+    /// Veredicto de Arquitectura medida y de Diseño no medida (`NO_MEDIDA`), como el evaluador real cuando
+    /// se calibró otra dimensión.
+    fn veredicto_arq_con_diseno_no_medido(_es_limpio: bool) -> Veredicto {
+        let mut v = veredicto_arq_dis(1.0);
+        v.puntajes[1].sin_veredicto = Some(crate::oracle::NO_MEDIDA.into());
+        v
+    }
+
+    #[test]
+    fn calibra_diseno_no_reusa_un_limpio_que_arquitectura_no_midio_en_diseno() {
+        let home = tempfile::tempdir().expect("home");
+        carpeta_con_repo_bueno(home.path());
+        let arquitectura = AtomicUsize::new(0);
+        calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "arquitectura",
+            4,
+            42,
+            None,
+            None,
+            &evaluador_con_limpios(&arquitectura, veredicto_arq_con_diseno_no_medido),
+        )
+        .expect("calibra arquitectura");
+        let diseno = AtomicUsize::new(0);
+        calibrar_tarea_con(
+            home.path(),
+            "calibra-fixture",
+            "diseno",
+            4,
+            42,
+            None,
+            None,
+            &evaluador_con_limpios(&diseno, |_| veredicto_arq_dis(1.0)),
+        )
+        .expect("calibra diseño");
+        assert_eq!(
+            diseno.load(Ordering::SeqCst),
+            2,
+            "Diseño no reusa un limpio que no midió: evalúa los dos"
         );
     }
 

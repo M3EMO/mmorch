@@ -2,21 +2,26 @@
 //! copia idéntica del repo bueno. Estructura, Arquitectura y Diseño la juzgan igual, así que cada una la
 //! evaluaría de nuevo. Este caché guarda el veredicto una vez y las otras dimensiones lo reusan.
 //!
-//! La clave junta la tarea, la versión del repo bueno y las rúbricas. Cambiar cualquiera cambia la clave, y
-//! entonces nada se reusa. Un archivo ilegible o corrupto cuenta como ausente. No se borra nada.
+//! La clave junta la tarea, la versión del repo bueno, las rúbricas, el modelo del juez de diseño, el prompt
+//! del juez, el `tarea.toml` y la semilla. Cambiar cualquiera cambia la clave, y entonces nada se reusa.
+//! Un puntaje no medido en su calibración (`NO_MEDIDA`) no se reusa. Un archivo ilegible o corrupto cuenta
+//! como ausente. No se borra nada.
 
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::goal::calcular_hash;
+use crate::oracle::juez;
 use crate::oracle::rubrica::cargar_embebidas;
 use crate::oracle::tarea::Tarea;
-use crate::oracle::{ErrorOraculo, infra};
+use crate::oracle::{ErrorOraculo, NO_MEDIDA, infra};
 use crate::tipos::{Dimension, Veredicto};
 
 /// Carpeta dentro de `calibracion/` con los veredictos de los limpios.
 const CARPETA: &str = "limpios";
+/// Modelo del juez de diseño cuando no hay elección: sin `root.toml`, sin ruta válida, o sin modelo.
+const SIN_JUEZ: &str = "sin_juez";
 /// Carpetas del repo que no entran en la versión: el `target` de Cargo y el `.git`.
 const SALTADAS: [&str; 2] = ["target", ".git"];
 
@@ -27,27 +32,58 @@ pub(super) struct Compartidos {
 }
 
 impl Compartidos {
-    /// La clave de la tarea y de `repo_bueno` con las rúbricas embebidas. Lee todo el repo para la versión.
+    /// La clave de la tarea con sus partes reales: el repo bueno, el modelo del juez de diseño, el prompt del
+    /// juez, el `tarea.toml` y la semilla. Lee todo el repo para la versión.
     pub(super) fn nuevo(
         home: &Path,
         tarea: &Tarea,
         repo_bueno: &Path,
+        modelo: &str,
+        semilla: u64,
+    ) -> Result<Compartidos, ErrorOraculo> {
+        let prompt = juez::huella_del_prompt();
+        let tarea_hash = hash_del_tarea_toml(&tarea.dir)?;
+        Compartidos::con_partes(
+            home,
+            &tarea.nombre,
+            repo_bueno,
+            modelo,
+            &prompt,
+            &tarea_hash,
+            semilla,
+        )
+    }
+
+    /// Como `nuevo`, con cada parte dada. La clave junta todas: cambiar una cambia la clave.
+    pub(super) fn con_partes(
+        home: &Path,
+        nombre: &str,
+        repo_bueno: &Path,
+        modelo: &str,
+        prompt_hash: &str,
+        tarea_hash: &str,
+        semilla: u64,
     ) -> Result<Compartidos, ErrorOraculo> {
         let version = version_del_repo(repo_bueno)?;
         let rubricas = hash_de_rubricas()?;
         Ok(Compartidos {
             carpeta: home.join(super::CARPETA_CASOS).join(CARPETA),
-            clave: format!("{}-{version}-{rubricas}", sanear(&tarea.nombre)),
+            clave: format!(
+                "{}-{version}-{rubricas}-{}-{prompt_hash}-{tarea_hash}-{semilla}",
+                sanear(nombre),
+                calcular_hash(modelo.as_bytes()),
+            ),
         })
     }
 
-    /// El veredicto guardado del caso `caso`. `Some` solo si parsea y trae un puntaje de `dimension`.
+    /// El veredicto guardado del caso `caso`. `Some` solo si parsea, trae un puntaje de `dimension` y ese
+    /// puntaje se midió. Un puntaje `NO_MEDIDA` (otra dimensión lo calibró) no sirve: esta dimensión evalúa.
     pub(super) fn leer(&self, caso: u32, dimension: Dimension) -> Option<Veredicto> {
         let texto = fs::read_to_string(self.ruta(caso)).ok()?;
         let veredicto: Veredicto = serde_json::from_str(&texto).ok()?;
-        super::puntaje_de(&veredicto, dimension)
-            .is_some()
-            .then_some(veredicto)
+        let puntaje = super::puntaje_de(&veredicto, dimension)?;
+        let medido = puntaje.sin_veredicto.as_deref() != Some(NO_MEDIDA);
+        medido.then_some(veredicto)
     }
 
     /// Guarda el veredicto del caso `caso`. Escribe a un temporal de la misma carpeta y lo renombra: un lector
@@ -70,6 +106,24 @@ impl Compartidos {
     fn ruta(&self, caso: u32) -> PathBuf {
         self.carpeta.join(format!("{}-{caso}.json", self.clave))
     }
+}
+
+/// Modelo que elige Route para el juez de diseño de producción. Sin `root.toml` o sin elección, vale
+/// `SIN_JUEZ`: la calibración sin juez tiene su propia clave.
+pub(super) fn modelo_del_juez_diseno(home: &Path) -> String {
+    if !home.join("root.toml").exists() {
+        return SIN_JUEZ.into();
+    }
+    let mut avisos = Vec::new();
+    crate::oracle::juez_diseno_de_produccion(home, &mut avisos)
+        .and_then(|juez| juez.eleccion.modelo)
+        .unwrap_or_else(|| SIN_JUEZ.into())
+}
+
+/// Hash del `tarea.toml` de `dir`. Cambiar la tarea cambia la clave.
+fn hash_del_tarea_toml(dir: &Path) -> Result<String, ErrorOraculo> {
+    let bytes = fs::read(dir.join("tarea.toml")).map_err(|e| infra("leer tarea.toml", e))?;
+    Ok(calcular_hash(&bytes))
 }
 
 /// Hash de todos los archivos del repo, en orden de ruta relativa. Cada archivo entra con su ruta y su tamaño.
@@ -143,6 +197,177 @@ fn sanear(nombre: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tipos::Puntaje;
+
+    /// Repo temporal con un archivo. Sirve de repo bueno en las claves de prueba.
+    fn repo_de_prueba() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().expect("repo");
+        fs::write(repo.path().join("lib.rs"), "fn f() {}").expect("lib");
+        repo
+    }
+
+    /// Veredicto con un puntaje de Diseño. `sin` es el `sin_veredicto` de ese puntaje.
+    fn veredicto_con_diseno(sin: Option<&str>) -> Veredicto {
+        Veredicto {
+            puntajes: vec![Puntaje {
+                dimension: Dimension::Diseno,
+                valor: 1.0,
+                calibrada: false,
+                exactitud_balanceada: None,
+                items: Vec::new(),
+                sin_veredicto: sin.map(String::from),
+                faltantes: Vec::new(),
+            }],
+            ..Veredicto::default()
+        }
+    }
+
+    /// Clave con todas las partes en valores fijos. Cada test cambia una sola.
+    fn clave_base(home: &Path, repo: &Path) -> Compartidos {
+        Compartidos::con_partes(
+            home,
+            "tarea-prueba",
+            repo,
+            "modelo-a",
+            "prompt-a",
+            "tarea-a",
+            42,
+        )
+        .expect("clave")
+    }
+
+    /// Guarda un limpio con `a` y lo lee con `b`.
+    fn leer_con_otra_clave(a: &Compartidos, b: &Compartidos) -> Option<Veredicto> {
+        a.guardar(1, &veredicto_con_diseno(None)).expect("guarda");
+        b.leer(1, Dimension::Diseno)
+    }
+
+    #[test]
+    fn leer_con_la_misma_clave_devuelve_lo_guardado() {
+        let home = tempfile::tempdir().expect("home");
+        let repo = repo_de_prueba();
+        let a = clave_base(home.path(), repo.path());
+        assert!(
+            leer_con_otra_clave(&a, &a).is_some(),
+            "control: misma clave"
+        );
+    }
+
+    #[test]
+    fn leer_rechaza_un_limpio_no_medido_en_su_calibracion() {
+        let home = tempfile::tempdir().expect("home");
+        let repo = repo_de_prueba();
+        let a = clave_base(home.path(), repo.path());
+        a.guardar(1, &veredicto_con_diseno(Some(crate::oracle::NO_MEDIDA)))
+            .expect("guarda");
+        assert!(
+            a.leer(1, Dimension::Diseno).is_none(),
+            "un puntaje no medido no se reusa"
+        );
+    }
+
+    #[test]
+    fn leer_reusa_un_limpio_con_sin_veredicto_por_cobertura() {
+        let home = tempfile::tempdir().expect("home");
+        let repo = repo_de_prueba();
+        let a = clave_base(home.path(), repo.path());
+        a.guardar(1, &veredicto_con_diseno(Some("juez caído")))
+            .expect("guarda");
+        assert!(
+            a.leer(1, Dimension::Diseno).is_some(),
+            "un sin veredicto por cobertura sí se reusa"
+        );
+    }
+
+    #[test]
+    fn clave_distinta_por_modelo_no_reusa() {
+        let home = tempfile::tempdir().expect("home");
+        let repo = repo_de_prueba();
+        let a = clave_base(home.path(), repo.path());
+        let b = Compartidos::con_partes(
+            home.path(),
+            "tarea-prueba",
+            repo.path(),
+            "modelo-b",
+            "prompt-a",
+            "tarea-a",
+            42,
+        )
+        .expect("clave");
+        assert!(
+            leer_con_otra_clave(&a, &b).is_none(),
+            "otro modelo, otra clave"
+        );
+    }
+
+    #[test]
+    fn clave_distinta_por_prompt_no_reusa() {
+        let home = tempfile::tempdir().expect("home");
+        let repo = repo_de_prueba();
+        let a = clave_base(home.path(), repo.path());
+        let b = Compartidos::con_partes(
+            home.path(),
+            "tarea-prueba",
+            repo.path(),
+            "modelo-a",
+            "prompt-b",
+            "tarea-a",
+            42,
+        )
+        .expect("clave");
+        assert!(
+            leer_con_otra_clave(&a, &b).is_none(),
+            "otro prompt, otra clave"
+        );
+    }
+
+    #[test]
+    fn clave_distinta_por_tarea_toml_no_reusa() {
+        let home = tempfile::tempdir().expect("home");
+        let repo = repo_de_prueba();
+        let a = clave_base(home.path(), repo.path());
+        let b = Compartidos::con_partes(
+            home.path(),
+            "tarea-prueba",
+            repo.path(),
+            "modelo-a",
+            "prompt-a",
+            "tarea-b",
+            42,
+        )
+        .expect("clave");
+        assert!(
+            leer_con_otra_clave(&a, &b).is_none(),
+            "otro tarea.toml, otra clave"
+        );
+    }
+
+    #[test]
+    fn clave_distinta_por_semilla_no_reusa() {
+        let home = tempfile::tempdir().expect("home");
+        let repo = repo_de_prueba();
+        let a = clave_base(home.path(), repo.path());
+        let b = Compartidos::con_partes(
+            home.path(),
+            "tarea-prueba",
+            repo.path(),
+            "modelo-a",
+            "prompt-a",
+            "tarea-a",
+            7,
+        )
+        .expect("clave");
+        assert!(
+            leer_con_otra_clave(&a, &b).is_none(),
+            "otra semilla, otra clave"
+        );
+    }
+
+    #[test]
+    fn modelo_sin_root_toml_es_sin_juez() {
+        let home = tempfile::tempdir().expect("home");
+        assert_eq!(modelo_del_juez_diseno(home.path()), "sin_juez");
+    }
 
     #[test]
     fn version_del_repo_ignora_target_y_git() {
