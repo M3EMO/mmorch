@@ -3768,3 +3768,174 @@ La propuesta completa está en `/home/mpera/.config/Claude/side-session-notes/lo
 8. **Borrado de memora y brasa** (decisión 61).
 
 No hay preguntas nuevas para el usuario.
+
+## Vuelta del 2026-11-04 (noche): 58 y 60 mezcladas, corrida real cortada
+
+**Estado.**
+- `claude/root-e7813e` está en 29b0203, con las Tareas 58 y 60. El usuario escribió: "Sí, mezclar ambas". La prueba con podman dio 2398 verdes y 0 fallas.
+- La Tarea 61 terminó en `laptop/tarea-61` (6ffe985), por 1,09 USD. Sin podman dio 2407 verdes, y su prueba con podman corre ahora.
+- La app de escritorio se reinició cerca de las 14:50 y cortó la corrida real de memora a la 1 h 50 min. La corrida no tiene modo de retomar.
+- El orquestador relanzó todo con `systemd-run --user`, para que otro reinicio de la app no lo corte.
+- La corrida real no arranca: Root la frena porque el login de Claude vence a las 19:14, antes del plazo total de la corrida.
+
+## Desempates técnicos 32 (Opus, 2026-11-04)
+
+**Informe 58.**
+1. **Memo por tarea y `mutacion.rs`.** Queda latente: cada memo se crea para una sola tarea, y el arreglo exige exponer otro comando sin ganar una medición.
+2. **Caso con varias llamadas de juez.** Queda: el margen de 1 USD de la calibración cubre esa subcuenta, y cada llamada pasa igual por el chequeo de tope de la Tarea 21.
+3. a 5. Quedan, por el mismo margen.
+6. **`entrega.contenedor` como ítem de construcción.** Queda: su ancla 3 pide construir sin red.
+7. y 8. Quedan.
+9. **Nombres de tests.** Cambia: los dos tests se renombran, porque un nombre que dice lo contrario engaña al próximo lector. Tarea 62.
+10. **`COLA` en dos archivos.** Queda: unificarla no cambia ninguna medición.
+- **Tope antes de clasificar en `entrega.rs`.** Queda como límite anotado: si un paso imprime más de 4000 bytes, la cabecera `STEP` puede cortarse. El resultado es sin veredicto, no un rojo falso.
+
+**Informe 60.**
+1. **Plazo inyectado.** Queda sin variable nueva: un test de 6 s con cota de 30 s es estable, y los tests unitarios de `colab.rs` cubren el tope fino.
+2. Queda.
+
+**Informe 61.**
+1. y 2. Quedan.
+3. **127 como infraestructura.** Queda: un 127 dice que no se encontró el comando, y eso no mide al producto.
+- **Texto del aviso repetido.** Cambia: `mod.rs` y `descarga/python.rs` comparten una sola constante. Tarea 62.
+- **`src/oracle/__pycache__/`.** Cambia: `.gitignore` suma `__pycache__/`. Tarea 62.
+
+**Orden de la calibración y la corrida real.**
+- **La calibración arranca primero, después de la mezcla de la 61.** La regla que sigue es otra: las dos no corren a la vez, porque la corrida real carga la CPU y ensucia los tests de tiempo. El orden entre ellas nunca fue una dependencia: la calibración usa claves de API y no el login, y no lee nada de la corrida real.
+- **Qué se pierde con la calibración primero.** La corrida real se atrasa hasta una pausa, entre memora y brasa. Si esa corrida encuentra un defecto del runner, se conoce más tarde. Ese defecto no cambia la calibración, porque el runner no entra en `evaluar`.
+- **Qué se perdería con la corrida real primero.** La calibración se atrasaría al menos 4 horas más la Tarea 62, sin ganar nada para su medición.
+- **Entrega.** La 58 ya está mezclada, así que Entrega entra ahora al proceso C.
+
+**Chequeo de vigencia del login.** Sí, es demasiado estricto, y además deja un riesgo.
+- **Por qué es estricto.** Exige que el token cubra 2 horas por cada rol de la config, desde el arranque. Son 4 horas de peor caso con dos roles. Pero el archivo del host se renueva solo cuando Claude Code corre en el host, y el planificador suele tardar mucho menos que su tope.
+- **El riesgo.** La copia del builder trae todo `claudeAiOauth`, con el token de refresco. Si el token de acceso vence durante un rol, `claude` dentro del contenedor puede refrescarlo. Un refresco puede rotar el token e invalidar el login del host. El desempate de "Desempates técnicos 26" pedía que el contenedor nunca renueve ni rote el token, y hoy solo lo evita la vigencia.
+- **Desempate.**
+  - La copia no lleva `refreshToken`. El contenedor no puede rotar el login.
+  - La vigencia se revisa antes de cada rol, contra el plazo de ese rol (2 horas). Antes de cada rol, Root vuelve a leer la credencial del host y arma otra copia.
+  - Si la vigencia no alcanza antes de un rol que no es el primero, Root registra un `Gate` y espera hasta 30 minutos a que el host renueve el archivo. Después sale con código 3. Razón: la corrida no se puede retomar, y una espera corta evita perder lo ya hecho.
+  - Antes del primer rol, sigue saliendo con código 3 de inmediato.
+- Una prueba real confirma que `claude` acepta una credencial sin `refreshToken`. Si no la acepta, el builder lo anota y conserva el token, con la vigencia por rol. Entonces el planner pregunta al usuario.
+
+### Tarea 62: Vigencia por rol, credencial sin refresco y limpieza
+- **Action**: el desempate de vigencia, y los nombres de tests, la constante del aviso y `.gitignore`.
+- **Archivos**: `src/corre/`, la constante del aviso en `src/oracle/descarga/python.rs` y `src/oracle/mod.rs`, los dos tests a renombrar y `.gitignore`.
+- **Arranca**: después de la mezcla de la 61, con `ROOT_SIN_PODMAN=1`, porque la calibración corre al mismo tiempo. Ninguno de sus cambios altera lo que mide la calibración.
+- **Brief**: `docs/builds/brief-local-62.md`.
+
+## Orden final del hito 1 (2026-11-04, noche)
+
+1. **Mezcla de la 61.** Espera su prueba con podman y la orden del usuario.
+2. **Calibración real de memora**, en 3 procesos con `systemd-run --user`, sobre esa mezcla y con `--tope-usd` igual al saldo menos 1 USD. Proceso A: Completitud y Funciona. Proceso B: Seguridad, Pruebas y Estructura. Proceso C: Arquitectura, Diseño, Eficiencia y Entrega.
+3. **Tarea 62** en paralelo con el paso 2, sin podman.
+4. **Pausa entre memora y brasa:** mezcla de la 62, comparación de `global` de memora y corrida real de memora (Tarea 16), con el test `ROOT_TEST_BUILDER_REAL=1` antes.
+5. **Calibración real de brasa**, en los mismos 3 procesos. Después, la comparación de `global` de brasa.
+6. **Validez automática** (Tarea 12b) y **cierre** (Tarea 47).
+7. **Borrado de memora y brasa** (decisión 61).
+
+**Límite conocido.** `systemd-run --user` protege de un reinicio de la app, no de un reinicio de la máquina. Una calibración cortada pierde solo la dimensión en curso: las filas terminadas quedan en `calibracion.json`.
+
+No hay preguntas nuevas para el usuario.
+
+## Vuelta del 2026-11-05: calibración de memora y parte de brasa
+
+**Estado.** `claude/root-e7813e` está en 0d00eb0, con la Tarea 61. La Tarea 62 está en `laptop/tarea-62` (758091b): su test real con `claude` pasa, y la suite sin podman da 2413 verdes. La calibración corrió con el binario 26f2170 y gastó 11,3877 USD de los 25 del usuario, con 1 USD de margen. Quedan 12,6123 USD.
+
+| Tarea | Dimensión | Sensibilidad / especificidad | Segundos |
+|---|---|---|---|
+| memora | seguridad | 1.0 / 1.0 | 32 |
+| memora | entrega | 1.0 / 1.0 | 88 |
+| memora | pruebas | sin dato / 1.0, 10 defectos no aplicables | 167 |
+| memora | completitud | 1.0 / 0.3 | 935 |
+| memora | estructura | 1.0 / 0.6 | 1951 |
+| memora | arquitectura | 1.0 / 0.0 | 2538 |
+| memora | diseno | 0.8 / 0.0 | 3213 |
+| memora | eficiencia | no aplica | 0 |
+| memora | funciona | exit 2: "no tiene defectos inyectables" | 0 |
+| brasa | completitud | 1.0 / 1.0 | 1101 |
+| brasa | seguridad | 1.0 / 1.0 | 16 |
+| brasa | pruebas | 1.0 / 1.0 | 28644 |
+| brasa | funciona | exit 2 | 0 |
+
+Falta brasa: estructura, arquitectura, diseno, eficiencia y entrega.
+
+## Diagnóstico de la calibración (Opus, 2026-11-05)
+
+**La pregunta "¿el repo base tiene esos defectos?" no explica estas falsas alarmas.** La detección compara cada caso contra la base, no contra un ideal. Un defecto real de la base aparece igual en la base y en el caso, así que no dispara. Lo que dispara es lo que cambia entre dos corridas del mismo repo. Los riesgos de capas de memora-ecc siguen siendo defectos reales del producto, y no son la causa.
+
+**Hechos medidos.**
+- `detecta_dimension` (`src/oracle/calibra.rs`) cuenta como detección cualquiera de tres cosas: un hallazgo con id nuevo, un `valor` menor o un ítem con nivel menor. Un hallazgo del juez tiene como id el hash de dimensión, archivo y cita.
+- Con el mismo commit, el juez dio Arquitectura 0,567 y 0,467, y Diseño 0,179 y 0,385 (medición del juez nuevo).
+- En la ventana de la calibración de memora, `deepseek-v4-pro` hizo 66 llamadas, con 3 reintentos, por 6,4374 USD. Son 63 evaluaciones, a 0,102 USD cada una.
+- Las 27 llamadas de Haiku con `sin_clave` no son de la calibración. La última ocurrió antes de su inicio, y costaron 0 USD.
+- Falsas alarmas medidas en 10 limpios: Arquitectura 10, Diseño 10, Completitud 7 y Estructura 4.
+- En Diseño, 4 de esas 10 tienen `sin_veredicto` por cobertura. Cuentan como detectadas, y las otras 6 salen de la regla.
+- `calibracion.json` no guarda veredictos, y `.casos.jsonl` no guarda qué disparó cada detección. Por eso no se puede leer qué dijo el juez en cada caso limpio.
+- memora-ecc tiene tests inestables con tasas de 84 % y 80 %: `test_client_id` y `test_bgsave_no_bloquea`.
+
+**Causas, con su certeza.**
+- **Arquitectura y Diseño (especificidad 0): causa probable, por el código y la varianza medida.** Una sola muestra del juez en la base se compara con otra muestra en cada caso. Cada corrida cita otras líneas, así que casi siempre aparece un id nuevo. El instrumento mide la varianza del juez, no el defecto.
+- **Estructura (0,6): la misma causa, con menos peso.** Solo 1 de sus 4 ítems es del juez.
+- **Completitud de memora (0,3): no es el juez, porque Completitud no lo usa.** Esto corrige la lectura del informe. La causa probable es el desempate 1 del informe 59, que aprobé: un test estable en la base que pasa a inestable cuenta como detección. Con 5 repeticiones, `test_client_id` (84 %) sale estable en la base cerca de 4 veces de cada 10. Después, en un caso limpio, se mezcla y dispara. El 7 de 10 medido es coherente con esa cuenta. brasa no tiene esos tests, y da 1,0.
+- **Pruebas de memora (10 no aplicables): sin causa probada.** La hipótesis: los mutantes muertos de la muestra no tienen un `#[test]` con asserts de una línea que llame a su función. El caso no aplicable no deja renglón en `.casos.jsonl`, así que hoy no se puede ver.
+- **Funciona (exit 2): no es un defecto.** Ningún `Defecto` apunta a Funciona, y la sección "Validation" del plan tampoco la calibra. Funciona queda fuera de `global` si no se calibra, y el objetivo del usuario pide calibrar: la Tarea 63 suma un defecto.
+- **Brasa pruebas (7,9 horas): hecho.** Son 10 casos con defecto, y cada uno corre `cargo-mutants` entero sobre la muestra. Los limpios reusan la mutación de la base.
+- **`target_reusado` solo en Completitud: hecho conocido.** Es la decisión del hallazgo 13: clippy y la mutación compilan en frío.
+
+## Desempates técnicos 33 (Opus, 2026-11-05)
+
+**Qué se arregla en Root.** La regla de detección y la ficha de los casos. El evaluador real no cambia: estos cambios tocan solo cómo la calibración mide.
+
+1. **Dimensiones con juez (Estructura, Arquitectura y Diseño).** Un caso detecta solo si pasa una de estas tres cosas:
+   - aparece un hallazgo nuevo de una sonda, o baja el nivel de un ítem de sonda;
+   - el juez cita el archivo del defecto a 5 líneas o menos de su lugar;
+   - el ítem que el defecto apunta baja 2 niveles o más frente a la base.
+   Un hallazgo del juez con id nuevo no cuenta por sí solo, y `valor` tampoco. Razón: un cambio de un nivel y una cita nueva son ruido medido del juez.
+2. **Regla simétrica en los limpios.** Cada caso limpio usa el defecto y el lugar del caso con defecto que lo precede, y aplica las mismas tres condiciones. Razón: si no, la especificidad sale buena por construcción.
+3. **Tests con ruido (Completitud y Funciona).** Después de correr todos los casos, Root arma el conjunto de tests que variaron entre la base y los casos limpios. Esos tests no cuentan para detectar. Esto cambia el desempate 1 del informe 59. Razón: la tasa real de un test no se conoce con 5 repeticiones de la base, y los casos limpios ya pagaron esa medición.
+4. **Limpio sin veredicto.** Deja de contar como detección. La fila suma `limpios_sin_veredicto`. Una dimensión queda calibrada solo si esos casos son como mucho el 20 % de los limpios y si su exactitud llega a 0,9. Esto ajusta el desempate 41 de "Desempates técnicos 11". Razón: una falla del instrumento se informa aparte y no se mezcla con una falsa alarma, pero sigue impidiendo calibrar.
+5. **Motivo en cada caso.** `.casos.jsonl` guarda qué disparó cada detección, los niveles del juez y una línea por caso no aplicable, con su motivo.
+6. **Limpios compartidos del juez.** Un caso limpio mide la misma copia de la base para las tres dimensiones con juez. Su resultado se reusa entre las tres calibraciones de la tarea. Razón: una llamada al juez puntúa los 10 ítems de las tres, y esto evita 20 llamadas por tarea.
+7. **Defecto para Funciona.** `ComportamientoRoto` cambia una comparación de código de producción (`==` por `!=`), compila y hace fallar tests. Apunta a Funciona. Razón: sin defecto, Funciona nunca entra a `global`.
+8. **Muestras del juez.** No se suman. El desempate de "Desempates técnicos 22" dijo que la calibración decidiría. Primero se mide la regla nueva: si la especificidad queda bajo 0,9, el planner propone 3 muestras por caso.
+
+**Propiedades reales del repo base (no se arreglan).** Los riesgos de capas de memora-ecc, sus tests inestables y sus defectos de FIFO y de spin son del producto. La varianza del juez en la evaluación real sigue existiendo, y `global` la excluye mientras la dimensión no quede calibrada.
+
+**Tiempo de brasa pruebas.** No se repite: su regla de detección no cambia, y dio 1,0 / 1,0. Esa fila queda. Para memora, que sí se repite, un caso con `AssertBorrado` corre `cargo-mutants` solo sobre el archivo del mutante elegido. Razón: borrar un assert no puede matar otros mutantes, así que la proporción solo puede bajar por ahí. La detección da lo mismo con mucho menos tiempo.
+
+**Costo de volver a medir.** La medición de memora dio 0,102 USD por evaluación, con reintentos incluidos. El plan usa 0,11 USD como margen. El costo de brasa con el juez no está medido.
+- Por tarea: 30 casos con defecto, 10 limpios compartidos y 1 base, o sea 41 evaluaciones, cerca de 4,5 USD.
+- Dos tareas: cerca de 9 USD. Quedan unos 3,6 USD de margen sobre 12,6123 USD.
+- Completitud, Funciona, Pruebas, Seguridad y Entrega no llaman al juez. Su gasto es casi 0.
+- Sin los limpios compartidos, cada tarea cuesta cerca de 6,44 USD, y dos tareas pasan los 12,6123 USD. Por eso el desempate 6 es obligatorio.
+- Si memora pasa de 5,5 USD, el orquestador frena antes de brasa y avisa al planner.
+
+**Qué se vuelve a calibrar.** Todo salvo brasa pruebas y Eficiencia. Las dimensiones sin juez no gastan API. Pruebas de memora corre primero, porque tarda 3 minutos y ahora deja el motivo de sus no aplicables.
+
+**Riesgos de la medición nueva.**
+- La sensibilidad 1,0 de Arquitectura y Estructura tampoco vale, porque el ruido también disparaba en los casos con defecto. La sensibilidad puede bajar con la regla nueva.
+- Diseño tuvo 4 de 10 limpios sin veredicto. Si eso se repite, Diseño no queda calibrada aunque la regla funcione.
+- Si una dimensión no llega a 0,9, `global` la excluye y el planner trae el dato. Solo entonces se discute cambiar la promesa del evaluador.
+
+**Informe 62.**
+1. **`espera_vigencia` en el trait.** Queda.
+2. **Intervalo cero.** Queda: falla cerrado.
+3. **Aviso mientras espera.** Queda: el `Gate` ya lo registra.
+- **Corrección de `refreshTokenExpiresAt`.** Queda.
+
+### Tarea 63: Regla de detección de la calibración
+- **Action**: los desempates 1 a 7, y el `cargo-mutants` acotado de `AssertBorrado`.
+- **Archivos**: `src/oracle/calibra.rs`, `src/oracle/calibra/`, `src/oracle/mutacion.rs`.
+- **Arranca**: ya, desde la punta de `claude/root-e7813e`, con `ROOT_SIN_PODMAN=1`.
+- **Brief**: `docs/builds/brief-local-63.md`.
+
+## Orden final del hito 1 (2026-11-05)
+
+1. **Mezcla de la 62.** Espera su prueba con podman y la orden del usuario.
+2. **Corrida real de memora (Tarea 16), ahora, antes de arreglar el evaluador.** Razón: la calibración está parada, así que hay una ventana sin carga. La Tarea 63 cambia solo cómo mide la calibración, no `evaluar`, así que la fila de la corrida sigue valiendo.
+3. **Tarea 63**, en paralelo con el paso 2, sin podman. Después, su mezcla con la orden del usuario.
+4. **Calibración otra vez**: primero Pruebas de memora, después el resto de memora y al final brasa. El tope es `--tope-usd 11,6`: el saldo menos 1 USD de margen, si el saldo sigue en 12,6123 USD.
+5. **Comparación de `global`.**
+6. **Validez automática** (Tarea 12b) y **cierre** (Tarea 47).
+7. **Borrado de memora y brasa** (decisión 61).
+
+No hay preguntas nuevas para el usuario.
