@@ -4040,3 +4040,167 @@ No hay preguntas nuevas para el usuario.
 **P63: ¿Mezclar la Tarea 62 ahora?** La Tarea 62 pasó con podman y destraba la corrida real de memora.
 - **a)** Mezclarla ahora. La corrida real arranca mientras se construye la 64. Recomendada.
 - **b)** Esperar a la prueba conjunta de 63, p5 y 62. La corrida real se demora lo que tarde esa prueba.
+
+## Vuelta del 2026-11-05 (noche): Tarea 64 construida y revisada
+
+**Estado.**
+- La Tarea 64 terminó por 1,83 USD en `laptop/tarea-64` (8c4d382), con push. Sin podman da 2495 verdes, 0 fallas y 3 ignorados.
+- El orquestador corre con podman 64, 63, p5 y 62 juntas, en `~/.cache/root-wt/prueba64` (34dd370).
+- P63 sigue sin respuesta. Quedan 12,6123 USD de los 25 del usuario.
+
+## Revisión del código de la Tarea 64 (Opus, sobre 8c4d382)
+
+**Las dos fallas quedaron resueltas, por lectura.**
+- **Falla 1.** `Partes::mide` acepta el trío con `juez_diseno` (`src/oracle/mod.rs:270-279`). `Compartidos::leer` rechaza `NO_MEDIDA` (`src/oracle/calibra/compartidos.rs:81-86`). La prueba usa `evaluar_con` real, y el builder la vio en rojo revirtiendo `mide`.
+- **Falla 2.** Un caso `AssertBorrado` usa solo `motivo_de_mutante_vivo` (`src/oracle/calibra.rs:1569-1570` y `src/oracle/calibra.rs:1651`). El hallazgo real coincide con los muertos: `parsear_outcomes` pasa `archivo` y `nombre` a `crear_hallazgo`, que no los cambia (`src/oracle/mutacion.rs:210-219`, `src/oracle/perfiles/mod.rs:82-84`).
+
+**Busqué falsos que difieran del evaluador real. Ninguno bloquea medir.**
+- **Route:** no tiene azar, y `root.toml` fija `juzga` en `deepseek-v4-pro`. La clave no cambia entre dimensiones.
+- **Repo bueno:** `.pytest_cache/` entra en la versión del repo, porque `SALTADAS` solo saltea `target` y `.git`. El oráculo corre con `no:cacheprovider` sobre una copia, así que el hash no cambia entre invocaciones.
+- **`Veredicto`:** no tiene campos con `serde(skip)`, así que el cache no pierde datos.
+- **`calibracion.json`:** `Fila` no usa `deny_unknown_fields`. Un binario sin la 63 lee las filas nuevas.
+
+**Límites que quedan, sin corrección antes de medir.**
+- **Falla pasajera congelada.** `leer` reusa cualquier `sin_veredicto` que no sea `NO_MEDIDA`. El test llama "por cobertura" a un "juez caído" (`src/oracle/calibra/compartidos.rs`, `leer_reusa_un_limpio_con_sin_veredicto_por_cobertura`). Un corte de red en un limpio pesa en las tres dimensiones. En 125 llamadas hubo 1 `red_cortada` y 3 errores de `respuesta`. La compuerta tolera 2 de 10. Si pasa, otra semilla lo resuelve.
+- **Especificidad de Pruebas.** Los limpios reusan la mutación de la base, así que la especificidad da 1,0 por construcción. También vale para la fila de brasa. La fila mide sensibilidad y no mide mutantes inestables.
+- **Mutante muerto por un test inestable.** En memora, un test con 84 % de pase puede "matar" un mutante al azar. Eso puede inflar la sensibilidad de Pruebas.
+- **Nombre con línea.** `nombre` trae `archivo:línea:columna`. Si un assert borrado está antes del mutante en el mismo archivo, el nombre cambia y el caso no detecta. Es un falso negativo honesto, y la corrida real lo muestra.
+- **Commit 4147e82 sin compilar sus tests.** Rompe un bisect, y no cambia el resultado. Queda.
+- **Copia de la constante en `BAJA_ITEM_CON_JUEZ`.** Queda. Está comentada.
+
+## Desempates técnicos 35 (Opus, 2026-11-05)
+
+**Preguntas del informe 64.**
+1. **`mutante_vivo` reemplaza las reglas viejas:** queda.
+2. **`estables::permite` en la regla nueva:** queda. En Pruebas siempre da `true` (`src/oracle/calibra/estables.rs:17`), así que no decide nada.
+3. **Coincidencia por archivo y nombre:** queda.
+4. **`sin_juez` sin `root.toml`:** queda. El `ROOT_HOME` real tiene `root.toml`.
+5. **Clave sin proveedor ni razonamiento:** queda para esta medición, porque `[ruteo.juzga]` no cambia. Si alguien cambia esa ruta, la calibración usa otra semilla.
+6. **`target_reusado` de un limpio reusado:** queda en `false`, y `limpio_reusado` da el dato.
+7. **Entrega con juez:** no se apaga.
+   - El juez lee los hallazgos de Entrega (`src/oracle/mod.rs`, comentario de `partes_de`). Apagarla calibra otro instrumento, y la regla de la Tarea 48 lo prohíbe.
+   - **Limpios de memora:** cerca de 4 s por evaluación. Entrega midió 88 s en 21 evaluaciones, con construcción en caché.
+   - **Casos con defecto de memora:** cambian `src/`, así que `COPY src` invalida la capa y `cargo build --release` corre otra vez. Eso no está medido.
+   - **Cota de esos casos:** Arquitectura midió 2538 s. Quitando cerca de 640 s de juez, quedan 190 s por defecto, con clippy incluido. Entrega suma como mucho 25 minutos por dimensión, hipótesis sin medir.
+   - **brasa:** no tiene Dockerfile, así que no construye imagen.
+   - **Reusar la Entrega de la base:** tampoco. Ahorra como mucho 25 minutos y pide otra tarea con otra prueba con podman.
+8. **El trío sale junto:** queda, y sirve para la compuerta de cobertura de abajo.
+
+**Tarea 65: no hace falta.** Nada de lo revisado invalida la medición.
+
+**Pruebas y Funciona de memora con el binario de 34dd370: sí, con una condición.**
+- Corren cuando termine la prueba con podman. El hallazgo 11 mostró tests que fallan con la máquina cargada, y la prueba en curso no debe ensuciarse.
+- No gastan API. Corren sin claves, y así no pueden gastar.
+- Sus filas valen después de mezclar: 34dd370 es el árbol que se mezcla.
+
+**El orden con la corrida real cambia.** La calibración va primero, si la prueba con podman da verde. Razón: una no depende de la otra, P63 sigue abierta, y `global` de la corrida real usa las filas calibradas. Esto reemplaza el orden anterior, que era mío.
+
+**Compuerta de costo, reemplaza la regla de 5,5 USD.** brasa no tiene costo medido, así que las dos Arquitecturas corren juntas y lo miden. Después, gasto real más 20 casos por tarea al costo medido debe entrar en el saldo menos 1 USD. Si no entra, el orquestador frena y consulta al planner.
+
+**Compuerta de cobertura, nueva.** Diseño tuvo 4 limpios de 10 sin veredicto, y el límite es 2. Los limpios de Arquitectura ya traen el puntaje de Diseño y el de Estructura, sin costo extra. Si una dimensión tiene más de 2 de 10 sin veredicto, no corre en esa tarea y vuelve al planner. Eso ahorra cerca de 1,1 USD por dimensión.
+
+**Línea base sin veredicto.** Si la base de Diseño queda sin veredicto, `calibrar` sale con error. Se repite el mismo comando hasta 2 veces. Cuesta cerca de 0,10 USD cada vez, y sus limpios siguen en el cache.
+
+## Comandos de la calibración (2026-11-05)
+
+Variables comunes:
+
+```bash
+BIN=<binario r00t de 34dd370>
+MEM=~/Proyectos/bench-ecc-sdlc/memora-ecc
+BRA=~/Proyectos/bench-ecc-sdlc/brasa-ecc
+SIN="env -u DEEPSEEK_API_KEY -u ANTHROPIC_API_KEY"
+CAL="oraculo calibrar --n 20 --semilla 42"
+# TOPE = saldo en el momento de lanzar el grupo, menos 1 USD.
+```
+
+La máquina tiene 8 núcleos y 15 GB. Los corchetes marcan procesos que corren a la vez. Dentro de cada proceso, 4 casos corren a la vez y los contenedores van de a uno.
+
+**Grupo 0, al terminar la prueba con podman. Valida `--file` y `ComportamientoRoto`. Sin API.**
+
+```bash
+$SIN $BIN $CAL --tarea memora --dimension pruebas  --repo $MEM &
+$SIN $BIN $CAL --tarea memora --dimension funciona --repo $MEM &
+wait
+```
+
+- **Se sigue si:** Pruebas tiene casos con `mutante_vivo:` y ningún `sin_veredicto` por `--file`, y Funciona tiene casos con motivo. Si no, vuelve al planner.
+
+**Grupo 1, sin juez de diseño. Solo sigue con el Grupo 0 correcto.**
+
+```bash
+$SIN $BIN $CAL --tarea memora --dimension completitud --repo $MEM &
+$SIN $BIN $CAL --tarea brasa  --dimension completitud --repo $BRA &
+$SIN $BIN $CAL --tarea brasa  --dimension funciona    --repo $BRA &
+( $SIN $BIN $CAL --tarea memora --dimension seguridad  --repo $MEM
+  $SIN $BIN $CAL --tarea brasa  --dimension seguridad  --repo $BRA
+  $BIN $CAL --tarea memora --dimension entrega   --repo $MEM --tope-usd $TOPE
+  $BIN $CAL --tarea brasa  --dimension entrega   --repo $BRA --tope-usd $TOPE
+  $BIN $CAL --tarea brasa  --dimension eficiencia --repo $BRA --tope-usd $TOPE ) &
+wait
+```
+
+- Entrega lleva claves, porque su juez de configuración puede pedirlas. No gastó nada en memora.
+- brasa no tiene Dockerfile, así que Entrega de brasa puede salir con defectos no aplicables. Ese resultado se informa.
+- brasa pruebas no se repite, y memora eficiencia ya tiene su fila.
+
+**Grupo 2a, con juez. Solo con la prueba con podman en verde.**
+
+```bash
+$BIN $CAL --tarea memora --dimension arquitectura --repo $MEM --tope-usd $TOPE &
+$BIN $CAL --tarea brasa  --dimension arquitectura --repo $BRA --tope-usd $TOPE &
+wait
+```
+
+Son 42 evaluaciones, cerca de 4,3 USD. Después se aplican las dos compuertas.
+
+**Compuerta de cobertura, sin dinero.**
+
+```bash
+python3 - <<'PY'
+import glob, json, os
+for t in ("memora", "brasa"):
+    fs = glob.glob(os.path.expanduser(f"~/.local/share/root/calibracion/limpios/{t}-*.json"))
+    for d in ("estructura", "diseno"):
+        sv = 0
+        for f in fs:
+            p = [x for x in json.load(open(f))["puntajes"] if x["dimension"].lower() == d]
+            sv += bool(p and p[0].get("sin_veredicto"))
+        print(t, d, "limpios", len(fs), "sin_veredicto", sv)
+PY
+```
+
+**Grupo 2b, las dimensiones que pasaron las compuertas.**
+
+```bash
+$BIN $CAL --tarea memora --dimension estructura --repo $MEM --tope-usd $TOPE &
+$BIN $CAL --tarea memora --dimension diseno     --repo $MEM --tope-usd $TOPE &
+$BIN $CAL --tarea brasa  --dimension estructura --repo $BRA --tope-usd $TOPE &
+$BIN $CAL --tarea brasa  --dimension diseno     --repo $BRA --tope-usd $TOPE &
+wait
+```
+
+- `$TOPE` se calcula una vez y vale para los cuatro: cada proceso ve el gasto de los otros desde su inicio.
+- Son 40 casos y cerca de 4,1 USD, si pasan todas las dimensiones.
+- Si aparece un timeout de infraestructura por la carga, los procesos bajan a 2 por vez.
+
+**Qué no puede ir en paralelo.** Arquitectura debe terminar antes de Estructura y Diseño de su tarea. La calibración no corre a la vez que una prueba con podman ni que la corrida real.
+
+## Orden final del hito 1 (2026-11-05, noche)
+
+1. **Prueba con podman de 34dd370**, en curso.
+2. **Grupo 0.** Si da correcto, **Grupo 1**.
+3. **Grupos 2a y 2b**, con el verde del paso 1.
+4. **Mezcla de la 62 y de 63, p5 y 64**, con la orden del usuario (P63 y P64). Puede ocurrir en cualquier momento después del verde, porque es el mismo árbol.
+5. **Corrida real de memora (Tarea 16)**, sobre la mezcla, sin calibración en curso.
+6. **Comparación de `global`.**
+7. **Validez automática** (Tarea 12b) y **cierre** (Tarea 47).
+8. **Borrado de memora y brasa** (decisión 61).
+
+## Preguntas para el usuario (2026-11-05, noche)
+
+**P63 sigue abierta.** Con el orden nuevo, la respuesta destraba la mezcla, no la calibración.
+
+**P64: ¿Mezclar 63, p5 y 64 cuando la prueba con podman dé verde?**
+- **a)** Sí, sin volver a preguntar, junto con la 62. Recomendada: es el árbol que se prueba.
+- **b)** No. El orquestador trae el resultado y espera otra orden.
