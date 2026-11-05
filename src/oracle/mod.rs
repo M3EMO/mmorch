@@ -6691,6 +6691,7 @@ mod tests {
                 archivo: "src/lib.rs".into(),
                 linea: 1,
                 nombre: "m".into(),
+                tests: vec![],
             }]
         );
     }

@@ -3,6 +3,7 @@
 //! de mutantes muertos. Si la herramienta falta en la imagen, no hay veredicto (fail-closed).
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +20,8 @@ const DIMENSION: Dimension = Dimension::Pruebas;
 const SONDA: &str = "cargo-mutants";
 /// Reporte que deja el comando dentro de `/salida`. Ver `comando_de_corrida`.
 pub(crate) const ARCHIVO_OUTCOMES: &str = "outcomes.json";
+/// Líneas `test ... FAILED` de cada log de la corrida, con su ruta. Ver `comando_de_corrida`.
+pub(crate) const ARCHIVO_TESTS_FALLIDOS: &str = "tests-fallidos.txt";
 /// Listado JSON de los mutantes que deja `comando_de_listado` dentro de `/salida`.
 const ARCHIVO_LISTADO: &str = "listado.json";
 const DETALLE_VIVO: &str = "este cambio de comportamiento no lo detecta ningún test";
@@ -42,6 +45,8 @@ pub struct MutanteMuerto {
     pub archivo: String,
     pub linea: u32,
     pub nombre: String,
+    /// Tests que fallaron con este mutante, en el orden de `tests-fallidos.txt`.
+    pub tests: Vec<String>,
 }
 
 /// Reporte `outcomes.json` de cargo-mutants. Solo se leen los campos que Root usa.
@@ -59,6 +64,9 @@ struct Resultado {
     scenario: Escenario,
     #[serde(default)]
     summary: String,
+    /// Ruta del log del mutante dentro de `log/`. `null` si no hay log.
+    #[serde(default)]
+    log_path: Option<String>,
 }
 
 /// `"Baseline"` o `{"Mutant": {...}}`: forma externa de serde.
@@ -96,6 +104,10 @@ struct Viable {
     linea: u32,
     nombre: String,
     muerto: bool,
+    /// Log del mutante, si el reporte lo trae. Lo usan los tests que fallaron con él.
+    log_path: Option<String>,
+    /// Verdadero si el resumen es `Timeout`: no se le atribuyen tests.
+    timeout: bool,
 }
 
 /// Lectura del reporte: los viables en orden del archivo, o el motivo por el que no hay muestra.
@@ -117,16 +129,18 @@ fn leer_viables(json: &str) -> Result<Lectura, ErrorOraculo> {
     let Some(resultados) = informe.outcomes else {
         return Ok(Lectura::Sin("sin marca de fin: falta outcomes".into()));
     };
-    let de = |m: &Mutante, muerto: bool| Viable {
-        archivo: m.file.clone(),
-        linea: m.span.start.line,
-        nombre: m.name.clone(),
-        muerto,
-    };
     let mut viables: Vec<Viable> = Vec::new();
     // `Baseline` es la marca de fin: sin él, la lista no prueba que la corrida terminó.
     let mut hay_baseline = false;
     for resultado in &resultados {
+        let de = |m: &Mutante, muerto: bool| Viable {
+            archivo: m.file.clone(),
+            linea: m.span.start.line,
+            nombre: m.name.clone(),
+            muerto,
+            log_path: resultado.log_path.clone(),
+            timeout: resultado.summary == "Timeout",
+        };
         match &resultado.scenario {
             Escenario::Baseline => match resultado.summary.as_str() {
                 "Success" => hay_baseline = true,
@@ -235,15 +249,49 @@ pub fn parsear_outcomes(
     })
 }
 
-/// Mutantes muertos de la muestra que mide `parsear_outcomes`, en el orden del archivo. Un reporte sin
-/// veredicto, ilegible o vacío no tiene muestra: da una lista vacía.
-pub fn mutantes_muertos(json: &str, mutantes_max: u32) -> Vec<MutanteMuerto> {
+/// Tests fallidos por log: la clave es la ruta `log/<archivo>.log`. Cada lista sigue el orden del archivo.
+fn leer_tests_fallidos(texto: &str) -> BTreeMap<&str, Vec<&str>> {
+    let mut por_log: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for linea in texto.lines() {
+        // Formato de `grep -H`: `<ruta>:test <nombre> ... FAILED`. Otra línea no cuenta.
+        let Some((ruta, resto)) = linea.split_once(":test ") else {
+            continue;
+        };
+        let Some(nombre) = resto.strip_suffix(" ... FAILED") else {
+            continue;
+        };
+        let tests = por_log.entry(ruta).or_default();
+        if !tests.contains(&nombre) {
+            tests.push(nombre);
+        }
+    }
+    por_log
+}
+
+/// Tests que fallaron con `viable`. Un `Timeout` no tiene tests, aunque su log tenga líneas.
+fn tests_de(viable: &Viable, por_log: &BTreeMap<&str, Vec<&str>>) -> Vec<String> {
+    if viable.timeout {
+        return Vec::new();
+    }
+    viable
+        .log_path
+        .as_deref()
+        .and_then(|ruta| por_log.get(ruta))
+        .map(|tests| tests.iter().map(|t| t.to_string()).collect())
+        .unwrap_or_default()
+}
+
+/// Mutantes muertos de la muestra que mide `parsear_outcomes`, en el orden del archivo. Cada uno trae
+/// los tests que fallaron con él, según `tests_fallidos` (el `tests-fallidos.txt` de la corrida). Un
+/// reporte sin veredicto, ilegible o vacío no tiene muestra: da una lista vacía.
+pub fn mutantes_muertos(json: &str, mutantes_max: u32, tests_fallidos: &str) -> Vec<MutanteMuerto> {
     if mutantes_max == 0 {
         return Vec::new();
     }
     let Ok(Lectura::Medible(viables)) = leer_viables(json) else {
         return Vec::new();
     };
+    let por_log = leer_tests_fallidos(tests_fallidos);
     muestra(&viables, mutantes_max)
         .iter()
         .filter(|v| v.muerto)
@@ -251,6 +299,7 @@ pub fn mutantes_muertos(json: &str, mutantes_max: u32) -> Vec<MutanteMuerto> {
             archivo: v.archivo.clone(),
             linea: v.linea,
             nombre: v.nombre.clone(),
+            tests: tests_de(v, &por_log),
         })
         .collect()
 }
@@ -327,9 +376,10 @@ fn muestra_repartida(nombres: &[String], max: usize) -> Vec<String> {
         .collect()
 }
 
-/// Comando de la corrida de mutación. Corre sobre una copia de `/repo` y deja `outcomes.json` en
-/// `/salida`, porque el ejecutor solo lee archivos sueltos de esa carpeta. `filtro` es `""` (todos
-/// los mutantes) o el `-F` de `filtro_de`.
+/// Comando de la corrida de mutación. Corre sobre una copia de `/repo`.
+/// Deja `outcomes.json` y `tests-fallidos.txt` en `/salida`: el ejecutor solo lee archivos sueltos ahí.
+/// `filtro` es `""` (todos los mutantes) o el `-F` de `filtro_de`.
+/// El último comando es el `cp`: su código de salida es el del comando.
 fn comando_de_corrida(tarea: &Tarea, filtro: &str) -> String {
     let minutos = tarea
         .pruebas
@@ -340,6 +390,8 @@ fn comando_de_corrida(tarea: &Tarea, filtro: &str) -> String {
         "{PRELUDIO}cp -a /repo /salida/work && cd /salida/work && \
          CARGO_TARGET_DIR=/salida/target timeout {segundos} cargo mutants --no-shuffle --jobs 1 \
          --output /salida/mutants{filtro} -- --offline; \
+         (cd /salida/mutants/mutants.out && grep -H '^test .* \\.\\.\\. FAILED$' log/*.log) \
+         > /salida/{ARCHIVO_TESTS_FALLIDOS} 2>/dev/null; \
          cp /salida/mutants/mutants.out/outcomes.json /salida/{ARCHIVO_OUTCOMES} 2>/dev/null"
     )
 }
@@ -1243,12 +1295,13 @@ mod tests {
             archivo: archivo.into(),
             linea,
             nombre: nombre.into(),
+            tests: Vec::new(),
         }
     }
 
     #[test]
     fn mutantes_muertos_devuelve_los_muertos_de_la_muestra_en_orden() {
-        let muertos = mutantes_muertos(MUERTOS_MIXTOS, 60);
+        let muertos = mutantes_muertos(MUERTOS_MIXTOS, 60, "");
         assert_eq!(
             muertos,
             vec![
@@ -1263,18 +1316,18 @@ mod tests {
     fn mutantes_muertos_recorta_a_la_muestra_de_mutantes_max() {
         // Los viables en orden: a1 (muerto), b3 (vivo), b4 (muerto), c5 (muerto).
         assert_eq!(
-            mutantes_muertos(MUERTOS_MIXTOS, 1),
+            mutantes_muertos(MUERTOS_MIXTOS, 1, ""),
             vec![muerto("src/a.rs", 1, "a1")]
         );
         assert_eq!(
-            mutantes_muertos(MUERTOS_MIXTOS, 3),
+            mutantes_muertos(MUERTOS_MIXTOS, 3, ""),
             vec![muerto("src/a.rs", 1, "a1"), muerto("src/b.rs", 4, "b4")]
         );
     }
 
     #[test]
     fn mutantes_muertos_coincide_con_los_muertos_de_parsear_outcomes() {
-        let muertos = mutantes_muertos(SIN_ASSERTS, 60);
+        let muertos = mutantes_muertos(SIN_ASSERTS, 60, "");
         let r = parsear_outcomes(SIN_ASSERTS, 60, &[]).expect("parsea");
         assert_eq!(muertos.len(), r.muertos as usize);
         assert!(muertos.iter().all(|m| m.archivo == "src/calc.rs"));
@@ -1282,10 +1335,74 @@ mod tests {
 
     #[test]
     fn mutantes_muertos_json_ilegible_vacio_o_sin_veredicto_es_vacio() {
-        assert!(mutantes_muertos("", 60).is_empty());
-        assert!(mutantes_muertos("{no es json", 60).is_empty());
+        assert!(mutantes_muertos("", 60, "").is_empty());
+        assert!(mutantes_muertos("{no es json", 60, "").is_empty());
         let sin_baseline = r#"{"outcomes":[{"scenario":{"Mutant":{"name":"m","file":"src/a.rs"}},"summary":"CaughtMutant"}]}"#;
-        assert!(mutantes_muertos(sin_baseline, 60).is_empty());
-        assert!(mutantes_muertos(MUERTOS_MIXTOS, 0).is_empty());
+        assert!(mutantes_muertos(sin_baseline, 60, "").is_empty());
+        assert!(mutantes_muertos(MUERTOS_MIXTOS, 0, "").is_empty());
+    }
+
+    const CON_LOGS: &str = include_str!("../../tests/fixtures/mutacion/outcomes-con-logs.json");
+    const TESTS_FALLIDOS: &str = include_str!("../../tests/fixtures/mutacion/tests-fallidos.txt");
+
+    #[test]
+    fn mutantes_muertos_cruza_log_path_con_los_tests_fallidos() {
+        let muertos = mutantes_muertos(CON_LOGS, 60, TESTS_FALLIDOS);
+        assert_eq!(muertos.len(), 3, "{muertos:?}");
+        assert_eq!(muertos[0].tests, vec!["t::ok"]);
+        assert_eq!(
+            muertos[2].tests,
+            vec!["db::tests::zset", "db::tests::zset_vacio"]
+        );
+    }
+
+    #[test]
+    fn mutantes_muertos_timeout_queda_con_tests_vacios() {
+        let muertos = mutantes_muertos(CON_LOGS, 60, TESTS_FALLIDOS);
+        let timeout = &muertos[1];
+        assert_eq!(
+            timeout.nombre,
+            "src/lib.rs:9:5: replace resta -> i32 with 0"
+        );
+        assert!(timeout.tests.is_empty(), "{timeout:?}");
+    }
+
+    #[test]
+    fn mutantes_muertos_sin_log_path_o_sin_entrada_da_tests_vacios() {
+        let json = r#"{"total_mutants":1,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"m","file":"src/a.rs","span":{"start":{"line":2}}}},"summary":"CaughtMutant"}]}"#;
+        let muertos = mutantes_muertos(json, 60, TESTS_FALLIDOS);
+        assert_eq!(muertos.len(), 1);
+        assert!(muertos[0].tests.is_empty(), "{muertos:?}");
+    }
+
+    #[test]
+    fn mutantes_muertos_tests_en_orden_del_archivo_sin_duplicados() {
+        let json = r#"{"total_mutants":1,"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"m","file":"src/a.rs","span":{"start":{"line":2}}}},"summary":"CaughtMutant","log_path":"log/a.log"}]}"#;
+        let texto = "log/a.log:test z::uno ... FAILED\nlog/a.log:test a::dos ... FAILED\n\
+                     log/a.log:test z::uno ... FAILED\n";
+        let muertos = mutantes_muertos(json, 60, texto);
+        assert_eq!(muertos[0].tests, vec!["z::uno", "a::dos"]);
+    }
+
+    #[test]
+    fn mutacion_comando_de_corrida_deja_tests_fallidos_antes_del_cp() {
+        let cmd = comando_de_corrida(&tarea_pruebas(5), "");
+        assert!(
+            cmd.contains(
+                "(cd /salida/mutants/mutants.out && grep -H '^test .* \\.\\.\\. FAILED$' log/*.log) > /salida/tests-fallidos.txt 2>/dev/null;"
+            ),
+            "{cmd}"
+        );
+        let grep = cmd.find("grep -H").expect("tiene el grep");
+        let cp = cmd
+            .find("cp /salida/mutants/mutants.out/outcomes.json")
+            .expect("tiene el cp");
+        assert!(grep < cp, "el grep va antes del cp: {cmd}");
+        assert!(
+            cmd.trim_end()
+                .ends_with("/salida/outcomes.json 2>/dev/null"),
+            "termina con el cp: {cmd}"
+        );
+        assert!(es_comando_de_mutacion(&cmd), "{cmd}");
     }
 }

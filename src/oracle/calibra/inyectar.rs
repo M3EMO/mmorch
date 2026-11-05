@@ -1438,6 +1438,7 @@ mod tests {
             nombre:
                 "src/protocolo.rs:2:1: replace leer_numero -> Result<u32, ParseIntError> with Ok(0)"
                     .into(),
+            tests: vec![],
         }
     }
 
@@ -1447,6 +1448,7 @@ mod tests {
             archivo: "src/lib.rs".into(),
             linea: 1,
             nombre: "src/lib.rs:1:1: replace nadie_lo_llama -> u32 with 0".into(),
+            tests: vec![],
         }
     }
 
@@ -1529,6 +1531,7 @@ mod tests {
             archivo: "src/protocolo.rs".into(),
             linea: 3,
             nombre: "src/protocolo.rs:3:5: replace a + b with a - b".into(),
+            tests: vec![],
         };
         let inyeccion = borrar_con(dir.path(), &[muerto], 42)
             .expect("E/S")

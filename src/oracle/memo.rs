@@ -49,7 +49,11 @@ impl MemoSondas {
         let Some(json) = salida.archivos.get(mutacion::ARCHIVO_OUTCOMES) else {
             return Vec::new();
         };
-        mutacion::mutantes_muertos(json, mutacion::mutantes_max(tarea))
+        let tests = salida
+            .archivos
+            .get(mutacion::ARCHIVO_TESTS_FALLIDOS)
+            .map_or("", String::as_str);
+        mutacion::mutantes_muertos(json, mutacion::mutantes_max(tarea), tests)
     }
 
     /// Salida grabada de la primera corrida de mutación, si hay una.
@@ -263,8 +267,26 @@ mod tests {
                 archivo: "src/a.rs".into(),
                 linea: 7,
                 nombre: "muerto".into(),
+                tests: vec![],
             }]
         );
+    }
+
+    #[test]
+    fn memo_mutantes_muertos_lee_tests_fallidos_de_la_salida_grabada() {
+        const OUTCOMES: &str = r#"{"total_mutants":1,"outcomes":[
+            {"scenario":"Baseline","summary":"Success"},
+            {"scenario":{"Mutant":{"name":"muerto","file":"src/a.rs","span":{"start":{"line":7}}}},"summary":"CaughtMutant","log_path":"log/a.log"}]}"#;
+        let tarea = tarea_rust();
+        let memo = MemoSondas::nuevo();
+        let mut salida = con_outcomes(OUTCOMES);
+        salida.archivos.insert(
+            "tests-fallidos.txt".into(),
+            "log/a.log:test ok::uno ... FAILED\nlog/a.log:test ok::dos ... FAILED\n".into(),
+        );
+        memo.anotar(&crate::oracle::mutacion::construir_comando(&tarea), &salida);
+        let muertos = memo.mutantes_muertos(&tarea);
+        assert_eq!(muertos[0].tests, vec!["ok::uno", "ok::dos"]);
     }
 
     #[test]

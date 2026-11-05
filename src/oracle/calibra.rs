@@ -4958,6 +4958,7 @@ mod tests {
             archivo: archivo.into(),
             linea: 10,
             nombre: nombre.into(),
+            tests: vec![],
         }
     }
 

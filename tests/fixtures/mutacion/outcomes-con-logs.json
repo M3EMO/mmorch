@@ -1,0 +1,114 @@
+{
+  "outcomes": [
+    {
+      "scenario": "Baseline",
+      "summary": "Success",
+      "log_path": "log/baseline.log",
+      "phase": "TEST",
+      "diff_path": null
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/lib.rs:1:25: replace suma -> i32 with 0",
+          "file": "src/lib.rs",
+          "span": {
+            "start": {
+              "line": 1,
+              "column": 25
+            },
+            "end": {
+              "line": 1,
+              "column": 30
+            }
+          },
+          "replacement": "0",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__lib.rs_line_1_col_25.log",
+      "phase": "TEST",
+      "diff_path": "diff/src__lib.rs_line_1_col_25.diff"
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/lib.rs:9:5: replace resta -> i32 with 0",
+          "file": "src/lib.rs",
+          "span": {
+            "start": {
+              "line": 9,
+              "column": 5
+            },
+            "end": {
+              "line": 9,
+              "column": 12
+            }
+          },
+          "replacement": "0",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Timeout",
+      "log_path": "log/src__lib.rs_line_9_col_5.log",
+      "phase": "TEST",
+      "diff_path": "diff/src__lib.rs_line_9_col_5.diff"
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/lib.rs:12:1: replace nada with ()",
+          "file": "src/lib.rs",
+          "span": {
+            "start": {
+              "line": 12,
+              "column": 1
+            },
+            "end": {
+              "line": 12,
+              "column": 9
+            }
+          },
+          "replacement": "()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/src__lib.rs_line_12_col_1.log",
+      "phase": "TEST",
+      "diff_path": "diff/src__lib.rs_line_12_col_1.diff"
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/db.rs:4:9: replace zset -> bool with true",
+          "file": "src/db.rs",
+          "span": {
+            "start": {
+              "line": 4,
+              "column": 9
+            },
+            "end": {
+              "line": 4,
+              "column": 16
+            }
+          },
+          "replacement": "true",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__db.rs_line_4_col_9.log",
+      "phase": "TEST",
+      "diff_path": "diff/src__db.rs_line_4_col_9.diff"
+    }
+  ],
+  "total_mutants": 4,
+  "caught": 2,
+  "missed": 1,
+  "timeout": 1,
+  "unviable": 0,
+  "success": 1,
+  "failure": 0
+}
