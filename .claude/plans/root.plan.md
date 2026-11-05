@@ -4372,3 +4372,93 @@ wait
 10. **Borrado de memora y brasa** (decisión 61).
 
 **P64 cambia de alcance otra vez.** Ahora cubre 63, p5, 64, 65 y 66.
+
+## Vuelta del 2026-11-05 (noche 2): Grupo 2a, Pruebas y Tarea 66
+
+**Resultados, binario d4b9679.**
+
+| Tarea | Dimensión | Sens. / espec. | Segundos | USD |
+|---|---|---|---|---|
+| memora | arquitectura | 1.0 / 1.0, 1 limpio sin veredicto | 2184 | en el total |
+| brasa | arquitectura | 1.0 / 1.0, 0 limpios sin veredicto | 7554 | en el total |
+| brasa | pruebas | 1.0 / 1.0 | 6306 | 0 |
+| memora | pruebas | 0.1 / 1.0 | 258 | 0 |
+
+- El Grupo 2a costó 4,4776 USD, o sea 0,107 USD por evaluación. El gasto medido es 15,8653 USD, y el saldo útil llega hasta 24 USD.
+- La compuerta de costo pasó: 15,87 + 40 x 0,107 = 20,13 USD.
+- **Cobertura, limpios sin veredicto:** memora estructura 0, memora diseño 4, brasa estructura 0 y brasa diseño 0. Memora diseño no corre.
+- El orquestador lanza el Grupo 2b sin memora diseño, y repite con la Tarea 66: memora completitud, memora funciona, brasa funciona y brasa entrega.
+
+## Diagnóstico de memora pruebas 0,1 (Opus, 2026-11-05)
+
+**Hechos medidos, con los registros de `cargo-mutants` del 2026-10-30, mismo commit de memora-ecc.**
+
+| Lugar del caso | Casos | Mutante muerto de la muestra en ese archivo | Qué lo mata en la base |
+|---|---|---|---|
+| `src/config.rs:210` | 3 | `src/config.rs:98`, borrar el brazo `dir` | Los 27 tests unitarios pasan. Fallan los 7 de `tests/server.rs`. |
+| `src/persist.rs:596` | 4 | `src/persist.rs:284` y `:465` | `snapshot_ida_y_vuelta`, por un `.unwrap()` en `src/persist.rs:594-595`, no por un assert. |
+| `src/db.rs:397` | 2 | `src/db.rs:60`, `ZSet::insert` da `false` | 6 tests, entre ellos 3 de `src/cmd/zsets.rs`, que no llaman `insert(`. |
+| `src/util.rs:205` | 1 | `src/util.rs:96` | El único detectado: lo matan asserts del test borrado. |
+
+- El caso no guarda qué mutante eligió. La tabla cruza el archivo del caso con la muestra simulada. Es una inferencia fuerte, no una lectura directa.
+- La muestra tiene 1 mutante de `src/config.rs`, y 3 de `src/persist.rs` y de `src/db.rs`.
+- El caso detectado nombra `src/util.rs:96:28`, que también aparece en la muestra simulada. Eso respalda la simulación.
+- Los mutantes de `src/config.rs`, `src/persist.rs` y `src/db.rs` tienen un motivo para seguir muertos, según los registros.
+
+**Conclusión: 0,1 es un límite del instrumento, no una debilidad de memora.** El inyector borra asserts de los tests que llaman la función por nombre. Eso no quita lo que mata al mutante: un `.unwrap()`, otro test o un test por socket. La suite sigue detectando ese cambio, así que la sonda tiene razón en no bajar. El defecto no debilitó nada que la muestra mida. brasa da 1,0 porque sus asserts sí son los que matan.
+
+**Límite real que queda.** La muestra mide 60 de 2263 mutantes. Una debilidad local de los tests solo se ve si cae en esa muestra. La sensibilidad calibrada dice: "si los tests que matan un mutante de la muestra desaparecen, Pruebas lo ve". No dice que Pruebas vea cualquier debilidad local. Subir la muestra costaría horas por evaluación.
+
+## Desempates técnicos 38 (Opus, 2026-11-05)
+
+**Pruebas se corrige.** El inyector usa lo que el registro ya dice: qué tests fallaron con ese mutante. El defecto les pone `#[ignore]`.
+- Razón: quita al que mata, también si mata con `.unwrap()`.
+- `cargo test` corta en el primer binario que falla. Un test por socket puede seguir matando después. Eso cuenta como falso negativo, y es honesto: la suite conserva esa detección.
+- No uso `--no-fail-fast`. Con él, el defecto quitaría todos los que matan, y el mutante viviría por construcción.
+- La evaluación real no cambia de resultado: el comando solo suma un archivo con los tests fallidos.
+
+**Memora diseño: no corre con esta semilla.**
+- **Hecho:** 3 de 10 limpios caen por "cobertura 8 de 13", porque el juez no encontró evidencia de `diseno.robustez` (peso 3) y `diseno.estado` (peso 2). El limpio 1 es una falla de red congelada.
+- **Sin la falla de red tampoco alcanza:** quedan 3 de 10, y la compuerta acepta 2.
+- **Umbral de dos tercios: no se baja.** Bajarlo después de ver el dato ajusta la regla al resultado. 8 de 13 es 0,615, y una evaluación real sin veredicto en 3 de 10 veces es inestable de verdad.
+- **Gasto ahorrado:** cerca de 1,07 USD de los casos con defecto, que no podrían calibrar.
+- **Otra semilla:** cuesta cerca de 2,2 USD, y da como mucho 38 % de pasar la compuerta, con p = 0,3. Eso pasa al usuario (P65).
+- **Mejora de fondo:** revisar el contrato de `sin_evidencia` del juez, en el hito 1b. Hoy cambiar el juez invalida las filas pagadas.
+- **La fila vieja de memora diseño** (0,8 / 0,0) es de la regla anterior. No calibra, y `global` no la usa.
+
+**Falla de red congelada.** `Compartidos::leer` deja de reusar un limpio con "el modelo falló". Las otras dimensiones lo evalúan otra vez. Corrige el límite de "Revisión del código de la Tarea 64".
+
+**Informe 66.**
+- **Pregunta 3:** queda. Cada candidato descartado cuesta una evaluación, y Funciona no gasta API.
+- **Pregunta 4:** no puede pasar. `rompe_la_compilacion` da falso en Funciona (`src/oracle/calibra.rs:1519`), así que esa rama no se activa.
+- **Pregunta 7:** no es una falla. `aplicar` exige `muestra_suficiente` (`src/oracle/calibra.rs:150` y `:1831`). Una fila "no aplica" tiene 0 defectos, así que queda sin calibrar y sin exactitud. No encontré otro lector de esas filas. La Tarea 67 suma la guarda.
+- **Otras preguntas:** quedan como las decidió el organizador.
+
+**Lo que hará el orquestador.** No invalida nada. Con 7 procesos a la vez, la carga agranda `ruidosos` en Completitud y Funciona. Conviene no pasar de 5 procesos, con `memora funciona` y `brasa funciona` después del Grupo 2b.
+
+**Filas que invalida la Tarea 67.** Solo `memora pruebas` y `brasa pruebas`, porque cambia el defecto. Ambas son sin API: cerca de 5 minutos y de 105 minutos. Las demás siguen valiendo: los resultados de la mutación no cambian, y las otras dimensiones no usan este defecto.
+
+**Saldo.** 15,87 USD + 33 evaluaciones del Grupo 2b x 0,107 = cerca de 19,4 USD. Quedan cerca de 4,6 USD hasta los 24 USD. El gasto de API de la corrida real no está medido entero. Una evaluación con juez cuesta cerca de 0,11 USD.
+
+### Tarea 67: Defecto de Pruebas con los tests que matan
+- **Action**: los cinco puntos del brief.
+- **Archivos**: `src/oracle/mutacion.rs`, `src/oracle/calibra.rs`, `src/oracle/calibra/`.
+- **Arranca**: ya, desde `laptop/tarea-66` (35ce168), con `ROOT_SIN_PODMAN=1`.
+- **Brief**: `docs/builds/brief-local-67.md`.
+
+## Orden final del hito 1 (2026-11-05, noche 2)
+
+1. **Prueba con podman de 8a5391f.** Después, el **Grupo 2b** sin memora diseño, y las filas de la 66. **Tarea 67** en paralelo.
+2. **Prueba con podman de 67 sobre todo lo anterior**, cuando no corra la calibración.
+3. **`memora pruebas` y `brasa pruebas`** con el binario de la 67.
+4. **Mezcla de 62, 63, p5, 64, 65, 66 y 67**, con la orden del usuario (P63 y P64).
+5. **Corrida real de memora (Tarea 16).** No le falta otra cosa: el test real de `claude` ya pasó, y no corre con calibración en curso.
+6. **Comparación de `global`.**
+7. **Validez automática** (Tarea 12b) y **cierre** (Tarea 47).
+8. **Borrado de memora y brasa** (decisión 61).
+
+## Pregunta para el usuario (2026-11-05, noche 2)
+
+**P65: ¿Memora Diseño queda sin calibrar?** El juez no da veredicto en 3 de cada 10 evaluaciones limpias, y el límite es 2. Queda fuera de `global` en memora.
+- **a)** Aceptar. El contrato del juez se revisa en el hito 1b. Recomendada.
+- **b)** Probar otra semilla: cerca de 2,2 USD, con 38 % como mucho de pasar la compuerta.
