@@ -4578,3 +4578,105 @@ Con ese criterio faltan: `brasa diseño`, `brasa pruebas`, `memora funciona` y l
 - **b)** No. Repetir `brasa funciona` y `memora pruebas` con una sola corrida más grande, `n = 40` y semilla 43, sin API. El resultado se acepta sea cual sea. Tarda cerca de 7 horas más.
 
 P63, P64 y P65 siguen abiertas. P64 ahora cubre también la 68.
+
+## Vuelta del 2026-11-05 (noche 4): brasa diseño y Tarea 68
+
+**Estado.**
+- `brasa diseño` dio 0.5 / 0.9, exactitud 0,70, con ca8c6a4. El primer intento salió sin veredicto de base, y el segundo terminó en 5997 s. Casos: `brasa-diseno-1793906284.casos.jsonl`.
+- El gasto medido es 21,0919 USD. Quedan 2,91 USD hasta 24 USD.
+- La Tarea 68 terminó en `laptop/tarea-68` (9f23104) por 0,82 USD, con 2552 verdes sin podman.
+- Corren `brasa pruebas` con ca8c6a4 y `memora funciona` con 0508008 (68, 67, 66, 63 y 62). La prueba con podman de 0508008 espera que terminen.
+
+**Duda del orquestador.** Preguntó si la 68 cambia filas de Completitud, o si `brasa funciona` se midió con una regla vieja. Se responde abajo, con lectura del código.
+
+## Qué filas cambia la Tarea 68 (Opus, por lectura)
+
+**El cambio solo agrega detecciones.** `motivo_de_deteccion` suma `test_malo_nuevo` (`src/oracle/calibra.rs`, commit 6381b97), y pasa igual por `estables::permite`. Una detección nueva exige un test malo fuera de la base y fuera de `ruidosos`.
+
+**Completitud: ninguna fila cambia.**
+- Las dos filas dan sensibilidad 1,0, así que no pueden sumar detecciones de defectos.
+- Un limpio no puede disparar: un test malo en un limpio y no en la base tiene dos estados, y entonces está en `ruidosos` (`src/oracle/calibra/estables.rs`, `ruidosos`).
+
+**`brasa funciona`: no cambia, salvo un caso que no creo que ocurra.**
+- `fraccion_pasa` suma a `total` los inestables y no los cuenta en `pasa` (`src/oracle/mod.rs:1637-1654`). Un test que pasa de bueno a fallido o inestable baja `pasa`, con `total` igual.
+- Entonces un test malo nuevo baja `valor`, y la regla vieja ya detectaba `valor_menor`.
+- La 68 solo cambia el caso donde otro test malo de la base pasa a bueno al mismo tiempo. Eso compensa la baja.
+- La fila de brasa tiene `ruidosos` vacío, así que base y limpios no variaron. Compensar exigiría que el defecto arregle un test por casualidad.
+- La única exclusión de brasa, `test_rendimiento[gpu-10000-res1]`, no afecta: no cuenta en `fraccion_pasa`, y la GPU falta también en la base, hipótesis por el motivo de `[[entorno]]`.
+- **Consecuencia medida por lógica:** los dos no detectados de `brasa funciona` no tuvieron ningún test malo nuevo. Pasaron toda la suite.
+
+**`memora funciona` sí cambia.** Tiene 3 tests ruidosos, y esa compensación puede pasar. La decisión anterior se confirma.
+
+**`brasa funciona` no se repite.** Tardaría 200 minutos y atrasaría la prueba con podman, para dar lo mismo.
+
+## Diagnóstico de brasa diseño (Opus, 2026-11-05)
+
+**Hechos medidos.**
+
+| Lugar | Caracteres antes de la línea | Resultado |
+|---|---|---|
+| `src/gltf_load.rs:32` (2 casos) | 1209 | Detecta, con `cita_juez` |
+| `src/main.rs:80` (2 casos) | 2269 | Detecta, con `cita_juez` |
+| `src/app.rs:230` | 6883 | No detecta |
+| `src/app.rs:300` (2 casos) | 9134 | 1 no detecta, 1 por `item_baja_2`, sin cita |
+| `src/scene.rs:416` | 13710 | No detecta |
+| `src/render.rs:664` | 25720 | No detecta |
+| `src/render.rs:791` | 31302 | Sin veredicto: cobertura 8 de 13 |
+
+- El juez recibe de cada archivo los primeros 6000 caracteres, y 40 000 en total (`src/oracle/juez.rs:151-152` y `:321`). Los números de línea cuentan dentro de ese límite. El código de brasa suma 119 012 caracteres.
+- `diseno.errores` da 0 en 5 de 9 defectos con veredicto, y en 1 de 10 limpios. La base da 2.
+- Las 4 líneas dentro del corte detectan por cita. Ninguna de las 6 fuera del corte detecta por cita.
+- El limpio 5 baja `errores` a 0, sin defecto. El caso 6 detecta igual, y está fuera del corte. Es compatible con ruido: 1 de 10 limpios hace lo mismo.
+
+**Hipótesis, sin medir.** El juez ve el defecto cuando lo tiene en su texto, y no lo ve cuando queda fuera. La muestra dentro del corte es de 4 casos.
+
+**Clasificación: límite del evaluador real, no propiedad de brasa.** Esto vale también en una evaluación real: Diseño juzga los primeros 6000 caracteres de cada archivo. `brasa diseño` queda sin calibrar, con 0,70. No se repite: otra semilla no cambia el corte.
+
+**Por qué no lo arreglo ahora.** Ampliar el texto cambia el prompt del juez. Eso cambia la clave de los limpios y lo que midieron Arquitectura y Estructura. Repetir el trío cuesta cerca de 9,2 USD (86 evaluaciones a 0,107), y más si el prompt crece. Quedan 2,91 USD.
+
+**Sumado al hito 1b, antes de evaluar un repo real:** el juez lee más allá de los primeros 6000 caracteres, y se revisa el contrato de `sin_evidencia`. Después se recalibra el trío.
+
+## Desempates técnicos 40 (Opus, 2026-11-05)
+
+1. **Pregunta 1 del informe 68:** queda. `test_malo_nuevo` va después de `hallazgo_nuevo` y antes de `valor_menor`. El orden solo cambia el texto del motivo.
+2. **Pregunta 2 del informe 68:** queda: "la dimensión no figura en el veredicto de la base".
+3. **Tarea 69: no hace falta.** Lo que queda abierto no tiene una corrección que entre en el saldo.
+4. **Limpieza:** el orquestador puede quitar `~/.cache/root-wt/local68b` y `local68b-parches`. Las ramas viejas no se tocan.
+
+**Tabla de filas.**
+
+| Dimensión | memora | brasa |
+|---|---|---|
+| seguridad | calibrada | calibrada |
+| entrega | calibrada | no aplica |
+| completitud | calibrada | calibrada |
+| estructura | calibrada | calibrada |
+| arquitectura | calibrada | calibrada |
+| eficiencia | no aplica | no aplica |
+| funciona | corriendo (0,90 antes) | fuera (0,889) |
+| pruebas | fuera (0,80) | corriendo (1,0 con el defecto viejo) |
+| diseño | fuera, sin correr | fuera (0,70) |
+
+**Saldo.** Quedan 2,91 USD hasta 24 USD, y todo queda reservado para la corrida real. Alcanzan para unas 27 evaluaciones con juez. Ninguna fila pendiente gasta API.
+
+## Orden final del hito 1 (2026-11-05, noche 4)
+
+1. **`brasa pruebas` y `memora funciona`**, en curso.
+2. **Prueba con podman de 0508008**, cuando terminen.
+3. **Mezcla de 62, 63, p5, 64, 65, 66, 67 y 68**, con la orden del usuario.
+4. **Corrida real de memora (Tarea 16)**.
+5. **Comparación de `global`.**
+6. **Validez automática** (Tarea 12b) y **cierre** (Tarea 47).
+7. **Borrado de memora y brasa** (decisión 61).
+
+## Preguntas reescritas para el usuario (2026-11-05, noche 4)
+
+**P65 (reescrita): ¿Diseño queda fuera de `global` en las dos tareas?** El juez solo lee los primeros 6000 caracteres de cada archivo. Con los defectos dentro de ese corte detectó 4 de 4, y fuera, por cita, 0 de 6. En memora, además, 3 de 10 evaluaciones limpias no dan veredicto.
+- **a)** Aceptar, y ampliar la lectura del juez en el hito 1b, antes de evaluar un repo real. Recomendada.
+- **b)** Arreglarlo ahora. Sube el tope: cerca de 12 USD más, por repetir el trío, y varias horas.
+
+**P66 (reescrita): ¿Alcanza este criterio para declarar calibrado el hito 1?** Cada dimensión tiene fila o razón escrita, y solo entran a `global` las de 0,9 o más. Hoy quedan fuera `brasa funciona` (0,889), `memora pruebas` (0,80) y Diseño en las dos tareas.
+- **a)** Sí. Recomendada: memora y brasa se borran después.
+- **b)** No. Repetir `brasa funciona` y `memora pruebas` una sola vez, con `n = 40` y semilla 43, sin API. El resultado se acepta sea cual sea. Tarda cerca de 7 horas más.
+
+P63 y P64 siguen abiertas. P64 cubre hasta la 68.
