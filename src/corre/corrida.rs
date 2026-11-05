@@ -1668,11 +1668,13 @@ mod tests {
         let ev = &costos[0];
         assert_eq!(ev.via, Some(Via::Cupo));
         assert_eq!(ev.modelo.as_deref(), Some("haiku"));
-        assert_eq!((ev.in_tokens, ev.out_tokens), (3500, 130));
+        assert_eq!((ev.in_tokens, ev.out_tokens), (2500, 130));
+        assert_eq!(ev.extra["cache_read_tokens"], 800);
+        assert_eq!(ev.extra["cache_write_tokens"], 200);
         // "haiku" se traduce a "claude-haiku-5-5": rige el precio de ese id, no el pesimista.
         let precio = Config::default().precios["claude-haiku-5-5"].clone();
         let (usd_entrada, usd_salida) = precio.tarifa_para(3500);
-        let esperado = 3500.0 * usd_entrada / 1e6 + 130.0 * usd_salida / 1e6;
+        let esperado = 2830.0 * usd_entrada / 1e6 + 130.0 * usd_salida / 1e6;
         assert!((ev.cost_usd - esperado).abs() < 1e-9, "{}", ev.cost_usd);
         assert_eq!(ev.extra["costo_estimado"], Value::Bool(true));
         assert!(!ev.extra.contains_key("precio_supuesto"));
@@ -1712,7 +1714,7 @@ mod tests {
         assert_eq!(costos.len(), 1, "un evento de costo para el rol cortado");
         let ev = &costos[0];
         assert_eq!(ev.modelo.as_deref(), Some("opus"));
-        let esperado = 3500.0 * 15.0 / 1e6 + 130.0 * 75.0 / 1e6;
+        let esperado = 2830.0 * 15.0 / 1e6 + 130.0 * 75.0 / 1e6;
         assert!((ev.cost_usd - esperado).abs() < 1e-9, "{}", ev.cost_usd);
         assert_eq!(ev.extra["precio_supuesto"], Value::Bool(true));
     }
