@@ -4465,6 +4465,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "description": "Archivo del defecto.",
           "type": "string"
         },
+        "en_evidencia": {
+          "description": "`true` si la evidencia de algún ítem del veredicto cita este archivo a `TOLERANCIA_LINEAS` líneas o\nmenos del defecto. No cuenta para `encontrado` ni para `recall`.",
+          "type": "boolean",
+          "default": false
+        },
         "encontrado": {
           "description": "`true` si Root tiene un hallazgo a ±3 líneas. Es el mismo criterio que `recall`.",
           "type": "boolean"

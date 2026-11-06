@@ -145,6 +145,10 @@ pub struct DetalleDefecto {
     pub linea: u32,
     /// `true` si Root tiene un hallazgo a ±3 líneas. Es el mismo criterio que `recall`.
     pub encontrado: bool,
+    /// `true` si la evidencia de algún ítem del veredicto cita este archivo a `TOLERANCIA_LINEAS` líneas o
+    /// menos del defecto. No cuenta para `encontrado` ni para `recall`.
+    #[serde(default)]
+    pub en_evidencia: bool,
     /// Hallazgo del mismo archivo con menor distancia en línea. `None` si no hay ninguno en ese archivo.
     pub hallazgo_cercano: Option<HallazgoCercano>,
 }
@@ -548,6 +552,23 @@ fn encuentra(v: &Veredicto, defecto: &DefectoReal) -> bool {
     })
 }
 
+/// `true` si la evidencia de algún ítem cita el archivo del defecto a `TOLERANCIA_LINEAS` líneas o menos.
+/// Las citas que no tienen la forma `archivo:linea` se ignoran.
+fn en_evidencia(v: &Veredicto, defecto: &DefectoReal) -> bool {
+    let archivo = normaliza(&defecto.archivo);
+    v.puntajes
+        .iter()
+        .flat_map(|p| p.items.iter())
+        .flat_map(|n| n.evidencia.iter())
+        .filter_map(|cita| cita.rsplit_once(':'))
+        .any(|(ruta, linea)| {
+            let Ok(linea) = linea.trim().parse::<u32>() else {
+                return false;
+            };
+            normaliza(ruta) == archivo && linea.abs_diff(defecto.linea) <= TOLERANCIA_LINEAS
+        })
+}
+
 /// Hallazgo del mismo archivo con menor distancia en línea. En empate, gana el primero de `v.hallazgos`.
 fn hallazgo_mas_cercano(v: &Veredicto, defecto: &DefectoReal) -> Option<HallazgoCercano> {
     let archivo = normaliza(&defecto.archivo);
@@ -767,6 +788,7 @@ fn medir_recall(
             archivo: defecto.archivo.clone(),
             linea: defecto.linea,
             encontrado,
+            en_evidencia: en_evidencia(&v, defecto),
             hallazgo_cercano: hallazgo_mas_cercano(&v, defecto),
         });
     }
@@ -2741,5 +2763,87 @@ fuente = "fixture"
         let viejo: Validez = serde_json::from_value(json).expect("lee un validez sin defectos");
         assert!(viejo.defectos.is_empty());
         assert_eq!(viejo.recall, v.recall);
+    }
+
+    #[test]
+    fn validez_evidencia_cercana_sin_hallazgo_no_es_encontrado() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos(casos, &[("src/a.rs", 100)]);
+        // Sin hallazgos. La evidencia cita una línea a 1 del defecto.
+        let mut v_root = veredicto(None, None, None, &[("seguridad.secretos", 2)]);
+        v_root.puntajes[0].items[0].evidencia = vec!["src/a.rs:101".into()];
+        let v = validar_con(casos, &falso(vec![clave("r", v_root)])).expect("mide");
+        let detalle = &v.defectos[0];
+        assert!(!detalle.encontrado, "sin hallazgo no hay encontrado");
+        assert!(detalle.en_evidencia, "la cita cae a 1 línea del defecto");
+        assert_eq!(v.recall.aciertos, Some(0));
+    }
+
+    #[test]
+    fn validez_evidencia_lejana_u_otro_archivo_no_cuenta() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos(casos, &[("src/a.rs", 100)]);
+        // Ninguna cita cae a 3 líneas o menos del defecto en su archivo. La última no tiene forma archivo:linea.
+        let mut v_root = veredicto(None, None, None, &[("seguridad.secretos", 2)]);
+        v_root.puntajes[0].items[0].evidencia = vec![
+            "src/a.rs:110".into(),
+            "src/b.rs:100".into(),
+            "test_x::t: pasa".into(),
+        ];
+        let v = validar_con(casos, &falso(vec![clave("r", v_root)])).expect("mide");
+        assert!(!v.defectos[0].en_evidencia);
+    }
+
+    #[test]
+    fn validez_evidencia_acepta_prefijo_y_borde() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos(casos, &[("src/a.rs", 100)]);
+        let correr = |cita: &str| {
+            let mut v_root = veredicto(None, None, None, &[("seguridad.secretos", 2)]);
+            v_root.puntajes[0].items[0].evidencia = vec![cita.into()];
+            validar_con(casos, &falso(vec![clave("r", v_root)])).expect("mide")
+        };
+        // El borde son 3 líneas: cuenta. Una más queda fuera.
+        assert!(correr("./src/a.rs:103").defectos[0].en_evidencia);
+        assert!(!correr("src/a.rs:104").defectos[0].en_evidencia);
+    }
+
+    #[test]
+    fn validez_evidencia_no_cambia_recall() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos(casos, &[("src/a.rs", 100)]);
+        // Hallazgo a 3 líneas y sin evidencia: sigue siendo encontrado.
+        let v_root = Veredicto {
+            hallazgos: vec![hallazgo("src/a.rs", 103)],
+            ..Veredicto::default()
+        };
+        let v = validar_con(casos, &falso(vec![clave("r", v_root)])).expect("mide");
+        assert!(v.defectos[0].encontrado);
+        assert!(!v.defectos[0].en_evidencia, "sin evidencia no hay cita");
+        assert_eq!(v.recall.valor, Some(1.0));
+        assert_eq!(v.recall.aciertos, Some(1));
+    }
+
+    #[test]
+    fn validez_viejo_defecto_sin_en_evidencia_lee_false() {
+        let dir = TempDir::new().expect("temporal");
+        escribir_defectos(dir.path(), &[("src/a.rs", 20)]);
+        let v =
+            validar_con(dir.path(), &falso(vec![clave("r", Veredicto::default())])).expect("mide");
+        let mut json = serde_json::to_value(&v.defectos[0]).expect("serializa");
+        assert!(
+            json.as_object_mut()
+                .expect("objeto")
+                .remove("en_evidencia")
+                .is_some(),
+            "la clave en_evidencia se serializa"
+        );
+        let viejo: DetalleDefecto =
+            serde_json::from_value(json).expect("lee un defecto sin en_evidencia");
+        assert!(!viejo.en_evidencia);
     }
 }
