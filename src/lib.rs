@@ -89,6 +89,7 @@ pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
                     gitleaks,
                     incluir,
                     defectos,
+                    por_archivo,
                 },
         } => {
             let opciones = oracle::auditar::OpcionesAuditar {
@@ -98,6 +99,7 @@ pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
                 gitleaks: gitleaks.clone(),
                 incluir: incluir.clone(),
                 defectos: defectos.clone(),
+                por_archivo: *por_archivo,
             };
             oraculo_auditar(cli.json, &opciones)
         }

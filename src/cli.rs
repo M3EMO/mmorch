@@ -263,6 +263,9 @@ pub enum OraculoAccion {
         /// Archivo TOML con defectos conocidos del repo.
         #[arg(long)]
         defectos: Option<PathBuf>,
+        /// Una llamada por archivo, con el mismo prompt de sistema. Un archivo que no cabe se parte en partes.
+        #[arg(long)]
+        por_archivo: bool,
     },
 }
 
@@ -451,6 +454,7 @@ mod tests {
                         gitleaks,
                         incluir,
                         defectos,
+                        por_archivo,
                     },
             } => {
                 assert_eq!(repo, PathBuf::from("/repo"));
@@ -462,7 +466,21 @@ mod tests {
                     vec![PathBuf::from("src/a.rs"), PathBuf::from("src/b.rs")]
                 );
                 assert_eq!(defectos, Some(PathBuf::from("/defectos.toml")));
+                assert!(!por_archivo);
             }
+            otro => panic!("se esperaba oraculo auditar, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn oraculo_auditar_por_archivo_parsea_a_true() {
+        let mut args = base();
+        args.push("--por-archivo");
+        let cli = Cli::try_parse_from(args).expect("--por-archivo parsea");
+        match cli.comando {
+            Comando::Oraculo {
+                accion: OraculoAccion::Auditar { por_archivo, .. },
+            } => assert!(por_archivo),
             otro => panic!("se esperaba oraculo auditar, llegó {otro:?}"),
         }
     }

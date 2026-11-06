@@ -41,6 +41,7 @@ pub struct OpcionesAuditar {
     pub gitleaks: PathBuf,
     pub incluir: Vec<PathBuf>,
     pub defectos: Option<PathBuf>,
+    pub por_archivo: bool,
 }
 
 /// Un defecto que el modelo propone y que el gate de cita confirma.
@@ -228,6 +229,7 @@ pub fn auditar_con(
         peor_caso,
         gasto,
         MAX_ENTRADA_JUEZ_BYTES,
+        false,
     )
 }
 
@@ -243,6 +245,7 @@ fn auditar_con_limite(
     peor_caso: &dyn Fn(&Prompt) -> f64,
     gasto: &dyn Fn() -> Result<f64, ErrorOraculo>,
     limite: u64,
+    por_archivo: bool,
 ) -> Result<Auditoria, ErrorOraculo> {
     let archivos = leer_archivos(repo, incluir)?;
     let presupuesto = (limite as usize).saturating_sub(PROMPT_AUDITORIA.len());
@@ -254,7 +257,15 @@ fn auditar_con_limite(
             grande.archivo
         )));
     }
-    let grupos = agrupar(bloques, presupuesto);
+    let grupos = if por_archivo {
+        // Cada archivo empaqueta solo consigo: sus partes pueden compartir llamada, otros archivos no.
+        tramos_por_archivo(bloques)
+            .into_iter()
+            .flat_map(|tramo| agrupar(tramo, presupuesto))
+            .collect()
+    } else {
+        agrupar(bloques, presupuesto)
+    };
     // El gate lee lo que el modelo vio: sin código de tests y con las líneas de secretos omitidas.
     let contenidos: BTreeMap<&str, String> = archivos
         .iter()
@@ -586,6 +597,24 @@ fn bloques(
     salida
 }
 
+/// Parte los bloques en tramos de bloques consecutivos del mismo archivo, en orden.
+fn tramos_por_archivo(bloques: Vec<Bloque>) -> Vec<Vec<Bloque>> {
+    let mut tramos: Vec<Vec<Bloque>> = Vec::new();
+    for b in bloques {
+        let mismo = tramos
+            .last()
+            .and_then(|t| t.last())
+            .is_some_and(|ult| ult.archivo == b.archivo);
+        if !mismo {
+            tramos.push(Vec::new());
+        }
+        if let Some(tramo) = tramos.last_mut() {
+            tramo.push(b);
+        }
+    }
+    tramos
+}
+
 /// Empaqueta los bloques en orden, sin pasar `presupuesto` bytes por grupo.
 fn agrupar(bloques: Vec<Bloque>, presupuesto: usize) -> Vec<Vec<Bloque>> {
     let mut grupos = Vec::new();
@@ -760,8 +789,17 @@ pub fn auditar(home: &Path, o: &OpcionesAuditar) -> Result<Auditoria, ErrorOracu
             .map_err(|e| ErrorOraculo::Infra(e.to_string()))
     };
 
-    let mut auditoria = auditar_con(
-        &o.repo, &o.incluir, &gitleaks, &juez, &modelo, o.tope_usd, &peor, &gasto,
+    let mut auditoria = auditar_con_limite(
+        &o.repo,
+        &o.incluir,
+        &gitleaks,
+        &juez,
+        &modelo,
+        o.tope_usd,
+        &peor,
+        &gasto,
+        MAX_ENTRADA_JUEZ_BYTES,
+        o.por_archivo,
     )?;
     if let Some(texto) = &texto_defectos {
         auditoria.medicion = medir_auditoria(texto, &o.repo, &auditoria)?;
@@ -863,6 +901,7 @@ mod tests {
             gitleaks: tmp.join("no-existe.json"),
             incluir: Vec::new(),
             defectos: None,
+            por_archivo: false,
         }
     }
 
@@ -985,6 +1024,85 @@ mod tests {
         }
         let todo: String = (0..modelo.llamadas()).map(|n| modelo.usuario(n)).collect();
         assert!(todo.contains("40000: let x = 1;\n"));
+        assert_eq!(aud.archivos, vec!["src/grande.rs".to_string()]);
+        assert!(!aud.incompleta);
+    }
+
+    #[test]
+    fn por_archivo_envia_cada_archivo_en_su_llamada() {
+        let (_tmp, repo) = repo_con(&[("src/a.rs", "fn a() {}\n"), ("src/b.rs", "fn b() {}\n")]);
+        let modelo = ModeloFalso::que_responde(JSON_VACIO);
+        let aud = auditar_con_limite(
+            &repo,
+            &[],
+            &[],
+            &modelo,
+            "m",
+            10.0,
+            &peor_cero,
+            &gasto_cero,
+            MAX_ENTRADA_JUEZ_BYTES,
+            true,
+        )
+        .expect("pasada");
+        assert_eq!(modelo.llamadas(), 2);
+        assert!(modelo.usuario(0).contains("src/a.rs"));
+        assert!(!modelo.usuario(0).contains("src/b.rs"));
+        assert!(modelo.usuario(1).contains("src/b.rs"));
+        assert!(!modelo.usuario(1).contains("src/a.rs"));
+        assert_eq!(modelo.prompt(0).sistema.as_deref(), Some(PROMPT_AUDITORIA));
+        assert_eq!(modelo.prompt(1).sistema.as_deref(), Some(PROMPT_AUDITORIA));
+        assert_eq!(aud.llamadas, 2);
+        assert_eq!(
+            aud.archivos,
+            vec!["src/a.rs".to_string(), "src/b.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn sin_por_archivo_los_dos_chicos_van_juntos() {
+        let (_tmp, repo) = repo_con(&[("src/a.rs", "fn a() {}\n"), ("src/b.rs", "fn b() {}\n")]);
+        let modelo = ModeloFalso::que_responde(JSON_VACIO);
+        auditar_con_limite(
+            &repo,
+            &[],
+            &[],
+            &modelo,
+            "m",
+            10.0,
+            &peor_cero,
+            &gasto_cero,
+            MAX_ENTRADA_JUEZ_BYTES,
+            false,
+        )
+        .expect("pasada");
+        assert_eq!(modelo.llamadas(), 1);
+        assert!(modelo.usuario(0).contains("src/a.rs"));
+        assert!(modelo.usuario(0).contains("src/b.rs"));
+    }
+
+    #[test]
+    fn por_archivo_parte_un_archivo_que_no_cabe() {
+        let grande = "let x = 1;\n".repeat(40_000);
+        let (_tmp, repo) = repo_con(&[("src/grande.rs", grande.as_str())]);
+        let modelo = ModeloFalso::que_responde(JSON_VACIO);
+        let aud = auditar_con_limite(
+            &repo,
+            &[],
+            &[],
+            &modelo,
+            "m",
+            10.0,
+            &peor_cero,
+            &gasto_cero,
+            MAX_ENTRADA_JUEZ_BYTES,
+            true,
+        )
+        .expect("pasada");
+        assert!(modelo.llamadas() >= 3, "llamadas: {}", modelo.llamadas());
+        for n in 0..modelo.llamadas() {
+            assert!(bytes_de_prompt(&modelo.prompt(n)) <= MAX_ENTRADA_JUEZ_BYTES);
+        }
         assert_eq!(aud.archivos, vec!["src/grande.rs".to_string()]);
         assert!(!aud.incompleta);
     }
