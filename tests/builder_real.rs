@@ -11,13 +11,15 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
+use root::corre::args::con_resume;
 use root::corre::contenedor::{
     IMAGEN_BUILDER, TIMEOUT_BUILDER, args_podman_builder, credencial_de,
 };
 use root::corre::{
-    ClaudeCorrida, EjecutorBuilder, EjecutorContenedorBuilder, Lanzamiento, args_claude,
-    copiar_sin_mcp, env_del_builder,
+    ClaudeCorrida, EjecutorBuilder, EjecutorContenedorBuilder, ErrorCorre, Lanzamiento,
+    args_claude, copiar_sin_mcp, env_del_builder,
 };
 use root::tipos::Rol;
 use tempfile::TempDir;
@@ -28,6 +30,19 @@ const MODELO_HAIKU: &str = "claude-haiku-5-5";
 const SECRETO_SHELL: &str = "SECRETO_BUILDER_SHELL_5d2c";
 /// Texto secreto del test con `claude`. No debe aparecer en el stdout.
 const SECRETO_REAL: &str = "SECRETO_BUILDER_REAL_9c1e";
+/// Plazo corto de la primera vuelta. `claude` debe seguir ocupado más que esto.
+const PLAZO_CORTO: Duration = Duration::from_secs(25);
+/// Plazo de la segunda vuelta. Sobra para terminar un archivo.
+const PLAZO_LARGO: Duration = Duration::from_secs(10 * 60);
+/// Prompt de la primera vuelta: 30 archivos con una pausa de 5 s entre cada uno.
+const PROMPT_LARGO: &str = "Crea 30 archivos, parte-01.txt a parte-30.txt, en el directorio actual. \
+     Hazlos uno por uno: escribe el número en cada archivo. Después de cada archivo, corre \
+     `sleep 5` con la herramienta Bash y espera a que termine. No hagas nada más. \
+     Al final responde 'fin'.";
+/// Prompt de la segunda vuelta: avisa del corte y pide terminar rápido.
+const PROMPT_CONTINUA: &str = "La vuelta anterior de esta tarea se cortó por plazo. Termínala rápido: \
+     crea el archivo listo.txt en el directorio actual con el texto listo. No hagas nada más. \
+     Al final responde solo 'listo'.";
 /// Credencial falsa: tiene `claudeAiOauth` y `mcpOAuth`. La copia no debe traer `mcpOAuth`.
 const CREDENCIAL_FALSA: &str = r#"{"claudeAiOauth":{"accessToken":"TOKEN_FALSO_1","refreshToken":"REFRESCO_FALSO_1","expiresAt":4102444800000},"mcpOAuth":{"servidor":{"accessToken":"MCP_FALSO_1"}}}"#;
 
@@ -235,6 +250,91 @@ fn builder_real_claude_crea_hola_y_no_lee_oraculos() {
         hay_error_de_herramienta(&stdout) || reporta_fallo(&stdout),
         "ni un tool_result de error ni un reporte de fallo: {stdout}"
     );
+}
+
+#[test]
+#[ignore = "gasta cupo: corre solo con ROOT_TEST_BUILDER_REAL=1"]
+fn builder_real_corte_por_plazo_y_resume_sigue_la_misma_sesion() {
+    if std::env::var("ROOT_TEST_BUILDER_REAL").ok().as_deref() != Some("1") {
+        return;
+    }
+    root::saltar_sin_podman!();
+    let tmp = TempDir::new().expect("tmp");
+    let (home, repo, _estado) = armar(tmp.path(), SECRETO_REAL);
+    let home_usuario = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+
+    // El timeout del ejecutor supera el plazo corto: el corte lo fija `Lanzamiento.plazo`.
+    let ejecutor = EjecutorContenedorBuilder {
+        imagen: IMAGEN_BUILDER.into(),
+        credencial: credencial_de(&home_usuario),
+        home: home.clone(),
+        home_usuario,
+        timeout: TIMEOUT_BUILDER,
+    };
+
+    // Primera vuelta: el plazo corto corta a `claude` antes de que termine la tarea.
+    let mut primera = lanzamiento(&home, &repo, PROMPT_LARGO);
+    primera.plazo = PLAZO_CORTO;
+    let stdout = match ejecutor.lanzar(&primera) {
+        Err(ErrorCorre::Cortado { stdout, .. }) => stdout,
+        Ok(salida) => panic!(
+            "la primera vuelta terminó sin cortarse (código {}): no prueba el corte",
+            salida.codigo
+        ),
+        Err(otro) => panic!("la primera vuelta falló: {otro}"),
+    };
+
+    // El session_id sale de la primera línea JSON con ese campo. Ver `sesion_de_transcript` en src/.
+    let sesion = sesion_del_stdout(&stdout).expect("el stdout parcial trae session_id");
+
+    // Segunda vuelta: mismos montajes y repo, con `--resume` y un prompt de continuación.
+    let mut segunda = lanzamiento(&home, &repo, PROMPT_CONTINUA);
+    segunda.args = con_resume(segunda.args, &sesion);
+    segunda.plazo = PLAZO_LARGO;
+    let salida = match ejecutor.lanzar(&segunda) {
+        Ok(salida) => salida,
+        Err(e) => panic!("la segunda vuelta falló: {e}"),
+    };
+    assert_eq!(
+        salida.codigo,
+        0,
+        "claude salió con error: {}",
+        String::from_utf8_lossy(&salida.stderr)
+    );
+
+    // El mensaje final (`type: result`) debe ser un éxito, sin `is_error`.
+    let stdout_2 = String::from_utf8_lossy(&salida.stdout);
+    let resultado = stdout_2
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v.get("type").and_then(|t| t.as_str()) == Some("result"))
+        .expect("falta la línea type=result en la segunda vuelta");
+    assert_eq!(
+        resultado.get("subtype").and_then(|s| s.as_str()),
+        Some("success"),
+        "la segunda vuelta no terminó con subtype success"
+    );
+    assert_eq!(
+        resultado.get("is_error").and_then(|e| e.as_bool()),
+        Some(false),
+        "la segunda vuelta trae is_error distinto de false"
+    );
+
+    // Si el binario devuelve otro id con `--resume`, es un hallazgo para el informe, no un error del test.
+    let sesion_final = resultado.get("session_id").and_then(|s| s.as_str());
+    assert!(
+        sesion_final == Some(sesion.as_str()),
+        "el resultado trae otro session_id con --resume: primera vuelta {sesion}, segunda vuelta {}",
+        sesion_final.unwrap_or("(ausente)")
+    );
+}
+
+/// `session_id` de la primera línea JSON del `stdout` que lo trae. Las líneas que no son JSON se saltan.
+fn sesion_del_stdout(stdout: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(stdout).lines().find_map(|linea| {
+        let valor: serde_json::Value = serde_json::from_str(linea).ok()?;
+        valor.get("session_id")?.as_str().map(str::to_string)
+    })
 }
 
 /// `true` si el stream trae un `tool_result` con `is_error: true`.
