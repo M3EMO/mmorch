@@ -4,6 +4,7 @@
 //! nunca directo.
 
 pub mod args;
+mod barrido;
 pub mod config;
 pub mod contenedor;
 pub mod corrida;

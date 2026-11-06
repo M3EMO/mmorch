@@ -17,8 +17,8 @@ use crate::corre::costo_cortado::{
 };
 use crate::corre::git_seguro;
 use crate::corre::{
-    Corrida, EjecutorBuilder, ErrorCorre, Lanzamiento, guardar_transcript, preparar_corrida,
-    reabrir_corrida,
+    Corrida, EjecutorBuilder, ErrorCorre, Lanzamiento, barrido, dir_corridas, guardar_transcript,
+    preparar_corrida, reabrir_corrida,
 };
 use crate::goal::verificar_goal;
 use crate::observe::claude::registrar_sesion_claude;
@@ -151,6 +151,9 @@ fn correr_interno(
     let huellas = HuellasOraculo::armar(deps.home, Some(deps.home_usuario), tarea)
         .map_err(|e| de_observe("armar las huellas del oráculo", e))?;
     let ruta_eventos = observe::ruta_eventos_en(deps.home);
+
+    // Copias de credencial de corridas muertas: se barren antes de rutear o lanzar nada.
+    barrido::barrer(&dir_corridas(deps.home_usuario), &ruta_eventos)?;
 
     // c) Ruteo previo de todos los roles: si uno no va por cupo, no se lanza nada.
     let mut elecciones: Vec<(Rol, Eleccion)> = Vec::new();
@@ -1407,6 +1410,31 @@ mod tests {
             !credencial.exists(),
             "la copia de la credencial es de Root y se borra al terminar: {}",
             credencial.display()
+        );
+    }
+
+    #[test]
+    fn corre_barre_la_copia_de_una_corrida_muerta_al_arrancar() {
+        let e = entorno();
+        let id = "corre-memo-ecc-test-1-4194999-0";
+        let copia = dir_corridas(&e.usuario)
+            .join(id)
+            .join("claude-estado")
+            .join(".credentials.json");
+        fs::create_dir_all(copia.parent().expect("estado")).expect("estado");
+        fs::write(&copia, "TOKEN_FALSO_PRUEBA").expect("copia previa");
+        correr_con(&e, &Builder::default(), &[], CONFIG).expect("corre");
+        assert!(!copia.exists(), "la copia de la corrida muerta se borra");
+        let barridos: Vec<Evento> = eventos(&e)
+            .into_iter()
+            .filter(|ev| ev.tipo == TipoEvento::Gate && ev.fase == "barrido")
+            .collect();
+        assert_eq!(barridos.len(), 1, "un Gate de barrido");
+        assert_eq!(barridos[0].corrida, id);
+        let texto = fs::read_to_string(e.home.join("eventos.jsonl")).unwrap_or_default();
+        assert!(
+            !texto.contains("TOKEN_FALSO_PRUEBA"),
+            "el Gate no lleva el token"
         );
     }
 
