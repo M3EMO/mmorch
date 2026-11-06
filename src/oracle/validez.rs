@@ -5,7 +5,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -154,6 +154,7 @@ pub fn validar_con(
     let mut ev = Evaluaciones {
         evaluador,
         cache: BTreeMap::new(),
+        veredictos: casos.join("veredictos"),
     };
     let mut avisos = Vec::new();
     let pares = leer_orden(casos)?;
@@ -552,9 +553,11 @@ fn kappas_dimension_sin_medir(motivo: &str) -> Vec<Kappa> {
 }
 
 /// Caché de veredictos por (tarea, ruta): cada repo se evalúa una sola vez.
+/// Cada evaluación nueva se guarda en `veredictos`, la carpeta de veredictos de los casos.
 struct Evaluaciones<'a> {
     evaluador: &'a dyn Fn(&Path, &str) -> Result<Veredicto, ErrorOraculo>,
     cache: BTreeMap<(String, PathBuf), Veredicto>,
+    veredictos: PathBuf,
 }
 
 impl Evaluaciones<'_> {
@@ -564,9 +567,45 @@ impl Evaluaciones<'_> {
             return Ok(v.clone());
         }
         let v = (self.evaluador)(ruta, tarea)?;
+        guardar_veredicto(&self.veredictos, ruta, &v)?;
         self.cache.insert(clave, v.clone());
         Ok(v)
     }
+}
+
+/// Escribe el veredicto de `ruta` en `<carpeta>/<nombre>.json`, de forma atómica.
+fn guardar_veredicto(carpeta: &Path, ruta: &Path, v: &Veredicto) -> Result<(), ErrorOraculo> {
+    fs::create_dir_all(carpeta).map_err(|e| io_infra("crear la carpeta de veredictos", &e))?;
+    let texto = serde_json::to_string_pretty(v)
+        .map_err(|e| ErrorOraculo::Infra(format!("serializar el veredicto: {e}")))?;
+    let destino = carpeta.join(format!("{}.json", nombre_del_clon(ruta)));
+    let mut temporal = tempfile::NamedTempFile::new_in(carpeta)
+        .map_err(|e| io_infra("crear el temporal del veredicto", &e))?;
+    temporal
+        .write_all(format!("{texto}\n").as_bytes())
+        .map_err(|e| io_infra("escribir el veredicto", &e))?;
+    temporal
+        .as_file()
+        .sync_all()
+        .map_err(|e| io_infra("escribir el veredicto", &e))?;
+    temporal
+        .persist(&destino)
+        .map_err(|e| io_infra("guardar el veredicto", &e.error))?;
+    Ok(())
+}
+
+/// Nombre del clon: el último componente de `ruta`. Un paquete ciego usa el id de su carpeta padre.
+fn nombre_del_clon(ruta: &Path) -> String {
+    let nombre = nombre_de(ruta);
+    match ruta.parent() {
+        Some(padre) if nombre == "repo" => nombre_de(padre),
+        _ => nombre,
+    }
+}
+
+fn nombre_de(ruta: &Path) -> String {
+    ruta.file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
 }
 
 fn medir_orden(
@@ -1479,6 +1518,48 @@ anclas = [
 
     fn cerca(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-5
+    }
+
+    /// Lee un veredicto guardado en disco y lo deserializa. Falla si el archivo no existe.
+    fn leer_veredicto(ruta: &Path) -> Veredicto {
+        let texto = fs::read_to_string(ruta).expect("lee el veredicto guardado");
+        serde_json::from_str::<Veredicto>(&texto).expect("deserializa el veredicto")
+    }
+
+    #[test]
+    fn validez_guarda_el_veredicto_de_cada_repo() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir(
+            &casos.join("orden.toml"),
+            "[[par]]\ntarea = \"memora\"\nmejor = \"a\"\npeor = \"b\"\nfuente = \"fixture: resultado medido\"\n",
+        );
+        let va = veredicto(Some(Decision::Listo), None, Some(0.9), &[]);
+        let vb = veredicto(Some(Decision::NoListo), None, Some(0.4), &[]);
+        let mapa = falso(vec![clave("a", va.clone()), clave("b", vb.clone())]);
+        validar_con(casos, &mapa).expect("mide");
+        assert_eq!(leer_veredicto(&casos.join("veredictos/a.json")), va);
+        assert_eq!(leer_veredicto(&casos.join("veredictos/b.json")), vb);
+    }
+
+    #[test]
+    fn validez_veredicto_de_paquete_ciego_usa_el_id() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir(
+            &casos.join("orden.toml"),
+            "[[par]]\ntarea = \"memora\"\nmejor = \"ciego/p1/repo\"\npeor = \"ciego/p2/repo\"\nfuente = \"fixture: resultado medido\"\n",
+        );
+        let v1 = veredicto(Some(Decision::Listo), None, Some(0.9), &[]);
+        let v2 = veredicto(Some(Decision::NoListo), None, Some(0.4), &[]);
+        let mapa = falso(vec![
+            clave("ciego/p1/repo", v1.clone()),
+            clave("ciego/p2/repo", v2.clone()),
+        ]);
+        validar_con(casos, &mapa).expect("mide");
+        assert_eq!(leer_veredicto(&casos.join("veredictos/p1.json")), v1);
+        assert_eq!(leer_veredicto(&casos.join("veredictos/p2.json")), v2);
+        assert!(!casos.join("veredictos/repo.json").exists());
     }
 
     #[test]
