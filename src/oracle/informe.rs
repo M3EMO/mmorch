@@ -194,9 +194,11 @@ pub fn informar_con(
     };
     if let Some(redactor) = redactor {
         let mut para_redactor = informe.clone();
-        ocultar_tests(&mut para_redactor, &ids_ocultos(v));
+        let visibles = ocultar_tests(&mut para_redactor, &ids_ocultos(v));
         match redactor.redactar(&para_redactor) {
-            Ok(redaccion) => aplicar_redaccion(&mut informe, redaccion, &ids_citables(v)),
+            Ok(redaccion) => {
+                aplicar_redaccion(&mut informe, redaccion, &ids_citables(v), &visibles);
+            }
             Err(e) => informe.confianza.avisos.push(format!(
                 "redactor sin resultado: {e}; el resumen y los textos son deterministas"
             )),
@@ -742,23 +744,29 @@ fn ids_citables(v: &Veredicto) -> BTreeSet<String> {
 }
 
 /// Pasa los textos del redactor por el gate de evidencia: cada oración debe citar un id real. Lo que no
-/// pasa queda con el texto determinista.
-fn aplicar_redaccion(informe: &mut Informe, redaccion: Redaccion, ids: &BTreeSet<String>) {
+/// pasa queda con el texto determinista. `visibles` dice qué acción vio el redactor: su texto `k` va a
+/// la acción `visibles.riesgos[k]` del informe completo.
+fn aplicar_redaccion(
+    informe: &mut Informe,
+    redaccion: Redaccion,
+    ids: &BTreeSet<String>,
+    visibles: &IndicesVisibles,
+) {
     if let Some(texto) = conservadas(&redaccion.resumen, ids) {
         informe.resumen = texto;
     }
-    for (accion, texto) in informe.riesgos.iter_mut().zip(&redaccion.riesgos) {
+    for (&pos, texto) in visibles.riesgos.iter().zip(&redaccion.riesgos) {
         if let Some(nuevo) = conservadas(texto, ids) {
-            accion.texto = nuevo;
+            informe.riesgos[pos].texto = nuevo;
         }
     }
-    for (accion, texto) in informe
+    for (&pos, texto) in visibles
         .proximos_pasos
-        .iter_mut()
+        .iter()
         .zip(&redaccion.proximos_pasos)
     {
         if let Some(nuevo) = conservadas(texto, ids) {
-            accion.texto = nuevo;
+            informe.proximos_pasos[pos].texto = nuevo;
         }
     }
 }
@@ -876,12 +884,21 @@ pub fn ids_ocultos(v: &Veredicto) -> BTreeSet<String> {
     ocultos
 }
 
+/// Posiciones, en el informe completo, de las acciones que `ocultar_tests` deja. El redactor recibe
+/// esas acciones en orden: su texto `k` es para la posición `k` de esta lista.
+#[derive(Debug, Default, PartialEq)]
+pub struct IndicesVisibles {
+    pub riesgos: Vec<usize>,
+    pub proximos_pasos: Vec<usize>,
+}
+
 /// Quita del informe lo que cita un test oculto: las acciones que lo nombran, el motivo y el resumen si
-/// lo nombran, y los tests de la confianza y de la evidencia de los requisitos.
-pub fn ocultar_tests(informe: &mut Informe, ocultos: &BTreeSet<String>) {
+/// lo nombran, y los tests de la confianza y de la evidencia de los requisitos. Devuelve las posiciones
+/// de las acciones que quedan.
+pub fn ocultar_tests(informe: &mut Informe, ocultos: &BTreeSet<String>) -> IndicesVisibles {
     let cita = |texto: &str| ocultos.iter().any(|id| texto.contains(id.as_str()));
-    informe.riesgos.retain(|a| !cita(&a.texto));
-    informe.proximos_pasos.retain(|a| !cita(&a.texto));
+    let riesgos = retener(&mut informe.riesgos, |a| !cita(&a.texto));
+    let proximos_pasos = retener(&mut informe.proximos_pasos, |a| !cita(&a.texto));
     if cita(&informe.resumen) {
         informe.resumen = "Resumen con ids de tests ocultos: ver la CLI.".into();
     }
@@ -905,6 +922,25 @@ pub fn ocultar_tests(informe: &mut Informe, ocultos: &BTreeSet<String>) {
         .confianza
         .tests_pendientes
         .retain(|p| !cita(&p.test) && !cita(&p.motivo));
+    IndicesVisibles {
+        riesgos,
+        proximos_pasos,
+    }
+}
+
+/// Como `Vec::retain`. Devuelve las posiciones originales de los elementos que se quedan.
+fn retener<T>(items: &mut Vec<T>, quedar: impl Fn(&T) -> bool) -> Vec<usize> {
+    let mut posiciones = Vec::new();
+    let mut original = 0;
+    items.retain(|item| {
+        let queda = quedar(item);
+        if queda {
+            posiciones.push(original);
+        }
+        original += 1;
+        queda
+    });
+    posiciones
 }
 
 /// Markdown legible: la decisión con su confianza, por qué, qué falta, qué arreglar primero y riesgos.
@@ -2619,6 +2655,48 @@ modulos = ["config"]
                 .expect("serializa")
                 .contains("flaky")
         );
+    }
+
+    #[test]
+    fn informe_texto_del_redactor_cae_en_el_riesgo_visible_con_un_oculto_primero() {
+        // El primer riesgo es oculto. El redactor solo ve el visible, así que su texto va a ese.
+        let mut v = ecc();
+        v.tasas.insert(
+            "oculto:tests/t.py::flaky".into(),
+            TasaTest {
+                pasa: 3,
+                total: 5,
+                wilson_inf: 0.2,
+            },
+        );
+        v.inestables = vec!["tests/t.py::flaky".into()];
+        let texto = "El hallazgo h-estructura-1 pide revisar el comando.";
+        let redactor = RedactorFalso {
+            redaccion: Redaccion {
+                riesgos: vec![texto.into()],
+                ..Redaccion::default()
+            },
+        };
+        let i = informar(
+            &v,
+            &tarea(),
+            &ReglasDecision::default(),
+            &BTreeSet::new(),
+            Some(&redactor),
+        )
+        .expect("informa");
+        let visible = i
+            .riesgos
+            .iter()
+            .find(|a| a.refs.contains(&"h-estructura-1".to_string()))
+            .unwrap_or_else(|| panic!("sin riesgo visible: {:?}", i.riesgos));
+        assert_eq!(visible.texto, texto, "{:?}", i.riesgos);
+        let oculto = i
+            .riesgos
+            .iter()
+            .find(|a| a.texto.contains("es inestable"))
+            .unwrap_or_else(|| panic!("sin riesgo del test oculto: {:?}", i.riesgos));
+        assert!(oculto.texto.contains("tests/t.py::flaky"), "{oculto:?}");
     }
 
     #[test]

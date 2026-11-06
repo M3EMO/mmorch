@@ -5654,8 +5654,7 @@ mod tests {
             resultado
         };
         let gasto = |_: f64| -> Result<f64, ErrorOraculo> {
-            // Da tiempo a que los casos recién lanzados escriban su reserva antes de la siguiente decisión.
-            std::thread::sleep(Duration::from_millis(50));
+            // Sin pausa: `gasto` y `con_reserva` leen la misma foto de reservas, sin hueco entre ellas.
             let abiertas = abiertas.lock().expect("lock").len();
             Ok((abiertas + cerrados.load(Ordering::SeqCst)) as f64)
         };

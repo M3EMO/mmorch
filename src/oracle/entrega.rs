@@ -19,6 +19,7 @@ use crate::oracle::ErrorOraculo;
 use crate::oracle::configs::{self, Instruccion, instrucciones, palabra_clave};
 use crate::oracle::contenedor::{
     PROXY_FUERA, SUFIJO_SELINUX, SalidaPodman, correr_podman as correr_podman_crudo,
+    correr_programa,
 };
 use crate::oracle::descarga::{self, ImagenBase, PRELUDIO, Problema};
 use crate::oracle::perfiles::herramientas::EjecutorHerramienta;
@@ -131,7 +132,7 @@ pub(crate) struct PodmanReal;
 
 impl Podman for PodmanReal {
     fn correr(&self, args: &[&str], plazo: Duration) -> Result<SalidaPodman, ErrorOraculo> {
-        correr_podman(args, plazo)
+        correr_podman_build("podman", args, plazo)
     }
 }
 
@@ -637,9 +638,10 @@ fn clasificar_fallo(
     let salida = format!("{}\n{}", build.stdout, build.stderr);
     let Some(paso) = texto_paso_fallido(&salida) else {
         let ultima = build.stderr.lines().rev().find(|l| !l.trim().is_empty());
+        let detalle = ultima.unwrap_or("sin salida de error").trim().to_string();
         return Err(ErrorOraculo::Infra(format!(
             "podman no empezó la construcción: {}",
-            ultima.unwrap_or("sin salida de error").trim()
+            recortar_cola(detalle)
         )));
     };
     let instrucciones_df = instrucciones(texto);
@@ -726,7 +728,7 @@ fn red_no_configurada(build: &SalidaPodman) -> Option<String> {
     format!("{}\n{}", build.stdout, build.stderr)
         .lines()
         .find(|linea| es_linea_red_no_configurada(linea))
-        .map(|linea| linea.trim().to_string())
+        .map(|linea| recortar_cola(linea.trim().to_string()))
 }
 
 fn es_linea_red_no_configurada(linea: &str) -> bool {
@@ -1041,6 +1043,17 @@ const COLA: usize = 4000;
 /// Corre `podman` y deja solo la cola de su stdout y su stderr. Toda llamada de este archivo pasa aquí.
 fn correr_podman(args: &[&str], plazo: Duration) -> Result<SalidaPodman, ErrorOraculo> {
     correr_podman_crudo(args, plazo).map(recortar_salida)
+}
+
+/// Corre `podman` para un build y deja la cola de 1 MiB de cada flujo, sin recortar a `COLA`.
+/// `clasificar_fallo` necesita el `STEP` aunque el error de después sea largo. Lo que se muestra se recorta
+/// en su punto de salida. `programa` es `podman` en producción; los tests pasan `sh`.
+fn correr_podman_build(
+    programa: &str,
+    args: &[&str],
+    plazo: Duration,
+) -> Result<SalidaPodman, ErrorOraculo> {
+    correr_programa(programa, args, plazo)
 }
 
 /// Deja los últimos `COLA` bytes de `texto`. Si el corte cae dentro de un carácter, avanza al siguiente.
@@ -3458,5 +3471,22 @@ pub(crate) mod tests {
         assert!(salida.stdout.ends_with("FIN"));
         assert_eq!(salida.stderr.len(), COLA);
         assert!(salida.stderr.ends_with("ERR"));
+    }
+
+    #[test]
+    fn entrega_build_con_step_y_8_kb_de_error_da_la_imagen_no_construye() {
+        // El STEP va al principio del stderr y luego siguen 8 KB de error sin saltos de línea.
+        let script = "printf 'STEP 1/2: FROM debian:12\\nSTEP 2/2: RUN false\\n' >&2; \
+                      head -c 8192 /dev/zero | tr '\\0' e >&2; exit 1";
+        let salida = correr_podman_build("sh", &["-c", script], PLAZO_BUILD).expect("corre");
+        let texto = "FROM debian:12\nRUN false\n";
+        match clasifica(&salida, texto) {
+            Desenlace::Hallazgo(h) => assert!(
+                h.detalle.contains("la imagen no construye"),
+                "{}",
+                h.detalle
+            ),
+            otro => panic!("debía dar hallazgo, no {}", nombre(&otro)),
+        }
     }
 }

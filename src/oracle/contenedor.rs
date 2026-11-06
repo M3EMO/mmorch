@@ -17,6 +17,9 @@ const COLA: usize = 4000;
 /// Bytes que `leer_cola_en_hilo` conserva al final. Un carácter UTF-8 ocupa hasta 4 bytes; el margen de
 /// 4 cubre el carácter cortado al inicio de la ventana. Así quedan siempre `COLA` caracteres completos.
 const COLA_BYTES: usize = COLA * 4 + 4;
+/// Bytes de la cola de stdout y stderr de `podman` que se conservan (build, inspect, rm). Es 1 MiB.
+/// El build necesita la salida entera para clasificar el fallo. El recorte a `COLA` va después.
+const TOPE_SALIDA_PODMAN: usize = 1024 * 1024;
 /// Tope de procesos e hilos del contenedor. Acota una fork bomb dentro de la imagen.
 const PIDS_LIMITE: u32 = 512;
 /// Memoria máxima del contenedor. Sube si una suite legítima llega al tope (ver el informe de medición).
@@ -224,8 +227,17 @@ pub(crate) fn turno_de_contenedor() -> MutexGuard<'static, ()> {
 
 /// Corre `podman` con `args` y espera hasta `plazo`. Si vence, mata el proceso y da `Infra`.
 pub(crate) fn correr_podman(args: &[&str], plazo: Duration) -> Result<SalidaPodman, ErrorOraculo> {
+    correr_programa("podman", args, plazo)
+}
+
+/// Igual que `correr_podman`, con el programa como parámetro. Los tests lo usan con `sh`.
+pub(crate) fn correr_programa(
+    programa: &str,
+    args: &[&str],
+    plazo: Duration,
+) -> Result<SalidaPodman, ErrorOraculo> {
     let _turno = turno_de_contenedor();
-    let mut comando = Command::new("podman");
+    let mut comando = Command::new(programa);
     comando.args(args);
     correr_comando(comando, args.first().unwrap_or(&""), plazo)
 }
@@ -242,8 +254,14 @@ fn correr_comando(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| ErrorOraculo::Infra(format!("no se pudo lanzar podman: {err}")))?;
-    let salida = hijo.stdout.take().map(leer_en_hilo);
-    let error = hijo.stderr.take().map(leer_en_hilo);
+    let salida = hijo
+        .stdout
+        .take()
+        .map(|f| leer_cola_en_hilo_con(f, TOPE_SALIDA_PODMAN));
+    let error = hijo
+        .stderr
+        .take()
+        .map(|f| leer_cola_en_hilo_con(f, TOPE_SALIDA_PODMAN));
     let estado = match esperar(&mut hijo, plazo) {
         Ok(Some(estado)) => estado,
         Ok(None) => {
@@ -317,7 +335,15 @@ pub(crate) fn leer_en_hilo<R: Read + Send + 'static>(mut flujo: R) -> JoinHandle
 }
 
 /// Lee un flujo en otro hilo y conserva solo los últimos `COLA_BYTES` bytes. La memoria no crece con la salida.
-pub(crate) fn leer_cola_en_hilo<R: Read + Send + 'static>(mut flujo: R) -> JoinHandle<Vec<u8>> {
+pub(crate) fn leer_cola_en_hilo<R: Read + Send + 'static>(flujo: R) -> JoinHandle<Vec<u8>> {
+    leer_cola_en_hilo_con(flujo, COLA_BYTES)
+}
+
+/// Lee un flujo en otro hilo y conserva solo los últimos `tope` bytes. El búfer nunca pasa de `2 * tope`.
+pub(crate) fn leer_cola_en_hilo_con<R: Read + Send + 'static>(
+    mut flujo: R,
+    tope: usize,
+) -> JoinHandle<Vec<u8>> {
     thread::spawn(move || {
         let mut cola = Vec::new();
         let mut trozo = [0u8; 8192];
@@ -327,16 +353,16 @@ pub(crate) fn leer_cola_en_hilo<R: Read + Send + 'static>(mut flujo: R) -> JoinH
                 Ok(n) => {
                     cola.extend_from_slice(&trozo[..n]);
                     // Se recorta al pasar el doble: el recorte cuesta lo mismo que la entrada leída.
-                    if cola.len() > 2 * COLA_BYTES {
-                        cola.drain(..cola.len() - COLA_BYTES);
+                    if cola.len() > 2 * tope {
+                        cola.drain(..cola.len() - tope);
                     }
                 }
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
                 Err(_) => break,
             }
         }
-        if cola.len() > COLA_BYTES {
-            cola.drain(..cola.len() - COLA_BYTES);
+        if cola.len() > tope {
+            cola.drain(..cola.len() - tope);
         }
         cola
     })
@@ -672,6 +698,35 @@ mod tests {
         })));
         assert_eq!(cola(&texto).chars().count(), COLA);
         assert!(cola(&texto).ends_with("FIN"));
+    }
+
+    /// Tope de la cola de salida de podman: 1 MiB.
+    const MIB: usize = 1024 * 1024;
+
+    #[test]
+    fn contenedor_cola_con_tope_de_1_mib_guarda_exactamente_1_mib() {
+        let flujo = Sintetico {
+            pendiente: 3 * MIB,
+            fin: b"FIN",
+        };
+        let bytes = leer_cola_en_hilo_con(flujo, MIB).join().expect("hilo");
+        assert_eq!(bytes.len(), MIB, "quedaron {} bytes de 3 MiB", bytes.len());
+        assert!(bytes.ends_with(b"FIN"));
+    }
+
+    #[test]
+    fn contenedor_correr_comando_conserva_solo_la_cola_de_1_mib() {
+        // 3 MiB por stdout y luego "FIN". La cola debe tener 1 MiB y terminar en "FIN".
+        let mut comando = Command::new("sh");
+        comando.args(["-c", "head -c 3145728 /dev/zero | tr '\\0' a; printf FIN"]);
+        let salida = correr_comando(comando, "sh", Duration::from_secs(30)).expect("corre");
+        assert_eq!(
+            salida.stdout.len(),
+            MIB,
+            "quedaron {} bytes de 3 MiB",
+            salida.stdout.len()
+        );
+        assert!(salida.stdout.ends_with("FIN"));
     }
 
     #[test]
