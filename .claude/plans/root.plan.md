@@ -96,6 +96,10 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 70 | Borrado de memora y brasa: "Cuando el dataset calibre". Corrige la decisión 61: el borrado sale del cierre del hito 1. |
 | 71 | "Toma lo que respondió graft". P67 a: retomar en vueltas. Si la primera vuelta falla al retomar, se para y se consulta al usuario, sin pasar a b. P68 a, ampliada a 69, 70 y 71: la prueba verde incluye un corte real seguido de `--resume`. La mezcla queda local, sin push. |
 | 72 | P69 a: el orquestador borró la credencial vieja. |
+| 73 | P73: "a, c y d". Guardar el detalle y repetir la validez, sumar la pasada de búsqueda, y firmar con la validez reprobada a la vista. Root no evalúa un repo real hasta cumplir el recall sobre el dataset. |
+| 74 | P74: "a". Un test oculto en rojo cuenta como encontrado, y la fila muestra aparte los encontrados por línea y por test. |
+| 75 | P75: "a". El saboteador y la curva de auditoría entran al PRD del dataset. |
+| 76 | P76: "Por ahora solo medir. Despues evaluamos si genera". |
 
 ## Patterns to Mirror
 
@@ -5041,3 +5045,122 @@ P63 y P64 siguen abiertas. P64 cubre hasta la 68.
 - **a)** Solo para medir en el piloto: cercanía de las tareas y cobertura de defectos. Sin API con un modelo abierto. Generar tareas se decide después de medir 3 tareas minadas. Recomendada.
 - **b)** También generar tareas nuevas en el piloto. Costo sin medir, dentro de los 50 USD.
 - **c)** No usar el mapa.
+
+## Vuelta del 2026-11-06 (2): respuestas y Tareas 70 a 72
+
+**Estado.**
+- Decisiones 73 a 76. P70, P71 y P72 siguen abiertas. La mezcla de la 72 no tiene orden.
+- Tareas sin podman: 70 (`5899d30`, 1,05 USD), 71 (`19b6ffb`, 3,41 USD), 72 (`1243228`, 1,45 USD). La prueba conjunta corre en `laptop/prueba72` (23e70b7).
+- Gasto de API: 22,06 USD. Quedan 1,94 USD hasta 24 USD.
+
+**Correcciones de Graft al PRD, citadas por Graft y sin comprobar.** "usa ECC-" queda confirmado: "Sí, las cuatro". C4 suma "El 25 % superior al inicio, y se revisa después del piloto", y "Sobre la distancia al techo del puntaje de rúbrica". U4 cambia la fila "Vía": los brazos base pueden ir por cupo. Graft usa `Fila.minutos_pared` cuando exista. El PRD ya lo dice.
+
+**Test flojo: no contradice el informe.** `9ea67c4` no contiene a la 71: `git merge-base` lo confirma, y ese commit solo toca plan y briefs. La corrección está en `bc4735a`. La prueba real es `laptop/prueba72`. Si falla ahí, vuelve al planner.
+
+## Desempates técnicos 43 (Opus, 2026-11-06)
+
+**Informe 70.**
+1. **Un 137 cuenta como vuelta:** queda.
+2. **Un aviso por corrida:** queda.
+3. **Barrido antes del ruteo:** queda.
+4. **Redactar `resultado.json`:** queda.
+- **Mensaje "se cortó por plazo" con un 137:** queda. El `Gate` dice además "el contenedor fue matado por SIGKILL". Corregir el texto va al hito 1b.
+
+**Informe 71.**
+1. **Cola de 1 MiB:** queda.
+2. **Junit ilegible como ausente:** queda. Solo cambia en un caso de infraestructura.
+3. **Redactor con ids ocultos:** hito 1b. Prerrequisito de `oraculo carencias`.
+4. **Secreto repetido en otra línea:** queda, y se anota como límite. Root no lee el valor del secreto. Hito 1b.
+5. **Constante local:** queda.
+6. **`tar` de `/repo`:** queda. El orquestador informa si la prueba con podman tarda más.
+- **`leer_salida` sin tope:** hito 1b.
+
+**Informe 72.** Preguntas 1 a 3: quedan. Preguntas 4 y 5: los hallazgos descartados no llegan al `Veredicto`, y por eso entran a la Tarea 73.
+
+**Desempates 2 y 4 de "Desempates técnicos 24": siguen sin hacerse.** `src/oracle/juez.rs` no acepta `2.0` ni tiene el motivo del tope. El plan los puso en el lote de la Tarea 47. Entran a la Tarea 73.
+
+**Dos tareas en paralelo.**
+- **Tarea 73:** P74, hallazgos descartados y desempates 2 y 4. Toca `validez.rs`, `juez.rs`, `mod.rs` y `tipos.rs`. La validez repetida la necesita.
+- **Tarea 74:** la pasada. Un subcomando nuevo, en un archivo nuevo. Nadie más la necesita para repetir la validez.
+- **Base de las dos:** `laptop/prueba72` (23e70b7). La 73 necesita el detalle de la 72.
+- **Choque:** solo una línea posible en `mod.rs`, para exponer el juez de producción.
+
+**Sobre qué defectos se mide la pasada.**
+- **Conjunto principal, fresco:** 10 defectos confirmados de la revisión de cierre, en Root `e665a5f`. Están en `~/.cache/root-wt/orquestador/frescos.toml`, fuera del repo. El builder no los ve.
+- **Conjunto secundario:** los 8 de la validez, informados aparte, con la marca "conocidos por quien escribió el prompt".
+- **Una sola medición.** El prompt queda fijo en el brief, y su hash en la salida. Si alguien lo ajusta después de ver un resultado, ese conjunto deja de medir.
+
+**Qué se puede afirmar con eso.**
+- Sí: "la pasada encontró k de 10 defectos reales en un recorte de Root". La cota de Wilson al 90 % de 8/10 es 0,60, así que el intervalo es ancho.
+- No: que cumple el recall de 0,8 en general. Son pocos casos, de un solo repo.
+- No: su precisión. El recorte se eligió por dónde están los defectos, y nadie etiquetó el resto.
+- **Sesgo:** un revisor LLM encontró esos 10, así que son la clase que un LLM encuentra. El recall real puede ser menor.
+- **Criterio.** La pasada no cambia el criterio de la validez. El recall oficial sigue saliendo de `oraculo validar`.
+
+**Costo contra el saldo, estimación sin medir.**
+
+| Parte | Caracteres | USD |
+|---|---|---|
+| Validez repetida | 9 repos | 0,97, medido |
+| Evaluación final de la corrida | 1 repo | 0,11, medido |
+| Pasada sobre los frescos | Cerca de 250 000 | Cerca de 0,25 |
+| Pasada sobre los 4 repos de los 8 | 444 617 | Cerca de 0,46 |
+| **Total** | | **Cerca de 1,79, de 1,94** |
+
+Supuse 3,2 caracteres por token y 16 000 tokens de salida por llamada, a los precios de `deepseek-v4-pro`. Entra por poco. La pasada corre al final, con `--tope-usd` igual al saldo menos lo que falte gastar, primero sobre los frescos. Si el tope la corta, se informa incompleta, y no hace falta pedir dinero. Un solo pedido nuevo: mandar código de Root a DeepSeek (P78).
+
+### Tarea 73: Recall por línea y por test, y hallazgos descartados
+- **Archivos**: `src/oracle/validez.rs`, `src/oracle/juez.rs`, `src/oracle/mod.rs`, `src/tipos.rs`.
+- **Arranca**: ya, desde `laptop/prueba72` (23e70b7), con `ROOT_SIN_PODMAN=1`.
+- **Brief**: `docs/builds/brief-local-73.md`.
+
+### Tarea 74: Pasada de búsqueda de defectos
+- **Archivos**: `src/oracle/auditar.rs` nuevo, `src/cli.rs`, `src/lib.rs`.
+- **Arranca**: ya, desde `laptop/prueba72` (23e70b7), con `ROOT_SIN_PODMAN=1`.
+- **Brief**: `docs/builds/brief-local-74.md`.
+
+## Orden final del hito 1 (2026-11-06, 2)
+
+**Ahora, en paralelo:** prueba con podman de `laptop/prueba72`, Tarea 73 y Tarea 74.
+
+**Línea A, no necesita a la 73 ni a la 74:**
+1. Si la prueba da verde, con corte real y `--resume`, mezcla local de 69, 70 y 71.
+2. `r00t corre --reanuda`. Si la primera vuelta falla al retomar, se para y se consulta al usuario.
+
+**Línea B, necesita a la 72 y a la 73:**
+3. Prueba con podman de 72, 73 y 74, sin otra carga: espera el fin de la corrida.
+4. Sumar `test` a los 3 defectos de `defectos.toml`, con su id exacto.
+5. Validez repetida. Da también la comparación de `global`: sus veredictos traen los pares memora-ecc contra memora-sdlc y brasa-ecc contra brasa-sdlc.
+
+**Línea C, necesita a la 74 y P78. Solo usa API, así que la pasada puede correr junto a la línea A:**
+6. Un contenedor corto de gitleaks por repo da su reporte. Si un reporte trae un hallazgo en Root, el orquestador frena y avisa. Después, pasada sobre los frescos, y sobre los 4 repos de los 8.
+
+**Final:**
+7. Comandos de "Validation".
+8. Completar `docs/cierre-hito-1.md`, que ya tiene su borrador, y firma del usuario, con la validez a la vista.
+9. Dataset, si P72 lo aprueba.
+
+**Lo que la firma no necesita:** una pasada exitosa. Si P78 dice no, el cierre lo dice.
+
+## Preguntas para el usuario (2026-11-06, 2)
+
+**P70 (reescrita): Si una corrida del dataset va por API, ¿cómo entra la clave al builder?** Los brazos base pueden ir por cupo. Esto vale para los que vayan por API. El builder corre tests de repos ajenos, y un proceso del contenedor podría leer una variable.
+- **a)** Una clave dedicada, con límite de gasto en la consola de Anthropic, como variable del contenedor. Una fuga cuesta como mucho el límite. Recomendada.
+- **b)** Un proxy en la laptop que guarda la clave. Más seguro, pero suma una pieza antes del piloto.
+- **c)** La clave de hoy, sin límite propio. No la recomiendo.
+
+**P71 (sin cambios): "Usar api claude": ¿incluye al juez de Root?** Hoy el juez usa `deepseek-v4-pro`, y las filas calibradas se midieron con él.
+- **a)** Solo los builders van por Claude. El juez sigue en DeepSeek, a cerca de 0,10 USD por evaluación. Recomendada.
+- **b)** También el juez, a cerca de 0,20 USD por evaluación con Sonnet. Hay que calibrar todo de nuevo.
+
+**P72 (reescrita): ¿Aprobás el PRD del dataset?** Está en `.claude/prds/dataset.prd.md`, con tus respuestas y las correcciones de Graft. Root administra dataset, vara y oráculo oculto, y Graft consume y mide. Incluye saboteador, curva y mapa solo para medir.
+- **a)** Aprobado para implementar después del cierre. Recomendada.
+- **b)** Lo leo y lo corrijo antes.
+
+**P77: ¿Mezclar las Tareas 72, 73 y 74 cuando su prueba con podman dé verde?** La mezcla queda local, sin push.
+- **a)** Sí, sin volver a preguntar. Recomendada: la validez repetida usa ese árbol.
+- **b)** No, el orquestador trae el resultado y espera otra orden.
+
+**P78: ¿Puedo mandar código de Root a DeepSeek para medir la pasada?** Son cerca de 250 000 caracteres de `src/corre/` y `src/oracle/`, sin tests. Hasta hoy solo mandamos memora y brasa. El repo no versiona `.env`. Los 10 defectos frescos están en ese código.
+- **a)** Sí. Recomendada: son los únicos defectos reales que nadie usó para escribir la pasada.
+- **b)** No. La pasada se mide solo sobre los 8 conocidos, y el cierre dice que esa medida está sesgada.
