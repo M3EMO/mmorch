@@ -259,8 +259,8 @@ pub enum OraculoAccion {
             conflicts_with = "solo_medir"
         )]
         tope_usd: Option<f64>,
-        /// Reporte JSON de gitleaks sobre el repo. Sin `--solo-medir`, es obligatorio.
-        #[arg(long, required_unless_present = "solo_medir")]
+        /// Reporte JSON de gitleaks sobre el repo. Es obligatorio, también con `--solo-medir`.
+        #[arg(long, required = true)]
         gitleaks: Option<PathBuf>,
         /// Ruta a incluir en la auditoría. Se repite: `--incluir a.rs --incluir b.rs`.
         #[arg(long, num_args = 1)]
@@ -506,8 +506,29 @@ mod tests {
     }
 
     #[test]
-    fn solo_medir_no_pide_tope_ni_gitleaks() {
+    fn solo_medir_no_pide_tope_pero_si_gitleaks() {
         let args = vec![
+            "r00t",
+            "oraculo",
+            "auditar",
+            "--repo",
+            "/repo",
+            "--salida",
+            "/salida.json",
+            "--gitleaks",
+            "/gitleaks.json",
+            "--solo-medir",
+            "/candidatos.json",
+        ];
+        let cli = Cli::try_parse_from(args).expect("solo-medir no pide tope, con gitleaks parsea");
+        match cli.comando {
+            Comando::Oraculo {
+                accion: OraculoAccion::Auditar { solo_medir, .. },
+            } => assert_eq!(solo_medir, Some(PathBuf::from("/candidatos.json"))),
+            otro => panic!("se esperaba oraculo auditar, llegó {otro:?}"),
+        }
+
+        let sin_gitleaks = vec![
             "r00t",
             "oraculo",
             "auditar",
@@ -518,13 +539,8 @@ mod tests {
             "--solo-medir",
             "/candidatos.json",
         ];
-        let cli = Cli::try_parse_from(args).expect("solo-medir no pide tope ni gitleaks");
-        match cli.comando {
-            Comando::Oraculo {
-                accion: OraculoAccion::Auditar { solo_medir, .. },
-            } => assert_eq!(solo_medir, Some(PathBuf::from("/candidatos.json"))),
-            otro => panic!("se esperaba oraculo auditar, llegó {otro:?}"),
-        }
+        let error = Cli::try_parse_from(sin_gitleaks).expect_err("solo-medir sin gitleaks falla");
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
     }
 
     #[test]

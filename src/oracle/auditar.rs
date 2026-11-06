@@ -921,14 +921,17 @@ fn leer_defectos(ruta: Option<&Path>, repo: &Path) -> Result<Option<String>, Err
     Ok(Some(texto))
 }
 
-/// Mide candidatos ya escritos en `candidatos`. Sin reporte de gitleaks, no se omite ninguna línea.
+/// Mide candidatos ya escritos en `candidatos`. Exige `o.gitleaks`: sin él es error de uso.
+/// Sin hallazgos de gitleaks en el reporte, no se omite ninguna línea.
 fn auditar_solo_medir(o: &OpcionesAuditar, candidatos: &Path) -> Result<Auditoria, ErrorOraculo> {
+    let Some(ruta_gitleaks) = &o.gitleaks else {
+        return Err(ErrorOraculo::Uso(
+            "--solo-medir también exige --gitleaks".into(),
+        ));
+    };
     let texto = fs::read_to_string(candidatos)
         .map_err(|e| ErrorOraculo::Uso(format!("candidatos {}: {e}", candidatos.display())))?;
-    let gitleaks = match &o.gitleaks {
-        Some(ruta) => leer_gitleaks(ruta)?,
-        None => Vec::new(),
-    };
+    let gitleaks = leer_gitleaks(ruta_gitleaks)?;
     let texto_defectos = leer_defectos(o.defectos.as_deref(), &o.repo)?;
     let mut auditoria = medir_candidatos(&o.repo, &o.incluir, &gitleaks, &texto)?;
     if let Some(texto) = &texto_defectos {
@@ -1165,9 +1168,11 @@ mod tests {
             "[[defecto]]\nrepo = \"root\"\narchivo = \"src/a.rs\"\nlinea = 2\n",
         )
         .expect("escribe");
+        let gitleaks = tmp.path().join("gitleaks.json");
+        fs::write(&gitleaks, "[]").expect("escribe");
         let o = OpcionesAuditar {
             tope_usd: None,
-            gitleaks: None,
+            gitleaks: Some(gitleaks),
             defectos: Some(defectos),
             solo_medir: Some(candidatos),
             ..opciones(repo, tmp.path())
@@ -1178,6 +1183,47 @@ mod tests {
         assert_eq!(medicion.casos_leidos, 1);
         let texto = fs::read_to_string(&o.salida).expect("hay salida");
         let _: Value = serde_json::from_str(&texto).expect("salida JSON");
+    }
+
+    #[test]
+    fn solo_medir_sin_gitleaks_es_uso() {
+        let (tmp, repo) = repo_tres_lineas();
+        let home = TempDir::new().expect("home vacío");
+        let candidatos = tmp.path().join("candidatos.json");
+        fs::write(&candidatos, JSON_VACIO).expect("escribe");
+        let o = OpcionesAuditar {
+            tope_usd: None,
+            gitleaks: None,
+            solo_medir: Some(candidatos),
+            ..opciones(repo, tmp.path())
+        };
+        let err = auditar(home.path(), &o).expect_err("solo-medir exige gitleaks");
+        assert!(matches!(err, ErrorOraculo::Uso(_)), "{err}");
+        assert!(!o.salida.exists());
+    }
+
+    #[test]
+    fn solo_medir_con_reporte_de_gitleaks_vacio_sigue_midiendo() {
+        let (tmp, repo) = repo_tres_lineas();
+        let home = TempDir::new().expect("home vacío");
+        let candidatos = tmp.path().join("candidatos.json");
+        fs::write(
+            &candidatos,
+            r#"{"defectos":[{"archivo":"src/a.rs","linea":2,"cita":"fn calcular(x: u32) -> u32 { x * 2 }","detalle":"real"}]}"#,
+        )
+        .expect("escribe");
+        let gitleaks = tmp.path().join("gitleaks.json");
+        fs::write(&gitleaks, "[]").expect("escribe");
+        let o = OpcionesAuditar {
+            tope_usd: None,
+            gitleaks: Some(gitleaks),
+            solo_medir: Some(candidatos),
+            ..opciones(repo, tmp.path())
+        };
+        let a = auditar(home.path(), &o).expect("solo medir con gitleaks vacío");
+        assert_eq!(a.hallazgos.len(), 1, "{:?}", a.hallazgos);
+        assert_eq!(a.llamadas, 0);
+        assert!(o.salida.exists());
     }
 
     #[test]
