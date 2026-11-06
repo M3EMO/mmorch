@@ -232,6 +232,16 @@ fn medir_auditoria(
     Ok(Some(medir(texto, repo, &a.hallazgos, &leidos)?))
 }
 
+/// Mide y asigna `a.medicion`. Sin archivos leídos no hay medición: deja el aviso que lo dice.
+fn medir_con_aviso(texto: &str, repo: &Path, a: &mut Auditoria) -> Result<(), ErrorOraculo> {
+    a.medicion = medir_auditoria(texto, repo, a)?;
+    if a.medicion.is_none() {
+        a.avisos
+            .push("ningún archivo leído: no hay medición".into());
+    }
+    Ok(())
+}
+
 /// Defecto de `defectos.toml` en la forma que mide la pasada. Sin `deny_unknown_fields`: otros campos se ignoran.
 #[derive(Deserialize)]
 struct DefectoRepo {
@@ -996,7 +1006,7 @@ fn auditar_solo_medir(o: &OpcionesAuditar, candidatos: &Path) -> Result<Auditori
     let texto_defectos = leer_defectos(o.defectos.as_deref(), &o.repo)?;
     let mut auditoria = medir_candidatos(&o.repo, &o.incluir, &gitleaks, &texto)?;
     if let Some(texto) = &texto_defectos {
-        auditoria.medicion = medir_auditoria(texto, &o.repo, &auditoria)?;
+        medir_con_aviso(texto, &o.repo, &mut auditoria)?;
     }
     escribir_salida(&o.salida, &auditoria)?;
     Ok(auditoria)
@@ -1056,7 +1066,7 @@ pub fn auditar(home: &Path, o: &OpcionesAuditar) -> Result<Auditoria, ErrorOracu
         o.por_archivo,
     )?;
     if let Some(texto) = &texto_defectos {
-        auditoria.medicion = medir_auditoria(texto, &o.repo, &auditoria)?;
+        medir_con_aviso(texto, &o.repo, &mut auditoria)?;
     }
     escribir_salida(&o.salida, &auditoria)?;
     Ok(auditoria)
@@ -1859,6 +1869,102 @@ linea = 5
             .expect("hay medición");
         assert_eq!(m.casos, 2);
         assert_eq!(m.casos_leidos, 1);
+    }
+
+    /// Repo cuyo único `.rs` es código de tests: ningún archivo llega a la medición.
+    fn repo_solo_tests() -> (TempDir, PathBuf) {
+        repo_con(&[("src/a.rs", "#[cfg(test)]\nmod t {}\n")])
+    }
+
+    /// Corre `auditar` con `--solo-medir` y gitleaks vacío. Con `defectos`, usa un defecto en `src/a.rs`.
+    fn solo_medir_sobre(
+        repo: PathBuf,
+        tmp: &Path,
+        candidatos: &str,
+        defectos: bool,
+    ) -> Result<Auditoria, ErrorOraculo> {
+        let home = TempDir::new().expect("home vacío");
+        let ruta_candidatos = tmp.join("candidatos.json");
+        fs::write(&ruta_candidatos, candidatos).expect("escribe");
+        let gitleaks = tmp.join("gitleaks.json");
+        fs::write(&gitleaks, "[]").expect("escribe");
+        let ruta_defectos = tmp.join("defectos.toml");
+        fs::write(
+            &ruta_defectos,
+            "[[defecto]]\nrepo = \"root\"\narchivo = \"src/a.rs\"\nlinea = 2\n",
+        )
+        .expect("escribe");
+        let o = OpcionesAuditar {
+            tope_usd: None,
+            gitleaks: Some(gitleaks),
+            defectos: defectos.then_some(ruta_defectos),
+            solo_medir: Some(ruta_candidatos),
+            ..opciones(repo, tmp)
+        };
+        auditar(home.path(), &o)
+    }
+
+    #[test]
+    fn solo_medir_sin_archivos_leidos_avisa_que_no_hay_medicion() {
+        let (_repo_tmp, repo) = repo_solo_tests();
+        let tmp = TempDir::new().expect("temporal");
+        let a = solo_medir_sobre(repo, tmp.path(), JSON_VACIO, true).expect("solo medir");
+        assert!(a.medicion.is_none());
+        assert!(
+            a.avisos
+                .contains(&"ningún archivo leído: no hay medición".to_string()),
+            "{:?}",
+            a.avisos
+        );
+    }
+
+    #[test]
+    fn solo_medir_con_archivo_leido_mide_y_no_avisa() {
+        let (_repo_tmp, repo) = repo_tres_lineas();
+        let tmp = TempDir::new().expect("temporal");
+        let a = solo_medir_sobre(repo, tmp.path(), JSON_VACIO, true).expect("solo medir");
+        assert!(a.medicion.is_some());
+        assert!(
+            !a.avisos
+                .contains(&"ningún archivo leído: no hay medición".to_string()),
+            "{:?}",
+            a.avisos
+        );
+    }
+
+    #[test]
+    fn solo_medir_sin_defectos_no_avisa_aunque_no_se_lea_nada() {
+        let (_repo_tmp, repo) = repo_solo_tests();
+        let tmp = TempDir::new().expect("temporal");
+        let a = solo_medir_sobre(repo, tmp.path(), JSON_VACIO, false).expect("solo medir");
+        assert!(a.medicion.is_none());
+        assert!(
+            !a.avisos
+                .contains(&"ningún archivo leído: no hay medición".to_string()),
+            "{:?}",
+            a.avisos
+        );
+    }
+
+    #[test]
+    fn medir_con_aviso_sin_archivos_leidos_empuja_el_aviso() {
+        let (_tmp, repo) = repo_con(&[]);
+        let mut a = auditoria_con(&[], &[]);
+        medir_con_aviso(DEFECTOS_DOS_ARCHIVOS, &repo, &mut a).expect("medición");
+        assert!(a.medicion.is_none());
+        assert_eq!(
+            a.avisos,
+            vec!["ningún archivo leído: no hay medición".to_string()]
+        );
+    }
+
+    #[test]
+    fn medir_con_aviso_con_archivos_leidos_no_empuja_nada() {
+        let (_tmp, repo) = repo_con(&[]);
+        let mut a = auditoria_con(&["src/a.rs"], &[]);
+        medir_con_aviso(DEFECTOS_DOS_ARCHIVOS, &repo, &mut a).expect("medición");
+        assert!(a.medicion.is_some());
+        assert!(a.avisos.is_empty(), "{:?}", a.avisos);
     }
 
     #[test]
