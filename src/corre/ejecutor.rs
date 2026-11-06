@@ -11,7 +11,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::contenedor::{args_podman_builder, estado_de, fisica, validar_montajes};
-use super::{ErrorCorre, copiar_sin_mcp, verificar_vigencia};
+use super::{ErrorCorre, copiar_sin_mcp, verificar_vigencia, vida_restante};
 use crate::oracle::ErrorOraculo;
 use crate::oracle::contenedor::{esperar, leer_en_hilo};
 use crate::tipos::Rol;
@@ -28,6 +28,9 @@ pub struct Lanzamiento {
     pub repo: PathBuf,
     /// Plugin de ECC del rol, en el host. Ausente si el rol no lo trae.
     pub plugin: Option<PathBuf>,
+    /// Plazo de este rol. Lo fija `correr` según la vida del login. El ejecutor no lo supera: aplica
+    /// el menor entre este plazo y su propio tope.
+    pub plazo: Duration,
 }
 
 /// Salida de un lanzamiento. Un código distinto de 0 no es error del ejecutor: lo decide el llamador.
@@ -38,7 +41,7 @@ pub struct SalidaClaude {
     pub stderr: Vec<u8>,
 }
 
-/// Cómo espera `correr` a que el login alcance para un rol. Revisa cada `intervalo`, hasta `tope`.
+/// Cómo espera `correr` a que el login dure lo mínimo para arrancar un rol. Revisa cada `intervalo`, hasta `tope`.
 #[derive(Debug, Clone, Copy)]
 pub struct EsperaVigencia {
     pub intervalo: Duration,
@@ -70,14 +73,19 @@ pub trait EjecutorBuilder {
     /// Corre el builder con `l` y devuelve su salida. Sale por `Err` solo si no pudo lanzarlo.
     fn lanzar(&self, l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre>;
 
-    /// Revisa que el login alcance para el plazo de un rol. Por defecto no revisa nada.
+    /// Revisa que el login dure al menos `plazo`. Por defecto no revisa nada.
     fn verificar_antes(&self, _plazo: Duration) -> Result<(), ErrorCorre> {
         Ok(())
     }
 
-    /// Cuánto espera `correr` a que el login alcance para un rol. Por defecto, `EsperaVigencia::default()`.
+    /// Cuánto espera `correr` a que el login dure lo mínimo para arrancar un rol. Por defecto, `EsperaVigencia::default()`.
     fn espera_vigencia(&self) -> EsperaVigencia {
         EsperaVigencia::default()
+    }
+
+    /// Vida que le queda al login. `None` si el ejecutor no conoce ningún límite.
+    fn vida_restante(&self) -> Result<Option<Duration>, ErrorCorre> {
+        Ok(None)
     }
 }
 
@@ -92,22 +100,26 @@ pub struct EjecutorContenedorBuilder {
     pub home: PathBuf,
     /// `$HOME` del host. Ningún montaje es igual a él ni lo contiene.
     pub home_usuario: PathBuf,
-    /// Tope de cada lanzamiento. Si vence, el contenedor se borra.
+    /// Tope de cada lanzamiento. Si vence, el contenedor se borra. Un rol corre con el menor entre
+    /// su `plazo` y este tope.
     pub timeout: Duration,
 }
 
+/// Código con que podman avisa que mató el contenedor con SIGKILL. El stdout del builder sigue válido.
+const CODIGO_SIGKILL: i32 = 137;
+
+/// Motivo de un contenedor matado con SIGKILL. Lo lee quien llama junto con el stdout conservado.
+const MENSAJE_SIGKILL: &str = "el contenedor fue matado por SIGKILL, a menudo por falta de memoria";
+
 /// Códigos con que podman sale por un fallo de infraestructura. Ninguno es un resultado del builder.
-const CODIGOS_PODMAN_INFRA: [(i32, &str); 4] = [
+/// El 137 no va aquí: un SIGKILL conserva el stdout (ver `clasificar_salida`).
+const CODIGOS_PODMAN_INFRA: [(i32, &str); 3] = [
     (
         125,
         "error propio de podman: imagen inexistente u opción inválida",
     ),
     (126, "el comando no es ejecutable"),
     (127, "el comando no se encontró"),
-    (
-        137,
-        "el contenedor fue matado por SIGKILL, a menudo por falta de memoria",
-    ),
 ];
 
 /// Significado del código de podman si es fallo de infraestructura. `None` si no lo es.
@@ -127,6 +139,29 @@ fn fallo_de_podman(salida: &SalidaClaude) -> Option<ErrorCorre> {
         salida.codigo,
         String::from_utf8_lossy(&salida.stderr).trim()
     )))
+}
+
+/// Decide qué hacer con la salida de podman. Función pura: no lanza nada.
+/// Un 137 devuelve `Cortado` con el stdout intacto, para que quien llama guarde el transcript.
+/// Los códigos 125, 126 y 127 son fallos de infraestructura: dan `Ejecutor`.
+/// Cualquier otro código es de claude y pasa como `Ok`.
+fn clasificar_salida(salida: SalidaClaude) -> Result<SalidaClaude, ErrorCorre> {
+    if salida.codigo == CODIGO_SIGKILL {
+        let detalle = String::from_utf8_lossy(&salida.stderr).trim().to_string();
+        let mensaje = if detalle.is_empty() {
+            MENSAJE_SIGKILL.to_string()
+        } else {
+            format!("{MENSAJE_SIGKILL}: {detalle}")
+        };
+        return Err(ErrorCorre::Cortado {
+            mensaje,
+            stdout: salida.stdout,
+        });
+    }
+    match fallo_de_podman(&salida) {
+        Some(error) => Err(error),
+        None => Ok(salida),
+    }
 }
 
 /// Contador de nombres de contenedor dentro del proceso. Con el pid, el nombre no choca con otra corrida.
@@ -186,11 +221,10 @@ impl EjecutorBuilder for EjecutorContenedorBuilder {
         let nombre = nombre_unico();
         let args = args_podman_builder(&real, &self.imagen, &credencial, &estado, &nombre);
 
-        match correr_proceso("podman", &args, self.timeout)? {
-            Fin::Termino(salida) => match fallo_de_podman(&salida) {
-                Some(error) => Err(error),
-                None => Ok(salida),
-            },
+        // El plazo de este rol no supera el tope del ejecutor.
+        let plazo = l.plazo.min(self.timeout);
+        match correr_proceso("podman", &args, plazo)? {
+            Fin::Termino(salida) => clasificar_salida(salida),
             Fin::Vencio { stdout, .. } => {
                 // Venció: se pide borrar el contenedor por nombre. Un fallo al borrar no tapa el aviso.
                 let _ = Command::new("podman")
@@ -200,7 +234,7 @@ impl EjecutorBuilder for EjecutorContenedorBuilder {
                 Err(ErrorCorre::Cortado {
                     mensaje: format!(
                         "timeout tras {} s; se pidió borrar el contenedor {nombre}",
-                        self.timeout.as_secs()
+                        plazo.as_secs()
                     ),
                     stdout,
                 })
@@ -212,6 +246,12 @@ impl EjecutorBuilder for EjecutorContenedorBuilder {
         // Mismo chequeo de existencia que `lanzar`: la falta de credencial tiene un solo mensaje.
         revisar_credencial(&self.credencial)?;
         verificar_vigencia(&self.credencial, ahora_ms(), plazo)
+    }
+
+    /// Revisa la credencial igual que `verificar_antes` y devuelve la vida que le queda al login.
+    fn vida_restante(&self) -> Result<Option<Duration>, ErrorCorre> {
+        revisar_credencial(&self.credencial)?;
+        vida_restante(&self.credencial, ahora_ms()).map(Some)
     }
 }
 
@@ -349,7 +389,7 @@ mod codigos_podman {
 
     #[test]
     fn codigos_de_infra_de_podman_tienen_significado() {
-        for codigo in [125, 126, 127, 137] {
+        for codigo in [125, 126, 127] {
             assert!(
                 significado_codigo_podman(codigo).is_some(),
                 "falta el significado de {codigo}"
@@ -369,11 +409,7 @@ mod codigos_podman {
 
     #[test]
     fn fallo_de_podman_nombra_el_codigo_y_su_significado() {
-        for (codigo, esperado) in [
-            (126, "no es ejecutable"),
-            (127, "no se encontró"),
-            (137, "SIGKILL"),
-        ] {
+        for (codigo, esperado) in [(126, "no es ejecutable"), (127, "no se encontró")] {
             let salida = SalidaClaude {
                 codigo,
                 stdout: Vec::new(),
@@ -386,6 +422,58 @@ mod codigos_podman {
                 texto.contains(&codigo.to_string()) && texto.contains(esperado),
                 "{texto}"
             );
+        }
+    }
+
+    #[test]
+    fn sigkill_con_stdout_da_cortado_con_ese_stdout() {
+        let stdout = b"{\"tipo\":\"parcial\"}\n".to_vec();
+        let salida = SalidaClaude {
+            codigo: 137,
+            stdout: stdout.clone(),
+            stderr: b"detalle\n".to_vec(),
+        };
+        match clasificar_salida(salida) {
+            Err(ErrorCorre::Cortado {
+                mensaje,
+                stdout: conservado,
+            }) => {
+                assert_eq!(conservado, stdout);
+                assert!(
+                    mensaje.contains("el contenedor fue matado por SIGKILL"),
+                    "{mensaje}"
+                );
+            }
+            otro => panic!("137 debe dar Cortado, dio {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn codigos_de_infra_de_podman_siguen_siendo_ejecutor() {
+        for codigo in [125, 126, 127] {
+            let salida = SalidaClaude {
+                codigo,
+                stdout: b"algo\n".to_vec(),
+                stderr: b"detalle\n".to_vec(),
+            };
+            match clasificar_salida(salida) {
+                Err(error @ ErrorCorre::Ejecutor(_)) => {
+                    assert!(error.to_string().contains(&codigo.to_string()), "{error}");
+                }
+                otro => panic!("{codigo} debe dar Ejecutor, dio {otro:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn codigos_de_claude_0_y_1_pasan_como_ok() {
+        for codigo in [0, 1] {
+            let salida = SalidaClaude {
+                codigo,
+                stdout: b"resultado\n".to_vec(),
+                stderr: Vec::new(),
+            };
+            assert_eq!(clasificar_salida(salida.clone()).ok(), Some(salida));
         }
     }
 
@@ -458,6 +546,7 @@ mod tests {
             env,
             repo,
             plugin: None,
+            plazo: crate::corre::contenedor::TIMEOUT_BUILDER,
         }
     }
 
@@ -725,6 +814,39 @@ mod tests {
         assert!(
             !error.to_string().contains("TOKEN_ACCESO_EJ"),
             "el mensaje no lleva tokens: {error}"
+        );
+    }
+
+    #[test]
+    fn corre_contenedor_vida_restante_sin_credencial_es_error_de_ejecutor() {
+        let tmp = TempDir::new().expect("tmp");
+        let (ejecutor, credencial) = ejecutor_real(&tmp, false);
+        let error = ejecutor
+            .vida_restante()
+            .expect_err("sin credencial no hay vida que medir");
+        let esperado = format!(
+            "no existe la credencial de Claude en {}",
+            credencial.display()
+        );
+        assert!(
+            matches!(error, ErrorCorre::Ejecutor(ref m) if *m == esperado),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn corre_contenedor_vida_restante_da_lo_que_resta_del_login() {
+        const HORA_MS: u64 = 3_600_000;
+        let tmp = TempDir::new().expect("tmp");
+        let (ejecutor, credencial) = ejecutor_real(&tmp, false);
+        escribir_credencial(&credencial, &credencial_con_mcp(ahora_ms() + 3 * HORA_MS));
+        let vida = ejecutor
+            .vida_restante()
+            .expect("lee la vida")
+            .expect("hay límite conocido");
+        assert!(
+            vida > Duration::from_secs(3 * 3600 - 60) && vida <= Duration::from_secs(3 * 3600),
+            "{vida:?}"
         );
     }
 

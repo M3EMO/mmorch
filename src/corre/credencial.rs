@@ -66,6 +66,12 @@ pub fn vencimiento_ms(origen: &Path) -> Result<u64, ErrorCorre> {
         })
 }
 
+/// Tiempo que le queda al login: `expiresAt - ahora_ms`. Cero si el login ya venció.
+pub fn vida_restante(origen: &Path, ahora_ms: u64) -> Result<Duration, ErrorCorre> {
+    let vence = vencimiento_ms(origen)?;
+    Ok(Duration::from_millis(vence.saturating_sub(ahora_ms)))
+}
+
 /// Falla si el login vence antes de `ahora_ms + plazo`, o justo en ese límite.
 pub fn verificar_vigencia(origen: &Path, ahora_ms: u64, plazo: Duration) -> Result<(), ErrorCorre> {
     let vence = vencimiento_ms(origen)?;
@@ -281,6 +287,22 @@ mod tests {
         let tmp = TempDir::new().expect("tmp");
         let origen = origen_con_vencimiento(&tmp, 1_501);
         verificar_vigencia(&origen, 1_000, Duration::from_millis(500)).expect("vigente");
+    }
+
+    #[test]
+    fn corre_credencial_vida_restante_es_vencimiento_menos_ahora() {
+        let tmp = TempDir::new().expect("tmp");
+        let origen = origen_con_vencimiento(&tmp, 10_000);
+        let vida = vida_restante(&origen, 4_000).expect("lee");
+        assert_eq!(vida, Duration::from_millis(6_000));
+    }
+
+    #[test]
+    fn corre_credencial_vida_restante_de_login_vencido_es_cero() {
+        let tmp = TempDir::new().expect("tmp");
+        let origen = origen_con_vencimiento(&tmp, 1_000);
+        let vida = vida_restante(&origen, 4_000).expect("lee");
+        assert_eq!(vida, Duration::ZERO, "un login vencido no tiene vida");
     }
 
     #[test]
