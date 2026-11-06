@@ -248,7 +248,14 @@ fn auditar_con_limite(
 
     for (i, grupo) in grupos.iter().enumerate() {
         let prompt = prompt_de(grupo);
-        if gasto()? + peor_caso(&prompt) > tope_usd {
+        let necesario = gasto()? + peor_caso(&prompt);
+        if necesario > tope_usd {
+            // Sin la primera llamada no hay nada que leer: es un error de uso, no una medición parcial.
+            if i == 0 {
+                return Err(ErrorOraculo::Uso(format!(
+                    "tope insuficiente: la primera llamada necesita {necesario:.4} USD en el peor caso y --tope-usd es {tope_usd:.4}"
+                )));
+            }
             auditoria.incompleta = true;
             sin_leer.extend(archivos_de(&grupos[i..]));
             break;
@@ -908,6 +915,25 @@ mod tests {
         assert_eq!(aud.sin_leer, vec!["src/b.rs".to_string()]);
         assert_eq!(aud.archivos, vec!["src/a.rs".to_string()]);
         assert_eq!(aud.costo_usd, 1.0);
+    }
+
+    #[test]
+    fn un_tope_que_no_alcanza_para_la_primera_llamada_es_uso_y_no_envia_nada() {
+        let (_tmp, repo) = repo_con(&[("src/lib.rs", "fn uno() {}\n")]);
+        let modelo = ModeloFalso::que_responde(JSON_VACIO);
+        let err = auditar_con(&repo, &[], &[], &modelo, "m", 0.5, &peor_uno, &gasto_cero)
+            .expect_err("debe fallar");
+        assert!(matches!(err, ErrorOraculo::Uso(_)), "{err}");
+        assert!(err.to_string().contains("1.0000"), "{err}");
+        assert_eq!(modelo.llamadas(), 0);
+    }
+
+    #[test]
+    fn un_tope_igual_al_peor_caso_si_alcanza() {
+        let (_tmp, repo) = repo_con(&[("src/lib.rs", "fn uno() {}\n")]);
+        let modelo = ModeloFalso::que_responde(JSON_VACIO);
+        auditar_con(&repo, &[], &[], &modelo, "m", 1.0, &peor_uno, &gasto_cero).expect("pasada");
+        assert_eq!(modelo.llamadas(), 1);
     }
 
     #[test]
