@@ -16,6 +16,7 @@ use crate::corre::costo_cortado::{
     costo_de_uso, evento_de_corte, precio_de_rol, uso_de_transcript,
 };
 use crate::corre::git_seguro;
+use crate::corre::redacta::{redactar, token_de_copia};
 use crate::corre::{
     Corrida, EjecutorBuilder, ErrorCorre, Lanzamiento, barrido, dir_corridas, guardar_transcript,
     preparar_corrida, reabrir_corrida,
@@ -41,6 +42,9 @@ const FASE_LANZAMIENTO: &str = "lanzamiento";
 const FASE_SESION: &str = "sesion";
 const FASE_EVALUACION: &str = "evaluacion";
 const FASE_TRANSCRIPT: &str = "transcript";
+/// Motivo del `Gate` de aviso: sin token legible en la copia, el transcript se guarda sin redactar.
+const MOTIVO_SIN_TOKEN: &str =
+    "sin accessToken legible en la copia: el transcript se guardó sin redactar";
 /// Fase del `Gate` que queda cuando el login no alcanza para un rol que va después del primero.
 const FASE_VIGENCIA: &str = "vigencia";
 /// Mensaje de commit del estado final del repo de la corrida.
@@ -246,10 +250,12 @@ fn correr_interno(
             };
             match deps.ejecutor.lanzar(&lanzamiento) {
                 Ok(salida) => {
-                    let ruta = guardar_transcript(deps.home, &id, n, *rol, &salida.stdout)?;
+                    // Lo que se guarda, y lo que se valida, es el stdout ya redactado.
+                    let guardado = stdout_redactado(&ruta_eventos, &corrida, &salida.stdout)?;
+                    let ruta = guardar_transcript(deps.home, &id, n, *rol, &guardado)?;
                     transcripts.push((*rol, ruta.clone()));
                     // Sin `result` exitoso el rol no evalúa: no hay resultado que evaluar.
-                    let linea = match resultado_exitoso(&salida.stdout) {
+                    let linea = match resultado_exitoso(&guardado) {
                         Ok(linea) => linea,
                         Err(causa) => {
                             let motivo =
@@ -272,8 +278,15 @@ fn correr_interno(
                 }
                 Err(ErrorCorre::Cortado { mensaje, stdout }) => {
                     // Un corte no aborta: deja su transcript parcial, su costo y la sesión para la siguiente vuelta.
-                    let ruta =
-                        registrar_corte(deps.home, &ruta_eventos, &id, *rol, n, &modelo, &stdout)?;
+                    let ruta = registrar_corte(
+                        deps.home,
+                        &ruta_eventos,
+                        &corrida,
+                        *rol,
+                        n,
+                        &modelo,
+                        &stdout,
+                    )?;
                     transcripts.push((*rol, ruta));
                     let motivo = format!("rol {} cortado por plazo: {mensaje}", nombre_rol(*rol));
                     gate(&ruta_eventos, &id, FASE_LANZAMIENTO, motivo, Some(*rol))?;
@@ -533,19 +546,61 @@ fn esperar_vigencia_del_rol(
 fn registrar_corte(
     home: &Path,
     ruta_eventos: &Path,
-    id: &str,
+    corrida: &Corrida,
     rol: Rol,
     n: u32,
     modelo: &str,
     stdout: &[u8],
 ) -> Result<PathBuf, ErrorCorre> {
-    let ruta = guardar_transcript(home, id, n, rol, stdout)?;
+    let guardado = stdout_redactado(ruta_eventos, corrida, stdout)?;
+    let ruta = guardar_transcript(home, &corrida.id, n, rol, &guardado)?;
     let config =
         Config::cargar(&home.join("root.toml")).map_err(|e| ErrorCorre::Uso(e.to_string()))?;
     let uso = uso_de_transcript(stdout);
     let costo = costo_de_uso(&uso, precio_de_rol(&config, modelo));
-    registrar(ruta_eventos, &evento_de_corte(id, modelo, &uso, &costo))?;
+    registrar(
+        ruta_eventos,
+        &evento_de_corte(&corrida.id, modelo, &uso, &costo),
+    )?;
     Ok(ruta)
+}
+
+/// Stdout de `claude` listo para guardar: el `accessToken` de la copia de la credencial, redactado.
+/// Sin token legible, devuelve el stdout igual y deja un `Gate` de aviso. El aviso sale una sola vez por
+/// corrida: la copia es la misma en todos sus transcripts.
+fn stdout_redactado(
+    ruta_eventos: &Path,
+    corrida: &Corrida,
+    stdout: &[u8],
+) -> Result<Vec<u8>, ErrorCorre> {
+    let token = copia_de(corrida).and_then(|copia| token_de_copia(&copia));
+    match token {
+        Some(token) => Ok(redactar(stdout, &token)),
+        None => {
+            if !aviso_sin_token_dado(ruta_eventos, &corrida.id)? {
+                gate(
+                    ruta_eventos,
+                    &corrida.id,
+                    FASE_TRANSCRIPT,
+                    MOTIVO_SIN_TOKEN.into(),
+                    None,
+                )?;
+            }
+            Ok(stdout.to_vec())
+        }
+    }
+}
+
+/// Si `eventos.jsonl` ya trae el aviso de transcript sin redactar de la corrida `id`.
+fn aviso_sin_token_dado(ruta_eventos: &Path, id: &str) -> Result<bool, ErrorCorre> {
+    let eventos =
+        observe::uso::leer_eventos(ruta_eventos).map_err(|e| de_observe("leer eventos", e))?;
+    Ok(eventos.iter().any(|ev| {
+        ev.tipo == TipoEvento::Gate
+            && ev.fase == FASE_TRANSCRIPT
+            && ev.corrida == id
+            && ev.extra.get("motivo").and_then(Value::as_str) == Some(MOTIVO_SIN_TOKEN)
+    }))
 }
 
 /// `session_id` de la primera línea JSON del `stdout` que lo trae. Las líneas que no son JSON se saltan.
@@ -684,14 +739,18 @@ impl Drop for GuardiaCredencial<'_> {
 /// `mcpOAuth`. Un enlace se borra como enlace, sin seguir su destino. Lo llama `GuardiaCredencial`, en todo
 /// camino de salida de `correr` desde que se prepara la corrida.
 fn quitar_credencial(corrida: &Corrida) -> Result<(), ErrorCorre> {
-    let Some(estado) = estado_de(&corrida.repo) else {
+    let Some(ruta) = copia_de(corrida) else {
         return Ok(());
     };
-    let ruta = estado.join(".credentials.json");
     borrado::borrar_archivo_dentro(&corrida.dir, &ruta).map_err(|fuente| ErrorCorre::Io {
         contexto: format!("borrar la copia de la credencial {}", ruta.display()),
         fuente,
     })
+}
+
+/// Ruta de la copia de la credencial de la corrida: `claude-estado/.credentials.json`. Sin estado, `None`.
+fn copia_de(corrida: &Corrida) -> Option<PathBuf> {
+    estado_de(&corrida.repo).map(|estado| estado.join(".credentials.json"))
 }
 
 /// Commit completo de `HEAD` de `repo`. Vacío si git no lo da.
@@ -1411,6 +1470,131 @@ mod tests {
             "la copia de la credencial es de Root y se borra al terminar: {}",
             credencial.display()
         );
+    }
+
+    // ---- Transcript redactado: el token de la copia no queda en disco ----
+
+    const TOKEN_PRUEBA: &str = "TOKEN_FALSO_PRUEBA_ABC";
+
+    /// Contenido de una copia de credencial con el `accessToken` de prueba.
+    fn credencial_con_token() -> String {
+        format!("{{\"claudeAiOauth\":{{\"accessToken\":\"{TOKEN_PRUEBA}\",\"expiresAt\":1}}}}")
+    }
+
+    /// Stdout de un rol: un `user` con `tool_result` que lleva el token, y su línea `result` exitosa.
+    fn stdout_con_token() -> Vec<u8> {
+        let sistema = r#"{"type":"system","subtype":"init","session_id":"s-tok-1"}"#;
+        let tool_result = format!(
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_1","content":"cat claude-estado/.credentials.json -> {TOKEN_PRUEBA}"}}]}}}}"#
+        );
+        let resultado = format!(
+            r#"{{"type":"result","subtype":"success","is_error":false,"result":"listo {TOKEN_PRUEBA}","duration_ms":1000,"num_turns":2,"total_cost_usd":0.01,"usage":{{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}},"modelUsage":{{"haiku":{{"inputTokens":10,"outputTokens":5,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"costUSD":0.01}}}},"session_id":"s-tok-1"}}"#
+        );
+        format!("{sistema}\n{tool_result}\n{resultado}\n").into_bytes()
+    }
+
+    /// Builder que deja la copia de credencial `credencial` en el estado de la corrida y devuelve `stdout`.
+    /// Con `corta`, el lanzamiento sale por corte de plazo con ese `stdout`.
+    struct ConCopia {
+        stdout: Vec<u8>,
+        credencial: Option<String>,
+        corta: bool,
+    }
+
+    impl EjecutorBuilder for ConCopia {
+        fn lanzar(&self, l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre> {
+            if let Some(texto) = &self.credencial {
+                let estado = estado_de(&l.repo).expect("estado de la corrida");
+                fs::create_dir_all(&estado).expect("carpeta de estado");
+                fs::write(estado.join(".credentials.json"), texto).expect("copia");
+            }
+            if self.corta {
+                return Err(ErrorCorre::Cortado {
+                    mensaje: "timeout tras 7200 s; prueba".into(),
+                    stdout: self.stdout.clone(),
+                });
+            }
+            Ok(SalidaClaude {
+                codigo: 0,
+                stdout: self.stdout.clone(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    /// Texto del transcript `n-<rol>.jsonl` de la corrida `id`.
+    fn transcript_de(e: &Entorno, id: &str, nombre: &str) -> String {
+        let ruta = e.home.join("transcripts").join(id).join(nombre);
+        fs::read_to_string(&ruta).unwrap_or_else(|_| panic!("falta {}", ruta.display()))
+    }
+
+    #[test]
+    fn corre_transcript_redacta_el_token_de_la_copia() {
+        let e = entorno();
+        let builder = ConCopia {
+            stdout: stdout_con_token(),
+            credencial: Some(credencial_con_token()),
+            corta: false,
+        };
+        let fila = correr_con(&e, &builder, &[], CONFIG_CONSTRUYE).expect("corre");
+        let texto = transcript_de(&e, &fila.id, "1-construye.jsonl");
+        assert!(
+            !texto.contains(TOKEN_PRUEBA),
+            "el transcript no lleva el token"
+        );
+        assert!(texto.contains("[REDACTADO]"), "{texto}");
+        let resultado = transcript_de(&e, &fila.id, "1-construye.resultado.json");
+        assert!(
+            !resultado.contains(TOKEN_PRUEBA),
+            "el resultado no lleva el token"
+        );
+        assert!(
+            gates(&e, FASE_TRANSCRIPT).is_empty(),
+            "con token no hay aviso"
+        );
+    }
+
+    #[test]
+    fn corre_corte_guarda_el_transcript_redactado_en_cada_vuelta() {
+        let e = entorno();
+        let builder = ConCopia {
+            stdout: stdout_con_token(),
+            credencial: Some(credencial_con_token()),
+            corta: true,
+        };
+        let (resultado, _) = correr_contando(&e, &builder, CONFIG_CONSTRUYE);
+        let fila = resultado.expect("agotar las vueltas deja fila");
+        for n in 1..=MAX_VUELTAS {
+            let texto = transcript_de(&e, &fila.id, &format!("{n}-construye.jsonl"));
+            assert!(!texto.contains(TOKEN_PRUEBA), "vuelta {n} sin token");
+            assert!(texto.contains("[REDACTADO]"), "vuelta {n}: {texto}");
+        }
+    }
+
+    #[test]
+    fn corre_sin_token_legible_guarda_igual_y_deja_un_solo_aviso() {
+        let e = entorno();
+        let builder = ConCopia {
+            stdout: stdout_con_token(),
+            // Copia sin `accessToken`: no hay token que quitar.
+            credencial: Some("{\"token\":\"de-prueba\"}".into()),
+            corta: false,
+        };
+        let fila = correr_con(&e, &builder, &[], CONFIG).expect("corre");
+        for nombre in ["1-planifica.jsonl", "2-construye.jsonl"] {
+            let texto = transcript_de(&e, &fila.id, nombre);
+            assert!(
+                texto.contains(TOKEN_PRUEBA),
+                "{nombre} se guarda sin redactar"
+            );
+        }
+        assert_eq!(
+            gates(&e, FASE_TRANSCRIPT),
+            vec![MOTIVO_SIN_TOKEN.to_string()],
+            "un aviso por corrida, sin el token"
+        );
+        let texto = fs::read_to_string(e.home.join("eventos.jsonl")).unwrap_or_default();
+        assert!(!texto.contains(TOKEN_PRUEBA), "el Gate no lleva el token");
     }
 
     #[test]

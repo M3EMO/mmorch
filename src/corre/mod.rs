@@ -12,6 +12,7 @@ mod costo_cortado;
 mod credencial;
 pub mod ejecutor;
 mod git_seguro;
+mod redacta;
 
 use std::fs;
 use std::io::{self, Write};
