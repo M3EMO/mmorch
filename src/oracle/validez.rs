@@ -5,7 +5,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use super::rubrica::{self, Rubrica};
 use super::{ErrorOraculo, evaluar_por_nombre};
-use crate::tipos::{Decision, Dimension, TODAS_LAS_DIMENSIONES, Veredicto};
+use crate::tipos::{Decision, Dimension, Fuente, TODAS_LAS_DIMENSIONES, Veredicto};
 
 /// Versión del formato de `validez.json`.
 pub const VERSION: u32 = 1;
@@ -85,8 +85,14 @@ pub struct Validez {
     pub v: u32,
     /// Fracción de pares de `orden.toml` que Root ordena como el resultado medido. Umbral 1,0.
     pub exactitud_orden: Metrica,
+    /// Un detalle por par de `orden.toml`, en su orden. Vacío sin `orden.toml` o sin pares.
+    #[serde(default)]
+    pub pares: Vec<DetallePar>,
     /// Fracción de defectos reales que Root encuentra con `archivo` y `linea` a ±3. Umbral 0,8.
     pub recall: Metrica,
+    /// Un detalle por defecto de `defectos.toml`, en su orden. Vacío sin `defectos.toml` o sin defectos.
+    #[serde(default)]
+    pub defectos: Vec<DetalleDefecto>,
     /// Paquetes con la misma `Decision` que el usuario. `cumple`: 5 de 6 (decisión 13).
     pub acuerdo_decision: Metrica,
     /// Una entrada por dimensión, en el orden de `TODAS_LAS_DIMENSIONES`. `cumple`: kappa >= 0,6.
@@ -97,6 +103,71 @@ pub struct Validez {
     pub spearman: Metrica,
     /// Casos que quedaron fuera o datos que faltan, con su motivo.
     pub avisos: Vec<String>,
+}
+
+/// Detalle de un par de `orden.toml`: qué decidió Root y con qué criterio.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DetallePar {
+    /// Tarea del par.
+    pub tarea: String,
+    /// Caso que debe quedar por encima.
+    pub mejor: String,
+    /// Caso que debe quedar por debajo.
+    pub peor: String,
+    /// `true` si Root ordena `mejor` por encima de `peor`.
+    pub acierto: bool,
+    /// Decisión de `mejor`. `None` si Root no dio decisión.
+    pub decision_mejor: Option<Decision>,
+    /// Decisión de `peor`. `None` si Root no dio decisión.
+    pub decision_peor: Option<Decision>,
+    /// Global de `mejor`. `None` si el veredicto no lo trae.
+    pub global_mejor: Option<f32>,
+    /// Global de `peor`. `None` si el veredicto no lo trae.
+    pub global_peor: Option<f32>,
+    /// Completitud de `mejor`. `None` si el veredicto no la trae.
+    pub completitud_mejor: Option<f32>,
+    /// Completitud de `peor`. `None` si el veredicto no la trae.
+    pub completitud_peor: Option<f32>,
+    /// Criterio que decidió el par: `decision`, `global`, `completitud` o `sin_orden`.
+    pub criterio: String,
+}
+
+/// Detalle de un defecto real de `defectos.toml`: si Root lo encontró y qué hallazgo quedó cerca.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DetalleDefecto {
+    /// Tarea del defecto.
+    pub tarea: String,
+    /// Repo del defecto, dentro de la carpeta de casos.
+    pub repo: String,
+    /// Archivo del defecto.
+    pub archivo: String,
+    /// Línea del defecto.
+    pub linea: u32,
+    /// `true` si Root tiene un hallazgo a ±3 líneas. Es el mismo criterio que `recall`.
+    pub encontrado: bool,
+    /// `true` si la evidencia de algún ítem del veredicto cita este archivo a `TOLERANCIA_LINEAS` líneas o
+    /// menos del defecto. No cuenta para `encontrado` ni para `recall`.
+    #[serde(default)]
+    pub en_evidencia: bool,
+    /// Hallazgo del mismo archivo con menor distancia en línea. `None` si no hay ninguno en ese archivo.
+    pub hallazgo_cercano: Option<HallazgoCercano>,
+    /// Test que marca el defecto, copiado de `defectos.toml`. `None` si el defecto no lo trae.
+    #[serde(default)]
+    pub test: Option<String>,
+    /// `Some(true)` si el test aparece en alguna lista de fallos del veredicto. `None` sin `test`.
+    #[serde(default)]
+    pub test_rojo: Option<bool>,
+}
+
+/// Hallazgo de Root en el mismo archivo que un defecto. Es el más cercano en línea.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct HallazgoCercano {
+    /// Línea del hallazgo.
+    pub linea: u32,
+    /// Quién produjo el hallazgo.
+    pub fuente: Fuente,
+    /// Líneas entre el hallazgo y el defecto.
+    pub distancia: u32,
 }
 
 /// Resultado de `preparar_ciego`: los ids de los paquetes armados. El origen queda en `clave.toml`.
@@ -154,12 +225,13 @@ pub fn validar_con(
     let mut ev = Evaluaciones {
         evaluador,
         cache: BTreeMap::new(),
+        veredictos: casos.join("veredictos"),
     };
     let mut avisos = Vec::new();
     let pares = leer_orden(casos)?;
     let defectos = leer_defectos(casos)?;
-    let exactitud_orden = medir_orden(casos, pares.as_deref(), &mut ev)?;
-    let recall = medir_recall(casos, defectos.as_deref(), &mut ev)?;
+    let (exactitud_orden, detalle_pares) = medir_orden(casos, pares.as_deref(), &mut ev)?;
+    let (recall, detalle_defectos) = medir_recall(casos, defectos.as_deref(), &mut ev)?;
     let ciego = leer_paquetes(casos, &mut ev, &mut avisos)?;
     let (acuerdo_decision, kappa_dimension, kappa_item, spearman) = match ciego {
         None => {
@@ -184,7 +256,9 @@ pub fn validar_con(
     Ok(Validez {
         v: VERSION,
         exactitud_orden,
+        pares: detalle_pares,
         recall,
+        defectos: detalle_defectos,
         acuerdo_decision,
         kappa_dimension,
         kappa_item,
@@ -457,20 +531,21 @@ fn nivel_de(v: &Veredicto, item: &str) -> Option<u8> {
         .map(|n| n.nivel)
 }
 
-/// `true` si Root pone `mejor` por encima de `peor`. Primero la decisión; a igual decisión, el global si
-/// los dos lo tienen, y si no, la completitud. Sin decisión, o en empate, no ordena: es un fallo.
-fn ordena_antes(mejor: &Veredicto, peor: &Veredicto) -> bool {
+/// Decide si Root pone `mejor` por encima de `peor`, y con qué criterio. Primero la decisión; a igual
+/// decisión, el global si los dos lo tienen, y si no, la completitud. Sin decisión, o en empate, no
+/// ordena: es un fallo.
+fn ordena(mejor: &Veredicto, peor: &Veredicto) -> (bool, &'static str) {
     let (Some(dm), Some(dp)) = (decision_de(mejor), decision_de(peor)) else {
-        return false;
+        return (false, "sin_orden");
     };
     if rango_decision(dm) != rango_decision(dp) {
-        return rango_decision(dm) > rango_decision(dp);
+        return (rango_decision(dm) > rango_decision(dp), "decision");
     }
     match (mejor.global, peor.global) {
-        (Some(gm), Some(gp)) => gm > gp,
+        (Some(gm), Some(gp)) => (gm > gp, "global"),
         _ => match (completitud_de(mejor), completitud_de(peor)) {
-            (Some(cm), Some(cp)) => cm > cp,
-            _ => false,
+            (Some(cm), Some(cp)) => (cm > cp, "completitud"),
+            _ => (false, "sin_orden"),
         },
     }
 }
@@ -481,6 +556,50 @@ fn encuentra(v: &Veredicto, defecto: &DefectoReal) -> bool {
     v.hallazgos.iter().any(|h| {
         normaliza(&h.archivo) == archivo && h.linea.abs_diff(defecto.linea) <= TOLERANCIA_LINEAS
     })
+}
+
+/// `Some(true)` si el `test` del defecto está en alguna lista de fallos del veredicto. `None` sin `test`.
+/// Solo informa: no cuenta para `encuentra` ni para `recall`.
+fn test_rojo(v: &Veredicto, defecto: &DefectoReal) -> Option<bool> {
+    let test = defecto.test.as_deref()?;
+    let en_lista = |lista: &[String]| lista.iter().any(|t| t == test);
+    Some(
+        en_lista(&v.ocultos_fallidos)
+            || en_lista(&v.inestables)
+            || en_lista(&v.inestables_contrato)
+            || en_lista(&v.contrato_fallidos),
+    )
+}
+
+/// `true` si la evidencia de algún ítem cita el archivo del defecto a `TOLERANCIA_LINEAS` líneas o menos.
+/// Las citas que no tienen la forma `archivo:linea` se ignoran.
+fn en_evidencia(v: &Veredicto, defecto: &DefectoReal) -> bool {
+    let archivo = normaliza(&defecto.archivo);
+    v.puntajes
+        .iter()
+        .flat_map(|p| p.items.iter())
+        .flat_map(|n| n.evidencia.iter())
+        .filter_map(|cita| cita.rsplit_once(':'))
+        .any(|(ruta, linea)| {
+            let Ok(linea) = linea.trim().parse::<u32>() else {
+                return false;
+            };
+            normaliza(ruta) == archivo && linea.abs_diff(defecto.linea) <= TOLERANCIA_LINEAS
+        })
+}
+
+/// Hallazgo del mismo archivo con menor distancia en línea. En empate, gana el primero de `v.hallazgos`.
+fn hallazgo_mas_cercano(v: &Veredicto, defecto: &DefectoReal) -> Option<HallazgoCercano> {
+    let archivo = normaliza(&defecto.archivo);
+    v.hallazgos
+        .iter()
+        .filter(|h| normaliza(&h.archivo) == archivo)
+        .min_by_key(|h| h.linea.abs_diff(defecto.linea))
+        .map(|h| HallazgoCercano {
+            linea: h.linea,
+            fuente: h.fuente.clone(),
+            distancia: h.linea.abs_diff(defecto.linea),
+        })
 }
 
 fn normaliza(ruta: &str) -> &str {
@@ -552,9 +671,11 @@ fn kappas_dimension_sin_medir(motivo: &str) -> Vec<Kappa> {
 }
 
 /// Caché de veredictos por (tarea, ruta): cada repo se evalúa una sola vez.
+/// Cada evaluación nueva se guarda en `veredictos`, la carpeta de veredictos de los casos.
 struct Evaluaciones<'a> {
     evaluador: &'a dyn Fn(&Path, &str) -> Result<Veredicto, ErrorOraculo>,
     cache: BTreeMap<(String, PathBuf), Veredicto>,
+    veredictos: PathBuf,
 }
 
 impl Evaluaciones<'_> {
@@ -564,69 +685,136 @@ impl Evaluaciones<'_> {
             return Ok(v.clone());
         }
         let v = (self.evaluador)(ruta, tarea)?;
+        guardar_veredicto(&self.veredictos, ruta, &v)?;
         self.cache.insert(clave, v.clone());
         Ok(v)
     }
 }
 
+/// Escribe el veredicto de `ruta` en `<carpeta>/<nombre>.json`, de forma atómica.
+fn guardar_veredicto(carpeta: &Path, ruta: &Path, v: &Veredicto) -> Result<(), ErrorOraculo> {
+    fs::create_dir_all(carpeta).map_err(|e| io_infra("crear la carpeta de veredictos", &e))?;
+    let texto = serde_json::to_string_pretty(v)
+        .map_err(|e| ErrorOraculo::Infra(format!("serializar el veredicto: {e}")))?;
+    let destino = carpeta.join(format!("{}.json", nombre_del_clon(ruta)));
+    let mut temporal = tempfile::NamedTempFile::new_in(carpeta)
+        .map_err(|e| io_infra("crear el temporal del veredicto", &e))?;
+    temporal
+        .write_all(format!("{texto}\n").as_bytes())
+        .map_err(|e| io_infra("escribir el veredicto", &e))?;
+    temporal
+        .as_file()
+        .sync_all()
+        .map_err(|e| io_infra("escribir el veredicto", &e))?;
+    temporal
+        .persist(&destino)
+        .map_err(|e| io_infra("guardar el veredicto", &e.error))?;
+    Ok(())
+}
+
+/// Nombre del clon: el último componente de `ruta`. Un paquete ciego usa el id de su carpeta padre.
+fn nombre_del_clon(ruta: &Path) -> String {
+    let nombre = nombre_de(ruta);
+    match ruta.parent() {
+        Some(padre) if nombre == "repo" => nombre_de(padre),
+        _ => nombre,
+    }
+}
+
+fn nombre_de(ruta: &Path) -> String {
+    ruta.file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+}
+
+/// Mide la exactitud de orden y devuelve un `DetallePar` por par, en el orden de `orden.toml`.
 fn medir_orden(
     casos: &Path,
     pares: Option<&[ParOrden]>,
     ev: &mut Evaluaciones,
-) -> Result<Metrica, ErrorOraculo> {
+) -> Result<(Metrica, Vec<DetallePar>), ErrorOraculo> {
     let Some(pares) = pares else {
-        return Ok(Metrica::sin_medir(
-            "falta orden.toml: sin pares de orden conocido",
+        return Ok((
+            Metrica::sin_medir("falta orden.toml: sin pares de orden conocido"),
+            Vec::new(),
         ));
     };
     if pares.is_empty() {
-        return Ok(Metrica::sin_medir("orden.toml no tiene pares"));
+        return Ok((Metrica::sin_medir("orden.toml no tiene pares"), Vec::new()));
     }
     let mut aciertos = 0;
+    let mut detalle = Vec::with_capacity(pares.len());
     for par in pares {
         let mejor = ev.veredicto(&par.tarea, &casos.join(&par.mejor))?;
         let peor = ev.veredicto(&par.tarea, &casos.join(&par.peor))?;
-        if ordena_antes(&mejor, &peor) {
+        let (acierto, criterio) = ordena(&mejor, &peor);
+        if acierto {
             aciertos += 1;
         }
+        detalle.push(DetallePar {
+            tarea: par.tarea.clone(),
+            mejor: par.mejor.clone(),
+            peor: par.peor.clone(),
+            acierto,
+            decision_mejor: decision_de(&mejor),
+            decision_peor: decision_de(&peor),
+            global_mejor: mejor.global,
+            global_peor: peor.global,
+            completitud_mejor: completitud_de(&mejor),
+            completitud_peor: completitud_de(&peor),
+            criterio: criterio.to_string(),
+        });
     }
-    Ok(Metrica::fraccion(
-        aciertos,
-        pares.len() as u32,
-        Some(UMBRAL_ORDEN),
-    ))
+    let metrica = Metrica::fraccion(aciertos, pares.len() as u32, Some(UMBRAL_ORDEN));
+    Ok((metrica, detalle))
 }
 
+/// Mide el recall y devuelve un `DetalleDefecto` por defecto, en el orden de `defectos.toml`.
 fn medir_recall(
     casos: &Path,
     defectos: Option<&[DefectoReal]>,
     ev: &mut Evaluaciones,
-) -> Result<Metrica, ErrorOraculo> {
+) -> Result<(Metrica, Vec<DetalleDefecto>), ErrorOraculo> {
     let umbral = Some(UMBRAL_RECALL);
     let Some(defectos) = defectos else {
-        return Ok(Metrica {
-            umbral,
-            ..Metrica::sin_medir("falta defectos.toml: sin defectos reales")
-        });
+        return Ok((
+            Metrica {
+                umbral,
+                ..Metrica::sin_medir("falta defectos.toml: sin defectos reales")
+            },
+            Vec::new(),
+        ));
     };
     if defectos.is_empty() {
-        return Ok(Metrica {
-            umbral,
-            ..Metrica::sin_medir("defectos.toml no tiene defectos")
-        });
+        return Ok((
+            Metrica {
+                umbral,
+                ..Metrica::sin_medir("defectos.toml no tiene defectos")
+            },
+            Vec::new(),
+        ));
     }
     let mut encontrados = 0;
+    let mut detalle = Vec::with_capacity(defectos.len());
     for defecto in defectos {
         let v = ev.veredicto(&defecto.tarea, &casos.join(&defecto.repo))?;
-        if encuentra(&v, defecto) {
+        let encontrado = encuentra(&v, defecto);
+        if encontrado {
             encontrados += 1;
         }
+        detalle.push(DetalleDefecto {
+            tarea: defecto.tarea.clone(),
+            repo: defecto.repo.clone(),
+            archivo: defecto.archivo.clone(),
+            linea: defecto.linea,
+            encontrado,
+            en_evidencia: en_evidencia(&v, defecto),
+            hallazgo_cercano: hallazgo_mas_cercano(&v, defecto),
+            test: defecto.test.clone(),
+            test_rojo: test_rojo(&v, defecto),
+        });
     }
-    Ok(Metrica::fraccion(
-        encontrados,
-        defectos.len() as u32,
-        umbral,
-    ))
+    let metrica = Metrica::fraccion(encontrados, defectos.len() as u32, umbral);
+    Ok((metrica, detalle))
 }
 
 /// Un paquete a ciegas ya evaluado por Root, con el formulario del usuario si lo hay.
@@ -1218,6 +1406,9 @@ struct DefectoReal {
     linea: u32,
     fuente: String,
     detalle: String,
+    /// Test que marca el defecto. Opcional: los `defectos.toml` viejos no lo traen.
+    #[serde(default)]
+    test: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1479,6 +1670,48 @@ anclas = [
 
     fn cerca(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-5
+    }
+
+    /// Lee un veredicto guardado en disco y lo deserializa. Falla si el archivo no existe.
+    fn leer_veredicto(ruta: &Path) -> Veredicto {
+        let texto = fs::read_to_string(ruta).expect("lee el veredicto guardado");
+        serde_json::from_str::<Veredicto>(&texto).expect("deserializa el veredicto")
+    }
+
+    #[test]
+    fn validez_guarda_el_veredicto_de_cada_repo() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir(
+            &casos.join("orden.toml"),
+            "[[par]]\ntarea = \"memora\"\nmejor = \"a\"\npeor = \"b\"\nfuente = \"fixture: resultado medido\"\n",
+        );
+        let va = veredicto(Some(Decision::Listo), None, Some(0.9), &[]);
+        let vb = veredicto(Some(Decision::NoListo), None, Some(0.4), &[]);
+        let mapa = falso(vec![clave("a", va.clone()), clave("b", vb.clone())]);
+        validar_con(casos, &mapa).expect("mide");
+        assert_eq!(leer_veredicto(&casos.join("veredictos/a.json")), va);
+        assert_eq!(leer_veredicto(&casos.join("veredictos/b.json")), vb);
+    }
+
+    #[test]
+    fn validez_veredicto_de_paquete_ciego_usa_el_id() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir(
+            &casos.join("orden.toml"),
+            "[[par]]\ntarea = \"memora\"\nmejor = \"ciego/p1/repo\"\npeor = \"ciego/p2/repo\"\nfuente = \"fixture: resultado medido\"\n",
+        );
+        let v1 = veredicto(Some(Decision::Listo), None, Some(0.9), &[]);
+        let v2 = veredicto(Some(Decision::NoListo), None, Some(0.4), &[]);
+        let mapa = falso(vec![
+            clave("ciego/p1/repo", v1.clone()),
+            clave("ciego/p2/repo", v2.clone()),
+        ]);
+        validar_con(casos, &mapa).expect("mide");
+        assert_eq!(leer_veredicto(&casos.join("veredictos/p1.json")), v1);
+        assert_eq!(leer_veredicto(&casos.join("veredictos/p2.json")), v2);
+        assert!(!casos.join("veredictos/repo.json").exists());
     }
 
     #[test]
@@ -2250,5 +2483,511 @@ fuente = "fixture"
             "el aviso dice que faltan niveles: {:?}",
             v.avisos
         );
+    }
+
+    /// Busca el detalle del par cuyo `mejor` es `mejor`. Falla si no hay.
+    fn par_de<'a>(pares: &'a [DetallePar], mejor: &str) -> &'a DetallePar {
+        pares
+            .iter()
+            .find(|p| p.mejor == mejor)
+            .expect("par en el detalle")
+    }
+
+    #[test]
+    fn validez_pares_identifica_el_par_fallido() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir(
+            &casos.join("orden.toml"),
+            "[[par]]\ntarea = \"memora\"\nmejor = \"a\"\npeor = \"b\"\nfuente = \"fixture\"\n\n\
+             [[par]]\ntarea = \"memora\"\nmejor = \"c\"\npeor = \"d\"\nfuente = \"fixture\"\n",
+        );
+        // El primer par falla: `a` tiene global menor que `b`. El segundo ordena bien.
+        let mapa = falso(vec![
+            clave(
+                "a",
+                veredicto(Some(Decision::Listo), Some(0.5), Some(0.7), &[]),
+            ),
+            clave(
+                "b",
+                veredicto(Some(Decision::Listo), Some(0.9), Some(0.6), &[]),
+            ),
+            clave(
+                "c",
+                veredicto(Some(Decision::Listo), Some(0.9), Some(0.8), &[]),
+            ),
+            clave(
+                "d",
+                veredicto(Some(Decision::Listo), Some(0.4), Some(0.2), &[]),
+            ),
+        ]);
+        let v = validar_con(casos, &mapa).expect("mide");
+        assert_eq!(v.pares.len(), 2, "un detalle por par");
+        let fallido = par_de(&v.pares, "a");
+        assert_eq!(fallido.tarea, "memora");
+        assert_eq!(fallido.peor, "b");
+        assert!(!fallido.acierto);
+        assert_eq!(fallido.decision_mejor, Some(Decision::Listo));
+        assert_eq!(fallido.decision_peor, Some(Decision::Listo));
+        assert_eq!(fallido.global_mejor, Some(0.5));
+        assert_eq!(fallido.global_peor, Some(0.9));
+        assert_eq!(fallido.completitud_mejor, Some(0.7));
+        assert_eq!(fallido.completitud_peor, Some(0.6));
+        assert_eq!(fallido.criterio, "global");
+        let bien = par_de(&v.pares, "c");
+        assert!(bien.acierto, "el segundo par ordena bien");
+        assert_eq!(bien.criterio, "global");
+    }
+
+    #[test]
+    fn validez_pares_criterio_decision_completitud_y_sin_orden() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir(
+            &casos.join("orden.toml"),
+            "[[par]]\ntarea = \"memora\"\nmejor = \"d1\"\npeor = \"d2\"\nfuente = \"fixture\"\n\n\
+             [[par]]\ntarea = \"memora\"\nmejor = \"g1\"\npeor = \"g2\"\nfuente = \"fixture\"\n\n\
+             [[par]]\ntarea = \"memora\"\nmejor = \"c1\"\npeor = \"c2\"\nfuente = \"fixture\"\n\n\
+             [[par]]\ntarea = \"memora\"\nmejor = \"s1\"\npeor = \"s2\"\nfuente = \"fixture\"\n",
+        );
+        let mapa = falso(vec![
+            // Decisión distinta: `Listo` pesa más que `NoListo`, aunque el global sea menor.
+            clave(
+                "d1",
+                veredicto(Some(Decision::Listo), Some(0.1), Some(0.1), &[]),
+            ),
+            clave(
+                "d2",
+                veredicto(Some(Decision::NoListo), Some(0.9), Some(0.9), &[]),
+            ),
+            // Misma decisión: manda el global.
+            clave(
+                "g1",
+                veredicto(Some(Decision::Listo), Some(0.6), Some(0.2), &[]),
+            ),
+            clave(
+                "g2",
+                veredicto(Some(Decision::Listo), Some(0.4), Some(0.9), &[]),
+            ),
+            // Sin global en ninguno: manda la completitud.
+            clave("c1", veredicto(Some(Decision::Listo), None, Some(0.8), &[])),
+            clave("c2", veredicto(Some(Decision::Listo), None, Some(0.3), &[])),
+            // Sin decisión del mejor: sin orden, y el par falla.
+            clave("s1", veredicto(None, Some(0.9), Some(0.9), &[])),
+            clave(
+                "s2",
+                veredicto(Some(Decision::Listo), Some(0.1), Some(0.1), &[]),
+            ),
+        ]);
+        let v = validar_con(casos, &mapa).expect("mide");
+        let d = par_de(&v.pares, "d1");
+        assert_eq!(d.criterio, "decision");
+        assert!(d.acierto);
+        let g = par_de(&v.pares, "g1");
+        assert_eq!(g.criterio, "global");
+        assert!(g.acierto);
+        let c = par_de(&v.pares, "c1");
+        assert_eq!(c.criterio, "completitud");
+        assert!(c.acierto);
+        assert_eq!(c.global_mejor, None);
+        let s = par_de(&v.pares, "s1");
+        assert_eq!(s.criterio, "sin_orden");
+        assert!(!s.acierto, "sin orden el par falla");
+        assert_eq!(s.decision_mejor, None);
+        assert_eq!(s.decision_peor, Some(Decision::Listo));
+    }
+
+    #[test]
+    fn validez_pares_no_cambia_exactitud_orden() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir(
+            &casos.join("orden.toml"),
+            "[[par]]\ntarea = \"memora\"\nmejor = \"x1\"\npeor = \"x2\"\nfuente = \"fixture\"\n\n\
+             [[par]]\ntarea = \"memora\"\nmejor = \"y1\"\npeor = \"y2\"\nfuente = \"fixture\"\n\n\
+             [[par]]\ntarea = \"memora\"\nmejor = \"z1\"\npeor = \"z2\"\nfuente = \"fixture\"\n",
+        );
+        // Un acierto por decisión, un fallo por global y un empate por global (cuenta como fallo).
+        let mapa = falso(vec![
+            clave("x1", veredicto(Some(Decision::Listo), Some(0.9), None, &[])),
+            clave(
+                "x2",
+                veredicto(Some(Decision::NoListo), Some(0.1), None, &[]),
+            ),
+            clave("y1", veredicto(Some(Decision::Listo), Some(0.3), None, &[])),
+            clave("y2", veredicto(Some(Decision::Listo), Some(0.8), None, &[])),
+            clave("z1", veredicto(Some(Decision::Listo), Some(0.5), None, &[])),
+            clave("z2", veredicto(Some(Decision::Listo), Some(0.5), None, &[])),
+        ]);
+        let v = validar_con(casos, &mapa).expect("mide");
+        assert_eq!(v.exactitud_orden.aciertos, Some(1));
+        assert_eq!(v.exactitud_orden.casos, 3);
+        assert!(cerca(v.exactitud_orden.valor.expect("medida"), 1.0 / 3.0));
+        assert_eq!(v.exactitud_orden.cumple, Some(false));
+        assert_eq!(v.pares.len(), 3);
+        let aciertos_pares = v.pares.iter().filter(|p| p.acierto).count() as u32;
+        assert_eq!(Some(aciertos_pares), v.exactitud_orden.aciertos);
+    }
+
+    #[test]
+    fn validez_viejo_sin_pares_lee_vacio() {
+        let dir = TempDir::new().expect("temporal");
+        let v = validar_con(dir.path(), &falso(Vec::new())).expect("mide");
+        let mut json = serde_json::to_value(&v).expect("serializa");
+        let mapa = json.as_object_mut().expect("objeto");
+        assert!(
+            mapa.remove("pares").is_some(),
+            "la clave pares se serializa"
+        );
+        let viejo: Validez = serde_json::from_value(json).expect("lee un validez sin pares");
+        assert!(viejo.pares.is_empty());
+        assert_eq!(viejo.exactitud_orden, v.exactitud_orden);
+    }
+
+    /// Escribe `defectos.toml` con un `[[defecto]]` por `(archivo, linea)`, todos de `memora` en `r`.
+    fn escribir_defectos(casos: &Path, defectos: &[(&str, u32)]) {
+        let mut texto = String::new();
+        for (archivo, linea) in defectos {
+            texto += &format!(
+                "[[defecto]]\ntarea = \"memora\"\nrepo = \"r\"\narchivo = \"{archivo}\"\nlinea = {linea}\n\
+                 fuente = \"revisión fixture\"\ndetalle = \"defecto fixture\"\n\n"
+            );
+        }
+        escribir(&casos.join("defectos.toml"), &texto);
+    }
+
+    #[test]
+    fn validez_defectos_identifica_el_encontrado_y_el_perdido() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos(casos, &[("src/a.rs", 20), ("src/a.rs", 40)]);
+        // El hallazgo de 22 queda a 2 líneas del primer defecto. El de 50 queda a 10 del segundo.
+        let mut juez = hallazgo("src/a.rs", 22);
+        juez.fuente = Fuente::Juez {
+            modelo: "modelo-fixture".into(),
+        };
+        let v_root = Veredicto {
+            hallazgos: vec![juez, hallazgo("src/a.rs", 50)],
+            ..Veredicto::default()
+        };
+        let v = validar_con(casos, &falso(vec![clave("r", v_root)])).expect("mide");
+        assert_eq!(v.defectos.len(), 2, "un detalle por defecto");
+        let encontrado = &v.defectos[0];
+        assert!(
+            encontrado.encontrado,
+            "el hallazgo de 22 cubre el defecto de 20"
+        );
+        assert_eq!(encontrado.tarea, "memora");
+        assert_eq!(encontrado.repo, "r");
+        assert_eq!(encontrado.archivo, "src/a.rs");
+        assert_eq!(encontrado.linea, 20);
+        assert_eq!(
+            encontrado.hallazgo_cercano,
+            Some(HallazgoCercano {
+                linea: 22,
+                fuente: Fuente::Juez {
+                    modelo: "modelo-fixture".into(),
+                },
+                distancia: 2,
+            })
+        );
+        let perdido = &v.defectos[1];
+        assert!(!perdido.encontrado, "el hallazgo de 50 queda fuera de ±3");
+        assert_eq!(perdido.linea, 40);
+        assert_eq!(
+            perdido.hallazgo_cercano,
+            Some(HallazgoCercano {
+                linea: 50,
+                fuente: Fuente::Sonda("fixture".into()),
+                distancia: 10,
+            })
+        );
+    }
+
+    #[test]
+    fn validez_defectos_sin_hallazgo_en_el_archivo_da_null() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos(casos, &[("src/a.rs", 20)]);
+        // El hallazgo cae en otro archivo: no es cercano al defecto.
+        let v_root = Veredicto {
+            hallazgos: vec![hallazgo("src/b.rs", 20)],
+            ..Veredicto::default()
+        };
+        let v = validar_con(casos, &falso(vec![clave("r", v_root)])).expect("mide");
+        let detalle = &v.defectos[0];
+        assert!(!detalle.encontrado);
+        assert_eq!(detalle.hallazgo_cercano, None);
+        let json = serde_json::to_value(detalle).expect("serializa");
+        assert_eq!(
+            json.get("hallazgo_cercano"),
+            Some(&serde_json::Value::Null),
+            "la clave existe con null"
+        );
+    }
+
+    #[test]
+    fn validez_defectos_elige_el_mas_cercano() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos(casos, &[("src/a.rs", 20)]);
+        // El de 14 va primero y queda a 6. El de 19 queda a 1. El de otro archivo, a 0, no cuenta.
+        let v_root = Veredicto {
+            hallazgos: vec![
+                hallazgo("src/a.rs", 14),
+                hallazgo("src/otro.rs", 20),
+                hallazgo("src/a.rs", 19),
+            ],
+            ..Veredicto::default()
+        };
+        let v = validar_con(casos, &falso(vec![clave("r", v_root)])).expect("mide");
+        let cercano = v.defectos[0]
+            .hallazgo_cercano
+            .clone()
+            .expect("hay hallazgo en el archivo");
+        assert_eq!(cercano.linea, 19);
+        assert_eq!(cercano.distancia, 1);
+    }
+
+    #[test]
+    fn validez_defectos_no_cambia_recall() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos(
+            casos,
+            &[("src/a.rs", 20), ("src/a.rs", 40), ("src/b.rs", 20)],
+        );
+        // Caso mixto: uno encontrado, uno con hallazgo lejano y uno sin hallazgo en su archivo.
+        let v_root = Veredicto {
+            hallazgos: vec![
+                hallazgo("src/a.rs", 22),
+                hallazgo("src/a.rs", 50),
+                hallazgo("src/c.rs", 20),
+            ],
+            ..Veredicto::default()
+        };
+        let v = validar_con(casos, &falso(vec![clave("r", v_root)])).expect("mide");
+        let encontrados = v.defectos.iter().filter(|d| d.encontrado).count() as u32;
+        assert_eq!(encontrados, 1);
+        assert_eq!(v.recall.aciertos, Some(encontrados));
+        assert_eq!(v.recall.casos, v.defectos.len() as u32);
+        assert!(cerca(v.recall.valor.expect("medida"), 1.0 / 3.0));
+    }
+
+    #[test]
+    fn validez_viejo_sin_defectos_lee_vacio() {
+        let dir = TempDir::new().expect("temporal");
+        let v = validar_con(dir.path(), &falso(Vec::new())).expect("mide");
+        let mut json = serde_json::to_value(&v).expect("serializa");
+        let mapa = json.as_object_mut().expect("objeto");
+        assert!(
+            mapa.remove("defectos").is_some(),
+            "la clave defectos se serializa"
+        );
+        let viejo: Validez = serde_json::from_value(json).expect("lee un validez sin defectos");
+        assert!(viejo.defectos.is_empty());
+        assert_eq!(viejo.recall, v.recall);
+    }
+
+    #[test]
+    fn validez_evidencia_cercana_sin_hallazgo_no_es_encontrado() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos(casos, &[("src/a.rs", 100)]);
+        // Sin hallazgos. La evidencia cita una línea a 1 del defecto.
+        let mut v_root = veredicto(None, None, None, &[("seguridad.secretos", 2)]);
+        v_root.puntajes[0].items[0].evidencia = vec!["src/a.rs:101".into()];
+        let v = validar_con(casos, &falso(vec![clave("r", v_root)])).expect("mide");
+        let detalle = &v.defectos[0];
+        assert!(!detalle.encontrado, "sin hallazgo no hay encontrado");
+        assert!(detalle.en_evidencia, "la cita cae a 1 línea del defecto");
+        assert_eq!(v.recall.aciertos, Some(0));
+    }
+
+    #[test]
+    fn validez_evidencia_lejana_u_otro_archivo_no_cuenta() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos(casos, &[("src/a.rs", 100)]);
+        // Ninguna cita cae a 3 líneas o menos del defecto en su archivo. La última no tiene forma archivo:linea.
+        let mut v_root = veredicto(None, None, None, &[("seguridad.secretos", 2)]);
+        v_root.puntajes[0].items[0].evidencia = vec![
+            "src/a.rs:110".into(),
+            "src/b.rs:100".into(),
+            "test_x::t: pasa".into(),
+        ];
+        let v = validar_con(casos, &falso(vec![clave("r", v_root)])).expect("mide");
+        assert!(!v.defectos[0].en_evidencia);
+    }
+
+    #[test]
+    fn validez_evidencia_acepta_prefijo_y_borde() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos(casos, &[("src/a.rs", 100)]);
+        let correr = |cita: &str| {
+            let mut v_root = veredicto(None, None, None, &[("seguridad.secretos", 2)]);
+            v_root.puntajes[0].items[0].evidencia = vec![cita.into()];
+            validar_con(casos, &falso(vec![clave("r", v_root)])).expect("mide")
+        };
+        // El borde son 3 líneas: cuenta. Una más queda fuera.
+        assert!(correr("./src/a.rs:103").defectos[0].en_evidencia);
+        assert!(!correr("src/a.rs:104").defectos[0].en_evidencia);
+    }
+
+    #[test]
+    fn validez_evidencia_no_cambia_recall() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos(casos, &[("src/a.rs", 100)]);
+        // Hallazgo a 3 líneas y sin evidencia: sigue siendo encontrado.
+        let v_root = Veredicto {
+            hallazgos: vec![hallazgo("src/a.rs", 103)],
+            ..Veredicto::default()
+        };
+        let v = validar_con(casos, &falso(vec![clave("r", v_root)])).expect("mide");
+        assert!(v.defectos[0].encontrado);
+        assert!(!v.defectos[0].en_evidencia, "sin evidencia no hay cita");
+        assert_eq!(v.recall.valor, Some(1.0));
+        assert_eq!(v.recall.aciertos, Some(1));
+    }
+
+    #[test]
+    fn validez_viejo_defecto_sin_en_evidencia_lee_false() {
+        let dir = TempDir::new().expect("temporal");
+        escribir_defectos(dir.path(), &[("src/a.rs", 20)]);
+        let v =
+            validar_con(dir.path(), &falso(vec![clave("r", Veredicto::default())])).expect("mide");
+        let mut json = serde_json::to_value(&v.defectos[0]).expect("serializa");
+        assert!(
+            json.as_object_mut()
+                .expect("objeto")
+                .remove("en_evidencia")
+                .is_some(),
+            "la clave en_evidencia se serializa"
+        );
+        let viejo: DetalleDefecto =
+            serde_json::from_value(json).expect("lee un defecto sin en_evidencia");
+        assert!(!viejo.en_evidencia);
+    }
+
+    /// Escribe `defectos.toml` con un `[[defecto]]` por `(repo, archivo, linea, test)`. Va siempre el campo `test`.
+    fn escribir_defectos_con_test(casos: &Path, defectos: &[(&str, &str, u32, &str)]) {
+        let mut texto = String::new();
+        for (repo, archivo, linea, test) in defectos {
+            texto += &format!(
+                "[[defecto]]\ntarea = \"memora\"\nrepo = \"{repo}\"\narchivo = \"{archivo}\"\nlinea = {linea}\n\
+                 fuente = \"revisión fixture\"\ndetalle = \"defecto fixture\"\ntest = \"{test}\"\n\n"
+            );
+        }
+        escribir(&casos.join("defectos.toml"), &texto);
+    }
+
+    #[test]
+    fn validez_defecto_acepta_el_campo_test() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos_con_test(casos, &[("r", "src/a.rs", 20, "t::mi_test")]);
+        let v = validar_con(casos, &falso(vec![clave("r", Veredicto::default())]))
+            .expect("acepta el campo test");
+        assert_eq!(v.defectos[0].test, Some("t::mi_test".to_string()));
+    }
+
+    #[test]
+    fn validez_test_rojo_en_cada_lista() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos_con_test(
+            casos,
+            &[
+                ("uno", "src/a.rs", 20, "t::oculto"),
+                ("dos", "src/a.rs", 40, "t::inestable"),
+                ("tres", "src/a.rs", 60, "t::inestable_contrato"),
+                ("cuatro", "src/a.rs", 80, "t::contrato"),
+                ("cinco", "src/a.rs", 100, "t::sano"),
+            ],
+        );
+        let v_uno = Veredicto {
+            ocultos_fallidos: vec!["t::oculto".into()],
+            ..Veredicto::default()
+        };
+        let v_dos = Veredicto {
+            inestables: vec!["t::inestable".into()],
+            ..Veredicto::default()
+        };
+        let v_tres = Veredicto {
+            inestables_contrato: vec!["t::inestable_contrato".into()],
+            ..Veredicto::default()
+        };
+        let v_cuatro = Veredicto {
+            contrato_fallidos: vec!["t::contrato".into()],
+            ..Veredicto::default()
+        };
+        // Lista de fallos con otros ids: `t::sano` no está en ninguna.
+        let v_cinco = Veredicto {
+            ocultos_fallidos: vec!["t::otro".into()],
+            inestables: vec!["t::otro_inestable".into()],
+            inestables_contrato: vec!["t::otro_contrato".into()],
+            contrato_fallidos: vec!["t::otro_fallido".into()],
+            ..Veredicto::default()
+        };
+        let mapa = vec![
+            clave("uno", v_uno),
+            clave("dos", v_dos),
+            clave("tres", v_tres),
+            clave("cuatro", v_cuatro),
+            clave("cinco", v_cinco),
+        ];
+        let v = validar_con(casos, &falso(mapa)).expect("mide");
+        for detalle in &v.defectos[..4] {
+            assert_eq!(detalle.test_rojo, Some(true), "test {:?}", detalle.test);
+        }
+        assert_eq!(v.defectos[4].test_rojo, Some(false));
+    }
+
+    #[test]
+    fn validez_test_rojo_sin_hallazgo_no_cambia_recall() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos_con_test(casos, &[("r", "src/a.rs", 20, "t::rojo")]);
+        // Test rojo y sin hallazgos en el archivo.
+        let v_root = Veredicto {
+            ocultos_fallidos: vec!["t::rojo".into()],
+            ..Veredicto::default()
+        };
+        let v = validar_con(casos, &falso(vec![clave("r", v_root)])).expect("mide");
+        let detalle = &v.defectos[0];
+        assert!(!detalle.encontrado, "test rojo no cuenta como encontrado");
+        assert_eq!(detalle.test_rojo, Some(true));
+        assert_eq!(v.recall.aciertos, Some(0));
+    }
+
+    #[test]
+    fn validez_defecto_sin_test_da_test_rojo_none() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos(casos, &[("src/a.rs", 20)]);
+        let v = validar_con(casos, &falso(vec![clave("r", Veredicto::default())])).expect("mide");
+        assert_eq!(v.defectos[0].test, None);
+        assert_eq!(v.defectos[0].test_rojo, None);
+    }
+
+    #[test]
+    fn validez_viejo_detalle_sin_test_lee_none() {
+        let dir = TempDir::new().expect("temporal");
+        escribir_defectos(dir.path(), &[("src/a.rs", 20)]);
+        let v =
+            validar_con(dir.path(), &falso(vec![clave("r", Veredicto::default())])).expect("mide");
+        let mut json = serde_json::to_value(&v.defectos[0]).expect("serializa");
+        let mapa = json.as_object_mut().expect("objeto");
+        assert!(mapa.remove("test").is_some(), "la clave test se serializa");
+        assert!(
+            mapa.remove("test_rojo").is_some(),
+            "la clave test_rojo se serializa"
+        );
+        let viejo: DetalleDefecto =
+            serde_json::from_value(json).expect("lee un detalle sin test ni test_rojo");
+        assert_eq!(viejo.test, None);
+        assert_eq!(viejo.test_rojo, None);
     }
 }
