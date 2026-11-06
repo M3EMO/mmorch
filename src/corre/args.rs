@@ -70,6 +70,13 @@ pub fn args_claude(
     args
 }
 
+/// Inserta `--resume <sesion>` justo después de `-p <prompt>`, en el índice 2. Si la lista es más corta, lo agrega al final.
+pub fn con_resume(mut args: Vec<String>, sesion: &str) -> Vec<String> {
+    let indice = args.len().min(2);
+    args.splice(indice..indice, ["--resume".to_string(), sesion.to_string()]);
+    args
+}
+
 /// Entorno del lanzamiento del builder. De `entorno_del_proceso` solo pasan `PATH` y `LANG`. Siempre fija la
 /// espera de `claude` igual al plazo del builder y la carpeta de datos de ECC. Si el rol fija `subagent_model`, agrega
 /// `CLAUDE_CODE_SUBAGENT_MODEL`. Si la config trae `ecc_disabled_hooks`, agrega `ECC_DISABLED_HOOKS`.
@@ -405,5 +412,44 @@ mod tests {
         assert_eq!(subagente(Rol::Planifica), Some("sonnet".to_string()));
         assert_eq!(subagente(Rol::Construye), None);
         assert_eq!(subagente(Rol::Verifica), None);
+    }
+
+    #[test]
+    fn corre_con_resume_va_justo_despues_del_prompt() {
+        let args: Vec<String> = ["-p", "haz", "--output-format", "stream-json"]
+            .map(String::from)
+            .to_vec();
+        let con = con_resume(args, "sesion-1");
+        let esperado: Vec<String> = [
+            "-p",
+            "haz",
+            "--resume",
+            "sesion-1",
+            "--output-format",
+            "stream-json",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(con, esperado);
+    }
+
+    #[test]
+    fn corre_con_resume_sobre_args_de_claude_deja_el_prompt_en_su_lugar() {
+        let tmp = TempDir::new().expect("tmp");
+        let home = tmp.path().join("root");
+        fs::create_dir_all(home.join("oraculos")).expect("oraculos");
+        let args = args_claude(
+            "el prompt",
+            "m",
+            &home,
+            &ClaudeCorrida::default(),
+            Rol::Construye,
+        );
+        let con = con_resume(args, "s9");
+        assert_eq!(con[0], "-p");
+        assert_eq!(con[1], "el prompt");
+        assert_eq!(valor_de(&con, "--resume"), "s9", "{con:?}");
+        assert_eq!(con[2], "--resume", "{con:?}");
+        assert_eq!(valor_de(&con, "--model"), "m", "{con:?}");
     }
 }

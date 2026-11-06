@@ -9,7 +9,7 @@ use serde_json::{Map, Value, json};
 
 use crate::borrado;
 use crate::config::Config;
-use crate::corre::args::{args_claude, env_del_builder};
+use crate::corre::args::{args_claude, con_resume, env_del_builder};
 use crate::corre::config::ConfigCorrida;
 use crate::corre::contenedor::{TIMEOUT_BUILDER, estado_de};
 use crate::corre::costo_cortado::{
@@ -48,6 +48,10 @@ const MENSAJE_ESTADO_FINAL: &str = "r00t corre: estado final";
 const MARGEN_LOGIN: Duration = Duration::from_secs(5 * 60);
 /// Vida mínima que debe tener el login para arrancar un rol.
 const VIGENCIA_MINIMA: Duration = Duration::from_secs(20 * 60);
+/// Lanzamientos máximos de un rol cuando sus vueltas se cortan por plazo.
+const MAX_VUELTAS: u32 = 4;
+/// Prefijo del prompt de cada vuelta que sigue a un corte por plazo.
+const PROMPT_CONTINUACION: &str = "La vuelta anterior se cortó por tiempo. Revisá `git status` y `git log`. Terminá o descartá lo que quedó sin commit. Seguí esta instrucción:";
 
 /// Lo que `correr` necesita del mundo. Producción arma las de la CLI; los tests dan las suyas.
 pub struct DepsCorre<'a> {
@@ -65,12 +69,11 @@ pub struct DepsCorre<'a> {
     pub entorno: &'a [(String, String)],
 }
 
-/// Un rol que ya corrió: su número de paso, su transcript, su código de salida y su línea `result`.
+/// Una vuelta que terminó bien: su número de lanzamiento, su código de salida y su línea `result`.
 struct Lanzado {
     n: u32,
     rol: Rol,
     codigo: i32,
-    ruta: PathBuf,
     linea: String,
 }
 
@@ -79,17 +82,22 @@ struct Lanzado {
 /// Cada rol registra su sesión al terminar, antes de lanzar el siguiente.
 /// Así su costo queda aunque un rol posterior aborte.
 ///
-/// El login debe durar al menos `VIGENCIA_MINIMA` para arrancar. Cada rol corre con un plazo
+/// El login debe durar al menos `VIGENCIA_MINIMA` para arrancar. Cada lanzamiento corre con un plazo
 /// que sale de la vida del login en ese momento (ver `plazo_de_lanzamiento`).
+///
+/// Un corte por plazo no aborta: el mismo rol vuelve a lanzarse, hasta `MAX_VUELTAS` lanzamientos.
+/// Cada vuelta retoma la sesión de la anterior con `--resume`, si la hay, y pide continuar.
+/// Si la última vuelta también se corta, el rol se agota y no corren más roles.
+/// La corrida igual llega a las lecturas del oráculo, a la evaluación y a la fila.
 ///
 /// Un código distinto de 0 de un rol corta la corrida: los roles siguientes no corren,
 /// pero la evaluación sí, y el informe dice lo que falta.
-/// Un fallo al lanzar aborta sin evaluar: sin builder no hay nada que evaluar,
+/// Un fallo al lanzar que no es un corte aborta sin evaluar: sin builder no hay nada que evaluar,
 /// y la evaluación puede gastar API.
 /// Un rol sin `result` exitoso también aborta sin evaluar ni escribir fila: deja un `Gate` con el motivo.
-/// Un rol cortado por plazo además guarda su transcript parcial y registra su costo estimado
+/// Cada vuelta cortada guarda su transcript parcial y registra su costo estimado
 /// (ver `registrar_corte`).
-/// Desde el segundo rol, la vigencia del login se espera antes de cada lanzamiento
+/// Desde el segundo lanzamiento, la vigencia del login se espera antes de cada lanzamiento
 /// (ver `esperar_vigencia_del_rol`).
 pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, ErrorCorre> {
     // a) GOAL: sin autorización no arranca y no se crea nada.
@@ -122,66 +130,108 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
     };
     let id = corrida.id.clone();
 
-    // e) Lanzamiento por rol, en orden. Cada salida se guarda como transcript.
+    // e) Lanzamiento por rol, en orden. Cada salida se guarda como transcript. Un corte por plazo
+    // vuelve a lanzar el mismo rol, hasta `MAX_VUELTAS` veces.
     let mut lanzados: Vec<Lanzado> = Vec::new();
-    for (indice, (rol, eleccion)) in elecciones.iter().enumerate() {
-        // Desde el segundo rol, cada lanzamiento vuelve a leer la credencial: se revisa su vigencia antes.
-        if indice > 0 {
-            esperar_vigencia_del_rol(deps.ejecutor, &ruta_eventos, &id, *rol)?;
-        }
-        let prompt = config_cargada.prompt.get(rol).cloned().unwrap_or_default();
+    // Transcript de cada lanzamiento, buenos y cortados. Lo revisa el oráculo en el paso g.
+    let mut transcripts: Vec<(Rol, PathBuf)> = Vec::new();
+    let mut lanzamientos: u32 = 0;
+    for (rol, eleccion) in &elecciones {
+        let prompt_rol = config_cargada.prompt.get(rol).cloned().unwrap_or_default();
         let modelo = eleccion.modelo.clone().unwrap_or_default();
-        // El plazo sale de la vida del login en este momento, no de la del inicio de la corrida.
-        let plazo = plazo_de_lanzamiento(deps.ejecutor.vida_restante()?);
-        let lanzamiento = Lanzamiento {
-            rol: *rol,
-            args: args_claude(&prompt, &modelo, deps.home, &config_cargada.claude, *rol),
-            env: env_del_builder(&config_cargada.claude, *rol, deps.entorno),
-            repo: corrida.repo.clone(),
-            plugin: config_cargada.claude.plugin_de(*rol).map(Path::to_path_buf),
-            plazo,
-        };
-        let n = u32::try_from(indice + 1).unwrap_or(u32::MAX);
-        let salida = match deps.ejecutor.lanzar(&lanzamiento) {
-            Ok(salida) => salida,
-            Err(error) => {
-                // Un rol cortado por plazo deja su transcript parcial y el costo de lo que gastó.
-                let motivo = match &error {
-                    ErrorCorre::Cortado { mensaje, stdout } => {
-                        registrar_corte(deps.home, &ruta_eventos, &id, *rol, n, &modelo, stdout)?;
-                        format!("rol {} cortado por plazo: {mensaje}", nombre_rol(*rol))
+        let mut sesion: Option<String> = None;
+        let mut vuelta: u32 = 0;
+        // `Some(código)` si el rol terminó. `None` si agotó sus vueltas cortadas.
+        let codigo = loop {
+            // Desde el segundo lanzamiento, cada uno vuelve a leer la credencial: se revisa su vigencia antes.
+            if lanzamientos > 0 {
+                esperar_vigencia_del_rol(deps.ejecutor, &ruta_eventos, &id, *rol)?;
+            }
+            vuelta += 1;
+            lanzamientos += 1;
+            let n = lanzamientos;
+            let prompt = if vuelta == 1 {
+                prompt_rol.clone()
+            } else {
+                format!("{PROMPT_CONTINUACION} {prompt_rol}")
+            };
+            let args = args_claude(&prompt, &modelo, deps.home, &config_cargada.claude, *rol);
+            let args = match &sesion {
+                Some(sesion) => con_resume(args, sesion),
+                None => args,
+            };
+            // El plazo sale de la vida del login en este momento, no de la del inicio de la corrida.
+            let plazo = plazo_de_lanzamiento(deps.ejecutor.vida_restante()?);
+            let lanzamiento = Lanzamiento {
+                rol: *rol,
+                args,
+                env: env_del_builder(&config_cargada.claude, *rol, deps.entorno),
+                repo: corrida.repo.clone(),
+                plugin: config_cargada.claude.plugin_de(*rol).map(Path::to_path_buf),
+                plazo,
+            };
+            match deps.ejecutor.lanzar(&lanzamiento) {
+                Ok(salida) => {
+                    let ruta = guardar_transcript(deps.home, &id, n, *rol, &salida.stdout)?;
+                    transcripts.push((*rol, ruta.clone()));
+                    // Sin `result` exitoso el rol no evalúa: no hay resultado que evaluar.
+                    let linea = match resultado_exitoso(&salida.stdout) {
+                        Ok(linea) => linea,
+                        Err(causa) => {
+                            let motivo =
+                                format!("rol {} sin resultado exitoso: {causa}", nombre_rol(*rol));
+                            gate(&ruta_eventos, &id, FASE_ROL, motivo.clone(), Some(*rol))?;
+                            return Err(ErrorCorre::Ejecutor(motivo));
+                        }
+                    };
+                    let codigo = salida.codigo;
+                    let lanzado = Lanzado {
+                        n,
+                        rol: *rol,
+                        codigo,
+                        linea,
+                    };
+                    // La sesión se registra al terminar el rol: si un rol siguiente aborta, su costo ya queda.
+                    registrar_sesion(deps.home, &id, &lanzado, &lanzado.linea, &ruta_eventos)?;
+                    lanzados.push(lanzado);
+                    break Some(codigo);
+                }
+                Err(ErrorCorre::Cortado { mensaje, stdout }) => {
+                    // Un corte no aborta: deja su transcript parcial, su costo y la sesión para la siguiente vuelta.
+                    let ruta =
+                        registrar_corte(deps.home, &ruta_eventos, &id, *rol, n, &modelo, &stdout)?;
+                    transcripts.push((*rol, ruta));
+                    let motivo = format!("rol {} cortado por plazo: {mensaje}", nombre_rol(*rol));
+                    gate(&ruta_eventos, &id, FASE_LANZAMIENTO, motivo, Some(*rol))?;
+                    if let Some(id_sesion) = sesion_de_transcript(&stdout) {
+                        sesion = Some(id_sesion);
                     }
-                    _ => format!("rol {} no arrancó: {error}", nombre_rol(*rol)),
-                };
-                gate(&ruta_eventos, &id, FASE_LANZAMIENTO, motivo, Some(*rol))?;
-                return Err(error);
+                    if vuelta == MAX_VUELTAS {
+                        break None;
+                    }
+                }
+                Err(error) => {
+                    let motivo = format!("rol {} no arrancó: {error}", nombre_rol(*rol));
+                    gate(&ruta_eventos, &id, FASE_LANZAMIENTO, motivo, Some(*rol))?;
+                    return Err(error);
+                }
             }
         };
-        let ruta = guardar_transcript(deps.home, &id, n, *rol, &salida.stdout)?;
-        // Sin `result` exitoso el rol no evalúa: no hay resultado que evaluar.
-        let linea = match resultado_exitoso(&salida.stdout) {
-            Ok(linea) => linea,
-            Err(causa) => {
-                let motivo = format!("rol {} sin resultado exitoso: {causa}", nombre_rol(*rol));
-                gate(&ruta_eventos, &id, FASE_ROL, motivo.clone(), Some(*rol))?;
-                return Err(ErrorCorre::Ejecutor(motivo));
+        match codigo {
+            None => {
+                let motivo = format!(
+                    "rol {} agotó {MAX_VUELTAS} vueltas cortadas por plazo",
+                    nombre_rol(*rol)
+                );
+                gate(&ruta_eventos, &id, FASE_ROL, motivo, Some(*rol))?;
+                break;
             }
-        };
-        let codigo = salida.codigo;
-        let lanzado = Lanzado {
-            n,
-            rol: *rol,
-            codigo,
-            ruta,
-            linea,
-        };
-        // La sesión se registra al terminar el rol: si un rol siguiente aborta, su costo ya queda.
-        registrar_sesion(deps.home, &id, &lanzado, &lanzado.linea, &ruta_eventos)?;
-        lanzados.push(lanzado);
-        if codigo != 0 {
-            let motivo = format!("rol {} salió con {codigo}", nombre_rol(*rol));
-            gate(&ruta_eventos, &id, FASE_ROL, motivo, Some(*rol))?;
-            break;
+            Some(codigo) if codigo != 0 => {
+                let motivo = format!("rol {} salió con {codigo}", nombre_rol(*rol));
+                gate(&ruta_eventos, &id, FASE_ROL, motivo, Some(*rol))?;
+                break;
+            }
+            Some(_) => {}
         }
     }
 
@@ -196,22 +246,17 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         registrar(&ruta_eventos, &ev)?;
     }
 
-    // g) Lecturas del oráculo en cada transcript. Las líneas que no son JSON también se anotan.
-    for lanzado in &lanzados {
-        let revision = registrar_lecturas(&lanzado.ruta, &id, &huellas, &ruta_eventos)
+    // g) Lecturas del oráculo en cada transcript, también los de vueltas cortadas.
+    // Las líneas que no son JSON también se anotan.
+    for (rol, ruta) in &transcripts {
+        let revision = registrar_lecturas(ruta, &id, &huellas, &ruta_eventos)
             .map_err(|e| de_observe("revisar el transcript", e))?;
         if !revision.avisos.is_empty() {
             let motivo = format!(
                 "transcript con líneas que no son JSON: {}",
                 revision.avisos.join("; ")
             );
-            gate(
-                &ruta_eventos,
-                &id,
-                FASE_TRANSCRIPT,
-                motivo,
-                Some(lanzado.rol),
-            )?;
+            gate(&ruta_eventos, &id, FASE_TRANSCRIPT, motivo, Some(*rol))?;
         }
     }
 
@@ -301,8 +346,9 @@ fn esperar_vigencia_del_rol(
     Err(ultimo)
 }
 
-/// Un rol cortado por tiempo: guarda su transcript parcial y registra el costo estimado de lo que gastó.
-/// Su `Gate` y su error los pone quien llama. El costo sale de `usage` y del precio del modelo.
+/// Una vuelta cortada por tiempo: guarda su transcript parcial como `<n>-<rol>.jsonl` y registra el costo
+/// estimado de lo que gastó. Devuelve la ruta del transcript. Su `Gate` lo pone quien llama.
+/// El costo sale de `usage` y del precio del modelo.
 fn registrar_corte(
     home: &Path,
     ruta_eventos: &Path,
@@ -311,13 +357,22 @@ fn registrar_corte(
     n: u32,
     modelo: &str,
     stdout: &[u8],
-) -> Result<(), ErrorCorre> {
-    guardar_transcript(home, id, n, rol, stdout)?;
+) -> Result<PathBuf, ErrorCorre> {
+    let ruta = guardar_transcript(home, id, n, rol, stdout)?;
     let config =
         Config::cargar(&home.join("root.toml")).map_err(|e| ErrorCorre::Uso(e.to_string()))?;
     let uso = uso_de_transcript(stdout);
     let costo = costo_de_uso(&uso, precio_de_rol(&config, modelo));
-    registrar(ruta_eventos, &evento_de_corte(id, modelo, &uso, &costo))
+    registrar(ruta_eventos, &evento_de_corte(id, modelo, &uso, &costo))?;
+    Ok(ruta)
+}
+
+/// `session_id` de la primera línea JSON del `stdout` que lo trae. Las líneas que no son JSON se saltan.
+fn sesion_de_transcript(stdout: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(stdout).lines().find_map(|linea| {
+        let valor: Value = serde_json::from_str(linea).ok()?;
+        valor.get("session_id")?.as_str().map(str::to_string)
+    })
 }
 
 /// Un rol va por cupo con modelo, o `r00t corre` no lo lanza.
@@ -1619,7 +1674,6 @@ mod tests {
             n: 1,
             rol: Rol::Planifica,
             codigo: 0,
-            ruta: PathBuf::new(),
             linea: String::new(),
         };
         let linea = r#"{"type":"result","total_cost_usd":0.7,"session_id":"s-dup","modelUsage":{"a":{"costUSD":0.5},"b":{"costUSD":0.2}}}"#;
@@ -1646,7 +1700,6 @@ mod tests {
             n: 1,
             rol: Rol::Planifica,
             codigo: 0,
-            ruta: PathBuf::new(),
             linea: String::new(),
         };
         let linea = r#"{"type":"result","total_cost_usd":-1.0,"session_id":"s-neg"}"#;
@@ -1769,40 +1822,320 @@ mod tests {
         }
     }
 
-    /// Evaluador que no debe correr: un rol cortado no se evalúa.
-    fn evaluador_no_debe_correr(
-        _repo: &Path,
-        _tarea: &Tarea,
-        _o: &OpcionesOraculo,
-    ) -> Result<Veredicto, ErrorOraculo> {
-        panic!("un rol cortado no se evalúa");
+    /// Qué hace un lanzamiento de `Programado`.
+    #[derive(Clone)]
+    enum Paso {
+        /// Corta por plazo: `lanzar` devuelve `Cortado` con este `stdout` parcial.
+        Corte(Vec<u8>),
+        /// Sale bien: corre el falso, con un `session_id` propio por lanzamiento.
+        Bien,
+        /// No arranca: `lanzar` devuelve un error del ejecutor que no es un corte.
+        NoArranca,
+    }
+
+    /// Ejecutor que sigue una lista de pasos, uno por lanzamiento. Sin más pasos, sale bien.
+    struct Programado {
+        pasos: Vec<Paso>,
+        lanzados: RefCell<Vec<Lanzamiento>>,
+    }
+
+    impl Programado {
+        fn con(pasos: Vec<Paso>) -> Self {
+            Self {
+                pasos,
+                lanzados: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl EjecutorBuilder for Programado {
+        fn lanzar(&self, l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre> {
+            self.lanzados.borrow_mut().push(l.clone());
+            let n = self.lanzados.borrow().len();
+            let paso = self.pasos.get(n - 1).cloned().unwrap_or(Paso::Bien);
+            match paso {
+                Paso::Corte(stdout) => Err(ErrorCorre::Cortado {
+                    mensaje: "timeout tras 7200 s; se pidió borrar el contenedor prueba".into(),
+                    stdout,
+                }),
+                Paso::NoArranca => Err(ErrorCorre::Ejecutor("prueba: no arranca".into())),
+                Paso::Bien => {
+                    let mut salida = EjecutorFalso.lanzar(l)?;
+                    let texto = String::from_utf8_lossy(&salida.stdout).replace(
+                        "\"session_id\":\"s1\"",
+                        &format!("\"session_id\":\"s-bien-{n}\""),
+                    );
+                    salida.stdout = texto.into_bytes();
+                    Ok(salida)
+                }
+            }
+        }
+    }
+
+    /// Corte con el `stdout` de la fixture, que trae `session_id` en su línea `init`.
+    fn cortado() -> Paso {
+        Paso::Corte(include_bytes!("../../tests/fixtures/transcripts/cortado.jsonl").to_vec())
+    }
+
+    /// Corte cuyo `stdout` no trae `session_id` en ninguna línea.
+    fn corte_sin_sesion() -> Paso {
+        let texto = String::from_utf8_lossy(include_bytes!(
+            "../../tests/fixtures/transcripts/cortado.jsonl"
+        ))
+        .into_owned();
+        let sin: Vec<&str> = texto
+            .lines()
+            .filter(|linea| !linea.contains("session_id"))
+            .collect();
+        Paso::Corte(format!("{}\n", sin.join("\n")).into_bytes())
+    }
+
+    /// Corre `correr` con `ejecutor` y cuenta cuántas veces se evaluó el repo.
+    fn correr_contando(
+        e: &Entorno,
+        ejecutor: &dyn EjecutorBuilder,
+        config: &str,
+    ) -> (Result<Fila, ErrorCorre>, usize) {
+        let evaluaciones = Cell::new(0);
+        let evaluar = |r: &Path, t: &Tarea, o: &OpcionesOraculo| {
+            evaluaciones.set(evaluaciones.get() + 1);
+            evaluador_falso(r, t, o)
+        };
+        let resultado = correr_con_eval(e, ejecutor, &[], config, &evaluar);
+        (resultado, evaluaciones.get())
+    }
+
+    /// Hay un par de argumentos con `bandera` seguida de `valor`.
+    fn tiene_par(args: &[String], bandera: &str, valor: &str) -> bool {
+        args.windows(2).any(|p| p[0] == bandera && p[1] == valor)
+    }
+
+    /// Eventos de costo estimado de la corrida `id`.
+    fn costos_estimados(e: &Entorno, id: &str) -> usize {
+        eventos(e)
+            .iter()
+            .filter(|ev| {
+                ev.corrida == id && ev.extra.get("costo_estimado") == Some(&Value::Bool(true))
+            })
+            .count()
     }
 
     #[test]
-    fn corre_rol_cortado_registra_costo_estimado_sin_fila_ni_evaluacion() {
+    fn corre_dos_cortes_y_un_resultado_exitoso_llegan_a_evaluar() {
+        let e = entorno();
+        let ejecutor = Programado::con(vec![cortado(), cortado(), Paso::Bien]);
+        let (resultado, evaluaciones) = correr_contando(&e, &ejecutor, CONFIG_CONSTRUYE);
+        let fila = resultado.expect("la corrida llega a la evaluación");
+        assert_eq!(evaluaciones, 1, "la corrida llega al juez final");
+
+        let transcripts = e.home.join("transcripts").join(&fila.id);
+        for n in 1..=3 {
+            let ruta = transcripts.join(format!("{n}-construye.jsonl"));
+            assert!(ruta.is_file(), "falta {}", ruta.display());
+        }
+
+        let lanzados = ejecutor.lanzados.borrow();
+        assert_eq!(lanzados.len(), 3, "dos cortes y un resultado");
+        assert!(
+            !lanzados[0].args.contains(&"--resume".to_string()),
+            "{:?}",
+            lanzados[0].args
+        );
+        assert_eq!(lanzados[0].args[1], "haz hecho");
+        for l in &lanzados[1..] {
+            assert!(tiene_par(&l.args, "--resume", "s-cortado"), "{:?}", l.args);
+            let prompt = &l.args[1];
+            assert!(prompt.starts_with(PROMPT_CONTINUACION), "{prompt}");
+            assert!(prompt.ends_with(" haz hecho"), "{prompt}");
+        }
+        assert_eq!(costos_estimados(&e, &fila.id), 2, "un costo por corte");
+    }
+
+    #[test]
+    fn corre_cuatro_cortes_evaluan_el_repo_parcial_y_escriben_la_fila() {
+        let e = entorno();
+        let ejecutor = Programado::con(vec![cortado(), cortado(), cortado(), cortado()]);
+        let (resultado, evaluaciones) = correr_contando(&e, &ejecutor, CONFIG_CONSTRUYE);
+        let fila = resultado.expect("agotar las vueltas no pierde la corrida");
+        assert_eq!(evaluaciones, 1, "el repo parcial se evalúa una vez");
+        assert_eq!(
+            ejecutor.lanzados.borrow().len(),
+            4,
+            "cuatro lanzamientos, no cinco"
+        );
+        let guardadas =
+            track::filas_de(&e.home.join("runs.jsonl"), &Filtro::default()).expect("runs");
+        assert_eq!(guardadas.len(), 1, "una fila por corrida");
+        assert_eq!(guardadas[0].id, fila.id);
+        assert_eq!(
+            gates(&e, FASE_ROL),
+            vec!["rol construye agotó 4 vueltas cortadas por plazo".to_string()]
+        );
+    }
+
+    #[test]
+    fn corre_cuatro_cortes_del_primer_rol_no_lanza_el_siguiente() {
+        let e = entorno();
+        let ejecutor = Programado::con(vec![cortado(), cortado(), cortado(), cortado()]);
+        let (resultado, evaluaciones) = correr_contando(&e, &ejecutor, CONFIG_PLAN_ORGANIZA);
+        resultado.expect("la corrida llega a la evaluación");
+        assert_eq!(evaluaciones, 1, "el repo parcial se evalúa una vez");
+        let roles: Vec<Rol> = ejecutor.lanzados.borrow().iter().map(|l| l.rol).collect();
+        assert_eq!(roles, vec![Rol::Planifica; 4], "organiza no debe correr");
+    }
+
+    #[test]
+    fn corre_lectura_del_oraculo_en_una_vuelta_cortada_deja_su_evento() {
+        let e = entorno();
+        let oculto = e
+            .home
+            .join("oraculos")
+            .join(TAREA)
+            .join("oculto")
+            .join("test_y.py");
+        let mut parcial = include_bytes!("../../tests/fixtures/transcripts/cortado.jsonl").to_vec();
+        let lectura = format!(
+            "{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"r1\",\"name\":\"Bash\",\"input\":{{\"command\":\"cat {}\"}}}}]}}}}\n",
+            oculto.display()
+        );
+        parcial.extend_from_slice(lectura.as_bytes());
+        let ejecutor = Programado::con(vec![Paso::Corte(parcial), Paso::Bien]);
+        let fila =
+            correr_con(&e, &ejecutor, &[], CONFIG_CONSTRUYE).expect("la corrida llega al juez");
+        assert!(
+            eventos(&e)
+                .iter()
+                .any(|ev| ev.tipo == TipoEvento::OraculoLeido && ev.corrida == fila.id),
+            "la lectura de una vuelta cortada debe quedar en eventos"
+        );
+        assert!(fila.resumen.invalida, "la lectura debe invalidar");
+    }
+
+    #[test]
+    fn corre_vuelta_sin_resultado_exitoso_y_no_cortada_sigue_abortando() {
+        let e = entorno();
+        let builder = Builder {
+            sin_resultado: true,
+            ..Builder::default()
+        };
+        let (error, evaluadas) = correr_contando_evaluaciones(&e, &builder);
+        assert!(matches!(error, ErrorCorre::Ejecutor(_)), "{error}");
+        assert_eq!(
+            builder.lanzados.borrow().len(),
+            1,
+            "sin resultado no hay otra vuelta"
+        );
+        assert_eq!(evaluadas, 0, "no debe evaluar");
+
+        let e2 = entorno();
+        let ejecutor = Programado::con(vec![Paso::NoArranca, Paso::Bien]);
+        let error = correr_con(&e2, &ejecutor, &[], CONFIG_CONSTRUYE)
+            .expect_err("un lanzamiento que no arranca aborta");
+        assert!(matches!(error, ErrorCorre::Ejecutor(_)), "{error}");
+        assert_eq!(
+            ejecutor.lanzados.borrow().len(),
+            1,
+            "un error que no es corte no reintenta"
+        );
+        assert_eq!(gates(&e2, FASE_LANZAMIENTO).len(), 1);
+    }
+
+    #[test]
+    fn corre_sin_session_id_en_el_corte_va_sin_resume() {
+        let e = entorno();
+        let ejecutor = Programado::con(vec![corte_sin_sesion(), Paso::Bien]);
+        correr_con(&e, &ejecutor, &[], CONFIG_CONSTRUYE).expect("corre");
+        let lanzados = ejecutor.lanzados.borrow();
+        assert_eq!(lanzados.len(), 2, "un corte y una vuelta");
+        assert!(
+            !lanzados[1].args.contains(&"--resume".to_string()),
+            "{:?}",
+            lanzados[1].args
+        );
+        assert!(lanzados[1].args[1].starts_with(PROMPT_CONTINUACION));
+    }
+
+    #[test]
+    fn corre_vuelta_sin_session_id_conserva_la_sesion_anterior() {
+        let e = entorno();
+        let ejecutor = Programado::con(vec![cortado(), corte_sin_sesion(), Paso::Bien]);
+        correr_con(&e, &ejecutor, &[], CONFIG_CONSTRUYE).expect("corre");
+        let lanzados = ejecutor.lanzados.borrow();
+        assert_eq!(lanzados.len(), 3);
+        assert!(
+            tiene_par(&lanzados[2].args, "--resume", "s-cortado"),
+            "{:?}",
+            lanzados[2].args
+        );
+    }
+
+    #[test]
+    fn corre_corte_en_el_segundo_rol_reintenta_solo_ese_rol() {
+        let e = entorno();
+        let ejecutor = Programado::con(vec![Paso::Bien, cortado(), Paso::Bien]);
+        let fila = correr_con(&e, &ejecutor, &[], CONFIG_PLAN_ORGANIZA).expect("corre");
+        let roles: Vec<Rol> = ejecutor.lanzados.borrow().iter().map(|l| l.rol).collect();
+        assert_eq!(roles, vec![Rol::Planifica, Rol::Organiza, Rol::Organiza]);
+
+        let transcripts = e.home.join("transcripts").join(&fila.id);
+        assert!(transcripts.join("2-organiza.jsonl").is_file());
+        assert!(transcripts.join("3-organiza.jsonl").is_file());
+
+        let sesiones: Vec<String> = eventos(&e)
+            .iter()
+            .filter(|ev| ev.corrida == fila.id && ev.tipo == TipoEvento::Sesion)
+            .filter_map(|ev| ev.extra.get("session_id").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        assert!(
+            sesiones.contains(&"s-bien-1".to_string()),
+            "la sesión de planifica queda registrada: {sesiones:?}"
+        );
+        let lanzados = ejecutor.lanzados.borrow();
+        assert!(tiene_par(&lanzados[2].args, "--resume", "s-cortado"));
+    }
+
+    #[test]
+    fn sesion_de_transcript_toma_la_primera_linea_con_session_id() {
+        let texto = b"{\"type\":\"system\",\"session_id\":\"s-a\"}\n{\"type\":\"assistant\",\"session_id\":\"s-b\"}\n";
+        assert_eq!(sesion_de_transcript(texto), Some("s-a".to_string()));
+    }
+
+    #[test]
+    fn sesion_de_transcript_sin_session_id_da_none() {
+        assert_eq!(sesion_de_transcript(b"{\"type\":\"assistant\"}\n"), None);
+        assert_eq!(sesion_de_transcript(b""), None);
+    }
+
+    #[test]
+    fn sesion_de_transcript_salta_las_lineas_que_no_son_json() {
+        let texto = b"no es json\n{\"session_id\":\"s-c\"}\n";
+        assert_eq!(sesion_de_transcript(texto), Some("s-c".to_string()));
+        let fixture = include_bytes!("../../tests/fixtures/transcripts/cortado.jsonl");
+        assert_eq!(sesion_de_transcript(fixture), Some("s-cortado".to_string()));
+    }
+
+    #[test]
+    fn corre_rol_cortado_registra_costo_estimado_por_vuelta() {
         let e = entorno();
         let stdout = include_bytes!("../../tests/fixtures/transcripts/cortado.jsonl").to_vec();
         let builder = Cortado { stdout };
-        let error = correr_con_eval(
-            &e,
-            &builder,
-            &[],
-            CONFIG_CONSTRUYE,
-            &evaluador_no_debe_correr,
-        )
-        .expect_err("un rol cortado sale con error");
-        assert!(matches!(error, ErrorCorre::Cortado { .. }), "{error}");
-        assert_eq!(error.codigo_de_salida(), 3);
+        let (resultado, evaluaciones) = correr_contando(&e, &builder, CONFIG_CONSTRUYE);
+        let fila = resultado.expect("agotar las vueltas deja fila");
+        assert_eq!(evaluaciones, 1, "la corrida cortada llega al juez");
         assert!(
-            !e.home.join("runs.jsonl").exists(),
-            "un corte no escribe fila"
+            e.home.join("runs.jsonl").exists(),
+            "la corrida escribe su fila"
         );
+        let guardadas =
+            track::filas_de(&e.home.join("runs.jsonl"), &Filtro::default()).expect("runs");
+        assert_eq!(guardadas[0].id, fila.id);
 
         let costos: Vec<Evento> = eventos(&e)
             .into_iter()
             .filter(|ev| ev.tipo == TipoEvento::Llamada && ev.cost_usd > 0.0)
             .collect();
-        assert_eq!(costos.len(), 1, "un evento de costo para el rol cortado");
+        assert_eq!(costos.len(), 4, "un evento de costo por vuelta cortada");
         let ev = &costos[0];
         assert_eq!(ev.via, Some(Via::Cupo));
         assert_eq!(ev.modelo.as_deref(), Some("haiku"));
@@ -1818,12 +2151,20 @@ mod tests {
         assert!(!ev.extra.contains_key("precio_supuesto"));
 
         let lanzamientos = gates(&e, FASE_LANZAMIENTO);
-        assert_eq!(lanzamientos.len(), 1, "el Gate de lanzamiento se mantiene");
-        assert!(lanzamientos[0].contains("rol construye cortado por plazo"));
-        assert!(!lanzamientos[0].contains("no arrancó"));
+        assert_eq!(lanzamientos.len(), 4, "un Gate de lanzamiento por corte");
+        assert!(
+            lanzamientos
+                .iter()
+                .all(|m| m.contains("rol construye cortado por plazo"))
+        );
+        assert!(lanzamientos.iter().all(|m| !m.contains("no arrancó")));
+        assert_eq!(
+            gates(&e, FASE_ROL),
+            vec!["rol construye agotó 4 vueltas cortadas por plazo".to_string()]
+        );
         assert!(
             gates(&e, FASE_EVALUACION).is_empty(),
-            "no hay evaluación de la corrida cortada"
+            "la evaluación corre sin error"
         );
     }
 
@@ -1838,46 +2179,42 @@ mod tests {
         .expect("root.toml");
         let stdout = include_bytes!("../../tests/fixtures/transcripts/cortado.jsonl").to_vec();
         let builder = Cortado { stdout };
-        let _ = correr_con_eval(
-            &e,
-            &builder,
-            &[],
-            CONFIG_CONSTRUYE,
-            &evaluador_no_debe_correr,
-        );
+        let (resultado, _) = correr_contando(&e, &builder, CONFIG_CONSTRUYE);
+        resultado.expect("agotar las vueltas deja fila");
 
         let costos: Vec<Evento> = eventos(&e)
             .into_iter()
             .filter(|ev| ev.tipo == TipoEvento::Llamada && ev.cost_usd > 0.0)
             .collect();
-        assert_eq!(costos.len(), 1, "un evento de costo para el rol cortado");
-        let ev = &costos[0];
-        assert_eq!(ev.modelo.as_deref(), Some("opus"));
-        let esperado = 2830.0 * 15.0 / 1e6 + 130.0 * 75.0 / 1e6;
-        assert!((ev.cost_usd - esperado).abs() < 1e-9, "{}", ev.cost_usd);
-        assert_eq!(ev.extra["precio_supuesto"], Value::Bool(true));
+        assert_eq!(costos.len(), 4, "un evento de costo por vuelta cortada");
+        for ev in &costos {
+            assert_eq!(ev.modelo.as_deref(), Some("opus"));
+            let esperado = 2830.0 * 15.0 / 1e6 + 130.0 * 75.0 / 1e6;
+            assert!((ev.cost_usd - esperado).abs() < 1e-9, "{}", ev.cost_usd);
+            assert_eq!(ev.extra["precio_supuesto"], Value::Bool(true));
+        }
     }
 
     #[test]
-    fn corre_rol_cortado_guarda_su_transcript_parcial() {
+    fn corre_rol_cortado_guarda_el_transcript_de_cada_vuelta() {
         let e = entorno();
         let stdout = include_bytes!("../../tests/fixtures/transcripts/cortado.jsonl").to_vec();
         let builder = Cortado {
             stdout: stdout.clone(),
         };
-        let _ = correr_con_eval(
-            &e,
-            &builder,
-            &[],
-            CONFIG_CONSTRUYE,
-            &evaluador_no_debe_correr,
-        );
+        let _ = correr_contando(&e, &builder, CONFIG_CONSTRUYE);
         let carpetas: Vec<PathBuf> = fs::read_dir(e.home.join("transcripts"))
             .expect("carpeta de transcripts")
             .map(|entrada| entrada.expect("entrada").path())
             .collect();
         assert_eq!(carpetas.len(), 1, "una carpeta por corrida");
-        let guardado = carpetas[0].join("1-construye.jsonl");
-        assert_eq!(fs::read(&guardado).expect("transcript"), stdout);
+        for n in 1..=4 {
+            let guardado = carpetas[0].join(format!("{n}-construye.jsonl"));
+            assert_eq!(
+                fs::read(&guardado).expect("transcript"),
+                stdout,
+                "vuelta {n}"
+            );
+        }
     }
 }
