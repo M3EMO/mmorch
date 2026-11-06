@@ -4399,6 +4399,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "$ref": "#/$defs/Kappa"
       }
     },
+    "pares": {
+      "description": "Un detalle por par de `orden.toml`, en su orden. Vacío sin `orden.toml` o sin pares.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/DetallePar"
+      }
+    },
     "recall": {
       "description": "Fracción de defectos reales que Root encuentra con `archivo` y `linea` a ±3. Umbral 0,8.",
       "$ref": "#/$defs/Metrica"
@@ -4424,6 +4432,110 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "avisos"
   ],
   "$defs": {
+    "Decision": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "listo",
+            "no_listo",
+            "bloqueado"
+          ]
+        },
+        {
+          "description": "Una dimensión que bloquea no tiene veredicto: no hay \"listo\" ni \"no listo\" que decir (decisión 48).",
+          "type": "string",
+          "const": "sin_decision"
+        }
+      ]
+    },
+    "DetallePar": {
+      "description": "Detalle de un par de `orden.toml`: qué decidió Root y con qué criterio.",
+      "type": "object",
+      "properties": {
+        "acierto": {
+          "description": "`true` si Root ordena `mejor` por encima de `peor`.",
+          "type": "boolean"
+        },
+        "completitud_mejor": {
+          "description": "Completitud de `mejor`. `None` si el veredicto no la trae.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "completitud_peor": {
+          "description": "Completitud de `peor`. `None` si el veredicto no la trae.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "criterio": {
+          "description": "Criterio que decidió el par: `decision`, `global`, `completitud` o `sin_orden`.",
+          "type": "string"
+        },
+        "decision_mejor": {
+          "description": "Decisión de `mejor`. `None` si Root no dio decisión.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Decision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decision_peor": {
+          "description": "Decisión de `peor`. `None` si Root no dio decisión.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Decision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "global_mejor": {
+          "description": "Global de `mejor`. `None` si el veredicto no lo trae.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "global_peor": {
+          "description": "Global de `peor`. `None` si el veredicto no lo trae.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "mejor": {
+          "description": "Caso que debe quedar por encima.",
+          "type": "string"
+        },
+        "peor": {
+          "description": "Caso que debe quedar por debajo.",
+          "type": "string"
+        },
+        "tarea": {
+          "description": "Tarea del par.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tarea",
+        "mejor",
+        "peor",
+        "acierto",
+        "criterio"
+      ]
+    },
     "Kappa": {
       "description": "Kappa de Cohen con pesos cuadráticos. `clave` es una dimensión (`seguridad`) o un ítem (`seguridad.secretos`).",
       "type": "object",

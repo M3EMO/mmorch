@@ -85,6 +85,9 @@ pub struct Validez {
     pub v: u32,
     /// Fracción de pares de `orden.toml` que Root ordena como el resultado medido. Umbral 1,0.
     pub exactitud_orden: Metrica,
+    /// Un detalle por par de `orden.toml`, en su orden. Vacío sin `orden.toml` o sin pares.
+    #[serde(default)]
+    pub pares: Vec<DetallePar>,
     /// Fracción de defectos reales que Root encuentra con `archivo` y `linea` a ±3. Umbral 0,8.
     pub recall: Metrica,
     /// Paquetes con la misma `Decision` que el usuario. `cumple`: 5 de 6 (decisión 13).
@@ -97,6 +100,33 @@ pub struct Validez {
     pub spearman: Metrica,
     /// Casos que quedaron fuera o datos que faltan, con su motivo.
     pub avisos: Vec<String>,
+}
+
+/// Detalle de un par de `orden.toml`: qué decidió Root y con qué criterio.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DetallePar {
+    /// Tarea del par.
+    pub tarea: String,
+    /// Caso que debe quedar por encima.
+    pub mejor: String,
+    /// Caso que debe quedar por debajo.
+    pub peor: String,
+    /// `true` si Root ordena `mejor` por encima de `peor`.
+    pub acierto: bool,
+    /// Decisión de `mejor`. `None` si Root no dio decisión.
+    pub decision_mejor: Option<Decision>,
+    /// Decisión de `peor`. `None` si Root no dio decisión.
+    pub decision_peor: Option<Decision>,
+    /// Global de `mejor`. `None` si el veredicto no lo trae.
+    pub global_mejor: Option<f32>,
+    /// Global de `peor`. `None` si el veredicto no lo trae.
+    pub global_peor: Option<f32>,
+    /// Completitud de `mejor`. `None` si el veredicto no la trae.
+    pub completitud_mejor: Option<f32>,
+    /// Completitud de `peor`. `None` si el veredicto no la trae.
+    pub completitud_peor: Option<f32>,
+    /// Criterio que decidió el par: `decision`, `global`, `completitud` o `sin_orden`.
+    pub criterio: String,
 }
 
 /// Resultado de `preparar_ciego`: los ids de los paquetes armados. El origen queda en `clave.toml`.
@@ -159,7 +189,7 @@ pub fn validar_con(
     let mut avisos = Vec::new();
     let pares = leer_orden(casos)?;
     let defectos = leer_defectos(casos)?;
-    let exactitud_orden = medir_orden(casos, pares.as_deref(), &mut ev)?;
+    let (exactitud_orden, detalle_pares) = medir_orden(casos, pares.as_deref(), &mut ev)?;
     let recall = medir_recall(casos, defectos.as_deref(), &mut ev)?;
     let ciego = leer_paquetes(casos, &mut ev, &mut avisos)?;
     let (acuerdo_decision, kappa_dimension, kappa_item, spearman) = match ciego {
@@ -185,6 +215,7 @@ pub fn validar_con(
     Ok(Validez {
         v: VERSION,
         exactitud_orden,
+        pares: detalle_pares,
         recall,
         acuerdo_decision,
         kappa_dimension,
@@ -458,20 +489,21 @@ fn nivel_de(v: &Veredicto, item: &str) -> Option<u8> {
         .map(|n| n.nivel)
 }
 
-/// `true` si Root pone `mejor` por encima de `peor`. Primero la decisión; a igual decisión, el global si
-/// los dos lo tienen, y si no, la completitud. Sin decisión, o en empate, no ordena: es un fallo.
-fn ordena_antes(mejor: &Veredicto, peor: &Veredicto) -> bool {
+/// Decide si Root pone `mejor` por encima de `peor`, y con qué criterio. Primero la decisión; a igual
+/// decisión, el global si los dos lo tienen, y si no, la completitud. Sin decisión, o en empate, no
+/// ordena: es un fallo.
+fn ordena(mejor: &Veredicto, peor: &Veredicto) -> (bool, &'static str) {
     let (Some(dm), Some(dp)) = (decision_de(mejor), decision_de(peor)) else {
-        return false;
+        return (false, "sin_orden");
     };
     if rango_decision(dm) != rango_decision(dp) {
-        return rango_decision(dm) > rango_decision(dp);
+        return (rango_decision(dm) > rango_decision(dp), "decision");
     }
     match (mejor.global, peor.global) {
-        (Some(gm), Some(gp)) => gm > gp,
+        (Some(gm), Some(gp)) => (gm > gp, "global"),
         _ => match (completitud_de(mejor), completitud_de(peor)) {
-            (Some(cm), Some(cp)) => cm > cp,
-            _ => false,
+            (Some(cm), Some(cp)) => (cm > cp, "completitud"),
+            _ => (false, "sin_orden"),
         },
     }
 }
@@ -608,32 +640,46 @@ fn nombre_de(ruta: &Path) -> String {
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
 }
 
+/// Mide la exactitud de orden y devuelve un `DetallePar` por par, en el orden de `orden.toml`.
 fn medir_orden(
     casos: &Path,
     pares: Option<&[ParOrden]>,
     ev: &mut Evaluaciones,
-) -> Result<Metrica, ErrorOraculo> {
+) -> Result<(Metrica, Vec<DetallePar>), ErrorOraculo> {
     let Some(pares) = pares else {
-        return Ok(Metrica::sin_medir(
-            "falta orden.toml: sin pares de orden conocido",
+        return Ok((
+            Metrica::sin_medir("falta orden.toml: sin pares de orden conocido"),
+            Vec::new(),
         ));
     };
     if pares.is_empty() {
-        return Ok(Metrica::sin_medir("orden.toml no tiene pares"));
+        return Ok((Metrica::sin_medir("orden.toml no tiene pares"), Vec::new()));
     }
     let mut aciertos = 0;
+    let mut detalle = Vec::with_capacity(pares.len());
     for par in pares {
         let mejor = ev.veredicto(&par.tarea, &casos.join(&par.mejor))?;
         let peor = ev.veredicto(&par.tarea, &casos.join(&par.peor))?;
-        if ordena_antes(&mejor, &peor) {
+        let (acierto, criterio) = ordena(&mejor, &peor);
+        if acierto {
             aciertos += 1;
         }
+        detalle.push(DetallePar {
+            tarea: par.tarea.clone(),
+            mejor: par.mejor.clone(),
+            peor: par.peor.clone(),
+            acierto,
+            decision_mejor: decision_de(&mejor),
+            decision_peor: decision_de(&peor),
+            global_mejor: mejor.global,
+            global_peor: peor.global,
+            completitud_mejor: completitud_de(&mejor),
+            completitud_peor: completitud_de(&peor),
+            criterio: criterio.to_string(),
+        });
     }
-    Ok(Metrica::fraccion(
-        aciertos,
-        pares.len() as u32,
-        Some(UMBRAL_ORDEN),
-    ))
+    let metrica = Metrica::fraccion(aciertos, pares.len() as u32, Some(UMBRAL_ORDEN));
+    Ok((metrica, detalle))
 }
 
 fn medir_recall(
@@ -2331,5 +2377,164 @@ fuente = "fixture"
             "el aviso dice que faltan niveles: {:?}",
             v.avisos
         );
+    }
+
+    /// Busca el detalle del par cuyo `mejor` es `mejor`. Falla si no hay.
+    fn par_de<'a>(pares: &'a [DetallePar], mejor: &str) -> &'a DetallePar {
+        pares
+            .iter()
+            .find(|p| p.mejor == mejor)
+            .expect("par en el detalle")
+    }
+
+    #[test]
+    fn validez_pares_identifica_el_par_fallido() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir(
+            &casos.join("orden.toml"),
+            "[[par]]\ntarea = \"memora\"\nmejor = \"a\"\npeor = \"b\"\nfuente = \"fixture\"\n\n\
+             [[par]]\ntarea = \"memora\"\nmejor = \"c\"\npeor = \"d\"\nfuente = \"fixture\"\n",
+        );
+        // El primer par falla: `a` tiene global menor que `b`. El segundo ordena bien.
+        let mapa = falso(vec![
+            clave(
+                "a",
+                veredicto(Some(Decision::Listo), Some(0.5), Some(0.7), &[]),
+            ),
+            clave(
+                "b",
+                veredicto(Some(Decision::Listo), Some(0.9), Some(0.6), &[]),
+            ),
+            clave(
+                "c",
+                veredicto(Some(Decision::Listo), Some(0.9), Some(0.8), &[]),
+            ),
+            clave(
+                "d",
+                veredicto(Some(Decision::Listo), Some(0.4), Some(0.2), &[]),
+            ),
+        ]);
+        let v = validar_con(casos, &mapa).expect("mide");
+        assert_eq!(v.pares.len(), 2, "un detalle por par");
+        let fallido = par_de(&v.pares, "a");
+        assert_eq!(fallido.tarea, "memora");
+        assert_eq!(fallido.peor, "b");
+        assert!(!fallido.acierto);
+        assert_eq!(fallido.decision_mejor, Some(Decision::Listo));
+        assert_eq!(fallido.decision_peor, Some(Decision::Listo));
+        assert_eq!(fallido.global_mejor, Some(0.5));
+        assert_eq!(fallido.global_peor, Some(0.9));
+        assert_eq!(fallido.completitud_mejor, Some(0.7));
+        assert_eq!(fallido.completitud_peor, Some(0.6));
+        assert_eq!(fallido.criterio, "global");
+        let bien = par_de(&v.pares, "c");
+        assert!(bien.acierto, "el segundo par ordena bien");
+        assert_eq!(bien.criterio, "global");
+    }
+
+    #[test]
+    fn validez_pares_criterio_decision_completitud_y_sin_orden() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir(
+            &casos.join("orden.toml"),
+            "[[par]]\ntarea = \"memora\"\nmejor = \"d1\"\npeor = \"d2\"\nfuente = \"fixture\"\n\n\
+             [[par]]\ntarea = \"memora\"\nmejor = \"g1\"\npeor = \"g2\"\nfuente = \"fixture\"\n\n\
+             [[par]]\ntarea = \"memora\"\nmejor = \"c1\"\npeor = \"c2\"\nfuente = \"fixture\"\n\n\
+             [[par]]\ntarea = \"memora\"\nmejor = \"s1\"\npeor = \"s2\"\nfuente = \"fixture\"\n",
+        );
+        let mapa = falso(vec![
+            // Decisión distinta: `Listo` pesa más que `NoListo`, aunque el global sea menor.
+            clave(
+                "d1",
+                veredicto(Some(Decision::Listo), Some(0.1), Some(0.1), &[]),
+            ),
+            clave(
+                "d2",
+                veredicto(Some(Decision::NoListo), Some(0.9), Some(0.9), &[]),
+            ),
+            // Misma decisión: manda el global.
+            clave(
+                "g1",
+                veredicto(Some(Decision::Listo), Some(0.6), Some(0.2), &[]),
+            ),
+            clave(
+                "g2",
+                veredicto(Some(Decision::Listo), Some(0.4), Some(0.9), &[]),
+            ),
+            // Sin global en ninguno: manda la completitud.
+            clave("c1", veredicto(Some(Decision::Listo), None, Some(0.8), &[])),
+            clave("c2", veredicto(Some(Decision::Listo), None, Some(0.3), &[])),
+            // Sin decisión del mejor: sin orden, y el par falla.
+            clave("s1", veredicto(None, Some(0.9), Some(0.9), &[])),
+            clave(
+                "s2",
+                veredicto(Some(Decision::Listo), Some(0.1), Some(0.1), &[]),
+            ),
+        ]);
+        let v = validar_con(casos, &mapa).expect("mide");
+        let d = par_de(&v.pares, "d1");
+        assert_eq!(d.criterio, "decision");
+        assert!(d.acierto);
+        let g = par_de(&v.pares, "g1");
+        assert_eq!(g.criterio, "global");
+        assert!(g.acierto);
+        let c = par_de(&v.pares, "c1");
+        assert_eq!(c.criterio, "completitud");
+        assert!(c.acierto);
+        assert_eq!(c.global_mejor, None);
+        let s = par_de(&v.pares, "s1");
+        assert_eq!(s.criterio, "sin_orden");
+        assert!(!s.acierto, "sin orden el par falla");
+        assert_eq!(s.decision_mejor, None);
+        assert_eq!(s.decision_peor, Some(Decision::Listo));
+    }
+
+    #[test]
+    fn validez_pares_no_cambia_exactitud_orden() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir(
+            &casos.join("orden.toml"),
+            "[[par]]\ntarea = \"memora\"\nmejor = \"x1\"\npeor = \"x2\"\nfuente = \"fixture\"\n\n\
+             [[par]]\ntarea = \"memora\"\nmejor = \"y1\"\npeor = \"y2\"\nfuente = \"fixture\"\n\n\
+             [[par]]\ntarea = \"memora\"\nmejor = \"z1\"\npeor = \"z2\"\nfuente = \"fixture\"\n",
+        );
+        // Un acierto por decisión, un fallo por global y un empate por global (cuenta como fallo).
+        let mapa = falso(vec![
+            clave("x1", veredicto(Some(Decision::Listo), Some(0.9), None, &[])),
+            clave(
+                "x2",
+                veredicto(Some(Decision::NoListo), Some(0.1), None, &[]),
+            ),
+            clave("y1", veredicto(Some(Decision::Listo), Some(0.3), None, &[])),
+            clave("y2", veredicto(Some(Decision::Listo), Some(0.8), None, &[])),
+            clave("z1", veredicto(Some(Decision::Listo), Some(0.5), None, &[])),
+            clave("z2", veredicto(Some(Decision::Listo), Some(0.5), None, &[])),
+        ]);
+        let v = validar_con(casos, &mapa).expect("mide");
+        assert_eq!(v.exactitud_orden.aciertos, Some(1));
+        assert_eq!(v.exactitud_orden.casos, 3);
+        assert!(cerca(v.exactitud_orden.valor.expect("medida"), 1.0 / 3.0));
+        assert_eq!(v.exactitud_orden.cumple, Some(false));
+        assert_eq!(v.pares.len(), 3);
+        let aciertos_pares = v.pares.iter().filter(|p| p.acierto).count() as u32;
+        assert_eq!(Some(aciertos_pares), v.exactitud_orden.aciertos);
+    }
+
+    #[test]
+    fn validez_viejo_sin_pares_lee_vacio() {
+        let dir = TempDir::new().expect("temporal");
+        let v = validar_con(dir.path(), &falso(Vec::new())).expect("mide");
+        let mut json = serde_json::to_value(&v).expect("serializa");
+        let mapa = json.as_object_mut().expect("objeto");
+        assert!(
+            mapa.remove("pares").is_some(),
+            "la clave pares se serializa"
+        );
+        let viejo: Validez = serde_json::from_value(json).expect("lee un validez sin pares");
+        assert!(viejo.pares.is_empty());
+        assert_eq!(viejo.exactitud_orden, v.exactitud_orden);
     }
 }
