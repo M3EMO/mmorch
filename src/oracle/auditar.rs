@@ -1,0 +1,1165 @@
+//! Pasada de búsqueda de defectos (Tarea 74). Un modelo propone candidatos; el gate de cita y la medición
+//! determinista los cuentan. Un LLM nunca decide si un defecto se encontró. No puntúa y no toca al juez.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io::Write;
+use std::path::{Component, Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use super::ErrorOraculo;
+use super::evidencia::cita_en_archivo;
+use super::juez::{LimitesPrompt, MAX_ENTRADA_JUEZ_BYTES, ModeloJuez, bytes_de_prompt};
+use super::perfiles::herramientas::parsear_gitleaks;
+use crate::config::Config;
+use crate::observe;
+use crate::proveedores::{INTENTOS_MAX, Prompt, costo_peor_caso};
+use crate::tipos::Hallazgo;
+
+/// Prompt de sistema de la pasada. Cambiar un byte cambia `hash_prompt`.
+pub const PROMPT_AUDITORIA: &str = r#"Sos un revisor senior. Leé este código y reportá defectos reales: conducta incorrecta, seguridad, fiabilidad o uso de recursos. Cada defecto trae archivo, línea, la cita textual de esa línea y una frase que dice qué falla. No reportes estilo. Si no hallás defectos, respondé una lista vacía. Respondé SOLO un objeto JSON: {"defectos":[{"archivo":"...","linea":N,"cita":"...","detalle":"..."}]}"#;
+
+/// Texto que reemplaza la línea de un hallazgo de `gitleaks` en el prompt.
+const LINEA_OMITIDA: &str = "[línea con un secreto omitida]";
+/// Desde esta línea, el código es de tests y no entra al prompt.
+const MARCA_TEST: &str = "#[cfg(test)]";
+/// Marca que se agrega al final de una línea recortada.
+const MARCA_RECORTE: &str = "…[recortado]";
+/// Distancia máxima en líneas entre un hallazgo y un defecto para contarlo como encontrado.
+const VENTANA_MEDICION: u32 = 3;
+/// Fase del flujo que va al `Evento` de cada llamada.
+const FASE: &str = "auditar";
+
+/// Opciones de `oraculo auditar`.
+#[derive(Debug, Clone)]
+pub struct OpcionesAuditar {
+    pub repo: PathBuf,
+    pub salida: PathBuf,
+    pub tope_usd: f64,
+    pub gitleaks: PathBuf,
+    pub incluir: Vec<PathBuf>,
+    pub defectos: Option<PathBuf>,
+}
+
+/// Un defecto que el modelo propone y que el gate de cita confirma.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Candidato {
+    pub archivo: String,
+    pub linea: u32,
+    pub cita: String,
+    pub detalle: String,
+}
+
+/// Un candidato que no entra a `hallazgos`, con el motivo.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Descartado {
+    pub archivo: String,
+    pub linea: u32,
+    pub cita: String,
+    pub detalle: String,
+    pub motivo: String,
+}
+
+/// Un defecto de `defectos.toml` y si algún hallazgo lo cubre.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DetalleDefecto {
+    pub archivo: String,
+    pub linea: u32,
+    pub encontrado: bool,
+    /// Solo con `encontrado`: el hallazgo más cercano dentro de la ventana.
+    pub hallazgo_cercano: Option<Candidato>,
+}
+
+/// Cuántos defectos del repo encontró la pasada.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Medicion {
+    pub encontrados: u32,
+    pub casos: u32,
+    pub detalle: Vec<DetalleDefecto>,
+}
+
+/// Contenido de `--salida`.
+#[derive(Debug, Clone, Serialize)]
+pub struct Auditoria {
+    pub hash_prompt: String,
+    pub modelo: String,
+    /// Archivos que salieron en alguna llamada.
+    pub archivos: Vec<String>,
+    /// Llamadas enviadas al modelo, con o sin respuesta usable.
+    pub llamadas: u32,
+    pub costo_usd: f64,
+    pub hallazgos: Vec<Candidato>,
+    pub descartados: Vec<Descartado>,
+    pub incompleta: bool,
+    /// Archivos que no se leyeron con éxito.
+    pub sin_leer: Vec<String>,
+    pub avisos: Vec<String>,
+    pub medicion: Option<Medicion>,
+}
+
+/// Huella del prompt de sistema. Cambia si cambia `PROMPT_AUDITORIA`.
+pub fn hash_prompt() -> String {
+    hash_de(PROMPT_AUDITORIA)
+}
+
+fn hash_de(texto: &str) -> String {
+    crate::goal::calcular_hash(texto.as_bytes())
+}
+
+/// Mide los defectos de `texto_defectos` que son de `repo` contra los `hallazgos`.
+pub fn medir(
+    texto_defectos: &str,
+    repo: &Path,
+    hallazgos: &[Candidato],
+) -> Result<Medicion, ErrorOraculo> {
+    let defectos = defectos_del_repo(texto_defectos, repo)?;
+    let mut encontrados = 0;
+    let mut detalle = Vec::with_capacity(defectos.len());
+    for d in &defectos {
+        let cercano = hallazgos
+            .iter()
+            .filter(|h| h.archivo == d.archivo && h.linea.abs_diff(d.linea) <= VENTANA_MEDICION)
+            .min_by_key(|h| h.linea.abs_diff(d.linea))
+            .cloned();
+        if cercano.is_some() {
+            encontrados += 1;
+        }
+        detalle.push(DetalleDefecto {
+            archivo: d.archivo.clone(),
+            linea: d.linea,
+            encontrado: cercano.is_some(),
+            hallazgo_cercano: cercano,
+        });
+    }
+    Ok(Medicion {
+        encontrados,
+        casos: u32::try_from(defectos.len()).unwrap_or(u32::MAX),
+        detalle,
+    })
+}
+
+/// Defecto de `defectos.toml` en la forma que mide la pasada. Sin `deny_unknown_fields`: otros campos se ignoran.
+#[derive(Deserialize)]
+struct DefectoRepo {
+    repo: String,
+    archivo: String,
+    linea: u32,
+}
+
+#[derive(Deserialize)]
+struct ArchivoDefectos {
+    #[serde(default)]
+    defecto: Vec<DefectoRepo>,
+}
+
+/// Defectos de `texto` que son de `repo`. El repo se compara por su último componente, no por texto.
+fn defectos_del_repo(texto: &str, repo: &Path) -> Result<Vec<DefectoRepo>, ErrorOraculo> {
+    let archivo: ArchivoDefectos = toml::from_str(texto)
+        .map_err(|e| ErrorOraculo::Uso(format!("defectos.toml inválido: {e}")))?;
+    let canonico = repo
+        .canonicalize()
+        .map_err(|e| ErrorOraculo::Uso(format!("repo {}: {e}", repo.display())))?;
+    let nombre = canonico
+        .file_name()
+        .ok_or_else(|| ErrorOraculo::Uso(format!("repo sin nombre: {}", repo.display())))?;
+    Ok(archivo
+        .defecto
+        .into_iter()
+        .filter(|d| Path::new(&d.repo).file_name() == Some(nombre))
+        .collect())
+}
+
+/// Corre la pasada con un modelo cualquiera. Con `tope_usd`, corta antes de la llamada que lo pasaría.
+#[allow(clippy::too_many_arguments)]
+pub fn auditar_con(
+    repo: &Path,
+    incluir: &[PathBuf],
+    gitleaks: &[Hallazgo],
+    modelo: &dyn ModeloJuez,
+    nombre_modelo: &str,
+    tope_usd: f64,
+    peor_caso: &dyn Fn(&Prompt) -> f64,
+    gasto: &dyn Fn() -> Result<f64, ErrorOraculo>,
+) -> Result<Auditoria, ErrorOraculo> {
+    auditar_con_limite(
+        repo,
+        incluir,
+        gitleaks,
+        modelo,
+        nombre_modelo,
+        tope_usd,
+        peor_caso,
+        gasto,
+        MAX_ENTRADA_JUEZ_BYTES,
+    )
+}
+
+/// Como `auditar_con`, con el límite de entrada como parámetro. Los tests lo bajan para partir archivos chicos.
+#[allow(clippy::too_many_arguments)]
+fn auditar_con_limite(
+    repo: &Path,
+    incluir: &[PathBuf],
+    gitleaks: &[Hallazgo],
+    modelo: &dyn ModeloJuez,
+    nombre_modelo: &str,
+    tope_usd: f64,
+    peor_caso: &dyn Fn(&Prompt) -> f64,
+    gasto: &dyn Fn() -> Result<f64, ErrorOraculo>,
+    limite: u64,
+) -> Result<Auditoria, ErrorOraculo> {
+    let archivos = leer_archivos(repo, incluir)?;
+    let presupuesto = (limite as usize).saturating_sub(PROMPT_AUDITORIA.len());
+    let omitidas = lineas_omitidas(gitleaks);
+    let bloques = bloques(&archivos, &omitidas, presupuesto);
+    if let Some(grande) = bloques.iter().find(|b| b.texto.len() > presupuesto) {
+        return Err(ErrorOraculo::Uso(format!(
+            "la ruta {} no cabe en un prompt del juez",
+            grande.archivo
+        )));
+    }
+    let grupos = agrupar(bloques, presupuesto);
+    // El gate lee lo que el modelo vio: sin código de tests y con las líneas de secretos omitidas.
+    let contenidos: BTreeMap<&str, String> = archivos
+        .iter()
+        .map(|a| {
+            let vacia = BTreeSet::new();
+            let omitidas = omitidas.get(a.ruta.as_str()).unwrap_or(&vacia);
+            (a.ruta.as_str(), texto_visible(a, omitidas))
+        })
+        .collect();
+
+    let mut auditoria = Auditoria {
+        hash_prompt: hash_prompt(),
+        modelo: nombre_modelo.into(),
+        archivos: Vec::new(),
+        llamadas: 0,
+        costo_usd: 0.0,
+        hallazgos: Vec::new(),
+        descartados: Vec::new(),
+        incompleta: false,
+        sin_leer: Vec::new(),
+        avisos: Vec::new(),
+        medicion: None,
+    };
+    let mut enviados = BTreeSet::new();
+    let mut sin_leer = BTreeSet::new();
+
+    for (i, grupo) in grupos.iter().enumerate() {
+        let prompt = prompt_de(grupo);
+        if gasto()? + peor_caso(&prompt) > tope_usd {
+            auditoria.incompleta = true;
+            sin_leer.extend(archivos_de(&grupos[i..]));
+            break;
+        }
+        auditoria.llamadas += 1;
+        let de_grupo = archivos_de(std::slice::from_ref(grupo));
+        enviados.extend(de_grupo.iter().cloned());
+        let n = auditoria.llamadas;
+        let salida = match modelo.consultar(&prompt) {
+            Ok(salida) => salida,
+            Err(e) => {
+                auditoria
+                    .avisos
+                    .push(format!("llamada {n}: el modelo falló: {e}"));
+                auditoria.incompleta = true;
+                sin_leer.extend(archivos_de(&grupos[i..]));
+                break;
+            }
+        };
+        auditoria.costo_usd += salida.costo_usd;
+        if salida.truncada {
+            auditoria.avisos.push(format!(
+                "llamada {n}: respuesta truncada por el tope de salida"
+            ));
+            auditoria.incompleta = true;
+            sin_leer.extend(de_grupo);
+            continue;
+        }
+        match parsear_respuesta(&salida.texto) {
+            Ok(propuestas) => {
+                for propuesta in propuestas {
+                    match propuesta {
+                        Ok(c) if !de_grupo.contains(&c.archivo) => auditoria
+                            .descartados
+                            .push(descartar(c, "el archivo no se envió en esta llamada")),
+                        Ok(c) => {
+                            let citada = contenidos.get(c.archivo.as_str()).is_some_and(|texto| {
+                                cita_en_archivo(texto.as_str(), c.linea, &c.cita)
+                            });
+                            if citada {
+                                auditoria.hallazgos.push(c);
+                            } else {
+                                auditoria
+                                    .descartados
+                                    .push(descartar(c, "cita no confirmada en el archivo"));
+                            }
+                        }
+                        Err(d) => auditoria.descartados.push(d),
+                    }
+                }
+            }
+            Err(motivo) => {
+                auditoria.avisos.push(format!("llamada {n}: {motivo}"));
+                auditoria.incompleta = true;
+                sin_leer.extend(de_grupo);
+            }
+        }
+    }
+    auditoria.archivos = enviados.into_iter().collect();
+    auditoria.sin_leer = sin_leer.into_iter().collect();
+    Ok(auditoria)
+}
+
+/// Un archivo `.rs` del repo con su contenido completo.
+struct Archivo {
+    ruta: String,
+    contenido: String,
+}
+
+/// Un trozo de archivo con su encabezado. Cabe en un prompt por sí solo.
+struct Bloque {
+    archivo: String,
+    texto: String,
+}
+
+fn descartar(c: Candidato, motivo: &str) -> Descartado {
+    Descartado {
+        archivo: c.archivo,
+        linea: c.linea,
+        cita: c.cita,
+        detalle: c.detalle,
+        motivo: motivo.into(),
+    }
+}
+
+/// Archivos `.rs` a auditar, ordenados por ruta relativa. Sin `incluir`, todo `src` del repo.
+fn leer_archivos(repo: &Path, incluir: &[PathBuf]) -> Result<Vec<Archivo>, ErrorOraculo> {
+    let raices: Vec<PathBuf> = if incluir.is_empty() {
+        vec![repo.join("src")]
+    } else {
+        incluir
+            .iter()
+            .map(|e| relativa(e).map(|r| repo.join(r)))
+            .collect::<Result<Vec<PathBuf>, ErrorOraculo>>()?
+    };
+    let mut rutas = BTreeMap::new();
+    for raiz in &raices {
+        recolectar(repo, raiz, &mut rutas)?;
+    }
+    if rutas.is_empty() {
+        return Err(ErrorOraculo::Uso(format!(
+            "no hay archivos .rs que auditar en {}",
+            repo.display()
+        )));
+    }
+    rutas
+        .into_iter()
+        .map(|(ruta, absoluta)| {
+            let bytes = fs::read(&absoluta)
+                .map_err(|e| ErrorOraculo::Infra(format!("leer {}: {e}", absoluta.display())))?;
+            Ok(Archivo {
+                ruta,
+                contenido: String::from_utf8_lossy(&bytes).into_owned(),
+            })
+        })
+        .collect()
+}
+
+/// Ruta de `entrada` sin raíz ni `..`. Una ruta que sale del repo es error de uso.
+fn relativa(entrada: &Path) -> Result<PathBuf, ErrorOraculo> {
+    let mut rel = PathBuf::new();
+    for componente in entrada.components() {
+        match componente {
+            Component::Normal(p) => rel.push(p),
+            Component::CurDir => {}
+            _ => {
+                return Err(ErrorOraculo::Uso(format!(
+                    "{} sale del repo: usá una ruta relativa",
+                    entrada.display()
+                )));
+            }
+        }
+    }
+    Ok(rel)
+}
+
+/// Junta los `.rs` de `ruta` en `rutas`. No sigue symlinks: un symlink como raíz es error de uso.
+fn recolectar(
+    repo: &Path,
+    ruta: &Path,
+    rutas: &mut BTreeMap<String, PathBuf>,
+) -> Result<(), ErrorOraculo> {
+    let meta = fs::symlink_metadata(ruta)
+        .map_err(|e| ErrorOraculo::Uso(format!("{}: {e}", ruta.display())))?;
+    if meta.file_type().is_symlink() {
+        return Err(ErrorOraculo::Uso(format!(
+            "{} es un symlink: no se sigue",
+            ruta.display()
+        )));
+    }
+    if meta.is_dir() {
+        let entradas = fs::read_dir(ruta)
+            .map_err(|e| ErrorOraculo::Infra(format!("leer {}: {e}", ruta.display())))?;
+        for entrada in entradas {
+            let entrada = entrada
+                .map_err(|e| ErrorOraculo::Infra(format!("leer {}: {e}", ruta.display())))?;
+            let tipo = entrada
+                .file_type()
+                .map_err(|e| ErrorOraculo::Infra(format!("tipo de {}: {e}", ruta.display())))?;
+            if tipo.is_symlink() {
+                continue;
+            }
+            recolectar(repo, &entrada.path(), rutas)?;
+        }
+    } else if meta.is_file() && ruta.extension().is_some_and(|x| x == "rs") {
+        let rel = ruta.strip_prefix(repo).unwrap_or(ruta);
+        rutas.insert(clave(rel), ruta.to_path_buf());
+    }
+    Ok(())
+}
+
+/// Ruta relativa con `/` como separador. Es la clave de `Archivo` y de los candidatos.
+fn clave(rel: &Path) -> String {
+    rel.components()
+        .filter_map(|c| match c {
+            Component::Normal(p) => Some(p.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<String>>()
+        .join("/")
+}
+
+/// Líneas de cada archivo que cita un hallazgo de `gitleaks`. Todas salen omitidas en el prompt.
+fn lineas_omitidas(gitleaks: &[Hallazgo]) -> BTreeMap<&str, BTreeSet<u32>> {
+    let mut mapa: BTreeMap<&str, BTreeSet<u32>> = BTreeMap::new();
+    for h in gitleaks {
+        mapa.entry(h.archivo.as_str()).or_default().insert(h.linea);
+    }
+    mapa
+}
+
+/// Texto de `a` que ve el modelo, con los números de línea reales: sin tests y sin líneas de secretos.
+fn texto_visible(a: &Archivo, omitidas: &BTreeSet<u32>) -> String {
+    let mut salida = String::new();
+    for (i, linea) in a.contenido.lines().enumerate() {
+        if linea.trim_start().starts_with(MARCA_TEST) {
+            break;
+        }
+        let omitida = omitidas.contains(&((i + 1) as u32));
+        salida.push_str(if omitida { LINEA_OMITIDA } else { linea });
+        salida.push('\n');
+    }
+    salida
+}
+
+/// Líneas de producción de `a` como `NN: texto`. Corta en la primera marca de tests.
+fn lineas_numeradas(a: &Archivo, omitidas: &BTreeSet<u32>) -> Vec<String> {
+    let mut salida = Vec::new();
+    for (i, linea) in a.contenido.lines().enumerate() {
+        if linea.trim_start().starts_with(MARCA_TEST) {
+            break;
+        }
+        let numero = (i + 1) as u32;
+        let texto = if omitidas.contains(&numero) {
+            LINEA_OMITIDA
+        } else {
+            linea
+        };
+        salida.push(format!("{numero}: {texto}\n"));
+    }
+    salida
+}
+
+fn encabezado(ruta: &str, parte: Option<usize>) -> String {
+    match parte {
+        None => format!("=== ARCHIVO {ruta} ===\n"),
+        Some(n) => format!("=== ARCHIVO {ruta} (parte {n}) ===\n"),
+    }
+}
+
+/// Recorta `fila` a `max` bytes, con la marca de recorte al final. Vacío si no cabe ni la marca.
+fn recortar(fila: &str, max: usize) -> String {
+    if fila.len() <= max {
+        return fila.to_string();
+    }
+    let marca = format!("{MARCA_RECORTE}\n");
+    if max < marca.len() {
+        return String::new();
+    }
+    let mut corte = (max - marca.len()).min(fila.len());
+    while !fila.is_char_boundary(corte) {
+        corte -= 1;
+    }
+    format!("{}{marca}", &fila[..corte])
+}
+
+/// Bloques de todos los archivos. Un archivo que no cabe entero se parte por líneas.
+fn bloques(
+    archivos: &[Archivo],
+    omitidas: &BTreeMap<&str, BTreeSet<u32>>,
+    presupuesto: usize,
+) -> Vec<Bloque> {
+    let vacio = BTreeSet::new();
+    let mut salida = Vec::new();
+    for a in archivos {
+        let filas = lineas_numeradas(a, omitidas.get(a.ruta.as_str()).unwrap_or(&vacio));
+        if filas.is_empty() {
+            continue;
+        }
+        let entero = format!("{}{}", encabezado(&a.ruta, None), filas.concat());
+        if entero.len() <= presupuesto {
+            salida.push(Bloque {
+                archivo: a.ruta.clone(),
+                texto: entero,
+            });
+            continue;
+        }
+        let mut parte = 1;
+        let mut actual = encabezado(&a.ruta, Some(parte));
+        let mut con_filas = false;
+        for fila in filas {
+            if con_filas && actual.len() + fila.len() > presupuesto {
+                salida.push(Bloque {
+                    archivo: a.ruta.clone(),
+                    texto: std::mem::take(&mut actual),
+                });
+                parte += 1;
+                actual = encabezado(&a.ruta, Some(parte));
+            }
+            let fila = if actual.len() + fila.len() > presupuesto {
+                recortar(&fila, presupuesto.saturating_sub(actual.len()))
+            } else {
+                fila
+            };
+            actual.push_str(&fila);
+            con_filas = true;
+        }
+        salida.push(Bloque {
+            archivo: a.ruta.clone(),
+            texto: actual,
+        });
+    }
+    salida
+}
+
+/// Empaqueta los bloques en orden, sin pasar `presupuesto` bytes por grupo.
+fn agrupar(bloques: Vec<Bloque>, presupuesto: usize) -> Vec<Vec<Bloque>> {
+    let mut grupos = Vec::new();
+    let mut actual: Vec<Bloque> = Vec::new();
+    let mut bytes = 0;
+    for b in bloques {
+        if !actual.is_empty() && bytes + b.texto.len() > presupuesto {
+            grupos.push(std::mem::take(&mut actual));
+            bytes = 0;
+        }
+        bytes += b.texto.len();
+        actual.push(b);
+    }
+    if !actual.is_empty() {
+        grupos.push(actual);
+    }
+    grupos
+}
+
+fn archivos_de(grupos: &[Vec<Bloque>]) -> BTreeSet<String> {
+    grupos.iter().flatten().map(|b| b.archivo.clone()).collect()
+}
+
+fn prompt_de(grupo: &[Bloque]) -> Prompt {
+    Prompt {
+        sistema: Some(PROMPT_AUDITORIA.into()),
+        usuario: grupo.iter().map(|b| b.texto.as_str()).collect(),
+        max_tokens: LimitesPrompt::default().max_tokens,
+        fase: FASE.into(),
+        reintento_juez: false,
+    }
+}
+
+#[derive(Deserialize)]
+struct RespuestaAuditor {
+    defectos: Vec<Value>,
+}
+
+/// Candidato tal como lo manda el modelo. Cada campo puede faltar.
+#[derive(Deserialize)]
+struct CandidatoCrudo {
+    archivo: Option<String>,
+    linea: Option<u32>,
+    cita: Option<String>,
+    detalle: Option<String>,
+}
+
+/// Parsea la respuesta. Un candidato incompleto o mal formado va a descartados, no rompe la llamada.
+fn parsear_respuesta(texto: &str) -> Result<Vec<Result<Candidato, Descartado>>, String> {
+    let respuesta: RespuestaAuditor =
+        serde_json::from_str(quitar_cerca(texto)).map_err(|e| format!("JSON inválido: {e}"))?;
+    Ok(respuesta
+        .defectos
+        .into_iter()
+        .map(|valor| {
+            let Ok(crudo) = serde_json::from_value::<CandidatoCrudo>(valor) else {
+                return Err(Descartado {
+                    archivo: String::new(),
+                    linea: 0,
+                    cita: String::new(),
+                    detalle: String::new(),
+                    motivo: "candidato mal formado".into(),
+                });
+            };
+            match (crudo.archivo, crudo.linea, crudo.cita, crudo.detalle) {
+                (Some(archivo), Some(linea), Some(cita), Some(detalle)) => Ok(Candidato {
+                    archivo,
+                    linea,
+                    cita,
+                    detalle,
+                }),
+                (archivo, linea, cita, detalle) => Err(Descartado {
+                    archivo: archivo.unwrap_or_default(),
+                    linea: linea.unwrap_or(0),
+                    cita: cita.unwrap_or_default(),
+                    detalle: detalle.unwrap_or_default(),
+                    motivo: "campos incompletos".into(),
+                }),
+            }
+        })
+        .collect())
+}
+
+/// Quita una cerca de Markdown alrededor del JSON, con o sin etiqueta de lenguaje.
+fn quitar_cerca(texto: &str) -> &str {
+    let limpio = texto.trim();
+    let Some(resto) = limpio.strip_prefix("```") else {
+        return limpio;
+    };
+    let resto = match resto.split_once('\n') {
+        Some((etiqueta, cuerpo)) if etiqueta.trim().chars().all(char::is_alphanumeric) => cuerpo,
+        _ => resto,
+    };
+    resto
+        .trim()
+        .strip_suffix("```")
+        .unwrap_or(resto.trim())
+        .trim()
+}
+
+/// Lee el reporte de `gitleaks`. Ausente o ilegible es error de uso.
+fn leer_gitleaks(ruta: &Path) -> Result<Vec<Hallazgo>, ErrorOraculo> {
+    let texto = fs::read_to_string(ruta)
+        .map_err(|e| ErrorOraculo::Uso(format!("reporte de gitleaks {}: {e}", ruta.display())))?;
+    parsear_gitleaks(&texto, &[])
+        .map_err(|e| ErrorOraculo::Uso(format!("reporte de gitleaks ilegible: {e}")))
+}
+
+/// Escribe `a` en `ruta` de forma atómica, con JSON y salto de línea final.
+fn escribir_salida(ruta: &Path, a: &Auditoria) -> Result<(), ErrorOraculo> {
+    let dir = match ruta.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    fs::create_dir_all(dir)
+        .map_err(|e| ErrorOraculo::Infra(format!("crear {}: {e}", dir.display())))?;
+    let texto = serde_json::to_string_pretty(a)
+        .map_err(|e| ErrorOraculo::Infra(format!("serializar la auditoría: {e}")))?;
+    let mut temporal = tempfile::NamedTempFile::new_in(dir)
+        .map_err(|e| ErrorOraculo::Infra(format!("temporal en {}: {e}", dir.display())))?;
+    temporal
+        .write_all(format!("{texto}\n").as_bytes())
+        .map_err(|e| ErrorOraculo::Infra(format!("escribir la salida: {e}")))?;
+    temporal
+        .as_file()
+        .sync_all()
+        .map_err(|e| ErrorOraculo::Infra(format!("sincronizar la salida: {e}")))?;
+    temporal
+        .persist(ruta)
+        .map_err(|e| ErrorOraculo::Infra(format!("reemplazar {}: {}", ruta.display(), e.error)))?;
+    Ok(())
+}
+
+/// Corre la pasada con el juez de producción y escribe `o.salida`.
+/// El reporte de gitleaks se lee antes de armar el juez: si falla, no se envía nada.
+pub fn auditar(home: &Path, o: &OpcionesAuditar) -> Result<Auditoria, ErrorOraculo> {
+    if !(o.tope_usd.is_finite() && o.tope_usd > 0.0) {
+        return Err(ErrorOraculo::Uso(format!(
+            "el tope de gasto debe ser finito y mayor que cero: {}",
+            o.tope_usd
+        )));
+    }
+    let inicio = observe::ahora().0;
+    let gitleaks = leer_gitleaks(&o.gitleaks)?;
+    let texto_defectos = match &o.defectos {
+        Some(ruta) => {
+            let texto = fs::read_to_string(ruta)
+                .map_err(|e| ErrorOraculo::Uso(format!("defectos {}: {e}", ruta.display())))?;
+            defectos_del_repo(&texto, &o.repo)?;
+            Some(texto)
+        }
+        None => None,
+    };
+
+    let mut avisos = Vec::new();
+    let juez = super::juez_diseno_de_produccion(home, &mut avisos)
+        .ok_or_else(|| ErrorOraculo::Eleccion(avisos.join("; ")))?;
+    let modelo = juez.eleccion.modelo.clone().ok_or_else(|| {
+        ErrorOraculo::Eleccion("la elección del juez no dice qué modelo usar".into())
+    })?;
+    let cfg = Config::cargar(&home.join("root.toml"))
+        .map_err(|e| ErrorOraculo::Configuracion(e.codigo_de_salida(), e.to_string()))?;
+    let precio = cfg.precios.get(&modelo).ok_or_else(|| {
+        ErrorOraculo::Eleccion(format!("root.toml no tiene precio para el modelo {modelo}"))
+    })?;
+    let peor = |p: &Prompt| {
+        f64::from(INTENTOS_MAX) * costo_peor_caso(precio, bytes_de_prompt(p), p.max_tokens)
+    };
+    let eventos = observe::ruta_eventos_en(home);
+    let gasto = || {
+        observe::uso::gasto_api_desde_en(&eventos, inicio)
+            .map_err(|e| ErrorOraculo::Infra(e.to_string()))
+    };
+
+    let mut auditoria = auditar_con(
+        &o.repo, &o.incluir, &gitleaks, &juez, &modelo, o.tope_usd, &peor, &gasto,
+    )?;
+    if let Some(texto) = &texto_defectos {
+        auditoria.medicion = Some(medir(texto, &o.repo, &auditoria.hallazgos)?);
+    }
+    escribir_salida(&o.salida, &auditoria)?;
+    Ok(auditoria)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::proveedores::RespuestaJuez;
+
+    const JSON_VACIO: &str = r#"{"defectos":[]}"#;
+
+    /// Modelo falso. Guarda cada prompt que recibe y responde con `responder(n)`, con `n` las llamadas previas.
+    struct ModeloFalso {
+        enviados: RefCell<Vec<Prompt>>,
+        responder: Box<dyn Fn(usize) -> Result<RespuestaJuez, ErrorOraculo>>,
+    }
+
+    impl ModeloFalso {
+        fn nuevo(
+            responder: impl Fn(usize) -> Result<RespuestaJuez, ErrorOraculo> + 'static,
+        ) -> Self {
+            Self {
+                enviados: RefCell::new(Vec::new()),
+                responder: Box::new(responder),
+            }
+        }
+
+        fn que_responde(texto: &'static str) -> Self {
+            Self::nuevo(move |_| respuesta(texto, 0.0))
+        }
+
+        fn llamadas(&self) -> usize {
+            self.enviados.borrow().len()
+        }
+
+        fn prompt(&self, n: usize) -> Prompt {
+            self.enviados.borrow()[n].clone()
+        }
+
+        fn usuario(&self, n: usize) -> String {
+            self.prompt(n).usuario
+        }
+    }
+
+    impl ModeloJuez for ModeloFalso {
+        fn consultar(&self, prompt: &Prompt) -> Result<RespuestaJuez, ErrorOraculo> {
+            let n = self.llamadas();
+            self.enviados.borrow_mut().push(prompt.clone());
+            (self.responder)(n)
+        }
+    }
+
+    fn respuesta(texto: &str, costo_usd: f64) -> Result<RespuestaJuez, ErrorOraculo> {
+        Ok(RespuestaJuez {
+            texto: texto.into(),
+            truncada: false,
+            costo_usd,
+        })
+    }
+
+    fn peor_cero(_: &Prompt) -> f64 {
+        0.0
+    }
+
+    fn peor_uno(_: &Prompt) -> f64 {
+        1.0
+    }
+
+    fn gasto_cero() -> Result<f64, ErrorOraculo> {
+        Ok(0.0)
+    }
+
+    /// Repo temporal con los archivos dados. La carpeta se llama `root`.
+    fn repo_con(archivos: &[(&str, &str)]) -> (TempDir, PathBuf) {
+        let tmp = TempDir::new().expect("temporal");
+        let repo = tmp.path().join("root");
+        fs::create_dir_all(&repo).expect("repo");
+        for (ruta, texto) in archivos {
+            let destino = repo.join(ruta);
+            fs::create_dir_all(destino.parent().expect("padre")).expect("carpetas");
+            fs::write(&destino, texto).expect("escribe");
+        }
+        (tmp, repo)
+    }
+
+    fn opciones(repo: PathBuf, tmp: &Path) -> OpcionesAuditar {
+        OpcionesAuditar {
+            repo,
+            salida: tmp.join("auditoria.json"),
+            tope_usd: 1.0,
+            gitleaks: tmp.join("no-existe.json"),
+            incluir: Vec::new(),
+            defectos: None,
+        }
+    }
+
+    #[test]
+    fn el_codigo_de_test_no_sale_y_las_lineas_son_reales() {
+        let codigo = "fn uno() {}\nfn dos() {}\n  #[cfg(test)]\nmod pruebas { fn en_test() {} }\n";
+        let (_tmp, repo) = repo_con(&[("src/lib.rs", codigo)]);
+        let modelo = ModeloFalso::que_responde(JSON_VACIO);
+        let aud = auditar_con(&repo, &[], &[], &modelo, "m", 10.0, &peor_cero, &gasto_cero)
+            .expect("pasada");
+        assert_eq!(modelo.llamadas(), 1);
+        let usuario = modelo.usuario(0);
+        assert!(usuario.contains("2: fn dos() {}\n"), "{usuario}");
+        assert!(!usuario.contains("en_test"), "{usuario}");
+        assert!(!usuario.contains("cfg(test)"), "{usuario}");
+        assert_eq!(aud.archivos, vec!["src/lib.rs".to_string()]);
+    }
+
+    #[test]
+    fn la_linea_de_un_secreto_sale_omitida() {
+        let codigo = "fn uno() {}\nlet clave = \"AKIAEXAMPLE123\";\n";
+        let (_tmp, repo) = repo_con(&[("src/lib.rs", codigo)]);
+        let json = r#"[{"RuleID":"aws-access-token","File":"src/lib.rs","StartLine":2,"Description":"clave"}]"#;
+        let gitleaks = parsear_gitleaks(json, &[]).expect("reporte");
+        let modelo = ModeloFalso::que_responde(JSON_VACIO);
+        auditar_con(
+            &repo,
+            &[],
+            &gitleaks,
+            &modelo,
+            "m",
+            10.0,
+            &peor_cero,
+            &gasto_cero,
+        )
+        .expect("pasada");
+        let usuario = modelo.usuario(0);
+        assert!(
+            usuario.contains("2: [línea con un secreto omitida]\n"),
+            "{usuario}"
+        );
+        assert!(!usuario.contains("AKIA"), "{usuario}");
+    }
+
+    #[test]
+    fn el_gate_solo_confirma_citas_de_lo_que_el_modelo_vio() {
+        let codigo = "fn uno() {}\nlet clave = \"AKIAEXAMPLE123\";\n#[cfg(test)]\nfn solo_en_tests_secreta() {}\n";
+        let (_tmp, repo) = repo_con(&[("src/lib.rs", codigo)]);
+        let json = r#"[{"RuleID":"aws-access-token","File":"src/lib.rs","StartLine":2,"Description":"clave"}]"#;
+        let gitleaks = parsear_gitleaks(json, &[]).expect("reporte");
+        let modelo = ModeloFalso::que_responde(
+            r#"{"defectos":[
+ {"archivo":"src/lib.rs","linea":2,"cita":"let clave = \"AKIAEXAMPLE123\";","detalle":"secreto"},
+ {"archivo":"src/lib.rs","linea":4,"cita":"fn solo_en_tests_secreta() {}","detalle":"test"}
+]}"#,
+        );
+        let a = auditar_con(
+            &repo,
+            &[],
+            &gitleaks,
+            &modelo,
+            "m",
+            10.0,
+            &peor_cero,
+            &gasto_cero,
+        )
+        .expect("pasada");
+        assert!(a.hallazgos.is_empty(), "{:?}", a.hallazgos);
+        assert_eq!(a.descartados.len(), 2);
+    }
+
+    #[test]
+    fn el_tope_corta_antes_de_la_segunda_llamada() {
+        // Cada archivo ocupa unos 180 KB con números: juntos no caben en un prompt.
+        let grande = "let x = 1;\n".repeat(10_000);
+        let (_tmp, repo) =
+            repo_con(&[("src/a.rs", grande.as_str()), ("src/b.rs", grande.as_str())]);
+        let modelo = ModeloFalso::nuevo(|_| respuesta(JSON_VACIO, 1.0));
+        let gasto = || -> Result<f64, ErrorOraculo> { Ok(modelo.llamadas() as f64) };
+        let aud =
+            auditar_con(&repo, &[], &[], &modelo, "m", 1.5, &peor_uno, &gasto).expect("pasada");
+        assert_eq!(modelo.llamadas(), 1);
+        assert_eq!(aud.llamadas, 1);
+        assert!(aud.incompleta);
+        assert_eq!(aud.sin_leer, vec!["src/b.rs".to_string()]);
+        assert_eq!(aud.archivos, vec!["src/a.rs".to_string()]);
+        assert_eq!(aud.costo_usd, 1.0);
+    }
+
+    #[test]
+    fn un_archivo_que_no_cabe_se_parte_con_numeros_reales() {
+        let grande = "let x = 1;\n".repeat(40_000);
+        let (_tmp, repo) = repo_con(&[("src/grande.rs", grande.as_str())]);
+        let modelo = ModeloFalso::que_responde(JSON_VACIO);
+        let aud = auditar_con(&repo, &[], &[], &modelo, "m", 10.0, &peor_cero, &gasto_cero)
+            .expect("pasada");
+        assert!(modelo.llamadas() >= 3, "llamadas: {}", modelo.llamadas());
+        for n in 0..modelo.llamadas() {
+            let prompt = modelo.prompt(n);
+            assert!(bytes_de_prompt(&prompt) <= MAX_ENTRADA_JUEZ_BYTES);
+        }
+        let todo: String = (0..modelo.llamadas()).map(|n| modelo.usuario(n)).collect();
+        assert!(todo.contains("40000: let x = 1;\n"));
+        assert_eq!(aud.archivos, vec!["src/grande.rs".to_string()]);
+        assert!(!aud.incompleta);
+    }
+
+    #[test]
+    fn una_cita_falsa_va_a_descartados_y_una_real_entra() {
+        let (_tmp, repo) =
+            repo_con(&[("src/lib.rs", "fn calcular_total(x: u32) -> u32 { x * 2 }\n")]);
+        let texto = r#"```json
+{"defectos":[
+ {"archivo":"src/lib.rs","linea":1,"cita":"fn no_existe_en_el_archivo(y: u8) {}","detalle":"falso"},
+ {"archivo":"src/lib.rs","linea":1,"cita":"fn calcular_total(x: u32) -> u32 { x * 2 }","detalle":"real"}
+]}
+```"#;
+        let modelo = ModeloFalso::que_responde(texto);
+        let aud = auditar_con(&repo, &[], &[], &modelo, "m", 10.0, &peor_cero, &gasto_cero)
+            .expect("pasada");
+        assert_eq!(aud.hallazgos.len(), 1, "{:?}", aud.hallazgos);
+        assert_eq!(aud.hallazgos[0].detalle, "real");
+        assert_eq!(aud.descartados.len(), 1, "{:?}", aud.descartados);
+        assert_eq!(
+            aud.descartados[0].cita,
+            "fn no_existe_en_el_archivo(y: u8) {}"
+        );
+        assert!(
+            aud.descartados[0].motivo.contains("cita"),
+            "{}",
+            aud.descartados[0].motivo
+        );
+    }
+
+    #[test]
+    fn medir_cuenta_solo_los_defectos_del_repo() {
+        let (_tmp, repo) = repo_con(&[]);
+        let texto = r#"
+[[defecto]]
+tarea = "t1"
+repo = "root"
+archivo = "src/a.rs"
+linea = 10
+fuente = "x"
+detalle = "uno"
+
+[[defecto]]
+tarea = "t2"
+repo = "/otra/ruta/root"
+archivo = "src/a.rs"
+linea = 50
+fuente = "x"
+detalle = "dos"
+
+[[defecto]]
+tarea = "t3"
+repo = "/x/broot"
+archivo = "src/a.rs"
+linea = 10
+fuente = "x"
+detalle = "de otro repo"
+"#;
+        let hallazgo = Candidato {
+            archivo: "src/a.rs".into(),
+            linea: 12,
+            cita: "cita".into(),
+            detalle: "d".into(),
+        };
+        let m = medir(texto, &repo, &[hallazgo]).expect("medición");
+        assert_eq!(m.casos, 2);
+        assert_eq!(m.encontrados, 1);
+        assert!(m.detalle[0].encontrado);
+        assert_eq!(
+            m.detalle[0].hallazgo_cercano.as_ref().map(|h| h.linea),
+            Some(12)
+        );
+        assert!(!m.detalle[1].encontrado);
+        assert!(m.detalle[1].hallazgo_cercano.is_none());
+    }
+
+    #[test]
+    fn medir_con_toml_roto_es_error_de_uso() {
+        let (_tmp, repo) = repo_con(&[]);
+        let err = medir("[[defecto\n", &repo, &[]).expect_err("debe fallar");
+        assert!(matches!(err, ErrorOraculo::Uso(_)), "{err}");
+    }
+
+    #[test]
+    fn el_hash_del_prompt_es_estable_y_cambia_con_el_texto() {
+        assert_eq!(hash_prompt(), hash_prompt());
+        assert_eq!(hash_prompt(), hash_de(PROMPT_AUDITORIA));
+        assert_ne!(hash_prompt(), hash_de(&format!("{PROMPT_AUDITORIA} ")));
+        assert_eq!(hash_prompt().len(), 16);
+    }
+
+    #[test]
+    fn un_reporte_de_gitleaks_ilegible_o_ausente_es_uso() {
+        let tmp = TempDir::new().expect("temporal");
+        let ruta = tmp.path().join("gitleaks.json");
+        fs::write(&ruta, "{ no es json").expect("escribe");
+        let err = leer_gitleaks(&ruta).expect_err("ilegible");
+        assert!(matches!(err, ErrorOraculo::Uso(_)), "{err}");
+        let err = leer_gitleaks(&tmp.path().join("no-existe.json")).expect_err("ausente");
+        assert!(matches!(err, ErrorOraculo::Uso(_)), "{err}");
+    }
+
+    #[test]
+    fn auditar_sin_reporte_de_gitleaks_falla_antes_de_armar_el_juez() {
+        let (tmp, repo) = repo_con(&[("src/lib.rs", "fn uno() {}\n")]);
+        let o = opciones(repo, tmp.path());
+        let err = auditar(tmp.path(), &o).expect_err("debe fallar");
+        assert!(matches!(err, ErrorOraculo::Uso(_)), "{err}");
+        assert!(!o.salida.exists());
+    }
+
+    #[test]
+    fn la_salida_trae_los_campos_pedidos() {
+        let tmp = TempDir::new().expect("temporal");
+        let ruta = tmp.path().join("anidado").join("auditoria.json");
+        let a = Auditoria {
+            hash_prompt: "h".into(),
+            modelo: "m".into(),
+            archivos: vec!["src/a.rs".into()],
+            llamadas: 1,
+            costo_usd: 0.5,
+            hallazgos: Vec::new(),
+            descartados: Vec::new(),
+            incompleta: true,
+            sin_leer: vec!["src/b.rs".into()],
+            avisos: vec!["aviso".into()],
+            medicion: None,
+        };
+        escribir_salida(&ruta, &a).expect("escribe");
+        let texto = fs::read_to_string(&ruta).expect("lee la salida");
+        assert!(texto.ends_with("}\n"));
+        let v: Value = serde_json::from_str(&texto).expect("json");
+        for campo in [
+            "hash_prompt",
+            "modelo",
+            "archivos",
+            "llamadas",
+            "costo_usd",
+            "hallazgos",
+            "descartados",
+            "incompleta",
+            "sin_leer",
+            "avisos",
+            "medicion",
+        ] {
+            assert!(v.get(campo).is_some(), "falta {campo}");
+        }
+        assert_eq!(v["incompleta"], true);
+        assert_eq!(v["sin_leer"][0], "src/b.rs");
+        let entradas = fs::read_dir(ruta.parent().expect("padre"))
+            .expect("lista")
+            .count();
+        assert_eq!(entradas, 1, "no queda temporal");
+    }
+
+    #[test]
+    fn tope_que_no_es_positivo_y_finito_es_uso() {
+        let (tmp, repo) = repo_con(&[("src/lib.rs", "fn uno() {}\n")]);
+        for tope in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut o = opciones(repo.clone(), tmp.path());
+            o.tope_usd = tope;
+            let err = auditar(tmp.path(), &o).expect_err("debe fallar");
+            assert!(matches!(err, ErrorOraculo::Uso(_)), "tope {tope}: {err}");
+        }
+    }
+
+    #[test]
+    fn incluir_fuera_del_repo_es_uso_y_no_envia_nada() {
+        let (_tmp, repo) = repo_con(&[("src/lib.rs", "fn uno() {}\n")]);
+        let modelo = ModeloFalso::que_responde(JSON_VACIO);
+        for ruta in ["/etc", "../otra"] {
+            let err = auditar_con(
+                &repo,
+                &[PathBuf::from(ruta)],
+                &[],
+                &modelo,
+                "m",
+                10.0,
+                &peor_cero,
+                &gasto_cero,
+            )
+            .expect_err("debe fallar");
+            assert!(matches!(err, ErrorOraculo::Uso(_)), "{ruta}: {err}");
+        }
+        assert_eq!(modelo.llamadas(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn los_symlinks_no_se_siguen() {
+        let (tmp, repo) = repo_con(&[("src/lib.rs", "fn uno() {}\n")]);
+        let afuera = tmp.path().join("afuera");
+        fs::create_dir_all(&afuera).expect("carpeta");
+        fs::write(afuera.join("fuera.rs"), "fn fuera_del_repo() {}\n").expect("escribe");
+        std::os::unix::fs::symlink(&afuera, repo.join("src").join("enlace")).expect("enlace");
+        let modelo = ModeloFalso::que_responde(JSON_VACIO);
+        auditar_con(&repo, &[], &[], &modelo, "m", 10.0, &peor_cero, &gasto_cero).expect("pasada");
+        assert_eq!(modelo.llamadas(), 1);
+        assert!(!modelo.usuario(0).contains("fuera_del_repo"));
+    }
+
+    #[test]
+    fn un_error_del_modelo_deja_el_resto_sin_leer() {
+        let grande = "let x = 1;\n".repeat(10_000);
+        let (_tmp, repo) =
+            repo_con(&[("src/a.rs", grande.as_str()), ("src/b.rs", grande.as_str())]);
+        let modelo = ModeloFalso::nuevo(|_| Err(ErrorOraculo::Infra("caída".into())));
+        let aud = auditar_con(&repo, &[], &[], &modelo, "m", 10.0, &peor_cero, &gasto_cero)
+            .expect("pasada");
+        assert_eq!(modelo.llamadas(), 1);
+        assert!(aud.incompleta);
+        assert_eq!(
+            aud.sin_leer,
+            vec!["src/a.rs".to_string(), "src/b.rs".to_string()]
+        );
+        assert_eq!(aud.avisos.len(), 1, "{:?}", aud.avisos);
+    }
+
+    #[test]
+    fn una_respuesta_de_formato_roto_deja_solo_su_grupo_sin_leer() {
+        let grande = "let x = 1;\n".repeat(10_000);
+        let (_tmp, repo) =
+            repo_con(&[("src/a.rs", grande.as_str()), ("src/b.rs", grande.as_str())]);
+        let modelo = ModeloFalso::nuevo(|n| {
+            if n == 0 {
+                respuesta("no es json", 0.0)
+            } else {
+                respuesta(JSON_VACIO, 0.0)
+            }
+        });
+        let aud = auditar_con(&repo, &[], &[], &modelo, "m", 10.0, &peor_cero, &gasto_cero)
+            .expect("pasada");
+        assert_eq!(aud.llamadas, 2);
+        assert_eq!(aud.sin_leer, vec!["src/a.rs".to_string()]);
+        assert!(aud.incompleta);
+        assert_eq!(aud.avisos.len(), 1, "{:?}", aud.avisos);
+    }
+}

@@ -1,5 +1,6 @@
 //! Oracle: corre los tests en un contenedor sin red y cuenta el resultado desde junit.
 
+pub mod auditar;
 pub mod calibra;
 pub mod colab;
 pub mod configs;
@@ -465,7 +466,10 @@ fn juez_config_de_produccion(
 
 /// Juez de diseño de producción: la elección de Route para `juzga`, con su respaldo. Sin presupuesto o
 /// sin elección válida, no hay juez y el aviso lo dice.
-fn juez_diseno_de_produccion(home: &Path, avisos: &mut Vec<String>) -> Option<JuezProveedor> {
+pub(crate) fn juez_diseno_de_produccion(
+    home: &Path,
+    avisos: &mut Vec<String>,
+) -> Option<JuezProveedor> {
     let tokens = juez::LimitesPrompt::default().max_tokens;
     let eleccion = match crate::route::comando::rutear_en(home, Rol::Juzga, "diseno", false, tokens)
     {
