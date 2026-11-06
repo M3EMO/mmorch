@@ -100,6 +100,9 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 74 | P74: "a". Un test oculto en rojo cuenta como encontrado, y la fila muestra aparte los encontrados por línea y por test. |
 | 75 | P75: "a". El saboteador y la curva de auditoría entran al PRD del dataset. |
 | 76 | P76: "Por ahora solo medir. Despues evaluamos si genera". |
+| 77 | P77: "a". Mezclar 72, 73 y 74 en local, sin push, cuando pase la suite de `laptop/prueba74`. |
+| 78 | P78, P70 y P71: el usuario devolvió el texto de cada pregunta con la recomendación, sin cambios, y el orquestador lo toma como aceptación. P78 sí. P70 a: clave dedicada con límite de gasto. P71 a: solo los builders van por Claude. |
+| 79 | P72: "Testear si tiene sustento y despues implementarlo en su totalidad dsps del cierre". |
 
 ## Patterns to Mirror
 
@@ -5164,3 +5167,60 @@ Supuse 3,2 caracteres por token y 16 000 tokens de salida por llamada, a los pre
 **P78: ¿Puedo mandar código de Root a DeepSeek para medir la pasada?** Son cerca de 250 000 caracteres de `src/corre/` y `src/oracle/`, sin tests. Hasta hoy solo mandamos memora y brasa. El repo no versiona `.env`. Los 10 defectos frescos están en ese código.
 - **a)** Sí. Recomendada: son los únicos defectos reales que nadie usó para escribir la pasada.
 - **b)** No. La pasada se mide solo sobre los 8 conocidos, y el cierre dice que esa medida está sesgada.
+
+## Vuelta del 2026-11-06 (3): prueba de sustento del PRD
+
+**Estado.** La corrida real lleva 31 de 57 tareas. Mezclas locales `3b29d43` y `b1e8278`, sin push. La Línea C arranca: gitleaks sobre `e665a5f` y la pasada con tope. Saldo: 22,06 USD de 24 USD. La prueba de sustento no gasta de ese saldo.
+
+**Prueba de sustento.** Está en `.claude/prds/dataset.prd.md`. Sus umbrales quedan fijos antes de leer la pasada.
+
+**Lo que cambió al probar leyendo.**
+- `jina-embeddings-v2-base-code` está obsoleto, y su página no lista Rust. La nota de la vuelta 59 en `vault/research/` quedó vieja en eso. No la toco.
+- El recall por test da 1 por construcción en una tarea minada. Esto limita P74 en el dataset, no en la validez del hito 1, cuyos defectos ya existían antes de medir.
+- El conjunto final pasa a 30 defectos o más.
+- El test de etiqueta del saboteador queda fuera de `oculto`.
+- Los 50 USD alcanzan solo para Root, por estimación.
+- **Sin verificar:** "Sí, las cuatro" no aparece en los archivos de Graft. Sigue como cita de Graft.
+
+**P70 y P71.** Registradas. Pido la clave al empezar D2, solo si algo va por API.
+
+## Desempates técnicos 44 (Opus, 2026-11-06)
+
+**Informe 74.**
+1. **Partir un archivo por líneas:** queda.
+2. **Fallas de una llamada:** queda.
+3. **Campos incompletos a `descartados`:** queda.
+4. **Código de salida:** prefiero 3 con `incompleta`, como `calibrar`. No lo cambio con la Línea C en marcha: hito 1b. Hasta entonces, el orquestador lee `incompleta` en la salida, y no el código.
+5. **Código después de `#[cfg(test)]`:** queda, como límite. Los 10 defectos frescos están antes de esa marca: lo revisé en `e665a5f`.
+6. **Corrida y fase:** queda. El gasto de la pasada se distingue por `fase = "auditar"`.
+
+**Tarea nueva: no hace falta.** Lo que sale de esta prueba es código del dataset, después del cierre.
+
+## Orden final del hito 1 (2026-11-06, 3)
+
+Sin cambios en las líneas A, B y C ni en el cierre. El dataset cambia así:
+
+1. **S3b** sale de la Línea C.
+2. **S12** es lectura pública. Puede ir ya.
+3. **S1, S2, S9 y S13** esperan P79 y P80, y corren en la laptop cuando no haya calibración ni corrida real.
+4. **Criterio de salida.** Después, implementación entera tras el cierre.
+
+## Preguntas para el usuario (2026-11-06, 3)
+
+**P79: ¿Puedo minar GitHub para probar el sustento?** Es red fuera del repo. El planner elige 10 repos de Rust con semilla, con licencia MIT o Apache-2.0 y 1000 estrellas o más, y clona 50 commits. También baja un modelo de embeddings. No usa API.
+- **a)** Sí, y me mostrás la lista antes de clonar. Recomendada.
+- **b)** Sí, sin mostrarme la lista.
+- **c)** No todavía.
+
+**P80: ¿Gasto hasta 3 USD de los 50 del dataset para medir el costo con 3 tareas?** Sin esto, los 41,5 USD del PRD son una estimación.
+- **a)** Sí. Recomendada.
+- **b)** No, implementar con la estimación.
+
+**P81: La decisión 12 dice que aprobás los requisitos de cada tarea. Con 20 tareas, ¿cómo lo hacemos?**
+- **a)** Aprobás las fichas de las 3 primeras y el método. Las demás pasan `ficha revisar` y el chequeo de fuga, y te muestro la lista. Recomendada.
+- **b)** Aprobás las 20.
+- **c)** No aprobás ninguna ficha, solo el método.
+
+**P82: ¿Los brazos de builder del piloto van por cupo o por API?** La parte de Root ya usa cerca de 41,5 de los 50 USD, por estimación.
+- **a)** Por cupo, y los 50 USD quedan para Root. Recomendada. Limita los minutos, pero una comparación exige la misma vía en los dos brazos.
+- **b)** Por API, con el costo medido en S2. Los 50 USD no alcanzan, y hay que ampliar.

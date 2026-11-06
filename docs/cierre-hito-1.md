@@ -57,7 +57,7 @@ Protocolo: `n = 20`, semilla 42. Solo entran a `global` las filas de 0,9 o más 
 
 ## Corrida real de memora (Tarea 16)
 
-**Pendiente.** Dos corridas no llegaron al juez final: un reinicio de la app a los 110 minutos, y el plazo de 2 horas con 25 de 57 tareas. Se retoma en vueltas (decisión 71). La fila queda marcada como `reanudada`, así que su tiempo y su costo no se comparan. Ver P67 en el plan.
+**En curso, sin juez final.** Dos corridas no llegaron al juez final: un reinicio de la app a los 110 minutos, y el plazo de 2 horas con 25 de 57 tareas. Se retomó en vueltas (decisión 71), y la última lectura da 31 de 57. La fila queda marcada como `reanudada`, así que su tiempo y su costo no se comparan. Ver P67 en el plan.
 
 ## Comparación de `global`
 
@@ -65,7 +65,7 @@ Protocolo: `n = 20`, semilla 42. Solo entran a `global` las filas de 0,9 o más 
 
 ## Revisión de cierre
 
-5 HIGH y 17 MEDIUM, de revisores que solo leyeron. Opus verificó los HIGH y seis MEDIUM en el código. Las Tareas 69, 70 y 71 corrigen lo que entra antes de firmar. Pendiente: la prueba con podman de esas tareas.
+5 HIGH y 17 MEDIUM, de revisores que solo leyeron. Opus verificó los HIGH y seis MEDIUM en el código. Las Tareas 69, 70 y 71 corrigen lo que entra antes de firmar. Sus mezclas son locales, sin push.
 
 ## Validation
 
@@ -86,7 +86,7 @@ Los builders se informan aparte en cada `docs/builds/*build-local-*.md`.
 - **Hito 1b:** G3 y el acuerdo con el usuario, G4, Colab 7h, Graft 16b con G5, la lectura ampliada del juez y el contrato `sin_evidencia`.
 - **Antes de la próxima calibración paga:** hallazgos 5, 18 y 19, y el arreglo de la Tarea 67.
 - **Antes de evaluar un repo real:** el recall sobre el dataset, y los hallazgos 9, 11, 12, 14 y 15, sin verificar.
-- **Dataset:** PRD en `.claude/prds/dataset.prd.md`. Memora y brasa se borran "Cuando el dataset calibre" (decisión 70).
+- **Dataset:** PRD en `.claude/prds/dataset.prd.md`, sujeto a su prueba de sustento (decisión 79). Memora y brasa se borran "Cuando el dataset calibre" (decisión 70).
 
 ## Firma
 
