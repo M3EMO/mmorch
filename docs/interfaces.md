@@ -4466,8 +4466,32 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       }
     },
     "recall": {
-      "description": "Fracción de defectos reales que Root encuentra con `archivo` y `linea` a ±3. Umbral 0,8.",
+      "description": "Fracción de defectos reales que Root encuentra: hallazgo con `archivo` y `linea` a ±3, o test rojo.\nUmbral 0,8.",
       "$ref": "#/$defs/Metrica"
+    },
+    "recall_linea": {
+      "description": "Fracción de defectos reales con hallazgo a `TOLERANCIA_LINEAS` líneas o menos. Sin umbral.",
+      "$ref": "#/$defs/Metrica",
+      "default": {
+        "aciertos": null,
+        "casos": 0,
+        "cumple": null,
+        "motivo": "validez.json anterior: métrica no medida",
+        "umbral": null,
+        "valor": null
+      }
+    },
+    "recall_test": {
+      "description": "Fracción de defectos reales con test rojo. Sin umbral.",
+      "$ref": "#/$defs/Metrica",
+      "default": {
+        "aciertos": null,
+        "casos": 0,
+        "cumple": null,
+        "motivo": "validez.json anterior: métrica no medida",
+        "umbral": null,
+        "valor": null
+      }
     },
     "spearman": {
       "description": "Spearman entre el `orden` de los formularios y el orden de Root. Sin umbral.",
@@ -4521,7 +4545,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": false
         },
         "encontrado": {
-          "description": "`true` si Root tiene un hallazgo a ±3 líneas. Es el mismo criterio que `recall`.",
+          "description": "`true` si Root tiene un hallazgo a ±3 líneas. Solo este criterio: `recall` también cuenta el test rojo.",
           "type": "boolean"
         },
         "hallazgo_cercano": {
@@ -4558,7 +4582,7 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "default": null
         },
         "test_rojo": {
-          "description": "`Some(true)` si el test aparece en alguna lista de fallos del veredicto. `None` sin `test`.",
+          "description": "`Some(true)` si el test aparece en alguna lista de fallos del veredicto. `None` sin `test`.\nCuenta para `recall` y `recall_test`, no para `encontrado`.",
           "type": [
             "boolean",
             "null"

@@ -88,8 +88,15 @@ pub struct Validez {
     /// Un detalle por par de `orden.toml`, en su orden. Vacío sin `orden.toml` o sin pares.
     #[serde(default)]
     pub pares: Vec<DetallePar>,
-    /// Fracción de defectos reales que Root encuentra con `archivo` y `linea` a ±3. Umbral 0,8.
+    /// Fracción de defectos reales que Root encuentra: hallazgo con `archivo` y `linea` a ±3, o test rojo.
+    /// Umbral 0,8.
     pub recall: Metrica,
+    /// Fracción de defectos reales con hallazgo a `TOLERANCIA_LINEAS` líneas o menos. Sin umbral.
+    #[serde(default = "metrica_sin_medir_vieja")]
+    pub recall_linea: Metrica,
+    /// Fracción de defectos reales con test rojo. Sin umbral.
+    #[serde(default = "metrica_sin_medir_vieja")]
+    pub recall_test: Metrica,
     /// Un detalle por defecto de `defectos.toml`, en su orden. Vacío sin `defectos.toml` o sin defectos.
     #[serde(default)]
     pub defectos: Vec<DetalleDefecto>,
@@ -143,7 +150,7 @@ pub struct DetalleDefecto {
     pub archivo: String,
     /// Línea del defecto.
     pub linea: u32,
-    /// `true` si Root tiene un hallazgo a ±3 líneas. Es el mismo criterio que `recall`.
+    /// `true` si Root tiene un hallazgo a ±3 líneas. Solo este criterio: `recall` también cuenta el test rojo.
     pub encontrado: bool,
     /// `true` si la evidencia de algún ítem del veredicto cita este archivo a `TOLERANCIA_LINEAS` líneas o
     /// menos del defecto. No cuenta para `encontrado` ni para `recall`.
@@ -155,6 +162,7 @@ pub struct DetalleDefecto {
     #[serde(default)]
     pub test: Option<String>,
     /// `Some(true)` si el test aparece en alguna lista de fallos del veredicto. `None` sin `test`.
+    /// Cuenta para `recall` y `recall_test`, no para `encontrado`.
     #[serde(default)]
     pub test_rojo: Option<bool>,
 }
@@ -231,7 +239,8 @@ pub fn validar_con(
     let pares = leer_orden(casos)?;
     let defectos = leer_defectos(casos)?;
     let (exactitud_orden, detalle_pares) = medir_orden(casos, pares.as_deref(), &mut ev)?;
-    let (recall, detalle_defectos) = medir_recall(casos, defectos.as_deref(), &mut ev)?;
+    let (recall, recall_linea, recall_test, detalle_defectos) =
+        medir_recall(casos, defectos.as_deref(), &mut ev)?;
     let ciego = leer_paquetes(casos, &mut ev, &mut avisos)?;
     let (acuerdo_decision, kappa_dimension, kappa_item, spearman) = match ciego {
         None => {
@@ -258,6 +267,8 @@ pub fn validar_con(
         exactitud_orden,
         pares: detalle_pares,
         recall,
+        recall_linea,
+        recall_test,
         defectos: detalle_defectos,
         acuerdo_decision,
         kappa_dimension,
@@ -559,7 +570,7 @@ fn encuentra(v: &Veredicto, defecto: &DefectoReal) -> bool {
 }
 
 /// `Some(true)` si el `test` del defecto está en alguna lista de fallos del veredicto. `None` sin `test`.
-/// Solo informa: no cuenta para `encuentra` ni para `recall`.
+/// Cuenta para `recall` y `recall_test`. No cuenta para `encuentra`.
 fn test_rojo(v: &Veredicto, defecto: &DefectoReal) -> Option<bool> {
     let test = defecto.test.as_deref()?;
     let en_lista = |lista: &[String]| lista.iter().any(|t| t == test);
@@ -604,6 +615,11 @@ fn hallazgo_mas_cercano(v: &Veredicto, defecto: &DefectoReal) -> Option<Hallazgo
 
 fn normaliza(ruta: &str) -> &str {
     ruta.trim_start_matches("./")
+}
+
+/// Default de las métricas que no están en un `validez.json` viejo: sin medir, con motivo.
+fn metrica_sin_medir_vieja() -> Metrica {
+    Metrica::sin_medir("validez.json anterior: métrica no medida")
 }
 
 impl Metrica {
@@ -768,39 +784,33 @@ fn medir_orden(
     Ok((metrica, detalle))
 }
 
-/// Mide el recall y devuelve un `DetalleDefecto` por defecto, en el orden de `defectos.toml`.
+/// Mide el recall. Devuelve `recall` (hallazgo por línea o test rojo), `recall_linea`, `recall_test` y un
+/// `DetalleDefecto` por defecto, en el orden de `defectos.toml`.
 fn medir_recall(
     casos: &Path,
     defectos: Option<&[DefectoReal]>,
     ev: &mut Evaluaciones,
-) -> Result<(Metrica, Vec<DetalleDefecto>), ErrorOraculo> {
-    let umbral = Some(UMBRAL_RECALL);
+) -> Result<(Metrica, Metrica, Metrica, Vec<DetalleDefecto>), ErrorOraculo> {
     let Some(defectos) = defectos else {
-        return Ok((
-            Metrica {
-                umbral,
-                ..Metrica::sin_medir("falta defectos.toml: sin defectos reales")
-            },
-            Vec::new(),
-        ));
+        return Ok(recall_sin_medir("falta defectos.toml: sin defectos reales"));
     };
     if defectos.is_empty() {
-        return Ok((
-            Metrica {
-                umbral,
-                ..Metrica::sin_medir("defectos.toml no tiene defectos")
-            },
-            Vec::new(),
-        ));
+        return Ok(recall_sin_medir("defectos.toml no tiene defectos"));
     }
     let mut encontrados = 0;
+    let mut en_linea = 0;
+    let mut en_test = 0;
     let mut detalle = Vec::with_capacity(defectos.len());
     for defecto in defectos {
         let v = ev.veredicto(&defecto.tarea, &casos.join(&defecto.repo))?;
         let encontrado = encuentra(&v, defecto);
-        if encontrado {
+        let rojo = test_rojo(&v, defecto);
+        let en_rojo = rojo == Some(true);
+        if encontrado || en_rojo {
             encontrados += 1;
         }
+        en_linea += u32::from(encontrado);
+        en_test += u32::from(en_rojo);
         detalle.push(DetalleDefecto {
             tarea: defecto.tarea.clone(),
             repo: defecto.repo.clone(),
@@ -810,11 +820,29 @@ fn medir_recall(
             en_evidencia: en_evidencia(&v, defecto),
             hallazgo_cercano: hallazgo_mas_cercano(&v, defecto),
             test: defecto.test.clone(),
-            test_rojo: test_rojo(&v, defecto),
+            test_rojo: rojo,
         });
     }
-    let metrica = Metrica::fraccion(encontrados, defectos.len() as u32, umbral);
-    Ok((metrica, detalle))
+    let total = defectos.len() as u32;
+    Ok((
+        Metrica::fraccion(encontrados, total, Some(UMBRAL_RECALL)),
+        Metrica::fraccion(en_linea, total, None),
+        Metrica::fraccion(en_test, total, None),
+        detalle,
+    ))
+}
+
+/// Las tres medidas de recall sin medir, con el mismo motivo. Solo `recall` lleva umbral.
+fn recall_sin_medir(motivo: &str) -> (Metrica, Metrica, Metrica, Vec<DetalleDefecto>) {
+    (
+        Metrica {
+            umbral: Some(UMBRAL_RECALL),
+            ..Metrica::sin_medir(motivo)
+        },
+        Metrica::sin_medir(motivo),
+        Metrica::sin_medir(motivo),
+        Vec::new(),
+    )
 }
 
 /// Un paquete a ciegas ya evaluado por Root, con el formulario del usuario si lo hay.
@@ -2018,6 +2046,8 @@ fuente = "fixture"
         for m in [
             &v.exactitud_orden,
             &v.recall,
+            &v.recall_linea,
+            &v.recall_test,
             &v.acuerdo_decision,
             &v.spearman,
         ] {
@@ -2025,6 +2055,8 @@ fuente = "fixture"
             assert!(m.motivo.is_some(), "sin fuente hay motivo");
             assert_eq!(m.cumple, None);
         }
+        assert_eq!(v.recall_linea.umbral, None, "recall_linea no tiene umbral");
+        assert_eq!(v.recall_test.umbral, None, "recall_test no tiene umbral");
         assert_eq!(v.kappa_dimension.len(), TODAS_LAS_DIMENSIONES.len());
         assert!(
             v.kappa_dimension
@@ -2946,7 +2978,7 @@ fuente = "fixture"
     }
 
     #[test]
-    fn validez_test_rojo_sin_hallazgo_no_cambia_recall() {
+    fn validez_test_rojo_sin_hallazgo_cuenta_en_recall() {
         let dir = TempDir::new().expect("temporal");
         let casos = dir.path();
         escribir_defectos_con_test(casos, &[("r", "src/a.rs", 20, "t::rojo")]);
@@ -2957,9 +2989,89 @@ fuente = "fixture"
         };
         let v = validar_con(casos, &falso(vec![clave("r", v_root)])).expect("mide");
         let detalle = &v.defectos[0];
-        assert!(!detalle.encontrado, "test rojo no cuenta como encontrado");
+        assert!(
+            !detalle.encontrado,
+            "test rojo no cuenta como encontrado por línea"
+        );
         assert_eq!(detalle.test_rojo, Some(true));
+        assert_eq!(v.recall.aciertos, Some(1), "test rojo cuenta en recall");
+    }
+
+    #[test]
+    fn validez_recall_test_rojo_sin_hallazgo_cuenta_en_recall_test() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos_con_test(casos, &[("r", "src/a.rs", 20, "t::rojo")]);
+        let v_root = Veredicto {
+            ocultos_fallidos: vec!["t::rojo".into()],
+            ..Veredicto::default()
+        };
+        let v = validar_con(casos, &falso(vec![clave("r", v_root)])).expect("mide");
+        assert_eq!(v.recall_test.aciertos, Some(1));
+        assert_eq!(v.recall_test.casos, 1);
+        assert_eq!(v.recall_test.umbral, None, "recall_test no tiene umbral");
+        assert_eq!(v.recall_test.cumple, None);
+        assert_eq!(
+            v.recall_linea.aciertos,
+            Some(0),
+            "sin hallazgo no cuenta por línea"
+        );
+        assert_eq!(v.recall_linea.casos, 1);
+    }
+
+    #[test]
+    fn validez_recall_sin_test_ni_hallazgo_no_cuenta() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos(casos, &[("src/a.rs", 20)]);
+        let v = validar_con(casos, &falso(vec![clave("r", Veredicto::default())])).expect("mide");
         assert_eq!(v.recall.aciertos, Some(0));
+        assert_eq!(v.recall_linea.aciertos, Some(0));
+        assert_eq!(v.recall_test.aciertos, Some(0));
+        assert_eq!(
+            v.recall_test.casos, 1,
+            "el defecto entra al total aunque no cuente"
+        );
+    }
+
+    #[test]
+    fn validez_recall_hallazgo_y_test_rojo_cuenta_una_vez() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos_con_test(casos, &[("r", "src/a.rs", 20, "t::rojo")]);
+        // Hallazgo a 2 líneas y test rojo: el defecto cuenta una sola vez en recall.
+        let v_root = Veredicto {
+            hallazgos: vec![hallazgo("src/a.rs", 22)],
+            ocultos_fallidos: vec!["t::rojo".into()],
+            ..Veredicto::default()
+        };
+        let v = validar_con(casos, &falso(vec![clave("r", v_root)])).expect("mide");
+        assert_eq!(v.recall.aciertos, Some(1), "un solo defecto, una sola vez");
+        assert_eq!(v.recall.casos, 1);
+        assert_eq!(v.recall_linea.aciertos, Some(1));
+        assert_eq!(v.recall_test.aciertos, Some(1));
+    }
+
+    #[test]
+    fn validez_recall_viejo_sin_metricas_lee_sin_medir() {
+        let dir = TempDir::new().expect("temporal");
+        let v = validar_con(dir.path(), &falso(Vec::new())).expect("mide");
+        let mut json = serde_json::to_value(&v).expect("serializa");
+        let mapa = json.as_object_mut().expect("objeto");
+        assert!(
+            mapa.remove("recall_linea").is_some(),
+            "la clave recall_linea se serializa"
+        );
+        assert!(
+            mapa.remove("recall_test").is_some(),
+            "la clave recall_test se serializa"
+        );
+        let viejo: Validez =
+            serde_json::from_value(json).expect("lee un validez sin recall_linea ni recall_test");
+        assert_eq!(viejo.recall_linea.valor, None);
+        assert!(viejo.recall_linea.motivo.is_some());
+        assert_eq!(viejo.recall_test.valor, None);
+        assert!(viejo.recall_test.motivo.is_some());
     }
 
     #[test]
