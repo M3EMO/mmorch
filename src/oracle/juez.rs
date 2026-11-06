@@ -704,8 +704,19 @@ fn id_de(valor: &Value) -> Option<String> {
 fn nivel_invalido(valor: &Value) -> bool {
     match valor.get("nivel") {
         None | Some(Value::Null) => false,
-        Some(nivel) => !nivel.as_i64().is_some_and(|n| (0..=NIVEL_MAX).contains(&n)),
+        Some(nivel) => !nivel_entero(nivel).is_some_and(|n| (0..=NIVEL_MAX).contains(&n)),
     }
+}
+
+/// Nivel entero de un valor JSON: un entero, o un flotante finito sin parte fraccionaria (2.0 vale 2).
+fn nivel_entero(valor: &Value) -> Option<i64> {
+    let numero = valor.as_number()?;
+    numero.as_i64().or_else(|| {
+        numero
+            .as_f64()
+            .filter(|f| f.is_finite() && f.fract() == 0.0)
+            .map(|f| f as i64)
+    })
 }
 
 /// Un ítem sin nivel y sin `sin_evidencia`. Rompe el contrato.
@@ -770,8 +781,9 @@ pub(crate) fn desenvuelto(texto: &str) -> &str {
 struct ItemCrudo {
     #[serde(default)]
     item: String,
+    /// Valor crudo: `nivel_entero` lo normaliza, así 2.0 vale como 2.
     #[serde(default)]
-    nivel: Option<i64>,
+    nivel: Option<Value>,
     #[serde(default)]
     motivo: Option<String>,
     #[serde(default)]
@@ -812,15 +824,18 @@ fn procesar_item(valor: Value, cx: &Contexto) -> Result<Dicho, Descarte> {
         serde_json::from_value(valor).map_err(|e| descarte("ítem", format!("mal formado: {e}")))?;
     let que = format!("ítem {}", cruda.item);
     let dimension = cx.dimension(&cruda.item).map_err(|m| descarte(&que, m))?;
-    let Some(nivel) = cruda.nivel else {
+    let Some(valor_nivel) = cruda.nivel.filter(|v| !v.is_null()) else {
         if cruda.motivo.as_deref() == Some(SIN_EVIDENCIA_DEL_JUEZ) {
             return Ok(Dicho::SinEvidencia(cruda.item));
         }
         return Err(descarte(&que, "sin nivel"));
     };
-    if !(0..=NIVEL_MAX).contains(&nivel) {
-        return Err(descarte(&que, format!("nivel {nivel} fuera de 0..=3")));
-    }
+    let Some(nivel) = nivel_entero(&valor_nivel).filter(|n| (0..=NIVEL_MAX).contains(n)) else {
+        return Err(descarte(
+            &que,
+            format!("nivel {valor_nivel} fuera de 0..=3"),
+        ));
+    };
     let mut validas = Vec::new();
     let mut fallidas = Vec::new();
     for ev in cruda
@@ -2273,6 +2288,49 @@ mod tests {
         assert_eq!(modelo.visto.borrow().len(), 2, "exactamente un reintento");
         assert_eq!(r.niveles.get(TOPE), Some(&1));
         assert!(r.faltantes.is_empty(), "{:?}", r.faltantes);
+    }
+
+    #[test]
+    fn juez_nivel_flotante_entero_vale_como_entero_sin_reintento() {
+        let c = caso();
+        let primera = respuesta(
+            json!([
+                {"item": MODULARIDAD, "nivel": 2.0, "evidencia": [real()]},
+                item_nivel(TOPE, 3, json!([real()])),
+            ]),
+            json!([]),
+        );
+        let modelo = FalsoSecuencia::nueva(vec![Ok(primera)]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert_eq!(modelo.visto.borrow().len(), 1, "sin reintento");
+        assert_eq!(r.niveles.get(MODULARIDAD), Some(&2));
+        assert_eq!(r.niveles.get(TOPE), Some(&3));
+    }
+
+    #[test]
+    fn juez_nivel_flotante_no_entero_o_fuera_de_rango_va_al_reintento() {
+        for nivel in [2.5, -1.0, 4.0] {
+            let c = caso();
+            let primera = respuesta(
+                json!([
+                    {"item": MODULARIDAD, "nivel": nivel, "evidencia": [real()]},
+                    item_nivel(TOPE, 1, json!([real()])),
+                ]),
+                json!([]),
+            );
+            let segunda = respuesta(
+                json!([item_nivel(MODULARIDAD, 1, json!([real()]))]),
+                json!([]),
+            );
+            let modelo = FalsoSecuencia::nueva(vec![Ok(primera), Ok(segunda)]);
+            let r = juzgar_secuencia(&c, &modelo);
+            assert_eq!(
+                modelo.visto.borrow().len(),
+                2,
+                "nivel {nivel}: un reintento"
+            );
+            assert_eq!(r.niveles.get(MODULARIDAD), Some(&1), "nivel {nivel}");
+        }
     }
 
     #[test]
