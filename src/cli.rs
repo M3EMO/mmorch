@@ -251,12 +251,17 @@ pub enum OraculoAccion {
         /// Archivo JSON donde se escribe la auditoría.
         #[arg(long)]
         salida: PathBuf,
-        /// Tope de gasto de API de la auditoría, en USD. Debe ser finito y mayor que 0.
-        #[arg(long, allow_negative_numbers = true)]
-        tope_usd: f64,
-        /// Reporte JSON de gitleaks sobre el repo.
-        #[arg(long)]
-        gitleaks: PathBuf,
+        /// Tope de gasto de API de la auditoría, en USD. Debe ser finito y mayor que 0. Sin `--solo-medir`, es obligatorio.
+        #[arg(
+            long,
+            allow_negative_numbers = true,
+            required_unless_present = "solo_medir",
+            conflicts_with = "solo_medir"
+        )]
+        tope_usd: Option<f64>,
+        /// Reporte JSON de gitleaks sobre el repo. Sin `--solo-medir`, es obligatorio.
+        #[arg(long, required_unless_present = "solo_medir")]
+        gitleaks: Option<PathBuf>,
         /// Ruta a incluir en la auditoría. Se repite: `--incluir a.rs --incluir b.rs`.
         #[arg(long, num_args = 1)]
         incluir: Vec<PathBuf>,
@@ -264,8 +269,11 @@ pub enum OraculoAccion {
         #[arg(long)]
         defectos: Option<PathBuf>,
         /// Una llamada por archivo, con el mismo prompt de sistema. Un archivo que no cabe se parte en partes.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "solo_medir")]
         por_archivo: bool,
+        /// Candidatos JSON de otro modelo. Aplica el gate y la medición sin llamar a ningún modelo.
+        #[arg(long)]
+        solo_medir: Option<PathBuf>,
     },
 }
 
@@ -455,12 +463,14 @@ mod tests {
                         incluir,
                         defectos,
                         por_archivo,
+                        solo_medir,
                     },
             } => {
+                assert_eq!(solo_medir, None);
                 assert_eq!(repo, PathBuf::from("/repo"));
                 assert_eq!(salida, PathBuf::from("/salida.json"));
-                assert_eq!(tope_usd, 0.5);
-                assert_eq!(gitleaks, PathBuf::from("/gitleaks.json"));
+                assert_eq!(tope_usd, Some(0.5));
+                assert_eq!(gitleaks, Some(PathBuf::from("/gitleaks.json")));
                 assert_eq!(
                     incluir,
                     vec![PathBuf::from("src/a.rs"), PathBuf::from("src/b.rs")]
@@ -493,6 +503,36 @@ mod tests {
             .collect();
         let error = Cli::try_parse_from(args).expect_err("falta --tope-usd");
         assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn solo_medir_no_pide_tope_ni_gitleaks() {
+        let args = vec![
+            "r00t",
+            "oraculo",
+            "auditar",
+            "--repo",
+            "/repo",
+            "--salida",
+            "/salida.json",
+            "--solo-medir",
+            "/candidatos.json",
+        ];
+        let cli = Cli::try_parse_from(args).expect("solo-medir no pide tope ni gitleaks");
+        match cli.comando {
+            Comando::Oraculo {
+                accion: OraculoAccion::Auditar { solo_medir, .. },
+            } => assert_eq!(solo_medir, Some(PathBuf::from("/candidatos.json"))),
+            otro => panic!("se esperaba oraculo auditar, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn solo_medir_con_tope_usd_es_conflicto() {
+        let mut args = base();
+        args.extend(["--solo-medir", "/candidatos.json"]);
+        let error = Cli::try_parse_from(args).expect_err("tope y solo-medir chocan");
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
     }
 
     #[test]

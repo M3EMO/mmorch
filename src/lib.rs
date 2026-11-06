@@ -90,6 +90,7 @@ pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
                     incluir,
                     defectos,
                     por_archivo,
+                    solo_medir,
                 },
         } => {
             let opciones = oracle::auditar::OpcionesAuditar {
@@ -100,6 +101,7 @@ pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
                 incluir: incluir.clone(),
                 defectos: defectos.clone(),
                 por_archivo: *por_archivo,
+                solo_medir: solo_medir.clone(),
             };
             oraculo_auditar(cli.json, &opciones)
         }
@@ -333,8 +335,9 @@ fn oraculo_informe(nombre: &str, repo: &Path, md: bool) -> Result<u8, Error> {
 /// `oraculo auditar`: valida `--tope-usd`, audita el repo y muestra un resumen. Los errores de uso salen con 2.
 /// Sale con 3 si quedó incompleta, con 0 si no. El JSON de `--salida` se escribe igual.
 fn oraculo_auditar(json: bool, opciones: &oracle::auditar::OpcionesAuditar) -> Result<u8, Error> {
-    let usd = opciones.tope_usd;
-    if !usd.is_finite() || usd <= 0.0 {
+    if let Some(usd) = opciones.tope_usd
+        && (!usd.is_finite() || usd <= 0.0)
+    {
         return Err(Error::Uso(format!(
             "--tope-usd debe ser un número finito mayor que 0, no {usd}"
         )));
