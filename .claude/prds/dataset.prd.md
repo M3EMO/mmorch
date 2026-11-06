@@ -129,10 +129,12 @@ Sin esto, el piloto mediría mal. Todos están en el plan de Root.
 
 | Opción | Dato | Fuente | Dónde corre | Costo |
 |---|---|---|---|---|
-| `jina-code-embeddings-0.5b` o `1.5b` | Sucesores de `jina-embeddings-v2-base-code`, que su página marca como obsoleto. Esa página no lista Rust, y dice que rinde mejor en Python, JavaScript, Java, PHP, Go y Ruby. No leí las fichas de los sucesores | Página de Jina | Laptop con CPU | 0 USD de API; tiempo sin medir |
+| `jina-embeddings-v2-base-code` | 322 MB, 768 dimensiones, Apache-2.0. Su README lista Rust. Su página lo marca como obsoleto. Pide `trust_remote_code` | Hugging Face, API y README, 2026-11-06 | Contenedor sin red ni claves, con CPU | 0 USD de API; tiempo sin medir |
+| `nomic-ai/CodeRankEmbed` | 547 MB, MIT. Control de S9. No leí su lista de lenguajes | Hugging Face, API | Igual | Igual |
+| **Descartados** | `jina-code-embeddings-0.5b` y `1.5b`: CC-BY-NC-4.0, y su README no nombra Rust. `nomic-embed-code`: su README no lista Rust, y pesa decenas de GB | Hugging Face | | |
 | `voyage-code-3` | Cerca de 0,18 USD por millón de tokens; API cerrada | Páginas de terceros, sin verificar | API externa | Estimación: 10 000 textos de 1000 tokens, cerca de 1,8 USD |
 
-- Propongo un modelo abierto, en la laptop, solo si S9 prueba que sirve en Rust. D1 mide el tiempo con una muestra de 100 textos.
+- Usamos un modelo abierto, en la laptop, solo si S9 prueba que sirve en Rust. D1 mide el tiempo con una muestra de 100 textos.
 - La decisión 33 dice que la cuenta de Colab es paga, y acepta la T4 solo para tests pendientes. Usarla aquí es otra pregunta.
 - Se embebe la descripción del repo, el mensaje del commit y un resumen del diff. Los tests ocultos no entran.
 
@@ -170,7 +172,7 @@ Sin esto, el piloto mediría mal. Todos están en el plan de Root.
 | N.º | Afirmación | Cómo se prueba | Sostiene | Cambia | Frena | Costo | Tiempo, estimación |
 |---|---|---|---|---|---|---|---|
 | S1 | Hay tareas suficientes de Rust | Minar 50 commits de 10 repos elegidos con semilla, con los criterios 1 a 5 | 10 % o más admitidos, de 3 repos o más | De 2 % a 10 %: más repos o minería más larga | Menos de 2 % | 0 USD; GitHub, P79 | 1 a 2 días de CPU |
-| S2 | El costo entra en 50 USD | 3 tareas de punta a punta: 15 evaluaciones y 6 defectos del saboteador | Proyección de Root de 50 USD o menos | De 50 a 75 USD: el usuario amplía | Más de 75 USD | Hasta 3 USD de los 50, P80 | 1 día |
+| S2 | El costo entra en 50 USD | 3 tareas de punta a punta: 15 evaluaciones y 6 defectos del saboteador | Proyección de Root de 50 USD o menos | De 50 a 75 USD: el usuario amplía | Más de 75 USD | Hasta 5 USD de los 50, P80, después del cierre | 1 día |
 | S3a | El tiempo es viable | Lo mide S2 | 60 minutos o menos por evaluación, y 7 días o menos en total | Hasta 14 días: se elige por tamaño de repo | Más de 14 días | Incluido en S2 | Incluido |
 | S3b | El recall de 0,8 es alcanzable | La pasada sobre los 10 defectos frescos | 7 o más de 10 | 4 a 6: el juez y la pasada se amplían antes de D4 | 3 o menos: el usuario decide | **Medido: 0 de 10, 0,4665 USD. Frena** | Hecho |
 | S9 | El mapa sirve en Rust | 100 crates de categorías conocidas: ¿el vecino más cercano comparte categoría? | 60 % o más | 30 % a 60 %: otro modelo | Menos de 30 % en dos modelos: el mapa no mide | 0 USD; bajar un modelo, P79 | Horas |
@@ -204,7 +206,7 @@ Los umbrales de S1, S3a, S9 y S13 son criterio mío, no una medición. No tienen
 - **Ajuste:** 20 defectos o más. Se permite mirarlos.
 - **Final, sellado:** 30 sembrados y 15 fallas reales, o más. Solo el orquestador los ve. Cada variante elegida se mide una sola vez.
 - **Gastados:** los 10 frescos y los 8 de la validez no entran en ninguno.
-- **Partición por repo.** Un repo del conjunto final no aparece en ajuste, ni en las tareas visibles.
+- **Partición.** Fallas reales: por repo. Sembrados: por archivo, porque salen de 2 repos. La regla exacta está en el plan.
 
 **Reporte.** Recall por línea, por clase y por origen (real o sembrado), además de candidatos por 1000 líneas. El recall sembrado solo no basta: un saboteador y un detector LLM pueden compartir puntos ciegos. Es un argumento, sin medir.
 
@@ -222,13 +224,14 @@ Los umbrales de S1, S3a, S9 y S13 son criterio mío, no una medición. No tienen
 | Calibración, 100 evaluaciones a 0,19 USD con la lectura ampliada | Cerca de 19 |
 | Curva: 40 defectos en 3 lecturas | Cerca de 23 |
 | Conjunto final: 30 defectos | Cerca de 5,7 |
-| Saboteador: 70 defectos intentados a 0,04 USD | Cerca de 3 |
-| Línea Buscador, variantes por API | Hasta 7, con tope (P84) |
-| **Subtotal de Root** | **Cerca de 59** |
+| Saboteador | 0 USD de API: va por cupo |
+| Línea Buscador, variantes por API | **Tope 12** (P84). Estimación: 9,2, con V0, V1 y Vd |
+| S2, 3 tareas | **Tope 5** (P80) |
+| **Subtotal de Root** | **Cerca de 65,7: 17 son topes y 48,7 son estimación** |
 | Línea Buscador por cupo y sondas | 0 USD de API |
 | Corridas de builder por API | No entran en este subtotal. Sin medir. Una sola corrida de memora midió 2,76 USD de planificación, y se estimó en cerca de 18 USD por 2 horas de organización |
 
-**Lectura.** El subtotal pasa de 50 USD, por estimación. El usuario dijo: "si hace falta mas agregaremos". S2 lo mide antes de pedir. Los brazos de builder por API no entran: dependen de P82. Los 0,19 USD salen de suponer 52 000 tokens de entrada y 30 000 de salida. La pasada midió de 20 000 a 30 000 de salida, y yo había estimado 16 000: costó 0,4665 USD contra 0,25 estimados.
+**Lectura.** El subtotal pasa de 50 USD por cerca de 16, por estimación. No recorto fases. Los brazos de builder van por cupo (P82). S2 mide la parte estimada. El usuario dijo: "si hace falta mas agregaremos". S2 lo mide antes de pedir. Los brazos de builder por API no entran: dependen de P82. Los 0,19 USD salen de suponer 52 000 tokens de entrada y 30 000 de salida. La pasada midió de 20 000 a 30 000 de salida, y yo había estimado 16 000: costó 0,4665 USD contra 0,25 estimados.
 
 **Regla.** El piloto corre primero 3 tareas, mide y frena. Después el planner proyecta el total. Si no entra en 50 USD, va al usuario. Toda corrida lleva `--tope-usd`.
 
@@ -267,5 +270,5 @@ Los umbrales de S1, S3a, S9 y S13 son criterio mío, no una medición. No tienen
 3. **P70:** cómo entra la clave al builder.
 4. **P71:** si "Usar api claude" incluye al juez.
 5. **Reusar benchmarks.** Los abstracts de FeatureBench, SWE-Milestone y Commit0 no nombran Rust. Falta leer sus artículos o repos. Es lectura pública, sin costo.
-6. **P79 a P82 y P84:** ver "Prueba de sustento" y "Línea Buscador".
+6. **Respondidas:** P79 con la lista a la vista, P80 hasta 5 USD, P81 con las 3 primeras fichas y el método, P82 por cupo, P84 hasta 12 USD. El método está en `docs/dataset-metodo-fichas.md`.
 7. **La clave dedicada (P70 a):** el usuario la crea al empezar D2, si algo va por API.

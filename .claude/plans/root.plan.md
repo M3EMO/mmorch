@@ -104,6 +104,11 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 78 | P78, P70 y P71: el usuario devolvió el texto de cada pregunta con la recomendación, sin cambios, y el orquestador lo toma como aceptación. P78 sí. P70 a: clave dedicada con límite de gasto. P71 a: solo los builders van por Claude. |
 | 79 | P72: "Testear si tiene sustento y despues implementarlo en su totalidad dsps del cierre". |
 | 80 | P83: "P83 a + b en paralelo". El dataset sigue, y la búsqueda de un buscador mejor corre a la vez, como objetivo medido. La regla sigue: Root no evalúa repos reales sin recall de 0,8. La lectura es del orquestador. |
+| 81 | P79: "sí, con la lista a la vista antes de clonar". |
+| 82 | P80: "sí, hasta 5". El tope sube de 3 a 5 USD. Corre después del cierre. |
+| 83 | P81: "apruebas las 3 primeras fichas y el método". |
+| 84 | P82: "cupo". |
+| 85 | P84: "sí, Hasta 12 dolares". El tope sube de 7 a 12 USD. Corre después del cierre. |
 
 ## Patterns to Mirror
 
@@ -5419,3 +5424,231 @@ Un intento vale solo si compila, si el test pasa limpio y da rojo con el defecto
 - **a)** Sí, con ese tope. Recomendada.
 - **b)** Solo si V2 o V3 dan una señal: recall de 0,5 o más. Ahorra, pero pierde el control.
 - **c)** No.
+
+## Vuelta del 2026-11-06 (6): protocolo de la Línea Buscador y minería
+
+**Estado.** Decisiones 81 a 85. El orquestador validó los sembrados, sin podman y con prioridad mínima: 180 intentos, 119 válidos y distintos (76 de memora-ecc, 43 de brasa-ecc), en 22 archivos. Lo acepto, porque la carga era baja. No leí `validados.jsonl` ni `crudos/`.
+
+**Filtro débil.** Las suites tienen 34 y 14 tests. Lo fuerte es el test propio del defecto: da rojo con él y pasa limpio. Son 119 defectos en 22 archivos, así que están agrupados: una cota de Wilson sobreestima la certeza.
+
+## Presupuesto de los 50 USD
+
+| Parte | USD | Tipo |
+|---|---|---|
+| Fichas | 1 | Estimación |
+| Calibración | 19 | Estimación |
+| Curva | 23 | Estimación |
+| Conjunto final con juez | 5,7 | Estimación |
+| Línea Buscador: V0, V1 y Vd | 12 | Tope (estimación: 9,2) |
+| S2 | 5 | Tope |
+| Brazos de builder y saboteador | 0 | Cupo |
+| **Total** | **65,7** | **17 de tope y 48,7 de estimación** |
+
+Pasa de 50 USD por cerca de 16. La pasada costó 1,9 veces lo estimado, así que la parte estimada puede crecer. No recorto. S2 mide, y con ese dato aplica "si hace falta mas agregaremos". Hoy no hace falta pedir nada.
+
+## Tarea 75: sus 10 decisiones
+
+| N.º | Decisión | Veredicto |
+|---|---|---|
+| 1 | Tope insuficiente no escribe `--salida` y sale con 2 | Aceptar |
+| 2 | `--solo-medir` sin `--gitleaks` | **Corregir: Tarea 76, antes de la mezcla** |
+| 3 | La densidad cuenta solo `hallazgos` | Aceptar |
+| 4 | `sin_clase` y `sin_origen` | Aceptar |
+| 5 | En `--solo-medir`, leído es tener texto visible | Aceptar, con regla: el protocolo pasa `--incluir` con lo que el modelo leyó |
+| 6 | `modelo = "externo"` | Aceptar |
+| 7 | Un `origen` desconocido da 2 | Aceptar |
+| 8 | `--solo-medir` con descartados sale con 0 | Aceptar |
+| 9 | Las partes de un archivo no se mezclan con otro | Aceptar |
+| 10 | Corregir el resumen de texto | Aceptar |
+
+**Motivo de la 2.** La cita de un candidato puede copiar un secreto al JSON. En memora y brasa no pasa. En repos minados sí puede, y ese JSON se comparte. El reporte es barato. **La falta de aviso con `medicion = null`** entra también a la 76.
+
+### Tarea 76: Gitleaks obligatorio en `--solo-medir`
+- **Arranca**: desde `laptop/tarea-75` (52dbb3b), con `ROOT_SIN_PODMAN=1`.
+- **Brief**: `docs/builds/brief-local-76.md`.
+
+## Protocolo de la Línea Buscador (ejecutable)
+
+**Binario.** `R` es `r00t` de `laptop/tarea-76`. **Semilla:** 20261109. Todo vive en `~/.cache/root-wt/sembrados/med/`.
+
+### Paso 1: reparto
+
+Sellá antes de medir. Campos: adaptá los nombres a `validados.jsonl`.
+
+```python
+import random, collections
+def repartir(validos, semilla=20261109):
+    r = random.Random(semilla)
+    ajuste, final = [], []
+    for repo in ("memora-ecc", "brasa-ecc"):
+        delrepo = [d for d in validos if d["repo"] == repo]
+        archivos = sorted({d["archivo"] for d in delrepo})
+        r.shuffle(archivos)
+        cuenta, meta, finales = 0, 0.6 * len(delrepo), set()
+        for a in archivos:
+            if cuenta >= meta:
+                break
+            finales.add(a)
+            cuenta += sum(d["archivo"] == a for d in delrepo)
+        for d in sorted(delrepo, key=lambda d: d["id"]):
+            (final if d["archivo"] in finales else ajuste).append(d)
+    return muestra(ajuste, 24, r), muestra(final, 30, r)
+
+def muestra(pool, n, r):
+    r.shuffle(pool)
+    for tope in (3, 4, 5, 10**6):
+        vistos, salida = collections.Counter(), []
+        for d in pool:
+            if vistos[d["archivo"]] < tope and len(salida) < n:
+                vistos[d["archivo"]] += 1
+                salida.append(d)
+        if len(salida) == n:
+            return salida
+    return salida
+```
+
+- **Regla.** Un archivo va entero a un solo conjunto. Cada repo aporta 60 % al pool final, y el resto a ajuste. Como máximo 3 defectos por archivo, y se sube solo si faltan.
+- **Salida.** `ajuste.jsonl` y `final.sellado.jsonl`, este con permisos 0600. Escribí su SHA-256 en tu registro. No leas `final.sellado.jsonl`, salvo por el script de medición. El planner recibe solo conteos.
+- **Si faltan válidos.** Con 50 o más, no hace nada. Hoy hay 119. Si el final queda con menos de 30, generá hasta 60 intentos más en los archivos del pool final. Si sigue corto, medí con lo que haya y escribí "muestra corta". El mínimo de ajuste es 20. Con menos, vuelve al planner.
+
+### Paso 2: una copia por defecto
+
+**Decisión: cada defecto se mide solo en su copia.**
+
+| Opción | Costo de ajuste | Validez |
+|---|---|---|
+| **Un defecto, su archivo, una llamada** | 24 llamadas | Sin interferencia. Con lectura por archivo da lo mismo que leer el repo, porque cada llamada ve un solo archivo |
+| Varios juntos, un lote por repo | 24 llamadas por lote, sobre archivos con y sin defecto | Pide validar la mezcla. Un defecto puede cambiar a otro. Sin ganancia para V2 ni V3 |
+
+**Cuándo sí se juntan:** V0, después del cierre, porque agrupa archivos. Un defecto por archivo en cada copia, y se valida la compilación.
+
+Preparación, una vez por repo: `gl/<repo>.json`, con gitleaks sobre el repo base, en un contenedor corto, sin suite con podman en curso.
+
+### Paso 3: variantes sobre `ajuste.jsonl`
+
+**Entrada común.** La parte del archivo antes del primer `#[cfg(test)]`, con cada línea como `<n>: <texto>`, igual que `auditar`. Va por stdin, desde una carpeta vacía.
+
+**Prompts fijos.**
+- `prompt-V2.txt`: el texto exacto de `PROMPT_AUDITORIA` (hash `c78bbcaa6c575833`).
+- `prompt-V3-<foco>.txt`: ese texto, más una línea: `Foco de esta revisión: <foco>.` Los focos son `conducta incorrecta`, `seguridad`, `fiabilidad` y `uso de recursos`.
+
+**V2 y V3, una llamada:**
+
+```bash
+cd "$(mktemp -d -p ~/.cache/root-wt/sembrados/med)"
+env -u DEEPSEEK_API_KEY -u ANTHROPIC_API_KEY timeout 600 nice -n 19 \
+  claude -p --setting-sources project --strict-mcp-config --tools "" --model sonnet \
+  --output-format json --system-prompt "$(cat "$PROMPT")" < "$ENTRADA" > "$SALIDA_CLAUDE"
+```
+
+- No uses `--bare`: ese modo puede cambiar la autenticación, y hace falta el cupo. Probá `--tools ""` con una llamada. Si la CLI lo rechaza, pará y avisá.
+- Tomá `result` y buscá el objeto JSON. Sin JSON, `{"defectos":[]}`, y sumá a `sin_json`.
+- En V3, juntá los `defectos` de los 4 focos.
+
+**Medir:**
+
+```bash
+$R --json oraculo auditar --repo "$COPIA" --salida "$V/$ID.json" --gitleaks "gl/$REPO.json" \
+  --incluir "$ARCHIVO" --defectos "def/$ID.toml" --solo-medir "$V/$ID.cand.json"
+```
+
+`def/$ID.toml` trae un `[[defecto]]`, con `repo` terminado en el nombre de la copia, `origen = "sembrado"` y `clase` si existe.
+
+**Densidad.** Una vez por variante, sobre cada archivo de producción limpio de los dos repos, con el mismo comando y sin `--defectos`. Son 24 archivos: 24 llamadas en V2 y 96 en V3.
+
+**Vs, sin cupo.** En la copia de cada defecto, y una vez en cada repo limpio:
+
+```bash
+CARGO_TARGET_DIR=$T nice -n 19 cargo clippy --message-format=json --quiet -- \
+  -W clippy::pedantic -W clippy::restriction -A clippy::blanket_clippy_restriction_lints > clippy.json
+```
+
+Convertí cada `primary` span de `src/` a `{"archivo","linea","cita","detalle"}`, con `cita` igual a esa línea del archivo. Medí con el mismo `--solo-medir`, sin `--incluir`. Son repos propios, por eso corre en el host.
+
+### Paso 4: orden y topes
+
+| Orden | Variante | Tope de llamadas | Cuándo |
+|---|---|---|---|
+| 1 | Vs | Sin cupo | Con prioridad mínima |
+| 2 | V2 | 60 | Sigue a Vs |
+| 3 | V3 | 200 | Sigue a V2 |
+
+- **Dos llamadas a la vez, como mucho.**
+- **Corte de cupo.** Antes de cada llamada, mirá `five_hour`. Con la corrida real activa, pausá en 60 %. Sin ella, pausá en 80 %. Seguí cuando reabra el bloque. La corrida real siempre tiene prioridad.
+- **Tope agotado.** Cerrá la variante con lo medido, y marcala `incompleta`.
+
+### Paso 5: lo que se informa y lo que se decide
+
+**Informe al planner, solo conteos:** por variante, recall por línea en ajuste, recall por repo y por clase, `candidatos_por_1000_lineas`, llamadas, `sin_json`, costo de lista, y `five_hour` al terminar.
+
+**Regla.**
+- Una variante **pasa ajuste** con recall de 0,5 o más y 50 candidatos por 1000 líneas o menos.
+- **Freno A:** ninguna pasa, también después de V0, V1 y Vd. Vuelve al usuario.
+- **El conjunto final espera.** Hace falta terminar V0, V1 y Vd, que corren después del cierre, y tener las fallas reales. Después corre una sola variante: la de mayor recall en ajuste, y ante un empate, la de menor densidad. Una sola corrida.
+- **Pasa el final:** 24 de 30 sembrados y 12 de 15 reales.
+
+**Corrección a la vuelta anterior.** Vd no sale de la validez repetida para este conjunto: esa validez mira los 8 gastados. Lo que dé ahí es solo informativo. Vd sobre ajuste son 24 evaluaciones, cerca de 2,4 USD y 9 horas, dentro del tope de P84.
+
+**Por ahora:** nadie ajusta prompts. Si V2 o V3 pasan, igual se termina el resto.
+
+## Minería (P79)
+
+**Antes de clonar:** el usuario ve la lista. Es la pregunta P85, abajo. Yo no la elegí: la sorteó el orquestador.
+
+**Después de su respuesta:**
+
+1. **Clonar los 10**, con `git clone --filter=blob:none`, en `~/.cache/root-wt/mineria/repos/`. Sin ejecutar nada del repo en el host. Este código es ajeno: ni `cargo` ni `build.rs` fuera de un contenedor.
+2. **Elegir commits, sin ejecutar.** Desde 2023-11-06, sin merges. El mensaje coincide con `fix|bug|regress|panic|overflow|leak|race|crash|correct`. Cambia 3 archivos `.rs` de producción o menos, con 30 líneas borradas o menos, y cambia tests en el mismo commit. Con la semilla 20261109, 5 commits por repo: 50 en total.
+3. **Base en contenedor.** `podman run --network none --cap-drop=all --security-opt no-new-privileges --memory=8g --pids-limit=4096`, sin claves. Las dependencias se bajan antes, con `cargo fetch`, que no corre `build.rs`. Sin suite con podman ni validez en curso. Plazo: 15 minutos por repo.
+4. **Criterios 1 a 5 de admisión** para cada commit. S1 sale de ahí.
+
+**Reserva, en su orden.** Un repo se reemplaza si:
+- `cargo test` de la punta no pasa en la base sin red, dentro del plazo;
+- pide un servicio externo: base de datos, Docker o red;
+- da menos de 5 commits que cumplan el paso 2.
+
+Con 5 reemplazos usados y todavía sin 10 repos, S1 da "cambia". Se informa, y no se sortea otro repo sin avisar.
+
+**Separar fallas reales del dataset.** Por repo.
+- Con la semilla 20261109, 4 de los repos con commits admitidos van a la Línea Buscador, y el resto al dataset.
+- De esos 4, 3 dan el conjunto final de reales, y 1 da reales de ajuste.
+- Si los 3 no llegan a 15 fallas, se minan hasta 15 commits por repo, solo de esos 3.
+- Si aun así no llegan, se informa "muestra corta".
+- **Sellado igual que los sembrados.** Un defecto real cuenta a 3 líneas o menos de una línea que el arreglo cambió, sobre el estado anterior.
+
+**Embeddings.** `jina-embeddings-v2-base-code`: 322 MB, Apache-2.0, y su README lista Rust. Control: `nomic-ai/CodeRankEmbed`, 547 MB, MIT. Corrijo la vuelta anterior: la página decía obsoleto y no listaba Rust, pero el README sí lo lista. Pide `trust_remote_code`, así que corre en un contenedor, con la revisión fija y sin red después de bajar. Sus sucesores no sirven: CC-BY-NC-4.0, y su README no nombra Rust. Espera P86.
+
+## P81: qué se le muestra al usuario
+
+`docs/dataset-metodo-fichas.md`: el método en una página, qué decide un modelo y qué no, y qué recibe con las 3 primeras fichas. Mostrale ese archivo después de la minería, junto con las 3 fichas, sin nombres de tests ocultos.
+
+## Orden (2026-11-06, 6)
+
+**Línea B:** sin cambios.
+
+**Ahora:** Tarea 76; reparto y sellado; Vs; V2 y V3 con el corte de cupo. P85 para clonar.
+
+**Sin suite ni validez en curso:** base de la minería y S9.
+
+**Después del cierre:** S2, V0, V1, Vd, conjunto final y dataset.
+
+## Preguntas para el usuario (2026-11-06, 6)
+
+**P85: Esta es la lista de GitHub que pediste ver. ¿La clono?** La sorteó el orquestador con semilla 20261108. Son 10 repos, con 5 de reserva. Se clonan sin ejecutar nada en la laptop: los tests corren en un contenedor sin red y sin claves.
+
+- **Principales:** lakekeeper/lakekeeper, postgresml/pgcat, embedded-graphics/embedded-graphics, iwe-org/iwe, moka-rs/moka, spacering-net/codeg, Canop/broot, smallvec/smallvec, zkat/miette, openlake-project/openlake.
+- **Reserva, en orden:** SaladDay/cc-switch-cli, opengeos/RustGIS, agentclientprotocol/agent-client-protocol, 0x676e67/wreq, microsoft/edit.
+
+Opciones:
+- **a)** Sí, tal como está. Recomendada: es un sorteo, y cambiarla a mano sesga la muestra. Los que piden servicios caen solos a la reserva.
+- **b)** Sí, sin estos repos: nombralos.
+- **c)** No todavía.
+
+**P86: ¿Instalo PyTorch y bajo los dos modelos de embeddings, dentro de un contenedor?** Son 322 MB y 547 MB más PyTorch, sin API. El primero pide ejecutar código de su repo en Hugging Face, por eso corre sin red ni claves y con la revisión fija.
+- **a)** Sí. Recomendada.
+- **b)** Solo el de licencia MIT, sin código remoto, si no lo pide. Pierdo la comparación.
+- **c)** No todavía. S9 espera.
+
+**P87: ¿Mezclar las Tareas 75 y 76 en local, sin push, cuando pase su suite con podman?** P77 cubre hasta la 74. Son el arnés de medición de la Línea Buscador.
+- **a)** Sí, sin volver a preguntar. Recomendada.
+- **b)** No, traé el resultado.
