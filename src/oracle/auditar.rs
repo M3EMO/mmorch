@@ -67,6 +67,8 @@ pub struct Descartado {
 pub struct DetalleDefecto {
     pub archivo: String,
     pub linea: u32,
+    /// Falso si el archivo no se leyó. Un defecto sin medir no cuenta.
+    pub medido: bool,
     pub encontrado: bool,
     /// Solo con `encontrado`: el hallazgo más cercano dentro de la ventana.
     pub hallazgo_cercano: Option<Candidato>,
@@ -77,6 +79,8 @@ pub struct DetalleDefecto {
 pub struct Medicion {
     pub encontrados: u32,
     pub casos: u32,
+    /// Defectos cuyo archivo se leyó. Solo estos entran en `encontrados`.
+    pub casos_leidos: u32,
     pub detalle: Vec<DetalleDefecto>,
 }
 
@@ -113,22 +117,34 @@ pub fn medir(
     texto_defectos: &str,
     repo: &Path,
     hallazgos: &[Candidato],
+    leidos: &BTreeSet<String>,
 ) -> Result<Medicion, ErrorOraculo> {
     let defectos = defectos_del_repo(texto_defectos, repo)?;
     let mut encontrados = 0;
+    let mut casos_leidos = 0;
     let mut detalle = Vec::with_capacity(defectos.len());
     for d in &defectos {
-        let cercano = hallazgos
-            .iter()
-            .filter(|h| h.archivo == d.archivo && h.linea.abs_diff(d.linea) <= VENTANA_MEDICION)
-            .min_by_key(|h| h.linea.abs_diff(d.linea))
-            .cloned();
+        // Sin lectura no hay medición: el defecto no cuenta como encontrado ni como caso medido.
+        let medido = leidos.contains(&d.archivo);
+        let cercano = if medido {
+            hallazgos
+                .iter()
+                .filter(|h| h.archivo == d.archivo && h.linea.abs_diff(d.linea) <= VENTANA_MEDICION)
+                .min_by_key(|h| h.linea.abs_diff(d.linea))
+                .cloned()
+        } else {
+            None
+        };
+        if medido {
+            casos_leidos += 1;
+        }
         if cercano.is_some() {
             encontrados += 1;
         }
         detalle.push(DetalleDefecto {
             archivo: d.archivo.clone(),
             linea: d.linea,
+            medido,
             encontrado: cercano.is_some(),
             hallazgo_cercano: cercano,
         });
@@ -136,8 +152,27 @@ pub fn medir(
     Ok(Medicion {
         encontrados,
         casos: u32::try_from(defectos.len()).unwrap_or(u32::MAX),
+        casos_leidos,
         detalle,
     })
+}
+
+/// Medición de la pasada. Sin archivos leídos no hay medición: devuelve `None`.
+fn medir_auditoria(
+    texto: &str,
+    repo: &Path,
+    a: &Auditoria,
+) -> Result<Option<Medicion>, ErrorOraculo> {
+    let leidos: BTreeSet<String> = a
+        .archivos
+        .iter()
+        .filter(|f| !a.sin_leer.contains(f))
+        .cloned()
+        .collect();
+    if leidos.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(medir(texto, repo, &a.hallazgos, &leidos)?))
 }
 
 /// Defecto de `defectos.toml` en la forma que mide la pasada. Sin `deny_unknown_fields`: otros campos se ignoran.
@@ -729,7 +764,7 @@ pub fn auditar(home: &Path, o: &OpcionesAuditar) -> Result<Auditoria, ErrorOracu
         &o.repo, &o.incluir, &gitleaks, &juez, &modelo, o.tope_usd, &peor, &gasto,
     )?;
     if let Some(texto) = &texto_defectos {
-        auditoria.medicion = Some(medir(texto, &o.repo, &auditoria.hallazgos)?);
+        auditoria.medicion = medir_auditoria(texto, &o.repo, &auditoria)?;
     }
     escribir_salida(&o.salida, &auditoria)?;
     Ok(auditoria)
@@ -1015,8 +1050,10 @@ detalle = "de otro repo"
             cita: "cita".into(),
             detalle: "d".into(),
         };
-        let m = medir(texto, &repo, &[hallazgo]).expect("medición");
+        let leidos: BTreeSet<String> = ["src/a.rs".to_string()].into();
+        let m = medir(texto, &repo, &[hallazgo], &leidos).expect("medición");
         assert_eq!(m.casos, 2);
+        assert_eq!(m.casos_leidos, 2);
         assert_eq!(m.encontrados, 1);
         assert!(m.detalle[0].encontrado);
         assert_eq!(
@@ -1028,10 +1065,93 @@ detalle = "de otro repo"
     }
 
     #[test]
+    fn un_defecto_en_un_archivo_no_leido_queda_sin_medir() {
+        let (_tmp, repo) = repo_con(&[]);
+        let texto = r#"
+[[defecto]]
+repo = "root"
+archivo = "src/a.rs"
+linea = 10
+
+[[defecto]]
+repo = "root"
+archivo = "src/b.rs"
+linea = 5
+"#;
+        let hallazgo = Candidato {
+            archivo: "src/a.rs".into(),
+            linea: 12,
+            cita: "cita".into(),
+            detalle: "d".into(),
+        };
+        let leidos: BTreeSet<String> = ["src/a.rs".to_string()].into();
+        let m = medir(texto, &repo, &[hallazgo], &leidos).expect("medición");
+        assert_eq!(m.casos, 2);
+        assert_eq!(m.casos_leidos, 1);
+        assert_eq!(m.encontrados, 1);
+        assert!(m.detalle[0].medido);
+        let b = &m.detalle[1];
+        assert!(!b.medido);
+        assert!(!b.encontrado);
+        assert!(b.hallazgo_cercano.is_none());
+    }
+
+    #[test]
     fn medir_con_toml_roto_es_error_de_uso() {
         let (_tmp, repo) = repo_con(&[]);
-        let err = medir("[[defecto\n", &repo, &[]).expect_err("debe fallar");
+        let err = medir("[[defecto\n", &repo, &[], &BTreeSet::new()).expect_err("debe fallar");
         assert!(matches!(err, ErrorOraculo::Uso(_)), "{err}");
+    }
+
+    /// Auditoría armada a mano. Solo importan `archivos` y `sin_leer`.
+    fn auditoria_con(archivos: &[&str], sin_leer: &[&str]) -> Auditoria {
+        Auditoria {
+            hash_prompt: "h".into(),
+            modelo: "m".into(),
+            archivos: archivos.iter().map(|s| s.to_string()).collect(),
+            llamadas: 1,
+            costo_usd: 0.0,
+            hallazgos: Vec::new(),
+            descartados: Vec::new(),
+            incompleta: false,
+            sin_leer: sin_leer.iter().map(|s| s.to_string()).collect(),
+            avisos: Vec::new(),
+            medicion: None,
+        }
+    }
+
+    const DEFECTOS_DOS_ARCHIVOS: &str = r#"
+[[defecto]]
+repo = "root"
+archivo = "src/a.rs"
+linea = 10
+
+[[defecto]]
+repo = "root"
+archivo = "src/b.rs"
+linea = 5
+"#;
+
+    #[test]
+    fn sin_ningun_archivo_leido_la_medicion_es_null() {
+        let (_tmp, repo) = repo_con(&[]);
+        let sin_archivos = auditoria_con(&[], &[]);
+        let m = medir_auditoria(DEFECTOS_DOS_ARCHIVOS, &repo, &sin_archivos).expect("medición");
+        assert!(m.is_none());
+        let todo_sin_leer = auditoria_con(&["src/a.rs", "src/b.rs"], &["src/a.rs", "src/b.rs"]);
+        let m = medir_auditoria(DEFECTOS_DOS_ARCHIVOS, &repo, &todo_sin_leer).expect("medición");
+        assert!(m.is_none());
+    }
+
+    #[test]
+    fn con_archivos_leidos_la_medicion_existe() {
+        let (_tmp, repo) = repo_con(&[]);
+        let a = auditoria_con(&["src/a.rs", "src/b.rs"], &["src/b.rs"]);
+        let m = medir_auditoria(DEFECTOS_DOS_ARCHIVOS, &repo, &a)
+            .expect("medición")
+            .expect("hay medición");
+        assert_eq!(m.casos, 2);
+        assert_eq!(m.casos_leidos, 1);
     }
 
     #[test]
