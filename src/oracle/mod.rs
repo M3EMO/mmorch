@@ -1301,7 +1301,7 @@ fn parte_juez_sin_veredicto(
 }
 
 /// Motivo de un ítem del juez sin nivel. Los descartes del reintento mandan sobre los del primer envío,
-/// así que van primero los tres motivos de reintento. Después el `sin_evidencia` y el gate
+/// así que van primero los motivos de reintento. Después el `sin_evidencia` y el gate
 /// de evidencia (desempate B').
 fn motivo_sin_nivel(resultado: &ResultadoJuez, id: &str) -> &'static str {
     let que = format!("ítem {id}");
@@ -1311,7 +1311,9 @@ fn motivo_sin_nivel(resultado: &ResultadoJuez, id: &str) -> &'static str {
         .filter(|d| d.que == que)
         .map(|d| d.motivo.as_str())
         .collect();
-    if motivos.contains(&MOTIVO_JUEZ_SIN_REINTENTO) {
+    if motivos.contains(&MOTIVO_REINTENTO_TOPE) {
+        MOTIVO_REINTENTO_TOPE
+    } else if motivos.contains(&MOTIVO_JUEZ_SIN_REINTENTO) {
         MOTIVO_JUEZ_SIN_REINTENTO
     } else if motivos.contains(&MOTIVO_GATE_REINTENTO) {
         MOTIVO_GATE_REINTENTO
@@ -1367,6 +1369,8 @@ pub const MOTIVO_JUEZ_SIN_REINTENTO: &str = "el juez no respondió tras un reint
 pub const MOTIVO_GATE_REINTENTO: &str = "la evidencia no pasó el gate tras un reintento";
 /// Motivo de un ítem del juez que no dio un nivel válido tras el reintento (Tarea 45, parte 2).
 pub const MOTIVO_JUEZ_NIVEL_INVALIDO: &str = "el juez no dio un nivel válido tras un reintento";
+/// Motivo de un ítem del juez cuyo reintento no se envió: el tope de API lo frenó antes de la llamada.
+pub const MOTIVO_REINTENTO_TOPE: &str = "reintento no enviado por el tope de API";
 
 /// Una parte de una dimensión, sondas o juez, con su peso: la suma de los pesos de sus ítems medidos.
 struct Parte {
@@ -6047,6 +6051,35 @@ mod tests {
                 "estructura.legibilidad"
             ),
             MOTIVO_JUEZ_NIVEL_INVALIDO
+        );
+    }
+
+    #[test]
+    fn motivo_sin_nivel_reconoce_reintento_frenado_por_tope() {
+        let mut solo_tope = resultado_con_niveles(&[]);
+        solo_tope.descartes = vec![juez::Descarte {
+            que: "ítem estructura.legibilidad".into(),
+            motivo: MOTIVO_REINTENTO_TOPE.into(),
+        }];
+        assert_eq!(
+            motivo_sin_nivel(&solo_tope, "estructura.legibilidad"),
+            MOTIVO_REINTENTO_TOPE
+        );
+        // El tope del reintento gana sobre el descarte de gate del primer envío.
+        let mut con_gate = resultado_con_niveles(&[]);
+        con_gate.descartes = vec![
+            juez::Descarte {
+                que: "ítem estructura.legibilidad".into(),
+                motivo: "sin evidencia que pase el gate".into(),
+            },
+            juez::Descarte {
+                que: "ítem estructura.legibilidad".into(),
+                motivo: MOTIVO_REINTENTO_TOPE.into(),
+            },
+        ];
+        assert_eq!(
+            motivo_sin_nivel(&con_gate, "estructura.legibilidad"),
+            MOTIVO_REINTENTO_TOPE
         );
     }
 

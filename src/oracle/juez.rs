@@ -17,6 +17,7 @@ use super::rubrica::{ErrorRubrica, ItemRubrica, Mide, Puntuacion, Rubrica};
 use super::tarea::Requisito;
 use super::{
     ErrorOraculo, MOTIVO_GATE_REINTENTO, MOTIVO_JUEZ_NIVEL_INVALIDO, MOTIVO_JUEZ_SIN_REINTENTO,
+    MOTIVO_REINTENTO_TOPE,
 };
 use crate::config::root_home;
 use crate::proveedores::{self, Prompt, RespuestaJuez};
@@ -461,7 +462,9 @@ pub fn juzgar(
             .cloned()
             .collect();
         for id in sin_nivel {
-            let motivo = if otra.gate.contains_key(&id) {
+            let motivo = if otra.frenado_por_tope {
+                MOTIVO_REINTENTO_TOPE
+            } else if otra.gate.contains_key(&id) {
                 MOTIVO_GATE_REINTENTO
             } else if otra.invalidos.contains(&id) {
                 MOTIVO_JUEZ_NIVEL_INVALIDO
@@ -504,8 +507,14 @@ fn reintentar(
     if exceso_de_entrada(&prompt).is_some() {
         return Lectura::default();
     }
-    let Ok(respuesta) = pedir(modelo, &prompt) else {
-        return Lectura::default();
+    let respuesta = match pedir(modelo, &prompt) {
+        Ok(respuesta) => respuesta,
+        Err(causa) => {
+            return Lectura {
+                frenado_por_tope: es_tope_de_api(&causa),
+                ..Lectura::default()
+            };
+        }
     };
     // Un id fuera del reintento no se pidió de nuevo: `leer_items` lo descarta con aviso.
     let pedidos: BTreeMap<String, Dimension> = cx
@@ -631,6 +640,18 @@ struct Lectura {
     gate: BTreeMap<String, Vec<CitaFallida>>,
     /// Ids que el juez dio por `sin_evidencia`.
     sin_evidencia: BTreeSet<String>,
+    /// El reintento no se envió porque el tope de API frenó la llamada.
+    frenado_por_tope: bool,
+}
+
+/// Texto que trae el error del tope de API cuando frena una llamada antes de enviarla.
+const TEXTO_TOPE_API: &str = "tope de API";
+/// Texto del error de la llamada que no se envía: el tope no pudo leer o reservar el gasto.
+const TEXTO_NO_ENVIADA: &str = "la llamada no se envía";
+
+/// Un error del modelo que frenó la llamada por el tope de API. Mira el texto: "tope" a secas no cuenta.
+fn es_tope_de_api(causa: &str) -> bool {
+    causa.contains(TEXTO_TOPE_API) || causa.contains(TEXTO_NO_ENVIADA)
 }
 
 /// Evidencia que no pasó el gate: archivo, línea y cita tal como la dijo el juez.
@@ -2397,6 +2418,51 @@ mod tests {
         let r = juzgar_secuencia(&c, &modelo);
         assert_eq!(modelo.visto.borrow().len(), 2, "el tercer envío no ocurre");
         assert_eq!(r.faltantes, vec![MODULARIDAD.to_string(), TOPE.to_string()]);
+    }
+
+    #[test]
+    fn juez_reintento_frenado_por_tope_deja_motivo_de_tope() {
+        let c = caso();
+        let primera = respuesta(
+            json!([item_nivel(MODULARIDAD, 2, json!([real()]))]),
+            json!([]),
+        );
+        let tope = "llamada rechazada antes de enviarla: costo estimado 0.100000 USD, margen 0.000000 USD del tope de API de 5.00 USD";
+        let modelo = FalsoSecuencia::nueva(vec![Ok(primera), Err(tope.into())]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert_eq!(modelo.visto.borrow().len(), 2);
+        assert_eq!(r.faltantes, vec![TOPE.to_string()]);
+        assert!(
+            descarte_de(&r, TOPE, MOTIVO_REINTENTO_TOPE),
+            "{:?}",
+            r.descartes
+        );
+        assert!(
+            !descarte_de(&r, TOPE, MOTIVO_JUEZ_SIN_REINTENTO),
+            "{:?}",
+            r.descartes
+        );
+    }
+
+    #[test]
+    fn juez_reintento_con_error_que_no_es_tope_deja_motivo_sin_reintento() {
+        let c = caso();
+        let primera = respuesta(
+            json!([item_nivel(MODULARIDAD, 2, json!([real()]))]),
+            json!([]),
+        );
+        let modelo = FalsoSecuencia::nueva(vec![Ok(primera), Err("tope".into())]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert!(
+            descarte_de(&r, TOPE, MOTIVO_JUEZ_SIN_REINTENTO),
+            "{:?}",
+            r.descartes
+        );
+        assert!(
+            !descarte_de(&r, TOPE, MOTIVO_REINTENTO_TOPE),
+            "{:?}",
+            r.descartes
+        );
     }
 
     #[test]
