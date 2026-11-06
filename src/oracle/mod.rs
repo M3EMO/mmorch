@@ -38,8 +38,8 @@ use crate::config::{Config, ReglasDecision, root_home};
 use crate::ficha::{self, ErrorFicha};
 use crate::proveedores::{Prompt, RespuestaJuez};
 use crate::tipos::{
-    Conteo, Dimension, Estado, EstadoRequisito, Hallazgo, ItemFaltante, Pendiente, Puntaje, Rol,
-    TasaTest, VERSION, Veredicto,
+    Conteo, Dimension, Estado, EstadoRequisito, Hallazgo, HallazgoDescartado, ItemFaltante,
+    Pendiente, Puntaje, Rol, TasaTest, VERSION, Veredicto,
 };
 use crate::track::stats::wilson_inferior;
 use calibra::Calibraciones;
@@ -858,6 +858,7 @@ fn evaluar_con(
         ocultos_fallidos: fallidos_de(&oculto),
         ambiguedades,
         contrato_fallidos: fallidos_de(&contrato),
+        hallazgos_descartados: medicion.hallazgos_descartados,
     };
     // La decisión sale de reglas deterministas; el estado sale de la decisión (Tarea 13b).
     let redactor_medido = deps
@@ -940,6 +941,8 @@ struct Medicion {
     avisos: Vec<String>,
     /// Lo que la construcción de la Entrega no pudo medir (Tarea 9d2). Va al `Veredicto`.
     pendientes: Vec<Pendiente>,
+    /// Hallazgos del juez descartados, con su motivo. No puntúan. Van al `Veredicto`.
+    hallazgos_descartados: Vec<HallazgoDescartado>,
 }
 
 /// El juez de diseño que `medir` usa: el modelo si se armó, su nombre y las rúbricas de la evaluación.
@@ -956,6 +959,8 @@ struct Juicio {
     hallazgos: Vec<Hallazgo>,
     avisos: Vec<String>,
     topes: BTreeMap<String, u8>,
+    /// Los descartados del juez y los del gate de citas.
+    descartados: Vec<HallazgoDescartado>,
 }
 
 /// Mide las nueve dimensiones con las sondas, los requisitos y el juez de diseño. `descarga` son los
@@ -1030,6 +1035,7 @@ fn medir(
         hallazgos: de_juez,
         avisos,
         topes,
+        descartados,
     } = juicio;
     hallazgos.extend(de_juez);
     let puntajes = DIMENSIONES
@@ -1107,7 +1113,23 @@ fn medir(
         requisitos: estados,
         avisos,
         pendientes: entrega.pendientes,
+        hallazgos_descartados: descartados,
     })
+}
+
+/// Pasa los descartes del gate de citas a `HallazgoDescartado`. Su ítem es la dimensión: el gate no ve el id del ítem.
+fn descartados_del_gate(
+    descartados: Vec<(Hallazgo, evidencia::Motivo)>,
+) -> Vec<HallazgoDescartado> {
+    descartados
+        .into_iter()
+        .map(|(h, motivo)| HallazgoDescartado {
+            archivo: h.archivo,
+            linea: h.linea,
+            item: h.dimension.clave().into(),
+            motivo: format!("la cita no pasa el gate: {motivo:?}"),
+        })
+        .collect()
 }
 
 /// Corre el juez de diseño sobre la copia del repo y filtra sus hallazgos con el gate de evidencia.
@@ -1125,6 +1147,7 @@ fn juzgar_diseno(
             hallazgos: Vec::new(),
             avisos: Vec::new(),
             topes,
+            descartados: Vec::new(),
         });
     };
     let spec_ruta = tarea.dir.join(&tarea.spec);
@@ -1144,6 +1167,7 @@ fn juzgar_diseno(
         juez.nombre,
         &juez::LimitesPrompt::default(),
     );
+    let mut descartados = resultado.hallazgos_descartados.clone();
     let filtrado = evidencia::filtrar_hallazgos(repo, std::mem::take(&mut resultado.hallazgos));
     let mut avisos = Vec::new();
     if !filtrado.descartados.is_empty() {
@@ -1152,11 +1176,13 @@ fn juzgar_diseno(
             filtrado.descartados.len()
         ));
     }
+    descartados.extend(descartados_del_gate(filtrado.descartados));
     Ok(Juicio {
         resultado: Some(resultado),
         hallazgos: filtrado.validos,
         avisos,
         topes,
+        descartados,
     })
 }
 
@@ -1275,7 +1301,7 @@ fn parte_juez_sin_veredicto(
 }
 
 /// Motivo de un ítem del juez sin nivel. Los descartes del reintento mandan sobre los del primer envío,
-/// así que van primero los tres motivos de reintento. Después el `sin_evidencia` y el gate
+/// así que van primero los motivos de reintento. Después el `sin_evidencia` y el gate
 /// de evidencia (desempate B').
 fn motivo_sin_nivel(resultado: &ResultadoJuez, id: &str) -> &'static str {
     let que = format!("ítem {id}");
@@ -1285,7 +1311,9 @@ fn motivo_sin_nivel(resultado: &ResultadoJuez, id: &str) -> &'static str {
         .filter(|d| d.que == que)
         .map(|d| d.motivo.as_str())
         .collect();
-    if motivos.contains(&MOTIVO_JUEZ_SIN_REINTENTO) {
+    if motivos.contains(&MOTIVO_REINTENTO_TOPE) {
+        MOTIVO_REINTENTO_TOPE
+    } else if motivos.contains(&MOTIVO_JUEZ_SIN_REINTENTO) {
         MOTIVO_JUEZ_SIN_REINTENTO
     } else if motivos.contains(&MOTIVO_GATE_REINTENTO) {
         MOTIVO_GATE_REINTENTO
@@ -1341,6 +1369,8 @@ pub const MOTIVO_JUEZ_SIN_REINTENTO: &str = "el juez no respondió tras un reint
 pub const MOTIVO_GATE_REINTENTO: &str = "la evidencia no pasó el gate tras un reintento";
 /// Motivo de un ítem del juez que no dio un nivel válido tras el reintento (Tarea 45, parte 2).
 pub const MOTIVO_JUEZ_NIVEL_INVALIDO: &str = "el juez no dio un nivel válido tras un reintento";
+/// Motivo de un ítem del juez cuyo reintento no se envió: el tope de API lo frenó antes de la llamada.
+pub const MOTIVO_REINTENTO_TOPE: &str = "reintento no enviado por el tope de API";
 
 /// Una parte de una dimensión, sondas o juez, con su peso: la suma de los pesos de sus ítems medidos.
 struct Parte {
@@ -2516,6 +2546,7 @@ pub fn redactar_para_mcp(mut v: Veredicto) -> Veredicto {
     let conservar = |x: &str| del_contrato(x) && !ocultos.iter().any(|id| x.contains(id.as_str()));
     v.inestables.clear();
     v.ocultos_fallidos.clear();
+    v.hallazgos_descartados.clear();
     v.tasas.retain(|k, _| !k.starts_with("oculto:"));
     v.corridas_acumuladas
         .retain(|k, _| !k.starts_with("oculto:"));
@@ -3822,6 +3853,49 @@ mod tests {
         assert!(
             !montajes.iter().any(|m| m.contains("oculto")),
             "{montajes:?}"
+        );
+    }
+
+    #[test]
+    fn oraculo_redaccion_mcp_vacia_hallazgos_descartados() {
+        let v = Veredicto {
+            hallazgos_descartados: vec![crate::tipos::HallazgoDescartado {
+                archivo: "src/lib.rs".into(),
+                linea: 1,
+                item: "diseno.modularidad".into(),
+                motivo: "sin requisito afectado".into(),
+            }],
+            ..Veredicto::default()
+        };
+        let r = redactar_para_mcp(v);
+        assert!(r.hallazgos_descartados.is_empty());
+    }
+
+    #[test]
+    fn oraculo_descartados_del_gate_de_citas_llevan_dimension_y_motivo() {
+        let h = Hallazgo {
+            dimension: Dimension::Diseno,
+            severidad: 2,
+            archivo: "src/lib.rs".into(),
+            linea: 9,
+            cita: "fn inventada() {}".into(),
+            detalle: "d".into(),
+            fuente: crate::tipos::Fuente::Juez {
+                modelo: MODELO_JUEZ.into(),
+            },
+            id: String::new(),
+            impacto: vec!["R1".into()],
+        };
+        let salida = descartados_del_gate(vec![(h, evidencia::Motivo::CitaAusente)]);
+        assert_eq!(salida.len(), 1, "{salida:?}");
+        assert_eq!(salida[0].archivo, "src/lib.rs");
+        assert_eq!(salida[0].linea, 9);
+        assert_eq!(salida[0].item, "diseno");
+        assert!(salida[0].motivo.contains("gate"), "{}", salida[0].motivo);
+        assert!(
+            salida[0].motivo.contains("CitaAusente"),
+            "{}",
+            salida[0].motivo
         );
     }
 
@@ -5269,6 +5343,7 @@ mod tests {
             items: Vec::new(),
             hallazgos: Vec::new(),
             descartes: Vec::new(),
+            hallazgos_descartados: Vec::new(),
             faltantes: vec![TOPE_ID.to_string()],
         };
         let rubricas = [rubrica_diseno()];
@@ -5315,6 +5390,56 @@ mod tests {
         assert_eq!(diseno.valor, 0.0);
         assert_ne!(v.estado, Estado::Verde);
         assert_eq!(v.global, None);
+    }
+
+    #[test]
+    fn oraculo_hallazgo_del_juez_sin_requisito_llega_a_descartados_del_veredicto() {
+        let base = tempfile::tempdir().expect("base");
+        let repo = repo_rust(base.path(), LOCK_SANO);
+        let sin_impacto = json!({
+            "item": MODULARIDAD_ID,
+            "severidad": 2,
+            "archivo": "src/lib.rs",
+            "linea": 1,
+            "cita": "pub fn f() -> u8 { 1 }",
+            "detalle": "hallazgo sin requisito",
+            "impacto": [],
+        });
+        let texto = respuesta_juez(
+            json!([item_juez(MODULARIDAD_ID, 2, json!([ev_lib()]))]),
+            json!([sin_impacto]),
+        );
+        let juez = JuezFalso::con(&texto, 0.0);
+        let rubricas = [rubrica_diseno()];
+        let correr = correr_suites(JUNIT_CONTRATO);
+        let v = evaluar_con_deps(
+            base.path(),
+            &repo,
+            Dependencias {
+                juez: Some(&juez),
+                modelo_juez: MODELO_JUEZ,
+                rubricas: &rubricas,
+                ..deps_de(&correr, &herramientas(&[]))
+            },
+        );
+        assert_eq!(
+            v.hallazgos_descartados.len(),
+            1,
+            "{:?}",
+            v.hallazgos_descartados
+        );
+        let d = &v.hallazgos_descartados[0];
+        assert_eq!(d.archivo, "src/lib.rs");
+        assert_eq!(d.linea, 1);
+        assert_eq!(d.item, MODULARIDAD_ID);
+        assert!(d.motivo.contains("sin requisito afectado"), "{}", d.motivo);
+        assert!(
+            !v.hallazgos
+                .iter()
+                .any(|h| h.detalle == "hallazgo sin requisito"),
+            "{:?}",
+            v.hallazgos
+        );
     }
 
     #[test]
@@ -5754,6 +5879,7 @@ mod tests {
             items: Vec::new(),
             hallazgos: Vec::new(),
             descartes: Vec::new(),
+            hallazgos_descartados: Vec::new(),
             faltantes: Vec::new(),
         }
     }
@@ -5925,6 +6051,35 @@ mod tests {
                 "estructura.legibilidad"
             ),
             MOTIVO_JUEZ_NIVEL_INVALIDO
+        );
+    }
+
+    #[test]
+    fn motivo_sin_nivel_reconoce_reintento_frenado_por_tope() {
+        let mut solo_tope = resultado_con_niveles(&[]);
+        solo_tope.descartes = vec![juez::Descarte {
+            que: "ítem estructura.legibilidad".into(),
+            motivo: MOTIVO_REINTENTO_TOPE.into(),
+        }];
+        assert_eq!(
+            motivo_sin_nivel(&solo_tope, "estructura.legibilidad"),
+            MOTIVO_REINTENTO_TOPE
+        );
+        // El tope del reintento gana sobre el descarte de gate del primer envío.
+        let mut con_gate = resultado_con_niveles(&[]);
+        con_gate.descartes = vec![
+            juez::Descarte {
+                que: "ítem estructura.legibilidad".into(),
+                motivo: "sin evidencia que pase el gate".into(),
+            },
+            juez::Descarte {
+                que: "ítem estructura.legibilidad".into(),
+                motivo: MOTIVO_REINTENTO_TOPE.into(),
+            },
+        ];
+        assert_eq!(
+            motivo_sin_nivel(&con_gate, "estructura.legibilidad"),
+            MOTIVO_REINTENTO_TOPE
         );
     }
 

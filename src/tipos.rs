@@ -218,6 +218,19 @@ pub struct Hallazgo {
     pub impacto: Vec<String>,
 }
 
+/// Hallazgo del juez que se descartó: no tiene requisito afectado o no pasó el gate de citas. No puntúa.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct HallazgoDescartado {
+    /// Archivo que citó el juez.
+    pub archivo: String,
+    /// Línea que citó el juez.
+    pub linea: u32,
+    /// Ítem de rúbrica que el juez puso en el hallazgo.
+    pub item: String,
+    /// Por qué se descartó.
+    pub motivo: String,
+}
+
 /// Nivel de un ítem de rúbrica. `nivel` va de 0 a 3.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct NivelItem {
@@ -408,6 +421,10 @@ pub struct Veredicto {
     /// viejo lee vacío.
     #[serde(default)]
     pub contrato_fallidos: Vec<String>,
+    /// Hallazgos del juez de diseño que se descartaron, con su motivo. No cuentan para ningún puntaje.
+    /// Un veredicto viejo lee vacío.
+    #[serde(default)]
+    pub hallazgos_descartados: Vec<HallazgoDescartado>,
 }
 
 impl Default for Veredicto {
@@ -438,6 +455,7 @@ impl Default for Veredicto {
             ocultos_fallidos: Vec::new(),
             ambiguedades: Vec::new(),
             contrato_fallidos: Vec::new(),
+            hallazgos_descartados: Vec::new(),
         }
     }
 }
@@ -649,6 +667,7 @@ mod tests {
             ocultos_fallidos: Vec::new(),
             ambiguedades: Vec::new(),
             contrato_fallidos: Vec::new(),
+            hallazgos_descartados: Vec::new(),
         }
     }
 
@@ -1181,5 +1200,28 @@ mod tests {
             "costo_usd":0.0}"#;
         let v: Veredicto = serde_json::from_str(texto).expect("v1 se acepta");
         assert!(v.pendientes.is_empty());
+    }
+
+    #[test]
+    fn hallazgo_descartado_ida_y_vuelta_en_veredicto() {
+        let mut v = Veredicto::default();
+        assert!(v.hallazgos_descartados.is_empty());
+        v.hallazgos_descartados.push(HallazgoDescartado {
+            archivo: "src/almacen.rs".into(),
+            linea: 4,
+            item: "diseno.modularidad".into(),
+            motivo: "sin requisito afectado".into(),
+        });
+        ida_y_vuelta(&v);
+    }
+
+    #[test]
+    fn hallazgo_descartado_veredicto_viejo_sin_campo_se_lee_vacio() {
+        let texto = r#"{"v":1,"tarea":"memora","repo":"r","commit":"c",
+            "contrato":{"pasa":1,"total":1},"oculto":{"pasa":0,"total":0},
+            "puntajes":[],"hallazgos":[],"global":null,"estado":"sin_veredicto",
+            "costo_usd":0.0}"#;
+        let v: Veredicto = serde_json::from_str(texto).expect("v1 se acepta");
+        assert!(v.hallazgos_descartados.is_empty());
     }
 }
