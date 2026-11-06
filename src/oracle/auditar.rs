@@ -63,6 +63,40 @@ pub struct Descartado {
     pub motivo: String,
 }
 
+/// Origen de un defecto: lo encontró un revisor real o se sembró a propósito.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Origen {
+    Real,
+    Sembrado,
+}
+
+impl Origen {
+    /// Clave del conteo por origen. Coincide con el texto de `defectos.toml`.
+    fn etiqueta(self) -> &'static str {
+        match self {
+            Origen::Real => "real",
+            Origen::Sembrado => "sembrado",
+        }
+    }
+}
+
+/// Suma un defecto medido al conteo de su grupo.
+fn sumar(mapa: &mut BTreeMap<String, Conteo>, clave: &str, encontrado: bool) {
+    let c = mapa.entry(clave.to_string()).or_default();
+    c.casos_leidos += 1;
+    if encontrado {
+        c.encontrados += 1;
+    }
+}
+
+/// Conteo de un grupo de defectos medidos.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+pub struct Conteo {
+    pub casos_leidos: u32,
+    pub encontrados: u32,
+}
+
 /// Un defecto de `defectos.toml` y si algún hallazgo lo cubre.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DetalleDefecto {
@@ -73,6 +107,8 @@ pub struct DetalleDefecto {
     pub encontrado: bool,
     /// Solo con `encontrado`: el hallazgo más cercano dentro de la ventana.
     pub hallazgo_cercano: Option<Candidato>,
+    pub clase: Option<String>,
+    pub origen: Option<Origen>,
 }
 
 /// Cuántos defectos del repo encontró la pasada.
@@ -83,6 +119,10 @@ pub struct Medicion {
     /// Defectos cuyo archivo se leyó. Solo estos entran en `encontrados`.
     pub casos_leidos: u32,
     pub detalle: Vec<DetalleDefecto>,
+    /// Solo defectos medidos. Suma de `casos_leidos` y `encontrados` igual a los totales.
+    pub por_clase: BTreeMap<String, Conteo>,
+    /// Igual que `por_clase`, agrupado por origen.
+    pub por_origen: BTreeMap<String, Conteo>,
 }
 
 /// Contenido de `--salida`.
@@ -124,6 +164,8 @@ pub fn medir(
     let mut encontrados = 0;
     let mut casos_leidos = 0;
     let mut detalle = Vec::with_capacity(defectos.len());
+    let mut por_clase = BTreeMap::new();
+    let mut por_origen = BTreeMap::new();
     for d in &defectos {
         // Sin lectura no hay medición: el defecto no cuenta como encontrado ni como caso medido.
         let medido = leidos.contains(&d.archivo);
@@ -138,6 +180,11 @@ pub fn medir(
         };
         if medido {
             casos_leidos += 1;
+            let encontrado = cercano.is_some();
+            let clase = d.clase.as_deref().unwrap_or("sin_clase");
+            let origen = d.origen.map_or("sin_origen", Origen::etiqueta);
+            sumar(&mut por_clase, clase, encontrado);
+            sumar(&mut por_origen, origen, encontrado);
         }
         if cercano.is_some() {
             encontrados += 1;
@@ -148,6 +195,8 @@ pub fn medir(
             medido,
             encontrado: cercano.is_some(),
             hallazgo_cercano: cercano,
+            clase: d.clase.clone(),
+            origen: d.origen,
         });
     }
     Ok(Medicion {
@@ -155,6 +204,8 @@ pub fn medir(
         casos: u32::try_from(defectos.len()).unwrap_or(u32::MAX),
         casos_leidos,
         detalle,
+        por_clase,
+        por_origen,
     })
 }
 
@@ -182,6 +233,12 @@ struct DefectoRepo {
     repo: String,
     archivo: String,
     linea: u32,
+    /// Libre. Sin clase, el conteo cae en `sin_clase`.
+    #[serde(default)]
+    clase: Option<String>,
+    /// Solo `real` o `sembrado`. Otro valor es error de uso.
+    #[serde(default)]
+    origen: Option<Origen>,
 }
 
 #[derive(Deserialize)]
@@ -1219,6 +1276,131 @@ linea = 5
         let (_tmp, repo) = repo_con(&[]);
         let err = medir("[[defecto\n", &repo, &[], &BTreeSet::new()).expect_err("debe fallar");
         assert!(matches!(err, ErrorOraculo::Uso(_)), "{err}");
+    }
+
+    /// Conteo corto para armar los mapas esperados.
+    fn conteo(casos_leidos: u32, encontrados: u32) -> Conteo {
+        Conteo {
+            casos_leidos,
+            encontrados,
+        }
+    }
+
+    #[test]
+    fn medir_cuenta_por_clase_y_por_origen() {
+        let (_tmp, repo) = repo_con(&[]);
+        let texto = r#"
+[[defecto]]
+repo = "root"
+archivo = "src/a.rs"
+linea = 10
+clase = "seguridad"
+origen = "real"
+
+[[defecto]]
+repo = "root"
+archivo = "src/a.rs"
+linea = 20
+clase = "seguridad"
+origen = "sembrado"
+
+[[defecto]]
+repo = "root"
+archivo = "src/a.rs"
+linea = 30
+clase = "logica"
+origen = "sembrado"
+
+[[defecto]]
+repo = "root"
+archivo = "src/a.rs"
+linea = 40
+"#;
+        let hallazgo = |linea| Candidato {
+            archivo: "src/a.rs".into(),
+            linea,
+            cita: "cita".into(),
+            detalle: "d".into(),
+        };
+        let hallazgos = vec![hallazgo(11), hallazgo(31)];
+        let leidos: BTreeSet<String> = ["src/a.rs".to_string()].into();
+        let m = medir(texto, &repo, &hallazgos, &leidos).expect("medición");
+
+        assert_eq!(
+            m.por_origen,
+            BTreeMap::from([
+                ("real".to_string(), conteo(1, 1)),
+                ("sembrado".to_string(), conteo(2, 1)),
+                ("sin_origen".to_string(), conteo(1, 0)),
+            ])
+        );
+        assert_eq!(
+            m.por_clase,
+            BTreeMap::from([
+                ("seguridad".to_string(), conteo(2, 1)),
+                ("logica".to_string(), conteo(1, 1)),
+                ("sin_clase".to_string(), conteo(1, 0)),
+            ])
+        );
+        let leidos_por_origen: u32 = m.por_origen.values().map(|c| c.casos_leidos).sum();
+        let leidos_por_clase: u32 = m.por_clase.values().map(|c| c.casos_leidos).sum();
+        let encontrados_por_origen: u32 = m.por_origen.values().map(|c| c.encontrados).sum();
+        let encontrados_por_clase: u32 = m.por_clase.values().map(|c| c.encontrados).sum();
+        assert_eq!(leidos_por_origen, m.casos_leidos);
+        assert_eq!(leidos_por_clase, m.casos_leidos);
+        assert_eq!(encontrados_por_origen, m.encontrados);
+        assert_eq!(encontrados_por_clase, m.encontrados);
+
+        assert_eq!(m.detalle[0].clase.as_deref(), Some("seguridad"));
+        assert_eq!(m.detalle[0].origen, Some(Origen::Real));
+        assert_eq!(m.detalle[3].clase, None);
+        assert_eq!(m.detalle[3].origen, None);
+    }
+
+    #[test]
+    fn un_defecto_no_leido_no_entra_en_los_conteos_por_clase() {
+        let (_tmp, repo) = repo_con(&[]);
+        let texto = r#"
+[[defecto]]
+repo = "root"
+archivo = "src/b.rs"
+linea = 5
+clase = "seguridad"
+origen = "real"
+"#;
+        let leidos: BTreeSet<String> = ["src/a.rs".to_string()].into();
+        let m = medir(texto, &repo, &[], &leidos).expect("medición");
+        assert!(m.por_clase.is_empty());
+        assert!(m.por_origen.is_empty());
+        assert!(!m.detalle[0].medido);
+    }
+
+    #[test]
+    fn un_origen_desconocido_es_error_de_uso() {
+        let (_tmp, repo) = repo_con(&[]);
+        let texto =
+            "[[defecto]]\nrepo = \"root\"\narchivo = \"src/a.rs\"\nlinea = 10\norigen = \"otro\"\n";
+        let err = medir(texto, &repo, &[], &BTreeSet::new()).expect_err("debe fallar");
+        assert!(
+            matches!(&err, ErrorOraculo::Uso(m) if m.contains("defectos.toml inválido")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn defectos_sin_clase_ni_origen_siguen_parseando() {
+        let (_tmp, repo) = repo_con(&[]);
+        let m = medir(DEFECTOS_DOS_ARCHIVOS, &repo, &[], &BTreeSet::new()).expect("medición");
+        assert_eq!(m.casos, 2);
+    }
+
+    #[test]
+    fn la_medicion_serializa_los_conteos() {
+        let (_tmp, repo) = repo_con(&[]);
+        let m = medir(DEFECTOS_DOS_ARCHIVOS, &repo, &[], &BTreeSet::new()).expect("medición");
+        let json = serde_json::to_value(&m).expect("json");
+        assert!(json["por_clase"].is_object(), "{json}");
+        assert!(json["por_origen"].is_object(), "{json}");
     }
 
     /// Auditoría armada a mano. Solo importan `archivos` y `sin_leer`.
