@@ -4498,6 +4498,22 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "tarea": {
           "description": "Tarea del defecto.",
           "type": "string"
+        },
+        "test": {
+          "description": "Test que marca el defecto, copiado de `defectos.toml`. `None` si el defecto no lo trae.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "test_rojo": {
+          "description": "`Some(true)` si el test aparece en alguna lista de fallos del veredicto. `None` sin `test`.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
         }
       },
       "required": [
