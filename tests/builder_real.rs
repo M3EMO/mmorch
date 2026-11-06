@@ -98,6 +98,7 @@ fn lanzamiento(home: &Path, repo: &Path, prompt: &str) -> Lanzamiento {
         env: env_del_builder(&claude, Rol::Construye, &[]),
         repo: repo.to_path_buf(),
         plugin: None,
+        plazo: TIMEOUT_BUILDER,
     }
 }
 

@@ -11,7 +11,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::contenedor::{args_podman_builder, estado_de, fisica, validar_montajes};
-use super::{ErrorCorre, copiar_sin_mcp, verificar_vigencia};
+use super::{ErrorCorre, copiar_sin_mcp, verificar_vigencia, vida_restante};
 use crate::oracle::ErrorOraculo;
 use crate::oracle::contenedor::{esperar, leer_en_hilo};
 use crate::tipos::Rol;
@@ -28,6 +28,9 @@ pub struct Lanzamiento {
     pub repo: PathBuf,
     /// Plugin de ECC del rol, en el host. Ausente si el rol no lo trae.
     pub plugin: Option<PathBuf>,
+    /// Plazo de este rol. Lo fija `correr` según la vida del login. El ejecutor no lo supera: aplica
+    /// el menor entre este plazo y su propio tope.
+    pub plazo: Duration,
 }
 
 /// Salida de un lanzamiento. Un código distinto de 0 no es error del ejecutor: lo decide el llamador.
@@ -38,7 +41,7 @@ pub struct SalidaClaude {
     pub stderr: Vec<u8>,
 }
 
-/// Cómo espera `correr` a que el login alcance para un rol. Revisa cada `intervalo`, hasta `tope`.
+/// Cómo espera `correr` a que el login dure lo mínimo para arrancar un rol. Revisa cada `intervalo`, hasta `tope`.
 #[derive(Debug, Clone, Copy)]
 pub struct EsperaVigencia {
     pub intervalo: Duration,
@@ -70,14 +73,19 @@ pub trait EjecutorBuilder {
     /// Corre el builder con `l` y devuelve su salida. Sale por `Err` solo si no pudo lanzarlo.
     fn lanzar(&self, l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre>;
 
-    /// Revisa que el login alcance para el plazo de un rol. Por defecto no revisa nada.
+    /// Revisa que el login dure al menos `plazo`. Por defecto no revisa nada.
     fn verificar_antes(&self, _plazo: Duration) -> Result<(), ErrorCorre> {
         Ok(())
     }
 
-    /// Cuánto espera `correr` a que el login alcance para un rol. Por defecto, `EsperaVigencia::default()`.
+    /// Cuánto espera `correr` a que el login dure lo mínimo para arrancar un rol. Por defecto, `EsperaVigencia::default()`.
     fn espera_vigencia(&self) -> EsperaVigencia {
         EsperaVigencia::default()
+    }
+
+    /// Vida que le queda al login. `None` si el ejecutor no conoce ningún límite.
+    fn vida_restante(&self) -> Result<Option<Duration>, ErrorCorre> {
+        Ok(None)
     }
 }
 
@@ -92,7 +100,8 @@ pub struct EjecutorContenedorBuilder {
     pub home: PathBuf,
     /// `$HOME` del host. Ningún montaje es igual a él ni lo contiene.
     pub home_usuario: PathBuf,
-    /// Tope de cada lanzamiento. Si vence, el contenedor se borra.
+    /// Tope de cada lanzamiento. Si vence, el contenedor se borra. Un rol corre con el menor entre
+    /// su `plazo` y este tope.
     pub timeout: Duration,
 }
 
@@ -186,7 +195,9 @@ impl EjecutorBuilder for EjecutorContenedorBuilder {
         let nombre = nombre_unico();
         let args = args_podman_builder(&real, &self.imagen, &credencial, &estado, &nombre);
 
-        match correr_proceso("podman", &args, self.timeout)? {
+        // El plazo de este rol no supera el tope del ejecutor.
+        let plazo = l.plazo.min(self.timeout);
+        match correr_proceso("podman", &args, plazo)? {
             Fin::Termino(salida) => match fallo_de_podman(&salida) {
                 Some(error) => Err(error),
                 None => Ok(salida),
@@ -200,7 +211,7 @@ impl EjecutorBuilder for EjecutorContenedorBuilder {
                 Err(ErrorCorre::Cortado {
                     mensaje: format!(
                         "timeout tras {} s; se pidió borrar el contenedor {nombre}",
-                        self.timeout.as_secs()
+                        plazo.as_secs()
                     ),
                     stdout,
                 })
@@ -212,6 +223,12 @@ impl EjecutorBuilder for EjecutorContenedorBuilder {
         // Mismo chequeo de existencia que `lanzar`: la falta de credencial tiene un solo mensaje.
         revisar_credencial(&self.credencial)?;
         verificar_vigencia(&self.credencial, ahora_ms(), plazo)
+    }
+
+    /// Revisa la credencial igual que `verificar_antes` y devuelve la vida que le queda al login.
+    fn vida_restante(&self) -> Result<Option<Duration>, ErrorCorre> {
+        revisar_credencial(&self.credencial)?;
+        vida_restante(&self.credencial, ahora_ms()).map(Some)
     }
 }
 
@@ -458,6 +475,7 @@ mod tests {
             env,
             repo,
             plugin: None,
+            plazo: crate::corre::contenedor::TIMEOUT_BUILDER,
         }
     }
 
@@ -725,6 +743,39 @@ mod tests {
         assert!(
             !error.to_string().contains("TOKEN_ACCESO_EJ"),
             "el mensaje no lleva tokens: {error}"
+        );
+    }
+
+    #[test]
+    fn corre_contenedor_vida_restante_sin_credencial_es_error_de_ejecutor() {
+        let tmp = TempDir::new().expect("tmp");
+        let (ejecutor, credencial) = ejecutor_real(&tmp, false);
+        let error = ejecutor
+            .vida_restante()
+            .expect_err("sin credencial no hay vida que medir");
+        let esperado = format!(
+            "no existe la credencial de Claude en {}",
+            credencial.display()
+        );
+        assert!(
+            matches!(error, ErrorCorre::Ejecutor(ref m) if *m == esperado),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn corre_contenedor_vida_restante_da_lo_que_resta_del_login() {
+        const HORA_MS: u64 = 3_600_000;
+        let tmp = TempDir::new().expect("tmp");
+        let (ejecutor, credencial) = ejecutor_real(&tmp, false);
+        escribir_credencial(&credencial, &credencial_con_mcp(ahora_ms() + 3 * HORA_MS));
+        let vida = ejecutor
+            .vida_restante()
+            .expect("lee la vida")
+            .expect("hay límite conocido");
+        assert!(
+            vida > Duration::from_secs(3 * 3600 - 60) && vida <= Duration::from_secs(3 * 3600),
+            "{vida:?}"
         );
     }
 

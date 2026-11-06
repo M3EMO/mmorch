@@ -166,6 +166,7 @@ mod tests {
             env,
             repo,
             plugin: None,
+            plazo: TIMEOUT_BUILDER,
         }
     }
 

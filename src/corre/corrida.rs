@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
@@ -43,6 +44,10 @@ const FASE_TRANSCRIPT: &str = "transcript";
 const FASE_VIGENCIA: &str = "vigencia";
 /// Mensaje de commit del estado final del repo de la corrida.
 const MENSAJE_ESTADO_FINAL: &str = "r00t corre: estado final";
+/// Margen que se resta a la vida del login antes de fijar el plazo de un rol.
+const MARGEN_LOGIN: Duration = Duration::from_secs(5 * 60);
+/// Vida mínima que debe tener el login para arrancar un rol.
+const VIGENCIA_MINIMA: Duration = Duration::from_secs(20 * 60);
 
 /// Lo que `correr` necesita del mundo. Producción arma las de la CLI; los tests dan las suyas.
 pub struct DepsCorre<'a> {
@@ -74,6 +79,9 @@ struct Lanzado {
 /// Cada rol registra su sesión al terminar, antes de lanzar el siguiente.
 /// Así su costo queda aunque un rol posterior aborte.
 ///
+/// El login debe durar al menos `VIGENCIA_MINIMA` para arrancar. Cada rol corre con un plazo
+/// que sale de la vida del login en ese momento (ver `plazo_de_lanzamiento`).
+///
 /// Un código distinto de 0 de un rol corta la corrida: los roles siguientes no corren,
 /// pero la evaluación sí, y el informe dice lo que falta.
 /// Un fallo al lanzar aborta sin evaluar: sin builder no hay nada que evaluar,
@@ -102,8 +110,8 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         exigir_cupo(*rol, &eleccion)?;
         elecciones.push((*rol, eleccion));
     }
-    // Vigencia del login: debe alcanzar para el plazo de un rol. Si no, no se arma ni se lanza nada.
-    deps.ejecutor.verificar_antes(TIMEOUT_BUILDER)?;
+    // Vigencia del login: debe durar al menos `VIGENCIA_MINIMA`. Si no, no se arma ni se lanza nada.
+    deps.ejecutor.verificar_antes(VIGENCIA_MINIMA)?;
 
     // d) Armado de la carpeta de la corrida.
     let corrida = preparar_corrida(deps.home, deps.home_usuario, tarea, config)?;
@@ -123,12 +131,15 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         }
         let prompt = config_cargada.prompt.get(rol).cloned().unwrap_or_default();
         let modelo = eleccion.modelo.clone().unwrap_or_default();
+        // El plazo sale de la vida del login en este momento, no de la del inicio de la corrida.
+        let plazo = plazo_de_lanzamiento(deps.ejecutor.vida_restante()?);
         let lanzamiento = Lanzamiento {
             rol: *rol,
             args: args_claude(&prompt, &modelo, deps.home, &config_cargada.claude, *rol),
             env: env_del_builder(&config_cargada.claude, *rol, deps.entorno),
             repo: corrida.repo.clone(),
             plugin: config_cargada.claude.plugin_de(*rol).map(Path::to_path_buf),
+            plazo,
         };
         let n = u32::try_from(indice + 1).unwrap_or(u32::MAX);
         let salida = match deps.ejecutor.lanzar(&lanzamiento) {
@@ -254,15 +265,24 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
     Ok(fila)
 }
 
-/// Espera a que el login alcance para el plazo de un rol. Si no alcanza, deja un `Gate` y revisa cada
-/// `intervalo`, como mucho `reintentos()` veces. Si nunca alcanza, devuelve el último error.
+/// Plazo de un rol según la vida del login. Sin vida conocida, rige el tope de dos horas. Con vida,
+/// el plazo es la vida menos `MARGEN_LOGIN`, sin pasar del tope.
+fn plazo_de_lanzamiento(vida: Option<Duration>) -> Duration {
+    match vida {
+        None => TIMEOUT_BUILDER,
+        Some(vida) => TIMEOUT_BUILDER.min(vida.saturating_sub(MARGEN_LOGIN)),
+    }
+}
+
+/// Espera a que el login dure al menos `VIGENCIA_MINIMA`. Si no dura, deja un `Gate` y revisa cada
+/// `intervalo`, como mucho `reintentos()` veces. Si nunca dura, devuelve el último error.
 fn esperar_vigencia_del_rol(
     ejecutor: &dyn EjecutorBuilder,
     ruta_eventos: &Path,
     id: &str,
     rol: Rol,
 ) -> Result<(), ErrorCorre> {
-    let Err(mut ultimo) = ejecutor.verificar_antes(TIMEOUT_BUILDER) else {
+    let Err(mut ultimo) = ejecutor.verificar_antes(VIGENCIA_MINIMA) else {
         return Ok(());
     };
     let motivo = format!(
@@ -273,7 +293,7 @@ fn esperar_vigencia_del_rol(
     let espera = ejecutor.espera_vigencia();
     for _ in 0..espera.reintentos() {
         std::thread::sleep(espera.intervalo);
-        match ejecutor.verificar_antes(TIMEOUT_BUILDER) {
+        match ejecutor.verificar_antes(VIGENCIA_MINIMA) {
             Ok(()) => return Ok(()),
             Err(error) => ultimo = error,
         }
@@ -638,6 +658,10 @@ mod tests {
         vigencia_llamadas: Cell<u32>,
         /// Plazo que `correr` pidió en `verificar_antes`.
         plazo_verificado: RefCell<Option<Duration>>,
+        /// Vida del login que devuelve `vida_restante`. Sin valor, el ejecutor no conoce límite.
+        vida: Cell<Option<Duration>>,
+        /// Vida del login después del primer lanzamiento, como un login que se consume al correr.
+        vida_tras_lanzar: Option<Duration>,
         lanzados: RefCell<Vec<Lanzamiento>>,
         /// Al lanzar, deja en `.git/config` un `fsmonitor` que escribe esta marca, y un archivo sin commit.
         fsmonitor_marca: Option<PathBuf>,
@@ -654,10 +678,16 @@ mod tests {
                         .vigencia_recupera_tras
                         .is_none_or(|m| llamada < desde + m)
             });
-            if self.vigencia_falla || en_racha {
+            // Un login con menos vida que el plazo no alcanza, como en el host.
+            let vida_corta = self.vida.get().is_some_and(|vida| vida < plazo);
+            if self.vigencia_falla || en_racha || vida_corta {
                 return Err(ErrorCorre::Ejecutor("prueba: el login vence".into()));
             }
             Ok(())
+        }
+
+        fn vida_restante(&self) -> Result<Option<Duration>, ErrorCorre> {
+            Ok(self.vida.get())
         }
 
         fn espera_vigencia(&self) -> EsperaVigencia {
@@ -669,6 +699,11 @@ mod tests {
 
         fn lanzar(&self, l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre> {
             self.lanzados.borrow_mut().push(l.clone());
+            // Tras el primer lanzamiento, el login queda con la vida de `vida_tras_lanzar`.
+            let primero = self.lanzados.borrow().len() == 1;
+            if let Some(tras) = self.vida_tras_lanzar.filter(|_| primero) {
+                self.vida.set(Some(tras));
+            }
             if self.no_lanza {
                 return Err(ErrorCorre::Ejecutor("prueba: no arranca".into()));
             }
@@ -1188,9 +1223,70 @@ mod tests {
         correr_con(&e, &builder, &[], CONFIG).expect("corre");
         assert_eq!(
             *builder.plazo_verificado.borrow(),
-            Some(TIMEOUT_BUILDER),
-            "el plazo es el de un rol, no el de todos"
+            Some(VIGENCIA_MINIMA),
+            "la vigencia mínima es la de arrancar un rol, no el plazo de todos"
         );
+    }
+
+    /// Login de una hora: el rol corre con su vida menos el margen, no con las dos horas.
+    #[test]
+    fn corre_con_una_hora_de_login_lanza_con_plazo_de_55_minutos() {
+        let e = entorno();
+        let builder = Builder {
+            vida: Cell::new(Some(Duration::from_secs(60 * 60))),
+            ..Builder::default()
+        };
+        correr_con(&e, &builder, &[], CONFIG_CONSTRUYE).expect("la corrida termina bien");
+        let lanzados = builder.lanzados.borrow();
+        assert_eq!(lanzados.len(), 1, "el rol arranca");
+        assert_eq!(lanzados[0].plazo, Duration::from_secs(55 * 60));
+    }
+
+    /// Login de 3 horas que queda en 10 minutos tras el primer rol: sin renovación, el segundo no arranca.
+    #[test]
+    fn corre_con_diez_minutos_de_login_espera_y_sale_con_error() {
+        let e = entorno();
+        let builder = Builder {
+            vida: Cell::new(Some(Duration::from_secs(3 * 60 * 60))),
+            vida_tras_lanzar: Some(Duration::from_secs(10 * 60)),
+            ..Builder::default()
+        };
+        let error = correr_con(&e, &builder, &[], CONFIG_PLAN_ORGANIZA)
+            .expect_err("el login no se renueva");
+        assert!(matches!(error, ErrorCorre::Ejecutor(_)), "{error}");
+        assert_eq!(error.codigo_de_salida(), 3);
+        let roles: Vec<Rol> = builder.lanzados.borrow().iter().map(|l| l.rol).collect();
+        assert_eq!(roles, vec![Rol::Planifica], "organiza no debe lanzarse");
+        assert_eq!(gates(&e, "vigencia").len(), 1, "un Gate de vigencia");
+    }
+
+    /// Login de 10 horas: el plazo del rol queda en el tope de dos horas.
+    #[test]
+    fn corre_con_vida_larga_lanza_con_plazo_de_dos_horas() {
+        let e = entorno();
+        let builder = Builder {
+            vida: Cell::new(Some(Duration::from_secs(10 * 60 * 60))),
+            ..Builder::default()
+        };
+        correr_con(&e, &builder, &[], CONFIG_CONSTRUYE).expect("corre");
+        assert_eq!(builder.lanzados.borrow()[0].plazo, TIMEOUT_BUILDER);
+    }
+
+    #[test]
+    fn plazo_de_lanzamiento_resta_el_margen_a_la_vida_del_login() {
+        let minutos = |m: u64| Duration::from_secs(m * 60);
+        assert_eq!(plazo_de_lanzamiento(Some(minutos(60))), minutos(55));
+        assert_eq!(plazo_de_lanzamiento(Some(minutos(20))), minutos(15));
+        assert_eq!(
+            plazo_de_lanzamiento(Some(minutos(10 * 60))),
+            TIMEOUT_BUILDER
+        );
+        assert_eq!(
+            plazo_de_lanzamiento(Some(TIMEOUT_BUILDER + minutos(5))),
+            TIMEOUT_BUILDER,
+            "el tope de dos horas manda sobre una vida mayor"
+        );
+        assert_eq!(plazo_de_lanzamiento(None), TIMEOUT_BUILDER);
     }
 
     /// Reintentos de la espera de prueba: su tope de 5 ms entre intervalos de 1 ms.
@@ -1215,7 +1311,7 @@ mod tests {
             1,
             "sin espera: una sola revisión"
         );
-        assert_eq!(*builder.plazo_verificado.borrow(), Some(TIMEOUT_BUILDER));
+        assert_eq!(*builder.plazo_verificado.borrow(), Some(VIGENCIA_MINIMA));
         assert!(
             gates(&e, "vigencia").is_empty(),
             "antes del primer rol no hay espera"

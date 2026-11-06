@@ -31,7 +31,7 @@ use crate::tipos::Rol;
 pub use args::{args_claude, env_del_builder};
 pub use config::{ClaudeCorrida, ConfigCorrida};
 pub use corrida::{DepsCorre, correr};
-pub use credencial::{copiar_sin_mcp, vencimiento_ms, verificar_vigencia};
+pub use credencial::{copiar_sin_mcp, vencimiento_ms, verificar_vigencia, vida_restante};
 pub use ejecutor::{
     EjecutorBuilder, EjecutorContenedorBuilder, EsperaVigencia, Lanzamiento, SalidaClaude,
 };
