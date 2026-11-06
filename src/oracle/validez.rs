@@ -156,6 +156,11 @@ pub struct DetalleDefecto {
     /// menos del defecto. No cuenta para `encontrado` ni para `recall`.
     #[serde(default)]
     pub en_evidencia: bool,
+    /// `true` si algún hallazgo descartado del veredicto cae en el mismo archivo a `TOLERANCIA_LINEAS`
+    /// líneas o menos del defecto. Solo informa: no cuenta para `encontrado`, `recall`, `recall_linea`
+    /// ni `recall_test`.
+    #[serde(default)]
+    pub descartado_cerca: bool,
     /// Hallazgo del mismo archivo con menor distancia en línea. `None` si no hay ninguno en ese archivo.
     pub hallazgo_cercano: Option<HallazgoCercano>,
     /// Test que marca el defecto, copiado de `defectos.toml`. `None` si el defecto no lo trae.
@@ -569,6 +574,15 @@ fn encuentra(v: &Veredicto, defecto: &DefectoReal) -> bool {
     })
 }
 
+/// `true` si algún hallazgo descartado cae en el mismo archivo y a no más de `TOLERANCIA_LINEAS` del defecto.
+/// Solo informa: no cuenta para `encuentra`.
+fn descartado_cerca(v: &Veredicto, defecto: &DefectoReal) -> bool {
+    let archivo = normaliza(&defecto.archivo);
+    v.hallazgos_descartados.iter().any(|h| {
+        normaliza(&h.archivo) == archivo && h.linea.abs_diff(defecto.linea) <= TOLERANCIA_LINEAS
+    })
+}
+
 /// `Some(true)` si el `test` del defecto está en alguna lista de fallos del veredicto. `None` sin `test`.
 /// Cuenta para `recall` y `recall_test`. No cuenta para `encuentra`.
 fn test_rojo(v: &Veredicto, defecto: &DefectoReal) -> Option<bool> {
@@ -818,6 +832,7 @@ fn medir_recall(
             linea: defecto.linea,
             encontrado,
             en_evidencia: en_evidencia(&v, defecto),
+            descartado_cerca: descartado_cerca(&v, defecto),
             hallazgo_cercano: hallazgo_mas_cercano(&v, defecto),
             test: defecto.test.clone(),
             test_rojo: rojo,
@@ -2901,6 +2916,94 @@ fuente = "fixture"
         let viejo: DetalleDefecto =
             serde_json::from_value(json).expect("lee un defecto sin en_evidencia");
         assert!(!viejo.en_evidencia);
+    }
+
+    /// Veredicto de Root con un hallazgo descartado en `archivo` a `linea`. Sin hallazgos.
+    fn con_descartado(archivo: &str, linea: u32) -> Veredicto {
+        Veredicto {
+            hallazgos_descartados: vec![crate::tipos::HallazgoDescartado {
+                archivo: archivo.into(),
+                linea,
+                item: "seguridad.secretos".into(),
+                motivo: "sin requisito afectado".into(),
+            }],
+            ..Veredicto::default()
+        }
+    }
+
+    #[test]
+    fn validez_descartado_cerca_informa_sin_contar_recall() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos(casos, &[("src/a.rs", 100)]);
+        // Un descartado a 2 líneas del defecto y ningún hallazgo.
+        let v = validar_con(
+            casos,
+            &falso(vec![clave("r", con_descartado("src/a.rs", 102))]),
+        )
+        .expect("mide");
+        let detalle = &v.defectos[0];
+        assert!(!detalle.encontrado, "un descartado no es encontrado");
+        assert!(detalle.descartado_cerca, "el descartado cae a 2 líneas");
+        assert_eq!(
+            v.recall.aciertos,
+            Some(0),
+            "un descartado no cuenta en recall"
+        );
+    }
+
+    #[test]
+    fn validez_descartado_a_10_lineas_no_es_cerca() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos(casos, &[("src/a.rs", 100)]);
+        let v = validar_con(
+            casos,
+            &falso(vec![clave("r", con_descartado("src/a.rs", 110))]),
+        )
+        .expect("mide");
+        assert!(!v.defectos[0].descartado_cerca, "a 10 líneas queda fuera");
+    }
+
+    #[test]
+    fn validez_descartado_otro_archivo_no_es_cerca() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos(casos, &[("src/a.rs", 100)]);
+        let v = validar_con(
+            casos,
+            &falso(vec![clave("r", con_descartado("src/b.rs", 100))]),
+        )
+        .expect("mide");
+        assert!(!v.defectos[0].descartado_cerca, "otro archivo no cuenta");
+    }
+
+    #[test]
+    fn validez_sin_descartados_da_descartado_cerca_false() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos(casos, &[("src/a.rs", 100)]);
+        let v = validar_con(casos, &falso(vec![clave("r", Veredicto::default())])).expect("mide");
+        assert!(!v.defectos[0].descartado_cerca);
+    }
+
+    #[test]
+    fn validez_viejo_defecto_sin_descartado_cerca_lee_false() {
+        let dir = TempDir::new().expect("temporal");
+        escribir_defectos(dir.path(), &[("src/a.rs", 20)]);
+        let v =
+            validar_con(dir.path(), &falso(vec![clave("r", Veredicto::default())])).expect("mide");
+        let mut json = serde_json::to_value(&v.defectos[0]).expect("serializa");
+        assert!(
+            json.as_object_mut()
+                .expect("objeto")
+                .remove("descartado_cerca")
+                .is_some(),
+            "la clave descartado_cerca se serializa"
+        );
+        let viejo: DetalleDefecto =
+            serde_json::from_value(json).expect("lee un defecto sin descartado_cerca");
+        assert!(!viejo.descartado_cerca);
     }
 
     /// Escribe `defectos.toml` con un `[[defecto]]` por `(repo, archivo, linea, test)`. Va siempre el campo `test`.

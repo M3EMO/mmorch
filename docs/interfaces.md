@@ -4539,6 +4539,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "description": "Archivo del defecto.",
           "type": "string"
         },
+        "descartado_cerca": {
+          "description": "`true` si algún hallazgo descartado del veredicto cae en el mismo archivo a `TOLERANCIA_LINEAS`\nlíneas o menos del defecto. Solo informa: no cuenta para `encontrado`, `recall`, `recall_linea`\nni `recall_test`.",
+          "type": "boolean",
+          "default": false
+        },
         "en_evidencia": {
           "description": "`true` si la evidencia de algún ítem del veredicto cita este archivo a `TOLERANCIA_LINEAS` líneas o\nmenos del defecto. No cuenta para `encontrado` ni para `recall`.",
           "type": "boolean",
