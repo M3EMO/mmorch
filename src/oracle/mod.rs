@@ -2180,11 +2180,12 @@ fn juzgar_junit(
     pytest: bool,
     esperados: Option<&BTreeSet<String>>,
 ) -> Result<Result<Junit, String>, ErrorOraculo> {
+    // Ausente, enlace, sobre el tope o ilegible: lo mismo que ausente (M16).
     let ruta = c.salida.join(xml);
-    if !ruta.is_file() {
+    let Some(texto) = junit::leer_de_salida(&ruta) else {
         return Err(sin_junit(c, xml, resultado));
-    }
-    let Ok(crudo) = junit::leer(&ruta) else {
+    };
+    let Ok(crudo) = junit::parsear(&texto) else {
         return Ok(Err("el junit no se pudo leer".into()));
     };
     if pytest {
@@ -2242,9 +2243,10 @@ fn coleccion_de(
     // Los flags se quitan antes del preludio de caché: su `pip` no es el `pytest` de la suite.
     // La colección no escribe junit: el nombre `XML_OCULTO` no se usa aquí.
     let resultado = correr_suite(c, &comando_de_coleccion(cmd), dir, XML_OCULTO, correr)?;
-    if !ruta.is_file() {
+    // Ausente, enlace, sobre el tope o ilegible: lo mismo que ausente (M16).
+    let Some(texto) = junit::leer_de_salida(&ruta) else {
         return Err(sin_junit(c, ARCHIVO_COLECCION, &resultado));
-    }
+    };
     // Código 5 de pytest: ningún test recolectado. Otro código distinto de 0 no da veredicto.
     match resultado.codigo {
         0 => {}
@@ -2255,7 +2257,6 @@ fn coleccion_de(
             )));
         }
     }
-    let texto = fs::read_to_string(&ruta).map_err(|e| infra("leer la lista de tests", e))?;
     let mut nodos: Vec<String> = Vec::new();
     for linea in texto.lines().map(str::trim) {
         if linea.contains(".py::") && !nodos.iter().any(|n| n == linea) {
@@ -3390,6 +3391,96 @@ mod tests {
         let correr = ejecutor_con(coleccion_de(1), Some(falso), 0);
         let s = correr_suite_de_prueba(base.path(), &tarea, &correr).expect("sin infra");
         assert!(matches!(s, Suite::SinVeredicto(_)), "{s:?}");
+    }
+
+    /// Ejecutor que deja el junit, o la lista de tests si `en_coleccion`, como enlace a `destino`.
+    fn ejecutor_con_enlace(
+        coleccion: &'static str,
+        destino: PathBuf,
+        en_coleccion: bool,
+    ) -> impl Fn(&contenedor::Ejecucion) -> Result<contenedor::Resultado, ErrorOraculo> {
+        move |e: &contenedor::Ejecucion| {
+            if e.cmd.contains("--collect-only") {
+                let ruta = e.salida.join(ARCHIVO_COLECCION);
+                if en_coleccion {
+                    std::os::unix::fs::symlink(&destino, &ruta).expect("enlace");
+                } else {
+                    fs::write(&ruta, coleccion).expect("coleccion");
+                }
+                return Ok(resultado_falso(0, ""));
+            }
+            let ruta = e.salida.join(xml_de_cmd(&e.cmd));
+            if en_coleccion {
+                // Solo la lista es enlace: el junit es normal y válido.
+                fs::write(&ruta, JUNIT_TRES).expect("junit");
+            } else {
+                std::os::unix::fs::symlink(&destino, &ruta).expect("enlace");
+            }
+            Ok(resultado_falso(0, ""))
+        }
+    }
+
+    /// Un junit de 3 verdes en `base/real.xml`, como destino de un enlace.
+    fn junit_real_en(base: &Path) -> PathBuf {
+        let real = base.join("real.xml");
+        fs::write(&real, JUNIT_TRES).expect("junit real");
+        real
+    }
+
+    #[test]
+    fn oraculo_junit_enlace_simbolico_en_salida_es_ausente() {
+        // Un enlace a un junit válido no vale: se trata igual que un junit que no existe.
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_de_prueba(base.path());
+        let destino = junit_real_en(base.path());
+        let correr = ejecutor_con_enlace(coleccion_de(3), destino, false);
+        let s = correr_suite_de_prueba(base.path(), &tarea, &correr);
+        assert!(
+            matches!(&s, Err(ErrorOraculo::Infra(m)) if m.contains("no produjo /salida/")),
+            "el enlace debe ser ausente: {s:?}"
+        );
+    }
+
+    #[test]
+    fn oraculo_lista_enlace_simbolico_en_salida_es_ausente() {
+        // La lista de tests que es enlace cuenta como ausente, igual que el junit.
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_de_prueba(base.path());
+        let destino = base.path().join("real.txt");
+        fs::write(&destino, coleccion_de(3)).expect("lista real");
+        let correr = ejecutor_con_enlace(coleccion_de(3), destino, true);
+        let s = correr_suite_de_prueba(base.path(), &tarea, &correr);
+        assert!(
+            matches!(&s, Err(ErrorOraculo::Infra(m)) if m.contains("no produjo /salida/")),
+            "la lista enlazada debe ser ausente: {s:?}"
+        );
+    }
+
+    #[test]
+    fn oraculo_junit_mayor_que_el_tope_es_ausente() {
+        // Un junit pasado del tope no se lee entero: se trata como ausente.
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_de_prueba(base.path());
+        let grande = format!(
+            "{JUNIT_TRES}<!--{}-->",
+            "x".repeat(junit::TOPE_SALIDA_BYTES as usize)
+        );
+        let correr = ejecutor_con(coleccion_de(3), Some(Box::leak(grande.into_boxed_str())), 0);
+        let s = correr_suite_de_prueba(base.path(), &tarea, &correr);
+        assert!(
+            matches!(&s, Err(ErrorOraculo::Infra(m)) if m.contains("no produjo /salida/")),
+            "el junit sobre el tope debe ser ausente: {s:?}"
+        );
+    }
+
+    #[test]
+    fn oraculo_junit_normal_valido_sigue_leyendose() {
+        // Guarda: un archivo normal y chico se lee igual que antes.
+        let base = tempfile::tempdir().expect("base");
+        let tarea = tarea_de_prueba(base.path());
+        let correr = ejecutor_con(coleccion_de(3), Some(JUNIT_TRES), 0);
+        let s = correr_suite_de_prueba(base.path(), &tarea, &correr).expect("sin infra");
+        assert!(matches!(s, Suite::Clasificada(_)), "{s:?}");
     }
 
     /// Tarea cuya suite oculta no es pytest: el junit lo escribe el propio comando.
