@@ -108,6 +108,9 @@ struct FugaGitleaks {
     descripcion: String,
 }
 
+/// Raíces que gitleaks antepone a la ruta del archivo. Se quitan para dejar la ruta relativa al repo.
+const RAICES_GITLEAKS: [&str; 2] = ["/salida/copia/", "/repo/"];
+
 /// Línea de cierre de gitleaks cuando no hay filtraciones. Va a stderr, no al reporte.
 const MARCA_GITLEAKS_LIMPIO: &str = "no leaks found";
 
@@ -131,9 +134,10 @@ pub fn parsear_gitleaks(json: &str, requisitos: &[Requisito]) -> Result<Vec<Hall
         .unwrap_or_default()
         .into_iter()
         .map(|f| {
-            let archivo = f
-                .archivo
-                .strip_prefix("/repo/")
+            // La ruta sale con la raíz de la copia (o la de /repo, en reportes viejos).
+            let archivo = RAICES_GITLEAKS
+                .iter()
+                .find_map(|raiz| f.archivo.strip_prefix(raiz))
                 .unwrap_or(f.archivo.as_str());
             crear_hallazgo(
                 Dimension::Seguridad,
@@ -332,21 +336,29 @@ pub(crate) fn con_veredicto(
     }
 }
 
-/// Comando de gitleaks en el contenedor de evaluación.
-pub(crate) const COMANDO_GITLEAKS: &str = "gitleaks detect --no-git --source /repo --report-format json \
+/// Comando de gitleaks en el contenedor de evaluación. Escanea una copia de `/repo` sin `target/` ni los
+/// archivos de config del repo, así el alumno no apaga hallazgos. `gitleaks:allow` no cuenta.
+pub(crate) const COMANDO_GITLEAKS: &str = "mkdir -p /salida/copia && \
+    tar -C /repo --exclude=./target --exclude=./.gitleaks.toml --exclude=./.gitleaksignore \
+    --exclude=./.cargo/audit.toml -cf - . | tar -C /salida/copia -xf - && \
+    cd /salida/copia && unset GITLEAKS_CONFIG GITLEAKS_CONFIG_TOML && \
+    gitleaks detect --no-git --source /salida/copia --ignore-gitleaks-allow --report-format json \
     --report-path /salida/gitleaks.json --exit-code 0 --no-banner";
 
-/// Comando de cargo audit en el contenedor de evaluación. Lee el `Cargo.lock` de `/repo`.
-pub(crate) const COMANDO_CARGO_AUDIT: &str =
-    "cd /repo && cargo audit --no-fetch --db /rustsec --json > /salida/audit.json";
+/// Comando de cargo audit en el contenedor de evaluación. Corre en una copia de `/repo` sin
+/// `.cargo/audit.toml`, que cargo audit lee desde el directorio actual.
+pub(crate) const COMANDO_CARGO_AUDIT: &str = "mkdir -p /salida/copia && \
+    tar -C /repo --exclude=./target --exclude=./.gitleaks.toml --exclude=./.gitleaksignore \
+    --exclude=./.cargo/audit.toml -cf - . | tar -C /salida/copia -xf - && \
+    cd /salida/copia && cargo audit --no-fetch --db /rustsec --json > /salida/audit.json";
 
-/// Comando de clippy en el contenedor de evaluación.
+/// Comando de clippy en el contenedor de evaluación. `--force-warn` no lo apaga un `allow` del repo.
 pub(crate) fn comando_clippy() -> String {
     [
         PRELUDIO,
         "cd /repo && CARGO_TARGET_DIR=/salida/target cargo clippy --message-format=json \
-         -- -A clippy::all -W clippy::correctness -W clippy::suspicious -W clippy::perf \
-         > /salida/clippy.json 2>/dev/null",
+         -- -A clippy::all --force-warn clippy::correctness --force-warn clippy::suspicious \
+         --force-warn clippy::perf > /salida/clippy.json 2>/dev/null",
     ]
     .concat()
 }
@@ -999,7 +1011,7 @@ mod tests {
         let cmd = &ej.cmds()[1];
         assert!(cmd.contains("--report-path /salida/gitleaks.json"));
         assert!(cmd.contains("--no-git"));
-        assert!(cmd.contains("--source /repo"));
+        assert!(cmd.contains("--source /salida/copia"));
     }
 
     #[test]
@@ -1113,8 +1125,10 @@ mod tests {
         assert_eq!(r.motivo, None);
         assert_eq!(r.hallazgos.len(), 2);
         assert_eq!(ej.cmds()[0], "command -v cargo-audit || exit 1");
+        assert!(ej.cmds()[1].starts_with("mkdir -p /salida/copia"));
         assert!(
-            ej.cmds()[1].starts_with("cd /repo && cargo audit --no-fetch --db /rustsec --json")
+            ej.cmds()[1]
+                .contains("cd /salida/copia && cargo audit --no-fetch --db /rustsec --json")
         );
     }
 
@@ -1130,7 +1144,7 @@ mod tests {
             "cd /repo && CARGO_TARGET_DIR=/salida/target cargo clippy --message-format=json"
         ));
         assert!(cmd.contains(
-            "-A clippy::all -W clippy::correctness -W clippy::suspicious -W clippy::perf"
+            "-A clippy::all --force-warn clippy::correctness --force-warn clippy::suspicious --force-warn clippy::perf"
         ));
         assert!(cmd.contains("> /salida/clippy.json 2>/dev/null"));
     }
@@ -1318,10 +1332,11 @@ mod tests {
             cmds.iter().any(|c| c.contains("gitleaks detect")),
             "{cmds:?}"
         );
+        // El comando de gitleaks nombra `.cargo/audit.toml` al excluirlo: no cuenta como cargo audit.
         assert!(
-            !cmds
-                .iter()
-                .any(|c| c.contains("cargo") || c.contains("bench-eficiencia")),
+            !cmds.iter().any(|c| c.contains("cargo audit")
+                || c.contains("cargo clippy")
+                || c.contains("bench-eficiencia")),
             "{cmds:?}"
         );
     }
@@ -1470,6 +1485,184 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(modo, 0o700, "la salida no se abre a otros usuarios");
+    }
+
+    /// Exclusiones de la copia del repo: los tres archivos de config y `target/` no entran al escaneo.
+    fn excluye_config_y_target(cmd: &str) {
+        for ruta in [
+            "./.gitleaks.toml",
+            "./.gitleaksignore",
+            "./.cargo/audit.toml",
+            "./target",
+        ] {
+            assert!(
+                cmd.contains(&format!("--exclude={ruta}")),
+                "no excluye {ruta}: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn comando_gitleaks_corre_sobre_copia_sin_config_ni_allow() {
+        excluye_config_y_target(COMANDO_GITLEAKS);
+        assert!(
+            COMANDO_GITLEAKS.contains("cd /salida/copia"),
+            "{COMANDO_GITLEAKS}"
+        );
+        assert!(
+            COMANDO_GITLEAKS.contains("--source /salida/copia"),
+            "{COMANDO_GITLEAKS}"
+        );
+        assert!(
+            COMANDO_GITLEAKS.contains("--ignore-gitleaks-allow"),
+            "{COMANDO_GITLEAKS}"
+        );
+        // Si la copia falla, el `&&` corta antes de gitleaks: no escanea /repo a ciegas.
+        assert!(
+            COMANDO_GITLEAKS.contains("&& gitleaks detect"),
+            "{COMANDO_GITLEAKS}"
+        );
+    }
+
+    #[test]
+    fn comando_cargo_audit_corre_sobre_copia_sin_audit_toml() {
+        excluye_config_y_target(COMANDO_CARGO_AUDIT);
+        assert!(
+            COMANDO_CARGO_AUDIT.contains(
+                "&& cd /salida/copia && cargo audit --no-fetch --db /rustsec --json > /salida/audit.json"
+            ),
+            "{COMANDO_CARGO_AUDIT}"
+        );
+    }
+
+    #[test]
+    fn comando_clippy_fuerza_las_categorias_con_force_warn() {
+        let cmd = comando_clippy();
+        for categoria in ["correctness", "suspicious", "perf"] {
+            let forzada = format!("--force-warn clippy::{categoria}");
+            assert!(cmd.contains(&forzada), "falta {forzada}: {cmd}");
+        }
+        // Un `-W` lo apaga `#![allow(clippy::all)]` del repo. `--force-warn` no.
+        assert!(!cmd.contains(" -W "), "queda un -W: {cmd}");
+    }
+
+    #[test]
+    fn sonda_gitleaks_quita_la_ruta_de_la_copia() {
+        let json = r#"[{"RuleID":"aws-access-token","File":"/salida/copia/src/s.rs","StartLine":4,"Description":"AWS"}]"#;
+        let hs = parsear_gitleaks(json, &[]).expect("parsea");
+        assert_eq!(hs[0].archivo, "src/s.rs");
+    }
+
+    // ---------- Guardas con la herramienta real ----------
+    // Corren solo con podman: se saltean con ROOT_SIN_PODMAN=1. El orquestador las corre.
+
+    /// Imagen de evaluación de Rust. La misma que usa `defectos.rs`.
+    const IMAGEN_EVAL: &str = "localhost/root-oraculo-rust:2";
+
+    /// Clave con forma de AWS. Gitleaks la marca con su regla por defecto.
+    const CLAVE_AWS: &str = "AKIAQ3ZX7LMNB2KD7WRT";
+
+    /// Ejecutor real sobre `repo`. El preludio de Rust copia `/cache/config.toml`, así que la caché lo trae.
+    fn ejecutor_real(repo: &Path, home: &Path, cache: &Path) -> EjecutorContenedor {
+        fs::write(cache.join("config.toml"), "").expect("config de la caché");
+        EjecutorContenedor {
+            imagen: IMAGEN_EVAL.into(),
+            repo: repo.into(),
+            oraculo: None,
+            rustsec: None,
+            cache: Some(cache.into()),
+            timeout: Duration::from_secs(600),
+            home: home.into(),
+        }
+    }
+
+    /// Repo de Rust sin dependencias con `src/lib.rs` dado. Trae `Cargo.lock` con la cabecera de cargo: sin ella, cargo lo reescribe sobre `/repo` de solo lectura.
+    fn repo_rust_con_lib(lib: &str) -> tempfile::TempDir {
+        let repo = repo_con_fuente("src/lib.rs", lib);
+        fs::write(
+            repo.path().join("Cargo.toml"),
+            "[package]\nname = \"guarda\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("Cargo.toml");
+        fs::write(
+            repo.path().join("Cargo.lock"),
+            "# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 3\n\n[[package]]\nname = \"guarda\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("Cargo.lock");
+        repo
+    }
+
+    #[test]
+    fn guarda_gitleaks_ignora_el_gitleaks_toml_del_repo() {
+        crate::saltar_sin_podman!();
+        let repo = repo_con_fuente("src/s.rs", &format!("const K: &str = \"{CLAVE_AWS}\";\n"));
+        fs::write(
+            repo.path().join(".gitleaks.toml"),
+            "[allowlist]\nregexes = [\"AKIA[A-Z0-9]+\"]\n",
+        )
+        .expect("config");
+        let home = tempfile::tempdir().expect("home");
+        let cache = tempfile::tempdir().expect("cache");
+        let ej = ejecutor_real(repo.path(), home.path(), cache.path());
+        let r = gitleaks(&ej, &tarea_rust(None));
+        assert!(
+            !r.hallazgos.is_empty(),
+            "el .gitleaks.toml del repo apagó el hallazgo: {:?}",
+            r.motivo
+        );
+    }
+
+    #[test]
+    fn guarda_gitleaks_ignora_el_gitleaksignore_del_repo() {
+        crate::saltar_sin_podman!();
+        let repo = repo_con_fuente("src/s.rs", &format!("const K: &str = \"{CLAVE_AWS}\";\n"));
+        fs::write(
+            repo.path().join(".gitleaksignore"),
+            "src/s.rs:aws-access-token:1\n",
+        )
+        .expect("ignore");
+        let home = tempfile::tempdir().expect("home");
+        let cache = tempfile::tempdir().expect("cache");
+        let ej = ejecutor_real(repo.path(), home.path(), cache.path());
+        let r = gitleaks(&ej, &tarea_rust(None));
+        assert!(
+            !r.hallazgos.is_empty(),
+            "el .gitleaksignore del repo apagó el hallazgo: {:?}",
+            r.motivo
+        );
+    }
+
+    #[test]
+    fn guarda_gitleaks_no_respeta_el_comentario_allow() {
+        crate::saltar_sin_podman!();
+        let texto = format!("const K: &str = \"{CLAVE_AWS}\"; // gitleaks:allow\n");
+        let repo = repo_con_fuente("src/s.rs", &texto);
+        let home = tempfile::tempdir().expect("home");
+        let cache = tempfile::tempdir().expect("cache");
+        let ej = ejecutor_real(repo.path(), home.path(), cache.path());
+        let r = gitleaks(&ej, &tarea_rust(None));
+        assert!(
+            !r.hallazgos.is_empty(),
+            "gitleaks:allow apagó el hallazgo: {:?}",
+            r.motivo
+        );
+    }
+
+    #[test]
+    fn guarda_clippy_force_warn_pasa_el_allow_del_repo() {
+        crate::saltar_sin_podman!();
+        let lib = "#![allow(clippy::all)]\npub fn f(a: i32) -> bool {\n    a == a\n}\n";
+        let repo = repo_rust_con_lib(lib);
+        let home = tempfile::tempdir().expect("home");
+        let cache = tempfile::tempdir().expect("cache");
+        let ej = ejecutor_real(repo.path(), home.path(), cache.path());
+        let r = clippy(&ej, &tarea_rust(None));
+        assert!(
+            r.hallazgos.iter().any(|h| h.cita.contains("a == a")),
+            "#![allow(clippy::all)] apagó el lint correctness: {:?} {:?}",
+            r.motivo,
+            r.hallazgos
+        );
     }
 
     #[test]

@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 
 use quick_xml::events::{BytesStart, Event};
@@ -259,10 +260,36 @@ fn malformado(error: impl Display) -> ErrorOraculo {
     ErrorOraculo::Junit(error.to_string())
 }
 
-/// Lee y parsea un junit XML del disco.
+/// Tope de tamaño de un archivo de `/salida`: el junit y la lista de tests (16 MiB).
+/// Un archivo más grande no se lee entero y se trata como ausente.
+pub(crate) const TOPE_SALIDA_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Lee un archivo de `/salida` como texto. `None` si no es un archivo normal (enlace, directorio,
+/// fifo...), si pasa `TOPE_SALIDA_BYTES` o si no se puede leer. El llamador lo trata como ausente.
+/// No sigue enlaces: el contenedor podría apuntarlos a un archivo del host (M16).
+pub(crate) fn leer_de_salida(ruta: &Path) -> Option<String> {
+    let meta = fs::symlink_metadata(ruta).ok()?;
+    if !meta.file_type().is_file() || meta.len() > TOPE_SALIDA_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    // Lee como mucho el tope más un byte: un archivo que crece tras el `stat` no se lee entero.
+    fs::File::open(ruta)
+        .ok()?
+        .take(TOPE_SALIDA_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > TOPE_SALIDA_BYTES {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Lee y parsea un junit del disco con las reglas de `leer_de_salida`. Un archivo rechazado, ausente
+/// o pasado del tope da error de infraestructura.
 pub fn leer(ruta: &Path) -> Result<Junit, ErrorOraculo> {
-    let xml = fs::read_to_string(ruta)
-        .map_err(|e| ErrorOraculo::Infra(format!("no se pudo leer {}: {e}", ruta.display())))?;
+    let xml = leer_de_salida(ruta)
+        .ok_or_else(|| ErrorOraculo::Infra(format!("no se pudo leer {}", ruta.display())))?;
     parsear(&xml)
 }
 

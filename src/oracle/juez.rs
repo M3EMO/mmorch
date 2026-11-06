@@ -30,6 +30,10 @@ const SONDA_ARQUITECTURA: &str = "arquitectura-nativa";
 const FASE: &str = "juez-diseno";
 /// Marca que se agrega al final de un extracto recortado.
 const MARCA_RECORTE: &str = "…[recortado]";
+/// Sonda que reporta secretos. Su línea es un secreto: no sale al prompt.
+const SONDA_GITLEAKS: &str = "gitleaks";
+/// Texto que reemplaza la línea de un hallazgo de `gitleaks` en un extracto.
+const LINEA_OMITIDA: &str = "[línea con un secreto omitida]";
 const NIVEL_MAX: i64 = 3;
 const SEVERIDAD_MAX: i64 = 3;
 /// Cuántos archivos grandes del mapa van en los extractos.
@@ -306,6 +310,7 @@ fn extractos(e: &EntradaJuez, limites: &LimitesPrompt) -> Vec<(String, String)> 
             archivos.push(h.archivo.clone());
         }
     }
+    let secretos = lineas_con_secreto(e.hallazgos_sondas);
     let mut restante = limites.extractos_total;
     let mut salida = Vec::new();
     for archivo in archivos {
@@ -318,7 +323,8 @@ fn extractos(e: &EntradaJuez, limites: &LimitesPrompt) -> Vec<(String, String)> 
         let Ok(contenido) = fs::read_to_string(e.repo.join(&archivo)) else {
             continue;
         };
-        let texto = numerar(&contenido, restante.min(limites.extracto_max));
+        let omitidas = secretos.get(archivo.as_str()).cloned().unwrap_or_default();
+        let texto = numerar(&contenido, restante.min(limites.extracto_max), &omitidas);
         if texto.is_empty() {
             continue;
         }
@@ -328,15 +334,36 @@ fn extractos(e: &EntradaJuez, limites: &LimitesPrompt) -> Vec<(String, String)> 
     salida
 }
 
-/// Líneas con su número real (`NN: `). El texto, con la marca de recorte, no pasa `limite` caracteres.
-/// Vacío si ni una línea cabe: así no sale un archivo con solo la marca.
-fn numerar(contenido: &str, limite: usize) -> String {
+/// Líneas de cada archivo que cita un hallazgo de `gitleaks`. Todas van omitidas en el extracto.
+fn lineas_con_secreto(hallazgos: &[Hallazgo]) -> BTreeMap<&str, BTreeSet<u32>> {
+    let mut secretos: BTreeMap<&str, BTreeSet<u32>> = BTreeMap::new();
+    for h in hallazgos {
+        if matches!(&h.fuente, Fuente::Sonda(s) if s == SONDA_GITLEAKS) {
+            secretos
+                .entry(h.archivo.as_str())
+                .or_default()
+                .insert(h.linea);
+        }
+    }
+    secretos
+}
+
+/// Líneas con su número real (`NN: `). Las de `omitidas` salen como `LINEA_OMITIDA`. El texto, con la
+/// marca de recorte, no pasa `limite` caracteres. Vacío si ni una línea cabe: así no sale un archivo con
+/// solo la marca.
+fn numerar(contenido: &str, limite: usize, omitidas: &BTreeSet<u32>) -> String {
     let marca = format!("{MARCA_RECORTE}\n");
     let tope = limite.saturating_sub(marca.chars().count());
     let mut salida = String::new();
     let mut usados = 0;
     for (i, linea) in contenido.lines().enumerate() {
-        let fila = format!("{}: {linea}\n", i + 1);
+        let numero = i + 1;
+        let texto = if omitidas.contains(&(numero as u32)) {
+            LINEA_OMITIDA
+        } else {
+            linea
+        };
+        let fila = format!("{numero}: {texto}\n");
         let largo = fila.chars().count();
         if usados + largo > tope {
             if salida.is_empty() {
@@ -1797,6 +1824,84 @@ mod tests {
             .expect("hay extractos");
         assert!(extractos.contains("--- src/a.rs ---"));
         assert!(!extractos.contains("--- src/b.rs ---"), "{extractos}");
+    }
+
+    /// Hallazgo de la sonda `sonda` en `archivo`, línea `linea`.
+    fn hallazgo_de(sonda: &str, archivo: &str, linea: u32) -> Hallazgo {
+        Hallazgo {
+            dimension: Dimension::Seguridad,
+            severidad: 3,
+            archivo: archivo.into(),
+            linea,
+            cita: "x".into(),
+            detalle: "detalle".into(),
+            fuente: Fuente::Sonda(sonda.into()),
+            id: String::new(),
+            impacto: Vec::new(),
+        }
+    }
+
+    /// Repo con `src/secreto.rs` de dos líneas: la línea 2 tiene un secreto.
+    fn repo_con_secreto() -> (TempDir, Mapa) {
+        let repo = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(repo.path().join("src")).expect("crea src");
+        fs::write(
+            repo.path().join("src/secreto.rs"),
+            "fn inicio() {}\nconst TOKEN: &str = \"sk-SECRETO-123\";\n",
+        )
+        .expect("escribe");
+        let mapa = construir_mapa(repo.path()).expect("mapa");
+        (repo, mapa)
+    }
+
+    #[test]
+    fn juez_prompt_no_envia_la_linea_de_un_hallazgo_gitleaks() {
+        let (repo, mapa) = repo_con_secreto();
+        let sondas = vec![hallazgo_de("gitleaks", "src/secreto.rs", 2)];
+        let c = caso();
+        let entrada = EntradaJuez {
+            repo: repo.path(),
+            mapa: &mapa,
+            hallazgos_sondas: &sondas,
+            ..c.entrada()
+        };
+        let p = construir_prompt(&entrada, &LimitesPrompt::default());
+        assert!(!p.usuario.contains("SECRETO-123"), "{}", p.usuario);
+        assert!(
+            p.usuario.contains(
+                "--- src/secreto.rs ---\n1: fn inicio() {}\n2: [línea con un secreto omitida]\n"
+            ),
+            "{}",
+            p.usuario
+        );
+    }
+
+    #[test]
+    fn juez_prompt_omite_gitleaks_aunque_otro_hallazgo_cite_el_archivo() {
+        let (repo, mapa) = repo_con_secreto();
+        let sondas = vec![
+            hallazgo_de("arquitectura-nativa", "src/secreto.rs", 1),
+            hallazgo_de("gitleaks", "src/secreto.rs", 2),
+        ];
+        let c = caso();
+        let entrada = EntradaJuez {
+            repo: repo.path(),
+            mapa: &mapa,
+            hallazgos_sondas: &sondas,
+            ..c.entrada()
+        };
+        let p = construir_prompt(&entrada, &LimitesPrompt::default());
+        assert!(!p.usuario.contains("SECRETO-123"), "{}", p.usuario);
+        assert!(p.usuario.contains("2: [línea con un secreto omitida]\n"));
+    }
+
+    #[test]
+    fn juez_prompt_sin_gitleaks_es_identico_al_de_antes() {
+        // Texto fijo del extracto de `caso()` sin hallazgos de gitleaks: el prompt no cambia.
+        let c = caso();
+        let p = construir_prompt(&c.entrada(), &LimitesPrompt::default());
+        let esperado = "\nEXTRACTOS:\n--- src/almacen.rs ---\n1: pub struct Almacen;\n2: \n3: impl Almacen {\n4:     pub fn guardar(&self) {}\n5: }\n";
+        assert!(p.usuario.ends_with(esperado), "{}", p.usuario);
     }
 
     #[test]
