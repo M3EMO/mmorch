@@ -4785,3 +4785,120 @@ P63 y P64 siguen abiertas. P64 cubre hasta la 68.
 **P68: ¿Mezclar la Tarea 69 cuando la prueba con podman dé verde?**
 - **a)** Sí, sin volver a preguntar. Recomendada.
 - **b)** No, el orquestador trae el resultado y espera otra orden.
+
+## Vuelta del 2026-11-05 (noche 6): Tarea 69 y revisión de cierre
+
+**Estado.**
+- La Tarea 69 terminó en `laptop/tarea-69` (3951cf2): 2596 verdes sin podman, 0 fallas, 4 ignorados, 3,12 USD. Tocó `src/corre/contenedor.rs`, `tests/builder_real.rs` y `tests/corre.rs`, fuera de su lista, para compilar y probar. Se acepta.
+- La validez automática corre desde las 20:23 y ocupa podman.
+- P67 y P68 siguen abiertas. El usuario escribió "Preguntar a la sesion Graft", y esa sesión no respondió.
+- La revisión de cierre está en `side-session-notes/local_c0426133-.../2026-11-05-revision-cierre-root.md`: 5 HIGH y 17 MEDIUM, de revisores que solo leyeron.
+
+## Verificación de la revisión de cierre (Opus, sobre laptop/tarea-69)
+
+**Hallazgo que la revisión no tenía.** `~/.cache/root/corridas/corre-memora-ecc-haiku-1793808081-1012512-0/claude-estado/.credentials.json` existe, con permisos 0600 y fecha 2026-11-04 13:06. Es anterior a la Tarea 62 y **trae `refreshToken`**. Su token de acceso venció hace 27,8 horas. La vigencia del token de refresco no está medida. Es la prueba real del hallazgo 1.
+
+| N.º | Veredicto | Línea que lo prueba | Nota |
+|---|---|---|---|
+| 1 | **Confirmado** | `src/corre/corrida.rs:671-678`: solo `Drop`. `src/corre/` no maneja señales. | El archivo de arriba lo prueba. |
+| 2 | **Confirmado** | `src/oracle/entrega.rs:1039` y `:1043` recortan a 4000. `:638-643` da `Infra` sin `STEP`. | Falla cerrado: sin veredicto, no un verde falso. |
+| 3 | **Confirmado el comando; sin probar la herramienta** | `herramientas.rs:336-341` corre sobre `/repo`, sin fijar config. | El comportamiento de gitleaks y de `cargo audit` sale de memoria. |
+| 4 | **Confirmado** | `src/oracle/contenedor.rs:245-246` y `:311-314` usan `read_to_end`. | `leer_cola_en_hilo` ya existe en `:320`. |
+| 5 | **Confirmado en parte** | `calibra.rs:1016-1029` cuenta una llamada, y `juez.rs:419` puede hacer otra. `calibra.rs:573` pasa `en_vuelo = 0`. | El gasto real nunca pasó el tope: `peor_caso` usa la entrada máxima. `la_suite_no_la_ejecuta` solo corre en Funciona, sin API. |
+| 6 | **Confirmado** | `src/corre/ejecutor.rs:201-204` y `:116-119`: 137 descarta `stdout`. | Se pierde el transcript y su revisión de lecturas. |
+| 7 | **Confirmado como posible; no ocurrió** | `src/corre/mod.rs:228-230` escribe sin redactar. | 0 transcripts con `accessToken`, y 0 archivos del repo con forma de token. Los archivos son 0600. |
+| 10 | **Confirmado** | `src/corre/ejecutor.rs:207-209`: `.output()` sin plazo. | |
+| 13 | **Confirmado en parte** | `src/oracle/mod.rs:2184` y `:2245` usan `is_file`, que sigue enlaces. `junit.rs:264` lee sin tope. | `herramientas.rs:433` ya lo evita (M16). No encontré que el contenido llegue a un mensaje: solo se parsea. |
+| 16 | **Confirmado el comando; sin probar la herramienta** | `herramientas.rs:347-349` usa `-W`. | |
+| 17 | **Confirmado** | `informe.rs:197` y `:883-884` filtran. `:750-758` hacen `zip` con la lista entera. | Un riesgo oculto corre todos los textos siguientes. |
+| 18 | **Confirmado** | `juez.rs:475-477` descarta el error del reintento. `compartidos.rs` lo reusa. | |
+| 20 | **Confirmado** | `juez.rs:304-307` suma los archivos citados, y `:318-321` los manda enteros. | La línea del secreto sale a DeepSeek. |
+
+**Sin verificar:** 8, 9, 11, 12, 14, 15, 19, 21 y 22. Solo los ordeno por su texto.
+
+**Defecto nuevo, del mismo tipo de siempre.** El arreglo de la Tarea 67 no funciona con la forma real. `compartidos.rs:92` pide `starts_with("el modelo falló: ")`, y el motivo real empieza con "cobertura 0 de 13 de peso...; el modelo falló: ...". El limpio 1 de memora sigue reusándose. El test usó un motivo inventado.
+
+**Test flojo: se corrige.** `calibra_cuatro_hilos_los_casos_con_reserva_no_suman_dos_veces` falló 3 veces hoy. El fallo es del test, por lectura. Su `gasto` duerme 50 ms entre la lectura de reservas y la de gasto (`calibra.rs:5656-5661`). Una reserva escrita en ese hueco cuenta dos veces, y el coordinador no lanza el cuarto caso. El código admite ese doble conteo a favor de la seguridad. No toca dinero.
+
+## ¿Algún confirmado invalida una fila medida? (Opus, por lectura)
+
+**No.**
+- **Hallazgos 3 y 16.** memora-ecc y brasa-ecc no tienen `.gitleaks.toml`, `.gitleaksignore` ni `.cargo/`. Sus `src/` no traen `gitleaks:allow` ni `allow(clippy`. Ninguna sonda se apagó.
+- **Hallazgo 2.** Afecta a un build que falla con más de 4 KB. La fila de Entrega de memora dio 1,0 / 1,0 con exit 0, y su defecto solo cambia `USER`. La de brasa es "no aplica". Las sondas del trío no usan ese camino para calificar sus ítems. Es falla cerrada.
+- **Hallazgo 18.** Revisé los limpios guardados: ninguno tiene un faltante "no respondió" o de reintento. No ocurrió.
+- **Hallazgo 20.** Cambia el prompt solo si gitleaks halla algo. Las filas no se recalculan.
+- **El arreglo de la Tarea 67.** `memora arquitectura` contó el limpio 1 como sin veredicto, dentro del límite de 1 de 10. La fila lo dice. Tiene 9 muestras limpias reales.
+- **Hallazgo 5.** Es del tope, no de la medición.
+
+## Desempates técnicos 41 (Opus, 2026-11-05)
+
+**Grupo 1: antes de la corrida real. Tarea 70, sobre la 69.**
+- **1:** barrer las copias de credencial de corridas muertas. Hay una real, con `refreshToken`.
+- **6:** un 137 conserva `stdout` y cuenta como vuelta. Sin esto, se pierde el transcript que prueba si el builder leyó el oráculo.
+- **7:** redactar el token en cada transcript. No ocurrió, pero una vuelta nueva lo puede escribir, y es barato.
+
+**Grupo 2: antes de firmar el cierre. Tarea 71, en paralelo.**
+- **2 y 4:** leer con cola de 1 MiB, clasificar con ella, y recortar a 4000 solo al guardar.
+- **3 y 16:** el repo evaluado no apaga sondas. Importa porque un builder de IA puede escribir esos archivos.
+- **13:** leer `/salida` sin seguir enlaces y con tope.
+- **17:** el texto del redactor cae en su acción.
+- **20:** el juez no recibe la línea de un secreto.
+- **Test flojo:** se corrige.
+
+**Grupo 3: hito 1b o dataset.**
+- **Antes de la próxima calibración paga, que usa los 50 USD del dataset:** 5 (tope), 18, 19 y el arreglo de la Tarea 67. Motivo: en el hito 1 no queda calibración paga, y arreglarlos ahora no cambia ninguna fila.
+- **Antes de evaluar un repo real:** 9, 11, 12, 14 y 15. Motivo: endurecen contra un repo hostil. Hoy solo evaluamos repos propios. Sin verificar.
+- **Mejora sin urgencia:** 8, 10, 21 y 22. Motivo: no cambian un resultado medido. 10 solo cuelga en un caso raro, y el orquestador lo ve.
+
+**Lo que no cambia.** La Tarea 71 no cambia las filas ni la validez en curso: en estos repos los comandos dan lo mismo, y el prompt solo cambia con un secreto.
+
+**Informe 69.**
+1. **`MAX_VUELTAS` por rol:** queda.
+2. **4 vueltas nuevas por `--reanuda`:** queda. Reanudar lo decide una persona.
+3. **`Fila.vueltas`:** queda.
+4. **Reanudar una corrida terminada:** queda con código 3. No gasta nada.
+5. **`OraculoLeido` repetido:** queda. Duplicar un aviso no oculta una lectura. Hito 1b.
+6. **Código de salida no guardado:** queda, hito 1b. Un rol con `result` exitoso y código distinto de 0 es raro.
+7. **Validar que la config no cambió:** hito 1b. La corrida de hoy no la cambia.
+8. **`commit_root` al reanudar:** queda. `reanudada` lo aclara.
+9. **Sin sesión, sin `--resume`:** queda.
+10. **Rol desconocido en transcripts:** queda.
+
+### Tarea 70: Credencial y transcripts del builder
+- **Archivos**: `src/corre/`, y solo sus tests.
+- **Arranca**: ya, desde `laptop/tarea-69` (3951cf2), con `ROOT_SIN_PODMAN=1`.
+- **Brief**: `docs/builds/brief-local-70.md`.
+
+### Tarea 71: El evaluador no se deja apagar ni filtra secretos
+- **Archivos**: `src/oracle/`, sin `src/oracle/calibra/`.
+- **Arranca**: ya, desde `e665a5f`, con `ROOT_SIN_PODMAN=1`. No choca con la 69 ni con la 70.
+- **Brief**: `docs/builds/brief-local-71.md`.
+
+## Orden final del hito 1 (2026-11-05, noche 6)
+
+**Ahora, en paralelo:** Tarea 70, Tarea 71, validez automática y borrador del cierre.
+
+**Después:**
+1. **Una sola prueba con podman de 69, 70 y 71 juntas**, cuando termine la validez, con `ROOT_TEST_BUILDER_REAL=1`.
+2. **Mezcla**, con la orden del usuario (P68).
+3. **`r00t corre --reanuda`**, desde las 01:11, con la respuesta a P67.
+4. **Comparación de `global`.**
+5. **Cierre (Tarea 47).** Lleva la tabla de esta revisión.
+6. **Dataset** con Graft. **Borrado** de memora y brasa cuando el dataset calibre.
+
+**Saldo.** Quedan 2,91 USD hasta 24 USD. La validez gasta como mucho 2,1 USD, y la evaluación final cerca de 0,11 USD. Quedan cerca de 0,7 USD. Las Tareas 70 y 71 van aparte, como los builders anteriores.
+
+## Preguntas para el usuario (2026-11-05, noche 6)
+
+**P69: ¿Borramos ya la copia vieja de tu credencial?** Quedó en `~/.cache/root/corridas/corre-memora-ecc-haiku-1793808081-1012512-0/claude-estado/.credentials.json`, de la corrida que murió el 4 de noviembre. Tiene permisos 0600, pero trae el token de refresco.
+- **a)** Borrarla ahora. Recomendada.
+- **b)** Esperar a que el barrido de la Tarea 70 la borre.
+
+**P67 (sin cambios): ¿Cómo llegamos al juez final de memora?**
+- **a)** Retomar esta corrida en vueltas de 2 horas, y no tirar las 25 tareas. Cerca de 150 minutos o más. Recomendada.
+- **b)** Empezar de cero, en vueltas de 2 horas. Cerca de 5 a 6 horas.
+- **c)** Subir el plazo a 6 horas, en un solo lanzamiento.
+
+**P68 (más alcance): ¿Mezclar 69, 70 y 71 cuando la prueba con podman dé verde?**
+- **a)** Sí, sin volver a preguntar. Recomendada.
+- **b)** No, el orquestador trae el resultado y espera otra orden.
