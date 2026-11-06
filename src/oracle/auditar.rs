@@ -624,6 +624,66 @@ fn texto_visible(a: &Archivo, omitidas: &BTreeSet<u32>) -> String {
     salida
 }
 
+/// Texto de `a` solo con sus líneas de secretos. Las demás quedan vacías, con los mismos números.
+fn texto_solo_secretos(a: &Archivo, omitidas: &BTreeSet<u32>) -> String {
+    let mut salida = String::new();
+    for (i, linea) in a.contenido.lines().enumerate() {
+        if linea.trim_start().starts_with(MARCA_TEST) {
+            break;
+        }
+        if omitidas.contains(&((i + 1) as u32)) {
+            salida.push_str(linea);
+        }
+        salida.push('\n');
+    }
+    salida
+}
+
+/// Cierto si la cita de `c` cae en una línea de secreto: la línea misma o una vecina que la cita.
+fn cae_en_secreto(
+    c: &Candidato,
+    omitidas: &BTreeMap<&str, BTreeSet<u32>>,
+    solo_secretos: &BTreeMap<&str, String>,
+) -> bool {
+    let en_omitida = omitidas
+        .get(c.archivo.as_str())
+        .is_some_and(|lineas| lineas.contains(&c.linea));
+    en_omitida
+        || solo_secretos
+            .get(c.archivo.as_str())
+            .is_some_and(|texto| cita_en_archivo(texto, c.linea, &c.cita))
+}
+
+/// Pasa a `descartados` sin texto los candidatos que caen en una línea de secreto.
+/// Solo mira candidatos válidos. Los demás pasan tal cual.
+fn ocultar_secretos(
+    propuestas: Vec<Result<Candidato, Descartado>>,
+    archivos: &[Archivo],
+    omitidas: &BTreeMap<&str, BTreeSet<u32>>,
+) -> Vec<Result<Candidato, Descartado>> {
+    let vacia = BTreeSet::new();
+    let solo_secretos: BTreeMap<&str, String> = archivos
+        .iter()
+        .map(|a| {
+            let omitidas = omitidas.get(a.ruta.as_str()).unwrap_or(&vacia);
+            (a.ruta.as_str(), texto_solo_secretos(a, omitidas))
+        })
+        .collect();
+    propuestas
+        .into_iter()
+        .map(|propuesta| match propuesta {
+            Ok(c) if cae_en_secreto(&c, omitidas, &solo_secretos) => Err(Descartado {
+                archivo: c.archivo,
+                linea: c.linea,
+                cita: String::new(),
+                detalle: String::new(),
+                motivo: "la cita cae en una línea de secreto".into(),
+            }),
+            otra => otra,
+        })
+        .collect()
+}
+
 /// Líneas de producción de `a` como `NN: texto`. Corta en la primera marca de tests.
 fn lineas_numeradas(a: &Archivo, omitidas: &BTreeSet<u32>) -> Vec<String> {
     let mut salida = Vec::new();
@@ -878,6 +938,7 @@ pub fn medir_candidatos(
     let contenidos = contenidos_visibles(&archivos, &omitidas);
     let propuestas = parsear_respuesta(texto_candidatos)
         .map_err(|motivo| ErrorOraculo::Uso(format!("candidatos ilegibles: {motivo}")))?;
+    let propuestas = ocultar_secretos(propuestas, &archivos, &omitidas);
     let enviados: BTreeSet<String> = contenidos
         .iter()
         .filter(|(_, texto)| !texto.is_empty())
@@ -1150,6 +1211,73 @@ mod tests {
         let (_tmp, repo) = repo_tres_lineas();
         let err = medir_candidatos(&repo, &[], &[], "no es json").expect_err("debe fallar");
         assert!(matches!(err, ErrorOraculo::Uso(_)), "{err}");
+    }
+
+    /// Repo con un secreto falso en la línea 3 de `src/a.rs`, rodeado de código normal.
+    fn repo_con_secreto_en_linea_tres() -> (TempDir, PathBuf) {
+        repo_con(&[(
+            "src/a.rs",
+            "fn calcular_total(x: u32) -> u32 { x * 2 }\nfn uno_de_muchos(x: u32) -> u32 { x + 1 }\nconst CLAVE: &str = \"AKIAFAKEFAKEFAKE1234\";\nfn cuatro_normal(x: u32) -> u32 { x - 1 }\nfn cinco_normal(x: u32) -> u32 { x * 3 }\nfn seis_normal(x: u32) -> u32 { x * 4 }\nfn siete_normal(x: u32) -> u32 { x * 5 }\n",
+        )])
+    }
+
+    /// Reporte de `gitleaks` con un hallazgo en la línea 3 de `src/a.rs`.
+    fn gitleaks_linea_tres() -> Vec<Hallazgo> {
+        parsear_gitleaks(
+            r#"[{"RuleID":"x","File":"src/a.rs","StartLine":3,"Description":"d"}]"#,
+            &[],
+        )
+        .expect("reporte")
+    }
+
+    const SECRETO_FALSO: &str = "AKIAFAKEFAKEFAKE1234";
+
+    #[test]
+    fn un_candidato_sobre_el_secreto_va_a_descartados_sin_copiar_su_texto() {
+        let (_tmp, repo) = repo_con_secreto_en_linea_tres();
+        let json = r#"{"defectos":[{"archivo":"src/a.rs","linea":3,"cita":"const CLAVE: &str = \"AKIAFAKEFAKEFAKE1234\";","detalle":"secreto"}]}"#;
+        let a = medir_candidatos(&repo, &[], &gitleaks_linea_tres(), json).expect("medición");
+        assert!(a.hallazgos.is_empty(), "{:?}", a.hallazgos);
+        assert_eq!(a.descartados.len(), 1, "{:?}", a.descartados);
+        assert_eq!(a.descartados[0].cita, "");
+        assert_eq!(a.descartados[0].detalle, "");
+        assert!(
+            a.descartados[0].motivo.contains("secreto"),
+            "{:?}",
+            a.descartados
+        );
+        let salida = serde_json::to_string(&a).expect("serializa");
+        assert!(!salida.contains(SECRETO_FALSO), "{salida}");
+    }
+
+    #[test]
+    fn un_candidato_en_la_linea_vecina_al_secreto_va_a_descartados_sin_texto() {
+        let (_tmp, repo) = repo_con_secreto_en_linea_tres();
+        let json = r#"{"defectos":[{"archivo":"src/a.rs","linea":4,"cita":"const CLAVE: &str = \"AKIAFAKEFAKEFAKE1234\";","detalle":"secreto"}]}"#;
+        let a = medir_candidatos(&repo, &[], &gitleaks_linea_tres(), json).expect("medición");
+        assert!(a.hallazgos.is_empty(), "{:?}", a.hallazgos);
+        assert_eq!(a.descartados.len(), 1, "{:?}", a.descartados);
+        assert_eq!(a.descartados[0].cita, "");
+        assert_eq!(a.descartados[0].detalle, "");
+        assert!(
+            a.descartados[0].motivo.contains("secreto"),
+            "{:?}",
+            a.descartados
+        );
+        let salida = serde_json::to_string(&a).expect("serializa");
+        assert!(!salida.contains(SECRETO_FALSO), "{salida}");
+    }
+
+    #[test]
+    fn un_candidato_legitimo_cerca_del_secreto_sigue_en_hallazgos() {
+        let (_tmp, repo) = repo_con_secreto_en_linea_tres();
+        let json = r#"{"defectos":[
+ {"archivo":"src/a.rs","linea":1,"cita":"fn calcular_total(x: u32) -> u32 { x * 2 }","detalle":"real"},
+ {"archivo":"src/a.rs","linea":7,"cita":"fn siete_normal(x: u32) -> u32 { x * 5 }","detalle":"real"}
+]}"#;
+        let a = medir_candidatos(&repo, &[], &gitleaks_linea_tres(), json).expect("medición");
+        assert_eq!(a.hallazgos.len(), 2, "{:?}", a.hallazgos);
+        assert!(a.descartados.is_empty(), "{:?}", a.descartados);
     }
 
     #[test]
