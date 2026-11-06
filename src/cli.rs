@@ -243,6 +243,27 @@ pub enum OraculoAccion {
         #[arg(long, requires = "preparar_ciego")]
         semilla: Option<u64>,
     },
+    /// Audita un repo con el juez de Root y el reporte de gitleaks. Escribe la auditoría en `--salida`.
+    Auditar {
+        /// Repo a auditar.
+        #[arg(long)]
+        repo: PathBuf,
+        /// Archivo JSON donde se escribe la auditoría.
+        #[arg(long)]
+        salida: PathBuf,
+        /// Tope de gasto de API de la auditoría, en USD. Debe ser finito y mayor que 0.
+        #[arg(long, allow_negative_numbers = true)]
+        tope_usd: f64,
+        /// Reporte JSON de gitleaks sobre el repo.
+        #[arg(long)]
+        gitleaks: PathBuf,
+        /// Ruta a incluir en la auditoría. Se repite: `--incluir a.rs --incluir b.rs`.
+        #[arg(long, num_args = 1)]
+        incluir: Vec<PathBuf>,
+        /// Archivo TOML con defectos conocidos del repo.
+        #[arg(long)]
+        defectos: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -353,6 +374,7 @@ impl Comando {
                 OraculoAccion::Pendientes { .. } => "oraculo pendientes",
                 OraculoAccion::Calibrar { .. } => "oraculo calibrar",
                 OraculoAccion::Validar { .. } => "oraculo validar",
+                OraculoAccion::Auditar { .. } => "oraculo auditar",
             },
             Comando::Observa { accion } => match accion {
                 ObservaAccion::Claude { .. } => "observa claude",
@@ -380,5 +402,88 @@ impl Comando {
             },
             Comando::Mcp => "mcp",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::error::ErrorKind;
+
+    use super::*;
+
+    /// Argumentos base de `oraculo auditar`, con todos los obligatorios.
+    fn base() -> Vec<&'static str> {
+        vec![
+            "r00t",
+            "oraculo",
+            "auditar",
+            "--repo",
+            "/repo",
+            "--salida",
+            "/salida.json",
+            "--tope-usd",
+            "0.5",
+            "--gitleaks",
+            "/gitleaks.json",
+        ]
+    }
+
+    #[test]
+    fn oraculo_auditar_parsea_flags_e_incluir_repetido_en_orden() {
+        let mut args = base();
+        args.extend([
+            "--incluir",
+            "src/a.rs",
+            "--incluir",
+            "src/b.rs",
+            "--defectos",
+            "/defectos.toml",
+        ]);
+        let cli = Cli::try_parse_from(args).expect("los flags de auditar parsean");
+        assert_eq!(cli.comando.ruta(), "oraculo auditar");
+        match cli.comando {
+            Comando::Oraculo {
+                accion:
+                    OraculoAccion::Auditar {
+                        repo,
+                        salida,
+                        tope_usd,
+                        gitleaks,
+                        incluir,
+                        defectos,
+                    },
+            } => {
+                assert_eq!(repo, PathBuf::from("/repo"));
+                assert_eq!(salida, PathBuf::from("/salida.json"));
+                assert_eq!(tope_usd, 0.5);
+                assert_eq!(gitleaks, PathBuf::from("/gitleaks.json"));
+                assert_eq!(
+                    incluir,
+                    vec![PathBuf::from("src/a.rs"), PathBuf::from("src/b.rs")]
+                );
+                assert_eq!(defectos, Some(PathBuf::from("/defectos.toml")));
+            }
+            otro => panic!("se esperaba oraculo auditar, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn oraculo_auditar_sin_tope_usd_es_error_de_uso_de_clap() {
+        let args: Vec<&str> = base()
+            .into_iter()
+            .filter(|a| *a != "--tope-usd" && *a != "0.5")
+            .collect();
+        let error = Cli::try_parse_from(args).expect_err("falta --tope-usd");
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn oraculo_auditar_sin_gitleaks_es_error_de_uso_de_clap() {
+        let args: Vec<&str> = base()
+            .into_iter()
+            .filter(|a| *a != "--gitleaks" && *a != "/gitleaks.json")
+            .collect();
+        let error = Cli::try_parse_from(args).expect_err("falta --gitleaks");
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
     }
 }
