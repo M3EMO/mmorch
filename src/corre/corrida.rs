@@ -18,6 +18,7 @@ use crate::corre::costo_cortado::{
 use crate::corre::git_seguro;
 use crate::corre::{
     Corrida, EjecutorBuilder, ErrorCorre, Lanzamiento, guardar_transcript, preparar_corrida,
+    reabrir_corrida,
 };
 use crate::goal::verificar_goal;
 use crate::observe::claude::registrar_sesion_claude;
@@ -100,12 +101,53 @@ struct Lanzado {
 /// Desde el segundo lanzamiento, la vigencia del login se espera antes de cada lanzamiento
 /// (ver `esperar_vigencia_del_rol`).
 pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, ErrorCorre> {
+    correr_interno(deps, tarea, config, None)
+}
+
+/// Retoma la corrida `id`, cortada antes de terminar, y devuelve su fila.
+///
+/// `id` debe ser de esta tarea y esta config, y su carpeta debe existir con `repo/`. Si no, es error de
+/// uso y no se lanza nada. No se arma un repo nuevo: sigue el de la corrida cortada.
+///
+/// Los roles que terminaron con `result` exitoso no se lanzan otra vez. Su sesión se registra si falta.
+/// El primer rol sin `result` exitoso retoma: si tiene transcripts parciales, la primera vuelta nueva
+/// lleva `--resume` con la última sesión que traigan, y pide continuar. Tiene sus `MAX_VUELTAS` vueltas.
+/// Los roles que siguen se lanzan como en una corrida nueva.
+/// El GOAL, la config, el ruteo, la vigencia, las lecturas, la evaluación y la fila son como en `correr`.
+pub fn correr_reanudando(
+    deps: &DepsCorre,
+    tarea: &str,
+    config: &str,
+    id: &str,
+) -> Result<Fila, ErrorCorre> {
+    correr_interno(deps, tarea, config, Some(id))
+}
+
+/// Cuerpo común de `correr` y `correr_reanudando`. Con `reanuda`, abre la carpeta de esa corrida en vez de
+/// armar una nueva, y retoma lo que ya tiene guardado.
+fn correr_interno(
+    deps: &DepsCorre,
+    tarea: &str,
+    config: &str,
+    reanuda: Option<&str>,
+) -> Result<Fila, ErrorCorre> {
     // a) GOAL: sin autorización no arranca y no se crea nada.
     verificar_goal(deps.repo_root)?;
 
     // b) Tarea, config y huellas del oráculo. Las huellas van antes de lanzar: sin ellas no hay lecturas que revisar.
     let tarea_cargada = cargar_en(deps.home, tarea).map_err(|e| ErrorCorre::Uso(e.to_string()))?;
     let config_cargada = ConfigCorrida::cargar(deps.home, config)?;
+    // Al reanudar, el id se revisa antes de lanzar o crear nada.
+    let reabierta = match reanuda {
+        Some(id) => Some(reabrir_corrida(
+            deps.home,
+            deps.home_usuario,
+            tarea,
+            config,
+            id,
+        )?),
+        None => None,
+    };
     let huellas = HuellasOraculo::armar(deps.home, Some(deps.home_usuario), tarea)
         .map_err(|e| de_observe("armar las huellas del oráculo", e))?;
     let ruta_eventos = observe::ruta_eventos_en(deps.home);
@@ -121,39 +163,68 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
     // Vigencia del login: debe durar al menos `VIGENCIA_MINIMA`. Si no, no se arma ni se lanza nada.
     deps.ejecutor.verificar_antes(VIGENCIA_MINIMA)?;
 
-    // d) Armado de la carpeta de la corrida.
-    let corrida = preparar_corrida(deps.home, deps.home_usuario, tarea, config)?;
+    // d) Armado de la carpeta de la corrida, o su reapertura. Reanudar no arma nada.
+    let corrida = match reabierta {
+        Some(corrida) => corrida,
+        None => preparar_corrida(deps.home, deps.home_usuario, tarea, config)?,
+    };
     // Desde acá, todo camino de salida quita la copia de la credencial (ver `GuardiaCredencial`).
     let guardia = GuardiaCredencial {
         corrida: &corrida,
         hecho: false,
     };
     let id = corrida.id.clone();
+    // Lo que dejó una corrida anterior: sus transcripts y el mayor número de lanzamiento.
+    let (previos, mayor_previo) = previos_de(deps.home, &id)?;
 
     // e) Lanzamiento por rol, en orden. Cada salida se guarda como transcript. Un corte por plazo
     // vuelve a lanzar el mismo rol, hasta `MAX_VUELTAS` veces.
     let mut lanzados: Vec<Lanzado> = Vec::new();
-    // Transcript de cada lanzamiento, buenos y cortados. Lo revisa el oráculo en el paso g.
-    let mut transcripts: Vec<(Rol, PathBuf)> = Vec::new();
-    let mut lanzamientos: u32 = 0;
+    // Transcript de cada lanzamiento, buenos y cortados, también los de corridas anteriores. Lo revisa
+    // el oráculo en el paso g.
+    let mut transcripts: Vec<(Rol, PathBuf)> =
+        previos.iter().map(|p| (p.rol, p.ruta.clone())).collect();
+    let mut lanzamientos: u32 = mayor_previo;
+    // Al reanudar, cada rol se mira en orden hasta el primero sin `result` exitoso. Después, todo se lanza normal.
+    let mut reanudando = reanuda.is_some();
+    // Desde el primer lanzamiento de esta invocación, la vigencia se espera antes de cada lanzamiento.
+    let mut ya_lanzo = false;
     for (rol, eleccion) in &elecciones {
         let prompt_rol = config_cargada.prompt.get(rol).cloned().unwrap_or_default();
         let modelo = eleccion.modelo.clone().unwrap_or_default();
         let mut sesion: Option<String> = None;
+        // Hay transcripts parciales de este rol: la primera vuelta sigue con la instrucción de continuar.
+        let mut retoma = false;
+        if reanudando {
+            match estado_previo(&previos, *rol) {
+                EstadoRol::Terminado(lanzado) => {
+                    registrar_sesion(deps.home, &id, &lanzado, &lanzado.linea, &ruta_eventos)?;
+                    lanzados.push(lanzado);
+                    continue;
+                }
+                EstadoRol::Parcial { sesion: previa } => {
+                    sesion = previa;
+                    retoma = true;
+                }
+                EstadoRol::Nuevo => {}
+            }
+            reanudando = false;
+        }
         let mut vuelta: u32 = 0;
         // `Some(código)` si el rol terminó. `None` si agotó sus vueltas cortadas.
         let codigo = loop {
-            // Desde el segundo lanzamiento, cada uno vuelve a leer la credencial: se revisa su vigencia antes.
-            if lanzamientos > 0 {
+            // Desde el primer lanzamiento de esta invocación, cada uno vuelve a leer la credencial: se revisa su vigencia antes.
+            if ya_lanzo {
                 esperar_vigencia_del_rol(deps.ejecutor, &ruta_eventos, &id, *rol)?;
             }
             vuelta += 1;
             lanzamientos += 1;
+            ya_lanzo = true;
             let n = lanzamientos;
-            let prompt = if vuelta == 1 {
-                prompt_rol.clone()
-            } else {
+            let prompt = if retoma || vuelta > 1 {
                 format!("{PROMPT_CONTINUACION} {prompt_rol}")
+            } else {
+                prompt_rol.clone()
             };
             let args = args_claude(&prompt, &modelo, deps.home, &config_cargada.claude, *rol);
             let args = match &sesion {
@@ -236,10 +307,11 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
     }
 
     // f) Después de planifica, la aprobación automática del plan. Solo si planifica salió bien.
+    // Reanudar no la vuelve a escribir si ya está en el log.
     let plan_aprobado = lanzados
         .iter()
         .any(|l| l.rol == Rol::Planifica && l.codigo == 0);
-    if plan_aprobado {
+    if plan_aprobado && !plan_ya_aprobado(&ruta_eventos, &id)? {
         let mut ev = observe::evento_manual(&id, TipoEvento::PlanAprobado, Some(MOTIVO_PLAN));
         // Una aprobación humana y una automática no se confunden.
         ev.extra.insert("automatica".into(), json!(true));
@@ -301,6 +373,8 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         resumen,
         modelos,
         forma: config_cargada.forma(config),
+        vueltas: lanzamientos,
+        reanudada: reanuda.is_some(),
         ..Fila::default()
     };
     track::agregar_en(&deps.home.join("runs.jsonl"), &fila).map_err(|fuente| ErrorCorre::Io {
@@ -308,6 +382,110 @@ pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, Error
         fuente,
     })?;
     Ok(fila)
+}
+
+/// Un transcript guardado de una corrida anterior: `<n>-<rol>.jsonl` en `transcripts/<id>/`.
+struct Previo {
+    n: u32,
+    rol: Rol,
+    ruta: PathBuf,
+    stdout: Vec<u8>,
+}
+
+/// Qué queda de un rol en la corrida que se reanuda.
+enum EstadoRol {
+    /// Un transcript trae `result` exitoso: el rol no se lanza otra vez.
+    Terminado(Lanzado),
+    /// Hay transcripts y ninguno terminó. Lleva la sesión del último que la traiga.
+    Parcial { sesion: Option<String> },
+    /// No hay transcripts del rol: se lanza como en una corrida nueva.
+    Nuevo,
+}
+
+/// Transcripts guardados de la corrida `id`, en orden de `n`, y el mayor `n` de sus archivos, también
+/// los `resultado.json`. Sin carpeta, no hay ninguno.
+fn previos_de(home: &Path, id: &str) -> Result<(Vec<Previo>, u32), ErrorCorre> {
+    let carpeta = home.join("transcripts").join(id);
+    let entradas = match fs::read_dir(&carpeta) {
+        Ok(entradas) => entradas,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), 0));
+        }
+        Err(error) => {
+            return Err(super::infra(format!("leer {}", carpeta.display()))(error));
+        }
+    };
+    let mut previos = Vec::new();
+    let mut mayor = 0;
+    for entrada in entradas {
+        let entrada = entrada.map_err(super::infra(format!("leer {}", carpeta.display())))?;
+        let nombre = entrada.file_name().to_string_lossy().into_owned();
+        let Some((n, rol, es_resultado)) = partes_de_archivo(&nombre) else {
+            continue;
+        };
+        mayor = mayor.max(n);
+        if es_resultado {
+            continue;
+        }
+        let ruta = entrada.path();
+        let stdout = fs::read(&ruta).map_err(super::infra(format!("leer {}", ruta.display())))?;
+        previos.push(Previo {
+            n,
+            rol,
+            ruta,
+            stdout,
+        });
+    }
+    previos.sort_by_key(|p| p.n);
+    Ok((previos, mayor))
+}
+
+/// Partes de un archivo de transcripts: `<n>-<rol>.jsonl` o `<n>-<rol>.resultado.json`. Da `n`, el rol
+/// y si es el resultado. Un nombre que no tiene esa forma da `None`.
+fn partes_de_archivo(nombre: &str) -> Option<(u32, Rol, bool)> {
+    let (base, es_resultado) = match nombre.strip_suffix(".resultado.json") {
+        Some(base) => (base, true),
+        None => (nombre.strip_suffix(".jsonl")?, false),
+    };
+    let (n, rol) = base.split_once('-')?;
+    let rol = serde_json::from_value(Value::String(rol.to_string())).ok()?;
+    Some((n.parse().ok()?, rol, es_resultado))
+}
+
+/// Estado de `rol` según lo guardado. Terminado si alguno de sus transcripts trae `result` exitoso.
+fn estado_previo(previos: &[Previo], rol: Rol) -> EstadoRol {
+    let del_rol: Vec<&Previo> = previos.iter().filter(|p| p.rol == rol).collect();
+    let terminado = del_rol
+        .iter()
+        .rev()
+        .find_map(|p| resultado_exitoso(&p.stdout).ok().map(|linea| (p.n, linea)));
+    if let Some((n, linea)) = terminado {
+        // El código de salida no se guardó. Un rol que terminó bien lleva 0: si hubiera salido distinto,
+        // la corrida original ya habría cortado antes de los roles siguientes.
+        return EstadoRol::Terminado(Lanzado {
+            n,
+            rol,
+            codigo: 0,
+            linea,
+        });
+    }
+    if del_rol.is_empty() {
+        return EstadoRol::Nuevo;
+    }
+    let sesion = del_rol
+        .iter()
+        .rev()
+        .find_map(|p| sesion_de_transcript(&p.stdout));
+    EstadoRol::Parcial { sesion }
+}
+
+/// Si `eventos.jsonl` ya trae la aprobación automática de la corrida `id`.
+fn plan_ya_aprobado(ruta_eventos: &Path, id: &str) -> Result<bool, ErrorCorre> {
+    let eventos =
+        observe::uso::leer_eventos(ruta_eventos).map_err(|e| de_observe("leer eventos", e))?;
+    Ok(eventos
+        .iter()
+        .any(|ev| ev.tipo == TipoEvento::PlanAprobado && ev.corrida == id))
 }
 
 /// Plazo de un rol según la vida del login. Sin vida conocida, rige el tope de dos horas. Con vida,
@@ -720,6 +898,8 @@ mod tests {
         lanzados: RefCell<Vec<Lanzamiento>>,
         /// Al lanzar, deja en `.git/config` un `fsmonitor` que escribe esta marca, y un archivo sin commit.
         fsmonitor_marca: Option<PathBuf>,
+        /// Lanzamientos que hizo antes una corrida anterior. El `session_id` falso sigue desde aquí.
+        sesion_desde: u32,
     }
 
     impl EjecutorBuilder for Builder {
@@ -827,7 +1007,7 @@ mod tests {
             }
             // Cada sesión real tiene su `session_id`. El falso repite `s1`, y el dedupe lo tomaría por
             // la misma sesión. Por eso cada lanzamiento lleva un id propio, con su número.
-            let n = self.lanzados.borrow().len();
+            let n = self.sesion_desde as usize + self.lanzados.borrow().len();
             let texto = String::from_utf8_lossy(&salida.stdout).replace(
                 "\"session_id\":\"s1\"",
                 &format!("\"session_id\":\"s1-{n}\""),
@@ -2216,5 +2396,278 @@ mod tests {
                 "vuelta {n}"
             );
         }
+    }
+
+    // ---- Reanudar una corrida cortada (`correr_reanudando`) ----
+
+    /// Id de la única corrida bajo `usuario`.
+    fn id_de_unica_corrida(usuario: &Path) -> String {
+        unica_corrida(usuario)
+            .file_name()
+            .expect("nombre de la carpeta")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// Cuántas carpetas de corridas hay bajo `usuario`. Sin carpeta, cero.
+    fn carpetas_de_corridas(usuario: &Path) -> usize {
+        fs::read_dir(dir_corridas(usuario)).map_or(0, |d| d.count())
+    }
+
+    /// Corrida de `plan-organiza` que deja a planifica terminado y a organiza sin `result`, sin cortar.
+    /// Devuelve el id de la corrida cortada.
+    fn corrida_cortada_en_organiza(e: &Entorno) -> String {
+        let builder = Builder {
+            sin_resultado_en: Some(Rol::Organiza),
+            ..Builder::default()
+        };
+        let error = correr_con(e, &builder, &[], CONFIG_PLAN_ORGANIZA)
+            .expect_err("organiza sin result aborta");
+        assert!(matches!(error, ErrorCorre::Ejecutor(_)), "{error}");
+        id_de_unica_corrida(&e.usuario)
+    }
+
+    /// Reanuda `id` con `config` y cuenta las evaluaciones del repo.
+    fn reanudar_contando(
+        e: &Entorno,
+        ejecutor: &dyn EjecutorBuilder,
+        config: &str,
+        id: &str,
+    ) -> (Result<Fila, ErrorCorre>, usize) {
+        let evaluaciones = Cell::new(0);
+        let evaluar = |r: &Path, t: &Tarea, o: &OpcionesOraculo| {
+            evaluaciones.set(evaluaciones.get() + 1);
+            evaluador_falso(r, t, o)
+        };
+        let deps = DepsCorre {
+            home: &e.home,
+            home_usuario: &e.usuario,
+            repo_root: &e.repo,
+            ejecutor,
+            evaluar: &evaluar,
+            entorno: &[],
+        };
+        let resultado = correr_reanudando(&deps, TAREA, config, id);
+        (resultado, evaluaciones.get())
+    }
+
+    /// Quita de `eventos.jsonl` los eventos de costo (`Llamada`) y de sesión de la corrida `id`.
+    fn quitar_costos_y_sesiones(e: &Entorno, id: &str) {
+        let ruta = e.home.join("eventos.jsonl");
+        let quedan: Vec<String> = fs::read_to_string(&ruta)
+            .expect("eventos")
+            .lines()
+            .filter(|linea| {
+                let ev: Evento = serde_json::from_str(linea).expect("evento válido");
+                !(ev.corrida == id && matches!(ev.tipo, TipoEvento::Llamada | TipoEvento::Sesion))
+            })
+            .map(str::to_string)
+            .collect();
+        fs::write(&ruta, format!("{}\n", quedan.join("\n"))).expect("reescribe eventos");
+    }
+
+    /// Cuántos eventos `Sesion` del `session_id` dado hay en el log.
+    fn sesiones_con_id(e: &Entorno, session_id: &str) -> usize {
+        eventos(e)
+            .iter()
+            .filter(|ev| {
+                ev.tipo == TipoEvento::Sesion
+                    && ev.extra.get("session_id").and_then(Value::as_str) == Some(session_id)
+            })
+            .count()
+    }
+
+    /// Builder que sale bien después de una corrida anterior de dos lanzamientos.
+    fn builder_tras_dos_lanzamientos() -> Builder {
+        Builder {
+            sesion_desde: 2,
+            ..Builder::default()
+        }
+    }
+
+    /// El rol terminado no se lanza otra vez: reanudar lanza solo organiza, y evalúa una vez.
+    #[test]
+    fn corre_reanuda_no_relanza_el_rol_terminado() {
+        let e = entorno();
+        let id = corrida_cortada_en_organiza(&e);
+        let builder = builder_tras_dos_lanzamientos();
+        let (resultado, evaluaciones) = reanudar_contando(&e, &builder, CONFIG_PLAN_ORGANIZA, &id);
+        resultado.expect("la corrida reanudada llega a la fila");
+        let roles: Vec<Rol> = builder.lanzados.borrow().iter().map(|l| l.rol).collect();
+        assert_eq!(
+            roles,
+            vec![Rol::Organiza],
+            "planifica no debe lanzarse otra vez"
+        );
+        assert_eq!(evaluaciones, 1, "la corrida reanudada evalúa una vez");
+    }
+
+    /// Organiza cortado con sesión: su primera vuelta nueva retoma esa sesión y pide continuar.
+    #[test]
+    fn corre_reanuda_organiza_parcial_sigue_con_resume() {
+        let e = entorno();
+        let id = corrida_cortada_en_organiza(&e);
+        let builder = builder_tras_dos_lanzamientos();
+        reanudar_contando(&e, &builder, CONFIG_PLAN_ORGANIZA, &id)
+            .0
+            .expect("reanuda");
+        let lanzados = builder.lanzados.borrow();
+        assert_eq!(lanzados.len(), 1, "organiza corre una vez");
+        assert!(
+            tiene_par(&lanzados[0].args, "--resume", "s1-2"),
+            "{:?}",
+            lanzados[0].args
+        );
+        let prompt = &lanzados[0].args[1];
+        assert!(prompt.starts_with(PROMPT_CONTINUACION), "{prompt}");
+    }
+
+    /// Si falta el evento de sesión del rol terminado, reanudar lo registra una vez y no duplica el costo.
+    #[test]
+    fn corre_reanuda_registra_la_sesion_del_rol_terminado_si_falta() {
+        let e = entorno();
+        let id = corrida_cortada_en_organiza(&e);
+        quitar_costos_y_sesiones(&e, &id);
+        assert_eq!(
+            sesiones_con_id(&e, "s1-1"),
+            0,
+            "precondición: sin la sesión"
+        );
+        let builder = builder_tras_dos_lanzamientos();
+        let fila = reanudar_contando(&e, &builder, CONFIG_PLAN_ORGANIZA, &id)
+            .0
+            .expect("reanuda");
+        assert_eq!(
+            sesiones_con_id(&e, "s1-1"),
+            1,
+            "la sesión de planifica queda una vez"
+        );
+        assert!(
+            (fila.resumen.usd_cupo - 0.02).abs() < 1e-9,
+            "dos sesiones de 0,01 USD: {:?}",
+            fila.resumen
+        );
+    }
+
+    /// Guarda: si la sesión del rol terminado ya está en el log, reanudar no la vuelve a registrar.
+    #[test]
+    fn corre_reanuda_no_duplica_la_sesion_que_ya_estaba() {
+        let e = entorno();
+        let id = corrida_cortada_en_organiza(&e);
+        assert_eq!(
+            sesiones_con_id(&e, "s1-1"),
+            1,
+            "precondición: la sesión ya está"
+        );
+        let builder = builder_tras_dos_lanzamientos();
+        let fila = reanudar_contando(&e, &builder, CONFIG_PLAN_ORGANIZA, &id)
+            .0
+            .expect("reanuda");
+        assert_eq!(sesiones_con_id(&e, "s1-1"), 1, "no se duplica");
+        assert!(
+            (fila.resumen.usd_cupo - 0.02).abs() < 1e-9,
+            "el costo no se duplica: {:?}",
+            fila.resumen
+        );
+    }
+
+    /// Si la corrida anterior ya dejó la aprobación del plan, reanudar no la repite.
+    #[test]
+    fn corre_reanuda_no_repite_la_aprobacion_del_plan() {
+        let e = entorno();
+        let id = corrida_cortada_en_organiza(&e);
+        let aprobacion = observe::evento_manual(&id, TipoEvento::PlanAprobado, Some(PLAN_APROBADO));
+        observe::registrar_en(&observe::ruta_eventos_en(&e.home), &aprobacion)
+            .expect("aprobación previa");
+        let builder = builder_tras_dos_lanzamientos();
+        reanudar_contando(&e, &builder, CONFIG_PLAN_ORGANIZA, &id)
+            .0
+            .expect("reanuda");
+        let aprobados = eventos(&e)
+            .iter()
+            .filter(|ev| ev.tipo == TipoEvento::PlanAprobado && ev.corrida == id)
+            .count();
+        assert_eq!(aprobados, 1, "una sola aprobación por corrida");
+    }
+
+    /// Un id de otra config, de otra tarea o con una ruta es error de uso. No lanza ni crea carpetas.
+    #[test]
+    fn corre_reanuda_con_otro_id_es_error_de_uso() {
+        let e = entorno();
+        let id = corrida_cortada_en_organiza(&e);
+        let antes = carpetas_de_corridas(&e.usuario);
+        let casos = [
+            (CONFIG_PLAN, id.clone()),
+            (
+                CONFIG_PLAN_ORGANIZA,
+                "corre-otra-plan-organiza-1-2-3".to_string(),
+            ),
+            (
+                CONFIG_PLAN_ORGANIZA,
+                format!("corre-{TAREA}-{CONFIG_PLAN_ORGANIZA}-../../fuera"),
+            ),
+        ];
+        for (config, id_ajeno) in casos {
+            let builder = Builder::default();
+            let (resultado, evaluaciones) = reanudar_contando(&e, &builder, config, &id_ajeno);
+            let error = resultado.expect_err("un id ajeno no reanuda");
+            assert!(matches!(error, ErrorCorre::Uso(_)), "{id_ajeno}: {error}");
+            assert_eq!(error.codigo_de_salida(), 2, "{id_ajeno}");
+            assert!(
+                builder.lanzados.borrow().is_empty(),
+                "{id_ajeno}: no debe lanzar"
+            );
+            assert_eq!(evaluaciones, 0, "{id_ajeno}: no debe evaluar");
+        }
+        assert_eq!(carpetas_de_corridas(&e.usuario), antes, "no crea carpetas");
+    }
+
+    /// Un id con el prefijo bien pero sin carpeta es error de uso. No crea nada.
+    #[test]
+    fn corre_reanuda_carpeta_inexistente_es_error_de_uso() {
+        let e = entorno();
+        let id = format!("corre-{TAREA}-{CONFIG_PLAN_ORGANIZA}-1700000000-1-0");
+        let builder = Builder::default();
+        let (resultado, evaluaciones) = reanudar_contando(&e, &builder, CONFIG_PLAN_ORGANIZA, &id);
+        let error = resultado.expect_err("sin carpeta no reanuda");
+        assert!(matches!(error, ErrorCorre::Uso(_)), "{error}");
+        assert_eq!(error.codigo_de_salida(), 2);
+        assert!(builder.lanzados.borrow().is_empty(), "no debe lanzar");
+        assert_eq!(evaluaciones, 0, "no debe evaluar");
+        assert!(
+            !dir_corridas(&e.usuario).exists(),
+            "no debe crear la carpeta de corridas"
+        );
+    }
+
+    /// Una corrida reanudada deja `reanudada` y `vueltas` en la fila y en `runs.jsonl`.
+    #[test]
+    fn corre_reanuda_deja_la_fila_marcada() {
+        let e = entorno();
+        let id = corrida_cortada_en_organiza(&e);
+        let builder = builder_tras_dos_lanzamientos();
+        let fila = reanudar_contando(&e, &builder, CONFIG_PLAN_ORGANIZA, &id)
+            .0
+            .expect("reanuda");
+        assert_eq!(fila.id, id);
+        assert!(fila.reanudada, "la fila debe decir que se reanudó");
+        assert_eq!(
+            fila.vueltas, 3,
+            "dos de la corrida cortada y una al reanudar"
+        );
+        let guardadas =
+            track::filas_de(&e.home.join("runs.jsonl"), &Filtro::default()).expect("runs");
+        assert_eq!(guardadas.len(), 1, "una fila");
+        assert!(guardadas[0].reanudada);
+        assert_eq!(guardadas[0].vueltas, 3);
+    }
+
+    /// Una corrida normal deja `reanudada` en falso y `vueltas` con sus lanzamientos.
+    #[test]
+    fn corre_corrida_normal_deja_reanudada_falsa() {
+        let e = entorno();
+        let fila = correr_con(&e, &Builder::default(), &[], CONFIG).expect("corre");
+        assert!(!fila.reanudada);
+        assert_eq!(fila.vueltas, 2, "planifica y construye");
     }
 }

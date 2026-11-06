@@ -67,6 +67,9 @@ pub enum Comando {
         tarea: String,
         #[arg(long)]
         config: String,
+        /// Retoma una corrida cortada: su id `corre-<tarea>-<config>-...`, con su carpeta en `$HOME`.
+        #[arg(long)]
+        reanuda: Option<String>,
     },
     /// Verifica o autoriza el GOAL.
     Goal {

@@ -654,7 +654,11 @@ fn ejecutar_sin_codigo(cli: &Cli) -> Result<(), Error> {
             *vigilar,
         ),
         Comando::Observa { accion } => observa(cli.json, accion),
-        Comando::Corre { tarea, config } => corre_accion(cli.json, tarea, config),
+        Comando::Corre {
+            tarea,
+            config,
+            reanuda,
+        } => corre_accion(cli.json, tarea, config, reanuda.as_deref()),
         Comando::Track { accion } => track_accion(cli.json, accion),
         Comando::Aprende { replay } => aprende_accion(cli.json, *replay),
         Comando::ImportarExterno { desde } => {
@@ -902,7 +906,7 @@ fn track_accion(json: bool, accion: &TrackAccion) -> Result<(), Error> {
 
 /// `corre`: arma y corre una tarea con una configuración, con el `ROOT_HOME`, el `$HOME` y el repo del
 /// proceso. Imprime la fila: con `--json`, la fila completa; sin él, un resumen corto.
-fn corre_accion(json: bool, tarea: &str, config: &str) -> Result<(), Error> {
+fn corre_accion(json: bool, tarea: &str, config: &str, reanuda: Option<&str>) -> Result<(), Error> {
     let home = config::root_home();
     let home_usuario = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
         Error::Uso("HOME no está definida: corre la necesita para la carpeta de corridas".into())
@@ -929,7 +933,10 @@ fn corre_accion(json: bool, tarea: &str, config: &str) -> Result<(), Error> {
         evaluar: &oracle::evaluar,
         entorno: &entorno,
     };
-    let fila = corre::correr(&deps, tarea, config)?;
+    let fila = match reanuda {
+        None => corre::correr(&deps, tarea, config)?,
+        Some(id) => corre::correr_reanudando(&deps, tarea, config, id)?,
+    };
     if json {
         println!("{}", serde_json::to_string_pretty(&fila)?);
     } else {
