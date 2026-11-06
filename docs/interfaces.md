@@ -4381,6 +4381,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "type": "string"
       }
     },
+    "defectos": {
+      "description": "Un detalle por defecto de `defectos.toml`, en su orden. Vacío sin `defectos.toml` o sin defectos.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/DetalleDefecto"
+      }
+    },
     "exactitud_orden": {
       "description": "Fracción de pares de `orden.toml` que Root ordena como el resultado medido. Umbral 1,0.",
       "$ref": "#/$defs/Metrica"
@@ -4447,6 +4455,52 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "type": "string",
           "const": "sin_decision"
         }
+      ]
+    },
+    "DetalleDefecto": {
+      "description": "Detalle de un defecto real de `defectos.toml`: si Root lo encontró y qué hallazgo quedó cerca.",
+      "type": "object",
+      "properties": {
+        "archivo": {
+          "description": "Archivo del defecto.",
+          "type": "string"
+        },
+        "encontrado": {
+          "description": "`true` si Root tiene un hallazgo a ±3 líneas. Es el mismo criterio que `recall`.",
+          "type": "boolean"
+        },
+        "hallazgo_cercano": {
+          "description": "Hallazgo del mismo archivo con menor distancia en línea. `None` si no hay ninguno en ese archivo.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HallazgoCercano"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "linea": {
+          "description": "Línea del defecto.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "repo": {
+          "description": "Repo del defecto, dentro de la carpeta de casos.",
+          "type": "string"
+        },
+        "tarea": {
+          "description": "Tarea del defecto.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tarea",
+        "repo",
+        "archivo",
+        "linea",
+        "encontrado"
       ]
     },
     "DetallePar": {
@@ -4534,6 +4588,70 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "peor",
         "acierto",
         "criterio"
+      ]
+    },
+    "Fuente": {
+      "description": "Quién produjo un hallazgo: una sonda determinista o un juez con modelo.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "Sonda": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Sonda"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Juez": {
+              "type": "object",
+              "properties": {
+                "modelo": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "modelo"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Juez"
+          ]
+        }
+      ]
+    },
+    "HallazgoCercano": {
+      "description": "Hallazgo de Root en el mismo archivo que un defecto. Es el más cercano en línea.",
+      "type": "object",
+      "properties": {
+        "distancia": {
+          "description": "Líneas entre el hallazgo y el defecto.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "fuente": {
+          "description": "Quién produjo el hallazgo.",
+          "$ref": "#/$defs/Fuente"
+        },
+        "linea": {
+          "description": "Línea del hallazgo.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "linea",
+        "fuente",
+        "distancia"
       ]
     },
     "Kappa": {

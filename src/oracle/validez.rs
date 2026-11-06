@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use super::rubrica::{self, Rubrica};
 use super::{ErrorOraculo, evaluar_por_nombre};
-use crate::tipos::{Decision, Dimension, TODAS_LAS_DIMENSIONES, Veredicto};
+use crate::tipos::{Decision, Dimension, Fuente, TODAS_LAS_DIMENSIONES, Veredicto};
 
 /// Versión del formato de `validez.json`.
 pub const VERSION: u32 = 1;
@@ -90,6 +90,9 @@ pub struct Validez {
     pub pares: Vec<DetallePar>,
     /// Fracción de defectos reales que Root encuentra con `archivo` y `linea` a ±3. Umbral 0,8.
     pub recall: Metrica,
+    /// Un detalle por defecto de `defectos.toml`, en su orden. Vacío sin `defectos.toml` o sin defectos.
+    #[serde(default)]
+    pub defectos: Vec<DetalleDefecto>,
     /// Paquetes con la misma `Decision` que el usuario. `cumple`: 5 de 6 (decisión 13).
     pub acuerdo_decision: Metrica,
     /// Una entrada por dimensión, en el orden de `TODAS_LAS_DIMENSIONES`. `cumple`: kappa >= 0,6.
@@ -127,6 +130,34 @@ pub struct DetallePar {
     pub completitud_peor: Option<f32>,
     /// Criterio que decidió el par: `decision`, `global`, `completitud` o `sin_orden`.
     pub criterio: String,
+}
+
+/// Detalle de un defecto real de `defectos.toml`: si Root lo encontró y qué hallazgo quedó cerca.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DetalleDefecto {
+    /// Tarea del defecto.
+    pub tarea: String,
+    /// Repo del defecto, dentro de la carpeta de casos.
+    pub repo: String,
+    /// Archivo del defecto.
+    pub archivo: String,
+    /// Línea del defecto.
+    pub linea: u32,
+    /// `true` si Root tiene un hallazgo a ±3 líneas. Es el mismo criterio que `recall`.
+    pub encontrado: bool,
+    /// Hallazgo del mismo archivo con menor distancia en línea. `None` si no hay ninguno en ese archivo.
+    pub hallazgo_cercano: Option<HallazgoCercano>,
+}
+
+/// Hallazgo de Root en el mismo archivo que un defecto. Es el más cercano en línea.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct HallazgoCercano {
+    /// Línea del hallazgo.
+    pub linea: u32,
+    /// Quién produjo el hallazgo.
+    pub fuente: Fuente,
+    /// Líneas entre el hallazgo y el defecto.
+    pub distancia: u32,
 }
 
 /// Resultado de `preparar_ciego`: los ids de los paquetes armados. El origen queda en `clave.toml`.
@@ -190,7 +221,7 @@ pub fn validar_con(
     let pares = leer_orden(casos)?;
     let defectos = leer_defectos(casos)?;
     let (exactitud_orden, detalle_pares) = medir_orden(casos, pares.as_deref(), &mut ev)?;
-    let recall = medir_recall(casos, defectos.as_deref(), &mut ev)?;
+    let (recall, detalle_defectos) = medir_recall(casos, defectos.as_deref(), &mut ev)?;
     let ciego = leer_paquetes(casos, &mut ev, &mut avisos)?;
     let (acuerdo_decision, kappa_dimension, kappa_item, spearman) = match ciego {
         None => {
@@ -217,6 +248,7 @@ pub fn validar_con(
         exactitud_orden,
         pares: detalle_pares,
         recall,
+        defectos: detalle_defectos,
         acuerdo_decision,
         kappa_dimension,
         kappa_item,
@@ -516,6 +548,20 @@ fn encuentra(v: &Veredicto, defecto: &DefectoReal) -> bool {
     })
 }
 
+/// Hallazgo del mismo archivo con menor distancia en línea. En empate, gana el primero de `v.hallazgos`.
+fn hallazgo_mas_cercano(v: &Veredicto, defecto: &DefectoReal) -> Option<HallazgoCercano> {
+    let archivo = normaliza(&defecto.archivo);
+    v.hallazgos
+        .iter()
+        .filter(|h| normaliza(&h.archivo) == archivo)
+        .min_by_key(|h| h.linea.abs_diff(defecto.linea))
+        .map(|h| HallazgoCercano {
+            linea: h.linea,
+            fuente: h.fuente.clone(),
+            distancia: h.linea.abs_diff(defecto.linea),
+        })
+}
+
 fn normaliza(ruta: &str) -> &str {
     ruta.trim_start_matches("./")
 }
@@ -682,36 +728,50 @@ fn medir_orden(
     Ok((metrica, detalle))
 }
 
+/// Mide el recall y devuelve un `DetalleDefecto` por defecto, en el orden de `defectos.toml`.
 fn medir_recall(
     casos: &Path,
     defectos: Option<&[DefectoReal]>,
     ev: &mut Evaluaciones,
-) -> Result<Metrica, ErrorOraculo> {
+) -> Result<(Metrica, Vec<DetalleDefecto>), ErrorOraculo> {
     let umbral = Some(UMBRAL_RECALL);
     let Some(defectos) = defectos else {
-        return Ok(Metrica {
-            umbral,
-            ..Metrica::sin_medir("falta defectos.toml: sin defectos reales")
-        });
+        return Ok((
+            Metrica {
+                umbral,
+                ..Metrica::sin_medir("falta defectos.toml: sin defectos reales")
+            },
+            Vec::new(),
+        ));
     };
     if defectos.is_empty() {
-        return Ok(Metrica {
-            umbral,
-            ..Metrica::sin_medir("defectos.toml no tiene defectos")
-        });
+        return Ok((
+            Metrica {
+                umbral,
+                ..Metrica::sin_medir("defectos.toml no tiene defectos")
+            },
+            Vec::new(),
+        ));
     }
     let mut encontrados = 0;
+    let mut detalle = Vec::with_capacity(defectos.len());
     for defecto in defectos {
         let v = ev.veredicto(&defecto.tarea, &casos.join(&defecto.repo))?;
-        if encuentra(&v, defecto) {
+        let encontrado = encuentra(&v, defecto);
+        if encontrado {
             encontrados += 1;
         }
+        detalle.push(DetalleDefecto {
+            tarea: defecto.tarea.clone(),
+            repo: defecto.repo.clone(),
+            archivo: defecto.archivo.clone(),
+            linea: defecto.linea,
+            encontrado,
+            hallazgo_cercano: hallazgo_mas_cercano(&v, defecto),
+        });
     }
-    Ok(Metrica::fraccion(
-        encontrados,
-        defectos.len() as u32,
-        umbral,
-    ))
+    let metrica = Metrica::fraccion(encontrados, defectos.len() as u32, umbral);
+    Ok((metrica, detalle))
 }
 
 /// Un paquete a ciegas ya evaluado por Root, con el formulario del usuario si lo hay.
@@ -2536,5 +2596,150 @@ fuente = "fixture"
         let viejo: Validez = serde_json::from_value(json).expect("lee un validez sin pares");
         assert!(viejo.pares.is_empty());
         assert_eq!(viejo.exactitud_orden, v.exactitud_orden);
+    }
+
+    /// Escribe `defectos.toml` con un `[[defecto]]` por `(archivo, linea)`, todos de `memora` en `r`.
+    fn escribir_defectos(casos: &Path, defectos: &[(&str, u32)]) {
+        let mut texto = String::new();
+        for (archivo, linea) in defectos {
+            texto += &format!(
+                "[[defecto]]\ntarea = \"memora\"\nrepo = \"r\"\narchivo = \"{archivo}\"\nlinea = {linea}\n\
+                 fuente = \"revisión fixture\"\ndetalle = \"defecto fixture\"\n\n"
+            );
+        }
+        escribir(&casos.join("defectos.toml"), &texto);
+    }
+
+    #[test]
+    fn validez_defectos_identifica_el_encontrado_y_el_perdido() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos(casos, &[("src/a.rs", 20), ("src/a.rs", 40)]);
+        // El hallazgo de 22 queda a 2 líneas del primer defecto. El de 50 queda a 10 del segundo.
+        let mut juez = hallazgo("src/a.rs", 22);
+        juez.fuente = Fuente::Juez {
+            modelo: "modelo-fixture".into(),
+        };
+        let v_root = Veredicto {
+            hallazgos: vec![juez, hallazgo("src/a.rs", 50)],
+            ..Veredicto::default()
+        };
+        let v = validar_con(casos, &falso(vec![clave("r", v_root)])).expect("mide");
+        assert_eq!(v.defectos.len(), 2, "un detalle por defecto");
+        let encontrado = &v.defectos[0];
+        assert!(
+            encontrado.encontrado,
+            "el hallazgo de 22 cubre el defecto de 20"
+        );
+        assert_eq!(encontrado.tarea, "memora");
+        assert_eq!(encontrado.repo, "r");
+        assert_eq!(encontrado.archivo, "src/a.rs");
+        assert_eq!(encontrado.linea, 20);
+        assert_eq!(
+            encontrado.hallazgo_cercano,
+            Some(HallazgoCercano {
+                linea: 22,
+                fuente: Fuente::Juez {
+                    modelo: "modelo-fixture".into(),
+                },
+                distancia: 2,
+            })
+        );
+        let perdido = &v.defectos[1];
+        assert!(!perdido.encontrado, "el hallazgo de 50 queda fuera de ±3");
+        assert_eq!(perdido.linea, 40);
+        assert_eq!(
+            perdido.hallazgo_cercano,
+            Some(HallazgoCercano {
+                linea: 50,
+                fuente: Fuente::Sonda("fixture".into()),
+                distancia: 10,
+            })
+        );
+    }
+
+    #[test]
+    fn validez_defectos_sin_hallazgo_en_el_archivo_da_null() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos(casos, &[("src/a.rs", 20)]);
+        // El hallazgo cae en otro archivo: no es cercano al defecto.
+        let v_root = Veredicto {
+            hallazgos: vec![hallazgo("src/b.rs", 20)],
+            ..Veredicto::default()
+        };
+        let v = validar_con(casos, &falso(vec![clave("r", v_root)])).expect("mide");
+        let detalle = &v.defectos[0];
+        assert!(!detalle.encontrado);
+        assert_eq!(detalle.hallazgo_cercano, None);
+        let json = serde_json::to_value(detalle).expect("serializa");
+        assert_eq!(
+            json.get("hallazgo_cercano"),
+            Some(&serde_json::Value::Null),
+            "la clave existe con null"
+        );
+    }
+
+    #[test]
+    fn validez_defectos_elige_el_mas_cercano() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos(casos, &[("src/a.rs", 20)]);
+        // El de 14 va primero y queda a 6. El de 19 queda a 1. El de otro archivo, a 0, no cuenta.
+        let v_root = Veredicto {
+            hallazgos: vec![
+                hallazgo("src/a.rs", 14),
+                hallazgo("src/otro.rs", 20),
+                hallazgo("src/a.rs", 19),
+            ],
+            ..Veredicto::default()
+        };
+        let v = validar_con(casos, &falso(vec![clave("r", v_root)])).expect("mide");
+        let cercano = v.defectos[0]
+            .hallazgo_cercano
+            .clone()
+            .expect("hay hallazgo en el archivo");
+        assert_eq!(cercano.linea, 19);
+        assert_eq!(cercano.distancia, 1);
+    }
+
+    #[test]
+    fn validez_defectos_no_cambia_recall() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos(
+            casos,
+            &[("src/a.rs", 20), ("src/a.rs", 40), ("src/b.rs", 20)],
+        );
+        // Caso mixto: uno encontrado, uno con hallazgo lejano y uno sin hallazgo en su archivo.
+        let v_root = Veredicto {
+            hallazgos: vec![
+                hallazgo("src/a.rs", 22),
+                hallazgo("src/a.rs", 50),
+                hallazgo("src/c.rs", 20),
+            ],
+            ..Veredicto::default()
+        };
+        let v = validar_con(casos, &falso(vec![clave("r", v_root)])).expect("mide");
+        let encontrados = v.defectos.iter().filter(|d| d.encontrado).count() as u32;
+        assert_eq!(encontrados, 1);
+        assert_eq!(v.recall.aciertos, Some(encontrados));
+        assert_eq!(v.recall.casos, v.defectos.len() as u32);
+        assert!(cerca(v.recall.valor.expect("medida"), 1.0 / 3.0));
+    }
+
+    #[test]
+    fn validez_viejo_sin_defectos_lee_vacio() {
+        let dir = TempDir::new().expect("temporal");
+        let v = validar_con(dir.path(), &falso(Vec::new())).expect("mide");
+        let mut json = serde_json::to_value(&v).expect("serializa");
+        let mapa = json.as_object_mut().expect("objeto");
+        assert!(
+            mapa.remove("defectos").is_some(),
+            "la clave defectos se serializa"
+        );
+        let viejo: Validez = serde_json::from_value(json).expect("lee un validez sin defectos");
+        assert!(viejo.defectos.is_empty());
+        assert_eq!(viejo.recall, v.recall);
     }
 }
