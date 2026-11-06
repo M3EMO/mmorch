@@ -4,6 +4,7 @@
 //! nunca directo.
 
 pub mod args;
+mod barrido;
 pub mod config;
 pub mod contenedor;
 pub mod corrida;
@@ -11,6 +12,7 @@ mod costo_cortado;
 mod credencial;
 pub mod ejecutor;
 mod git_seguro;
+mod redacta;
 
 use std::fs;
 use std::io::{self, Write};
@@ -30,8 +32,8 @@ use crate::tipos::Rol;
 
 pub use args::{args_claude, env_del_builder};
 pub use config::{ClaudeCorrida, ConfigCorrida};
-pub use corrida::{DepsCorre, correr};
-pub use credencial::{copiar_sin_mcp, vencimiento_ms, verificar_vigencia};
+pub use corrida::{DepsCorre, correr, correr_reanudando};
+pub use credencial::{copiar_sin_mcp, vencimiento_ms, verificar_vigencia, vida_restante};
 pub use ejecutor::{
     EjecutorBuilder, EjecutorContenedorBuilder, EsperaVigencia, Lanzamiento, SalidaClaude,
 };
@@ -52,8 +54,8 @@ pub enum ErrorCorre {
     Git(String),
     #[error("no se pudo lanzar el builder: {0}")]
     Ejecutor(String),
-    /// El builder se cortó por tiempo. Lleva el `stdout` que alcanzó a dar: su transcript parcial.
-    #[error("no se pudo lanzar el builder: {mensaje}")]
+    /// El builder se cortó por plazo. Lleva el `stdout` que alcanzó a dar: su transcript parcial.
+    #[error("el builder se cortó por plazo: {mensaje}")]
     Cortado { mensaje: String, stdout: Vec<u8> },
     /// El GOAL no está autorizado o fue alterado. Sale con el código de `goal verificar`.
     #[error(transparent)]
@@ -125,16 +127,7 @@ pub fn preparar_corrida(
 ) -> Result<Corrida, ErrorCorre> {
     nombre_de_tarea_valido(tarea).map_err(|m| ErrorCorre::Uso(format!("tarea: {m}")))?;
     nombre_de_tarea_valido(config).map_err(|m| ErrorCorre::Uso(format!("config: {m}")))?;
-    let raiz = dir_corridas(home_usuario);
-    let raiz_root = ruta_fisica(home).map_err(infra("resolver ROOT_HOME"))?;
-    let raiz_fisica = ruta_fisica(&raiz).map_err(infra("resolver la carpeta de corridas"))?;
-    if raiz_fisica.starts_with(&raiz_root) {
-        return Err(ErrorCorre::Uso(format!(
-            "la carpeta de corridas {} queda dentro de ROOT_HOME {}",
-            raiz_fisica.display(),
-            raiz_root.display()
-        )));
-    }
+    let raiz = raiz_fuera_de_root_home(home, home_usuario)?;
     let id = id_corrida(tarea, config, ahora_s());
     let dir = raiz.join(&id);
     fs::create_dir_all(&raiz).map_err(infra("crear la carpeta de corridas"))?;
@@ -154,6 +147,69 @@ pub fn preparar_corrida(
             Err(error)
         }
     }
+}
+
+/// Abre la carpeta de una corrida cortada para reanudarla. No arma nada: no hay `git init` ni copia.
+/// El id debe ser de esta tarea y esta config, y su carpeta debe existir con `repo/`.
+fn reabrir_corrida(
+    home: &Path,
+    home_usuario: &Path,
+    tarea: &str,
+    config: &str,
+    id: &str,
+) -> Result<Corrida, ErrorCorre> {
+    nombre_de_tarea_valido(tarea).map_err(|m| ErrorCorre::Uso(format!("tarea: {m}")))?;
+    nombre_de_tarea_valido(config).map_err(|m| ErrorCorre::Uso(format!("config: {m}")))?;
+    let prefijo = format!("corre-{tarea}-{config}-");
+    if !id.starts_with(&prefijo) {
+        return Err(ErrorCorre::Uso(format!(
+            "el id {id} no es de la tarea {tarea} con la config {config}: debe empezar con {prefijo}"
+        )));
+    }
+    nombre_de_tarea_valido(id).map_err(|m| ErrorCorre::Uso(format!("id: {m}")))?;
+    let raiz = raiz_fuera_de_root_home(home, home_usuario)?;
+    let dir = raiz.join(id);
+    if !es_carpeta(&dir) {
+        return Err(ErrorCorre::Uso(format!(
+            "no hay carpeta de la corrida {id}: {}",
+            dir.display()
+        )));
+    }
+    let repo = dir.join("repo");
+    if !es_carpeta(&repo) {
+        return Err(ErrorCorre::Uso(format!(
+            "la corrida {id} no tiene repo: {}",
+            repo.display()
+        )));
+    }
+    Ok(Corrida {
+        id: id.to_string(),
+        dir,
+        repo,
+        tarea: tarea.to_string(),
+        config: config.to_string(),
+        commit: String::new(),
+    })
+}
+
+/// Carpeta de corridas de `home_usuario`. Error de uso si cae dentro de `home` (ROOT_HOME).
+fn raiz_fuera_de_root_home(home: &Path, home_usuario: &Path) -> Result<PathBuf, ErrorCorre> {
+    let raiz = dir_corridas(home_usuario);
+    let raiz_root = ruta_fisica(home).map_err(infra("resolver ROOT_HOME"))?;
+    let raiz_fisica = ruta_fisica(&raiz).map_err(infra("resolver la carpeta de corridas"))?;
+    if raiz_fisica.starts_with(&raiz_root) {
+        return Err(ErrorCorre::Uso(format!(
+            "la carpeta de corridas {} queda dentro de ROOT_HOME {}",
+            raiz_fisica.display(),
+            raiz_root.display()
+        )));
+    }
+    Ok(raiz)
+}
+
+/// Carpeta real, sin enlace simbólico. Un enlace o un archivo da `false`.
+fn es_carpeta(ruta: &Path) -> bool {
+    fs::symlink_metadata(ruta).is_ok_and(|meta| meta.is_dir())
 }
 
 /// Escribe el stdout de `claude` en `<home>/transcripts/<id>/<n>-<rol>.jsonl`, de forma atómica.
@@ -620,5 +676,16 @@ mod tests {
         assert_eq!(ErrorCorre::Ejecutor("x".into()).codigo_de_salida(), 3);
         let error = Error::from(ErrorCorre::Uso("x".into()));
         assert_eq!(error.codigo_de_salida(), 2);
+    }
+
+    #[test]
+    fn corre_error_cortado_dice_que_se_corto_por_plazo() {
+        let texto = ErrorCorre::Cortado {
+            mensaje: "x".into(),
+            stdout: vec![],
+        }
+        .to_string();
+        assert!(texto.contains("el builder se cortó por plazo"), "{texto}");
+        assert!(!texto.contains("no se pudo lanzar"), "{texto}");
     }
 }

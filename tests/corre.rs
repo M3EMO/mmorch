@@ -182,3 +182,31 @@ fn corre_con_goal_valido_sin_credencial_sale_con_3_y_no_escribe_fila() {
         "sin lanzamiento no hay fila"
     );
 }
+
+#[test]
+fn corre_reanuda_con_id_de_otra_config_sale_con_2_y_no_toca_nada() {
+    // El id no empieza por `corre-memo-ecc-test-`: el error de uso sale antes de lanzar o crear nada.
+    let e = escenario(true);
+    let salida = root_en(
+        &e,
+        &[
+            "corre",
+            "--tarea",
+            "memo",
+            "--config",
+            "ecc-test",
+            "--reanuda",
+            "corre-memo-otra-1-2-0",
+        ],
+    );
+    assert_eq!(codigo(&salida), 2);
+    let stderr = String::from_utf8_lossy(&salida.stderr);
+    assert!(
+        stderr.contains("uso: ") && stderr.contains("corre-memo-ecc-test-"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        sin_rastro(&e),
+        "no debe crear carpetas ni escribir runs.jsonl"
+    );
+}

@@ -532,6 +532,12 @@ pub struct Fila {
     /// Forma de la corrida. Las filas anteriores a la decisión 28 la leen vacía.
     #[serde(default)]
     pub forma: Forma,
+    /// La corrida se retomó con `r00t corre --reanuda`. Las filas anteriores a este campo la leen en `false`.
+    #[serde(default)]
+    pub reanudada: bool,
+    /// Lanzamientos de `claude` de la corrida, sumando los de antes de reanudarla. Las filas anteriores la leen en 0.
+    #[serde(default)]
+    pub vueltas: u32,
 }
 
 impl Default for Fila {
@@ -547,6 +553,8 @@ impl Default for Fila {
             resumen: Resumen::default(),
             modelos: BTreeMap::new(),
             forma: Forma::default(),
+            reanudada: false,
+            vueltas: 0,
         }
     }
 }
@@ -678,6 +686,8 @@ mod tests {
             resumen: resumen(),
             modelos: BTreeMap::new(),
             forma: Forma::default(),
+            reanudada: false,
+            vueltas: 0,
         }
     }
 
@@ -1019,6 +1029,31 @@ mod tests {
             "turnos":0,"intervenciones":0,"invalida":false}}"#;
         let f: Fila = serde_json::from_str(texto).expect("v1 se acepta");
         assert!(f.modelos.is_empty());
+    }
+
+    /// Fila anterior a `reanudada` y `vueltas`: se lee con `false` y 0.
+    #[test]
+    fn tipos_fila_sin_reanudada_ni_vueltas_se_lee() {
+        let texto = r#"{"v":1,"id":"f-1","ts":1.0,"tarea":"memora","config":"c",
+            "commit_root":"x","veredicto":{"v":1,"tarea":"memora","repo":"r",
+            "commit":"c","contrato":{"pasa":1,"total":1},"oculto":{"pasa":0,"total":0},
+            "puntajes":[],"hallazgos":[],"global":null,"estado":"sin_veredicto",
+            "costo_usd":0.0},"resumen":{"usd_api":0.0,"usd_cupo":0.0,"minutos":0.0,
+            "turnos":0,"intervenciones":0,"invalida":false}}"#;
+        let f: Fila = serde_json::from_str(texto).expect("fila sin los campos nuevos");
+        assert!(!f.reanudada);
+        assert_eq!(f.vueltas, 0);
+    }
+
+    #[test]
+    fn tipos_fila_con_reanudada_y_vueltas_ida_y_vuelta() {
+        let mut f = fila();
+        f.reanudada = true;
+        f.vueltas = 3;
+        ida_y_vuelta(&f);
+        let valor = serde_json::to_value(&f).unwrap();
+        assert_eq!(valor["reanudada"], true);
+        assert_eq!(valor["vueltas"], 3);
     }
 
     #[test]
