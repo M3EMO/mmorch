@@ -103,6 +103,7 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 77 | P77: "a". Mezclar 72, 73 y 74 en local, sin push, cuando pase la suite de `laptop/prueba74`. |
 | 78 | P78, P70 y P71: el usuario devolvió el texto de cada pregunta con la recomendación, sin cambios, y el orquestador lo toma como aceptación. P78 sí. P70 a: clave dedicada con límite de gasto. P71 a: solo los builders van por Claude. |
 | 79 | P72: "Testear si tiene sustento y despues implementarlo en su totalidad dsps del cierre". |
+| 80 | P83: "P83 a + b en paralelo". El dataset sigue, y la búsqueda de un buscador mejor corre a la vez, como objetivo medido. La regla sigue: Root no evalúa repos reales sin recall de 0,8. La lectura es del orquestador. |
 
 ## Patterns to Mirror
 
@@ -5296,3 +5297,125 @@ Sin cambios en las líneas A, B y C ni en el cierre. El dataset cambia así:
 - **a)** Seguir con el dataset, y sumar la búsqueda de un buscador mejor como objetivo medido sobre defectos nuevos. La regla sigue: Root no evalúa repos reales sin recall de 0,8. No prometo llegar. Recomendada: sin un conjunto grande y separado no se puede medir ningún arreglo, y el usuario pidió construir sobre el dataset.
 - **b)** Pausar el dataset y buscar primero un buscador mejor. El problema: faltan defectos nuevos para medirlo, y esos salen del dataset.
 - **c)** Seguir con el dataset y cambiar la promesa de Root: medir conducta con tests y sondas, y dejar de prometer que encuentra defectos ubicados. Esto cambia tu criterio de "un evaluador con criterio".
+
+## Vuelta del 2026-11-06 (5): Línea Buscador e informe de energía libre
+
+**Estado.** Decisión 80. P79 a P82 siguen abiertas. La corrida real sigue activa. Saldo: 22,53 de 24 USD, con 0,39 USD libres.
+
+## Línea Buscador
+
+**Meta.** Recall de 0,8 sobre defectos que nadie usó para ajustar. No hay evidencia de que se pueda.
+
+**De dónde salen los defectos.**
+
+| Origen | Cuántos | Etiqueta | Costo | Espera |
+|---|---|---|---|---|
+| **Fallas reales** de repos públicos de Rust: commit que arregla y trae su test | 15 o más en el conjunto final | Líneas que cambió el arreglo, y test rojo antes del commit | 0 USD de API | P79 |
+| **Sembrados** por el saboteador, en copias de memora-ecc y brasa-ecc | 30 o más en el final, 20 o más en ajuste | Línea alterada, y un test nuevo que da rojo y pasa en la copia limpia | Cupo | Nada para generar. Validar espera CPU libre. |
+| **Root, MEDIUM de la revisión** verificados y no gastados | Hasta 11, solo para ajuste | Lectura de Opus | 0 USD | Sin apuro |
+
+**Medido sobre el historial local.** Con una regla mecánica (mensaje de arreglo, cambio en `src/`, test agregado, 3 archivos o menos), Root da 5 commits de 380, varios sin ser arreglos. memora y brasa dan 0. El historial local no alcanza para fallas reales: salen de GitHub.
+
+**Sellado.** Una semilla reparte por repo. El orquestador guarda el conjunto final, y escribe solo su hash en el plan. Yo no leo ese conjunto. Los 10 frescos y los 8 de la validez no entran.
+
+**Prompt del saboteador, fijo:**
+
+> Elegí una función de producción que un test ejercite. Introducí un defecto plausible que un revisor pasaría por alto: conducta incorrecta, seguridad, fiabilidad o uso de recursos. No cambies firmas. Después escribí un test nuevo que pase en el código original y falle en el tuyo. Respondé con el diff del defecto, el test y la línea alterada. No menciones el defecto en comentarios.
+
+Un intento vale solo si compila, si el test pasa limpio y da rojo con el defecto, y si los tests del repo siguen como antes. **Ese test no entra al buscador ni a `oculto`.**
+
+**Variantes, en este orden. Los textos quedan fijos ahora.**
+
+| Variante | Qué prueba | Costo por 20 defectos, estimación |
+|---|---|---|
+| **Vs:** clippy `restriction` y `pedantic`, sin LLM | Si lo chequeable alcanza. Es la regla de Root | 0 USD |
+| **Vd:** juez actual, contando `descartado_cerca` | Si la regla de impacto tira aciertos | 0 USD extra: sale de la validez repetida |
+| **V2:** un archivo por llamada, prompt de `auditar`, Sonnet por cupo | Modelo y método | Cupo |
+| **V3:** como V2, con una llamada por foco: conducta, seguridad, fiabilidad y recursos | Lo más parecido a la revisión que halló los 10 | Cupo |
+| **V0:** `auditar` tal como está | Control | Cerca de 3,4 USD |
+| **V1:** `auditar --por-archivo` | Si partir mejora, con el mismo modelo | Cerca de 3,4 USD |
+
+**Qué se puede afirmar.** V3 se parece a la revisión de donde salieron los 10 gastados, pero se mide sobre otros defectos. Ajustar se permite solo con el conjunto de ajuste, y cada ajuste es otra variante con su hash.
+
+**Qué la frena, fijado antes de medir.**
+- **Freno A:** ninguna variante llega a recall de 0,5 por línea en ajuste. Vuelve al usuario.
+- **Freno B:** la mejor pasa de 50 candidatos por 1000 líneas. Es inútil para un revisor, aunque acierte. El umbral es criterio mío.
+- **Freno C:** se agota el tope de P84.
+- **Freno D:** el final da menos de 0,8 en sembrados o en reales. Root sigue sin evaluar repos reales, y el usuario decide.
+
+**Pasa.** 24 de 30 sembrados y 12 de 15 reales, en una sola medición. La cota de Wilson de 24/30 es 0,69, y queda escrita junto al resultado.
+
+## Qué arranca ya y qué espera
+
+**Ya, en paralelo con la Línea B, sin API ni los 50 USD:**
+- **Tarea 75**, sin podman: el arnés de medición de `auditar`. Solo toca su archivo y su subcomando.
+- **Generar sembrados por cupo.** Es solo texto. Cupo actual bajo, según la última lectura.
+
+**Espera CPU libre, después de la corrida y de la validez repetida:** validar sembrados, Vs, V2 y V3.
+
+**Sale solo de la Línea B:** Vd, de la validez repetida con la Tarea 73.
+
+**Espera respuesta:** fallas reales (P79), V0 y V1 (P84).
+
+**Después del cierre (P72):** las fases D0 a D6 del PRD. Leo P83 como paralelo entre buscador y dataset, no como permiso de adelantar el PRD al cierre. La Línea Buscador antes del cierre no gasta API.
+
+## Informe de energía libre: las 8 recomendaciones
+
+**Cómo lo uso.** Sonnet lo escribió desde notas. Solo uso sus datos como pista. Las cifras de Bai y otros, y de Just y otros, vienen de notas y resúmenes, y no las verifiqué.
+
+**Corrección al informe.** Mezcla dos errores. Los 16 000 eran mi estimación de salida. Las 0 llamadas salen de la reserva de `auditar`: 3 intentos, un token por byte y 32 000 de salida (`src/oracle/auditar.rs`). El defecto real es otro: con el tope insuficiente, la salida informó "0 de 10" sin leer nada.
+
+| N.º | Recomendación | Clase | Motivo |
+|---|---|---|---|
+| 1 | Validar topes y reservas antes de gastar | **Hito 1b, primero: Tarea 75 para `auditar`** | La Línea Buscador la necesita. Un tope insuficiente da error con la cifra necesaria, y no mide. La reserva sigue pesimista: bajarla puede pasar el tope. El hallazgo 5 (`peor_caso` sin reintento ni casos en vuelo) sigue en D0, antes de otra calibración paga. |
+| 2 | Registrar predicción como intervalo | **Dataset, D2** | Es barato y S2 lo necesita. Se mide el error. |
+| 3 | Calibrar con cuantiles conformales | **Rechazar por ahora** | No hay corridas para calibrar. Se reabre con 30 corridas o más por modelo. |
+| 4 | Recall por clase y fallas reales aparte | **Dataset y Línea Buscador** | Es el centro de esta línea. |
+| 5 | Priorizar por pérdida del detector | **Rechazar en el piloto** | Con 20 a 45 casos, la varianza de los pesos pesa demasiado, y el piloto elige con semilla. Sí acepto su idea: nunca priorizar por error de costo. |
+| 6 | Registrar la probabilidad de selección | **Dataset** | No cuesta nada, y deja abierta la selección activa. |
+| 7 | Separar `aprende` del puntaje y rotar | **Dataset, con un límite** | La separación entra. La rotación no toca las tareas ancla, porque C4 las fija. |
+| 8 | No usar arquitectura de energía libre | **Se acepta: rechazo esa arquitectura** | Sin beneficio medido en agentes, según notas no exhaustivas. |
+
+## Desempates técnicos 46 (Opus, 2026-11-06)
+
+1. **Ningún ajuste al prompt de `auditar`.** `PROMPT_AUDITORIA` queda igual, con su hash como guarda.
+2. **El costo sube.** La Línea Buscador suma hasta 7 USD a los cerca de 52 USD: cerca de 59 USD, por estimación. Los 50 no alcanzan si todo sale como estimé. S2 lo mide, y el usuario decide con ese dato.
+3. **Cupo primero.** Las variantes sin API van antes, para no tocar los 50 USD.
+
+### Tarea 75: Arnés de medición de `auditar`
+- **Archivos**: `src/oracle/auditar.rs`, `src/cli.rs` y `src/lib.rs`.
+- **Arranca**: ya, desde `laptop/prueba74`, con `ROOT_SIN_PODMAN=1`.
+- **Brief**: `docs/builds/brief-local-75.md`.
+
+## Orden final del hito 1 (2026-11-06, 5)
+
+**Línea B, sin cambios:** corrida real, prueba de 72, 73 y 74, mezcla local, validez repetida, "Validation", cierre y firma.
+
+**Línea Buscador, en paralelo:** Tarea 75 y sembrados por cupo ahora. Validar y medir sin API cuando haya CPU libre. La firma no la espera.
+
+**Después del cierre:** dataset completo según P72 y sus respuestas.
+
+## Preguntas para el usuario (2026-11-06, 5)
+
+**P79 (reescrita): ¿Puedo minar GitHub para el dataset y para la Línea Buscador?** Es red fuera del repo. Los commits salen de repos de Rust elegidos con semilla, con licencia MIT o Apache-2.0 y 1000 estrellas o más. Mide si hay tareas, y da las 15 fallas reales que hacen falta. También baja un modelo de embeddings. No usa API.
+- **a)** Sí, y me mostrás la lista antes de clonar. Recomendada.
+- **b)** Sí, sin mostrarme la lista.
+- **c)** No todavía. La Línea Buscador queda solo con defectos sembrados.
+
+**P80 (reescrita): ¿Gasto hasta 3 USD de los 50 del dataset para medir el costo con 3 tareas, después del cierre?** Sin esto, los cerca de 59 USD son una estimación.
+- **a)** Sí. Recomendada.
+- **b)** No, implementar con la estimación.
+
+**P81 (sin cambios): La decisión 12 dice que aprobás los requisitos de cada tarea. Con 20 tareas, ¿cómo lo hacemos?**
+- **a)** Aprobás las fichas de las 3 primeras y el método. Las demás pasan `ficha revisar` y el chequeo de fuga, y te muestro la lista. Recomendada.
+- **b)** Aprobás las 20.
+- **c)** No aprobás ninguna ficha, solo el método.
+
+**P82 (reescrita): ¿Los brazos de builder del piloto van por cupo o por API?** La parte de Root ya usa cerca de 59 USD, por estimación, más que los 50.
+- **a)** Por cupo. Los 50 USD quedan para Root, y S2 dice si hace falta ampliar. Recomendada.
+- **b)** Por API, con el costo medido en S2. Hay que ampliar más.
+
+**P84: ¿Gasto hasta 7 USD de los 50 en las dos variantes de la Línea Buscador que usan API?** Son V0 y V1, sobre el conjunto de ajuste, después del cierre. Las variantes por cupo y sin LLM corren igual. Sin V0 y V1 no hay control con el modelo actual.
+- **a)** Sí, con ese tope. Recomendada.
+- **b)** Solo si V2 o V3 dan una señal: recall de 0,5 o más. Ahorra, pero pierde el control.
+- **c)** No.

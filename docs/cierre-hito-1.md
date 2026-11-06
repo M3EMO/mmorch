@@ -100,7 +100,8 @@ Los builders se informan aparte en cada `docs/builds/*build-local-*.md`.
 - **Hito 1b, de la pasada:** `medicion` informa "0 de 10" aunque no lea nada, el tope frena con su reserva pesimista, y sale con 0 estando incompleta. Dos defectos reales que halló siguen en la punta: `src/corre/ejecutor.rs:339` y `src/corre/corrida.rs:281`.
 - **Antes de la próxima calibración paga:** hallazgos 5, 18 y 19, y el arreglo de la Tarea 67.
 - **Antes de evaluar un repo real:** el recall sobre el dataset, y los hallazgos 9, 11, 12, 14 y 15, sin verificar.
-- **Dataset:** PRD en `.claude/prds/dataset.prd.md`, sujeto a su prueba de sustento (decisión 79). Memora y brasa se borran "Cuando el dataset calibre" (decisión 70).
+- **Dataset:** PRD en `.claude/prds/dataset.prd.md`, sujeto a su prueba de sustento (decisión 79).
+- **Línea Buscador (P83):** busca un buscador con recall de 0,8 sobre defectos nuevos. No forma parte de este cierre, y nadie promete el resultado. Memora y brasa se borran "Cuando el dataset calibre" (decisión 70).
 
 ## Firma
 

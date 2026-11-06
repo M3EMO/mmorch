@@ -1,6 +1,6 @@
 # PRD: Dataset fiable para Root y Graft
 
-**Estado:** borrador de Opus (rol planner de Root), 2026-11-06. P72: "Testear si tiene sustento y despues implementarlo en su totalidad dsps del cierre". Se implementa entero si pasa "Prueba de sustento". P70 a, P71 a, P73 d, P75 y P76 están decididas.
+**Estado:** borrador de Opus (rol planner de Root), 2026-11-06. P72: "Testear si tiene sustento y despues implementarlo en su totalidad dsps del cierre". Se implementa entero si pasa "Prueba de sustento". P70 a, P71 a, P73 d, P75, P76 y P83 están decididas. P83: "P83 a + b en paralelo".
 **Dueño:** Root. Graft consume el contrato C1 a C6.
 **Cuándo:** se implementa después de cerrar el hito 1 de Root. Este borrador no necesita podman, y por eso se adelanta.
 
@@ -144,6 +144,7 @@ Sin esto, el piloto mediría mal. Todos están en el plan de Root.
 - **Curva de auditoría.** Recall según lo que Root lee: 6000 caracteres por archivo, más, y todo. Es mi lectura del nombre, porque no vi el tuit. Decide con datos cuánto debe leer el juez.
 - **El mapa no los reemplaza.** El mapa dice dónde falta muestra. El saboteador da casos con etiqueta. La curva mide cuánto cuesta encontrarlos.
 - **Separación.** Los defectos que ajustan el juez no miden el recall final. Eso exige dos conjuntos.
+- **Manifiesto.** El dataset guarda la semilla y la probabilidad de selección de cada tarea. Las tareas que alimentan a `aprende` no puntúan la vara. Las tareas ancla no rotan.
 - **Tamaño del conjunto final: 30 defectos o más.** Con 30, 24 aciertos dan 0,8 y una cota de Wilson de 0,69. Con 8, el recall no distingue casi nada.
 - **Recall por test en tareas minadas: no vale como prueba.** Si el test del commit está en `oculto`, el estado anterior siempre da rojo. El recall de D4 usa línea, sonda o juez. `recall_test` se informa aparte.
 
@@ -185,13 +186,29 @@ Los umbrales de S1, S3a, S9 y S13 son criterio mío, no una medición. No tienen
 
 **Lo que no significa.** No prueba que el dataset sea inútil: es el lugar donde se puede medir otro buscador sobre defectos nuevos. Tampoco prueba que el 0,8 sea imposible.
 
-**Este conjunto quedó gastado.** Los 10 ya no miden un buscador ajustado por quien vio este resultado. El umbral de S3b no cambia, y el usuario decide (P83).
+**Este conjunto quedó gastado.** Los 10 ya no miden un buscador ajustado por quien vio este resultado. El umbral de S3b no cambió.
+
+**Decisión del usuario.** P83: "P83 a + b en paralelo". El dataset sigue, y la Línea Buscador corre a la vez. La regla sigue: Root no evalúa repos reales sin recall de 0,8. Nadie promete llegar.
 
 ### Criterio de salida
 
-- **Implementar el PRD entero tras el cierre:** S1, S2, S3a, S9 y S13 sostienen, P79 a P82 tienen respuesta, y P83 resuelve S3b.
+- **Implementar el PRD entero tras el cierre:** S1, S2, S3a, S9 y S13 sostienen, P79 a P82 y P84 tienen respuesta. S3b ya no frena el PRD: pasa a la Línea Buscador.
 - **Cambiar el PRD y seguir:** alguna da "cambia". El planner escribe el cambio, con costo, y el usuario lo ve. Ninguna fase sale.
 - **Frenar y preguntar:** alguna da "frena". El usuario decide. S9 solo frena el mapa, y el usuario decide si eso cambia su pedido.
+
+## Línea Buscador (P83)
+
+**Objetivo.** Hallar un buscador que cumpla el recall de 0,8 sobre defectos que nadie usó para ajustar. El detalle está en el plan, en "Línea Buscador". No hay evidencia de que exista a costo razonable.
+
+**Conjuntos.**
+- **Ajuste:** 20 defectos o más. Se permite mirarlos.
+- **Final, sellado:** 30 sembrados y 15 fallas reales, o más. Solo el orquestador los ve. Cada variante elegida se mide una sola vez.
+- **Gastados:** los 10 frescos y los 8 de la validez no entran en ninguno.
+- **Partición por repo.** Un repo del conjunto final no aparece en ajuste, ni en las tareas visibles.
+
+**Reporte.** Recall por línea, por clase y por origen (real o sembrado), además de candidatos por 1000 líneas. El recall sembrado solo no basta: un saboteador y un detector LLM pueden compartir puntos ciegos. Es un argumento, sin medir.
+
+**Cuenta el oráculo.** Un defecto real cuenta si un hallazgo cae a 3 líneas o menos de una línea que cambió el arreglo. Un sembrado cuenta igual sobre la línea alterada. Un LLM nunca decide el acierto.
 
 ## Costo
 
@@ -206,11 +223,12 @@ Los umbrales de S1, S3a, S9 y S13 son criterio mío, no una medición. No tienen
 | Curva: 40 defectos en 3 lecturas | Cerca de 23 |
 | Conjunto final: 30 defectos | Cerca de 5,7 |
 | Saboteador: 70 defectos intentados a 0,04 USD | Cerca de 3 |
-| **Subtotal de Root** | **Cerca de 52** |
-| Buscadores nuevos, si P83 a | Sin medir |
+| Línea Buscador, variantes por API | Hasta 7, con tope (P84) |
+| **Subtotal de Root** | **Cerca de 59** |
+| Línea Buscador por cupo y sondas | 0 USD de API |
 | Corridas de builder por API | No entran en este subtotal. Sin medir. Una sola corrida de memora midió 2,76 USD de planificación, y se estimó en cerca de 18 USD por 2 horas de organización |
 
-**Lectura.** El subtotal pasa de 50 USD por poco. Los brazos de builder por API no entran: dependen de P82. Los 0,19 USD salen de suponer 52 000 tokens de entrada y 30 000 de salida. La pasada midió de 20 000 a 30 000 de salida, y yo había estimado 16 000: costó 0,4665 USD contra 0,25 estimados.
+**Lectura.** El subtotal pasa de 50 USD, por estimación. El usuario dijo: "si hace falta mas agregaremos". S2 lo mide antes de pedir. Los brazos de builder por API no entran: dependen de P82. Los 0,19 USD salen de suponer 52 000 tokens de entrada y 30 000 de salida. La pasada midió de 20 000 a 30 000 de salida, y yo había estimado 16 000: costó 0,4665 USD contra 0,25 estimados.
 
 **Regla.** El piloto corre primero 3 tareas, mide y frena. Después el planner proyecta el total. Si no entra en 50 USD, va al usuario. Toda corrida lleva `--tope-usd`.
 
@@ -222,7 +240,7 @@ Los umbrales de S1, S3a, S9 y S13 son criterio mío, no una medición. No tienen
 |---|---|---|---|
 | D0 | Prerrequisitos | Baja | Tests verdes con podman |
 | D1 | Minería, chequeos de admisión y mapa | 0 | 30 candidatos con criterios 1 a 5, y su cercanía |
-| D2 | 3 tareas de punta a punta | Se mide | Costo y tiempo reales |
+| D2 | 3 tareas de punta a punta, con predicción registrada como intervalo antes de cada corrida | Se mide | Costo y tiempo reales, y error de la predicción |
 | D3 | 20 tareas estratificadas también por cercanía, partición y C1 a C6 | Según D2 | Chequeos C1 a C6: verde en fixture bueno, rojo en fixture malo |
 | D4 | Calibración por versión, saboteador y curva | Cerca de 10 USD, más lo que mida D2 | Filas por dimensión y recall sobre un conjunto separado |
 | D5 | Vara v1 y `oraculo carencias` | Baja | Graft la consume |
@@ -249,5 +267,5 @@ Los umbrales de S1, S3a, S9 y S13 son criterio mío, no una medición. No tienen
 3. **P70:** cómo entra la clave al builder.
 4. **P71:** si "Usar api claude" incluye al juez.
 5. **Reusar benchmarks.** Los abstracts de FeatureBench, SWE-Milestone y Commit0 no nombran Rust. Falta leer sus artículos o repos. Es lectura pública, sin costo.
-6. **P79 a P82:** ver "Prueba de sustento".
+6. **P79 a P82 y P84:** ver "Prueba de sustento" y "Línea Buscador".
 7. **La clave dedicada (P70 a):** el usuario la crea al empezar D2, si algo va por API.
