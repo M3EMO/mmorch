@@ -1215,6 +1215,8 @@ mod tests {
             sin_leer: Vec::new(),
             avisos: Vec::new(),
             medicion,
+            lineas_leidas: 0,
+            candidatos_por_1000_lineas: None,
         }
     }
 

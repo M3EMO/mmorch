@@ -142,6 +142,10 @@ pub struct Auditoria {
     pub sin_leer: Vec<String>,
     pub avisos: Vec<String>,
     pub medicion: Option<Medicion>,
+    /// Líneas del texto que vio el modelo, de los archivos leídos. Sin código de tests.
+    pub lineas_leidas: u32,
+    /// Hallazgos por cada mil líneas leídas. `None` si no se leyó ninguna línea.
+    pub candidatos_por_1000_lineas: Option<f64>,
 }
 
 /// Huella del prompt de sistema. Cambia si cambia `PROMPT_AUDITORIA`.
@@ -345,6 +349,8 @@ fn auditar_con_limite(
         sin_leer: Vec::new(),
         avisos: Vec::new(),
         medicion: None,
+        lineas_leidas: 0,
+        candidatos_por_1000_lineas: None,
     };
     let mut enviados = BTreeSet::new();
     let mut sin_leer = BTreeSet::new();
@@ -419,7 +425,37 @@ fn auditar_con_limite(
     }
     auditoria.archivos = enviados.into_iter().collect();
     auditoria.sin_leer = sin_leer.into_iter().collect();
+    let (lineas, por_mil) = densidad(
+        &contenidos,
+        &auditoria.archivos,
+        &auditoria.sin_leer,
+        auditoria.hallazgos.len(),
+    );
+    auditoria.lineas_leidas = lineas;
+    auditoria.candidatos_por_1000_lineas = por_mil;
     Ok(auditoria)
+}
+
+/// Líneas leídas y hallazgos por mil líneas. Sin líneas leídas, la densidad es `None`.
+/// Cuenta el texto visible de los archivos leídos, no los archivos enviados.
+fn densidad(
+    contenidos: &BTreeMap<&str, String>,
+    archivos: &[String],
+    sin_leer: &[String],
+    n_hallazgos: usize,
+) -> (u32, Option<f64>) {
+    let lineas: usize = archivos
+        .iter()
+        .filter(|f| !sin_leer.contains(f))
+        .filter_map(|f| contenidos.get(f.as_str()))
+        .map(|texto| texto.lines().count())
+        .sum();
+    let lineas = u32::try_from(lineas).unwrap_or(u32::MAX);
+    if lineas == 0 {
+        return (0, None);
+    }
+    let por_mil = n_hallazgos as f64 * 1000.0 / f64::from(lineas);
+    (lineas, Some(por_mil))
 }
 
 /// Un archivo `.rs` del repo con su contenido completo.
@@ -1417,6 +1453,8 @@ origen = "real"
             sin_leer: sin_leer.iter().map(|s| s.to_string()).collect(),
             avisos: Vec::new(),
             medicion: None,
+            lineas_leidas: 0,
+            candidatos_por_1000_lineas: None,
         }
     }
 
@@ -1498,6 +1536,8 @@ linea = 5
             sin_leer: vec!["src/b.rs".into()],
             avisos: vec!["aviso".into()],
             medicion: None,
+            lineas_leidas: 0,
+            candidatos_por_1000_lineas: None,
         };
         escribir_salida(&ruta, &a).expect("escribe");
         let texto = fs::read_to_string(&ruta).expect("lee la salida");
@@ -1515,6 +1555,8 @@ linea = 5
             "sin_leer",
             "avisos",
             "medicion",
+            "lineas_leidas",
+            "candidatos_por_1000_lineas",
         ] {
             assert!(v.get(campo).is_some(), "falta {campo}");
         }
@@ -1607,5 +1649,59 @@ linea = 5
         assert_eq!(aud.sin_leer, vec!["src/a.rs".to_string()]);
         assert!(aud.incompleta);
         assert_eq!(aud.avisos.len(), 1, "{:?}", aud.avisos);
+    }
+
+    #[test]
+    fn la_auditoria_cuenta_lineas_leidas_y_densidad() {
+        // Diez líneas de producción y cinco de tests. Solo cuentan las de producción.
+        let produccion = "fn uno() {}\nfn dos() {}\nfn calcular_total(x: u32) -> u32 { x * 2 }\nfn cuatro() {}\nfn cinco() {}\nfn seis() {}\nfn siete() {}\nfn ocho() {}\nfn nueve() {}\nfn diez() {}\n";
+        let pruebas = "#[cfg(test)]\nmod pruebas {\n    fn uno() {}\n    fn dos() {}\n}\n";
+        let codigo = format!("{produccion}{pruebas}");
+        let (_tmp, repo) = repo_con(&[("src/a.rs", codigo.as_str())]);
+        let modelo = ModeloFalso::que_responde(
+            r#"{"defectos":[
+ {"archivo":"src/a.rs","linea":3,"cita":"fn calcular_total(x: u32) -> u32 { x * 2 }","detalle":"real"}
+]}"#,
+        );
+        let aud = auditar_con(&repo, &[], &[], &modelo, "m", 10.0, &peor_cero, &gasto_cero)
+            .expect("pasada");
+        assert_eq!(aud.hallazgos.len(), 1, "{:?}", aud.descartados);
+        assert_eq!(aud.lineas_leidas, 10);
+        assert_eq!(aud.candidatos_por_1000_lineas, Some(100.0));
+    }
+
+    #[test]
+    fn un_archivo_sin_leer_no_suma_lineas() {
+        let grande = "let x = 1;\n".repeat(10_000);
+        let (_tmp, repo) =
+            repo_con(&[("src/a.rs", grande.as_str()), ("src/b.rs", grande.as_str())]);
+        let modelo = ModeloFalso::nuevo(|_| Err(ErrorOraculo::Infra("caída".into())));
+        let aud = auditar_con(&repo, &[], &[], &modelo, "m", 10.0, &peor_cero, &gasto_cero)
+            .expect("pasada");
+        assert!(
+            aud.archivos.contains(&"src/a.rs".to_string()),
+            "{:?}",
+            aud.archivos
+        );
+        assert_eq!(aud.lineas_leidas, 0);
+        assert_eq!(aud.candidatos_por_1000_lineas, None);
+    }
+
+    #[test]
+    fn densidad_sin_lineas_es_none() {
+        let contenidos: BTreeMap<&str, String> = BTreeMap::from([
+            ("src/a.rs", "fn uno() {}\n".to_string()),
+            ("src/vacio.rs", String::new()),
+        ]);
+        let a = vec!["src/a.rs".to_string()];
+        let vacio = vec!["src/vacio.rs".to_string()];
+        let nada: Vec<String> = Vec::new();
+        // Sin archivos leídos: no hay densidad.
+        assert_eq!(densidad(&contenidos, &a, &a, 0), (0, None));
+        assert_eq!(densidad(&contenidos, &[], &[], 0), (0, None));
+        // Archivo leído sin líneas: tampoco hay densidad.
+        assert_eq!(densidad(&contenidos, &vacio, &nada, 0), (0, None));
+        // Archivo leído con una línea y sin hallazgos: densidad cero.
+        assert_eq!(densidad(&contenidos, &a, &nada, 0), (1, Some(0.0)));
     }
 }
