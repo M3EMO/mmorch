@@ -32,6 +32,19 @@ Medición del 2026-11-05 con `e665a5f`: 0,97 USD y 199,7 minutos. Pendiente: la 
 
 **Sin medir:** qué par falló y qué defecto se encontró.
 
+## Pasada de búsqueda de defectos (P73 c)
+
+Medición única, con prompt fijo, sobre 10 defectos confirmados de Root `e665a5f`, en un recorte de 8 archivos. `deepseek-v4-pro`, 0,4665 USD.
+
+| Medida | Resultado |
+|---|---|
+| Defectos encontrados | **0 de 10** |
+| Cota superior de Wilson al 90 % | 0,14 |
+| Hallazgos, según lectura de Opus | 6: 4 reales, 1 dudoso, 1 falso |
+| Reales que la revisión de cierre no tenía | 2 |
+
+La pasada leyó todo y no se cortó. No puntúa y no toca `global`. No mejora el recall oficial. No se midió sobre los 8 de la validez: no entra en el saldo. Según el umbral fijado antes de medir, S3b del dataset da "frena".
+
 ## Calibración por dimensión
 
 Protocolo: `n = 20`, semilla 42. Solo entran a `global` las filas de 0,9 o más (P66 a).
@@ -57,7 +70,7 @@ Protocolo: `n = 20`, semilla 42. Solo entran a `global` las filas de 0,9 o más 
 
 ## Corrida real de memora (Tarea 16)
 
-**En curso, sin juez final.** Dos corridas no llegaron al juez final: un reinicio de la app a los 110 minutos, y el plazo de 2 horas con 25 de 57 tareas. Se retomó en vueltas (decisión 71), y la última lectura da 31 de 57. La fila queda marcada como `reanudada`, así que su tiempo y su costo no se comparan. Ver P67 en el plan.
+**En curso, sin juez final.** Dos corridas no llegaron al juez final: un reinicio de la app a los 110 minutos, y el plazo de 2 horas con 25 de 57 tareas. Se retomó en vueltas (decisión 71), y la última lectura da 35 de 57. La fila queda marcada como `reanudada`, así que su tiempo y su costo no se comparan. Ver P67 en el plan.
 
 ## Comparación de `global`
 
@@ -75,7 +88,7 @@ Protocolo: `n = 20`, semilla 42. Solo entran a `global` las filas de 0,9 o más 
 
 | Concepto | USD |
 |---|---|
-| API hasta el 2026-11-06 | 22,06 |
+| API hasta el 2026-11-06, con la pasada | 22,53 |
 | Límite útil del hito 1 | 24,00 |
 
 Los builders se informan aparte en cada `docs/builds/*build-local-*.md`.
@@ -84,6 +97,7 @@ Los builders se informan aparte en cada `docs/builds/*build-local-*.md`.
 
 - **Sin medir por falta de fuente:** los 7 defectos de F1, cuyos repos se borraron (decisión 59).
 - **Hito 1b:** G3 y el acuerdo con el usuario, G4, Colab 7h, Graft 16b con G5, la lectura ampliada del juez y el contrato `sin_evidencia`.
+- **Hito 1b, de la pasada:** `medicion` informa "0 de 10" aunque no lea nada, el tope frena con su reserva pesimista, y sale con 0 estando incompleta. Dos defectos reales que halló siguen en la punta: `src/corre/ejecutor.rs:339` y `src/corre/corrida.rs:281`.
 - **Antes de la próxima calibración paga:** hallazgos 5, 18 y 19, y el arreglo de la Tarea 67.
 - **Antes de evaluar un repo real:** el recall sobre el dataset, y los hallazgos 9, 11, 12, 14 y 15, sin verificar.
 - **Dataset:** PRD en `.claude/prds/dataset.prd.md`, sujeto a su prueba de sustento (decisión 79). Memora y brasa se borran "Cuando el dataset calibre" (decisión 70).

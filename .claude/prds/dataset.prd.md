@@ -110,7 +110,7 @@ Sin esto, el piloto mediría mal. Todos están en el plan de Root.
 4. Una falla del modelo no se reusa en un limpio (hallazgo 18 y arreglo de la Tarea 67).
 5. `Fila` guarda la huella de prompt, rúbricas y regla (hallazgo 19, sin verificar).
 6. `r00t corre` lanza por API (R6), y `track comparar` conoce la vía (R12).
-7. **Recall sobre defectos reales.** El hito 1 midió 0,125, con umbral 0,8. Root no evalúa un repo real hasta cumplirlo sobre defectos que no se usaron para ajustar nada (P73 d).
+7. **Recall sobre defectos reales.** El hito 1 midió 0,125, con umbral 0,8, y la pasada 0 de 10. Root no evalúa un repo real hasta cumplirlo sobre defectos que no se usaron para ajustar nada (P73 d). Ningún dato de hoy dice que se cumpla.
 
 ## Mapa de tareas y defectos (decidido: solo medir)
 
@@ -149,7 +149,7 @@ Sin esto, el piloto mediría mal. Todos están en el plan de Root.
 
 ## Prueba de sustento (P72)
 
-**Regla.** Cada umbral queda fijo antes de ver el resultado. Ningún resultado recorta una fase: "cambia" suma costo, tiempo o método. La pasada de la Línea C acaba de arrancar, y S3b se fijó antes de leerla.
+**Regla.** Cada umbral queda fijo antes de ver el resultado. Ningún resultado recorta una fase: "cambia" suma costo, tiempo o método. S3b se fijó antes de leer la pasada, y ya tiene resultado: **frena** (ver abajo).
 
 ### Ya probado leyendo, sin API
 
@@ -160,7 +160,7 @@ Sin esto, el piloto mediría mal. Todos están en el plan de Root.
 | S6 | Se puede filtrar por mutación del commit | **Sostiene, sin probar la versión** | La documentación de `cargo-mutants` describe `--in-diff`. La imagen trae 27.1.0, y no vi su `--help`. |
 | S7 | Una calibración sirve para tareas nuevas | **Cambia el PRD** | Hoy las filas son por tarea, y dos defectos piden datos que un commit no trae. Es código de D0 y D3. |
 | S8 | El recall es medible | **Cambia el PRD** | Un test del commit en `oculto` da recall 1 por construcción, y 8 defectos no alcanzan. Ahora: test de etiqueta aparte y 30 defectos o más. |
-| S10 | Los 50 USD alcanzan | **Solo para Root** | Cerca de 41,5 USD, por estimación. Los brazos de builder por API no entran. |
+| S10 | Los 50 USD alcanzan | **No alcanzan por poco, por estimación** | Cerca de 52 USD con el costo medido de la pasada. Los brazos de builder por API no entran. S2 lo mide. |
 | S11 | Las fichas salen sin el usuario | **Choca con la decisión 12** | La decisión 12 dice: "el usuario aprueba los requisitos; la spec sale de una sesión `/grill-me`". C6 usa un modelo. Va a P81. |
 | S12 | Los benchmarks externos se reusan | **Sin sostener** | Sus abstracts no nombran Rust. Falta lectura. |
 
@@ -171,15 +171,25 @@ Sin esto, el piloto mediría mal. Todos están en el plan de Root.
 | S1 | Hay tareas suficientes de Rust | Minar 50 commits de 10 repos elegidos con semilla, con los criterios 1 a 5 | 10 % o más admitidos, de 3 repos o más | De 2 % a 10 %: más repos o minería más larga | Menos de 2 % | 0 USD; GitHub, P79 | 1 a 2 días de CPU |
 | S2 | El costo entra en 50 USD | 3 tareas de punta a punta: 15 evaluaciones y 6 defectos del saboteador | Proyección de Root de 50 USD o menos | De 50 a 75 USD: el usuario amplía | Más de 75 USD | Hasta 3 USD de los 50, P80 | 1 día |
 | S3a | El tiempo es viable | Lo mide S2 | 60 minutos o menos por evaluación, y 7 días o menos en total | Hasta 14 días: se elige por tamaño de repo | Más de 14 días | Incluido en S2 | Incluido |
-| S3b | El recall de 0,8 es alcanzable | La pasada sobre los 10 defectos frescos | 7 o más de 10 | 4 a 6: el juez y la pasada se amplían antes de D4 | 3 o menos: el usuario decide | Línea C, ya aprobada | Hoy |
+| S3b | El recall de 0,8 es alcanzable | La pasada sobre los 10 defectos frescos | 7 o más de 10 | 4 a 6: el juez y la pasada se amplían antes de D4 | 3 o menos: el usuario decide | **Medido: 0 de 10, 0,4665 USD. Frena** | Hecho |
 | S9 | El mapa sirve en Rust | 100 crates de categorías conocidas: ¿el vecino más cercano comparte categoría? | 60 % o más | 30 % a 60 %: otro modelo | Menos de 30 % en dos modelos: el mapa no mide | 0 USD; bajar un modelo, P79 | Horas |
 | S13 | El saboteador da casos válidos | 10 intentos en las 3 tareas de S2 | 5 o más compilan, pasan limpios y su test da rojo | 2 a 4: mejorar el prompt | 1 o menos | Incluido en S2 | Incluido |
 
 Los umbrales de S1, S3a, S9 y S13 son criterio mío, no una medición. No tienen otra base.
 
+### Resultado de S3b: frena
+
+**Medido.** La pasada leyó los 8 archivos, sin corte, y encontró 0 de 10. Con 0 de 10, la cota superior de Wilson al 90 % es 0,14. De sus 6 hallazgos, 4 son reales según mi lectura, 1 dudoso y 1 falso. Dos reales no estaban en la revisión de cierre.
+
+**Lo que significa.** Esta pasada no sirve como camino al recall de 0,8. Hoy ninguna medición apoya esa afirmación del PRD. La pasada sí halla defectos de otra clase.
+
+**Lo que no significa.** No prueba que el dataset sea inútil: es el lugar donde se puede medir otro buscador sobre defectos nuevos. Tampoco prueba que el 0,8 sea imposible.
+
+**Este conjunto quedó gastado.** Los 10 ya no miden un buscador ajustado por quien vio este resultado. El umbral de S3b no cambia, y el usuario decide (P83).
+
 ### Criterio de salida
 
-- **Implementar el PRD entero tras el cierre:** S1, S2, S3a, S3b, S9 y S13 sostienen, y P79 a P82 tienen respuesta.
+- **Implementar el PRD entero tras el cierre:** S1, S2, S3a, S9 y S13 sostienen, P79 a P82 tienen respuesta, y P83 resuelve S3b.
 - **Cambiar el PRD y seguir:** alguna da "cambia". El planner escribe el cambio, con costo, y el usuario lo ve. Ninguna fase sale.
 - **Frenar y preguntar:** alguna da "frena". El usuario decide. S9 solo frena el mapa, y el usuario decide si eso cambia su pedido.
 
@@ -192,14 +202,15 @@ Los umbrales de S1, S3a, S9 y S13 son criterio mío, no una medición. No tienen
 | Parte | USD de API |
 |---|---|
 | Fichas de 20 tareas | Cerca de 1 |
-| Calibración, 100 evaluaciones a 0,15 USD con la lectura ampliada | Cerca de 15 |
-| Curva: 40 defectos en 3 lecturas | Cerca de 18 |
-| Conjunto final: 30 defectos | Cerca de 4,5 |
+| Calibración, 100 evaluaciones a 0,19 USD con la lectura ampliada | Cerca de 19 |
+| Curva: 40 defectos en 3 lecturas | Cerca de 23 |
+| Conjunto final: 30 defectos | Cerca de 5,7 |
 | Saboteador: 70 defectos intentados a 0,04 USD | Cerca de 3 |
-| **Subtotal de Root** | **Cerca de 41,5** |
+| **Subtotal de Root** | **Cerca de 52** |
+| Buscadores nuevos, si P83 a | Sin medir |
 | Corridas de builder por API | No entran en este subtotal. Sin medir. Una sola corrida de memora midió 2,76 USD de planificación, y se estimó en cerca de 18 USD por 2 horas de organización |
 
-**Lectura.** El subtotal entra en 50 USD con poco margen. Los brazos de builder por API no entran: dependen de P82. Los 0,15 USD salen de suponer 52 000 tokens de entrada y 16 000 de salida.
+**Lectura.** El subtotal pasa de 50 USD por poco. Los brazos de builder por API no entran: dependen de P82. Los 0,19 USD salen de suponer 52 000 tokens de entrada y 30 000 de salida. La pasada midió de 20 000 a 30 000 de salida, y yo había estimado 16 000: costó 0,4665 USD contra 0,25 estimados.
 
 **Regla.** El piloto corre primero 3 tareas, mide y frena. Después el planner proyecta el total. Si no entra en 50 USD, va al usuario. Toda corrida lleva `--tope-usd`.
 

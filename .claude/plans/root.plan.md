@@ -5224,3 +5224,75 @@ Sin cambios en las líneas A, B y C ni en el cierre. El dataset cambia así:
 **P82: ¿Los brazos de builder del piloto van por cupo o por API?** La parte de Root ya usa cerca de 41,5 de los 50 USD, por estimación.
 - **a)** Por cupo, y los 50 USD quedan para Root. Recomendada. Limita los minutos, pero una comparación exige la misma vía en los dos brazos.
 - **b)** Por API, con el costo medido en S2. Los 50 USD no alcanzan, y hay que ampliar.
+
+## Vuelta del 2026-11-06 (4): la pasada dio 0 de 10
+
+**Medido.** `oraculo auditar` sobre Root `e665a5f`, en 3 tandas, con las 8 rutas de los frescos, hash `c78bbcaa6c575833` y `deepseek-v4-pro`: 0 de 10, 6 hallazgos, 1 descartado por cita, 0,4665 USD. Sin `incompleta` ni `sin_leer`. Saldo: 22,53 de 24 USD. Reservados: 0,97 y 0,11. Quedan 0,39 USD libres. La corrida real lleva 35 de 57 tareas.
+
+**Sin ajustar nada.** No toqué el prompt, y estos 10 no se repiten.
+
+## Lectura de los 6 hallazgos (Opus, sobre `e665a5f`)
+
+| Hallazgo | Veredicto | Por qué |
+|---|---|---|
+| `src/oracle/mod.rs:2289`, `split(' ')` rompe comillas | **Falso** | `tokens.join(" ")` devuelve el texto igual. Solo quita tokens de verbosidad o junit. Queda un borde: un `-q` dentro de comillas. |
+| `src/corre/ejecutor.rs:299`, error de `esperar` no mata al hijo | **Real, raro** | El `?` sale sin `kill`. La rama de plazo sí mata. `contenedor.rs` sí lo hace bien. No estaba en la revisión. |
+| `src/corre/corrida.rs:134`, `?` pierde el `Gate` y el error | **Real, menor** | `registrar_corte(...)?` sale antes del `gate`. No estaba en la revisión. |
+| `src/oracle/contenedor.rs:392`, 125 a 127 como infraestructura | **Real, conocido** | El código lo documenta, y la revisión lo tenía como LOW. Falla cerrado. |
+| `src/oracle/informe.rs:882`, `contains` oculta de más | **Dudoso** | La conducta es esa, pero ocultar de más es el lado seguro. |
+| `src/oracle/contenedor.rs:331`, corte dentro de un carácter | **Real, cosmético** | Puede dar un carácter de reemplazo al inicio de una cola de error. |
+| Descartado: `src/oracle/mod.rs:1811`, `cp` sin `--` | **Falso** | La cita no existe tal cual, y las rutas son internas. El gate hizo bien en rechazarlo. |
+
+**Resultado:** 4 reales, 1 dudoso y 1 falso, según mi lectura. Es un juicio de lectura, no un oráculo. Ninguno es grave, y 2 son nuevos.
+
+## Por qué 0 de 10
+
+**Probado.**
+- **Leyó los archivos.** Las 3 tandas cubren las 8 rutas, sin `sin_leer`. Los tokens de entrada (38 870, 37 987 y 31 504) cuadran con el código de producción completo. Los 10 defectos están antes del primer `#[cfg(test)]`.
+- **No se cortó.** Ninguna tanda marcó `incompleta`.
+- **No es la tolerancia.** El hallazgo más cercano del mismo archivo está a 17 líneas o más, y habla de otra cosa. Cuatro de los 10 están en 3 archivos sin ningún hallazgo.
+- **El prompt no excluye esos defectos.** Pide conducta incorrecta, seguridad, fiabilidad y recursos, y no pone un máximo.
+- **Dio pocos candidatos.** Fueron 7 en 3 llamadas, sobre cerca de 300 000 caracteres.
+
+**Medido, con una estimación.** La salida total fue de 79 866 tokens, y el JSON de los candidatos tiene 2439 caracteres, cerca de 800 tokens. Cerca del 99 % se fue en razonamiento. Dos tandas llegaron a cerca de 29 800 de 32 000.
+
+**Supuesto, sin probar.**
+- Una sola pasada sobre mucho código da pocos candidatos, y no cubre los mismos defectos que una revisión por áreas.
+- El límite de 32 000 pudo frenar el razonamiento en dos tandas.
+- No sé si el modelo consideró estos defectos: `auditar` no guarda el razonamiento.
+
+**Límite de la medición.** Una sola corrida, de un modelo, en un repo. Un revisor LLM eligió los 10.
+
+## Desempates técnicos 45 (Opus, 2026-11-06)
+
+1. **S3b no cambia.** Da "frena", y el usuario decide (P83). No bajo el umbral ni repito.
+2. **El conjunto de 10 queda gastado** para ajustar un buscador. Queda como registro.
+3. **Validez repetida: sin cambios.** La 72 y la 73 siguen siendo necesarias. Los veredictos, `recall_linea`, `recall_test` y los descartes siguen explicando la validez.
+4. **Pasada sobre los 8 conocidos: no corre.** Costaría más de los 0,39 USD libres, por lo medido, y su medida estaría sesgada. P73 c queda cumplida con la medición sobre los frescos.
+5. **Al hito 1b, sin tarea ahora:**
+   - `medicion` no informa un conteo si no leyó esos archivos (la salida de 0 llamadas decía "0 de 10");
+   - la reserva supone 3 intentos, un token por byte y 32 000 de salida, y frena con tope suficiente;
+   - `auditar` sale con 3 si queda incompleta;
+   - `src/corre/ejecutor.rs:339` (kill ante error de `esperar`) y `src/corre/corrida.rs:281` (`Gate` antes del `?`), que siguen en la punta.
+6. **El cierre no depende de esto.** La firma ya deja la validez a la vista, y ahora la pasada también.
+
+**Consecuencia para P79 a P82.**
+- **P79 (minar):** no pierde sentido. Mide si hay tareas, sin API. Solo se suspende si P83 es b.
+- **P80 (3 USD):** se ejecuta solo si P83 es a o c. Sin esa respuesta no gasto.
+- **P81 (fichas) y P82 (vías):** pierden urgencia. Esperan a P83.
+- **P82:** la cifra sube de 41,5 a cerca de 52 USD, con el costo medido.
+
+## Orden final del hito 1 (2026-11-06, 4)
+
+1. **Corrida real**, en curso, 35 de 57.
+2. **Prueba con podman de 72, 73 y 74**, cuando termine la corrida. Mezcla local (P77).
+3. **Validez repetida**, con `test` en los 3 defectos. Da también la comparación de `global`.
+4. **Comandos de "Validation"**, cierre completo y firma del usuario.
+5. **P83**, y después el dataset según su respuesta.
+
+## Pregunta para el usuario (2026-11-06, 4)
+
+**P83: La pasada de búsqueda encontró 0 de 10 defectos reales. El umbral que fijé antes de medir dice que el PRD del dataset frena. ¿Cómo seguimos?** Leyó todo y no se cortó, así que el fallo no es de lectura. De sus 6 hallazgos, 4 son reales, y 2 no estaban en la revisión. Hoy ninguna medición dice que el recall de 0,8 se pueda alcanzar.
+- **a)** Seguir con el dataset, y sumar la búsqueda de un buscador mejor como objetivo medido sobre defectos nuevos. La regla sigue: Root no evalúa repos reales sin recall de 0,8. No prometo llegar. Recomendada: sin un conjunto grande y separado no se puede medir ningún arreglo, y el usuario pidió construir sobre el dataset.
+- **b)** Pausar el dataset y buscar primero un buscador mejor. El problema: faltan defectos nuevos para medirlo, y esos salen del dataset.
+- **c)** Seguir con el dataset y cambiar la promesa de Root: medir conducta con tests y sondas, y dejar de prometer que encuentra defectos ubicados. Esto cambia tu criterio de "un evaluador con criterio".
