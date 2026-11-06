@@ -2134,6 +2134,36 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "fuente"
       ]
     },
+    "HallazgoDescartado": {
+      "description": "Hallazgo del juez que se descartó: no tiene requisito afectado o no pasó el gate de citas. No puntúa.",
+      "type": "object",
+      "properties": {
+        "archivo": {
+          "description": "Archivo que citó el juez.",
+          "type": "string"
+        },
+        "item": {
+          "description": "Ítem de rúbrica que el juez puso en el hallazgo.",
+          "type": "string"
+        },
+        "linea": {
+          "description": "Línea que citó el juez.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "motivo": {
+          "description": "Por qué se descartó.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "archivo",
+        "linea",
+        "item",
+        "motivo"
+      ]
+    },
     "Informe": {
       "description": "`riesgos` y `proximos_pasos` tienen como máximo 5 entradas.",
       "type": "object",
@@ -2486,6 +2516,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "type": "array",
           "items": {
             "$ref": "#/$defs/Hallazgo"
+          }
+        },
+        "hallazgos_descartados": {
+          "description": "Hallazgos del juez de diseño que se descartaron, con su motivo. No cuentan para ningún puntaje.\nUn veredicto viejo lee vacío.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/HallazgoDescartado"
           }
         },
         "inestables": {
@@ -4865,6 +4903,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "$ref": "#/$defs/Hallazgo"
       }
     },
+    "hallazgos_descartados": {
+      "description": "Hallazgos del juez de diseño que se descartaron, con su motivo. No cuentan para ningún puntaje.\nUn veredicto viejo lee vacío.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/HallazgoDescartado"
+      }
+    },
     "inestables": {
       "description": "Ids ordenados de los tests inestables del oculto. Un veredicto viejo lee vacío.",
       "type": "array",
@@ -5304,6 +5350,36 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "cita",
         "detalle",
         "fuente"
+      ]
+    },
+    "HallazgoDescartado": {
+      "description": "Hallazgo del juez que se descartó: no tiene requisito afectado o no pasó el gate de citas. No puntúa.",
+      "type": "object",
+      "properties": {
+        "archivo": {
+          "description": "Archivo que citó el juez.",
+          "type": "string"
+        },
+        "item": {
+          "description": "Ítem de rúbrica que el juez puso en el hallazgo.",
+          "type": "string"
+        },
+        "linea": {
+          "description": "Línea que citó el juez.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "motivo": {
+          "description": "Por qué se descartó.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "archivo",
+        "linea",
+        "item",
+        "motivo"
       ]
     },
     "Informe": {
