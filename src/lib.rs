@@ -80,6 +80,27 @@ pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
             fuentes.as_deref(),
             *semilla,
         ),
+        Comando::Oraculo {
+            accion:
+                OraculoAccion::Auditar {
+                    repo,
+                    salida,
+                    tope_usd,
+                    gitleaks,
+                    incluir,
+                    defectos,
+                },
+        } => {
+            let opciones = oracle::auditar::OpcionesAuditar {
+                repo: repo.clone(),
+                salida: salida.clone(),
+                tope_usd: *tope_usd,
+                gitleaks: gitleaks.clone(),
+                incluir: incluir.clone(),
+                defectos: defectos.clone(),
+            };
+            oraculo_auditar(cli.json, &opciones)
+        }
         Comando::Ficha { accion } => ficha_accion(cli.json, accion),
         Comando::Route {
             rol,
@@ -305,6 +326,43 @@ fn oraculo_informe(nombre: &str, repo: &Path, md: bool) -> Result<u8, Error> {
         println!("{}", serde_json::to_string_pretty(informe)?);
     }
     Ok(oracle::codigo_de_estado(veredicto.estado))
+}
+
+/// `oraculo auditar`: valida `--tope-usd`, audita el repo y muestra un resumen. Los errores de uso salen con 2.
+/// Sale con 0 aunque quede incompleta: es una medida.
+fn oraculo_auditar(json: bool, opciones: &oracle::auditar::OpcionesAuditar) -> Result<u8, Error> {
+    let usd = opciones.tope_usd;
+    if !usd.is_finite() || usd <= 0.0 {
+        return Err(Error::Uso(format!(
+            "--tope-usd debe ser un número finito mayor que 0, no {usd}"
+        )));
+    }
+    let auditoria = oracle::auditar::auditar(&config::root_home(), opciones)?;
+    let valor = serde_json::to_value(&auditoria)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&valor)?);
+    } else {
+        println!("{}", resumen_auditoria(&valor));
+    }
+    Ok(0)
+}
+
+/// Una línea con los conteos de la auditoría. Lee los campos por nombre desde su JSON.
+fn resumen_auditoria(valor: &serde_json::Value) -> String {
+    let cuenta = |campo: &str| valor[campo].as_array().map_or(0, Vec::len);
+    let costo = valor["costo_usd"].as_f64().unwrap_or(0.0);
+    let llamadas = valor["llamadas"].as_u64().unwrap_or(0);
+    let incompleta = valor["incompleta"].as_bool().unwrap_or(false);
+    let mut linea = format!(
+        "auditoría: hallazgos {}, descartados {}, llamadas {llamadas}, costo ${costo:.4}, incompleta: {}",
+        cuenta("hallazgos"),
+        cuenta("descartados"),
+        if incompleta { "sí" } else { "no" }
+    );
+    if let Some(encontrados) = valor["medicion"]["casos"]["encontrados"].as_u64() {
+        linea.push_str(&format!(", encontrados {encontrados} de casos"));
+    }
+    linea
 }
 
 /// `oraculo pendientes --colab`: corre el paquete en Colab, importa el junit y reporta.
@@ -1089,5 +1147,41 @@ fn imprimir_registrados(json: bool, cuantos: usize) {
         println!("{}", serde_json::json!({"registrados": cuantos}));
     } else {
         println!("Registrados {cuantos} eventos");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn oraculo_auditar_tope_usd_no_positivo_sale_con_uso_sin_tocar_nada() {
+        for valor in ["0", "-1"] {
+            let cli = Cli::try_parse_from([
+                "r00t",
+                "oraculo",
+                "auditar",
+                "--repo",
+                "/repo-que-no-existe",
+                "--salida",
+                "/salida-que-no-existe.json",
+                "--tope-usd",
+                valor,
+                "--gitleaks",
+                "/gitleaks-que-no-existe.json",
+            ])
+            .expect("los flags parsean");
+            let error = ejecutar(&cli).expect_err("el tope no positivo es error de uso");
+            assert!(
+                matches!(error, Error::Uso(_)),
+                "--tope-usd {valor}: {error:?}"
+            );
+            assert_eq!(error.codigo_de_salida(), 2, "--tope-usd {valor}");
+            assert!(
+                error.to_string().contains("finito mayor que 0"),
+                "--tope-usd {valor}: {error}"
+            );
+        }
     }
 }
