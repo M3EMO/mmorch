@@ -105,18 +105,21 @@ pub struct EjecutorContenedorBuilder {
     pub timeout: Duration,
 }
 
+/// Código con que podman avisa que mató el contenedor con SIGKILL. El stdout del builder sigue válido.
+const CODIGO_SIGKILL: i32 = 137;
+
+/// Motivo de un contenedor matado con SIGKILL. Lo lee quien llama junto con el stdout conservado.
+const MENSAJE_SIGKILL: &str = "el contenedor fue matado por SIGKILL, a menudo por falta de memoria";
+
 /// Códigos con que podman sale por un fallo de infraestructura. Ninguno es un resultado del builder.
-const CODIGOS_PODMAN_INFRA: [(i32, &str); 4] = [
+/// El 137 no va aquí: un SIGKILL conserva el stdout (ver `clasificar_salida`).
+const CODIGOS_PODMAN_INFRA: [(i32, &str); 3] = [
     (
         125,
         "error propio de podman: imagen inexistente u opción inválida",
     ),
     (126, "el comando no es ejecutable"),
     (127, "el comando no se encontró"),
-    (
-        137,
-        "el contenedor fue matado por SIGKILL, a menudo por falta de memoria",
-    ),
 ];
 
 /// Significado del código de podman si es fallo de infraestructura. `None` si no lo es.
@@ -136,6 +139,29 @@ fn fallo_de_podman(salida: &SalidaClaude) -> Option<ErrorCorre> {
         salida.codigo,
         String::from_utf8_lossy(&salida.stderr).trim()
     )))
+}
+
+/// Decide qué hacer con la salida de podman. Función pura: no lanza nada.
+/// Un 137 devuelve `Cortado` con el stdout intacto, para que quien llama guarde el transcript.
+/// Los códigos 125, 126 y 127 son fallos de infraestructura: dan `Ejecutor`.
+/// Cualquier otro código es de claude y pasa como `Ok`.
+fn clasificar_salida(salida: SalidaClaude) -> Result<SalidaClaude, ErrorCorre> {
+    if salida.codigo == CODIGO_SIGKILL {
+        let detalle = String::from_utf8_lossy(&salida.stderr).trim().to_string();
+        let mensaje = if detalle.is_empty() {
+            MENSAJE_SIGKILL.to_string()
+        } else {
+            format!("{MENSAJE_SIGKILL}: {detalle}")
+        };
+        return Err(ErrorCorre::Cortado {
+            mensaje,
+            stdout: salida.stdout,
+        });
+    }
+    match fallo_de_podman(&salida) {
+        Some(error) => Err(error),
+        None => Ok(salida),
+    }
 }
 
 /// Contador de nombres de contenedor dentro del proceso. Con el pid, el nombre no choca con otra corrida.
@@ -198,10 +224,7 @@ impl EjecutorBuilder for EjecutorContenedorBuilder {
         // El plazo de este rol no supera el tope del ejecutor.
         let plazo = l.plazo.min(self.timeout);
         match correr_proceso("podman", &args, plazo)? {
-            Fin::Termino(salida) => match fallo_de_podman(&salida) {
-                Some(error) => Err(error),
-                None => Ok(salida),
-            },
+            Fin::Termino(salida) => clasificar_salida(salida),
             Fin::Vencio { stdout, .. } => {
                 // Venció: se pide borrar el contenedor por nombre. Un fallo al borrar no tapa el aviso.
                 let _ = Command::new("podman")
@@ -366,7 +389,7 @@ mod codigos_podman {
 
     #[test]
     fn codigos_de_infra_de_podman_tienen_significado() {
-        for codigo in [125, 126, 127, 137] {
+        for codigo in [125, 126, 127] {
             assert!(
                 significado_codigo_podman(codigo).is_some(),
                 "falta el significado de {codigo}"
@@ -386,11 +409,7 @@ mod codigos_podman {
 
     #[test]
     fn fallo_de_podman_nombra_el_codigo_y_su_significado() {
-        for (codigo, esperado) in [
-            (126, "no es ejecutable"),
-            (127, "no se encontró"),
-            (137, "SIGKILL"),
-        ] {
+        for (codigo, esperado) in [(126, "no es ejecutable"), (127, "no se encontró")] {
             let salida = SalidaClaude {
                 codigo,
                 stdout: Vec::new(),
@@ -403,6 +422,58 @@ mod codigos_podman {
                 texto.contains(&codigo.to_string()) && texto.contains(esperado),
                 "{texto}"
             );
+        }
+    }
+
+    #[test]
+    fn sigkill_con_stdout_da_cortado_con_ese_stdout() {
+        let stdout = b"{\"tipo\":\"parcial\"}\n".to_vec();
+        let salida = SalidaClaude {
+            codigo: 137,
+            stdout: stdout.clone(),
+            stderr: b"detalle\n".to_vec(),
+        };
+        match clasificar_salida(salida) {
+            Err(ErrorCorre::Cortado {
+                mensaje,
+                stdout: conservado,
+            }) => {
+                assert_eq!(conservado, stdout);
+                assert!(
+                    mensaje.contains("el contenedor fue matado por SIGKILL"),
+                    "{mensaje}"
+                );
+            }
+            otro => panic!("137 debe dar Cortado, dio {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn codigos_de_infra_de_podman_siguen_siendo_ejecutor() {
+        for codigo in [125, 126, 127] {
+            let salida = SalidaClaude {
+                codigo,
+                stdout: b"algo\n".to_vec(),
+                stderr: b"detalle\n".to_vec(),
+            };
+            match clasificar_salida(salida) {
+                Err(error @ ErrorCorre::Ejecutor(_)) => {
+                    assert!(error.to_string().contains(&codigo.to_string()), "{error}");
+                }
+                otro => panic!("{codigo} debe dar Ejecutor, dio {otro:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn codigos_de_claude_0_y_1_pasan_como_ok() {
+        for codigo in [0, 1] {
+            let salida = SalidaClaude {
+                codigo,
+                stdout: b"resultado\n".to_vec(),
+                stderr: Vec::new(),
+            };
+            assert_eq!(clasificar_salida(salida.clone()).ok(), Some(salida));
         }
     }
 
