@@ -97,6 +97,54 @@ Sin esto, el piloto mediría mal. Todos están en el plan de Root.
 4. Una falla del modelo no se reusa en un limpio (hallazgo 18 y arreglo de la Tarea 67).
 5. `Fila` guarda la huella de prompt, rúbricas y regla (hallazgo 19, sin verificar).
 6. `r00t corre` lanza por API (R6), y `track comparar` conoce la vía (R12).
+7. **Recall sobre defectos reales.** El hito 1 midió 0,125, con umbral 0,8. Root no evalúa un repo real hasta cumplirlo sobre defectos que no se usaron para ajustar nada. Esto es una propuesta, atada a P73.
+
+## Fuente de tareas por mapa (propuesta, sin decidir)
+
+**Origen.** El usuario respondió con un video: "Esto. Algo asi." El orquestador vio 24 cuadros, sin audio. El video arma un mapa de significado de los juegos de Steam, elige espacio vacío y genera ideas con "BLENDED FROM", "LEANS TOWARD" y "MUST NOT COPY". Después mide de nuevo. Esta sección es una lectura de ese video, y el usuario no la aprobó.
+
+**Qué aporta.**
+- **Medida de cercanía.** Cada tarea tiene su distancia a lo público. Hipótesis: una tarea lejana está menos memorizada por el modelo.
+- **Cobertura de defectos.** Un mapa de defectos reales e inyectados muestra si lo inyectado representa lo real. El hito 1 sugiere que no: los inyectados dieron 1,0 en muchas dimensiones, y el recall real dio 0,125.
+- **Tareas nuevas.** "Mezcla de", "se inclina a" y "no copiar", con una medición de vuelta si el borrador queda cerca.
+
+**Regla de Root.** La distancia es un cálculo, no un juicio. Un LLM puede escribir un borrador, pero nunca etiqueta. Lejos no significa bueno ni factible.
+
+**Una tarea generada entra solo con oráculo.**
+- Una solución de referencia pasa los tests ocultos.
+- Un defecto conocido los pone en rojo.
+- Cumple los criterios 2 a 5. El criterio 1 usa el estado inicial de la tarea, no un commit.
+
+**Tamaño medido.** `gh api search/repositories`, 2026-11-05, Rust con licencia MIT o Apache-2.0: 42 127 repos con 10 estrellas o más, 9676 con 100 o más, y 1717 con 1000 o más. La consulta une las dos licencias, y no verifiqué ese comportamiento de GitHub. Alcanza para un mapa de repos. No medí cuántos commits sirven como tareas, y un mapa tan chico puede tener huecos sin sentido.
+
+**Embeddings.**
+
+| Opción | Dato | Fuente | Dónde corre | Costo |
+|---|---|---|---|---|
+| `jina-embeddings-v2-base-code` o su sucesor | 768 dimensiones, 8192 tokens, Apache 2.0 | Búsqueda web, sin leer el modelo | Laptop con CPU | 0 USD de API; tiempo sin medir |
+| `voyage-code-3` | Cerca de 0,18 USD por millón de tokens; API cerrada | Páginas de terceros, sin verificar | API externa | Estimación: 10 000 textos de 1000 tokens, cerca de 1,8 USD |
+
+- **Propuesta:** el modelo abierto, en la laptop. No tiene GPU (`nvidia-smi` no existe), pero el piloto son miles de textos cortos. D1 mide el tiempo con una muestra de 100.
+- **Colab:** la decisión 33 dice que la cuenta es paga y acepta la T4 para los tests pendientes. No confirmé que la T4 sea gratis. Una A100 pide preguntar antes. Usar Colab aquí es otra pregunta al usuario.
+- **Qué se embebe:** descripción del repo, mensaje del commit y resumen del diff. No hay código de tests ocultos.
+
+**Qué fase cambia.**
+- **D1:** suma el mapa, solo para medir: cercanía de cada candidato y mapa de defectos.
+- **D3:** estratifica también por cercanía.
+- **D7, nueva y después de D6:** tareas generadas. Empieza con 3 tareas y mide su costo.
+
+**Contrato.**
+- **C1, C2, C5 y C6:** sin cambios. Una tarea generada cumple lo mismo.
+- **C3:** solo commits reales. Una tarea generada no entra en una secuencia.
+- **C4:** las tareas ancla siguen fijas. Una tarea generada no es ancla hasta tener una versión estable.
+- **Métrica nueva, propuesta:** el puntaje del coder según la cercanía. Con 20 tareas solo muestra una tendencia. No prueba memoria.
+
+**Los 50 USD.** Medir el mapa no gasta API con el modelo abierto. Generar tareas gasta sin medir, así que D7 no entra en los 50 USD, salvo que el usuario lo pida después de D2.
+
+**Saboteador y curva de auditoría (propuesta, sin decidir).**
+- **Saboteador.** Un modelo escribe un defecto plausible en código con tests. Un test oculto lo pone en rojo, y ese test es la etiqueta. Sigue teniendo sentido: ataca el problema medido, porque hoy los inyectores cubren pocas clases.
+- **Curva de auditoría.** Recall según lo que Root lee: 6000 caracteres por archivo, más, y todo. Mi lectura del nombre, porque no vi el tuit. Sigue teniendo sentido: decide con datos cuánto debe leer el juez.
+- **El mapa no los reemplaza.** El mapa dice dónde falta muestra. El saboteador da casos con etiqueta. La curva mide cuánto cuesta encontrarlos.
 
 ## Costo
 
@@ -126,6 +174,7 @@ Sin esto, el piloto mediría mal. Todos están en el plan de Root.
 | D4 | Calibración por versión | Cerca de 10 USD | Filas por dimensión |
 | D5 | Vara v1 y `oraculo carencias` | Baja | Graft la consume |
 | D6 | Borrado de memora y brasa | 0 | Decisión 70, con orden del usuario |
+| D7 | Tareas generadas por mapa, si se aprueba | Sin medir | 3 tareas con oráculo y su costo |
 
 ## Métricas de éxito
 
@@ -148,4 +197,5 @@ Sin esto, el piloto mediría mal. Todos están en el plan de Root.
 3. **P70:** cómo entra la clave al builder.
 4. **P71:** si "Usar api claude" incluye al juez.
 5. **"usa ECC-".** El mensaje termina cortado. La lectura de Graft es que el dataset se construye con ECC. No está confirmada.
-6. **Reusar benchmarks.** FeatureBench, SWE-Milestone y Commit0 se propusieron. No verifiqué si traen tareas de Rust. Se revisa en D1.
+6. **P75 y P76:** saboteador, curva de auditoría y fuente por mapa.
+7. **Reusar benchmarks.** FeatureBench, SWE-Milestone y Commit0 se propusieron. No verifiqué si traen tareas de Rust. Se revisa en D1.

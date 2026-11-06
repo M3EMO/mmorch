@@ -4954,3 +4954,90 @@ P63 y P64 siguen abiertas. P64 cubre hasta la 68.
 **P72: ¿Aprobás el borrador del PRD del dataset?** Está en `.claude/prds/dataset.prd.md`. Root administra dataset, vara y oráculo oculto, y Graft consume y mide.
 - **a)** Aprobado para implementar después del cierre. Recomendada.
 - **b)** Lo leo y lo corrijo antes.
+
+## Vuelta del 2026-11-06: validez reprobada y video del usuario
+
+**Validez, binario `e665a5f`.** Orden 5 de 6 = 0,833, umbral 1,0. Recall 1 de 8 = 0,125, umbral 0,8. Acuerdo sin medir. 0,97 USD, 199,7 minutos, exit 0. Gasto de API: 22,06 USD. Quedan 1,94 USD hasta 24 USD.
+
+## Diagnóstico de la validez (Opus, sin gastar API)
+
+**Qué se recupera.** `evidencia/<tarea>/<hash>/historial.jsonl` guarda cada test por repetición. Los veredictos, las decisiones y los hallazgos no quedan en ningún lado. No se puede saber sin correr qué par falló ni qué defecto se encontró.
+
+**Corrección a la lectura del orquestador.** Simulé `extractos` sobre los clones: 5 archivos más largos, 6000 caracteres por archivo y 40 000 en total. Es una simulación: los archivos que citan las sondas también entran, después. `src/cmd/mod.rs:171` no está entre los 5 más largos de memora. Entonces 5 de 8 defectos no llegan al juez, no 4.
+
+| Defecto | ¿Llega al juez? | ¿Lo vio el oráculo? | Causa que se puede probar |
+|---|---|---|---|
+| `src/scene.rs:349` traversal | No, llega hasta la línea 182 | No aplica | Fuera del corte. Sin sonda de esa clase. |
+| `src/scene.rs:319` sin tope | No | No aplica | Igual. |
+| `src/render.rs:576` textura | No, hasta la 151 | No aplica | Igual. |
+| `src/gltf_load.rs:92` recursión | Sí | No aplica | Sin sonda de esa clase. Ver la regla de impacto. |
+| `src/scene.rs:180` overflow | Sí, por 2 líneas | No aplica | Igual. |
+| `src/scene.rs:271` spin | No | **Sí: test rojo 5 de 5** | La métrica no cuenta un test. |
+| `src/cmd/mod.rs:171` FIFO | No, fuera del top 5 | **Sí: test rojo 5 de 5** | Igual. |
+| `src/renderer.rs:70` backend | Sí | **Sí: test rojo 5 de 5** | Igual. |
+
+**Hechos de código.**
+1. `encuentra` solo mira `v.hallazgos`, con archivo y línea a 3 o menos (`src/oracle/validez.rs:479-484`). Un test rojo no crea un hallazgo con línea. Root midió esos 3 defectos y la métrica los da por perdidos.
+2. El juez descarta un hallazgo sin requisito afectado (`src/oracle/juez.rs:54` y `procesar_hallazgo`). Un defecto de seguridad que la ficha no nombra cae ahí.
+3. La evidencia de un ítem no cuenta como hallazgo. El juez puede citar la línea sin que la métrica lo vea.
+4. Las sondas nativas buscan `unsafe`, `unwrap`, tamaños y secretos. Ninguna busca traversal, recursión ni tamaño de lectura.
+
+**Hipótesis, sin medir.**
+- En `gltf_load.rs:92` y `scene.rs:180`, el juez los vio y la regla de impacto los descartó, o no los vio.
+- No sé cuál es el defecto encontrado.
+- **El par fallido.** Los tests favorecen al `mejor` en los 6 pares (historial, por ejemplo 61+67 contra 60+67). Entonces el fallo no viene de los tests. `ordena_antes` usa `global` antes que completitud (`src/oracle/validez.rs:469-475`). Sospecho de `71fc74c` contra `d09e1f2` o de `0f290a9` contra `c4a3c96`, de código casi igual, donde pesa el ruido del juez.
+
+**Por qué la calibración dio 1 y la validez 0,125.** Los defectos inyectados son de las clases que las sondas buscan. Los reales son de otras. La calibración mide la reacción a esas clases, no el criterio. La Tarea 12b ya lo avisaba.
+
+**Con todo arreglado en la métrica, sigue reprobado.** Contar los 3 tests da como mucho 4 de 8: 0,5.
+
+## Desempates técnicos 42 (Opus, 2026-11-06)
+
+1. **El hito 1 no puede firmarse como cumplido.** El criterio es orden 1,0 y recall 0,8. No lo bajo. Solo el usuario acepta una firma con la validez reprobada.
+2. **Sumar el detalle por caso ya: sí.** Sin él, cualquier arreglo se hace a ciegas. Es la Tarea 72, y corre en paralelo: `src/oracle/validez.rs` no lo tocan la 70 ni la 71.
+3. **Los 50 USD del dataset no se usan** para el hito 1 sin preguntar.
+4. **Búsqueda dirigida con reglas para estas 5 clases: no.** Ajustar sondas a los 8 defectos invalida la medición. Cualquier búsqueda se mide sobre defectos nuevos.
+
+### Tarea 72: Detalle por caso en la validez
+- **Archivos**: `src/oracle/validez.rs` y sus tests.
+- **Arranca**: ya, desde `e665a5f`, con `ROOT_SIN_PODMAN=1`.
+- **Brief**: `docs/builds/brief-local-72.md`.
+
+## Orden final del hito 1 (2026-11-06)
+
+**Ahora, en paralelo:** Tareas 70, 71 y 72.
+
+**Después, sin superponer podman:**
+1. **Una prueba con podman de 69, 70, 71 y 72**, con corte real y `--resume`.
+2. **Mezcla local**, según la decisión 71. La 72 entra con la orden de P73.
+3. **`r00t corre --reanuda`.**
+4. **Validez otra vez**, si P73 lo pide.
+5. **Comparación de `global`**, y **cierre** según P73.
+
+**Saldo.** Quedan 1,94 USD. La validez otra vez gasta cerca de 0,97 USD, y la evaluación final cerca de 0,11 USD. Quedan cerca de 0,86 USD.
+
+**Sumado al PRD del dataset:** "Fuente de tareas por mapa", como propuesta, con D7 y el prerrequisito 7. Nota de investigación en `vault/research/2026-11-05-embeddings-codigo-mapa-dataset.md`, sin verificar.
+
+## Preguntas para el usuario (2026-11-06)
+
+**P73: La validez reprobó: Root ordenó 5 de 6 pares y encontró 1 de 8 defectos reales, con umbrales de 6 de 6 y 0,8. ¿Qué hacemos con el cierre del hito 1?**
+- **a)** Guardar el detalle por caso y repetir la validez. Cerca de 1 USD y 200 minutos. Explica las fallas, pero no las arregla.
+- **b)** Adelantar la lectura ampliada del juez y repetir las filas del trío. Estimación: de 11 a 14 USD y de 6 a 8 horas, más que el saldo de 1,94 USD. No resuelve los 3 defectos de test ni la regla de impacto.
+- **c)** Sumar una pasada de búsqueda de defectos que no puntúa y no toca al juez. Estimación: cerca de 0,09 USD por evaluación, más un builder y un día. Riesgo: medirla sobre estos 8 defectos la sesga.
+- **d)** Firmar el hito 1 con la validez reprobada a la vista. Root no evalúa un repo real hasta cumplir el recall sobre el dataset. Sin gasto extra.
+- **Recomiendo a y d juntas.** Se entiende la falla por 1 USD, se firma sin esconderla, y el arreglo se mide sobre defectos nuevos.
+
+**P74: ¿Un defecto cuenta como encontrado si su test oculto queda en rojo?** Hoy cuenta solo un hallazgo con archivo y línea. Root vio esos 3 defectos por sus tests.
+- **a)** Sí, pero la fila muestra aparte encontrados por línea y por test. Recomendada: dice qué midió de verdad. Esto cambia la definición, y sube el recall como mucho a 0,5.
+- **b)** No. Encontrar un defecto exige ubicarlo.
+
+**P75: ¿Sumamos el saboteador de código y la curva de auditoría al PRD del dataset?** Un modelo escribe un defecto, y un test oculto en rojo es su etiqueta. La curva mide recall según cuánto lee Root.
+- **a)** Los dos. Recomendada: atacan lo que falló en la validez.
+- **b)** Solo el saboteador.
+- **c)** Solo la curva.
+- **d)** Ninguno.
+
+**P76: Con tu video, ¿para qué usamos el mapa?**
+- **a)** Solo para medir en el piloto: cercanía de las tareas y cobertura de defectos. Sin API con un modelo abierto. Generar tareas se decide después de medir 3 tareas minadas. Recomendada.
+- **b)** También generar tareas nuevas en el piloto. Costo sin medir, dentro de los 50 USD.
+- **c)** No usar el mapa.
