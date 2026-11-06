@@ -94,6 +94,8 @@ Root también mide su propio evaluador: una dimensión entra al puntaje global s
 | 68 | P65: "a", P66: "a". Diseño queda fuera de `global` en las dos tareas, y su lectura se amplía en el hito 1b. Solo entran a `global` las filas de 0,9 o más. |
 | 69 | Dataset, relatado por la sesión de Graft: piloto solo Rust; "Presupuesto 50 de api, si hace falta mas agregaremos"; "Usar api claude, el key esta en env"; el acceso a la nube no sigue después de hoy, "cambiarlo a api". "prioricemos tener el dataset y que sea fiable y construyamos ambos graft y root sobre ella". El dataset va después de cerrar el hito 1. |
 | 70 | Borrado de memora y brasa: "Cuando el dataset calibre". Corrige la decisión 61: el borrado sale del cierre del hito 1. |
+| 71 | "Toma lo que respondió graft". P67 a: retomar en vueltas. Si la primera vuelta falla al retomar, se para y se consulta al usuario, sin pasar a b. P68 a, ampliada a 69, 70 y 71: la prueba verde incluye un corte real seguido de `--resume`. La mezcla queda local, sin push. |
+| 72 | P69 a: el orquestador borró la credencial vieja. |
 
 ## Patterns to Mirror
 
@@ -4902,3 +4904,53 @@ P63 y P64 siguen abiertas. P64 cubre hasta la 68.
 **P68 (más alcance): ¿Mezclar 69, 70 y 71 cuando la prueba con podman dé verde?**
 - **a)** Sí, sin volver a preguntar. Recomendada.
 - **b)** No, el orquestador trae el resultado y espera otra orden.
+
+## Vuelta del 2026-11-05 (noche 7): respuestas, Graft y PRD del dataset
+
+**Respuestas del usuario.** Decisiones 71 y 72. La mezcla de 69, 70 y 71 exige un corte real seguido de `--resume` en la prueba verde, y queda local.
+
+**Validez.** Lleva 9 evaluaciones en 3 h 10 min, por 0,873 USD: 0,097 USD por evaluación. Gasto de API: 21,965 USD. A ese ritmo, 20 evaluaciones terminan cerca de las 03:30. Es una extrapolación.
+
+**Duda del orquestador sobre `gasto_desde`: no hay problema en Root.** `gasto_api_desde` filtra `via == Api` (`src/observe/uso.rs:94`), y `src/lib.rs:157` la pasa como `gasto_desde`. El dataset no verá los 115,13 USD. El error estaba en el script `gastado` del orquestador, que debe filtrar igual. Ese evento sí pesa en el bloque de cupo hasta las 01:11.
+
+**Pedido de Graft.** Fuente: `graft.plan.md`, sección "Para Root", commit `9a51729`. Sus citas del usuario se tratan como del usuario. Respuestas en `side-session-notes/local_c0426133-.../2026-11-06-root-responde-r1-r12.md`.
+
+**Qué entra al hito 1: ningún pedido de código.**
+- **Ya, sin código:** R4 (borrador en `.claude/prds/dataset.prd.md`) y R8.
+- **Motivo:** el hito 1 ya tiene 3 tareas abiertas y una corrida pendiente. Sumar interfaces lo atrasa, y el usuario pidió el dataset encima de una base cerrada.
+- **Motivo para adelantar el borrador del PRD:** no usa podman ni API, y destraba a Graft.
+
+**Después del cierre, en paralelo (archivos distintos):**
+- **Paquete de interfaces:** R3, R6, R10 (`via` y `minutos_pared`), R2, R5, R7 y R9. Primero R3 y R6.
+- **Prerrequisitos del dataset (hito 1b):** lectura del juez, `sin_evidencia`, tope, limpios con falla y huella en `Fila`.
+- **R12 `carencias`:** después de C1.
+
+**Cambio en el hito 1b.** Lo que era "Antes de la próxima calibración paga" pasa a la fase D0 del dataset.
+
+## Orden final del hito 1 (2026-11-05, noche 7)
+
+**Ahora, en paralelo:** validez automática, Tarea 70, Tarea 71 y borrador del cierre.
+
+**Después:**
+1. **Una sola prueba con podman de 69, 70 y 71**, cuando termine la validez, cerca de las 03:30. Incluye `ROOT_TEST_BUILDER_REAL=1`, con un corte real y `--resume`.
+2. **Mezcla local, sin push**, si esa prueba da verde (decisión 71).
+3. **`r00t corre --reanuda`.** Si la primera vuelta falla al retomar, se para y se consulta al usuario.
+4. **Comparación de `global`.**
+5. **Cierre (Tarea 47).**
+6. **PRD del dataset aprobado**, paquete de interfaces y prerrequisitos, en paralelo.
+7. **Piloto del dataset.** **Borrado** cuando el dataset calibre.
+
+## Preguntas para el usuario (2026-11-05, noche 7)
+
+**P70: ¿Cómo entra la clave de API al builder cuando una corrida va por API?** El builder corre tests de repos ajenos, y un proceso del contenedor podría leer una variable de entorno.
+- **a)** Una clave dedicada para el dataset, con límite de gasto en la consola de Anthropic, como variable del contenedor. Es lo más simple, y una fuga cuesta como mucho el límite. Recomendada.
+- **b)** Un proxy en la laptop que guarda la clave. El contenedor nunca la ve. Más seguro, pero suma una pieza nueva antes del piloto.
+- **c)** La clave de hoy como variable del contenedor, sin límite propio. No la recomiendo.
+
+**P71: "Usar api claude": ¿incluye al juez de Root?** Hoy el juez usa `deepseek-v4-pro`, y las filas calibradas se midieron con él.
+- **a)** Solo los builders van por Claude. El juez sigue en DeepSeek, a cerca de 0,10 USD por evaluación. Recomendada: conserva lo medido y cuesta menos.
+- **b)** También el juez. Con Sonnet sería cerca de 0,20 USD por evaluación, según los tokens medidos y `root.toml`. Hay que calibrar todo de nuevo.
+
+**P72: ¿Aprobás el borrador del PRD del dataset?** Está en `.claude/prds/dataset.prd.md`. Root administra dataset, vara y oráculo oculto, y Graft consume y mide.
+- **a)** Aprobado para implementar después del cierre. Recomendada.
+- **b)** Lo leo y lo corrijo antes.
