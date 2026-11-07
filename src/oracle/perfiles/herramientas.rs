@@ -138,23 +138,75 @@ pub(crate) fn motivo_json(e: &serde_json::Error) -> String {
     }
 }
 
+/// Parsea el reporte sin mirar el disco. Las rutas relativas quedan normalizadas; las absolutas, como vienen.
 pub fn parsear_gitleaks(json: &str, requisitos: &[Requisito]) -> Result<Vec<Hallazgo>, String> {
+    parsear_gitleaks_con(json, None, requisitos).map(|(hs, _)| hs)
+}
+
+/// Parsea el reporte con `repo`: revisa que cada archivo exista y da avisos de los que no. Una ruta
+/// absoluta fuera de `repo` es error.
+pub fn parsear_gitleaks_en(
+    json: &str,
+    repo: &Path,
+    requisitos: &[Requisito],
+) -> Result<(Vec<Hallazgo>, Vec<String>), String> {
+    parsear_gitleaks_con(json, Some(repo), requisitos)
+}
+
+/// Ruta de `ruta` dentro de `repo`, sin el prefijo del repo. Prueba la ruta tal cual y la canónica.
+fn ruta_bajo_repo<'a>(ruta: &'a str, repo: &Path) -> Option<&'a str> {
+    let canonica = fs::canonicalize(repo).ok();
+    std::iter::once(repo)
+        .chain(canonica.as_deref())
+        .find_map(|raiz| Path::new(ruta).strip_prefix(raiz).ok())
+        .and_then(Path::to_str)
+}
+
+/// Ruta del archivo de gitleaks relativa al repo. Sin `repo`, una ruta absoluta queda como viene.
+fn ruta_relativa(archivo: &str, repo: Option<&Path>) -> Result<String, String> {
+    let sin_punto = archivo.strip_prefix("./").unwrap_or(archivo);
+    let ruta = match RAICES_GITLEAKS
+        .iter()
+        .find_map(|raiz| sin_punto.strip_prefix(raiz))
+    {
+        Some(resto) => resto,
+        None => match repo.filter(|_| sin_punto.starts_with('/')) {
+            None => sin_punto,
+            Some(repo) => ruta_bajo_repo(sin_punto, repo)
+                .ok_or_else(|| format!("gitleaks: el archivo {archivo} sale del repo"))?,
+        },
+    };
+    Ok(ruta.strip_prefix("./").unwrap_or(ruta).to_string())
+}
+
+/// Núcleo de `parsear_gitleaks` y `parsear_gitleaks_en`. Con `repo`, da un aviso por cada archivo que
+/// no existe. El aviso no lleva texto del secreto.
+fn parsear_gitleaks_con(
+    json: &str,
+    repo: Option<&Path>,
+    requisitos: &[Requisito],
+) -> Result<(Vec<Hallazgo>, Vec<String>), String> {
     // `null` y `[]` dan lo mismo: sin filtraciones. Los campos del secreto no se deserializan.
     let fugas: Option<Vec<FugaGitleaks>> =
         serde_json::from_str(json).map_err(|e| motivo_json(&e))?;
     let mut hallazgos = Vec::new();
+    let mut avisos = Vec::new();
     for f in fugas.unwrap_or_default() {
-        // La ruta sale con la raíz de la copia (o la de /repo, en reportes viejos).
-        let archivo = RAICES_GITLEAKS
-            .iter()
-            .find_map(|raiz| f.archivo.strip_prefix(raiz))
-            .unwrap_or(f.archivo.as_str());
+        let archivo = ruta_relativa(&f.archivo, repo)?;
+        if repo.is_some_and(|r| !r.join(&archivo).exists()) {
+            let aviso = format!(
+                "gitleaks: el archivo {archivo} no existe en el repo: no se omiten sus líneas"
+            );
+            if !avisos.contains(&aviso) {
+                avisos.push(aviso);
+            }
+        }
         // Un hallazgo por línea: juez y auditar omiten todo el rango de la fuga.
         for linea in lineas_de_fuga(f.linea, f.fin) {
             hallazgos.push(crear_hallazgo(
                 Dimension::Seguridad,
                 3,
-                archivo,
+                &archivo,
                 linea,
                 &f.regla,
                 &f.descripcion,
@@ -163,7 +215,7 @@ pub fn parsear_gitleaks(json: &str, requisitos: &[Requisito]) -> Result<Vec<Hall
             ));
         }
     }
-    Ok(hallazgos)
+    Ok((hallazgos, avisos))
 }
 
 /// Salida de `cargo audit --json`. Las vulnerabilidades son severidad 3; los avisos, severidad 1.
@@ -1597,6 +1649,76 @@ mod tests {
     fn sonda_gitleaks_sin_end_line_da_la_linea_de_inicio() {
         let hs = parsear_gitleaks(&fuga_en_rango(10, None), &[]).expect("parsea");
         assert_eq!(lineas(&hs), vec![10]);
+    }
+
+    // ---------- Ruta de gitleaks con repo ----------
+
+    /// Reporte de una fuga en `archivo`. Trae un secreto de prueba que no debe salir en ningún aviso.
+    fn reporte_en(archivo: &str) -> String {
+        serde_json::json!([{
+            "RuleID": "r",
+            "File": archivo,
+            "StartLine": 4,
+            "Description": "d",
+            "Secret": "CLAVE-SECRETA-123",
+            "Match": "CLAVE-SECRETA-123"
+        }])
+        .to_string()
+    }
+
+    #[test]
+    fn sonda_gitleaks_ruta_absoluta_del_repo_da_ruta_relativa() {
+        let repo = repo_con_fuente("src/a.rs", "fn a() {}\n");
+        let archivo = repo.path().join("src/a.rs");
+        let json = reporte_en(&archivo.to_string_lossy());
+        let (hs, avisos) = parsear_gitleaks_en(&json, repo.path(), &[]).expect("parsea");
+        assert_eq!(hs[0].archivo, "src/a.rs");
+        assert!(avisos.is_empty(), "{avisos:?}");
+    }
+
+    #[test]
+    fn sonda_gitleaks_quita_prefijos_de_ruta() {
+        let repo = repo_con_fuente("src/a.rs", "fn a() {}\n");
+        for archivo in ["./src/a.rs", "/repo/src/a.rs", "/salida/copia/src/a.rs"] {
+            let (hs, avisos) =
+                parsear_gitleaks_en(&reporte_en(archivo), repo.path(), &[]).expect("parsea");
+            assert_eq!(hs[0].archivo, "src/a.rs", "entrada {archivo}");
+            assert!(avisos.is_empty(), "entrada {archivo}: {avisos:?}");
+        }
+    }
+
+    #[test]
+    fn sonda_gitleaks_ruta_absoluta_fuera_del_repo_es_error() {
+        let repo = repo_con_fuente("src/a.rs", "fn a() {}\n");
+        let error = parsear_gitleaks_en(&reporte_en("/otra/parte/src/a.rs"), repo.path(), &[])
+            .expect_err("debe fallar");
+        assert!(error.contains("sale del repo"), "{error}");
+    }
+
+    #[test]
+    fn sonda_gitleaks_archivo_inexistente_da_aviso_sin_secreto() {
+        let repo = repo_con_fuente("src/a.rs", "fn a() {}\n");
+        let (hs, avisos) = parsear_gitleaks_en(&reporte_en("/repo/src/nuevo.rs"), repo.path(), &[])
+            .expect("parsea");
+        assert_eq!(hs.len(), 1, "el hallazgo se deja igual");
+        assert_eq!(hs[0].archivo, "src/nuevo.rs");
+        assert_eq!(avisos.len(), 1, "{avisos:?}");
+        assert!(avisos[0].contains("src/nuevo.rs"), "{avisos:?}");
+        assert!(avisos[0].contains("no existe en el repo"), "{avisos:?}");
+        assert!(!avisos[0].contains("CLAVE-SECRETA"), "{avisos:?}");
+    }
+
+    #[test]
+    fn sonda_gitleaks_sin_repo_ruta_relativa_no_cambia() {
+        let hs = parsear_gitleaks(&reporte_en("src/a.rs"), &[]).expect("parsea");
+        assert_eq!(hs[0].archivo, "src/a.rs");
+    }
+
+    #[test]
+    fn sonda_gitleaks_sin_repo_ruta_absoluta_no_da_error() {
+        // Sin repo no hay contra qué comparar: la ruta absoluta sigue como viene.
+        let hs = parsear_gitleaks(&reporte_en("/otra/parte/src/a.rs"), &[]).expect("parsea");
+        assert_eq!(hs[0].archivo, "/otra/parte/src/a.rs");
     }
 
     #[test]
