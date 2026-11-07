@@ -17,10 +17,11 @@ use super::rubrica::{ErrorRubrica, ItemRubrica, Mide, Puntuacion, Rubrica};
 use super::tarea::Requisito;
 use super::{
     ErrorOraculo, MOTIVO_GATE_REINTENTO, MOTIVO_JUEZ_NIVEL_INVALIDO, MOTIVO_JUEZ_SIN_REINTENTO,
+    MOTIVO_REINTENTO_TOPE,
 };
 use crate::config::root_home;
 use crate::proveedores::{self, Prompt, RespuestaJuez};
-use crate::tipos::{Dimension, Eleccion, Fuente, Hallazgo, NivelItem, Via};
+use crate::tipos::{Dimension, Eleccion, Fuente, Hallazgo, HallazgoDescartado, NivelItem, Via};
 
 /// Ítem de la rúbrica de modularidad. Su tope lo pone un ciclo de módulos.
 const MODULARIDAD: &str = "diseno.modularidad";
@@ -183,6 +184,9 @@ pub struct ResultadoJuez {
     pub hallazgos: Vec<Hallazgo>,
     pub descartes: Vec<Descarte>,
     pub faltantes: Vec<String>,
+    /// Hallazgos rechazados por no tener requisito afectado o por el gate de citas. Un resultado viejo lee vacío.
+    #[serde(default)]
+    pub hallazgos_descartados: Vec<HallazgoDescartado>,
 }
 
 /// Arma el prompt del juez. Es determinista: la misma entrada da el mismo prompt.
@@ -429,8 +433,9 @@ pub fn juzgar(
     };
     let mut lectura = leer_items(respuesta.items, &cx);
     let mut hallazgos = Vec::new();
+    let mut hallazgos_descartados = Vec::new();
     for valor in respuesta.hallazgos {
-        match procesar_hallazgo(valor, &cx) {
+        match procesar_hallazgo(valor, &cx, &mut hallazgos_descartados) {
             Ok(hallazgo) => hallazgos.push(hallazgo),
             Err(d) => lectura.descartes.push(d),
         }
@@ -457,7 +462,9 @@ pub fn juzgar(
             .cloned()
             .collect();
         for id in sin_nivel {
-            let motivo = if otra.gate.contains_key(&id) {
+            let motivo = if otra.frenado_por_tope {
+                MOTIVO_REINTENTO_TOPE
+            } else if otra.gate.contains_key(&id) {
                 MOTIVO_GATE_REINTENTO
             } else if otra.invalidos.contains(&id) {
                 MOTIVO_JUEZ_NIVEL_INVALIDO
@@ -481,6 +488,7 @@ pub fn juzgar(
         hallazgos,
         descartes: lectura.descartes,
         faltantes,
+        hallazgos_descartados,
     }
 }
 
@@ -499,8 +507,14 @@ fn reintentar(
     if exceso_de_entrada(&prompt).is_some() {
         return Lectura::default();
     }
-    let Ok(respuesta) = pedir(modelo, &prompt) else {
-        return Lectura::default();
+    let respuesta = match pedir(modelo, &prompt) {
+        Ok(respuesta) => respuesta,
+        Err(causa) => {
+            return Lectura {
+                frenado_por_tope: es_tope_de_api(&causa),
+                ..Lectura::default()
+            };
+        }
     };
     // Un id fuera del reintento no se pidió de nuevo: `leer_items` lo descarta con aviso.
     let pedidos: BTreeMap<String, Dimension> = cx
@@ -561,6 +575,7 @@ fn sin_veredicto(causa: String, pedidos: &BTreeMap<String, Dimension>) -> Result
         hallazgos: Vec::new(),
         descartes: Vec::new(),
         faltantes: pedidos.keys().cloned().collect(),
+        hallazgos_descartados: Vec::new(),
     }
 }
 
@@ -625,6 +640,18 @@ struct Lectura {
     gate: BTreeMap<String, Vec<CitaFallida>>,
     /// Ids que el juez dio por `sin_evidencia`.
     sin_evidencia: BTreeSet<String>,
+    /// El reintento no se envió porque el tope de API frenó la llamada.
+    frenado_por_tope: bool,
+}
+
+/// Texto que trae el error del tope de API cuando frena una llamada antes de enviarla.
+const TEXTO_TOPE_API: &str = "tope de API";
+/// Texto del error de la llamada que no se envía: el tope no pudo leer o reservar el gasto.
+const TEXTO_NO_ENVIADA: &str = "la llamada no se envía";
+
+/// Un error del modelo que frenó la llamada por el tope de API. Mira el texto: "tope" a secas no cuenta.
+fn es_tope_de_api(causa: &str) -> bool {
+    causa.contains(TEXTO_TOPE_API) || causa.contains(TEXTO_NO_ENVIADA)
 }
 
 /// Evidencia que no pasó el gate: archivo, línea y cita tal como la dijo el juez.
@@ -698,8 +725,19 @@ fn id_de(valor: &Value) -> Option<String> {
 fn nivel_invalido(valor: &Value) -> bool {
     match valor.get("nivel") {
         None | Some(Value::Null) => false,
-        Some(nivel) => !nivel.as_i64().is_some_and(|n| (0..=NIVEL_MAX).contains(&n)),
+        Some(nivel) => !nivel_entero(nivel).is_some_and(|n| (0..=NIVEL_MAX).contains(&n)),
     }
+}
+
+/// Nivel entero de un valor JSON: un entero, o un flotante finito sin parte fraccionaria (2.0 vale 2).
+fn nivel_entero(valor: &Value) -> Option<i64> {
+    let numero = valor.as_number()?;
+    numero.as_i64().or_else(|| {
+        numero
+            .as_f64()
+            .filter(|f| f.is_finite() && f.fract() == 0.0)
+            .map(|f| f as i64)
+    })
 }
 
 /// Un ítem sin nivel y sin `sin_evidencia`. Rompe el contrato.
@@ -764,8 +802,9 @@ pub(crate) fn desenvuelto(texto: &str) -> &str {
 struct ItemCrudo {
     #[serde(default)]
     item: String,
+    /// Valor crudo: `nivel_entero` lo normaliza, así 2.0 vale como 2.
     #[serde(default)]
-    nivel: Option<i64>,
+    nivel: Option<Value>,
     #[serde(default)]
     motivo: Option<String>,
     #[serde(default)]
@@ -806,15 +845,18 @@ fn procesar_item(valor: Value, cx: &Contexto) -> Result<Dicho, Descarte> {
         serde_json::from_value(valor).map_err(|e| descarte("ítem", format!("mal formado: {e}")))?;
     let que = format!("ítem {}", cruda.item);
     let dimension = cx.dimension(&cruda.item).map_err(|m| descarte(&que, m))?;
-    let Some(nivel) = cruda.nivel else {
+    let Some(valor_nivel) = cruda.nivel.filter(|v| !v.is_null()) else {
         if cruda.motivo.as_deref() == Some(SIN_EVIDENCIA_DEL_JUEZ) {
             return Ok(Dicho::SinEvidencia(cruda.item));
         }
         return Err(descarte(&que, "sin nivel"));
     };
-    if !(0..=NIVEL_MAX).contains(&nivel) {
-        return Err(descarte(&que, format!("nivel {nivel} fuera de 0..=3")));
-    }
+    let Some(nivel) = nivel_entero(&valor_nivel).filter(|n| (0..=NIVEL_MAX).contains(n)) else {
+        return Err(descarte(
+            &que,
+            format!("nivel {valor_nivel} fuera de 0..=3"),
+        ));
+    };
     let mut validas = Vec::new();
     let mut fallidas = Vec::new();
     for ev in cruda
@@ -869,8 +911,31 @@ fn evidencia_valida(
     }
 }
 
-/// Valida un hallazgo: requisito real, severidad 1 a 3, cita en el repo.
-fn procesar_hallazgo(valor: Value, cx: &Contexto) -> Result<Hallazgo, Descarte> {
+/// Anota un hallazgo rechazado por requisito o por cita, con su archivo, línea e ítem. Devuelve el descarte
+/// que va a `descartes`.
+fn descartar_hallazgo(
+    archivo: &str,
+    linea: u32,
+    item: &str,
+    motivo: String,
+    rechazados: &mut Vec<HallazgoDescartado>,
+) -> Descarte {
+    rechazados.push(HallazgoDescartado {
+        archivo: archivo.into(),
+        linea,
+        item: item.into(),
+        motivo: motivo.clone(),
+    });
+    descarte(format!("hallazgo sobre {item}"), motivo)
+}
+
+/// Valida un hallazgo: requisito real, severidad 1 a 3, cita en el repo. Los rechazos por requisito o cita
+/// también van a `rechazados`.
+fn procesar_hallazgo(
+    valor: Value,
+    cx: &Contexto,
+    rechazados: &mut Vec<HallazgoDescartado>,
+) -> Result<Hallazgo, Descarte> {
     let cruda: HallazgoCrudo = serde_json::from_value(valor)
         .map_err(|e| descarte("hallazgo", format!("mal formado: {e}")))?;
     let que = format!("hallazgo sobre {}", cruda.item);
@@ -883,16 +948,25 @@ fn procesar_hallazgo(valor: Value, cx: &Contexto) -> Result<Hallazgo, Descarte> 
         return Err(descarte(&que, "falta archivo, línea o cita"));
     }
     if cruda.impacto.is_empty() {
-        return Err(descarte(&que, "sin requisito afectado"));
+        return Err(descartar_hallazgo(
+            &cruda.archivo,
+            cruda.linea,
+            &cruda.item,
+            "sin requisito afectado".into(),
+            rechazados,
+        ));
     }
     if let Some(id) = cruda
         .impacto
         .iter()
         .find(|id| !cx.requisitos.iter().any(|r| r.id == **id))
     {
-        return Err(descarte(
-            &que,
+        return Err(descartar_hallazgo(
+            &cruda.archivo,
+            cruda.linea,
+            &cruda.item,
             format!("sin requisito afectado: {id} no existe"),
+            rechazados,
         ));
     }
     let mut h = crear_hallazgo(
@@ -909,9 +983,12 @@ fn procesar_hallazgo(valor: Value, cx: &Contexto) -> Result<Hallazgo, Descarte> 
     h.impacto = cruda.impacto;
     match verificar_hallazgo(cx.repo, &h) {
         Verificacion::Valido => Ok(h),
-        Verificacion::Descartado(motivo) => Err(descarte(
-            &que,
+        Verificacion::Descartado(motivo) => Err(descartar_hallazgo(
+            &cruda.archivo,
+            cruda.linea,
+            &cruda.item,
             format!("la cita no pasa el gate: {motivo:?}"),
+            rechazados,
         )),
     }
 }
@@ -1612,6 +1689,102 @@ mod tests {
         assert!(r.descartes.iter().any(|d| d.motivo.contains("severidad")));
     }
 
+    // Hallazgos descartados: el juez conserva archivo, línea, ítem y motivo de los que rechaza por requisito o cita.
+
+    #[test]
+    fn juez_hallazgo_sin_impacto_queda_en_descartados() {
+        let c = caso();
+        let texto = respuesta(json!([]), json!([hallazgo_json(json!([]), 2, CITA_REAL)]));
+        let r = juzgar_con(&c, texto);
+        assert!(r.hallazgos.is_empty());
+        assert_eq!(
+            r.hallazgos_descartados.len(),
+            1,
+            "{:?}",
+            r.hallazgos_descartados
+        );
+        let d = &r.hallazgos_descartados[0];
+        assert_eq!(d.archivo, "src/almacen.rs");
+        assert_eq!(d.linea, 4);
+        assert_eq!(d.item, MODULARIDAD);
+        assert!(d.motivo.contains("sin requisito afectado"), "{}", d.motivo);
+    }
+
+    #[test]
+    fn juez_hallazgo_con_requisito_inexistente_queda_en_descartados() {
+        let c = caso();
+        let texto = respuesta(
+            json!([]),
+            json!([hallazgo_json(json!(["R9"]), 2, CITA_REAL)]),
+        );
+        let r = juzgar_con(&c, texto);
+        assert!(r.hallazgos.is_empty());
+        assert_eq!(
+            r.hallazgos_descartados.len(),
+            1,
+            "{:?}",
+            r.hallazgos_descartados
+        );
+        let d = &r.hallazgos_descartados[0];
+        assert_eq!((d.archivo.as_str(), d.linea), ("src/almacen.rs", 4));
+        assert_eq!(d.item, MODULARIDAD);
+        assert!(d.motivo.contains("sin requisito afectado"), "{}", d.motivo);
+    }
+
+    #[test]
+    fn juez_hallazgo_con_cita_inventada_queda_en_descartados() {
+        let c = caso();
+        let texto = respuesta(
+            json!([]),
+            json!([hallazgo_json(json!(["R1"]), 2, "pub fn borrar(&self) {}")]),
+        );
+        let r = juzgar_con(&c, texto);
+        assert!(r.hallazgos.is_empty());
+        assert_eq!(
+            r.hallazgos_descartados.len(),
+            1,
+            "{:?}",
+            r.hallazgos_descartados
+        );
+        let d = &r.hallazgos_descartados[0];
+        assert_eq!((d.archivo.as_str(), d.linea), ("src/almacen.rs", 4));
+        assert_eq!(d.item, MODULARIDAD);
+        assert!(d.motivo.contains("gate"), "{}", d.motivo);
+    }
+
+    #[test]
+    fn juez_hallazgo_valido_no_entra_a_descartados() {
+        let c = caso();
+        let texto = respuesta(
+            json!([]),
+            json!([hallazgo_json(json!(["R1"]), 2, CITA_REAL)]),
+        );
+        let r = juzgar_con(&c, texto);
+        assert_eq!(r.hallazgos.len(), 1);
+        assert!(
+            r.hallazgos_descartados.is_empty(),
+            "{:?}",
+            r.hallazgos_descartados
+        );
+    }
+
+    #[test]
+    fn juez_hallazgo_severidad_invalida_no_entra_a_descartados() {
+        let c = caso();
+        let texto = respuesta(
+            json!([]),
+            json!([hallazgo_json(json!(["R1"]), 4, CITA_REAL)]),
+        );
+        let r = juzgar_con(&c, texto);
+        assert!(r.hallazgos.is_empty());
+        assert!(r.descartes.iter().any(|d| d.motivo.contains("severidad")));
+        assert!(
+            r.hallazgos_descartados.is_empty(),
+            "{:?}",
+            r.hallazgos_descartados
+        );
+    }
+
     // Proveedor: el juez razona y usa la API.
 
     /// Una elección inválida es un error de configuración: `Eleccion`, con código de salida 2.
@@ -2139,6 +2312,49 @@ mod tests {
     }
 
     #[test]
+    fn juez_nivel_flotante_entero_vale_como_entero_sin_reintento() {
+        let c = caso();
+        let primera = respuesta(
+            json!([
+                {"item": MODULARIDAD, "nivel": 2.0, "evidencia": [real()]},
+                item_nivel(TOPE, 3, json!([real()])),
+            ]),
+            json!([]),
+        );
+        let modelo = FalsoSecuencia::nueva(vec![Ok(primera)]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert_eq!(modelo.visto.borrow().len(), 1, "sin reintento");
+        assert_eq!(r.niveles.get(MODULARIDAD), Some(&2));
+        assert_eq!(r.niveles.get(TOPE), Some(&3));
+    }
+
+    #[test]
+    fn juez_nivel_flotante_no_entero_o_fuera_de_rango_va_al_reintento() {
+        for nivel in [2.5, -1.0, 4.0] {
+            let c = caso();
+            let primera = respuesta(
+                json!([
+                    {"item": MODULARIDAD, "nivel": nivel, "evidencia": [real()]},
+                    item_nivel(TOPE, 1, json!([real()])),
+                ]),
+                json!([]),
+            );
+            let segunda = respuesta(
+                json!([item_nivel(MODULARIDAD, 1, json!([real()]))]),
+                json!([]),
+            );
+            let modelo = FalsoSecuencia::nueva(vec![Ok(primera), Ok(segunda)]);
+            let r = juzgar_secuencia(&c, &modelo);
+            assert_eq!(
+                modelo.visto.borrow().len(),
+                2,
+                "nivel {nivel}: un reintento"
+            );
+            assert_eq!(r.niveles.get(MODULARIDAD), Some(&1), "nivel {nivel}");
+        }
+    }
+
+    #[test]
     fn juez_nivel_cinco_en_reintento_deja_motivo_de_nivel_invalido() {
         let c = caso();
         let primera = respuesta(
@@ -2202,6 +2418,51 @@ mod tests {
         let r = juzgar_secuencia(&c, &modelo);
         assert_eq!(modelo.visto.borrow().len(), 2, "el tercer envío no ocurre");
         assert_eq!(r.faltantes, vec![MODULARIDAD.to_string(), TOPE.to_string()]);
+    }
+
+    #[test]
+    fn juez_reintento_frenado_por_tope_deja_motivo_de_tope() {
+        let c = caso();
+        let primera = respuesta(
+            json!([item_nivel(MODULARIDAD, 2, json!([real()]))]),
+            json!([]),
+        );
+        let tope = "llamada rechazada antes de enviarla: costo estimado 0.100000 USD, margen 0.000000 USD del tope de API de 5.00 USD";
+        let modelo = FalsoSecuencia::nueva(vec![Ok(primera), Err(tope.into())]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert_eq!(modelo.visto.borrow().len(), 2);
+        assert_eq!(r.faltantes, vec![TOPE.to_string()]);
+        assert!(
+            descarte_de(&r, TOPE, MOTIVO_REINTENTO_TOPE),
+            "{:?}",
+            r.descartes
+        );
+        assert!(
+            !descarte_de(&r, TOPE, MOTIVO_JUEZ_SIN_REINTENTO),
+            "{:?}",
+            r.descartes
+        );
+    }
+
+    #[test]
+    fn juez_reintento_con_error_que_no_es_tope_deja_motivo_sin_reintento() {
+        let c = caso();
+        let primera = respuesta(
+            json!([item_nivel(MODULARIDAD, 2, json!([real()]))]),
+            json!([]),
+        );
+        let modelo = FalsoSecuencia::nueva(vec![Ok(primera), Err("tope".into())]);
+        let r = juzgar_secuencia(&c, &modelo);
+        assert!(
+            descarte_de(&r, TOPE, MOTIVO_JUEZ_SIN_REINTENTO),
+            "{:?}",
+            r.descartes
+        );
+        assert!(
+            !descarte_de(&r, TOPE, MOTIVO_REINTENTO_TOPE),
+            "{:?}",
+            r.descartes
+        );
     }
 
     #[test]
@@ -2339,6 +2600,7 @@ mod tests {
             items: vec![],
             hallazgos: vec![],
             descartes: vec![],
+            hallazgos_descartados: vec![],
             faltantes: vec![],
         };
         let p = puntuar_con_juez(&rubrica_mixta(), &r, &topes, MODELO).expect("puntúa");
@@ -2424,6 +2686,7 @@ mod tests {
             items: vec![],
             hallazgos: vec![],
             descartes: vec![],
+            hallazgos_descartados: vec![],
             faltantes: vec![],
         };
         let p = puntuar_con_juez(&rubricas[0], &r, &topes, MODELO).expect("puntúa");

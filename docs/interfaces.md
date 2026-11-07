@@ -61,6 +61,7 @@ Una fila por subcomando. Los argumentos entre corchetes son opcionales.
 | `r00t oraculo calibrar --tarea <t> --dimension <d> [--n 20] [--semilla 42] [--repo <dir>] [--tope-usd <n>]` | Calibra una dimensión con defectos inyectados: mitad con defecto, mitad limpia. Mide la sensibilidad, la especificidad y la exactitud balanceada, por dimensión y por ítem, contra una línea base. Agrega una fila a `$ROOT_HOME/calibracion.json` e imprime la fila. Sin `--repo`, usa `[calibracion] repo` de `tarea.toml`; sin ninguno, sale con `2`. Con `--tope-usd <n>`, antes de la línea base y de cada caso compara el gasto de API desde el inicio, más el peor caso del caso, con el tope. Si no entra, registra un `Gate` `calibracion-tope`, guarda la fila de los casos hechos como `incompleta` y sale con `3`. El tope debe ser finito y mayor que 0; si no, sale con `2`. Eficiencia sin `[eficiencia]` en `tarea.toml` no aplica: sale con `0`, no corre la base ni los casos y agrega una fila con `no_aplica`. | `Fila` | construido (Tarea 12 y decisión 48). |
 | `r00t oraculo validar --casos <dir> [--json]` | Mide si el juicio de Root coincide con los casos de `<dir>` (orden conocido, defectos reales y el formulario a ciegas). Escribe `<dir>/validez.json`. Una métrica sin datos queda sin medir, nunca 0 ni 1. Sale con `0` aunque una métrica no cumpla. | `Validez` | construido (Tarea 12b). Formatos: sección ## Validez. |
 | `r00t oraculo validar --preparar-ciego --fuentes <manifiesto.toml> --casos <dir> [--semilla N]` | Arma un paquete anónimo por fuente en `<dir>/ciego/`, con su formulario, y la clave `ciego/clave.toml`. Las listas de rastros van a `$ROOT_HOME/validez/`, nunca a `ciego/`. Los conteos van a `$ROOT_HOME/validez/rastros.json`, no a la salida. | ids de los paquetes | construido (Tarea 12b). |
+| `r00t oraculo auditar --repo <dir> --salida <archivo.json> --tope-usd <n> --gitleaks <reporte.json> [--incluir <ruta>]... [--defectos <toml>]` | Pasada de búsqueda de defectos. Un modelo propone candidatos sobre el código de producción de `src/`. Un candidato entra a `hallazgos` solo si el gate de cita confirma su cita; los demás van a `descartados` con su motivo. No puntúa y no toca a `oraculo evaluar`. `--tope-usd` y `--gitleaks` son obligatorios: sin ellos, o con un tope no finito o menor o igual a 0, sale con `2`. Antes de cada llamada compara el gasto de API más el peor caso con el tope; si no entra, para y deja `incompleta`. Con `--defectos`, un defecto cuenta como encontrado si un hallazgo cae en su archivo a 3 líneas o menos. Escribe `--salida` de forma atómica. Sale con `0` aunque quede incompleta. | JSON con `hash_prompt`, `modelo`, `archivos`, `llamadas`, `costo_usd`, `hallazgos`, `descartados`, `incompleta`, `sin_leer`, `avisos` y `medicion` | construido (Tarea 74). |
 | `r00t oraculo informe --tarea <t> --repo <dir> [--md]` | Arma el informe del PM sobre el veredicto: decisión, regla que la disparó, requisitos, bloqueantes, riesgos, próximos pasos y confianza. Sin `--md`, imprime JSON; con `--md`, markdown legible. | `Informe` | construido (Tarea 13b). |
 | `r00t oraculo validar --casos <dir>` | Mide si el juicio de Root coincide con resultados conocidos. | `Validez` | pendiente (Tarea 12b). No está en `--help`. |
 | `r00t observa claude --archivo <salida-de-claude-p> --corrida <id> [--via cupo\|nube]` | Registra la salida JSON de `claude -p`. Con `--via nube`, registra una sesión en la nube. | `{registrados, via}` | construido |
@@ -2134,6 +2135,36 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "fuente"
       ]
     },
+    "HallazgoDescartado": {
+      "description": "Hallazgo del juez que se descartó: no tiene requisito afectado o no pasó el gate de citas. No puntúa.",
+      "type": "object",
+      "properties": {
+        "archivo": {
+          "description": "Archivo que citó el juez.",
+          "type": "string"
+        },
+        "item": {
+          "description": "Ítem de rúbrica que el juez puso en el hallazgo.",
+          "type": "string"
+        },
+        "linea": {
+          "description": "Línea que citó el juez.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "motivo": {
+          "description": "Por qué se descartó.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "archivo",
+        "linea",
+        "item",
+        "motivo"
+      ]
+    },
     "Informe": {
       "description": "`riesgos` y `proximos_pasos` tienen como máximo 5 entradas.",
       "type": "object",
@@ -2486,6 +2517,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "type": "array",
           "items": {
             "$ref": "#/$defs/Hallazgo"
+          }
+        },
+        "hallazgos_descartados": {
+          "description": "Hallazgos del juez de diseño que se descartaron, con su motivo. No cuentan para ningún puntaje.\nUn veredicto viejo lee vacío.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/HallazgoDescartado"
           }
         },
         "inestables": {
@@ -4393,6 +4432,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "type": "string"
       }
     },
+    "defectos": {
+      "description": "Un detalle por defecto de `defectos.toml`, en su orden. Vacío sin `defectos.toml` o sin defectos.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/DetalleDefecto"
+      }
+    },
     "exactitud_orden": {
       "description": "Fracción de pares de `orden.toml` que Root ordena como el resultado medido. Umbral 1,0.",
       "$ref": "#/$defs/Metrica"
@@ -4411,9 +4458,41 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "$ref": "#/$defs/Kappa"
       }
     },
+    "pares": {
+      "description": "Un detalle por par de `orden.toml`, en su orden. Vacío sin `orden.toml` o sin pares.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/DetallePar"
+      }
+    },
     "recall": {
-      "description": "Fracción de defectos reales que Root encuentra con `archivo` y `linea` a ±3. Umbral 0,8.",
+      "description": "Fracción de defectos reales que Root encuentra: hallazgo con `archivo` y `linea` a ±3, o test rojo.\nUmbral 0,8.",
       "$ref": "#/$defs/Metrica"
+    },
+    "recall_linea": {
+      "description": "Fracción de defectos reales con hallazgo a `TOLERANCIA_LINEAS` líneas o menos. Sin umbral.",
+      "$ref": "#/$defs/Metrica",
+      "default": {
+        "aciertos": null,
+        "casos": 0,
+        "cumple": null,
+        "motivo": "validez.json anterior: métrica no medida",
+        "umbral": null,
+        "valor": null
+      }
+    },
+    "recall_test": {
+      "description": "Fracción de defectos reales con test rojo. Sin umbral.",
+      "$ref": "#/$defs/Metrica",
+      "default": {
+        "aciertos": null,
+        "casos": 0,
+        "cumple": null,
+        "motivo": "validez.json anterior: métrica no medida",
+        "umbral": null,
+        "valor": null
+      }
     },
     "spearman": {
       "description": "Spearman entre el `orden` de los formularios y el orden de Root. Sin umbral.",
@@ -4436,6 +4515,246 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
     "avisos"
   ],
   "$defs": {
+    "Decision": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "listo",
+            "no_listo",
+            "bloqueado"
+          ]
+        },
+        {
+          "description": "Una dimensión que bloquea no tiene veredicto: no hay \"listo\" ni \"no listo\" que decir (decisión 48).",
+          "type": "string",
+          "const": "sin_decision"
+        }
+      ]
+    },
+    "DetalleDefecto": {
+      "description": "Detalle de un defecto real de `defectos.toml`: si Root lo encontró y qué hallazgo quedó cerca.",
+      "type": "object",
+      "properties": {
+        "archivo": {
+          "description": "Archivo del defecto.",
+          "type": "string"
+        },
+        "descartado_cerca": {
+          "description": "`true` si algún hallazgo descartado del veredicto cae en el mismo archivo a `TOLERANCIA_LINEAS`\nlíneas o menos del defecto. Solo informa: no cuenta para `encontrado`, `recall`, `recall_linea`\nni `recall_test`.",
+          "type": "boolean",
+          "default": false
+        },
+        "en_evidencia": {
+          "description": "`true` si la evidencia de algún ítem del veredicto cita este archivo a `TOLERANCIA_LINEAS` líneas o\nmenos del defecto. No cuenta para `encontrado` ni para `recall`.",
+          "type": "boolean",
+          "default": false
+        },
+        "encontrado": {
+          "description": "`true` si Root tiene un hallazgo a ±3 líneas. Solo este criterio: `recall` también cuenta el test rojo.",
+          "type": "boolean"
+        },
+        "hallazgo_cercano": {
+          "description": "Hallazgo del mismo archivo con menor distancia en línea. `None` si no hay ninguno en ese archivo.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HallazgoCercano"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "linea": {
+          "description": "Línea del defecto.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "repo": {
+          "description": "Repo del defecto, dentro de la carpeta de casos.",
+          "type": "string"
+        },
+        "tarea": {
+          "description": "Tarea del defecto.",
+          "type": "string"
+        },
+        "test": {
+          "description": "Test que marca el defecto, copiado de `defectos.toml`. `None` si el defecto no lo trae.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "test_rojo": {
+          "description": "`Some(true)` si el test aparece en alguna lista de fallos del veredicto. `None` sin `test`.\nCuenta para `recall` y `recall_test`, no para `encontrado`.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "tarea",
+        "repo",
+        "archivo",
+        "linea",
+        "encontrado"
+      ]
+    },
+    "DetallePar": {
+      "description": "Detalle de un par de `orden.toml`: qué decidió Root y con qué criterio.",
+      "type": "object",
+      "properties": {
+        "acierto": {
+          "description": "`true` si Root ordena `mejor` por encima de `peor`.",
+          "type": "boolean"
+        },
+        "completitud_mejor": {
+          "description": "Completitud de `mejor`. `None` si el veredicto no la trae.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "completitud_peor": {
+          "description": "Completitud de `peor`. `None` si el veredicto no la trae.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "criterio": {
+          "description": "Criterio que decidió el par: `decision`, `global`, `completitud` o `sin_orden`.",
+          "type": "string"
+        },
+        "decision_mejor": {
+          "description": "Decisión de `mejor`. `None` si Root no dio decisión.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Decision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decision_peor": {
+          "description": "Decisión de `peor`. `None` si Root no dio decisión.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Decision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "global_mejor": {
+          "description": "Global de `mejor`. `None` si el veredicto no lo trae.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "global_peor": {
+          "description": "Global de `peor`. `None` si el veredicto no lo trae.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "mejor": {
+          "description": "Caso que debe quedar por encima.",
+          "type": "string"
+        },
+        "peor": {
+          "description": "Caso que debe quedar por debajo.",
+          "type": "string"
+        },
+        "tarea": {
+          "description": "Tarea del par.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tarea",
+        "mejor",
+        "peor",
+        "acierto",
+        "criterio"
+      ]
+    },
+    "Fuente": {
+      "description": "Quién produjo un hallazgo: una sonda determinista o un juez con modelo.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "Sonda": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Sonda"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Juez": {
+              "type": "object",
+              "properties": {
+                "modelo": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "modelo"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Juez"
+          ]
+        }
+      ]
+    },
+    "HallazgoCercano": {
+      "description": "Hallazgo de Root en el mismo archivo que un defecto. Es el más cercano en línea.",
+      "type": "object",
+      "properties": {
+        "distancia": {
+          "description": "Líneas entre el hallazgo y el defecto.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "fuente": {
+          "description": "Quién produjo el hallazgo.",
+          "$ref": "#/$defs/Fuente"
+        },
+        "linea": {
+          "description": "Línea del hallazgo.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "linea",
+        "fuente",
+        "distancia"
+      ]
+    },
     "Kappa": {
       "description": "Kappa de Cohen con pesos cuadráticos. `clave` es una dimensión (`seguridad`) o un ítem (`seguridad.secretos`).",
       "type": "object",
@@ -4612,6 +4931,14 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
       "type": "array",
       "items": {
         "$ref": "#/$defs/Hallazgo"
+      }
+    },
+    "hallazgos_descartados": {
+      "description": "Hallazgos del juez de diseño que se descartaron, con su motivo. No cuentan para ningún puntaje.\nUn veredicto viejo lee vacío.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/HallazgoDescartado"
       }
     },
     "inestables": {
@@ -5053,6 +5380,36 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
         "cita",
         "detalle",
         "fuente"
+      ]
+    },
+    "HallazgoDescartado": {
+      "description": "Hallazgo del juez que se descartó: no tiene requisito afectado o no pasó el gate de citas. No puntúa.",
+      "type": "object",
+      "properties": {
+        "archivo": {
+          "description": "Archivo que citó el juez.",
+          "type": "string"
+        },
+        "item": {
+          "description": "Ítem de rúbrica que el juez puso en el hallazgo.",
+          "type": "string"
+        },
+        "linea": {
+          "description": "Línea que citó el juez.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "motivo": {
+          "description": "Por qué se descartó.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "archivo",
+        "linea",
+        "item",
+        "motivo"
       ]
     },
     "Informe": {

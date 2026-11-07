@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::Path;
 
-use root::oracle::MOTIVO_JUEZ_SIN_REINTENTO;
+use root::oracle::MOTIVO_REINTENTO_TOPE;
 use root::oracle::juez::{EntradaJuez, EstadoJuez, JuezProveedor, LimitesPrompt, juzgar};
 use root::oracle::mapa;
 use root::oracle::rubrica::Rubrica;
@@ -173,7 +173,7 @@ fn juez_con_tope_lleno_no_envia_el_reintento() {
         "con el tope lleno no debe salir el reintento"
     );
 
-    // (2) El ítem omitido queda como faltante, con su descarte y el motivo de falta de reintento.
+    // (2) El ítem omitido queda como faltante, con su descarte y el motivo del tope.
     assert_eq!(r.estado, EstadoJuez::Ok);
     assert_eq!(
         r.niveles.get(MODULARIDAD),
@@ -189,7 +189,7 @@ fn juez_con_tope_lleno_no_envia_el_reintento() {
     assert!(
         descartes.contains(&(
             format!("ítem {ITEM_OMITIDO}"),
-            MOTIVO_JUEZ_SIN_REINTENTO.to_string()
+            MOTIVO_REINTENTO_TOPE.to_string()
         )),
         "descartes: {descartes:?}"
     );
