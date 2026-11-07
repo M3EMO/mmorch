@@ -62,6 +62,9 @@ pub struct Descartado {
     pub cita: String,
     pub detalle: String,
     pub motivo: String,
+    /// Huella de la cita, solo en una cita no confirmada. Vacía en los demás descartes.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub cita_hash: String,
 }
 
 /// Origen de un defecto: lo encontró un revisor real o se sembró a propósito.
@@ -446,8 +449,8 @@ fn aplicar_gate(
                 if citada {
                     a.hallazgos.push(c);
                 } else {
-                    a.descartados
-                        .push(descartar(c, "cita no confirmada en el archivo"));
+                    // Root no sabe si la cita es un secreto. Va sin texto.
+                    a.descartados.push(descartar_cita_no_confirmada(&c));
                 }
             }
             Err(d) => a.descartados.push(d),
@@ -511,6 +514,27 @@ fn descartar(c: Candidato, motivo: &str) -> Descartado {
         cita: c.cita,
         detalle: c.detalle,
         motivo: motivo.into(),
+        cita_hash: String::new(),
+    }
+}
+
+/// Descarta sin copiar la cita ni el detalle. Sirve cuando la cita puede ser un secreto.
+fn descartar_sin_texto(c: &Candidato, motivo: &str) -> Descartado {
+    Descartado {
+        archivo: c.archivo.clone(),
+        linea: c.linea,
+        cita: String::new(),
+        detalle: String::new(),
+        motivo: motivo.into(),
+        cita_hash: String::new(),
+    }
+}
+
+/// Descarta una cita que el gate no confirma. No copia el texto: guarda su huella.
+fn descartar_cita_no_confirmada(c: &Candidato) -> Descartado {
+    Descartado {
+        cita_hash: hash_de(&c.cita),
+        ..descartar_sin_texto(c, "cita no confirmada en el archivo")
     }
 }
 
@@ -666,6 +690,8 @@ fn cae_en_secreto(
 
 /// Pasa a `descartados` sin texto los candidatos que caen en una línea de secreto.
 /// Solo mira candidatos válidos. Los demás pasan tal cual.
+// Ver `parsear_respuesta`: el `Err` de `Descartado` es grande a propósito.
+#[allow(clippy::result_large_err)]
 fn ocultar_secretos(
     propuestas: Vec<Result<Candidato, Descartado>>,
     archivos: &[Archivo],
@@ -682,13 +708,10 @@ fn ocultar_secretos(
     propuestas
         .into_iter()
         .map(|propuesta| match propuesta {
-            Ok(c) if cae_en_secreto(&c, omitidas, &solo_secretos) => Err(Descartado {
-                archivo: c.archivo,
-                linea: c.linea,
-                cita: String::new(),
-                detalle: String::new(),
-                motivo: "la cita cae en una línea de secreto".into(),
-            }),
+            Ok(c) if cae_en_secreto(&c, omitidas, &solo_secretos) => Err(descartar_sin_texto(
+                &c,
+                "la cita cae en una línea de secreto",
+            )),
             otra => otra,
         })
         .collect()
@@ -850,6 +873,8 @@ struct CandidatoCrudo {
 }
 
 /// Parsea la respuesta. Un candidato incompleto o mal formado va a descartados, no rompe la llamada.
+// `Descartado` lleva la huella de la cita: el `Err` pasa de 128 bytes y no vale la pena encajonarlo.
+#[allow(clippy::result_large_err)]
 fn parsear_respuesta(texto: &str) -> Result<Vec<Result<Candidato, Descartado>>, String> {
     let respuesta: RespuestaAuditor =
         serde_json::from_str(quitar_cerca(texto)).map_err(|e| format!("JSON inválido: {e}"))?;
@@ -864,6 +889,7 @@ fn parsear_respuesta(texto: &str) -> Result<Vec<Result<Candidato, Descartado>>, 
                     cita: String::new(),
                     detalle: String::new(),
                     motivo: "candidato mal formado".into(),
+                    cita_hash: String::new(),
                 });
             };
             match (crudo.archivo, crudo.linea, crudo.cita, crudo.detalle) {
@@ -879,6 +905,7 @@ fn parsear_respuesta(texto: &str) -> Result<Vec<Result<Candidato, Descartado>>, 
                     cita: cita.unwrap_or_default(),
                     detalle: detalle.unwrap_or_default(),
                     motivo: "campos incompletos".into(),
+                    cita_hash: String::new(),
                 }),
             }
         })
@@ -1595,15 +1622,41 @@ mod tests {
         assert_eq!(aud.hallazgos.len(), 1, "{:?}", aud.hallazgos);
         assert_eq!(aud.hallazgos[0].detalle, "real");
         assert_eq!(aud.descartados.len(), 1, "{:?}", aud.descartados);
-        assert_eq!(
-            aud.descartados[0].cita,
-            "fn no_existe_en_el_archivo(y: u8) {}"
-        );
+        assert_eq!(aud.descartados[0].cita, "");
+        assert_eq!(aud.descartados[0].detalle, "");
         assert!(
             aud.descartados[0].motivo.contains("cita"),
             "{}",
             aud.descartados[0].motivo
         );
+    }
+
+    #[test]
+    fn una_cita_no_confirmada_va_a_descartados_sin_copiar_su_texto() {
+        let (_tmp, repo) =
+            repo_con(&[("src/lib.rs", "fn calcular_total(x: u32) -> u32 { x * 2 }\n")]);
+        let texto = r#"```json
+{"defectos":[
+ {"archivo":"src/lib.rs","linea":1,"cita":"fn no_existe_en_el_archivo(y: u8) {}","detalle":"falso"}
+]}
+```"#;
+        let modelo = ModeloFalso::que_responde(texto);
+        let aud = auditar_con(&repo, &[], &[], &modelo, "m", 10.0, &peor_cero, &gasto_cero)
+            .expect("pasada");
+        assert!(aud.hallazgos.is_empty(), "{:?}", aud.hallazgos);
+        assert_eq!(aud.descartados.len(), 1, "{:?}", aud.descartados);
+        assert_eq!(
+            aud.descartados[0].motivo,
+            "cita no confirmada en el archivo"
+        );
+        assert_eq!(aud.descartados[0].cita, "");
+        assert_eq!(aud.descartados[0].detalle, "");
+        assert_eq!(
+            aud.descartados[0].cita_hash,
+            hash_de("fn no_existe_en_el_archivo(y: u8) {}")
+        );
+        let salida = serde_json::to_string(&aud).expect("serializa");
+        assert!(!salida.contains("no_existe_en_el_archivo"), "{salida}");
     }
 
     #[test]
