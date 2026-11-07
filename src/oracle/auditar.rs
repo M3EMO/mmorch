@@ -162,11 +162,12 @@ fn hash_de(texto: &str) -> String {
 }
 
 /// Mide los defectos de `texto_defectos` que son de `repo` contra los `hallazgos`.
+/// `visibles` tiene, por cada archivo leído, sus líneas visibles. Un defecto fuera de ellas no se mide.
 pub fn medir(
     texto_defectos: &str,
     repo: &Path,
     hallazgos: &[Candidato],
-    leidos: &BTreeSet<String>,
+    visibles: &BTreeMap<String, BTreeSet<u32>>,
 ) -> Result<Medicion, ErrorOraculo> {
     let defectos = defectos_del_repo(texto_defectos, repo)?;
     let mut encontrados = 0;
@@ -175,8 +176,10 @@ pub fn medir(
     let mut por_clase = BTreeMap::new();
     let mut por_origen = BTreeMap::new();
     for d in &defectos {
-        // Sin lectura no hay medición: el defecto no cuenta como encontrado ni como caso medido.
-        let medido = leidos.contains(&d.archivo);
+        // Sin línea visible no hay medición: el defecto no cuenta como encontrado ni como caso medido.
+        let medido = visibles
+            .get(&d.archivo)
+            .is_some_and(|lineas| lineas.contains(&d.linea));
         let cercano = if medido {
             hallazgos
                 .iter()
@@ -217,27 +220,44 @@ pub fn medir(
     })
 }
 
+/// Líneas visibles de cada archivo leído de `a`. Las relee del repo: la pasada no guarda el texto del modelo.
+fn visibles_leidos(
+    repo: &Path,
+    a: &Auditoria,
+    omitidas: &BTreeMap<&str, BTreeSet<u32>>,
+) -> Result<BTreeMap<String, BTreeSet<u32>>, ErrorOraculo> {
+    let vacia = BTreeSet::new();
+    let mut salida = BTreeMap::new();
+    for ruta in a.archivos.iter().filter(|f| !a.sin_leer.contains(f)) {
+        let archivo = leer_archivo(ruta, &repo.join(ruta))?;
+        let omitidas = omitidas.get(ruta.as_str()).unwrap_or(&vacia);
+        salida.insert(ruta.clone(), lineas_visibles(&archivo, omitidas));
+    }
+    Ok(salida)
+}
+
 /// Medición de la pasada. Sin archivos leídos no hay medición: devuelve `None`.
 fn medir_auditoria(
     texto: &str,
     repo: &Path,
     a: &Auditoria,
+    omitidas: &BTreeMap<&str, BTreeSet<u32>>,
 ) -> Result<Option<Medicion>, ErrorOraculo> {
-    let leidos: BTreeSet<String> = a
-        .archivos
-        .iter()
-        .filter(|f| !a.sin_leer.contains(f))
-        .cloned()
-        .collect();
-    if leidos.is_empty() {
+    let visibles = visibles_leidos(repo, a, omitidas)?;
+    if visibles.is_empty() {
         return Ok(None);
     }
-    Ok(Some(medir(texto, repo, &a.hallazgos, &leidos)?))
+    Ok(Some(medir(texto, repo, &a.hallazgos, &visibles)?))
 }
 
 /// Mide y asigna `a.medicion`. Sin archivos leídos no hay medición: deja el aviso que lo dice.
-fn medir_con_aviso(texto: &str, repo: &Path, a: &mut Auditoria) -> Result<(), ErrorOraculo> {
-    a.medicion = medir_auditoria(texto, repo, a)?;
+fn medir_con_aviso(
+    texto: &str,
+    repo: &Path,
+    a: &mut Auditoria,
+    omitidas: &BTreeMap<&str, BTreeSet<u32>>,
+) -> Result<(), ErrorOraculo> {
+    a.medicion = medir_auditoria(texto, repo, a, omitidas)?;
     if a.medicion.is_none() {
         a.avisos
             .push("ningún archivo leído: no hay medición".into());
@@ -563,15 +583,18 @@ fn leer_archivos(repo: &Path, incluir: &[PathBuf]) -> Result<Vec<Archivo>, Error
     }
     rutas
         .into_iter()
-        .map(|(ruta, absoluta)| {
-            let bytes = fs::read(&absoluta)
-                .map_err(|e| ErrorOraculo::Infra(format!("leer {}: {e}", absoluta.display())))?;
-            Ok(Archivo {
-                ruta,
-                contenido: String::from_utf8_lossy(&bytes).into_owned(),
-            })
-        })
+        .map(|(ruta, absoluta)| leer_archivo(&ruta, &absoluta))
         .collect()
+}
+
+/// Lee `absoluta` como texto. `ruta` es la clave relativa con la que el archivo se nombra.
+fn leer_archivo(ruta: &str, absoluta: &Path) -> Result<Archivo, ErrorOraculo> {
+    let bytes = fs::read(absoluta)
+        .map_err(|e| ErrorOraculo::Infra(format!("leer {}: {e}", absoluta.display())))?;
+    Ok(Archivo {
+        ruta: ruta.into(),
+        contenido: String::from_utf8_lossy(&bytes).into_owned(),
+    })
 }
 
 /// Ruta de `entrada` sin raíz ni `..`. Una ruta que sale del repo es error de uso.
@@ -647,15 +670,34 @@ fn lineas_omitidas(gitleaks: &[Hallazgo]) -> BTreeMap<&str, BTreeSet<u32>> {
     mapa
 }
 
+/// Líneas de producción de `a` con su número (desde 1). Corta en la primera marca de tests.
+fn produccion(a: &Archivo) -> impl Iterator<Item = (u32, &str)> {
+    a.contenido
+        .lines()
+        .enumerate()
+        .take_while(|(_, linea)| !linea.trim_start().starts_with(MARCA_TEST))
+        .map(|(i, linea)| ((i + 1) as u32, linea))
+}
+
+/// Números de línea de `a` que el modelo ve con su código: de producción y sin líneas de secretos.
+/// `texto_visible` y la medición usan esta misma regla.
+fn lineas_visibles(a: &Archivo, omitidas: &BTreeSet<u32>) -> BTreeSet<u32> {
+    produccion(a)
+        .map(|(n, _)| n)
+        .filter(|n| !omitidas.contains(n))
+        .collect()
+}
+
 /// Texto de `a` que ve el modelo, con los números de línea reales: sin tests y sin líneas de secretos.
 fn texto_visible(a: &Archivo, omitidas: &BTreeSet<u32>) -> String {
+    let visibles = lineas_visibles(a, omitidas);
     let mut salida = String::new();
-    for (i, linea) in a.contenido.lines().enumerate() {
-        if linea.trim_start().starts_with(MARCA_TEST) {
-            break;
-        }
-        let omitida = omitidas.contains(&((i + 1) as u32));
-        salida.push_str(if omitida { LINEA_OMITIDA } else { linea });
+    for (n, linea) in produccion(a) {
+        salida.push_str(if visibles.contains(&n) {
+            linea
+        } else {
+            LINEA_OMITIDA
+        });
         salida.push('\n');
     }
     salida
@@ -664,11 +706,8 @@ fn texto_visible(a: &Archivo, omitidas: &BTreeSet<u32>) -> String {
 /// Texto de `a` solo con sus líneas de secretos. Las demás quedan vacías, con los mismos números.
 fn texto_solo_secretos(a: &Archivo, omitidas: &BTreeSet<u32>) -> String {
     let mut salida = String::new();
-    for (i, linea) in a.contenido.lines().enumerate() {
-        if linea.trim_start().starts_with(MARCA_TEST) {
-            break;
-        }
-        if omitidas.contains(&((i + 1) as u32)) {
+    for (n, linea) in produccion(a) {
+        if omitidas.contains(&n) {
             salida.push_str(linea);
         }
         salida.push('\n');
@@ -722,20 +761,16 @@ fn ocultar_secretos(
 
 /// Líneas de producción de `a` como `NN: texto`. Corta en la primera marca de tests.
 fn lineas_numeradas(a: &Archivo, omitidas: &BTreeSet<u32>) -> Vec<String> {
-    let mut salida = Vec::new();
-    for (i, linea) in a.contenido.lines().enumerate() {
-        if linea.trim_start().starts_with(MARCA_TEST) {
-            break;
-        }
-        let numero = (i + 1) as u32;
-        let texto = if omitidas.contains(&numero) {
-            LINEA_OMITIDA
-        } else {
-            linea
-        };
-        salida.push(format!("{numero}: {texto}\n"));
-    }
-    salida
+    produccion(a)
+        .map(|(numero, linea)| {
+            let texto = if omitidas.contains(&numero) {
+                LINEA_OMITIDA
+            } else {
+                linea
+            };
+            format!("{numero}: {texto}\n")
+        })
+        .collect()
 }
 
 fn encabezado(ruta: &str, parte: Option<usize>) -> String {
@@ -1038,7 +1073,8 @@ fn auditar_solo_medir(o: &OpcionesAuditar, candidatos: &Path) -> Result<Auditori
     let texto_defectos = leer_defectos(o.defectos.as_deref(), &o.repo)?;
     let mut auditoria = medir_candidatos(&o.repo, &o.incluir, &gitleaks, &texto)?;
     if let Some(texto) = &texto_defectos {
-        medir_con_aviso(texto, &o.repo, &mut auditoria)?;
+        let omitidas = lineas_omitidas(&gitleaks);
+        medir_con_aviso(texto, &o.repo, &mut auditoria, &omitidas)?;
     }
     escribir_salida(&o.salida, &auditoria)?;
     Ok(auditoria)
@@ -1098,7 +1134,8 @@ pub fn auditar(home: &Path, o: &OpcionesAuditar) -> Result<Auditoria, ErrorOracu
         o.por_archivo,
     )?;
     if let Some(texto) = &texto_defectos {
-        medir_con_aviso(texto, &o.repo, &mut auditoria)?;
+        let omitidas = lineas_omitidas(&gitleaks);
+        medir_con_aviso(texto, &o.repo, &mut auditoria, &omitidas)?;
     }
     escribir_salida(&o.salida, &auditoria)?;
     Ok(auditoria)
@@ -1698,8 +1735,8 @@ detalle = "de otro repo"
             cita: "cita".into(),
             detalle: "d".into(),
         };
-        let leidos: BTreeSet<String> = ["src/a.rs".to_string()].into();
-        let m = medir(texto, &repo, &[hallazgo], &leidos).expect("medición");
+        let visibles = visibles_hasta(&["src/a.rs"], 100);
+        let m = medir(texto, &repo, &[hallazgo], &visibles).expect("medición");
         assert_eq!(m.casos, 2);
         assert_eq!(m.casos_leidos, 2);
         assert_eq!(m.encontrados, 1);
@@ -1732,8 +1769,8 @@ linea = 5
             cita: "cita".into(),
             detalle: "d".into(),
         };
-        let leidos: BTreeSet<String> = ["src/a.rs".to_string()].into();
-        let m = medir(texto, &repo, &[hallazgo], &leidos).expect("medición");
+        let visibles = visibles_hasta(&["src/a.rs"], 100);
+        let m = medir(texto, &repo, &[hallazgo], &visibles).expect("medición");
         assert_eq!(m.casos, 2);
         assert_eq!(m.casos_leidos, 1);
         assert_eq!(m.encontrados, 1);
@@ -1747,8 +1784,21 @@ linea = 5
     #[test]
     fn medir_con_toml_roto_es_error_de_uso() {
         let (_tmp, repo) = repo_con(&[]);
-        let err = medir("[[defecto\n", &repo, &[], &BTreeSet::new()).expect_err("debe fallar");
+        let err = medir("[[defecto\n", &repo, &[], &BTreeMap::new()).expect_err("debe fallar");
         assert!(matches!(err, ErrorOraculo::Uso(_)), "{err}");
+    }
+
+    /// Líneas visibles para `medir`: cada archivo con sus líneas 1 a `hasta`.
+    fn visibles_hasta(archivos: &[&str], hasta: u32) -> BTreeMap<String, BTreeSet<u32>> {
+        archivos
+            .iter()
+            .map(|f| (f.to_string(), (1..=hasta).collect()))
+            .collect()
+    }
+
+    /// Código de doce líneas. El defecto de `DEFECTOS_DOS_ARCHIVOS` (línea 10) cae dentro.
+    fn doce_lineas() -> String {
+        "fn f() {}\n".repeat(12)
     }
 
     /// Conteo corto para armar los mapas esperados.
@@ -1796,8 +1846,8 @@ linea = 40
             detalle: "d".into(),
         };
         let hallazgos = vec![hallazgo(11), hallazgo(31)];
-        let leidos: BTreeSet<String> = ["src/a.rs".to_string()].into();
-        let m = medir(texto, &repo, &hallazgos, &leidos).expect("medición");
+        let visibles = visibles_hasta(&["src/a.rs"], 100);
+        let m = medir(texto, &repo, &hallazgos, &visibles).expect("medición");
 
         assert_eq!(
             m.por_origen,
@@ -1841,8 +1891,8 @@ linea = 5
 clase = "seguridad"
 origen = "real"
 "#;
-        let leidos: BTreeSet<String> = ["src/a.rs".to_string()].into();
-        let m = medir(texto, &repo, &[], &leidos).expect("medición");
+        let visibles = visibles_hasta(&["src/a.rs"], 100);
+        let m = medir(texto, &repo, &[], &visibles).expect("medición");
         assert!(m.por_clase.is_empty());
         assert!(m.por_origen.is_empty());
         assert!(!m.detalle[0].medido);
@@ -1853,7 +1903,7 @@ origen = "real"
         let (_tmp, repo) = repo_con(&[]);
         let texto =
             "[[defecto]]\nrepo = \"root\"\narchivo = \"src/a.rs\"\nlinea = 10\norigen = \"otro\"\n";
-        let err = medir(texto, &repo, &[], &BTreeSet::new()).expect_err("debe fallar");
+        let err = medir(texto, &repo, &[], &BTreeMap::new()).expect_err("debe fallar");
         assert!(
             matches!(&err, ErrorOraculo::Uso(m) if m.contains("defectos.toml inválido")),
             "{err}"
@@ -1863,14 +1913,14 @@ origen = "real"
     #[test]
     fn defectos_sin_clase_ni_origen_siguen_parseando() {
         let (_tmp, repo) = repo_con(&[]);
-        let m = medir(DEFECTOS_DOS_ARCHIVOS, &repo, &[], &BTreeSet::new()).expect("medición");
+        let m = medir(DEFECTOS_DOS_ARCHIVOS, &repo, &[], &BTreeMap::new()).expect("medición");
         assert_eq!(m.casos, 2);
     }
 
     #[test]
     fn la_medicion_serializa_los_conteos() {
         let (_tmp, repo) = repo_con(&[]);
-        let m = medir(DEFECTOS_DOS_ARCHIVOS, &repo, &[], &BTreeSet::new()).expect("medición");
+        let m = medir(DEFECTOS_DOS_ARCHIVOS, &repo, &[], &BTreeMap::new()).expect("medición");
         let json = serde_json::to_value(&m).expect("json");
         assert!(json["por_clase"].is_object(), "{json}");
         assert!(json["por_origen"].is_object(), "{json}");
@@ -1911,18 +1961,31 @@ linea = 5
     fn sin_ningun_archivo_leido_la_medicion_es_null() {
         let (_tmp, repo) = repo_con(&[]);
         let sin_archivos = auditoria_con(&[], &[]);
-        let m = medir_auditoria(DEFECTOS_DOS_ARCHIVOS, &repo, &sin_archivos).expect("medición");
+        let m = medir_auditoria(
+            DEFECTOS_DOS_ARCHIVOS,
+            &repo,
+            &sin_archivos,
+            &BTreeMap::new(),
+        )
+        .expect("medición");
         assert!(m.is_none());
         let todo_sin_leer = auditoria_con(&["src/a.rs", "src/b.rs"], &["src/a.rs", "src/b.rs"]);
-        let m = medir_auditoria(DEFECTOS_DOS_ARCHIVOS, &repo, &todo_sin_leer).expect("medición");
+        let m = medir_auditoria(
+            DEFECTOS_DOS_ARCHIVOS,
+            &repo,
+            &todo_sin_leer,
+            &BTreeMap::new(),
+        )
+        .expect("medición");
         assert!(m.is_none());
     }
 
     #[test]
     fn con_archivos_leidos_la_medicion_existe() {
-        let (_tmp, repo) = repo_con(&[]);
+        let codigo = doce_lineas();
+        let (_tmp, repo) = repo_con(&[("src/a.rs", codigo.as_str())]);
         let a = auditoria_con(&["src/a.rs", "src/b.rs"], &["src/b.rs"]);
-        let m = medir_auditoria(DEFECTOS_DOS_ARCHIVOS, &repo, &a)
+        let m = medir_auditoria(DEFECTOS_DOS_ARCHIVOS, &repo, &a, &BTreeMap::new())
             .expect("medición")
             .expect("hay medición");
         assert_eq!(m.casos, 2);
@@ -2008,7 +2071,7 @@ linea = 5
     fn medir_con_aviso_sin_archivos_leidos_empuja_el_aviso() {
         let (_tmp, repo) = repo_con(&[]);
         let mut a = auditoria_con(&[], &[]);
-        medir_con_aviso(DEFECTOS_DOS_ARCHIVOS, &repo, &mut a).expect("medición");
+        medir_con_aviso(DEFECTOS_DOS_ARCHIVOS, &repo, &mut a, &BTreeMap::new()).expect("medición");
         assert!(a.medicion.is_none());
         assert_eq!(
             a.avisos,
@@ -2018,9 +2081,10 @@ linea = 5
 
     #[test]
     fn medir_con_aviso_con_archivos_leidos_no_empuja_nada() {
-        let (_tmp, repo) = repo_con(&[]);
+        let codigo = doce_lineas();
+        let (_tmp, repo) = repo_con(&[("src/a.rs", codigo.as_str())]);
         let mut a = auditoria_con(&["src/a.rs"], &[]);
-        medir_con_aviso(DEFECTOS_DOS_ARCHIVOS, &repo, &mut a).expect("medición");
+        medir_con_aviso(DEFECTOS_DOS_ARCHIVOS, &repo, &mut a, &BTreeMap::new()).expect("medición");
         assert!(a.medicion.is_some());
         assert!(a.avisos.is_empty(), "{:?}", a.avisos);
     }
@@ -2283,5 +2347,73 @@ linea = 5
         let a = medir_candidatos(&repo, &[], &[], json).expect("medición");
         assert_eq!(a.hallazgos.len(), 1, "{:?}", a.hallazgos);
         assert_eq!(a.hallazgos[0].detalle, "detalle real");
+    }
+
+    /// Corre `--solo-medir` con candidatos, defectos y reporte de gitleaks dados. Sin juez ni tope.
+    fn solo_medir_con(
+        repo: PathBuf,
+        tmp: &Path,
+        candidatos: &str,
+        defectos: &str,
+        gitleaks: &str,
+    ) -> Result<Auditoria, ErrorOraculo> {
+        let home = tempfile::tempdir().expect("home vacío");
+        let ruta_candidatos = tmp.join("candidatos.json");
+        let ruta_gitleaks = tmp.join("gitleaks.json");
+        let ruta_defectos = tmp.join("defectos.toml");
+        fs::write(&ruta_candidatos, candidatos).expect("escribe");
+        fs::write(&ruta_gitleaks, gitleaks).expect("escribe");
+        fs::write(&ruta_defectos, defectos).expect("escribe");
+        let o = OpcionesAuditar {
+            tope_usd: None,
+            gitleaks: Some(ruta_gitleaks),
+            defectos: Some(ruta_defectos),
+            solo_medir: Some(ruta_candidatos),
+            ..opciones(repo, tmp)
+        };
+        auditar(home.path(), &o)
+    }
+
+    #[test]
+    fn un_defecto_despues_del_corte_de_tests_no_se_mide() {
+        let (tmp, repo) = repo_con(&[(
+            "src/a.rs",
+            "fn uno() {}\n#[cfg(test)]\nmod t {}\nfn despues() {}\n",
+        )]);
+        let defectos = "[[defecto]]\nrepo = \"root\"\narchivo = \"src/a.rs\"\nlinea = 4\n";
+        let a = solo_medir_con(repo, tmp.path(), JSON_VACIO, defectos, "[]").expect("solo medir");
+        let m = a.medicion.expect("hay medición");
+        assert!(!m.detalle[0].medido, "{:?}", m.detalle);
+        assert_eq!(m.casos_leidos, 0);
+        assert_eq!(m.encontrados, 0);
+    }
+
+    #[test]
+    fn un_defecto_en_una_linea_omitida_por_secreto_no_se_mide() {
+        let (tmp, repo) = repo_con(&[(
+            "src/a.rs",
+            "fn uno() {}\nlet clave = \"AKIAEXAMPLE123\";\nfn tres() {}\n",
+        )]);
+        let gitleaks = r#"[{"RuleID":"aws-access-token","File":"src/a.rs","StartLine":2,"Description":"clave"}]"#;
+        let defectos = "[[defecto]]\nrepo = \"root\"\narchivo = \"src/a.rs\"\nlinea = 2\n";
+        let a =
+            solo_medir_con(repo, tmp.path(), JSON_VACIO, defectos, gitleaks).expect("solo medir");
+        let m = a.medicion.expect("hay medición");
+        assert!(!m.detalle[0].medido, "{:?}", m.detalle);
+        assert_eq!(m.casos_leidos, 0);
+        assert_eq!(m.encontrados, 0);
+    }
+
+    #[test]
+    fn un_defecto_antes_del_corte_de_tests_se_mide_y_se_encuentra() {
+        let (tmp, repo) = repo_tres_lineas();
+        let candidatos = r#"{"defectos":[{"archivo":"src/a.rs","linea":2,"cita":"fn calcular(x: u32) -> u32 { x * 2 }","detalle":"real"}]}"#;
+        let defectos = "[[defecto]]\nrepo = \"root\"\narchivo = \"src/a.rs\"\nlinea = 2\n";
+        let a = solo_medir_con(repo, tmp.path(), candidatos, defectos, "[]").expect("solo medir");
+        let m = a.medicion.expect("hay medición");
+        assert!(m.detalle[0].medido, "{:?}", m.detalle);
+        assert!(m.detalle[0].encontrado, "{:?}", m.detalle);
+        assert_eq!(m.casos_leidos, 1);
+        assert_eq!(m.encontrados, 1);
     }
 }
