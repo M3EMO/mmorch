@@ -5750,3 +5750,127 @@ P85 y P86 siguen abiertas, con el mismo texto de la vuelta (6).
 **P87 (reescrita): ¿Mezclar las Tareas 75, 76 y 77 en local, sin push, cuando pase su suite con podman?** P77 cubre hasta la 74. La 75 y la 76 son el arnés de medición del buscador. La 77 corrige la fila de una corrida.
 - **a)** Sí, sin volver a preguntar. Recomendada.
 - **b)** No, traé el resultado.
+
+## Vuelta del 2026-11-07 (1): validez repetida, revisión nueva y firma
+
+**Estado.** La punta local tiene 72 a 77, sin push. Suite de 9781451: 2754 pasan, 0 fallan, 4 ignorados. API: 23,83 de 24 USD. P85, P86 y P87 respondidas con a.
+
+**Validez repetida (bfd5110).** Orden 5 de 6. Recall 3 de 8: por línea 0 de 8, por test 3 de 8. Los dos pares de `global` dan el orden esperado.
+
+## Variación sobre el mismo commit
+
+**Por qué Estructura cambia con los mismos hallazgos: es el juez. Probado por lectura y por datos.**
+- `juntar_partes` mezcla sondas y juez (`src/oracle/mod.rs:1390`). `estructura.legibilidad` es un ítem del juez.
+- Los hallazgos de sonda son iguales. Cambia el nivel de ese ítem.
+- Los 10 limpios de brasa ya guardados dan Estructura de 0,19 a 0,286, los mismos dos extremos que viste.
+- Arquitectura en esos limpios va de 0,533 a 0,733.
+
+**Por qué `commit` difiere: `commit` no es un commit. Inferencia fuerte, sin ejecutar.**
+- El campo guarda `identidad_de`, un hash del contenido y de las suites (`src/oracle/mod.rs:2674`).
+- `hash_de_version` y `copiar_repo` saltan los mismos `EXCLUIDOS`.
+- La carpeta del banco trae `.pytest_cache/`, y el clon no. `target/` no cuenta. El resto del árbol está limpio en los dos.
+- **Decisión: no ignorar todo lo ignorado.** Un archivo ignorado entra a la copia evaluada, así que debe cambiar la identidad. Sumar `.pytest_cache` y `__pycache__` a `EXCLUIDOS` va al hito 1b.
+
+**Banda de `global`: 0,07. Medida con limpios guardados, sin gastar.**
+
+| Tarea | Muestras | Rango en `global` | Desvío |
+|---|---|---|---|
+| memora | 9 | 0,069 | 0,022 |
+| brasa | 10 | 0,046 | 0,017 |
+
+- Solo varían Estructura y Arquitectura por el juez, sobre 6 y 5 dimensiones. No incluye tests inestables.
+- **Regla de lectura:** una diferencia menor a 0,07 no ordena dos repos. Corrijo el 0,05 del cierre.
+- **No cambio `ordena_antes`.** Hacerlo después de ver el par fallado acomoda la medición. El par fallado (0,047) cae dentro de la banda, y el cierre lo dice. Sigue contando como fallado.
+- brasa-ecc contra brasa-sdlc (0,073) queda justo afuera. Con una sola muestra por lado, su decisión da más apoyo que su número.
+
+**Criterio de "Validation".** "Cada diferencia con causa" es el comando de brasa. El de memora pide niveles estables, y no cumple. Dos tests siguen sin causa en `oraculos/memora/diferencias.md`: `test_bgsave_no_bloquea` y `test_client_id`. Anotalos con sus tasas medidas y "causa sin determinar". El diagnóstico va al hito 1b.
+
+## Revisión del código nuevo
+
+**HIGH: acepto tu confirmación por lectura.** H1, H2 y H3 no afectan una medición ya hecha. Hoy no sale nada con secretos: los 4 reportes de Root son de una línea, y no queda gasto en el hito 1.
+
+**MEDIUM verificados.**
+
+| N.º | Veredicto | Línea | Efecto |
+|---|---|---|---|
+| Oracle M1 | **Confirmado** | `src/oracle/auditar.rs:648-653`, y `medido` por archivo en `:176` | Baja el recall si un defecto queda después de un `#[cfg(test)]` a mitad del archivo |
+| Oracle M2 | **Confirmado, sin efecto hoy** | `src/oracle/auditar.rs:179-185` | El protocolo mide un defecto por copia. Importa en V0 y en commits reales con varias líneas |
+| Oracle M3 | **Confirmado, sin efecto en el 3 de 8** | `src/oracle/validez.rs:588-597` | Los 3 tests estaban en `ocultos_fallidos`. Pero `evaluar` de hoy da FIFO como inestable, así que el número es frágil |
+| Oracle M8 | **Confirmado el camino** | `src/oracle/juez.rs:325-329` salta absolutas, no `..` | No probé que clippy dé esa ruta. Importa con repos ajenos |
+| Oracle M5 | **Confirmado** | `src/oracle/perfiles/herramientas.rs:439` | Importa con repos ajenos |
+
+**Los demás MEDIUM (oracle M4, M6 y M7; corre 1 a 5): sin verificar.** Los ordeno por su texto.
+
+**Dónde va cada uno.**
+
+| Momento | Qué | Motivo |
+|---|---|---|
+| **Antes de la firma** | Nada de código. Solo corregir `docs/cierre-hito-1.md` | Ninguno cambia un número medido, y el cierre los lista |
+| **Antes del conjunto final, de V0, V1, S2 y de evaluar repos ajenos: Tarea 78** | H1, H2, H3, M1, M2, M3, M5 y M8 | Tocan la medición del buscador, o exponen secretos y el host con código ajeno |
+| **Hito 1b** | Oracle M4, M6 y M7; corre 1 a 5; `.pytest_cache` en `EXCLUIDOS` | No cambian un resultado medido. Corre 3 no aplica hoy: Sonnet no tiene umbral de precio |
+
+**M3, decisión.** P74 dice "un test oculto en rojo". Un inestable no es rojo. La fila cuenta rojo estable, y muestra `test_inestable` aparte. El recall puede bajar a 2 de 8 si FIFO sale inestable en la próxima corrida. Lo acepto. No saco del denominador un defecto cuya sonda no midió: eso solo lo sube. Queda un aviso.
+
+**Después de la Tarea 78,** volvé a medir V2 y V3 con `--solo-medir` sobre los candidatos guardados. No gasta cupo.
+
+### Tarea 78: Secretos y medición fiel en `auditar` y `validar`
+- **Archivos**: `src/oracle/auditar.rs`, `src/oracle/validez.rs`, `src/oracle/perfiles/herramientas.rs`, `src/oracle/juez.rs` y `src/oracle/evidencia.rs`.
+- **Arranca**: ya, desde la punta de `claude/root-e7813e`, con `ROOT_SIN_PODMAN=1`.
+- **Brief**: `docs/builds/brief-local-78.md`.
+
+## Tarea 77
+
+1. **Hash de la cita sola:** queda. Una cita no confirmada se puede adivinar solo si es corta, y el archivo es local.
+2. **Descarte por secreto sin hash:** queda.
+3. **`assistant` sin `message.id` cuenta:** queda.
+4. **Latencia medida:** queda.
+5. **La fila vieja no se reescribe:** queda.
+
+**Sospecha del revisor, `--resume`: refutada por los datos de la corrida real, con una sola muestra.**
+- La última vuelta siguió la sesión `6ae73968`, la misma de los cortes.
+- Su `result` dice `total_cost_usd` 0,74, `num_turns` 14 y `duration_ms` 293 791.
+- Los cortes anteriores estimaron de 17 a 26 USD cada uno.
+- Si `claude` conservara lo acumulado, ese costo sería mucho mayor. Entonces no hay doble conteo.
+- **Cómo se mide:** se suma cada vuelta como está. Con la próxima corrida reanudada se revisa otra vez.
+
+## ¿Se puede pedir la firma?
+
+**Sí, ya.** Están medidas la validez, la comparación y "Validation". La revisión está leída, y nada de la Tarea 78 cambia un número del cierre. Corregí `docs/cierre-hito-1.md`. Falta anotar los 2 tests en `diferencias.md`. La calibración no se repitió con el binario final: el cierre lo dice.
+
+## Orden (2026-11-07, 1)
+
+**Ahora, en paralelo:**
+- Pedir la firma (P88).
+- Tarea 78, sin podman.
+- Minería: elección de commits y S9, que ya corren.
+- Anotar los 2 tests en `diferencias.md`.
+
+**Con CPU libre, sin otra suite:** base de la minería en contenedor, y S1.
+
+**Después:**
+1. Prueba con podman de la Tarea 78. Mezcla según P89.
+2. Volver a medir V2 y V3 sin cupo.
+3. Con la firma, y P72 mediante: S2, V0, V1, Vd, reales de ajuste, y conjunto final si V3 pasa la regla.
+4. Dataset completo.
+
+**Saldo.** Quedan 0,17 USD del hito 1. No se usan. Lo que sigue usa los 50 USD, según P80 y P84.
+
+## Preguntas para el usuario (2026-11-07, 1)
+
+**P88: ¿Firmás el cierre del hito 1 con la validez reprobada a la vista?** Está en `docs/cierre-hito-1.md`. Esto es lo que firmarías:
+- **Cumple:** `r00t corre` llega al juez final de punta a punta, y memora-ecc y brasa-ecc quedan por encima de sus pares de SDLC.
+- **No cumple:** orden 5 de 6, con umbral 6 de 6. Recall 3 de 8, con umbral 0,8. Por línea, Root encontró 0 de 8.
+- **No cumple:** niveles estables en 3 corridas de memora.
+- **Fuera de `global`:** Diseño en las dos tareas, Funciona en brasa y Pruebas en memora.
+- **Sin repetir:** la calibración, con el binario final.
+- **Sigue la regla:** Root no evalúa un repo real hasta cumplir el recall sobre el dataset.
+- **Pendiente, sin cambiar números:** la Tarea 78, y lo demás que el cierre lista para el hito 1b.
+
+Opciones:
+- **a)** Firmo así. Recomendada: todo lo que falta está escrito, y no cambia lo medido.
+- **b)** Firmo cuando entre la Tarea 78. Se demora, y no cambia ningún número.
+- **c)** No firmo. Decime qué falta.
+
+**P89: ¿Mezclar la Tarea 78 en local, sin push, cuando pase su suite con podman?**
+- **a)** Sí, sin volver a preguntar. Recomendada.
+- **b)** No, traé el resultado.

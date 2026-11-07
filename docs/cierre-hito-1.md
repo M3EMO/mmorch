@@ -1,6 +1,6 @@
 # Cierre del hito 1 de Root
 
-**Estado: BORRADOR, sin firmar.** Falta la revisión del código nuevo desde `e665a5f`.
+**Estado: sin firmar.** Listo para pedir la firma del usuario (P88).
 
 ## Veredicto del hito
 
@@ -40,6 +40,8 @@ Medición del 2026-11-07 con `bfd5110`: 0,87 USD y 133 minutos. La medición del
 - `src/scene.rs:180` aparece en la evidencia de un ítem, y no como hallazgo.
 - Falló el par `memora-sdlc-ba9d6e8` sobre `memora-sdlc-876f72a`: 0,399 contra 0,446. Ambos dan "bloqueado".
 - La causa de ese par es Estructura: 0,0 contra 0,56. Sin esa dimensión, el orden queda correcto: 0,50 contra 0,42. La fórmula no cambia por este dato: ajustarla tras ver un par acomoda la medición.
+- La diferencia de ese par, 0,047, cae dentro de la banda de variación de `global`. Igual cuenta como fallado.
+- Los 3 tests estaban en `ocultos_fallidos`. Otra corrida dio FIFO como inestable, así que el 3 de 8 es frágil. Con la Tarea 78, un inestable no cuenta como rojo.
 
 ## Pasada de búsqueda de defectos (P73 c)
 
@@ -106,11 +108,18 @@ Sale de los veredictos de la validez repetida, en `validez/veredictos/`.
 | memora-ecc contra memora-sdlc | 0,812 | 0,399 | Listo contra bloqueado | Correcto |
 | brasa-ecc contra brasa-sdlc | 0,587 | 0,514 | Listo contra bloqueado | Correcto |
 
-Los dos pares van en el orden esperado. Son 2 pares, sin intervalo de confianza. En brasa, la distancia de 0,073 es menor que la variación medida abajo.
+Los dos pares van en el orden esperado. Son 2 pares, sin intervalo de confianza. La distancia de brasa, 0,073, queda justo fuera de la banda de 0,07 medida abajo. Su decisión da más apoyo que su número.
 
 ## Revisión de cierre
 
 5 HIGH y 17 MEDIUM, de revisores que solo leyeron. Opus verificó los HIGH y seis MEDIUM en el código. Las Tareas 69, 70 y 71 corrigen lo que entra antes de firmar. Sus mezclas son locales, sin push.
+
+**Revisión del código nuevo, 2026-11-07.** 3 HIGH y 13 MEDIUM, de revisores que solo leyeron. Ninguno cambia un número de este cierre. La Tarea 78 corrige, antes de usar la Línea Buscador o repos ajenos:
+- secretos de varias líneas, rutas de gitleaks y citas en `--solo-medir` (HIGH);
+- medición de líneas no visibles, un candidato que cubre dos defectos, e inestables contados como rojos;
+- lectura sin tope de `/salida`, y rutas con `..` hacia el juez.
+
+La sospecha de doble conteo con `--resume` queda refutada por una muestra: la última vuelta informó 0,74 USD y 14 turnos.
 
 ## Validation
 
@@ -123,7 +132,7 @@ Punta probada: `8a9992c`, y después `9781451`. El árbol de código de `3108290
 | `r00t goal verificar` | Pasa: `311a6371c0cd414a` |
 | `evaluar` memora-ecc | `global` 0,819, listo, contrato 61/61, oculto 65/68, 3 inestables |
 | `evaluar` brasa-ecc | `global` 0,541, listo, contrato 53/53, oculto 20/21 |
-| Calibración de 8 dimensiones | No se repitió: la tabla de arriba es del binario anterior, por presupuesto |
+| Calibración de 8 dimensiones | **No se repitió:** las filas son de binarios anteriores, por presupuesto. La Tarea 71 cambió los comandos de gitleaks, audit y clippy. No debería cambiar estos repos, sin medir |
 | `informe` memora-sdlc | Bloqueado, con módulos ausentes, código 1 |
 | `oraculo validar` | La medición de arriba |
 | `corre` y `track listar` | La fila de arriba |
@@ -136,9 +145,11 @@ Punta probada: `8a9992c`, y después `9781451`. El árbol de código de `3108290
 - Brasa coincide en 14 de 14 entre las dos corridas de hoy.
 
 **`global` varía sobre el mismo commit.** Memora da 0,812 y 0,819. Brasa da 0,587 y 0,541.
-- En brasa, Estructura pasa de 0,29 a 0,19 con los mismos 6 hallazgos, y Arquitectura de 0,73 a 0,60. No medí la causa.
+- **La causa es el juez.** En brasa, Estructura pasa de 0,29 a 0,19 con los mismos 6 hallazgos, porque cambia `estructura.legibilidad`. Arquitectura pasa de 0,73 a 0,60.
+- Los limpios guardados lo confirman, con 9 y 10 muestras. `global` varía por el juez en un rango de 0,069 en memora y 0,046 en brasa. Esto no incluye tests inestables.
 - Diseño, sin calibrar, va de 0,82 a 0,0 en brasa. No entra a `global`.
-- Una diferencia de `global` menor a 0,05 no alcanza para ordenar dos repos.
+- **Una diferencia de `global` menor a 0,07 no alcanza para ordenar dos repos.**
+- El campo `commit` no es un commit: es un hash del contenido. Por eso difiere entre el clon y la carpeta del banco, que trae `.pytest_cache/`. Es una inferencia, sin ejecutar.
 
 ## Dinero
 
@@ -154,6 +165,8 @@ Los builders se informan aparte en cada `docs/builds/*build-local-*.md`.
 - **Sin medir por falta de fuente:** los 7 defectos de F1, cuyos repos se borraron (decisión 59).
 - **Hito 1b:** G3 y el acuerdo con el usuario, G4, Colab 7h, Graft 16b con G5, la lectura ampliada del juez y el contrato `sin_evidencia`.
 - **Hito 1b, de la pasada:** `medicion` informa "0 de 10" aunque no lea nada, el tope frena con su reserva pesimista, y sale con 0 estando incompleta. Dos defectos reales que halló siguen en la punta: `src/corre/ejecutor.rs:339` y `src/corre/corrida.rs:281`.
+- **Hito 1b, de la revisión nueva:** copias de gitleaks en disco, un `RUN` de más de 1 MiB, veredictos que se pisan, y los 5 MEDIUM de `corre`.
+- **Hito 1b, de estabilidad:** causa de `test_bgsave_no_bloquea` y `test_client_id`.
 - **Antes de la próxima calibración paga:** hallazgos 5, 18 y 19, y el arreglo de la Tarea 67.
 - **Antes de evaluar un repo real:** el recall sobre el dataset, y los hallazgos 9, 11, 12, 14 y 15, sin verificar.
 - **Dataset:** PRD en `.claude/prds/dataset.prd.md`, sujeto a su prueba de sustento (decisión 79).
@@ -161,4 +174,4 @@ Los builders se informan aparte en cada `docs/builds/*build-local-*.md`.
 
 ## Firma
 
-Sin firmar. La firma es del usuario.
+Sin firmar. La firma es del usuario. Pregunta: P88 del plan.
