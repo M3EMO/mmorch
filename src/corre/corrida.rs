@@ -3,7 +3,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
@@ -13,7 +13,8 @@ use crate::corre::args::{args_claude, con_resume, env_del_builder};
 use crate::corre::config::ConfigCorrida;
 use crate::corre::contenedor::{TIMEOUT_BUILDER, estado_de};
 use crate::corre::costo_cortado::{
-    costo_de_uso, evento_de_corte, precio_de_rol, uso_de_transcript,
+    costo_de_uso, evento_de_corte, evento_sesion_de_corte, precio_de_rol, turnos_de_transcript,
+    uso_de_transcript,
 };
 use crate::corre::git_seguro;
 use crate::corre::redacta::{redactar, token_de_copia};
@@ -100,8 +101,8 @@ struct Lanzado {
 /// Un fallo al lanzar que no es un corte aborta sin evaluar: sin builder no hay nada que evaluar,
 /// y la evaluación puede gastar API.
 /// Un rol sin `result` exitoso también aborta sin evaluar ni escribir fila: deja un `Gate` con el motivo.
-/// Cada vuelta cortada guarda su transcript parcial y registra su costo estimado
-/// (ver `registrar_corte`).
+/// Cada vuelta cortada guarda su transcript parcial, registra su costo estimado
+/// y registra su sesión sin costo, con su duración y sus turnos (ver `registrar_corte`).
 /// Desde el segundo lanzamiento, la vigencia del login se espera antes de cada lanzamiento
 /// (ver `esperar_vigencia_del_rol`).
 pub fn correr(deps: &DepsCorre, tarea: &str, config: &str) -> Result<Fila, ErrorCorre> {
@@ -248,7 +249,10 @@ fn correr_interno(
                 plugin: config_cargada.claude.plugin_de(*rol).map(Path::to_path_buf),
                 plazo,
             };
-            match deps.ejecutor.lanzar(&lanzamiento) {
+            let inicio = Instant::now();
+            let resultado = deps.ejecutor.lanzar(&lanzamiento);
+            let duracion = inicio.elapsed();
+            match resultado {
                 Ok(salida) => {
                     // Lo que se guarda, y lo que se valida, es el stdout ya redactado.
                     let guardado = stdout_redactado(&ruta_eventos, &corrida, &salida.stdout)?;
@@ -286,6 +290,7 @@ fn correr_interno(
                         n,
                         &modelo,
                         &stdout,
+                        duracion,
                     )?;
                     transcripts.push((*rol, ruta));
                     let motivo = format!("rol {} cortado por plazo: {mensaje}", nombre_rol(*rol));
@@ -542,7 +547,9 @@ fn esperar_vigencia_del_rol(
 
 /// Una vuelta cortada por tiempo: guarda su transcript parcial como `<n>-<rol>.jsonl` y registra el costo
 /// estimado de lo que gastó. Devuelve la ruta del transcript. Su `Gate` lo pone quien llama.
-/// El costo sale de `usage` y del precio del modelo.
+/// El costo sale de `usage` y del precio del modelo. También registra un `Sesion` sin costo, con la
+/// `duracion` del lanzamiento y los turnos de la vuelta (ver `evento_sesion_de_corte`).
+#[allow(clippy::too_many_arguments)]
 fn registrar_corte(
     home: &Path,
     ruta_eventos: &Path,
@@ -551,6 +558,7 @@ fn registrar_corte(
     n: u32,
     modelo: &str,
     stdout: &[u8],
+    duracion: Duration,
 ) -> Result<PathBuf, ErrorCorre> {
     let guardado = stdout_redactado(ruta_eventos, corrida, stdout)?;
     let ruta = guardar_transcript(home, &corrida.id, n, rol, &guardado)?;
@@ -561,6 +569,10 @@ fn registrar_corte(
     registrar(
         ruta_eventos,
         &evento_de_corte(&corrida.id, modelo, &uso, &costo),
+    )?;
+    registrar(
+        ruta_eventos,
+        &evento_sesion_de_corte(&corrida.id, duracion, turnos_de_transcript(stdout)),
     )?;
     Ok(ruta)
 }
@@ -2343,6 +2355,97 @@ mod tests {
         assert_eq!(costos_estimados(&e, &fila.id), 2, "un costo por corte");
     }
 
+    /// Ejecutor que espera `demora` en cada corte antes de devolverlo. Así un corte dura un tiempo medible.
+    struct DemoraEnCortes<'a> {
+        interno: &'a dyn EjecutorBuilder,
+        demora: Duration,
+    }
+
+    impl EjecutorBuilder for DemoraEnCortes<'_> {
+        fn lanzar(&self, l: &Lanzamiento) -> Result<SalidaClaude, ErrorCorre> {
+            let resultado = self.interno.lanzar(l);
+            if matches!(resultado, Err(ErrorCorre::Cortado { .. })) {
+                std::thread::sleep(self.demora);
+            }
+            resultado
+        }
+
+        fn verificar_antes(&self, plazo: Duration) -> Result<(), ErrorCorre> {
+            self.interno.verificar_antes(plazo)
+        }
+
+        fn espera_vigencia(&self) -> EsperaVigencia {
+            self.interno.espera_vigencia()
+        }
+
+        fn vida_restante(&self) -> Result<Option<Duration>, ErrorCorre> {
+            self.interno.vida_restante()
+        }
+    }
+
+    /// Dos cortes y un resultado: el resumen suma los turnos y los minutos de las vueltas cortadas.
+    #[test]
+    fn corre_dos_cortes_suman_sus_turnos_y_minutos_al_resumen() {
+        let e = entorno();
+        let programado = Programado::con(vec![cortado(), cortado(), Paso::Bien]);
+        let ejecutor = DemoraEnCortes {
+            interno: &programado,
+            demora: Duration::from_millis(30),
+        };
+        let (resultado, _) = correr_contando(&e, &ejecutor, CONFIG_CONSTRUYE);
+        let fila = resultado.expect("la corrida llega a la evaluación");
+
+        let log = eventos(&e);
+        let sesiones: Vec<&Evento> = log
+            .iter()
+            .filter(|ev| ev.corrida == fila.id && ev.tipo == TipoEvento::Sesion)
+            .collect();
+        let de_resultado = sesiones
+            .iter()
+            .find(|ev| !ev.extra.contains_key("cortada"))
+            .expect("la Sesion del resultado final");
+        let turnos_del_resultado = de_resultado.extra["num_turns"].as_u64().expect("num_turns");
+        // La fixture trae dos `message.id` distintos por corte: dos turnos por corte.
+        assert_eq!(
+            u64::from(fila.resumen.turnos),
+            2 * 2 + turnos_del_resultado,
+            "{:?}",
+            fila.resumen
+        );
+        assert!(
+            fila.resumen.minutos > de_resultado.latency_s / 60.0,
+            "los cortes suman minutos: {:?}",
+            fila.resumen
+        );
+
+        let cortadas: Vec<&&Evento> = sesiones
+            .iter()
+            .filter(|ev| ev.extra.get("cortada") == Some(&Value::Bool(true)))
+            .collect();
+        assert_eq!(cortadas.len(), 2, "un Sesion por corte");
+        for ev in &cortadas {
+            assert!(ev.latency_s >= 0.03, "duración del corte: {}", ev.latency_s);
+            assert_eq!(ev.cost_usd, 0.0, "el costo ya va en la Llamada");
+            assert!(
+                !ev.extra.contains_key("session_id"),
+                "un corte no lleva id de sesión"
+            );
+        }
+
+        // El Sesion de corte no suma costo: el total de cupo sale de las Llamadas y del resultado.
+        let costo_de_eventos: f64 = log
+            .iter()
+            .filter(|ev| ev.corrida == fila.id && ev.via == Some(Via::Cupo))
+            .map(|ev| ev.cost_usd)
+            .sum();
+        assert!(
+            (fila.resumen.usd_cupo - costo_de_eventos).abs() < 1e-9,
+            "{:?} vs {costo_de_eventos}",
+            fila.resumen
+        );
+        assert_eq!(costos_estimados(&e, &fila.id), 2, "dos Llamadas de corte");
+    }
+
     #[test]
     fn corre_cuatro_cortes_evaluan_el_repo_parcial_y_escriben_la_fila() {
         let e = entorno();
@@ -2689,6 +2792,18 @@ mod tests {
             .count()
     }
 
+    /// Cuántos eventos `Sesion` de cortes tiene la corrida `id`.
+    fn sesiones_cortadas(e: &Entorno, id: &str) -> usize {
+        eventos(e)
+            .iter()
+            .filter(|ev| {
+                ev.tipo == TipoEvento::Sesion
+                    && ev.corrida == id
+                    && ev.extra.get("cortada") == Some(&Value::Bool(true))
+            })
+            .count()
+    }
+
     /// Builder que sale bien después de una corrida anterior de dos lanzamientos.
     fn builder_tras_dos_lanzamientos() -> Builder {
         Builder {
@@ -2780,6 +2895,44 @@ mod tests {
             (fila.resumen.usd_cupo - 0.02).abs() < 1e-9,
             "el costo no se duplica: {:?}",
             fila.resumen
+        );
+    }
+
+    /// Guarda: reanudar tras un corte no repite el `Sesion` del corte. El rol cortado retoma su sesión.
+    #[test]
+    fn corre_reanuda_tras_corte_no_duplica_la_sesion_del_corte() {
+        let e = entorno();
+        let primera = Programado::con(vec![Paso::Bien, cortado(), Paso::NoArranca]);
+        let error = correr_contando(&e, &primera, CONFIG_PLAN_ORGANIZA)
+            .0
+            .expect_err("organiza no arranca en su segunda vuelta");
+        assert!(matches!(error, ErrorCorre::Ejecutor(_)), "{error}");
+        let id = id_de_unica_corrida(&e.usuario);
+        assert_eq!(
+            sesiones_cortadas(&e, &id),
+            1,
+            "precondición: un Sesion de corte"
+        );
+
+        let segunda = builder_tras_dos_lanzamientos();
+        reanudar_contando(&e, &segunda, CONFIG_PLAN_ORGANIZA, &id)
+            .0
+            .expect("reanuda");
+        let lanzados = segunda.lanzados.borrow();
+        assert!(
+            tiene_par(&lanzados[0].args, "--resume", "s-cortado"),
+            "{:?}",
+            lanzados[0].args
+        );
+        assert_eq!(
+            sesiones_cortadas(&e, &id),
+            1,
+            "reanudar no repite el Sesion del corte"
+        );
+        assert_eq!(
+            sesiones_con_id(&e, "s-bien-1"),
+            1,
+            "planifica queda una vez"
         );
     }
 
