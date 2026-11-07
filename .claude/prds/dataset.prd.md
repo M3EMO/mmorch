@@ -104,6 +104,7 @@ Una tarea sale de un commit público con licencia permisiva. Entra solo si cumpl
 
 Sin esto, el piloto mediría mal. Todos están en el plan de Root.
 
+0. Revisar las fórmulas de Seguridad y Estructura, y fijar `[decision.minimo]` con datos. La corrida real de memora dio Seguridad 0,556 por 2 `unsafe` normales, y un "listo" sin mínimos.
 1. El juez lee más allá de los primeros 6000 caracteres de cada archivo. Diseño detectó por cita 4 de 4 dentro del corte y 0 de 6 fuera.
 2. Se revisa `sin_evidencia`. En memora, 3 de 10 limpios no dieron veredicto.
 3. El tope cuenta el reintento y los casos en vuelo (hallazgo 5 de la revisión de cierre).
@@ -209,6 +210,8 @@ Los umbrales de S1, S3a, S9 y S13 son criterio mío, no una medición. No tienen
 - **Partición.** Fallas reales: por repo. Sembrados: por archivo, porque salen de 2 repos. La regla exacta está en el plan.
 
 **Reporte.** Recall por línea, por clase y por origen (real o sembrado), además de candidatos por 1000 líneas. El recall sembrado solo no basta: un saboteador y un detector LLM pueden compartir puntos ciegos. Es un argumento, sin medir.
+
+**Primera medición, sobre 24 sembrados de ajuste.** Clippy: 0,833, con 530,8 candidatos por 1000 líneas, y no sirve. Sonnet por archivo: 0,708, con 1,3. Sonnet con 4 focos: 0,833, con 11,3. En 18 defectos reales ya gastados, solo informativo, los 4 focos dieron 7 de 18. Los sembrados pueden sobrestimar el recall real. Por eso deciden los dos umbrales, y antes del final se exigen 3 o más de 5 reales de ajuste.
 
 **Cuenta el oráculo.** Un defecto real cuenta si un hallazgo cae a 3 líneas o menos de una línea que cambió el arreglo. Un sembrado cuenta igual sobre la línea alterada. Un LLM nunca decide el acierto.
 

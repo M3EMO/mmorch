@@ -1,6 +1,6 @@
 # Cierre del hito 1 de Root
 
-**Estado: BORRADOR, sin firmar.** Faltan la corrida real, la repetición de la validez y los comandos de "Validation".
+**Estado: BORRADOR, sin firmar.** Faltan la repetición de la validez y los comandos de "Validation".
 
 ## Veredicto del hito
 
@@ -70,7 +70,23 @@ Protocolo: `n = 20`, semilla 42. Solo entran a `global` las filas de 0,9 o más 
 
 ## Corrida real de memora (Tarea 16)
 
-**En curso, sin juez final.** Dos corridas no llegaron al juez final: un reinicio de la app a los 110 minutos, y el plazo de 2 horas con 25 de 57 tareas. Se retomó en vueltas (decisión 71), y la última lectura da 35 de 57. La fila queda marcada como `reanudada`, así que su tiempo y su costo no se comparan. Ver P67 en el plan.
+**Cumple: `r00t corre` llega al juez final de punta a punta.** Binario `b1e8278`, exit 0, reanudada, 6 vueltas.
+
+| Medida | Resultado |
+|---|---|
+| Contrato y oculto | 61/61 y 68/68, sin inestables |
+| `global` | 0,785, sobre 6 dimensiones calibradas |
+| Decisión | Listo |
+| API | 0,0876 USD |
+
+**Cómo leer esa fila:**
+- **"Listo" significa "pasa lo que medimos".** No significa "sin defectos". El recall real sigue reprobado.
+- **`invalida = true` es un falso positivo.** El builder corrió `ps`, y vio la ruta del host en sus propios argumentos. No leyó el oráculo.
+- **Costo.** `usd_cupo` = 181,57 trae un corte con la fórmula vieja. El total de lista es cerca de 84 USD, por estimación.
+- **Tiempo.** `minutos` = 16,95 cubre solo planifica y la última vuelta. La retoma duró 389 minutos de reloj.
+- **`commit_root`** dice `85631b9`, y el binario es `b1e8278`.
+- **Seguridad 0,556** sale de 2 llamadas `unsafe` normales. **Estructura 0,286** sale sobre todo de avisos de tamaño. Las dos pesan en `global`, y sus fórmulas van a revisión en el dataset.
+- **No se compara.** La fila es reanudada, y salió de varios lanzamientos.
 
 ## Comparación de `global`
 
@@ -88,7 +104,7 @@ Protocolo: `n = 20`, semilla 42. Solo entran a `global` las filas de 0,9 o más 
 
 | Concepto | USD |
 |---|---|
-| API hasta el 2026-11-06, con la pasada | 22,53 |
+| API hasta el 2026-11-06, con la pasada y la corrida | 22,62 |
 | Límite útil del hito 1 | 24,00 |
 
 Los builders se informan aparte en cada `docs/builds/*build-local-*.md`.

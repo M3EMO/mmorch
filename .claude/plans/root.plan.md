@@ -5652,3 +5652,101 @@ Opciones:
 **P87: ¿Mezclar las Tareas 75 y 76 en local, sin push, cuando pase su suite con podman?** P77 cubre hasta la 74. Son el arnés de medición de la Línea Buscador.
 - **a)** Sí, sin volver a preguntar. Recomendada.
 - **b)** No, traé el resultado.
+
+## Vuelta del 2026-11-06 (7): corrida real terminada y primera medición del buscador
+
+**Estado.** La corrida real terminó con exit 0, reanudada, en 6 vueltas: planifica y 5 de organiza. El binario es `b1e8278`. API: 22,6156 de 24 USD. Quedan 1,38 USD libres antes de la validez. Cupo: bloque de 5 horas al 43 %, y semanal al 21 %.
+
+**Resultado de la corrida.** Contrato 61/61, oculto 68/68, 0 inestables. `global` 0,785. Decisión "listo". La Tarea 16 cumple su objetivo: `r00t corre` llega al juez final de punta a punta (decisión 62).
+
+## Los tres defectos de la fila (leí el código y los eventos)
+
+**a. `invalida = true`: falso positivo, confirmado.**
+- `buscar_en` busca la ruta literal en la entrada y también en la salida (`src/observe/transcript.rs:369-378`). El resto de esa función sí separa `es_entrada`.
+- El único `oraculo_leido` dice motivo `ruta`, herramienta Bash y cita `/home/mpera/.local/share/root`. No hay evento por huella ni por nombre.
+- La causa de fondo está en `src/corre/args.rs:40-47`. Root pasa la ruta del host en `--disallowedTools`. Dentro del contenedor esa ruta no existe, así que la regla no protege nada. Solo le muestra al builder la ruta y el usuario del host.
+- **Decisión:** las dos cosas se corrigen. La ruta del host sale de los argumentos, y queda `Bash(*oraculos*)`. La ruta literal cuenta solo en la entrada. Huella y nombre siguen revisando la salida.
+- **La fila no se reescribe.** `aprende` y `track comparar` la excluyen. Igual es reanudada, y no se compara. El cierre lo dice.
+
+**b. Minutos y turnos: incompletos, y la Tarea 69 dejó esa inconsistencia.**
+- **Corrección a tu lectura:** no es solo la última vuelta. Son planifica y la última: 723 s + 294 s = 16,95 minutos, y 29 + 14 = 43 turnos.
+- **Causa.** La Tarea 69 registra un corte como `Llamada` con latencia 0 (`src/corre/costo_cortado.rs:122-139`). Solo un `Sesion` suma minutos y turnos.
+- **Otro error de la misma fila.** `usd_cupo` = 181,57 trae los 115,13 del primer corte, con la fórmula vieja. Con la nueva serían cerca de 18. El total real de lista es cerca de 84 USD, por estimación. El evento no se reescribe, y el cierre lo aclara.
+
+**c. `commit_root`: confirmado.** `commit_completo(deps.repo_root)` corre `git rev-parse HEAD` en el directorio de trabajo (`src/corre/corrida.rs:757`). El binario no guarda su commit. **Decisión:** `Fila` suma `commit_binario`, grabado al compilar. `commit_root` queda: `verificar_goal` lee esa carpeta, y es otro dato.
+
+## Seguridad, Estructura y la decisión "listo"
+
+**Las cuentas cierran.** `global` es el promedio de 6 dimensiones calibradas: 1,0 + 0,556 + 0,286 + 0,867 + 1,0 + 1,0, dividido 6, da 0,785.
+
+**Seguridad 0,556: ruido, por lectura.** Son 2 `unsafe` de `getrlimit` y `setrlimit`, llamadas normales. `penal` usa el peso del requisito, no el de la rúbrica (`src/oracle/perfiles/mod.rs:109-118`). La rúbrica le da peso 1 a `seguridad.unsafe`, pero el módulo `server` toca requisitos de peso 3. Cada hallazgo resta 0,222.
+
+**Estructura 0,286: señal débil.** Un servidor completo con 34 avisos de tamaño dice algo de mantenimiento. No dice cuán grave es. El comentario de `puntuar_hallazgos` dice "Nunca se cuenta por cantidad bruta de avisos", y la suma hace justamente eso.
+
+**Decisión "listo": correcta según las reglas, y debe leerse con su límite.** `[decision.minimo]` está vacío, y ninguna regla disparó. Todos los tests pasan. Pero Root encontró 1 de 8 defectos reales, así que "listo" significa "pasa lo que medimos". No significa "sin defectos". El hallazgo de severidad 3 (`fsync` bajo el lock) es de Diseño, sin calibrar, y no decide nada.
+
+**No cambio ningún puntaje ahora.** La validez repetida va a medir `global`, y cambiar la fórmula mueve esa medición. Las dos fórmulas pasan a D0 del dataset, y `[decision.minimo]` se fija con datos del dataset.
+
+## Línea Buscador: juicio de la medición
+
+**Según el protocolo, sobre ajuste:**
+- **Vs:** falla el freno B, con 530,8 por 1000 líneas.
+- **V2:** pasa, con 0,708 y 1,3 por 1000.
+- **V3:** pasa, con 0,833 y 11,3 por 1000.
+- **Va al final:** V3. La regla elige el mayor recall.
+
+**Tu prueba sobre los 18 gastados: aceptable, y no cuenta.** No tocó el sellado ni cambió prompts. Solo gastó cupo. Dio una alarma útil. La próxima vez, avisá antes: mirar un resultado antes de decidir tienta a mover la regla. Por eso no muevo ningún umbral.
+
+**Mi lectura.**
+- V3 da 0,833 en sembrados y 0,39 en reales gastados. Son conjuntos distintos, así que "más del doble" es una señal, no una medida.
+- **Hipótesis 1, familia:** Sonnet siembra y Sonnet busca. V0 y V1 la prueban: DeepSeek mide los mismos sembrados. Si DeepSeek también da alto, no es la familia.
+- **Hipótesis 2, clase:** un defecto sembrado toca una línea, y uno real suele ser algo que falta. Sin medir.
+- **Sesgo a favor de V3:** una revisión Sonnet eligió los 10 frescos. Los 8 de validez dan 3/8, sin ese sesgo directo.
+
+## Desempates técnicos 47 (Opus, 2026-11-06)
+
+1. **Los sembrados conservan su papel:** son necesarios, y no alcanzan. Sirven para regresión barata y por clase.
+2. **El umbral no cambia:** 24 de 30 sembrados y 12 de 15 reales, los dos. Decide en la práctica el de reales.
+3. **Regla nueva, más estricta, y escrita antes de ver reales nuevos.** Antes de abrir el final, la variante debe dar 3 o más de 5 en los reales de ajuste. Si no, el conjunto final queda sellado y vuelve al usuario. Razón: un sellado se usa una sola vez, y hoy hay una alarma.
+4. **No hay variante nueva por ahora.** Una variante nueva se justifica con los reales de ajuste, no con los 18 gastados.
+5. **V0 y V1 siguen,** con el tope de P84. Ahora prueban también la hipótesis de familia.
+
+**Informe 76.**
+1. **Ventana de secreto:** queda, y se suma otra regla. Root no conoce el valor del secreto, así que no puede buscar la cita en todo el archivo. Una cita no confirmada no se copia: va su hash. Tarea 77.
+2. **Motivo:** queda.
+3. **Archivo con solo tests:** queda.
+4. **Aviso con texto:** queda.
+5. **`detalle` vacío:** queda.
+
+### Tarea 77: Fila fiel de la corrida y cita no confirmada
+- **Archivos**: `src/corre/`, `src/observe/transcript.rs`, `src/oracle/auditar.rs`, `Fila` en `src/tipos.rs` y `build.rs` nuevo.
+- **Arranca**: ya, desde `laptop/tarea-76` (c88040b), con `ROOT_SIN_PODMAN=1`.
+- **Brief**: `docs/builds/brief-local-77.md`.
+
+## Orden (2026-11-06, 7)
+
+**Ahora, en paralelo:**
+- Suite con podman de c88040b.
+- Tarea 77, sin podman. No toca `evaluar`.
+- Clonado y commits de la minería, si P85 responde. No ejecuta nada.
+
+**Cuando termine la suite:**
+1. Mezcla local de 72, 73 y 74 (`laptop/prueba74`), según P77. La 75 y la 76 esperan P87.
+2. **Validez repetida**, binario bfd5110. Son cerca de 0,97 USD y 200 minutos, y ocupa podman. En paralelo pueden seguir la 77 y la generación de texto por cupo. La base de la minería y S9 no: usan contenedores y CPU.
+
+**Con la validez lista:**
+3. Comparación de `global`, con sus veredictos.
+4. Comandos de "Validation".
+5. Completar `docs/cierre-hito-1.md` y firma del usuario, con la validez a la vista. La 77 no es requisito de la firma: el cierre ya aclara los tres defectos.
+
+**Después del cierre:** S2, V0, V1, Vd, reales de ajuste, conjunto final si V3 pasa la regla nueva, y dataset.
+
+**Saldo.** 1,38 USD libres, menos 0,97 de la validez, deja cerca de 0,41 USD. La evaluación final ya está pagada.
+
+## Preguntas para el usuario (2026-11-06, 7)
+
+P85 y P86 siguen abiertas, con el mismo texto de la vuelta (6).
+
+**P87 (reescrita): ¿Mezclar las Tareas 75, 76 y 77 en local, sin push, cuando pase su suite con podman?** P77 cubre hasta la 74. La 75 y la 76 son el arnés de medición del buscador. La 77 corrige la fila de una corrida.
+- **a)** Sí, sin volver a preguntar. Recomendada.
+- **b)** No, traé el resultado.
