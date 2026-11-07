@@ -390,6 +390,7 @@ fn correr_interno(
         tarea: tarea.to_string(),
         config: config.to_string(),
         commit_root: commit_completo(deps.repo_root),
+        commit_binario: crate::corre::COMMIT_BINARIO.into(),
         veredicto,
         resumen,
         modelos,
@@ -1217,6 +1218,23 @@ mod tests {
         );
         assert_eq!(guardada.modelos[&Rol::Planifica], "opus");
         assert_eq!(guardada.modelos[&Rol::Construye], "haiku");
+    }
+
+    /// La fila lleva el commit con el que se compiló el binario. Sin git: `desconocido`.
+    #[test]
+    fn corre_fila_lleva_commit_binario_de_la_compilacion() {
+        let e = entorno();
+        let fila = correr_con(&e, &Builder::default(), &[], CONFIG).expect("corre");
+        let binario = fila.commit_binario.as_str();
+        assert!(!binario.is_empty(), "commit_binario vacío");
+        assert_eq!(binario, crate::corre::COMMIT_BINARIO);
+        // Con o sin `-sucio`: el worktree puede estar sucio o no.
+        let limpio = binario.strip_suffix("-sucio").unwrap_or(binario);
+        assert!(
+            binario == "desconocido"
+                || (limpio.len() == 40 && limpio.chars().all(|c| c.is_ascii_hexdigit())),
+            "commit_binario inesperado: {binario:?}"
+        );
     }
 
     #[test]

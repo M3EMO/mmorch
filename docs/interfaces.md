@@ -1702,6 +1702,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
   "title": "Fila",
   "type": "object",
   "properties": {
+    "commit_binario": {
+      "description": "Commit con el que se compiló el binario `r00t`. Las filas anteriores la leen vacía.",
+      "type": "string",
+      "default": ""
+    },
     "commit_root": {
       "type": "string"
     },
