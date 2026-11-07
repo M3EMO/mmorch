@@ -12,7 +12,7 @@ use serde_json::Value;
 use super::ErrorOraculo;
 use super::evidencia::cita_en_archivo;
 use super::juez::{LimitesPrompt, MAX_ENTRADA_JUEZ_BYTES, ModeloJuez, bytes_de_prompt};
-use super::perfiles::herramientas::parsear_gitleaks;
+use super::perfiles::herramientas::parsear_gitleaks_en;
 use crate::config::Config;
 use crate::observe;
 use crate::proveedores::{INTENTOS_MAX, Prompt, costo_peor_caso};
@@ -1000,12 +1000,13 @@ fn quitar_cerca(texto: &str) -> &str {
         .trim()
 }
 
-/// Lee el reporte de `gitleaks`. Ausente o ilegible es error de uso.
-fn leer_gitleaks(ruta: &Path) -> Result<Vec<Hallazgo>, ErrorOraculo> {
+/// Lee el reporte de `gitleaks` y sus avisos. Las rutas salen relativas a `repo`.
+/// Ausente, ilegible o con una ruta fuera del repo es error de uso.
+fn leer_gitleaks(ruta: &Path, repo: &Path) -> Result<(Vec<Hallazgo>, Vec<String>), ErrorOraculo> {
     let texto = fs::read_to_string(ruta)
         .map_err(|e| ErrorOraculo::Uso(format!("reporte de gitleaks {}: {e}", ruta.display())))?;
-    parsear_gitleaks(&texto, &[])
-        .map_err(|e| ErrorOraculo::Uso(format!("reporte de gitleaks ilegible: {e}")))
+    parsear_gitleaks_en(&texto, repo, &[])
+        .map_err(|e| ErrorOraculo::Uso(format!("reporte de gitleaks inválido: {e}")))
 }
 
 /// Escribe `a` en `ruta` de forma atómica, con JSON y salto de línea final.
@@ -1101,9 +1102,10 @@ fn auditar_solo_medir(o: &OpcionesAuditar, candidatos: &Path) -> Result<Auditori
     };
     let texto = fs::read_to_string(candidatos)
         .map_err(|e| ErrorOraculo::Uso(format!("candidatos {}: {e}", candidatos.display())))?;
-    let gitleaks = leer_gitleaks(ruta_gitleaks)?;
+    let (gitleaks, avisos_gitleaks) = leer_gitleaks(ruta_gitleaks, &o.repo)?;
     let texto_defectos = leer_defectos(o.defectos.as_deref(), &o.repo)?;
     let mut auditoria = medir_candidatos(&o.repo, &o.incluir, &gitleaks, &texto)?;
+    auditoria.avisos.extend(avisos_gitleaks);
     if let Some(texto) = &texto_defectos {
         let omitidas = lineas_omitidas(&gitleaks);
         medir_con_aviso(texto, &o.repo, &mut auditoria, &omitidas)?;
@@ -1130,7 +1132,7 @@ pub fn auditar(home: &Path, o: &OpcionesAuditar) -> Result<Auditoria, ErrorOracu
         )));
     }
     let inicio = observe::ahora().0;
-    let gitleaks = leer_gitleaks(ruta_gitleaks)?;
+    let (gitleaks, avisos_gitleaks) = leer_gitleaks(ruta_gitleaks, &o.repo)?;
     let texto_defectos = leer_defectos(o.defectos.as_deref(), &o.repo)?;
 
     let mut avisos = Vec::new();
@@ -1165,6 +1167,7 @@ pub fn auditar(home: &Path, o: &OpcionesAuditar) -> Result<Auditoria, ErrorOracu
         MAX_ENTRADA_JUEZ_BYTES,
         o.por_archivo,
     )?;
+    auditoria.avisos.extend(avisos_gitleaks);
     if let Some(texto) = &texto_defectos {
         let omitidas = lineas_omitidas(&gitleaks);
         medir_con_aviso(texto, &o.repo, &mut auditoria, &omitidas)?;
@@ -1334,10 +1337,12 @@ mod tests {
 
     /// Reporte de `gitleaks` con un hallazgo en la línea 3 de `src/a.rs`.
     fn gitleaks_linea_tres() -> Vec<Hallazgo> {
-        parsear_gitleaks(
+        parsear_gitleaks_en(
             r#"[{"RuleID":"x","File":"src/a.rs","StartLine":3,"Description":"d"}]"#,
+            Path::new("/repo"),
             &[],
         )
+        .map(|(h, _)| h)
         .expect("reporte")
     }
 
@@ -1465,6 +1470,54 @@ mod tests {
         assert!(o.salida.exists());
     }
 
+    /// Corre `--solo-medir` con un reporte de gitleaks de una sola fuga y un candidato en la línea 2.
+    fn solo_medir_con_fuga(archivo: &str) -> Result<Auditoria, ErrorOraculo> {
+        let (tmp, repo) = repo_tres_lineas();
+        let home = TempDir::new().expect("home vacío");
+        let candidatos = tmp.path().join("candidatos.json");
+        fs::write(
+            &candidatos,
+            r#"{"defectos":[{"archivo":"src/a.rs","linea":2,"cita":"fn calcular(x: u32) -> u32 { x * 2 }","detalle":"real"}]}"#,
+        )
+        .expect("escribe");
+        let archivo = archivo.replace("REPO", &repo.to_string_lossy());
+        let reporte = serde_json::json!([{
+            "RuleID": "r", "File": archivo, "StartLine": 2, "Description": "d"
+        }]);
+        let gitleaks = tmp.path().join("gitleaks.json");
+        fs::write(&gitleaks, reporte.to_string()).expect("escribe");
+        let o = OpcionesAuditar {
+            tope_usd: None,
+            gitleaks: Some(gitleaks),
+            solo_medir: Some(candidatos),
+            ..opciones(repo, tmp.path())
+        };
+        auditar(home.path(), &o)
+    }
+
+    #[test]
+    fn solo_medir_omite_la_linea_de_una_fuga_con_ruta_absoluta_del_repo() {
+        let a = solo_medir_con_fuga("REPO/src/a.rs").expect("mide");
+        assert!(a.hallazgos.is_empty(), "{:?}", a.hallazgos);
+        assert_eq!(a.descartados.len(), 1, "{:?}", a.descartados);
+    }
+
+    #[test]
+    fn solo_medir_avisa_de_una_fuga_en_un_archivo_que_no_existe() {
+        let a = solo_medir_con_fuga("/repo/src/no_existe.rs").expect("mide");
+        assert!(
+            a.avisos.iter().any(|v| v.contains("no existe en el repo")),
+            "{:?}",
+            a.avisos
+        );
+    }
+
+    #[test]
+    fn solo_medir_con_una_fuga_fuera_del_repo_es_uso() {
+        let err = solo_medir_con_fuga("/otra/parte/src/a.rs").expect_err("fuera del repo");
+        assert!(matches!(err, ErrorOraculo::Uso(_)), "{err}");
+    }
+
     #[test]
     fn auditar_sin_solo_medir_y_sin_tope_es_uso() {
         let (tmp, repo) = repo_tres_lineas();
@@ -1498,7 +1551,9 @@ mod tests {
         let codigo = "fn uno() {}\nlet clave = \"AKIAEXAMPLE123\";\n";
         let (_tmp, repo) = repo_con(&[("src/lib.rs", codigo)]);
         let json = r#"[{"RuleID":"aws-access-token","File":"src/lib.rs","StartLine":2,"Description":"clave"}]"#;
-        let gitleaks = parsear_gitleaks(json, &[]).expect("reporte");
+        let gitleaks = parsear_gitleaks_en(json, Path::new("/repo"), &[])
+            .map(|(h, _)| h)
+            .expect("reporte");
         let modelo = ModeloFalso::que_responde(JSON_VACIO);
         auditar_con(
             &repo,
@@ -1524,7 +1579,9 @@ mod tests {
         let codigo = "fn uno() {}\nlet clave = \"AKIAEXAMPLE123\";\n#[cfg(test)]\nfn solo_en_tests_secreta() {}\n";
         let (_tmp, repo) = repo_con(&[("src/lib.rs", codigo)]);
         let json = r#"[{"RuleID":"aws-access-token","File":"src/lib.rs","StartLine":2,"Description":"clave"}]"#;
-        let gitleaks = parsear_gitleaks(json, &[]).expect("reporte");
+        let gitleaks = parsear_gitleaks_en(json, Path::new("/repo"), &[])
+            .map(|(h, _)| h)
+            .expect("reporte");
         let modelo = ModeloFalso::que_responde(
             r#"{"defectos":[
  {"archivo":"src/lib.rs","linea":2,"cita":"let clave = \"AKIAEXAMPLE123\";","detalle":"secreto"},
@@ -2222,9 +2279,10 @@ linea = 5
         let tmp = TempDir::new().expect("temporal");
         let ruta = tmp.path().join("gitleaks.json");
         fs::write(&ruta, "{ no es json").expect("escribe");
-        let err = leer_gitleaks(&ruta).expect_err("ilegible");
+        let err = leer_gitleaks(&ruta, tmp.path()).expect_err("ilegible");
         assert!(matches!(err, ErrorOraculo::Uso(_)), "{err}");
-        let err = leer_gitleaks(&tmp.path().join("no-existe.json")).expect_err("ausente");
+        let err =
+            leer_gitleaks(&tmp.path().join("no-existe.json"), tmp.path()).expect_err("ausente");
         assert!(matches!(err, ErrorOraculo::Uso(_)), "{err}");
     }
 

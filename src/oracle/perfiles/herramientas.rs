@@ -111,14 +111,20 @@ struct FugaGitleaks {
     descripcion: String,
 }
 
-/// Líneas máximas que cubre una fuga de gitleaks. Un `EndLine` absurdo no crea más hallazgos que esto.
+/// Líneas máximas que cubre una fuga de gitleaks. Un rango mayor es error: recortarlo dejaría a la vista
+/// líneas con secreto.
 const TOPE_LINEAS_POR_FUGA: u32 = 2000;
 
 /// Líneas de una fuga, de `inicio` a `fin`. Sin `fin` o con uno anterior, solo `inicio`.
-/// Cubre como mucho `TOPE_LINEAS_POR_FUGA` líneas.
-fn lineas_de_fuga(inicio: u32, fin: u32) -> std::ops::RangeInclusive<u32> {
+/// Un rango de más de `TOPE_LINEAS_POR_FUGA` líneas es error.
+fn lineas_de_fuga(inicio: u32, fin: u32) -> Result<std::ops::RangeInclusive<u32>, String> {
     let fin = fin.max(inicio);
-    inicio..=fin.min(inicio.saturating_add(TOPE_LINEAS_POR_FUGA - 1))
+    if fin - inicio >= TOPE_LINEAS_POR_FUGA {
+        return Err(format!(
+            "gitleaks: una fuga cubre más de {TOPE_LINEAS_POR_FUGA} líneas (tope)"
+        ));
+    }
+    Ok(inicio..=fin)
 }
 
 /// Raíces que gitleaks antepone a la ruta del archivo. Se quitan para dejar la ruta relativa al repo.
@@ -203,7 +209,7 @@ fn parsear_gitleaks_con(
             }
         }
         // Un hallazgo por línea: juez y auditar omiten todo el rango de la fuga.
-        for linea in lineas_de_fuga(f.linea, f.fin) {
+        for linea in lineas_de_fuga(f.linea, f.fin)? {
             hallazgos.push(crear_hallazgo(
                 Dimension::Seguridad,
                 3,
@@ -1651,10 +1657,12 @@ mod tests {
 
     #[test]
     fn sonda_gitleaks_rango_tiene_tope_de_lineas() {
-        let hs = parsear_gitleaks(&fuga_en_rango(1, Some(1_000_000)), &[]).expect("parsea");
-        // El tope es 2000 líneas por fuga: de la 1 a la 2000.
+        // Recortar el rango dejaría líneas con secreto a la vista: un rango sobre el tope es error.
+        let e =
+            parsear_gitleaks(&fuga_en_rango(1, Some(1_000_000)), &[]).expect_err("sobre el tope");
+        assert!(e.contains("tope"), "{e}");
+        let hs = parsear_gitleaks(&fuga_en_rango(1, Some(2000)), &[]).expect("justo en el tope");
         assert_eq!(hs.len(), 2000);
-        assert_eq!(hs.last().map(|h| h.linea), Some(2000));
     }
 
     #[test]
