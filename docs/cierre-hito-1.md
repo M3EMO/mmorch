@@ -1,6 +1,6 @@
 # Cierre del hito 1 de Root
 
-**Estado: BORRADOR, sin firmar.** Faltan la repetición de la validez y los comandos de "Validation".
+**Estado: BORRADOR, sin firmar.** Falta la revisión del código nuevo desde `e665a5f`.
 
 ## Veredicto del hito
 
@@ -9,10 +9,14 @@
 | Criterio | Umbral | Medido | Resultado |
 |---|---|---|---|
 | Exactitud de orden | 1,0 | 5 de 6 = 0,833 | **No cumple** |
-| Recall de defectos reales | 0,8 | 1 de 8 = 0,125 | **No cumple** |
+| Recall de defectos reales | 0,8 | 3 de 8 = 0,375 | **No cumple** |
+| Recall por línea | Sin umbral | 0 de 8 | Sin umbral |
+| Recall por test rojo | Sin umbral | 3 de 8 | Sin umbral |
 | Acuerdo con el usuario | Hito 1b | Sin medir | Sin medir |
 
-Medición del 2026-11-05 con `e665a5f`: 0,97 USD y 199,7 minutos. Pendiente: la repetición con el detalle por caso. P74 cambia la definición de "encontrado": un test oculto en rojo cuenta, y la fila separa línea y test.
+Medición del 2026-11-07 con `bfd5110`: 0,87 USD y 133 minutos. La medición del 2026-11-05 dio 1 de 8 con `e665a5f`, 0,97 USD y 199,7 minutos.
+
+**La suba no es una mejora del juez.** P74 cambió la definición de "encontrado": un test oculto en rojo cuenta. Por línea, el juez bajó de 1 de 8 a 0 de 8.
 
 ## Lo que significa
 
@@ -30,7 +34,12 @@ Medición del 2026-11-05 con `e665a5f`: 0,97 USD y 199,7 minutos. Pendiente: la 
 
 **Por simulación:** 5 de 8 defectos no llegan al juez, porque lee los 5 archivos más largos y 6000 caracteres de cada uno.
 
-**Sin medir:** qué par falló y qué defecto se encontró.
+**Medido el 2026-11-07:**
+- Root halla por test los 3 defectos con test oculto: spin, FIFO y backend.
+- Ningún hallazgo cae a 3 líneas o menos de un defecto. El más cercano queda a 5 líneas, en `src/renderer.rs:70`.
+- `src/scene.rs:180` aparece en la evidencia de un ítem, y no como hallazgo.
+- Falló el par `memora-sdlc-ba9d6e8` sobre `memora-sdlc-876f72a`: 0,399 contra 0,446. Ambos dan "bloqueado".
+- La causa de ese par es Estructura: 0,0 contra 0,56. Sin esa dimensión, el orden queda correcto: 0,50 contra 0,42. La fórmula no cambia por este dato: ajustarla tras ver un par acomoda la medición.
 
 ## Pasada de búsqueda de defectos (P73 c)
 
@@ -90,7 +99,14 @@ Protocolo: `n = 20`, semilla 42. Solo entran a `global` las filas de 0,9 o más 
 
 ## Comparación de `global`
 
-**Pendiente.** Sale de los veredictos que guarda la validez repetida.
+Sale de los veredictos de la validez repetida, en `validez/veredictos/`.
+
+| Par | Mejor | Peor | Decisión | Resultado |
+|---|---|---|---|---|
+| memora-ecc contra memora-sdlc | 0,812 | 0,399 | Listo contra bloqueado | Correcto |
+| brasa-ecc contra brasa-sdlc | 0,587 | 0,514 | Listo contra bloqueado | Correcto |
+
+Los dos pares van en el orden esperado. Son 2 pares, sin intervalo de confianza. En brasa, la distancia de 0,073 es menor que la variación medida abajo.
 
 ## Revisión de cierre
 
@@ -98,13 +114,37 @@ Protocolo: `n = 20`, semilla 42. Solo entran a `global` las filas de 0,9 o más 
 
 ## Validation
 
-**Pendiente de correr:** cada comando de la sección "Validation" del plan, con su resultado.
+Punta probada: `8a9992c`, y después `9781451`. El árbol de código de `3108290` es igual a `9781451`.
+
+| Comando | Resultado |
+|---|---|
+| `cargo fmt --check` y `cargo clippy` | Limpios en `8a9992c` |
+| Suite con podman | `9781451`: 2754 pasan, 0 fallan, 4 ignorados; `builder_real` pasa |
+| `r00t goal verificar` | Pasa: `311a6371c0cd414a` |
+| `evaluar` memora-ecc | `global` 0,819, listo, contrato 61/61, oculto 65/68, 3 inestables |
+| `evaluar` brasa-ecc | `global` 0,541, listo, contrato 53/53, oculto 20/21 |
+| Calibración de 8 dimensiones | No se repitió: la tabla de arriba es del binario anterior, por presupuesto |
+| `informe` memora-sdlc | Bloqueado, con módulos ausentes, código 1 |
+| `oraculo validar` | La medición de arriba |
+| `corre` y `track listar` | La fila de arriba |
+| `aprende --replay` | Sin datos: 1 fila, que además es inválida |
+
+**"Niveles estables en 3 corridas": no cumple en memora.** Comparé `evaluar` del 2026-11-07, la validez y el humo del 2026-11-04, con binarios distintos.
+- Entre las dos primeras, 14 de 16 niveles coinciden. R4 y R13 varían entre 2 y 3.
+- El humo también da R7 en 1, y coincide en R4 y R13 con la corrida de hoy.
+- La causa visible son 3 tests inestables: `test_bgsave_no_bloquea`, `test_blpop_fifo_entre_clientes` y `test_client_id`.
+- Brasa coincide en 14 de 14 entre las dos corridas de hoy.
+
+**`global` varía sobre el mismo commit.** Memora da 0,812 y 0,819. Brasa da 0,587 y 0,541.
+- En brasa, Estructura pasa de 0,29 a 0,19 con los mismos 6 hallazgos, y Arquitectura de 0,73 a 0,60. No medí la causa.
+- Diseño, sin calibrar, va de 0,82 a 0,0 en brasa. No entra a `global`.
+- Una diferencia de `global` menor a 0,05 no alcanza para ordenar dos repos.
 
 ## Dinero
 
 | Concepto | USD |
 |---|---|
-| API hasta el 2026-11-06, con la pasada y la corrida | 22,62 |
+| API hasta el 2026-11-07, con validez y "Validation" | 23,83 |
 | Límite útil del hito 1 | 24,00 |
 
 Los builders se informan aparte en cada `docs/builds/*build-local-*.md`.
