@@ -121,7 +121,7 @@ fn sin_blancos(texto: &str) -> String {
 }
 
 /// Resuelve `archivo` dentro de `raiz`. Rechaza rutas que salen de `raiz`.
-fn ruta_dentro(raiz: &Path, archivo: &str) -> Result<PathBuf, Motivo> {
+pub(crate) fn ruta_dentro(raiz: &Path, archivo: &str) -> Result<PathBuf, Motivo> {
     let relativa = Path::new(archivo);
     if relativa.is_absolute() {
         return Err(Motivo::ArchivoFueraDeRaiz);
