@@ -104,8 +104,20 @@ struct FugaGitleaks {
     archivo: String,
     #[serde(rename = "StartLine", default)]
     linea: u32,
+    #[serde(rename = "EndLine", default)]
+    fin: u32,
     #[serde(rename = "Description", default)]
     descripcion: String,
+}
+
+/// Líneas máximas que cubre una fuga de gitleaks. Un `EndLine` absurdo no crea más hallazgos que esto.
+const TOPE_LINEAS_POR_FUGA: u32 = 2000;
+
+/// Líneas de una fuga, de `inicio` a `fin`. Sin `fin` o con uno anterior, solo `inicio`.
+/// Cubre como mucho `TOPE_LINEAS_POR_FUGA` líneas.
+fn lineas_de_fuga(inicio: u32, fin: u32) -> std::ops::RangeInclusive<u32> {
+    let fin = fin.max(inicio);
+    inicio..=fin.min(inicio.saturating_add(TOPE_LINEAS_POR_FUGA - 1))
 }
 
 /// Raíces que gitleaks antepone a la ruta del archivo. Se quitan para dejar la ruta relativa al repo.
@@ -130,27 +142,28 @@ pub fn parsear_gitleaks(json: &str, requisitos: &[Requisito]) -> Result<Vec<Hall
     // `null` y `[]` dan lo mismo: sin filtraciones. Los campos del secreto no se deserializan.
     let fugas: Option<Vec<FugaGitleaks>> =
         serde_json::from_str(json).map_err(|e| motivo_json(&e))?;
-    Ok(fugas
-        .unwrap_or_default()
-        .into_iter()
-        .map(|f| {
-            // La ruta sale con la raíz de la copia (o la de /repo, en reportes viejos).
-            let archivo = RAICES_GITLEAKS
-                .iter()
-                .find_map(|raiz| f.archivo.strip_prefix(raiz))
-                .unwrap_or(f.archivo.as_str());
-            crear_hallazgo(
+    let mut hallazgos = Vec::new();
+    for f in fugas.unwrap_or_default() {
+        // La ruta sale con la raíz de la copia (o la de /repo, en reportes viejos).
+        let archivo = RAICES_GITLEAKS
+            .iter()
+            .find_map(|raiz| f.archivo.strip_prefix(raiz))
+            .unwrap_or(f.archivo.as_str());
+        // Un hallazgo por línea: juez y auditar omiten todo el rango de la fuga.
+        for linea in lineas_de_fuga(f.linea, f.fin) {
+            hallazgos.push(crear_hallazgo(
                 Dimension::Seguridad,
                 3,
                 archivo,
-                f.linea,
+                linea,
                 &f.regla,
                 &f.descripcion,
                 "gitleaks",
                 requisitos,
-            )
-        })
-        .collect())
+            ));
+        }
+    }
+    Ok(hallazgos)
 }
 
 /// Salida de `cargo audit --json`. Las vulnerabilidades son severidad 3; los avisos, severidad 1.
@@ -1551,6 +1564,45 @@ mod tests {
         let json = r#"[{"RuleID":"aws-access-token","File":"/salida/copia/src/s.rs","StartLine":4,"Description":"AWS"}]"#;
         let hs = parsear_gitleaks(json, &[]).expect("parsea");
         assert_eq!(hs[0].archivo, "src/s.rs");
+    }
+
+    /// Un reporte de una fuga con `StartLine`, `EndLine` y el archivo dado.
+    fn fuga_en_rango(inicio: u32, fin: Option<u32>) -> String {
+        let fin = fin.map(|f| format!(",\"EndLine\":{f}")).unwrap_or_default();
+        format!(
+            r#"[{{"RuleID":"r","File":"/repo/src/a.rs","StartLine":{inicio}{fin},"Description":"d"}}]"#
+        )
+    }
+
+    fn lineas(hs: &[Hallazgo]) -> Vec<u32> {
+        hs.iter().map(|h| h.linea).collect()
+    }
+
+    #[test]
+    fn sonda_gitleaks_rango_da_un_hallazgo_por_linea() {
+        let hs = parsear_gitleaks(&fuga_en_rango(10, Some(20)), &[]).expect("parsea");
+        assert_eq!(lineas(&hs), (10..=20).collect::<Vec<u32>>());
+        assert!(hs.iter().all(|h| h.archivo == "src/a.rs" && h.cita == "r"));
+    }
+
+    #[test]
+    fn sonda_gitleaks_rango_tiene_tope_de_lineas() {
+        let hs = parsear_gitleaks(&fuga_en_rango(1, Some(1_000_000)), &[]).expect("parsea");
+        // El tope es 2000 líneas por fuga: de la 1 a la 2000.
+        assert_eq!(hs.len(), 2000);
+        assert_eq!(hs.last().map(|h| h.linea), Some(2000));
+    }
+
+    #[test]
+    fn sonda_gitleaks_sin_end_line_da_la_linea_de_inicio() {
+        let hs = parsear_gitleaks(&fuga_en_rango(10, None), &[]).expect("parsea");
+        assert_eq!(lineas(&hs), vec![10]);
+    }
+
+    #[test]
+    fn sonda_gitleaks_end_line_anterior_da_la_linea_de_inicio() {
+        let hs = parsear_gitleaks(&fuga_en_rango(10, Some(3)), &[]).expect("parsea");
+        assert_eq!(lineas(&hs), vec![10]);
     }
 
     // ---------- Guardas con la herramienta real ----------
