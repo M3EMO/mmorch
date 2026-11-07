@@ -406,6 +406,7 @@ fn auditar_con_limite(
                     propuestas,
                     &|archivo: &str| de_grupo.contains(archivo),
                     &contenidos,
+                    &omitidas,
                     &mut auditoria,
                 );
             }
@@ -435,19 +436,21 @@ fn aplicar_gate(
     propuestas: Vec<Result<Candidato, Descartado>>,
     enviado: &dyn Fn(&str) -> bool,
     contenidos: &BTreeMap<&str, String>,
+    omitidas: &BTreeMap<&str, BTreeSet<u32>>,
     a: &mut Auditoria,
 ) {
     for propuesta in propuestas {
         match propuesta {
-            Ok(c) if !enviado(&c.archivo) => a
-                .descartados
-                .push(descartar(c, "el archivo no se envió en esta llamada")),
+            Ok(c) if !enviado(&c.archivo) => a.descartados.push(descartar_sin_texto(
+                &c,
+                "el archivo no se envió en esta llamada",
+            )),
             Ok(c) => {
                 let citada = contenidos
                     .get(c.archivo.as_str())
                     .is_some_and(|texto| cita_en_archivo(texto.as_str(), c.linea, &c.cita));
                 if citada {
-                    a.hallazgos.push(c);
+                    a.hallazgos.push(sin_detalle_si_hay_secretos(c, omitidas));
                 } else {
                     // Root no sabe si la cita es un secreto. Va sin texto.
                     a.descartados.push(descartar_cita_no_confirmada(&c));
@@ -507,15 +510,15 @@ struct Bloque {
     texto: String,
 }
 
-fn descartar(c: Candidato, motivo: &str) -> Descartado {
-    Descartado {
-        archivo: c.archivo,
-        linea: c.linea,
-        cita: c.cita,
-        detalle: c.detalle,
-        motivo: motivo.into(),
-        cita_hash: String::new(),
+/// Un hallazgo en un archivo con líneas de secreto va sin `detalle`: lo escribe el modelo y puede repetir el secreto.
+fn sin_detalle_si_hay_secretos(
+    mut c: Candidato,
+    omitidas: &BTreeMap<&str, BTreeSet<u32>>,
+) -> Candidato {
+    if omitidas.contains_key(c.archivo.as_str()) {
+        c.detalle.clear();
     }
+    c
 }
 
 /// Descarta sin copiar la cita ni el detalle. Sirve cuando la cita puede ser un secreto.
@@ -899,11 +902,12 @@ fn parsear_respuesta(texto: &str) -> Result<Vec<Result<Candidato, Descartado>>, 
                     cita,
                     detalle,
                 }),
-                (archivo, linea, cita, detalle) => Err(Descartado {
+                // Sin cita ni detalle: son texto del modelo y pueden ser un secreto.
+                (archivo, linea, _, _) => Err(Descartado {
                     archivo: archivo.unwrap_or_default(),
                     linea: linea.unwrap_or(0),
-                    cita: cita.unwrap_or_default(),
-                    detalle: detalle.unwrap_or_default(),
+                    cita: String::new(),
+                    detalle: String::new(),
                     motivo: "campos incompletos".into(),
                     cita_hash: String::new(),
                 }),
@@ -1000,6 +1004,7 @@ pub fn medir_candidatos(
         propuestas,
         &|archivo: &str| enviados.contains(archivo),
         &contenidos,
+        &omitidas,
         &mut a,
     );
     let (lineas, por_mil) = densidad(&contenidos, &a.archivos, &a.sin_leer, a.hallazgos.len());
@@ -2231,5 +2236,52 @@ linea = 5
         assert_eq!(densidad(&contenidos, &vacio, &nada, 0), (0, None));
         // Archivo leído con una línea y sin hallazgos: densidad cero.
         assert_eq!(densidad(&contenidos, &a, &nada, 0), (1, Some(0.0)));
+    }
+
+    #[test]
+    fn solo_medir_no_copia_cita_ni_detalle_de_un_archivo_no_enviado() {
+        let (_tmp, repo) = repo_tres_lineas();
+        let json = r#"{"defectos":[{"archivo":"src/fantasma.rs","linea":1,"cita":"TEXTO_DEL_MODELO_FANTASMA","detalle":"DETALLE_DEL_MODELO_FANTASMA"}]}"#;
+        let a = medir_candidatos(&repo, &[], &[], json).expect("medición");
+        assert_eq!(a.descartados.len(), 1, "{:?}", a.descartados);
+        assert_eq!(a.descartados[0].cita, "");
+        assert_eq!(a.descartados[0].detalle, "");
+        let salida = serde_json::to_string(&a).expect("serializa");
+        assert!(!salida.contains("MODELO_FANTASMA"), "{salida}");
+    }
+
+    #[test]
+    fn solo_medir_no_copia_texto_de_campos_incompletos() {
+        let (_tmp, repo) = repo_tres_lineas();
+        // Falta `linea`: el candidato va a descartados con el motivo de campos incompletos.
+        let json = r#"{"defectos":[{"archivo":"src/a.rs","cita":"TEXTO_DEL_MODELO_INCOMPLETO","detalle":"DETALLE_DEL_MODELO_INCOMPLETO"}]}"#;
+        let a = medir_candidatos(&repo, &[], &[], json).expect("medición");
+        assert_eq!(a.descartados.len(), 1, "{:?}", a.descartados);
+        assert_eq!(a.descartados[0].motivo, "campos incompletos");
+        assert_eq!(a.descartados[0].cita, "");
+        assert_eq!(a.descartados[0].detalle, "");
+        let salida = serde_json::to_string(&a).expect("serializa");
+        assert!(!salida.contains("MODELO_INCOMPLETO"), "{salida}");
+    }
+
+    #[test]
+    fn un_hallazgo_en_un_archivo_con_secreto_no_conserva_su_detalle() {
+        let (_tmp, repo) = repo_con_secreto_en_linea_tres();
+        // La línea 1 es válida y no es de secreto, pero el archivo tiene una línea omitida.
+        let json = r#"{"defectos":[{"archivo":"src/a.rs","linea":1,"cita":"fn calcular_total(x: u32) -> u32 { x * 2 }","detalle":"SECRETO_DE_PRUEBA_123"}]}"#;
+        let a = medir_candidatos(&repo, &[], &gitleaks_linea_tres(), json).expect("medición");
+        assert_eq!(a.hallazgos.len(), 1, "{:?}", a.hallazgos);
+        assert_eq!(a.hallazgos[0].detalle, "");
+        let salida = serde_json::to_string(&a).expect("serializa");
+        assert!(!salida.contains("SECRETO_DE_PRUEBA_123"), "{salida}");
+    }
+
+    #[test]
+    fn un_hallazgo_en_un_archivo_sin_secretos_conserva_su_detalle() {
+        let (_tmp, repo) = repo_tres_lineas();
+        let json = r#"{"defectos":[{"archivo":"src/a.rs","linea":2,"cita":"fn calcular(x: u32) -> u32 { x * 2 }","detalle":"detalle real"}]}"#;
+        let a = medir_candidatos(&repo, &[], &[], json).expect("medición");
+        assert_eq!(a.hallazgos.len(), 1, "{:?}", a.hallazgos);
+        assert_eq!(a.hallazgos[0].detalle, "detalle real");
     }
 }
