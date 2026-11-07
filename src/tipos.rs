@@ -556,6 +556,9 @@ pub struct Fila {
     /// Lanzamientos de `claude` de la corrida, sumando los de antes de reanudarla. Las filas anteriores la leen en 0.
     #[serde(default)]
     pub vueltas: u32,
+    /// Commit con el que se compiló el binario `r00t`. Las filas anteriores la leen vacía.
+    #[serde(default)]
+    pub commit_binario: String,
 }
 
 impl Default for Fila {
@@ -573,6 +576,7 @@ impl Default for Fila {
             forma: Forma::default(),
             reanudada: false,
             vueltas: 0,
+            commit_binario: String::new(),
         }
     }
 }
@@ -707,6 +711,7 @@ mod tests {
             forma: Forma::default(),
             reanudada: false,
             vueltas: 0,
+            commit_binario: String::new(),
         }
     }
 
@@ -1048,6 +1053,27 @@ mod tests {
             "turnos":0,"intervenciones":0,"invalida":false}}"#;
         let f: Fila = serde_json::from_str(texto).expect("v1 se acepta");
         assert!(f.modelos.is_empty());
+    }
+
+    /// `commit_binario` sale en el JSON. Por defecto vale cadena vacía.
+    #[test]
+    fn tipos_fila_serializa_commit_binario_vacio_por_defecto() {
+        assert_eq!(Fila::default().commit_binario, "");
+        let json = serde_json::to_value(Fila::default()).expect("serializa");
+        assert_eq!(json["commit_binario"], json!(""), "{json}");
+    }
+
+    /// Fila anterior a `commit_binario`: se lee con cadena vacía.
+    #[test]
+    fn tipos_fila_sin_commit_binario_se_lee_vacia() {
+        let texto = r#"{"v":1,"id":"f-1","ts":1.0,"tarea":"memora","config":"c",
+            "commit_root":"x","veredicto":{"v":1,"tarea":"memora","repo":"r",
+            "commit":"c","contrato":{"pasa":1,"total":1},"oculto":{"pasa":0,"total":0},
+            "puntajes":[],"hallazgos":[],"global":null,"estado":"sin_veredicto",
+            "costo_usd":0.0},"resumen":{"usd_api":0.0,"usd_cupo":0.0,"minutos":0.0,
+            "turnos":0,"intervenciones":0,"invalida":false}}"#;
+        let f: Fila = serde_json::from_str(texto).expect("fila sin commit_binario");
+        assert_eq!(f.commit_binario, "");
     }
 
     /// Fila anterior a `reanudada` y `vueltas`: se lee con `false` y 0.

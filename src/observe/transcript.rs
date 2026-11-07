@@ -1,10 +1,10 @@
 //! Lee el transcript de `claude -p --output-format stream-json` y busca en él lecturas del oráculo.
 //!
 //! Por cada llamada a herramienta revisa la entrada (todos los strings de `input`) y la salida:
-//! - `ruta`: una ruta real de `ROOT_HOME` o de `ROOT_HOME/oraculos/`. En la entrada, los tokens con
-//!   forma de ruta se resuelven: `~`, `$HOME` y `$ROOT_HOME` se expanden; las relativas, contra el
-//!   cwd del transcript o un `cd` previo del mismo comando; los enlaces se siguen. En la salida, el
-//!   texto se mira tal cual.
+//! - `ruta`: una ruta real de `ROOT_HOME` o de `ROOT_HOME/oraculos/`. Solo en la entrada. Los tokens
+//!   con forma de ruta se resuelven: `~`, `$HOME` y `$ROOT_HOME` se expanden; las relativas, contra
+//!   el cwd del transcript o un `cd` previo del mismo comando; los enlaces se siguen. La salida no
+//!   cuenta rutas: `ps` o `ls` pueden nombrar `ROOT_HOME` sin que se lea el oráculo.
 //! - `nombre`: un archivo o una función `def test_...` del oráculo oculto que no aparece en
 //!   `contrato/`. Los de contrato los ve el builder, así que no cuentan.
 //! - `huella`: una línea larga y única de un archivo oculto, recortada, que aparece en la entrada o
@@ -358,7 +358,9 @@ fn hallazgos(llamada: &LlamadaHerramienta, cwd: &Path, huellas: &HuellasOraculo)
     encontrados
 }
 
-/// Busca en un texto. Solo la entrada (`es_entrada`) resuelve los tokens con forma de ruta.
+/// Busca en un texto. Solo la entrada (`es_entrada`) busca rutas: una ruta literal o un token
+/// resuelto. La salida solo se revisa por nombre y por huella, porque `ps` o `ls` pueden nombrar
+/// ROOT_HOME sin que el builder lea nada.
 fn buscar_en(
     texto: &str,
     es_entrada: bool,
@@ -366,17 +368,17 @@ fn buscar_en(
     huellas: &HuellasOraculo,
     encontrados: &mut Vec<Hallazgo>,
 ) {
-    if let Some(ruta) = huellas
-        .rutas
-        .iter()
-        .find(|ruta| aparece_bordeado(texto, &ruta.to_string_lossy()))
-    {
-        encontrados.push(Hallazgo {
-            motivo: Motivo::Ruta,
-            cita: truncar(&ruta.to_string_lossy()),
-        });
-    }
     if es_entrada {
+        if let Some(ruta) = huellas
+            .rutas
+            .iter()
+            .find(|ruta| aparece_bordeado(texto, &ruta.to_string_lossy()))
+        {
+            encontrados.push(Hallazgo {
+                motivo: Motivo::Ruta,
+                cita: truncar(&ruta.to_string_lossy()),
+            });
+        }
         let resueltas = rutas_nombradas(texto, cwd, huellas);
         if let Some((token, _)) = resueltas
             .iter()
@@ -677,5 +679,64 @@ mod tests {
     fn transcript_cita_se_recorta_a_200_caracteres() {
         assert_eq!(truncar(&"a".repeat(300)).chars().count(), 200);
         assert_eq!(truncar("corta"), "corta");
+    }
+
+    /// Oráculo falso con `oculto/t.py` bajo un tmpdir. Devuelve `ROOT_HOME`.
+    fn oraculo_falso(tmp: &tempfile::TempDir) -> PathBuf {
+        let base = tmp.path().canonicalize().expect("canónica");
+        let root = base.join("home/.local/share/root");
+        fs::create_dir_all(root.join("oraculos/x/oculto")).expect("oculto");
+        fs::write(
+            root.join("oraculos/x/oculto/t.py"),
+            "def test_indice(tmp):\n    assert sincronizar(tmp, \"clave-secreta-42\") == [1, 2, 3]\n",
+        )
+        .expect("escribe el oculto");
+        root
+    }
+
+    /// Escribe un transcript con las líneas dadas, una por evento JSON.
+    fn escribir_transcript(tmp: &tempfile::TempDir, lineas: &[String]) -> PathBuf {
+        let ruta = tmp.path().join("transcript.jsonl");
+        fs::write(&ruta, lineas.join("\n")).expect("escribe el transcript");
+        ruta
+    }
+
+    #[test]
+    fn transcript_salida_de_ps_con_ruta_root_home_no_emite() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = oraculo_falso(&tmp);
+        // `ps` lista los argumentos de claude: la ruta de ROOT_HOME aparece sin leer el oráculo.
+        let proceso = format!(
+            "mpera 4242 claude -p --add-dir {} --output-format stream-json",
+            root.display()
+        );
+        let ruta = escribir_transcript(
+            &tmp,
+            &[
+                json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "p1", "name": "Bash", "input": {"command": "ps aux | grep claude"}}]}}).to_string(),
+                json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "p1", "content": proceso}]}}).to_string(),
+            ],
+        );
+        let huellas = HuellasOraculo::armar(&root, None, "x").expect("arma las huellas");
+        let eventos = revisar_transcript(&ruta, "c1", &huellas).expect("revisa");
+        assert!(eventos.is_empty(), "{eventos:?}");
+    }
+
+    #[test]
+    fn transcript_nombre_oculto_en_la_salida_emite() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = oraculo_falso(&tmp);
+        let ruta = escribir_transcript(
+            &tmp,
+            &[
+                json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "g1", "name": "Grep", "input": {"pattern": "sincroniza"}}]}}).to_string(),
+                json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "g1", "content": "1:def test_indice(tmp):"}]}}).to_string(),
+            ],
+        );
+        let huellas = HuellasOraculo::armar(&root, None, "x").expect("arma las huellas");
+        let eventos = revisar_transcript(&ruta, "c1", &huellas).expect("revisa");
+        assert_eq!(eventos.len(), 1, "{eventos:?}");
+        assert_eq!(eventos[0].extra["motivo"], "nombre");
+        assert_eq!(eventos[0].extra["cita"], "test_indice");
     }
 }

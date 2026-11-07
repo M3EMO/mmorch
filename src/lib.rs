@@ -89,6 +89,8 @@ pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
                     gitleaks,
                     incluir,
                     defectos,
+                    por_archivo,
+                    solo_medir,
                 },
         } => {
             let opciones = oracle::auditar::OpcionesAuditar {
@@ -98,6 +100,8 @@ pub fn ejecutar(cli: &Cli) -> Result<u8, Error> {
                 gitleaks: gitleaks.clone(),
                 incluir: incluir.clone(),
                 defectos: defectos.clone(),
+                por_archivo: *por_archivo,
+                solo_medir: solo_medir.clone(),
             };
             oraculo_auditar(cli.json, &opciones)
         }
@@ -329,22 +333,28 @@ fn oraculo_informe(nombre: &str, repo: &Path, md: bool) -> Result<u8, Error> {
 }
 
 /// `oraculo auditar`: valida `--tope-usd`, audita el repo y muestra un resumen. Los errores de uso salen con 2.
-/// Sale con 0 aunque quede incompleta: es una medida.
+/// Sale con 3 si quedó incompleta, con 0 si no. El JSON de `--salida` se escribe igual.
 fn oraculo_auditar(json: bool, opciones: &oracle::auditar::OpcionesAuditar) -> Result<u8, Error> {
-    let usd = opciones.tope_usd;
-    if !usd.is_finite() || usd <= 0.0 {
+    if let Some(usd) = opciones.tope_usd
+        && (!usd.is_finite() || usd <= 0.0)
+    {
         return Err(Error::Uso(format!(
             "--tope-usd debe ser un número finito mayor que 0, no {usd}"
         )));
     }
     let auditoria = oracle::auditar::auditar(&config::root_home(), opciones)?;
-    let valor = serde_json::to_value(&auditoria)?;
+    terminar_auditoria(json, &auditoria)
+}
+
+/// Imprime la auditoría y devuelve el código de salida: 3 si quedó incompleta, 0 si no.
+fn terminar_auditoria(json: bool, auditoria: &oracle::auditar::Auditoria) -> Result<u8, Error> {
+    let valor = serde_json::to_value(auditoria)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&valor)?);
     } else {
         println!("{}", resumen_auditoria(&valor));
     }
-    Ok(0)
+    Ok(if auditoria.incompleta { 3 } else { 0 })
 }
 
 /// Una línea con los conteos de la auditoría. Lee los campos por nombre desde su JSON.
@@ -359,8 +369,14 @@ fn resumen_auditoria(valor: &serde_json::Value) -> String {
         cuenta("descartados"),
         if incompleta { "sí" } else { "no" }
     );
-    if let Some(encontrados) = valor["medicion"]["casos"]["encontrados"].as_u64() {
-        linea.push_str(&format!(", encontrados {encontrados} de casos"));
+    let medicion = &valor["medicion"];
+    if !medicion.is_null() {
+        let encontrados = medicion["encontrados"].as_u64().unwrap_or(0);
+        let leidos = medicion["casos_leidos"].as_u64().unwrap_or(0);
+        let casos = medicion["casos"].as_u64().unwrap_or(0);
+        linea.push_str(&format!(
+            ", encontrados {encontrados} de {leidos} casos leídos ({casos} en total)"
+        ));
     }
     linea
 }
@@ -1183,5 +1199,72 @@ mod tests {
                 "--tope-usd {valor}: {error}"
             );
         }
+    }
+
+    /// Auditoría mínima para probar la salida. Solo cambian `incompleta` y `medicion`.
+    fn auditoria_de(
+        incompleta: bool,
+        medicion: Option<oracle::auditar::Medicion>,
+    ) -> oracle::auditar::Auditoria {
+        oracle::auditar::Auditoria {
+            hash_prompt: String::new(),
+            modelo: String::new(),
+            archivos: Vec::new(),
+            llamadas: 0,
+            costo_usd: 0.0,
+            hallazgos: Vec::new(),
+            descartados: Vec::new(),
+            incompleta,
+            sin_leer: Vec::new(),
+            avisos: Vec::new(),
+            medicion,
+            lineas_leidas: 0,
+            candidatos_por_1000_lineas: None,
+        }
+    }
+
+    #[test]
+    fn auditoria_incompleta_sale_con_3() {
+        let auditoria = auditoria_de(true, None);
+        let codigo = terminar_auditoria(true, &auditoria).expect("la salida no falla");
+        assert_eq!(codigo, 3, "una auditoría incompleta sale con 3");
+    }
+
+    #[test]
+    fn auditoria_completa_sale_con_0() {
+        let auditoria = auditoria_de(false, None);
+        let codigo = terminar_auditoria(true, &auditoria).expect("la salida no falla");
+        assert_eq!(codigo, 0, "una auditoría completa sale con 0");
+    }
+
+    #[test]
+    fn el_resumen_cuenta_encontrados_sobre_casos_leidos() {
+        let valor = serde_json::json!({
+            "hallazgos": [],
+            "descartados": [],
+            "llamadas": 1,
+            "costo_usd": 0.5,
+            "incompleta": false,
+            "medicion": {"encontrados": 1, "casos": 4, "casos_leidos": 2, "detalle": []}
+        });
+        let resumen = resumen_auditoria(&valor);
+        assert!(
+            resumen.contains("encontrados 1 de 2 casos leídos (4 en total)"),
+            "resumen: {resumen}"
+        );
+    }
+
+    #[test]
+    fn el_resumen_sin_medicion_no_menciona_encontrados() {
+        let valor = serde_json::json!({
+            "hallazgos": [],
+            "descartados": [],
+            "llamadas": 0,
+            "costo_usd": 0.0,
+            "incompleta": false,
+            "medicion": null
+        });
+        let resumen = resumen_auditoria(&valor);
+        assert!(!resumen.contains("encontrados"), "resumen: {resumen}");
     }
 }

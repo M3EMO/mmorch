@@ -4,6 +4,7 @@
 //! La caché tiene su propio precio: la lectura cuesta 0,1 y la escritura 1,25 de la entrada.
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -46,9 +47,34 @@ pub struct Costo {
 /// Suma el `usage` de las líneas `assistant` del transcript. Un `message.id` repetido cuenta una vez.
 /// Las líneas que no son JSON se ignoran.
 pub fn uso_de_transcript(stdout: &[u8]) -> Uso {
+    let mut uso = Uso::default();
+    for mensaje in mensajes_assistant(stdout) {
+        let Some(usage) = mensaje.get("usage") else {
+            continue;
+        };
+        uso.in_tokens = uso.in_tokens.saturating_add(campo(usage, "input_tokens"));
+        uso.out_tokens = uso.out_tokens.saturating_add(campo(usage, "output_tokens"));
+        uso.cache_read_tokens = uso
+            .cache_read_tokens
+            .saturating_add(campo(usage, "cache_read_input_tokens"));
+        uso.cache_write_tokens = uso
+            .cache_write_tokens
+            .saturating_add(campo(usage, "cache_creation_input_tokens"));
+    }
+    uso
+}
+
+/// Turnos de un transcript parcial: sus `message.id` distintos en las líneas `assistant`.
+/// Una línea `assistant` sin id cuenta como un turno. Las líneas que no son JSON se ignoran.
+pub fn turnos_de_transcript(stdout: &[u8]) -> u32 {
+    u32::try_from(mensajes_assistant(stdout).len()).unwrap_or(u32::MAX)
+}
+
+/// Objetos `message` de las líneas `assistant`, sin repetir `message.id`. Lo comparten el uso y los turnos.
+fn mensajes_assistant(stdout: &[u8]) -> Vec<Value> {
     let texto = String::from_utf8_lossy(stdout);
     let mut vistos: HashSet<String> = HashSet::new();
-    let mut uso = Uso::default();
+    let mut mensajes = Vec::new();
     for linea in texto.lines() {
         let Ok(valor) = serde_json::from_str::<Value>(linea) else {
             continue;
@@ -64,19 +90,9 @@ pub fn uso_de_transcript(stdout: &[u8]) -> Uso {
         {
             continue;
         }
-        let Some(usage) = mensaje.get("usage") else {
-            continue;
-        };
-        uso.in_tokens = uso.in_tokens.saturating_add(campo(usage, "input_tokens"));
-        uso.out_tokens = uso.out_tokens.saturating_add(campo(usage, "output_tokens"));
-        uso.cache_read_tokens = uso
-            .cache_read_tokens
-            .saturating_add(campo(usage, "cache_read_input_tokens"));
-        uso.cache_write_tokens = uso
-            .cache_write_tokens
-            .saturating_add(campo(usage, "cache_creation_input_tokens"));
+        mensajes.push(mensaje.clone());
     }
-    uso
+    mensajes
 }
 
 /// Número entero de `usage` por `clave`. Ausente vale 0.
@@ -135,6 +151,19 @@ pub fn evento_de_corte(corrida: &str, modelo: &str, uso: &Uso, costo: &Costo) ->
     if costo.precio_supuesto {
         ev.extra.insert("precio_supuesto".into(), json!(true));
     }
+    ev
+}
+
+/// Evento `Sesion` de una vuelta cortada. Lleva la duración del lanzamiento y sus turnos.
+/// No lleva costo: el costo ya va en la `Llamada` de `evento_de_corte`.
+/// No lleva `session_id`: un corte no ocupa el id que el rol retoma con `--resume`.
+pub fn evento_sesion_de_corte(corrida: &str, duracion: Duration, num_turns: u32) -> Evento {
+    let mut ev = observe::evento_manual(corrida, TipoEvento::Sesion, None);
+    ev.via = Some(Via::Cupo);
+    ev.familia = Some("anthropic".into());
+    ev.latency_s = duracion.as_secs_f64();
+    ev.extra.insert("num_turns".into(), json!(num_turns));
+    ev.extra.insert("cortada".into(), json!(true));
     ev
 }
 
@@ -307,5 +336,44 @@ mod tests {
         );
         assert_eq!(ev.extra["cache_read_tokens"], json!(54_732_360u64));
         assert_eq!(ev.extra["cache_write_tokens"], json!(2_797_230u64));
+    }
+
+    #[test]
+    fn turnos_de_transcript_fixture_cuenta_dos_message_id() {
+        let stdout = include_bytes!("../../tests/fixtures/transcripts/cortado.jsonl");
+        assert_eq!(turnos_de_transcript(stdout), 2);
+    }
+
+    #[test]
+    fn turnos_de_transcript_ignora_repetidos_y_lo_que_no_es_assistant() {
+        let texto = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"id\":\"m1\"}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"id\":\"m1\"}}\n",
+            "{\"type\":\"user\",\"message\":{\"id\":\"m9\"}}\n",
+            "no es json\n",
+            "{\"type\":\"assistant\",\"message\":{\"id\":\"m2\"}}\n",
+        );
+        assert_eq!(turnos_de_transcript(texto.as_bytes()), 2);
+    }
+
+    #[test]
+    fn turnos_de_transcript_sin_transcript_da_cero() {
+        assert_eq!(turnos_de_transcript(b""), 0);
+    }
+
+    #[test]
+    fn costo_cortado_evento_sesion_no_tiene_costo_ni_session_id() {
+        let ev = evento_sesion_de_corte("corre-1", Duration::from_millis(30), 2);
+        assert_eq!(ev.tipo, TipoEvento::Sesion);
+        assert_eq!(ev.via, Some(Via::Cupo));
+        assert_eq!(ev.familia.as_deref(), Some("anthropic"));
+        assert_eq!(ev.corrida, "corre-1");
+        assert!((ev.latency_s - 0.03).abs() < 1e-9, "{}", ev.latency_s);
+        assert_eq!(ev.cost_usd, 0.0);
+        assert_eq!((ev.in_tokens, ev.out_tokens), (0, 0));
+        assert_eq!(ev.extra["num_turns"], json!(2));
+        assert_eq!(ev.extra["cortada"], Value::Bool(true));
+        assert!(!ev.extra.contains_key("session_id"));
     }
 }

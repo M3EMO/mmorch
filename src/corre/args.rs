@@ -1,8 +1,7 @@
-//! Argumentos y entorno de `claude -p` por rol. Los argumentos niegan la lectura de `oraculos/`
-//! (decisiones 39 y 43). El entorno no lleva claves de API ni `ROOT_HOME`.
+//! Argumentos y entorno de `claude -p` por rol. Los argumentos niegan `Bash(*oraculos*)` y no llevan
+//! ninguna ruta del host (decisiones 39 y 43, Tarea 77). El entorno no lleva claves de API ni `ROOT_HOME`.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::config::ClaudeCorrida;
 use super::contenedor::{ECC_DATOS_EN_CONTENEDOR, TIMEOUT_BUILDER};
@@ -22,31 +21,14 @@ const VARIABLE_SUBAGENTES: &str = "CLAUDE_CODE_SUBAGENT_MODEL";
 const VARIABLE_DATOS_ECC: &str = "ECC_AGENT_DATA_HOME";
 
 /// Argumentos de `claude -p` para un rol. Piden `stream-json`, el modelo, solo el proyecto como fuente de
-/// configuración, ningún MCP, el modo de permisos de la config y la negación de `oraculos/` bajo `home`.
+/// configuración, ningún MCP, el modo de permisos de la config y la negación `Bash(*oraculos*)`. `home` no se usa: ninguna ruta del host va a `claude`.
 pub fn args_claude(
     prompt: &str,
     modelo: &str,
-    home: &Path,
+    _home: &Path,
     claude: &ClaudeCorrida,
     rol: Rol,
 ) -> Vec<String> {
-    let oraculos = ruta_oraculos(home);
-    let mut rutas = vec![oraculos.clone()];
-    let tal_cual = home.join("oraculos");
-    if tal_cual != oraculos {
-        rutas.push(tal_cual);
-    }
-    // Las reglas van al final: `--disallowedTools` acepta varios valores y no debe comerse nada más.
-    let mut negadas: Vec<String> = Vec::new();
-    for ruta in &rutas {
-        let o = ruta.display();
-        negadas.push(format!("Read({o}/**)"));
-        negadas.push(format!("Edit({o}/**)"));
-        negadas.push(format!("Grep({o}/**)"));
-        negadas.push(format!("Glob({o}/**)"));
-    }
-    negadas.push("Bash(*oraculos*)".to_string());
-
     let mut args = vec![
         "-p".to_string(),
         prompt.to_string(),
@@ -65,8 +47,10 @@ pub fn args_claude(
     }
     args.push("--permission-mode".to_string());
     args.push(claude.modo_permisos().to_string());
+    // La regla va al final: `--disallowedTools` acepta varios valores y no debe comerse nada más.
+    // Solo `Bash(*oraculos*)`: una ruta del host no existe en el contenedor y mostraría usuario y ruta.
     args.push("--disallowedTools".to_string());
-    args.extend(negadas);
+    args.push("Bash(*oraculos*)".to_string());
     args
 }
 
@@ -108,18 +92,13 @@ pub fn env_del_builder(
     env
 }
 
-/// Ruta de `oraculos/` bajo `home`, canonicalizada si existe. Si no existe, la ruta tal cual.
-fn ruta_oraculos(home: &Path) -> PathBuf {
-    let base = home.join("oraculos");
-    fs::canonicalize(&base).unwrap_or(base)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::corre::config::ClaudeRol;
     use crate::corre::contenedor::TIMEOUT_BUILDER;
     use std::collections::BTreeMap;
+    use std::fs;
     use tempfile::TempDir;
 
     fn par(clave: &str, valor: &str) -> (String, String) {
@@ -190,7 +169,7 @@ mod tests {
             args[negar + 1..].iter().all(|a| a.contains('(')),
             "solo reglas después de --disallowedTools: {args:?}"
         );
-        assert!(args[negar + 1].starts_with("Read("), "{args:?}");
+        assert_eq!(args[negar + 1], "Bash(*oraculos*)", "{args:?}");
     }
 
     #[test]
@@ -218,33 +197,55 @@ mod tests {
         assert!(args.contains(&"--verbose".to_string()));
         assert!(args.contains(&"--strict-mcp-config".to_string()));
 
-        let oraculos = fs::canonicalize(home.join("oraculos")).expect("canonica");
-        let o = oraculos.display();
-        for regla in [
-            format!("Read({o}/**)"),
-            format!("Edit({o}/**)"),
-            format!("Grep({o}/**)"),
-            format!("Glob({o}/**)"),
-            "Bash(*oraculos*)".to_string(),
-        ] {
-            assert!(args.contains(&regla), "falta {regla} en {args:?}");
-        }
+        assert!(args.contains(&"Bash(*oraculos*)".to_string()), "{args:?}");
         assert!(posicion("--disallowedTools") < args.len() - 1);
     }
 
     #[test]
-    fn corre_args_niegan_la_ruta_real_si_home_tiene_enlace() {
+    fn corre_args_no_traen_la_ruta_del_host() {
+        let tmp = TempDir::new().expect("tmp");
+        let home = tmp.path().join("root");
+        fs::create_dir_all(home.join("oraculos")).expect("oraculos");
+        let args = args_claude("p", "m", &home, &ClaudeCorrida::default(), Rol::Construye);
+
+        // Ninguna pieza de los argumentos lleva la ruta del host, ni tal cual ni canonicalizada.
+        let propia = home.display().to_string();
+        let canonica = fs::canonicalize(&home)
+            .expect("canonica")
+            .display()
+            .to_string();
+        for arg in &args {
+            assert!(
+                !arg.contains(&propia),
+                "la ruta del host va a claude: {arg}"
+            );
+            assert!(
+                !arg.contains(&canonica),
+                "la ruta canónica va a claude: {arg}"
+            );
+        }
+
+        let negar = args
+            .iter()
+            .position(|a| a == "--disallowedTools")
+            .expect("falta --disallowedTools");
+        assert_eq!(
+            args[negar + 1..],
+            ["Bash(*oraculos*)".to_string()],
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn corre_args_con_home_enlazado_tampoco_traen_ninguna_ruta() {
         let tmp = TempDir::new().expect("tmp");
         let real = tmp.path().join("real");
         fs::create_dir_all(real.join("oraculos")).expect("oraculos");
         let enlace = tmp.path().join("enlace");
         std::os::unix::fs::symlink(&real, &enlace).expect("enlace");
         let args = args_claude("p", "m", &enlace, &ClaudeCorrida::default(), Rol::Construye);
-        let canonica = fs::canonicalize(real.join("oraculos")).expect("canonica");
-        assert!(
-            args.contains(&format!("Read({}/**)", canonica.display())),
-            "{args:?}"
-        );
+        let base = tmp.path().display().to_string();
+        assert!(args.iter().all(|a| !a.contains(&base)), "{args:?}");
     }
 
     #[test]

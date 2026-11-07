@@ -38,6 +38,9 @@ pub use ejecutor::{
     EjecutorBuilder, EjecutorContenedorBuilder, EsperaVigencia, Lanzamiento, SalidaClaude,
 };
 
+/// Commit con el que se compiló este binario. Lo fija `build.rs` al compilar.
+pub const COMMIT_BINARIO: &str = env!("ROOT_COMMIT_BINARIO");
+
 /// Errores de una corrida. `Uso` sale con código 2: lo arregla el humano en la config o en la tarea.
 /// `Goal` y `Ruteo` llevan el código de su error. Los demás salen con código 3, `Cortado` incluido.
 #[derive(Debug, ErrorDerive)]
