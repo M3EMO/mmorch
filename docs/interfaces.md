@@ -4581,6 +4581,11 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           "description": "Repo del defecto, dentro de la carpeta de casos.",
           "type": "string"
         },
+        "sonda_sin_veredicto": {
+          "description": "`true` si el veredicto no trae resultado de la sonda (`estado` sin veredicto). El defecto sigue en\nel denominador de `recall`. Un veredicto viejo lee `false`.",
+          "type": "boolean",
+          "default": false
+        },
         "tarea": {
           "description": "Tarea del defecto.",
           "type": "string"
@@ -4593,8 +4598,13 @@ Salida exacta de `r00t esquema <tipo>`, en orden alfabético. El test `tests/int
           ],
           "default": null
         },
+        "test_inestable": {
+          "description": "`true` si el test está en `inestables` o `inestables_contrato`. No es rojo: no suma a `test_rojo`\nni a `recall`. Un veredicto viejo lee `false`.",
+          "type": "boolean",
+          "default": false
+        },
         "test_rojo": {
-          "description": "`Some(true)` si el test aparece en alguna lista de fallos del veredicto. `None` sin `test`.\nCuenta para `recall` y `recall_test`, no para `encontrado`.",
+          "description": "`Some(true)` si el test está en `ocultos_fallidos` o `contrato_fallidos` del veredicto. `None` sin `test`.\nCuenta para `recall` y `recall_test`, no para `encontrado`.",
           "type": [
             "boolean",
             "null"

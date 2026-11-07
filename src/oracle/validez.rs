@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use super::rubrica::{self, Rubrica};
 use super::{ErrorOraculo, evaluar_por_nombre};
-use crate::tipos::{Decision, Dimension, Fuente, TODAS_LAS_DIMENSIONES, Veredicto};
+use crate::tipos::{Decision, Dimension, Estado, Fuente, TODAS_LAS_DIMENSIONES, Veredicto};
 
 /// Versión del formato de `validez.json`.
 pub const VERSION: u32 = 1;
@@ -166,10 +166,18 @@ pub struct DetalleDefecto {
     /// Test que marca el defecto, copiado de `defectos.toml`. `None` si el defecto no lo trae.
     #[serde(default)]
     pub test: Option<String>,
-    /// `Some(true)` si el test aparece en alguna lista de fallos del veredicto. `None` sin `test`.
+    /// `Some(true)` si el test está en `ocultos_fallidos` o `contrato_fallidos` del veredicto. `None` sin `test`.
     /// Cuenta para `recall` y `recall_test`, no para `encontrado`.
     #[serde(default)]
     pub test_rojo: Option<bool>,
+    /// `true` si el test está en `inestables` o `inestables_contrato`. No es rojo: no suma a `test_rojo`
+    /// ni a `recall`. Un veredicto viejo lee `false`.
+    #[serde(default)]
+    pub test_inestable: bool,
+    /// `true` si el veredicto no trae resultado de la sonda (`estado` sin veredicto). El defecto sigue en
+    /// el denominador de `recall`. Un veredicto viejo lee `false`.
+    #[serde(default)]
+    pub sonda_sin_veredicto: bool,
 }
 
 /// Hallazgo de Root en el mismo archivo que un defecto. Es el más cercano en línea.
@@ -583,17 +591,21 @@ fn descartado_cerca(v: &Veredicto, defecto: &DefectoReal) -> bool {
     })
 }
 
-/// `Some(true)` si el `test` del defecto está en alguna lista de fallos del veredicto. `None` sin `test`.
-/// Cuenta para `recall` y `recall_test`. No cuenta para `encuentra`.
+/// `Some(true)` si el `test` del defecto está en `ocultos_fallidos` o `contrato_fallidos`. `None` sin `test`.
+/// Un test inestable no es rojo: ver `test_inestable`. Cuenta para `recall` y `recall_test`.
 fn test_rojo(v: &Veredicto, defecto: &DefectoReal) -> Option<bool> {
     let test = defecto.test.as_deref()?;
     let en_lista = |lista: &[String]| lista.iter().any(|t| t == test);
-    Some(
-        en_lista(&v.ocultos_fallidos)
-            || en_lista(&v.inestables)
-            || en_lista(&v.inestables_contrato)
-            || en_lista(&v.contrato_fallidos),
-    )
+    Some(en_lista(&v.ocultos_fallidos) || en_lista(&v.contrato_fallidos))
+}
+
+/// `true` si el `test` del defecto está en `inestables` o `inestables_contrato`. No cuenta como rojo.
+fn test_inestable(v: &Veredicto, defecto: &DefectoReal) -> bool {
+    let Some(test) = defecto.test.as_deref() else {
+        return false;
+    };
+    let en_lista = |lista: &[String]| lista.iter().any(|t| t == test);
+    en_lista(&v.inestables) || en_lista(&v.inestables_contrato)
 }
 
 /// `true` si la evidencia de algún ítem cita el archivo del defecto a `TOLERANCIA_LINEAS` líneas o menos.
@@ -836,6 +848,8 @@ fn medir_recall(
             hallazgo_cercano: hallazgo_mas_cercano(&v, defecto),
             test: defecto.test.clone(),
             test_rojo: rojo,
+            test_inestable: test_inestable(&v, defecto),
+            sonda_sin_veredicto: v.estado == Estado::SinVeredicto,
         });
     }
     let total = defectos.len() as u32;
@@ -3074,10 +3088,19 @@ fuente = "fixture"
             clave("cinco", v_cinco),
         ];
         let v = validar_con(casos, &falso(mapa)).expect("mide");
-        for detalle in &v.defectos[..4] {
-            assert_eq!(detalle.test_rojo, Some(true), "test {:?}", detalle.test);
+        // Los dos inestables (`dos`, `tres`) no son rojos: van en `test_inestable`.
+        for (i, detalle) in v.defectos[..4].iter().enumerate() {
+            let inestable = i == 1 || i == 2;
+            assert_eq!(
+                detalle.test_rojo,
+                Some(!inestable),
+                "test {:?}",
+                detalle.test
+            );
+            assert_eq!(detalle.test_inestable, inestable, "test {:?}", detalle.test);
         }
         assert_eq!(v.defectos[4].test_rojo, Some(false));
+        assert!(!v.defectos[4].test_inestable);
     }
 
     #[test]
@@ -3185,6 +3208,123 @@ fuente = "fixture"
         let v = validar_con(casos, &falso(vec![clave("r", Veredicto::default())])).expect("mide");
         assert_eq!(v.defectos[0].test, None);
         assert_eq!(v.defectos[0].test_rojo, None);
+    }
+
+    #[test]
+    fn validez_test_inestable_no_es_rojo_ni_suma_recall() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos_con_test(
+            casos,
+            &[
+                ("uno", "src/a.rs", 20, "t::flaky"),
+                ("dos", "src/a.rs", 40, "t::flaky_contrato"),
+            ],
+        );
+        let v_uno = Veredicto {
+            inestables: vec!["t::flaky".into()],
+            estado: Estado::Verde,
+            ..Veredicto::default()
+        };
+        let v_dos = Veredicto {
+            inestables_contrato: vec!["t::flaky_contrato".into()],
+            estado: Estado::Verde,
+            ..Veredicto::default()
+        };
+        let mapa = vec![clave("uno", v_uno), clave("dos", v_dos)];
+        let v = validar_con(casos, &falso(mapa)).expect("mide");
+        for detalle in &v.defectos {
+            assert_eq!(detalle.test_rojo, Some(false), "test {:?}", detalle.test);
+            assert!(detalle.test_inestable, "test {:?}", detalle.test);
+        }
+        assert_eq!(v.recall.aciertos, Some(0), "inestable no cuenta en recall");
+        assert_eq!(v.recall.casos, 2);
+        assert_eq!(
+            v.recall_test.aciertos,
+            Some(0),
+            "inestable no cuenta en recall_test"
+        );
+    }
+
+    #[test]
+    fn validez_sonda_sin_veredicto_marca_y_sigue_en_denominador() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos_con_test(
+            casos,
+            &[
+                ("uno", "src/a.rs", 20, "t::a"),
+                ("dos", "src/a.rs", 60, "t::b"),
+            ],
+        );
+        // `uno` sin veredicto de sonda; `dos` con veredicto y sin hallazgos.
+        let v_uno = Veredicto {
+            estado: Estado::SinVeredicto,
+            ..Veredicto::default()
+        };
+        let v_dos = Veredicto {
+            estado: Estado::Verde,
+            ..Veredicto::default()
+        };
+        let mapa = vec![clave("uno", v_uno), clave("dos", v_dos)];
+        let v = validar_con(casos, &falso(mapa)).expect("mide");
+        assert!(v.defectos[0].sonda_sin_veredicto, "sin veredicto se marca");
+        assert!(
+            !v.defectos[1].sonda_sin_veredicto,
+            "con veredicto no se marca"
+        );
+        assert_eq!(
+            v.recall.casos, 2,
+            "el defecto sin veredicto sigue en el denominador"
+        );
+        assert_eq!(v.recall.aciertos, Some(0));
+    }
+
+    #[test]
+    fn validez_guardas_rojo_ocultos_y_contrato_no_marcan_inestable() {
+        let dir = TempDir::new().expect("temporal");
+        let casos = dir.path();
+        escribir_defectos_con_test(
+            casos,
+            &[
+                ("uno", "src/a.rs", 20, "t::oculto"),
+                ("dos", "src/a.rs", 40, "t::contrato"),
+            ],
+        );
+        let v_uno = Veredicto {
+            ocultos_fallidos: vec!["t::oculto".into()],
+            estado: Estado::Rojo,
+            ..Veredicto::default()
+        };
+        let v_dos = Veredicto {
+            contrato_fallidos: vec!["t::contrato".into()],
+            estado: Estado::Rojo,
+            ..Veredicto::default()
+        };
+        let mapa = vec![clave("uno", v_uno), clave("dos", v_dos)];
+        let v = validar_con(casos, &falso(mapa)).expect("mide");
+        for detalle in &v.defectos {
+            assert_eq!(detalle.test_rojo, Some(true), "test {:?}", detalle.test);
+            assert!(!detalle.test_inestable, "test {:?}", detalle.test);
+            assert!(!detalle.sonda_sin_veredicto, "test {:?}", detalle.test);
+        }
+        assert_eq!(v.recall.aciertos, Some(2));
+    }
+
+    #[test]
+    fn validez_viejo_detalle_sin_marcas_nuevas_lee_false() {
+        let dir = TempDir::new().expect("temporal");
+        escribir_defectos_con_test(dir.path(), &[("r", "src/a.rs", 20, "t::x")]);
+        let v =
+            validar_con(dir.path(), &falso(vec![clave("r", Veredicto::default())])).expect("mide");
+        let mut json = serde_json::to_value(&v.defectos[0]).expect("serializa");
+        let mapa = json.as_object_mut().expect("objeto");
+        assert!(mapa.remove("test_inestable").is_some(), "se serializa");
+        assert!(mapa.remove("sonda_sin_veredicto").is_some(), "se serializa");
+        let viejo: DetalleDefecto =
+            serde_json::from_value(json).expect("lee un detalle sin marcas nuevas");
+        assert!(!viejo.test_inestable);
+        assert!(!viejo.sonda_sin_veredicto);
     }
 
     #[test]
