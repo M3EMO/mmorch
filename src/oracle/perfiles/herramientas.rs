@@ -16,6 +16,7 @@ use super::{ResultadoSonda, crear_hallazgo, puntuar_hallazgos};
 use crate::oracle::ErrorOraculo;
 use crate::oracle::contenedor::{self, Ejecucion};
 use crate::oracle::descarga::PRELUDIO;
+use crate::oracle::junit::leer_de_salida;
 use crate::oracle::tarea::{Requisito, Tarea};
 use crate::tipos::{Dimension, Hallazgo};
 
@@ -499,26 +500,18 @@ fn carpeta_de_salida(tmp: &Path) -> std::io::Result<tempfile::TempDir> {
     Ok(salida)
 }
 
-/// Lee los archivos sueltos de `dir`. Las subcarpetas, como `target/`, no se leen. Un enlace no se sigue:
-/// el contenedor podría apuntarlo a un archivo del host (M16).
+/// Lee los archivos sueltos de `dir` con las reglas de `leer_de_salida`. Las subcarpetas, como `target/`,
+/// no se leen. Un enlace no se sigue: el contenedor podría apuntarlo a un archivo del host (M16). Un
+/// archivo que pasa el tope no entra al mapa: el llamador lo trata como ausente.
 fn leer_salida(dir: &Path) -> Result<BTreeMap<String, String>, ErrorOraculo> {
     let entradas =
         fs::read_dir(dir).map_err(|e| ErrorOraculo::Infra(format!("leer /salida: {e}")))?;
     let mut archivos = BTreeMap::new();
     for entrada in entradas.flatten() {
-        let ruta = entrada.path();
-        let Ok(meta) = fs::symlink_metadata(&ruta) else {
-            continue;
-        };
-        if !meta.file_type().is_file() {
-            continue;
+        // Lo que `leer_de_salida` rechaza (enlace, tope pasado, no UTF-8) queda ausente.
+        if let Some(texto) = leer_de_salida(&entrada.path()) {
+            archivos.insert(entrada.file_name().to_string_lossy().into_owned(), texto);
         }
-        let bytes = fs::read(&ruta)
-            .map_err(|e| ErrorOraculo::Infra(format!("leer {}: {e}", ruta.display())))?;
-        archivos.insert(
-            entrada.file_name().to_string_lossy().into_owned(),
-            String::from_utf8_lossy(&bytes).into_owned(),
-        );
     }
     Ok(archivos)
 }
@@ -1517,6 +1510,25 @@ mod tests {
         assert!(args.contains(&format!("{}:/cache:ro,z", cache.path().display())));
         assert!(args.contains(&format!("{}:/salida:z", salida_dir.path().display())));
         assert!(ej.tiene_rustsec());
+    }
+
+    #[test]
+    fn herramientas_leer_salida_deja_fuera_el_archivo_mayor_al_tope() {
+        use crate::oracle::junit::TOPE_SALIDA_BYTES;
+        let salida = tempfile::tempdir().expect("salida");
+        // Archivo disperso: fija el tamaño sin escribir bytes reales.
+        let grande = fs::File::create(salida.path().join("gitleaks.json")).expect("crea");
+        grande
+            .set_len(TOPE_SALIDA_BYTES + 1)
+            .expect("fija el tamaño");
+        fs::write(salida.path().join("ok.json"), "[]").expect("escribe");
+        let archivos = leer_salida(salida.path()).expect("lee la salida");
+        assert!(
+            !archivos.contains_key("gitleaks.json"),
+            "{:?}",
+            archivos.keys()
+        );
+        assert_eq!(archivos.get("ok.json").map(String::as_str), Some("[]"));
     }
 
     #[cfg(unix)]
