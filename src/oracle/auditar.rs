@@ -109,7 +109,7 @@ pub struct DetalleDefecto {
     /// Falso si el archivo no se leyó. Un defecto sin medir no cuenta.
     pub medido: bool,
     pub encontrado: bool,
-    /// Solo con `encontrado`: el hallazgo más cercano dentro de la ventana.
+    /// Solo con `encontrado`: el candidato asignado a este defecto dentro de la ventana. Un candidato cubre un solo defecto.
     pub hallazgo_cercano: Option<Candidato>,
     pub clase: Option<String>,
     pub origen: Option<Origen>,
@@ -170,25 +170,24 @@ pub fn medir(
     visibles: &BTreeMap<String, BTreeSet<u32>>,
 ) -> Result<Medicion, ErrorOraculo> {
     let defectos = defectos_del_repo(texto_defectos, repo)?;
+    // Sin línea visible no hay medición: el defecto no cuenta como encontrado ni como caso medido.
+    let medidos: Vec<bool> = defectos
+        .iter()
+        .map(|d| {
+            visibles
+                .get(&d.archivo)
+                .is_some_and(|lineas| lineas.contains(&d.linea))
+        })
+        .collect();
+    let asignados = emparejar(&defectos, &medidos, hallazgos);
     let mut encontrados = 0;
     let mut casos_leidos = 0;
     let mut detalle = Vec::with_capacity(defectos.len());
     let mut por_clase = BTreeMap::new();
     let mut por_origen = BTreeMap::new();
-    for d in &defectos {
-        // Sin línea visible no hay medición: el defecto no cuenta como encontrado ni como caso medido.
-        let medido = visibles
-            .get(&d.archivo)
-            .is_some_and(|lineas| lineas.contains(&d.linea));
-        let cercano = if medido {
-            hallazgos
-                .iter()
-                .filter(|h| h.archivo == d.archivo && h.linea.abs_diff(d.linea) <= VENTANA_MEDICION)
-                .min_by_key(|h| h.linea.abs_diff(d.linea))
-                .cloned()
-        } else {
-            None
-        };
+    for (i, d) in defectos.iter().enumerate() {
+        let medido = medidos[i];
+        let cercano = asignados[i].map(|hi| hallazgos[hi].clone());
         if medido {
             casos_leidos += 1;
             let encontrado = cercano.is_some();
@@ -218,6 +217,39 @@ pub fn medir(
         por_clase,
         por_origen,
     })
+}
+
+/// Asigna a cada defecto medido como mucho un candidato del mismo archivo, dentro de la ventana.
+/// Gana el par de menor distancia. En empate: línea del defecto, línea del candidato y orden de aparición.
+/// Devuelve, por cada defecto, el índice del candidato asignado.
+fn emparejar(
+    defectos: &[DefectoRepo],
+    medidos: &[bool],
+    hallazgos: &[Candidato],
+) -> Vec<Option<usize>> {
+    // Cada par: (distancia, línea del defecto, línea del candidato, índice del candidato, índice del defecto).
+    let mut pares: Vec<(u32, u32, u32, usize, usize)> = Vec::new();
+    for (di, d) in defectos.iter().enumerate() {
+        if !medidos[di] {
+            continue;
+        }
+        for (hi, h) in hallazgos.iter().enumerate() {
+            let distancia = h.linea.abs_diff(d.linea);
+            if h.archivo == d.archivo && distancia <= VENTANA_MEDICION {
+                pares.push((distancia, d.linea, h.linea, hi, di));
+            }
+        }
+    }
+    pares.sort_unstable();
+    let mut asignados = vec![None; defectos.len()];
+    let mut usado = vec![false; hallazgos.len()];
+    for (_, _, _, hi, di) in pares {
+        if asignados[di].is_none() && !usado[hi] {
+            asignados[di] = Some(hi);
+            usado[hi] = true;
+        }
+    }
+    asignados
 }
 
 /// Líneas visibles de cada archivo leído de `a`. Las relee del repo: la pasada no guarda el texto del modelo.
@@ -1896,6 +1928,94 @@ origen = "real"
         assert!(m.por_clase.is_empty());
         assert!(m.por_origen.is_empty());
         assert!(!m.detalle[0].medido);
+    }
+
+    #[test]
+    fn un_candidato_cubre_un_solo_defecto_y_el_empate_gana_la_linea_menor() {
+        let (_tmp, repo) = repo_con(&[]);
+        let texto = r#"
+[[defecto]]
+repo = "root"
+archivo = "src/a.rs"
+linea = 10
+
+[[defecto]]
+repo = "root"
+archivo = "src/a.rs"
+linea = 14
+"#;
+        // El candidato de la línea 12 queda a 2 líneas de cada defecto. Gana el de la línea 10.
+        let hallazgo = Candidato {
+            archivo: "src/a.rs".into(),
+            linea: 12,
+            cita: "cita".into(),
+            detalle: "d".into(),
+        };
+        let visibles = visibles_hasta(&["src/a.rs"], 100);
+        let m = medir(texto, &repo, &[hallazgo], &visibles).expect("medición");
+        assert_eq!(m.encontrados, 1, "{:?}", m.detalle);
+        assert!(m.detalle[0].encontrado, "{:?}", m.detalle);
+        assert!(!m.detalle[1].encontrado, "{:?}", m.detalle);
+        assert_eq!(
+            m.detalle[0].hallazgo_cercano.as_ref().map(|h| h.linea),
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn dos_defectos_y_dos_candidatos_cruzados_se_emparejan_por_menor_distancia() {
+        let (_tmp, repo) = repo_con(&[]);
+        let texto = r#"
+[[defecto]]
+repo = "root"
+archivo = "src/a.rs"
+linea = 10
+
+[[defecto]]
+repo = "root"
+archivo = "src/a.rs"
+linea = 13
+"#;
+        // Candidatos: 7 (a 3 del defecto 10), 12 (a 2 del 10 y a 1 del 13).
+        // El par de distancia 1 (13 con 12) va primero. Luego el 10 se queda con el 7.
+        let candidato = |linea| Candidato {
+            archivo: "src/a.rs".into(),
+            linea,
+            cita: "cita".into(),
+            detalle: "d".into(),
+        };
+        let hallazgos = vec![candidato(7), candidato(12)];
+        let visibles = visibles_hasta(&["src/a.rs"], 100);
+        let m = medir(texto, &repo, &hallazgos, &visibles).expect("medición");
+        assert_eq!(m.encontrados, 2, "{:?}", m.detalle);
+        assert_eq!(
+            m.detalle[0].hallazgo_cercano.as_ref().map(|h| h.linea),
+            Some(7)
+        );
+        assert_eq!(
+            m.detalle[1].hallazgo_cercano.as_ref().map(|h| h.linea),
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn un_defecto_con_candidato_propio_sigue_encontrado() {
+        let (_tmp, repo) = repo_con(&[]);
+        let texto = "[[defecto]]\nrepo = \"root\"\narchivo = \"src/a.rs\"\nlinea = 10\n";
+        let hallazgo = Candidato {
+            archivo: "src/a.rs".into(),
+            linea: 11,
+            cita: "cita".into(),
+            detalle: "d".into(),
+        };
+        let visibles = visibles_hasta(&["src/a.rs"], 100);
+        let m = medir(texto, &repo, &[hallazgo], &visibles).expect("medición");
+        assert_eq!(m.encontrados, 1);
+        assert!(m.detalle[0].encontrado);
+        assert_eq!(
+            m.detalle[0].hallazgo_cercano.as_ref().map(|h| h.linea),
+            Some(11)
+        );
     }
 
     #[test]
