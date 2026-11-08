@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::evidencia::{Verificacion, verificar_hallazgo};
+use super::evidencia::{Verificacion, ruta_dentro, verificar_hallazgo};
 use super::mapa::Mapa;
 use super::perfiles::crear_hallazgo;
 use super::perfiles::rust::REGLA_CICLO;
@@ -321,10 +321,11 @@ fn extractos(e: &EntradaJuez, limites: &LimitesPrompt) -> Vec<(String, String)> 
         if restante == 0 {
             break;
         }
-        if Path::new(&archivo).is_absolute() {
+        // Solo se lee lo que queda dentro del repo. Se lee la ruta canónica que devuelve `ruta_dentro`.
+        let Ok(ruta) = ruta_dentro(e.repo, &archivo) else {
             continue;
-        }
-        let Ok(contenido) = fs::read_to_string(e.repo.join(&archivo)) else {
+        };
+        let Ok(contenido) = fs::read_to_string(ruta) else {
             continue;
         };
         let omitidas = secretos.get(archivo.as_str()).cloned().unwrap_or_default();
@@ -1997,6 +1998,68 @@ mod tests {
             .expect("hay extractos");
         assert!(extractos.contains("--- src/a.rs ---"));
         assert!(!extractos.contains("--- src/b.rs ---"), "{extractos}");
+    }
+
+    /// Texto que solo existe fuera de la raíz del repo.
+    const AFUERA: &str = "secreto fuera de la raiz";
+
+    /// Repo en `base/repo/` con `src/a.rs`. Un `afuera.txt` hermano de `repo/` tiene `AFUERA`.
+    fn repo_hermano_de_afuera() -> (TempDir, PathBuf) {
+        let base = tempfile::tempdir().expect("tempdir");
+        let repo = base.path().join("repo");
+        fs::create_dir_all(repo.join("src")).expect("crea src");
+        fs::write(repo.join("src/a.rs"), ALMACEN).expect("escribe");
+        fs::write(base.path().join("afuera.txt"), AFUERA).expect("escribe");
+        (base, repo)
+    }
+
+    /// Prompt del juez con un hallazgo de sonda que cita `archivo`.
+    fn prompt_con_sonda_en(repo: &Path, archivo: &str) -> String {
+        let mapa = construir_mapa(repo).expect("mapa");
+        let sondas = vec![hallazgo_de(SONDA_ARQUITECTURA, archivo, 1)];
+        let c = caso();
+        let entrada = EntradaJuez {
+            repo,
+            mapa: &mapa,
+            hallazgos_sondas: &sondas,
+            ..c.entrada()
+        };
+        construir_prompt(&entrada, &LimitesPrompt::default()).usuario
+    }
+
+    #[test]
+    fn juez_extractos_no_leen_con_punto_punto_fuera_de_la_raiz() {
+        let (_base, repo) = repo_hermano_de_afuera();
+        let usuario = prompt_con_sonda_en(&repo, "../afuera.txt");
+        assert!(!usuario.contains(AFUERA), "{usuario}");
+    }
+
+    #[test]
+    fn juez_extractos_leen_punto_punto_que_queda_dentro() {
+        let (_base, repo) = repo_hermano_de_afuera();
+        let usuario = prompt_con_sonda_en(&repo, "src/../src/a.rs");
+        assert!(
+            usuario.contains("--- src/../src/a.rs ---\n1: pub struct Almacen;"),
+            "{usuario}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn juez_extractos_no_siguen_enlace_que_sale_de_la_raiz() {
+        let (base, repo) = repo_hermano_de_afuera();
+        std::os::unix::fs::symlink(base.path().join("afuera.txt"), repo.join("enlace.txt"))
+            .expect("crea enlace");
+        let usuario = prompt_con_sonda_en(&repo, "enlace.txt");
+        assert!(!usuario.contains(AFUERA), "{usuario}");
+    }
+
+    #[test]
+    fn juez_extractos_omiten_ruta_absoluta() {
+        let (base, repo) = repo_hermano_de_afuera();
+        let absoluta = base.path().join("afuera.txt");
+        let usuario = prompt_con_sonda_en(&repo, &absoluta.to_string_lossy());
+        assert!(!usuario.contains(AFUERA), "{usuario}");
     }
 
     /// Hallazgo de la sonda `sonda` en `archivo`, línea `linea`.
