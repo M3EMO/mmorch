@@ -1,6 +1,6 @@
 # Cierre del hito 1 de Root
 
-**Estado: sin firmar.** Listo para pedir la firma del usuario (P88).
+**Estado: FIRMADO por el usuario el 2026-11-08, con la validez reprobada a la vista.**
 
 ## Veredicto del hito
 
@@ -174,4 +174,6 @@ Los builders se informan aparte en cada `docs/builds/*build-local-*.md`.
 
 ## Firma
 
-Sin firmar. La firma es del usuario. Pregunta: P88 del plan.
+El usuario respondió a P88 el 2026-11-08: "a) Firmo así".
+
+La firma cubre este documento tal como queda. La Tarea 78 y el hito 1b siguen pendientes, y no cambian ningún número de arriba. Pregunta: P88 del plan.
