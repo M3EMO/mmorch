@@ -10,6 +10,15 @@ const PROBAR: &str = "scripts/probar-imagen-oraculo.sh";
 
 const PREFIJO_INSTALL: &str = "cargo install --locked --version ";
 const FUENTE_NEXTEST: &str = "https://crates.io/crates/cargo-nextest";
+const RUTA_NEXTEST_TOML: &str = "/etc/root-oraculo/nextest.toml";
+
+/// Líneas exactas que deben quedar en nextest.toml, tal como van entre comillas simples en el RUN.
+const LINEAS_NEXTEST_TOML: &[&str] = &[
+    "[store]",
+    "dir = \"/salida/target/nextest\"",
+    "[profile.ci.junit]",
+    "path = \"junit.xml\"",
+];
 
 /// Palabras que abren una instrucción de Dockerfile.
 const INSTRUCCIONES: &[&str] = &[
@@ -93,13 +102,25 @@ fn b_nextest_va_despues_de_hadolint_y_al_final() {
         idx > idx_hadolint,
         "la capa de cargo-nextest debe ir después de la de hadolint"
     );
-    let instruccion_despues = lineas[idx + 1..].iter().find_map(|l| {
-        let primera = l.split_whitespace().next()?;
-        INSTRUCCIONES.contains(&primera).then_some(primera)
-    });
+    let posteriores: Vec<(usize, &str)> = lineas
+        .iter()
+        .enumerate()
+        .skip(idx + 1)
+        .filter_map(|(i, l)| {
+            let primera = l.split_whitespace().next()?;
+            INSTRUCCIONES.contains(&primera).then_some((i, *l))
+        })
+        .collect();
+    assert_eq!(
+        posteriores.len(),
+        1,
+        "debe haber exactamente una instrucción después de la capa de cargo-nextest, hay {}: {posteriores:?}",
+        posteriores.len()
+    );
+    let (_, linea_final) = posteriores[0];
     assert!(
-        instruccion_despues.is_none(),
-        "hay una instrucción {instruccion_despues:?} después de la capa de cargo-nextest"
+        linea_final.contains(RUTA_NEXTEST_TOML),
+        "la única instrucción posterior debe escribir {RUTA_NEXTEST_TOML}, es: {linea_final:?}"
     );
 }
 
@@ -143,6 +164,29 @@ fn e_herramientas_anteriores_sin_cambio_de_version() {
         assert!(
             texto.contains(exigido),
             "el Containerfile perdió o cambió: {exigido}"
+        );
+    }
+}
+
+#[test]
+fn f_nextest_toml_va_despues_de_nextest_con_el_contenido() {
+    let texto = leer(CONTAINERFILE);
+    let lineas: Vec<&str> = texto.lines().collect();
+    let (idx_nextest, _) = linea_nextest(&texto).expect("falta la línea de cargo-nextest");
+    let (idx_toml, linea_toml) = lineas
+        .iter()
+        .enumerate()
+        .find(|(_, l)| l.trim_start().starts_with("RUN") && l.contains(RUTA_NEXTEST_TOML))
+        .expect("falta una instrucción RUN que escriba /etc/root-oraculo/nextest.toml");
+    assert!(
+        idx_toml > idx_nextest,
+        "la instrucción que escribe nextest.toml debe ir después de la capa de cargo-nextest"
+    );
+    for esperada in LINEAS_NEXTEST_TOML {
+        let entre_comillas = format!("'{esperada}'");
+        assert!(
+            linea_toml.contains(&entre_comillas),
+            "nextest.toml no trae la línea {entre_comillas} en el RUN: {linea_toml:?}"
         );
     }
 }
