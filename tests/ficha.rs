@@ -385,6 +385,14 @@ fn borrador_runner_nextest_usa_nextest_y_copia_junit() {
     );
     assert!(contrato.contains("/salida/contrato.xml"), "{contrato}");
     assert!(!contrato.contains("pytest"), "{contrato}");
+    assert!(
+        contrato.contains("--profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml"),
+        "{contrato}"
+    );
+    assert_eq!(
+        contrato,
+        "CARGO_TARGET_DIR=/salida/target cargo nextest run --offline --profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml; s=$?; cp /salida/target/nextest/ci/junit.xml /salida/contrato.xml || exit 1; exit $s"
+    );
 
     let oculto = cmd_de(&valor, "oculto");
     assert!(
@@ -394,6 +402,14 @@ fn borrador_runner_nextest_usa_nextest_y_copia_junit() {
     assert!(oculto.contains("target/nextest/ci/junit.xml"), "{oculto}");
     assert!(oculto.contains("/salida/oculto.xml"), "{oculto}");
     assert!(!oculto.contains("pytest"), "{oculto}");
+    assert!(
+        oculto.contains("--profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml"),
+        "{oculto}"
+    );
+    assert_eq!(
+        oculto,
+        "CARGO_TARGET_DIR=/salida/target cargo nextest run --offline --profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml; s=$?; cp /salida/target/nextest/ci/junit.xml /salida/oculto.xml || exit 1; exit $s"
+    );
 
     assert_eq!(
         valor["imagen"].as_str(),

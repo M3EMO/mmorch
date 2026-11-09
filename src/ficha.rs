@@ -385,9 +385,12 @@ const CMD_OCULTO: &str = "ORACULO_REPO=/repo CARGO_TARGET_DIR=/salida/target pyt
 
 /// Comando de nextest que copia el junit a `/salida/<xml>.xml`. El `cp` corre aunque nextest falle,
 /// y el código de salida de nextest se conserva.
+///
+/// Usa el tool-config `/etc/root-oraculo/nextest.toml` que trae la imagen: ahí vive el perfil `ci`
+/// y su store. El repo no pide el perfil `ci`; lo define la imagen.
 fn cmd_nextest(xml: &str) -> String {
     format!(
-        "CARGO_TARGET_DIR=/salida/target cargo nextest run --offline --profile ci; s=$?; cp /salida/target/nextest/ci/junit.xml /salida/{xml}.xml || exit 1; exit $s"
+        "CARGO_TARGET_DIR=/salida/target cargo nextest run --offline --profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml; s=$?; cp /salida/target/nextest/ci/junit.xml /salida/{xml}.xml || exit 1; exit $s"
     )
 }
 
