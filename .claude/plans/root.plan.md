@@ -6112,3 +6112,92 @@ Esta es la única pregunta abierta.
 - **c)** Las dos cosas: a ahora, y b hasta completar 20 reales para el buscador.
 - **d)** Seguir con 16 tareas. El dataset queda chico, y el buscador da "muestra corta".
 - **e)** Frenar el dataset por ahora.
+
+## Vuelta del 2026-11-09 (3): definición de S2
+
+**Estado.** La punta local es 329e82b, sin push. P94 a: los commits de función nueva van solo al dataset, y hay 7 candidatas de 3 repos. P81: "Sí, apruebo" el método y las 3 fichas v2. Vd corre desde las 14:22, con cerca de 9 horas. P84 acumulado: 7,41 de 12 USD.
+
+**Fichas v1 descartadas:** bien hecho. El redactor no debe ver tests.
+
+## La dependencia de t1
+
+**Corrección.** El builder sí tiene red: `pasta:--no-map-gw` (`src/corre/contenedor.rs:73`). La evaluación corre sin red, con la fase de descarga antes. Igual hay que medir.
+
+**Medí esto:** los 4 tests ocultos, con bet 1.0.3 más el cambio de `composite_pattern.rs`. Esta medición no choca con Vd: es un contenedor corto, y Vd no mide tiempo. Corrélo ahora, con prioridad mínima.
+
+| Resultado | Qué hago | ¿Se muestra de nuevo al usuario? |
+|---|---|---|
+| Pasan con 1.0.3 | t1 queda igual | No |
+| No pasan, y con el salto a 1.0.4 en el estado inicial el test da rojo antes y verde después | Aplicar el salto al estado inicial. Repetir el criterio 1 con ese estado. La ficha no cambia, si sus ejemplos dan igual | No hace falta aprobarla otra vez. Avisale en una línea: el estado inicial lleva una dependencia del commit, y eso se aparta del método aprobado |
+| No pasan, y con ese salto los tests ya dan verde antes | El arreglo vive en la dependencia. No hay tarea. Reemplazá t1 | **Sí:** es una ficha nueva, y el usuario aprobó estas 3 |
+| Un ejemplo de la ficha cambia con 1.0.4 | Corregir la ficha | **Sí** |
+
+**Reemplazo:** el siguiente admitido de broot, por la semilla 20261109. Si broot no tiene otro, el siguiente del repo de ajuste real.
+
+## Qué son las evaluaciones de S2
+
+**Corrección mía.** Los "15" nunca estuvieron definidos. Salieron de D4: 100 evaluaciones para 20 tareas, 5 por tarea. Eso supone una base compartida que la CLI de hoy no tiene. Lo reemplazo por esto.
+
+**Por tarea:**
+
+| N.º | Estado del repo | Comando | Llamadas al juez |
+|---|---|---|---|
+| 1 | Padre: el estado inicial | `oraculo evaluar --tarea s2-tN --repo <padre>` | 1 |
+| 2 a 8 | Commit real, como repo bueno | `oraculo calibrar --tarea s2-tN --dimension arquitectura --n 2 --semilla 42 --repo <commit> --tope-usd $T`. Después `estructura` y `diseno`, en ese orden | 7: 3 bases, 3 defectos y 1 limpio compartido |
+| 9 | Lo que construye el builder | `r00t corre --tarea s2-tN --config ecc-haiku`. Va por cupo (P82), y su juez final por API | 1 |
+
+**Total:** 27 evaluaciones con juez. Una repetición por tarea. `repeticiones = 3` ya repite los tests adentro de cada evaluación.
+
+**Si un defecto no aplica,** por ejemplo `CicloEntreCapas` con `capas = [["patron"]]`, queda "no aplica" y se informa. No inventes capas. Es justo un dato que S2 debe medir.
+
+**Saboteador y S13, por cupo y sin API.**
+- 10 tentativas: 4 en t1, 3 en t2 y 3 en t3, con el prompt fijo.
+- S13 cuenta cuántas valen: compilan, pasan limpias, y su test da rojo.
+- De las válidas, las 2 primeras de cada tarea, 6 en total, se miden con V3 y `--solo-medir`. Es informativo: no entran a ningún conjunto del buscador.
+
+**Tope de 5 USD.**
+- Pasá `--tope-usd` igual a lo que queda de P80.
+- Con 4,0 USD gastados, no lances más `corre`.
+- Con 4,5 USD gastados, pará todo y marcá S2 incompleta.
+
+**Intervalos para registrar antes de cada corrida** en `s2/predicciones.jsonl`. Son estimaciones mías, y el objetivo es medir cuánto me equivoco.
+
+| Paso | Costo | Tiempo |
+|---|---|---|
+| Una evaluación con juez | 0,08 a 0,20 USD | 5 a 60 minutos |
+| `calibrar` de una dimensión, n = 2 | 0,20 a 0,60 USD | 15 a 120 minutos |
+| `corre`, una tarea | 1 a 15 USD de lista, por cupo; 0,08 a 0,20 USD de API | 10 a 120 minutos |
+| Una tentativa del saboteador | 0,02 a 0,20 USD de lista | 2 a 15 minutos |
+
+**Al terminar cada uno,** guardá costo real, tokens y minutos. S3a sale de estos minutos.
+
+**Para proyectar D4:** usá tokens medidos, no estas cifras. S2 usa el juez de hoy, que lee 6000 caracteres. La lectura ampliada va a costar más.
+
+## Tus dos desvíos
+
+**`anexo.rs` y archivo nuevo en `tests/`: acepto.** Con una condición: corré cada `tarea.toml` generado contra el padre y contra el commit real. Oculto debe dar rojo y verde. Si un anexo no compila, se corrige.
+
+**`pruebas = []`: hace falta llenarlo, sin código.** Con la lista vacía, cada requisito queda "sin pruebas", y Completitud no tiene veredicto (`src/oracle/requisitos.rs:369`).
+- **Formato.** El id es `<classname>::<nombre>` del junit, sin cambios (`id_de` y `id_de_clave`). Sacalo de un junit real de nextest. No lo armes a mano.
+- **Reparto para S2.** Poné todos los rojo a verde en `pruebas` de cada requisito. Es grueso, pero S2 mide costo y factibilidad. Completitud va a dar todo o nada, y eso se anota.
+- **Para D3.** Alguien tiene que asociar cada test con su requisito. Queda como decisión de D3, junto con quien la revise.
+
+**Los ejemplos de las fichas contra el commit real:** sí, y hacelo ahora, con prioridad mínima.
+
+## Cronograma
+
+**Ahora, en paralelo con Vd. Sin API, con prioridad mínima:**
+1. Medición de `bet` en t1.
+2. Ejemplos de las fichas contra el commit real.
+3. Oculto rojo y verde sobre cada `tarea.toml`, y los `pruebas` llenos.
+4. Saboteador: las 10 tentativas por cupo, y validarlas.
+5. V3 sobre los 6 defectos.
+6. Criterios 2 a 4 sobre las 7 candidatas de función nueva.
+
+Vd solo mira hallazgos y descartes, así que la carga no cambia lo que mide.
+
+**Después de Vd:** las evaluaciones por API de S2, y `r00t corre` al final. La API espera porque el vigía de Vd cuenta todo. El `corre` espera porque S2 mide sus minutos, y la carga los ensucia.
+
+**Después de S2:** proyección, y el dataset según lo medido.
+
+**Preguntas al usuario:** ninguna nueva. Solo si t1 cae en la tercera o la cuarta fila de la tabla.
