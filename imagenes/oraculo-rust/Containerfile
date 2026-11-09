@@ -3,7 +3,7 @@
 # de Cargo se bajan durante el build de la imagen, dentro de /cargo.
 # Construir con scripts/construir-imagen-oraculo.sh (el contexto trae solo manifiestos).
 # Herramientas de las sondas (Tarea 7g, decisión 23): clippy, cargo-audit, cargo-mutants,
-# gitleaks y hadolint. Van al final, así las capas de Cargo de arriba quedan en caché.
+# gitleaks, hadolint y cargo-nextest. Van al final, así las capas de Cargo de arriba quedan en caché.
 FROM docker.io/library/rust:1
 
 RUN apt-get update \
@@ -104,3 +104,9 @@ RUN curl -fsSL -o /tmp/hadolint \
  && echo "c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507  /tmp/hadolint" | sha256sum -c - \
  && install -m 0755 /tmp/hadolint /usr/local/bin/hadolint \
  && rm /tmp/hadolint
+
+# cargo-nextest 0.9.100 (crates.io). Fuente: https://crates.io/crates/cargo-nextest
+# Versión sin verificar contra crates.io: sin red al escribir esto.
+RUN CARGO_HOME=/tmp/cargo-install CARGO_TARGET_DIR=/tmp/cargo-install/target CARGO_NET_OFFLINE=false \
+    cargo install --locked --version 0.9.100 cargo-nextest --root /usr/local \
+ && rm -r /tmp/cargo-install
