@@ -5874,3 +5874,145 @@ Opciones:
 **P89: ¿Mezclar la Tarea 78 en local, sin push, cuando pase su suite con podman?**
 - **a)** Sí, sin volver a preguntar. Recomendada.
 - **b)** No, traé el resultado.
+
+## Vuelta del 2026-11-09 (1): S1, S9, Tarea 78 y lo que sigue tras el cierre
+
+**Estado.** La punta local es 6403196, con 72 a 78, sin push. El cierre del hito 1 está firmado (P88 a). Disco: 330 GB libres.
+
+**Línea Buscador.** La re-medición con r00t-ed65adc da lo mismo: V2 17/24 y V3 20/24. La Tarea 78 no cambió esos números.
+
+**S9: sostiene.** `jina-embeddings-v2-base-code` dio 66 de 100, y el umbral era 60. El azar da 0,118. Control: 50 de 100. Se usa Jina.
+
+## S1: da "cambia"
+
+**Cómo se lee.**
+- El número de S1 es 3 de 50: 6 %. El diseño era 50 commits de 10 repos. Cae en la banda "cambia".
+- 3 de 25 (12 %) es otra cosa: el rendimiento de un commit en un repo que ya compila. Su cota de Wilson al 90 % va de 0,06 a 0,23.
+- No uso el 12 % para decir "sostiene". La regla previa también da "cambia": se usaron 5 reemplazos, y no hay 10 repos.
+- **El rendimiento real es más bajo:** de 15 repos probados pasaron 5. El criterio 5 todavía no se midió, y va a bajar el número.
+
+**Los 7 `antes_no_compila`: no entran, y siguen en el denominador.** Una compilación rota no es un test en rojo. Falla todo el binario, y no aísla una conducta. Además, suele significar que el test usa una API nueva, y la ficha tendría que nombrarla: eso se parece a una fuga.
+
+**`--all-features`: no entra al método.** Dio 1 commit más de 10, y 6 no compilaron. El commit extra de miette no cuenta. Cambiar la bandera después de ver el dato solo agrega ruido.
+
+**Qué cambia, antes de ver datos nuevos.**
+- **Más commits y más repos, las dos cosas.** Hasta 15 commits por repo, en los 5 que pasan y en la reserva nueva que pase. Más commits aprovechan una base que ya compila. Más repos hacen falta para separar por repo.
+- **Regla nueva de S1, fijada ahora.** Hacen falta cerca de 40 admitidos: 20 para el dataset y 20 reales para el buscador.
+
+| Admitidos con criterios 1 a 4 | Resultado |
+|---|---|
+| 40 o más, en 5 repos o más | Sostiene |
+| De 20 a 39 | Cambia: el usuario elige entre dataset o buscador primero, o minar otra reserva |
+| Menos de 20 | Frena, y pregunto |
+
+- **Estimación:** 15 commits en 15 repos son cerca de 225. Al 12 %, salen cerca de 27. Lo más probable es "cambia". El criterio 5 baja más ese número.
+
+## Línea Buscador con 3 repos
+
+Hacen falta 4, y hay 3 con un admitido cada uno. Tampoco alcanzan los commits: faltan 20 reales.
+
+**Si la reserva no alcanza:**
+- **Ajuste y final siguen separados por repo.** Esa regla no cambia. Mínimo: 2 repos para final y 1 para ajuste.
+- **Buscador y dataset pueden compartir un repo,** con commits distintos. El dataset no ve el conjunto sellado, y ningún builder ve los commits del buscador. Esto cambia la regla de la vuelta (6).
+- **Con menos de 15 reales finales:** no bajo 12 de 15. Se informa "muestra corta", y no se puede afirmar el 0,8 en reales. Root sigue sin evaluar repos reales.
+- **Regla de 3 de 5:** con menos de 5 reales de ajuste, no se abre el final.
+
+## Tarea 78: sus 9 preguntas
+
+1. **Un hallazgo por línea del rango:** acepto. **`linea_fin` va al hito 1b.** Esos hallazgos pesan de más en Seguridad, y esa fórmula ya está en revisión.
+2. **Error con más de 2000 líneas:** acepto. Falla cerrado.
+3. **`VENTANA_MEDICION` en 3:** correcto. El brief hablaba de 2 defectos a 4 líneas entre sí.
+4. **Emparejamiento voraz:** acepto.
+5. **`SinVeredicto`, y fallido gana a inestable:** acepto.
+6. **`leer_salida` más estricto:** acepto. Falla cerrado.
+7. **Medición relee el repo:** acepto. Las copias no cambian.
+8. **El gate también en la pasada de producción:** acepto. Era la intención.
+9. **Normalizar rutas en el juez:** sí, en **hito 1b**, antes de evaluar repos ajenos. Junto con la sonda `gitleaks()` sin repo y las rutas con `..`.
+
+## Después del cierre
+
+**Presupuesto.** Topes de los 50 USD: P80, 5 USD. P84, 12 USD. Los dos están aprobados.
+
+### Ahora, en paralelo
+
+**A. V0 y V1 por API (P84).** Tope total: 12 USD, con Vd adentro. Medí en este orden. Si el gasto acumulado de P84 pasa de 10 USD, no lances lo que sigue.
+
+- **V1, sobre `ajuste.jsonl`:**
+```bash
+$R --json oraculo auditar --repo "$COPIA" --salida "$V/$ID.json" --gitleaks "gl/$REPO.json" \
+  --incluir "$ARCHIVO" --defectos "def/$ID.toml" --por-archivo --tope-usd "$TOPE"
+```
+- **Densidad de V1:** una vez por archivo limpio, sin `--defectos`.
+- **V0.** Armá copias con un defecto por archivo, como máximo. Son 3 lotes por repo, porque hay hasta 3 defectos por archivo. Validá que cada copia compile. Corré `auditar` sin `--por-archivo`, con todos los archivos del repo. Estimación: cerca de 1,4 USD por V0, y 2,8 USD por V1.
+- `TOPE` es lo que queda de los 12 USD en ese momento.
+
+**B. Tarea 78 no pide nada más.** Sus pendientes van al hito 1b.
+
+**C. Tarea 79: imagen con nextest.** Sin podman, salvo su guarda final. Brief: `docs/builds/brief-local-79.md`.
+
+**D. Minería ampliada,** si responde P90.
+
+### Después
+
+| Paso | Necesita | Costo |
+|---|---|---|
+| **Vd** sobre ajuste | CPU libre: 24 `evaluar`, cerca de 9 horas | Cerca de 2,4 USD, dentro de P84 |
+| **Fichas de las 3 tareas admitidas** | Tarea 79. Las escribe un modelo por cupo | Cupo |
+| **Mostrarle al usuario** las 3 fichas y `docs/dataset-metodo-fichas.md` (P81) | Las fichas | 0 |
+| **S2** con esas 3 tareas | La aprobación de P81, y la imagen nueva | Tope 5 USD |
+| **Reales de ajuste con V3** | Minería, 5 reales de un repo | Cupo |
+| **Conjunto final, una vez** | V0, V1, Vd; V3 con 3 o más de 5 reales | Cupo |
+| **Dataset D0 a D6** | S1 "sostiene", o tu elección si da "cambia" | Sin aprobar más allá de los topes |
+
+**Registro de S2.** Antes de cada corrida, guardá la predicción de costo y de tiempo como intervalo. Al final, guardá el valor real.
+
+**P70 (clave dedicada).** P82 dijo cupo, así que hoy nada la necesita. La pido solo si una corrida va por API.
+
+## Colab Pro+: no conviene por tiempo
+
+**Hechos.** Las 4 filas de `criterios.log` tardaron 13 s, 54 s, 59 s y 1147 s. No tengo el total de los 25 commits. El más lento es iwe, por sus mutantes. La base sí pesa, con plazos de 15 y 30 minutos por repo. La laptop tiene 8 núcleos, y no hubo cuello de botella medido.
+
+**Costo.** `colab usage` da el saldo. No medí cuántas unidades gasta una VM de CPU. Tu memoria dice que la T4 es gratis, y la decisión 33 dice que la cuenta es paga. Hay que mirarlo.
+
+**A favor de Colab:** no corre código ajeno en la laptop. Sin Drive y sin claves, la VM es descartable. Puede correr varias VM a la vez.
+
+**En contra:** no hay podman adentro, así que no hay `--network none`. Hay que usar `unshare -rn`, y bajar dependencias antes. Una VM se corta, y una sesión larga de Pro+ cuesta unidades.
+
+**Decisión.** Los contenedores `--network none` ya aíslan bien. Sin un cuello de botella, no conviene. Lo reabro si la proyección de S1 pasa de 7 días de CPU.
+
+**Plan mínimo, si lo pedís:**
+1. `colab usage`, para ver saldo y tarifa.
+2. `colab run` de un solo repo en una VM de CPU, sin GPU, sin `drivemount` y sin Secrets.
+3. El script instala Rust con `rustup-init` verificado por `.sha256`, y baja dependencias con `cargo fetch`.
+4. Corre tests y mutantes con `unshare -rn`.
+5. Baja solo el JSON de resultados. Nunca el repo ni `target/`.
+6. Compará tiempo y unidades contra la laptop. Recién ahí se decide.
+
+## Orden (2026-11-09, 1)
+
+**En paralelo ahora:** V1, V0, Tarea 79, y la minería ampliada si P90 responde.
+
+**Con CPU libre:** Vd y la base de los repos nuevos. No junto con una suite con podman.
+
+**En serie:** fichas, aprobación del usuario, S2.
+
+**Al final:** reales de ajuste, conjunto final, y dataset según S1.
+
+## Preguntas para el usuario (2026-11-09, 1)
+
+**P90: S1 dio 3 tareas admitidas de 50 previstas. ¿Cómo sigo buscando tareas?** Los filtros dejan 5 repos de 15. Harían falta cerca de 40 tareas, y lo más probable es llegar a unas 27.
+
+La reserva nueva son 10 repos, sorteados: rust-fuzz/cargo-fuzz, tower-rs/tower, lusingander/serie, slawlor/ractor, pykeio/ort, Auburn/FastNoiseLite, katanemo/plano, giacomo-b/rust-stakeholder, vortex-data/vortex y farm-fe/farm. Se clonan sin ejecutar nada en la laptop. Los tests corren en contenedor, sin red ni claves.
+
+- **a)** Clonar esta reserva, y subir a 15 commits por repo. Recomendada: hacen falta más repos y más commits.
+- **b)** Solo clonar esta reserva, con 5 commits por repo.
+- **c)** Solo subir a 15 commits en los 5 repos que ya pasan.
+- **d)** No seguir por ahora.
+
+**P91: ¿Sumo `cargo-nextest` a una imagen nueva del oráculo?** Las tareas de Rust lo necesitan para dar resultados por test. Se baja de crates.io, con versión fija, igual que las demás herramientas.
+- **a)** Sí. Recomendada.
+- **b)** No. Sin esto, S2 y el dataset no pueden correr.
+
+**P92: ¿Probamos la compilación de repos ajenos en Colab Pro+?** No hace falta por tiempo: la laptop alcanza, y los contenedores ya aíslan. Colab gasta unidades de cómputo, y todavía no medí cuántas.
+- **a)** No por ahora. La reabro si S1 proyecta más de 7 días de CPU. Recomendada.
+- **b)** Sí, un piloto de un repo. Me decís un tope de unidades.
