@@ -6016,3 +6016,99 @@ La reserva nueva son 10 repos, sorteados: rust-fuzz/cargo-fuzz, tower-rs/tower, 
 **P92: ¿Probamos la compilación de repos ajenos en Colab Pro+?** No hace falta por tiempo: la laptop alcanza, y los contenedores ya aíslan. Colab gasta unidades de cómputo, y todavía no medí cuántas.
 - **a)** No por ahora. La reabro si S1 proyecta más de 7 días de CPU. Recomendada.
 - **b)** Sí, un piloto de un repo. Me decís un tope de unidades.
+
+## Vuelta del 2026-11-09 (2): S1 frena, V1 y Colab
+
+**Estado.** La punta local es 4210cba, con 72 a 79, sin push. Respuestas: P90 a, P91 a, P92 b con tope de 50 unidades, P93 a. Suite de la 79: 2798 verdes, 0 rojos.
+
+## S1: frena, según la regla fijada antes
+
+**Medido.** 8 repos pasan la base, de 25 probados. 109 commits medidos. **16 admitidos, de 5 repos**, con reparto [2, 2, 3, 4, 5]. Eso es 14,7 %. Hacían falta 40. El criterio 5 no se midió.
+
+**La regla decía:** menos de 20, frena y pregunto. No toco esa regla. La decisión es del usuario (P94).
+
+**Qué dicen los números.**
+- `antes_no_compila` son 38 de 109: la mayor causa de rechazo.
+- Esos commits agregan API y su test la usa. No sirven para medir un buscador de defectos.
+- Pueden servir para el dataset, como tareas de **función nueva**. Ahí la ficha puede nombrar la interfaz sin filtrar la solución. El contrato C5 ya pide un `tipo` por tarea.
+- Sería un cambio de criterio, hecho después de ver el dato. Por eso no lo decido yo.
+- No sé cuántos pasarían los criterios 2 a 4. Hay que medirlo. No gasta API.
+- Con el criterio actual, llegar a 40 pide cerca de 165 commits más. Eso son cerca de 11 repos más que pasen, o unos 34 repos probados. Es una estimación.
+
+## V1 y el truncado
+
+**Medido.** 17 de 23: memora 11 de 15, brasa 6 de 8. Densidad 10,2 por 1000 líneas. Gasto: 5,37 USD en 57 llamadas. Mi estimación era 2,8: me equivoqué por 1,9 veces, otra vez.
+
+**Los faltantes no cuentan como fallos.** Sin respuesta no hay medición. El denominador es 23. La densidad cubre 20 de 24 archivos, y se informa así.
+
+**No subo el tope de salida.** Ese tope es parte de la variante. Cambiarlo crea otra variante, con otro costo, para recuperar 1 defecto. No se reintenta.
+
+**V0 sigue, con condiciones.**
+- Una sola corrida, sin reintentos, con tope de 3 USD.
+- Una tanda truncada queda "no medida", no como fallo.
+- Queda dentro de P84: de los 6,63 USD restantes, 3 para V0 y cerca de 2,4 para Vd.
+- Si V0 gasta el tope, se corta y se informa.
+
+**Lo que aprendimos.**
+- La hipótesis de familia pierde fuerza. DeepSeek da 0,74 en defectos sembrados por Sonnet, cerca de V2 y V3. Sembrados altos no dependen de que el buscador sea Sonnet.
+- Queda la otra hipótesis: un sembrado es más fácil que un defecto real. Sin medir.
+- **La selección no cambia.** V3 sigue primero con 0,833. V1 da 0,739 y V2 0,708.
+
+## Colab
+
+**Mi decisión cambia en parte.** El costo ya no pesa: 0,01 unidades por corrida, con 781 de saldo.
+
+**No para los criterios de admisión.** El piloto dio 2460 verdes y 2 rojos, y la laptop 2462 verdes, sin causa conocida. Un test que cambia de entorno cambia la etiqueta. Toda la admisión sigue en un solo entorno.
+
+**Sí para el filtro barato,** si P94 pide más repos. Colab corre "¿pasa `cargo test` en la punta?" sobre los repos candidatos. Los que pasan se miden después en la laptop. Una VM es más lenta (569 s contra 297 s), así que solo conviene con varias a la vez.
+
+**Condición:** medí primero cuántas VM simultáneas da la cuenta. Con 3 o más, se usa. Con menos, sigue la laptop. Todo dentro del tope de 50 unidades.
+
+## Tarea 79: sus 6 preguntas
+
+1. **`tecnica.runner`:** acepto.
+2. **Imagen `:3` con nextest:** acepto. El `:1` viejo del camino pytest va al hito 1b.
+3. **Runner desconocido da 2:** acepto.
+4. **Ruta del junit:** la sección 5 de su informe la reemplaza, con la configuración en la imagen. Acepto esa versión.
+5. **Scripts por defecto a `:3`:** acepto.
+6. **`docs/interfaces.md`:** acepto.
+
+**Falta de diseño que deja el informe.** Con nextest, `contrato.cmd` y `oculto.cmd` corren la misma suite. Además, un test de Rust suele vivir dentro de `src/`, en el mismo archivo. Para S2 alcanza con esto, y no hace falta código:
+- `oculto.cmd` copia `/repo`, aplica `/oraculo/oculto/test.patch` con los tests del commit, y corre solo los tests rojo a verde con `-E`.
+- `contrato.cmd` corre los tests que ya pasaban.
+
+Si funciona en S2, se convierte en una regla de D3.
+
+## Orden (2026-11-09, 2)
+
+**En paralelo ahora:**
+- V0, con tope de 3 USD. Solo API.
+- Fichas de S2, por cupo.
+
+**Con CPU libre, sin suite con podman:** Vd, 24 `evaluar`, cerca de 9 horas.
+
+**Depende de P94:** minería, reales de ajuste, conjunto final y dataset.
+
+### S2, qué hace falta
+
+1. **Elegir las 3 tareas.** Sacalas del repo con más admitidos: 5. Ese repo pasa a ser el de ajuste real, con sus 5 fallas. Ajuste se puede mirar, así que mostrar esas fichas no gasta el sellado. El orden de las 3 sale de la semilla 20261109.
+2. **Los otros 4 repos dan 11 reales para el final.** Son menos de 15: si P94 no suma más, el final queda "muestra corta".
+3. **Fichas.** Un modelo por cupo escribe cada `## Ficha`. Después corre `r00t ficha revisar`, y un chequeo de fuga: la ficha no cita identificadores nuevos del diff ni copia líneas agregadas.
+4. **Quién las ve: el usuario (P81 a).** Mostrale `docs/dataset-metodo-fichas.md` y las 3 fichas, con el enlace al commit y la cantidad de tests ocultos, sin sus nombres. Nada corre antes de su "sí".
+5. **`tarea.toml`** con `runner = "nextest"` y `oculto.cmd` con el parche.
+6. **Registro.** Antes de cada corrida, guardá el intervalo de costo y de tiempo previsto.
+7. **Corrida**, con tope de 5 USD. Con 3 tareas son 15 evaluaciones y 6 defectos del saboteador por cupo.
+
+**Después de S2:** proyectar el total. El subtotal de 65,7 USD lleva dos errores de 1,9 veces en mis estimaciones de salida. S2 corrige eso con datos.
+
+## Preguntas para el usuario (2026-11-09, 2)
+
+Esta es la única pregunta abierta.
+
+**P94: S1 llegó a 16 tareas admitidas, y hacían falta 40. La regla que fijamos dice que se frena hasta que decidas.** La mayor causa de rechazo son 38 commits cuyo test no compila antes del arreglo, porque agregan una función nueva.
+
+- **a)** Usar esos commits solo en el dataset, como tareas de función nueva, si pasan los demás criterios. Las 16 tareas actuales van al buscador. Sin API. Cambia un criterio después de ver el dato, y por eso te lo pregunto. Recomendada: es lo más barato, y el dataset gana variedad. El buscador igual queda corto: 16 reales, con 20 previstas.
+- **b)** Mantener el criterio y minar otra reserva. Sin API. Son unos 34 repos más probados, por estimación, y varios días.
+- **c)** Las dos cosas: a ahora, y b hasta completar 20 reales para el buscador.
+- **d)** Seguir con 16 tareas. El dataset queda chico, y el buscador da "muestra corta".
+- **e)** Frenar el dataset por ahora.
