@@ -352,6 +352,119 @@ fn ficha_borrador_parsea_y_tarea_lo_acepta() {
     assert_eq!(valor["eficiencia"]["piso"].as_float(), Some(5000.0));
 }
 
+/// Parsea la ficha de `spec-completa.md` y pone `runner` en `[tecnica]`.
+fn ficha_con_runner(runner: &str) -> ficha::Ficha {
+    let texto = fixture("spec-completa.md");
+    let (mut ficha_leida, _) = ficha::extraer(&texto).expect("parsea");
+    ficha_leida.tecnica.runner = runner.into();
+    ficha_leida
+}
+
+/// Lee `[<tabla>].<clave>` de un borrador TOML.
+fn cmd_de(borrador: &toml::Value, tabla: &str) -> String {
+    borrador[tabla]["cmd"]
+        .as_str()
+        .unwrap_or_else(|| panic!("falta {tabla}.cmd"))
+        .to_string()
+}
+
+#[test]
+fn borrador_runner_nextest_usa_nextest_y_copia_junit() {
+    let ficha_leida = ficha_con_runner("nextest");
+    let borrador = ficha::borrador_tarea(&ficha_leida, "memora").expect("arma el borrador");
+    let valor: toml::Value = toml::from_str(&borrador).expect("TOML válido");
+
+    let contrato = cmd_de(&valor, "contrato");
+    assert!(
+        contrato.contains("cargo nextest run --offline --profile ci"),
+        "{contrato}"
+    );
+    assert!(
+        contrato.contains("target/nextest/ci/junit.xml"),
+        "{contrato}"
+    );
+    assert!(contrato.contains("/salida/contrato.xml"), "{contrato}");
+    assert!(!contrato.contains("pytest"), "{contrato}");
+    assert!(
+        contrato.contains("--profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml"),
+        "{contrato}"
+    );
+    assert_eq!(
+        contrato,
+        "CARGO_TARGET_DIR=/salida/target cargo nextest run --offline --profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml; s=$?; cp /salida/target/nextest/ci/junit.xml /salida/contrato.xml || exit 1; exit $s"
+    );
+
+    let oculto = cmd_de(&valor, "oculto");
+    assert!(
+        oculto.contains("cargo nextest run --offline --profile ci"),
+        "{oculto}"
+    );
+    assert!(oculto.contains("target/nextest/ci/junit.xml"), "{oculto}");
+    assert!(oculto.contains("/salida/oculto.xml"), "{oculto}");
+    assert!(!oculto.contains("pytest"), "{oculto}");
+    assert!(
+        oculto.contains("--profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml"),
+        "{oculto}"
+    );
+    assert_eq!(
+        oculto,
+        "CARGO_TARGET_DIR=/salida/target cargo nextest run --offline --profile ci --tool-config-file root:/etc/root-oraculo/nextest.toml; s=$?; cp /salida/target/nextest/ci/junit.xml /salida/oculto.xml || exit 1; exit $s"
+    );
+
+    assert_eq!(
+        valor["imagen"].as_str(),
+        Some("localhost/root-oraculo-rust:3")
+    );
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    fs::write(dir.path().join("tarea.toml"), &borrador).expect("escribe");
+    let tarea = Tarea::cargar_de(dir.path()).expect("Tarea acepta el borrador");
+    assert_eq!(tarea.imagen, "localhost/root-oraculo-rust:3");
+}
+
+#[test]
+fn borrador_runner_desconocido_da_error_de_estructura() {
+    let ficha_leida = ficha_con_runner("foo");
+    let error = ficha::borrador_tarea(&ficha_leida, "memora")
+        .expect_err("runner desconocido no arma borrador");
+    match error {
+        ErrorFicha::Estructura(mensaje) => assert_eq!(
+            mensaje,
+            "tecnica.runner desconocido: foo; usá \"pytest\" o \"nextest\""
+        ),
+        otro => panic!("error inesperado: {otro:?}"),
+    }
+}
+
+#[test]
+fn borrador_sin_runner_o_pytest_sale_igual_que_antes() {
+    let texto = fixture("spec-completa.md");
+    let (ficha_sin_tocar, _) = ficha::extraer(&texto).expect("parsea");
+    let base = ficha::borrador_tarea(&ficha_sin_tocar, "memora").expect("borrador");
+    assert!(base.contains("python3 -m pytest"), "{base}");
+    assert!(base.contains("localhost/root-oraculo-rust:1"), "{base}");
+
+    let con_pytest = ficha_con_runner("pytest");
+    let borrador = ficha::borrador_tarea(&con_pytest, "memora").expect("borrador");
+    assert_eq!(borrador, base);
+}
+
+#[test]
+fn ficha_runner_se_parsea_y_falta_da_vacio() {
+    let texto = fixture("spec-completa.md");
+    let con_clave = texto.replacen(
+        "lenguaje = \"rust\"",
+        "lenguaje = \"rust\"\nrunner = \"nextest\"",
+        1,
+    );
+    assert!(con_clave.contains("runner = \"nextest\""));
+    let (ficha_con, _) = ficha::extraer(&con_clave).expect("parsea con runner");
+    assert_eq!(ficha_con.tecnica.runner, "nextest");
+
+    let (ficha_sin, _) = ficha::extraer(&texto).expect("parsea sin runner");
+    assert_eq!(ficha_sin.tecnica.runner, "");
+}
+
 #[test]
 fn ficha_cli_revisar_completa_sin_juez_sale_3_y_dice_juez_no_corrido() {
     let salida = root(&[

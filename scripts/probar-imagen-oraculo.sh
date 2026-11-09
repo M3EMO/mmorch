@@ -3,7 +3,7 @@
 # Uso: scripts/probar-imagen-oraculo.sh
 set -euo pipefail
 
-IMAGEN=${IMAGEN:-localhost/root-oraculo-rust:2}
+IMAGEN=${IMAGEN:-localhost/root-oraculo-rust:3}
 BANCO=${BANCO:-$HOME/Proyectos/bench-ecc-sdlc}
 LVP=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
 
@@ -84,6 +84,7 @@ chequeo "(g) cargo audit --version" correr "$IMAGEN" cargo audit --version
 chequeo "(g) cargo mutants --version" correr "$IMAGEN" cargo mutants --version
 chequeo "(g) gitleaks version" correr "$IMAGEN" gitleaks version
 chequeo "(g) hadolint --version" correr "$IMAGEN" hadolint --version
+chequeo "(g) cargo nextest --version" correr "$IMAGEN" cargo nextest --version
 
 if [ "$FALLOS" -gt 0 ]; then
     echo "$FALLOS chequeo(s) con FALLA"

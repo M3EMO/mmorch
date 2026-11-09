@@ -315,7 +315,7 @@ Tablas de la ficha:
 |---|---|
 | `[producto]` | `usuarios`, `problema`, `fuera_de_alcance` |
 | `[[producto.requisito]]` | `id`, `titulo`, `peso`, `aceptacion` (medible: número, comando o salida exacta) |
-| `[tecnica]` | `lenguaje`, `version_minima`, `dependencias_permitidas`, `plataformas` |
+| `[tecnica]` | `lenguaje`, `runner` (`pytest` o `nextest`; vacío es `pytest`), `version_minima`, `dependencias_permitidas`, `plataformas` |
 | `[[tecnica.limite]]` | `id`, `metrica`, `minimo`, `maximo`, `unidad`. Se copia a `[eficiencia]` de `tarea.toml`. |
 | `[arquitectura]` | `capas`, `persistencia`, `concurrencia`. Se copia a `[arquitectura]` de `tarea.toml`. |
 | `[[arquitectura.interfaz]]` | `id`, `modulo`, `publica` |
